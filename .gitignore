@@ -1,0 +1,35 @@
+node_modules/
+runs/
+config/agents.json
+.env
+.env.*
+
+# 其它工具的本地状态目录（不入库）
+.serena/
+.omo/
+.wao-worktrees/
+.wao-worker-claude-config/
+
+# 测试报告产物
+test-results.json
+test-report.html
+
+# 临时调试脚本 / 测试输出捕获（不入库）
+dbg-*.mjs
+test_*.mjs
+*-out.txt
+researcher_test.txt
+
+# reliability 套件临时文件（sentinel 文件、bad-agents 配置）
+scripts/reliability-tmp/
+# .wao/ 下除 decisions/（ADR 决策类冻结文档，应随代码）外，其余运行时状态不入库。
+# 注意 git 目录忽略陷阱：直接写 .wao/ + !.wao/decisions/ 无效（git 不进入被忽略目录遍历）。
+# 正确写法：先 unignore .wao/ 本身让 git 进入，再 .wao/* 忽略全部，最后 !.wao/decisions/ 例外。
+.wao/*
+!.wao/decisions/
+
+# 本地开发 scratch 区（取证脚本、TDD-list 草稿、孤儿计划簇等不入库）
+.dev/
+
+# 用户本地草图/笔记（不入库）
+演示文稿1.pptx

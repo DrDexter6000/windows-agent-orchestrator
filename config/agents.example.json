@@ -1,0 +1,143 @@
+{
+  "_comment": "Worker agent registry（角色驱动，对齐 team-roles.md + 决策 0005）。权威源是 docs/team-roles.md；本文件是它的配置落地。每个 worker 按【角色】命名，主控按能力派任务。Lead runtime（装 WAO skill 的那个）不进 registry——它是调用方。",
+  "_comment_ssot": "⚠ 修改本文件前先读 docs/team-roles.md（角色权威）+ .wao/decisions/0005（定稿决策）。本文件的 worker 必须与 team-roles.md 一一对应，不得自行新增/改名。opencode 已降为 fallback（见 coder_opencode_fallback）。",
+  "_comment_safe": "安全：默认全进程式 backend（进程死即会话死，无 opencode stop 虚假成功风险，见 06-18 事故）。opencode 仅在需要 token 闸门精确控成本时用，且必须配 tokenBudget。",
+  "_comment_provider": "P4 决策B（决策 0010 融合项 #3）：claude-code worker 用 provider 一等字段（baseUrl/apiKeyEnv/model/effort/contextWindow），backend 从它推导 wrapper 参数 + claude CLI flags，单一真相源防漂移（opus-4.8 bug 温床）。不再手拼 prependArgs/args 里的 model。args 仅留真正 ad-hoc 的 CLI flag（如 --dangerously-skip-permissions）。旧形态（手拼 prependArgs/args）仍向后兼容，但 example 用新形态示范。",
+  "agents": {
+    "researcher": {
+      "_comment": "[Researcher] 调研/分析专家。只读分析不改产品代码。对齐 team-roles.md Researcher。",
+      "_comment_backend": "claude-code wrapper（进程式，弃 opencode——06-18 事故风险）。DeepSeek-v4-flash 1M context + 低成本。",
+      "_comment_effort": "variant=max 用 --effort max（不能用 model 后缀，DeepSeek 端点只认 deepseek-v4-flash，probe 实测见 team-roles.md）。",
+      "_comment_task": "适合任务: 代码库调研/技术选型/可行性分析/文档生成/brief 输出",
+      "backend": "claude-code",
+      "provider": {
+        "baseUrl": "https://api.deepseek.com/anthropic",
+        "apiKeyEnv": "DEEPSEEK_API_KEY",
+        "model": "deepseek-v4-flash",
+        "effort": "max",
+        "contextWindow": 1000000
+      },
+      "cwd": "D:/projects/your-project",
+      "args": ["--dangerously-skip-permissions"],
+      "_comment_env": "TD-79 Python 环境隔离：researcher 是只读角色，不应改全局 Python env。PIP_REQUIRE_VIRTUALENV 让 pip 在无激活 venv 时直接拒绝安装；PYTHONNOUSERSITE 禁 user site-packages。两者都是 OS-native 机制，pip 自己拒绝，无需 WAO 包装命令。需真正装包的 worker（coder_*）不配此项。",
+      "env": {
+        "PIP_REQUIRE_VIRTUALENV": "1",
+        "PYTHONNOUSERSITE": "1"
+      }
+    },
+    "coder_hq": {
+      "_comment": "[Coder-HQ] 核心实现者。高质量/长程编码任务。对齐 team-roles.md Coder-HQ。",
+      "_comment_backend": "claude-code wrapper（进程式，已 probe）。GLM-5.2 1M context 编码能力强。",
+      "_comment_effort": "effort=high（CLAUDE_CODE_EFFORT_LEVEL=high，probe 通过）。",
+      "_comment_task": "适合任务: 写/改代码/重构/修 bug/按 brief 实现",
+      "backend": "claude-code",
+      "provider": {
+        "baseUrl": "https://open.bigmodel.cn/api/anthropic",
+        "apiKeyEnv": "ZHIPU_API_KEY",
+        "model": "glm-5.2",
+        "effort": "high",
+        "contextWindow": 1000000
+      },
+      "cwd": "D:/projects/your-project",
+      "args": ["--dangerously-skip-permissions"]
+    },
+    "coder_low": {
+      "_comment": "[Coder-Low] 轻活快速处理。杀鸡不用牛刀。对齐 team-roles.md Coder-Low。",
+      "_comment_backend": "claude-code wrapper（进程式）。glm-5-turbo 快速推理低成本。",
+      "_comment_task": "适合任务: 小 bug 修复/跑脚本/简单文件改动/格式调整",
+      "backend": "claude-code",
+      "provider": {
+        "baseUrl": "https://open.bigmodel.cn/api/anthropic",
+        "apiKeyEnv": "ZHIPU_API_KEY",
+        "model": "glm-5-turbo",
+        "contextWindow": 128000
+      },
+      "cwd": "D:/projects/your-project",
+      "args": ["--dangerously-skip-permissions"]
+    },
+    "coder_mm": {
+      "_comment": "[Coder-MM] 多模态处理。涉及图像/截图的任务。对齐 team-roles.md Coder-MM。",
+      "_comment_backend": "kimi-code（进程式，官方过 Kimi 白名单，无需伪装 header）。进程死即会话死，无 stop 虚假成功风险。",
+      "_comment_yolo": "⚠ 不要加 --yolo：kimi -p 模式与 --yolo 互斥（CLI 报错）。-p 模式已默认无交互批准。",
+      "_comment_limit": "kimi stream-json 不含 usage/token，token 预算硬闸门（S1-1）对本 worker 无效；成本控制靠 kimi 自带超时（agent_task_timeout_s=900）+ WAO waitTimeout。",
+      "_comment_task": "适合任务: UI 截图设计还原/带图文档/图像相关编码",
+      "backend": "kimi-code",
+      "cwd": "D:/projects/your-project"
+    },
+    "tester": {
+      "_comment": "[Tester] 执行层验证 + 运行监控（轮询）。对齐 team-roles.md Tester。",
+      "_comment_backend": "codex（进程式，command_execution exitCode 最准，scorecard commandsPassed 门控最准）。",
+      "_comment_effort": "effort=medium（测试是确定性任务，不需高推理）。",
+      "_comment_note": "codex 作为 Lead（主控）时不进 registry——这里是把它当 worker 用。",
+      "_comment_task": "适合任务: 跑测试/验证 exitCode/检查产出文件/轮询运行状态",
+      "backend": "codex",
+      "cwd": "D:/projects/your-project"
+    },
+    "auditor": {
+      "_comment": "[Auditor] 独立红队。前置审计方案 + 后置验收。与 Coder 不同源防伪完成。对齐 team-roles.md Auditor。",
+      "_comment_backend": "claude-code（官方 Claude，最强判断力）。opus-4.8 effort=xhigh。",
+      "_comment_auth": "owner 亲自验证 claude login 通过（2026-06-24）。用官方 Claude 不走 wrapper。",
+      "_comment_task": "适合任务: 前置方案审计/后置独立复核/PASS-FAIL 判定",
+      "backend": "claude-code",
+      "cwd": "D:/projects/your-project",
+      "args": ["--model", "opus-4.8", "--dangerously-skip-permissions"]
+    },
+    "coder_opencode_fallback": {
+      "_comment": "[FALLBACK] opencode-serve worker。⚠ 默认不用——opencode 是 fallback 选项（决策 0005）。仅在需要 token 闸门精确控成本时用。",
+      "_comment_risk": "opencode session 存活在 WAO 进程之外，有 stop 虚假成功风险（06-18 事故，TD-37/39）。fire-and-forget 路径已被护栏拒绝（TD-39）。用此 worker 必须 --wait。tokenBudget 是硬门（registry validate 强制）。",
+      "_comment_gating": "本 worker 的派发会触发 P1-1 认证新鲜度校验（若 summary 过期或缺认证则拒绝）。",
+      "backend": "opencode-serve",
+      "serveUrl": "http://127.0.0.1:4297",
+      "agent": "build",
+      "cwd": "D:/projects/your-project",
+      "model": {
+        "providerID": "zhipuai-coding-plan",
+        "id": "glm-5.2"
+      },
+      "tokenBudget": 5000000,
+      "tokenBudgetMultiplier": 100
+    }
+  },
+  "certification": {
+    "_comment": "npm run reliability 读取此矩阵认证 runtime+model 组合。对齐 team-roles.md：进程式 worker 是主认证对象；opencode fallback 不强制认证（已降级）。",
+    "_comment_drills": "drills: sentinel(读文件/assistant text/metrics), scorecard(command+file evidence), isolation(--isolate worktree), workflowRunDir(workflow 子 run 归档)。进程式 backend 不跑 stop drill（进程死即会话死，无 stop 风险）。",
+    "matrix": [
+      {
+        "agentId": "researcher",
+        "label": "DeepSeek-v4-flash max via claude-code wrapper",
+        "profile": "strict",
+        "providerID": "deepseek",
+        "modelId": "deepseek-v4-flash",
+        "drills": ["sentinel", "scorecard", "workflowRunDir"]
+      },
+      {
+        "agentId": "coder_hq",
+        "label": "GLM-5.2 high via claude-code wrapper",
+        "profile": "strict",
+        "providerID": "zhipuai-coding-plan",
+        "modelId": "glm-5.2",
+        "drills": ["sentinel", "scorecard", "isolation", "workflowRunDir"]
+      },
+      {
+        "agentId": "coder_low",
+        "label": "glm-5-turbo via claude-code wrapper",
+        "profile": "strict",
+        "providerID": "zhipuai-coding-plan",
+        "modelId": "glm-5-turbo",
+        "drills": ["sentinel", "scorecard"]
+      },
+      {
+        "agentId": "coder_mm",
+        "label": "kimi-for-coding via kimi-code CLI",
+        "profile": "strict",
+        "drills": ["sentinel", "scorecard"]
+      },
+      {
+        "agentId": "tester",
+        "label": "Codex tester worker",
+        "profile": "strict",
+        "drills": ["sentinel", "scorecard"]
+      }
+    ]
+  }
+}

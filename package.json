@@ -1,0 +1,25 @@
+{
+  "name": "windows-agent-orchestrator-poc",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Windows-native minimal orchestrator PoC for agent runtimes.",
+  "license": "Apache-2.0",
+  "author": "DrDexter6000",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DrDexter6000/windows-agent-orchestrator.git"
+  },
+  "scripts": {
+    "test": "node --test --import ./test/_guardBypass.mjs",
+    "test:report": "node --test --test-reporter ./test/reporter.mjs & node tools/generate-report.mjs",
+    "report": "node tools/generate-report.mjs",
+    "cli": "node scripts/wao-node.cjs src/cli.js",
+    "smoke": "node scripts/wao-node.cjs src/smoke.js",
+    "reliability": "node scripts/wao-node.cjs scripts/run-reliability.mjs",
+    "long-run": "node scripts/wao-node.cjs scripts/long-run-probe.mjs"
+  },
+  "engines": {
+    "node": ">=22 <25"
+  }
+}
