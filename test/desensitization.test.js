@@ -22,10 +22,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, basename } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
+// 扫描器定义文件自身——天然豁免：它内含正则字面量和"硬泄露形态"示例文本
+// （如注释里的 `D:\Loster`），这些是规则定义不是真实泄露，不该被自己扫到。
+// 用 import.meta.url 动态解析，不硬编码文件名，改名/复制不受影响。
+const SELF = "test/" + basename(fileURLToPath(import.meta.url));
 
 /** 拿 git 跟踪的文件清单（只这些会进仓库）。失败说明不在 git 仓内，跳过本门控。 */
 function trackedFiles() {
@@ -57,6 +61,7 @@ test("脱敏门控: git 跟踪文件不得含真实 API key/token 明文", () =>
   const ALLOW = /test-secret|test-key|fake-key|placeholder|example|oauth-token|must-not-be-used|dummy/i;
 
   for (const f of trackedFiles()) {
+    if (f === SELF) continue; // 扫描器定义文件豁免（含 token 前缀正则字面量）
     let txt;
     try { txt = readTracked(f); } catch { continue; } // 子模块/特殊文件跳过
     const matches = [...txt.matchAll(new RegExp(VIOLATION, "gi"))];
@@ -86,6 +91,7 @@ test("脱敏门控: git 跟踪文件不得含本机绝对路径（真实 Windows
   const ALLOW_PATH = /<[a-z]+>/i;
 
   for (const f of trackedFiles()) {
+    if (f === SELF) continue; // 扫描器定义文件豁免（含正则字面量 + 硬泄露示例文本）
     let txt;
     try { txt = readTracked(f); } catch { continue; }
     const matches = [...txt.matchAll(new RegExp(ABS_PATH, "gi"))];
