@@ -567,3 +567,42 @@ test("registry list/check/validate 三命令分工必须在入口文档一致", 
       `${file} 缺少 registry 三命令一致分工说明：${marker}`);
   }
 });
+
+test("tech-debt.md 已偿还 TD 每条必须填'偿还信息'（TD-81：偿还声明一致性机器守卫）", () => {
+  // 元发现（2026-07-02 核实 friction log 时挖出）：TD 表"已偿还"声明 vs 代码事实之间
+  // 没有机器守卫。本仓是 snapshot（原始 commit 在私有仓库，无 hash 可溯），某条 TD 标 ✅
+  // 但偿还信息空/残缺时，没有测试会红。本断言守住最低底线：凡是进了"## 已偿还"区的
+  // 条目，"偿还于"列（第4列）必须非空且含可识别的偿还标记（里程碑/日期/已落地语）。
+  //
+  // 这是"偿还声明自身一致性"守卫，不是"代码事实"守卫——后者需对每条 TD 手写源文件映射，
+  // 成本高且 TD 描述非结构化。本守卫只抓"误标已偿还但忘填偿还信息"类漂移，是有意收窄。
+  // 真实代码回退漂移仍需人工核对（见 06-28 friction log 二次核实表的做法）。
+  //
+  // 偿还标记：里程碑(M\d)、日期(2026-)、或显式偿还语(当场修/修复/落地/已解/清零/偿还)。
+  const td = read("docs/tech-debt.md");
+  const repaidStart = td.indexOf("## 已偿还");
+  const repaidEnd = td.indexOf("\n---", repaidStart);
+  assert.ok(repaidStart !== -1, "docs/tech-debt.md 缺少 '## 已偿还' 区块");
+  const repaidSection = td.slice(repaidStart, repaidEnd === -1 ? undefined : repaidEnd);
+
+  // 命中：已偿还表的 TD 行。列分隔 = | TD-XX | 登记于 | 内容 | 偿还于 |
+  const tdRow = /^\|(TD-\d+)\|([^|]*)\|([^|]*)\|([^|]*)\|/;
+
+  for (const line of repaidSection.split("\n")) {
+    const m = line.match(tdRow);
+    if (!m) continue;
+    const id = m[1].trim();
+    const repaidCol = m[4].trim();
+
+    // 偿还列不能为空或仅标点。
+    assert.ok(
+      repaidCol.length > 2 && /\S/.test(repaidCol),
+      `${id} 进了"已偿还"区但"偿还于"列为空——标了已偿还却没填偿还信息。`
+    );
+    // 偿还列必须含可识别的偿还标记。
+    assert.ok(
+      /M\d|2026|当场修|修复|落地|已解|清零|偿还|已实现|修正|闭环/.test(repaidCol),
+      `${id} 的"偿还于"列缺少可识别的偿还标记（里程碑/日期/偿还语）：\n  "${repaidCol.slice(0, 60)}..."`
+    );
+  }
+});
