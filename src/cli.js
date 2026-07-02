@@ -17,6 +17,7 @@ import { listWorktrees, removeWorktree } from "./isolation.js";
 import { initWaoDir, validateWaoDir, getWaoDir } from "./waoDir.js";
 import { writeStateSnapshot, readCurrentState } from "./waoState.js";
 import { addDecision, listDecisions, readDecision } from "./waoDecisions.js";
+import { addDeclare, listDeclares, summarizeDeclares, REASON_CODES } from "./waoDeclare.js";
 import { writeHandoff, readHandoff } from "./waoHandoff.js";
 import {
   connectDaemon,
@@ -1155,7 +1156,7 @@ async function loadRunFiles(runDir) {
  *   - failed / timed_out
  *   - completed 但 scorecard.warn 无证据（与 M8-1 默认 warn 联动）
  */
-export function buildDashboard(runs) {
+export function buildDashboard(runs, selfDeclared = null) {
   const rows = runs.map(({ runId, events }) => {
     const agentId = events[0]?.agentId ?? "(unknown)";
     const state = findState(events);
@@ -1205,6 +1206,10 @@ export function buildDashboard(runs) {
       totalCost,
       running,
       flagged,
+      // TD-82：Lead 自做声明（曝光机制——让"没派工"对用户可见）。
+      // selfDeclared 来自 .wao/decisions/ 的 DECL- 文件（runsDashboardCommand 注入），
+      // 不是 run events——WAO 看不见 Lead 的非 WAO 工具调用，只能靠 Lead 主动声明。
+      selfDeclared: selfDeclared ?? { count: 0, byReason: {} },
     },
   };
 }
@@ -1536,7 +1541,15 @@ export async function runsDashboardCommand(args, config) {
       runs.sort((a, b) => (b.events.at(-1)?.ts ?? "").localeCompare(a.events.at(-1)?.ts ?? ""));
       runs = runs.slice(0, latestN);
     }
-    const dash = buildDashboard(runs);
+    // TD-82：读 .wao/decisions/ 下的 Lead 自做声明，注入 dashboard（曝光机制）。
+    // .wao/ 未 init 时静默跳过（count:0），不阻塞 dashboard。
+    let selfDeclared = null;
+    const cwd = resolve(options.cwd ?? process.cwd());
+    const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
+    try {
+      selfDeclared = await summarizeDeclares(waoDir);
+    } catch { /* .wao/ 未 init，无声明——dashboard 照常显示 */ }
+    const dash = buildDashboard(runs, selfDeclared);
     if (asJson) {
       console.log(JSON.stringify(dash, null, 2));
       return;
@@ -1572,7 +1585,10 @@ export async function runsDashboardCommand(args, config) {
       console.log(`${row.runId.padEnd(widths.runId)} ${row.agentId.padEnd(widths.agentId)} ${row.state.padEnd(widths.state)} ${row.tokens.padEnd(widths.tokens)} ${row.cost.padEnd(widths.cost)} ${row.evidence.padEnd(widths.evidence)} ${row.age}${row.flag}`);
     }
     const s = dash.summary;
-    console.log(`[summary] total=${s.total} running=${s.running} flagged=${s.flagged} cost=$${s.totalCost.toFixed(4)}`);
+    console.log(`[summary] total=${s.total} running=${s.running} flagged=${s.flagged} cost=$${s.totalCost.toFixed(4)}` +
+      (s.selfDeclared.count > 0
+        ? ` | Lead自做=${s.selfDeclared.count} 理由分布=${JSON.stringify(s.selfDeclared.byReason)}`
+        : ""));
   };
 
   await renderOnce();
@@ -1618,11 +1634,15 @@ async function waoCommand(args, config) {
     await waoHandoffCommand(tail, config);
     return;
   }
+  if (sub === "declare") {
+    await waoDeclareCommand(tail, config);
+    return;
+  }
   if (sub === "doctor") {
     await waoDoctorCommand(tail, config);
     return;
   }
-  throw new Error(`Unknown wao subcommand: ${sub ?? "(none)"}. Try: wao init | wao state | wao decision | wao handoff | wao doctor`);
+  throw new Error(`Unknown wao subcommand: ${sub ?? "(none)"}. Try: wao init | wao state | wao decision | wao handoff | wao declare | wao doctor`);
 }
 
 /**
@@ -1843,6 +1863,36 @@ async function waoDecisionCommand(args, config) {
     return;
   }
   throw new Error(`Unknown wao decision subcommand: ${sub ?? "(none)"}. Try: add | list | show`);
+}
+
+/**
+ * wao declare：Lead 自做声明（TD-82）。
+ * Lead 自己完成一个本可派发的任务时，用此命令声明理由，让自做行为对用户/dashboard 可见。
+ * 强制力 = 曝光（可见），不是拦截。Lead 仍全权可自做。
+ * reason 必须是枚举值（REASON_CODES），防"声明"退化成自由文本失去约束力。
+ */
+async function waoDeclareCommand(args, config) {
+  const options = parseOptions(args);
+  const cwd = resolve(options.cwd ?? process.cwd());
+  const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
+
+  if (options.task) {
+    // add：写一条声明。--task 必填，--reason 必填且需在枚举内。
+    if (!options.reason) {
+      throw new Error(`wao declare requires --reason <code>。合法值：[${REASON_CODES.join(", ")}]`);
+    }
+    const path = await addDeclare(waoDir, {
+      task: options.task,
+      reason: options.reason,
+      note: options.note,
+    });
+    console.log(JSON.stringify({ declared: true, path, reason: options.reason }, null, 2));
+    return;
+  }
+  // 无 --task → 默认列出现有声明（裸 "wao declare" = 自省视图）。
+  const summary = await summarizeDeclares(waoDir);
+  const declares = await listDeclares(waoDir);
+  console.log(JSON.stringify({ ...summary, declares }, null, 2));
 }
 
 async function waoStateCommand(args, config) {
@@ -2167,6 +2217,8 @@ Project state (.wao/):
   wao decision add --title T [--body B | --body-file F] [--context C]
   wao decision list
   wao decision show <id>
+  wao declare --task T --reason <code> [--note N]  # Lead 自做声明（reason: too-coupled|too-small|high-constitutional-risk|verification-cheaper|needs-global-context）
+  wao declare                                       # 列出已有声明 + 理由分布
   wao handoff write --from R --to R --summary S [--artifacts a,b]
   wao handoff read <role>  # latest incoming handoff addressed to role
   wao doctor [--cwd DIR] [--format json]

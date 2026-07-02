@@ -258,6 +258,17 @@ test("M8-2: 空目录（无 run）不崩，返回空结构", () => {
   assert.equal(dash.summary.flagged, 0);
 });
 
+test("TD-82: buildDashboard 第二参数 selfDeclared 注入 summary（曝光 Lead 自做）", () => {
+  // 不传 selfDeclared → 默认 count:0（不阻塞现有 dashboard 调用方）
+  const dash1 = buildDashboard([]);
+  assert.deepEqual(dash1.summary.selfDeclared, { count: 0, byReason: {} },
+    "不传 selfDeclared 时默认 count:0");
+  // 传 selfDeclared → 注入 summary
+  const dash2 = buildDashboard([], { count: 3, byReason: { "too-small": 2, "too-coupled": 1 } });
+  assert.equal(dash2.summary.selfDeclared.count, 3, "selfDeclared.count 注入");
+  assert.equal(dash2.summary.selfDeclared.byReason["too-small"], 2, "byReason 注入");
+});
+
 test("M8-2: runsDashboardCommand 渲染 text 输出（含 header + rows + summary，异常标 ⚠）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-dash-"));
   try {
@@ -1051,12 +1062,56 @@ test("help: 列出所有 main() 真实路由的命令族（防 help 与代码漂
   assert.match(out, /wao init/, "help 必须列出 wao init");
   assert.match(out, /wao state/, "help 必须列出 wao state");
   assert.match(out, /wao decision/, "help 必须列出 wao decision");
+  assert.match(out, /wao declare/, "help 必须列出 wao declare（TD-82 自做声明）");
   assert.match(out, /wao handoff/, "help 必须列出 wao handoff");
   assert.match(out, /wao doctor/, "help 必须列出 wao doctor");
   // daemon 补充族（P5/TD-45/46，曾漏）
   assert.match(out, /daemon supervise/, "help 必须列出 daemon supervise");
   assert.match(out, /daemon supervisor/, "help 必须列出 daemon supervisor");
   assert.match(out, /daemon health/, "help 必须列出 daemon health");
+});
+
+test("TD-82: wao declare 写入声明 + wao declare（裸）列出汇总（端到端）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-declare-e2e-"));
+  try {
+    // 先 init .wao/（declare 依赖 decisions/ 槽位）
+    spawnSync(process.execPath, ["src/cli.js", "wao", "init", "--cwd", dir],
+      { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    // 写一条声明
+    const r = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "declare",
+      "--task", "改了 help 文本",
+      "--reason", "too-small",
+      "--cwd", dir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    assert.equal(r.status, 0, `declare 应成功，stderr=${r.stderr}`);
+    assert.match(r.stdout, /"declared": true/, "输出 declared:true");
+    assert.match(r.stdout, /"reason": "too-small"/, "输出 reason");
+    // 裸 wao declare 列出汇总
+    const r2 = spawnSync(process.execPath, ["src/cli.js", "wao", "declare", "--cwd", dir],
+      { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    assert.match(r2.stdout, /"count": 1/, "汇总 count:1");
+    assert.match(r2.stdout, /"too-small": 1/, "byReason 含 too-small:1");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("TD-82: wao declare 非法 reason fail-fast（枚举约束）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-declare-bad-"));
+  try {
+    spawnSync(process.execPath, ["src/cli.js", "wao", "init", "--cwd", dir],
+      { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    const r = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "declare",
+      "--task", "x", "--reason", "因为我想",
+      "--cwd", dir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    assert.notEqual(r.status, 0, "非法 reason 必须 fail-fast");
+    assert.match(r.stderr, /reason 必须是枚举值/, "stderr 解释合法枚举值");
+  } finally {
+    rmrfRetry(dir);
+  }
 });
 
 test("run --background: malformed --scorecard-rules fail-fast，不返回 ghost runId", () => {
