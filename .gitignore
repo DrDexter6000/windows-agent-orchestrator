@@ -9,6 +9,7 @@ config/agents.json
 .omo/
 .wao-worktrees/
 .wao-worker-claude-config/
+.zcode/
 
 # 测试报告产物
 test-results.json
