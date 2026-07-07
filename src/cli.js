@@ -417,10 +417,20 @@ async function registryCommand(args, config) {
     // 无 summary 或解析失败 = 未认证，全显示 -
   }
   // F5: model 列，让 lead 选型时有模型信息。
-  for (const agent of registry.listAgents()) {
-    const model = displayModel(agent);
-    const cert = certMap[agent.id] ?? "-";
-    console.log(`${agent.id}\t${agent.backend}\t${model}\t${cert}\t${agent.cwd}`);
+  // F17: --format json 输出机器可读 JSON（dogfood round 4 实证：原接受参数但静默忽略）。
+  const agents = registry.listAgents().map((agent) => ({
+    id: agent.id,
+    backend: agent.backend,
+    model: displayModel(agent),
+    certification: certMap[agent.id] ?? null,
+    cwd: agent.cwd,
+  }));
+  if (options.format === "json") {
+    console.log(JSON.stringify(agents, null, 2));
+    return;
+  }
+  for (const agent of agents) {
+    console.log(`${agent.id}\t${agent.backend}\t${agent.model}\t${agent.certification ?? "-"}\t${agent.cwd}`);
   }
 }
 
@@ -617,6 +627,11 @@ async function registryValidateCommand(args, config) {
     if (issues.length === 0) {
       const model = agent.model ? `${agent.model.id}` : (agent.backend === "claude-code" ? "claude" : "default");
       console.log(`✔ ${id}\t${agent.backend}\t${model}`);
+      // TD-87（kimi tokenBudget 静默无效陷阱）：kimi stream-json 无 usage 字段，
+      // 配 tokenBudget 不报错但不生效。warn 提示用户别误以为有保护（dogfood round 2 发现）。
+      if (agent.backend === "kimi-code" && typeof agent.tokenBudget === "number") {
+        console.log(`  ⚠ ${id}: kimi-code 配了 tokenBudget 但不生效（stream-json 无 usage 字段）—— kimi 靠自带 max_steps/timeout 兜底，不靠 WAO tokenBudget`);
+      }
     } else {
       console.log(`✖ ${id}\t${issues.join("; ")}`);
       allOk = false;

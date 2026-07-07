@@ -1088,6 +1088,55 @@ test("WF-8: registry list 对 kimi/codex 默认模型显示非 '-'", () => {
   }
 });
 
+test("F17: registry list --format json 输出可解析 JSON（dogfood round 4 实证 bug）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-reglist-json-"));
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        coder_hq: { backend: "claude-code", binary: "/x", cwd: dir, args: ["--model", "glm-5.2"] },
+        researcher: { backend: "claude-code", binary: "/x", cwd: dir, args: ["--model", "deepseek-v4-flash"] },
+      },
+    }), "utf8");
+
+    const out = execSync(`node src/cli.js registry list --registry ${registryPath} --run-dir ${dir} --format json`, {
+      cwd: process.cwd(), encoding: "utf8",
+    });
+    // 必须是合法 JSON 数组（原 bug：接受 --format json 但仍输出 tab 表格，JSON.parse 会抛）
+    const parsed = JSON.parse(out);
+    assert.ok(Array.isArray(parsed), "输出应是 JSON 数组");
+    assert.equal(parsed.length, 2, "含 2 个 agent");
+    const hq = parsed.find((a) => a.id === "coder_hq");
+    assert.ok(hq, "含 coder_hq");
+    assert.equal(hq.backend, "claude-code", "backend 字段正确");
+    assert.equal(hq.model, "glm-5.2", "model 字段正确");
+    assert.equal(hq.certification, null, "无 summary（--run-dir 指向空目录）时 certification 为 null");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-87: registry validate 对 kimi-code 配 tokenBudget 给 ⚠ warning（静默无效陷阱）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-regval-kimi-budget-"));
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        coder_mm: { backend: "kimi-code", cwd: dir, tokenBudget: 100000 },
+      },
+    }), "utf8");
+
+    const out = execSync(`node src/cli.js registry validate --registry ${registryPath}`, {
+      cwd: process.cwd(), encoding: "utf8",
+    });
+    // validate 通过（✔），但有 ⚠ warning 提示 tokenBudget 对 kimi 无效
+    assert.match(out, /✔\s*coder_mm/, "kimi worker validate 通过");
+    assert.match(out, /⚠.*kimi-code.*tokenBudget.*不生效/, "配了 tokenBudget 的 kimi worker 应有 ⚠ warning");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // TD-52 守卫：help 必须列出 main() 真实路由的全部命令族。
 // _guardBypass.mjs 已全局设 WAO_SKIP_VERSION_GUARD=1，子进程继承，故任意 Node 可跑 help。
 // 防止 printHelp 与代码漂移（首装 e2e 摩擦日志 F1：曾漏列 dashboard/diagnose/forecast/wao 族/daemon supervise）。
