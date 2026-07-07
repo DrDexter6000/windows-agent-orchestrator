@@ -108,5 +108,6 @@ No formatter/linter — match existing style.
 
 - Keep independent from `D:\projects\talking-cli`.
 - **Node version: WAO runs on v22, v24 is hard-rejected.** `.nvmrc` declares `22`. `src/nodeVersionGuard.js` blocks v24 (libuv Windows Job Object regression kills long processes — TD-40). The system default `node` may be v24; **all WAO entrypoints (`cli`/`smoke`/`reliability`/`long-run` in `package.json`) route through `scripts/wao-node.cjs`**, which uses the system-level shared v22 at `%LOCALAPPDATA%\Programs\nodejs-v22\node.exe` (overridable via `WAO_NODE` env). This keeps the global PATH/default node untouched (other projects keep v24) while WAO always gets v22. `npm test` is exempt (uses `test/_guardBypass.mjs` to skip the guard, runs on any node).
+- **win32 `/tmp` 路径歧义（派工/写文件时注意）。** Git Bash 的 `/tmp` 解析到 `C:/Users/<user>/AppData/Local/Temp`（MSYS POSIX 映射），但 Node 的 `path.resolve('/tmp')` 解析到当前盘根的 `\tmp`（如 `D:\tmp`）——两者不是同一个地方。派工 prompt 指定输出路径、或 worker 写临时文件时，**不要用 POSIX `/tmp/`**（会导致 ZCode Write 工具和 `npm run cli` 把文件写到不同地方，文件"丢失"）。用明确的 Windows 绝对路径（`C:/Users/<user>/AppData/Local/Temp/...`）或 `os.tmpdir()`。dogfood round 1 曾因此丢交付物。
 - No GUI, no complex permissions, no automatic task decomposition unless explicitly requested.
 - Do not commit `config/agents.json`, `runs/`, `.wao-worktrees/`, secrets.
