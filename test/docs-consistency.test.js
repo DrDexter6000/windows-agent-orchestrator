@@ -619,3 +619,19 @@ test("TD-82: SKILL.md 的 wao declare 理由码与 src/waoDeclare.js 的 REASON_
       `SKILL.md 未列出理由码 \`${code}\`——文档与 waoDeclare.js REASON_CODES 漂移。`);
   }
 });
+
+test("TD-83: SKILL.md 的 pipeline 阶段定义与 src/waoStage.js 的 STAGE_NUMBERS 一致", async () => {
+  // SSOT：阶段编号权威源是 src/waoStage.js 的 STAGE_NUMBERS 数组。
+  // SKILL.md 的"6 阶段产物门控"章节必须列出全部阶段（1..6）及其产物落点，
+  // 防 Lead 不知道有哪些阶段可声明、或凭空造一个代码不认的阶段号卡住。
+  const { STAGE_NUMBERS } = await import("../src/waoStage.js");
+  const skill = read("SKILL.md");
+  // SKILL.md 必须提及 wao stage 命令（让 Lead 知道这是门控入口）
+  assert.ok(skill.includes("wao stage"),
+    "SKILL.md 未提及 `wao stage`——Lead 不知道 pipeline 门控命令存在。");
+  // 每个阶段号必须在 SKILL.md 出现（带标记，防裸数字误命中）
+  for (const n of STAGE_NUMBERS) {
+    assert.ok(skill.includes(`阶段 ${n}`),
+      `SKILL.md 未列出"阶段 ${n}"——文档与 waoStage.js STAGE_NUMBERS 漂移。`);
+  }
+});

@@ -9,8 +9,8 @@ import assert from "node:assert/strict";
 import { spawnSync, spawn, execSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { parseOptions, loadPrompt, runAndWait, buildDashboard, runsDashboardCommand, runCommand, statusCommand, collectCommand } from "../src/cli.js";
+import { join, resolve } from "node:path";
+import { parseOptions, loadPrompt, runAndWait, buildDashboard, runsDashboardCommand, runCommand, statusCommand, collectCommand, resolveTargetCwd } from "../src/cli.js";
 import { readTranscript, findState } from "../src/transcript.js";
 
 /** 捕获 console.log 输出（用于测命令渲染）。返回拼接的字符串。 */
@@ -76,6 +76,48 @@ test("parseOptions: --kebab-case 自动转 camelCase（含 prompt-file → promp
   const opts = parseOptions(["--prompt-file", "task.txt", "--wait-timeout", "5000"]);
   assert.equal(opts.promptFile, "task.txt", "--prompt-file 必须映射到 promptFile");
   assert.equal(opts.waitTimeout, "5000", "--wait-timeout 必须映射到 waitTimeout");
+});
+
+// TD-84：resolveTargetCwd 回退链——跨项目 scope 修复
+// dogfood 发现 worker 调 wao 命令时记录写错项目（写进 Lead repo 而非干活的目标项目）。
+// 回退链：--cwd > WAO_TARGET_CWD env > process.cwd()。worker 子进程被注入 WAO_TARGET_CWD，
+// 所以 worker 这一路自动正确；Lead 跨项目派工时需显式带 --cwd（SKILL 纪律）。
+
+test("TD-84: resolveTargetCwd 显式 --cwd 优先于 env 和 process.cwd()", () => {
+  const prevEnv = process.env.WAO_TARGET_CWD;
+  try {
+    process.env.WAO_TARGET_CWD = "/tmp/env-target";
+    const cwd = resolveTargetCwd({ cwd: "/tmp/explicit" });
+    assert.equal(cwd, resolve("/tmp/explicit"), "显式 --cwd 必须最优先，覆盖 env");
+  } finally {
+    if (prevEnv === undefined) delete process.env.WAO_TARGET_CWD;
+    else process.env.WAO_TARGET_CWD = prevEnv;
+  }
+});
+
+test("TD-84: resolveTargetCwd 无 --cwd 时读 WAO_TARGET_CWD（worker 子进程注入）", () => {
+  const prevEnv = process.env.WAO_TARGET_CWD;
+  try {
+    process.env.WAO_TARGET_CWD = "/tmp/worker-target-project";
+    const cwd = resolveTargetCwd({});
+    assert.equal(cwd, resolve("/tmp/worker-target-project"),
+      "无 --cwd 时必须回落到 WAO_TARGET_CWD——worker 调 wao 命令自动写进干活的项目");
+  } finally {
+    if (prevEnv === undefined) delete process.env.WAO_TARGET_CWD;
+    else process.env.WAO_TARGET_CWD = prevEnv;
+  }
+});
+
+test("TD-84: resolveTargetCwd 无 --cwd 无 env 时回落 process.cwd()（向后兼容）", () => {
+  const prevEnv = process.env.WAO_TARGET_CWD;
+  try {
+    delete process.env.WAO_TARGET_CWD;
+    const cwd = resolveTargetCwd({});
+    assert.equal(cwd, resolve(process.cwd()),
+      "无 --cwd 无 env 时回落 process.cwd()——Lead 裸跑 / 本地单项目场景向后兼容");
+  } finally {
+    if (prevEnv !== undefined) process.env.WAO_TARGET_CWD = prevEnv;
+  }
 });
 
 test("loadPrompt: --prompt-file 优先，多行内容完整读取（防 PowerShell 截断）", async () => {
@@ -1063,6 +1105,7 @@ test("help: 列出所有 main() 真实路由的命令族（防 help 与代码漂
   assert.match(out, /wao state/, "help 必须列出 wao state");
   assert.match(out, /wao decision/, "help 必须列出 wao decision");
   assert.match(out, /wao declare/, "help 必须列出 wao declare（TD-82 自做声明）");
+  assert.match(out, /wao stage/, "help 必须列出 wao stage（TD-83 阶段声明）");
   assert.match(out, /wao handoff/, "help 必须列出 wao handoff");
   assert.match(out, /wao doctor/, "help 必须列出 wao doctor");
   // daemon 补充族（P5/TD-45/46，曾漏）
@@ -1109,6 +1152,57 @@ test("TD-82: wao declare 非法 reason fail-fast（枚举约束）", () => {
     ], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
     assert.notEqual(r.status, 0, "非法 reason 必须 fail-fast");
     assert.match(r.stderr, /reason 必须是枚举值/, "stderr 解释合法枚举值");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("TD-83: wao stage 写入声明 + wao stage（裸）列出 pipeline 缺口（端到端）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-stage-e2e-"));
+  try {
+    spawnSync(process.execPath, ["src/cli.js", "wao", "init", "--cwd", dir],
+      { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    // 走阶段 1（spec）+ 阶段 3（派发）——典型"敷衍"模式：跳了 2/4/5/6
+    const r = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "stage", "1",
+      "--task", "起草 auth 契约",
+      "--artifacts", "docs/01-prd.md",
+      "--cwd", dir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    assert.equal(r.status, 0, `stage 1 应成功，stderr=${r.stderr}`);
+    assert.match(r.stdout, /"staged": true/, "输出 staged:true");
+    assert.match(r.stdout, /"stage": 1/, "输出 stage:1");
+
+    const r2 = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "stage", "3",
+      "--task", "派发实现",
+      "--cwd", dir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    assert.equal(r2.status, 0, `stage 3 应成功`);
+
+    // 裸 wao stage 列出 pipeline 进度 + 缺口
+    const r3 = spawnSync(process.execPath, ["src/cli.js", "wao", "stage", "--cwd", dir],
+      { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    assert.match(r3.stdout, /"count": 2/, "声明 2 个阶段");
+    assert.match(r3.stdout, /"progress": "\[1\]✓ \[2\]— \[3\]✓ \[4\]— \[5\]— \[6\]—"/,
+      "progress 行显示阶段 1/3 已声明、2/4/5/6 缺口");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("TD-83: wao stage 非法 stage 号 fail-fast（枚举约束，防跳号）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-stage-bad-"));
+  try {
+    spawnSync(process.execPath, ["src/cli.js", "wao", "init", "--cwd", dir],
+      { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    const r = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "stage", "7",
+      "--task", "x",
+      "--cwd", dir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    assert.notEqual(r.status, 0, "非法 stage 号（7）必须 fail-fast");
+    assert.match(r.stderr, /stage 必须是/, "stderr 解释合法枚举值");
   } finally {
     rmrfRetry(dir);
   }

@@ -51,6 +51,13 @@ export async function assertDecisionsMapConsistency(waoDir) {
   for (const id of mapIds) {
     assert.ok(fileIds.has(id), `decisions map 索引 ${id} 但正文文件不存在（悬空索引）`);
   }
+  // TD-83：STAGE- 前缀正文与 map 索引计数一致（防 agent 绕过 wao stage 命令直接写文件）。
+  // 不做文件级双向（STAGE 索引行不存文件名，只存 STAGE | n | task | artifact）；
+  // 计数一致是最强可达约束——能抓"写正文没更新 map"和"map 悬空行"两类脱节。
+  const stageFiles = readdirSync(decisionsDir).filter((f) => /^STAGE-\d+-.*\.md$/.test(f));
+  const stageMapLines = map.split("\n").filter((l) => /^STAGE\s*\|/.test(l));
+  assert.equal(stageFiles.length, stageMapLines.length,
+    `decisions STAGE- 正文 ${stageFiles.length} 个但 map 索引 ${stageMapLines.length} 行（脱节）`);
 }
 
 test("S3-5 守卫1: tmpdir 合法 .wao/ → assertWaoTopLevelClean 通过", async () => {
@@ -98,6 +105,22 @@ test("S3-5 守卫2: 正文存在但 map 没索引 → 断言失败（脱节）",
       () => assertDecisionsMapConsistency(waoDir),
       /0099.*map.*无索引|0099.*脱节/,
       "正文存在但 map 无索引应报脱节",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-83 守卫2: STAGE- 正文存在但 map 无索引 → 计数不一致报脱节", async () => {
+  const dir = await makeInitWao();
+  try {
+    const waoDir = getWaoDir(dir);
+    // 绕过 wao stage 命令直接写一个 STAGE- 正文（map 不更新）
+    await writeFile(join(waoDir, "decisions", "STAGE-1-rogue.md"), "# rogue stage\n");
+    await assert.rejects(
+      () => assertDecisionsMapConsistency(waoDir),
+      /STAGE.*脱节|STAGE.*正文.*1.*map.*索引.*0/,
+      "STAGE 正文存在但 map 无索引应报脱节（计数不一致）",
     );
   } finally {
     await rm(dir, { recursive: true, force: true });

@@ -15,12 +15,21 @@ description: "[LEAD-ONLY] You become the Lead Operator (orchestrator) the moment
 > 这不是强制你不许自己做——而是让"自己做"这个偏离**对用户可见**（dashboard 会汇总
 > 你的自做声明）。WAO 看不见你的非 WAO 工具调用，只能靠你主动声明。
 
+> **6 阶段产物门控 pipeline（TD-83）。** 每个任务都走这 6 步：理解→编排→派发→验收→汇总→总结。
+> 走完一阶段**应该 `wao stage <n>` 声明**，让 pipeline 进度对用户/dashboard 可见。注意：声明的作用
+> 是**让缺口可见，不是强制走完**——"应该"不等于"不许跳"。跳步是合法的，代价只是 dashboard
+> 留缺口（`[1]spec—`）。这让"跳了 spec/plan、直接派工、自己干完剩下"这个最常见的敷衍模式**显形**
+> （dashboard 的 `[pipeline]` 行会显示 `[1]spec✓ [2]plan— [3]派发✓ [4]验收— [5]汇总— [6]总结—`，
+> 缺口一目了然）。**适用域**：pipeline 针对**会产出可派发子任务**的任务；纯 Lead 脑力活（读文档/
+> 写报告/元审计）不必走 stage，dashboard 缺口在这种情况下是可接受的。见 §"主控的 6 阶段 pipeline"。
+
 **如果你是 worker / 副主控：这不是给你的技能。** Worker 收到任务 prompt 直接干；
-副主控（红队）收到主控整理好的方案/交付物做评审。两者都不调用本技能的命令。
+副主控（红队，即 auditor 角色——见 [`docs/team-roles.md`](docs/team-roles.md)）收到主控整理好的
+方案/交付物做评审。两者都不调用本技能的命令。
 
 ### WAO 当前目标与上线边界
 
-**目标**：让 lead agent 可靠调度其它 agent-runtime + LLM 完成真实任务。WAO 不是聊天代理、不是 agent 框架、不是 runtime 研究项目；它是确定性控制平面，负责 dispatch、transcript、isolation、scorecard、metrics 和 workflow。
+**目标**：让 lead agent 可靠调度其它 agent-runtime + LLM 完成真实任务。WAO 不是聊天代理、不是 agent 框架、不是 runtime 研究项目；它是确定性控制平面，负责 dispatch、transcript（= `runs/<runId>.jsonl` 事件日志，见 §"Transcript format"）、isolation、scorecard、metrics 和 workflow。
 
 **当前状态**：WAO 已进入主控监督下的**正式试运行**。本地单元/集成门槛为 `npm test`，runtime 上线门槛为 `npm run reliability` 生成的 certification summary。只把 `runs/reliability-summary.json.workers[*].status === "certified"` 且 `recommendedUse === "strict-dispatch"` 的 worker 当作真实任务默认可派发对象；opencode stop 路径已有后台 quietness 验证（TD-37/TD-38），但仍按 fallback lane 使用。
 
@@ -28,29 +37,101 @@ description: "[LEAD-ONLY] You become the Lead Operator (orchestrator) the moment
 
 **上线边界**：可以做真实 repo 调研、编码、修 bug、写文档、跑测试、daemon-backed workflow 编排、scorecard-gated 验收。仍不承诺自动合并、大规模并发生产队列或无需主控判断的全自动故障应对。
 
-### 主控的职责链（每个任务都走一遍）
+### 主控的 6 阶段 pipeline（每个任务都走一遍——TD-83）
 
-1. **理解任务** —— 搞清楚用户要什么、边界在哪、验收标准是什么。不清楚就问用户，别猜。
-2. **编排** —— 决定是自己做、派发给一个 worker、还是拆成多步 workflow。
-   能并行的考虑并行（`spawn` 多个 + `--wait`，或 `workflow run`）。
-   有可复用流程就用参数式 DAG（`--vars`）。**编排决策由你推理，不由工具替你决定。**
-3. **派发** —— 用 `spawn`/`run`/`workflow run` 把任务交给合适的 worker。
-   按 [`docs/team-roles.md`](docs/team-roles.md) 的**标准团队角色**挑 worker（researcher/coder_hq/coder_low/coder_mm/tester/auditor）。
-   派发时带 `--cwd <目标项目>`。给 worker 的 prompt 只写干净任务，不灌编排上下文（原则 #1）。
-   **任务边界要写死**（dogfood 实证：边界模糊的 prompt 是 worker 越界的主因）：
-   - **read-only 任务显式禁写/装/改环境**：prompt 里明确"不得 `pip install`、不得改全局环境、不得重装 editable package，除非本 prompt 显式授权"。read-only worker（researcher）跑了 `pip install -e .` 污染全局 Python 是真实事故——工具层（registry `env` 字段，见 TD-79）已加 `PIP_REQUIRE_VIRTUALENV` 兜底，但 prompt 层约束是第一道防线。
-   - **入口指定，别猜包名**：Python repo 的 worker prompt 应指定入口（如"用 `python -m tools` 而非 console script"），防 worker 从 PATH 解析到错的 checkout（真实 friction：worker 用全局 `<目标项目>.exe` 跑到别处 checkout）。
-   - **项目专属命令归目标项目的 AGENTS.md**：本 SKILL 只管 WAO 通用派工纪律；目标项目的构建/测试/运行命令（`npm test`/`python -m tools`/...）由**目标项目自己的 AGENTS.md** 定义，派工 prompt 引用它而非在本 SKILL 硬编码。
-4. **前置审计（按风险触发，非默认）** —— 出了执行方案后，**仅当任务风险/不确定性高时**派 Auditor 审方案合理性（在执行前拦截错误编排）。低风险常规工作不必前置 auditor——见 §"Auditor 调用 policy"。
-5. **验收** —— 别只信 worker 自报"完成"。
-   - 程序级第一道筛：scorecard（配了 rules 才生效，查命令真跑/文件真存在）。
-   - 语义级第二道筛：**你自己的语义判断**（交付物对不对、够不够、符不符合用户意图）；**仅当风险/不确定性高或你自审信心不足时**加 Auditor 独立复核。
-   两道都要过才算完成。worker 说完成 ≠ 真完成。
-6. **管状态（用 .wao/）** —— 用 `wao state`/`wao decision`/`wao handoff` 管项目进度和交接。
-   worker 也会自己调这些命令记录产出（它们有 `$WAO_CLI` env）。**不要新建文档文件**——用 wao 命令，否则文档熵增。
-7. **整合交付** —— 多 worker 的产出要汇总成连贯的交付物，不是把几份原始输出甩给用户。
-8. **汇报** —— 告诉用户做了什么、结果如何、用了多少成本（`runs metrics`）、有何风险或遗留。
-   - **记 friction（🟡 你判）**：若本次用 WAO 遇到**让你反复绕路、或让你想改 WAO 本身**的摩擦（不是任务本身的正常复杂度），记一条到 `.dev/friction-log/`。这是你独有的语义判断——机器分不清"卡顿"和"正常复杂度"，所以由你定。轻量记一条即可（场景+你当时为什么觉得别扭+是否已有 TD/SKILL 覆盖）；run 失败/超支等 🟢 域信号已自动进 transcript，不必重复记。命名 `YYYY-MM-DDTHH-MM_<简述>.md`。
+> **为什么升级**：旧版职责链是散文建议，Lead 能跳过任意一步直接派工自己干完（07-07 用户观察
+> 的"敷衍"模式：只派一次 researcher 然后剩下全自己干）。根因是阶段 1/2/5/6 没有任何产物
+> gate，跳过 = 隐形。现在每阶段必须有**产物** + **门控声明**（`wao stage <n>`），让缺口
+> 在 dashboard 显形。强制力是**曝光不是拦截**——Lead 仍可跳步，但跳步会留缺口。
+
+每个任务走这 6 步。每步走完**应该 `wao stage <n> --task "..." [--artifacts ...]` 声明**，
+让 pipeline 进度可见（dashboard 的 `[pipeline]` 行）。**任何阶段都可跳**——代价只是 dashboard
+留缺口（`[n]阶段名—`），不报错、不拦截。小到不值得走某阶段的任务（改 typo、读个文件答个问题），
+跳过对应阶段是合理的，别为走仪式浪费 token。
+
+> **`--artifacts` 格式约定**：接**逗号分隔**的路径列表（`--artifacts a.md,b.json,runs/x.jsonl`），
+> 路径相对 `--cwd`（默认 Lead 进程 cwd）。可省略（派发/验收阶段的证据在 `runs/<runId>.jsonl`，
+> 不必手填；只有 stage 1/2/5 这种有显式产物文件的阶段才需要填）。
+
+**阶段 1：任务理解（spec/PRD）** —— 搞清楚用户要什么、边界在哪、验收标准是什么。不清楚就问用户，别猜。
+- **产物**：spec/PRD（验收标准、边界、风险列表）。落 `docs/01-prd.md` 或任务专属 spec 文件（**进版本控制**——这是契约，不是过程记录）。
+- **门控**：`wao stage 1 --task "<任务描述>" --artifacts <spec文件路径>`
+- 小到不值得写 spec 的任务（改 typo）：跳过本阶段即可（见上"任何阶段都可跳"总纲），dashboard 留 `[1]spec—` 缺口。
+
+**阶段 2：任务编排（plan）** —— 决定任务拆分、worker 分工、串/并行顺序、每个子任务的验收命令。
+- **产物**：plan（任务拆分表 + 每个 worker 的派工 prompt 草稿 + 验收标准）。可以写进 spec 文件的 §plan 段，或单独 plan 文件。
+- **门控**：`wao stage 2 --task "<编排方案>" --artifacts <plan文件路径>`
+- **关键**：在这一步就要**写死后续的派工计划**——哪个子任务派给哪个 worker、串还是并行、验收靠什么。**不要边派边想**——边派边想是"敷衍"的直接症状（派完一个 researcher 才发现自己根本没规划剩下怎么干，于是顺手自己干完）。能并行的考虑并行（`spawn` 多个 + `--wait`，或 `workflow run`）；有可复用流程就用参数式 DAG（`--vars`）。
+- 编排决策由你推理，但**产物必须落盘**（不再是"心里想想"——dogfood 实证心里想等于没想）。
+
+**阶段 3：任务派发（执行 + 监督）** —— 用 `spawn`/`run`/`workflow run` 按 plan 把任务交给合适的 worker。
+- **产物**：各 worker run 的 transcript（`runs/<runId>.jsonl`，自动产生，无需手写）。
+- **门控**：`wao stage 3 --task "<派发了什么>" --artifacts runs/run_xxx.jsonl,runs/run_yyy.jsonl`
+- 按 [`docs/team-roles.md`](docs/team-roles.md) 的**标准团队角色**挑 worker（researcher/coder_hq/coder_low/coder_mm/tester/auditor）。派发时带 `--cwd <目标项目>`。
+- 给 worker 的 prompt 只写干净任务，不灌编排上下文（原则 #1）。**任务边界要写死**（dogfood 实证：边界模糊的 prompt 是 worker 越界的主因）：
+  - **read-only 任务显式禁写/装/改环境**：prompt 里明确"不得 `pip install`、不得改全局环境、不得重装 editable package，除非本 prompt 显式授权"。read-only worker（researcher）跑了 `pip install -e .` 污染全局 Python 是真实事故——工具层（registry `env` 字段，见 TD-79）已加 `PIP_REQUIRE_VIRTUALENV` 兜底，但 prompt 层约束是第一道防线。
+  - **入口指定，别猜包名**：Python repo 的 worker prompt 应指定入口（如"用 `python -m tools` 而非 console script"），防 worker 从 PATH 解析到错的 checkout。
+  - **项目专属命令归目标项目的 AGENTS.md**：本 SKILL 只管 WAO 通用派工纪律；目标项目的构建/测试/运行命令由**目标项目自己的 AGENTS.md** 定义，派工 prompt 引用它而非在本 SKILL 硬编码。
+
+**阶段 4：交付验收（放行 / 打回重做）** —— 别只信 worker 自报"完成"。
+- **产物**：验收结论（放行还是打回 + 理由）。可写进 stage 声明的 note，或单独文件。
+- **门控**：`wao stage 4 --task "<验收结论>" [--note "<放行/打回理由>"]`
+- 程序级第一道筛：scorecard（配了 rules 才生效，查命令真跑/文件真存在）。
+- 语义级第二道筛：**你自己的语义判断**（交付物对不对、够不够、符不符合用户意图）；**仅当风险/不确定性高或你自审信心不足时**加 Auditor 独立复核。
+- 两道都要过才算完成。worker 说完成 ≠ 真完成。**打回 = 回阶段 3 重派**：重派后应再次 `wao stage 3`
+  声明（追加一条 STAGE- 文件，dashboard 的 stage 3 仍显示 ✓，count 会反映重派次数——`summarizeStages`
+  的 `declared` 是 Set 去重，所以重复声明同阶段不会让缺口消失，但 count 会涨）。
+- **前置审计（按风险触发，非默认）**：出执行方案后（阶段 2 与阶段 3 之间），**仅当任务风险/不确定性高时**派 Auditor 审方案合理性（在执行前拦截错误编排）。低风险常规工作不必前置 auditor——见 §"Auditor 调用 policy"。
+
+**阶段 5：交付物汇总** —— 多 worker 的产出要汇总成连贯的交付物，不是把几份原始输出甩给用户。
+- **产物**：整合后的交付物（文档/代码/报告）。
+- **门控**：`wao stage 5 --task "<汇总了什么>" --artifacts <交付物路径>`
+- 单 worker 单产物的简单任务：这步可能只是"把 worker 输出原样转交"，但仍要声明（让 dashboard 显示你确实做了这步，没跳）。
+
+**阶段 6：自审自检 + 总结报告** —— 告诉用户做了什么、结果如何、用了多少成本、有何风险或遗留。
+- **产物**：总结报告（摩擦/遗留/成本）。落 `docs/incidents/`（过程类，按日期命名）或 stage 声明的 note。
+- **门控**：`wao stage 6 --task "<总结>" [--note "<自检结论>"]`
+- **记 friction（🟡 你判）**：若本次用 WAO 遇到**让你反复绕路、或让你想改 WAO 本身**的摩擦（不是任务本身的正常复杂度），记一条到 `.dev/friction-log/`。这是你独有的语义判断——机器分不清"卡顿"和"正常复杂度"，所以由你定。轻量记一条即可（场景+你当时为什么觉得别扭+是否已有 TD/SKILL 覆盖）；run 失败/超支等 🟢 域信号已自动进 transcript，不必重复记。命名 `YYYY-MM-DDTHH-MM_<简述>.md`。
+
+**管状态（用 .wao/）** —— 贯穿全程：用 `wao state`/`wao decision`/`wao handoff` 管项目进度和交接。
+worker 也会自己调这些命令记录产出（它们有 `$WAO_CLI` env）。
+
+> **划界（避免与下面"阶段产物落点"表冲突）**："不要新建文档文件"特指**状态/决策/交接这类运行时
+> 元数据**——用 `wao` 命令记进 `.wao/`，别另起文档。但**任务产物本身**（spec/plan/交付物/自审报告）
+> 是交付物或契约，该写文件就写文件（落 `docs/` 等版本控制位置，见下表）。两件事不是一回事：
+> 元数据走 wao 命令，产物走文件——别把"不新建状态文档"误读成"不许产 spec"。
+
+#### 阶段产物落点速查（SSOT 合规）
+
+| 阶段 | 产物 | artifact 落点（不进 .wao/——它在 gitignore） |
+|---|---|---|
+| 阶段 1 理解 | spec/PRD | `docs/01-prd.md` 或任务专属 spec（**版本控制**，契约类） |
+| 阶段 2 编排 | plan（拆分 + 分工 + 验收命令） | spec 文件 §plan 段，或单独 plan 文件（契约类） |
+| 阶段 3 派发 | 各 run transcript | `runs/<runId>.jsonl`（自动产生） |
+| 阶段 4 验收 | 验收结论 | stage 声明 note，或单独文件 |
+| 阶段 5 汇总 | 整合交付物 | 交付物本身（代码/文档） |
+| 阶段 6 总结 | 自审报告 | `docs/incidents/`（过程类，按日期命名）或 stage note |
+
+#### 跨项目派工的 stage/declare 归属（TD-84）
+
+**行动指令（先看这条）**：当你（Lead）派 worker 去别的项目干活时，**所有 `wao stage`/`wao declare`
+命令必须显式带 `--cwd <目标项目>`**，让记录写进目标项目的 `.wao/`：
+```
+wao stage 1 --task "..." --artifacts docs/spec.md --cwd D:/projects/life-index_gui
+```
+忘带 = 记进 Lead 自己的仓库，目标项目 dashboard 看不到 pipeline 进度——这是 dogfood 已证实的断裂点。
+
+**为什么**：stage/declare 记录**归属于 worker 干活的目标项目**，不是 Lead 所在的项目。但两条路径的
+自动化程度不同——
+- **worker 调 wao 命令**（handoff/decision/declare/stage）：**自动正确**——worker 子进程被注入
+  `WAO_TARGET_CWD` env（值 = agent.cwd），wao 命令的 cwd 回退链（`--cwd → WAO_TARGET_CWD → process.cwd()`）
+  会自动指向目标项目。角色 prompt 里的 `--cwd $WAO_TARGET_CWD` 是冗余安全网，可省。
+- **你（Lead）调 wao stage/declare**：你的进程**没有** `WAO_TARGET_CWD`（只注入给 worker 子进程），
+  所以 env 回退救不了——必须显式带 `--cwd`。
+
+> dogfood 实证（WP-GUI-DEVDEPS 报告）：Lead 在 WAO repo 编排、派 worker 去 `life-index_gui`
+> 干活时，stage/declare 写进了 Lead cwd 的 `.wao/`（WAO repo），目标项目 dashboard 看不到——
+> 本节就是为修这个断裂点。
 
 ### 何时自己做 vs 派发（默认派发——TD-82）
 
@@ -337,6 +418,10 @@ wao decision list                  # list decisions
 wao decision show <id>             # show one decision (e.g. 0001)
 wao handoff write --from R --to R --summary S [--artifacts a,b]       # write a handoff
 wao handoff read <role>            # read the handoff addressed to a role
+wao stage <n> --task T [--artifacts a,b] [--note N]   # 声明走完 pipeline 第 n 阶段（TD-83，n=1..6）
+wao stage                                            # 列出已声明阶段 + 缺口（pipeline 自省）
+wao declare --task T --reason <code> [--note N]       # 自做一个本可派发的任务时声明（TD-82，reason: too-coupled|too-small|high-constitutional-risk|verification-cheaper|needs-global-context）
+wao declare                                          # 列出已有声明 + 理由分布
 ```
 
 > `wao doctor` is the recommended first command after installing the WAO skill — it
@@ -529,10 +614,10 @@ Each run produces `runs/<runId>.jsonl` — one JSON event per line.
 States: the state machine is defined once in `docs/02-architecture.md` (single source of truth); terminal states are `{completed | failed | aborted | timed_out}`.
 
 The **complete event-type table is defined once** in [`docs/usage.md` §三](docs/usage.md)
-(it is the single source of truth; do not maintain a parallel list here). The events an
-agent most often acts on: `run.completed`/`run.timed_out`/`run.aborted` (terminal),
-`run.event` (evidence: command/file_written/tool_use/tool_result — feeds scorecard),
-`scorecard.checked` (gate result), `run.metrics` (tokens/cost).
+(it is the single source of truth; do not maintain a parallel list here). 为避免漂移，
+本节不重复事件名枚举——查事件类型去 usage.md。你日常最常作用于的是：终态事件
+（`run.completed` 等）、`run.event`（证据，喂 scorecard）、`scorecard.checked`（门控结果）、
+`run.metrics`（token/cost）——具体 type 名见 usage.md 权威表。
 
 Read directly: `npm run cli -- tail <runId>` or parse the JSONL file.
 

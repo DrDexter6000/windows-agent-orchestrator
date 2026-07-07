@@ -18,6 +18,7 @@ import { initWaoDir, validateWaoDir, getWaoDir } from "./waoDir.js";
 import { writeStateSnapshot, readCurrentState } from "./waoState.js";
 import { addDecision, listDecisions, readDecision } from "./waoDecisions.js";
 import { addDeclare, listDeclares, summarizeDeclares, REASON_CODES } from "./waoDeclare.js";
+import { addStage, listStages, summarizeStages, STAGE_NUMBERS } from "./waoStage.js";
 import { writeHandoff, readHandoff } from "./waoHandoff.js";
 import {
   connectDaemon,
@@ -1156,7 +1157,7 @@ async function loadRunFiles(runDir) {
  *   - failed / timed_out
  *   - completed 但 scorecard.warn 无证据（与 M8-1 默认 warn 联动）
  */
-export function buildDashboard(runs, selfDeclared = null) {
+export function buildDashboard(runs, selfDeclared = null, stageProgress = null) {
   const rows = runs.map(({ runId, events }) => {
     const agentId = events[0]?.agentId ?? "(unknown)";
     const state = findState(events);
@@ -1210,6 +1211,10 @@ export function buildDashboard(runs, selfDeclared = null) {
       // selfDeclared 来自 .wao/decisions/ 的 DECL- 文件（runsDashboardCommand 注入），
       // 不是 run events——WAO 看不见 Lead 的非 WAO 工具调用，只能靠 Lead 主动声明。
       selfDeclared: selfDeclared ?? { count: 0, byReason: {} },
+      // TD-83：Lead 阶段声明（pipeline 进度曝光——让"跳过 spec/plan/汇总/总结"对用户可见）。
+      // stageProgress 来自 .wao/decisions/ 的 STAGE- 文件（runsDashboardCommand 注入）。
+      // declared 是已声明阶段号的 Set，count 是已声明阶段数。
+      stageProgress: stageProgress ?? { declared: [], count: 0 },
     },
   };
 }
@@ -1544,12 +1549,20 @@ export async function runsDashboardCommand(args, config) {
     // TD-82：读 .wao/decisions/ 下的 Lead 自做声明，注入 dashboard（曝光机制）。
     // .wao/ 未 init 时静默跳过（count:0），不阻塞 dashboard。
     let selfDeclared = null;
-    const cwd = resolve(options.cwd ?? process.cwd());
+    let stageProgress = null;
+    const cwd = resolveTargetCwd(options);
     const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
     try {
       selfDeclared = await summarizeDeclares(waoDir);
     } catch { /* .wao/ 未 init，无声明——dashboard 照常显示 */ }
-    const dash = buildDashboard(runs, selfDeclared);
+    try {
+      const stageSummary = await summarizeStages(waoDir);
+      stageProgress = {
+        declared: [...stageSummary.declared].sort((a, b) => a - b),
+        count: stageSummary.count,
+      };
+    } catch { /* .wao/ 未 init——pipeline 进度留空 */ }
+    const dash = buildDashboard(runs, selfDeclared, stageProgress);
     if (asJson) {
       console.log(JSON.stringify(dash, null, 2));
       return;
@@ -1589,6 +1602,14 @@ export async function runsDashboardCommand(args, config) {
       (s.selfDeclared.count > 0
         ? ` | Lead自做=${s.selfDeclared.count} 理由分布=${JSON.stringify(s.selfDeclared.byReason)}`
         : ""));
+    // TD-83：pipeline 阶段进度行——让"跳过 spec/plan/汇总/总结"对用户可见（曝光机制）。
+    if (s.stageProgress.count > 0 || s.stageProgress.declared.length === 0) {
+      const stageNames = ["", "spec", "plan", "派发", "验收", "汇总", "总结"];
+      const line = [1, 2, 3, 4, 5, 6]
+        .map((n) => `[${n}]${stageNames[n]}${s.stageProgress.declared.includes(n) ? "✓" : "—"}`)
+        .join(" ");
+      console.log(`[pipeline] ${line}`);
+    }
   };
 
   await renderOnce();
@@ -1638,11 +1659,15 @@ async function waoCommand(args, config) {
     await waoDeclareCommand(tail, config);
     return;
   }
+  if (sub === "stage") {
+    await waoStageCommand(tail, config);
+    return;
+  }
   if (sub === "doctor") {
     await waoDoctorCommand(tail, config);
     return;
   }
-  throw new Error(`Unknown wao subcommand: ${sub ?? "(none)"}. Try: wao init | wao state | wao decision | wao handoff | wao declare | wao doctor`);
+  throw new Error(`Unknown wao subcommand: ${sub ?? "(none)"}. Try: wao init | wao state | wao decision | wao handoff | wao declare | wao stage | wao doctor`);
 }
 
 /**
@@ -1651,7 +1676,7 @@ async function waoCommand(args, config) {
  */
 async function waoDoctorCommand(args, config) {
   const options = parseOptions(args);
-  const cwd = resolve(options.cwd ?? process.cwd());
+  const cwd = resolveTargetCwd(options);
   const checks = [];
 
   // 1. Node 版本（WAO 需 22+）
@@ -1791,7 +1816,7 @@ async function whichCli(name) {
 
 async function waoInitCommand(args, config) {
   const options = parseOptions(args);
-  const cwd = resolve(options.cwd ?? process.cwd());
+  const cwd = resolveTargetCwd(options);
   const override = options.stateDir ?? config.stateDir;
   await initWaoDir(cwd, override);
   const waoDir = getWaoDir(cwd, override);
@@ -1805,7 +1830,7 @@ async function waoInitCommand(args, config) {
 async function waoHandoffCommand(args, config) {
   const [sub, ...tail] = args;
   const options = parseOptions(tail);
-  const cwd = resolve(options.cwd ?? process.cwd());
+  const cwd = resolveTargetCwd(options);
   const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
 
   if (sub === "write") {
@@ -1835,7 +1860,7 @@ async function waoHandoffCommand(args, config) {
 async function waoDecisionCommand(args, config) {
   const [sub, ...tail] = args;
   const options = parseOptions(tail);
-  const cwd = resolve(options.cwd ?? process.cwd());
+  const cwd = resolveTargetCwd(options);
   const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
 
   if (sub === "add") {
@@ -1873,7 +1898,7 @@ async function waoDecisionCommand(args, config) {
  */
 async function waoDeclareCommand(args, config) {
   const options = parseOptions(args);
-  const cwd = resolve(options.cwd ?? process.cwd());
+  const cwd = resolveTargetCwd(options);
   const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
 
   if (options.task) {
@@ -1895,11 +1920,59 @@ async function waoDeclareCommand(args, config) {
   console.log(JSON.stringify({ ...summary, declares }, null, 2));
 }
 
+/**
+ * wao stage：Lead 阶段声明（TD-83）。
+ * Lead 走完 pipeline 的一个阶段时，用此命令声明产物，让 pipeline 进度对用户/dashboard 可见。
+ * 强制力 = 曝光（可见），不是拦截。Lead 仍全权可跳过任意阶段，但跳过会在 dashboard 留缺口。
+ * stage 必须是枚举值（STAGE_NUMBERS = 1..6），防跳号或自造阶段逃避门控。
+ *
+ * 用法：
+ *   wao stage 1 --task "起草 auth 契约" --artifacts docs/01-prd.md
+ *   wao stage 3 --task "派发实现" --artifacts runs/run_xxx.jsonl,runs/run_yyy.jsonl
+ *   wao stage              # 裸跑：列出已声明阶段 + 缺口（自省视图）
+ */
+async function waoStageCommand(args, config) {
+  // 阶段号是位置参数（纯数字），不能用"第一个非 -- 开头"——那会误匹配 --cwd <path> 的路径值。
+  // 用正则匹配首个纯数字 token，防 parseOptions 的值（如 /tmp/x、docs/y.md）被当成阶段号。
+  const stageArg = args.find((a) => /^\d+$/.test(a));
+  const options = parseOptions(args);
+  const cwd = resolveTargetCwd(options);
+  const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
+
+  if (stageArg !== undefined) {
+    const stage = Number(stageArg);
+    if (!options.task) {
+      throw new Error(`wao stage requires --task <描述>。阶段 ${stageArg} 的产物描述是可见性的核心。`);
+    }
+    const artifacts = options.artifacts
+      ? options.artifacts.split(",").map((s) => s.trim()).filter(Boolean)
+      : undefined;
+    const path = await addStage(waoDir, {
+      stage,
+      task: options.task,
+      artifacts,
+      note: options.note,
+    });
+    console.log(JSON.stringify({ staged: true, stage, path }, null, 2));
+    return;
+  }
+  // 无阶段号 → 默认列出已声明阶段 + 缺口（裸 "wao stage" = pipeline 自省视图）。
+  const summary = await summarizeStages(waoDir);
+  const progress = STAGE_NUMBERS.map((n) => `[${n}]${summary.declared.has(n) ? "✓" : "—"}`).join(" ");
+  // 注意：declared 是 Set，JSON.stringify(Set) → {}。转数组输出，便于人读 + pipeline 解析。
+  console.log(JSON.stringify({
+    declared: [...summary.declared].sort((a, b) => a - b),
+    count: summary.count,
+    stages: summary.stages,
+    progress,
+  }, null, 2));
+}
+
 async function waoStateCommand(args, config) {
   const [sub, ...tail] = args;
   if (sub === "read") {
     const options = parseOptions(tail);
-    const cwd = resolve(options.cwd ?? process.cwd());
+    const cwd = resolveTargetCwd(options);
     const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
     const state = await readCurrentState(waoDir);
     if (!state) {
@@ -1921,7 +1994,7 @@ async function waoStateCommand(args, config) {
   }
   if (sub === "snapshot") {
     const options = parseOptions(tail);
-    const cwd = resolve(options.cwd ?? process.cwd());
+    const cwd = resolveTargetCwd(options);
     const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
     // 手动快照：需 workflowId（必填），其余可选
     if (!options.workflowId) throw new Error("wao state snapshot requires --workflow-id");
@@ -2068,6 +2141,25 @@ async function loadScorecardRules(options) {
     options.scorecardRulesSource = "--scorecard-rules";
   }
   return options;
+}
+
+/**
+ * 解析 wao 命令的目标项目 cwd（TD-84：跨项目 scope 修复）。
+ *
+ * 回退链（优先级高→低）：
+ *   1. 显式 --cwd 参数（options.cwd）——调用方明确指定，最优先
+ *   2. WAO_TARGET_CWD env——worker 子进程被注入的目标项目（processBackend.js 注入，
+ *      值 = agent.cwd）。让 worker 调 wao 命令时自动写进干活的项目，不靠角色 prompt
+ *      显式传 --cwd $WAO_TARGET_CWD（那个变成冗余安全网）。
+ *   3. process.cwd()——Lead 裸跑 / 本地单项目场景的默认。
+ *
+ * 注意：Lead 进程没有 WAO_TARGET_CWD（只注入给 worker 子进程），所以 Lead 跨项目
+ * 派工时调 wao stage/declare 仍需显式带 --cwd 指向目标项目（SKILL 纪律约束）。
+ */
+export function resolveTargetCwd(options) {
+  if (options.cwd) return resolve(options.cwd);
+  if (process.env.WAO_TARGET_CWD) return resolve(process.env.WAO_TARGET_CWD);
+  return resolve(process.cwd());
 }
 
 export function parseOptions(args) {
@@ -2219,6 +2311,8 @@ Project state (.wao/):
   wao decision show <id>
   wao declare --task T --reason <code> [--note N]  # Lead 自做声明（reason: too-coupled|too-small|high-constitutional-risk|verification-cheaper|needs-global-context）
   wao declare                                       # 列出已有声明 + 理由分布
+  wao stage <n> --task T [--artifacts a,b] [--note N]  # Lead 阶段声明（n: 1=spec 2=plan 3=派发 4=验收 5=汇总 6=总结）
+  wao stage                                            # 列出已声明阶段 + 缺口（pipeline 自省）
   wao handoff write --from R --to R --summary S [--artifacts a,b]
   wao handoff read <role>  # latest incoming handoff addressed to role
   wao doctor [--cwd DIR] [--format json]
