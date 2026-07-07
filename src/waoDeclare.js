@@ -29,6 +29,7 @@ export const REASON_CODES = [
   "high-constitutional-risk", // 触及项目宪法/公共契约，逐行审边界成本不低于自做
   "verification-cheaper",   // 验收比派工还省
   "needs-global-context",   // 需要只有 Lead 有的全局上下文
+  "user-assigned",          // 用户明确指派 Lead 自做（非 Lead 自主偏离派工默认）
 ];
 
 /** DECL- 文件名前缀（与 ADR 的 NNNN- 区分）。 */
@@ -119,6 +120,7 @@ const REASON_DESC = {
   "high-constitutional-risk": "触及项目宪法/公共契约",
   "verification-cheaper": "验收比派工还省",
   "needs-global-context": "需要只有 Lead 有的全局上下文",
+  "user-assigned": "用户明确指派 Lead 自做（非自主偏离派工）",
 };
 
 function slugify(text) {
