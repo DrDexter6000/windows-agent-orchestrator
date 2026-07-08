@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { readFile, readdir, unlink, mkdir } from "node:fs/promises";
-import { existsSync, watchFile, unwatchFile, unlinkSync } from "node:fs";
+import { existsSync, watchFile, unwatchFile, unlinkSync, readdirSync, statSync } from "node:fs";
 import { spawnSync, spawn } from "node:child_process";
-import { join, resolve, dirname, basename } from "node:path";
+import { join, resolve, dirname, basename, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readRegistry, normalizeAgent } from "./registry.js";
 import { findLatest, findState, findLastEventSeq, JsonlTranscript, readTranscript } from "./transcript.js";
@@ -66,6 +66,32 @@ let configCache = null;
 async function getConfig() {
   if (!configCache) configCache = await loadConfig();
   return configCache;
+}
+
+/**
+ * TD-95 #11：doctor --strict 的 JS parse smoke。
+ * 对 src/ 下所有 .js 跑 node --check，防注释/语法错误漏到运行时（复盘 #3 教训）。
+ * 返回 {pass, detail}——失败时列出哪些文件解析失败。
+ */
+function _doctorParseSmoke() {
+  const srcDir = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
+  if (!existsSync(srcDir)) return { pass: true, detail: "src/ 不存在（跳过 parse smoke）" };
+  const failures = [];
+  const collectJs = (dir) => {
+    for (const entry of readdirSync(dir)) {
+      if (entry === "node_modules" || entry.startsWith(".")) continue;
+      const full = join(dir, entry);
+      const st = statSync(full);
+      if (st.isDirectory()) collectJs(full);
+      else if (entry.endsWith(".js")) {
+        const result = spawnSync(process.execPath, ["--check", full], { encoding: "utf8", timeout: 10_000 });
+        if (result.status !== 0) failures.push(full.replace(srcDir + sep, ""));
+      }
+    }
+  };
+  collectJs(srcDir);
+  if (failures.length === 0) return { pass: true, detail: `src/ 所有 .js 解析通过` };
+  return { pass: false, detail: `${failures.length} 个文件解析失败: ${failures.join(", ")}` };
 }
 
 function newRunManager(config) {
@@ -1808,11 +1834,12 @@ async function waoDoctorCommand(args, config) {
   if (waoCheck.ok) {
     checks.push({ name: "wao_init", pass: true, detail: ".wao/ 已初始化" });
   } else if (waoCheck.initialized) {
-    checks.push({
-      name: "wao_init",
-      pass: false,
-      detail: `.wao/ 结构异常: 缺[${waoCheck.missing.join(",")}] / 多余[${waoCheck.unexpected.join(",")}]`,
-    });
+    // TD-95 #1：多余目录时给迁移建议（不只报异常），帮 Lead 知道怎么处理
+    let detail = `.wao/ 结构异常: 缺[${waoCheck.missing.join(",")}] / 多余[${waoCheck.unexpected.join(",")}]`;
+    if (waoCheck.unexpected.length > 0) {
+      detail += ` — 多余目录可能是旧版遗留，建议迁移到 .dev/wao-legacy/<日期>/ 后删除`;
+    }
+    checks.push({ name: "wao_init", pass: false, detail });
   } else {
     checks.push({
       name: "wao_init",
@@ -1832,6 +1859,17 @@ async function waoDoctorCommand(args, config) {
     level: "info",
     detail: "WAO 是本地仓内工具，故意不进 PATH——用 `npm run cli -- <command>` 调（走 v22 shim）。PATH 里没有 wao 命令是正常的，不是安装缺失。",
   });
+
+  // 7. TD-95 #11 --strict：JS parse smoke（防注释崩溃漏到运行时，复盘 #3 教训）。
+  //    对 src/*.js 跑 node --check。非 strict 模式跳过（保持 doctor 快速）。
+  if (options.strict) {
+    const parseResult = _doctorParseSmoke();
+    checks.push({
+      name: "parse_smoke",
+      pass: parseResult.pass,
+      detail: parseResult.detail,
+    });
+  }
 
   const failed = checks.filter((c) => !c.pass);
   const verdict = failed.length === 0 ? "HEALTHY" : `${failed.length} ISSUE(S)`;
