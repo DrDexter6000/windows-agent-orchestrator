@@ -480,6 +480,11 @@ Externalize project state/decisions/handoffs to files (not session memory) so wo
 survives runtime switches. **These are the commands the responsibility chain step 6
 and safety rule 5 refer to** — use them instead of creating new doc files.
 
+> **命名空间提示（避免 `stage` vs `wao stage` 踩坑）**：下面这些命令都在 **`wao` 命名空间**下——
+> 完整形式是 `npm run cli -- wao <子命令>`，**不是** `npm run cli -- <子命令>`。例如 `wao stage 1`
+> 要写成 `npm run cli -- wao stage 1 --task ...`，写成 `npm run cli -- stage 1` 会得到
+> `Unknown command: stage`（dogfood round 6 实证的踩坑）。
+
 ```
 wao doctor                         # preflight: Node/CLI/provider keys/registry/.wao health (run once after install)
 wao init [--cwd DIR]               # create the .wao/ skeleton (slots: project.md, state/, decisions/, handoff/, runs/)
