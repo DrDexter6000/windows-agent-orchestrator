@@ -175,6 +175,23 @@ test("runAndWait: worker completed 时正常透传结果", async () => {
   assert.equal(result.failed, undefined);
 });
 
+test("TD-95 #6: failed run 的 error 截断到 ≤500 字符 + 含 diagnosis 字段", async () => {
+  // 复盘 #6：error 字段含后端 raw stderr（最多 4000 字符），噪声高不可读。
+  // 修复：error 截断到 500 字符 + 附 transcript path；failed 时注入 diagnosis 字段。
+  const longError = "x".repeat(3000);
+  const fakeRun = {
+    transcript: { context: { runId: "run_noise_test_789" }, filePath: "nonexistent-for-diagnosis.jsonl" },
+    waitForCompletion: async () => { throw new Error(longError); },
+  };
+  const result = await runAndWait(fakeRun, {});
+  assert.equal(result.failed, true);
+  // error 应截断
+  assert.ok((result.error?.length ?? 9999) <= 500, `error 应 ≤500 字符，实际 ${result.error?.length}`);
+  // diagnosis 字段应存在（即使 transcript 不存在，diagnoseFailure 也不应崩）
+  assert.ok(result.diagnosis, "failed run 应含 diagnosis 字段（帮 Lead 快速分类，不用读 raw error）");
+  assert.ok(result.transcript, "failed run 应附 transcript path（Lead 需要时能找到完整记录）");
+});
+
 test("runAndWait: worker timed_out 时透传（不误判 failed）", async () => {
   const fakeRun = {
     transcript: { context: { runId: "run_to_test_789" } },

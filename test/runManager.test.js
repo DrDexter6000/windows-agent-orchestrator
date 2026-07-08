@@ -616,6 +616,94 @@ test("backend emit done(failed) 时 RunManager 转 failed 并抛错", async () =
   }
 });
 
+// ===== TD-95 #5: 状态悖论修复——evidence audit on failed backend =====
+// 复盘 #5：coder_low 写了文件 + 跑了测试(exit0)，但 backend 进程退出码非零 → done(failed)。
+// WAO 终态 failed（不撒谎——backend 确实崩了），但应在 transcript 写 run.evidence_audit
+// 让 Lead 知道"证据其实通过了，任务可能做对了，需人工确认"。
+
+test("TD-95 #5: backend done(failed) 但证据通过 → transcript 含 run.evidence_audit passed:true", async () => {
+  const dir = await makeTempDir();
+  try {
+    const config = { registry: "config/agents.json", runDir: dir, pollInterval: 10, waitTimeout: 1000, timeout: 5000, retries: 0 };
+    const mockBackend = {
+      async spawn() {
+        return {
+          backend: "process",
+          backendSessionId: "ses_evidence_audit",
+          events: async function* () {
+            yield { kind: "message", role: "assistant", parts: [{ type: "text", text: "done" }] };
+            yield { kind: "file_written", path: "src/foo.js" };
+            yield { kind: "command", command: "node test.js", exitCode: 0 };
+            yield { kind: "done", reason: "failed", error: "process exited with code 1" };
+          },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+      sessionOutlivesProcess: false,
+    };
+    const readRegistry = async () => ({
+      getAgent(id) { return { id, backend: "process", cwd: dir }; },
+      listAgents() { return []; },
+    });
+    const manager = new RunManager({ config, readRegistry, transcriptDir: dir, backendFor: () => mockBackend });
+    const run = await manager.start("test_agent", { prompt: "implement foo" });
+
+    // waitForCompletion 仍 throw（终态 failed 是真的——backend 崩了）
+    await assert.rejects(
+      () => run.waitForCompletion({ waitTimeout: 500, pollInterval: 10 }),
+      /process exited with code 1/,
+    );
+    assert.equal(run.state, "failed");
+
+    // 但 transcript 应含 run.evidence_audit——让 Lead 知道证据通过了
+    const events = await readTranscript(run.transcript.filePath);
+    const audit = events.find((e) => e.type === "run.evidence_audit");
+    assert.ok(audit, "failed run 有证据时应写 run.evidence_audit 事件");
+    assert.equal(audit.passed, true, "evidence audit 应标 passed:true（证据其实通过了）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-95 #5: backend done(failed) 且无证据 → 不写 evidence_audit（真的失败了）", async () => {
+  const dir = await makeTempDir();
+  try {
+    const config = { registry: "config/agents.json", runDir: dir, pollInterval: 10, waitTimeout: 1000, timeout: 5000, retries: 0 };
+    const mockBackend = {
+      async spawn() {
+        return {
+          backend: "process",
+          backendSessionId: "ses_no_evidence",
+          events: async function* () {
+            yield { kind: "message", role: "assistant", parts: [{ type: "text", text: "reading..." }] };
+            yield { kind: "done", reason: "failed", error: "crash" };
+          },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+      sessionOutlivesProcess: false,
+    };
+    const readRegistry = async () => ({
+      getAgent(id) { return { id, backend: "process", cwd: dir }; },
+      listAgents() { return []; },
+    });
+    const manager = new RunManager({ config, readRegistry, transcriptDir: dir, backendFor: () => mockBackend });
+    const run = await manager.start("test_agent", { prompt: "implement foo" });
+
+    await assert.rejects(
+      () => run.waitForCompletion({ waitTimeout: 500, pollInterval: 10 }),
+      /crash/,
+    );
+    const events = await readTranscript(run.transcript.filePath);
+    const audit = events.find((e) => e.type === "run.evidence_audit");
+    assert.ok(!audit, "无证据的 failed run 不应写 evidence_audit（避免误导 Lead）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ===== M3-5: 进程式 resume 测试 =====
 
 /** mock 进程式 backend：spawn 计数 + 返回含 events/abort 的 handle */

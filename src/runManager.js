@@ -653,6 +653,17 @@ export class Run {
       return { completed: true, messages, evidence, timedOut: false, metrics };
     }
     if (doneReason === "failed") {
+      // TD-95 #5 复盘：backend 崩了但证据可能已齐（worker 写了文件 + 跑了测试 exit0）。
+      // 终态仍 failed（不撒谎——backend 确实崩了），但写 run.evidence_audit 让 Lead 知道
+      // "证据其实通过了，任务可能做对了，需人工确认"。诊断靠 Lead，不自动改终态。
+      const auditResult = _auditEvidenceOnFailure(evidence, messages);
+      if (auditResult.passed) {
+        await this.transcript.append("run.evidence_audit", {
+          passed: true,
+          note: "backend failed but evidence passed (file_written/command exit0 present) — task may be correct, verify manually",
+          checks: auditResult.checks,
+        });
+      }
       await this.transcript.append("run.error", { phase: "wait", error: doneError ?? "unknown" });
       await this._transition(this.state, "failed", "backend_error");
       await this._runCleanup();
@@ -811,4 +822,32 @@ async function _maybeWriteFrictionLog(run) {
     debugMode: run.config.debugMode,
     metrics,
   });
+}
+
+/**
+ * TD-95 #5：backend done(failed) 时审计已累积的证据。
+ *
+ * 不跑完整 scorecard（hasDoneEvent 会 fail——failed 路径无 run.completed 事件）。
+ * 只查"正面证据信号"：有 file_written 或 command(exitCode===0) → passed:true。
+ *
+ * 目的：worker 可能写对了文件 + 跑对了测试，只是 backend 进程退出码非零。
+ * 让 Lead 知道"证据其实通过了"，而非被迫从 raw transcript 手动翻找。
+ *
+ * @param {object[]} evidence — waitForCompletion 累积的 evidence 数组
+ * @param {object[]} messages — 累积的 messages（查 assistant text）
+ * @returns {{passed: boolean, checks: object[]}}
+ */
+function _auditEvidenceOnFailure(evidence, messages) {
+  const checks = [];
+  const hasFileWritten = evidence.some((e) => e.kind === "file_written");
+  const hasCommandExit0 = evidence.some((e) => e.kind === "command" && e.exitCode === 0);
+  const hasAssistantText = messages.some(
+    (m) => m.info?.role === "assistant" && m.parts?.some((p) => p.type === "text" && p.text?.trim()),
+  );
+  checks.push({ name: "evidence_file_written", passed: hasFileWritten });
+  checks.push({ name: "evidence_command_exit0", passed: hasCommandExit0 });
+  checks.push({ name: "evidence_assistant_text", passed: hasAssistantText });
+  // passed = 有产出证据（文件写入 或 命令成功）——任一即说明 worker 做了实事
+  const passed = hasFileWritten || hasCommandExit0;
+  return { passed, checks };
 }

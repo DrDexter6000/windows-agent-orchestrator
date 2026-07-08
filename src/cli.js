@@ -2313,6 +2313,9 @@ export function parseOptions(args) {
  * 包装 waitForCompletion：捕获 failed 抛错，转为结构化结果返回。
  * 让主控能看到 worker 失败的证据（runId/failed/error），决定是否接手，
  * 而不是 CLI 崩溃 exit 1 什么也不输出。
+ *
+ * TD-95 #6（复盘）：error 截断到 500 字符（后端 raw stderr 最多 4000 字符，噪声高）；
+ * failed 时注入 diagnosis 字段（复用 diagnoseFailure，帮 Lead 快速分类不用读 raw error）。
  */
 export async function runAndWait(run, options) {
   try {
@@ -2321,12 +2324,32 @@ export async function runAndWait(run, options) {
   } catch (error) {
     // waitForCompletion 在 done(failed) 时抛错。转为结构化失败结果，
     // 让调用方（主控/CLI）能看到失败原因，而非裸 crash。
+    const rawError = error.message ?? String(error);
+    // TD-95 #6：截断 error 到 500 字符（含后缀）+ 附 transcript path
+    const MAX_ERROR = 500;
+    const SUFFIX = `... (truncated, ${rawError.length} chars total — see transcript)`;
+    const truncatedError = rawError.length > MAX_ERROR
+      ? rawError.slice(0, MAX_ERROR - SUFFIX.length) + SUFFIX
+      : rawError;
+    // TD-95 #6：注入 diagnosis（读 transcript 分类）。transcript 不存在也给 unknown（不崩）。
+    let diagnosis = null;
+    try {
+      const { diagnoseFailure } = await import("./diagnosis.js");
+      const { readTranscript } = await import("./transcript.js");
+      let events = [];
+      try { events = await readTranscript(run.transcript.filePath); } catch {}
+      diagnosis = diagnoseFailure(events);
+    } catch {
+      // diagnoseFailure 本身崩（不该发生）→ diagnosis 留 null
+    }
     return {
       runId: run.transcript.context.runId,
       completed: false,
       failed: true,
       timedOut: false,
-      error: error.message ?? String(error),
+      error: truncatedError,
+      transcript: run.transcript.filePath,
+      ...(diagnosis ? { diagnosis } : {}),
     };
   }
 }
