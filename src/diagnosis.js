@@ -130,6 +130,43 @@ export function diagnoseFailure(events) {
     return { category: "scorecard_fail", evidence };
   }
 
+  // 4.5) TD-95 #5 evidence_passed_backend_failed：backend 崩了但证据通过了。
+  //   runManager 的 _auditEvidenceOnFailure 在 failed 路径写 run.evidence_audit {passed:true}。
+  //   必须在 crash/provider_disconnect 之前判——否则会被 exit code 抢归 crash。
+  //   让 Lead 知道"任务可能做对了，需人工确认"，而非被 'crash' 误导。
+  const evidenceAudit = evs.find((e) => e.type === "run.evidence_audit" && e.passed === true);
+  if (evidenceAudit && state === "failed") {
+    const files = evs.filter((e) => e.type === "run.event" && e.kind === "file_written");
+    const cmds = evs.filter((e) => e.type === "run.event" && e.kind === "command" && e.exitCode === 0);
+    evidence.push({
+      eventType: "run.evidence_audit",
+      fact: `backend 进程失败但证据通过：${files.length} 个文件写入 + ${cmds.length} 个命令 exit0。任务可能做对了，需人工确认`,
+    });
+    return { category: "evidence_passed_backend_failed", evidence };
+  }
+
+  // 4.6) TD-95 #4 no_effect：worker 读了上下文但没产出（无 file_written + 无 command exit0）。
+  //   必须在 crash 之前判——但要求有 tool_use/assistant text 活动（worker 确实干了事但没产出），
+  //   否则纯进程崩溃（无活动）仍是 crash，不是 no_effect。
+  //   真实例：coder_hq 读了 4 个文件然后进程崩了，产出接近 0。
+  if (state === "failed") {
+    const hasFileWritten = evs.some((e) => e.type === "run.event" && e.kind === "file_written");
+    const hasCommandExit0 = evs.some((e) => e.type === "run.event" && e.kind === "command" && e.exitCode === 0);
+    const hasToolUse = evs.some((e) => e.type === "run.event" && e.kind === "tool_use");
+    const hasAssistantText = evs.some(
+      (e) => e.type === "run.message" && e.role === "assistant" && e.parts?.some((p) => p.type === "text" && p.text?.trim()),
+    );
+    // 只有"有活动但无产出"才是 no_effect。无活动的纯崩溃仍是 crash。
+    if (!hasFileWritten && !hasCommandExit0 && (hasToolUse || hasAssistantText)) {
+      const activityCount = evs.filter((e) => e.type === "run.event").length;
+      evidence.push({
+        eventType: "run.event",
+        fact: `worker 有 ${activityCount} 条活动事件但无 file_written / 无 command exit0（读完上下文没产出）`,
+      });
+      return { category: "no_effect", evidence };
+    }
+  }
+
   // 5.5) provider_disconnect：worker 活跃工作后，末段静默 ≥阈值 才 exit≠0 →
   //      provider 网关流式中断（非 runtime 真崩）。判据保守（Lead 定：静默阈值
   //      120s、死前≥3 run.event、宁漏贴勿误贴）。真实样本 run_2026062818401405116u1yd
