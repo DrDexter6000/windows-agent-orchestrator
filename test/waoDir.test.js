@@ -50,18 +50,21 @@ test("S3-1: initWaoDir 幂等（重复 init 不破坏已有内容）", async () 
   }
 });
 
-test("S3-1: initWaoDir 追加 .wao/ 到 .gitignore（不重复追加）", async () => {
+test("S3-1: initWaoDir 追加 .wao/ 规则到 .gitignore（含 decisions/ 例外，不重复追加）", async () => {
   const dir = await makeTempDir();
   try {
     // 首次 init
     await initWaoDir(dir);
     let gitignore = await readFile(join(dir, ".gitignore"), "utf8");
-    assert.ok(gitignore.includes(".wao/"), "首次 init 应追加 .wao/ 到 .gitignore");
-    // 重复 init
+    // TD-94（#2 复盘）：应写三行规则——.wao/* 忽略全部 + !.wao/decisions/ 例外入库
+    // 不能只写裸 .wao/（会连 decisions/ ADR 一起忽略，违背 SKILL 契约）
+    assert.ok(gitignore.includes(".wao/*"), "init 应写 .wao/*（忽略全部）");
+    assert.ok(gitignore.includes("!.wao/decisions/"), "init 应写 !.wao/decisions/（ADR 例外入库）");
+    // 重复 init 不应重复追加（幂等）
     await initWaoDir(dir);
     gitignore = await readFile(join(dir, ".gitignore"), "utf8");
-    const matches = gitignore.match(/\.wao\//g) ?? [];
-    assert.equal(matches.length, 1, "重复 init 不应重复追加 .wao/");
+    const exceptionMatches = gitignore.match(/!\/?\.wao\/decisions\//g) ?? [];
+    assert.equal(exceptionMatches.length, 1, "重复 init 不应重复追加 !.wao/decisions/");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

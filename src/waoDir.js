@@ -142,7 +142,13 @@ const MAP_HEADER = {
 `,
 };
 
-/** 追加 .wao/ 到 .gitignore（幂等）。 */
+/**
+ * 追加 .wao/ gitignore 规则到目标项目（幂等）。
+ *
+ * TD-94（复盘 #2）：写三行规则——.wao/* 忽略全部 + !.wao/decisions/ 例外入库。
+ * 不能只写裸 .wao/（会连 decisions/ ADR 一起忽略，违背 SKILL "decisions/ 随代码版本化" 契约）。
+ * 幂等检查：检测 !.wao/decisions/（精确规则），而非 .wao/ 子串（裸 .wao/ 和 .wao/* 都含它）。
+ */
 async function ensureGitignore(cwd) {
   const giPath = join(cwd, ".gitignore");
   let existing = "";
@@ -151,10 +157,12 @@ async function ensureGitignore(cwd) {
   } catch {
     // 不存在，新建
   }
-  if (!existing.includes(".wao/")) {
-    const addition = existing.length > 0 && !existing.endsWith("\n")
-      ? `\n.wao/\n`
-      : `${existing}.wao/\n`;
-    await writeFile(giPath, addition, "utf8");
-  }
+  // 幂等：已含精确规则就不追加（检测 !.wao/decisions/，不检测 .wao/ 子串）
+  if (existing.includes("!.wao/decisions/")) return;
+
+  const rules = ".wao/*\n!.wao/decisions/\n";
+  const addition = existing.length > 0 && !existing.endsWith("\n")
+    ? `\n${rules}`
+    : `${existing}${rules}`;
+  await writeFile(giPath, addition, "utf8");
 }
