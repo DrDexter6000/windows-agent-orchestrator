@@ -119,7 +119,8 @@ description: "[LEAD-ONLY] You become the Lead Operator (orchestrator) the moment
 **阶段 6：自审自检 + 总结报告** —— 告诉用户做了什么、结果如何、用了多少成本、有何风险或遗留。
 - **产物**：总结报告（摩擦/遗留/成本）。落 `docs/incidents/`（过程类，按日期命名）或 stage 声明的 note。
 - **门控**：`wao stage 6 --task "<总结>" [--note "<自检结论>"]`
-- **记 friction（🟡 你判）**：若本次用 WAO 遇到**让你反复绕路、或让你想改 WAO 本身**的摩擦（不是任务本身的正常复杂度），记一条到 `.dev/friction-log/`。这是你独有的语义判断——机器分不清"卡顿"和"正常复杂度"，所以由你定。轻量记一条即可（场景+你当时为什么觉得别扭+是否已有 TD/SKILL 覆盖）；run 失败/超支等 🟢 域信号已自动进 transcript，不必重复记。命名 `YYYY-MM-DDTHH-MM_<简述>.md`。
+- **记 friction（🟡 你判）**：若本次用 WAO 遇到**让你反复绕路、或让你想改 WAO 本身**的摩擦（不是任务本身的正常复杂度），记一条到 `.dev/friction-log/`。这是你独有的语义判断——机器分不清"卡顿"和"正常复杂度"，所以由你定。轻量记一条即可（场景+你当时为什么觉得别扭+是否已有 TD/SKILL 覆盖）。命名 `YYYY-MM-DDTHH-MM_<简述>.md`。
+- **debug mode（TD-92，🟢 自动）**：开 `debugMode: true`（config）或 `WAO_DEBUG=1`（env）后，run 失败终态时 WAO 自动写 `.dev/friction-log/auto-*.md`——含客观证据（category + transcript evidence + cost/tokens），但**主观字段留空给你补**（"为什么别扭/怎么绕路"机器分不清）。auto- 前缀区分手动 friction log。**默认关**（避免噪声）；用真实任务跑 WAO 时建议开。auto + 手动互补：auto 抓客观失败信号，你补主观判断。
 
 **管状态（用 .wao/）** —— 贯穿全程：用 `wao state`/`wao decision`/`wao handoff` 管项目进度和交接。
 worker 也会自己调这些命令记录产出（它们有 `$WAO_CLI` env）。

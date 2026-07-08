@@ -5,6 +5,7 @@ import { JsonlTranscript, TERMINAL_STATES, readTranscript, findState } from "./t
 import { createWorktree, removeWorktree } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
+import { writeFrictionLog, frictionLogDirFromRunDir } from "./frictionLog.js";
 
 /**
  * RunManager 持有活跃 run 的生命周期。
@@ -333,7 +334,25 @@ export class RunManager {
 
   async _transition(transcript, from, to, reason) {
     await transcript.append("run.state_change", { from, to, reason });
+    // TD-92 debug mode：预生成失败（certification_gate/fire_forget_guard/spawn_error）也捕获 friction
+    if (to === "failed" || to === "timed_out" || to === "aborted") {
+      const ctx = transcript.context ?? {};
+      _maybeWriteFrictionLogFromTranscript(transcript, ctx.runId, ctx.agentId, this.config).catch(() => {});
+    }
   }
+}
+
+/**
+ * TD-92：RunManager 层的 friction 捕获（预生成失败路径，无 Run 实例）。
+ * 从 transcript 读 events + 调 writeFrictionLog。fire-and-forget，不阻塞。
+ */
+async function _maybeWriteFrictionLogFromTranscript(transcript, runId, agentId, config) {
+  const events = await readTranscript(transcript.filePath);
+  const frictionLogDir = frictionLogDirFromRunDir(config.runDir);
+  await writeFrictionLog(runId ?? "unknown", agentId ?? "unknown", events, {
+    frictionLogDir,
+    debugMode: config.debugMode,
+  });
 }
 
 function parseTags(tags) {
@@ -766,5 +785,30 @@ export class Run {
   async _transition(from, to, reason) {
     this.state = to;
     await this.transcript.append("run.state_change", { from, to, reason });
+    // TD-92 debug mode：失败终态自动捕获 friction（镜像 raiseAlert，fire-and-forget 不阻塞终态）
+    if (to === "failed" || to === "timed_out" || to === "aborted") {
+      _maybeWriteFrictionLog(this).catch(() => {});
+    }
   }
+}
+
+/**
+ * TD-92：读 transcript + 调 writeFrictionLog。fire-and-forget，失败降级不阻塞终态。
+ * 在 Run._transition 的失败终态路径调用。不抛——friction 捕获失败只是少一个 log 文件。
+ */
+async function _maybeWriteFrictionLog(run) {
+  const events = await readTranscript(run.transcript.filePath);
+  const frictionLogDir = frictionLogDirFromRunDir(run.config.runDir);
+  // metrics 从 transcript 提取（最后一条 run.metrics）
+  const metricsEvent = [...events].reverse().find((e) => e.type === "run.metrics");
+  const metrics = metricsEvent ? {
+    costUsd: metricsEvent.costUsd,
+    tokens: metricsEvent.tokens?.total,
+    durationMs: metricsEvent.durationMs,
+  } : {};
+  await writeFrictionLog(run.runId, run.agentId, events, {
+    frictionLogDir,
+    debugMode: run.config.debugMode,
+    metrics,
+  });
 }
