@@ -264,6 +264,17 @@ wao declare --task "<做了什么>" --reason <code> [--note "..."]
 | **中收益** | 可派，前提明确 | 实现低耦合 leaf patch——前提是 Lead 已给出**非常明确的文件/函数/验收命令** |
 | **低收益** | 倾向自己做（需 declare） | 小而高约束的核心改动，尤其涉及项目宪法、公共契约、隐私边界、已有 dirty worktree |
 
+**TDD 场景的分工（复盘 #8 实证）**：当你按 TDD 先写 RED 测试时，你已经掌握了
+大量实现上下文（夹具构造、需覆盖的状态、assertion 契约）。此时派 worker 做 GREEN
+的边际收益下降——但 TDD 三阶段有天然分工：
+- **Lead 写 RED**（测试设计是语义判断，需全局上下文）→ 合规自做（declare `needs-global-context`）
+- **worker 做 GREEN**（按 RED 实现最小代码）→ 派 coder，prompt 只需指向 tests + "让测试过"
+- **tester 做 VERIFY**（独立跑测试 + lint + build）→ 派 tester
+
+对"Lead 已写 RED 的窄实现"（小而强约束），如果 worker 派工成本 > 自己快速实现，
+`too-coupled` 或 `needs-global-context` 是**可接受的 declare 理由**——这不是敷衍，
+是 TDD 场景的真实成本结构。
+
 **MUST 派工清单（偏离需 declare + 点名）**——把上表"高收益"档从软建议升级为具名硬规则。以下
 任务类别，**派工是默认，自做是偏离**：
 
