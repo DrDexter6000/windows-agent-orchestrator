@@ -24,6 +24,13 @@ description: "[LEAD-ONLY] You become the Lead Operator (orchestrator) the moment
 你下面有 worker（在 registry 里），你的职责是驱动它们完成任务，而不是自己埋头干完全程。
 你的最小职责链是：理解 → 编排 → 派发 → 验收 → 整合 → 汇报。
 
+> **敷衍式派工是编排失败（命名这个反模式——它反复害你）。** dogfood 4 轮反复重现同一
+> 模式：派 1 个象征性 worker（通常是 researcher），剩下全自己干——产出可能不错，但**编排是
+> 失败的**。根因：你把 dispatch 当成"要省的成本"，而不是"职责本身"。**不管产出好坏，"派 1 个
+> 然后自己干完"不是合格的编排。** 发现自己在这么做时二选一：补派（把剩下的子任务真正派出去），
+> 或 `wao declare` 说清为什么剩下的不能并行/不能派。**"顺手做了"不是理由**——那就是敷衍式派工
+> 的定义。
+
 > **默认派发（TD-82）。** 你的第一直觉应是"派给 worker"，不是"我自己干"。自己只做
 > 编排、验收、整合，以及小到不值得派发的任务。**自己做一个本可派发的任务 = 偏离默认，
 > 必须用 `wao declare --task ... --reason <code>` 声明理由**（见 §"何时自己做 vs 派发"）。
@@ -87,6 +94,12 @@ description: "[LEAD-ONLY] You become the Lead Operator (orchestrator) the moment
   - **read-only 任务显式禁写/装/改环境**：prompt 里明确"不得 `pip install`、不得改全局环境、不得重装 editable package，除非本 prompt 显式授权"。read-only worker（researcher）跑了 `pip install -e .` 污染全局 Python 是真实事故——工具层（registry `env` 字段，见 TD-79）已加 `PIP_REQUIRE_VIRTUALENV` 兜底，但 prompt 层约束是第一道防线。
   - **入口指定，别猜包名**：Python repo 的 worker prompt 应指定入口（如"用 `python -m tools` 而非 console script"），防 worker 从 PATH 解析到错的 checkout。
   - **项目专属命令归目标项目的 AGENTS.md**：本 SKILL 只管 WAO 通用派工纪律；目标项目的构建/测试/运行命令由**目标项目自己的 AGENTS.md** 定义，派工 prompt 引用它而非在本 SKILL 硬编码。
+
+**派工下限（防敷衍式派工的具体闸门）**：plan（阶段 2）拆出 **≥2 个独立子任务**时，阶段 3 应派
+**≥2 worker**——不是 1 个象征性 worker + 自己干剩下的。只有 1 个独立子任务的任务，1 个 worker
+合理。若你 plan 拆了多个子任务但实际只派 1 个，需 `wao declare` 说明为何其余子任务不能并行/
+不能派（"我顺手做了"不是理由——那就是敷衍式派工）。这条和 §"MUST 派工清单"联动：清单第 1
+条已点名"可并行读要并行"，阶段 3 下限把它钉在编排动作上。
 
 **阶段 4：交付验收（放行 / 打回重做）** —— 别只信 worker 自报"完成"。
 - **产物**：验收结论（放行还是打回 + 理由）。可写进 stage 声明的 note，或单独文件。
@@ -248,6 +261,21 @@ wao declare --task "<做了什么>" --reason <code> [--note "..."]
 | **高收益** | 强烈推荐派 | 独立验证、并行审计、跑测试、收集证据、读大范围文档、复现 bug |
 | **中收益** | 可派，前提明确 | 实现低耦合 leaf patch——前提是 Lead 已给出**非常明确的文件/函数/验收命令** |
 | **低收益** | 倾向自己做（需 declare） | 小而高约束的核心改动，尤其涉及项目宪法、公共契约、隐私边界、已有 dirty worktree |
+
+**MUST 派工清单（偏离需 declare + 点名）**——把上表"高收益"档从软建议升级为具名硬规则。以下
+任务类别，**派工是默认，自做是偏离**：
+
+1. **可并行的多文件/多模块读**——你读了 A 发现还要读 B、C → 该 `spawn` 多个 researcher 并行，
+   不是自己串行读完。自己串行读 = 浪费并行性 + 污染你的上下文。
+2. **证据收集 / 独立验证**——跑测试验 exitCode、查文件是否存在、复现 bug → 该派 tester，
+   不是自己跑。自己是 Lead（最贵模型），干 leaf 验证是算力浪费。
+3. **worker 专长任务**——多模态 → coder_mm；测试 → tester；深度调研 → researcher。有专长
+   worker 还自己做 = 放弃专长价值。
+
+**偏离任一条 = `wao declare`**，并在 note 里点名"违反了 MUST 派工清单第 N 条"。Lead 仍全权可
+偏离，但偏离是对着**具名规则**说话（"我违反了第 2 条，理由 needs-global-context"），不是对着
+模糊"推荐"滑过去。这是规则层纪律——和 🟡 域不冲突：判断仍由你做，工具不拦截，但规则摆出来
+让你能被（自己和用户）对照检查。
 
 **无硬红线**：与 auditor policy 同构——上表是参考不是强制。**Lead 在任何场景都可偏离**
 （例如对"低收益"任务仍选择派工，或对"高收益"任务选择自己做 + declare），并对决策负责。
