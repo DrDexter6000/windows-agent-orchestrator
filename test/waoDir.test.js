@@ -10,19 +10,21 @@ async function makeTempDir() {
   return mkdtemp(join(tmpdir(), "wao-dir-"));
 }
 
-test("S3-1: initWaoDir 创建 5 槽位 + 各 map.md", async () => {
+test("S3-1: initWaoDir 创建 6 槽位 + 各 map.md（TD-91 加 pipeline）", async () => {
   const dir = await makeTempDir();
   try {
     await initWaoDir(dir);
-    // 5 个顶层槽位都存在
+    // 6 个顶层槽位都存在
     assert.ok(existsSync(join(dir, ".wao", "project.md")), "project.md 应存在");
     assert.ok(existsSync(join(dir, ".wao", "state")), "state/ 应存在");
     assert.ok(existsSync(join(dir, ".wao", "decisions")), "decisions/ 应存在");
+    assert.ok(existsSync(join(dir, ".wao", "pipeline")), "pipeline/ 应存在（TD-91）");
     assert.ok(existsSync(join(dir, ".wao", "handoff")), "handoff/ 应存在");
     assert.ok(existsSync(join(dir, ".wao", "runs")), "runs/ 应存在");
-    // 各 map.md 存在（state/decisions/handoff 有 map，project.md 是单文件，runs 无 map）
+    // 各 map.md 存在（state/decisions/pipeline/handoff 有 map，project.md 是单文件，runs 无 map）
     assert.ok(existsSync(join(dir, ".wao", "state", "map.md")), "state/map.md 应存在");
     assert.ok(existsSync(join(dir, ".wao", "decisions", "map.md")), "decisions/map.md 应存在");
+    assert.ok(existsSync(join(dir, ".wao", "pipeline", "map.md")), "pipeline/map.md 应存在（TD-91）");
     assert.ok(existsSync(join(dir, ".wao", "handoff", "map.md")), "handoff/map.md 应存在");
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -104,10 +106,10 @@ test("S3-1: getWaoDir 支持 --state-dir 覆盖", () => {
   assert.ok(custom.endsWith(".custom-wao"), `应支持覆盖，got ${custom}`);
 });
 
-test("S3-1: WAO_TOP_LEVEL_SLOTS 导出预定义 5 槽位", () => {
+test("S3-1: WAO_TOP_LEVEL_SLOTS 导出预定义 6 槽位（TD-91 加 pipeline）", () => {
   assert.ok(Array.isArray(WAO_TOP_LEVEL_SLOTS));
-  assert.ok(WAO_TOP_LEVEL_SLOTS.length === 5, "应正好 5 个槽位");
-  for (const slot of ["project.md", "state", "decisions", "handoff", "runs"]) {
+  assert.ok(WAO_TOP_LEVEL_SLOTS.length === 6, "应正好 6 个槽位（TD-91 加 pipeline）");
+  for (const slot of ["project.md", "state", "decisions", "pipeline", "handoff", "runs"]) {
     assert.ok(WAO_TOP_LEVEL_SLOTS.includes(slot), `应含 ${slot}`);
   }
 });

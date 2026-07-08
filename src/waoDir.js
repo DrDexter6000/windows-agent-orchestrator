@@ -14,11 +14,13 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-// 锁死的 5 个顶层槽位。新增槽位是架构变更，需同步改 waoLayout.test.js 守卫。
-export const WAO_TOP_LEVEL_SLOTS = ["project.md", "state", "decisions", "handoff", "runs"];
+// 锁死的 6 个顶层槽位。新增槽位是架构变更，需同步改 waoLayout.test.js 守卫。
+// TD-91：pipeline/ 是第 6 槽位——STAGE-/DECL- 运行时声明专用，与 decisions/（ADR 冻结决策）分离。
+// 原先 STAGE/DECL 写进 decisions/（被 git 跟踪），实验声明和真实 ADR 混在一起污染版本库。
+export const WAO_TOP_LEVEL_SLOTS = ["project.md", "state", "decisions", "pipeline", "handoff", "runs"];
 
-// state/decisions/handoff 有 map.md（索引），project.md 是单文件，runs 无 map。
-const SLOTS_WITH_MAP = ["state", "decisions", "handoff"];
+// state/decisions/pipeline/handoff 有 map.md（索引），project.md 是单文件，runs 无 map。
+const SLOTS_WITH_MAP = ["state", "decisions", "pipeline", "handoff"];
 
 /**
  * 解析 .wao/ 路径。
@@ -124,8 +126,14 @@ const MAP_HEADER = {
 `,
   decisions: `# Decisions Map
 
-<!-- 索引：所有决策。一行一条，不放正文。渐进式披露。 -->
+<!-- 索引：ADR 冻结决策（NNNN-*.md）。一行一条，不放正文。随代码版本化。 -->
 <!-- 格式：<编号> | <标题> | <一句话> -->
+<!-- TD-91：STAGE/DECL 运行时声明已挪到 pipeline/，本目录只留 ADR。 -->
+`,
+  pipeline: `# Pipeline Map
+
+<!-- 索引：STAGE/DECL 运行时声明。一行一条，不放正文。gitignore（每轮临时）。 -->
+<!-- 格式：STAGE | <n> | <task> | <artifact>  或  DECL | <task> | <reason> -->
 `,
   handoff: `# Handoff Map
 

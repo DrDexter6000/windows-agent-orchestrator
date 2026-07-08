@@ -6,8 +6,8 @@
  * transcript），所以"自做"零摩擦、"派发"高摩擦，默认行为永远选摩擦最小的路。
  *
  * declare 的强制力 = 曝光（可见），不是拦截。Lead 仍全权可自做，但自做一个本可
- * 派发的任务时必须声明，让自做行为对用户和 dashboard 可见。声明存进现有 decisions/
- * 槽位（用 DECL- 前缀与 ADR 的 NNNN- 区分，不新建 .wao/ 第 6 槽位——那需架构变更）。
+ * 派发的任务时必须声明，让自做行为对用户和 dashboard 可见。声明存进 .wao/pipeline/
+ * 槽位（TD-91：与 decisions/ 的 ADR 分离——DECL 是运行时声明，decisions 是冻结决策）。
  *
  * REASON_CODES 是理由码的权威枚举（SSOT），SKILL.md 和 docs-consistency 守卫指向它。
  * 改这个数组 = 同步改 SKILL 文档 + 守卫测试。
@@ -53,11 +53,11 @@ export async function addDeclare(waoDir, { task, reason, note }) {
     throw new Error("declare --task 不能为空——声明要让自做行为可见，task 是可见性的核心。");
   }
 
-  const decisionsDir = join(waoDir, "decisions");
+  const pipelineDir = join(waoDir, "pipeline");
   const ts = new Date().toISOString().replace(/[-:.]/g, "").slice(0, 15); // YYYYMMDDTHHMM
   const slug = slugify(task);
   const fileName = `${DECL_PREFIX}${ts}-${slug}.md`;
-  const filePath = join(decisionsDir, fileName);
+  const filePath = join(pipelineDir, fileName);
 
   // 正文（带结构化 frontmatter，便于 dashboard 聚合解析）
   const content = [
@@ -78,19 +78,19 @@ export async function addDeclare(waoDir, { task, reason, note }) {
   ].filter((l) => l !== "").join("\n");
   await writeFile(filePath, (content.endsWith("\n") ? content : content + "\n"), "utf8");
 
-  // map 索引行（与 ADR 索引行视觉区分：DECL 前缀）
-  await appendMapIndex(join(decisionsDir, "map.md"),
+  // map 索引行（pipeline/map.md，与 ADR/STAGE 索引行视觉区分：DECL 前缀）
+  await appendMapIndex(join(pipelineDir, "map.md"),
     `DECL | ${task.slice(0, 50)} | ${reason}`);
 
   return filePath;
 }
 
 /**
- * 列出所有 declare 声明（从 decisions/map.md 读 DECL 行）。
+ * 列出所有 declare 声明（从 pipeline/map.md 读 DECL 行）。
  * @returns {Promise<Array<{task: string, reason: string}>>}
  */
 export async function listDeclares(waoDir) {
-  const mapPath = join(waoDir, "decisions", "map.md");
+  const mapPath = join(waoDir, "pipeline", "map.md");
   let map = "";
   try { map = await readFile(mapPath, "utf8"); } catch { return []; }
   const lines = map.split("\n").filter((l) => /^DECL\s*\|/.test(l));

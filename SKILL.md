@@ -245,8 +245,9 @@ wao declare --task "<做了什么>" --reason <code> [--note "..."]
 | `needs-global-context` | 需要只有 Lead 有的全局上下文 |
 | `user-assigned` | 用户明确指派 Lead 自做（非 Lead 自主偏离派工默认） |
 
-理由码用**枚举不用自由文本**——防"声明"退化成"写句话"失去约束力。声明存进 `.wao/decisions/`
-（DECL- 前缀，与 ADR 的 NNNN- 区分），`runs dashboard` 会汇总你的自做声明（`Lead自做=N 理由分布=...`）。
+理由码用**枚举不用自由文本**——防"声明"退化成"写句话"失去约束力。声明存进 `.wao/pipeline/`
+（TD-91：DECL- 前缀，与 ADR 分目录——ADR 是冻结决策在 decisions/，DECL 是运行时声明在 pipeline/），
+`runs dashboard` 会汇总你的自做声明（`Lead自做=N 理由分布=...`）。
 这让你（和用户）能看见"这个会话里 Lead 自己干了几件本该派的活"，从而调参派工率。
 
 **用户指派场景的 declare 判断**：当用户**明确指派**你（Lead）做某事（不是你自主偏离派工），用 `user-assigned`。
@@ -309,7 +310,7 @@ wao declare --task "<做了什么>" --reason <code> [--note "..."]
 
 5. **用 `.wao/` 记录状态，不要新建文档，不要把上下文塞进 session。** `wao decision add` / `wao handoff write` / `wao state` 是记录手段。agent 直接建文件会导致文档熵增（WAO 自己就长出过 35 个冗余 .md）。状态外化到文件 = 换 runtime 也能断点续接。
 
-6. **交付物里写命令文本 ≠ 已执行该命令（TD-85）。** dogfood round 3 实证：Lead 在报告里写了完整的 `wao declare --task ... --reason ...` 命令（代码块格式），但**从未真正运行它**——`.wao/decisions/` 里没有对应 DECL 文件，dashboard count=0。这违反了安全铁律精神的核心："worker 自报完成 ≠ 真完成"——**Lead 自己也可能犯同样的错**（声称做了 X，实际只写了 X 的文本）。
+6. **交付物里写命令文本 ≠ 已执行该命令（TD-85）。** dogfood round 3 实证：Lead 在报告里写了完整的 `wao declare --task ... --reason ...` 命令（代码块格式），但**从未真正运行它**——`.wao/pipeline/` 里没有对应 DECL 文件，dashboard count=0。这违反了安全铁律精神的核心："worker 自报完成 ≠ 真完成"——**Lead 自己也可能犯同样的错**（声称做了 X，实际只写了 X 的文本）。
    - **纪律**：在交付物里提及某条 wao 命令时，必须区分两种措辞——
      - "建议执行：`wao declare ...`"（还没做，是提议）
      - "已执行：`wao declare ...`"（真做了，`.wao/` 里有对应记录可验证）

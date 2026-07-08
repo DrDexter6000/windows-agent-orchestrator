@@ -14,7 +14,7 @@ async function makeInitWao() {
 }
 
 /**
- * 守卫1（导出供复用）：.wao/ 顶层只有预定义 5 槽位。
+ * 守卫1（导出供复用）：.wao/ 顶层只有预定义 6 槽位。
  * 这是治文档熵增的核心：负向断言"不准新建文档类型"。
  * 任何 agent 想往 .wao/ 塞 docs/my-finding.md，这里会抓。
  */
@@ -30,6 +30,7 @@ export function assertWaoTopLevelClean(waoDir) {
 /**
  * 守卫2（导出供复用）：decisions/map.md 每行索引对应实际存在的正文文件，
  * 且每个正文文件都在 map 里有索引。双向一致。
+ * TD-91：STAGE/DECL 已挪到 pipeline/，decisions 只查 ADR（NNNN-）。
  */
 export async function assertDecisionsMapConsistency(waoDir) {
   const decisionsDir = join(waoDir, "decisions");
@@ -51,13 +52,30 @@ export async function assertDecisionsMapConsistency(waoDir) {
   for (const id of mapIds) {
     assert.ok(fileIds.has(id), `decisions map 索引 ${id} 但正文文件不存在（悬空索引）`);
   }
-  // TD-83：STAGE- 前缀正文与 map 索引计数一致（防 agent 绕过 wao stage 命令直接写文件）。
-  // 不做文件级双向（STAGE 索引行不存文件名，只存 STAGE | n | task | artifact）；
-  // 计数一致是最强可达约束——能抓"写正文没更新 map"和"map 悬空行"两类脱节。
-  const stageFiles = readdirSync(decisionsDir).filter((f) => /^STAGE-\d+-.*\.md$/.test(f));
-  const stageMapLines = map.split("\n").filter((l) => /^STAGE\s*\|/.test(l));
+  // TD-91：decisions/ 不应再有 STAGE-/DECL-（已挪到 pipeline/）。
+  // 如果 decisions/ 出现 STAGE-/DECL-，说明旧代码路径或旧声明残留——抓出来。
+  const strayRuntime = files.filter((f) => /^STAGE-|^DECL-/.test(f));
+  // 注意：files 已过滤为 NNNN- 格式，strayRuntime 理论恒空。但若有人手写也抓不到——
+  // 这里额外扫全部 decisions 目录内容确保无 STAGE-/DECL- 残留。
+  const allDecisionsFiles = readdirSync(decisionsDir);
+  const strayInDir = allDecisionsFiles.filter((f) => /^STAGE-|^DECL-/.test(f));
+  assert.equal(strayInDir.length, 0,
+    `decisions/ 不应有 STAGE-/DECL-（TD-91 已挪到 pipeline/），发现：${strayInDir.join(", ")}`);
+
+  // TD-83/TD-91：pipeline/ 的 STAGE-/DECL- 正文与 pipeline/map.md 索引计数一致。
+  // 防 agent 绕过 wao stage/declare 命令直接写文件（写正文没更新 map）。
+  const pipelineDir = join(waoDir, "pipeline");
+  const pipelineMapPath = join(pipelineDir, "map.md");
+  let pipelineMap = "";
+  try { pipelineMap = await readFile(pipelineMapPath, "utf8"); } catch {}
+  const stageFiles = readdirSync(pipelineDir).filter((f) => /^STAGE-\d+-.*\.md$/.test(f));
+  const stageMapLines = pipelineMap.split("\n").filter((l) => /^STAGE\s*\|/.test(l));
   assert.equal(stageFiles.length, stageMapLines.length,
-    `decisions STAGE- 正文 ${stageFiles.length} 个但 map 索引 ${stageMapLines.length} 行（脱节）`);
+    `pipeline STAGE- 正文 ${stageFiles.length} 个但 map 索引 ${stageMapLines.length} 行（脱节）`);
+  const declFiles = readdirSync(pipelineDir).filter((f) => /^DECL-.*\.md$/.test(f));
+  const declMapLines = pipelineMap.split("\n").filter((l) => /^DECL\s*\|/.test(l));
+  assert.equal(declFiles.length, declMapLines.length,
+    `pipeline DECL- 正文 ${declFiles.length} 个但 map 索引 ${declMapLines.length} 行（脱节）`);
 }
 
 test("S3-5 守卫1: tmpdir 合法 .wao/ → assertWaoTopLevelClean 通过", async () => {
@@ -115,8 +133,8 @@ test("TD-83 守卫2: STAGE- 正文存在但 map 无索引 → 计数不一致报
   const dir = await makeInitWao();
   try {
     const waoDir = getWaoDir(dir);
-    // 绕过 wao stage 命令直接写一个 STAGE- 正文（map 不更新）
-    await writeFile(join(waoDir, "decisions", "STAGE-1-rogue.md"), "# rogue stage\n");
+    // 绕过 wao stage 命令直接写一个 STAGE- 正文到 pipeline/（map 不更新）
+    await writeFile(join(waoDir, "pipeline", "STAGE-1-rogue.md"), "# rogue stage\n");
     await assert.rejects(
       () => assertDecisionsMapConsistency(waoDir),
       /STAGE.*脱节|STAGE.*正文.*1.*map.*索引.*0/,

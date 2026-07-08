@@ -15,8 +15,8 @@
  *
  * 产物正文不进 .wao/（违反 SSOT：spec 是契约要进版本控制，.wao/ 在 gitignore）。
  * stage 声明只存元数据 + artifacts 路径指针，指向 docs/ 或 runs/<runId>.jsonl。
- * 声明存进现有 decisions/ 槽位（用 STAGE- 前缀与 ADR 的 NNNN- 和 DECL- 区分，
- * 不新建 .wao/ 第 6 槽位——那需架构变更）。
+ * 声明存进 .wao/pipeline/ 槽位（TD-91：与 decisions/ 的 ADR 分离——STAGE 是运行时声明，
+ * decisions 是冻结决策）。用 STAGE- 前缀与 DECL- 区分。
  *
  * STAGE_NUMBERS 是阶段编号的权威枚举（SSOT），SKILL.md 和 docs-consistency 守卫指向它。
  * 改这个数组 = 同步改 SKILL 文档 + 守卫测试。
@@ -64,11 +64,11 @@ export async function addStage(waoDir, { stage, task, artifacts, note }) {
     throw new Error("stage --task 不能为空——声明要让 pipeline 进度可见，task 是可见性的核心。");
   }
 
-  const decisionsDir = join(waoDir, "decisions");
+  const pipelineDir = join(waoDir, "pipeline");
   const ts = new Date().toISOString().replace(/[-:.]/g, "").slice(0, 15); // YYYYMMDDTHHMM
   const slug = slugify(task);
   const fileName = `${STAGE_PREFIX}${stage}-${ts}-${slug}.md`;
-  const filePath = join(decisionsDir, fileName);
+  const filePath = join(pipelineDir, fileName);
 
   // 正文（带结构化 frontmatter，便于 dashboard 聚合解析）
   const artifactList = Array.isArray(artifacts) ? artifacts : [];
@@ -92,20 +92,20 @@ export async function addStage(waoDir, { stage, task, artifacts, note }) {
   ].filter((l) => l !== "").join("\n");
   await writeFile(filePath, (content.endsWith("\n") ? content : content + "\n"), "utf8");
 
-  // map 索引行（与 ADR/DECL 索引行视觉区分：STAGE 前缀 + 阶段号）
+  // map 索引行（pipeline/map.md，与 ADR/DECL 索引行视觉区分：STAGE 前缀 + 阶段号）
   const artifactsSummary = artifactList.length > 0 ? artifactList[0].slice(0, 40) : "(无产物)";
-  await appendMapIndex(join(decisionsDir, "map.md"),
+  await appendMapIndex(join(pipelineDir, "map.md"),
     `STAGE | ${stage} | ${task.slice(0, 50)} | ${artifactsSummary}`);
 
   return filePath;
 }
 
 /**
- * 列出所有阶段声明（从 decisions/map.md 读 STAGE 行）。
+ * 列出所有阶段声明（从 pipeline/map.md 读 STAGE 行）。
  * @returns {Promise<Array<{stage: number, task: string, artifact: string}>>}
  */
 export async function listStages(waoDir) {
-  const mapPath = join(waoDir, "decisions", "map.md");
+  const mapPath = join(waoDir, "pipeline", "map.md");
   let map = "";
   try { map = await readFile(mapPath, "utf8"); } catch { return []; }
   const lines = map.split("\n").filter((l) => /^STAGE\s*\|/.test(l));

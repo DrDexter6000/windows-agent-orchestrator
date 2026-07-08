@@ -39,7 +39,8 @@ test("TD-82: addDeclare 建正文(DECL- 前缀 + 结构化 frontmatter) + 更新
     assert.match(body, /reason: too-small/, "正文含 reason frontmatter");
     assert.match(body, /task: /, "正文含 task frontmatter");
     // map 索引行用 DECL 前缀标记（与 ADR 行视觉区分）
-    const map = await readFile(join(waoDir, "decisions", "map.md"), "utf8");
+    // TD-91：DECL 索引在 pipeline/map.md（不在 decisions/map.md）
+    const map = await readFile(join(waoDir, "pipeline", "map.md"), "utf8");
     assert.match(map, /^DECL \|.*too-small/m, "map 含 DECL 索引行（含 reason）");
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -112,20 +113,24 @@ test("TD-82: summarizeDeclares 聚合 count + byReason（供 dashboard）", asyn
   }
 });
 
-test("TD-82: 声明不污染 ADR 编号序列（DECL- 与 NNNN- 独立）", async () => {
+test("TD-82/TD-91: DECL- 在 pipeline/，ADR 在 decisions/，编号独立不混", async () => {
   const dir = await makeInitWao();
   try {
     const waoDir = getWaoDir(dir);
-    // 声明与决策共存于 decisions/，互不干扰编号
+    // TD-91：ADR 进 decisions/，DECL 进 pipeline/——不再混在一个目录
     const { addDecision } = await import("../src/waoDecisions.js");
     await addDecision(waoDir, { title: "架构决策", body: "b" });
     await addDeclare(waoDir, { task: "自做声明", reason: "too-small" });
     await addDecision(waoDir, { title: "第二条决策", body: "b2" });
-    const files = readdirSync(join(waoDir, "decisions")).filter((f) => f.endsWith(".md") && f !== "map.md");
-    const adrFiles = files.filter((f) => /^\d{4}-/.test(f));
-    const declFiles = files.filter((f) => f.startsWith("DECL-"));
-    assert.equal(adrFiles.length, 2, "2 个 ADR 文件");
-    assert.equal(declFiles.length, 1, "1 个 DECL 文件");
+    // decisions/ 只应有 ADR
+    const decisionsFiles = readdirSync(join(waoDir, "decisions")).filter((f) => f.endsWith(".md") && f !== "map.md");
+    const adrFiles = decisionsFiles.filter((f) => /^\d{4}-/.test(f));
+    assert.equal(adrFiles.length, 2, "decisions/ 有 2 个 ADR");
+    assert.equal(decisionsFiles.filter((f) => f.startsWith("DECL-")).length, 0,
+      "decisions/ 不应有 DECL-（TD-91 已挪到 pipeline/）");
+    // pipeline/ 应有 DECL-
+    const pipelineFiles = readdirSync(join(waoDir, "pipeline")).filter((f) => f.endsWith(".md") && f !== "map.md");
+    assert.equal(pipelineFiles.filter((f) => f.startsWith("DECL-")).length, 1, "pipeline/ 有 1 个 DECL");
     // ADR 编号连续不受 DECL 干扰
     assert.ok(adrFiles.some((f) => f.startsWith("0001-")), "ADR 0001 存在");
     assert.ok(adrFiles.some((f) => f.startsWith("0002-")), "ADR 0002 存在（编号未被打断）");

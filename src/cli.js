@@ -1231,11 +1231,11 @@ export function buildDashboard(runs, selfDeclared = null, stageProgress = null) 
       running,
       flagged,
       // TD-82：Lead 自做声明（曝光机制——让"没派工"对用户可见）。
-      // selfDeclared 来自 .wao/decisions/ 的 DECL- 文件（runsDashboardCommand 注入），
+      // selfDeclared 来自 .wao/pipeline/ 的 DECL- 文件（runsDashboardCommand 注入），
       // 不是 run events——WAO 看不见 Lead 的非 WAO 工具调用，只能靠 Lead 主动声明。
       selfDeclared: selfDeclared ?? { count: 0, byReason: {} },
       // TD-83：Lead 阶段声明（pipeline 进度曝光——让"跳过 spec/plan/汇总/总结"对用户可见）。
-      // stageProgress 来自 .wao/decisions/ 的 STAGE- 文件（runsDashboardCommand 注入）。
+      // stageProgress 来自 .wao/pipeline/ 的 STAGE- 文件（runsDashboardCommand 注入）。
       // declared 是已声明阶段号的 Set，count 是已声明阶段数。
       stageProgress: stageProgress ?? { declared: [], count: 0 },
     },
@@ -1569,7 +1569,7 @@ export async function runsDashboardCommand(args, config) {
       runs.sort((a, b) => (b.events.at(-1)?.ts ?? "").localeCompare(a.events.at(-1)?.ts ?? ""));
       runs = runs.slice(0, latestN);
     }
-    // TD-82：读 .wao/decisions/ 下的 Lead 自做声明，注入 dashboard（曝光机制）。
+    // TD-82：读 .wao/pipeline/ 下的 Lead 自做声明，注入 dashboard（曝光机制）。
     // .wao/ 未 init 时静默跳过（count:0），不阻塞 dashboard。
     let selfDeclared = null;
     let stageProgress = null;
@@ -1888,7 +1888,7 @@ async function waoInitCommand(args, config) {
   console.log(JSON.stringify({
     initialized: true,
     waoDir,
-    slots: ["project.md", "state/", "decisions/", "handoff/", "runs/"],
+    slots: ["project.md", "state/", "decisions/", "pipeline/", "handoff/", "runs/"],
   }, null, 2));
 }
 

@@ -40,7 +40,8 @@ test("TD-83: addStage 建正文(STAGE- 前缀 + 结构化 frontmatter) + 更新 
     assert.match(body, /stage: 1/, "正文含 stage frontmatter");
     assert.match(body, /task: /, "正文含 task frontmatter");
     // map 索引行用 STAGE 前缀标记（与 ADR/DECL 行视觉区分）
-    const map = await readFile(join(waoDir, "decisions", "map.md"), "utf8");
+    // TD-91：STAGE/DECL 索引在 pipeline/map.md（不在 decisions/map.md）
+    const map = await readFile(join(waoDir, "pipeline", "map.md"), "utf8");
     assert.match(map, /^STAGE \| 1 \|/m, "map 含 STAGE 索引行（含阶段号）");
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -117,24 +118,27 @@ test("TD-83: summarizeStages 聚合 declared 集合（供 dashboard 渲染阶段
   }
 });
 
-test("TD-83: 阶段声明不污染 ADR 编号序列（STAGE-/DECL-/NNNN- 三者独立）", async () => {
+test("TD-83/TD-91: STAGE-/DECL- 在 pipeline/，ADR 在 decisions/，三者独立不混", async () => {
   const dir = await makeInitWao();
   try {
     const waoDir = getWaoDir(dir);
-    // 三种文件共存于 decisions/，互不干扰
+    // TD-91：ADR 进 decisions/，STAGE/DECL 进 pipeline/——不再混在一个目录
     const { addDecision } = await import("../src/waoDecisions.js");
     const { addDeclare } = await import("../src/waoDeclare.js");
     await addDecision(waoDir, { title: "架构决策", body: "b" });
     await addDeclare(waoDir, { task: "自做声明", reason: "too-small" });
     await addStage(waoDir, { stage: 1, task: "阶段声明" });
     await addDecision(waoDir, { title: "第二条决策", body: "b2" });
-    const files = readdirSync(join(waoDir, "decisions")).filter((f) => f.endsWith(".md") && f !== "map.md");
-    const adrFiles = files.filter((f) => /^\d{4}-/.test(f));
-    const declFiles = files.filter((f) => f.startsWith("DECL-"));
-    const stageFiles = files.filter((f) => f.startsWith("STAGE-"));
-    assert.equal(adrFiles.length, 2, "2 个 ADR 文件");
-    assert.equal(declFiles.length, 1, "1 个 DECL 文件");
-    assert.equal(stageFiles.length, 1, "1 个 STAGE 文件");
+    // decisions/ 只应有 ADR（NNNN-），不应有 STAGE-/DECL-
+    const decisionsFiles = readdirSync(join(waoDir, "decisions")).filter((f) => f.endsWith(".md") && f !== "map.md");
+    const adrFiles = decisionsFiles.filter((f) => /^\d{4}-/.test(f));
+    assert.equal(adrFiles.length, 2, "decisions/ 有 2 个 ADR");
+    assert.equal(decisionsFiles.filter((f) => /^STAGE-|^DECL-/.test(f)).length, 0,
+      "decisions/ 不应有 STAGE-/DECL-（TD-91 已挪到 pipeline/）");
+    // pipeline/ 应有 STAGE- + DECL-
+    const pipelineFiles = readdirSync(join(waoDir, "pipeline")).filter((f) => f.endsWith(".md") && f !== "map.md");
+    assert.equal(pipelineFiles.filter((f) => f.startsWith("DECL-")).length, 1, "pipeline/ 有 1 个 DECL");
+    assert.equal(pipelineFiles.filter((f) => f.startsWith("STAGE-")).length, 1, "pipeline/ 有 1 个 STAGE");
     // ADR 编号连续不受 STAGE/DECL 干扰
     assert.ok(adrFiles.some((f) => f.startsWith("0001-")), "ADR 0001 存在");
     assert.ok(adrFiles.some((f) => f.startsWith("0002-")), "ADR 0002 存在（编号未被打断）");
