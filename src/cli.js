@@ -11,6 +11,7 @@ import { OpenCodeServeBackend } from "./backends/opencodeServe.js";
 import { ClaudeCodeBackend } from "./backends/claudeCode.js";
 import { CodexBackend } from "./backends/codex.js";
 import { KimiCodeBackend } from "./backends/kimiCode.js";
+import { getWaoCliPath } from "./waoCliPath.js";
 import { executeStopWithVerification } from "./backends/opencodeStopVerify.js";
 import { raiseAlert } from "./alerts.js";
 import { listWorktrees, removeWorktree } from "./isolation.js";
@@ -2216,7 +2217,8 @@ async function loadRun(runId, options, config) {
 
 function backendFor(agent) {
   // WAO CLI 路径（注入 worker env，让 worker 能调 wao 命令记录状态）
-  const waoCliPath = join(dirname(fileURLToPath(import.meta.url)), "cli.js");
+  // TD-90: Windows 上指向 scripts/wao-cli.cmd（v22 shim），避免 worker shell 默认 v24 触发 guard
+  const waoCliPath = getWaoCliPath();
   if (agent.backend === "opencode-serve") {
     return new OpenCodeServeBackend();
   }

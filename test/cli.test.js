@@ -1171,6 +1171,22 @@ test("TD-89: registry validate 对非 claude-code + systemPrompt 给 ⚠ warning
   }
 });
 
+test("TD-90: getWaoCliPath 在 win32 返回 .cmd shim（worker 不踩 v24 guard）", async () => {
+  // dogfood round 7 实证：worker 收到的 $WAO_CLI 原指向裸 src/cli.js，worker shell
+  // 默认 node v24，直接 `node $WAO_CLI` 触发 nodeVersionGuard 被拒。TD-90 修复让
+  // Windows 上 getWaoCliPath 返回 scripts/wao-cli.cmd（内部用 v22 node 绝对路径）。
+  const { getWaoCliPath } = await import("../src/waoCliPath.js");
+  const p = getWaoCliPath();
+  if (process.platform === "win32") {
+    // Windows：必须是 .cmd shim，且该文件真实存在
+    assert.ok(p.endsWith("wao-cli.cmd"), `win32 上 WAO_CLI 应指向 .cmd shim，实际：${p}`);
+    assert.ok(existsSync(p), `wao-cli.cmd 文件必须存在：${p}`);
+  } else {
+    // 非 Windows：回退裸 cli.js（无 v24 guard 问题）
+    assert.ok(p.endsWith("cli.js"), `非 win32 应回退 cli.js，实际：${p}`);
+  }
+});
+
 // TD-52 守卫：help 必须列出 main() 真实路由的全部命令族。
 // _guardBypass.mjs 已全局设 WAO_SKIP_VERSION_GUARD=1，子进程继承，故任意 Node 可跑 help。
 // 防止 printHelp 与代码漂移（首装 e2e 摩擦日志 F1：曾漏列 dashboard/diagnose/forecast/wao 族/daemon supervise）。

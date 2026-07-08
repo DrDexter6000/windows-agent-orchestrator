@@ -20,6 +20,7 @@ import { OpenCodeServeBackend } from "./backends/opencodeServe.js";
 import { ClaudeCodeBackend } from "./backends/claudeCode.js";
 import { CodexBackend } from "./backends/codex.js";
 import { KimiCodeBackend } from "./backends/kimiCode.js";
+import { getWaoCliPath } from "./waoCliPath.js";
 import { readRegistry } from "./registry.js";
 import { normalizeAgent } from "./registry.js";
 import { JsonlTranscript, findLastEventSeq, findState, readTranscript, TERMINAL_STATES } from "./transcript.js";
@@ -94,7 +95,8 @@ export async function runBackground(opts = {}) {
   if (!prompt) throw new Error("runBackground: prompt required");
   if (!runDir) throw new Error("runBackground: runDir required");
 
-  const waoCliPath = join(dirname(fileURLToPath(import.meta.url)), "cli.js");
+  // TD-90: Windows 上指向 scripts/wao-cli.cmd（v22 shim），避免 worker shell 默认 v24 触发 guard
+  const waoCliPath = getWaoCliPath();
   // registry 可是路径（生产）或对象（测试注入）。对象时构造一个内存 readRegistry。
   const registryResolver = typeof opts.registry === "object" && opts.registry !== null
     ? makeObjectRegistry(opts.registry)

@@ -43,6 +43,7 @@ import { OpenCodeServeBackend } from "./backends/opencodeServe.js";
 import { ClaudeCodeBackend } from "./backends/claudeCode.js";
 import { CodexBackend } from "./backends/codex.js";
 import { KimiCodeBackend } from "./backends/kimiCode.js";
+import { getWaoCliPath } from "./waoCliPath.js";
 
 // handshake 文件名。放 runDir/（与 transcript 同目录）——不能放 .wao/，
 // .wao/ 是锁死 5 槽位结构（waoDir.js WAO_TOP_LEVEL_SLOTS），有 layout 守卫负向断言。
@@ -310,7 +311,8 @@ export async function startDaemon(opts = {}) {
   const { runDir } = opts;
   if (!runDir) throw new Error("startDaemon: runDir required");
   const pipe = opts.pipe ?? DEFAULT_PIPE;
-  const waoCliPath = join(dirname(fileURLToPath(import.meta.url)), "cli.js");
+  // TD-90: Windows 上指向 scripts/wao-cli.cmd（v22 shim），避免 worker shell 默认 v24 触发 guard
+  const waoCliPath = getWaoCliPath();
 
   // registry 解析：对象 → 内存 readRegistry；字符串 → readRegistry
   const registryResolver = typeof opts.registry === "object" && opts.registry !== null
