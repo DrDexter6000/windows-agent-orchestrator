@@ -11,7 +11,7 @@
  *   - category=none（成功）或 unknown（信号不足）不写——写这些是噪声
  *
  * 产物：.dev/friction-log/auto-<ts>-<category>-<runId尾>.md
- *   auto- 前缀区分手动 friction log（dogfood-* / 日期-*）
+ *   auto- 前缀区分手动 friction log（手动 log 用 dogfood- 或日期- 前缀）
  *   结构兼容手动 log（场景/影响/建议），但主观字段留空给 Lead 补
  */
 import { writeFile, mkdir } from "node:fs/promises";
