@@ -635,3 +635,33 @@ test("TD-83: SKILL.md 的 pipeline 阶段定义与 src/waoStage.js 的 STAGE_NUM
       `SKILL.md 未列出"阶段 ${n}"——文档与 waoStage.js STAGE_NUMBERS 漂移。`);
   }
 });
+
+test("F1 守卫: SKILL.md 必须列出 CLI 实际路由的关键命令/子命令（防命令索引漂移）", () => {
+  // dogfood round 1/5 两次独立浮现同一 friction：wao ask / workflow list / wao stage /
+  // wao declare 等子命令已实现并路由，但 SKILL Quick reference 漏列——Lead 读 SKILL 不知道
+  // 这些命令存在。根因是"新增 CLI 路由时忘记同步 SKILL"，靠人工同步不可靠（两轮复发）。
+  // 本守卫维护一个白名单（CLI 实际路由的关键命令/子命令），断言每个都出现在 SKILL.md。
+  // 新增路由时若忘记写进 SKILL，此测试会红。
+  //
+  // 白名单来源：src/cli.js main() 顶层路由 + 各 command 函数的子分发。
+  const skill = read("SKILL.md");
+  const REQUIRED_SKILL_COMMANDS = [
+    // 顶层命令族（main() 路由）
+    "run ", "spawn", "retry", "resume", "status", "tail", "collect", "stop",
+    "runs ", "workflow", "worktree", "wao ", "daemon",
+    "registry",
+    // wao 子命令（waoCommand 分发）——反复遗漏的高发区
+    "wao init", "wao state", "wao decision", "wao handoff",
+    "wao declare", "wao stage", "wao ask", "wao doctor",
+    // workflow 子命令（workflowCommand 分发）
+    "workflow run", "workflow list",
+    // daemon 子命令（daemonCommand 分发）
+    "daemon start", "daemon run", "daemon stop",
+    // runs 子命令（高频）
+    "runs list", "runs dashboard", "runs metrics",
+  ];
+  const missing = REQUIRED_SKILL_COMMANDS.filter((cmd) => !skill.includes(cmd));
+  assert.deepEqual(missing, [],
+    `SKILL.md 缺少以下 CLI 命令的文档（命令索引漂移）：${missing.join(", ")}。` +
+    `新增 CLI 路由时必须同步写进 SKILL.md 的 Quick reference 或相关章节。`);
+});

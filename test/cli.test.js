@@ -1137,6 +1137,40 @@ test("TD-87: registry validate 对 kimi-code 配 tokenBudget 给 ⚠ warning（�
   }
 });
 
+test("TD-89: registry validate 对非 claude-code + systemPrompt 给 ⚠ warning（静默失效）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-regval-sysprompt-"));
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        // kimi-code + systemPrompt → 应 warn
+        coder_mm: { backend: "kimi-code", cwd: dir, systemPrompt: "config/roles/coder_mm.md" },
+        // codex + systemPrompt → 应 warn
+        tester: { backend: "codex", cwd: dir, systemPrompt: "config/roles/tester.md" },
+        // claude-code + systemPrompt → 不应 warn（该 backend 真正消费 systemPrompt）
+        researcher: { backend: "claude-code", cwd: dir, systemPrompt: "config/roles/researcher.md" },
+        // kimi-code 无 systemPrompt → 不应 warn（没配就不存在失效）
+        coder_plain: { backend: "kimi-code", cwd: dir },
+      },
+    }), "utf8");
+
+    const out = execSync(`node src/cli.js registry validate --registry ${registryPath}`, {
+      cwd: process.cwd(), encoding: "utf8",
+    });
+    // 非 claude-code + systemPrompt → ⚠ warning
+    assert.match(out, /⚠.*coder_mm.*kimi-code.*不消费 systemPrompt/, "kimi-code 配 systemPrompt 应 warn");
+    assert.match(out, /⚠.*tester.*codex.*不消费 systemPrompt/, "codex 配 systemPrompt 应 warn");
+    // claude-code + systemPrompt → 无该 warning（该 backend 消费 systemPrompt）
+    const researcherBlock = out.split("\n").filter(l => l.includes("researcher")).join("\n");
+    assert.doesNotMatch(researcherBlock, /⚠.*systemPrompt/, "claude-code + systemPrompt 不应 warn（真正消费）");
+    // 无 systemPrompt → 无该 warning
+    const plainBlock = out.split("\n").filter(l => l.includes("coder_plain")).join("\n");
+    assert.doesNotMatch(plainBlock, /⚠.*systemPrompt/, "无 systemPrompt 的 worker 不应 warn");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // TD-52 守卫：help 必须列出 main() 真实路由的全部命令族。
 // _guardBypass.mjs 已全局设 WAO_SKIP_VERSION_GUARD=1，子进程继承，故任意 Node 可跑 help。
 // 防止 printHelp 与代码漂移（首装 e2e 摩擦日志 F1：曾漏列 dashboard/diagnose/forecast/wao 族/daemon supervise）。
