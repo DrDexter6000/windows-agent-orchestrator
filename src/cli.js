@@ -1644,7 +1644,45 @@ async function workflowCommand(args, config) {
     await workflowRunCommand(tail, config);
     return;
   }
-  throw new Error(`Unknown workflow subcommand: ${sub ?? "(none)"}. Try: workflow run <file.mjs>`);
+  if (sub === "list") {
+    await workflowListCommand(config);
+    return;
+  }
+  throw new Error(`Unknown workflow subcommand: ${sub ?? "(none)"}. Try: workflow run <name|file.mjs> | workflow list`);
+}
+
+/**
+ * workflow list：列出可用模板（TD-88 模板库）。
+ * 扫描 workflows/templates/ 目录，列出 .mjs 模板名 + 用法提示。
+ */
+async function workflowListCommand(config) {
+  const templatesDir = join(dirname(fileURLToPath(import.meta.url)), "..", "workflows", "templates");
+  let files = [];
+  try {
+    files = (await readdir(templatesDir)).filter((f) => f.endsWith(".mjs"));
+  } catch {
+    // templates 目录不存在 = 无模板
+  }
+  if (files.length === 0) {
+    console.log("No workflow templates found. 用 workflow run <file.mjs> 跑自定义 workflow。");
+    return;
+  }
+  console.log("可用模板（workflow run <名字> --vars ...）：");
+  for (const f of files) {
+    const name = f.replace(/\.mjs$/, "");
+    // 读文件头注释找用法（前 8 行的"用法"或"模板"字样）
+    let usage = "";
+    try {
+      const content = await readFile(join(templatesDir, f), "utf8");
+      const lines = content.split("\n").slice(0, 8);
+      const usageLine = lines.find((l) => l.includes("用法") || l.includes("workflow run"));
+      if (usageLine) usage = usageLine.replace(/^\/\/\s*/, "").trim();
+    } catch {}
+    console.log(`  ${name}${usage ? `\t${usage}` : ""}`);
+  }
+  console.log("");
+  console.log("用法：workflow run <名字> --vars key=value [--vars ...]");
+  console.log("也可传完整路径：workflow run workflows/templates/<名字>.mjs");
 }
 
 /**
@@ -1678,11 +1716,15 @@ async function waoCommand(args, config) {
     await waoStageCommand(tail, config);
     return;
   }
+  if (sub === "ask") {
+    await waoAskCommand(tail, config);
+    return;
+  }
   if (sub === "doctor") {
     await waoDoctorCommand(tail, config);
     return;
   }
-  throw new Error(`Unknown wao subcommand: ${sub ?? "(none)"}. Try: wao init | wao state | wao decision | wao handoff | wao declare | wao stage | wao doctor`);
+  throw new Error(`Unknown wao subcommand: ${sub ?? "(none)"}. Try: wao init | wao state | wao decision | wao handoff | wao declare | wao stage | wao ask | wao doctor`);
 }
 
 /**
@@ -1983,6 +2025,57 @@ async function waoStageCommand(args, config) {
   }, null, 2));
 }
 
+/**
+ * wao ask：快捷派工（TD-88 派工摩擦反转）。
+ * 降低单次派工的命令构造成本——Lead 不用每次拼 run <agentId> --prompt "..." + 手写边界声明。
+ *
+ * 用法：
+ *   wao ask researcher "读 src/foo.js 给摘要"              # 默认只读边界（注入禁写/禁装声明）
+ *   wao ask coder_hq "修 src/foo.js 的 bug" --mode write   # 写模式（不注入只读边界）
+ *   wao ask researcher "..." --cwd D:/projects/xxx          # 跨项目（走 resolveTargetCwd）
+ *
+ * 内部：构造带边界模板的 prompt，调 runCommand（复用，不重写 run 逻辑）。
+ */
+async function waoAskCommand(args, config) {
+  const [agentId, ...rest] = args;
+  if (!agentId) {
+    throw new Error('wao ask requires <agentId> "<一句话任务>". 例：wao ask researcher "读 src/foo.js 给摘要"');
+  }
+  // 提取一句话任务（第一个非 -- 的位置参数，agentId 之后的）
+  const task = rest.find((a) => !a.startsWith("--"));
+  if (!task) {
+    throw new Error(`wao ask requires 一句话任务. 例：wao ask ${agentId} "读 src/foo.js 给摘要"`);
+  }
+  const options = parseOptions(rest);
+  const mode = options.mode ?? "readonly";
+
+  // 只读模式：注入边界声明（来自 SKILL.md 安全铁律 + 派工边界要求）
+  // 写模式（--mode write）：不注入，让 worker 能改文件
+  let prompt = task;
+  if (mode === "readonly") {
+    prompt = [
+      task,
+      "",
+      "—— 只读边界（wao ask 自动注入）——",
+      "本任务只读：不得修改任何文件，不得安装依赖（pip install/npm install 等），不得改变环境。",
+      "如有需要，结果直接在回复里给出，不要写文件。",
+    ].join("\n");
+  }
+
+  // 构造 run 命令的参数，复用 runCommand
+  const runArgs = [agentId];
+  runArgs.push("--prompt", prompt);
+  // 透传 Lead 给的 --cwd / --registry / --format 等（resolveTargetCwd 在 runCommand 内生效）
+  for (const opt of ["cwd", "registry", "format", "run-dir"]) {
+    const flag = `--${opt}`;
+    if (rest.includes(flag)) {
+      const idx = rest.indexOf(flag);
+      runArgs.push(flag, rest[idx + 1]);
+    }
+  }
+  await runCommand(runArgs, config);
+}
+
 async function waoStateCommand(args, config) {
   const [sub, ...tail] = args;
   if (sub === "read") {
@@ -2030,10 +2123,21 @@ async function waoStateCommand(args, config) {
 async function workflowRunCommand(args, config) {
   const [filePath, ...tail] = args;
   if (!filePath) {
-    throw new Error("workflow run requires <file.mjs>");
+    throw new Error("workflow run requires <name|file.mjs>. 用 workflow list 看可用模板。");
   }
   const options = parseOptions(tail);
-  const absolutePath = resolve(filePath);
+
+  // TD-88 模板库：名字解析。若 filePath 不像路径（无分隔符 / 不是已存在文件），
+  // 查 workflows/templates/<名字>.mjs。找到用它；找不到 fallback 到原路径逻辑。
+  let absolutePath = resolve(filePath);
+  const looksLikePath = /[\\/]/.test(filePath) || existsSync(absolutePath);
+  if (!looksLikePath) {
+    const templatesDir = join(dirname(fileURLToPath(import.meta.url)), "..", "workflows", "templates");
+    const templatePath = join(templatesDir, `${filePath}.mjs`);
+    if (existsSync(templatePath)) {
+      absolutePath = templatePath;
+    }
+  }
 
   // 加载 workflow
   const wfDef = await loadWorkflow(absolutePath);
@@ -2304,7 +2408,8 @@ Commands:
   runs dashboard [--watch N] [--agent ID] [--latest N] [--format json] [--run-dir DIR]
   runs diagnose <runId> [--run-dir DIR] [--format json]
   runs forecast --agents a,b [--run-dir DIR] [--format json]
-  workflow run <file.mjs> [--input TEXT] [--registry FILE] [--isolate] [--wait-timeout MS] [--run-dir DIR] [--vars key=value...]
+  workflow run <name|file.mjs> [--input TEXT] [--registry FILE] [--isolate] [--wait-timeout MS] [--run-dir DIR] [--vars key=value...]
+  workflow list                  # 列出可用模板（workflows/templates/）
   worktree list [--cwd DIR]
   worktree remove <path> [--cwd DIR]
   daemon start [--run-dir DIR] [--registry FILE] [--pipe PIPE] [--resume-on-start]
@@ -2328,6 +2433,7 @@ Project state (.wao/):
   wao declare                                       # 列出已有声明 + 理由分布
   wao stage <n> --task T [--artifacts a,b] [--note N]  # Lead 阶段声明（n: 1=spec 2=plan 3=派发 4=验收 5=汇总 6=总结）
   wao stage                                            # 列出已声明阶段 + 缺口（pipeline 自省）
+  wao ask <agentId> "<一句话任务>" [--mode write] [--cwd DIR]  # 快捷派工（只读默认注入边界；--mode write 不注入）
   wao handoff write --from R --to R --summary S [--artifacts a,b]
   wao handoff read <role>  # latest incoming handoff addressed to role
   wao doctor [--cwd DIR] [--format json]

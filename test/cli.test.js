@@ -1155,12 +1155,14 @@ test("help: 列出所有 main() 真实路由的命令族（防 help 与代码漂
   assert.match(out, /wao decision/, "help 必须列出 wao decision");
   assert.match(out, /wao declare/, "help 必须列出 wao declare（TD-82 自做声明）");
   assert.match(out, /wao stage/, "help 必须列出 wao stage（TD-83 阶段声明）");
+  assert.match(out, /wao ask/, "help 必须列出 wao ask（TD-88 快捷派工）");
   assert.match(out, /wao handoff/, "help 必须列出 wao handoff");
   assert.match(out, /wao doctor/, "help 必须列出 wao doctor");
   // daemon 补充族（P5/TD-45/46，曾漏）
   assert.match(out, /daemon supervise/, "help 必须列出 daemon supervise");
   assert.match(out, /daemon supervisor/, "help 必须列出 daemon supervisor");
   assert.match(out, /daemon health/, "help 必须列出 daemon health");
+  assert.match(out, /workflow list/, "help 必须列出 workflow list（TD-88 模板库）");
 });
 
 test("TD-82: wao declare 写入声明 + wao declare（裸）列出汇总（端到端）", () => {
@@ -1255,6 +1257,41 @@ test("TD-83: wao stage 非法 stage 号 fail-fast（枚举约束，防跳号）"
   } finally {
     rmrfRetry(dir);
   }
+});
+
+test("TD-88: wao ask 缺 agentId 或任务时 fail-fast（快捷派工参数校验）", () => {
+  // 缺 agentId
+  const r1 = spawnSync(process.execPath, ["src/cli.js", "wao", "ask"],
+    { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+  assert.notEqual(r1.status, 0, "缺 agentId 必须 fail-fast");
+  assert.match(r1.stderr, /requires <agentId>/, "stderr 提示需要 agentId");
+
+  // 有 agentId 缺任务
+  const r2 = spawnSync(process.execPath, ["src/cli.js", "wao", "ask", "researcher"],
+    { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+  assert.notEqual(r2.status, 0, "缺任务必须 fail-fast");
+  assert.match(r2.stderr, /requires 一句话任务/, "stderr 提示需要一句话任务");
+});
+
+test("TD-88: workflow list 列出模板 + workflow run 按名字解析", () => {
+  // workflow list 应列出 analyze-implement 和 parallel-research 两个模板
+  const r = spawnSync(process.execPath, ["src/cli.js", "workflow", "list"],
+    { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+  assert.equal(r.status, 0, `workflow list 应成功，stderr=${r.stderr}`);
+  assert.match(r.stdout, /analyze-implement/, "list 应列出 analyze-implement 模板");
+  assert.match(r.stdout, /parallel-research/, "list 应列出 parallel-research 模板");
+  assert.match(r.stdout, /workflow run <名字>/, "list 提示按名字调用用法");
+
+  // 按名字调用应解析到 templates/ 目录（不传 --vars 让它报"占位符未解析"或正常加载）
+  // 这里只验证名字解析不报"文件不存在"——加载成功即说明解析对了
+  const r2 = spawnSync(process.execPath, [
+    "src/cli.js", "workflow", "run", "parallel-research",
+    "--vars", "topicA=testA", "--vars", "topicB=testB",
+    "--registry", "config/agents.example.json", // 用 example 避免依赖真实 agents.json
+  ], { cwd: process.cwd(), encoding: "utf8", timeout: 15000 });
+  // 不验证 workflow 执行结果（需要真实 backend），只验证没报"找不到文件"
+  assert.doesNotMatch(r2.stderr || "", /MODULE_NOT_FOUND|Cannot find module.*parallel-research/,
+    "按名字调用应解析到模板文件，不报模块未找到");
 });
 
 test("run --background: malformed --scorecard-rules fail-fast，不返回 ghost runId", () => {
