@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, spawn, execSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseOptions, loadPrompt, runAndWait, buildDashboard, runsDashboardCommand, runCommand, statusCommand, collectCommand, resolveTargetCwd } from "../src/cli.js";
@@ -1321,6 +1321,32 @@ test("TD-83: wao stage 非法 stage 号 fail-fast（枚举约束，防跳号）"
     ], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
     assert.notEqual(r.status, 0, "非法 stage 号（7）必须 fail-fast");
     assert.match(r.stderr, /stage 必须是/, "stderr 解释合法枚举值");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("TD-95 #7: stage artifact 含 run 路径时存为绝对路径（跨项目可解析）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-stage-artifact-"));
+  try {
+    spawnSync(process.execPath, ["src/cli.js", "wao", "init", "--cwd", dir],
+      { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    // 模拟跨项目派工：artifact 是 runs/run_xxx.jsonl（相对 WAO repo，不是 --cwd 目标）
+    const r = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "stage", "3",
+      "--task", "派发实现",
+      "--artifacts", "runs/run_test123.jsonl",
+      "--cwd", dir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    assert.equal(r.status, 0, `stage 3 应成功，stderr=${r.stderr}`);
+    // 读 stage 正文，确认 artifact 是绝对路径（跨项目时可解析）
+    const stageFiles = readdirSync(join(dir, ".wao", "pipeline")).filter((f) => f.startsWith("STAGE-3"));
+    assert.ok(stageFiles.length === 1, "应有 1 个 STAGE-3 文件");
+    const body = readFileSync(join(dir, ".wao", "pipeline", stageFiles[0]), "utf8");
+    // artifact 应是绝对路径（含盘符 + run_test123.jsonl），不是裸 runs/run_test123.jsonl
+    assert.ok(body.includes("run_test123.jsonl"), "artifact 应含 run_test123.jsonl");
+    assert.ok(/[A-Za-z]:[\\/].*run_test123/.test(body),
+      "artifact 应是绝对路径（含盘符），实际：" + body.slice(0, 200));
   } finally {
     rmrfRetry(dir);
   }

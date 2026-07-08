@@ -2009,9 +2009,14 @@ async function waoStageCommand(args, config) {
     if (!options.task) {
       throw new Error(`wao stage requires --task <描述>。阶段 ${stageArg} 的产物描述是可见性的核心。`);
     }
-    const artifacts = options.artifacts
+    const rawArtifacts = options.artifacts
       ? options.artifacts.split(",").map((s) => s.trim()).filter(Boolean)
       : undefined;
+    // TD-95 #7：run 路径 artifact 解析为绝对路径（跨项目时可解析）。
+    // transcript 物理在 WAO repo 的 runDir，不在 --cwd 目标项目。裸 runs/run_xxx.jsonl
+    // 从目标项目不可解析——解析为绝对路径让审计者能找到。
+    const waoRunDir = resolve(options.runDir ?? config.runDir);
+    const artifacts = rawArtifacts?.map((a) => resolveArtifactPath(a, waoRunDir));
     const path = await addStage(waoDir, {
       stage,
       task: options.task,
@@ -2288,6 +2293,30 @@ export function resolveTargetCwd(options) {
   if (options.cwd) return resolve(options.cwd);
   if (process.env.WAO_TARGET_CWD) return resolve(process.env.WAO_TARGET_CWD);
   return resolve(process.cwd());
+}
+
+/**
+ * TD-95 #7：解析 stage artifact 路径。
+ *
+ * run 路径（runs/run_xxx.jsonl）的物理位置在 WAO repo 的 runDir，不在 --cwd 目标项目。
+ * 裸相对路径从目标项目不可解析——解析为绝对路径让审计者能找到。
+ *
+ * 规则：
+ *   - 已是绝对路径 → 原样返回
+ *   - 匹配 runs/ 前缀（run transcript）→ 相对 WAO runDir 解析为绝对
+ *   - 其他（docs/xxx.md 等项目内路径）→ 相对 process.cwd() 解析（保持原行为）
+ */
+export function resolveArtifactPath(artifact, waoRunDir) {
+  // 已是绝对路径（含盘符或以 / 开头）→ 不动
+  if (/^[A-Za-z]:[\\/]/.test(artifact) || artifact.startsWith("/")) {
+    return artifact;
+  }
+  // run transcript 路径 → 相对 WAO runDir（transcript 物理位置）
+  if (artifact.startsWith("runs/")) {
+    return resolve(waoRunDir, "..", artifact);
+  }
+  // 其他（docs/ 等）→ 保持原样（相对目标项目，addStage 只存字符串不解析）
+  return artifact;
 }
 
 export function parseOptions(args) {
