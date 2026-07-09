@@ -235,6 +235,23 @@ test("M6-5: requireEvidence true + 无任何证据 → 失败", async () => {
   assert.equal(evCheck.passed, false);
 });
 
+test("小尾巴2: requireEvidence + 只有 assistant message（无 command/file/tool）→ 不算 evidence（回归锁定）", async () => {
+  // TD-97 边界：message 算活动（activityEventCount）但不算 evidence（evidenceEventCount）。
+  // requireEvidence 只认 command/file_written/tool_use/tool_result，不认 message。
+  // 防以后漂移：如果有人把 message 也算进 hasAnyEvidence，此测试会红。
+  const events = [
+    { type: "run.completed" },
+    { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "I read the files." }] },
+  ];
+  const result = await checkScorecard({
+    events, cwd: ".",
+    rules: { requireEvidence: true },
+  });
+  assert.equal(result.passed, false, "只有 message 不算 evidence，requireEvidence 应失败");
+  const evCheck = result.checks.find((c) => c.name === "hasEvidence");
+  assert.equal(evCheck.passed, false, "hasEvidence 应 false——message 不是 evidence");
+});
+
 test("M6-5: 每条 check 含 name/passed/evidence 三字段", async () => {
   const events = [
     { type: "run.completed" },

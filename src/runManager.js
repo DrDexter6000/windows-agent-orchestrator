@@ -6,6 +6,7 @@ import { createWorktree, removeWorktree } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
 import { writeFrictionLog, frictionLogDirFromRunDir } from "./frictionLog.js";
+import { assessRunEvidence } from "./runEvidenceAssessment.js";
 
 /**
  * RunManager 持有活跃 run 的生命周期。
@@ -825,29 +826,29 @@ async function _maybeWriteFrictionLog(run) {
 }
 
 /**
- * TD-95 #5：backend done(failed) 时审计已累积的证据。
+ * TD-95 #5 / TD-97：backend done(failed) 时审计已累积的证据。
  *
+ * TD-97：复用 assessRunEvidence（SSOT），不再自己判 file_written/command/assistant text。
  * 不跑完整 scorecard（hasDoneEvent 会 fail——failed 路径无 run.completed 事件）。
  * 只查"正面证据信号"：有 file_written 或 command(exitCode===0) → passed:true。
  *
  * 目的：worker 可能写对了文件 + 跑对了测试，只是 backend 进程退出码非零。
  * 让 Lead 知道"证据其实通过了"，而非被迫从 raw transcript 手动翻找。
  *
- * @param {object[]} evidence — waitForCompletion 累积的 evidence 数组
- * @param {object[]} messages — 累积的 messages（查 assistant text）
+ * @param {object[]} evidence — waitForCompletion 累积的 evidence 数组（RunEvent 形状 {kind,...}）
+ * @param {object[]} messages — 累积的 messages（内存形状 {info:{role},parts}）
  * @returns {{passed: boolean, checks: object[]}}
  */
 function _auditEvidenceOnFailure(evidence, messages) {
-  const checks = [];
-  const hasFileWritten = evidence.some((e) => e.kind === "file_written");
-  const hasCommandExit0 = evidence.some((e) => e.kind === "command" && e.exitCode === 0);
-  const hasAssistantText = messages.some(
-    (m) => m.info?.role === "assistant" && m.parts?.some((p) => p.type === "text" && p.text?.trim()),
-  );
-  checks.push({ name: "evidence_file_written", passed: hasFileWritten });
-  checks.push({ name: "evidence_command_exit0", passed: hasCommandExit0 });
-  checks.push({ name: "evidence_assistant_text", passed: hasAssistantText });
+  // TD-97：合并 evidence + messages 后调统一评估（assessRunEvidence 兼容三种形状）
+  const all = [...(evidence ?? []), ...(messages ?? [])];
+  const a = assessRunEvidence(all);
+  const checks = [
+    { name: "evidence_file_written", passed: a.hasFileWritten },
+    { name: "evidence_command_exit0", passed: a.hasCommandExit0 },
+    { name: "evidence_assistant_text", passed: a.hasAssistantText },
+  ];
   // passed = 有产出证据（文件写入 或 命令成功）——任一即说明 worker 做了实事
-  const passed = hasFileWritten || hasCommandExit0;
+  const passed = a.hasFileWritten || a.hasCommandExit0;
   return { passed, checks };
 }

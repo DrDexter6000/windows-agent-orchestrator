@@ -23,6 +23,7 @@
 // 只读：本函数不接收也不返回可变状态，不改 transcript。
 
 import { findState } from "./transcript.js";
+import { assessRunEvidence } from "./runEvidenceAssessment.js";
 
 // 真正的认证失败：HTTP 401 / 身份验证失败 / unauthorized / 无效 key。
 // C2 收紧：去掉宽泛的 "auth.*fail"/裸 "api_key"（会把配置冲突误判为 provider_auth）。
@@ -136,11 +137,11 @@ export function diagnoseFailure(events) {
   //   让 Lead 知道"任务可能做对了，需人工确认"，而非被 'crash' 误导。
   const evidenceAudit = evs.find((e) => e.type === "run.evidence_audit" && e.passed === true);
   if (evidenceAudit && state === "failed") {
-    const files = evs.filter((e) => e.type === "run.event" && e.kind === "file_written");
-    const cmds = evs.filter((e) => e.type === "run.event" && e.kind === "command" && e.exitCode === 0);
+    // TD-97：复用统一证据评估获取 file/command 计数
+    const a = assessRunEvidence(evs);
     evidence.push({
       eventType: "run.evidence_audit",
-      fact: `backend 进程失败但证据通过：${files.length} 个文件写入 + ${cmds.length} 个命令 exit0。任务可能做对了，需人工确认`,
+      fact: `backend 进程失败但证据通过：${a.fileWrittenCount} 个文件写入 + ${a.commandExit0Count} 个命令 exit0。任务可能做对了，需人工确认`,
     });
     return { category: "evidence_passed_backend_failed", evidence };
   }
@@ -149,22 +150,14 @@ export function diagnoseFailure(events) {
   //   必须在 crash 之前判——但要求有 tool_use/assistant text 活动（worker 确实干了事但没产出），
   //   否则纯进程崩溃（无活动）仍是 crash，不是 no_effect。
   //   真实例：coder_hq 读了 4 个文件然后进程崩了，产出接近 0。
+  //   TD-97：复用统一证据评估，不再自己判 file/command/tool_use/assistant text。
   if (state === "failed") {
-    const hasFileWritten = evs.some((e) => e.type === "run.event" && e.kind === "file_written");
-    const hasCommandExit0 = evs.some((e) => e.type === "run.event" && e.kind === "command" && e.exitCode === 0);
-    const hasToolUse = evs.some((e) => e.type === "run.event" && e.kind === "tool_use");
-    // 审计 P2 修正：transcript 实际把 message 落为 run.event kind=message（runManager.js:526），
-    // 不是 run.message（架构文档 02-architecture.md:218 明确 run.message 不落盘）。
-    const hasAssistantText = evs.some(
-      (e) => e.type === "run.event" && e.kind === "message" && e.role === "assistant"
-        && e.parts?.some((p) => p.type === "text" && p.text?.trim()),
-    );
+    const a = assessRunEvidence(evs);
     // 只有"有活动但无产出"才是 no_effect。无活动的纯崩溃仍是 crash。
-    if (!hasFileWritten && !hasCommandExit0 && (hasToolUse || hasAssistantText)) {
-      const activityCount = evs.filter((e) => e.type === "run.event").length;
+    if (!a.hasFileWritten && !a.hasCommandExit0 && (a.hasToolUse || a.hasAssistantText)) {
       evidence.push({
         eventType: "run.event",
-        fact: `worker 有 ${activityCount} 条活动事件但无 file_written / 无 command exit0（读完上下文没产出）`,
+        fact: `worker 有 ${a.activityEventCount} 条活动事件但无 file_written / 无 command exit0（读完上下文没产出）`,
       });
       return { category: "no_effect", evidence };
     }

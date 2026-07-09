@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import { resolve, isAbsolute } from "node:path";
 import { execFileSync } from "node:child_process";
+import { assessRunEvidence } from "./runEvidenceAssessment.js";
 
 /**
  * scorecard：证据链门控（M6-5，spec §6.1）。
@@ -64,29 +65,27 @@ export async function checkScorecard({ events, cwd, rules }) {
   }
 
   // 4. hasEvidence：requireEvidence 时检查至少一条证据
+  // TD-97：复用统一证据评估（assessRunEvidence），不再自己数 evidenceEvents.length
   if (rules?.requireEvidence) {
-    const hasAny = evidenceEvents.length > 0;
+    const a = assessRunEvidence(events);
     checks.push({
       name: "hasEvidence",
-      passed: hasAny,
-      evidence: `${evidenceEvents.length} evidence event(s) found`,
-      ...(hasAny ? {} : { detail: "no command/file_written/tool_use/tool_result events" }),
+      passed: a.hasAnyEvidence,
+      evidence: `${a.evidenceEventCount} evidence event(s) found`,
+      ...(a.hasAnyEvidence ? {} : { detail: "no command/file_written/tool_use/tool_result events" }),
     });
   }
 
   // 5. hasAssistantText：requireAssistantText 时检查至少一条 assistant message 含非空 text。
   // 纵深防御（codex 实测建议）：防 completed 但 assistantTextCount=0 的伪完成。
+  // TD-97：复用统一证据评估（assessRunEvidence 兼容 run.message 临时形状 + run.event 落盘形状）。
   if (rules?.requireAssistantText) {
-    const messageEvents = (events ?? []).filter((e) => e.type === "run.message");
-    const hasText = messageEvents.some(
-      (m) => m.role === "assistant" && Array.isArray(m.parts) &&
-             m.parts.some((p) => p.type === "text" && p.text),
-    );
+    const a = assessRunEvidence(events);
     checks.push({
       name: "hasAssistantText",
-      passed: hasText,
-      evidence: hasText ? "assistant text answer present" : "no assistant text answer",
-      ...(hasText ? {} : { detail: "completed but no assistant text part — possible pseudo-completion" }),
+      passed: a.hasAssistantText,
+      evidence: a.hasAssistantText ? "assistant text answer present" : "no assistant text answer",
+      ...(a.hasAssistantText ? {} : { detail: "completed but no assistant text part — possible pseudo-completion" }),
     });
   }
 
