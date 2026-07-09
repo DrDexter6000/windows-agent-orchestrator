@@ -11,7 +11,7 @@
 // `from "../src/cli.js"` 导入行不变）。
 
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
 
 import { readRegistry } from "../registry.js";
 import { RunManager } from "../runManager.js";
@@ -20,6 +20,7 @@ import { ClaudeCodeBackend } from "../backends/claudeCode.js";
 import { CodexBackend } from "../backends/codex.js";
 import { KimiCodeBackend } from "../backends/kimiCode.js";
 import { getWaoCliPath } from "../waoCliPath.js";
+import { readTranscript, findLastEventSeq, JsonlTranscript } from "../transcript.js";
 
 // F5: 从 args 数组里取 --flag <value> 的 value，取不到返回 undefined。
 export function extractFlag(args, flag) {
@@ -138,4 +139,27 @@ export function newRunManager(config) {
     transcriptDir: config.runDir,
     backendFor: config.backendFor ?? backendFor,
   });
+}
+
+/**
+ * 读 run transcript + 构造可追加的 JsonlTranscript 句柄。
+ * 跨族共用：status/tail/collect/stop/retry 都靠它定位 run 的 transcript。
+ * 只读 I/O（readTranscript）+ 纯构造（new JsonlTranscript），符合 shared 标准。
+ *
+ * TD-98 阶段 2e-1a：从 cli.js 移到 shared.js（status/tail/collect 迁出后，
+ * stop/retry 仍暂留 cli.js，需继续共用 loadRun）。
+ */
+export async function loadRun(runId, options, config) {
+  if (!runId) {
+    throw new Error("runId is required");
+  }
+  const runDir = resolve(options.runDir ?? config.runDir);
+  const filePath = join(runDir, `${runId}.jsonl`);
+  const events = await readTranscript(filePath);
+  const transcript = new JsonlTranscript(filePath, {
+    runId,
+    agentId: events[0]?.agentId ?? "unknown",
+    initialSeq: findLastEventSeq(events),
+  });
+  return { transcript, events };
 }
