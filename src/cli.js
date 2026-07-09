@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { findLatest, JsonlTranscript, readTranscript } from "./transcript.js";
+import { JsonlTranscript, readTranscript } from "./transcript.js";
 import {
   connectDaemon,
   readHandshake as readDaemonHandshake,
@@ -32,11 +32,12 @@ import { waoCommand as waoCommandCore, resolveArtifactPath } from "./commands/wa
 import { statusCommand, tailCommand, collectCommand } from "./commands/observe.js";
 // TD-98 阶段 2e-1b：stop 命令拆到 src/commands/stop.js（杀进程 + verification + alert，非只读）。
 import { stopCommand } from "./commands/stop.js";
-// TD-98 阶段 2a/2b/2c/2e-1a：parseOptions/loadPrompt/displayModel/extractFlag/resolveTargetCwd/
-// resolveIsolateFlag/newRunManager/loadRun 抽到 commands/shared.js，消除 commands/*.js 对 cli.js
+// TD-98 阶段 2e-2：retry/resume 命令拆到 src/commands/lifecycle.js。
+import { retryCommand, resumeCommand } from "./commands/lifecycle.js";
+// TD-98 阶段 2a/2b/2c/2e：parseOptions/loadPrompt/displayModel/extractFlag/resolveTargetCwd/
+// resolveIsolateFlag/newRunManager 抽到 commands/shared.js，消除 commands/*.js 对 cli.js
 // 的反向依赖。cli.js re-export 以保持 test/cli.test.js 的 `from "../src/cli.js"` 导入行不变。
-// loadRun 由 retry（暂留 cli.js）继续共用。
-import { parseOptions, loadPrompt, displayModel, extractFlag, resolveTargetCwd, resolveIsolateFlag, newRunManager, loadRun } from "./commands/shared.js";
+import { parseOptions, loadPrompt, displayModel, extractFlag, resolveTargetCwd, resolveIsolateFlag, newRunManager } from "./commands/shared.js";
 // Re-export：保持外部 import 路径（test/cli.test.js）不变。
 export { parseOptions, loadPrompt, displayModel, resolveTargetCwd };
 // buildDashboard / runsDashboardCommand 从 runs.js re-export（test/cli.test.js 依赖）。
@@ -175,55 +176,8 @@ async function main(argv) {
 
 // TD-98 阶段 1：registry 命令族已拆到 src/commands/registry.js（行为不变）。
 
-async function retryCommand(args, config) {
-  const [runId, ...tail] = args;
-  if (!runId) {
-    throw new Error("retry requires <runId>");
-  }
-  const options = parseOptions(tail);
-  const { events } = await loadRun(runId, options, config);
-  const agentId = events[0]?.agentId;
-  if (!agentId) {
-    throw new Error(`Run ${runId} has no agentId`);
-  }
-  const promptEvent = findLatest(events, "prompt.sent");
-  if (!promptEvent?.prompt) {
-    throw new Error(`Run ${runId} has no stored prompt (runs before v0.0.2 may not store prompts)`);
-  }
-  const manager = newRunManager(config);
-  const run = await manager.start(agentId, {
-    prompt: promptEvent.prompt,
-    registry: options.registry,
-    runDir: options.runDir,
-    tags: options.tag,
-    cwd: options.cwd,
-    isolate: resolveIsolateFlag(options),
-  });
-  console.log(JSON.stringify({ originalRunId: runId, newRunId: run.transcript.context.runId, transcript: run.transcript.filePath, ...run.result }, null, 2));
-  if (options.wait) {
-    const waitResult = await run.waitForCompletion(options);
-    console.log(JSON.stringify({ completed: waitResult.completed }, null, 2));
-  }
-}
+// TD-98 阶段 2e-2：retry/resume 命令已移至 src/commands/lifecycle.js（上方 import）。
 
-async function resumeCommand(args, config) {
-  const [runId, ...tail] = args;
-  if (!runId) {
-    throw new Error("resume requires <runId>");
-  }
-  const options = parseOptions(tail);
-  const manager = newRunManager(config);
-  const run = await manager.resume(runId, { runDir: options.runDir, registry: options.registry });
-  if (!run) {
-    console.log(JSON.stringify({ runId, resumed: false, reason: "terminal or not found" }));
-    return;
-  }
-  console.log(JSON.stringify({ runId, resumed: true, state: run.state, sessionId: run.result?.backendSessionId }));
-  if (options.wait) {
-    const waitResult = await run.waitForCompletion(options);
-    console.log(JSON.stringify({ runId, completed: waitResult.completed }));
-  }
-}
 
 // TD-98 阶段 1：registryCheck/Validate 已拆到 src/commands/registry.js（行为不变）。
 
