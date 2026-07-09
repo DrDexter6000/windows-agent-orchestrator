@@ -1,19 +1,13 @@
 #!/usr/bin/env node
 import { readFile, unlink } from "node:fs/promises";
-import { existsSync, watchFile, unwatchFile, unlinkSync, readdirSync, statSync } from "node:fs";
+import { existsSync, watchFile, unwatchFile, unlinkSync } from "node:fs";
 import { spawnSync, spawn } from "node:child_process";
-import { join, resolve, dirname, basename, sep } from "node:path";
+import { join, resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findLatest, findState, findLastEventSeq, JsonlTranscript, readTranscript } from "./transcript.js";
 import { OpenCodeServeBackend } from "./backends/opencodeServe.js";
 import { executeStopWithVerification } from "./backends/opencodeStopVerify.js";
 import { raiseAlert } from "./alerts.js";
-import { initWaoDir, validateWaoDir, getWaoDir } from "./waoDir.js";
-import { writeStateSnapshot, readCurrentState } from "./waoState.js";
-import { addDecision, listDecisions, readDecision } from "./waoDecisions.js";
-import { addDeclare, listDeclares, summarizeDeclares, REASON_CODES } from "./waoDeclare.js";
-import { addStage, listStages, summarizeStages, STAGE_NUMBERS } from "./waoStage.js";
-import { writeHandoff, readHandoff } from "./waoHandoff.js";
 import {
   connectDaemon,
   readHandshake as readDaemonHandshake,
@@ -33,6 +27,10 @@ import { runsCommand, buildDashboard, runsDashboardCommand } from "./commands/ru
 // TD-98 阶段 2c：workflow + worktree 命令族拆到 src/commands/（行为不变，纯搬迁）。
 import { workflowCommand } from "./commands/workflow.js";
 import { worktreeCommand } from "./commands/worktree.js";
+// TD-98 阶段 2d：wao + doctor 命令族拆到 src/commands/（行为不变，纯搬迁）。
+// wao.js 的 waoCommand 接受 deps.askHandler（= cli.js 的 waoAskCommand，内部复用 runCommand），
+// 保持依赖方向 cli.js -> wao.js（wao ask 不反向 import cli.js）。
+import { waoCommand as waoCommandCore, resolveArtifactPath } from "./commands/wao.js";
 // TD-98 阶段 2a/2b/2c：parseOptions/loadPrompt/displayModel/extractFlag/resolveTargetCwd/
 // resolveIsolateFlag/newRunManager 抽到 commands/shared.js，消除 commands/*.js 对 cli.js
 // 的反向依赖。cli.js re-export 以保持 test/cli.test.js 的 `from "../src/cli.js"` 导入行不变。
@@ -41,6 +39,8 @@ import { parseOptions, loadPrompt, displayModel, extractFlag, resolveTargetCwd, 
 export { parseOptions, loadPrompt, displayModel, resolveTargetCwd };
 // buildDashboard / runsDashboardCommand 从 runs.js re-export（test/cli.test.js 依赖）。
 export { buildDashboard, runsDashboardCommand };
+// resolveArtifactPath 从 wao.js re-export（原 cli.js export，保持符号可见）。
+export { resolveArtifactPath };
 
 const hardcodedDefaults = {
   registry: "config/agents.json",
@@ -72,30 +72,15 @@ async function getConfig() {
   return configCache;
 }
 
+// _doctorParseSmoke / isProviderWrappedClaudeCodeWorker / hasClaudeOauthCredentials /
+// whichCli 已移至 src/commands/doctor.js（TD-98 阶段 2d，随 doctor 族搬迁）。
+
 /**
- * TD-95 #11：doctor --strict 的 JS parse smoke。
- * 对 src/ 下所有 .js 跑 node --check，防注释/语法错误漏到运行时（复盘 #3 教训）。
- * 返回 {pass, detail}——失败时列出哪些文件解析失败。
+ * waoCommand 派遣器包装：注入 askHandler（= waoAskCommand，复用 cli.js 的 runCommand）。
+ * wao.js 的 waoCommandCore 不 import ../cli.js，ask 子命令靠这里注入，保持依赖方向。
  */
-function _doctorParseSmoke() {
-  const srcDir = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
-  if (!existsSync(srcDir)) return { pass: true, detail: "src/ 不存在（跳过 parse smoke）" };
-  const failures = [];
-  const collectJs = (dir) => {
-    for (const entry of readdirSync(dir)) {
-      if (entry === "node_modules" || entry.startsWith(".")) continue;
-      const full = join(dir, entry);
-      const st = statSync(full);
-      if (st.isDirectory()) collectJs(full);
-      else if (entry.endsWith(".js")) {
-        const result = spawnSync(process.execPath, ["--check", full], { encoding: "utf8", timeout: 10_000 });
-        if (result.status !== 0) failures.push(full.replace(srcDir + sep, ""));
-      }
-    }
-  };
-  collectJs(srcDir);
-  if (failures.length === 0) return { pass: true, detail: `src/ 所有 .js 解析通过` };
-  return { pass: false, detail: `${failures.length} 个文件解析失败: ${failures.join(", ")}` };
+async function waoCommand(args, config) {
+  await waoCommandCore(args, config, { askHandler: waoAskCommand });
 }
 
 // TD-98 阶段 2c：newRunManager / resolveIsolateFlag / backendFor 已移至 commands/shared.js
@@ -704,362 +689,10 @@ async function stopCommand(args, config) {
 // src/commands/workflow.js（上方 import）。workflowRunCommand + parseTemplateVars 也在那里。
 
 
-/**
- * wao 命令族：.wao/ 文档状态管理（阶段 3）。
- * 子命令：init / state / decision / handoff。
- * init 显式创建 .wao/ 骨架；state/decision/handoff 读写各槽位（命令强制，agent 不直接 touch 文件）。
- */
-async function waoCommand(args, config) {
-  const [sub, ...tail] = args;
-  if (sub === "init") {
-    await waoInitCommand(tail, config);
-    return;
-  }
-  if (sub === "state") {
-    await waoStateCommand(tail, config);
-    return;
-  }
-  if (sub === "decision") {
-    await waoDecisionCommand(tail, config);
-    return;
-  }
-  if (sub === "handoff") {
-    await waoHandoffCommand(tail, config);
-    return;
-  }
-  if (sub === "declare") {
-    await waoDeclareCommand(tail, config);
-    return;
-  }
-  if (sub === "stage") {
-    await waoStageCommand(tail, config);
-    return;
-  }
-  if (sub === "ask") {
-    await waoAskCommand(tail, config);
-    return;
-  }
-  if (sub === "doctor") {
-    await waoDoctorCommand(tail, config);
-    return;
-  }
-  throw new Error(`Unknown wao subcommand: ${sub ?? "(none)"}. Try: wao init | wao state | wao decision | wao handoff | wao declare | wao stage | wao ask | wao doctor`);
-}
+// TD-98 阶段 2d：wao 命令族（waoCommand 派遣器 + waoDoctorCommand + waoInit/Handoff/Decision/
+// Declare/Stage/State 子命令 + doctor 专用 helper）已移至 src/commands/wao.js + doctor.js。
+// 仅 waoAskCommand 留在 cli.js（内部复用 runCommand，run 命令族不拆）。
 
-/**
- * wao doctor：部署前/定期体检。检查环境是否满足安全派发条件。
- * 主控装上 WAO skill 后应先跑一次 doctor，确认环境齐 + 安全配置到位。
- */
-async function waoDoctorCommand(args, config) {
-  const options = parseOptions(args);
-  const cwd = resolveTargetCwd(options);
-  const checks = [];
-
-  // 1. Node 版本（WAO 需 22+）
-  const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
-  checks.push({
-    name: "node_version",
-    pass: nodeMajor >= 22,
-    detail: `Node ${process.versions.node} (需要 >=22)`,
-  });
-
-  // 2. 各 CLI 在 PATH（claude/codex/kimi/opencode）
-  for (const cli of ["claude", "codex", "kimi", "opencode"]) {
-    const found = await whichCli(cli);
-    checks.push({ name: `cli_${cli}`, pass: found, detail: found ? "在 PATH" : "未找到（该 backend 不可用）" });
-  }
-
-  // 3. provider key 在 env
-  for (const key of ["ZHIPU_API_KEY", "DEEPSEEK_API_KEY", "KIMI_API_KEY"]) {
-    const present = Boolean(process.env[key]);
-    checks.push({ name: `key_${key}`, pass: present, detail: present ? "已设置" : "未设置（对应 provider 会 401）" });
-  }
-
-  // 4. agents.json 完整性：opencode worker 是否都配了 tokenBudget
-  const registryPath = resolve(options.registry ?? config.registry);
-  if (existsSync(registryPath)) {
-    try {
-      const raw = await readFile(registryPath, "utf8");
-      const reg = JSON.parse(raw);
-      const agents = reg.agents ?? {};
-      const providerClaudeWorkers = Object.entries(agents)
-        .filter(([, agent]) => isProviderWrappedClaudeCodeWorker(agent))
-        .map(([id]) => id);
-      if (providerClaudeWorkers.length > 0 && await hasClaudeOauthCredentials()) {
-        checks.push({
-          name: "claude_oauth_provider_workers",
-          pass: true,
-          level: "warn",
-          detail: `claude-code OAuth 登录态存在；provider worker (${providerClaudeWorkers.join(",")}) 必须通过 wrapper 的 CLAUDE_CONFIG_DIR 隔离，避免 OAuth token 覆盖 provider key`,
-        });
-      }
-      for (const [id, agent] of Object.entries(agents)) {
-        if (agent.backend === "opencode-serve" && !agent.tokenBudget) {
-          checks.push({
-            name: `budget_${id}`,
-            pass: false,
-            detail: `opencode worker ${id} 未配 tokenBudget（06-18 事故风险，必须配）`,
-          });
-        }
-      }
-      checks.push({ name: "registry_loads", pass: true, detail: `${Object.keys(agents).length} agents` });
-    } catch (error) {
-      checks.push({ name: "registry_loads", pass: false, detail: `agents.json 解析失败: ${error.message}` });
-    }
-  } else {
-    checks.push({ name: "registry_loads", pass: false, detail: `agents.json 不存在: ${registryPath}` });
-  }
-
-  // 5. .wao/ 是否 init
-  // 三态：已初始化(OK) / 未初始化(WARN，fresh-agent preflight 第一步的"正常初态"，不该判失败)
-  //      / 结构异常(FAIL，缺槽位或多余文件才是真不健康)。
-  // doctor 是 onboarding §4d 的 preflight 第一道——"还没 init"是 run wao init 之前的预期状态，
-  // 不应与 401/key 缺/CLI 缺同列让 exit=1，否则 fresh agent 在第一步就误判环境坏了。
-  const waoCheck = validateWaoDir(cwd, options.stateDir ?? config.stateDir);
-  if (waoCheck.ok) {
-    checks.push({ name: "wao_init", pass: true, detail: ".wao/ 已初始化" });
-  } else if (waoCheck.initialized) {
-    // TD-95 #1：多余目录时给迁移建议（不只报异常），帮 Lead 知道怎么处理
-    let detail = `.wao/ 结构异常: 缺[${waoCheck.missing.join(",")}] / 多余[${waoCheck.unexpected.join(",")}]`;
-    if (waoCheck.unexpected.length > 0) {
-      detail += ` — 多余目录可能是旧版遗留，建议迁移到 .dev/wao-legacy/<日期>/ 后删除`;
-    }
-    checks.push({ name: "wao_init", pass: false, detail });
-  } else {
-    checks.push({
-      name: "wao_init",
-      pass: true,
-      level: "warn",
-      detail: ".wao/ 未初始化（run wao init；这是 preflight 的正常初态，不计入 HEALTHY 判定）",
-    });
-  }
-
-  // 6. invocation_method（TD-72 延伸，info 级，永不计入 HEALTHY 判定）：
-  // fresh agent 易把"PATH 里没有 wao"误读成安装缺失——但 WAO 故意不进 PATH
-  // （v22 约束：链进 PATH 会被系统默认 v24 node 拉起被 version guard 拒）。
-  // doctor 主动告知正确调用方式，堵住认知 friction。
-  checks.push({
-    name: "invocation_method",
-    pass: true,
-    level: "info",
-    detail: "WAO 是本地仓内工具，故意不进 PATH——用 `npm run cli -- <command>` 调（走 v22 shim）。PATH 里没有 wao 命令是正常的，不是安装缺失。",
-  });
-
-  // 7. TD-95 #11 --strict：JS parse smoke（防注释崩溃漏到运行时，复盘 #3 教训）。
-  //    对 src/*.js 跑 node --check。非 strict 模式跳过（保持 doctor 快速）。
-  if (options.strict) {
-    const parseResult = _doctorParseSmoke();
-    checks.push({
-      name: "parse_smoke",
-      pass: parseResult.pass,
-      detail: parseResult.detail,
-    });
-  }
-
-  const failed = checks.filter((c) => !c.pass);
-  const verdict = failed.length === 0 ? "HEALTHY" : `${failed.length} ISSUE(S)`;
-
-  if (options.format === "json") {
-    console.log(JSON.stringify({ verdict, checks }, null, 2));
-  } else {
-    console.log(`WAO Doctor: ${verdict}`);
-    for (const c of checks) {
-      const label = c.level === "warn" ? "WARN" : (c.level === "info" ? "INFO" : (c.pass ? "OK" : "FAIL"));
-      console.log(`  [${label}] ${c.name}: ${c.detail}`);
-    }
-  }
-  if (failed.length > 0) process.exitCode = 1;
-}
-
-function isProviderWrappedClaudeCodeWorker(agent) {
-  if (agent?.backend !== "claude-code") return false;
-  if (agent.provider?.baseUrl && agent.provider?.apiKeyEnv) return true;
-  const prependArgs = Array.isArray(agent.prependArgs) ? agent.prependArgs : [];
-  return prependArgs.includes("--base-url") && prependArgs.includes("--api-key-env");
-}
-
-async function hasClaudeOauthCredentials(env = process.env) {
-  const base = env.USERPROFILE || env.HOME;
-  if (!base) return false;
-  const credentialsPath = join(base, ".claude", ".credentials.json");
-  try {
-    const raw = await readFile(credentialsPath, "utf8");
-    const parsed = JSON.parse(raw);
-    return Boolean(parsed?.claudeAiOauth);
-  } catch {
-    return false;
-  }
-}
-
-/** 检查 CLI 是否在 PATH（where/which）。*/
-async function whichCli(name) {
-  const { execSync } = await import("node:child_process");
-  try {
-    execSync(process.platform === "win32" ? `where ${name}` : `which ${name}`, { stdio: "ignore", windowsHide: true });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function waoInitCommand(args, config) {
-  const options = parseOptions(args);
-  const cwd = resolveTargetCwd(options);
-  const override = options.stateDir ?? config.stateDir;
-  await initWaoDir(cwd, override);
-  const waoDir = getWaoDir(cwd, override);
-  console.log(JSON.stringify({
-    initialized: true,
-    waoDir,
-    slots: ["project.md", "state/", "decisions/", "pipeline/", "handoff/", "runs/"],
-  }, null, 2));
-}
-
-async function waoHandoffCommand(args, config) {
-  const [sub, ...tail] = args;
-  const options = parseOptions(tail);
-  const cwd = resolveTargetCwd(options);
-  const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
-
-  if (sub === "write") {
-    if (!options.from || !options.to) throw new Error("wao handoff write requires --from and --to");
-    if (!options.summary) throw new Error("wao handoff write requires --summary");
-    const path = await writeHandoff(waoDir, {
-      from: options.from,
-      to: options.to,
-      summary: options.summary,
-      artifacts: options.artifacts ? options.artifacts.split(",") : [],
-      claims: [],
-    });
-    console.log(JSON.stringify({ written: true, path }, null, 2));
-    return;
-  }
-  if (sub === "read") {
-    const role = tail[0];
-    if (!role) throw new Error("wao handoff read requires <role>");
-    const body = await readHandoff(waoDir, role);
-    if (!body) { console.log(JSON.stringify({ found: false }, null, 2)); return; }
-    console.log(body);
-    return;
-  }
-  throw new Error(`Unknown wao handoff subcommand: ${sub ?? "(none)"}. Try: write | read`);
-}
-
-async function waoDecisionCommand(args, config) {
-  const [sub, ...tail] = args;
-  const options = parseOptions(tail);
-  const cwd = resolveTargetCwd(options);
-  const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
-
-  if (sub === "add") {
-    if (!options.title) throw new Error("wao decision add requires --title");
-    let body = options.body ?? "";
-    if (options.bodyFile) body = await readFile(resolve(options.bodyFile), "utf8");
-    const path = await addDecision(waoDir, {
-      title: options.title,
-      body,
-      context: options.context,
-    });
-    console.log(JSON.stringify({ added: true, id: path.split(/[\\/]/).pop().slice(0, 4), path }, null, 2));
-    return;
-  }
-  if (sub === "list") {
-    const list = await listDecisions(waoDir);
-    for (const line of list) console.log(line);
-    return;
-  }
-  if (sub === "show") {
-    const id = tail[0];
-    if (!id) throw new Error("wao decision show requires <id> (e.g. 0001)");
-    const body = await readDecision(waoDir, id);
-    console.log(body);
-    return;
-  }
-  throw new Error(`Unknown wao decision subcommand: ${sub ?? "(none)"}. Try: add | list | show`);
-}
-
-/**
- * wao declare：Lead 自做声明（TD-82）。
- * Lead 自己完成一个本可派发的任务时，用此命令声明理由，让自做行为对用户/dashboard 可见。
- * 强制力 = 曝光（可见），不是拦截。Lead 仍全权可自做。
- * reason 必须是枚举值（REASON_CODES），防"声明"退化成自由文本失去约束力。
- */
-async function waoDeclareCommand(args, config) {
-  const options = parseOptions(args);
-  const cwd = resolveTargetCwd(options);
-  const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
-
-  if (options.task) {
-    // add：写一条声明。--task 必填，--reason 必填且需在枚举内。
-    if (!options.reason) {
-      throw new Error(`wao declare requires --reason <code>。合法值：[${REASON_CODES.join(", ")}]`);
-    }
-    const path = await addDeclare(waoDir, {
-      task: options.task,
-      reason: options.reason,
-      note: options.note,
-    });
-    console.log(JSON.stringify({ declared: true, path, reason: options.reason }, null, 2));
-    return;
-  }
-  // 无 --task → 默认列出现有声明（裸 "wao declare" = 自省视图）。
-  const summary = await summarizeDeclares(waoDir);
-  const declares = await listDeclares(waoDir);
-  console.log(JSON.stringify({ ...summary, declares }, null, 2));
-}
-
-/**
- * wao stage：Lead 阶段声明（TD-83）。
- * Lead 走完 pipeline 的一个阶段时，用此命令声明产物，让 pipeline 进度对用户/dashboard 可见。
- * 强制力 = 曝光（可见），不是拦截。Lead 仍全权可跳过任意阶段，但跳过会在 dashboard 留缺口。
- * stage 必须是枚举值（STAGE_NUMBERS = 1..6），防跳号或自造阶段逃避门控。
- *
- * 用法：
- *   wao stage 1 --task "起草 auth 契约" --artifacts docs/01-prd.md
- *   wao stage 3 --task "派发实现" --artifacts runs/run_xxx.jsonl,runs/run_yyy.jsonl
- *   wao stage              # 裸跑：列出已声明阶段 + 缺口（自省视图）
- */
-async function waoStageCommand(args, config) {
-  // 阶段号是位置参数（纯数字），不能用"第一个非 -- 开头"——那会误匹配 --cwd <path> 的路径值。
-  // 用正则匹配首个纯数字 token，防 parseOptions 的值（如 /tmp/x、docs/y.md）被当成阶段号。
-  const stageArg = args.find((a) => /^\d+$/.test(a));
-  const options = parseOptions(args);
-  const cwd = resolveTargetCwd(options);
-  const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
-
-  if (stageArg !== undefined) {
-    const stage = Number(stageArg);
-    if (!options.task) {
-      throw new Error(`wao stage requires --task <描述>。阶段 ${stageArg} 的产物描述是可见性的核心。`);
-    }
-    const rawArtifacts = options.artifacts
-      ? options.artifacts.split(",").map((s) => s.trim()).filter(Boolean)
-      : undefined;
-    // TD-95 #7：run 路径 artifact 解析为绝对路径（跨项目时可解析）。
-    // transcript 物理在 WAO repo 的 runDir，不在 --cwd 目标项目。裸 runs/run_xxx.jsonl
-    // 从目标项目不可解析——解析为绝对路径让审计者能找到。
-    const waoRunDir = resolve(options.runDir ?? config.runDir);
-    const artifacts = rawArtifacts?.map((a) => resolveArtifactPath(a, waoRunDir));
-    const path = await addStage(waoDir, {
-      stage,
-      task: options.task,
-      artifacts,
-      note: options.note,
-    });
-    console.log(JSON.stringify({ staged: true, stage, path }, null, 2));
-    return;
-  }
-  // 无阶段号 → 默认列出已声明阶段 + 缺口（裸 "wao stage" = pipeline 自省视图）。
-  const summary = await summarizeStages(waoDir);
-  const progress = STAGE_NUMBERS.map((n) => `[${n}]${summary.declared.has(n) ? "✓" : "—"}`).join(" ");
-  // 注意：declared 是 Set，JSON.stringify(Set) → {}。转数组输出，便于人读 + pipeline 解析。
-  console.log(JSON.stringify({
-    declared: [...summary.declared].sort((a, b) => a - b),
-    count: summary.count,
-    stages: summary.stages,
-    progress,
-  }, null, 2));
-}
 
 /**
  * wao ask：快捷派工（TD-88 派工摩擦反转）。
@@ -1112,49 +745,7 @@ async function waoAskCommand(args, config) {
   await runCommand(runArgs, config);
 }
 
-async function waoStateCommand(args, config) {
-  const [sub, ...tail] = args;
-  if (sub === "read") {
-    const options = parseOptions(tail);
-    const cwd = resolveTargetCwd(options);
-    const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
-    const state = await readCurrentState(waoDir);
-    if (!state) {
-      console.log(JSON.stringify({ initialized: false, message: ".wao/ not initialized or no current state" }, null, 2));
-      return;
-    }
-    if (options.format === "text" || !options.format) {
-      console.log(`workflow: ${state.workflowId}`);
-      console.log(`updated: ${state.updated}`);
-      console.log(`status: ${state.status}`);
-      console.log("steps:");
-      for (const s of state.steps) {
-        console.log(`  ${s.node}\t${s.status}\t${s.runId}`);
-      }
-    } else {
-      console.log(JSON.stringify(state, null, 2));
-    }
-    return;
-  }
-  if (sub === "snapshot") {
-    const options = parseOptions(tail);
-    const cwd = resolveTargetCwd(options);
-    const waoDir = getWaoDir(cwd, options.stateDir ?? config.stateDir);
-    // 手动快照：需 workflowId（必填），其余可选
-    if (!options.workflowId) throw new Error("wao state snapshot requires --workflow-id");
-    await writeStateSnapshot(waoDir, {
-      workflowId: options.workflowId,
-      executed: [],
-      skipped: [],
-      completedResults: new Map(),
-      allNodes: [],
-      predecessors: {},
-    });
-    console.log(JSON.stringify({ snapshot: true, waoDir }, null, 2));
-    return;
-  }
-  throw new Error(`Unknown wao state subcommand: ${sub ?? "(none)"}. Try: wao state read | wao state snapshot`);
-}
+// waoStateCommand 已移至 src/commands/wao.js（TD-98 阶段 2d，随 wao 族搬迁）。
 
 // workflowRunCommand 已移至 src/commands/workflow.js（TD-98 阶段 2c，随 workflow 族搬迁）。
 
@@ -1211,29 +802,8 @@ async function loadScorecardRules(options) {
 // resolveTargetCwd 已移至 commands/shared.js（TD-98 阶段 2b：runs/wao 多 family 共用，
 // 上方 import + re-export）。
 
-/**
- * TD-95 #7：解析 stage artifact 路径。
- *
- * run 路径（runs/run_xxx.jsonl）的物理位置在 WAO repo 的 runDir，不在 --cwd 目标项目。
- * 裸相对路径从目标项目不可解析——解析为绝对路径让审计者能找到。
- *
- * 规则：
- *   - 已是绝对路径 → 原样返回
- *   - 匹配 runs/ 前缀（run transcript）→ 相对 WAO runDir 解析为绝对
- *   - 其他（docs/xxx.md 等项目内路径）→ 相对 process.cwd() 解析（保持原行为）
- */
-export function resolveArtifactPath(artifact, waoRunDir) {
-  // 已是绝对路径（含盘符或以 / 开头）→ 不动
-  if (/^[A-Za-z]:[\\/]/.test(artifact) || artifact.startsWith("/")) {
-    return artifact;
-  }
-  // run transcript 路径 → 相对 WAO runDir（transcript 物理位置）
-  if (artifact.startsWith("runs/")) {
-    return resolve(waoRunDir, "..", artifact);
-  }
-  // 其他（docs/ 等）→ 保持原样（相对目标项目，addStage 只存字符串不解析）
-  return artifact;
-}
+// resolveArtifactPath 已移至 commands/wao.js（TD-98 阶段 2d，随 wao stage 搬迁；
+// 上方 import + re-export，保持符号可见）。
 
 // TD-98 阶段 2a：parseOptions 已移至 commands/shared.js（上方 import 即 re-export）。
 
