@@ -59,3 +59,24 @@ export async function loadPrompt(options) {
   }
   throw new Error("Provide --prompt or --prompt-file");
 }
+
+/**
+ * 解析 wao 命令的目标项目 cwd（TD-84：跨项目 scope 修复）。
+ *
+ * 回退链（优先级高→低）：
+ *   1. 显式 --cwd 参数（options.cwd）——调用方明确指定，最优先
+ *   2. WAO_TARGET_CWD env——worker 子进程被注入的目标项目（processBackend.js 注入，
+ *      值 = agent.cwd）。让 worker 调 wao 命令时自动写进干活的项目，不靠角色 prompt
+ *      显式传 --cwd $WAO_TARGET_CWD（那个变成冗余安全网）。
+ *   3. process.cwd()——Lead 裸跑 / 本地单项目场景的默认。
+ *
+ * 注意：Lead 进程没有 WAO_TARGET_CWD（只注入给 worker 子进程），所以 Lead 跨项目
+ * 派工时调 wao stage/declare 仍需显式带 --cwd 指向目标项目（SKILL 纪律约束）。
+ *
+ * TD-98 阶段 2b：从 cli.js 移到 shared.js（纯函数，多 family 共用：runs/wao/spawn）。
+ */
+export function resolveTargetCwd(options) {
+  if (options.cwd) return resolve(options.cwd);
+  if (process.env.WAO_TARGET_CWD) return resolve(process.env.WAO_TARGET_CWD);
+  return resolve(process.cwd());
+}
