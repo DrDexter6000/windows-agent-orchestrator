@@ -13,6 +13,14 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
+import { readRegistry } from "../registry.js";
+import { RunManager } from "../runManager.js";
+import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
+import { ClaudeCodeBackend } from "../backends/claudeCode.js";
+import { CodexBackend } from "../backends/codex.js";
+import { KimiCodeBackend } from "../backends/kimiCode.js";
+import { getWaoCliPath } from "../waoCliPath.js";
+
 // F5: 从 args 数组里取 --flag <value> 的 value，取不到返回 undefined。
 export function extractFlag(args, flag) {
   if (!Array.isArray(args)) return undefined;
@@ -79,4 +87,55 @@ export function resolveTargetCwd(options) {
   if (options.cwd) return resolve(options.cwd);
   if (process.env.WAO_TARGET_CWD) return resolve(process.env.WAO_TARGET_CWD);
   return resolve(process.cwd());
+}
+
+/**
+ * 解析 --isolate / --no-isolate flag → true | false | undefined(不覆盖配置)。
+ *
+ * TD-98 阶段 2c：从 cli.js 移到 shared.js（纯函数，spawn/run/workflow 多 family 共用）。
+ */
+export function resolveIsolateFlag(options) {
+  if (options.isolate === true) return true;
+  if (options.noIsolate === true) return false;
+  return undefined;
+}
+
+/**
+ * 按 agent.backend 选对应后端实例。
+ *
+ * WAO CLI 路径（注入 worker env，让 worker 能调 wao 命令记录状态）
+ * TD-90: Windows 上指向 scripts/wao-cli.cmd（v22 shim），避免 worker shell 默认 v24 触发 guard。
+ *
+ * TD-98 阶段 2c：从 cli.js 移到 shared.js（cli.js + workflow.js 共用）。
+ */
+export function backendFor(agent) {
+  const waoCliPath = getWaoCliPath();
+  if (agent.backend === "opencode-serve") {
+    return new OpenCodeServeBackend();
+  }
+  if (agent.backend === "claude-code") {
+    return new ClaudeCodeBackend({ waoCliPath });
+  }
+  if (agent.backend === "codex") {
+    return new CodexBackend({ waoCliPath });
+  }
+  if (agent.backend === "kimi-code") {
+    return new KimiCodeBackend({ waoCliPath });
+  }
+  throw new Error(`Unsupported backend: ${agent.backend}`);
+}
+
+/**
+ * 构造 RunManager（生产路径：模块默认 readRegistry + backendFor）。
+ * 测试钩子：允许 config 注入 mock readRegistry / backendFor。
+ *
+ * TD-98 阶段 2c：从 cli.js 移到 shared.js（cli.js + workflow.js 共用）。
+ */
+export function newRunManager(config) {
+  return new RunManager({
+    config,
+    readRegistry: config.readRegistry ?? readRegistry,
+    transcriptDir: config.runDir,
+    backendFor: config.backendFor ?? backendFor,
+  });
 }

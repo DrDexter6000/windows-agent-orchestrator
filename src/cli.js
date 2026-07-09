@@ -1,20 +1,13 @@
 #!/usr/bin/env node
-import { readFile, readdir, unlink, mkdir } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
 import { existsSync, watchFile, unwatchFile, unlinkSync, readdirSync, statSync } from "node:fs";
 import { spawnSync, spawn } from "node:child_process";
 import { join, resolve, dirname, basename, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readRegistry, normalizeAgent } from "./registry.js";
 import { findLatest, findState, findLastEventSeq, JsonlTranscript, readTranscript } from "./transcript.js";
-import { RunManager } from "./runManager.js";
 import { OpenCodeServeBackend } from "./backends/opencodeServe.js";
-import { ClaudeCodeBackend } from "./backends/claudeCode.js";
-import { CodexBackend } from "./backends/codex.js";
-import { KimiCodeBackend } from "./backends/kimiCode.js";
-import { getWaoCliPath } from "./waoCliPath.js";
 import { executeStopWithVerification } from "./backends/opencodeStopVerify.js";
 import { raiseAlert } from "./alerts.js";
-import { listWorktrees, removeWorktree } from "./isolation.js";
 import { initWaoDir, validateWaoDir, getWaoDir } from "./waoDir.js";
 import { writeStateSnapshot, readCurrentState } from "./waoState.js";
 import { addDecision, listDecisions, readDecision } from "./waoDecisions.js";
@@ -29,11 +22,6 @@ import {
   DEFAULT_PIPE,
   DEFAULT_LIVENESS_THRESHOLD_MS,
 } from "./daemon.js";
-import { aggregateRunMetrics, aggregateSummary, formatDuration } from "./metrics.js";
-import { diagnoseFailure } from "./diagnosis.js";
-import { forecastCost } from "./costForecast.js";
-import { loadWorkflow, applyTemplate } from "./workflow/loader.js";
-import { WorkflowEngine } from "./workflow/engine.js";
 import { renderRunSummary } from "./cliRunSummary.js";
 import { checkNodeVersion } from "./nodeVersionGuard.js";
 import { readSupervisorState } from "./daemonSupervisor.js";
@@ -42,10 +30,13 @@ import { daemonCommand } from "./commands/daemon.js";
 import { registryCommand } from "./commands/registry.js";
 // TD-98 阶段 2b：runs 命令族拆到 src/commands/runs.js（行为不变，纯搬迁）。
 import { runsCommand, buildDashboard, runsDashboardCommand } from "./commands/runs.js";
-// TD-98 阶段 2a/2b：parseOptions/loadPrompt/displayModel/extractFlag/resolveTargetCwd 抽到
-// commands/shared.js，消除 commands/*.js 对 cli.js 的反向依赖。cli.js re-export 以保持
-// test/cli.test.js 的 `from "../src/cli.js"` 导入行不变。
-import { parseOptions, loadPrompt, displayModel, extractFlag, resolveTargetCwd } from "./commands/shared.js";
+// TD-98 阶段 2c：workflow + worktree 命令族拆到 src/commands/（行为不变，纯搬迁）。
+import { workflowCommand } from "./commands/workflow.js";
+import { worktreeCommand } from "./commands/worktree.js";
+// TD-98 阶段 2a/2b/2c：parseOptions/loadPrompt/displayModel/extractFlag/resolveTargetCwd/
+// resolveIsolateFlag/newRunManager 抽到 commands/shared.js，消除 commands/*.js 对 cli.js
+// 的反向依赖。cli.js re-export 以保持 test/cli.test.js 的 `from "../src/cli.js"` 导入行不变。
+import { parseOptions, loadPrompt, displayModel, extractFlag, resolveTargetCwd, resolveIsolateFlag, newRunManager } from "./commands/shared.js";
 // Re-export：保持外部 import 路径（test/cli.test.js）不变。
 export { parseOptions, loadPrompt, displayModel, resolveTargetCwd };
 // buildDashboard / runsDashboardCommand 从 runs.js re-export（test/cli.test.js 依赖）。
@@ -107,22 +98,9 @@ function _doctorParseSmoke() {
   return { pass: false, detail: `${failures.length} 个文件解析失败: ${failures.join(", ")}` };
 }
 
-function newRunManager(config) {
-  return new RunManager({
-    config,
-    // 测试钩子：允许 config 注入 mock readRegistry / backendFor（生产路径不传，用模块默认）。
-    readRegistry: config.readRegistry ?? readRegistry,
-    transcriptDir: config.runDir,
-    backendFor: config.backendFor ?? backendFor,
-  });
-}
-
-/** 解析 --isolate / --no-isolate flag → true | false | undefined(不覆盖配置) */
-function resolveIsolateFlag(options) {
-  if (options.isolate === true) return true;
-  if (options.noIsolate === true) return false;
-  return undefined;
-}
+// TD-98 阶段 2c：newRunManager / resolveIsolateFlag / backendFor 已移至 commands/shared.js
+//（上方 import + re-export；cli.js 的 spawn/run 命令仍用 newRunManager/resolveIsolateFlag，
+// workflow.js 也从 shared.js import，避免反向依赖）。
 
 // TD-98 阶段 1：daemon 命令族已拆到 src/commands/daemon.js（行为不变）。
 
@@ -722,52 +700,9 @@ async function stopCommand(args, config) {
 // 已移至 src/commands/runs.js（上方 import + re-export）。
 
 
-async function workflowCommand(args, config) {
-  const [sub, ...tail] = args;
-  if (sub === "run") {
-    await workflowRunCommand(tail, config);
-    return;
-  }
-  if (sub === "list") {
-    await workflowListCommand(config);
-    return;
-  }
-  throw new Error(`Unknown workflow subcommand: ${sub ?? "(none)"}. Try: workflow run <name|file.mjs> | workflow list`);
-}
+// TD-98 阶段 2c：workflow 命令族（workflowCommand + workflowListCommand）已移至
+// src/commands/workflow.js（上方 import）。workflowRunCommand + parseTemplateVars 也在那里。
 
-/**
- * workflow list：列出可用模板（TD-88 模板库）。
- * 扫描 workflows/templates/ 目录，列出 .mjs 模板名 + 用法提示。
- */
-async function workflowListCommand(config) {
-  const templatesDir = join(dirname(fileURLToPath(import.meta.url)), "..", "workflows", "templates");
-  let files = [];
-  try {
-    files = (await readdir(templatesDir)).filter((f) => f.endsWith(".mjs"));
-  } catch {
-    // templates 目录不存在 = 无模板
-  }
-  if (files.length === 0) {
-    console.log("No workflow templates found. 用 workflow run <file.mjs> 跑自定义 workflow。");
-    return;
-  }
-  console.log("可用模板（workflow run <名字> --vars ...）：");
-  for (const f of files) {
-    const name = f.replace(/\.mjs$/, "");
-    // 读文件头注释找用法（前 8 行的"用法"或"模板"字样）
-    let usage = "";
-    try {
-      const content = await readFile(join(templatesDir, f), "utf8");
-      const lines = content.split("\n").slice(0, 8);
-      const usageLine = lines.find((l) => l.includes("用法") || l.includes("workflow run"));
-      if (usageLine) usage = usageLine.replace(/^\/\/\s*/, "").trim();
-    } catch {}
-    console.log(`  ${name}${usage ? `\t${usage}` : ""}`);
-  }
-  console.log("");
-  console.log("用法：workflow run <名字> --vars key=value [--vars ...]");
-  console.log("也可传完整路径：workflow run workflows/templates/<名字>.mjs");
-}
 
 /**
  * wao 命令族：.wao/ 文档状态管理（阶段 3）。
@@ -1221,66 +1156,8 @@ async function waoStateCommand(args, config) {
   throw new Error(`Unknown wao state subcommand: ${sub ?? "(none)"}. Try: wao state read | wao state snapshot`);
 }
 
-async function workflowRunCommand(args, config) {
-  const [filePath, ...tail] = args;
-  if (!filePath) {
-    throw new Error("workflow run requires <name|file.mjs>. 用 workflow list 看可用模板。");
-  }
-  const options = parseOptions(tail);
+// workflowRunCommand 已移至 src/commands/workflow.js（TD-98 阶段 2c，随 workflow 族搬迁）。
 
-  // TD-88 模板库：名字解析。若 filePath 不像路径（无分隔符 / 不是已存在文件），
-  // 查 workflows/templates/<名字>.mjs。找到用它；找不到 fallback 到原路径逻辑。
-  let absolutePath = resolve(filePath);
-  const looksLikePath = /[\\/]/.test(filePath) || existsSync(absolutePath);
-  if (!looksLikePath) {
-    const templatesDir = join(dirname(fileURLToPath(import.meta.url)), "..", "workflows", "templates");
-    const templatePath = join(templatesDir, `${filePath}.mjs`);
-    if (existsSync(templatePath)) {
-      absolutePath = templatePath;
-    }
-  }
-
-  // 加载 workflow
-  const wfDef = await loadWorkflow(absolutePath);
-
-  // 参数式 DAG：--vars key=value 注入模板变量（可多次）
-  const templateVars = parseTemplateVars(tail);
-  const effectiveDef = Object.keys(templateVars).length > 0
-    ? applyTemplate(wfDef, templateVars)
-    : wfDef;
-
-  // workflow 级 transcript
-  const runDir = resolve(options.runDir ?? config.runDir);
-  await mkdir(runDir, { recursive: true });
-  const workflowRunId = `wf_${new Date().toISOString().replace(/[-:.TZ]/g, "")}`;
-  const transcript = new JsonlTranscript(join(runDir, `${workflowRunId}.jsonl`), {
-    runId: workflowRunId,
-    agentId: effectiveDef.id,
-  });
-
-  // 执行
-  const manager = newRunManager(config);
-  const engine = new WorkflowEngine({ runManager: manager, transcript });
-  const result = await engine.execute(effectiveDef, {
-    input: options.input,
-    isolate: resolveIsolateFlag(options),
-    ...(options.registry ? { registry: options.registry } : {}),
-    runDir,
-    ...(options.waitTimeout ? { waitTimeout: Number(options.waitTimeout) } : {}),
-  });
-
-  console.log(JSON.stringify({
-    workflowRunId,
-    workflowId: wfDef.id,
-    completed: result.completed,
-    nodes: Object.fromEntries(
-      Object.entries(result.nodeResults).map(([id, r]) => [id, {
-        completed: r.completed,
-        runId: r.runId,
-      }]),
-    ),
-  }, null, 2));
-}
 
 // parseDuration 已移至 src/commands/runs.js（runs prune 专用 helper，随 runs 族搬迁）。
 
@@ -1299,24 +1176,8 @@ async function loadRun(runId, options, config) {
   return { transcript, events };
 }
 
-function backendFor(agent) {
-  // WAO CLI 路径（注入 worker env，让 worker 能调 wao 命令记录状态）
-  // TD-90: Windows 上指向 scripts/wao-cli.cmd（v22 shim），避免 worker shell 默认 v24 触发 guard
-  const waoCliPath = getWaoCliPath();
-  if (agent.backend === "opencode-serve") {
-    return new OpenCodeServeBackend();
-  }
-  if (agent.backend === "claude-code") {
-    return new ClaudeCodeBackend({ waoCliPath });
-  }
-  if (agent.backend === "codex") {
-    return new CodexBackend({ waoCliPath });
-  }
-  if (agent.backend === "kimi-code") {
-    return new KimiCodeBackend({ waoCliPath });
-  }
-  throw new Error(`Unsupported backend: ${agent.backend}`);
-}
+// backendFor 已移至 commands/shared.js（TD-98 阶段 2c：newRunManager 的后端选择器，随
+// newRunManager 一起搬走；cli.js 不再直接调用，但 OpenCodeServeBackend 仍被 stop/spawn 用）。
 
 function parseAgentList(args) {
   const agents = [];
@@ -1434,53 +1295,10 @@ function parseScorecardRules(raw, source = "--scorecard-rules") {
   }
 }
 
-/**
- * 解析 --vars key=value 参数（可多次出现）。
- * 例：--vars coder=glm_worker --vars feature=登录
- * → { coder: "glm_worker", feature: "登录" }
- */
-function parseTemplateVars(args) {
-  const vars = {};
-  for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === "--vars" && i + 1 < args.length) {
-      const pair = args[i + 1];
-      const eqIdx = pair.indexOf("=");
-      if (eqIdx === -1) {
-        throw new Error(`--vars requires key=value format, got: ${pair}`);
-      }
-      const key = pair.slice(0, eqIdx);
-      const value = pair.slice(eqIdx + 1);
-      vars[key] = value;
-      i += 1;
-    }
-  }
-  return vars;
-}
+// parseTemplateVars + worktreeCommand 已移至 src/commands/（TD-98 阶段 2c：
+// parseTemplateVars 是 workflow run 专用 helper，worktreeCommand 是 worktree 族，
+// 分别搬到 commands/workflow.js 和 commands/worktree.js，上方 import）。
 
-/**
- * worktree 命令：列出/删除 worktree（TD-22）。
- *   worktree list [--cwd DIR]
- *   worktree remove <path> [--cwd DIR]
- * 能力层（listWorktrees/removeWorktree）早已实现，本命令只是 CLI 暴露。
- */
-async function worktreeCommand(args, config) {
-  const [sub, ...rest] = args;
-  const options = parseOptions(rest);
-  const cwd = resolve(options.cwd ?? config.cwd ?? process.cwd());
-  if (sub === "list") {
-    const wts = await listWorktrees(cwd);
-    console.log(JSON.stringify(wts, null, 2));
-    return;
-  }
-  if (sub === "remove") {
-    const target = rest.find((a) => !a.startsWith("--"));
-    if (!target) throw new Error("worktree remove requires <path>");
-    await removeWorktree(resolve(target));
-    console.log(JSON.stringify({ removed: resolve(target) }));
-    return;
-  }
-  throw new Error(`Unknown worktree subcommand: ${sub ?? "(none)"} (expected: list | remove)`);
-}
 
 function printHelp() {
   console.log(`Windows Agent Orchestrator PoC
