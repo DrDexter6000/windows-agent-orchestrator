@@ -40,6 +40,12 @@ import { readSupervisorState } from "./daemonSupervisor.js";
 // TD-98 阶段 1：daemon/registry 命令族拆到 src/commands/（行为不变，纯搬迁）。
 import { daemonCommand } from "./commands/daemon.js";
 import { registryCommand } from "./commands/registry.js";
+// TD-98 阶段 2a：parseOptions/loadPrompt/displayModel/extractFlag 抽到 commands/shared.js，
+// 消除 commands/*.js 对 cli.js 的反向依赖。cli.js re-export 以保持 test/cli.test.js
+// 的 `from "../src/cli.js"` 导入行不变。
+import { parseOptions, loadPrompt, displayModel, extractFlag } from "./commands/shared.js";
+// Re-export：保持外部 import 路径（test/cli.test.js）不变。
+export { parseOptions, loadPrompt, displayModel };
 
 const hardcodedDefaults = {
   registry: "config/agents.json",
@@ -606,24 +612,7 @@ export async function collectCommand(args, config) {
   console.log(JSON.stringify(messages, null, 2));
 }
 
-// F5: 从 args 数组里取 --flag <value> 的 value，取不到返回 undefined。
-function extractFlag(args, flag) {
-  if (!Array.isArray(args)) return undefined;
-  const i = args.indexOf(flag);
-  return i >= 0 && i + 1 < args.length ? args[i + 1] : undefined;
-}
-
-// TD-98 阶段 1：export 给 commands/registry.js 用（displayModel 是 registry 的唯一 cli.js 依赖）
-export function displayModel(agent) {
-  if (typeof agent.model === "string") return agent.model;
-  return agent.model?.id
-    ?? agent.provider?.model
-    ?? extractFlag(agent.args, "--model")
-    ?? extractFlag(agent.args, "--default-model")
-    ?? extractFlag(agent.prependArgs, "--model")
-    ?? extractFlag(agent.prependArgs, "--default-model")
-    ?? (["claude-code", "codex", "kimi-code"].includes(agent.backend) ? "(default)" : "-");
-}
+// TD-98 阶段 2a：extractFlag/displayModel 已移至 commands/shared.js（上方 import）。
 
 // C1: 进程型 run 的 stop 走 taskkill 杀进程树（/T 整树 /F 强杀）。
 // 复用 processBackend._kill 的同款逻辑。PID 不存在/已退出 → 返回 false（调用方据此标 unverified）。
@@ -1866,15 +1855,7 @@ function parseAgentList(args) {
   return { agents, options };
 }
 
-export async function loadPrompt(options) {
-  if (options.promptFile) {
-    return readFile(resolve(options.promptFile), "utf8");
-  }
-  if (options.prompt) {
-    return options.prompt;
-  }
-  throw new Error("Provide --prompt or --prompt-file");
-}
+// TD-98 阶段 2a：loadPrompt 已移至 commands/shared.js（上方 import 即 re-export）。
 
 async function loadScorecardRules(options) {
   if (options.scorecardRules && options.scorecardRulesFile) {
@@ -1932,24 +1913,7 @@ export function resolveArtifactPath(artifact, waoRunDir) {
   return artifact;
 }
 
-export function parseOptions(args) {
-  const options = {};
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (!arg.startsWith("--")) {
-      continue;
-    }
-    const key = arg.slice(2).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
-    const next = args[index + 1];
-    if (!next || next.startsWith("--")) {
-      options[key] = true;
-      continue;
-    }
-    options[key] = next;
-    index += 1;
-  }
-  return options;
-}
+// TD-98 阶段 2a：parseOptions 已移至 commands/shared.js（上方 import 即 re-export）。
 
 /**
  * 包装 waitForCompletion：捕获 failed 抛错，转为结构化结果返回。

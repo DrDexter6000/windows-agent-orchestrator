@@ -5,7 +5,7 @@
 // 依赖：
 //   - 外部模块：./daemon.js（connectDaemon/readDaemonHandshake/isDaemonAlive/...）、
 //     ./daemonSupervisor.js（readSupervisorState）
-//   - cli.js 共享工具：parseOptions、loadPrompt（纯函数，ESM 循环 import 安全）
+//   - 共享工具：./shared.js（parseOptions/loadPrompt，纯函数/低风险 I/O）
 //   - node built-in：child_process（spawn/spawnSync）、fs（readFileSync/unlinkSync/existsSync）、
 //     path（join/resolve/dirname）、url（fileURLToPath）
 //
@@ -25,8 +25,8 @@ import {
   DEFAULT_LIVENESS_THRESHOLD_MS,
 } from "../daemon.js";
 import { readSupervisorState } from "../daemonSupervisor.js";
-// ESM 循环 import 安全：parseOptions/loadPrompt 是纯函数，不在模块顶层调用。
-import { parseOptions, loadPrompt } from "../cli.js";
+// TD-98 阶段 2a：parseOptions/loadPrompt 从 cli.js 抽到 ./shared.js，消除 ESM 循环 import。
+import { parseOptions, loadPrompt } from "./shared.js";
 
 // daemon 命令族：start/stop/status/ping/list。常驻 daemon（P3-T1，ADR 0012 命名管道 IPC）。
 // start: fork detached node src/daemon.js；ping/status/list/stop: 经 IPC 连 daemon。

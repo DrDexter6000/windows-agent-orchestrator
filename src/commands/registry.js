@@ -4,7 +4,7 @@
 //
 // 依赖：
 //   - 外部模块：../registry.js（readRegistry/normalizeAgent）、../backends/opencodeServe.js
-//   - cli.js 共享工具：parseOptions、displayModel（ESM 循环 import 安全——纯函数，不在顶层调用）
+//   - 共享工具：./shared.js（parseOptions/displayModel，纯函数）
 //   - node built-in：fs/promises（readFile）、path（join/resolve）
 
 import { readFile } from "node:fs/promises";
@@ -12,8 +12,8 @@ import { join, resolve } from "node:path";
 
 import { readRegistry, normalizeAgent } from "../registry.js";
 import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
-// ESM 循环 import 安全：parseOptions/displayModel 是纯函数，不在模块顶层调用。
-import { parseOptions, displayModel } from "../cli.js";
+// TD-98 阶段 2a：parseOptions/displayModel 从 cli.js 抽到 ./shared.js，消除 ESM 循环 import。
+import { parseOptions, displayModel } from "./shared.js";
 
 async function registryCommand(args, config) {
   const [sub, ...tail] = args;
