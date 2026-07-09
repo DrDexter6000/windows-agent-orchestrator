@@ -172,3 +172,116 @@ test("TD-99: rejected 必须写 run.state_change_rejected 审计事件", async (
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// --- TD-99 审计收尾：边界修复测试 ---
+
+test("TD-99 边界: failed 后错误 running 不复活，再尝试 aborted 必须 rejected/state=failed", async () => {
+  const dir = await makeDir();
+  try {
+    const [a] = twoInstancesOnSameFile(dir);
+    await a.transitionState(null, "running", "first_message");
+    await a.transitionState("running", "failed", "backend_error");
+    // 模拟"终态后错误地写了非终态 running"（旧 race 产物或 bug）。
+    // _detectExistingTerminal 从后向前扫，发现历史有 terminal failed → 仍拒绝。
+    await a.append("run.state_change", { from: "failed", to: "running", reason: "erroneous_revive" });
+
+    const r = await a.transitionState("running", "aborted", "stop_requested");
+    assert.equal(r.accepted, false, "终态被错误 running 覆盖后，新转移仍必须 rejected");
+    assert.equal(r.state, "failed", "state=failed（最近的 terminal）");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-99 边界: aborted 已赢时迟到 completed 不得留下 run.completed fact", async () => {
+  const dir = await makeDir();
+  try {
+    const [a] = twoInstancesOnSameFile(dir);
+    await a.transitionState(null, "running", "first_message");
+    await a.transitionState("running", "aborted", "stop_requested", {
+      factEvents: [{ type: "run.aborted", payload: { reason: "user" } }],
+    });
+    // 迟到的 completed 带 factEvent——rejected 不得写 run.completed。
+    const r = await a.transitionState("aborted", "completed", "done", {
+      factEvents: [{ type: "run.completed", payload: { messageCount: 1 } }],
+    });
+    assert.equal(r.accepted, false);
+    const events = await readTranscript(a.filePath);
+    const completedFact = events.find((e) => e.type === "run.completed");
+    assert.equal(completedFact, undefined, "rejected 不得留 run.completed fact");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-99 边界: failed 已赢时迟到 timed_out 不得留下 run.timed_out fact", async () => {
+  const dir = await makeDir();
+  try {
+    const [a] = twoInstancesOnSameFile(dir);
+    await a.transitionState(null, "running", "first_message");
+    await a.transitionState("running", "failed", "backend_error");
+    const r = await a.transitionState("failed", "timed_out", "timeout", {
+      factEvents: [{ type: "run.timed_out", payload: {} }],
+    });
+    assert.equal(r.accepted, false);
+    const events = await readTranscript(a.filePath);
+    const timedOutFact = events.find((e) => e.type === "run.timed_out");
+    assert.equal(timedOutFact, undefined, "rejected 不得留 run.timed_out fact");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-99 边界: failed 已赢时迟到 internal abort 不得留下 run.aborted fact", async () => {
+  const dir = await makeDir();
+  try {
+    const [a] = twoInstancesOnSameFile(dir);
+    await a.transitionState(null, "running", "first_message");
+    await a.transitionState("running", "failed", "backend_error");
+    const r = await a.transitionState("failed", "aborted", "user", {
+      factEvents: [{ type: "run.aborted", payload: { reason: "user" } }],
+    });
+    assert.equal(r.accepted, false);
+    const events = await readTranscript(a.filePath);
+    // 只应有 aborted 的 state_change_rejected，不应有 run.aborted fact。
+    const abortedFacts = events.filter((e) => e.type === "run.aborted");
+    assert.equal(abortedFacts.length, 0, "rejected 不得留 run.aborted fact");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-99 边界: accepted 时 fact event 与 state_change seq 连续", async () => {
+  const dir = await makeDir();
+  try {
+    const [a] = twoInstancesOnSameFile(dir);
+    await a.transitionState(null, "running", "first_message");
+    const r = await a.transitionState("running", "completed", "done", {
+      factEvents: [{ type: "run.completed", payload: { messageCount: 5 } }],
+    });
+    assert.equal(r.accepted, true);
+    assert.ok(r.facts.length === 1, "一个 fact event");
+    const factSeq = r.facts[0].seq;
+    const stateSeq = r.transition.seq;
+    assert.equal(stateSeq - factSeq, 1, "fact 与 state_change seq 连续（+1）");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-99 边界: rejection 审计字段完整（attemptedReason + reason=first_terminal_wins）", async () => {
+  const dir = await makeDir();
+  try {
+    const [a] = twoInstancesOnSameFile(dir);
+    await a.transitionState(null, "running", "first_message");
+    await a.transitionState("running", "failed", "backend_error");
+    const r = await a.transitionState("failed", "aborted", "stop_requested");
+    assert.equal(r.accepted, false);
+    assert.equal(r.rejection.attemptedTo, "aborted");
+    assert.equal(r.rejection.attemptedReason, "stop_requested");
+    assert.equal(r.rejection.existingTerminal, "failed");
+    assert.equal(r.rejection.reason, "first_terminal_wins");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

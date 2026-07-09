@@ -104,7 +104,19 @@ async function spawnBackgroundRunner(agentId, options, config) {
   });
   // TD-99：pending 初始化走 transitionState（first-terminal-wins 仲裁）。
   // 此时 transcript 刚建（只有 background_submitted），无既有终态，必 accepted。
-  await transcript.transitionState(null, "pending", "background_spawned");
+  // 万一 rejected（runId 复用了旧终态 transcript），不得 fork detached runner。
+  const pendingResult = await transcript.transitionState(null, "pending", "background_spawned");
+  if (!pendingResult.accepted) {
+    console.log(JSON.stringify({
+      runId,
+      transcript: transcriptPath,
+      background: true,
+      terminalAccepted: false,
+      terminalState: pendingResult.state,
+      note: `not forked: transcript already terminal (${pendingResult.state})`,
+    }, null, 2));
+    return;
+  }
   const runnerArgs = [
     runnerPath, agentId,
     "--prompt", options.prompt ?? "",

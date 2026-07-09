@@ -212,7 +212,7 @@ interface TranscriptEvent {
 | `run.aborted` | 被 abort | ✅ 现有 |
 | `run.error` | 错误 | ✅ 现有 |
 | `run.stop_requested` | 用户请求停止 | ✅ 现有 |
-| **`run.state_change_rejected`** | TD-99：终态仲裁拒绝一次迟到转移（含 attemptedTo/existingTerminal/reason） | `[S]` 新增 |
+| **`run.state_change_rejected`** | TD-99：终态仲裁拒绝一次迟到转移（含 attemptedTo/attemptedReason/existingTerminal/reason="first_terminal_wins"） | `[S]` 新增 |
 | `messages.collected` | collect 命令 | ✅ 现有 |
 | **`scorecard.checked`** | scorecard 审计一次 | `[M]` |
 | **`workflow.*`** | DAG 节点级事件 | `[M]` |

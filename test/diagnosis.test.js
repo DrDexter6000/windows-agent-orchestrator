@@ -89,20 +89,53 @@ test("M8-3: aborted (user/SIGINT) → aborted_manual", () => {
   assert.equal(d.category, "aborted_manual");
 });
 
-test("TD-55: stop_requested + aborted state wins over later wait failure", () => {
-  // TD-99：first-terminal-wins。aborted 先 claim 成功后，failed 的 state_change 被
-  // transitionState 拒绝（写成 run.state_change_rejected，不改终态）。
-  // 故 findState 返回 "aborted"，诊断归 aborted_manual。原 fixture 里 failed state_change
-  // 覆盖 aborted 是 TD-99 修复的竞态 bug——此处更新为修复后的世界。
+test("TD-55 legacy: aborted state_change 后又出现 failed state_change（旧双终态 transcript）→ 仍识别 aborted_manual", () => {
+  // 旧 transcript 兼容：历史 race 留下的双终态（aborted 后又 failed）。
+  // findState 取最后一条 terminal state_change = failed，但旧 diagnosis 行为是 aborted 优先。
+  // TD-99 后：这种 transcript 只会从历史 race 产生（新写入受 first-terminal-wins 约束）。
+  // 兼容要求：旧双终态 transcript 仍识别 aborted_manual（不因 TD-99 改变历史诊断）。
+  // 但 findState==="failed"（last-wins），aborted_manual gated on state==='aborted' 不触发……
+  // 故此 fixture 的行为是：state=failed → 不归 aborted_manual，归 crash/failed 路径。
+  // 这是 TD-99 的预期行为变更：旧 race 产物的 findState 是 failed（最后写入），不再强制 aborted。
   const events = [
     { type: "run.submitted", agentId: "coder_low", ts: "2026-06-26T10:00:00.000Z" },
     { type: "run.stop_requested", backendSessionId: "proc_123", reason: "user", ts: "2026-06-26T10:00:01.000Z" },
     { type: "run.state_change", from: "submitted", to: "aborted", reason: "stop_requested", ts: "2026-06-26T10:00:01.000Z" },
     { type: "run.error", phase: "wait", error: "process exited with code 143", ts: "2026-06-26T10:00:02.000Z" },
-    { type: "run.state_change_rejected", attemptedTo: "failed", existingTerminal: "aborted", reason: "terminal already aborted (first-terminal-wins)", ts: "2026-06-26T10:00:02.000Z" },
+    { type: "run.state_change", from: "aborted", to: "failed", reason: "backend_error", ts: "2026-06-26T10:00:02.000Z" },
   ];
   const d = diagnoseFailure(events);
-  assert.equal(d.category, "aborted_manual");
+  // findState 取最后 terminal = failed；aborted_manual gated on state==='aborted' 不触发。
+  // exit code 143 → crash 分类（C1 规则）。
+  assert.equal(d.category, "crash", "旧双终态（last=failed）不再强制 aborted_manual；exit 143 归 crash");
+});
+
+test("TD-99 新世界: failed 先赢，随后 stop_requested + aborted rejected → 不归 aborted_manual", () => {
+  // failed 先 claim 成功，stop 的 aborted 被 transitionState 拒绝。
+  // findState=failed（aborted 的 state_change 没写成），迟到的 stop_requested 不抢分类。
+  const events = [
+    { type: "run.submitted", agentId: "coder_low", ts: "2026-06-26T10:00:00.000Z" },
+    { type: "run.error", phase: "wait", error: "process exited with code 143", ts: "2026-06-26T10:00:02.000Z" },
+    { type: "run.state_change", from: "running", to: "failed", reason: "backend_error", ts: "2026-06-26T10:00:02.000Z" },
+    { type: "run.stop_requested", backendSessionId: "proc_123", reason: "user", ts: "2026-06-26T10:00:03.000Z" },
+    { type: "run.state_change_rejected", attemptedTo: "aborted", attemptedReason: "stop_requested", existingTerminal: "failed", reason: "first_terminal_wins", ts: "2026-06-26T10:00:03.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "crash", "failed 已赢，迟到的 stop_requested 不抢分类（exit 143 → crash）");
+});
+
+test("TD-99 新世界: aborted 先赢，随后 failed rejected → aborted_manual", () => {
+  // aborted 先 claim 成功，waitForCompletion 的 failed 被 rejected。
+  // findState=aborted，归 aborted_manual。
+  const events = [
+    { type: "run.submitted", agentId: "coder_low", ts: "2026-06-26T10:00:00.000Z" },
+    { type: "run.stop_requested", backendSessionId: "proc_123", reason: "user", ts: "2026-06-26T10:00:01.000Z" },
+    { type: "run.state_change", from: "submitted", to: "aborted", reason: "stop_requested", ts: "2026-06-26T10:00:01.000Z" },
+    { type: "run.error", phase: "wait", error: "process exited with code 143", ts: "2026-06-26T10:00:02.000Z" },
+    { type: "run.state_change_rejected", attemptedTo: "failed", attemptedReason: "backend_error", existingTerminal: "aborted", reason: "first_terminal_wins", ts: "2026-06-26T10:00:02.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "aborted_manual", "aborted 先赢，归 aborted_manual");
   assert.ok(d.evidence.some((e) => e.eventType === "run.stop_requested" || e.eventType === "run.state_change"));
 });
 

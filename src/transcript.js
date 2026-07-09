@@ -78,14 +78,16 @@ export class JsonlTranscript {
         events = [];
       }
       const existing = _detectExistingTerminal(events);
+      const baseSeq = Math.max(this.seq, findLastEventSeq(events));
       if (existing) {
-        // 被拒：写审计事件（锁内，与判定原子）。
+        // 被拒：写审计事件（锁内，与判定原子）。rejected 不写任何 terminal fact。
         const rejectionPayload = {
           attemptedTo: to,
+          attemptedReason: reason,
           existingTerminal: existing,
-          reason: `terminal already ${existing} (first-terminal-wins)`,
+          reason: "first_terminal_wins",
         };
-        this.seq = Math.max(this.seq, findLastEventSeq(events)) + 1;
+        this.seq = baseSeq + 1;
         const rejectionEvent = {
           ts: new Date().toISOString(),
           seq: this.seq,
@@ -97,34 +99,23 @@ export class JsonlTranscript {
         await appendFile(this.filePath, `${JSON.stringify(rejectionEvent)}\n`, "utf8");
         return { accepted: false, state: existing, rejection: rejectionPayload };
       }
-      // 接受：同批写入 factEvents（如 run.aborted）+ run.state_change。
+      // 接受：构造完整 JSONL 字符串（factEvents + state_change），一次 appendFile 原子落盘。
       const factEvents = Array.isArray(options.factEvents) ? options.factEvents : [];
-      const transition = { from, to, reason };
-      let seq = Math.max(this.seq, findLastEventSeq(events));
+      const ts = new Date().toISOString();
+      const ctx = { runId: this.context.runId, agentId: this.context.agentId };
+      let seq = baseSeq;
+      const lines = [];
       const written = [];
       for (const fe of factEvents) {
         seq += 1;
-        const ev = {
-          ts: new Date().toISOString(),
-          seq,
-          runId: this.context.runId,
-          agentId: this.context.agentId,
-          type: fe.type,
-          ...(fe.payload ?? {}),
-        };
-        await appendFile(this.filePath, `${JSON.stringify(ev)}\n`, "utf8");
+        const ev = { ts, seq, ...ctx, type: fe.type, ...(fe.payload ?? {}) };
+        lines.push(JSON.stringify(ev));
         written.push(ev);
       }
       seq += 1;
-      const stateEv = {
-        ts: new Date().toISOString(),
-        seq,
-        runId: this.context.runId,
-        agentId: this.context.agentId,
-        type: "run.state_change",
-        ...transition,
-      };
-      await appendFile(this.filePath, `${JSON.stringify(stateEv)}\n`, "utf8");
+      const stateEv = { ts, seq, ...ctx, type: "run.state_change", from, to, reason };
+      lines.push(JSON.stringify(stateEv));
+      await appendFile(this.filePath, `${lines.join("\n")}\n`, "utf8");
       this.seq = seq;
       return { accepted: true, state: to, transition: stateEv, facts: written };
     } finally {
@@ -135,17 +126,32 @@ export class JsonlTranscript {
 
 /**
  * TD-99 内部：检测事件序列中是否已有"已 claim 的终态"。
- * - 有 run.state_change 且最新一条 to∈TERMINAL → 返回该终态。
- * - 有 run.state_change 但均非终态 → 返回 null（前置事实不算已 claim）。
+ * - 从后向前扫所有 run.state_change，只要历史中出现过 terminal state_change → 返回
+ *   最后一个 terminal（旧双终态 transcript 兼容：last-terminal-wins）。
+ *   这堵住"终态后被错误地写了非终态 running"导致复活的后门。
+ * - 有 state_change 但均非终态 → 返回 null（前置事实不算已 claim）。
  * - 完全无 state_change → 用 findState 的 legacy fallback（旧 transcript 兼容）。
  */
 function _detectExistingTerminal(events) {
-  const stateChangeIndex = findLatestIndex(events, "run.state_change");
-  if (stateChangeIndex >= 0) {
-    const latest = events[stateChangeIndex];
-    return TERMINAL_STATES.includes(latest.to) ? latest.to : null;
+  let lastTerminal = null;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const ev = events[index];
+    if (ev.type === "run.state_change") {
+      if (TERMINAL_STATES.includes(ev.to)) {
+        // 从后向前找到的第一个 terminal state_change = 最近的 terminal。
+        // 对旧双终态 transcript（如 aborted 后又 failed）返回最后写入的 terminal（last-wins 兼容）。
+        lastTerminal = ev.to;
+        break;
+      }
+      // 这条非终态——继续往前找是否有更早的 terminal（防"终态后错误 running"复活）。
+    }
   }
-  // 无 state_change：legacy fallback
+  if (lastTerminal) return lastTerminal;
+  // 有 state_change 但扫完全部均非终态，或完全无 state_change。
+  if (events.some((e) => e.type === "run.state_change")) {
+    return null;
+  }
+  // 完全无 state_change：legacy fallback
   const inferred = findState(events);
   return TERMINAL_STATES.includes(inferred) ? inferred : null;
 }

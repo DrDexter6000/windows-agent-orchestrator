@@ -1983,3 +1983,78 @@ test("P1-1: requireCertified + 认证过期 → 拒绝", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- TD-99 审计收尾：start rejection 行为 ---
+
+test("TD-99: 已有 terminal transcript + 相同 runId start → spawn 调用次数为 0", async () => {
+  const dir = await makeTempDir();
+  try {
+    const runId = "run_already_terminal";
+    const tp = join(dir, `${runId}.jsonl`);
+    const seed = new JsonlTranscript(tp, { runId, agentId: "test_agent" });
+    await seed.append("run.started", { backend: "test" });
+    await seed.transitionState(null, "running", "first_message");
+    await seed.transitionState("running", "failed", "backend_error");
+
+    let spawnCalls = 0;
+    const backendFor = () => ({
+      async spawn() { spawnCalls += 1; return { backend: "fake", backendSessionId: "ses" }; },
+    });
+    const config = { registry: "config/agents.json", runDir: dir, timeout: 5000, retries: 0 };
+    const readRegistry = async () => ({
+      getAgent(id) { return { id, backend: "fake", cwd: dir }; },
+      listAgents() { return []; },
+    });
+    const manager = new RunManager({ config, readRegistry, transcriptDir: dir, backendFor });
+
+    await assert.rejects(
+      manager.start("test_agent", { prompt: "hello", runId }),
+      /already in terminal state/,
+    );
+    assert.equal(spawnCalls, 0, "pending rejected → backend.spawn 不得调用");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-99: backend.spawn 返回前由第二个 writer claim aborted → submitted rejected + handle abort + 不注册 activeRuns", async () => {
+  const dir = await makeTempDir();
+  try {
+    const runId = "run_spawn_race";
+    let handleAborted = false;
+    let resolveSpawn;
+    const spawnPromise = new Promise((resolve) => { resolveSpawn = resolve; });
+    const backendFor = () => ({
+      async spawn() {
+        return spawnPromise.then(() => ({
+          backend: "fake",
+          backendSessionId: "ses_race",
+          abort: async () => { handleAborted = true; },
+        }));
+      },
+    });
+    const config = { registry: "config/agents.json", runDir: dir, timeout: 5000, retries: 0 };
+    const readRegistry = async () => ({
+      getAgent(id) { return { id, backend: "fake", cwd: dir }; },
+      listAgents() { return []; },
+    });
+    const manager = new RunManager({ config, readRegistry, transcriptDir: dir, backendFor });
+
+    const startPromise = manager.start("test_agent", { prompt: "hello", runId });
+    // 给 start 时间走到 spawn（pending accepted → 进入 spawn 等待）。
+    await new Promise((r) => setTimeout(r, 50));
+
+    // 第二个 writer 在 spawn resolve 前 claim aborted。
+    const tp = join(dir, `${runId}.jsonl`);
+    const externalWriter = new JsonlTranscript(tp, { runId, agentId: "test_agent" });
+    await externalWriter.transitionState("pending", "aborted", "external_stop");
+
+    resolveSpawn();
+
+    await assert.rejects(startPromise, /became terminal/);
+    assert.equal(handleAborted, true, "rejected 时新 handle 被 abort");
+    assert.equal(manager.activeRuns.has(runId), false, "不注册到 activeRuns");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

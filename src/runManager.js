@@ -126,7 +126,13 @@ export class RunManager {
       scorecardConfigured: Boolean(scorecardRules),
       ...(tagsPayload ? { tags: tagsPayload } : {}),
     });
-    await this._transition(transcript, null, "pending", "created");
+    const pendingResult = await this._transition(transcript, null, "pending", "created");
+    // TD-99：若 pending rejected（runId 已有终态——如同 runId 复用旧终态 transcript），
+    // 不得 spawn backend，立即报已有终态。
+    if (!pendingResult.accepted) {
+      if (cleanupFn) await safeCleanup(cleanupFn, transcript);
+      throw new Error(`Cannot start run ${finalRunId}: transcript already in terminal state "${pendingResult.state}" (first-terminal-wins)`);
+    }
 
     const backend = this.backendFor(effectiveAgent);
 
@@ -221,7 +227,14 @@ export class RunManager {
       prompt,
     });
     await transcript.append("run.submitted", {});
-    await this._transition(transcript, "pending", "submitted", "spawned");
+    const submittedResult = await this._transition(transcript, "pending", "submitted", "spawned");
+    // TD-99：若 submitted rejected（spawn 期间外部写了终态，如 stop/abort），best-effort
+    // abort 新 handle、执行 cleanup、不注册 activeRuns、抛明确错误。
+    if (!submittedResult.accepted) {
+      try { await result.abort?.(); } catch { /* best-effort */ }
+      if (cleanupFn) await safeCleanup(cleanupFn, transcript);
+      throw new Error(`Run ${finalRunId} became terminal "${submittedResult.state}" during spawn (first-terminal-wins); new handle aborted`);
+    }
 
     const run = new Run({
       runId: finalRunId,
@@ -534,6 +547,12 @@ export class Run {
       for await (const ev of this.handle.events(controller.signal, { pollInterval, silentTimeout })) {
         // 若已被 abort，停止处理后续事件（避免覆盖 aborted 状态）
         if (this._aborted) break;
+        // TD-99：若 _transition 把内存 state 同步为终态（外部写了终态，仲裁 rejected），
+        // 不再消费后续 backend events。
+        if (TERMINAL_STATES.includes(this.state)) {
+          doneReason = null;
+          break;
+        }
         if (ev.kind === "message") {
           // 首个 message → 转 running
           await markRunningOnce("first_message");
@@ -667,11 +686,17 @@ export class Run {
           }
         }
       }
-      await this.transcript.append("run.completed", {
-        backendSessionId: this.result.backendSessionId,
-        messageCount: messages.length,
+      // TD-99：run.completed 与 completed state_change 同批原子提交（factEvents）。
+      // rejected 时不留 run.completed fact。
+      const tResult = await this._transition(this.state, "completed", "done", {
+        factEvents: [{
+          type: "run.completed",
+          payload: {
+            backendSessionId: this.result.backendSessionId,
+            messageCount: messages.length,
+          },
+        }],
       });
-      const tResult = await this._transition(this.state, "completed", "done");
       await this._runCleanup();
       // TD-99：若输给先到的终态，返回与现有终态一致的结果。
       if (!tResult.accepted) return _loserResult(tResult.state, { messages, evidence, metrics });
@@ -698,10 +723,13 @@ export class Run {
       throw new Error(doneError ?? "backend reported failure");
     }
     // timedOut（controller abort 导致流结束，无 done 事件）
-    await this.transcript.append("run.timed_out", {
-      backendSessionId: this.result.backendSessionId,
+    // TD-99：run.timed_out 与 timed_out state_change 同批原子提交（factEvents）。
+    const tResult = await this._transition(this.state, "timed_out", "timeout", {
+      factEvents: [{
+        type: "run.timed_out",
+        payload: { backendSessionId: this.result.backendSessionId },
+      }],
     });
-    const tResult = await this._transition(this.state, "timed_out", "timeout");
     await this._runCleanup();
     if (!tResult.accepted) return _loserResult(tResult.state, { messages, evidence, metrics });
     return { completed: false, messages, evidence, timedOut: true, metrics };
@@ -812,21 +840,29 @@ export class Run {
     } catch (error) {
       abortError = error.message ?? "abort_failed";
     }
-    await this.transcript.append("run.aborted", {
-      backendSessionId: this.result.backendSessionId,
-      reason,
-      ...(abortError ? { error: abortError } : {}),
+    // TD-99：run.aborted 与 aborted state_change 同批原子提交（factEvents）。
+    // rejected 时不留 run.aborted fact（输给先到的终态）。
+    // 无论 backend.abort 成功与否，run 都进入 aborted 状态（状态机以意图为准，不以后端成败为准）。
+    await this._transition(this.state, "aborted", reason, {
+      factEvents: [{
+        type: "run.aborted",
+        payload: {
+          backendSessionId: this.result.backendSessionId,
+          reason,
+          ...(abortError ? { error: abortError } : {}),
+        },
+      }],
     });
-    // 无论 backend.abort 成功与否，run 都进入 aborted 状态（状态机以意图为准，不以后端成败为准）
-    await this._transition(this.state, "aborted", reason);
     await this._runCleanup();
   }
 
-  async _transition(from, to, reason) {
+  async _transition(from, to, reason, options = {}) {
     // TD-99：走原子终态仲裁（first-terminal-wins）。
-    // accepted：this.state = to + 触发 friction hook。
-    // rejected：this.state 同步为现有终态（不复活），返回结果让调用方据现有终态分支。
-    const result = await this.transcript.transitionState(from, to, reason);
+    // accepted：this.state = to + 触发 friction hook。terminal fact（run.completed/
+    //   run.timed_out/run.aborted）通过 options.factEvents 与 state_change 同批原子提交。
+    // rejected：this.state 同步为现有终态（不复活），不写任何 terminal fact，返回结果
+    //   让调用方据现有终态分支。
+    const result = await this.transcript.transitionState(from, to, reason, options);
     if (result.accepted) {
       this.state = to;
       // TD-92 debug mode：失败终态自动捕获 friction（镜像 raiseAlert，fire-and-forget 不阻塞终态）
