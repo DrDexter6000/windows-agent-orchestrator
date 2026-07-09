@@ -1,0 +1,17 @@
+{"type":"prompt.sent","agentId":"coder_low","prompt":"apply gui upgrade atom S2 git freshness","ts":"2026-07-08T21:29:45.000Z","seq":1,"runId":"run_fixture_evidence_passed"}
+{"type":"run.submitted","agentId":"coder_low","ts":"2026-07-08T21:29:45.001Z","seq":2,"runId":"run_fixture_evidence_passed"}
+{"type":"session.created","backendSessionId":"proc_fixture","ts":"2026-07-08T21:29:45.500Z","seq":3,"runId":"run_fixture_evidence_passed"}
+{"type":"run.started","ts":"2026-07-08T21:29:45.501Z","seq":4,"runId":"run_fixture_evidence_passed"}
+{"type":"run.state_change","from":"pending","to":"submitted","reason":"start","ts":"2026-07-08T21:29:45.502Z","seq":5,"runId":"run_fixture_evidence_passed"}
+{"type":"run.state_change","from":"submitted","to":"running","reason":"first_message","ts":"2026-07-08T21:29:46.000Z","seq":6,"runId":"run_fixture_evidence_passed"}
+{"type":"run.event","kind":"tool_use","name":"Read","toolCallId":"tu1","ts":"2026-07-08T21:29:47.000Z","seq":7,"runId":"run_fixture_evidence_passed"}
+{"type":"run.event","kind":"tool_result","toolCallId":"tu1","isError":false,"ts":"2026-07-08T21:29:47.500Z","seq":8,"runId":"run_fixture_evidence_passed"}
+{"type":"run.event","kind":"message","role":"assistant","parts":[{"type":"text","text":"I'll apply the gui upgrade atom."}],"ts":"2026-07-08T21:29:50.000Z","seq":9,"runId":"run_fixture_evidence_passed"}
+{"type":"run.event","kind":"file_written","path":"scripts/lib/gui-upgrade-atom.mjs","ts":"2026-07-08T21:30:00.000Z","seq":10,"runId":"run_fixture_evidence_passed"}
+{"type":"run.event","kind":"tool_use","name":"Bash","toolCallId":"tu2","ts":"2026-07-08T21:30:01.000Z","seq":11,"runId":"run_fixture_evidence_passed"}
+{"type":"run.event","kind":"command","command":"node scripts/gui-upgrade-atom.test.mjs","ts":"2026-07-08T21:30:02.000Z","seq":12,"runId":"run_fixture_evidence_passed"}
+{"type":"run.event","kind":"tool_result","toolCallId":"tu2","isError":false,"ts":"2026-07-08T21:30:05.000Z","seq":13,"runId":"run_fixture_evidence_passed"}
+{"type":"run.event","kind":"message","role":"assistant","parts":[{"type":"text","text":"gui upgrade atom S2 git freshness OK"}],"ts":"2026-07-08T21:30:06.000Z","seq":14,"runId":"run_fixture_evidence_passed"}
+{"type":"run.evidence_audit","passed":true,"note":"backend failed but evidence passed (file_written/command exit0 present) — task may be correct, verify manually","checks":[{"name":"evidence_file_written","passed":true},{"name":"evidence_command_exit0","passed":true},{"name":"evidence_assistant_text","passed":true}],"ts":"2026-07-08T21:30:10.000Z","seq":15,"runId":"run_fixture_evidence_passed"}
+{"type":"run.error","phase":"wait","error":"process exited with code 1; stdout: gui upgrade atom S2 git freshness OK","ts":"2026-07-08T21:30:10.001Z","seq":16,"runId":"run_fixture_evidence_passed"}
+{"type":"run.state_change","from":"running","to":"failed","reason":"backend_error","ts":"2026-07-08T21:30:10.002Z","seq":17,"runId":"run_fixture_evidence_passed"}

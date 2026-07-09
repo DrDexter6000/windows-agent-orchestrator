@@ -355,3 +355,21 @@ test("审计 P2: failed run 只有 assistant text（无 tool_use）→ 仍应识
   assert.equal(d.category, "no_effect",
     "有 assistant text 活动但无产出的 failed run 应判 no_effect（不是 crash）");
 });
+
+test("审计 P2 fixture: 真实脱敏 transcript → evidence_passed_backend_failed（现场回放验证）", async () => {
+  // 审计要求：涉及外部系统的功能不能只靠 mock，需真实 fixture 回放。
+  // 本 fixture 从真实任务 run_20260708212945430tnnchx（coder_low，复盘 #5 状态悖论案例）
+  // 脱敏提取：worker 写了文件 + 测试输出 OK，但 backend 进程 exit 1 → WAO 终态 failed。
+  const { readFileSync } = await import("node:fs");
+  const { join, dirname } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const fixturePath = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "transcript-evidence-passed-backend-failed.jsonl");
+  const raw = readFileSync(fixturePath, "utf8");
+  const events = raw.trim().split("\n").map((l) => JSON.parse(l));
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "evidence_passed_backend_failed",
+    "真实脱敏 transcript 应诊断为 evidence_passed_backend_failed（不是 crash/provider_disconnect）");
+  assert.ok(d.evidence.length > 0, "应附证据");
+  assert.ok(d.evidence.some((e) => e.fact.includes("证据通过")),
+    "证据应说明'证据通过'——让 Lead 知道任务可能做对了");
+});
