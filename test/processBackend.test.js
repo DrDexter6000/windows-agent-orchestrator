@@ -238,8 +238,10 @@ test("abort 能杀掉长时进程", async () => {
 
   await handle.abort();
 
-  // taskkill 异步，轮询等待进程真正退出（最多 2s）
-  const deadline = Date.now() + 2000;
+  // taskkill 异步（fire-and-forget spawn），轮询等待进程真正退出。
+  // 窗口放宽到 5s：并发 npm test 负载下 taskkill 子进程调度可能 >2s（Windows 进程终止
+  // 语义：/T /F 杀整树，父进程退出与 OS 回收 PID 有延迟）。断言不放宽——仍要求 isAlive===false。
+  const deadline = Date.now() + 5000;
   while (handle.isAlive() && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 50));
   }

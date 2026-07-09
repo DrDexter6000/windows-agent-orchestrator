@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { JsonlTranscript, TERMINAL_STATES, readTranscript, findState } from "./transcript.js";
+import { JsonlTranscript, TERMINAL_STATES, readTranscript, findState, findLatest } from "./transcript.js";
 import { createWorktree, removeWorktree } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
@@ -189,6 +189,16 @@ export class RunManager {
       );
     }
 
+    // TD-54 修复（spawn-failure race）：prompt.sent 必须在 backend.spawn 之前持久化。
+    // 原 bug：prompt.sent 写在 spawn 之后（下方 line ~206），spawn 失败时 RunManager.start
+    // 先写 terminal failed（spawn_error）再 throw，prompt.sent 永远不会从这里写——
+    // 靠 backgroundRunner 的 writeStartupFailureTranscript 兜底，但那时 failed 已落盘，
+    // 测试（及任何轮询 transcript 的消费者）可能在 failed 之后、prompt.sent 之前快照，
+    // 拿不到 prompt。修复：spawn 前先写 prompt.sent {prompt}（不含 messageId，spawn 前还没有），
+    // spawn 成功后再写第二条含 messageId/admittedSeq 的 prompt.sent；resume/retry 用 findLatest
+    // 取最后一条（含 messageId），保证 opencode-serve resume 拿得到 messageId。
+    await transcript.append("prompt.sent", { prompt });
+
     let result;
     try {
       result = await backend.spawn(effectiveAgent, { prompt });
@@ -203,6 +213,8 @@ export class RunManager {
       backendSessionId: result.backendSessionId,
       serveUrl: agent.serveUrl,
     });
+    // spawn 成功后补写带 messageId/admittedSeq 的 prompt.sent（resume opencode-serve 流需要 messageId）。
+    // 此时已过 spawn 失败分支，不会产生"terminal 先于 prompt.sent"的 race。
     await transcript.append("prompt.sent", {
       messageId: result.messageId,
       admittedSeq: result.admittedSeq,
@@ -263,7 +275,8 @@ export class RunManager {
     // 进程式 backend（进程已死）→ 重放 prompt 重新 spawn
     const isProcess = runStarted.backend === "claude-code" || runStarted.backend === "codex" || runStarted.backend === "kimi-code";
     if (isProcess) {
-      const promptEvent = events.find((e) => e.type === "prompt.sent");
+      // TD-54：prompt.sent 可能写两条，取最后一条（两条都有 .prompt，无差别）。
+      const promptEvent = findLatest(events, "prompt.sent");
       if (!promptEvent?.prompt) return null;
       const originalSessionId = session.backendSessionId;
       // 重新 spawn 新进程
@@ -298,8 +311,10 @@ export class RunManager {
     const handle = {
       backend: session.backend,
       backendSessionId: sessionId,
-      messageId: events.find((e) => e.type === "prompt.sent")?.messageId,
-      admittedSeq: events.find((e) => e.type === "prompt.sent")?.admittedSeq,
+      // TD-54 修复：prompt.sent 现在可能写两条（spawn 前 {prompt} + spawn 后 {messageId,...}），
+      // resume 取最后一条才有 messageId（opencode-serve resume 流需要）。
+      messageId: findLatest(events, "prompt.sent")?.messageId,
+      admittedSeq: findLatest(events, "prompt.sent")?.admittedSeq,
       events: (signal, opts) => backend.streamEvents(serveUrl, sessionId, { cwd, signal, interval: opts?.pollInterval }),
       abort: async () => backend.abort(serveUrl, sessionId),
     };
