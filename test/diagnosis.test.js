@@ -327,11 +327,12 @@ test("TD-95 #5: failed run + evidence_audit passed → category=evidence_passed_
 
 test("TD-95 #4: failed run + 无 file_written + 无 command exit0 → category=no_effect", () => {
   // 复盘 #4：coder_hq 读了上下文但没写任何文件，backend 崩了 → "读完没产出"。
+  // 审计修正：transcript 实际把 message 落为 run.event kind=message（不是 run.message）。
   const events = [
     { type: "run.submitted", agentId: "coder_hq", ts: "2026-07-08T10:00:00.000Z" },
     { type: "run.event", kind: "tool_use", name: "Read", ts: "2026-07-08T10:00:30.000Z" },
     { type: "run.event", kind: "tool_result", isError: false, ts: "2026-07-08T10:00:31.000Z" },
-    { type: "run.message", role: "assistant", parts: [{ type: "text", text: "reading..." }], ts: "2026-07-08T10:01:00.000Z" },
+    { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "reading..." }], ts: "2026-07-08T10:01:00.000Z" },
     { type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-07-08T10:05:00.000Z" },
     { type: "run.state_change", from: "running", to: "failed", reason: "backend_error", ts: "2026-07-08T10:05:01.000Z" },
   ];
@@ -339,4 +340,18 @@ test("TD-95 #4: failed run + 无 file_written + 无 command exit0 → category=n
   assert.equal(d.category, "no_effect",
     "failed run 无产出证据应识别为 no_effect（读完没写文件/没跑成功命令）");
   assert.ok(d.evidence.length > 0, "应附证据");
+});
+
+test("审计 P2: failed run 只有 assistant text（无 tool_use）→ 仍应识别 no_effect", () => {
+  // 审计发现：diagnosis 原查 run.message（不存在的事件类型），实际是 run.event kind=message。
+  // 只有 assistant text 没有 tool_use 的 failed run 应仍判 no_effect（有活动但无产出）。
+  const events = [
+    { type: "run.submitted", agentId: "coder_hq", ts: "2026-07-08T10:00:00.000Z" },
+    { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "let me read the files first" }], ts: "2026-07-08T10:00:30.000Z" },
+    { type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-07-08T10:05:00.000Z" },
+    { type: "run.state_change", from: "running", to: "failed", reason: "backend_error", ts: "2026-07-08T10:05:01.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "no_effect",
+    "有 assistant text 活动但无产出的 failed run 应判 no_effect（不是 crash）");
 });

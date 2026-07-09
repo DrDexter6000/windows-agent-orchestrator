@@ -153,8 +153,11 @@ export function diagnoseFailure(events) {
     const hasFileWritten = evs.some((e) => e.type === "run.event" && e.kind === "file_written");
     const hasCommandExit0 = evs.some((e) => e.type === "run.event" && e.kind === "command" && e.exitCode === 0);
     const hasToolUse = evs.some((e) => e.type === "run.event" && e.kind === "tool_use");
+    // 审计 P2 修正：transcript 实际把 message 落为 run.event kind=message（runManager.js:526），
+    // 不是 run.message（架构文档 02-architecture.md:218 明确 run.message 不落盘）。
     const hasAssistantText = evs.some(
-      (e) => e.type === "run.message" && e.role === "assistant" && e.parts?.some((p) => p.type === "text" && p.text?.trim()),
+      (e) => e.type === "run.event" && e.kind === "message" && e.role === "assistant"
+        && e.parts?.some((p) => p.type === "text" && p.text?.trim()),
     );
     // 只有"有活动但无产出"才是 no_effect。无活动的纯崩溃仍是 crash。
     if (!hasFileWritten && !hasCommandExit0 && (hasToolUse || hasAssistantText)) {
