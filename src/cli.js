@@ -1,13 +1,10 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { spawnSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { findLatest, findState, JsonlTranscript, readTranscript } from "./transcript.js";
-import { OpenCodeServeBackend } from "./backends/opencodeServe.js";
-import { executeStopWithVerification } from "./backends/opencodeStopVerify.js";
-import { raiseAlert } from "./alerts.js";
+import { findLatest, JsonlTranscript, readTranscript } from "./transcript.js";
 import {
   connectDaemon,
   readHandshake as readDaemonHandshake,
@@ -33,10 +30,12 @@ import { worktreeCommand } from "./commands/worktree.js";
 import { waoCommand as waoCommandCore, resolveArtifactPath } from "./commands/wao.js";
 // TD-98 阶段 2e-1a：只读 observe 命令族（status/tail/collect）拆到 src/commands/observe.js。
 import { statusCommand, tailCommand, collectCommand } from "./commands/observe.js";
+// TD-98 阶段 2e-1b：stop 命令拆到 src/commands/stop.js（杀进程 + verification + alert，非只读）。
+import { stopCommand } from "./commands/stop.js";
 // TD-98 阶段 2a/2b/2c/2e-1a：parseOptions/loadPrompt/displayModel/extractFlag/resolveTargetCwd/
 // resolveIsolateFlag/newRunManager/loadRun 抽到 commands/shared.js，消除 commands/*.js 对 cli.js
 // 的反向依赖。cli.js re-export 以保持 test/cli.test.js 的 `from "../src/cli.js"` 导入行不变。
-// loadRun 由 stop/retry（暂留 cli.js）继续共用。
+// loadRun 由 retry（暂留 cli.js）继续共用。
 import { parseOptions, loadPrompt, displayModel, extractFlag, resolveTargetCwd, resolveIsolateFlag, newRunManager, loadRun } from "./commands/shared.js";
 // Re-export：保持外部 import 路径（test/cli.test.js）不变。
 export { parseOptions, loadPrompt, displayModel, resolveTargetCwd };
@@ -406,104 +405,9 @@ export async function runCommand(args, config) {
 
 // TD-98 阶段 2a：extractFlag/displayModel 已移至 commands/shared.js（上方 import）。
 
-// C1: 进程型 run 的 stop 走 taskkill 杀进程树（/T 整树 /F 强杀）。
-// 复用 processBackend._kill 的同款逻辑。PID 不存在/已退出 → 返回 false（调用方据此标 unverified）。
-function killProcessTree(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
+// TD-98 阶段 2e-1b：stop 命令（stopCommand + killProcessTree）已移至 src/commands/stop.js
+//（上方 import）。stop 非只读——杀进程 + stop verification + alert，单独成族。
 
-async function stopCommand(args, config) {
-  const [runId, ...tail] = args;
-  const { transcript, events } = await loadRun(runId, parseOptions(tail), config);
-  const session = findLatest(events, "session.created");
-  if (!session?.backendSessionId) {
-    throw new Error(`Run ${runId} has no session metadata (no session.created event)`);
-  }
-
-  // C1（F2 修复）：进程型 run（backendSessionId=proc_<pid>）无服务端 session 可 abort，
-  // 走 taskkill 路径。进程死即会话死（OS 保证），taskkill 成功即 verified。
-  // 与 opencode 路径分流——按 session 标志判定，不按 backend 名分支（runtime-agnostic）。
-  if (session.backendSessionId.startsWith("proc_")) {
-    const pid = Number(session.backendSessionId.slice("proc_".length));
-    const fromState = findState(events);
-    await transcript.append("run.stop_requested", { backendSessionId: session.backendSessionId, backend: "process" });
-    const killed = killProcessTree(pid);
-    await transcript.append("run.aborted", {
-      backendSessionId: session.backendSessionId,
-      backend: "process",
-      reason: "stop_requested",
-      verified: killed,
-    });
-    await transcript.append("run.state_change", { from: fromState, to: "aborted", reason: "stop_requested" });
-    if (!killed) {
-      await transcript.append("run.stop_unverified", { backendSessionId: session.backendSessionId, reason: "process not found / already exited" });
-    }
-    console.log(JSON.stringify({
-      runId,
-      stopped: true,
-      backend: "process",
-      pid,
-      taskkillCalled: true,
-      verified: killed,
-      note: killed ? "process killed (process death = session death)" : "process not found (may have already exited)",
-    }, null, 2));
-    return;
-  }
-
-  if (!session?.serveUrl) {
-    throw new Error(`Run ${runId} session ${session.backendSessionId} has no serveUrl (opencode path needs one)`);
-  }
-  const backend = new OpenCodeServeBackend();
-  const fromState = findState(events);
-  await transcript.append("run.stop_requested", { backendSessionId: session.backendSessionId });
-
-  // S1-2（TD-37 落地）：abort 后验证后台是否真停。
-  // 06-18 事故证明 abort HTTP 调用可能虚假成功——transcript 写 aborted 但 serve 端继续烧。
-  // 现在：abort → verifyStopQuiet → quiet=false 强制 taskkill 兜底，不再只信 HTTP 返回。
-  const stopResult = await executeStopWithVerification(
-    backend, session.serveUrl, session.backendSessionId,
-    { cwd: session.cwd, rounds: 3, intervalMs: 2000 },
-  );
-
-  if (stopResult.verified) {
-    await transcript.append("run.stop_verified", { backendSessionId: session.backendSessionId });
-  } else {
-    await transcript.append("run.stop_unverified", {
-      backendSessionId: session.backendSessionId,
-      taskkillCalled: stopResult.taskkillCalled,
-      delta: stopResult.verifyResult?.delta,
-      metric: stopResult.verifyResult?.metric,
-    });
-    // S1-3 告警：stop 未验证 = 后台可能仍在烧 token（06-18 事故复现路径），立即弹窗
-    raiseAlert("stop_unverified",
-      `stop ${runId} not verified: backend may still be running (taskkill=${stopResult.taskkillCalled})`,
-      { runId, logPath: join(config.runDir, "ALERTS.log") },
-    ).catch(() => { /* 告警失败不影响终态 */ });
-  }
-  await transcript.append("run.aborted", {
-    backendSessionId: session.backendSessionId,
-    reason: "stop_requested",
-    verified: stopResult.verified,
-    taskkillCalled: stopResult.taskkillCalled,
-  });
-  await transcript.append("run.state_change", {
-    from: fromState,
-    to: "aborted",
-    reason: "stop_requested",
-  });
-  console.log(JSON.stringify({
-    runId,
-    stopped: true,
-    verified: stopResult.verified,
-    taskkillCalled: stopResult.taskkillCalled,
-  }, null, 2));
-}
 
 // TD-98 阶段 2b：runs 命令族（runsCommand + buildDashboard + runsDashboardCommand +
 // list/summary/prune/grep/metrics/scorecard/diagnose/forecast + loadRunFiles + parseDuration）
