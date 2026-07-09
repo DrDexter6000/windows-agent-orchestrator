@@ -64,11 +64,14 @@ export function diagnoseFailure(events) {
 
   const evidence = [];
 
-  // 1) aborted_manual：显式 stop/abort 优先于后续 wait/crash 噪音。
+  // 1) aborted_manual：显式 stop/abort，且当前终态确实是 aborted。
+  //    TD-99：failed/completed/timed_out 已赢时，迟到的 run.stop_requested 不得抢分类——
+  //    只有 findState==="aborted" 才归 aborted_manual。无 state_change 的旧 transcript
+  //    若 legacy fallback 推出 aborted（run.aborted/run.stop_requested 兜底），也保留。
   const stopRequested = evs.find((e) => e.type === "run.stop_requested");
   const aborted = evs.find((e) => e.type === "run.aborted");
   const abortedChange = evs.find((e) => e.type === "run.state_change" && e.to === "aborted");
-  if (stopRequested || aborted || abortedChange) {
+  if (state === "aborted" && (stopRequested || aborted || abortedChange)) {
     const source = stopRequested ?? aborted ?? abortedChange;
     evidence.push({
       eventType: source.type,

@@ -188,7 +188,8 @@ async function writeStartupFailureTranscript({ runDir, runId, agentId, prompt, e
     await transcript.append("run.started", { backend: "backgroundRunner" });
   }
   if (!events.some((event) => event.type === "run.state_change")) {
-    await transcript.append("run.state_change", { from: null, to: "pending", reason: "created" });
+    // TD-99：pending 初始化走 transitionState（first-terminal-wins 仲裁）。
+    await transcript.transitionState(null, "pending", "created");
   }
   if (prompt && !events.some((event) => event.type === "prompt.sent")) {
     await transcript.append("prompt.sent", { prompt });
@@ -197,7 +198,10 @@ async function writeStartupFailureTranscript({ runDir, runId, agentId, prompt, e
     return;
   }
   await transcript.append("run.error", { phase: "start", error: error.message ?? String(error) });
-  await transcript.append("run.state_change", { from: "pending", to: "failed", reason: "startup_error" });
+  // TD-99：failed 终态走 transitionState——若已被外部 abort（竞态），此处 rejected，不覆盖。
+  await transcript.transitionState("pending", "failed", "startup_error", {
+    factEvents: [],
+  });
 }
 
 /**

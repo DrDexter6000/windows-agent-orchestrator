@@ -212,6 +212,7 @@ interface TranscriptEvent {
 | `run.aborted` | 被 abort | ✅ 现有 |
 | `run.error` | 错误 | ✅ 现有 |
 | `run.stop_requested` | 用户请求停止 | ✅ 现有 |
+| **`run.state_change_rejected`** | TD-99：终态仲裁拒绝一次迟到转移（含 attemptedTo/existingTerminal/reason） | `[S]` 新增 |
 | `messages.collected` | collect 命令 | ✅ 现有 |
 | **`scorecard.checked`** | scorecard 审计一次 | `[M]` |
 | **`workflow.*`** | DAG 节点级事件 | `[M]` |
@@ -283,6 +284,14 @@ type RunState =
 - `running→aborted`：`abort()` 调用
 
 **每次转移写 `run.state_change` 事件**，含 `{ from, to, reason }`。
+
+**TD-99 跨进程终态仲裁**：状态转移经 `JsonlTranscript.transitionState` 在已有 append lock 内
+原子完成（读事件 → 检查既有终态 → 分配 seq → 批量 append）。规则 = **first terminal wins**：
+一旦 transcript 中已有终态（terminal `run.state_change`，或旧 transcript 的 legacy terminal fact），
+任何后续转移（含 `running`/`submitted` 复活）被拒绝，写 `run.state_change_rejected` 审计事件
+（不静默消失）。RunManager 决定合法转移（状态机策略）；Transcript 只负责跨进程原子提交和终态
+不可逆，不把完整状态机策略下沉到 L1。这解决了 owner 进程（`waitForCompletion` 写 failed/completed）
+与短命 CLI 进程（`stop` 写 aborted）之间的终态覆盖竞态。
 
 ### 4.2 RunManager `[S]`
 

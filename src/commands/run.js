@@ -102,7 +102,9 @@ async function spawnBackgroundRunner(agentId, options, config) {
     cwd: options.cwd,
     scorecardConfigured: Boolean(options.scorecardRules),
   });
-  await transcript.append("run.state_change", { from: null, to: "pending", reason: "background_spawned" });
+  // TD-99：pending 初始化走 transitionState（first-terminal-wins 仲裁）。
+  // 此时 transcript 刚建（只有 background_submitted），无既有终态，必 accepted。
+  await transcript.transitionState(null, "pending", "background_spawned");
   const runnerArgs = [
     runnerPath, agentId,
     "--prompt", options.prompt ?? "",

@@ -52,14 +52,20 @@ export async function stopCommand(args, config) {
     const fromState = findState(events);
     await transcript.append("run.stop_requested", { backendSessionId: session.backendSessionId, backend: "process" });
     const killed = killProcessTree(pid);
-    await transcript.append("run.aborted", {
-      backendSessionId: session.backendSessionId,
-      backend: "process",
-      reason: "stop_requested",
-      verified: killed,
+    // TD-99：run.aborted + aborted state_change 同一次 terminal transition commit（first-terminal-wins）。
+    // 若 run 已终态（failed/completed/timed_out），transitionState rejected，不覆盖终态。
+    const termResult = await transcript.transitionState(fromState, "aborted", "stop_requested", {
+      factEvents: [{
+        type: "run.aborted",
+        payload: {
+          backendSessionId: session.backendSessionId,
+          backend: "process",
+          reason: "stop_requested",
+          verified: killed,
+        },
+      }],
     });
-    await transcript.append("run.state_change", { from: fromState, to: "aborted", reason: "stop_requested" });
-    if (!killed) {
+    if (!killed && termResult.accepted) {
       await transcript.append("run.stop_unverified", { backendSessionId: session.backendSessionId, reason: "process not found / already exited" });
     }
     console.log(JSON.stringify({
@@ -69,6 +75,8 @@ export async function stopCommand(args, config) {
       pid,
       taskkillCalled: true,
       verified: killed,
+      terminalAccepted: termResult.accepted,
+      terminalState: termResult.state,
       note: killed ? "process killed (process death = session death)" : "process not found (may have already exited)",
     }, null, 2));
     return;
@@ -104,21 +112,24 @@ export async function stopCommand(args, config) {
       { runId, logPath: join(config.runDir, "ALERTS.log") },
     ).catch(() => { /* 告警失败不影响终态 */ });
   }
-  await transcript.append("run.aborted", {
-    backendSessionId: session.backendSessionId,
-    reason: "stop_requested",
-    verified: stopResult.verified,
-    taskkillCalled: stopResult.taskkillCalled,
-  });
-  await transcript.append("run.state_change", {
-    from: fromState,
-    to: "aborted",
-    reason: "stop_requested",
+  // TD-99：run.aborted + aborted state_change 同一次 terminal transition commit。
+  const termResult = await transcript.transitionState(fromState, "aborted", "stop_requested", {
+    factEvents: [{
+      type: "run.aborted",
+      payload: {
+        backendSessionId: session.backendSessionId,
+        reason: "stop_requested",
+        verified: stopResult.verified,
+        taskkillCalled: stopResult.taskkillCalled,
+      },
+    }],
   });
   console.log(JSON.stringify({
     runId,
     stopped: true,
     verified: stopResult.verified,
     taskkillCalled: stopResult.taskkillCalled,
+    terminalAccepted: termResult.accepted,
+    terminalState: termResult.state,
   }, null, 2));
 }

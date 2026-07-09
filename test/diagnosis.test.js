@@ -90,12 +90,16 @@ test("M8-3: aborted (user/SIGINT) → aborted_manual", () => {
 });
 
 test("TD-55: stop_requested + aborted state wins over later wait failure", () => {
+  // TD-99：first-terminal-wins。aborted 先 claim 成功后，failed 的 state_change 被
+  // transitionState 拒绝（写成 run.state_change_rejected，不改终态）。
+  // 故 findState 返回 "aborted"，诊断归 aborted_manual。原 fixture 里 failed state_change
+  // 覆盖 aborted 是 TD-99 修复的竞态 bug——此处更新为修复后的世界。
   const events = [
     { type: "run.submitted", agentId: "coder_low", ts: "2026-06-26T10:00:00.000Z" },
     { type: "run.stop_requested", backendSessionId: "proc_123", reason: "user", ts: "2026-06-26T10:00:01.000Z" },
     { type: "run.state_change", from: "submitted", to: "aborted", reason: "stop_requested", ts: "2026-06-26T10:00:01.000Z" },
     { type: "run.error", phase: "wait", error: "process exited with code 143", ts: "2026-06-26T10:00:02.000Z" },
-    { type: "run.state_change", from: "aborted", to: "failed", reason: "backend_error", ts: "2026-06-26T10:00:02.000Z" },
+    { type: "run.state_change_rejected", attemptedTo: "failed", existingTerminal: "aborted", reason: "terminal already aborted (first-terminal-wins)", ts: "2026-06-26T10:00:02.000Z" },
   ];
   const d = diagnoseFailure(events);
   assert.equal(d.category, "aborted_manual");

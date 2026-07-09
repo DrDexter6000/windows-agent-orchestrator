@@ -42,6 +42,112 @@ export class JsonlTranscript {
       await releaseLock();
     }
   }
+
+  /**
+   * TD-99：跨进程原子终态仲裁。
+   *
+   * 在已有 append lock 内一次完成：读事件 → 检查既有终态 → 分配 seq → 批量 append。
+   * 不在持锁期间调公开 append()（避免嵌套锁死锁）——直接在锁内 readFile/appendFile。
+   *
+   * 仲裁规则（first terminal wins）：
+   *   - 历史已有 terminal run.state_change → 拒绝任何新转移（含 running/submitted 复活）。
+   *   - 有 state_change 但均非终态 → 不把 run.stop_requested/run.error/run.completed 等
+   *     前置事实当成已 claim 的终态（防自拒绝）。
+   *   - 完全无 state_change → 用 findState 的 legacy fallback（inferStateFromLegacyEvent）
+   *     判断是否已有 legacy terminal fact（旧 transcript 兼容）。
+   *
+   * terminal 成功时，可将 terminal fact event（如 run.aborted/run.completed）与 state_change
+   * 同批写入（options.factEvents），保证终态事实与状态转移原子落盘。
+   * rejected 时写 run.state_change_rejected 审计事件（不静默消失）。
+   *
+   * @param {string} from - 期望的源状态（信息性，不做严格校验）
+   * @param {string} to - 目标状态
+   * @param {string} reason
+   * @param {{ factEvents?: Array<{type: string, payload?: object}> }} [options]
+   *   terminal 成功时同批写入的 fact events（如 [{type:"run.aborted", payload:{...}}]）
+   * @returns {Promise<{accepted:true, state, transition}|{accepted:false, state, rejection}>}
+   */
+  async transitionState(from, to, reason, options = {}) {
+    await mkdir(dirname(this.filePath), { recursive: true });
+    const releaseLock = await acquireAppendLock(this.filePath);
+    try {
+      let events = [];
+      try {
+        events = await readTranscript(this.filePath);
+      } catch {
+        events = [];
+      }
+      const existing = _detectExistingTerminal(events);
+      if (existing) {
+        // 被拒：写审计事件（锁内，与判定原子）。
+        const rejectionPayload = {
+          attemptedTo: to,
+          existingTerminal: existing,
+          reason: `terminal already ${existing} (first-terminal-wins)`,
+        };
+        this.seq = Math.max(this.seq, findLastEventSeq(events)) + 1;
+        const rejectionEvent = {
+          ts: new Date().toISOString(),
+          seq: this.seq,
+          runId: this.context.runId,
+          agentId: this.context.agentId,
+          type: "run.state_change_rejected",
+          ...rejectionPayload,
+        };
+        await appendFile(this.filePath, `${JSON.stringify(rejectionEvent)}\n`, "utf8");
+        return { accepted: false, state: existing, rejection: rejectionPayload };
+      }
+      // 接受：同批写入 factEvents（如 run.aborted）+ run.state_change。
+      const factEvents = Array.isArray(options.factEvents) ? options.factEvents : [];
+      const transition = { from, to, reason };
+      let seq = Math.max(this.seq, findLastEventSeq(events));
+      const written = [];
+      for (const fe of factEvents) {
+        seq += 1;
+        const ev = {
+          ts: new Date().toISOString(),
+          seq,
+          runId: this.context.runId,
+          agentId: this.context.agentId,
+          type: fe.type,
+          ...(fe.payload ?? {}),
+        };
+        await appendFile(this.filePath, `${JSON.stringify(ev)}\n`, "utf8");
+        written.push(ev);
+      }
+      seq += 1;
+      const stateEv = {
+        ts: new Date().toISOString(),
+        seq,
+        runId: this.context.runId,
+        agentId: this.context.agentId,
+        type: "run.state_change",
+        ...transition,
+      };
+      await appendFile(this.filePath, `${JSON.stringify(stateEv)}\n`, "utf8");
+      this.seq = seq;
+      return { accepted: true, state: to, transition: stateEv, facts: written };
+    } finally {
+      await releaseLock();
+    }
+  }
+}
+
+/**
+ * TD-99 内部：检测事件序列中是否已有"已 claim 的终态"。
+ * - 有 run.state_change 且最新一条 to∈TERMINAL → 返回该终态。
+ * - 有 run.state_change 但均非终态 → 返回 null（前置事实不算已 claim）。
+ * - 完全无 state_change → 用 findState 的 legacy fallback（旧 transcript 兼容）。
+ */
+function _detectExistingTerminal(events) {
+  const stateChangeIndex = findLatestIndex(events, "run.state_change");
+  if (stateChangeIndex >= 0) {
+    const latest = events[stateChangeIndex];
+    return TERMINAL_STATES.includes(latest.to) ? latest.to : null;
+  }
+  // 无 state_change：legacy fallback
+  const inferred = findState(events);
+  return TERMINAL_STATES.includes(inferred) ? inferred : null;
 }
 
 async function acquireAppendLock(filePath) {

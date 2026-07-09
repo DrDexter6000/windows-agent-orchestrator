@@ -349,12 +349,16 @@ export class RunManager {
   }
 
   async _transition(transcript, from, to, reason) {
-    await transcript.append("run.state_change", { from, to, reason });
-    // TD-92 debug mode：预生成失败（certification_gate/fire_forget_guard/spawn_error）也捕获 friction
-    if (to === "failed" || to === "timed_out" || to === "aborted") {
-      const ctx = transcript.context ?? {};
-      _maybeWriteFrictionLogFromTranscript(transcript, ctx.runId, ctx.agentId, this.config).catch(() => {});
+    // TD-99：走原子终态仲裁。accepted 才触发 friction hook；rejected 同步不触发。
+    const result = await transcript.transitionState(from, to, reason);
+    if (result.accepted) {
+      // TD-92 debug mode：预生成失败（certification_gate/fire_forget_guard/spawn_error）也捕获 friction
+      if (to === "failed" || to === "timed_out" || to === "aborted") {
+        const ctx = transcript.context ?? {};
+        _maybeWriteFrictionLogFromTranscript(transcript, ctx.runId, ctx.agentId, this.config).catch(() => {});
+      }
     }
+    return result;
   }
 }
 
@@ -617,8 +621,10 @@ export class Run {
         `token budget exceeded: used ${budgetUsed}×${tokenBudgetMultiplier} > ${tokenBudget}`,
         { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
       ).catch(() => { /* 告警失败不影响终态 */ });
-      await this._transition(this.state, "failed", "budget_exceeded");
+      const tResult = await this._transition(this.state, "failed", "budget_exceeded");
       await this._runCleanup();
+      // TD-99：若输给先到的终态（如外部 abort），返回与现有终态一致的结果。
+      if (!tResult.accepted) return _loserResult(tResult.state, { messages, evidence, metrics, budgetExceeded: true });
       return { completed: false, messages, evidence, timedOut: false, metrics, budgetExceeded: true };
     }
 
@@ -654,8 +660,9 @@ export class Run {
             await this.transcript.append("scorecard.warn", { detail, checks: scResult.checks });
           } else {
             await this.transcript.append("run.error", { phase: "scorecard", detail });
-            await this._transition(this.state, "failed", "scorecard_failed");
+            const tResult = await this._transition(this.state, "failed", "scorecard_failed");
             await this._runCleanup();
+            if (!tResult.accepted) return _loserResult(tResult.state, { messages, evidence, metrics, scorecard: scResult });
             return { completed: false, messages, evidence, timedOut: false, metrics, scorecard: scResult };
           }
         }
@@ -664,8 +671,10 @@ export class Run {
         backendSessionId: this.result.backendSessionId,
         messageCount: messages.length,
       });
-      await this._transition(this.state, "completed", "done");
+      const tResult = await this._transition(this.state, "completed", "done");
       await this._runCleanup();
+      // TD-99：若输给先到的终态，返回与现有终态一致的结果。
+      if (!tResult.accepted) return _loserResult(tResult.state, { messages, evidence, metrics });
       return { completed: true, messages, evidence, timedOut: false, metrics };
     }
     if (doneReason === "failed") {
@@ -681,16 +690,20 @@ export class Run {
         });
       }
       await this.transcript.append("run.error", { phase: "wait", error: doneError ?? "unknown" });
-      await this._transition(this.state, "failed", "backend_error");
+      const tResult = await this._transition(this.state, "failed", "backend_error");
       await this._runCleanup();
+      // TD-99：failed claim 若输给先到的 aborted/completed/timed_out，不再 throw failed；
+      // 返回与现有终态一致的结构化结果（loser 不改终态）。
+      if (!tResult.accepted) return _loserResult(tResult.state, { messages, evidence, metrics });
       throw new Error(doneError ?? "backend reported failure");
     }
     // timedOut（controller abort 导致流结束，无 done 事件）
     await this.transcript.append("run.timed_out", {
       backendSessionId: this.result.backendSessionId,
     });
-    await this._transition(this.state, "timed_out", "timeout");
+    const tResult = await this._transition(this.state, "timed_out", "timeout");
     await this._runCleanup();
+    if (!tResult.accepted) return _loserResult(tResult.state, { messages, evidence, metrics });
     return { completed: false, messages, evidence, timedOut: true, metrics };
   }
 
@@ -810,13 +823,37 @@ export class Run {
   }
 
   async _transition(from, to, reason) {
-    this.state = to;
-    await this.transcript.append("run.state_change", { from, to, reason });
-    // TD-92 debug mode：失败终态自动捕获 friction（镜像 raiseAlert，fire-and-forget 不阻塞终态）
-    if (to === "failed" || to === "timed_out" || to === "aborted") {
-      _maybeWriteFrictionLog(this).catch(() => {});
+    // TD-99：走原子终态仲裁（first-terminal-wins）。
+    // accepted：this.state = to + 触发 friction hook。
+    // rejected：this.state 同步为现有终态（不复活），返回结果让调用方据现有终态分支。
+    const result = await this.transcript.transitionState(from, to, reason);
+    if (result.accepted) {
+      this.state = to;
+      // TD-92 debug mode：失败终态自动捕获 friction（镜像 raiseAlert，fire-and-forget 不阻塞终态）
+      if (to === "failed" || to === "timed_out" || to === "aborted") {
+        _maybeWriteFrictionLog(this).catch(() => {});
+      }
+    } else {
+      // 输给先到的终态——同步 this.state，不改终态。
+      this.state = result.state;
     }
+    return result;
   }
+}
+
+/**
+ * TD-99：构造"loser 结果"——当 _transition rejected（输给先到的终态）时，
+ * waitForCompletion 各终态路径返回与现有终态一致的结构化结果。
+ * 不改终态，不 throw failed——loser 尊重 first-terminal-wins。
+ */
+function _loserResult(existingTerminal, base) {
+  return {
+    ...base,
+    completed: existingTerminal === "completed",
+    failed: existingTerminal === "failed",
+    aborted: existingTerminal === "aborted",
+    timedOut: existingTerminal === "timed_out",
+  };
 }
 
 /**
