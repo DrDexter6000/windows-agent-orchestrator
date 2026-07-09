@@ -11,9 +11,10 @@
 //   - doctor 子命令：./doctor.js（waoDoctorCommand）
 //   - node built-in：fs/promises（readFile）、path（resolve/join）
 //
-// 注意：wao ask 复用 cli.js 的 runCommand（run 命令族，不拆）。wao.js 不 import ../cli.js，
-// 故 waoCommand 接受第三个参数 deps = { askHandler }，由 cli.js 注入（askHandler = waoAskCommand，
-// 内部调 runCommand）。这是唯一需要跨族的回指——用依赖注入保持依赖方向 cli.js -> wao.js。
+// 注意：wao.js 不持有也不直接调用 runCommand（runCommand 由 commands/run.js 持有）。
+// wao ask 子命令通过依赖注入接收 askHandler：cli.js 把 waoAskCommand 作为 deps.askHandler
+// 注入 waoCommand，waoAskCommand 留在 cli.js 内部调用 commands/run.js 导出的 runCommand。
+// DI 的目的：避免 wao.js 反向 import ../cli.js，保持依赖方向 cli.js -> wao.js。
 //
 // 本模块内部 helper：resolveArtifactPath（wao stage 的 run 路径解析，随 stage 搬迁）。
 
@@ -257,8 +258,8 @@ async function waoStateCommand(args, config) {
  * @param {string[]} args
  * @param {object} config
  * @param {{ askHandler?: (args: string[], config: object) => Promise<void> }} [deps]
- *   ask 子命令依赖注入——wao ask 复用 cli.js 的 runCommand（run 命令族不拆），
- *   wao.js 不 import ../cli.js，故 askHandler 由 cli.js 注入。
+ *   ask 子命令依赖注入——cli.js 注入 waoAskCommand（它内部调 commands/run.js 的 runCommand）。
+ *   wao.js 不 import ../cli.js，故 askHandler 由 cli.js 注入，保持依赖方向。
  */
 export async function waoCommand(args, config, deps = {}) {
   const [sub, ...tail] = args;
@@ -287,7 +288,8 @@ export async function waoCommand(args, config, deps = {}) {
     return;
   }
   if (sub === "ask") {
-    // ask 复用 runCommand（cli.js 的 run 命令族）——依赖注入，保持依赖方向。
+    // ask 通过依赖注入调 waoAskCommand（cli.js 注入），waoAskCommand 内部调 commands/run.js 的 runCommand。
+    // wao.js 不直接持有 runCommand，避免反向 import cli.js。
     if (!deps.askHandler) throw new Error("wao ask requires runCommand (deps.askHandler not injected)");
     await deps.askHandler(args.slice(1), config);
     return;
