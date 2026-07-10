@@ -2024,8 +2024,13 @@ test("TD-99: backend.spawn 返回前由第二个 writer claim aborted → submit
     let handleAborted = false;
     let resolveSpawn;
     const spawnPromise = new Promise((resolve) => { resolveSpawn = resolve; });
+    // spawnEntered barrier：spawn 被调用时 resolve，测试据此确定 start 已走到 spawn
+    // （pending accepted），无需 setTimeout 猜测时序。
+    let signalSpawnEntered;
+    const spawnEntered = new Promise((resolve) => { signalSpawnEntered = resolve; });
     const backendFor = () => ({
       async spawn() {
+        signalSpawnEntered();
         return spawnPromise.then(() => ({
           backend: "fake",
           backendSessionId: "ses_race",
@@ -2041,10 +2046,10 @@ test("TD-99: backend.spawn 返回前由第二个 writer claim aborted → submit
     const manager = new RunManager({ config, readRegistry, transcriptDir: dir, backendFor });
 
     const startPromise = manager.start("test_agent", { prompt: "hello", runId });
-    // 给 start 时间走到 spawn（pending accepted → 进入 spawn 等待）。
-    await new Promise((r) => setTimeout(r, 50));
+    // 等 spawn 真正被调用（barrier），此时 pending 已 accepted，start 在等 spawn resolve。
+    await spawnEntered;
 
-    // 第二个 writer 在 spawn resolve 前 claim aborted。
+    // 第二个 writer 在 spawn resolve 前 claim aborted（确定性，不依赖 sleep）。
     const tp = join(dir, `${runId}.jsonl`);
     const externalWriter = new JsonlTranscript(tp, { runId, agentId: "test_agent" });
     await externalWriter.transitionState("pending", "aborted", "external_stop");

@@ -7,9 +7,12 @@
 //   - 返回 {accepted:true, state, transition} 或 {accepted:false, state, rejection}。
 //
 // 这些测试不依赖 sleep；并发用 Promise.all + 两实例同文件。
-import { mkdtemp, rm } from "node:fs/promises";
+// 跨进程测试用 fork + IPC barrier（ready/go 协议），同样不依赖 sleep。
+import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { fork } from "node:child_process";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -282,6 +285,83 @@ test("TD-99 边界: rejection 审计字段完整（attemptedReason + reason=firs
     assert.equal(r.rejection.existingTerminal, "failed");
     assert.equal(r.rejection.reason, "first_terminal_wins");
   } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// --- TD-99 真实跨进程仲裁 ---
+
+const HELPER_PATH = join(dirname(fileURLToPath(import.meta.url)), "crossProcessClaim.helper.mjs");
+
+/** fork 一个子进程，用 IPC barrier（ready/go）同步，不依赖 sleep。 */
+function forkClaimer({ filePath, runId, targetState, reason }) {
+  const child = fork(HELPER_PATH, [], { stdio: ["ignore", "ignore", "inherit", "ipc"] });
+  const ready = new Promise((resolve) => {
+    child.once("message", function onMsg(msg) {
+      if (msg.cmd === "ready") resolve();
+      else child.once("message", onMsg);
+    });
+  });
+  const result = new Promise((resolve) => {
+    child.on("message", function onMsg(msg) {
+      if (msg.cmd === "result") resolve(msg);
+    });
+  });
+  const done = new Promise((resolve) => {
+    child.on("message", function onMsg(msg) {
+      if (msg.cmd === "done") resolve();
+    });
+    child.on("exit", () => resolve());
+  });
+  child.send({ cmd: "init", filePath, runId, agentId: "test_agent", targetState, reason });
+  return {
+    ready,
+    go: () => child.send({ cmd: "go" }),
+    result,
+    done,
+    kill: () => { try { child.kill(); } catch { /* 已退出 */ } },
+  };
+}
+
+test("TD-99 跨进程: 两个独立 Node 进程竞争同一 transcript → 恰好一个 accepted", async () => {
+  const dir = await makeDir();
+  const filePath = join(dir, "run_cross.jsonl");
+  // 先用主进程建 running 基线（两子进程从非终态出发 claim terminal）。
+  const seed = new JsonlTranscript(filePath, { runId: "run_cross", agentId: "test_agent" });
+  await seed.transitionState(null, "running", "first_message");
+
+  const a = forkClaimer({ filePath, runId: "run_cross", targetState: "failed", reason: "backend_error" });
+  const b = forkClaimer({ filePath, runId: "run_cross", targetState: "aborted", reason: "stop_requested" });
+
+  try {
+    // 等两子进程都 ready（构造完 transcript，等 go），再同时放行。
+    await Promise.all([a.ready, b.ready]);
+    a.go();
+    b.go();
+
+    const [ra, rb] = await Promise.all([a.result, b.result]);
+    await Promise.all([a.done, b.done]);
+
+    const accepted = [ra, rb].filter((r) => r.accepted);
+    const rejected = [ra, rb].filter((r) => !r.accepted);
+    assert.equal(accepted.length, 1, "恰好一个 accepted");
+    assert.equal(rejected.length, 1, "恰好一个 rejected");
+
+    // loser 的 existingTerminal 与 winner 的 state 一致。
+    assert.equal(rejected[0].state, accepted[0].state, "loser.existingTerminal === winner.state");
+
+    // transcript 恰好一条 terminal state_change。
+    const events = await readTranscript(filePath);
+    const terminalChanges = events.filter(
+      (e) => e.type === "run.state_change" && TERMINAL_STATES.includes(e.to),
+    );
+    assert.equal(terminalChanges.length, 1, "恰好一条 terminal state_change");
+
+    // winner 的终态生效。
+    assert.equal(findState(events), accepted[0].state);
+  } finally {
+    a.kill();
+    b.kill();
     await rm(dir, { recursive: true, force: true });
   }
 });

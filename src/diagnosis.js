@@ -22,7 +22,7 @@
 //
 // 只读：本函数不接收也不返回可变状态，不改 transcript。
 
-import { findState } from "./transcript.js";
+import { findState, TERMINAL_STATES } from "./transcript.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
 
 // 真正的认证失败：HTTP 401 / 身份验证失败 / unauthorized / 无效 key。
@@ -63,6 +63,29 @@ export function diagnoseFailure(events) {
   if (state === "completed") return { category: "none", evidence: [] };
 
   const evidence = [];
+
+  // 0) TD-99 legacy 兼容：旧双终态 transcript（aborted 先 claim 成功，failed 被 race 写入覆盖）。
+  //    新世界不会产生双终态（first-terminal-wins），这只出现在历史 transcript。
+  //    窄兼容规则（全部满足才按 legacy aborted_manual 解释）：
+  //      - 有明确 stop_requested 或 run.aborted 证据
+  //      - terminal state_change 至少两条（双终态特征）
+  //      - 第一条 terminal state_change.to === "aborted"（aborted 是真正意图，先到达）
+  //      - 不存在 run.state_change_rejected（新世界 rejected 的不归此路径）
+  //    findState 仍返回 last-wins（不改），但诊断按 legacy 给 aborted_manual。
+  const stopRequestedLegacy = evs.find((e) => e.type === "run.stop_requested");
+  const abortedLegacy = evs.find((e) => e.type === "run.aborted");
+  if (stopRequestedLegacy || abortedLegacy) {
+    const terminalChanges = evs.filter((e) => e.type === "run.state_change" && TERMINAL_STATES.includes(e.to));
+    const hasRejected = evs.some((e) => e.type === "run.state_change_rejected");
+    if (terminalChanges.length >= 2 && terminalChanges[0].to === "aborted" && !hasRejected) {
+      const source = stopRequestedLegacy ?? abortedLegacy ?? terminalChanges[0];
+      evidence.push({
+        eventType: source.type,
+        fact: `被显式中止（reason=${source.reason ?? "unknown"}）[legacy 双终态兼容]`,
+      });
+      return { category: "aborted_manual", evidence };
+    }
+  }
 
   // 1) aborted_manual：显式 stop/abort，且当前终态确实是 aborted。
   //    TD-99：failed/completed/timed_out 已赢时，迟到的 run.stop_requested 不得抢分类——
