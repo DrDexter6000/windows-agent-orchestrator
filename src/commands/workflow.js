@@ -137,15 +137,21 @@ async function workflowRunCommand(args, config) {
     ...(options.waitTimeout ? { waitTimeout: Number(options.waitTimeout) } : {}),
   });
 
-  // TD-102: nodes 含所有定义节点——执行的有结果，skipped 的标 {completed:false, skipped:true}。
+  // TD-102 审计收尾: nodes 必须覆盖 effectiveDef 的全部节点。
+  // - 有 nodeResult: {completed, runId}
+  // - skipped: {completed:false, skipped:true}
+  // - 其它未执行（如 timeout 截断）: {completed:false, skipped:false, notExecuted:true}
   const skippedSet = new Set(result.skipped ?? []);
-  const nodeEntries = Object.entries(result.nodeResults).map(([id, r]) => [id, {
-    completed: r.completed,
-    runId: r.runId,
-  }]);
-  for (const nodeId of skippedSet) {
-    if (!nodeEntries.some(([id]) => id === nodeId)) {
-      nodeEntries.push([nodeId, { completed: false, skipped: true }]);
+  const nodes = {};
+  for (const node of effectiveDef.nodes) {
+    const id = node.id;
+    const nr = result.nodeResults?.[id];
+    if (nr) {
+      nodes[id] = { completed: nr.completed, runId: nr.runId };
+    } else if (skippedSet.has(id)) {
+      nodes[id] = { completed: false, skipped: true };
+    } else {
+      nodes[id] = { completed: false, skipped: false, notExecuted: true };
     }
   }
 
@@ -153,7 +159,7 @@ async function workflowRunCommand(args, config) {
     workflowRunId,
     workflowId: wfDef.id,
     completed: result.completed,
-    nodes: Object.fromEntries(nodeEntries),
+    nodes,
   }, null, 2));
 }
 

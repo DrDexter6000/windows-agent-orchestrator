@@ -145,3 +145,97 @@ test("S3-2 端到端: .wao/ 未 init → engine 不崩，workflow 正常完成",
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// --- TD-102 审计收尾: timeout outcome edges ---
+
+test("TD-102 timeout: 超时后 .wao/state 必须 failed（不是 in_progress）", async () => {
+  const dir = await makeTempProjectWithWao();
+  try {
+    // 让节点 start 慢（200ms），workflowTimeout=50ms → 第 1 层未跑完就到 deadline
+    const rm = mockRunManager();
+    const origStart = rm.start.bind(rm);
+    rm.start = async (agentId, opts) => {
+      await new Promise((r) => setTimeout(r, 200));
+      return origStart(agentId, opts);
+    };
+    const engine = new WorkflowEngine({ runManager: rm });
+    const wf = defineWorkflow({
+      id: "wf_timeout",
+      nodes: [
+        { id: "a", type: "agent", agentId: "worker", prompt: "A" },
+        { id: "b", type: "agent", agentId: "worker", prompt: "B" }, // 第 2 层，应被超时截断
+      ],
+      edges: [{ from: "a", to: "b" }],
+    });
+    const result = await engine.execute(wf, { workflowTimeout: 50, cwd: dir });
+    assert.equal(result.completed, false, "超时 → completed:false");
+    assert.equal(result.timedOut, true, "timedOut:true");
+
+    // 核心断言：state snapshot 必须是 failed，不是 in_progress
+    const state = await readCurrentState(getWaoDir(dir));
+    assert.ok(state, "state 应被写入");
+    assert.equal(state.status, "failed", "超时后 state 必须 failed（不是 in_progress）");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-102 timeout: 超时未执行的节点不伪装 skipped（CLI 可区分）", async () => {
+  const dir = await makeTempProjectWithWao();
+  try {
+    const rm = mockRunManager();
+    const origStart = rm.start.bind(rm);
+    rm.start = async (agentId, opts) => {
+      await new Promise((r) => setTimeout(r, 200));
+      return origStart(agentId, opts);
+    };
+    const engine = new WorkflowEngine({ runManager: rm });
+    const wf = defineWorkflow({
+      id: "wf_timeout_skip",
+      nodes: [
+        { id: "a", type: "agent", agentId: "worker", prompt: "A" },
+        { id: "b", type: "agent", agentId: "worker", prompt: "B" },
+      ],
+      edges: [{ from: "a", to: "b" }],
+    });
+    const result = await engine.execute(wf, { workflowTimeout: 50, cwd: dir });
+    // b 在第 2 层被 timeout 截断——不应在 skipped 中
+    assert.ok(!result.skipped.includes("b"), "超时截断的 b 不应伪装为 skipped");
+    // b 也不应在 nodeResults 中（未执行）
+    assert.ok(!result.nodeResults.b, "b 不应在 nodeResults 中（未执行）");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-102 router skip: state notes 不得写 'upstream failed'", async () => {
+  const dir = await makeTempProjectWithWao();
+  try {
+    const rm = mockRunManager();
+    const engine = new WorkflowEngine({ runManager: rm });
+    const wf = defineWorkflow({
+      id: "wf_router_notes",
+      nodes: [
+        { id: "check", type: "agent", agentId: "worker", prompt: "check" },
+        { id: "decide", type: "router", routes: () => "go" },
+        { id: "go", type: "agent", agentId: "worker", prompt: "go" },
+        { id: "stop", type: "agent", agentId: "worker", prompt: "stop" }, // router 未选
+      ],
+      edges: [
+        { from: "check", to: "decide" },
+        { from: "decide", to: "go" },
+        { from: "decide", to: "stop" },
+      ],
+    });
+    await engine.execute(wf, { cwd: dir });
+
+    const state = await readCurrentState(getWaoDir(dir));
+    const stopStep = state.steps.find((s) => s.node === "stop");
+    assert.equal(stopStep.status, "skipped", "stop 应标 skipped（router 未选）");
+    // 核心断言：router skip 的 notes 不得是 "upstream failed"
+    assert.notEqual(stopStep.notes, "upstream failed",
+      "router 未选的节点 notes 不得写 'upstream failed'（制造错误原因）");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -167,6 +167,27 @@ export class WorkflowEngine {
       }
     }
 
+    // TD-102 审计收尾：for 循环结束后写一次最终 state snapshot。
+    // 超时 break 跳过了层末快照写入 → state 停在上一个 in_progress。
+    // 最终快照强制终态：!overallCompleted（超时/失败）→ failed；否则正常推导。
+    if (waoDir) {
+      try {
+        await writeStateSnapshot(waoDir, {
+          workflowId: workflowDef.id,
+          executed: [...executed],
+          skipped: [...skipped],
+          completedResults,
+          allNodes: allNodeIds,
+          predecessors: Object.fromEntries(
+            [...edgeMap.entries()].map(([id, e]) => [id, e.predecessors]),
+          ),
+          ...(overallCompleted ? {} : { finalStatus: "failed" }),
+        });
+      } catch (error) {
+        console.error(`[wao] state snapshot failed: ${error.message}`);
+      }
+    }
+
     await this._log("workflow.completed", {
       workflowId: workflowDef.id,
       completed: overallCompleted,

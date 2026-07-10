@@ -45,7 +45,7 @@ export async function writeStateSnapshot(waoDir, data) {
   }
 
   // 生成新 current.md
-  const { workflowId, executed, skipped, completedResults, allNodes, predecessors } = data;
+  const { workflowId, executed, skipped, completedResults, allNodes, predecessors, finalStatus } = data;
   const executedSet = new Set(executed ?? []);
   const skippedSet = new Set(skipped ?? []);
   const ts = new Date().toISOString();
@@ -54,9 +54,12 @@ export async function writeStateSnapshot(waoDir, data) {
   const resolvedSet = new Set([...executedSet, ...skippedSet]);
   const anyFailed = [...completedResults.values()].some((r) => !r.completed);
   const allResolved = resolvedSet.size >= (allNodes?.length ?? 0);
-  const status = !allResolved
-    ? "in_progress"
-    : (anyFailed ? "failed" : "completed");
+  // TD-102 审计收尾：engine 可通过 finalStatus 强制终态（timeout 截断时节点未全 resolved，
+  // 但 workflow 已终态——必须 failed，不能 in_progress）。
+  const status = finalStatus
+    ?? (!allResolved
+      ? "in_progress"
+      : (anyFailed ? "failed" : "completed"));
 
   const lines = [];
   lines.push(`# State: ${workflowId ?? "unknown"}`);
@@ -73,7 +76,7 @@ export async function writeStateSnapshot(waoDir, data) {
     let notes = "";
     if (skippedSet.has(node)) {
       status = "skipped";
-      notes = "upstream failed";
+      notes = "skipped"; // TD-102: 中性 notes，不猜测 upstream_failed vs route_not_selected
     } else if (executedSet.has(node) && result) {
       status = result.completed ? "completed" : "failed";
       runId = result.runId ?? "-";
