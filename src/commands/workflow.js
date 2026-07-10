@@ -137,16 +137,23 @@ async function workflowRunCommand(args, config) {
     ...(options.waitTimeout ? { waitTimeout: Number(options.waitTimeout) } : {}),
   });
 
+  // TD-102: nodes 含所有定义节点——执行的有结果，skipped 的标 {completed:false, skipped:true}。
+  const skippedSet = new Set(result.skipped ?? []);
+  const nodeEntries = Object.entries(result.nodeResults).map(([id, r]) => [id, {
+    completed: r.completed,
+    runId: r.runId,
+  }]);
+  for (const nodeId of skippedSet) {
+    if (!nodeEntries.some(([id]) => id === nodeId)) {
+      nodeEntries.push([nodeId, { completed: false, skipped: true }]);
+    }
+  }
+
   console.log(JSON.stringify({
     workflowRunId,
     workflowId: wfDef.id,
     completed: result.completed,
-    nodes: Object.fromEntries(
-      Object.entries(result.nodeResults).map(([id, r]) => [id, {
-        completed: r.completed,
-        runId: r.runId,
-      }]),
-    ),
+    nodes: Object.fromEntries(nodeEntries),
   }, null, 2));
 }
 

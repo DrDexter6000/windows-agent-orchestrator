@@ -496,3 +496,27 @@ test("M8-5: integrator 节点 output 经 ctx.upstream 可被下游引用（链�
   assert.ok(cCall, "下游 c 应被调用");
   assert.match(cCall.prompt, /output_run_1/, "c 的 prompt 应引用 integrator 的 draft");
 });
+
+// ---------------------------------------------------------------------------
+// TD-102 Batch 1B: WorkflowEngine.execute() returns skipped node IDs
+// ---------------------------------------------------------------------------
+
+test("TD-102: first-layer failure → execute() returns skipped downstream node IDs", async () => {
+  const rm = mockRunManager(["a"]); // a fails
+  const engine = makeEngine(rm);
+  const wf = defineWorkflow({
+    id: "skip-test",
+    nodes: [
+      { id: "a", type: "agent", agentId: "w", prompt: "a" },
+      { id: "b", type: "agent", agentId: "w", prompt: "b" },
+      { id: "c", type: "agent", agentId: "w", prompt: "c" },
+    ],
+    edges: [{ from: "a", to: "b" }, { from: "b", to: "c" }],
+  });
+  const result = await engine.execute(wf, { cwd: join(tmpdir(), "wao-test-disabled") });
+  assert.equal(result.completed, false);
+  // execute() must return skipped node IDs
+  assert.ok(Array.isArray(result.skipped), "execute() should return a skipped array");
+  assert.ok(result.skipped.includes("b"), "b should be in skipped");
+  assert.ok(result.skipped.includes("c"), "c should be in skipped");
+});

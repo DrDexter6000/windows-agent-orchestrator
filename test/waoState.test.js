@@ -122,3 +122,49 @@ test("S3-2: readCurrentState 对未 init 的 waoDir 返回 null（不崩）", as
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// --- TD-102 Batch 1B: state snapshot resolved semantics ---
+
+test("TD-102: executed failed + downstream skipped + all resolved → status=failed", async () => {
+  const dir = await makeInitWao();
+  try {
+    const waoDir = getWaoDir(dir);
+    await writeStateSnapshot(waoDir, {
+      workflowId: "wf_fail",
+      executed: ["analyze", "implement"],
+      skipped: ["test"],
+      completedResults: new Map([
+        ["analyze", { runId: "r1", completed: true }],
+        ["implement", { runId: "r2", completed: false }],
+      ]),
+      allNodes: ["analyze", "implement", "test"],
+      predecessors: { implement: ["analyze"], test: ["implement"] },
+    });
+    const state = await readCurrentState(waoDir);
+    assert.equal(state.status, "failed", "executed 有 failed + skipped 补齐 → failed");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-102: all executed completed + router-skipped + all resolved → status=completed", async () => {
+  const dir = await makeInitWao();
+  try {
+    const waoDir = getWaoDir(dir);
+    await writeStateSnapshot(waoDir, {
+      workflowId: "wf_ok",
+      executed: ["analyze", "implement_a"],
+      skipped: ["implement_b"],  // router 未选，不是失败
+      completedResults: new Map([
+        ["analyze", { runId: "r1", completed: true }],
+        ["implement_a", { runId: "r2", completed: true }],
+      ]),
+      allNodes: ["analyze", "implement_a", "implement_b"],
+      predecessors: { implement_a: ["analyze"], implement_b: ["analyze"] },
+    });
+    const state = await readCurrentState(waoDir);
+    assert.equal(state.status, "completed", "全 completed + router skip 不算失败 → completed");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

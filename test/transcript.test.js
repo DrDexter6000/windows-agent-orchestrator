@@ -128,6 +128,24 @@ test("findState lets a later terminal legacy event override non-terminal state_c
   assert.equal(findState(events), "aborted");
 });
 
+// --- TD-102 Batch 1B: workflow transcript outcome semantics ---
+
+test("TD-102: workflow.completed {completed:true} → findState returns completed", () => {
+  const events = [
+    { type: "workflow.started" },
+    { type: "workflow.completed", completed: true },
+  ];
+  assert.equal(findState(events), "completed");
+});
+
+test("TD-102: workflow.completed {completed:false} → findState returns failed", () => {
+  const events = [
+    { type: "workflow.started" },
+    { type: "workflow.completed", completed: false },
+  ];
+  assert.equal(findState(events), "failed");
+});
+
 test("findLastEventSeq returns max seq", () => {
   const events = [
     { type: "run.started", seq: 1 },

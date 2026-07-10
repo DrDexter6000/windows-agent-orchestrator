@@ -49,10 +49,14 @@ export async function writeStateSnapshot(waoDir, data) {
   const executedSet = new Set(executed ?? []);
   const skippedSet = new Set(skipped ?? []);
   const ts = new Date().toISOString();
+  // TD-102: resolved = executed ∪ skipped。全 resolved 才可能终态；
+  // anyFailed 只看 executed results（router skip 不算失败）。
+  const resolvedSet = new Set([...executedSet, ...skippedSet]);
   const anyFailed = [...completedResults.values()].some((r) => !r.completed);
-  const status = executedSet.size === (allNodes?.length ?? 0)
-    ? (anyFailed ? "failed" : "completed")
-    : "in_progress";
+  const allResolved = resolvedSet.size >= (allNodes?.length ?? 0);
+  const status = !allResolved
+    ? "in_progress"
+    : (anyFailed ? "failed" : "completed");
 
   const lines = [];
   lines.push(`# State: ${workflowId ?? "unknown"}`);

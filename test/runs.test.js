@@ -361,3 +361,108 @@ test("collect on process-type run: 从 transcript 重建 message，不报 openco
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- TD-102 Batch 1B: runs aggregation must exclude workflow transcripts ---
+
+test("TD-102: runs list excludes wf_* transcripts", async () => {
+  const dir = await makeRunDir();
+  try {
+    await writeJsonl(dir, "run_real", [
+      { type: "run.started", ts: "2026-07-10T10:00:00.000Z" },
+      { type: "run.state_change", to: "completed" },
+      { type: "run.completed", ts: "2026-07-10T10:01:00.000Z" },
+    ]);
+    await writeJsonl(dir, "wf_test", [
+      { type: "workflow.started", ts: "2026-07-10T11:00:00.000Z" },
+      { type: "workflow.completed", completed: false, ts: "2026-07-10T11:01:00.000Z" },
+    ]);
+
+    const output = cli(["runs", "list"], dir);
+    const lines = output.split(/\r?\n/);
+    // 只含 run_real，不含 wf_test
+    assert.ok(lines.some((l) => l.startsWith("run_real")), "含 run_real");
+    assert.ok(!lines.some((l) => l.startsWith("wf_test")), "不含 wf_* workflow transcript");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-102: runs summary excludes wf_* transcripts", async () => {
+  const dir = await makeRunDir();
+  try {
+    await writeJsonl(dir, "run_a", [
+      { type: "run.started", ts: "2026-07-10T10:00:00.000Z" },
+      { type: "run.state_change", to: "completed" },
+      { type: "run.completed", ts: "2026-07-10T10:01:00.000Z" },
+    ]);
+    await writeJsonl(dir, "wf_fail", [
+      { type: "workflow.started", ts: "2026-07-10T11:00:00.000Z" },
+      { type: "workflow.completed", completed: false, ts: "2026-07-10T11:01:00.000Z" },
+    ]);
+
+    const output = cli(["runs", "summary"], dir);
+    // 只算 1 个 run，不是 2 个
+    assert.match(output, /Total runs:\s*1/, "summary 只计 1 个 run（排除 wf_*）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-102: runs metrics --summary excludes wf_* transcripts", async () => {
+  const dir = await makeRunDir();
+  try {
+    await writeJsonl(dir, "run_x", [
+      { type: "run.started", ts: "2026-07-10T10:00:00.000Z" },
+      { type: "run.state_change", to: "completed" },
+      { type: "run.metrics", tokens: { input: 100, output: 50 } },
+      { type: "run.completed", ts: "2026-07-10T10:01:00.000Z" },
+    ]);
+    await writeJsonl(dir, "wf_metrics", [
+      { type: "workflow.started", ts: "2026-07-10T11:00:00.000Z" },
+      { type: "workflow.completed", completed: true, ts: "2026-07-10T11:01:00.000Z" },
+    ]);
+
+    const output = cli(["runs", "metrics", "--summary"], dir);
+    assert.match(output, /Total runs:\s*1/, "metrics summary 只计 1 个 run");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-102: runs dashboard --format json excludes wf_* transcripts", async () => {
+  const dir = await makeRunDir();
+  try {
+    await writeJsonl(dir, "run_d", [
+      { type: "run.started", ts: "2026-07-10T10:00:00.000Z" },
+      { type: "run.state_change", to: "completed" },
+      { type: "run.completed", ts: "2026-07-10T10:01:00.000Z" },
+    ]);
+    await writeJsonl(dir, "wf_dash", [
+      { type: "workflow.started", ts: "2026-07-10T11:00:00.000Z" },
+      { type: "workflow.completed", completed: false, ts: "2026-07-10T11:01:00.000Z" },
+    ]);
+
+    const output = cli(["runs", "dashboard", "--format", "json"], dir);
+    const parsed = JSON.parse(output);
+    assert.equal(parsed.summary.total, 1, "dashboard 只含 1 个 run");
+    assert.ok(parsed.rows.every((r) => !r.runId.startsWith("wf_")), "dashboard rows 无 wf_*");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-102: direct status wf_* still works and reports failed for completed:false", async () => {
+  const dir = await makeRunDir();
+  try {
+    await writeJsonl(dir, "wf_direct", [
+      { type: "workflow.started", ts: "2026-07-10T11:00:00.000Z" },
+      { type: "workflow.completed", completed: false, ts: "2026-07-10T11:01:00.000Z" },
+    ]);
+
+    const output = cli(["status", "wf_direct"], dir);
+    // 直接 status 应仍可用，且报告 failed（不是 completed）
+    assert.match(output, /failed/i, "direct status wf_* 应报 failed（completed:false）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

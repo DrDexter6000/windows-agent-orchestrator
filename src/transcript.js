@@ -261,6 +261,11 @@ export function findState(events) {
   if (!last) {
     return "pending";
   }
+  // TD-102: workflow.completed {completed:false} is a failed workflow, not completed.
+  // 读取 workflow.completed 事件的 payload——type 映射只看类型名，不看 completed 字段。
+  if (last.type === "workflow.completed" && last.completed === false) {
+    return "failed";
+  }
   return inferStateFromLegacyEvent(last.type);
 }
 

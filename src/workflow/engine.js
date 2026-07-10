@@ -178,6 +178,8 @@ export class WorkflowEngine {
       completed: overallCompleted,
       timedOut,
       nodeResults: Object.fromEntries(completedResults),
+      // TD-102: 被跳过的节点 IDs（失败传播 + router 未选）。CLI 用此渲染完整 node 列表。
+      skipped: [...skipped],
     };
   }
 

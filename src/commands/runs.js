@@ -73,6 +73,17 @@ async function loadRunFiles(runDir) {
 }
 
 /**
+ * TD-102: 只加载 run_*.jsonl（排除 wf_* workflow transcript）。
+ * list/summary/metrics --summary/dashboard/forecast 使用此函数——
+ * workflow transcript 不是 worker run，不应计入 run 聚合。
+ * grep/prune 保持 loadRunFiles（所有 .jsonl）。
+ */
+async function loadRunOnlyFiles(runDir) {
+  const files = await loadRunFiles(runDir);
+  return files.filter((f) => f.startsWith("run_"));
+}
+
+/**
  * M8-2 实时仪表盘聚合（🟢 工具域：纯只读聚合，绝不 retry/stop/改状态）。
  *
  * 把散落在多个 run transcript 里的状态/token/费用/证据聚合成单一视图，省 Lead
@@ -151,7 +162,7 @@ export function buildDashboard(runs, selfDeclared = null, stageProgress = null) 
 async function runsListCommand(args, config) {
   const options = parseOptions(args);
   const runDir = resolve(options.runDir ?? config.runDir);
-  const jsonlFiles = await loadRunFiles(runDir);
+  const jsonlFiles = await loadRunOnlyFiles(runDir);
   if (jsonlFiles.length === 0) {
     console.log("No runs found.");
     return;
@@ -191,7 +202,7 @@ async function runsListCommand(args, config) {
 async function runsSummaryCommand(args, config) {
   const options = parseOptions(args);
   const runDir = resolve(options.runDir ?? config.runDir);
-  const jsonlFiles = await loadRunFiles(runDir);
+  const jsonlFiles = await loadRunOnlyFiles(runDir);
   if (jsonlFiles.length === 0) {
     console.log("No runs found.");
     return;
@@ -291,7 +302,7 @@ async function runsMetricsCommand(args, config) {
 
   // --summary: 跨 run 聚合
   if (options.summary) {
-    const jsonlFiles = await loadRunFiles(runDir);
+    const jsonlFiles = await loadRunOnlyFiles(runDir);
     if (jsonlFiles.length === 0) {
       console.log("No runs found.");
       return;
@@ -425,7 +436,7 @@ async function runsForecastCommand(args, config) {
   }
 
   // 从 runs 目录构建 history：读每个 jsonl，按 agentId 分组，算 aggregateRunMetrics。
-  const jsonlFiles = await loadRunFiles(runDir);
+  const jsonlFiles = await loadRunOnlyFiles(runDir);
   const history = {};
   for (const f of jsonlFiles) {
     const events = await readTranscript(join(runDir, f));
@@ -475,7 +486,7 @@ export async function runsDashboardCommand(args, config) {
   const asJson = options.format === "json";
 
   const renderOnce = async () => {
-    const jsonlFiles = await loadRunFiles(runDir);
+    const jsonlFiles = await loadRunOnlyFiles(runDir);
     let runs = await Promise.all(
       jsonlFiles.map(async (f) => ({
         runId: f.replace(/\.jsonl$/, ""),
