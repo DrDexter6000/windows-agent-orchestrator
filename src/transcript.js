@@ -151,9 +151,26 @@ function _detectExistingTerminal(events) {
   if (events.some((e) => e.type === "run.state_change")) {
     return null;
   }
-  // 完全无 state_change：legacy fallback
-  const inferred = findState(events);
-  return TERMINAL_STATES.includes(inferred) ? inferred : null;
+  // 完全无 state_change：legacy fallback。
+  // TD-100：findState 的 legacy fallback 把 run.stop_requested 映射成 "aborted"，
+  // 但在 _detectExistingTerminal 语境下，stop_requested 是"意图"而非"已 claim 的终态"——
+  // stop 命令自己刚写的 stop_requested 不应自拒绝后续的 aborted claim。
+  // run.aborted / run.completed / run.timed_out / run.error 是真实终态事实，保留。
+  const last = events.at(-1);
+  if (!last) return null;
+  const legacyClaimMap = {
+    "run.completed": "completed",
+    "workflow.completed": "completed",
+    "run.timed_out": "timed_out",
+    "run.aborted": "aborted",
+    "run.error": "failed",
+  };
+  // 从后向前找第一个 legacy claim 级终态事实（排除 run.stop_requested）。
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const mapped = legacyClaimMap[events[index].type];
+    if (mapped) return mapped;
+  }
+  return null;
 }
 
 async function acquireAppendLock(filePath) {

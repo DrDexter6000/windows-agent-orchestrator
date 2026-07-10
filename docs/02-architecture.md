@@ -293,6 +293,12 @@ type RunState =
 不可逆，不把完整状态机策略下沉到 L1。这解决了 owner 进程（`waitForCompletion` 写 failed/completed）
 与短命 CLI 进程（`stop` 写 aborted）之间的终态覆盖竞态。
 
+**TD-100 stop 副作用所有权**：`stop` 命令先 `transitionState` claim `aborted`（含 `run.aborted{verification:"pending"}`），
+只有 accepted winner 才执行破坏性副作用（taskkill / backend.abort）。rejected loser 零副作用。
+winner 执行 kill/abort 后追加 `run.stop_verified`（进程已死）或 `run.stop_unverified`（进程可能仍活 + raiseAlert）。
+`verified` 以后置 PID 存活检查为准——taskkill exitCode=0 不单独产生 verified=true（PID 可能复用/僵尸）。
+`run.stop_requested` 含 `reason:"user"`（修复 diagnosis 显示 reason=unknown）。
+
 ### 4.2 RunManager `[S]`
 
 替代当前 `cli.js` 里散落的 `activeSessions` 数组 + `doSpawn`/`doWait` 逻辑。
