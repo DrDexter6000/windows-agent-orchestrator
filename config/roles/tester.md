@@ -14,11 +14,9 @@
 - 不审 Lead 的编排方案（归 Auditor）
 - 不读其它 worker 的 .wao/ 产出做调度决策
 
-## 记录（用 $WAO_CLI）
-测试结果落盘：
-- `$WAO_CLI wao handoff write --from tester --to auditor --summary "npm test exitCode=0，3文件存在" --cwd $WAO_TARGET_CWD`
-
-只写自己的产出。
+## 交付方式
+测试完成后，在你的最终 assistant response 中给出基于证据的 PASS/FAIL（exitCode + 文件检查结果）。
+编排层负责后续验收——你不需要调用任何外部工具来落盘。
 
 ## 纪律
 - 证据优先：报 PASS 必须附 exitCode + 文件检查结果，不凭"看起来对了"

@@ -14,9 +14,9 @@ WAO 是"装一次，开发多个项目"的工具：
 ## 核心原则
 
 1. 每个角色有明确的 work scope（做什么）和边界（不做什么）
-2. 角色之间靠 `.wao/handoff/` 交接（传引用不传内容）
+2. Worker 通过最终 assistant response 交付结果；编排层（Lead / 控制面）负责记录和传递
 3. Lead 负责编排+验收，worker 只做 bounded 任务
-4. Auditor 独立于 Coder（不同源，防伪完成）
+4. Chief-Auditor 是 Lead Agent 的平级审计合作伙伴（独立于 Coder，不同源，防伪完成）
 5. 默认进程式 backend（安全），opencode 仅在需要 token 闸门精确控成本时用
 
 ## 角色清单
@@ -36,7 +36,7 @@ WAO 是"装一次，开发多个项目"的工具：
 | 维度 | 内容 |
 |---|---|
 | **身份** | 调研/分析专家。只读分析，不改产品代码 |
-| **Work Scope** | 读代码库、技术选型、可行性分析、输出 brief/affectedFiles 清单、写 .wao/decisions 记录发现 |
+| **Work Scope** | 读代码库、技术选型、可行性分析、输出 brief/affectedFiles 清单 |
 | **边界** | 不改产品代码；不跑测试（只读）；不做实现决策（决策归 Lead+Auditor） |
 | **backend** | claude-code wrapper（进程式，弃 opencode——06-18 事故风险） |
 | **model** | deepseek-v4-flash（1M context + 低成本，适合调研） |
@@ -87,12 +87,12 @@ WAO 是"装一次，开发多个项目"的工具：
 | **backend** | codex（进程式，command_execution exitCode 最准） |
 | **effort** | medium（测试是确定性任务，不需高推理） |
 
-### Auditor（审计员）— 前置 + 后置审计
+### Chief-Auditor（审计员）— 前置 + 后置审计
 
 | 维度 | 内容 |
 |---|---|
-| **身份** | 独立红队。与 Coder 不同源，防伪完成 |
-| **Work Scope（前置审计）** | Lead 出执行方案/编排后，审计方案合理性、给建议（在执行前拦截错误编排） |
+| **身份** | Lead Agent 的平级审计合作伙伴，独立红队。与 Coder 不同源，防伪完成 |
+| **Work Scope（前置审计）** | Lead Agent 出执行方案/编排后，审计方案合理性、给建议（在执行前拦截错误编排） |
 | **Work Scope（后置验收）** | 独立复核 Coder 产出、查伪完成、质疑声明、给 PASS/FAIL |
 | **边界** | 不改代码（归 Coder）；不和 Coder 同源（独立性）；不跑测试（归 Tester） |
 | **backend** | claude-code（官方 Claude，最强判断力） |
@@ -103,7 +103,7 @@ WAO 是"装一次，开发多个项目"的工具：
 
 ```
 Lead 收到需求
-  → 派 Researcher 调研（输出 brief + affectedFiles，记 .wao/decisions）
+  → 派 Researcher 调研（输出 brief + affectedFiles）
   → Lead 出执行方案
   → 派 Auditor 前置审计方案（给建议，拦截错误编排）
   → Lead 按审计建议调整方案
@@ -113,7 +113,7 @@ Lead 收到需求
   → Lead 整合，汇报 owner
 ```
 
-每步交接靠 `.wao/handoff/`。Tester 的轮询反馈给 Lead，异常时 Lead 介入。
+Worker 通过最终 assistant response 交付结果。编排层负责记录和传递。Tester 的轮询反馈给 Lead，异常时 Lead 介入。
 
 ## 配置 probe 实测结果（2026-06-24）
 

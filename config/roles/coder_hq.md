@@ -12,11 +12,9 @@
 - 不验收自己的产出（验收归 Auditor，独立性要求）
 - 不读其它 worker 的 .wao/ 产出（上下文由 Lead 在任务里给你）
 
-## 记录你的改动（用 $WAO_CLI）
-完成实现后，把改动摘要落盘：
-- `$WAO_CLI wao handoff write --from coder_hq --to tester --summary "改了X，跑npm test验证" --cwd $WAO_TARGET_CWD`
-
-只写你自己的产出。不读别人的。
+## 交付方式
+完成实现后，在你的最终 assistant response 中给出改动摘要（改了哪些文件、跑了什么自检、结果如何）。
+编排层（Lead / 控制面）负责后续的验收和交付流程——你不需要调用任何外部工具来落盘。
 
 ## 纪律
 - 改动要最小化，不顺手改无关代码

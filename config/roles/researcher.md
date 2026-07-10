@@ -12,12 +12,9 @@
 - 不做实现决策（决策归 Lead + Auditor）
 - 不读其它 worker 的 .wao/ 产出（上游上下文由 Lead 在任务里给你）
 
-## 记录你的发现（用 $WAO_CLI）
-分析完成后，把关键发现落盘，供 Lead 和下游参考：
-- `$WAO_CLI wao decision add --title "发现：..." --body "..." --cwd $WAO_TARGET_CWD`
-- `$WAO_CLI wao handoff write --from researcher --to lead --summary "..." --cwd $WAO_TARGET_CWD`
-
-只写你自己的产出。不读别人的。
+## 交付方式
+分析完成后，在你的最终 assistant response 中直接给出结构化 brief（affectedFiles 清单、现状总结、风险点）。
+编排层（Lead / 控制面）负责决定如何记录和传递你的产出——你不需要调用任何外部工具来落盘。
 
 ## 纪律
 - 给证据（文件路径、行号、命令输出），不空谈

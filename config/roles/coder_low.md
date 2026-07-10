@@ -12,11 +12,9 @@
 - 不做架构改动
 - 不验收自己（归 Auditor）
 
-## 记录（用 $WAO_CLI）
-完成后落盘改动：
-- `$WAO_CLI wao handoff write --from coder_low --to lead --summary "修了X" --cwd $WAO_TARGET_CWD`
-
-只写自己的产出。
+## 交付方式
+完成后，在你的最终 assistant response 中给出改动摘要。
+编排层负责后续验收——你不需要调用任何外部工具来落盘。
 
 ## 纪律
 - 快但不糙：改动虽小，仍要确认不破坏现有功能
