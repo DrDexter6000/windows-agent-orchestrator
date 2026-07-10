@@ -167,10 +167,12 @@ export class WorkflowEngine {
       }
     }
 
-    // TD-102 审计收尾：for 循环结束后写一次最终 state snapshot。
-    // 超时 break 跳过了层末快照写入 → state 停在上一个 in_progress。
-    // 最终快照强制终态：!overallCompleted（超时/失败）→ failed；否则正常推导。
-    if (waoDir) {
+    // TD-102 最终收尾：仅 timeout 时补写最终 snapshot。
+    // 普通（成功/节点失败/router skip）已在层末写过正确 snapshot，不重复写——
+    // 重复写会产生多余的 history 归档 + map 索引。
+    // timeout break 跳过了层末快照写入 → state 停在上一个 in_progress，
+    // 需要这里补写 finalStatus:"failed"（超时未执行节点保持 pending，不进 skipped）。
+    if (timedOut && waoDir) {
       try {
         await writeStateSnapshot(waoDir, {
           workflowId: workflowDef.id,
@@ -181,7 +183,7 @@ export class WorkflowEngine {
           predecessors: Object.fromEntries(
             [...edgeMap.entries()].map(([id, e]) => [id, e.predecessors]),
           ),
-          ...(overallCompleted ? {} : { finalStatus: "failed" }),
+          finalStatus: "failed",
         });
       } catch (error) {
         console.error(`[wao] state snapshot failed: ${error.message}`);

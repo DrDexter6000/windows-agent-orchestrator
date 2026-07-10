@@ -239,3 +239,35 @@ test("TD-102 router skip: state notes 不得写 'upstream failed'", async () => 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// --- TD-102 最终收尾: 不产生重复最终 snapshot ---
+
+test("TD-102: 正常成功 workflow 不产生重复最终 snapshot（history + map 干净）", async () => {
+  const dir = await makeTempProjectWithWao();
+  try {
+    const rm = mockRunManager();
+    const engine = new WorkflowEngine({ runManager: rm });
+    const wf = defineWorkflow({
+      id: "one-node",
+      nodes: [{ id: "a", type: "agent", agentId: "worker", prompt: "A" }],
+      edges: [],
+    });
+    await engine.execute(wf, { cwd: dir });
+
+    // history 目录不应有任何归档文件——单节点 workflow 只有 1 层，1 次 snapshot，
+    // 没有"旧 current 被归档"的过程（第一次写 current 不归档）。
+    const { readdir } = await import("node:fs/promises");
+    const historyDir = join(getWaoDir(dir), "state", "history");
+    let historyFiles = [];
+    try { historyFiles = await readdir(historyDir); } catch {}
+    assert.equal(historyFiles.length, 0,
+      `正常单节点 workflow 不应产生 history 归档，got: ${historyFiles.join(", ")}`);
+
+    // map.md 不应含 "archived snapshot" 索引行
+    const mapContent = await readFile(join(getWaoDir(dir), "state", "map.md"), "utf8");
+    assert.ok(!/archived snapshot/i.test(mapContent),
+      "map.md 不应含 archived snapshot 索引（无重复归档）");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

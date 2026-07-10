@@ -137,10 +137,30 @@ async function workflowRunCommand(args, config) {
     ...(options.waitTimeout ? { waitTimeout: Number(options.waitTimeout) } : {}),
   });
 
-  // TD-102 审计收尾: nodes 必须覆盖 effectiveDef 的全部节点。
-  // - 有 nodeResult: {completed, runId}
-  // - skipped: {completed:false, skipped:true}
-  // - 其它未执行（如 timeout 截断）: {completed:false, skipped:false, notExecuted:true}
+  // TD-102 最终收尾: nodes 由纯函数 buildWorkflowNodeSummary 生成。
+  const nodes = buildWorkflowNodeSummary(effectiveDef, result);
+
+  console.log(JSON.stringify({
+    workflowRunId,
+    workflowId: wfDef.id,
+    completed: result.completed,
+    nodes,
+  }, null, 2));
+}
+
+/**
+ * TD-102 最终收尾：从 execute() 结果构造 CLI node summary。
+ * 纯函数，可独立测试。遍历 effectiveDef 的全部节点：
+ * - 有 nodeResult: {completed, runId}
+ * - skipped（失败传播/router 未选）: {completed:false, skipped:true}
+ * - 其它未执行（如 timeout 截断）: {completed:false, skipped:false, notExecuted:true}
+ * 输出键覆盖 effectiveDef 的全部节点且顺序稳定（按定义顺序）。
+ *
+ * @param {{nodes: Array<{id: string}>}} effectiveDef
+ * @param {{nodeResults?: object, skipped?: string[]}} result
+ * @returns {Record<string, object>}
+ */
+export function buildWorkflowNodeSummary(effectiveDef, result) {
   const skippedSet = new Set(result.skipped ?? []);
   const nodes = {};
   for (const node of effectiveDef.nodes) {
@@ -154,13 +174,7 @@ async function workflowRunCommand(args, config) {
       nodes[id] = { completed: false, skipped: false, notExecuted: true };
     }
   }
-
-  console.log(JSON.stringify({
-    workflowRunId,
-    workflowId: wfDef.id,
-    completed: result.completed,
-    nodes,
-  }, null, 2));
+  return nodes;
 }
 
 export { workflowCommand };
