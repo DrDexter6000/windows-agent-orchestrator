@@ -293,10 +293,18 @@ type RunState =
 不可逆，不把完整状态机策略下沉到 L1。这解决了 owner 进程（`waitForCompletion` 写 failed/completed）
 与短命 CLI 进程（`stop` 写 aborted）之间的终态覆盖竞态。
 
-**TD-100 stop 副作用所有权**：`stop` 命令先 `transitionState` claim `aborted`（含 `run.aborted{verification:"pending"}`），
-只有 accepted winner 才执行破坏性副作用（taskkill / backend.abort）。rejected loser 零副作用。
+**TD-100 stop 副作用所有权**：`stop` 命令先 `transitionState` claim `aborted`，只有 accepted winner
+才执行破坏性副作用（taskkill / backend.abort）。rejected loser 零副作用。
+`run.stop_requested` 不再 claim 前单独 append，而是通过 `transitionState` 的 `attemptEvents` 同批提交
+（accepted: stop_requested → run.aborted{verification:"pending"} → state_change；rejected:
+stop_requested → state_change_rejected）——持锁读取的旧 events 不含本次 attemptEvents，不自拒绝。
 winner 执行 kill/abort 后追加 `run.stop_verified`（进程已死）或 `run.stop_unverified`（进程可能仍活 + raiseAlert）。
 `verified` 以后置 PID 存活检查为准——taskkill exitCode=0 不单独产生 verified=true（PID 可能复用/僵尸）。
+PID 存活判定：`isPidAlive` 仅在 `ESRCH`（进程不存在）时返回 false；`EPERM`/未知错误保守返回 true
+（不得假验证）。taskkill 后执行有界轮询（`waitForPidExit`，默认 5 轮 × 200ms，可注入）补偿 Windows
+PID 回收延迟，轮询耗尽仍 alive → unverified + raiseAlert。`run.stop_verified`/`run.stop_unverified`
+均写 `outcome`/`taskkillCalled`/`taskkillExitCode`/`processAliveBefore`/`processAliveAfter`（进程路径）
+或 `backend`/`method`/`taskkillCalled`（opencode 路径），transcript 可重建"为何 verified"。
 `run.stop_requested` 含 `reason:"user"`（修复 diagnosis 显示 reason=unknown）。
 
 ### 4.2 RunManager `[S]`

@@ -45,15 +45,41 @@ function killProcessTree(pid) {
 
 /**
  * 检查 PID 是否存活。用 process.kill(pid, 0) 探测（不实际发信号，只检查存在性）。
+ * TD-100 收尾契约：
+ *   - ESRCH（进程不存在）→ false（死）。
+ *   - EPERM（存在但无权限）→ true（保守 alive，不得假验证）。
+ *   - 未知错误 → true（无法证明死亡时不得 verified）。
  */
-function isPidAlive(pid) {
+export function isPidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true; // 存活
-  } catch {
-    return false; // 不存在或无权限（Windows 上 EPERM 也算"存在"——但我们保守取 false）
+  } catch (e) {
+    // ESRCH = 进程不存在 → 死。其余（EPERM/未知）→ 保守 alive。
+    if (e && (e.code === "ESRCH" || /^(Error: )?.*ESRCH/.test(e.message))) return false;
+    return true;
   }
+}
+
+/**
+ * TD-100 收尾：taskkill 后有界轮询等待 PID 退出。
+ * Windows PID 回收有延迟，单次探测可能假 still_running。
+ *
+ * @param {number} pid
+ * @param {(pid:number)=>boolean} isAlive 存活检查函数（可注入）
+ * @param {(ms:number)=>Promise<void>} sleep 等待函数（可注入，测试用 no-op）
+ * @param {{rounds?:number, intervalMs?:number}} [pollConfig] 轮询参数
+ * @returns {Promise<boolean>} 最终存活状态（true=仍活, false=已退出）
+ */
+export async function waitForPidExit(pid, isAlive, sleep, pollConfig = {}) {
+  const rounds = pollConfig.rounds ?? 5;
+  const intervalMs = pollConfig.intervalMs ?? 200;
+  for (let i = 0; i < rounds; i += 1) {
+    if (!isAlive(pid)) return false; // 已退出
+    if (i < rounds - 1) await sleep(intervalMs);
+  }
+  return isAlive(pid); // 轮询耗尽，返回最终状态
 }
 
 /**
@@ -66,14 +92,15 @@ function isPidAlive(pid) {
  *   taskkill 非零但 PID 最终死了   → outcome=already_exited, verified=true（不宣称 killed）
  *   taskkill 抛异常                → outcome=taskkill_error, verified=depends(isAlive)
  */
-async function processStop({ transcript, session, fromState, runId, deps }) {
+async function processStop({ transcript, session, fromState, runId, deps, stopRequestedAttempt }) {
   const pid = Number(session.backendSessionId.slice("proc_".length));
   const kill = deps.kill ?? ((p) => killProcessTree(p));
   const isAlive = deps.isAlive ?? ((p) => isPidAlive(p));
   const alert = deps.alert ?? (async (level, msg, opts) => raiseAlert(level, msg, opts));
 
-  // TD-100：先 claim 终态。
+  // TD-100：先 claim 终态。stop_requested 通过 attemptEvents 同批提交（不自拒绝）。
   const termResult = await transcript.transitionState(fromState, "aborted", "stop_requested", {
+    attemptEvents: stopRequestedAttempt ? [stopRequestedAttempt] : [],
     factEvents: [{
       type: "run.aborted",
       payload: {
@@ -105,8 +132,13 @@ async function processStop({ transcript, session, fromState, runId, deps }) {
   if (aliveBefore) {
     killResult = kill(pid);
   }
-  // 后置存活检查（唯一 verified 判定依据）。
-  const aliveAfter = isAlive(pid);
+  // TD-100 收尾：taskkill 后有界轮询（Windows PID 回收延迟可能造成假 still_running）。
+  const waitForExit = deps.waitForExit ?? ((p, ia, sl, pc) => waitForPidExit(p, ia, sl, pc));
+  const sleepFn = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const pollConfig = deps.pollConfig ?? {};
+  const aliveAfter = aliveBefore
+    ? await waitForExit(pid, isAlive, sleepFn, pollConfig)
+    : isAlive(pid);
   const verified = aliveAfter === false;
 
   // 判定 outcome。
@@ -114,21 +146,26 @@ async function processStop({ transcript, session, fromState, runId, deps }) {
   if (!aliveBefore) {
     outcome = "already_exited";
   } else if (aliveAfter) {
-    outcome = killResult.called ? "still_running" : "still_running";
+    outcome = "still_running";
+  } else if (killResult.called && killResult.exitCode === 0) {
+    outcome = "killed";
+  } else if (killResult.called && killResult.exitCode === null) {
+    outcome = "taskkill_error";
   } else {
-    // kill 后死了。
-    outcome = killResult.exitCode === 0 ? "killed" : "already_exited";
-    // taskkill 非零但 PID 死了 → 不是本次 kill 杀的（可能同时自己退了）→ already_exited
-    if (killResult.exitCode !== 0 && killResult.exitCode !== null) {
-      outcome = "already_exited";
-    }
-    if (killResult.exitCode === null && killResult.called) {
-      outcome = "taskkill_error";
-    }
+    // taskkill 非零但 PID 最终死了 → 不是本次 kill 杀的（可能同时自己退了）→ already_exited
+    outcome = "already_exited";
   }
 
   if (verified) {
-    await transcript.append("run.stop_verified", { backendSessionId: session.backendSessionId, backend: "process", outcome });
+    await transcript.append("run.stop_verified", {
+      backendSessionId: session.backendSessionId,
+      backend: "process",
+      outcome,
+      taskkillCalled: killResult.called,
+      taskkillExitCode: killResult.exitCode,
+      processAliveBefore: aliveBefore,
+      processAliveAfter: aliveAfter,
+    });
   } else {
     await transcript.append("run.stop_unverified", {
       backendSessionId: session.backendSessionId,
@@ -166,13 +203,14 @@ async function processStop({ transcript, session, fromState, runId, deps }) {
 /**
  * TD-100 opencode 路径：先 claim，只有 winner 才 abort+verify。
  */
-async function opencodeStop({ transcript, session, fromState, runId, config, deps }) {
+async function opencodeStop({ transcript, session, fromState, runId, config, deps, stopRequestedAttempt }) {
   const backend = new OpenCodeServeBackend();
   const executeStop = deps.executeStop ?? ((b, url, sid, opts) => executeStopWithVerification(b, url, sid, opts));
   const alert = deps.alert ?? (async (level, msg, opts) => raiseAlert(level, msg, opts));
 
-  // TD-100：先 claim 终态。
+  // TD-100：先 claim 终态。stop_requested 通过 attemptEvents 同批提交（不自拒绝）。
   const termResult = await transcript.transitionState(fromState, "aborted", "stop_requested", {
+    attemptEvents: stopRequestedAttempt ? [stopRequestedAttempt] : [],
     factEvents: [{
       type: "run.aborted",
       payload: {
@@ -202,7 +240,12 @@ async function opencodeStop({ transcript, session, fromState, runId, config, dep
   );
 
   if (stopResult.verified) {
-    await transcript.append("run.stop_verified", { backendSessionId: session.backendSessionId });
+    await transcript.append("run.stop_verified", {
+      backendSessionId: session.backendSessionId,
+      backend: "opencode-serve",
+      method: "abort+verify",
+      taskkillCalled: stopResult.taskkillCalled ?? false,
+    });
   } else {
     await transcript.append("run.stop_unverified", {
       backendSessionId: session.backendSessionId,
@@ -242,17 +285,22 @@ export async function stopCommand(args, config, deps = {}) {
     throw new Error(`Run ${runId} has no session metadata (no session.created event)`);
   }
 
-  // TD-100：stop_requested 在 claim 之前写（记录意图），必须含 reason。
+  // TD-100 收尾：stop_requested 不再 claim 前单独 append，而是通过 transitionState 的
+  // attemptEvents 同批提交——避免 _detectExistingTerminal 在锁内读到自己的 stop_requested
+  // 导致自拒绝（legacy SSOT 统一）。
   const fromState = findState(events);
-  await transcript.append("run.stop_requested", {
-    backendSessionId: session.backendSessionId,
-    ...(session.backendSessionId.startsWith("proc_") ? { backend: "process" } : {}),
-    reason: "user",
-  });
+  const stopRequestedAttempt = {
+    type: "run.stop_requested",
+    payload: {
+      backendSessionId: session.backendSessionId,
+      ...(session.backendSessionId.startsWith("proc_") ? { backend: "process" } : {}),
+      reason: "user",
+    },
+  };
 
   // TD-100：按 session 标志分流（runtime-agnostic）。
   if (session.backendSessionId.startsWith("proc_")) {
-    await processStop({ transcript, session, fromState, runId, deps: { ...deps, config } });
+    await processStop({ transcript, session, fromState, runId, deps: { ...deps, config }, stopRequestedAttempt });
     return;
   }
 
@@ -260,5 +308,5 @@ export async function stopCommand(args, config, deps = {}) {
     throw new Error(`Run ${runId} session ${session.backendSessionId} has no serveUrl (opencode path needs one)`);
   }
 
-  await opencodeStop({ transcript, session, fromState, runId, config, deps });
+  await opencodeStop({ transcript, session, fromState, runId, config, deps, stopRequestedAttempt });
 }

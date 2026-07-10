@@ -289,7 +289,80 @@ test("TD-99 边界: rejection 审计字段完整（attemptedReason + reason=firs
   }
 });
 
-// --- TD-99 真实跨进程仲裁 ---
+// --- TD-100 收尾：attemptEvents + legacy SSOT 统一 ---
+
+test("TD-100 SSOT: 仅含 legacy run.stop_requested、无 state_change → findState=aborted，transitionState 必须 rejected/state=aborted", async () => {
+  const dir = await makeDir();
+  try {
+    const [a] = twoInstancesOnSameFile(dir);
+    // 模拟旧 transcript：直接 append run.stop_requested（无 state_change）。
+    await a.append("run.stop_requested", { backendSessionId: "ses1", reason: "user" });
+
+    // 读取器和仲裁器对 legacy stop_requested 必须得出相同结论（aborted）。
+    const events = await readTranscript(a.filePath);
+    assert.equal(findState(events), "aborted", "findState 把 legacy stop_requested 解释为 aborted");
+
+    const r = await a.transitionState("running", "failed", "backend_error");
+    assert.equal(r.accepted, false, "legacy stop_requested 应被视为已有终态 → rejected");
+    assert.equal(r.state, "aborted", "existingTerminal = aborted（与 findState 一致）");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-100 attemptEvents: accepted 时 attemptEvents + factEvents + state_change 同批写入，seq 连续", async () => {
+  const dir = await makeDir();
+  try {
+    const [a] = twoInstancesOnSameFile(dir);
+    await a.transitionState(null, "running", "first_message");
+
+    const r = await a.transitionState("running", "aborted", "stop_requested", {
+      attemptEvents: [{ type: "run.stop_requested", payload: { backendSessionId: "ses1", reason: "user" } }],
+      factEvents: [{ type: "run.aborted", payload: { backendSessionId: "ses1", verification: "pending" } }],
+    });
+    assert.equal(r.accepted, true);
+
+    const events = await readTranscript(a.filePath);
+    const stopReq = events.find((e) => e.type === "run.stop_requested");
+    const abortedFact = events.find((e) => e.type === "run.aborted");
+    const stateChange = events.find((e) => e.type === "run.state_change" && e.to === "aborted");
+    assert.ok(stopReq, "含 stop_requested (attemptEvents)");
+    assert.ok(abortedFact, "含 run.aborted (factEvents)");
+    assert.ok(stateChange, "含 aborted state_change");
+    // seq 连续：stop_requested → run.aborted → state_change
+    assert.equal(abortedFact.seq - stopReq.seq, 1, "stop_requested → run.aborted seq 连续");
+    assert.equal(stateChange.seq - abortedFact.seq, 1, "run.aborted → state_change seq 连续");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-100 attemptEvents: rejected 时 attemptEvents + state_change_rejected 同批写入", async () => {
+  const dir = await makeDir();
+  try {
+    const [a] = twoInstancesOnSameFile(dir);
+    await a.transitionState(null, "running", "first_message");
+    await a.transitionState("running", "failed", "backend_error");
+
+    const r = await a.transitionState("failed", "aborted", "stop_requested", {
+      attemptEvents: [{ type: "run.stop_requested", payload: { backendSessionId: "ses1", reason: "user" } }],
+      factEvents: [{ type: "run.aborted", payload: { reason: "user" } }],
+    });
+    assert.equal(r.accepted, false);
+
+    const events = await readTranscript(a.filePath);
+    const stopReq = events.filter((e) => e.type === "run.stop_requested");
+    const rejectedEv = events.find((e) => e.type === "run.state_change_rejected");
+    assert.ok(rejectedEv, "含 state_change_rejected");
+    // rejected 仍写 attemptEvents（stop_requested 作为审计意图）
+    assert.ok(stopReq.length > 0, "rejected 时仍写 attemptEvents（stop_requested）");
+    // rejected 不写 factEvents
+    const abortedFacts = events.filter((e) => e.type === "run.aborted");
+    assert.equal(abortedFacts.length, 0, "rejected 不写 factEvents (run.aborted)");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 const HELPER_PATH = join(dirname(fileURLToPath(import.meta.url)), "crossProcessClaim.helper.mjs");
 

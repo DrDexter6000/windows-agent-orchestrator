@@ -51,21 +51,28 @@ export class JsonlTranscript {
    *
    * 仲裁规则（first terminal wins）：
    *   - 历史已有 terminal run.state_change → 拒绝任何新转移（含 running/submitted 复活）。
-   *   - 有 state_change 但均非终态 → 不把 run.stop_requested/run.error/run.completed 等
-   *     前置事实当成已 claim 的终态（防自拒绝）。
-   *   - 完全无 state_change → 用 findState 的 legacy fallback（inferStateFromLegacyEvent）
-   *     判断是否已有 legacy terminal fact（旧 transcript 兼容）。
+   *   - 有 state_change 但均非终态 → 不把 run.error/run.completed 等前置事实当终态。
+   *   - 完全无 state_change → 用 findState 的 legacy fallback 判断是否有 legacy terminal
+   *     fact（旧 transcript 兼容）。
+   *
+   * TD-100 收尾：options.attemptEvents——意图事件（如 run.stop_requested），无论
+   * accepted/rejected 都同批写入。这样 stop 命令不再 claim 前单独 append stop_requested
+   * （旧实现会被同一 transcript 的 _detectExistingTerminal 读到导致自拒绝），而是通过
+   * attemptEvents 把 stop_requested 作为 claim 批次的一部分提交。持锁读取的旧 events
+   * 不含本次 attemptEvents，不自拒绝。
    *
    * terminal 成功时，可将 terminal fact event（如 run.aborted/run.completed）与 state_change
    * 同批写入（options.factEvents），保证终态事实与状态转移原子落盘。
-   * rejected 时写 run.state_change_rejected 审计事件（不静默消失）。
+   * rejected 时写 run.state_change_rejected 审计事件（不静默消失），不写 factEvents。
    *
    * @param {string} from - 期望的源状态（信息性，不做严格校验）
    * @param {string} to - 目标状态
    * @param {string} reason
-   * @param {{ factEvents?: Array<{type: string, payload?: object}> }} [options]
-   *   terminal 成功时同批写入的 fact events（如 [{type:"run.aborted", payload:{...}}]）
-   * @returns {Promise<{accepted:true, state, transition}|{accepted:false, state, rejection}>}
+   * @param {{ factEvents?: Array<{type: string, payload?: object}>,
+   *           attemptEvents?: Array<{type: string, payload?: object}> }} [options]
+   *   factEvents: terminal 成功时同批写入（如 [{type:"run.aborted", payload:{...}}]）。
+   *   attemptEvents: 无论 accepted/rejected 都同批写入（如 stop_requested）。
+   * @returns {Promise<{accepted:true, state, transition, facts, attempts}|{accepted:false, state, rejection, attempts}>}
    */
   async transitionState(from, to, reason, options = {}) {
     await mkdir(dirname(this.filePath), { recursive: true });
@@ -79,6 +86,21 @@ export class JsonlTranscript {
       }
       const existing = _detectExistingTerminal(events);
       const baseSeq = Math.max(this.seq, findLastEventSeq(events));
+      const attemptEvents = Array.isArray(options.attemptEvents) ? options.attemptEvents : [];
+      const ts = new Date().toISOString();
+      const ctx = { runId: this.context.runId, agentId: this.context.agentId };
+
+      // 先分配 attemptEvents 的 seq（无论 accepted/rejected 都写）。
+      let seq = baseSeq;
+      const lines = [];
+      const writtenAttempts = [];
+      for (const ae of attemptEvents) {
+        seq += 1;
+        const ev = { ts, seq, ...ctx, type: ae.type, ...(ae.payload ?? {}) };
+        lines.push(JSON.stringify(ev));
+        writtenAttempts.push(ev);
+      }
+
       if (existing) {
         // 被拒：写审计事件（锁内，与判定原子）。rejected 不写任何 terminal fact。
         const rejectionPayload = {
@@ -87,24 +109,15 @@ export class JsonlTranscript {
           existingTerminal: existing,
           reason: "first_terminal_wins",
         };
-        this.seq = baseSeq + 1;
-        const rejectionEvent = {
-          ts: new Date().toISOString(),
-          seq: this.seq,
-          runId: this.context.runId,
-          agentId: this.context.agentId,
-          type: "run.state_change_rejected",
-          ...rejectionPayload,
-        };
-        await appendFile(this.filePath, `${JSON.stringify(rejectionEvent)}\n`, "utf8");
-        return { accepted: false, state: existing, rejection: rejectionPayload };
+        seq += 1;
+        const rejectionEvent = { ts, seq, ...ctx, type: "run.state_change_rejected", ...rejectionPayload };
+        lines.push(JSON.stringify(rejectionEvent));
+        await appendFile(this.filePath, `${lines.join("\n")}\n`, "utf8");
+        this.seq = seq;
+        return { accepted: false, state: existing, rejection: rejectionPayload, attempts: writtenAttempts };
       }
-      // 接受：构造完整 JSONL 字符串（factEvents + state_change），一次 appendFile 原子落盘。
+      // 接受：构造完整 JSONL 字符串（attemptEvents + factEvents + state_change），一次 appendFile 原子落盘。
       const factEvents = Array.isArray(options.factEvents) ? options.factEvents : [];
-      const ts = new Date().toISOString();
-      const ctx = { runId: this.context.runId, agentId: this.context.agentId };
-      let seq = baseSeq;
-      const lines = [];
       const written = [];
       for (const fe of factEvents) {
         seq += 1;
@@ -117,7 +130,7 @@ export class JsonlTranscript {
       lines.push(JSON.stringify(stateEv));
       await appendFile(this.filePath, `${lines.join("\n")}\n`, "utf8");
       this.seq = seq;
-      return { accepted: true, state: to, transition: stateEv, facts: written };
+      return { accepted: true, state: to, transition: stateEv, facts: written, attempts: writtenAttempts };
     } finally {
       await releaseLock();
     }
@@ -131,6 +144,11 @@ export class JsonlTranscript {
  *   这堵住"终态后被错误地写了非终态 running"导致复活的后门。
  * - 有 state_change 但均非终态 → 返回 null（前置事实不算已 claim）。
  * - 完全无 state_change → 用 findState 的 legacy fallback（旧 transcript 兼容）。
+ *
+ * TD-100 收尾：SSOT 统一——legacy fallback 与 findState/inferStateFromLegacyEvent 完全一致，
+ * 不再排除 run.stop_requested。stop 命令的 stop_requested 不再 claim 前单独写入，而是通过
+ * transitionState 的 attemptEvents 同批提交——因此持锁读取的旧 events 中不会包含本次的
+ * stop_requested，不会自拒绝。
  */
 function _detectExistingTerminal(events) {
   let lastTerminal = null;
@@ -147,30 +165,13 @@ function _detectExistingTerminal(events) {
     }
   }
   if (lastTerminal) return lastTerminal;
-  // 有 state_change 但扫完全部均非终态，或完全无 state_change。
+  // 有 state_change 但扫完全部均非终态。
   if (events.some((e) => e.type === "run.state_change")) {
     return null;
   }
-  // 完全无 state_change：legacy fallback。
-  // TD-100：findState 的 legacy fallback 把 run.stop_requested 映射成 "aborted"，
-  // 但在 _detectExistingTerminal 语境下，stop_requested 是"意图"而非"已 claim 的终态"——
-  // stop 命令自己刚写的 stop_requested 不应自拒绝后续的 aborted claim。
-  // run.aborted / run.completed / run.timed_out / run.error 是真实终态事实，保留。
-  const last = events.at(-1);
-  if (!last) return null;
-  const legacyClaimMap = {
-    "run.completed": "completed",
-    "workflow.completed": "completed",
-    "run.timed_out": "timed_out",
-    "run.aborted": "aborted",
-    "run.error": "failed",
-  };
-  // 从后向前找第一个 legacy claim 级终态事实（排除 run.stop_requested）。
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const mapped = legacyClaimMap[events[index].type];
-    if (mapped) return mapped;
-  }
-  return null;
+  // 完全无 state_change：legacy fallback——与 findState 同源（inferStateFromLegacyEvent）。
+  const inferred = findState(events);
+  return TERMINAL_STATES.includes(inferred) ? inferred : null;
 }
 
 async function acquireAppendLock(filePath) {

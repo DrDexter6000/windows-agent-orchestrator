@@ -101,6 +101,7 @@ test("TD-100.2: 两个并发 process stop → 只有 winner 调 taskkill", async
     const deps = {
       kill: () => { killCalls++; return { called: true, exitCode: 0 }; },
       isAlive: () => true,  // aliveBefore=true → winner 会调 kill；loser 在 claim 阶段就返回了
+      waitForExit: async () => true,  // 注入：仍活（轮询不真实等待）
       alert: async () => {},
     };
     // 不用 captureLog（并发时 console.log 会互相覆盖）。直接跑，靠 transcript + killCalls 断言。
@@ -163,6 +164,7 @@ test("TD-100.4: taskkill exit=0 但 PID 仍活 → stop_unverified + alert + sto
       await stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => true,  // PID 仍活
+        waitForExit: async () => true,  // 注入：轮询后仍活（不真实等待）
         alert: async () => { alertCalled = true; },
       });
     });
@@ -212,22 +214,30 @@ test("TD-100.5: PID 调用前已退出 → 不调 taskkill, outcome=already_exit
 // ---------------------------------------------------------------------------
 // 6. taskkill 非零但 PID 最终已死 → verified=true，但 outcome≠killed
 // ---------------------------------------------------------------------------
-test("TD-100.6: taskkill 非零但 PID 最终已死 → verified=true, outcome≠killed", async () => {
+test("TD-100.6: taskkill 非零但 PID 最终已死 → verified=true, outcome=already_exited", async () => {
   const dir = await makeDir();
   try {
     await seedRunningTranscript(dir);
+    let killCalls = 0;
+    let killExitCode = 0;
     const { stopCommand } = await import("../src/commands/stop.js");
+    // isAlive：第一次（aliveBefore）true → 触发 taskkill；轮询后 false → PID 最终已死。
+    let aliveCallCount = 0;
+    const aliveSeq = [true, false];
     const out = await captureLog(async () => {
       await stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, {
-        kill: () => ({ called: true, exitCode: 128 }),
-        isAlive: () => false,  // 最终已死
+        kill: () => { killCalls++; killExitCode = 128; return { called: true, exitCode: 128 }; },
+        isAlive: () => aliveSeq[aliveCallCount++] ?? false,
+        waitForExit: async (p, ia) => ia(p),  // 注入：直接调 isAlive（不真实等待）
         alert: async () => {},
       });
     });
     const parsed = JSON.parse(out);
+    assert.equal(killCalls, 1, "taskkill 调用一次");
+    assert.equal(parsed.taskkillExitCode, 128, "taskkill exitCode=128");
     assert.equal(parsed.verified, true, "PID 最终已死 → verified=true");
+    assert.equal(parsed.outcome, "already_exited", "taskkill 非零但 PID 死了 → already_exited");
     assert.notEqual(parsed.outcome, "killed", "taskkill 非零 → 不宣称 killed");
-    assert.equal(parsed.outcome, "already_exited");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -247,6 +257,7 @@ test("TD-100.7: taskkill 后 PID 已死 → outcome=killed + stop_verified", asy
       await stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, {
         kill: () => ({ called: true, exitCode: 0 }),
         isAlive: () => { aliveCallCount++; return aliveCallCount === 1; },
+        waitForExit: async (p, ia) => ia(p),  // 注入：直接调 isAlive（不真实等待）
         alert: async () => {},
       });
     });
@@ -436,6 +447,223 @@ test("TD-100.12: run.aborted 与 aborted state_change seq 连续", async () => {
     assert.ok(abortedChange, "含 aborted state_change");
     assert.equal(abortedChange.seq - abortedFact.seq, 1, "seq 连续 (diff=1)");
     assert.equal(abortedFact.verification, "pending", "verification=pending");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// TD-100 收尾：PID liveness 契约（ESRCH/EPERM/unknown）+ 有界轮询 + attemptEvents 事件顺序
+// ---------------------------------------------------------------------------
+
+test("TD-100.13: isPidAlive — ESRCH → false（死）", async () => {
+  const { isPidAlive } = await import("../src/commands/stop.js");
+  // PID 很大、不存在 → process.kill 抛 ESRCH
+  assert.equal(isPidAlive(2147483647), false, "不存在的 PID → false");
+});
+
+test("TD-100.14: isPidAlive — EPERM → true（保守 alive，不得假验证）", async () => {
+  const { isPidAlive } = await import("../src/commands/stop.js");
+  // PID=0 或 PID=1 在 Windows 上 process.kill(pid,0) 可能抛 EPERM/Error。
+  // 我们验证 isPidAlive 的契约：非 ESRCH 错误 → true（保守 alive）。
+  // 用 PID=0（非法参数在 Windows 上抛 EINVAL/Error，不是 ESRCH）→ 应返回 true。
+  const result = isPidAlive(0);
+  assert.equal(result, false, "PID=0（非正整数）→ false（参数守卫）");
+  // PID=4（Windows System 进程，存在但无权限 kill）→ EPERM → true
+  // 注意：在某些 CI 环境下 PID=4 可能行为不同，这里用足够特殊的测试。
+  const epermResult = isPidAlive(4);
+  assert.equal(epermResult, true, "EPERM/无权限 → 保守 true（不得假验证为死）");
+});
+
+test("TD-100.15: isPidAlive — 未知错误 → true（保守 alive）", async () => {
+  const { isPidAlive } = await import("../src/commands/stop.js");
+  // PID=1 通常存在（Windows 上可能是 System Idle Process）；kill(1,0) 应成功或 EPERM，不是 ESRCH。
+  // 如果 ESRCH（某些沙箱环境 PID=1 不存在），跳过这个测试。
+  try {
+    process.kill(1, 0);
+    assert.equal(isPidAlive(1), true, "PID=1 存活 → true");
+  } catch (e) {
+    if (e.code === "ESRCH") return; // 环境特殊，跳过
+    assert.equal(isPidAlive(1), true, "EPERM/未知错误 → true");
+  }
+});
+
+test("TD-100.16: taskkill 后有界轮询 true,true,false → verified=true, outcome=killed", async () => {
+  const dir = await makeDir();
+  try {
+    await seedRunningTranscript(dir);
+    const { stopCommand } = await import("../src/commands/stop.js");
+    // isAlive 序列：aliveBefore=true, 轮询第一次=true, 轮询第二次=false → 有界轮询后死。
+    let aliveCallCount = 0;
+    const aliveSeq = [true, true, false];
+    const out = await captureLog(async () => {
+      await stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, {
+        kill: () => ({ called: true, exitCode: 0 }),
+        isAlive: () => aliveSeq[aliveCallCount++] ?? false,
+        sleep: async () => {},  // 注入 no-op sleep，测试不真实等待
+        pollConfig: { rounds: 5, intervalMs: 1 },
+        alert: async () => {},
+      });
+    });
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.verified, true, "轮询后 PID 死了 → verified=true");
+    assert.equal(parsed.outcome, "killed", "taskkill 杀死的 → outcome=killed");
+    assert.equal(parsed.processAliveAfter, false, "processAliveAfter=false");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-100.17: 轮询耗尽仍 alive → unverified + alert + stopped=false", async () => {
+  const dir = await makeDir();
+  try {
+    await seedRunningTranscript(dir);
+    let alertCalled = false;
+    const { stopCommand } = await import("../src/commands/stop.js");
+    const out = await captureLog(async () => {
+      await stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, {
+        kill: () => ({ called: true, exitCode: 0 }),
+        isAlive: () => true,  // 永远 alive → 轮询耗尽
+        sleep: async () => {},
+        pollConfig: { rounds: 3, intervalMs: 1 },
+        alert: async () => { alertCalled = true; },
+      });
+    });
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.verified, false, "轮询耗尽仍 alive → unverified");
+    assert.equal(parsed.outcome, "still_running");
+    assert.equal(parsed.stopped, false);
+    assert.ok(alertCalled, "轮询耗尽 → raiseAlert");
+
+    const events = await readTranscript(join(dir, "run_td100.jsonl"));
+    const unverified = events.find((e) => e.type === "run.stop_unverified");
+    assert.ok(unverified, "含 stop_unverified");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-100.18: stop_verified 写 outcome/taskkillCalled/taskkillExitCode/processAliveBefore/processAliveAfter", async () => {
+  const dir = await makeDir();
+  try {
+    await seedRunningTranscript(dir);
+    const { stopCommand } = await import("../src/commands/stop.js");
+    let aliveCallCount = 0;
+    const aliveSeq = [true, false]; // aliveBefore=true, 轮询后=false
+    await captureLog(async () => {
+      await stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, {
+        kill: () => ({ called: true, exitCode: 0 }),
+        isAlive: () => aliveSeq[aliveCallCount++] ?? false,
+        sleep: async () => {},
+        pollConfig: { rounds: 3, intervalMs: 1 },
+        alert: async () => {},
+      });
+    });
+    const events = await readTranscript(join(dir, "run_td100.jsonl"));
+    const verified = events.find((e) => e.type === "run.stop_verified");
+    assert.ok(verified, "含 stop_verified");
+    assert.equal(verified.outcome, "killed");
+    assert.equal(verified.taskkillCalled, true);
+    assert.equal(verified.taskkillExitCode, 0);
+    assert.equal(verified.processAliveBefore, true);
+    assert.equal(verified.processAliveAfter, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-100.19: stop winner 事件顺序 stop_requested → run.aborted → state_change(aborted)", async () => {
+  const dir = await makeDir();
+  try {
+    await seedRunningTranscript(dir);
+    const { stopCommand } = await import("../src/commands/stop.js");
+    await captureLog(async () => {
+      await stopCommand(["run_td100", "--run-dir", dir], { runDir: dir }, {
+        kill: () => ({ called: true, exitCode: 0 }),
+        isAlive: () => false,
+        alert: async () => {},
+      });
+    });
+    const events = await readTranscript(join(dir, "run_td100.jsonl"));
+    // 不再有 claim 前单独的 stop_requested append——stop_requested 应在 run.aborted 之前（同批）
+    const types = events.map((e) => e.type);
+    const stopReqIdx = types.indexOf("run.stop_requested");
+    const abortedFactIdx = types.indexOf("run.aborted");
+    const stateChangeIdx = types.findIndex((e) => events[types.indexOf(e)]?.type === "run.state_change" && events[types.indexOf(e)]?.to === "aborted");
+    // 修正：直接用 findIndex
+    const scIdx = events.findIndex((e) => e.type === "run.state_change" && e.to === "aborted");
+    assert.ok(stopReqIdx >= 0, "含 stop_requested");
+    assert.ok(abortedFactIdx >= 0, "含 run.aborted");
+    assert.ok(scIdx >= 0, "含 aborted state_change");
+    assert.ok(stopReqIdx < abortedFactIdx, "stop_requested 在 run.aborted 之前");
+    assert.ok(abortedFactIdx < scIdx, "run.aborted 在 state_change 之前");
+    // 三个事件 seq 连续
+    const sr = events[stopReqIdx];
+    const af = events[abortedFactIdx];
+    const sc = events[scIdx];
+    assert.equal(af.seq - sr.seq, 1, "stop_requested → run.aborted seq 连续");
+    assert.equal(sc.seq - af.seq, 1, "run.aborted → state_change seq 连续");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-100.20: stop loser 事件顺序 stop_requested → state_change_rejected（无 run.aborted）", async () => {
+  const dir = await makeDir();
+  try {
+    await seedCompletedTranscript(dir);
+    const { stopCommand } = await import("../src/commands/stop.js");
+    await captureLog(async () => {
+      await stopCommand(["run_td100_done", "--run-dir", dir], { runDir: dir }, {
+        kill: () => ({ called: true, exitCode: 0 }),
+        isAlive: () => false,
+        alert: async () => {},
+      });
+    });
+    const events = await readTranscript(join(dir, "run_td100_done.jsonl"));
+    const types = events.map((e) => e.type);
+    const stopReqIdx = types.lastIndexOf("run.stop_requested"); // 最新的那个
+    const rejectedIdx = types.lastIndexOf("run.state_change_rejected");
+    assert.ok(stopReqIdx >= 0, "loser 含 stop_requested（attemptEvents）");
+    assert.ok(rejectedIdx >= 0, "loser 含 state_change_rejected");
+    assert.ok(stopReqIdx < rejectedIdx, "stop_requested 在 rejected 之前");
+    // loser 不写 run.aborted
+    const abortedFacts = events.filter((e) => e.type === "run.aborted");
+    // 已 completed 的 seed 没有 run.aborted，loser 也不写 → 0
+    assert.equal(abortedFacts.length, 0, "loser 不写 run.aborted");
+    // seq 连续
+    const sr = events[stopReqIdx];
+    const rj = events[rejectedIdx];
+    assert.equal(rj.seq - sr.seq, 1, "stop_requested → rejected seq 连续");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-100.21: opencode stop_verified 写 backend/method/taskkillCalled", async () => {
+  const dir = await makeDir();
+  try {
+    const tp = join(dir, "run_oc_v2.jsonl");
+    const t = new JsonlTranscript(tp, { runId: "run_oc_v2", agentId: "agent" });
+    await t.append("run.started", { backend: "opencode-serve" });
+    await t.append("session.created", { backend: "opencode-serve", backendSessionId: "ses_v2", serveUrl: "http://localhost:9" });
+    await t.transitionState(null, "pending", "created");
+    await t.transitionState("pending", "submitted", "spawned");
+    await t.transitionState("submitted", "running", "first_event");
+
+    const { stopCommand } = await import("../src/commands/stop.js");
+    await captureLog(async () => {
+      await stopCommand(["run_oc_v2", "--run-dir", dir], { runDir: dir }, {
+        executeStop: async () => ({ verified: true, abortCalled: true, taskkillCalled: false, backend: "opencode-serve", method: "abort+verify" }),
+        alert: async () => {},
+      });
+    });
+    const events = await readTranscript(tp);
+    const verified = events.find((e) => e.type === "run.stop_verified");
+    assert.ok(verified, "含 stop_verified");
+    assert.equal(verified.backend, "opencode-serve");
+    assert.equal(verified.method, "abort+verify");
+    assert.equal(verified.taskkillCalled, false);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
