@@ -306,6 +306,13 @@ PID 回收延迟，轮询耗尽仍 alive → unverified + raiseAlert。`run.stop
 均写 `outcome`/`taskkillCalled`/`taskkillExitCode`/`processAliveBefore`/`processAliveAfter`（进程路径）
 或 `backend`/`method`/`taskkillCalled`（opencode 路径），transcript 可重建"为何 verified"。
 `run.stop_requested` 含 `reason:"user"`（修复 diagnosis 显示 reason=unknown）。
+**无效 PID 边界**：`stop` 命令在 claim 前验证 process session PID（`Number.isInteger(pid) && pid > 0`）。
+无效 PID（`proc_not-a-number` / `proc_0` / `proc_-1`）不进入 `processStop`，不 claim 终态，不 taskkill，
+保持 run 原状态。记录 `stop_requested` + `stop_unverified{outcome:"invalid_pid"}` + raiseAlert。
+CLI 输出 `stopped:false / outcome:"invalid_pid" / terminalAccepted:false / terminalState:<原状态>`。
+这把"metadata 损坏（backendSessionId 格式异常）"与"进程已退出（already_exited/verified）"区分开。
+`isPidAlive` 的探测函数可注入（`isPidAlive(pid, probe=process.kill)`），测试用注入 probe 模拟
+ESRCH/EPERM/未知错误，不依赖真实 PID 环境。
 
 ### 4.2 RunManager `[S]`
 

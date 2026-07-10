@@ -44,16 +44,17 @@ function killProcessTree(pid) {
 }
 
 /**
- * 检查 PID 是否存活。用 process.kill(pid, 0) 探测（不实际发信号，只检查存在性）。
+ * 检查 PID 是否存活。用 probe(pid, 0) 探测（默认 process.kill，不实际发信号，只检查存在性）。
  * TD-100 收尾契约：
  *   - ESRCH（进程不存在）→ false（死）。
  *   - EPERM（存在但无权限）→ true（保守 alive，不得假验证）。
  *   - 未知错误 → true（无法证明死亡时不得 verified）。
+ * probe 可注入（测试用），生产默认 process.kill 行为不变。
  */
-export function isPidAlive(pid) {
+export function isPidAlive(pid, probe = process.kill) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
-    process.kill(pid, 0);
+    probe(pid, 0);
     return true; // 存活
   } catch (e) {
     // ESRCH = 进程不存在 → 死。其余（EPERM/未知）→ 保守 alive。
@@ -300,6 +301,14 @@ export async function stopCommand(args, config, deps = {}) {
 
   // TD-100：按 session 标志分流（runtime-agnostic）。
   if (session.backendSessionId.startsWith("proc_")) {
+    // TD-100 最终边界：claim 前验证 process session PID。
+    // 无效 PID（非数字 / 0 / 负数）不进入 processStop，不 claim 终态，不 taskkill。
+    const rawPid = session.backendSessionId.slice("proc_".length);
+    const pid = Number(rawPid);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      await invalidPidStop({ transcript, session, fromState, runId, deps: { ...deps, config }, stopRequestedAttempt, rawPid });
+      return;
+    }
     await processStop({ transcript, session, fromState, runId, deps: { ...deps, config }, stopRequestedAttempt });
     return;
   }
@@ -309,4 +318,53 @@ export async function stopCommand(args, config, deps = {}) {
   }
 
   await opencodeStop({ transcript, session, fromState, runId, config, deps, stopRequestedAttempt });
+}
+
+/**
+ * TD-100 最终边界：无效 process session PID 的安全处理。
+ *
+ * 不 claim 终态（不调 transitionState），不 taskkill，不改 run 状态。
+ * 记录 stop_requested + stop_unverified {outcome:"invalid_pid"}，raiseAlert，
+ * CLI 输出 stopped=false / outcome="invalid_pid" / terminalAccepted=false。
+ *
+ * 这把"metadata 损坏（backendSessionId 格式异常）"与"进程已退出"区分开——
+ * 后者是 verified=true，前者是明确拒绝操作。
+ */
+async function invalidPidStop({ transcript, session, fromState, runId, deps, stopRequestedAttempt, rawPid }) {
+  const alert = deps.alert ?? (async (level, msg, opts) => raiseAlert(level, msg, opts));
+
+  // stop_requested 通过 attemptEvents 同批写入 stop_unverified（不 claim，走 append）。
+  await transcript.append("run.stop_requested", {
+    backendSessionId: session.backendSessionId,
+    backend: "process",
+    reason: "user",
+  });
+  await transcript.append("run.stop_unverified", {
+    backendSessionId: session.backendSessionId,
+    backend: "process",
+    outcome: "invalid_pid",
+    taskkillCalled: false,
+    taskkillExitCode: null,
+    processAliveBefore: false,
+    processAliveAfter: false,
+  });
+  await alert("stop_unverified",
+    `stop ${runId} not verified: invalid process session PID (backendSessionId=${session.backendSessionId}, rawPid="${rawPid}")`,
+    { runId, logPath: join(deps.config?.runDir ?? ".", "ALERTS.log") },
+  ).catch(() => { /* 告警失败不影响 */ });
+
+  console.log(JSON.stringify({
+    runId,
+    stopped: false,
+    backend: "process",
+    sideEffectAttempted: false,
+    terminalAccepted: false,
+    terminalState: fromState,
+    verified: false,
+    outcome: "invalid_pid",
+    taskkillCalled: false,
+    taskkillExitCode: null,
+    processAliveBefore: false,
+    processAliveAfter: false,
+  }, null, 2));
 }

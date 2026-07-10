@@ -458,34 +458,20 @@ test("TD-100.12: run.aborted 与 aborted state_change seq 连续", async () => {
 
 test("TD-100.13: isPidAlive — ESRCH → false（死）", async () => {
   const { isPidAlive } = await import("../src/commands/stop.js");
-  // PID 很大、不存在 → process.kill 抛 ESRCH
-  assert.equal(isPidAlive(2147483647), false, "不存在的 PID → false");
+  const probe = () => { const e = new Error("ESRCH"); e.code = "ESRCH"; throw e; };
+  assert.equal(isPidAlive(99999, probe), false, "ESRCH → false");
 });
 
 test("TD-100.14: isPidAlive — EPERM → true（保守 alive，不得假验证）", async () => {
   const { isPidAlive } = await import("../src/commands/stop.js");
-  // PID=0 或 PID=1 在 Windows 上 process.kill(pid,0) 可能抛 EPERM/Error。
-  // 我们验证 isPidAlive 的契约：非 ESRCH 错误 → true（保守 alive）。
-  // 用 PID=0（非法参数在 Windows 上抛 EINVAL/Error，不是 ESRCH）→ 应返回 true。
-  const result = isPidAlive(0);
-  assert.equal(result, false, "PID=0（非正整数）→ false（参数守卫）");
-  // PID=4（Windows System 进程，存在但无权限 kill）→ EPERM → true
-  // 注意：在某些 CI 环境下 PID=4 可能行为不同，这里用足够特殊的测试。
-  const epermResult = isPidAlive(4);
-  assert.equal(epermResult, true, "EPERM/无权限 → 保守 true（不得假验证为死）");
+  const probe = () => { const e = new Error("EPERM"); e.code = "EPERM"; throw e; };
+  assert.equal(isPidAlive(99999, probe), true, "EPERM → true");
 });
 
 test("TD-100.15: isPidAlive — 未知错误 → true（保守 alive）", async () => {
   const { isPidAlive } = await import("../src/commands/stop.js");
-  // PID=1 通常存在（Windows 上可能是 System Idle Process）；kill(1,0) 应成功或 EPERM，不是 ESRCH。
-  // 如果 ESRCH（某些沙箱环境 PID=1 不存在），跳过这个测试。
-  try {
-    process.kill(1, 0);
-    assert.equal(isPidAlive(1), true, "PID=1 存活 → true");
-  } catch (e) {
-    if (e.code === "ESRCH") return; // 环境特殊，跳过
-    assert.equal(isPidAlive(1), true, "EPERM/未知错误 → true");
-  }
+  const probe = () => { throw new Error("something weird"); };
+  assert.equal(isPidAlive(99999, probe), true, "未知错误 → true");
 });
 
 test("TD-100.16: taskkill 后有界轮询 true,true,false → verified=true, outcome=killed", async () => {
@@ -667,4 +653,128 @@ test("TD-100.21: opencode stop_verified 写 backend/method/taskkillCalled", asyn
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// TD-100 最终边界：invalid process session PID 不 claim 终态
+// ---------------------------------------------------------------------------
+
+/** 构造一个 running 状态的 process-backed transcript，可指定 backendSessionId。 */
+async function seedRunningTranscriptCustomSid(dir, runId, sid) {
+  const tp = join(dir, `${runId}.jsonl`);
+  const t = new JsonlTranscript(tp, { runId, agentId: "td100_agent" });
+  await t.append("run.started", { backend: "claude-code" });
+  await t.append("session.created", { backend: "process", backendSessionId: sid });
+  await t.transitionState(null, "pending", "created");
+  await t.transitionState("pending", "submitted", "spawned");
+  await t.transitionState("submitted", "running", "first_event");
+  return tp;
+}
+
+test("TD-100.22: invalid PID (proc_not-a-number) → stopped=false, outcome=invalid_pid, 不 claim", async () => {
+  const dir = await makeDir();
+  try {
+    await seedRunningTranscriptCustomSid(dir, "run_invalid", "proc_not-a-number");
+    let killCalls = 0;
+    let alertMsg = null;
+    const { stopCommand } = await import("../src/commands/stop.js");
+    const out = await captureLog(async () => {
+      await stopCommand(["run_invalid", "--run-dir", dir], { runDir: dir }, {
+        kill: () => { killCalls++; return { called: true, exitCode: 0 }; },
+        isAlive: () => false,
+        alert: async (level, msg) => { alertMsg = msg; },
+      });
+    });
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.stopped, false);
+    assert.equal(parsed.verified, false);
+    assert.equal(parsed.outcome, "invalid_pid");
+    assert.equal(parsed.sideEffectAttempted, false);
+    assert.equal(parsed.terminalAccepted, false);
+    assert.equal(parsed.terminalState, "running", "terminalState 保持原状态");
+    assert.equal(parsed.taskkillCalled, false);
+    assert.equal(killCalls, 0, "不调 taskkill");
+
+    const events = await readTranscript(join(dir, "run_invalid.jsonl"));
+    // 写 stop_requested {reason:"user"}
+    const sr = events.find((e) => e.type === "run.stop_requested");
+    assert.ok(sr, "写 stop_requested");
+    assert.equal(sr.reason, "user");
+    // 写 stop_unverified {outcome:"invalid_pid"}
+    const uv = events.find((e) => e.type === "run.stop_unverified");
+    assert.ok(uv, "写 stop_unverified");
+    assert.equal(uv.outcome, "invalid_pid");
+    // 不得写 run.aborted
+    assert.equal(events.find((e) => e.type === "run.aborted"), undefined, "不得写 run.aborted");
+    // 不得写 aborted state_change
+    assert.equal(events.find((e) => e.type === "run.state_change" && e.to === "aborted"), undefined, "不得写 aborted state_change");
+    // alert 指出 invalid PID
+    assert.ok(alertMsg && /invalid/i.test(alertMsg), "alert 指出 invalid PID");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-100.23: proc_0 → stopped=false, outcome=invalid_pid, 不 claim", async () => {
+  const dir = await makeDir();
+  try {
+    await seedRunningTranscriptCustomSid(dir, "run_zero", "proc_0");
+    let killCalls = 0;
+    const { stopCommand } = await import("../src/commands/stop.js");
+    const out = await captureLog(async () => {
+      await stopCommand(["run_zero", "--run-dir", dir], { runDir: dir }, {
+        kill: () => { killCalls++; return { called: true, exitCode: 0 }; },
+        isAlive: () => false,
+        alert: async () => {},
+      });
+    });
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.outcome, "invalid_pid");
+    assert.equal(parsed.terminalAccepted, false);
+    assert.equal(parsed.terminalState, "running");
+    assert.equal(killCalls, 0);
+
+    const events = await readTranscript(join(dir, "run_zero.jsonl"));
+    assert.equal(events.find((e) => e.type === "run.aborted"), undefined, "不得写 run.aborted");
+    assert.equal(events.find((e) => e.type === "run.state_change" && e.to === "aborted"), undefined, "不得写 aborted state_change");
+    assert.ok(events.find((e) => e.type === "run.stop_unverified" && e.outcome === "invalid_pid"), "写 stop_unverified invalid_pid");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-100.24: proc_-1 → stopped=false, outcome=invalid_pid, 不 claim", async () => {
+  const dir = await makeDir();
+  try {
+    await seedRunningTranscriptCustomSid(dir, "run_neg", "proc_-1");
+    let killCalls = 0;
+    const { stopCommand } = await import("../src/commands/stop.js");
+    const out = await captureLog(async () => {
+      await stopCommand(["run_neg", "--run-dir", dir], { runDir: dir }, {
+        kill: () => { killCalls++; return { called: true, exitCode: 0 }; },
+        isAlive: () => false,
+        alert: async () => {},
+      });
+    });
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.outcome, "invalid_pid");
+    assert.equal(parsed.terminalAccepted, false);
+    assert.equal(killCalls, 0);
+
+    const events = await readTranscript(join(dir, "run_neg.jsonl"));
+    assert.equal(events.find((e) => e.type === "run.aborted"), undefined, "不得写 run.aborted");
+    assert.equal(events.find((e) => e.type === "run.state_change" && e.to === "aborted"), undefined, "不得写 aborted state_change");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// TD-100 确定性 PID 探测：isPidAlive 可注入 probe（.13/.14/.15 已覆盖 ESRCH/EPERM/unknown）
+// ---------------------------------------------------------------------------
+
+test("TD-100.25: isPidAlive — probe 不抛 → true（存活）", async () => {
+  const { isPidAlive } = await import("../src/commands/stop.js");
+  const probe = () => {};  // 不抛 = 存活
+  assert.equal(isPidAlive(99999, probe), true, "存活 → true");
 });
