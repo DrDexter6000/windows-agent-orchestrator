@@ -89,6 +89,7 @@
 
 | # | 登记于 | 类别 | 内容 | 触发条件 / 何时处理 |
 |---|--------|------|------|---------------------|
+| TD-103 | 2026-07-10 控制面加固 Phase 2 | 交付能力 | Coder Delivery Contract v1——控制面缺少从 isolated worktree 产出 atomic delivery commit 的能力。Spec §Coder Delivery Contract v1 定义了 `inspectDelivery` / `packageDelivery` 契约和 DeliveryRef v1 schema，但此前无实现。 | **Phase 2 core complete（inspection + packaging），未完全偿还**。Phase 3 待做：RunManager/CLI delivery mode 集成、`run.delivery_created`/`run.delivery_failed` 事件、exact-artifact verification、Lead acceptance、coder-first template、真实 dogfood。 |
 | TD-4 | M0 | 架构 | stopCommand 直调 backend.abort 不走 RunManager（不写 state_change）。语义：stop 操作历史 run 可能已不在 activeRuns | M7 resume/恢复统一两条路径（active→RunManager.abort，历史→transcript 追加） |
 | TD-13 | M2 | 跨平台 | ProcessBackend abort 用 Windows taskkill /T /F | 需跨平台时加 platform 分支（AGENTS.md 约束只 Windows） |
 | TD-15 | M2 | 语义 | ProcessBackend retries 参数被忽略（进程式不幂等重试） | 需进程级重试（如 OOM 重启）时定义语义 |

@@ -412,6 +412,69 @@ interface SchedulerOpts { maxConcurrent: number; }
 
 **中期 `[M]`**：持久 daemon + IPC（命名管道或本地 HTTP）。CLI 变 daemon 客户端。
 
+### 4.6 Coder Delivery Contract v1 `[Phase 2]`
+
+> **实现状态**：TD-103 Phase 2 core complete（inspection + packaging deep module）。
+> Phase 3（RunManager/CLI 集成、transcript 事件、verification、acceptance、dogfood）待做。
+
+控制平面（而非 worker）负责把 isolated worktree 里的 worker 产出打包成 atomic delivery commit。
+worker 只准备变更，不创建 commit。
+
+**模块边界**：`src/delivery.js` 是 deep module，只依赖 Node built-ins，不 import CLI / RunManager /
+workflow / transcript / backend / role 模块。Git 通过 `execFileSync("git", args)` 结构化参数调用，
+**禁止 shell-built command string**。
+
+**API（v1）**：
+
+```js
+inspectDelivery(input) -> proposed DeliveryRef   // read-only, fail-closed
+packageDelivery(input) -> committed DeliveryRef  // re-inspect + stage + one commit
+```
+
+**DeliveryRef v1**：
+
+```jsonc
+{
+  "schemaVersion": 1,
+  "kind": "git_commit",
+  "runId": "run_...",
+  "baseCommit": "<full hash>",
+  "deliveryCommit": null,          // null = proposed; full hash after packaging
+  "branch": "wao/run_...",
+  "worktreePath": "<resolved path>",
+  "changedFiles": ["repo/relative/path"],  // unique, lexically sorted
+  "verification": {
+    "status": "pending",           // pending | passed | failed
+    "commands": [],                // or "unavailableReason" when no verification
+    "unavailableReason": "..."     // (optional) present only when commands is empty
+  },
+  "acceptance": {
+    "status": "pending",           // pending | accepted | rejected
+    "reviewerType": "lead_agent"
+  },
+  "integration": {
+    "status": "pending",           // pending | integrated
+    "targetCommit": null
+  }
+}
+```
+
+**Packaging ownership**：worker 不创建 delivery commit。`packageDelivery` 重新 inspect 后只 stage
+inspected 授权路径（`git add -A -- <changedFiles...>`），创建一个 run-scoped commit
+（message = `wao-delivery: <runId>`），author/committer identity 通过子进程 env 传入
+（`WAO Delivery <wao-delivery@local>`），不修改 repo-local/global git config。
+
+**Fail-closed**（inspection + packaging 均适用）：empty diff、dirty base（pre-staged changes）、
+disallowed path（不在 allowedPaths 或 path-segment boundary 越界）、non-Git path、primary checkout
+（非 linked worktree）、detached HEAD、wrong branch、base commit mismatch、ephemeral/non-persistent
+isolation、invalid runId（ref 注入/路径遍历）、invalid allowedPaths、missing verification — 均拒绝。
+
+**生命周期**（Phase 3 实现，Phase 2 不发 transcript 事件）：
+```
+worker output → delivery_created → verification_passed|failed → lead_accepted|rejected → integrated
+```
+worker 进程完成 ≠ code delivery 完成。
+
 ---
 
 ## 5. L3：编排层 `[M]`
@@ -580,6 +643,7 @@ src/
 ├── transcript.js             # L1：JSONL transcript（现有，扩展事件类型）
 ├── runManager.js             # L2：RunManager + 状态机
 ├── isolation.js              # L2：worktree（进程隔离=Node 内置 Job Object v22 + taskkill，见 ADR 0013；端口表见 portAllocator.js）
+├── delivery.js               # L2：Coder Delivery Contract v1（TD-103 Phase 2：isolated delivery inspect/package，不 import CLI/RunManager）
 ├── portAllocator.js          # L2：端口分配表（已实现但未接入，TD-23）
 ├── metrics.js                # 横切：metrics 聚合
 ├── runEvent.js               # L1：RunEvent 类型（message/done/metrics + 证据 command/file_written/tool_use/tool_result）
