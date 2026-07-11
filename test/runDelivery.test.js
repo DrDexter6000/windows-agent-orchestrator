@@ -1304,8 +1304,8 @@ test("3A2-02: hard scorecard pass packages after scorecard.checked and before te
     const run = await mgr.start("test", {
       prompt: "hi", isolate: true, runId: "run_delivtest_p02",
       delivery: deliveryOpts(repo, baseCommit),
-      // warn mode = scorecard runs and writes scorecard.checked; non-blocking
-      scorecardMode: "warn",
+      // Explicit hard scorecard with requireAssistantText only (mock provides assistant text)
+      scorecard: { rules: { requireAssistantText: true, mode: "hard" } },
     });
     const { writeFile: wf } = await import("node:fs/promises");
     await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
@@ -1316,11 +1316,20 @@ test("3A2-02: hard scorecard pass packages after scorecard.checked and before te
     assert.ok(result.delivery, "delivery must be present");
 
     const events = await readTranscript(run.transcript.filePath);
+    // Verify hard scorecard actually passed (not warn)
+    const scorecardChecked = events.find((e) => e.type === "scorecard.checked");
+    assert.ok(scorecardChecked, "scorecard.checked must exist");
+    assert.equal(scorecardChecked.passed, true, "hard scorecard must pass");
+    // Verify scorecard.checked is before delivery_created
     const scorecardIdx = events.findIndex((e) => e.type === "scorecard.checked");
     const deliveryIdx = events.findIndex((e) => e.type === "run.delivery_created");
-    assert.ok(scorecardIdx >= 0, "scorecard.checked must exist");
     assert.ok(deliveryIdx >= 0, "delivery_created must exist");
     assert.ok(scorecardIdx < deliveryIdx, "scorecard.checked before delivery_created");
+
+    // Verify scorecard.rules persisted in run.started (for resume)
+    const started = events.find((e) => e.type === "run.started");
+    assert.ok(started.scorecardRules, "run.started must persist scorecardRules");
+    assert.equal(started.scorecardRules.mode, "hard", "persisted mode must be hard");
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);
@@ -1506,7 +1515,7 @@ test("3A2-08: manual abort before packaging never calls packager", async () => {
       delivery: deliveryOpts(repo, baseCommit),
     });
 
-    run.abort("user");
+    await run.abort("user");
     const result = await run.waitForCompletion({ waitTimeout: 5000, pollInterval: 10 });
     assert.equal(packageCount, 0, "packager must not be called on abort");
     assert.equal(result.completed, false, "must not be completed");
@@ -1552,7 +1561,9 @@ test("3A2-18: external terminal wins before package gate — no Git commit and n
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg18-"));
   let packageCount = 0;
   try {
-    const slowFetch = async (url, init = {}) => {
+    // Mock that returns one assistant message so backend reports done:completed.
+    // But we externally claim aborted before waitForCompletion reaches packaging.
+    const completeFetch = async (url, init = {}) => {
       const urlStr = String(url);
       if (init.method === "POST" && urlStr.endsWith("/api/session")) {
         return {
@@ -1565,7 +1576,16 @@ test("3A2-18: external terminal wins before package gate — no Git commit and n
         return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
       }
       if (init.method === "GET" && urlStr.includes("/message")) {
-        return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
+        return {
+          ok: true, status: 200,
+          async json() {
+            return [{
+              info: { id: "msg_reply", role: "assistant" },
+              parts: [{ type: "text", text: "done" }],
+            }];
+          },
+          async text() { return "[]"; },
+        };
       }
       if (init.method === "POST" && urlStr.includes("/abort")) {
         return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
@@ -1574,7 +1594,7 @@ test("3A2-18: external terminal wins before package gate — no Git commit and n
     };
 
     const mgr = makeManagerWithPackager(
-      runDir, repo, slowFetch,
+      runDir, repo, completeFetch,
       () => { packageCount++; return {}; },
     );
     const run = await mgr.start("test", {
@@ -1585,24 +1605,129 @@ test("3A2-18: external terminal wins before package gate — no Git commit and n
     const { writeFile: wf } = await import("node:fs/promises");
     await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
 
-    // Externally claim aborted terminal before waitForCompletion reaches packaging
+    // Deterministically claim aborted terminal BEFORE waitForCompletion.
+    // The run is in "submitted" state. We claim aborted via the same transcript.
     const { JsonlTranscript } = await import("../src/transcript.js");
     const extTs = new JsonlTranscript(run.transcript.filePath, {
       runId: "run_delivtest_p18", agentId: "test",
+      initialSeq: run.transcript.seq,
     });
-    await new Promise(r => setTimeout(r, 200));
-    try {
-      await extTs.transitionState("running", "aborted", "external_stop", {
-        factEvents: [{ type: "run.aborted", payload: { reason: "external" } }],
-      });
-    } catch { /* may fail if state wrong */ }
+    const claimResult = await extTs.transitionState("submitted", "aborted", "external_stop", {
+      factEvents: [{ type: "run.aborted", payload: { reason: "external" } }],
+    });
+    assert.equal(claimResult.accepted, true, "external aborted claim must be accepted");
 
-    const result = await run.waitForCompletion({ waitTimeout: 500, pollInterval: 10 });
+    // Now waitForCompletion — it should detect the external terminal and return
+    // a loser result without calling the packager.
+    const result = await run.waitForCompletion({ waitTimeout: 2000, pollInterval: 10 });
+
+    // Deterministic assertions
     assert.equal(packageCount, 0, "packager must not be called when external terminal exists");
+    assert.equal(result.aborted, true, "result must reflect aborted terminal");
 
+    // Transcript: exactly one terminal state_change, and it's aborted
     const events = await readTranscript(run.transcript.filePath);
+    const terminalStateChanges = events.filter(
+      (e) => e.type === "run.state_change" && ["completed", "failed", "aborted", "timed_out"].includes(e.to),
+    );
+    assert.equal(terminalStateChanges.length, 1, "exactly one terminal state change");
+    assert.equal(terminalStateChanges[0].to, "aborted", "terminal must be aborted");
+
+    // No delivery events at all
     assert.ok(!events.some((e) => e.type === "run.delivery_created"), "no delivery_created");
     assert.ok(!events.some((e) => e.type === "run.delivery_failed"), "no delivery_failed");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3A1-15c: resume restores hard scorecard mode (not downgraded to warn)", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-15c-"));
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi",
+      isolate: true,
+      runId: "run_delivtest_15c",
+      delivery: deliveryOpts(repo, baseCommit),
+      // Explicit hard scorecard with requireAssistantText
+      scorecard: { rules: { requireAssistantText: true, mode: "hard" } },
+    });
+    const originalWorktree = run.deliveryContext.worktreePath;
+
+    // Simulate worker writing to the worktree
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(originalWorktree, "src", "a.js"), "resume hard\n");
+
+    // Verify run.started persisted the exact hard rules
+    const events = await readTranscript(run.transcript.filePath);
+    const started = events.find((e) => e.type === "run.started");
+    assert.ok(started.scorecardRules, "run.started must persist scorecardRules");
+    assert.equal(started.scorecardRules.mode, "hard", "persisted mode must be hard");
+
+    // Resume the run
+    const resumedRun = await mgr.resume("run_delivtest_15c", { runDir });
+    assert.ok(resumedRun, "resume must succeed");
+
+    // Resumed run must have hard mode, NOT downgraded to warn
+    assert.ok(resumedRun.scorecardRules, "resumed run must have scorecardRules");
+    assert.equal(resumedRun.scorecardRules.mode, "hard",
+      "resumed scorecard mode must be hard, not downgraded to warn");
+
+    // Complete the resumed run — scorecard.checked should pass (assistant text present)
+    const result = await resumedRun.waitForCompletion({});
+    assert.equal(result.completed, true);
+
+    // Verify scorecard.checked was written with mode hard
+    const eventsAfter = await readTranscript(run.transcript.filePath);
+    const scorecardChecked = eventsAfter.find((e) => e.type === "scorecard.checked");
+    assert.ok(scorecardChecked, "scorecard.checked must exist on resumed run");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3A1-15d: resume fails closed when scorecard rules snapshot is missing", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-15d-"));
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi",
+      isolate: true,
+      runId: "run_delivtest_15d",
+      delivery: deliveryOpts(repo, baseCommit),
+      scorecardMode: "hard",
+    });
+
+    // Simulate worker writing
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "corrupt\n");
+
+    // Corrupt the transcript: remove scorecardRules from run.started but keep scorecardConfigured=true
+    const { readFile, writeFile: wfRaw } = await import("node:fs/promises");
+    const raw = await readFile(run.transcript.filePath, "utf8");
+    const lines = raw.trim().split("\n").map(l => {
+      const ev = JSON.parse(l);
+      if (ev.type === "run.started" && ev.scorecardConfigured) {
+        delete ev.scorecardRules;
+      }
+      return JSON.stringify(ev);
+    });
+    await wfRaw(run.transcript.filePath, lines.join("\n") + "\n");
+
+    // Resume should fail closed — scorecard configured but rules snapshot missing
+    const resumedRun = await mgr.resume("run_delivtest_15d", { runDir });
+    assert.equal(resumedRun, null, "resume must fail closed when scorecard rules missing");
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);

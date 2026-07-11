@@ -8,7 +8,7 @@ import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
 import { writeFrictionLog, frictionLogDirFromRunDir } from "./frictionLog.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
-import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery } from "./delivery.js";
+import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree } from "./delivery.js";
 
 /**
  * RunManager 持有活跃 run 的生命周期。
@@ -182,6 +182,9 @@ export class RunManager {
       serveUrl: agent.serveUrl,
       model: agent.model,
       scorecardConfigured: Boolean(scorecardRules),
+      // TD-103 Phase 3A closeout: persist resolved scorecardRules so resume can
+      // restore the exact same gate (hard/warn/explicit) instead of re-deriving.
+      ...(scorecardRules ? { scorecardRules } : {}),
       ...(tagsPayload ? { tags: tagsPayload } : {}),
       ...(deliveryContext ? {
         delivery: {
@@ -373,7 +376,7 @@ export class RunManager {
             ? { verificationCommands: deliveryContext.verificationCommands }
             : { verificationUnavailableReason: deliveryContext.verificationUnavailableReason }),
         });
-        _proveResumeWorktree(deliveryContext);
+        proveLinkedWorktree(deliveryContext);
       } catch {
         // Validation failed — do not spawn/attach
         return null;
@@ -386,13 +389,17 @@ export class RunManager {
     const resumeCwd = deliveryContext ? deliveryContext.worktreePath : runStarted.cwd;
     const agent = loaded.getAgent(transcript.context.agentId, { cwd: resumeCwd });
 
-    // TD-103 audit: restore scorecardRules for delivery runs. The original
-    // scorecardMode is not in run.started, so we re-derive rules from agent config
-    // using the default mode (warn). scorecardConfigured flag tells us if scorecard
-    // was active; for delivery runs we must not skip scorecard — it gates packaging.
+    // TD-103 Phase 3A closeout: restore scorecardRules from the exact snapshot
+    // persisted in run.started. Do NOT re-derive — the original mode (hard/warn)
+    // and explicit rules must survive resume unchanged. If transcript says
+    // scorecardConfigured but the rules snapshot is missing/malformed, fail closed.
     let resumeScorecardRules = null;
     if (runStarted.scorecardConfigured) {
-      resumeScorecardRules = resolveScorecardRules(null, agent.scorecard, "warn");
+      if (!runStarted.scorecardRules || typeof runStarted.scorecardRules !== "object") {
+        // Cannot reconstruct precise rules — fail closed for safety.
+        return null;
+      }
+      resumeScorecardRules = runStarted.scorecardRules;
     }
 
     const backend = this.backendFor(agent);
@@ -581,52 +588,6 @@ function _reconstructDeliveryContext(runStarted, runId) {
   };
 }
 
-/**
- * TD-103 Phase 3A audit: prove the worktree is still valid for resume.
- * Checks: worktree path exists, HEAD is on the expected branch at the expected
- * base commit. Throws on any failure (resume path catches and returns null).
- * @param {object} ctx — delivery context (worktreePath, baseCommit, runId)
- */
-function _proveResumeWorktree(ctx) {
-  const expectedBranch = `wao/${ctx.runId}`;
-  // Worktree must exist
-  const toplevel = String(
-    execFileSync("git", ["rev-parse", "--show-toplevel"], {
-      cwd: ctx.worktreePath,
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "ignore"],
-      windowsHide: true,
-    }),
-  ).trim();
-  const normAbs = (p) => p.replace(/\\/g, "/");
-  if (normAbs(resolve(toplevel)) !== normAbs(resolve(ctx.worktreePath))) {
-    throw new Error(`worktree toplevel mismatch on resume`);
-  }
-  // HEAD must be on expected branch
-  const branch = String(
-    execFileSync("git", ["symbolic-ref", "--short", "HEAD"], {
-      cwd: ctx.worktreePath,
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "ignore"],
-      windowsHide: true,
-    }),
-  ).trim();
-  if (branch !== expectedBranch) {
-    throw new Error(`worktree on wrong branch on resume: ${branch} != ${expectedBranch}`);
-  }
-  // HEAD must equal baseCommit
-  const head = String(
-    execFileSync("git", ["rev-parse", "HEAD"], {
-      cwd: ctx.worktreePath,
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "ignore"],
-      windowsHide: true,
-    }),
-  ).trim();
-  if (head !== ctx.baseCommit) {
-    throw new Error(`worktree HEAD (${head}) != baseCommit (${ctx.baseCommit}) on resume`);
-  }
-}
 
 /**
  * 解析 scorecard rules（M6-6 + M8-1 默认 warn）。优先级：

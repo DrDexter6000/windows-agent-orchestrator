@@ -188,11 +188,14 @@ function parseNul(output) {
  * Prove through Git that worktreePath is a persistent linked worktree on the
  * expected branch at the expected base commit.
  *
- * @param {object} input — validated input (runId, worktreePath, baseCommit, isolation)
+ * Exported so RunManager.resume() can reuse the same SSOT proof without
+ * maintaining a second Git identity checker.
+ *
+ * @param {object} input — { runId, worktreePath, baseCommit, isolation }
  * @returns {{worktreePath: string, branch: string, canonicalBase: string}}
  * @throws {DeliveryError} on any proof failure
  */
-function proveLinkedWorktree(input) {
+export function proveLinkedWorktree(input) {
   const { runId, worktreePath, baseCommit, isolation } = input;
   const expectedBranch = `wao/${runId}`;
 
