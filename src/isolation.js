@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { existsSync, rmSync } from "node:fs";
 
@@ -9,8 +9,25 @@ import { existsSync, rmSync } from "node:fs";
  * 不决定"要不要隔离"（那是 RunManager 读 agent 配置的事）。
  *
  * worktree 放在 <sourceCwd>/.wao-worktrees/<name>。
- * 用 execSync 调 git（同步，worktree 操作是快命令）。
+ * 用 execFileSync 调 git（结构化参数，不拼 shell 字符串）。
  */
+
+/**
+ * 防御性 name 校验——防止 worktree name 进入路径/分支/shell 时注入。
+ * 与 delivery.js 的 isValidRunId SSOT 一致（但不反向依赖 delivery 模块）。
+ * @param {string} name
+ * @returns {boolean}
+ */
+function isValidWorktreeName(name) {
+  if (typeof name !== "string" || name.length === 0) return false;
+  if (/[\\/]/.test(name)) return false;
+  if (name.includes("\0")) return false;
+  if (name.includes("..")) return false;
+  if (/\s/.test(name)) return false;
+  if (/[~^:?*\[\]"&|<>$`';!(){}]/.test(name)) return false;
+  if (/^[.-]/.test(name)) return false;
+  return true;
+}
 
 /**
  * 创建一个独立 worktree。
@@ -19,16 +36,19 @@ import { existsSync, rmSync } from "node:fs";
  * @returns {Promise<{path: string, branch: string}>}
  */
 export function createWorktree(sourceCwd, name) {
+  if (!isValidWorktreeName(name)) {
+    throw new Error(`Invalid worktree name (contains path separators, shell metacharacters, or traversal): ${JSON.stringify(name)}`);
+  }
   const cwd = resolve(sourceCwd);
   if (!isGitRepo(cwd)) {
     throw new Error(`${cwd} is not a git repository (worktree requires git)`);
   }
   const wtPath = join(cwd, ".wao-worktrees", name);
   const branch = `wao/${name}`;
-  // git worktree add <path> -b <branch>
-  execSync(`git worktree add "${wtPath}" -b "${branch}"`, {
+  // execFileSync with structured args — no shell-built command string.
+  execFileSync("git", ["worktree", "add", wtPath, "-b", branch], {
     cwd,
-    stdio: "pipe", // 捕获输出，不污染测试
+    stdio: "pipe",
     windowsHide: true,
   });
   return Promise.resolve({ path: wtPath, branch });

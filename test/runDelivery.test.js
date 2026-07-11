@@ -1326,10 +1326,10 @@ test("3A2-02: hard scorecard pass packages after scorecard.checked and before te
     assert.ok(deliveryIdx >= 0, "delivery_created must exist");
     assert.ok(scorecardIdx < deliveryIdx, "scorecard.checked before delivery_created");
 
-    // Verify scorecard.rules persisted in run.started (for resume)
+    // Verify scorecard.rules persisted inside delivery metadata in run.started
     const started = events.find((e) => e.type === "run.started");
-    assert.ok(started.scorecardRules, "run.started must persist scorecardRules");
-    assert.equal(started.scorecardRules.mode, "hard", "persisted mode must be hard");
+    assert.ok(started.delivery?.scorecardRules, "delivery.scorecardRules must be persisted");
+    assert.equal(started.delivery.scorecardRules.mode, "hard", "persisted mode must be hard");
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);
@@ -1667,8 +1667,8 @@ test("3A1-15c: resume restores hard scorecard mode (not downgraded to warn)", as
     // Verify run.started persisted the exact hard rules
     const events = await readTranscript(run.transcript.filePath);
     const started = events.find((e) => e.type === "run.started");
-    assert.ok(started.scorecardRules, "run.started must persist scorecardRules");
-    assert.equal(started.scorecardRules.mode, "hard", "persisted mode must be hard");
+    assert.ok(started.delivery?.scorecardRules, "delivery.scorecardRules must be persisted");
+    assert.equal(started.delivery.scorecardRules.mode, "hard", "persisted mode must be hard");
 
     // Resume the run
     const resumedRun = await mgr.resume("run_delivtest_15c", { runDir });
@@ -1713,13 +1713,13 @@ test("3A1-15d: resume fails closed when scorecard rules snapshot is missing", as
     const { writeFile: wf } = await import("node:fs/promises");
     await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "corrupt\n");
 
-    // Corrupt the transcript: remove scorecardRules from run.started but keep scorecardConfigured=true
+    // Corrupt the transcript: remove delivery.scorecardRules but keep scorecardConfigured=true
     const { readFile, writeFile: wfRaw } = await import("node:fs/promises");
     const raw = await readFile(run.transcript.filePath, "utf8");
     const lines = raw.trim().split("\n").map(l => {
       const ev = JSON.parse(l);
-      if (ev.type === "run.started" && ev.scorecardConfigured) {
-        delete ev.scorecardRules;
+      if (ev.type === "run.started" && ev.scorecardConfigured && ev.delivery) {
+        delete ev.delivery.scorecardRules;
       }
       return JSON.stringify(ev);
     });
@@ -1728,6 +1728,210 @@ test("3A1-15d: resume fails closed when scorecard rules snapshot is missing", as
     // Resume should fail closed — scorecard configured but rules snapshot missing
     const resumedRun = await mgr.resume("run_delivtest_15d", { runDir });
     assert.equal(resumedRun, null, "resume must fail closed when scorecard rules missing");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+// ===== Phase 3A security: runId injection prevention =====
+
+test("3A-SEC-01: runId with shell metacharacters rejected before worktree creation", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-sec01-"));
+  let spawnCount = 0;
+  try {
+    const fetchImpl = createMockFetch();
+    const countingFetch = async (...args) => {
+      if (String(args[0]).includes("/api/session")) spawnCount++;
+      return fetchImpl(...args);
+    };
+    const mgr = makeManager(runDir, repo, countingFetch);
+    await assert.rejects(
+      () => mgr.start("test", {
+        prompt: "hi", isolate: true,
+        runId: 'run_evil"; rm -rf /',
+        delivery: deliveryOpts(repo, baseCommit),
+      }),
+    );
+    assert.equal(spawnCount, 0, "backend.spawn must not be called for malicious runId");
+    // No worktree directory created
+    assert.ok(!existsSync(join(repo, ".wao-worktrees", 'run_evil"; rm -rf /')),
+      "no worktree directory must be created for malicious runId");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3A-SEC-02: runId with path traversal rejected", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-sec02-"));
+  let spawnCount = 0;
+  try {
+    const fetchImpl = createMockFetch();
+    const countingFetch = async (...args) => {
+      if (String(args[0]).includes("/api/session")) spawnCount++;
+      return fetchImpl(...args);
+    };
+    const mgr = makeManager(runDir, repo, countingFetch);
+    await assert.rejects(
+      () => mgr.start("test", {
+        prompt: "hi", isolate: true,
+        runId: "run_evil../../../etc",
+        delivery: deliveryOpts(repo, baseCommit),
+      }),
+    );
+    assert.equal(spawnCount, 0, "backend.spawn must not be called for traversal runId");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3A-SEC-03: runId with path separator rejected", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-sec03-"));
+  let spawnCount = 0;
+  try {
+    const fetchImpl = createMockFetch();
+    const countingFetch = async (...args) => {
+      if (String(args[0]).includes("/api/session")) spawnCount++;
+      return fetchImpl(...args);
+    };
+    const mgr = makeManager(runDir, repo, countingFetch);
+    await assert.rejects(
+      () => mgr.start("test", {
+        prompt: "hi", isolate: true,
+        runId: "run_evil/path",
+        delivery: deliveryOpts(repo, baseCommit),
+      }),
+    );
+    assert.equal(spawnCount, 0, "backend.spawn must not be called for separator runId");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3A-SEC-04: runId with ampersand rejected", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-sec04-"));
+  let spawnCount = 0;
+  try {
+    const fetchImpl = createMockFetch();
+    const countingFetch = async (...args) => {
+      if (String(args[0]).includes("/api/session")) spawnCount++;
+      return fetchImpl(...args);
+    };
+    const mgr = makeManager(runDir, repo, countingFetch);
+    await assert.rejects(
+      () => mgr.start("test", {
+        prompt: "hi", isolate: true,
+        runId: "run_evil&whoami",
+        delivery: deliveryOpts(repo, baseCommit),
+      }),
+    );
+    assert.equal(spawnCount, 0, "backend.spawn must not be called for ampersand runId");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3A-SEC-05: runId with spaces rejected", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-sec05-"));
+  let spawnCount = 0;
+  try {
+    const fetchImpl = createMockFetch();
+    const countingFetch = async (...args) => {
+      if (String(args[0]).includes("/api/session")) spawnCount++;
+      return fetchImpl(...args);
+    };
+    const mgr = makeManager(runDir, repo, countingFetch);
+    await assert.rejects(
+      () => mgr.start("test", {
+        prompt: "hi", isolate: true,
+        runId: "run evil spaced",
+        delivery: deliveryOpts(repo, baseCommit),
+      }),
+    );
+    assert.equal(spawnCount, 0, "backend.spawn must not be called for spaced runId");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3A-SEC-06: createWorktree directly rejects malicious names", async () => {
+  const { createWorktree } = await import("../src/isolation.js");
+  const { repo } = await makeRepo();
+  try {
+    // Shell metacharacter
+    assert.throws(() => createWorktree(repo, 'evil"; rm -rf /'));
+    // Path traversal
+    assert.throws(() => createWorktree(repo, "evil/../../../etc"));
+    // Backslash
+    assert.throws(() => createWorktree(repo, "evil\\path"));
+    // Empty
+    assert.throws(() => createWorktree(repo, ""));
+    // Ampersand
+    assert.throws(() => createWorktree(repo, "evil&whoami"));
+  } finally {
+    await cleanupDir(repo);
+  }
+});
+
+// ===== Phase 3A: Ordinary run exact-shape regression =====
+
+test("3A-SHAPE-01: ordinary run run.started does NOT have scorecardRules at top level", async () => {
+  const { repo } = await makeRepo();
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-shape01-"));
+  try {
+    const mgr = makeManager(runDir, repo, createMockFetch());
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_shape_test_01",
+      scorecardMode: "warn",
+    });
+    const events = await readTranscript(run.transcript.filePath);
+    const started = events.find((e) => e.type === "run.started");
+
+    // Ordinary run must NOT have top-level scorecardRules
+    assert.ok(!("scorecardRules" in started),
+      "ordinary run.started must not have top-level scorecardRules");
+    // Must NOT have delivery (no delivery option)
+    assert.ok(!("delivery" in started),
+      "ordinary run.started must not have delivery field");
+    // scorecardConfigured is the only scorecard-related field at top level
+    assert.ok("scorecardConfigured" in started,
+      "scorecardConfigured must still be present");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3A-SHAPE-02: delivery run has scorecardRules inside delivery, not at top level", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-shape02-"));
+  try {
+    const mgr = makeManager(runDir, repo, createMockFetch());
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_shape_test_02",
+      delivery: deliveryOpts(repo, baseCommit),
+      scorecardMode: "warn",
+    });
+    const events = await readTranscript(run.transcript.filePath);
+    const started = events.find((e) => e.type === "run.started");
+
+    // Top level must NOT have scorecardRules
+    assert.ok(!("scorecardRules" in started),
+      "delivery run.started must not have top-level scorecardRules");
+    // Delivery field must contain scorecardRules
+    assert.ok(started.delivery, "delivery field must exist");
+    assert.ok(started.delivery.scorecardRules,
+      "delivery.scorecardRules must exist");
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);

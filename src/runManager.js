@@ -8,7 +8,7 @@ import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
 import { writeFrictionLog, frictionLogDirFromRunDir } from "./frictionLog.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
-import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree } from "./delivery.js";
+import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId } from "./delivery.js";
 
 /**
  * RunManager 持有活跃 run 的生命周期。
@@ -91,6 +91,14 @@ export class RunManager {
     const agent = loaded.getAgent(agentId, { cwd });
 
     const finalRunId = runId ?? `run_${new Date().toISOString().replace(/[-:.TZ]/g, "")}${Math.random().toString(36).slice(2, 8)}`;
+
+    // TD-103 Phase 3A security: validate runId before it enters any Git command.
+    // Custom runIds reach worktree paths, branch names, and (in delivery mode)
+    // commit-tree/update-ref. Reject early to prevent injection. Reuses the same
+    // SSOT validator as delivery.js (isValidRunId).
+    if (!isValidRunId(finalRunId)) {
+      throw new Error(`Invalid runId (contains path separators, shell metacharacters, or traversal): ${JSON.stringify(finalRunId)}`);
+    }
     const dir = resolve(runDir ?? this.config.runDir);
     await mkdir(dir, { recursive: true });
 
@@ -182,9 +190,6 @@ export class RunManager {
       serveUrl: agent.serveUrl,
       model: agent.model,
       scorecardConfigured: Boolean(scorecardRules),
-      // TD-103 Phase 3A closeout: persist resolved scorecardRules so resume can
-      // restore the exact same gate (hard/warn/explicit) instead of re-deriving.
-      ...(scorecardRules ? { scorecardRules } : {}),
       ...(tagsPayload ? { tags: tagsPayload } : {}),
       ...(deliveryContext ? {
         delivery: {
@@ -194,6 +199,10 @@ export class RunManager {
           ...(deliveryContext.verificationCommands
             ? { verificationCommands: deliveryContext.verificationCommands }
             : { verificationUnavailableReason: deliveryContext.verificationUnavailableReason }),
+          // TD-103 Phase 3A: persist resolved scorecardRules inside delivery
+          // metadata so resume restores the exact same gate. Ordinary runs
+          // (no delivery) keep their original event shape unchanged.
+          ...(scorecardRules ? { scorecardRules } : {}),
         },
       } : {}),
     });
@@ -389,17 +398,21 @@ export class RunManager {
     const resumeCwd = deliveryContext ? deliveryContext.worktreePath : runStarted.cwd;
     const agent = loaded.getAgent(transcript.context.agentId, { cwd: resumeCwd });
 
-    // TD-103 Phase 3A closeout: restore scorecardRules from the exact snapshot
-    // persisted in run.started. Do NOT re-derive — the original mode (hard/warn)
-    // and explicit rules must survive resume unchanged. If transcript says
-    // scorecardConfigured but the rules snapshot is missing/malformed, fail closed.
+    // TD-103 Phase 3A: restore scorecardRules from the exact snapshot persisted
+    // inside delivery metadata in run.started. Do NOT re-derive — the original
+    // mode (hard/warn) and explicit rules must survive resume unchanged.
+    // Only delivery runs persist this snapshot. Non-delivery runs re-derive
+    // from agent config (existing behavior, no regression).
     let resumeScorecardRules = null;
-    if (runStarted.scorecardConfigured) {
-      if (!runStarted.scorecardRules || typeof runStarted.scorecardRules !== "object") {
-        // Cannot reconstruct precise rules — fail closed for safety.
+    if (deliveryContext && runStarted.scorecardConfigured) {
+      if (!runStarted.delivery?.scorecardRules || typeof runStarted.delivery.scorecardRules !== "object") {
+        // Delivery run with scorecard configured but snapshot missing → fail closed.
         return null;
       }
-      resumeScorecardRules = runStarted.scorecardRules;
+      resumeScorecardRules = runStarted.delivery.scorecardRules;
+    } else if (!deliveryContext && runStarted.scorecardConfigured) {
+      // Non-delivery run: re-derive from agent config (existing behavior).
+      resumeScorecardRules = resolveScorecardRules(null, agent.scorecard, "warn");
     }
 
     const backend = this.backendFor(agent);

@@ -86,10 +86,12 @@ function normAbs(p) {
 
 /**
  * Validate a WAO runId. Must be safe for use as a git ref component in `wao/<runId>`.
+ * Exported so RunManager and isolation.js can reuse the same SSOT check before
+ * worktree creation (not just at packaging time).
  * @param {string} runId
  * @returns {boolean}
  */
-function isValidRunId(runId) {
+export function isValidRunId(runId) {
   if (typeof runId !== "string" || runId.length === 0) return false;
   // No path separators (branch = wao/<runId>, separators would create sub-refs/traversal)
   if (/[\\/]/.test(runId)) return false;
