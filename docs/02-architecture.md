@@ -215,6 +215,9 @@ interface TranscriptEvent {
 | **`run.state_change_rejected`** | TD-99：终态仲裁拒绝一次迟到转移（含 attemptedTo/attemptedReason/existingTerminal/reason="first_terminal_wins"） | `[S]` 新增 |
 | **`run.delivery_created`** | TD-103 Phase 3A：delivery 打包成功——`delivery` 含完整 DeliveryRef（deliveryCommit/baseCommit/branch/changedFiles/verification/acceptance/integration） | Phase 3A |
 | **`run.delivery_failed`** | TD-103 Phase 3A：delivery 打包失败——`deliveryCode`（empty_diff/disallowed_path/commit_integrity/delivery_error 等）+ `message`（脱敏摘要） | Phase 3A |
+| **`run.delivery_verification_passed`** | TD-103 Phase 3B：delivery 验证通过——`delivery.verification.status:"passed"`，含 verifiedCommit/results | Phase 3B |
+| **`run.delivery_verification_failed`** | TD-103 Phase 3B：delivery 验证失败——`delivery.verification.status:"failed"`，含 failureCode/command_failed/command_timeout/artifact_mutated/execution_error | Phase 3B |
+| **`run.delivery_verification_unavailable`** | TD-103 Phase 3B：无验证命令——`delivery.verification.status:"unavailable"`，含 unavailableReason | Phase 3B |
 | `messages.collected` | collect 命令 | ✅ 现有 |
 | **`scorecard.checked`** | scorecard 审计一次 | `[M]` |
 | **`workflow.*`** | DAG 节点级事件 | `[M]` |
@@ -544,7 +547,7 @@ backend done:completed
 **Terminal arbitration**（复用 TD-99 `transitionState`）：
 - 成功：`run.delivery_created` + `run.completed` 作为 `factEvents` 在 accepted completed transition 中同批写入。
 - 失败：`run.delivery_failed` + `run.error{phase:"delivery"}` 作为 `factEvents` 在 accepted failed transition 中同批写入。
-- Race（external terminal 在 packaging 期间先赢）：`run.delivery_created`/`run.delivery_failed` 作为独立 append 写入（attempt fact），返回 loser result 含 `delivery`/`deliveryError`。不回滚已创建的 DeliveryRef（它是 isolated recoverable artifact）。
+- Race（external terminal 在 packaging 期间先赢）：`run.delivery_created`/`run.delivery_failed` 作为 `attemptEvents` 在 transitionState 仲裁批次中同批写入（自 `87bf1e3` 起），返回 loser result 含 `delivery`/`deliveryError`。不回滚已创建的 DeliveryRef（它是 isolated recoverable artifact）。
 
 **`waitForCompletion` result contract**：
 - 成功：`{completed:true, messages, evidence, timedOut:false, metrics, delivery}` — `delivery` 是完整 DeliveryRef。
