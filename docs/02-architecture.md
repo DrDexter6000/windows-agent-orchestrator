@@ -460,22 +460,31 @@ packageDelivery(input) -> committed DeliveryRef  // re-inspect + stage + one com
 ```
 
 **Packaging ownership**：worker 不创建 delivery commit。`packageDelivery` 重新 inspect 后只 stage
-inspected 授权路径（`git add -A -- <changedFiles...>`），创建一个 run-scoped commit
-（message = `wao-delivery: <runId>`），author/committer identity 通过子进程 env 传入
-（`WAO Delivery <wao-delivery@local>`），不修改 repo-local/global git config。
-GPG signing 通过 flag/env 禁用（不绕过 hooks——rejecting hook 是 packaging failure）。
+inspected 授权路径（`git add -A -- <changedFiles...>`），然后用 Git **plumbing** 命令创建 commit：
+`git write-tree` 捕获 staged index tree → `git commit-tree <tree> -p <baseCommit>` 创建 commit object
+（message 通过 stdin 传入，author/committer identity 通过子进程 env 传入
+`WAO Delivery <wao-delivery@local>`）→ `git update-ref refs/heads/<branch> <candidate> <baseCommit>`
+原子 CAS 更新 branch ref（expected-old-value 保护防并发）。
 
-**Post-commit integrity gate**：commit 成功后，统一验证四项不变量——(1) parent = baseCommit，
-(2) `baseCommit..HEAD` 恰好 1 个 commit，(3) committed files = inspected changedFiles（精确集合等价），
-(4) worktree 干净（`git status --porcelain=v1 -z --untracked-files=all` 为空——检测 hook 注入的
-未授权 staged 文件或 untracked 文件）。ignored 文件不出现不影响成功。只有全通过才返回 DeliveryRef。
+**Hooks 不参与机械打包**：`commit-tree` + `update-ref` 是 plumbing 命令，**不执行任何 repository hooks**
+（pre-commit / prepare-commit-msg / commit-msg / post-commit 均不运行）。
+Git hooks 属于项目验证策略，未来由 `DeliveryRef.verification.commands` 显式执行；
+机械 packager 必须确定性地把已检查的 index tree 变成 commit，不受项目 hook 配置影响。
+不修改 repo-local/global git config；GPG signing 不适用（plumbing 路径不走 signing）。
 
-**Packaging failure cleanup**：两类失败路径：
-- **commit 前失败**（staging mismatch / hook exit≠0）：`git reset -q --` unstage packager 自己的
-  staging，保留 working-tree 文件内容；验证 HEAD 在 base、index 为空。
-- **post-commit integrity 失败**（hook exit 0 但注入了越权文件 / worktree 不干净）：
-  `git reset --mixed -q --end-of-options <canonicalBase>` 把 branch HEAD 移回 base（不用 `--hard`、
-  不用 `clean`），保留所有 working-tree 文件内容（worker 改动 + hook 生成的文件），然后重新验证
+**Post-commit integrity gate**：`update-ref` 后统一验证八项不变量——(1) HEAD === candidateCommit，
+(2) parent = baseCommit，(3) `baseCommit..HEAD` 恰好 1 个 commit，(4) `HEAD^{tree}` === write-tree 输出，
+(5) committed files = inspected changedFiles（精确集合等价），(6) commit message 精确为
+`wao-delivery: <runId>`，(7) author/committer 精确为 WAO process identity，
+(8) worktree 干净（`git status --porcelain=v1 -z --untracked-files=all` 为空）。
+ignored 文件不出现不影响成功。只有全通过才返回 DeliveryRef。
+
+**Packaging failure cleanup**：三类失败路径：
+- **staging mismatch**：`git reset -q --` 恢复 index 到 base，保留 working-tree；验证 HEAD 在 base、index 为空。
+- **commit-tree / update-ref CAS 失败**：`git reset -q --` 恢复 index（branch 未移动——CAS 保护），
+  保留 working-tree；验证 HEAD 在 base、index 为空。candidate object 不可达但不影响 branch。
+- **post-update-ref integrity 失败**：`git reset --mixed -q --end-of-options <canonicalBase>` 把 branch
+  HEAD 移回 base（不用 `--hard`、不用 `clean`），保留所有 working-tree 文件内容，然后重新验证
   HEAD === baseCommit 且 cached diff 为空。只有验证成功才声称 restored。
   rollback 本身失败时抛 `deliveryCode=cleanup_failed`（保留原始失败类别/摘要，不吞错误、不虚报恢复）。
 

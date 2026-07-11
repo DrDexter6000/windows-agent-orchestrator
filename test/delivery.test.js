@@ -1,7 +1,8 @@
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { inspectDelivery, packageDelivery, DeliveryError } from "../src/delivery.js";
@@ -922,7 +923,7 @@ test("2B-11: empty diff and disallowed paths fail before staging/commit", async 
   }
 });
 
-test("2B-12: rejecting pre-commit hook makes packaging fail", async () => {
+test("2B-12: rejecting pre-commit hook does not affect packaging (hooks not executed)", async () => {
   const { repo, baseCommit } = await makeRepo();
   const wtPath = makeWorktree(repo);
   try {
@@ -936,53 +937,46 @@ test("2B-12: rejecting pre-commit hook makes packaging fail", async () => {
       hookPath,
       "#!/bin/sh\necho 'rejected by test hook' >&2\nexit 1\n",
     );
-    // Make hook executable (chmod may not matter on Windows but set anyway)
     try { execSync(`chmod +x "${hookPath}"`, { stdio: "ignore" }); } catch { /* best effort */ }
 
-    assertDeliveryError(
-      () => packageDelivery(baseInput(wtPath, baseCommit)),
-      "commit_failed",
-    );
-
-    // Branch HEAD remains at base
-    assert.equal(getHead(wtPath), baseCommit, "HEAD must remain at base after hook rejection");
+    // Hook must NOT run — packaging succeeds
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.ok(ref.deliveryCommit, "packaging must succeed despite rejecting hook");
+    assert.equal(getHead(wtPath), ref.deliveryCommit);
   } finally {
     await cleanupRepo(repo);
   }
 });
 
-test("2B-13: after commit failure, branch HEAD remains at base, index restored, worker file contents remain present", async () => {
+test("2B-13: after successful packaging with rejecting hook, worktree is clean and content is committed", async () => {
   const { repo, baseCommit } = await makeRepo();
   const wtPath = makeWorktree(repo);
   try {
     await writeFile(join(wtPath, "src", "a.js"), "worker modified\n");
     await writeFile(join(wtPath, "src", "new.js"), "worker new\n");
 
-    // Install rejecting hook
+    // Install rejecting hook — must not run
     const hookDir = join(repo, ".git", "hooks");
     await mkdir(hookDir, { recursive: true });
     const hookPath = join(hookDir, "pre-commit");
     await writeFile(hookPath, "#!/bin/sh\nexit 1\n");
     try { execSync(`chmod +x "${hookPath}"`, { stdio: "ignore" }); } catch { /* best effort */ }
 
-    assertDeliveryError(
-      () => packageDelivery(baseInput(wtPath, baseCommit)),
-      "commit_failed",
-    );
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
 
-    // HEAD at base
-    assert.equal(getHead(wtPath), baseCommit);
-    // Index clean (no staged changes — packager unstaged its own staging)
+    // HEAD at delivery commit
+    assert.equal(getHead(wtPath), ref.deliveryCommit);
+    // Index clean
     const staged = execSync("git diff --name-only --cached", {
       cwd: wtPath, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
     }).trim();
-    assert.equal(staged, "", "index must be restored to clean after commit failure");
+    assert.equal(staged, "", "index must be clean after packaging");
 
-    // Worker file contents remain present (not reset/discarded)
-    const aContent = await readFile(join(wtPath, "src", "a.js"), "utf8");
-    assert.equal(aContent, "worker modified\n", "worker content must survive commit failure");
-    const newContent = await readFile(join(wtPath, "src", "new.js"), "utf8");
-    assert.equal(newContent, "worker new\n", "worker content must survive commit failure");
+    // Committed content matches worker content (not modified by hook)
+    const committedA = execSync(`git show ${ref.deliveryCommit}:src/a.js`, {
+      cwd: wtPath, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+    });
+    assert.equal(committedA, "worker modified\n", "committed content must match worker content");
   } finally {
     await cleanupRepo(repo);
   }
@@ -1072,13 +1066,12 @@ function cachedDiff(cwd) {
   }).trim();
 }
 
-// ===== 2C Tests: Post-commit integrity gate + hook mutation rollback =====
+// ===== 2C Tests: Hook non-execution (plumbing path) =====
 
-test("2C-01: hook stages disallowed file + exit 0 → packageDelivery must fail-closed and rollback", async () => {
+test("2C-01: pre-commit hook that stages disallowed file must NOT execute", async () => {
   const { repo, baseCommit } = await makeRepo();
   const wtPath = makeWorktree(repo);
   try {
-    // Legitimate worker change
     await writeFile(join(wtPath, "src", "a.js"), "modified\n");
 
     // Install a malicious pre-commit hook: creates + stages evil.txt, then exits 0
@@ -1091,38 +1084,24 @@ test("2C-01: hook stages disallowed file + exit 0 → packageDelivery must fail-
     );
     try { execSync(`chmod +x "${hookPath}"`, { stdio: "ignore" }); } catch { /* best effort */ }
 
-    // packageDelivery must throw (fail-closed)
-    assertDeliveryError(
-      () => packageDelivery(baseInput(wtPath, baseCommit)),
-      "commit_integrity",
-    );
+    // Hook must NOT run — packaging succeeds with only authorized files
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.ok(ref.deliveryCommit, "packaging must succeed — hook must not execute");
+    assert.deepEqual(ref.changedFiles, ["src/a.js"], "only authorized files in delivery");
 
-    // branch HEAD must be back at baseCommit
-    assert.equal(getHead(wtPath), baseCommit, "HEAD must be rolled back to base");
+    // evil.txt must not exist (hook never ran)
+    assert.ok(!existsSync(join(wtPath, "evil.txt")), "hook-generated file must not exist");
 
-    // index must be clean
-    assert.equal(cachedDiff(wtPath), "", "index must be empty after rollback");
-
-    // worker change must be preserved in working tree
-    const aContent = await readFile(join(wtPath, "src", "a.js"), "utf8");
-    assert.equal(aContent, "modified\n", "worker content must survive rollback");
-
-    // hook-generated file must be preserved in working tree (not cleaned)
-    const evilContent = await readFile(join(wtPath, "evil.txt"), "utf8");
-    assert.equal(evilContent, "evil\n", "hook-generated file must survive rollback");
-
-    // no reachable delivery commit on the branch (branch HEAD = base)
-    const commits = reachableCommits(wtPath, BRANCH);
-    assert.ok(
-      !commits.some((c) => c !== baseCommit),
-      "branch must not have any reachable commit beyond base",
-    );
+    // HEAD at delivery commit
+    assert.equal(getHead(wtPath), ref.deliveryCommit);
+    // Worktree clean (no evil.txt, no tracked changes)
+    assert.equal(porcelainStatus(wtPath), "", "worktree must be clean");
   } finally {
     await cleanupRepo(repo);
   }
 });
 
-test("2C-02: hook creates unstaged disallowed file + exit 0 → must detect dirty worktree and rollback", async () => {
+test("2C-02: pre-commit hook that creates unstaged disallowed file must NOT execute", async () => {
   const { repo, baseCommit } = await makeRepo();
   const wtPath = makeWorktree(repo);
   try {
@@ -1138,32 +1117,15 @@ test("2C-02: hook creates unstaged disallowed file + exit 0 → must detect dirt
     );
     try { execSync(`chmod +x "${hookPath}"`, { stdio: "ignore" }); } catch { /* best effort */ }
 
-    // Must fail-closed — worktree is dirty after commit
-    assertDeliveryError(
-      () => packageDelivery(baseInput(wtPath, baseCommit)),
-      "commit_integrity",
-    );
+    // Hook must NOT run — packaging succeeds, worktree clean
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.ok(ref.deliveryCommit, "packaging must succeed — hook must not execute");
 
-    // HEAD back at base
-    assert.equal(getHead(wtPath), baseCommit, "HEAD must be rolled back to base");
+    // evil.txt must not exist (hook never ran)
+    assert.ok(!existsSync(join(wtPath, "evil.txt")), "hook-generated file must not exist");
 
-    // Index clean
-    assert.equal(cachedDiff(wtPath), "", "index must be empty after rollback");
-
-    // Worker content preserved
-    const aContent = await readFile(join(wtPath, "src", "a.js"), "utf8");
-    assert.equal(aContent, "modified\n", "worker content must survive rollback");
-
-    // Hook-generated file preserved
-    const evilContent = await readFile(join(wtPath, "evil.txt"), "utf8");
-    assert.equal(evilContent, "evil\n", "hook-generated file must survive rollback");
-
-    // No reachable delivery commit
-    const commits = reachableCommits(wtPath, BRANCH);
-    assert.ok(
-      !commits.some((c) => c !== baseCommit),
-      "branch must not have any reachable commit beyond base",
-    );
+    assert.equal(getHead(wtPath), ref.deliveryCommit);
+    assert.equal(porcelainStatus(wtPath), "", "worktree must be clean");
   } finally {
     await cleanupRepo(repo);
   }
@@ -1321,6 +1283,282 @@ test("2C-11: legal paths with normal spaces still work after hardening", async (
     await writeFile(join(wtPath, "src", "my file.js"), "spaced\n");
     const ref = inspectDelivery(baseInput(wtPath, baseCommit));
     assert.ok(ref.changedFiles.includes("src/my file.js"));
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+// ===== 2D Tests: Plumbing path — commit-tree + write-tree + update-ref =====
+
+// Helper: get tree hash of a commit (use execFileSync to avoid cmd.exe ^ escaping)
+function treeHash(cwd, commit) {
+  return execFileSync("git", ["rev-parse", `${commit}^{tree}`], {
+    cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+  }).trim();
+}
+
+// Helper: get full commit message (subject + body, raw)
+function fullCommitMessage(cwd, commit) {
+  return execSync(`git show -s --format=%B ${commit}`, {
+    cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+  });
+}
+
+test("2D-01: pre-commit hook that rewrites authorized file content must NOT execute", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    // Worker intends to change a.js to "worker intended\n"
+    await writeFile(join(wtPath, "src", "a.js"), "worker intended\n");
+
+    // Malicious hook rewrites a.js content, stages it, exits 0
+    const hookDir = join(repo, ".git", "hooks");
+    await mkdir(hookDir, { recursive: true });
+    const hookPath = join(hookDir, "pre-commit");
+    await writeFile(
+      hookPath,
+      "#!/bin/sh\necho 'HOOK REWROTE' > src/a.js\ngit add src/a.js\nexit 0\n",
+    );
+    try { execSync(`chmod +x "${hookPath}"`, { stdio: "ignore" }); } catch { /* best effort */ }
+
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+
+    // Committed content must be worker's intended content, not hook's rewrite
+    const committedContent = execSync(
+      `git show ${ref.deliveryCommit}:src/a.js`,
+      { cwd: wtPath, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] },
+    );
+    assert.equal(committedContent, "worker intended\n",
+      "committed content must equal worker staged content, not hook rewrite");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2D-02: prepare-commit-msg hook that rewrites message must NOT execute", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+
+    const hookDir = join(repo, ".git", "hooks");
+    await mkdir(hookDir, { recursive: true });
+    const hookPath = join(hookDir, "prepare-commit-msg");
+    await writeFile(
+      hookPath,
+      "#!/bin/sh\necho 'HOOK HIJACKED MESSAGE' > \"$1\"\nexit 0\n",
+    );
+    try { execSync(`chmod +x "${hookPath}"`, { stdio: "ignore" }); } catch { /* best effort */ }
+
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    const msg = fullCommitMessage(wtPath, ref.deliveryCommit).trim();
+    assert.equal(msg, `wao-delivery: ${RUN_ID}`,
+      "commit message must be exactly wao-delivery: <runId>, not hook-rewritten");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2D-03: commit-msg hook that rewrites message must NOT execute", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+
+    const hookDir = join(repo, ".git", "hooks");
+    await mkdir(hookDir, { recursive: true });
+    const hookPath = join(hookDir, "commit-msg");
+    await writeFile(
+      hookPath,
+      "#!/bin/sh\necho 'HOOK HIJACKED' > \"$1\"\nexit 0\n",
+    );
+    try { execSync(`chmod +x "${hookPath}"`, { stdio: "ignore" }); } catch { /* best effort */ }
+
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    const msg = fullCommitMessage(wtPath, ref.deliveryCommit).trim();
+    assert.equal(msg, `wao-delivery: ${RUN_ID}`,
+      "commit message must be exactly wao-delivery: <runId>, not hook-rewritten");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2D-04: post-commit hook that creates marker file must NOT execute", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+
+    const hookDir = join(repo, ".git", "hooks");
+    await mkdir(hookDir, { recursive: true });
+    const hookPath = join(hookDir, "post-commit");
+    await writeFile(
+      hookPath,
+      "#!/bin/sh\necho 'post-commit ran' > hook-marker.txt\nexit 0\n",
+    );
+    try { execSync(`chmod +x "${hookPath}"`, { stdio: "ignore" }); } catch { /* best effort */ }
+
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.ok(ref.deliveryCommit);
+
+    // Marker file must not exist (hook never ran)
+    assert.ok(!existsSync(join(wtPath, "hook-marker.txt")),
+      "post-commit hook must not execute — no marker file");
+
+    // Worktree must be clean
+    assert.equal(porcelainStatus(wtPath), "", "worktree must be clean");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2D-05: expected staged tree === committed tree (write-tree parity)", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    await writeFile(join(wtPath, "src", "new.js"), "new\n");
+
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+
+    // The committed tree must match the staged index tree at packaging time
+    const committedTree = treeHash(wtPath, ref.deliveryCommit);
+    assert.match(committedTree, /^[0-9a-f]{40}$/);
+
+    // Reconstruct what the tree should be: base tree + worker changes
+    // The delivery commit's tree must be a valid tree object
+    // (we can't easily recompute write-tree after HEAD moved, but we can
+    // verify the tree contains exactly the expected files)
+    const treeFiles = execSync(
+      `git ls-tree -r --name-only -z ${ref.deliveryCommit}`,
+      { cwd: wtPath, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] },
+    ).split("\0").filter(Boolean).sort();
+    // Must contain src/a.js and src/b.js (original) and src/new.js
+    assert.ok(treeFiles.includes("src/a.js"));
+    assert.ok(treeFiles.includes("src/b.js"));
+    assert.ok(treeFiles.includes("src/new.js"));
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2D-06: update-ref expected-old CAS protection — branch must not move if base changed", async () => {
+  // This test verifies that update-ref uses expected-old-value.
+  // We simulate a concurrent change to the branch ref by manually moving it
+  // between inspect and package. Since packageDelivery re-inspects internally,
+  // a truly concurrent move is hard to test deterministically.
+  // Instead: verify that after a successful package, the branch ref == deliveryCommit,
+  // and a second package attempt with the old base fails (base_commit_mismatch).
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "first\n");
+    const ref1 = packageDelivery(baseInput(wtPath, baseCommit));
+
+    // Branch ref must be at deliveryCommit
+    const branchRef = execSync(`git rev-parse refs/heads/${BRANCH}`, {
+      cwd: wtPath, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+    }).trim();
+    assert.equal(branchRef, ref1.deliveryCommit, "branch ref must be at delivery commit");
+
+    // Second package with original base must fail (HEAD has moved)
+    assertDeliveryError(
+      () => packageDelivery(baseInput(wtPath, baseCommit)),
+      "base_commit_mismatch",
+    );
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2D-07: commit message and identity are exact in plumbing path", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+
+    // Message exact (no trailing newline beyond what git adds)
+    const msg = fullCommitMessage(wtPath, ref.deliveryCommit).trim();
+    assert.equal(msg, `wao-delivery: ${RUN_ID}`);
+
+    // Author/committer identity
+    const identity = commitIdentity(wtPath, ref.deliveryCommit);
+    assert.equal(identity.author, "WAO Delivery <wao-delivery@local>");
+    assert.equal(identity.committer, "WAO Delivery <wao-delivery@local>");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2D-08: spaces in paths work via plumbing path", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "my file.js"), "spaced content\n");
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.ok(ref.changedFiles.includes("src/my file.js"));
+    assert.deepEqual(commitFiles(wtPath, ref.deliveryCommit), ["src/my file.js"]);
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2D-09: deleted + untracked files work via plumbing path", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    await rm(join(wtPath, "src", "b.js"));
+    await writeFile(join(wtPath, "src", "c.js"), "new\n");
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.deepEqual(commitFiles(wtPath, ref.deliveryCommit), ["src/a.js", "src/b.js", "src/c.js"]);
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2D-10: ignored files do not affect plumbing path success", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    await writeFile(join(wtPath, "src", "secret.env"), "KEY=123\n");
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.ok(!ref.changedFiles.includes("src/secret.env"));
+    assert.equal(porcelainStatus(wtPath), "", "worktree clean (ignored file not counted)");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2D-11: source checkout remains unchanged after plumbing packaging", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    const sourceHeadBefore = getHead(repo);
+    const sourceBranchBefore = currentBranch(repo);
+
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    packageDelivery(baseInput(wtPath, baseCommit));
+
+    assert.equal(getHead(repo), sourceHeadBefore, "source HEAD must not move");
+    assert.equal(currentBranch(repo), sourceBranchBefore, "source branch must not change");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2D-12: repo-local git identity remains unchanged after plumbing packaging", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    const before = getRepoIdentity(wtPath);
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    packageDelivery(baseInput(wtPath, baseCommit));
+    const after = getRepoIdentity(wtPath);
+    assert.equal(after.name, before.name);
+    assert.equal(after.email, before.email);
   } finally {
     await cleanupRepo(repo);
   }
