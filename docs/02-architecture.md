@@ -465,15 +465,27 @@ inspected 授权路径（`git add -A -- <changedFiles...>`），创建一个 run
 （`WAO Delivery <wao-delivery@local>`），不修改 repo-local/global git config。
 GPG signing 通过 flag/env 禁用（不绕过 hooks——rejecting hook 是 packaging failure）。
 
-**Packaging failure cleanup**：commit 失败（hook 拒绝/错误）时，packager 只 unstage 自己的 staging
-（`git reset -q --`，不用 `--hard`），保留 working-tree 文件内容；branch HEAD 停在 base，worker 产出
-保留供 diagnosis/retry。staging 不精确匹配 inspected changedFiles 时同样 unstage + fail。
+**Post-commit integrity gate**：commit 成功后，统一验证四项不变量——(1) parent = baseCommit，
+(2) `baseCommit..HEAD` 恰好 1 个 commit，(3) committed files = inspected changedFiles（精确集合等价），
+(4) worktree 干净（`git status --porcelain=v1 -z --untracked-files=all` 为空——检测 hook 注入的
+未授权 staged 文件或 untracked 文件）。ignored 文件不出现不影响成功。只有全通过才返回 DeliveryRef。
+
+**Packaging failure cleanup**：两类失败路径：
+- **commit 前失败**（staging mismatch / hook exit≠0）：`git reset -q --` unstage packager 自己的
+  staging，保留 working-tree 文件内容；验证 HEAD 在 base、index 为空。
+- **post-commit integrity 失败**（hook exit 0 但注入了越权文件 / worktree 不干净）：
+  `git reset --mixed -q --end-of-options <canonicalBase>` 把 branch HEAD 移回 base（不用 `--hard`、
+  不用 `clean`），保留所有 working-tree 文件内容（worker 改动 + hook 生成的文件），然后重新验证
+  HEAD === baseCommit 且 cached diff 为空。只有验证成功才声称 restored。
+  rollback 本身失败时抛 `deliveryCode=cleanup_failed`（保留原始失败类别/摘要，不吞错误、不虚报恢复）。
+
 重复 packaging（HEAD 已在 delivery commit）被 base mismatch 拦截，不创建第二个 commit。
 
 **Fail-closed**（inspection + packaging 均适用）：empty diff、dirty base（pre-staged changes）、
 disallowed path（不在 allowedPaths 或 path-segment boundary 越界）、non-Git path、primary checkout
 （非 linked worktree）、detached HEAD、wrong branch、base commit mismatch、ephemeral/non-persistent
-isolation、invalid runId（ref 注入/路径遍历）、invalid allowedPaths、missing verification — 均拒绝。
+isolation、invalid runId（ref 注入/路径遍历）、invalid allowedPaths（含空 segment/尾分隔符/重复分隔符）、
+invalid baseCommit（`--` 开头 option 注入）、whitespace-only verification — 均拒绝，不静默改写。
 
 **生命周期**（Phase 3 实现，Phase 2 不发 transcript 事件）：
 ```

@@ -1032,5 +1032,299 @@ test("2B-15: packaging never pushes and creates no remote refs", async () => {
   }
 });
 
+// Helper: get porcelain status (tracked + untracked non-ignored), NUL-delimited
+function porcelainStatus(cwd) {
+  return execSync("git status --porcelain -z", {
+    cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+  }).trim();
+}
+
+// Helper: get porcelain v1 with untracked-files=all, NUL-delimited
+function porcelainAll(cwd) {
+  return execSync("git status --porcelain=v1 -z --untracked-files=all", {
+    cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+  }).trim();
+}
+
+// Helper: check if a commit hash is reachable from a branch
+function isReachable(cwd, commit, fromRef) {
+  try {
+    execSync(`git merge-base --is-ancestor ${commit} ${fromRef}`, {
+      cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Helper: list all commits reachable from a ref (one per line)
+function reachableCommits(cwd, fromRef) {
+  return execSync(`git rev-list ${fromRef}`, {
+    cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+  }).trim().split(/\s+/).filter(Boolean);
+}
+
+// Helper: get cached (staged) diff file list
+function cachedDiff(cwd) {
+  return execSync("git diff --name-only --cached", {
+    cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+  }).trim();
+}
+
+// ===== 2C Tests: Post-commit integrity gate + hook mutation rollback =====
+
+test("2C-01: hook stages disallowed file + exit 0 → packageDelivery must fail-closed and rollback", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    // Legitimate worker change
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+
+    // Install a malicious pre-commit hook: creates + stages evil.txt, then exits 0
+    const hookDir = join(repo, ".git", "hooks");
+    await mkdir(hookDir, { recursive: true });
+    const hookPath = join(hookDir, "pre-commit");
+    await writeFile(
+      hookPath,
+      "#!/bin/sh\necho 'evil' > evil.txt\ngit add evil.txt\nexit 0\n",
+    );
+    try { execSync(`chmod +x "${hookPath}"`, { stdio: "ignore" }); } catch { /* best effort */ }
+
+    // packageDelivery must throw (fail-closed)
+    assertDeliveryError(
+      () => packageDelivery(baseInput(wtPath, baseCommit)),
+      "commit_integrity",
+    );
+
+    // branch HEAD must be back at baseCommit
+    assert.equal(getHead(wtPath), baseCommit, "HEAD must be rolled back to base");
+
+    // index must be clean
+    assert.equal(cachedDiff(wtPath), "", "index must be empty after rollback");
+
+    // worker change must be preserved in working tree
+    const aContent = await readFile(join(wtPath, "src", "a.js"), "utf8");
+    assert.equal(aContent, "modified\n", "worker content must survive rollback");
+
+    // hook-generated file must be preserved in working tree (not cleaned)
+    const evilContent = await readFile(join(wtPath, "evil.txt"), "utf8");
+    assert.equal(evilContent, "evil\n", "hook-generated file must survive rollback");
+
+    // no reachable delivery commit on the branch (branch HEAD = base)
+    const commits = reachableCommits(wtPath, BRANCH);
+    assert.ok(
+      !commits.some((c) => c !== baseCommit),
+      "branch must not have any reachable commit beyond base",
+    );
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2C-02: hook creates unstaged disallowed file + exit 0 → must detect dirty worktree and rollback", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+
+    // Hook creates evil.txt but does NOT stage it, exits 0
+    const hookDir = join(repo, ".git", "hooks");
+    await mkdir(hookDir, { recursive: true });
+    const hookPath = join(hookDir, "pre-commit");
+    await writeFile(
+      hookPath,
+      "#!/bin/sh\necho 'evil' > evil.txt\nexit 0\n",
+    );
+    try { execSync(`chmod +x "${hookPath}"`, { stdio: "ignore" }); } catch { /* best effort */ }
+
+    // Must fail-closed — worktree is dirty after commit
+    assertDeliveryError(
+      () => packageDelivery(baseInput(wtPath, baseCommit)),
+      "commit_integrity",
+    );
+
+    // HEAD back at base
+    assert.equal(getHead(wtPath), baseCommit, "HEAD must be rolled back to base");
+
+    // Index clean
+    assert.equal(cachedDiff(wtPath), "", "index must be empty after rollback");
+
+    // Worker content preserved
+    const aContent = await readFile(join(wtPath, "src", "a.js"), "utf8");
+    assert.equal(aContent, "modified\n", "worker content must survive rollback");
+
+    // Hook-generated file preserved
+    const evilContent = await readFile(join(wtPath, "evil.txt"), "utf8");
+    assert.equal(evilContent, "evil\n", "hook-generated file must survive rollback");
+
+    // No reachable delivery commit
+    const commits = reachableCommits(wtPath, BRANCH);
+    assert.ok(
+      !commits.some((c) => c !== baseCommit),
+      "branch must not have any reachable commit beyond base",
+    );
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2C-03: normal success path — worktree must be clean (tracked + untracked non-ignored) after packaging", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    await writeFile(join(wtPath, "src", "new.js"), "new\n");
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+
+    // HEAD at delivery commit
+    assert.equal(getHead(wtPath), ref.deliveryCommit);
+
+    // porcelain status must be empty (tracked + untracked non-ignored)
+    assert.equal(porcelainStatus(wtPath), "", "worktree must be clean after success");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2C-04: ignored files do not affect success — porcelain non-ignored is clean", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    // Create an ignored file (*.env pattern in .gitignore)
+    await writeFile(join(wtPath, "src", "secret.env"), "KEY=123\n");
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+
+    assert.equal(getHead(wtPath), ref.deliveryCommit);
+    // Non-ignored porcelain must be clean
+    assert.equal(porcelainStatus(wtPath), "", "ignored files must not block success");
+    // porcelain with --untracked-files=all shows ignored? No — porcelain doesn't show ignored.
+    // But the ignored file should not appear in changedFiles
+    assert.ok(!ref.changedFiles.includes("src/secret.env"));
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+// ===== 2C Tests: Input boundary hardening =====
+
+test("2C-05: baseCommit starting with '--' must not be interpreted as a git option", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    assertDeliveryError(
+      () =>
+        inspectDelivery(
+          baseInput(wtPath, baseCommit, { baseCommit: "--evil" }),
+        ),
+      "invalid_base_commit",
+    );
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2C-06: verificationCommands with only whitespace must be rejected", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    assertDeliveryError(
+      () =>
+        inspectDelivery(
+          baseInput(wtPath, baseCommit, { verificationCommands: ["   "] }),
+        ),
+      "invalid_verification",
+    );
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2C-07: verificationUnavailableReason with only whitespace must be rejected", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    assertDeliveryError(
+      () =>
+        inspectDelivery(
+          baseInput(wtPath, baseCommit, {
+            verificationCommands: undefined,
+            verificationUnavailableReason: "   ",
+          }),
+        ),
+      "invalid_verification",
+    );
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2C-08: allowedPaths with empty segment must be rejected", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    assertDeliveryError(
+      () =>
+        inspectDelivery(
+          baseInput(wtPath, baseCommit, { allowedPaths: ["src//a.js"] }),
+        ),
+      "invalid_allowed_paths",
+    );
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2C-09: allowedPaths with trailing slash must be rejected", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    assertDeliveryError(
+      () =>
+        inspectDelivery(
+          baseInput(wtPath, baseCommit, { allowedPaths: ["src/"] }),
+        ),
+      "invalid_allowed_paths",
+    );
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2C-10: allowedPaths with leading slash (rooted) must be rejected", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    assertDeliveryError(
+      () =>
+        inspectDelivery(
+          baseInput(wtPath, baseCommit, { allowedPaths: ["/src"] }),
+        ),
+      "invalid_allowed_paths",
+    );
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2C-11: legal paths with normal spaces still work after hardening", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "my file.js"), "spaced\n");
+    const ref = inspectDelivery(baseInput(wtPath, baseCommit));
+    assert.ok(ref.changedFiles.includes("src/my file.js"));
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
 // Helper for reading file content in sync test
 import { readFile } from "node:fs/promises";

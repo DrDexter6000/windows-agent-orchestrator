@@ -106,6 +106,7 @@ function isValidRunId(runId) {
 
 /**
  * Validate an allowedPath entry. Repo-relative path, no traversal/absolute/rooted.
+ * Rejects empty segments, trailing slash, leading slash — does not silently rewrite.
  * @param {string} p
  * @returns {boolean}
  */
@@ -118,10 +119,13 @@ function isValidAllowedPath(p) {
   if (/^[a-zA-Z]:/.test(fwd)) return false;
   // Reject "." exactly
   if (fwd === ".") return false;
-  // Reject any "." or ".." segment
+  // Reject trailing slash (would create empty final segment)
+  if (fwd.endsWith("/")) return false;
   const segments = fwd.split("/");
+  // Reject any empty segment (catches double slashes, leading slash already caught)
+  if (segments.some((s) => s.length === 0)) return false;
+  // Reject any "." or ".." segment
   if (segments.some((s) => s === ".." || s === ".")) return false;
-  // Reject backslash escape sequences that could break pathspec
   return true;
 }
 
@@ -248,9 +252,11 @@ function proveLinkedWorktree(input) {
     );
   }
 
-  // 5. Canonicalize baseCommit and verify HEAD matches
+  // 5. Canonicalize baseCommit and verify HEAD matches.
+  //    --end-of-options prevents baseCommit values starting with '-' from being
+  //    interpreted as git options (defense in depth — validateInput already rejects them).
   const canonicalBase = String(
-    git(["rev-parse", "--verify", `${baseCommit}^{commit}`], { cwd: worktreePath }),
+    git(["rev-parse", "--verify", "--end-of-options", `${baseCommit}^{commit}`], { cwd: worktreePath }),
   ).trim();
   const headCommit = String(git(["rev-parse", "HEAD"], { cwd: worktreePath })).trim();
   if (headCommit !== canonicalBase) {
@@ -370,11 +376,17 @@ function validateInput(input) {
     );
   }
 
-  // baseCommit
+  // baseCommit — reject option-like values to prevent git argument injection
   if (typeof input.baseCommit !== "string" || input.baseCommit.length === 0) {
     throw new DeliveryError(
       "invalid_input",
       "baseCommit must be a non-empty string",
+    );
+  }
+  if (input.baseCommit.startsWith("-")) {
+    throw new DeliveryError(
+      "invalid_base_commit",
+      `baseCommit must not start with '-' (would be interpreted as a git option): ${JSON.stringify(input.baseCommit)}`,
     );
   }
 
@@ -391,16 +403,16 @@ function validateInput(input) {
     );
   }
 
-  // verification
+  // verification — reject whitespace-only strings (trim before checking emptiness)
   const hasCommands =
     Array.isArray(input.verificationCommands) &&
     input.verificationCommands.length > 0 &&
     input.verificationCommands.every(
-      (c) => typeof c === "string" && c.length > 0,
+      (c) => typeof c === "string" && c.trim().length > 0,
     );
   const hasReason =
     typeof input.verificationUnavailableReason === "string" &&
-    input.verificationUnavailableReason.length > 0;
+    input.verificationUnavailableReason.trim().length > 0;
 
   if (!hasCommands && !hasReason) {
     throw new DeliveryError(
@@ -488,6 +500,114 @@ function unstageOwnChanges(cwd) {
   gitSafe(["reset", "-q", "--"], { cwd });
 }
 
+/**
+ * Rollback a delivery branch to baseCommit after a post-commit integrity failure.
+ * Uses `git reset --mixed <baseCommit>` (NOT --hard) to move HEAD back to base
+ * while preserving all working-tree file contents (worker changes + hook-generated files).
+ *
+ * After rollback, re-verifies:
+ *   HEAD === canonicalBase
+ *   cached diff is empty (index clean)
+ *
+ * @param {string} cwd — worktree path
+ * @param {string} canonicalBase — canonical full hash of base commit
+ * @throws {DeliveryError} with deliveryCode="cleanup_failed" if rollback verification fails
+ */
+function rollbackToBase(cwd, canonicalBase) {
+  // `git reset --mixed <base>` — moves HEAD to base, unstages index, preserves working tree.
+  // --end-of-options prevents baseCommit from being interpreted as a flag (defense in depth).
+  git(["reset", "--mixed", "-q", "--end-of-options", canonicalBase], { cwd });
+
+  // Re-verify: HEAD must be at base
+  const headAfter = String(git(["rev-parse", "HEAD"], { cwd })).trim();
+  if (headAfter !== canonicalBase) {
+    throw new DeliveryError(
+      "cleanup_failed",
+      `rollback verification failed: HEAD (${headAfter}) != baseCommit (${canonicalBase}) after reset --mixed`,
+    );
+  }
+
+  // Re-verify: index must be clean (no staged changes)
+  const stagedAfter = parseNul(
+    git(["diff", "--name-only", "--cached", "-z"], { cwd }),
+  );
+  if (stagedAfter.length > 0) {
+    throw new DeliveryError(
+      "cleanup_failed",
+      `rollback verification failed: index not clean after reset --mixed; staged=[${stagedAfter.join(",")}]`,
+    );
+  }
+}
+
+/**
+ * Unified post-commit integrity gate. Checks:
+ *   1. parent of HEAD == canonicalBase
+ *   2. exactly one commit in canonicalBase..HEAD
+ *   3. committed files exactly match inspected changedFiles
+ *   4. worktree is clean (porcelain v1 --untracked-files=all is empty)
+ *
+ * @param {string} cwd — worktree path
+ * @param {string} canonicalBase — canonical full hash of base commit
+ * @param {string[]} changedFiles — inspected authorized changed files
+ * @returns {string} delivery commit hash (canonical full hash)
+ * @throws {DeliveryError} with deliveryCode="commit_integrity" on any check failure
+ */
+function verifyPostCommitIntegrity(cwd, canonicalBase, changedFiles) {
+  const deliveryCommit = String(git(["rev-parse", "HEAD"], { cwd })).trim();
+
+  // 1. Parent must be exactly baseCommit
+  const parent = String(git(["rev-parse", "HEAD^"], { cwd })).trim();
+  if (parent !== canonicalBase) {
+    throw new DeliveryError(
+      "commit_integrity",
+      `delivery commit parent (${parent}) is not baseCommit (${canonicalBase})`,
+    );
+  }
+
+  // 2. Exactly one commit in baseCommit..HEAD
+  const count = Number(
+    String(git(["rev-list", "--count", `${canonicalBase}..HEAD`], { cwd })).trim(),
+  );
+  if (count !== 1) {
+    throw new DeliveryError(
+      "commit_integrity",
+      `expected exactly 1 commit in ${canonicalBase}..HEAD, got ${count}`,
+    );
+  }
+
+  // 3. Committed files must exactly equal inspected changedFiles
+  const committedFiles = parseNul(
+    git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"], { cwd }),
+  ).sort();
+  const changedSorted = [...changedFiles].sort();
+  if (
+    committedFiles.length !== changedSorted.length ||
+    committedFiles.some((p, i) => p !== changedSorted[i])
+  ) {
+    throw new DeliveryError(
+      "commit_integrity",
+      `committed files do not match inspected changedFiles; committed=[${committedFiles.join(",")}] expected=[${changedSorted.join(",")}]`,
+    );
+  }
+
+  // 4. Worktree must be clean — no tracked changes, no untracked non-ignored files.
+  //    porcelain v1 with --untracked-files=all catches all non-ignored untracked files
+  //    (including hook-generated ones that were not staged).
+  //    Ignored files (matched by .gitignore) do NOT appear and do not block success.
+  const porcelain = String(
+    git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd }),
+  );
+  if (porcelain.trim().length > 0) {
+    const dirtyPaths = parseNul(porcelain).join(", ");
+    throw new DeliveryError(
+      "commit_integrity",
+      `worktree is dirty after commit (tracked changes or non-ignored untracked files present): ${dirtyPaths}`,
+    );
+  }
+
+  return deliveryCommit;
+}
+
 // ===== Public API: packageDelivery =====
 
 /**
@@ -499,8 +619,12 @@ function unstageOwnChanges(cwd) {
  * 3. Re-read staged paths, require exact set equality with proposed changedFiles.
  * 4. Commit with process-scoped author/committer env, deterministic message,
  *    no signing, no hooks bypass.
- * 5. On commit failure: unstage packager's staging (preserve file contents), throw.
- * 6. Verify parent/count/path set, resolve new HEAD, return committed DeliveryRef.
+ * 5. On commit failure (exit≠0): unstage packager's staging, throw commit_failed.
+ * 6. Post-commit integrity gate: verify parent/count/committed-paths/worktree-clean.
+ *    On integrity failure: rollback branch to base (git reset --mixed, NOT --hard),
+ *    preserve working-tree contents, throw commit_integrity.
+ *    If rollback itself fails: throw cleanup_failed (preserves original error summary).
+ * 7. Only return DeliveryRef when all integrity checks pass and worktree is clean.
  *
  * @param {object} input — same shape as inspectDelivery
  * @returns {object} committed DeliveryRef (deliveryCommit: full hash)
@@ -542,7 +666,7 @@ export function packageDelivery(input) {
     GIT_COMMIT_GPGSIGN: "false",
   };
 
-  let commitOk = false;
+  let commitFailed = false;
   try {
     execFileSync("git", ["commit", "--no-gpg-sign", "-m", commitMessage], {
       cwd,
@@ -551,61 +675,64 @@ export function packageDelivery(input) {
       stdio: ["pipe", "pipe", "ignore"], // a rejecting hook writes to stderr — fail closed
       windowsHide: true,
     });
-    commitOk = true;
   } catch {
-    // 5. Commit failure: unstage packager's staging, preserve file contents
+    commitFailed = true;
+  }
+
+  // 5. Commit failure (exit≠0): unstage own staging, verify HEAD at base, throw
+  if (commitFailed) {
     unstageOwnChanges(cwd);
+    // Verify HEAD didn't move (hook might have staged then aborted)
+    const headAfter = String(git(["rev-parse", "HEAD"], { cwd })).trim();
+    if (headAfter !== proposed.baseCommit) {
+      // Commit somehow partially succeeded or HEAD moved — rollback
+      try {
+        rollbackToBase(cwd, proposed.baseCommit);
+      } catch (cleanupErr) {
+        throw new DeliveryError(
+          "cleanup_failed",
+          `commit failed AND rollback failed: original=commit_failed, cleanup=${cleanupErr.message}`,
+        );
+      }
+    }
     throw new DeliveryError(
       "commit_failed",
       `git commit failed (hook rejection or error) for runId=${proposed.runId}; index restored, worker file contents preserved`,
     );
   }
 
-  // If commit somehow didn't throw but also didn't produce a commit, clean up
-  if (!commitOk) {
-    unstageOwnChanges(cwd);
-    throw new DeliveryError("commit_failed", "commit did not complete");
+  // 6. Post-commit integrity gate
+  //    Catches: hook staged disallowed files, hook created untracked files,
+  //    unexpected commit structure, dirty worktree.
+  let integrityError = null;
+  let deliveryCommit = null;
+  try {
+    deliveryCommit = verifyPostCommitIntegrity(cwd, proposed.baseCommit, changedFiles);
+  } catch (err) {
+    integrityError = err;
   }
 
-  // 6. Verify the new commit and return committed DeliveryRef
-  const deliveryCommit = String(git(["rev-parse", "HEAD"], { cwd })).trim();
-
-  // Verify parent is exactly baseCommit
-  const parent = String(git(["rev-parse", "HEAD^"], { cwd })).trim();
-  if (parent !== proposed.baseCommit) {
+  if (integrityError) {
+    // Rollback: move branch HEAD back to base, preserve working-tree contents
+    const originalCode = integrityError.deliveryCode || "commit_integrity";
+    const originalMessage = integrityError.message;
+    try {
+      rollbackToBase(cwd, proposed.baseCommit);
+    } catch (cleanupErr) {
+      // Rollback failed — do not swallow, do not claim recovery
+      throw new DeliveryError(
+        "cleanup_failed",
+        `integrity failure (${originalCode}: ${originalMessage}) AND rollback failed: ${cleanupErr.message}`,
+      );
+    }
+    // Rollback succeeded — throw the original integrity error
     throw new DeliveryError(
-      "commit_integrity",
-      `delivery commit parent (${parent}) is not baseCommit (${proposed.baseCommit})`,
+      originalCode,
+      `${originalMessage}; branch rolled back to base, working-tree contents preserved`,
     );
   }
 
-  // Verify exactly one commit in baseCommit..deliveryCommit
-  const count = Number(
-    String(git(["rev-list", "--count", `${proposed.baseCommit}..HEAD`], { cwd })).trim(),
-  );
-  if (count !== 1) {
-    throw new DeliveryError(
-      "commit_integrity",
-      `expected exactly 1 commit in ${proposed.baseCommit}..HEAD, got ${count}`,
-    );
-  }
-
-  // Verify committed files exactly equal inspected changedFiles
-  const committedFiles = parseNul(
-    git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"], { cwd }),
-  ).sort();
-  const changedSorted = [...changedFiles].sort();
-  if (
-    committedFiles.length !== changedSorted.length ||
-    committedFiles.some((p, i) => p !== changedSorted[i])
-  ) {
-    throw new DeliveryError(
-      "commit_integrity",
-      `committed files do not match inspected changedFiles; committed=[${committedFiles.join(",")}] expected=[${changedSorted.join(",")}]`,
-    );
-  }
-
-  // Build committed DeliveryRef (do not mutate proposed in place)
+  // 7. All checks passed — build and return committed DeliveryRef
   return {
     schemaVersion: 1,
     kind: "git_commit",
@@ -614,7 +741,7 @@ export function packageDelivery(input) {
     deliveryCommit,
     branch: proposed.branch,
     worktreePath: proposed.worktreePath,
-    changedFiles: committedFiles,
+    changedFiles: [...changedFiles].sort(),
     verification: proposed.verification,
     acceptance: { ...proposed.acceptance },
     integration: { ...proposed.integration },
