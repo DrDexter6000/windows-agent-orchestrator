@@ -1937,3 +1937,78 @@ test("3A-SHAPE-02: delivery run has scorecardRules inside delivery, not at top l
     await cleanupDir(runDir);
   }
 });
+
+// ===== Phase 3A final closeout regression tests =====
+
+test("3A-REG-01: isValidRunId SSOT rejects &, quotes, path separators, spaces, leading dash/dot", async () => {
+  const { isValidRunId } = await import("../src/delivery.js");
+  // Rejected
+  assert.equal(isValidRunId("run_evil&whoami"), false, "& must be rejected");
+  assert.equal(isValidRunId('run_evil"; rm -rf /'), false, "quotes must be rejected");
+  assert.equal(isValidRunId("run_evil/path"), false, "slash must be rejected");
+  assert.equal(isValidRunId("run evil"), false, "spaces must be rejected");
+  assert.equal(isValidRunId("-evil"), false, "leading dash must be rejected");
+  assert.equal(isValidRunId(".evil"), false, "leading dot must be rejected");
+  assert.equal(isValidRunId("run..evil"), false, "double dot must be rejected");
+  assert.equal(isValidRunId(""), false, "empty must be rejected");
+  // Accepted
+  assert.equal(isValidRunId("run_abc123"), true, "safe runId must be accepted");
+  assert.equal(isValidRunId("run-test_001"), true, "hyphen inside must be accepted");
+});
+
+test("3A-REG-02: RunManager rejects malicious runId with 'Invalid runId' message (not 'Invalid worktree name')", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-reg02-"));
+  try {
+    const mgr = makeManager(runDir, repo, createMockFetch());
+    // The ampersand runId: isValidRunId must reject it at RunManager level,
+    // BEFORE createWorktree is called. The error message must say "runId"
+    // not "worktree name" — proving RunManager preflight caught it.
+    let errorMsg = null;
+    try {
+      await mgr.start("test", {
+        prompt: "hi", isolate: true,
+        runId: "run_evil&whoami",
+        delivery: deliveryOpts(repo, baseCommit),
+      });
+    } catch (e) {
+      errorMsg = e.message;
+    }
+    assert.ok(errorMsg, "start must throw");
+    assert.ok(errorMsg.includes("runId"), "error must reference runId (not worktree name)");
+    assert.ok(!errorMsg.includes("worktree name"), "error must not reference worktree name");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3A-REG-03: ordinary non-delivery resume does NOT produce scorecard.checked (baseline behavior)", async () => {
+  const { repo } = await makeRepo();
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-reg03-"));
+  try {
+    const mgr = makeManager(runDir, repo, createMockFetch());
+    // Start an ordinary (non-delivery) run
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_reg03_test",
+      scorecardMode: "warn",
+    });
+
+    // Resume it
+    const resumedRun = await mgr.resume("run_reg03_test", { runDir });
+    assert.ok(resumedRun, "resume must succeed");
+
+    // Complete the resumed run
+    const result = await resumedRun.waitForCompletion({});
+    assert.equal(result.completed, true);
+
+    // Transcript must NOT have scorecard.checked — baseline 9e25c5c behavior
+    const events = await readTranscript(run.transcript.filePath);
+    const scorecardChecked = events.find((e) => e.type === "scorecard.checked");
+    assert.equal(scorecardChecked, undefined,
+      "ordinary resumed run must NOT have scorecard.checked (baseline behavior)");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});

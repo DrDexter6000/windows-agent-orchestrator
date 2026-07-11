@@ -85,25 +85,23 @@ function normAbs(p) {
 // ===== Input validation =====
 
 /**
- * Validate a WAO runId. Must be safe for use as a git ref component in `wao/<runId>`.
- * Exported so RunManager and isolation.js can reuse the same SSOT check before
- * worktree creation (not just at packaging time).
+ * Validate a WAO runId. Must be safe for use as a git ref component in `wao/<runId>`,
+ * a filesystem directory name, and a structured-argument value.
+ *
+ * Uses a conservative allowlist (alphanumeric, underscore, hyphen) to reject
+ * ALL shell metacharacters, path separators, quotes, and other injection vectors.
+ * This is the single SSOT — isolation.js and runManager.js both reuse it.
+ *
  * @param {string} runId
  * @returns {boolean}
  */
 export function isValidRunId(runId) {
   if (typeof runId !== "string" || runId.length === 0) return false;
-  // No path separators (branch = wao/<runId>, separators would create sub-refs/traversal)
-  if (/[\\/]/.test(runId)) return false;
-  // No NUL byte
-  if (runId.includes("\0")) return false;
-  // No traversal
-  if (runId.includes("..")) return false;
-  // No spaces (git refs cannot contain spaces)
-  if (/\s/.test(runId)) return false;
-  // No git ref-special characters
-  if (/[~^:?*\[]/.test(runId)) return false;
-  // Must not start with dot or dash (git ref rule)
+  // Conservative allowlist: letters, digits, underscore, hyphen only.
+  // Rejects everything else including &, quotes, path separators, spaces,
+  // git ref-special chars, NUL.
+  // Additionally reject leading dot or dash (git ref rule + option-injection defense).
+  if (!/^[A-Za-z0-9_-]+$/.test(runId)) return false;
   if (/^[.-]/.test(runId)) return false;
   return true;
 }

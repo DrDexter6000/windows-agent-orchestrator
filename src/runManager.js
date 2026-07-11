@@ -398,11 +398,10 @@ export class RunManager {
     const resumeCwd = deliveryContext ? deliveryContext.worktreePath : runStarted.cwd;
     const agent = loaded.getAgent(transcript.context.agentId, { cwd: resumeCwd });
 
-    // TD-103 Phase 3A: restore scorecardRules from the exact snapshot persisted
-    // inside delivery metadata in run.started. Do NOT re-derive — the original
-    // mode (hard/warn) and explicit rules must survive resume unchanged.
-    // Only delivery runs persist this snapshot. Non-delivery runs re-derive
-    // from agent config (existing behavior, no regression).
+    // TD-103 Phase 3A: restore scorecardRules ONLY for delivery runs, from the
+    // exact snapshot persisted inside delivery metadata in run.started.
+    // Non-delivery resume keeps the 9e25c5c baseline behavior: scorecardRules=null.
+    // (A general resume-scorecard fix is a separate concern, not in Phase 3A scope.)
     let resumeScorecardRules = null;
     if (deliveryContext && runStarted.scorecardConfigured) {
       if (!runStarted.delivery?.scorecardRules || typeof runStarted.delivery.scorecardRules !== "object") {
@@ -410,9 +409,6 @@ export class RunManager {
         return null;
       }
       resumeScorecardRules = runStarted.delivery.scorecardRules;
-    } else if (!deliveryContext && runStarted.scorecardConfigured) {
-      // Non-delivery run: re-derive from agent config (existing behavior).
-      resumeScorecardRules = resolveScorecardRules(null, agent.scorecard, "warn");
     }
 
     const backend = this.backendFor(agent);

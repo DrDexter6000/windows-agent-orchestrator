@@ -1,6 +1,7 @@
 import { execSync, execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { existsSync, rmSync } from "node:fs";
+import { isValidRunId } from "./delivery.js";
 
 /**
  * Worktree 隔离能力层（M3-1）。
@@ -13,30 +14,13 @@ import { existsSync, rmSync } from "node:fs";
  */
 
 /**
- * 防御性 name 校验——防止 worktree name 进入路径/分支/shell 时注入。
- * 与 delivery.js 的 isValidRunId SSOT 一致（但不反向依赖 delivery 模块）。
- * @param {string} name
- * @returns {boolean}
- */
-function isValidWorktreeName(name) {
-  if (typeof name !== "string" || name.length === 0) return false;
-  if (/[\\/]/.test(name)) return false;
-  if (name.includes("\0")) return false;
-  if (name.includes("..")) return false;
-  if (/\s/.test(name)) return false;
-  if (/[~^:?*\[\]"&|<>$`';!(){}]/.test(name)) return false;
-  if (/^[.-]/.test(name)) return false;
-  return true;
-}
-
-/**
  * 创建一个独立 worktree。
  * @param {string} sourceCwd 源仓库（主工作树）路径
  * @param {string} name worktree 名称（用作目录名 + 分支名）
  * @returns {Promise<{path: string, branch: string}>}
  */
 export function createWorktree(sourceCwd, name) {
-  if (!isValidWorktreeName(name)) {
+  if (!isValidRunId(name)) {
     throw new Error(`Invalid worktree name (contains path separators, shell metacharacters, or traversal): ${JSON.stringify(name)}`);
   }
   const cwd = resolve(sourceCwd);
@@ -75,7 +59,7 @@ export function removeWorktree(wtPath) {
   while (attempt < MAX_RETRIES && !removed) {
     attempt += 1;
     try {
-      execSync(`git worktree remove --force "${path}"`, {
+      execFileSync("git", ["worktree", "remove", "--force", path], {
         cwd: path,
         stdio: "pipe",
         windowsHide: true,
