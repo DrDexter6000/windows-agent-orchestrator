@@ -463,6 +463,12 @@ packageDelivery(input) -> committed DeliveryRef  // re-inspect + stage + one com
 inspected 授权路径（`git add -A -- <changedFiles...>`），创建一个 run-scoped commit
 （message = `wao-delivery: <runId>`），author/committer identity 通过子进程 env 传入
 （`WAO Delivery <wao-delivery@local>`），不修改 repo-local/global git config。
+GPG signing 通过 flag/env 禁用（不绕过 hooks——rejecting hook 是 packaging failure）。
+
+**Packaging failure cleanup**：commit 失败（hook 拒绝/错误）时，packager 只 unstage 自己的 staging
+（`git reset -q --`，不用 `--hard`），保留 working-tree 文件内容；branch HEAD 停在 base，worker 产出
+保留供 diagnosis/retry。staging 不精确匹配 inspected changedFiles 时同样 unstage + fail。
+重复 packaging（HEAD 已在 delivery commit）被 base mismatch 拦截，不创建第二个 commit。
 
 **Fail-closed**（inspection + packaging 均适用）：empty diff、dirty base（pre-staged changes）、
 disallowed path（不在 allowedPaths 或 path-segment boundary 越界）、non-Git path、primary checkout

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { execSync } from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { inspectDelivery } from "../src/delivery.js";
+import { inspectDelivery, packageDelivery, DeliveryError } from "../src/delivery.js";
 
 // ===== Constants =====
 
@@ -640,6 +640,393 @@ test("2A-23: invalid runId with slash fails closed", async () => {
         ),
       "invalid_run_id",
     );
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+// ===== 2B Tests: packageDelivery =====
+
+// Helper: get full HEAD hash of a worktree
+function getHead(cwd) {
+  return execSync("git rev-parse HEAD", {
+    cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+  }).trim();
+}
+
+// Helper: get repo-local user.name/user.email
+function getRepoIdentity(cwd) {
+  const name = execSync("git config user.name", {
+    cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+  }).trim();
+  const email = execSync("git config user.email", {
+    cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+  }).trim();
+  return { name, email };
+}
+
+// Helper: list files in a commit (sorted)
+function commitFiles(cwd, commit) {
+  const out = execSync(`git diff-tree --no-commit-id --name-only -r -z ${commit}`, {
+    cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+  });
+  return out.split("\0").filter((s) => s.length > 0).sort();
+}
+
+// Helper: get commit author + committer as "Name <email>"
+function commitIdentity(cwd, commit) {
+  const authorName = execSync(
+    `git show -s --format=%an ${commit}`,
+    { cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] },
+  ).trim();
+  const authorEmail = execSync(
+    `git show -s --format=%ae ${commit}`,
+    { cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] },
+  ).trim();
+  const committerName = execSync(
+    `git show -s --format=%cn ${commit}`,
+    { cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] },
+  ).trim();
+  const committerEmail = execSync(
+    `git show -s --format=%ce ${commit}`,
+    { cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] },
+  ).trim();
+  return {
+    author: `${authorName} <${authorEmail}>`,
+    committer: `${committerName} <${committerEmail}>`,
+  };
+}
+
+// Helper: rev-count between two commits
+function revCount(cwd, from, to) {
+  return Number(
+    execSync(`git rev-list --count ${from}..${to}`, {
+      cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+    }).trim(),
+  );
+}
+
+// Helper: get parent of a commit (use ~1, not ^ — caret is cmd.exe escape char)
+function parentHash(cwd, commit) {
+  return execSync(`git rev-parse ${commit}~1`, {
+    cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+  }).trim();
+}
+
+// Helper: get commit message (subject only)
+function commitMessage(cwd, commit) {
+  return execSync(`git show -s --format=%s ${commit}`, {
+    cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+  }).trim();
+}
+
+// Helper: get current branch of HEAD
+function currentBranch(cwd) {
+  return execSync("git symbolic-ref --short HEAD", {
+    cwd, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+  }).trim();
+}
+
+test("2B-01: packageDelivery creates one commit for allowed tracked + deleted + untracked files", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    await rm(join(wtPath, "src", "b.js"));
+    await writeFile(join(wtPath, "src", "c.js"), "new\n");
+
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.ok(ref.deliveryCommit, "deliveryCommit must be set");
+    assert.match(ref.deliveryCommit, /^[0-9a-f]{40}$/);
+
+    // Exactly one commit in baseCommit..deliveryCommit
+    assert.equal(revCount(wtPath, baseCommit, ref.deliveryCommit), 1);
+    // Files match inspected changedFiles
+    assert.deepEqual(
+      commitFiles(wtPath, ref.deliveryCommit),
+      ["src/a.js", "src/b.js", "src/c.js"],
+    );
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2B-02: commit message is exactly 'wao-delivery: <runId>'", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.equal(commitMessage(wtPath, ref.deliveryCommit), `wao-delivery: ${RUN_ID}`);
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2B-03: parent is exactly base commit and rev-count is exactly one", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.equal(parentHash(wtPath, ref.deliveryCommit), baseCommit);
+    assert.equal(revCount(wtPath, baseCommit, ref.deliveryCommit), 1);
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2B-04: commit contains only sorted authorized changed files", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "m\n");
+    await writeFile(join(wtPath, "src", "new.js"), "n\n");
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.deepEqual(commitFiles(wtPath, ref.deliveryCommit), ["src/a.js", "src/new.js"]);
+    assert.deepEqual(ref.changedFiles, ["src/a.js", "src/new.js"]);
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2B-05: source checkout HEAD/branch/status remain unchanged", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    const sourceHeadBefore = getHead(repo);
+    const sourceBranchBefore = currentBranch(repo);
+    const sourceStatus = execSync("git status --porcelain", {
+      cwd: repo, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+    }).trim();
+
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    packageDelivery(baseInput(wtPath, baseCommit));
+
+    assert.equal(getHead(repo), sourceHeadBefore, "source HEAD must not move");
+    assert.equal(currentBranch(repo), sourceBranchBefore, "source branch must not change");
+    const sourceStatusAfter = execSync("git status --porcelain", {
+      cwd: repo, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+    }).trim();
+    assert.equal(sourceStatusAfter, sourceStatus, "source status must not change");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2B-06: delivery worktree HEAD advances to delivery commit and is clean", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+
+    assert.equal(getHead(wtPath), ref.deliveryCommit, "worktree HEAD must be delivery commit");
+    assert.equal(currentBranch(wtPath), BRANCH, "worktree branch must remain wao/<runId>");
+    const status = execSync("git status --porcelain", {
+      cwd: wtPath, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+    }).trim();
+    assert.equal(status, "", "worktree must be clean after packaging");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2B-07: returned DeliveryRef fills deliveryCommit and preserves pending lifecycle", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+
+    assert.match(ref.deliveryCommit, /^[0-9a-f]{40}$/);
+    assert.equal(ref.baseCommit, baseCommit);
+    assert.equal(ref.branch, BRANCH);
+    assert.deepEqual(ref.verification, { status: "pending", commands: ["npm test"] });
+    assert.deepEqual(ref.acceptance, { status: "pending", reviewerType: "lead_agent" });
+    assert.deepEqual(ref.integration, { status: "pending", targetCommit: null });
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2B-08: repository-local user.name and user.email are byte-for-byte unchanged", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    const before = getRepoIdentity(wtPath);
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    packageDelivery(baseInput(wtPath, baseCommit));
+    const after = getRepoIdentity(wtPath);
+    assert.equal(after.name, before.name);
+    assert.equal(after.email, before.email);
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2B-09: commit author/committer are the WAO process-scoped identity", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    const identity = commitIdentity(wtPath, ref.deliveryCommit);
+    assert.equal(identity.author, "WAO Delivery <wao-delivery@local>");
+    assert.equal(identity.committer, "WAO Delivery <wao-delivery@local>");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2B-10: spaces in paths are committed correctly without shell quoting tricks", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "my file.js"), "spaced content\n");
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+    assert.ok(ref.changedFiles.includes("src/my file.js"));
+    assert.deepEqual(commitFiles(wtPath, ref.deliveryCommit), ["src/my file.js"]);
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2B-11: empty diff and disallowed paths fail before staging/commit", async () => {
+  // Empty diff
+  const { repo, baseCommit } = await makeRepo();
+  const wt1 = makeWorktree(repo);
+  try {
+    assertDeliveryError(
+      () => packageDelivery(baseInput(wt1, baseCommit)),
+      "empty_diff",
+    );
+    // No commit created
+    assert.equal(getHead(wt1), baseCommit);
+  } finally {
+    await cleanupRepo(repo);
+  }
+
+  // Disallowed path
+  const { repo: repo2, baseCommit: base2 } = await makeRepo();
+  const wt2 = makeWorktree(repo2);
+  try {
+    await writeFile(join(wt2, "README.md"), "# changed\n");
+    assertDeliveryError(
+      () => packageDelivery(baseInput(wt2, base2)),
+      "disallowed_path",
+    );
+    assert.equal(getHead(wt2), base2);
+  } finally {
+    await cleanupRepo(repo2);
+  }
+});
+
+test("2B-12: rejecting pre-commit hook makes packaging fail", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+
+    // Install a rejecting pre-commit hook in the main repo (shared by linked worktree)
+    const hookDir = join(repo, ".git", "hooks");
+    await mkdir(hookDir, { recursive: true });
+    const hookPath = join(hookDir, "pre-commit");
+    await writeFile(
+      hookPath,
+      "#!/bin/sh\necho 'rejected by test hook' >&2\nexit 1\n",
+    );
+    // Make hook executable (chmod may not matter on Windows but set anyway)
+    try { execSync(`chmod +x "${hookPath}"`, { stdio: "ignore" }); } catch { /* best effort */ }
+
+    assertDeliveryError(
+      () => packageDelivery(baseInput(wtPath, baseCommit)),
+      "commit_failed",
+    );
+
+    // Branch HEAD remains at base
+    assert.equal(getHead(wtPath), baseCommit, "HEAD must remain at base after hook rejection");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2B-13: after commit failure, branch HEAD remains at base, index restored, worker file contents remain present", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "worker modified\n");
+    await writeFile(join(wtPath, "src", "new.js"), "worker new\n");
+
+    // Install rejecting hook
+    const hookDir = join(repo, ".git", "hooks");
+    await mkdir(hookDir, { recursive: true });
+    const hookPath = join(hookDir, "pre-commit");
+    await writeFile(hookPath, "#!/bin/sh\nexit 1\n");
+    try { execSync(`chmod +x "${hookPath}"`, { stdio: "ignore" }); } catch { /* best effort */ }
+
+    assertDeliveryError(
+      () => packageDelivery(baseInput(wtPath, baseCommit)),
+      "commit_failed",
+    );
+
+    // HEAD at base
+    assert.equal(getHead(wtPath), baseCommit);
+    // Index clean (no staged changes — packager unstaged its own staging)
+    const staged = execSync("git diff --name-only --cached", {
+      cwd: wtPath, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+    }).trim();
+    assert.equal(staged, "", "index must be restored to clean after commit failure");
+
+    // Worker file contents remain present (not reset/discarded)
+    const aContent = await readFile(join(wtPath, "src", "a.js"), "utf8");
+    assert.equal(aContent, "worker modified\n", "worker content must survive commit failure");
+    const newContent = await readFile(join(wtPath, "src", "new.js"), "utf8");
+    assert.equal(newContent, "worker new\n", "worker content must survive commit failure");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2B-14: repeated packaging with the same base fails closed rather than creating a second commit", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref1 = packageDelivery(baseInput(wtPath, baseCommit));
+
+    // HEAD is now at delivery commit, not base — second package should fail
+    assertDeliveryError(
+      () => packageDelivery(baseInput(wtPath, baseCommit)),
+      "base_commit_mismatch",
+    );
+    // Still only one commit
+    assert.equal(revCount(wtPath, baseCommit, ref1.deliveryCommit), 1);
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2B-15: packaging never pushes and creates no remote refs", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    // Add a remote (bare) to verify no push happens
+    const bareDir = await mkdtemp(join(tmpdir(), "wao-bare-"));
+    execSync(`git init --bare "${bareDir}"`, { stdio: "ignore" });
+    execSync(`git remote add origin "${bareDir}"`, { cwd: repo, stdio: "ignore" });
+
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    packageDelivery(baseInput(wtPath, baseCommit));
+
+    // Remote should have no refs
+    const remoteBranches = execSync("git branch -r", {
+      cwd: repo, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+    }).trim();
+    assert.equal(remoteBranches, "", "no remote refs should exist");
+
+    // Clean up bare repo
+    await rm(bareDir, { recursive: true, force: true });
   } finally {
     await cleanupRepo(repo);
   }

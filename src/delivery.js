@@ -474,3 +474,149 @@ export function inspectDelivery(input) {
     verification: validated.verification,
   });
 }
+
+// ===== Commit failure cleanup =====
+
+/**
+ * Unstage the packager's own staging while preserving working-tree file contents.
+ * Never uses `reset --hard` or `git clean`.
+ * @param {string} cwd
+ */
+function unstageOwnChanges(cwd) {
+  // `git reset -q --` (no --hard) unstages index changes, preserves working tree.
+  // Structured args, no shell string.
+  gitSafe(["reset", "-q", "--"], { cwd });
+}
+
+// ===== Public API: packageDelivery =====
+
+/**
+ * Package an isolated Git delivery into exactly one reviewable commit.
+ *
+ * Sequence:
+ * 1. Re-run full inspection (inspectDelivery) — fail closed before touching anything.
+ * 2. Stage exact inspected authorized changed files (`git add -A -- <files...>`).
+ * 3. Re-read staged paths, require exact set equality with proposed changedFiles.
+ * 4. Commit with process-scoped author/committer env, deterministic message,
+ *    no signing, no hooks bypass.
+ * 5. On commit failure: unstage packager's staging (preserve file contents), throw.
+ * 6. Verify parent/count/path set, resolve new HEAD, return committed DeliveryRef.
+ *
+ * @param {object} input — same shape as inspectDelivery
+ * @returns {object} committed DeliveryRef (deliveryCommit: full hash)
+ * @throws {DeliveryError} on any contract violation or commit failure
+ */
+export function packageDelivery(input) {
+  // 1. Re-inspect (read-only, fail-closed) before touching Git state
+  const proposed = inspectDelivery(input);
+  const cwd = proposed.worktreePath;
+  const changedFiles = proposed.changedFiles;
+
+  // 2. Stage exact inspected authorized paths
+  //    `git add -A -- <pathspec...>` — structured args, explicit paths, explicit --
+  git(["add", "-A", "--", ...changedFiles], { cwd });
+
+  // 3. Re-read staged paths and require exact set equality
+  const staged = parseNul(git(["diff", "--name-only", "--cached", "-z"], { cwd }));
+  const stagedSet = new Set(staged);
+  const changedSet = new Set(changedFiles);
+  if (stagedSet.size !== changedSet.size ||
+      [...changedSet].some((p) => !stagedSet.has(p))) {
+    // Unstage and fail — staging did not produce exact set equality
+    unstageOwnChanges(cwd);
+    throw new DeliveryError(
+      "staging_mismatch",
+      `staged paths do not match inspected changedFiles; staged=[${staged.join(",")}] expected=[${changedFiles.join(",")}]`,
+    );
+  }
+
+  // 4. Commit with process-scoped identity env
+  const commitMessage = `wao-delivery: ${proposed.runId}`;
+  const commitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: DELIVERY_IDENTITY.name,
+    GIT_AUTHOR_EMAIL: DELIVERY_IDENTITY.email,
+    GIT_COMMITTER_NAME: DELIVERY_IDENTITY.name,
+    GIT_COMMITTER_EMAIL: DELIVERY_IDENTITY.email,
+    // Disable signing so machine-local config cannot block packaging
+    GIT_COMMIT_GPGSIGN: "false",
+  };
+
+  let commitOk = false;
+  try {
+    execFileSync("git", ["commit", "--no-gpg-sign", "-m", commitMessage], {
+      cwd,
+      env: commitEnv,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"], // a rejecting hook writes to stderr — fail closed
+      windowsHide: true,
+    });
+    commitOk = true;
+  } catch {
+    // 5. Commit failure: unstage packager's staging, preserve file contents
+    unstageOwnChanges(cwd);
+    throw new DeliveryError(
+      "commit_failed",
+      `git commit failed (hook rejection or error) for runId=${proposed.runId}; index restored, worker file contents preserved`,
+    );
+  }
+
+  // If commit somehow didn't throw but also didn't produce a commit, clean up
+  if (!commitOk) {
+    unstageOwnChanges(cwd);
+    throw new DeliveryError("commit_failed", "commit did not complete");
+  }
+
+  // 6. Verify the new commit and return committed DeliveryRef
+  const deliveryCommit = String(git(["rev-parse", "HEAD"], { cwd })).trim();
+
+  // Verify parent is exactly baseCommit
+  const parent = String(git(["rev-parse", "HEAD^"], { cwd })).trim();
+  if (parent !== proposed.baseCommit) {
+    throw new DeliveryError(
+      "commit_integrity",
+      `delivery commit parent (${parent}) is not baseCommit (${proposed.baseCommit})`,
+    );
+  }
+
+  // Verify exactly one commit in baseCommit..deliveryCommit
+  const count = Number(
+    String(git(["rev-list", "--count", `${proposed.baseCommit}..HEAD`], { cwd })).trim(),
+  );
+  if (count !== 1) {
+    throw new DeliveryError(
+      "commit_integrity",
+      `expected exactly 1 commit in ${proposed.baseCommit}..HEAD, got ${count}`,
+    );
+  }
+
+  // Verify committed files exactly equal inspected changedFiles
+  const committedFiles = parseNul(
+    git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"], { cwd }),
+  ).sort();
+  const changedSorted = [...changedFiles].sort();
+  if (
+    committedFiles.length !== changedSorted.length ||
+    committedFiles.some((p, i) => p !== changedSorted[i])
+  ) {
+    throw new DeliveryError(
+      "commit_integrity",
+      `committed files do not match inspected changedFiles; committed=[${committedFiles.join(",")}] expected=[${changedSorted.join(",")}]`,
+    );
+  }
+
+  // Build committed DeliveryRef (do not mutate proposed in place)
+  return {
+    schemaVersion: 1,
+    kind: "git_commit",
+    runId: proposed.runId,
+    baseCommit: proposed.baseCommit,
+    deliveryCommit,
+    branch: proposed.branch,
+    worktreePath: proposed.worktreePath,
+    changedFiles: committedFiles,
+    verification: proposed.verification,
+    acceptance: { ...proposed.acceptance },
+    integration: { ...proposed.integration },
+  };
+}
