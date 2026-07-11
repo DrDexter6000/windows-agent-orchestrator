@@ -352,15 +352,50 @@ export class RunManager {
 
     const registryPath = resolve(options.registry ?? this.config.registry);
     const loaded = await this.readRegistry(registryPath);
-    const agent = loaded.getAgent(transcript.context.agentId, { cwd: runStarted.cwd });
-    const backend = this.backendFor(agent);
 
-    // TD-103 Phase 3A: reconstruct delivery context from run.started for resume.
+    // TD-103 Phase 3A audit: reconstruct delivery context from run.started for resume.
+    // Must validate BEFORE spawn/attach: use SSOT prepareDeliveryRequest + prove worktree state.
     const deliveryContext = _reconstructDeliveryContext(runStarted, runId);
     if (runStarted.delivery && !deliveryContext) {
       // Transcript says delivery mode but context is malformed/missing — fail closed.
       return null;
     }
+    if (deliveryContext) {
+      // Full fail-closed validation: re-validate the delivery request through SSOT,
+      // then prove the worktree is still a persistent linked worktree at the correct
+      // branch and base commit. This prevents resume from spawning into a stale or
+      // missing worktree, or using a corrupted delivery context.
+      try {
+        prepareDeliveryRequest({
+          mode: deliveryContext.mode,
+          allowedPaths: deliveryContext.allowedPaths,
+          ...(deliveryContext.verificationCommands
+            ? { verificationCommands: deliveryContext.verificationCommands }
+            : { verificationUnavailableReason: deliveryContext.verificationUnavailableReason }),
+        });
+        _proveResumeWorktree(deliveryContext);
+      } catch {
+        // Validation failed — do not spawn/attach
+        return null;
+      }
+    }
+
+    // TD-103 audit: for delivery runs, the agent cwd must be the worktree path,
+    // NOT the source repo (runStarted.cwd is the source repo). Non-delivery runs
+    // keep using runStarted.cwd as before.
+    const resumeCwd = deliveryContext ? deliveryContext.worktreePath : runStarted.cwd;
+    const agent = loaded.getAgent(transcript.context.agentId, { cwd: resumeCwd });
+
+    // TD-103 audit: restore scorecardRules for delivery runs. The original
+    // scorecardMode is not in run.started, so we re-derive rules from agent config
+    // using the default mode (warn). scorecardConfigured flag tells us if scorecard
+    // was active; for delivery runs we must not skip scorecard — it gates packaging.
+    let resumeScorecardRules = null;
+    if (runStarted.scorecardConfigured) {
+      resumeScorecardRules = resolveScorecardRules(null, agent.scorecard, "warn");
+    }
+
+    const backend = this.backendFor(agent);
 
     // 进程式 backend（进程已死）→ 重放 prompt 重新 spawn
     const isProcess = runStarted.backend === "claude-code" || runStarted.backend === "codex" || runStarted.backend === "kimi-code";
@@ -388,6 +423,8 @@ export class RunManager {
         config: this.config,
         onRemove: () => this.activeRuns.delete(runId),
         initialState: "submitted",
+        ...(deliveryContext ? { effectiveCwd: deliveryContext.worktreePath } : {}),
+        scorecardRules: resumeScorecardRules,
         deliveryContext,
         packageDeliveryFn: this.packageDeliveryFn,
       });
@@ -399,7 +436,8 @@ export class RunManager {
     // HTTP 类 backend（opencode-serve）→ attach 到已有 session
     const serveUrl = agent.serveUrl;
     const sessionId = session.backendSessionId;
-    const cwd = runStarted.cwd;
+    // TD-103 audit: delivery runs use worktree cwd for streamEvents polling.
+    const cwd = resumeCwd;
     const handle = {
       backend: session.backend,
       backendSessionId: sessionId,
@@ -422,6 +460,8 @@ export class RunManager {
       config: this.config,
       onRemove: () => this.activeRuns.delete(runId),
       initialState: state,
+      ...(deliveryContext ? { effectiveCwd: deliveryContext.worktreePath } : {}),
+      scorecardRules: resumeScorecardRules,
       deliveryContext,
       packageDeliveryFn: this.packageDeliveryFn,
     });
@@ -513,7 +553,9 @@ async function safeCleanup(cleanupFn, transcript) {
 
 /**
  * TD-103 Phase 3A: reconstruct delivery context from run.started transcript event.
- * Returns null if no delivery was configured, or if the context is malformed.
+ * Returns null if no delivery was configured, or if required fields are missing.
+ * Full validation (mode/allowedPaths/verification) is done by prepareDeliveryRequest
+ * after reconstruction. This function only checks structural presence.
  * @param {object} runStarted — run.started event
  * @param {string} runId
  * @returns {object|null} delivery context or null
@@ -521,8 +563,7 @@ async function safeCleanup(cleanupFn, transcript) {
 function _reconstructDeliveryContext(runStarted, runId) {
   if (!runStarted?.delivery) return null;
   const d = runStarted.delivery;
-  // Validate all required fields are present — fail closed on missing/malformed
-  if (!d.mode || !d.baseCommit || !d.allowedPaths) return null;
+  if (!d.mode || !d.baseCommit || !Array.isArray(d.allowedPaths)) return null;
   if (!runStarted.worktreePath) return null;
   const hasCommands = Array.isArray(d.verificationCommands) && d.verificationCommands.length > 0;
   const hasReason = typeof d.verificationUnavailableReason === "string" && d.verificationUnavailableReason.length > 0;
@@ -538,6 +579,53 @@ function _reconstructDeliveryContext(runStarted, runId) {
       ? { verificationCommands: [...d.verificationCommands] }
       : { verificationUnavailableReason: d.verificationUnavailableReason }),
   };
+}
+
+/**
+ * TD-103 Phase 3A audit: prove the worktree is still valid for resume.
+ * Checks: worktree path exists, HEAD is on the expected branch at the expected
+ * base commit. Throws on any failure (resume path catches and returns null).
+ * @param {object} ctx — delivery context (worktreePath, baseCommit, runId)
+ */
+function _proveResumeWorktree(ctx) {
+  const expectedBranch = `wao/${ctx.runId}`;
+  // Worktree must exist
+  const toplevel = String(
+    execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: ctx.worktreePath,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
+      windowsHide: true,
+    }),
+  ).trim();
+  const normAbs = (p) => p.replace(/\\/g, "/");
+  if (normAbs(resolve(toplevel)) !== normAbs(resolve(ctx.worktreePath))) {
+    throw new Error(`worktree toplevel mismatch on resume`);
+  }
+  // HEAD must be on expected branch
+  const branch = String(
+    execFileSync("git", ["symbolic-ref", "--short", "HEAD"], {
+      cwd: ctx.worktreePath,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
+      windowsHide: true,
+    }),
+  ).trim();
+  if (branch !== expectedBranch) {
+    throw new Error(`worktree on wrong branch on resume: ${branch} != ${expectedBranch}`);
+  }
+  // HEAD must equal baseCommit
+  const head = String(
+    execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: ctx.worktreePath,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
+      windowsHide: true,
+    }),
+  ).trim();
+  if (head !== ctx.baseCommit) {
+    throw new Error(`worktree HEAD (${head}) != baseCommit (${ctx.baseCommit}) on resume`);
+  }
 }
 
 /**
@@ -817,38 +905,45 @@ export class Run {
 
         const deliveryResult = await this._finalizeDelivery();
         if (deliveryResult.success) {
-          // Packaging succeeded — attempt completed with delivery_created + run.completed
+          // Packaging succeeded — delivery_created as attemptEvent (always written, even if
+          // transition rejected), run.completed as factEvent (only on accepted).
+          // This eliminates the orphan-delivery-commit window: no matter what happens to
+          // the transition, the delivery fact is in the same atomic batch.
           const tResult = await this._transition(this.state, "completed", "done", {
-            factEvents: [
+            attemptEvents: [
               { type: "run.delivery_created", payload: { delivery: deliveryResult.ref } },
-              { type: "run.completed", payload: {
+            ],
+            factEvents: [{
+              type: "run.completed",
+              payload: {
                 backendSessionId: this.result.backendSessionId,
                 messageCount: messages.length,
-              } },
-            ],
+              },
+            }],
           });
           await this._runCleanup();
           if (!tResult.accepted) {
-            // Race lost — factEvents not written on rejected. Record delivery_created
-            // as an attempt fact so the Git commit is discoverable in transcript.
-            await this.transcript.append("run.delivery_created", { delivery: deliveryResult.ref });
+            // Race lost — delivery_created was written as attemptEvent (atomic with rejection).
             return _loserResult(tResult.state, { messages, evidence, metrics, delivery: deliveryResult.ref });
           }
           return { completed: true, messages, evidence, timedOut: false, metrics, delivery: deliveryResult.ref };
         } else {
-          // Packaging failed — attempt failed with delivery_failed + run.error
+          // Packaging failed — delivery_failed as attemptEvent (always written),
+          // run.error as factEvent (only on accepted).
           const errCode = deliveryResult.error.code;
           const errMsg = deliveryResult.error.message;
           const tResult = await this._transition(this.state, "failed", "delivery_failed", {
-            factEvents: [
+            attemptEvents: [
               { type: "run.delivery_failed", payload: { deliveryCode: errCode, message: errMsg } },
-              { type: "run.error", payload: { phase: "delivery", deliveryCode: errCode } },
             ],
+            factEvents: [{
+              type: "run.error",
+              payload: { phase: "delivery", deliveryCode: errCode },
+            }],
           });
           await this._runCleanup();
           if (!tResult.accepted) {
-            // Race lost — record delivery_failed as attempt fact
-            await this.transcript.append("run.delivery_failed", { deliveryCode: errCode, message: errMsg });
+            // Race lost — delivery_failed was written as attemptEvent (atomic with rejection).
             return _loserResult(tResult.state, {
               messages, evidence, metrics,
               deliveryError: { code: errCode, message: errMsg },

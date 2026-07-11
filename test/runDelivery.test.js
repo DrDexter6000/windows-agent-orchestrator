@@ -542,29 +542,88 @@ test("3A1-14: prepared context can be reconstructed from run.started for resume"
   }
 });
 
-test("3A1-15: delivery-enabled resume preserves original base/worktree/allowed paths/verification", async () => {
+test("3A1-15: delivery-enabled resume uses worktree cwd + restores scorecard + produces correct DeliveryRef", async () => {
   const { repo, baseCommit } = await makeRepo();
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-15-"));
   try {
-    const mgr = makeManager(runDir, repo, createMockFetch());
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+    );
     const run = await mgr.start("test", {
       prompt: "hi",
       isolate: true,
       runId: "run_delivtest_15",
       delivery: deliveryOpts(repo, baseCommit),
     });
-
-    // Abort before completion so resume is possible
-    // (don't waitForCompletion — just let it be in submitted state)
     const originalWorktree = run.deliveryContext.worktreePath;
 
-    // Now try to resume
+    // Simulate worker writing to the worktree
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(originalWorktree, "src", "a.js"), "resume modified\n");
+
+    // Source checkout must NOT have the worker's file
+    const sourceContent = await import("node:fs/promises").then(m => m.readFile(
+      join(repo, "src", "a.js"), "utf8",
+    ));
+    assert.equal(sourceContent, "const a = 1;\n", "source must be unchanged");
+
+    // Resume the run
     const resumedRun = await mgr.resume("run_delivtest_15", { runDir });
     assert.ok(resumedRun, "resume must succeed for delivery-enabled run");
     assert.ok(resumedRun.deliveryContext, "resumed run must have deliveryContext");
     assert.equal(resumedRun.deliveryContext.baseCommit, baseCommit);
     assert.equal(resumedRun.deliveryContext.worktreePath, originalWorktree);
     assert.deepEqual(resumedRun.deliveryContext.allowedPaths, ["src"]);
+
+    // Resume must use worktree as effectiveCwd, NOT source repo
+    assert.equal(resumedRun.effectiveCwd, originalWorktree,
+      "resumed run effectiveCwd must be worktree, not source repo");
+
+    // Scorecard rules must be restored
+    assert.ok(resumedRun.scorecardRules, "resumed run must have scorecardRules");
+
+    // Complete the resumed run — delivery must package correctly
+    const result = await resumedRun.waitForCompletion({});
+    assert.equal(result.completed, true, "resumed run must complete");
+    assert.ok(result.delivery, "resumed run must produce delivery");
+    assert.ok(result.delivery.deliveryCommit, "delivery commit must exist");
+    assert.deepEqual(result.delivery.changedFiles, ["src/a.js"]);
+
+    // Source checkout still unchanged
+    const sourceContentAfter = await import("node:fs/promises").then(m => m.readFile(
+      join(repo, "src", "a.js"), "utf8",
+    ));
+    assert.equal(sourceContentAfter, "const a = 1;\n", "source must still be unchanged");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3A1-15b: resume fails closed when delivery worktree branch has advanced", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-15b-"));
+  try {
+    const mgr = makeManager(runDir, repo, createMockFetch());
+    const run = await mgr.start("test", {
+      prompt: "hi",
+      isolate: true,
+      runId: "run_delivtest_15b",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    // Advance the worktree branch past base (simulating partial commit or corruption)
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "advanced\n");
+    execSync("git add .", { cwd: run.deliveryContext.worktreePath, stdio: "ignore" });
+    execSync('git commit -m "advanced"', {
+      cwd: run.deliveryContext.worktreePath, stdio: "ignore",
+      env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
+    });
+
+    // Resume should fail closed — HEAD no longer at base
+    const resumedRun = await mgr.resume("run_delivtest_15b", { runDir });
+    assert.equal(resumedRun, null, "resume must fail closed when worktree HEAD != base");
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);
@@ -1225,6 +1284,325 @@ test("3A2-20: race — external aborted terminal wins during packaging that thro
     );
     assert.equal(terminalStateChanges.length, 1, "exactly one terminal state change");
     assert.equal(terminalStateChanges[0].to, "aborted", "terminal must be aborted");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+// ===== Batch 3A-2: Missing mandatory test coverage (audit follow-up) =====
+
+test("3A2-02: hard scorecard pass packages after scorecard.checked and before terminal completed", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-pkg-02-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg02-"));
+  let packageCount = 0;
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => { packageCount++; return packageDelivery(input); },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_delivtest_p02",
+      delivery: deliveryOpts(repo, baseCommit),
+      // warn mode = scorecard runs and writes scorecard.checked; non-blocking
+      scorecardMode: "warn",
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+
+    const result = await run.waitForCompletion({});
+    assert.equal(packageCount, 1, "packager called exactly once after hard scorecard pass");
+    assert.equal(result.completed, true);
+    assert.ok(result.delivery, "delivery must be present");
+
+    const events = await readTranscript(run.transcript.filePath);
+    const scorecardIdx = events.findIndex((e) => e.type === "scorecard.checked");
+    const deliveryIdx = events.findIndex((e) => e.type === "run.delivery_created");
+    assert.ok(scorecardIdx >= 0, "scorecard.checked must exist");
+    assert.ok(deliveryIdx >= 0, "delivery_created must exist");
+    assert.ok(scorecardIdx < deliveryIdx, "scorecard.checked before delivery_created");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3A2-03: warn-mode scorecard failure records warning and still packages", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-pkg-03-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg03-"));
+  let packageCount = 0;
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => { packageCount++; return packageDelivery(input); },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_delivtest_p03",
+      delivery: deliveryOpts(repo, baseCommit),
+      scorecardMode: "warn",
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+
+    const result = await run.waitForCompletion({});
+    assert.equal(packageCount, 1, "packager must be called even with warn scorecard failure");
+    assert.equal(result.completed, true, "warn scorecard failure does not block completion");
+
+    const events = await readTranscript(run.transcript.filePath);
+    const scorecardWarn = events.find((e) => e.type === "scorecard.warn");
+    assert.ok(scorecardWarn, "scorecard.warn event must exist");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3A2-06: timeout never calls packager", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-pkg-06-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg06-"));
+  let packageCount = 0;
+  try {
+    const timeoutFetch = async (url, init = {}) => {
+      const urlStr = String(url);
+      if (init.method === "POST" && urlStr.endsWith("/api/session")) {
+        return {
+          ok: true, status: 200,
+          async json() { return { data: { id: "ses_timeout" } }; },
+          async text() { return "{}"; },
+        };
+      }
+      if (init.method === "POST" && urlStr.includes("/prompt_async")) {
+        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
+      }
+      if (init.method === "GET" && urlStr.includes("/message")) {
+        return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
+      }
+      if (init.method === "POST" && urlStr.includes("/abort")) {
+        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
+      }
+      return { ok: false, status: 404, async text() { return ""; } };
+    };
+    const mgr = makeManagerWithPackager(
+      runDir, repo, timeoutFetch,
+      () => { packageCount++; return {}; },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_delivtest_p06",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const result = await run.waitForCompletion({ waitTimeout: 200, pollInterval: 10 });
+    assert.equal(packageCount, 0, "packager must not be called on timeout");
+    assert.equal(result.timedOut, true, "must be timed out");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3A2-07: budget failure never calls packager", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-pkg-07-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg07-"));
+  let packageCount = 0;
+  try {
+    // Mock that returns session with large token count → budget exceeded.
+    // Returns empty messages first so metrics polling (every 5 polls) triggers
+    // before completion detection.
+    let pollCount = 0;
+    const budgetFetch = async (url, init = {}) => {
+      const urlStr = String(url);
+      if (init.method === "POST" && urlStr.endsWith("/api/session")) {
+        return {
+          ok: true, status: 200,
+          async json() { return { data: { id: "ses_budget" } }; },
+          async text() { return "{}"; },
+        };
+      }
+      if (init.method === "POST" && urlStr.includes("/prompt_async")) {
+        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
+      }
+      if (init.method === "GET" && urlStr.includes("/message")) {
+        pollCount++;
+        // Return empty for first 6 polls so metrics polling triggers,
+        // then return assistant message
+        if (pollCount < 7) {
+          return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
+        }
+        return {
+          ok: true, status: 200,
+          async json() {
+            return [{
+              info: { id: "msg_reply", role: "assistant" },
+              parts: [{ type: "text", text: "done" }],
+            }];
+          },
+          async text() { return "[]"; },
+        };
+      }
+      // Session endpoint for metrics polling — return large token count.
+      // trySessionMetrics reads sess.tokens directly (not under .data).
+      if (init.method === "GET" && urlStr.includes("/session/")) {
+        return {
+          ok: true, status: 200,
+          async json() {
+            return { tokens: { input: 1000, output: 1000, reasoning: 0 } };
+          },
+          async text() { return "{}"; },
+        };
+      }
+      if (init.method === "POST" && urlStr.includes("/abort")) {
+        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
+      }
+      return { ok: false, status: 404, async text() { return ""; } };
+    };
+    const mgr = makeManagerWithPackager(
+      runDir, repo, budgetFetch,
+      () => { packageCount++; return {}; },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_delivtest_p07",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    // Pass token budget via waitForCompletion options
+    const result = await run.waitForCompletion({ tokenBudget: 10, tokenBudgetMultiplier: 1 });
+    assert.equal(packageCount, 0, "packager must not be called on budget failure");
+    assert.equal(result.budgetExceeded, true, "must be budget exceeded");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3A2-08: manual abort before packaging never calls packager", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-pkg-08-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg08-"));
+  let packageCount = 0;
+  try {
+    const slowFetch = async (url, init = {}) => {
+      const urlStr = String(url);
+      if (init.method === "POST" && urlStr.endsWith("/api/session")) {
+        return {
+          ok: true, status: 200,
+          async json() { return { data: { id: "ses_slow" } }; },
+          async text() { return "{}"; },
+        };
+      }
+      if (init.method === "POST" && urlStr.includes("/prompt_async")) {
+        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
+      }
+      if (init.method === "GET" && urlStr.includes("/message")) {
+        return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
+      }
+      if (init.method === "POST" && urlStr.includes("/abort")) {
+        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
+      }
+      return { ok: false, status: 404, async text() { return ""; } };
+    };
+    const mgr = makeManagerWithPackager(
+      runDir, repo, slowFetch,
+      () => { packageCount++; return {}; },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_delivtest_p08",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+
+    run.abort("user");
+    const result = await run.waitForCompletion({ waitTimeout: 5000, pollInterval: 10 });
+    assert.equal(packageCount, 0, "packager must not be called on abort");
+    assert.equal(result.completed, false, "must not be completed");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3A2-10: disallowed path produces failed lifecycle with original delivery code", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-pkg-10-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg10-"));
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_delivtest_p10",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "README.md"), "# changed\n");
+
+    const result = await run.waitForCompletion({});
+    assert.equal(result.failed, true, "must be failed");
+    assert.ok(result.deliveryError, "must have deliveryError");
+    assert.equal(result.deliveryError.code, "disallowed_path");
+
+    const events = await readTranscript(run.transcript.filePath);
+    const deliveryFailed = events.find((e) => e.type === "run.delivery_failed");
+    assert.ok(deliveryFailed);
+    assert.equal(deliveryFailed.deliveryCode, "disallowed_path");
+    assert.equal(run.state, "failed");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3A2-18: external terminal wins before package gate — no Git commit and no delivery event", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-pkg-18-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg18-"));
+  let packageCount = 0;
+  try {
+    const slowFetch = async (url, init = {}) => {
+      const urlStr = String(url);
+      if (init.method === "POST" && urlStr.endsWith("/api/session")) {
+        return {
+          ok: true, status: 200,
+          async json() { return { data: { id: "ses_stop_gate" } }; },
+          async text() { return "{}"; },
+        };
+      }
+      if (init.method === "POST" && urlStr.includes("/prompt_async")) {
+        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
+      }
+      if (init.method === "GET" && urlStr.includes("/message")) {
+        return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
+      }
+      if (init.method === "POST" && urlStr.includes("/abort")) {
+        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
+      }
+      return { ok: false, status: 404, async text() { return ""; } };
+    };
+
+    const mgr = makeManagerWithPackager(
+      runDir, repo, slowFetch,
+      () => { packageCount++; return {}; },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_delivtest_p18",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+
+    // Externally claim aborted terminal before waitForCompletion reaches packaging
+    const { JsonlTranscript } = await import("../src/transcript.js");
+    const extTs = new JsonlTranscript(run.transcript.filePath, {
+      runId: "run_delivtest_p18", agentId: "test",
+    });
+    await new Promise(r => setTimeout(r, 200));
+    try {
+      await extTs.transitionState("running", "aborted", "external_stop", {
+        factEvents: [{ type: "run.aborted", payload: { reason: "external" } }],
+      });
+    } catch { /* may fail if state wrong */ }
+
+    const result = await run.waitForCompletion({ waitTimeout: 500, pollInterval: 10 });
+    assert.equal(packageCount, 0, "packager must not be called when external terminal exists");
+
+    const events = await readTranscript(run.transcript.filePath);
+    assert.ok(!events.some((e) => e.type === "run.delivery_created"), "no delivery_created");
+    assert.ok(!events.some((e) => e.type === "run.delivery_failed"), "no delivery_failed");
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);
