@@ -658,7 +658,21 @@ test("3A1-16: verificationUnavailableReason is accepted in delivery mode", async
 
 // ===== Batch 3A-2: Package before terminal completion =====
 
-/** Create a manager with injectable packageDeliveryFn. */
+/** Dummy verifier for 3A tests that focus on packaging, not verification. */
+const dummyVerifier = async (deliveryRef) => ({
+  delivery: {
+    ...deliveryRef,
+    verification: {
+      ...deliveryRef.verification,
+      status: "passed",
+      verifiedCommit: deliveryRef.deliveryCommit,
+      results: [],
+    },
+  },
+  outcome: "passed",
+});
+
+/** Create a manager with injectable packageDeliveryFn and verifyDeliveryFn. */
 function makeManagerWithPackager(runDir, repoDir, fetchImpl, packageDeliveryFn, opts = {}) {
   const config = {
     registry: "x",
@@ -692,6 +706,7 @@ function makeManagerWithPackager(runDir, repoDir, fetchImpl, packageDeliveryFn, 
     readRegistry,
     backendFor: () => new OpenCodeServeBackend({ fetchImpl, timeout: 1000, retries: 0 }),
     packageDeliveryFn,
+    verifyDeliveryFn: opts.verifyDeliveryFn ?? dummyVerifier,
   });
 }
 
@@ -1152,7 +1167,7 @@ test("3A2-22: successful worktree remains persistent and clean at delivery commi
   }
 });
 
-test("3A2-23: verification/acceptance/integration fields remain pending; no Phase 3B events", async () => {
+test("3A2-23: acceptance/integration remain pending; verification updated by verifier", async () => {
   const { repo, baseCommit } = await makeRepo("wao-rd-pkg-23-");
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg23-"));
   try {
@@ -1168,13 +1183,14 @@ test("3A2-23: verification/acceptance/integration fields remain pending; no Phas
     await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
     const result = await run.waitForCompletion({});
 
-    assert.equal(result.delivery.verification.status, "pending");
+    // Verification was run (dummy verifier → passed)
+    assert.equal(result.delivery.verification.status, "passed");
+    // Acceptance and integration remain pending (Phase 3C)
     assert.equal(result.delivery.acceptance.status, "pending");
     assert.equal(result.delivery.integration.status, "pending");
 
-    // No Phase 3B events
+    // No Phase 3C acceptance/integration events
     const events = await readTranscript(run.transcript.filePath);
-    assert.ok(!events.some((e) => e.type === "run.delivery_verified"), "no verification event");
     assert.ok(!events.some((e) => e.type === "run.delivery_accepted"), "no acceptance event");
     assert.ok(!events.some((e) => e.type === "run.delivery_integrated"), "no integration event");
   } finally {
@@ -2007,6 +2023,314 @@ test("3A-REG-03: ordinary non-delivery resume does NOT produce scorecard.checked
     const scorecardChecked = events.find((e) => e.type === "scorecard.checked");
     assert.equal(scorecardChecked, undefined,
       "ordinary resumed run must NOT have scorecard.checked (baseline behavior)");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+// ===== Batch 3B-2: Verification integration tests =====
+
+test("3B2-01: accepted delivery completion calls verifier exactly once", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-01-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b201-"));
+  let verifyCount = 0;
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+      { verifyDeliveryFn: async (ref) => { verifyCount++; return { delivery: { ...ref, verification: { ...ref.verification, status: "passed", verifiedCommit: ref.deliveryCommit, results: [] } }, outcome: "passed" }; } },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_01",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+    await run.waitForCompletion({});
+    assert.equal(verifyCount, 1, "verifier called exactly once");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3B2-04: passing verifier → event passed + returned updated ref", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-04-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b204-"));
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+      { verifyDeliveryFn: async (ref) => ({ delivery: { ...ref, verification: { status: "passed", commands: ["echo ok"], verifiedCommit: ref.deliveryCommit, results: [{ index: 0, command: "echo ok", exitCode: 0, signal: null, timedOut: false, durationMs: 5, stdoutBytes: 3, stderrBytes: 0 }] } }, outcome: "passed" }) },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_04",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+    const result = await run.waitForCompletion({});
+    assert.equal(result.completed, true);
+    assert.equal(result.delivery.verification.status, "passed");
+    assert.equal(result.verificationFailed, false);
+
+    const events = await readTranscript(run.transcript.filePath);
+    const passed = events.find((e) => e.type === "run.delivery_verification_passed");
+    assert.ok(passed, "verification_passed event must exist");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3B2-05: failing verifier → run remains completed, one terminal, event failed, verificationFailed:true", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-05-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b205-"));
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+      { verifyDeliveryFn: async (ref) => ({ delivery: { ...ref, verification: { status: "failed", failureCode: "command_failed", verifiedCommit: ref.deliveryCommit, results: [] } }, outcome: "failed", failureCode: "command_failed" }) },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_05",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+    const result = await run.waitForCompletion({});
+    assert.equal(result.completed, true, "run stays completed");
+    assert.equal(result.verificationFailed, true);
+    assert.equal(result.delivery.verification.status, "failed");
+
+    const events = await readTranscript(run.transcript.filePath);
+    const terminals = events.filter((e) => e.type === "run.state_change" && ["completed", "failed", "aborted", "timed_out"].includes(e.to));
+    assert.equal(terminals.length, 1, "exactly one terminal state_change");
+    assert.equal(terminals[0].to, "completed", "terminal must be completed");
+
+    const failed = events.find((e) => e.type === "run.delivery_verification_failed");
+    assert.ok(failed, "verification_failed event must exist");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3B2-06: unavailable → event unavailable, verificationUnavailable:true", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-06-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b206-"));
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+      { verifyDeliveryFn: async (ref) => ({ delivery: { ...ref, verification: { status: "unavailable", unavailableReason: "no test", verifiedCommit: ref.deliveryCommit, results: [] } }, outcome: "unavailable" }) },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_06",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationUnavailableReason: "no test" },
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+    const result = await run.waitForCompletion({});
+    assert.equal(result.completed, true);
+    assert.equal(result.verificationUnavailable, true);
+    assert.equal(result.delivery.verification.status, "unavailable");
+
+    const events = await readTranscript(run.transcript.filePath);
+    const unavail = events.find((e) => e.type === "run.delivery_verification_unavailable");
+    assert.ok(unavail, "verification_unavailable event must exist");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3B2-07: event order is delivery_created → completed → state_change → verification", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-07-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b207-"));
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_07",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+    await run.waitForCompletion({});
+    const events = await readTranscript(run.transcript.filePath);
+    const deliveryCreatedIdx = events.findIndex((e) => e.type === "run.delivery_created");
+    const completedIdx = events.findIndex((e) => e.type === "run.completed");
+    const stateChangeIdx = events.findIndex((e) => e.type === "run.state_change" && e.to === "completed");
+    const verificationIdx = events.findIndex((e) => e.type.startsWith("run.delivery_verification"));
+    assert.ok(deliveryCreatedIdx >= 0);
+    assert.ok(completedIdx >= 0);
+    assert.ok(stateChangeIdx >= 0);
+    assert.ok(verificationIdx >= 0);
+    assert.ok(deliveryCreatedIdx < completedIdx, "delivery_created before run.completed");
+    assert.ok(completedIdx <= stateChangeIdx, "completed before or at state_change");
+    assert.ok(stateChangeIdx < verificationIdx, "state_change before verification");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3B2-08: run.delivery_created remains pending; verification event has updated ref", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-08-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b208-"));
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_08",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+    await run.waitForCompletion({});
+    const events = await readTranscript(run.transcript.filePath);
+    const created = events.find((e) => e.type === "run.delivery_created");
+    assert.ok(created, "delivery_created must exist");
+    assert.equal(created.delivery.verification.status, "pending", "delivery_created verification must be pending");
+    const verified = events.find((e) => e.type.startsWith("run.delivery_verification"));
+    assert.ok(verified, "verification event must exist");
+    assert.notEqual(verified.delivery.verification.status, "pending", "verified ref must have non-pending status");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3B2-16: verifier throw maps to execution_error without raw sentinel leakage", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-16-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b216-"));
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+      { verifyDeliveryFn: async () => { throw new Error("internal: SECRET_KEY=leaked in /secret/path"); } },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_16",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+    const result = await run.waitForCompletion({});
+    assert.equal(result.completed, true, "run stays completed");
+    assert.equal(result.delivery.verification.status, "failed");
+    assert.equal(result.delivery.verification.failureCode, "execution_error");
+
+    const events = await readTranscript(run.transcript.filePath);
+    const failed = events.find((e) => e.type === "run.delivery_verification_failed");
+    assert.ok(failed);
+    assert.ok(!JSON.stringify(failed).includes("SECRET_KEY"), "no secret leakage in transcript");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3B2-17: verification failure does not append failed/aborted/timed_out state_change", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-17-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b217-"));
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+      { verifyDeliveryFn: async (ref) => ({ delivery: { ...ref, verification: { status: "failed", failureCode: "command_failed", verifiedCommit: ref.deliveryCommit, results: [] } }, outcome: "failed", failureCode: "command_failed" }) },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_17",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+    await run.waitForCompletion({});
+    const events = await readTranscript(run.transcript.filePath);
+    const terminals = events.filter((e) => e.type === "run.state_change" && ["completed", "failed", "aborted", "timed_out"].includes(e.to));
+    assert.equal(terminals.length, 1, "only one terminal");
+    assert.equal(terminals[0].to, "completed", "must be completed (not failed/aborted)");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3B2-19: ordinary non-delivery run calls verifier zero times", async () => {
+  const { repo } = await makeRepo("wao-rd-3b2-19-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b219-"));
+  let verifyCount = 0;
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+      { verifyDeliveryFn: async () => { verifyCount++; return { delivery: {}, outcome: "passed" }; } },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_19",
+    });
+    const result = await run.waitForCompletion({});
+    assert.equal(verifyCount, 0, "verifier must not be called for non-delivery run");
+    assert.equal(result.completed, true);
+    assert.ok(!result.delivery, "no delivery in result");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3B2-21: verifier not invoked twice if result/transcript read repeatedly", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-21-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b221-"));
+  let verifyCount = 0;
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+      { verifyDeliveryFn: async (ref) => { verifyCount++; return { delivery: { ...ref, verification: { status: "passed", verifiedCommit: ref.deliveryCommit, results: [] } }, outcome: "passed" }; } },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_21",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+    await run.waitForCompletion({});
+    await readTranscript(run.transcript.filePath);
+    await readTranscript(run.transcript.filePath);
+    assert.equal(verifyCount, 1, "verifier called exactly once");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("3B2-23: no Phase 3C acceptance/integration events exist", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-23-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b223-"));
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_23",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+    await run.waitForCompletion({});
+    const events = await readTranscript(run.transcript.filePath);
+    assert.ok(!events.some((e) => e.type === "run.delivery_accepted"), "no acceptance event");
+    assert.ok(!events.some((e) => e.type === "run.delivery_integrated"), "no integration event");
+    assert.ok(!events.some((e) => e.type === "run.delivery_rejected"), "no rejection event");
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);

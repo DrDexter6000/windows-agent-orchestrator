@@ -9,6 +9,7 @@ import { raiseAlert } from "./alerts.js";
 import { writeFrictionLog, frictionLogDirFromRunDir } from "./frictionLog.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId } from "./delivery.js";
+import { verifyDelivery as defaultVerifyDelivery } from "./deliveryVerification.js";
 
 /**
  * RunManager 持有活跃 run 的生命周期。
@@ -38,12 +39,13 @@ function installSigintHandler() {
 }
 
 export class RunManager {
-  constructor({ config, readRegistry, transcriptDir, backendFor, packageDeliveryFn = defaultPackageDelivery }) {
+  constructor({ config, readRegistry, transcriptDir, backendFor, packageDeliveryFn = defaultPackageDelivery, verifyDeliveryFn = defaultVerifyDelivery }) {
     this.config = config;
     this.readRegistry = readRegistry;
     this.transcriptDir = transcriptDir;
     this.backendFor = backendFor;
     this.packageDeliveryFn = packageDeliveryFn;
+    this.verifyDeliveryFn = verifyDeliveryFn;
     this.activeRuns = new Map();
   }
 
@@ -331,6 +333,7 @@ export class RunManager {
       scorecardRules,
       deliveryContext,
       packageDeliveryFn: this.packageDeliveryFn,
+      verifyDeliveryFn: this.verifyDeliveryFn,
     });
     this.activeRuns.set(finalRunId, run);
     this._ensureSigintHandler();
@@ -443,6 +446,7 @@ export class RunManager {
         scorecardRules: resumeScorecardRules,
         deliveryContext,
         packageDeliveryFn: this.packageDeliveryFn,
+        verifyDeliveryFn: this.verifyDeliveryFn,
       });
       this.activeRuns.set(runId, run);
       this._ensureSigintHandler();
@@ -640,6 +644,7 @@ export class Run {
     scorecardRules = null,
     deliveryContext = null,
     packageDeliveryFn = defaultPackageDelivery,
+    verifyDeliveryFn = defaultVerifyDelivery,
   }) {
     this.runId = runId;
     this.agentId = agentId;
@@ -665,7 +670,9 @@ export class Run {
     // TD-103 Phase 3A: delivery context for packaging after completion.
     this.deliveryContext = deliveryContext;
     this._packageDeliveryFn = packageDeliveryFn;
+    this._verifyDeliveryFn = verifyDeliveryFn;
     this._deliveryPackaged = false; // guard: package at most once
+    this._deliveryVerified = false; // guard: verify at most once
   }
 
   /**
@@ -896,7 +903,17 @@ export class Run {
             // Race lost — delivery_created was written as attemptEvent (atomic with rejection).
             return _loserResult(tResult.state, { messages, evidence, metrics, delivery: deliveryResult.ref });
           }
-          return { completed: true, messages, evidence, timedOut: false, metrics, delivery: deliveryResult.ref };
+          // TD-103 Phase 3B: verify the delivery AFTER completion + cleanup.
+          // Run terminal stays completed regardless of verification outcome.
+          const verifiedRef = await this._verifyDeliveryResult(deliveryResult.ref);
+          const baseResult = { completed: true, messages, evidence, timedOut: false, metrics, delivery: verifiedRef.delivery };
+          if (verifiedRef.outcome === "failed") {
+            return { ...baseResult, verificationFailed: true };
+          }
+          if (verifiedRef.outcome === "unavailable") {
+            return { ...baseResult, verificationUnavailable: true };
+          }
+          return { ...baseResult, verificationFailed: false };
         } else {
           // Packaging failed — delivery_failed as attemptEvent (always written),
           // run.error as factEvent (only on accepted).
@@ -1016,6 +1033,48 @@ export class Run {
       // Sanitize message — no stack traces or stderr leakage
       const message = _sanitizeDeliveryMessage(err?.message ?? "unknown delivery error");
       return { success: false, error: { code, message } };
+    }
+  }
+
+  /**
+   * TD-103 Phase 3B: verify a delivered DeliveryRef.
+   * Runs after terminal completed + cleanup. Appends verification event to transcript.
+   * Never changes run terminal state.
+   * @param {object} deliveryRef — the committed DeliveryRef from packaging
+   * @returns {Promise<{delivery: object, outcome: string}>}
+   */
+  async _verifyDeliveryResult(deliveryRef) {
+    if (this._deliveryVerified) {
+      // Already verified — return last known result (idempotent)
+      return this._lastVerificationResult ?? { delivery: deliveryRef, outcome: "passed" };
+    }
+    this._deliveryVerified = true;
+    try {
+      const result = await this._verifyDeliveryFn(deliveryRef);
+      const eventType = result.outcome === "passed"
+        ? "run.delivery_verification_passed"
+        : result.outcome === "failed"
+          ? "run.delivery_verification_failed"
+          : "run.delivery_verification_unavailable";
+      // Append the complete updated DeliveryRef under delivery
+      await this.transcript.append(eventType, { delivery: result.delivery });
+      this._lastVerificationResult = result;
+      return result;
+    } catch (err) {
+      // Verifier threw — map to safe execution_error failed ref
+      const safeRef = {
+        ...deliveryRef,
+        verification: {
+          ...deliveryRef.verification,
+          status: "failed",
+          failureCode: "execution_error",
+          verifiedCommit: deliveryRef.deliveryCommit,
+          results: [],
+        },
+      };
+      await this.transcript.append("run.delivery_verification_failed", { delivery: safeRef });
+      this._lastVerificationResult = { delivery: safeRef, outcome: "failed", failureCode: "execution_error" };
+      return this._lastVerificationResult;
     }
   }
 
