@@ -804,6 +804,65 @@ export class Run {
       }
       // TD-99：run.completed 与 completed state_change 同批原子提交（factEvents）。
       // rejected 时不留 run.completed fact。
+      // TD-103 Phase 3A: delivery packaging before terminal completion.
+      if (this.deliveryContext && !this._deliveryPackaged) {
+        this._deliveryPackaged = true;
+        // Re-check external terminal before packaging
+        const preTerminal = await this._externalTerminalState();
+        if (preTerminal) {
+          this.state = preTerminal;
+          await this._runCleanup();
+          return _loserResult(preTerminal, { messages, evidence, metrics });
+        }
+
+        const deliveryResult = await this._finalizeDelivery();
+        if (deliveryResult.success) {
+          // Packaging succeeded — attempt completed with delivery_created + run.completed
+          const tResult = await this._transition(this.state, "completed", "done", {
+            factEvents: [
+              { type: "run.delivery_created", payload: { delivery: deliveryResult.ref } },
+              { type: "run.completed", payload: {
+                backendSessionId: this.result.backendSessionId,
+                messageCount: messages.length,
+              } },
+            ],
+          });
+          await this._runCleanup();
+          if (!tResult.accepted) {
+            // Race lost — factEvents not written on rejected. Record delivery_created
+            // as an attempt fact so the Git commit is discoverable in transcript.
+            await this.transcript.append("run.delivery_created", { delivery: deliveryResult.ref });
+            return _loserResult(tResult.state, { messages, evidence, metrics, delivery: deliveryResult.ref });
+          }
+          return { completed: true, messages, evidence, timedOut: false, metrics, delivery: deliveryResult.ref };
+        } else {
+          // Packaging failed — attempt failed with delivery_failed + run.error
+          const errCode = deliveryResult.error.code;
+          const errMsg = deliveryResult.error.message;
+          const tResult = await this._transition(this.state, "failed", "delivery_failed", {
+            factEvents: [
+              { type: "run.delivery_failed", payload: { deliveryCode: errCode, message: errMsg } },
+              { type: "run.error", payload: { phase: "delivery", deliveryCode: errCode } },
+            ],
+          });
+          await this._runCleanup();
+          if (!tResult.accepted) {
+            // Race lost — record delivery_failed as attempt fact
+            await this.transcript.append("run.delivery_failed", { deliveryCode: errCode, message: errMsg });
+            return _loserResult(tResult.state, {
+              messages, evidence, metrics,
+              deliveryError: { code: errCode, message: errMsg },
+            });
+          }
+          return {
+            completed: false, failed: true, messages, evidence,
+            timedOut: false, metrics,
+            deliveryError: { code: errCode, message: errMsg },
+          };
+        }
+      }
+
+      // Non-delivery completed path (existing behavior, unchanged)
       const tResult = await this._transition(this.state, "completed", "done", {
         factEvents: [{
           type: "run.completed",
@@ -873,6 +932,25 @@ export class Run {
       return TERMINAL_STATES.includes(state) ? state : null;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * TD-103 Phase 3A: finalize delivery by calling the packager.
+   * Returns {success:true, ref} or {success:false, error:{code, message}}.
+   * Never throws — packaging failures are structured results.
+   * @returns {Promise<{success:true, ref:object}|{success:false, error:{code, message}}>}
+   */
+  async _finalizeDelivery() {
+    try {
+      const ref = await this._packageDeliveryFn(this.deliveryContext);
+      return { success: true, ref };
+    } catch (err) {
+      // Preserve DeliveryError.deliveryCode when present; map unknown to delivery_error.
+      const code = err?.deliveryCode ?? "delivery_error";
+      // Sanitize message — no stack traces or stderr leakage
+      const message = _sanitizeDeliveryMessage(err?.message ?? "unknown delivery error");
+      return { success: false, error: { code, message } };
     }
   }
 
@@ -1006,6 +1084,34 @@ function _loserResult(existingTerminal, base) {
     aborted: existingTerminal === "aborted",
     timedOut: existingTerminal === "timed_out",
   };
+}
+
+/**
+ * TD-103 Phase 3A: sanitize delivery error messages for transcript/result.
+ * Returns a concise, non-secret summary. Raw error messages may contain file
+ * paths, stderr, or secrets — the structured deliveryCode carries the
+ * machine-readable category; this message is a safe human-readable label only.
+ */
+function _sanitizeDeliveryMessage(msg) {
+  if (typeof msg !== "string" || msg.length === 0) return "delivery packaging error";
+  // For known DeliveryError codes, use a safe fixed description.
+  // For unknown errors, do NOT echo the raw message — it may contain secrets.
+  // The deliveryCode field carries the machine-readable category.
+  const lower = msg.toLowerCase();
+  if (lower.includes("empty_diff") || lower.includes("no changes")) return "empty diff — no changes to package";
+  if (lower.includes("disallowed_path")) return "changes outside allowed paths";
+  if (lower.includes("pre_staged")) return "pre-staged changes detected";
+  if (lower.includes("not_a_git_repo")) return "worktree is not a git repository";
+  if (lower.includes("primary_checkout")) return "worktree is primary checkout, not isolated";
+  if (lower.includes("wrong_branch")) return "worktree on wrong branch";
+  if (lower.includes("base_commit_mismatch")) return "worktree HEAD does not match base commit";
+  if (lower.includes("detached_head")) return "worktree HEAD is detached";
+  if (lower.includes("commit_integrity") || lower.includes("integrity")) return "delivery commit integrity check failed";
+  if (lower.includes("staging_mismatch")) return "staged paths do not match inspected changes";
+  if (lower.includes("commit_failed") || lower.includes("commit-tree")) return "git commit-tree failed";
+  if (lower.includes("cleanup_failed")) return "delivery cleanup failed";
+  // Unknown error — do not leak raw message
+  return "delivery packaging error";
 }
 
 /**

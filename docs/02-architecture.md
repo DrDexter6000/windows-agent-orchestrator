@@ -213,6 +213,8 @@ interface TranscriptEvent {
 | `run.error` | 错误 | ✅ 现有 |
 | `run.stop_requested` | 用户请求停止 | ✅ 现有 |
 | **`run.state_change_rejected`** | TD-99：终态仲裁拒绝一次迟到转移（含 attemptedTo/attemptedReason/existingTerminal/reason="first_terminal_wins"） | `[S]` 新增 |
+| **`run.delivery_created`** | TD-103 Phase 3A：delivery 打包成功——`delivery` 含完整 DeliveryRef（deliveryCommit/baseCommit/branch/changedFiles/verification/acceptance/integration） | Phase 3A |
+| **`run.delivery_failed`** | TD-103 Phase 3A：delivery 打包失败——`deliveryCode`（empty_diff/disallowed_path/commit_integrity/delivery_error 等）+ `message`（脱敏摘要） | Phase 3A |
 | `messages.collected` | collect 命令 | ✅ 现有 |
 | **`scorecard.checked`** | scorecard 审计一次 | `[M]` |
 | **`workflow.*`** | DAG 节点级事件 | `[M]` |
@@ -501,6 +503,59 @@ invalid baseCommit（`--` 开头 option 注入）、whitespace-only verification
 worker output → delivery_created → verification_passed|failed → lead_accepted|rejected → integrated
 ```
 worker 进程完成 ≠ code delivery 完成。
+
+### 4.7 Run delivery mode 集成 `[Phase 3A]`
+
+> **实现状态**：TD-103 Phase 3A complete。Run delivery mode 已接入 RunManager 生命周期。
+> Phase 3B（exact-artifact verification、CLI flag 暴露）和 3C（coder-first template、dogfood）待做。
+
+**RunManager.start() option**：
+
+```js
+delivery: {
+  mode: "git_commit_v1",             // 目前唯一支持的模式
+  allowedPaths: ["src", "test/"],     // SSOT 验证同 src/delivery.js
+  verificationCommands: ["npm test"]  // OR verificationUnavailableReason: "..."
+}
+```
+
+`delivery` absent：字节级兼容现有行为，无 delivery Git 调用或事件。
+`delivery` present：`mode` 必须为 `git_commit_v1`，要求 `{type:"worktree", strategy:"persistent"}` 隔离。
+worktree 创建前用 `prepareDeliveryRequest()` 验证（SSOT 在 `src/delivery.js`）。
+worktree 创建后、backend spawn 前捕获 base commit（full hash）。
+`run.started` 扩展 `delivery: {mode, baseCommit, allowedPaths, verificationCommands|verificationUnavailableReason}`。
+`resume()` 从 `run.started.delivery` 重建 deliveryContext。
+
+**Packaging 时序**（`waitForCompletion` completed 路径内）：
+
+```text
+backend done:completed
+  → scorecard (existing)
+  → hard scorecard failed: existing failed path, no package
+  → re-check external terminal
+  → if terminal exists: loser result, no package
+  → packageDelivery(deliveryContext)     // plumbing path, no hooks
+     → success: transition completed with factEvents [delivery_created + run.completed]
+     → failure: transition failed with factEvents [delivery_failed + run.error phase=delivery]
+  → transition accepted: return success/failure contract
+  → transition rejected (race): return existing terminal + delivery/deliveryError fact
+```
+
+**Terminal arbitration**（复用 TD-99 `transitionState`）：
+- 成功：`run.delivery_created` + `run.completed` 作为 `factEvents` 在 accepted completed transition 中同批写入。
+- 失败：`run.delivery_failed` + `run.error{phase:"delivery"}` 作为 `factEvents` 在 accepted failed transition 中同批写入。
+- Race（external terminal 在 packaging 期间先赢）：`run.delivery_created`/`run.delivery_failed` 作为独立 append 写入（attempt fact），返回 loser result 含 `delivery`/`deliveryError`。不回滚已创建的 DeliveryRef（它是 isolated recoverable artifact）。
+
+**`waitForCompletion` result contract**：
+- 成功：`{completed:true, messages, evidence, timedOut:false, metrics, delivery}` — `delivery` 是完整 DeliveryRef。
+- 打包失败：`{completed:false, failed:true, messages, evidence, timedOut:false, metrics, deliveryError:{code, message}}` — 结构化非抛出。
+- backend 失败/超时/budget/abort/hard scorecard fail：不调 packager，保持现有行为。
+
+**事件排序**：
+- 成功：`scorecard.checked`（如有）→ `run.delivery_created` → `run.completed` → `run.state_change completed`（seq 连续）。
+- 打包失败：`run.delivery_failed` → `run.error phase=delivery` → `run.state_change failed`（seq 连续）。
+
+`packageDeliveryFn` 构造函数参数（默认 `packageDelivery`）仅供测试/组合注入，非通用 service container。
 
 ---
 
