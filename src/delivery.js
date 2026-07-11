@@ -441,6 +441,61 @@ function validateInput(input) {
   };
 }
 
+// ===== Public API: prepareDeliveryRequest =====
+
+/**
+ * Validate and normalize a delivery request from RunManager.start() options.
+ * This is the SSOT for delivery-request validation — RunManager calls this
+ * before backend spawn to fail-closed on invalid delivery configs.
+ *
+ * Does NOT require worktreePath or baseCommit (those are captured after worktree
+ * creation). Validates mode, allowedPaths, and verification declaration only.
+ *
+ * @param {object} delivery — { mode, allowedPaths, verificationCommands?, verificationUnavailableReason? }
+ * @returns {{mode:string, allowedPaths:string[], verification:{commands:string[], unavailableReason:string|null}}}
+ * @throws {DeliveryError} on any contract violation
+ */
+export function prepareDeliveryRequest(delivery) {
+  if (!delivery || typeof delivery !== "object") {
+    throw new DeliveryError("invalid_input", "delivery must be an object");
+  }
+
+  // mode
+  if (delivery.mode !== "git_commit_v1") {
+    throw new DeliveryError(
+      "invalid_mode",
+      `delivery.mode must be "git_commit_v1", got: ${JSON.stringify(delivery.mode)}`,
+    );
+  }
+
+  // allowedPaths — reuse the same SSOT validator
+  const allowedPaths = validateAllowedPaths(delivery.allowedPaths);
+
+  // verification — same trim-aware check as validateInput
+  const hasCommands =
+    Array.isArray(delivery.verificationCommands) &&
+    delivery.verificationCommands.length > 0 &&
+    delivery.verificationCommands.every(
+      (c) => typeof c === "string" && c.trim().length > 0,
+    );
+  const hasReason =
+    typeof delivery.verificationUnavailableReason === "string" &&
+    delivery.verificationUnavailableReason.trim().length > 0;
+
+  if (!hasCommands && !hasReason) {
+    throw new DeliveryError(
+      "invalid_verification",
+      "must provide either non-empty verificationCommands or verificationUnavailableReason",
+    );
+  }
+
+  const verification = hasCommands
+    ? { commands: [...delivery.verificationCommands], unavailableReason: null }
+    : { commands: [], unavailableReason: delivery.verificationUnavailableReason };
+
+  return { mode: "git_commit_v1", allowedPaths, verification };
+}
+
 // ===== Public API: inspectDelivery =====
 
 /**

@@ -1,12 +1,14 @@
 import { mkdir } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import { JsonlTranscript, TERMINAL_STATES, readTranscript, findState, findLatest } from "./transcript.js";
 import { createWorktree, removeWorktree } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
 import { writeFrictionLog, frictionLogDirFromRunDir } from "./frictionLog.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
+import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery } from "./delivery.js";
 
 /**
  * RunManager 持有活跃 run 的生命周期。
@@ -36,11 +38,12 @@ function installSigintHandler() {
 }
 
 export class RunManager {
-  constructor({ config, readRegistry, transcriptDir, backendFor }) {
+  constructor({ config, readRegistry, transcriptDir, backendFor, packageDeliveryFn = defaultPackageDelivery }) {
     this.config = config;
     this.readRegistry = readRegistry;
     this.transcriptDir = transcriptDir;
     this.backendFor = backendFor;
+    this.packageDeliveryFn = packageDeliveryFn;
     this.activeRuns = new Map();
   }
 
@@ -77,6 +80,10 @@ export class RunManager {
       // generatedAt 在 certFreshnessDays 内，否则拒绝派发。默认关（向后兼容 + 不破坏测试）。
       requireCertified = false,
       certFreshnessDays = 30,
+      // TD-103 Phase 3A：delivery mode。absent = 普通运行（无 delivery Git 调用/事件）。
+      // present = mode 必须为 "git_commit_v1"，要求 persistent worktree 隔离，
+      // worker 完成后控制面打包 delivery commit。
+      delivery = null,
     } = options;
 
     const registryPath = resolve(registry ?? this.config.registry);
@@ -94,6 +101,21 @@ export class RunManager {
 
     // 隔离：isolate flag > agent.isolation > config.defaultIsolation
     const isolationConfig = resolveIsolation(isolate, agent.isolation, this.config.defaultIsolation);
+
+    // TD-103 Phase 3A: delivery mode preflight — validate before any Git/spawn work.
+    // Delivery requires persistent worktree isolation. Validate the request shape
+    // through the delivery kernel SSOT (prepareDeliveryRequest), then enforce isolation.
+    let deliveryPrepared = null; // validated {mode, allowedPaths, verification}
+    if (delivery) {
+      deliveryPrepared = prepareDeliveryRequest(delivery);
+      if (isolationConfig.type !== "worktree" || isolationConfig.strategy !== "persistent") {
+        throw new Error(
+          `Delivery mode requires persistent worktree isolation, got: ${JSON.stringify(isolationConfig)}. `
+          + `Use isolate:true or agent isolation {type:"worktree", strategy:"persistent"}.`,
+        );
+      }
+    }
+
     let worktreeInfo = null;
     let effectiveCwd = agent.cwd;
     let cleanupFn = null;
@@ -106,9 +128,45 @@ export class RunManager {
           cleanupFn = () => removeWorktree(worktreeInfo.path);
         }
       } catch (error) {
+        if (delivery) {
+          // TD-103: delivery mode is fail-closed on worktree creation failure.
+          // Do NOT fall back to source checkout — delivery requires an isolated worktree.
+          throw new Error(
+            `Delivery mode requires an isolated worktree, but worktree creation failed: ${error.message}`,
+          );
+        }
         await transcript.append("run.isolation_failed", { error: error.message });
         // 降级：用原 cwd 继续
       }
+    }
+
+    // TD-103 Phase 3A: capture base commit AFTER worktree creation, BEFORE backend spawn.
+    // The base commit is the full hash of the worktree's HEAD at creation time.
+    let deliveryContext = null;
+    if (delivery && worktreeInfo) {
+      const baseCommit = String(
+        execFileSync("git", ["rev-parse", "HEAD"], {
+          cwd: worktreeInfo.path,
+          encoding: "utf8",
+          stdio: ["pipe", "pipe", "ignore"],
+          windowsHide: true,
+        }),
+      ).trim();
+      deliveryContext = {
+        mode: "git_commit_v1",
+        runId: finalRunId,
+        worktreePath: worktreeInfo.path,
+        baseCommit,
+        allowedPaths: deliveryPrepared.allowedPaths,
+        isolation: { type: "worktree", strategy: "persistent" },
+        verificationCommands: deliveryPrepared.verification.commands.length > 0
+          ? deliveryPrepared.verification.commands : undefined,
+        verificationUnavailableReason: deliveryPrepared.verification.unavailableReason
+          ?? undefined,
+      };
+      // Clean undefined keys
+      if (!deliveryContext.verificationCommands) delete deliveryContext.verificationCommands;
+      if (!deliveryContext.verificationUnavailableReason) delete deliveryContext.verificationUnavailableReason;
     }
 
     // worktree 路径（若有）作为 backend 的 cwd
@@ -125,6 +183,16 @@ export class RunManager {
       model: agent.model,
       scorecardConfigured: Boolean(scorecardRules),
       ...(tagsPayload ? { tags: tagsPayload } : {}),
+      ...(deliveryContext ? {
+        delivery: {
+          mode: deliveryContext.mode,
+          baseCommit: deliveryContext.baseCommit,
+          allowedPaths: deliveryContext.allowedPaths,
+          ...(deliveryContext.verificationCommands
+            ? { verificationCommands: deliveryContext.verificationCommands }
+            : { verificationUnavailableReason: deliveryContext.verificationUnavailableReason }),
+        },
+      } : {}),
     });
     const pendingResult = await this._transition(transcript, null, "pending", "created");
     // TD-99：若 pending rejected（runId 已有终态——如同 runId 复用旧终态 transcript），
@@ -249,6 +317,8 @@ export class RunManager {
       cleanup: cleanupFn,
       effectiveCwd,
       scorecardRules,
+      deliveryContext,
+      packageDeliveryFn: this.packageDeliveryFn,
     });
     this.activeRuns.set(finalRunId, run);
     this._ensureSigintHandler();
@@ -285,6 +355,13 @@ export class RunManager {
     const agent = loaded.getAgent(transcript.context.agentId, { cwd: runStarted.cwd });
     const backend = this.backendFor(agent);
 
+    // TD-103 Phase 3A: reconstruct delivery context from run.started for resume.
+    const deliveryContext = _reconstructDeliveryContext(runStarted, runId);
+    if (runStarted.delivery && !deliveryContext) {
+      // Transcript says delivery mode but context is malformed/missing — fail closed.
+      return null;
+    }
+
     // 进程式 backend（进程已死）→ 重放 prompt 重新 spawn
     const isProcess = runStarted.backend === "claude-code" || runStarted.backend === "codex" || runStarted.backend === "kimi-code";
     if (isProcess) {
@@ -311,6 +388,8 @@ export class RunManager {
         config: this.config,
         onRemove: () => this.activeRuns.delete(runId),
         initialState: "submitted",
+        deliveryContext,
+        packageDeliveryFn: this.packageDeliveryFn,
       });
       this.activeRuns.set(runId, run);
       this._ensureSigintHandler();
@@ -343,6 +422,8 @@ export class RunManager {
       config: this.config,
       onRemove: () => this.activeRuns.delete(runId),
       initialState: state,
+      deliveryContext,
+      packageDeliveryFn: this.packageDeliveryFn,
     });
     this.activeRuns.set(runId, run);
     this._ensureSigintHandler();
@@ -431,6 +512,35 @@ async function safeCleanup(cleanupFn, transcript) {
 }
 
 /**
+ * TD-103 Phase 3A: reconstruct delivery context from run.started transcript event.
+ * Returns null if no delivery was configured, or if the context is malformed.
+ * @param {object} runStarted — run.started event
+ * @param {string} runId
+ * @returns {object|null} delivery context or null
+ */
+function _reconstructDeliveryContext(runStarted, runId) {
+  if (!runStarted?.delivery) return null;
+  const d = runStarted.delivery;
+  // Validate all required fields are present — fail closed on missing/malformed
+  if (!d.mode || !d.baseCommit || !d.allowedPaths) return null;
+  if (!runStarted.worktreePath) return null;
+  const hasCommands = Array.isArray(d.verificationCommands) && d.verificationCommands.length > 0;
+  const hasReason = typeof d.verificationUnavailableReason === "string" && d.verificationUnavailableReason.length > 0;
+  if (!hasCommands && !hasReason) return null;
+  return {
+    mode: d.mode,
+    runId,
+    worktreePath: runStarted.worktreePath,
+    baseCommit: d.baseCommit,
+    allowedPaths: [...d.allowedPaths],
+    isolation: { type: "worktree", strategy: "persistent" },
+    ...(hasCommands
+      ? { verificationCommands: [...d.verificationCommands] }
+      : { verificationUnavailableReason: d.verificationUnavailableReason }),
+  };
+}
+
+/**
  * 解析 scorecard rules（M6-6 + M8-1 默认 warn）。优先级：
  *   显式 options.scorecard > agent.scorecard > scorecardMode 决定的默认 > null
  *
@@ -470,6 +580,8 @@ export class Run {
     cleanup = null,
     effectiveCwd = null,
     scorecardRules = null,
+    deliveryContext = null,
+    packageDeliveryFn = defaultPackageDelivery,
   }) {
     this.runId = runId;
     this.agentId = agentId;
@@ -492,6 +604,10 @@ export class Run {
     this._sessionKilled = false;
     this.effectiveCwd = effectiveCwd ?? agent.cwd;
     this.scorecardRules = scorecardRules;
+    // TD-103 Phase 3A: delivery context for packaging after completion.
+    this.deliveryContext = deliveryContext;
+    this._packageDeliveryFn = packageDeliveryFn;
+    this._deliveryPackaged = false; // guard: package at most once
   }
 
   /**
