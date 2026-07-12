@@ -8,7 +8,7 @@ import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
 import { writeFrictionLog, frictionLogDirFromRunDir } from "./frictionLog.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
-import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId } from "./delivery.js";
+import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError } from "./delivery.js";
 import { verifyDelivery as defaultVerifyDelivery } from "./deliveryVerification.js";
 
 /**
@@ -1086,11 +1086,11 @@ export class Run {
     if (!this._verificationComputePromise) {
       this._verificationComputePromise = this._computeVerification(deliveryRef);
     }
-    // DeliveryError(artifact_mismatch) is a known proof failure — let it
-    // propagate to all waiters as-is. Unknown errors are mapped inside
-    // _computeVerification to a safe execution_error result (not re-thrown),
-    // so this await resolves to a result object in all cases except
-    // artifact_mismatch (which is a deliberate proof rejection).
+    // _computeVerification always resolves to a result object:
+    //   - normal result from verifyDeliveryFn
+    //   - DeliveryError → failed result preserving failureCode (not re-thrown)
+    //   - unknown error → execution_error result (not re-thrown)
+    // Only transcript append failures (Phase 2) propagate to callers.
     const result = await this._verificationComputePromise;
 
     // Phase 2: append the outcome event — coalesce concurrent appends.
@@ -1117,10 +1117,17 @@ export class Run {
   }
 
   /**
-   * Run the verifier exactly once. Maps unknown exceptions to execution_error.
-   * DeliveryError(artifact_mismatch) is re-thrown (known proof failure).
+   * Run the verifier exactly once. Always resolves to a result object:
+   *   - normal result from verifyDeliveryFn
+   *   - DeliveryError → failed result preserving the original failureCode
+   *     (e.g. artifact_mismatch). Not re-thrown, not downgraded to execution_error.
+   *   - unknown error → execution_error result (not re-thrown).
+   *
+   * Strict DeliveryError identification via instanceof — does not accept
+   * forged objects with name/code fields.
+   *
    * @param {object} deliveryRef
-   * @returns {Promise<object>} resolved result object
+   * @returns {Promise<object>} resolved result object (never throws)
    */
   async _computeVerification(deliveryRef) {
     try {
@@ -1128,12 +1135,27 @@ export class Run {
       this._pendingVerificationResult = result;
       return result;
     } catch (err) {
-      // DeliveryError is a known proof failure (artifact_mismatch, etc.) —
-      // do not downgrade it to execution_error. Propagate to all waiters.
-      if (err?.name === "DeliveryError" || err?.deliveryCode) {
-        throw err;
+      // Known DeliveryError proof failure (artifact_mismatch, etc.) —
+      // preserve the failureCode in a structured failed result.
+      // Do NOT downgrade to execution_error, do NOT re-throw.
+      if (err instanceof DeliveryError) {
+        const failureCode = err.deliveryCode;
+        const safeRef = {
+          ...deliveryRef,
+          verification: {
+            ...deliveryRef.verification,
+            status: "failed",
+            failureCode,
+            verifiedCommit: deliveryRef.deliveryCommit,
+            results: [],
+          },
+        };
+        const mapped = { delivery: safeRef, outcome: "failed", failureCode };
+        this._pendingVerificationResult = mapped;
+        return mapped;
       }
       // Unknown internal exception → map to safe execution_error result.
+      // No stack/message/stderr leakage.
       const safeRef = {
         ...deliveryRef,
         verification: {

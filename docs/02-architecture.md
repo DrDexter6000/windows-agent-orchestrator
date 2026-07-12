@@ -606,11 +606,18 @@ packageDelivery success → transitionState(completed)
 - append 成功后 `_verificationRecorded=true`，后续调用幂等返回 `_recordedVerificationResult`。
 - 不重新引入"未落盘却返回 pass"的 fallback。
 
-错误分类：
+错误分类（`_computeVerification`，strict `instanceof DeliveryError` 识别）：
 
-- `DeliveryError`（artifact_mismatch 等已知 proof 失败）原样传播，不降级为 execution_error。
+- `DeliveryError`（artifact_mismatch 等已知 proof 失败）→ 转换为 verification failed result，
+  **保留原 failureCode**（不降级为 execution_error，不原样抛给 waitForCompletion）。
+  生成 `{delivery: {...ref, verification:{status:"failed", failureCode, verifiedCommit, results:[]}},
+  outcome:"failed", failureCode}`，由 `_verificationAppendPromise` 写入唯一
+  `run.delivery_verification_failed` event。waitForCompletion 返回 `completed:true +
+  verificationFailed:true`，run terminal 保持 completed。
 - 只有未知 verifier 内部异常映射为 `execution_error` result（不 re-throw）。
-- 不泄露原始 stack/stderr/secret。
+- **只有 transcript outcome append 失败才向调用者传播异常**——这是唯一的异常传播路径。
+- 不泄露原始 error.message/stack/stderr/secret。
+- strict `instanceof DeliveryError` 识别——不接受伪造的 `{name:"DeliveryError"}` 对象。
 
 **身份 SSOT**（`src/delivery.js`）：
 

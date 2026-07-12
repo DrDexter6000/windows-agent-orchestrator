@@ -7,8 +7,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { RunManager } from "../src/runManager.js";
 import { Run } from "../src/runManager.js";
+import { DeliveryError } from "../src/delivery.js";
 import { OpenCodeServeBackend } from "../src/backends/opencodeServe.js";
-import { readTranscript, findState } from "../src/transcript.js";
+import { readTranscript, findState, JsonlTranscript } from "../src/transcript.js";
 import { packageDelivery } from "../src/delivery.js";
 
 // ===== Helpers =====
@@ -2637,30 +2638,65 @@ test("3B-CONC2: three concurrent calls → verifier once, one outcome event", as
 
 /**
  * Error classification: DeliveryError(artifact_mismatch) from the verifier
- * must NOT be downgraded to execution_error. It propagates as-is.
+ * must be converted to a verification failed result preserving failureCode.
+ * It must NOT be re-thrown (would skip the outcome event), and must NOT be
+ * downgraded to execution_error.
  */
-test("3B-ERR1: DeliveryError artifact_mismatch propagates, not downgraded to execution_error", async () => {
+test("3B-ERR1: DeliveryError artifact_mismatch → failed result preserving failureCode, not re-thrown", async () => {
+  let appendCount = 0;
+  const appendedTypes = [];
   const transcriptMock = {
-    async append(type) { return { type, seq: 1 }; },
+    async append(type) { appendCount++; appendedTypes.push(type); return { type, seq: appendCount }; },
     filePath: "/fake/transcript.jsonl",
     context: { runId: "run_closeout_unit", agentId: "test" },
     seq: 0,
   };
   const run = makeRunWithMockTranscript({
     verifyDeliveryFn: async () => {
-      const err = new Error("artifact proof failed");
-      err.name = "DeliveryError";
-      err.deliveryCode = "artifact_mismatch";
-      throw err;
+      throw new DeliveryError("artifact_mismatch", "proof failed");
     },
     transcriptMock,
   });
 
-  await assert.rejects(
-    () => run._verifyDeliveryResult(UNIT_REF),
-    (err) => err.deliveryCode === "artifact_mismatch",
-    "DeliveryError(artifact_mismatch) must propagate as-is, not become execution_error",
-  );
+  // Must NOT throw — must resolve to a failed result
+  const result = await run._verifyDeliveryResult(UNIT_REF);
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.failureCode, "artifact_mismatch",
+    "DeliveryError failureCode must be preserved, not downgraded to execution_error");
+  assert.equal(result.delivery.verification.status, "failed");
+  assert.equal(result.delivery.verification.failureCode, "artifact_mismatch");
+  assert.equal(appendCount, 1, "exactly one outcome event written");
+  assert.deepEqual(appendedTypes, ["run.delivery_verification_failed"]);
+});
+
+/**
+ * Strict identification: a forged error object with name="DeliveryError" and
+ * deliveryCode="artifact_mismatch" but NOT instanceof DeliveryError must be
+ * treated as an unknown error → execution_error.
+ */
+test("3B-ERR3: forged DeliveryError object (not instanceof) → execution_error", async () => {
+  let appendCount = 0;
+  const transcriptMock = {
+    async append(type) { appendCount++; return { type, seq: appendCount }; },
+    filePath: "/fake/transcript.jsonl",
+    context: { runId: "run_closeout_unit", agentId: "test" },
+    seq: 0,
+  };
+  const run = makeRunWithMockTranscript({
+    verifyDeliveryFn: async () => {
+      const forged = new Error("forged");
+      forged.name = "DeliveryError";
+      forged.deliveryCode = "artifact_mismatch";
+      throw forged;
+    },
+    transcriptMock,
+  });
+
+  const result = await run._verifyDeliveryResult(UNIT_REF);
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.failureCode, "execution_error",
+    "forged object must NOT be accepted as DeliveryError — must be execution_error");
+  assert.equal(appendCount, 1);
 });
 
 test("3B-ERR2: unknown verifier error maps to execution_error result (not re-thrown)", async () => {
@@ -2682,6 +2718,66 @@ test("3B-ERR2: unknown verifier error maps to execution_error result (not re-thr
   assert.equal(result.failureCode, "execution_error");
   assert.equal(appendCount, 1);
   assert.deepEqual(appendedTypes, ["run.delivery_verification_failed"]);
+});
+
+/**
+ * Concurrency: three concurrent calls when verifier throws DeliveryError(artifact_mismatch).
+ * verifierCount===1, exactly one verification_failed event, all three results
+ * outcome==="failed" with failureCode==="artifact_mismatch".
+ */
+test("3B-CONC3: three concurrent artifact_mismatch → verifier once, one failed event, all failed/artifact_mismatch", async () => {
+  const runDir = await mkdtemp(join(tmpdir(), "wao-conc3-"));
+  const transcript = new JsonlTranscript(join(runDir, "run_conc3.jsonl"), {
+    runId: "run_conc3",
+    agentId: "test",
+  });
+  let verifyCount = 0;
+  let resolveVerifier;
+  const barrier = new Promise((r) => { resolveVerifier = r; });
+  const run = new Run({
+    runId: "run_conc3",
+    agentId: "test",
+    agent: { cwd: "." },
+    backend: {},
+    handle: {},
+    transcript,
+    result: { backendSessionId: "ses_x" },
+    config: {},
+    onRemove: () => {},
+    initialState: "completed",
+    verifyDeliveryFn: async () => {
+      verifyCount++;
+      await barrier;
+      throw new DeliveryError("artifact_mismatch", "proof failed");
+    },
+  });
+  try {
+    const callsPromise = Promise.all([
+      run._verifyDeliveryResult(UNIT_REF),
+      run._verifyDeliveryResult(UNIT_REF),
+      run._verifyDeliveryResult(UNIT_REF),
+    ]);
+    setTimeout(() => resolveVerifier(), 30);
+    const results = await callsPromise;
+
+    assert.equal(verifyCount, 1, "verifier must run exactly once even with 3 callers on mismatch");
+    assert.equal(results.length, 3);
+    for (const r of results) {
+      assert.equal(r.outcome, "failed");
+      assert.equal(r.failureCode, "artifact_mismatch");
+    }
+
+    const events = await readTranscript(transcript.filePath);
+    const failedEvents = events.filter((e) => e.type === "run.delivery_verification_failed");
+    assert.equal(failedEvents.length, 1, "exactly one verification_failed event");
+    assert.equal(failedEvents[0].delivery.verification.failureCode, "artifact_mismatch");
+    assert.equal(failedEvents[0].delivery.verification.status, "failed");
+    // No raw error message/stack leakage in the event
+    const eventJson = JSON.stringify(failedEvents[0]);
+    assert.ok(!eventJson.includes("proof failed"), "no raw error message in event");
+  } finally {
+    await cleanupDir(runDir);
+  }
 });
 
 // ===== Phase 3B closeout: missing 3B2 integration contracts (12 tests) =====
@@ -3291,6 +3387,70 @@ test("3B2-REAL: default verifyDelivery kernel end-to-end (no dummyVerifier)", as
     // Terminal state is completed (not changed by verification)
     const finalState = findState(events);
     assert.equal(finalState, "completed", "terminal state must be completed");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+/**
+ * 3B2-MISMATCH: full RunManager flow with pre-verification artifact_mismatch.
+ * Verifier throws DeliveryError("artifact_mismatch") — the flow must NOT throw.
+ * Run terminal stays completed, result has verificationFailed:true, exactly
+ * one verification_failed event, delivery_created ref remains pending (the
+ * outcome event holds the updated failed ref).
+ */
+test("3B2-MISMATCH: pre-verification artifact_mismatch → no throw, completed+verificationFailed, one failed event", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-mismatch-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b2mismatch-"));
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+      {
+        verifyDeliveryFn: async () => {
+          throw new DeliveryError("artifact_mismatch", "proof failed");
+        },
+      },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_mismatch",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+
+    // Must NOT throw
+    const result = await run.waitForCompletion({});
+
+    assert.equal(result.completed, true, "run must complete despite verification mismatch");
+    assert.equal(result.verificationFailed, true, "verificationFailed must be true");
+    assert.ok(result.delivery, "must have delivery ref");
+    assert.equal(result.delivery.verification.status, "failed");
+    assert.equal(result.delivery.verification.failureCode, "artifact_mismatch");
+
+    const events = await readTranscript(run.transcript.filePath);
+
+    // Exactly one terminal state_change (completed)
+    const terminals = events.filter((e) =>
+      e.type === "run.state_change" && ["completed", "failed", "timed_out", "aborted"].includes(e.to));
+    assert.equal(terminals.length, 1, "exactly one terminal state_change");
+    assert.equal(terminals[0].to, "completed", "terminal must be completed");
+
+    // Exactly one verification_failed event
+    const verEvents = events.filter((e) => e.type === "run.delivery_verification_failed");
+    assert.equal(verEvents.length, 1, "exactly one verification_failed event");
+    assert.equal(verEvents[0].delivery.verification.failureCode, "artifact_mismatch");
+
+    // delivery_created ref must still exist and remain pending
+    const createdEvent = events.find((e) => e.type === "run.delivery_created");
+    assert.ok(createdEvent, "delivery_created event must exist");
+    assert.equal(createdEvent.delivery.verification.status, "pending",
+      "delivery_created ref must remain pending; outcome event holds the failed ref");
+
+    // No raw error message/stack in transcript
+    const transcriptJson = JSON.stringify(events);
+    assert.ok(!transcriptJson.includes("proof failed"), "no raw error message in transcript");
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);
