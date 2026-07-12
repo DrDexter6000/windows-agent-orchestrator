@@ -2532,6 +2532,158 @@ test("3B-B5: verifier throw + append failure propagates append error (not swallo
   );
 });
 
+// ===== Phase 3B concurrency final: unit-level concurrency tests =====
+
+/**
+ * Concurrency: two concurrent calls share a single failed append.
+ * verifierCount===1, appendCount===1 (one attempt, shared failure).
+ * After fixing the append, a third call retries append only — verifier stays at 1.
+ */
+test("3B-CONC1: two concurrent calls share one failed append, retry succeeds", async () => {
+  let verifyCount = 0;
+  let appendCount = 0;
+  let appendWillFail = true;
+  const transcriptMock = {
+    async append(type, payload) {
+      appendCount++;
+      if (appendWillFail) throw new Error("disk full");
+      return { type, ...payload, seq: appendCount };
+    },
+    filePath: "/fake/transcript.jsonl",
+    context: { runId: "run_conc_unit", agentId: "test" },
+    seq: 0,
+  };
+  let resolveVerifier;
+  const barrier = new Promise((r) => { resolveVerifier = r; });
+  const run = makeRunWithMockTranscript({
+    verifyDeliveryFn: async (ref) => {
+      verifyCount++;
+      await barrier;
+      return {
+        delivery: { ...ref, verification: { ...ref.verification, status: "passed", verifiedCommit: ref.deliveryCommit, results: [] } },
+        outcome: "passed",
+      };
+    },
+    transcriptMock,
+  });
+
+  // Two concurrent calls while verifier is still in-flight
+  const callsPromise = Promise.allSettled([
+    run._verifyDeliveryResult(UNIT_REF),
+    run._verifyDeliveryResult(UNIT_REF),
+  ]);
+  setTimeout(() => resolveVerifier(), 30);
+  const results = await callsPromise;
+
+  // Both must reject (shared append failure)
+  assert.equal(results[0].status, "rejected", "first call must reject on append failure");
+  assert.equal(results[1].status, "rejected", "second call must reject on append failure");
+  assert.equal(verifyCount, 1, "verifier must run exactly once");
+  assert.equal(appendCount, 1, "append must be attempted exactly once (shared)");
+
+  // Fix the append, retry — verifier NOT re-run, append succeeds
+  appendWillFail = false;
+  const result = await run._verifyDeliveryResult(UNIT_REF);
+  assert.equal(result.outcome, "passed");
+  assert.equal(verifyCount, 1, "verifier must NOT re-run on retry");
+  assert.equal(appendCount, 2, "append retried and succeeded");
+});
+
+/**
+ * Concurrency: three or more concurrent calls still coalesce to one verifier
+ * call and one outcome event.
+ */
+test("3B-CONC2: three concurrent calls → verifier once, one outcome event", async () => {
+  let verifyCount = 0;
+  let appendCount = 0;
+  const transcriptMock = {
+    async append(type, payload) {
+      appendCount++;
+      return { type, ...payload, seq: appendCount };
+    },
+    filePath: "/fake/transcript.jsonl",
+    context: { runId: "run_conc_unit", agentId: "test" },
+    seq: 0,
+  };
+  let resolveVerifier;
+  const barrier = new Promise((r) => { resolveVerifier = r; });
+  const run = makeRunWithMockTranscript({
+    verifyDeliveryFn: async (ref) => {
+      verifyCount++;
+      await barrier;
+      return {
+        delivery: { ...ref, verification: { ...ref.verification, status: "passed", verifiedCommit: ref.deliveryCommit, results: [] } },
+        outcome: "passed",
+      };
+    },
+    transcriptMock,
+  });
+
+  const callsPromise = Promise.all([
+    run._verifyDeliveryResult(UNIT_REF),
+    run._verifyDeliveryResult(UNIT_REF),
+    run._verifyDeliveryResult(UNIT_REF),
+  ]);
+  setTimeout(() => resolveVerifier(), 30);
+  const results = await callsPromise;
+
+  assert.equal(results.length, 3);
+  for (const r of results) {
+    assert.equal(r.outcome, "passed");
+  }
+  assert.equal(verifyCount, 1, "verifier must run exactly once even with 3 callers");
+  assert.equal(appendCount, 1, "exactly one append even with 3 callers");
+});
+
+/**
+ * Error classification: DeliveryError(artifact_mismatch) from the verifier
+ * must NOT be downgraded to execution_error. It propagates as-is.
+ */
+test("3B-ERR1: DeliveryError artifact_mismatch propagates, not downgraded to execution_error", async () => {
+  const transcriptMock = {
+    async append(type) { return { type, seq: 1 }; },
+    filePath: "/fake/transcript.jsonl",
+    context: { runId: "run_closeout_unit", agentId: "test" },
+    seq: 0,
+  };
+  const run = makeRunWithMockTranscript({
+    verifyDeliveryFn: async () => {
+      const err = new Error("artifact proof failed");
+      err.name = "DeliveryError";
+      err.deliveryCode = "artifact_mismatch";
+      throw err;
+    },
+    transcriptMock,
+  });
+
+  await assert.rejects(
+    () => run._verifyDeliveryResult(UNIT_REF),
+    (err) => err.deliveryCode === "artifact_mismatch",
+    "DeliveryError(artifact_mismatch) must propagate as-is, not become execution_error",
+  );
+});
+
+test("3B-ERR2: unknown verifier error maps to execution_error result (not re-thrown)", async () => {
+  let appendCount = 0;
+  const appendedTypes = [];
+  const transcriptMock = {
+    async append(type) { appendCount++; appendedTypes.push(type); return { type, seq: appendCount }; },
+    filePath: "/fake/transcript.jsonl",
+    context: { runId: "run_closeout_unit", agentId: "test" },
+    seq: 0,
+  };
+  const run = makeRunWithMockTranscript({
+    verifyDeliveryFn: async () => { throw new Error("unexpected internal error"); },
+    transcriptMock,
+  });
+
+  const result = await run._verifyDeliveryResult(UNIT_REF);
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.failureCode, "execution_error");
+  assert.equal(appendCount, 1);
+  assert.deepEqual(appendedTypes, ["run.delivery_verification_failed"]);
+});
+
 // ===== Phase 3B closeout: missing 3B2 integration contracts (12 tests) =====
 
 /**
@@ -2577,17 +2729,31 @@ test("3B2-02: packager's original DeliveryRef passes exactly to verifier", async
 });
 
 /**
- * 3B2-03: verifier runs strictly after run.completed state_change (happens-before).
- * For persistent delivery worktrees there is no cleanup_done event (worktree persists),
- * so the ordering proof is: completed state_change → verification event.
+ * 3B2-03: cleanup (handle.abort) completes before verifier enters.
+ * Uses a deferred abort barrier: the verifier asserts at entry that the abort
+ * has already completed. This locks the happens-before relationship directly,
+ * not just event ordering.
  */
-test("3B2-03: run.completed state_change happens-before verifier", async () => {
+test("3B2-03: cleanup (handle.abort) completes before verifier enters", async () => {
   const { repo, baseCommit } = await makeRepo("wao-rd-3b2-03-");
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b203-"));
   try {
+    let abortCompleted = false;
+    let verifierEnteredAfterAbort = false;
+
     const mgr = makeManagerWithPackager(
       runDir, repo, createMockFetch(),
       (input) => packageDelivery(input),
+      {
+        verifyDeliveryFn: async (ref) => {
+          // Assert at verifier entry that cleanup (abort) has completed.
+          verifierEnteredAfterAbort = abortCompleted;
+          return {
+            delivery: { ...ref, verification: { ...ref.verification, status: "passed", verifiedCommit: ref.deliveryCommit, results: [] } },
+            outcome: "passed",
+          };
+        },
+      },
     );
     const run = await mgr.start("test", {
       prompt: "hi", isolate: true, runId: "run_3b2_test_03",
@@ -2595,8 +2761,23 @@ test("3B2-03: run.completed state_change happens-before verifier", async () => {
     });
     const { writeFile: wf } = await import("node:fs/promises");
     await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+
+    // Instrument handle.abort to mark completion (deferred to prove ordering).
+    // The real abort is called by _runCleanup before _verifyDeliveryResult.
+    const realAbort = run.handle.abort?.bind(run.handle);
+    run.handle.abort = async () => {
+      await new Promise((r) => setTimeout(r, 20)); // simulate abort latency
+      abortCompleted = true;
+      if (realAbort) await realAbort();
+    };
+
     await run.waitForCompletion({});
 
+    assert.ok(abortCompleted, "handle.abort must have been called");
+    assert.ok(verifierEnteredAfterAbort,
+      "verifier must enter AFTER handle.abort completed (cleanup happens-before)");
+
+    // Also verify event ordering as belt-and-suspenders
     const events = await readTranscript(run.transcript.filePath);
     const completedIdx = events.findIndex((e) =>
       e.type === "run.state_change" && e.to === "completed");
@@ -2617,7 +2798,7 @@ test("3B2-03: run.completed state_change happens-before verifier", async () => {
 /**
  * 3B2-08: packaging failure → verifier called zero times.
  */
-test("3B2-08b: packaging failure → verifierCount===0", async () => {
+test("3B2-PKG-FAIL: packaging failure → verifierCount===0", async () => {
   const { repo, baseCommit } = await makeRepo("wao-rd-3b2-08-");
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b208-"));
   let verifyCount = 0;
@@ -2996,17 +3177,28 @@ test("3B2-22: concurrent _verifyDeliveryResult calls → verifier once, one outc
   const { repo, baseCommit } = await makeRepo("wao-rd-3b2-22-");
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b222-"));
   let verifyCount = 0;
-  let outcomeEventCount = 0;
   try {
-    const slowVerifier = async (ref) => {
-      verifyCount++;
-      await new Promise((r) => setTimeout(r, 50)); // simulate slow verification
-      return { delivery: { ...ref, verification: { ...ref.verification, status: "passed", verifiedCommit: ref.deliveryCommit, results: [] } }, outcome: "passed" };
-    };
+    // Deferred verifier: stays pending until released, proving that both
+    // concurrent callers enter _verifyDeliveryResult while the verifier
+    // is still in-flight (not yet returned).
+    let resolveVerifierBarrier;
+    const verifierBarrier = new Promise((r) => { resolveVerifierBarrier = r; });
+
     const mgr = makeManagerWithPackager(
       runDir, repo, createMockFetch(),
       (input) => packageDelivery(input),
-      { verifyDeliveryFn: slowVerifier },
+      {
+        verifyDeliveryFn: async (ref) => {
+          verifyCount++;
+          // Block until both callers have entered — the barrier proves overlap.
+          // Release after a tick to let the second caller arrive.
+          await verifierBarrier;
+          return {
+            delivery: { ...ref, verification: { ...ref.verification, status: "passed", verifiedCommit: ref.deliveryCommit, results: [] } },
+            outcome: "passed",
+          };
+        },
+      },
     );
     const run = await mgr.start("test", {
       prompt: "hi", isolate: true, runId: "run_3b2_test_22",
@@ -3014,15 +3206,91 @@ test("3B2-22: concurrent _verifyDeliveryResult calls → verifier once, one outc
     });
     const { writeFile: wf } = await import("node:fs/promises");
     await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
-    await run.waitForCompletion({});
 
+    // Package a real committed DeliveryRef (the worktree HEAD moves to delivery commit)
+    const ref = packageDelivery({
+      runId: "run_3b2_test_22",
+      worktreePath: run.deliveryContext.worktreePath,
+      baseCommit: run.deliveryContext.baseCommit,
+      allowedPaths: ["src"],
+      isolation: { type: "worktree", strategy: "persistent" },
+      verificationCommands: ["echo ok"],
+    });
+
+    // Two truly concurrent calls — both start before the verifier resolves.
+    const callsPromise = Promise.all([
+      run._verifyDeliveryResult(ref),
+      run._verifyDeliveryResult(ref),
+    ]);
+
+    // Release the barrier so the (single) verifier call can complete.
+    setTimeout(() => resolveVerifierBarrier(), 30);
+
+    const [r1, r2] = await callsPromise;
+
+    assert.equal(verifyCount, 1, "verifier must be called exactly once under concurrency");
+    assert.equal(r1.outcome, "passed");
+    assert.equal(r2.outcome, "passed");
+
+    // Use real JsonlTranscript to assert exactly one outcome event on disk.
     const events = await readTranscript(run.transcript.filePath);
-    outcomeEventCount = events.filter((e) =>
+    const outcomeEvents = events.filter((e) =>
       e.type === "run.delivery_verification_passed" ||
       e.type === "run.delivery_verification_failed" ||
-      e.type === "run.delivery_verification_unavailable").length;
-    assert.equal(verifyCount, 1, "verifier called exactly once even conceptually");
-    assert.equal(outcomeEventCount, 1, "exactly one outcome event on disk");
+      e.type === "run.delivery_verification_unavailable");
+    assert.equal(outcomeEvents.length, 1, "exactly one outcome event on disk");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+/**
+ * 3B2-REAL: full integration with DEFAULT verifyDelivery kernel (no dummyVerifier).
+ * Uses a real temp git repo + linked worktree + packageDelivery + the actual
+ * verifyDelivery from deliveryVerification.js. Verifies the complete lifecycle
+ * end-to-end: completed=true, verification=passed, exactly one verification event,
+ * terminal state is completed.
+ */
+test("3B2-REAL: default verifyDelivery kernel end-to-end (no dummyVerifier)", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-real-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b2real-"));
+  try {
+    // makeManager (no packager override) uses default packageDelivery + verifyDelivery.
+    const mgr = makeManager(runDir, repo, createMockFetch());
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_real",
+      delivery: deliveryOpts(repo, baseCommit, { verificationCommands: ["echo ok"] }),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+
+    const result = await run.waitForCompletion({});
+
+    // The default verifyDelivery kernel must have run against the real commit
+    assert.equal(result.completed, true, "run must complete");
+    assert.ok(result.delivery, "must have delivery ref");
+    assert.ok(result.delivery.deliveryCommit, "must have real delivery commit");
+    assert.equal(result.delivery.verification.status, "passed",
+      "default verifyDelivery kernel must verify passed");
+    assert.equal(result.delivery.verification.results.length, 1,
+      "one verification command result");
+    assert.equal(result.delivery.verification.results[0].exitCode, 0,
+      "echo ok must exit 0");
+    assert.equal(result.verificationFailed, false);
+
+    // Exactly one verification event on disk
+    const events = await readTranscript(run.transcript.filePath);
+    const verEvents = events.filter((e) =>
+      e.type === "run.delivery_verification_passed" ||
+      e.type === "run.delivery_verification_failed" ||
+      e.type === "run.delivery_verification_unavailable");
+    assert.equal(verEvents.length, 1, "exactly one verification event");
+    assert.equal(verEvents[0].type, "run.delivery_verification_passed");
+
+    // Terminal state is completed (not changed by verification)
+    const finalState = findState(events);
+    assert.equal(finalState, "completed", "terminal state must be completed");
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);

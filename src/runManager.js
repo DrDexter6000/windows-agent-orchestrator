@@ -673,10 +673,22 @@ export class Run {
     this._packageDeliveryFn = packageDeliveryFn;
     this._verifyDeliveryFn = verifyDeliveryFn;
     this._deliveryPackaged = false; // guard: package at most once
-    // TD-103 Phase 3B closeout: transcript-atomic verification guards.
-    // _pendingVerificationResult caches the verifier output (run at most once);
-    // _verificationRecorded is set ONLY after the outcome event is on disk.
+    // TD-103 Phase 3B concurrency final closeout: transcript-atomic verification.
+    //
+    // Concurrency state machine for _verifyDeliveryResult:
+    //   _verificationComputePromise — shared in-flight Promise for the verifier
+    //     computation. Created once; all concurrent callers await the same
+    //     Promise so the verifier runs exactly once.
+    //   _pendingVerificationResult — immutable result once the compute Promise
+    //     resolves. Survives across append retries.
+    //   _verificationAppendPromise — shared in-flight Promise for the transcript
+    //     append of the outcome event. Created per append attempt; cleared on
+    //     failure so an explicit retry can re-attempt.
+    //   _verificationRecorded — set true ONLY after the outcome event is on
+    //     disk. Once true, _recordedVerificationResult is the idempotent answer.
+    this._verificationComputePromise = null;
     this._pendingVerificationResult = null;
+    this._verificationAppendPromise = null;
     this._verificationRecorded = false;
     this._recordedVerificationResult = null;
   }
@@ -1050,65 +1062,113 @@ export class Run {
    * @returns {Promise<{delivery: object, outcome: string}>}
    */
   async _verifyDeliveryResult(deliveryRef) {
-    // TD-103 Phase 3B closeout (CTO RED #4): transcript-atomic verification.
+    // TD-103 Phase 3B concurrency final closeout.
     //
-    // Invariants:
-    //   1. The verifier runs at most once. Its result is cached as
-    //      _pendingVerificationResult (never claimed as final until on disk).
-    //   2. The outcome event must be on disk before we report the result as
-    //      final. If append fails, the error propagates — no fake pass.
-    //   3. On retry after an append failure, the cached verifier result is
-    //      re-attempted to disk (verifier NOT re-run).
-    //   4. Once the outcome event is recorded, _verificationRecorded guards
-    //      idempotency — subsequent calls return the recorded result without
-    //      re-running anything.
-    //   5. Verifier throws are mapped to execution_error BEFORE the append;
-    //      if the append for execution_error also fails, that error propagates.
+    // Concurrency invariants (verified by RED→GREEN with real concurrent calls):
+    //   1. The verifier computation runs exactly once regardless of caller
+    //      count. All concurrent callers share _verificationComputePromise.
+    //   2. The outcome append runs at most once successfully. Concurrent
+    //      callers share _verificationAppendPromise. On failure, all waiters
+    //      receive the same error; the promise is cleared so an explicit
+    //      retry can re-attempt the append without re-running the verifier.
+    //   3. The outcome event must be on disk before we report success.
+    //   4. No "unrecorded pass" fallback — ever.
+    //   5. DeliveryError(artifact_mismatch) from the verifier propagates as-is
+    //      (it is a known proof failure, not an internal crash). Only truly
+    //      unknown verifier exceptions map to execution_error.
 
-    // Already recorded on disk — idempotent return.
+    // Fast path: already recorded on disk.
     if (this._verificationRecorded) {
       return this._recordedVerificationResult;
     }
 
-    // Run verifier at most once; cache result for append retry.
-    if (!this._pendingVerificationResult) {
-      let result;
-      try {
-        result = await this._verifyDeliveryFn(deliveryRef);
-      } catch (err) {
-        // Verifier threw — map to execution_error failed ref.
-        // This result is what we attempt to persist; the throw itself is absorbed.
-        const safeRef = {
-          ...deliveryRef,
-          verification: {
-            ...deliveryRef.verification,
-            status: "failed",
-            failureCode: "execution_error",
-            verifiedCommit: deliveryRef.deliveryCommit,
-            results: [],
-          },
-        };
-        result = { delivery: safeRef, outcome: "failed", failureCode: "execution_error" };
-      }
-      this._pendingVerificationResult = result;
+    // Phase 1: compute the verifier result exactly once across all callers.
+    if (!this._verificationComputePromise) {
+      this._verificationComputePromise = this._computeVerification(deliveryRef);
+    }
+    // DeliveryError(artifact_mismatch) is a known proof failure — let it
+    // propagate to all waiters as-is. Unknown errors are mapped inside
+    // _computeVerification to a safe execution_error result (not re-thrown),
+    // so this await resolves to a result object in all cases except
+    // artifact_mismatch (which is a deliberate proof rejection).
+    const result = await this._verificationComputePromise;
+
+    // Phase 2: append the outcome event — coalesce concurrent appends.
+    if (!this._verificationAppendPromise) {
+      this._verificationAppendPromise = this._appendVerificationOutcome(result);
+    }
+    try {
+      await this._verificationAppendPromise;
+    } catch (err) {
+      // Append failed — clear the promise so an explicit retry can re-attempt.
+      // All concurrent waiters received the same error via the shared promise.
+      this._verificationAppendPromise = null;
+      throw err;
     }
 
-    const result = this._pendingVerificationResult;
+    // Phase 3: append succeeded — mark as recorded and return.
+    // _verificationRecorded was set inside _appendVerificationOutcome before
+    // the promise resolved, so this is a belt-and-suspenders check.
+    if (this._verificationRecorded) {
+      return this._recordedVerificationResult;
+    }
+    // Should not reach here — _appendVerificationOutcome sets _verificationRecorded.
+    return result;
+  }
+
+  /**
+   * Run the verifier exactly once. Maps unknown exceptions to execution_error.
+   * DeliveryError(artifact_mismatch) is re-thrown (known proof failure).
+   * @param {object} deliveryRef
+   * @returns {Promise<object>} resolved result object
+   */
+  async _computeVerification(deliveryRef) {
+    try {
+      const result = await this._verifyDeliveryFn(deliveryRef);
+      this._pendingVerificationResult = result;
+      return result;
+    } catch (err) {
+      // DeliveryError is a known proof failure (artifact_mismatch, etc.) —
+      // do not downgrade it to execution_error. Propagate to all waiters.
+      if (err?.name === "DeliveryError" || err?.deliveryCode) {
+        throw err;
+      }
+      // Unknown internal exception → map to safe execution_error result.
+      const safeRef = {
+        ...deliveryRef,
+        verification: {
+          ...deliveryRef.verification,
+          status: "failed",
+          failureCode: "execution_error",
+          verifiedCommit: deliveryRef.deliveryCommit,
+          results: [],
+        },
+      };
+      const mapped = { delivery: safeRef, outcome: "failed", failureCode: "execution_error" };
+      this._pendingVerificationResult = mapped;
+      return mapped;
+    }
+  }
+
+  /**
+   * Append the verification outcome event to the transcript.
+   * Sets _verificationRecorded + _recordedVerificationResult on success.
+   * Throws on append failure (callers clear _verificationAppendPromise to
+   * allow retry).
+   * @param {object} result — the computed verifier result
+   */
+  async _appendVerificationOutcome(result) {
     const eventType = result.outcome === "passed"
       ? "run.delivery_verification_passed"
       : result.outcome === "failed"
         ? "run.delivery_verification_failed"
         : "run.delivery_verification_unavailable";
 
-    // Append outcome event. If this fails, propagate — do NOT claim success.
-    // The caller (waitForCompletion) sees the error; retry will re-attempt
-    // the same already-computed result to disk.
     await this.transcript.append(eventType, { delivery: result.delivery });
 
-    // Successfully recorded — now it is safe to mark as final.
+    // Successfully on disk — safe to mark as final.
     this._verificationRecorded = true;
     this._recordedVerificationResult = result;
-    return result;
   }
 
   /** 终态时清理 worktree（ephemeral 策略）。幂等，失败不阻塞。 */

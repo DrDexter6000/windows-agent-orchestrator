@@ -420,7 +420,8 @@ interface SchedulerOpts { maxConcurrent: number; }
 ### 4.6 Coder Delivery Contract v1 `[Phase 2]`
 
 > **实现状态**：TD-103 Phase 2 core complete（inspection + packaging deep module）。
-> Phase 3（RunManager/CLI 集成、transcript 事件、verification、acceptance、dogfood）待做。
+> Phase 3A（RunManager 集成、transcript 事件）complete，Phase 3B（exact-artifact verification）complete。
+> Phase 3C（CLI flag 暴露、acceptance、coder-first template、dogfood）待做。
 
 控制平面（而非 worker）负责把 isolated worktree 里的 worker 产出打包成 atomic delivery commit。
 worker 只准备变更，不创建 commit。
@@ -510,7 +511,8 @@ worker 进程完成 ≠ code delivery 完成。
 ### 4.7 Run delivery mode 集成 `[Phase 3A]`
 
 > **实现状态**：TD-103 Phase 3A complete。Run delivery mode 已接入 RunManager 生命周期。
-> Phase 3B（exact-artifact verification、CLI flag 暴露）和 3C（coder-first template、dogfood）待做。
+> Phase 3B（exact-artifact verification）complete——见 §4.8。
+> Phase 3C（CLI flag 暴露、coder-first template、dogfood）待做。
 
 **RunManager.start() option**：
 
@@ -595,11 +597,20 @@ packageDelivery success → transitionState(completed)
 
 **Transcript 原子可信语义**（`Run._verifyDeliveryResult`）：
 
-- verifier 最多执行一次；结果缓存为 `_pendingVerificationResult`（在落盘前不视为 final）。
-- outcome event 必须成功落盘后才能返回结果为 final。append 失败 → 异常原样传播，不伪造 pass。
-- append 失败后重试：不重跑 verifier，只重试落盘同一已计算结果。
-- 一旦 outcome event 落盘成功（`_verificationRecorded=true`），后续调用幂等返回已记录结果。
-- verifier throw 映射为 `execution_error`，独立于 transcript append 的成功/失败。
+并发控制（`_verificationComputePromise` / `_verificationAppendPromise` 合并 in-flight Promise）：
+
+- verifier 计算通过共享 `_verificationComputePromise` 合并——任意数量并发调用只执行 verifier 一次。Promise 创建一次，所有 caller await 同一实例。
+- outcome append 通过共享 `_verificationAppendPromise` 合并——任意数量并发调用最多成功 append 一个 outcome event。
+- append 失败时，所有等待者收到同一个错误；`_verificationAppendPromise` 清空以允许显式重试。
+- 重试 append 不得重跑 verifier（使用已缓存的 `_pendingVerificationResult`）。
+- append 成功后 `_verificationRecorded=true`，后续调用幂等返回 `_recordedVerificationResult`。
+- 不重新引入"未落盘却返回 pass"的 fallback。
+
+错误分类：
+
+- `DeliveryError`（artifact_mismatch 等已知 proof 失败）原样传播，不降级为 execution_error。
+- 只有未知 verifier 内部异常映射为 `execution_error` result（不 re-throw）。
+- 不泄露原始 stack/stderr/secret。
 
 **身份 SSOT**（`src/delivery.js`）：
 
