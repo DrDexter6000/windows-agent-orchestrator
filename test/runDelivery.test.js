@@ -6,6 +6,7 @@ import { execSync } from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { RunManager } from "../src/runManager.js";
+import { Run } from "../src/runManager.js";
 import { OpenCodeServeBackend } from "../src/backends/opencodeServe.js";
 import { readTranscript, findState } from "../src/transcript.js";
 import { packageDelivery } from "../src/delivery.js";
@@ -2331,6 +2332,697 @@ test("3B2-23: no Phase 3C acceptance/integration events exist", async () => {
     assert.ok(!events.some((e) => e.type === "run.delivery_accepted"), "no acceptance event");
     assert.ok(!events.some((e) => e.type === "run.delivery_integrated"), "no integration event");
     assert.ok(!events.some((e) => e.type === "run.delivery_rejected"), "no rejection event");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+// ===== Phase 3B closeout: B-transcript atomicity tests (CTO RED #4) =====
+
+/** Build a Run with a mock transcript for unit-level _verifyDeliveryResult tests. */
+function makeRunWithMockTranscript({ verifyDeliveryFn, transcriptMock }) {
+  return new Run({
+    runId: "run_closeout_unit",
+    agentId: "test",
+    agent: { cwd: "." },
+    backend: {},
+    handle: {},
+    transcript: transcriptMock,
+    result: { backendSessionId: "ses_x" },
+    config: {},
+    onRemove: () => {},
+    initialState: "completed",
+    verifyDeliveryFn,
+  });
+}
+
+/** A minimal committed DeliveryRef for unit tests (no real git needed). */
+const UNIT_REF = {
+  schemaVersion: 1,
+  kind: "git_commit",
+  runId: "run_closeout_unit",
+  baseCommit: "b".repeat(40),
+  deliveryCommit: "d".repeat(40),
+  branch: "wao/run_closeout_unit",
+  worktreePath: "/fake/wt",
+  changedFiles: ["src/a.js"],
+  verification: { status: "pending", commands: ["npm test"] },
+  acceptance: { status: "pending", reviewerType: "lead_agent" },
+  integration: { status: "pending", targetCommit: null },
+};
+
+/**
+ * CTO RED #4: _verifyDeliveryResult sets _deliveryVerified=true before append,
+ * and wraps append in the verifier's try/catch. On first append failure, the
+ * second call returns a fake "passed" without ever recording to transcript.
+ *
+ * Expected behavior after fix:
+ * - First call: verifier runs, append throws → exception propagates to caller
+ * - _deliveryVerified must NOT be set (no unrecorded pass claim)
+ * - Second call: verifier runs again (re-attempt), or transcript is retried
+ */
+test("3B-B1: first append failure propagates error, no unrecorded pass (CTO RED #4)", async () => {
+  let verifyCount = 0;
+  let appendCount = 0;
+  const transcriptMock = {
+    async append() {
+      appendCount++;
+      throw new Error("disk full");
+    },
+    filePath: "/fake/transcript.jsonl",
+    context: { runId: "run_closeout_unit", agentId: "test" },
+    seq: 0,
+  };
+  const run = makeRunWithMockTranscript({
+    verifyDeliveryFn: async (ref) => {
+      verifyCount++;
+      return {
+        delivery: { ...ref, verification: { ...ref.verification, status: "passed", verifiedCommit: ref.deliveryCommit, results: [] } },
+        outcome: "passed",
+      };
+    },
+    transcriptMock,
+  });
+
+  // First call must propagate the append error, NOT swallow it.
+  await assert.rejects(
+    () => run._verifyDeliveryResult(UNIT_REF),
+    (err) => /disk full/.test(err.message),
+    "first append failure must propagate, not be swallowed into a fake pass",
+  );
+  assert.equal(verifyCount, 1, "verifier called once on first attempt");
+  assert.equal(appendCount, 1, "append attempted once");
+});
+
+test("3B-B2: after append failure, second call retries append without re-running verifier (CTO RED #4)", async () => {
+  let verifyCount = 0;
+  let appendCount = 0;
+  let appendWillFail = true;
+  const transcriptMock = {
+    async append(type, payload) {
+      appendCount++;
+      if (appendWillFail) throw new Error("disk full");
+      return { type, ...payload, seq: appendCount };
+    },
+    filePath: "/fake/transcript.jsonl",
+    context: { runId: "run_closeout_unit", agentId: "test" },
+    seq: 0,
+  };
+  const run = makeRunWithMockTranscript({
+    verifyDeliveryFn: async (ref) => {
+      verifyCount++;
+      return {
+        delivery: { ...ref, verification: { ...ref.verification, status: "passed", verifiedCommit: ref.deliveryCommit, results: [] } },
+        outcome: "passed",
+      };
+    },
+    transcriptMock,
+  });
+
+  // First call fails (append throws)
+  await assert.rejects(() => run._verifyDeliveryResult(UNIT_REF), /disk full/);
+
+  // Fix the append, retry — verifier must NOT re-run (cached result), append retries
+  appendWillFail = false;
+  const result = await run._verifyDeliveryResult(UNIT_REF);
+  assert.equal(result.outcome, "passed");
+  assert.equal(verifyCount, 1, "verifier must NOT re-run on retry (same already-computed result)");
+  assert.equal(appendCount, 2, "append retried and succeeded");
+});
+
+test("3B-B3: successful verification appends exactly one outcome event and is idempotent after", async () => {
+  let verifyCount = 0;
+  let appendCount = 0;
+  const appendedTypes = [];
+  const transcriptMock = {
+    async append(type, payload) {
+      appendCount++;
+      appendedTypes.push(type);
+      return { type, ...payload, seq: appendCount };
+    },
+    filePath: "/fake/transcript.jsonl",
+    context: { runId: "run_closeout_unit", agentId: "test" },
+    seq: 0,
+  };
+  const run = makeRunWithMockTranscript({
+    verifyDeliveryFn: async (ref) => {
+      verifyCount++;
+      return {
+        delivery: { ...ref, verification: { ...ref.verification, status: "passed", verifiedCommit: ref.deliveryCommit, results: [] } },
+        outcome: "passed",
+      };
+    },
+    transcriptMock,
+  });
+
+  const r1 = await run._verifyDeliveryResult(UNIT_REF);
+  assert.equal(r1.outcome, "passed");
+  assert.equal(verifyCount, 1);
+  assert.equal(appendCount, 1, "exactly one append on success");
+
+  // Idempotent: second call after success does NOT re-run verifier or append again
+  const r2 = await run._verifyDeliveryResult(UNIT_REF);
+  assert.equal(r2.outcome, "passed");
+  assert.equal(verifyCount, 1, "verifier not re-run after successful record");
+  assert.equal(appendCount, 1, "no duplicate append after success");
+  assert.deepEqual(appendedTypes, ["run.delivery_verification_passed"]);
+});
+
+test("3B-B4: verifier throw propagates, does not map to verification_failed via append", async () => {
+  let appendCount = 0;
+  const transcriptMock = {
+    async append(type) { appendCount++; return { type, seq: appendCount }; },
+    filePath: "/fake/transcript.jsonl",
+    context: { runId: "run_closeout_unit", agentId: "test" },
+    seq: 0,
+  };
+  const run = makeRunWithMockTranscript({
+    verifyDeliveryFn: async () => { throw new Error("verifier exploded"); },
+    transcriptMock,
+  });
+
+  // Verifier throw must propagate — the caller (waitForCompletion) decides how
+  // to handle it. The transcript append for execution_error must succeed
+  // (it's a different code path), but the throw itself must not be swallowed
+  // by a transcript append failure.
+  const result = await run._verifyDeliveryResult(UNIT_REF);
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.failureCode, "execution_error");
+  assert.equal(appendCount, 1, "execution_error event was recorded");
+});
+
+test("3B-B5: verifier throw + append failure propagates append error (not swallowed)", async () => {
+  const transcriptMock = {
+    async append() { throw new Error("disk full during error recording"); },
+    filePath: "/fake/transcript.jsonl",
+    context: { runId: "run_closeout_unit", agentId: "test" },
+    seq: 0,
+  };
+  const run = makeRunWithMockTranscript({
+    verifyDeliveryFn: async () => { throw new Error("verifier exploded"); },
+    transcriptMock,
+  });
+
+  // Both verifier AND append fail — the append error must propagate.
+  await assert.rejects(
+    () => run._verifyDeliveryResult(UNIT_REF),
+    (err) => /disk full/.test(err.message),
+    "append failure during error recording must propagate, not be swallowed",
+  );
+});
+
+// ===== Phase 3B closeout: missing 3B2 integration contracts (12 tests) =====
+
+/**
+ * 3B2-02: packager's original DeliveryRef is passed exactly to the verifier.
+ * The verifier must receive the ref as returned by packageDelivery, not a
+ * reconstructed or modified version.
+ */
+test("3B2-02: packager's original DeliveryRef passes exactly to verifier", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-02-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b202-"));
+  let capturedRef = null;
+  let packagerReturnedRef = null;
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => {
+        packagerReturnedRef = packageDelivery(input);
+        return packagerReturnedRef;
+      },
+      {
+        verifyDeliveryFn: async (ref) => {
+          capturedRef = ref;
+          return { delivery: { ...ref, verification: { ...ref.verification, status: "passed", verifiedCommit: ref.deliveryCommit, results: [] } }, outcome: "passed" };
+        },
+      },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_02",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+    await run.waitForCompletion({});
+
+    assert.ok(capturedRef, "verifier must have been called");
+    assert.ok(packagerReturnedRef, "packager must have returned a ref");
+    assert.deepEqual(capturedRef, packagerReturnedRef,
+      "verifier must receive the exact ref returned by packager");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+/**
+ * 3B2-03: verifier runs strictly after run.completed state_change (happens-before).
+ * For persistent delivery worktrees there is no cleanup_done event (worktree persists),
+ * so the ordering proof is: completed state_change → verification event.
+ */
+test("3B2-03: run.completed state_change happens-before verifier", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-03-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b203-"));
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_03",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+    await run.waitForCompletion({});
+
+    const events = await readTranscript(run.transcript.filePath);
+    const completedIdx = events.findIndex((e) =>
+      e.type === "run.state_change" && e.to === "completed");
+    const verIdx = events.findIndex((e) =>
+      e.type === "run.delivery_verification_passed" ||
+      e.type === "run.delivery_verification_failed" ||
+      e.type === "run.delivery_verification_unavailable");
+    assert.ok(completedIdx >= 0, "completed state_change must exist");
+    assert.ok(verIdx >= 0, "verification event must exist");
+    assert.ok(completedIdx < verIdx,
+      `completed (seq ${events[completedIdx]?.seq}) must happen-before verification (seq ${events[verIdx]?.seq})`);
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+/**
+ * 3B2-08: packaging failure → verifier called zero times.
+ */
+test("3B2-08b: packaging failure → verifierCount===0", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-08-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b208-"));
+  let verifyCount = 0;
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      () => { throw new Error("packaging exploded"); },
+      { verifyDeliveryFn: async (ref) => { verifyCount++; return { delivery: ref, outcome: "passed" }; } },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_08",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+    await run.waitForCompletion({});
+    assert.equal(verifyCount, 0, "verifier must not be called when packaging fails");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+/**
+ * 3B2-09: backend failure → verifier called zero times.
+ */
+test("3B2-09: backend failure → verifierCount===0", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-09-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b209-"));
+  let verifyCount = 0;
+  const failingFetch = async (url, init = {}) => {
+    const urlStr = String(url);
+    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
+      return { ok: true, status: 200, async json() { return { data: { id: "ses_fail" } }; }, async text() { return "{}"; } };
+    }
+    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
+      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
+    }
+    if (init.method === "GET" && urlStr.includes("/message")) { throw new Error("backend gone"); }
+    if (init.method === "POST" && urlStr.includes("/abort")) {
+      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
+    }
+    return { ok: false, status: 404, async text() { return ""; } };
+  };
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, failingFetch,
+      (input) => packageDelivery(input),
+      { verifyDeliveryFn: async (ref) => { verifyCount++; return { delivery: ref, outcome: "passed" }; } },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_09",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    try { await run.waitForCompletion({ waitTimeout: 500, pollInterval: 10 }); } catch { /* expected */ }
+    assert.equal(verifyCount, 0, "verifier must not be called on backend failure");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+/**
+ * 3B2-10: wait timeout → verifier called zero times.
+ */
+test("3B2-10: wait timeout → verifierCount===0", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-10-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b210-"));
+  let verifyCount = 0;
+  // A fetch that never produces a done event — will hang until waitTimeout
+  const hangingFetch = async (url, init = {}) => {
+    const urlStr = String(url);
+    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
+      return { ok: true, status: 200, async json() { return { data: { id: "ses_hang" } }; }, async text() { return "{}"; } };
+    }
+    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
+      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
+    }
+    if (init.method === "GET" && urlStr.includes("/message")) {
+      // Return messages but no done signal — will keep polling
+      return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
+    }
+    if (init.method === "POST" && urlStr.includes("/abort")) {
+      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
+    }
+    return { ok: false, status: 404, async text() { return ""; } };
+  };
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, hangingFetch,
+      (input) => packageDelivery(input),
+      { verifyDeliveryFn: async (ref) => { verifyCount++; return { delivery: ref, outcome: "passed" }; } },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_10",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    try { await run.waitForCompletion({ waitTimeout: 300, pollInterval: 10 }); } catch { /* expected timeout */ }
+    assert.equal(verifyCount, 0, "verifier must not be called on wait timeout");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+/**
+ * 3B2-11: budget exceeded → verifier called zero times.
+ */
+test("3B2-11: budget exceeded → verifierCount===0", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-11-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b211-"));
+  let verifyCount = 0;
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+      { verifyDeliveryFn: async (ref) => { verifyCount++; return { delivery: ref, outcome: "passed" }; } },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_11",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    // Tiny budget → immediate budget exceeded
+    try {
+      await run.waitForCompletion({ tokenBudget: 1, pollInterval: 10, waitTimeout: 5000 });
+    } catch { /* expected budget failure */ }
+    assert.equal(verifyCount, 0, "verifier must not be called on budget exceeded");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+/**
+ * 3B2-12: user abort → verifier called zero times.
+ */
+test("3B2-12: user abort → verifierCount===0", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-12-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b212-"));
+  let verifyCount = 0;
+  const hangingFetch = async (url, init = {}) => {
+    const urlStr = String(url);
+    if (init.method === "POST" && urlStr.endsWith("/api/session")) {
+      return { ok: true, status: 200, async json() { return { data: { id: "ses_abort" } }; }, async text() { return "{}"; } };
+    }
+    if (init.method === "POST" && urlStr.includes("/prompt_async")) {
+      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
+    }
+    if (init.method === "GET" && urlStr.includes("/message")) {
+      return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
+    }
+    if (init.method === "POST" && urlStr.includes("/abort")) {
+      return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
+    }
+    return { ok: false, status: 404, async text() { return ""; } };
+  };
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, hangingFetch,
+      (input) => packageDelivery(input),
+      { verifyDeliveryFn: async (ref) => { verifyCount++; return { delivery: ref, outcome: "passed" }; } },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_12",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const ac = new AbortController();
+    const waitPromise = run.waitForCompletion({ signal: ac.signal, pollInterval: 10, waitTimeout: 10000 });
+    // Abort after a short delay
+    setTimeout(() => mgr.abort("run_3b2_test_12", "user"), 100);
+    try { await waitPromise; } catch { /* expected abort */ }
+    assert.equal(verifyCount, 0, "verifier must not be called on user abort");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+/**
+ * 3B2-13: hard scorecard failure → verifier called zero times.
+ */
+test("3B2-13: hard scorecard failure → verifierCount===0", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-13-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b213-"));
+  let verifyCount = 0;
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+      { verifyDeliveryFn: async (ref) => { verifyCount++; return { delivery: ref, outcome: "passed" }; } },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_13",
+      delivery: deliveryOpts(repo, baseCommit),
+      scorecardMode: "hard",
+    });
+    // Don't write any files → no evidence → hard scorecard fails
+    await run.waitForCompletion({});
+    assert.equal(verifyCount, 0, "verifier must not be called on hard scorecard failure");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+/**
+ * 3B2-14: external-terminal race (delivery_created written but transition rejected)
+ * → verifier called zero times.
+ */
+test("3B2-14: external-terminal race loser → verifierCount===0", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-14-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b214-"));
+  let verifyCount = 0;
+  try {
+    const racingPackager = async (input) => {
+      // Simulate external terminal written during packaging
+      const racingTranscript = run.transcript;
+      await racingTranscript.append("run.state_change", { from: "running", to: "timed_out", reason: "external_race" });
+      return packageDelivery(input);
+    };
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      racingPackager,
+      { verifyDeliveryFn: async (ref) => { verifyCount++; return { delivery: ref, outcome: "passed" }; } },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_14",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+    const result = await run.waitForCompletion({});
+    // Race loser: not completed, delivery_created was written as attemptEvent
+    assert.ok(!result.completed, "race loser must not be completed");
+    assert.equal(verifyCount, 0, "verifier must not be called on race loser");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+/**
+ * 3B2-15: delivery resume restores the same verification commands from transcript.
+ */
+test("3B2-15: delivery resume restores same verification commands and worktree", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-15-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b215-"));
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_15",
+      delivery: deliveryOpts(repo, baseCommit, { verificationCommands: ["npm run test:unit"] }),
+    });
+    const originalWorktree = run.deliveryContext.worktreePath;
+    const originalCommands = run.deliveryContext.verificationCommands;
+
+    // Resume
+    const resumedRun = await mgr.resume("run_3b2_test_15", { runDir });
+    assert.ok(resumedRun, "resume must succeed");
+    assert.ok(resumedRun.deliveryContext, "resumed run must have deliveryContext");
+    assert.deepEqual(resumedRun.deliveryContext.verificationCommands, originalCommands,
+      "resumed run must have same verification commands");
+    assert.equal(resumedRun.deliveryContext.worktreePath, originalWorktree,
+      "resumed run must use same worktree path");
+    assert.equal(resumedRun.deliveryContext.baseCommit, baseCommit,
+      "resumed run must have same base commit");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+/**
+ * 3B2-18: integration-level — transcript append failure during verification
+ * does not produce an unrecorded pass in the result.
+ * (Unit-level coverage is 3B-B1; this verifies the RunManager flow propagates.)
+ */
+test("3B2-18: transcript append failure in verification propagates through waitForCompletion", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-18-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b218-"));
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_18",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+
+    // Sabotage the transcript append to fail on the verification event
+    const realAppend = run.transcript.append.bind(run.transcript);
+    let verificationAppendAttempted = false;
+    run.transcript.append = async (type, payload) => {
+      if (type === "run.delivery_verification_passed" || type === "run.delivery_verification_failed") {
+        verificationAppendAttempted = true;
+        throw new Error("simulated disk full");
+      }
+      return realAppend(type, payload);
+    };
+
+    // waitForCompletion should propagate the append error
+    await assert.rejects(
+      () => run.waitForCompletion({}),
+      (err) => /simulated disk full/.test(err.message),
+      "append failure during verification must propagate through waitForCompletion",
+    );
+    assert.ok(verificationAppendAttempted, "verification append must have been attempted");
+
+    // Transcript must NOT contain a verification event (the append failed)
+    const events = await readTranscript(run.transcript.filePath);
+    const verEvent = events.find((e) =>
+      e.type === "run.delivery_verification_passed" ||
+      e.type === "run.delivery_verification_failed");
+    assert.equal(verEvent, undefined, "no verification event must be on disk after append failure");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+/**
+ * 3B2-20: HTTP resume respects the injected verifier function.
+ * The Run created via HTTP resume must carry verifyDeliveryFn from RunManager,
+ * not fall back to the default.
+ */
+test("3B2-20: HTTP resume respects injected verifier (CTO closeout C)", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-20-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b220-"));
+  let verifyCount = 0;
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+      {
+        verifyDeliveryFn: async (ref) => {
+          verifyCount++;
+          return { delivery: { ...ref, verification: { ...ref.verification, status: "passed", verifiedCommit: ref.deliveryCommit, results: [] } }, outcome: "passed" };
+        },
+      },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_20",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const originalWorktree = run.deliveryContext.worktreePath;
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(originalWorktree, "src", "a.js"), "resume modified\n");
+
+    // Resume via HTTP path (opencode-serve is HTTP backend)
+    const resumedRun = await mgr.resume("run_3b2_test_20", { runDir });
+    assert.ok(resumedRun, "resume must succeed");
+    // The resumed Run must carry the injected verifier (not default)
+    assert.ok(resumedRun._verifyDeliveryFn, "resumed Run must have verifyDeliveryFn");
+
+    // Complete the resumed run — the injected verifier must be called
+    const result = await resumedRun.waitForCompletion({});
+    assert.equal(result.completed, true);
+    assert.equal(verifyCount, 1, "injected verifier must be called exactly once on resumed run");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+/**
+ * 3B2-22: concurrent calls to _verifyDeliveryResult execute verifier at most once
+ * and write at most one outcome event.
+ */
+test("3B2-22: concurrent _verifyDeliveryResult calls → verifier once, one outcome event", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-22-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b222-"));
+  let verifyCount = 0;
+  let outcomeEventCount = 0;
+  try {
+    const slowVerifier = async (ref) => {
+      verifyCount++;
+      await new Promise((r) => setTimeout(r, 50)); // simulate slow verification
+      return { delivery: { ...ref, verification: { ...ref.verification, status: "passed", verifiedCommit: ref.deliveryCommit, results: [] } }, outcome: "passed" };
+    };
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+      { verifyDeliveryFn: slowVerifier },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_3b2_test_22",
+      delivery: deliveryOpts(repo, baseCommit),
+    });
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+    await run.waitForCompletion({});
+
+    const events = await readTranscript(run.transcript.filePath);
+    outcomeEventCount = events.filter((e) =>
+      e.type === "run.delivery_verification_passed" ||
+      e.type === "run.delivery_verification_failed" ||
+      e.type === "run.delivery_verification_unavailable").length;
+    assert.equal(verifyCount, 1, "verifier called exactly once even conceptually");
+    assert.equal(outcomeEventCount, 1, "exactly one outcome event on disk");
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);

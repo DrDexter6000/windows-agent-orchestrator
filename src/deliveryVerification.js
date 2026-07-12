@@ -163,9 +163,12 @@ export async function verifyDelivery(deliveryRef, opts = {}) {
   const commands = deliveryRef?.verification?.commands ?? [];
   const unavailableReason = deliveryRef?.verification?.unavailableReason;
 
-  // Unavailable: no commands, reason present
+  // Unavailable: no commands, reason present.
+  // CTO RED #1 fix: must prove exact committed DeliveryRef BEFORE returning unavailable.
   if (commands.length === 0) {
     if (typeof unavailableReason === "string" && unavailableReason.trim().length > 0) {
+      // Exact proof before declaring unavailable — a forged/dirty ref must fail here.
+      assertCommittedDeliveryRef(deliveryRef);
       return {
         delivery: _buildUpdatedRef(deliveryRef, {
           status: "unavailable",
@@ -198,6 +201,34 @@ export async function verifyDelivery(deliveryRef, opts = {}) {
       stderrBytes: result.stderrBytes,
     });
 
+    // CTO RED #2 fix: re-run exact proof after EVERY command outcome
+    // (exit 0, non-zero, timeout, launch-error). If the proof fails, the
+    // artifact was mutated — artifact_mutated takes priority over the
+    // command's own failure code.
+    let mutated = false;
+    try {
+      assertCommittedDeliveryRef(deliveryRef);
+    } catch {
+      mutated = true;
+    }
+
+    if (mutated) {
+      return {
+        delivery: _buildUpdatedRef(deliveryRef, {
+          status: "failed",
+          commands,
+          verifiedCommit: deliveryRef.deliveryCommit,
+          timeoutMs,
+          results,
+          failureCode: "artifact_mutated",
+          failedCommandIndex: i,
+        }),
+        outcome: "failed",
+        failureCode: "artifact_mutated",
+      };
+    }
+
+    // Artifact intact — classify the command's own outcome.
     // Launch error → execution_error
     if (result.launchError) {
       return {
@@ -249,28 +280,10 @@ export async function verifyDelivery(deliveryRef, opts = {}) {
       };
     }
 
-    // Exit 0 — re-check artifact integrity
-    try {
-      assertCommittedDeliveryRef(deliveryRef);
-    } catch (err) {
-      // Artifact mutated by the command
-      return {
-        delivery: _buildUpdatedRef(deliveryRef, {
-          status: "failed",
-          commands,
-          verifiedCommit: deliveryRef.deliveryCommit,
-          timeoutMs,
-          results,
-          failureCode: "artifact_mutated",
-          failedCommandIndex: i,
-        }),
-        outcome: "failed",
-        failureCode: "artifact_mutated",
-      };
-    }
+    // Exit 0 + proof passed → continue to next command
   }
 
-  // All commands passed
+  // All commands passed + final proof still holds (checked after last command)
   return {
     delivery: _buildUpdatedRef(deliveryRef, {
       status: "passed",

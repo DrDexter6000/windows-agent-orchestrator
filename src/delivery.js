@@ -182,6 +182,38 @@ function parseNul(output) {
     .filter((s) => s.length > 0);
 }
 
+// ===== Delivery identity SSOT (shared by package post-commit + assertCommittedDeliveryRef) =====
+
+/**
+ * Verify that the commit at HEAD has both author AND committer set to the WAO
+ * Delivery process identity. This is the single SSOT for identity checks used
+ * by both verifyPostCommitIntegrity (packaging) and assertCommittedDeliveryRef
+ * (verification proof).
+ *
+ * @param {string} cwd — worktree path
+ * @param {string} errorDeliveryCode — DeliveryCode to throw on mismatch
+ *   ("commit_integrity" for packaging, "artifact_mismatch" for verification)
+ * @throws {DeliveryError} if author or committer identity does not match
+ */
+function assertDeliveryIdentity(cwd, errorDeliveryCode) {
+  const authorName = String(git(["show", "-s", "--format=%an", "HEAD"], { cwd })).trim();
+  const authorEmail = String(git(["show", "-s", "--format=%ae", "HEAD"], { cwd })).trim();
+  const committerName = String(git(["show", "-s", "--format=%cn", "HEAD"], { cwd })).trim();
+  const committerEmail = String(git(["show", "-s", "--format=%ce", "HEAD"], { cwd })).trim();
+  if (authorName !== DELIVERY_IDENTITY.name || authorEmail !== DELIVERY_IDENTITY.email) {
+    throw new DeliveryError(
+      errorDeliveryCode,
+      `author identity (${authorName} <${authorEmail}>) != WAO identity`,
+    );
+  }
+  if (committerName !== DELIVERY_IDENTITY.name || committerEmail !== DELIVERY_IDENTITY.email) {
+    throw new DeliveryError(
+      errorDeliveryCode,
+      `committer identity (${committerName} <${committerEmail}>) != WAO identity`,
+    );
+  }
+}
+
 // ===== Persistent linked-worktree proof =====
 
 /**
@@ -377,12 +409,8 @@ export function assertCommittedDeliveryRef(deliveryRef) {
     throw new DeliveryError("artifact_mismatch", "commit message mismatch");
   }
 
-  // 10. Author/committer must be WAO identity
-  const authorName = String(git(["show", "-s", "--format=%an", "HEAD"], { cwd })).trim();
-  const authorEmail = String(git(["show", "-s", "--format=%ae", "HEAD"], { cwd })).trim();
-  if (authorName !== DELIVERY_IDENTITY.name || authorEmail !== DELIVERY_IDENTITY.email) {
-    throw new DeliveryError("artifact_mismatch", "author identity mismatch");
-  }
+  // 10. Author/committer must be WAO identity (SSOT: assertDeliveryIdentity)
+  assertDeliveryIdentity(cwd, "artifact_mismatch");
 
   // 11. Worktree must be clean (no non-ignored changes)
   const porcelain = String(git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd }));
@@ -825,23 +853,8 @@ function verifyPostCommitIntegrity(cwd, candidateCommit, canonicalBase, expected
     );
   }
 
-  // 7. Author/committer identity must be WAO process identity
-  const authorName = String(git(["show", "-s", "--format=%an", "HEAD"], { cwd })).trim();
-  const authorEmail = String(git(["show", "-s", "--format=%ae", "HEAD"], { cwd })).trim();
-  const committerName = String(git(["show", "-s", "--format=%cn", "HEAD"], { cwd })).trim();
-  const committerEmail = String(git(["show", "-s", "--format=%ce", "HEAD"], { cwd })).trim();
-  if (authorName !== DELIVERY_IDENTITY.name || authorEmail !== DELIVERY_IDENTITY.email) {
-    throw new DeliveryError(
-      "commit_integrity",
-      `author identity (${authorName} <${authorEmail}>) != WAO identity`,
-    );
-  }
-  if (committerName !== DELIVERY_IDENTITY.name || committerEmail !== DELIVERY_IDENTITY.email) {
-    throw new DeliveryError(
-      "commit_integrity",
-      `committer identity (${committerName} <${committerEmail}>) != WAO identity`,
-    );
-  }
+  // 7. Author/committer identity must be WAO process identity (SSOT: assertDeliveryIdentity)
+  assertDeliveryIdentity(cwd, "commit_integrity");
 
   // 8. Worktree must be clean
   const porcelain = String(

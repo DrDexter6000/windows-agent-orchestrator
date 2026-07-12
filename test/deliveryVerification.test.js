@@ -533,3 +533,194 @@ test("3B-25: verification result contains no stdout/stderr body, stack, env, or 
     await cleanupDir(repo);
   }
 });
+
+// ===== 3B closeout RED tests (CTO 4 confirmed REDs) =====
+
+/**
+ * CTO RED #3: assertCommittedDeliveryRef only checks author, not committer.
+ * An "Evil Committer <evil@local>" commit passes verification.
+ */
+test("3B-C1: forged committer identity -> artifact_mismatch (CTO RED #3)", async () => {
+  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-c1-");
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = makeDeliveryRef(wtPath, baseCommit, { verificationCommands: ["echo ok"] });
+
+    // Forge ONLY the committer identity using plumbing (commit-tree + update-ref).
+    // Author stays WAO identity; committer is corrupted to "Evil Committer".
+    // Tree, parent, and message are preserved exactly so no other check trips.
+    const { execFileSync: ef } = await import("node:child_process");
+    const tree = ef("git", ["rev-parse", "HEAD^{tree}"], { cwd: wtPath, encoding: "utf8" }).trim();
+    const parent = ef("git", ["rev-parse", "HEAD^"], { cwd: wtPath, encoding: "utf8" }).trim();
+    const evilEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "WAO Delivery",
+      GIT_AUTHOR_EMAIL: "wao-delivery@local",
+      GIT_COMMITTER_NAME: "Evil Committer",
+      GIT_COMMITTER_EMAIL: "evil@local",
+    };
+    const evilCommit = ef("git", ["commit-tree", tree, "-p", parent], {
+      cwd: wtPath, encoding: "utf8", env: evilEnv,
+      input: `wao-delivery: ${RUN_ID}\n`,
+    }).trim();
+    // Move the branch ref so HEAD (symbolic-ref) follows
+    ef("git", ["update-ref", `refs/heads/${BRANCH}`, evilCommit], { cwd: wtPath, stdio: "ignore" });
+    const forgedRef = { ...ref, deliveryCommit: evilCommit };
+
+    await assert.rejects(
+      () => verifyDelivery(forgedRef),
+      (err) => err.deliveryCode === "artifact_mismatch",
+      "forged committer must be caught as artifact_mismatch",
+    );
+  } finally {
+    await cleanupDir(repo);
+  }
+});
+
+/**
+ * CTO RED #1: unavailable path returns before asserting committed DeliveryRef.
+ * A dirty/forged worktree still gets status:"unavailable".
+ */
+test("3B-C2: dirty worktree + unavailableReason -> artifact_mismatch, zero commands (CTO RED #1)", async () => {
+  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-c2-");
+  let commandCount = 0;
+  const fakeRunCommand = async () => { commandCount++; return { exitCode: 0, stdoutBytes: 0, stderrBytes: 0, durationMs: 0, timedOut: false, signal: null }; };
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = makeDeliveryRef(wtPath, baseCommit, {
+      verificationCommands: [],
+      verificationUnavailableReason: "no test suite",
+    });
+
+    // Dirty the worktree AFTER packaging — now the committed state is violated.
+    await writeFile(join(wtPath, "src", "a.js"), "tampered\n");
+
+    await assert.rejects(
+      () => verifyDelivery(ref, { runCommand: fakeRunCommand }),
+      (err) => err.deliveryCode === "artifact_mismatch",
+      "dirty worktree with unavailableReason must fail as artifact_mismatch before returning unavailable",
+    );
+    assert.equal(commandCount, 0, "zero commands must execute for unavailable path");
+  } finally {
+    await cleanupDir(repo);
+  }
+});
+
+/**
+ * CTO RED #2: failed/timeout/launch-error paths skip post-command proof.
+ * A command that modifies a tracked file AND exits non-zero should be
+ * artifact_mutated, not command_failed.
+ */
+test("3B-C3: exit-1 command modifies tracked file -> artifact_mutated (CTO RED #2)", async () => {
+  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-c3-");
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = makeDeliveryRef(wtPath, baseCommit, {
+      verificationCommands: ['node -e "require(\'fs\').writeFileSync(\'src/a.js\', \'corrupted\\n\')" && exit 1'],
+    });
+
+    const result = await verifyDelivery(ref);
+    assert.equal(result.outcome, "failed");
+    assert.equal(result.failureCode, "artifact_mutated",
+      "exit-1 + file mutation must be artifact_mutated, NOT command_failed");
+  } finally {
+    await cleanupDir(repo);
+  }
+});
+
+/**
+ * CTO RED #2 variant: timeout command modifies tracked file -> artifact_mutated.
+ */
+test("3B-C4: timeout command modifies tracked file -> artifact_mutated (CTO RED #2)", async () => {
+  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-c4-");
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = makeDeliveryRef(wtPath, baseCommit, {
+      verificationCommands: ['node -e "require(\'fs\').writeFileSync(\'src/a.js\', \'corrupted\\n\')" && sleep 10'],
+    });
+
+    const result = await verifyDelivery(ref, { timeoutMs: 500 });
+    assert.equal(result.outcome, "failed");
+    assert.equal(result.failureCode, "artifact_mutated",
+      "timeout + file mutation must be artifact_mutated, NOT command_timeout");
+  } finally {
+    await cleanupDir(repo);
+  }
+});
+
+/**
+ * CTO RED #2 variant: launch-error command modifies tracked file -> artifact_mutated.
+ */
+test("3B-C5: launch-error command modifies tracked file -> artifact_mutated (CTO RED #2)", async () => {
+  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-c5-");
+  let fakeCalled = false;
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = makeDeliveryRef(wtPath, baseCommit, {
+      verificationCommands: ["fake-command"],
+    });
+
+    // Simulate: command mutates the file then fails to launch (launchError).
+    // The real mutation happens via the fakeRunCommand side-effect.
+    const { writeFile: wf } = await import("node:fs/promises");
+    const fakeRunCommand = async () => {
+      fakeCalled = true;
+      await wf(join(wtPath, "src", "a.js"), "corrupted\n");
+      return { exitCode: null, signal: null, timedOut: false, durationMs: 0, stdoutBytes: 0, stderrBytes: 0, launchError: true };
+    };
+
+    const result = await verifyDelivery(ref, { runCommand: fakeRunCommand });
+    assert.ok(fakeCalled, "fake command must have been called");
+    assert.equal(result.outcome, "failed");
+    assert.equal(result.failureCode, "artifact_mutated",
+      "launch-error + file mutation must be artifact_mutated, NOT execution_error");
+  } finally {
+    await cleanupDir(repo);
+  }
+});
+
+/**
+ * CTO RED #2 variant: launch-error command on a clean worktree -> execution_error,
+ * NOT artifact_mismatch (proves the post-proof is actually running, not just always-passing).
+ */
+test("3B-C6: launch-error command on clean worktree -> execution_error (proves post-proof runs)", async () => {
+  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-c6-");
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = makeDeliveryRef(wtPath, baseCommit, { verificationCommands: ["fake-command"] });
+
+    const fakeRunCommand = async () => {
+      return { exitCode: null, signal: null, timedOut: false, durationMs: 0, stdoutBytes: 0, stderrBytes: 0, launchError: true };
+    };
+
+    const result = await verifyDelivery(ref, { runCommand: fakeRunCommand });
+    assert.equal(result.outcome, "failed");
+    assert.equal(result.failureCode, "execution_error",
+      "launch-error on clean worktree must be execution_error");
+  } finally {
+    await cleanupDir(repo);
+  }
+});
+
+/**
+ * CTO RED #1 variant: unavailable with valid (unmutated) worktree still returns unavailable
+ * and still calls zero commands. Proves the unavailable path works correctly when proof passes.
+ */
+test("3B-C7: valid unavailable -> unavailable outcome, zero commands, proof passed", async () => {
+  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-c7-");
+  let commandCount = 0;
+  const fakeRunCommand = async () => { commandCount++; return { exitCode: 0, stdoutBytes: 0, stderrBytes: 0, durationMs: 0, timedOut: false, signal: null }; };
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = makeDeliveryRef(wtPath, baseCommit, {
+      verificationCommands: [],
+      verificationUnavailableReason: "no test suite",
+    });
+
+    const result = await verifyDelivery(ref, { runCommand: fakeRunCommand });
+    assert.equal(result.outcome, "unavailable");
+    assert.equal(commandCount, 0, "valid unavailable must execute zero commands");
+  } finally {
+    await cleanupDir(repo);
+  }
+});

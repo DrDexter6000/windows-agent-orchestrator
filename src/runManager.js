@@ -484,6 +484,7 @@ export class RunManager {
       scorecardRules: resumeScorecardRules,
       deliveryContext,
       packageDeliveryFn: this.packageDeliveryFn,
+      verifyDeliveryFn: this.verifyDeliveryFn,
     });
     this.activeRuns.set(runId, run);
     this._ensureSigintHandler();
@@ -672,7 +673,12 @@ export class Run {
     this._packageDeliveryFn = packageDeliveryFn;
     this._verifyDeliveryFn = verifyDeliveryFn;
     this._deliveryPackaged = false; // guard: package at most once
-    this._deliveryVerified = false; // guard: verify at most once
+    // TD-103 Phase 3B closeout: transcript-atomic verification guards.
+    // _pendingVerificationResult caches the verifier output (run at most once);
+    // _verificationRecorded is set ONLY after the outcome event is on disk.
+    this._pendingVerificationResult = null;
+    this._verificationRecorded = false;
+    this._recordedVerificationResult = null;
   }
 
   /**
@@ -1044,38 +1050,65 @@ export class Run {
    * @returns {Promise<{delivery: object, outcome: string}>}
    */
   async _verifyDeliveryResult(deliveryRef) {
-    if (this._deliveryVerified) {
-      // Already verified — return last known result (idempotent)
-      return this._lastVerificationResult ?? { delivery: deliveryRef, outcome: "passed" };
+    // TD-103 Phase 3B closeout (CTO RED #4): transcript-atomic verification.
+    //
+    // Invariants:
+    //   1. The verifier runs at most once. Its result is cached as
+    //      _pendingVerificationResult (never claimed as final until on disk).
+    //   2. The outcome event must be on disk before we report the result as
+    //      final. If append fails, the error propagates — no fake pass.
+    //   3. On retry after an append failure, the cached verifier result is
+    //      re-attempted to disk (verifier NOT re-run).
+    //   4. Once the outcome event is recorded, _verificationRecorded guards
+    //      idempotency — subsequent calls return the recorded result without
+    //      re-running anything.
+    //   5. Verifier throws are mapped to execution_error BEFORE the append;
+    //      if the append for execution_error also fails, that error propagates.
+
+    // Already recorded on disk — idempotent return.
+    if (this._verificationRecorded) {
+      return this._recordedVerificationResult;
     }
-    this._deliveryVerified = true;
-    try {
-      const result = await this._verifyDeliveryFn(deliveryRef);
-      const eventType = result.outcome === "passed"
-        ? "run.delivery_verification_passed"
-        : result.outcome === "failed"
-          ? "run.delivery_verification_failed"
-          : "run.delivery_verification_unavailable";
-      // Append the complete updated DeliveryRef under delivery
-      await this.transcript.append(eventType, { delivery: result.delivery });
-      this._lastVerificationResult = result;
-      return result;
-    } catch (err) {
-      // Verifier threw — map to safe execution_error failed ref
-      const safeRef = {
-        ...deliveryRef,
-        verification: {
-          ...deliveryRef.verification,
-          status: "failed",
-          failureCode: "execution_error",
-          verifiedCommit: deliveryRef.deliveryCommit,
-          results: [],
-        },
-      };
-      await this.transcript.append("run.delivery_verification_failed", { delivery: safeRef });
-      this._lastVerificationResult = { delivery: safeRef, outcome: "failed", failureCode: "execution_error" };
-      return this._lastVerificationResult;
+
+    // Run verifier at most once; cache result for append retry.
+    if (!this._pendingVerificationResult) {
+      let result;
+      try {
+        result = await this._verifyDeliveryFn(deliveryRef);
+      } catch (err) {
+        // Verifier threw — map to execution_error failed ref.
+        // This result is what we attempt to persist; the throw itself is absorbed.
+        const safeRef = {
+          ...deliveryRef,
+          verification: {
+            ...deliveryRef.verification,
+            status: "failed",
+            failureCode: "execution_error",
+            verifiedCommit: deliveryRef.deliveryCommit,
+            results: [],
+          },
+        };
+        result = { delivery: safeRef, outcome: "failed", failureCode: "execution_error" };
+      }
+      this._pendingVerificationResult = result;
     }
+
+    const result = this._pendingVerificationResult;
+    const eventType = result.outcome === "passed"
+      ? "run.delivery_verification_passed"
+      : result.outcome === "failed"
+        ? "run.delivery_verification_failed"
+        : "run.delivery_verification_unavailable";
+
+    // Append outcome event. If this fails, propagate — do NOT claim success.
+    // The caller (waitForCompletion) sees the error; retry will re-attempt
+    // the same already-computed result to disk.
+    await this.transcript.append(eventType, { delivery: result.delivery });
+
+    // Successfully recorded — now it is safe to mark as final.
+    this._verificationRecorded = true;
+    this._recordedVerificationResult = result;
+    return result;
   }
 
   /** 终态时清理 worktree（ephemeral 策略）。幂等，失败不阻塞。 */

@@ -560,6 +560,53 @@ backend done:completed
 
 `packageDeliveryFn` 构造函数参数（默认 `packageDelivery`）仅供测试/组合注入，非通用 service container。
 
+### 4.8 Delivery Verification 集成 `[Phase 3B]`
+
+> **实现状态**：TD-103 Phase 3B complete。exact-artifact deterministic verification 已接入 RunManager。
+> Phase 3C（CLI flag 暴露、Lead acceptance、coder-first template、真实 dogfood）待做。
+
+**两个独立维度**：
+
+Run terminal state（`completed`/`failed`/`timed_out`/`aborted`）和 delivery verification status（`passed`/`failed`/`unavailable`）是**两个正交维度**，不互相覆盖：
+
+- `run.completed` = worker lifecycle done（backend exited cleanly）。
+- verification `failed` = verification commands failed or artifact mutated。
+- verification 可以在 `run.completed` 之后 fail，**不改变** run terminal state。
+
+**生命周期时序**（`waitForCompletion` 成功路径内，packaging 之后）：
+
+```text
+packageDelivery success → transitionState(completed)
+  → run.delivery_created + run.completed (factEvents, atomic batch)
+  → run.state_change completed
+  → _runCleanup() (session abort; persistent worktree 不删)
+  → _verifyDeliveryResult(deliveryRef)
+     → verifyDelivery(deliveryRef)    // exact-artifact proof + commands
+     → transcript.append(verification_passed|failed|unavailable)
+  → return {completed:true, delivery:verifiedRef, verificationFailed?, verificationUnavailable?}
+```
+
+**Verification 的 proof 纪律**（`src/deliveryVerification.js`）：
+
+1. **所有结果前先 proof**：passed/failed/unavailable 任何结果产生前，都必须先调 `assertCommittedDeliveryRef(deliveryRef)`。unavailable 路径（零 command）也不例外——脏/伪造的 worktree 必须被 `artifact_mismatch` 挡住。
+2. **每命令后 re-proof**：每个 attempted command 结束后（exit 0、非零、timeout、launch error），都先重新执行完整 proof，再分类命令结果。
+3. **artifact_mutated 优先**：若命令同时失败并造成 artifact mutation，`artifact_mutated` 优先于 `command_failed`/`command_timeout`/`execution_error`。
+4. **不 reset/clean**：verification 不修改被命令改动的 worktree 状态（proof 是只读的）。
+
+**Transcript 原子可信语义**（`Run._verifyDeliveryResult`）：
+
+- verifier 最多执行一次；结果缓存为 `_pendingVerificationResult`（在落盘前不视为 final）。
+- outcome event 必须成功落盘后才能返回结果为 final。append 失败 → 异常原样传播，不伪造 pass。
+- append 失败后重试：不重跑 verifier，只重试落盘同一已计算结果。
+- 一旦 outcome event 落盘成功（`_verificationRecorded=true`），后续调用幂等返回已记录结果。
+- verifier throw 映射为 `execution_error`，独立于 transcript append 的成功/失败。
+
+**身份 SSOT**（`src/delivery.js`）：
+
+`assertDeliveryIdentity(cwd, deliveryCode)` 是 author + committer 身份检查的单一 SSOT，由 `verifyPostCommitIntegrity`（packaging，`commit_integrity`）和 `assertCommittedDeliveryRef`（verification proof，`artifact_mismatch`）共用。
+
+`verifyDeliveryFn` 构造函数参数（默认 `verifyDelivery`）仅供测试/组合注入。HTTP resume 创建 Run 时同样传入（自 closeout 起，不再遗漏）。
+
 ---
 
 ## 5. L3：编排层 `[M]`
