@@ -445,7 +445,33 @@ MCP host 的 stdio 配置指向同一个入口：
 }
 ```
 
-字段语义与 CLI `registry list --format json` 的数组元素一致（MCP 仅多一层 `agents` 包装）。`registry_list` 是只读操作，调用前后 runDir 不会有新增 transcript/run 文件。完整 Lead 闭环（dispatch / delivery / acceptance 等 state-changing tool）尚未在 MCP 上实现。
+字段语义与 CLI `registry list --format json` 的数组元素一致（MCP 仅多一层 `agents` 包装）。`registry_list` 是只读操作，调用前后 runDir 不会有新增 transcript/run 文件。
+
+### MCP `run_dispatch`（supervised background dispatch，M9-2B）
+
+`run_dispatch` 让 MCP host 正式派发一个受监督的后台任务。它直接复用与 CLI `run --background` 相同的 application service（`dispatchRun()`），不 shell-out CLI。WAO 拥有 dispatch、detached runner 和 transcript；模型只提供 worker 和 bounded prompt。
+
+`run_dispatch` tool：
+
+- **输入**（strict schema，拒绝额外字段）：
+
+```json
+{ "agentId": "coder_low", "prompt": "bounded task prompt" }
+```
+
+模型**不能**传 `registryPath`、`runDir`、`runId`、`cwd`、`requireCertified`、timeout、isolation 或 delivery 参数——这些是 server-owned 配置。MCP 固定以 `requireCertified: true` 调 shared service（认证门由控制面决定，不由模型决定）。
+
+- **输出**（成功或拒绝同形，MCP `content` + `structuredContent`）：
+
+```json
+{ "runId": "run_...", "accepted": true, "state": "pending" }
+```
+
+只返回 `runId`/`accepted`/`state`，不返回绝对路径、PID、prompt、argv 或内部错误。service 失败时返回固定安全文案 `run_dispatch failed`，不拼接原始 exception message、stderr、路径或凭据。
+
+返回时 transcript 已可读且为 `pending`；关闭 MCP host 后，detached runner 独立驱动 worker 到终态（token 闸门/超时/兜底 abort 都生效），写入共享 transcript。Lead 后续用 `status`/`runs` CLI 监督（MCP supervise/status 尚未实现，属 M9-3）。
+
+annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:false, openWorldHint:true`（真实派发操作）。
 
 ---
 

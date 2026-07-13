@@ -27,6 +27,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import { getRegistryInventory } from "../application/registryInventory.js";
+import { dispatchRun } from "../application/runDispatch.js";
 
 // Stable server identity advertised at initialize.
 const SERVER_NAME = "wao-mcp";
@@ -71,21 +72,59 @@ const REGISTRY_LIST_DESCRIPTION =
   "certification status. Read-only. Accepts no file-path arguments; the registry " +
   "and run directory are fixed at server startup.";
 
+// Fixed safe text returned when run dispatch fails. Never concatenate dynamic
+// content (err.message, path, argv, env) — the model learns only that dispatch
+// failed, never operational detail.
+const DISPATCH_ERROR_TEXT = "run_dispatch failed";
+
+// run_dispatch input: only agentId + prompt. Strict — rejects registryPath,
+// runDir, runId, cwd, requireCertified, timeouts, isolation, delivery, etc.
+// Those are server-owned config; a model must not override them per call.
+const RUN_DISPATCH_INPUT = z.object({
+  agentId: z.string().min(1),
+  prompt: z.string().min(1),
+}).strict();
+
+// run_dispatch output: only runId + accepted + state. No paths, PID, prompt, argv.
+const RUN_DISPATCH_OUTPUT = z.object({
+  runId: z.string(),
+  accepted: z.boolean(),
+  state: z.string(),
+});
+
+// Dispatch is a real side-effecting operation (spawns a supervised worker),
+// so it is not read-only, not idempotent, and touches the open world.
+const RUN_DISPATCH_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: true,
+};
+
+const RUN_DISPATCH_DESCRIPTION =
+  "Dispatch a supervised background run to a worker agent. The worker receives " +
+  "a bounded task prompt; WAO owns dispatch, the detached runner, and the transcript. " +
+  "Returns a runId the Lead can supervise later. Only agentId and prompt are accepted; " +
+  "registry, run directory, and certification are fixed by the server.";
+
 /**
- * Create a WAO MCP server with a single read-only tool: registry_list.
+ * Create a WAO MCP server with read-only registry_list and run_dispatch tools.
  *
  * @param {object} input
  * @param {string} input.registryPath — path to agents.json (startup config)
- * @param {string} input.runDir — path to runs/ dir (for reliability-summary.json)
+ * @param {string} input.runDir — path to runs/ dir (for reliability-summary.json + transcripts)
  * @param {Function} [input.getRegistryInventoryFn] — injectable for testing
+ * @param {Function} [input.dispatchRunFn] — injectable dispatcher for testing
  * @returns {import("@modelcontextprotocol/sdk/server/mcp.js").McpServer}
  */
 export function createWaoMcpServer({
   registryPath,
   runDir,
   getRegistryInventoryFn,
+  dispatchRunFn,
 }) {
   const service = getRegistryInventoryFn ?? getRegistryInventory;
+  const dispatcher = dispatchRunFn ?? dispatchRun;
 
   const mcp = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -113,6 +152,46 @@ export function createWaoMcpServer({
         };
       }
       const payload = { agents };
+      return {
+        content: [{ type: "text", text: JSON.stringify(payload) }],
+        structuredContent: payload,
+      };
+    },
+  );
+
+  mcp.registerTool(
+    "run_dispatch",
+    {
+      description: RUN_DISPATCH_DESCRIPTION,
+      inputSchema: RUN_DISPATCH_INPUT,
+      outputSchema: RUN_DISPATCH_OUTPUT,
+      annotations: RUN_DISPATCH_ANNOTATIONS,
+    },
+    async ({ agentId, prompt }) => {
+      let result;
+      try {
+        result = await dispatcher({
+          agentId,
+          prompt,
+          registryPath,
+          runDir,
+          // MCP always requires certification — the control plane decides this,
+          // never the model. Background path now propagates it (M9-2A).
+          requireCertified: true,
+        });
+      } catch {
+        // Redaction: fixed safe text. Never surface err.message/path/argv/env.
+        return {
+          isError: true,
+          content: [{ type: "text", text: DISPATCH_ERROR_TEXT }],
+        };
+      }
+      // Only runId/accepted/state — strip transcriptPath and any internal detail.
+      const payload = {
+        runId: result.runId,
+        accepted: result.accepted,
+        state: result.state,
+      };
       return {
         content: [{ type: "text", text: JSON.stringify(payload) }],
         structuredContent: payload,
