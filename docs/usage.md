@@ -403,6 +403,50 @@ LLM 编排器（未来的 M5 DAG 或外部脚本）只需要：
 3. `collect <runId>` 或读 transcript 拿产出
 4. `runs metrics <runId>` 拿成本
 
+### MCP stdio 接口（agent-facing primary，M9-1）
+
+WAO 也是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude Desktop、其它 agent runtime）可通过 stdio 把 WAO 当作 MCP server 调用。M9-1 只暴露**只读** `registry_list` tool，让 agent 查询当前 registry inventory。该 tool 直接复用与 CLI `registry list` 相同的 application service（`getRegistryInventory()`），不 shell-out CLI、不写 transcript、不产生 run。
+
+启动 stdio server（所有生产入口走 Node v22 shim）：
+
+```bash
+# 默认 registry (config/agents.json) 和 runDir (runs/)
+npm run mcp
+
+# 显式指定（路径由 server 启动配置决定，tool 调用不能覆盖）
+npm run mcp -- --registry config/agents.json --run-dir runs
+```
+
+MCP host 的 stdio 配置指向同一个入口：
+
+```json
+{
+  "mcpServers": {
+    "wao": {
+      "command": "node",
+      "args": ["scripts/wao-node.cjs", "src/mcp/stdio.js",
+               "--registry", "config/agents.json", "--run-dir", "runs"]
+    }
+  }
+}
+```
+
+`registry_list` tool：
+
+- **输入**：无参数。`registryPath`/`runDir` 是 server 启动配置，模型每次调用不能覆盖（由 server 持有）。
+- **输出**：MCP `content`（text = JSON）+ `structuredContent`（同义对象），形状为：
+
+```json
+{
+  "agents": [
+    { "id": "coder_low", "backend": "claude-code", "model": "glm-5-turbo",
+      "certification": "certified", "cwd": "/repo" }
+  ]
+}
+```
+
+字段语义与 CLI `registry list --format json` 的数组元素一致（MCP 仅多一层 `agents` 包装）。`registry_list` 是只读操作，调用前后 runDir 不会有新增 transcript/run 文件。完整 Lead 闭环（dispatch / delivery / acceptance 等 state-changing tool）尚未在 MCP 上实现。
+
 ---
 
 ## 五、常见问题

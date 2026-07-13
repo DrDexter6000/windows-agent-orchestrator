@@ -47,9 +47,10 @@ CLI Adapter ─┘                 ↓
 ```
 
 - MCP Adapter 和 CLI Adapter 只做 transport/input/output adaptation。
-- Application Services 层是 M9 planned target——当前部分 use-case orchestration 仍在 `src/commands/*.js` 中，尚未提取为共享 services。RunManager/transcript/delivery/workflow/registry 是 core/domain capabilities，不是完整的 application-service 层。M9 首步必须盘点 CLI use cases 并提取最小共享 services。
-- 业务规则只写一次，在 application services 层。**禁止 MCP Server 通过 shell 调 CLI 并解析文本输出。**
-- RunManager / transcript / delivery / Backend / workflow 不依赖 MCP——MCP 是 L4 adapter，不是 L1-L3 dependency。
+- Application Services 层是 M9 planned target。**M9-0 已提取第一个共享 service**（`src/application/registryInventory.js`），**M9-1 已落地第一个 MCP adapter 垂直切片**（`src/mcp/server.js` 的 `registry_list` tool 直接调用 `getRegistryInventory()`，不 shell-out CLI）。其余 use-case orchestration 仍在 `src/commands/*.js` 中，尚未提取为共享 services。RunManager/transcript/delivery/workflow/registry 是 core/domain capabilities，不是完整的 application-service 层。
+- 业务规则只写一次，在 application services 层。**禁止 MCP Server 通过 shell 调 CLI 并解析文本输出。** M9-1 的 MCP adapter 直接 import 并调用 application service。
+- RunManager / transcript / delivery / Backend / workflow 不依赖 MCP——MCP 是 L4 adapter，不是 L1-L3 dependency。M9-1 的依赖方向：`src/mcp/server.js` → `src/application/registryInventory.js` → `src/registry.js`；`src/mcp/**` 是唯一允许 import `@modelcontextprotocol/sdk` 与 `zod` 的位置（由 `M9-1-10` 边界测试守卫）。
+- M9-1 只暴露只读 `registry_list`：不写 transcript、不修改 registry、不产生 run、不暴露 dispatch/acceptance 等 state-changing tool。完整 Lead 闭环（inventory → dispatch → supervise → collect/diagnose → delivery query → acceptance）尚未在 MCP 上实现。
 - Backend 仍只负责 worker runtime。
 - Skill 是 Lead 指导层（`SKILL.md`），不在运行时依赖图中保存状态。
 - Transcript 继续是 run truth SSOT。等价的 state-changing operation（无论来自 MCP 还是 CLI）必须调用同一 service，产生相同 transcript durable facts 和 outcome；read-only query 不制造 transcript 事件，返回语义等价的结构化结果。
@@ -883,6 +884,11 @@ src/
 ├── diagnosis.js              # 横切：故障诊断（M8-3+C，给证据不给处方；类别 provider_auth/config_conflict/timeout/scorecard_fail/budget/crash/aborted_manual/unknown）
 ├── costForecast.js           # 横切：成本预演（M8-4，历史中位数±区间）
 ├── smoke.js                  # L4：真实 CLI smoke 入口（npm run smoke）
+├── mcp/                      # L4：MCP adapter（M9-1，agent-facing primary）
+│   ├── server.js             #   MCP server factory + registry_list tool（直接调用 application service）
+│   └── stdio.js              #   stdio production entrypoint（StdioServerTransport，npm run mcp）
+├── application/              # L3：shared application services（M9 use-case 层）
+│   └── registryInventory.js  #   registry inventory SSOT（M9-0，CLI + MCP 共用）
 ├── backends/
 │   ├── opencodeServe.js      # L1：HTTP 类 backend
 │   ├── processBackend.js     # L1：进程式 backend 基类

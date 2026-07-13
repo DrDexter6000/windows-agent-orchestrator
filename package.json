@@ -15,11 +15,16 @@
     "test:report": "node --test --test-reporter ./test/reporter.mjs & node tools/generate-report.mjs",
     "report": "node tools/generate-report.mjs",
     "cli": "node scripts/wao-node.cjs src/cli.js",
+    "mcp": "node scripts/wao-node.cjs src/mcp/stdio.js",
     "smoke": "node scripts/wao-node.cjs src/smoke.js",
     "reliability": "node scripts/wao-node.cjs scripts/run-reliability.mjs",
     "long-run": "node scripts/wao-node.cjs scripts/long-run-probe.mjs"
   },
   "engines": {
     "node": ">=22 <25"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "3.25.76"
   }
 }
