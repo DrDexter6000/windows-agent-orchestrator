@@ -15,6 +15,8 @@ import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { isSecretEnvName } from "../secretRedaction.js";
 // TD-98 阶段 2a：parseOptions/displayModel 从 cli.js 抽到 ./shared.js，消除 ESM 循环 import。
 import { parseOptions, displayModel } from "./shared.js";
+// M9-0: registry list data logic delegated to shared application service.
+import { getRegistryInventory } from "../application/registryInventory.js";
 
 async function registryCommand(args, config) {
   const [sub, ...tail] = args;
@@ -27,28 +29,14 @@ async function registryCommand(args, config) {
     return;
   }
   const options = parseOptions(args);
-  const registry = await readRegistry(resolve(options.registry ?? config.registry));
-  // N1 修复：合并认证状态列。读 runDir/reliability-summary.json.workers[id].status，
-  // 让 lead 一眼看清 worker 列表 + 认证状态（原要跑两命令脑内 join）。summary 缺则显示 -。
-  const runDir = resolve(options.runDir ?? config.runDir);
-  let certMap = {};
-  try {
-    const summary = JSON.parse(await readFile(join(runDir, "reliability-summary.json"), "utf8"));
-    for (const [id, w] of Object.entries(summary?.workers ?? {})) {
-      certMap[id] = w.status ?? "-";
-    }
-  } catch {
-    // 无 summary 或解析失败 = 未认证，全显示 -
-  }
-  // F5: model 列，让 lead 选型时有模型信息。
+  // M9-0: data logic (registry read + summary join + model label) lives in
+  // the shared application service. This command only handles I/O: option
+  // parsing, path resolution, and text/JSON output formatting.
+  const agents = await getRegistryInventory({
+    registryPath: resolve(options.registry ?? config.registry),
+    runDir: resolve(options.runDir ?? config.runDir),
+  });
   // F17: --format json 输出机器可读 JSON（dogfood round 4 实证：原接受参数但静默忽略）。
-  const agents = registry.listAgents().map((agent) => ({
-    id: agent.id,
-    backend: agent.backend,
-    model: displayModel(agent),
-    certification: certMap[agent.id] ?? null,
-    cwd: agent.cwd,
-  }));
   if (options.format === "json") {
     console.log(JSON.stringify(agents, null, 2));
     return;
