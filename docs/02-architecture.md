@@ -20,7 +20,10 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ L4 接口层    CLI client · (可选)本地 HTTP API · 事件订阅       │
+│ L4 接口层    MCP Server (agent-facing primary)                │
+│              CLI client (human/ops/debug/fallback)            │
+│              事件/资源订阅                                     │
+│              shared application services                       │
 ├──────────────────────────────────────────────────────────────┤
 │ L3 编排层    DAG 引擎 · 可插拔节点 · 结构化 handoff            │
 ├──────────────────────────────────────────────────────────────┤
@@ -30,6 +33,25 @@
 └──────────────────────────────────────────────────────────────┘
      横切：scorecard（门控审计）· metrics（可观测）
 ```
+
+**L4 依赖方向**（decision 0017）：
+
+```
+MCP Server ─┐
+            ├→ Application Services
+CLI Client ─┘        ↓
+              RunManager / Transcript /
+              Delivery / Workflow / Registry
+                        ↓
+                     Backends
+```
+
+- MCP Server 和 CLI Client 只做 transport/input/output adaptation。
+- 业务规则只写一次，在 application services 层。**禁止 MCP Server 通过 shell 调 CLI 并解析文本输出。**
+- RunManager / transcript / delivery / Backend / workflow 不依赖 MCP——MCP 是 L4 adapter，不是 L1-L3 dependency。
+- Backend 仍只负责 worker runtime。
+- Skill 是 Lead 指导层（`SKILL.md`），不在运行时依赖图中保存状态。
+- Transcript 继续是 run truth SSOT，无论操作来自 MCP 还是 CLI。
 
 **依赖方向**：上层依赖下层，下层不知道上层。横切层只读 transcript + 发事件，不参与调度决策。
 

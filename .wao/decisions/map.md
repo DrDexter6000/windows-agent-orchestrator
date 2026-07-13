@@ -18,3 +18,4 @@
 0014 | FL7b coder_hq provider instability fallback
 0015 | Worker credential boundary: minimize now, broker before unsupervised release
 0016 | Supervised Phase 3C may resume; broker remains an unsupervised release boundary
+0017 | MCP-first control surface: MCP Server is agent-facing primary, CLI is fallback, shared application services
