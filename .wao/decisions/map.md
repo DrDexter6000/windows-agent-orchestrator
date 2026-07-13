@@ -16,3 +16,4 @@
 0012 | daemon IPC 选型：命名管道（`node:net` over `\\.\pipe\wao-daemon`，T0b spike 后 owner 拍板）
 0013 | 进程隔离 Job Object：复用 Node 内置（v22）vs 自定义实现（行业调研+零依赖约束后 owner 拍板）
 0014 | FL7b coder_hq provider instability fallback
+0015 | Worker credential boundary: minimize now, broker before unsupervised release

@@ -168,6 +168,14 @@ interface StreamParser {
 若格式不稳定或不结构化，parser 要做容错（提取不到 tool_use 就只产 message 事件，
 不让整个 run 失败——降级而非崩溃）。
 
+`EventQueue` must drain events that arrived while the consumer was paused before honoring `closed`. A fast child may emit `message` + `done` and exit while RunManager is awaiting transcript I/O; `done` cannot be skipped merely because the queue is already closed.
+
+**Worker environment and output boundary (TD-104)**:
+- Process workers do not inherit `process.env` wholesale. The backend copies a fixed OS/runtime allowlist, the credential channel assigned to that backend, non-secret `agent.env`, and WAO control variables.
+- Secret-like names are forbidden in `agent.env`; registry configuration names an inherited credential channel instead of storing credential values.
+- Values from explicitly assigned credential channels are redacted regardless of channel name. Values of at least eight characters from credential-like environment names (including proxy URLs) are also exact-match redacted before parsed events enter RunManager memory, before JSONL persistence, and in raw-capture/stdout/stderr diagnostic sinks. Raw capture uses a UTF-8 streaming redactor, so a value split across chunks or code-point bytes is still removed.
+- This is exposure minimization, not a strong secret boundary. A worker under the same OS identity can still inspect its assigned runtime credential or credential files. Strong isolation requires the broker/identity boundary recorded in decision 0015 and TD-104.
+
 ### 2.6 现有 OpenCodeServeBackend 的迁移 `[S]`
 
 **现状**：`spawn` 返回 `{ backend, backendSessionId, messageId, admittedSeq }`，
@@ -227,6 +235,7 @@ interface TranscriptEvent {
 - `run.state_change` 让状态机**显式化**（替代当前靠"最后事件 type"推断）。
 - `run.event` 透传 RunEvent 流，让 transcript 成为**完整的事实来源**——
   恢复、scorecard、metrics 全部从这些事件重建，不依赖内存。
+- Transcript envelope fields (`ts`, `seq`, `runId`, `agentId`, `type`) are authoritative and cannot be overridden by payload fields. Payloads, transition batches, and transition reasons pass through the same secret redactor before append.
 
 ### 3.3 Transcript API（现状基本不变）
 
@@ -421,7 +430,7 @@ interface SchedulerOpts { maxConcurrent: number; }
 
 > **实现状态**：TD-103 Phase 2 core complete（inspection + packaging deep module）。
 > Phase 3A（RunManager 集成、transcript 事件）complete，Phase 3B（exact-artifact verification）complete。
-> Phase 3C（CLI flag 暴露、acceptance、coder-first template、dogfood）待做。
+> 项目当前进度只见 `docs/roadmap.md`；Phase 3C 的不可变准入条件见 decision 0015。
 
 控制平面（而非 worker）负责把 isolated worktree 里的 worker 产出打包成 atomic delivery commit。
 worker 只准备变更，不创建 commit。
@@ -512,7 +521,6 @@ worker 进程完成 ≠ code delivery 完成。
 
 > **实现状态**：TD-103 Phase 3A complete。Run delivery mode 已接入 RunManager 生命周期。
 > Phase 3B（exact-artifact verification）complete——见 §4.8。
-> Phase 3C（CLI flag 暴露、coder-first template、dogfood）待做。
 
 **RunManager.start() option**：
 
@@ -552,9 +560,11 @@ backend done:completed
 - Race（external terminal 在 packaging 期间先赢）：`run.delivery_created`/`run.delivery_failed` 作为 `attemptEvents` 在 transitionState 仲裁批次中同批写入（自 `87bf1e3` 起），返回 loser result 含 `delivery`/`deliveryError`。不回滚已创建的 DeliveryRef（它是 isolated recoverable artifact）。
 
 **`waitForCompletion` result contract**：
-- 成功：`{completed:true, messages, evidence, timedOut:false, metrics, delivery}` — `delivery` 是完整 DeliveryRef。
-- 打包失败：`{completed:false, failed:true, messages, evidence, timedOut:false, metrics, deliveryError:{code, message}}` — 结构化非抛出。
-- backend 失败/超时/budget/abort/hard scorecard fail：不调 packager，保持现有行为。
+- Every non-throw terminal result carries consistent booleans: `completed`, `failed`, `aborted`, and `timedOut`; exactly one matches the terminal state.
+- 成功：`{completed:true, failed:false, aborted:false, timedOut:false, messages, evidence, metrics, delivery}` — `delivery` 是完整 DeliveryRef。
+- 打包失败：`{completed:false, failed:true, aborted:false, timedOut:false, messages, evidence, metrics, deliveryError:{code, message}}` — 结构化非抛出。
+- timeout/budget/abort/hard scorecard fail return the same structured terminal shape and do not call the packager. An accepted backend failure remains the exception path and throws after persisting `run.error` + terminal `failed`.
+- The RunManager wait timer owns timeout causality: if its abort causes a process to exit non-zero and emit `done(failed)`, the terminal/result remains `timed_out`, not `backend_error`.
 
 **事件排序**：
 - 成功：`scorecard.checked`（如有）→ `run.delivery_created` → `run.completed` → `run.state_change completed`（seq 连续）。
@@ -565,7 +575,6 @@ backend done:completed
 ### 4.8 Delivery Verification 集成 `[Phase 3B]`
 
 > **实现状态**：TD-103 Phase 3B complete。exact-artifact deterministic verification 已接入 RunManager。
-> Phase 3C（CLI flag 暴露、Lead acceptance、coder-first template、真实 dogfood）待做。
 
 **两个独立维度**：
 
