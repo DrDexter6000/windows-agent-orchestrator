@@ -4,7 +4,7 @@
 //
 // 依赖：
 //   - 外部模块：../registry.js（readRegistry/normalizeAgent）、../backends/opencodeServe.js
-//   - 共享工具：./shared.js（parseOptions/displayModel，纯函数）
+//   - 共享工具：./shared.js（parseOptions，纯函数）
 //   - node built-in：fs/promises（readFile）、path（join/resolve）
 
 import { readFile } from "node:fs/promises";
@@ -13,8 +13,8 @@ import { join, resolve } from "node:path";
 import { readRegistry, normalizeAgent } from "../registry.js";
 import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { isSecretEnvName } from "../secretRedaction.js";
-// TD-98 阶段 2a：parseOptions/displayModel 从 cli.js 抽到 ./shared.js，消除 ESM 循环 import。
-import { parseOptions, displayModel } from "./shared.js";
+// TD-98 阶段 2a：parseOptions 从 cli.js 抽到 ./shared.js，消除 ESM 循环 import。
+import { parseOptions } from "./shared.js";
 // M9-0: registry list data logic delegated to shared application service.
 import { getRegistryInventory } from "../application/registryInventory.js";
 

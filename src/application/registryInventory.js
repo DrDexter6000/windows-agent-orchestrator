@@ -6,28 +6,51 @@
 // reading agents.json, joining reliability-summary.json certification
 // status, and resolving model display labels.
 //
-// Constraints (enforced by design, not discipline):
-// - No console.log, no process.exit, no argv parsing.
-// - No import from command modules (src/commands/registry.js etc.).
-//   shared.js is allowed — it is a shared utility module, not a command.
-// - No MCP dependency.
-// - No shell commands, no file writes, no credential reads.
-// - Pure data transformation — returns structured arrays.
+// It also owns the displayModel SSOT — the model label resolution logic
+// lives here, and src/commands/shared.js re-exports it to preserve the
+// existing public contract.
+//
+// This service performs read-only file I/O (registry + reliability summary).
+// It does not import from src/commands/*, does not parse CLI args,
+// does not write to console, does not set process.exit, does not depend
+// on MCP, does not modify files, and does not read credentials.
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readRegistry } from "../registry.js";
-import { displayModel } from "../commands/shared.js";
+
+// ===== Private helpers (owned by this module) =====
+
+/**
+ * Extract a --flag <value> from an args array.
+ * @param {string[]} args
+ * @param {string} flag
+ * @returns {string|undefined}
+ */
+function extractFlag(args, flag) {
+  if (!Array.isArray(args)) return undefined;
+  const i = args.indexOf(flag);
+  return i >= 0 && i + 1 < args.length ? args[i + 1] : undefined;
+}
 
 /**
  * Resolve the model display label for an agent.
- * Delegates to the shared displayModel SSOT.
+ * This is the SSOT — shared.js re-exports it.
  * @param {object} agent — normalized agent from registry
  * @returns {string}
  */
-function resolveAgentModelLabel(agent) {
-  return displayModel(agent);
+export function displayModel(agent) {
+  if (typeof agent.model === "string") return agent.model;
+  return agent.model?.id
+    ?? agent.provider?.model
+    ?? extractFlag(agent.args, "--model")
+    ?? extractFlag(agent.args, "--default-model")
+    ?? extractFlag(agent.prependArgs, "--model")
+    ?? extractFlag(agent.prependArgs, "--default-model")
+    ?? (["claude-code", "codex", "kimi-code"].includes(agent.backend) ? "(default)" : "-");
 }
+
+// ===== Service implementation =====
 
 /**
  * Read reliability-summary.json and build a certification map.
@@ -75,7 +98,7 @@ export async function getRegistryInventory({
   return registry.listAgents().map((agent) => ({
     id: agent.id,
     backend: agent.backend,
-    model: resolveAgentModelLabel(agent),
+    model: displayModel(agent),
     certification: certMap[agent.id] ?? null,
     cwd: agent.cwd,
   }));

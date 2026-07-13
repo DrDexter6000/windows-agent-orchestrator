@@ -167,24 +167,79 @@ test("M9-0-06: agent in registry but not in summary → certification null", asy
   }
 });
 
-test("M9-0-07: dependency injection — custom readRegistry and readFile work", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-m90-07-"));
-  try {
-    const registryPath = makeRegistry(dir, {
-      coder_hq: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5.2"] },
-    });
+test("M9-0-07: fake dependency injection — no real filesystem touched", async () => {
+  let readRegistryCalled = false;
+  let readFileCalled = false;
 
-    // Use injected readRegistry
-    const { readRegistry } = await import("../src/registry.js");
-    const result = await getRegistryInventory({
-      registryPath,
-      runDir: null,
-      readRegistry,
+  // Fake readRegistry returns an in-memory registry — no file read
+  const fakeReadRegistry = async () => {
+    readRegistryCalled = true;
+    return {
+      listAgents() {
+        return [
+          { id: "coder_hq", backend: "claude-code", cwd: "/fake", args: ["--model", "glm-5.2"] },
+          { id: "researcher", backend: "claude-code", cwd: "/fake", args: ["--model", "opus"] },
+        ];
+      },
+      getAgent(id) { throw new Error(`not implemented for fake: ${id}`); },
+    };
+  };
+
+  // Fake readFile returns in-memory reliability summary — no file read
+  const fakeReadFile = async () => {
+    readFileCalled = true;
+    return JSON.stringify({
+      workers: {
+        coder_hq: { status: "certified" },
+      },
     });
-    assert.equal(result.length, 1);
-    assert.equal(result[0].id, "coder_hq");
-    assert.equal(result[0].certification, null);
-  } finally {
-    cleanupDir(dir);
+  };
+
+  const result = await getRegistryInventory({
+    registryPath: "/nonexistent/registry.json",
+    runDir: "/nonexistent/runs",
+    readRegistryFn: fakeReadRegistry,
+    readFileFn: fakeReadFile,
+  });
+
+  assert.ok(readRegistryCalled, "fake readRegistry was called (not real filesystem)");
+  assert.ok(readFileCalled, "fake readFile was called for summary");
+
+  assert.equal(result.length, 2);
+  const hq = result.find((a) => a.id === "coder_hq");
+  const res = result.find((a) => a.id === "researcher");
+  assert.equal(hq.certification, "certified", "certification merged from fake summary");
+  assert.equal(res.certification, null, "agent not in fake summary → null");
+  assert.equal(hq.model, "glm-5.2");
+});
+
+// ===== Boundary test: src/application must not import from src/commands =====
+
+test("M9-0-BOUNDARY: src/application must not import from src/commands", async () => {
+  const { readdir, readFile } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const appDir = join(process.cwd(), "src", "application");
+
+  let files;
+  try {
+    files = await readdir(appDir);
+  } catch {
+    // Directory doesn't exist yet — skip
+    return;
+  }
+
+  const jsFiles = files.filter((f) => f.endsWith(".js"));
+  assert.ok(jsFiles.length > 0, "src/application should have at least one .js file");
+
+  for (const file of jsFiles) {
+    const content = await readFile(join(appDir, file), "utf8");
+    // Check for any import path that references commands/
+    const importLines = content.split("\n").filter((l) => l.trim().startsWith("import"));
+    for (const line of importLines) {
+      assert.ok(
+        !line.includes("../commands/") && !line.includes("/commands/"),
+        `src/application/${file} must not import from commands/: ${line.trim()}`,
+      );
+    }
   }
 });

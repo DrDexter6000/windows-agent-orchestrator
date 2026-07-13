@@ -3,8 +3,7 @@
 // 从 cli.js 抽出的纯工具/低风险共享函数，让 commands/*.js 不再反向 import ../cli.js，
 // 消除 ESM 循环依赖。这些函数：
 //   - parseOptions：args → options 对象（纯函数，无 I/O）
-//   - extractFlag：从 args 数组取 --flag <value>（纯函数）
-//   - displayModel：agent → 模型展示字符串（纯函数，依赖 extractFlag）
+//   - displayModel：agent → 模型展示字符串（SSOT 在 application/registryInventory.js，此处 re-export）
 //   - loadPrompt：options → prompt 文本（读文件，I/O 仅 node:fs/promises）
 //
 // cli.js 现在从这里 import 并 re-export（保持 test/cli.test.js 的
@@ -21,24 +20,11 @@ import { CodexBackend } from "../backends/codex.js";
 import { KimiCodeBackend } from "../backends/kimiCode.js";
 import { getWaoCliPath } from "../waoCliPath.js";
 import { readTranscript, findLastEventSeq, JsonlTranscript } from "../transcript.js";
+// M9-0: displayModel SSOT lives in application/registryInventory.js;
+// this re-export preserves the existing shared.js/cli.js public contract.
+import { displayModel } from "../application/registryInventory.js";
 
-// F5: 从 args 数组里取 --flag <value> 的 value，取不到返回 undefined。
-export function extractFlag(args, flag) {
-  if (!Array.isArray(args)) return undefined;
-  const i = args.indexOf(flag);
-  return i >= 0 && i + 1 < args.length ? args[i + 1] : undefined;
-}
-
-export function displayModel(agent) {
-  if (typeof agent.model === "string") return agent.model;
-  return agent.model?.id
-    ?? agent.provider?.model
-    ?? extractFlag(agent.args, "--model")
-    ?? extractFlag(agent.args, "--default-model")
-    ?? extractFlag(agent.prependArgs, "--model")
-    ?? extractFlag(agent.prependArgs, "--default-model")
-    ?? (["claude-code", "codex", "kimi-code"].includes(agent.backend) ? "(default)" : "-");
-}
+export { displayModel };
 
 export function parseOptions(args) {
   const options = {};

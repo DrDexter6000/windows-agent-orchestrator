@@ -34,10 +34,11 @@ import { retryCommand, resumeCommand } from "./commands/lifecycle.js";
 // TD-98 阶段 2e-3：run/spawn 命令族（runCommand/spawnCommand/runAndWait + scorecard helper
 // + spawnBackgroundRunner）拆到 src/commands/run.js。waoAskCommand 仍留 cli.js，调 run.js 的 runCommand。
 import { spawnCommand, runCommand, runAndWait } from "./commands/run.js";
-// TD-98 阶段 2a/2b/2c/2e：parseOptions/loadPrompt/displayModel/extractFlag/resolveTargetCwd
+// TD-98 阶段 2a/2b/2c/2e：parseOptions/loadPrompt/displayModel/resolveTargetCwd
 // 抽到 commands/shared.js，消除 commands/*.js 对 cli.js 的反向依赖。
 // cli.js re-export 以保持 test/cli.test.js 的 `from "../src/cli.js"` 导入行不变。
-import { parseOptions, loadPrompt, displayModel, extractFlag, resolveTargetCwd } from "./commands/shared.js";
+// M9-0: extractFlag removed (dead import); displayModel SSOT is in application/registryInventory.js.
+import { parseOptions, loadPrompt, displayModel, resolveTargetCwd } from "./commands/shared.js";
 // Re-export：保持外部 import 路径（test/cli.test.js）不变。
 export { parseOptions, loadPrompt, displayModel, resolveTargetCwd };
 // buildDashboard / runsDashboardCommand 从 runs.js re-export（test/cli.test.js 依赖）。
