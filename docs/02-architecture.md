@@ -59,7 +59,7 @@ CLI Adapter ─┘                 ↓
 **Worker 输入不变量**：
 - Lead 的 `SKILL.md`、roadmap、跨 worker 上下文和编排职责**不得注入 worker**。
 - Worker 接收 bounded task prompt。
-- Worker 可以接收稳定 role contract 和必要安全/运行时约束。role contract 可通过 runtime 支持的 system-prompt 机制注入（如 claude-code 的 `--system-prompt`）；runtime 不支持时，由 task prompt 明确关键边界。
+- Worker 可以接收稳定 role contract 和必要安全/运行时约束。role contract 可通过 runtime 支持的 system-prompt 机制注入（如 claude-code 的 `--append-system-prompt-file`）；runtime 不支持时，由 task prompt 明确关键边界。
 - Transcript 与控制面仍由 WAO/Lead 所有。
 
 ---
