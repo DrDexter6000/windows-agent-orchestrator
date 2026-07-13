@@ -85,7 +85,7 @@ spec §4.3 的 cleanup 钩子是确定性的，即使没有 Job Object 也能保
 
 ## 进度跟踪
 
-> **TD-103 Coder Delivery current state (2026-07-12)**: Phase 3B complete; Phase 3C paused after dogfood exposed TD-104. Resume CLI acceptance/template/real dogfood only after decision 0015's broker or equivalent identity gate passes.
+> **TD-103 Coder Delivery current state (2026-07-13)**: Phase 3B complete. TD-104 containment is deployed and Owner credential rotation is complete. Under decision 0016, supervised Phase 3C may resume with one bounded process-backed coder; a broker remains required before unattended or multi-tenant release.
 
 | M | 状态 |
 |---|------|

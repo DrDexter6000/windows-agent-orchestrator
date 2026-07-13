@@ -430,7 +430,7 @@ interface SchedulerOpts { maxConcurrent: number; }
 
 > **实现状态**：TD-103 Phase 2 core complete（inspection + packaging deep module）。
 > Phase 3A（RunManager 集成、transcript 事件）complete，Phase 3B（exact-artifact verification）complete。
-> 项目当前进度只见 `docs/roadmap.md`；Phase 3C 的不可变准入条件见 decision 0015。
+> 项目当前进度只见 `docs/roadmap.md`；监督式 Phase 3C 的凭据边界见 decision 0016，强隔离发布边界仍见 decision 0015。
 
 控制平面（而非 worker）负责把 isolated worktree 里的 worker 产出打包成 atomic delivery commit。
 worker 只准备变更，不创建 commit。
