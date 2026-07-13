@@ -85,7 +85,7 @@ spec §4.3 的 cleanup 钩子是确定性的，即使没有 Job Object 也能保
 
 ## 进度跟踪
 
-> **TD-103 Coder Delivery current state (2026-07-13)**: Phase 3B complete. TD-104 containment is deployed and Owner credential rotation is complete. Under decision 0016, supervised Phase 3C may resume with one bounded process-backed coder; a broker remains required before unattended or multi-tenant release.
+> **TD-103 Coder Delivery current state (2026-07-13)**: Phase 3C complete and repaid. Real supervised coder dogfood PASS (runId `run_td103_3c_dogfood_20260713`, worker coder_low / claude-code / glm-5-turbo, terminal=completed, verification=passed, acceptance=accepted). TD-104 containment is deployed and Owner credential rotation is complete. Strong-isolation boundary remains per TD-104 / decision 0015/0016; supervised single-process delivery is allowed, but unattended or multi-tenant release still requires a credential broker.
 
 | M | 状态 |
 |---|------|

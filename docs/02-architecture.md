@@ -429,8 +429,9 @@ interface SchedulerOpts { maxConcurrent: number; }
 ### 4.6 Coder Delivery Contract v1 `[Phase 2]`
 
 > **实现状态**：TD-103 Phase 2 core complete（inspection + packaging deep module）。
-> Phase 3A（RunManager 集成、transcript 事件）complete，Phase 3B（exact-artifact verification）complete。
-> 项目当前进度只见 `docs/roadmap.md`；监督式 Phase 3C 的凭据边界见 decision 0016，强隔离发布边界仍见 decision 0015。
+> Phase 3A（RunManager 集成、transcript 事件）complete，Phase 3B（exact-artifact verification）complete，Phase 3C（公开 delivery CLI + Lead acceptance）complete。
+> 真实监督式 coder dogfood 已通过（runId `run_td103_3c_dogfood_20260713`）。
+> 项目当前进度只见 `docs/roadmap.md`；强隔离发布边界见 decision 0015/0016。
 
 控制平面（而非 worker）负责把 isolated worktree 里的 worker 产出打包成 atomic delivery commit。
 worker 只准备变更，不创建 commit。
@@ -521,6 +522,8 @@ worker 进程完成 ≠ code delivery 完成。
 
 > **实现状态**：TD-103 Phase 3A complete。Run delivery mode 已接入 RunManager 生命周期。
 > Phase 3B（exact-artifact verification）complete——见 §4.8。
+> Phase 3C-1（公开 foreground delivery CLI）complete——见 §4.9。
+> Phase 3C-2（Lead acceptance record）complete——见 §4.9。
 
 **RunManager.start() option**：
 
@@ -575,6 +578,7 @@ backend done:completed
 ### 4.8 Delivery Verification 集成 `[Phase 3B]`
 
 > **实现状态**：TD-103 Phase 3B complete。exact-artifact deterministic verification 已接入 RunManager。
+> Phase 3C-1（公开 foreground delivery CLI）+ Phase 3C-2（Lead acceptance record）complete——见 §4.9。
 
 **两个独立维度**：
 
@@ -636,9 +640,11 @@ packageDelivery success → transitionState(completed)
 
 ### 4.9 Lead Acceptance Record `[Phase 3C-2]`
 
-> **实现状态**：TD-103 Phase 3C-2 complete。`runs delivery` 命令已接入 CLI，
-> transcript-backed 原子 first-decision-wins 语义已实现。
-> Phase 3C coder-first template 和真实 dogfood 待 CTO 审计后做。
+> **实现状态**：TD-103 Phase 3C complete。公开 foreground delivery CLI（`run --delivery-spec-file`）
+> 和 Lead acceptance record（`runs delivery --accept/--reject`）已落地。transcript-backed 原子
+> first-decision-wins 语义已实现。真实监督式 coder dogfood 已通过
+> （runId `run_td103_3c_dogfood_20260713`，worker coder_low / claude-code / glm-5-turbo，
+> terminal=completed，verification=passed，acceptance=accepted）。
 
 **公开 CLI**：
 
