@@ -8,6 +8,7 @@ import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
 import { writeFrictionLog, frictionLogDirFromRunDir } from "./frictionLog.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
+import { createSecretRedactor } from "./secretRedaction.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError } from "./delivery.js";
 import { verifyDelivery as defaultVerifyDelivery } from "./deliveryVerification.js";
 
@@ -653,6 +654,11 @@ export class Run {
     this.backend = backend;
     this.handle = handle;
     this.transcript = transcript;
+    this._redact = typeof handle.redact === "function"
+      ? (value) => handle.redact(value)
+      : (typeof transcript.redact === "function"
+        ? (value) => transcript.redact(value)
+        : createSecretRedactor().redact);
     this.result = result;
     this.config = config;
     this.onRemove = onRemove;
@@ -719,7 +725,11 @@ export class Run {
     // 调用方可传外部 signal（如 daemon 的 per-run 控制器）：外部 abort 同样打断 events 流。
     // 用 AbortSignal.any 合并 waitTimeout 控制器与外部 signal（Node 20+ 原生）。
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), waitTimeout);
+    let waitTimerExpired = false;
+    const timer = setTimeout(() => {
+      waitTimerExpired = true;
+      controller.abort();
+    }, waitTimeout);
     if (options.signal) {
       if (options.signal.aborted) {
         controller.abort();
@@ -743,7 +753,8 @@ export class Run {
     };
 
     try {
-      for await (const ev of this.handle.events(controller.signal, { pollInterval, silentTimeout })) {
+      for await (const rawEvent of this.handle.events(controller.signal, { pollInterval, silentTimeout })) {
+        const ev = this._redact(rawEvent);
         // 若已被 abort，停止处理后续事件（避免覆盖 aborted 状态）
         if (this._aborted) break;
         // TD-99：若 _transition 把内存 state 同步为终态（外部写了终态，仲裁 rejected），
@@ -796,7 +807,7 @@ export class Run {
         }
       }
       // 流自然结束（非 break）= signal 被 abort = 超时
-      if (doneReason === null && controller.signal.aborted) {
+      if (waitTimerExpired || (doneReason === null && controller.signal.aborted)) {
         timedOut = true;
       }
     } finally {
@@ -807,22 +818,14 @@ export class Run {
 
     if (this._aborted) {
       await this._runCleanup();
-      return { completed: false, messages, evidence, timedOut: false, metrics };
+      return _loserResult("aborted", { messages, evidence, metrics });
     }
 
     const externalTerminalState = await this._externalTerminalState();
     if (externalTerminalState) {
       this.state = externalTerminalState;
       await this._runCleanup();
-      return {
-        completed: externalTerminalState === "completed",
-        failed: externalTerminalState === "failed",
-        aborted: externalTerminalState === "aborted",
-        messages,
-        evidence,
-        timedOut: externalTerminalState === "timed_out",
-        metrics,
-      };
+      return _loserResult(externalTerminalState, { messages, evidence, metrics });
     }
 
     // 预算硬闸门（S1-1）：超限即转 failed + 兜底 abort。独立于 done/timeout，
@@ -843,7 +846,18 @@ export class Run {
       await this._runCleanup();
       // TD-99：若输给先到的终态（如外部 abort），返回与现有终态一致的结果。
       if (!tResult.accepted) return _loserResult(tResult.state, { messages, evidence, metrics, budgetExceeded: true });
-      return { completed: false, messages, evidence, timedOut: false, metrics, budgetExceeded: true };
+      return _loserResult("failed", { messages, evidence, metrics, budgetExceeded: true });
+    }
+
+    if (timedOut) {
+      const tResult = await this._transition(this.state, "timed_out", "timeout", {
+        factEvents: [{
+          type: "run.timed_out",
+          payload: { backendSessionId: this.result.backendSessionId },
+        }],
+      });
+      await this._runCleanup();
+      return _loserResult(tResult.state, { messages, evidence, metrics });
     }
 
     if (doneReason === "completed") {
@@ -881,7 +895,7 @@ export class Run {
             const tResult = await this._transition(this.state, "failed", "scorecard_failed");
             await this._runCleanup();
             if (!tResult.accepted) return _loserResult(tResult.state, { messages, evidence, metrics, scorecard: scResult });
-            return { completed: false, messages, evidence, timedOut: false, metrics, scorecard: scResult };
+            return _loserResult("failed", { messages, evidence, metrics, scorecard: scResult });
           }
         }
       }
@@ -924,7 +938,7 @@ export class Run {
           // TD-103 Phase 3B: verify the delivery AFTER completion + cleanup.
           // Run terminal stays completed regardless of verification outcome.
           const verifiedRef = await this._verifyDeliveryResult(deliveryResult.ref);
-          const baseResult = { completed: true, messages, evidence, timedOut: false, metrics, delivery: verifiedRef.delivery };
+          const baseResult = _loserResult("completed", { messages, evidence, metrics, delivery: verifiedRef.delivery });
           if (verifiedRef.outcome === "failed") {
             return { ...baseResult, verificationFailed: true };
           }
@@ -954,11 +968,10 @@ export class Run {
               deliveryError: { code: errCode, message: errMsg },
             });
           }
-          return {
-            completed: false, failed: true, messages, evidence,
-            timedOut: false, metrics,
+          return _loserResult("failed", {
+            messages, evidence, metrics,
             deliveryError: { code: errCode, message: errMsg },
-          };
+          });
         }
       }
 
@@ -975,7 +988,7 @@ export class Run {
       await this._runCleanup();
       // TD-99：若输给先到的终态，返回与现有终态一致的结果。
       if (!tResult.accepted) return _loserResult(tResult.state, { messages, evidence, metrics });
-      return { completed: true, messages, evidence, timedOut: false, metrics };
+      return _loserResult("completed", { messages, evidence, metrics });
     }
     if (doneReason === "failed") {
       // TD-95 #5 复盘：backend 崩了但证据可能已齐（worker 写了文件 + 跑了测试 exit0）。
@@ -997,8 +1010,6 @@ export class Run {
       if (!tResult.accepted) return _loserResult(tResult.state, { messages, evidence, metrics });
       throw new Error(doneError ?? "backend reported failure");
     }
-    // timedOut（controller abort 导致流结束，无 done 事件）
-    // TD-99：run.timed_out 与 timed_out state_change 同批原子提交（factEvents）。
     const tResult = await this._transition(this.state, "timed_out", "timeout", {
       factEvents: [{
         type: "run.timed_out",
@@ -1006,8 +1017,7 @@ export class Run {
       }],
     });
     await this._runCleanup();
-    if (!tResult.accepted) return _loserResult(tResult.state, { messages, evidence, metrics });
-    return { completed: false, messages, evidence, timedOut: true, metrics };
+    return _loserResult(tResult.state, { messages, evidence, metrics });
   }
 
   async abort(reason = "user") {

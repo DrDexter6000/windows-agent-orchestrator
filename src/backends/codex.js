@@ -19,6 +19,7 @@ export class CodexBackend extends ProcessBackend {
         "--skip-git-repo-check",
         task.prompt,
       ],
+      credentialEnvNames: () => ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"],
       ...opts,
     });
   }

@@ -2,6 +2,16 @@ import { spawn } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import path from "node:path";
 import { doneEvent } from "../runEvent.js";
+import { createSecretRedactor, isSecretEnvName } from "../secretRedaction.js";
+
+const SAFE_INHERITED_ENV = new Set([
+  "ALL_PROXY", "APPDATA", "COLORTERM", "COMSPEC", "HOMEDRIVE", "HOMEPATH",
+  "HTTP_PROXY", "HTTPS_PROXY", "LANG", "LC_ALL", "LOCALAPPDATA", "NODE_EXTRA_CA_CERTS",
+  "NO_PROXY", "NUMBER_OF_PROCESSORS", "OS", "PATH", "PATHEXT", "PROCESSOR_ARCHITECTURE",
+  "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "SSL_CERT_DIR",
+  "SSL_CERT_FILE", "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "TERM", "TMP", "USERDOMAIN",
+  "USERNAME", "USERPROFILE", "WINDIR",
+]);
 
 /**
  * 事件队列：把 parser 产出的事件和进程 close 信号汇成一条流。
@@ -35,6 +45,9 @@ class EventQueue {
   drain() {
     return this.items.splice(0);
   }
+  hasItems() {
+    return this.items.length > 0;
+  }
 }
 
 /**
@@ -58,7 +71,15 @@ class EventQueue {
  * 不实现自定义 Job Object：违反零依赖（需 N-API/FFI 原生模块）且业界无人这样做（内置已够用，见 ADR 0013）。
  */
 export class ProcessBackend {
-  constructor({ parserClass, buildArgs, timeout = 30_000, retries = 0, waoCliPath = null, rawCapturePath = null } = {}) {
+  constructor({
+    parserClass,
+    buildArgs,
+    timeout = 30_000,
+    retries = 0,
+    waoCliPath = null,
+    rawCapturePath = null,
+    credentialEnvNames = () => [],
+  } = {}) {
     if (!parserClass) throw new Error("parserClass is required");
     if (!buildArgs) throw new Error("buildArgs is required");
     this.parserClass = parserClass;
@@ -75,6 +96,7 @@ export class ProcessBackend {
     // 纪律）。不影响 transcript。注意：env 形态多 run 会追加写同一文件——单次调研用，正式
     // 按 run 隔离走构造参数（未来 backendFor 传 runId）。
     this.rawCapturePath = rawCapturePath ?? (process.env.WAO_RAW_CAPTURE || null);
+    this.credentialEnvNames = credentialEnvNames;
   }
 
   async spawn(agent, task) {
@@ -99,6 +121,18 @@ export class ProcessBackend {
       binary = process.env.ComSpec || "cmd.exe";
       windowsVerbatimArguments = true;
     }
+    const agentEnv = agent.env ?? {};
+    const forbiddenAgentEnv = Object.keys(agentEnv).find(isSecretEnvName);
+    if (forbiddenAgentEnv) {
+      throw new Error(`secret-like agent.env key is not allowed: ${forbiddenAgentEnv}`);
+    }
+    const inheritedNames = this.credentialEnvNames(agent);
+    const childEnv = buildChildEnv(inheritedNames, agentEnv, {
+      ...(this.waoCliPath ? { WAO_CLI: this.waoCliPath } : {}),
+      WAO_TARGET_CWD: agent.cwd,
+    });
+    const redactor = createSecretRedactor(process.env, inheritedNames);
+    const rawRedactor = redactor.createStream();
     const child = spawn(binary, args, {
       cwd: agent.cwd,
       stdio: ["ignore", "pipe", "pipe"],
@@ -108,12 +142,7 @@ export class ProcessBackend {
       // WAO_CLI = WAO 的 cli.js 路径；WAO_TARGET_CWD = worker 当前干活的目标项目（用于 wao 命令的 --cwd）。
       // TD-79：agent.env（registry 声明）注入子进程——如 PIP_REQUIRE_VIRTUALENV 让 pip 拒绝
       // 安装，防 read-only worker（researcher）跑 pip install 污染全局 Python env。
-      env: {
-        ...process.env,
-        ...(this.waoCliPath ? { WAO_CLI: this.waoCliPath } : {}),
-        WAO_TARGET_CWD: agent.cwd,
-        ...(agent.env ?? {}),
-      },
+      env: childEnv,
     });
 
     // spawn 失败（ENOENT 等）会 emit 'error' 事件而非抛错。
@@ -140,18 +169,21 @@ export class ProcessBackend {
       // TD-76 raw-capture：parser 输入前留一份原始 stdout（旁路文件，不影响 transcript）。
       // 同步写防乱序；失败静默（调研工具，不应影响 run）。
       if (this.rawCapturePath) {
-        try { appendFileSync(this.rawCapturePath, chunk); } catch { /* 调研工具，失败不阻塞 */ }
+        try { appendFileSync(this.rawCapturePath, rawRedactor.write(chunk), "utf8"); } catch { /* 调研工具，失败不阻塞 */ }
       }
       // TD-77B：累积 stdout 尾部摘要（parser 仍吃全量 chunk，这里只是镜像截取尾部供诊断）。
-      stdoutTail = trimTail(stdoutTail + chunk.toString("utf8"));
+      stdoutTail = trimTail(redactor.redactString(stdoutTail + chunk.toString("utf8")));
       queue.push(parser.feed(chunk));
     });
     child.stderr.on("data", (chunk) => {
       // stderr 不作为正常事件流解析（codex 的非 JSON 日志有些走 stderr）。
       // 但失败兜底时保留尾部摘要，避免 provider/CLI 错误黑盒化。
-      stderrTail = trimTail(stderrTail + chunk.toString("utf8"));
+      stderrTail = trimTail(redactor.redactString(stderrTail + chunk.toString("utf8")));
     });
     child.on("close", (code) => {
+      if (this.rawCapturePath) {
+        try { appendFileSync(this.rawCapturePath, rawRedactor.end(), "utf8"); } catch { /* 调研工具，失败不阻塞 */ }
+      }
       exitCode = code;
       queue.push(parser.flush());
       queue.markClosed();
@@ -165,6 +197,7 @@ export class ProcessBackend {
       backendSessionId: sessionId,
       messageId: undefined,
       admittedSeq: undefined,
+      redact: (value) => redactor.redact(value),
       events: (signal, opts = {}) => this._streamEvents({
         queue,
         child,
@@ -194,6 +227,7 @@ export class ProcessBackend {
           if (!anyEventSeen) anyEventSeen = true;
           yield ev;
         }
+        if (queue.closed && queue.hasItems()) continue;
         if (queue.closed) {
           // 进程已退出。若无 done，按 exit code 兜底
           if (!emittedDone && !queue.sawDone) {
@@ -284,6 +318,19 @@ export class ProcessBackend {
       return name;
     }
   }
+}
+
+function buildChildEnv(inheritedNames, agentEnv, waoEnv) {
+  const requested = new Set(
+    [...SAFE_INHERITED_ENV, ...(inheritedNames ?? [])]
+      .filter((name) => typeof name === "string" && name.length > 0)
+      .map((name) => name.toUpperCase()),
+  );
+  const inherited = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (requested.has(name.toUpperCase())) inherited[name] = value;
+  }
+  return { ...inherited, ...agentEnv, ...waoEnv };
 }
 
 function isWindowsCommandScript(filePath) {

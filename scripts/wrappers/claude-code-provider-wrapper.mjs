@@ -32,6 +32,11 @@ const childEnv = {
   ANTHROPIC_AUTH_TOKEN: token,
   CLAUDE_CONFIG_DIR: isolatedClaudeConfigDir,
 };
+if (options.apiKeyEnv.toUpperCase() !== "ANTHROPIC_AUTH_TOKEN") {
+  for (const key of Object.keys(childEnv)) {
+    if (key.toUpperCase() === options.apiKeyEnv.toUpperCase()) delete childEnv[key];
+  }
+}
 deleteOAuthHints(childEnv);
 
 if (options.defaultModel) {

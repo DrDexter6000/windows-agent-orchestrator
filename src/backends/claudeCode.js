@@ -46,6 +46,13 @@ export class ClaudeCodeBackend extends ProcessBackend {
         args.push(...(Array.isArray(agent.args) ? agent.args : []));
         return args;
       },
+      credentialEnvNames: (agent) => {
+        const configured = agent.provider?.apiKeyEnv;
+        if (configured) return [configured];
+        const args = Array.isArray(agent.prependArgs) ? agent.prependArgs : [];
+        const index = args.indexOf("--api-key-env");
+        return index >= 0 && args[index + 1] ? [args[index + 1]] : [];
+      },
       ...opts,
     });
   }
@@ -64,4 +71,3 @@ export class ClaudeCodeBackend extends ProcessBackend {
     return "claude";
   }
 }
-

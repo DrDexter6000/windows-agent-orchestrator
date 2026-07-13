@@ -25,6 +25,7 @@ export class KimiCodeBackend extends ProcessBackend {
         "--output-format", "stream-json",
         ...(Array.isArray(agent.args) ? agent.args : []),
       ],
+      credentialEnvNames: () => ["KIMI_API_KEY", "KIMI_BASE_URL", "KIMI_MODEL_NAME"],
       ...opts,
     });
   }

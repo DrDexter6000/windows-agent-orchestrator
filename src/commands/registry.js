@@ -12,6 +12,7 @@ import { join, resolve } from "node:path";
 
 import { readRegistry, normalizeAgent } from "../registry.js";
 import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
+import { isSecretEnvName } from "../secretRedaction.js";
 // TD-98 阶段 2a：parseOptions/displayModel 从 cli.js 抽到 ./shared.js，消除 ESM 循环 import。
 import { parseOptions, displayModel } from "./shared.js";
 
@@ -182,6 +183,9 @@ async function registryValidateCommand(args, config) {
         issues.push("env must be an object");
       } else {
         for (const [k, v] of Object.entries(agent.env)) {
+          if (isSecretEnvName(k)) {
+            issues.push(`env.${k} is secret-like; configure an inherited provider credential channel instead`);
+          }
           if (typeof v !== "string") {
             issues.push(`env.${k} value must be a string`);
           }

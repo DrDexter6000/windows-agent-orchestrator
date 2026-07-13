@@ -511,6 +511,36 @@ test("TD-79: registry validate 拒绝 env 值非字符串的 env 字段", () => 
   }
 });
 
+test("TD-104: registry validate rejects secret-like agent.env keys", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-registry-secret-env-"));
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        bad_worker: {
+          backend: "claude-code",
+          cwd: "D:/projects/app",
+          env: { SESSION_TOKEN: "test-secret-registry-value" },
+        },
+      },
+    }), "utf8");
+
+    const result = spawnSync(process.execPath, [
+      "src/cli.js",
+      "registry", "validate",
+      "--registry", registryPath,
+    ], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /secret-like.*inherited provider credential channel/i);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("C3: registry validate 拒绝缺 tokenBudget 的 opencode worker（06-18 事故防线硬门）", () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-budget-validate-"));
   try {

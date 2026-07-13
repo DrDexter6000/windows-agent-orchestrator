@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,6 +12,7 @@ import {
   RUN_STATES,
   TERMINAL_STATES,
 } from "../src/transcript.js";
+import { createSecretRedactor } from "../src/secretRedaction.js";
 
 test("appends normalized JSONL events", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wao-transcript-"));
@@ -172,6 +173,81 @@ test("RUN_STATES and TERMINAL_STATES constants are correct", () => {
   // 终态都是 RUN_STATES 的子集
   for (const t of TERMINAL_STATES) {
     assert.ok(RUN_STATES.includes(t));
+  }
+});
+
+test("TD-104: transcript redacts nested secret values in append and transition batches", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wao-transcript-redact-"));
+  const previous = process.env.WAO_TEST_API_KEY;
+  const secret = "wao-test-secret-value-104";
+  process.env.WAO_TEST_API_KEY = secret;
+  try {
+    const transcript = new JsonlTranscript(join(dir, "run.jsonl"), {
+      runId: "run_redact",
+      agentId: "test_agent",
+    });
+
+    await transcript.append("run.event", {
+      kind: "tool_result",
+      output: { nested: [`before ${secret} after`] },
+    });
+    await transcript.transitionState("running", "failed", `reason ${secret}`, {
+      attemptEvents: [{ type: "run.attempt", payload: { detail: secret } }],
+      factEvents: [{ type: "run.error", payload: { error: secret } }],
+    });
+    await transcript.transitionState("failed", "aborted", `retry ${secret}`);
+
+    const raw = await readFile(transcript.filePath, "utf8");
+    assert.equal(raw.includes(secret), false, "raw JSONL must not contain the secret value");
+    assert.match(raw, /\[REDACTED:WAO_TEST_API_KEY\]/);
+  } finally {
+    if (previous === undefined) delete process.env.WAO_TEST_API_KEY;
+    else process.env.WAO_TEST_API_KEY = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-104: stream redaction preserves UTF-8 boundaries and proxy credentials", () => {
+  const secret = "密钥-test-value";
+  const redactor = createSecretRedactor(
+    { HTTP_PROXY: "http://user:password@example.invalid", CUSTOM_CHANNEL: secret },
+    ["CUSTOM_CHANNEL"],
+  );
+  const stream = redactor.createStream();
+  const bytes = Buffer.from(`prefix ${secret} suffix`, "utf8");
+  const split = Buffer.from("prefix 密", "utf8").length - 1;
+  const output = stream.write(bytes.subarray(0, split))
+    + stream.write(bytes.subarray(split))
+    + stream.end();
+
+  assert.equal(output.includes(secret), false);
+  assert.match(output, /\[REDACTED:CUSTOM_CHANNEL\]/);
+  assert.equal(redactor.redactString("http://user:password@example.invalid"), "[REDACTED:HTTP_PROXY]");
+});
+
+test("TD-104: transcript envelope fields cannot be overridden by payload", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wao-transcript-envelope-"));
+  try {
+    const transcript = new JsonlTranscript(join(dir, "run.jsonl"), {
+      runId: "run_authoritative",
+      agentId: "agent_authoritative",
+    });
+    const event = await transcript.append("run.event", {
+      ts: "forged",
+      seq: 999,
+      runId: "run_forged",
+      agentId: "agent_forged",
+      type: "run.completed",
+      kind: "message",
+    });
+
+    assert.equal(event.runId, "run_authoritative");
+    assert.equal(event.agentId, "agent_authoritative");
+    assert.equal(event.type, "run.event");
+    assert.equal(event.seq, 1);
+    assert.notEqual(event.ts, "forged");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
 

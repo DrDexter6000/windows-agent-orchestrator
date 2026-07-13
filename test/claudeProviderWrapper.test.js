@@ -19,6 +19,7 @@ test("claude provider wrapper forwards angle-bracket prompts without shell repar
     "  env: {",
     "    baseUrl: process.env.ANTHROPIC_BASE_URL,",
     "    token: process.env.ANTHROPIC_AUTH_TOKEN,",
+    "    sourceToken: process.env.DEEPSEEK_API_KEY,",
     "    model: process.env.ANTHROPIC_MODEL,",
     "    compact: process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,",
     "    configDir: process.env.CLAUDE_CONFIG_DIR,",
@@ -37,7 +38,7 @@ test("claude provider wrapper forwards angle-bracket prompts without shell repar
       WRAPPER,
       "--claude-binary", NODE,
       "--base-url", "https://api.deepseek.com/anthropic",
-      "--api-key-env", "DEEPSEEK_API_KEY",
+      "--api-key-env", "deepseek_api_key",
       "--default-model", "deepseek-v4-flash",
       "--context-window", "200000",
       "--",
@@ -62,6 +63,7 @@ test("claude provider wrapper forwards angle-bracket prompts without shell repar
     ]);
     assert.equal(parsed.env.baseUrl, "https://api.deepseek.com/anthropic");
     assert.equal(parsed.env.token, "test-secret");
+    assert.equal(parsed.env.sourceToken, undefined);
     assert.equal(parsed.env.model, "deepseek-v4-flash");
     assert.equal(parsed.env.compact, "200000");
     assert.ok(parsed.env.configDir, "wrapper must set CLAUDE_CONFIG_DIR for provider workers");
@@ -69,6 +71,28 @@ test("claude provider wrapper forwards angle-bracket prompts without shell repar
     assert.ok(!path.resolve(parsed.env.configDir).startsWith(path.resolve(oauthDir)));
     const configListing = await readFile(path.join(parsed.env.configDir, ".credentials.json"), "utf8").catch(() => "");
     assert.ok(!configListing.includes("claudeAiOauth"), "isolated config dir must not copy OAuth credentials");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("claude provider wrapper preserves ANTHROPIC_AUTH_TOKEN when it is the assigned source channel", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "wao-claude-wrapper-token-"));
+  const fakeClaude = path.join(dir, "fake-claude.mjs");
+  await writeFile(fakeClaude, "process.stdout.write(process.env.ANTHROPIC_AUTH_TOKEN ?? 'missing');");
+  try {
+    const { stdout } = await execFileAsync(NODE, [
+      WRAPPER,
+      "--claude-binary", NODE,
+      "--base-url", "https://example.invalid/anthropic",
+      "--api-key-env", "ANTHROPIC_AUTH_TOKEN",
+      "--",
+      fakeClaude,
+    ], {
+      cwd: path.resolve("."),
+      env: { ...process.env, ANTHROPIC_AUTH_TOKEN: "test-secret-auth-token" },
+    });
+    assert.equal(stdout, "test-secret-auth-token");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

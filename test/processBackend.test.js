@@ -4,6 +4,9 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ProcessBackend } from "../src/backends/processBackend.js";
+import { ClaudeCodeBackend } from "../src/backends/claudeCode.js";
+import { CodexBackend } from "../src/backends/codex.js";
+import { KimiCodeBackend } from "../src/backends/kimiCode.js";
 import { ClaudeStreamParser } from "../src/backends/parsers/claudeCode.js";
 
 const NODE = process.execPath;
@@ -443,4 +446,107 @@ test("TD-79 回归: 无 agent.env 时子进程不染多余 env（不破坏原行
   const msg = events.find((e) => e.kind === "message" && e.role === "assistant");
   const text = (msg.parts ?? []).map((p) => p.text).filter(Boolean).join("");
   assert.match(text, /PIPRV=\(unset\)/, "无 agent.env 时不注入 PIP_REQUIRE_VIRTUALENV");
+});
+
+test("TD-104: worker environment includes assigned credential but excludes unrelated provider keys", async () => {
+  const previousAssigned = process.env.WAO_ASSIGNED_API_KEY;
+  const previousUnrelated = process.env.WAO_UNRELATED_API_KEY;
+  process.env.WAO_ASSIGNED_API_KEY = "assigned-test-secret";
+  process.env.WAO_UNRELATED_API_KEY = "unrelated-test-secret";
+  try {
+    const script = [
+      "const assigned = Boolean(process.env.WAO_ASSIGNED_API_KEY);",
+      "const unrelated = Boolean(process.env.WAO_UNRELATED_API_KEY);",
+      `process.stdout.write(JSON.stringify({type:"assistant",message:{content:[{type:"text",text:"assigned="+assigned+";unrelated="+unrelated}]}})+"\\n");`,
+      `process.stdout.write(JSON.stringify({type:"result",subtype:"success",is_error:false})+"\\n");`,
+    ].join("");
+    const backend = new ProcessBackend({
+      parserClass: ClaudeStreamParser,
+      buildArgs: () => ["-e", script],
+      credentialEnvNames: () => ["WAO_ASSIGNED_API_KEY"],
+    });
+    const handle = await backend.spawn(makeAgent(), { prompt: "test" });
+    const events = [];
+    for await (const event of handle.events(new AbortController().signal)) events.push(event);
+    const text = events.find((event) => event.kind === "message")?.parts?.[0]?.text;
+    assert.equal(text, "assigned=true;unrelated=false");
+  } finally {
+    if (previousAssigned === undefined) delete process.env.WAO_ASSIGNED_API_KEY;
+    else process.env.WAO_ASSIGNED_API_KEY = previousAssigned;
+    if (previousUnrelated === undefined) delete process.env.WAO_UNRELATED_API_KEY;
+    else process.env.WAO_UNRELATED_API_KEY = previousUnrelated;
+  }
+});
+
+test("TD-104: process backends declare only their assigned credential channels", () => {
+  const claude = new ClaudeCodeBackend();
+  const kimi = new KimiCodeBackend();
+  const codex = new CodexBackend();
+
+  assert.deepEqual(claude.credentialEnvNames({ provider: { apiKeyEnv: "ZHIPU_API_KEY" } }), ["ZHIPU_API_KEY"]);
+  assert.deepEqual(claude.credentialEnvNames({}), []);
+  assert.deepEqual(kimi.credentialEnvNames({}), ["KIMI_API_KEY", "KIMI_BASE_URL", "KIMI_MODEL_NAME"]);
+  assert.deepEqual(codex.credentialEnvNames({}), ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"]);
+});
+
+test("TD-104: secret-like values are rejected from agent.env", async () => {
+  const backend = makeBackend(ClaudeStreamParser, () => ["-e", "process.exit(0)"]);
+  await assert.rejects(
+    () => backend.spawn(makeAgent({ env: { EMBEDDED_API_KEY: "test-secret-registry-value" } }), { prompt: "test" }),
+    /secret-like.*agent\.env|agent\.env.*secret-like/i,
+  );
+});
+
+test("TD-104: raw capture redacts an explicitly assigned credential split across stdout chunks", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "wao-rawcap-secret-"));
+  const capturePath = path.join(dir, "raw.log");
+  const previous = process.env.WAO_SPLIT_CHANNEL;
+  const secret = "split-test-secret-value-104";
+  process.env.WAO_SPLIT_CHANNEL = secret;
+  try {
+    const script = [
+      "const value=process.env.WAO_SPLIT_CHANNEL;",
+      `process.stdout.write('{"type":"assistant","message":{"content":[{"type":"text","text":"'+value.slice(0,10));`,
+      `setTimeout(()=>{process.stdout.write(value.slice(10)+'"}]}}\\n');process.stdout.write('{"type":"result","subtype":"success","is_error":false}\\n');},10);`,
+    ].join("");
+    const backend = new ProcessBackend({
+      parserClass: ClaudeStreamParser,
+      buildArgs: () => ["-e", script],
+      rawCapturePath: capturePath,
+      credentialEnvNames: () => ["WAO_SPLIT_CHANNEL"],
+    });
+    const handle = await backend.spawn(makeAgent(), { prompt: "test" });
+    for await (const _event of handle.events(new AbortController().signal)) {
+    }
+    const raw = await import("node:fs/promises").then((module) => module.readFile(capturePath, "utf8"));
+    assert.equal(raw.includes(secret), false);
+    assert.match(raw, /\[REDACTED:WAO_SPLIT_CHANNEL\]/);
+    assert.equal(JSON.stringify(handle.redact({ value: secret })).includes(secret), false);
+  } finally {
+    if (previous === undefined) delete process.env.WAO_SPLIT_CHANNEL;
+    else process.env.WAO_SPLIT_CHANNEL = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-105: done queued while consumer is paused is drained before closed stream returns", async () => {
+  const script = [
+    `process.stdout.write('{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}\\n');`,
+    `setTimeout(()=>process.stdout.write('{"type":"result","subtype":"success","is_error":false}\\n'),20);`,
+  ].join("");
+  const backend = new ProcessBackend({
+    parserClass: ClaudeStreamParser,
+    buildArgs: () => ["-e", script],
+  });
+  const handle = await backend.spawn(makeAgent(), { prompt: "test" });
+  const iterator = handle.events(new AbortController().signal)[Symbol.asyncIterator]();
+
+  const first = await iterator.next();
+  assert.equal(first.value?.kind, "message");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const second = await iterator.next();
+
+  assert.equal(second.done, false);
+  assert.equal(second.value?.kind, "done");
+  assert.equal(second.value?.reason, "completed");
 });

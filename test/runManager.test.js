@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { RunManager, gracefulShutdown } from "../src/runManager.js";
 import { OpenCodeServeBackend } from "../src/backends/opencodeServe.js";
 import { JsonlTranscript, findLastEventSeq, readTranscript, findState } from "../src/transcript.js";
+import { createSecretRedactor } from "../src/secretRedaction.js";
 
 // 复用 integration.test.js 的 mock fetch 模式
 function createMockFetch({ assistantDelay = 0 } = {}) {
@@ -286,6 +287,8 @@ test("aborted transition via Run.abort()", async () => {
     const waitResult = await waitPromise;
     // abort 后 waitResult 可能已完成或被打断，但状态必须是 aborted
     assert.equal(run.state, "aborted");
+    assert.equal(waitResult.aborted, true);
+    assert.equal(waitResult.failed, false);
 
     const events = await readTranscript(run.transcript.filePath);
     const abortedEvent = events.find((e) => e.type === "run.aborted");
@@ -1124,6 +1127,7 @@ test("M6-6: scorecard requireCommands 不满足 → failed + scorecard.checked p
     const result = await run.waitForCompletion({});
 
     assert.equal(result.completed, false);
+    assert.equal(result.failed, true);
     assert.equal(run.state, "failed");
 
     const transcript = await readTranscript(run.transcript.filePath);
@@ -1715,10 +1719,81 @@ test("S1-1: multiplier 生效 — 同样 token，multiplier=1 不触发，multip
     const run2 = await manager2.start("a", { prompt: "go" });
     const r2 = await run2.waitForCompletion({ pollInterval: 5 });
     assert.equal(run2.state, "failed", "multiplier=100 时应触发 budget_exceeded → failed");
+    assert.equal(r2.failed, true);
     const ev2 = await readTranscript(run2.transcript.filePath);
     assert.ok(ev2.some((e) => e.type === "run.budget_exceeded"), "multiplier=100 应触发闸门");
   } finally {
     rmSync(dir2, { recursive: true, force: true });
+  }
+});
+
+test("TD-105: backend done(failed) caused by wait timer remains timed_out", async () => {
+  const dir = await makeTempDir();
+  try {
+    const backend = {
+      async spawn() {
+        return {
+          backend: "process",
+          backendSessionId: "proc_timeout_race",
+          async *events(signal) {
+            await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+            yield { kind: "done", reason: "failed", error: "process exited with code 1 after taskkill" };
+          },
+          async abort() {},
+          isAlive: () => false,
+        };
+      },
+    };
+    const manager = makeProcessManager(dir, backend);
+    const run = await manager.start("test", { prompt: "go" });
+    const result = await run.waitForCompletion({ waitTimeout: 20 });
+
+    assert.equal(result.timedOut, true);
+    assert.equal(result.failed, false);
+    assert.equal(run.state, "timed_out");
+    const events = await readTranscript(run.transcript.filePath);
+    assert.equal(events.some((event) => event.type === "run.error" && event.phase === "wait"), false);
+    assert.equal(events.filter((event) => event.type === "run.state_change" && event.to === "timed_out").length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-104: worker output is redacted before in-memory results and transcript persistence", async () => {
+  const dir = await makeTempDir();
+  const previous = process.env.WAO_RESULT_CHANNEL;
+  const secret = "result-test-secret-value-104";
+  process.env.WAO_RESULT_CHANNEL = secret;
+  try {
+    const redactor = createSecretRedactor(process.env, ["WAO_RESULT_CHANNEL"]);
+    const backend = {
+      async spawn() {
+        return {
+          backend: "process",
+          backendSessionId: "proc_redaction",
+          async *events() {
+            yield { kind: "message", role: "assistant", parts: [{ type: "text", text: `seen ${secret}` }] };
+            yield { kind: "tool_result", output: { value: secret } };
+            yield { kind: "done", reason: "completed" };
+          },
+          async abort() {},
+          isAlive: () => false,
+          redact: (value) => redactor.redact(value),
+        };
+      },
+    };
+    const manager = makeProcessManager(dir, backend);
+    const run = await manager.start("test", { prompt: "go" });
+    const result = await run.waitForCompletion({ waitTimeout: 1000 });
+    const raw = await readFile(run.transcript.filePath, "utf8");
+
+    assert.equal(JSON.stringify(result).includes(secret), false);
+    assert.equal(raw.includes(secret), false);
+    assert.match(JSON.stringify(result), /\[REDACTED:WAO_RESULT_CHANNEL\]/);
+  } finally {
+    if (previous === undefined) delete process.env.WAO_RESULT_CHANNEL;
+    else process.env.WAO_RESULT_CHANNEL = previous;
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

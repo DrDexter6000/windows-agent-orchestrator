@@ -876,6 +876,7 @@ test("3A2-09: empty diff produces run.delivery_failed, run.error phase=delivery,
     const result = await run.waitForCompletion({});
     assert.equal(result.completed, false, "must not be completed");
     assert.equal(result.failed, true, "must be failed");
+    assert.equal(result.aborted, false, "failed delivery result must include aborted:false");
     assert.ok(result.deliveryError, "must have deliveryError");
     assert.equal(result.deliveryError.code, "empty_diff");
 

@@ -1,5 +1,6 @@
 import { appendFile, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
+import { createSecretRedactor } from "./secretRedaction.js";
 
 const APPEND_LOCK_TIMEOUT_MS = 5000;
 const APPEND_LOCK_STALE_MS = 30000;
@@ -21,6 +22,11 @@ export class JsonlTranscript {
     this.filePath = filePath;
     this.context = context;
     this.seq = Number.isInteger(context?.initialSeq) ? context.initialSeq : 0;
+    this.redactor = createSecretRedactor();
+  }
+
+  redact(value) {
+    return this.redactor.redact(value);
   }
 
   async append(type, payload = {}) {
@@ -29,12 +35,12 @@ export class JsonlTranscript {
     try {
       this.seq = Math.max(this.seq, await readMaxSeq(this.filePath)) + 1;
       const event = {
+        ...this.redact(payload),
         ts: new Date().toISOString(),
         seq: this.seq,
         runId: this.context.runId,
         agentId: this.context.agentId,
         type,
-        ...payload,
       };
       await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
       return event;
@@ -89,6 +95,7 @@ export class JsonlTranscript {
       const attemptEvents = Array.isArray(options.attemptEvents) ? options.attemptEvents : [];
       const ts = new Date().toISOString();
       const ctx = { runId: this.context.runId, agentId: this.context.agentId };
+      const safeReason = this.redactor.redactString(String(reason));
 
       // 先分配 attemptEvents 的 seq（无论 accepted/rejected 都写）。
       let seq = baseSeq;
@@ -96,7 +103,7 @@ export class JsonlTranscript {
       const writtenAttempts = [];
       for (const ae of attemptEvents) {
         seq += 1;
-        const ev = { ts, seq, ...ctx, type: ae.type, ...(ae.payload ?? {}) };
+        const ev = { ...this.redact(ae.payload ?? {}), ts, seq, ...ctx, type: ae.type };
         lines.push(JSON.stringify(ev));
         writtenAttempts.push(ev);
       }
@@ -105,7 +112,7 @@ export class JsonlTranscript {
         // 被拒：写审计事件（锁内，与判定原子）。rejected 不写任何 terminal fact。
         const rejectionPayload = {
           attemptedTo: to,
-          attemptedReason: reason,
+          attemptedReason: safeReason,
           existingTerminal: existing,
           reason: "first_terminal_wins",
         };
@@ -121,12 +128,12 @@ export class JsonlTranscript {
       const written = [];
       for (const fe of factEvents) {
         seq += 1;
-        const ev = { ts, seq, ...ctx, type: fe.type, ...(fe.payload ?? {}) };
+        const ev = { ...this.redact(fe.payload ?? {}), ts, seq, ...ctx, type: fe.type };
         lines.push(JSON.stringify(ev));
         written.push(ev);
       }
       seq += 1;
-      const stateEv = { ts, seq, ...ctx, type: "run.state_change", from, to, reason };
+      const stateEv = { ts, seq, ...ctx, type: "run.state_change", from, to, reason: safeReason };
       lines.push(JSON.stringify(stateEv));
       await appendFile(this.filePath, `${lines.join("\n")}\n`, "utf8");
       this.seq = seq;
