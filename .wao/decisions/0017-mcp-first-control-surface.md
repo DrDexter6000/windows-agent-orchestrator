@@ -29,8 +29,15 @@ WAO is an **MCP-first, Skill-guided, CLI-backed** multi-runtime agent control pl
 
 2. **MCP Server and CLI share the same application-service layer.** Both are
    thin transport/input/output adapters. Business rules live once in the
-   application services (RunManager, transcript, delivery, workflow, registry).
-   **MCP Server must not shell out to CLI and parse text output.**
+   application services. **MCP Server must not shell out to CLI and parse text
+   output.** The shared application-service layer is a **planned M9 target**—it
+   does not yet fully exist. Current use-case orchestration and output logic
+   partially remain in `src/commands/*.js`. RunManager, transcript, delivery,
+   workflow, and registry are core/domain capabilities, not a complete
+   application-service layer. M9's first step is to inventory CLI use cases and
+   extract minimal shared services; CLI then delegates to these services and
+   MCP calls the same services. This requires structural extraction but does
+   not rewrite the core state machine, transcript, delivery, or Backend.
 
 3. **Core services are MCP-agnostic.** RunManager, transcript, delivery,
    Backend, and workflow do not depend on MCP. MCP is an L4 adapter, not an
@@ -41,8 +48,12 @@ WAO is an **MCP-first, Skill-guided, CLI-backed** multi-runtime agent control pl
    does not replace transcript, and does not implement control logic. Lead
    retains decomposition and acceptance responsibility. WAO does not auto-decompose.
 
-5. **CLI remains the human/ops/debug/fallback interface.** CLI and MCP produce
-   identical transcript facts for the same operation.
+5. **CLI remains the human/ops/debug/fallback interface.** Equivalent
+   state-changing operations (whether from MCP or CLI) must call the same
+   service, producing identical transcript durable facts and outcome.
+   Read-only queries do not create transcript events; MCP and CLI return
+   semantically equivalent structured results. This does not promise
+   byte-identical text output between CLI and MCP.
 
 6. **Host-global configuration is not WAO's responsibility.** WAO may provide
    its own MCP Server startup and configuration entry point, but does not take

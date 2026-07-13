@@ -37,25 +37,30 @@
 **L4 依赖方向**（decision 0017）：
 
 ```
-MCP Server ─┐
-            ├→ Application Services
-CLI Client ─┘        ↓
-              RunManager / Transcript /
-              Delivery / Workflow / Registry
-                        ↓
-                     Backends
+MCP Adapter ─┐
+             ├→ Application Services (planned M9 use-case layer)
+CLI Adapter ─┘                 ↓
+                  RunManager / Transcript /
+                  Delivery / Workflow / Registry
+                               ↓
+                            Backends
 ```
 
-- MCP Server 和 CLI Client 只做 transport/input/output adaptation。
+- MCP Adapter 和 CLI Adapter 只做 transport/input/output adaptation。
+- Application Services 层是 M9 planned target——当前部分 use-case orchestration 仍在 `src/commands/*.js` 中，尚未提取为共享 services。RunManager/transcript/delivery/workflow/registry 是 core/domain capabilities，不是完整的 application-service 层。M9 首步必须盘点 CLI use cases 并提取最小共享 services。
 - 业务规则只写一次，在 application services 层。**禁止 MCP Server 通过 shell 调 CLI 并解析文本输出。**
 - RunManager / transcript / delivery / Backend / workflow 不依赖 MCP——MCP 是 L4 adapter，不是 L1-L3 dependency。
 - Backend 仍只负责 worker runtime。
 - Skill 是 Lead 指导层（`SKILL.md`），不在运行时依赖图中保存状态。
-- Transcript 继续是 run truth SSOT，无论操作来自 MCP 还是 CLI。
+- Transcript 继续是 run truth SSOT。等价的 state-changing operation（无论来自 MCP 还是 CLI）必须调用同一 service，产生相同 transcript durable facts 和 outcome；read-only query 不制造 transcript 事件，返回语义等价的结构化结果。
 
 **依赖方向**：上层依赖下层，下层不知道上层。横切层只读 transcript + 发事件，不参与调度决策。
 
-**铁律**：任何层都**不往 agent 的 system prompt 灌指令**。agent 只看到 task prompt。
+**Worker 输入不变量**：
+- Lead 的 `SKILL.md`、roadmap、跨 worker 上下文和编排职责**不得注入 worker**。
+- Worker 接收 bounded task prompt。
+- Worker 可以接收稳定 role contract 和必要安全/运行时约束。role contract 可通过 runtime 支持的 system-prompt 机制注入（如 claude-code 的 `--system-prompt`）；runtime 不支持时，由 task prompt 明确关键边界。
+- Transcript 与控制面仍由 WAO/Lead 所有。
 
 ---
 
