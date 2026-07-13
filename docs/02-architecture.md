@@ -743,6 +743,8 @@ const nodeHandlers = {
 registry.registerNodeType("my-custom", MyHandler);
 ```
 
+`gate.requiredClaims` uses `"nodeId.field"` to require one predecessor field; a bare `"field"` searches all predecessors. This format is part of the workflow contract, not a Lead prompt convention.
+
 **LLM 编排器 `[L]`**：作为一种 `router` 节点实现，或作为独立的策略层客户端调用 L2 原语。
 它是**可插拔策略的一等公民**，但不焊死在引擎里。
 
