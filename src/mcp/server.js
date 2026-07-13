@@ -7,7 +7,7 @@
 // so an MCP host can list configured agents over the MCP protocol.
 //
 // Architectural contract (see docs/02-architecture.md):
-//   - This module imports the MCP SDK (the ONLY place allowed besides tests).
+//   - This module imports the MCP SDK + zod (the ONLY place allowed besides tests).
 //   - It depends on src/application/registryInventory.js — it does NOT import
 //     src/commands/*, does NOT shell out to the CLI, does NOT write transcripts,
 //     does NOT spawn runs, does NOT read credentials.
@@ -16,9 +16,15 @@
 // The factory is dependency-injectable for testing: production wires the real
 // `getRegistryInventory`, tests may pass a fake to assert exactly-once
 // invocation and path-non-override without touching the filesystem.
+//
+// M9-1 audit closeout: this module uses the SDK high-level McpServer so that
+// input validation, unknown-tool rejection, and output-schema validation are
+// owned by the SDK's protocol layer (not hand-rolled). On service failure it
+// returns a FIXED safe text and never concatenates err.message, stack, paths,
+// env, or stderr into the result.
 
-import { Server } from "@modelcontextprotocol/sdk/server";
-import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
 
 import { getRegistryInventory } from "../application/registryInventory.js";
 
@@ -26,23 +32,44 @@ import { getRegistryInventory } from "../application/registryInventory.js";
 const SERVER_NAME = "wao-mcp";
 const SERVER_VERSION = "0.0.1";
 
-// The only tool this server registers. No write/dispatch/run tools here —
-// exposing mutation surface is out of scope for M9-1 and would violate the
-// read-only boundary.
-const REGISTRY_LIST_TOOL = {
-  name: "registry_list",
-  description:
-    "List configured WAO worker agents with their backend, model, and reliability " +
-    "certification status. Read-only. Accepts no file-path arguments; the registry " +
-    "and run directory are fixed at server startup.",
-  // The tool deliberately takes NO parameters. registryPath/runDir are startup
-  // configuration — a model must not override them per call.
-  inputSchema: {
-    type: "object",
-    properties: {},
-    additionalProperties: false,
-  },
+// Fixed safe text returned when the underlying service fails. Intentionally
+// constant — never concatenate dynamic content here (no err.message, no path,
+// no env). This is the redaction contract: the model learns only that the
+// read failed, never why in operational detail.
+const SERVICE_ERROR_TEXT = "registry_list failed";
+
+// The registry_list tool input: a strict empty object. Extra keys are rejected
+// by zod validation before the service is ever called, so a model cannot
+// override server-side registryPath/runDir via tool arguments.
+const REGISTRY_LIST_INPUT = z.object({}).strict();
+
+// The structured output shape: { agents: [...] }. certification is nullable
+// because an agent may have no reliability-summary entry.
+const AGENT_ENTRY = z.object({
+  id: z.string(),
+  backend: z.string(),
+  model: z.string(),
+  certification: z.string().nullable(),
+  cwd: z.string(),
+});
+
+const REGISTRY_LIST_OUTPUT = z.object({
+  agents: z.array(AGENT_ENTRY),
+});
+
+// Read-only annotations tell MCP hosts this tool is safe to cache/retry and
+// does not mutate the world.
+const REGISTRY_LIST_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
 };
+
+const REGISTRY_LIST_DESCRIPTION =
+  "List configured WAO worker agents with their backend, model, and reliability " +
+  "certification status. Read-only. Accepts no file-path arguments; the registry " +
+  "and run directory are fixed at server startup.";
 
 /**
  * Create a WAO MCP server with a single read-only tool: registry_list.
@@ -51,7 +78,7 @@ const REGISTRY_LIST_TOOL = {
  * @param {string} input.registryPath — path to agents.json (startup config)
  * @param {string} input.runDir — path to runs/ dir (for reliability-summary.json)
  * @param {Function} [input.getRegistryInventoryFn] — injectable for testing
- * @returns {import("@modelcontextprotocol/sdk/server").Server}
+ * @returns {import("@modelcontextprotocol/sdk/server/mcp.js").McpServer}
  */
 export function createWaoMcpServer({
   registryPath,
@@ -60,49 +87,40 @@ export function createWaoMcpServer({
 }) {
   const service = getRegistryInventoryFn ?? getRegistryInventory;
 
-  const server = new Server(
+  const mcp = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
-    { capabilities: { tools: {} } },
+    { version: SERVER_VERSION },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [REGISTRY_LIST_TOOL],
-  }));
-
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const toolName = request?.params?.name;
-    if (toolName !== REGISTRY_LIST_TOOL.name) {
-      // Unknown tool — return a bounded MCP error result, no stack.
-      return {
-        isError: true,
-        content: [{ type: "text", text: `unknown tool: ${toolName}` }],
-      };
-    }
-
-    try {
-      const agents = await service({ registryPath, runDir });
+  mcp.registerTool(
+    "registry_list",
+    {
+      description: REGISTRY_LIST_DESCRIPTION,
+      inputSchema: REGISTRY_LIST_INPUT,
+      outputSchema: REGISTRY_LIST_OUTPUT,
+      annotations: REGISTRY_LIST_ANNOTATIONS,
+    },
+    async () => {
+      let agents;
+      try {
+        agents = await service({ registryPath, runDir });
+      } catch {
+        // Redaction contract: fixed safe text only. Never surface err.message,
+        // stack, paths, env, or any dynamic detail to the model.
+        return {
+          isError: true,
+          content: [{ type: "text", text: SERVICE_ERROR_TEXT }],
+        };
+      }
       const payload = { agents };
-      const text = JSON.stringify(payload);
-      const result = {
-        content: [{ type: "text", text }],
-      };
-      // v1 SDK transparently passes structuredContent through to the client when
-      // present. We include it so hosts that prefer structured data get the same
-      // object. If a future SDK strips it, the text content above is the contract.
-      result.structuredContent = payload;
-      return result;
-    } catch (err) {
-      // Containment: never leak raw stack, env, or arbitrary error properties.
-      // Surface only a bounded, safe message as an MCP tool error result.
-      const message = err && typeof err.message === "string" ? err.message : "registry_list failed";
       return {
-        isError: true,
-        content: [{ type: "text", text: `registry_list failed: ${message}` }],
+        content: [{ type: "text", text: JSON.stringify(payload) }],
+        structuredContent: payload,
       };
-    }
-  });
+    },
+  );
 
-  return server;
+  return mcp;
 }
 
-export { SERVER_NAME, SERVER_VERSION, REGISTRY_LIST_TOOL };
+export { SERVER_NAME, SERVER_VERSION };

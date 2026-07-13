@@ -60,10 +60,10 @@ async function main() {
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  // Diagnostics to stderr only; stdout stays protocol-pure.
-  process.stderr.write(
-    `[wao-mcp] stdio server ready (registry=${resolve(registryPath)}, runDir=${resolve(runDir)})\n`,
-  );
+  // Diagnostics to stderr only; stdout stays protocol-pure. The banner is a
+  // FIXED string — never echo registryPath/runDir here, because MCP hosts
+  // collect stderr and those absolute paths are host-local sensitive data.
+  process.stderr.write("[wao-mcp] stdio server ready\n");
 }
 
 // Only run when invoked directly as an entrypoint, not when imported by tests.
@@ -72,10 +72,10 @@ const entryUrl = pathToFileURL(resolve(process.argv[1] ?? "")).href;
 const invokedDirectly = entryUrl === import.meta.url;
 
 if (invokedDirectly) {
-  main().catch((err) => {
-    // Bounded error to stderr; never raw stack to stdout.
-    const message = err && typeof err.message === "string" ? err.message : "stdio server failed";
-    process.stderr.write(`[wao-mcp] fatal: ${message}\n`);
+  main().catch(() => {
+    // Fixed safe text only — never echo err.message, stack, or paths to
+    // stderr (MCP hosts collect stderr and raw messages can leak internals).
+    process.stderr.write("[wao-mcp] fatal: startup failed\n");
     process.exitCode = 1;
   });
 }
