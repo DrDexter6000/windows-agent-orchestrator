@@ -709,17 +709,10 @@ async function runsDeliveryCommand(args, config) {
     throw new Error("--reason-file must contain non-empty UTF-8 text");
   }
 
-  // Accept requires completed terminal + verification passed
-  if (decision === "accepted") {
-    if (terminalState !== "completed") {
-      throw new Error(`Cannot accept: run terminal state is ${terminalState}, must be completed`);
-    }
-    if (verificationStatus !== "passed") {
-      throw new Error(`Cannot accept: delivery verification is ${verificationStatus}, must be passed`);
-    }
-  }
-
-  // Atomic first-decision-wins via transcript primitive
+  // Atomic first-decision-wins via transcript primitive.
+  // Durable preconditions (exactly-one delivery, matching verification commit,
+  // verification final status, terminal state) are re-checked IN-LOCK by
+  // tryAppendDecision — the CLI does not gate on lock-external reads.
   const { JsonlTranscript } = await import("../transcript.js");
   const transcript = new JsonlTranscript(filePath, {
     runId,
@@ -727,7 +720,6 @@ async function runsDeliveryCommand(args, config) {
     initialSeq: events[events.length - 1]?.seq ?? 0,
   });
   const result = await transcript.tryAppendDecision({
-    deliveryRef: latestRef,
     decision,
     reason,
   });
@@ -744,12 +736,11 @@ async function runsDeliveryCommand(args, config) {
       console.log(JSON.stringify({
         decisionAccepted: false,
         existing: result.existing,
-        delivery: latestRef,
       }, null, 2));
     }
   } else {
     if (result.accepted) {
-      console.log(`Decision recorded: ${decision} for ${deliveryCommit}`);
+      console.log(`Decision recorded: ${decision} for ${result.event.deliveryCommit}`);
     } else {
       console.log(`Decision not recorded: existing ${result.existing.status} for ${result.existing.deliveryCommit}`);
     }

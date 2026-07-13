@@ -361,6 +361,13 @@ npm run cli -- daemon stop
 | `messages.collected` | collect 命令拉取消息 | M0 |
 | `run.rerun` | 进程式 resume 重放（originalSessionId → newSessionId） | M3 |
 | `run.cleanup_done` | worktree 清理完成 | M3 |
+| `run.delivery_created` | TD-103：delivery 打包成功——含完整 DeliveryRef | Phase 3A |
+| `run.delivery_failed` | TD-103：delivery 打包失败——含 deliveryCode + message | Phase 3A |
+| `run.delivery_verification_passed` | TD-103：delivery 验证通过 | Phase 3B |
+| `run.delivery_verification_failed` | TD-103：delivery 验证失败（含 failureCode） | Phase 3B |
+| `run.delivery_verification_unavailable` | TD-103：无验证命令（unavailableReason） | Phase 3B |
+| `run.delivery_accepted` | TD-103：Lead 接受——含 updated DeliveryRef + deliveryCommit + reason | Phase 3C-2 |
+| `run.delivery_rejected` | TD-103：Lead 拒绝——含 updated DeliveryRef + deliveryCommit + reason | Phase 3C-2 |
 | `workflow.*` | DAG 节点级事件（workflow.started/completed、node.started/completed），独立 `wf_*.jsonl` | M5 |
 
 > `run.message`：不是落盘事件类型——RunManager 把 message 的 role/parts 传给 scorecard 供 `requireAssistantText` 检查，不写进 transcript。

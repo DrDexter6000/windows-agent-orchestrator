@@ -574,3 +574,239 @@ test("3C2-A15: ordinary runs list behavior unchanged", async () => {
     await cleanupDir(dir);
   }
 });
+
+// ===== Phase 3C-2 audit closeout: durable precondition RED tests =====
+
+/**
+ * A. Only run.delivery_created, verification=pending, no verification outcome event.
+ * --reject must fail; no run.delivery_rejected must be appended.
+ */
+test("3C2-PRE-A: reject on pending verification (no outcome event) fails closed", async () => {
+  const { dir, runId, transcript } = makeDeliveryTranscript("wao-3c2-pre-a-");
+  try {
+    // Write delivery_created but NO verification event
+    const ref = {
+      schemaVersion: 1, kind: "git_commit", runId,
+      baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
+      branch: `wao/${runId}`, worktreePath: "/fake/wt", changedFiles: ["src/a.js"],
+      verification: { status: "pending", commands: ["echo ok"] },
+      acceptance: { status: "pending", reviewerType: "lead_agent" },
+      integration: { status: "pending", targetCommit: null },
+    };
+    await transcript.append("run.started", { delivery: { mode: "git_commit_v1", baseCommit: "b".repeat(40), allowedPaths: ["src"], verificationCommands: ["echo ok"] } });
+    await transcript.append("run.delivery_created", { delivery: ref });
+    await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+
+    const reasonPath = join(dir, "reason.txt");
+    writeFileSync(reasonPath, "rejecting before verification", "utf8");
+
+    const { runsDeliveryCommand } = await import("../src/commands/runs.js");
+    await assert.rejects(
+      () => runsDeliveryCommand([runId, "--reject", "--reason-file", reasonPath, "--run-dir", dir, "--format", "json"], {}),
+      /verification|cannot reject/i,
+      "reject on pending verification must fail",
+    );
+
+    const events = await readTranscript(transcript.filePath);
+    assert.equal(events.filter((e) => e.type === "run.delivery_rejected").length, 0,
+      "no rejected event must be appended");
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+/**
+ * B. Verification outcome completely missing (no verification event at all).
+ * Both accept and reject must fail closed; no decision event appended.
+ */
+test("3C2-PRE-B: missing verification outcome → accept/reject both fail closed", async () => {
+  const { dir, runId, transcript } = makeDeliveryTranscript("wao-3c2-pre-b-");
+  try {
+    const ref = {
+      schemaVersion: 1, kind: "git_commit", runId,
+      baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
+      branch: `wao/${runId}`, worktreePath: "/fake/wt", changedFiles: ["src/a.js"],
+      verification: { status: "pending", commands: ["echo ok"] },
+      acceptance: { status: "pending", reviewerType: "lead_agent" },
+      integration: { status: "pending", targetCommit: null },
+    };
+    await transcript.append("run.started", {});
+    await transcript.append("run.delivery_created", { delivery: ref });
+    await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+
+    const reasonPath = join(dir, "reason.txt");
+    writeFileSync(reasonPath, "some reason", "utf8");
+
+    const { runsDeliveryCommand } = await import("../src/commands/runs.js");
+    await assert.rejects(
+      () => runsDeliveryCommand([runId, "--accept", "--reason-file", reasonPath, "--run-dir", dir], {}),
+      /verification|cannot accept/i,
+      "accept with missing verification must fail",
+    );
+    await assert.rejects(
+      () => runsDeliveryCommand([runId, "--reject", "--reason-file", reasonPath, "--run-dir", dir], {}),
+      /verification|cannot reject/i,
+      "reject with missing verification must fail",
+    );
+
+    const events = await readTranscript(transcript.filePath);
+    assert.equal(events.filter((e) => e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected").length, 0,
+      "no decision event must be appended");
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+/**
+ * C. Two run.delivery_created events (duplicate delivery).
+ * Accept/reject must fail closed; must not "take the latest and proceed".
+ */
+test("3C2-PRE-C: two delivery_created events → fail closed", async () => {
+  const { dir, runId, transcript } = makeDeliveryTranscript("wao-3c2-pre-c-");
+  try {
+    const ref1 = {
+      schemaVersion: 1, kind: "git_commit", runId,
+      baseCommit: "b".repeat(40), deliveryCommit: "d1".padEnd(40, "1"),
+      branch: `wao/${runId}`, worktreePath: "/fake/wt", changedFiles: ["src/a.js"],
+      verification: { status: "passed", commands: ["echo ok"], verifiedCommit: "d1".padEnd(40, "1"), results: [] },
+      acceptance: { status: "pending", reviewerType: "lead_agent" },
+      integration: { status: "pending", targetCommit: null },
+    };
+    const ref2 = {
+      ...ref1,
+      deliveryCommit: "d2".padEnd(40, "2"),
+      verification: { ...ref1.verification, verifiedCommit: "d2".padEnd(40, "2") },
+    };
+    await transcript.append("run.started", {});
+    await transcript.append("run.delivery_created", { delivery: ref1 });
+    await transcript.append("run.delivery_verification_passed", { delivery: ref1 });
+    await transcript.append("run.delivery_created", { delivery: ref2 });
+    await transcript.append("run.delivery_verification_passed", { delivery: ref2 });
+    await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+
+    const reasonPath = join(dir, "reason.txt");
+    writeFileSync(reasonPath, "which one?", "utf8");
+
+    const { runsDeliveryCommand } = await import("../src/commands/runs.js");
+    await assert.rejects(
+      () => runsDeliveryCommand([runId, "--accept", "--reason-file", reasonPath, "--run-dir", dir], {}),
+      /multiple|exactly one|ambiguous/i,
+      "accept with duplicate delivery must fail",
+    );
+
+    const events = await readTranscript(transcript.filePath);
+    assert.equal(events.filter((e) => e.type === "run.delivery_accepted").length, 0,
+      "no accepted event for duplicate delivery");
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+/**
+ * D. Verification event's deliveryCommit does not match delivery_created's deliveryCommit.
+ * Accept/reject must fail closed.
+ */
+test("3C2-PRE-D: verification commit mismatch → fail closed", async () => {
+  const { dir, runId, transcript } = makeDeliveryTranscript("wao-3c2-pre-d-");
+  try {
+    const createdRef = {
+      schemaVersion: 1, kind: "git_commit", runId,
+      baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
+      branch: `wao/${runId}`, worktreePath: "/fake/wt", changedFiles: ["src/a.js"],
+      verification: { status: "pending", commands: ["echo ok"] },
+      acceptance: { status: "pending", reviewerType: "lead_agent" },
+      integration: { status: "pending", targetCommit: null },
+    };
+    const verifiedRef = {
+      ...createdRef,
+      deliveryCommit: "e".repeat(40), // different commit!
+      verification: { status: "passed", commands: ["echo ok"], verifiedCommit: "e".repeat(40), results: [] },
+    };
+    await transcript.append("run.started", {});
+    await transcript.append("run.delivery_created", { delivery: createdRef });
+    await transcript.append("run.delivery_verification_passed", { delivery: verifiedRef });
+    await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+
+    const reasonPath = join(dir, "reason.txt");
+    writeFileSync(reasonPath, "accepting mismatched", "utf8");
+
+    const { runsDeliveryCommand } = await import("../src/commands/runs.js");
+    await assert.rejects(
+      () => runsDeliveryCommand([runId, "--accept", "--reason-file", reasonPath, "--run-dir", dir], {}),
+      /mismatch|inconsistent|deliveryCommit/i,
+      "accept with commit mismatch must fail",
+    );
+
+    const events = await readTranscript(transcript.filePath);
+    assert.equal(events.filter((e) => e.type === "run.delivery_accepted").length, 0,
+      "no accepted event for commit mismatch");
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+/**
+ * E. Stale caller TOCTOU: CLI pre-reads, then transcript gets a duplicate delivery
+ * before the atomic claim. The in-lock check must reject based on latest transcript.
+ */
+test("3C2-PRE-E: stale caller — in-lock recheck rejects duplicate added after pre-read", async () => {
+  const { dir, runId, transcript } = makeDeliveryTranscript("wao-3c2-pre-e-");
+  try {
+    // Write a valid delivery lifecycle
+    await writeFullDeliveryLifecycle(transcript);
+
+    const reasonPath = join(dir, "reason.txt");
+    writeFileSync(reasonPath, "stale caller accept", "utf8");
+
+    // Pre-read the transcript (simulating CLI's lock-external read)
+    const preEvents = await readTranscript(transcript.filePath);
+    const { latestRef } = _reconstructDeliveryExported(preEvents);
+    assert.ok(latestRef, "pre-read must find a delivery ref");
+
+    // Now inject a SECOND delivery_created before the decision attempt
+    const secondRef = {
+      ...latestRef,
+      deliveryCommit: "f".repeat(40),
+      verification: { status: "passed", commands: ["echo ok"], verifiedCommit: "f".repeat(40), results: [] },
+    };
+    await transcript.append("run.delivery_created", { delivery: secondRef });
+    await transcript.append("run.delivery_verification_passed", { delivery: secondRef });
+
+    // The decision command should fail because the in-lock check sees two deliveries
+    const { runsDeliveryCommand } = await import("../src/commands/runs.js");
+    await assert.rejects(
+      () => runsDeliveryCommand([runId, "--accept", "--reason-file", reasonPath, "--run-dir", dir], {}),
+      /multiple|exactly one|ambiguous/i,
+      "in-lock recheck must detect duplicate delivery added after pre-read",
+    );
+
+    const events = await readTranscript(transcript.filePath);
+    assert.equal(events.filter((e) => e.type === "run.delivery_accepted").length, 0,
+      "no accepted event despite stale caller having a valid pre-read");
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+/** Exported wrapper for testing _reconstructDelivery (not part of public API). */
+function _reconstructDeliveryExported(events) {
+  // Inline copy of the logic for test-side pre-read verification
+  let latestRef = null;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    if (events[i].type === "run.delivery_created" && events[i].delivery) {
+      latestRef = events[i].delivery;
+      break;
+    }
+  }
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const e = events[i];
+    if ((e.type === "run.delivery_verification_passed"
+      || e.type === "run.delivery_verification_failed"
+      || e.type === "run.delivery_verification_unavailable")
+      && e.delivery) {
+      latestRef = e.delivery;
+      break;
+    }
+  }
+  return { latestRef };
+}

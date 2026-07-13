@@ -147,24 +147,33 @@ export class JsonlTranscript {
    * TD-103 Phase 3C-2: Atomic first-decision-wins for Lead acceptance.
    *
    * Under the existing cross-process append lock:
-   *   1. read current events;
-   *   2. check for an existing accepted/rejected event for the same deliveryCommit;
-   *   3. append at most one decision event with the next seq;
-   *   4. return {accepted:true, event} to the winner or
+   *   1. read current events (in-lock, no TOCTOU);
+   *   2. validate durable preconditions from in-lock events;
+   *   3. check for an existing accepted/rejected event for the same deliveryCommit;
+   *   4. append at most one decision event with the next seq;
+   *   5. return {accepted:true, event} to the winner or
    *      {accepted:false, existing} to losers.
+   *
+   * Durable preconditions (checked in-lock, not in the CLI):
+   *   - exactly one run.delivery_created event;
+   *   - exactly one verification outcome event (passed/failed/unavailable);
+   *   - verification event's deliveryCommit must match delivery_created's;
+   *   - reject only allowed when verification status ∈ {passed, failed, unavailable};
+   *   - accept requires terminal state completed + verification passed.
    *
    * The event contains a new DeliveryRef value equal to the latest verified
    * DeliveryRef except acceptance.status becomes "accepted" or "rejected",
-   * plus deliveryCommit, reviewerType:"lead_agent", and the trimmed reason.
+   * plus deliveryCommit, reviewerType:"lead_agent", and the trimmed+redacted reason.
    *
    * Narrow primitive — not a workflow engine, database, or state machine.
    * Reuses the current redactor. Append failure propagates; never reports
    * acceptance before durable transcript write.
    *
-   * @param {{deliveryRef: object, decision: "accepted"|"rejected", reason: string}} input
+   * @param {{decision: "accepted"|"rejected", reason: string}} input
    * @returns {Promise<{accepted:true, event:object}|{accepted:false, existing:object}>}
+   * @throws {Error} if durable preconditions are not met
    */
-  async tryAppendDecision({ deliveryRef, decision, reason }) {
+  async tryAppendDecision({ decision, reason }) {
     await mkdir(dirname(this.filePath), { recursive: true });
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
@@ -174,22 +183,44 @@ export class JsonlTranscript {
       } catch {
         events = [];
       }
-      const deliveryCommit = deliveryRef?.deliveryCommit;
+
+      // In-lock fact validation — single owner of delivery facts.
+      const facts = _validateDeliveryFacts(events);
+      if (facts.error) {
+        throw new Error(facts.error);
+      }
+
+      // Decision-specific gate (also in-lock).
+      const terminalState = findState(events);
+      const verificationStatus = facts.verificationStatus;
+      if (decision === "accepted") {
+        if (terminalState !== "completed") {
+          throw new Error(`Cannot accept: run terminal state is ${terminalState}, must be completed`);
+        }
+        if (verificationStatus !== "passed") {
+          throw new Error(`Cannot accept: delivery verification is ${verificationStatus}, must be passed`);
+        }
+      } else {
+        // reject: only allowed when verification has a final outcome
+        if (!["passed", "failed", "unavailable"].includes(verificationStatus)) {
+          throw new Error(`Cannot reject: delivery verification is ${verificationStatus}, must be passed/failed/unavailable`);
+        }
+      }
+
+      const deliveryCommit = facts.deliveryCommit;
+      const deliveryRef = facts.latestRef;
       const decisionType = decision === "accepted"
         ? "run.delivery_accepted"
         : "run.delivery_rejected";
 
       // Check for existing decision event for the same deliveryCommit.
-      const existing = events.find((e) =>
-        (e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected")
-        && e.deliveryCommit === deliveryCommit);
-      if (existing) {
+      if (facts.decisionEvent) {
         return {
           accepted: false,
           existing: {
-            type: existing.type,
-            status: existing.type === "run.delivery_accepted" ? "accepted" : "rejected",
-            deliveryCommit: existing.deliveryCommit,
+            type: facts.decisionEvent.type,
+            status: facts.decisionEvent.type === "run.delivery_accepted" ? "accepted" : "rejected",
+            deliveryCommit: facts.decisionEvent.deliveryCommit,
           },
         };
       }
@@ -218,6 +249,69 @@ export class JsonlTranscript {
       await releaseLock();
     }
   }
+}
+
+/**
+ * TD-103 Phase 3C-2: Single owner of delivery fact validation.
+ *
+ * Validates durable preconditions from a transcript event array:
+ *   - exactly one run.delivery_created event;
+ *   - exactly one verification outcome event (passed/failed/unavailable);
+ *   - verification event's deliveryCommit must match delivery_created's;
+ *   - identifies any existing decision event.
+ *
+ * @param {object[]} events
+ * @returns {{valid:boolean, latestRef:object|null, deliveryCommit:string|null, verificationStatus:string, decisionEvent:object|null, error:string|null}}
+ */
+function _validateDeliveryFacts(events) {
+  const createdEvents = events.filter((e) => e.type === "run.delivery_created" && e.delivery);
+  if (createdEvents.length === 0) {
+    return { valid: false, latestRef: null, deliveryCommit: null, verificationStatus: "pending", decisionEvent: null, error: "No committed delivery found (missing run.delivery_created)" };
+  }
+  if (createdEvents.length > 1) {
+    return { valid: false, latestRef: null, deliveryCommit: null, verificationStatus: "pending", decisionEvent: null, error: `Multiple delivery_created events found (${createdEvents.length}); exactly one required` };
+  }
+
+  const createdRef = createdEvents[0].delivery;
+  const createdCommit = createdRef.deliveryCommit;
+
+  // Find verification outcome events
+  const verificationEvents = events.filter((e) =>
+    e.type === "run.delivery_verification_passed"
+    || e.type === "run.delivery_verification_failed"
+    || e.type === "run.delivery_verification_unavailable");
+
+  if (verificationEvents.length === 0) {
+    return { valid: false, latestRef: createdRef, deliveryCommit: createdCommit, verificationStatus: "pending", decisionEvent: null, error: "No verification outcome event found (missing run.delivery_verification_*)" };
+  }
+  if (verificationEvents.length > 1) {
+    return { valid: false, latestRef: createdRef, deliveryCommit: createdCommit, verificationStatus: "pending", decisionEvent: null, error: `Multiple verification outcome events found (${verificationEvents.length}); exactly one required` };
+  }
+
+  const verificationEvent = verificationEvents[0];
+  const verificationRef = verificationEvent.delivery;
+  const verificationCommit = verificationRef?.deliveryCommit;
+
+  // Verification commit must match delivery_created commit
+  if (verificationCommit !== createdCommit) {
+    return { valid: false, latestRef: createdRef, deliveryCommit: createdCommit, verificationStatus: "pending", decisionEvent: null, error: `Verification deliveryCommit (${verificationCommit}) does not match delivery_created commit (${createdCommit})` };
+  }
+
+  // Extract verification status
+  const verificationStatus = verificationEvent.type === "run.delivery_verification_passed"
+    ? "passed"
+    : verificationEvent.type === "run.delivery_verification_failed"
+      ? "failed"
+      : "unavailable";
+
+  // The latest DeliveryRef is the one from the verification event (has updated verification status)
+  const latestRef = verificationRef;
+
+  // Check for existing decision event
+  const decisionEvent = events.find((e) =>
+    e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected") ?? null;
+
+  return { valid: true, latestRef, deliveryCommit: createdCommit, verificationStatus, decisionEvent, error: null };
 }
 
 /**
