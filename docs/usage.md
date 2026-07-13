@@ -219,6 +219,28 @@ npm run cli -- run coder_low --prompt "..." --isolate
 
 隔离后，agent 在 `<cwd>/.wao-worktrees/<runId>/` 里工作，不污染主工作树。
 
+### 场景 4b：delivery 模式（foreground run + 原子交付 commit）
+
+```powershell
+# 1. 写 delivery spec JSON 文件
+@'
+{
+  "mode": "git_commit_v1",
+  "allowedPaths": ["src", "test/"],
+  "verificationCommands": ["node --test test/example.test.js"]
+}
+'@ | Set-Content delivery-spec.json
+
+# 2. 前台运行，--isolate 必须指定
+npm run cli -- run coder_low --prompt "..." --isolate --delivery-spec-file delivery-spec.json --format json
+```
+
+Delivery 模式在 worktree 隔离中运行 worker，完成后打包一个 atomic delivery commit，
+然后运行验证命令。`--format json` 返回完整 DeliveryRef 和 `verificationFailed` /
+`verificationUnavailable` 标志。schema 语义见 `docs/02-architecture.md` §4.6-4.8。
+
+限制：仅支持 foreground `run`，不支持 `--background` 或 `spawn`。
+
 ### 场景 5：重试 / 恢复
 
 ```powershell

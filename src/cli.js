@@ -295,7 +295,7 @@ Commands:
   registry check [--registry config/agents.json]
   registry validate [--registry FILE]
   spawn <agentId> [agentId2 ...] --prompt "..." [--cwd DIR] [--registry FILE] [--run-dir DIR] [--wait] [--background] [--poll-interval MS] [--wait-timeout MS] [--tag key=value] [--isolate] [--scorecard-rules-file FILE]
-  run <agentId> --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate] [--require-certified] [--background] [--scorecard-rules-file FILE]
+  run <agentId> --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate] [--require-certified] [--background] [--scorecard-rules-file FILE] [--delivery-spec-file FILE]
   status <runId> [--run-dir DIR] [--format json]
   tail <runId> [--limit N] [--follow] [--run-dir DIR]
   collect <runId> [--limit N] [--run-dir DIR]
@@ -311,6 +311,9 @@ Commands:
   runs scorecard <runId> [--run-dir DIR] [--format json]
   runs dashboard [--watch N] [--agent ID] [--latest N] [--format json] [--run-dir DIR]
   runs diagnose <runId> [--run-dir DIR] [--format json]
+  runs delivery <runId> [--run-dir DIR] [--format json]
+  runs delivery <runId> --accept --reason-file FILE [--run-dir DIR] [--format json]
+  runs delivery <runId> --reject --reason-file FILE [--run-dir DIR] [--format json]
   runs forecast --agents a,b [--run-dir DIR] [--format json]
   workflow run <name|file.mjs> [--input TEXT] [--registry FILE] [--isolate] [--wait-timeout MS] [--run-dir DIR] [--vars key=value...]
   workflow list                  # 列出可用模板（workflows/templates/）

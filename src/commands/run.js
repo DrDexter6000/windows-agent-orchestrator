@@ -30,6 +30,7 @@ import { fileURLToPath } from "node:url";
 import { JsonlTranscript, readTranscript } from "../transcript.js";
 import { renderRunSummary } from "../cliRunSummary.js";
 import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag } from "./shared.js";
+import { prepareDeliveryRequest } from "../delivery.js";
 
 function parseAgentList(args) {
   const agents = [];
@@ -56,6 +57,40 @@ async function loadScorecardRules(options) {
     options.scorecardRulesSource = "--scorecard-rules";
   }
   return options;
+}
+
+/**
+ * TD-103 Phase 3C-1: Load and validate a delivery spec from a JSON file.
+ *
+ * The file contains the existing RunManager delivery request:
+ *   { mode: "git_commit_v1", allowedPaths: [...], verificationCommands: [...] }
+ *
+ * Validates through the existing prepareDeliveryRequest() SSOT — does not
+ * duplicate mode/path/verification rules. Returns the validated delivery
+ * object suitable for RunManager.start({delivery}), or undefined if no
+ * --delivery-spec-file was given.
+ *
+ * @param {object} options — parsed CLI options
+ * @returns {Promise<object|undefined>} validated delivery request or undefined
+ */
+async function loadDeliverySpec(options) {
+  if (!options.deliverySpecFile) return undefined;
+  const raw = await readFile(resolve(options.deliverySpecFile), "utf8");
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`--delivery-spec-file must contain valid JSON: ${options.deliverySpecFile}`);
+  }
+  // Validate through SSOT — throws DeliveryError on schema violations.
+  const validated = prepareDeliveryRequest(parsed);
+  return {
+    mode: validated.mode,
+    allowedPaths: validated.allowedPaths,
+    ...(validated.verification.commands.length > 0
+      ? { verificationCommands: validated.verification.commands }
+      : { verificationUnavailableReason: validated.verification.unavailableReason }),
+  };
 }
 
 /**
@@ -142,6 +177,9 @@ async function spawnBackgroundRunner(agentId, options, config) {
 
 export async function spawnCommand(args, config) {
   const { agents, options } = parseAgentList(args);
+  if (options.deliverySpecFile) {
+    throw new Error("delivery mode is only supported on `run`, not `spawn`");
+  }
   const manager = newRunManager(config);
   // P2（M7）：单 agent spawn 不带 --wait = 后台托管（detached runner）。
   // 替代旧 TD-39 "拒绝裸 spawn"——现在不拒，而是托管：runner 拥有 handle 驱动 wait+gate+abort，
@@ -206,6 +244,16 @@ export async function runCommand(args, config) {
     throw new Error("run requires <agentId>");
   }
   const options = parseOptions(tail);
+  // TD-103 Phase 3C-1: load and validate delivery spec before any side effects.
+  const delivery = await loadDeliverySpec(options);
+  // Delivery requires --isolate; reject before spawn.
+  if (delivery && !resolveIsolateFlag(options)) {
+    throw new Error("delivery mode requires --isolate (persistent worktree isolation)");
+  }
+  // Delivery is foreground-only; reject --background before fork side effects.
+  if (delivery && options.background) {
+    throw new Error("delivery mode is not supported with --background (foreground only)");
+  }
   // P2（M7）：--background = detached runner 托管。CLI 预生成 runId、fork runner、立即返回。
   // runner 拥有 worker handle，驱动 waitForCompletion（含 token 闸门/超时/兜底 abort），
   // 写共享 transcript。这是 06-18 事故架构洞的正解——把"拒绝裸 spawn"换"托管生命周期"。
@@ -222,12 +270,15 @@ export async function runCommand(args, config) {
     registry: options.registry,
     runDir: options.runDir,
     tags: options.tag,
-    cwd: options.cwd,
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+    ...(options.runId ? { runId: options.runId } : {}),
     isolate: resolveIsolateFlag(options),
     requireCertified: Boolean(options.requireCertified),
     // M8-1：默认 scorecard 模式。warn(默认)=开启留痕不阻塞 | hard=升级硬闸 | off=完全关闭。
     ...(options.scorecardMode ? { scorecardMode: options.scorecardMode } : {}),
     ...(options.scorecardRules ? { scorecard: { rules: parseScorecardRules(options.scorecardRules, options.scorecardRulesSource) } } : {}),
+    // TD-103 Phase 3C-1: pass validated delivery request to RunManager.
+    ...(delivery ? { delivery } : {}),
   });
   const format = options.format ?? "text";
   const waitResult = await runAndWait(run, options);
