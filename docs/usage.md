@@ -471,7 +471,7 @@ MCP host 的 stdio 配置指向同一个入口：
 
 返回时 transcript 已可读且为 `pending`；关闭 MCP host 后，detached runner 独立驱动 worker 到终态（token 闸门/超时/兜底 abort 都生效），写入共享 transcript。Lead 后续用 `status`/`runs` CLI 监督（MCP supervise/status 尚未实现，属 M9-3）。
 
-annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:false, openWorldHint:true`（真实派发操作）。
+annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:false, openWorldHint:true`（派发真实 worker，可执行命令、修改文件、访问外部系统）。
 
 ---
 

@@ -50,7 +50,7 @@ CLI Adapter ─┘                 ↓
 - Application Services 层是 M9 planned target。**已提取的共享 services**：`src/application/registryInventory.js`（M9-0，inventory）、`src/application/runDispatch.js`（M9-2A，background dispatch）。CLI `run --background` / `spawn`（no --wait）已委托 `dispatchRun()`。其余 use-case orchestration 仍在 `src/commands/*.js` 中，尚未提取为共享 services。RunManager/transcript/delivery/workflow/registry 是 core/domain capabilities，不是完整的 application-service 层。
 - 业务规则只写一次，在 application services 层。**禁止 MCP Server 通过 shell 调 CLI 并解析文本输出。** MCP adapter 直接 import 并调用 application service。
 - RunManager / transcript / delivery / Backend / workflow 不依赖 MCP——MCP 是 L4 adapter，不是 L1-L3 dependency。`src/mcp/**` 是唯一允许 import `@modelcontextprotocol/sdk` 与 `zod` 的位置（由边界测试守卫）。`src/application/**` 不得 import `src/commands/*`、`src/mcp/*`、MCP SDK 或 zod。
-- M9-1 暴露只读 `registry_list`。M9-2A 提取共享 dispatch service 但尚未暴露 MCP dispatch tool（M9-2B）。完整 Lead 闭环（inventory → dispatch → supervise → collect/diagnose → delivery query → acceptance）尚未在 MCP 上完成。
+- M9 已暴露 MCP `registry_list`（只读）和 `run_dispatch`（派发受监督后台 run，调 `dispatchRun()` service，固定 `requireCertified:true`，destructive）。尚未在 MCP 实现：supervise/collect/diagnose/delivery query/acceptance（M9-3+）。完整 Lead 闭环（inventory → dispatch → supervise → collect/diagnose → delivery query → acceptance）尚未在 MCP 上完成。
 - Backend 仍只负责 worker runtime。
 - Skill 是 Lead 指导层（`SKILL.md`），不在运行时依赖图中保存状态。
 - Transcript 继续是 run truth SSOT。等价的 state-changing operation（无论来自 MCP 还是 CLI）必须调用同一 service，产生相同 transcript durable facts 和 outcome；read-only query 不制造 transcript 事件，返回语义等价的结构化结果。

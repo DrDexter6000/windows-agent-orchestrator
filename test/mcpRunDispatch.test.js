@@ -90,9 +90,10 @@ test("M9-2B-01: tools/list has registry_list + run_dispatch with strict schema a
         "input schema has only agentId + prompt",
       );
       assert.equal(rd.inputSchema.additionalProperties, false, "input is strict");
-      // Annotations: not read-only, open-world (dispatches real work).
+      // Annotations: not read-only, destructive (worker may modify files/run commands),
+      // not idempotent, open-world (dispatches real work).
       assert.equal(rd.annotations.readOnlyHint, false, "readOnlyHint:false");
-      assert.equal(rd.annotations.destructiveHint, false, "destructiveHint:false");
+      assert.equal(rd.annotations.destructiveHint, true, "destructiveHint:true (worker can mutate files/execute commands)");
       assert.equal(rd.annotations.idempotentHint, false, "idempotentHint:false");
       assert.equal(rd.annotations.openWorldHint, true, "openWorldHint:true");
       // Output schema declared.
@@ -208,15 +209,21 @@ test("M9-2B-04: control-plane args rejected, dispatcher not called", async () =>
       { agentId: "x", prompt: "y", evil: true },
     ];
     for (const bad of badArgsList) {
-      let threw = false;
+      let rejected = false;
+      let result = null;
       try {
-        const res = await client.callTool({ name: "run_dispatch", arguments: bad });
-        assert.equal(res.isError, true, `control-plane arg ${JSON.stringify(Object.keys(bad))} rejected`);
+        result = await client.callTool({ name: "run_dispatch", arguments: bad });
       } catch {
-        threw = true;
+        // A protocol-level rejection (throw) is a valid rejection.
+        rejected = true;
       }
-      // Either thrown or isError:true — both mean rejected.
-      assert.ok(threw || true);
+      if (!rejected) {
+        // If it returned a result, it must be an explicit tool error — never success.
+        assert.equal(result.isError, true,
+          `control-plane arg ${JSON.stringify(Object.keys(bad))} must be rejected, got success`);
+        rejected = true;
+      }
+      assert.ok(rejected, `every control-plane arg must be rejected: ${JSON.stringify(Object.keys(bad))}`);
     }
     assert.equal(callCount, 0, "dispatcher never called for any control-plane arg");
   } finally {

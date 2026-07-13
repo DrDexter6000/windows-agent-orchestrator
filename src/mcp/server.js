@@ -1,21 +1,22 @@
 // src/mcp/server.js
 //
-// M9-1: WAO MCP server factory — read-only registry_list vertical slice.
+// WAO MCP server factory — agent-facing control plane over stdio.
 //
-// This is the agent-facing MCP adapter. It exposes WAO's registry inventory
-// (the M9-0 `getRegistryInventory()` application service) as a single MCP tool
-// so an MCP host can list configured agents over the MCP protocol.
+// This is the agent-facing MCP adapter. It exposes WAO application services as
+// MCP tools so an MCP host can list configured agents (registry_list) and
+// dispatch supervised background runs (run_dispatch) over the MCP protocol.
 //
 // Architectural contract (see docs/02-architecture.md):
 //   - This module imports the MCP SDK + zod (the ONLY place allowed besides tests).
-//   - It depends on src/application/registryInventory.js — it does NOT import
-//     src/commands/*, does NOT shell out to the CLI, does NOT write transcripts,
-//     does NOT spawn runs, does NOT read credentials.
-//   - The tool is strictly read-only: it returns data, never mutates state.
+//   - It depends on src/application/registryInventory.js and runDispatch.js — it
+//     does NOT import src/commands/*, does NOT shell out to the CLI, does NOT
+//     read credentials, does NOT write transcripts directly.
+//   - registry_list is read-only. run_dispatch spawns a supervised worker via the
+//     dispatchRun service (which forks a detached runner); it is destructive.
 //
 // The factory is dependency-injectable for testing: production wires the real
-// `getRegistryInventory`, tests may pass a fake to assert exactly-once
-// invocation and path-non-override without touching the filesystem.
+// services, tests may pass fakes to assert exactly-once invocation,
+// path-non-override, and error containment without touching the filesystem.
 //
 // M9-1 audit closeout: this module uses the SDK high-level McpServer so that
 // input validation, unknown-tool rejection, and output-schema validation are
@@ -92,11 +93,12 @@ const RUN_DISPATCH_OUTPUT = z.object({
   state: z.string(),
 });
 
-// Dispatch is a real side-effecting operation (spawns a supervised worker),
-// so it is not read-only, not idempotent, and touches the open world.
+// Dispatch spawns a worker that executes commands, modifies files, and may
+// reach external systems — it is destructive (not append-only) per the SDK
+// annotation contract. Not read-only, not idempotent, open world.
 const RUN_DISPATCH_ANNOTATIONS = {
   readOnlyHint: false,
-  destructiveHint: false,
+  destructiveHint: true,
   idempotentHint: false,
   openWorldHint: true,
 };

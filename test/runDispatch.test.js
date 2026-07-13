@@ -135,6 +135,38 @@ test("M9-2A-02: spawn argv carries all required background runner params", async
     assert.ok(argv.includes("90000"), "argv has waitTimeout value");
     assert.ok(argv.includes("--poll-interval"), "argv has --poll-interval");
     assert.ok(argv.includes("--cwd"), "argv has --cwd");
+    // requireCertified defaults to false → flag must NOT appear when unset.
+    assert.ok(!argv.includes("--require-certified"), "no --require-certified when requireCertified is false/default");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// M9-2A-02b: requireCertified:true → argv carries --require-certified.
+//            Locks the flag into the runner argv so M9-2A-07's gate proof
+//            rests on a verified propagation path, not an assumption.
+// ---------------------------------------------------------------------
+
+test("M9-2A-02b: requireCertified:true adds --require-certified to runner argv", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m92a-02b-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const runDir = join(dir, "runs");
+
+    await dispatchRun({
+      agentId: "coder_low",
+      prompt: "x",
+      registryPath,
+      runDir,
+      requireCertified: true,
+      spawnFn: fakeSpawn,
+    });
+
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].args.includes("--require-certified"),
+      "argv contains --require-certified when requireCertified:true");
   } finally {
     cleanupDir(dir);
   }
@@ -278,12 +310,17 @@ test("M9-2A-06: dispatchRun does not write to console", async () => {
 });
 
 // ---------------------------------------------------------------------
-// M9-2A-07: requireCertified is propagated to runner argv and RunManager.
-//           Using a temp registry + fresh summary + nonexistent backend binary:
-//           an uncertified worker must reach a failed terminal state.
+// M9-2A-07: requireCertified propagated — uncertified worker fails at the
+//           certification gate (not at a later binary/spawn failure).
+//           The test proves the flag reaches RunManager by asserting the
+//           SPECIFIC failure cause: run.error.phase === "certification-gate",
+//           terminal reason === "certification_gate", and the run never entered
+//           submitted/running. A nonexistent binary alone cannot explain this —
+//           if requireCertified were silently dropped, the worker would proceed
+//           past the gate and fail later with a spawn/start error instead.
 // ---------------------------------------------------------------------
 
-test("M9-2A-07: requireCertified propagated — uncertified worker fails terminal", async () => {
+test("M9-2A-07: requireCertified propagated — fails at certification-gate, never submitted", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m92a-07-"));
   try {
     const registryPath = makeRegistry(dir, {
@@ -294,7 +331,7 @@ test("M9-2A-07: requireCertified propagated — uncertified worker fails termina
       },
     });
     const runDir = join(dir, "runs");
-    // Fresh summary that does NOT include uncertified_worker.
+    // Fresh summary that does NOT include uncertified_worker → gate must reject.
     makeSummary(runDir, { other_worker: { status: "certified" } });
 
     const result = await dispatchRun({
@@ -305,21 +342,44 @@ test("M9-2A-07: requireCertified propagated — uncertified worker fails termina
       requireCertified: true,
     });
 
-    // With requireCertified and the worker absent from the summary, dispatch must
-    // NOT produce an accepted pending run. Either it rejects at the gate or the
-    // runner drives it to a failed terminal. We assert the transcript reaches
-    // a terminal failure, proving the flag is no longer silently ignored.
     const transcriptPath = join(runDir, `${result.runId}.jsonl`);
     let events = [];
-    for (let i = 0; i < 60; i += 1) {
+    for (let i = 0; i < 80; i += 1) {
       if (existsSync(transcriptPath)) {
         events = await readTranscript(transcriptPath);
         if (["failed", "completed", "aborted", "timed_out"].includes(findState(events))) break;
       }
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 150));
     }
-    const finalState = findState(events);
-    assert.equal(finalState, "failed", "uncertified worker with requireCertified reaches failed terminal");
+
+    // Terminal state is failed.
+    assert.equal(findState(events), "failed", "uncertified worker reaches failed terminal");
+
+    // The failure must be at the certification gate specifically — this is what
+    // proves requireCertified reached RunManager. A dropped flag would let the
+    // nonexistent binary fail later with phase:"start", not "certification-gate".
+    const runError = findLatest(events, "run.error");
+    assert.ok(runError, "a run.error event was written");
+    assert.equal(runError.phase, "certification-gate",
+      `failure cause is certification-gate (got phase=${JSON.stringify(runError.phase)}); ` +
+      `if this is "start" or absent, requireCertified was silently dropped`);
+
+    // The failed transition must carry the certification_gate reason.
+    const failedChange = events.find(
+      (e) => e.type === "run.state_change" && e.to === "failed",
+    );
+    assert.ok(failedChange, "failed state_change present");
+    assert.equal(failedChange.reason, "certification_gate",
+      `terminal reason is certification_gate (got ${JSON.stringify(failedChange.reason)})`);
+
+    // The run must NEVER have entered submitted or running — the gate stops it
+    // at pending. If a submitted/running state_change exists, the worker was
+    // dispatched despite failing certification.
+    const submittedOrRunning = events.filter(
+      (e) => e.type === "run.state_change" && (e.to === "submitted" || e.to === "running"),
+    );
+    assert.equal(submittedOrRunning.length, 0,
+      "never entered submitted/running — gate rejects before dispatch");
   } finally {
     cleanupDir(dir);
   }
