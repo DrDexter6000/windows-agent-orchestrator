@@ -23,14 +23,15 @@
 //   2. runAndWait 动态 import：./diagnosis.js → ../diagnosis.js，./transcript.js → ../transcript.js。
 
 import { readFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { JsonlTranscript, readTranscript } from "../transcript.js";
+import { readTranscript } from "../transcript.js";
 import { renderRunSummary } from "../cliRunSummary.js";
 import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag } from "./shared.js";
 import { prepareDeliveryRequest } from "../delivery.js";
+// M9-2A: background dispatch delegated to shared application service.
+import { dispatchRun } from "../application/runDispatch.js";
 
 function parseAgentList(args) {
   const agents = [];
@@ -118,58 +119,44 @@ async function loadScorecardFromTranscript(transcriptPath) {
   }
 }
 
-// P2（M7）：fork detached runner 托管一个 background run。
-// CLI 预生成 runId（与 RunManager 同款格式），fork node backgroundRunner.js 传过去，
-// detached + unref → CLI 进程退出后 runner 独立存活到 run 结束。立即返回 runId。
+// P2（M7）→ M9-2A：fork detached runner 托管一个 background run。
+// 派发逻辑已提取到共享 application service (dispatchRun)；本函数只负责 CLI 适配——
+// 选项整理 + 把 service 结构化结果映射到既有 JSON 输出契约（不变）。
 async function spawnBackgroundRunner(agentId, options, config) {
   if (options.scorecardRules) {
     parseScorecardRules(options.scorecardRules, options.scorecardRulesSource);
   }
-  // TD-98 阶段 2e-3 路径修正：本模块在 src/commands/，backgroundRunner.js 在 src/，
-  // 故 dirname(import.meta.url) 需多一层 .. 才能解析到 src/backgroundRunner.js。
+  // TD-98 阶段 2e-3 路径修正：本模块在 src/commands/，backgroundRunner.js 在 src/。
   const runnerPath = join(dirname(fileURLToPath(import.meta.url)), "..", "backgroundRunner.js");
-  const runId = options.runId ?? `run_${new Date().toISOString().replace(/[-:.TZ]/g, "")}${Math.random().toString(36).slice(2, 8)}`;
-  const runDir = resolve(options.runDir ?? config.runDir);
-  const transcriptPath = join(runDir, `${runId}.jsonl`);
-  const transcript = new JsonlTranscript(transcriptPath, { runId, agentId });
-  await transcript.append("run.background_submitted", {
-    background: true,
+  const result = await dispatchRun({
+    agentId,
+    prompt: options.prompt ?? "",
+    registryPath: resolve(options.registry ?? config.registry),
+    runDir: resolve(options.runDir ?? config.runDir),
+    runId: options.runId,
     cwd: options.cwd,
-    scorecardConfigured: Boolean(options.scorecardRules),
+    waitTimeout: options.waitTimeout ?? config.waitTimeout ?? 120000,
+    pollInterval: options.pollInterval ?? config.pollInterval ?? 1000,
+    scorecardRules: options.scorecardRules,
+    scorecardMode: options.scorecardMode,
+    // M9-2A (§70)：background 路径不再静默忽略 requireCertified——与 foreground 一致透传。
+    requireCertified: Boolean(options.requireCertified),
+    runnerPath,
   });
-  // TD-99：pending 初始化走 transitionState（first-terminal-wins 仲裁）。
-  // 此时 transcript 刚建（只有 background_submitted），无既有终态，必 accepted。
-  // 万一 rejected（runId 复用了旧终态 transcript），不得 fork detached runner。
-  const pendingResult = await transcript.transitionState(null, "pending", "background_spawned");
-  if (!pendingResult.accepted) {
+  if (!result.accepted) {
     console.log(JSON.stringify({
-      runId,
-      transcript: transcriptPath,
+      runId: result.runId,
+      transcript: result.transcriptPath,
       background: true,
       terminalAccepted: false,
-      terminalState: pendingResult.state,
-      note: `not forked: transcript already terminal (${pendingResult.state})`,
+      terminalState: result.terminalState,
+      note: `not forked: transcript already terminal (${result.terminalState})`,
     }, null, 2));
     return;
   }
-  const runnerArgs = [
-    runnerPath, agentId,
-    "--prompt", options.prompt ?? "",
-    "--run-dir", runDir,
-    "--run-id", runId,
-    "--wait-timeout", String(options.waitTimeout ?? config.waitTimeout ?? 120000),
-    "--poll-interval", String(options.pollInterval ?? config.pollInterval ?? 1000),
-  ];
-  runnerArgs.push("--registry", options.registry ?? config.registry);
-  if (options.cwd) runnerArgs.push("--cwd", options.cwd);
-  if (options.scorecardRules) runnerArgs.push("--scorecard-rules", options.scorecardRules);
-  // M8-1：把 --scorecard-mode 透传给 background runner（默认 warn；hard/off 由 Lead 显式传）。
-  if (options.scorecardMode) runnerArgs.push("--scorecard-mode", options.scorecardMode);
-  // detached: runner 脱离 CLI 进程组，CLI 退出不杀它；stdio ignore（runner 自写 transcript）。
-  spawn(process.execPath, runnerArgs, { detached: true, stdio: "ignore" }).unref();
   console.log(JSON.stringify({
-    runId,
-    transcript: transcriptPath,
+    runId: result.runId,
+    transcript: result.transcriptPath,
     background: true,
     note: "detached runner owns lifecycle (token gate / abort / state). Poll with `status`/`tail`.",
   }, null, 2));

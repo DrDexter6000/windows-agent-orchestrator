@@ -133,6 +133,8 @@ export async function runBackground(opts = {}) {
       ...(opts.scorecardRules ? { scorecard: { rules: opts.scorecardRules } } : {}),
       // M8-1：透传 --scorecard-mode（默认 warn；hard/off 由 Lead 显式传）。
       ...(opts.scorecardMode ? { scorecardMode: opts.scorecardMode } : {}),
+      // M9-2A：透传 --require-certified（CLI/MCP background 路径不再静默忽略认证门）。
+      requireCertified: Boolean(opts.requireCertified),
     });
   } catch (error) {
     await writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error });
@@ -233,6 +235,8 @@ export async function runMain(argv = process.argv.slice(2)) {
     pollInterval: Number(opts["poll-interval"] ?? 1000),
     scorecardRules: opts["scorecard-rules"] ? JSON.parse(opts["scorecard-rules"]) : undefined,
     scorecardMode: opts["scorecard-mode"],
+    // M9-2A: boolean flag — present in argv means enabled.
+    requireCertified: argv.includes("--require-certified"),
   });
   // detached runner 把最终结果写 stdout 一行 JSON（供调试/日志；CLI 已返回，不依赖此）
   process.stdout.write(JSON.stringify(result) + "\n");
