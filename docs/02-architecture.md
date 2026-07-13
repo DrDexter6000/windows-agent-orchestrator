@@ -634,6 +634,44 @@ packageDelivery success → transitionState(completed)
 
 `verifyDeliveryFn` 构造函数参数（默认 `verifyDelivery`）仅供测试/组合注入。HTTP resume 创建 Run 时同样传入（自 closeout 起，不再遗漏）。
 
+### 4.9 Lead Acceptance Record `[Phase 3C-2]`
+
+> **实现状态**：TD-103 Phase 3C-2 complete。`runs delivery` 命令已接入 CLI，
+> transcript-backed 原子 first-decision-wins 语义已实现。
+> Phase 3C coder-first template 和真实 dogfood 待 CTO 审计后做。
+
+**公开 CLI**：
+
+```text
+runs delivery <runId> [--format json]                                    # 只读查询
+runs delivery <runId> --accept --reason-file FILE [--format json]       # Lead 接受
+runs delivery <runId> --reject --reason-file FILE [--format json]       # Lead 拒绝
+```
+
+**只读查询**返回从 transcript 事件重建的结构化视图：runId、终态、最新 DeliveryRef、
+verification 状态/failureCode、acceptance 状态及已有决策事件（如有）。Transcript 是 SSOT，
+不创建额外 current-state 文件。
+
+**决策前置条件**：
+- 必须存在 exactly one committed delivery（有 `run.delivery_created` + verification event）。
+- `--accept` 和 `--reject` 互斥。
+- `--reason-file` 必须是非空 UTF-8 文件（不支持 inline reason，避免 PowerShell quoting drift）。
+- `--accept` 要求 run terminal `completed` + verification `passed`。
+- `--reject` 允许 passed/failed/unavailable verification，但仍要求 committed delivery。
+- 不执行 merge/reset/checkout/cherry-pick/push/branch deletion/worktree deletion/Git mutation。
+
+**事件**：append exactly one of `run.delivery_accepted` / `run.delivery_rejected`。
+事件含新 DeliveryRef（acceptance.status 变为 accepted/rejected，其余字段不变）+
+`deliveryCommit` + `reviewerType:"lead_agent"` + trimmed reason。
+不重写已有 `run.delivery_created` 或 verification 事件。
+
+**原子 first-decision-wins**（`JsonlTranscript.tryAppendDecision`）：
+在已有 cross-process append lock 内完成：读事件 → 检查同一 `deliveryCommit` 的已有
+accepted/rejected event → append at most one decision event → 返回 `{accepted:true,event}`
+给 winner 或 `{accepted:false,existing}` 给 loser。此原语窄，不泛化为 workflow engine。
+append 失败原样传播；不在 durable transcript write 前 report acceptance。
+CLI JSON 区分 `decisionAccepted:true`（winner）vs `decisionAccepted:false` + existing（loser）。
+
 ---
 
 ## 5. L3：编排层 `[M]`

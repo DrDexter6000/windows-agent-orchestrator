@@ -241,6 +241,23 @@ Delivery 模式在 worktree 隔离中运行 worker，完成后打包一个 atomi
 
 限制：仅支持 foreground `run`，不支持 `--background` 或 `spawn`。
 
+### 场景 4c：Lead 验收（delivery acceptance）
+
+```powershell
+# 查询 delivery 状态
+npm run cli -- runs delivery <runId> --format json
+
+# 接受（要求 verification passed + terminal completed）
+npm run cli -- runs delivery <runId> --accept --reason-file accept-reason.txt --format json
+
+# 拒绝（允许 passed/failed/unavailable verification）
+npm run cli -- runs delivery <runId> --reject --reason-file reject-reason.txt --format json
+```
+
+Lead 验收通过 transcript-backed 原子 first-decision-wins 写入 `run.delivery_accepted` /
+`run.delivery_rejected` 事件。`--reason-file` 必须是非空 UTF-8 文件。语义见
+`docs/02-architecture.md` §4.9。
+
 ### 场景 5：重试 / 恢复
 
 ```powershell

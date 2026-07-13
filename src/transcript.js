@@ -142,6 +142,82 @@ export class JsonlTranscript {
       await releaseLock();
     }
   }
+
+  /**
+   * TD-103 Phase 3C-2: Atomic first-decision-wins for Lead acceptance.
+   *
+   * Under the existing cross-process append lock:
+   *   1. read current events;
+   *   2. check for an existing accepted/rejected event for the same deliveryCommit;
+   *   3. append at most one decision event with the next seq;
+   *   4. return {accepted:true, event} to the winner or
+   *      {accepted:false, existing} to losers.
+   *
+   * The event contains a new DeliveryRef value equal to the latest verified
+   * DeliveryRef except acceptance.status becomes "accepted" or "rejected",
+   * plus deliveryCommit, reviewerType:"lead_agent", and the trimmed reason.
+   *
+   * Narrow primitive — not a workflow engine, database, or state machine.
+   * Reuses the current redactor. Append failure propagates; never reports
+   * acceptance before durable transcript write.
+   *
+   * @param {{deliveryRef: object, decision: "accepted"|"rejected", reason: string}} input
+   * @returns {Promise<{accepted:true, event:object}|{accepted:false, existing:object}>}
+   */
+  async tryAppendDecision({ deliveryRef, decision, reason }) {
+    await mkdir(dirname(this.filePath), { recursive: true });
+    const releaseLock = await acquireAppendLock(this.filePath);
+    try {
+      let events = [];
+      try {
+        events = await readTranscript(this.filePath);
+      } catch {
+        events = [];
+      }
+      const deliveryCommit = deliveryRef?.deliveryCommit;
+      const decisionType = decision === "accepted"
+        ? "run.delivery_accepted"
+        : "run.delivery_rejected";
+
+      // Check for existing decision event for the same deliveryCommit.
+      const existing = events.find((e) =>
+        (e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected")
+        && e.deliveryCommit === deliveryCommit);
+      if (existing) {
+        return {
+          accepted: false,
+          existing: {
+            type: existing.type,
+            status: existing.type === "run.delivery_accepted" ? "accepted" : "rejected",
+            deliveryCommit: existing.deliveryCommit,
+          },
+        };
+      }
+
+      // Build the new DeliveryRef with updated acceptance status.
+      const newRef = {
+        ...deliveryRef,
+        acceptance: {
+          status: decision,
+          reviewerType: "lead_agent",
+        },
+      };
+      const trimmedReason = String(reason).trim();
+      const baseSeq = Math.max(this.seq, findLastEventSeq(events));
+      const seq = baseSeq + 1;
+      const ts = new Date().toISOString();
+      const ctx = { runId: this.context.runId, agentId: this.context.agentId };
+      const event = {
+        ...this.redact({ delivery: newRef, deliveryCommit, reason: trimmedReason }),
+        ts, seq, ...ctx, type: decisionType,
+      };
+      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      this.seq = seq;
+      return { accepted: true, event };
+    } finally {
+      await releaseLock();
+    }
+  }
 }
 
 /**

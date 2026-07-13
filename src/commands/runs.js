@@ -16,7 +16,7 @@
 //
 // 本模块内部 helper：parseDuration（runs prune 专用）、loadRunFiles（runs 族专用）。
 
-import { readdir, unlink } from "node:fs/promises";
+import { readdir, unlink, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -57,6 +57,10 @@ async function runsCommand(args, config) {
   }
   if (sub === "diagnose") {
     await runsDiagnoseCommand(tail, config);
+    return;
+  }
+  if (sub === "delivery") {
+    await runsDeliveryCommand(tail, config);
     return;
   }
   if (sub === "forecast") {
@@ -575,4 +579,179 @@ export async function runsDashboardCommand(args, config) {
   }
 }
 
-export { runsCommand };
+export { runsCommand, runsDeliveryCommand };
+
+// ===== TD-103 Phase 3C-2: Lead acceptance record =====
+
+/**
+ * Reconstruct the latest DeliveryRef from transcript events.
+ * Looks for delivery_created, then any verification event (which carries
+ * an updated DeliveryRef), and checks for existing accepted/rejected events.
+ * @param {object[]} events
+ * @returns {{latestRef: object|null, decisionEvent: object|null, deliveryCommit: string|null}}
+ */
+function _reconstructDelivery(events) {
+  // Find the latest delivery_created event (has the initial DeliveryRef)
+  let latestRef = null;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    if (events[i].type === "run.delivery_created" && events[i].delivery) {
+      latestRef = events[i].delivery;
+      break;
+    }
+  }
+  // If there's a verification event, it carries an updated DeliveryRef
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const e = events[i];
+    if ((e.type === "run.delivery_verification_passed"
+      || e.type === "run.delivery_verification_failed"
+      || e.type === "run.delivery_verification_unavailable")
+      && e.delivery) {
+      latestRef = e.delivery;
+      break;
+    }
+  }
+  // Check for existing decision event
+  let decisionEvent = null;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const e = events[i];
+    if (e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected") {
+      decisionEvent = e;
+      break;
+    }
+  }
+  // If a decision event exists, it carries the final DeliveryRef with updated acceptance
+  if (decisionEvent?.delivery) {
+    latestRef = decisionEvent.delivery;
+  }
+  const deliveryCommit = latestRef?.deliveryCommit ?? null;
+  return { latestRef, decisionEvent, deliveryCommit };
+}
+
+/**
+ * runs delivery <runId> — Lead acceptance record.
+ *
+ * Read-only query:
+ *   runs delivery <runId> [--format json]
+ *
+ * Decision:
+ *   runs delivery <runId> --accept --reason-file FILE [--format json]
+ *   runs delivery <runId> --reject --reason-file FILE [--format json]
+ *
+ * Records a Lead verdict via transcript-backed atomic first-decision-wins.
+ * Never manufactures the verdict or infers semantic correctness.
+ */
+async function runsDeliveryCommand(args, config) {
+  const options = parseOptions(args);
+  const runDir = resolve(options.runDir ?? config.runDir);
+  const [runId] = args.filter((a) => !a.startsWith("--"));
+  if (!runId) {
+    throw new Error("runs delivery requires <runId>");
+  }
+  const filePath = join(runDir, `${runId}.jsonl`);
+  const events = await readTranscript(filePath);
+  const terminalState = findState(events);
+  const { latestRef, decisionEvent, deliveryCommit } = _reconstructDelivery(events);
+
+  // No committed delivery → fail closed
+  if (!latestRef || !deliveryCommit) {
+    throw new Error(`No committed delivery found for run ${runId}`);
+  }
+
+  const verificationStatus = latestRef.verification?.status ?? "pending";
+  const acceptanceStatus = decisionEvent
+    ? (decisionEvent.type === "run.delivery_accepted" ? "accepted" : "rejected")
+    : (latestRef.acceptance?.status ?? "pending");
+
+  // Read-only query (no --accept / --reject)
+  if (!options.accept && !options.reject) {
+    const view = {
+      runId,
+      terminalState,
+      deliveryRef: latestRef,
+      verification: {
+        status: verificationStatus,
+        ...(latestRef.verification?.failureCode ? { failureCode: latestRef.verification.failureCode } : {}),
+      },
+      acceptance: {
+        status: acceptanceStatus,
+        ...(decisionEvent ? { decisionEvent: { type: decisionEvent.type, reason: decisionEvent.reason } } : {}),
+      },
+    };
+    if (options.format === "json") {
+      console.log(JSON.stringify(view, null, 2));
+    } else {
+      console.log(`Run: ${runId} (${terminalState})`);
+      console.log(`Delivery: ${deliveryCommit}`);
+      console.log(`Verification: ${verificationStatus}`);
+      console.log(`Acceptance: ${acceptanceStatus}`);
+    }
+    return;
+  }
+
+  // Decision mode
+  if (options.accept && options.reject) {
+    throw new Error("--accept and --reject are mutually exclusive");
+  }
+  const decision = options.accept ? "accepted" : "rejected";
+
+  // Reason file is mandatory
+  if (!options.reasonFile) {
+    throw new Error("--reason-file is required for --accept or --reject");
+  }
+  let rawReason;
+  try {
+    rawReason = await readFile(resolve(options.reasonFile), "utf8");
+  } catch {
+    throw new Error(`--reason-file could not be read: ${options.reasonFile}`);
+  }
+  const reason = rawReason.trim();
+  if (reason.length === 0) {
+    throw new Error("--reason-file must contain non-empty UTF-8 text");
+  }
+
+  // Accept requires completed terminal + verification passed
+  if (decision === "accepted") {
+    if (terminalState !== "completed") {
+      throw new Error(`Cannot accept: run terminal state is ${terminalState}, must be completed`);
+    }
+    if (verificationStatus !== "passed") {
+      throw new Error(`Cannot accept: delivery verification is ${verificationStatus}, must be passed`);
+    }
+  }
+
+  // Atomic first-decision-wins via transcript primitive
+  const { JsonlTranscript } = await import("../transcript.js");
+  const transcript = new JsonlTranscript(filePath, {
+    runId,
+    agentId: events[0]?.agentId ?? "unknown",
+    initialSeq: events[events.length - 1]?.seq ?? 0,
+  });
+  const result = await transcript.tryAppendDecision({
+    deliveryRef: latestRef,
+    decision,
+    reason,
+  });
+
+  if (options.format === "json") {
+    if (result.accepted) {
+      console.log(JSON.stringify({
+        decisionAccepted: true,
+        delivery: result.event.delivery,
+        deliveryCommit: result.event.deliveryCommit,
+        reason: result.event.reason,
+      }, null, 2));
+    } else {
+      console.log(JSON.stringify({
+        decisionAccepted: false,
+        existing: result.existing,
+        delivery: latestRef,
+      }, null, 2));
+    }
+  } else {
+    if (result.accepted) {
+      console.log(`Decision recorded: ${decision} for ${deliveryCommit}`);
+    } else {
+      console.log(`Decision not recorded: existing ${result.existing.status} for ${result.existing.deliveryCommit}`);
+    }
+  }
+}
