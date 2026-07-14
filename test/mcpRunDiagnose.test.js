@@ -300,14 +300,15 @@ test("M9-5B-08: no prescription fields in output or tool description", async () 
 });
 
 // ---------------------------------------------------------------------------
-// M9-5B-09: malformed eventType (paths/control chars/quotes/slashes) → "unknown".
-//           CTO P1: the projection must use a conservative ASCII allowlist, not
-//           just length checks. Paths, commands, control chars, or secrets in
-//           eventType must NEVER reach the output.
+// M9-5B-09: malformed eventType values map to unknown (exact-set projection).
+//           CTO P1/P1-rework: the projection must use the exact set of event
+//           types diagnoseFailure can produce — NOT a character-class allowlist.
+//           Each malicious vector is tested INDIVIDUALLY (single-item evidence)
+//           so the assertion cannot be hidden by the 8-item cap.
 // ---------------------------------------------------------------------------
 
-test("M9-5B-09: malformed eventType values map to unknown (allowlist projection)", async () => {
-  const maliciousTypes = [
+test("M9-5B-09: each malicious eventType individually maps to unknown", async () => {
+  const maliciousVectors = [
     "C:\\Users\\owner\\secret.txt",
     "/home/owner/secret",
     "run.event\x00null",
@@ -319,15 +320,53 @@ test("M9-5B-09: malformed eventType values map to unknown (allowlist projection)
     "run:event",
     "rm -rf /",
     "AKIA-SECRET-TOKEN-malicious-type-with-secret-value",
+    "AKIAIOSFODNN7EXAMPLE",
     "x".repeat(65),
+    "",
+    "unknown_custom_type",
+    "messages.collected",
   ];
-  const legitimateTypes = ["run.error", "run.event", "scorecard.checked"];
 
-  const evidence = [];
-  // Legitimate first so they fit within the 8-item cap.
-  for (const t of legitimateTypes) evidence.push({ eventType: t, fact: "redacted" });
-  for (const t of maliciousTypes) evidence.push({ eventType: t, fact: "redacted" });
+  for (const bad of maliciousVectors) {
+    const server = createWaoMcpServer({
+      registryPath: "/server/r.json", runDir: "/server/runs",
+      getRunDiagnosisFn: async () => ({
+        runId: "r", state: "failed", terminal: true, category: "unknown",
+        evidence: [{ eventType: bad, fact: "redacted" }],
+      }),
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_diagnose", arguments: { runId: "r" } });
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      const dumped = JSON.stringify(res);
 
+      // Single-item evidence, within the 8-item cap — no truncation to hide behind.
+      assert.equal(parsed.signalCount, 1, `signalCount=1 for ${JSON.stringify(bad)}`);
+      assert.equal(parsed.signalsTruncated, false, `not truncated for ${JSON.stringify(bad)}`);
+      assert.deepEqual(parsed.signalEventTypes, ["unknown"],
+        `malicious eventType must map to exactly ["unknown"]: ${JSON.stringify(bad)}`);
+
+      // The raw value must not appear anywhere in the output.
+      const checkVal = typeof bad === "string" ? bad.replace(/[\x00-\x1f]/g, "") : "";
+      if (checkVal.length > 0 && checkVal !== "unknown") {
+        assert.ok(!dumped.includes(checkVal),
+          `raw malicious value must not appear in output: ${JSON.stringify(bad)}`);
+      }
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }
+});
+
+test("M9-5B-09b: each legitimate eventType passes through verbatim", async () => {
+  const legitTypes = [
+    "run.stop_requested", "run.aborted", "run.state_change", "run.error",
+    "run.timed_out", "scorecard.checked", "run.evidence_audit", "run.event",
+  ];
+  // All 8 fit within the cap.
+  const evidence = legitTypes.map((t) => ({ eventType: t, fact: "redacted" }));
   const server = createWaoMcpServer({
     registryPath: "/server/r.json", runDir: "/server/runs",
     getRunDiagnosisFn: async () => ({ runId: "r", state: "failed", terminal: true, category: "unknown", evidence }),
@@ -336,27 +375,9 @@ test("M9-5B-09: malformed eventType values map to unknown (allowlist projection)
   try {
     const res = await client.callTool({ name: "run_diagnose", arguments: { runId: "r" } });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
-    const dumped = JSON.stringify(res);
-
-    assert.equal(parsed.signalCount, 15, "signalCount = 15 (12 malicious + 3 legit)");
-
-    for (const t of maliciousTypes) {
-      const checkVal = t.replace(/[\x00-\x1f]/g, "");
-      if (checkVal.length > 0) {
-        assert.ok(!dumped.includes(checkVal), `malicious value must not leak: ${JSON.stringify(t)}`);
-      }
-    }
-    assert.ok(!dumped.includes("secret.txt"), "no Windows path leak");
-    assert.ok(!dumped.includes("/home/owner"), "no POSIX path leak");
-    assert.ok(!dumped.includes("rm -rf"), "no command leak");
-    assert.ok(!dumped.includes("AKIA-SECRET"), "no secret leak");
-
-    assert.ok(parsed.signalEventTypes.includes("run.error"), "legitimate preserved");
-    assert.ok(parsed.signalEventTypes.includes("run.event"), "legitimate preserved");
-    assert.ok(parsed.signalEventTypes.includes("scorecard.checked"), "legitimate preserved");
-
-    const unknownCount = parsed.signalEventTypes.filter((t) => t === "unknown").length;
-    assert.ok(unknownCount > 0, "malicious types mapped to unknown");
+    assert.equal(parsed.signalCount, 8);
+    assert.equal(parsed.signalsTruncated, false);
+    assert.deepEqual(parsed.signalEventTypes, legitTypes, "all legitimate types preserved verbatim");
   } finally {
     await client.close();
     await server.close();
