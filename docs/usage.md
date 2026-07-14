@@ -503,6 +503,42 @@ annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:false, o
 
 annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`（纯只读查询）。
 
+### MCP `run_collect`（有界结果收集，M9-4B）
+
+`run_collect` 让 MCP host 收集一个 run 的 worker 产出。它直接复用与 CLI `collect` 相同的 application service（`collectRunMessages()`），不 shell-out CLI。**不是只读**：每次成功调用追加一个 `messages.collected` 审计事件到 transcript（不改变 terminal state）；重复调用会再次追加（非幂等）。
+
+`run_collect` tool：
+
+- **输入**（strict schema）：
+
+```json
+{ "runId": "run_..." }
+```
+
+模型**不能**传 `runDir`、`limit`、`serveUrl`、`sessionId`、`cwd`、`raw`、`includeTools` 等——这些是 server-owned 配置。
+
+- **安全有界输出**（只返回 assistant 文本 + 证据计数，不含原始执行证据）：
+
+```json
+{
+  "runId": "run_...",
+  "backend": "process",
+  "reconstructed": true,
+  "itemCount": 12,
+  "messages": [
+    { "role": "assistant", "text": "bounded result text", "truncated": false }
+  ],
+  "evidenceCounts": { "message": 1, "command": 3, "toolUse": 2, "toolResult": 2, "fileWritten": 1, "other": 3 },
+  "truncated": false
+}
+```
+
+边界：最多 8 条 message，每条 text 最多 4000 字符，全部 text 合计最多 12000 字符；超限设 `truncated:true`。只提取 assistant 角色 message 的 text part；assistant 文本经 secret redactor 脱敏当前进程环境中的凭据值。`messages:[]` 在无 assistant message 时是合法结果。
+
+**绝不返回**：command string/argv、tool input/tool output/tool result raw payload、file_written path、cwd、serveUrl、sessionId、PID、unknown event raw object、prompt、环境变量、异常 message/stack。`content` JSON 与 `structuredContent` 语义一致。service/投影/redaction/output validation 全部包在同一错误边界内；任何失败只返回固定 `run_collect failed`，不泄漏 SDK output validation error、原始异常、绝对路径或 secret。
+
+annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:false, openWorldHint:true`（成功调用追加审计事件；serve path 可能读取外部 runtime 服务；但不杀进程、不修改 worker checkout、不改变 run terminal）。
+
 ---
 
 ## 五、常见问题

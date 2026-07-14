@@ -30,6 +30,8 @@ import { z } from "zod";
 import { getRegistryInventory } from "../application/registryInventory.js";
 import { dispatchRun } from "../application/runDispatch.js";
 import { getRunStatus } from "../application/runStatus.js";
+import { collectRunMessages } from "../application/runCollect.js";
+import { createSecretRedactor } from "../secretRedaction.js";
 
 // Stable server identity advertised at initialize.
 const SERVER_NAME = "wao-mcp";
@@ -160,8 +162,137 @@ const RUN_STATUS_DESCRIPTION =
   "safe machine fields — no command text, file paths, tool inputs, messages, or error " +
   "content. Accepts only runId; the run directory is fixed by the server.";
 
+// ===== run_collect bounded projection constants =====
+
+const COLLECT_ERROR_TEXT = "run_collect failed";
+const COLLECT_LIMIT = 50;
+const COLLECT_MAX_MESSAGES = 8;
+const COLLECT_MAX_TEXT_CHARS = 4000;
+const COLLECT_MAX_TOTAL_CHARS = 12000;
+
+const RUN_COLLECT_INPUT = z.object({
+  runId: z.string().min(1),
+}).strict();
+
+const COLLECTED_MESSAGE = z.object({
+  role: z.string(),
+  text: z.string(),
+  truncated: z.boolean(),
+});
+
+const RUN_COLLECT_OUTPUT = z.object({
+  runId: z.string(),
+  backend: z.string(),
+  reconstructed: z.boolean(),
+  itemCount: z.number(),
+  messages: z.array(COLLECTED_MESSAGE),
+  evidenceCounts: z.object({
+    message: z.number(),
+    command: z.number(),
+    toolUse: z.number(),
+    toolResult: z.number(),
+    fileWritten: z.number(),
+    other: z.number(),
+  }),
+  truncated: z.boolean(),
+});
+
+const RUN_COLLECT_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: true,
+};
+
+const RUN_COLLECT_DESCRIPTION =
+  "Collect a run's worker output: bounded, redacted assistant-authored text plus " +
+  "evidence counts (no raw commands, tool inputs/outputs, file paths, or unknown " +
+  "payloads). Each successful call appends one messages.collected audit event to the " +
+  "transcript (not idempotent). Accepts only runId; the run directory and limit are "  +
+  "fixed by the server.";
+
 /**
- * Create a WAO MCP server with registry_list, run_dispatch, and run_status tools.
+ * Project a raw collect result into a bounded, redacted MCP-safe output.
+ *
+ * Extracts ONLY assistant-authored text parts. Applies per-message (4000 char) and
+ * total (12000 char) and count (8 message) caps with accurate truncated flags.
+ * Secrets in text are redacted via the process secret redactor. Evidence kinds are
+ * counted (no raw payload). Unknown/malformed entries count as "other" only.
+ *
+ * @param {object} rawResult — collectRunMessages return value
+ * @param {string} runId
+ * @returns {object} bounded projection matching RUN_COLLECT_OUTPUT
+ */
+function projectCollectResult(rawResult, runId) {
+  const redactor = createSecretRedactor();
+  const items = Array.isArray(rawResult.data) ? rawResult.data : [];
+
+  const evidenceCounts = { message: 0, command: 0, toolUse: 0, toolResult: 0, fileWritten: 0, other: 0 };
+  const messages = [];
+  let totalChars = 0;
+  let messagesTruncated = false;
+
+  for (const item of items) {
+    // Tally evidence counts by kind — no payload included.
+    const kind = item?.kind;
+    // Serve messages lack `kind`; detect them by the {info:{role}, parts} shape.
+    const isServeMessage = !kind && item?.info && Array.isArray(item.parts);
+    if (kind === "message" || isServeMessage) evidenceCounts.message += 1;
+    else if (kind === "command") evidenceCounts.command += 1;
+    else if (kind === "tool_use") evidenceCounts.toolUse += 1;
+    else if (kind === "tool_result") evidenceCounts.toolResult += 1;
+    else if (kind === "file_written") evidenceCounts.fileWritten += 1;
+    else evidenceCounts.other += 1;
+
+    // Only extract assistant text; skip everything else.
+    if (kind !== "message" && !isServeMessage) continue;
+    // Process: {role, parts}. Serve: {info:{role}, parts}. Only assistant.
+    const role = item.role ?? item.info?.role;
+    if (role !== "assistant") continue;
+
+    if (messages.length >= COLLECT_MAX_MESSAGES) {
+      messagesTruncated = true;
+      continue;
+    }
+    const parts = Array.isArray(item.parts) ? item.parts : [];
+    const textParts = parts
+      .filter((p) => p && p.type === "text" && typeof p.text === "string")
+      .map((p) => p.text);
+    let text = redactor.redactString(textParts.join("\n"));
+    let perTruncated = false;
+    if (text.length > COLLECT_MAX_TEXT_CHARS) {
+      text = text.slice(0, COLLECT_MAX_TEXT_CHARS);
+      perTruncated = true;
+      messagesTruncated = true;
+    }
+    // Total cap.
+    if (totalChars + text.length > COLLECT_MAX_TOTAL_CHARS) {
+      const remaining = COLLECT_MAX_TOTAL_CHARS - totalChars;
+      if (remaining <= 0) {
+        messagesTruncated = true;
+        break;
+      }
+      text = text.slice(0, remaining);
+      perTruncated = true;
+      messagesTruncated = true;
+    }
+    totalChars += text.length;
+    messages.push({ role: "assistant", text, truncated: perTruncated });
+  }
+
+  return {
+    runId,
+    backend: rawResult.backend ?? "unknown",
+    reconstructed: Boolean(rawResult.reconstructed),
+    itemCount: items.length,
+    messages,
+    evidenceCounts,
+    truncated: messagesTruncated,
+  };
+}
+
+/**
+ * Create a WAO MCP server with registry_list, run_dispatch, run_status, run_collect.
  *
  * @param {object} input
  * @param {string} input.registryPath — path to agents.json (startup config)
@@ -169,6 +300,7 @@ const RUN_STATUS_DESCRIPTION =
  * @param {Function} [input.getRegistryInventoryFn] — injectable for testing
  * @param {Function} [input.dispatchRunFn] — injectable dispatcher for testing
  * @param {Function} [input.getRunStatusFn] — injectable status service for testing
+ * @param {Function} [input.collectRunMessagesFn] — injectable collect service for testing
  * @returns {import("@modelcontextprotocol/sdk/server/mcp.js").McpServer}
  */
 export function createWaoMcpServer({
@@ -177,10 +309,12 @@ export function createWaoMcpServer({
   getRegistryInventoryFn,
   dispatchRunFn,
   getRunStatusFn,
+  collectRunMessagesFn,
 }) {
   const service = getRegistryInventoryFn ?? getRegistryInventory;
   const dispatcher = dispatchRunFn ?? dispatchRun;
   const statusService = getRunStatusFn ?? getRunStatus;
+  const collectService = collectRunMessagesFn ?? collectRunMessages;
 
   const mcp = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -311,6 +445,35 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: STATUS_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "run_collect",
+    {
+      description: RUN_COLLECT_DESCRIPTION,
+      inputSchema: RUN_COLLECT_INPUT,
+      outputSchema: RUN_COLLECT_OUTPUT,
+      annotations: RUN_COLLECT_ANNOTATIONS,
+    },
+    async ({ runId }) => {
+      // Entire service call + projection + redaction + output validation in ONE
+      // try/catch. Any failure collapses to the fixed safe text — never leak
+      // SDK output-validation error, raw exception, path, or secret.
+      try {
+        const raw = await collectService({ runId, runDir, limit: COLLECT_LIMIT });
+        const payload = projectCollectResult(raw, runId);
+        RUN_COLLECT_OUTPUT.parse(payload);
+        return {
+          content: [{ type: "text", text: JSON.stringify(payload) }],
+          structuredContent: payload,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: COLLECT_ERROR_TEXT }],
         };
       }
     },
