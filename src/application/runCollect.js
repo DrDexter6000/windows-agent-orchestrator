@@ -55,17 +55,21 @@ function reconstructProcessEvent(ev) {
 
 /**
  * Build a default appendCollectedFn that writes to the real transcript file.
+ * Uses the validated runId argument (not events[0].runId) for the transcript
+ * context so the audit event is always correctly attributed even if the first
+ * event lacks a runId field.
  * @param {string} transcriptPath
+ * @param {string} runId — the validated runId argument (authoritative)
  * @returns {Function}
  */
-function defaultAppendFn(transcriptPath) {
+function defaultAppendFn(transcriptPath, runId) {
   return async (type, payload) => {
-    // Re-read to get the latest seq + context (the file may have grown).
+    // Re-read to get the latest seq + agentId (the file may have grown).
     let events = [];
     try { events = await readTranscript(transcriptPath); } catch { events = []; }
     const ctx = events[0] ?? {};
     const t = new JsonlTranscript(transcriptPath, {
-      runId: ctx.runId ?? "unknown",
+      runId,
       agentId: ctx.agentId ?? "unknown",
       initialSeq: findLastEventSeq(events),
     });
@@ -131,7 +135,7 @@ export async function collectRunMessages({
       .filter((e) => e !== null)
       .slice(-effectiveLimit);
 
-    const _append = appendCollectedFn ?? defaultAppendFn(transcriptPath);
+    const _append = appendCollectedFn ?? defaultAppendFn(transcriptPath, runId);
     await _append("messages.collected", {
       backendSessionId: session.backendSessionId,
       backend: "process",

@@ -401,3 +401,33 @@ test("M9-4A-11: service writes no console + dependency-direction guard", async (
     cleanupDir(dir);
   }
 });
+
+// ---------------------------------------------------------------------
+// M9-4A-12: messages.collected runId is correctly attributed even when the
+//           first transcript event lacks a runId field (Reviewer A F2 regression).
+// ---------------------------------------------------------------------
+
+test("M9-4A-12: messages.collected runId correctly attributed when first event lacks runId", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m94a-12-"));
+  try {
+    const runDir = join(dir, "runs");
+    const runId = "run_attrib_test";
+    // First event (run.submitted) has NO runId field — like the TD-77 fixtures.
+    writeTranscript(runDir, runId,
+      jl({ type: "run.submitted", agentId: "researcher", ts: "2026-07-14T00:00:00.000Z" }) +
+      jl({ type: "session.created", backend: "process", backendSessionId: "proc_99", runId, agentId: "researcher" }) +
+      jl({ type: "run.event", kind: "command", command: "echo", ts: "2026-07-14T00:00:01.000Z", runId, agentId: "researcher" }) +
+      jl({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-07-14T00:00:02.000Z", runId, agentId: "researcher" }),
+    );
+    // Use the default (real) append — no injection — so we verify the persisted event.
+    await collectRunMessages({ runId, runDir });
+
+    const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+    const collected = events.filter((e) => e.type === "messages.collected");
+    assert.equal(collected.length, 1, "one messages.collected");
+    // The audit event's runId must be the validated arg, not "unknown".
+    assert.equal(collected[0].runId, runId, "messages.collected runId is the validated arg, not unknown");
+  } finally {
+    cleanupDir(dir);
+  }
+});
