@@ -34,6 +34,7 @@ import { collectRunMessages } from "../application/runCollect.js";
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
 import { getRunDelivery, decideRunDelivery } from "../application/runDelivery.js";
 import { DIAGNOSIS_CATEGORIES } from "../diagnosis.js";
+import { RUN_STATES } from "../transcript.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 
 // Stable server identity advertised at initialize.
@@ -367,23 +368,31 @@ const RUN_DIAGNOSE_DESCRIPTION =
 
 const DELIVERY_QUERY_ERROR_TEXT = "run_delivery failed";
 const COMMIT_HASH_RE = /^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/;
+const COMMIT_HASH_SCHEMA = z.string().regex(COMMIT_HASH_RE);
 const SAFE_VERIFICATION_STATUSES = new Set(["pending", "passed", "failed", "unavailable"]);
 const SAFE_FAILURE_CODES = new Set(["command_failed", "command_timeout", "artifact_mutated", "artifact_mismatch", "execution_error", "unknown"]);
+const SAFE_ACCEPTANCE_STATUSES = new Set(["pending", "accepted", "rejected"]);
+const SAFE_DECISION_TYPES = new Set(["run.delivery_accepted", "run.delivery_rejected"]);
+const TERMINAL_STATE_ENUM = z.enum(RUN_STATES);
+const VERIFICATION_STATUS_ENUM = z.enum(["pending", "passed", "failed", "unavailable"]);
+const ACCEPTANCE_STATUS_ENUM = z.enum(["pending", "accepted", "rejected"]);
+const FAILURE_CODE_ENUM = z.enum(["command_failed", "command_timeout", "artifact_mutated", "artifact_mismatch", "execution_error", "unknown"]);
+const DECISION_TYPE_ENUM = z.enum(["run.delivery_accepted", "run.delivery_rejected"]);
 
 const RUN_DELIVERY_INPUT = z.object({
   runId: z.string().min(1),
 }).strict();
 
 const RUN_DELIVERY_OUTPUT = z.object({
-  runId: z.string(),
-  terminalState: z.string(),
-  baseCommit: z.string().nullable(),
-  deliveryCommit: z.string().nullable(),
+  runId: z.string().min(1),
+  terminalState: TERMINAL_STATE_ENUM,
+  baseCommit: COMMIT_HASH_SCHEMA,
+  deliveryCommit: COMMIT_HASH_SCHEMA,
   changedFileCount: z.number().int().nonnegative(),
-  verificationStatus: z.string(),
-  verificationFailureCode: z.string().nullable(),
-  acceptanceStatus: z.string(),
-  decisionType: z.string().nullable(),
+  verificationStatus: VERIFICATION_STATUS_ENUM,
+  verificationFailureCode: FAILURE_CODE_ENUM.nullable(),
+  acceptanceStatus: ACCEPTANCE_STATUS_ENUM,
+  decisionType: DECISION_TYPE_ENUM.nullable(),
 });
 
 const RUN_DELIVERY_ANNOTATIONS = {
@@ -409,11 +418,11 @@ const RUN_DELIVERY_DECIDE_INPUT = z.object({
 }).strict();
 
 const RUN_DELIVERY_DECIDE_OUTPUT = z.object({
-  runId: z.string(),
+  runId: z.string().min(1),
   decisionAccepted: z.boolean(),
-  deliveryCommit: z.string().nullable(),
-  acceptanceStatus: z.string(),
-  existingStatus: z.string().nullable(),
+  deliveryCommit: COMMIT_HASH_SCHEMA,
+  acceptanceStatus: z.enum(["accepted", "rejected"]),
+  existingStatus: z.enum(["accepted", "rejected"]).nullable(),
 });
 
 const RUN_DELIVERY_DECIDE_ANNOTATIONS = {
@@ -682,28 +691,40 @@ export function createWaoMcpServer({
     async ({ runId }) => {
       try {
         const delivery = await deliveryQueryService({ runId, runDir });
-        // Safe projection: only scalar machine fields. No DeliveryRef object,
-        // no changed file names, no worktreePath, no branch, no commands, no reason.
+        // Use the request runId — never echo the service result's runId,
+        // which could differ and leak arbitrary content.
+        if (delivery.runId !== runId) throw new Error("runId mismatch");
         const ref = delivery.deliveryRef ?? {};
-        const baseCommit = typeof ref.baseCommit === "string" && COMMIT_HASH_RE.test(ref.baseCommit) ? ref.baseCommit : null;
-        const deliveryCommit = typeof ref.deliveryCommit === "string" && COMMIT_HASH_RE.test(ref.deliveryCommit) ? ref.deliveryCommit : null;
-        const changedFileCount = Array.isArray(ref.changedFiles) ? ref.changedFiles.length : 0;
+        // Every scalar must pass a closed-set check. Malformed values throw
+        // → caught by the outer try/catch → fixed safe error.
+        const baseCommit = COMMIT_HASH_SCHEMA.parse(ref.baseCommit);
+        const deliveryCommit = COMMIT_HASH_SCHEMA.parse(ref.deliveryCommit);
+        if (!Array.isArray(ref.changedFiles)) throw new Error("changedFiles not array");
+        const changedFileCount = ref.changedFiles.length;
         const rawVStatus = delivery.verification?.status ?? "pending";
-        const verificationStatus = SAFE_VERIFICATION_STATUSES.has(rawVStatus) ? rawVStatus : "unknown";
+        if (!SAFE_VERIFICATION_STATUSES.has(rawVStatus)) throw new Error("bad verificationStatus");
+        const verificationStatus = rawVStatus;
         const rawFailureCode = delivery.verification?.failureCode;
-        const verificationFailureCode = rawFailureCode ? (SAFE_FAILURE_CODES.has(rawFailureCode) ? rawFailureCode : "unknown") : null;
-        const acceptanceStatus = delivery.acceptance?.status ?? "pending";
-        const decisionType = delivery.acceptance?.decisionEvent?.type ?? null;
+        const verificationFailureCode = rawFailureCode
+          ? (SAFE_FAILURE_CODES.has(rawFailureCode) ? rawFailureCode : "unknown")
+          : null;
+        const rawAcceptance = delivery.acceptance?.status ?? "pending";
+        if (!SAFE_ACCEPTANCE_STATUSES.has(rawAcceptance)) throw new Error("bad acceptanceStatus");
+        const acceptanceStatus = rawAcceptance;
+        const rawDecisionType = delivery.acceptance?.decisionEvent?.type ?? null;
+        const decisionType = rawDecisionType && SAFE_DECISION_TYPES.has(rawDecisionType) ? rawDecisionType : null;
+        const terminalState = delivery.terminalState;
+        if (!RUN_STATES.includes(terminalState)) throw new Error("bad terminalState");
         const payload = {
-          runId: delivery.runId,
-          terminalState: delivery.terminalState,
+          runId,
+          terminalState,
           baseCommit,
           deliveryCommit,
           changedFileCount,
           verificationStatus,
           verificationFailureCode,
-          acceptanceStatus: ["pending", "accepted", "rejected"].includes(acceptanceStatus) ? acceptanceStatus : "pending",
-          decisionType: ["run.delivery_accepted", "run.delivery_rejected"].includes(decisionType) ? decisionType : null,
+          acceptanceStatus,
+          decisionType,
         };
         RUN_DELIVERY_OUTPUT.parse(payload);
         return {
@@ -730,24 +751,31 @@ export function createWaoMcpServer({
     async ({ runId, decision, reason }) => {
       try {
         const result = await deliveryDecideService({ runId, runDir, decision, reason });
-        // Safe projection: no reason, no DeliveryRef, no delivery details.
-        const payload = result.accepted
-          ? {
-              runId,
-              decisionAccepted: true,
-              deliveryCommit: typeof result.event?.deliveryCommit === "string" && COMMIT_HASH_RE.test(result.event.deliveryCommit)
-                ? result.event.deliveryCommit : null,
-              acceptanceStatus: decision,
-              existingStatus: null,
-            }
-          : {
-              runId,
-              decisionAccepted: false,
-              deliveryCommit: typeof result.existing?.deliveryCommit === "string" && COMMIT_HASH_RE.test(result.existing.deliveryCommit)
-                ? result.existing.deliveryCommit : null,
-              acceptanceStatus: result.existing?.status ?? "pending",
-              existingStatus: result.existing?.status ?? null,
-            };
+        // Strict validation: every scalar must pass closed-set checks.
+        // Malformed service result → throw → fixed safe error.
+        if (typeof result.accepted !== "boolean") throw new Error("accepted not boolean");
+        let payload;
+        if (result.accepted) {
+          const deliveryCommit = COMMIT_HASH_SCHEMA.parse(result.event?.deliveryCommit);
+          payload = {
+            runId,
+            decisionAccepted: true,
+            deliveryCommit,
+            acceptanceStatus: decision,
+            existingStatus: null,
+          };
+        } else {
+          const existingStatus = result.existing?.status;
+          if (existingStatus !== "accepted" && existingStatus !== "rejected") throw new Error("bad existing status");
+          const deliveryCommit = COMMIT_HASH_SCHEMA.parse(result.existing?.deliveryCommit);
+          payload = {
+            runId,
+            decisionAccepted: false,
+            deliveryCommit,
+            acceptanceStatus: existingStatus,
+            existingStatus,
+          };
+        }
         RUN_DELIVERY_DECIDE_OUTPUT.parse(payload);
         return {
           content: [{ type: "text", text: JSON.stringify(payload) }],

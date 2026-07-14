@@ -353,3 +353,171 @@ test("M9-6B-11: tool descriptions have no recommendation/merge/push claims", asy
     }
   } finally { cleanupDir(dir); }
 });
+
+// ---------------------------------------------------------------------------
+// M9-6B-12: malformed query scalar values → fixed error (CTO P1).
+// ---------------------------------------------------------------------------
+
+test("M9-6B-12: malformed query scalar values collapse to fixed error", async () => {
+  const mkRef = (over = {}) => ({ baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40), changedFiles: [], ...over });
+  const vectors = [
+    ["runId mismatch", { runId: "evil", terminalState: "completed", deliveryRef: mkRef(), verification: { status: "passed" }, acceptance: { status: "pending" } }],
+    ["terminalState=secret", { runId: "run_x", terminalState: "C:\\secret", deliveryRef: mkRef(), verification: { status: "passed" }, acceptance: { status: "pending" } }],
+    ["bad baseCommit", { runId: "run_x", terminalState: "completed", deliveryRef: mkRef({ baseCommit: "not-hash" }), verification: { status: "passed" }, acceptance: { status: "pending" } }],
+    ["null deliveryCommit", { runId: "run_x", terminalState: "completed", deliveryRef: mkRef({ deliveryCommit: null }), verification: { status: "passed" }, acceptance: { status: "pending" } }],
+    ["bad verificationStatus", { runId: "run_x", terminalState: "completed", deliveryRef: mkRef(), verification: { status: "AKIA-LEAK" }, acceptance: { status: "pending" } }],
+    ["bad acceptanceStatus", { runId: "run_x", terminalState: "completed", deliveryRef: mkRef(), verification: { status: "passed" }, acceptance: { status: "/etc/passwd" } }],
+    ["changedFiles not array", { runId: "run_x", terminalState: "completed", deliveryRef: mkRef({ changedFiles: "evil" }), verification: { status: "passed" }, acceptance: { status: "pending" } }],
+  ];
+  for (const [label, result] of vectors) {
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs", getRunDeliveryFn: async () => result });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
+      assert.equal(res.isError, true, `${label}: must be error`);
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes("C:\\\\"), `${label}: no path`);
+      assert.ok(!dumped.includes("AKIA"), `${label}: no secret`);
+      assert.ok(!dumped.includes("/etc/passwd"), `${label}: no path`);
+      assert.ok(!dumped.includes("not-hash"), `${label}: no bad commit`);
+    } finally { await client.close(); await server.close(); }
+  }
+});
+
+test("M9-6B-13: malformed decide result collapses to fixed error", async () => {
+  const vectors = [
+    ["loser bad status", { accepted: false, existing: { status: "C:\\secret", deliveryCommit: "d".repeat(40) } }],
+    ["loser bad commit", { accepted: false, existing: { status: "accepted", deliveryCommit: "not-hash" } }],
+    ["winner bad commit", { accepted: true, event: { deliveryCommit: "evil" } }],
+    ["accepted not boolean", { accepted: "yes", event: {} }],
+  ];
+  for (const [label, result] of vectors) {
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs", decideRunDeliveryFn: async () => result });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_x", decision: "accepted", reason: "x" } });
+      assert.equal(res.isError, true, `${label}: must be error`);
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes("C:\\\\"), `${label}: no path`);
+      assert.ok(!dumped.includes("secret"), `${label}: no secret`);
+      assert.ok(!dumped.includes("not-hash"), `${label}: no bad commit`);
+      assert.ok(!dumped.includes("evil"), `${label}: no bad value`);
+    } finally { await client.close(); await server.close(); }
+  }
+});
+
+// Real integration tests using actual JsonlTranscript + default service.
+
+async function setupDeliveryRun(dir, runId, verificationStatus) {
+  const { JsonlTranscript } = await import("../src/transcript.js");
+  const runDir = join(dir, "runs");
+  const transcript = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "test" });
+  const ref = {
+    schemaVersion: 1, kind: "git_commit", runId,
+    baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
+    branch: "wao/x", worktreePath: "/fake", changedFiles: ["a.js"],
+    verification: { status: verificationStatus, commands: [], verifiedCommit: "d".repeat(40), results: [],
+      ...(verificationStatus === "failed" ? { failureCode: "command_failed" } : {}) },
+    acceptance: { status: "pending" }, integration: { status: "pending", targetCommit: null },
+  };
+  await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake" });
+  await transcript.append("run.delivery_created", { delivery: ref });
+  const vType = verificationStatus === "passed" ? "run.delivery_verification_passed" : "run.delivery_verification_failed";
+  await transcript.append(vType, { delivery: ref });
+  await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+  const rp = join(dir, "agents.json");
+  writeFileSync(rp, JSON.stringify({ agents: { w: { backend: "claude-code", cwd: dir } } }), "utf8");
+  return { runDir, rp };
+}
+
+test("M9-6B-14: MCP accept through real service appends one event", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "m96b-14-"));
+  try {
+    const { runDir, rp } = await setupDeliveryRun(dir, "run_i14", "passed");
+    const server = createWaoMcpServer({ registryPath: rp, runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i14", decision: "accepted", reason: "LGTM" } });
+      const p = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(p.decisionAccepted, true);
+      assert.equal(p.deliveryCommit, "d".repeat(40));
+    } finally { await client.close(); await server.close(); }
+    const { readTranscript } = await import("../src/transcript.js");
+    const events = await readTranscript(join(runDir, "run_i14.jsonl"));
+    assert.equal(events.filter((e) => e.type === "run.delivery_accepted").length, 1);
+  } finally { cleanupDir(dir); }
+});
+
+test("M9-6B-15: failed verification blocks accept, allows reject", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "m96b-15-"));
+  try {
+    const { runDir, rp } = await setupDeliveryRun(dir, "run_i15", "failed");
+    // Accept fails
+    {
+      const server = createWaoMcpServer({ registryPath: rp, runDir });
+      const client = await buildInMemoryClient(server);
+      try {
+        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i15", decision: "accepted", reason: "x" } });
+        assert.equal(res.isError, true, "accept on failed verification must error");
+      } finally { await client.close(); await server.close(); }
+    }
+    // Reject succeeds
+    {
+      const server = createWaoMcpServer({ registryPath: rp, runDir });
+      const client = await buildInMemoryClient(server);
+      try {
+        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i15", decision: "rejected", reason: "bad" } });
+        const p = JSON.parse(res.content.find((b) => b.type === "text").text);
+        assert.equal(p.decisionAccepted, true, "reject succeeds");
+      } finally { await client.close(); await server.close(); }
+    }
+    const { readTranscript } = await import("../src/transcript.js");
+    const events = await readTranscript(join(runDir, "run_i15.jsonl"));
+    assert.equal(events.filter((e) => e.type === "run.delivery_rejected").length, 1);
+    assert.equal(events.filter((e) => e.type === "run.delivery_accepted").length, 0);
+  } finally { cleanupDir(dir); }
+});
+
+test("M9-6B-16: repeated/opposite decisions lose, one total event", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "m96b-16-"));
+  try {
+    const { runDir, rp } = await setupDeliveryRun(dir, "run_i16", "passed");
+    for (const [decision, reason] of [["accepted", "first"], ["accepted", "second"], ["rejected", "opposite"]]) {
+      const server = createWaoMcpServer({ registryPath: rp, runDir });
+      const client = await buildInMemoryClient(server);
+      try {
+        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i16", decision, reason } });
+        const p = JSON.parse(res.content.find((b) => b.type === "text").text);
+        if (reason === "first") assert.equal(p.decisionAccepted, true);
+        else { assert.equal(p.decisionAccepted, false); assert.equal(p.existingStatus, "accepted"); }
+      } finally { await client.close(); await server.close(); }
+    }
+    const { readTranscript } = await import("../src/transcript.js");
+    const events = await readTranscript(join(runDir, "run_i16.jsonl"));
+    assert.equal(events.filter((e) => e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected").length, 1);
+  } finally { cleanupDir(dir); }
+});
+
+test("M9-6B-17: concurrent MCP decisions → one winner, one loser, one event", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "m96b-17-"));
+  try {
+    const { runDir, rp } = await setupDeliveryRun(dir, "run_i17", "passed");
+    const s1 = createWaoMcpServer({ registryPath: rp, runDir });
+    const s2 = createWaoMcpServer({ registryPath: rp, runDir });
+    const c1 = await buildInMemoryClient(s1);
+    const c2 = await buildInMemoryClient(s2);
+    try {
+      const [r1, r2] = await Promise.all([
+        c1.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i17", decision: "accepted", reason: "c1" } }),
+        c2.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i17", decision: "accepted", reason: "c2" } }),
+      ]);
+      const p1 = JSON.parse(r1.content.find((b) => b.type === "text").text);
+      const p2 = JSON.parse(r2.content.find((b) => b.type === "text").text);
+      assert.equal([p1, p2].filter((p) => p.decisionAccepted).length, 1, "one winner");
+      assert.equal([p1, p2].filter((p) => !p.decisionAccepted).length, 1, "one loser");
+    } finally { await c1.close(); await s1.close(); await c2.close(); await s2.close(); }
+    const { readTranscript } = await import("../src/transcript.js");
+    const events = await readTranscript(join(runDir, "run_i17.jsonl"));
+    assert.equal(events.filter((e) => e.type === "run.delivery_accepted").length, 1, "one event");
+  } finally { cleanupDir(dir); }
+});
