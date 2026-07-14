@@ -31,6 +31,8 @@ import { getRegistryInventory } from "../application/registryInventory.js";
 import { dispatchRun } from "../application/runDispatch.js";
 import { getRunStatus } from "../application/runStatus.js";
 import { collectRunMessages } from "../application/runCollect.js";
+import { getRunDiagnosis } from "../application/runDiagnosis.js";
+import { DIAGNOSIS_CATEGORIES } from "../diagnosis.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 
 // Stable server identity advertised at initialize.
@@ -307,8 +309,44 @@ function projectCollectResult(rawResult, runId) {
   };
 }
 
+// ===== run_diagnose safe projection constants =====
+
+const DIAGNOSE_ERROR_TEXT = "run_diagnose failed";
+const DIAGNOSE_MAX_SIGNALS = 8;
+const DIAGNOSE_MAX_TYPE_CHARS = 64;
+
+const RUN_DIAGNOSE_INPUT = z.object({
+  runId: z.string().min(1),
+}).strict();
+
+// Category enum from the diagnosis SSOT — no second hand-maintained list.
+const DIAGNOSIS_CATEGORY_ENUM = z.enum(DIAGNOSIS_CATEGORIES);
+
+const RUN_DIAGNOSE_OUTPUT = z.object({
+  runId: z.string(),
+  state: z.string(),
+  terminal: z.boolean(),
+  category: DIAGNOSIS_CATEGORY_ENUM,
+  signalEventTypes: z.array(z.string()),
+  signalCount: z.number(),
+  signalsTruncated: z.boolean(),
+});
+
+const RUN_DIAGNOSE_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+const RUN_DIAGNOSE_DESCRIPTION =
+  "Diagnose a run's failure category and signal event types. Read-only, idempotent. " +
+  "Returns only safe machine fields (category, event types, counts). Does not return " +
+  "raw error text, commands, file paths, or tool payloads. The Lead decides what to " +
+  "do next; this tool gives facts only.";
+
 /**
- * Create a WAO MCP server with registry_list, run_dispatch, run_status, run_collect.
+ * Create a WAO MCP server with registry_list, run_dispatch, run_status, run_collect, run_diagnose.
  *
  * @param {object} input
  * @param {string} input.registryPath — path to agents.json (startup config)
@@ -317,6 +355,7 @@ function projectCollectResult(rawResult, runId) {
  * @param {Function} [input.dispatchRunFn] — injectable dispatcher for testing
  * @param {Function} [input.getRunStatusFn] — injectable status service for testing
  * @param {Function} [input.collectRunMessagesFn] — injectable collect service for testing
+ * @param {Function} [input.getRunDiagnosisFn] — injectable diagnosis service for testing
  * @returns {import("@modelcontextprotocol/sdk/server/mcp.js").McpServer}
  */
 export function createWaoMcpServer({
@@ -326,11 +365,13 @@ export function createWaoMcpServer({
   dispatchRunFn,
   getRunStatusFn,
   collectRunMessagesFn,
+  getRunDiagnosisFn,
 }) {
   const service = getRegistryInventoryFn ?? getRegistryInventory;
   const dispatcher = dispatchRunFn ?? dispatchRun;
   const statusService = getRunStatusFn ?? getRunStatus;
   const collectService = collectRunMessagesFn ?? collectRunMessages;
+  const diagnosisService = getRunDiagnosisFn ?? getRunDiagnosis;
 
   const mcp = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -490,6 +531,50 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: COLLECT_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "run_diagnose",
+    {
+      description: RUN_DIAGNOSE_DESCRIPTION,
+      inputSchema: RUN_DIAGNOSE_INPUT,
+      outputSchema: RUN_DIAGNOSE_OUTPUT,
+      annotations: RUN_DIAGNOSE_ANNOTATIONS,
+    },
+    async ({ runId }) => {
+      // Entire service call + safe projection + output validation in ONE try/catch.
+      try {
+        const diag = await diagnosisService({ runId, runDir });
+        // Safe projection: only event TYPES from evidence (no raw fact/error/path).
+        // Malformed/non-string/overlong types map to "unknown".
+        const allTypes = (Array.isArray(diag.evidence) ? diag.evidence : [])
+          .map((e) => {
+            const t = e?.eventType;
+            if (typeof t !== "string" || t.length === 0 || t.length > DIAGNOSE_MAX_TYPE_CHARS) return "unknown";
+            return t;
+          });
+        const signalEventTypes = allTypes.slice(0, DIAGNOSE_MAX_SIGNALS);
+        const payload = {
+          runId: diag.runId,
+          state: diag.state,
+          terminal: diag.terminal,
+          category: diag.category,
+          signalEventTypes,
+          signalCount: allTypes.length,
+          signalsTruncated: allTypes.length > DIAGNOSE_MAX_SIGNALS,
+        };
+        RUN_DIAGNOSE_OUTPUT.parse(payload);
+        return {
+          content: [{ type: "text", text: JSON.stringify(payload) }],
+          structuredContent: payload,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: DIAGNOSE_ERROR_TEXT }],
         };
       }
     },

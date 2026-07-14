@@ -539,6 +539,32 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:false, openWorldHint:true`（成功调用追加审计事件；serve path 可能读取外部 runtime 服务；但不杀进程、不修改 worker checkout、不改变 run terminal）。
 
+### MCP `run_diagnose`（安全确定性诊断，M9-5B）
+
+`run_diagnose` 让 MCP host 诊断一个 run 的失败原因分类。它直接复用与 CLI `runs diagnose` 相同的 application service（`getRunDiagnosis()` → `diagnoseFailure()` 内核），不 shell-out CLI。只读——不追加 transcript event、不修改 terminal state、不给处方或建议。
+
+`run_diagnose` tool：
+
+- **输入**（strict schema）：`{ "runId": "run_..." }`。模型不能传 runDir/raw/includeEvidence/recommend/retry/worker/strategy 等。
+
+- **安全输出**（只返回机器字段，不含 raw evidence fact）：
+
+```json
+{
+  "runId": "run_...",
+  "state": "failed",
+  "terminal": true,
+  "category": "provider_disconnect",
+  "signalEventTypes": ["run.event", "run.error"],
+  "signalCount": 2,
+  "signalsTruncated": false
+}
+```
+
+`category` 来自 `DIAGNOSIS_CATEGORIES` SSOT（12 类 enum）。`signalEventTypes` 只保留 evidence 的 event type（最多 8 条，每条 ≤64 字符，异常映射为 `unknown`），**绝不返回** raw fact/error/detail/reason/check name/command/tool payload/path/timestamp/prompt/PID/sessionId/provider stderr/环境变量，也**绝不返回** recommendation/advice/retry/nextStep。`content` JSON 与 `structuredContent` 语义一致。失败返回固定 `run_diagnose failed`。
+
+annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`（纯只读查询，不触碰外部系统）。
+
 ---
 
 ## 五、常见问题

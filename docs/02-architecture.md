@@ -47,10 +47,10 @@ CLI Adapter ─┘                 ↓
 ```
 
 - MCP Adapter 和 CLI Adapter 只做 transport/input/output adaptation。
-- Application Services 层是 M9 planned target。**已提取的共享 services**：`src/application/registryInventory.js`（M9-0，inventory）、`src/application/runDispatch.js`（M9-2A，background dispatch）、`src/application/runStatus.js`（M9-3A，read-only status）、`src/application/runCollect.js`（M9-4A，collection，每次成功追加一个 `messages.collected` 审计事件，非只读）。CLI `run --background`/`spawn` 委托 `dispatchRun()`；CLI `status` 委托 `getRunStatus()`；CLI `collect` 委托 `collectRunMessages()`。其余 use-case orchestration 仍在 `src/commands/*.js` 中。
+- Application Services 层是 M9 planned target。**已提取的共享 services**：`registryInventory.js`（M9-0）、`runDispatch.js`（M9-2A）、`runStatus.js`（M9-3A，只读）、`runCollect.js`（M9-4A，非只读）、`runDiagnosis.js`（M9-5A，只读，委托 `diagnoseFailure` 内核 SSOT）。CLI `runs diagnose` 委托 `getRunDiagnosis()`；MCP `run_diagnose` 只返回安全机器字段（category + signal event types），不返回 raw evidence fact。其余 use-case orchestration 仍在 `src/commands/*.js` 中。
 - 业务规则只写一次，在 application services 层。**禁止 MCP Server 通过 shell 调 CLI 并解析文本输出。** MCP adapter 直接 import 并调用 application service。
 - RunManager / transcript / delivery / Backend / workflow 不依赖 MCP——MCP 是 L4 adapter，不是 L1-L3 dependency。`src/mcp/**` 是唯一允许 import `@modelcontextprotocol/sdk` 与 `zod` 的位置（由边界测试守卫）。`src/application/**` 不得 import `src/commands/*`、`src/mcp/*`、MCP SDK 或 zod。
-- M9 已暴露 MCP `registry_list`（只读）、`run_dispatch`（派发受监督后台 run，destructive）、`run_status`（point-in-time 状态查询，只读，返回安全机器子集）、`run_collect`（有界结果收集，返回 assistant 文本 + evidenceCounts，每次成功追加 messages.collected，非只读非幂等）。尚未在 MCP 实现：diagnose/delivery query/acceptance。完整 Lead 闭环（inventory → dispatch → supervise → collect/diagnose → delivery query → acceptance）尚未在 MCP 上完成。
+- M9 已暴露 MCP `registry_list`（只读）、`run_dispatch`（destructive）、`run_status`（只读安全机器字段）、`run_collect`（有界 assistant 文本 + evidenceCounts，非只读非幂等）、`run_diagnose`（只读，返回 category + signal event types，不返回 raw evidence fact/处方）。尚未在 MCP 实现：delivery query/acceptance。完整 Lead 闭环（inventory → dispatch → supervise → collect/diagnose → delivery query → acceptance）尚未在 MCP 上完成。
 - Backend 仍只负责 worker runtime。
 - Skill 是 Lead 指导层（`SKILL.md`），不在运行时依赖图中保存状态。
 - Transcript 继续是 run truth SSOT。等价的 state-changing operation（无论来自 MCP 还是 CLI）必须调用同一 service，产生相同 transcript durable facts 和 outcome；read-only query 不制造 transcript 事件，返回语义等价的结构化结果。
@@ -892,6 +892,7 @@ src/
 │   ├── runDispatch.js        #   background dispatch service（M9-2A，CLI + MCP 共用）
 │   ├── runStatus.js          #   read-only run status service（M9-3A，CLI + MCP 共用）
 │   └── runCollect.js         #   run collection service（M9-4A，CLI + MCP 共用）
+│   └── runDiagnosis.js       #   read-only run diagnosis service（M9-5A，CLI + MCP 共用）
 ├── backends/
 │   ├── opencodeServe.js      # L1：HTTP 类 backend
 │   ├── processBackend.js     # L1：进程式 backend 基类
