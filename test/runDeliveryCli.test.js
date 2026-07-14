@@ -309,9 +309,10 @@ test("3C1-04: missing --isolate fails before spawn", async () => {
 });
 
 /**
- * 3C1-05: background run with delivery fails before transcript/fork side effects.
+ * 3C1-05: background run with delivery now succeeds (M9-7A removed the foreground-only restriction).
+ * The run dispatches to the shared service; delivery is forwarded as structured argv.
  */
-test("3C1-05: background run with delivery fails before transcript/fork", async () => {
+test("3C1-05: background run with delivery dispatches successfully (M9-7A)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-3c1-05-"));
   try {
     const specPath = join(dir, "delivery.json");
@@ -322,17 +323,19 @@ test("3C1-05: background run with delivery fails before transcript/fork", async 
     }), "utf8");
 
     const config = makeConfig(dir, dir, createMockFetch());
-    await assert.rejects(
-      () => runCommand([
+    // M9-7A: background + delivery is now supported. The command should not
+    // reject with /background/. It dispatches and returns a runId.
+    const out = await captureLog(async () => {
+      await runCommand([
         "test", "--prompt", "hi",
         "--delivery-spec-file", specPath,
         "--background",
         "--isolate",
         "--run-dir", dir,
-      ], config),
-      /background/i,
-      "background + delivery should fail before fork",
-    );
+      ], config);
+    });
+    // Should have returned a background JSON with runId, not thrown.
+    assert.match(out, /"runId"/, "background delivery returns runId");
   } finally {
     await cleanupDir(dir);
   }

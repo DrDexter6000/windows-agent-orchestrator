@@ -410,3 +410,78 @@ import { readdirSync } from "node:fs";
 function readdirSafe(p) {
   try { return readdirSync(p); } catch { return []; }
 }
+
+// ===== M9-7A: delivery-capable dispatch tests =====
+
+test("M9-7A-01: valid delivery passes through prepareDeliveryRequest, argv gets --delivery-json + --isolate", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m97a-01-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const result = await dispatchRun({
+      agentId: "coder_low",
+      prompt: "do it",
+      registryPath,
+      runDir: join(dir, "runs"),
+      spawnFn: fakeSpawn,
+      delivery: {
+        mode: "git_commit_v1",
+        allowedPaths: ["src"],
+        verificationCommands: ["npm test"],
+      },
+    });
+    assert.equal(result.accepted, true);
+    const argv = calls[0].args;
+    // Delivery JSON passed as structured argv.
+    const djIdx = argv.indexOf("--delivery-json");
+    assert.ok(djIdx >= 0, "argv has --delivery-json");
+    const dj = JSON.parse(argv[djIdx + 1]);
+    assert.equal(dj.mode, "git_commit_v1");
+    assert.deepEqual(dj.allowedPaths, ["src"]);
+    assert.deepEqual(dj.verification.commands, ["npm test"]);
+    // Isolate forced.
+    assert.ok(argv.includes("--isolate"), "argv has --isolate");
+  } finally { cleanupDir(dir); }
+});
+
+test("M9-7A-02: invalid delivery rejected before transcript/fork", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m97a-02-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    // Missing mode
+    await assert.rejects(() => dispatchRun({
+      agentId: "coder_low", prompt: "x", registryPath, runDir: join(dir, "runs"),
+      spawnFn: fakeSpawn,
+      delivery: { allowedPaths: ["src/"], verificationCommands: ["npm test"] },
+    }));
+    // Both commands and reason
+    await assert.rejects(() => dispatchRun({
+      agentId: "coder_low", prompt: "x", registryPath, runDir: join(dir, "runs"),
+      spawnFn: fakeSpawn,
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src/"], verificationCommands: ["npm test"], verificationUnavailableReason: "no" },
+    }));
+    // Neither commands nor reason
+    await assert.rejects(() => dispatchRun({
+      agentId: "coder_low", prompt: "x", registryPath, runDir: join(dir, "runs"),
+      spawnFn: fakeSpawn,
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src/"] },
+    }));
+    assert.equal(calls.length, 0, "no spawn for invalid delivery");
+  } finally { cleanupDir(dir); }
+});
+
+test("M9-7A-03: non-delivery dispatch argv unchanged (no --delivery-json, no --isolate)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m97a-03-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    await dispatchRun({
+      agentId: "coder_low", prompt: "x", registryPath, runDir: join(dir, "runs"),
+      spawnFn: fakeSpawn,
+    });
+    const argv = calls[0].args;
+    assert.ok(!argv.includes("--delivery-json"), "no --delivery-json for non-delivery");
+    assert.ok(!argv.includes("--isolate"), "no --isolate for non-delivery");
+  } finally { cleanupDir(dir); }
+});

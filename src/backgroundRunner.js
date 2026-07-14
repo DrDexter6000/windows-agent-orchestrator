@@ -135,6 +135,9 @@ export async function runBackground(opts = {}) {
       ...(opts.scorecardMode ? { scorecardMode: opts.scorecardMode } : {}),
       // M9-2A：透传 --require-certified（CLI/MCP background 路径不再静默忽略认证门）。
       requireCertified: Boolean(opts.requireCertified),
+      // M9-7A: delivery runs force persistent worktree isolation.
+      ...(opts.isolate ? { isolate: true } : {}),
+      ...(opts.delivery ? { delivery: opts.delivery } : {}),
     });
   } catch (error) {
     await writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error });
@@ -237,6 +240,9 @@ export async function runMain(argv = process.argv.slice(2)) {
     scorecardMode: opts["scorecard-mode"],
     // M9-2A: boolean flag — present in argv means enabled.
     requireCertified: argv.includes("--require-certified"),
+    // M9-7A: delivery request as structured JSON (validated by dispatchRun before fork).
+    delivery: opts["delivery-json"] ? JSON.parse(opts["delivery-json"]) : undefined,
+    isolate: argv.includes("--isolate"),
   });
   // detached runner 把最终结果写 stdout 一行 JSON（供调试/日志；CLI 已返回，不依赖此）
   process.stdout.write(JSON.stringify(result) + "\n");

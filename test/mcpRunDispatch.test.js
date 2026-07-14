@@ -84,11 +84,10 @@ test("M9-2B-01: tools/list has registry_list + run_dispatch with strict schema a
 
       const rd = tools.tools.find((t) => t.name === "run_dispatch");
       assert.ok(rd, "run_dispatch present");
-      // Strict input: only agentId + prompt, no extra fields.
-      assert.deepEqual(
-        Object.keys(rd.inputSchema.properties ?? {}).sort(),
-        ["agentId", "prompt"],
-        "input schema has only agentId + prompt",
+      // Strict input: agentId + prompt required, delivery optional.
+      const inputKeys = Object.keys(rd.inputSchema.properties ?? {}).sort();
+      assert.deepEqual(inputKeys, ["agentId", "delivery", "prompt"],
+        "input schema has agentId + prompt + optional delivery",
       );
       assert.equal(rd.inputSchema.additionalProperties, false, "input is strict");
       // Annotations: not read-only, destructive (worker may modify files/run commands),

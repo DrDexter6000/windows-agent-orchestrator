@@ -122,7 +122,7 @@ async function loadScorecardFromTranscript(transcriptPath) {
 // P2（M7）→ M9-2A：fork detached runner 托管一个 background run。
 // 派发逻辑已提取到共享 application service (dispatchRun)；本函数只负责 CLI 适配——
 // 选项整理 + 把 service 结构化结果映射到既有 JSON 输出契约（不变）。
-async function spawnBackgroundRunner(agentId, options, config) {
+async function spawnBackgroundRunner(agentId, options, config, delivery) {
   if (options.scorecardRules) {
     parseScorecardRules(options.scorecardRules, options.scorecardRulesSource);
   }
@@ -141,6 +141,8 @@ async function spawnBackgroundRunner(agentId, options, config) {
     scorecardMode: options.scorecardMode,
     // M9-2A (§70)：background 路径不再静默忽略 requireCertified——与 foreground 一致透传。
     requireCertified: Boolean(options.requireCertified),
+    // M9-7A: forward validated delivery request for background delivery runs.
+    delivery,
     runnerPath,
   });
   if (!result.accepted) {
@@ -237,17 +239,15 @@ export async function runCommand(args, config) {
   if (delivery && !resolveIsolateFlag(options)) {
     throw new Error("delivery mode requires --isolate (persistent worktree isolation)");
   }
-  // Delivery is foreground-only; reject --background before fork side effects.
-  if (delivery && options.background) {
-    throw new Error("delivery mode is not supported with --background (foreground only)");
-  }
+  // M9-7A: background delivery is now supported — the delivery request is
+  // forwarded through the shared dispatchRun service to the detached runner.
   // P2（M7）：--background = detached runner 托管。CLI 预生成 runId、fork runner、立即返回。
   // runner 拥有 worker handle，驱动 waitForCompletion（含 token 闸门/超时/兜底 abort），
   // 写共享 transcript。这是 06-18 事故架构洞的正解——把"拒绝裸 spawn"换"托管生命周期"。
   if (options.background) {
     options.prompt = await loadPrompt(options);
     await loadScorecardRules(options);
-    return spawnBackgroundRunner(agentId, options, config);
+    return spawnBackgroundRunner(agentId, options, config, delivery);
   }
   options.wait = true;
   await loadScorecardRules(options);

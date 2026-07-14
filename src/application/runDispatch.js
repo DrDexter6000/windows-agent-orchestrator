@@ -20,7 +20,7 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { JsonlTranscript } from "../transcript.js";
-import { isValidRunId } from "../delivery.js";
+import { isValidRunId, prepareDeliveryRequest } from "../delivery.js";
 
 // Default path to the detached runner. Resolved relative to this module so the
 // service stays independent of the caller's cwd (CLI vs MCP vs test).
@@ -79,6 +79,7 @@ export async function dispatchRun({
   spawnFn,
   runnerPath,
   execPath,
+  delivery,
 }) {
   if (!agentId || typeof agentId !== "string") {
     throw new Error("dispatchRun: agentId is required");
@@ -102,6 +103,10 @@ export async function dispatchRun({
       `Invalid runId (contains path separators, shell metacharacters, or traversal): ${JSON.stringify(finalRunId)}`,
     );
   }
+
+  // M9-7A: validate delivery BEFORE any transcript write or fork.
+  // prepareDeliveryRequest is the SSOT — it enforces mode/path/verification rules.
+  const validatedDelivery = delivery ? prepareDeliveryRequest(delivery) : null;
 
   const resolvedRunDir = resolve(runDir);
   const resolvedRegistry = resolve(registryPath);
@@ -150,6 +155,12 @@ export async function dispatchRun({
   if (scorecardRules) runnerArgs.push("--scorecard-rules", scorecardRules);
   if (scorecardMode) runnerArgs.push("--scorecard-mode", scorecardMode);
   if (requireCertified) runnerArgs.push("--require-certified");
+  // M9-7A: delivery runs force persistent worktree isolation and carry the
+  // validated delivery request as structured JSON argv (no shell string).
+  if (validatedDelivery) {
+    runnerArgs.push("--isolate");
+    runnerArgs.push("--delivery-json", JSON.stringify(validatedDelivery));
+  }
 
   // detached: runner survives CLI/MCP process exit; stdio ignore (runner writes
   // transcript); unref so the parent does not wait for it.
