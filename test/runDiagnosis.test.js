@@ -8,7 +8,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -144,10 +144,10 @@ test("M9-5A-04: missing transcript fails closed without creating files", async (
 });
 
 // ---------------------------------------------------------------------
-// M9-5A-05: read-only — transcript bytes/hash/mtime/event-count unchanged.
+// M9-5A-05: read-only — transcript bytes unchanged after diagnosis calls.
 // ---------------------------------------------------------------------
 
-test("M9-5A-05: diagnosis is read-only — transcript unchanged", async () => {
+test("M9-5A-05: diagnosis is read-only — transcript bytes unchanged", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m95a-05-"));
   try {
     const runDir = join(dir, "runs");
@@ -157,11 +157,10 @@ test("M9-5A-05: diagnosis is read-only — transcript unchanged", async () => {
     );
     const path = join(runDir, `${runId}.jsonl`);
     const before = readFileSync(path, "utf8");
-    const beforeStat = statSync(path);
     await getRunDiagnosis({ runId, runDir });
     await getRunDiagnosis({ runId, runDir });
     const after = readFileSync(path, "utf8");
-    assert.equal(after, before, "bytes unchanged");
+    assert.equal(after, before, "transcript bytes unchanged after two diagnosis calls");
   } finally {
     cleanupDir(dir);
   }

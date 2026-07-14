@@ -891,7 +891,7 @@ src/
 │   ├── registryInventory.js  #   registry inventory SSOT（M9-0，CLI + MCP 共用）
 │   ├── runDispatch.js        #   background dispatch service（M9-2A，CLI + MCP 共用）
 │   ├── runStatus.js          #   read-only run status service（M9-3A，CLI + MCP 共用）
-│   └── runCollect.js         #   run collection service（M9-4A，CLI + MCP 共用）
+│   ├── runCollect.js         #   run collection service（M9-4A，CLI + MCP 共用）
 │   └── runDiagnosis.js       #   read-only run diagnosis service（M9-5A，CLI + MCP 共用）
 ├── backends/
 │   ├── opencodeServe.js      # L1：HTTP 类 backend

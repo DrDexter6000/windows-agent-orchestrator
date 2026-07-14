@@ -298,3 +298,67 @@ test("M9-5B-08: no prescription fields in output or tool description", async () 
     cleanupDir(dir);
   }
 });
+
+// ---------------------------------------------------------------------------
+// M9-5B-09: malformed eventType (paths/control chars/quotes/slashes) → "unknown".
+//           CTO P1: the projection must use a conservative ASCII allowlist, not
+//           just length checks. Paths, commands, control chars, or secrets in
+//           eventType must NEVER reach the output.
+// ---------------------------------------------------------------------------
+
+test("M9-5B-09: malformed eventType values map to unknown (allowlist projection)", async () => {
+  const maliciousTypes = [
+    "C:\\Users\\owner\\secret.txt",
+    "/home/owner/secret",
+    "run.event\x00null",
+    "run\tevent",
+    "run\nevent",
+    "run\"event",
+    "run\\event",
+    "run/event",
+    "run:event",
+    "rm -rf /",
+    "AKIA-SECRET-TOKEN-malicious-type-with-secret-value",
+    "x".repeat(65),
+  ];
+  const legitimateTypes = ["run.error", "run.event", "scorecard.checked"];
+
+  const evidence = [];
+  // Legitimate first so they fit within the 8-item cap.
+  for (const t of legitimateTypes) evidence.push({ eventType: t, fact: "redacted" });
+  for (const t of maliciousTypes) evidence.push({ eventType: t, fact: "redacted" });
+
+  const server = createWaoMcpServer({
+    registryPath: "/server/r.json", runDir: "/server/runs",
+    getRunDiagnosisFn: async () => ({ runId: "r", state: "failed", terminal: true, category: "unknown", evidence }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_diagnose", arguments: { runId: "r" } });
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    const dumped = JSON.stringify(res);
+
+    assert.equal(parsed.signalCount, 15, "signalCount = 15 (12 malicious + 3 legit)");
+
+    for (const t of maliciousTypes) {
+      const checkVal = t.replace(/[\x00-\x1f]/g, "");
+      if (checkVal.length > 0) {
+        assert.ok(!dumped.includes(checkVal), `malicious value must not leak: ${JSON.stringify(t)}`);
+      }
+    }
+    assert.ok(!dumped.includes("secret.txt"), "no Windows path leak");
+    assert.ok(!dumped.includes("/home/owner"), "no POSIX path leak");
+    assert.ok(!dumped.includes("rm -rf"), "no command leak");
+    assert.ok(!dumped.includes("AKIA-SECRET"), "no secret leak");
+
+    assert.ok(parsed.signalEventTypes.includes("run.error"), "legitimate preserved");
+    assert.ok(parsed.signalEventTypes.includes("run.event"), "legitimate preserved");
+    assert.ok(parsed.signalEventTypes.includes("scorecard.checked"), "legitimate preserved");
+
+    const unknownCount = parsed.signalEventTypes.filter((t) => t === "unknown").length;
+    assert.ok(unknownCount > 0, "malicious types mapped to unknown");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});

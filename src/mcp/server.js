@@ -314,6 +314,12 @@ function projectCollectResult(rawResult, runId) {
 const DIAGNOSE_ERROR_TEXT = "run_diagnose failed";
 const DIAGNOSE_MAX_SIGNALS = 8;
 const DIAGNOSE_MAX_TYPE_CHARS = 64;
+// Conservative ASCII allowlist for signal event types: letters, digits, dot,
+// underscore, hyphen only. Paths, commands, quotes, slashes, control chars,
+// or any non-ASCII → "unknown". This is the trust boundary — the MCP output
+// must never echo a raw path/command/secret even if the upstream service
+// returns one in eventType.
+const DIAGNOSE_TYPE_ALLOWLIST = /^[A-Za-z0-9._-]+$/;
 
 const RUN_DIAGNOSE_INPUT = z.object({
   runId: z.string().min(1),
@@ -549,12 +555,13 @@ export function createWaoMcpServer({
       try {
         const diag = await diagnosisService({ runId, runDir });
         // Safe projection: only event TYPES from evidence (no raw fact/error/path).
-        // Malformed/non-string/overlong types map to "unknown".
+        // Conservative ASCII allowlist: only [A-Za-z0-9._-], length 1..64.
+        // Anything else (paths, commands, quotes, control chars, secrets) → "unknown".
         const allTypes = (Array.isArray(diag.evidence) ? diag.evidence : [])
           .map((e) => {
             const t = e?.eventType;
             if (typeof t !== "string" || t.length === 0 || t.length > DIAGNOSE_MAX_TYPE_CHARS) return "unknown";
-            return t;
+            return DIAGNOSE_TYPE_ALLOWLIST.test(t) ? t : "unknown";
           });
         const signalEventTypes = allTypes.slice(0, DIAGNOSE_MAX_SIGNALS);
         const payload = {
