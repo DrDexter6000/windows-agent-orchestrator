@@ -29,6 +29,7 @@ import { z } from "zod";
 
 import { getRegistryInventory } from "../application/registryInventory.js";
 import { dispatchRun } from "../application/runDispatch.js";
+import { getRunStatus } from "../application/runStatus.js";
 
 // Stable server identity advertised at initialize.
 const SERVER_NAME = "wao-mcp";
@@ -109,14 +110,54 @@ const RUN_DISPATCH_DESCRIPTION =
   "Returns a runId the Lead can supervise later. Only agentId and prompt are accepted; " +
   "registry, run directory, and certification are fixed by the server.";
 
+// Fixed safe text for run_status failure. Never concatenates dynamic content.
+const STATUS_ERROR_TEXT = "run_status failed";
+
+// run_status input: only runId. runDir is server-owned; a model cannot override it.
+const RUN_STATUS_INPUT = z.object({
+  runId: z.string().min(1),
+}).strict();
+
+// run_status output: ONLY safe machine fields. No raw event payloads, commands,
+// paths, messages, tool input, or error content. lastEvent/lastActivity are null
+// when absent.
+const RUN_STATUS_OUTPUT = z.object({
+  runId: z.string(),
+  state: z.string(),
+  terminal: z.boolean(),
+  lastEvent: z.object({
+    type: z.string(),
+    ts: z.string(),
+  }).nullable(),
+  lastActivity: z.object({
+    kind: z.string(),
+    ts: z.string(),
+    secondsSince: z.number().nullable(),
+  }).nullable(),
+});
+
+const RUN_STATUS_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+const RUN_STATUS_DESCRIPTION =
+  "Query the point-in-time status of a run: its state, whether it is terminal, and " +
+  "the last event / last worker activity timestamp and age. Read-only. Returns only " +
+  "safe machine fields — no command text, file paths, tool inputs, messages, or error " +
+  "content. Accepts only runId; the run directory is fixed by the server.";
+
 /**
- * Create a WAO MCP server with read-only registry_list and run_dispatch tools.
+ * Create a WAO MCP server with registry_list, run_dispatch, and run_status tools.
  *
  * @param {object} input
  * @param {string} input.registryPath — path to agents.json (startup config)
- * @param {string} input.runDir — path to runs/ dir (for reliability-summary.json + transcripts)
+ * @param {string} input.runDir — path to runs/ dir
  * @param {Function} [input.getRegistryInventoryFn] — injectable for testing
  * @param {Function} [input.dispatchRunFn] — injectable dispatcher for testing
+ * @param {Function} [input.getRunStatusFn] — injectable status service for testing
  * @returns {import("@modelcontextprotocol/sdk/server/mcp.js").McpServer}
  */
 export function createWaoMcpServer({
@@ -124,9 +165,11 @@ export function createWaoMcpServer({
   runDir,
   getRegistryInventoryFn,
   dispatchRunFn,
+  getRunStatusFn,
 }) {
   const service = getRegistryInventoryFn ?? getRegistryInventory;
   const dispatcher = dispatchRunFn ?? dispatchRun;
+  const statusService = getRunStatusFn ?? getRunStatus;
 
   const mcp = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -193,6 +236,49 @@ export function createWaoMcpServer({
         runId: result.runId,
         accepted: result.accepted,
         state: result.state,
+      };
+      return {
+        content: [{ type: "text", text: JSON.stringify(payload) }],
+        structuredContent: payload,
+      };
+    },
+  );
+
+  mcp.registerTool(
+    "run_status",
+    {
+      description: RUN_STATUS_DESCRIPTION,
+      inputSchema: RUN_STATUS_INPUT,
+      outputSchema: RUN_STATUS_OUTPUT,
+      annotations: RUN_STATUS_ANNOTATIONS,
+    },
+    async ({ runId }) => {
+      let status;
+      try {
+        status = await statusService({ runId, runDir });
+      } catch {
+        // Redaction: fixed safe text. Never surface err.message/path/secret.
+        return {
+          isError: true,
+          content: [{ type: "text", text: STATUS_ERROR_TEXT }],
+        };
+      }
+      // Safe subset only: no raw event payloads, commands, paths, tool input,
+      // messages, or lastActivitySummary. Only machine identifiers + timestamps.
+      const payload = {
+        runId: status.runId,
+        state: status.state,
+        terminal: status.terminal,
+        lastEvent: status.lastEventType
+          ? { type: status.lastEventType, ts: status.lastEventTs }
+          : null,
+        lastActivity: status.lastActivityTs
+          ? {
+              kind: status.lastActivityEventKind,
+              ts: status.lastActivityTs,
+              secondsSince: status.secondsSinceActivity,
+            }
+          : null,
       };
       return {
         content: [{ type: "text", text: JSON.stringify(payload) }],

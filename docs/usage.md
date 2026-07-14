@@ -473,6 +473,36 @@ MCP host 的 stdio 配置指向同一个入口：
 
 annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:false, openWorldHint:true`（派发真实 worker，可执行命令、修改文件、访问外部系统）。
 
+### MCP `run_status`（point-in-time 状态查询，M9-3B）
+
+`run_status` 让 MCP host 查询一个 run 的当前状态。它直接复用与 CLI `status` 相同的 application service（`getRunStatus()`），不 shell-out CLI。只读——不写 transcript、不修改任何持久状态。
+
+`run_status` tool：
+
+- **输入**（strict schema）：
+
+```json
+{ "runId": "run_..." }
+```
+
+模型**不能**传 `runDir`、registry、`follow`、`limit`、timeout 或其它控制参数——`runDir` 只能来自 server 启动配置。
+
+- **安全输出**（只返回机器标识 + 时间戳，不含任何内容）：
+
+```json
+{
+  "runId": "run_...",
+  "state": "running",
+  "terminal": false,
+  "lastEvent": { "type": "run.event", "ts": "2026-07-14T00:00:10.000Z" },
+  "lastActivity": { "kind": "command", "ts": "2026-07-14T00:00:10.000Z", "secondsSince": 4 }
+}
+```
+
+`lastEvent`/`lastActivity` 在不存在时为 `null`。**绝不返回**：原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量或 `lastActivitySummary`。这是有意的安全子集——CLI status 输出含人类可读摘要（含命令名/文件名），但 MCP 只暴露安全的机器字段。`content` 的 JSON 与 `structuredContent` 语义一致。service 失败时返回固定安全文案 `run_status failed`，不拼接异常 message/stack/path。
+
+annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`（纯只读查询）。
+
 ---
 
 ## 五、常见问题
