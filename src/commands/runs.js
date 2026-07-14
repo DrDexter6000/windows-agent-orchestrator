@@ -23,6 +23,8 @@ import { join, resolve } from "node:path";
 import { readTranscript, findState } from "../transcript.js";
 import { aggregateRunMetrics, aggregateSummary, formatDuration } from "../metrics.js";
 import { diagnoseFailure } from "../diagnosis.js";
+// M9-5A: diagnosis delegated to shared application service.
+import { getRunDiagnosis } from "../application/runDiagnosis.js";
 import { forecastCost } from "../costForecast.js";
 import { getWaoDir } from "../waoDir.js";
 import { summarizeDeclares } from "../waoDeclare.js";
@@ -403,14 +405,15 @@ async function runsDiagnoseCommand(args, config) {
   if (!runId) {
     throw new Error("runs diagnose requires <runId>");
   }
-  const filePath = join(runDir, `${runId}.jsonl`);
-  const events = await readTranscript(filePath);
-  const d = diagnoseFailure(events);
+  // M9-5A: diagnosis delegated to shared application service. CLI prints the
+  // existing JSON/text output (raw factual evidence for human/ops/debug).
+  const d = await getRunDiagnosis({ runId, runDir });
   if (options.format === "json") {
-    console.log(JSON.stringify({ runId, ...d }, null, 2));
+    // CLI JSON shape unchanged: {runId, category, evidence} — no state/terminal.
+    console.log(JSON.stringify({ runId: d.runId, category: d.category, evidence: d.evidence }, null, 2));
     return;
   }
-  console.log(`runId:    ${runId}`);
+  console.log(`runId:    ${d.runId}`);
   console.log(`category: ${d.category}`);
   if (d.evidence.length > 0) {
     console.log(`evidence:`);
