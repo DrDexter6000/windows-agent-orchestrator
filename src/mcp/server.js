@@ -35,6 +35,17 @@ import { getRunStatus } from "../application/runStatus.js";
 const SERVER_NAME = "wao-mcp";
 const SERVER_VERSION = "0.0.1";
 
+/**
+ * Defensive field check for run_status payload normalization: a field counts as
+ * a usable string only if it is a non-empty finite string. null/undefined/NaN/
+ * empty all fail, collapsing incomplete event/activity pairs to null.
+ * @param {unknown} v
+ * @returns {boolean}
+ */
+function isStringField(v) {
+  return typeof v === "string" && v.length > 0;
+}
+
 // Fixed safe text returned when the underlying service fails. Intentionally
 // constant — never concatenate dynamic content here (no err.message, no path,
 // no env). This is the redaction contract: the model learns only that the
@@ -253,37 +264,55 @@ export function createWaoMcpServer({
       annotations: RUN_STATUS_ANNOTATIONS,
     },
     async ({ runId }) => {
-      let status;
+      // The entire service call + safe-payload construction + output-schema
+      // validation are inside ONE try/catch. Any malformed service result or
+      // schema mismatch must collapse to the fixed safe text — never leak the
+      // SDK's detailed Output validation error (which can include field names,
+      // expected types, or internal structure).
       try {
-        status = await statusService({ runId, runDir });
+        const status = await statusService({ runId, runDir });
+        // Normalize timestamps defensively: a legacy/malformed transcript event
+        // may have lastEventType present but lastEventTs null/NaN/non-string.
+        // Incomplete pairs collapse to null rather than producing a payload that
+        // would fail output-schema validation downstream.
+        const lastEvent = isStringField(status.lastEventType) && isStringField(status.lastEventTs)
+          ? { type: status.lastEventType, ts: status.lastEventTs }
+          : null;
+        const lastActivity = isStringField(status.lastActivityTs) && isStringField(status.lastActivityEventKind)
+          ? {
+              kind: status.lastActivityEventKind,
+              ts: status.lastActivityTs,
+              secondsSince: typeof status.secondsSinceActivity === "number" && Number.isFinite(status.secondsSinceActivity)
+                ? status.secondsSinceActivity
+                : null,
+            }
+          : null;
+        const payload = {
+          runId: status.runId,
+          state: status.state,
+          terminal: status.terminal,
+          lastEvent,
+          lastActivity,
+        };
+        // Pre-validate against the output schema BEFORE returning. If this
+        // throws (malformed service result that normalization could not fix),
+        // the catch collapses it to the fixed safe text — ahead of the SDK
+        // framework's own validateToolOutput, which would otherwise emit a
+        // detailed Output validation error.
+        RUN_STATUS_OUTPUT.parse(payload);
+        return {
+          content: [{ type: "text", text: JSON.stringify(payload) }],
+          structuredContent: payload,
+        };
       } catch {
-        // Redaction: fixed safe text. Never surface err.message/path/secret.
+        // Redaction: fixed safe text. Covers service throw, malformed result,
+        // and any payload/schema mismatch. Never surface err.message/path/secret
+        // or SDK validation detail.
         return {
           isError: true,
           content: [{ type: "text", text: STATUS_ERROR_TEXT }],
         };
       }
-      // Safe subset only: no raw event payloads, commands, paths, tool input,
-      // messages, or lastActivitySummary. Only machine identifiers + timestamps.
-      const payload = {
-        runId: status.runId,
-        state: status.state,
-        terminal: status.terminal,
-        lastEvent: status.lastEventType
-          ? { type: status.lastEventType, ts: status.lastEventTs }
-          : null,
-        lastActivity: status.lastActivityTs
-          ? {
-              kind: status.lastActivityEventKind,
-              ts: status.lastActivityTs,
-              secondsSince: status.secondsSinceActivity,
-            }
-          : null,
-      };
-      return {
-        content: [{ type: "text", text: JSON.stringify(payload) }],
-        structuredContent: payload,
-      };
     },
   );
 
