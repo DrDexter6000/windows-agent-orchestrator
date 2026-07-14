@@ -405,3 +405,116 @@ test("M9-2B-07: CLI and MCP dispatch produce same initial durable facts and outc
     cleanupDir(dir);
   }
 });
+
+// ===== M9-7A: delivery-capable dispatch tests =====
+
+test("M9-7A-04: MCP run_dispatch with delivery passes delivery to service", async () => {
+  let callCount = 0;
+  let captured = null;
+  const fakeDispatch = async (input) => {
+    callCount += 1;
+    captured = input;
+    return { accepted: true, runId: "run_delivery_m97a", state: "pending", transcriptPath: "/x.jsonl" };
+  };
+  const server = createWaoMcpServer({
+    registryPath: "/server/r.json", runDir: "/server/runs",
+    dispatchRunFn: fakeDispatch,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({
+      name: "run_dispatch",
+      arguments: {
+        agentId: "coder_low", prompt: "do it",
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
+      },
+    });
+    assert.equal(callCount, 1);
+    assert.ok(captured.delivery, "service received delivery");
+    assert.equal(captured.delivery.mode, "git_commit_v1");
+    assert.equal(captured.requireCertified, true, "still forced certified");
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    assert.deepEqual(Object.keys(parsed).sort(), ["accepted", "runId", "state"], "output unchanged");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("M9-7A-05: MCP delivery with both commands+reason rejected, service count 0", async () => {
+  let callCount = 0;
+  const fakeDispatch = async () => { callCount += 1; return { accepted: true, runId: "x", state: "pending" }; };
+  const server = createWaoMcpServer({
+    registryPath: "/r.json", runDir: "/runs", dispatchRunFn: fakeDispatch,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    let rejected = false;
+    let result = null;
+    try {
+      result = await client.callTool({
+        name: "run_dispatch",
+        arguments: {
+          agentId: "x", prompt: "y",
+          delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"], verificationUnavailableReason: "no" },
+        },
+      });
+    } catch { rejected = true; }
+    if (!rejected) { assert.equal(result.isError, true, "both commands+reason rejected"); rejected = true; }
+    assert.ok(rejected);
+    assert.equal(callCount, 0, "service never called");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("M9-7A-06: MCP delivery with no verification rejected, service count 0", async () => {
+  let callCount = 0;
+  const fakeDispatch = async () => { callCount += 1; return { accepted: true, runId: "x", state: "pending" }; };
+  const server = createWaoMcpServer({
+    registryPath: "/r.json", runDir: "/runs", dispatchRunFn: fakeDispatch,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    let rejected = false;
+    let result = null;
+    try {
+      result = await client.callTool({
+        name: "run_dispatch",
+        arguments: {
+          agentId: "x", prompt: "y",
+          delivery: { mode: "git_commit_v1", allowedPaths: ["src"] },
+        },
+      });
+    } catch { rejected = true; }
+    if (!rejected) { assert.equal(result.isError, true); rejected = true; }
+    assert.ok(rejected);
+    assert.equal(callCount, 0);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("M9-7A-07: non-delivery dispatch still works identically", async () => {
+  let callCount = 0;
+  let captured = null;
+  const fakeDispatch = async (input) => {
+    callCount += 1;
+    captured = input;
+    return { accepted: true, runId: "r", state: "pending" };
+  };
+  const server = createWaoMcpServer({
+    registryPath: "/r.json", runDir: "/runs", dispatchRunFn: fakeDispatch,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y" } });
+    assert.equal(callCount, 1);
+    assert.ok(!captured.delivery, "no delivery forwarded for non-delivery dispatch");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});

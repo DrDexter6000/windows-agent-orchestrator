@@ -96,12 +96,26 @@ const REGISTRY_LIST_DESCRIPTION =
 // failed, never operational detail.
 const DISPATCH_ERROR_TEXT = "run_dispatch failed";
 
-// run_dispatch input: only agentId + prompt. Strict — rejects registryPath,
-// runDir, runId, cwd, requireCertified, timeouts, isolation, delivery, etc.
-// Those are server-owned config; a model must not override them per call.
+// run_dispatch input: agentId + prompt required; optional delivery block.
+// Server-owned config (runDir, runId, cwd, isolate, requireCertified, timeouts)
+// is never accepted — delivery.force-isolate is enforced by the service.
+const DELIVERY_INPUT = z.object({
+  mode: z.literal("git_commit_v1"),
+  allowedPaths: z.array(z.string().min(1).max(512)).min(1).max(64),
+  verificationCommands: z.array(z.string().min(1).max(512)).max(32).optional(),
+  verificationUnavailableReason: z.string().min(1).max(512).optional(),
+}).strict().refine(
+  (d) => !d.verificationCommands || !d.verificationUnavailableReason,
+  "cannot provide both verificationCommands and verificationUnavailableReason",
+).refine(
+  (d) => d.verificationCommands || d.verificationUnavailableReason,
+  "must provide either verificationCommands or verificationUnavailableReason",
+);
+
 const RUN_DISPATCH_INPUT = z.object({
   agentId: z.string().min(1),
   prompt: z.string().min(1),
+  delivery: DELIVERY_INPUT.optional(),
 }).strict();
 
 // run_dispatch output: only runId + accepted + state. No paths, PID, prompt, argv.
@@ -512,7 +526,7 @@ export function createWaoMcpServer({
       outputSchema: RUN_DISPATCH_OUTPUT,
       annotations: RUN_DISPATCH_ANNOTATIONS,
     },
-    async ({ agentId, prompt }) => {
+    async ({ agentId, prompt, delivery }) => {
       let result;
       try {
         result = await dispatcher({
@@ -523,6 +537,8 @@ export function createWaoMcpServer({
           // MCP always requires certification — the control plane decides this,
           // never the model. Background path now propagates it (M9-2A).
           requireCertified: true,
+          // M9-7A: optional delivery request — service validates via prepareDeliveryRequest.
+          ...(delivery ? { delivery } : {}),
         });
       } catch {
         // Redaction: fixed safe text. Never surface err.message/path/argv/env.
