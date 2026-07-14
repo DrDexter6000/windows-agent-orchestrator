@@ -106,7 +106,17 @@ export async function dispatchRun({
 
   // M9-7A: validate delivery BEFORE any transcript write or fork.
   // prepareDeliveryRequest is the SSOT — it enforces mode/path/verification rules.
+  // The validated result has internal shape {verification:{commands,unavailableReason}},
+  // but RunManager.start expects the public shape {verificationCommands|verificationUnavailableReason}.
+  // Convert to public shape here — do NOT let runner or RunManager re-implement conversion.
   const validatedDelivery = delivery ? prepareDeliveryRequest(delivery) : null;
+  const publicDelivery = validatedDelivery ? {
+    mode: validatedDelivery.mode,
+    allowedPaths: validatedDelivery.allowedPaths,
+    ...(validatedDelivery.verification.commands.length > 0
+      ? { verificationCommands: validatedDelivery.verification.commands }
+      : { verificationUnavailableReason: validatedDelivery.verification.unavailableReason }),
+  } : null;
 
   const resolvedRunDir = resolve(runDir);
   const resolvedRegistry = resolve(registryPath);
@@ -157,9 +167,18 @@ export async function dispatchRun({
   if (requireCertified) runnerArgs.push("--require-certified");
   // M9-7A: delivery runs force persistent worktree isolation and carry the
   // validated delivery request as structured JSON argv (no shell string).
-  if (validatedDelivery) {
+  // Use the public shape that RunManager.start expects directly.
+  if (publicDelivery) {
     runnerArgs.push("--isolate");
-    runnerArgs.push("--delivery-json", JSON.stringify(validatedDelivery));
+    runnerArgs.push("--delivery-json", JSON.stringify(publicDelivery));
+  }
+
+  // P2: conservative total argv length guard — Windows CreateProcess has a
+  // ~32K limit; we enforce a much tighter bound to stay well within it.
+  const ARGV_MAX_TOTAL = 24000;
+  const totalArgvLen = runnerArgs.reduce((sum, a) => sum + String(a).length + 1, 0);
+  if (totalArgvLen > ARGV_MAX_TOTAL) {
+    throw new Error(`runner argv too long (${totalArgvLen} > ${ARGV_MAX_TOTAL}); reduce prompt/delivery/scorecard size`);
   }
 
   // detached: runner survives CLI/MCP process exit; stdio ignore (runner writes

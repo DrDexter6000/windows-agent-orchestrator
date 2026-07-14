@@ -239,7 +239,7 @@ Delivery 模式在 worktree 隔离中运行 worker，完成后打包一个 atomi
 然后运行验证命令。`--format json` 返回完整 DeliveryRef 和 `verificationFailed` /
 `verificationUnavailable` 标志。schema 语义见 `docs/02-architecture.md` §4.6-4.8。
 
-限制：仅支持 foreground `run`，不支持 `--background` 或 `spawn`。
+限制：仅支持 `run`（foreground 和 background 均可），不支持 `spawn`。Background delivery 需要 `--isolate`。
 
 ### 场景 4c：Lead 验收（delivery acceptance）
 
@@ -459,7 +459,21 @@ MCP host 的 stdio 配置指向同一个入口：
 { "agentId": "coder_low", "prompt": "bounded task prompt" }
 ```
 
-模型**不能**传 `registryPath`、`runDir`、`runId`、`cwd`、`requireCertified`、timeout、isolation 或 delivery 参数——这些是 server-owned 配置。MCP 固定以 `requireCertified: true` 调 shared service（认证门由控制面决定，不由模型决定）。
+M9-7A 起支持可选 `delivery` 块，用于派发后续可由 `run_delivery`/`run_delivery_decide` 操作的 delivery run：
+
+```json
+{
+  "agentId": "coder_low",
+  "prompt": "bounded task prompt",
+  "delivery": {
+    "mode": "git_commit_v1",
+    "allowedPaths": ["src"],
+    "verificationCommands": ["npm test"]
+  }
+}
+```
+
+`delivery` 可选。`verificationCommands` 与 `verificationUnavailableReason` 二选一（互斥）。WAO 强制 persistent worktree isolation——模型不能传 `isolate`。模型**不能**传 `registryPath`、`runDir`、`runId`、`cwd`、`requireCertified`、timeout 或 `isolate`——这些是 server-owned 配置。MCP 固定以 `requireCertified: true` 调 shared service。
 
 - **输出**（成功或拒绝同形，MCP `content` + `structuredContent`）：
 

@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
@@ -309,35 +309,107 @@ test("3C1-04: missing --isolate fails before spawn", async () => {
 });
 
 /**
- * 3C1-05: background run with delivery now succeeds (M9-7A removed the foreground-only restriction).
- * The run dispatches to the shared service; delivery is forwarded as structured argv.
+ * 3C1-05: background run with delivery produces full lifecycle events (M9-7A closeout).
+ * Uses a real git repo + a fake process worker script that writes a file and exits 0.
+ * Dispatches via CLI subprocess, polls transcript to terminal, verifies delivery events.
  */
-test("3C1-05: background run with delivery dispatches successfully (M9-7A)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-3c1-05-"));
+test("3C1-05: background delivery produces delivery_created + verification + terminal", async () => {
+  const { repo, baseCommit } = makeRepo("wao-3c1-05-");
   try {
-    const specPath = join(dir, "delivery.json");
+    const runDir = join(repo, "runs");
+    mkdirSync(runDir, { recursive: true });
+
+    // Registry pointing to a fake worker binary that writes src/out.js and exits 0.
+    const fakeWorker = join(import.meta.dirname, "fixtures", "fake-worker-writefile.cjs");
+    const registryPath = join(repo, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        fake_worker: {
+          backend: "claude-code",
+          binary: process.execPath,
+          prependArgs: [fakeWorker, "out.js", "fake output"],
+          cwd: repo,
+          args: [],
+        },
+      },
+    }), "utf8");
+
+    const specPath = join(repo, "delivery.json");
     writeFileSync(specPath, JSON.stringify({
       mode: "git_commit_v1",
       allowedPaths: ["src"],
       verificationCommands: ["echo ok"],
     }), "utf8");
 
-    const config = makeConfig(dir, dir, createMockFetch());
-    // M9-7A: background + delivery is now supported. The command should not
-    // reject with /background/. It dispatches and returns a runId.
-    const out = await captureLog(async () => {
-      await runCommand([
-        "test", "--prompt", "hi",
-        "--delivery-spec-file", specPath,
-        "--background",
-        "--isolate",
-        "--run-dir", dir,
-      ], config);
-    });
-    // Should have returned a background JSON with runId, not thrown.
-    assert.match(out, /"runId"/, "background delivery returns runId");
+    // Dispatch via CLI subprocess — the detached runner runs independently.
+    const cliOut = execSync(
+      `node src/cli.js run fake_worker --prompt "write a file" ` +
+      `--delivery-spec-file ${specPath} --background --isolate ` +
+      `--registry ${registryPath} --run-dir ${runDir}`,
+      { cwd: process.cwd(), encoding: "utf8", timeout: 15000,
+        env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" } },
+    );
+    const parsed = JSON.parse(cliOut.slice(cliOut.indexOf("{"), cliOut.lastIndexOf("}") + 1));
+    const runId = parsed.runId;
+    assert.ok(runId, "background delivery returns runId");
+
+    // Poll transcript to terminal.
+    const transcriptPath = join(runDir, `${runId}.jsonl`);
+    let events = [];
+    for (let i = 0; i < 120; i += 1) {
+      if (existsSync(transcriptPath)) {
+        events = await readTranscript(transcriptPath);
+        const st = findState(events);
+        if (["completed", "failed", "aborted", "timed_out"].includes(st)) break;
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+
+    // After reaching terminal, re-read to capture all events (verification may
+    // be written immediately after the terminal state_change). Retry a few
+    // times to handle flush timing under load.
+    for (let r = 0; r < 10; r += 1) {
+      await new Promise((res) => setTimeout(res, 500));
+      events = await readTranscript(transcriptPath);
+      const hasVerification = events.some((e) =>
+        e.type === "run.delivery_verification_passed" ||
+        e.type === "run.delivery_verification_failed" ||
+        e.type === "run.delivery_verification_unavailable");
+      if (hasVerification) break;
+    }
+
+    const finalState = findState(events);
+    // The delivery lifecycle may complete or fail depending on worktree setup;
+    // either way we must reach terminal and have delivery events.
+    assert.ok(["completed", "failed"].includes(finalState),
+      `background delivery reached terminal (got ${finalState})`);
+
+    // Must have delivery_created.
+    const deliveryCreated = events.filter((e) => e.type === "run.delivery_created");
+    assert.ok(deliveryCreated.length >= 1, "at least one delivery_created event");
+
+    // If completed, must have verification outcome.
+    if (finalState === "completed") {
+      const vEvents = events.filter((e) =>
+        e.type === "run.delivery_verification_passed" ||
+        e.type === "run.delivery_verification_failed" ||
+        e.type === "run.delivery_verification_unavailable");
+      assert.ok(vEvents.length >= 1, "verification outcome present on completed delivery");
+    }
+
+    // Source checkout unchanged.
+    const sourceFiles = execSync("git diff --name-only HEAD", { cwd: repo, encoding: "utf8" }).trim();
+    assert.equal(sourceFiles, "", "source checkout unchanged by worker");
+
+    // Heartbeat cleared.
+    const ownerFile = join(runDir, `.owner-${runId}`);
+    for (let i = 0; i < 40; i += 1) {
+      if (!existsSync(ownerFile)) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(!existsSync(ownerFile), "heartbeat cleared after runner exit");
   } finally {
-    await cleanupDir(dir);
+    await cleanupDir(repo);
   }
 });
 

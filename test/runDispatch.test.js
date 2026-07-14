@@ -438,7 +438,9 @@ test("M9-7A-01: valid delivery passes through prepareDeliveryRequest, argv gets 
     const dj = JSON.parse(argv[djIdx + 1]);
     assert.equal(dj.mode, "git_commit_v1");
     assert.deepEqual(dj.allowedPaths, ["src"]);
-    assert.deepEqual(dj.verification.commands, ["npm test"]);
+    // Public shape: verificationCommands (not nested verification.commands).
+    assert.deepEqual(dj.verificationCommands, ["npm test"]);
+    assert.ok(!dj.verification, "no internal nested verification structure");
     // Isolate forced.
     assert.ok(argv.includes("--isolate"), "argv has --isolate");
   } finally { cleanupDir(dir); }
@@ -483,5 +485,42 @@ test("M9-7A-03: non-delivery dispatch argv unchanged (no --delivery-json, no --i
     const argv = calls[0].args;
     assert.ok(!argv.includes("--delivery-json"), "no --delivery-json for non-delivery");
     assert.ok(!argv.includes("--isolate"), "no --isolate for non-delivery");
+  } finally { cleanupDir(dir); }
+});
+
+test("M9-7A-08: argv total length guard rejects oversized input before fork", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m97a-08-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    // Build a prompt that makes total argv > 24000 chars.
+    const hugePrompt = "x".repeat(25000);
+    let threw = false;
+    try {
+      await dispatchRun({
+        agentId: "coder_low", prompt: hugePrompt, registryPath, runDir: join(dir, "runs"),
+        spawnFn: fakeSpawn,
+      });
+    } catch { threw = true; }
+    assert.ok(threw, "oversized argv must throw before fork");
+    assert.equal(calls.length, 0, "no spawn for oversized argv");
+  } finally { cleanupDir(dir); }
+});
+
+test("M9-7A-09: delivery with unavailableReason uses public shape in argv", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m97a-09-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    await dispatchRun({
+      agentId: "coder_low", prompt: "x", registryPath, runDir: join(dir, "runs"),
+      spawnFn: fakeSpawn,
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationUnavailableReason: "no verification available" },
+    });
+    const argv = calls[0].args;
+    const dj = JSON.parse(argv[argv.indexOf("--delivery-json") + 1]);
+    assert.equal(dj.verificationUnavailableReason, "no verification available");
+    assert.ok(!dj.verificationCommands, "no commands when reason provided");
+    assert.ok(!dj.verification, "no internal nested structure");
   } finally { cleanupDir(dir); }
 });

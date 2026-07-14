@@ -227,6 +227,43 @@ export async function runMain(argv = process.argv.slice(2)) {
   const args = argv.filter((a) => !a.startsWith("--"));
   const opts = parseSimpleFlags(argv);
   const agentId = args[0];
+
+  // M9-7A closeout: parse delivery JSON before entering runBackground. If it
+  // fails, fail-closed — write a safe run.error + transition to failed. Never
+  // leave a pending transcript, never spawn a worker with corrupt input.
+  let parsedDelivery;
+  if (opts["delivery-json"]) {
+    try {
+      parsedDelivery = JSON.parse(opts["delivery-json"]);
+    } catch {
+      // Malformed delivery JSON — fail closed with a fixed safe reason.
+      const runDir = opts["run-dir"];
+      const runId = opts["run-id"];
+      if (runDir && runId) {
+        const transcriptPath = join(runDir, `${runId}.jsonl`);
+        try {
+          let events = [];
+          try { events = await readTranscript(transcriptPath); } catch { events = []; }
+          const t = new JsonlTranscript(transcriptPath, {
+            runId, agentId: agentId ?? "unknown",
+            initialSeq: findLastEventSeq(events),
+          });
+          if (!TERMINAL_STATES.includes(findState(events))) {
+            await t.append("run.error", { phase: "delivery_parse", error: "malformed delivery JSON in runner argv" });
+            await t.transitionState("pending", "failed", "delivery_parse_error");
+          }
+        } catch { /* best effort — don't mask the original error */ }
+      }
+      const failResult = {
+        runId: opts["run-id"] ?? "unknown",
+        completed: false, failed: true, timedOut: false,
+        error: "malformed delivery JSON in runner argv",
+      };
+      process.stdout.write(JSON.stringify(failResult) + "\n");
+      return;
+    }
+  }
+
   const result = await runBackground({
     agentId,
     prompt: opts.prompt,
@@ -238,10 +275,8 @@ export async function runMain(argv = process.argv.slice(2)) {
     pollInterval: Number(opts["poll-interval"] ?? 1000),
     scorecardRules: opts["scorecard-rules"] ? JSON.parse(opts["scorecard-rules"]) : undefined,
     scorecardMode: opts["scorecard-mode"],
-    // M9-2A: boolean flag — present in argv means enabled.
     requireCertified: argv.includes("--require-certified"),
-    // M9-7A: delivery request as structured JSON (validated by dispatchRun before fork).
-    delivery: opts["delivery-json"] ? JSON.parse(opts["delivery-json"]) : undefined,
+    delivery: parsedDelivery,
     isolate: argv.includes("--isolate"),
   });
   // detached runner 把最终结果写 stdout 一行 JSON（供调试/日志；CLI 已返回，不依赖此）
