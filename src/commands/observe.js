@@ -17,74 +17,37 @@
 
 import { readFile } from "node:fs/promises";
 import { watchFile, unwatchFile } from "node:fs";
-import { basename } from "node:path";
+import { resolve } from "node:path";
 
-import { findState, findLatest, readTranscript } from "../transcript.js";
+import { findLatest, readTranscript } from "../transcript.js";
 import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { parseOptions, loadRun } from "./shared.js";
+// M9-3A: status aggregation delegated to shared application service.
+import { getRunStatus } from "../application/runStatus.js";
 
-/**
- * TD-75 补全：把最后一条 run.event 映射成 Lead 可读的活动类型 + 摘要。
- * 只给"在干啥"的人类可读描述，不泄露完整内容（summary 截断/取关键标识，防 token 膨胀）。
- * @param {Object} ev - 最后一条 run.event（可为 null）
- * @returns {{lastActivityKind: string|null, lastActivitySummary: string|null}}
- */
-function describeActivity(ev) {
-  if (!ev) return { lastActivityKind: null, lastActivitySummary: null };
-  switch (ev.kind) {
-    case "message":
-      return { lastActivityKind: "在说话", lastActivitySummary: `worker 发言（${ev.role ?? "?"}）` };
-    case "thinking":
-      // TD-76：思考期间心跳持续，Lead 知道"在想"而非"假死"（不存内容）
-      return { lastActivityKind: "在思考", lastActivitySummary: "worker 正在 reasoning" };
-    case "command":
-      return { lastActivityKind: "跑命令", lastActivitySummary: truncate(ev.command ?? "", 80) };
-    case "tool_use":
-      return { lastActivityKind: `用工具 ${ev.tool ?? "?"}`, lastActivitySummary: summarizeToolInput(ev.tool, ev.input) };
-    case "tool_result":
-      return { lastActivityKind: "收工具结果", lastActivitySummary: `${ev.tool ?? "?"} 返回${ev.isError ? "（错误）" : ""}` };
-    case "file_written":
-      return { lastActivityKind: "在写文件", lastActivitySummary: basename(ev.path ?? "") };
-    default:
-      return { lastActivityKind: ev.kind ?? "未知", lastActivitySummary: "" };
-  }
-}
-
-function summarizeToolInput(tool, input) {
-  if (!input || typeof input !== "object") return "";
-  // 取最能标识"在干啥"的字段：路径/命令/pattern 优先
-  const key = input.file_path ?? input.path ?? input.command ?? input.pattern ?? input.query;
-  return key ? truncate(String(key), 80) : "";
-}
-
-function truncate(s, n) {
-  const t = s.replace(/\s+/g, " ").trim();
-  return t.length > n ? t.slice(0, n) + "…" : t;
-}
+// M9-3A: describeActivity/summarizeToolInput/truncate were the local copy of the
+// status activity algorithm. They have been migrated to the shared application
+// service (src/application/runStatus.js) so CLI and MCP use one algorithm.
+// statusCommand now delegates to getRunStatus; the local copies are removed to
+// prevent drift (no second algorithm).
 
 export async function statusCommand(args, config) {
   const [runId, ...tail] = args;
-  const { events } = await loadRun(runId, parseOptions(tail), config);
-  const last = events.at(-1);
-  const state = findState(events);
-  // TD-75 worker 心跳：lastActivityTs = 最后一条 run.event 的 ts。
-  // appendFile 每 event flush（transcript.js），故这是实时的"生命体征"——
-  // Lead 据此判 worker 活性：< 120s 还活着别动（守"宁慢勿杀"）；≥120s 才是掉链子信号。
-  // 只算 run.event（thinking/text/tool_use/tool_result/command/file_written），不计
-  // state_change/error/metrics 等编排事件——心跳要反映"worker 在产出"。
-  // 无 run.event（纯启动失败）→ null。终态 run 也输出（Lead 看死前是否还在跳）。
-  //
-  // TD-75 补全：同一条事件还带 kind（message/command/tool_use/tool_result/file_written），
-  // 映射成 lastActivityKind（人类可读活动类型）+ lastActivitySummary（带具体内容，如命令名/
-  // 工具名/文件名）。让 Lead 从"47s 前还活着"升级到"47s 前在跑 npm test"——掌握 worker 在干啥，
-  // 减少因"不知道在干啥"而误判停（守"宁慢勿杀"）。
-  const lastActivity = [...events].reverse().find((e) => e.type === "run.event");
-  const lastActivityTs = lastActivity?.ts ?? null;
-  const secondsSinceActivity = lastActivityTs
-    ? Math.round((Date.now() - new Date(lastActivityTs).getTime()) / 1000)
-    : null;
-  const { lastActivityKind, lastActivitySummary } = describeActivity(lastActivity);
-  console.log(JSON.stringify({ runId, state, last, lastActivityTs, secondsSinceActivity, lastActivityKind, lastActivitySummary }, null, 2));
+  const options = parseOptions(tail);
+  const runDir = resolve(options.runDir ?? config.runDir);
+  // M9-3A: aggregation delegated to shared application service. The CLI prints
+  // the existing TD-75 field subset (byte-compatible output); the service also
+  // returns machine fields for MCP that the CLI does not print.
+  const status = await getRunStatus({ runId, runDir });
+  console.log(JSON.stringify({
+    runId: status.runId,
+    state: status.state,
+    last: status.last,
+    lastActivityTs: status.lastActivityTs,
+    secondsSinceActivity: status.secondsSinceActivity,
+    lastActivityKind: status.lastActivityKind,
+    lastActivitySummary: status.lastActivitySummary,
+  }, null, 2));
 }
 
 export async function tailCommand(args, config) {

@@ -47,7 +47,7 @@ CLI Adapter ─┘                 ↓
 ```
 
 - MCP Adapter 和 CLI Adapter 只做 transport/input/output adaptation。
-- Application Services 层是 M9 planned target。**已提取的共享 services**：`src/application/registryInventory.js`（M9-0，inventory）、`src/application/runDispatch.js`（M9-2A，background dispatch）。CLI `run --background` / `spawn`（no --wait）已委托 `dispatchRun()`。其余 use-case orchestration 仍在 `src/commands/*.js` 中，尚未提取为共享 services。RunManager/transcript/delivery/workflow/registry 是 core/domain capabilities，不是完整的 application-service 层。
+- Application Services 层是 M9 planned target。**已提取的共享 services**：`src/application/registryInventory.js`（M9-0，inventory）、`src/application/runDispatch.js`（M9-2A，background dispatch）、`src/application/runStatus.js`（M9-3A，read-only status）。CLI `run --background` / `spawn` 委托 `dispatchRun()`；CLI `status` 委托 `getRunStatus()`。其余 use-case orchestration 仍在 `src/commands/*.js` 中。RunManager/transcript/delivery/workflow/registry 是 core/domain capabilities，不是完整的 application-service 层。
 - 业务规则只写一次，在 application services 层。**禁止 MCP Server 通过 shell 调 CLI 并解析文本输出。** MCP adapter 直接 import 并调用 application service。
 - RunManager / transcript / delivery / Backend / workflow 不依赖 MCP——MCP 是 L4 adapter，不是 L1-L3 dependency。`src/mcp/**` 是唯一允许 import `@modelcontextprotocol/sdk` 与 `zod` 的位置（由边界测试守卫）。`src/application/**` 不得 import `src/commands/*`、`src/mcp/*`、MCP SDK 或 zod。
 - M9 已暴露 MCP `registry_list`（只读）和 `run_dispatch`（派发受监督后台 run，调 `dispatchRun()` service，固定 `requireCertified:true`，destructive）。尚未在 MCP 实现：supervise/collect/diagnose/delivery query/acceptance（M9-3+）。完整 Lead 闭环（inventory → dispatch → supervise → collect/diagnose → delivery query → acceptance）尚未在 MCP 上完成。
@@ -889,7 +889,8 @@ src/
 │   └── stdio.js              #   stdio production entrypoint（StdioServerTransport，npm run mcp）
 ├── application/              # L3：shared application services（M9 use-case 层）
 │   ├── registryInventory.js  #   registry inventory SSOT（M9-0，CLI + MCP 共用）
-│   └── runDispatch.js        #   background dispatch service（M9-2A，CLI + MCP 共用）
+│   ├── runDispatch.js        #   background dispatch service（M9-2A，CLI + MCP 共用）
+│   └── runStatus.js          #   read-only run status service（M9-3A，CLI + MCP 共用）
 ├── backends/
 │   ├── opencodeServe.js      # L1：HTTP 类 backend
 │   ├── processBackend.js     # L1：进程式 backend 基类
