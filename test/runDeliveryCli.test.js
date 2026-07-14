@@ -379,23 +379,23 @@ test("3C1-05: background delivery produces delivery_created + verification + ter
     }
 
     const finalState = findState(events);
-    // The delivery lifecycle may complete or fail depending on worktree setup;
-    // either way we must reach terminal and have delivery events.
-    assert.ok(["completed", "failed"].includes(finalState),
-      `background delivery reached terminal (got ${finalState})`);
+    assert.equal(finalState, "completed",
+      `background delivery must complete successfully (got ${finalState})`);
 
-    // Must have delivery_created.
+    // Precise delivery event counts.
     const deliveryCreated = events.filter((e) => e.type === "run.delivery_created");
-    assert.ok(deliveryCreated.length >= 1, "at least one delivery_created event");
+    assert.equal(deliveryCreated.length, 1, "exactly 1 delivery_created");
 
-    // If completed, must have verification outcome.
-    if (finalState === "completed") {
-      const vEvents = events.filter((e) =>
-        e.type === "run.delivery_verification_passed" ||
-        e.type === "run.delivery_verification_failed" ||
-        e.type === "run.delivery_verification_unavailable");
-      assert.ok(vEvents.length >= 1, "verification outcome present on completed delivery");
-    }
+    const verificationPassed = events.filter((e) => e.type === "run.delivery_verification_passed");
+    assert.equal(verificationPassed.length, 1, "exactly 1 delivery_verification_passed");
+
+    const deliveryFailed = events.filter((e) => e.type === "run.delivery_failed");
+    assert.equal(deliveryFailed.length, 0, "0 delivery_failed");
+
+    const verificationFailed = events.filter((e) => e.type === "run.delivery_verification_failed");
+    assert.equal(verificationFailed.length, 0, "0 verification_failed");
+    const verificationUnavailable = events.filter((e) => e.type === "run.delivery_verification_unavailable");
+    assert.equal(verificationUnavailable.length, 0, "0 verification_unavailable");
 
     // Source checkout unchanged.
     const sourceFiles = execSync("git diff --name-only HEAD", { cwd: repo, encoding: "utf8" }).trim();

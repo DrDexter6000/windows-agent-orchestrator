@@ -120,6 +120,44 @@ export async function dispatchRun({
 
   const resolvedRunDir = resolve(runDir);
   const resolvedRegistry = resolve(registryPath);
+
+  // Construct runner argv BEFORE any transcript write. All static preflight
+  // (argv length guard, delivery validation) must happen before a single
+  // durable fact is written — otherwise a rejected dispatch leaves an
+  // orphaned pending transcript with no owner.
+  const _spawn = spawnFn ?? spawn;
+  const _execPath = execPath ?? process.execPath;
+  const _runnerPath = runnerPath ?? DEFAULT_RUNNER_PATH;
+  const effectiveWaitTimeout = waitTimeout ?? DEFAULT_WAIT_TIMEOUT;
+  const effectivePollInterval = pollInterval ?? DEFAULT_POLL_INTERVAL;
+
+  const runnerArgs = [
+    _runnerPath,
+    agentId,
+    "--prompt", prompt,
+    "--run-dir", resolvedRunDir,
+    "--run-id", finalRunId,
+    "--registry", resolvedRegistry,
+    "--wait-timeout", String(effectiveWaitTimeout),
+    "--poll-interval", String(effectivePollInterval),
+  ];
+  if (cwd) runnerArgs.push("--cwd", cwd);
+  if (scorecardRules) runnerArgs.push("--scorecard-rules", scorecardRules);
+  if (scorecardMode) runnerArgs.push("--scorecard-mode", scorecardMode);
+  if (requireCertified) runnerArgs.push("--require-certified");
+  if (publicDelivery) {
+    runnerArgs.push("--isolate");
+    runnerArgs.push("--delivery-json", JSON.stringify(publicDelivery));
+  }
+
+  // Conservative total argv length guard — BEFORE transcript write.
+  const ARGV_MAX_TOTAL = 24000;
+  const totalArgvLen = runnerArgs.reduce((sum, a) => sum + String(a).length + 1, 0);
+  if (totalArgvLen > ARGV_MAX_TOTAL) {
+    throw new Error(`runner argv too long (${totalArgvLen} > ${ARGV_MAX_TOTAL}); reduce prompt/delivery/scorecard size`);
+  }
+
+  // All preflight passed — now write transcript durable facts.
   const transcriptPath = join(resolvedRunDir, `${finalRunId}.jsonl`);
   const transcript = new JsonlTranscript(transcriptPath, { runId: finalRunId, agentId });
 
@@ -142,43 +180,6 @@ export async function dispatchRun({
       transcriptPath,
       terminalState: pendingResult.state,
     };
-  }
-
-  // Accepted — spawn the detached runner with the full argv it needs.
-  const _spawn = spawnFn ?? spawn;
-  const _execPath = execPath ?? process.execPath;
-  const _runnerPath = runnerPath ?? DEFAULT_RUNNER_PATH;
-  const effectiveWaitTimeout = waitTimeout ?? DEFAULT_WAIT_TIMEOUT;
-  const effectivePollInterval = pollInterval ?? DEFAULT_POLL_INTERVAL;
-
-  const runnerArgs = [
-    _runnerPath,
-    agentId,
-    "--prompt", prompt,
-    "--run-dir", resolvedRunDir,
-    "--run-id", finalRunId,
-    "--registry", resolvedRegistry,
-    "--wait-timeout", String(effectiveWaitTimeout),
-    "--poll-interval", String(effectivePollInterval),
-  ];
-  if (cwd) runnerArgs.push("--cwd", cwd);
-  if (scorecardRules) runnerArgs.push("--scorecard-rules", scorecardRules);
-  if (scorecardMode) runnerArgs.push("--scorecard-mode", scorecardMode);
-  if (requireCertified) runnerArgs.push("--require-certified");
-  // M9-7A: delivery runs force persistent worktree isolation and carry the
-  // validated delivery request as structured JSON argv (no shell string).
-  // Use the public shape that RunManager.start expects directly.
-  if (publicDelivery) {
-    runnerArgs.push("--isolate");
-    runnerArgs.push("--delivery-json", JSON.stringify(publicDelivery));
-  }
-
-  // P2: conservative total argv length guard — Windows CreateProcess has a
-  // ~32K limit; we enforce a much tighter bound to stay well within it.
-  const ARGV_MAX_TOTAL = 24000;
-  const totalArgvLen = runnerArgs.reduce((sum, a) => sum + String(a).length + 1, 0);
-  if (totalArgvLen > ARGV_MAX_TOTAL) {
-    throw new Error(`runner argv too long (${totalArgvLen} > ${ARGV_MAX_TOTAL}); reduce prompt/delivery/scorecard size`);
   }
 
   // detached: runner survives CLI/MCP process exit; stdio ignore (runner writes

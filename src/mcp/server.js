@@ -102,8 +102,8 @@ const DISPATCH_ERROR_TEXT = "run_dispatch failed";
 const DELIVERY_INPUT = z.object({
   mode: z.literal("git_commit_v1"),
   allowedPaths: z.array(z.string().min(1).max(512)).min(1).max(64),
-  verificationCommands: z.array(z.string().min(1).max(512)).max(32).optional(),
-  verificationUnavailableReason: z.string().min(1).max(512).optional(),
+  verificationCommands: z.array(z.string().trim().min(1).max(512)).min(1).max(32).optional(),
+  verificationUnavailableReason: z.string().trim().min(1).max(512).optional(),
 }).strict().refine(
   (d) => !d.verificationCommands || !d.verificationUnavailableReason,
   "cannot provide both verificationCommands and verificationUnavailableReason",

@@ -488,22 +488,26 @@ test("M9-7A-03: non-delivery dispatch argv unchanged (no --delivery-json, no --i
   } finally { cleanupDir(dir); }
 });
 
-test("M9-7A-08: argv total length guard rejects oversized input before fork", async () => {
+test("M9-7A-08: argv total length guard rejects oversized input before transcript/fork", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m97a-08-"));
   const { fakeSpawn, calls } = makeFakeSpawn();
   try {
     const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const runDir = join(dir, "runs");
     // Build a prompt that makes total argv > 24000 chars.
     const hugePrompt = "x".repeat(25000);
     let threw = false;
     try {
       await dispatchRun({
-        agentId: "coder_low", prompt: hugePrompt, registryPath, runDir: join(dir, "runs"),
+        agentId: "coder_low", prompt: hugePrompt, registryPath, runDir,
         spawnFn: fakeSpawn,
       });
     } catch { threw = true; }
-    assert.ok(threw, "oversized argv must throw before fork");
-    assert.equal(calls.length, 0, "no spawn for oversized argv");
+    assert.ok(threw, "oversized argv must throw");
+    assert.equal(calls.length, 0, "no spawn");
+    // CRITICAL: no transcript file must exist — preflight must happen before any write.
+    const files = readdirSafe(runDir);
+    assert.equal(files.length, 0, "no transcript written for rejected dispatch");
   } finally { cleanupDir(dir); }
 });
 

@@ -518,3 +518,31 @@ test("M9-7A-07: non-delivery dispatch still works identically", async () => {
     await server.close();
   }
 });
+
+test("M9-7A-08: empty/whitespace verification values rejected at adapter, service count 0", async () => {
+  let callCount = 0;
+  const fakeDispatch = async () => { callCount += 1; return { accepted: true, runId: "x", state: "pending" }; };
+  const server = createWaoMcpServer({
+    registryPath: "/r.json", runDir: "/runs", dispatchRunFn: fakeDispatch,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const badInputs = [
+      { agentId: "x", prompt: "y", delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: [] } },
+      { agentId: "x", prompt: "y", delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["   "] } },
+      { agentId: "x", prompt: "y", delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationUnavailableReason: "   " } },
+    ];
+    for (const bad of badInputs) {
+      let rejected = false;
+      let result = null;
+      try { result = await client.callTool({ name: "run_dispatch", arguments: bad }); }
+      catch { rejected = true; }
+      if (!rejected) { assert.equal(result.isError, true, `rejected: ${JSON.stringify(Object.keys(bad.delivery || {}))}`); rejected = true; }
+      assert.ok(rejected);
+    }
+    assert.equal(callCount, 0, "service never called for empty/whitespace delivery");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
