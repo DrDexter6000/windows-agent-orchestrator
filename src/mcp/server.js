@@ -32,6 +32,7 @@ import { dispatchRun } from "../application/runDispatch.js";
 import { getRunStatus } from "../application/runStatus.js";
 import { collectRunMessages } from "../application/runCollect.js";
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
+import { getRunDelivery, decideRunDelivery } from "../application/runDelivery.js";
 import { DIAGNOSIS_CATEGORIES } from "../diagnosis.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 
@@ -362,8 +363,73 @@ const RUN_DIAGNOSE_DESCRIPTION =
   "raw error text, commands, file paths, or tool payloads. The Lead decides what to " +
   "do next; this tool gives facts only.";
 
+// ===== run_delivery (read-only query) constants =====
+
+const DELIVERY_QUERY_ERROR_TEXT = "run_delivery failed";
+const COMMIT_HASH_RE = /^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/;
+const SAFE_VERIFICATION_STATUSES = new Set(["pending", "passed", "failed", "unavailable"]);
+const SAFE_FAILURE_CODES = new Set(["command_failed", "command_timeout", "artifact_mutated", "artifact_mismatch", "execution_error", "unknown"]);
+
+const RUN_DELIVERY_INPUT = z.object({
+  runId: z.string().min(1),
+}).strict();
+
+const RUN_DELIVERY_OUTPUT = z.object({
+  runId: z.string(),
+  terminalState: z.string(),
+  baseCommit: z.string().nullable(),
+  deliveryCommit: z.string().nullable(),
+  changedFileCount: z.number().int().nonnegative(),
+  verificationStatus: z.string(),
+  verificationFailureCode: z.string().nullable(),
+  acceptanceStatus: z.string(),
+  decisionType: z.string().nullable(),
+});
+
+const RUN_DELIVERY_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+const RUN_DELIVERY_DESCRIPTION =
+  "Query the delivery status of a run: terminal state, delivery/base commit hashes, " +
+  "changed file count, verification status, and acceptance status. Read-only. Does not " +
+  "return changed file names, worktree paths, verification commands, or decision reasons.";
+
+// ===== run_delivery_decide (durable decision) constants =====
+
+const DELIVERY_DECIDE_ERROR_TEXT = "run_delivery_decide failed";
+
+const RUN_DELIVERY_DECIDE_INPUT = z.object({
+  runId: z.string().min(1),
+  decision: z.enum(["accepted", "rejected"]),
+  reason: z.string().trim().min(1).max(2000),
+}).strict();
+
+const RUN_DELIVERY_DECIDE_OUTPUT = z.object({
+  runId: z.string(),
+  decisionAccepted: z.boolean(),
+  deliveryCommit: z.string().nullable(),
+  acceptanceStatus: z.string(),
+  existingStatus: z.string().nullable(),
+});
+
+const RUN_DELIVERY_DECIDE_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+const RUN_DELIVERY_DECIDE_DESCRIPTION =
+  "Record an explicit Lead decision (accepted or rejected) on a delivery. The first " +
+  "durable decision wins; later attempts lose without error. Does not decide correctness " +
+  "automatically. Does not return the decision reason or delivery details.";
+
 /**
- * Create a WAO MCP server with registry_list, run_dispatch, run_status, run_collect, run_diagnose.
+ * Create a WAO MCP server with registry_list, run_dispatch, run_status, run_collect, run_diagnose, run_delivery, run_delivery_decide.
  *
  * @param {object} input
  * @param {string} input.registryPath — path to agents.json (startup config)
@@ -373,6 +439,8 @@ const RUN_DIAGNOSE_DESCRIPTION =
  * @param {Function} [input.getRunStatusFn] — injectable status service for testing
  * @param {Function} [input.collectRunMessagesFn] — injectable collect service for testing
  * @param {Function} [input.getRunDiagnosisFn] — injectable diagnosis service for testing
+ * @param {Function} [input.getRunDeliveryFn] — injectable delivery query service for testing
+ * @param {Function} [input.decideRunDeliveryFn] — injectable delivery decision service for testing
  * @returns {import("@modelcontextprotocol/sdk/server/mcp.js").McpServer}
  */
 export function createWaoMcpServer({
@@ -383,12 +451,16 @@ export function createWaoMcpServer({
   getRunStatusFn,
   collectRunMessagesFn,
   getRunDiagnosisFn,
+  getRunDeliveryFn,
+  decideRunDeliveryFn,
 }) {
   const service = getRegistryInventoryFn ?? getRegistryInventory;
   const dispatcher = dispatchRunFn ?? dispatchRun;
   const statusService = getRunStatusFn ?? getRunStatus;
   const collectService = collectRunMessagesFn ?? collectRunMessages;
   const diagnosisService = getRunDiagnosisFn ?? getRunDiagnosis;
+  const deliveryQueryService = getRunDeliveryFn ?? getRunDelivery;
+  const deliveryDecideService = decideRunDeliveryFn ?? decideRunDelivery;
 
   const mcp = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -594,6 +666,97 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: DIAGNOSE_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "run_delivery",
+    {
+      description: RUN_DELIVERY_DESCRIPTION,
+      inputSchema: RUN_DELIVERY_INPUT,
+      outputSchema: RUN_DELIVERY_OUTPUT,
+      annotations: RUN_DELIVERY_ANNOTATIONS,
+    },
+    async ({ runId }) => {
+      try {
+        const delivery = await deliveryQueryService({ runId, runDir });
+        // Safe projection: only scalar machine fields. No DeliveryRef object,
+        // no changed file names, no worktreePath, no branch, no commands, no reason.
+        const ref = delivery.deliveryRef ?? {};
+        const baseCommit = typeof ref.baseCommit === "string" && COMMIT_HASH_RE.test(ref.baseCommit) ? ref.baseCommit : null;
+        const deliveryCommit = typeof ref.deliveryCommit === "string" && COMMIT_HASH_RE.test(ref.deliveryCommit) ? ref.deliveryCommit : null;
+        const changedFileCount = Array.isArray(ref.changedFiles) ? ref.changedFiles.length : 0;
+        const rawVStatus = delivery.verification?.status ?? "pending";
+        const verificationStatus = SAFE_VERIFICATION_STATUSES.has(rawVStatus) ? rawVStatus : "unknown";
+        const rawFailureCode = delivery.verification?.failureCode;
+        const verificationFailureCode = rawFailureCode ? (SAFE_FAILURE_CODES.has(rawFailureCode) ? rawFailureCode : "unknown") : null;
+        const acceptanceStatus = delivery.acceptance?.status ?? "pending";
+        const decisionType = delivery.acceptance?.decisionEvent?.type ?? null;
+        const payload = {
+          runId: delivery.runId,
+          terminalState: delivery.terminalState,
+          baseCommit,
+          deliveryCommit,
+          changedFileCount,
+          verificationStatus,
+          verificationFailureCode,
+          acceptanceStatus: ["pending", "accepted", "rejected"].includes(acceptanceStatus) ? acceptanceStatus : "pending",
+          decisionType: ["run.delivery_accepted", "run.delivery_rejected"].includes(decisionType) ? decisionType : null,
+        };
+        RUN_DELIVERY_OUTPUT.parse(payload);
+        return {
+          content: [{ type: "text", text: JSON.stringify(payload) }],
+          structuredContent: payload,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: DELIVERY_QUERY_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "run_delivery_decide",
+    {
+      description: RUN_DELIVERY_DECIDE_DESCRIPTION,
+      inputSchema: RUN_DELIVERY_DECIDE_INPUT,
+      outputSchema: RUN_DELIVERY_DECIDE_OUTPUT,
+      annotations: RUN_DELIVERY_DECIDE_ANNOTATIONS,
+    },
+    async ({ runId, decision, reason }) => {
+      try {
+        const result = await deliveryDecideService({ runId, runDir, decision, reason });
+        // Safe projection: no reason, no DeliveryRef, no delivery details.
+        const payload = result.accepted
+          ? {
+              runId,
+              decisionAccepted: true,
+              deliveryCommit: typeof result.event?.deliveryCommit === "string" && COMMIT_HASH_RE.test(result.event.deliveryCommit)
+                ? result.event.deliveryCommit : null,
+              acceptanceStatus: decision,
+              existingStatus: null,
+            }
+          : {
+              runId,
+              decisionAccepted: false,
+              deliveryCommit: typeof result.existing?.deliveryCommit === "string" && COMMIT_HASH_RE.test(result.existing.deliveryCommit)
+                ? result.existing.deliveryCommit : null,
+              acceptanceStatus: result.existing?.status ?? "pending",
+              existingStatus: result.existing?.status ?? null,
+            };
+        RUN_DELIVERY_DECIDE_OUTPUT.parse(payload);
+        return {
+          content: [{ type: "text", text: JSON.stringify(payload) }],
+          structuredContent: payload,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: DELIVERY_DECIDE_ERROR_TEXT }],
         };
       }
     },

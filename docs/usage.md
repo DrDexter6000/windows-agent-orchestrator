@@ -565,6 +565,49 @@ annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:false, 
 
 annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`（纯只读查询，不触碰外部系统）。
 
+### MCP `run_delivery`（只读 delivery 查询，M9-6B）
+
+`run_delivery` 让 MCP host 查询一个 run 的 delivery 状态。只读，不追加 transcript event。
+
+- **输入**（strict）：`{ "runId": "run_..." }`。
+- **安全输出**（不返回完整 DeliveryRef / changedFiles / reason / commands / worktreePath）：
+
+```json
+{
+  "runId": "run_...",
+  "terminalState": "completed",
+  "baseCommit": "bbb...",
+  "deliveryCommit": "ddd...",
+  "changedFileCount": 3,
+  "verificationStatus": "passed",
+  "verificationFailureCode": null,
+  "acceptanceStatus": "pending",
+  "decisionType": null
+}
+```
+
+Commit hash 校验为 40/64 位十六进制；changedFileCount 是数组长度（不返回文件名）；verification status ∈ `pending|passed|failed|unavailable`；failureCode ∈ 安全 enum 或 null；decisionType ∈ `run.delivery_accepted|run.delivery_rejected|null`。失败返回固定 `run_delivery failed`。
+
+annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`。
+
+### MCP `run_delivery_decide`（持久 Lead 决策，M9-6B）
+
+`run_delivery_decide` 让 MCP host 记录一个 Lead 决策（accept/reject）。**不可逆**（首决策 wins，后续 lose）。调用共享 service 委托 `tryAppendDecision` 的锁内原子 first-decision-wins 语义。
+
+- **输入**（strict）：`{ "runId": "run_...", "decision": "accepted"|"rejected", "reason": "≤2000 chars" }`。拒绝 runDir/force/merge/push/raw/includeReason 等控制面参数。
+- **安全输出**（不返回 reason/DeliveryRef）：
+
+```json
+// 赢家
+{ "runId": "run_...", "decisionAccepted": true, "deliveryCommit": "ddd...", "acceptanceStatus": "accepted", "existingStatus": null }
+// 输家
+{ "runId": "run_...", "decisionAccepted": false, "deliveryCommit": "ddd...", "acceptanceStatus": "accepted", "existingStatus": "accepted" }
+```
+
+失败返回固定 `run_delivery_decide failed`。Reason 在持久化前 trim+redact，但**绝不返回**给 MCP。
+
+annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:true, openWorldHint:false`（首决策不可逆；重复决策幂等返回 loser）。
+
 ---
 
 ## 五、常见问题
