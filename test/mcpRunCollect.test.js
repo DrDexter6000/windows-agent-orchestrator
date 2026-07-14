@@ -416,3 +416,83 @@ test("M9-4B-10: MCP run_collect appends messages.collected via shared service", 
     cleanupDir(dir);
   }
 });
+
+// ---------------------------------------------------------------------
+// M9-4B-11: tool-only assistant messages don't consume the 8-message text quota.
+//           CTO P1: 8 tool-only assistant messages + 1 final text answer → output
+//           must contain the final answer, not 8 empty texts.
+// ---------------------------------------------------------------------
+
+test("M9-4B-11: tool-only assistant messages do not consume text quota", async () => {
+  // 8 assistant messages with NO text part (tool_use only) + 1 final answer.
+  const data = [];
+  for (let i = 0; i < 8; i += 1) {
+    data.push({ kind: "message", role: "assistant", parts: [{ type: "tool_use", id: `t${i}`, name: "Bash", input: { command: "echo" } }] });
+  }
+  data.push({ kind: "message", role: "assistant", parts: [{ type: "text", text: "final answer" }] });
+
+  const server = createWaoMcpServer({
+    registryPath: "/server/r.json", runDir: "/server/runs",
+    collectRunMessagesFn: async () => ({ data, reconstructed: true, backend: "process" }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    // The final answer must be present.
+    assert.ok(parsed.messages.some((m) => m.text === "final answer"),
+      "final answer present — tool-only messages did not consume the text quota");
+    // No empty-text messages.
+    for (const m of parsed.messages) {
+      assert.ok(m.text.length > 0, `no empty-text message in output (got "${m.text}")`);
+    }
+    // evidenceCounts.message counts ALL 9 messages (8 tool-only + 1 text).
+    assert.equal(parsed.evidenceCounts.message, 9, "all 9 messages counted");
+    assert.equal(parsed.itemCount, 9, "itemCount = 9");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+// ---------------------------------------------------------------------
+// M9-4B-12: 12000-char cap does not stop evidence counting.
+//           CTO P2: after the text cap, subsequent command/tool/file events
+//           must still be counted in evidenceCounts.
+// ---------------------------------------------------------------------
+
+test("M9-4B-12: text cap does not break evidence counting for later items", async () => {
+  // Four 4000-char assistant messages fill the 12000 total cap (4×4000=16000,
+  // but the 4th hits remaining<=0). After the break, command/tool/file items
+  // follow — the OLD code `break`s out of the loop, skipping their evidence
+  // tallies. They must still be counted.
+  const data = [];
+  for (let i = 0; i < 4; i += 1) {
+    data.push({ kind: "message", role: "assistant", parts: [{ type: "text", text: "z".repeat(4000) }] });
+  }
+  data.push({ kind: "command", command: "npm test" });
+  data.push({ kind: "tool_use", tool: "Read", input: { file_path: "a.js" } });
+  data.push({ kind: "tool_result", tool: "Read", output: "..." });
+  data.push({ kind: "file_written", path: "out.txt" });
+
+  const server = createWaoMcpServer({
+    registryPath: "/server/r.json", runDir: "/server/runs",
+    collectRunMessagesFn: async () => ({ data, reconstructed: true, backend: "process" }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    // All 8 items (4 messages + 4 evidence) must be counted even though the
+    // text cap was hit during the 4th message.
+    assert.equal(parsed.itemCount, 8, "itemCount = 8 (all items)");
+    assert.equal(parsed.evidenceCounts.message, 4, "all 4 messages counted");
+    assert.equal(parsed.evidenceCounts.command, 1, "command counted after text cap");
+    assert.equal(parsed.evidenceCounts.toolUse, 1, "toolUse counted after text cap");
+    assert.equal(parsed.evidenceCounts.toolResult, 1, "toolResult counted after text cap");
+    assert.equal(parsed.evidenceCounts.fileWritten, 1, "fileWritten counted after text cap");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});

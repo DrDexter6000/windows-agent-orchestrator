@@ -125,7 +125,12 @@ export async function collectRunMessages({
     throw new Error(`Run ${runId} has no session metadata (no session.created event)`);
   }
 
-  const effectiveLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : DEFAULT_LIMIT;
+  // limit=0 means "all" (existing CLI semantics: slice(-0) returns everything).
+  // Negative/NaN/non-number falls back to the default. MCP always passes 50.
+  const numericLimit = Number(limit);
+  const effectiveLimit = Number.isFinite(numericLimit) && numericLimit >= 0
+    ? Math.floor(numericLimit)
+    : DEFAULT_LIMIT;
 
   if (!session.serveUrl) {
     // Process-backed: reconstruct run.event entries from transcript.
@@ -154,7 +159,7 @@ export async function collectRunMessages({
     limit: effectiveLimit,
   });
 
-  const _append = appendCollectedFn ?? defaultAppendFn(transcriptPath);
+  const _append = appendCollectedFn ?? defaultAppendFn(transcriptPath, runId);
   await _append("messages.collected", {
     backendSessionId: session.backendSessionId,
     count: messages.data?.length ?? 0,

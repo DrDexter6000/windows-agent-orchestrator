@@ -50,25 +50,6 @@ const PROCESS_EVENTS = [
   jl({ type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "done" }], ts: "2026-06-28T20:34:20.000Z", runId: "run_proc", agentId: "researcher" }),
 ];
 
-// Injectable append that records calls and writes to the real transcript file
-// (so we can verify the event was actually persisted + readable).
-function makeAppendRecorder(transcriptPath) {
-  const calls = [];
-  const { JsonlTranscript } = require("../src/transcript.js");
-  const appendFn = async (type, payload) => {
-    calls.push({ type, payload });
-    // Actually write so readTranscript can see it.
-    const events = readTranscriptSync(transcriptPath);
-    const t = new JsonlTranscript(transcriptPath, {
-      runId: payload.runId ?? "run_proc",
-      agentId: "researcher",
-      initialSeq: events.length,
-    });
-    await t.append(type, payload);
-  };
-  return { calls, appendFn };
-}
-
 function readTranscriptSync(p) {
   try {
     return readFileSync(p, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
@@ -427,6 +408,62 @@ test("M9-4A-12: messages.collected runId correctly attributed when first event l
     assert.equal(collected.length, 1, "one messages.collected");
     // The audit event's runId must be the validated arg, not "unknown".
     assert.equal(collected[0].runId, runId, "messages.collected runId is the validated arg, not unknown");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// M9-4A-13: serve path messages.collected runId correctly attributed
+//           (Reviewer A CTO rework P1: serve branch must pass runId too).
+// ---------------------------------------------------------------------
+
+test("M9-4A-13: serve path messages.collected runId = validated arg (first event no runId)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m94a-13-"));
+  try {
+    const runDir = join(dir, "runs");
+    const runId = "run_serve_attr";
+    // First event lacks runId field; session.created has serveUrl (serve path).
+    writeTranscript(runDir, runId,
+      jl({ type: "run.submitted", agentId: "researcher", ts: "2026-07-14T00:00:00.000Z" }) +
+      jl({ type: "session.created", backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", backendSessionId: "sess_serve", runId, agentId: "researcher" }) +
+      jl({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-07-14T00:00:01.000Z", runId, agentId: "researcher" }),
+    );
+    // Use default (real) append + fake fetch.
+    await collectRunMessages({
+      runId, runDir,
+      fetchServeMessagesFn: async () => ({ data: [{ id: "m1" }] }),
+    });
+
+    const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+    const collected = events.filter((e) => e.type === "messages.collected");
+    assert.equal(collected.length, 1, "one messages.collected");
+    assert.equal(collected[0].runId, runId, "serve path runId = validated arg, not unknown/absent");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// M9-4A-14: limit=0 means "all" (existing CLI semantics: slice(-0) = all).
+//           CTO P2: the service incorrectly falls back to 50 for limit=0.
+// ---------------------------------------------------------------------
+
+test("M9-4A-14: limit=0 returns all reconstructed events (CLI 0=all semantics)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m94a-14-"));
+  try {
+    const runDir = join(dir, "runs");
+    // 55 run.events — more than the default limit of 50. If limit=0 is
+    // incorrectly treated as "fall back to 50", only 50 would return.
+    // With correct 0=all semantics (slice(-0) = all), all 55 return.
+    let lines = jl({ type: "session.created", backend: "process", backendSessionId: "proc_1", runId: "run_lim0", agentId: "w" });
+    for (let i = 0; i < 55; i += 1) {
+      lines += jl({ type: "run.event", kind: "command", command: `cmd${i}`, ts: "2026-07-14T00:00:01.000Z", runId: "run_lim0", agentId: "w" });
+    }
+    lines += jl({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-07-14T00:00:04.000Z", runId: "run_lim0", agentId: "w" });
+    writeTranscript(runDir, "run_lim0", lines);
+    const result = await collectRunMessages({ runId: "run_lim0", runDir, limit: 0 });
+    assert.equal(result.data.length, 55, "limit=0 returns all 55 events, not capped at 50");
   } finally {
     cleanupDir(dir);
   }

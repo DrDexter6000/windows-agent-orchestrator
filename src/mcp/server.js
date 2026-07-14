@@ -233,7 +233,9 @@ function projectCollectResult(rawResult, runId) {
   let messagesTruncated = false;
 
   for (const item of items) {
-    // Tally evidence counts by kind — no payload included.
+    // Tally evidence counts by kind — no payload included. This happens for
+    // EVERY item regardless of text/quota limits, so evidenceCounts always
+    // covers the full set.
     const kind = item?.kind;
     // Serve messages lack `kind`; detect them by the {info:{role}, parts} shape.
     const isServeMessage = !kind && item?.info && Array.isArray(item.parts);
@@ -244,38 +246,52 @@ function projectCollectResult(rawResult, runId) {
     else if (kind === "file_written") evidenceCounts.fileWritten += 1;
     else evidenceCounts.other += 1;
 
-    // Only extract assistant text; skip everything else.
+    // Only extract assistant text; skip everything else from the messages array.
     if (kind !== "message" && !isServeMessage) continue;
     // Process: {role, parts}. Serve: {info:{role}, parts}. Only assistant.
     const role = item.role ?? item.info?.role;
     if (role !== "assistant") continue;
 
-    if (messages.length >= COLLECT_MAX_MESSAGES) {
-      messagesTruncated = true;
-      continue;
-    }
+    // Extract text parts. A message with NO non-empty text (e.g. tool_use-only)
+    // is counted in evidenceCounts but does NOT enter the messages array and
+    // does NOT consume the 8-message quota — it carries no Lead-readable result.
     const parts = Array.isArray(item.parts) ? item.parts : [];
     const textParts = parts
-      .filter((p) => p && p.type === "text" && typeof p.text === "string")
+      .filter((p) => p && p.type === "text" && typeof p.text === "string" && p.text.length > 0)
       .map((p) => p.text);
+    if (textParts.length === 0) continue;
+
     let text = redactor.redactString(textParts.join("\n"));
+
+    // Per-text cap (4000 chars).
     let perTruncated = false;
     if (text.length > COLLECT_MAX_TEXT_CHARS) {
       text = text.slice(0, COLLECT_MAX_TEXT_CHARS);
       perTruncated = true;
       messagesTruncated = true;
     }
-    // Total cap.
+
+    // Total cap (12000 chars). When the budget is exhausted, stop collecting
+    // text but CONTINUE the loop so later items are still counted in
+    // evidenceCounts. (Old code used `break`, which skipped later tallies.)
     if (totalChars + text.length > COLLECT_MAX_TOTAL_CHARS) {
       const remaining = COLLECT_MAX_TOTAL_CHARS - totalChars;
-      if (remaining <= 0) {
-        messagesTruncated = true;
-        break;
-      }
-      text = text.slice(0, remaining);
-      perTruncated = true;
       messagesTruncated = true;
+      if (remaining > 0 && messages.length < COLLECT_MAX_MESSAGES) {
+        text = text.slice(0, remaining);
+        perTruncated = true;
+        totalChars += text.length;
+        messages.push({ role: "assistant", text, truncated: perTruncated });
+      }
+      continue;
     }
+
+    // 8-message count cap.
+    if (messages.length >= COLLECT_MAX_MESSAGES) {
+      messagesTruncated = true;
+      continue;
+    }
+
     totalChars += text.length;
     messages.push({ role: "assistant", text, truncated: perTruncated });
   }
