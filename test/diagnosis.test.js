@@ -361,13 +361,14 @@ test("TD-95 #5: failed run + evidence_audit passed → category=evidence_passed_
 test("TD-95 #4: failed run + 无 file_written + 无 command exit0 → category=no_effect", () => {
   // 复盘 #4：coder_hq 读了上下文但没写任何文件，backend 崩了 → "读完没产出"。
   // 审计修正：transcript 实际把 message 落为 run.event kind=message（不是 run.message）。
+  // M9-5P：timestamp 间隔 <120s 静默，避免满足 provider_disconnect 严格签名。
   const events = [
     { type: "run.submitted", agentId: "coder_hq", ts: "2026-07-08T10:00:00.000Z" },
     { type: "run.event", kind: "tool_use", name: "Read", ts: "2026-07-08T10:00:30.000Z" },
     { type: "run.event", kind: "tool_result", isError: false, ts: "2026-07-08T10:00:31.000Z" },
     { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "reading..." }], ts: "2026-07-08T10:01:00.000Z" },
-    { type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-07-08T10:05:00.000Z" },
-    { type: "run.state_change", from: "running", to: "failed", reason: "backend_error", ts: "2026-07-08T10:05:01.000Z" },
+    { type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-07-08T10:02:30.000Z" },
+    { type: "run.state_change", from: "running", to: "failed", reason: "backend_error", ts: "2026-07-08T10:02:31.000Z" },
   ];
   const d = diagnoseFailure(events);
   assert.equal(d.category, "no_effect",
@@ -387,6 +388,90 @@ test("审计 P2: failed run 只有 assistant text（无 tool_use）→ 仍应识
   const d = diagnoseFailure(events);
   assert.equal(d.category, "no_effect",
     "有 assistant text 活动但无产出的 failed run 应判 no_effect（不是 crash）");
+});
+
+// ---------------------------------------------------------------------------
+// M9-5P：provider_disconnect 优先级修复。
+//
+// 真实样本 run_202607082124125368q0r9t（脱敏提取）：worker 有 14 条活动事件
+// （tool_use/tool_result/message/command），无 file_written、无 command exit0，
+// 末段静默 266s 后 exit 1。当前被 no_effect 抢先误判（no_effect 在 provider_disconnect
+// 之前 return）。修复后严格 provider_disconnect 签名应优先。
+//
+// 回归矩阵：
+//   1. 本 fixture（266s 静默 + 有活动无产出）：no_effect → provider_disconnect
+//   2. 22s 静默样本（run_2026062818401405116u1yd 外形）：仍为 no_effect（不满足 120s）
+//   3. 现有普通 no_effect fixture：仍为 no_effect
+//   4. evidence_passed_backend_failed 同时满足断流外形时仍由更高优先级赢
+// ---------------------------------------------------------------------------
+
+test("M9-5P: provider_disconnect 优先于 no_effect（真实脱敏 fixture，266s 静默）", () => {
+  // 从 run_202607082124125368q0r9t 脱敏提取：保留事件类型、顺序、timestamp 间隔、
+  // 活动数量、退出码。去掉 prompt、路径、命令正文、tool input/output、凭据。
+  const events = [
+    { type: "run.started", ts: "2026-07-08T21:24:12.538Z", runId: "run_m95p", agentId: "w" },
+    { type: "run.state_change", to: "pending", ts: "2026-07-08T21:24:12.539Z", runId: "run_m95p", agentId: "w" },
+    { type: "session.created", backend: "claude-code", backendSessionId: "proc_redacted", ts: "2026-07-08T21:24:12.665Z", runId: "run_m95p", agentId: "w" },
+    { type: "run.state_change", to: "running", ts: "2026-07-08T21:24:20.700Z", runId: "run_m95p", agentId: "w" },
+    // 14 run.event（tool_use/tool_result/message/command）— 有活动但无 file_written/exit0
+    { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "redacted" }], ts: "2026-07-08T21:24:20.703Z", runId: "run_m95p", agentId: "w" },
+    { type: "run.event", kind: "tool_use", tool: "Read", input: {}, ts: "2026-07-08T21:24:20.708Z", runId: "run_m95p", agentId: "w" },
+    { type: "run.event", kind: "tool_result", tool: "Read", output: "redacted", ts: "2026-07-08T21:24:20.716Z", runId: "run_m95p", agentId: "w" },
+    { type: "run.event", kind: "tool_use", tool: "Read", input: {}, ts: "2026-07-08T21:24:20.917Z", runId: "run_m95p", agentId: "w" },
+    { type: "run.event", kind: "tool_result", tool: "Read", output: "redacted", ts: "2026-07-08T21:24:20.921Z", runId: "run_m95p", agentId: "w" },
+    { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "redacted" }], ts: "2026-07-08T21:24:31.098Z", runId: "run_m95p", agentId: "w" },
+    { type: "run.event", kind: "tool_use", tool: "Edit", input: {}, ts: "2026-07-08T21:24:31.105Z", runId: "run_m95p", agentId: "w" },
+    { type: "run.event", kind: "tool_result", tool: "Edit", output: "redacted", ts: "2026-07-08T21:24:31.106Z", runId: "run_m95p", agentId: "w" },
+    { type: "run.event", kind: "command", command: "redacted", ts: "2026-07-08T21:24:31.671Z", runId: "run_m95p", agentId: "w" },
+    { type: "run.event", kind: "tool_result", tool: "Bash", output: "redacted", ts: "2026-07-08T21:24:47.155Z", runId: "run_m95p", agentId: "w" },
+    // 末段静默 266s 后 exit 1
+    { type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-07-08T21:29:13.184Z", runId: "run_m95p", agentId: "w" },
+    { type: "run.state_change", to: "failed", reason: "backend_error", ts: "2026-07-08T21:29:13.186Z", runId: "run_m95p", agentId: "w" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "provider_disconnect",
+    "严格 provider_disconnect 签名（≥3 events + ≥120s 静默 + exit crash）优先于 no_effect");
+  assert.ok(d.evidence.length >= 2, "provider_disconnect 证据完整");
+  // evidence event types 与现有严格规则一致
+  const types = d.evidence.map((e) => e.eventType);
+  assert.ok(types.includes("run.event"), "evidence 含 run.event（lastActivity）");
+  assert.ok(types.includes("run.error"), "evidence 含 run.error（exit crash）");
+});
+
+test("M9-5P 回归: 22s 静默 + 有活动无产出 → 仍 no_effect（不满足 120s 阈值）", () => {
+  // run_2026062818401405116u1yd 外形：有活动无产出，但静默只有 22s < 120s。
+  // provider_disconnect 严格签名不满足 → 仍应走 no_effect。
+  const events = [
+    { type: "run.state_change", to: "running", ts: "2026-06-28T18:40:00.000Z", runId: "r", agentId: "w" },
+    { type: "run.event", kind: "tool_use", tool: "Read", input: {}, ts: "2026-06-28T18:44:50.000Z", runId: "r", agentId: "w" },
+    { type: "run.event", kind: "tool_result", tool: "Read", output: "x", ts: "2026-06-28T18:44:51.000Z", runId: "r", agentId: "w" },
+    { type: "run.event", kind: "tool_use", tool: "Read", input: {}, ts: "2026-06-28T18:44:52.000Z", runId: "r", agentId: "w" },
+    { type: "run.event", kind: "tool_result", tool: "Read", output: "x", ts: "2026-06-28T18:44:53.000Z", runId: "r", agentId: "w" },
+    // 22s 静默后 exit 1
+    { type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-06-28T18:45:15.000Z", runId: "r", agentId: "w" },
+    { type: "run.state_change", to: "failed", reason: "backend_error", ts: "2026-06-28T18:45:15.000Z", runId: "r", agentId: "w" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "no_effect",
+    "22s 静默 < 120s 阈值 → provider_disconnect 签名不满足 → 仍 no_effect");
+});
+
+test("M9-5P 回归: evidence_passed_backend_failed 同时满足断流外形 → 仍 evidence_passed_backend_failed", () => {
+  // 有 evidence_audit passed + ≥3 events + ≥120s 静默 + exit crash。
+  // evidence_passed_backend_failed 优先级必须高于 provider_disconnect 和 no_effect。
+  const events = [
+    { type: "run.state_change", to: "running", ts: "2026-07-14T00:00:00.000Z", runId: "r", agentId: "w" },
+    { type: "run.event", kind: "tool_use", tool: "X", input: {}, ts: "2026-07-14T00:01:00.000Z", runId: "r", agentId: "w" },
+    { type: "run.event", kind: "tool_result", tool: "X", output: "y", ts: "2026-07-14T00:01:01.000Z", runId: "r", agentId: "w" },
+    { type: "run.event", kind: "tool_use", tool: "Y", input: {}, ts: "2026-07-14T00:01:02.000Z", runId: "r", agentId: "w" },
+    { type: "run.evidence_audit", passed: true, ts: "2026-07-14T00:02:00.000Z", runId: "r", agentId: "w" },
+    // ≥120s 静默后 exit crash
+    { type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-07-14T00:05:00.000Z", runId: "r", agentId: "w" },
+    { type: "run.state_change", to: "failed", reason: "backend_error", ts: "2026-07-14T00:05:00.000Z", runId: "r", agentId: "w" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "evidence_passed_backend_failed",
+    "evidence_passed_backend_failed 优先于 provider_disconnect 和 no_effect");
 });
 
 test("审计 P2 fixture: 真实脱敏 transcript → evidence_passed_backend_failed（现场回放验证）", async () => {

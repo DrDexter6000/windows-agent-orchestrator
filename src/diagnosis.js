@@ -9,21 +9,43 @@
 // 实现上，返回结构只有 { category, evidence }，没有 recommendation 字段；
 // 所有 fact 字符串只陈述发生了什么，不陈述"该做什么"。
 //
-// 分类（按信号归类；信号不足归 unknown，不强归类）：
-//   provider_auth  — 401/身份验证失败/unauthor/auth fail
-//   timeout        — run.timed_out 事件
-//   scorecard_fail — run.error phase:scorecard / scorecard.checked passed:false（且未 completed）
-//   budget         — run.state_change reason:budget_exceeded
-//   crash          — run.error phase:spawn/spawn_fail
-//   provider_disconnect — worker 活跃工作后静默≥阈值 exit≠0（provider 流式中断，非真崩）
-//   aborted_manual — run.aborted 事件
-//   unknown        — 有失败终态但无明确信号
-//   none           — 成功 run（无失败终态，无需诊断）
+// 完整分类（12 类，按优先级归类；信号不足归 unknown，不强归类）：
+//   provider_auth               — 401/身份验证失败/unauthor/auth fail
+//   config_conflict             — 配置层冲突（API key 与登录打架等）
+//   timeout                     — run.timed_out 事件
+//   budget                      — run.state_change reason:budget_exceeded
+//   scorecard_fail              — run.error phase:scorecard / scorecard.checked passed:false（且未 completed）
+//   evidence_passed_backend_failed — backend 崩了但证据通过（需人工确认）
+//   provider_disconnect         — worker 活跃工作后静默≥120s exit≠0（provider 流式中断，非真崩）
+//   no_effect                   — worker 有活动但无产出（无 file_written + 无 command exit0）
+//   crash                       — run.error phase:spawn/spawn_fail / 进程异常退出
+//   aborted_manual              — run.aborted 事件
+//   unknown                     — 有失败终态但无明确信号
+//   none                        — 成功 run（无失败终态，无需诊断）
 //
 // 只读：本函数不接收也不返回可变状态，不改 transcript。
 
 import { findState, TERMINAL_STATES } from "./transcript.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
+
+/**
+ * Frozen category enum SSOT — the complete set of diagnosis categories.
+ * MCP output schema uses this to avoid a second hand-maintained list.
+ */
+export const DIAGNOSIS_CATEGORIES = Object.freeze([
+  "provider_auth",
+  "config_conflict",
+  "timeout",
+  "budget",
+  "scorecard_fail",
+  "evidence_passed_backend_failed",
+  "provider_disconnect",
+  "no_effect",
+  "crash",
+  "aborted_manual",
+  "unknown",
+  "none",
+]);
 
 // 真正的认证失败：HTTP 401 / 身份验证失败 / unauthorized / 无效 key。
 // C2 收紧：去掉宽泛的 "auth.*fail"/裸 "api_key"（会把配置冲突误判为 provider_auth）。
@@ -159,7 +181,7 @@ export function diagnoseFailure(events) {
 
   // 4.5) TD-95 #5 evidence_passed_backend_failed：backend 崩了但证据通过了。
   //   runManager 的 _auditEvidenceOnFailure 在 failed 路径写 run.evidence_audit {passed:true}。
-  //   必须在 crash/provider_disconnect 之前判——否则会被 exit code 抢归 crash。
+  //   必须在 crash/provider_disconnect/no_effect 之前判——否则会被 exit code 抢归 crash。
   //   让 Lead 知道"任务可能做对了，需人工确认"，而非被 'crash' 误导。
   const evidenceAudit = evs.find((e) => e.type === "run.evidence_audit" && e.passed === true);
   if (evidenceAudit && state === "failed") {
@@ -172,28 +194,13 @@ export function diagnoseFailure(events) {
     return { category: "evidence_passed_backend_failed", evidence };
   }
 
-  // 4.6) TD-95 #4 no_effect：worker 读了上下文但没产出（无 file_written + 无 command exit0）。
-  //   必须在 crash 之前判——但要求有 tool_use/assistant text 活动（worker 确实干了事但没产出），
-  //   否则纯进程崩溃（无活动）仍是 crash，不是 no_effect。
-  //   真实例：coder_hq 读了 4 个文件然后进程崩了，产出接近 0。
-  //   TD-97：复用统一证据评估，不再自己判 file/command/tool_use/assistant text。
-  if (state === "failed") {
-    const a = assessRunEvidence(evs);
-    // 只有"有活动但无产出"才是 no_effect。无活动的纯崩溃仍是 crash。
-    if (!a.hasFileWritten && !a.hasCommandExit0 && (a.hasToolUse || a.hasAssistantText)) {
-      evidence.push({
-        eventType: "run.event",
-        fact: `worker 有 ${a.activityEventCount} 条活动事件但无 file_written / 无 command exit0（读完上下文没产出）`,
-      });
-      return { category: "no_effect", evidence };
-    }
-  }
-
-  // 5.5) provider_disconnect：worker 活跃工作后，末段静默 ≥阈值 才 exit≠0 →
+  // 4.6) provider_disconnect：worker 活跃工作后，末段静默 ≥阈值 才 exit≠0 →
   //      provider 网关流式中断（非 runtime 真崩）。判据保守（Lead 定：静默阈值
-  //      120s、死前≥3 run.event、宁漏贴勿误贴）。真实样本 run_2026062818401405116u1yd
-  //      （coder_hq/GLM-5.2）：死前 84 事件 + 末段静默后进程 exit 1，claude-code 从未
-  //      发 result（metrics=0）→ GLM 网关流式中断，非 worker 行为问题。
+  //      120s、死前≥3 run.event、宁漏贴勿误贴）。
+  //      M9-5P 修复：此严格签名必须优先于通用 no_effect——否则一个同时满足
+  //      "有活动无产出"（no_effect）和 "≥3 events + ≥120s 静默 + exit crash"
+  //      （provider_disconnect）的 run 会被 no_effect 抢先误判。真实样本
+  //      run_202607082124125368q0r9t（14 events, 266s 静默, exit 1）即此 case。
   //      排在 crash 之前：否则会被 CRASH_EXIT_SIGNAL 抢归 crash。
   const exitCrashForPd = evs.find(
     (e) => e.type === "run.error" && typeof e.error === "string" && CRASH_EXIT_SIGNAL.test(e.error),
@@ -214,6 +221,24 @@ export function diagnoseFailure(events) {
         });
         return { category: "provider_disconnect", evidence };
       }
+    }
+  }
+
+  // 4.7) TD-95 #4 no_effect：worker 读了上下文但没产出（无 file_written + 无 command exit0）。
+  //   必须在 crash 之前判——但要求有 tool_use/assistant text 活动（worker 确实干了事但没产出），
+  //   否则纯进程崩溃（无活动）仍是 crash，不是 no_effect。
+  //   M9-5P：排在 provider_disconnect 之后——不满足严格断流签名（<120s 静默或 <3 events）
+  //   的"有活动无产出" run 仍归 no_effect。
+  //   TD-97：复用统一证据评估，不再自己判 file/command/tool_use/assistant text。
+  if (state === "failed") {
+    const a = assessRunEvidence(evs);
+    // 只有"有活动但无产出"才是 no_effect。无活动的纯崩溃仍是 crash。
+    if (!a.hasFileWritten && !a.hasCommandExit0 && (a.hasToolUse || a.hasAssistantText)) {
+      evidence.push({
+        eventType: "run.event",
+        fact: `worker 有 ${a.activityEventCount} 条活动事件但无 file_written / 无 command exit0（读完上下文没产出）`,
+      });
+      return { category: "no_effect", evidence };
     }
   }
 
