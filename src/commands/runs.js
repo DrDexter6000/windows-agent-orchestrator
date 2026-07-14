@@ -25,6 +25,8 @@ import { aggregateRunMetrics, aggregateSummary, formatDuration } from "../metric
 import { diagnoseFailure } from "../diagnosis.js";
 // M9-5A: diagnosis delegated to shared application service.
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
+// M9-6A: delivery query/decision delegated to shared application services.
+import { getRunDelivery, decideRunDelivery } from "../application/runDelivery.js";
 import { forecastCost } from "../costForecast.js";
 import { getWaoDir } from "../waoDir.js";
 import { summarizeDeclares } from "../waoDeclare.js";
@@ -585,50 +587,8 @@ export async function runsDashboardCommand(args, config) {
 export { runsCommand, runsDeliveryCommand };
 
 // ===== TD-103 Phase 3C-2: Lead acceptance record =====
-
-/**
- * Reconstruct the latest DeliveryRef from transcript events.
- * Looks for delivery_created, then any verification event (which carries
- * an updated DeliveryRef), and checks for existing accepted/rejected events.
- * @param {object[]} events
- * @returns {{latestRef: object|null, decisionEvent: object|null, deliveryCommit: string|null}}
- */
-function _reconstructDelivery(events) {
-  // Find the latest delivery_created event (has the initial DeliveryRef)
-  let latestRef = null;
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    if (events[i].type === "run.delivery_created" && events[i].delivery) {
-      latestRef = events[i].delivery;
-      break;
-    }
-  }
-  // If there's a verification event, it carries an updated DeliveryRef
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const e = events[i];
-    if ((e.type === "run.delivery_verification_passed"
-      || e.type === "run.delivery_verification_failed"
-      || e.type === "run.delivery_verification_unavailable")
-      && e.delivery) {
-      latestRef = e.delivery;
-      break;
-    }
-  }
-  // Check for existing decision event
-  let decisionEvent = null;
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const e = events[i];
-    if (e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected") {
-      decisionEvent = e;
-      break;
-    }
-  }
-  // If a decision event exists, it carries the final DeliveryRef with updated acceptance
-  if (decisionEvent?.delivery) {
-    latestRef = decisionEvent.delivery;
-  }
-  const deliveryCommit = latestRef?.deliveryCommit ?? null;
-  return { latestRef, decisionEvent, deliveryCommit };
-}
+// M9-6A: _reconstructDelivery migrated to src/application/runDelivery.js
+// so CLI and MCP share one reconstruction algorithm.
 
 /**
  * runs delivery <runId> — Lead acceptance record.
@@ -642,6 +602,9 @@ function _reconstructDelivery(events) {
  *
  * Records a Lead verdict via transcript-backed atomic first-decision-wins.
  * Never manufactures the verdict or infers semantic correctness.
+ *
+ * M9-6A: query/decision logic delegated to shared application services
+ * (getRunDelivery / decideRunDelivery). CLI owns argv parsing + text/JSON I/O only.
  */
 async function runsDeliveryCommand(args, config) {
   const options = parseOptions(args);
@@ -650,43 +613,17 @@ async function runsDeliveryCommand(args, config) {
   if (!runId) {
     throw new Error("runs delivery requires <runId>");
   }
-  const filePath = join(runDir, `${runId}.jsonl`);
-  const events = await readTranscript(filePath);
-  const terminalState = findState(events);
-  const { latestRef, decisionEvent, deliveryCommit } = _reconstructDelivery(events);
-
-  // No committed delivery → fail closed
-  if (!latestRef || !deliveryCommit) {
-    throw new Error(`No committed delivery found for run ${runId}`);
-  }
-
-  const verificationStatus = latestRef.verification?.status ?? "pending";
-  const acceptanceStatus = decisionEvent
-    ? (decisionEvent.type === "run.delivery_accepted" ? "accepted" : "rejected")
-    : (latestRef.acceptance?.status ?? "pending");
 
   // Read-only query (no --accept / --reject)
   if (!options.accept && !options.reject) {
-    const view = {
-      runId,
-      terminalState,
-      deliveryRef: latestRef,
-      verification: {
-        status: verificationStatus,
-        ...(latestRef.verification?.failureCode ? { failureCode: latestRef.verification.failureCode } : {}),
-      },
-      acceptance: {
-        status: acceptanceStatus,
-        ...(decisionEvent ? { decisionEvent: { type: decisionEvent.type, reason: decisionEvent.reason } } : {}),
-      },
-    };
+    const view = await getRunDelivery({ runId, runDir });
     if (options.format === "json") {
       console.log(JSON.stringify(view, null, 2));
     } else {
-      console.log(`Run: ${runId} (${terminalState})`);
-      console.log(`Delivery: ${deliveryCommit}`);
-      console.log(`Verification: ${verificationStatus}`);
-      console.log(`Acceptance: ${acceptanceStatus}`);
+      console.log(`Run: ${view.runId} (${view.terminalState})`);
+      console.log(`Delivery: ${view.deliveryRef.deliveryCommit}`);
+      console.log(`Verification: ${view.verification.status}`);
+      console.log(`Acceptance: ${view.acceptance.status}`);
     }
     return;
   }
@@ -712,20 +649,8 @@ async function runsDeliveryCommand(args, config) {
     throw new Error("--reason-file must contain non-empty UTF-8 text");
   }
 
-  // Atomic first-decision-wins via transcript primitive.
-  // Durable preconditions (exactly-one delivery, matching verification commit,
-  // verification final status, terminal state) are re-checked IN-LOCK by
-  // tryAppendDecision — the CLI does not gate on lock-external reads.
-  const { JsonlTranscript } = await import("../transcript.js");
-  const transcript = new JsonlTranscript(filePath, {
-    runId,
-    agentId: events[0]?.agentId ?? "unknown",
-    initialSeq: events[events.length - 1]?.seq ?? 0,
-  });
-  const result = await transcript.tryAppendDecision({
-    decision,
-    reason,
-  });
+  // Delegate to shared service — tryAppendDecision does in-lock validation.
+  const result = await decideRunDelivery({ runId, runDir, decision, reason });
 
   if (options.format === "json") {
     if (result.accepted) {
