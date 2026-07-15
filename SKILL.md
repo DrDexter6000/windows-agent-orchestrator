@@ -7,7 +7,7 @@ description: "[LEAD-ONLY] Use when the user asks to dispatch, supervise, resume,
 
 Loading this skill makes you the Lead Operator. You own understanding, orchestration, dispatch, acceptance, integration, and reporting. Workers and auditors do not load this skill.
 
-WAO is a deterministic control plane for real worker tasks: dispatch, transcript, isolation, delivery, scorecard, metrics, and workflow. It is in supervised production trial, not autonomous production. Use only workers whose latest certification says `certified` and `strict-dispatch`; Claude Code process workers are the default coding lane. Do not promise automatic merge, unattended failure response, or large production queues.
+WAO is an MCP-first, Skill-guided, CLI-backed deterministic control plane for real worker tasks: dispatch, transcript, isolation, delivery, scorecard, metrics, and workflow. The Lead uses MCP tools as the primary interface; CLI is for human/ops/debug/fallback. It is in supervised production trial, not autonomous production. Use only workers whose latest certification says `certified` and `strict-dispatch`; Claude Code process workers are the default coding lane. Do not promise automatic merge, unattended failure response, or large production queues.
 
 ## Mainline
 
@@ -55,45 +55,45 @@ Never put credentials or secret values in a worker prompt. For read-only work, e
 
 Before dispatch:
 
-1. Use `registry validate` and `registry list`; require a certified strict-dispatch worker for real changes.
-2. Pass an explicit Windows `--cwd <target>` and use an absolute `--prompt-file` for multiline prompts.
-3. Prefer process-backed workers. Use opencode only when its current certification, token budget, and stop verification support the task.
-4. Use isolation for coding tasks when the delivery path requires it.
+1. Use MCP `registry_list` to confirm worker availability and certification status; require a certified strict-dispatch worker for real changes.
+2. For static schema checks, `registry validate`/`doctor`/debug, use CLI fallback.
+3. Host MCP/provider/auth configuration belongs to the host runtime, not WAO. Never put credential values in worker prompts, MCP arguments, or the repository.
+4. Delivery runs force persistent worktree isolation automatically — the model cannot override `isolate`.
 
 After `stop`, trust the terminal result and transcript evidence, including stop verification; do not infer success from an HTTP response alone. Daemon liveness comes from `daemon ping`, `daemon list`, and `daemon status`, not `.wao/`.
 
 See `references/safety-incidents.md` before unattended or stop-sensitive work. Read `references/opencode-pitfalls.md` only when using opencode.
 
-## Minimal Loop
+## Minimal MCP Loop
 
-Discover the live interface instead of relying on a copied command inventory:
+The Lead drives the full minimal loop through 7 MCP tools:
 
-```powershell
-npm run cli -- help
-npm run cli -- registry validate --registry config/agents.json
-npm run cli -- registry list --registry config/agents.json
-```
+| Tool | Side effect | Purpose |
+|---|---|---|
+| `registry_list` | read-only | Inventory + certification status |
+| `run_dispatch` | destructive | Create a supervised run (with optional delivery block for git_commit_v1) |
+| `run_status` | read-only | Poll terminal state + last activity |
+| `run_collect` | appends `messages.collected` (non-idempotent) | Collect bounded worker output |
+| `run_diagnose` | read-only | Failure category + signal types (no prescription) |
+| `run_delivery` | read-only | Query delivery commit/verification/acceptance |
+| `run_delivery_decide` | durable (first-decision-wins) | Record Lead accept/reject |
 
-Dispatch one bounded task:
+Minimal closed loop: `inventory → dispatch → status → collect/diagnose → delivery query → Lead decision`
 
-```powershell
-npm run cli -- run coder_low --prompt-file <absolute-prompt-file> --cwd <target-project> --registry config/agents.json --require-certified --format json
-```
+See `docs/usage.md §MCP stdio` for host setup, full input/output schemas, and install instructions.
 
-Supervise and collect with `status`, `tail`, and `collect`. Use `stop` only when needed. For reusable multi-worker flows, prefer `workflow list` and a named `workflow run` template over handwritten orchestration.
-
-`registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health`
+CLI (`npm run cli --`) remains available for human/ops/debug/fallback, including `registry validate`, `registry check`, `daemon`, and `runs dashboard`. `registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health`.
 
 ## Acceptance
 
-Worker self-report is evidence, not acceptance. Before reporting completion:
+Worker self-report is evidence, not acceptance. Verification/scorecard/worker output are not semantic acceptance. Before recording acceptance:
 
-1. Check the terminal transcript state.
-2. Check deterministic evidence: command exit, files, scorecard, delivery, and verification events relevant to the task.
-3. Inspect the actual artifact or diff and make the semantic Lead judgment.
-4. Check for residual worker processes after stop-sensitive or background work.
+1. Check terminal state via `run_status`; collect output via `run_collect`; diagnose on failure via `run_diagnose`.
+2. `run_delivery` shows verification result and acceptance status, but does not return changed paths or raw diff. When semantic judgment requires inspecting the artifact or diff, use Owner-authorized repo-local read-only Git/CLI — do not blindly accept on `verification=passed` alone.
+3. Record the verdict with `run_delivery_decide` (first-decision-wins, irreversible through MCP).
+4. The Lead owns the final decision even when all deterministic gates pass.
 
-On failure, use `runs diagnose <runId>` for evidence and category; the Lead decides the response. Do not automatically turn a failure into a new feature or remediation project.
+On failure, `run_diagnose` gives category + evidence; the Lead decides the response. Do not automatically turn a failure into a new feature or remediation project.
 
 ## Scorecard
 
