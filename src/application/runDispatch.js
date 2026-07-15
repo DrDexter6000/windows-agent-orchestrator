@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 
 import { JsonlTranscript } from "../transcript.js";
 import { isValidRunId, prepareDeliveryRequest } from "../delivery.js";
+import { resolveWaitTimeout } from "./timeoutPolicy.js";
 
 // Default path to the detached runner. Resolved relative to this module so the
 // service stays independent of the caller's cwd (CLI vs MCP vs test).
@@ -29,7 +30,6 @@ const DEFAULT_RUNNER_PATH = join(
   "backgroundRunner.js",
 );
 
-const DEFAULT_WAIT_TIMEOUT = 120000;
 const DEFAULT_POLL_INTERVAL = 1000;
 
 /**
@@ -80,6 +80,8 @@ export async function dispatchRun({
   runnerPath,
   execPath,
   delivery,
+  globalWaitTimeout,
+  agentWaitTimeout,
 }) {
   if (!agentId || typeof agentId !== "string") {
     throw new Error("dispatchRun: agentId is required");
@@ -128,7 +130,11 @@ export async function dispatchRun({
   const _spawn = spawnFn ?? spawn;
   const _execPath = execPath ?? process.execPath;
   const _runnerPath = runnerPath ?? DEFAULT_RUNNER_PATH;
-  const effectiveWaitTimeout = waitTimeout ?? DEFAULT_WAIT_TIMEOUT;
+  const { ms: effectiveWaitTimeout, source: waitTimeoutSource } = resolveWaitTimeout({
+    explicit: waitTimeout,
+    agentWaitTimeout,
+    globalWaitTimeout,
+  });
   const effectivePollInterval = pollInterval ?? DEFAULT_POLL_INTERVAL;
 
   const runnerArgs = [

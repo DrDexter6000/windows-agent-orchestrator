@@ -110,8 +110,8 @@ export async function runBackground(opts = {}) {
       // 字符串时用真实路径。避免 start() 里 resolve(undefined) 抛错。
       registry: registryPath ?? (typeof opts.registry === "object" ? "." : undefined),
       pollInterval: opts.pollInterval ?? 1000,
-      waitTimeout: opts.waitTimeout ?? 120000,
-      timeout: (opts.waitTimeout ?? 120000) + 5000,
+      waitTimeout: opts.waitTimeout ?? 300000,
+      timeout: (opts.waitTimeout ?? 300000) + 5000,
       retries: 0,
     },
     readRegistry: registryResolver,
@@ -158,7 +158,7 @@ export async function runBackground(opts = {}) {
   let waitResult;
   try {
     waitResult = await run.waitForCompletion({
-      waitTimeout: opts.waitTimeout ?? 120000,
+      waitTimeout: opts.waitTimeout ?? 300000,
       pollInterval: opts.pollInterval ?? 1000,
     });
   } finally {
@@ -271,7 +271,7 @@ export async function runMain(argv = process.argv.slice(2)) {
     runDir: opts["run-dir"],
     runId: opts["run-id"],
     cwd: opts.cwd,
-    waitTimeout: Number(opts["wait-timeout"] ?? 120000),
+    waitTimeout: Number(opts["wait-timeout"] ?? 300000),
     pollInterval: Number(opts["poll-interval"] ?? 1000),
     scorecardRules: opts["scorecard-rules"] ? JSON.parse(opts["scorecard-rules"]) : undefined,
     scorecardMode: opts["scorecard-mode"],
