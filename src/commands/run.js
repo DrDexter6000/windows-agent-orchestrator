@@ -235,6 +235,15 @@ export async function runCommand(args, config) {
     throw new Error("run requires <agentId>");
   }
   const options = parseOptions(tail);
+  // M10-pre closeout-2: validate explicit waitTimeout at the CLI boundary BEFORE any
+  // side effects (loadDeliverySpec, manager.start, dispatchRun). Reuses the timeoutPolicy
+  // SSOT — no second hand-rolled range check. Applies to both foreground and background
+  // paths: background dispatchRun also validates, but this guard catches foreground
+  // runAndWait which passes options directly to waitForCompletion.
+  if (options.waitTimeout !== undefined && options.waitTimeout !== null && options.waitTimeout !== "") {
+    const { validateExplicitTimeout } = await import("../application/timeoutPolicy.js");
+    validateExplicitTimeout(Number(options.waitTimeout));
+  }
   // TD-103 Phase 3C-1: load and validate delivery spec before any side effects.
   const delivery = await loadDeliverySpec(options);
   // Delivery requires --isolate; reject before spawn.

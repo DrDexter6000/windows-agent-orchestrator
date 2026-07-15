@@ -19,8 +19,8 @@
 // Entrypoint: invoked via the repo Node shim (see package.json "mcp" script):
 //   node scripts/wao-node.cjs src/mcp/stdio.js [--registry PATH] [--run-dir PATH]
 
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { resolve, dirname, join } from "node:path";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import process from "node:process";
@@ -33,14 +33,40 @@ const DEFAULT_REGISTRY = "config/agents.json";
 const DEFAULT_RUN_DIR = "runs";
 const DEFAULT_WAIT_TIMEOUT = 300000;
 
+// M10-pre closeout-2: derive the WAO repo root from THIS module's location, not
+// process.cwd(). An MCP host's cwd is not guaranteed to be the WAO repo — it
+// could be anywhere. stdio.js lives at src/mcp/stdio.js, so repo root is two
+// levels up (src/mcp/ → src/ → repo root).
+const _MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(_MODULE_DIR, "..", "..");
+
+/**
+ * Resolve the config/default.json path relative to the WAO repo root, not the
+ * host's cwd. Optionally accepts an explicit override path for testing.
+ * @param {string} [override] — explicit config path (tests)
+ * @returns {string} absolute path to config/default.json
+ */
+function resolveConfigPath(override) {
+  return override ? resolve(override) : join(REPO_ROOT, "config", "default.json");
+}
+
 /**
  * Load global config.waitTimeout from config/default.json.
- * Falls back to 300000 if the file is missing or unparseable.
- * This is the server-owned global tier of the timeout precedence chain.
+ *
+ * The config path is derived from THIS module's location (src/mcp/stdio.js →
+ * repo root → config/default.json), NOT from process.cwd(). An MCP host may
+ * have any cwd; relying on it would silently read the wrong file or miss it.
+ *
+ * Contract on missing/corrupt config:
+ *   - If the file is missing, unparseable, or the waitTimeout value fails the
+ *     bounded check (integer 1000..600000), the function safely falls back to
+ *     DEFAULT_WAIT_TIMEOUT (300000). It NEVER returns an out-of-range value.
+ *
+ * @param {string} [configOverride] — explicit config path (tests only)
  * @returns {Promise<number>}
  */
-async function loadGlobalWaitTimeout() {
-  const configPath = resolve("config/default.json");
+async function loadGlobalWaitTimeout(configOverride) {
+  const configPath = resolveConfigPath(configOverride);
   if (!existsSync(configPath)) return DEFAULT_WAIT_TIMEOUT;
   try {
     const raw = await readFile(configPath, "utf8");
@@ -54,6 +80,10 @@ async function loadGlobalWaitTimeout() {
   }
   return DEFAULT_WAIT_TIMEOUT;
 }
+
+// Exported for the cwd-independence test (M10pre-C2-06). This function is
+// server-internal; it is NOT part of the MCP tool surface.
+export { loadGlobalWaitTimeout as loadGlobalWaitTimeoutForTest };
 
 /**
  * Parse --registry/--run-dir from argv as discrete flag pairs.

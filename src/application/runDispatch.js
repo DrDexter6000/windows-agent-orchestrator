@@ -97,12 +97,20 @@ export async function dispatchRun({
   }
 
   // M10-pre closeout: validate explicit waitTimeout BEFORE any transcript write or fork.
-  // This is the externally-controlled value (CLI --wait-timeout / MCP tool input).
+  // The explicit value comes from CLI --wait-timeout or a trusted internal caller.
+  // MCP tool input is NOT allowed to set waitTimeout — the run_dispatch schema rejects it.
   // It must pass full production range [1000, 600000]. An invalid value must fail-closed
   // with zero transcript, zero fork — no orphaned pending transcript.
   // validateExplicitTimeout throws on out-of-range/NaN/non-integer.
   if (waitTimeout !== undefined && waitTimeout !== null) {
     validateExplicitTimeout(waitTimeout);
+  }
+  // M10-pre closeout-2: validate server-owned globalWaitTimeout too.
+  // A corrupted config/default.json or broken internal caller could pass an out-of-range
+  // value. Same boundary gate, same fail-closed semantics: zero transcript, zero fork.
+  // MCP tool input is NOT allowed to set globalWaitTimeout — the run_dispatch schema rejects it.
+  if (globalWaitTimeout !== undefined && globalWaitTimeout !== null) {
+    validateExplicitTimeout(globalWaitTimeout);
   }
 
   // Validate runId BEFORE any file write or fork. Custom runIds reach transcript

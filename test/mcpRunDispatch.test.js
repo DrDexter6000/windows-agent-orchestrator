@@ -207,6 +207,12 @@ test("M9-2B-04: control-plane args rejected, dispatcher not called", async () =>
       { agentId: "x", prompt: "y", runId: "run_evil" },
       { agentId: "x", prompt: "y", cwd: "/evil" },
       { agentId: "x", prompt: "y", evil: true },
+      // M10-pre closeout-2: MCP tool input must NOT control timeout values.
+      // waitTimeout and globalWaitTimeout are server-owned; the model cannot set them.
+      { agentId: "x", prompt: "y", waitTimeout: 999 },
+      { agentId: "x", prompt: "y", waitTimeout: 600000 },
+      { agentId: "x", prompt: "y", globalWaitTimeout: 300000 },
+      { agentId: "x", prompt: "y", globalWaitTimeout: 999999 },
     ];
     for (const bad of badArgsList) {
       let rejected = false;

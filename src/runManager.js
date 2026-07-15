@@ -1258,43 +1258,79 @@ export class Run {
     if (!h) return;
 
     // M10-pre Batch B: process-backed workers — verify process actually died.
+    // M10-pre closeout-2: the try/catch ONLY wraps the probe (verifyProcessExit).
+    // The transcript append is OUTSIDE the probe catch so a write failure is never
+    // misclassified as a probe_error.
     if (typeof h.isAlive === "function") {
+      let probeResult;
+      let probeThrew = false;
       try {
         const { verifyProcessExit } = await import("./application/processStopVerify.js");
-        const result = await verifyProcessExit({
+        probeResult = await verifyProcessExit({
           isAlive: () => h.isAlive(),
           rounds: 3,
           intervalMs: 1000,
         });
-        if (result.quiet) {
-          await this.transcript.append("run.stop_verified", {
-            backend: this.result?.backend ?? "process",
-            path: "_runCleanup",
-            roundsUsed: result.roundsUsed,
-          });
-        } else {
+      } catch {
+        // Probe threw — we do NOT know if the process died. Fail-closed.
+        // Never record exception message/PID/command/path/stderr.
+        probeThrew = true;
+      }
+
+      if (probeThrew) {
+        // Probe error path: write stop_unverified with fixed safe outcome.
+        // Transcript append failure triggers an evidence-write alert — it is NOT
+        // reclassified as probe_error (the probe already succeeded or failed above).
+        try {
           await this.transcript.append("run.stop_unverified", {
             backend: this.result?.backend ?? "process",
             path: "_runCleanup",
-            roundsUsed: result.roundsUsed,
+            outcome: "probe_error",
           });
+        } catch {
+          // Transcript write itself failed — cannot record the probe_error fact.
+          // Do NOT silently swallow: fire a safe evidence-write alert.
           raiseAlert("stop_unverified",
-            `_runCleanup process stop not verified (run ${this.runId}): process may still be running`,
+            `_runCleanup evidence write failed (run ${this.runId}): probe error unrecordable`,
             { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
           ).catch(() => {});
         }
-      } catch {
-        // M10-pre closeout: probe threw — we do NOT know if the process died.
-        // Fail-closed: record unverified with a fixed safe outcome. Never record
-        // the exception message, PID, command, path, or stderr — they may leak
-        // operational internals. The fixed outcome "probe_error" is safe to surface.
-        await this.transcript.append("run.stop_unverified", {
-          backend: this.result?.backend ?? "process",
-          path: "_runCleanup",
-          outcome: "probe_error",
-        }).catch(() => { /* transcript write itself failed — can't record, but don't block */ });
         raiseAlert("stop_unverified",
           `_runCleanup process stop unverified (run ${this.runId}): probe error`,
+          { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
+        ).catch(() => {});
+      } else if (probeResult.quiet) {
+        // Probe succeeded: process is quiet. Write stop_verified.
+        // Write failure here is an evidence-write failure, NOT a probe error —
+        // do not fall through to the probe_error branch.
+        try {
+          await this.transcript.append("run.stop_verified", {
+            backend: this.result?.backend ?? "process",
+            path: "_runCleanup",
+            roundsUsed: probeResult.roundsUsed,
+          });
+        } catch {
+          raiseAlert("stop_unverified",
+            `_runCleanup evidence write failed (run ${this.runId}): stop_verified unrecordable`,
+            { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
+          ).catch(() => {});
+        }
+      } else {
+        // Probe succeeded: process still alive. Write stop_unverified (alive).
+        try {
+          await this.transcript.append("run.stop_unverified", {
+            backend: this.result?.backend ?? "process",
+            path: "_runCleanup",
+            roundsUsed: probeResult.roundsUsed,
+          });
+        } catch {
+          raiseAlert("stop_unverified",
+            `_runCleanup evidence write failed (run ${this.runId}): stop_unverified unrecordable`,
+            { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
+          ).catch(() => {});
+        }
+        raiseAlert("stop_unverified",
+          `_runCleanup process stop not verified (run ${this.runId}): process may still be running`,
           { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
         ).catch(() => {});
       }

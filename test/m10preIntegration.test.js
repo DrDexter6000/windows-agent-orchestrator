@@ -264,8 +264,14 @@ test("M10pre-INT-e: isAlive throws → stop_unverified outcome=probe_error + ale
     const dumped = JSON.stringify(unverified);
     assert.ok(!dumped.includes("probe exploded"), "must not leak exception message");
     assert.ok(!dumped.includes("Error"), "must not leak exception type");
-    // ALERTS.log should exist
-    assert.ok(existsSync(join(dir, "ALERTS.log")), "ALERTS.log must exist after probe error");
+    // ALERTS.log should exist — raiseAlert is fire-and-forget async; wait briefly.
+    const alertsPath = join(dir, "ALERTS.log");
+    let alertWritten = false;
+    for (let i = 0; i < 20; i++) {
+      if (existsSync(alertsPath)) { alertWritten = true; break; }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.ok(alertWritten, "ALERTS.log must exist after probe error");
   } finally {
     cleanupDir(dir);
   }
