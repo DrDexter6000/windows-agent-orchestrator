@@ -476,7 +476,9 @@ M9-7A 起支持可选 `delivery` 块，用于派发后续可由 `run_delivery`/`
 }
 ```
 
-`delivery` 可选。`verificationCommands` 与 `verificationUnavailableReason` 二选一（互斥）。WAO 强制 persistent worktree isolation——模型不能传 `isolate`。模型**不能**传 `registryPath`、`runDir`、`runId`、`cwd`、`requireCertified`、timeout 或 `isolate`——这些是 server-owned 配置。MCP 固定以 `requireCertified: true` 调 shared service。
+`delivery` 可选。`verificationCommands` 与 `verificationUnavailableReason` 二选一（互斥）。WAO 强制 persistent worktree isolation——模型不能传 `isolate`。模型**不能**传 `registryPath`、`runDir`、`runId`、`cwd`、`workspaceRoot`、`requireCertified`、timeout 或 `isolate`——这些是 server-owned 配置。MCP 固定以 `requireCertified: true` 调 shared service。
+
+**Workspace binding（M10-pre2）**：`run_dispatch` 在调用 shared service 前**重新解析并证明** host-authorized workspace（优先级：显式 `--workspace-root` > MCP client roots/list 恰好一个合法 `file://` root > 否则 fail-closed）。证明后的 canonical Git root 作为 server-owned `cwd` 传给 dispatcher——模型不能通过任何 tool argument 提供路径。workspace 未绑定时 dispatcher 不会被调用（零 transcript、零 fork），返回固定安全文案。
 
 - **输出**（成功或拒绝同形，MCP `content` + `structuredContent`）：
 
@@ -489,6 +491,28 @@ M9-7A 起支持可选 `delivery` 块，用于派发后续可由 `run_delivery`/`
 返回时 transcript 已可读且为 `pending`；关闭 MCP host 后，detached runner 独立驱动 worker 到终态（token 闸门/超时/兜底 abort 都生效），写入共享 transcript。Lead 用 MCP `run_status` 轮询状态。
 
 annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:false, openWorldHint:true`（派发真实 worker，可执行命令、修改文件、访问外部系统）。
+
+### MCP `workspace_status`（workspace binding 状态查询，M10-pre2）
+
+`workspace_status` 让 MCP host 查询当前 host-authorized workspace 绑定状态。只读、幂等——不修改任何持久状态。`run_dispatch` 在执行前**自行重新证明** workspace，不信任此工具的先前结果。
+
+`workspace_status` tool：
+
+- **输入**（strict empty schema，拒绝任何字段）：
+
+```json
+{}
+```
+
+- **输出**：
+
+```json
+{ "bound": true, "source": "server_config", "gitHead": "abc123...", "dirty": false }
+```
+
+`source` 为 `"server_config"`（显式 `--workspace-root`）或 `"mcp_root"`（client roots/list）。`bound=false` 时其余字段为 `null`。不返回绝对路径、root URI、git remote、文件名、status 明细或异常 message。失败返回固定安全文案 `workspace_status failed`。
+
+annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true`。
 
 ### MCP `run_status`（point-in-time 状态查询，M9-3B）
 

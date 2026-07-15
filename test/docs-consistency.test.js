@@ -644,3 +644,19 @@ test("Prompt surfaces 保持薄入口与 Lead/worker 边界", () => {
     assert.ok(!/roadmap|wao stage|wao declare/i.test(prompt), `${role} 不应收到 Lead roadmap/pipeline 规则`);
   }
 });
+
+test("M10-pre2: workspace_status tool documented in usage.md and SKILL.md", () => {
+  const usage = read("docs/usage.md");
+  const skill = read("SKILL.md");
+  // usage.md must document the new tool
+  assert.ok(usage.includes("workspace_status"), "usage.md must document workspace_status tool");
+  assert.ok(usage.includes("--workspace-root"), "usage.md must mention --workspace-root startup flag");
+  // SKILL.md must list it in the tool table
+  assert.ok(skill.includes("workspace_status"), "SKILL.md tool table must include workspace_status");
+  // SKILL.md must say 8 tools now (was 7 before M10-pre2)
+  assert.ok(/8 MCP tools/.test(skill), "SKILL.md must reflect 8 MCP tools after workspace_status addition");
+  // team-roles.md must mention workspace binding (MCP-first)
+  const roles = read("docs/team-roles.md");
+  assert.ok(/workspace binding|workspace-root|roots\/list/.test(roles),
+    "team-roles.md must mention workspace binding for MCP dispatch");
+});

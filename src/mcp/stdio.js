@@ -19,7 +19,7 @@
 // Entrypoint: invoked via the repo Node shim (see package.json "mcp" script):
 //   node scripts/wao-node.cjs src/mcp/stdio.js [--registry PATH] [--run-dir PATH]
 
-import { resolve, dirname, join } from "node:path";
+import { resolve, dirname, join, isAbsolute } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -86,13 +86,13 @@ async function loadGlobalWaitTimeout(configOverride) {
 export { loadGlobalWaitTimeout as loadGlobalWaitTimeoutForTest };
 
 /**
- * Parse --registry/--run-dir from argv as discrete flag pairs.
+ * Parse --registry/--run-dir/--workspace-root from argv as discrete flag pairs.
  * Structural parse only — never shell-joins. Unknown flags are ignored.
  * @param {string[]} argv
- * @returns {{registryPath: string, runDir: string}}
+ * @returns {{registryPath: string, runDir: string, workspaceRoot: string|undefined}}
  */
 export function parseMcpArgs(argv) {
-  const out = { registryPath: DEFAULT_REGISTRY, runDir: DEFAULT_RUN_DIR };
+  const out = { registryPath: DEFAULT_REGISTRY, runDir: DEFAULT_RUN_DIR, workspaceRoot: undefined };
   if (!Array.isArray(argv)) return out;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -102,13 +102,28 @@ export function parseMcpArgs(argv) {
     } else if (arg === "--run-dir" && i + 1 < argv.length) {
       out.runDir = argv[i + 1];
       i += 1;
+    } else if (arg === "--workspace-root" && i + 1 < argv.length) {
+      out.workspaceRoot = argv[i + 1];
+      i += 1;
     }
   }
   return out;
 }
 
 async function main() {
-  const { registryPath, runDir } = parseMcpArgs(process.argv.slice(2));
+  const { registryPath, runDir, workspaceRoot } = parseMcpArgs(process.argv.slice(2));
+  // M10-pre2: validate --workspace-root if provided. Must be an absolute path.
+  // Relative/empty/duplicate are rejected at startup (fail closed). The path
+  // is NOT printed to stderr/stdout. Full proof happens at dispatch time.
+  let validatedWorkspaceRoot;
+  if (workspaceRoot !== undefined) {
+    if (!isAbsolute(workspaceRoot) || workspaceRoot.length === 0) {
+      process.stderr.write("[wao-mcp] fatal: startup failed\n");
+      process.exitCode = 1;
+      return;
+    }
+    validatedWorkspaceRoot = resolve(workspaceRoot);
+  }
   // M10-pre closeout: load server-owned global waitTimeout so the MCP dispatch
   // path threads it to the detached runner — same precedence as CLI background.
   const globalWaitTimeout = await loadGlobalWaitTimeout();
@@ -116,6 +131,7 @@ async function main() {
     registryPath: resolve(registryPath),
     runDir: resolve(runDir),
     globalWaitTimeout,
+    ...(validatedWorkspaceRoot ? { workspaceRoot: validatedWorkspaceRoot } : {}),
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);

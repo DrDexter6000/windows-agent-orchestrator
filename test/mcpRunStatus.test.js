@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { execSync } from "node:child_process";
 
 import { createWaoMcpServer } from "../src/mcp/server.js";
 
@@ -46,6 +47,15 @@ function ev(obj) {
 
 function cleanupDir(dir) {
   try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+}
+
+function makeGitRepo(dir) {
+  execSync('git init', { cwd: dir, stdio: 'pipe' });
+  execSync('git config user.email test@test.com', { cwd: dir, stdio: 'pipe' });
+  execSync('git config user.name Test', { cwd: dir, stdio: 'pipe' });
+  writeFileSync(join(dir, 'README.md'), '# test\n', 'utf8');
+  execSync('git add README.md', { cwd: dir, stdio: 'pipe' });
+  execSync('git commit -m init', { cwd: dir, stdio: 'pipe' });
 }
 
 async function buildInMemoryClient(server) {
@@ -393,6 +403,7 @@ test("M9-3B-07: real stdio run_dispatch(pending) then run_status polls to failed
   const dir = mkdtempSync(join(tmpdir(), "wao-m93b-07-"));
   let client;
   try {
+    makeGitRepo(dir);
     const registryPath = makeRegistry(dir, {
       failing_worker: { backend: "claude-code", binary: "nonexistent-m93b-07", cwd: dir },
     });
@@ -403,7 +414,7 @@ test("M9-3B-07: real stdio run_dispatch(pending) then run_status polls to failed
     client = new Client({ name: "wao-m93b-07", version: "0.0.1" }, { capabilities: {} });
     const transport = new StdioClientTransport({
       command: process.execPath,
-      args: [SHIM, STDIO_ENTRY, "--registry", registryPath, "--run-dir", runDir],
+      args: [SHIM, STDIO_ENTRY, "--registry", registryPath, "--run-dir", runDir, "--workspace-root", dir],
       env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" },
     });
     await client.connect(transport);

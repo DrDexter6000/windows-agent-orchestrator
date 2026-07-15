@@ -43,6 +43,15 @@ function cleanupDir(dir) {
   try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
 }
 
+function makeGitRepo(dir) {
+  execSync('git init', { cwd: dir, stdio: 'pipe' });
+  execSync('git config user.email test@test.com', { cwd: dir, stdio: 'pipe' });
+  execSync('git config user.name Test', { cwd: dir, stdio: 'pipe' });
+  writeFileSync(join(dir, 'README.md'), '# test\n', 'utf8');
+  execSync('git add README.md', { cwd: dir, stdio: 'pipe' });
+  execSync('git commit -m init', { cwd: dir, stdio: 'pipe' });
+}
+
 async function buildInMemoryClient(server) {
   const { Client } = await import("@modelcontextprotocol/sdk/client");
   const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -52,12 +61,14 @@ async function buildInMemoryClient(server) {
   return client;
 }
 
-async function buildStdioSubprocessTransport({ registryPath, runDir, env = {} }) {
+async function buildStdioSubprocessTransport({ registryPath, runDir, workspaceRoot, env = {} }) {
   const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
   const childEnv = { ...process.env, WAO_SKIP_VERSION_GUARD: "1", ...env };
+  const args = [SHIM, STDIO_ENTRY, "--registry", registryPath, "--run-dir", runDir];
+  if (workspaceRoot) args.push("--workspace-root", workspaceRoot);
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [SHIM, STDIO_ENTRY, "--registry", registryPath, "--run-dir", runDir],
+    args,
     env: childEnv,
   });
   return transport;
@@ -113,31 +124,38 @@ test("M9-2B-01: tools/list has registry_list + run_dispatch with strict schema a
 // ---------------------------------------------------------------------
 
 test("M9-2B-02: run_dispatch calls dispatcher once with server paths and requireCertified:true", async () => {
-  let callCount = 0;
-  let captured = null;
-  const fakeDispatch = async (input) => {
-    callCount += 1;
-    captured = input;
-    return { accepted: true, runId: "run_fake_m92b02", state: "pending", transcriptPath: "/x.jsonl" };
-  };
-
-  const server = createWaoMcpServer({
-    registryPath: "/server/registry.json",
-    runDir: "/server/runs",
-    dispatchRunFn: fakeDispatch,
-  });
-  const client = await buildInMemoryClient(server);
+  const dir = mkdtempSync(join(tmpdir(), "wao-m92b-02-"));
   try {
-    await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "do it" } });
-    assert.equal(callCount, 1, "dispatcher called exactly once");
-    assert.equal(captured.registryPath, "/server/registry.json", "server-owned registryPath");
-    assert.equal(captured.runDir, "/server/runs", "server-owned runDir");
-    assert.equal(captured.requireCertified, true, "requireCertified fixed true");
-    assert.equal(captured.agentId, "coder_low");
-    assert.equal(captured.prompt, "do it");
+    makeGitRepo(dir);
+    let callCount = 0;
+    let captured = null;
+    const fakeDispatch = async (input) => {
+      callCount += 1;
+      captured = input;
+      return { accepted: true, runId: "run_fake_m92b02", state: "pending", transcriptPath: "/x.jsonl" };
+    };
+
+    const server = createWaoMcpServer({
+      registryPath: "/server/registry.json",
+      runDir: "/server/runs",
+      workspaceRoot: dir,
+      dispatchRunFn: fakeDispatch,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "do it" } });
+      assert.equal(callCount, 1, "dispatcher called exactly once");
+      assert.equal(captured.registryPath, "/server/registry.json", "server-owned registryPath");
+      assert.equal(captured.runDir, "/server/runs", "server-owned runDir");
+      assert.equal(captured.requireCertified, true, "requireCertified fixed true");
+      assert.equal(captured.agentId, "coder_low");
+      assert.equal(captured.prompt, "do it");
+    } finally {
+      await client.close();
+      await server.close();
+    }
   } finally {
-    await client.close();
-    await server.close();
+    cleanupDir(dir);
   }
 });
 
@@ -146,42 +164,49 @@ test("M9-2B-02: run_dispatch calls dispatcher once with server paths and require
 // ---------------------------------------------------------------------
 
 test("M9-2B-03: run_dispatch success output has only runId/accepted/state, no leaks", async () => {
-  const fakeDispatch = async () => ({
-    accepted: true,
-    runId: "run_ok_m92b03",
-    state: "pending",
-    transcriptPath: "/secret/runs/run_ok_m92b03.jsonl",
-  });
-
-  const server = createWaoMcpServer({
-    registryPath: "/server/registry.json",
-    runDir: "/server/runs",
-    dispatchRunFn: fakeDispatch,
-  });
-  const client = await buildInMemoryClient(server);
+  const dir = mkdtempSync(join(tmpdir(), "wao-m92b-03-"));
   try {
-    const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "secret-prompt-value" } });
-    const textBlock = res.content.find((b) => b.type === "text");
-    const parsed = JSON.parse(textBlock.text);
+    makeGitRepo(dir);
+    const fakeDispatch = async () => ({
+      accepted: true,
+      runId: "run_ok_m92b03",
+      state: "pending",
+      transcriptPath: "/secret/runs/run_ok_m92b03.jsonl",
+    });
 
-    // Only these three keys.
-    assert.deepEqual(Object.keys(parsed).sort(), ["accepted", "runId", "state"], "only runId/accepted/state");
-    assert.equal(parsed.accepted, true);
-    assert.equal(parsed.runId, "run_ok_m92b03");
-    assert.equal(parsed.state, "pending");
+    const server = createWaoMcpServer({
+      registryPath: "/server/registry.json",
+      runDir: "/server/runs",
+      workspaceRoot: dir,
+      dispatchRunFn: fakeDispatch,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "secret-prompt-value" } });
+      const textBlock = res.content.find((b) => b.type === "text");
+      const parsed = JSON.parse(textBlock.text);
 
-    // No leaks.
-    const dumped = JSON.stringify(res);
-    assert.ok(!dumped.includes("/secret/runs"), "no transcriptPath leak");
-    assert.ok(!dumped.includes("secret-prompt-value"), "no prompt leak");
-    assert.ok(!dumped.includes("argv"), "no argv leak");
-    // structuredContent mirrors content.
-    if (res.structuredContent) {
-      assert.deepEqual(res.structuredContent, parsed, "structuredContent matches text JSON");
+      // Only these three keys.
+      assert.deepEqual(Object.keys(parsed).sort(), ["accepted", "runId", "state"], "only runId/accepted/state");
+      assert.equal(parsed.accepted, true);
+      assert.equal(parsed.runId, "run_ok_m92b03");
+      assert.equal(parsed.state, "pending");
+
+      // No leaks.
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes("/secret/runs"), "no transcriptPath leak");
+      assert.ok(!dumped.includes("secret-prompt-value"), "no prompt leak");
+      assert.ok(!dumped.includes("argv"), "no argv leak");
+      // structuredContent mirrors content.
+      if (res.structuredContent) {
+        assert.deepEqual(res.structuredContent, parsed, "structuredContent matches text JSON");
+      }
+    } finally {
+      await client.close();
+      await server.close();
     }
   } finally {
-    await client.close();
-    await server.close();
+    cleanupDir(dir);
   }
 });
 
@@ -243,31 +268,38 @@ test("M9-2B-04: control-plane args rejected, dispatcher not called", async () =>
 // ---------------------------------------------------------------------
 
 test("M9-2B-05: dispatcher error returns fixed safe text, no secret/path leak", async () => {
-  const SECRET = "test-secret-dispatch-leak-m92b05";
-  const ABS_PATH = "C:\\Users\\leak\\runs\\secret.jsonl";
-  const fakeDispatch = async () => {
-    throw new Error(`dispatch crashed at ${ABS_PATH} key=${SECRET}`);
-  };
-
-  const server = createWaoMcpServer({
-    registryPath: "/server/registry.json",
-    runDir: "/server/runs",
-    dispatchRunFn: fakeDispatch,
-  });
-  const client = await buildInMemoryClient(server);
+  const dir = mkdtempSync(join(tmpdir(), "wao-m92b-05-"));
   try {
-    const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y" } });
-    assert.equal(res.isError, true, "error flagged");
-    const dumped = JSON.stringify(res);
-    assert.ok(!dumped.includes(SECRET), "no secret leak");
-    assert.ok(!dumped.includes(ABS_PATH), "no absolute path leak");
-    assert.ok(!dumped.includes("C:\\\\Users"), "no path fragment leak");
-    const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
-    assert.ok(/run_dispatch failed/.test(text), "fixed safe text present");
-    assert.ok(!/at .*\(.+:\d+:\d+\)/.test(text), "no stack frame");
+    makeGitRepo(dir);
+    const SECRET = "test-secret-dispatch-leak-m92b05";
+    const ABS_PATH = "C:\\Users\\leak\\runs\\secret.jsonl";
+    const fakeDispatch = async () => {
+      throw new Error(`dispatch crashed at ${ABS_PATH} key=${SECRET}`);
+    };
+
+    const server = createWaoMcpServer({
+      registryPath: "/server/registry.json",
+      runDir: "/server/runs",
+      workspaceRoot: dir,
+      dispatchRunFn: fakeDispatch,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y" } });
+      assert.equal(res.isError, true, "error flagged");
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes(SECRET), "no secret leak");
+      assert.ok(!dumped.includes(ABS_PATH), "no absolute path leak");
+      assert.ok(!dumped.includes("C:\\\\Users"), "no path fragment leak");
+      const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+      assert.ok(/run_dispatch failed/.test(text), "fixed safe text present");
+      assert.ok(!/at .*\(.+:\d+:\d+\)/.test(text), "no stack frame");
+    } finally {
+      await client.close();
+      await server.close();
+    }
   } finally {
-    await client.close();
-    await server.close();
+    cleanupDir(dir);
   }
 });
 
@@ -280,6 +312,7 @@ test("M9-2B-06: real stdio run_dispatch reaches pending, runner drives to failed
   const dir = mkdtempSync(join(tmpdir(), "wao-m92b-06-"));
   let client;
   try {
+    makeGitRepo(dir);
     const registryPath = makeRegistry(dir, {
       failing_worker: {
         backend: "claude-code",
@@ -291,7 +324,7 @@ test("M9-2B-06: real stdio run_dispatch reaches pending, runner drives to failed
 
     const { Client } = await import("@modelcontextprotocol/sdk/client");
     client = new Client({ name: "wao-m92b-06", version: "0.0.1" }, { capabilities: {} });
-    const transport = await buildStdioSubprocessTransport({ registryPath, runDir });
+    const transport = await buildStdioSubprocessTransport({ registryPath, runDir, workspaceRoot: dir });
     await client.connect(transport);
 
     const res = await client.callTool({
@@ -344,6 +377,7 @@ test("M9-2B-06: real stdio run_dispatch reaches pending, runner drives to failed
 test("M9-2B-07: CLI and MCP dispatch produce same initial durable facts and outcome", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m92b-07-"));
   try {
+    makeGitRepo(dir);
     const registryPath = makeRegistry(dir, {
       parity_worker: {
         backend: "claude-code",
@@ -354,7 +388,7 @@ test("M9-2B-07: CLI and MCP dispatch produce same initial durable facts and outc
     const runDir = makeSummary(dir, { parity_worker: { status: "certified" } });
 
     // MCP dispatch via in-memory server + real dispatchRun.
-    const mcpServer = createWaoMcpServer({ registryPath, runDir });
+    const mcpServer = createWaoMcpServer({ registryPath, runDir, workspaceRoot: dir });
     const mcpClient = await buildInMemoryClient(mcpServer);
     let mcpRunId;
     try {
@@ -415,17 +449,21 @@ test("M9-2B-07: CLI and MCP dispatch produce same initial durable facts and outc
 // ===== M9-7A: delivery-capable dispatch tests =====
 
 test("M9-7A-04: MCP run_dispatch with delivery passes delivery to service", async () => {
-  let callCount = 0;
-  let captured = null;
-  const fakeDispatch = async (input) => {
-    callCount += 1;
-    captured = input;
-    return { accepted: true, runId: "run_delivery_m97a", state: "pending", transcriptPath: "/x.jsonl" };
-  };
-  const server = createWaoMcpServer({
-    registryPath: "/server/r.json", runDir: "/server/runs",
-    dispatchRunFn: fakeDispatch,
-  });
+  const dir = mkdtempSync(join(tmpdir(), "wao-m97a-04-"));
+  try {
+    makeGitRepo(dir);
+    let callCount = 0;
+    let captured = null;
+    const fakeDispatch = async (input) => {
+      callCount += 1;
+      captured = input;
+      return { accepted: true, runId: "run_delivery_m97a", state: "pending", transcriptPath: "/x.jsonl" };
+    };
+    const server = createWaoMcpServer({
+      registryPath: "/server/r.json", runDir: "/server/runs",
+      workspaceRoot: dir,
+      dispatchRunFn: fakeDispatch,
+    });
   const client = await buildInMemoryClient(server);
   try {
     const res = await client.callTool({
@@ -441,9 +479,12 @@ test("M9-7A-04: MCP run_dispatch with delivery passes delivery to service", asyn
     assert.equal(captured.requireCertified, true, "still forced certified");
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     assert.deepEqual(Object.keys(parsed).sort(), ["accepted", "runId", "state"], "output unchanged");
+    } finally {
+      await client.close();
+      await server.close();
+    }
   } finally {
-    await client.close();
-    await server.close();
+    cleanupDir(dir);
   }
 });
 
@@ -504,24 +545,30 @@ test("M9-7A-06: MCP delivery with no verification rejected, service count 0", as
 });
 
 test("M9-7A-07: non-delivery dispatch still works identically", async () => {
-  let callCount = 0;
-  let captured = null;
-  const fakeDispatch = async (input) => {
-    callCount += 1;
-    captured = input;
-    return { accepted: true, runId: "r", state: "pending" };
-  };
-  const server = createWaoMcpServer({
-    registryPath: "/r.json", runDir: "/runs", dispatchRunFn: fakeDispatch,
-  });
-  const client = await buildInMemoryClient(server);
+  const dir = mkdtempSync(join(tmpdir(), "wao-m97a-07-"));
   try {
-    await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y" } });
-    assert.equal(callCount, 1);
-    assert.ok(!captured.delivery, "no delivery forwarded for non-delivery dispatch");
+    makeGitRepo(dir);
+    let callCount = 0;
+    let captured = null;
+    const fakeDispatch = async (input) => {
+      callCount += 1;
+      captured = input;
+      return { accepted: true, runId: "r", state: "pending" };
+    };
+    const server = createWaoMcpServer({
+      registryPath: "/r.json", runDir: "/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y" } });
+      assert.equal(callCount, 1);
+      assert.ok(!captured.delivery, "no delivery forwarded for non-delivery dispatch");
+    } finally {
+      await client.close();
+      await server.close();
+    }
   } finally {
-    await client.close();
-    await server.close();
+    cleanupDir(dir);
   }
 });
 

@@ -66,19 +66,20 @@ See `references/safety-incidents.md` before unattended or stop-sensitive work. R
 
 ## Minimal MCP Loop
 
-The Lead drives the full minimal loop through 7 MCP tools:
+The Lead drives the full minimal loop through 8 MCP tools:
 
 | Tool | Side effect | Purpose |
 |---|---|---|
 | `registry_list` | read-only | Inventory + certification status |
-| `run_dispatch` | destructive | Create a supervised run (with optional delivery block for git_commit_v1) |
+| `workspace_status` | read-only | Query host-authorized workspace binding (M10-pre2) |
+| `run_dispatch` | destructive | Create a supervised run (with optional delivery block for git_commit_v1); workspace is server-owned, not model-controlled |
 | `run_status` | read-only | Poll terminal state + last activity |
 | `run_collect` | appends `messages.collected` (non-idempotent) | Collect bounded worker output |
 | `run_diagnose` | read-only | Failure category + signal types (no prescription) |
 | `run_delivery` | read-only | Query delivery commit/verification/acceptance |
 | `run_delivery_decide` | durable (first-decision-wins) | Record Lead accept/reject |
 
-Minimal closed loop: `inventory → dispatch → status → collect/diagnose → delivery query → Lead decision`
+Minimal closed loop: `inventory → workspace_status → dispatch → status → collect/diagnose → delivery query → Lead decision`
 
 See `docs/usage.md §MCP stdio` for host setup, full input/output schemas, and install instructions.
 

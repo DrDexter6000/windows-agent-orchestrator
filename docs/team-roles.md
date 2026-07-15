@@ -9,7 +9,7 @@
 WAO 是"装一次，开发多个项目"的工具：
 - **WAO skill** 装在 runtime 目录（一次性）
 - **`.wao/`** 建在被开发的目标项目（每项目一次）
-- agents.json 的 worker `cwd` 是**动态的**——派发时 Lead 用 `--cwd <目标项目>` 指定
+- agents.json 的 worker `cwd` 是**动态的**——CLI 派发时 Lead 用 `--cwd <目标项目>` 指定；MCP 派发时由 host-authorized workspace binding 决定（`--workspace-root` 或 MCP roots/list），Lead 不能通过 tool argument 传任意路径（M10-pre2）
 
 ## 核心原则
 

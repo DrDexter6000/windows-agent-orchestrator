@@ -33,6 +33,7 @@ import { getRunStatus } from "../application/runStatus.js";
 import { collectRunMessages } from "../application/runCollect.js";
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
 import { getRunDelivery, decideRunDelivery } from "../application/runDelivery.js";
+import { proveWorkspace } from "../application/workspaceBinding.js";
 import { DIAGNOSIS_CATEGORIES } from "../diagnosis.js";
 import { RUN_STATES } from "../transcript.js";
 import { createSecretRedactor } from "../secretRedaction.js";
@@ -451,6 +452,33 @@ const RUN_DELIVERY_DECIDE_DESCRIPTION =
   "durable decision wins; later attempts lose without error. Does not decide correctness " +
   "automatically. Does not return the decision reason or delivery details.";
 
+// ===== workspace_status (read-only binding proof) constants =====
+
+const WORKSPACE_ERROR_TEXT = "workspace_status failed";
+const WORKSPACE_NOT_BOUND_TEXT = "workspace not bound: configure --workspace-root or provide exactly one MCP root";
+
+const WORKSPACE_STATUS_INPUT = z.object({}).strict();
+
+const WORKSPACE_STATUS_OUTPUT = z.object({
+  bound: z.boolean(),
+  source: z.enum(["server_config", "mcp_root"]).nullable(),
+  gitHead: z.string().regex(/^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/).nullable(),
+  dirty: z.boolean().nullable(),
+});
+
+const WORKSPACE_STATUS_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+const WORKSPACE_STATUS_DESCRIPTION =
+  "Query the host-authorized workspace binding status: whether a workspace is bound, " +
+  "its source (server_config or mcp_root), the Git HEAD commit, and dirty status. " +
+  "Read-only. Does not return absolute paths, root URIs, git remotes, file names, " +
+  "status details, or exception messages.";
+
 /**
  * Create a WAO MCP server with registry_list, run_dispatch, run_status, run_collect, run_diagnose, run_delivery, run_delivery_decide.
  *
@@ -458,6 +486,7 @@ const RUN_DELIVERY_DECIDE_DESCRIPTION =
  * @param {string} input.registryPath — path to agents.json (startup config)
  * @param {string} input.runDir — path to runs/ dir
  * @param {number} [input.globalWaitTimeout] — server-owned global config.waitTimeout (M10-pre closeout)
+ * @param {string} [input.workspaceRoot] — server-owned explicit workspace root (M10-pre2)
  * @param {Function} [input.getRegistryInventoryFn] — injectable for testing
  * @param {Function} [input.dispatchRunFn] — injectable dispatcher for testing
  * @param {Function} [input.getRunStatusFn] — injectable status service for testing
@@ -471,6 +500,7 @@ export function createWaoMcpServer({
   registryPath,
   runDir,
   globalWaitTimeout,
+  workspaceRoot,
   getRegistryInventoryFn,
   dispatchRunFn,
   getRunStatusFn,
@@ -491,6 +521,55 @@ export function createWaoMcpServer({
     { name: SERVER_NAME, version: SERVER_VERSION },
     { version: SERVER_VERSION },
   );
+
+  /**
+   * Resolve the workspace binding using the authority precedence:
+   *   1. Explicit workspaceRoot (server startup --workspace-root)
+   *   2. MCP client roots/list — exactly one valid file:// root
+   *   3. Otherwise: not bound (fail closed)
+   *
+   * Returns { bound, source, root, gitHead, dirty } or { bound: false }.
+   * Never returns paths/URIs — callers use .root internally only.
+   */
+  async function resolveWorkspaceBinding() {
+    // Priority 1: explicit server config
+    if (workspaceRoot) {
+      try {
+        const proof = proveWorkspace(workspaceRoot);
+        return { bound: true, source: "server_config", ...proof };
+      } catch {
+        return { bound: false };
+      }
+    }
+
+    // Priority 2: MCP client roots
+    try {
+      const result = await mcp.server.listRoots();
+      const roots = Array.isArray(result.roots) ? result.roots : [];
+      if (roots.length === 0) return { bound: false };
+      // Fail closed on multiple roots — multi-workspace is a future capability.
+      if (roots.length > 1) return { bound: false };
+
+      const root = roots[0];
+      const uri = root?.uri;
+      if (typeof uri !== "string" || !uri.startsWith("file:///")) return { bound: false };
+
+      // Convert file:// URI to filesystem path
+      const { fileURLToPath } = await import("node:url");
+      let pathStr;
+      try {
+        pathStr = fileURLToPath(uri);
+      } catch {
+        return { bound: false };
+      }
+
+      const proof = proveWorkspace(pathStr);
+      return { bound: true, source: "mcp_root", ...proof };
+    } catch {
+      // Client does not support roots, or roots/list failed — not bound.
+      return { bound: false };
+    }
+  }
 
   mcp.registerTool(
     "registry_list",
@@ -521,6 +600,44 @@ export function createWaoMcpServer({
   );
 
   mcp.registerTool(
+    "workspace_status",
+    {
+      description: WORKSPACE_STATUS_DESCRIPTION,
+      inputSchema: WORKSPACE_STATUS_INPUT,
+      outputSchema: WORKSPACE_STATUS_OUTPUT,
+      annotations: WORKSPACE_STATUS_ANNOTATIONS,
+    },
+    async () => {
+      try {
+        const binding = await resolveWorkspaceBinding();
+        if (!binding.bound) {
+          const payload = { bound: false, source: null, gitHead: null, dirty: null };
+          return {
+            content: [{ type: "text", text: JSON.stringify(payload) }],
+            structuredContent: payload,
+          };
+        }
+        const payload = {
+          bound: true,
+          source: binding.source,
+          gitHead: binding.gitHead,
+          dirty: binding.dirty,
+        };
+        WORKSPACE_STATUS_OUTPUT.parse(payload);
+        return {
+          content: [{ type: "text", text: JSON.stringify(payload) }],
+          structuredContent: payload,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: WORKSPACE_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  mcp.registerTool(
     "run_dispatch",
     {
       description: RUN_DISPATCH_DESCRIPTION,
@@ -529,6 +646,27 @@ export function createWaoMcpServer({
       annotations: RUN_DISPATCH_ANNOTATIONS,
     },
     async ({ agentId, prompt, delivery }) => {
+      // M10-pre2: re-resolve and prove workspace BEFORE any dispatch.
+      // State-changing calls do their own authority proof — they do NOT trust
+      // a prior workspace_status result. If the workspace is not bound,
+      // the dispatcher is never called (zero transcript, zero fork).
+      let workspaceCwd;
+      try {
+        const binding = await resolveWorkspaceBinding();
+        if (!binding.bound) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
+          };
+        }
+        workspaceCwd = binding.root;
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
+        };
+      }
+
       let result;
       try {
         result = await dispatcher({
@@ -536,6 +674,9 @@ export function createWaoMcpServer({
           prompt,
           registryPath,
           runDir,
+          // M10-pre2: server-owned canonical workspace root as cwd.
+          // The model cannot provide this — it comes from host-authorized binding.
+          cwd: workspaceCwd,
           // MCP always requires certification — the control plane decides this,
           // never the model. Background path now propagates it (M9-2A).
           requireCertified: true,
