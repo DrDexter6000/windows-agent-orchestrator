@@ -105,9 +105,9 @@ test("WSB-04: workspace_status returns bound=true, source, gitHead, dirty; no pa
   }
 });
 
-// ===== 5. workspace_status malformed service result → fixed safe failure =====
+// ===== 5. workspace_status unbound contract (no workspace → bound=false) =====
 
-test("WSB-05: workspace_status with no workspace bound → bound=false", async () => {
+test("WSB-05: workspace_status with no workspace bound → bound=false, all fields null", async () => {
   const server = createWaoMcpServer({
     registryPath: "/r.json",
     runDir: "/runs",
@@ -119,6 +119,9 @@ test("WSB-05: workspace_status with no workspace bound → bound=false", async (
     const textBlock = res.content.find((b) => b.type === "text");
     const parsed = JSON.parse(textBlock.text);
     assert.equal(parsed.bound, false);
+    assert.equal(parsed.source, null);
+    assert.equal(parsed.gitHead, null);
+    assert.equal(parsed.dirty, null);
   } finally {
     await client.close();
     await server.close();
@@ -250,16 +253,38 @@ test("WSB-01: workspace_status input is strict empty — extra fields rejected",
   }
 });
 
-// ===== 11. stdio --workspace-root parsing =====
+// ===== 11. stdio --workspace-root strict parsing =====
 
-test("WSB-11: parseMcpArgs parses --workspace-root correctly", async () => {
+test("WSB-11: parseMcpArgs parses valid --workspace-root and rejects malformed", async () => {
   const { parseMcpArgs } = await import("../src/mcp/stdio.js");
-  // Valid absolute path
+  // Valid absolute path (with spaces)
   const r1 = parseMcpArgs(["--workspace-root", "D:/some path/repo"]);
-  assert.ok(r1.workspaceRoot, "workspaceRoot present");
-  // Missing value
-  const r2 = parseMcpArgs(["--workspace-root"]);
-  assert.ok(!r2.workspaceRoot || r2.workspaceRoot === undefined, "no workspaceRoot when value missing");
+  assert.equal(r1.workspaceRoot, "D:/some path/repo", "valid absolute path with spaces");
+
+  // Missing value — must throw
+  assert.throws(() => parseMcpArgs(["--workspace-root"]), /workspace-root/, "missing value throws");
+
+  // Empty string — must throw
+  assert.throws(() => parseMcpArgs(["--workspace-root", ""]), /workspace-root/, "empty value throws");
+
+  // Whitespace-only — must throw
+  assert.throws(() => parseMcpArgs(["--workspace-root", "   "]), /workspace-root/, "whitespace value throws");
+
+  // Relative path — must throw
+  assert.throws(() => parseMcpArgs(["--workspace-root", "relative/path"]), /workspace-root/, "relative path throws");
+
+  // Duplicate — must throw
+  assert.throws(() => parseMcpArgs(["--workspace-root", "D:/a", "--workspace-root", "D:/b"]),
+    /workspace-root/, "duplicate throws");
+
+  // No --workspace-root — undefined (valid, uses roots fallback)
+  const r2 = parseMcpArgs(["--registry", "/r.json"]);
+  assert.equal(r2.workspaceRoot, undefined, "no workspaceRoot when flag absent");
+
+  // --registry and --run-dir behavior unchanged (last-wins, lenient)
+  const r3 = parseMcpArgs(["--registry", "/a.json", "--run-dir", "/runs"]);
+  assert.equal(r3.registryPath, "/a.json");
+  assert.equal(r3.runDir, "/runs");
 });
 
 // ===== 12. Fixed MCP error does not leak absolute path =====

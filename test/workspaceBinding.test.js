@@ -18,7 +18,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { proveWorkspace } from "../src/application/workspaceBinding.js";
@@ -99,6 +99,28 @@ test("WS-03: path with spaces → bound", () => {
 test("WS-04: relative path rejected", () => {
   assert.throws(() => proveWorkspace("relative/path"));
   assert.throws(() => proveWorkspace("./relative"));
+});
+
+// 4b. Windows case-insensitive path alias — same dir with different casing must bind
+test("WS-04b: Windows case-insensitive path alias binds with same canonical root", () => {
+  if (process.platform !== "win32") return; // Windows-only test
+  const tmp = mkdtempSync(join(tmpdir(), "WaoCaseProbe-"));
+  try {
+    makeGitRepo(tmp);
+    // Construct an equivalent path with different casing for one path component.
+    // Windows treats "WaoCaseProbe-XXX" and "waocaseprobe-XXX" as the same directory.
+    const parent = dirname(tmp);
+    const lastSegment = tmp.slice(parent.length + 1);
+    const lowerSegment = lastSegment.toLowerCase();
+    if (lowerSegment === lastSegment) return; // can't test if already lowercase
+    const aliasPath = join(parent, lowerSegment);
+
+    const result = proveWorkspace(aliasPath);
+    // Canonical root must be the REAL path (realpath resolves to actual on-disk casing).
+    assert.equal(result.root, tmp.replace(/\\/g, "/"));
+  } finally {
+    cleanupDir(tmp);
+  }
 });
 
 // 5. Non-existent directory rejected

@@ -35,6 +35,17 @@ function normalizePath(p) {
   return realpathSync(p).replace(/\\/g, "/");
 }
 
+// Compare two normalized path strings using platform-appropriate semantics.
+// On Windows (win32), paths are case-insensitive — "C:/Foo" and "c:/foo" refer
+// to the same directory. On other platforms, paths are case-sensitive.
+// The case-fold is used ONLY for the identity comparison, not for the canonical
+// root returned to callers — that stays in its original casing from realpath.
+const IS_WIN32 = process.platform === "win32";
+function pathsMatch(a, b) {
+  if (IS_WIN32) return a.toLowerCase() === b.toLowerCase();
+  return a === b;
+}
+
 /**
  * Run a git command with structured argv (no shell string).
  * @param {string[]} args
@@ -91,7 +102,9 @@ export function proveWorkspace(pathStr, opts = {}) {
 
   // The input path MUST be the Git top-level — not a subdirectory.
   // A subdirectory would silently expand authorization, which is forbidden.
-  if (canonicalInput !== canonicalToplevel) {
+  // Comparison uses platform-appropriate semantics: case-insensitive on Windows,
+  // case-sensitive elsewhere (matching the OS's path identity rules).
+  if (!pathsMatch(canonicalInput, canonicalToplevel)) {
     throw new Error("workspace: path must be a Git worktree top-level, not a subdirectory");
   }
 

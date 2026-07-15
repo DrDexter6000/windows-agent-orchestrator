@@ -88,12 +88,26 @@ export { loadGlobalWaitTimeout as loadGlobalWaitTimeoutForTest };
 /**
  * Parse --registry/--run-dir/--workspace-root from argv as discrete flag pairs.
  * Structural parse only — never shell-joins. Unknown flags are ignored.
+ *
+ * --workspace-root has strict fail-closed semantics:
+ *   - Missing value (flag at end of argv): throw
+ *   - Empty string or whitespace-only value: throw
+ *   - Relative path: throw
+ *   - Duplicate flag: throw
+ *   The throw propagates to main().catch() which prints the fixed startup fatal
+ *   text — the path value is never printed.
+ *
+ * --registry and --run-dir keep their existing lenient behavior (last-wins,
+ * missing value ignored) to avoid regressions in existing host configurations.
+ *
  * @param {string[]} argv
  * @returns {{registryPath: string, runDir: string, workspaceRoot: string|undefined}}
+ * @throws {Error} on malformed --workspace-root (missing/empty/whitespace/relative/duplicate)
  */
 export function parseMcpArgs(argv) {
   const out = { registryPath: DEFAULT_REGISTRY, runDir: DEFAULT_RUN_DIR, workspaceRoot: undefined };
   if (!Array.isArray(argv)) return out;
+  let workspaceRootSeen = false;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--registry" && i + 1 < argv.length) {
@@ -102,8 +116,26 @@ export function parseMcpArgs(argv) {
     } else if (arg === "--run-dir" && i + 1 < argv.length) {
       out.runDir = argv[i + 1];
       i += 1;
-    } else if (arg === "--workspace-root" && i + 1 < argv.length) {
-      out.workspaceRoot = argv[i + 1];
+    } else if (arg === "--workspace-root") {
+      // Duplicate detection — fail closed on ambiguity.
+      if (workspaceRootSeen) {
+        throw new Error("workspace-root: duplicate flag");
+      }
+      workspaceRootSeen = true;
+      // Missing value — flag at end of argv with no following argument.
+      if (i + 1 >= argv.length) {
+        throw new Error("workspace-root: missing value");
+      }
+      const value = argv[i + 1];
+      // Empty or whitespace-only value.
+      if (typeof value !== "string" || value.trim().length === 0) {
+        throw new Error("workspace-root: empty value");
+      }
+      // Must be absolute — relative paths are rejected.
+      if (!isAbsolute(value)) {
+        throw new Error("workspace-root: relative path");
+      }
+      out.workspaceRoot = value;
       i += 1;
     }
   }
@@ -111,17 +143,21 @@ export function parseMcpArgs(argv) {
 }
 
 async function main() {
-  const { registryPath, runDir, workspaceRoot } = parseMcpArgs(process.argv.slice(2));
-  // M10-pre2: validate --workspace-root if provided. Must be an absolute path.
-  // Relative/empty/duplicate are rejected at startup (fail closed). The path
-  // is NOT printed to stderr/stdout. Full proof happens at dispatch time.
+  let parsed;
+  try {
+    parsed = parseMcpArgs(process.argv.slice(2));
+  } catch {
+    // parseMcpArgs throws on malformed --workspace-root (missing/empty/relative/duplicate).
+    // The error is caught here — the path value or error detail is never printed.
+    process.stderr.write("[wao-mcp] fatal: startup failed\n");
+    process.exitCode = 1;
+    return;
+  }
+  const { registryPath, runDir, workspaceRoot } = parsed;
+  // M10-pre2: workspaceRoot has already been validated by parseMcpArgs
+  // (absolute, non-empty, non-duplicate). Resolve it for canonical form.
   let validatedWorkspaceRoot;
   if (workspaceRoot !== undefined) {
-    if (!isAbsolute(workspaceRoot) || workspaceRoot.length === 0) {
-      process.stderr.write("[wao-mcp] fatal: startup failed\n");
-      process.exitCode = 1;
-      return;
-    }
     validatedWorkspaceRoot = resolve(workspaceRoot);
   }
   // M10-pre closeout: load server-owned global waitTimeout so the MCP dispatch
