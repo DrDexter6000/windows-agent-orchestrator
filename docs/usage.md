@@ -358,6 +358,9 @@ npm run cli -- daemon stop
 | `run.aborted` | 被 abort | M0 |
 | `run.error` | 错误 | M0 |
 | `run.stop_requested` | 用户请求停止 | M0 |
+| `run.wait_policy` | M10-pre：实际生效的等待超时策略（waitTimeoutMs + source: explicit/agent/global/default） | M10-pre |
+| `run.stop_verified` | M10-pre：进程式 worker 终态后确认已退出（quiet） | M10-pre |
+| `run.stop_unverified` | M10-pre：进程式 worker 终态后无法确认退出（outcome: alive/probe_error） | M10-pre |
 | `messages.collected` | collect 命令拉取消息 | M0 |
 | `run.rerun` | 进程式 resume 重放（originalSessionId → newSessionId） | M3 |
 | `run.cleanup_done` | worktree 清理完成 | M3 |

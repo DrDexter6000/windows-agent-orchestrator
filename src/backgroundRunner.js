@@ -83,7 +83,8 @@ function backendFor(agent, { fetchImpl, waoCliPath } = {}) {
  * @param {object|string} opts.registry - registry 对象或路径
  * @param {string} opts.runDir
  * @param {Function} [opts.fetchImpl] - 测试注入（opencode）
- * @param {number} [opts.waitTimeout]
+ * @param {number} [opts.waitTimeout] - explicit override (becomes "explicit" tier)
+ * @param {number} [opts.globalWaitTimeout] - server-owned global config.waitTimeout
  * @param {number} [opts.pollInterval]
  * @param {object} [opts.scorecardRules]
  * @returns {Promise<{runId, completed, failed, timedOut, error}>}
@@ -110,8 +111,12 @@ export async function runBackground(opts = {}) {
       // 字符串时用真实路径。避免 start() 里 resolve(undefined) 抛错。
       registry: registryPath ?? (typeof opts.registry === "object" ? "." : undefined),
       pollInterval: opts.pollInterval ?? 1000,
-      waitTimeout: opts.waitTimeout,
-      timeout: (opts.waitTimeout ?? 300000) + 5000,
+      // M10-pre closeout: config.waitTimeout receives the server-owned global value.
+      // If opts.globalWaitTimeout is provided (from --global-wait-timeout argv), use it.
+      // Otherwise fall back to opts.waitTimeout (legacy callers) or the SSOT default.
+      // RunManager.waitForCompletion resolves explicit > agent > config(this) > default.
+      waitTimeout: opts.globalWaitTimeout ?? opts.waitTimeout,
+      timeout: (opts.waitTimeout ?? opts.globalWaitTimeout ?? 300000) + 5000,
       retries: 0,
     },
     readRegistry: registryResolver,
@@ -272,6 +277,9 @@ export async function runMain(argv = process.argv.slice(2)) {
     runId: opts["run-id"],
     cwd: opts.cwd,
     waitTimeout: opts["wait-timeout"] !== undefined ? Number(opts["wait-timeout"]) : undefined,
+    // M10-pre closeout: server-owned global config.waitTimeout (from --global-wait-timeout).
+    // Never disguised as --wait-timeout — RunManager resolves precedence internally.
+    globalWaitTimeout: opts["global-wait-timeout"] !== undefined ? Number(opts["global-wait-timeout"]) : undefined,
     pollInterval: Number(opts["poll-interval"] ?? 1000),
     scorecardRules: opts["scorecard-rules"] ? JSON.parse(opts["scorecard-rules"]) : undefined,
     scorecardMode: opts["scorecard-mode"],

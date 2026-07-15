@@ -1284,7 +1284,19 @@ export class Run {
           ).catch(() => {});
         }
       } catch {
-        // Verification failed — don't block terminal state.
+        // M10-pre closeout: probe threw — we do NOT know if the process died.
+        // Fail-closed: record unverified with a fixed safe outcome. Never record
+        // the exception message, PID, command, path, or stderr — they may leak
+        // operational internals. The fixed outcome "probe_error" is safe to surface.
+        await this.transcript.append("run.stop_unverified", {
+          backend: this.result?.backend ?? "process",
+          path: "_runCleanup",
+          outcome: "probe_error",
+        }).catch(() => { /* transcript write itself failed — can't record, but don't block */ });
+        raiseAlert("stop_unverified",
+          `_runCleanup process stop unverified (run ${this.runId}): probe error`,
+          { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
+        ).catch(() => {});
       }
       return;
     }

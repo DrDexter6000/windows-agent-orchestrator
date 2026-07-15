@@ -233,8 +233,8 @@ test("transcript 事件表单一权威：usage.md 必须是完整权威，SKILL.
   // 规则：SKILL.md 的 transcript 段必须指向 usage，不得自己列全量事件表。
   const skill = read("SKILL.md");
   const usage = read("docs/usage.md");
-  // usage 必须含完整事件集（含 M3+M5+M6 新增的）。
-  for (const ev of ["run.event", "scorecard.checked", "run.rerun", "run.cleanup_done"]) {
+  // usage 必须含完整事件集（含 M3+M5+M6+M10-pre 新增的）。
+  for (const ev of ["run.event", "scorecard.checked", "run.rerun", "run.cleanup_done", "run.wait_policy", "run.stop_verified", "run.stop_unverified"]) {
     assert.ok(usage.includes(ev), `usage.md transcript 表缺事件 ${ev}（应是完整权威）`);
   }
   // SKILL 不得再维护并行全量表（不得同时列 run.rerun 与 run.event 等做"完整清单"）。

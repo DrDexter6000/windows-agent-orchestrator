@@ -457,6 +457,7 @@ const RUN_DELIVERY_DECIDE_DESCRIPTION =
  * @param {object} input
  * @param {string} input.registryPath — path to agents.json (startup config)
  * @param {string} input.runDir — path to runs/ dir
+ * @param {number} [input.globalWaitTimeout] — server-owned global config.waitTimeout (M10-pre closeout)
  * @param {Function} [input.getRegistryInventoryFn] — injectable for testing
  * @param {Function} [input.dispatchRunFn] — injectable dispatcher for testing
  * @param {Function} [input.getRunStatusFn] — injectable status service for testing
@@ -469,6 +470,7 @@ const RUN_DELIVERY_DECIDE_DESCRIPTION =
 export function createWaoMcpServer({
   registryPath,
   runDir,
+  globalWaitTimeout,
   getRegistryInventoryFn,
   dispatchRunFn,
   getRunStatusFn,
@@ -537,6 +539,9 @@ export function createWaoMcpServer({
           // MCP always requires certification — the control plane decides this,
           // never the model. Background path now propagates it (M9-2A).
           requireCertified: true,
+          // M10-pre closeout: thread server-owned global config.waitTimeout to the
+          // detached runner. This is NOT --wait-timeout (never externally controllable).
+          globalWaitTimeout,
           // M9-7A: optional delivery request — service validates via prepareDeliveryRequest.
           ...(delivery ? { delivery } : {}),
         });

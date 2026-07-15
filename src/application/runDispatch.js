@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 
 import { JsonlTranscript } from "../transcript.js";
 import { isValidRunId, prepareDeliveryRequest } from "../delivery.js";
-import { resolveWaitTimeout } from "./timeoutPolicy.js";
+import { resolveWaitTimeout, validateExplicitTimeout } from "./timeoutPolicy.js";
 
 // Default path to the detached runner. Resolved relative to this module so the
 // service stays independent of the caller's cwd (CLI vs MCP vs test).
@@ -54,7 +54,8 @@ function generateRunId() {
  * @param {string} input.runDir — path to runs/ directory
  * @param {string} [input.runId] — optional custom runId (validated)
  * @param {string} [input.cwd] — optional worker cwd
- * @param {number} [input.waitTimeout]
+ * @param {number} [input.waitTimeout] — explicit override (range-validated 1000..600000)
+ * @param {number} [input.globalWaitTimeout] — server-owned global config.waitTimeout (trusted)
  * @param {number} [input.pollInterval]
  * @param {string} [input.scorecardRules] — raw JSON string
  * @param {string} [input.scorecardMode]
@@ -72,6 +73,7 @@ export async function dispatchRun({
   runId,
   cwd,
   waitTimeout,
+  globalWaitTimeout,
   pollInterval,
   scorecardRules,
   scorecardMode,
@@ -92,6 +94,15 @@ export async function dispatchRun({
   }
   if (!runDir || typeof runDir !== "string") {
     throw new Error("dispatchRun: runDir is required");
+  }
+
+  // M10-pre closeout: validate explicit waitTimeout BEFORE any transcript write or fork.
+  // This is the externally-controlled value (CLI --wait-timeout / MCP tool input).
+  // It must pass full production range [1000, 600000]. An invalid value must fail-closed
+  // with zero transcript, zero fork — no orphaned pending transcript.
+  // validateExplicitTimeout throws on out-of-range/NaN/non-integer.
+  if (waitTimeout !== undefined && waitTimeout !== null) {
+    validateExplicitTimeout(waitTimeout);
   }
 
   // Validate runId BEFORE any file write or fork. Custom runIds reach transcript
@@ -145,6 +156,13 @@ export async function dispatchRun({
   // RunManager resolves from agent.waitTimeout > config.waitTimeout > default.
   if (waitTimeout !== undefined && waitTimeout !== null) {
     runnerArgs.push("--wait-timeout", String(waitTimeout));
+  }
+  // M10-pre closeout: thread server-owned global config.waitTimeout to the runner.
+  // This is NOT --wait-timeout (which would become "explicit" in precedence).
+  // The runner sets RunManager config.waitTimeout from this value, so the full
+  // precedence explicit > agent > global > default is preserved in the detached process.
+  if (globalWaitTimeout !== undefined && globalWaitTimeout !== null) {
+    runnerArgs.push("--global-wait-timeout", String(globalWaitTimeout));
   }
   if (cwd) runnerArgs.push("--cwd", cwd);
   if (scorecardRules) runnerArgs.push("--scorecard-rules", scorecardRules);

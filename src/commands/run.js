@@ -136,6 +136,8 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
     runId: options.runId,
     cwd: options.cwd,
     waitTimeout: options.waitTimeout ? Number(options.waitTimeout) : undefined,
+    // M10-pre closeout: thread server-owned global config.waitTimeout to the runner.
+    globalWaitTimeout: config.waitTimeout,
     pollInterval: options.pollInterval ?? config.pollInterval ?? 1000,
     scorecardRules: options.scorecardRules,
     scorecardMode: options.scorecardMode,

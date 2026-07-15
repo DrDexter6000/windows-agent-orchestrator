@@ -21,6 +21,8 @@
 
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import process from "node:process";
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -29,6 +31,29 @@ import { createWaoMcpServer } from "./server.js";
 
 const DEFAULT_REGISTRY = "config/agents.json";
 const DEFAULT_RUN_DIR = "runs";
+const DEFAULT_WAIT_TIMEOUT = 300000;
+
+/**
+ * Load global config.waitTimeout from config/default.json.
+ * Falls back to 300000 if the file is missing or unparseable.
+ * This is the server-owned global tier of the timeout precedence chain.
+ * @returns {Promise<number>}
+ */
+async function loadGlobalWaitTimeout() {
+  const configPath = resolve("config/default.json");
+  if (!existsSync(configPath)) return DEFAULT_WAIT_TIMEOUT;
+  try {
+    const raw = await readFile(configPath, "utf8");
+    const parsed = JSON.parse(raw);
+    const wt = Number(parsed.waitTimeout);
+    if (Number.isFinite(wt) && Number.isInteger(wt) && wt >= 1000 && wt <= 600000) {
+      return wt;
+    }
+  } catch {
+    // fall through to default
+  }
+  return DEFAULT_WAIT_TIMEOUT;
+}
 
 /**
  * Parse --registry/--run-dir from argv as discrete flag pairs.
@@ -54,9 +79,13 @@ export function parseMcpArgs(argv) {
 
 async function main() {
   const { registryPath, runDir } = parseMcpArgs(process.argv.slice(2));
+  // M10-pre closeout: load server-owned global waitTimeout so the MCP dispatch
+  // path threads it to the detached runner — same precedence as CLI background.
+  const globalWaitTimeout = await loadGlobalWaitTimeout();
   const server = createWaoMcpServer({
     registryPath: resolve(registryPath),
     runDir: resolve(runDir),
+    globalWaitTimeout,
   });
   const transport = new StdioServerTransport();
   await server.connect(transport);
