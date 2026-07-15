@@ -1,6 +1,6 @@
 # 部署与使用指南
 
-> 本文档基于 M0–M8 + fresh-runtime hardening 后的实际能力编写。
+> 本文档基于 M0–M9 + fresh-runtime hardening 后的实际能力编写。
 > WAO 当前可用于主控监督下的正式试运行；daemon / background 派发 / resume-on-start 已落地，最终验收仍由 Lead 负责。
 
 ---
@@ -403,31 +403,29 @@ LLM 编排器（未来的 M5 DAG 或外部脚本）只需要：
 3. `collect <runId>` 或读 transcript 拿产出
 4. `runs metrics <runId>` 拿成本
 
-### MCP stdio 接口（agent-facing primary，M9-1）
+### MCP stdio 接口（agent-facing primary，M9）
 
 WAO 是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude Desktop、Codex、其它 agent runtime）可通过 stdio 把 WAO 当作 MCP server 调用。MCP 暴露 7 个工具组成最小 Lead 闭环（inventory → dispatch → status → collect/diagnose → delivery query → acceptance）。每个 tool 直接调用共享 application service，不 shell-out CLI。
 
-**Host 注册说明**：把 `npm run mcp`（或等价的 `node scripts/wao-node.cjs src/mcp/stdio.js`）注册到 host 的 MCP 配置；host 配置语法由 host 自己负责。注册后若当前会话未发现工具，重启或重载 host。Provider credential 必须由 host 通过其安全 env inheritance/allowlist 提供——不把 credential value 写入 repo、worker prompt 或 MCP args。WAO 不接管 host-global auth。
+**Host 注册说明**：`npm run mcp` 仅用于在 WAO repo 内手工 smoke；正式 host 注册应指向 Node shim 和 stdio entrypoint 的**绝对路径**，并为 registry 和 runDir 指定绝对路径——MCP host 的启动 cwd 不保证是 WAO repo。host 配置语法由 host 自己负责。注册后若当前会话未发现工具，重启或重载 host。Provider credential 必须由 host 通过其安全 env inheritance/allowlist 提供——不把 credential value 写入 repo、worker prompt 或 MCP args。WAO 不接管 host-global auth。
 
-启动 stdio server（所有生产入口走 Node v22 shim）：
+在 WAO repo 内手工 smoke（所有生产入口走 Node v22 shim）：
 
 ```bash
-# 默认 registry (config/agents.json) 和 runDir (runs/)
 npm run mcp
-
-# 显式指定（路径由 server 启动配置决定，tool 调用不能覆盖）
-npm run mcp -- --registry config/agents.json --run-dir runs
 ```
 
-MCP host 的 stdio 配置指向同一个入口：
+MCP host 的 stdio 配置（使用绝对路径占位符，替换为你的实际 WAO 安装路径）：
 
 ```json
 {
   "mcpServers": {
     "wao": {
       "command": "node",
-      "args": ["scripts/wao-node.cjs", "src/mcp/stdio.js",
-               "--registry", "config/agents.json", "--run-dir", "runs"]
+      "args": ["C:\\path\\to\\wao\\scripts\\wao-node.cjs",
+               "C:\\path\\to\\wao\\src\\mcp\\stdio.js",
+               "--registry", "C:\\path\\to\\wao\\config\\agents.json",
+               "--run-dir", "C:\\path\\to\\wao\\runs"]
     }
   }
 }
