@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 
 import { JsonlTranscript } from "../transcript.js";
 import { isValidRunId, prepareDeliveryRequest } from "../delivery.js";
-import { resolveWaitTimeout, validateExplicitTimeout } from "./timeoutPolicy.js";
+import { resolveWaitTimeout, validateBoundedWaitTimeout } from "./timeoutPolicy.js";
 
 // Default path to the detached runner. Resolved relative to this module so the
 // service stays independent of the caller's cwd (CLI vs MCP vs test).
@@ -98,19 +98,19 @@ export async function dispatchRun({
 
   // M10-pre closeout: validate explicit waitTimeout BEFORE any transcript write or fork.
   // The explicit value comes from CLI --wait-timeout or a trusted internal caller.
-  // MCP tool input is NOT allowed to set waitTimeout — the run_dispatch schema rejects it.
+  // MCP run_dispatch schema does NOT accept waitTimeout — the model cannot set it.
   // It must pass full production range [1000, 600000]. An invalid value must fail-closed
   // with zero transcript, zero fork — no orphaned pending transcript.
-  // validateExplicitTimeout throws on out-of-range/NaN/non-integer.
+  // validateBoundedWaitTimeout throws on out-of-range/NaN/non-integer.
   if (waitTimeout !== undefined && waitTimeout !== null) {
-    validateExplicitTimeout(waitTimeout);
+    validateBoundedWaitTimeout(waitTimeout);
   }
   // M10-pre closeout-2: validate server-owned globalWaitTimeout too.
   // A corrupted config/default.json or broken internal caller could pass an out-of-range
   // value. Same boundary gate, same fail-closed semantics: zero transcript, zero fork.
-  // MCP tool input is NOT allowed to set globalWaitTimeout — the run_dispatch schema rejects it.
+  // MCP run_dispatch schema does NOT accept globalWaitTimeout — the model cannot set it.
   if (globalWaitTimeout !== undefined && globalWaitTimeout !== null) {
-    validateExplicitTimeout(globalWaitTimeout);
+    validateBoundedWaitTimeout(globalWaitTimeout);
   }
 
   // Validate runId BEFORE any file write or fork. Custom runIds reach transcript

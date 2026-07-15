@@ -235,14 +235,23 @@ export async function runCommand(args, config) {
     throw new Error("run requires <agentId>");
   }
   const options = parseOptions(tail);
-  // M10-pre closeout-2: validate explicit waitTimeout at the CLI boundary BEFORE any
-  // side effects (loadDeliverySpec, manager.start, dispatchRun). Reuses the timeoutPolicy
-  // SSOT — no second hand-rolled range check. Applies to both foreground and background
-  // paths: background dispatchRun also validates, but this guard catches foreground
-  // runAndWait which passes options directly to waitForCompletion.
-  if (options.waitTimeout !== undefined && options.waitTimeout !== null && options.waitTimeout !== "") {
-    const { validateExplicitTimeout } = await import("../application/timeoutPolicy.js");
-    validateExplicitTimeout(Number(options.waitTimeout));
+  // M10-pre closeout-3: validate ALL timeout values at the CLI boundary BEFORE any
+  // side effects (loadDeliverySpec, manager.start, dispatchRun). This is the single
+  // gate for the foreground path — RunManager.resolveWaitTimeout does not range-check.
+  //
+  // Two values are validated:
+  //   1. Explicit --wait-timeout: if the flag is present at all (including empty string
+  //      or whitespace), it must be a valid integer in [1000, 600000]. Empty/whitespace
+  //      is NOT silently treated as "not provided" — it is rejected.
+  //   2. Global config.waitTimeout: if config provides it, it must also pass the same
+  //      bounded check. A corrupted config/default.json must not bypass the 10-minute cap.
+  // Both checks happen before loadDeliverySpec / manager.start / dispatchRun.
+  const { validateBoundedWaitTimeout } = await import("../application/timeoutPolicy.js");
+  if (options.waitTimeout !== undefined && options.waitTimeout !== null) {
+    validateBoundedWaitTimeout(Number(options.waitTimeout));
+  }
+  if (config?.waitTimeout !== undefined && config?.waitTimeout !== null) {
+    validateBoundedWaitTimeout(config.waitTimeout);
   }
   // TD-103 Phase 3C-1: load and validate delivery spec before any side effects.
   const delivery = await loadDeliverySpec(options);
