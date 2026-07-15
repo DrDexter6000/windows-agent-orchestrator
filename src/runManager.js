@@ -707,7 +707,13 @@ export class Run {
    *   - 超时由 RunManager 管（AbortController 打断 events 流）
    */
   async waitForCompletion(options = {}) {
-    const waitTimeout = Number(options.waitTimeout ?? this.config.waitTimeout);
+    // M10-pre: unified timeout precedence via SSOT
+    const { resolveWaitTimeout } = await import("./application/timeoutPolicy.js");
+    const { ms: waitTimeout, source: waitTimeoutSource } = resolveWaitTimeout({
+      explicit: options.waitTimeout,
+      agentWaitTimeout: this.agent?.waitTimeout,
+      globalWaitTimeout: this.config.waitTimeout,
+    });
     const pollInterval = Number(options.pollInterval ?? this.config.pollInterval);
     // silentTimeout：静默无响应早失败（Kimi 白名单 / 不存在的 model）。
     // 来源优先级：options（CLI flag）> agent.silentTimeout（registry）> config > undefined（不启用）
@@ -720,6 +726,12 @@ export class Run {
     const tokenBudget = options.tokenBudget ?? this.agent?.tokenBudget ?? this.config.tokenBudget;
     const tokenBudgetMultiplier = options.tokenBudgetMultiplier
       ?? this.agent?.tokenBudgetMultiplier ?? this.config.tokenBudgetMultiplier ?? 100;
+
+    // M10-pre: record actual wait policy as a safe durable fact before setting timer.
+    await this.transcript.append("run.wait_policy", {
+      waitTimeoutMs: waitTimeout,
+      source: waitTimeoutSource,
+    });
 
     // RunManager 持有超时计时器，到点 abort signal 打断 events 流。
     // 调用方可传外部 signal（如 daemon 的 per-run 控制器）：外部 abort 同样打断 events 流。
@@ -1243,8 +1255,43 @@ export class Run {
    */
   async _verifyStopQuietIfCapable() {
     const h = this.handle;
-    if (!h || typeof h.session !== "function" || typeof h.messages !== "function") {
-      return; // 进程式 backend（无 session endpoint），进程已死，无需验证
+    if (!h) return;
+
+    // M10-pre Batch B: process-backed workers — verify process actually died.
+    if (typeof h.isAlive === "function") {
+      try {
+        const { verifyProcessExit } = await import("./application/processStopVerify.js");
+        const result = await verifyProcessExit({
+          isAlive: () => h.isAlive(),
+          rounds: 3,
+          intervalMs: 1000,
+        });
+        if (result.quiet) {
+          await this.transcript.append("run.stop_verified", {
+            backend: this.result?.backend ?? "process",
+            path: "_runCleanup",
+            roundsUsed: result.roundsUsed,
+          });
+        } else {
+          await this.transcript.append("run.stop_unverified", {
+            backend: this.result?.backend ?? "process",
+            path: "_runCleanup",
+            roundsUsed: result.roundsUsed,
+          });
+          raiseAlert("stop_unverified",
+            `_runCleanup process stop not verified (run ${this.runId}): process may still be running`,
+            { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
+          ).catch(() => {});
+        }
+      } catch {
+        // Verification failed — don't block terminal state.
+      }
+      return;
+    }
+
+    // opencode 类 backend：取 serveUrl + sessionId 用于验证
+    if (typeof h.session !== "function" || typeof h.messages !== "function") {
+      return;
     }
     // opencode 类：取 serveUrl + sessionId 用于验证
     const serveUrl = this.result?.serveUrl;

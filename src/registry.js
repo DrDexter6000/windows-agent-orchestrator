@@ -41,6 +41,15 @@ export function normalizeAgent(id, agent) {
   } else {
     throw new Error(`Agent ${id} has unknown backend: ${agent.backend}`);
   }
+  // M10-pre: validate agent.waitTimeout if present (production range).
+  if (agent.waitTimeout !== undefined && agent.waitTimeout !== null) {
+    const wt = Number(agent.waitTimeout);
+    if (!Number.isFinite(wt) || !Number.isInteger(wt) || wt < 1000 || wt > 600000) {
+      throw new Error(
+        `Agent ${id} has invalid waitTimeout: must be an integer in [1000, 600000], got: ${JSON.stringify(agent.waitTimeout)}`,
+      );
+    }
+  }
   return {
     id,
     ...agent,

@@ -33,15 +33,17 @@ export function resolveWaitTimeout({ explicit, agentWaitTimeout, globalWaitTimeo
 }
 
 /**
- * Validate a timeout value: must be a finite integer in [1000, 600000].
+ * Validate a timeout value at resolution time: must be a finite positive integer.
+ * Production range enforcement (1000..600000) is done at registry validate,
+ * not here — this allows test fixtures to use small values for fast timeouts.
  * @param {unknown} v
  * @returns {number}
  */
 function validateTimeout(v) {
   const n = Number(v);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < MIN_WAIT_TIMEOUT || n > MAX_WAIT_TIMEOUT) {
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
     throw new Error(
-      `Invalid waitTimeout: must be an integer in [${MIN_WAIT_TIMEOUT}, ${MAX_WAIT_TIMEOUT}], got: ${JSON.stringify(v)}`,
+      `Invalid waitTimeout: must be a positive finite integer, got: ${JSON.stringify(v)}`,
     );
   }
   return n;

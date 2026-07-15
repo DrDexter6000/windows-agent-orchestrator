@@ -80,8 +80,6 @@ export async function dispatchRun({
   runnerPath,
   execPath,
   delivery,
-  globalWaitTimeout,
-  agentWaitTimeout,
 }) {
   if (!agentId || typeof agentId !== "string") {
     throw new Error("dispatchRun: agentId is required");
@@ -130,11 +128,8 @@ export async function dispatchRun({
   const _spawn = spawnFn ?? spawn;
   const _execPath = execPath ?? process.execPath;
   const _runnerPath = runnerPath ?? DEFAULT_RUNNER_PATH;
-  const { ms: effectiveWaitTimeout, source: waitTimeoutSource } = resolveWaitTimeout({
-    explicit: waitTimeout,
-    agentWaitTimeout,
-    globalWaitTimeout,
-  });
+  // M10-pre: only pass --wait-timeout to runner when explicitly set.
+  // RunManager resolves timeout from agent > config > default internally.
   const effectivePollInterval = pollInterval ?? DEFAULT_POLL_INTERVAL;
 
   const runnerArgs = [
@@ -144,9 +139,13 @@ export async function dispatchRun({
     "--run-dir", resolvedRunDir,
     "--run-id", finalRunId,
     "--registry", resolvedRegistry,
-    "--wait-timeout", String(effectiveWaitTimeout),
     "--poll-interval", String(effectivePollInterval),
   ];
+  // M10-pre: only pass --wait-timeout when explicitly provided (CLI override).
+  // RunManager resolves from agent.waitTimeout > config.waitTimeout > default.
+  if (waitTimeout !== undefined && waitTimeout !== null) {
+    runnerArgs.push("--wait-timeout", String(waitTimeout));
+  }
   if (cwd) runnerArgs.push("--cwd", cwd);
   if (scorecardRules) runnerArgs.push("--scorecard-rules", scorecardRules);
   if (scorecardMode) runnerArgs.push("--scorecard-mode", scorecardMode);
