@@ -683,6 +683,40 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:true, openWorldHint:false`（首决策不可逆；重复决策幂等返回 loser）。
 
+### MCP `run_stop`（stop runaway worker，M10 P0-2）
+
+`run_stop` 让 MCP host 停止一个失控的 worker run。它直接复用与 CLI `stop` 相同的 application service（`runStop.js`），不 shell-out CLI。**destructive，workspace-bound**——只允许停止 host-authorized workspace 绑定范围内的 run。
+
+`run_stop` tool：
+
+- **输入**（strict schema，拒绝额外字段）：
+
+```json
+{ "runId": "run_..." }
+```
+
+模型**不能**传 `runDir`、`force`、registry、timeout 或其它控制参数——这些是 server-owned 配置。
+
+- **安全输出**（只返回机器标识 + 终态事实，不含路径/PID/session）：
+
+```json
+{
+  "runId": "run_...",
+  "terminalAccepted": true,
+  "terminalState": "aborted",
+  "sideEffectAttempted": true,
+  "stopVerified": true
+}
+```
+
+`terminalAccepted`（first-terminal-wins 仲裁是否认领 `aborted`）、`terminalState`（终态）、`sideEffectAttempted`（是否执行了 taskkill/abort 等破坏性副作用——rejected loser 为 false）、`stopVerified`（进程式 worker 终态后是否确认已退出）。**绝不返回**：PID、进程路径、session id、argv、command、绝对路径、prompt、环境变量或异常 message/stack。失败返回固定安全文案 `run_stop failed`。
+
+**安全契约**：workspace-bound——run 必须属于当前 host-authorized workspace，否则拒绝。不返回 PID/path/session 等可被用于跨 workspace 探测的标识。stop verification 以后置 PID 存活检查为准，不假验证（ESRCH=已退出，EPERM/未知=保守 alive）。
+
+CLI fallback：`npm run cli -- stop <runId>`。
+
+annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:false, openWorldHint:true`（认领终态 + 可能 taskkill 杀进程；重复调用幂等返回 loser 但首次破坏性）。
+
 ---
 
 ## 五、常见问题

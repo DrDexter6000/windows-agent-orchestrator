@@ -33,6 +33,7 @@ import { getRunStatus } from "../application/runStatus.js";
 import { collectRunMessages } from "../application/runCollect.js";
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
 import { getRunDelivery, decideRunDelivery } from "../application/runDelivery.js";
+import { stopRun } from "../application/runStop.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
 import { DIAGNOSIS_CATEGORIES } from "../diagnosis.js";
 import { RUN_STATES } from "../transcript.js";
@@ -479,6 +480,38 @@ const WORKSPACE_STATUS_DESCRIPTION =
   "Read-only. Does not return absolute paths, root URIs, git remotes, file names, " +
   "status details, or exception messages.";
 
+// ===== run_stop (workspace-bound destructive) constants =====
+
+const RUN_STOP_ERROR_TEXT = "run_stop failed";
+
+const RUN_STOP_INPUT = z.object({
+  runId: z.string().min(1),
+}).strict();
+
+const RUN_STOP_OUTPUT = z.object({
+  runId: z.string(),
+  terminalAccepted: z.boolean(),
+  terminalState: z.enum(RUN_STATES),
+  sideEffectAttempted: z.boolean(),
+  stopVerified: z.boolean().nullable(),
+});
+
+const RUN_STOP_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: false,
+};
+
+const RUN_STOP_DESCRIPTION =
+  "Stop a run that was dispatched from the currently bound workspace. " +
+  "Uses first-terminal-wins: the first stop caller claims the terminal 'aborted' " +
+  "state and executes the destructive side effect (process kill or backend abort). " +
+  "Concurrent or late callers are rejected with zero side effects. " +
+  "Workspace-bound: can only stop runs whose dispatch cwd matches the bound workspace root. " +
+  "Not idempotent: a second call after terminal is already claimed writes a rejection audit fact. " +
+  "Returns only safe machine fields (no PID, path, session id, command, stderr, or alert content).";
+
 /**
  * Create a WAO MCP server with registry_list, run_dispatch, run_status, run_collect, run_diagnose, run_delivery, run_delivery_decide.
  *
@@ -508,6 +541,7 @@ export function createWaoMcpServer({
   getRunDiagnosisFn,
   getRunDeliveryFn,
   decideRunDeliveryFn,
+  stopRunFn,
 }) {
   const service = getRegistryInventoryFn ?? getRegistryInventory;
   const dispatcher = dispatchRunFn ?? dispatchRun;
@@ -516,6 +550,7 @@ export function createWaoMcpServer({
   const diagnosisService = getRunDiagnosisFn ?? getRunDiagnosis;
   const deliveryQueryService = getRunDeliveryFn ?? getRunDelivery;
   const deliveryDecideService = decideRunDeliveryFn ?? decideRunDelivery;
+  const stopService = stopRunFn ?? stopRun;
 
   const mcp = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -947,6 +982,61 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: DELIVERY_DECIDE_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  // ===== run_stop (workspace-bound destructive) =====
+
+  mcp.registerTool(
+    "run_stop",
+    {
+      description: RUN_STOP_DESCRIPTION,
+      inputSchema: RUN_STOP_INPUT,
+      outputSchema: RUN_STOP_OUTPUT,
+      annotations: RUN_STOP_ANNOTATIONS,
+    },
+    async ({ runId }) => {
+      try {
+        // Resolve workspace binding BEFORE calling stopRun — the service
+        // uses authorizedWorkspaceRoot to verify ownership.
+        const binding = await resolveWorkspaceBinding();
+        if (!binding.bound) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
+          };
+        }
+        const result = await stopService({
+          runId,
+          runDir,
+          authorizedWorkspaceRoot: binding.root,
+        });
+        // Build safe output payload — use the request runId, not service return.
+        // Collapse authorization failure to fixed error (don't leak ownership details).
+        if (result.authorized === false) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: RUN_STOP_ERROR_TEXT }],
+          };
+        }
+        const payload = {
+          runId,
+          terminalAccepted: result.terminalAccepted,
+          terminalState: result.terminalState,
+          sideEffectAttempted: result.sideEffectAttempted,
+          stopVerified: result.stopVerified ?? null,
+        };
+        RUN_STOP_OUTPUT.parse(payload);
+        return {
+          content: [{ type: "text", text: JSON.stringify(payload) }],
+          structuredContent: payload,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: RUN_STOP_ERROR_TEXT }],
         };
       }
     },

@@ -653,8 +653,8 @@ test("M10-pre2: workspace_status tool documented in usage.md and SKILL.md", () =
   assert.ok(usage.includes("--workspace-root"), "usage.md must mention --workspace-root startup flag");
   // SKILL.md must list it in the tool table
   assert.ok(skill.includes("workspace_status"), "SKILL.md tool table must include workspace_status");
-  // SKILL.md must say 8 tools now (was 7 before M10-pre2)
-  assert.ok(/8 MCP tools/.test(skill), "SKILL.md must reflect 8 MCP tools after workspace_status addition");
+  // SKILL.md must say 9 tools now (8 after M10-pre2 + run_stop in M10 P0-2)
+  assert.ok(/9 MCP tools/.test(skill), "SKILL.md must reflect 9 MCP tools after run_stop addition");
   // team-roles.md must mention workspace binding (MCP-first)
   const roles = read("docs/team-roles.md");
   assert.ok(/workspace binding|workspace-root|roots\/list/.test(roles),

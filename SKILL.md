@@ -66,7 +66,7 @@ See `references/safety-incidents.md` before unattended or stop-sensitive work. R
 
 ## Minimal MCP Loop
 
-The Lead drives the full minimal loop through 8 MCP tools:
+The Lead drives the full minimal loop through 9 MCP tools:
 
 | Tool | Side effect | Purpose |
 |---|---|---|
@@ -78,8 +78,9 @@ The Lead drives the full minimal loop through 8 MCP tools:
 | `run_diagnose` | read-only | Failure category + signal types (no prescription) |
 | `run_delivery` | read-only | Query delivery commit/verification/acceptance |
 | `run_delivery_decide` | durable (first-decision-wins) | Record Lead accept/reject |
+| `run_stop` | destructive (first-terminal-wins) | Stop a runaway worker (workspace-bound) |
 
-Minimal closed loop: `inventory → workspace_status → dispatch → status → collect/diagnose → delivery query → Lead decision`
+Minimal closed loop: `inventory → workspace_status → dispatch → status → collect/diagnose → delivery query → Lead decision → (stop on runaway)`
 
 See `docs/usage.md §MCP stdio` for host setup, full input/output schemas, and install instructions.
 
