@@ -524,18 +524,20 @@ MCP workspace binding 有三种来源（优先级：显式 `--workspace-root` > 
 
 **真实可执行入口**（当前没有全局 `wao` executable）：
 
-```bash
+```powershell
 # bind: 在目标项目中生成 WAO managed block
-node scripts\wao-cli.cmd mcp bind --host codex --cwd <git-root>
+& "D:\projects\windows-agent-orchestrator-poc\scripts\wao-cli.cmd" mcp bind --host codex --cwd "D:\path\to\repo"
 
 # status: 查询绑定状态
-node scripts\wao-cli.cmd mcp status --host codex --cwd <git-root>
+& "D:\projects\windows-agent-orchestrator-poc\scripts\wao-cli.cmd" mcp status --host codex --cwd "D:\path\to\repo"
 
 # unbind: 移除 WAO managed block（保留用户其它配置）
-node scripts\wao-cli.cmd mcp unbind --host codex --cwd <git-root>
+& "D:\projects\windows-agent-orchestrator-poc\scripts\wao-cli.cmd" mcp unbind --host codex --cwd "D:\path\to\repo"
 ```
 
 或在 WAO repo 内：`npm run cli -- mcp bind --host codex --cwd <git-root>`。
+
+注意：`.cmd` 文件不能通过 `node xxx.cmd` 调用——它必须由 PowerShell 或 cmd.exe 直接执行。
 
 **安全契约**：
 - 不修改全局 `~/.codex/config.toml`，不写入 credential value。

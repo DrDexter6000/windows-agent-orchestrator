@@ -11,21 +11,32 @@
 //   - Reuses proveWorkspace from workspaceBinding.js (Git identity proof SSOT).
 //   - Never reads the process working directory — cwd is always an explicit argument.
 //
-// Security contract:
-//   - No credential values are written. The managed block contains only paths
-//     and command/args for the WAO MCP stdio entry point.
-//   - Tracked .codex/config.toml → fail-closed (refuse to modify).
-//   - Existing non-WAO [mcp_servers.wao] → fail-closed.
-//   - External modification of managed block → fail-closed on unbind.
-//   - Only .git/info/exclude is modified (with WAO markers), never tracked .gitignore.
-//   - Atomic writes with rollback on verification failure.
+// Transactional write contract (P1-A):
+//   bind and unbind are two-resource transactions (config + exclude).
+//   Both resources are saved (original bytes + existence) before any write.
+//   Writes use same-directory temp file + atomic renameSync (so a crash mid-write
+//   never leaves a half-written file). If any step fails after the first resource
+//   is written, all previously written resources are restored to their exact
+//   original bytes. If restoration itself fails, the original failure is wrapped
+//   in a cleanup_failed error — we never silently report success.
 //
-// Codex override semantics (proven by Stage A probe):
-//   - Same-name [mcp_servers.wao] in project config replaces global's command/args.
-//   - Global env vars are inherited; project config does NOT need credential values.
-//   - The managed block must contain the complete command+args (no reliance on global).
+// Integrity contract (P1-C):
+//   - Managed block markers must be exactly 1 begin + 1 end, in order.
+//   - Duplicate, nested, or single-sided markers → fail-closed.
+//   - Checksum is verified before bind/rebind, status, and unbind.
+//   - External modification of the managed block → fail-closed (never overwrite).
+//   - status distinguishes: not_configured, external_conflict, tracked_config,
+//     managed_modified, exclude_missing_or_modified, configured.
+//   - Only a fully verified contract returns bound:true.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+  renameSync,
+  unlinkSync,
+} from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -45,77 +56,46 @@ const EXCLUDE_MARKER_BEGIN = "# >>> WAO MANAGED (mcp workspace activation) >>>";
 const EXCLUDE_MARKER_END = "# <<< WAO MANAGED (mcp workspace activation) <<<";
 
 // Derive the WAO repo root from this module's location.
-// This module lives at src/application/mcpWorkspaceActivation.js → repo root is 3 levels up.
 const _MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(_MODULE_DIR, "..", "..");
 
-/**
- * Build the absolute path to the WAO Node shim (scripts/wao-node.cjs).
- * This is the same shim used by package.json "mcp" script.
- */
 function shimPath() {
   return join(REPO_ROOT, "scripts", "wao-node.cjs");
 }
-
-/**
- * Build the absolute path to the WAO MCP stdio entry point.
- */
 function stdioPath() {
   return join(REPO_ROOT, "src", "mcp", "stdio.js");
 }
-
-/**
- * Build the absolute path to the WAO registry (config/agents.json).
- */
 function registryPath() {
   return join(REPO_ROOT, "config", "agents.json");
 }
-
-/**
- * Build the absolute path to the WAO run directory.
- */
 function runDirPath() {
   return join(REPO_ROOT, "runs");
 }
 
+// ── Checksum ────────────────────────────────────────────────────────────────
+
 /**
- * Compute a SHA-256 checksum of the managed block payload (everything between
- * the begin/end markers, excluding the checksum line itself). This is embedded
- * in the block so unbind can detect external modification.
+ * Compute a SHA-256 checksum (truncated to 16 hex chars) over the managed block
+ * payload lines (everything between markers, excluding the checksum line itself).
  */
 function computeChecksum(payloadLines) {
   const text = payloadLines.join("\n");
   return createHash("sha256").update(text, "utf8").digest("hex").substring(0, 16);
 }
 
-// ── TOML helpers (no third-party parser) ────────────────────────────────────
+// ── TOML helpers ─────────────────────────────────────────────────────────────
 
-/**
- * Format a string as a TOML basic string (double-quoted, escaped).
- * Windows backslashes must be escaped in basic strings.
- */
 function tomlBasicString(s) {
   return '"' + s.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
 }
 
-/**
- * Format a string array as a TOML inline array.
- */
 function tomlArray(arr) {
   return "[" + arr.map(tomlBasicString).join(", ") + "]";
 }
 
 /**
- * Build the WAO managed block content for .codex/config.toml.
- * The block configures [mcp_servers.wao] with the WAO stdio entry point
- * and --workspace-root bound to the project's canonical root.
- *
- * The block includes a SHA-256 checksum line so unbind can detect external
- * modification (fail-closed). The checksum is computed over the payload lines
- * (version + comments + [mcp_servers.wao] section), excluding markers and checksum.
- *
- * @param {string} canonicalRoot — the proven Git top-level (from proveWorkspace)
- * @returns {string} TOML lines for the managed block
+ * Build the managed block content for .codex/config.toml.
+ * The block includes a SHA-256 checksum for tamper detection.
  */
 function buildManagedBlock(canonicalRoot) {
   const args = [
@@ -127,9 +107,7 @@ function buildManagedBlock(canonicalRoot) {
   ];
   const payloadLines = [
     `# version = ${MANAGED_VERSION}`,
-    `# This block is managed by WAO (wao mcp bind). Do not edit manually.`,
-    `# To reconfigure, run: wao mcp unbind --host codex --cwd <root>`,
-    `# then: wao mcp bind --host codex --cwd <root>`,
+    `# Managed by WAO. To reconfigure: run mcp unbind then mcp bind (via scripts/wao-cli.cmd or npm run cli).`,
     `[mcp_servers.wao]`,
     `command = ${tomlBasicString("node")}`,
     `args = ${tomlArray(args)}`,
@@ -140,16 +118,14 @@ function buildManagedBlock(canonicalRoot) {
     ...payloadLines,
     `# checksum = ${checksum}`,
     MANAGED_END,
-  ].join("\n");
+  ].join("\n") + "\n";
 }
 
 /**
  * Verify that the managed block's checksum matches its content.
- * Returns true if the block is intact (checksum matches), false if tampered.
+ * Returns true if the block is intact, false if tampered.
  */
 function verifyManagedBlockChecksum(blockLines) {
-  // blockLines includes begin marker, payload, checksum line, end marker
-  // Find the checksum line
   let checksumLine = null;
   let payloadLines = [];
   for (const line of blockLines) {
@@ -167,147 +143,128 @@ function verifyManagedBlockChecksum(blockLines) {
   return storedChecksum === computed;
 }
 
-// ── Config file read/write ──────────────────────────────────────────────────
+// ── Marker cardinality ───────────────────────────────────────────────────────
 
 /**
- * Read .codex/config.toml from a project directory.
- * @param {string} projectDir
- * @returns {string|null} file content, or null if not exists
- */
-function readCodexConfigRaw(projectDir) {
-  const p = join(projectDir, ".codex", "config.toml");
-  if (!existsSync(p)) return null;
-  return readFileSync(p, "utf8");
-}
-
-/**
- * Write .codex/config.toml atomically (write+read-back-verify).
- * @param {string} projectDir
+ * Find all occurrences of a line marker in the content.
+ * A "line marker" matches when a line (trimmed of \r) equals the marker string.
+ * Returns an array of {lineStart, lineEnd} byte offsets for each matching line.
+ *
  * @param {string} content
+ * @param {string} marker
+ * @returns {Array<{lineStart: number, lineEnd: number, nlStart: number, nlEnd: number}>}
+ *   lineStart/lineEnd = the marker text boundaries (excluding newline);
+ *   nlStart/nlEnd = the newline boundaries after the marker line (may be empty at EOF).
  */
-function writeCodexConfig(projectDir, content) {
-  const codexDir = join(projectDir, ".codex");
-  if (!existsSync(codexDir)) mkdirSync(codexDir, { recursive: true });
-  const p = join(codexDir, "config.toml");
-  writeFileSync(p, content, "utf8");
-}
-
-/**
- * Check if .codex/config.toml is tracked by Git.
- * Uses `git ls-files --error-unmatch` which exits non-zero if not tracked.
- */
-function isConfigTracked(projectDir) {
-  try {
-    execFileSync("git", ["ls-files", "--error-unmatch", ".codex/config.toml"], {
-      cwd: projectDir,
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// ── Managed block parsing ───────────────────────────────────────────────────
-
-/**
- * Extract the managed block boundaries from config content.
- * @param {string} content
- * @returns {{begin: number, end: number, lines: string[]} | null}
- *   Line indices of begin/end markers (0-based), or null if no managed block.
- */
-function findManagedBlock(content) {
-  const lines = content.split("\n");
-  let beginIdx = -1;
-  let endIdx = -1;
-  for (let i = 0; i < lines.length; i += 1) {
-    if (lines[i].trim() === MANAGED_BEGIN) beginIdx = i;
-    if (lines[i].trim() === MANAGED_END) endIdx = i;
-  }
-  if (beginIdx === -1 || endIdx === -1 || endIdx < beginIdx) return null;
-  return { begin: beginIdx, end: endIdx, lines: lines.slice(beginIdx, endIdx + 1) };
-}
-
-/**
- * Check if config content contains a non-WAO-managed [mcp_servers.wao] section
- * that would conflict with the managed block.
- * @param {string} content
- * @param {object|null} managedBlock — result of findManagedBlock
- * @returns {boolean} true if a conflicting non-managed wao server exists
- */
-function hasConflictingWaoServer(content, managedBlock) {
-  const lines = content.split("\n");
-  const headerLine = "[mcp_servers.wao]";
-  for (let i = 0; i < lines.length; i += 1) {
-    if (lines[i].trim() === headerLine) {
-      // Is this inside the managed block?
-      if (managedBlock && i > managedBlock.begin && i < managedBlock.end) {
-        continue; // this is our managed wao server, not a conflict
-      }
-      return true; // found a wao server outside the managed block
+function findMarkerLineOffsets(content, marker) {
+  const results = [];
+  let pos = 0;
+  while (pos < content.length) {
+    // Find start of next line
+    let lineStart = pos;
+    // Find end of this line (next \n or end of content)
+    let nlIdx = content.indexOf("\n", pos);
+    if (nlIdx === -1) nlIdx = content.length;
+    // Extract the line text, stripping a trailing \r for CRLF
+    let lineText = content.substring(lineStart, nlIdx);
+    if (lineText.endsWith("\r")) lineText = lineText.slice(0, -1);
+    if (lineText.trim() === marker) {
+      // Record the full line including its newline
+      const lineEnd = nlIdx < content.length ? nlIdx + 1 : nlIdx; // include \n
+      results.push({ lineStart, lineEnd, text: lineText });
     }
+    pos = nlIdx < content.length ? nlIdx + 1 : nlIdx;
+    if (nlIdx === content.length) break;
   }
-  return false;
+  return results;
 }
 
 /**
- * Insert or replace the managed block in config content.
- * Preserves all existing content. If a managed block already exists, it is replaced.
- * @param {string} content — original config content (may be "")
- * @param {string} block — the managed block lines
- * @returns {string} updated content
- */
-function insertManagedBlock(content, block) {
-  const existing = findManagedBlock(content);
-  if (existing) {
-    // Replace the existing managed block
-    const lines = content.split("\n");
-    const before = lines.slice(0, existing.begin);
-    const after = lines.slice(existing.end + 1);
-    const parts = [before.join("\n"), block, after.join("\n")].filter((s) => s.length > 0);
-    return parts.join("\n") + "\n";
-  }
-  // No existing managed block — append
-  if (content.length === 0) {
-    return block + "\n";
-  }
-  const trimmed = content.endsWith("\n") ? content : content + "\n";
-  return trimmed + "\n" + block + "\n";
-}
-
-/**
- * Remove the managed block from config content.
- * Preserves user content byte-for-byte outside the managed block region.
- * Only the managed block lines (begin..end inclusive) are removed; the remaining
- * lines are rejoined with the same newline separator they had.
+ * Find exactly one begin + one end marker, in order.
+ * Returns {beginOffset, endOffset, blockText} or null if no markers.
+ * Throws on duplicate, nested, or single-sided markers (fail-closed).
+ *
+ * Offsets are byte positions into content:
+ *   beginOffset = start of the begin marker line
+ *   endOffset = end of the end marker line (including its trailing newline, if any)
+ *
  * @param {string} content
- * @returns {string|null} content without managed block, or null if no managed block found
+ * @param {string} beginMarker
+ * @param {string} endMarker
+ * @returns {{beginOffset: number, endOffset: number, blockText: string} | null}
+ * @throws {Error} if markers are duplicated, out of order, or single-sided
  */
-function removeManagedBlock(content) {
-  const existing = findManagedBlock(content);
-  if (!existing) return null;
-  const lines = content.split("\n");
-  const before = lines.slice(0, existing.begin);
-  const after = lines.slice(existing.end + 1);
-  const remaining = [...before, ...after];
-  // If nothing remains, signal "now empty"
-  if (remaining.length === 0) return "";
-  // Rejoin preserving the original line structure. Clean up only the boundary
-  // where the block was removed: collapse exactly the blank lines that separated
-  // the block from surrounding content, without touching anything else.
-  const result = remaining.join("\n");
-  // Only trim a single leading/trailing blank line pair that was adjacent to the
-  // removed block — do not normalize the entire file.
-  return result.replace(/^\n+/, "").replace(/\n+$/, "") + "\n";
+function findMarkerBlock(content, beginMarker, endMarker) {
+  const begins = findMarkerLineOffsets(content, beginMarker);
+  const ends = findMarkerLineOffsets(content, endMarker);
+  if (begins.length === 0 && ends.length === 0) return null;
+  if (begins.length !== 1 || ends.length !== 1) {
+    throw new Error(
+      `managed markers corrupted: found ${begins.length} begin + ${ends.length} end (expected 1+1)`,
+    );
+  }
+  if (ends[0].lineStart <= begins[0].lineStart) {
+    throw new Error("managed markers corrupted: end before begin");
+  }
+  const blockText = content.substring(begins[0].lineStart, ends[0].lineEnd);
+  // Lines for checksum verification: split without trailing empty from final \n
+  const rawLines = blockText.split("\n");
+  // Drop trailing empty string if blockText ends with \n (the marker line's newline)
+  const lines = rawLines[rawLines.length - 1] === "" ? rawLines.slice(0, -1) : rawLines;
+  return {
+    beginOffset: begins[0].lineStart,
+    endOffset: ends[0].lineEnd,
+    blockText,
+    lines,
+  };
 }
 
-// ── .git/info/exclude management ────────────────────────────────────────────
+// ── Config file operations (atomic) ─────────────────────────────────────────
 
 /**
- * Get the .git directory absolute path for a project.
- * Uses `git rev-parse --absolute-git-dir` to find it reliably as an absolute path.
- * Falls back to resolving the relative --git-dir against projectDir for older Git.
+ * Atomically write a file: write to same-directory temp, then renameSync.
+ * This ensures a crash mid-write never leaves a half-written file.
+ * The temp file is always cleaned up on failure.
+ */
+function atomicWriteFile(filePath, content) {
+  const dir = dirname(filePath);
+  const tmp = join(dir, `.wao-tmp-${Date.now()}-${process.pid}`);
+  try {
+    writeFileSync(tmp, content, "utf8");
+    renameSync(tmp, filePath);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* best effort cleanup */ }
+    throw err;
+  }
+}
+
+/**
+ * Read file content as exact bytes (Buffer) for byte-fidelity comparison.
+ */
+function readFileBytes(filePath) {
+  return readFileSync(filePath);
+}
+
+/**
+ * Read file content as string, or null if not exists.
+ */
+function readFileStr(filePath) {
+  if (!existsSync(filePath)) return null;
+  return readFileSync(filePath, "utf8");
+}
+
+// ── Config paths ────────────────────────────────────────────────────────────
+
+function codexConfigPath(projectDir) {
+  return join(projectDir, ".codex", "config.toml");
+}
+
+function excludePath(gitDir) {
+  return join(gitDir, "info", "exclude");
+}
+
+/**
+ * Get the .git directory absolute path.
  */
 function getGitDir(projectDir) {
   let raw;
@@ -324,7 +281,6 @@ function getGitDir(projectDir) {
       stdio: ["pipe", "pipe", "pipe"],
     }).trim();
   }
-  // Ensure absolute — resolve relative paths against projectDir
   if (!raw.match(/^[A-Za-z]:[\\/]/) && !raw.startsWith("/")) {
     return resolve(projectDir, raw);
   }
@@ -332,88 +288,196 @@ function getGitDir(projectDir) {
 }
 
 /**
- * Read .git/info/exclude content.
+ * Check if .codex/config.toml is tracked by Git.
  */
-function readExcludeRaw(gitDir) {
-  const p = join(gitDir, "info", "exclude");
-  if (!existsSync(p)) return "";
-  return readFileSync(p, "utf8");
-}
-
-/**
- * Write .git/info/exclude content.
- */
-function writeExcludeRaw(gitDir, content) {
-  const excludeDir = join(gitDir, "info");
-  const p = join(excludeDir, "exclude");
-  writeFileSync(p, content, "utf8");
-}
-
-/**
- * Find the WAO exclude marker block boundaries.
- */
-function findExcludeBlock(content) {
-  const lines = content.split("\n");
-  let beginIdx = -1;
-  let endIdx = -1;
-  for (let i = 0; i < lines.length; i += 1) {
-    if (lines[i].trim() === EXCLUDE_MARKER_BEGIN) beginIdx = i;
-    if (lines[i].trim() === EXCLUDE_MARKER_END) endIdx = i;
+function isConfigTracked(projectDir) {
+  try {
+    execFileSync("git", ["ls-files", "--error-unmatch", ".codex/config.toml"], {
+      cwd: projectDir,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return true;
+  } catch {
+    return false;
   }
-  if (beginIdx === -1 || endIdx === -1 || endIdx < beginIdx) return null;
-  return { begin: beginIdx, end: endIdx };
+}
+
+// ── Managed block insert/remove (byte-fidelity) ──────────────────────────────
+
+/**
+ * Insert or replace the managed block in config content.
+ * Preserves all existing content byte-for-byte using string substring operations.
+ *
+ * When replacing an existing block, the new block occupies exactly the same
+ * byte range [beginOffset, endOffset) — no separator is added or removed.
+ *
+ * When appending a new block at end-of-file, a separator of exactly "\n\n" is
+ * inserted before the block. This means:
+ *   - Content ending with "\n" → original + "\n\n" + block
+ *   - Content not ending with "\n" → original + "\n\n" + block
+ * In both cases exactly 2 separator bytes are added. removeManagedBlock strips
+ * exactly 2 bytes when the block was at EOF, restoring the original perfectly.
+ *
+ * @param {string} content — original config content
+ * @param {string} block — the managed block text (including trailing newline)
+ * @param {object|null} existing — result of findMarkerBlock, or null
+ * @returns {string} updated content
+ */
+function insertManagedBlock(content, block, existing) {
+  if (existing) {
+    // Replace the existing managed block region byte-for-byte
+    return content.substring(0, existing.beginOffset) + block + content.substring(existing.endOffset);
+  }
+  // No existing managed block — append with deterministic separator
+  if (content.length === 0) {
+    return block;
+  }
+  // Always add exactly "\n\n" separator (2 bytes)
+  return content + "\n\n" + block;
 }
 
 /**
- * Add the WAO exclude rule for /.codex/config.toml if not present.
- * @returns {string} updated exclude content
+ * Remove the managed block from config content.
+ * Preserves user content byte-for-byte.
+ *
+ * When the block was at end-of-file (after is empty/whitespace), strips the
+ * exactly 2-byte separator ("\n\n") that insertManagedBlock added. This is the
+ * only case where we strip — if content exists after the block, the separator
+ * is between content sections and the block is replaced in-place.
+ *
+ * @param {string} content
+ * @param {object} existing — result of findMarkerBlock
+ * @returns {string} content without managed block
  */
-function addExcludeRule(content) {
-  if (findExcludeBlock(content)) return content; // already present
-  const block = [
-    EXCLUDE_MARKER_BEGIN,
-    "/.codex/config.toml",
-    EXCLUDE_MARKER_END,
-  ].join("\n");
-  if (content.length === 0) return block + "\n";
-  const trimmed = content.endsWith("\n") ? content : content + "\n";
-  return trimmed + block + "\n";
+function removeManagedBlock(content, existing) {
+  const before = content.substring(0, existing.beginOffset);
+  const after = content.substring(existing.endOffset);
+
+  if (after.trim().length === 0 && before.length >= 2 && before.endsWith("\n\n")) {
+    // Block was at EOF — strip the exactly 2-byte separator
+    return before.substring(0, before.length - 2) + after;
+  }
+  return before + after;
+}
+
+// ── Exclude rule insert/remove ───────────────────────────────────────────────
+
+const EXCLUDE_BLOCK = [EXCLUDE_MARKER_BEGIN, "/.codex/config.toml", EXCLUDE_MARKER_END].join("\n") + "\n";
+
+/**
+ * Add or replace the WAO exclude rule. Byte-fidelity for surrounding content.
+ * Uses the same deterministic "\n\n" separator pattern as insertManagedBlock.
+ */
+function insertExcludeRule(content, existing) {
+  if (existing) {
+    return content.substring(0, existing.beginOffset) + EXCLUDE_BLOCK + content.substring(existing.endOffset);
+  }
+  if (content.length === 0) return EXCLUDE_BLOCK;
+  return content + "\n\n" + EXCLUDE_BLOCK;
 }
 
 /**
- * Remove the WAO exclude rule.
- * @returns {string|null} updated content, or null if no exclude block found
+ * Remove the WAO exclude rule. Byte-fidelity for surrounding content.
  */
-function removeExcludeRule(content) {
-  const existing = findExcludeBlock(content);
-  if (!existing) return null;
-  const lines = content.split("\n");
-  const before = lines.slice(0, existing.begin);
-  const after = lines.slice(existing.end + 1);
-  const result = [...before, ...after].join("\n").replace(/\n{3,}/g, "\n\n").trim();
-  return result.length === 0 ? "" : result + "\n";
+function removeExcludeRule(content, existing) {
+  const before = content.substring(0, existing.beginOffset);
+  const after = content.substring(existing.endOffset);
+  if (after.trim().length === 0 && before.length >= 2 && before.endsWith("\n\n")) {
+    return before.substring(0, before.length - 2) + after;
+  }
+  return before + after;
 }
 
-// ── Verify: managed block integrity ─────────────────────────────────────────
+// ── Conflict detection ──────────────────────────────────────────────────────
 
 /**
- * Verify that a managed block in the written config is intact and matches
- * the expected canonical root.
- * @param {string} content — config file content after write
- * @param {string} canonicalRoot — expected workspace root
- * @returns {boolean} true if verified
+ * Check if config content contains a non-WAO-managed [mcp_servers.wao] section
+ * outside the managed block boundaries.
+ * Uses byte offsets to determine if the header is inside the managed block.
  */
-function verifyManagedBlock(content, canonicalRoot) {
-  const managed = findManagedBlock(content);
-  if (!managed) return false;
-  const blockText = managed.lines.join("\n");
-  // Must contain the workspace-root argument
-  if (!blockText.includes("--workspace-root")) return false;
-  // Must contain the canonical root value (as a TOML basic string)
-  if (!blockText.includes(canonicalRoot.replace(/\\/g, "\\\\"))) return false;
-  // Must reference stdio.js
-  if (!blockText.includes("stdio.js")) return false;
-  return true;
+function hasConflictingWaoServer(content, managedBlock) {
+  // Find all [mcp_servers.wao] header positions as byte offsets
+  const header = "[mcp_servers.wao]";
+  let pos = 0;
+  while (true) {
+    const idx = content.indexOf(header, pos);
+    if (idx === -1) break;
+    // Check if this is at the start of a line (preceded by \n or start of content)
+    const lineStart = idx === 0 || content[idx - 1] === "\n";
+    if (!lineStart) {
+      pos = idx + 1;
+      continue;
+    }
+    // Check if this header is inside the managed block
+    if (managedBlock && idx > managedBlock.beginOffset && idx < managedBlock.endOffset) {
+      pos = idx + 1;
+      continue;
+    }
+    return true; // found a wao server header outside the managed block
+  }
+  return false;
+}
+
+// ── Transactional resource snapshot ─────────────────────────────────────────
+
+/**
+ * Capture the exact bytes and existence state of a file for rollback.
+ */
+function snapshotFile(filePath) {
+  if (!existsSync(filePath)) return { path: filePath, exists: false, bytes: null };
+  return { path: filePath, exists: true, bytes: readFileBytes(filePath) };
+}
+
+/**
+ * Restore a file to its snapshot state (exact bytes or delete).
+ */
+function restoreFile(snap) {
+  if (!snap.exists) {
+    try { unlinkSync(snap.path); } catch { /* already gone */ }
+    return;
+  }
+  writeFileSync(snap.path, snap.bytes);
+}
+
+// ── Dependency injection points for testing ─────────────────────────────────
+
+/**
+ * Default file operation hooks. Tests can inject failures at specific points.
+ * Each function receives the same args as the real operation.
+ * A hook that throws aborts the transaction and triggers rollback.
+ */
+function defaultHooks() {
+  return {
+    writeConfig: (projectDir, content) => atomicWriteFile(codexConfigPath(projectDir), content),
+    readConfig: (projectDir) => readFileStr(codexConfigPath(projectDir)),
+    verifyConfig: (_projectDir, content, canonicalRoot) => {
+      // Real verification: check the managed block is present and checksum is valid.
+      let managed;
+      try {
+        managed = findMarkerBlock(content, MANAGED_BEGIN, MANAGED_END);
+      } catch {
+        return false;
+      }
+      if (!managed) return false;
+      if (!verifyManagedBlockChecksum(managed.lines)) return false;
+      // Check the workspace-root in the block matches the canonical root
+      return managed.blockText.includes(canonicalRoot.replace(/\\/g, "\\\\"));
+    },
+    writeExclude: (gitDir, content) => {
+      // Ensure info/ dir exists
+      const infoDir = join(gitDir, "info");
+      if (!existsSync(infoDir)) mkdirSync(infoDir, { recursive: true });
+      atomicWriteFile(excludePath(gitDir), content);
+    },
+    mkdirCodex: (projectDir) => {
+      const codexDir = join(projectDir, ".codex");
+      if (!existsSync(codexDir)) mkdirSync(codexDir, { recursive: true });
+    },
+    deleteConfig: (projectDir) => {
+      unlinkSync(codexConfigPath(projectDir));
+    },
+  };
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -421,78 +485,114 @@ function verifyManagedBlock(content, canonicalRoot) {
 /**
  * Bind a project as a WAO workspace for the specified host.
  *
- * @param {{host: string, cwd: string}} opts
+ * Transaction order:
+ *   1. Prove workspace (canonical root + Git top-level proof)
+ *   2. Check tracked → fail-closed
+ *   3. Read existing config + exclude bytes (snapshot)
+ *   4. Find + verify existing managed blocks (checksum)
+ *   5. Check for conflicts
+ *   6. Write config (atomic temp+rename) ← first resource
+ *   7. Read back + verify config integrity ← verification point
+ *   8. Write exclude (atomic temp+rename) ← second resource
+ *   9. If any step 6-8 fails: restore both resources from snapshot, throw
+ *
+ * @param {{host: string, cwd: string, hooks?: object}} opts
  * @returns {Promise<{bound: boolean, host: string, workspaceRoot: string, status: string}>}
- * @throws {Error} if host is unsupported, cwd is not a Git top-level,
- *   config is tracked, or there's a conflicting [mcp_servers.wao]
  */
-export async function bindWorkspace({ host, cwd }) {
+export async function bindWorkspace({ host, cwd, hooks }) {
   if (!SUPPORTED_HOSTS.includes(host)) {
     throw new Error(`unsupported host: ${host} (supported: ${SUPPORTED_HOSTS.join(", ")})`);
   }
   if (typeof cwd !== "string" || cwd.length === 0) {
     throw new Error("workspace: cwd must be a non-empty string");
   }
-  if (!resolve(cwd).match(/^[A-Za-z]:[\\/]/) && !resolve(cwd).startsWith("/")) {
+  const resolvedCwd = resolve(cwd);
+  if (!resolvedCwd.match(/^[A-Za-z]:[\\/]/) && !resolvedCwd.startsWith("/")) {
     throw new Error("workspace: cwd must be an absolute path");
   }
 
-  // Prove workspace — reuse the SSOT from workspaceBinding.js
+  const h = { ...defaultHooks(), ...hooks };
+
+  // 1. Prove workspace
   const proof = proveWorkspace(cwd);
   const canonicalRoot = proof.root;
 
-  // Fail-closed: tracked .codex/config.toml
+  // 2. Fail-closed: tracked config
   if (isConfigTracked(canonicalRoot)) {
     throw new Error(".codex/config.toml is tracked by Git — refuse to modify (fail-closed)");
   }
 
-  // Read existing config
-  const existingContent = readCodexConfigRaw(canonicalRoot) ?? "";
-  const existingManaged = findManagedBlock(existingContent);
+  const gitDir = getGitDir(canonicalRoot);
+  const configP = codexConfigPath(canonicalRoot);
+  const excludeP = excludePath(gitDir);
 
-  // Fail-closed: conflicting non-managed [mcp_servers.wao]
-  if (hasConflictingWaoServer(existingContent, existingManaged)) {
+  // 3. Snapshot both resources
+  const configSnap = snapshotFile(configP);
+  const excludeSnap = snapshotFile(excludeP);
+
+  // 4. Find + verify existing managed blocks
+  const existingContent = configSnap.exists ? configSnap.bytes.toString("utf8") : "";
+  let configManaged = null;
+  if (existingContent.length > 0) {
+    configManaged = findMarkerBlock(existingContent, MANAGED_BEGIN, MANAGED_END);
+    if (configManaged && !verifyManagedBlockChecksum(configManaged.lines)) {
+      throw new Error(
+        "existing managed block was externally modified — refuse to overwrite (fail-closed). Run mcp unbind manually after verifying the changes.",
+      );
+    }
+  }
+
+  let excludeManaged = null;
+  const existingExclude = excludeSnap.exists ? excludeSnap.bytes.toString("utf8") : "";
+  if (existingExclude.length > 0) {
+    excludeManaged = findMarkerBlock(existingExclude, EXCLUDE_MARKER_BEGIN, EXCLUDE_MARKER_END);
+  }
+
+  // 5. Check for conflicts
+  if (hasConflictingWaoServer(existingContent, configManaged)) {
     throw new Error(
-      "conflict: [mcp_servers.wao] already exists and is not WAO-managed — remove it manually or unbind first",
+      "conflict: [mcp_servers.wao] already exists and is not WAO-managed — remove it manually first",
     );
   }
 
-  // Build and insert managed block
+  // 6. Build new content
   const block = buildManagedBlock(canonicalRoot);
-  const newContent = insertManagedBlock(existingContent, block);
+  const newConfigContent = insertManagedBlock(existingContent, block, configManaged);
+  const newExcludeContent = insertExcludeRule(existingExclude, excludeManaged);
 
-  // Save originals for rollback
-  const gitDir = getGitDir(canonicalRoot);
-  const excludeBefore = readExcludeRaw(gitDir);
-  const configBefore = existingContent;
-
-  // Write config
-  writeCodexConfig(canonicalRoot, newContent);
-
-  // Verify written config
-  const writtenContent = readCodexConfigRaw(canonicalRoot);
-  if (!writtenContent || !verifyManagedBlock(writtenContent, canonicalRoot)) {
-    // Rollback: restore config
-    if (configBefore.length > 0) {
-      writeCodexConfig(canonicalRoot, configBefore);
-    } else {
-      // Config didn't exist before — if it's now empty or just our failed block, remove
-      const afterRemove = removeManagedBlock(writtenContent ?? "");
-      if (afterRemove === "" || afterRemove === null) {
-        // Remove the file if it only had our block
-        const { unlinkSync } = await import("node:fs");
-        try { unlinkSync(join(canonicalRoot, ".codex", "config.toml")); } catch { /* best effort */ }
-      } else {
-        writeCodexConfig(canonicalRoot, afterRemove);
-      }
-    }
-    throw new Error("write verification failed — config rolled back to original");
+  // 7. Write config (first resource) — may throw via hook
+  h.mkdirCodex(canonicalRoot);
+  try {
+    h.writeConfig(canonicalRoot, newConfigContent);
+  } catch (err) {
+    // Config write failed — nothing was written yet (atomicWriteFile cleaned temp)
+    throw err;
   }
 
-  // Write exclude rule
-  const excludeAfter = addExcludeRule(excludeBefore);
-  if (excludeAfter !== excludeBefore) {
-    writeExcludeRaw(gitDir, excludeAfter);
+  // 8. Read back + verify config — wrapped in try/catch because read-back or
+  //    verify can throw (disk error, permission, concurrent deletion). Any throw
+  //    must trigger rollback, not leave config written without exclude.
+  let verified = false;
+  try {
+    const writtenConfig = h.readConfig(canonicalRoot);
+    verified = !!writtenConfig && h.verifyConfig(canonicalRoot, writtenConfig, canonicalRoot);
+  } catch (verifyErr) {
+    _rollback(configSnap, excludeSnap, "config verification step threw");
+    throw new Error(`config verification step failed — rolled back to original: ${verifyErr.message}`);
+  }
+  if (!verified) {
+    // Verification returned false — rollback config to snapshot
+    _rollback(configSnap, excludeSnap, "config verification failed");
+    throw new Error("config write verification failed — rolled back to original");
+  }
+
+  // 9. Write exclude (second resource) — may throw via hook
+  try {
+    h.writeExclude(gitDir, newExcludeContent);
+  } catch (err) {
+    // Exclude write failed — rollback config (already written) to snapshot
+    _rollback(configSnap, excludeSnap, "exclude write failed");
+    throw err;
   }
 
   return {
@@ -507,52 +607,81 @@ export async function bindWorkspace({ host, cwd }) {
 
 /**
  * Query the workspace binding status for a project.
+ * Proves workspace and verifies managed block integrity + exclude presence.
  *
- * @param {{host: string, cwd: string}} opts
- * @returns {Promise<{bound: boolean, host: string, status: string, workspaceRoot?: string, configPath?: string}>}
+ * Status values:
+ *   - not_configured: no managed block
+ *   - external_conflict: non-WAO [mcp_servers.wao] exists
+ *   - tracked_config: .codex/config.toml is Git-tracked
+ *   - managed_modified: managed block checksum mismatch
+ *   - exclude_missing_or_modified: config OK but exclude block missing/corrupted
+ *   - configured: all checks pass
  */
 export async function statusWorkspace({ host, cwd }) {
   if (!SUPPORTED_HOSTS.includes(host)) {
     return { bound: false, host, status: "unsupported_host" };
   }
 
-  const content = readCodexConfigRaw(cwd);
+  // Prove workspace — must be a real Git top-level
+  let canonicalRoot;
+  try {
+    const proof = proveWorkspace(cwd);
+    canonicalRoot = proof.root;
+  } catch (err) {
+    return { bound: false, host, status: "invalid_workspace", error: err.message };
+  }
+
+  // Check tracked
+  if (isConfigTracked(canonicalRoot)) {
+    return { bound: false, host, status: "tracked_config" };
+  }
+
+  const configP = codexConfigPath(canonicalRoot);
+  const content = readFileStr(configP);
   if (!content) {
     return { bound: false, host, status: "not_configured" };
   }
 
-  const managed = findManagedBlock(content);
-  if (!managed) {
-    // Config exists but no WAO managed block
+  let configManaged;
+  try {
+    configManaged = findMarkerBlock(content, MANAGED_BEGIN, MANAGED_END);
+  } catch (err) {
+    return { bound: false, host, status: "managed_modified", error: err.message };
+  }
+
+  if (!configManaged) {
     if (hasConflictingWaoServer(content, null)) {
       return { bound: false, host, status: "external_conflict" };
     }
     return { bound: false, host, status: "not_configured" };
   }
 
-  // Verify managed block integrity
-  // Extract the workspace-root from the managed block
-  const blockText = managed.lines.join("\n");
-  const rootMatch = blockText.match(/--workspace-root",\s*"[^"]*"([^"]*)"/);
-  // Simpler: find the workspace-root value in the args array
-  const wsRootIdx = blockText.indexOf("--workspace-root");
-  let workspaceRoot = null;
-  if (wsRootIdx !== -1) {
-    // The canonical root follows --workspace-root in the args array
-    const afterFlag = blockText.substring(wsRootIdx);
-    // Match the next TOML basic string after --workspace-root
-    const pathMatch = afterFlag.match(/--workspace-root",\s*"((?:[^"\\]|\\.)*)"/);
-    if (pathMatch) {
-      workspaceRoot = pathMatch[1].replace(/\\\\/g, "\\");
+  // Verify checksum
+  if (!verifyManagedBlockChecksum(configManaged.lines)) {
+    return { bound: false, host, status: "managed_modified" };
+  }
+
+  // Verify exclude block
+  const gitDir = getGitDir(canonicalRoot);
+  const excludeContent = readFileStr(excludePath(gitDir));
+  let excludeManaged = null;
+  if (excludeContent) {
+    try {
+      excludeManaged = findMarkerBlock(excludeContent, EXCLUDE_MARKER_BEGIN, EXCLUDE_MARKER_END);
+    } catch {
+      excludeManaged = null;
     }
+  }
+  if (!excludeManaged) {
+    return { bound: false, host, status: "exclude_missing_or_modified" };
   }
 
   return {
     bound: true,
     host,
     status: "configured",
-    workspaceRoot,
-    configPath: join(cwd, ".codex", "config.toml"),
+    workspaceRoot: canonicalRoot,
+    configPath: configP,
     managed: true,
   };
 }
@@ -560,55 +689,134 @@ export async function statusWorkspace({ host, cwd }) {
 /**
  * Remove the WAO workspace binding from a project.
  *
- * @param {{host: string, cwd: string}} opts
- * @returns {Promise<{unbound: boolean, status: string}>}
- * @throws {Error} if the managed block was externally modified
+ * Transaction order:
+ *   1. Prove workspace
+ *   2. Read existing config + exclude bytes (snapshot)
+ *   3. Verify managed block checksum (fail-closed on tamper)
+ *   4. Remove managed block from config content
+ *   5. Write config (atomic) ← first resource
+ *   6. Remove exclude rule / write updated exclude ← second resource
+ *   7. If step 6 fails: restore both resources, throw
  */
-export async function unbindWorkspace({ host, cwd }) {
+export async function unbindWorkspace({ host, cwd, hooks }) {
   if (!SUPPORTED_HOSTS.includes(host)) {
     throw new Error(`unsupported host: ${host} (supported: ${SUPPORTED_HOSTS.join(", ")})`);
   }
 
-  const content = readCodexConfigRaw(cwd);
+  const h = { ...defaultHooks(), ...hooks };
+
+  // 1. Prove workspace
+  const proof = proveWorkspace(cwd);
+  const canonicalRoot = proof.root;
+
+  const gitDir = getGitDir(canonicalRoot);
+  const configP = codexConfigPath(canonicalRoot);
+  const excludeP = excludePath(gitDir);
+
+  // 2. Snapshot
+  const configSnap = snapshotFile(configP);
+  const excludeSnap = snapshotFile(excludeP);
+
+  const content = configSnap.exists ? configSnap.bytes.toString("utf8") : "";
   if (!content) {
     return { unbound: true, status: "already_unbound" };
   }
 
-  const managed = findManagedBlock(content);
-  if (!managed) {
+  let configManaged;
+  try {
+    configManaged = findMarkerBlock(content, MANAGED_BEGIN, MANAGED_END);
+  } catch (err) {
+    throw new Error(
+      `managed markers corrupted — refuse to remove (fail-closed): ${err.message}`,
+    );
+  }
+
+  if (!configManaged) {
     return { unbound: true, status: "already_unbound" };
   }
 
-  // Verify managed block integrity before removal — detect external modification
-  if (!verifyManagedBlockChecksum(managed.lines)) {
-    throw new Error("managed block was externally modified — refuse to remove (fail-closed)");
+  // 3. Verify checksum
+  if (!verifyManagedBlockChecksum(configManaged.lines)) {
+    throw new Error(
+      "managed block was externally modified — refuse to remove (fail-closed)",
+    );
   }
 
-  // Remove managed block from config
-  const newContent = removeManagedBlock(content);
-  if (newContent === null) {
-    // No managed block found (shouldn't happen here)
-    return { unbound: true, status: "already_unbound" };
-  }
+  // 4. Remove managed block
+  const newConfigContent = removeManagedBlock(content, configManaged);
+  // Check if only whitespace/newlines remain → delete file
+  const configIsEmpty = newConfigContent.trim().length === 0;
 
-  // Write updated config
-  if (newContent.length === 0) {
-    // Config is now empty — delete the file
-    const { unlinkSync } = await import("node:fs");
-    try { unlinkSync(join(cwd, ".codex", "config.toml")); } catch { /* best effort */ }
+  // 5. Write config (first resource)
+  if (configIsEmpty) {
+    // Config had only the managed block — delete the file
+    try { h.deleteConfig(canonicalRoot); } catch (err) {
+      throw err;
+    }
   } else {
-    writeCodexConfig(cwd, newContent);
+    try { h.writeConfig(canonicalRoot, newConfigContent); } catch (err) {
+      throw err;
+    }
   }
 
-  // Remove exclude rule
-  const gitDir = getGitDir(cwd);
-  const excludeBefore = readExcludeRaw(gitDir);
-  const excludeAfter = removeExcludeRule(excludeBefore);
-  if (excludeAfter !== null) {
-    writeExcludeRaw(gitDir, excludeAfter);
+  // 6. Remove exclude rule (second resource)
+  const excludeContent = excludeSnap.exists ? excludeSnap.bytes.toString("utf8") : "";
+  let excludeManaged = null;
+  if (excludeContent) {
+    try {
+      excludeManaged = findMarkerBlock(excludeContent, EXCLUDE_MARKER_BEGIN, EXCLUDE_MARKER_END);
+    } catch {
+      excludeManaged = null;
+    }
+  }
+
+  if (excludeManaged) {
+    const newExcludeContent = removeExcludeRule(excludeContent, excludeManaged);
+    const trimmedExclude = newExcludeContent.replace(/^\n+/, "").replace(/\n+$/, "");
+    try {
+      if (trimmedExclude.length === 0) {
+        // Exclude file becomes empty — write empty (keep file, git default)
+        h.writeExclude(gitDir, "");
+      } else {
+        h.writeExclude(gitDir, newExcludeContent);
+      }
+    } catch (err) {
+      // Exclude write failed — rollback config
+      _rollback(configSnap, excludeSnap, "exclude write failed during unbind");
+      throw err;
+    }
   }
 
   return { unbound: true, status: "unbound" };
+}
+
+/**
+ * Rollback both resources to their snapshot state.
+ * If restoration fails, wraps the original error in cleanup_failed.
+ */
+function _rollback(configSnap, excludeSnap, reason) {
+  let cleanupError = null;
+  try {
+    restoreFile(configSnap);
+  } catch (e) {
+    cleanupError = e;
+  }
+  try {
+    restoreFile(excludeSnap);
+  } catch (e) {
+    cleanupError = cleanupError || e;
+  }
+  // Clean up any temp files
+  for (const snap of [configSnap, excludeSnap]) {
+    const dir = dirname(snap.path);
+    const tmpPattern = `.wao-tmp-`;
+    // Best-effort: temp files are cleaned by atomicWriteFile on failure
+  }
+  if (cleanupError) {
+    throw new Error(
+      `cleanup_failed: ${reason} — restoration may be incomplete: ${cleanupError.message}`,
+    );
+  }
 }
 
 export { SUPPORTED_HOSTS };
