@@ -514,6 +514,38 @@ annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:false, o
 
 annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true`。
 
+### 项目级 Workspace Activation（M10 P0-1，Human Owner ops 命令）
+
+MCP workspace binding 有三种来源（优先级：显式 `--workspace-root` > MCP roots/list > fail-closed）。`--workspace-root` 是全局静态启动参数——切换项目需要改 host 配置并重启。
+
+`mcp bind/status/unbind` 命令让 Human Owner 在目标项目中执行**一次**项目级激活，生成一个 `.codex/config.toml` 中的 WAO managed block（含 `--workspace-root` 绑定到项目 canonical Git root）。之后每次在项目中冷启动 Lead 会话即可获得正确的 workspace authority，无需手改全局配置。
+
+**前置条件**：项目必须是 Codex trusted project（在 Codex Desktop 打开一次即建立 trust）。详见 Codex 官方文档 `.codex/config.toml (trusted projects only)`。
+
+**真实可执行入口**（当前没有全局 `wao` executable）：
+
+```bash
+# bind: 在目标项目中生成 WAO managed block
+node scripts\wao-cli.cmd mcp bind --host codex --cwd <git-root>
+
+# status: 查询绑定状态
+node scripts\wao-cli.cmd mcp status --host codex --cwd <git-root>
+
+# unbind: 移除 WAO managed block（保留用户其它配置）
+node scripts\wao-cli.cmd mcp unbind --host codex --cwd <git-root>
+```
+
+或在 WAO repo 内：`npm run cli -- mcp bind --host codex --cwd <git-root>`。
+
+**安全契约**：
+- 不修改全局 `~/.codex/config.toml`，不写入 credential value。
+- 只写 `.codex/config.toml`（精确路径排除进 `.git/info/exclude`，不修改 tracked `.gitignore`）。
+- 同名 `[mcp_servers.wao]` 整表替换全局的 command/args；env 从全局继承（探针验证）。
+- tracked `.codex/config.toml` → fail-closed；既有非 WAO `[mcp_servers.wao]` → fail-closed。
+- managed block 含 SHA-256 checksum，外部修改后 unbind fail-closed。
+
+**`configured` vs `active`**：`mcp status` 返回 `configured`（配置已正确写入），不返回 `active`。真实 Codex host 加载需要 trust + 重启/新任务——只有 CTO 在独立 Codex Desktop 会话中才能验证 `active`。
+
 ### MCP `run_status`（point-in-time 状态查询，M9-3B）
 
 `run_status` 让 MCP host 查询一个 run 的当前状态。它直接复用与 CLI `status` 相同的 application service（`getRunStatus()`），不 shell-out CLI。只读——不写 transcript、不修改任何持久状态。

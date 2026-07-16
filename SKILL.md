@@ -83,7 +83,7 @@ Minimal closed loop: `inventory → workspace_status → dispatch → status →
 
 See `docs/usage.md §MCP stdio` for host setup, full input/output schemas, and install instructions.
 
-CLI (`npm run cli --`) remains available for human/ops/debug/fallback, including `registry validate`, `registry check`, `daemon`, and `runs dashboard`. `registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health`.
+CLI (`npm run cli --`) remains available for human/ops/debug/fallback, including `registry validate`, `registry check`, `daemon`, and `runs dashboard`. `registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health`. `mcp bind/status/unbind` is a Human Owner ops command for project-level workspace activation (M10 P0-1); see `docs/usage.md §项目级 Workspace Activation`.
 
 ## Acceptance
 

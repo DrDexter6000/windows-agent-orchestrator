@@ -1260,6 +1260,10 @@ test("help: 列出所有 main() 真实路由的命令族（防 help 与代码漂
   assert.match(out, /daemon supervisor/, "help 必须列出 daemon supervisor");
   assert.match(out, /daemon health/, "help 必须列出 daemon health");
   assert.match(out, /workflow list/, "help 必须列出 workflow list（TD-88 模板库）");
+  // mcp 族（M10 P0-1 workspace activation）
+  assert.match(out, /mcp bind/, "help 必须列出 mcp bind（M10 P0-1 workspace activation）");
+  assert.match(out, /mcp status/, "help 必须列出 mcp status");
+  assert.match(out, /mcp unbind/, "help 必须列出 mcp unbind");
 });
 
 test("TD-82: wao declare 写入声明 + wao declare（裸）列出汇总（端到端）", () => {

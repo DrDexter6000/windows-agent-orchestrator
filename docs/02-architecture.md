@@ -895,6 +895,7 @@ src/
 │   ├── runDiagnosis.js       #   read-only run diagnosis service（M9-5A，CLI + MCP 共用）
 │   ├── runDelivery.js        #   delivery query + decision service（M9-6A，CLI + MCP 共用）
 │   ├── workspaceBinding.js   #   host-authorized workspace proof SSOT（M10-pre2，MCP 共用）
+│   ├── mcpWorkspaceActivation.js # project-scoped workspace activation SSOT（M10 P0-1，CLI 用，MCP 不用）
 │   ├── timeoutPolicy.js      #   wait timeout precedence SSOT（M10-pre，CLI + MCP 共用）
 │   └── processStopVerify.js  #   bounded process exit verification（M10-pre）
 ├── backends/

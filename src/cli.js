@@ -34,6 +34,8 @@ import { retryCommand, resumeCommand } from "./commands/lifecycle.js";
 // TD-98 阶段 2e-3：run/spawn 命令族（runCommand/spawnCommand/runAndWait + scorecard helper
 // + spawnBackgroundRunner）拆到 src/commands/run.js。waoAskCommand 仍留 cli.js，调 run.js 的 runCommand。
 import { spawnCommand, runCommand, runAndWait } from "./commands/run.js";
+// M10 P0-1: mcp bind/status/unbind 命令族（项目级 workspace activation）。
+import { mcpCommand } from "./commands/mcp.js";
 // TD-98 阶段 2a/2b/2c/2e：parseOptions/loadPrompt/displayModel/resolveTargetCwd
 // 抽到 commands/shared.js，消除 commands/*.js 对 cli.js 的反向依赖。
 // cli.js re-export 以保持 test/cli.test.js 的 `from "../src/cli.js"` 导入行不变。
@@ -173,6 +175,10 @@ async function main(argv) {
   }
   if (command === "daemon") {
     await daemonCommand(rest, config);
+    return;
+  }
+  if (command === "mcp") {
+    await mcpCommand(rest, config);
     return;
   }
   throw new Error(`Unknown command: ${command}`);
@@ -329,6 +335,11 @@ Commands:
   daemon supervise [--run-dir DIR] [--registry FILE] [--idle-exit-ms MS]
   daemon supervisor status|stop [--run-dir DIR]
   daemon health [--run-dir DIR]
+
+Workspace activation (host project binding):
+  mcp bind --host codex --cwd <git-root>
+  mcp status --host codex --cwd <git-root>
+  mcp unbind --host codex --cwd <git-root>
 
 Project state (.wao/):
   wao init [--cwd DIR] [--state-dir DIR]
