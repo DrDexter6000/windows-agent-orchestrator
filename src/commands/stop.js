@@ -72,7 +72,7 @@ function stopResultToCliJson(r) {
       stopped: r.stopVerified,
       backend: "process",
       pid: r.pid,
-      sideEffectAttempted: true,
+      sideEffectAttempted: r.sideEffectAttempted,
       terminalAccepted: true,
       terminalState: "aborted",
       verified: r.stopVerified,

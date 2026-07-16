@@ -35,6 +35,7 @@ import { getRunDiagnosis } from "../application/runDiagnosis.js";
 import { getRunDelivery, decideRunDelivery } from "../application/runDelivery.js";
 import { stopRun } from "../application/runStop.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
+import { isValidRunId } from "../delivery.js";
 import { DIAGNOSIS_CATEGORIES } from "../diagnosis.js";
 import { RUN_STATES } from "../transcript.js";
 import { createSecretRedactor } from "../secretRedaction.js";
@@ -999,6 +1000,14 @@ export function createWaoMcpServer({
     },
     async ({ runId }) => {
       try {
+        // FIX-A: validate runId before calling service — prevents path escape
+        // at the MCP layer so the service is never invoked for malicious runIds.
+        if (!isValidRunId(runId)) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: RUN_STOP_ERROR_TEXT }],
+          };
+        }
         // Resolve workspace binding BEFORE calling stopRun — the service
         // uses authorizedWorkspaceRoot to verify ownership.
         const binding = await resolveWorkspaceBinding();

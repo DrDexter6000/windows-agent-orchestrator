@@ -30,6 +30,8 @@ import { realpathSync } from "node:fs";
 import { JsonlTranscript, readTranscript, findState, findLatest } from "../transcript.js";
 import { executeStopWithVerification } from "../backends/opencodeStopVerify.js";
 import { raiseAlert } from "../alerts.js";
+import { isValidRunId } from "../delivery.js";
+import { proveWorkspace } from "./workspaceBinding.js";
 
 // ── Process primitives (owned here, not in commands/) ────────────────────────
 
@@ -73,62 +75,11 @@ async function waitForPidExit(pid, isAliveFn, sleep, pollConfig = {}) {
   return isAliveFn(pid);
 }
 
-// ── Workspace path matching (reuse SSOT pattern from workspaceBinding.js) ────
-
-const IS_WIN32 = process.platform === "win32";
-
-/**
- * Compare two normalized path strings using platform-appropriate semantics.
- * Mirrors workspaceBinding.js pathsMatch — case-insensitive on win32,
- * case-sensitive elsewhere. Does NOT import workspaceBinding to avoid
- * pulling proveWorkspace's execFileSync into this module's import graph
- * (the MCP server already proved the workspace; we only need comparison).
- */
-function pathsMatch(a, b) {
-  if (IS_WIN32) return a.toLowerCase() === b.toLowerCase();
-  return a === b;
-}
-
-/**
- * Normalize a path for comparison: realpath + forward slashes.
- */
-function normalizePath(p) {
-  try {
-    return realpathSync(p).replace(/\\/g, "/");
-  } catch {
-    // Path doesn't exist — can't canonicalize. Return a best-effort normalization.
-    return p.replace(/\\/g, "/");
-  }
-}
-
-/**
- * Get the Git top-level for a directory (structured argv, no shell).
- */
-function gitTopLevel(dir) {
-  return execFileSync("git", ["rev-parse", "--show-toplevel"], {
-    cwd: dir,
-    encoding: "utf8",
-    stdio: ["pipe", "pipe", "pipe"],
-  }).trim();
-}
-
-// ── Workspace ownership verification ─────────────────────────────────────────
+// ── Workspace ownership verification (FIX-B: reuse proveWorkspace SSOT) ─────
 
 /**
  * Find the workspace ownership fact from transcript events.
- *
- * The authoritative ownership fact is `run.background_submitted.cwd` —
- * the cwd passed to dispatchRun when the run was created. This is a durable
- * transcript fact, not in-memory state.
- *
- * For delivery runs (which use a temporary worktree), the ownership fact
- * is still the source workspace cwd, NOT the delivery worktree path,
- * because dispatchRun writes background_submitted.cwd = the source workspace
- * root before creating the worktree.
- *
- * @param {object[]} events
- * @returns {{cwd: string}|null} the ownership cwd, or null if not found
- * @throws {Error} if multiple background_submitted events exist (ambiguous)
+ * Transcript events are flat — payload fields are at the top level.
  */
 function findOwnershipFact(events) {
   const submitted = events.filter((e) => e.type === "run.background_submitted");
@@ -136,8 +87,6 @@ function findOwnershipFact(events) {
   if (submitted.length > 1) {
     throw new Error("ambiguous ownership: multiple run.background_submitted events");
   }
-  // Transcript events are flat — payload fields are at the top level alongside
-  // envelope fields (ts, seq, runId, agentId, type).
   const cwd = submitted[0].cwd;
   if (typeof cwd !== "string" || cwd.length === 0) {
     throw new Error("malformed ownership: run.background_submitted.cwd is missing or empty");
@@ -147,24 +96,30 @@ function findOwnershipFact(events) {
 
 /**
  * Verify that a run's workspace ownership matches the authorized root.
- *
- * @param {object[]} events
- * @param {string} authorizedWorkspaceRoot — canonical Git root from server binding
- * @returns {{authorized: true, ownershipCwd: string}}
- * @throws {Error} if ownership is missing, malformed, ambiguous, or mismatched
+ * Uses proveWorkspace SSOT — rejects subdirectories, non-existent paths,
+ * other repos. No hand-written path comparison.
  */
 function verifyWorkspaceOwnership(events, authorizedWorkspaceRoot) {
   const fact = findOwnershipFact(events);
   if (!fact) {
     throw new Error("missing ownership: no run.background_submitted event");
   }
-  // Canonicalize both sides
-  const ownershipRoot = gitTopLevel(fact.cwd);
-  const authorizedRoot = gitTopLevel(authorizedWorkspaceRoot);
-  const normOwnership = normalizePath(ownershipRoot);
-  const normAuthorized = normalizePath(authorizedRoot);
-  if (!pathsMatch(normOwnership, normAuthorized)) {
-    throw new Error("workspace mismatch: run ownership does not match authorized workspace");
+  // Prove the ownership cwd is a real Git top-level (rejects subdirectories)
+  const ownershipProof = proveWorkspace(fact.cwd);
+  // Prove the authorized root is a real Git top-level
+  const authorizedProof = proveWorkspace(authorizedWorkspaceRoot);
+  // Compare canonical roots using the SSOT's platform-aware normalization
+  // proveWorkspace returns root in normalized form (realpath + forward slashes)
+  if (ownershipProof.root !== authorizedProof.root) {
+    // On Windows, pathsMatch is case-insensitive — proveWorkspace normalizes
+    // via realpath which preserves original casing. Use toLowerCase for win32.
+    const IS_WIN32 = process.platform === "win32";
+    const match = IS_WIN32
+      ? ownershipProof.root.toLowerCase() === authorizedProof.root.toLowerCase()
+      : ownershipProof.root === authorizedProof.root;
+    if (!match) {
+      throw new Error("workspace mismatch: run ownership does not match authorized workspace");
+    }
   }
   return { authorized: true, ownershipCwd: fact.cwd };
 }
@@ -198,6 +153,13 @@ function verifyWorkspaceOwnership(events, authorizedWorkspaceRoot) {
 export async function stopRun(input) {
   const { runId, runDir, authorizedWorkspaceRoot } = input;
   const deps = input.deps ?? {};
+
+  // ── FIX-A: runId validation BEFORE any path join or file read ─────────────
+  // Prevents path traversal (../, absolute paths, separators, shell chars).
+  // Uses the existing isValidRunId SSOT from delivery.js.
+  if (!isValidRunId(runId)) {
+    throw new Error(`invalid runId: ${JSON.stringify(runId)}`);
+  }
 
   // Resolve runDir
   const resolvedRunDir = resolveRunDir(runDir);
@@ -368,7 +330,10 @@ async function processStop({ transcript, session, fromState, runId, pid, deps, s
     runId,
     terminalAccepted: true,
     terminalState: "aborted",
-    sideEffectAttempted: true,
+    // FIX-C: sideEffectAttempted reflects whether the destructive primitive was
+    // actually called. If the process was already dead (aliveBefore=false), no
+    // kill was attempted — report false. Only report true when kill was called.
+    sideEffectAttempted: killResult.called,
     stopVerified: verified,
     backend: "process",
     pid,
@@ -439,6 +404,10 @@ async function opencodeStop({ transcript, session, fromState, runId, config, dep
     runId,
     terminalAccepted: true,
     terminalState: "aborted",
+    // FIX-C: sideEffectAttempted reflects whether the destructive primitive
+    // (executeStop) was actually called. Since we reach here only after a
+    // successful executeStop call, this is true. If executeStop threw, the
+    // error would propagate (no swallow) — so reaching this line means it ran.
     sideEffectAttempted: true,
     stopVerified: stopResult.verified ?? false,
     taskkillCalled: stopResult.taskkillCalled ?? false,
