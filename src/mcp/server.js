@@ -527,7 +527,7 @@ const RUNS_LIST_OUTPUT = z.object({
   runs: z.array(z.object({
     runId: z.string(),
     agentId: z.string(),
-    state: z.enum(RUN_STATES),
+    state: z.enum([...RUN_STATES, "unknown"]),
     terminal: z.boolean(),
     updatedAt: z.string().datetime().nullable(),
   })),

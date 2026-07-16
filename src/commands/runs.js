@@ -181,6 +181,7 @@ async function runsListCommand(args, config) {
     agentId: options.agent,
     latest: latestN,
     knownAgentIds: [],
+    validateAgentIds: false, // CLI preserves raw agentId
   });
 
   // When --latest is NOT set, restore original file-name ascending order.

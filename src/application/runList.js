@@ -44,17 +44,17 @@ function scanRunFiles(runDir) {
  * @param {string[]} knownAgentIds — for agentId validation
  * @returns {{runId, agentId, state, terminal, updatedAt}|null}
  */
-function summarizeRun(runId, events, knownAgentIds) {
+function summarizeRun(runId, events, knownAgentIds, input) {
   if (!Array.isArray(events) || events.length === 0) return null;
   const state = findState(events);
   // Map unknown states to "unknown" (don't leak arbitrary strings)
   const safeState = RUN_STATES.includes(state) ? state : "unknown";
   const terminal = TERMINAL_STATES.includes(safeState);
   // agentId from first event; validate against known registry.
-  // When knownAgentIds is empty (CLI path), preserve raw agentId.
-  // When non-empty (MCP path), map unknown agents to "unknown".
+  // MCP path: always validate (even if registry unavailable → all "unknown").
+  // CLI path (validateAgentIds=false): preserve raw agentId.
   const rawAgentId = events[0]?.agentId;
-  const agentId = knownAgentIds.length === 0
+  const agentId = input.validateAgentIds === false
     ? (typeof rawAgentId === "string" ? rawAgentId : "unknown")
     : (typeof rawAgentId === "string" && knownAgentIds.includes(rawAgentId) ? rawAgentId : "unknown");
   // updatedAt: last event's ts, validated as ISO timestamp
@@ -132,7 +132,7 @@ export async function listRuns(input) {
       if (TERMINAL_STATES.includes(state)) continue;
     }
 
-    const summary = summarizeRun(runId, events, knownAgentIds);
+    const summary = summarizeRun(runId, events, knownAgentIds, input);
     if (summary) summaries.push(summary);
   }
 

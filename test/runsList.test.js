@@ -314,6 +314,53 @@ test("MCP-06: annotations correct", async () => {
 
 // ── Architecture boundary ────────────────────────────────────────────────────
 
+test("AGENTID-01: MCP path maps unregistered agentId to 'unknown' even when registry empty", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-agentid-01-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-agentid-01-rd-"));
+  try {
+    makeGitRepo(dir);
+    // Seed run with an agentId that won't be in any registry
+    await seedRun(runDir, "run_evil_agent", dir, "running", "<<INJECTED>>");
+    const { listRuns } = await import("../src/application/runList.js");
+    // MCP path: validateAgentIds defaults to true, knownAgentIds=[] → all "unknown"
+    const result = await listRuns({
+      runDir,
+      authorizedWorkspaceRoot: dir,
+      knownAgentIds: [],
+    });
+    assert.ok(result.runs.length > 0);
+    assert.equal(result.runs[0].agentId, "unknown", "injected agentId must be mapped to 'unknown'");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});
+
+test("STATE-01: unrecognized state maps to 'unknown' without breaking the list", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-state-01-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-state-01-rd-"));
+  try {
+    makeGitRepo(dir);
+    // Seed a good run
+    await seedRun(runDir, "run_good", dir, "running");
+    // Seed a run with an unrecognized state
+    const tp = join(runDir, "run_evil_state.jsonl");
+    const t = new JsonlTranscript(tp, { runId: "run_evil_state", agentId: "coder_low" });
+    await t.append("run.started", { backend: "claude-code" });
+    await t.append("run.background_submitted", { background: true, cwd: dir });
+    await t.append("session.created", { backend: "process", backendSessionId: "proc_1" });
+    await t.transitionState(null, "pending", "created");
+    await t.append("run.state_change", { from: "pending", to: "paused", reason: "evil" }); // not in RUN_STATES
+    const { listRuns } = await import("../src/application/runList.js");
+    const result = await listRuns({
+      runDir, authorizedWorkspaceRoot: dir, knownAgentIds: [],
+    });
+    // Both runs should appear; evil state mapped to "unknown"
+    const good = result.runs.find((r) => r.runId === "run_good");
+    const evil = result.runs.find((r) => r.runId === "run_evil_state");
+    assert.ok(good, "good run must not be hidden by evil sibling");
+    assert.ok(evil, "evil state run must appear (not crash the list)");
+    assert.equal(evil.state, "unknown", "unrecognized state must be 'unknown'");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});
+
 test("ARCH-01: runWorkspaceOwnership does not import commands/mcp/SDK/zod", async () => {
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(join(join(fileURLToPath(new URL(".", import.meta.url))), "..", "src", "application", "runWorkspaceOwnership.js"), "utf8");
