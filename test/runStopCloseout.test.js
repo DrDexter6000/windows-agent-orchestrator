@@ -1,7 +1,8 @@
 // test/runStopCloseout.test.js
 //
 // M10 P0-2 CTO closeout tests: runId escape, subdirectory rejection,
-// sideEffectAttempted honesty, MCP concurrency, delivery ownership.
+// sideEffectAttempted honesty, MCP concurrency (one client, two calls),
+// delivery ownership, SSOT architecture boundary.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -227,7 +228,12 @@ test("HONEST-02: process alive → kill called → sideEffectAttempted=true", as
 
 // ── MCP concurrency ──────────────────────────────────────────────────────────
 
-test("MCP-CONCURRENCY: two MCP clients → one winner, one loser, one side effect", async () => {
+test("MCP-CONCURRENCY: two concurrent MCP calls through one client → one winner, one loser, one side effect", async () => {
+  // Note: this test issues two concurrent run_stop calls through the SAME MCP
+  // client/server pair. It does NOT test two independent MCP hosts. The
+  // underlying transitionState cross-process arbitration is proven separately
+  // in terminalArbitration.test.js. Here we verify the MCP adapter correctly
+  // surfaces the winner/loser distinction under concurrent access.
   const dir = mkdtempSync(join(tmpdir(), "wao-mcp-conc-"));
   try {
     makeGitRepo(dir);
@@ -251,7 +257,6 @@ test("MCP-CONCURRENCY: two MCP clients → one winner, one loser, one side effec
     });
     const client = await buildClient(server);
     try {
-      // Two concurrent calls through the SAME client/server
       const [r1, r2] = await Promise.all([
         client.callTool({ name: "run_stop", arguments: { runId: "run_conc" } }),
         client.callTool({ name: "run_stop", arguments: { runId: "run_conc" } }),
@@ -272,6 +277,79 @@ test("MCP-CONCURRENCY: two MCP clients → one winner, one loser, one side effec
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// ── Delivery ownership ───────────────────────────────────────────────────────
+
+test("DELIVERY-01: delivery run uses source workspace ownership, not worktree", async () => {
+  // A delivery run's background_submitted.cwd is the source workspace root.
+  // The actual worker runs in a temporary delivery worktree (.wao-worktrees/).
+  // Authorization must use the source ownership fact, not the worktree path.
+  const sourceDir = mkdtempSync(join(tmpdir(), "wao-delivery-src-"));
+  try {
+    makeGitRepo(sourceDir);
+    // Create a "delivery worktree" as a subdirectory of sourceDir
+    const worktreeDir = join(sourceDir, ".wao-worktrees", "run_delivery_test");
+    mkdirSync(worktreeDir, { recursive: true });
+    // Initialize as a git worktree-like structure (just a subdir with a git link)
+    // The key point: background_submitted.cwd = sourceDir (the ownership fact),
+    // NOT worktreeDir (where the worker actually runs).
+    const runDir = mkdtempSync(join(tmpdir(), "wao-delivery-rd-"));
+    const tp = join(runDir, "run_delivery.jsonl");
+    const t = new JsonlTranscript(tp, { runId: "run_delivery", agentId: "a" });
+    await t.append("run.started", { backend: "claude-code" });
+    // Ownership fact: source workspace root (NOT the delivery worktree)
+    await t.append("run.background_submitted", { background: true, cwd: sourceDir });
+    await t.append("session.created", {
+      backend: "process", backendSessionId: "proc_55555",
+      // session.cwd points to the delivery worktree (where worker actually runs)
+      cwd: worktreeDir,
+    });
+    await t.transitionState(null, "pending", "created");
+    await t.transitionState("pending", "running", "first_event");
+
+    const { stopRun } = await import("../src/application/runStop.js");
+    // Authorized workspace = source root (matches background_submitted.cwd)
+    const result = await stopRun({
+      runId: "run_delivery", runDir, authorizedWorkspaceRoot: sourceDir,
+      deps: defaultDeps(),
+    });
+    // Authorization must PASS — source ownership fact matches
+    assert.notEqual(result.authorized, false, "delivery run must be authorized via source ownership");
+    assert.equal(result.terminalAccepted, true, "must proceed to terminal claim");
+
+    rmSync(runDir, { recursive: true, force: true });
+  } finally { rmSync(sourceDir, { recursive: true, force: true }); }
+});
+
+test("DELIVERY-02: delivery run rejected if authorized root is the worktree, not source", async () => {
+  // If someone tries to authorize using the worktree path instead of the source,
+  // it must fail — worktreeDir is a subdirectory of sourceDir, proveWorkspace
+  // will reject it as non-top-level (it's not a Git top-level).
+  const sourceDir = mkdtempSync(join(tmpdir(), "wao-delivery2-src-"));
+  try {
+    makeGitRepo(sourceDir);
+    const worktreeDir = join(sourceDir, ".wao-worktrees", "run_test2");
+    mkdirSync(worktreeDir, { recursive: true });
+    const runDir = mkdtempSync(join(tmpdir(), "wao-delivery2-rd-"));
+    const tp = join(runDir, "run_delivery2.jsonl");
+    const t = new JsonlTranscript(tp, { runId: "run_delivery2", agentId: "a" });
+    await t.append("run.started", { backend: "claude-code" });
+    await t.append("run.background_submitted", { background: true, cwd: sourceDir });
+    await t.append("session.created", { backend: "process", backendSessionId: "proc_44444", cwd: worktreeDir });
+    await t.transitionState(null, "pending", "created");
+    await t.transitionState("pending", "running", "first_event");
+
+    const { stopRun } = await import("../src/application/runStop.js");
+    // Try to authorize with the worktree path — must fail
+    const result = await stopRun({
+      runId: "run_delivery2", runDir, authorizedWorkspaceRoot: worktreeDir,
+      deps: defaultDeps(),
+    });
+    assert.equal(result.authorized, false, "worktree path must not authorize — it's a subdirectory");
+
+    rmSync(runDir, { recursive: true, force: true });
+  } finally { rmSync(sourceDir, { recursive: true, force: true }); }
+});
+
 // ── Architecture ─────────────────────────────────────────────────────────────
 
 test("ARCH-CLOSEOUT: runStop.js does not have hand-written pathsMatch/gitTopLevel", async () => {
@@ -285,8 +363,15 @@ test("ARCH-CLOSEOUT: runStop.js does not have hand-written pathsMatch/gitTopLeve
   assert.ok(!src.includes("function pathsMatch"), "no hand-written pathsMatch");
   assert.ok(!src.includes("function gitTopLevel"), "no hand-written gitTopLevel");
   assert.ok(!src.includes("function normalizePath"), "no hand-written normalizePath");
-  // Must use proveWorkspace
+  // Must not contain platform detection or case-folding for path comparison
+  assert.ok(!src.includes("process.platform"), "no process.platform in runStop (use SSOT)");
+  assert.ok(!src.includes("toLowerCase"), "no toLowerCase in runStop (use SSOT)");
+  // Must use proveWorkspace + pathsMatch from workspaceBinding SSOT
   assert.ok(src.includes("proveWorkspace"), "must use proveWorkspace SSOT");
+  assert.ok(src.includes("pathsMatch"), "must use pathsMatch SSOT from workspaceBinding");
   // Must use isValidRunId
   assert.ok(src.includes("isValidRunId"), "must use isValidRunId SSOT");
+  // Must not have dead imports
+  assert.ok(!src.includes("execFileSync"), "no dead execFileSync import");
+  assert.ok(!src.includes("realpathSync"), "no dead realpathSync import");
 });

@@ -24,14 +24,13 @@
 //   human/ops and can stop any run in the specified runDir.
 
 import { join, resolve } from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 import { JsonlTranscript, readTranscript, findState, findLatest } from "../transcript.js";
 import { executeStopWithVerification } from "../backends/opencodeStopVerify.js";
 import { raiseAlert } from "../alerts.js";
 import { isValidRunId } from "../delivery.js";
-import { proveWorkspace } from "./workspaceBinding.js";
+import { proveWorkspace, pathsMatch } from "./workspaceBinding.js";
 
 // ── Process primitives (owned here, not in commands/) ────────────────────────
 
@@ -108,18 +107,10 @@ function verifyWorkspaceOwnership(events, authorizedWorkspaceRoot) {
   const ownershipProof = proveWorkspace(fact.cwd);
   // Prove the authorized root is a real Git top-level
   const authorizedProof = proveWorkspace(authorizedWorkspaceRoot);
-  // Compare canonical roots using the SSOT's platform-aware normalization
-  // proveWorkspace returns root in normalized form (realpath + forward slashes)
-  if (ownershipProof.root !== authorizedProof.root) {
-    // On Windows, pathsMatch is case-insensitive — proveWorkspace normalizes
-    // via realpath which preserves original casing. Use toLowerCase for win32.
-    const IS_WIN32 = process.platform === "win32";
-    const match = IS_WIN32
-      ? ownershipProof.root.toLowerCase() === authorizedProof.root.toLowerCase()
-      : ownershipProof.root === authorizedProof.root;
-    if (!match) {
-      throw new Error("workspace mismatch: run ownership does not match authorized workspace");
-    }
+  // Compare canonical roots using the SSOT pathsMatch helper from
+  // workspaceBinding.js (platform-aware: case-insensitive on win32).
+  if (!pathsMatch(ownershipProof.root, authorizedProof.root)) {
+    throw new Error("workspace mismatch: run ownership does not match authorized workspace");
   }
   return { authorized: true, ownershipCwd: fact.cwd };
 }

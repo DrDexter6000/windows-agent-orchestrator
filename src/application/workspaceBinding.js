@@ -41,7 +41,17 @@ function normalizePath(p) {
 // The case-fold is used ONLY for the identity comparison, not for the canonical
 // root returned to callers — that stays in its original casing from realpath.
 const IS_WIN32 = process.platform === "win32";
-function pathsMatch(a, b) {
+/**
+ * Compare two normalized canonical path strings using platform-appropriate semantics.
+ * On Windows (win32), paths are case-insensitive — "C:/Foo" and "c:/foo" refer
+ * to the same directory. On other platforms, paths are case-sensitive.
+ * The case-fold is used ONLY for the identity comparison, not for the canonical
+ * root returned to callers — that stays in its original casing from realpath.
+ *
+ * Exported as the SSOT for canonical workspace root comparison — other modules
+ * (e.g. runStop.js) must import this instead of reimplementing platform detection.
+ */
+export function pathsMatch(a, b) {
   if (IS_WIN32) return a.toLowerCase() === b.toLowerCase();
   return a === b;
 }
