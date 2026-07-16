@@ -34,6 +34,7 @@ import { collectRunMessages } from "../application/runCollect.js";
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
 import { getRunDelivery, decideRunDelivery } from "../application/runDelivery.js";
 import { stopRun } from "../application/runStop.js";
+import { listRuns } from "../application/runList.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
 import { isValidRunId } from "../delivery.js";
 import { DIAGNOSIS_CATEGORIES } from "../diagnosis.js";
@@ -513,6 +514,41 @@ const RUN_STOP_DESCRIPTION =
   "Not idempotent: a second call after terminal is already claimed writes a rejection audit fact. " +
   "Returns only safe machine fields (no PID, path, session id, command, stderr, or alert content).";
 
+// ===== runs_list (workspace-bound read-only run inventory) constants =====
+
+const RUNS_LIST_ERROR_TEXT = "runs_list failed";
+
+const RUNS_LIST_INPUT = z.object({
+  activeOnly: z.boolean().optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+}).strict();
+
+const RUNS_LIST_OUTPUT = z.object({
+  runs: z.array(z.object({
+    runId: z.string(),
+    agentId: z.string(),
+    state: z.enum(RUN_STATES),
+    terminal: z.boolean(),
+    updatedAt: z.string().datetime().nullable(),
+  })),
+  returnedCount: z.number().int(),
+  truncated: z.boolean(),
+});
+
+const RUNS_LIST_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+const RUNS_LIST_DESCRIPTION =
+  "List runs dispatched from the currently bound workspace. " +
+  "Returns runId, agentId, state, terminal, and updatedAt for each run. " +
+  "Workspace-bound: only runs whose dispatch cwd matches the bound workspace root are visible. " +
+  "Optional activeOnly filters to non-terminal runs; limit caps results (default 50). " +
+  "Read-only, idempotent. Does not return prompts, paths, commands, PIDs, sessions, or counts of excluded runs.";
+
 /**
  * Create a WAO MCP server with registry_list, run_dispatch, run_status, run_collect, run_diagnose, run_delivery, run_delivery_decide.
  *
@@ -543,6 +579,7 @@ export function createWaoMcpServer({
   getRunDeliveryFn,
   decideRunDeliveryFn,
   stopRunFn,
+  listRunsFn,
 }) {
   const service = getRegistryInventoryFn ?? getRegistryInventory;
   const dispatcher = dispatchRunFn ?? dispatchRun;
@@ -552,6 +589,7 @@ export function createWaoMcpServer({
   const deliveryQueryService = getRunDeliveryFn ?? getRunDelivery;
   const deliveryDecideService = decideRunDeliveryFn ?? decideRunDelivery;
   const stopService = stopRunFn ?? stopRun;
+  const listRunsService = listRunsFn ?? listRuns;
 
   const mcp = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -1046,6 +1084,72 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: RUN_STOP_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  // ===== runs_list (workspace-bound read-only run inventory) =====
+
+  mcp.registerTool(
+    "runs_list",
+    {
+      description: RUNS_LIST_DESCRIPTION,
+      inputSchema: RUNS_LIST_INPUT,
+      outputSchema: RUNS_LIST_OUTPUT,
+      annotations: RUNS_LIST_ANNOTATIONS,
+    },
+    async (input) => {
+      try {
+        const binding = await resolveWorkspaceBinding();
+        if (!binding.bound) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
+          };
+        }
+
+        // Get known agent IDs from registry for agentId validation
+        let knownAgentIds = [];
+        try {
+          const inventory = await service({ registryPath, runDir });
+          knownAgentIds = (inventory.agents ?? []).map((a) => a.id);
+        } catch {
+          // Registry unavailable — all agentIds will be "unknown"
+        }
+
+        const activeOnly = input?.activeOnly ?? false;
+        const limit = input?.limit ?? 50;
+
+        const result = await listRunsService({
+          runDir,
+          activeOnly,
+          latest: limit,
+          authorizedWorkspaceRoot: binding.root,
+          knownAgentIds,
+        });
+
+        const payload = {
+          runs: result.runs.map((r) => ({
+            runId: r.runId,
+            agentId: r.agentId,
+            state: r.state,
+            terminal: r.terminal,
+            updatedAt: r.updatedAt,
+          })),
+          returnedCount: result.runs.length,
+          truncated: result.matchedCount > result.runs.length,
+        };
+
+        RUNS_LIST_OUTPUT.parse(payload);
+        return {
+          content: [{ type: "text", text: JSON.stringify(payload) }],
+          structuredContent: payload,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: RUNS_LIST_ERROR_TEXT }],
         };
       }
     },

@@ -30,7 +30,7 @@ import { JsonlTranscript, readTranscript, findState, findLatest } from "../trans
 import { executeStopWithVerification } from "../backends/opencodeStopVerify.js";
 import { raiseAlert } from "../alerts.js";
 import { isValidRunId } from "../delivery.js";
-import { proveWorkspace, pathsMatch } from "./workspaceBinding.js";
+import { findRunWorkspaceOwnership, verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 
 // ── Process primitives (owned here, not in commands/) ────────────────────────
 
@@ -74,46 +74,12 @@ async function waitForPidExit(pid, isAliveFn, sleep, pollConfig = {}) {
   return isAliveFn(pid);
 }
 
-// ── Workspace ownership verification (FIX-B: reuse proveWorkspace SSOT) ─────
+// ── Workspace ownership verification (delegated to runWorkspaceOwnership SSOT) ─
 
-/**
- * Find the workspace ownership fact from transcript events.
- * Transcript events are flat — payload fields are at the top level.
- */
-function findOwnershipFact(events) {
-  const submitted = events.filter((e) => e.type === "run.background_submitted");
-  if (submitted.length === 0) return null;
-  if (submitted.length > 1) {
-    throw new Error("ambiguous ownership: multiple run.background_submitted events");
-  }
-  const cwd = submitted[0].cwd;
-  if (typeof cwd !== "string" || cwd.length === 0) {
-    throw new Error("malformed ownership: run.background_submitted.cwd is missing or empty");
-  }
-  return { cwd };
-}
+// The ownership algorithm lives in src/application/runWorkspaceOwnership.js.
+// runStop.js delegates to it — no second copy of the logic.
+// Re-export for backward compatibility with existing test imports.
 
-/**
- * Verify that a run's workspace ownership matches the authorized root.
- * Uses proveWorkspace SSOT — rejects subdirectories, non-existent paths,
- * other repos. No hand-written path comparison.
- */
-function verifyWorkspaceOwnership(events, authorizedWorkspaceRoot) {
-  const fact = findOwnershipFact(events);
-  if (!fact) {
-    throw new Error("missing ownership: no run.background_submitted event");
-  }
-  // Prove the ownership cwd is a real Git top-level (rejects subdirectories)
-  const ownershipProof = proveWorkspace(fact.cwd);
-  // Prove the authorized root is a real Git top-level
-  const authorizedProof = proveWorkspace(authorizedWorkspaceRoot);
-  // Compare canonical roots using the SSOT pathsMatch helper from
-  // workspaceBinding.js (platform-aware: case-insensitive on win32).
-  if (!pathsMatch(ownershipProof.root, authorizedProof.root)) {
-    throw new Error("workspace mismatch: run ownership does not match authorized workspace");
-  }
-  return { authorized: true, ownershipCwd: fact.cwd };
-}
 
 // ── Main service ─────────────────────────────────────────────────────────────
 
@@ -169,7 +135,7 @@ export async function stopRun(input) {
   // HTTP stop, or alert. Authorization failure = zero events, zero side effects.
   if (authorizedWorkspaceRoot !== undefined) {
     try {
-      verifyWorkspaceOwnership(events, authorizedWorkspaceRoot);
+      verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot);
     } catch (err) {
       return {
         runId,
@@ -453,4 +419,7 @@ function resolveRunDir(runDir) {
   return resolve(runDir);
 }
 
-export { findOwnershipFact, verifyWorkspaceOwnership, killProcessTree, isPidAlive, waitForPidExit };
+// Re-export ownership helpers for backward compatibility with tests that
+// import from runStop.js. The canonical implementation is in runWorkspaceOwnership.js.
+export { findRunWorkspaceOwnership as findOwnershipFact, verifyRunWorkspaceOwnership as verifyWorkspaceOwnership } from "./runWorkspaceOwnership.js";
+export { killProcessTree, isPidAlive, waitForPidExit };

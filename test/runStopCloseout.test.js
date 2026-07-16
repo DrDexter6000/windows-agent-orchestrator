@@ -366,9 +366,8 @@ test("ARCH-CLOSEOUT: runStop.js does not have hand-written pathsMatch/gitTopLeve
   // Must not contain platform detection or case-folding for path comparison
   assert.ok(!src.includes("process.platform"), "no process.platform in runStop (use SSOT)");
   assert.ok(!src.includes("toLowerCase"), "no toLowerCase in runStop (use SSOT)");
-  // Must use proveWorkspace + pathsMatch from workspaceBinding SSOT
-  assert.ok(src.includes("proveWorkspace"), "must use proveWorkspace SSOT");
-  assert.ok(src.includes("pathsMatch"), "must use pathsMatch SSOT from workspaceBinding");
+  // Must delegate to runWorkspaceOwnership SSOT (which uses proveWorkspace)
+  assert.ok(src.includes("runWorkspaceOwnership"), "must delegate to runWorkspaceOwnership SSOT");
   // Must use isValidRunId
   assert.ok(src.includes("isValidRunId"), "must use isValidRunId SSOT");
   // Must not have dead imports

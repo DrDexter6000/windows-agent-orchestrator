@@ -170,39 +170,37 @@ export function buildDashboard(runs, selfDeclared = null, stageProgress = null) 
 async function runsListCommand(args, config) {
   const options = parseOptions(args);
   const runDir = resolve(options.runDir ?? config.runDir);
-  const jsonlFiles = await loadRunOnlyFiles(runDir);
-  if (jsonlFiles.length === 0) {
-    console.log("No runs found.");
-    return;
-  }
-  // N3/N5 修复：加 --agent（按 agentId 过滤）和 --latest N（取最近 N 个，按最新事件 ts 倒序）。
-  // 原 bug：runs list 列历史所有 run，lead 找"刚才那次"费劲。
-  const agentFilter = options.agent;
+  const { listRuns } = await import("../application/runList.js");
+
   const latestN = options.latest ? Number(options.latest) : null;
 
-  // 收集每个 run 的摘要（runId + state + agentId + 最新 ts）
-  const summaries = [];
-  for (const file of jsonlFiles) {
-    const runId = file.replace(/\.jsonl$/, "");
-    const events = await readTranscript(join(runDir, file));
-    const agentId = events[0]?.agentId;
-    if (agentFilter && agentId !== agentFilter) continue;
-    const state = findState(events);
-    const lastTs = events.at(-1)?.ts ?? "";
-    summaries.push({ runId, state, agentId, lastTs });
+  // CLI is human/ops — no workspace authorization.
+  // knownAgentIds = [] so raw agentId is preserved (CLI doesn't validate).
+  const result = await listRuns({
+    runDir,
+    agentId: options.agent,
+    latest: latestN,
+    knownAgentIds: [],
+  });
+
+  // When --latest is NOT set, restore original file-name ascending order.
+  // (The service sorts by updatedAt desc by default; CLI original kept
+  // file-name order without --latest.)
+  if (!latestN) {
+    result.runs.sort((a, b) => a.runId.localeCompare(b.runId));
   }
 
-  // --latest N：按最新事件 ts 倒序取 N 个（ts 不可比时退回 runId 字典序）
-  if (latestN && latestN > 0) {
-    summaries.sort((a, b) => (b.lastTs ?? "").localeCompare(a.lastTs ?? ""));
-    summaries.splice(latestN);
-  }
-
-  if (summaries.length === 0) {
-    console.log(agentFilter ? `No runs found for agent "${agentFilter}".` : "No runs found.");
+  if (result.runs.length === 0) {
+    const jsonlFiles = await loadRunOnlyFiles(runDir);
+    if (jsonlFiles.length === 0) {
+      console.log("No runs found.");
+      return;
+    }
+    console.log(options.agent ? `No runs found for agent "${options.agent}".` : "No runs found.");
     return;
   }
-  for (const s of summaries) {
+
+  for (const s of result.runs) {
     console.log(`${s.runId}\t${s.state}`);
   }
 }

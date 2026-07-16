@@ -717,6 +717,40 @@ CLI fallback：`npm run cli -- stop <runId>`。
 
 annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:false, openWorldHint:true`（认领终态 + 可能 taskkill 杀进程；重复调用幂等返回 loser 但首次破坏性）。
 
+### MCP `runs_list`（project-bound run 列表，M10 P0-3）
+
+`runs_list` 让 MCP host 列出当前 host-authorized workspace 绑定范围内的 run（project-bound recovery）。只读、幂等——不修改任何持久状态、不追加 transcript event。
+
+`runs_list` tool：
+
+- **输入**（strict schema，拒绝额外字段）：
+
+```json
+{ "activeOnly": false, "limit": 50 }
+```
+
+两个字段均可选。`activeOnly`（bool，默认 `false`）：只返回未到终态的 run。`limit`（整数 1..100，默认 `50`）：返回条目数上限。模型**不能**传 `runDir`、registry、`agentId`、`cwd`、`workspaceRoot` 等 server-owned 配置——workspace 绑定由 server 解析，不能通过 tool argument 提供。
+
+- **安全有界输出**（只返回机器字段 + 终态事实，不含路径/session/prompt）：
+
+```json
+{
+  "runs": [
+    { "runId": "run_...", "agentId": "coder_low", "state": "running", "terminal": false, "updatedAt": "2026-07-15T00:00:10.000Z" }
+  ],
+  "returnedCount": 1,
+  "truncated": false
+}
+```
+
+`runs` 每个元素只含 `runId`/`agentId`/`state`/`terminal`/`updatedAt`。`returnedCount` = `runs.length`；`truncated` 表示因 `limit` 截断而仍有更多匹配 run。**绝不返回**：PID、进程路径、session id、argv、command、绝对路径、prompt、环境变量、messages、evidence 或异常 message/stack。失败返回固定安全文案 `runs_list failed`。
+
+**Workspace-bound**：只返回当前 host-authorized workspace 绑定范围内的 run——其它项目的 run 不可见（project-bound recovery，不跨 workspace 探测）。workspace 未绑定时返回空 `runs:[]`（不 fail-closed，因这是只读列举而非 state-changing）。
+
+CLI fallback：`npm run cli -- runs list [--agent ID] [--latest N]`。
+
+annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`（纯只读列举查询）。
+
 ---
 
 ## 五、常见问题
