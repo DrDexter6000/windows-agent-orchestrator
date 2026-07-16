@@ -126,10 +126,11 @@ export async function listRuns(input) {
     const rawAgentId = events[0]?.agentId;
     if (agentId && rawAgentId !== agentId) continue;
 
-    // Active-only filter
+    // Active-only filter: only return known non-terminal states.
+    // "unknown" state is NOT provably active — exclude it for honesty.
     if (activeOnly) {
       const state = findState(events);
-      if (TERMINAL_STATES.includes(state)) continue;
+      if (!RUN_STATES.includes(state) || TERMINAL_STATES.includes(state)) continue;
     }
 
     const summary = summarizeRun(runId, events, knownAgentIds, input);

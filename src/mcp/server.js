@@ -1113,7 +1113,7 @@ export function createWaoMcpServer({
         let knownAgentIds = [];
         try {
           const inventory = await service({ registryPath, runDir });
-          knownAgentIds = (inventory.agents ?? []).map((a) => a.id);
+          knownAgentIds = (Array.isArray(inventory) ? inventory : []).map((a) => a.id);
         } catch {
           // Registry unavailable — all agentIds will be "unknown"
         }
