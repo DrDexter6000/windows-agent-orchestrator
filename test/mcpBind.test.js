@@ -12,11 +12,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync,
+  mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 
@@ -70,7 +70,7 @@ function makeExpectedServer(root) {
   return {
     name: "wao", enabled: true,
     transport: {
-      type: "stdio", command: "node",
+      type: "stdio", command: process.execPath,
       args: [
         join(REPO_ROOT, "scripts", "wao-node.cjs"),
         join(REPO_ROOT, "src", "mcp", "stdio.js"),
@@ -283,6 +283,28 @@ test("TRACKED-01: tracked .codex/config.toml → fail-closed", async () => {
       () => bindWorkspace({ host: "codex", cwd: dir, hooks: fakeCodexHooks() }),
       (err) => err.message.includes("tracked"),
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TRACKED-UNBIND-01: unbind refuses a tracked project config before server mutation", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-tracked-unbind-"));
+  try {
+    makeGitRepo(dir);
+    const fk = fakeCodexHooks();
+    const { bindWorkspace, unbindWorkspace } = await import(
+      "../src/application/mcpWorkspaceActivation.js"
+    );
+    await bindWorkspace({ host: "codex", cwd: dir, hooks: fk });
+    mkdirSync(join(dir, ".codex"), { recursive: true });
+    writeFileSync(join(dir, ".codex", "config.toml"), "# tracked owner config\n");
+    execFileSync("git", ["add", "-f", ".codex/config.toml"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "track project config"], { cwd: dir });
+    fk.calls.length = 0;
+
+    await assert.rejects(() => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }), /tracked/);
+    assert.ok(!fk.calls.some((call) => call.startsWith("remove:")));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -582,6 +604,426 @@ test("ARCH-02: codexMcpConfig does not import application/commands/mcp/SDK/zod",
   assert.ok(!src.includes('from "zod"'), "no zod");
   // No codex exec
   assert.ok(!src.includes('"exec"'), "no codex exec");
+  if (process.platform === "win32") {
+    assert.ok(!src.includes("cmd.exe"), "Windows adapter must not invoke cmd.exe");
+    assert.ok(!src.includes("ComSpec"), "Windows adapter must not invoke ComSpec");
+  }
+});
+
+test("P0-1R-DIGEST-01: exclude digest covers the full normalized server contract", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-digest-"));
+  try {
+    makeGitRepo(dir);
+    const { proveWorkspace } = await import("../src/application/workspaceBinding.js");
+    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+    const canonicalRoot = proveWorkspace(dir).root;
+    await bindWorkspace({ host: "codex", cwd: dir, hooks: fakeCodexHooks() });
+
+    const server = makeExpectedServer(canonicalRoot);
+    const normalizedContract = {
+      version: 1,
+      name: server.name,
+      enabled: server.enabled,
+      transport: {
+        type: server.transport.type,
+        command: server.transport.command,
+        args: server.transport.args,
+        cwd: server.transport.cwd,
+        env: server.transport.env,
+        env_vars: server.transport.env_vars,
+      },
+      workspaceRoot: canonicalRoot,
+    };
+    const expectedDigest = createHash("sha256")
+      .update(JSON.stringify(normalizedContract), "utf8")
+      .digest("hex")
+      .substring(0, 16);
+    const exclude = readExclude(join(dir, ".git")).toString("utf8");
+    assert.match(exclude, new RegExp(`# digest: ${expectedDigest}\\b`));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0-1R-TXN-01: bind verification failure restores config and exclude bytes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-bind-txn-"));
+  try {
+    makeGitRepo(dir);
+    const codexDir = join(dir, ".codex");
+    const configPath = join(codexDir, "config.toml");
+    mkdirSync(codexDir);
+    const configBefore = Buffer.from('# owner config\r\nmodel = "gpt-5"\r\n');
+    writeFileSync(configPath, configBefore);
+    const excludeBefore = readExclude(join(dir, ".git"));
+    const fk = fakeCodexHooks();
+    fk.codexAdd = async () => {
+      writeFileSync(configPath, "[mcp_servers.wao]\ncommand = \"mutated\"\n");
+    };
+    fk.codexGet = async () => ({
+      name: "wao",
+      enabled: true,
+      transport: {
+        type: "stdio", command: "wrong", args: [], env: null, env_vars: [], cwd: null,
+      },
+    });
+
+    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+    await assert.rejects(
+      () => bindWorkspace({ host: "codex", cwd: dir, hooks: fk }),
+      /mismatch/,
+    );
+    assert.deepEqual(readFileSync(configPath), configBefore);
+    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0-1R-TXN-02: unbind verification failure restores config and exclude bytes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-unbind-txn-"));
+  try {
+    makeGitRepo(dir);
+    const codexDir = join(dir, ".codex");
+    const configPath = join(codexDir, "config.toml");
+    mkdirSync(codexDir);
+    const configBefore = Buffer.from('[mcp_servers.wao]\r\ncommand = "node"\r\n');
+    writeFileSync(configPath, configBefore);
+    const fk = fakeCodexHooks();
+    const { bindWorkspace, unbindWorkspace } = await import(
+      "../src/application/mcpWorkspaceActivation.js"
+    );
+    await bindWorkspace({ host: "codex", cwd: dir, hooks: fk });
+    const excludeBefore = readExclude(join(dir, ".git"));
+    const server = fk.servers.get("wao");
+    fk.codexRemove = async () => {
+      rmSync(configPath, { force: true });
+    };
+    fk.codexList = async () => [server];
+
+    await assert.rejects(
+      () => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }),
+      /still present/,
+    );
+    assert.deepEqual(readFileSync(configPath), configBefore);
+    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0-1R-TXN-03: add that mutates config then throws restores both resources", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-add-throw-txn-"));
+  try {
+    makeGitRepo(dir);
+    const codexDir = join(dir, ".codex");
+    const configPath = join(codexDir, "config.toml");
+    mkdirSync(codexDir);
+    const configBefore = Buffer.from("# owner-before-add\n");
+    writeFileSync(configPath, configBefore);
+    const excludeBefore = readExclude(join(dir, ".git"));
+    const fk = fakeCodexHooks();
+    fk.codexAdd = async () => {
+      writeFileSync(configPath, "# partially-mutated\n");
+      throw new Error("simulated add failure after write");
+    };
+
+    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+    await assert.rejects(() => bindWorkspace({ host: "codex", cwd: dir, hooks: fk }), /add failed/);
+    assert.deepEqual(readFileSync(configPath), configBefore);
+    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0-1R-TXN-04: get that throws after add restores both resources", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-get-throw-txn-"));
+  try {
+    makeGitRepo(dir);
+    const codexDir = join(dir, ".codex");
+    const configPath = join(codexDir, "config.toml");
+    mkdirSync(codexDir);
+    const configBefore = Buffer.from("# owner-before-get\r\n");
+    writeFileSync(configPath, configBefore);
+    const excludeBefore = readExclude(join(dir, ".git"));
+    const fk = fakeCodexHooks();
+    fk.codexAdd = async () => writeFileSync(configPath, "# added\n");
+    fk.codexGet = async () => { throw new Error("simulated get failure"); };
+
+    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+    await assert.rejects(() => bindWorkspace({ host: "codex", cwd: dir, hooks: fk }), /verify failed/);
+    assert.deepEqual(readFileSync(configPath), configBefore);
+    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0-1R-TXN-05: remove that mutates config then throws restores both resources", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-remove-throw-txn-"));
+  try {
+    makeGitRepo(dir);
+    const codexDir = join(dir, ".codex");
+    const configPath = join(codexDir, "config.toml");
+    mkdirSync(codexDir);
+    const configBefore = Buffer.from("# owner-before-remove\n");
+    writeFileSync(configPath, configBefore);
+    const fk = fakeCodexHooks();
+    const { bindWorkspace, unbindWorkspace } = await import(
+      "../src/application/mcpWorkspaceActivation.js"
+    );
+    await bindWorkspace({ host: "codex", cwd: dir, hooks: fk });
+    const excludeBefore = readExclude(join(dir, ".git"));
+    fk.codexRemove = async () => {
+      rmSync(configPath, { force: true });
+      throw new Error("simulated remove failure after write");
+    };
+
+    await assert.rejects(() => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }), /remove failed/);
+    assert.deepEqual(readFileSync(configPath), configBefore);
+    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0-1R-TXN-06: post-remove list failure restores both resources", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-list-throw-txn-"));
+  try {
+    makeGitRepo(dir);
+    const codexDir = join(dir, ".codex");
+    const configPath = join(codexDir, "config.toml");
+    mkdirSync(codexDir);
+    const configBefore = Buffer.from("# owner-before-list\n");
+    writeFileSync(configPath, configBefore);
+    const fk = fakeCodexHooks();
+    const { bindWorkspace, unbindWorkspace } = await import(
+      "../src/application/mcpWorkspaceActivation.js"
+    );
+    await bindWorkspace({ host: "codex", cwd: dir, hooks: fk });
+    const excludeBefore = readExclude(join(dir, ".git"));
+    const server = fk.servers.get("wao");
+    let listCount = 0;
+    fk.codexList = async () => {
+      listCount++;
+      if (listCount === 1) return [server];
+      throw new Error("simulated post-remove list failure");
+    };
+    fk.codexRemove = async () => rmSync(configPath, { force: true });
+
+    await assert.rejects(() => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }), /verify failed/);
+    assert.deepEqual(readFileSync(configPath), configBefore);
+    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0-1R-TXN-07: bind refuses a silent exclude write and does not add server", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-bind-exclude-noop-"));
+  try {
+    makeGitRepo(dir);
+    const excludeBefore = readExclude(join(dir, ".git"));
+    const fk = fakeCodexHooks();
+    fk.writeExclude = () => {};
+    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+
+    await assert.rejects(() => bindWorkspace({ host: "codex", cwd: dir, hooks: fk }), /exclude verify/);
+    assert.ok(!fk.calls.some((call) => call.startsWith("add:")));
+    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0-1R-TXN-08: unbind refuses a silent exclude removal and restores config", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-unbind-exclude-noop-"));
+  try {
+    makeGitRepo(dir);
+    const codexDir = join(dir, ".codex");
+    const configPath = join(codexDir, "config.toml");
+    mkdirSync(codexDir);
+    const configBefore = Buffer.from("# owner-before-exclude-remove\n");
+    writeFileSync(configPath, configBefore);
+    const fk = fakeCodexHooks();
+    const { bindWorkspace, unbindWorkspace } = await import(
+      "../src/application/mcpWorkspaceActivation.js"
+    );
+    await bindWorkspace({ host: "codex", cwd: dir, hooks: fk });
+    const excludeBefore = readExclude(join(dir, ".git"));
+    fk.codexRemove = async ({ name }) => {
+      fk.servers.delete(name);
+      rmSync(configPath, { force: true });
+    };
+    fk.writeExclude = () => {};
+
+    await assert.rejects(() => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }), /exclude verify/);
+    assert.deepEqual(readFileSync(configPath), configBefore);
+    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0-1R-TXN-09: bind rechecks both resources before reporting success", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-bind-final-check-"));
+  try {
+    makeGitRepo(dir);
+    const fk = fakeCodexHooks();
+    const originalGet = fk.codexGet;
+    fk.codexGet = async (opts) => {
+      const server = await originalGet(opts);
+      const excludePath = join(dir, ".git", "info", "exclude");
+      writeFileSync(excludePath, readFileSync(excludePath, "utf8").replace("/.codex/config.toml", "/bad"));
+      return server;
+    };
+    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+
+    await assert.rejects(() => bindWorkspace({ host: "codex", cwd: dir, hooks: fk }), /final state/);
+    assert.equal(fk.servers.has("wao"), true, "fake server store models an external side effect");
+    assert.ok(!readFileSync(join(dir, ".git", "info", "exclude"), "utf8").includes("/bad"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0-1R-TXN-10: unbind rechecks both resources before reporting success", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-unbind-final-check-"));
+  try {
+    makeGitRepo(dir);
+    const fk = fakeCodexHooks();
+    const { bindWorkspace, unbindWorkspace } = await import(
+      "../src/application/mcpWorkspaceActivation.js"
+    );
+    await bindWorkspace({ host: "codex", cwd: dir, hooks: fk });
+    const configPath = join(dir, ".codex", "config.toml");
+    mkdirSync(join(dir, ".codex"), { recursive: true });
+    const configBefore = Buffer.from("# before-final-unbind-check\n");
+    writeFileSync(configPath, configBefore);
+    const excludeBefore = readExclude(join(dir, ".git"));
+    const originalWriteExclude = (gitDir, content) => writeFileSync(join(gitDir, "info", "exclude"), content);
+    fk.writeExclude = (gitDir, content) => {
+      originalWriteExclude(gitDir, content);
+      fk.servers.set("wao", makeExpectedServer(dir.replace(/\\/g, "/")));
+    };
+
+    await assert.rejects(() => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }), /final state/);
+    assert.deepEqual(readFileSync(configPath), configBefore);
+    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0-1R-TXN-11: bind final-state read failure rolls back both resources", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-bind-final-read-"));
+  try {
+    makeGitRepo(dir);
+    const codexDir = join(dir, ".codex");
+    const configPath = join(codexDir, "config.toml");
+    mkdirSync(codexDir);
+    const configBefore = Buffer.from("# before-bind-final-read\n");
+    writeFileSync(configPath, configBefore);
+    const excludeBefore = readExclude(join(dir, ".git"));
+    const fk = fakeCodexHooks();
+    const originalAdd = fk.codexAdd;
+    fk.codexAdd = async (opts) => {
+      await originalAdd(opts);
+      writeFileSync(configPath, "# added-before-final-read\n");
+    };
+    let readCount = 0;
+    fk.readExclude = (gitDir) => {
+      readCount++;
+      if (readCount === 3) throw new Error("simulated final exclude read failure");
+      const path = join(gitDir, "info", "exclude");
+      return existsSync(path) ? readFileSync(path, "utf8") : null;
+    };
+    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+
+    await assert.rejects(() => bindWorkspace({ host: "codex", cwd: dir, hooks: fk }), /final state/);
+    assert.deepEqual(readFileSync(configPath), configBefore);
+    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0-1R-TXN-12: unbind final-state read failure rolls back both resources", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-unbind-final-read-"));
+  try {
+    makeGitRepo(dir);
+    const codexDir = join(dir, ".codex");
+    const configPath = join(codexDir, "config.toml");
+    mkdirSync(codexDir);
+    const configBefore = Buffer.from("# before-unbind-final-read\n");
+    writeFileSync(configPath, configBefore);
+    const fk = fakeCodexHooks();
+    const { bindWorkspace, unbindWorkspace } = await import(
+      "../src/application/mcpWorkspaceActivation.js"
+    );
+    await bindWorkspace({ host: "codex", cwd: dir, hooks: fk });
+    const excludeBefore = readExclude(join(dir, ".git"));
+    const originalRemove = fk.codexRemove;
+    fk.codexRemove = async (opts) => {
+      await originalRemove(opts);
+      rmSync(configPath, { force: true });
+    };
+    let readCount = 0;
+    fk.readExclude = (gitDir) => {
+      readCount++;
+      if (readCount === 3) throw new Error("simulated final exclude read failure");
+      const path = join(gitDir, "info", "exclude");
+      return existsSync(path) ? readFileSync(path, "utf8") : null;
+    };
+
+    await assert.rejects(() => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }), /final state/);
+    assert.deepEqual(readFileSync(configPath), configBefore);
+    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0-1R-SCOPE-01: .codex junction cannot redirect activation outside workspace", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-codex-link-"));
+  const external = mkdtempSync(join(tmpdir(), "wao-codex-external-"));
+  try {
+    makeGitRepo(dir);
+    const externalConfig = join(external, "config.toml");
+    const sentinel = Buffer.from("# external-owner-config\n");
+    writeFileSync(externalConfig, sentinel);
+    symlinkSync(external, join(dir, ".codex"), process.platform === "win32" ? "junction" : "dir");
+    const fk = fakeCodexHooks();
+    fk.codexAdd = async ({ codexHome }) => writeFileSync(join(codexHome, "config.toml"), "mutated\n");
+    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+
+    await assert.rejects(() => bindWorkspace({ host: "codex", cwd: dir, hooks: fk }), /codex home/i);
+    assert.deepEqual(readFileSync(externalConfig), sentinel);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(external, { recursive: true, force: true });
+  }
+});
+
+test("P0-1R-SCOPE-02: config symlink cannot redirect activation outside workspace", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-config-link-"));
+  const external = mkdtempSync(join(tmpdir(), "wao-config-external-"));
+  try {
+    makeGitRepo(dir);
+    mkdirSync(join(dir, ".codex"));
+    const externalConfig = join(external, "owner.toml");
+    const sentinel = Buffer.from("# external-config-file\n");
+    writeFileSync(externalConfig, sentinel);
+    symlinkSync(externalConfig, join(dir, ".codex", "config.toml"), "file");
+    const fk = fakeCodexHooks();
+    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+
+    await assert.rejects(() => bindWorkspace({ host: "codex", cwd: dir, hooks: fk }), /config.*link/i);
+    assert.deepEqual(readFileSync(externalConfig), sentinel);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(external, { recursive: true, force: true });
+  }
 });
 
 test("ARCH-03: no 'node ...wao-cli.cmd' in docs or generated content", async () => {
@@ -622,18 +1064,11 @@ test("CODEX-INTEGRATION: real Codex CLI bind → status → unbind", async () =>
     assert.equal(status1.status, "configured", `status should be configured, got: ${JSON.stringify(status1)}`);
     assert.equal(status1.bound, true);
 
-    // Verify Codex can parse the generated config
-    const codexBin = process.platform === "win32"
-      ? process.env.ComSpec || "cmd.exe" : "codex";
-    const codexPrefix = process.platform === "win32" ? ["/c", "codex"] : [];
-    const getOutput = execFileSync(codexBin, [...codexPrefix, "mcp", "get", "wao", "--json"], {
-      encoding: "utf8",
-      env: { ...process.env, CODEX_HOME: join(dir, ".codex") },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const parsed = JSON.parse(getOutput);
+    // Verify Codex can parse the generated config through the same shell-free adapter.
+    const { codexMcpGet } = await import("../src/hostAdapters/codexMcpConfig.js");
+    const parsed = await codexMcpGet({ codexHome: join(dir, ".codex"), name: "wao" });
     assert.equal(parsed.name, "wao");
-    assert.equal(parsed.transport.command, "node");
+    assert.equal(parsed.transport.command, process.execPath);
     assert.ok(parsed.transport.args.some(a => a.includes("stdio.js")));
     assert.ok(parsed.transport.args.some(a => a === "--workspace-root"));
 
@@ -657,6 +1092,25 @@ test("CODEX-INTEGRATION: real Codex CLI bind → status → unbind", async () =>
       const globalHashAfter = createHash("sha256").update(readFileSync(globalConfigP)).digest("hex");
       assert.equal(globalHashAfter, globalHashBefore, "global config must be unchanged");
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0-1R-INTEGRATION: fresh project with spaces and ampersand binds without a shell", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao fresh & safe "));
+  try {
+    makeGitRepo(dir);
+    assert.equal(existsSync(join(dir, ".codex")), false, "fixture must start without .codex");
+    const { bindWorkspace, statusWorkspace, unbindWorkspace } = await import(
+      "../src/application/mcpWorkspaceActivation.js"
+    );
+
+    const bound = await bindWorkspace({ host: "codex", cwd: dir });
+    assert.equal(bound.status, "configured");
+    assert.equal((await statusWorkspace({ host: "codex", cwd: dir })).status, "configured");
+    await unbindWorkspace({ host: "codex", cwd: dir });
+    assert.equal((await statusWorkspace({ host: "codex", cwd: dir })).status, "not_configured");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

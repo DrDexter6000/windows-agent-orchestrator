@@ -26,7 +26,10 @@
 //   - An exact server without WAO exclude metadata is "unmanaged_exact_server"
 //     — WAO never auto-claims or deletes it.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
+import {
+  readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync,
+  readdirSync, rmdirSync, lstatSync, realpathSync,
+} from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -72,20 +75,28 @@ function expectedServerContract(canonicalRoot) {
     "--workspace-root", canonicalRoot,
   ];
   return {
+    version: 1,
     name: "wao",
-    command: "node",
-    args,
+    enabled: true,
+    transport: {
+      type: "stdio",
+      command: process.execPath,
+      args,
+      cwd: null,
+      env: null,
+      env_vars: [],
+    },
+    workspaceRoot: canonicalRoot,
   };
 }
 
 /**
  * Compute a digest of the expected server contract for ownership verification.
- * Covers the full normalized contract: command + args (sorted not needed —
- * order is semantic). This digest is stored in the exclude block and verified
- * on every status/bind/unbind to detect drift.
+ * Covers the full normalized contract. This digest is stored in the exclude
+ * block and verified on every status/bind/unbind to detect drift.
  */
 function contractDigest(expected) {
-  const text = JSON.stringify({ command: expected.command, args: expected.args });
+  const text = JSON.stringify(expected);
   return createHash("sha256").update(text, "utf8").digest("hex").substring(0, 16);
 }
 
@@ -109,8 +120,7 @@ function buildExcludeBlock(expected) {
  * Check if a Codex server object exactly matches the expected contract.
  *
  * Per CTO correction: ALL execution-behavior fields must match precisely:
- *   - transport.command must equal expected.command
- *   - transport.args must be array-equal to expected.args (order + values)
+ *   - transport fields must equal expected.transport
  *   - transport.cwd must be null
  *   - transport.env must be null
  *   - transport.env_vars must be empty array []
@@ -122,23 +132,26 @@ function buildExcludeBlock(expected) {
 function serverMatchesExpected(server, expected) {
   if (!server) return false;
   if (server.name !== expected.name) return false;
-  if (server.enabled !== true) return false;
+  if (server.enabled !== expected.enabled) return false;
   const t = server.transport;
   if (!t) return false;
-  if (t.type !== "stdio") return false;
-  if (t.command !== expected.command) return false;
+  const expectedTransport = expected.transport;
+  if (t.type !== expectedTransport.type) return false;
+  if (t.command !== expectedTransport.command) return false;
   // Args: exact array equality
   if (!Array.isArray(t.args)) return false;
-  if (t.args.length !== expected.args.length) return false;
-  for (let i = 0; i < expected.args.length; i++) {
-    if (t.args[i] !== expected.args[i]) return false;
+  if (t.args.length !== expectedTransport.args.length) return false;
+  for (let i = 0; i < expectedTransport.args.length; i++) {
+    if (t.args[i] !== expectedTransport.args[i]) return false;
   }
   // cwd must be null (no working directory override)
-  if (t.cwd !== null && t.cwd !== undefined) return false;
+  if (t.cwd !== expectedTransport.cwd) return false;
   // env must be null (no extra env vars injected by Codex config)
-  if (t.env !== null && t.env !== undefined) return false;
+  if (t.env !== expectedTransport.env) return false;
   // env_vars must be empty (no env var names declared)
-  if (!Array.isArray(t.env_vars) || t.env_vars.length > 0) return false;
+  if (!Array.isArray(t.env_vars) || t.env_vars.length !== expectedTransport.env_vars.length) {
+    return false;
+  }
   return true;
 }
 
@@ -187,6 +200,35 @@ function isConfigTracked(projectDir) {
 function codexHomePath(canonicalRoot) { return join(canonicalRoot, ".codex"); }
 function codexConfigPath(canonicalRoot) { return join(canonicalRoot, ".codex", "config.toml"); }
 function excludePath(gitDir) { return join(gitDir, "info", "exclude"); }
+
+function pathsEqual(a, b) {
+  const left = resolve(a);
+  const right = resolve(b);
+  return process.platform === "win32"
+    ? left.toLowerCase() === right.toLowerCase()
+    : left === right;
+}
+
+function assertLocalCodexPaths(canonicalRoot) {
+  const codexHome = codexHomePath(canonicalRoot);
+  if (!existsSync(codexHome)) return;
+  const homeStat = lstatSync(codexHome);
+  if (homeStat.isSymbolicLink() || !homeStat.isDirectory()) {
+    throw new Error("unsafe codex home: .codex must be a local directory, not a link");
+  }
+  if (!pathsEqual(realpathSync.native(codexHome), codexHome)) {
+    throw new Error("unsafe codex home: resolved path escapes the workspace");
+  }
+  const configPath = codexConfigPath(canonicalRoot);
+  if (!existsSync(configPath)) return;
+  const configStat = lstatSync(configPath);
+  if (configStat.isSymbolicLink() || !configStat.isFile()) {
+    throw new Error("unsafe config link: .codex/config.toml must be a local regular file");
+  }
+  if (!pathsEqual(realpathSync.native(configPath), configPath)) {
+    throw new Error("unsafe config link: resolved path escapes the workspace");
+  }
+}
 
 // ── Atomic file write ────────────────────────────────────────────────────────
 
@@ -282,13 +324,20 @@ function restoreFile(snap) {
  * Rollback multiple snapshots. If any restore fails, wraps original error
  * in cleanup_failed with the original failure code/message preserved.
  */
-function rollback(snapshots, originalReason) {
+function rollback(snapshots, originalReason, removeEmptyDirs = []) {
   const errors = [];
   for (const snap of snapshots) {
     try {
       restoreFile(snap);
     } catch (err) {
       errors.push(`${snap.path}: ${err.message}`);
+    }
+  }
+  for (const dir of removeEmptyDirs) {
+    try {
+      if (existsSync(dir) && readdirSync(dir).length === 0) rmdirSync(dir);
+    } catch (err) {
+      errors.push(`${dir}: ${err.message}`);
     }
   }
   if (errors.length > 0) {
@@ -336,6 +385,7 @@ function defaultHooks() {
  */
 async function classifyState(h, canonicalRoot, expected) {
   const codexHome = codexHomePath(canonicalRoot);
+  assertLocalCodexPaths(canonicalRoot);
 
   // 1. Check server via list (authoritative existence check)
   let servers;
@@ -414,6 +464,7 @@ export async function bindWorkspace({ host, cwd, hooks }) {
   const proof = proveWorkspace(cwd);
   const canonicalRoot = proof.root;
   const expected = expectedServerContract(canonicalRoot);
+  assertLocalCodexPaths(canonicalRoot);
 
   // 2. Fail-closed: tracked config
   if (isConfigTracked(canonicalRoot)) {
@@ -451,7 +502,12 @@ export async function bindWorkspace({ host, cwd, hooks }) {
   // 4. Snapshot for rollback
   const gitDir = getGitDir(canonicalRoot);
   const codexHome = codexHomePath(canonicalRoot);
+  const configPath = codexConfigPath(canonicalRoot);
+  const codexHomeExisted = existsSync(codexHome);
+  const configSnap = snapshotFile(configPath);
   const excludeSnap = snapshotFile(excludePath(gitDir));
+  const snapshots = [configSnap, excludeSnap];
+  const cleanupDirs = codexHomeExisted ? [] : [codexHome];
 
   // 5. Write exclude block FIRST (crash → only extra ignore, no config exposure)
   const excludeContent = excludeSnap.exists ? excludeSnap.bytes.toString("utf8") : "";
@@ -470,30 +526,56 @@ export async function bindWorkspace({ host, cwd, hooks }) {
   try {
     h.writeExclude(gitDir, newExcludeContent);
   } catch (err) {
+    rollback(snapshots, `exclude write failed: ${err.message}`, cleanupDirs);
     throw new Error(`exclude write failed: ${err.message}`);
+  }
+  try {
+    if (h.readExclude(gitDir) !== newExcludeContent) {
+      throw new Error("written bytes do not match expected ownership block");
+    }
+  } catch (err) {
+    rollback(snapshots, `exclude verify failed: ${err.message}`, cleanupDirs);
+    throw new Error(`exclude verify failed: ${err.message}`);
   }
 
   // 6. codex mcp add
   try {
+    if (!existsSync(codexHome)) mkdirSync(codexHome, { recursive: true });
+    assertLocalCodexPaths(canonicalRoot);
     await h.codexAdd({
-      codexHome, name: expected.name, command: expected.command, args: expected.args,
+      codexHome,
+      name: expected.name,
+      command: expected.transport.command,
+      args: expected.transport.args,
     });
   } catch (err) {
-    rollback([excludeSnap], `codex mcp add failed: ${err.message}`);
+    rollback(snapshots, `codex mcp add failed: ${err.message}`, cleanupDirs);
     throw new Error(`codex mcp add failed: ${err.message}`);
   }
 
   // 7. Verify exact server contract via get
   let added;
   try {
+    assertLocalCodexPaths(canonicalRoot);
     added = await h.codexGet({ codexHome, name: expected.name });
   } catch (err) {
-    rollback([excludeSnap], `codex mcp get verify failed: ${err.message}`);
+    rollback(snapshots, `codex mcp get verify failed: ${err.message}`, cleanupDirs);
     throw new Error(`verify failed after add: ${err.message}`);
   }
   if (!serverMatchesExpected(added, expected)) {
-    rollback([excludeSnap], "server contract mismatch after add");
+    rollback(snapshots, "server contract mismatch after add", cleanupDirs);
     throw new Error("server contract mismatch after add — rolled back");
+  }
+  let finalState;
+  try {
+    finalState = await classifyState(h, canonicalRoot, expected);
+  } catch (err) {
+    rollback(snapshots, `final state verification failed: ${err.message}`, cleanupDirs);
+    throw new Error(`final state verification failed after bind: ${err.message}`);
+  }
+  if (finalState.status !== "configured") {
+    rollback(snapshots, `final state verification failed: ${finalState.status}`, cleanupDirs);
+    throw new Error(`final state verification failed after bind: ${finalState.status}`);
   }
 
   return {
@@ -520,13 +602,23 @@ export async function statusWorkspace({ host, cwd, hooks }) {
   } catch (err) {
     return { bound: false, host, status: "invalid_workspace", error: err.message };
   }
+  try {
+    assertLocalCodexPaths(canonicalRoot);
+  } catch (err) {
+    return { bound: false, host, status: "unsafe_codex_home", error: err.message };
+  }
 
   if (isConfigTracked(canonicalRoot)) {
     return { bound: false, host, status: "tracked_config" };
   }
 
   const expected = expectedServerContract(canonicalRoot);
-  const state = await classifyState(h, canonicalRoot, expected);
+  let state;
+  try {
+    state = await classifyState(h, canonicalRoot, expected);
+  } catch (err) {
+    return { bound: false, host, status: "unsafe_codex_home", error: err.message };
+  }
 
   return {
     bound: state.status === "configured",
@@ -559,8 +651,13 @@ export async function unbindWorkspace({ host, cwd, hooks }) {
   const proof = proveWorkspace(cwd);
   const canonicalRoot = proof.root;
   const expected = expectedServerContract(canonicalRoot);
+  assertLocalCodexPaths(canonicalRoot);
   const gitDir = getGitDir(canonicalRoot);
   const codexHome = codexHomePath(canonicalRoot);
+
+  if (isConfigTracked(canonicalRoot)) {
+    throw new Error(".codex/config.toml is tracked by Git — refuse to modify (fail-closed)");
+  }
 
   // 2. Classify state (preflight — all checks before mutation)
   const state = await classifyState(h, canonicalRoot, expected);
@@ -590,26 +687,30 @@ export async function unbindWorkspace({ host, cwd, hooks }) {
   }
 
   // 3. Snapshot for rollback
+  const configSnap = snapshotFile(codexConfigPath(canonicalRoot));
   const excludeSnap = snapshotFile(excludePath(gitDir));
+  const snapshots = [configSnap, excludeSnap];
 
   // 4. Remove server if it exists
   if (state.hasServer) {
     try {
+      assertLocalCodexPaths(canonicalRoot);
       await h.codexRemove({ codexHome, name: expected.name });
     } catch (err) {
-      rollback([excludeSnap], `codex mcp remove failed: ${err.message}`);
+      rollback(snapshots, `codex mcp remove failed: ${err.message}`);
       throw new Error(`codex mcp remove failed: ${err.message}`);
     }
     // 5. Verify server is absent
     let servers;
     try {
+      assertLocalCodexPaths(canonicalRoot);
       servers = await h.codexList({ codexHome });
     } catch (err) {
-      rollback([excludeSnap], `post-remove verify failed: ${err.message}`);
+      rollback(snapshots, `post-remove verify failed: ${err.message}`);
       throw new Error(`post-remove verify failed: ${err.message}`);
     }
     if (servers.some((s) => s.name === "wao")) {
-      rollback([excludeSnap], "server still present after remove");
+      rollback(snapshots, "server still present after remove");
       throw new Error("server still present after remove — rolled back");
     }
   }
@@ -633,10 +734,33 @@ export async function unbindWorkspace({ host, cwd, hooks }) {
           h.writeExclude(gitDir, newContent);
         }
       } catch (err) {
-        rollback([excludeSnap], `exclude remove failed: ${err.message}`);
+        rollback(snapshots, `exclude remove failed: ${err.message}`);
         throw new Error(`exclude remove failed: ${err.message}`);
       }
+      const expectedContent = newContent.trim().length === 0 && before.length === 0
+        ? newContent.trim() + "\n"
+        : newContent;
+      try {
+        if (h.readExclude(gitDir) !== expectedContent) {
+          throw new Error("written bytes do not match expected exclude content");
+        }
+      } catch (err) {
+        rollback(snapshots, `exclude verify failed after remove: ${err.message}`);
+        throw new Error(`exclude verify failed after remove: ${err.message}`);
+      }
     }
+  }
+
+  let finalState;
+  try {
+    finalState = await classifyState(h, canonicalRoot, expected);
+  } catch (err) {
+    rollback(snapshots, `final state verification failed: ${err.message}`);
+    throw new Error(`final state verification failed after unbind: ${err.message}`);
+  }
+  if (finalState.status !== "not_configured") {
+    rollback(snapshots, `final state verification failed: ${finalState.status}`);
+    throw new Error(`final state verification failed after unbind: ${finalState.status}`);
   }
 
   return { unbound: true, status: "unbound" };
