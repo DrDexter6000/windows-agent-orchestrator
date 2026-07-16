@@ -1,35 +1,24 @@
 // test/mcpBind.test.js
 //
-// M10 P0-1: Project-scoped workspace activation (mcp bind/status/unbind).
-// CTO closeout: real failure injection, byte-fidelity, checksum/status, marker cardinality.
+// M10 P0-1 Reframe: Codex-owned config adapter tests.
 //
-// Architectural contract (verified by test ARCH):
-//   - src/application/mcpWorkspaceActivation.js does NOT import src/commands/*,
-//     src/mcp/*, MCP SDK, or zod.
-//   - Reuses proveWorkspace from workspaceBinding.js.
+// Tests use fake Codex adapter hooks for deterministic unit testing,
+// plus a real Codex CLI integration test (no skip allowed per CTO).
 //
-// Security contract:
-//   - Two-resource transaction (config + exclude) with atomic writes and rollback.
-//   - Any single-step failure restores both resources to exact original bytes.
-//   - Marker cardinality enforced (exactly 1 begin + 1 end).
-//   - Checksum verified before bind/rebind/status/unbind.
-//   - Byte-fidelity: user content preserved exactly through bind→unbind cycle.
-//   - No credential values written.
+// Architectural contract:
+//   - mcpWorkspaceActivation.js does NOT import commands/mcp/SDK/zod
+//   - codexMcpConfig.js does NOT import application/commands/mcp/SDK/zod
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  mkdtempSync,
-  mkdirSync,
-  rmSync,
-  writeFileSync,
-  readFileSync,
-  existsSync,
+  mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
-import { execFileSync } from "node:child_process";
+import { join, dirname, resolve } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -43,43 +32,79 @@ function makeGitRepo(dir) {
 }
 
 function readExclude(gitDir) {
-  const excludePath = join(gitDir, "info", "exclude");
-  if (!existsSync(excludePath)) return null;
-  return readFileSync(excludePath);
-}
-
-function readCodexConfig(projectDir) {
-  const p = join(projectDir, ".codex", "config.toml");
+  const p = join(gitDir, "info", "exclude");
   if (!existsSync(p)) return null;
   return readFileSync(p);
 }
 
-function readCodexConfigStr(projectDir) {
-  const buf = readCodexConfig(projectDir);
-  return buf ? buf.toString("utf8") : null;
+/**
+ * Create fake Codex adapter hooks backed by an in-memory server store.
+ * Each hook records its calls for ordering assertions.
+ */
+function fakeCodexHooks(initialServers = []) {
+  const servers = new Map();
+  for (const s of initialServers) servers.set(s.name, s);
+  const calls = [];
+  return {
+    calls,
+    servers,
+    codexList: async () => { calls.push("list"); return [...servers.values()]; },
+    codexGet: async ({ name }) => { calls.push(`get:${name}`); return servers.get(name) ?? null; },
+    codexAdd: async ({ name, command, args }) => {
+      calls.push(`add:${name}`);
+      servers.set(name, {
+        name, enabled: true,
+        transport: { type: "stdio", command, args, env: null, env_vars: [], cwd: null },
+      });
+    },
+    codexRemove: async ({ name }) => { calls.push(`remove:${name}`); servers.delete(name); },
+  };
+}
+
+/**
+ * Build a server object matching the expected contract for a given root.
+ */
+function makeExpectedServer(root) {
+  const _MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+  const REPO_ROOT = resolve(_MODULE_DIR, "..");
+  return {
+    name: "wao", enabled: true,
+    transport: {
+      type: "stdio", command: "node",
+      args: [
+        join(REPO_ROOT, "scripts", "wao-node.cjs"),
+        join(REPO_ROOT, "src", "mcp", "stdio.js"),
+        "--registry", join(REPO_ROOT, "config", "agents.json"),
+        "--run-dir", join(REPO_ROOT, "runs"),
+        "--workspace-root", root,
+      ],
+      env: null, env_vars: [], cwd: null,
+    },
+  };
 }
 
 // ── Basic lifecycle ─────────────────────────────────────────────────────────
 
-test("BIND-01: bind → status configured → unbind → status not_configured", async () => {
+test("BIND-01: bind → status configured → unbind → not_configured", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-bind-01-"));
   try {
     makeGitRepo(dir);
     const { bindWorkspace, statusWorkspace, unbindWorkspace } = await import(
       "../src/application/mcpWorkspaceActivation.js"
     );
+    const fk = fakeCodexHooks();
 
-    const bindResult = await bindWorkspace({ host: "codex", cwd: dir });
+    const bindResult = await bindWorkspace({ host: "codex", cwd: dir, hooks: fk });
     assert.equal(bindResult.bound, true);
     assert.equal(bindResult.status, "configured");
 
-    const status1 = await statusWorkspace({ host: "codex", cwd: dir });
+    const status1 = await statusWorkspace({ host: "codex", cwd: dir, hooks: fk });
     assert.equal(status1.bound, true);
     assert.equal(status1.status, "configured");
 
-    await unbindWorkspace({ host: "codex", cwd: dir });
+    await unbindWorkspace({ host: "codex", cwd: dir, hooks: fk });
 
-    const status2 = await statusWorkspace({ host: "codex", cwd: dir });
+    const status2 = await statusWorkspace({ host: "codex", cwd: dir, hooks: fk });
     assert.equal(status2.bound, false);
     assert.equal(status2.status, "not_configured");
   } finally {
@@ -87,644 +112,550 @@ test("BIND-01: bind → status configured → unbind → status not_configured",
   }
 });
 
-// ── Rejection tests ─────────────────────────────────────────────────────────
+// ── CTO RED: exclude corruption ──────────────────────────────────────────────
 
-test("BIND-03: non-Git directory rejected, zero writes", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-bind-03-"));
+test("EXCLUDE-CORRUPT-01: exclude rule changed to /unexpected-path → status excludes, unbind refuses, bytes unchanged", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-exc-corrupt-"));
   try {
-    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
-    await assert.rejects(() => bindWorkspace({ host: "codex", cwd: dir }));
-    assert.ok(!existsSync(join(dir, ".codex")), "no .codex/ should be created");
+    makeGitRepo(dir);
+    const { bindWorkspace, statusWorkspace, unbindWorkspace } = await import(
+      "../src/application/mcpWorkspaceActivation.js"
+    );
+    const fk = fakeCodexHooks();
+
+    await bindWorkspace({ host: "codex", cwd: dir, hooks: fk });
+
+    // Tamper: change /.codex/config.toml to /unexpected-path inside the exclude block
+    const excludeP = join(dir, ".git", "info", "exclude");
+    const exclude = readFileSync(excludeP, "utf8");
+    const tampered = exclude.replace("/.codex/config.toml", "/unexpected-path");
+    writeFileSync(excludeP, tampered);
+
+    // Status must NOT report configured
+    const status = await statusWorkspace({ host: "codex", cwd: dir, hooks: fk });
+    assert.equal(status.bound, false);
+    assert.equal(status.status, "exclude_missing_or_modified");
+
+    // Unbind must refuse
+    await assert.rejects(
+      () => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }),
+      (err) => err.message.includes("exclude"),
+    );
+
+    // Config bytes must be unchanged (Codex adapter wasn't called for remove)
+    assert.ok(!fk.calls.includes("remove:wao"), "codexRemove must not have been called");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("BIND-04: Git subdirectory rejected, zero writes", async () => {
-  const root = mkdtempSync(join(tmpdir(), "wao-bind-04-"));
-  const subdir = join(root, "subdir");
+// ── External conflict ────────────────────────────────────────────────────────
+
+test("CONFLICT-01: different wao server → external_conflict, zero mutation", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-conflict-"));
   try {
-    makeGitRepo(root);
-    mkdirSync(subdir);
-    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
-    await assert.rejects(() => bindWorkspace({ host: "codex", cwd: subdir }));
-    assert.ok(!existsSync(join(subdir, ".codex")));
+    makeGitRepo(dir);
+    const differentServer = {
+      name: "wao", enabled: true,
+      transport: { type: "stdio", command: "other-bin", args: ["diff"], env: null, env_vars: [], cwd: null },
+    };
+    const fk = fakeCodexHooks([differentServer]);
+    const { bindWorkspace, statusWorkspace } = await import(
+      "../src/application/mcpWorkspaceActivation.js"
+    );
+
+    const status = await statusWorkspace({ host: "codex", cwd: dir, hooks: fk });
+    assert.equal(status.status, "external_conflict");
+
+    await assert.rejects(
+      () => bindWorkspace({ host: "codex", cwd: dir, hooks: fk }),
+      (err) => err.message.includes("conflict"),
+    );
+    // No add/remove calls
+    assert.ok(!fk.calls.some(c => c.startsWith("add:")), "add must not be called");
+    assert.ok(!fk.calls.some(c => c.startsWith("remove:")), "remove must not be called");
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("BIND-05: tracked .codex/config.toml → fail-closed", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-bind-05-"));
+// ── Unmanaged exact server ───────────────────────────────────────────────────
+
+test("UNMANAGED-EXACT-01: exact server but no exclude → unmanaged_exact_server, refuse bind and unbind", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-unmanaged-"));
+  try {
+    makeGitRepo(dir);
+    // Get the canonical root that proveWorkspace would return
+    const { proveWorkspace } = await import("../src/application/workspaceBinding.js");
+    const proof = proveWorkspace(dir);
+    const canonicalRoot = proof.root;
+    const exactServer = makeExpectedServer(canonicalRoot);
+    const fk = fakeCodexHooks([exactServer]);
+    const { bindWorkspace, statusWorkspace, unbindWorkspace } = await import(
+      "../src/application/mcpWorkspaceActivation.js"
+    );
+
+    const status = await statusWorkspace({ host: "codex", cwd: dir, hooks: fk });
+    assert.equal(status.status, "unmanaged_exact_server");
+
+    await assert.rejects(
+      () => bindWorkspace({ host: "codex", cwd: dir, hooks: fk }),
+      (err) => err.message.includes("unmanaged_exact_server"),
+    );
+    await assert.rejects(
+      () => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }),
+      (err) => err.message.includes("unmanaged_exact_server"),
+    );
+    // No mutation
+    assert.ok(!fk.calls.some(c => c.startsWith("add:")), "add must not be called");
+    assert.ok(!fk.calls.some(c => c.startsWith("remove:")), "remove must not be called");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── Activation incomplete ────────────────────────────────────────────────────
+
+test("ACTIVATION-INCOMPLETE-01: exclude exists but server missing → activation_incomplete, bind completes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-incomplete-"));
+  try {
+    makeGitRepo(dir);
+    const { bindWorkspace, statusWorkspace } = await import(
+      "../src/application/mcpWorkspaceActivation.js"
+    );
+    // First bind to create exclude
+    const fk1 = fakeCodexHooks();
+    await bindWorkspace({ host: "codex", cwd: dir, hooks: fk1 });
+
+    // Simulate server removed externally but exclude remains
+    const fk2 = fakeCodexHooks(); // empty server list
+    const status = await statusWorkspace({ host: "codex", cwd: dir, hooks: fk2 });
+    assert.equal(status.status, "activation_incomplete");
+
+    // bind should complete the activation
+    const result = await bindWorkspace({ host: "codex", cwd: dir, hooks: fk2 });
+    assert.equal(result.bound, true);
+    assert.equal(result.status, "configured");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── Idempotent ───────────────────────────────────────────────────────────────
+
+test("IDEMPOTENT-01: exact server + exact exclude → bind idempotent", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-idem-"));
+  try {
+    makeGitRepo(dir);
+    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+    const fk = fakeCodexHooks();
+    await bindWorkspace({ host: "codex", cwd: dir, hooks: fk });
+    const addCount1 = fk.calls.filter(c => c.startsWith("add:")).length;
+
+    // Second bind — should be idempotent
+    const result2 = await bindWorkspace({ host: "codex", cwd: dir, hooks: fk });
+    assert.equal(result2.bound, true);
+    const addCount2 = fk.calls.filter(c => c.startsWith("add:")).length;
+    assert.equal(addCount2, addCount1, "add should not be called again on idempotent bind");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── Tracked config ───────────────────────────────────────────────────────────
+
+test("TRACKED-01: tracked .codex/config.toml → fail-closed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-tracked-"));
   try {
     makeGitRepo(dir);
     mkdirSync(join(dir, ".codex"));
     writeFileSync(join(dir, ".codex", "config.toml"), "# user config\n");
     execFileSync("git", ["add", "-A"], { cwd: dir });
-    execFileSync("git", ["commit", "-q", "-m", "add codex config"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "track config"], { cwd: dir });
 
-    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+    const { bindWorkspace, statusWorkspace } = await import(
+      "../src/application/mcpWorkspaceActivation.js"
+    );
+    const status = await statusWorkspace({ host: "codex", cwd: dir, hooks: fakeCodexHooks() });
+    assert.equal(status.status, "tracked_config");
+
     await assert.rejects(
-      () => bindWorkspace({ host: "codex", cwd: dir }),
+      () => bindWorkspace({ host: "codex", cwd: dir, hooks: fakeCodexHooks() }),
       (err) => err.message.includes("tracked"),
     );
-    const config = readCodexConfigStr(dir);
-    assert.equal(config, "# user config\n");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("BIND-06: existing non-WAO [mcp_servers.wao] → fail-closed", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-bind-06-"));
+// ── Failure injection: rollback ──────────────────────────────────────────────
+
+test("ROLLBACK-ADD-01: codexAdd fails → exclude rolled back", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-rb-add-"));
   try {
     makeGitRepo(dir);
-    mkdirSync(join(dir, ".codex"));
-    writeFileSync(
-      join(dir, ".codex", "config.toml"),
-      '[mcp_servers.wao]\ncommand = "my-custom"\nargs = ["x"]\n',
-    );
+    const excludeBefore = readExclude(join(dir, ".git"));
+    const fk = fakeCodexHooks();
+    fk.codexAdd = async () => { throw new Error("simulated add failure"); };
+
     const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
     await assert.rejects(
-      () => bindWorkspace({ host: "codex", cwd: dir }),
-      (err) => err.message.includes("conflict"),
+      () => bindWorkspace({ host: "codex", cwd: dir, hooks: fk }),
+      (err) => err.message.includes("add failed"),
     );
-    const config = readCodexConfigStr(dir);
-    assert.ok(config.includes('command = "my-custom"'));
+    // Exclude must be restored
+    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("BIND-14: relative path rejected", async () => {
+test("ROLLBACK-VERIFY-01: codexGet returns mismatch → rollback", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-rb-verify-"));
+  try {
+    makeGitRepo(dir);
+    const excludeBefore = readExclude(join(dir, ".git"));
+    const fk = fakeCodexHooks();
+    // Add succeeds but get returns a mismatched server
+    fk.codexGet = async () => ({
+      name: "wao", enabled: true,
+      transport: { type: "stdio", command: "wrong", args: [], env: null, env_vars: [], cwd: null },
+    });
+
+    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+    await assert.rejects(
+      () => bindWorkspace({ host: "codex", cwd: dir, hooks: fk }),
+      (err) => err.message.includes("mismatch"),
+    );
+    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ROLLBACK-REMOVE-01: codexRemove fails → rollback", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-rb-rm-"));
+  try {
+    makeGitRepo(dir);
+    const { bindWorkspace, unbindWorkspace } = await import(
+      "../src/application/mcpWorkspaceActivation.js"
+    );
+    const fk = fakeCodexHooks();
+    await bindWorkspace({ host: "codex", cwd: dir, hooks: fk });
+
+    const excludeBefore = readExclude(join(dir, ".git"));
+    // Now break remove
+    fk.codexRemove = async () => { throw new Error("simulated remove failure"); };
+
+    await assert.rejects(
+      () => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }),
+      (err) => err.message.includes("remove failed"),
+    );
+    // Exclude must be unchanged (rollback restores it)
+    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ROLLBACK-REMOVE-VERIFY-01: remove succeeds but verify shows server still present → rollback", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-rb-rm-ver-"));
+  try {
+    makeGitRepo(dir);
+    const { bindWorkspace, unbindWorkspace } = await import(
+      "../src/application/mcpWorkspaceActivation.js"
+    );
+    const fk = fakeCodexHooks();
+    await bindWorkspace({ host: "codex", cwd: dir, hooks: fk });
+
+    const excludeBefore = readExclude(join(dir, ".git"));
+    // Remove "succeeds" but list still shows the server
+    fk.codexRemove = async () => {}; // no-op, doesn't actually delete
+    // Override codexList to still show the server
+    const server = fk.servers.get("wao");
+    fk.codexList = async () => [server];
+
+    await assert.rejects(
+      () => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }),
+      (err) => err.message.includes("still present"),
+    );
+    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── Bind ordering ────────────────────────────────────────────────────────────
+
+test("BIND-ORDER-01: exclude written before codex add", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-order-"));
+  try {
+    makeGitRepo(dir);
+    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+    const callOrder = [];
+    // Use a mutable store so codexAdd populates what codexGet returns
+    let addedServer = null;
+    const fk = {
+      codexList: async () => { callOrder.push("list"); return addedServer ? [addedServer] : []; },
+      codexGet: async () => { callOrder.push("get"); return addedServer; },
+      codexAdd: async ({ name, command, args }) => {
+        callOrder.push("add");
+        addedServer = {
+          name, enabled: true,
+          transport: { type: "stdio", command, args, env: null, env_vars: [], cwd: null },
+        };
+      },
+      codexRemove: async () => { callOrder.push("remove"); addedServer = null; },
+      readExclude: (gitDir) => {
+        callOrder.push("readExclude");
+        const p = join(gitDir, "info", "exclude");
+        return existsSync(p) ? readFileSync(p, "utf8") : null;
+      },
+      writeExclude: (gitDir, content) => {
+        callOrder.push("writeExclude");
+        const infoDir = join(gitDir, "info");
+        if (!existsSync(infoDir)) mkdirSync(infoDir, { recursive: true });
+        writeFileSync(join(infoDir, "exclude"), content);
+      },
+    };
+    await bindWorkspace({ host: "codex", cwd: dir, hooks: fk });
+
+    const writeIdx = callOrder.indexOf("writeExclude");
+    const addIdx = callOrder.indexOf("add");
+    assert.ok(writeIdx !== -1 && addIdx !== -1, "both writeExclude and add must be called");
+    assert.ok(writeIdx < addIdx, "exclude must be written before codex add");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── Unbind preflight ─────────────────────────────────────────────────────────
+
+test("UNBIND-PREFLIGHT-01: exclude damaged → mutation count 0", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-preflight-"));
+  try {
+    makeGitRepo(dir);
+    const { bindWorkspace, unbindWorkspace } = await import(
+      "../src/application/mcpWorkspaceActivation.js"
+    );
+    const fk = fakeCodexHooks();
+    await bindWorkspace({ host: "codex", cwd: dir, hooks: fk });
+
+    // Damage exclude
+    const excludeP = join(dir, ".git", "info", "exclude");
+    writeFileSync(excludeP, readFileSync(excludeP, "utf8").replace("/.codex/config.toml", "/bad"));
+
+    // Reset call tracking
+    fk.calls.length = 0;
+    await assert.rejects(
+      () => unbindWorkspace({ host: "codex", cwd: dir, hooks: fk }),
+    );
+    assert.ok(!fk.calls.some(c => c.startsWith("remove:")), "remove must not be called on damaged exclude");
+    assert.ok(!fk.calls.some(c => c === "writeExclude"), "writeExclude must not be called on damaged exclude");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── Rejection tests ─────────────────────────────────────────────────────────
+
+test("REJECT-01: non-Git directory rejected", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-reject-nogit-"));
+  try {
+    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+    await assert.rejects(() => bindWorkspace({ host: "codex", cwd: dir, hooks: fakeCodexHooks() }));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("REJECT-02: Git subdirectory rejected", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wao-reject-sub-"));
+  const subdir = join(root, "sub");
+  try {
+    makeGitRepo(root);
+    mkdirSync(subdir);
+    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+    await assert.rejects(() => bindWorkspace({ host: "codex", cwd: subdir, hooks: fakeCodexHooks() }));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("REJECT-03: relative path rejected", async () => {
   const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
   await assert.rejects(
-    () => bindWorkspace({ host: "codex", cwd: "relative/path" }),
+    () => bindWorkspace({ host: "codex", cwd: "rel/path", hooks: fakeCodexHooks() }),
     (err) => err.message.includes("absolute"),
   );
 });
 
-test("BIND-15: unsupported host rejected", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-bind-15-"));
+test("REJECT-04: unsupported host rejected", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-reject-host-"));
   try {
     makeGitRepo(dir);
     const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
     await assert.rejects(
-      () => bindWorkspace({ host: "claude-code", cwd: dir }),
+      () => bindWorkspace({ host: "claude", cwd: dir, hooks: fakeCodexHooks() }),
       (err) => err.message.includes("host"),
     );
-    assert.ok(!existsSync(join(dir, ".codex")));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-// ── Idempotency ─────────────────────────────────────────────────────────────
+// ── Extra fields rejection (CTO correction 3) ────────────────────────────────
 
-test("BIND-07: idempotent bind — no duplicate block/rule", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-bind-07-"));
+test("EXTRA-FIELDS-01: server with cwd set → not exact match", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-extra-cwd-"));
+  try {
+    makeGitRepo(dir);
+    const server = makeExpectedServer(dir.replace(/\\/g, "/"));
+    server.transport.cwd = "/some/path"; // extra cwd
+    const fk = fakeCodexHooks([server]);
+    const { statusWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+    const status = await statusWorkspace({ host: "codex", cwd: dir, hooks: fk });
+    // Should NOT be configured — cwd makes it non-exact
+    assert.notEqual(status.status, "configured");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("EXTRA-FIELDS-02: server with env_vars → not exact match", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-extra-env-"));
+  try {
+    makeGitRepo(dir);
+    const server = makeExpectedServer(dir.replace(/\\/g, "/"));
+    server.transport.env_vars = ["EXTRA_VAR"]; // extra env var name
+    const fk = fakeCodexHooks([server]);
+    const { statusWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+    const status = await statusWorkspace({ host: "codex", cwd: dir, hooks: fk });
+    assert.notEqual(status.status, "configured");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── .gitignore not modified ──────────────────────────────────────────────────
+
+test("GITIGNORE-01: .gitignore never modified, git status clean of .codex", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-gitignore-"));
   try {
     makeGitRepo(dir);
     const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
-    await bindWorkspace({ host: "codex", cwd: dir });
-    await bindWorkspace({ host: "codex", cwd: dir });
-
-    const config = readCodexConfigStr(dir);
-    const markerCount = (config.match(/WAO MANAGED BLOCK/g) || []).length;
-    assert.equal(markerCount, 2, "exactly one begin + one end marker");
-
-    const exclude = readExclude(join(dir, ".git"));
-    const beginMarkers = (exclude.toString("utf8").match(/>>> WAO MANAGED \(mcp workspace activation\) >>>/g) || []).length;
-    assert.equal(beginMarkers, 1);
-    const ruleCount = (exclude.toString("utf8").match(/^\/\.codex\/config\.toml$/gm) || []).length;
-    assert.equal(ruleCount, 1);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("BIND-08: idempotent unbind — already_unbound", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-bind-08-"));
-  try {
-    makeGitRepo(dir);
-    const { bindWorkspace, unbindWorkspace } = await import(
-      "../src/application/mcpWorkspaceActivation.js"
-    );
-    await bindWorkspace({ host: "codex", cwd: dir });
-    await unbindWorkspace({ host: "codex", cwd: dir });
-    const result2 = await unbindWorkspace({ host: "codex", cwd: dir });
-    assert.equal(result2.unbound, true);
-    assert.equal(result2.status, "already_unbound");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// ── Tamper detection ────────────────────────────────────────────────────────
-
-test("BIND-09: managed block externally modified → unbind fail-closed", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-bind-09-"));
-  try {
-    makeGitRepo(dir);
-    const { bindWorkspace, unbindWorkspace } = await import(
-      "../src/application/mcpWorkspaceActivation.js"
-    );
-    await bindWorkspace({ host: "codex", cwd: dir });
-    const config = readCodexConfigStr(dir);
-    const tampered = config.replace('command = "node"', 'command = "evil"');
-    writeFileSync(join(dir, ".codex", "config.toml"), tampered);
-    await assert.rejects(
-      () => unbindWorkspace({ host: "codex", cwd: dir }),
-      (err) => err.message.includes("modified"),
-    );
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("BIND-09b: managed block externally modified → bind fail-closed (no overwrite)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-bind-09b-"));
-  try {
-    makeGitRepo(dir);
-    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
-    await bindWorkspace({ host: "codex", cwd: dir });
-    const config = readCodexConfigStr(dir);
-    const tampered = config.replace('command = "node"', 'command = "evil"');
-    writeFileSync(join(dir, ".codex", "config.toml"), tampered);
-    await assert.rejects(
-      () => bindWorkspace({ host: "codex", cwd: dir }),
-      (err) => err.message.includes("modified"),
-    );
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// ── Status state classification ─────────────────────────────────────────────
-
-test("BIND-10: .gitignore never modified; git status shows no .codex/config.toml", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-bind-10-"));
-  try {
-    makeGitRepo(dir);
-    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
-    await bindWorkspace({ host: "codex", cwd: dir });
+    await bindWorkspace({ host: "codex", cwd: dir, hooks: fakeCodexHooks() });
     const status = execFileSync("git", ["status", "--porcelain"], { cwd: dir, encoding: "utf8" });
     assert.ok(!status.includes(".codex/config.toml"));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("BIND-11: no credential values written", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-bind-11-"));
+// ── No credentials ───────────────────────────────────────────────────────────
+
+test("NO-CRED-01: no credential values in exclude or output", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-nocred-"));
   try {
     makeGitRepo(dir);
     const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
-    await bindWorkspace({ host: "codex", cwd: dir });
-    const config = readCodexConfigStr(dir);
-    assert.ok(!config.includes("ZHIPU_API_KEY"));
-    assert.ok(!/(?:api[_-]?key|secret|token)\s*[:=]/i.test(config));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+    const result = await bindWorkspace({ host: "codex", cwd: dir, hooks: fakeCodexHooks() });
+    const exclude = readExclude(join(dir, ".git")).toString("utf8");
+    assert.ok(!exclude.includes("ZHIPU_API_KEY"));
+    assert.ok(!/api[_-]?key|secret|token/i.test(exclude));
+    assert.ok(!JSON.stringify(result).includes("ZHIPU_API_KEY"));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("BIND-STAT-01: status managed_modified when checksum tampered", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-stat-01-"));
-  try {
-    makeGitRepo(dir);
-    const { bindWorkspace, statusWorkspace } = await import(
-      "../src/application/mcpWorkspaceActivation.js"
-    );
-    await bindWorkspace({ host: "codex", cwd: dir });
-    const config = readCodexConfigStr(dir);
-    writeFileSync(join(dir, ".codex", "config.toml"), config.replace('command = "node"', 'command = "evil"'));
-    const status = await statusWorkspace({ host: "codex", cwd: dir });
-    assert.equal(status.bound, false);
-    assert.equal(status.status, "managed_modified");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
+// ── Architecture boundary ────────────────────────────────────────────────────
 
-test("BIND-STAT-02: status tracked_config when .codex/config.toml tracked", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-stat-02-"));
-  try {
-    makeGitRepo(dir);
-    mkdirSync(join(dir, ".codex"));
-    writeFileSync(join(dir, ".codex", "config.toml"), "# tracked\n");
-    execFileSync("git", ["add", "-A"], { cwd: dir });
-    execFileSync("git", ["commit", "-q", "-m", "track config"], { cwd: dir });
-    const { statusWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
-    const status = await statusWorkspace({ host: "codex", cwd: dir });
-    assert.equal(status.bound, false);
-    assert.equal(status.status, "tracked_config");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("BIND-STAT-03: status external_conflict when non-WAO wao server exists", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-stat-03-"));
-  try {
-    makeGitRepo(dir);
-    mkdirSync(join(dir, ".codex"));
-    writeFileSync(join(dir, ".codex", "config.toml"), '[mcp_servers.wao]\ncommand = "other"\n');
-    const { statusWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
-    const status = await statusWorkspace({ host: "codex", cwd: dir });
-    assert.equal(status.bound, false);
-    assert.equal(status.status, "external_conflict");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("BIND-STAT-04: status exclude_missing when config OK but exclude gone", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-stat-04-"));
-  try {
-    makeGitRepo(dir);
-    const { bindWorkspace, statusWorkspace } = await import(
-      "../src/application/mcpWorkspaceActivation.js"
-    );
-    await bindWorkspace({ host: "codex", cwd: dir });
-    // Delete the exclude rule
-    const excludeP = join(dir, ".git", "info", "exclude");
-    writeFileSync(excludeP, "# reset\n");
-    const status = await statusWorkspace({ host: "codex", cwd: dir });
-    assert.equal(status.bound, false);
-    assert.equal(status.status, "exclude_missing_or_modified");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// ── Duplicate marker cardinality ────────────────────────────────────────────
-
-test("BIND-MARKER-01: duplicate begin marker → fail-closed", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-marker-01-"));
-  try {
-    makeGitRepo(dir);
-    const { bindWorkspace, statusWorkspace } = await import(
-      "../src/application/mcpWorkspaceActivation.js"
-    );
-    await bindWorkspace({ host: "codex", cwd: dir });
-    // Duplicate the begin marker
-    const config = readCodexConfigStr(dir);
-    const dup = config.replace(
-      "# >>> WAO MANAGED BLOCK (mcp workspace activation) >>>",
-      "# >>> WAO MANAGED BLOCK (mcp workspace activation) >>>\n# >>> WAO MANAGED BLOCK (mcp workspace activation) >>>",
-    );
-    writeFileSync(join(dir, ".codex", "config.toml"), dup);
-    const status = await statusWorkspace({ host: "codex", cwd: dir });
-    assert.equal(status.bound, false);
-    assert.equal(status.status, "managed_modified");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// ── Byte-fidelity (P1-D) ────────────────────────────────────────────────────
-
-test("BIND-BYTE-01: LF config preserved exactly through bind→unbind", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-byte-01-"));
-  try {
-    makeGitRepo(dir);
-    mkdirSync(join(dir, ".codex"));
-    const userConfig = '# my config\nmodel = "gpt-5"\n\n[mcp_servers.other]\ncommand = "other"\nargs = ["run"]\n';
-    writeFileSync(join(dir, ".codex", "config.toml"), userConfig);
-    const { bindWorkspace, unbindWorkspace } = await import(
-      "../src/application/mcpWorkspaceActivation.js"
-    );
-    const before = readCodexConfig(dir);
-    await bindWorkspace({ host: "codex", cwd: dir });
-    await unbindWorkspace({ host: "codex", cwd: dir });
-    const after = readCodexConfig(dir);
-    assert.deepEqual(after, before, "config bytes must be identical after bind→unbind");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("BIND-BYTE-02: CRLF config preserved exactly", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-byte-02-"));
-  try {
-    makeGitRepo(dir);
-    mkdirSync(join(dir, ".codex"));
-    const userConfig = Buffer.from('# my config\r\nmodel = "gpt-5"\r\n');
-    writeFileSync(join(dir, ".codex", "config.toml"), userConfig);
-    const { bindWorkspace, unbindWorkspace } = await import(
-      "../src/application/mcpWorkspaceActivation.js"
-    );
-    const before = readCodexConfig(dir);
-    await bindWorkspace({ host: "codex", cwd: dir });
-    await unbindWorkspace({ host: "codex", cwd: dir });
-    const after = readCodexConfig(dir);
-    assert.deepEqual(after, before, "CRLF config bytes must be identical");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("BIND-BYTE-03: no trailing newline config preserved exactly", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-byte-03-"));
-  try {
-    makeGitRepo(dir);
-    mkdirSync(join(dir, ".codex"));
-    writeFileSync(join(dir, ".codex", "config.toml"), '# no newline at end');
-    const { bindWorkspace, unbindWorkspace } = await import(
-      "../src/application/mcpWorkspaceActivation.js"
-    );
-    const before = readCodexConfig(dir);
-    await bindWorkspace({ host: "codex", cwd: dir });
-    await unbindWorkspace({ host: "codex", cwd: dir });
-    const after = readCodexConfig(dir);
-    assert.deepEqual(after, before, "no-trailing-newline config must be preserved");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("BIND-BYTE-04: exclude bytes preserved exactly through bind→unbind", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-byte-04-"));
-  try {
-    makeGitRepo(dir);
-    const { bindWorkspace, unbindWorkspace } = await import(
-      "../src/application/mcpWorkspaceActivation.js"
-    );
-    const before = readExclude(join(dir, ".git"));
-    await bindWorkspace({ host: "codex", cwd: dir });
-    await unbindWorkspace({ host: "codex", cwd: dir });
-    const after = readExclude(join(dir, ".git"));
-    assert.deepEqual(after, before, "exclude bytes must be identical after bind→unbind");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("BIND-BYTE-05: UTF-8 BOM config preserved exactly", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-byte-05-"));
-  try {
-    makeGitRepo(dir);
-    mkdirSync(join(dir, ".codex"));
-    const userConfig = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('# bom config\nmodel = "x"\n')]);
-    writeFileSync(join(dir, ".codex", "config.toml"), userConfig);
-    const { bindWorkspace, unbindWorkspace } = await import(
-      "../src/application/mcpWorkspaceActivation.js"
-    );
-    const before = readCodexConfig(dir);
-    await bindWorkspace({ host: "codex", cwd: dir });
-    await unbindWorkspace({ host: "codex", cwd: dir });
-    const after = readCodexConfig(dir);
-    assert.deepEqual(after, before, "BOM config must be preserved byte-for-byte");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// ── Real failure injection (P1-B) ───────────────────────────────────────────
-
-test("BIND-FAIL-01: config write failure → both resources unchanged", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-fail-01-"));
-  try {
-    makeGitRepo(dir);
-    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
-    const configBefore = readCodexConfig(dir);
-    const excludeBefore = readExclude(join(dir, ".git"));
-    await assert.rejects(
-      () => bindWorkspace({
-        host: "codex", cwd: dir,
-        hooks: { writeConfig: () => { throw new Error("simulated config write failure"); } },
-      }),
-      (err) => err.message.includes("simulated config write failure"),
-    );
-    assert.deepEqual(readCodexConfig(dir), configBefore, "config must be unchanged");
-    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore, "exclude must be unchanged");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("BIND-FAIL-02: config verify failure → config rolled back, exclude unchanged", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-fail-02-"));
-  try {
-    makeGitRepo(dir);
-    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
-    const configBefore = readCodexConfig(dir);
-    const excludeBefore = readExclude(join(dir, ".git"));
-    await assert.rejects(
-      () => bindWorkspace({
-        host: "codex", cwd: dir,
-        hooks: { verifyConfig: () => false },
-      }),
-      (err) => err.message.includes("verification failed"),
-    );
-    assert.deepEqual(readCodexConfig(dir), configBefore, "config must be restored to original");
-    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore, "exclude must be unchanged");
-    // No temp files left
-    const codexDir = join(dir, ".codex");
-    if (existsSync(codexDir)) {
-      const { readdirSync } = await import("node:fs");
-      const temps = readdirSync(codexDir).filter(f => f.startsWith(".wao-tmp-"));
-      assert.equal(temps.length, 0, "no temp files should remain");
-    }
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("BIND-FAIL-02b: config verify THROWS → both resources rolled back", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-fail-02b-"));
-  try {
-    makeGitRepo(dir);
-    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
-    const configBefore = readCodexConfig(dir);
-    const excludeBefore = readExclude(join(dir, ".git"));
-    await assert.rejects(
-      () => bindWorkspace({
-        host: "codex", cwd: dir,
-        hooks: { verifyConfig: () => { throw new Error("verify explodes"); } },
-      }),
-      (err) => err.message.includes("verification step failed"),
-    );
-    // Critical: config must be restored despite the throw
-    assert.deepEqual(readCodexConfig(dir), configBefore, "config must be restored even when verify throws");
-    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore, "exclude must be unchanged");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("BIND-FAIL-02c: config read-back THROWS → both resources rolled back", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-fail-02c-"));
-  try {
-    makeGitRepo(dir);
-    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
-    const configBefore = readCodexConfig(dir);
-    const excludeBefore = readExclude(join(dir, ".git"));
-    await assert.rejects(
-      () => bindWorkspace({
-        host: "codex", cwd: dir,
-        hooks: { readConfig: () => { throw new Error("read-back explodes"); } },
-      }),
-      (err) => err.message.includes("verification step failed"),
-    );
-    assert.deepEqual(readCodexConfig(dir), configBefore, "config must be restored even when read-back throws");
-    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore, "exclude must be unchanged");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("BIND-FAIL-03: exclude write failure → config rolled back to original", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-fail-03-"));
-  try {
-    makeGitRepo(dir);
-    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
-    const configBefore = readCodexConfig(dir);
-    const excludeBefore = readExclude(join(dir, ".git"));
-    await assert.rejects(
-      () => bindWorkspace({
-        host: "codex", cwd: dir,
-        hooks: { writeExclude: () => { throw new Error("simulated exclude write failure"); } },
-      }),
-      (err) => err.message.includes("simulated exclude write failure"),
-    );
-    assert.deepEqual(readCodexConfig(dir), configBefore, "config must be rolled back");
-    assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore, "exclude must be unchanged");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// ── Existing user config preservation ───────────────────────────────────────
-
-test("BIND-12: existing non-conflict config preserved (content lines survive)", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-bind-12-"));
-  try {
-    makeGitRepo(dir);
-    mkdirSync(join(dir, ".codex"));
-    const userContent = '# My Codex config\nmodel = "gpt-5"\n\n[mcp_servers.other-tool]\ncommand = "other"\nargs = ["run"]\n';
-    writeFileSync(join(dir, ".codex", "config.toml"), userContent);
-    const { bindWorkspace, unbindWorkspace } = await import(
-      "../src/application/mcpWorkspaceActivation.js"
-    );
-    await bindWorkspace({ host: "codex", cwd: dir });
-    const configAfter = readCodexConfigStr(dir);
-    assert.ok(configAfter.includes('model = "gpt-5"'));
-    assert.ok(configAfter.includes('[mcp_servers.other-tool]'));
-    await unbindWorkspace({ host: "codex", cwd: dir });
-    // Byte-exact comparison (BIND-BYTE-01 covers this more strictly, but verify here too)
-    const configFinal = readCodexConfig(dir);
-    assert.deepEqual(configFinal, Buffer.from(userContent), "config must be byte-identical to original");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// ── Architectural boundary ──────────────────────────────────────────────────
-
-test("ARCH: application layer does not import commands/, mcp/, SDK, or zod", async () => {
-  const modulePath = join(
-    dirname(fileURLToPath(import.meta.url)),
-    "..", "src", "application", "mcpWorkspaceActivation.js",
-  );
+test("ARCH-01: mcpWorkspaceActivation does not import commands/mcp/SDK/zod", async () => {
+  const modulePath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "application", "mcpWorkspaceActivation.js");
   const src = readFileSync(modulePath, "utf8");
-  assert.ok(!src.includes("from \"../commands/"), "must not import commands/");
-  assert.ok(!src.includes("from \"../mcp/"), "must not import mcp/");
-  assert.ok(!src.includes("@modelcontextprotocol/sdk"), "must not import MCP SDK");
-  assert.ok(!src.includes("from \"zod\""), "must not import zod");
+  assert.ok(!src.includes('from "../commands/'), "no commands/");
+  assert.ok(!src.includes('from "../mcp/'), "no mcp/");
+  assert.ok(!src.includes("@modelcontextprotocol/sdk"), "no SDK");
+  assert.ok(!src.includes('from "zod"'), "no zod");
   assert.ok(src.includes("proveWorkspace"), "must reuse proveWorkspace");
-  // Check for literal process.cwd() — the string in comments was already fixed
-  const lines = src.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    // Allow comments mentioning the concept, but not actual code calls
-    const trimmed = lines[i].trim();
-    if (trimmed.startsWith("//")) continue;
-    assert.ok(
-      !trimmed.includes("process.cwd()"),
-      `line ${i + 1}: must not call process.cwd() in code: ${trimmed}`,
-    );
-  }
+  assert.ok(src.includes("codexMcpConfig"), "must delegate to codexMcpConfig adapter");
+  // No handwritten TOML writer
+  assert.ok(!src.includes("tomlBasicString"), "no handwritten TOML string writer");
+  assert.ok(!src.includes("tomlArray"), "no handwritten TOML array writer");
+  assert.ok(!src.includes("MANAGED_BEGIN"), "no managed block in config.toml");
 });
 
-test("DOC-GUARD: no 'node ...wao-cli.cmd' in docs or generated content", async () => {
-  // Check docs/usage.md
-  const usagePath = join(
-    dirname(fileURLToPath(import.meta.url)),
-    "..", "docs", "usage.md",
-  );
-  const usageSrc = readFileSync(usagePath, "utf8");
-  assert.ok(
-    !/node\s+.*wao-cli\.cmd/.test(usageSrc),
-    "docs/usage.md must not contain 'node ...wao-cli.cmd' (use & or cmd.exe call instead)",
-  );
-  // Check generated managed block comment
-  const modulePath = join(
-    dirname(fileURLToPath(import.meta.url)),
-    "..", "src", "application", "mcpWorkspaceActivation.js",
-  );
+test("ARCH-02: codexMcpConfig does not import application/commands/mcp/SDK/zod", async () => {
+  const modulePath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "hostAdapters", "codexMcpConfig.js");
   const src = readFileSync(modulePath, "utf8");
-  assert.ok(
-    !/node\s+.*wao-cli\.cmd/.test(src),
-    "mcpWorkspaceActivation.js must not reference 'node ...wao-cli.cmd'",
-  );
+  assert.ok(!src.includes('from "../application/'), "no application/");
+  assert.ok(!src.includes('from "../commands/'), "no commands/");
+  assert.ok(!src.includes('from "../mcp/'), "no mcp/");
+  assert.ok(!src.includes("@modelcontextprotocol/sdk"), "no SDK");
+  assert.ok(!src.includes('from "zod"'), "no zod");
+  // No codex exec
+  assert.ok(!src.includes('"exec"'), "no codex exec");
 });
 
-// ── Codex parser probe (P1-E) ───────────────────────────────────────────────
-// Tests that a bind-generated .codex/config.toml can be parsed by Codex CLI.
-// Uses an isolated CODEX_HOME to avoid touching the real global config.
-// NOTE: codex mcp list/get management commands may NOT load project config
-// even for trusted projects in an isolated CODEX_HOME. This is a Codex CLI
-// limitation, not a WAO bug. If Codex is unavailable or doesn't load project
-// config in isolation, this test skips with a clear explanation. The real
-// Codex Desktop cold-start gate is reserved for CTO.
+test("ARCH-03: no 'node ...wao-cli.cmd' in docs or generated content", async () => {
+  const usagePath = join(dirname(fileURLToPath(import.meta.url)), "..", "docs", "usage.md");
+  const usageSrc = readFileSync(usagePath, "utf8");
+  assert.ok(!/node\s+.*wao-cli\.cmd/.test(usageSrc));
+  const modulePath = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "application", "mcpWorkspaceActivation.js");
+  const src = readFileSync(modulePath, "utf8");
+  assert.ok(!/node\s+.*wao-cli\.cmd/.test(src));
+});
 
-test("CODEX-PROBE: bind generates parseable config (or skip if Codex unavailable)", async (t) => {
-  const codexBin = (() => {
-    try { execFileSync("codex", ["--version"], { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }); return true; }
-    catch { return false; }
-  })();
-  if (!codexBin) {
-    t.todo("Codex CLI not available — skipping parser probe");
-    return;
-  }
+// ── Real Codex CLI integration (NO SKIP per CTO) ─────────────────────────────
 
-  const dir = mkdtempSync(join(tmpdir(), "wao-codex-probe-"));
+test("CODEX-INTEGRATION: real Codex CLI bind → status → unbind", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-codex-int-"));
   try {
     makeGitRepo(dir);
-    const { bindWorkspace } = await import("../src/application/mcpWorkspaceActivation.js");
+    // Pre-create config with a comment + other server to verify Codex preserves them
+    mkdirSync(join(dir, ".codex"));
+    writeFileSync(join(dir, ".codex", "config.toml"),
+      '# my comment\nmodel = "gpt-5"\n\n[mcp_servers.other]\ncommand = "other"\nargs = ["x"]\n');
+
+    const { bindWorkspace, statusWorkspace, unbindWorkspace } = await import(
+      "../src/application/mcpWorkspaceActivation.js"
+    );
+
+    // Hash global config before (must be unchanged after)
+    const homeDir = process.env.USERPROFILE || process.env.HOME || "";
+    const globalConfigP = join(homeDir, ".codex", "config.toml");
+    let globalHashBefore = null;
+    if (existsSync(globalConfigP)) {
+      globalHashBefore = createHash("sha256").update(readFileSync(globalConfigP)).digest("hex");
+    }
+
+    // Use real Codex CLI (no fake hooks) — CODEX_HOME is project's .codex/
     await bindWorkspace({ host: "codex", cwd: dir });
+    const status1 = await statusWorkspace({ host: "codex", cwd: dir });
+    assert.equal(status1.status, "configured", `status should be configured, got: ${JSON.stringify(status1)}`);
+    assert.equal(status1.bound, true);
 
-    // Verify the generated config is valid TOML by checking Codex can parse it.
-    // Use isolated CODEX_HOME with trust for the probe dir.
-    const isolatedHome = mkdtempSync(join(tmpdir(), "wao-codex-home-"));
-    const configToml = join(isolatedHome, "config.toml");
-    const winPath = dir.replace(/\//g, "\\");
-    writeFileSync(configToml, `model = "gpt-5"\n\n[projects.'${winPath}']\ntrust_level = "trusted"\n`);
+    // Verify Codex can parse the generated config
+    const codexBin = process.platform === "win32"
+      ? process.env.ComSpec || "cmd.exe" : "codex";
+    const codexPrefix = process.platform === "win32" ? ["/c", "codex"] : [];
+    const getOutput = execFileSync(codexBin, [...codexPrefix, "mcp", "get", "wao", "--json"], {
+      encoding: "utf8",
+      env: { ...process.env, CODEX_HOME: join(dir, ".codex") },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const parsed = JSON.parse(getOutput);
+    assert.equal(parsed.name, "wao");
+    assert.equal(parsed.transport.command, "node");
+    assert.ok(parsed.transport.args.some(a => a.includes("stdio.js")));
+    assert.ok(parsed.transport.args.some(a => a === "--workspace-root"));
 
-    try {
-      const output = execFileSync(
-        "codex", ["-C", dir, "mcp", "get", "wao"],
-        {
-          encoding: "utf8",
-          stdio: ["pipe", "pipe", "pipe"],
-          env: { ...process.env, CODEX_HOME: isolatedHome },
-          timeout: 10000,
-        },
-      );
-      // If we get here, Codex loaded the project config
-      assert.ok(output.includes("node"), "Codex should see command=node");
-      assert.ok(output.includes("stdio.js"), "Codex should see stdio.js in args");
-    } catch (err) {
-      // Codex management command didn't load project config in isolated CODEX_HOME.
-      // This is a known limitation — the real host gate is reserved for CTO.
-      // Verify at minimum the config file exists and contains expected fields.
-      const config = readCodexConfigStr(dir);
-      assert.ok(config, "config must exist");
-      assert.ok(config.includes("command = \"node\""), "config must have command=node");
-      assert.ok(config.includes("stdio.js"), "config must reference stdio.js");
-      assert.ok(config.includes("--workspace-root"), "config must have --workspace-root");
-      t.todo("Codex management command did not load project config in isolated CODEX_HOME — real host gate reserved for CTO");
+    // Other server + comment preserved by Codex's own TOML writer
+    const configContent = readFileSync(join(dir, ".codex", "config.toml"), "utf8");
+    assert.ok(configContent.includes("# my comment"), "user comment preserved by Codex");
+    assert.ok(configContent.includes("[mcp_servers.other]"), "other server preserved by Codex");
+
+    // Unbind
+    await unbindWorkspace({ host: "codex", cwd: dir });
+    const status2 = await statusWorkspace({ host: "codex", cwd: dir });
+    assert.equal(status2.status, "not_configured");
+
+    // After unbind, other server + comment still there
+    const configAfter = readFileSync(join(dir, ".codex", "config.toml"), "utf8");
+    assert.ok(configAfter.includes("# my comment"), "comment survives unbind");
+    assert.ok(configAfter.includes("[mcp_servers.other]"), "other server survives unbind");
+
+    // Global config unchanged
+    if (globalHashBefore && existsSync(globalConfigP)) {
+      const globalHashAfter = createHash("sha256").update(readFileSync(globalConfigP)).digest("hex");
+      assert.equal(globalHashAfter, globalHashBefore, "global config must be unchanged");
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });

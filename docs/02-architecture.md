@@ -895,8 +895,11 @@ src/
 │   ├── runDiagnosis.js       #   read-only run diagnosis service（M9-5A，CLI + MCP 共用）
 │   ├── runDelivery.js        #   delivery query + decision service（M9-6A，CLI + MCP 共用）
 │   ├── workspaceBinding.js   #   host-authorized workspace proof SSOT（M10-pre2，MCP 共用）
-│   ├── mcpWorkspaceActivation.js # project-scoped workspace activation SSOT（M10 P0-1，CLI 用，MCP 不用）
+│   ├── mcpWorkspaceActivation.js # project-scoped workspace activation（M10 P0-1，CLI 用，委托 hostAdapters）
 │   ├── timeoutPolicy.js      #   wait timeout precedence SSOT（M10-pre，CLI + MCP 共用）
+│   ├── processStopVerify.js  #   bounded process exit verification（M10-pre）
+├── hostAdapters/             # L4：host-specific config adapters（M10 P0-1 reframe）
+│   └── codexMcpConfig.js     #   Codex CLI MCP server CRUD（add/get/remove/list，不写 TOML）
 │   └── processStopVerify.js  #   bounded process exit verification（M10-pre）
 ├── backends/
 │   ├── opencodeServe.js      # L1：HTTP 类 backend
