@@ -20,15 +20,44 @@
 //   - stderr is captured (not mixed into errors) to avoid leaking internal paths.
 
 import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
+import { homedir } from "node:os";
+
+let cachedCodexExecutable;
+
+function canExecuteCodex(candidate) {
+  try {
+    execFileSync(candidate, ["--version"], {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+      timeout: 5000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function windowsCodexCandidates() {
+  const packageName = process.arch === "arm64" ? "codex-win32-arm64" : "codex-win32-x64";
+  const target = process.arch === "arm64"
+    ? "aarch64-pc-windows-msvc"
+    : "x86_64-pc-windows-msvc";
+  const candidate = join(
+    homedir(), "AppData", "Roaming", "npm", "node_modules", "@openai", "codex",
+    "node_modules", "@openai", packageName, "vendor", target, "bin", "codex.exe",
+  );
+  return [candidate].filter((candidate) =>
+    isAbsolute(candidate) && candidate.toLowerCase().endsWith(".exe") && existsSync(candidate));
+}
 
 /**
  * Resolve the Codex binary invocation for the current platform.
  *
- * On Windows, npm-installed CLIs are .cmd wrappers. Node's execFileSync cannot
- * execute .cmd files directly without shell:true (which is forbidden — security).
- * The structured-argv solution is to invoke cmd.exe (ComSpec) with /c and pass
- * the .cmd file + args as discrete argv elements. This is NOT shell string
- * concatenation — each arg is a separate process argument.
+ * Windows must resolve the native codex.exe. Batch and PowerShell wrappers are
+ * shell entrypoints and cannot safely preserve arbitrary project paths.
  *
  * On non-Windows, "codex" is a regular binary on PATH.
  *
@@ -36,12 +65,24 @@ import { execFileSync } from "node:child_process";
  */
 function resolveCodexInvocation(opts) {
   if (opts.codexBin) {
+    if (!isAbsolute(opts.codexBin)) {
+      throw new Error("codex_cli_unavailable: codexBin must be an absolute path");
+    }
+    if (process.platform === "win32" && !opts.codexBin.toLowerCase().endsWith(".exe")) {
+      throw new Error("codex_cli_unavailable: Windows requires a native .exe");
+    }
     return { bin: opts.codexBin, args: [] };
   }
   if (process.platform === "win32") {
-    // Use cmd.exe /c to run codex.cmd — structured argv, no shell string
-    const comspec = process.env.ComSpec || "cmd.exe";
-    return { bin: comspec, args: ["/c", "codex"] };
+    if (cachedCodexExecutable && existsSync(cachedCodexExecutable)) {
+      return { bin: cachedCodexExecutable, args: [] };
+    }
+    const executable = windowsCodexCandidates().find(canExecuteCodex);
+    if (!executable) {
+      throw new Error("codex_cli_unavailable: native codex.exe not found");
+    }
+    cachedCodexExecutable = executable;
+    return { bin: executable, args: [] };
   }
   return { bin: "codex", args: [] };
 }
@@ -55,6 +96,9 @@ function resolveCodexInvocation(opts) {
  * @throws {Error} if codex is unavailable or returns non-zero exit
  */
 function runCodex(args, opts) {
+  if (typeof opts.codexHome !== "string" || !isAbsolute(opts.codexHome)) {
+    throw new Error("codex_cli_unavailable: CODEX_HOME must be an absolute path");
+  }
   const { bin, args: prefix } = resolveCodexInvocation(opts);
   return execFileSync(bin, [...prefix, ...args], {
     encoding: "utf8",
@@ -80,6 +124,7 @@ function runCodex(args, opts) {
  * @throws {Error} "codex_cli_unavailable" if codex is missing or crashes
  */
 export async function codexMcpList(opts) {
+  if (!existsSync(opts.codexHome)) return [];
   let stdout;
   try {
     stdout = runCodex(["mcp", "list", "--json"], opts);
@@ -109,6 +154,7 @@ export async function codexMcpList(opts) {
  * @throws {Error} "codex_cli_error" for non-not-found failures
  */
 export async function codexMcpGet(opts) {
+  if (!existsSync(opts.codexHome)) return null;
   let stdout;
   try {
     stdout = runCodex(["mcp", "get", opts.name, "--json"], opts);
@@ -139,6 +185,7 @@ export async function codexMcpGet(opts) {
  */
 export async function codexMcpAdd(opts) {
   try {
+    if (!existsSync(opts.codexHome)) mkdirSync(opts.codexHome, { recursive: true });
     runCodex(["mcp", "add", opts.name, "--", opts.command, ...opts.args], opts);
   } catch (err) {
     throw new Error(`codex_cli_error: mcp add failed: ${err.message}`);
@@ -157,6 +204,7 @@ export async function codexMcpAdd(opts) {
  * @throws {Error} on failure
  */
 export async function codexMcpRemove(opts) {
+  if (!existsSync(opts.codexHome)) return;
   try {
     runCodex(["mcp", "remove", opts.name], opts);
   } catch (err) {
