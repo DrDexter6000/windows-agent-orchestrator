@@ -751,6 +751,55 @@ CLI fallback：`npm run cli -- runs list [--agent ID] [--latest N]`。
 
 annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`（纯只读列举查询）。
 
+### MCP `run_wait`（long-poll 终态/活性等待，M10-pre3）
+
+`run_wait` 让 MCP host 以 long-poll 方式等待一个 run 到达终态或产出 liveness 摘要，避免 busy `run_status` 轮询。它直接复用与 CLI 同等的 application service（`runWait.js`，读 transcript + liveness 投影 `ownerLiveness.js`），不 shell-out CLI。**只读**——不追加 transcript event、不修改 terminal state、不改变 run 生命周期。
+
+`run_wait` tool：
+
+- **输入**（strict schema，拒绝额外字段）：
+
+```json
+{ "runId": "run_...", "afterSeq": 42, "waitMs": 180000 }
+```
+
+`runId` 必填。`afterSeq`（整数 ≥0，可选）：只在 transcript 的 `seq > afterSeq` 出现新事件或终态时提前返回；省略时以调用时刻已知最大 seq 为基线。`waitMs`（整数，**下限 180000** 即 180s，默认 180000）：服务端最长阻塞时长；到时未触发则 `returnedEarly:false` 地等到终态，或超时返回 `returnedEarly:true` + 当前 liveness。模型**不能**传 `runDir`、registry、`force`、timeout 控制面参数——这些是 server-owned 配置。
+
+- **安全有界输出**（只返回机器字段 + liveness 摘要，不含内容/路径/session）：
+
+```json
+{
+  "runId": "run_...",
+  "state": "running",
+  "terminal": false,
+  "cursor": 42,
+  "returnedEarly": true,
+  "liveness": "progress",
+  "activityEventCount": 3,
+  "lastActivityKind": "command",
+  "ownerHeartbeat": { "kind": "command", "ts": "2026-07-15T00:00:10.000Z", "secondsSince": 4 }
+}
+```
+
+`liveness` 取值（从 transcript 事件流投影，**不引 isAlive**）：
+
+- `terminal` —— run 已到终态（completed/failed/aborted/timed_out）。
+- `progress` —— 近窗口内有证据事件（message/command/tool_use/file_written/metrics），worker 在产出。
+- `process_only` —— 进程式 worker 仍在运行但近窗口无证据事件（疑似思考或卡顿，未到 silent 阈值）。
+- `silent` —— 超过静默阈值仍无新事件（排队或疑似卡住，`submitted` 阶段 `lastActivity=null` 时也归此）。
+
+`cursor` 是返回时已观测到的最大 `seq`，作为下次 `afterSeq` 的续读点。`activityEventCount` 是近窗口证据事件数；`lastActivityKind` 是最近一条证据事件类型（不存在为 `null`）；`ownerHeartbeat` 是 liveness 投影的权威心跳字段（`null` 表示无证据事件）。**绝不返回**：原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量或 `lastActivitySummary`。`content` JSON 与 `structuredContent` 语义一致。service 失败时返回固定安全文案 `run_wait failed`。
+
+**三钟分离（M10-pre3）**：WAO 现在有三个互相独立的时钟，不要混淆：
+
+1. **执行截止（execution deadline，默认禁用）**：worker run 上的 wall-clock 终止时钟。M10-pre3 起**默认禁用**——不再用 wall-clock 杀 worker，改由 Lead 观察驱动。显式配置时仍生效。
+2. **后端请求超时（backend request timeout，独立）**：单次后端调用（HTTP/进程 spawn/collect 拉取）的网络/IO 超时，与 run 生命周期正交，按 `config.timeout` 链生效。
+3. **Lead 观察等待（`run_wait`）**：Lead 侧的 long-poll 阻塞上限（`waitMs`，下限 180s），只决定 Lead 一次调用等多久，**不影响 worker 生命周期**。到时返回当前 liveness 让 Lead 决定继续等/collect/stop。
+
+CLI fallback：`run_wait` 是 MCP-first 能力，等价的 CLI 长等待可由 `status` 轮询或 `tail --follow` 拼出，但语义不等同。
+
+annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`（纯只读 long-poll，不触碰外部系统、不修改 transcript）。
+
 ---
 
 ## 五、常见问题

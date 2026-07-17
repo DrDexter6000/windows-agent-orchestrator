@@ -25,6 +25,10 @@ import { dirname } from "node:path";
 import { readTranscript, findState, TERMINAL_STATES } from "./transcript.js";
 import { RunManager } from "./runManager.js";
 import { readRegistry, normalizeAgent } from "./registry.js";
+import { ownerFilePath, checkOwnerLiveness, DEFAULT_OWNER_LIVENESS_THRESHOLD_MS } from "./application/ownerLiveness.js";
+
+// Re-export for backward compatibility with daemon tests/supervisor imports
+export const DEFAULT_LIVENESS_THRESHOLD_MS = DEFAULT_OWNER_LIVENESS_THRESHOLD_MS;
 import { checkNodeVersion } from "./nodeVersionGuard.js";
 import { assessDaemonHealth } from "./daemonHealth.js";
 
@@ -54,7 +58,7 @@ export const DEFAULT_PIPE = "\\\\.\\pipe\\wao-daemon";
 
 // 心跳/判活默认参数。
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 2000;
-export const DEFAULT_LIVENESS_THRESHOLD_MS = 10000;
+// M10-pre3: liveness threshold imported from application/ownerLiveness.js (top of file)
 
 // ============================================================
 // 纯函数（无 IO 副作用的逻辑，最先做，最稳，可单测）
@@ -171,28 +175,15 @@ export function scanAllRuns(runDir, now = Date.now(), thresholdMs = DEFAULT_LIVE
 // 真相源竞争。
 
 /** owner 文件路径：runDir/.owner-<runId> */
-export function ownerFilePath(runDir, runId) {
-  return join(runDir, `.owner-${runId}`);
-}
+// M10-pre3: owner heartbeat logic delegated to application/ownerLiveness.js SSOT
+// (imported at top of file). ownerFilePath is re-exported for test compatibility.
+export { ownerFilePath };
 
 /**
- * 判 run 是否有活的所有者。owner 文件存在 + 心跳在阈值内 = true（别劫持）。
- * @param {string} runDir
- * @param {string} runId
- * @param {number} now - 当前时间戳（ms）
- * @param {number} thresholdMs - 心跳超时阈值（默认 DEFAULT_LIVENESS_THRESHOLD_MS）
- * @returns {boolean}
+ * 判 run 是否有活的所有者。Delegates to ownerLiveness SSOT.
  */
 export function isRunOwned(runDir, runId, now, thresholdMs = DEFAULT_LIVENESS_THRESHOLD_MS) {
-  const filePath = ownerFilePath(runDir, runId);
-  if (!existsSync(filePath)) return false;
-  try {
-    const owner = JSON.parse(readFileSync(filePath, "utf8"));
-    if (typeof owner.heartbeatAt !== "number") return false;
-    return (now - owner.heartbeatAt) <= thresholdMs;
-  } catch {
-    return false; // 坏 JSON = 当无 owner（容错，宁可 resume 也不卡死）
-  }
+  return checkOwnerLiveness(runDir, runId, now, thresholdMs).fresh;
 }
 // IPC 客户端（请求-响应：发 1 行 JSON 请求，读 1 行 JSON 响应，关连接）
 // ============================================================

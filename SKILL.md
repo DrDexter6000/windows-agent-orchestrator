@@ -66,7 +66,7 @@ See `references/safety-incidents.md` before unattended or stop-sensitive work. R
 
 ## Minimal MCP Loop
 
-The Lead drives the full minimal loop through 10 MCP tools:
+The Lead drives the full minimal loop through 11 MCP tools:
 
 | Tool | Side effect | Purpose |
 |---|---|---|
@@ -74,6 +74,7 @@ The Lead drives the full minimal loop through 10 MCP tools:
 | `workspace_status` | read-only | Query host-authorized workspace binding (M10-pre2) |
 | `run_dispatch` | destructive | Create a supervised run (with optional delivery block for git_commit_v1); workspace is server-owned, not model-controlled |
 | `run_status` | read-only | Poll terminal state + last activity |
+| `run_wait` | read-only (long-poll) | Wait for terminal or liveness summary (180s default) |
 | `run_collect` | appends `messages.collected` (non-idempotent) | Collect bounded worker output |
 | `run_diagnose` | read-only | Failure category + signal types (no prescription) |
 | `run_delivery` | read-only | Query delivery commit/verification/acceptance |
@@ -81,7 +82,9 @@ The Lead drives the full minimal loop through 10 MCP tools:
 | `run_stop` | destructive (first-terminal-wins) | Stop a runaway worker (workspace-bound) |
 | `runs_list` | read-only | List runs in current workspace (project-bound recovery) |
 
-Minimal closed loop: `inventory → workspace_status → dispatch → status → collect/diagnose → delivery query → Lead decision → (stop on runaway)`; recovery: `runs_list` (list runs in the bound workspace after `workspace_status`)
+Minimal closed loop: `inventory → workspace_status → dispatch → status/wait → collect/diagnose → delivery query → Lead decision → (stop on runaway)`; recovery: `runs_list` (list runs in the bound workspace after `workspace_status`)
+
+The Lead uses `run_wait` as the primary supervision primitive: it blocks up to `waitMs` (default 180s) and returns as soon as the run reaches a terminal state or produces a liveness summary (`terminal`/`progress`/`process_only`/`silent`), avoiding busy poll loops. The execution deadline on worker runs is now disabled by default — supervision is observation-driven via `run_wait`, not wall-clock termination.
 
 See `docs/usage.md §MCP stdio` for host setup, full input/output schemas, and install instructions.
 

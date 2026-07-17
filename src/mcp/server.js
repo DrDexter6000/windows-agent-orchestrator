@@ -35,6 +35,7 @@ import { getRunDiagnosis } from "../application/runDiagnosis.js";
 import { getRunDelivery, decideRunDelivery } from "../application/runDelivery.js";
 import { stopRun } from "../application/runStop.js";
 import { listRuns } from "../application/runList.js";
+import { runWait } from "../application/runWait.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
 import { isValidRunId } from "../delivery.js";
 import { DIAGNOSIS_CATEGORIES } from "../diagnosis.js";
@@ -549,6 +550,45 @@ const RUNS_LIST_DESCRIPTION =
   "Optional activeOnly filters to non-terminal runs; limit caps results (default 50). " +
   "Read-only, idempotent. Does not return prompts, paths, commands, PIDs, sessions, or counts of excluded runs.";
 
+// ===== run_wait (workspace-bound liveness-aware long-poll) constants =====
+
+const RUN_WAIT_ERROR_TEXT = "run_wait failed";
+
+const RUN_WAIT_INPUT = z.object({
+  runId: z.string().min(1),
+  afterSeq: z.number().int().nonnegative().optional(),
+  waitMs: z.number().int().min(180000).max(600000).optional(),
+}).strict();
+
+const RUN_WAIT_OUTPUT = z.object({
+  runId: z.string(),
+  state: z.enum([...RUN_STATES, "unknown"]),
+  terminal: z.boolean(),
+  cursor: z.number().int(),
+  returnedEarly: z.boolean(),
+  liveness: z.enum(["terminal", "progress", "process_only", "silent"]),
+  activityEventCount: z.number().int(),
+  lastActivityKind: z.string().nullable(),
+  ownerHeartbeat: z.enum(["fresh", "stale", "n/a"]),
+});
+
+const RUN_WAIT_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+const RUN_WAIT_DESCRIPTION =
+  "Wait for a run to reach terminal state or observation period to expire, " +
+  "then return a liveness summary. Workspace-bound: only waits on runs from " +
+  "the bound workspace. liveness values: terminal (done), progress (durable " +
+  "activity since afterSeq), process_only (runner alive but no progress), " +
+  "silent (no progress, runner not provably fresh). " +
+  "Does NOT stop the run — Lead decides based on liveness. " +
+  "waitMs minimum 180000 (3 min); does not terminate the worker. " +
+  "Read-only: no transcript events, no owner file, no state change.";
+
 /**
  * Create a WAO MCP server with registry_list, run_dispatch, run_status, run_collect, run_diagnose, run_delivery, run_delivery_decide.
  *
@@ -580,6 +620,7 @@ export function createWaoMcpServer({
   decideRunDeliveryFn,
   stopRunFn,
   listRunsFn,
+  runWaitFn,
 }) {
   const service = getRegistryInventoryFn ?? getRegistryInventory;
   const dispatcher = dispatchRunFn ?? dispatchRun;
@@ -590,6 +631,7 @@ export function createWaoMcpServer({
   const deliveryDecideService = decideRunDeliveryFn ?? decideRunDelivery;
   const stopService = stopRunFn ?? stopRun;
   const listRunsService = listRunsFn ?? listRuns;
+  const runWaitService = runWaitFn ?? runWait;
 
   const mcp = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -1150,6 +1192,61 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: RUNS_LIST_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  // ===== run_wait (workspace-bound liveness-aware long-poll) =====
+
+  mcp.registerTool(
+    "run_wait",
+    {
+      description: RUN_WAIT_DESCRIPTION,
+      inputSchema: RUN_WAIT_INPUT,
+      outputSchema: RUN_WAIT_OUTPUT,
+      annotations: RUN_WAIT_ANNOTATIONS,
+    },
+    async (input) => {
+      try {
+        const runId = input?.runId;
+        if (!isValidRunId(runId)) {
+          return { isError: true, content: [{ type: "text", text: RUN_WAIT_ERROR_TEXT }] };
+        }
+        const binding = await resolveWorkspaceBinding();
+        if (!binding.bound) {
+          return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
+        }
+
+        const result = await runWaitService({
+          runId,
+          runDir,
+          afterSeq: input?.afterSeq ?? 0,
+          waitMs: input?.waitMs ?? 180000,
+          authorizedWorkspaceRoot: binding.root,
+        });
+
+        const payload = {
+          runId,
+          state: result.state,
+          terminal: result.terminal,
+          cursor: result.cursor,
+          returnedEarly: result.returnedEarly,
+          liveness: result.liveness,
+          activityEventCount: result.activityEventCount,
+          lastActivityKind: result.lastActivityKind,
+          ownerHeartbeat: result.ownerHeartbeat,
+        };
+
+        RUN_WAIT_OUTPUT.parse(payload);
+        return {
+          content: [{ type: "text", text: JSON.stringify(payload) }],
+          structuredContent: payload,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: RUN_WAIT_ERROR_TEXT }],
         };
       }
     },
