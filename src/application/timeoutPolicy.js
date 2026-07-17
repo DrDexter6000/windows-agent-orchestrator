@@ -2,9 +2,14 @@
 //
 // M10-pre: Unified wait timeout precedence SSOT.
 //
-// Precedence: explicit request > agent.waitTimeout > global config.waitTimeout > DEFAULT.
-// This is the single authority for resolving effective wait timeout across
-// dispatchRun, backgroundRunner, and RunManager.
+// Precedence: explicit request > agent.waitTimeout > global config.waitTimeout > disabled.
+//
+// M10-pre3: The default execution deadline is DISABLED. Previously the default
+// was 300000ms, which caused real workers still making progress to be killed.
+// Now, when no explicit/agent/global timeout is configured, the deadline is
+// null (disabled) — RunManager.waitForCompletion will NOT create a total-duration
+// timer. Workers run until they complete, fail, are externally aborted, or hit
+// a configured token/resource budget.
 //
 // Validation discipline (M10-pre closeout):
 //   - validateBoundedWaitTimeout is the single production range gate: integer in
@@ -18,42 +23,40 @@
 //     The model cannot control timeout values. Explicit timeout comes from CLI
 //     --wait-timeout or trusted internal callers only.
 //   - The AGENT value is validated at registry load time (normalizeAgent: 1000..600000).
-//   - The GLOBAL config value is validated by the caller before entering RunManager:
-//     CLI loadConfig validates in runCommand; MCP loadGlobalWaitTimeout validates
-//     at load time with fail-down to DEFAULT.
-//   - The DEFAULT is a constant (300000).
-//   - Tests that exercise RunManager.waitForCompletion with small timeouts test the
-//     timer/abort mechanics, not the boundary contract. They bypass the CLI parser
-//     and therefore bypass validateBoundedWaitTimeout — no production contract is weakened.
-//     ("不得为了测试方便放宽生产契约；测试通过依赖注入/fake timer解决")
+//   - The GLOBAL config value is validated by the caller before entering RunManager.
+//   - The DEFAULT is now disabled (null), not 300000.
 
-const DEFAULT_WAIT_TIMEOUT = 300000;
+const DEFAULT_WAIT_TIMEOUT = null; // M10-pre3: disabled by default
 const MIN_WAIT_TIMEOUT = 1000;
 const MAX_WAIT_TIMEOUT = 600000;
 
 /**
- * Resolve the effective wait timeout and its source.
+ * Resolve the effective wait timeout (execution deadline) and its source.
  *
  * Pure precedence function — does NOT range-validate. Range validation for
  * externally-controlled values happens at the boundary via validateBoundedWaitTimeout.
  *
+ * M10-pre3: When no explicit/agent/global value is configured, returns disabled
+ * ({ ms: null, source: "disabled", enabled: false }). RunManager.waitForCompletion
+ * must check `enabled` before creating a timer.
+ *
  * @param {object} input
- * @param {number|undefined} input.explicit — explicit CLI/trusted-internal override (boundary-validated by caller)
- * @param {number|undefined} input.agentWaitTimeout — from registry agent.waitTimeout (validated at load)
- * @param {number|undefined} input.globalWaitTimeout — from config/default.json (validated by caller)
- * @returns {{ms: number, source: "explicit"|"agent"|"global"|"default"}}
+ * @param {number|undefined|null} input.explicit — explicit CLI/trusted-internal override
+ * @param {number|undefined|null} input.agentWaitTimeout — from registry agent.waitTimeout
+ * @param {number|undefined|null} input.globalWaitTimeout — from config/default.json
+ * @returns {{ms: number|null, source: "explicit"|"agent"|"global"|"disabled", enabled: boolean}}
  */
 export function resolveWaitTimeout({ explicit, agentWaitTimeout, globalWaitTimeout } = {}) {
   if (explicit !== undefined && explicit !== null) {
-    return { ms: validatePositiveInteger(explicit), source: "explicit" };
+    return { ms: validatePositiveInteger(explicit), source: "explicit", enabled: true };
   }
   if (agentWaitTimeout !== undefined && agentWaitTimeout !== null) {
-    return { ms: validatePositiveInteger(agentWaitTimeout), source: "agent" };
+    return { ms: validatePositiveInteger(agentWaitTimeout), source: "agent", enabled: true };
   }
   if (globalWaitTimeout !== undefined && globalWaitTimeout !== null) {
-    return { ms: validatePositiveInteger(globalWaitTimeout), source: "global" };
+    return { ms: validatePositiveInteger(globalWaitTimeout), source: "global", enabled: true };
   }
-  return { ms: DEFAULT_WAIT_TIMEOUT, source: "default" };
+  return { ms: null, source: "disabled", enabled: false };
 }
 
 /**

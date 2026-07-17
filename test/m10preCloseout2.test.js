@@ -133,8 +133,11 @@ test("M10pre-C2-06: loadGlobalWaitTimeout reads WAO config regardless of host cw
   const { readFile } = await import("node:fs/promises");
   const realRaw = await readFile(realConfigPath, "utf8");
   const realParsed = JSON.parse(realRaw);
-  const realWaitTimeout = Number(realParsed.waitTimeout);
-  assert.ok(realWaitTimeout >= 1000 && realWaitTimeout <= 600000, "real config waitTimeout in range");
+  // M10-pre3: real config waitTimeout may be null (disabled) or a valid integer
+  const realWaitTimeout = realParsed.waitTimeout;
+  if (realWaitTimeout !== null) {
+    assert.ok(Number(realWaitTimeout) >= 1000 && Number(realWaitTimeout) <= 600000, "real config waitTimeout in range or null");
+  }
 
   // Create a temp dir with a DIFFERENT waitTimeout to act as a "trap".
   const trapDir = mkdtempSync(join(tmpdir(), "wao-c2-06-"));
@@ -157,7 +160,9 @@ test("M10pre-C2-06: loadGlobalWaitTimeout reads WAO config regardless of host cw
       env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" },
     });
     assert.equal(result.status, 0, `node process must exit 0: ${result.stderr}`);
-    const loaded = Number(result.stdout);
+    const loadedRaw = result.stdout.trim();
+    // M10-pre3: config may return "null" (disabled) or a number string
+    const loaded = loadedRaw === "null" ? null : Number(loadedRaw);
     // Must be the REAL WAO config value, NOT the trap (420000).
     assert.equal(loaded, realWaitTimeout,
       `loaded ${loaded} must match real WAO config ${realWaitTimeout}, not trap cwd config 420000`);

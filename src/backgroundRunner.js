@@ -111,12 +111,13 @@ export async function runBackground(opts = {}) {
       // 字符串时用真实路径。避免 start() 里 resolve(undefined) 抛错。
       registry: registryPath ?? (typeof opts.registry === "object" ? "." : undefined),
       pollInterval: opts.pollInterval ?? 1000,
-      // M10-pre closeout: config.waitTimeout receives the server-owned global value.
-      // If opts.globalWaitTimeout is provided (from --global-wait-timeout argv), use it.
-      // Otherwise fall back to opts.waitTimeout (legacy callers) or the SSOT default.
-      // RunManager.waitForCompletion resolves explicit > agent > config(this) > default.
+      // M10-pre3: execution deadline (waitTimeout) is now separate from backend
+      // request/poll timeout. waitTimeout may be null (disabled) — that's correct:
+      // RunManager.waitForCompletion will skip the total-duration timer.
+      // The backend request timeout (config.timeout) stays at its own independent
+      // finite value — it bounds a single HTTP poll, not the total run duration.
       waitTimeout: opts.globalWaitTimeout ?? opts.waitTimeout,
-      timeout: (opts.waitTimeout ?? opts.globalWaitTimeout ?? 300000) + 5000,
+      timeout: 30000, // independent backend request/poll timeout (not derived from deadline)
       retries: 0,
     },
     readRegistry: registryResolver,

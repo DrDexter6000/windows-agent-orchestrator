@@ -56,7 +56,7 @@ const hardcodedDefaults = {
   registry: "config/agents.json",
   runDir: "runs",
   pollInterval: 5000,
-  waitTimeout: 300000,
+  waitTimeout: null,
   timeout: 30000,
   retries: 2,
   defaultIsolation: "none",

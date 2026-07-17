@@ -707,41 +707,41 @@ export class Run {
    *   - 超时由 RunManager 管（AbortController 打断 events 流）
    */
   async waitForCompletion(options = {}) {
-    // M10-pre: unified timeout precedence via SSOT
+    // M10-pre3: unified timeout precedence via SSOT — default is now disabled.
     const { resolveWaitTimeout } = await import("./application/timeoutPolicy.js");
-    const { ms: waitTimeout, source: waitTimeoutSource } = resolveWaitTimeout({
+    const { ms: waitTimeout, source: waitTimeoutSource, enabled: deadlineEnabled } = resolveWaitTimeout({
       explicit: options.waitTimeout,
       agentWaitTimeout: this.agent?.waitTimeout,
       globalWaitTimeout: this.config.waitTimeout,
     });
     const pollInterval = Number(options.pollInterval ?? this.config.pollInterval);
     // silentTimeout：静默无响应早失败（Kimi 白名单 / 不存在的 model）。
-    // 来源优先级：options（CLI flag）> agent.silentTimeout（registry）> config > undefined（不启用）
     const silentTimeout = options.silentTimeout ?? this.agent?.silentTimeout ?? this.config.silentTimeout;
 
-    // token 预算硬闸门（S1-1，事故修复 2026-06-18）：唯一不依赖 abort 是否生效的防线。
-    // opencode session.tokens 比 provider 账单偏小 1-2 数量级（cache read/context 重发不计），
-    // 故用 multiplier（默认 100，来自 06-18 事故 DB 172万 vs 账单 1.25亿 ≈ ×73，取 100 留余量）逼近。
-    // 未配 tokenBudget → 闸门不启用（向后兼容）。触发即终态 failed，不可恢复。
+    // token 预算硬闸门（S1-1）：唯一不依赖 abort 是否生效的防线。
     const tokenBudget = options.tokenBudget ?? this.agent?.tokenBudget ?? this.config.tokenBudget;
     const tokenBudgetMultiplier = options.tokenBudgetMultiplier
       ?? this.agent?.tokenBudgetMultiplier ?? this.config.tokenBudgetMultiplier ?? 100;
 
-    // M10-pre: record actual wait policy as a safe durable fact before setting timer.
+    // M10-pre3: record actual wait policy as a safe durable fact.
+    // Disabled deadline is honestly expressed as waitTimeoutMs: null.
     await this.transcript.append("run.wait_policy", {
       waitTimeoutMs: waitTimeout,
       source: waitTimeoutSource,
     });
 
-    // RunManager 持有超时计时器，到点 abort signal 打断 events 流。
-    // 调用方可传外部 signal（如 daemon 的 per-run 控制器）：外部 abort 同样打断 events 流。
-    // 用 AbortSignal.any 合并 waitTimeout 控制器与外部 signal（Node 20+ 原生）。
+    // M10-pre3: only create the total-duration timer when deadline is enabled.
+    // When disabled, the run has no time-based kill — workers run until they
+    // complete, fail, are externally aborted, or hit token/resource budget.
     const controller = new AbortController();
     let waitTimerExpired = false;
-    const timer = setTimeout(() => {
-      waitTimerExpired = true;
-      controller.abort();
-    }, waitTimeout);
+    let timer = null;
+    if (deadlineEnabled) {
+      timer = setTimeout(() => {
+        waitTimerExpired = true;
+        controller.abort();
+      }, waitTimeout);
+    }
     if (options.signal) {
       if (options.signal.aborted) {
         controller.abort();

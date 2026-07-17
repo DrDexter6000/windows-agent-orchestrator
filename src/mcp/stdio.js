@@ -31,7 +31,8 @@ import { createWaoMcpServer } from "./server.js";
 
 const DEFAULT_REGISTRY = "config/agents.json";
 const DEFAULT_RUN_DIR = "runs";
-const DEFAULT_WAIT_TIMEOUT = 300000;
+// M10-pre3: default execution deadline is disabled (null).
+// Previously 300000, which caused real workers still making progress to be killed.
 
 // M10-pre closeout-2: derive the WAO repo root from THIS module's location, not
 // process.cwd(). An MCP host's cwd is not guaranteed to be the WAO repo — it
@@ -58,27 +59,29 @@ function resolveConfigPath(override) {
  * have any cwd; relying on it would silently read the wrong file or miss it.
  *
  * Contract on missing/corrupt config:
- *   - If the file is missing, unparseable, or the waitTimeout value fails the
- *     bounded check (integer 1000..600000), the function safely falls back to
- *     DEFAULT_WAIT_TIMEOUT (300000). It NEVER returns an out-of-range value.
+ *   - If the file is missing, unparseable, or waitTimeout is null/undefined,
+ *     the function returns null (disabled). It NEVER silently falls back to 300000.
+ *   - A valid explicit integer in [1000, 600000] is passed through.
  *
  * @param {string} [configOverride] — explicit config path (tests only)
- * @returns {Promise<number>}
+ * @returns {Promise<number|null>} validated timeout or null (disabled)
  */
 async function loadGlobalWaitTimeout(configOverride) {
   const configPath = resolveConfigPath(configOverride);
-  if (!existsSync(configPath)) return DEFAULT_WAIT_TIMEOUT;
+  if (!existsSync(configPath)) return null;
   try {
     const raw = await readFile(configPath, "utf8");
     const parsed = JSON.parse(raw);
+    // M10-pre3: null/undefined means disabled
+    if (parsed.waitTimeout === null || parsed.waitTimeout === undefined) return null;
     const wt = Number(parsed.waitTimeout);
     if (Number.isFinite(wt) && Number.isInteger(wt) && wt >= 1000 && wt <= 600000) {
       return wt;
     }
   } catch {
-    // fall through to default
+    // fall through to disabled
   }
-  return DEFAULT_WAIT_TIMEOUT;
+  return null;
 }
 
 // Exported for the cwd-independence test (M10pre-C2-06). This function is

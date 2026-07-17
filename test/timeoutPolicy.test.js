@@ -34,10 +34,11 @@ test("M10pre-03: global config fallback when neither explicit nor agent", () => 
   assert.equal(r.source, "global");
 });
 
-test("M10pre-04: default 300000 when all sources missing", () => {
+test("M10pre-04: disabled when all sources missing (M10-pre3)", () => {
   const r = resolveWaitTimeout({ explicit: undefined, agentWaitTimeout: undefined, globalWaitTimeout: undefined });
-  assert.equal(r.ms, 300000);
-  assert.equal(r.source, "default");
+  assert.equal(r.ms, null);
+  assert.equal(r.source, "disabled");
+  assert.equal(r.enabled, false);
 });
 
 // resolveWaitTimeout is a pure type-checker (positive integer), NOT a range gate.
