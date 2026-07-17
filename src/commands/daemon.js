@@ -16,6 +16,13 @@ import { readFileSync, unlinkSync, existsSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// M10-pre3 final gate: test-injectable spawn. Production reads `spawn`; tests
+// override via _setSpawnForTest to observe spawn count/args without detaching a
+// real daemon child. null restores the production import.
+let _spawnImpl = null;
+function _spawnForTest(fn) { _spawnImpl = fn; }
+function resolveSpawn() { return _spawnImpl ?? spawn; }
+
 import {
   connectDaemon,
   readHandshake as readDaemonHandshake,
@@ -27,6 +34,7 @@ import {
 import { readSupervisorState } from "../daemonSupervisor.js";
 // TD-98 阶段 2a：parseOptions/loadPrompt 从 cli.js 抽到 ./shared.js，消除 ESM 循环 import。
 import { parseOptions, loadPrompt } from "./shared.js";
+import { validateBoundedWaitTimeout } from "../application/timeoutPolicy.js";
 
 // daemon 命令族：start/stop/status/ping/list。常驻 daemon（P3-T1，ADR 0012 命名管道 IPC）。
 // start: fork detached node src/daemon.js；ping/status/list/stop: 经 IPC 连 daemon。
@@ -105,7 +113,7 @@ function resolveDaemonPipe(options) {
   return options.pipe ?? DEFAULT_PIPE;
 }
 
-async function daemonStartCommand(args, config) {
+export async function daemonStartCommand(args, config) {
   const options = parseOptions(args);
   const runDir = resolve(options.runDir ?? config.runDir);
   const pipe = resolveDaemonPipe(options);
@@ -117,24 +125,42 @@ async function daemonStartCommand(args, config) {
   }
   const daemonPath = join(dirname(fileURLToPath(import.meta.url)), "..", "daemon.js");
   const registry = options.registry ?? config.registry;
-  // M10-pre3C: only forward --wait-timeout when an explicit CLI/config value
-  // exists. Omitted must NOT synthesize 120000 — startDaemon treats an absent
-  // flag as disabled (null). An explicit value is range-validated in startDaemon
-  // via the timeout-policy SSOT (1000..600000).
-  const explicitWaitTimeout = options.waitTimeout ?? config.waitTimeout;
+  // M10-pre3 final gate (F1): validate explicit waitTimeout BEFORE spawn. The
+  // detached child validates too (defense in depth), but the CLI must not print
+  // {started:true} and return success for an invalid timeout that will kill the
+  // child moments later. Both CLI options.waitTimeout and config.waitTimeout are
+  // range-checked via the SSOT (1000..600000). Omitted/null → disabled (no flag).
+  // This rejects empty/whitespace/NaN/fractional/below-min/above-max.
+  const cliWaitTimeout = options.waitTimeout;
+  const cfgWaitTimeout = config.waitTimeout;
+  // Distinguish truly omitted (undefined/null) from present-but-invalid.
+  // Omitted → disabled (no flag, no error). Present in any form (even empty/
+  // whitespace/garbage) → MUST validate and reject if invalid; never silently
+  // treat a malformed value as omitted (that would print success then kill the
+  // child).
+  let validatedWaitTimeout = null;
+  const cliPresent = cliWaitTimeout !== undefined && cliWaitTimeout !== null;
+  const cfgPresent = cfgWaitTimeout !== undefined && cfgWaitTimeout !== null;
+  if (cliPresent) {
+    // A present CLI value is always validated (even if it's "" / "  " / "abc");
+    // Number("") and Number("  ") are 0 → below min → rejected by the SSOT.
+    validatedWaitTimeout = validateBoundedWaitTimeout(Number(cliWaitTimeout));
+  } else if (cfgPresent) {
+    validatedWaitTimeout = validateBoundedWaitTimeout(Number(cfgWaitTimeout));
+  }
   const daemonArgs = [
     daemonPath,
     "--run-dir", runDir,
     "--registry", registry,
     "--pipe", pipe,
-    ...(explicitWaitTimeout !== undefined && explicitWaitTimeout !== null
-      ? ["--wait-timeout", String(explicitWaitTimeout)]
+    ...(validatedWaitTimeout !== null
+      ? ["--wait-timeout", String(validatedWaitTimeout)]
       : []),
     "--poll-interval", String(options.pollInterval ?? config.pollInterval ?? 1000),
     ...(options.resumeOnStart ? ["--resume-on-start", "true"] : []),
   ];
   // detached + stdio ignore + windowsHide：daemon 脱离 CLI 进程组，CLI 退出不杀它，不弹窗。
-  spawn(process.execPath, daemonArgs, { detached: true, stdio: "ignore", windowsHide: true }).unref();
+  resolveSpawn()(process.execPath, daemonArgs, { detached: true, stdio: "ignore", windowsHide: true }).unref();
   console.log(JSON.stringify({
     ok: true, started: true, pipe,
     runDir,
@@ -262,3 +288,7 @@ async function daemonListCommand(args, config) {
     process.exitCode = 1;
   }
 }
+
+// Test-only hook: override the spawn implementation to observe spawn count/args
+// without detaching a real daemon child. Pass null to restore production spawn.
+export { _spawnForTest as _setSpawnForTest };

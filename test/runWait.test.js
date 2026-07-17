@@ -694,10 +694,13 @@ test("MCP-WAIT-10 (P2-B): real stdio smoke — tool discovery + already-terminal
 // keyed to that token during the long poll; a client with
 // resetTimeoutOnProgress:true resets its 60s timer on each notification.
 //
-// These tests prove (no-model, InMemoryTransport) that the server sends
-// progress notifications during the poll and that a client configured with a
-// short timeout + resetTimeoutOnProgress does NOT time out across a
-// server-side wait longer than that timeout.
+// These tests prove (no-model, InMemoryTransport) that the server emits
+// progress notifications during the poll and that the SDK delivers them to the
+// client's onprogress callback with resetTimeoutOnProgress set. They do NOT
+// prove real-time timeout reset: InMemoryTransport delivers synchronously and
+// the server-side wait here uses a fake clock (no real wall-clock blocking), so
+// wall-clock timeout behavior cannot be exercised here. Real Codex Host 180s
+// acceptance remains the only host proof.
 
 test("KEEPALIVE-01 (P1-A/M10-pre3C): server emits progress + SDK onprogress receives it with resetTimeoutOnProgress set", async () => {
   // This is a real SDK client-behavior test. It proves the END-TO-END progress
