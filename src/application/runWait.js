@@ -162,9 +162,13 @@ export async function runWait(input) {
     throw new Error(`invalid runId: ${JSON.stringify(runId)}`);
   }
 
-  // Validate waitMs
-  if (!Number.isInteger(waitMs) || waitMs < 180000) {
-    throw new Error(`waitMs must be an integer >= 180000, got: ${waitMs}`);
+  // Validate waitMs — the service is the shared business boundary and must
+  // enforce the same 180000..600000 range as the MCP adapter, independent of
+  // zod. A direct service caller that passes 179999 or 600001 must be rejected.
+  const RUN_WAIT_MIN_MS = 180000;
+  const RUN_WAIT_MAX_MS = 600000;
+  if (!Number.isInteger(waitMs) || waitMs < RUN_WAIT_MIN_MS || waitMs > RUN_WAIT_MAX_MS) {
+    throw new Error(`waitMs must be an integer in [${RUN_WAIT_MIN_MS}, ${RUN_WAIT_MAX_MS}], got: ${JSON.stringify(waitMs)}`);
   }
 
   const _sleep = input.sleepFn ?? ((ms) => new Promise((r) => setTimeout(r, ms)));

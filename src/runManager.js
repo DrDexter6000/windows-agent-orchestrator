@@ -742,11 +742,24 @@ export class Run {
         controller.abort();
       }, waitTimeout);
     }
+    // M10-pre3C: track an EXTERNAL abort separately from the deadline timer.
+    // Both abort the same controller (to unblock the events stream), but only
+    // the deadline timer may produce timed_out. An external signal (Run.abort,
+    // daemon IPC stop, daemon shutdown, caller-supplied AbortSignal) is abort
+    // semantics and must terminal as aborted — never timed_out. Previously the
+    // external signal also set controller.signal.aborted, and the downstream
+    // `(doneReason === null && controller.signal.aborted)` test conflated the
+    // two, so a daemon stop could race into a false timed_out.
+    let externalAborted = false;
     if (options.signal) {
       if (options.signal.aborted) {
+        externalAborted = true;
         controller.abort();
       } else {
-        options.signal.addEventListener("abort", () => controller.abort(), { once: true });
+        options.signal.addEventListener("abort", () => {
+          externalAborted = true;
+          controller.abort();
+        }, { once: true });
       }
     }
 
@@ -818,8 +831,12 @@ export class Run {
           evidence.push(ev);
         }
       }
-      // 流自然结束（非 break）= signal 被 abort = 超时
-      if (waitTimerExpired || (doneReason === null && controller.signal.aborted)) {
+      // M10-pre3C: only the deadline timer may set timedOut. An external
+      // AbortSignal (Run.abort, daemon IPC stop, daemon shutdown, caller signal)
+      // is abort semantics and must NOT become timed_out. The externalAborted
+      // flag is routed to _abortInternal below so the run terminals honestly as
+      // aborted via the existing atomic terminal arbitration.
+      if (waitTimerExpired) {
         timedOut = true;
       }
     } finally {
@@ -827,6 +844,14 @@ export class Run {
     }
 
     this._removeFromManager();
+
+    // M10-pre3C: if an external signal aborted the wait (and no other path has
+    // already terminalized this run), route it through _abortInternal so the
+    // terminal fact is exactly one aborted — not timed_out, not fabricated.
+    // This wins over the stream-ended and timed_out branches below.
+    if (externalAborted && !TERMINAL_STATES.includes(this.state) && !this._aborted) {
+      await this._abortInternal("external_signal");
+    }
 
     if (this._aborted) {
       await this._runCleanup();

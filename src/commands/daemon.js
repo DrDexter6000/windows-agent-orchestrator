@@ -117,12 +117,19 @@ async function daemonStartCommand(args, config) {
   }
   const daemonPath = join(dirname(fileURLToPath(import.meta.url)), "..", "daemon.js");
   const registry = options.registry ?? config.registry;
+  // M10-pre3C: only forward --wait-timeout when an explicit CLI/config value
+  // exists. Omitted must NOT synthesize 120000 — startDaemon treats an absent
+  // flag as disabled (null). An explicit value is range-validated in startDaemon
+  // via the timeout-policy SSOT (1000..600000).
+  const explicitWaitTimeout = options.waitTimeout ?? config.waitTimeout;
   const daemonArgs = [
     daemonPath,
     "--run-dir", runDir,
     "--registry", registry,
     "--pipe", pipe,
-    "--wait-timeout", String(options.waitTimeout ?? config.waitTimeout ?? 120000),
+    ...(explicitWaitTimeout !== undefined && explicitWaitTimeout !== null
+      ? ["--wait-timeout", String(explicitWaitTimeout)]
+      : []),
     "--poll-interval", String(options.pollInterval ?? config.pollInterval ?? 1000),
     ...(options.resumeOnStart ? ["--resume-on-start", "true"] : []),
   ];

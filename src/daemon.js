@@ -26,6 +26,7 @@ import { readTranscript, findState, TERMINAL_STATES } from "./transcript.js";
 import { RunManager } from "./runManager.js";
 import { readRegistry, normalizeAgent } from "./registry.js";
 import { ownerFilePath, checkOwnerLiveness, DEFAULT_OWNER_LIVENESS_THRESHOLD_MS } from "./application/ownerLiveness.js";
+import { validateBoundedWaitTimeout } from "./application/timeoutPolicy.js";
 
 // Re-export for backward compatibility with daemon tests/supervisor imports
 export const DEFAULT_LIVENESS_THRESHOLD_MS = DEFAULT_OWNER_LIVENESS_THRESHOLD_MS;
@@ -310,7 +311,16 @@ export async function startDaemon(opts = {}) {
     ? makeObjectRegistry(opts.registry)
     : readRegistry;
   const registryPath = typeof opts.registry === "string" ? opts.registry : undefined;
-  const waitTimeout = opts.waitTimeout ?? 120000;
+  // M10-pre3C: the daemon must NOT inject an implicit 120000 execution deadline.
+  // Omitted/null means disabled — RunManager.waitForCompletion resolves the
+  // policy via the timeout-policy SSOT and creates no total-duration timer.
+  // An explicit value is range-validated through the existing SSOT boundary
+  // (validateBoundedWaitTimeout, 1000..600000) so a malformed timeout cannot
+  // silently become a run.
+  let waitTimeout = null;
+  if (opts.waitTimeout !== undefined && opts.waitTimeout !== null) {
+    waitTimeout = validateBoundedWaitTimeout(opts.waitTimeout);
+  }
   const pollInterval = opts.pollInterval ?? 1000;
 
   const manager = new RunManager({
@@ -319,7 +329,11 @@ export async function startDaemon(opts = {}) {
       registry: registryPath ?? (typeof opts.registry === "object" ? "." : undefined),
       pollInterval,
       waitTimeout,
-      timeout: waitTimeout + 5000,
+      // M10-pre3C: backend/request timeout is a SEPARATE operational timeout.
+      // It must NOT be derived from the execution deadline (waitTimeout + 5000),
+      // because when the deadline is disabled (null) that formula collapses to
+      // 5000ms and would starve real backends. Use a fixed daemon-local default.
+      timeout: opts.requestTimeout ?? 30000,
       retries: 0,
     },
     readRegistry: registryResolver,
@@ -520,7 +534,9 @@ export async function handleRequest(req, manager, ctx = {}) {
     ctx.runControllers?.set(run.runId, controller);
     // 后台驱动到终态（不 await：IPC start 立即返回 runId，run 在 daemon 内继续）
     run.waitForCompletion({
-      waitTimeout: ctx.waitTimeout ?? 120000,
+      // M10-pre3C: ctx.waitTimeout is already null (disabled) or a validated
+      // number from startDaemon. Do NOT re-default to 120000 here.
+      waitTimeout: ctx.waitTimeout,
       pollInterval: ctx.pollInterval ?? 1000,
       signal: controller.signal,
     })
@@ -561,7 +577,10 @@ export async function daemonMain(argv = process.argv.slice(2)) {
     runDir: opts["run-dir"],
     pipe: opts.pipe ?? DEFAULT_PIPE,
     registry: opts.registry,
-    waitTimeout: Number(opts["wait-timeout"] ?? 120000),
+    // M10-pre3C: omitted --wait-timeout must NOT default to 120000. Pass the
+    // raw string through; startDaemon validates via the SSOT and treats
+    // omitted/null as disabled. An explicit value is range-checked there.
+    ...(opts["wait-timeout"] !== undefined ? { waitTimeout: Number(opts["wait-timeout"]) } : {}),
     pollInterval: Number(opts["poll-interval"] ?? 1000),
     heartbeatIntervalMs: Number(opts["heartbeat"] ?? DEFAULT_HEARTBEAT_INTERVAL_MS),
     resumeOnStart: opts["resume-on-start"] === "true" || opts["resume-on-start"] === true,

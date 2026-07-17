@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import { JsonlTranscript, readTranscript } from "../src/transcript.js";
 import { createWaoMcpServer } from "../src/mcp/server.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { CompatibilityCallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 function makeGitRepo(dir) {
@@ -698,13 +699,26 @@ test("MCP-WAIT-10 (P2-B): real stdio smoke — tool discovery + already-terminal
 // short timeout + resetTimeoutOnProgress does NOT time out across a
 // server-side wait longer than that timeout.
 
-test("KEEPALIVE-01 (P1-A): run_wait sends progress notifications during poll", async () => {
+test("KEEPALIVE-01 (P1-A/M10-pre3C): server emits progress + SDK onprogress receives it with resetTimeoutOnProgress set", async () => {
+  // This is a real SDK client-behavior test. It proves the END-TO-END progress
+  // path: the client requests progress (onprogress → SDK attaches
+  // _meta.progressToken), the server reads extra._meta.progressToken and emits
+  // notifications/progress during the poll, and the SDK delivers those to the
+  // client's onprogress callback. resetTimeoutOnProgress:true is set so a real
+  // host that honors it would reset its request timer on each notification.
+  //
+  // IMPORTANT LIMITATION: InMemoryTransport delivers messages synchronously and
+  // the server-side wait here uses a fake clock (no real wall-clock blocking),
+  // so this test CANNOT prove real-time timeout reset — that requires a real
+  // transport with wall-clock pacing and is the job of the later CTO Codex Host
+  // 180s gate. What this test proves: (1) the call RESOLVES, (2) onprogress
+  // fires at least once, (3) resetTimeoutOnProgress is wired. It does NOT catch
+  // the call error — a rejection fails the test.
   const dir = mkdtempSync(join(tmpdir(), "wao-ka-01-"));
   const runDir = mkdtempSync(join(tmpdir(), "wao-ka-01-rd-"));
   try {
     makeGitRepo(dir);
     await seedRunningRun(runDir, "run_ka", dir);
-    const progressNotifications = [];
     const server = createWaoMcpServer({
       registryPath: "/r.json", runDir, workspaceRoot: dir,
       runWaitFn: async (input) => {
@@ -712,46 +726,34 @@ test("KEEPALIVE-01 (P1-A): run_wait sends progress notifications during poll", a
         return runWait({
           ...input,
           sleepFn: () => Promise.resolve(),
-          nowFn: (() => { let t = Date.now(); return () => (t += 60000); })(),
-          // The adapter forwards an onPoll keepalive hook through to the service
-          // when the client supplied a progressToken. Keep it if present.
+          nowFn: (() => { let t = Date.now(); return () => (t += 30000); })(),
           ...(input.onPoll ? { onPoll: input.onPoll } : {}),
         });
       },
     });
-    // Wrap the server-side transport to observe outbound notifications/progress.
     const [c1, s1] = InMemoryTransport.createLinkedPair();
-    const origSend = s1.send.bind(s1);
-    s1.send = async (msg, opts) => {
-      try {
-        const parsed = typeof msg === "string" ? JSON.parse(msg) : msg;
-        if (parsed && parsed.method === "notifications/progress") progressNotifications.push(parsed);
-      } catch { /* not JSON */ }
-      return origSend(msg, opts);
-    };
     await server.connect(s1);
     const client = new Client({ name: "test", version: "0" }, { version: "0" });
     await client.connect(c1);
+    let progressCb = 0;
+    let rejected = false;
+    let rejectErr = null;
     try {
-      // onprogress causes the SDK to attach _meta.progressToken (=requestId) to
-      // the request; the server reads extra._meta.progressToken and emits
-      // notifications/progress keyed to it so a resetTimeoutOnProgress client
-      // can keep the 60s default alive across the 180s wait. NOTE: callTool's
-      // signature is (params, resultSchema?, options?) — options is the 3rd arg.
-      await client.callTool(
+      // callTool(params, resultSchema, options). CompatibilityCallToolResultSchema
+      // avoids the SDK 1.29 zod-compat response-path quirk. Do NOT swallow.
+      const res = await client.callTool(
         { name: "run_wait", arguments: { runId: "run_ka", waitMs: 180000 } },
-        undefined,
-        { onprogress: () => {} },
-      ).catch(() => {}); // SDK 1.29 response-path zod-compat quirk tolerated; we assert server-side emissions.
+        CompatibilityCallToolResultSchema,
+        { timeout: 5000, resetTimeoutOnProgress: true, onprogress: () => { progressCb++; } },
+      );
+      assert.ok(res, "call must RESOLVE — the progress path is wired end-to-end");
+      assert.ok(progressCb > 0, `onprogress must fire at least once; got ${progressCb}`);
+    } catch (e) {
+      rejected = true;
+      rejectErr = e;
     } finally { await client.close(); await server.close(); }
-    assert.ok(progressNotifications.length > 0,
-      `server must emit notifications/progress during the long poll; got ${progressNotifications.length}`);
-    for (const n of progressNotifications) {
-      assert.equal(n.method, "notifications/progress");
-      assert.equal(typeof n.params.progressToken, "number",
-        "progressToken must be the numeric request id so the client can reset its timer");
-      assert.equal(typeof n.params.progress, "number");
-    }
+    assert.equal(rejected, false,
+      `call must not reject; got ${rejectErr?.name ?? ""}: ${rejectErr?.message ?? ""}`);
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
 
