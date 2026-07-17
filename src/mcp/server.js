@@ -582,12 +582,18 @@ const RUN_WAIT_ANNOTATIONS = {
 const RUN_WAIT_DESCRIPTION =
   "Wait for a run to reach terminal state or observation period to expire, " +
   "then return a liveness summary. Workspace-bound: only waits on runs from " +
-  "the bound workspace. liveness values: terminal (done), progress (durable " +
-  "activity since afterSeq), process_only (runner alive but no progress), " +
+  "the bound workspace. Returns early ONLY on terminal state; otherwise waits " +
+  "the full waitMs and returns liveness. afterSeq omitted = baseline at first " +
+  "read (history not counted); explicit afterSeq counts all seq > afterSeq. " +
+  "liveness values: terminal (done), progress (durable activity in window — " +
+  "includes run.metrics), process_only (runner alive but no progress), " +
   "silent (no progress, runner not provably fresh). " +
   "Does NOT stop the run — Lead decides based on liveness. " +
   "waitMs minimum 180000 (3 min); does not terminate the worker. " +
-  "Read-only: no transcript events, no owner file, no state change.";
+  "Read-only: no transcript events, no owner file, no state change. " +
+  "Sends standard notifications/progress during the poll when the client " +
+  "requests progress (onprogress), so a resetTimeoutOnProgress client can " +
+  "span the 180s wait across the MCP 60s default request timeout.";
 
 /**
  * Create a WAO MCP server with registry_list, run_dispatch, run_status, run_collect, run_diagnose, run_delivery, run_delivery_decide.
@@ -1207,7 +1213,7 @@ export function createWaoMcpServer({
       outputSchema: RUN_WAIT_OUTPUT,
       annotations: RUN_WAIT_ANNOTATIONS,
     },
-    async (input) => {
+    async (input, extra) => {
       try {
         const runId = input?.runId;
         if (!isValidRunId(runId)) {
@@ -1218,12 +1224,49 @@ export function createWaoMcpServer({
           return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
         }
 
+        // M10-pre3 closeout (P1-A): keep the MCP request alive across the
+        // >=180s long-poll. The MCP SDK default request timeout is 60s, so a
+        // 180s server-side wait would be killed by the client before it
+        // returns. The standard mechanism is notifications/progress: when the
+        // client passes `onprogress`, the SDK attaches _meta.progressToken
+        // (= the request id) to the request; we read it from `extra` and emit
+        // progress notifications keyed to that token on each poll. A client
+        // that set `resetTimeoutOnProgress:true` then resets its 60s timer on
+        // each notification. This is entirely opt-in and standard — we do NOT
+        // patch the host or require a global timeout change. If the client did
+        // not request progress (no token), we send nothing.
+        const progressToken = extra?._meta?.progressToken;
+        const hasKeepalive = progressToken !== undefined && progressToken !== null
+          && typeof extra?.sendNotification === "function";
+        const onPoll = hasKeepalive
+          ? async ({ fraction }) => {
+              // progress must be monotonically non-decreasing per spec; the
+              // service already clamps fraction to [0,1).
+              const progress = Math.max(1, Math.floor(fraction * 100));
+              await extra.sendNotification({
+                method: "notifications/progress",
+                params: {
+                  progressToken,
+                  progress,
+                  total: 100,
+                },
+              });
+            }
+          : undefined;
+
         const result = await runWaitService({
           runId,
           runDir,
-          afterSeq: input?.afterSeq ?? 0,
+          // Preserve omitted-vs-explicit-0 semantics (M10-pre3 closeout P1-B):
+          //   - afterSeq omitted on the tool call → key absent here → service
+          //     treats it as baseline-at-first-read (history not counted).
+          //   - afterSeq:0 passed → forwarded as 0 → counts all history.
+          // The earlier `input?.afterSeq ?? 0` coercion collapsed both into 0,
+          // which made every first poll misreport history as progress.
+          ...(input?.afterSeq !== undefined ? { afterSeq: input.afterSeq } : {}),
           waitMs: input?.waitMs ?? 180000,
           authorizedWorkspaceRoot: binding.root,
+          ...(onPoll ? { onPoll } : {}),
         });
 
         const payload = {

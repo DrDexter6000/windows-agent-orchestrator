@@ -358,7 +358,7 @@ npm run cli -- daemon stop
 | `run.aborted` | 被 abort | M0 |
 | `run.error` | 错误 | M0 |
 | `run.stop_requested` | 用户请求停止 | M0 |
-| `run.wait_policy` | M10-pre：实际生效的等待超时策略（waitTimeoutMs + source: explicit/agent/global/default） | M10-pre |
+| `run.wait_policy` | M10-pre：实际生效的等待超时策略（waitTimeoutMs + source: explicit/agent/global/disabled）。M10-pre3 起默认 disabled（waitTimeoutMs:null） | M10-pre |
 | `run.stop_verified` | M10-pre：进程式 worker 终态后确认已退出（quiet） | M10-pre |
 | `run.stop_unverified` | M10-pre：进程式 worker 终态后无法确认退出（outcome: alive/probe_error） | M10-pre |
 | `messages.collected` | collect 命令拉取消息 | M0 |
@@ -753,7 +753,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 ### MCP `run_wait`（long-poll 终态/活性等待，M10-pre3）
 
-`run_wait` 让 MCP host 以 long-poll 方式等待一个 run 到达终态或产出 liveness 摘要，避免 busy `run_status` 轮询。它直接复用与 CLI 同等的 application service（`runWait.js`，读 transcript + liveness 投影 `ownerLiveness.js`），不 shell-out CLI。**只读**——不追加 transcript event、不修改 terminal state、不改变 run 生命周期。
+`run_wait` 让 MCP host 以 long-poll 方式等待一个 run 到达终态或产出 liveness 摘要，避免 busy `run_status` 轮询。它直接复用与 CLI 同等的 application service（`runWait.js`，读 transcript + owner 心跳 freshness SSOT `ownerLiveness.js`），不 shell-out CLI。**只读**——不追加 transcript event、不修改 terminal state、不改变 run 生命周期。
 
 `run_wait` tool：
 
@@ -763,7 +763,14 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 { "runId": "run_...", "afterSeq": 42, "waitMs": 180000 }
 ```
 
-`runId` 必填。`afterSeq`（整数 ≥0，可选）：只在 transcript 的 `seq > afterSeq` 出现新事件或终态时提前返回；省略时以调用时刻已知最大 seq 为基线。`waitMs`（整数，**下限 180000** 即 180s，默认 180000）：服务端最长阻塞时长；到时未触发则 `returnedEarly:false` 地等到终态，或超时返回 `returnedEarly:true` + 当前 liveness。模型**不能**传 `runDir`、registry、`force`、timeout 控制面参数——这些是 server-owned 配置。
+`runId` 必填。`afterSeq`（整数 ≥0，可选）：
+
+- **省略**：service 把首次读取 transcript 时的最大 `seq` 作为基线——只统计等待窗口内出现的新进展，不把历史事件误报为 progress（这是首轮 poll 的默认行为）。
+- **显式 `0` 或正整数**：调用者有意统计 `seq > afterSeq` 的全部进展（含历史），用于续读。把上次返回的 `cursor` 当 `afterSeq` 传回即可增量续读。
+
+`waitMs`（整数，**下限 180000** 即 180s，默认 180000，上限 600000）：服务端最长阻塞时长。模型**不能**传 `runDir`、registry、`force`、timeout 控制面参数——这些是 server-owned 配置。
+
+- **返回时机**：服务在两种情况下返回——(1) run 到达终态（completed/failed/aborted/timed_out），此时 `returnedEarly:true`；(2) `waitMs` 到期仍未终态，此时 `returnedEarly:false` 并附带 liveness 摘要让 Lead 决定下一步。**普通新事件不会触发提前返回**——只有终态会；窗口内的新进展通过到期的 liveness=`progress` 体现。
 
 - **安全有界输出**（只返回机器字段 + liveness 摘要，不含内容/路径/session）：
 
@@ -773,22 +780,37 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
   "state": "running",
   "terminal": false,
   "cursor": 42,
-  "returnedEarly": true,
+  "returnedEarly": false,
   "liveness": "progress",
   "activityEventCount": 3,
   "lastActivityKind": "command",
-  "ownerHeartbeat": { "kind": "command", "ts": "2026-07-15T00:00:10.000Z", "secondsSince": 4 }
+  "ownerHeartbeat": "fresh"
 }
 ```
 
-`liveness` 取值（从 transcript 事件流投影，**不引 isAlive**）：
+字段：
+
+- `state`：从 transcript 投影的当前状态（含 `unknown`）。
+- `terminal`：是否已到终态。
+- `cursor`：返回时已观测到的最大 `seq`，作为下次 `afterSeq` 的续读点。
+- `returnedEarly`：`true` = 因终态提前返回；`false` = `waitMs` 到期返回。
+- `liveness`（见下）。
+- `activityEventCount`：相对 baseline 的证据事件数。
+- `lastActivityKind`：最近一条证据事件的闭合安全标签（`message`/`thinking`/`command`/`tool_use`/`tool_result`/`file_written`/`metrics`/`state`/`delivery`/`scorecard` 等）；不存在为 `null`。
+- `ownerHeartbeat`：owner 心跳新鲜度投影，枚举 `"fresh"`（.owner 文件存在且心跳在阈值内）/`"stale"`（存在但过时）/`"n/a"`（终态返回，无 owner 概念）。**是字符串枚举，不是对象**。
+
+`liveness` 取值（从 transcript 事件流 + owner 心跳投影，**不引 isAlive**）：
 
 - `terminal` —— run 已到终态（completed/failed/aborted/timed_out）。
-- `progress` —— 近窗口内有证据事件（message/command/tool_use/file_written/metrics），worker 在产出。
-- `process_only` —— 进程式 worker 仍在运行但近窗口无证据事件（疑似思考或卡顿，未到 silent 阈值）。
-- `silent` —— 超过静默阈值仍无新事件（排队或疑似卡住，`submitted` 阶段 `lastActivity=null` 时也归此）。
+- `progress` —— baseline 之后有证据事件（message/command/tool_use/tool_result/file_written/`run.metrics`），worker 在产出。
+- `process_only` —— baseline 之后无证据事件，但 owner 心跳新鲜（worker 进程仍在，疑似思考或卡顿）。
+- `silent` —— baseline 之后无证据事件，且 owner 心跳过时或不存在（排队或疑似卡住）。
 
-`cursor` 是返回时已观测到的最大 `seq`，作为下次 `afterSeq` 的续读点。`activityEventCount` 是近窗口证据事件数；`lastActivityKind` 是最近一条证据事件类型（不存在为 `null`）；`ownerHeartbeat` 是 liveness 投影的权威心跳字段（`null` 表示无证据事件）。**绝不返回**：原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量或 `lastActivitySummary`。`content` JSON 与 `structuredContent` 语义一致。service 失败时返回固定安全文案 `run_wait failed`。
+注意：`run.metrics`（token/cost tick）算作进展，但其原始 token/cost 数值**绝不返回**——只暴露 `lastActivityKind:"metrics"`。证据事件的闭集由 `runWait.js` 所有；`ownerLiveness.js` 只负责心跳新鲜度 SSOT，不是完整 liveness 投影 SSOT。
+
+**绝不返回**：原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量、token/cost 原值。`content` JSON 与 `structuredContent` 语义一致。service 失败时返回固定安全文案 `run_wait failed`，不泄漏 zod 校验信息。
+
+**transport keepalive（M10-pre3 closeout）**：MCP SDK 默认请求超时是 60s，而 `run_wait` 最长阻塞 180s。为避免被 client 超时杀掉，server 在每次 poll 后向请求关联的 `progressToken` 发送标准 `notifications/progress`（仅当 client 通过 `onprogress` 请求了进度时）。client 若设 `resetTimeoutOnProgress:true`，每收到一条进度就重置 60s 计时器，从而跨越 180s。这是**标准 MCP 机制**，不 patch host、不改全局 timeout；是否启用取决于 host 的调用方式。若 host 不请求进度，server 不发通知，client 仍受其默认超时约束。
 
 **三钟分离（M10-pre3）**：WAO 现在有三个互相独立的时钟，不要混淆：
 

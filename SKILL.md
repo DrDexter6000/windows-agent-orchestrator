@@ -101,6 +101,10 @@ Worker self-report is evidence, not acceptance. Verification/scorecard/worker ou
 
 On failure, `run_diagnose` gives category + evidence; the Lead decides the response. Do not automatically turn a failure into a new feature or remediation project.
 
+## Advisor / Auditor Discipline
+
+Lead 必须先自行审查方案和结果。Advisor/Auditor 默认不调用；只有 Lead 能明确写出一个尚未解决的问题，以及现有确定性证据为何不足时，才调用一次窄审查。没有新证据，不重复审查。Advisor 不替代 Lead 的基础判断或最终验收。
+
 ## Scorecard
 
 Scorecard defaults to `warn`; use `--scorecard-mode hard` only when missing evidence must block completion, and `off` only deliberately. Put non-trivial rules in a file and pass `--scorecard-rules-file`; do not fight PowerShell inline JSON quoting.

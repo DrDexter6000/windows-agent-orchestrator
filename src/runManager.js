@@ -1022,6 +1022,26 @@ export class Run {
       if (!tResult.accepted) return _loserResult(tResult.state, { messages, evidence, metrics });
       throw new Error(doneError ?? "backend reported failure");
     }
+    // M10-pre3 closeout (P1-D / honesty discipline): the fallthrough below
+    // previously ALWAYS wrote run.timed_out whenever doneReason was neither
+    // "completed" nor "failed". That fabricated a timeout even when no deadline
+    // timer existed and no abort happened — e.g. a backend whose event stream
+    // simply ended without emitting a done event. That is dishonest: timed_out
+    // must mean a wall-clock deadline fired.
+    //
+    // Now we distinguish:
+    //   - timedOut === true (waitTimerExpired, or stream ended because the
+    //     controller signal was aborted by a real deadline timer) → timed_out.
+    //   - timedOut === false AND doneReason === null (stream ended with no done,
+    //     no timer, no abort) → honest failed with reason "backend_stream_ended".
+    //     Reuses the existing failed terminal arbitration (no second terminal).
+    if (!timedOut && doneReason === null) {
+      await this.transcript.append("run.error", { phase: "wait", error: "backend stream ended without done" });
+      const endedResult = await this._transition(this.state, "failed", "backend_stream_ended");
+      await this._runCleanup();
+      if (!endedResult.accepted) return _loserResult(endedResult.state, { messages, evidence, metrics });
+      throw new Error("backend stream ended without done");
+    }
     const tResult = await this._transition(this.state, "timed_out", "timeout", {
       factEvents: [{
         type: "run.timed_out",

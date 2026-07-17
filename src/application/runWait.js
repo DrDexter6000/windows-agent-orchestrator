@@ -25,9 +25,17 @@ import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { checkOwnerLiveness } from "./ownerLiveness.js";
 
 // ── Progress event types (closed set) ────────────────────────────────────────
+//
+// NOTE: run.metrics is a DISTINCT transcript type written by runManager (see
+// src/runManager.js:791 — `transcript.append("run.metrics", {tokens, costUsd})`),
+// NOT `run.event` with kind=metrics. Earlier this set listed only "run.event"
+// and silently dropped standalone metrics events, causing real runs whose only
+// window activity was a token-usage tick to be misreported as silent. The
+// closed set now names run.metrics explicitly so it always counts.
 
 const PROGRESS_EVENT_TYPES = new Set([
-  "run.event",       // durable RunEvent (message/thinking/command/tool_use/tool_result/file_written/metrics)
+  "run.event",       // durable RunEvent (message/thinking/command/tool_use/tool_result/file_written)
+  "run.metrics",     // standalone metrics tick (tokens/cost) — own transcript type
   "run.state_change",
   "run.completed",
   "run.failed",
@@ -47,6 +55,7 @@ const PROGRESS_EVENT_TYPES = new Set([
 /**
  * Activity kinds that count as durable progress.
  * Maps run.event payload kind to a safe summary label.
+ * (run.metrics maps to "metrics" via the standalone-type branch below.)
  */
 const ACTIVITY_KIND_MAP = {
   message: "message",
@@ -55,14 +64,17 @@ const ACTIVITY_KIND_MAP = {
   tool_use: "tool_use",
   tool_result: "tool_result",
   file_written: "file_written",
-  metrics: "metrics",
 };
 
 /**
  * Determine the safe activity kind label from an event.
  * Returns null if the event has no usable activity kind.
+ * Never returns the raw payload — only a closed safe label.
  */
 function activityKind(event) {
+  // Standalone run.metrics transcript event → safe "metrics" label.
+  // (token/cost values are NOT returned; only the kind label is exposed.)
+  if (event.type === "run.metrics") return "metrics";
   if (event.type === "run.event" && event.kind) {
     return ACTIVITY_KIND_MAP[event.kind] ?? null;
   }
@@ -97,10 +109,23 @@ function countProgressAfterSeq(events, afterSeq) {
 /**
  * Wait for a run to reach terminal state or observation period to expire.
  *
+ * afterSeq semantics (M10-pre3 closeout, P1-B):
+ *   - OMITTED (`afterSeq` key not present on input): the baseline is the max seq
+ *     observed at the FIRST transcript read. Only events that arrive DURING the
+ *     wait window count as progress. This prevents historical events from being
+ *     misreported as progress on a caller's first poll.
+ *   - EXPLICIT integer ≥ 0: the caller intentionally opts into counting every
+ *     event with seq > afterSeq (including history). This is the incremental
+ *     cursor a caller passes after a previous run_wait returned `cursor`.
+ *
+ * The service is the shared business boundary: it validates afterSeq itself
+ * (non-negative integer) and does NOT rely on the MCP zod schema. A direct
+ * service caller that passes -1 or 1.5 must be rejected.
+ *
  * @param {object} input
  * @param {string} input.runId — must pass isValidRunId
  * @param {string} input.runDir
- * @param {number} [input.afterSeq=0] — cursor for incremental activity
+ * @param {number} [input.afterSeq] — cursor; omitted = baseline-at-first-read
  * @param {number} [input.waitMs=180000] — observation period (>= 180000)
  * @param {string} [input.authorizedWorkspaceRoot] — MCP workspace binding
  * @param {Function} [input.sleepFn] — injectable sleep (testing)
@@ -113,10 +138,24 @@ export async function runWait(input) {
   const {
     runId,
     runDir,
-    afterSeq = 0,
     waitMs = 180000,
     authorizedWorkspaceRoot,
   } = input;
+
+  // Distinguish omitted afterSeq from explicit 0.
+  // Hasown on the input object — explicit undefined is treated as omitted too,
+  // since the only honest way to say "count all history" is the literal 0.
+  const afterSeqOmitted = !Object.prototype.hasOwnProperty.call(input, "afterSeq")
+    || input.afterSeq === undefined;
+
+  // Validate afterSeq independently (P2-A): the service is a shared business
+  // boundary, not every caller goes through MCP zod.
+  if (!afterSeqOmitted) {
+    const as = input.afterSeq;
+    if (!Number.isInteger(as) || as < 0) {
+      throw new Error(`invalid afterSeq: must be a non-negative integer, got: ${JSON.stringify(as)}`);
+    }
+  }
 
   // Validate runId before any file access
   if (!isValidRunId(runId)) {
@@ -153,6 +192,11 @@ export async function runWait(input) {
   const terminal = TERMINAL_STATES.includes(state);
   const cursor = findLastEventSeq(events) ?? 0;
 
+  // Resolve the activity baseline:
+  //   omitted → cursor at first read (only window-new events count)
+  //   explicit → the caller's cursor
+  const activityBaseline = afterSeqOmitted ? cursor : input.afterSeq;
+
   // If already terminal, return immediately
   if (terminal) {
     return {
@@ -169,10 +213,24 @@ export async function runWait(input) {
   }
 
   // Wait loop: poll until terminal or waitMs expires
-  const deadline = _now() + waitMs;
+  // Capture the start time ONCE so the deadline and the keepalive fraction
+  // share a single baseline. Reading _now() separately for deadline and start
+  // would advance a fake clock twice and skew test determinism.
+  const startNow = _now();
+  const deadline = startNow + waitMs;
   let currentState = state;
   let currentEvents = events;
   let currentCursor = cursor;
+
+  // M10-pre3 closeout (P1-A): an optional keepalive hook the caller can supply
+  // (the MCP adapter wires it to notifications/progress keyed to the client's
+  // progressToken). The service invokes it after every successful re-read while
+  // still non-terminal, so a long poll keeps the MCP request alive without the
+  // service itself knowing anything about MCP. onPoll receives the elapsed
+  // fraction of waitMs so the caller can report monotonically increasing
+  // progress. This stays read-only: onPoll is a notification, not a write.
+  const onPoll = typeof input.onPoll === "function" ? input.onPoll : null;
+  let pollIndex = 0;
 
   while (_now() < deadline) {
     // Sleep for poll interval (or remaining time, whichever is shorter)
@@ -204,10 +262,19 @@ export async function runWait(input) {
         ownerHeartbeat: "n/a",
       };
     }
+
+    // Keepalive: notify the caller that the poll is still alive. The fraction
+    // is clamped to [0,1); the MCP adapter turns this into notifications/progress.
+    if (onPoll) {
+      pollIndex++;
+      const elapsed = _now() - startNow;
+      const fraction = waitMs > 0 ? Math.min(Math.max(elapsed / waitMs, 0), 0.999) : 0;
+      try { await onPoll({ index: pollIndex, fraction }); } catch { /* keepalive failure must not break the wait */ }
+    }
   }
 
-  // waitMs expired — compute liveness summary
-  const progress = countProgressAfterSeq(currentEvents, afterSeq);
+  // waitMs expired — compute liveness summary against the resolved baseline
+  const progress = countProgressAfterSeq(currentEvents, activityBaseline);
   const ownerLiveness = checkOwnerLiveness(resolvedRunDir, runId, _now());
 
   let liveness;
