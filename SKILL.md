@@ -86,7 +86,7 @@ Minimal closed loop: `inventory → workspace_status → dispatch → status/wai
 
 The Lead uses `run_wait` as the primary supervision primitive: it blocks up to `waitMs` (default 180s) and returns as soon as the run reaches a terminal state or produces a liveness summary (`terminal`/`progress`/`process_only`/`silent`), avoiding busy poll loops. The execution deadline on worker runs is now disabled by default — supervision is observation-driven via `run_wait`, not wall-clock termination.
 
-See `docs/usage.md §MCP stdio` for host setup, full input/output schemas, and install instructions.
+See `docs/usage.md §MCP stdio` for host setup, full input/output schemas, and install instructions. OpenCode (`opencode-ai`) as Lead host: see `docs/usage.md §OpenCode 项目级配置` for the project-local `opencode.json` schema (array `command`, `enabled:true`, `--workspace-root`) and the new-process restart boundary.
 
 CLI (`npm run cli --`) remains available for human/ops/debug/fallback, including `registry validate`, `registry check`, `daemon`, and `runs dashboard`. `registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health`. `mcp bind/status/unbind` is a Human Owner ops command for project-level workspace activation (M10 P0-1); see `docs/usage.md §项目级 Workspace Activation`.
 

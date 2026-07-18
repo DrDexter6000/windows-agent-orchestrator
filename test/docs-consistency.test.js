@@ -803,3 +803,48 @@ test("M10 closeout: Smash Bros delivery 未被宣称已集成", () => {
       `${name} 不得宣称 Smash Bros delivery 已 merge/integrate/集成`);
   }
 });
+
+// ============================================================
+// M11-0A: OpenCode project-local setup docs guards
+// ============================================================
+
+test("M11-0A: 活文档不存在错误的 opencode 包名 (opencode 而非 opencode-ai)", () => {
+  const usage = read("docs/usage.md");
+  const skill = read("SKILL.md");
+  for (const [name, txt] of [["usage", usage], ["SKILL", skill]]) {
+    assert.ok(!/npm i -g opencode\b(?!-ai)/.test(txt), `${name} 不得出现 'npm i -g opencode'（应为 opencode-ai）`);
+    assert.ok(!/npm install -g opencode\b(?!-ai)/.test(txt), `${name} 不得出现 'npm install -g opencode'（应为 opencode-ai）`);
+  }
+});
+
+test("M11-0A: 活文档存在正确的 opencode-ai 安装命令", () => {
+  const usage = read("docs/usage.md");
+  assert.ok(/npm install -g opencode-ai/.test(usage), "usage.md 必须含 'npm install -g opencode-ai'");
+});
+
+test("M11-0A: 活文档不存在 '无 npm install' stale，且存在 npm ci", () => {
+  const usage = read("docs/usage.md");
+  assert.ok(!/无 npm install/.test(usage), "usage.md 不得再写 '无 npm install'（WAO 含 MCP SDK/zod 依赖）");
+  assert.ok(/npm ci/.test(usage), "usage.md 必须含 'npm ci' 安装步骤");
+});
+
+test("M11-0A: usage.md 含 OpenCode 项目级配置 schema 关键字段", () => {
+  const usage = read("docs/usage.md");
+  for (const needle of ["\$schema", '"mcp"', '"type": "local"', '"enabled": true', '"command": [', "--workspace-root", "--pure"]) {
+    assert.ok(usage.includes(needle), `usage.md OpenCode 配置示例缺关键字段: ${needle}`);
+  }
+});
+
+test("M11-0A: usage.md 说明 --pure 用途、新进程重启边界、command 数组要求", () => {
+  const usage = read("docs/usage.md");
+  assert.ok(/--pure/.test(usage), "usage.md 必须提到 --pure");
+  assert.ok(/禁用.*插件|插件.*干扰/.test(usage), "usage.md 必须说明 --pure 禁用插件以减少冲突");
+  assert.ok(/新的 OpenCode 进程|启动新.*进程|重启|新进程/.test(usage), "usage.md 必须说明改配置后需启动新进程");
+  assert.ok(/command.*必须是数组|command 必须是数组|数组/.test(usage), "usage.md 必须说明 command 必须是数组");
+});
+
+test("M11-0A: usage.md MCP 段不再声称只有 7 tools", () => {
+  const usage = read("docs/usage.md");
+  assert.ok(!/7 个工具/.test(usage), "usage.md MCP 段不得再声称只有 7 个工具");
+  assert.ok(/11 个工具/.test(usage), "usage.md MCP 段必须反映 11 个工具");
+});
