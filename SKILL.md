@@ -7,7 +7,7 @@ description: "[LEAD-ONLY] Use when the user asks to dispatch, supervise, resume,
 
 Loading this skill makes you the Lead Operator. You own understanding, orchestration, dispatch, acceptance, integration, and reporting. Workers and auditors do not load this skill.
 
-WAO is an MCP-first, Skill-guided, CLI-backed deterministic control plane for real worker tasks: dispatch, transcript, isolation, delivery, scorecard, metrics, and workflow. The Lead uses MCP tools as the primary interface; CLI is for human/ops/debug/fallback. It is in supervised production trial, not autonomous production. Use only workers whose latest certification says `certified` and `strict-dispatch`; Claude Code process workers are the default coding lane. Do not promise automatic merge, unattended failure response, or large production queues.
+WAO is an MCP-first, Skill-guided, CLI-backed deterministic control plane for real worker tasks: dispatch, transcript, isolation, delivery, scorecard, metrics, and workflow. The Lead uses MCP tools as the primary interface; CLI is for human/ops/debug/fallback. It is in supervised production trial, not autonomous production. Use only workers whose latest `registry_list` certification is `certified` — a `certified` worker is eligible for strict dispatch under the certification policy, so the Lead does not separately prove a second `strict-dispatch` field. `conditional` workers (e.g. `coder_mm`) require an explicit Owner-authorized exception for any non-read-only task. Claude Code process workers are the default coding lane. Do not promise automatic merge, unattended failure response, or large production queues.
 
 ## Mainline
 
@@ -55,7 +55,7 @@ Never put credentials or secret values in a worker prompt. For read-only work, e
 
 Before dispatch:
 
-1. Use MCP `registry_list` to confirm worker availability and certification status; require a certified strict-dispatch worker for real changes.
+1. Use MCP `registry_list` to confirm worker availability and certification status; require a `certified` worker for real changes (certification is the single eligibility field — `certified` implies strict-dispatch eligibility). `conditional` workers need an explicit Owner-authorized exception for non-read-only tasks.
 2. For static schema checks, `registry validate`/`doctor`/debug, use CLI fallback.
 3. Host MCP/provider/auth configuration belongs to the host runtime, not WAO. Never put credential values in worker prompts, MCP arguments, or the repository.
 4. Delivery runs force persistent worktree isolation automatically — the model cannot override `isolate`.

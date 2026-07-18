@@ -220,6 +220,8 @@ npm run cli -- run coder_low --prompt "..." --isolate
 
 隔离后，agent 在 `<cwd>/.wao-worktrees/<runId>/` 里工作，不污染主工作树。
 
+**Worktree checkout 卫生（M11-1B）**：WAO 在创建首个 worktree 前，会在仓库本地 `.git/info/exclude` 写入恰好一条根忽略规则 `/.wao-worktrees/`，使持久 worktree 目录不出现在源工作树的普通 `git status --porcelain` 输出。该规则是仓库本地 hygiene 规则（不编辑 tracked `.gitignore`、不隐藏任意 worker 产出）；WAO 保留既有 exclude 字节（含 BOM、CRLF/LF、用户规则），对已存在的精确规则幂等，在 `git worktree add` 失败时回滚本次调用新增的规则。该规则与 host activation（如 Codex `mcp bind`）的 marker block 互相独立，移除一个不会影响另一个。
+
 ### 场景 4b：delivery 模式（foreground run + 原子交付 commit）
 
 ```powershell
