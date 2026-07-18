@@ -36,7 +36,8 @@ function sensitiveDeliveryResult() {
       baseCommit: "b".repeat(40),
       worktreePath: "C:\\Users\\owner\\secret\\worktree",
       branch: "wao/run_x",
-      changedFiles: ["src/secret.js", "config/credentials.json"],
+      // Sorted canonical repo-relative paths (real DeliveryRef.changedFiles is sorted).
+      changedFiles: ["config/credentials.json", "src/secret.js"],
       verification: { status: "passed", commands: ["npm test"], results: [{ ok: true }], failureCode: null },
       acceptance: { status: "pending", reviewerType: "lead_agent" },
       integration: { status: "pending", targetCommit: null },
@@ -48,7 +49,7 @@ function sensitiveDeliveryResult() {
 
 // ===== Tests =====
 
-test("M9-6B-01: tools/list has seven tools including run_delivery + run_delivery_decide", async () => {
+test("M9-6B-01: tools/list includes run_delivery + run_delivery_decide", async () => {
   const dir = mkdtempSync(join(tmpdir(), "m96b-01-"));
   try {
     const rp = join(dir, "agents.json");
@@ -83,7 +84,7 @@ test("M9-6B-01: tools/list has seven tools including run_delivery + run_delivery
   } finally { cleanupDir(dir); }
 });
 
-test("M9-6B-02: run_delivery returns only safe fields, no DeliveryRef leak", async () => {
+test("M9-6B-02: run_delivery returns safe fields incl. bounded changedPaths, no DeliveryRef leak", async () => {
   const server = createWaoMcpServer({
     registryPath: "/r.json", runDir: "/runs",
     getRunDeliveryFn: async () => sensitiveDeliveryResult(),
@@ -92,7 +93,8 @@ test("M9-6B-02: run_delivery returns only safe fields, no DeliveryRef leak", asy
   try {
     const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
-    const allowed = new Set(["runId", "terminalState", "baseCommit", "deliveryCommit", "changedFileCount", "verificationStatus", "verificationFailureCode", "acceptanceStatus", "decisionType"]);
+    // M11-1A: changedPaths + changedPathsTruncated are now part of the safe output set.
+    const allowed = new Set(["runId", "terminalState", "baseCommit", "deliveryCommit", "changedFileCount", "changedPaths", "changedPathsTruncated", "verificationStatus", "verificationFailureCode", "acceptanceStatus", "decisionType"]);
     for (const k of Object.keys(parsed)) assert.ok(allowed.has(k), `unexpected key: ${k}`);
 
     assert.equal(parsed.changedFileCount, 2, "count derived from array length");
@@ -101,14 +103,23 @@ test("M9-6B-02: run_delivery returns only safe fields, no DeliveryRef leak", asy
     assert.equal(parsed.acceptanceStatus, "pending");
     assert.equal(parsed.decisionType, null);
 
+    // M11-1A: changedPaths now exposes the safe repo-relative paths (bounded, validated).
+    // The old "no changed file names" contract is replaced by "only safe repo-relative paths".
+    assert.ok(Array.isArray(parsed.changedPaths), "changedPaths must be an array");
+    assert.equal(parsed.changedPaths.length, 2);
+    assert.deepEqual(parsed.changedPaths, ["config/credentials.json", "src/secret.js"].sort(),
+      "changedPaths must be sorted, repo-relative, forward-slash");
+    assert.equal(parsed.changedPathsTruncated, false, "2 <= 64 cap, not truncated");
+
+    // Still must NOT leak raw DeliveryRef internals / absolute paths / commands / results.
     const dumped = JSON.stringify(res);
-    assert.ok(!dumped.includes("worktreePath"), "no worktreePath");
-    assert.ok(!dumped.includes("secret.js"), "no changed file names");
-    assert.ok(!dumped.includes("credentials.json"), "no changed file names");
+    assert.ok(!dumped.includes("worktreePath"), "no worktreePath (absolute worktree path)");
+    assert.ok(!dumped.includes("C:\\\\Users"), "no absolute Windows path");
     assert.ok(!dumped.includes("wao/run_x"), "no branch");
     assert.ok(!dumped.includes("npm test"), "no verification commands");
     assert.ok(!dumped.includes("results"), "no verification results");
     assert.ok(!dumped.includes("integration"), "no integration target");
+    assert.ok(!dumped.includes("reviewerType"), "no acceptance reviewerType");
 
     if (res.structuredContent) assert.deepEqual(res.structuredContent, parsed);
   } finally {
@@ -382,6 +393,158 @@ test("M9-6B-12: malformed query scalar values collapse to fixed error", async ()
       assert.ok(!dumped.includes("not-hash"), `${label}: no bad commit`);
     } finally { await client.close(); await server.close(); }
   }
+});
+
+// ---------------------------------------------------------------------------
+// M11-1A: safe changed-path projection in run_delivery.
+// ---------------------------------------------------------------------------
+
+test("M11-1A-01: run_delivery output field set is exactly old fields + changedPaths + changedPathsTruncated", async () => {
+  const server = createWaoMcpServer({
+    registryPath: "/r.json", runDir: "/runs",
+    getRunDeliveryFn: async () => ({
+      runId: "run_x",
+      terminalState: "completed",
+      deliveryRef: {
+        deliveryCommit: "d".repeat(40), baseCommit: "b".repeat(40),
+        changedFiles: ["src/a.js", "test/a.test.js"],
+        verification: { status: "passed" },
+        acceptance: { status: "pending" },
+      },
+      verification: { status: "passed" },
+      acceptance: { status: "pending" },
+    }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    const expectedKeys = new Set([
+      "runId", "terminalState", "baseCommit", "deliveryCommit",
+      "changedFileCount", "changedPaths", "changedPathsTruncated",
+      "verificationStatus", "verificationFailureCode", "acceptanceStatus", "decisionType",
+    ]);
+    assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys,
+      `field set mismatch; got ${Object.keys(parsed).sort()}`);
+  } finally { await client.close(); await server.close(); }
+});
+
+test("M11-1A-02: run_delivery returns safe repo-relative paths, no raw diff/content/worktree/branch", async () => {
+  const server = createWaoMcpServer({
+    registryPath: "/r.json", runDir: "/runs",
+    getRunDeliveryFn: async () => ({
+      runId: "run_x",
+      terminalState: "completed",
+      deliveryRef: {
+        deliveryCommit: "d".repeat(40), baseCommit: "b".repeat(40),
+        worktreePath: "C:\\Users\\owner\\worktree",
+        branch: "wao/run_x",
+        changedFiles: ["src/a.js", "test/b.test.js"],
+        verification: { status: "passed", commands: ["npm test"], results: [{ ok: true }] },
+        acceptance: { status: "pending", reviewerType: "lead_agent" },
+        integration: { status: "pending", targetCommit: null },
+      },
+      verification: { status: "passed" },
+      acceptance: { status: "pending" },
+    }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    assert.deepEqual(parsed.changedPaths, ["src/a.js", "test/b.test.js"]);
+    assert.equal(parsed.changedFileCount, 2);
+    assert.equal(parsed.changedPathsTruncated, false);
+    const dumped = JSON.stringify(res);
+    for (const forbidden of ["worktreePath", "C:\\\\Users", "wao/run_x", "npm test", "results", "integration", "reviewerType", "targetCommit"]) {
+      assert.ok(!dumped.includes(forbidden), `no ${forbidden} leak`);
+    }
+  } finally { await client.close(); await server.close(); }
+});
+
+test("M11-1A-03: run_delivery caps changedPaths at 64, sets truncated=true when count>64", async () => {
+  // 65 sorted canonical paths → first 64 returned, count=65, truncated=true.
+  const many = Array.from({ length: 65 }, (_, i) => `src/f${String(i).padStart(3, "0")}.js`).sort();
+  const server = createWaoMcpServer({
+    registryPath: "/r.json", runDir: "/runs",
+    getRunDeliveryFn: async () => ({
+      runId: "run_x",
+      terminalState: "completed",
+      deliveryRef: {
+        deliveryCommit: "d".repeat(40), baseCommit: "b".repeat(40),
+        changedFiles: many,
+        verification: { status: "passed" },
+        acceptance: { status: "pending" },
+      },
+      verification: { status: "passed" },
+      acceptance: { status: "pending" },
+    }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    assert.equal(parsed.changedPaths.length, 64, "capped at 64");
+    assert.equal(parsed.changedFileCount, 65, "real count preserved");
+    assert.equal(parsed.changedPathsTruncated, true, "truncated flag set");
+    assert.deepEqual(parsed.changedPaths, many.slice(0, 64), "deterministic first 64");
+  } finally { await client.close(); await server.close(); }
+});
+
+test("M11-1A-04: run_delivery malformed path in changedFiles → fixed 'run_delivery failed', no leak", async () => {
+  const server = createWaoMcpServer({
+    registryPath: "/r.json", runDir: "/runs",
+    getRunDeliveryFn: async () => ({
+      runId: "run_x",
+      terminalState: "completed",
+      deliveryRef: {
+        deliveryCommit: "d".repeat(40), baseCommit: "b".repeat(40),
+        // Malformed: absolute path + traversal — must fail-closed.
+        changedFiles: ["C:\\Users\\owner\\secret.js", "../etc/passwd"],
+        verification: { status: "passed" },
+        acceptance: { status: "pending" },
+      },
+      verification: { status: "passed" },
+      acceptance: { status: "pending" },
+    }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
+    assert.equal(res.isError, true, "malformed path must produce error");
+    const dumped = JSON.stringify(res);
+    assert.ok(dumped.includes("run_delivery failed"), "fixed safe error text");
+    // Malicious values must NOT leak through the fixed error.
+    assert.ok(!dumped.includes("C:\\\\Users"), "no absolute path leak");
+    assert.ok(!dumped.includes("../etc/passwd"), "no traversal leak");
+    assert.ok(!dumped.includes("owner"), "no user dir leak");
+  } finally { await client.close(); await server.close(); }
+});
+
+test("M11-1A-05: run_delivery malformed service result (non-array changedFiles) → fixed error", async () => {
+  const server = createWaoMcpServer({
+    registryPath: "/r.json", runDir: "/runs",
+    getRunDeliveryFn: async () => ({
+      runId: "run_x",
+      terminalState: "completed",
+      deliveryRef: {
+        deliveryCommit: "d".repeat(40), baseCommit: "b".repeat(40),
+        changedFiles: "AKIAIOSFODNN7EXAMPLE",
+        verification: { status: "passed" },
+        acceptance: { status: "pending" },
+      },
+      verification: { status: "passed" },
+      acceptance: { status: "pending" },
+    }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
+    assert.equal(res.isError, true, "non-array changedFiles must produce error");
+    const dumped = JSON.stringify(res);
+    assert.ok(dumped.includes("run_delivery failed"), "fixed safe error text");
+    assert.ok(!dumped.includes("AKIA"), "no secret-like value leak");
+  } finally { await client.close(); await server.close(); }
 });
 
 test("M9-6B-13: malformed decide result collapses to fixed error", async () => {

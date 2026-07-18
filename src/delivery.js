@@ -77,6 +77,18 @@ function toFwd(p) {
   return String(p).replace(/\\/g, "/");
 }
 
+/**
+ * Exported repo-relative path validator (M11-1A): the single SSOT used by both
+ * packaging/inspection and the safe delivery-review projection. Reused by
+ * src/application/deliveryReview.js so there is no second path-identity
+ * algorithm in the codebase.
+ * @param {string} p
+ * @returns {boolean}
+ */
+export function isValidRepoRelativePath(p) {
+  return isValidAllowedPath(p);
+}
+
 /** Normalize absolute OS path for comparison (resolve + fwd-slash). */
 function normAbs(p) {
   return toFwd(resolve(p));

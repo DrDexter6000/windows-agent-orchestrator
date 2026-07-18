@@ -680,12 +680,12 @@ annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:false, 
 
 annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`（纯只读查询，不触碰外部系统）。
 
-### MCP `run_delivery`（只读 delivery 查询，M9-6B）
+### MCP `run_delivery`（只读 delivery 查询，M9-6B + M11-1A）
 
 `run_delivery` 让 MCP host 查询一个 run 的 delivery 状态。只读，不追加 transcript event。
 
 - **输入**（strict）：`{ "runId": "run_..." }`。
-- **安全输出**（不返回完整 DeliveryRef / changedFiles / reason / commands / worktreePath）：
+- **安全输出**（不返回完整 DeliveryRef / raw diff / file content / reason / commands / results / worktreePath / branch / integration）：
 
 ```json
 {
@@ -694,6 +694,8 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
   "baseCommit": "bbb...",
   "deliveryCommit": "ddd...",
   "changedFileCount": 3,
+  "changedPaths": ["src/a.js", "src/b.js", "test/a.test.js"],
+  "changedPathsTruncated": false,
   "verificationStatus": "passed",
   "verificationFailureCode": null,
   "acceptanceStatus": "pending",
@@ -701,7 +703,16 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 }
 ```
 
-Commit hash 校验为 40/64 位十六进制；changedFileCount 是数组长度（不返回文件名）；verification status ∈ `pending|passed|failed|unavailable`；failureCode ∈ 安全 enum 或 null；decisionType ∈ `run.delivery_accepted|run.delivery_rejected|null`。失败返回固定 `run_delivery failed`。
+字段：
+
+- Commit hash 校验为 40/64 位十六进制。
+- `changedFileCount` = DeliveryRef 中全部 changed files 的真实总数（不受 cap 影响）。
+- `changedPaths` = 最多 **64** 条、确定性顺序（与 DeliveryRef 的 sorted canonical 顺序一致）、repo-relative、forward-slash 的安全路径。这是 review metadata，**不是 raw diff 或文件内容**。64 cap 是 server-owned 常量，模型不能通过 tool argument 控制。
+- `changedPathsTruncated` = `changedFileCount > changedPaths.length`（即真实总数超过 64 cap）。
+- `verificationStatus` ∈ `pending|passed|failed|unavailable`；只有 `passed` 表示 exact-artifact verification 已通过，Lead 仍负责语义判断。
+- `verificationFailureCode` ∈ 安全 enum 或 null；`decisionType` ∈ `run.delivery_accepted|run.delivery_rejected|null`。
+
+路径投影的安全边界：每个 path 经 `src/delivery.js` 的 repo-relative 校验 SSOT 复验（拒绝绝对 Windows/POSIX/UNC、`..`/`.` traversal、空 segment、尾分隔符），并额外限制长度 1..512、无控制字符、无 NUL、统一 forward-slash。任何 malformed path 一律 fail-closed —— 整个 projection 不返回部分结果，调用折叠为固定 `run_delivery failed`，不泄漏恶意值。失败返回固定 `run_delivery failed`（不拼接异常、路径或 secret）。
 
 annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`。
 

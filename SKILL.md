@@ -95,7 +95,7 @@ CLI (`npm run cli --`) remains available for human/ops/debug/fallback, including
 Worker self-report is evidence, not acceptance. Verification/scorecard/worker output are not semantic acceptance. Before recording acceptance:
 
 1. Check terminal state via `run_status`; collect output via `run_collect`; diagnose on failure via `run_diagnose`.
-2. `run_delivery` shows verification result and acceptance status, but does not return changed paths or raw diff. When semantic judgment requires inspecting the artifact or diff, use Owner-authorized repo-local read-only Git/CLI — do not blindly accept on `verification=passed` alone.
+2. `run_delivery` returns a bounded list of safe repo-relative changed paths (capped at 64, with a truncation flag), plus verification result and acceptance status — but it does not return raw diff, file content, worktree paths, verification commands, or decision reasons. Only `verificationStatus=passed` means exact-artifact verification passed; the Lead still owns semantic acceptance and must not blindly accept on `verification=passed` alone. When semantic judgment requires inspecting the artifact or diff beyond the bounded path list, use Owner-authorized repo-local read-only Git/CLI.
 3. Record the verdict with `run_delivery_decide` (first-decision-wins, irreversible through MCP).
 4. The Lead owns the final decision even when all deterministic gates pass.
 

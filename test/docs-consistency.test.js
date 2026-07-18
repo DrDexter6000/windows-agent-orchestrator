@@ -778,17 +778,17 @@ test("M10 closeout: roadmap 不出现 'unattended or multi-tenant release' / cre
     "PRD 必须声明 WAO 不为缺 goal/autonomy 的 Lead 补 goal loop");
 });
 
-test("M11 mainline: roadmap 存在且只存在一个规划中的 M11 Lead Experience + Adaptive Playbooks", () => {
+test("M11 mainline: roadmap 存在且只存在一个 M11 Lead Experience + Adaptive Playbooks 行，标为进行中或规划中，不得整体完成", () => {
   const roadmap = read("docs/roadmap.md");
   const lines = roadmap.split("\n");
   // 进度跟踪表里 | M11 | 行
   const m11Rows = lines.filter((l) => /^\|\s*M11\b/.test(l));
   assert.equal(m11Rows.length, 1, `roadmap 必须恰好一个 M11 进度行；实际 ${m11Rows.length}`);
   const m11Row = m11Rows[0];
-  // 必须是规划中/未开始，不得标 ✅ 完成 或 进行中
-  assert.ok(/📋 规划中|规划中.*未开始/.test(m11Row), "M11 必须标为规划中（未开始）");
-  assert.ok(!/✅\s*完成/.test(m11Row), "M11 不得标为已完成");
-  assert.ok(!/🔧|进行中/.test(m11Row), "M11 不得标为进行中");
+  // 必须是进行中（🔧）或规划中（📋），不得标 ✅ 完成（M11 整体未完成）
+  assert.ok(/🔧 进行中|📋 规划中|🔧.*进行中|📋.*规划中/.test(m11Row),
+    "M11 必须标为进行中或规划中");
+  assert.ok(!/✅\s*完成/.test(m11Row), "M11 不得标为整体完成");
   // 名称必须含两个核心（Lead Experience + Adaptive Playbooks 或同义）
   assert.ok(/Lead Experience/.test(m11Row) && /Adaptive Playbooks|playbook|template/i.test(m11Row),
     "M11 名称必须保留 Lead Experience + Adaptive Playbooks 两个核心");
@@ -847,4 +847,27 @@ test("M11-0A: usage.md MCP 段不再声称只有 7 tools", () => {
   const usage = read("docs/usage.md");
   assert.ok(!/7 个工具/.test(usage), "usage.md MCP 段不得再声称只有 7 个工具");
   assert.ok(/11 个工具/.test(usage), "usage.md MCP 段必须反映 11 个工具");
+});
+
+// ============================================================
+// M11-1A: safe delivery changed-path projection docs guards
+// ============================================================
+
+test("M11-1A: usage.md 记录 changedPaths/changedPathsTruncated 字段与 64 cap", () => {
+  const usage = read("docs/usage.md");
+  assert.ok(/changedPaths/.test(usage), "usage.md 必须记录 changedPaths 字段");
+  assert.ok(/changedPathsTruncated/.test(usage), "usage.md 必须记录 changedPathsTruncated 字段");
+  assert.ok(/64/.test(usage), "usage.md 必须记录 64 cap");
+  // 仍明确不返回 raw diff / 文件内容
+  assert.ok(/不返回.*raw diff|不是 raw diff|raw diff/.test(usage), "usage.md 必须声明不返回 raw diff");
+});
+
+test("M11-1A: SKILL Acceptance 段反映 bounded changed paths 但不替代语义验收", () => {
+  const skill = read("SKILL.md");
+  assert.ok(/changed paths|changedPaths/.test(skill), "SKILL Acceptance 必须提到 changed paths");
+  // 仍强调 Lead 不得仅因 verification=passed 自动接受
+  assert.ok(/verificationStatus=passed|verification=passed|blindly accept/.test(skill),
+    "SKILL 必须声明 Lead 不得仅因 verification passed 自动接受");
+  // 不返回 raw diff / 文件内容
+  assert.ok(/raw diff|file content|文件内容/.test(skill), "SKILL 必须声明不返回 raw diff/文件内容");
 });

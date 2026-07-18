@@ -33,6 +33,7 @@ import { getRunStatus } from "../application/runStatus.js";
 import { collectRunMessages } from "../application/runCollect.js";
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
 import { getRunDelivery, decideRunDelivery } from "../application/runDelivery.js";
+import { projectDeliveryChangedPaths, CHANGED_PATHS_LIMIT } from "../application/deliveryReview.js";
 import { stopRun } from "../application/runStop.js";
 import { listRuns } from "../application/runList.js";
 import { runWait } from "../application/runWait.js";
@@ -408,6 +409,8 @@ const RUN_DELIVERY_OUTPUT = z.object({
   baseCommit: COMMIT_HASH_SCHEMA,
   deliveryCommit: COMMIT_HASH_SCHEMA,
   changedFileCount: z.number().int().nonnegative(),
+  changedPaths: z.array(z.string().min(1).max(512)),
+  changedPathsTruncated: z.boolean(),
   verificationStatus: VERIFICATION_STATUS_ENUM,
   verificationFailureCode: FAILURE_CODE_ENUM.nullable(),
   acceptanceStatus: ACCEPTANCE_STATUS_ENUM,
@@ -423,8 +426,11 @@ const RUN_DELIVERY_ANNOTATIONS = {
 
 const RUN_DELIVERY_DESCRIPTION =
   "Query the delivery status of a run: terminal state, delivery/base commit hashes, " +
-  "changed file count, verification status, and acceptance status. Read-only. Does not " +
-  "return changed file names, worktree paths, verification commands, or decision reasons.";
+  "changed file count, a bounded list of safe repo-relative changed paths " +
+  `(up to ${CHANGED_PATHS_LIMIT}, with a truncation flag), verification status, and acceptance status. ` +
+  "Read-only. Only verificationStatus=passed means exact-artifact verification passed; " +
+  "the Lead still owns semantic acceptance. Does not return raw diff, file content, " +
+  "worktree paths, verification commands/results, or decision reasons.";
 
 // ===== run_delivery_decide (durable decision) constants =====
 
@@ -984,7 +990,14 @@ export function createWaoMcpServer({
         const baseCommit = COMMIT_HASH_SCHEMA.parse(ref.baseCommit);
         const deliveryCommit = COMMIT_HASH_SCHEMA.parse(ref.deliveryCommit);
         if (!Array.isArray(ref.changedFiles)) throw new Error("changedFiles not array");
-        const changedFileCount = ref.changedFiles.length;
+        // M11-1A: project changedFiles into a bounded, safe repo-relative list.
+        // projectDeliveryChangedPaths reuses the delivery.js path-validation SSOT,
+        // caps at CHANGED_PATHS_LIMIT, and throws on any malformed path — which the
+        // outer try/catch folds into the fixed `run_delivery failed` error.
+        const projection = projectDeliveryChangedPaths({ changedFiles: ref.changedFiles });
+        const changedFileCount = projection.changedFileCount;
+        const changedPaths = projection.changedPaths;
+        const changedPathsTruncated = projection.changedPathsTruncated;
         const rawVStatus = delivery.verification?.status ?? "pending";
         if (!SAFE_VERIFICATION_STATUSES.has(rawVStatus)) throw new Error("bad verificationStatus");
         const verificationStatus = rawVStatus;
@@ -1005,6 +1018,8 @@ export function createWaoMcpServer({
           baseCommit,
           deliveryCommit,
           changedFileCount,
+          changedPaths,
+          changedPathsTruncated,
           verificationStatus,
           verificationFailureCode,
           acceptanceStatus,
