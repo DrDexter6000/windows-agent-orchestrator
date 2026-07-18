@@ -660,3 +660,101 @@ test("M10-pre2: workspace_status tool documented in usage.md and SKILL.md", () =
   assert.ok(/workspace binding|workspace-root|roots\/list/.test(roles),
     "team-roles.md must mention workspace binding for MCP dispatch");
 });
+
+// ============================================================
+// M10 closeout + product definition calibration guards
+// ============================================================
+
+test("M10 closeout: roadmap 中 M10 恰好一个 ✅ 完成", () => {
+  const roadmap = read("docs/roadmap.md");
+  const lines = roadmap.split("\n");
+  // 进度跟踪表里 | M10 | 行必须标 ✅ 完成
+  const m10Rows = lines.filter((l) => /^\|\s*M10\b/.test(l));
+  assert.ok(m10Rows.length >= 1, "roadmap 必须有 M10 进度行");
+  const completedM10 = m10Rows.filter((l) => /✅\s*完成/.test(l));
+  assert.equal(completedM10.length, 1, `M10 必须恰好一个 ✅ 完成；实际 ${completedM10.length}`);
+});
+
+test("M10 closeout: 活文档不再出现 stale M10 in-progress 文案", () => {
+  const roadmap = read("docs/roadmap.md");
+  const prd = read("docs/01-prd.md");
+  const arch = read("docs/02-architecture.md");
+  for (const [name, txt] of [["roadmap", roadmap], ["01-prd", prd], ["02-architecture", arch]]) {
+    assert.ok(!/M10 整体未完成/.test(txt), `${name} 不得再写"M10 整体未完成"`);
+    assert.ok(!/M10-pre3.*准备中|M10-pre3\s*\|.*🔧/.test(txt), `${name} 不得再把 M10-pre3 标为准备中`);
+    assert.ok(!/M10 P0-2.*进行中|M10 P0-3.*进行中/.test(txt), `${name} 不得再把 M10 P0-2/P0-3 标为进行中`);
+  }
+});
+
+test("M10 closeout: PRD 不再把 metrics / scorecard / 验收契约标为 ❌", () => {
+  const prd = read("docs/01-prd.md");
+  // 这三项横切能力已完成，PRD 能力表不得保留 ❌
+  const metricsLine = prd.split("\n").find((l) => /metrics 聚合/.test(l));
+  assert.ok(metricsLine, "PRD 必须有 metrics 聚合能力行");
+  assert.ok(!/❌/.test(metricsLine), "PRD metrics 聚合不得再标 ❌");
+  const scorecardLine = prd.split("\n").find((l) => /scorecard 证据链门控/.test(l));
+  assert.ok(scorecardLine && !/❌/.test(scorecardLine), "PRD scorecard 不得再标 ❌");
+  const acceptLine = prd.split("\n").find((l) => /验收契约机制/.test(l));
+  assert.ok(acceptLine && !/❌/.test(acceptLine), "PRD 验收契约机制不得再标 ❌");
+});
+
+test("M10 closeout: PRD 不再声称 MCP 当前只有 7 tools", () => {
+  const prd = read("docs/01-prd.md");
+  // PRD 必须反映当前 11 tools，不得回退到 7 tools
+  assert.ok(!/7 tools/.test(prd), "PRD 不得再声称 MCP 当前只有 7 tools");
+  assert.ok(/11 tools/.test(prd), "PRD 必须反映当前 11 tools");
+});
+
+test("M10 closeout: TD-106 恰好存在一次且仍在开放区，不进入已偿还区", () => {
+  const td = read("docs/tech-debt.md");
+  // 切出"已偿还"区与"开放"区
+  const repaidIdx = td.indexOf("## 已偿还");
+  const openIdx = td.indexOf("## 开放");
+  assert.ok(repaidIdx >= 0 && openIdx > repaidIdx, "tech-debt.md 必须有 已偿还 与 开放 两区");
+  const repaidSection = td.slice(repaidIdx, openIdx);
+  const openSection = td.slice(openIdx);
+  // TD-106 不得出现在已偿还区
+  assert.ok(!/^\|\s*TD-106\b/m.test(repaidSection), "TD-106 不得进入已偿还区（仍开放）");
+  // TD-106 必须在开放区恰好一次
+  const openMatches = openSection.match(/^\|\s*TD-106\b/gm) || [];
+  assert.equal(openMatches.length, 1, `TD-106 必须在开放区恰好一次；实际 ${openMatches.length}`);
+});
+
+test("M10 closeout: PRD 不再把 WAO 自带无人值守 goal/autonomy 或多租户强隔离作为产品承诺/成熟度门", () => {
+  const prd = read("docs/01-prd.md");
+  const roadmap = read("docs/roadmap.md");
+  // PRD 非目标区必须显式排除这两把错误尺子
+  assert.ok(/多租户.*强身份隔离.*不是 WAO roadmap|多租户.*强身份隔离.*不是.*目标/.test(prd),
+    "PRD 必须声明多租户强隔离不是 roadmap/目标");
+  assert.ok(/不为.*goal\/autonomy.*实现 goal loop|不替 Lead 做持续语义推理/.test(prd),
+    "PRD 必须声明 WAO 不为缺 goal/autonomy 的 Lead 补 goal loop");
+  // roadmap 不得把"多租户/企业级强隔离"列为成熟度门
+  assert.ok(!/多租户.*成熟度门|企业级强隔离.*成熟度门/.test(roadmap),
+    "roadmap 不得把多租户/企业级强隔离列为成熟度门");
+});
+
+test("M11 mainline: roadmap 存在且只存在一个规划中的 M11 Lead Experience + Adaptive Playbooks", () => {
+  const roadmap = read("docs/roadmap.md");
+  const lines = roadmap.split("\n");
+  // 进度跟踪表里 | M11 | 行
+  const m11Rows = lines.filter((l) => /^\|\s*M11\b/.test(l));
+  assert.equal(m11Rows.length, 1, `roadmap 必须恰好一个 M11 进度行；实际 ${m11Rows.length}`);
+  const m11Row = m11Rows[0];
+  // 必须是规划中/未开始，不得标 ✅ 完成 或 进行中
+  assert.ok(/📋 规划中|规划中.*未开始/.test(m11Row), "M11 必须标为规划中（未开始）");
+  assert.ok(!/✅\s*完成/.test(m11Row), "M11 不得标为已完成");
+  assert.ok(!/🔧|进行中/.test(m11Row), "M11 不得标为进行中");
+  // 名称必须含两个核心（Lead Experience + Adaptive Playbooks 或同义）
+  assert.ok(/Lead Experience/.test(m11Row) && /Adaptive Playbooks|playbook|template/i.test(m11Row),
+    "M11 名称必须保留 Lead Experience + Adaptive Playbooks 两个核心");
+});
+
+test("M10 closeout: Smash Bros delivery 未被宣称已集成", () => {
+  const roadmap = read("docs/roadmap.md");
+  const prd = read("docs/01-prd.md");
+  // 不得宣称 Smash Bros delivery 已 merge/integrate/集成进目标项目
+  for (const [name, txt] of [["roadmap", roadmap], ["01-prd", prd]]) {
+    assert.ok(!/Smash Bros.*已 merge|Smash Bros.*已 integrate|Smash Bros.*已集成/.test(txt),
+      `${name} 不得宣称 Smash Bros delivery 已 merge/integrate/集成`);
+  }
+});
