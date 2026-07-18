@@ -409,7 +409,7 @@ const RUN_DELIVERY_OUTPUT = z.object({
   baseCommit: COMMIT_HASH_SCHEMA,
   deliveryCommit: COMMIT_HASH_SCHEMA,
   changedFileCount: z.number().int().nonnegative(),
-  changedPaths: z.array(z.string().min(1).max(512)),
+  changedPaths: z.array(z.string().min(1).max(512)).max(CHANGED_PATHS_LIMIT),
   changedPathsTruncated: z.boolean(),
   verificationStatus: VERIFICATION_STATUS_ENUM,
   verificationFailureCode: FAILURE_CODE_ENUM.nullable(),
@@ -996,8 +996,18 @@ export function createWaoMcpServer({
         // outer try/catch folds into the fixed `run_delivery failed` error.
         const projection = projectDeliveryChangedPaths({ changedFiles: ref.changedFiles });
         const changedFileCount = projection.changedFileCount;
-        const changedPaths = projection.changedPaths;
         const changedPathsTruncated = projection.changedPathsTruncated;
+        // M11-1A closeout: apply the existing exact-value secret redactor to each
+        // projected path. A legitimate repo-relative path can still carry a known
+        // exact secret value (e.g. a token embedded in a filename). Reuse the same
+        // createSecretRedactor the collect path uses; if redactString changes a
+        // path, the whole path collapses to the fixed "[REDACTED]" marker so no
+        // partial secret fragment leaks. No new credential-pattern scanner.
+        const deliveryRedactor = createSecretRedactor();
+        const changedPaths = projection.changedPaths.map((p) => {
+          const redacted = deliveryRedactor.redactString(p);
+          return redacted === p ? p : "[REDACTED]";
+        });
         const rawVStatus = delivery.verification?.status ?? "pending";
         if (!SAFE_VERIFICATION_STATUSES.has(rawVStatus)) throw new Error("bad verificationStatus");
         const verificationStatus = rawVStatus;

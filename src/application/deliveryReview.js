@@ -69,18 +69,32 @@ function validateProjectedPath(p) {
  *     or malformed input fails closed — callers must not project partial results.
  *   - Output is at most CHANGED_PATHS_LIMIT paths, deterministic (first N after
  *     validating the input is already sorted).
+ *   - The CHANGED_PATHS_LIMIT cap is a hard ceiling: a caller-supplied limit
+ *     (test-only hook) is clamped to [0, CHANGED_PATHS_LIMIT]; it can never
+ *     raise the cap. The MCP adapter does not expose limit to the model.
  *   - changedFileCount is the REAL total from the input array (not the capped
  *     length), so truncation is detectable.
  *   - Input is never mutated.
  *
  * @param {object} input
  * @param {string[]} input.changedFiles — sorted unique repo-relative paths
- * @param {number} [input.limit=CHANGED_PATHS_LIMIT] — server-owned cap (not model-controlled)
+ * @param {number} [input.limit] — optional test-only hook; clamped to [0, CHANGED_PATHS_LIMIT]
  * @returns {{changedFileCount: number, changedPaths: string[], changedPathsTruncated: boolean}}
  */
-export function projectDeliveryChangedPaths({ changedFiles, limit = CHANGED_PATHS_LIMIT }) {
+export function projectDeliveryChangedPaths({ changedFiles, limit } = {}) {
   if (!Array.isArray(changedFiles)) {
     throw new Error("changedFiles must be an array");
+  }
+  // The cap is a hard ceiling. Caller-supplied limit is clamped to [0, CAP]; it
+  // can only narrow the output, never widen it beyond CHANGED_PATHS_LIMIT.
+  // Infinity means "no narrowing" → use the full CAP. Non-finite (other than
+  // Infinity) / negative / non-integer values fail closed.
+  let cap = CHANGED_PATHS_LIMIT;
+  if (limit !== undefined && limit !== null && Number.isFinite(limit)) {
+    if (limit < 0 || !Number.isInteger(limit)) {
+      throw new Error(`invalid limit: must be a non-negative integer, got ${JSON.stringify(limit)}`);
+    }
+    cap = Math.min(limit, CHANGED_PATHS_LIMIT);
   }
   // Validate every entry against the strict projection rules. Use a snapshot
   // copy so the caller's array is never mutated even if validation throws.
@@ -102,7 +116,6 @@ export function projectDeliveryChangedPaths({ changedFiles, limit = CHANGED_PATH
     prev = canonical;
     validated.push(canonical);
   }
-  const cap = Math.max(0, Math.floor(limit));
   const changedPaths = cap > 0 ? validated.slice(0, cap) : [];
   return {
     changedFileCount: validated.length,

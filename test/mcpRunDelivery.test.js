@@ -547,6 +547,102 @@ test("M11-1A-05: run_delivery malformed service result (non-array changedFiles) 
   } finally { await client.close(); await server.close(); }
 });
 
+test("M11-1A-06: run_delivery redacts a changed path that carries a known exact secret value (env-exact redaction)", async () => {
+  // RED on prior HEAD: a legitimate repo-relative path that happens to contain
+  // a known exact secret value (injected as an env name recognized by
+  // createSecretRedactor) was returned verbatim. GREEN: any path changed by the
+  // redactor maps to the fixed "[REDACTED]" marker; the raw secret never leaks
+  // in content or structuredContent.
+  const { createSecretRedactor } = await import("../src/secretRedaction.js");
+  const SECRET = "LEAKTOKEN123456";
+  // Build a redactor recognizing WAO_TEST_API_KEY=LEAKTOKEN123456 (same shape the
+  // production redactor uses against process.env). We inject this env into the
+  // process before the server builds its redactor.
+  process.env.WAO_TEST_API_KEY = SECRET;
+  try {
+    const server = createWaoMcpServer({
+      registryPath: "/r.json", runDir: "/runs",
+      getRunDeliveryFn: async () => ({
+        runId: "run_x",
+        terminalState: "completed",
+        deliveryRef: {
+          deliveryCommit: "d".repeat(40), baseCommit: "b".repeat(40),
+          changedFiles: [`src/${SECRET}.js`, "test/ok.test.js"],
+          verification: { status: "passed" },
+          acceptance: { status: "pending" },
+        },
+        verification: { status: "passed" },
+        acceptance: { status: "pending" },
+      }),
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
+      // The path carrying the secret must NOT appear verbatim anywhere.
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes(SECRET), `raw secret '${SECRET}' must not leak in content or structuredContent`);
+      // The affected path must be mapped to the fixed [REDACTED] marker.
+      assert.ok(dumped.includes("[REDACTED]"), "secret-bearing path must map to fixed [REDACTED]");
+      // The other (clean) path still appears verbatim.
+      assert.ok(dumped.includes("test/ok.test.js"), "clean path still exposed");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    delete process.env.WAO_TEST_API_KEY;
+  }
+});
+
+test("M11-1A-07: run_delivery exposes at most 64 changed paths regardless of service-side limit", async () => {
+  // RED on prior HEAD: projectDeliveryChangedPaths accepted an arbitrary limit
+  // and could return >64. GREEN: the MCP path always caps at CHANGED_PATHS_LIMIT;
+  // changedFileCount still reflects the real total.
+  const { CHANGED_PATHS_LIMIT } = await import("../src/application/deliveryReview.js");
+  const total = 65;
+  const many = Array.from({ length: total }, (_, i) => `src/f${String(i).padStart(3, "0")}.js`).sort();
+  const server = createWaoMcpServer({
+    registryPath: "/r.json", runDir: "/runs",
+    getRunDeliveryFn: async () => ({
+      runId: "run_x",
+      terminalState: "completed",
+      deliveryRef: {
+        deliveryCommit: "d".repeat(40), baseCommit: "b".repeat(40),
+        changedFiles: many,
+        verification: { status: "passed" },
+        acceptance: { status: "pending" },
+      },
+      verification: { status: "passed" },
+      acceptance: { status: "pending" },
+    }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    assert.ok(Array.isArray(parsed.changedPaths) && parsed.changedPaths.length <= CHANGED_PATHS_LIMIT,
+      `changedPaths must be <= ${CHANGED_PATHS_LIMIT}; got ${parsed.changedPaths?.length}`);
+    assert.equal(parsed.changedPaths.length, CHANGED_PATHS_LIMIT, "exactly capped at 64");
+    assert.equal(parsed.changedFileCount, total, "real total preserved");
+    assert.equal(parsed.changedPathsTruncated, true, "truncated=true");
+  } finally { await client.close(); await server.close(); }
+});
+
+test("M11-1A-08: run_delivery outputSchema declares changedPaths maxItems=64 + items maxLength=512", async () => {
+  const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs" });
+  const client = await buildInMemoryClient(server);
+  try {
+    const tools = await client.listTools();
+    const rd = tools.tools.find((t) => t.name === "run_delivery");
+    const cp = rd.outputSchema?.properties?.changedPaths;
+    assert.ok(cp, "run_delivery outputSchema must declare changedPaths");
+    assert.equal(cp.type, "array");
+    assert.equal(cp.maxItems, 64, "changedPaths outputSchema maxItems must be 64");
+    assert.equal(cp.items?.maxLength, 512, "changedPaths items maxLength must be 512");
+    assert.equal(cp.items?.minLength, 1, "changedPaths items minLength must be 1");
+  } finally { await client.close(); await server.close(); }
+});
+
 test("M9-6B-13: malformed decide result collapses to fixed error", async () => {
   const vectors = [
     ["loser bad status", { accepted: false, existing: { status: "C:\\secret", deliveryCommit: "d".repeat(40) } }],

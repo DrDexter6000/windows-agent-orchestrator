@@ -55,6 +55,23 @@ test("DR-04: cap is the server-owned constant 64", () => {
   assert.equal(CHANGED_PATHS_LIMIT, 64);
 });
 
+test("DR-04b: 64-cap is a hard ceiling — limit=65/1000/Infinity cannot bypass it", () => {
+  // RED on prior head: projectDeliveryChangedPaths accepted an arbitrary limit
+  // and could return >64. GREEN: output length never exceeds CHANGED_PATHS_LIMIT
+  // regardless of caller-supplied limit; changedFileCount still reflects reality.
+  const input = Array.from({ length: 65 }, (_, i) => `src/f${String(i).padStart(3, "0")}.js`);
+  input.sort();
+  for (const badLimit of [65, 1000, Infinity]) {
+    const result = projectDeliveryChangedPaths({ changedFiles: input, limit: badLimit });
+    assert.ok(result.changedPaths.length <= CHANGED_PATHS_LIMIT,
+      `limit=${badLimit}: changedPaths must be <= ${CHANGED_PATHS_LIMIT}; got ${result.changedPaths.length}`);
+    assert.equal(result.changedPaths.length, CHANGED_PATHS_LIMIT,
+      `limit=${badLimit}: must cap at exactly ${CHANGED_PATHS_LIMIT}`);
+    assert.equal(result.changedFileCount, 65, `limit=${badLimit}: real total preserved`);
+    assert.equal(result.changedPathsTruncated, true, `limit=${badLimit}: truncated=true`);
+  }
+});
+
 // ===== fail-closed on malformed path vectors =====
 
 function expectThrow(changedFiles, label) {
