@@ -331,11 +331,19 @@ test("SKILL.md 开头必须说明 WAO 的当前目标、上线边界和认证驱
   assert.ok(/Claude Code-first|Claude Code first|Claude-first|Claude Code process workers are the default coding lane/i.test(head), "SKILL.md 开头未声明当前 Claude Code-first 调度策略");
 });
 
-test("usage.md 顶部状态必须反映 M0-M9 当前能力，不得停留在 M0-M4/M0-M6/M0-M8", () => {
+test("活文档页首状态必须反映 M0-M10 当前能力（usage + architecture），不得停留在 M0-M9 或更早", () => {
   const usage = read("docs/usage.md");
-  const head = usage.slice(0, 1200);
-  assert.ok(!/M0.M4|M0–M4|M0-M4/.test(head), "usage.md 顶部仍自称 M0-M4 后能力");
-  assert.ok(/M0.M9|M0–M9|M0-M9/.test(head), "usage.md 顶部未说明当前 M0-M9 能力");
+  const usageHead = usage.slice(0, 1200);
+  const arch = read("docs/02-architecture.md");
+  const archHead = arch.slice(0, 1200);
+  // 两个活文档页首都必须说明当前 M0-M10 能力
+  assert.ok(/M0.M10|M0–M10|M0-M10/.test(usageHead), "usage.md 顶部未说明当前 M0-M10 能力");
+  assert.ok(/M0.M10|M0–M10|M0-M10/.test(archHead), "02-architecture.md 顶部未说明当前 M0-M10 能力");
+  // 两个活文档页首都不得继续把当前能力写成 M0-M9（或更早 M0-M4/M0-M6/M0-M8）
+  assert.ok(!/M0.M9|M0–M9|M0-M9/.test(usageHead), "usage.md 顶部仍自称 M0-M9 能力（应为 M0-M10）");
+  assert.ok(!/M0.M9|M0–M9|M0-M9/.test(archHead), "02-architecture.md 顶部仍自称 M0-M9 能力（应为 M0-M10）");
+  assert.ok(!/M0.M4|M0–M4|M0-M4|M0.M6|M0–M6|M0-M6|M0.M8|M0–M8|M0-M8/.test(usageHead),
+    "usage.md 顶部仍停留在 M0-M4/M0-M6/M0-M8");
   assert.ok(!/M5 daemon/.test(usage), "usage.md 仍把 daemon 误写成 M5，roadmap 中 daemon 属 M7");
 });
 

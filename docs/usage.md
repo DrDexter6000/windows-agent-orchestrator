@@ -1,6 +1,6 @@
 # 部署与使用指南
 
-> 本文档基于 M0–M9 + fresh-runtime hardening 后的实际能力编写。
+> 本文档基于 M0–M10 + fresh-runtime hardening 后的实际能力编写。
 > WAO 当前可用于主控监督下的正式试运行；daemon / background 派发 / resume-on-start 已落地，最终验收仍由 Lead 负责。
 
 ---
