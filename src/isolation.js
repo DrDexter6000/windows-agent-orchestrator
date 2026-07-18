@@ -2,6 +2,7 @@ import { execSync, execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { existsSync, rmSync } from "node:fs";
 import { isValidRunId } from "./delivery.js";
+import { ensureWaoWorktreeExclude } from "./gitLocalExclude.js";
 
 /**
  * Worktree 隔离能力层（M3-1）。
@@ -11,6 +12,12 @@ import { isValidRunId } from "./delivery.js";
  *
  * worktree 放在 <sourceCwd>/.wao-worktrees/<name>。
  * 用 execFileSync 调 git（结构化参数，不拼 shell 字符串）。
+ *
+ * M11-1B：createWorktree 在 `git worktree add` 前调用
+ * ensureWaoWorktreeExclude，确保仓库本地 .git/info/exclude 恰好有一条
+ * `/.wao-worktrees/` 根规则，使持久 worktree 目录不出现在普通
+ * `git status --porcelain`。exclude 规则由 gitLocalExclude.js 拥有，
+ * 是 runtime-neutral core Git helper，不依赖任何 host adapter。
  */
 
 /**
@@ -27,15 +34,13 @@ export function createWorktree(sourceCwd, name) {
   if (!isGitRepo(cwd)) {
     throw new Error(`${cwd} is not a git repository (worktree requires git)`);
   }
-  const wtPath = join(cwd, ".wao-worktrees", name);
-  const branch = `wao/${name}`;
-  // execFileSync with structured args — no shell-built command string.
-  execFileSync("git", ["worktree", "add", wtPath, "-b", branch], {
-    cwd,
-    stdio: "pipe",
-    windowsHide: true,
-  });
-  return Promise.resolve({ path: wtPath, branch });
+  // M11-1B: ensure the repository-local exclude rule is present (idempotent),
+  // then create the worktree. ensureWaoWorktreeExclude owns the atomic exclude
+  // write + read-back verify + worktree-add-failure rollback of the exclude.
+  // If the exclude prepare or the worktree add fails, it throws and (for the
+  // worktree-add case) restores the pre-call exclude bytes.
+  const result = ensureWaoWorktreeExclude(cwd, { addWorktree: true, worktreeName: name });
+  return Promise.resolve({ path: result.worktree.path, branch: result.worktree.branch });
 }
 
 /**
