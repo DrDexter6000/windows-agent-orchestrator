@@ -36,6 +36,9 @@ import { retryCommand, resumeCommand } from "./commands/lifecycle.js";
 import { spawnCommand, runCommand, runAndWait } from "./commands/run.js";
 // M10 P0-1: mcp bind/status/unbind 命令族（项目级 workspace activation）。
 import { mcpCommand } from "./commands/mcp.js";
+// M11-2B: playbook list/show 命令族（Lead Playbook Catalog 只读 CLI 适配）。
+// 纯 CLI 适配：argv/format/console，数据逻辑委托 ../application/playbookCatalog.js。
+import { playbookCommand } from "./commands/playbook.js";
 // TD-98 阶段 2a/2b/2c/2e：parseOptions/loadPrompt/displayModel/resolveTargetCwd
 // 抽到 commands/shared.js，消除 commands/*.js 对 cli.js 的反向依赖。
 // cli.js re-export 以保持 test/cli.test.js 的 `from "../src/cli.js"` 导入行不变。
@@ -181,6 +184,10 @@ async function main(argv) {
     await mcpCommand(rest, config);
     return;
   }
+  if (command === "playbook") {
+    await playbookCommand(rest, config);
+    return;
+  }
   throw new Error(`Unknown command: ${command}`);
 }
 
@@ -324,6 +331,8 @@ Commands:
   runs forecast --agents a,b [--run-dir DIR] [--format json]
   workflow run <name|file.mjs> [--input TEXT] [--registry FILE] [--isolate] [--wait-timeout MS] [--run-dir DIR] [--vars key=value...]
   workflow list                  # 列出可用模板（workflows/templates/）
+  playbook list [--format json]              # 列出内置 Lead playbook 摘要（只读）
+  playbook show <id> [--format json]         # 展示一个完整 Lead playbook（只读）
   worktree list [--cwd DIR]
   worktree remove <path> [--cwd DIR]
   daemon start [--run-dir DIR] [--registry FILE] [--pipe PIPE] [--resume-on-start]

@@ -38,6 +38,7 @@ import { stopRun } from "../application/runStop.js";
 import { listRuns } from "../application/runList.js";
 import { runWait } from "../application/runWait.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
+import { listLeadPlaybooks, getLeadPlaybook } from "../application/playbookCatalog.js";
 import { isValidRunId } from "../delivery.js";
 import { DIAGNOSIS_CATEGORIES } from "../diagnosis.js";
 import { RUN_STATES } from "../transcript.js";
@@ -601,6 +602,100 @@ const RUN_WAIT_DESCRIPTION =
   "requests progress (onprogress), so a resetTimeoutOnProgress client can " +
   "span the 180s wait across the MCP 60s default request timeout.";
 
+// ===== Lead Playbook Catalog (M11-2B) constants =====
+//
+// Read-only, provider-neutral catalog of exactly four built-in Lead playbooks.
+// Both tools delegate to the M11-2A application service (playbookCatalog.js).
+// They do NOT require a workspace binding, do NOT read the registry or any run
+// transcript, and create no filesystem mutation. There is no playbook_run /
+// _start / _next / _recommend — the catalog is a decision scaffold, not an
+// executor (see .dev/m11-2-adaptive-playbooks-spec-tdd-plan.md §3).
+
+const PLAYBOOK_LIST_ERROR_TEXT = "playbook_list failed";
+const PLAYBOOK_GET_ERROR_TEXT = "playbook_get failed";
+
+// list input: strict empty object. A model cannot inject a catalog path.
+const PLAYBOOK_LIST_INPUT = z.object({}).strict();
+
+// get input: only id, lowercase kebab-case 1..64, strict object.
+const PLAYBOOK_GET_INPUT = z.object({
+  id: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).min(1).max(64),
+}).strict();
+
+// PlaybookV1 output schema bounds — these mirror the M11-2A service contract
+// exactly. The service validates fail-closed and returns deep clones; the
+// outputSchema here is a second boundary that collapses any malformed service
+// payload to the fixed error inside the single try/catch per tool.
+const PLAYBOOK_SUMMARY_ENTRY = z.object({
+  id: z.string().min(1).max(64),
+  version: z.literal(1),
+  title: z.string().min(1).max(80),
+  summary: z.string().min(1).max(240),
+  lanePattern: z.enum(["single", "parallel-independent", "serial-discovery", "read-only"]),
+});
+
+const PLAYBOOK_LIST_OUTPUT = z.object({
+  playbooks: z.array(PLAYBOOK_SUMMARY_ENTRY).min(1).max(4),
+});
+
+const PLAYBOOK_ROLE = z.object({
+  capability: z.enum(["coder", "researcher", "tester", "advisor", "auditor"]),
+  importance: z.enum(["core", "conditional"]),
+  min: z.number().int().min(0).max(4),
+  max: z.number().int().min(0).max(4),
+}).strict();
+
+const PLAYBOOK_PHASE = z.object({
+  id: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).min(1).max(64),
+  intent: z.string().min(1).max(240),
+  importance: z.enum(["core", "conditional"]),
+  evidence: z.array(z.string().min(1).max(240)).min(1).max(4),
+  adaptations: z.array(z.string().min(1).max(240)).min(1).max(4),
+}).strict();
+
+const PLAYBOOK_V1 = z.object({
+  id: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).min(1).max(64),
+  version: z.literal(1),
+  title: z.string().min(1).max(80),
+  summary: z.string().min(1).max(240),
+  useWhen: z.array(z.string().min(1).max(240)).min(1).max(4),
+  avoidWhen: z.array(z.string().min(1).max(240)).min(1).max(4),
+  lanePattern: z.enum(["single", "parallel-independent", "serial-discovery", "read-only"]),
+  roles: z.array(PLAYBOOK_ROLE).min(1).max(5),
+  phases: z.array(PLAYBOOK_PHASE).min(1).max(6),
+  completionEvidence: z.array(z.string().min(1).max(240)).min(1).max(6),
+  escalation: z.object({
+    advisor: z.string().min(1).max(240),
+    auditor: z.string().min(1).max(240),
+  }).strict(),
+}).strict();
+
+const PLAYBOOK_GET_OUTPUT = z.object({
+  playbook: PLAYBOOK_V1,
+});
+
+const PLAYBOOK_TOOL_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+const PLAYBOOK_LIST_DESCRIPTION =
+  "List the built-in Lead playbooks as compact summaries (id, version, title, " +
+  "summary, lanePattern). Read-only, idempotent. A playbook is a read-only " +
+  "decision scaffold with evidence gates and adaptation points — the Lead " +
+  "chooses and adapts it; the catalog never dispatches or executes a workflow. " +
+  "Accepts no arguments; the catalog is fixed. Requires no workspace binding.";
+
+const PLAYBOOK_GET_DESCRIPTION =
+  "Get one complete built-in Lead playbook by id. Read-only, idempotent. " +
+  "Returns the full playbook (roles, phases with evidence gates, completion " +
+  "evidence, escalation conditions). The Lead keeps, skips, or changes defaults " +
+  "and then uses normal WAO tools; the catalog does not dispatch, advance phases, " +
+  "or accept delivery. Accepts only the playbook id (lowercase kebab-case). " +
+  "Requires no workspace binding.";
+
 /**
  * Create a WAO MCP server with registry_list, run_dispatch, run_status, run_collect, run_diagnose, run_delivery, run_delivery_decide.
  *
@@ -616,6 +711,8 @@ const RUN_WAIT_DESCRIPTION =
  * @param {Function} [input.getRunDiagnosisFn] — injectable diagnosis service for testing
  * @param {Function} [input.getRunDeliveryFn] — injectable delivery query service for testing
  * @param {Function} [input.decideRunDeliveryFn] — injectable delivery decision service for testing
+ * @param {Function} [input.listLeadPlaybooksFn] — injectable playbook list service for testing
+ * @param {Function} [input.getLeadPlaybookFn] — injectable playbook get service for testing
  * @returns {import("@modelcontextprotocol/sdk/server/mcp.js").McpServer}
  */
 export function createWaoMcpServer({
@@ -633,6 +730,8 @@ export function createWaoMcpServer({
   stopRunFn,
   listRunsFn,
   runWaitFn,
+  listLeadPlaybooksFn,
+  getLeadPlaybookFn,
 }) {
   const service = getRegistryInventoryFn ?? getRegistryInventory;
   const dispatcher = dispatchRunFn ?? dispatchRun;
@@ -644,6 +743,8 @@ export function createWaoMcpServer({
   const stopService = stopRunFn ?? stopRun;
   const listRunsService = listRunsFn ?? listRuns;
   const runWaitService = runWaitFn ?? runWait;
+  const playbookListService = listLeadPlaybooksFn ?? listLeadPlaybooks;
+  const playbookGetService = getLeadPlaybookFn ?? getLeadPlaybook;
 
   const mcp = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -1315,6 +1416,69 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: RUN_WAIT_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  // ===== playbook_list (M11-2B read-only Lead Playbook Catalog) =====
+
+  mcp.registerTool(
+    "playbook_list",
+    {
+      description: PLAYBOOK_LIST_DESCRIPTION,
+      inputSchema: PLAYBOOK_LIST_INPUT,
+      outputSchema: PLAYBOOK_LIST_OUTPUT,
+      annotations: PLAYBOOK_TOOL_ANNOTATIONS,
+    },
+    async () => {
+      // Entire service call + output-schema validation in ONE try/catch. Any
+      // service throw or malformed payload collapses to the fixed safe text —
+      // never leak err.message, catalog content, paths, or SDK validation detail.
+      try {
+        const playbooks = playbookListService();
+        const payload = { playbooks };
+        PLAYBOOK_LIST_OUTPUT.parse(payload);
+        return {
+          content: [{ type: "text", text: JSON.stringify(payload) }],
+          structuredContent: payload,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: PLAYBOOK_LIST_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  // ===== playbook_get (M11-2B read-only Lead Playbook Catalog) =====
+
+  mcp.registerTool(
+    "playbook_get",
+    {
+      description: PLAYBOOK_GET_DESCRIPTION,
+      inputSchema: PLAYBOOK_GET_INPUT,
+      outputSchema: PLAYBOOK_GET_OUTPUT,
+      annotations: PLAYBOOK_TOOL_ANNOTATIONS,
+    },
+    async ({ id }) => {
+      // The id is already validated by the input schema (lowercase kebab
+      // 1..64). The service re-validates and returns a NotFound typed error for
+      // valid-shaped-but-unknown ids, which this catch collapses to the fixed
+      // safe text — the model learns only that the lookup failed.
+      try {
+        const playbook = playbookGetService({ id });
+        const payload = { playbook };
+        PLAYBOOK_GET_OUTPUT.parse(payload);
+        return {
+          content: [{ type: "text", text: JSON.stringify(payload) }],
+          structuredContent: payload,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: PLAYBOOK_GET_ERROR_TEXT }],
         };
       }
     },
