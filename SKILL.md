@@ -14,7 +14,7 @@ WAO is an MCP-first, Skill-guided, CLI-backed deterministic control plane for re
 A WAO worker and a host-native subagent are different execution channels. Loading this Skill, or borrowing WAO discipline, is not the same as dispatching through WAO.
 
 1. When the user explicitly asks to "use WAO", "use a WAO worker", or "dispatch an external worker", a host-native subagent is **not** an equivalent substitute. Do not silently route to native subagents instead.
-2. Before starting any worker, run one bounded WAO preflight: `registry_list` then `workspace_status`.
+2. The WAO preflight (`registry_list` then `workspace_status`) binds to the **WAO route**: once the user specifies, or the Lead explicitly chooses, the WAO route, run one bounded preflight before calling `run_dispatch` to start a WAO worker. A native-subagent route does not require a WAO preflight, but must not impersonate a WAO worker.
 3. If a higher-priority host rule conflicts with the user-requested WAO route, state the conflict explicitly **before** dispatching. Do not silently fall back to a native subagent.
 4. The minimum fact standard for "dispatched through WAO": only a successful `run_dispatch` that returns a `runId` counts. Loading this Skill or borrowing WAO discipline does not count as "used WAO" for a dispatch task.
 5. Native subagents may do clearly Lead-side local assistance, but must not impersonate a WAO worker and produce no WAO transcript/delivery.
@@ -79,7 +79,7 @@ See `references/safety-incidents.md` before unattended or stop-sensitive work. R
 
 ## Minimal MCP Loop
 
-The Lead drives the full minimal loop through 13 MCP tools:
+WAO exposes 13 MCP tools. The minimal control loop uses the relevant control tools below; `playbook_list`/`playbook_get` are optional read-only catalog reads that sit **outside** the dispatch loop and are never required before `run_dispatch`.
 
 | Tool | Side effect | Purpose |
 |---|---|---|

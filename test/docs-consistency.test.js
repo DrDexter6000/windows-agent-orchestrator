@@ -1058,3 +1058,41 @@ test("M11-2C-10: SKILL/architecture 当前工具事实为 13 tools，不残留 1
   assert.ok(/13 tools/.test(serverLine),
     "architecture server.js 注释当前工具数为 13");
 });
+
+// ============================================================
+// M11-2C routing-semantics micro-closeout.
+// The first M11-2C draft said "Before starting any worker, run ... WAO preflight"
+// and "drives the full minimal loop through 13 MCP tools". Both over-reached:
+// the former forced native-subagent routes through a WAO preflight (contradicting
+// "Lead keeps the routing choice"); the latter implied all 13 tools are a
+// mandatory loop (playbook reads are optional and outside the dispatch loop).
+// ============================================================
+
+test("M11-2C-11: SKILL 不得要求任何 worker（含 native 路线）都执行 WAO preflight", () => {
+  const skill = read("SKILL.md");
+  // 禁止全局强制措辞：把 "any worker" / "任何 worker" / "every worker" 与
+  // WAO preflight 绑在同一规则句里。正确语义是 preflight 绑定 WAO route /
+  // run_dispatch / WAO worker，而非所有 worker。
+  const globalPreflight = /before\s+starting\s+(any|every|all)\s+worker[^.]*WAO\s+preflight|任何\s*worker[^。]*WAO\s*preflight|所有\s*worker[^。]*WAO\s*preflight/i;
+  assert.ok(!globalPreflight.test(skill),
+    "SKILL 不得要求任何/every worker 都执行 WAO preflight（preflight 须绑定 WAO route）");
+  // 必须明确 preflight 绑定 WAO route / run_dispatch / WAO worker 之一。
+  assert.ok(/preflight[^.]*WAO\s+route|WAO\s+route[^.]*preflight|preflight[^.]*run_dispatch|run_dispatch[^.]*preflight|preflight[^.]*WAO\s+worker|WAO\s+worker[^.]*preflight/i.test(skill),
+    "SKILL 必须把 WAO preflight 明确绑定到 WAO route / run_dispatch / WAO worker");
+});
+
+test("M11-2C-12: SKILL 13-tool 文案不得声称 minimal loop 必须经过全部 13 tools", () => {
+  const skill = read("SKILL.md");
+  // 禁止 "full minimal loop through 13 MCP tools" / "minimal loop 必须经过全部 13"
+  // 这类暗示全部 13 工具都是 mandatory loop 的措辞。playbook_list/get 是可选、
+  // 位于 dispatch loop 外的 catalog reads。
+  const mandatoryAll = /full\s+minimal\s+loop\s+through\s+13|minimal\s+loop\s+必须.*全部\s*13|loop\s+must\s+(use|go through|include)\s+all\s+13/i;
+  assert.ok(!mandatoryAll.test(skill),
+    "SKILL 13-tool 文案不得声称 minimal loop 必须经过全部 13 tools");
+  // 必须表达：WAO 暴露 13 tools，但 minimal control loop 只用相关 control tools，
+  // playbook reads 是可选且在 dispatch loop 外。
+  assert.ok(/13 MCP tools|13 tools/i.test(skill),
+    "SKILL 仍声明 WAO 暴露 13 MCP tools（事实不变）");
+  assert.ok(/optional|可选/i.test(skill) && /dispatch loop|control loop/i.test(skill),
+    "SKILL 必须说明 playbook reads 可选且在 dispatch/control loop 之外");
+});
