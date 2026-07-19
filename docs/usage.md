@@ -877,6 +877,48 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 ---
 
+### MCP `playbook_list` / `playbook_get`（可选只读 Lead Playbook Catalog，M11-2）
+
+这两个工具暴露一个小型只读 Lead Playbook Catalog——可选的决策脚手架（evidence gate、adaptation point）。一个 playbook 给 Lead 紧凑的默认值、证据门和适应点；Lead 保留、跳过或修改任何条件步骤。**不要求**每次派发前调用，偏离 playbook 也无需 Owner 批准（除非既有权威规则已要求）。Catalog 不自动拆解任务、不选 worker、不派发、不推进 phase、不验收；**不存在** `playbook_run`/`playbook_start`/`playbook_next`/`playbook_recommend`。
+
+`playbook_list` tool：
+
+```
+输入：{}（strict empty object）
+输出：{ playbooks: [{ id, version, title, summary, lanePattern }] }   // 恰好四个内置 playbook，稳定顺序
+```
+
+`playbook_get` tool：
+
+```
+输入：{ id }   // id = lowercase kebab-case 1..64，strict object
+输出：{ playbook: <完整 PlaybookV1> }   // roles/phases/completionEvidence/escalation
+```
+
+两个工具 annotations 均为 `readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`。不要求 workspace binding，不读 transcript/registry/runDir，不产生任何 transcript 或文件副作用。任意 malformed service output（未知字段、非批准 id、id 不匹配请求、min>max、Advisor/Auditor 为 core、>12 KiB）折叠为固定错误 `playbook_list failed` / `playbook_get failed`，不泄漏 err.message、id、路径或 catalog 原始内容。
+
+四个内置 playbook：
+
+| id | 默认模式 |
+|---|---|
+| `single-coder-delivery` | 一个 bounded coder lane，frozen verification |
+| `parallel-independent-deliveries` | 两个以上不重叠 lane，composition gate |
+| `investigate-then-implement` | 先只读调查，Lead 综合，再派 coder |
+| `read-only-independent-review` | 独立只读审查 |
+
+CLI fallback（`npm run cli --`）：
+
+```
+npm run cli -- playbook list                    # id<TAB>lanePattern<TAB>title<TAB>summary
+npm run cli -- playbook list --format json      # { playbooks: [ {id,version,title,summary,lanePattern} ] }
+npm run cli -- playbook show <id>               # 完整 PlaybookV1 pretty JSON
+npm run cli -- playbook show <id> --format json # { playbook: { ...完整 PlaybookV1... } }
+```
+
+CLI 只做 argv/format/console，数据逻辑委托同一 `application/playbookCatalog.js` service，因此 CLI `--format json` 与 MCP `structuredContent` 语义精确一致。unknown/malformed id 透传 M11-2A 固定 typed error（`PlaybookNotFoundError`/`PlaybookValidationError`），不输出 raw catalog/path。
+
+---
+
 ## 五、常见问题
 
 ### claude 报 `stream-json requires --verbose`

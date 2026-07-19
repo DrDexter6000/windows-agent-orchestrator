@@ -11,7 +11,7 @@
 WAO 是面向 Lead Agent 的多 runtime 协作工具。它通过 MCP/CLI 提供可靠、确定性的派发、监督、恢复、交付与验收原语，通过 Skill/Playbook 提供可复用但不强制的工程思维与工作流；Lead 保留任务理解、语义拆解、编排选择和最终判断。
 
 - **MCP 是当前 primary agent-facing adapter，但不是产品存在的目的，也不是唯一可能形态**：任意支持 MCP 的 Agent Runtime 都可以作为 Lead Agent 使用 WAO。Lead 通过 MCP 调用 dispatch、supervise、collect、diagnose、delivery 和 acceptance 等确定性能力。Skill、CLI、plugin/MCP adapter 都服务于同一个产品核心。
-- **Skill-guided**：`SKILL.md` 承载工程纪律、角色合同与 Lead guidance，并将逐步提供可复用但不强制的工作流模板（Adaptive Playbooks 属 M11 规划，当前不是已交付能力）。Skill 告诉 Lead 何时派工、如何验收和遵守边界。Skill 不保存运行状态，不代替 transcript，不实现控制逻辑。Lead 继续负责语义分解、失败响应和最终验收。WAO 不自动执行语义任务分解。
+- **Skill-guided**：`SKILL.md` 承载工程纪律、角色合同与 Lead guidance，并提供可复用但不强制的可选 Lead Playbook Catalog（Adaptive Playbooks 已在 M11-2 交付为只读、可选、Lead 可修改的决策脚手架：四个内置 playbook + `playbook_list`/`playbook_get`）。Skill 告诉 Lead 何时派工、如何验收和遵守边界。Skill 不保存运行状态，不代替 transcript，不实现控制逻辑。Lead 继续负责语义分解、失败响应和最终验收。WAO 不自动执行语义任务分解，Catalog 不自动拆解/选 worker/派发/推进 phase/验收，不存在 `playbook_run` 类执行入口。
 - **CLI-backed**：CLI 保留为人类操作、debug、运维、CI 和 fallback 接口。MCP 与 CLI 必须调用同一个 application-service 层。禁止 MCP Server 通过 shell 调 CLI 并解析文本输出。RunManager、transcript、delivery、Backend 不依赖 MCP。M9/M10 最小 Lead 闭环 shared application services 已完成提取；其它非闭环 use case 仍可留在 `src/commands/*.js`。
 - **配置责任**：WAO 可以提供自身 MCP Server 的启动和配置入口。WAO 不接管 host runtime 的全局 MCP 配置、provider 配置或认证系统。一个 runtime 可以作为 Lead host，也可以通过 Backend 作为 worker，但两种角色必须保持边界清楚。
 

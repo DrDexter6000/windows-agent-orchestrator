@@ -661,8 +661,9 @@ test("M10-pre2: workspace_status tool documented in usage.md and SKILL.md", () =
   assert.ok(usage.includes("--workspace-root"), "usage.md must mention --workspace-root startup flag");
   // SKILL.md must list it in the tool table
   assert.ok(skill.includes("workspace_status"), "SKILL.md tool table must include workspace_status");
-  // SKILL.md must say 11 tools now (10 after M10-pre2/P0-2 + runs_list in M10 P0-3, + run_wait in M10-pre3)
-  assert.ok(/11 MCP tools/.test(skill), "SKILL.md must reflect 11 MCP tools after run_wait addition (M10-pre3)");
+  // SKILL.md must reflect the current MCP tool count. History: 10 (M10-pre2/P0-2)
+  // + runs_list (M10 P0-3) + run_wait (M10-pre3) = 11; + playbook_list/get (M11-2) = 13.
+  assert.ok(/13 MCP tools/.test(skill), "SKILL.md must reflect 13 MCP tools (11 + playbook_list/get, M11-2)");
   // team-roles.md must mention workspace binding (MCP-first)
   const roles = read("docs/team-roles.md");
   assert.ok(/workspace binding|workspace-root|roots\/list/.test(roles),
@@ -927,4 +928,133 @@ test("M11-1B-closeout: usage.md 不得声称 git worktree add 失败会回滚 hy
     "usage.md 必须声明 /.wao-worktrees/ 是稳定 hygiene 规则");
   assert.ok(/worktree add.*失败.*保留.*不回滚|worktree add.*失败.*不回滚/.test(usage),
     "usage.md 必须明确 git worktree add 失败时保留规则、不回滚");
+});
+
+// ============================================================
+// M11-2C: Skill + SSOT routing contract + optional playbooks.
+// Semantic guards — each pins one contract, no verbatim prose match.
+// A fresh Codex Lead silently used native subagents despite an explicit WAO
+// request and a loaded Skill; these guards keep the routing boundary and the
+// "used WAO" fact standard explicit in the docs.
+// ============================================================
+
+test("M11-2C-01: SKILL 明确显式 WAO 请求不得静默替换为 native subagent", () => {
+  const skill = read("SKILL.md");
+  // 必须存在一条路由契约规则：用户显式要 WAO/外部 worker 时，host-native subagent
+  // 不构成等价替代，Lead 不得静默改用。
+  assert.ok(/native subagent|host-native|subagent/i.test(skill),
+    "SKILL.md 必须提及 native/host subagent 路由边界");
+  assert.ok(/静默|silently|不得.*替代|do not.*substitute|not.*equivalent/i.test(skill),
+    "SKILL.md 必须禁止静默用 native subagent 替代显式 WAO 请求");
+});
+
+test("M11-2C-02: SKILL 明确 run_dispatch 返回 runId 才算 WAO worker dispatch", () => {
+  const skill = read("SKILL.md");
+  // “真正使用 WAO”的最低事实标准：只有 run_dispatch 成功返回 runId 才能这样表述。
+  // 仅加载 Skill 或借用 WAO 纪律不算。
+  assert.ok(/run_dispatch.*runId|runId.*run_dispatch|only.*run_dispatch/i.test(skill),
+    "SKILL.md 必须把 run_dispatch runId 作为 WAO worker dispatch 的事实标准");
+  assert.ok(/Skill.*不算|loading.*Skill.*not|borrow.*discipline.*not|不算.*通过 WAO/i.test(skill),
+    "SKILL.md 必须说明仅加载 Skill / 借用纪律不算通过 WAO 派工");
+});
+
+test("M11-2C-03: SKILL 含 playbook_list/playbook_get 且说明 optional/adaptable", () => {
+  const skill = read("SKILL.md");
+  assert.ok(/playbook_list/.test(skill), "SKILL.md 提及 playbook_list");
+  assert.ok(/playbook_get/.test(skill), "SKILL.md 提及 playbook_get");
+  // 必须说明 optional + Lead 可保留/跳过/修改条件步骤。
+  assert.ok(/optional|可选/i.test(skill), "SKILL.md 说明 playbook 为 optional");
+  assert.ok(/skip|跳过|adaptable|可修改|保留/i.test(skill),
+    "SKILL.md 说明 Lead 可保留/跳过/修改 playbook 条件步骤");
+});
+
+test("M11-2C-04: 活文档不得声称存在 playbook_run/start/next/recommend", () => {
+  // 扫描活文档（SKILL + docs/*）。executor 工具（playbook_run/start/next/recommend）
+  // 不存在；文档可以否定地提及它们（"there is no playbook_run"），但不得用肯定式
+  // 动词声称其存在或使用（"call/use/invoke/run playbook_run"）。
+  //
+  // 本守卫检测的是"肯定式声称"句式（动词 + 工具名），而不是扫所有裸词出现——
+  // 因为否定声明（there is no / 不存在 / 没有）是合法且必要的，逐词扫会产生假阳性。
+  const live = [
+    "SKILL.md",
+    "docs/usage.md",
+    "docs/01-prd.md",
+    "docs/02-architecture.md",
+    "docs/roadmap.md",
+  ].map(read).join("\n<<<FILE_BOUNDARY>>>\n");
+  const stripped = live.replace(/[*`]/g, "");
+  // 肯定式声称：英文动词（call/use/invoke/run/execute）或中文动词（调用/使用/执行/运行）
+  // 后跟 playbook_run/start/next/recommend。这是"声称工具存在并可用"的真实信号。
+  const positiveClaim = /\b(?:call|use|invoke|run|execute)\s+playbook_(run|start|next|recommend)\b|调用\s*playbook_(run|start|next|recommend)|使用\s*playbook_(run|start|next|recommend)|执行\s*playbook_(run|start|next|recommend)|运行\s*playbook_(run|start|next|recommend)/i;
+  assert.ok(!positiveClaim.test(stripped),
+    "活文档不得用肯定式动词声称 playbook_run/start/next/recommend 存在或可调用（否定声明除外）");
+});
+
+test("M11-2C-05: PRD 继续拒绝 automatic decomposition 与 fixed workflow", () => {
+  const prd = read("docs/01-prd.md");
+  assert.ok(/不自动.*语义.*分解|不自动做语义任务分解|no automatic.*decomposition/i.test(prd),
+    "PRD 继续否定自动语义分解");
+  assert.ok(/不强制.*workflow|不强制固定.*workflow|no fixed workflow/i.test(prd),
+    "PRD 继续否定强制固定 workflow");
+});
+
+test("M11-2C-06: architecture 明确 Catalog ≠ WorkflowEngine（分离）", () => {
+  const arch = read("docs/02-architecture.md");
+  // 必须同时出现 Catalog（只读 Lead Playbook）与 WorkflowEngine（可执行 CLI DAG），
+  // 并表达二者分离/不同用途。
+  assert.ok(/Playbook Catalog|Lead Playbook|playbookCatalog/i.test(arch),
+    "architecture 提及 Playbook Catalog");
+  assert.ok(/WorkflowEngine|workflow engine|executable.*template/i.test(arch),
+    "architecture 提及 WorkflowEngine/executable template");
+  assert.ok(/分离|separate|distinct|不同于|不是.*executor|read-only.*not.*executable/i.test(arch),
+    "architecture 明确 Catalog 与 WorkflowEngine 分离");
+});
+
+test("M11-2C-07: roadmap 只标 M11-2 complete，不标整个 M11 complete", () => {
+  const roadmap = read("docs/roadmap.md");
+  // M11-2 必须被标记为完成（或已交付）。
+  assert.ok(/M11-2.*完成|M11-2.*complete|M11-2.*✅|M11-2.*已交付|M11-2.*done/i.test(roadmap),
+    "roadmap 标记 M11-2 完成");
+  // 但 M11 整体行不得是纯完成态（不得把整个 M11 标 ✅ 完成）。
+  // 允许 "M11 🔧 进行中" / "M11 整体未完成" 等措辞。
+  const m11RowPattern = /\|\s*M11\s*\|[^|]*\|/g;
+  const m11Rows = roadmap.match(m11RowPattern) || [];
+  const m11Aggregate = m11Rows.join(" ");
+  assert.ok(!/M11.*✅\s*完成(?!.*进行中)/.test(m11Aggregate) || /进行中|未完成|in progress/i.test(m11Aggregate),
+    "roadmap 不得把整个 M11 标为已完成（M11 整体仍进行中）");
+  assert.ok(/M11.*进行中|M11.*未完成|M11.*in progress/i.test(m11Aggregate),
+    "roadmap 保持 M11 整体进行中");
+});
+
+test("M11-2C-08: usage 含 playbook 的 MCP 与 CLI 两种只读入口", () => {
+  const usage = read("docs/usage.md");
+  assert.ok(/playbook_list/.test(usage), "usage 提及 playbook_list MCP 工具");
+  assert.ok(/playbook_get/.test(usage), "usage 提及 playbook_get MCP 工具");
+  assert.ok(/playbook list/.test(usage), "usage 提及 `playbook list` CLI");
+  assert.ok(/playbook show/.test(usage), "usage 提及 `playbook show` CLI");
+  assert.ok(/--format json/i.test(usage), "usage 提及 playbook --format json");
+});
+
+test("M11-2C-09: SKILL/PRD 保持 Advisor/Auditor conditional（非默认流水线）", () => {
+  const skill = read("SKILL.md");
+  const prd = read("docs/01-prd.md");
+  for (const [name, text] of [["SKILL.md", skill], ["PRD", prd]]) {
+    assert.ok(/Advisor.*Auditor.*conditional|Advisor.*conditional|Auditor.*conditional|Advisor\/Auditor.*按需|Advisor\/Auditor.*低信心|conditional.*Advisor|可选.*Advisor/i.test(text),
+      `${name} 保持 Advisor/Auditor 为 conditional/按需，非默认流水线`);
+  }
+});
+
+test("M11-2C-10: SKILL/architecture 当前工具事实为 13 tools，不残留 11-tool 当前状态声明", () => {
+  const skill = read("SKILL.md");
+  const arch = read("docs/02-architecture.md");
+  // SKILL 的 "Minimal MCP Loop" 当前状态声明必须反映 13 tools（11 + playbook_list/get）。
+  assert.ok(/13 MCP tools|13 tools/i.test(skill),
+    "SKILL.md Minimal MCP Loop 当前工具数为 13");
+  // architecture 的 server.js 当前 tool 注释必须反映 13（不得仍是 "11 tools"）。
+  // 精确匹配 "server.js ... N tools" 的当前状态注释行。
+  const serverLine = arch.split("\n").find((l) => /server\.js.*tools/.test(l)) || "";
+  assert.ok(!/11 tools/.test(serverLine),
+    "architecture server.js 注释不得残留 11 tools（当前为 13）");
+  assert.ok(/13 tools/.test(serverLine),
+    "architecture server.js 注释当前工具数为 13");
 });

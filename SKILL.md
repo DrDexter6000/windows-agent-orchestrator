@@ -9,6 +9,19 @@ Loading this skill makes you the Lead Operator. You own understanding, orchestra
 
 WAO is an MCP-first, Skill-guided, CLI-backed deterministic control plane for real worker tasks: dispatch, transcript, isolation, delivery, scorecard, metrics, and workflow. The Lead uses MCP tools as the primary interface; CLI is for human/ops/debug/fallback. It is in supervised production trial, not autonomous production. Use only workers whose latest `registry_list` certification is `certified` — a `certified` worker is eligible for strict dispatch under the certification policy, so the Lead does not separately prove a second `strict-dispatch` field. `conditional` workers (e.g. `coder_mm`) require an explicit Owner-authorized exception for any non-read-only task. Claude Code process workers are the default coding lane. Do not promise automatic merge, unattended failure response, or large production queues.
 
+## Routing Contract
+
+A WAO worker and a host-native subagent are different execution channels. Loading this Skill, or borrowing WAO discipline, is not the same as dispatching through WAO.
+
+1. When the user explicitly asks to "use WAO", "use a WAO worker", or "dispatch an external worker", a host-native subagent is **not** an equivalent substitute. Do not silently route to native subagents instead.
+2. Before starting any worker, run one bounded WAO preflight: `registry_list` then `workspace_status`.
+3. If a higher-priority host rule conflicts with the user-requested WAO route, state the conflict explicitly **before** dispatching. Do not silently fall back to a native subagent.
+4. The minimum fact standard for "dispatched through WAO": only a successful `run_dispatch` that returns a `runId` counts. Loading this Skill or borrowing WAO discipline does not count as "used WAO" for a dispatch task.
+5. Native subagents may do clearly Lead-side local assistance, but must not impersonate a WAO worker and produce no WAO transcript/delivery.
+6. WAO is not mandatory for every task. When the user has not specified a route, the Lead keeps the routing choice.
+
+This is a routing boundary, not a new governance system — do not expand it into one.
+
 ## Mainline
 
 Before expanding work, stop at the first true line:
@@ -66,7 +79,7 @@ See `references/safety-incidents.md` before unattended or stop-sensitive work. R
 
 ## Minimal MCP Loop
 
-The Lead drives the full minimal loop through 11 MCP tools:
+The Lead drives the full minimal loop through 13 MCP tools:
 
 | Tool | Side effect | Purpose |
 |---|---|---|
@@ -81,14 +94,29 @@ The Lead drives the full minimal loop through 11 MCP tools:
 | `run_delivery_decide` | durable (first-decision-wins) | Record Lead accept/reject |
 | `run_stop` | destructive (first-terminal-wins) | Stop a runaway worker (workspace-bound) |
 | `runs_list` | read-only | List runs in current workspace (project-bound recovery) |
+| `playbook_list` | read-only | List built-in Lead playbooks as compact summaries (optional, M11-2) |
+| `playbook_get` | read-only | Get one complete built-in Lead playbook by id (optional, M11-2) |
 
-Minimal closed loop: `inventory → workspace_status → dispatch → status/wait → collect/diagnose → delivery query → Lead decision → (stop on runaway)`; recovery: `runs_list` (list runs in the bound workspace after `workspace_status`)
+Minimal closed loop: `inventory → workspace_status → dispatch → status/wait → collect/diagnose → delivery query → Lead decision → (stop on runaway)`; recovery: `runs_list` (list runs in the bound workspace after `workspace_status`). `playbook_list`/`playbook_get` are optional read-only catalog reads — they sit outside the dispatch loop and are never required before `run_dispatch`.
 
 The Lead uses `run_wait` as the primary supervision primitive: it blocks up to `waitMs` (default 180s) and returns as soon as the run reaches a terminal state or produces a liveness summary (`terminal`/`progress`/`process_only`/`silent`), avoiding busy poll loops. The execution deadline on worker runs is now disabled by default — supervision is observation-driven via `run_wait`, not wall-clock termination.
 
 See `docs/usage.md §MCP stdio` for host setup, full input/output schemas, and install instructions. OpenCode (`opencode-ai`) as Lead host: see `docs/usage.md §OpenCode 项目级配置` for the project-local `opencode.json` schema (array `command`, `enabled:true`, `--workspace-root`) and the new-process restart boundary.
 
 CLI (`npm run cli --`) remains available for human/ops/debug/fallback, including `registry validate`, `registry check`, `daemon`, and `runs dashboard`. `registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health`. `mcp bind/status/unbind` is a Human Owner ops command for project-level workspace activation (M10 P0-1); see `docs/usage.md §项目级 Workspace Activation`.
+
+## Optional Lead Playbooks
+
+`playbook_list` and `playbook_get` expose a small read-only catalog of optional Lead decision scaffolds — evidence gates and adaptation points a fresh Lead can pick up in one bounded read. A playbook is **optional and Lead-adaptable**: the Lead may keep, skip, or change any conditional step. It is not required before `run_dispatch`, and deviating from one needs no Owner approval unless an existing authority rule already requires it. There is **no** `playbook_run` / `playbook_start` / `playbook_next` / `playbook_recommend` — the catalog does not auto-decompose, choose workers, dispatch, advance phases, or accept delivery. Catalog reads create no transcript or filesystem mutation.
+
+| Playbook | Default pattern |
+|---|---|
+| `single-coder-delivery` | One bounded coder lane with frozen verification |
+| `parallel-independent-deliveries` | Two or more non-overlapping coder lanes from one frozen base |
+| `investigate-then-implement` | Read-only research, Lead synthesis, then a coder lane |
+| `read-only-independent-review` | One or two independent read-only review lanes |
+
+Use `playbook_list` for the summaries, then at most one `playbook_get` for the chosen candidate. Do not copy full playbook JSON, prompts, or personality text into worker context — state which defaults you keep, skip, or change. Advisor/Auditor stages in a playbook remain **conditional**: call them only when you can name one unresolved question and explain why the existing deterministic evidence is insufficient.
 
 ## Acceptance
 

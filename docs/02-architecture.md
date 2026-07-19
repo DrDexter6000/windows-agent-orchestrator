@@ -887,7 +887,7 @@ src/
 ├── costForecast.js           # 横切：成本预演（M8-4，历史中位数±区间）
 ├── smoke.js                  # L4：真实 CLI smoke 入口（npm run smoke）
 ├── mcp/                      # L4：MCP adapter（M9-1，agent-facing primary）
-│   ├── server.js             #   MCP server factory + 11 tools（registry_list/workspace_status/run_dispatch/run_status/run_wait/run_collect/run_diagnose/run_delivery/run_delivery_decide/run_stop/runs_list）
+│   ├── server.js             #   MCP server factory + 13 tools（registry_list/workspace_status/run_dispatch/run_status/run_wait/run_collect/run_diagnose/run_delivery/run_delivery_decide/run_stop/runs_list/playbook_list/playbook_get）
 │   └── stdio.js              #   stdio production entrypoint（StdioServerTransport，npm run mcp，--workspace-root）
 ├── application/              # L3：shared application services（M9 use-case 层）
 │   ├── registryInventory.js  #   registry inventory SSOT（M9-0，CLI + MCP 共用）
@@ -905,6 +905,7 @@ src/
 │   ├── mcpWorkspaceActivation.js # project-scoped workspace activation（M10 P0-1，CLI 用，委托 hostAdapters）
 │   ├── timeoutPolicy.js      #   wait timeout precedence SSOT（M10-pre，CLI + MCP 共用）
 │   ├── processStopVerify.js  #   bounded process exit verification（M10-pre）
+│   └── playbookCatalog.js    #   read-only Lead Playbook Catalog SSOT（M11-2A，loader + MCP/CLI 共用；validatePlaybookSummaryList/validatePlaybookV1）
 ├── hostAdapters/             # L4：host-specific config adapters（M10 P0-1 reframe）
 │   └── codexMcpConfig.js     #   Codex CLI MCP server CRUD（add/get/remove/list，不写 TOML）
 │   └── processStopVerify.js  #   bounded process exit verification（M10-pre）
@@ -933,6 +934,17 @@ test/
 > **未实现的模块**（spec 曾设想，roadmap 无对应 milestone，勿当作既有文件）：
 > - `scheduler.js`（限并发调度器，**未实现**）—— 见 §4.4，登记 TD-5。
 > - `workflow/dag.js`（**未实现**，DAG 能力已拆进 schema.js + engine.js，无独立 dag.js）。
+
+**Lead Playbook Catalog ≠ WorkflowEngine（M11-2 概念分离）**：
+
+WAO 有两套**不同用途**的编排辅助，必须区分，不得混淆：
+
+| 概念 | 位置 | 可执行 | 用途 |
+|---|---|---:|---|
+| Lead Playbook Catalog | `playbooks/lead/*.json` + `application/playbookCatalog.js` + `playbook_list`/`playbook_get`（只读 MCP/CLI） | 否 | 可选的 Lead 决策脚手架：evidence gate、adaptation point。Lead 保留/跳过/修改条件步骤；catalog 不派发、不推进 phase、不验收。 |
+| WorkflowEngine | `src/workflow/engine.js` + `workflows/templates/*.mjs` | 是 | 确定性 CLI DAG 执行（分层 + 并行 + 失败传播），硬编码 agent/prompt。 |
+
+Catalog 是只读数据 + application service（`validatePlaybookSummaryList`/`validatePlaybookV1` 作为 loader 与 MCP/CLI adapter 共用的 SSOT），**不是**第二个 executor；不存在 `playbook_run`/`playbook_start`/`playbook_next`/`playbook_recommend`。现有 `workflow run/list` 仍是专家级 CLI 特性，不是 M11-2 的基础。
 
 **模块边界规则**：
 - backend 特定逻辑**只在** `src/backends/` 下
