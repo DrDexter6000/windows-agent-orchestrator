@@ -1,0 +1,48 @@
+{
+  "id": "single-coder-delivery",
+  "version": 1,
+  "title": "Single coder delivery",
+  "summary": "One bounded implementation lane with delivery review and frozen verification.",
+  "useWhen": ["One bounded implementation surface", "Requirements are clear enough to dispatch"],
+  "avoidWhen": ["The task cannot yet be bounded", "Multiple independent surfaces need parallel lanes"],
+  "lanePattern": "single",
+  "roles": [
+    { "capability": "coder", "importance": "core", "min": 1, "max": 1 },
+    { "capability": "tester", "importance": "conditional", "min": 0, "max": 1 }
+  ],
+  "phases": [
+    {
+      "id": "preflight",
+      "intent": "Confirm workspace binding, registry, and that the task is bounded.",
+      "importance": "core",
+      "evidence": ["Workspace bound", "Eligible coder certified"],
+      "adaptations": ["Skip delivery mode for a read-only task"]
+    },
+    {
+      "id": "dispatch",
+      "intent": "Dispatch one bounded task to an eligible coder with delivery mode.",
+      "importance": "core",
+      "evidence": ["runId recorded", "Task and allowed paths bounded"],
+      "adaptations": ["Use delivery spec for code changes", "Omit delivery for read-only"]
+    },
+    {
+      "id": "supervise",
+      "intent": "Observe the coder via run_wait until terminal or liveness warrants action.",
+      "importance": "core",
+      "evidence": ["Terminal or liveness summary observed"],
+      "adaptations": ["Continue waiting if progress is fresh"]
+    },
+    {
+      "id": "review-and-decide",
+      "intent": "Collect bounded output, review delivery paths, and make one decision.",
+      "importance": "core",
+      "evidence": ["Collected output", "Verification result", "Lead decision recorded"],
+      "adaptations": ["Tester only for risk or insufficient evidence", "Skip Advisor/Auditor for low-risk"]
+    }
+  ],
+  "completionEvidence": ["Terminal fact", "Verification result", "Lead decision"],
+  "escalation": {
+    "advisor": "Only for one named unresolved design question.",
+    "auditor": "Only for one named residual high-risk acceptance question."
+  }
+}

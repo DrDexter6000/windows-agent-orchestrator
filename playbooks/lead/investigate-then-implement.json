@@ -1,0 +1,56 @@
+{
+  "id": "investigate-then-implement",
+  "version": 1,
+  "title": "Investigate then implement",
+  "summary": "Read-only research, Lead synthesis, then one bounded coder delivery.",
+  "useWhen": ["The task needs exploration before bounding", "Uncertainty is high enough to warrant a read-only pass"],
+  "avoidWhen": ["The task is already well-bounded", "No implementation is needed"],
+  "lanePattern": "serial-discovery",
+  "roles": [
+    { "capability": "researcher", "importance": "core", "min": 1, "max": 1 },
+    { "capability": "coder", "importance": "core", "min": 1, "max": 1 },
+    { "capability": "tester", "importance": "conditional", "min": 0, "max": 1 }
+  ],
+  "phases": [
+    {
+      "id": "investigate",
+      "intent": "Dispatch one read-only research lane to map the problem space.",
+      "importance": "core",
+      "evidence": ["Research runId recorded", "Read-only mode confirmed"],
+      "adaptations": ["Research is not auto-injected into worker system prompt"]
+    },
+    {
+      "id": "synthesize",
+      "intent": "Lead reads research output and synthesizes a bounded implementation task.",
+      "importance": "core",
+      "evidence": ["Research collected", "Lead states the bounded task"],
+      "adaptations": ["Skip if research confirms the task was already bounded"]
+    },
+    {
+      "id": "implement",
+      "intent": "Dispatch one bounded coder lane with delivery mode.",
+      "importance": "core",
+      "evidence": ["Coder runId recorded", "Task bounded from synthesis"],
+      "adaptations": ["Use delivery spec for code changes"]
+    },
+    {
+      "id": "supervise",
+      "intent": "Observe the coder via run_wait until terminal.",
+      "importance": "core",
+      "evidence": ["Terminal or liveness observed"],
+      "adaptations": ["Continue if progress is fresh"]
+    },
+    {
+      "id": "review-and-decide",
+      "intent": "Collect, review delivery paths, and decide.",
+      "importance": "core",
+      "evidence": ["Collected output", "Verification result", "Lead decision"],
+      "adaptations": ["Tester only for risk"]
+    }
+  ],
+  "completionEvidence": ["Research terminal", "Implementation terminal", "Lead decision"],
+  "escalation": {
+    "advisor": "Only for one named design question unresolved by research.",
+    "auditor": "Only for one named residual risk after implementation."
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "id": "parallel-independent-deliveries",
+  "version": 1,
+  "title": "Parallel independent deliveries",
+  "summary": "Two or more non-overlapping coder lanes dispatched from one frozen base.",
+  "useWhen": ["Two or more independent implementation surfaces", "Paths do not overlap"],
+  "avoidWhen": ["Surfaces share files or have hidden interaction risk"],
+  "lanePattern": "parallel-independent",
+  "roles": [
+    { "capability": "coder", "importance": "core", "min": 2, "max": 4 },
+    { "capability": "tester", "importance": "conditional", "min": 0, "max": 1 }
+  ],
+  "phases": [
+    {
+      "id": "preflight",
+      "intent": "Confirm workspace binding and that each surface is independently bounded.",
+      "importance": "core",
+      "evidence": ["Workspace bound", "Non-overlapping paths verified"],
+      "adaptations": ["Abort if paths overlap"]
+    },
+    {
+      "id": "dispatch",
+      "intent": "Dispatch each coder lane with its own delivery spec from the same base.",
+      "importance": "core",
+      "evidence": ["runId per lane", "Each lane has bounded allowed paths"],
+      "adaptations": ["Stagger dispatch if resource contention"]
+    },
+    {
+      "id": "supervise",
+      "intent": "Observe all lanes via run_wait until each reaches terminal.",
+      "importance": "core",
+      "evidence": ["Each lane terminal or liveness observed"],
+      "adaptations": ["Stop a runaway lane without aborting siblings"]
+    },
+    {
+      "id": "composition-gate",
+      "intent": "Verify that independent deliveries compose correctly before acceptance.",
+      "importance": "conditional",
+      "evidence": ["Independent composition test passed"],
+      "adaptations": ["Tester only when interaction risk exists"]
+    },
+    {
+      "id": "review-and-decide",
+      "intent": "Review each delivery and decide accept or reject per lane.",
+      "importance": "core",
+      "evidence": ["Per-lane decision recorded"],
+      "adaptations": ["Reject one lane without rejecting all"]
+    }
+  ],
+  "completionEvidence": ["All lanes terminal", "Composition verified", "Per-lane decision"],
+  "escalation": {
+    "advisor": "Only for one named cross-lane design question.",
+    "auditor": "Only for one named composition-risk acceptance question."
+  }
+}

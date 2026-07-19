@@ -1,0 +1,42 @@
+{
+  "id": "read-only-independent-review",
+  "version": 1,
+  "title": "Read-only independent review",
+  "summary": "One or two independent read-only lanes for risk or design review.",
+  "useWhen": ["A design or risk question needs independent read-only analysis"],
+  "avoidWhen": ["The question is already resolved", "Implementation is needed"],
+  "lanePattern": "read-only",
+  "roles": [
+    { "capability": "researcher", "importance": "core", "min": 1, "max": 2 },
+    { "capability": "advisor", "importance": "conditional", "min": 0, "max": 1 },
+    { "capability": "auditor", "importance": "conditional", "min": 0, "max": 1 }
+  ],
+  "phases": [
+    {
+      "id": "dispatch",
+      "intent": "Dispatch one or two read-only lanes with the same review question.",
+      "importance": "core",
+      "evidence": ["runId per lane", "Read-only mode confirmed"],
+      "adaptations": ["Use one lane if the question is narrow"]
+    },
+    {
+      "id": "supervise",
+      "intent": "Observe each read-only lane via run_wait until terminal.",
+      "importance": "core",
+      "evidence": ["Each lane terminal"],
+      "adaptations": ["No stop needed for read-only runaway"]
+    },
+    {
+      "id": "synthesize",
+      "intent": "Lead reads independent outputs and forms a judgment.",
+      "importance": "core",
+      "evidence": ["Each lane collected", "Lead states the judgment"],
+      "adaptations": ["Escalate only if outputs disagree on a named risk"]
+    }
+  ],
+  "completionEvidence": ["All lanes terminal", "Each lane collected", "Lead judgment stated"],
+  "escalation": {
+    "advisor": "Only for one named unresolved semantic or risk question.",
+    "auditor": "Only for one named residual high-risk question."
+  }
+}
