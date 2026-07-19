@@ -35,7 +35,7 @@
     {
       "id": "composition-gate",
       "intent": "Verify that independent deliveries compose correctly before acceptance.",
-      "importance": "conditional",
+      "importance": "core",
       "evidence": ["Independent composition test passed"],
       "adaptations": ["Tester only when interaction risk exists"]
     },

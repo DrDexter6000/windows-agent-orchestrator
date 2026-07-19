@@ -1,6 +1,6 @@
 // src/application/playbookCatalog.js
 //
-// M11-2A: Lead Playbook Catalog kernel.
+// M11-2A (closeout): Lead Playbook Catalog kernel.
 //
 // A read-only, provider-neutral, deterministic registry of exactly four
 // built-in Lead playbooks. Each playbook is a compact decision scaffold with
@@ -15,16 +15,25 @@
 //   - Reads built-in JSON at module load, validates fail-closed, caches.
 //   - Returns deep clones so callers cannot mutate cached state.
 //   - No external catalog path in v1.
+//
+// Fail-closed guarantees (M11-2A closeout):
+//   - The catalog directory must contain EXACTLY the four approved JSON files.
+//   - Each parsed id must match its filename stem.
+//   - Every object (root, role, phase, escalation) must pass a strict key
+//     allowlist — unknown fields are rejected, not ignored.
+//   - IDs (playbook + phase) must be lowercase kebab-case.
+//   - getLeadPlaybook input is validated for shape; NotFound uses a fixed
+//     message that does not echo caller input.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 
 // ── Typed errors ─────────────────────────────────────────────────────────────
 
 export class PlaybookNotFoundError extends Error {
-  constructor(id) {
-    super(`Playbook not found: ${JSON.stringify(id)}`);
+  constructor() {
+    super("Playbook not found");
     this.name = "PlaybookNotFoundError";
     this.code = "PLAYBOOK_NOT_FOUND";
   }
@@ -60,81 +69,105 @@ const MAX_LIST_ENTRIES = 4;
 const MAX_COMPLETION_EVIDENCE = 6;
 const MAX_OBJECT_BYTES = 12288; // 12 KiB
 
-// ── Structured validation (deterministic, not keyword-pattern matching) ──────
+// Strict key allowlists for each object type.
+const ROOT_KEYS = new Set([
+  "id", "version", "title", "summary", "useWhen", "avoidWhen",
+  "lanePattern", "roles", "phases", "completionEvidence", "escalation",
+]);
+const ROLE_KEYS = new Set(["capability", "importance", "min", "max"]);
+const PHASE_KEYS = new Set(["id", "intent", "importance", "evidence", "adaptations"]);
+const ESCALATION_KEYS = new Set(["advisor", "auditor"]);
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Lowercase kebab-case: lowercase alphanumeric segments joined by hyphens. */
+function isKebabId(v) {
+  return typeof v === "string"
+    && v.length >= 1
+    && v.length <= MAX_ID_LEN
+    && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(v);
+}
 
 function isNonEmptyString(v, max = MAX_STRING_LEN) {
   return typeof v === "string" && v.length >= 1 && v.length <= max;
 }
 
-function isAsciiId(v) {
-  return typeof v === "string" && v.length >= 1 && v.length <= MAX_ID_LEN && /^[A-Za-z0-9_-]+$/.test(v);
-}
-
-function validateBoundedStringArray(arr, fieldName, maxLen = MAX_LIST_ENTRIES) {
-  if (!Array.isArray(arr) || arr.length < 1 || arr.length > maxLen) {
-    throw new PlaybookValidationError(`${fieldName} must be a non-empty array of at most ${maxLen} entries`);
-  }
-  for (let i = 0; i < arr.length; i += 1) {
-    if (!isNonEmptyString(arr[i])) {
-      throw new PlaybookValidationError(`${fieldName}[${i}] must be a non-empty string of at most ${MAX_STRING_LEN} chars`);
+function checkNoUnknownKeys(obj, allowed, label) {
+  for (const k of Object.keys(obj)) {
+    if (!allowed.has(k)) {
+      throw new PlaybookValidationError(`${label}: unknown key '${k}'`);
     }
   }
 }
 
-function validateRole(role, i) {
-  if (!role || typeof role !== "object") {
-    throw new PlaybookValidationError(`role[${i}] must be an object`);
+function validateBoundedStringArray(arr, fieldName, label, maxLen = MAX_LIST_ENTRIES) {
+  if (!Array.isArray(arr) || arr.length < 1 || arr.length > maxLen) {
+    throw new PlaybookValidationError(`${label}: ${fieldName} must be a non-empty array of at most ${maxLen} entries`);
   }
-  if (!VALID_CAPABILITIES.has(role.capability)) {
-    throw new PlaybookValidationError(`role[${i}].capability must be one of ${[...VALID_CAPABILITIES].join("|")}`);
-  }
-  if (!VALID_IMPORTANCE.has(role.importance)) {
-    throw new PlaybookValidationError(`role[${i}].importance must be core|conditional`);
-  }
-  if (!Number.isInteger(role.min) || role.min < 0 || role.min > 4) {
-    throw new PlaybookValidationError(`role[${i}].min must be integer 0..4`);
-  }
-  if (!Number.isInteger(role.max) || role.max < 0 || role.max > 4) {
-    throw new PlaybookValidationError(`role[${i}].max must be integer 0..4`);
-  }
-  if (role.min > role.max) {
-    throw new PlaybookValidationError(`role[${i}].min (${role.min}) must be <= max (${role.max})`);
-  }
-  // Advisor/Auditor must not be core.
-  if ((role.capability === "advisor" || role.capability === "auditor") && role.importance === "core") {
-    throw new PlaybookValidationError(`role[${i}]: ${role.capability} must not be core`);
+  for (let i = 0; i < arr.length; i += 1) {
+    if (!isNonEmptyString(arr[i])) {
+      throw new PlaybookValidationError(`${label}: ${fieldName}[${i}] must be a non-empty string of at most ${MAX_STRING_LEN} chars`);
+    }
   }
 }
 
-function validatePhase(phase, i) {
-  if (!phase || typeof phase !== "object") {
-    throw new PlaybookValidationError(`phase[${i}] must be an object`);
+function validateRole(role, i, label) {
+  if (!role || typeof role !== "object") {
+    throw new PlaybookValidationError(`${label}: role[${i}] must be an object`);
   }
-  if (!isAsciiId(phase.id)) {
-    throw new PlaybookValidationError(`phase[${i}].id must be 1..64 ASCII chars`);
+  checkNoUnknownKeys(role, ROLE_KEYS, `${label}: role[${i}]`);
+  if (!VALID_CAPABILITIES.has(role.capability)) {
+    throw new PlaybookValidationError(`${label}: role[${i}].capability must be one of ${[...VALID_CAPABILITIES].join("|")}`);
+  }
+  if (!VALID_IMPORTANCE.has(role.importance)) {
+    throw new PlaybookValidationError(`${label}: role[${i}].importance must be core|conditional`);
+  }
+  if (!Number.isInteger(role.min) || role.min < 0 || role.min > 4) {
+    throw new PlaybookValidationError(`${label}: role[${i}].min must be integer 0..4`);
+  }
+  if (!Number.isInteger(role.max) || role.max < 0 || role.max > 4) {
+    throw new PlaybookValidationError(`${label}: role[${i}].max must be integer 0..4`);
+  }
+  if (role.min > role.max) {
+    throw new PlaybookValidationError(`${label}: role[${i}].min (${role.min}) must be <= max (${role.max})`);
+  }
+  if ((role.capability === "advisor" || role.capability === "auditor") && role.importance === "core") {
+    throw new PlaybookValidationError(`${label}: role[${i}]: ${role.capability} must not be core`);
+  }
+}
+
+function validatePhase(phase, i, label) {
+  if (!phase || typeof phase !== "object") {
+    throw new PlaybookValidationError(`${label}: phase[${i}] must be an object`);
+  }
+  checkNoUnknownKeys(phase, PHASE_KEYS, `${label}: phase[${i}]`);
+  if (!isKebabId(phase.id)) {
+    throw new PlaybookValidationError(`${label}: phase[${i}].id must be lowercase kebab-case (1..64 chars)`);
   }
   if (!isNonEmptyString(phase.intent)) {
-    throw new PlaybookValidationError(`phase[${i}].intent must be 1..${MAX_STRING_LEN} chars`);
+    throw new PlaybookValidationError(`${label}: phase[${i}].intent must be 1..${MAX_STRING_LEN} chars`);
   }
   if (!VALID_IMPORTANCE.has(phase.importance)) {
-    throw new PlaybookValidationError(`phase[${i}].importance must be core|conditional`);
+    throw new PlaybookValidationError(`${label}: phase[${i}].importance must be core|conditional`);
   }
-  validateBoundedStringArray(phase.evidence, `phase[${i}].evidence`, MAX_LIST_ENTRIES);
-  validateBoundedStringArray(phase.adaptations, `phase[${i}].adaptations`, MAX_LIST_ENTRIES);
+  validateBoundedStringArray(phase.evidence, "evidence", `${label}: phase[${i}]`, MAX_LIST_ENTRIES);
+  validateBoundedStringArray(phase.adaptations, "adaptations", `${label}: phase[${i}]`, MAX_LIST_ENTRIES);
 }
 
 /**
- * Validate a complete PlaybookV1 object structurally.
+ * Validate a complete PlaybookV1 object structurally with strict key allowlists.
  * Throws PlaybookValidationError on any violation.
  */
 function validatePlaybook(pb, sourceId) {
   const label = sourceId || pb?.id || "<unknown>";
 
-  if (!pb || typeof pb !== "object") {
-    throw new PlaybookValidationError(`${label}: playbook must be an object`);
+  if (!pb || typeof pb !== "object" || Array.isArray(pb)) {
+    throw new PlaybookValidationError(`${label}: playbook must be a plain object`);
   }
-  if (!isAsciiId(pb.id)) {
-    throw new PlaybookValidationError(`${label}: id must be 1..64 ASCII chars`);
+  checkNoUnknownKeys(pb, ROOT_KEYS, label);
+
+  if (!isKebabId(pb.id)) {
+    throw new PlaybookValidationError(`${label}: id must be lowercase kebab-case (1..64 chars)`);
   }
   if (pb.version !== 1) {
     throw new PlaybookValidationError(`${label}: version must be exactly 1`);
@@ -148,24 +181,25 @@ function validatePlaybook(pb, sourceId) {
   if (!VALID_LANE_PATTERNS.has(pb.lanePattern)) {
     throw new PlaybookValidationError(`${label}: lanePattern must be one of ${[...VALID_LANE_PATTERNS].join("|")}`);
   }
-  validateBoundedStringArray(pb.useWhen, "useWhen", MAX_LIST_ENTRIES);
-  validateBoundedStringArray(pb.avoidWhen, "avoidWhen", MAX_LIST_ENTRIES);
+  validateBoundedStringArray(pb.useWhen, "useWhen", label, MAX_LIST_ENTRIES);
+  validateBoundedStringArray(pb.avoidWhen, "avoidWhen", label, MAX_LIST_ENTRIES);
 
   if (!Array.isArray(pb.roles) || pb.roles.length < 1 || pb.roles.length > MAX_ROLES) {
     throw new PlaybookValidationError(`${label}: roles must be 1..${MAX_ROLES} entries`);
   }
-  pb.roles.forEach((r, i) => validateRole(r, i));
+  pb.roles.forEach((r, i) => validateRole(r, i, label));
 
   if (!Array.isArray(pb.phases) || pb.phases.length < 1 || pb.phases.length > MAX_PHASES) {
     throw new PlaybookValidationError(`${label}: phases must be 1..${MAX_PHASES} entries`);
   }
-  pb.phases.forEach((p, i) => validatePhase(p, i));
+  pb.phases.forEach((p, i) => validatePhase(p, i, label));
 
-  validateBoundedStringArray(pb.completionEvidence, "completionEvidence", MAX_COMPLETION_EVIDENCE);
+  validateBoundedStringArray(pb.completionEvidence, "completionEvidence", label, MAX_COMPLETION_EVIDENCE);
 
-  if (!pb.escalation || typeof pb.escalation !== "object") {
-    throw new PlaybookValidationError(`${label}: escalation must be an object`);
+  if (!pb.escalation || typeof pb.escalation !== "object" || Array.isArray(pb.escalation)) {
+    throw new PlaybookValidationError(`${label}: escalation must be a plain object`);
   }
+  checkNoUnknownKeys(pb.escalation, ESCALATION_KEYS, `${label}: escalation`);
   if (!isNonEmptyString(pb.escalation.advisor)) {
     throw new PlaybookValidationError(`${label}: escalation.advisor must be 1..${MAX_STRING_LEN} chars`);
   }
@@ -173,7 +207,6 @@ function validatePlaybook(pb, sourceId) {
     throw new PlaybookValidationError(`${label}: escalation.auditor must be 1..${MAX_STRING_LEN} chars`);
   }
 
-  // 12 KiB bound on serialized object
   const bytes = Buffer.from(JSON.stringify(pb), "utf8").length;
   if (bytes > MAX_OBJECT_BYTES) {
     throw new PlaybookValidationError(`${label}: serialized object ${bytes} bytes exceeds ${MAX_OBJECT_BYTES} (12 KiB)`);
@@ -183,28 +216,53 @@ function validatePlaybook(pb, sourceId) {
 // ── Catalog load (module-load, fail-closed) ──────────────────────────────────
 
 const _MODULE_DIR = dirname(fileURLToPath(import.meta.url));
-// src/application/ → ../../playbooks/lead/
 const CATALOG_DIR = resolve(_MODULE_DIR, "..", "..", "playbooks", "lead");
 
+/**
+ * Load and validate the built-in catalog. The catalog directory must contain
+ * EXACTLY the four approved JSON files (no extra, no missing). Each file's
+ * parsed id must match its filename stem. Duplicates or substitutions are
+ * rejected.
+ */
 function loadAndValidateCatalog() {
+  // Enumerate directory: require exactly the four approved files.
+  let files;
+  try {
+    files = readdirSync(CATALOG_DIR).filter((f) => f.endsWith(".json")).sort();
+  } catch {
+    throw new PlaybookValidationError("built-in catalog directory unreadable or missing");
+  }
+  const expectedFiles = PLAYBOOK_IDS.map((id) => `${id}.json`).sort();
+  // Exact set match (no extra, no missing).
+  if (files.length !== expectedFiles.length || !files.every((f, i) => f === expectedFiles[i])) {
+    throw new PlaybookValidationError(
+      `built-in catalog file set mismatch: expected ${expectedFiles.join(", ")}, got ${files.join(", ")}`,
+    );
+  }
+
   const catalog = new Map();
   for (const id of PLAYBOOK_IDS) {
-    const filePath = join(CATALOG_DIR, `${id}.json`);
+    const fileName = `${id}.json`;
+    const filePath = join(CATALOG_DIR, fileName);
     let raw;
     try {
       raw = readFileSync(filePath, "utf8");
     } catch {
-      throw new PlaybookValidationError(`built-in catalog file missing or unreadable: ${id}.json`);
+      throw new PlaybookValidationError(`built-in catalog file unreadable: ${fileName}`);
     }
     let parsed;
     try {
       parsed = JSON.parse(raw);
     } catch {
-      throw new PlaybookValidationError(`built-in catalog file not valid JSON: ${id}.json`);
+      throw new PlaybookValidationError(`built-in catalog file not valid JSON: ${fileName}`);
     }
-    // Verify the parsed id matches the expected id (no silent substitution).
+    // The parsed id must match the filename stem exactly (no substitution).
     if (parsed.id !== id) {
-      throw new PlaybookValidationError(`built-in catalog id mismatch in ${id}.json: got ${parsed.id}`);
+      throw new PlaybookValidationError(`built-in catalog id mismatch in ${fileName}: expected ${id}, got ${parsed.id}`);
+    }
+    // The id must not already exist in the map (no duplicate across files).
+    if (catalog.has(parsed.id)) {
+      throw new PlaybookValidationError(`built-in catalog duplicate id: ${parsed.id}`);
     }
     validatePlaybook(parsed, id);
     catalog.set(id, parsed);
@@ -234,7 +292,6 @@ export function listLeadPlaybooks() {
       lanePattern: pb.lanePattern,
     });
   }
-  // Deep clone the array of objects.
   return JSON.parse(JSON.stringify(summaries));
 }
 
@@ -242,18 +299,20 @@ export function listLeadPlaybooks() {
  * Get a complete, validated, deep-cloned PlaybookV1 by ID.
  *
  * @param {object} input
- * @param {string} input.id — must be one of the four approved IDs
+ * @param {string} input.id — must be a valid lowercase-kebab ID
  * @returns {object} deep-cloned PlaybookV1
- * @throws {PlaybookValidationError} if input is malformed (non-string, empty, etc.)
+ * @throws {PlaybookValidationError} if input is malformed (non-string, wrong shape, etc.)
  * @throws {PlaybookNotFoundError} if the ID is valid-shaped but not in the catalog
  */
 export function getLeadPlaybook({ id } = {}) {
-  if (typeof id !== "string" || id.length === 0) {
-    throw new PlaybookValidationError(`id must be a non-empty string, got: ${JSON.stringify(id)}`);
+  // Validate input shape: must be a non-empty lowercase-kebab string.
+  if (!isKebabId(id)) {
+    throw new PlaybookValidationError("id must be a non-empty lowercase-kebab string (1..64 chars)");
   }
   const pb = _catalog.get(id);
   if (!pb) {
-    throw new PlaybookNotFoundError(id);
+    // Fixed safe message — does NOT echo the caller's input.
+    throw new PlaybookNotFoundError();
   }
   return JSON.parse(JSON.stringify(pb));
 }

@@ -24,7 +24,7 @@
       "intent": "Observe each read-only lane via run_wait until terminal.",
       "importance": "core",
       "evidence": ["Each lane terminal"],
-      "adaptations": ["No stop needed for read-only runaway"]
+      "adaptations": ["Read-only restricts mutation only; if runaway or policy violation is proven, Lead may still run_stop"]
     },
     {
       "id": "synthesize",
