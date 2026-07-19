@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 
-import { ensureWaoWorktreeExclude } from "../src/gitLocalExclude.js";
+import { ensureWaoWorktreeExclude, prepareAndRunWorktreeAdd } from "../src/gitLocalExclude.js";
 
 const WAO_RULE = "/.wao-worktrees/";
 
@@ -59,12 +59,12 @@ function countExactRules(content, rule = WAO_RULE) {
 
 // ===== HYGIENE-02..05: byte/newline/BOM/no-trailing-newline preservation =====
 
-test("HYGIENE-02: existing LF exclude bytes preserved as exact prefix; rule appended once", () => {
+test("HYGIENE-02: existing LF exclude bytes preserved as exact prefix; rule appended once", async () => {
   const repo = makeTempRepo();
   try {
     const pre = "user-rule-1\n*.log\n";
     writeExclude(repo, pre);
-    const result = ensureWaoWorktreeExclude(repo);
+    const result = await ensureWaoWorktreeExclude(repo);
     assert.equal(result.added, true, "rule was added");
     const after = readExclude(repo);
     assert.ok(after.startsWith(pre), "pre-existing bytes must be an exact prefix (untouched)");
@@ -72,12 +72,12 @@ test("HYGIENE-02: existing LF exclude bytes preserved as exact prefix; rule appe
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
-test("HYGIENE-03: CRLF newline convention preserved for the appended separator/rule", () => {
+test("HYGIENE-03: CRLF newline convention preserved for the appended separator/rule", async () => {
   const repo = makeTempRepo();
   try {
     const pre = "user-crlf\r\n*.tmp\r\n"; // CRLF
     writeExclude(repo, pre);
-    ensureWaoWorktreeExclude(repo);
+    await ensureWaoWorktreeExclude(repo);
     const after = readExclude(repo);
     assert.ok(after.startsWith(pre), "pre-existing CRLF bytes preserved");
     // The appended separator + rule must use CRLF to match the file's convention.
@@ -87,25 +87,25 @@ test("HYGIENE-03: CRLF newline convention preserved for the appended separator/r
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
-test("HYGIENE-04: UTF-8 BOM is preserved", () => {
+test("HYGIENE-04: UTF-8 BOM is preserved", async () => {
   const repo = makeTempRepo();
   try {
     const BOM = "\uFEFF";
     const pre = BOM + "user-bom\n";
     writeExclude(repo, pre);
-    ensureWaoWorktreeExclude(repo);
+    await ensureWaoWorktreeExclude(repo);
     const after = readExclude(repo);
     assert.ok(after.startsWith(BOM), "BOM must be preserved at start");
     assert.equal(countExactRules(after), 1);
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
-test("HYGIENE-05: no-trailing-newline file receives only the necessary separator", () => {
+test("HYGIENE-05: no-trailing-newline file receives only the necessary separator", async () => {
   const repo = makeTempRepo();
   try {
     const pre = "no-trailing-newline-here"; // no trailing \n
     writeExclude(repo, pre);
-    ensureWaoWorktreeExclude(repo);
+    await ensureWaoWorktreeExclude(repo);
     const after = readExclude(repo);
     // pre-existing content must be an exact prefix; only the separator + rule added.
     assert.ok(after.startsWith(pre), "pre-existing content preserved");
@@ -119,15 +119,15 @@ test("HYGIENE-05: no-trailing-newline file receives only the necessary separator
 
 // ===== HYGIENE-06: idempotency =====
 
-test("HYGIENE-06: repeated invocation is idempotent; exact rule count stays one", () => {
+test("HYGIENE-06: repeated invocation is idempotent; exact rule count stays one", async () => {
   const repo = makeTempRepo();
   try {
     writeExclude(repo, "user\n");
-    const r1 = ensureWaoWorktreeExclude(repo);
+    const r1 = await ensureWaoWorktreeExclude(repo);
     assert.equal(r1.added, true);
-    const r2 = ensureWaoWorktreeExclude(repo);
+    const r2 = await ensureWaoWorktreeExclude(repo);
     assert.equal(r2.added, false, "second call must report not-added");
-    const r3 = ensureWaoWorktreeExclude(repo);
+    const r3 = await ensureWaoWorktreeExclude(repo);
     assert.equal(r3.added, false);
     const after = readExclude(repo);
     assert.equal(countExactRules(after), 1, "still exactly one rule after 3 calls");
@@ -136,7 +136,7 @@ test("HYGIENE-06: repeated invocation is idempotent; exact rule count stays one"
 
 // ===== HYGIENE-07: similar patterns/comments don't count as the exact rule =====
 
-test("HYGIENE-07: similar patterns/comments/substrings do not count as the exact owned rule", () => {
+test("HYGIENE-07: similar patterns/comments/substrings do not count as the exact owned rule", async () => {
   const repo = makeTempRepo();
   try {
     // None of these is the exact rule (different scope / comment / substring).
@@ -148,7 +148,7 @@ test("HYGIENE-07: similar patterns/comments/substrings do not count as the exact
     ];
     for (const fake of fakes) {
       writeExclude(repo, fake + "\n");
-      const r = ensureWaoWorktreeExclude(repo);
+      const r = await ensureWaoWorktreeExclude(repo);
       assert.equal(r.added, true, `fake '${fake}' must not count as exact rule; rule added`);
       const after = readExclude(repo);
       assert.equal(countExactRules(after), 1, `exactly one exact rule after '${fake}'`);
@@ -156,99 +156,71 @@ test("HYGIENE-07: similar patterns/comments/substrings do not count as the exact
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
-// ===== HYGIENE-08: injected exclude write/rename/read-back failure → no git worktree add =====
+// ===== HYGIENE-08: prepare-only adds the rule (no worktree add attempted) =====
 
-test("HYGIENE-08: injected write/rename/read-back failure means zero git worktree add and exact byte restoration", () => {
+test("HYGIENE-08: prepare-only ensureWaoWorktreeExclude adds the rule once; no worktree add", async () => {
   const repo = makeTempRepo();
   try {
     const pre = "user-rule\n";
     writeExclude(repo, pre);
-    // Inject a failing gitExec: git worktree add must never be called.
-    let addCalls = 0;
-    const failingGit = (args) => {
-      if (args[0] === "worktree" && args[1] === "add") { addCalls++; throw new Error("injected git failure"); }
-      // delegate real git for rev-parse so exclude prep still resolves the git dir
-      return execSync("git " + args.map((a) => `"${a}"`).join(" "), { cwd: repo, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
-    };
-    const result = ensureWaoWorktreeExclude(repo, { gitExec: failingGit, addWorktree: false });
-    // addWorktree:false means the helper only prepares exclude, no worktree add attempted.
-    // To exercise the rollback path, we use addWorktree with a failing git.
-    assert.equal(addCalls, 0, "no worktree add in prepare-only mode");
-    // prepare-only mode must have added the rule.
-    assert.equal(result.added, true);
+    const result = await ensureWaoWorktreeExclude(repo);
+    assert.equal(result.added, true, "rule was added by prepare-only call");
     const after = readExclude(repo);
     assert.equal(countExactRules(after), 1, "prepare-only added the rule");
+    assert.ok(after.startsWith(pre), "pre-existing bytes preserved");
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
-test("HYGIENE-08b: exclude write failure (injected) → no rule added, pre bytes restored, no temp file", () => {
+test("HYGIENE-08b: exclude write failure (injected) → no rule added, pre bytes restored, no temp file", async () => {
   const repo = makeTempRepo();
   try {
     const pre = "user-rule\n";
     writeExclude(repo, pre);
-    // Inject a writeExclude that always throws.
-    const beforeEntries = readdirSync(join(repo, ".git", "info"));
-    assert.throws(
+    const beforeEntries = readdirSync(join(repo, ".git", "info")).filter((e) => e !== "exclude.wao-lock");
+    await assert.rejects(
       () => ensureWaoWorktreeExclude(repo, {
         writeExclude: () => { throw new Error("injected write failure"); },
       }),
       /write failure|exclude/i,
     );
-    // Pre-existing bytes must be unchanged.
     assert.equal(readExclude(repo), pre, "pre-existing bytes restored/unchanged after write failure");
-    // No temp file left in info dir.
-    const afterEntries = readdirSync(join(repo, ".git", "info"));
+    const afterEntries = readdirSync(join(repo, ".git", "info")).filter((e) => e !== "exclude.wao-lock");
     assert.deepEqual(afterEntries, beforeEntries, "no temp file left in info dir");
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
-// ===== HYGIENE-09: injected git worktree add failure restores pre-call exclude bytes + no temp =====
+// ===== HYGIENE-09: injected git worktree add failure restores locked-time exclude bytes + no temp =====
 
-test("HYGIENE-09: injected git worktree add failure restores pre-call exclude bytes and leaves no temp file", () => {
+test("HYGIENE-09: injected runWorktreeAdd failure restores pre-call exclude bytes and leaves no temp file", async () => {
   const repo = makeTempRepo();
   try {
     const pre = "user-pre-rule\n";
     writeExclude(repo, pre);
     const infoDir = join(repo, ".git", "info");
-    const beforeEntries = readdirSync(infoDir);
-    // addWorktree path with an injected failing gitExec for `worktree add`.
-    assert.throws(
-      () => ensureWaoWorktreeExclude(repo, {
-        addWorktree: true,
-        worktreeName: "run_test_fail",
-        gitExec: (args) => {
-          if (args[0] === "worktree" && args[1] === "add") throw new Error("injected worktree add failure");
-          return execSync("git " + args.map((a) => `"${a}"`).join(" "), { cwd: repo, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
-        },
+    const beforeEntries = readdirSync(infoDir).filter((e) => e !== "exclude.wao-lock");
+    await assert.rejects(
+      () => prepareAndRunWorktreeAdd(repo, {
+        runWorktreeAdd: () => { throw new Error("injected worktree add failure"); },
       }),
       /worktree add failure|worktree/i,
     );
-    // Pre-call exclude bytes must be restored exactly.
     assert.equal(readExclude(repo), pre, "exclude bytes restored to pre-call state after worktree add failure");
-    // No temp file left.
-    const afterEntries = readdirSync(infoDir);
+    const afterEntries = readdirSync(infoDir).filter((e) => e !== "exclude.wao-lock");
     assert.deepEqual(afterEntries, beforeEntries, "no temp file left after worktree add failure");
-    // No wao-worktrees dir created.
     assert.ok(!existsSync(join(repo, ".wao-worktrees")), "no .wao-worktrees dir created on failure");
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
 // ===== HYGIENE-10: pre-existing exact user rule survives worktree-add failure =====
 
-test("HYGIENE-10: pre-existing exact user rule survives worktree-add failure", () => {
+test("HYGIENE-10: pre-existing exact user rule survives worktree-add failure", async () => {
   const repo = makeTempRepo();
   try {
-    // User already wrote the exact rule themselves.
     const pre = "user-line\n" + WAO_RULE + "\n";
     writeExclude(repo, pre);
-    assert.throws(
-      () => ensureWaoWorktreeExclude(repo, {
-        addWorktree: true,
-        worktreeName: "run_test_fail2",
-        gitExec: (args) => {
-          if (args[0] === "worktree" && args[1] === "add") throw new Error("injected worktree add failure");
-          return execSync("git " + args.map((a) => `"${a}"`).join(" "), { cwd: repo, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
-        },
+    await assert.rejects(
+      () => prepareAndRunWorktreeAdd(repo, {
+        runWorktreeAdd: () => { throw new Error("injected worktree add failure"); },
       }),
       /worktree/i,
     );
@@ -261,7 +233,7 @@ test("HYGIENE-10: pre-existing exact user rule survives worktree-add failure", (
 
 // ===== HYGIENE-11: shared/common Git directory resolution for a linked-worktree layout =====
 
-test("HYGIENE-11: exclude written to the common Git dir for a linked-worktree source layout", () => {
+test("HYGIENE-11: exclude written to the common Git dir for a linked-worktree source layout", async () => {
   // Build a main repo, then create a linked worktree of it; the linked worktree
   // is the "source cwd". The exclude rule must land in the MAIN repo's
   // .git/info/exclude (the common dir), not the linked worktree's per-worktree
@@ -273,7 +245,7 @@ test("HYGIENE-11: exclude written to the common Git dir for a linked-worktree so
     // git worktree add <linkedDir> (detached from the temp dir name collision)
     execSync(`git worktree add "${linkedDir}" -b linked-branch`, { cwd: mainRepo, stdio: "ignore" });
     // Now ensureWaoWorktreeExclude(linkedDir) should write to mainRepo's common dir.
-    const res = ensureWaoWorktreeExclude(linkedDir);
+    const res = await ensureWaoWorktreeExclude(linkedDir);
     assert.equal(res.added, true);
     const mainExclude = join(mainRepo, ".git", "info", "exclude");
     assert.ok(existsSync(mainExclude), "exclude written to the common (main) git dir");
@@ -290,14 +262,14 @@ test("HYGIENE-11: exclude written to the common Git dir for a linked-worktree so
 
 // ===== HYGIENE-12: Codex activation exclude block preserves the independent WAO rule =====
 
-test("HYGIENE-12: WAO worktree rule coexists with the Codex managed exclude block; removing the block preserves the WAO rule", () => {
+test("HYGIENE-12: WAO worktree rule coexists with the Codex managed exclude block; removing the block preserves the WAO rule", async () => {
   // This tests that the WAO rule (a bare root rule) is independent of the
   // Codex marker block (EXCLUDE_MARKER_BEGIN/END). They occupy different lines
   // and neither owns the other.
   const repo = makeTempRepo();
   try {
     // First, WAO hygiene adds its rule.
-    ensureWaoWorktreeExclude(repo);
+    await ensureWaoWorktreeExclude(repo);
     // Then simulate a Codex-managed block being added by the host activation path.
     const codexBlock = [
       "# >>> WAO MANAGED (mcp workspace activation v1) >>>",

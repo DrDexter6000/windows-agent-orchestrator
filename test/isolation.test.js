@@ -68,7 +68,9 @@ test("createWorktree 不同 name 创建不同分支", async () => {
 test("createWorktree 在非 git 仓库抛错", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wao-notgit-"));
   try {
-    assert.throws(
+    // createWorktree is async (M11-1B: runs the exclude transaction under a
+    // cross-process lock). A non-git repo rejects via promise rejection.
+    await assert.rejects(
       () => createWorktree(dir, "wt-fail"),
       /not a git repository|fatal|git/i,
     );

@@ -1887,16 +1887,17 @@ test("3A-SEC-06: createWorktree directly rejects malicious names", async () => {
   const { createWorktree } = await import("../src/isolation.js");
   const { repo } = await makeRepo();
   try {
+    // createWorktree is async (M11-1B); invalid names reject the returned promise.
     // Shell metacharacter
-    assert.throws(() => createWorktree(repo, 'evil"; rm -rf /'));
+    await assert.rejects(() => createWorktree(repo, 'evil"; rm -rf /'));
     // Path traversal
-    assert.throws(() => createWorktree(repo, "evil/../../../etc"));
+    await assert.rejects(() => createWorktree(repo, "evil/../../../etc"));
     // Backslash
-    assert.throws(() => createWorktree(repo, "evil\\path"));
+    await assert.rejects(() => createWorktree(repo, "evil\\path"));
     // Empty
-    assert.throws(() => createWorktree(repo, ""));
+    await assert.rejects(() => createWorktree(repo, ""));
     // Ampersand
-    assert.throws(() => createWorktree(repo, "evil&whoami"));
+    await assert.rejects(() => createWorktree(repo, "evil&whoami"));
   } finally {
     await cleanupDir(repo);
   }
