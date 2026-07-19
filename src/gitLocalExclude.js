@@ -23,14 +23,19 @@
 //   - Never edits the tracked `.gitignore`. Only the repository-local
 //     `.git/info/exclude` (which is not tracked by Git).
 //
-// Lock contract (owner-token, mirrors transcript.js style with safety fixes):
-//   - Each acquirer writes a random owner token. Release only deletes the lock
-//     if the on-disk token still matches — never unlinks a lock a new owner
-//     already acquired.
-//   - Stale recovery never deletes a lock whose owner token is present and
-//     fresh; it only removes locks that are empty/corrupt OR whose token age
-//     exceeds the stale threshold. Empty/corrupt locks additionally require an
-//     mtime older than a small grace window to avoid racing a live writer.
+// Lock contract (owner-token age-based lease; no PID/liveness detection):
+//   - Each acquirer writes a random owner token. The token proves OWNERSHIP
+//     IDENTITY for safe release — it does NOT prove the owner process is still
+//     alive. This is an age-based lease, not a liveness probe.
+//   - Release only deletes the lock if the on-disk token still matches — never
+//     unlinks a lock a new owner already acquired.
+//   - A valid token younger than LOCK_STALE_MS is retained (fresh lease).
+//   - A valid token older than LOCK_STALE_MS is treated as a stale lease and
+//     may be recovered (the owner is assumed to have crashed or hung). There is
+//     no PID probe — age alone governs stale recovery.
+//   - Empty/corrupt locks (no parseable token) are recovered only after an mtime
+//     grace window, to avoid racing a writer between file creation and token
+//     write.
 
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -183,8 +188,9 @@ function tryRestore(excludeFile, snapExists, snapBytes, writeExclude) {
 
 /**
  * Parse a lock file body. Returns { token, ts } or null if not a valid
- * owner-token record (empty/corrupt). The token proves a live owner; absence
- * of a parseable record means the lock is recoverable.
+ * owner-token record (empty/corrupt). The token is an ownership identity
+ * marker for safe release — it does NOT prove the owner process is alive.
+ * Absence of a parseable record means the lock is recoverable.
  */
 function parseLock(raw) {
   if (!raw || raw.length === 0) return null;
@@ -204,12 +210,16 @@ function parseLock(raw) {
  * deletes the lock if THIS owner still owns it (token match). Never unlinks a
  * lock that a new owner has acquired.
  *
- * Stale recovery rules:
- *   - A lock with a valid owner token older than LOCK_STALE_MS is considered
- *     stale (owner crashed) and removed.
+ * Stale recovery rules (age-based lease; no PID/liveness probe):
+ *   - A lock with a valid token younger than LOCK_STALE_MS is a fresh lease:
+ *     retained (not removed). The token identifies ownership for safe release;
+ *     it does NOT prove the owner process is alive.
+ *   - A lock with a valid token older than LOCK_STALE_MS is a stale lease:
+ *     recovered (removed), assuming the owner crashed or hung. Age alone
+ *     governs; there is no PID probe.
  *   - An empty/corrupt lock (no parseable token) is removed only if its mtime
- *     is older than LOCK_CORRUPT_GRACE_MS, to avoid racing a live writer that
- *     has created the file but not yet finished writing the token.
+ *     is older than LOCK_CORRUPT_GRACE_MS, to avoid racing a writer between
+ *     file creation and token write.
  */
 async function acquireExcludeLock(lockPath) {
   const start = Date.now();
@@ -218,11 +228,11 @@ async function acquireExcludeLock(lockPath) {
   while (true) {
     try {
       const handle = await open(lockPath, "wx");
-      await handle.writeFile(JSON.stringify({ token: myToken, ts: Date.now(), pid: process.pid }), "utf8");
+      await handle.writeFile(JSON.stringify({ token: myToken, ts: Date.now() }), "utf8");
       await handle.close().catch(() => {});
       const release = async () => {
-        // Only delete the lock if WE still own it. A new owner that acquired
-        // after we crashed must not be deleted.
+        // Only delete the lock if WE still own it (token match). A new owner
+        // that acquired after we released/crashed must not be deleted.
         try {
           const cur = await readFile(lockPath, "utf8");
           const parsed = parseLock(cur);
@@ -255,15 +265,17 @@ async function maybeRecoverStaleLock(lockPath) {
   }
   const parsed = parseLock(raw);
   if (parsed) {
-    // Valid owner token. Only remove if older than the stale threshold. We do
-    // NOT remove a fresh token — the owner is provably live.
+    // Valid token. A fresh lease (younger than LOCK_STALE_MS) is retained — we
+    // do not remove it. A stale lease (older than LOCK_STALE_MS) is recovered.
+    // The token identifies ownership for safe release; it does NOT prove the
+    // owner is alive. Age alone governs stale recovery (no PID probe).
     if (Date.now() - parsed.ts > LOCK_STALE_MS) {
       await unlink(lockPath).catch(() => {});
     }
     return;
   }
   // Empty or corrupt lock. Require an mtime grace window to avoid racing a
-  // live writer between file creation and token write.
+  // writer between file creation and token write.
   try {
     const st = await stat(lockPath);
     if (Date.now() - st.mtimeMs > LOCK_CORRUPT_GRACE_MS) {

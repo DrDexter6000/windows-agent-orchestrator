@@ -9,7 +9,9 @@
 //   - preserve all pre-existing exclude bytes (BOM, CRLF/LF, user rules)
 //   - treat an existing exact rule as already configured (idempotent, no dup)
 //   - write atomically (temp + rename in same dir), read-back verify
-//   - on git worktree add failure, restore pre-call exclude bytes/absence
+//   - the rule is STABLE: git worktree add failure does NOT roll it back.
+//     Only an exclude-internal failure (write/read-back verify) rolls back to
+//     the locked-time bytes.
 //   - never shell-build Git commands; never edit tracked .gitignore
 //   - import no commands/mcp/SDK/Zod/application/host-adapter modules
 
@@ -188,8 +190,6 @@ test("HYGIENE-08b: exclude write failure (injected) → no rule added, pre bytes
     assert.deepEqual(afterEntries, beforeEntries, "no temp file left in info dir");
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
-
-// ===== HYGIENE-09: injected git worktree add failure restores locked-time exclude bytes + no temp =====
 
 // ===== HYGIENE-09: git worktree add failure does NOT roll back the stable rule =====
 //

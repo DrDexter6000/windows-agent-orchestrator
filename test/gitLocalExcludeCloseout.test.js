@@ -128,56 +128,75 @@ test("B: two real child processes calling createWorktree concurrently both succe
   }
 });
 
-// ===== C. lock ownership =====
+// ===== C. lock ownership (age-based lease; no PID/liveness) =====
 
-test("C-1: release does not delete a lock a new owner acquired", async () => {
-  // Directly exercise the lock primitives by importing the module's internal
-  // acquire. We simulate: owner1 acquires, owner2 (separately) replaces the
-  // lock body with its own token, owner1's release must NOT delete it.
+test("C-1: production release does not delete a lock a new owner acquired (via injected writeExclude)", async () => {
+  // Exercise the REAL production release path (not a hand-written token check).
+  // Inject writeExclude so that, while the production ensureWaoWorktreeExclude
+  // holds the lock (owner1 token), we overwrite the lock body with owner2's
+  // token. When production's finally/release runs, it must see the mismatched
+  // token and NOT delete the lock.
   const repo = makeTempRepo();
   try {
-    const lockPath = excludePath(repo) + ".test-lock";
-    const { open, readFile, unlink, writeFile } = await import("node:fs/promises");
-    // owner1 creates the lock with its token.
-    const h1 = await open(lockPath, "wx");
-    await h1.writeFile(JSON.stringify({ token: "owner1-token", ts: Date.now() }), "utf8");
-    await h1.close();
-    // Simulate owner2 acquiring (replace body with owner2 token).
-    await writeFile(lockPath, JSON.stringify({ token: "owner2-token", ts: Date.now() }), "utf8");
-    // owner1's release logic: only delete if token matches owner1.
-    const cur = await readFile(lockPath, "utf8");
-    const parsed = JSON.parse(cur);
-    if (parsed.token === "owner1-token") { await unlink(lockPath); }
-    // Lock must still exist (owner2 owns it).
-    assert.ok(existsSync(lockPath), "lock survives owner1 release because owner2 owns it");
-    await unlink(lockPath).catch(() => {});
+    const lockPath = excludePath(repo) + ".wao-lock";
+    let hijacked = false;
+    await ensureWaoWorktreeExclude(repo, {
+      writeExclude: (filePath, content) => {
+        // Real write of the exclude file.
+        writeFileSync(filePath, content, "utf8");
+        // While we hold the lock, overwrite the lock body with owner2 token
+        // (simulate a new owner acquiring after a crash). Do this only once.
+        if (!hijacked) {
+          hijacked = true;
+          writeFileSync(lockPath, JSON.stringify({ token: "owner2-hijack", ts: Date.now() }), "utf8");
+        }
+      },
+    });
+    // The lock must STILL exist after production release — owner2 owns it now.
+    assert.ok(existsSync(lockPath), "production release did not delete owner2's lock (token mismatch)");
+    await unlinkSafe(lockPath);
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
-test("C-2: active owner not deleted merely for exceeding stale time when token is fresh", async () => {
-  // A lock with a fresh token (ts within stale threshold) must NOT be removed
-  // by stale recovery, even if we ask. We verify via ensureWaoWorktreeExclude
-  // timing out when a fresh lock blocks it.
+test("C-2: fresh valid lease is retained (not removed) within the acquisition timeout", async () => {
+  // A lock with a fresh valid token (ts within stale threshold) is a fresh
+  // lease: retained. ensureWaoWorktreeExclude must time out because the fresh
+  // lease is not removable, and the lock must survive.
   const repo = makeTempRepo();
   try {
     const lockPath = excludePath(repo) + ".wao-lock";
     const { open } = await import("node:fs/promises");
-    // Plant a FRESH lock owned by someone else.
+    // Plant a FRESH valid-token lock owned by someone else.
     const h = await open(lockPath, "wx");
-    await h.writeFile(JSON.stringify({ token: "other-fresh", ts: Date.now(), pid: 999999 }), "utf8");
+    await h.writeFile(JSON.stringify({ token: "other-fresh", ts: Date.now() }), "utf8");
     await h.close();
-    // ensureWaoWorktreeExclude must time out (the fresh lock is not removable).
-    // Reduce the wait by asserting it rejects within a reasonable bound.
     const start = Date.now();
     await assert.rejects(
       () => ensureWaoWorktreeExclude(repo),
       /Timed out waiting for WAO exclude lock/i,
     );
     const elapsed = Date.now() - start;
-    assert.ok(elapsed >= 9000, `should wait ~lock timeout; elapsed ${elapsed}ms`);
-    // The fresh lock must still exist (not deleted by stale recovery).
-    assert.ok(existsSync(lockPath), "fresh owner lock not deleted by stale recovery");
+    assert.ok(elapsed >= 9000, `should wait ~lock timeout (10s); elapsed ${elapsed}ms`);
+    // The fresh lease must still exist (retained, not removed by stale recovery).
+    assert.ok(existsSync(lockPath), "fresh valid lease retained (not removed)");
     await unlinkSafe(lockPath);
+  } finally { rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("C-2b: valid stale lease (token older than LOCK_STALE_MS) is recovered; rule ensured; no lock residue", async () => {
+  // A lock with a valid token but ts older than 60s is a stale lease: recovered.
+  const repo = makeTempRepo();
+  try {
+    const lockPath = excludePath(repo) + ".wao-lock";
+    // Plant a valid-token lock with an OLD timestamp (stale lease).
+    const staleTs = Date.now() - 120000; // 120s ago, > LOCK_STALE_MS (60s)
+    writeFileSync(lockPath, JSON.stringify({ token: "stale-owner", ts: staleTs }), "utf8");
+    // ensureWaoWorktreeExclude should recover the stale lease and succeed.
+    const r = await ensureWaoWorktreeExclude(repo);
+    assert.ok(r.added || r.alreadyPresent, "recovered from stale lease and ensured rule");
+    assert.equal(countExact(readExclude(repo)), 1, "rule ensured after stale-lease recovery");
+    // No lock residue (the stale lock was removed; the new owner's release cleaned up).
+    assert.ok(!existsSync(lockPath), "no lock residue after stale-lease recovery");
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
@@ -187,15 +206,12 @@ test("C-3: empty/corrupt lock recoverable after grace window; no permanent stuck
     const lockPath = excludePath(repo) + ".wao-lock";
     // Plant a corrupt (non-JSON) lock with an OLD mtime (beyond grace).
     writeFileSync(lockPath, "not-json-garbage");
-    // Backdate mtime by setting it via utimes.
     const oldTime = (Date.now() - 10000) / 1000; // 10s ago, > grace (5s)
     const { utimes } = await import("node:fs/promises");
     await utimes(lockPath, oldTime, oldTime);
-    // ensureWaoWorktreeExclude should recover and succeed.
     const r = await ensureWaoWorktreeExclude(repo);
     assert.ok(r.added || r.alreadyPresent, "recovered from corrupt stale lock and ensured rule");
     assert.equal(countExact(readExclude(repo)), 1, "rule ensured after corrupt-lock recovery");
-    // No lock residue.
     assert.ok(!existsSync(lockPath), "no lock residue after recovery");
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
