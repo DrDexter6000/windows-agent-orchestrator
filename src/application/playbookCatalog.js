@@ -359,7 +359,18 @@ function validatePlaybookSummaryList(list) {
 }
 
 /**
- * Validate a complete PlaybookV1 object against the full contract.
+ * Validate a complete PlaybookV1 object against the full contract AND bind it
+ * to an explicitly expected catalog id.
+ *
+ * M11-2B ID-binding micro-closeout: the caller supplies the id it asked for
+ * (expectedId). The validator proves, in order:
+ *   1. expectedId belongs to the frozen approved closed set (PLAYBOOK_IDS);
+ *   2. the returned object's id === expectedId (no answering A with B);
+ *   3. the full contract holds (via validatePlaybook — min<=max,
+ *      Advisor/Auditor-not-core, strict keys, per-field bounds, 12 KiB).
+ * Only then does it return a deep clone. This closes the trust gap where a
+ * service could return a different approved playbook or an unapproved id and
+ * still cross the adapter boundary.
  *
  * M11-2B CTO closeout SSOT: reuses validatePlaybook (the same function the
  * loader uses at module load) so min<=max, Advisor/Auditor-not-core, strict
@@ -369,11 +380,23 @@ function validatePlaybookSummaryList(list) {
  * its original shape.
  *
  * @param {unknown} pb
- * @returns {object} deep-cloned, fully validated PlaybookV1
- * @throws {PlaybookValidationError} on any structural or semantic violation
+ * @param {string} expectedId — the caller-requested id; must be in PLAYBOOK_IDS
+ * @returns {object} deep-cloned, fully validated PlaybookV1 with pb.id === expectedId
+ * @throws {PlaybookValidationError} on any structural, semantic, or id-binding violation
  */
-function validatePlaybookV1(pb) {
-  validatePlaybook(pb, pb?.id);
+function validatePlaybookV1(pb, expectedId) {
+  // Bind to the caller-requested id BEFORE any other validation. An unapproved
+  // or mismatched id must fail closed here — the returned object must not be
+  // trusted to self-identify. Fixed messages do not echo the offending id.
+  if (typeof expectedId !== "string" || !PLAYBOOK_IDS.includes(expectedId)) {
+    throw new PlaybookValidationError("expectedId must be an approved playbook id");
+  }
+  if (!pb || typeof pb !== "object" || pb.id !== expectedId) {
+    throw new PlaybookValidationError("returned playbook id does not match the requested id");
+  }
+  // Now that the id is bound and approved, run the full structural/semantic
+  // contract. validatePlaybook also re-checks pb.id via isKebabId (defensive).
+  validatePlaybook(pb, expectedId);
   // Deep clone AFTER successful validation. The clone is built from the now-
   // trusted object, so callers receive exactly the validated shape (no extra
   // keys can ride along, because validatePlaybook rejected unknown keys).

@@ -1474,18 +1474,20 @@ export function createWaoMcpServer({
       annotations: PLAYBOOK_TOOL_ANNOTATIONS,
     },
     async ({ id }) => {
-      // M11-2B CTO closeout: the service output is UNTRUSTED. We validate it
-      // through the application-service SSOT (validatePlaybookV1), which
-      // reuses the SAME validatePlaybook the loader uses — so min<=max,
+      // M11-2B CTO closeout + ID-binding micro-closeout: the service output is
+      // UNTRUSTED. We validate it through the application-service SSOT
+      // (validatePlaybookV1), binding it to the REQUESTED id — so the service
+      // cannot answer A with B or return an unapproved id. validatePlaybookV1
+      // reuses the SAME validatePlaybook the loader uses, so min<=max,
       // Advisor/Auditor-not-core, strict keys, per-field bounds, AND the 12 KiB
       // serialized-object bound are enforced identically at load time and here.
       // The payload is built from the VALIDATED deep clone, never the raw
-      // service output. A valid-shaped-but-unknown id (PlaybookNotFoundError)
-      // and any semantic violation (PlaybookValidationError) both collapse to
-      // the fixed error inside this try/catch.
+      // service output. A valid-shaped-but-unknown id (PlaybookNotFoundError),
+      // an id mismatch, and any semantic violation (PlaybookValidationError)
+      // all collapse to the fixed error inside this try/catch.
       try {
         const raw = playbookGetService({ id });
-        const playbook = validatePlaybookV1(raw);
+        const playbook = validatePlaybookV1(raw, id);
         const payload = { playbook };
         PLAYBOOK_GET_OUTPUT.parse(payload);
         return {

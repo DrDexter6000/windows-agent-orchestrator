@@ -25,7 +25,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createWaoMcpServer } from "../src/mcp/server.js";
-import { listLeadPlaybooks, getLeadPlaybook } from "../src/application/playbookCatalog.js";
+import {
+  listLeadPlaybooks,
+  getLeadPlaybook,
+  PLAYBOOK_IDS,
+} from "../src/application/playbookCatalog.js";
 
 // ===== Helpers =====
 
@@ -677,5 +681,127 @@ test("PB-B-CLOSEOUT-F: valid injected summary list and playbook still pass", asy
   } finally {
     await client.close();
     await server.close();
+  }
+});
+
+// =====================================================================
+// M11-2B ID-binding micro-closeout.
+//
+// playbook_get({id:A}) must prove the service returned the playbook whose id
+// is exactly A and A is in the approved closed set. The pre-fix candidate
+// (6bfb86d) validated the returned object against its OWN id, so a service
+// could answer A with B (both approved) or return an unapproved id and still
+// cross the MCP boundary — the Lead would believe it chose A while receiving B.
+// =====================================================================
+
+// ---- Probe G: request A, service returns a different approved playbook B. ----
+// Pre-fix: validatePlaybookV1 used pb.id to self-validate, so B passed and was
+// returned to a caller that asked for A.
+test("PB-B-IDBIND-G: request A but service returns approved B collapses to fixed error", async () => {
+  // Request single-coder-delivery, but inject a service that returns a fully
+  // valid parallel-independent-deliveries. Every field is individually valid;
+  // only the request≠returned id relation is wrong.
+  const returned = getLeadPlaybook({ id: "parallel-independent-deliveries" });
+  const server = createWaoMcpServer({
+    registryPath: "/x", runDir: "/x",
+    getLeadPlaybookFn: () => returned,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({
+      name: "playbook_get", arguments: { id: "single-coder-delivery" },
+    });
+    assert.equal(res.isError, true, "request≠returned id collapses to error");
+    assert.ok(!res.structuredContent, "no structuredContent on error");
+    const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+    assert.equal(text, "playbook_get failed", "fixed error text");
+    // The wrong-id playbook content must not leak.
+    const dumped = JSON.stringify(res);
+    assert.ok(!dumped.includes("parallel-independent-deliveries"),
+      "the mis-returned playbook id must not leak");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+// ---- Probe H: request unapproved, service returns same unapproved id. ----
+// Pre-fix: the returned object's id validated itself, and the approved-set
+// check was not applied at the adapter boundary, so an unapproved id crossed.
+test("PB-B-IDBIND-H: request unapproved id collapses to fixed error, no id leak", async () => {
+  const UNAPPROVED = "valid-but-unapproved";
+  // A complete, structurally valid PlaybookV1 whose only sin is that its id is
+  // not in the approved closed set. Well under 12 KiB.
+  const returned = {
+    id: UNAPPROVED,
+    version: 1,
+    title: "Valid but unapproved",
+    summary: "Structurally valid but the id is not in the approved set.",
+    useWhen: ["One bounded surface"],
+    avoidWhen: ["Not approved"],
+    lanePattern: "single",
+    roles: [{ capability: "coder", importance: "core", min: 1, max: 1 }],
+    phases: [{
+      id: "dispatch",
+      intent: "Dispatch one bounded task.",
+      importance: "core",
+      evidence: ["runId recorded"],
+      adaptations: ["Skip delivery for read-only"],
+    }],
+    completionEvidence: ["Terminal fact"],
+    escalation: {
+      advisor: "Only for one named question.",
+      auditor: "Only for one named risk.",
+    },
+  };
+  const server = createWaoMcpServer({
+    registryPath: "/x", runDir: "/x",
+    getLeadPlaybookFn: () => returned,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({
+      name: "playbook_get", arguments: { id: UNAPPROVED },
+    });
+    assert.equal(res.isError, true, "unapproved id collapses to error");
+    assert.ok(!res.structuredContent, "no structuredContent on error");
+    const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+    assert.equal(text, "playbook_get failed", "fixed error text");
+    // The unapproved id must not leak into the result.
+    const dumped = JSON.stringify(res);
+    assert.ok(!dumped.includes(UNAPPROVED),
+      "the unapproved id must not leak into the result");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+// ---- Probe I (positive guard): each approved id, requested and returned,
+// succeeds with an exact id match and full-content equality. Guards against
+// the fix becoming too aggressive or breaking the normal path.
+test("PB-B-IDBIND-I: each approved id requested==returned succeeds with exact match", async () => {
+  // For each approved id, inject a service that returns the real catalog entry
+  // for THAT id, then request THAT id. All four must succeed.
+  for (const id of PLAYBOOK_IDS) {
+    const returned = getLeadPlaybook({ id });
+    const server = createWaoMcpServer({
+      registryPath: "/x", runDir: "/x",
+      getLeadPlaybookFn: () => returned,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "playbook_get", arguments: { id },
+      });
+      assert.equal(res.isError, undefined, `${id}: valid get is not an error`);
+      assert.equal(res.structuredContent.playbook.id, id,
+        `${id}: returned id matches requested id`);
+      assert.deepEqual(res.structuredContent.playbook, returned,
+        `${id}: full playbook content equals the service output`);
+    } finally {
+      await client.close();
+      await server.close();
+    }
   }
 });
