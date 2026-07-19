@@ -1,24 +1,18 @@
 // src/gitLocalExclude.js
 //
-// M11-1B: Runtime-neutral WAO worktree checkout hygiene (transactional).
+// M11-1B (reframed): Runtime-neutral WAO worktree checkout hygiene.
 //
-// Before `git worktree add` creates <source>/.wao-worktrees/<name>, this helper
-// ensures the repository-local .git/info/exclude contains exactly one effective
-// root rule `/.wao-worktrees/`, so the persistent worktree directory does not
-// pollute the source checkout's ordinary `git status --porcelain` output.
+// `ensureWaoWorktreeExclude` is a SHORT transaction that ensures the
+// repository-local .git/info/exclude contains exactly one effective root rule
+// `/.wao-worktrees/`. The cross-process lock covers ONLY the exclude
+// read/normalize/write/read-back verify. After the lock is released, the
+// caller (src/isolation.js) runs `git worktree add` WITHOUT holding the lock.
 //
-// Transaction contract (M11-1B closeout):
-//   The whole operation (read exclude → prepare/repair rule → optional
-//   `git worktree add` → verify → rollback on failure) runs UNDER a single
-//   cross-process mutex held on a lock file beside the exclude file. This makes
-//   interleaved concurrent success/failure safe: a caller whose own prepare
-//   added the rule, but whose `git worktree add` fails after ANOTHER caller has
-//   created a real worktree, restores the LOCKED-TIME snapshot — which still
-//   contains the rule, because the other caller's success did not remove it.
-//
-//   Rollback always restores the locked-time exclude bytes/absence, never the
-//   pre-this-call bytes. So a failed caller cannot delete a rule that a
-//   concurrently-succeeded caller's worktree depends on.
+// Per CTO reframe (M11-1B round 2): `/.wao-worktrees/` is a STABLE repository-
+// local hygiene rule. It is NOT removed when a worktree is removed, and it is
+// NOT rolled back when `git worktree add` fails. Folding worktree-add into the
+// exclude transaction was an over-design that produced a long lock and
+// fragile re-ensure branches; it is removed.
 //
 // Architectural contract:
 //   - Runtime-neutral: no Codex/OpenCode/MCP host dependency.
@@ -29,30 +23,36 @@
 //   - Never edits the tracked `.gitignore`. Only the repository-local
 //     `.git/info/exclude` (which is not tracked by Git).
 //
-// Worktree authority:
-//   `ensureWaoWorktreeExclude` does NOT validate the worktree name for path/
-//   ref safety — that stays in src/isolation.js (the worktree authority). The
-//   helper only owns the exclude hygiene rule. `prepareAndRunWorktreeAdd` is the
-//   callback form: isolation.js acquires the lock, then calls git worktree add
-//   itself, inside the locked section.
+// Lock contract (owner-token, mirrors transcript.js style with safety fixes):
+//   - Each acquirer writes a random owner token. Release only deletes the lock
+//     if the on-disk token still matches — never unlinks a lock a new owner
+//     already acquired.
+//   - Stale recovery never deletes a lock whose owner token is present and
+//     fresh; it only removes locks that are empty/corrupt OR whose token age
+//     exceeds the stale threshold. Empty/corrupt locks additionally require an
+//     mtime older than a small grace window to avoid racing a live writer.
 
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
-  existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync,
+  existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync, statSync,
 } from "node:fs";
-import { open, unlink, readFile } from "node:fs/promises";
+import { open, unlink, readFile, stat } from "node:fs/promises";
 import { join, resolve, isAbsolute, dirname } from "node:path";
 
 /** The single exact root rule WAO owns in .git/info/exclude. */
 export const WAO_WORKTREE_EXCLUDE_RULE = "/.wao-worktrees/";
 
-const LOCK_TIMEOUT_MS = 10000;
-const LOCK_STALE_MS = 60000;
+const LOCK_TIMEOUT_MS = 10000;   // how long to wait to acquire the lock
+const LOCK_STALE_MS = 60000;     // a token older than this is considered stale
+const LOCK_CORRUPT_GRACE_MS = 5000; // empty/corrupt lock must sit this long before recovery
+
+// ── Git dir resolution ───────────────────────────────────────────────────────
 
 /**
  * Resolve the repository's effective shared/common Git directory for a source
- * checkout path. Uses `--git-common-dir` so linked-worktree sources land the
- * rule in the shared common dir.
+ * checkout. Uses `--git-common-dir` so linked-worktree sources land the rule
+ * in the shared common dir (where info/exclude is read for all linked worktrees).
  *
  * @param {string} sourceCwd
  * @param {Function} [gitExec] - injectable (args, opts) => stdout string
@@ -66,21 +66,18 @@ export function resolveCommonGitDir(sourceCwd, gitExec) {
   return raw;
 }
 
-/**
- * Detect newline convention. CRLF if present, else LF.
- */
+// ── Pure byte helpers ────────────────────────────────────────────────────────
+
 function detectNewline(content) {
   return content.includes("\r\n") ? "\r\n" : "\n";
 }
 
 /**
- * Count lines that are exactly the rule (no whitespace/comment). A rule on the
- * first line preceded by a UTF-8 BOM still counts (the BOM is an encoding
- * marker, not part of the rule text).
+ * Count lines that are exactly the rule. A rule on the first line preceded by
+ * a UTF-8 BOM counts (the BOM is an encoding marker, not part of the rule).
  */
 export function countExactRule(content, rule = WAO_WORKTREE_EXCLUDE_RULE) {
   if (!content) return 0;
-  // Strip a leading BOM so a rule at the very first position (BOM + rule) counts.
   const stripped = content.startsWith("\uFEFF") ? content.slice(1) : content;
   return stripped.split(/\r?\n/).filter((l) => l === rule).length;
 }
@@ -115,120 +112,56 @@ function defaultReadExclude(filePath) {
   return readFileSync(filePath, "utf8");
 }
 
-// ── Cross-process lock (mirrors src/transcript.js style) ─────────────────────
-
-async function acquireExcludeLock(lockPath) {
-  const start = Date.now();
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    try {
-      const handle = await open(lockPath, "wx");
-      await handle.writeFile(JSON.stringify({ pid: process.pid, ts: Date.now() }), "utf8");
-      return async () => {
-        await handle.close().catch(() => {});
-        await unlink(lockPath).catch(() => {});
-      };
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-      await removeStaleLock(lockPath);
-      if (Date.now() - start > LOCK_TIMEOUT_MS) {
-        throw new Error(`Timed out waiting for WAO exclude lock: ${lockPath}`);
-      }
-      await sleep(5);
-    }
-  }
-}
-
-async function removeStaleLock(lockPath) {
-  try {
-    const raw = await readFile(lockPath, "utf8");
-    const data = JSON.parse(raw);
-    if (Date.now() - Number(data.ts) > LOCK_STALE_MS) {
-      await unlink(lockPath).catch(() => {});
-    }
-  } catch {
-    // unreadable → let the timeout path decide
-  }
-}
-
-function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-
-// ── Rule preparation (pure byte operations) ──────────────────────────────────
-
 /**
- * Compute the new exclude content that converges the WAO rule to exactly one
- * occurrence while preserving every non-WAO line byte-for-byte.
- *
- * Rules:
- *   - Pre-existing exact rule(s): collapse to exactly ONE, keeping the position
- *     of the FIRST occurrence; remove only subsequent exact-rule lines.
- *   - No exact rule: append one, preserving BOM/CRLF/LF/no-trailing-newline.
- *   - Never touches comment lines, similar-but-not-exact patterns, or user
- *     lines other than removing subsequent duplicate exact-rule lines.
+ * Compute new exclude content that converges the WAO rule to exactly one
+ * occurrence while preserving every non-WAO line byte-for-byte (BOM, CRLF/LF,
+ * user rules, comment lines). Keeps the first exact-rule occurrence; drops
+ * subsequent duplicate exact-rule lines. Appends one rule if none exists.
  *
  * @param {string} content - current exclude content (may be null/empty)
- * @returns {{ content: string, mutated: boolean, rulePresentAfter: boolean }}
+ * @returns {{ content: string, mutated: boolean }}
  */
 function prepareExcludedContent(content) {
   const rule = WAO_WORKTREE_EXCLUDE_RULE;
   const hadContent = content && content.length > 0;
 
   if (!hadContent) {
-    // No existing content → just the rule + newline.
-    const nl = "\n";
-    return { content: rule + nl, mutated: true, rulePresentAfter: true };
+    return { content: rule + "\n", mutated: true };
   }
 
   const nl = detectNewline(content);
-  // Split keeping line endings so we preserve CRLF exactly.
-  const lines = content.split(/(\r?\n)/); // alternating: line, sep, line, sep, ...
-  // Rebuild non-rule lines, keeping the first exact-rule occurrence.
+  const lines = content.split(/(\r?\n)/); // [line, sep, line, sep, ...]
   let seenRule = false;
   const out = [];
   let removedDup = false;
-  // A BOM may prefix the very first line text; treat a BOM-prefixed rule line
-  // as the exact rule (the BOM is an encoding marker, not rule text).
   const stripBom = (s) => (s.startsWith("\uFEFF") ? s.slice(1) : s);
   for (let i = 0; i < lines.length; i += 1) {
     const seg = lines[i];
-    // A "line text" segment is at even index (separators at odd indices).
     const isLineText = (i % 2 === 0);
     if (isLineText && stripBom(seg) === rule) {
       if (!seenRule) {
         seenRule = true;
         out.push(seg); // keep first occurrence (preserve any BOM prefix)
       } else {
-        removedDup = true; // drop subsequent exact-rule line (and its separator below)
-        // Also drop the following separator segment if present.
-        if (i + 1 < lines.length && /^\r?\n$/.test(lines[i + 1])) {
-          i += 1; // skip separator
-        }
+        removedDup = true;
+        if (i + 1 < lines.length && /^\r?\n$/.test(lines[i + 1])) i += 1; // drop separator too
       }
     } else {
       out.push(seg);
     }
   }
   let newContent = out.join("");
+  if (seenRule) return { content: newContent, mutated: removedDup };
 
-  if (seenRule) {
-    // Rule already present (possibly collapsed from duplicates).
-    return { content: newContent, mutated: removedDup, rulePresentAfter: true };
-  }
-
-  // No exact rule present → append. Preserve BOM at start; add separator if
-  // the body does not end with a newline.
+  // No exact rule → append, preserving BOM at start.
   const bom = content.startsWith("\uFEFF") ? "\uFEFF" : "";
   const body = bom ? content.slice(1) : content;
   const needsSep = body.length > 0 && !body.endsWith("\n") && !body.endsWith("\r\n");
   const sep = needsSep ? nl : "";
   newContent = bom + body + sep + rule + nl;
-  return { content: newContent, mutated: true, rulePresentAfter: true };
+  return { content: newContent, mutated: true };
 }
 
-/**
- * Restore exclude to a snapshot. Only ENOENT on delete is swallowed.
- * Throws on restore failure so callers can surface cleanup failure.
- */
 function restoreSnapshot(excludeFile, snapExists, snapBytes, writeExclude) {
   if (!snapExists) {
     try { unlinkSync(excludeFile); } catch (err) { if (err.code !== "ENOENT") throw err; }
@@ -237,10 +170,6 @@ function restoreSnapshot(excludeFile, snapExists, snapBytes, writeExclude) {
   writeExclude(excludeFile, snapBytes.toString("utf8"));
 }
 
-/**
- * Best-effort restore that captures (not throws) the error, for use in failure
- * paths where the original error must be surfaced. Returns null on success.
- */
 function tryRestore(excludeFile, snapExists, snapBytes, writeExclude) {
   try {
     restoreSnapshot(excludeFile, snapExists, snapBytes, writeExclude);
@@ -250,20 +179,123 @@ function tryRestore(excludeFile, snapExists, snapBytes, writeExclude) {
   }
 }
 
+// ── Owner-token cross-process lock ───────────────────────────────────────────
+
+/**
+ * Parse a lock file body. Returns { token, ts } or null if not a valid
+ * owner-token record (empty/corrupt). The token proves a live owner; absence
+ * of a parseable record means the lock is recoverable.
+ */
+function parseLock(raw) {
+  if (!raw || raw.length === 0) return null;
+  try {
+    const data = JSON.parse(raw);
+    if (typeof data.token === "string" && data.token.length > 0 && typeof data.ts === "number") {
+      return { token: data.token, ts: data.ts };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Acquire the cross-process lock. Returns { release } where release only
+ * deletes the lock if THIS owner still owns it (token match). Never unlinks a
+ * lock that a new owner has acquired.
+ *
+ * Stale recovery rules:
+ *   - A lock with a valid owner token older than LOCK_STALE_MS is considered
+ *     stale (owner crashed) and removed.
+ *   - An empty/corrupt lock (no parseable token) is removed only if its mtime
+ *     is older than LOCK_CORRUPT_GRACE_MS, to avoid racing a live writer that
+ *     has created the file but not yet finished writing the token.
+ */
+async function acquireExcludeLock(lockPath) {
+  const start = Date.now();
+  const myToken = randomBytes(16).toString("hex");
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      const handle = await open(lockPath, "wx");
+      await handle.writeFile(JSON.stringify({ token: myToken, ts: Date.now(), pid: process.pid }), "utf8");
+      await handle.close().catch(() => {});
+      const release = async () => {
+        // Only delete the lock if WE still own it. A new owner that acquired
+        // after we crashed must not be deleted.
+        try {
+          const cur = await readFile(lockPath, "utf8");
+          const parsed = parseLock(cur);
+          if (parsed && parsed.token === myToken) {
+            await unlink(lockPath).catch(() => {});
+          }
+          // If the token differs or the lock is gone, another owner has it — leave it.
+        } catch {
+          // Lock already gone — nothing to release.
+        }
+      };
+      return release;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      await maybeRecoverStaleLock(lockPath);
+      if (Date.now() - start > LOCK_TIMEOUT_MS) {
+        throw new Error(`Timed out waiting for WAO exclude lock: ${lockPath}`);
+      }
+      await sleep(5);
+    }
+  }
+}
+
+async function maybeRecoverStaleLock(lockPath) {
+  let raw;
+  try {
+    raw = await readFile(lockPath, "utf8");
+  } catch {
+    return; // unreadable / gone — let the normal acquire path retry
+  }
+  const parsed = parseLock(raw);
+  if (parsed) {
+    // Valid owner token. Only remove if older than the stale threshold. We do
+    // NOT remove a fresh token — the owner is provably live.
+    if (Date.now() - parsed.ts > LOCK_STALE_MS) {
+      await unlink(lockPath).catch(() => {});
+    }
+    return;
+  }
+  // Empty or corrupt lock. Require an mtime grace window to avoid racing a
+  // live writer between file creation and token write.
+  try {
+    const st = await stat(lockPath);
+    if (Date.now() - st.mtimeMs > LOCK_CORRUPT_GRACE_MS) {
+      await unlink(lockPath).catch(() => {});
+    }
+  } catch {
+    // stat failed — let acquire retry
+  }
+}
+
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+// ── Public API ───────────────────────────────────────────────────────────────
+
 /**
  * Ensure the repository-local exclude contains exactly one WAO worktree rule.
- * Prepare-only (no `git worktree add`). Runs under a cross-process lock; on any
- * read-back/verify failure, restores the locked-time exclude bytes/absence.
+ * SHORT transaction: acquires the cross-process lock, reads the current
+ * exclude, normalizes it (exact-one convergence), writes atomically, read-back
+ * verifies, releases the lock. On any read/write/verify failure, restores the
+ * locked-time bytes/absence and surfaces the error (original + cleanup if
+ * restore also fails).
+ *
+ * This does NOT run `git worktree add`. The caller runs that AFTER this
+ * returns, without holding the exclude lock. The rule is STABLE: a failed
+ * `git worktree add` does NOT roll it back.
  *
  * @param {string} sourceCwd
  * @param {object} [opts]
  * @param {Function} [opts.gitExec]
  * @param {Function} [opts.writeExclude] - (filePath, content) => void
  * @param {Function} [opts.readExclude] - (filePath) => string|null
- * @returns {Promise<{added: boolean, alreadyPresent: boolean, repaired: boolean}>}
- *   added: this call appended a new rule (none existed before).
- *   repaired: this call collapsed duplicates to exactly one (or otherwise mutated).
- *   alreadyPresent: rule was already exactly-one before this call.
+ * @returns {Promise<{added: boolean, repaired: boolean, alreadyPresent: boolean}>}
  */
 export async function ensureWaoWorktreeExclude(sourceCwd, opts = {}) {
   const {
@@ -278,7 +310,7 @@ export async function ensureWaoWorktreeExclude(sourceCwd, opts = {}) {
 
   const release = await acquireExcludeLock(lockPath);
   try {
-    // Snapshot the LOCKED-TIME state (this is the rollback target, NOT pre-call).
+    // Snapshot the LOCKED-TIME state (rollback target for exclude-internal failures).
     const snapExists = existsSync(excludeFile);
     const snapBytes = snapExists ? readFileSync(excludeFile) : null;
     const currentContent = snapExists ? snapBytes.toString("utf8") : "";
@@ -290,7 +322,6 @@ export async function ensureWaoWorktreeExclude(sourceCwd, opts = {}) {
       try {
         writeExclude(excludeFile, prepared.content);
       } catch (writeErr) {
-        // Restore locked-time bytes (the pre-mutation state under this lock).
         const restoreErr = tryRestore(excludeFile, snapExists, snapBytes, writeExclude);
         if (restoreErr) {
           throw new Error(
@@ -299,7 +330,6 @@ export async function ensureWaoWorktreeExclude(sourceCwd, opts = {}) {
         }
         throw new Error(`exclude write failure: ${writeErr.message}`);
       }
-      // Read-back verify (this is the verify boundary — injected throw covered here).
       let verifyContent;
       try {
         verifyContent = readExclude(excludeFile);
@@ -321,147 +351,12 @@ export async function ensureWaoWorktreeExclude(sourceCwd, opts = {}) {
         }
         throw new Error("exclude verify failed: rule not present exactly once after write");
       }
-      // For a repair (was already present), verifyContent is acceptable as long
-      // as exactly-one. We do NOT require pre-existing-bytes-prefix when we
-      // collapsed duplicates (the bytes legitimately changed).
     }
 
     return {
       added: !wasPresent && prepared.mutated,
       repaired: wasPresent && prepared.mutated,
       alreadyPresent: wasPresent && !prepared.mutated,
-    };
-  } finally {
-    await release();
-  }
-}
-
-/**
- * Transactional form used by src/isolation.js: acquire the cross-process lock,
- * prepare the exclude rule, run the caller's `git worktree add` callback INSIDE
- * the locked section, and on any failure (prepare or add) restore the
- * locked-time exclude bytes/absence.
- *
- * isolation.js retains worktree authority (name validation, branch naming); the
- * helper only owns the exclude hygiene transaction.
- *
- * @param {string} sourceCwd
- * @param {object} opts
- * @param {Function} opts.runWorktreeAdd - () => void; called inside the lock after exclude prep.
- *   Must throw on failure; the helper handles exclude rollback.
- * @param {Function} [opts.gitExec]
- * @param {Function} [opts.writeExclude]
- * @param {Function} [opts.readExclude]
- * @returns {Promise<{added: boolean, repaired: boolean, alreadyPresent: boolean}>}
- */
-export async function prepareAndRunWorktreeAdd(sourceCwd, opts) {
-  const {
-    runWorktreeAdd,
-    gitExec,
-    writeExclude = defaultWriteExclude,
-    readExclude = defaultReadExclude,
-  } = opts;
-  if (typeof runWorktreeAdd !== "function") {
-    throw new Error("prepareAndRunWorktreeAdd: runWorktreeAdd callback required");
-  }
-  const git = gitExec ?? defaultGitExec;
-  const commonDir = resolveCommonGitDir(sourceCwd, git);
-  const excludeFile = join(commonDir, "info", "exclude");
-  const lockPath = `${excludeFile}.wao-lock`;
-
-  const release = await acquireExcludeLock(lockPath);
-  try {
-    const snapExists = existsSync(excludeFile);
-    const snapBytes = snapExists ? readFileSync(excludeFile) : null;
-    const currentContent = snapExists ? snapBytes.toString("utf8") : "";
-
-    const wasPresent = countExactRule(currentContent) >= 1;
-    const prepared = prepareExcludedContent(currentContent);
-    let didMutateExclude = false;
-
-    if (prepared.mutated) {
-      try {
-        writeExclude(excludeFile, prepared.content);
-      } catch (writeErr) {
-        const restoreErr = tryRestore(excludeFile, snapExists, snapBytes, writeExclude);
-        if (restoreErr) {
-          throw new Error(
-            `exclude write failure: ${writeErr.message} — AND restore failed: ${restoreErr.message} (manual cleanup required)`,
-          );
-        }
-        throw new Error(`exclude write failure: ${writeErr.message}`);
-      }
-      let verifyContent;
-      try {
-        verifyContent = readExclude(excludeFile);
-      } catch (readErr) {
-        const restoreErr = tryRestore(excludeFile, snapExists, snapBytes, writeExclude);
-        if (restoreErr) {
-          throw new Error(
-            `exclude read-back failure: ${readErr.message} — AND restore failed: ${restoreErr.message} (manual cleanup required)`,
-          );
-        }
-        throw new Error(`exclude read-back failure: ${readErr.message}`);
-      }
-      if (verifyContent === null || countExactRule(verifyContent) !== 1) {
-        const restoreErr = tryRestore(excludeFile, snapExists, snapBytes, writeExclude);
-        if (restoreErr) {
-          throw new Error(
-            `exclude verify failed: rule not exactly one — AND restore failed: ${restoreErr.message} (manual cleanup required)`,
-          );
-        }
-        throw new Error("exclude verify failed: rule not present exactly once after write");
-      }
-      didMutateExclude = true;
-    }
-
-    // Run git worktree add INSIDE the lock. On failure, restore locked-time bytes.
-    try {
-      runWorktreeAdd();
-    } catch (addError) {
-      // Restore the LOCKED-TIME snapshot (not pre-this-call bytes). This is the
-      // key fix for P1-A: if another caller created a real worktree that needs
-      // the rule (the rule was added under this lock before the add), restoring
-      // locked-time bytes would drop the rule and re-pollute source git status.
-      //
-      // Spec §4.3: the WAO rule is a STABLE repository-local hygiene rule. It is
-      // not tied to a single worktree's lifetime. So on worktree-add failure we
-      // restore locked-time bytes — UNLESS a real .wao-worktrees/ worktree now
-      // exists, in which case the rule must be re-ensured (kept) so that
-      // worktree's source git status stays clean.
-      if (didMutateExclude) {
-        const restoreErr = tryRestore(excludeFile, snapExists, snapBytes, writeExclude);
-        if (restoreErr) {
-          throw new Error(
-            `git worktree add failure: ${addError.message} — AND exclude restore failed: ${restoreErr.message} (manual cleanup required)`,
-          );
-        }
-        // Re-ensure the rule if a real worktree now exists under .wao-worktrees/
-        // (e.g. the callback created B's worktree before failing A's add). The
-        // rule is stable hygiene and must protect any existing worktree dir.
-        const sourceResolved = resolve(sourceCwd);
-        const waoWtDir = join(sourceResolved, ".wao-worktrees");
-        if (existsSync(waoWtDir)) {
-          try {
-            const cur = readExclude(excludeFile) ?? "";
-            if (countExactRule(cur) < 1) {
-              const rePrepared = prepareExcludedContent(cur);
-              if (rePrepared.mutated) {
-                writeExclude(excludeFile, rePrepared.content);
-              }
-            }
-          } catch {
-            // best-effort; the original addError is the primary signal
-          }
-        }
-      }
-      throw new Error(`git worktree add failure: ${addError.message}`);
-    }
-
-    return {
-      added: !wasPresent && didMutateExclude,
-      repaired: wasPresent && didMutateExclude,
-      alreadyPresent: wasPresent && !didMutateExclude,
     };
   } finally {
     await release();

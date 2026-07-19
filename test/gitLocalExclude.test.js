@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 
-import { ensureWaoWorktreeExclude, prepareAndRunWorktreeAdd } from "../src/gitLocalExclude.js";
+import { ensureWaoWorktreeExclude } from "../src/gitLocalExclude.js";
 
 const WAO_RULE = "/.wao-worktrees/";
 
@@ -191,43 +191,63 @@ test("HYGIENE-08b: exclude write failure (injected) → no rule added, pre bytes
 
 // ===== HYGIENE-09: injected git worktree add failure restores locked-time exclude bytes + no temp =====
 
-test("HYGIENE-09: injected runWorktreeAdd failure restores pre-call exclude bytes and leaves no temp file", async () => {
+// ===== HYGIENE-09: git worktree add failure does NOT roll back the stable rule =====
+//
+// M11-1B reframe: the exclude rule is STABLE. createWorktree runs
+// ensureWaoWorktreeExclude (short lock) and THEN `git worktree add` without
+// holding the exclude lock. A worktree-add failure propagates but the rule
+// stays exactly one — it is NOT rolled back.
+
+test("HYGIENE-09: createWorktree with a failed git worktree add keeps the stable rule exactly one", async () => {
+  const { createWorktree } = await import("../src/isolation.js");
   const repo = makeTempRepo();
   try {
     const pre = "user-pre-rule\n";
     writeExclude(repo, pre);
     const infoDir = join(repo, ".git", "info");
     const beforeEntries = readdirSync(infoDir).filter((e) => e !== "exclude.wao-lock");
+    // Force `git worktree add` to fail by pre-creating the worktree path with a blocker.
+    const { mkdirSync } = await import("node:fs");
+    const wtDir = join(repo, ".wao-worktrees", "run_h9_fail");
+    mkdirSync(wtDir, { recursive: true });
+    writeFileSync(join(wtDir, "blocker"), "x");
+
     await assert.rejects(
-      () => prepareAndRunWorktreeAdd(repo, {
-        runWorktreeAdd: () => { throw new Error("injected worktree add failure"); },
-      }),
-      /worktree add failure|worktree/i,
+      () => createWorktree(repo, "run_h9_fail"),
+      /already exists|worktree|fatal/i,
     );
-    assert.equal(readExclude(repo), pre, "exclude bytes restored to pre-call state after worktree add failure");
-    const afterEntries = readdirSync(infoDir).filter((e) => e !== "exclude.wao-lock");
-    assert.deepEqual(afterEntries, beforeEntries, "no temp file left after worktree add failure");
-    assert.ok(!existsSync(join(repo, ".wao-worktrees")), "no .wao-worktrees dir created on failure");
+    // The stable rule must still be exactly one (NOT rolled back).
+    const after = readExclude(repo);
+    assert.equal(countExactRules(after), 1, "stable rule stays exactly one after worktree add failure");
+    assert.ok(after.startsWith(pre), "pre-existing user bytes preserved");
+    // No lock residue.
+    assert.deepEqual(
+      readdirSync(infoDir).filter((e) => e !== "exclude.wao-lock"),
+      beforeEntries,
+      "no temp/lock file left after worktree add failure",
+    );
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 
 // ===== HYGIENE-10: pre-existing exact user rule survives worktree-add failure =====
 
-test("HYGIENE-10: pre-existing exact user rule survives worktree-add failure", async () => {
+test("HYGIENE-10: pre-existing exact user rule survives worktree-add failure (stable, not rolled back)", async () => {
+  const { createWorktree } = await import("../src/isolation.js");
   const repo = makeTempRepo();
   try {
     const pre = "user-line\n" + WAO_RULE + "\n";
     writeExclude(repo, pre);
+    const { mkdirSync } = await import("node:fs");
+    const wtDir = join(repo, ".wao-worktrees", "run_h10_fail");
+    mkdirSync(wtDir, { recursive: true });
+    writeFileSync(join(wtDir, "blocker"), "x");
+
     await assert.rejects(
-      () => prepareAndRunWorktreeAdd(repo, {
-        runWorktreeAdd: () => { throw new Error("injected worktree add failure"); },
-      }),
-      /worktree/i,
+      () => createWorktree(repo, "run_h10_fail"),
+      /already exists|worktree|fatal/i,
     );
-    // The exact rule must still be present exactly once (restored to pre-call bytes).
     const after = readExclude(repo);
-    assert.equal(after, pre, "pre-call bytes (incl. user's exact rule) restored");
-    assert.equal(countExactRules(after), 1, "exact rule still present exactly once");
+    assert.equal(countExactRules(after), 1, "exact rule still present exactly once (stable)");
   } finally { rmSync(repo, { recursive: true, force: true }); }
 });
 

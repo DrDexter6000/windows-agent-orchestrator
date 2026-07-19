@@ -2,7 +2,7 @@ import { execSync, execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { existsSync, rmSync } from "node:fs";
 import { isValidRunId } from "./delivery.js";
-import { prepareAndRunWorktreeAdd } from "./gitLocalExclude.js";
+import { ensureWaoWorktreeExclude } from "./gitLocalExclude.js";
 
 /**
  * Worktree 隔离能力层（M3-1）。
@@ -13,12 +13,14 @@ import { prepareAndRunWorktreeAdd } from "./gitLocalExclude.js";
  * worktree 放在 <sourceCwd>/.wao-worktrees/<name>。
  * 用 execFileSync 调 git（结构化参数，不拼 shell 字符串）。
  *
- * M11-1B：createWorktree 通过 prepareAndRunWorktreeAdd 在仓库本地
- * `.git/info/exclude` 的事务性跨进程锁内完成「确保 /.wao-worktrees/ 规则
- * 恰好一条 → git worktree add → 失败回滚」。事务设计保证并发派发时一个
- * 失败调用不会删除另一成功调用 worktree 依赖的规则。Worktree 名称安全
- * 校验由 isolation.js 保有（worktree authority），exclude 规则只归
- * gitLocalExclude.js 拥有。
+ * M11-1B (reframed)：createWorktree 流程为短事务设计——
+ *   1. 校验 runId / repo（worktree authority 由 isolation.js 保有）；
+ *   2. await ensureWaoWorktreeExclude(cwd)：在 exclude 专用跨进程锁内
+ *      完成 read/normalize/atomic-write/read-back verify，锁立即释放；
+ *   3. 锁释放后才执行 `git worktree add`（不持 exclude 锁）。
+ * `/.wao-worktrees/` 是稳定 repository-local hygiene rule（spec §4.3）：
+ * worktree 删除后仍保留；`git worktree add` 失败时不回滚该规则——规则
+ * 只在 exclude ensure 自身失败时回滚到 locked-time bytes。
  */
 
 /**
@@ -35,20 +37,17 @@ export async function createWorktree(sourceCwd, name) {
   if (!isGitRepo(cwd)) {
     throw new Error(`${cwd} is not a git repository (worktree requires git)`);
   }
+  // 1. Ensure the stable exclude rule under the short exclude lock, then
+  //    release the lock. The rule is NOT rolled back if step 2 fails.
+  await ensureWaoWorktreeExclude(cwd);
+  // 2. git worktree add WITHOUT holding the exclude lock. structured args —
+  //    no shell-built command string.
   const wtPath = join(cwd, ".wao-worktrees", name);
   const branch = `wao/${name}`;
-  // Run the exclude-prep + worktree-add under one cross-process transaction.
-  // isolation.js owns the worktree-name safety check (above) and the branch
-  // naming; the helper owns the exclude hygiene transaction.
-  await prepareAndRunWorktreeAdd(cwd, {
-    runWorktreeAdd: () => {
-      // execFileSync with structured args — no shell-built command string.
-      execFileSync("git", ["worktree", "add", wtPath, "-b", branch], {
-        cwd,
-        stdio: "pipe",
-        windowsHide: true,
-      });
-    },
+  execFileSync("git", ["worktree", "add", wtPath, "-b", branch], {
+    cwd,
+    stdio: "pipe",
+    windowsHide: true,
   });
   return { path: wtPath, branch };
 }
