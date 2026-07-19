@@ -49,12 +49,18 @@ export class PlaybookValidationError extends Error {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const PLAYBOOK_IDS = [
+// Frozen approved-ID contract: the loader enforces exactly this set on disk,
+// and the MCP/CLI adapters reuse the SAME contract to validate injected service
+// output. M11-2B CTO closeout: a single SSOT, never a second hand-maintained
+// list in the adapter layer.
+const PLAYBOOK_IDS = Object.freeze([
   "single-coder-delivery",
   "parallel-independent-deliveries",
   "investigate-then-implement",
   "read-only-independent-review",
-];
+]);
+
+const SUMMARY_KEYS = Object.freeze(["id", "version", "title", "summary", "lanePattern"]);
 
 const VALID_CAPABILITIES = new Set(["coder", "researcher", "tester", "advisor", "auditor"]);
 const VALID_IMPORTANCE = new Set(["core", "conditional"]);
@@ -273,6 +279,113 @@ function loadAndValidateCatalog() {
 const _catalog = loadAndValidateCatalog();
 
 // ── Public API ───────────────────────────────────────────────────────────────
+
+/**
+ * Validate one PlaybookV1 summary entry against the strict summary contract.
+ *
+ * M11-2B CTO closeout SSOT: the MCP/CLI adapters call this on injected service
+ * output so that an unknown field (e.g. a leaked secret) or an off-contract
+ * scalar collapses to a typed error before crossing the adapter boundary. The
+ * strict five-key set and approved-id closed set are enforced HERE, not in a
+ * second hand-maintained list.
+ *
+ * @param {unknown} entry
+ * @returns {{id:string,version:number,title:string,summary:string,lanePattern:string}}
+ *   a clean copy with exactly the five approved keys — never the input reference
+ * @throws {PlaybookValidationError} on any structural violation or non-approved id
+ */
+function validatePlaybookSummaryEntry(entry) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    throw new PlaybookValidationError("summary entry must be a plain object");
+  }
+  checkNoUnknownKeys(entry, new Set(SUMMARY_KEYS), "summary entry");
+  if (!isKebabId(entry.id)) {
+    throw new PlaybookValidationError("summary entry.id must be lowercase kebab-case (1..64 chars)");
+  }
+  // Approved-id closed set: a valid-shaped but unknown id is rejected here.
+  // This is the SSOT the loader relies on for exact-set matching.
+  if (!PLAYBOOK_IDS.includes(entry.id)) {
+    throw new PlaybookValidationError(`summary entry.id '${entry.id}' is not an approved playbook id`);
+  }
+  if (entry.version !== 1) {
+    throw new PlaybookValidationError("summary entry.version must be exactly 1");
+  }
+  if (!isNonEmptyString(entry.title, MAX_TITLE_LEN)) {
+    throw new PlaybookValidationError(`summary entry.title must be 1..${MAX_TITLE_LEN} chars`);
+  }
+  if (!isNonEmptyString(entry.summary)) {
+    throw new PlaybookValidationError(`summary entry.summary must be 1..${MAX_STRING_LEN} chars`);
+  }
+  if (!VALID_LANE_PATTERNS.has(entry.lanePattern)) {
+    throw new PlaybookValidationError("summary entry.lanePattern must be one of "
+      + [...VALID_LANE_PATTERNS].join("|"));
+  }
+  // Return a clean copy with exactly the five approved keys — never the input
+  // reference, so an extra field on the input cannot slip through.
+  return {
+    id: entry.id,
+    version: entry.version,
+    title: entry.title,
+    summary: entry.summary,
+    lanePattern: entry.lanePattern,
+  };
+}
+
+/**
+ * Validate a complete summary list: EXACTLY the four approved ids in the stable
+ * order. Returns a clean array of validated summary entries.
+ *
+ * @param {unknown} list
+ * @returns {Array<object>} clean validated summaries, stable order
+ * @throws {PlaybookValidationError} on count mismatch, id-set mismatch, order
+ *   mismatch, or any malformed entry
+ */
+function validatePlaybookSummaryList(list) {
+  if (!Array.isArray(list) || list.length !== PLAYBOOK_IDS.length) {
+    throw new PlaybookValidationError(
+      `summary list must contain exactly ${PLAYBOOK_IDS.length} entries`,
+    );
+  }
+  const validated = list.map(validatePlaybookSummaryEntry);
+  // Exact-set + stable-order match against the approved contract.
+  for (let i = 0; i < PLAYBOOK_IDS.length; i += 1) {
+    if (validated[i].id !== PLAYBOOK_IDS[i]) {
+      throw new PlaybookValidationError(
+        `summary list id at position ${i} is '${validated[i].id}', expected '${PLAYBOOK_IDS[i]}'`,
+      );
+    }
+  }
+  return validated;
+}
+
+/**
+ * Validate a complete PlaybookV1 object against the full contract.
+ *
+ * M11-2B CTO closeout SSOT: reuses validatePlaybook (the same function the
+ * loader uses at module load) so min<=max, Advisor/Auditor-not-core, strict
+ * keys, and the 12 KiB serialized-object bound are enforced identically at
+ * load time and at the adapter boundary. Returns a deep clone — NEVER the
+ * input reference — so a malformed/injected object cannot pass through with
+ * its original shape.
+ *
+ * @param {unknown} pb
+ * @returns {object} deep-cloned, fully validated PlaybookV1
+ * @throws {PlaybookValidationError} on any structural or semantic violation
+ */
+function validatePlaybookV1(pb) {
+  validatePlaybook(pb, pb?.id);
+  // Deep clone AFTER successful validation. The clone is built from the now-
+  // trusted object, so callers receive exactly the validated shape (no extra
+  // keys can ride along, because validatePlaybook rejected unknown keys).
+  return JSON.parse(JSON.stringify(pb));
+}
+
+export {
+  PLAYBOOK_IDS,
+  validatePlaybookSummaryList,
+  validatePlaybookSummaryEntry,
+  validatePlaybookV1,
+};
 
 /**
  * List all built-in Lead playbooks as bounded summary objects.

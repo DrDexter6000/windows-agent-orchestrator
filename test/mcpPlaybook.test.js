@@ -45,6 +45,51 @@ async function buildInMemoryClient(server) {
 /** A valid real built-in id used across tests. */
 const KNOWN_ID = "single-coder-delivery";
 
+/**
+ * Build a valid four-entry summary list (deep clone of the real service output).
+ * Used as the baseline for closeout probes that mutate one field at a time.
+ */
+function validSummaryList() {
+  return listLeadPlaybooks().map((s) => ({ ...s }));
+}
+
+/**
+ * Build a valid full PlaybookV1 (deep clone of single-coder-delivery).
+ * Used as the baseline for closeout probes that mutate one field at a time.
+ */
+function validPlaybook() {
+  return getLeadPlaybook({ id: KNOWN_ID });
+}
+
+/**
+ * Build a valid full PlaybookV1 whose individual fields are all at their max
+ * length, but whose total serialized size stays under 12 KiB. Used as the
+ * baseline for the oversized probe (probe E mutates this to exceed 12 KiB
+ * while keeping every per-field bound satisfied).
+ */
+function maxedValidPlaybook() {
+  const f = (n = 240) => "x".repeat(n);
+  return {
+    id: "maxed-but-valid-shaped",
+    version: 1,
+    title: f(80),
+    summary: f(),
+    useWhen: [f(), f(), f(), f()],
+    avoidWhen: [f(), f(), f(), f()],
+    lanePattern: "single",
+    roles: [{ capability: "coder", importance: "core", min: 1, max: 1 }],
+    phases: Array.from({ length: 6 }, (_, i) => ({
+      id: `phase-${i}`,
+      intent: f(),
+      importance: "core",
+      evidence: [f(), f(), f(), f()],
+      adaptations: [f(), f(), f(), f()],
+    })),
+    completionEvidence: [f(), f(), f(), f(), f(), f()],
+    escalation: { advisor: f(), auditor: f() },
+  };
+}
+
 // =====================================================================
 // PB-B01: discovery includes playbook_list and playbook_get.
 // =====================================================================
@@ -408,4 +453,229 @@ test("PB-B10: application service has no MCP/CLI/SDK reverse dependency", async 
   // The adapter must delegate playbook data to the application service.
   assert.ok(/playbookCatalog\.js/.test(mcpSrc),
     "MCP adapter imports the application playbook service");
+});
+
+// =====================================================================
+// M11-2B CTO closeout — trust-boundary probes.
+//
+// Each probe independently constructs ONE semantic violation while keeping
+// every other field valid, so a failure cannot be masked by an unrelated
+// schema error. Each probe asserts:
+//   (1) the MCP result collapses to the fixed error (isError:true),
+//   (2) neither content nor structuredContent leaks the sentinel/malicious
+//       value. The pre-fix candidate (9c3a32f) let all five through.
+// =====================================================================
+
+// ---- Probe A: summary list with an extra unknown field (secret). ----
+// Pre-fix: outputSchema was non-strict, so the extra key passed through.
+test("PB-B-CLOSEOUT-A: summary with extra field collapses to fixed error, no leak", async () => {
+  const SENTINEL = "LEAK_SENTINEL_A_CLOSEOUT";
+  const list = validSummaryList();
+  list[0] = { ...list[0], secret: SENTINEL }; // extra unknown field
+  const server = createWaoMcpServer({
+    registryPath: "/x", runDir: "/x", listLeadPlaybooksFn: () => list,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "playbook_list", arguments: {} });
+    assert.equal(res.isError, true, "extra-field summary collapses to error");
+    const dumped = JSON.stringify(res);
+    assert.ok(!dumped.includes(SENTINEL), "sentinel must not leak anywhere");
+    const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+    assert.equal(text, "playbook_list failed", "fixed error text");
+    assert.ok(!res.structuredContent, "no structuredContent on error");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+// ---- Probe B: summary list with a single non-approved playbook id. ----
+// Pre-fix: outputSchema allowed any 1..4 kebab ids, so an unknown id passed.
+// Contract: exactly the four approved ids in stable order.
+test("PB-B-CLOSEOUT-B: non-approved playbook id collapses to fixed error", async () => {
+  const list = [
+    { id: "unknown-playbook", version: 1, title: "t", summary: "s", lanePattern: "single" },
+  ];
+  const server = createWaoMcpServer({
+    registryPath: "/x", runDir: "/x", listLeadPlaybooksFn: () => list,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "playbook_list", arguments: {} });
+    assert.equal(res.isError, true, "non-approved id collapses to error");
+    const dumped = JSON.stringify(res);
+    assert.ok(!dumped.includes("unknown-playbook"),
+      "non-approved id must not appear in the result");
+    const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+    assert.equal(text, "playbook_list failed", "fixed error text");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+// ---- Probe B2: four entries but wrong order / wrong set. ----
+// Even four valid-shaped ids must be EXACTLY the approved set in the stable
+// order; a substitution or reorder must fail.
+test("PB-B-CLOSEOUT-B2: four valid-shaped but non-matching ids collapse to fixed error", async () => {
+  const list = [
+    { id: "single-coder-delivery", version: 1, title: "a", summary: "a", lanePattern: "single" },
+    { id: "parallel-independent-deliveries", version: 1, title: "b", summary: "b", lanePattern: "parallel-independent" },
+    { id: "investigate-then-implement", version: 1, title: "c", summary: "c", lanePattern: "serial-discovery" },
+    { id: "not-the-fourth-approved-id", version: 1, title: "d", summary: "d", lanePattern: "read-only" },
+  ];
+  const server = createWaoMcpServer({
+    registryPath: "/x", runDir: "/x", listLeadPlaybooksFn: () => list,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "playbook_list", arguments: {} });
+    assert.equal(res.isError, true, "non-matching id set collapses to error");
+    const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+    assert.equal(text, "playbook_list failed", "fixed error text");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+// ---- Probe C: role min > max. ----
+// Pre-fix: outputSchema only checked min/max ranges, not the min<=max relation.
+test("PB-B-CLOSEOUT-C: role min>max collapses to fixed error", async () => {
+  const pb = validPlaybook();
+  // Mutate the first role so min>max while keeping types valid (int 0..4).
+  pb.roles[0] = { ...pb.roles[0], min: 4, max: 0 };
+  const server = createWaoMcpServer({
+    registryPath: "/x", runDir: "/x", getLeadPlaybookFn: () => pb,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({
+      name: "playbook_get", arguments: { id: KNOWN_ID },
+    });
+    assert.equal(res.isError, true, "min>max collapses to error");
+    const dumped = JSON.stringify(res);
+    assert.ok(!/"min":4[^]*"max":0|min.*4.*max.*0/.test(dumped),
+      "malicious min/max must not leak");
+    const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+    assert.equal(text, "playbook_get failed", "fixed error text");
+    assert.ok(!res.structuredContent, "no structuredContent on error");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+// ---- Probe D: Advisor or Auditor role with importance=core. ----
+// Pre-fix: outputSchema did not encode the Advisor/Auditor-not-core rule.
+test("PB-B-CLOSEOUT-D: advisor importance=core collapses to fixed error", async () => {
+  const pb = validPlaybook();
+  // Append an advisor marked core — every field is individually valid except
+  // the capability/importance relation.
+  pb.roles.push({ capability: "advisor", importance: "core", min: 0, max: 1 });
+  const server = createWaoMcpServer({
+    registryPath: "/x", runDir: "/x", getLeadPlaybookFn: () => pb,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({
+      name: "playbook_get", arguments: { id: KNOWN_ID },
+    });
+    assert.equal(res.isError, true, "advisor-as-core collapses to error");
+    const dumped = JSON.stringify(res);
+    assert.ok(!/"advisor"[^}]*"core"|"importance":"core"[^}]*"advisor"/.test(dumped),
+      "advisor-core relation must not leak");
+    const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+    assert.equal(text, "playbook_get failed", "fixed error text");
+    assert.ok(!res.structuredContent, "no structuredContent on error");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+// ---- Probe D2: Auditor role with importance=core (second capability). ----
+test("PB-B-CLOSEOUT-D2: auditor importance=core collapses to fixed error", async () => {
+  const pb = validPlaybook();
+  pb.roles.push({ capability: "auditor", importance: "core", min: 0, max: 1 });
+  const server = createWaoMcpServer({
+    registryPath: "/x", runDir: "/x", getLeadPlaybookFn: () => pb,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({
+      name: "playbook_get", arguments: { id: KNOWN_ID },
+    });
+    assert.equal(res.isError, true, "auditor-as-core collapses to error");
+    const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+    assert.equal(text, "playbook_get failed", "fixed error text");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+// ---- Probe E: every per-field bound satisfied but total > 12 KiB. ----
+// Pre-fix: outputSchema validated per-field lengths but not the global 12 KiB
+// serialized-object bound.
+test("PB-B-CLOSEOUT-E: oversized (>12KiB) playbook collapses to fixed error", async () => {
+  const pb = maxedValidPlaybook();
+  const bytes = Buffer.byteLength(JSON.stringify(pb), "utf8");
+  assert.ok(bytes > 12288, `fixture is oversized (got ${bytes} bytes); test is meaningful`);
+  const server = createWaoMcpServer({
+    registryPath: "/x", runDir: "/x", getLeadPlaybookFn: () => pb,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({
+      name: "playbook_get", arguments: { id: "maxed-but-valid-shaped" },
+    });
+    assert.equal(res.isError, true, "oversized playbook collapses to error");
+    // The oversized payload must not pass through in either channel.
+    assert.ok(!res.structuredContent, "no structuredContent on error");
+    const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+    assert.equal(text, "playbook_get failed", "fixed error text");
+    // Sanity: the fixed error text is far smaller than 12 KiB.
+    assert.ok(Buffer.byteLength(text, "utf8") < 1024, "error text is compact");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+// ---- Probe F: valid payloads still pass (no over-rejection). ----
+// Guards against the fix becoming too aggressive: the real built-in catalog
+// (via the default service) and a valid injected payload must still succeed.
+test("PB-B-CLOSEOUT-F: valid injected summary list and playbook still pass", async () => {
+  const validList = validSummaryList();
+  const validPb = validPlaybook();
+  const server = createWaoMcpServer({
+    registryPath: "/x", runDir: "/x",
+    listLeadPlaybooksFn: () => validList,
+    getLeadPlaybookFn: () => validPb,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const listRes = await client.callTool({ name: "playbook_list", arguments: {} });
+    assert.equal(listRes.isError, undefined, "valid list is not an error");
+    assert.equal(listRes.structuredContent.playbooks.length, 4, "four playbooks");
+    // Each summary must have exactly the five approved keys (no extra).
+    for (const s of listRes.structuredContent.playbooks) {
+      assert.deepEqual(Object.keys(s).sort(),
+        ["id", "lanePattern", "summary", "title", "version"],
+        "summary has exactly the five keys");
+    }
+
+    const getRes = await client.callTool({
+      name: "playbook_get", arguments: { id: KNOWN_ID },
+    });
+    assert.equal(getRes.isError, undefined, "valid get is not an error");
+    assert.equal(getRes.structuredContent.playbook.id, KNOWN_ID);
+    assert.deepEqual(getRes.structuredContent.playbook, validPb,
+      "valid playbook passes through unchanged");
+  } finally {
+    await client.close();
+    await server.close();
+  }
 });

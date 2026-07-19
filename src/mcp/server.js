@@ -38,7 +38,12 @@ import { stopRun } from "../application/runStop.js";
 import { listRuns } from "../application/runList.js";
 import { runWait } from "../application/runWait.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
-import { listLeadPlaybooks, getLeadPlaybook } from "../application/playbookCatalog.js";
+import {
+  listLeadPlaybooks,
+  getLeadPlaybook,
+  validatePlaybookSummaryList,
+  validatePlaybookV1,
+} from "../application/playbookCatalog.js";
 import { isValidRunId } from "../delivery.js";
 import { DIAGNOSIS_CATEGORIES } from "../diagnosis.js";
 import { RUN_STATES } from "../transcript.js";
@@ -632,11 +637,11 @@ const PLAYBOOK_SUMMARY_ENTRY = z.object({
   title: z.string().min(1).max(80),
   summary: z.string().min(1).max(240),
   lanePattern: z.enum(["single", "parallel-independent", "serial-discovery", "read-only"]),
-});
+}).strict();
 
 const PLAYBOOK_LIST_OUTPUT = z.object({
-  playbooks: z.array(PLAYBOOK_SUMMARY_ENTRY).min(1).max(4),
-});
+  playbooks: z.array(PLAYBOOK_SUMMARY_ENTRY).min(4).max(4),
+}).strict();
 
 const PLAYBOOK_ROLE = z.object({
   capability: z.enum(["coder", "researcher", "tester", "advisor", "auditor"]),
@@ -672,7 +677,7 @@ const PLAYBOOK_V1 = z.object({
 
 const PLAYBOOK_GET_OUTPUT = z.object({
   playbook: PLAYBOOK_V1,
-});
+}).strict();
 
 const PLAYBOOK_TOOL_ANNOTATIONS = {
   readOnlyHint: true,
@@ -1432,11 +1437,17 @@ export function createWaoMcpServer({
       annotations: PLAYBOOK_TOOL_ANNOTATIONS,
     },
     async () => {
-      // Entire service call + output-schema validation in ONE try/catch. Any
-      // service throw or malformed payload collapses to the fixed safe text —
-      // never leak err.message, catalog content, paths, or SDK validation detail.
+      // M11-2B CTO closeout: the service output is UNTRUSTED. We validate it
+      // through the application-service SSOT (validatePlaybookSummaryList),
+      // which enforces exactly-four-approved-ids, stable order, strict
+      // five-key summary entries, and the closed lanePattern enum. The payload
+      // is built from the VALIDATED return value, never the raw service output
+      // — so an unknown field, unknown id, or ordering violation collapses to
+      // the fixed error inside this single try/catch. outputSchema.parse is a
+      // second defensive boundary.
       try {
-        const playbooks = playbookListService();
+        const raw = playbookListService();
+        const playbooks = validatePlaybookSummaryList(raw);
         const payload = { playbooks };
         PLAYBOOK_LIST_OUTPUT.parse(payload);
         return {
@@ -1463,12 +1474,18 @@ export function createWaoMcpServer({
       annotations: PLAYBOOK_TOOL_ANNOTATIONS,
     },
     async ({ id }) => {
-      // The id is already validated by the input schema (lowercase kebab
-      // 1..64). The service re-validates and returns a NotFound typed error for
-      // valid-shaped-but-unknown ids, which this catch collapses to the fixed
-      // safe text — the model learns only that the lookup failed.
+      // M11-2B CTO closeout: the service output is UNTRUSTED. We validate it
+      // through the application-service SSOT (validatePlaybookV1), which
+      // reuses the SAME validatePlaybook the loader uses — so min<=max,
+      // Advisor/Auditor-not-core, strict keys, per-field bounds, AND the 12 KiB
+      // serialized-object bound are enforced identically at load time and here.
+      // The payload is built from the VALIDATED deep clone, never the raw
+      // service output. A valid-shaped-but-unknown id (PlaybookNotFoundError)
+      // and any semantic violation (PlaybookValidationError) both collapse to
+      // the fixed error inside this try/catch.
       try {
-        const playbook = playbookGetService({ id });
+        const raw = playbookGetService({ id });
+        const playbook = validatePlaybookV1(raw);
         const payload = { playbook };
         PLAYBOOK_GET_OUTPUT.parse(payload);
         return {
