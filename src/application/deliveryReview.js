@@ -33,10 +33,13 @@ const MAX_PATH_LENGTH = 512;
  * Builds on the delivery.js repo-relative SSOT and adds length + control-char
  * guards. Returns the canonical forward-slash form, or throws on any violation.
  *
+ * Exported (M11-3B closeout) so the delivery-review diff projection reuses the
+ * SAME strict path SSOT before any Git call — no second path-rule copy.
+ *
  * @param {string} p
  * @returns {string} canonical forward-slash path
  */
-function validateProjectedPath(p) {
+export function validateProjectedPath(p) {
   if (typeof p !== "string" || p.length === 0) {
     throw new Error("invalid changedPath: must be a non-empty string");
   }
