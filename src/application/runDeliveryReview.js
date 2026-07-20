@@ -120,22 +120,31 @@ export async function resolveRunDeliveryReviewTarget({
     throw new Error("delivery verification is pending; not reviewable");
   }
 
-  // 4. Workspace ownership — the run must belong to the authorized source repo.
+  // 4. runId binding: the durable DeliveryRef's runId must equal the requested
+  //    runId. This must pass BEFORE workspace ownership and the Git proof, so a
+  //    transcript carrying another run's DeliveryRef (e.g. an injected or
+  //    replayed ref) cannot reach the object database. Fixed message — never
+  //    echo dynamic runId values into adapter-facing errors.
+  const deliveryRef = facts.latestRef;
+  if (!deliveryRef || deliveryRef.runId !== runId) {
+    throw new Error("runId mismatch: durable DeliveryRef does not match the requested runId");
+  }
+
+  // 5. Workspace ownership — the run must belong to the authorized source repo.
   //    This must pass BEFORE the Git proof, so a cross-workspace request never
   //    reaches the object database.
   verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot);
 
-  // 5. Exact delivery commit proof in the authorized source repo. The kernel
+  // 6. Exact delivery commit proof in the authorized source repo. The kernel
   //    uses explicit commit args (not HEAD), so a dirty or advanced source
   //    checkout does not affect the proof, and a removed linked worktree is
   //    irrelevant — the commit objects live in the source repo.
-  const deliveryRef = facts.latestRef;
   const proof = assertDeliveryCommitInRepository({
     repoRoot: authorizedWorkspaceRoot,
     deliveryRef,
   });
 
-  // 6. fileIndex addresses a verified changed file. The path returned to the
+  // 7. fileIndex addresses a verified changed file. The path returned to the
   //    caller comes ONLY from the verified sorted list, never from model input.
   const sortedFiles = [...proof.changedFiles].sort();
   validateFileIndex(fileIndex, sortedFiles.length);

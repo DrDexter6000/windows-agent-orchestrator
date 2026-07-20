@@ -325,6 +325,26 @@ export function proveLinkedWorktree(input) {
 // ===== Exact committed DeliveryRef proof (Phase 3B) =====
 
 /**
+ * M11-3A closeout SSOT: canonical commit-id literal validator.
+ *
+ * A persisted DeliveryRef commit field is an immutable identity, not a name to
+ * be resolved. It MUST be a complete, lowercase, 40- (sha1) or 64- (sha256)
+ * character hexadecimal string. Anything else — HEAD, branch, tag, refspec,
+ * abbreviated SHA, uppercase, non-hex, option-like, empty — is rejected BEFORE
+ * any Git command runs, so the proof never confuses "what this name resolves to
+ * now" with "what the transcript recorded immutably".
+ *
+ * Exported so adapters and tests can share the single contract.
+ *
+ * @param {unknown} v
+ * @returns {boolean}
+ */
+export function isCanonicalCommitId(v) {
+  if (typeof v !== "string") return false;
+  return /^[0-9a-f]{40}$/.test(v) || /^[0-9a-f]{64}$/.test(v);
+}
+
+/**
  * Source-repository kernel: prove a committed DeliveryRef against EXACT commit
  * objects in a repository, independent of the working tree, HEAD, or any live
  * delivery worktree.
@@ -367,6 +387,16 @@ export function assertDeliveryCommitInRepository({ repoRoot, deliveryRef }) {
   if (typeof repoRoot !== "string" || repoRoot.length === 0) {
     throw new DeliveryError("artifact_mismatch", "repoRoot must be a non-empty string");
   }
+  // M11-3A closeout: persisted commit fields are immutable literals, not names.
+  // Reject HEAD/branch/tag/short-SHA/uppercase/non-hex/option-like/empty BEFORE
+  // any Git command, so proof is over the exact recorded identity, not whatever
+  // a name resolves to now.
+  if (!isCanonicalCommitId(deliveryRef.baseCommit)) {
+    throw new DeliveryError("artifact_mismatch", "baseCommit must be a canonical 40/64-hex commit id");
+  }
+  if (!isCanonicalCommitId(deliveryRef.deliveryCommit)) {
+    throw new DeliveryError("artifact_mismatch", "deliveryCommit must be a canonical 40/64-hex commit id");
+  }
 
   const cwd = repoRoot;
   const delivery = deliveryRef.deliveryCommit;
@@ -396,6 +426,17 @@ export function assertDeliveryCommitInRepository({ repoRoot, deliveryRef }) {
     throw new DeliveryError("artifact_mismatch", "deliveryCommit does not resolve to a commit");
   }
   const canonicalDelivery = String(canonicalDeliveryRaw).trim();
+
+  // 2b. M11-3A closeout: the resolved canonical commit must equal the persisted
+  //     literal exactly. A complete hex id resolves to itself; if it ever does
+  //     not, the object database is answering for a different identity than the
+  //     transcript recorded — fail closed.
+  if (canonicalBase !== deliveryRef.baseCommit) {
+    throw new DeliveryError("artifact_mismatch", "resolved baseCommit differs from the persisted literal");
+  }
+  if (canonicalDelivery !== delivery) {
+    throw new DeliveryError("artifact_mismatch", "resolved deliveryCommit differs from the persisted literal");
+  }
 
   // 3. Parent must be exactly baseCommit (explicit object query, not HEAD^).
   const parent = String(git(

@@ -584,3 +584,223 @@ test("M11-3A-G5: proof leaves source refs/HEAD/worktree unchanged; kernel uses s
     await cleanupRepo(repo);
   }
 });
+
+// =====================================================================
+// M11-3A CTO closeout — exact-commit literal + runId binding + count causality
+//
+// The first M11-3A candidate (3a2ffdb) let symbolic/abbreviated Git refs and
+// cross-run DeliveryRefs reach the proof. These tests pin the closed boundaries.
+// =====================================================================
+
+// ---- Helper: build a one-file delivery scenario (smaller, for closeout) ----
+async function buildSimpleDelivery(prefix = "wao-m113a-cl-") {
+  const { repo, baseCommit } = await makeRepo(prefix);
+  const wtPath = makeWorktree(repo, "run_closeout");
+  await writeFile(join(wtPath, "src", "a.js"), "const a = 11;\n");
+  const ref = packageDelivery({
+    runId: "run_closeout", worktreePath: wtPath, baseCommit,
+    allowedPaths: ["src"], isolation: { type: "worktree", strategy: "persistent" },
+    verificationCommands: ["npm test"],
+  });
+  return { repo, baseCommit, wtPath, ref };
+}
+
+// ---- GROUP HASH: exact-commit literal validator (pre-Git) ----
+test("M11-3A-HASH: symbolic/abbreviated/non-hex commit literals rejected before Git", async () => {
+  const { assertDeliveryCommitInRepository } = await import("../src/delivery.js");
+  const { repo, ref } = await buildSimpleDelivery("wao-m113a-hash-");
+  // tag the delivery commit so 'mytag' resolves to it (proves we reject the NAME,
+  // not because the object is absent).
+  execSync(`git -C "${repo}" tag mytag ${ref.deliveryCommit}`, { stdio: "ignore" });
+  const short8 = ref.deliveryCommit.slice(0, 8);
+  try {
+    const badDeliveryValues = [
+      "HEAD", "HEAD~0", "HEAD~1",                 // HEAD family
+      "wao/run_closeout",                          // branch name
+      "mytag",                                      // tag name
+      "refs/heads/wao/run_closeout",               // full ref
+      short8,                                       // abbreviated SHA
+      ref.deliveryCommit.slice(0, 12),              // 12-char short SHA
+      ref.deliveryCommit.toUpperCase(),             // uppercase (non-canonical)
+      ref.deliveryCommit.replace("a", "g"),         // non-hex char
+      "-" + ref.deliveryCommit,                     // option-like
+      "",                                           // empty
+      "not-a-commit",                              // arbitrary string
+    ];
+    for (const bad of badDeliveryValues) {
+      assert.throws(
+        () => assertDeliveryCommitInRepository({
+          repoRoot: repo, deliveryRef: { ...ref, deliveryCommit: bad },
+        }),
+        (err) => err.deliveryCode === "artifact_mismatch",
+        `deliveryCommit=${JSON.stringify(bad)} must be rejected as non-literal`,
+      );
+    }
+    // Same for baseCommit.
+    const badBaseValues = ["HEAD~1", "wao/run_closeout", "mytag", short8, ""];
+    for (const bad of badBaseValues) {
+      assert.throws(
+        () => assertDeliveryCommitInRepository({
+          repoRoot: repo, deliveryRef: { ...ref, baseCommit: bad },
+        }),
+        (err) => err.deliveryCode === "artifact_mismatch",
+        `baseCommit=${JSON.stringify(bad)} must be rejected as non-literal`,
+      );
+    }
+
+    // Control: a valid full lowercase 40-hex literal passes.
+    const proof = assertDeliveryCommitInRepository({ repoRoot: repo, deliveryRef: ref });
+    assert.equal(proof.deliveryCommit, ref.deliveryCommit);
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("M11-3A-HASH-64: 64-hex commit literal contract is recognized (sha256)", async () => {
+  // The literal validator must accept the 64-hex form by contract, independent
+  // of whether this repo's objects are sha1 or sha256. We test the validator
+  // function directly (not a live git object) to pin the literal contract.
+  const { isCanonicalCommitId } = await import("../src/delivery.js");
+  const sha256 = "a".repeat(64);
+  const sha1 = "0123456789abcdef0123456789abcdef01234567";
+  assert.equal(isCanonicalCommitId(sha1), true, "40-hex accepted");
+  assert.equal(isCanonicalCommitId(sha256), true, "64-hex accepted");
+  assert.equal(isCanonicalCommitId(sha1.toUpperCase()), false, "uppercase rejected");
+  assert.equal(isCanonicalCommitId(sha1.slice(0, 8)), false, "short rejected");
+  assert.equal(isCanonicalCommitId("g".repeat(40)), false, "non-hex rejected");
+  assert.equal(isCanonicalCommitId(""), false, "empty rejected");
+});
+
+// ---- GROUP IDBIND: request runId must equal durable DeliveryRef.runId ----
+async function writeTranscriptFor(runDir, runId, events) {
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile(join(runDir, `${runId}.jsonl`), events.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+}
+
+test("M11-3A-IDBIND: request A but durable DeliveryRef.runId=B rejected before Git proof", async () => {
+  const { resolveRunDeliveryReviewTarget } = await import("../src/application/runDeliveryReview.js");
+  const { repo, ref } = await buildSimpleDelivery("wao-m113a-idbind-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-m113a-idbind-td-"));
+  try {
+    // ref.runId === "run_closeout"; transcript is for "run_victim".
+    const events = [
+      { type: "run.started", runId: "run_victim", ts: "2026-01-01T00:00:00Z", seq: 1 },
+      { type: "run.background_submitted", runId: "run_victim", ts: "2026-01-01T00:00:00Z", seq: 1, cwd: repo, background: true },
+      { type: "run.delivery_created", runId: "run_victim", ts: "2026-01-01T00:00:01Z", seq: 2, delivery: ref },
+      { type: "run.delivery_verification_passed", runId: "run_victim", ts: "2026-01-01T00:00:02Z", seq: 3, delivery: ref },
+      { type: "run.state_change", runId: "run_victim", ts: "2026-01-01T00:00:03Z", seq: 4, from: "running", to: "completed" },
+      { type: "run.completed", runId: "run_victim", ts: "2026-01-01T00:00:04Z", seq: 5 },
+    ];
+    await writeTranscriptFor(runDir, "run_victim", events);
+
+    await assert.rejects(
+      () => resolveRunDeliveryReviewTarget({
+        runId: "run_victim", runDir, authorizedWorkspaceRoot: repo, fileIndex: 0,
+      }),
+      (err) => /runId|binding|mismatch|not match/i.test(err.message),
+      "cross-run DeliveryRef (ref.runId != requested runId) must be rejected before Git proof",
+    );
+  } finally {
+    await cleanupRepo(repo);
+    await cleanupRepo(runDir);
+  }
+});
+
+test("M11-3A-IDBIND-OK: request matches durable ref runId → resolves", async () => {
+  const { resolveRunDeliveryReviewTarget } = await import("../src/application/runDeliveryReview.js");
+  const { repo, ref } = await buildSimpleDelivery("wao-m113a-idbind-ok-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-m113a-idbind-ok-td-"));
+  try {
+    const events = [
+      { type: "run.started", runId: "run_closeout", ts: "2026-01-01T00:00:00Z", seq: 1 },
+      { type: "run.background_submitted", runId: "run_closeout", ts: "2026-01-01T00:00:00Z", seq: 1, cwd: repo, background: true },
+      { type: "run.delivery_created", runId: "run_closeout", ts: "2026-01-01T00:00:01Z", seq: 2, delivery: ref },
+      { type: "run.delivery_verification_passed", runId: "run_closeout", ts: "2026-01-01T00:00:02Z", seq: 3, delivery: ref },
+      { type: "run.state_change", runId: "run_closeout", ts: "2026-01-01T00:00:03Z", seq: 4, from: "running", to: "completed" },
+      { type: "run.completed", runId: "run_closeout", ts: "2026-01-01T00:00:04Z", seq: 5 },
+    ];
+    await writeTranscriptFor(runDir, "run_closeout", events);
+
+    const t = await resolveRunDeliveryReviewTarget({
+      runId: "run_closeout", runDir, authorizedWorkspaceRoot: repo, fileIndex: 0,
+    });
+    assert.equal(t.runId, "run_closeout");
+    assert.equal(t.deliveryCommit, ref.deliveryCommit);
+  } finally {
+    await cleanupRepo(repo);
+    await cleanupRepo(runDir);
+  }
+});
+
+// ---- GROUP COUNT: merge fixture isolates the commit-count branch ----
+//
+// Topology:
+//   base ──→ secondParent (extra commit, e.g. edit src/c.js)
+//     \──────────────────→ mergeCommit (first parent = base, second parent = secondParent)
+//
+// mergeCommit's FIRST parent is exactly base → parent check (step 3) PASSES.
+// rev-list --count base..mergeCommit = 2 (base→secondParent, then merge) →
+// count check (step 4) FAILS. files/message/identity are never reached, so the
+// failure is causally attributable to commit-count, not parent/files/identity.
+test("M11-3A-COUNT: merge fixture (first-parent=base, count>1) fails on commit-count only", async () => {
+  const { assertDeliveryCommitInRepository } = await import("../src/delivery.js");
+  const { repo, baseCommit, ref } = await buildSimpleDelivery("wao-m113a-count-");
+  try {
+    // 1. Create a second parent commit on top of base (adds an unrelated file).
+    const probe = join(repo, ".wao-worktrees", "__count_merge_probe");
+    execSync(`git -C "${repo}" worktree add --detach "${probe}" ${baseCommit}`, { stdio: "ignore" });
+    let secondParent;
+    try {
+      await writeFile(join(probe, "src", "c.js"), "const c = 3;\n");
+      execSync(`git -C "${probe}" add .`, { stdio: "ignore" });
+      execSync(`git -C "${probe}" -c user.name="WAO Delivery" -c user.email="wao-delivery@local" commit -m "extra"`, { stdio: "ignore" });
+      secondParent = git(probe, "rev-parse", "HEAD");
+    } finally {
+      execSync(`git -C "${repo}" worktree remove --force "${probe}"`, { stdio: "ignore" });
+    }
+
+    // 2. Build a merge commit: first parent = base, second parent = secondParent.
+    //    Use the SAME tree as the real delivery commit so the merge is well-formed;
+    //    the message is the expected wao-delivery message and identity is WAO, so
+    //    only commit-count can fail.
+    //    Use `git log --format=%T` to read the tree hash (avoids `^{tree}` shell
+    //    escaping differences across bash/cmd).
+    const deliveryTree = git(repo, "log", "--format=%T", "-n", "1", ref.deliveryCommit);
+    const mergeCommit = execSync(
+      `git -C "${repo}" commit-tree ${deliveryTree} -p ${baseCommit} -p ${secondParent}`,
+      { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+        env: { ...process.env, GIT_AUTHOR_NAME: "WAO Delivery", GIT_AUTHOR_EMAIL: "wao-delivery@local",
+               GIT_COMMITTER_NAME: "WAO Delivery", GIT_COMMITTER_EMAIL: "wao-delivery@local" } },
+    ).trim();
+
+    // 3. Assert: first parent IS base (so parent check passes). Use `git log
+    //    --format=%P` to read the parent list (avoids `<commit>^` shell escaping
+    //    of the caret under Windows cmd; the kernel itself uses structured argv
+    //    so the caret is safe there).
+    const parents = git(repo, "log", "--format=%P", "-n", "1", mergeCommit).split(/\s+/).filter(Boolean);
+    assert.equal(parents[0], baseCommit, "merge first-parent is base (parent check would pass)");
+
+    // 4. Assert: commit count base..merge > 1.
+    const count = Number(git(repo, "rev-list", "--count", `${baseCommit}..${mergeCommit}`));
+    assert.ok(count > 1, `commit count > 1 (got ${count})`);
+
+    // 5. The proof must fail, and because parent passed, the failure is causally
+    //    from commit-count. (We cannot read the exact reason string safely, but
+    //    the fixture guarantees parent passed and count > 1, so a count-check is
+    //    the only remaining gate before files/message/identity.)
+    let caught = null;
+    try {
+      assertDeliveryCommitInRepository({
+        repoRoot: repo,
+        deliveryRef: { ...ref, deliveryCommit: mergeCommit },
+      });
+    } catch (e) {
+      caught = e;
+    }
+    assert.ok(caught, "merge fixture must fail the proof");
+    assert.equal(caught.deliveryCode, "artifact_mismatch");
+    assert.match(caught.message, /1 commit|count/i, "failure reason is commit-count");
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
