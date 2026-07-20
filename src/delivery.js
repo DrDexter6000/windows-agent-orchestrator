@@ -197,21 +197,25 @@ function parseNul(output) {
 // ===== Delivery identity SSOT (shared by package post-commit + assertCommittedDeliveryRef) =====
 
 /**
- * Verify that the commit at HEAD has both author AND committer set to the WAO
- * Delivery process identity. This is the single SSOT for identity checks used
- * by both verifyPostCommitIntegrity (packaging) and assertCommittedDeliveryRef
- * (verification proof).
+ * Verify that a commit has both author AND committer set to the WAO Delivery
+ * process identity. This is the single SSOT for identity checks used by both
+ * verifyPostCommitIntegrity (packaging) and assertCommittedDeliveryRef /
+ * assertDeliveryCommitInRepository (verification proof).
  *
- * @param {string} cwd — worktree path
+ * @param {string} cwd — repository/worktree path
  * @param {string} errorDeliveryCode — DeliveryCode to throw on mismatch
  *   ("commit_integrity" for packaging, "artifact_mismatch" for verification)
+ * @param {string} [commitRef="HEAD"] — the commit to check. Defaults to HEAD for
+ *   packaging/linked-worktree callers; the source-repo kernel passes an explicit
+ *   full delivery commit hash so the check is independent of the working tree.
  * @throws {DeliveryError} if author or committer identity does not match
  */
-function assertDeliveryIdentity(cwd, errorDeliveryCode) {
-  const authorName = String(git(["show", "-s", "--format=%an", "HEAD"], { cwd })).trim();
-  const authorEmail = String(git(["show", "-s", "--format=%ae", "HEAD"], { cwd })).trim();
-  const committerName = String(git(["show", "-s", "--format=%cn", "HEAD"], { cwd })).trim();
-  const committerEmail = String(git(["show", "-s", "--format=%ce", "HEAD"], { cwd })).trim();
+function assertDeliveryIdentity(cwd, errorDeliveryCode, commitRef = "HEAD") {
+  const ref = commitRef;
+  const authorName = String(git(["show", "-s", "--format=%an", ref], { cwd })).trim();
+  const authorEmail = String(git(["show", "-s", "--format=%ae", ref], { cwd })).trim();
+  const committerName = String(git(["show", "-s", "--format=%cn", ref], { cwd })).trim();
+  const committerEmail = String(git(["show", "-s", "--format=%ce", ref], { cwd })).trim();
   if (authorName !== DELIVERY_IDENTITY.name || authorEmail !== DELIVERY_IDENTITY.email) {
     throw new DeliveryError(
       errorDeliveryCode,
@@ -321,8 +325,132 @@ export function proveLinkedWorktree(input) {
 // ===== Exact committed DeliveryRef proof (Phase 3B) =====
 
 /**
- * Prove that a committed DeliveryRef is an exact, unmutated delivery commit.
- * Reuses proveLinkedWorktree + post-commit integrity checks.
+ * Source-repository kernel: prove a committed DeliveryRef against EXACT commit
+ * objects in a repository, independent of the working tree, HEAD, or any live
+ * delivery worktree.
+ *
+ * M11-3A: extracted from assertCommittedDeliveryRef so read-only review can
+ * prove the durable delivery commit from the authorized source repo even after
+ * the linked worktree is removed, the source checkout is dirty, or the source
+ * HEAD has advanced. Every Git query uses an explicit commit argument (never
+ * HEAD), so the working tree is never consulted.
+ *
+ * Proves (all against `repoRoot`):
+ *   - DeliveryRef schemaVersion/kind/runId;
+ *   - base/delivery commits resolve and canonicalize;
+ *   - delivery parent === base;
+ *   - exactly one commit in base..delivery;
+ *   - committed paths exactly equal sorted changedFiles;
+ *   - commit message is exactly `wao-delivery: <runId>`;
+ *   - author and committer are the WAO Delivery identity.
+ *
+ * Does NOT check: linked-worktree status, branch, HEAD, or clean working tree.
+ * Those belong to the verification wrapper (assertCommittedDeliveryRef) and to
+ * delivery verification, not to read-only review.
+ *
+ * @param {object} input
+ * @param {string} input.repoRoot — authorized source repository root
+ * @param {object} input.deliveryRef — committed DeliveryRef v1
+ * @returns {{ deliveryCommit, baseCommit, changedFiles }}
+ * @throws {DeliveryError} deliveryCode="artifact_mismatch" on any proof failure
+ */
+export function assertDeliveryCommitInRepository({ repoRoot, deliveryRef }) {
+  if (!deliveryRef || typeof deliveryRef !== "object") {
+    throw new DeliveryError("artifact_mismatch", "deliveryRef must be an object");
+  }
+  if (deliveryRef.schemaVersion !== 1 || deliveryRef.kind !== "git_commit") {
+    throw new DeliveryError("artifact_mismatch", "deliveryRef must be schemaVersion 1, kind git_commit");
+  }
+  if (!isValidRunId(deliveryRef.runId)) {
+    throw new DeliveryError("artifact_mismatch", "invalid runId in deliveryRef");
+  }
+  if (typeof repoRoot !== "string" || repoRoot.length === 0) {
+    throw new DeliveryError("artifact_mismatch", "repoRoot must be a non-empty string");
+  }
+
+  const cwd = repoRoot;
+  const delivery = deliveryRef.deliveryCommit;
+  const expectedMessage = `wao-delivery: ${deliveryRef.runId}`;
+
+  // 1. repoRoot must be a git repository.
+  const toplevelRaw = gitSafe(["rev-parse", "--show-toplevel"], { cwd });
+  if (toplevelRaw === null) {
+    throw new DeliveryError("artifact_mismatch", "repoRoot is not a git repository");
+  }
+
+  // 2. Canonicalize base and delivery commits against EXACT objects (not HEAD).
+  //    --end-of-options prevents option-like values; ^{commit} requires a commit.
+  const canonicalBaseRaw = gitSafe(
+    ["rev-parse", "--verify", "--end-of-options", `${deliveryRef.baseCommit}^{commit}`],
+    { cwd },
+  );
+  if (canonicalBaseRaw === null) {
+    throw new DeliveryError("artifact_mismatch", "baseCommit does not resolve to a commit");
+  }
+  const canonicalBase = String(canonicalBaseRaw).trim();
+  const canonicalDeliveryRaw = gitSafe(
+    ["rev-parse", "--verify", "--end-of-options", `${delivery}^{commit}`],
+    { cwd },
+  );
+  if (canonicalDeliveryRaw === null) {
+    throw new DeliveryError("artifact_mismatch", "deliveryCommit does not resolve to a commit");
+  }
+  const canonicalDelivery = String(canonicalDeliveryRaw).trim();
+
+  // 3. Parent must be exactly baseCommit (explicit object query, not HEAD^).
+  const parent = String(git(
+    ["rev-parse", "--verify", "--end-of-options", `${canonicalDelivery}^`],
+    { cwd },
+  )).trim();
+  if (parent !== canonicalBase) {
+    throw new DeliveryError("artifact_mismatch", "delivery commit parent does not match baseCommit");
+  }
+
+  // 4. Exactly one commit in base..delivery.
+  const count = Number(String(git(
+    ["rev-list", "--count", `${canonicalBase}..${canonicalDelivery}`],
+    { cwd },
+  )).trim());
+  if (count !== 1) {
+    throw new DeliveryError("artifact_mismatch", `expected 1 commit in base..delivery, got ${count}`);
+  }
+
+  // 5. Committed files must exactly equal sorted changedFiles.
+  const committedFiles = parseNul(
+    git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", canonicalDelivery], { cwd }),
+  ).sort();
+  const expectedFiles = [...deliveryRef.changedFiles].sort();
+  if (committedFiles.length !== expectedFiles.length ||
+      committedFiles.some((p, i) => p !== expectedFiles[i])) {
+    throw new DeliveryError("artifact_mismatch", "committed files do not match deliveryRef.changedFiles");
+  }
+
+  // 6. Commit message must be exact.
+  const msg = String(git(["show", "-s", "--format=%B", canonicalDelivery], { cwd })).trim();
+  if (msg !== expectedMessage) {
+    throw new DeliveryError("artifact_mismatch", "commit message mismatch");
+  }
+
+  // 7. Author/committer must be WAO identity (SSOT, explicit commit).
+  assertDeliveryIdentity(cwd, "artifact_mismatch", canonicalDelivery);
+
+  return {
+    deliveryCommit: canonicalDelivery,
+    baseCommit: canonicalBase,
+    changedFiles: expectedFiles,
+  };
+}
+
+/**
+ * Prove that a committed DeliveryRef is an exact, unmutated delivery commit in
+ * a LIVE linked worktree, AND that the worktree is at HEAD=deliveryCommit on the
+ * expected branch and clean.
+ *
+ * Reuses the source-repository kernel (assertDeliveryCommitInRepository) for the
+ * exact commit proof, then retains the linked-worktree / branch / HEAD / clean
+ * checks that delivery verification requires. The kernel runs against the
+ * worktree path (which shares the source repo's object database), so behavior is
+ * unchanged for verification callers.
  *
  * Used by deliveryVerification.js before and after running verification commands.
  *
@@ -342,11 +470,6 @@ export function assertCommittedDeliveryRef(deliveryRef) {
   }
 
   const cwd = deliveryRef.worktreePath;
-  const expectedMessage = `wao-delivery: ${deliveryRef.runId}`;
-
-  // Reuse the existing linked-worktree proof (checks repo, linked, branch, HEAD=base).
-  // But for verification, HEAD must be at deliveryCommit, not baseCommit.
-  // So we prove the worktree structure first, then check HEAD independently.
   const expectedBranch = `wao/${deliveryRef.runId}`;
 
   // 1. Must be a git repository
@@ -375,67 +498,29 @@ export function assertCommittedDeliveryRef(deliveryRef) {
     throw new DeliveryError("artifact_mismatch", `HEAD on wrong branch: ${branchRaw.trim()} != ${expectedBranch}`);
   }
 
-  // 4. Canonicalize commits
-  const canonicalBaseRaw = gitSafe(["rev-parse", "--verify", "--end-of-options", `${deliveryRef.baseCommit}^{commit}`], { cwd });
-  if (canonicalBaseRaw === null) {
-    throw new DeliveryError("artifact_mismatch", "baseCommit does not resolve to a commit");
-  }
-  const canonicalBase = String(canonicalBaseRaw).trim();
-  const canonicalDeliveryRaw = gitSafe(["rev-parse", "--verify", "--end-of-options", `${deliveryRef.deliveryCommit}^{commit}`], { cwd });
-  if (canonicalDeliveryRaw === null) {
-    throw new DeliveryError("artifact_mismatch", "deliveryCommit does not resolve to a commit");
-  }
-  const canonicalDelivery = String(canonicalDeliveryRaw).trim();
+  // 4. Exact commit proof via the shared kernel (runs against this worktree's
+  //    shared object database; uses explicit commit args, not HEAD).
+  const kernel = assertDeliveryCommitInRepository({ repoRoot: cwd, deliveryRef });
 
-  // 5. HEAD must be exactly deliveryCommit
+  // 5. HEAD must be exactly deliveryCommit (linked-worktree-specific: the
+  //    kernel proved the commit object; here we prove the worktree IS at it).
   const head = String(git(["rev-parse", "HEAD"], { cwd })).trim();
-  if (head !== canonicalDelivery) {
-    throw new DeliveryError("artifact_mismatch", `HEAD (${head}) != deliveryCommit (${canonicalDelivery})`);
+  if (head !== kernel.deliveryCommit) {
+    throw new DeliveryError("artifact_mismatch", `HEAD (${head}) != deliveryCommit (${kernel.deliveryCommit})`);
   }
 
-  // 6. Parent must be exactly baseCommit
-  const parent = String(git(["rev-parse", "HEAD^"], { cwd })).trim();
-  if (parent !== canonicalBase) {
-    throw new DeliveryError("artifact_mismatch", `parent (${parent}) != baseCommit (${canonicalBase})`);
-  }
-
-  // 7. Exactly one commit in base..delivery
-  const count = Number(String(git(["rev-list", "--count", `${canonicalBase}..HEAD`], { cwd })).trim());
-  if (count !== 1) {
-    throw new DeliveryError("artifact_mismatch", `expected 1 commit in base..HEAD, got ${count}`);
-  }
-
-  // 8. Committed files must match changedFiles
-  const committedFiles = parseNul(
-    git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"], { cwd }),
-  ).sort();
-  const expectedFiles = [...deliveryRef.changedFiles].sort();
-  if (committedFiles.length !== expectedFiles.length ||
-      committedFiles.some((p, i) => p !== expectedFiles[i])) {
-    throw new DeliveryError("artifact_mismatch", "committed files do not match deliveryRef.changedFiles");
-  }
-
-  // 9. Commit message must be exact
-  const msg = String(git(["show", "-s", "--format=%B", "HEAD"], { cwd })).trim();
-  if (msg !== expectedMessage) {
-    throw new DeliveryError("artifact_mismatch", "commit message mismatch");
-  }
-
-  // 10. Author/committer must be WAO identity (SSOT: assertDeliveryIdentity)
-  assertDeliveryIdentity(cwd, "artifact_mismatch");
-
-  // 11. Worktree must be clean (no non-ignored changes)
+  // 6. Worktree must be clean (no non-ignored changes) — verification requirement.
   const porcelain = String(git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd }));
   if (porcelain.trim().length > 0) {
     throw new DeliveryError("artifact_mismatch", `worktree is dirty: ${parseNul(porcelain).join(", ")}`);
   }
 
   return {
-    deliveryCommit: canonicalDelivery,
-    baseCommit: canonicalBase,
+    deliveryCommit: kernel.deliveryCommit,
+    baseCommit: kernel.baseCommit,
     branch: expectedBranch,
-    worktreePath: normAbs(cwd),
-    changedFiles: expectedFiles,
+    worktreePath: cwd,
+    changedFiles: kernel.changedFiles,
   };
 }
 

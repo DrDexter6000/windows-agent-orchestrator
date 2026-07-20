@@ -185,7 +185,7 @@ export class JsonlTranscript {
       }
 
       // In-lock fact validation — single owner of delivery facts.
-      const facts = _validateDeliveryFacts(events);
+      const facts = validateDeliveryFacts(events);
       if (facts.error) {
         throw new Error(facts.error);
       }
@@ -260,10 +260,14 @@ export class JsonlTranscript {
  *   - verification event's deliveryCommit must match delivery_created's;
  *   - identifies any existing decision event.
  *
+ * M11-3A: exported as validateDeliveryFacts so the read-only review service can
+ * reuse the SAME durable-facts validator as tryAppendDecision, without altering
+ * tryAppendDecision or introducing a second reconstruction algorithm.
+ *
  * @param {object[]} events
  * @returns {{valid:boolean, latestRef:object|null, deliveryCommit:string|null, verificationStatus:string, decisionEvent:object|null, error:string|null}}
  */
-function _validateDeliveryFacts(events) {
+export function validateDeliveryFacts(events) {
   const createdEvents = events.filter((e) => e.type === "run.delivery_created" && e.delivery);
   if (createdEvents.length === 0) {
     return { valid: false, latestRef: null, deliveryCommit: null, verificationStatus: "pending", decisionEvent: null, error: "No committed delivery found (missing run.delivery_created)" };
