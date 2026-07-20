@@ -204,7 +204,7 @@ const REVIEW_TOTAL_BYTES = 256 * 1024;     // 256 KiB total per file
 // ordinary Git failure. No partial stdout is returned on overflow.
 const GIT_DIFF_MAX_BUFFER = REVIEW_TOTAL_BYTES;
 
-const CURSOR_VERSION = 2;
+const CURSOR_VERSION = 3;
 const CURSOR_MAX_CHARS = 192;
 
 /**
@@ -327,27 +327,31 @@ function contentDigest(text) {
 }
 
 /**
- * Compute a 128-bit irreversible fingerprint of the runId, base64url-encoded
- * (22 chars). The cursor binds the runId via this fingerprint (not the raw
- * runId) so the token does not echo the runId, while still failing cross-run
- * replay even when two runs share the same deliveryCommit + fileIndex + digest.
+ * Compute a 128-bit irreversible ARTIFACT fingerprint binding runId +
+ * deliveryCommit + fileIndex, base64url-encoded (22 chars). The cursor carries
+ * ONLY this fingerprint (never the full 40/64-hex commit literal), so the token
+ * stays <=192 chars for both sha1 and sha256 commits. Domain separation
+ * (`runId|deliveryCommit|fileIndex`) prevents substring collisions, and the
+ * fingerprint still fails cross-run / cross-commit / cross-file replay because
+ * any of the three changing changes the fingerprint.
  * @private
  */
-function runIdFingerprint(runId) {
-  return createHash("sha256").update(String(runId), "utf8").digest().subarray(0, 16).toString("base64url");
+function artifactFingerprint(runId, deliveryCommit, fileIndex) {
+  const material = `${runId}|${deliveryCommit}|${fileIndex}`;
+  return createHash("sha256").update(material, "utf8").digest().subarray(0, 16).toString("base64url");
 }
 
 /**
- * Encode an opaque cursor. base64url(canonical JSON) v2, binding runId
- * fingerprint + commit + fileIndex + offset + 128-bit content digest.
- * Max 192 chars. Canonical re-encode must equal the input token.
+ * Encode an opaque cursor. base64url(canonical JSON) v3, binding the 128-bit
+ * artifact fingerprint (runId+commit+fileIndex) + offset + 128-bit content
+ * digest. Max 192 chars for BOTH 40- and 64-hex commits (the full commit is
+ * never placed in the token). Canonical re-encode must equal the input token.
  * @private
  */
-function encodeCursor({ runIdFp, deliveryCommit, fileIndex, nextOffset, digest }) {
+function encodeCursor({ artifactFp, fileIndex, nextOffset, digest }) {
   const payload = {
     v: CURSOR_VERSION,
-    r: runIdFp,
-    c: deliveryCommit,
+    a: artifactFp,
     i: fileIndex,
     o: nextOffset,
     d: digest,
@@ -361,15 +365,15 @@ function encodeCursor({ runIdFp, deliveryCommit, fileIndex, nextOffset, digest }
 
 /**
  * Decode and strictly validate an opaque cursor against the expected binding.
- * Failures (malformed/wrong-version/unknown-keys/wrong-types/cross-run/
- * cross-commit/cross-file/offset-out-of-range/mid-codepoint/stale-digest/
- * noncanonical-encoding) throw a fixed "invalid cursor" error. Omitted cursor →
- * offset 0. `artifactAvailable` must be true: a cursor supplied for a
- * binary/too-large/unavailable artifact is rejected.
+ * Failures (malformed/wrong-version/unknown-keys/wrong-types/cross-artifact/
+ * offset-out-of-range/mid-codepoint/stale-digest/noncanonical-encoding) throw a
+ * fixed "invalid cursor" error. Omitted cursor → offset 0. `artifactAvailable`
+ * must be true: a cursor supplied for a binary/too-large/unavailable artifact
+ * is rejected.
  * @private
  */
 function decodeCursor(token, {
-  runIdFp, deliveryCommit, fileIndex, totalSafeBytes, safeTextBuf, digest, artifactAvailable,
+  artifactFp, fileIndex, totalSafeBytes, safeTextBuf, digest, artifactAvailable,
 }) {
   if (token === undefined || token === null) {
     return { offset: 0 };
@@ -397,9 +401,9 @@ function decodeCursor(token, {
   if (!payload || payload.v !== CURSOR_VERSION) {
     throw new Error("invalid cursor: version");
   }
-  // Strict key set (canonical order: c,d,i,o,r,v).
+  // Strict key set (canonical order: a,d,i,o,v).
   const keys = Object.keys(payload).sort().join(",");
-  if (keys !== "c,d,i,o,r,v") {
+  if (keys !== "a,d,i,o,v") {
     throw new Error("invalid cursor: keys");
   }
   // Canonical re-encode must equal the input token (rejects noncanonical JSON
@@ -408,11 +412,10 @@ function decodeCursor(token, {
   if (canonical !== token) {
     throw new Error("invalid cursor: noncanonical encoding");
   }
-  if (typeof payload.r !== "string" || payload.r !== runIdFp) {
-    throw new Error("invalid cursor: run mismatch");
-  }
-  if (typeof payload.c !== "string" || payload.c !== deliveryCommit) {
-    throw new Error("invalid cursor: commit mismatch");
+  // Artifact fingerprint binds runId + deliveryCommit + fileIndex as one. Any
+  // cross-run / cross-commit / cross-file replay changes the fingerprint.
+  if (typeof payload.a !== "string" || payload.a !== artifactFp) {
+    throw new Error("invalid cursor: artifact mismatch");
   }
   if (!Number.isInteger(payload.i) || payload.i !== fileIndex) {
     throw new Error("invalid cursor: file mismatch");
@@ -529,7 +532,7 @@ export async function getRunDeliveryReview(
   // Build the redactor from the host env (exact-secret SSOT).
   const redactor = createSecretRedactor(hostDependencies.env ?? process.env);
   const safeChangedPath = projectChangedPath(path, redactor);
-  const runIdFp = runIdFingerprint(runId);
+  const artifactFp = artifactFingerprint(runId, delivery, fileIndex);
 
   // Helper: a binary/too-large/unavailable artifact result. A supplied cursor
   // for such an artifact is rejected (decodeCursor checks artifactAvailable).
@@ -596,11 +599,10 @@ export async function getRunDeliveryReview(
 
   const digest = contentDigest(sanitized);
 
-  // 7. Decode/validate cursor (binding runId fingerprint + commit + fileIndex +
-  //    digest + offset). artifactAvailable=true here.
+  // 7. Decode/validate cursor (binding artifact fingerprint + fileIndex + digest
+  //    + offset). artifactAvailable=true here.
   const { offset: startOffset } = decodeCursor(cursor, {
-    runIdFp,
-    deliveryCommit: delivery,
+    artifactFp,
     fileIndex,
     totalSafeBytes: safeBuf.length,
     safeTextBuf: safeBuf,
@@ -610,7 +612,7 @@ export async function getRunDeliveryReview(
 
   const { fragment, nextOffset } = paginateSafe(safeBuf, startOffset);
   const nextCursor = nextOffset !== null
-    ? encodeCursor({ runIdFp, deliveryCommit: delivery, fileIndex, nextOffset, digest })
+    ? encodeCursor({ artifactFp, fileIndex, nextOffset, digest })
     : null;
 
   return {

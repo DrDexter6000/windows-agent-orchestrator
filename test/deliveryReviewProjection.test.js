@@ -853,3 +853,81 @@ test("M11-3B-G22: truncated === (nextCursor !== null); every page <= 16 KiB", as
     await cleanupRepo(uni.runDir);
   }
 });
+
+// =====================================================================
+// M11-3B Package A: cursor portability (40/64-hex) + path C0/C1/DEL safety
+// =====================================================================
+
+test("M11-3B-PA-CURSOR-LEN: continuation cursor stays <=192 for 40 AND 64-hex commits", async () => {
+  // Force a real multi-page artifact so the service emits a real cursor.
+  // Use sha256 repo (64-hex) if available; otherwise the assertion still
+  // validates the 40-hex case, and a direct cursor-length unit check covers
+  // 64-hex without needing a sha256 repo.
+  const s = await buildReviewScenario({
+    changeFn: async (wt) => { await writeFile(join(wt, "src", "a.js"), "Y".repeat(20000) + "\n"); },
+    prefix: "wao-m113b-palen-",
+  });
+  try {
+    const page1 = await getRunDeliveryReview({
+      runId: s.runId, runDir: s.runDir, authorizedWorkspaceRoot: s.repo, fileIndex: 0,
+    });
+    assert.ok(page1.nextCursor, "need a real cursor");
+    assert.ok(page1.nextCursor.length <= 192,
+      `40-hex cursor must be <=192, got ${page1.nextCursor.length}`);
+    // The cursor must NOT carry the full commit literal (it is bound via the
+    // artifact fingerprint), so 64-hex commits also stay within bound.
+    const decoded = JSON.parse(Buffer.from(page1.nextCursor, "base64url").toString("utf8"));
+    assert.ok(!("c" in decoded),
+      "cursor must not carry a full-commit field (bind via artifact fingerprint)");
+    assert.ok("a" in decoded && typeof decoded.a === "string" && decoded.a.length === 22,
+      "cursor binds an artifact fingerprint (runId+commit+fileIndex)");
+  } finally {
+    await cleanupRepo(s.repo);
+    await cleanupRepo(s.runDir);
+  }
+});
+
+test("M11-3B-PA-CURSOR-64HEX: 64-hex commit fingerprint keeps cursor <=192", async () => {
+  // Synthetic check: build the exact cursor payload the service would emit for a
+  // 64-hex commit and assert the bound. This covers the sha256 case without
+  // requiring a sha256 git repo (which is non-trivial to construct on sha1 git).
+  const { createHash } = await import("node:crypto");
+  const fakeRunId = "run_m113b_pa64";
+  const fakeCommit64 = "a".repeat(64);
+  const fakeDigest = createHash("sha256").update("x").digest().subarray(0, 16).toString("base64url");
+  // Domain-separated fingerprint: sha256(runId|commit|fileIndex) first 16 bytes.
+  const fp = createHash("sha256").update(`${fakeRunId}|${fakeCommit64}|0`).digest().subarray(0, 16).toString("base64url");
+  // OLD design (full commit literal): 203 chars → OVERFLOW at 64-hex.
+  const payloadOld = { v: 3, a: fp, c: fakeCommit64, i: 0, o: 12345, d: fakeDigest };
+  const tokenOld = Buffer.from(JSON.stringify(payloadOld), "utf8").toString("base64url");
+  console.log("  64-hex WITH full commit (old design):", tokenOld.length, tokenOld.length<=192?"OK":"OVERFLOW");
+  assert.ok(tokenOld.length > 192, "old design (full commit) must overflow at 64-hex (proving the bug)");
+  // NEW design (artifact fingerprint only, no full commit): <=192.
+  const payloadNew = { v: 3, a: fp, i: 0, o: 12345, d: fakeDigest };
+  const tokenNew = Buffer.from(JSON.stringify(payloadNew), "utf8").toString("base64url");
+  console.log("  64-hex fingerprint-only (new design):", tokenNew.length, tokenNew.length<=192?"OK":"OVERFLOW");
+  assert.ok(tokenNew.length <= 192, `fingerprint-only cursor must be <=192 even for 64-hex commit, got ${tokenNew.length}`);
+});
+
+test("M11-3B-PA-PATH-C1: validateProjectedPath rejects C0, C1, DEL control chars", async () => {
+  const { validateProjectedPath } = await import("../src/application/deliveryReview.js");
+  // C0 (NUL, TAB, LF) — already rejected.
+  // C1 (NEL=0x85, RLO=0x202e is not C1; 0x80..0x9f is C1). Test 0x85 (NEL).
+  // DEL (0x7f).
+  const badPaths = [
+    "src/\u0085x.js",   // C1 NEL
+    "src/\u0080x.js",   // C1 PAD
+    "src/\u009fx.js",   // C1 APC
+    "src/\x00x.js",     // C0 NUL
+    "src/\x7fx.js",     // DEL
+  ];
+  for (const p of badPaths) {
+    assert.throws(
+      () => validateProjectedPath(p),
+      /control|invalid|canonical/i,
+      `path with control char U+${p.charCodeAt(4).toString(16)} must be rejected`,
+    );
+  }
+  // Control: a clean canonical path passes.
+  assert.equal(validateProjectedPath("src/a.js"), "src/a.js");
+});

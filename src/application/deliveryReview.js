@@ -46,9 +46,12 @@ export function validateProjectedPath(p) {
   if (p.length > MAX_PATH_LENGTH) {
     throw new Error(`invalid changedPath: length ${p.length} exceeds ${MAX_PATH_LENGTH}`);
   }
-  // Reject NUL or any C0/C1 control character (tab, newline, etc.).
+  // Reject NUL and ANY C0 (0x00-0x1F), DEL (0x7F), or C1 (0x80-0x9F) control
+  // character. C1 (e.g. NEL=0x85) is a real attack vector: it is invisible/
+  // bidi-affecting in some editors and could smuggle content or break path
+  // parsing. The previous regex only covered C0+DEL; C1 is now included.
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f\x7f]/.test(p)) {
+  if (/[\x00-\x1f\x7f-\x9f]/.test(p)) {
     throw new Error("invalid changedPath: control character present");
   }
   // Backslash is non-canonical (Git uses forward slash); reject so the output
