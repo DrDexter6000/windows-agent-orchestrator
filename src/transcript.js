@@ -315,7 +315,21 @@ export function validateDeliveryFacts(events) {
   const decisionEvent = events.find((e) =>
     e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected") ?? null;
 
-  return { valid: true, latestRef, deliveryCommit: createdCommit, verificationStatus, decisionEvent, error: null };
+  // M11-3A closeout: also surface the created ref and both envelope runIds so a
+  // read-only consumer (runDeliveryReview) can bind the full durable identity
+  // chain (created event/ref + verification event/ref) to the requested runId
+  // before any Git proof. tryAppendDecision ignores these extra fields.
+  return {
+    valid: true,
+    latestRef,
+    createdRef,
+    deliveryCommit: createdCommit,
+    verificationStatus,
+    decisionEvent,
+    createdEventRunId: createdEvents[0].runId ?? null,
+    verificationEventRunId: verificationEvent.runId ?? null,
+    error: null,
+  };
 }
 
 /**

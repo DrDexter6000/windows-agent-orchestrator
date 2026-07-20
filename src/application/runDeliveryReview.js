@@ -120,14 +120,25 @@ export async function resolveRunDeliveryReviewTarget({
     throw new Error("delivery verification is pending; not reviewable");
   }
 
-  // 4. runId binding: the durable DeliveryRef's runId must equal the requested
-  //    runId. This must pass BEFORE workspace ownership and the Git proof, so a
-  //    transcript carrying another run's DeliveryRef (e.g. an injected or
-  //    replayed ref) cannot reach the object database. Fixed message — never
-  //    echo dynamic runId values into adapter-facing errors.
+  // 4. Full durable-run identity binding. The requested runId must equal ALL of:
+  //    - the run.delivery_created event envelope runId;
+  //    - the verification event envelope runId;
+  //    - the created DeliveryRef.runId;
+  //    - the verification (latest) DeliveryRef.runId.
+  //    Any mismatch means a cross-run ref or event was injected into this
+  //    transcript (created ref of run B, verification ref of run A, etc.). This
+  //    must pass BEFORE workspace ownership and the Git proof, so a cross-run
+  //    DeliveryRef cannot reach the object database. Fixed message — never echo
+  //    dynamic runId values into adapter-facing errors.
   const deliveryRef = facts.latestRef;
-  if (!deliveryRef || deliveryRef.runId !== runId) {
-    throw new Error("runId mismatch: durable DeliveryRef does not match the requested runId");
+  const createdRef = facts.createdRef;
+  if (
+    facts.createdEventRunId !== runId
+    || facts.verificationEventRunId !== runId
+    || !createdRef || createdRef.runId !== runId
+    || !deliveryRef || deliveryRef.runId !== runId
+  ) {
+    throw new Error("runId mismatch: durable delivery identity does not match the requested runId");
   }
 
   // 5. Workspace ownership — the run must belong to the authorized source repo.

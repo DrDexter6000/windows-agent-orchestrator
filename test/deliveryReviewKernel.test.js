@@ -238,32 +238,11 @@ test("M11-3A-G2: parent/count/files/message/author/committer mismatch each fail 
       );
     }
 
-    // --- commit-count mismatch: squash a second commit onto the delivery branch ---
-    {
-      // Add a second commit to the delivery branch so base..delivery has 2 commits.
-      // Do this in the source repo via the delivery branch ref.
-      const deliveryBranch = `wao/${RUN_ID}`;
-      // Create a throwaway repo state: branch already at delivery; add a child.
-      execSync(`git -C "${repo}" branch __m113a_count ${validDelivery}`, { stdio: "ignore" });
-      // Build a child commit on top of the delivery commit in a temp worktree.
-      const tmpWt = join(repo, ".wao-worktrees", "__count_probe");
-      execSync(`git -C "${repo}" worktree add --detach "${tmpWt}" ${validDelivery}`, { stdio: "ignore" });
-      try {
-        await writeFile(join(tmpWt, "src", "c.js"), "const c = 3;\n");
-        execSync(`git -C "${tmpWt}" add .`, { stdio: "ignore" });
-        execSync(`git -C "${tmpWt}" -c user.name="WAO Delivery" -c user.email="wao-delivery@local" commit -m "wao-delivery: ${RUN_ID}"`, { stdio: "ignore" });
-        const childCommit = git(tmpWt, "rev-parse", "HEAD");
-        const refChild = { ...deliveryRef, deliveryCommit: childCommit };
-        assert.throws(
-          () => assertDeliveryCommitInRepository({ repoRoot: repo, deliveryRef: refChild }),
-          (err) => err.deliveryCode === "artifact_mismatch",
-          "commit-count mismatch (2 commits) must fail",
-        );
-      } finally {
-        execSync(`git -C "${repo}" worktree remove --force "${tmpWt}"`, { stdio: "ignore" });
-        execSync(`git -C "${repo}" branch -D __m113a_count`, { stdio: "ignore" });
-      }
-    }
+    // (commit-count mismatch is proved by the M11-3A-COUNT merge-fixture test
+    // at the end of this file: first-parent===base so the parent check passes,
+    // count>1 so the count check fails. The former child-commit probe that
+    // lived here hit the parent check first and could not prove the count
+    // branch — it has been removed.)
 
     // --- files mismatch: claim a changedFiles list that differs from the commit ---
     {
@@ -622,7 +601,7 @@ test("M11-3A-HASH: symbolic/abbreviated/non-hex commit literals rejected before 
       short8,                                       // abbreviated SHA
       ref.deliveryCommit.slice(0, 12),              // 12-char short SHA
       ref.deliveryCommit.toUpperCase(),             // uppercase (non-canonical)
-      ref.deliveryCommit.replace("a", "g"),         // non-hex char
+      `g${ref.deliveryCommit.slice(1)}`,            // deterministic non-hex first char
       "-" + ref.deliveryCommit,                     // option-like
       "",                                           // empty
       "not-a-commit",                              // arbitrary string
@@ -726,6 +705,69 @@ test("M11-3A-IDBIND-OK: request matches durable ref runId → resolves", async (
     });
     assert.equal(t.runId, "run_closeout");
     assert.equal(t.deliveryCommit, ref.deliveryCommit);
+  } finally {
+    await cleanupRepo(repo);
+    await cleanupRepo(runDir);
+  }
+});
+
+// ---- IDBIND-CHAIN: full durable identity chain (5-way) ----
+//
+// The requested runId must equal: created event envelope runId, verification
+// event envelope runId, created DeliveryRef.runId, and verification
+// DeliveryRef.runId. Each of the four mismatch classes must be rejected BEFORE
+// workspace ownership and Git proof. (The earlier IDBIND tests only covered the
+// verification ref runId; the created ref runId was unbound.)
+test("M11-3A-IDBIND-CHAIN: each of the 4 durable runId positions must match the request", async () => {
+  const { resolveRunDeliveryReviewTarget } = await import("../src/application/runDeliveryReview.js");
+  const { repo, ref } = await buildSimpleDelivery("wao-m113a-chain-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-m113a-chain-td-"));
+
+  /**
+   * Build events for run_closeout, optionally overriding ONE of the four
+   * durable runId positions with run_impostor. cwd=repo so ownership passes
+   * when runId is consistent; the Git proof only runs when all gates pass.
+   */
+  const buildEvents = (override) => {
+    const REQ = "run_closeout";
+    const createdRefRunId = override === "createdRef" ? "run_impostor" : REQ;
+    const verifiedRefRunId = override === "verifiedRef" ? "run_impostor" : REQ;
+    const createdEvtRunId = override === "createdEvent" ? "run_impostor" : REQ;
+    const verifiedEvtRunId = override === "verifiedEvent" ? "run_impostor" : REQ;
+    const createdRef = { ...ref, runId: createdRefRunId };
+    const verifiedRef = { ...ref, runId: verifiedRefRunId };
+    return [
+      { type: "run.started", runId: REQ, ts: "2026-01-01T00:00:00Z", seq: 1 },
+      { type: "run.background_submitted", runId: REQ, ts: "2026-01-01T00:00:00Z", seq: 1, cwd: repo, background: true },
+      { type: "run.delivery_created", runId: createdEvtRunId, ts: "2026-01-01T00:00:01Z", seq: 2, delivery: createdRef },
+      { type: "run.delivery_verification_passed", runId: verifiedEvtRunId, ts: "2026-01-01T00:00:02Z", seq: 3, delivery: verifiedRef },
+      { type: "run.state_change", runId: REQ, ts: "2026-01-01T00:00:03Z", seq: 4, from: "running", to: "completed" },
+      { type: "run.completed", runId: REQ, ts: "2026-01-01T00:00:04Z", seq: 5 },
+    ];
+  };
+
+  try {
+    // Positive: no override → resolves (all four positions consistent).
+    await writeTranscriptFor(runDir, "run_closeout", buildEvents(null));
+    const ok = await resolveRunDeliveryReviewTarget({
+      runId: "run_closeout", runDir, authorizedWorkspaceRoot: repo, fileIndex: 0,
+    });
+    assert.equal(ok.deliveryCommit, ref.deliveryCommit, "consistent chain resolves");
+
+    // Each of the four override classes must be rejected before Git proof.
+    for (const override of ["createdEvent", "verifiedEvent", "createdRef", "verifiedRef"]) {
+      // Rewrite the transcript with this single override.
+      const { rmSync } = await import("node:fs");
+      try { rmSync(join(runDir, "run_closeout.jsonl"), { force: true }); } catch {}
+      await writeTranscriptFor(runDir, "run_closeout", buildEvents(override));
+      await assert.rejects(
+        () => resolveRunDeliveryReviewTarget({
+          runId: "run_closeout", runDir, authorizedWorkspaceRoot: repo, fileIndex: 0,
+        }),
+        (err) => /runId mismatch|identity does not match/i.test(err.message),
+        `override=${override} must be rejected before Git proof`,
+      );
+    }
   } finally {
     await cleanupRepo(repo);
     await cleanupRepo(runDir);
