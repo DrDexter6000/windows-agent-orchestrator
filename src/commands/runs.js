@@ -27,6 +27,8 @@ import { diagnoseFailure } from "../diagnosis.js";
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
 // M9-6A: delivery query/decision delegated to shared application services.
 import { getRunDelivery, decideRunDelivery } from "../application/runDelivery.js";
+// M11-3C: delivery review projection delegated to shared application service.
+import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
 import { forecastCost } from "../costForecast.js";
 import { getWaoDir } from "../waoDir.js";
 import { summarizeDeclares } from "../waoDeclare.js";
@@ -583,6 +585,118 @@ export async function runsDashboardCommand(args, config) {
   }
 }
 
+/**
+ * M11-3C: `runs delivery review <runId> --file-index N [--cursor TOKEN] [--format json] [--cwd DIR]`
+ *
+ * CLI adapter for the safe delivery-diff projection. Delegates to the SAME
+ * getRunDeliveryReview application service as the MCP adapter. Does NOT parse
+ * cursor, does NOT shell out, does NOT decode the diff.
+ *
+ * Uses narrow strict parsing for --file-index / --cursor / --format so the
+ * general parseOptions behaviour is unaffected.
+ *
+ * @param {string[]} args — everything after `delivery review`
+ * @param {object} config
+ * @param {object} [hostDeps] — { getRunDeliveryReviewFn } for testing
+ */
+async function runsDeliveryReviewCommand(args, config, hostDeps = {}) {
+  // Narrow, strict flag parsing for review — independent of parseOptions so the
+  // historical query/accept/reject parsing is byte-compatible.
+  const flags = {};
+  const positionals = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i];
+    if (a === "--file-index") {
+      if (flags.fileIndex !== undefined) throw new Error("--file-index specified multiple times");
+      const v = args[i + 1];
+      if (v === undefined || v.startsWith("--")) throw new Error("--file-index requires a value");
+      flags.fileIndex = v;
+      i += 1;
+    } else if (a === "--cursor") {
+      if (flags.cursor !== undefined) throw new Error("--cursor specified multiple times");
+      const v = args[i + 1];
+      if (v === undefined || v.startsWith("--")) throw new Error("--cursor requires a value");
+      flags.cursor = v;
+      i += 1;
+    } else if (a === "--format") {
+      const v = args[i + 1];
+      if (v === undefined || v.startsWith("--")) throw new Error("--format requires a value");
+      flags.format = v;
+      i += 1;
+    } else if (a === "--cwd") {
+      const v = args[i + 1];
+      if (v === undefined || v.startsWith("--")) throw new Error("--cwd requires a value");
+      flags.cwd = v;
+      i += 1;
+    } else if (a.startsWith("--")) {
+      throw new Error(`unknown flag for delivery review: ${a}`);
+    } else {
+      positionals.push(a);
+    }
+  }
+
+  const runId = positionals[0];
+  if (!runId || runId.trim().length === 0) {
+    throw new Error("runs delivery review requires <runId>");
+  }
+
+  if (flags.fileIndex === undefined) {
+    throw new Error("runs delivery review requires --file-index");
+  }
+  const fileIndexStr = String(flags.fileIndex).trim();
+  if (fileIndexStr.length === 0) {
+    throw new Error("--file-index must be non-empty");
+  }
+  if (!/^\d+$/.test(fileIndexStr)) {
+    throw new Error("--file-index must be a non-negative integer");
+  }
+  const fileIndex = Number(fileIndexStr);
+
+  // Resolve authorized workspace root via the existing CLI workspace mechanism.
+  const cwd = flags.cwd ? resolve(flags.cwd) : resolveTargetCwd({ cwd: undefined }, config);
+  const runDir = resolve(config.runDir);
+
+  const service = hostDeps.getRunDeliveryReviewFn ?? getRunDeliveryReview;
+  const result = await service({
+    runId,
+    runDir,
+    authorizedWorkspaceRoot: cwd,
+    fileIndex,
+    ...(flags.cursor !== undefined ? { cursor: flags.cursor } : {}),
+  });
+
+  if (flags.format === "json") {
+    // JSON output: semantically equal to MCP structuredContent.
+    console.log(JSON.stringify({
+      runId: result.runId,
+      deliveryCommit: result.deliveryCommit,
+      fileIndex: result.fileIndex,
+      changedFileCount: result.changedFileCount,
+      changedPath: result.changedPath,
+      contentFormat: result.contentFormat,
+      artifactTextTrust: result.artifactTextTrust,
+      available: result.available,
+      unavailableReason: result.unavailableReason,
+      fragment: result.fragment,
+      fragmentBytes: result.fragmentBytes,
+      nextCursor: result.nextCursor,
+      truncated: result.truncated,
+    }, null, 2));
+    return;
+  }
+
+  // Text mode: safe file identity + fragment or unavailable status + cursor.
+  console.log(`File: ${result.changedPath} (${result.fileIndex + 1}/${result.changedFileCount})`);
+  if (result.available) {
+    console.log(result.fragment);
+    if (result.nextCursor) {
+      console.log(`--- next cursor: ${result.nextCursor} ---`);
+    }
+  } else {
+    console.log(`[unavailable: ${result.unavailableReason}]`);
+  }
+}
+
 export { runsCommand, runsDeliveryCommand };
 
 // ===== TD-103 Phase 3C-2: Lead acceptance record =====
@@ -605,7 +719,14 @@ export { runsCommand, runsDeliveryCommand };
  * M9-6A: query/decision logic delegated to shared application services
  * (getRunDelivery / decideRunDelivery). CLI owns argv parsing + text/JSON I/O only.
  */
-async function runsDeliveryCommand(args, config) {
+async function runsDeliveryCommand(args, config, hostDeps) {
+  // M11-3C: `runs delivery review` sub-command — must be recognized BEFORE the
+  // ordinary query/accept/reject parsing so "review" is not mistaken for a runId.
+  if (args[0] === "review") {
+    await runsDeliveryReviewCommand(args.slice(1), config, hostDeps);
+    return;
+  }
+
   const options = parseOptions(args);
   const runDir = resolve(options.runDir ?? config.runDir);
   const [runId] = args.filter((a) => !a.startsWith("--"));
