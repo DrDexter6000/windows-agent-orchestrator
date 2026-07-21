@@ -498,6 +498,21 @@ test("M11-3B-G13: bad offset/stale-digest/noncanonical cursor rejected (real v2 
     const real = JSON.parse(Buffer.from(page1.nextCursor, "base64url").toString("utf8"));
     const canon = (obj) => Buffer.from(JSON.stringify(obj), "utf8").toString("base64url");
 
+    // Compute the EXACT total safe bytes by walking to the terminal page, so the
+    // equal-end and beyond-end probes use precise values (not a guessed 9999999).
+    let walkCursor = page1.nextCursor;
+    let lastOffset = real.o;
+    let lastFragmentBytes = page1.fragmentBytes;
+    while (walkCursor) {
+      const walk = await getRunDeliveryReview({ runId: uni.runId, runDir: uni.runDir, authorizedWorkspaceRoot: uni.repo, fileIndex: 0, cursor: walkCursor });
+      const walkPayload = JSON.parse(Buffer.from(walkCursor, "base64url").toString("utf8"));
+      lastOffset = walkPayload.o;
+      lastFragmentBytes = walk.fragmentBytes;
+      walkCursor = walk.nextCursor;
+    }
+    const totalBytes = lastOffset + lastFragmentBytes;
+    assert.ok(totalBytes > 0, "computed a real total byte count");
+
     // negative offset
     await assert.rejects(
       () => getRunDeliveryReview({ runId: uni.runId, runDir: uni.runDir, authorizedWorkspaceRoot: uni.repo, fileIndex: 0, cursor: canon({ ...real, o: -5 }) }),
@@ -508,9 +523,16 @@ test("M11-3B-G13: bad offset/stale-digest/noncanonical cursor rejected (real v2 
       () => getRunDeliveryReview({ runId: uni.runId, runDir: uni.runDir, authorizedWorkspaceRoot: uni.repo, fileIndex: 0, cursor: canon({ ...real, o: 1.5 }) }),
       /cursor|offset|range/i, "fractional offset rejected",
     );
-    // equal-to-end offset (offset must be < totalBytes)
+    // equal-to-end offset (offset === totalBytes): the terminal empty page is
+    // never encoded (nextCursor is null there), so offset === totalBytes must
+    // fail the strict `< totalBytes` range check.
     await assert.rejects(
-      () => getRunDeliveryReview({ runId: uni.runId, runDir: uni.runDir, authorizedWorkspaceRoot: uni.repo, fileIndex: 0, cursor: canon({ ...real, o: 9999999 }) }),
+      () => getRunDeliveryReview({ runId: uni.runId, runDir: uni.runDir, authorizedWorkspaceRoot: uni.repo, fileIndex: 0, cursor: canon({ ...real, o: totalBytes }) }),
+      /cursor|offset|range/i, "equal-to-end (offset===totalBytes) rejected",
+    );
+    // beyond-end offset.
+    await assert.rejects(
+      () => getRunDeliveryReview({ runId: uni.runId, runDir: uni.runDir, authorizedWorkspaceRoot: uni.repo, fileIndex: 0, cursor: canon({ ...real, o: totalBytes + 1 }) }),
       /cursor|offset|range/i, "beyond-end offset rejected",
     );
     // stale digest (tamper only d)
@@ -518,10 +540,10 @@ test("M11-3B-G13: bad offset/stale-digest/noncanonical cursor rejected (real v2 
       () => getRunDeliveryReview({ runId: uni.runId, runDir: uni.runDir, authorizedWorkspaceRoot: uni.repo, fileIndex: 0, cursor: canon({ ...real, d: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }) }),
       /cursor|stale|digest/i, "stale digest rejected",
     );
-    // cross-run fingerprint (tamper only r) — same commit/digest, different runId fingerprint
+    // artifact fingerprint (tamper only a) — same v/i/o/d, different fingerprint.
     await assert.rejects(
-      () => getRunDeliveryReview({ runId: uni.runId, runDir: uni.runDir, authorizedWorkspaceRoot: uni.repo, fileIndex: 0, cursor: canon({ ...real, r: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" }) }),
-      /cursor|run|mismatch/i, "cross-run fingerprint rejected",
+      () => getRunDeliveryReview({ runId: uni.runId, runDir: uni.runDir, authorizedWorkspaceRoot: uni.repo, fileIndex: 0, cursor: canon({ ...real, a: "ZZZZZZZZZZZZZZZZZZZZZZ" }) }),
+      /cursor|artifact|mismatch/i, "tampered artifact fingerprint rejected",
     );
 
     // noncanonical encoding: hand-craft a token whose decoded JSON has the right
@@ -539,27 +561,24 @@ test("M11-3B-G13: bad offset/stale-digest/noncanonical cursor rejected (real v2 
       );
     }
 
-    // continuation-byte offset: the real cursor's offset is a valid boundary.
-    // Scan forward from it to the first multi-byte start byte and point the
-    // cursor one byte INTO that sequence (a continuation byte). The service must
-    // reject an offset that lands on a UTF-8 continuation byte. We probe by
-    // trying offsets real.o+1 .. real.o+8; at least one multi-byte sequence in
-    // the CJK/emoji body will yield a continuation byte within that window.
-    // (If none do in this window, the offset either lands on a start byte and
-    // pages normally, or is out of range — both are acceptable non-leak outcomes.
-    // We assert that at least one probed offset is rejected as a code-point split
-    // OR is rejected as out-of-range, proving the offset is never accepted
-    // mid-sequence.)
-    let anyRejected = false;
+    // continuation-byte offset: the real cursor's offset is a valid code-point
+    // boundary. The CJK/emoji body guarantees multi-byte sequences; within
+    // real.o+1..real.o+8 at least one offset lands on a UTF-8 continuation byte
+    // (0x80-0xBF). The service must reject it specifically as a code-point split
+    // (not just any range error). We assert at least one probe hits the
+    // split-code-point error message exactly.
+    let sawSplit = false;
     for (let delta = 1; delta <= 8; delta += 1) {
       try {
         await getRunDeliveryReview({ runId: uni.runId, runDir: uni.runDir, authorizedWorkspaceRoot: uni.repo, fileIndex: 0, cursor: canon({ ...real, o: real.o + delta }) });
-      } catch {
-        anyRejected = true;
-        break;
+      } catch (e) {
+        if (/split.*code.?point|code.?point.*split|continuation/i.test(e.message)) {
+          sawSplit = true;
+          break;
+        }
       }
     }
-    assert.ok(anyRejected, "at least one offset in the probe window is rejected (continuation/range)");
+    assert.ok(sawSplit, "at least one offset in the probe window hits the split-code-point error");
   } finally {
     await cleanupRepo(uni.repo);
     await cleanupRepo(uni.runDir);
@@ -708,119 +727,143 @@ test("M11-3B-G19: requesting a pathspec-magic path returns ONLY that file's byte
 });
 
 // ---- G20: Git failure truth — overflow vs ordinary failure vs numstat failure ----
+// Uses the narrow projection Git injection point (hostDependencies.gitExecFileSyncFn)
+// so each failure mode is constructed deterministically. The injected output still
+// flows through the 256 KiB raw cap, redaction, and sanitization — it is not a
+// raw-output bypass.
 test("M11-3B-G20: overflow=diff_too_large; ordinary Git failure=application error; numstat failure=fail closed", async () => {
-  // (a) ~300 KiB raw text → overflow → diff_too_large, no partial fragment.
-  const big = await buildReviewScenario({
-    changeFn: async (wt) => { await writeFile(join(wt, "src", "a.js"), "const big = \"" + "A".repeat(300 * 1024) + "\";\n"); },
-    prefix: "wao-m113b-ov-",
+  // A small valid scenario; the real git is only used for M11-3A eligibility +
+  // packaging. The projection git calls are injected per sub-case.
+  const s = await buildReviewScenario({
+    changeFn: async (wt) => { await writeFile(join(wt, "src", "a.js"), "const a = 2;\n"); },
+    prefix: "wao-m113b-g20-",
   });
   try {
-    const r = await getRunDeliveryReview({
-      runId: big.runId, runDir: big.runDir, authorizedWorkspaceRoot: big.repo, fileIndex: 0,
-    });
-    assert.equal(r.available, false);
-    assert.equal(r.unavailableReason, "diff_too_large");
-    assert.equal(r.fragment, "");
-    assert.equal(r.fragmentBytes, 0);
-    assert.equal(r.nextCursor, null);
-  } finally {
-    await cleanupRepo(big.repo);
-    await cleanupRepo(big.runDir);
-  }
+    // Helper: make an injected exec that inspects argv and decides what to return.
+    // numstat argv starts with "--literal-pathspecs diff --numstat"; full-diff argv
+    // includes "--unified=3".
+    const makeExec = (numstatImpl, diffImpl) => (cmd, args, opts) => {
+      if (args.includes("--numstat")) return numstatImpl(cmd, args, opts);
+      if (args.includes("--unified=3")) return diffImpl(cmd, args, opts);
+      throw new Error(`unexpected git argv in injection: ${args.join(" ")}`);
+    };
 
-  // (b) ~260 KiB raw secret text that redacts DOWN below 256 KiB must STILL be
-  //     diff_too_large, because the RAW output exceeded the cap.
-  const SECRET = "test-secret-redact-overflow-1234567"; // >= MIN_SECRET_LENGTH
-  const bigSecret = await buildReviewScenario({
-    changeFn: async (wt) => {
-      // ~260 KiB of the secret repeated; redaction replaces each with a short
-      // marker, shrinking well under 256 KiB — but the raw diff overflowed.
-      await writeFile(join(wt, "src", "a.js"), "const s = \"" + SECRET.repeat(Math.ceil(260 * 1024 / SECRET.length)) + "\";\n");
-    },
-    prefix: "wao-m113b-ovsec-",
-  });
-  try {
-    const r = await getRunDeliveryReview({
-      runId: bigSecret.runId, runDir: bigSecret.runDir, authorizedWorkspaceRoot: bigSecret.repo, fileIndex: 0,
-    }, { env: { CONFIGURED_TOKEN: SECRET } });
-    assert.equal(r.available, false, "raw overflow → unavailable even if redaction shrinks");
-    assert.equal(r.unavailableReason, "diff_too_large");
-    assert.equal(r.fragment, "");
-  } finally {
-    await cleanupRepo(bigSecret.repo);
-    await cleanupRepo(bigSecret.runDir);
-  }
+    // (a) real ENOBUFS overflow on the full diff → diff_too_large, no partial.
+    {
+      const exec = makeExec(
+        () => "1\t1\tsrc/a.js\n", // numstat says text
+        () => { const e = new Error("maxBuffer size exceeded"); e.code = "ENOBUFS"; throw e; },
+      );
+      const r = await getRunDeliveryReview({
+        runId: s.runId, runDir: s.runDir, authorizedWorkspaceRoot: s.repo, fileIndex: 0,
+      }, { gitExecFileSyncFn: exec });
+      assert.equal(r.available, false);
+      assert.equal(r.unavailableReason, "diff_too_large");
+      assert.equal(r.fragment, "");
+      assert.equal(r.fragmentBytes, 0);
+      assert.equal(r.nextCursor, null);
+      const dumped = JSON.stringify(r);
+      assert.ok(!/stderr|fatal|not a git|ENOBUFS/i.test(dumped), "no stderr/path/error leak");
+    }
 
-  // (c) Ordinary Git failure (non-existent repo) → application error, NOT
-  //     diff_too_large. Use a valid scenario but point authorizedWorkspaceRoot
-  //     at a path that is not a git repo AFTER eligibility — eligibility requires
-  //     a real repo, so instead inject a readTranscriptFn that returns events
-  //     pointing at a valid repo, but corrupt the repo state isn't possible
-  //     without breaking eligibility. Instead: a cursor supplied against a
-  //     binary/too-large artifact must be rejected (not silently ignored).
-  const bin = await buildReviewScenario({
-    changeFn: async (wt) => {
-      await writeFile(join(wt, "src", "a.js"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe]));
-    },
-    prefix: "wao-m113b-bincursor-",
-  });
-  try {
-    // A cursor supplied for a binary artifact must throw (not return the binary
-    // metadata result silently).
-    await assert.rejects(
-      () => getRunDeliveryReview({
-        runId: bin.runId, runDir: bin.runDir, authorizedWorkspaceRoot: bin.repo, fileIndex: 0,
-        cursor: "eyJ2IjoyLCJyIjoiYSIsImMiOiJiIiwiaSI6MCwibyI6MSwiZCI6ImMifQ",
-      }),
-      /cursor|artifact|paginated|invalid/i,
-      "cursor supplied for binary artifact rejected",
-    );
+    // (b) ordinary Git failure on the full diff → fixed application error, NOT
+    //     diff_too_large. No partial fragment, no stderr/path leak.
+    {
+      const exec = makeExec(
+        () => "1\t1\tsrc/a.js\n",
+        () => { const e = new Error("fatal: not a git repository"); throw e; },
+      );
+      let caught = null;
+      try {
+        await getRunDeliveryReview({
+          runId: s.runId, runDir: s.runDir, authorizedWorkspaceRoot: s.repo, fileIndex: 0,
+        }, { gitExecFileSyncFn: exec });
+      } catch (e) { caught = e; }
+      assert.ok(caught, "ordinary Git failure must throw an application error");
+      assert.ok(/run_delivery_review failed/i.test(caught.message),
+        "ordinary Git failure → fixed application error (not diff_too_large)");
+    }
+
+    // (c) numstat failure → fail closed (application error), never falls back to
+    //     a text read.
+    {
+      const exec = makeExec(
+        () => { const e = new Error("fatal: numstat broken"); throw e; },
+        () => "this must NOT be reached",
+      );
+      let caught = null;
+      try {
+        await getRunDeliveryReview({
+          runId: s.runId, runDir: s.runDir, authorizedWorkspaceRoot: s.repo, fileIndex: 0,
+        }, { gitExecFileSyncFn: exec });
+      } catch (e) { caught = e; }
+      assert.ok(caught, "numstat failure must throw (fail closed)");
+      assert.ok(/run_delivery_review failed/i.test(caught.message),
+        "numstat failure → application error (no text fallback)");
+    }
+
+    // (d) injected raw output > 256 KiB → treated as overflow even though the
+    //     injection did not throw. Proves the cap is enforced on injected output.
+    {
+      const huge = "X".repeat(256 * 1024 + 100);
+      const exec = makeExec(
+        () => "1\t1\tsrc/a.js\n",
+        () => huge,
+      );
+      const r = await getRunDeliveryReview({
+        runId: s.runId, runDir: s.runDir, authorizedWorkspaceRoot: s.repo, fileIndex: 0,
+      }, { gitExecFileSyncFn: exec });
+      assert.equal(r.available, false);
+      assert.equal(r.unavailableReason, "diff_too_large");
+      assert.equal(r.fragment, "");
+    }
   } finally {
-    await cleanupRepo(bin.repo);
-    await cleanupRepo(bin.runDir);
+    await cleanupRepo(s.repo);
+    await cleanupRepo(s.runDir);
   }
 });
 
-// ---- G21: cursor binds runId (cross-run same commit/content rejected) ----
-test("M11-3B-G21: cross-run cursor rejected even when commit + fileIndex + content digest would match", async () => {
-  // Two runs with IDENTICAL body change → same content digest, but different
-  // runId (hence different runId fingerprint). A cursor from run1 applied to
-  // run2 must be rejected by the runId-fingerprint binding.
-  const body = "const same = 1;\n";
-  const r1 = await buildReviewScenario({
-    runId: "run_m113b_sameA", changeFn: async (wt) => { await writeFile(join(wt, "src", "a.js"), body); },
-    prefix: "wao-m113b-sameA-",
-  });
-  // For r2 we need the SAME diff content but a different runId. Because the diff
-  // is over the same base+change, the content digest matches; only runId differs.
-  // We need a >16KiB body to obtain a real cursor.
-  const bigBody = "X".repeat(20000) + "\n";
-  const big1 = await buildReviewScenario({
-    runId: "run_m113b_bigSameA", changeFn: async (wt) => { await writeFile(join(wt, "src", "a.js"), bigBody); },
-    prefix: "wao-m113b-bigsameA-",
-  });
-  const big2 = await buildReviewScenario({
-    runId: "run_m113b_bigSameB", changeFn: async (wt) => { await writeFile(join(wt, "src", "a.js"), bigBody); },
-    prefix: "wao-m113b-bigsameB-",
+// ---- G21: cursor artifact fingerprint binding (causal, single-field tamper) ----
+//
+// WAO delivery commits always encode the runId in the commit message
+// (`wao-delivery: <runId>`), so two legitimate different runs can NEVER share a
+// deliveryCommit. Rather than fake an impossible scenario, this test takes a REAL
+// valid cursor, decodes it, tampers ONLY the artifact fingerprint (`a`) field,
+// re-encodes canonically, and proves the artifact-mismatch branch fires. This
+// isolates the fingerprint-binding code path independent of commit/digest.
+test("M11-3B-G21: tampering only the artifact fingerprint of a real cursor is rejected", async () => {
+  const s = await buildReviewScenario({
+    changeFn: async (wt) => { await writeFile(join(wt, "src", "a.js"), "Y".repeat(20000) + "\n"); },
+    prefix: "wao-m113b-g21-",
   });
   try {
     const page1 = await getRunDeliveryReview({
-      runId: big1.runId, runDir: big1.runDir, authorizedWorkspaceRoot: big1.repo, fileIndex: 0,
+      runId: s.runId, runDir: s.runDir, authorizedWorkspaceRoot: s.repo, fileIndex: 0,
     });
     assert.ok(page1.nextCursor, "need a real cursor");
-    // The two runs have identical diff content, so digest matches; only runId
-    // (fingerprint) differs. The cursor must be rejected for big2.
-    await assert.rejects(
-      () => getRunDeliveryReview({
-        runId: big2.runId, runDir: big2.runDir, authorizedWorkspaceRoot: big2.repo, fileIndex: 0, cursor: page1.nextCursor,
-      }),
-      /cursor|run|mismatch/i,
-      "cross-run cursor rejected despite matching commit/digest",
-    );
+    assert.equal(page1.truncated, true);
+
+    // Decode the real cursor, tamper ONLY `a`, keep v/i/o/d byte-identical.
+    const real = JSON.parse(Buffer.from(page1.nextCursor, "base64url").toString("utf8"));
+    assert.ok("a" in real, "cursor carries artifact fingerprint field");
+    const tampered = Buffer.from(
+      JSON.stringify({ ...real, a: "Z".repeat(22) }), // same length, different fingerprint
+      "utf8",
+    ).toString("base64url");
+    assert.notEqual(tampered, page1.nextCursor, "tampered token differs from real");
+
+    let caught = null;
+    try {
+      await getRunDeliveryReview({
+        runId: s.runId, runDir: s.runDir, authorizedWorkspaceRoot: s.repo, fileIndex: 0, cursor: tampered,
+      });
+    } catch (e) { caught = e; }
+    assert.ok(caught, "tampered artifact fingerprint must be rejected");
+    assert.ok(/cursor|artifact|mismatch/i.test(caught.message),
+      "rejection came from the artifact-mismatch branch");
   } finally {
-    await cleanupRepo(r1.repo); await cleanupRepo(r1.runDir);
-    await cleanupRepo(big1.repo); await cleanupRepo(big1.runDir);
-    await cleanupRepo(big2.repo); await cleanupRepo(big2.runDir);
+    await cleanupRepo(s.repo);
+    await cleanupRepo(s.runDir);
   }
 });
 

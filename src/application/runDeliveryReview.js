@@ -213,15 +213,21 @@ const CURSOR_MAX_CHARS = 192;
  * cap — diff_too_large). Distinguishing these is the M11-3B closeout truth fix.
  * @private
  */
-function gitReadBounded(args, cwd) {
+function gitReadBounded(args, cwd, gitExec) {
+  const exec = gitExec ?? execFileSync;
   try {
-    const out = execFileSync("git", args, {
+    const out = exec("git", args, {
       cwd,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "ignore"],
       windowsHide: true,
       maxBuffer: GIT_DIFF_MAX_BUFFER,
     });
+    // Even under a test injection, enforce the hard raw cap: an injected output
+    // larger than 256 KiB is treated as overflow, never returned raw.
+    if (typeof out === "string" && Buffer.byteLength(out, "utf8") > GIT_DIFF_MAX_BUFFER) {
+      return { ok: false, overflow: true };
+    }
     return { ok: true, out };
   } catch (err) {
     // maxBuffer exceeded → the raw output is genuinely too large.
@@ -255,10 +261,11 @@ function assertSafePath(path) {
  * matching sibling files.
  * @private
  */
-function classifyBinary(base, delivery, path, cwd) {
+function classifyBinary(base, delivery, path, cwd, gitExec) {
   const res = gitReadBounded(
     ["--literal-pathspecs", "diff", "--numstat", "--no-renames", base, delivery, "--", path],
     cwd,
+    gitExec,
   );
   if (!res.ok) return res.overflow ? "failed" : "failed";
   const line = res.out.split("\n").find((l) => l.length > 0);
@@ -275,7 +282,7 @@ function classifyBinary(base, delivery, path, cwd) {
  * ok=false+overflow=false → ordinary Git failure (caller throws application error).
  * @private
  */
-function readCompleteDiff(base, delivery, path, cwd) {
+function readCompleteDiff(base, delivery, path, cwd, gitExec) {
   return gitReadBounded(
     [
       "--literal-pathspecs",
@@ -290,6 +297,7 @@ function readCompleteDiff(base, delivery, path, cwd) {
       path,
     ],
     cwd,
+    gitExec,
   );
 }
 
@@ -504,6 +512,11 @@ function projectChangedPath(path, redactor) {
  * @param {object} [hostDependencies] — test-only injection
  * @param {object} [hostDependencies.env] — env for the secret redactor
  * @param {Function} [hostDependencies.readTranscriptFn]
+ * @param {Function} [hostDependencies.gitExecFileSyncFn] — inject the projection
+ *   Git executor (classifyBinary + readCompleteDiff) for deterministic failure
+ *   tests. M11-3A eligibility still uses the real Git. Injected output still
+ *   passes through the 256 KiB raw cap, redaction, and sanitization — it is NOT
+ *   a raw-output bypass.
  * @returns {Promise<object>} safe structured review result
  */
 export async function getRunDeliveryReview(
@@ -519,6 +532,7 @@ export async function getRunDeliveryReview(
     fileIndex,
     ...(hostDependencies.readTranscriptFn ? { readTranscriptFn: hostDependencies.readTranscriptFn } : {}),
   });
+  const gitExec = hostDependencies.gitExecFileSyncFn;
 
   const base = target.baseCommit;
   const delivery = target.deliveryCommit;
@@ -561,7 +575,7 @@ export async function getRunDeliveryReview(
 
   // 2. Binary detection via structured metadata (--literal-pathspecs numstat).
   //    A numstat Git failure fails closed (never falls back to a text read).
-  const binaryClass = classifyBinary(base, delivery, path, cwd);
+  const binaryClass = classifyBinary(base, delivery, path, cwd, gitExec);
   if (binaryClass === "failed") {
     throw new Error("run_delivery_review failed");
   }
@@ -572,7 +586,7 @@ export async function getRunDeliveryReview(
   // 3. Read the complete single-file diff (bounded to EXACTLY 256 KiB).
   //    overflow (raw > 256 KiB) → diff_too_large (no partial output).
   //    ordinary Git failure → application error (NOT diff_too_large).
-  const diffRes = readCompleteDiff(base, delivery, path, cwd);
+  const diffRes = readCompleteDiff(base, delivery, path, cwd, gitExec);
   if (!diffRes.ok) {
     if (diffRes.overflow) {
       return unavailableResult("diff_too_large");
