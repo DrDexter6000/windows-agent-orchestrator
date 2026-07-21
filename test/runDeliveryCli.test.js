@@ -365,17 +365,20 @@ test("3C1-05: background delivery produces delivery_created + verification + ter
       await new Promise((r) => setTimeout(r, 250));
     }
 
-    // After reaching terminal, re-read to capture all events (verification may
-    // be written immediately after the terminal state_change). Retry a few
-    // times to handle flush timing under load.
-    for (let r = 0; r < 10; r += 1) {
-      await new Promise((res) => setTimeout(res, 500));
+    // After reaching terminal, the detached runner still has post-terminal work:
+    // cleanup (worktree removal) and then delivery verification. The verification
+    // event is written AFTER run.completed, so we must poll for the durable
+    // verification outcome event specifically — not rely on terminal as a
+    // "everything is done" signal. Poll up to 60s (120 × 500ms) for the
+    // verification event to appear.
+    for (let r = 0; r < 120; r += 1) {
       events = await readTranscript(transcriptPath);
       const hasVerification = events.some((e) =>
         e.type === "run.delivery_verification_passed" ||
         e.type === "run.delivery_verification_failed" ||
         e.type === "run.delivery_verification_unavailable");
       if (hasVerification) break;
+      await new Promise((res) => setTimeout(res, 500));
     }
 
     const finalState = findState(events);
