@@ -38,6 +38,7 @@ import { stopRun } from "../application/runStop.js";
 import { listRuns } from "../application/runList.js";
 import { runWait } from "../application/runWait.js";
 import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
+import { projectReviewResult } from "../application/deliveryReviewProjection.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
 import {
   listLeadPlaybooks,
@@ -724,103 +725,10 @@ const PLAYBOOK_GET_DESCRIPTION =
  */
 
 // ===== run_delivery_review (M11-3C read-only workspace-bound diff projection) =====
-
-/**
- * M11-3C: pure safe-output projection for run_delivery_review.
- *
- * Takes the UNTRUSTED service output and builds a NEW validated payload — never
- * returns the raw service object. Every field and cross-field invariant is
- * checked; any violation throws so the handler's single try/catch folds it into
- * the fixed `run_delivery_review failed` error.
- *
- * This helper does NO Git I/O — it only validates and copies.
- * @private
- */
-function projectReviewResult(raw, { runId: expectedRunId }) {
-  if (!raw || typeof raw !== "object") throw new Error("invalid review result");
-  // Reject unknown keys — the service output must be exactly the safe field set.
-  const ALLOWED_REVIEW_KEYS = new Set([
-    "runId", "deliveryCommit", "fileIndex", "changedFileCount", "changedPath",
-    "contentFormat", "artifactTextTrust", "available", "unavailableReason",
-    "fragment", "fragmentBytes", "nextCursor", "truncated",
-  ]);
-  for (const k of Object.keys(raw)) {
-    if (!ALLOWED_REVIEW_KEYS.has(k)) throw new Error("unknown key in review result");
-  }
-  // runId must match the request.
-  if (raw.runId !== expectedRunId) throw new Error("runId mismatch");
-  // deliveryCommit must be canonical lowercase 40/64 hex.
-  if (typeof raw.deliveryCommit !== "string" || !/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(raw.deliveryCommit)) {
-    throw new Error("invalid deliveryCommit");
-  }
-  // fileIndex: non-negative integer.
-  if (!Number.isInteger(raw.fileIndex) || raw.fileIndex < 0) throw new Error("invalid fileIndex");
-  // changedFileCount: non-negative integer.
-  if (!Number.isInteger(raw.changedFileCount) || raw.changedFileCount < 0) throw new Error("invalid changedFileCount");
-  // fileIndex must be < changedFileCount (or changedFileCount can be 0 for binary/empty —
-  // but fileIndex >= changedFileCount is only valid if available=false).
-  if (raw.available === true && raw.fileIndex >= raw.changedFileCount) throw new Error("fileIndex out of range");
-  // changedPath: safe string.
-  if (typeof raw.changedPath !== "string" || raw.changedPath.length === 0 || raw.changedPath.length > 512) {
-    throw new Error("invalid changedPath");
-  }
-  // contentFormat + artifactTextTrust must be the exact constants.
-  if (raw.contentFormat !== "unified_diff_v1") throw new Error("invalid contentFormat");
-  if (raw.artifactTextTrust !== "untrusted_repository_text") throw new Error("invalid artifactTextTrust");
-
-  const available = raw.available;
-  if (typeof available !== "boolean") throw new Error("invalid available");
-
-  // available=true invariants
-  if (available) {
-    if (raw.unavailableReason !== null) throw new Error("available but reason set");
-    if (typeof raw.fragment !== "string") throw new Error("invalid fragment");
-    // fragment must be <= 16384 chars and <= 16384 bytes UTF-8.
-    if (raw.fragment.length > 16384) throw new Error("fragment too long");
-    if (Buffer.byteLength(raw.fragment, "utf8") > 16 * 1024) throw new Error("fragment too many bytes");
-    // fragmentBytes must match actual UTF-8 byte length.
-    const actualBytes = Buffer.byteLength(raw.fragment, "utf8");
-    if (raw.fragmentBytes !== actualBytes) throw new Error("fragmentBytes mismatch");
-    // Only LF (0x0A) and TAB (0x09) are safe control chars; reject all others.
-    // eslint-disable-next-line no-control-regex
-    if (/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(raw.fragment)) throw new Error("unsafe control char in fragment");
-    // nextCursor: null or opaque string <=192.
-    if (raw.nextCursor !== null) {
-      if (typeof raw.nextCursor !== "string" || raw.nextCursor.length === 0 || raw.nextCursor.length > 192) {
-        throw new Error("invalid nextCursor");
-      }
-    }
-    // truncated must be consistent with nextCursor.
-    const expectedTruncated = raw.nextCursor !== null;
-    if (raw.truncated !== expectedTruncated) throw new Error("truncated/nextCursor inconsistency");
-  } else {
-    // available=false invariants
-    if (raw.unavailableReason !== "binary" && raw.unavailableReason !== "diff_too_large") {
-      throw new Error("invalid unavailableReason");
-    }
-    if (raw.fragment !== "") throw new Error("unavailable but fragment non-empty");
-    if (raw.fragmentBytes !== 0) throw new Error("unavailable but fragmentBytes non-zero");
-    if (raw.nextCursor !== null) throw new Error("unavailable but nextCursor non-null");
-    if (raw.truncated !== false) throw new Error("unavailable but truncated true");
-  }
-
-  // Build and return a NEW object — never the raw service reference.
-  return {
-    runId: raw.runId,
-    deliveryCommit: raw.deliveryCommit,
-    fileIndex: raw.fileIndex,
-    changedFileCount: raw.changedFileCount,
-    changedPath: raw.changedPath,
-    contentFormat: raw.contentFormat,
-    artifactTextTrust: raw.artifactTextTrust,
-    available,
-    unavailableReason: raw.unavailableReason,
-    fragment: raw.fragment,
-    fragmentBytes: raw.fragmentBytes,
-    nextCursor: raw.nextCursor,
-    truncated: raw.truncated,
-  };
-}
+// M11-3C closeout: projectReviewResult is now a shared SSOT in
+// src/application/deliveryReviewProjection.js — both MCP and CLI MUST call it.
+// It adds exact-secret redaction (changedPath) and fragment-secret fail-closed
+// that the inline version lacked.
 
 const DELIVERY_REVIEW_ERROR_TEXT = "run_delivery_review failed";
 const DELIVERY_REVIEW_INPUT = z.object({
@@ -1663,6 +1571,21 @@ export function createWaoMcpServer({
       // cross-field validation + outputSchema.parse is inside ONE try/catch so
       // any violation collapses to the fixed error with no structuredContent.
       try {
+        // M11-3C closeout: pre-validate model input BEFORE workspace binding or
+        // any service call. Invalid runId/cursor → fixed error, serviceCalls=0.
+        const runId = input?.runId;
+        if (!isValidRunId(runId)) {
+          return { isError: true, content: [{ type: "text", text: DELIVERY_REVIEW_ERROR_TEXT }] };
+        }
+        const cursor = input?.cursor;
+        if (cursor !== undefined) {
+          if (typeof cursor !== "string" || cursor.length === 0 || cursor.length > 192
+              || !/^[A-Za-z0-9_-]+$/.test(cursor)) {
+            return { isError: true, content: [{ type: "text", text: DELIVERY_REVIEW_ERROR_TEXT }] };
+          }
+        }
+        const fileIndex = input?.fileIndex;
+
         // Workspace binding — review is workspace-bound (the service needs the
         // authorized source repo to prove the exact commit). No binding → the
         // service is NEVER called.
@@ -1670,10 +1593,6 @@ export function createWaoMcpServer({
         if (!binding.bound) {
           return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
         }
-
-        const runId = input?.runId;
-        const fileIndex = input?.fileIndex;
-        const cursor = input?.cursor;
 
         const result = await deliveryReviewService({
           runId,

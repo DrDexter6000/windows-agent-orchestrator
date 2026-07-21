@@ -465,3 +465,175 @@ test("M11-3C-07: cursor passed opaquely; adapter has no shell-out; no hostDepend
   assert.ok(!/node:child_process/.test(srvSrc), "MCP adapter has no child_process import");
   assert.ok(!/shell:\s*true/.test(srvSrc), "no shell:true");
 });
+
+// =====================================================================
+// M11-3C closeout: shared projection secret redaction + strict input +
+// real default-service no-model smoke.
+// =====================================================================
+
+// ---- closeout-1: exact secret in changedPath is redacted; secret in fragment fails closed ----
+test("M11-3C-CLOSE-1: changedPath secret → [REDACTED]; fragment secret → fixed error", async () => {
+  const SECRET = "test-secret-closeout-mcp-path";
+  const ENV_VAR = "M113C_CLOSE1_TOKEN";
+  const oldVal = process.env[ENV_VAR];
+  process.env[ENV_VAR] = SECRET; // configure in process.env so createSecretRedactor() finds it
+  const dir = makeGitDir("m113c-close1-");
+  try {
+    // changedPath contains a configured secret → redacted to [REDACTED]
+    {
+      const server = createWaoMcpServer({
+        registryPath: "/x", runDir: dir, workspaceRoot: dir,
+        getRunDeliveryReviewFn: async () => validTextPage({
+          runId: "run_close1", changedPath: `src/${SECRET}.js`,
+        }),
+      });
+      const client = await buildInMemoryClient(server);
+      try {
+        const res = await client.callTool({ name: "run_delivery_review", arguments: { runId: "run_close1", fileIndex: 0 } });
+        assert.equal(res.isError, undefined, "valid call");
+        assert.equal(res.structuredContent.changedPath, "[REDACTED]", "changedPath collapsed to [REDACTED]");
+        assert.ok(!JSON.stringify(res).includes(SECRET), "secret not in result");
+      } finally { await client.close(); await server.close(); }
+    }
+    // fragment contains a configured secret → fail closed
+    {
+      const server = createWaoMcpServer({
+        registryPath: "/x", runDir: dir, workspaceRoot: dir,
+        getRunDeliveryReviewFn: async () => validTextPage({
+          runId: "run_close1",
+          fragment: `+const x = "${SECRET}";\n`,
+          fragmentBytes: Buffer.byteLength(`+const x = "${SECRET}";\n`),
+        }),
+      });
+      const client = await buildInMemoryClient(server);
+      try {
+        const res = await client.callTool({ name: "run_delivery_review", arguments: { runId: "run_close1", fileIndex: 0 } });
+        assert.equal(res.isError, true, "fragment secret → error");
+        assert.ok(!res.structuredContent, "no structuredContent");
+        assert.ok(!JSON.stringify(res).includes(SECRET), "secret not in error result");
+      } finally { await client.close(); await server.close(); }
+    }
+  } finally {
+    if (oldVal === undefined) delete process.env[ENV_VAR]; else process.env[ENV_VAR] = oldVal;
+    cleanupDir(dir);
+  }
+});
+test("M11-3C-CLOSE-2: whitespace runId / bad cursor rejected before service", async () => {
+  const dir = makeGitDir("m113c-close2-");
+  try {
+    let calls = 0;
+    const server = createWaoMcpServer({
+      registryPath: "/x", runDir: dir, workspaceRoot: dir,
+      getRunDeliveryReviewFn: async () => { calls++; return validTextPage(); },
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      // whitespace runId
+      calls = 0;
+      await client.callTool({ name: "run_delivery_review", arguments: { runId: "   ", fileIndex: 0 } }).catch(() => {});
+      assert.equal(calls, 0, "whitespace runId → 0 calls");
+
+      // empty cursor
+      calls = 0;
+      const r2 = await client.callTool({ name: "run_delivery_review", arguments: { runId: "run_review1", fileIndex: 0, cursor: "" } }).catch(() => ({ isError: true }));
+      assert.equal(r2.isError, true, "empty cursor → error");
+      assert.equal(calls, 0, "empty cursor → 0 calls");
+
+      // non-base64url cursor
+      calls = 0;
+      const r3 = await client.callTool({ name: "run_delivery_review", arguments: { runId: "run_review1", fileIndex: 0, cursor: "bad!token" } }).catch(() => ({ isError: true }));
+      assert.equal(r3.isError, true, "non-base64url cursor → error");
+      assert.equal(calls, 0, "non-base64url cursor → 0 calls");
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); }
+});
+
+// ---- closeout-3: REAL no-model smoke — default service, real git, real transcript ----
+test("M11-3C-CLOSE-3-SMOKE: real default service MCP + CLI parity, inventory unchanged", async () => {
+  const { packageDelivery } = await import("../src/delivery.js");
+  const { runsDeliveryCommand } = await import("../src/commands/runs.js");
+  const { statSync } = await import("node:fs");
+
+  // Build a real git repo with a verified delivery.
+  const repo = mkdtempSync(join(tmpdir(), "m113c-smoke-repo-"));
+  const runDir = mkdtempSync(join(tmpdir(), "m113c-smoke-td-"));
+  try {
+    execSync("git init -b main", { cwd: repo, stdio: "ignore" });
+    execSync('git config user.email "t@t"', { cwd: repo, stdio: "ignore" });
+    execSync('git config user.name "t"', { cwd: repo, stdio: "ignore" });
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "a.js"), "const a = 1;\n");
+    execSync("git add . && git commit -m init", { cwd: repo, stdio: "ignore" });
+    const base = execSync("git rev-parse HEAD", { cwd: repo, encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"] }).trim();
+
+    const wt = join(repo, ".wao-worktrees", "run_smoke");
+    execSync(`git worktree add "${wt}" -b wao/run_smoke`, { cwd: repo, stdio: "ignore" });
+    writeFileSync(join(wt, "src", "a.js"), "const a = 2;\n");
+    const ref = packageDelivery({
+      runId: "run_smoke", worktreePath: wt, baseCommit: base, allowedPaths: ["src"],
+      isolation: { type: "worktree", strategy: "persistent" }, verificationCommands: ["npm test"],
+    });
+
+    // Write a real transcript.
+    const events = [
+      { type: "run.started", runId: "run_smoke", ts: "2026-01-01T00:00:00Z", seq: 1 },
+      { type: "run.background_submitted", runId: "run_smoke", ts: "2026-01-01T00:00:00Z", seq: 1, cwd: repo, background: true },
+      { type: "run.delivery_created", runId: "run_smoke", ts: "2026-01-01T00:00:01Z", seq: 2, delivery: ref },
+      { type: "run.delivery_verification_passed", runId: "run_smoke", ts: "2026-01-01T00:00:02Z", seq: 3, delivery: ref },
+      { type: "run.state_change", runId: "run_smoke", ts: "2026-01-01T00:00:03Z", seq: 4, from: "running", to: "completed" },
+      { type: "run.completed", runId: "run_smoke", ts: "2026-01-01T00:00:04Z", seq: 5 },
+    ];
+    writeFileSync(join(runDir, "run_smoke.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+
+    // MCP: default service, no injection — first page
+    const server = createWaoMcpServer({ registryPath: "/x", runDir, workspaceRoot: repo });
+    const client = await buildInMemoryClient(server);
+    try {
+      const transcriptBefore = statSync(join(runDir, "run_smoke.jsonl")).size;
+      const headBefore = execSync("git rev-parse HEAD", { cwd: repo, encoding: "utf8" }).trim();
+
+      const res = await client.callTool({
+        name: "run_delivery_review",
+        arguments: { runId: "run_smoke", fileIndex: 0 },
+      });
+      assert.equal(res.isError, undefined, "MCP smoke call succeeds");
+      assert.ok(res.structuredContent.available, "artifact available");
+      assert.ok(res.structuredContent.fragment.includes("const a = 2;"), "diff content present");
+      assert.equal(res.structuredContent.changedPath, "src/a.js");
+      assert.equal(res.structuredContent.contentFormat, "unified_diff_v1");
+      assert.equal(res.structuredContent.artifactTextTrust, "untrusted_repository_text");
+
+      // Inventory unchanged
+      const transcriptAfter = statSync(join(runDir, "run_smoke.jsonl")).size;
+      const headAfter = execSync("git rev-parse HEAD", { cwd: repo, encoding: "utf8" }).trim();
+      assert.equal(transcriptAfter, transcriptBefore, "transcript bytes unchanged");
+      assert.equal(headAfter, headBefore, "source HEAD unchanged");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+
+    // CLI: default service, --format json — semantic parity with MCP
+    {
+      const orig = console.log;
+      let cliOut = "";
+      console.log = (...a) => { cliOut += a.join("\t") + "\n"; };
+      try {
+        await runsDeliveryCommand(
+          ["review", "run_smoke", "--file-index", "0", "--format", "json", "--cwd", repo],
+          { runDir },
+        );
+      } finally { console.log = orig; }
+      const cliParsed = JSON.parse(cliOut);
+      assert.equal(cliParsed.available, true, "CLI parity: available");
+      assert.equal(cliParsed.changedPath, "src/a.js", "CLI parity: changedPath");
+      assert.equal(cliParsed.contentFormat, "unified_diff_v1", "CLI parity: contentFormat");
+      assert.ok(cliParsed.fragment.includes("const a = 2;"), "CLI parity: fragment content");
+    }
+  } finally {
+    try { execSync("git worktree prune", { cwd: repo, stdio: "ignore" }); } catch {}
+    cleanupDir(repo);
+    cleanupDir(runDir);
+  }
+});

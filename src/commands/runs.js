@@ -600,33 +600,23 @@ export async function runsDashboardCommand(args, config) {
  * @param {object} [hostDeps] — { getRunDeliveryReviewFn } for testing
  */
 async function runsDeliveryReviewCommand(args, config, hostDeps = {}) {
-  // Narrow, strict flag parsing for review — independent of parseOptions so the
-  // historical query/accept/reject parsing is byte-compatible.
+  // M11-3C closeout: strict flag parsing — every flag value must be non-empty /
+  // non-whitespace; no duplicates; exactly one positional; format must be json
+  // (or omitted = text); cursor must be base64url.
+  const KNOWN_FLAGS = new Set(["--file-index", "--cursor", "--format", "--cwd"]);
+  const seenFlags = new Set();
   const flags = {};
   const positionals = [];
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
-    if (a === "--file-index") {
-      if (flags.fileIndex !== undefined) throw new Error("--file-index specified multiple times");
+    if (a === "--file-index" || a === "--cursor" || a === "--format" || a === "--cwd") {
+      if (seenFlags.has(a)) throw new Error(`${a} specified multiple times`);
+      seenFlags.add(a);
       const v = args[i + 1];
-      if (v === undefined || v.startsWith("--")) throw new Error("--file-index requires a value");
-      flags.fileIndex = v;
-      i += 1;
-    } else if (a === "--cursor") {
-      if (flags.cursor !== undefined) throw new Error("--cursor specified multiple times");
-      const v = args[i + 1];
-      if (v === undefined || v.startsWith("--")) throw new Error("--cursor requires a value");
-      flags.cursor = v;
-      i += 1;
-    } else if (a === "--format") {
-      const v = args[i + 1];
-      if (v === undefined || v.startsWith("--")) throw new Error("--format requires a value");
-      flags.format = v;
-      i += 1;
-    } else if (a === "--cwd") {
-      const v = args[i + 1];
-      if (v === undefined || v.startsWith("--")) throw new Error("--cwd requires a value");
-      flags.cwd = v;
+      if (v === undefined || v.startsWith("--")) throw new Error(`${a} requires a value`);
+      if (v.trim().length === 0) throw new Error(`${a} must be non-empty`);
+      const key = a.slice(2).replace(/-([a-z])/, (_, c) => c.toUpperCase());
+      flags[key] = v;
       i += 1;
     } else if (a.startsWith("--")) {
       throw new Error(`unknown flag for delivery review: ${a}`);
@@ -635,29 +625,40 @@ async function runsDeliveryReviewCommand(args, config, hostDeps = {}) {
     }
   }
 
+  if (positionals.length !== 1) {
+    throw new Error("runs delivery review requires exactly one <runId>");
+  }
   const runId = positionals[0];
-  if (!runId || runId.trim().length === 0) {
-    throw new Error("runs delivery review requires <runId>");
+  if (runId.trim().length === 0 || !/^[A-Za-z0-9_-]+$/.test(runId)) {
+    throw new Error("runs delivery review requires a valid <runId>");
   }
 
   if (flags.fileIndex === undefined) {
     throw new Error("runs delivery review requires --file-index");
   }
-  const fileIndexStr = String(flags.fileIndex).trim();
-  if (fileIndexStr.length === 0) {
-    throw new Error("--file-index must be non-empty");
-  }
-  if (!/^\d+$/.test(fileIndexStr)) {
+  if (!/^\d+$/.test(flags.fileIndex)) {
     throw new Error("--file-index must be a non-negative integer");
   }
-  const fileIndex = Number(fileIndexStr);
+  const fileIndex = Number(flags.fileIndex);
+
+  // cursor must be base64url if provided.
+  if (flags.cursor !== undefined) {
+    if (!/^[A-Za-z0-9_-]+$/.test(flags.cursor)) {
+      throw new Error("--cursor must be a valid opaque token");
+    }
+  }
+
+  // format must be json or omitted (text).
+  if (flags.format !== undefined && flags.format !== "json") {
+    throw new Error("--format only supports 'json' (text mode is default)");
+  }
 
   // Resolve authorized workspace root via the existing CLI workspace mechanism.
   const cwd = flags.cwd ? resolve(flags.cwd) : resolveTargetCwd({ cwd: undefined }, config);
   const runDir = resolve(config.runDir);
 
   const service = hostDeps.getRunDeliveryReviewFn ?? getRunDeliveryReview;
-  const result = await service({
+  const raw = await service({
     runId,
     runDir,
     authorizedWorkspaceRoot: cwd,
@@ -665,23 +666,13 @@ async function runsDeliveryReviewCommand(args, config, hostDeps = {}) {
     ...(flags.cursor !== undefined ? { cursor: flags.cursor } : {}),
   });
 
+  // M11-3C closeout: use the SAME shared safe-output projection as the MCP
+  // adapter. Never output the raw service result directly.
+  const { projectReviewResult } = await import("../application/deliveryReviewProjection.js");
+  const result = projectReviewResult(raw, { runId });
+
   if (flags.format === "json") {
-    // JSON output: semantically equal to MCP structuredContent.
-    console.log(JSON.stringify({
-      runId: result.runId,
-      deliveryCommit: result.deliveryCommit,
-      fileIndex: result.fileIndex,
-      changedFileCount: result.changedFileCount,
-      changedPath: result.changedPath,
-      contentFormat: result.contentFormat,
-      artifactTextTrust: result.artifactTextTrust,
-      available: result.available,
-      unavailableReason: result.unavailableReason,
-      fragment: result.fragment,
-      fragmentBytes: result.fragmentBytes,
-      nextCursor: result.nextCursor,
-      truncated: result.truncated,
-    }, null, 2));
+    console.log(JSON.stringify(result, null, 2));
     return;
   }
 

@@ -150,7 +150,9 @@ test("M11-3C-CLI-04: text mode outputs fragment + cursor + unavailable status", 
     const out1 = await captureLog(async () => {
       await runsDeliveryCommand(["review", "run_x", "--file-index", "0"], config, {
         getRunDeliveryReviewFn: async () => validReviewResult({
+          runId: "run_x",
           fragment: "line1\nline2\n",
+          fragmentBytes: 12,
           nextCursor: "abc123cursor",
           truncated: true,
         }),
@@ -163,6 +165,7 @@ test("M11-3C-CLI-04: text mode outputs fragment + cursor + unavailable status", 
     const out2 = await captureLog(async () => {
       await runsDeliveryCommand(["review", "run_x", "--file-index", "0"], config, {
         getRunDeliveryReviewFn: async () => validReviewResult({
+          runId: "run_x",
           available: false, unavailableReason: "binary", fragment: "", fragmentBytes: 0, nextCursor: null, truncated: false,
         }),
       });
@@ -173,6 +176,7 @@ test("M11-3C-CLI-04: text mode outputs fragment + cursor + unavailable status", 
     const out3 = await captureLog(async () => {
       await runsDeliveryCommand(["review", "run_x", "--file-index", "0"], config, {
         getRunDeliveryReviewFn: async () => validReviewResult({
+          runId: "run_x",
           available: false, unavailableReason: "diff_too_large", fragment: "", fragmentBytes: 0, nextCursor: null, truncated: false,
         }),
       });
@@ -194,10 +198,56 @@ test("M11-3C-CLI-05: --cursor passed opaquely to service", async () => {
     const config = { runDir: dir };
     await captureLog(async () => {
       await runsDeliveryCommand(["review", "run_x", "--file-index", "0", "--cursor", "opaque-token"], config, {
-        getRunDeliveryReviewFn: async (args) => { captured = args.cursor; return validReviewResult(); },
+        getRunDeliveryReviewFn: async (args) => { captured = args.cursor; return validReviewResult({ runId: "run_x" }); },
       });
     });
     assert.equal(captured, "opaque-token", "cursor passed opaquely");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
+// M11-3C closeout: CLI strict parser — extra positional, duplicate flags,
+// whitespace, unknown format all rejected.
+// =====================================================================
+
+test("M11-3C-CLI-CLOSE: extra positional / duplicate flags / whitespace / unknown format rejected", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "m113c-cli-close-"));
+  try {
+    const config = { runDir: dir };
+    const svc = async () => validReviewResult({ runId: "run_x" });
+
+    // extra positional (two runIds)
+    await assert.rejects(
+      () => runsDeliveryCommand(["review", "run_x", "extra", "--file-index", "0"], config, { getRunDeliveryReviewFn: svc }),
+      /exactly one|runId/i,
+      "extra positional rejected",
+    );
+    // duplicate --format
+    await assert.rejects(
+      () => runsDeliveryCommand(["review", "run_x", "--file-index", "0", "--format", "json", "--format", "json"], config, { getRunDeliveryReviewFn: svc }),
+      /multiple|duplicate/i,
+      "duplicate --format rejected",
+    );
+    // duplicate --cwd
+    await assert.rejects(
+      () => runsDeliveryCommand(["review", "run_x", "--file-index", "0", "--cwd", "/a", "--cwd", "/b"], config, { getRunDeliveryReviewFn: svc }),
+      /multiple|duplicate/i,
+      "duplicate --cwd rejected",
+    );
+    // whitespace cursor
+    await assert.rejects(
+      () => runsDeliveryCommand(["review", "run_x", "--file-index", "0", "--cursor", "   "], config, { getRunDeliveryReviewFn: svc }),
+      /cursor|non-empty|opaque/i,
+      "whitespace cursor rejected",
+    );
+    // unknown format
+    await assert.rejects(
+      () => runsDeliveryCommand(["review", "run_x", "--file-index", "0", "--format", "xml"], config, { getRunDeliveryReviewFn: svc }),
+      /format|json/i,
+      "unknown format rejected",
+    );
   } finally {
     cleanupDir(dir);
   }
