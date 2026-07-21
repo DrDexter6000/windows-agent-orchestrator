@@ -603,13 +603,13 @@ async function runsDeliveryReviewCommand(args, config, hostDeps = {}) {
   // M11-3C closeout: strict flag parsing — every flag value must be non-empty /
   // non-whitespace; no duplicates; exactly one positional; format must be json
   // (or omitted = text); cursor must be base64url.
-  const KNOWN_FLAGS = new Set(["--file-index", "--cursor", "--format", "--cwd"]);
+  const KNOWN_FLAGS = new Set(["--file-index", "--cursor", "--format", "--cwd", "--run-dir"]);
   const seenFlags = new Set();
   const flags = {};
   const positionals = [];
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
-    if (a === "--file-index" || a === "--cursor" || a === "--format" || a === "--cwd") {
+    if (a === "--file-index" || a === "--cursor" || a === "--format" || a === "--cwd" || a === "--run-dir") {
       if (seenFlags.has(a)) throw new Error(`${a} specified multiple times`);
       seenFlags.add(a);
       const v = args[i + 1];
@@ -655,7 +655,7 @@ async function runsDeliveryReviewCommand(args, config, hostDeps = {}) {
 
   // Resolve authorized workspace root via the existing CLI workspace mechanism.
   const cwd = flags.cwd ? resolve(flags.cwd) : resolveTargetCwd({ cwd: undefined }, config);
-  const runDir = resolve(config.runDir);
+  const runDir = resolve(flags.runDir ?? config.runDir);
 
   const service = hostDeps.getRunDeliveryReviewFn ?? getRunDeliveryReview;
   const raw = await service({
