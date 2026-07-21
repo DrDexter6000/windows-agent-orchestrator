@@ -252,3 +252,30 @@ test("M11-3C-CLI-CLOSE: extra positional / duplicate flags / whitespace / unknow
     cleanupDir(dir);
   }
 });
+
+// =====================================================================
+// M11-3C closeout: --run-dir is an authorized CLI parity flag
+// =====================================================================
+
+test("M11-3C-CLI-RUNDIR: --run-dir passes through to service", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "m113c-cli-rd-"));
+  const customRunDir = mkdtempSync(join(tmpdir(), "m113c-cli-rd-custom-"));
+  try {
+    let capturedRunDir = null;
+    const config = { runDir: dir };
+    await captureLog(async () => {
+      await runsDeliveryCommand(
+        ["review", "run_x", "--file-index", "0", "--run-dir", customRunDir],
+        config,
+        { getRunDeliveryReviewFn: async (args) => {
+          capturedRunDir = args.runDir;
+          return validReviewResult({ runId: "run_x" });
+        } },
+      );
+    });
+    assert.equal(capturedRunDir, customRunDir, "--run-dir overrides config.runDir");
+  } finally {
+    cleanupDir(dir);
+    cleanupDir(customRunDir);
+  }
+});

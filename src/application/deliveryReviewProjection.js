@@ -66,18 +66,13 @@ export function projectReviewResult(raw, { runId: expectedRunId, env } = {}) {
   // When available, fileIndex must be within range.
   if (raw.available === true && raw.fileIndex >= raw.changedFileCount) throw new Error("fileIndex out of range");
 
-  // changedPath: MUST be a canonical repo-relative path. Validate FIRST with
-  // the existing SSOT (validateProjectedPath rejects absolute, traversal,
+  // changedPath: MUST be a canonical repo-relative path. Validate with the
+  // existing SSOT (validateProjectedPath: rejects absolute, traversal,
   // backslash, double/trailing separator, dot segment, C0/C1/DEL, >512).
-  // Then add PROJECTION-layer hardening: reject pathspec magic ([*?]) and
-  // colons that are valid POSIX filenames but dangerous when output crosses
-  // to the model. This is not a second path-identity algorithm — it is a
-  // narrow output-boundary guard layered on top of the SSOT.
+  // M11-3B --literal-pathspecs already prevents Git pathspec expansion at the
+  // diff-read layer; the projection output is data, not a Git pathspec, so
+  // legal POSIX filename characters like [*?:] are NOT re-rejected here.
   validateProjectedPath(raw.changedPath);
-  // eslint-disable-next-line no-control-regex
-  if (/[[\]*?:]/.test(raw.changedPath)) {
-    throw new Error("invalid changedPath: pathspec magic or colon at output boundary");
-  }
   const redactor = createSecretRedactor(env ?? process.env);
   let changedPath = raw.changedPath;
   const redactedPath = redactor.redactString(changedPath);
