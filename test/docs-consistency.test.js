@@ -1107,7 +1107,7 @@ test("M11-3D1: Lead 在 decision 前逐文件逐页 review，并把 fragment 当
     "usage 记录 artifact trust marker 与 prompt injection 边界");
 });
 
-test("M11-3D1: 本地 Git fallback 只用于不可用 review，roadmap 不提前声称 dogfood 完成", () => {
+test("M11-3D: 本地 Git fallback 只用于不可用 review，roadmap 记录 fresh Lead dogfood PASS", () => {
   const skill = read("SKILL.md");
   const roadmap = read("docs/roadmap.md");
   assert.ok(/fallback only when review returns `available:false`.*`binary` or `diff_too_large`/i.test(skill),
@@ -1115,10 +1115,12 @@ test("M11-3D1: 本地 Git fallback 只用于不可用 review，roadmap 不提前
   const m11Row = roadmap.split("\n").find((l) => /^\|\s*M11\s*\|/.test(l)) || "";
   assert.ok(/M11-3.*A\/B\/C.*完成|M11-3A\/B\/C.*完成/i.test(m11Row),
     "roadmap 标记 M11-3A/B/C 完成");
-  assert.ok(/M11-3D.*dogfood.*(待|未完成|pending)/i.test(m11Row),
-    "roadmap 保持 M11-3D dogfood 未完成");
-  assert.ok(!/M11-3D.*dogfood.*(PASS|已完成|已通过)/i.test(m11Row),
-    "roadmap 不提前声称 M11-3D dogfood 通过");
+  assert.ok(/M11-3D.*fresh Codex CLI Lead dogfood.*(PASS|已完成|已通过)/i.test(m11Row),
+    "roadmap 标记 M11-3D fresh Codex CLI Lead dogfood 已通过");
+  assert.ok(/run_20260721225501254ly42og|76039be/i.test(m11Row),
+    "roadmap 保留 M11-3D 最小证据锚点");
+  assert.ok(!/M11-3D.*dogfood.*(待完成|未完成|pending)/i.test(m11Row),
+    "roadmap 不再把 M11-3D dogfood 标为待完成");
 });
 
 // ============================================================
