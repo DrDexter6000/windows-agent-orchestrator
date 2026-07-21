@@ -749,7 +749,7 @@ const DELIVERY_REVIEW_OUTPUT = z.object({
   unavailableReason: z.enum(["binary", "diff_too_large"]).nullable(),
   fragment: z.string().max(16384),
   fragmentBytes: z.number().int().nonnegative(),
-  nextCursor: z.string().max(192).nullable(),
+  nextCursor: z.string().regex(/^[A-Za-z0-9_-]+$/).max(192).nullable(),
   truncated: z.boolean(),
 }).strict();
 

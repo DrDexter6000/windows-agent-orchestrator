@@ -22,6 +22,7 @@
 
 import { createSecretRedactor } from "../secretRedaction.js";
 import { isValidRunId, isCanonicalCommitId } from "../delivery.js";
+import { validateProjectedPath } from "./deliveryReview.js";
 
 /** Allowed top-level keys in a review result. */
 const ALLOWED_REVIEW_KEYS = new Set([
@@ -65,9 +66,17 @@ export function projectReviewResult(raw, { runId: expectedRunId, env } = {}) {
   // When available, fileIndex must be within range.
   if (raw.available === true && raw.fileIndex >= raw.changedFileCount) throw new Error("fileIndex out of range");
 
-  // changedPath: safe string ≤512; redact if it contains a configured secret.
-  if (typeof raw.changedPath !== "string" || raw.changedPath.length === 0 || raw.changedPath.length > 512) {
-    throw new Error("invalid changedPath");
+  // changedPath: MUST be a canonical repo-relative path. Validate FIRST with
+  // the existing SSOT (validateProjectedPath rejects absolute, traversal,
+  // backslash, double/trailing separator, dot segment, C0/C1/DEL, >512).
+  // Then add PROJECTION-layer hardening: reject pathspec magic ([*?]) and
+  // colons that are valid POSIX filenames but dangerous when output crosses
+  // to the model. This is not a second path-identity algorithm — it is a
+  // narrow output-boundary guard layered on top of the SSOT.
+  validateProjectedPath(raw.changedPath);
+  // eslint-disable-next-line no-control-regex
+  if (/[[\]*?:]/.test(raw.changedPath)) {
+    throw new Error("invalid changedPath: pathspec magic or colon at output boundary");
   }
   const redactor = createSecretRedactor(env ?? process.env);
   let changedPath = raw.changedPath;
@@ -107,10 +116,14 @@ export function projectReviewResult(raw, { runId: expectedRunId, env } = {}) {
     const redactedFragment = redactor.redactString(raw.fragment);
     if (redactedFragment !== raw.fragment) throw new Error("unredacted secret in fragment");
 
-    // nextCursor: null or opaque base64url string ≤192.
+    // nextCursor: null or opaque base64url string ≤192. The cursor must only
+    // contain [A-Za-z0-9_-] — no spaces, colons, slashes, or path-like content.
     if (raw.nextCursor !== null) {
       if (typeof raw.nextCursor !== "string" || raw.nextCursor.length === 0 || raw.nextCursor.length > 192) {
         throw new Error("invalid nextCursor");
+      }
+      if (!/^[A-Za-z0-9_-]+$/.test(raw.nextCursor)) {
+        throw new Error("invalid nextCursor: not base64url");
       }
     }
     const expectedTruncated = raw.nextCursor !== null;
