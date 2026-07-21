@@ -154,32 +154,68 @@ test("WSB-SMOKE: workspace_status → run_dispatch(delivery) → completed → d
       // 7. Close client — detached runner continues.
       await client.close();
 
-      // 8. Wait for terminal state AND delivery verification events.
-      // Verification happens AFTER the completed transition (runManager.js:950-952),
-      // so we must wait for verification events to appear, not just the terminal state.
+      // 8. Wait for terminal state, then for the durable delivery verification outcome.
+      //
+      // Why two phases (M11-3D pre sync):
+      //   Production order in runManager.js is:
+      //     run.completed (terminal state_change)
+      //       → _runCleanup()
+      //       → run.delivery_verification_{passed|failed|unavailable}
+      //   Under full-suite concurrency, cleanup + verification can land AFTER the
+      //   terminal transition by more than the previous single-loop budget. The
+      //   terminal transition alone is therefore NOT a "delivery is done" signal.
+      //   Phase 1 waits bounded for a terminal state. Phase 2 then waits bounded
+      //   (up to 60s) specifically for ONE durable verification outcome. The final
+      //   exact-count assertions below still distinguish passed vs failed vs
+      //   unavailable — we never treat "any verification outcome" as success.
       const transcriptPath = join(runDir, `${runId}.jsonl`);
       const { readTranscript, findState, findLatest } = await import("../src/transcript.js");
+
+      // Phase 1: bounded wait for a terminal state (≈30s ceiling preserved).
       let events = [];
+      let terminalState = null;
       for (let i = 0; i < 150; i++) {
         if (existsSync(transcriptPath)) {
           events = await readTranscript(transcriptPath);
           const state = findState(events);
-          // Break only when terminal AND verification outcome is present (if delivery).
-          if (["failed", "aborted", "timed_out"].includes(state)) break;
-          if (state === "completed") {
-            // For delivery runs, wait until verification events appear.
-            const hasVerification = events.some((e) =>
-              e.type === "run.delivery_verification_passed" ||
-              e.type === "run.delivery_verification_failed" ||
-              e.type === "run.delivery_verification_unavailable");
-            const hasCreated = events.some((e) => e.type === "run.delivery_created");
-            const hasFailed = events.some((e) => e.type === "run.delivery_failed");
-            if (hasFailed || (hasCreated && hasVerification)) break;
-            // If no delivery context (non-delivery run), break immediately.
-            if (!hasCreated && i > 10) break;
+          if (["completed", "failed", "aborted", "timed_out"].includes(state)) {
+            terminalState = state;
+            break;
           }
         }
         await new Promise((r) => setTimeout(r, 200));
+      }
+
+      // Phase 2: bounded wait (up to 60s) for a durable verification outcome.
+      // Only relevant for delivery runs; if no delivery_created appears within a
+      // short grace window, this is a non-delivery run and we skip to assertions.
+      // For delivery runs, refuse to proceed until ONE of the three durable
+      // verification events is observed — terminal alone is not sufficient.
+      if (terminalState === "completed") {
+        let sawCreated = false;
+        let createdGrace = 0;
+        for (let i = 0; i < 300; i++) { // 300 × 200ms = 60s ceiling
+          if (existsSync(transcriptPath)) {
+            events = await readTranscript(transcriptPath);
+          }
+          const hasCreated = events.some((e) => e.type === "run.delivery_created");
+          const hasFailed = events.some((e) => e.type === "run.delivery_failed");
+          const hasVerification = events.some((e) =>
+            e.type === "run.delivery_verification_passed" ||
+            e.type === "run.delivery_verification_failed" ||
+            e.type === "run.delivery_verification_unavailable");
+          // delivery_failed is itself a durable terminal outcome for delivery.
+          if (hasFailed || hasVerification) break;
+          if (hasCreated) {
+            sawCreated = true;
+          } else if (!sawCreated) {
+            // Non-delivery run (no delivery_created observed): skip the 60s wait.
+            // Bounded grace prevents an early exit masking a late delivery_created.
+            createdGrace += 1;
+            if (createdGrace > 25) break; // ~5s grace
+          }
+          await new Promise((r) => setTimeout(r, 200));
+        }
       }
 
       // 9. EXACT terminal state assertion — must be "completed", not "failed".
@@ -188,14 +224,23 @@ test("WSB-SMOKE: workspace_status → run_dispatch(delivery) → completed → d
         `terminal must be exactly "completed" (got "${finalState}") — if failed, packaging/verification broke`);
 
       // 10. EXACT event count assertions.
+      // The three verification outcomes (passed/failed/unavailable) are mutually
+      // exclusive durable results. We assert each independently — a failed or
+      // unavailable outcome is NOT masked as "verification done, so pass".
       const deliveryCreatedEvents = events.filter((e) => e.type === "run.delivery_created");
       const verificationPassedEvents = events.filter((e) => e.type === "run.delivery_verification_passed");
       const verificationFailedEvents = events.filter((e) => e.type === "run.delivery_verification_failed");
+      const verificationUnavailableEvents = events.filter((e) => e.type === "run.delivery_verification_unavailable");
       const deliveryFailedEvents = events.filter((e) => e.type === "run.delivery_failed");
+      // Exactly one terminal transition into "completed".
+      const completedTransitions = events.filter(
+        (e) => e.type === "run.state_change" && e.to === "completed");
 
+      assert.equal(completedTransitions.length, 1, "exactly 1 terminal transition to completed");
       assert.equal(deliveryCreatedEvents.length, 1, "exactly 1 run.delivery_created");
       assert.equal(verificationPassedEvents.length, 1, "exactly 1 run.delivery_verification_passed");
       assert.equal(verificationFailedEvents.length, 0, "0 run.delivery_verification_failed");
+      assert.equal(verificationUnavailableEvents.length, 0, "0 run.delivery_verification_unavailable");
       assert.equal(deliveryFailedEvents.length, 0, "0 run.delivery_failed");
 
       // 11. Delivery commit exists with correct parent.
