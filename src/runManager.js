@@ -11,6 +11,7 @@ import { assessRunEvidence } from "./runEvidenceAssessment.js";
 import { createSecretRedactor } from "./secretRedaction.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError } from "./delivery.js";
 import { verifyDelivery as defaultVerifyDelivery } from "./deliveryVerification.js";
+import { loadRoleContract } from "./application/roleContract.js";
 
 /**
  * RunManager 持有活跃 run 的生命周期。
@@ -92,6 +93,23 @@ export class RunManager {
     const registryPath = resolve(registry ?? this.config.registry);
     const loaded = await this.readRegistry(registryPath);
     const agent = loaded.getAgent(agentId, { cwd });
+
+    // M11-5（TD-89 修复）：角色合同加载。在 transcript 创建前 fail-closed
+    // （零 transcript、零 spawn）。agent.systemPrompt 是 registry 声明的角色
+    // 文件路径（相对 WAO 仓库根，与原 claudeCode resolve 语义一致）。加载器
+    // 验证后返回内容字符串；RunManager 同时保留验证过的绝对路径（给 claude
+    // backend 的 --append-system-prompt-file）。未配置 systemPrompt 的 agent
+    // 保持旧行为（roleContract/roleContractPath 均为 undefined）。
+    //
+    // 安全：transcript 只持久化原始 task prompt（行 289 prompt.sent），绝不
+    // 保存 roleContract 内容或组合后的 prompt。Lead/model 不能覆盖此处的
+    // registry 选定角色。
+    let roleContract = undefined;
+    let roleContractPath = undefined;
+    if (agent.systemPrompt) {
+      roleContractPath = resolve(agent.systemPrompt);
+      roleContract = loadRoleContract(roleContractPath);
+    }
 
     const finalRunId = runId ?? `run_${new Date().toISOString().replace(/[-:.TZ]/g, "")}${Math.random().toString(36).slice(2, 8)}`;
 
@@ -290,7 +308,7 @@ export class RunManager {
 
     let result;
     try {
-      result = await backend.spawn(effectiveAgent, { prompt });
+      result = await backend.spawn(effectiveAgent, { prompt, roleContract, roleContractPath });
     } catch (error) {
       await transcript.append("run.error", { phase: "spawn", error: error.message });
       await this._transition(transcript, "pending", "failed", "spawn_error");
@@ -402,6 +420,15 @@ export class RunManager {
     const resumeCwd = deliveryContext ? deliveryContext.worktreePath : runStarted.cwd;
     const agent = loaded.getAgent(transcript.context.agentId, { cwd: resumeCwd });
 
+    // M11-5（TD-89 修复）：resume 也必须重新经过同一角色合同加载器，不得静默
+    // 漏掉。与 start 路径同一 SSOT（roleContract.js），同一 fail-closed 边界。
+    let resumeRoleContract = undefined;
+    let resumeRoleContractPath = undefined;
+    if (agent.systemPrompt) {
+      resumeRoleContractPath = resolve(agent.systemPrompt);
+      resumeRoleContract = loadRoleContract(resumeRoleContractPath);
+    }
+
     // TD-103 Phase 3A: restore scorecardRules ONLY for delivery runs, from the
     // exact snapshot persisted inside delivery metadata in run.started.
     // Non-delivery resume keeps the 9e25c5c baseline behavior: scorecardRules=null.
@@ -425,7 +452,11 @@ export class RunManager {
       if (!promptEvent?.prompt) return null;
       const originalSessionId = session.backendSessionId;
       // 重新 spawn 新进程
-      const newResult = await backend.spawn(agent, { prompt: promptEvent.prompt });
+      const newResult = await backend.spawn(agent, {
+        prompt: promptEvent.prompt,
+        roleContract: resumeRoleContract,
+        roleContractPath: resumeRoleContractPath,
+      });
       await transcript.append("run.rerun", {
         originalSessionId,
         newSessionId: newResult.backendSessionId,

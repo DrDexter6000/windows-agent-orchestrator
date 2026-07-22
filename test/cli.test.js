@@ -1184,35 +1184,48 @@ test("TD-87: registry validate 对 kimi-code 配 tokenBudget 给 ⚠ warning（�
   }
 });
 
-test("TD-89: registry validate 对非 claude-code + systemPrompt 给 ⚠ warning（静默失效）", () => {
+test("TD-89 (M11-5 resolved): registry validate accepts systemPrompt for all backends, fail-closed on bad role file", () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-regval-sysprompt-"));
   try {
+    // M11-5 后：所有三个 process backend 都消费 systemPrompt。旧的"kimi/codex 不消费
+    // systemPrompt"warning 已删除。registry validate 用共享加载器对所有配 systemPrompt
+    // 的 backend 统一 fail-closed 验证（缺失/目录/空/超限/非法 UTF-8/NUL）。
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({
       agents: {
-        // kimi-code + systemPrompt → 应 warn
+        // kimi-code + valid systemPrompt → 应 pass（不再 warn）
         coder_mm: { backend: "kimi-code", cwd: dir, systemPrompt: "config/roles/coder_mm.md" },
-        // codex + systemPrompt → 应 warn
+        // codex + valid systemPrompt → 应 pass（不再 warn）
         tester: { backend: "codex", cwd: dir, systemPrompt: "config/roles/tester.md" },
-        // claude-code + systemPrompt → 不应 warn（该 backend 真正消费 systemPrompt）
+        // claude-code + valid systemPrompt → 应 pass
         researcher: { backend: "claude-code", cwd: dir, systemPrompt: "config/roles/researcher.md" },
-        // kimi-code 无 systemPrompt → 不应 warn（没配就不存在失效）
-        coder_plain: { backend: "kimi-code", cwd: dir },
       },
     }), "utf8");
 
     const out = execSync(`node src/cli.js registry validate --registry ${registryPath}`, {
       cwd: process.cwd(), encoding: "utf8",
     });
-    // 非 claude-code + systemPrompt → ⚠ warning
-    assert.match(out, /⚠.*coder_mm.*kimi-code.*不消费 systemPrompt/, "kimi-code 配 systemPrompt 应 warn");
-    assert.match(out, /⚠.*tester.*codex.*不消费 systemPrompt/, "codex 配 systemPrompt 应 warn");
-    // claude-code + systemPrompt → 无该 warning（该 backend 消费 systemPrompt）
-    const researcherBlock = out.split("\n").filter(l => l.includes("researcher")).join("\n");
-    assert.doesNotMatch(researcherBlock, /⚠.*systemPrompt/, "claude-code + systemPrompt 不应 warn（真正消费）");
-    // 无 systemPrompt → 无该 warning
-    const plainBlock = out.split("\n").filter(l => l.includes("coder_plain")).join("\n");
-    assert.doesNotMatch(plainBlock, /⚠.*systemPrompt/, "无 systemPrompt 的 worker 不应 warn");
+    // 三个都 pass（无 ✖，无旧 ⚠ "不消费 systemPrompt" warning）
+    assert.match(out, /✔\s*coder_mm/, "kimi-code + systemPrompt passes");
+    assert.match(out, /✔\s*tester/, "codex + systemPrompt passes");
+    assert.match(out, /✔\s*researcher/, "claude-code + systemPrompt passes");
+    // 不再有"不消费 systemPrompt"warning
+    assert.doesNotMatch(out, /不消费 systemPrompt/, "old TD-89 warning removed");
+    assert.match(out, /all valid/, "registry fully valid");
+
+    // fail-closed: 非法角色文件（缺失）→ ✖ + exit 1
+    const badRegistryPath = join(dir, "agents-bad.json");
+    writeFileSync(badRegistryPath, JSON.stringify({
+      agents: {
+        bad_worker: { backend: "codex", cwd: dir, systemPrompt: join(dir, "nonexistent-role.md") },
+      },
+    }), "utf8");
+    // registry validate exits 1 when there are errors — use spawnSync to capture non-zero exit.
+    const badResult = spawnSync(process.execPath,
+      ["src/cli.js", "registry", "validate", "--registry", badRegistryPath],
+      { cwd: process.cwd(), encoding: "utf8" });
+    assert.notEqual(badResult.status, 0, "registry validate exits non-zero on bad role");
+    assert.match(badResult.stdout, /✖\s*bad_worker.*角色合同无效/, "missing role file → fail-closed");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

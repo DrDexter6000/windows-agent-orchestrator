@@ -17,6 +17,7 @@ import { isSecretEnvName } from "../secretRedaction.js";
 import { parseOptions } from "./shared.js";
 // M9-0: registry list data logic delegated to shared application service.
 import { getRegistryInventory } from "../application/registryInventory.js";
+import { loadRoleContract } from "../application/roleContract.js";
 
 async function registryCommand(args, config) {
   const [sub, ...tail] = args;
@@ -197,12 +198,19 @@ async function registryValidateCommand(args, config) {
       if (agent.backend === "kimi-code" && typeof agent.tokenBudget === "number") {
         console.log(`  ⚠ ${id}: kimi-code 配了 tokenBudget 但不生效（stream-json 无 usage 字段）—— kimi 靠自带 max_steps/timeout 兜底，不靠 WAO tokenBudget`);
       }
-      // TD-89（systemPrompt 静默失效）：agent.systemPrompt 只有 claude-code backend 消费
-      // （claudeCode.js:35-40 用 --append-system-prompt-file 注入）。kimi-code/codex 的
-      // buildArgs 完全不引用该字段——写了角色契约路径但被忽略，角色边界（身份/纪律）不进 worker。
-      // dogfood round 5 发现：6 agent 全声明 systemPrompt，但 coder_mm(tester)/tester(codex) 死配。
-      if (agent.systemPrompt && agent.backend !== "claude-code") {
-        console.log(`  ⚠ ${id}: ${agent.backend} 不消费 systemPrompt（只有 claude-code 用 --append-system-prompt-file 注入）—— 角色契约 ${agent.systemPrompt} 未生效，角色边界需在 task prompt 里手写兜底`);
+      // M11-5（TD-89 修复）：所有三个 process backend（claude-code/codex/kimi-code）
+      // 现在都消费 systemPrompt。registry validate 用共享加载器（roleContract.js）
+      // 验证角色文件——缺失/目录/空/超限/非法 UTF-8/NUL 都 fail closed（不再是
+      // warning，而是 ✖ 阻止派发）。旧的"codex/kimi 不消费 systemPrompt"warning
+      // 已删除（不再适用）。
+      if (agent.systemPrompt) {
+        try {
+          loadRoleContract(resolve(agent.systemPrompt));
+        } catch (e) {
+          console.log(`✖ ${id}\t角色合同无效: ${e.message}`);
+          allOk = false;
+          continue;
+        }
       }
     } else {
       console.log(`✖ ${id}\t${issues.join("; ")}`);

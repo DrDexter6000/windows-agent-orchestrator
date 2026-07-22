@@ -20,11 +20,25 @@ export class KimiCodeBackend extends ProcessBackend {
   constructor(opts = {}) {
     super({
       parserClass: KimiStreamParser,
-      buildArgs: (agent, task) => [
-        "-p", task.prompt,
-        "--output-format", "stream-json",
-        ...(Array.isArray(agent.args) ? agent.args : []),
-      ],
+      buildArgs: (agent, task) => {
+        // M11-5（TD-89 修复）：kimi CLI 无 system/developer message 通道
+        // （-p 只接受单个 prompt 字符串，无 system flag）。fallback：把角色
+        // 合同与任务用固定分隔组合进同一个 prompt。role 在前、task 在后、
+        // 各恰好一次。
+        //
+        // 边界声明：这不是系统级权限隔离（kimi CLI 不提供）。角色边界靠
+        // prompt 级引导，与 systemPrompt 在 claude/codex 的 transport 强度
+        // 不同——文档须明确这一点。
+        const ROLE_TASK_SEPARATOR = "\n\n---\n\n";
+        const prompt = task.roleContract
+          ? `${task.roleContract}${ROLE_TASK_SEPARATOR}${task.prompt}`
+          : task.prompt;
+        return [
+          "-p", prompt,
+          "--output-format", "stream-json",
+          ...(Array.isArray(agent.args) ? agent.args : []),
+        ];
+      },
       credentialEnvNames: () => ["KIMI_API_KEY", "KIMI_BASE_URL", "KIMI_MODEL_NAME"],
       ...opts,
     });

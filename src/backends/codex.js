@@ -13,12 +13,32 @@ export class CodexBackend extends ProcessBackend {
   constructor(opts = {}) {
     super({
       parserClass: CodexStreamParser,
-      buildArgs: (_agent, task) => [
-        "exec",
-        "--json",
-        "--skip-git-repo-check",
-        task.prompt,
-      ],
+      buildArgs: (_agent, task) => {
+        const args = [
+          "exec",
+          "--json",
+          "--skip-git-repo-check",
+        ];
+        // M11-5（TD-89 修复）：角色合同经共享加载器验证后以 task.roleContract
+        // （字符串内容）传入。Codex 的 -c developer_instructions 是 append 到
+        // developer message 的 config override（Stage 0 探针证明：不替换 base
+        // instructions，task 仍是独立 user message）。TOML basic string 需安全
+        // 转义（TOML 1.0 §basic strings：反斜杠 → \\，双引号 → \"，newline → \n，
+        // CR → \r，tab → \t；其它 C0 控制字符不允许）。role 文件是多行 Markdown，
+        // newline 必须转义否则产生无效 TOML。绝不使用 model_instructions_file
+        // （它会替换 Codex 内置 base instructions）。
+        if (task.roleContract) {
+          const safe = task.roleContract
+            .replace(/\\/g, "\\\\")
+            .replace(/"/g, '\\"')
+            .replace(/\r/g, "\\r")
+            .replace(/\n/g, "\\n")
+            .replace(/\t/g, "\\t");
+          args.push("-c", `developer_instructions="${safe}"`);
+        }
+        args.push(task.prompt);
+        return args;
+      },
       credentialEnvNames: () => ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"],
       ...opts,
     });
