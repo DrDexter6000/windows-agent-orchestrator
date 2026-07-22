@@ -39,6 +39,7 @@ import { listRuns } from "../application/runList.js";
 import { runWait } from "../application/runWait.js";
 import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
 import { projectReviewResult } from "../application/deliveryReviewProjection.js";
+import { projectCollectResult } from "../application/runCollectProjection.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
 import {
   listLeadPlaybooks,
@@ -195,15 +196,26 @@ const RUN_STATUS_DESCRIPTION =
   "content. Accepts only runId; the run directory is fixed by the server.";
 
 // ===== run_collect bounded projection constants =====
+//
+// M11-4: the projection algorithm + cursor codec live in the shared
+// application module src/application/runCollectProjection.js. Both MCP and
+// CLI delegate to it — there is no second projection algorithm here. The
+// schema constants below are the MCP output contract only.
 
 const COLLECT_ERROR_TEXT = "run_collect failed";
 const COLLECT_LIMIT = 50;
-const COLLECT_MAX_MESSAGES = 8;
-const COLLECT_MAX_TEXT_CHARS = 4000;
-const COLLECT_MAX_TOTAL_CHARS = 12000;
+// Cursor alphabet: base64url (RFC 4648 §5), no padding. ≤192 chars.
+const COLLECT_CURSOR_RE = /^[A-Za-z0-9_-]+$/;
+const COLLECT_CURSOR_MAX = 192;
 
 const RUN_COLLECT_INPUT = z.object({
   runId: z.string().min(1),
+  // cursor format is validated INSIDE the handler (via the projection layer)
+  // so that malformed cursors collapse to the fixed `run_collect failed`
+  // text rather than leaking an SDK input-validation error to the caller.
+  // The schema here only accepts an optional string; the trust boundary is
+  // the handler's try/catch.
+  cursor: z.string().optional(),
 }).strict();
 
 const COLLECTED_MESSAGE = z.object({
@@ -227,6 +239,7 @@ const RUN_COLLECT_OUTPUT = z.object({
     other: z.number(),
   }),
   truncated: z.boolean(),
+  nextCursor: z.string().regex(COLLECT_CURSOR_RE).max(COLLECT_CURSOR_MAX).nullable(),
 });
 
 const RUN_COLLECT_ANNOTATIONS = {
@@ -240,104 +253,9 @@ const RUN_COLLECT_DESCRIPTION =
   "Collect a run's worker output: bounded, redacted assistant-authored text plus " +
   "evidence counts (no raw commands, tool inputs/outputs, file paths, or unknown " +
   "payloads). Each successful call appends one messages.collected audit event to the " +
-  "transcript (not idempotent). Accepts only runId; the run directory and limit are "  +
-  "fixed by the server.";
-
-/**
- * Project a raw collect result into a bounded, redacted MCP-safe output.
- *
- * Extracts ONLY assistant-authored text parts. Applies per-message (4000 char) and
- * total (12000 char) and count (8 message) caps with accurate truncated flags.
- * Secrets in text are redacted via the process secret redactor. Evidence kinds are
- * counted (no raw payload). Unknown/malformed entries count as "other" only.
- *
- * @param {object} rawResult — collectRunMessages return value
- * @param {string} runId
- * @returns {object} bounded projection matching RUN_COLLECT_OUTPUT
- */
-function projectCollectResult(rawResult, runId) {
-  const redactor = createSecretRedactor();
-  const items = Array.isArray(rawResult.data) ? rawResult.data : [];
-
-  const evidenceCounts = { message: 0, command: 0, toolUse: 0, toolResult: 0, fileWritten: 0, other: 0 };
-  const messages = [];
-  let totalChars = 0;
-  let messagesTruncated = false;
-
-  for (const item of items) {
-    // Tally evidence counts by kind — no payload included. This happens for
-    // EVERY item regardless of text/quota limits, so evidenceCounts always
-    // covers the full set.
-    const kind = item?.kind;
-    // Serve messages lack `kind`; detect them by the {info:{role}, parts} shape.
-    const isServeMessage = !kind && item?.info && Array.isArray(item.parts);
-    if (kind === "message" || isServeMessage) evidenceCounts.message += 1;
-    else if (kind === "command") evidenceCounts.command += 1;
-    else if (kind === "tool_use") evidenceCounts.toolUse += 1;
-    else if (kind === "tool_result") evidenceCounts.toolResult += 1;
-    else if (kind === "file_written") evidenceCounts.fileWritten += 1;
-    else evidenceCounts.other += 1;
-
-    // Only extract assistant text; skip everything else from the messages array.
-    if (kind !== "message" && !isServeMessage) continue;
-    // Process: {role, parts}. Serve: {info:{role}, parts}. Only assistant.
-    const role = item.role ?? item.info?.role;
-    if (role !== "assistant") continue;
-
-    // Extract text parts. A message with NO non-empty text (e.g. tool_use-only)
-    // is counted in evidenceCounts but does NOT enter the messages array and
-    // does NOT consume the 8-message quota — it carries no Lead-readable result.
-    const parts = Array.isArray(item.parts) ? item.parts : [];
-    const textParts = parts
-      .filter((p) => p && p.type === "text" && typeof p.text === "string" && p.text.length > 0)
-      .map((p) => p.text);
-    if (textParts.length === 0) continue;
-
-    let text = redactor.redactString(textParts.join("\n"));
-
-    // Per-text cap (4000 chars).
-    let perTruncated = false;
-    if (text.length > COLLECT_MAX_TEXT_CHARS) {
-      text = text.slice(0, COLLECT_MAX_TEXT_CHARS);
-      perTruncated = true;
-      messagesTruncated = true;
-    }
-
-    // Total cap (12000 chars). When the budget is exhausted, stop collecting
-    // text but CONTINUE the loop so later items are still counted in
-    // evidenceCounts. (Old code used `break`, which skipped later tallies.)
-    if (totalChars + text.length > COLLECT_MAX_TOTAL_CHARS) {
-      const remaining = COLLECT_MAX_TOTAL_CHARS - totalChars;
-      messagesTruncated = true;
-      if (remaining > 0 && messages.length < COLLECT_MAX_MESSAGES) {
-        text = text.slice(0, remaining);
-        perTruncated = true;
-        totalChars += text.length;
-        messages.push({ role: "assistant", text, truncated: perTruncated });
-      }
-      continue;
-    }
-
-    // 8-message count cap.
-    if (messages.length >= COLLECT_MAX_MESSAGES) {
-      messagesTruncated = true;
-      continue;
-    }
-
-    totalChars += text.length;
-    messages.push({ role: "assistant", text, truncated: perTruncated });
-  }
-
-  return {
-    runId,
-    backend: rawResult.backend ?? "unknown",
-    reconstructed: Boolean(rawResult.reconstructed),
-    itemCount: items.length,
-    messages,
-    evidenceCounts,
-    truncated: messagesTruncated,
-  };
-}
+  "transcript (not idempotent). Accepts runId and an optional opaque cursor returned " +
+  "in the previous page's nextCursor to continue reading a truncated result; the run " +
+  "directory and limit are fixed by the server.";
 
 // ===== run_diagnose safe projection constants =====
 
@@ -1060,14 +978,28 @@ export function createWaoMcpServer({
       outputSchema: RUN_COLLECT_OUTPUT,
       annotations: RUN_COLLECT_ANNOTATIONS,
     },
-    async ({ runId }) => {
+    async ({ runId, cursor }) => {
       // Entire service call + projection + redaction + output validation in ONE
       // try/catch. Any failure collapses to the fixed safe text — never leak
       // SDK output-validation error, raw exception, path, or secret.
+      //
+      // M11-4 §12: when a cursor is present, defer the audit append until the
+      // projection layer has validated the cursor binding and produced a
+      // successful page. Invalid cursors and projection failures result in
+      // ZERO audit appends. Cursor-less (page 1) calls keep the legacy
+      // always-append contract.
       try {
-        const raw = await collectService({ runId, runDir, limit: COLLECT_LIMIT });
-        const payload = projectCollectResult(raw, runId);
+        const hasCursor = cursor !== undefined && cursor !== null;
+        const raw = await collectService({
+          runId, runDir, limit: COLLECT_LIMIT, cursor,
+          deferAppend: hasCursor,
+        });
+        const payload = projectCollectResult(raw, { runId, cursor });
         RUN_COLLECT_OUTPUT.parse(payload);
+        // Projection + schema validation succeeded → safe to commit the audit.
+        if (typeof raw.commitAppend === "function") {
+          await raw.commitAppend();
+        }
         return {
           content: [{ type: "text", text: JSON.stringify(payload) }],
           structuredContent: payload,

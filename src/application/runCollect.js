@@ -86,19 +86,33 @@ function defaultAppendFn(transcriptPath, runId) {
  * transcript. Serve-backed runs (serveUrl present): fetch messages via the
  * backend capability (or injected fetchServeMessagesFn).
  *
+ * M11-4 continuation: when `cursor` is provided AND `deferAppend` is true,
+ * the service reads + reconstructs the snapshot but does NOT append the audit
+ * event. It returns a `commitAppend` function the caller MUST invoke after
+ * the projection layer has validated the cursor binding and produced a
+ * successful page. This guarantees invalid cursors and projection failures
+ * result in ZERO audit appends (M11-4 §12). When `deferAppend` is false
+ * (default, M9-4A back-compat), the service appends exactly once before
+ * returning, preserving the existing CLI/M9-4A contract.
+ *
  * @param {object} input
  * @param {string} input.runId — must pass isValidRunId
  * @param {string} input.runDir — runs/ directory (host-owned)
  * @param {number} [input.limit=50] — max items to collect
+ * @param {string} [input.cursor] — opaque continuation token (M11-4)
+ * @param {boolean} [input.deferAppend=false] — when true, do not append; return
+ *        commitAppend for the caller to invoke after projection success
  * @param {Function} [input.readTranscriptFn] — injectable for testing
  * @param {Function} [input.appendCollectedFn] — injectable append (testing)
  * @param {Function} [input.fetchServeMessagesFn] — injectable serve fetch (testing)
- * @returns {Promise<{data: Array, reconstructed?: boolean, backend?: string}>}
+ * @returns {Promise<{data: Array, reconstructed?: boolean, backend?: string, commitAppend?: Function}>}
  */
 export async function collectRunMessages({
   runId,
   runDir,
   limit = DEFAULT_LIMIT,
+  cursor,
+  deferAppend = false,
   readTranscriptFn,
   appendCollectedFn,
   fetchServeMessagesFn,
@@ -132,6 +146,12 @@ export async function collectRunMessages({
     ? Math.floor(numericLimit)
     : DEFAULT_LIMIT;
 
+  // M11-4: when deferring append (cursor continuation), build the payload +
+  // commit function but do NOT invoke append. The caller commits after the
+  // projection layer has validated the cursor binding. This guarantees zero
+  // audit appends on invalid cursor / projection failure (§12).
+  const shouldDefer = deferAppend && cursor !== undefined && cursor !== null;
+
   if (!session.serveUrl) {
     // Process-backed: reconstruct run.event entries from transcript.
     const reconstructed = events
@@ -140,14 +160,20 @@ export async function collectRunMessages({
       .filter((e) => e !== null)
       .slice(-effectiveLimit);
 
-    const _append = appendCollectedFn ?? defaultAppendFn(transcriptPath, runId);
-    await _append("messages.collected", {
+    const payload = {
       backendSessionId: session.backendSessionId,
       backend: "process",
       count: reconstructed.length,
       reconstructed: true,
-    });
-
+    };
+    if (shouldDefer) {
+      return {
+        data: reconstructed, reconstructed: true, backend: "process",
+        commitAppend: buildCommitAppend(appendCollectedFn, transcriptPath, runId, payload),
+      };
+    }
+    const _append = appendCollectedFn ?? defaultAppendFn(transcriptPath, runId);
+    await _append("messages.collected", payload);
     return { data: reconstructed, reconstructed: true, backend: "process" };
   }
 
@@ -159,13 +185,31 @@ export async function collectRunMessages({
     limit: effectiveLimit,
   });
 
-  const _append = appendCollectedFn ?? defaultAppendFn(transcriptPath, runId);
-  await _append("messages.collected", {
+  const payload = {
     backendSessionId: session.backendSessionId,
     count: messages.data?.length ?? 0,
-  });
-
+  };
+  if (shouldDefer) {
+    return {
+      ...messages,
+      commitAppend: buildCommitAppend(appendCollectedFn, transcriptPath, runId, payload),
+    };
+  }
+  const _append = appendCollectedFn ?? defaultAppendFn(transcriptPath, runId);
+  await _append("messages.collected", payload);
   return messages;
+}
+
+/**
+ * Build a commitAppend closure that invokes the real (or injected) append
+ * with the prepared payload. The caller invokes this only after the projection
+ * layer has validated the cursor and produced a successful page.
+ */
+function buildCommitAppend(appendCollectedFn, transcriptPath, runId, payload) {
+  return async () => {
+    const _append = appendCollectedFn ?? defaultAppendFn(transcriptPath, runId);
+    await _append("messages.collected", payload);
+  };
 }
 
 /**
