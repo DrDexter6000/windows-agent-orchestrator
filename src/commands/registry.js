@@ -205,7 +205,10 @@ async function registryValidateCommand(args, config) {
       // 已删除（不再适用）。
       if (agent.systemPrompt) {
         try {
-          loadRoleContract(resolve(agent.systemPrompt));
+          // Package C1: loadRoleContract resolves the path relative to the WAO
+          // install root (not cwd), so `registry validate` works from any
+          // target-project directory. Pass the registry-declared path as-is.
+          loadRoleContract(agent.systemPrompt);
         } catch (e) {
           console.log(`✖ ${id}\t角色合同无效: ${e.message}`);
           allOk = false;

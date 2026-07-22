@@ -1,11 +1,11 @@
 // src/application/roleContract.js
 //
-// M11-5: Shared, backend-neutral role contract loader.
+// M11-5: Shared, backend-neutral role contract loader + path authority.
 //
 // WAO lets a Lead write only the concrete task; the registry's per-agent
-// `systemPrompt` (a path to a role contract file) is loaded here, validated,
-// and delivered to each process backend exactly once. The Lead/model cannot
-// override or bypass the registry-selected role contract.
+// `systemPrompt` (a path to a role contract file) is resolved here, loaded,
+// validated, and delivered to each process backend exactly once. The
+// Lead/model cannot override or bypass the registry-selected role contract.
 //
 // Architectural contract:
 //   - No spawn, no transcript writes, no MCP/CLI/command imports.
@@ -19,12 +19,28 @@
 //     content or the combined prompt.
 //
 // Why a string (not a path): the three backends consume the role differently
-// (claude: writes a temp file + --append-system-prompt-file; codex: inlines
-// into -c developer_instructions; kimi: concatenates into the prompt). Keeping
-// the loader path-free and returning content lets each backend choose its
+// (claude: --append-system-prompt <content>; codex: inlines into
+// -c developer_instructions; kimi: concatenates into the prompt). Keeping the
+// loader path-free and returning content lets each backend choose its
 // transport without the loader branching on runtime.
+//
+// M11-5 Package C1 (path authority): a relative `systemPrompt` is resolved
+// against the WAO installation/repo root (derived from this module's URL),
+// NOT against process.cwd(). This lets the same global registry + role files
+// be used from any target-project cwd (Life Index, Smash Bros, ...). This is
+// the single resolver; RunManager.start/resume and `registry validate` all
+// delegate to it — call sites must NOT pre-resolve with path.resolve().
 
 import { readFileSync, statSync } from "node:fs";
+import { isAbsolute, resolve, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
+
+// WAO installation/repo root, derived from this module's URL
+// (<repoRoot>/src/application/roleContract.js → up two levels). Stable across
+// cwd changes: a Lead calling WAO from any target project resolves role files
+// relative to the WAO install, not the caller's cwd.
+const WAO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /** Maximum acceptable role contract size (bytes). */
 export const ROLE_CONTRACT_MAX_BYTES = 4096;
@@ -36,7 +52,30 @@ export const ROLE_CONTRACT_MAX_BYTES = 4096;
 const UNSAFE_CONTROL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/;
 
 /**
+ * Resolve a role-contract path relative to the WAO installation root.
+ *
+ * Absolute paths are returned unchanged. Relative paths are resolved against
+ * the WAO repo/install root (derived from this module's URL), NOT against
+ * process.cwd() — so the same global registry works from any target-project
+ * cwd. Callers (RunManager.start/resume, `registry validate`) must delegate
+ * here instead of pre-resolving with path.resolve().
+ *
+ * @param {string} rolePath — path from agent.systemPrompt (registry-owned)
+ * @returns {string} absolute path to the role contract file
+ */
+export function resolveRoleContractPath(rolePath) {
+  if (typeof rolePath !== "string" || rolePath.length === 0) {
+    throw new Error("role contract path is required");
+  }
+  return isAbsolute(rolePath) ? rolePath : join(WAO_ROOT, rolePath);
+}
+
+/**
  * Load and validate a role contract file.
+ *
+ * The path is resolved through resolveRoleContractPath (relative to the WAO
+ * install root, not cwd) before any I/O. Callers pass the registry-declared
+ * path as-is — do NOT pre-resolve with path.resolve().
  *
  * @param {string} rolePath — path from agent.systemPrompt (registry-owned)
  * @returns {string} the validated, non-empty role contract content (UTF-8)
@@ -46,14 +85,13 @@ const UNSAFE_CONTROL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/;
  *                 absolute path.
  */
 export function loadRoleContract(rolePath) {
-  if (typeof rolePath !== "string" || rolePath.length === 0) {
-    throw new Error("role contract path is required");
-  }
+  // Package C1: resolve relative to WAO install root, not process.cwd().
+  const resolved = resolveRoleContractPath(rolePath);
 
   // Stat first to reject directories and missing files with a clear boundary.
   let st;
   try {
-    st = statSync(rolePath);
+    st = statSync(resolved);
   } catch {
     throw new Error("role contract file is missing or unreadable");
   }
@@ -64,7 +102,7 @@ export function loadRoleContract(rolePath) {
   // Read raw bytes.
   let raw;
   try {
-    raw = readFileSync(rolePath);
+    raw = readFileSync(resolved);
   } catch {
     throw new Error("role contract file is unreadable");
   }

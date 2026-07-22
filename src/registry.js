@@ -50,16 +50,18 @@ export function normalizeAgent(id, agent) {
       );
     }
   }
-  // M11-5 Package A2: systemPrompt must be either ABSENT (attribute not
-  // present / undefined) or a NON-EMPTY trimmed string. null, numbers,
-  // booleans, objects, arrays, and whitespace-only strings are all rejected
-  // — they silently pass truthy checks or get treated as "no role" depending
-  // on context, recreating the TD-89 silent-failure class. The error is a
-  // FIXED SAFE SHAPE: it never echoes the supplied value, a path, role
-  // content, or any sentinel (a bad value could itself be sensitive or
-  // inject a payload into logs).
-  if (agent.systemPrompt !== undefined) {
-    if (typeof agent.systemPrompt !== "string" || agent.systemPrompt.trim().length === 0) {
+  // M11-5 Package C3: systemPrompt uses OWN-PROPERTY semantics.
+  //   - property ABSENT (not an own property)  → no role contract (legitimate).
+  //   - own property present, value undefined / null / blank / non-string → REJECT.
+  //   - own property present, non-empty trimmed string                     → legitimate.
+  // Own-property semantics distinguish "field omitted" from "field set to
+  // undefined" — the latter is a malformed registry entry, not "no role".
+  // The error is a FIXED SAFE SHAPE: it never echoes the supplied value, a
+  // path, role content, or any sentinel (a bad value could itself be sensitive
+  // or inject a payload into logs).
+  if (Object.prototype.hasOwnProperty.call(agent, "systemPrompt")) {
+    const sp = agent.systemPrompt;
+    if (typeof sp !== "string" || sp.trim().length === 0) {
       throw new Error(`Agent ${id} has invalid systemPrompt: must be a non-empty string when present`);
     }
   }

@@ -103,7 +103,9 @@ export class RunManager {
 
     // M11-5（TD-89 修复）：角色合同加载。在 transcript 创建前 fail-closed
     // （零 transcript、零 spawn）。agent.systemPrompt 是 registry 声明的角色
-    // 文件路径（相对 WAO 仓库根）。加载器验证后返回内容字符串，传给
+    // 文件路径；由 loadRoleContract 内部的 resolveRoleContractPath 相对 WAO
+    // 安装根解析（不依赖 process.cwd()），所以从任意目标项目 cwd 调用都能
+    // 找到全局 registry 的角色文件。加载器验证后返回内容字符串，传给
     // backend.spawn（各 backend 用 runtime-native 方式恰好一次注入）。
     // 未配置 systemPrompt 的 agent 保持旧行为（roleContract 为 undefined）。
     //
@@ -112,18 +114,23 @@ export class RunManager {
     // 角色注入的 backend 配了 systemPrompt 会被静默丢弃——必须在 transcript
     // 创建前 fail-closed，不是事后。错误是固定安全形状，不回显值/路径/角色内容。
     //
-    // 安全：transcript 只持久化原始 task prompt（prompt.sent），绝不保存
-    // roleContract 内容或组合后的 prompt。Lead/model 不能覆盖此处的 registry
-    // 选定角色。
+    // Package C2 严格性：只有 backend.supportsRoleContract === true 才允许
+    // 带角色合同；字符串/数字/对象/null/undefined 等 truthy 非-true 值一律
+    // fail closed（避免 "false"/1/{} 被当作支持）。
+    //
+    // 安全：transcript 不把角色合同保存为 prompt.sent/control-plane input
+    // （只持久化原始 task prompt）。Lead/model 不能覆盖此处的 registry 选定
+    // 角色。（注意：worker 输出可能在回答中引用或复述角色，这由模型决定，
+    // 不是 WAO 持久化角色正文。）
     let roleContract = undefined;
     if (agent.systemPrompt) {
-      if (!backend.supportsRoleContract) {
+      if (backend.supportsRoleContract !== true) {
         throw new Error(
           `Agent ${agentId}: systemPrompt is configured but the selected backend does not support role contract injection. ` +
           `Remove systemPrompt from this agent, or switch to a backend that declares supportsRoleContract.`
         );
       }
-      roleContract = loadRoleContract(resolve(agent.systemPrompt));
+      roleContract = loadRoleContract(agent.systemPrompt);
     }
 
     const finalRunId = runId ?? `run_${new Date().toISOString().replace(/[-:.TZ]/g, "")}${Math.random().toString(36).slice(2, 8)}`;
@@ -444,18 +451,20 @@ export class RunManager {
 
     // M11-5（TD-89 修复）：resume 也必须重新经过同一角色合同加载器，不得静默
     // 漏掉。与 start 路径同一 SSOT（roleContract.js），同一 fail-closed 边界。
+    // 路径解析同样由 loadRoleContract 内部相对 WAO 安装根处理（不依赖 cwd）。
     // Package A2：不支持角色注入的 backend 配了 systemPrompt 必须显式抛错
     // （不再静默 return null）——resume 不能假装成功然后丢掉角色。错误是固定
     // 安全形状。这里在 spawn/attach 前拒绝，spawn 计数为 0、transcript 字节不变。
+    // Package C2 严格性：只有 supportsRoleContract === true 才允许（truthy 非-true 拒绝）。
     let resumeRoleContract = undefined;
     if (agent.systemPrompt) {
-      if (!backend.supportsRoleContract) {
+      if (backend.supportsRoleContract !== true) {
         throw new Error(
           `Agent ${transcript.context.agentId}: systemPrompt is configured but the selected backend does not support role contract injection. ` +
           `Remove systemPrompt from this agent, or switch to a backend that declares supportsRoleContract.`
         );
       }
-      resumeRoleContract = loadRoleContract(resolve(agent.systemPrompt));
+      resumeRoleContract = loadRoleContract(agent.systemPrompt);
     }
 
     // TD-103 Phase 3A: restore scorecardRules ONLY for delivery runs, from the

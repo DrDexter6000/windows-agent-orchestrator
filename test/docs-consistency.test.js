@@ -1236,3 +1236,50 @@ test("M11-4-DOC-05: TD-106 records M11-3/M11-4 capabilities as resolved, old ope
   // TD-106 uniqueness + open-section placement are pinned by existing M10
   // closeout guards — not repeated here.
 });
+
+// ===== M11-5 Package C: documentation truthfulness guards =====
+// Narrow guards (string presence/absence, not free-text parsers) that pin the
+// truthful claims established in Package C. Failure → fix the doc, not the test.
+
+// C-DOC-1: docs must NOT claim the role body "never" / "绝不" enters the
+// transcript as an absolute. The truthful claim is that WAO does not persist
+// the role contract as prompt.sent/control-plane input; worker OUTPUT may
+// echo or summarize the role. The absolute "绝不保存角色正文/zero-leak" wording
+// is untruthful and must be gone from architecture/usage/tech-debt.
+test("M11-5-C-DOC-1: docs do not claim role body absolutely never in transcript", () => {
+  for (const rel of ["docs/02-architecture.md", "docs/usage.md", "docs/tech-debt.md"]) {
+    const text = read(rel);
+    assert.ok(!/绝不保存角色正文|角色正文零泄漏|never persists role (body|content)/i.test(text),
+      `${rel}: must not claim role body absolutely never in transcript (worker output may echo role)`);
+  }
+});
+
+// C-DOC-2: architecture/usage document the path authority (relative
+// systemPrompt resolves against the WAO install root, not cwd) so cross-project
+// use is a documented fact, not an implementation accident.
+test("M11-5-C-DOC-2: docs document path authority (WAO install root, not cwd)", () => {
+  const arch = read("docs/02-architecture.md");
+  const usage = read("docs/usage.md");
+  assert.ok(/相对 WAO 安装根|install root|not.*cwd|不依赖.*cwd|不依赖调用者 cwd/i.test(arch),
+    "architecture documents install-root path authority");
+  assert.ok(/相对 WAO 安装根|install root|not.*cwd|不依赖.*cwd|不依赖调用者 cwd/i.test(usage),
+    "usage documents install-root path authority");
+});
+
+// C-DOC-3: docs document the strict capability judgment (=== true, not truthy).
+test("M11-5-C-DOC-3: docs document strict capability judgment (=== true)", () => {
+  const arch = read("docs/02-architecture.md");
+  assert.ok(/supportsRoleContract === true|严格相等|strict/i.test(arch),
+    "architecture documents strict (=== true) capability judgment");
+});
+
+// C-DOC-4: docs document the load timing truthfully — start loads BEFORE
+// transcript creation; resume loads AFTER reading the existing transcript but
+// before any append/spawn (not "before reading transcript").
+test("M11-5-C-DOC-4: docs document truthful load timing (start pre-transcript; resume post-read pre-spawn)", () => {
+  const arch = read("docs/02-architecture.md");
+  assert.ok(/start.*创建 transcript.*前|start.*before.*transcript/i.test(arch),
+    "architecture: start loads before transcript creation");
+  assert.ok(/resume.*读取.*transcript.*后|resume.*after read/i.test(arch),
+    "architecture: resume loads after reading transcript");
+});

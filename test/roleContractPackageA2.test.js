@@ -437,7 +437,8 @@ test("M11-5-A2-ARCH1: runManager role-contract region is capability-driven, no r
   // We check that no "opencode-serve" comparison appears in a role-contract
   // context by ensuring the capability is the sole gate.
   // Strict guard: the start role-contract block must not branch on runtime.
-  const startRoleBlock = src.match(/let roleContract[\s\S]*?loadRoleContract\(resolve\(agent\.systemPrompt\)\)/);
+  // Package C1: path resolution moved into loadRoleContract (no call-site resolve()).
+  const startRoleBlock = src.match(/let roleContract[\s\S]*?loadRoleContract\(agent\.systemPrompt\)/);
   assert.ok(startRoleBlock, "found start role-contract block");
   const block = startRoleBlock[0];
   assert.ok(!/opencode-serve|claude-code|codex|kimi-code/.test(block),
@@ -453,8 +454,9 @@ test("M11-5-A2-ARCH1: runManager role-contract region is capability-driven, no r
 test("M11-5-A2-ARCH2: resume role-contract region is capability-driven, no silent null", () => {
   const src = readFileSync(resolve(process.cwd(), "src/runManager.js"), "utf8");
   // The resume role-contract block: from resumeRoleContract declaration to
-  // the loadRoleContract call.
-  const resumeRoleBlock = src.match(/let resumeRoleContract[\s\S]*?loadRoleContract\(resolve\(agent\.systemPrompt\)\)/);
+  // the loadRoleContract call. Package C1: path resolution moved into
+  // loadRoleContract (no call-site resolve()).
+  const resumeRoleBlock = src.match(/let resumeRoleContract[\s\S]*?loadRoleContract\(agent\.systemPrompt\)/);
   assert.ok(resumeRoleBlock, "found resume role-contract block");
   const block = resumeRoleBlock[0];
   assert.ok(!/opencode-serve|claude-code|codex|kimi-code/.test(block),
