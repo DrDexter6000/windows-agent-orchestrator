@@ -1195,20 +1195,46 @@ test("M11-4-DOC-03: architecture.md lists runCollectProjection.js shared ownersh
     "architecture ties runCollectProjection.js to M11-4");
 });
 
-test("M11-4-DOC-04: roadmap records M11-4 implementation complete, dogfood pending", () => {
+test("M11-4-DOC-04: roadmap records M11-4 fresh Lead dogfood complete with Host friction, M11 still in progress", () => {
   const roadmap = read("docs/roadmap.md");
   const m11Row = roadmap.split("\n").find((l) => /^\|\s*M11\s*\|/.test(l)) || "";
   assert.ok(m11Row, "roadmap 含 M11 行");
-  // M11-4 implementation recorded as complete.
-  assert.ok(/M11-4.*implementation.*完成|M11-4.*完成.*implementation|M11-4 implementation.*完成/i.test(m11Row)
-    || /M11-4.*implementation.*complete/i.test(m11Row),
-    "roadmap marks M11-4 implementation complete");
-  // M11-4 dogfood is still pending (not claimed complete).
-  assert.ok(/M11-4.*dogfood.*待|fresh Lead dogfood.*待.*M11-4|M11-4.*fresh Lead dogfood.*待/i.test(m11Row)
-    || /fresh Lead dogfood.*待验收/.test(m11Row),
-    "roadmap keeps M11-4 fresh Lead dogfood as pending acceptance");
-  assert.ok(!/M11-4.*dogfood.*PASS|M11-4.*dogfood.*完成|M11-4.*dogfood.*已通过/i.test(m11Row),
-    "roadmap does NOT claim M11-4 dogfood passed (still pending)");
-  // M11 overall still in progress.
+  // M11-4 fresh Lead dogfood is recorded as complete.
+  assert.ok(/M11-4.*fresh.*Lead.*dogfood.*(完成|PASS|通过)|fresh.*Codex.*CLI.*Lead.*M11-4.*dogfood.*(完成|PASS|通过)/i.test(m11Row)
+    || /M11-4.*dogfood.*(PASS_WITH_HOST_FRICTION|完成|已通过)/i.test(m11Row),
+    "roadmap marks M11-4 fresh Lead dogfood complete");
+  // Verdict is PASS_WITH_HOST_FRICTION (not plain PASS — friction preserved).
+  assert.ok(/PASS_WITH_HOST_FRICTION/.test(m11Row),
+    "roadmap records M11-4 verdict as PASS_WITH_HOST_FRICTION (friction preserved)");
+  // Durable evidence anchor (runId).
+  assert.ok(/run_m114_fresh_lead_20260722/.test(m11Row),
+    "roadmap carries the M11-4 dogfood runId anchor");
+  // No stale "pending" / "待授权" / "待执行" phrasing for M11-4 dogfood.
+  assert.ok(!/M11-4.*dogfood.*待|M11-4.*fresh Lead dogfood.*待(授权|执行|验收)|fresh Lead dogfood.*待.*M11-4/i.test(m11Row),
+    "roadmap no longer marks M11-4 dogfood as pending");
+  // M11 overall still in progress (not closed).
   assert.ok(/🔧.*进行中|in progress/i.test(m11Row), "M11 still marked in progress");
+});
+
+test("M11-4-DOC-05: TD-106 no longer lists M11-3/M11-4 capabilities as open", () => {
+  const td = read("docs/tech-debt.md");
+  // TD-106 appears exactly once and stays in the open section (not repaid).
+  const td106Matches = td.match(/TD-106/g) || [];
+  assert.equal(td106Matches.length, 1, "TD-106 appears exactly once");
+  // The raw delivery diff review (M11-3 run_delivery_review) is resolved.
+  const td106Row = td.split("\n").find((l) => /^\|\s*TD-106\s*\|/.test(l)) || "";
+  assert.ok(td106Row, "TD-106 row present");
+  assert.ok(/run_delivery_review.*M11-3|M11-3.*run_delivery_review/.test(td106Row),
+    "TD-106 records M11-3 run_delivery_review as resolved");
+  // The run_collect truncation raw-transcript fallback (M11-4) is resolved.
+  assert.ok(/run_collect.*continuation.*M11-4|M11-4.*run_collect.*continuation|cursor.*continuation.*M11-4/i.test(td106Row),
+    "TD-106 records M11-4 run_collect cursor continuation as resolved");
+  // The old open items (c) and (d) must NOT remain as unresolved capability gaps.
+  // Match the ORIGINAL open-declaration phrasing ("仍开放" / "截断时...可能回退"),
+  // not the "已处理" resolution phrasing that legitimately mentions the same
+  // keywords while describing the fix.
+  assert.ok(!/raw artifact\/diff review 仍开放/.test(td106Row),
+    "TD-106 no longer lists raw artifact/diff review as open (M11-3 resolved it)");
+  assert.ok(!/run_collect.*截断时.*可能回退|run_collect.*截断时.*Lead 可能/.test(td106Row),
+    "TD-106 no longer declares run_collect truncation raw-transcript fallback as an open gap (M11-4 resolved it)");
 });
