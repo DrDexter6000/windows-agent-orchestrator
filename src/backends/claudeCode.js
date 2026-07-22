@@ -20,9 +20,9 @@ const WRAPPER_PATH = resolve(join(dirname(fileURLToPath(import.meta.url)), "..",
  * agent.args：仅作真正 ad-hoc 的 CLI flag 透传（如 ["--dangerously-skip-permissions"]）。
  *
  * M11-5 角色合同（TD-89 修复）：role contract 由 RunManager 经共享加载器
- * （roleContract.js）验证后，以 task.roleContractPath（已确认存在的绝对路径）
- * 传入。这里用 `--append-system-prompt-file` 恰好一次注入。不再有"文件不存在静默
- * 忽略"分支——加载器已 fail-closed，到这里的路径必然有效。
+ * （roleContract.js）验证后，以 task.roleContract（已验证的字符串内容）传入。
+ * 这里用 `--append-system-prompt <content>` 恰好一次注入——直接传内容，不传
+ * 文件路径，消除 TOCTOU 竞态（加载验证 ROLE_A 后文件被替换为 ROLE_B 的窗口）。
  */
 export class ClaudeCodeBackend extends ProcessBackend {
   constructor(opts = {}) {
@@ -34,11 +34,10 @@ export class ClaudeCodeBackend extends ProcessBackend {
           "--output-format", "stream-json",
           "--verbose",
         ];
-        // M11-5：角色合同注入（config/roles/*.md，loader 已验证）。
-        // --append-system-prompt-file 恰好一次；roleContractPath 由 RunManager
-        // 传入（加载器已确认文件存在且合法，无需再 existsSync）。
-        if (task.roleContractPath) {
-          args.push("--append-system-prompt-file", task.roleContractPath);
+        // M11-5：角色合同注入（config/roles/*.md，loader 已验证内容）。
+        // --append-system-prompt <content> 恰好一次；用内容而非路径，消除 TOCTOU。
+        if (task.roleContract) {
+          args.push("--append-system-prompt", task.roleContract);
         }
         // P4 决策B：有 provider 时，claude CLI 的 --model/--effort 从 provider 推导
         // （与 wrapper 同源，防漂移）。无 provider 时这些应在 agent.args 里（旧形态）。

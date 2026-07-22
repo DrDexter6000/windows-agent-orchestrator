@@ -105,10 +105,18 @@ export class RunManager {
     // 保存 roleContract 内容或组合后的 prompt。Lead/model 不能覆盖此处的
     // registry 选定角色。
     let roleContract = undefined;
-    let roleContractPath = undefined;
     if (agent.systemPrompt) {
-      roleContractPath = resolve(agent.systemPrompt);
-      roleContract = loadRoleContract(roleContractPath);
+      // M11-5 (CTO rework P1): opencode-serve does NOT support role contract
+      // injection (no system/developer message channel). A configured
+      // systemPrompt on an opencode-serve worker would be silently dropped —
+      // fail closed BEFORE transcript creation or spawn, not after.
+      if (agent.backend === "opencode-serve") {
+        throw new Error(
+          `Agent ${agentId}: systemPrompt is configured but backend "opencode-serve" does not support role contract injection. ` +
+          `Remove systemPrompt from this agent, or switch to a process backend (claude-code/codex/kimi-code).`
+        );
+      }
+      roleContract = loadRoleContract(resolve(agent.systemPrompt));
     }
 
     const finalRunId = runId ?? `run_${new Date().toISOString().replace(/[-:.TZ]/g, "")}${Math.random().toString(36).slice(2, 8)}`;
@@ -308,7 +316,7 @@ export class RunManager {
 
     let result;
     try {
-      result = await backend.spawn(effectiveAgent, { prompt, roleContract, roleContractPath });
+      result = await backend.spawn(effectiveAgent, { prompt, roleContract });
     } catch (error) {
       await transcript.append("run.error", { phase: "spawn", error: error.message });
       await this._transition(transcript, "pending", "failed", "spawn_error");
@@ -423,10 +431,11 @@ export class RunManager {
     // M11-5（TD-89 修复）：resume 也必须重新经过同一角色合同加载器，不得静默
     // 漏掉。与 start 路径同一 SSOT（roleContract.js），同一 fail-closed 边界。
     let resumeRoleContract = undefined;
-    let resumeRoleContractPath = undefined;
     if (agent.systemPrompt) {
-      resumeRoleContractPath = resolve(agent.systemPrompt);
-      resumeRoleContract = loadRoleContract(resumeRoleContractPath);
+      if (agent.backend === "opencode-serve") {
+        return null;
+      }
+      resumeRoleContract = loadRoleContract(resolve(agent.systemPrompt));
     }
 
     // TD-103 Phase 3A: restore scorecardRules ONLY for delivery runs, from the
@@ -455,7 +464,6 @@ export class RunManager {
       const newResult = await backend.spawn(agent, {
         prompt: promptEvent.prompt,
         roleContract: resumeRoleContract,
-        roleContractPath: resumeRoleContractPath,
       });
       await transcript.append("run.rerun", {
         originalSessionId,

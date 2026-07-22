@@ -152,27 +152,25 @@ test("M11-5-A8: loadRoleContract accepts exactly 4096 bytes", () => {
 // B1: claude-code uses --append-system-prompt-file exactly once when role is
 //     present; task prompt is NOT concatenated with role.
 // ---------------------------------------------------------------------
-test("M11-5-B1: claude-code buildArgs uses --append-system-prompt-file once, task not concatenated", () => {
+test("M11-5-B1: claude-code buildArgs uses --append-system-prompt <content> once, task not concatenated", () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m115-b1-"));
   try {
-    const rolePath = writeRole(dir, "role.md", "ROLE_MARKER_CLAUDE");
     const backend = new ClaudeCodeBackend();
     const buildArgs = getBuildArgs(backend);
     const agent = {};
-    // claude uses roleContractPath (loader-validated path), not content.
-    const task = { prompt: "TASK_MARKER", roleContractPath: rolePath };
+    // M11-5 CTO rework: claude uses roleContract (content, not path) to
+    // eliminate TOCTOU. --append-system-prompt <content> exactly once.
+    const task = { prompt: "TASK_MARKER", roleContract: "ROLE_MARKER_CLAUDE" };
     const args = buildArgs(agent, task);
-    const flagIdx = args.indexOf("--append-system-prompt-file");
-    assert.ok(flagIdx >= 0, "has --append-system-prompt-file");
-    // exactly once
-    assert.equal(args.filter((a) => a === "--append-system-prompt-file").length, 1, "flag exactly once");
-    // the path follows the flag
-    assert.equal(args[flagIdx + 1], rolePath, "role path follows the flag");
+    const flagIdx = args.indexOf("--append-system-prompt");
+    assert.ok(flagIdx >= 0, "has --append-system-prompt");
+    assert.equal(args.filter((a) => a === "--append-system-prompt").length, 1, "flag exactly once");
+    // content follows the flag
+    assert.ok(args[flagIdx + 1]?.includes("ROLE_MARKER_CLAUDE"), "role content follows the flag");
     // task prompt present as its own arg, not concatenated with role
     assert.ok(args.includes("TASK_MARKER"), "task prompt is its own arg");
-    // no arg contains the role content inline (it goes via the file flag)
-    assert.ok(!args.some((a) => typeof a === "string" && a.includes("ROLE_MARKER_CLAUDE")),
-      "role content not inlined into args (delivered via file)");
+    // no path-based flag (TOCTOU elimination)
+    assert.ok(!args.includes("--append-system-prompt-file"), "no path-based file flag (TOCTOU eliminated)");
   } finally {
     cleanupDir(dir);
   }

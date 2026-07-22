@@ -18,6 +18,7 @@
         "contextWindow": 1000000
       },
       "cwd": "D:/projects/your-project",
+      "systemPrompt": "config/roles/researcher.md",
       "args": ["--dangerously-skip-permissions"],
       "_comment_env": "TD-79 Python 环境隔离：researcher 是只读角色，不应改全局 Python env。PIP_REQUIRE_VIRTUALENV 让 pip 在无激活 venv 时直接拒绝安装；PYTHONNOUSERSITE 禁 user site-packages。两者都是 OS-native 机制，pip 自己拒绝，无需 WAO 包装命令。需真正装包的 worker（coder_*）不配此项。",
       "env": {
@@ -39,6 +40,7 @@
         "contextWindow": 1000000
       },
       "cwd": "D:/projects/your-project",
+      "systemPrompt": "config/roles/coder_hq.md",
       "args": ["--dangerously-skip-permissions"]
     },
     "coder_low": {
@@ -53,6 +55,7 @@
         "contextWindow": 128000
       },
       "cwd": "D:/projects/your-project",
+      "systemPrompt": "config/roles/coder_low.md",
       "args": ["--dangerously-skip-permissions"]
     },
     "coder_mm": {
@@ -62,7 +65,8 @@
       "_comment_limit": "kimi stream-json 不含 usage/token，token 预算硬闸门（S1-1）对本 worker 无效；成本控制靠 kimi 自带超时（agent_task_timeout_s=900）+ WAO waitTimeout。",
       "_comment_task": "适合任务: UI 截图设计还原/带图文档/图像相关编码",
       "backend": "kimi-code",
-      "cwd": "D:/projects/your-project"
+      "cwd": "D:/projects/your-project",
+      "systemPrompt": "config/roles/coder_mm.md"
     },
     "tester": {
       "_comment": "[Tester] 执行层验证 + 运行监控（轮询）。对齐 team-roles.md Tester。",
@@ -71,7 +75,8 @@
       "_comment_note": "codex 作为 Lead（主控）时不进 registry——这里是把它当 worker 用。",
       "_comment_task": "适合任务: 跑测试/验证 exitCode/检查产出文件/轮询运行状态",
       "backend": "codex",
-      "cwd": "D:/projects/your-project"
+      "cwd": "D:/projects/your-project",
+      "systemPrompt": "config/roles/tester.md"
     },
     "auditor": {
       "_comment": "[Auditor] 独立红队。前置审计方案 + 后置验收。与 Coder 不同源防伪完成。对齐 team-roles.md Auditor。",
@@ -80,6 +85,7 @@
       "_comment_task": "适合任务: 前置方案审计/后置独立复核/PASS-FAIL 判定",
       "backend": "claude-code",
       "cwd": "D:/projects/your-project",
+      "systemPrompt": "config/roles/auditor.md",
       "args": ["--model", "opus-4.8", "--dangerously-skip-permissions"]
     },
     "coder_opencode_fallback": {

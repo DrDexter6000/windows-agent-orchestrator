@@ -50,6 +50,15 @@ export function normalizeAgent(id, agent) {
       );
     }
   }
+  // M11-5 (CTO rework): systemPrompt must be a non-empty trimmed string if present.
+  // Reject numbers, booleans, objects, arrays, and whitespace-only strings —
+  // they silently pass truthy checks or get treated as "no role" depending on
+  // context, recreating the TD-89 silent-failure class.
+  if (agent.systemPrompt !== undefined && agent.systemPrompt !== null) {
+    if (typeof agent.systemPrompt !== "string" || agent.systemPrompt.trim().length === 0) {
+      throw new Error(`Agent ${id} has invalid systemPrompt: must be a non-empty string (got ${JSON.stringify(agent.systemPrompt)})`);
+    }
+  }
   return {
     id,
     ...agent,
