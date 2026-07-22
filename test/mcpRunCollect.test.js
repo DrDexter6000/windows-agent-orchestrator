@@ -71,7 +71,8 @@ test("M9-4B-01: tools/list has registry_list + run_dispatch + run_status + run_c
 
       const rc = tools.tools.find((t) => t.name === "run_collect");
       assert.ok(rc, "run_collect present");
-      assert.deepEqual(Object.keys(rc.inputSchema.properties ?? {}), ["runId"], "input has only runId");
+      // M11-4: input now accepts an optional opaque cursor for continuation.
+      assert.deepEqual(Object.keys(rc.inputSchema.properties ?? {}), ["runId", "cursor"], "input has runId + optional cursor");
       assert.equal(rc.inputSchema.additionalProperties, false, "input strict");
       // annotations: not read-only, not idempotent (appends audit event), open-world.
       assert.equal(rc.annotations.readOnlyHint, false, "readOnlyHint:false");
@@ -137,7 +138,8 @@ test("M9-4B-03: run_collect output is bounded safe projection, no raw leak", asy
     const parsed = JSON.parse(textBlock.text);
 
     // Top-level keys: only the safe projection.
-    const allowedKeys = new Set(["runId", "backend", "reconstructed", "itemCount", "messages", "evidenceCounts", "truncated"]);
+    // M11-4: nextCursor added for continuation (null when result fits one page).
+    const allowedKeys = new Set(["runId", "backend", "reconstructed", "itemCount", "messages", "evidenceCounts", "truncated", "nextCursor"]);
     for (const k of Object.keys(parsed)) {
       assert.ok(allowedKeys.has(k), `unexpected key in output: ${k}`);
     }
@@ -494,5 +496,208 @@ test("M9-4B-12: text cap does not break evidence counting for later items", asyn
   } finally {
     await client.close();
     await server.close();
+  }
+});
+
+// ===== M11-4 B3: MCP run_collect continuation (safe projection + cursor) =====
+//
+// M11-4 adds an opaque nextCursor to run_collect so a Lead can read the full
+// worker output page by page through the same safe tool. These tests prove
+// the MCP adapter (1) accepts an optional cursor, (2) returns a bounded
+// nextCursor, (3) keeps every existing safety property intact across pages,
+// (4) collapses every error path to the fixed `run_collect failed` text.
+
+// Helper: a process transcript with N assistant messages of the given body.
+function writeM11_4Transcript(runDir, runId, messageBodies) {
+  mkdirSync(runDir, { recursive: true });
+  const lines = [
+    JSON.stringify({ type: "session.created", backend: "process", backendSessionId: "proc_m114", runId, agentId: "w" }),
+    JSON.stringify({ type: "run.started", backend: "claude-code", ts: "2026-07-22T00:00:00.000Z", runId, agentId: "w" }),
+  ];
+  messageBodies.forEach((body, i) => {
+    lines.push(JSON.stringify({
+      type: "run.event", kind: "message", role: "assistant",
+      parts: [{ type: "text", text: body }],
+      ts: `2026-07-22T00:00:${10 + i}.000Z`, runId, agentId: "w",
+    }));
+  });
+  lines.push(JSON.stringify({ type: "run.state_change", to: "completed", reason: "ok", ts: "2026-07-22T00:10:00.000Z", runId, agentId: "w" }));
+  writeFileSync(join(runDir, `${runId}.jsonl`), lines.map((l) => l + "\n").join(""), "utf8");
+}
+
+// ---------------------------------------------------------------------
+// M11-4-B3-01: run_collect input schema now accepts optional cursor; output
+// carries nextCursor (null for small, opaque token for multi-page).
+// ---------------------------------------------------------------------
+test("M11-4-B3-01: small result returns nextCursor=null; large result paginates over MCP", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m114-b3-01-"));
+  try {
+    const runDir = join(dir, "runs");
+    const runId = "run_b3_01";
+
+    // --- small ---
+    writeM11_4Transcript(runDir, runId, ["single message"]);
+    let server = createWaoMcpServer({ registryPath: "/server/r.json", runDir });
+    let client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_collect", arguments: { runId } });
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(parsed.messages.length, 1);
+      assert.equal(parsed.nextCursor, null, "small result: nextCursor null");
+      // Existing fields preserved.
+      assert.equal(parsed.runId, runId);
+      assert.equal(parsed.backend, "process");
+      assert.equal(parsed.reconstructed, true);
+      assert.equal(parsed.itemCount, 1);
+      assert.equal(parsed.evidenceCounts.message, 1);
+      assert.equal(parsed.truncated, false);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// M11-4-B3-02: 12 messages paginate via MCP across pages with no dup/loss.
+// ---------------------------------------------------------------------
+test("M11-4-B3-02: 12 messages paginate via MCP, exact-once reconstruction", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m114-b3-02-"));
+  try {
+    const runDir = join(dir, "runs");
+    const runId = "run_b3_02";
+    const bodies = [];
+    for (let i = 0; i < 12; i += 1) bodies.push(`body-${i}`);
+    writeM11_4Transcript(runDir, runId, bodies);
+
+    const collected = [];
+    let cursor = null;
+    const server = createWaoMcpServer({ registryPath: "/server/r.json", runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      while (true) {
+        const args = cursor ? { runId, cursor } : { runId };
+        const res = await client.callTool({ name: "run_collect", arguments: args });
+        const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+        collected.push(...parsed.messages.map((m) => m.text));
+        cursor = parsed.nextCursor;
+        if (!cursor) break;
+      }
+      assert.equal(collected.length, 12, "all 12 read");
+      for (let i = 0; i < 12; i += 1) assert.equal(collected[i], `body-${i}`);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// M11-4-B3-03: malformed cursor over MCP → fixed "run_collect failed", no
+// err.message / path / SDK validation detail leak.
+// ---------------------------------------------------------------------
+test("M11-4-B3-03: malformed cursor over MCP returns fixed safe text, no leak", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m114-b3-03-"));
+  try {
+    const runDir = join(dir, "runs");
+    const runId = "run_b3_03";
+    writeM11_4Transcript(runDir, runId, ["x"]);
+    const server = createWaoMcpServer({ registryPath: "/server/r.json", runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_collect", arguments: { runId, cursor: "not!base64url" } });
+      assert.equal(res.isError, true, "isError flagged");
+      const text = res.content.find((b) => b.type === "text").text;
+      assert.ok(/run_collect failed/.test(text), "fixed safe text");
+      const dumped = JSON.stringify(res);
+      assert.ok(!/err\.message|stack|validation error|path/i.test(dumped), "no leak");
+      assert.ok(!res.structuredContent, "no structuredContent on error");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// M11-4-B3-04: cross-run cursor replay over MCP → fixed safe text.
+// ---------------------------------------------------------------------
+test("M11-4-B3-04: cross-run cursor replay over MCP fails closed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m114-b3-04-"));
+  try {
+    const runDir = join(dir, "runs");
+    writeM11_4Transcript(runDir, "runA", Array.from({ length: 10 }, (_, i) => `A-${i}`));
+    writeM11_4Transcript(runDir, "runB", ["B-0", "B-1"]);
+    const server = createWaoMcpServer({ registryPath: "/server/r.json", runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const resA = await client.callTool({ name: "run_collect", arguments: { runId: "runA" } });
+      const parsedA = JSON.parse(resA.content.find((b) => b.type === "text").text);
+      assert.ok(parsedA.nextCursor, "runA has next cursor");
+      const resB = await client.callTool({ name: "run_collect", arguments: { runId: "runB", cursor: parsedA.nextCursor } });
+      assert.equal(resB.isError, true, "cross-run replay fails closed");
+      assert.ok(/run_collect failed/.test(resB.content.find((b) => b.type === "text").text));
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// M11-4-B3-05: exact configured secret in assistant text is redacted across
+// page boundaries. Env must be set BEFORE server creation (redactor reads
+// process.env at projection call time per page, but we set it up-front to
+// be safe across implementations).
+// ---------------------------------------------------------------------
+test("M11-4-B3-05: exact secret redacted across pages (redaction before pagination)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m114-b3-05-"));
+  const prev = process.env.WAO_M114_TEST_SECRET;
+  try {
+    const runDir = join(dir, "runs");
+    const runId = "run_b3_05";
+    const secret = "test-secret-m114-mcp-value-9876543210";
+    // Register the secret as a known env value so the redactor picks it up.
+    process.env.WAO_M114_TEST_SECRET = secret;
+    // One very long message that repeats the secret many times, forcing
+    // multi-page slicing. If pagination ran before redaction, a slice could
+    // land inside the secret token.
+    const body = (secret + "-").repeat(4000);
+    writeM11_4Transcript(runDir, runId, [body]);
+    const server = createWaoMcpServer({ registryPath: "/server/r.json", runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const collected = [];
+      let cursor = null;
+      let safety = 0;
+      while (true) {
+        const args = cursor ? { runId, cursor } : { runId };
+        const res = await client.callTool({ name: "run_collect", arguments: args });
+        const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+        collected.push(...parsed.messages.map((m) => m.text));
+        cursor = parsed.nextCursor;
+        if (!cursor) break;
+        safety += 1;
+        if (safety > 10) throw new Error("runaway pagination");
+      }
+      const reconstructed = collected.join("");
+      assert.ok(!reconstructed.includes(secret), "secret zero-leak across pages");
+      assert.ok(reconstructed.includes("[REDACTED"), "redaction marker present");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    if (prev === undefined) delete process.env.WAO_M114_TEST_SECRET;
+    else process.env.WAO_M114_TEST_SECRET = prev;
+    cleanupDir(dir);
   }
 });

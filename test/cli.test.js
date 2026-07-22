@@ -1853,6 +1853,192 @@ test("TD-77A: 空 run（无任何 run.event）→ data:[] 不抛", async () => {
   }
 });
 
+// ===== M11-4 B4: CLI collect --cursor parity + audit append =====
+
+// A process transcript with N assistant messages for CLI continuation tests.
+function writeM11_4CliTranscript(dir, runId, messageBodies) {
+  const lines = [
+    JSON.stringify({ type: "run.submitted", agentId: "researcher", ts: "2026-07-22T00:00:00.000Z" }),
+    JSON.stringify({ type: "session.created", backend: "process", backendSessionId: "proc_m114_cli", runId, agentId: "researcher" }),
+    JSON.stringify({ type: "run.started", backend: "claude-code", ts: "2026-07-22T00:00:01.000Z", runId, agentId: "researcher" }),
+  ];
+  messageBodies.forEach((body, i) => {
+    lines.push(JSON.stringify({
+      type: "run.event", kind: "message", role: "assistant",
+      parts: [{ type: "text", text: body }],
+      ts: `2026-07-22T00:00:${10 + i}.000Z`, runId, agentId: "researcher",
+    }));
+  });
+  lines.push(JSON.stringify({ type: "run.state_change", to: "completed", reason: "ok", ts: "2026-07-22T00:10:00.000Z", runId, agentId: "researcher" }));
+  writeFileSync(join(dir, `${runId}.jsonl`), lines.map((l) => l + "\n").join(""), "utf8");
+}
+
+// ---------------------------------------------------------------------
+// M11-4-B4-01: default `collect <runId>` stays byte-compatible (raw data
+// shape, no nextCursor pollution). The new --cursor entry is opt-in.
+// ---------------------------------------------------------------------
+test("M11-4-B4-01: default collect stays byte-compatible (raw data, no cursor field)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m114-b4-01-"));
+  try {
+    writeM11_4CliTranscript(dir, "run_cli_default", ["one", "two"]);
+    const out = await captureLog(async () => {
+      await collectCommand(["run_cli_default", "--run-dir", dir], { runDir: dir });
+    });
+    const parsed = JSON.parse(out);
+    // Existing raw ops surface preserved.
+    assert.equal(parsed.reconstructed, true);
+    assert.equal(parsed.backend, "process");
+    assert.ok(Array.isArray(parsed.data));
+    assert.equal(parsed.data.length, 2);
+    // No safe-projection fields leak into the default ops output.
+    assert.equal(parsed.nextCursor, undefined, "default collect has no nextCursor");
+    assert.equal(parsed.messages, undefined, "default collect has no messages array");
+    assert.equal(parsed.evidenceCounts, undefined, "default collect has no evidenceCounts");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// M11-4-B4-02: `collect <runId> --cursor <token>` delegates to the shared
+// safe projection (MCP-parity JSON output with nextCursor).
+// ---------------------------------------------------------------------
+test("M11-4-B4-02: collect --cursor delegates to shared safe projection", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m114-b4-02-"));
+  try {
+    const bodies = [];
+    for (let i = 0; i < 12; i += 1) bodies.push(`cli-body-${i}`);
+    writeM11_4CliTranscript(dir, "run_cli_cursor", bodies);
+
+    // Page 1 WITHOUT cursor → projection-mode first page.
+    let out = await captureLog(async () => {
+      await collectCommand(["run_cli_cursor", "--run-dir", dir, "--format", "json"], { runDir: dir });
+    });
+    let parsed = JSON.parse(out);
+    assert.ok(parsed.messages, "--format json yields projection shape");
+    assert.equal(parsed.messages.length, 8, "page 1 caps at 8");
+    assert.ok(parsed.nextCursor, "page 1 has next cursor");
+    assert.equal(parsed.runId, "run_cli_cursor");
+    assert.equal(parsed.backend, "process");
+    assert.ok(parsed.evidenceCounts);
+
+    // Page 2 WITH cursor.
+    const cursor = parsed.nextCursor;
+    out = await captureLog(async () => {
+      await collectCommand(["run_cli_cursor", "--cursor", cursor, "--run-dir", dir, "--format", "json"], { runDir: dir });
+    });
+    parsed = JSON.parse(out);
+    assert.equal(parsed.messages.length, 4, "page 2 returns the remaining 4");
+    assert.equal(parsed.nextCursor, null, "page 2 is terminal");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// M11-4-B4-03: CLI continuation audit — each successful page appends exactly
+// one messages.collected; invalid cursor appends zero. Audit event does not
+// store cursor or text.
+// ---------------------------------------------------------------------
+test("M11-4-B4-03: CLI continuation audit appends one per page, zero on invalid cursor", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m114-b4-03-"));
+  try {
+    const bodies = [];
+    for (let i = 0; i < 12; i += 1) bodies.push(`audit-${i}`);
+    writeM11_4CliTranscript(dir, "run_cli_audit", bodies);
+    const tpath = join(dir, "run_cli_audit.jsonl");
+
+    // Page 1
+    let out = await captureLog(async () => {
+      await collectCommand(["run_cli_audit", "--run-dir", dir, "--format", "json"], { runDir: dir });
+    });
+    const page1 = JSON.parse(out);
+    // Page 2
+    await captureLog(async () => {
+      await collectCommand(["run_cli_audit", "--cursor", page1.nextCursor, "--run-dir", dir, "--format", "json"], { runDir: dir });
+    });
+    // Invalid cursor — must NOT append.
+    await captureLog(async () => {
+      try {
+        await collectCommand(["run_cli_audit", "--cursor", "not!base64url", "--run-dir", dir, "--format", "json"], { runDir: dir });
+      } catch { /* expected */ }
+    });
+
+    const events = readFileSync(tpath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    const audits = events.filter((e) => e.type === "messages.collected");
+    assert.equal(audits.length, 2, "exactly 2 audits for 2 successful pages");
+    // Audit must not carry cursor or text.
+    for (const a of audits) {
+      const dumped = JSON.stringify(a);
+      assert.ok(!/nextCursor|cursor token/i.test(dumped), "audit has no cursor");
+      assert.ok(!/"text"\s*:/.test(dumped), "audit has no message text");
+    }
+    // Terminal unchanged.
+    const states = events.filter((e) => e.type === "run.state_change");
+    assert.equal(states.at(-1).to, "completed", "terminal unchanged");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// M11-4-B4-04: CLI continuation with --cursor produces output that is
+// deep-equal to MCP structuredContent for the same run + page.
+// ---------------------------------------------------------------------
+test("M11-4-B4-04: CLI --cursor output deep-equals MCP structuredContent", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m114-b4-04-"));
+  try {
+    const bodies = [];
+    for (let i = 0; i < 12; i += 1) bodies.push(`parity-${i}`);
+    writeM11_4CliTranscript(dir, "run_cli_parity", bodies);
+
+    // CLI page 1.
+    const cliOut = await captureLog(async () => {
+      await collectCommand(["run_cli_parity", "--run-dir", dir, "--format", "json"], { runDir: dir });
+    });
+    const cliPage1 = JSON.parse(cliOut);
+
+    // MCP page 1 over InMemoryTransport (separate run dir to avoid double-append
+    // polluting the CLI's transcript). We build a second identical fixture.
+    const dir2 = mkdtempSync(join(tmpdir(), "wao-m114-b4-04b-"));
+    const runDir2 = join(dir2, "runs");
+    mkdirSync(runDir2, { recursive: true });
+    writeM11_4CliTranscript(runDir2, "run_cli_parity", bodies);
+
+    const { createWaoMcpServer } = await import("../src/mcp/server.js");
+    const { Client } = await import("@modelcontextprotocol/sdk/client");
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const server = createWaoMcpServer({ registryPath: "/server/r.json", runDir: runDir2 });
+    const client = new Client({ name: "wao-test", version: "0.0.1" }, { capabilities: {} });
+    const [c, s] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(s), client.connect(c)]);
+    try {
+      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_cli_parity" } });
+      const mcpPage1 = res.structuredContent;
+      // Deep semantic equality: same field set, same message texts, same
+      // evidenceCounts, same itemCount, same truncated. nextCursor tokens
+      // differ in literal (different snapshot reads) but both must be
+      // non-null base64url ≤192.
+      assert.deepEqual(cliPage1.messages, mcpPage1.messages, "messages deepEqual");
+      assert.deepEqual(cliPage1.evidenceCounts, mcpPage1.evidenceCounts, "evidenceCounts deepEqual");
+      assert.equal(cliPage1.itemCount, mcpPage1.itemCount);
+      assert.equal(cliPage1.backend, mcpPage1.backend);
+      assert.equal(cliPage1.reconstructed, mcpPage1.reconstructed);
+      assert.equal(cliPage1.truncated, mcpPage1.truncated);
+      assert.equal(cliPage1.runId, mcpPage1.runId);
+      assert.ok(cliPage1.nextCursor && mcpPage1.nextCursor);
+      assert.match(cliPage1.nextCursor, /^[A-Za-z0-9_-]+$/);
+      assert.match(mcpPage1.nextCursor, /^[A-Za-z0-9_-]+$/);
+    } finally {
+      await client.close();
+      await server.close();
+      rmrfRetry(dir2);
+    }
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
 test("runs scorecard --format json: 无规则与提前失败都输出三态 JSON", () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-scorecard-json-states-"));
   try {
