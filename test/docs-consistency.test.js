@@ -1147,3 +1147,68 @@ test("M11-2-DOGFOOD: fresh Codex CLI Lead dogfood marked complete with anchor, r
   assert.ok(!/M11-2.*真实.*Lead.*dogfood|真实.*Lead.*dogfood/i.test(openList),
     "roadmap '仍开放' 清单不再含旧短语 'M11-2 真实 Lead dogfood'");
 });
+
+// ============================================================
+// M11-4 run_collect continuation guards.
+// Long-term contract guards (not one-off report parsers):
+//   1. usage.md documents the cursor input + nextCursor output + safety.
+//   2. SKILL.md tells the Lead to follow nextCursor to null.
+//   3. architecture.md lists runCollectProjection.js as shared ownership.
+//   4. roadmap records M11-4 implementation complete but dogfood pending.
+// ============================================================
+
+test("M11-4-DOC-01: usage.md documents run_collect cursor input + nextCursor + zero-append-on-invalid", () => {
+  const usage = read("docs/usage.md");
+  // Input accepts optional opaque cursor.
+  assert.ok(/run_collect/.test(usage), "usage covers run_collect");
+  assert.ok(/"cursor"/.test(usage) && /opaque continuation token/i.test(usage),
+    "usage documents the optional opaque cursor input");
+  // Output carries nextCursor (null or token).
+  assert.ok(/"nextCursor"/.test(usage), "usage documents nextCursor output field");
+  // Continuation semantics: page-by-page until null, exact-once, frozen snapshot.
+  assert.ok(/续读|continuation/i.test(usage), "usage documents continuation flow");
+  assert.ok(/无漏项.*无重复|no loss.*no dup/i.test(usage) || /完整.*按序.*无漏项.*无重复/.test(usage),
+    "usage states no-loss/no-duplication reconstruction");
+  assert.ok(/snapshot.*冻结|frozen.*snapshot|frozen.*prefix/i.test(usage),
+    "usage documents frozen-snapshot stability");
+  // Security: cursor never carries raw sensitive values.
+  assert.ok(/cursor.*不含.*raw|cursor.*绝不.*raw|绝不.*raw runId/i.test(usage),
+    "usage states cursor carries no raw runId/session/path/prompt/secret");
+  // Invalid cursor → zero audit append.
+  assert.ok(/invalid cursor|无效 cursor/i.test(usage) && /零追加|zero.*append/i.test(usage),
+    "usage states invalid cursor → zero audit append");
+});
+
+test("M11-4-DOC-02: SKILL.md tells Lead to follow nextCursor to null via run_collect", () => {
+  const skill = read("SKILL.md");
+  assert.ok(/nextCursor.*null.*run_collect|run_collect.*nextCursor.*null/i.test(skill),
+    "SKILL instructs Lead to call run_collect with nextCursor until null");
+  assert.ok(/不.*读.*runs\/\*\.jsonl|do not read.*runs\/\*\.jsonl|never.*read.*transcript/i.test(skill),
+    "SKILL tells Lead not to read raw transcript — safe continuation exists");
+});
+
+test("M11-4-DOC-03: architecture.md lists runCollectProjection.js shared ownership", () => {
+  const arch = read("docs/02-architecture.md");
+  assert.ok(/runCollectProjection\.js/.test(arch),
+    "architecture lists runCollectProjection.js as a shared application service");
+  assert.ok(/runCollectProjection\.js.*M11-4|M11-4.*runCollectProjection\.js/.test(arch),
+    "architecture ties runCollectProjection.js to M11-4");
+});
+
+test("M11-4-DOC-04: roadmap records M11-4 implementation complete, dogfood pending", () => {
+  const roadmap = read("docs/roadmap.md");
+  const m11Row = roadmap.split("\n").find((l) => /^\|\s*M11\s*\|/.test(l)) || "";
+  assert.ok(m11Row, "roadmap 含 M11 行");
+  // M11-4 implementation recorded as complete.
+  assert.ok(/M11-4.*implementation.*完成|M11-4.*完成.*implementation|M11-4 implementation.*完成/i.test(m11Row)
+    || /M11-4.*implementation.*complete/i.test(m11Row),
+    "roadmap marks M11-4 implementation complete");
+  // M11-4 dogfood is still pending (not claimed complete).
+  assert.ok(/M11-4.*dogfood.*待|fresh Lead dogfood.*待.*M11-4|M11-4.*fresh Lead dogfood.*待/i.test(m11Row)
+    || /fresh Lead dogfood.*待验收/.test(m11Row),
+    "roadmap keeps M11-4 fresh Lead dogfood as pending acceptance");
+  assert.ok(!/M11-4.*dogfood.*PASS|M11-4.*dogfood.*完成|M11-4.*dogfood.*已通过/i.test(m11Row),
+    "roadmap does NOT claim M11-4 dogfood passed (still pending)");
+  // M11 overall still in progress.
+  assert.ok(/🔧.*进行中|in progress/i.test(m11Row), "M11 still marked in progress");
+});
