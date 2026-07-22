@@ -109,10 +109,12 @@ export class RunManager {
     // backend.spawn（各 backend 用 runtime-native 方式恰好一次注入）。
     // 未配置 systemPrompt 的 agent 保持旧行为（roleContract 为 undefined）。
     //
-    // Package A2 决策边界：是否支持角色注入由 backend 能力声明
-    // （supportsRoleContract）决定，RunManager 不认识 runtime 名称。不支持
-    // 角色注入的 backend 配了 systemPrompt 会被静默丢弃——必须在 transcript
-    // 创建前 fail-closed，不是事后。错误是固定安全形状，不回显值/路径/角色内容。
+    // Package A2/C2 决策边界：是否支持角色注入由 backend 能力声明
+    // （supportsRoleContract）决定，RunManager 不认识 runtime 名称。若没有
+    // 能力门，不支持注入的 backend 配了 systemPrompt 就可能被静默丢弃；
+    // 现在严格要求 supportsRoleContract === true，否则在 transcript 创建和
+    // spawn 前 fail closed（start）/ 读取既有 transcript 后、append/spawn 前
+    // fail closed（resume）。错误是固定安全形状，不回显值/路径/角色内容。
     //
     // Package C2 严格性：只有 backend.supportsRoleContract === true 才允许
     // 带角色合同；字符串/数字/对象/null/undefined 等 truthy 非-true 值一律

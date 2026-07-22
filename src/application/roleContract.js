@@ -9,14 +9,21 @@
 //
 // Architectural contract:
 //   - No spawn, no transcript writes, no MCP/CLI/command imports.
-//   - Validates BEFORE RunManager creates the transcript or spawns the backend.
+//   - Load timing differs by path:
+//       * start: validates BEFORE RunManager creates the transcript or spawns.
+//       * resume: validates AFTER reading the existing transcript, but BEFORE
+//         any append or spawn (a failure leaves the existing transcript bytes
+//         unchanged).
 //   - Fail-closed on every malformation: missing, directory, empty, >4096
 //     bytes, illegal UTF-8, NUL byte. Zero role content or absolute path in
 //     the error (the error is a fixed safe shape).
 //   - Returns the validated role contract STRING (the file content). Callers
-//     (RunManager) pass it to backend.spawn as task.roleContract; the
-//     transcript persists only the original task prompt, never the role
-//     content or the combined prompt.
+//     (RunManager) pass it to backend.spawn as task.roleContract. WAO does
+//     NOT persist the role contract as prompt.sent or any control-plane
+//     input — the transcript stores only the original task prompt. (Note:
+//     this is about what WAO persists, not what the model emits; worker
+//     output may echo or summarize the role, so the transcript is not
+//     guaranteed to never contain role wording.)
 //
 // Why a string (not a path): the three backends consume the role differently
 // (claude: --append-system-prompt <content>; codex: inlines into
