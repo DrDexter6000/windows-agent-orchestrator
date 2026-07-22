@@ -496,7 +496,7 @@ OpenCode（`opencode-ai` npm 包，不是已废弃的 `opencode`）作为 MCP Le
 
 `run_dispatch` 让 MCP host 正式派发一个受监督的后台任务。它直接复用与 CLI `run --background` 相同的 application service（`dispatchRun()`），不 shell-out CLI。WAO 拥有 dispatch、detached runner 和 transcript；模型只提供 worker 和 bounded prompt。
 
-**M11-5 角色合同自动注入（TD-89 修复）**：Lead 只需写具体任务 prompt，无需复制角色说明。WAO 根据 registry 中 agent 声明的 `systemPrompt`（指向 `config/roles/*.md` 角色契约），在 transcript 创建前用共享加载器（`roleContract.js`）验证并以 runtime-native 方式恰好一次注入 worker——claude-code 用 `--append-system-prompt-file`，codex 用 `-c developer_instructions`（append 到 developer message，不替换 base instructions），kimi-code 用固定分隔组合 role+task。transcript 只持久化原始 task prompt，绝不保存角色正文。Lead/model 不能通过 `run_dispatch` 覆盖角色（strict schema 不接受 `systemPrompt`/`roleContract`/`rolePath`）。
+**M11-5 角色合同自动注入（TD-89 修复）**：Lead 只需写具体任务 prompt，无需复制角色说明。WAO 根据 registry 中 agent 声明的 `systemPrompt`（指向 `config/roles/*.md` 角色契约），在 transcript 创建前用共享加载器（`roleContract.js`）验证并以 runtime-native 方式恰好一次注入 worker——claude-code 用 `--append-system-prompt <内容>`（恰好一次，用内容不用路径以消除 TOCTOU），codex 用 `-c developer_instructions`（append 到 developer message，不替换 base instructions），kimi-code 用固定分隔组合 role+task。是否支持注入由 backend 能力声明（`supportsRoleContract`）决定：不支持角色注入的 backend（如 opencode-serve）配了 `systemPrompt` 会在 transcript 创建前 fail-closed（start 抛错、resume 显式抛错而非静默丢弃）。transcript 只持久化原始 task prompt，绝不保存角色正文。Lead/model 不能通过 `run_dispatch` 覆盖角色（strict schema 不接受 `systemPrompt`/`roleContract`/`rolePath`）。
 
 `run_dispatch` tool：
 

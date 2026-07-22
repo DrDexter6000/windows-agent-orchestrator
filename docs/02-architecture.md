@@ -62,7 +62,7 @@ CLI Adapter ─┘                 ↓
 **Worker 输入不变量**：
 - Lead 的 `SKILL.md`、roadmap、跨 worker 上下文和编排职责**不得注入 worker**。
 - Worker 接收 bounded task prompt。
-- Worker 可以接收稳定 role contract 和必要安全/运行时约束。M11-5（TD-89 修复）后，三个 process backend 都消费 registry 声明的 `systemPrompt`（经共享 `roleContract.js` 加载器在 transcript 创建前 fail-closed 验证）：claude-code 用 `--append-system-prompt-file`（原生 system-prompt 通道）；codex 用 `-c developer_instructions=<安全 TOML 字符串>`（append 到 developer message，不替换 base instructions）；kimi-code 用固定分隔组合 role+task（role 在前 task 在后各恰好一次——**不是系统级权限隔离**，是 prompt 级引导，强度低于 claude/codex 的 system/developer 通道）。runtime 差异只存在于 backend 内，共享 orchestration 不按 runtime 分支。Lead/model 不能通过 MCP/CLI 覆盖角色（run_dispatch strict schema）。
+- Worker 可以接收稳定 role contract 和必要安全/运行时约束。M11-5（TD-89 修复 + Package A2 架构收口）后，角色合同注入由 **backend 能力声明** 驱动：RunManager 读 `backend.supportsRoleContract` 决策（claude-code/codex/kimi-code = true，opencode-serve = false），**不按 runtime 名称分支**。不支持角色注入的 backend 配了 `systemPrompt` 会在 transcript 创建前 fail-closed（start 抛错、resume 显式抛错而非静默 return null）。registry 声明的 `systemPrompt` 经共享 `roleContract.js` 加载器在 transcript 创建前验证：claude-code 用 `--append-system-prompt <内容>`（恰好一次，原生 system-prompt 通道，用内容不用路径以消除 TOCTOU）；codex 用 `-c developer_instructions=<安全 TOML 字符串>`（append 到 developer message，不替换 base instructions）；kimi-code 用固定分隔组合 role+task（role 在前 task 在后各恰好一次——**不是系统级权限隔离**，是 prompt 级引导，强度低于 claude/codex 的 system/developer 通道）。runtime 差异只存在于 backend 内，共享 orchestration 不按 runtime 分支。Lead/model 不能通过 MCP/CLI 覆盖角色（run_dispatch strict schema）。transcript 只持久化原始 task prompt，绝不保存角色正文。
 - Transcript 与控制面仍由 WAO/Lead 所有。
 
 ---
