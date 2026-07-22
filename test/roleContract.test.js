@@ -361,4 +361,3 @@ test("M11-5-C3: resume spawn call passes roleContract (no bypass)", () => {
   assert.ok(/backend\.spawn\([^)]*roleContract:\s*resumeRoleContract/s.test(src),
     "resume backend.spawn passes roleContract");
 });
-
