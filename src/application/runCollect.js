@@ -24,6 +24,16 @@ import { isValidRunId } from "../delivery.js";
 
 const DEFAULT_LIMIT = 50;
 
+// M11-4 CTO rework (Fix B): the OpenCode serve /message endpoint only
+// supports a `limit` query param (no cursor, no "fetch all"). In projection
+// mode we request a large limit to retrieve the complete message list in a
+// single call. 10000 is far above any realistic single-run worker output;
+// if a real run ever exceeds it, serve continuation degrades gracefully
+// (returns what serve gave) and the residual is documented. This is the
+// narrowest compatible serve-equivalent — no second algorithm, no
+// runtime-name branch in shared code.
+const SERVE_PROJECTION_LIMIT = 10000;
+
 // ===== Process event reconstruction (migrated from observe.js, TD-77) =====
 
 /**
@@ -146,19 +156,32 @@ export async function collectRunMessages({
     ? Math.floor(numericLimit)
     : DEFAULT_LIMIT;
 
-  // M11-4: when deferring append (cursor continuation), build the payload +
-  // commit function but do NOT invoke append. The caller commits after the
-  // projection layer has validated the cursor binding. This guarantees zero
-  // audit appends on invalid cursor / projection failure (§12).
-  const shouldDefer = deferAppend && cursor !== undefined && cursor !== null;
+  // M11-4 CTO rework (Fix A+C): the projection/continuation path (any call
+  // with deferAppend=true, i.e. MCP and CLI --format json / --cursor) MUST
+  // read the COMPLETE worker-authored snapshot, not a pre-truncated tail.
+  // The old code always sliced to the last `effectiveLimit` items BEFORE
+  // pagination, permanently hiding earlier messages (RED-1: 60 messages →
+  // only last 50 reachable). Now: projection mode reads ALL run.event
+  // entries; the legacy raw CLI mode (deferAppend=false) keeps the
+  // slice(-limit) behavior byte-compatible.
+  //
+  // Serve path: the backend /message endpoint only supports a `limit` query
+  // param (no "fetch all"). In projection mode we pass a large limit
+  // (SERVE_PROJECTION_LIMIT) to retrieve the complete message list in one
+  // call; if a real worker run ever exceeds it, continuation degrades
+  // gracefully (returns what serve gave). This is the narrowest compatible
+  // serve-equivalent; no second algorithm, no runtime-name branch.
+  const isProjectionMode = deferAppend;
 
   if (!session.serveUrl) {
     // Process-backed: reconstruct run.event entries from transcript.
-    const reconstructed = events
+    const reconstructedAll = events
       .filter((e) => e.type === "run.event")
       .map(reconstructProcessEvent)
-      .filter((e) => e !== null)
-      .slice(-effectiveLimit);
+      .filter((e) => e !== null);
+    const reconstructed = isProjectionMode
+      ? reconstructedAll                     // full snapshot — pagination handles bounds
+      : reconstructedAll.slice(-effectiveLimit);  // legacy raw CLI tail behavior
 
     const payload = {
       backendSessionId: session.backendSessionId,
@@ -166,7 +189,7 @@ export async function collectRunMessages({
       count: reconstructed.length,
       reconstructed: true,
     };
-    if (shouldDefer) {
+    if (isProjectionMode) {
       return {
         data: reconstructed, reconstructed: true, backend: "process",
         commitAppend: buildCommitAppend(appendCollectedFn, transcriptPath, runId, payload),
@@ -178,18 +201,20 @@ export async function collectRunMessages({
   }
 
   // Serve-backed: fetch messages via backend capability.
+  // Projection mode: request the full list (large limit). Legacy mode: tail.
   const runStarted = findLatest(events, "run.started");
   const _fetch = fetchServeMessagesFn ?? defaultServeFetch();
+  const serveLimit = isProjectionMode ? SERVE_PROJECTION_LIMIT : effectiveLimit;
   const messages = await _fetch(session.serveUrl, session.backendSessionId, {
     cwd: runStarted?.cwd,
-    limit: effectiveLimit,
+    limit: serveLimit,
   });
 
   const payload = {
     backendSessionId: session.backendSessionId,
     count: messages.data?.length ?? 0,
   };
-  if (shouldDefer) {
+  if (isProjectionMode) {
     return {
       ...messages,
       commitAppend: buildCommitAppend(appendCollectedFn, transcriptPath, runId, payload),

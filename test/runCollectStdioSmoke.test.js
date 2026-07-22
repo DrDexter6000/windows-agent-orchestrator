@@ -335,3 +335,95 @@ test("M11-4-STDIO-SMOKE: multi-page continuation over real stdio with restart, r
     cleanupDir(dir);
   }
 });
+
+// =====================================================================
+// M11-4 CTO rework: serve-path no-model continuation over a REAL HTTP
+// boundary. A local HTTP server simulates the OpenCode serve
+// /session/:id/message?limit=N endpoint. The real OpenCodeServeBackend
+// (which uses fetch) calls it through the real stdio MCP server. Proves:
+//   - service passes SERVE_PROJECTION_LIMIT (>50) to the serve fetch
+//   - the full >50 message list is retrieved in one HTTP call
+//   - continuation reads all messages via the same safe projection
+// No real worker/model is spawned; the HTTP server is a deterministic fixture.
+// =====================================================================
+test("M11-4-STDIO-SERVE: serve continuation over real HTTP boundary retrieves >50 messages", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m114-stdio-serve-"));
+  try {
+    const runDir = join(dir, "runs");
+    const runId = "run_stdio_serve";
+    mkdirSync(runDir, { recursive: true });
+    // Serve-backed transcript: session.created carries serveUrl + backendSessionId.
+    writeFileSync(join(runDir, `${runId}.jsonl`), [
+      JSON.stringify({ type: "run.submitted", agentId: "w", ts: "2026-07-22T00:00:00.000Z" }),
+      JSON.stringify({ type: "session.created", backend: "opencode-serve", backendSessionId: "srv_stdio", serveUrl: "http://127.0.0.1:0", runId, agentId: "w" }),
+      JSON.stringify({ type: "run.started", backend: "opencode-serve", ts: "2026-07-22T00:00:01.000Z", runId, agentId: "w" }),
+      JSON.stringify({ type: "run.state_change", to: "completed", reason: "ok", ts: "2026-07-22T00:10:00.000Z", runId, agentId: "w" }),
+    ].map((l) => l + "\n").join(""), "utf8");
+
+    // Start a local HTTP server that simulates OpenCode serve /message.
+    const TOTAL_MESSAGES = 60;
+    const { createServer } = await import("node:http");
+    const httpServer = createServer((req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      // Serve returns the LAST `limit` messages (real OpenCode semantics).
+      const limit = Number(url.searchParams.get("limit") ?? 50);
+      const all = [];
+      for (let i = 0; i < TOTAL_MESSAGES; i += 1) {
+        all.push({ info: { role: "assistant" }, parts: [{ type: "text", text: `srv-m${i}` }] });
+      }
+      const data = all.slice(-limit);
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(data));
+    });
+    await new Promise((r) => httpServer.listen(0, "127.0.0.1", r));
+    const httpPort = httpServer.address().port;
+    const realServeUrl = `http://127.0.0.1:${httpPort}`;
+
+    try {
+      // Patch the transcript's serveUrl to the actual local port.
+      const tpath = join(runDir, `${runId}.jsonl`);
+      const lines = readFileSync(tpath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      for (const l of lines) {
+        if (l.type === "session.created") l.serveUrl = realServeUrl;
+      }
+      writeFileSync(tpath, lines.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf8");
+
+      // The stdio subprocess uses the default collectRunMessages which calls
+      // OpenCodeServeBackend.messages() for serve-backed runs. The HTTP
+      // boundary is exercised for real (no fake fetch).
+      const collected = [];
+      let cursor = null;
+      let pages = 0;
+      while (true) {
+        // Real stdio MCP server subprocess. The subprocess inherits none of
+        // our in-memory state; it reads the transcript, sees serveUrl, and
+        // fetches the local HTTP server via the REAL OpenCodeServeBackend.
+        // This exercises the true serve HTTP boundary end-to-end.
+        const handle = await buildStdioClient({ registryPath: join(dir, "agents.json"), runDir });
+        try {
+          const args = cursor ? { runId, cursor } : { runId };
+          const res = await handle.client.callTool({ name: "run_collect", arguments: args });
+          assert.equal(res.isError, undefined, `serve page ${pages + 1} not error`);
+          const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+          collected.push(...parsed.messages.map((m) => m.text));
+          cursor = parsed.nextCursor;
+          pages += 1;
+        } finally {
+          await handle.client.close();
+          await handle.transport.close();
+        }
+        if (!cursor) break;
+        if (pages > 20) throw new Error("runaway");
+      }
+      assert.equal(collected.length, TOTAL_MESSAGES, `all ${TOTAL_MESSAGES} serve messages retrieved`);
+      for (let i = 0; i < TOTAL_MESSAGES; i += 1) {
+        assert.equal(collected[i], `srv-m${i}`, `serve msg ${i} in order`);
+      }
+      assert.ok(pages >= 2, `serve multi-page (${pages})`);
+    } finally {
+      await new Promise((r) => httpServer.close(r));
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});

@@ -983,16 +983,16 @@ export function createWaoMcpServer({
       // try/catch. Any failure collapses to the fixed safe text — never leak
       // SDK output-validation error, raw exception, path, or secret.
       //
-      // M11-4 §12: when a cursor is present, defer the audit append until the
-      // projection layer has validated the cursor binding and produced a
-      // successful page. Invalid cursors and projection failures result in
-      // ZERO audit appends. Cursor-less (page 1) calls keep the legacy
-      // always-append contract.
+      // M11-4 CTO rework (Fix D): MCP is ALWAYS in projection mode, so the
+      // audit append is ALWAYS deferred until projection + output validation
+      // succeed. The OLD code only deferred when a cursor was present, so a
+      // cursor-less page 1 whose service succeeded but projection failed
+      // still appended an audit event (RED-3). Now page 1 also commits zero
+      // on any failure.
       try {
-        const hasCursor = cursor !== undefined && cursor !== null;
         const raw = await collectService({
           runId, runDir, limit: COLLECT_LIMIT, cursor,
-          deferAppend: hasCursor,
+          deferAppend: true,
         });
         const payload = projectCollectResult(raw, { runId, cursor });
         RUN_COLLECT_OUTPUT.parse(payload);
