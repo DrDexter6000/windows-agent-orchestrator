@@ -1154,7 +1154,9 @@ test("M11-2-DOGFOOD: fresh Codex CLI Lead dogfood marked complete with anchor, r
 //   1. usage.md documents the cursor input + nextCursor output + safety.
 //   2. SKILL.md tells the Lead to follow nextCursor to null.
 //   3. architecture.md lists runCollectProjection.js as shared ownership.
-//   4. roadmap records M11-4 implementation complete but dogfood pending.
+//   4. roadmap records M11-4 fresh Lead dogfood completed (this package's fact).
+// M11-overall-in-progress + TD-106 open/unique are pinned by existing
+// M11 mainline and M10 closeout guards — not repeated here.
 // ============================================================
 
 test("M11-4-DOC-01: usage.md documents run_collect cursor input + nextCursor + zero-append-on-invalid", () => {
@@ -1195,7 +1197,7 @@ test("M11-4-DOC-03: architecture.md lists runCollectProjection.js shared ownersh
     "architecture ties runCollectProjection.js to M11-4");
 });
 
-test("M11-4-DOC-04: roadmap records M11-4 fresh Lead dogfood complete with Host friction, M11 still in progress", () => {
+test("M11-4-DOC-04: roadmap records M11-4 fresh Lead dogfood completed", () => {
   const roadmap = read("docs/roadmap.md");
   const m11Row = roadmap.split("\n").find((l) => /^\|\s*M11\s*\|/.test(l)) || "";
   assert.ok(m11Row, "roadmap 含 M11 行");
@@ -1212,29 +1214,25 @@ test("M11-4-DOC-04: roadmap records M11-4 fresh Lead dogfood complete with Host 
   // No stale "pending" / "待授权" / "待执行" phrasing for M11-4 dogfood.
   assert.ok(!/M11-4.*dogfood.*待|M11-4.*fresh Lead dogfood.*待(授权|执行|验收)|fresh Lead dogfood.*待.*M11-4/i.test(m11Row),
     "roadmap no longer marks M11-4 dogfood as pending");
-  // M11 overall still in progress (not closed).
-  assert.ok(/🔧.*进行中|in progress/i.test(m11Row), "M11 still marked in progress");
+  // M11-overall-in-progress is pinned by the existing M11 mainline guard —
+  // not repeated here.
 });
 
-test("M11-4-DOC-05: TD-106 no longer lists M11-3/M11-4 capabilities as open", () => {
+test("M11-4-DOC-05: TD-106 records M11-3/M11-4 capabilities as resolved, old open gaps gone", () => {
   const td = read("docs/tech-debt.md");
-  // TD-106 appears exactly once and stays in the open section (not repaid).
-  const td106Matches = td.match(/TD-106/g) || [];
-  assert.equal(td106Matches.length, 1, "TD-106 appears exactly once");
-  // The raw delivery diff review (M11-3 run_delivery_review) is resolved.
   const td106Row = td.split("\n").find((l) => /^\|\s*TD-106\s*\|/.test(l)) || "";
   assert.ok(td106Row, "TD-106 row present");
-  assert.ok(/run_delivery_review.*M11-3|M11-3.*run_delivery_review/.test(td106Row),
-    "TD-106 records M11-3 run_delivery_review as resolved");
-  // The run_collect truncation raw-transcript fallback (M11-4) is resolved.
+  // M11-3 safe delivery diff review recorded as resolved.
+  assert.ok(/run_delivery_review.*M11-3|M11-3.*run_delivery_review|安全.*delivery.*diff.*review.*M11-3|M11-3.*安全.*delivery.*diff.*review/i.test(td106Row),
+    "TD-106 records M11-3 safe delivery diff review as resolved");
+  // M11-4 run_collect continuation recorded as resolved.
   assert.ok(/run_collect.*continuation.*M11-4|M11-4.*run_collect.*continuation|cursor.*continuation.*M11-4/i.test(td106Row),
     "TD-106 records M11-4 run_collect cursor continuation as resolved");
-  // The old open items (c) and (d) must NOT remain as unresolved capability gaps.
-  // Match the ORIGINAL open-declaration phrasing ("仍开放" / "截断时...可能回退"),
-  // not the "已处理" resolution phrasing that legitimately mentions the same
-  // keywords while describing the fix.
+  // The old open-gap phrasings must NOT remain as unresolved capability gaps.
   assert.ok(!/raw artifact\/diff review 仍开放/.test(td106Row),
     "TD-106 no longer lists raw artifact/diff review as open (M11-3 resolved it)");
   assert.ok(!/run_collect.*截断时.*可能回退|run_collect.*截断时.*Lead 可能/.test(td106Row),
     "TD-106 no longer declares run_collect truncation raw-transcript fallback as an open gap (M11-4 resolved it)");
+  // TD-106 uniqueness + open-section placement are pinned by existing M10
+  // closeout guards — not repeated here.
 });
