@@ -21,6 +21,12 @@ export class OpenCodeServeBackend {
   // sessionOutlivesProcess 让控制平面按 backend *属性* 判定（非 runtime 名分支，runtime-agnostic）。
   sessionOutlivesProcess = true;
 
+  // M11-5 Package A2: opencode-serve has no system/developer message channel,
+  // so it cannot receive a role contract. Declared explicitly so RunManager
+  // decides by capability (never by runtime name); a configured systemPrompt
+  // on this backend must fail closed, not be silently dropped.
+  supportsRoleContract = false;
+
   constructor({ fetchImpl = globalThis.fetch, timeout = 30_000, retries = 2 } = {}) {
     if (!fetchImpl) {
       throw new Error("fetch is required");

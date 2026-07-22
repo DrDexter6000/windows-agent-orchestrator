@@ -17,6 +17,12 @@ import { KimiStreamParser } from "./parsers/kimiCode.js";
  * kimi 自带超时 + WAO waitTimeout。给 kimi agent 配 tokenBudget 不会报错但不生效。
  */
 export class KimiCodeBackend extends ProcessBackend {
+  // M11-5 Package A2: explicit role-contract capability declaration.
+  // RunManager reads this boolean to decide role injection — no runtime-name
+  // branch. kimi injects by concatenating role + task with a fixed delimiter
+  // (prompt-level guidance, not system-level isolation).
+  supportsRoleContract = true;
+
   constructor(opts = {}) {
     super({
       parserClass: KimiStreamParser,

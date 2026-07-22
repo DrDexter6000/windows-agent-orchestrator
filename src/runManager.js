@@ -94,26 +94,33 @@ export class RunManager {
     const loaded = await this.readRegistry(registryPath);
     const agent = loaded.getAgent(agentId, { cwd });
 
+    // M11-5 Package A2: obtain the backend ONCE, up front, so the role-contract
+    // decision can read its CAPABILITY (supportsRoleContract) instead of branching
+    // on the runtime name. The backend instance is reused for spawn below; it does
+    // not touch cwd/binary until spawn, so selecting it from `agent` (pre-worktree)
+    // vs `effectiveAgent` (post-worktree) yields the same instance.
+    const backend = this.backendFor(agent);
+
     // M11-5（TD-89 修复）：角色合同加载。在 transcript 创建前 fail-closed
     // （零 transcript、零 spawn）。agent.systemPrompt 是 registry 声明的角色
-    // 文件路径（相对 WAO 仓库根，与原 claudeCode resolve 语义一致）。加载器
-    // 验证后返回内容字符串；RunManager 同时保留验证过的绝对路径（给 claude
-    // backend 的 --append-system-prompt-file）。未配置 systemPrompt 的 agent
-    // 保持旧行为（roleContract/roleContractPath 均为 undefined）。
+    // 文件路径（相对 WAO 仓库根）。加载器验证后返回内容字符串，传给
+    // backend.spawn（各 backend 用 runtime-native 方式恰好一次注入）。
+    // 未配置 systemPrompt 的 agent 保持旧行为（roleContract 为 undefined）。
     //
-    // 安全：transcript 只持久化原始 task prompt（行 289 prompt.sent），绝不
-    // 保存 roleContract 内容或组合后的 prompt。Lead/model 不能覆盖此处的
-    // registry 选定角色。
+    // Package A2 决策边界：是否支持角色注入由 backend 能力声明
+    // （supportsRoleContract）决定，RunManager 不认识 runtime 名称。不支持
+    // 角色注入的 backend 配了 systemPrompt 会被静默丢弃——必须在 transcript
+    // 创建前 fail-closed，不是事后。错误是固定安全形状，不回显值/路径/角色内容。
+    //
+    // 安全：transcript 只持久化原始 task prompt（prompt.sent），绝不保存
+    // roleContract 内容或组合后的 prompt。Lead/model 不能覆盖此处的 registry
+    // 选定角色。
     let roleContract = undefined;
     if (agent.systemPrompt) {
-      // M11-5 (CTO rework P1): opencode-serve does NOT support role contract
-      // injection (no system/developer message channel). A configured
-      // systemPrompt on an opencode-serve worker would be silently dropped —
-      // fail closed BEFORE transcript creation or spawn, not after.
-      if (agent.backend === "opencode-serve") {
+      if (!backend.supportsRoleContract) {
         throw new Error(
-          `Agent ${agentId}: systemPrompt is configured but backend "opencode-serve" does not support role contract injection. ` +
-          `Remove systemPrompt from this agent, or switch to a process backend (claude-code/codex/kimi-code).`
+          `Agent ${agentId}: systemPrompt is configured but the selected backend does not support role contract injection. ` +
+          `Remove systemPrompt from this agent, or switch to a backend that declares supportsRoleContract.`
         );
       }
       roleContract = loadRoleContract(resolve(agent.systemPrompt));
@@ -243,7 +250,9 @@ export class RunManager {
       throw new Error(`Cannot start run ${finalRunId}: transcript already in terminal state "${pendingResult.state}" (first-terminal-wins)`);
     }
 
-    const backend = this.backendFor(effectiveAgent);
+    // backend 已在前面（role-contract capability 决策前）由 this.backendFor(agent)
+    // 创建一次，这里复用——它只在 spawn 时才读 agent.cwd/binary，所以与 effectiveAgent
+    // 选出的实例一致。
 
     // P1-1 认证新鲜度强制门（opt-in，06-18 事故教训"调度安全不能建立在模型行为假设上"）。
     // 启用时：读 runDir/reliability-summary.json，校验目标 worker。
@@ -428,12 +437,23 @@ export class RunManager {
     const resumeCwd = deliveryContext ? deliveryContext.worktreePath : runStarted.cwd;
     const agent = loaded.getAgent(transcript.context.agentId, { cwd: resumeCwd });
 
+    // M11-5 Package A2：获取 backend 一次，前置到角色合同决策前——决策由
+    // backend 能力（supportsRoleContract）驱动，不认识 runtime 名称。该 backend
+    // 实例在下方 spawn/attach 复用。
+    const backend = this.backendFor(agent);
+
     // M11-5（TD-89 修复）：resume 也必须重新经过同一角色合同加载器，不得静默
     // 漏掉。与 start 路径同一 SSOT（roleContract.js），同一 fail-closed 边界。
+    // Package A2：不支持角色注入的 backend 配了 systemPrompt 必须显式抛错
+    // （不再静默 return null）——resume 不能假装成功然后丢掉角色。错误是固定
+    // 安全形状。这里在 spawn/attach 前拒绝，spawn 计数为 0、transcript 字节不变。
     let resumeRoleContract = undefined;
     if (agent.systemPrompt) {
-      if (agent.backend === "opencode-serve") {
-        return null;
+      if (!backend.supportsRoleContract) {
+        throw new Error(
+          `Agent ${transcript.context.agentId}: systemPrompt is configured but the selected backend does not support role contract injection. ` +
+          `Remove systemPrompt from this agent, or switch to a backend that declares supportsRoleContract.`
+        );
       }
       resumeRoleContract = loadRoleContract(resolve(agent.systemPrompt));
     }
@@ -450,8 +470,6 @@ export class RunManager {
       }
       resumeScorecardRules = runStarted.delivery.scorecardRules;
     }
-
-    const backend = this.backendFor(agent);
 
     // 进程式 backend（进程已死）→ 重放 prompt 重新 spawn
     const isProcess = runStarted.backend === "claude-code" || runStarted.backend === "codex" || runStarted.backend === "kimi-code";

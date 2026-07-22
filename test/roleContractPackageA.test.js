@@ -34,10 +34,13 @@ function makeRegistry(dir, agents) {
 }
 
 // A fake backend that records what it received and returns a minimal handle.
-function makeFakeBackend({ sessionOutlivesProcess = false, recordSpawn = null } = {}) {
+// supportsRoleContract defaults to false (fail-safe); tests that exercise the
+// supported-injection path pass true explicitly.
+function makeFakeBackend({ sessionOutlivesProcess = false, supportsRoleContract = false, recordSpawn = null } = {}) {
   const calls = [];
   const backend = {
     sessionOutlivesProcess,
+    supportsRoleContract,
     spawn: async (agent, task) => {
       const entry = {
         agentId: agent?.agentId ?? agent?.id,
@@ -117,9 +120,9 @@ test("M11-5-A-RED2: systemPrompt must be a non-empty trimmed string (reject 0, {
   }
   // Valid: non-empty string.
   assert.doesNotThrow(() => normalizeAgent("ok", { backend: "claude-code", cwd: "/x", systemPrompt: "config/roles/x.md" }));
-  // Valid: absent / null / undefined.
+  // M11-5 Package A2: only absent-attribute is "no role". null is now rejected.
   assert.doesNotThrow(() => normalizeAgent("ok", { backend: "claude-code", cwd: "/x" }));
-  assert.doesNotThrow(() => normalizeAgent("ok", { backend: "claude-code", cwd: "/x", systemPrompt: null }));
+  assert.throws(() => normalizeAgent("ok", { backend: "claude-code", cwd: "/x", systemPrompt: null }), /systemPrompt/i);
 });
 
 // ===== RED-3: Claude TOCTOU — content, not path =====
@@ -161,7 +164,7 @@ test("M11-5-A-RED4a: RunManager.start passes roleContract to backend spawn (beha
     const registryPath = makeRegistry(dir, {
       coder: { backend: "claude-code", cwd: dir, systemPrompt: rolePath },
     });
-    const { backend, calls } = makeFakeBackend();
+    const { backend, calls } = makeFakeBackend({ supportsRoleContract: true });
     const mgr = makeManager({ runDir, registryPath, backend });
     await mgr.start("coder", { prompt: "do task", runDir, registry: registryPath });
     assert.ok(calls.length >= 1, "spawn was called");
@@ -186,7 +189,7 @@ test("M11-5-A-RED4b: RunManager.start with missing role file → zero spawn, zer
     const registryPath = makeRegistry(dir, {
       coder: { backend: "claude-code", cwd: dir, systemPrompt: join(dir, "missing.md") },
     });
-    const { backend, calls } = makeFakeBackend();
+    const { backend, calls } = makeFakeBackend({ supportsRoleContract: true });
     const mgr = makeManager({ runDir, registryPath, backend });
     let threw = false;
     try {

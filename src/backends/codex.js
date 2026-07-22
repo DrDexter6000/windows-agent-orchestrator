@@ -10,6 +10,11 @@ import { CodexStreamParser } from "./parsers/codex.js";
  * codex.cmd 最终执行的就是：node <npm-global>/node_modules/@openai/codex/bin/codex.js %*
  */
 export class CodexBackend extends ProcessBackend {
+  // M11-5 Package A2: explicit role-contract capability declaration.
+  // RunManager reads this boolean to decide role injection — no runtime-name
+  // branch. codex injects via -c developer_instructions (append, not replace).
+  supportsRoleContract = true;
+
   constructor(opts = {}) {
     super({
       parserClass: CodexStreamParser,

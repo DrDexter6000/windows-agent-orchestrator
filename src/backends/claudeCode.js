@@ -25,6 +25,12 @@ const WRAPPER_PATH = resolve(join(dirname(fileURLToPath(import.meta.url)), "..",
  * 文件路径，消除 TOCTOU 竞态（加载验证 ROLE_A 后文件被替换为 ROLE_B 的窗口）。
  */
 export class ClaudeCodeBackend extends ProcessBackend {
+  // M11-5 Package A2: explicit role-contract capability declaration.
+  // RunManager reads this boolean to decide whether a configured
+  // agent.systemPrompt may be injected — it must NOT branch on the runtime
+  // name. claude-code injects via --append-system-prompt (content, once).
+  supportsRoleContract = true;
+
   constructor(opts = {}) {
     super({
       parserClass: ClaudeStreamParser,
