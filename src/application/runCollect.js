@@ -24,15 +24,21 @@ import { isValidRunId } from "../delivery.js";
 
 const DEFAULT_LIMIT = 50;
 
-// M11-4 CTO rework (Fix B): the OpenCode serve /message endpoint only
-// supports a `limit` query param (no cursor, no "fetch all"). In projection
-// mode we request a large limit to retrieve the complete message list in a
-// single call. 10000 is far above any realistic single-run worker output;
-// if a real run ever exceeds it, serve continuation degrades gracefully
-// (returns what serve gave) and the residual is documented. This is the
-// narrowest compatible serve-equivalent — no second algorithm, no
-// runtime-name branch in shared code.
+// M11-4 final serve-cap closeout: the OpenCode serve /message endpoint only
+// supports a `limit` query param (no cursor, no "fetch all"). Projection
+// mode must NEVER silently report a truncated serve tail as a complete read.
+//
+// We define an explicit maximum acceptable serve snapshot (SERVE_PROJECTION_LIMIT)
+// and request cap+1 items (the sentinel). If serve returns ≥ sentinel items,
+// the run exceeded our safe capacity and we FAIL CLOSED (throw before any
+// append or projection) — the caller (MCP/CLI) collapses this to a fixed
+// `run_collect failed` with zero partial output and zero audit append.
+//
+// 10000 is far above any realistic single-run worker output. If a real run
+// ever exceeds it, that is a genuine capability limit, not a graceful
+// degradation: the Lead gets an explicit failure and must narrow the task.
 const SERVE_PROJECTION_LIMIT = 10000;
+const SERVE_PROJECTION_SENTINEL = SERVE_PROJECTION_LIMIT + 1;
 
 // ===== Process event reconstruction (migrated from observe.js, TD-77) =====
 
@@ -96,14 +102,17 @@ function defaultAppendFn(transcriptPath, runId) {
  * transcript. Serve-backed runs (serveUrl present): fetch messages via the
  * backend capability (or injected fetchServeMessagesFn).
  *
- * M11-4 continuation: when `cursor` is provided AND `deferAppend` is true,
- * the service reads + reconstructs the snapshot but does NOT append the audit
- * event. It returns a `commitAppend` function the caller MUST invoke after
- * the projection layer has validated the cursor binding and produced a
- * successful page. This guarantees invalid cursors and projection failures
- * result in ZERO audit appends (M11-4 §12). When `deferAppend` is false
- * (default, M9-4A back-compat), the service appends exactly once before
- * returning, preserving the existing CLI/M9-4A contract.
+ * M11-4 continuation + CTO rework: when `deferAppend` is true (projection
+ * mode — MCP always, CLI --format json / --cursor), the service reads +
+ * reconstructs the FULL snapshot but does NOT append the audit event,
+ * regardless of whether a cursor is present. It returns a `commitAppend`
+ * function the caller MUST invoke after the projection layer has validated
+ * the cursor binding (or produced page 1) AND output schema validation
+ * succeeded. This guarantees ANY failure — invalid cursor, projection
+ * failure, schema failure, serve-cap overflow — results in ZERO audit
+ * appends, including on cursor-less page 1 (M11-4 §12 + CTO rework Fix D).
+ * When `deferAppend` is false (default, legacy raw CLI back-compat), the
+ * service appends exactly once before returning.
  *
  * @param {object} input
  * @param {string} input.runId — must pass isValidRunId
@@ -166,11 +175,11 @@ export async function collectRunMessages({
   // slice(-limit) behavior byte-compatible.
   //
   // Serve path: the backend /message endpoint only supports a `limit` query
-  // param (no "fetch all"). In projection mode we pass a large limit
-  // (SERVE_PROJECTION_LIMIT) to retrieve the complete message list in one
-  // call; if a real worker run ever exceeds it, continuation degrades
-  // gracefully (returns what serve gave). This is the narrowest compatible
-  // serve-equivalent; no second algorithm, no runtime-name branch.
+  // param (no "fetch all"). In projection mode we request cap+1 (sentinel)
+  // items; if serve returns ≥ sentinel, the run exceeds our safe capacity and
+  // we FAIL CLOSED below — never report a truncated tail as a complete read.
+  // Process and serve share one continuation contract (shape-driven algorithm,
+  // no runtime-name branch).
   const isProjectionMode = deferAppend;
 
   if (!session.serveUrl) {
@@ -201,14 +210,24 @@ export async function collectRunMessages({
   }
 
   // Serve-backed: fetch messages via backend capability.
-  // Projection mode: request the full list (large limit). Legacy mode: tail.
+  // Projection mode: request cap+1 (sentinel) so we can detect a run that
+  // exceeds the safe serve snapshot capacity. Legacy mode: tail (limit).
   const runStarted = findLatest(events, "run.started");
   const _fetch = fetchServeMessagesFn ?? defaultServeFetch();
-  const serveLimit = isProjectionMode ? SERVE_PROJECTION_LIMIT : effectiveLimit;
+  const serveLimit = isProjectionMode ? SERVE_PROJECTION_SENTINEL : effectiveLimit;
   const messages = await _fetch(session.serveUrl, session.backendSessionId, {
     cwd: runStarted?.cwd,
     limit: serveLimit,
   });
+
+  // M11-4 serve-cap: if serve returned ≥ sentinel items, the run exceeds our
+  // safe capacity. Fail closed BEFORE any append or projection — never
+  // report a truncated tail as a complete read. This throw propagates to the
+  // MCP/CLI handler try/catch which collapses it to a fixed safe text with
+  // zero partial output and zero audit append.
+  if (isProjectionMode && Array.isArray(messages.data) && messages.data.length >= SERVE_PROJECTION_SENTINEL) {
+    throw new Error("serve snapshot exceeds safe capacity");
+  }
 
   const payload = {
     backendSessionId: session.backendSessionId,
