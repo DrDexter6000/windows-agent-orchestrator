@@ -2,10 +2,12 @@
 //
 // M11-4 final serve-cap closeout: serve silent-truncation boundary tests.
 //
-// The serve /message endpoint only supports a `limit` query param. If a run
-// has more items than the projection-mode cap, the earliest assistant message
-// would be silently dropped AND the projection would report nextCursor:null
-// (a false "complete read"). These tests prove the fail-closed contract:
+// WAO's current OpenCodeServeBackend.messages adapter issues a single bounded
+// `limit` request (it does not consume OpenCode's upstream `before` /
+// X-Next-Cursor pagination). If a run has more items than the projection-mode
+// cap, the earliest assistant message would be silently dropped AND the
+// projection would report nextCursor:null (a false "complete read"). These
+// tests prove the fail-closed contract of WAO's current adapter strategy:
 //   - 9999 / 10000 items → complete success
 //   - 10001+ items → fixed `run_collect failed`, zero partial, zero append
 //
@@ -194,4 +196,3 @@ test("M11-4-SERVE-CAP-10001-ASSISTANT-FIRST: earliest assistant lost → fail cl
     cleanupDir(dir);
   }
 });
-

@@ -24,19 +24,25 @@ import { isValidRunId } from "../delivery.js";
 
 const DEFAULT_LIMIT = 50;
 
-// M11-4 final serve-cap closeout: the OpenCode serve /message endpoint only
-// supports a `limit` query param (no cursor, no "fetch all"). Projection
-// mode must NEVER silently report a truncated serve tail as a complete read.
+// M11-4 final serve-cap closeout: projection mode must NEVER silently report
+// a truncated serve tail as a complete read.
 //
-// We define an explicit maximum acceptable serve snapshot (SERVE_PROJECTION_LIMIT)
-// and request cap+1 items (the sentinel). If serve returns ≥ sentinel items,
-// the run exceeded our safe capacity and we FAIL CLOSED (throw before any
-// append or projection) — the caller (MCP/CLI) collapses this to a fixed
-// `run_collect failed` with zero partial output and zero audit append.
+// Capability note (corrected): the OpenCode /message endpoint DOES support
+// upstream pagination (a `before` cursor / X-Next-Cursor header). WAO's
+// current OpenCodeServeBackend.messages adapter does NOT consume that — it
+// issues a single bounded `limit` request. M11-4 builds on that current
+// adapter behavior: we define an explicit maximum acceptable serve snapshot
+// (SERVE_PROJECTION_LIMIT) and request cap+1 items (the sentinel). If serve
+// returns ≥ sentinel items, the run exceeded our adapter's safe capacity and
+// we FAIL CLOSED (throw before any append or projection) — the caller
+// (MCP/CLI) collapses this to a fixed `run_collect failed` with zero partial
+// output and zero audit append.
 //
 // 10000 is far above any realistic single-run worker output. If a real run
-// ever exceeds it, that is a genuine capability limit, not a graceful
-// degradation: the Lead gets an explicit failure and must narrow the task.
+// ever exceeds it, that is a genuine adapter-capacity limit (not a claim
+// that OpenCode itself cannot paginate): the Lead gets an explicit failure
+// and must narrow the task. Consuming upstream pagination is a future
+// adapter enhancement, out of scope for M11-4.
 const SERVE_PROJECTION_LIMIT = 10000;
 const SERVE_PROJECTION_SENTINEL = SERVE_PROJECTION_LIMIT + 1;
 
@@ -174,12 +180,13 @@ export async function collectRunMessages({
   // entries; the legacy raw CLI mode (deferAppend=false) keeps the
   // slice(-limit) behavior byte-compatible.
   //
-  // Serve path: the backend /message endpoint only supports a `limit` query
-  // param (no "fetch all"). In projection mode we request cap+1 (sentinel)
-  // items; if serve returns ≥ sentinel, the run exceeds our safe capacity and
-  // we FAIL CLOSED below — never report a truncated tail as a complete read.
-  // Process and serve share one continuation contract (shape-driven algorithm,
-  // no runtime-name branch).
+  // Serve path: WAO's current OpenCodeServeBackend.messages adapter issues a
+  // single bounded `limit` request (it does not consume OpenCode's upstream
+  // `before` / X-Next-Cursor pagination). In projection mode we request cap+1
+  // (sentinel) items; if serve returns ≥ sentinel, the run exceeds our
+  // adapter's safe capacity and we FAIL CLOSED below — never report a
+  // truncated tail as a complete read. Process and serve share one
+  // continuation contract (shape-driven algorithm, no runtime-name branch).
   const isProjectionMode = deferAppend;
 
   if (!session.serveUrl) {
