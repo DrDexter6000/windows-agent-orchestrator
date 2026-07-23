@@ -23,7 +23,8 @@ import { JsonlTranscript } from "../transcript.js";
 import { isValidRunId, prepareDeliveryRequest } from "../delivery.js";
 import { resolveWaitTimeout, validateBoundedWaitTimeout } from "./timeoutPolicy.js";
 import { readRegistry } from "../registry.js";
-import { assessWorkerReadiness } from "./credentialReadiness.js";
+import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
+import { inheritedEnvNames } from "../envPolicy.js";
 
 // M11-7: thrown when a worker's REQUIRED credential is missing at dispatch time.
 // Carries the missing env NAMES (never values). Callers (MCP) collapse to a
@@ -159,21 +160,24 @@ export async function dispatchRun({
   const resolvedRegistry = resolve(registryPath);
 
   // M11-7: credential preflight BEFORE any transcript write or fork. Reads the
-  // registry to resolve the agent, then assesses whether its REQUIRED declared
-  // credentials are available (process.env → Windows user env). A missing
-  // REQUIRED credential throws CredentialMissingError (zero transcript, zero
-  // fork). The resolved VALUES are threaded into the runner env so the worker
-  // child inherits them (and the redactor scrubs them). Same SSOT as
-  // registry_list and RunManager.start/resume — they never disagree.
+  // registry to resolve the agent, then assesses credential availability via the
+  // shared SSOT. A missing REQUIRED credential throws CredentialMissingError
+  // (zero transcript, zero fork). The resolved VALUES are threaded into the
+  // runner env so the worker child inherits them (and the redactor scrubs them).
+  // Dispatch resolves ALL inherited env names (required + optional) so optional
+  // Kimi/Codex config is bridged too — unlike registry_list, which only reads
+  // required names. One operation-scoped resolver per dispatch (no cross-op cache).
   let finalCredentials = resolvedCredentials ?? {};
   if (!skipCredentialCheck) {
     const registry = await readRegistry(resolvedRegistry);
     const agent = registry.getAgent(agentId);
-    const readiness = await assessWorkerReadiness({ agent, userEnvReader });
+    const resolver = createEnvResolver(userEnvReader);
+    const readiness = await assessWorkerReadiness({
+      agent, resolver, names: inheritedEnvNames(agent),
+    });
     if (readiness.credentialAvailability === "missing") {
       throw new CredentialMissingError(readiness.missingCredentialEnvNames);
     }
-    // Merge any newly-resolved values (e.g. from user env). Drop unresolved names.
     finalCredentials = Object.fromEntries(
       Object.entries({ ...finalCredentials, ...readiness.resolvedEnv })
         .filter(([, v]) => typeof v === "string" && v.length > 0),

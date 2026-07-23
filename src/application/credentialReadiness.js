@@ -104,43 +104,82 @@ export async function resolveCredentialEnv(name, opts = {}) {
 export const CREDENTIAL_SENTINEL = "M117_CREDENTIAL_SENTINEL_VALUE";
 
 /**
+ * An operation-scoped env resolver. Created once per inventory/dispatch/start/
+ * resume operation. Caches each resolved name (including "missing") for the
+ * lifetime of the operation, so two workers sharing an env name read it at most
+ * ONCE per operation. Discarded when the operation ends (no cross-operation
+ * cache) — credential rotation/addition takes effect on the next operation
+ * without a Host restart.
+ *
+ * Create via createEnvResolver(); do not construct directly.
+ */
+export class EnvResolver {
+  constructor(userEnvReader) {
+    this._reader = userEnvReader ?? readWindowsUserEnv;
+    this._cache = new Map();
+    this.readerCallCount = 0;
+    this.readerCallsByName = {};
+  }
+
+  /**
+   * Resolve one env name through this operation's cache.
+   * @param {string} name
+   * @returns {Promise<{ name: string, source: "process_env"|"user_env"|"missing", value: string|undefined }>}
+   */
+  async resolve(name) {
+    if (this._cache.has(name)) return this._cache.get(name);
+    const r = await resolveCredentialEnv(name, { userEnvReader: this._reader });
+    this.readerCallCount += 1;
+    this.readerCallsByName[name] = (this.readerCallsByName[name] ?? 0) + 1;
+    this._cache.set(name, r);
+    return r;
+  }
+}
+
+/**
+ * Create a fresh operation-scoped env resolver. Each call returns an independent
+ * resolver with its own cache — so the next registry_list/dispatch/start/resume
+ * re-observes current state.
+ * @param {(name: string) => Promise<string|undefined>} [userEnvReader]
+ * @returns {EnvResolver}
+ */
+export function createEnvResolver(userEnvReader) {
+  return new EnvResolver(userEnvReader);
+}
+
+/**
  * Assess a single worker's CREDENTIAL availability (not full runtime health).
  * - "available": all REQUIRED declared credentials resolve (process.env or user env).
  * - "missing":  at least one REQUIRED credential is absent.
  * - "not_required": the worker declares no required credential (no gate applies).
  *
- * resolvedEnv carries ALL inherited names that resolved (required + optional)
- * for the ProcessBackend to inject into the child env + redactor. It MUST NOT
- * be logged/serialized.
- *
- * Within one call, each name is read at most once (operation-scoped de-dupe);
- * the NEXT call re-observes current state (no permanent cache). readerCallCount
- * is returned so tests can assert no duplicate reads.
- * @param {{ agent: object, userEnvReader?: (name: string) => Promise<string|undefined> }} input
- * @returns {Promise<{ credentialAvailability: "available"|"missing"|"not_required", missingCredentialEnvNames: string[], resolvedEnv: Record<string,string>, readerCallCount: number }>}
+ * @param {object} input
+ * @param {object} input.agent — normalized agent from registry
+ * @param {EnvResolver} [input.resolver] — operation-scoped resolver (shared across
+ *   workers in one inventory/dispatch). If omitted, a single-use resolver is
+ *   created (no cross-worker de-dupe, but still no permanent cache).
+ * @param {string[]} [input.names] — which env names to resolve. Defaults to the
+ *   REQUIRED names only (for registry_list). Pass inheritedEnvNames(agent) to
+ *   also bridge optional inherited env (for dispatch/start/resume).
+ * @returns {Promise<{ credentialAvailability: "available"|"missing"|"not_required", missingCredentialEnvNames: string[], resolvedEnv: Record<string,string> }>}
+ *   resolvedEnv carries the resolved VALUES for names that resolved. It MUST NOT
+ *   be logged/serialized.
  */
-export async function assessWorkerReadiness({ agent, userEnvReader }) {
+export async function assessWorkerReadiness({ agent, resolver, names }) {
   const required = requiredCredentialNames(agent);
-  const inherited = inheritedEnvNames(agent);
+  // Default: resolve only required names (registry_list path — cheap). Callers
+  // that need to bridge optional inherited env pass names explicitly.
+  const toResolve = names ?? required;
+  const envResolver = resolver ?? createEnvResolver();
   const resolvedEnv = {};
   const missing = [];
-  const seen = new Set(); // operation-scoped de-dupe
-  let readerCallCount = 0;
-  const reader = userEnvReader ?? readWindowsUserEnv;
-  const wrappedReader = async (name) => {
-    readerCallCount += 1;
-    return reader(name);
-  };
-  for (const name of inherited) {
-    if (seen.has(name)) continue;
-    seen.add(name);
-    const r = await resolveCredentialEnv(name, { userEnvReader: wrappedReader });
+  for (const name of toResolve) {
+    const r = await envResolver.resolve(name);
     if (typeof r.value === "string") resolvedEnv[name] = r.value;
-    // Only REQUIRED names participate in the missing gate.
     if (required.includes(name) && r.source === "missing") missing.push(name);
   }
   const credentialAvailability = required.length === 0
     ? "not_required"
     : (missing.length > 0 ? "missing" : "available");
-  return { credentialAvailability, missingCredentialEnvNames: missing, resolvedEnv, readerCallCount };
+  return { credentialAvailability, missingCredentialEnvNames: missing, resolvedEnv };
 }

@@ -12,7 +12,8 @@ import { createSecretRedactor } from "./secretRedaction.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError } from "./delivery.js";
 import { verifyDelivery as defaultVerifyDelivery } from "./deliveryVerification.js";
 import { loadRoleContract } from "./application/roleContract.js";
-import { assessWorkerReadiness, readWindowsUserEnv } from "./application/credentialReadiness.js";
+import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./application/credentialReadiness.js";
+import { inheritedEnvNames } from "./envPolicy.js";
 
 /**
  * RunManager 持有活跃 run 的生命周期。
@@ -145,7 +146,11 @@ export class RunManager {
     // zero worktree, zero spawn). Resolved values (incl. Windows user-env bridge)
     // are passed to backend.spawn so the worker child inherits them and the
     // redactor scrubs them. Values never enter argv/transcript/MCP output.
-    const credentialReadiness = await assessWorkerReadiness({ agent, userEnvReader: this.userEnvReader });
+    // Start resolves ALL inherited env names (required + optional) so optional
+    // Kimi/Codex config is bridged. One operation-scoped resolver per start.
+    const credentialReadiness = await assessWorkerReadiness({
+      agent, resolver: createEnvResolver(this.userEnvReader), names: inheritedEnvNames(agent),
+    });
     if (credentialReadiness.credentialAvailability === "missing") {
       throw new Error(
         `Agent ${agentId}: missing required credential env: ${credentialReadiness.missingCredentialEnvNames.join(", ")}. ` +
@@ -492,7 +497,9 @@ export class RunManager {
     // SSOT as start/dispatchRun/registry_list. Missing REQUIRED credential →
     // throw (spawn count 0, transcript bytes unchanged). Resolved values are
     // passed to the resume spawn for the worker child env + redactor.
-    const resumeReadiness = await assessWorkerReadiness({ agent, userEnvReader: this.userEnvReader });
+    const resumeReadiness = await assessWorkerReadiness({
+      agent, resolver: createEnvResolver(this.userEnvReader), names: inheritedEnvNames(agent),
+    });
     if (resumeReadiness.credentialAvailability === "missing") {
       throw new Error(
         `Agent ${transcript.context.agentId}: missing required credential env: ${resumeReadiness.missingCredentialEnvNames.join(", ")}.`,

@@ -19,7 +19,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readRegistry } from "../registry.js";
-import { assessWorkerReadiness } from "./credentialReadiness.js";
+import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 
 // ===== Private helpers (owned by this module) =====
 
@@ -99,10 +99,16 @@ export async function getRegistryInventory({
   const registry = await _readRegistry(registryPath);
   const certMap = await buildCertMap(runDir, readFileFn);
 
+  // M11-7 (operation closeout): ONE operation-scoped resolver shared across all
+  // workers, and resolve ONLY the required credential names (registry_list shows
+  // credentialAvailability, which depends solely on required names). Optional
+  // inherited env (OPENAI_BASE_URL, CODEX_HOME, KIMI_MODEL_NAME, ...) is NOT read
+  // here — it is irrelevant to the availability status and would add unnecessary
+  // cold-start cost. Two workers sharing a required name read it at most ONCE.
+  const resolver = createEnvResolver(userEnvReader);
   const results = [];
   for (const agent of registry.listAgents()) {
-    // M11-7: runtime readiness is distinct from certification. Assess per worker.
-    const readiness = await assessWorkerReadiness({ agent, userEnvReader });
+    const readiness = await assessWorkerReadiness({ agent, resolver });
     results.push({
       id: agent.id,
       backend: agent.backend,

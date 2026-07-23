@@ -20,6 +20,7 @@ import { execFileSync } from "node:child_process";
 import {
   resolveCredentialEnv,
   assessWorkerReadiness,
+  createEnvResolver,
   requiredCredentialNames,
   inheritedEnvNames,
   CREDENTIAL_SENTINEL,
@@ -72,7 +73,7 @@ test("M11-7-R1a: optional env names are NOT required (no false blocker)", () => 
 test("M11-7-R1b: explicitly-declared REQUIRED credential blocks when missing", async () => {
   delete process.env.TEST_M117_REQ_MISSING;
   const agent = { backend: "claude-code", id: "researcher", provider: { apiKeyEnv: "TEST_M117_REQ_MISSING" } };
-  const r = await assessWorkerReadiness({ agent, userEnvReader: fakeUserEnvReader({}) });
+  const r = await assessWorkerReadiness({ agent, resolver: createEnvResolver(fakeUserEnvReader({})) });
   assert.equal(r.credentialAvailability, "missing");
   assert.deepEqual(r.missingCredentialEnvNames, ["TEST_M117_REQ_MISSING"]);
 });
@@ -82,7 +83,7 @@ test("M11-7-R1c: real registry — coder_mm/tester not blocked; researcher gated
   const reader = fakeUserEnvReader({});
   const results = {};
   for (const [id, a] of Object.entries(reg.agents)) {
-    const r = await assessWorkerReadiness({ agent: { id, ...a }, userEnvReader: reader });
+    const r = await assessWorkerReadiness({ agent: { id, ...a }, resolver: createEnvResolver(reader) });
     results[id] = r.credentialAvailability;
   }
   assert.notEqual(results.coder_mm, "missing", "coder_mm not blocked by optional config");
@@ -98,37 +99,125 @@ test("M11-7-A: provider.apiKeyEnv and legacy --api-key-env are required", () => 
 });
 
 test("M11-7-A6: worker with no required credential → not_required", async () => {
-  const r = await assessWorkerReadiness({ agent: { backend: "claude-code", id: "plain" }, userEnvReader: fakeUserEnvReader({}) });
+  const r = await assessWorkerReadiness({ agent: { backend: "claude-code", id: "plain" }, resolver: createEnvResolver(fakeUserEnvReader({})) });
   assert.equal(r.credentialAvailability, "not_required");
   assert.deepEqual(r.missingCredentialEnvNames, []);
 });
 
 test("M11-7-A8: readiness result does not carry certification", async () => {
-  const r = await assessWorkerReadiness({ agent: { backend: "claude-code", id: "x", provider: { apiKeyEnv: "TEST_M117_SEP" } }, userEnvReader: fakeUserEnvReader({ TEST_M117_SEP: "test-key-abc" }) });
+  const r = await assessWorkerReadiness({ agent: { backend: "claude-code", id: "x", provider: { apiKeyEnv: "TEST_M117_SEP" } }, resolver: createEnvResolver(fakeUserEnvReader({ TEST_M117_SEP: "test-key-abc" })) });
   assert.equal(r.certification, undefined);
 });
 
 // ===== RED-3: no permanent cache — rotation/recovery without restart =====
 
-test("M11-7-R3: rotation/recovery takes effect on next call (no permanent cache)", async () => {
+test("M11-7-R3: rotation/recovery takes effect on next operation (no permanent cache)", async () => {
   const agent = { backend: "claude-code", id: "x", provider: { apiKeyEnv: "TEST_M117_ROTATE" } };
   delete process.env.TEST_M117_ROTATE;
   let map = {};
-  let r = await assessWorkerReadiness({ agent, userEnvReader: fakeUserEnvReader(map) });
+  // First operation: missing.
+  let r = await assessWorkerReadiness({ agent, resolver: createEnvResolver(fakeUserEnvReader(map)) });
   assert.equal(r.credentialAvailability, "missing");
+  // Rotate: available on the NEXT independent operation (new resolver).
   map = { TEST_M117_ROTATE: "test-key-rotated" };
-  r = await assessWorkerReadiness({ agent, userEnvReader: fakeUserEnvReader(map) });
+  r = await assessWorkerReadiness({ agent, resolver: createEnvResolver(fakeUserEnvReader(map)) });
   assert.equal(r.credentialAvailability, "available");
   assert.equal(r.resolvedEnv.TEST_M117_ROTATE, "test-key-rotated");
 });
 
-test("M11-7-R3b: each name read at most once per assessment (readerCallCount)", async () => {
+test("M11-7-R3b: each name read at most once per operation (resolver.readerCallCount)", async () => {
   const agent = { backend: "claude-code", id: "x", provider: { apiKeyEnv: "TEST_M117_DEDUPE" } };
   delete process.env.TEST_M117_DEDUPE;
   const reader = fakeUserEnvReader({ TEST_M117_DEDUPE: "test-key-dedupe" });
-  const r = await assessWorkerReadiness({ agent, userEnvReader: reader });
-  assert.equal(r.readerCallCount, 1, "reader called once for the single distinct name");
+  const resolver = createEnvResolver(reader);
+  await assessWorkerReadiness({ agent, resolver });
+  assert.equal(resolver.readerCallCount, 1, "reader called once for the single distinct name");
   assert.deepEqual(reader.calls, ["TEST_M117_DEDUPE"]);
+});
+
+// ===== operation-scope: inventory shared-name de-dupe + no optional reads =====
+
+// OP-1: two agents sharing one required env name → read EXACTLY ONCE in one inventory.
+test("M11-7-OP1: shared required name read exactly once across one inventory", async () => {
+  const { getRegistryInventory } = await import("../src/application/registryInventory.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m117-op1-"));
+  try {
+    delete process.env.TEST_M117_OP_SHARED;
+    const registryPath = makeRegistry(dir, {
+      a: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_OP_SHARED" } },
+      b: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_OP_SHARED" } },
+    });
+    const counts = {};
+    const reader = async (name) => { counts[name] = (counts[name] ?? 0) + 1; return "test-key-op"; };
+    await getRegistryInventory({ registryPath, runDir: dir, userEnvReader: reader });
+    assert.equal(counts.TEST_M117_OP_SHARED, 1, "shared required name read exactly once in one inventory");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// OP-2: inventory does NOT read optional inherited env for agents with no required credential.
+test("M11-7-OP2: inventory reads NO optional env for not_required agents", async () => {
+  const { getRegistryInventory } = await import("../src/application/registryInventory.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m117-op2-"));
+  try {
+    for (const n of ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME", "KIMI_API_KEY", "KIMI_BASE_URL", "KIMI_MODEL_NAME"]) delete process.env[n];
+    const registryPath = makeRegistry(dir, {
+      tester: { backend: "codex", cwd: dir },
+      coder_mm: { backend: "kimi-code", cwd: dir },
+    });
+    const counts = {};
+    const reader = async (name) => { counts[name] = (counts[name] ?? 0) + 1; return undefined; };
+    const agents = await getRegistryInventory({ registryPath, runDir: dir, userEnvReader: reader });
+    assert.deepEqual(counts, {}, "no optional inherited env read during inventory");
+    assert.equal(agents.find((a) => a.id === "tester").credentialAvailability, "not_required");
+    assert.equal(agents.find((a) => a.id === "coder_mm").credentialAvailability, "not_required");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// OP-3: a second inventory operation re-reads (observes rotation), no permanent cache.
+test("M11-7-OP3: second inventory re-reads and observes rotation", async () => {
+  const { getRegistryInventory } = await import("../src/application/registryInventory.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m117-op3-"));
+  try {
+    delete process.env.TEST_M117_OP_ROT;
+    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_OP_ROT" } } });
+    // First inventory: missing.
+    let map = {};
+    let agents = await getRegistryInventory({ registryPath, runDir: dir, userEnvReader: async (n) => map[n] });
+    assert.equal(agents[0].credentialAvailability, "missing");
+    // Rotate: second inventory observes available — no restart.
+    map = { TEST_M117_OP_ROT: "test-key-op-rot" };
+    agents = await getRegistryInventory({ registryPath, runDir: dir, userEnvReader: async (n) => map[n] });
+    assert.equal(agents[0].credentialAvailability, "available");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// OP-4: dispatch still bridges OPTIONAL inherited env (not just required).
+test("M11-7-OP4: dispatch bridges optional inherited env into runner env", async () => {
+  const { dispatchRun } = await import("../src/application/runDispatch.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m117-op4-"));
+  try {
+    // kimi agent: KIMI_BASE_URL is optional inherited. Put it in user env only.
+    delete process.env.KIMI_API_KEY;
+    delete process.env.KIMI_BASE_URL;
+    delete process.env.KIMI_MODEL_NAME;
+    const registryPath = makeRegistry(dir, { w: { backend: "kimi-code", cwd: dir } });
+    const runDir = join(dir, "runs"); mkdirSync(runDir, { recursive: true });
+    let capturedEnv = null;
+    await dispatchRun({
+      agentId: "w", prompt: "do", registryPath, runDir,
+      spawnFn: (exe, args, opts) => { capturedEnv = opts.env; return { unref() {} }; },
+      userEnvReader: fakeUserEnvReader({ KIMI_BASE_URL: "test-key-opt-url" }),
+    });
+    assert.equal(capturedEnv.KIMI_BASE_URL, "test-key-opt-url", "optional inherited env bridged into runner env");
+  } finally {
+    cleanupDir(dir);
+  }
 });
 
 // ===== resolveCredentialEnv precedence =====
