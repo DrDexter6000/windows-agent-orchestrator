@@ -56,7 +56,10 @@ import { getRegistryInventory } from "./registryInventory.js";
 // Cap on active runs returned in one preflight (bounded to keep the advisory
 // result small even under runaway conditions). The TRUE count is reported
 // separately as activeRunCount + activeRunsTruncated.
-const ACTIVE_RUNS_CAP = 10;
+// Exported so the MCP output schema enforces the SAME bound (single SSOT).
+export const ACTIVE_RUNS_CAP = 10;
+// Cap on workers returned (defensive against a pathological registry).
+export const WORKERS_CAP = 64;
 
 /**
  * Aggregate the mechanical preflight facts. Each section is settled
@@ -77,18 +80,25 @@ const ACTIVE_RUNS_CAP = 10;
  * @param {{bound:boolean, source?:string, root?:string, gitHead?:string, dirty?:boolean}|null} [input.workspaceBinding]
  *   The already-resolved workspace binding (from the MCP adapter's session state).
  *   null/undefined when the resolver itself threw (→ unknown, not faked unbound).
- * @param {boolean} [input.selectionFailed] — true when an optional workspaceRoot
- *   selection was requested but failed (the prior binding, if any, is unchanged).
+ * @param {boolean} [input.selectionRequested] — true when a workspaceRoot was
+ *   provided (selection was attempted). Combined with the binding outcome this
+ *   derives the workspaceSelection value.
+ * @param {boolean} [input.selectionFailed] — true when the attempted selection
+ *   threw (kept for backward compat; selectionRequested+selectionFailed together
+ *   determine the outcome).
  * @param {string} input.registryPath
  * @param {string} input.runDir
  * @param {Function} [input.userEnvReader] — for credential readiness
- * @param {Function} [input.getRegistryInventoryFn] — injectable for testing
+ * @param {Function} [input.getRegistryInventoryFn] — injectable for testing.
+ *   Must be a function (never undefined) so the aggregator NEVER falls back to a
+ *   default re-read — the caller replays its single snapshot outcome.
  * @param {Function} [input.listRunsFn] — injectable; signature matches listRuns
  * @param {string[]} [input.knownAgentIds]
  * @returns {Promise<object>} advisory preflight result (see output shape below)
  */
 export async function aggregateLeadPreflight({
   workspaceBinding,
+  selectionRequested = false,
   selectionFailed = false,
   registryPath,
   runDir,
@@ -128,11 +138,36 @@ export async function aggregateLeadPreflight({
     checkStatus.workspace = "observed";
     observations.push("workspace not bound — call workspace_select or lead_preflight with workspaceRoot");
   }
-  // A failed selection must be EXPLICIT even if a prior binding is still active.
-  if (selectionFailed) {
-    workspaceSelection = "failed_using_prior";
-    checkStatus.workspace = "warning";
-    warnings.push("workspace selection failed — prior session selection (if any) is unchanged; the reported workspace is the PRIOR selection, not the requested one");
+  // Derive workspaceSelection from the explicit closed set:
+  //   not_requested      — no workspaceRoot was provided.
+  //   selected           — selection was requested and succeeded (binding is the
+  //                        newly-selected lead_session).
+  //   failed_using_prior — selection was requested but failed, and a PRIOR
+  //                        binding is still active (the reported workspace is the
+  //                        prior one, NOT the requested one).
+  //   failed_unbound     — selection was requested but failed, and there was NO
+  //                        prior binding (nothing is bound).
+  //   failed_unknown     — selection was requested but failed, and the resolver
+  //                        also threw (cannot tell if a prior binding exists).
+  if (!selectionRequested) {
+    workspaceSelection = "not_requested";
+  } else if (!selectionFailed) {
+    workspaceSelection = "selected";
+  } else {
+    // Selection failed — distinguish by whether a prior binding exists.
+    if (workspaceBinding == null) {
+      workspaceSelection = "failed_unknown";
+      checkStatus.workspace = "warning";
+      warnings.push("workspace selection failed and binding state could not be confirmed — use workspace_status to check directly");
+    } else if (workspaceBinding.bound) {
+      workspaceSelection = "failed_using_prior";
+      checkStatus.workspace = "warning";
+      warnings.push("workspace selection failed — prior session selection is unchanged; the reported workspace is the PRIOR selection, not the requested one");
+    } else {
+      workspaceSelection = "failed_unbound";
+      checkStatus.workspace = "warning";
+      warnings.push("workspace selection failed and no prior workspace is bound — call workspace_select with a valid Git top-level to retry");
+    }
   }
 
   // --- Section 2: worker credential availability (independent) ---
@@ -141,7 +176,7 @@ export async function aggregateLeadPreflight({
   try {
     const invFn = getRegistryInventoryFn ?? getRegistryInventory;
     const agents = await invFn({ registryPath, runDir, userEnvReader });
-    workers = agents.map((a) => ({
+    workers = agents.slice(0, WORKERS_CAP).map((a) => ({
       id: a.id,
       backend: a.backend,
       model: a.model,
@@ -149,6 +184,9 @@ export async function aggregateLeadPreflight({
       credentialAvailability: a.credentialAvailability,
     }));
     checkStatus.workers = "observed";
+    if (agents.length > WORKERS_CAP) {
+      warnings.push(`worker inventory truncated to ${WORKERS_CAP} (registry has ${agents.length}) — use registry_list for the full list`);
+    }
     const conditional = workers.filter((w) => w.certification === "conditional");
     const missing = workers.filter((w) => w.credentialAvailability === "missing");
     if (conditional.length > 0) {
@@ -205,7 +243,8 @@ export async function aggregateLeadPreflight({
   // A selection failure or any "unknown"/"warning" makes it false.
   const sections = ["workspace", "workers", "activeRuns"];
   const allObserved = sections.every((s) => checkStatus[s] === "observed");
-  const complete = allObserved && !selectionFailed;
+  // complete is false if any section is unknown/warning OR a selection failed.
+  const complete = allObserved && !(selectionRequested && selectionFailed);
 
   const manualChecks = [
     "workspace_status — verify binding independently",

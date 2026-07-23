@@ -43,7 +43,7 @@ import { projectCollectResult } from "../application/runCollectProjection.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
 import { selectSessionWorkspace } from "../application/sessionWorkspace.js";
 import { readWindowsUserEnv } from "../application/credentialReadiness.js";
-import { aggregateLeadPreflight } from "../application/leadPreflight.js";
+import { aggregateLeadPreflight, ACTIVE_RUNS_CAP, WORKERS_CAP } from "../application/leadPreflight.js";
 import {
   listLeadPlaybooks,
   getLeadPlaybook,
@@ -486,22 +486,26 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
     gitHead: z.string().regex(/^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/).nullable(),
     dirty: z.boolean().nullable(),
   }).nullable(),
-  workspaceSelection: z.enum(["failed_using_prior"]).nullable(),
+  workspaceSelection: z.enum([
+    "not_requested", "selected",
+    "failed_using_prior", "failed_unbound", "failed_unknown",
+  ]).nullable(),
   // workers/activeRuns are null when unreadable (unknown), NOT when known-empty.
+  // Array bounds share the application-layer SSOT caps so they cannot drift.
   workers: z.array(z.object({
     id: z.string().max(128),
     backend: z.string().max(64),
     model: z.string().max(128),
     certification: z.string().nullable(),
     credentialAvailability: z.enum(["available", "missing", "not_required"]),
-  }).strict()).nullable(),
+  }).strict()).max(WORKERS_CAP).nullable(),
   activeRuns: z.array(z.object({
     runId: z.string().max(128),
     agentId: z.string().max(128),
     state: z.string().max(64),
     terminal: z.boolean(),
     updatedAt: z.string().nullable(),
-  }).strict()).nullable(),
+  }).strict()).max(ACTIVE_RUNS_CAP).nullable(),
   activeRunCount: z.number().int().nullable(),
   activeRunsTruncated: z.boolean(),
   observations: z.array(z.string().max(512)).max(64),
@@ -1064,10 +1068,11 @@ export function createWaoMcpServer({
       // the project via the SAME authority as workspace_select (setSessionWorkspace).
       // A failed selection does NOT overwrite the prior valid session selection
       // (setSessionWorkspace only stores on success) — and is reported EXPLICITLY
-      // (workspaceSelection=failed_using_prior, checkStatus.workspace=warning,
-      // complete=false) so a Lead cannot misread "stuck on prior A" as "selected B".
+      // via workspaceSelection (closed set: not_requested/selected/failed_using_prior/
+      // failed_unbound/failed_unknown) so a Lead cannot misread the outcome.
+      const selectionRequested = typeof workspaceRoot === "string" && workspaceRoot.length > 0;
       let selectionFailed = false;
-      if (typeof workspaceRoot === "string" && workspaceRoot.length > 0) {
+      if (selectionRequested) {
         try {
           setSessionWorkspace(workspaceRoot);
         } catch {
@@ -1083,29 +1088,37 @@ export function createWaoMcpServer({
       } catch {
         workspaceBinding = null;
       }
-      // M11-8A closeout (P3): read the registry ONCE and reuse the same snapshot
-      // for both the worker inventory AND knownAgentIds (avoids a double read +
-      // two inconsistent time points). The aggregator projects the safe fields;
-      // we extract knownAgentIds from the same result.
+      // M11-8A closeout (P3/truth): read the registry EXACTLY ONCE. Capture the
+      // outcome (snapshot or failure) and pass a resolver that replays THAT
+      // outcome — never lets the aggregator fall back to a second default read.
+      // This prevents first-fail/second-success skew between workers and
+      // knownAgentIds.
       let inventorySnapshot = null;
+      let inventoryFailed = false;
       try {
         inventorySnapshot = await service({ registryPath, runDir, userEnvReader: resolveUserEnv });
       } catch {
-        inventorySnapshot = null;
+        inventoryFailed = true;
       }
       const knownAgentIds = Array.isArray(inventorySnapshot)
         ? inventorySnapshot.map((a) => a.id)
         : [];
+      // Replay the single outcome: success → return the snapshot; failure → throw
+      // (so the aggregator marks workers=unknown). Never undefined (which would
+      // trigger a fallback re-read).
+      const inventoryResolver = inventoryFailed
+        ? async () => { throw new Error("registry snapshot failed"); }
+        : async () => inventorySnapshot;
       let payload;
       try {
         payload = await aggregateLeadPreflight({
           workspaceBinding,
+          selectionRequested,
           selectionFailed,
           registryPath,
           runDir,
           userEnvReader: resolveUserEnv,
-          // Reuse the single inventory snapshot for workers (avoids a second read).
-          getRegistryInventoryFn: inventorySnapshot != null ? async () => inventorySnapshot : undefined,
+          getRegistryInventoryFn: inventoryResolver,
           listRunsFn: (workspaceBinding && workspaceBinding.bound)
             ? (args) => listRunsService({ ...args, knownAgentIds })
             : undefined,

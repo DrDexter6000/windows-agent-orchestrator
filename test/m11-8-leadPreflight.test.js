@@ -361,6 +361,7 @@ test("M11-8-T1: failed selection → workspaceSelection=failed_using_prior, comp
   // All other sections succeed, so WITHOUT the fix complete would be true.
   const result = await aggregateLeadPreflight({
     workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "a".repeat(40), dirty: false },
+    selectionRequested: true,
     selectionFailed: true,
     registryPath: "/r.json", runDir: "/runs",
     getRegistryInventoryFn: async () => [{ id: "w", backend: "claude-code", model: "m", certification: null, credentialAvailability: "not_required", cwd: "/A", missingCredentialEnvNames: [] }],
@@ -433,4 +434,94 @@ test("M11-8-T5: MCP lead_preflight failed selection → explicit failed_using_pr
       assert.equal(parsed.workspace.bound, true);
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); cleanupDir(wsA); cleanupDir(notGit); }
+});
+
+// ===== Final truth-boundary RED→GREEN (CTO micro-closeout) =====
+
+// FB-A: registry single read — failed snapshot must NOT trigger a second read.
+test("M11-8-FBA: registry failure → exactly ONE read, workers=null (no fallback re-read)", async () => {
+  let readCount = 0;
+  const failingResolver = async () => { readCount += 1; throw new Error("snapshot failed"); };
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "a".repeat(40), dirty: false },
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: failingResolver,
+    listRunsFn: async () => ({ runs: [], matchedCount: 0 }),
+  });
+  assert.equal(readCount, 1, "registry read exactly once (no fallback)");
+  assert.equal(result.workers, null, "failed read → null, not []");
+  assert.equal(result.checkStatus.workers, "unknown");
+});
+
+// FB-B1: fresh unbound + selection failed → failed_unbound (NOT failed_using_prior).
+test("M11-8-FBB1: fresh unbound + failed selection → failed_unbound", async () => {
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: false },
+    selectionRequested: true,
+    selectionFailed: true,
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => [],
+  });
+  assert.equal(result.workspaceSelection, "failed_unbound", "no prior → failed_unbound, not failed_using_prior");
+  assert.equal(result.complete, false);
+});
+
+// FB-B2: selection succeeded → selected.
+test("M11-8-FBB2: successful selection → selected", async () => {
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "b".repeat(40), dirty: false },
+    selectionRequested: true,
+    selectionFailed: false,
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => [],
+  });
+  assert.equal(result.workspaceSelection, "selected");
+});
+
+// FB-B3: no workspaceRoot → not_requested.
+test("M11-8-FBB3: no selection requested → not_requested", async () => {
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "c".repeat(40), dirty: false },
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => [],
+  });
+  assert.equal(result.workspaceSelection, "not_requested");
+});
+
+// FB-B4: selection failed + resolver threw → failed_unknown.
+test("M11-8-FBB4: failed selection + resolver threw → failed_unknown", async () => {
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: null,
+    selectionRequested: true,
+    selectionFailed: true,
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => [],
+  });
+  assert.equal(result.workspaceSelection, "failed_unknown");
+  assert.equal(result.complete, false);
+});
+
+// FB-C: schema enforces maxItems via shared SSOT (prove caps are consistent).
+test("M11-8-FBC: ACTIVE_RUNS_CAP and WORKERS_CAP are exported and finite", async () => {
+  const { ACTIVE_RUNS_CAP, WORKERS_CAP } = await import("../src/application/leadPreflight.js");
+  assert.equal(typeof ACTIVE_RUNS_CAP, "number");
+  assert.equal(typeof WORKERS_CAP, "number");
+  assert.ok(ACTIVE_RUNS_CAP > 0 && ACTIVE_RUNS_CAP <= 50, "reasonable cap");
+  assert.ok(WORKERS_CAP > 0 && WORKERS_CAP <= 256, "reasonable cap");
+});
+
+// FB-C2: workers truncated at WORKERS_CAP.
+test("M11-8-FBC2: workers truncated at WORKERS_CAP", async () => {
+  const { WORKERS_CAP } = await import("../src/application/leadPreflight.js");
+  const many = Array.from({ length: WORKERS_CAP + 10 }, (_, i) => ({
+    id: `w${i}`, backend: "claude-code", model: "m", certification: null,
+    credentialAvailability: "not_required", cwd: "/A", missingCredentialEnvNames: [],
+  }));
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "d".repeat(40), dirty: false },
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => many,
+  });
+  assert.equal(result.workers.length, WORKERS_CAP, "workers capped");
+  assert.ok(result.warnings.some((w) => /truncated/i.test(w)), "truncation warning");
 });
