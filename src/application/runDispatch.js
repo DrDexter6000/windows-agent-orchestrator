@@ -82,6 +82,7 @@ export async function dispatchRun({
   runnerPath,
   execPath,
   delivery,
+  resolvedCredentials,
 }) {
   if (!agentId || typeof agentId !== "string") {
     throw new Error("dispatchRun: agentId is required");
@@ -215,7 +216,11 @@ export async function dispatchRun({
 
   // detached: runner survives CLI/MCP process exit; stdio ignore (runner writes
   // transcript); unref so the parent does not wait for it.
-  _spawn(_execPath, runnerArgs, { detached: true, stdio: "ignore" }).unref();
+  // M11-7: thread resolved credential VALUES into the runner's env (NOT argv —
+  // values must never appear in argv). The runner's ProcessBackend then inherits
+  // them via process.env (buildChildEnv) and redacts them (createSecretRedactor).
+  const runnerEnv = { ...process.env, ...(resolvedCredentials ?? {}) };
+  _spawn(_execPath, runnerArgs, { detached: true, stdio: "ignore", env: runnerEnv }).unref();
 
   return {
     accepted: true,

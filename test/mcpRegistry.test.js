@@ -146,8 +146,8 @@ test("M9-1-03: registry_list calls injected service exactly once and returns str
     callCount += 1;
     capturedArgs = input;
     return [
-      { id: "coder_low", backend: "claude-code", model: "glm-5-turbo", certification: "certified", cwd: "/repo" },
-      { id: "researcher", backend: "claude-code", model: "opus", certification: null, cwd: "/repo" },
+      { id: "coder_low", backend: "claude-code", model: "glm-5-turbo", certification: "certified", cwd: "/repo", runtimeAvailability: "ready", missingCredentialEnvNames: [] },
+      { id: "researcher", backend: "claude-code", model: "opus", certification: null, cwd: "/repo", runtimeAvailability: "ready", missingCredentialEnvNames: [] },
     ];
   };
 
@@ -822,8 +822,8 @@ test("M9-1-C5: registry_list declares readOnly/destructive/idempotent/openWorld 
 
 test("M9-1-C6: output schema declared; structuredContent matches schema and text JSON", async () => {
   const fakeService = async () => [
-    { id: "coder_low", backend: "claude-code", model: "glm-5-turbo", certification: "certified", cwd: "/r" },
-    { id: "tester", backend: "codex", model: "(default)", certification: null, cwd: "/r" },
+    { id: "coder_low", backend: "claude-code", model: "glm-5-turbo", certification: "certified", cwd: "/r", runtimeAvailability: "ready", missingCredentialEnvNames: [] },
+    { id: "tester", backend: "codex", model: "(default)", certification: null, cwd: "/r", runtimeAvailability: "ready", missingCredentialEnvNames: [] },
   ];
 
   const server = createWaoMcpServer({

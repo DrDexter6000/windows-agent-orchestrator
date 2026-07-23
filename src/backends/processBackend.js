@@ -79,6 +79,7 @@ export class ProcessBackend {
     waoCliPath = null,
     rawCapturePath = null,
     credentialEnvNames = () => [],
+    spawnFn = null,
   } = {}) {
     if (!parserClass) throw new Error("parserClass is required");
     if (!buildArgs) throw new Error("buildArgs is required");
@@ -90,6 +91,9 @@ export class ProcessBackend {
     // WAO CLI 路径（注入 worker env，让 worker 能调 wao decision/handoff 记录状态）。
     // 由 cli.js 的 backendFor 构造时传入。
     this.waoCliPath = waoCliPath;
+    // M11-7: injectable spawn (default: node child_process.spawn) for tests that
+    // need to inspect the child env / redaction without launching a real process.
+    this._spawnFn = spawnFn ?? spawn;
     // TD-76 raw-capture：可开关旁路日志，捕获 parser 输入前的原始 stdout（每 chunk 追加写）。
     // 默认 null（关）。注入优先级：构造参数 > WAO_RAW_CAPTURE env（env 便于一次性调研，
     // 无需改代码/签名）。用途：抓 thinking/schema 等 raw 形态做调研（不臆测，守 decision 0009
@@ -127,13 +131,22 @@ export class ProcessBackend {
       throw new Error(`secret-like agent.env key is not allowed: ${forbiddenAgentEnv}`);
     }
     const inheritedNames = this.credentialEnvNames(agent);
+    // M11-7: resolvedCredentials carries credential VALUES resolved from the
+    // Windows user env (when not present in process.env). Passed in by the
+    // caller (backgroundRunner / RunManager) so the child env AND the redactor
+    // both cover them — preventing both "credential missing" crashes and
+    // stdout/stderr secret leaks of the fallback values.
+    const resolvedCredentials = task.resolvedCredentials ?? {};
     const childEnv = buildChildEnv(inheritedNames, agentEnv, {
       ...(this.waoCliPath ? { WAO_CLI: this.waoCliPath } : {}),
       WAO_TARGET_CWD: agent.cwd,
-    });
-    const redactor = createSecretRedactor(process.env, inheritedNames);
+    }, resolvedCredentials);
+    // Build the redactor over process.env MERGED with the resolved fallback
+    // credentials, so fallback values are scrubbed from worker output too.
+    const redactorEnv = { ...process.env, ...resolvedCredentials };
+    const redactor = createSecretRedactor(redactorEnv, inheritedNames);
     const rawRedactor = redactor.createStream();
-    const child = spawn(binary, args, {
+    const child = this._spawnFn(binary, args, {
       cwd: agent.cwd,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -320,7 +333,7 @@ export class ProcessBackend {
   }
 }
 
-function buildChildEnv(inheritedNames, agentEnv, waoEnv) {
+function buildChildEnv(inheritedNames, agentEnv, waoEnv, resolvedCredentials = {}) {
   const requested = new Set(
     [...SAFE_INHERITED_ENV, ...(inheritedNames ?? [])]
       .filter((name) => typeof name === "string" && name.length > 0)
@@ -330,7 +343,17 @@ function buildChildEnv(inheritedNames, agentEnv, waoEnv) {
   for (const [name, value] of Object.entries(process.env)) {
     if (requested.has(name.toUpperCase())) inherited[name] = value;
   }
-  return { ...inherited, ...agentEnv, ...waoEnv };
+  // M11-7: merge registry-declared credentials resolved from the Windows user
+  // env (when absent from process.env). These take precedence over any stale
+  // process.env value but below agent.env/waoEnv. They are also fed to the
+  // redactor below so they are scrubbed from worker stdout/stderr/transcript.
+  const credEnv = {};
+  for (const [name, value] of Object.entries(resolvedCredentials ?? {})) {
+    if (requested.has(name.toUpperCase()) && typeof value === "string") {
+      credEnv[name] = value;
+    }
+  }
+  return { ...inherited, ...credEnv, ...agentEnv, ...waoEnv };
 }
 
 function isWindowsCommandScript(filePath) {

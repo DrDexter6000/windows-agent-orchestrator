@@ -28,6 +28,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import { getRegistryInventory } from "../application/registryInventory.js";
+import { readRegistry } from "../registry.js";
+import { resolve } from "node:path";
 import { dispatchRun } from "../application/runDispatch.js";
 import { getRunStatus } from "../application/runStatus.js";
 import { collectRunMessages } from "../application/runCollect.js";
@@ -42,6 +44,7 @@ import { projectReviewResult } from "../application/deliveryReviewProjection.js"
 import { projectCollectResult } from "../application/runCollectProjection.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
 import { selectSessionWorkspace } from "../application/sessionWorkspace.js";
+import { assessWorkerReadiness, readWindowsUserEnv } from "../application/credentialReadiness.js";
 import {
   listLeadPlaybooks,
   getLeadPlaybook,
@@ -81,12 +84,18 @@ const REGISTRY_LIST_INPUT = z.object({}).strict();
 
 // The structured output shape: { agents: [...] }. certification is nullable
 // because an agent may have no reliability-summary entry.
+// M11-7: runtimeAvailability (ready|credential_missing) is DISTINCT from
+// certification — a historically-certified worker may still lack a credential
+// in the current launch environment. missingCredentialEnvNames lists the env
+// var NAMES only (never values).
 const AGENT_ENTRY = z.object({
   id: z.string(),
   backend: z.string(),
   model: z.string(),
   certification: z.string().nullable(),
   cwd: z.string(),
+  runtimeAvailability: z.enum(["ready", "credential_missing"]),
+  missingCredentialEnvNames: z.array(z.string()).max(32),
 });
 
 const REGISTRY_LIST_OUTPUT = z.object({
@@ -111,6 +120,13 @@ const REGISTRY_LIST_DESCRIPTION =
 // content (err.message, path, argv, env) — the model learns only that dispatch
 // failed, never operational detail.
 const DISPATCH_ERROR_TEXT = "run_dispatch failed";
+
+// M11-7: fixed, actionable error when a worker lacks a required credential at
+// dispatch time. Actionable (names shown) but never echoes credential VALUES.
+const DISPATCH_CREDENTIAL_MISSING_TEXT =
+  "run_dispatch refused: the worker is missing a required credential. " +
+  "See registry_list (runtimeAvailability / missingCredentialEnvNames) for the env var names, " +
+  "then set them in the current process or Windows User environment and retry.";
 
 // run_dispatch input: agentId + prompt required; optional delivery block.
 // Server-owned config (runDir, runId, cwd, isolate, requireCertified, timeouts)
@@ -728,6 +744,9 @@ export function createWaoMcpServer({
   runDir,
   globalWaitTimeout,
   workspaceRoot,
+  // M11-7: injectable Windows user-env reader (default reads HKCU\Environment).
+  // Used by registry_list readiness + run_dispatch pre-check. Injectable for tests.
+  userEnvReader,
   getRegistryInventoryFn,
   dispatchRunFn,
   getRunStatusFn,
@@ -743,6 +762,9 @@ export function createWaoMcpServer({
   getRunDeliveryReviewFn,
 }) {
   const service = getRegistryInventoryFn ?? getRegistryInventory;
+  // M11-7: the Windows user-env reader for credential readiness. Defaults to
+  // the real reader (PowerShell HKCU\Environment); tests inject a fake.
+  const resolveUserEnv = userEnvReader ?? readWindowsUserEnv;
   const dispatcher = dispatchRunFn ?? dispatchRun;
   const statusService = getRunStatusFn ?? getRunStatus;
   const collectService = collectRunMessagesFn ?? collectRunMessages;
@@ -868,7 +890,7 @@ export function createWaoMcpServer({
     async () => {
       let agents;
       try {
-        agents = await service({ registryPath, runDir });
+        agents = await service({ registryPath, runDir, userEnvReader: resolveUserEnv });
       } catch {
         // Redaction contract: fixed safe text only. Never surface err.message,
         // stack, paths, env, or any dynamic detail to the model.
@@ -995,6 +1017,34 @@ export function createWaoMcpServer({
         };
       }
 
+      // M11-7: runtime readiness check BEFORE transcript write or fork. A worker
+      // whose registry-declared credential is absent from both process.env and
+      // the Windows user env would crash on startup — refuse dispatch up front
+      // (zero transcript, zero fork). Same SSOT as registry_list so the two never
+      // disagree. The resolved credential VALUES are threaded to the dispatcher
+      // so the runner injects them into the worker child env + redactor.
+      let resolvedCredentials = undefined;
+      try {
+        const registry = await readRegistry(resolve(registryPath));
+        const agent = registry.getAgent(agentId, { cwd: workspaceCwd });
+        const readiness = await assessWorkerReadiness({ agent, userEnvReader: resolveUserEnv });
+        if (readiness.runtimeAvailability === "credential_missing") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DISPATCH_CREDENTIAL_MISSING_TEXT }],
+          };
+        }
+        // resolvedEnv carries resolved credential values; pass to dispatcher so
+        // the runner injects them into ProcessBackend (child env + redactor).
+        resolvedCredentials = readiness.resolvedEnv;
+      } catch {
+        // Registry read or assessment failure → fail closed (fixed text).
+        return {
+          isError: true,
+          content: [{ type: "text", text: DISPATCH_ERROR_TEXT }],
+        };
+      }
+
       let result;
       try {
         result = await dispatcher({
@@ -1013,6 +1063,10 @@ export function createWaoMcpServer({
           globalWaitTimeout,
           // M9-7A: optional delivery request — service validates via prepareDeliveryRequest.
           ...(delivery ? { delivery } : {}),
+          // M11-7: resolved credential values for the worker child env + redactor.
+          ...(resolvedCredentials && Object.keys(resolvedCredentials).length > 0
+            ? { resolvedCredentials }
+            : {}),
         });
       } catch {
         // Redaction: fixed safe text. Never surface err.message/path/argv/env.

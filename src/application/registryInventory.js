@@ -13,11 +13,13 @@
 // This service performs read-only file I/O (registry + reliability summary).
 // It does not import from src/commands/*, does not parse CLI args,
 // does not write to console, does not set process.exit, does not depend
-// on MCP, does not modify files, and does not read credentials.
+// on MCP, does not modify files. (M11-7: it probes whether registry-declared
+// credential env NAMES are present — names only; it never surfaces values.)
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readRegistry } from "../registry.js";
+import { assessWorkerReadiness } from "./credentialReadiness.js";
 
 // ===== Private helpers (owned by this module) =====
 
@@ -83,23 +85,33 @@ async function buildCertMap(runDir, customReadFile) {
  * @param {string} [input.runDir] — path to runs/ dir (for reliability-summary.json)
  * @param {Function} [input.readRegistryFn] — injectable readRegistry for testing
  * @param {Function} [input.readFileFn] — injectable readFile for testing
- * @returns {Promise<Array<{id, backend, model, certification, cwd}>>}
+ * @param {Function} [input.userEnvReader] — injectable Windows user-env reader (M11-7)
+ * @returns {Promise<Array<{id, backend, model, certification, cwd, runtimeAvailability, missingCredentialEnvNames}>>}
  */
 export async function getRegistryInventory({
   registryPath,
   runDir,
   readRegistryFn,
   readFileFn,
+  userEnvReader,
 }) {
   const _readRegistry = readRegistryFn ?? readRegistry;
   const registry = await _readRegistry(registryPath);
   const certMap = await buildCertMap(runDir, readFileFn);
 
-  return registry.listAgents().map((agent) => ({
-    id: agent.id,
-    backend: agent.backend,
-    model: displayModel(agent),
-    certification: certMap[agent.id] ?? null,
-    cwd: agent.cwd,
-  }));
+  const results = [];
+  for (const agent of registry.listAgents()) {
+    // M11-7: runtime readiness is distinct from certification. Assess per worker.
+    const readiness = await assessWorkerReadiness({ agent, userEnvReader });
+    results.push({
+      id: agent.id,
+      backend: agent.backend,
+      model: displayModel(agent),
+      certification: certMap[agent.id] ?? null,
+      cwd: agent.cwd,
+      runtimeAvailability: readiness.runtimeAvailability,
+      missingCredentialEnvNames: readiness.missingCredentialEnvNames,
+    });
+  }
+  return results;
 }

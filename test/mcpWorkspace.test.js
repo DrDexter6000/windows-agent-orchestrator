@@ -134,6 +134,7 @@ test("WSB-06: run_dispatch passes canonical root as cwd to dispatcher", async ()
   const dir = mkdtempSync(join(tmpdir(), "wao-wsb-06-"));
   try {
     makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { x: { backend: "claude-code", cwd: dir } });
     let captured = null;
     let callCount = 0;
     const fakeDispatch = async (input) => {
@@ -142,7 +143,7 @@ test("WSB-06: run_dispatch passes canonical root as cwd to dispatcher", async ()
       return { accepted: true, runId: "run_wsb06", state: "pending" };
     };
     const server = createWaoMcpServer({
-      registryPath: "/r.json",
+      registryPath,
       runDir: "/runs",
       workspaceRoot: dir,
       dispatchRunFn: fakeDispatch,

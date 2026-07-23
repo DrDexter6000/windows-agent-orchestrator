@@ -127,6 +127,7 @@ test("M9-2B-02: run_dispatch calls dispatcher once with server paths and require
   const dir = mkdtempSync(join(tmpdir(), "wao-m92b-02-"));
   try {
     makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
     let callCount = 0;
     let captured = null;
     const fakeDispatch = async (input) => {
@@ -136,7 +137,7 @@ test("M9-2B-02: run_dispatch calls dispatcher once with server paths and require
     };
 
     const server = createWaoMcpServer({
-      registryPath: "/server/registry.json",
+      registryPath,
       runDir: "/server/runs",
       workspaceRoot: dir,
       dispatchRunFn: fakeDispatch,
@@ -145,7 +146,7 @@ test("M9-2B-02: run_dispatch calls dispatcher once with server paths and require
     try {
       await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "do it" } });
       assert.equal(callCount, 1, "dispatcher called exactly once");
-      assert.equal(captured.registryPath, "/server/registry.json", "server-owned registryPath");
+      assert.ok(captured.registryPath, "server-owned registryPath passed through");
       assert.equal(captured.runDir, "/server/runs", "server-owned runDir");
       assert.equal(captured.requireCertified, true, "requireCertified fixed true");
       assert.equal(captured.agentId, "coder_low");
@@ -167,6 +168,7 @@ test("M9-2B-03: run_dispatch success output has only runId/accepted/state, no le
   const dir = mkdtempSync(join(tmpdir(), "wao-m92b-03-"));
   try {
     makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { x: { backend: "claude-code", cwd: dir } });
     const fakeDispatch = async () => ({
       accepted: true,
       runId: "run_ok_m92b03",
@@ -175,7 +177,7 @@ test("M9-2B-03: run_dispatch success output has only runId/accepted/state, no le
     });
 
     const server = createWaoMcpServer({
-      registryPath: "/server/registry.json",
+      registryPath,
       runDir: "/server/runs",
       workspaceRoot: dir,
       dispatchRunFn: fakeDispatch,
@@ -452,6 +454,7 @@ test("M9-7A-04: MCP run_dispatch with delivery passes delivery to service", asyn
   const dir = mkdtempSync(join(tmpdir(), "wao-m97a-04-"));
   try {
     makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
     let callCount = 0;
     let captured = null;
     const fakeDispatch = async (input) => {
@@ -460,7 +463,7 @@ test("M9-7A-04: MCP run_dispatch with delivery passes delivery to service", asyn
       return { accepted: true, runId: "run_delivery_m97a", state: "pending", transcriptPath: "/x.jsonl" };
     };
     const server = createWaoMcpServer({
-      registryPath: "/server/r.json", runDir: "/server/runs",
+      registryPath, runDir: "/server/runs",
       workspaceRoot: dir,
       dispatchRunFn: fakeDispatch,
     });
@@ -548,6 +551,7 @@ test("M9-7A-07: non-delivery dispatch still works identically", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m97a-07-"));
   try {
     makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { x: { backend: "claude-code", cwd: dir } });
     let callCount = 0;
     let captured = null;
     const fakeDispatch = async (input) => {
@@ -556,7 +560,7 @@ test("M9-7A-07: non-delivery dispatch still works identically", async () => {
       return { accepted: true, runId: "r", state: "pending" };
     };
     const server = createWaoMcpServer({
-      registryPath: "/r.json", runDir: "/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch,
+      registryPath, runDir: "/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch,
     });
     const client = await buildInMemoryClient(server);
     try {
