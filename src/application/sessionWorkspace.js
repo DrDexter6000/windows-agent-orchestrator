@@ -35,8 +35,14 @@ import { proveWorkspace } from "./workspaceBinding.js";
  * @returns {{ root: string, gitHead: string, dirty: boolean, source: "lead_session" }}
  *   canonical root, full HEAD, dirty status, and the fixed source label.
  * @throws {Error} if workspaceRoot is missing, not absolute, not a real Git
- *   top-level, or any Git command fails. The error message is a fixed safe
- *   shape and does not echo the absolute path or role/project content.
+ *   top-level, or any Git command fails.
+ *
+ * Error-shape note: this application service may surface underlying
+ * exceptions from Git/realpath (e.g. a raw execFileSync error for a non-repo
+ * path). The FIXED SAFE error shape (never echoing the supplied path or role
+ * content) is guaranteed by the MCP `workspace_select` adapter, which collapses
+ * every thrown error to a single constant before it reaches the model. Do NOT
+ * assume every error from proveWorkspace here is already a fixed shape.
  */
 export function selectSessionWorkspace({ workspaceRoot } = {}) {
   if (typeof workspaceRoot !== "string" || workspaceRoot.length === 0) {

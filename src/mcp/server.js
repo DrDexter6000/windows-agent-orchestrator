@@ -810,12 +810,14 @@ export function createWaoMcpServer({
       if (!remoteCaps || !remoteCaps.roots) {
         throw new Error("client did not declare roots capability");
       }
-      // Bound the roots/list round-trip so a non-responding client cannot hang
-      // dispatch/workspace_status (defense-in-depth).
-      const result = await Promise.race([
-        mcp.server.listRoots(),
-        new Promise((_resolve, reject) => setTimeout(() => reject(new Error("roots/list timed out")), 5000)),
-      ]);
+      // Use the MCP SDK's native request timeout/cancellation (timeout +
+      // maxTotalTimeout). The SDK owns the timer and cleanup — no hand-rolled
+      // Promise.race + setTimeout that would leak a dangling timer or leave the
+      // underlying roots/list request hanging on timeout.
+      const result = await mcp.server.listRoots(undefined, {
+        timeout: 5000,
+        maxTotalTimeout: 5000,
+      });
       const roots = Array.isArray(result.roots) ? result.roots : [];
       if (roots.length === 1) {
         const root = roots[0];
@@ -839,7 +841,7 @@ export function createWaoMcpServer({
       // through to server_config rather than returning unbound, so a startup
       // --workspace-root still binds when the client advertises no/empty roots.
     } catch {
-      // Client does not support roots, or roots/list failed — fall through.
+      // Client does not support roots, or roots/list failed/timed out — fall through.
     }
 
     // Priority 3: explicit server config (startup --workspace-root, legacy default)
