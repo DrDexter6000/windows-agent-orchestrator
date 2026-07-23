@@ -887,7 +887,7 @@ src/
 ├── costForecast.js           # 横切：成本预演（M8-4，历史中位数±区间）
 ├── smoke.js                  # L4：真实 CLI smoke 入口（npm run smoke）
 ├── mcp/                      # L4：MCP adapter（M9-1，agent-facing primary）
-│   ├── server.js             #   MCP server factory + 15 tools（registry_list/workspace_status/workspace_select/run_dispatch/run_status/run_wait/run_collect/run_diagnose/run_delivery/run_delivery_review/run_delivery_decide/run_stop/runs_list/playbook_list/playbook_get）
+│   ├── server.js             #   MCP server factory + 16 tools（lead_preflight/registry_list/workspace_status/workspace_select/run_dispatch/run_status/run_wait/run_collect/run_diagnose/run_delivery/run_delivery_review/run_delivery_decide/run_stop/runs_list/playbook_list/playbook_get）
 │   └── stdio.js              #   stdio production entrypoint（StdioServerTransport，npm run mcp，--workspace-root）
 ├── application/              # L3：shared application services（M9 use-case 层）
 │   ├── registryInventory.js  #   registry inventory SSOT（M9-0，CLI + MCP 共用）
@@ -903,6 +903,7 @@ src/
 │   ├── ownerLiveness.js      #   run liveness 投影 SSOT（M10-pre3，terminal/progress/process_only/silent，runWait 共用）
 │   ├── workspaceBinding.js   #   host-authorized workspace proof SSOT（M10-pre2，MCP 共用）
 │   ├── sessionWorkspace.js   #   Lead session workspace selection kernel（M11-6，无状态，委托 proveWorkspace）
+│   ├── leadPreflight.js      #   advisory single-call preflight aggregator（M11-8A，组合 registryInventory+listRuns，advisory 非 gate）
 │   ├── mcpWorkspaceActivation.js # project-scoped workspace activation（M10 P0-1，CLI 用，委托 hostAdapters）
 │   ├── timeoutPolicy.js      #   wait timeout precedence SSOT（M10-pre，CLI + MCP 共用）
 │   ├── processStopVerify.js  #   bounded process exit verification（M10-pre）

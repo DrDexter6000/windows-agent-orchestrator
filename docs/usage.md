@@ -411,7 +411,7 @@ LLM 编排器（未来的 M5 DAG 或外部脚本）只需要：
 
 ### MCP stdio 接口（agent-facing primary，M9）
 
-WAO 是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude Desktop、Codex、OpenCode、其它 agent runtime）可通过 stdio 把 WAO 当作 MCP server 调用。MCP 暴露 15 个工具；常用 Lead 闭环为 inventory → workspace_status/select → dispatch → status/wait → collect/diagnose → delivery query/review → acceptance，另有 stop/list recovery 与可选 playbook catalog。每个 tool 直接调用共享 application service，不 shell-out CLI。当前工具清单权威表见 `SKILL.md` 与 `docs/02-architecture.md`。
+WAO 是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude Desktop、Codex、OpenCode、其它 agent runtime）可通过 stdio 把 WAO 当作 MCP server 调用。MCP 暴露 16 个工具；常用 Lead 闭环为 inventory → workspace_status/select → dispatch → status/wait → collect/diagnose → delivery query/review → acceptance，另有 stop/list recovery 与可选 playbook catalog。每个 tool 直接调用共享 application service，不 shell-out CLI。当前工具清单权威表见 `SKILL.md` 与 `docs/02-architecture.md`。
 
 **Host 注册说明**：`npm run mcp` 仅用于在 WAO repo 内手工 smoke；正式 host 注册应指向 Node shim 和 stdio entrypoint 的**绝对路径**，并为 registry 和 runDir 指定绝对路径——MCP host 的启动 cwd 不保证是 WAO repo。host 配置语法由 host 自己负责。注册后若当前会话未发现工具，重启或重载 host。Provider credential 必须由 host 通过其安全 env inheritance/allowlist 提供——不把 credential value 写入 repo、worker prompt 或 MCP args。WAO 不接管 host-global auth。
 
@@ -586,6 +586,36 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:true, openWorldHint:false`。
 
 典型 Lead 流程：`workspace_status`（未绑定）→ `workspace_select(<current Git root>)` → `workspace_status`（确认 `lead_session`）→ `run_dispatch`。
+
+### MCP `lead_preflight`（advisory 单调用启动检查，M11-8A）
+
+`lead_preflight` 让 Lead 一次调用完成 workspace 选择/确认 + worker credential 可用性 + active-run 查询，替代机械地依次调用 `workspace_select`/`workspace_status` + `registry_list` + `runs_list`。**ADVISORY ONLY，不是 gate**：每项检查独立结算（一项失败不吞其他），输出是事实供 Lead 判断，绝不自动中止——不产生 permit/token/approval 状态，`run_dispatch`/`workspace_select`/`registry_list`/`runs_list` 不依赖它曾成功。`complete` 仅表示机械事实是否可读取，不是"是否应派发"的裁定。
+
+`lead_preflight` tool：
+
+- **输入**（strict schema）：
+
+```json
+{ "workspaceRoot": "/abs/path/to/git/repo" }
+```
+
+`workspaceRoot` 可选；提供时复用 `workspace_select` 的 workspace authority SSOT（`lead_session`），失败不覆盖既有有效选择。省略时只检查当前 session selection。
+
+- **输出**（安全投影，不含绝对路径/credential value/prompt/command/PID/session）：
+
+```json
+{
+  "workspace": { "bound": true, "source": "lead_session", "gitHead": "abc...", "dirty": false },
+  "workers": [ { "id": "...", "backend": "...", "model": "...", "certification": "certified", "credentialAvailability": "available" } ],
+  "activeRuns": [ { "runId": "...", "agentId": "...", "state": "running", "terminal": false, "updatedAt": "..." } ],
+  "observations": ["..."], "warnings": ["..."],
+  "manualChecks": ["workspace_status — ...", "registry_list — ...", "runs_list — ..."],
+  "checkStatus": { "workspace": "observed", "workers": "observed", "activeRuns": "observed" },
+  "complete": true
+}
+```
+
+不返回 `PASS`/`FAIL`；check-level 状态为 `observed`/`warning`/`unknown`。`manualChecks` 指向原始 MCP 工具，允许 Lead 独立复核（与聚合结论不同时，Lead 可依据直接证据继续并记录 friction）。Active run、conditional worker、dirty workspace 只是事实，不自动禁止派发。
 
 ### 项目级 Workspace Activation（M10 P0-1，**可选** Human Owner ops 命令）
 

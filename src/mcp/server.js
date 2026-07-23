@@ -43,6 +43,7 @@ import { projectCollectResult } from "../application/runCollectProjection.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
 import { selectSessionWorkspace } from "../application/sessionWorkspace.js";
 import { readWindowsUserEnv } from "../application/credentialReadiness.js";
+import { aggregateLeadPreflight } from "../application/leadPreflight.js";
 import {
   listLeadPlaybooks,
   getLeadPlaybook,
@@ -464,6 +465,64 @@ const WORKSPACE_SELECT_DESCRIPTION =
   "uses it for subsequent run_dispatch. Session-scoped: affects only this MCP server, " +
   "writes no config, requires no host bind or restart. Idempotent — re-selecting the " +
   "same repo is a no-op. A failed select does not change the current selection.";
+
+// ===== lead_preflight (advisory single-call aggregator) constants =====
+// M11-8A: lets a Lead gather workspace binding + worker credential availability +
+// active runs in ONE call instead of workspace_select/status + registry_list +
+// runs_list. ADVISORY ONLY — not a gate. Each section settles independently; a
+// failure is a warning, never a hard stop. No PASS/FAIL verdict.
+
+const LEAD_PREFLIGHT_INPUT = z.object({
+  workspaceRoot: z.string().min(1).max(1024).optional(),
+}).strict();
+
+const LEAD_PREFLIGHT_OUTPUT = z.object({
+  workspace: z.object({
+    bound: z.boolean(),
+    source: z.enum(["lead_session", "server_config", "mcp_root"]).nullable(),
+    gitHead: z.string().regex(/^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/).nullable(),
+    dirty: z.boolean().nullable(),
+  }),
+  workers: z.array(z.object({
+    id: z.string(),
+    backend: z.string(),
+    model: z.string(),
+    certification: z.string().nullable(),
+    credentialAvailability: z.enum(["available", "missing", "not_required"]),
+  })),
+  activeRuns: z.array(z.object({
+    runId: z.string(),
+    agentId: z.string(),
+    state: z.string(),
+    terminal: z.boolean(),
+    updatedAt: z.string().nullable(),
+  })),
+  observations: z.array(z.string()),
+  warnings: z.array(z.string()),
+  manualChecks: z.array(z.string()),
+  checkStatus: z.object({
+    workspace: z.enum(["observed", "warning", "unknown"]),
+    workers: z.enum(["observed", "warning", "unknown"]),
+    activeRuns: z.enum(["observed", "warning", "unknown"]),
+  }),
+  complete: z.boolean(),
+});
+
+const LEAD_PREFLIGHT_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+const LEAD_PREFLIGHT_DESCRIPTION =
+  "Advisory single-call preflight: gather workspace binding, worker credential " +
+  "availability, and active runs in one result. Optional workspaceRoot selects the " +
+  "project (lead_session) using the same authority as workspace_select. ADVISORY ONLY — " +
+  "not a gate: warnings/observations are facts for the Lead to judge, never an auto-stop. " +
+  "Each section settles independently; use the original tools (workspace_status, " +
+  "registry_list, runs_list) to re-verify any section. No credential values, paths, " +
+  "prompts, commands, PIDs, or sessions are returned.";
 
 // ===== run_stop (workspace-bound destructive) constants =====
 
@@ -982,6 +1041,93 @@ export function createWaoMcpServer({
           content: [{ type: "text", text: WORKSPACE_SELECT_ERROR_TEXT }],
         };
       }
+    },
+  );
+
+  mcp.registerTool(
+    "lead_preflight",
+    {
+      description: LEAD_PREFLIGHT_DESCRIPTION,
+      inputSchema: LEAD_PREFLIGHT_INPUT,
+      outputSchema: LEAD_PREFLIGHT_OUTPUT,
+      annotations: LEAD_PREFLIGHT_ANNOTATIONS,
+    },
+    async ({ workspaceRoot }) => {
+      // M11-8A: advisory single-call preflight. Optional workspaceRoot selects
+      // the project via the SAME authority as workspace_select (setSessionWorkspace).
+      // A failed selection does NOT overwrite the prior valid session selection
+      // (setSessionWorkspace only stores on success) — and is reported as a
+      // warning, never a hard stop. Then aggregates workspace binding + worker
+      // inventory + active runs. Each section settles INDEPENDENTLY (a throw in
+      // runs_list does not swallow workspace/registry results).
+      let selectionFailed = false;
+      if (typeof workspaceRoot === "string" && workspaceRoot.length > 0) {
+        try {
+          setSessionWorkspace(workspaceRoot);
+        } catch {
+          // Selection failed — do NOT clear leadSelection. Report as warning;
+          // the rest of preflight still runs against the prior binding (if any).
+          selectionFailed = true;
+        }
+      }
+      // Resolve the (possibly just-selected) binding for the aggregate.
+      let workspaceBinding;
+      try {
+        workspaceBinding = await resolveWorkspaceBinding();
+      } catch {
+        workspaceBinding = { bound: false };
+      }
+      // Best-effort knownAgentIds for active-run filtering (never blocks).
+      let knownAgentIds = [];
+      try {
+        const agents = await service({ registryPath, runDir, userEnvReader: resolveUserEnv });
+        knownAgentIds = agents.map((a) => a.id);
+      } catch { /* best-effort */ }
+      let payload;
+      try {
+        payload = await aggregateLeadPreflight({
+          workspaceBinding,
+          registryPath,
+          runDir,
+          userEnvReader: resolveUserEnv,
+          listRunsFn: workspaceBinding.bound
+            ? (args) => listRunsService({ ...args, knownAgentIds })
+            : undefined,
+        });
+        if (selectionFailed) {
+          payload.warnings = [
+            ...(payload.warnings ?? []),
+            "workspace selection failed — prior session selection (if any) is unchanged; use workspace_select to retry",
+          ];
+        }
+        // Validate the projected shape (drops any internal-only fields).
+        LEAD_PREFLIGHT_OUTPUT.parse(payload);
+      } catch {
+        // Even aggregate failure must NOT block independent tools. Return a
+        // minimal advisory so the Lead knows to use the original tools.
+        const fallback = {
+          workspace: { bound: false, source: null, gitHead: null, dirty: null },
+          workers: [],
+          activeRuns: [],
+          observations: [],
+          warnings: ["lead_preflight could not aggregate — use workspace_status, registry_list, and runs_list directly"],
+          manualChecks: [
+            "workspace_status — verify binding independently",
+            "registry_list — verify worker certification + credential availability",
+            "runs_list — verify active runs independently",
+          ],
+          checkStatus: { workspace: "unknown", workers: "unknown", activeRuns: "unknown" },
+          complete: false,
+        };
+        return {
+          content: [{ type: "text", text: JSON.stringify(fallback) }],
+          structuredContent: fallback,
+        };
+      }
+      return {
+        content: [{ type: "text", text: JSON.stringify(payload) }],
+        structuredContent: payload,
+      };
     },
   );
 

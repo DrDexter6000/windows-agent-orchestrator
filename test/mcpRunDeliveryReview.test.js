@@ -55,7 +55,7 @@ function makeGitDir(prefix) {
 // Group 1: tool discovery + count + annotations
 // =====================================================================
 
-test("M11-3C-01: run_delivery_review is registered; total tools = 15; read-only annotations", async () => {
+test("M11-3C-01: run_delivery_review is registered; total tools = 16; read-only annotations", async () => {
   const dir = mkdtempSync(join(tmpdir(), "m113c-01-"));
   try {
     const rp = join(dir, "agents.json");
@@ -65,7 +65,7 @@ test("M11-3C-01: run_delivery_review is registered; total tools = 15; read-only 
     try {
       const { tools } = await client.listTools();
       assert.ok(tools.find((t) => t.name === "run_delivery_review"), "run_delivery_review present");
-      assert.equal(tools.length, 15, "exactly 15 tools (M11-6 added workspace_select)");
+      assert.equal(tools.length, 16, "exactly 16 tools (M11-8A added lead_preflight)");
       const t = tools.find((x) => x.name === "run_delivery_review");
       assert.equal(t.annotations.readOnlyHint, true);
       assert.equal(t.annotations.destructiveHint, false);

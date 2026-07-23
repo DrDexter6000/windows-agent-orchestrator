@@ -14,7 +14,7 @@ WAO is an MCP-first, Skill-guided, CLI-backed deterministic control plane for re
 A WAO worker and a host-native subagent are different execution channels. Loading this Skill, or borrowing WAO discipline, is not the same as dispatching through WAO.
 
 1. When the user explicitly asks to "use WAO", "use a WAO worker", or "dispatch an external worker", a host-native subagent is **not** an equivalent substitute. Do not silently route to native subagents instead.
-2. The WAO preflight binds to the **WAO route**: once the user specifies, or the Lead explicitly chooses, the WAO route, run one bounded preflight before calling `run_dispatch` to start a WAO worker. Preflight is: `registry_list` → `workspace_status` → if unbound or the bound root is not the current Git project, the Lead calls `workspace_select(<current Git worktree top-level>)` → `workspace_status` confirms → `run_dispatch`. A native-subagent route does not require a WAO preflight, but must not impersonate a WAO worker.
+2. The WAO preflight binds to the **WAO route**: once the user specifies, or the Lead explicitly chooses, the WAO route, the normal start path is a single `lead_preflight({ workspaceRoot?: <current Git top-level> })` call — it selects the workspace (if provided), confirms binding, and reports worker credential availability + active runs in one result. `lead_preflight` is **advisory only** — its warnings/observations are facts to judge, never an auto-stop; do not abort work solely because it reports a warning/partial/unknown. Then `run_dispatch`. The original tools (`workspace_select`, `workspace_status`, `registry_list`, `runs_list`) remain for diagnosis, recovery, and fine-grained queries. A native-subagent route does not require a WAO preflight, but must not impersonate a WAO worker.
 3. If a higher-priority host rule conflicts with the user-requested WAO route, state the conflict explicitly **before** dispatching. Do not silently fall back to a native subagent.
 4. The minimum fact standard for "dispatched through WAO": only a successful `run_dispatch` that returns a `runId` counts. Loading this Skill or borrowing WAO discipline does not count as "used WAO" for a dispatch task.
 5. Native subagents may do clearly Lead-side local assistance, but must not impersonate a WAO worker and produce no WAO transcript/delivery.
@@ -78,10 +78,11 @@ After `stop`, trust the terminal result and transcript evidence, including stop 
 See `references/safety-incidents.md` before unattended or stop-sensitive work. Read `references/opencode-pitfalls.md` only when using opencode.
 ## Minimal MCP Loop
 
-WAO exposes 15 MCP tools. The minimal control loop uses the relevant control tools below; `playbook_list`/`playbook_get` are optional read-only catalog reads that sit **outside** the dispatch loop and are never required before `run_dispatch`.
+WAO exposes 16 MCP tools. The minimal control loop uses the relevant control tools below; `playbook_list`/`playbook_get` are optional read-only catalog reads that sit **outside** the dispatch loop and are never required before `run_dispatch`.
 
 | Tool | Side effect | Purpose |
 |---|---|---|
+| `lead_preflight` | advisory (session-scoped if workspaceRoot) | One-call aggregate: workspace binding + worker credential availability + active runs. ADVISORY ONLY — not a gate; warnings are facts to judge, never an auto-stop. Use original tools to re-verify any section |
 | `registry_list` | read-only | Inventory + certification status |
 | `workspace_status` | read-only | Query current workspace binding (source, workspaceRoot, gitHead, dirty) |
 | `workspace_select` | session-scoped | Lead selects the working Git project for this session (`lead_session`); idempotent, no host bind/restart, no file writes |
@@ -98,8 +99,7 @@ WAO exposes 15 MCP tools. The minimal control loop uses the relevant control too
 | `playbook_list` | read-only | List built-in Lead playbooks as compact summaries (optional, M11-2) |
 | `playbook_get` | read-only | Get one complete built-in Lead playbook by id (optional, M11-2) |
 
-Minimal closed loop: `inventory → workspace_status → dispatch → status/wait → collect/diagnose → delivery query/review → Lead decision → (stop on runaway)`; recovery: `runs_list` (list runs in the bound workspace after `workspace_status`). `playbook_list`/`playbook_get` are optional read-only catalog reads — they sit outside the dispatch loop and are never required before `run_dispatch`.
-
+Minimal closed loop: `lead_preflight (or inventory → workspace_status) → dispatch → status/wait → collect/diagnose → delivery query/review → Lead decision → (stop on runaway)`; recovery: `runs_list` (list runs in the bound workspace after `workspace_status`). `playbook_list`/`playbook_get` are optional read-only catalog reads — they sit outside the dispatch loop and are never required before `run_dispatch`.
 The Lead uses `run_wait` as the primary supervision primitive: it blocks up to `waitMs` (default 180s) and returns as soon as the run reaches a terminal state or produces a liveness summary (`terminal`/`progress`/`process_only`/`silent`), avoiding busy poll loops. The execution deadline on worker runs is now disabled by default — supervision is observation-driven via `run_wait`, not wall-clock termination.
 See `docs/usage.md §MCP stdio` for host setup, full input/output schemas, and install instructions. OpenCode (`opencode-ai`) as Lead host: see `docs/usage.md §OpenCode 项目级配置` for the project-local `opencode.json` schema (array `command`, `enabled:true`, `--workspace-root`) and the new-process restart boundary.
 
