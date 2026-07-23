@@ -74,7 +74,7 @@ async function buildInMemoryClient(server, clientCapabilities = {}) {
 
 // ===== 4. workspace_status returns accurate source/head/dirty, zero path leak =====
 
-test("WSB-04: workspace_status returns bound=true, source, gitHead, dirty; no path leak", async () => {
+test("WSB-04: workspace_status returns bound=true, source, gitHead, dirty, workspaceRoot", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-wsb-04-"));
   try {
     const head = makeGitRepo(dir);
@@ -92,10 +92,10 @@ test("WSB-04: workspace_status returns bound=true, source, gitHead, dirty; no pa
       assert.equal(parsed.source, "server_config");
       assert.equal(parsed.gitHead, head);
       assert.equal(parsed.dirty, false);
-      // No absolute path leak
-      const dumped = JSON.stringify(res);
-      assert.ok(!dumped.includes(dir.replace(/\\/g, "/")), "no workspace path leak");
-      assert.ok(!dumped.includes(dir), "no workspace path leak (backslash)");
+      // M11-6: workspaceRoot is now returned (the Lead/host explicitly submitted
+      // the path; it is not a credential to hide). It must be the canonical root.
+      assert.equal(parsed.workspaceRoot.replace(/\\/g, "/"), dir.replace(/\\/g, "/"),
+        "workspaceRoot is the canonical Git root");
     } finally {
       await client.close();
       await server.close();

@@ -411,7 +411,7 @@ LLM 编排器（未来的 M5 DAG 或外部脚本）只需要：
 
 ### MCP stdio 接口（agent-facing primary，M9）
 
-WAO 是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude Desktop、Codex、OpenCode、其它 agent runtime）可通过 stdio 把 WAO 当作 MCP server 调用。MCP 暴露 14 个工具；常用 Lead 闭环为 inventory → dispatch → status/wait → collect/diagnose → delivery query/review → acceptance，另有 stop/list recovery 与可选 playbook catalog。每个 tool 直接调用共享 application service，不 shell-out CLI。当前工具清单权威表见 `SKILL.md` 与 `docs/02-architecture.md`。
+WAO 是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude Desktop、Codex、OpenCode、其它 agent runtime）可通过 stdio 把 WAO 当作 MCP server 调用。MCP 暴露 15 个工具；常用 Lead 闭环为 inventory → workspace_status/select → dispatch → status/wait → collect/diagnose → delivery query/review → acceptance，另有 stop/list recovery 与可选 playbook catalog。每个 tool 直接调用共享 application service，不 shell-out CLI。当前工具清单权威表见 `SKILL.md` 与 `docs/02-architecture.md`。
 
 **Host 注册说明**：`npm run mcp` 仅用于在 WAO repo 内手工 smoke；正式 host 注册应指向 Node shim 和 stdio entrypoint 的**绝对路径**，并为 registry 和 runDir 指定绝对路径——MCP host 的启动 cwd 不保证是 WAO repo。host 配置语法由 host 自己负责。注册后若当前会话未发现工具，重启或重载 host。Provider credential 必须由 host 通过其安全 env inheritance/allowlist 提供——不把 credential value 写入 repo、worker prompt 或 MCP args。WAO 不接管 host-global auth。
 
@@ -522,7 +522,7 @@ M9-7A 起支持可选 `delivery` 块，用于派发后续可由 `run_delivery`/`
 
 `delivery` 可选。`verificationCommands` 与 `verificationUnavailableReason` 二选一（互斥）。WAO 强制 persistent worktree isolation——模型不能传 `isolate`。模型**不能**传 `registryPath`、`runDir`、`runId`、`cwd`、`workspaceRoot`、`requireCertified`、timeout 或 `isolate`——这些是 server-owned 配置。MCP 固定以 `requireCertified: true` 调 shared service。
 
-**Workspace binding（M10-pre2）**：`run_dispatch` 在调用 shared service 前**重新解析并证明** host-authorized workspace（优先级：显式 `--workspace-root` > MCP client roots/list 恰好一个合法 `file://` root > 否则 fail-closed）。证明后的 canonical Git root 作为 server-owned `cwd` 传给 dispatcher——模型不能通过任何 tool argument 提供路径。workspace 未绑定时 dispatcher 不会被调用（零 transcript、零 fork），返回固定安全文案。
+**Workspace binding（M10-pre2 + M11-6）**：`run_dispatch` 在调用 shared service 前**重新解析并证明** workspace（优先级：Lead 会话选择 `workspace_select`（`lead_session`）> MCP client roots/list 恰好一个合法 `file://` root（`mcp_root`）> 显式 `--workspace-root`（`server_config`）> 否则 fail-closed）。证明后的 canonical Git root 作为 `cwd` 传给 dispatcher。workspace 未绑定时 dispatcher 不会被调用（零 transcript、零 fork），返回固定安全文案。**M11-6**：Lead 可在当前会话用 `workspace_select` 选择 Git 项目（最高优先级），无需 Human Owner bind、无需项目配置、无需重启——失败选择不影响既有会话状态，也不写任何持久配置。
 
 - **输出**（成功或拒绝同形，MCP `content` + `structuredContent`）：
 
@@ -536,9 +536,9 @@ M9-7A 起支持可选 `delivery` 块，用于派发后续可由 `run_delivery`/`
 
 annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:false, openWorldHint:true`（派发真实 worker，可执行命令、修改文件、访问外部系统）。
 
-### MCP `workspace_status`（workspace binding 状态查询，M10-pre2）
+### MCP `workspace_status`（workspace binding 状态查询，M10-pre2 + M11-6）
 
-`workspace_status` 让 MCP host 查询当前 host-authorized workspace 绑定状态。只读、幂等——不修改任何持久状态。`run_dispatch` 在执行前**自行重新证明** workspace，不信任此工具的先前结果。
+`workspace_status` 查询当前 workspace 绑定状态。只读、幂等——不修改任何持久状态。`run_dispatch` 在执行前**自行重新证明** workspace，不信任此工具的先前结果。
 
 `workspace_status` tool：
 
@@ -551,18 +551,46 @@ annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:false, o
 - **输出**：
 
 ```json
-{ "bound": true, "source": "server_config", "gitHead": "abc123...", "dirty": false }
+{ "bound": true, "source": "lead_session", "workspaceRoot": "/abs/canonical/git/root", "gitHead": "abc123...", "dirty": false }
 ```
 
-`source` 为 `"server_config"`（显式 `--workspace-root`）或 `"mcp_root"`（client roots/list）。`bound=false` 时其余字段为 `null`。不返回绝对路径、root URI、git remote、文件名、status 明细或异常 message。失败返回固定安全文案 `workspace_status failed`。
+`source` 为 `"lead_session"`（Lead 会话选择）、`"mcp_root"`（client roots/list）或 `"server_config"`（显式 `--workspace-root`）。`workspaceRoot` 是当前绑定的 canonical Git 顶层绝对路径（Lead/host 已显式提交，非 credential，故返回）；`bound=false` 时 `source`/`workspaceRoot`/`gitHead`/`dirty` 均为 `null`。失败返回固定安全文案 `workspace_status failed`。
 
-annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true`。
+annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`。
 
-### 项目级 Workspace Activation（M10 P0-1，Human Owner ops 命令）
+### MCP `workspace_select`（Lead 会话级工作区选择，M11-6）
 
-MCP workspace binding 有三种来源（优先级：显式 `--workspace-root` > MCP roots/list > fail-closed）。`--workspace-root` 是全局静态启动参数——切换项目需要改 host 配置并重启。
+`workspace_select` 让 Lead 在当前 MCP 会话中选择工作 Git 项目（`lead_session` 来源，最高优先级）。**会话级**：只作用于当前 `createWaoMcpServer` 实例，两个 server 实例状态严格隔离；不写磁盘、不写 `.codex/config.toml`、不写 transcript、不创建 run/worktree/process，无需 host bind 或重启。验证委托 `proveWorkspace` SSOT——只接受 canonical Git 顶层（拒绝 relative/nonexistent/non-Git/subdirectory）。**失败选择不影响既有有效选择**（只在成功时更新）。幂等：重复选同一 repo 是 no-op。
 
-`mcp bind/status/unbind` 命令让 Human Owner 在目标项目中执行**一次**项目级激活，生成一个 `.codex/config.toml` 中的 WAO managed block（含 `--workspace-root` 绑定到项目 canonical Git root）。之后每次在项目中冷启动 Lead 会话即可获得正确的 workspace authority，无需手改全局配置。
+`workspace_select` tool：
+
+- **输入**（strict schema）：
+
+```json
+{ "workspaceRoot": "/abs/path/to/git/repo" }
+```
+
+`workspaceRoot` 必须为非空绝对路径（≤1024 字符）。
+
+- **输出**：
+
+```json
+{ "bound": true, "source": "lead_session", "workspaceRoot": "/abs/canonical/git/root", "gitHead": "abc123...", "dirty": false }
+```
+
+失败返回固定安全文案 `workspace_select failed: workspaceRoot must be a canonical Git top-level directory`（不回显传入路径、stderr 或异常 message）。
+
+annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:true, openWorldHint:false`。
+
+典型 Lead 流程：`workspace_status`（未绑定）→ `workspace_select(<current Git root>)` → `workspace_status`（确认 `lead_session`）→ `run_dispatch`。
+
+### 项目级 Workspace Activation（M10 P0-1，**可选** Human Owner ops 命令）
+
+> **M11-6 起，正常使用不要求先 bind。** Lead 可在当前会话用 `workspace_select` 选择 Git 项目（见上文 §`workspace_select`），无需 Human Owner bind、无需项目配置、无需重启。`mcp bind` 只是**可选的持久项目级默认**——为希望冷启动即自动绑定某项目的场景提供便利。
+
+MCP workspace binding 来源优先级：`lead_session`（`workspace_select`）> `mcp_root`（client roots/list）> `server_config`（显式 `--workspace-root`）> fail-closed。`--workspace-root` 是全局静态启动参数。
+
+`mcp bind/status/unbind` 命令让 Human Owner 在目标项目中执行**一次**（可选）项目级激活，生成一个 `.codex/config.toml` 中的 WAO managed block（含 `--workspace-root` 绑定到项目 canonical Git root）。这提供一个持久项目级默认——但不是正常使用的前置条件。
 
 **前置条件**：项目必须是 Codex trusted project（在 Codex Desktop 打开一次即建立 trust）。详见 Codex 官方文档 `.codex/config.toml (trusted projects only)`。
 

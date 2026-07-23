@@ -41,6 +41,7 @@ import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
 import { projectReviewResult } from "../application/deliveryReviewProjection.js";
 import { projectCollectResult } from "../application/runCollectProjection.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
+import { selectSessionWorkspace } from "../application/sessionWorkspace.js";
 import {
   listLeadPlaybooks,
   getLeadPlaybook,
@@ -391,13 +392,14 @@ const RUN_DELIVERY_DECIDE_DESCRIPTION =
 // ===== workspace_status (read-only binding proof) constants =====
 
 const WORKSPACE_ERROR_TEXT = "workspace_status failed";
-const WORKSPACE_NOT_BOUND_TEXT = "workspace not bound: configure --workspace-root or provide exactly one MCP root";
+const WORKSPACE_NOT_BOUND_TEXT = "workspace not bound: call workspace_select with a Git worktree top-level, configure --workspace-root, or provide exactly one MCP root";
 
 const WORKSPACE_STATUS_INPUT = z.object({}).strict();
 
 const WORKSPACE_STATUS_OUTPUT = z.object({
   bound: z.boolean(),
-  source: z.enum(["server_config", "mcp_root"]).nullable(),
+  source: z.enum(["lead_session", "server_config", "mcp_root"]).nullable(),
+  workspaceRoot: z.string().nullable(),
   gitHead: z.string().regex(/^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/).nullable(),
   dirty: z.boolean().nullable(),
 });
@@ -410,10 +412,44 @@ const WORKSPACE_STATUS_ANNOTATIONS = {
 };
 
 const WORKSPACE_STATUS_DESCRIPTION =
-  "Query the host-authorized workspace binding status: whether a workspace is bound, " +
-  "its source (server_config or mcp_root), the Git HEAD commit, and dirty status. " +
-  "Read-only. Does not return absolute paths, root URIs, git remotes, file names, " +
-  "status details, or exception messages.";
+  "Query the current workspace binding: whether a workspace is bound, its source " +
+  "(lead_session, server_config, or mcp_root), the canonical Git workspaceRoot, the " +
+  "Git HEAD commit, and dirty status. Read-only. Use workspace_select to choose a " +
+  "Git project in-session (lead_session) without host bind or restart.";
+
+// ===== workspace_select (Lead session-level workspace selection) constants =====
+// M11-6: lets a Lead choose the working Git project in the current MCP session.
+// Validates via proveWorkspace (canonical Git top-level only). Session-scoped:
+// per createWaoMcpServer instance, not global, not persisted. A failed select
+// leaves the prior valid selection intact.
+
+const WORKSPACE_SELECT_INPUT = z.object({
+  workspaceRoot: z.string().min(1).max(1024),
+}).strict();
+
+const WORKSPACE_SELECT_OUTPUT = z.object({
+  bound: z.literal(true),
+  source: z.literal("lead_session"),
+  workspaceRoot: z.string().min(1),
+  gitHead: z.string().regex(/^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/),
+  dirty: z.boolean(),
+});
+
+const WORKSPACE_SELECT_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+const WORKSPACE_SELECT_ERROR_TEXT = "workspace_select failed: workspaceRoot must be a canonical Git top-level directory";
+
+const WORKSPACE_SELECT_DESCRIPTION =
+  "Select the working Git project for this session (lead_session source). The Lead " +
+  "passes an absolute path to a Git worktree top-level; WAO proves it is canonical and " +
+  "uses it for subsequent run_dispatch. Session-scoped: affects only this MCP server, " +
+  "writes no config, requires no host bind or restart. Idempotent — re-selecting the " +
+  "same repo is a no-op. A failed select does not change the current selection.";
 
 // ===== run_stop (workspace-bound destructive) constants =====
 
@@ -727,15 +763,86 @@ export function createWaoMcpServer({
 
   /**
    * Resolve the workspace binding using the authority precedence:
-   *   1. Explicit workspaceRoot (server startup --workspace-root)
+   *   1. Lead session selection (workspace_select) — highest authority; the
+   *      Lead is the Owner's trusted coordinator and may choose the project.
    *   2. MCP client roots/list — exactly one valid file:// root
-   *   3. Otherwise: not bound (fail closed)
+   *   3. Explicit workspaceRoot (server startup --workspace-root, legacy default)
+   *   4. Otherwise: not bound (fail closed)
+   *
+   * Every resolution re-proves via proveWorkspace (no cached identity). A failed
+   * session selection does NOT clear leadSelection — the prior valid selection
+   * survives (setSessionWorkspace only stores on success).
    *
    * Returns { bound, source, root, gitHead, dirty } or { bound: false }.
-   * Never returns paths/URIs — callers use .root internally only.
    */
+  // M11-6: per-server session selection state. Lives in this closure (not a
+  // global), so two createWaoMcpServer instances are strictly isolated. Only
+  // setSessionWorkspace mutates it, and only with a proven canonical root.
+  let leadSelection = null;
+
+  function setSessionWorkspace(workspaceRoot) {
+    // selectSessionWorkspace delegates to proveWorkspace (re-proves, no cache).
+    // Throws on any failure; leadSelection is only updated on success, so a
+    // failed select leaves the prior valid selection intact.
+    const proof = selectSessionWorkspace({ workspaceRoot });
+    leadSelection = proof;
+    return proof;
+  }
+
   async function resolveWorkspaceBinding() {
-    // Priority 1: explicit server config
+    // Priority 1: Lead session selection (re-prove to avoid cached identity)
+    if (leadSelection) {
+      try {
+        const proof = proveWorkspace(leadSelection.root);
+        return { bound: true, source: "lead_session", ...proof };
+      } catch {
+        return { bound: false };
+      }
+    }
+
+    // Priority 2: MCP client roots
+    try {
+      // Guard: only query roots if the client declared a roots capability at
+      // initialize. A raw JSON-RPC client (or one without roots support) never
+      // responds to roots/list, which would hang indefinitely — so we skip the
+      // round-trip entirely when the capability is absent and fall through.
+      const remoteCaps = mcp.server?.getClientCapabilities?.() ?? {};
+      if (!remoteCaps || !remoteCaps.roots) {
+        throw new Error("client did not declare roots capability");
+      }
+      // Bound the roots/list round-trip so a non-responding client cannot hang
+      // dispatch/workspace_status (defense-in-depth).
+      const result = await Promise.race([
+        mcp.server.listRoots(),
+        new Promise((_resolve, reject) => setTimeout(() => reject(new Error("roots/list timed out")), 5000)),
+      ]);
+      const roots = Array.isArray(result.roots) ? result.roots : [];
+      if (roots.length === 1) {
+        const root = roots[0];
+        const uri = root?.uri;
+        if (typeof uri === "string" && uri.startsWith("file:///")) {
+          // Convert file:// URI to filesystem path
+          const { fileURLToPath } = await import("node:url");
+          let pathStr;
+          try {
+            pathStr = fileURLToPath(uri);
+          } catch {
+            pathStr = null;
+          }
+          if (pathStr) {
+            const proof = proveWorkspace(pathStr);
+            return { bound: true, source: "mcp_root", ...proof };
+          }
+        }
+      }
+      // 0 roots, >1 roots (multi-workspace deferred), or invalid root: fall
+      // through to server_config rather than returning unbound, so a startup
+      // --workspace-root still binds when the client advertises no/empty roots.
+    } catch {
+      // Client does not support roots, or roots/list failed — fall through.
+    }
+
+    // Priority 3: explicit server config (startup --workspace-root, legacy default)
     if (workspaceRoot) {
       try {
         const proof = proveWorkspace(workspaceRoot);
@@ -745,33 +852,7 @@ export function createWaoMcpServer({
       }
     }
 
-    // Priority 2: MCP client roots
-    try {
-      const result = await mcp.server.listRoots();
-      const roots = Array.isArray(result.roots) ? result.roots : [];
-      if (roots.length === 0) return { bound: false };
-      // Fail closed on multiple roots — multi-workspace is a future capability.
-      if (roots.length > 1) return { bound: false };
-
-      const root = roots[0];
-      const uri = root?.uri;
-      if (typeof uri !== "string" || !uri.startsWith("file:///")) return { bound: false };
-
-      // Convert file:// URI to filesystem path
-      const { fileURLToPath } = await import("node:url");
-      let pathStr;
-      try {
-        pathStr = fileURLToPath(uri);
-      } catch {
-        return { bound: false };
-      }
-
-      const proof = proveWorkspace(pathStr);
-      return { bound: true, source: "mcp_root", ...proof };
-    } catch {
-      // Client does not support roots, or roots/list failed — not bound.
-      return { bound: false };
-    }
+    return { bound: false };
   }
 
   mcp.registerTool(
@@ -814,7 +895,7 @@ export function createWaoMcpServer({
       try {
         const binding = await resolveWorkspaceBinding();
         if (!binding.bound) {
-          const payload = { bound: false, source: null, gitHead: null, dirty: null };
+          const payload = { bound: false, source: null, workspaceRoot: null, gitHead: null, dirty: null };
           return {
             content: [{ type: "text", text: JSON.stringify(payload) }],
             structuredContent: payload,
@@ -823,6 +904,10 @@ export function createWaoMcpServer({
         const payload = {
           bound: true,
           source: binding.source,
+          // M11-6: workspaceRoot is the Lead-/host-chosen canonical Git root.
+          // It is not a credential — the Lead explicitly submitted it via
+          // workspace_select, or the host supplied it via --workspace-root/MCP root.
+          workspaceRoot: binding.root,
           gitHead: binding.gitHead,
           dirty: binding.dirty,
         };
@@ -835,6 +920,44 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: WORKSPACE_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "workspace_select",
+    {
+      description: WORKSPACE_SELECT_DESCRIPTION,
+      inputSchema: WORKSPACE_SELECT_INPUT,
+      outputSchema: WORKSPACE_SELECT_OUTPUT,
+      annotations: WORKSPACE_SELECT_ANNOTATIONS,
+    },
+    async ({ workspaceRoot }) => {
+      // M11-6: Lead session-level workspace selection. Validates the chosen
+      // path via proveWorkspace (canonical Git top-level only). setSessionWorkspace
+      // only stores the selection on SUCCESS — a failed select leaves the prior
+      // valid selection intact (no mutation on failure).
+      try {
+        const proof = setSessionWorkspace(workspaceRoot);
+        const payload = {
+          bound: true,
+          source: proof.source,
+          workspaceRoot: proof.root,
+          gitHead: proof.gitHead,
+          dirty: proof.dirty,
+        };
+        WORKSPACE_SELECT_OUTPUT.parse(payload);
+        return {
+          content: [{ type: "text", text: JSON.stringify(payload) }],
+          structuredContent: payload,
+        };
+      } catch {
+        // Fixed safe text — never concatenate err.message, the absolute path,
+        // stderr, or role/project content.
+        return {
+          isError: true,
+          content: [{ type: "text", text: WORKSPACE_SELECT_ERROR_TEXT }],
         };
       }
     },
