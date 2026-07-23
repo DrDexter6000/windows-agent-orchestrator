@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { ProcessBackend } from "./processBackend.js";
 import { ClaudeStreamParser } from "./parsers/claudeCode.js";
 import { resolveProviderArgs } from "./claudeCodeProvider.js";
+import { inheritedEnvNames } from "../envPolicy.js";
 
 // claude-code-provider-wrapper.mjs 的绝对路径（本文件同目录的 ../../scripts/wrappers/）。
 const WRAPPER_PATH = resolve(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts", "wrappers", "claude-code-provider-wrapper.mjs"));
@@ -53,13 +54,10 @@ export class ClaudeCodeBackend extends ProcessBackend {
         args.push(...(Array.isArray(agent.args) ? agent.args : []));
         return args;
       },
-      credentialEnvNames: (agent) => {
-        const configured = agent.provider?.apiKeyEnv;
-        if (configured) return [configured];
-        const args = Array.isArray(agent.prependArgs) ? agent.prependArgs : [];
-        const index = args.indexOf("--api-key-env");
-        return index >= 0 && args[index + 1] ? [args[index + 1]] : [];
-      },
+      // M11-7: delegate to the runtime-neutral env-policy SSOT (no mirrored
+      // algorithm). inheritedEnvNames returns the declared credential name(s)
+      // for claude-code (provider.apiKeyEnv / legacy --api-key-env).
+      credentialEnvNames: (agent) => inheritedEnvNames(agent),
       ...opts,
     });
   }

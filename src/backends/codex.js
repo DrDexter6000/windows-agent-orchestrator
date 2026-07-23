@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { ProcessBackend } from "./processBackend.js";
 import { CodexStreamParser } from "./parsers/codex.js";
+import { inheritedEnvNames } from "../envPolicy.js";
 
 /**
  * Codex backend（M2-6）。
@@ -44,7 +45,8 @@ export class CodexBackend extends ProcessBackend {
         args.push(task.prompt);
         return args;
       },
-      credentialEnvNames: () => ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"],
+      // M11-7: delegate to the runtime-neutral env-policy SSOT.
+      credentialEnvNames: (agent) => inheritedEnvNames(agent),
       ...opts,
     });
   }

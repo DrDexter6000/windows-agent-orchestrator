@@ -22,6 +22,19 @@ import { fileURLToPath } from "node:url";
 import { JsonlTranscript } from "../transcript.js";
 import { isValidRunId, prepareDeliveryRequest } from "../delivery.js";
 import { resolveWaitTimeout, validateBoundedWaitTimeout } from "./timeoutPolicy.js";
+import { readRegistry } from "../registry.js";
+import { assessWorkerReadiness } from "./credentialReadiness.js";
+
+// M11-7: thrown when a worker's REQUIRED credential is missing at dispatch time.
+// Carries the missing env NAMES (never values). Callers (MCP) collapse to a
+// fixed actionable text.
+export class CredentialMissingError extends Error {
+  constructor(missingNames) {
+    super(`credential missing: ${missingNames.join(", ")}`);
+    this.name = "CredentialMissingError";
+    this.missingCredentialEnvNames = missingNames;
+  }
+}
 
 // Default path to the detached runner. Resolved relative to this module so the
 // service stays independent of the caller's cwd (CLI vs MCP vs test).
@@ -83,6 +96,10 @@ export async function dispatchRun({
   execPath,
   delivery,
   resolvedCredentials,
+  userEnvReader,
+  // M11-7: skip the credential preflight (e.g. when the caller already did it
+  // and is passing resolvedCredentials). Default false = always check.
+  skipCredentialCheck = false,
 }) {
   if (!agentId || typeof agentId !== "string") {
     throw new Error("dispatchRun: agentId is required");
@@ -140,6 +157,28 @@ export async function dispatchRun({
 
   const resolvedRunDir = resolve(runDir);
   const resolvedRegistry = resolve(registryPath);
+
+  // M11-7: credential preflight BEFORE any transcript write or fork. Reads the
+  // registry to resolve the agent, then assesses whether its REQUIRED declared
+  // credentials are available (process.env → Windows user env). A missing
+  // REQUIRED credential throws CredentialMissingError (zero transcript, zero
+  // fork). The resolved VALUES are threaded into the runner env so the worker
+  // child inherits them (and the redactor scrubs them). Same SSOT as
+  // registry_list and RunManager.start/resume — they never disagree.
+  let finalCredentials = resolvedCredentials ?? {};
+  if (!skipCredentialCheck) {
+    const registry = await readRegistry(resolvedRegistry);
+    const agent = registry.getAgent(agentId);
+    const readiness = await assessWorkerReadiness({ agent, userEnvReader });
+    if (readiness.credentialAvailability === "missing") {
+      throw new CredentialMissingError(readiness.missingCredentialEnvNames);
+    }
+    // Merge any newly-resolved values (e.g. from user env). Drop unresolved names.
+    finalCredentials = Object.fromEntries(
+      Object.entries({ ...finalCredentials, ...readiness.resolvedEnv })
+        .filter(([, v]) => typeof v === "string" && v.length > 0),
+    );
+  }
 
   // Construct runner argv BEFORE any transcript write. All static preflight
   // (argv length guard, delivery validation) must happen before a single
@@ -219,7 +258,7 @@ export async function dispatchRun({
   // M11-7: thread resolved credential VALUES into the runner's env (NOT argv —
   // values must never appear in argv). The runner's ProcessBackend then inherits
   // them via process.env (buildChildEnv) and redacts them (createSecretRedactor).
-  const runnerEnv = { ...process.env, ...(resolvedCredentials ?? {}) };
+  const runnerEnv = { ...process.env, ...finalCredentials };
   _spawn(_execPath, runnerArgs, { detached: true, stdio: "ignore", env: runnerEnv }).unref();
 
   return {

@@ -486,14 +486,14 @@ OpenCode（`opencode-ai` npm 包，不是已废弃的 `opencode`）作为 MCP Le
   "agents": [
     { "id": "coder_low", "backend": "claude-code", "model": "glm-5-turbo",
       "certification": "certified", "cwd": "/repo",
-      "runtimeAvailability": "ready", "missingCredentialEnvNames": [] }
+      "credentialAvailability": "available", "missingCredentialEnvNames": [] }
   ]
 }
 ```
 
 字段语义与 CLI `registry list --format json` 的数组元素一致（MCP 仅多一层 `agents` 包装）。`registry_list` 是只读操作，调用前后 runDir 不会有新增 transcript/run 文件。
 
-**M11-7 运行时可用性**：`certification` 是历史可靠性认证结果，不等于"此刻可启动"。`runtimeAvailability`（`ready` / `credential_missing`）反映 worker 的 registry 声明 credential env 是否在当前环境可用：优先 `process.env`，回退 Windows Current-User 环境，两处都缺失则为 `credential_missing`（`missingCredentialEnvNames` 列出缺失的 env 变量**名**，绝不包含值）。`run_dispatch` 在 transcript 写入和 fork 前用同一 readiness 检查拒绝 `credential_missing` 的 worker（零 transcript、零 fork），返回固定可行动错误。WAO 不保存/轮换凭据，不批量导入用户环境，只读取 registry 明确声明的精确变量名。
+**M11-7 凭据可用性**：`certification` 是历史可靠性认证结果，不等于"此刻可启动"。`credentialAvailability`（`available` / `missing` / `not_required`）只反映 worker **registry 显式声明为必需**的 credential（`provider.apiKeyEnv` / legacy `--api-key-env`）是否在当前环境可用——不声称 runtime 整体健康。优先 `process.env`，回退 Windows Current-User 环境，两处都缺失则为 `missing`；未声明必需凭据的 worker 为 `not_required`。**可选继承变量**（如 `OPENAI_BASE_URL`、`CODEX_HOME`、`KIMI_MODEL_NAME`）会被继承但不参与 missing gate——不会因缺少可选配置阻止派发。`missingCredentialEnvNames` 列出缺失的必需 env 变量**名**（绝不包含值）。`run_dispatch` 在 transcript 写入和 fork 前用同一 readiness 检查拒绝 `missing` 的 worker（零 transcript、零 fork），返回固定可行动错误。WAO 不保存/轮换凭据，不批量导入用户环境，只读取 registry 明确声明的精确变量名；设置或轮换凭据后**无需重启 Host**（每次评估重新观察当前状态）。
 
 ### MCP `run_dispatch`（supervised background dispatch，M9-2B）
 

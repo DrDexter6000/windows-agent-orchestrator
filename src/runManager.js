@@ -12,6 +12,7 @@ import { createSecretRedactor } from "./secretRedaction.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError } from "./delivery.js";
 import { verifyDelivery as defaultVerifyDelivery } from "./deliveryVerification.js";
 import { loadRoleContract } from "./application/roleContract.js";
+import { assessWorkerReadiness, readWindowsUserEnv } from "./application/credentialReadiness.js";
 
 /**
  * RunManager 持有活跃 run 的生命周期。
@@ -41,13 +42,16 @@ function installSigintHandler() {
 }
 
 export class RunManager {
-  constructor({ config, readRegistry, transcriptDir, backendFor, packageDeliveryFn = defaultPackageDelivery, verifyDeliveryFn = defaultVerifyDelivery }) {
+  constructor({ config, readRegistry, transcriptDir, backendFor, packageDeliveryFn = defaultPackageDelivery, verifyDeliveryFn = defaultVerifyDelivery, userEnvReader }) {
     this.config = config;
     this.readRegistry = readRegistry;
     this.transcriptDir = transcriptDir;
     this.backendFor = backendFor;
     this.packageDeliveryFn = packageDeliveryFn;
     this.verifyDeliveryFn = verifyDeliveryFn;
+    // M11-7: injectable Windows user-env reader for the credential bridge.
+    // Default reads HKCU\Environment; tests inject a fake.
+    this.userEnvReader = userEnvReader ?? readWindowsUserEnv;
     this.activeRuns = new Map();
   }
 
@@ -134,6 +138,21 @@ export class RunManager {
       }
       roleContract = loadRoleContract(agent.systemPrompt);
     }
+
+    // M11-7 (CTO closeout): credential availability check BEFORE transcript
+    // creation or spawn (foreground/resume path). Same SSOT as dispatchRun and
+    // registry_list. A missing REQUIRED credential throws here (zero transcript,
+    // zero worktree, zero spawn). Resolved values (incl. Windows user-env bridge)
+    // are passed to backend.spawn so the worker child inherits them and the
+    // redactor scrubs them. Values never enter argv/transcript/MCP output.
+    const credentialReadiness = await assessWorkerReadiness({ agent, userEnvReader: this.userEnvReader });
+    if (credentialReadiness.credentialAvailability === "missing") {
+      throw new Error(
+        `Agent ${agentId}: missing required credential env: ${credentialReadiness.missingCredentialEnvNames.join(", ")}. ` +
+        `Set it in the current process or Windows User environment.`,
+      );
+    }
+    const resolvedCredentials = credentialReadiness.resolvedEnv;
 
     const finalRunId = runId ?? `run_${new Date().toISOString().replace(/[-:.TZ]/g, "")}${Math.random().toString(36).slice(2, 8)}`;
 
@@ -334,7 +353,7 @@ export class RunManager {
 
     let result;
     try {
-      result = await backend.spawn(effectiveAgent, { prompt, roleContract });
+      result = await backend.spawn(effectiveAgent, { prompt, roleContract, resolvedCredentials });
     } catch (error) {
       await transcript.append("run.error", { phase: "spawn", error: error.message });
       await this._transition(transcript, "pending", "failed", "spawn_error");
@@ -469,6 +488,18 @@ export class RunManager {
       resumeRoleContract = loadRoleContract(agent.systemPrompt);
     }
 
+    // M11-7 (CTO closeout): credential availability check on resume too — same
+    // SSOT as start/dispatchRun/registry_list. Missing REQUIRED credential →
+    // throw (spawn count 0, transcript bytes unchanged). Resolved values are
+    // passed to the resume spawn for the worker child env + redactor.
+    const resumeReadiness = await assessWorkerReadiness({ agent, userEnvReader: this.userEnvReader });
+    if (resumeReadiness.credentialAvailability === "missing") {
+      throw new Error(
+        `Agent ${transcript.context.agentId}: missing required credential env: ${resumeReadiness.missingCredentialEnvNames.join(", ")}.`,
+      );
+    }
+    const resumeResolvedCredentials = resumeReadiness.resolvedEnv;
+
     // TD-103 Phase 3A: restore scorecardRules ONLY for delivery runs, from the
     // exact snapshot persisted inside delivery metadata in run.started.
     // Non-delivery resume keeps the 9e25c5c baseline behavior: scorecardRules=null.
@@ -493,6 +524,7 @@ export class RunManager {
       const newResult = await backend.spawn(agent, {
         prompt: promptEvent.prompt,
         roleContract: resumeRoleContract,
+        resolvedCredentials: resumeResolvedCredentials,
       });
       await transcript.append("run.rerun", {
         originalSessionId,

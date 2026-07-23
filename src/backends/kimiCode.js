@@ -1,5 +1,6 @@
 import { ProcessBackend } from "./processBackend.js";
 import { KimiStreamParser } from "./parsers/kimiCode.js";
+import { inheritedEnvNames } from "../envPolicy.js";
 
 /**
  * Kimi Code CLI backend（S2-2，阶段 2）。
@@ -45,7 +46,8 @@ export class KimiCodeBackend extends ProcessBackend {
           ...(Array.isArray(agent.args) ? agent.args : []),
         ];
       },
-      credentialEnvNames: () => ["KIMI_API_KEY", "KIMI_BASE_URL", "KIMI_MODEL_NAME"],
+      // M11-7: delegate to the runtime-neutral env-policy SSOT.
+      credentialEnvNames: (agent) => inheritedEnvNames(agent),
       ...opts,
     });
   }

@@ -1,24 +1,34 @@
 // test/m11-7-workerReadiness.test.js
 //
-// M11-7: Worker Runtime Readiness + Windows user-env credential bridge.
+// M11-7 (CTO closeout): Worker credential availability + Windows user-env bridge.
 //
-// Proves:
-//   A. Credential resolution SSOT (process.env > Windows User > missing),
-//      ProcessBackend consumes it (child env + redactor both cover fallback).
-//   B. Runtime readiness truth (certification stays distinct from availability;
-//      registry_list shows runtimeAvailability; run_dispatch fails BEFORE
-//      transcript/fork when a credential is missing).
-//
-// TDD: written against the current code, drives the GREEN implementation.
+// Covers the four RED requirements:
+//   1. Real-registry probe: optional config (KIMI_BASE_URL etc.) does NOT block;
+//      only an explicitly-declared missing REQUIRED credential blocks.
+//   2. Foreground start + resume bridge resolved values into ProcessBackend;
+//      missing REQUIRED credential is rejected before transcript/spawn.
+//   3. No permanent cache: rotation/recovery takes effect without restart.
+//   4. Real-event + transcript sentinel zero-hit.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
-import { resolveCredentialEnv, resolveWorkerCredentialNames, assessWorkerReadiness, CREDENTIAL_SENTINEL } from "../src/application/credentialReadiness.js";
+import {
+  resolveCredentialEnv,
+  assessWorkerReadiness,
+  requiredCredentialNames,
+  inheritedEnvNames,
+  CREDENTIAL_SENTINEL,
+} from "../src/application/credentialReadiness.js";
+
+// NOTE on test values: desensitization gate (test/desensitization.test.js) flags
+// any XXX_SECRET/API_KEY/TOKEN = "<20+ chars>" pattern. Test credential values
+// here are intentionally short or allowlisted (test-key/test-secret) so the gate
+// never trips on a fixture.
 
 // ===== Helpers =====
 
@@ -32,12 +42,13 @@ function makeRegistry(dir, agents) {
   return p;
 }
 
-// A fake user-env reader (injectable) that returns values for requested names.
 function fakeUserEnvReader(map) {
-  return async (name) => map[name];
+  const calls = [];
+  const fn = async (name) => { calls.push(name); return map[name]; };
+  fn.calls = calls;
+  return fn;
 }
 
-// Create a Git repo (for workspace_select in dispatch tests).
 function makeGitRepo(dir) {
   execFileSync("git", ["init"], { cwd: dir, stdio: "pipe" });
   execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: dir, stdio: "pipe" });
@@ -47,302 +58,307 @@ function makeGitRepo(dir) {
   execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "pipe" });
 }
 
-// ===== Package A: credential resolution SSOT =====
+// ===== RED-1: real-registry probe (no false blockers) =====
 
-// A-1: resolveCredentialEnv prefers process.env when present.
-test("M11-7-A1: process.env present → used, user-env not consulted", async () => {
-  const orig = process.env.TEST_M117_PROC;
-  process.env.TEST_M117_PROC = "from-process-env";
-  try {
-    const reader = fakeUserEnvReader({ TEST_M117_PROC: "from-user-env" });
-    const result = await resolveCredentialEnv("TEST_M117_PROC", { userEnvReader: reader });
-    assert.equal(result.source, "process_env");
-    assert.equal(result.value, "from-process-env");
-  } finally {
-    if (orig === undefined) delete process.env.TEST_M117_PROC; else process.env.TEST_M117_PROC = orig;
-  }
+test("M11-7-R1a: optional env names are NOT required (no false blocker)", () => {
+  const kimi = { backend: "kimi-code", id: "coder_mm" };
+  assert.deepEqual(requiredCredentialNames(kimi), [], "kimi-code has NO required creds");
+  assert.ok(inheritedEnvNames(kimi).includes("KIMI_BASE_URL"), "KIMI_BASE_URL is inherited (optional)");
+  const codex = { backend: "codex", id: "tester" };
+  assert.deepEqual(requiredCredentialNames(codex), [], "codex has NO required creds");
+  assert.ok(inheritedEnvNames(codex).includes("CODEX_HOME"), "CODEX_HOME is inherited (optional)");
 });
 
-// A-2: process.env missing, Windows User env has value → fallback used.
-test("M11-7-A2: process.env missing, user-env present → fallback used", async () => {
-  delete process.env.TEST_M117_FALLBACK;
-  const reader = fakeUserEnvReader({ TEST_M117_FALLBACK: "from-user-env" });
-  const result = await resolveCredentialEnv("TEST_M117_FALLBACK", { userEnvReader: reader });
-  assert.equal(result.source, "user_env");
-  assert.equal(result.value, "from-user-env");
+test("M11-7-R1b: explicitly-declared REQUIRED credential blocks when missing", async () => {
+  delete process.env.TEST_M117_REQ_MISSING;
+  const agent = { backend: "claude-code", id: "researcher", provider: { apiKeyEnv: "TEST_M117_REQ_MISSING" } };
+  const r = await assessWorkerReadiness({ agent, userEnvReader: fakeUserEnvReader({}) });
+  assert.equal(r.credentialAvailability, "missing");
+  assert.deepEqual(r.missingCredentialEnvNames, ["TEST_M117_REQ_MISSING"]);
 });
 
-// A-3: both missing → missing.
-test("M11-7-A3: both missing → source=missing, value=undefined", async () => {
-  delete process.env.TEST_M117_MISSING;
+test("M11-7-R1c: real registry — coder_mm/tester not blocked; researcher gated on declared key", async () => {
+  const reg = JSON.parse(readFileSync("config/agents.json", "utf8"));
   const reader = fakeUserEnvReader({});
-  const result = await resolveCredentialEnv("TEST_M117_MISSING", { userEnvReader: reader });
-  assert.equal(result.source, "missing");
-  assert.equal(result.value, undefined);
+  const results = {};
+  for (const [id, a] of Object.entries(reg.agents)) {
+    const r = await assessWorkerReadiness({ agent: { id, ...a }, userEnvReader: reader });
+    results[id] = r.credentialAvailability;
+  }
+  assert.notEqual(results.coder_mm, "missing", "coder_mm not blocked by optional config");
+  assert.notEqual(results.tester, "missing", "tester not blocked by optional config");
+  assert.ok(["available", "missing"].includes(results.researcher), "researcher gated on its declared key");
 });
 
-// A-4: user-env reader only receives the EXACT requested name (no bulk import).
-test("M11-7-A4: user-env reader receives only the exact requested name", async () => {
-  delete process.env.TEST_M117_EXACT;
-  const seen = [];
-  const reader = async (name) => { seen.push(name); return undefined; };
-  await resolveCredentialEnv("TEST_M117_EXACT", { userEnvReader: reader });
-  assert.deepEqual(seen, ["TEST_M117_EXACT"], "reader called with exactly the requested name");
+// ===== A: env-policy SSOT =====
+
+test("M11-7-A: provider.apiKeyEnv and legacy --api-key-env are required", () => {
+  assert.ok(requiredCredentialNames({ backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" } }).includes("DEEPSEEK_API_KEY"));
+  assert.ok(requiredCredentialNames({ backend: "claude-code", prependArgs: ["--api-key-env", "DEEPSEEK_API_KEY", "--"] }).includes("DEEPSEEK_API_KEY"));
 });
 
-// A-5: resolveWorkerCredentialNames handles provider.apiKeyEnv + legacy --api-key-env.
-test("M11-7-A5: credential names from provider.apiKeyEnv and legacy --api-key-env", () => {
-  // provider.apiKeyEnv (first-class)
-  const a = resolveWorkerCredentialNames({ backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" } });
-  assert.ok(a.includes("DEEPSEEK_API_KEY"), "provider.apiKeyEnv resolved");
-  // legacy --api-key-env in prependArgs
-  const b = resolveWorkerCredentialNames({
-    backend: "claude-code",
-    prependArgs: ["--api-key-env", "DEEPSEEK_API_KEY", "--"],
-  });
-  assert.ok(b.includes("DEEPSEEK_API_KEY"), "legacy --api-key-env resolved");
-  // codex static names
-  const c = resolveWorkerCredentialNames({ backend: "codex" });
-  assert.ok(c.includes("OPENAI_API_KEY") && c.includes("CODEX_HOME"), "codex static names");
-  // no credential requirement
-  const d = resolveWorkerCredentialNames({ backend: "claude-code" });
-  assert.ok(Array.isArray(d));
-});
-
-// A-6: a worker with no credential names is ready.
-test("M11-7-A6: worker with no credential requirement → ready", async () => {
-  const r = await assessWorkerReadiness({
-    agent: { backend: "claude-code", id: "plain" },
-    userEnvReader: fakeUserEnvReader({}),
-  });
-  assert.equal(r.runtimeAvailability, "ready");
+test("M11-7-A6: worker with no required credential → not_required", async () => {
+  const r = await assessWorkerReadiness({ agent: { backend: "claude-code", id: "plain" }, userEnvReader: fakeUserEnvReader({}) });
+  assert.equal(r.credentialAvailability, "not_required");
   assert.deepEqual(r.missingCredentialEnvNames, []);
 });
 
-// A-7: credential missing → credential_missing with bounded names.
-test("M11-7-A7: credential missing → credential_missing + bounded names", async () => {
-  delete process.env.TEST_M117_MISSING_A;
-  const r = await assessWorkerReadiness({
-    agent: { backend: "claude-code", id: "x", provider: { apiKeyEnv: "TEST_M117_MISSING_A" } },
-    userEnvReader: fakeUserEnvReader({}),
-  });
-  assert.equal(r.runtimeAvailability, "credential_missing");
-  assert.deepEqual(r.missingCredentialEnvNames, ["TEST_M117_MISSING_A"]);
+test("M11-7-A8: readiness result does not carry certification", async () => {
+  const r = await assessWorkerReadiness({ agent: { backend: "claude-code", id: "x", provider: { apiKeyEnv: "TEST_M117_SEP" } }, userEnvReader: fakeUserEnvReader({ TEST_M117_SEP: "test-key-abc" }) });
+  assert.equal(r.certification, undefined);
 });
 
-// A-8: certification stays distinct from runtimeAvailability.
-test("M11-7-A8: certification and runtimeAvailability are independent fields", async () => {
-  // certified BUT credential missing
-  delete process.env.TEST_M117_CERT_BUT_MISSING;
-  const r = await assessWorkerReadiness({
-    agent: { backend: "claude-code", id: "x", provider: { apiKeyEnv: "TEST_M117_CERT_BUT_MISSING" } },
-    userEnvReader: fakeUserEnvReader({}),
-  });
-  assert.equal(r.runtimeAvailability, "credential_missing");
-  // certification is NOT a field on the readiness result (it stays in inventory).
-  assert.equal(r.certification, undefined, "readiness does not carry certification (kept separate)");
+// ===== RED-3: no permanent cache — rotation/recovery without restart =====
+
+test("M11-7-R3: rotation/recovery takes effect on next call (no permanent cache)", async () => {
+  const agent = { backend: "claude-code", id: "x", provider: { apiKeyEnv: "TEST_M117_ROTATE" } };
+  delete process.env.TEST_M117_ROTATE;
+  let map = {};
+  let r = await assessWorkerReadiness({ agent, userEnvReader: fakeUserEnvReader(map) });
+  assert.equal(r.credentialAvailability, "missing");
+  map = { TEST_M117_ROTATE: "test-key-rotated" };
+  r = await assessWorkerReadiness({ agent, userEnvReader: fakeUserEnvReader(map) });
+  assert.equal(r.credentialAvailability, "available");
+  assert.equal(r.resolvedEnv.TEST_M117_ROTATE, "test-key-rotated");
 });
 
-// ===== Package B: registry_list + run_dispatch readiness gate =====
+test("M11-7-R3b: each name read at most once per assessment (readerCallCount)", async () => {
+  const agent = { backend: "claude-code", id: "x", provider: { apiKeyEnv: "TEST_M117_DEDUPE" } };
+  delete process.env.TEST_M117_DEDUPE;
+  const reader = fakeUserEnvReader({ TEST_M117_DEDUPE: "test-key-dedupe" });
+  const r = await assessWorkerReadiness({ agent, userEnvReader: reader });
+  assert.equal(r.readerCallCount, 1, "reader called once for the single distinct name");
+  assert.deepEqual(reader.calls, ["TEST_M117_DEDUPE"]);
+});
 
-// B-1: registry_list includes runtimeAvailability + missingCredentialEnvNames.
-test("M11-7-B1: registry_list projects runtimeAvailability + missingCredentialEnvNames", async () => {
+// ===== resolveCredentialEnv precedence =====
+
+test("M11-7-A1: process.env present → used, user-env not consulted", async () => {
+  process.env.TEST_M117_PROC = "from-process";
+  try {
+    const r = await resolveCredentialEnv("TEST_M117_PROC", { userEnvReader: fakeUserEnvReader({ TEST_M117_PROC: "from-user" }) });
+    assert.equal(r.source, "process_env");
+    assert.equal(r.value, "from-process");
+  } finally { delete process.env.TEST_M117_PROC; }
+});
+
+test("M11-7-A2: process.env missing, user-env present → fallback", async () => {
+  delete process.env.TEST_M117_FB;
+  const r = await resolveCredentialEnv("TEST_M117_FB", { userEnvReader: fakeUserEnvReader({ TEST_M117_FB: "from-user" }) });
+  assert.equal(r.source, "user_env");
+  assert.equal(r.value, "from-user");
+});
+
+test("M11-7-A3: both missing → missing", async () => {
+  delete process.env.TEST_M117_MISS;
+  const r = await resolveCredentialEnv("TEST_M117_MISS", { userEnvReader: fakeUserEnvReader({}) });
+  assert.equal(r.source, "missing");
+  assert.equal(r.value, undefined);
+});
+
+// ===== Package B: registry_list projection =====
+
+test("M11-7-B1: registry_list projects credentialAvailability + missingCredentialEnvNames", async () => {
   const { getRegistryInventory } = await import("../src/application/registryInventory.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-m117-b1-"));
   try {
-    delete process.env.TEST_M117_INV_MISSING;
+    delete process.env.TEST_M117_B1_BAD;
+    process.env.TEST_M117_B1_GOOD = "test-key-good";
     const registryPath = makeRegistry(dir, {
-      good: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_INV_PRESENT" } },
-      bad: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_INV_MISSING" } },
+      good: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_B1_GOOD" } },
+      bad: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_B1_BAD" } },
+      none: { backend: "claude-code", cwd: dir },
     });
-    process.env.TEST_M117_INV_PRESENT = "present-val";
-    const agents = await getRegistryInventory({
-      registryPath, runDir: dir,
-      userEnvReader: fakeUserEnvReader({}),
-    });
+    const agents = await getRegistryInventory({ registryPath, runDir: dir, userEnvReader: fakeUserEnvReader({}) });
     const good = agents.find((a) => a.id === "good");
     const bad = agents.find((a) => a.id === "bad");
-    assert.equal(good.runtimeAvailability, "ready");
-    assert.deepEqual(good.missingCredentialEnvNames, []);
-    assert.equal(bad.runtimeAvailability, "credential_missing");
-    assert.deepEqual(bad.missingCredentialEnvNames, ["TEST_M117_INV_MISSING"]);
+    const none = agents.find((a) => a.id === "none");
+    assert.equal(good.credentialAvailability, "available");
+    assert.equal(bad.credentialAvailability, "missing");
+    assert.deepEqual(bad.missingCredentialEnvNames, ["TEST_M117_B1_BAD"]);
+    assert.equal(none.credentialAvailability, "not_required");
   } finally {
-    delete process.env.TEST_M117_INV_PRESENT;
+    delete process.env.TEST_M117_B1_GOOD;
     cleanupDir(dir);
   }
 });
 
-// B-2: credential value never leaks into registry_list output.
 test("M11-7-B2: credential value not in registry_list output", async () => {
   const { getRegistryInventory } = await import("../src/application/registryInventory.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-m117-b2-"));
   try {
-    process.env.TEST_M117_SECRET_VAL = "SUPER_SECRET_VALUE_12345678";
-    const registryPath = makeRegistry(dir, {
-      w: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_SECRET_VAL" } },
-    });
-    const agents = await getRegistryInventory({
-      registryPath, runDir: dir,
-      userEnvReader: fakeUserEnvReader({}),
-    });
-    const dumped = JSON.stringify(agents);
-    assert.ok(!dumped.includes("SUPER_SECRET_VALUE_12345678"), "no secret value leak in inventory output");
+    process.env.TEST_M117_B2_KEY = "test-key-leakcheck";
+    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_B2_KEY" } } });
+    const agents = await getRegistryInventory({ registryPath, runDir: dir, userEnvReader: fakeUserEnvReader({}) });
+    assert.ok(!JSON.stringify(agents).includes("test-key-leakcheck"), "no credential value leak");
   } finally {
-    delete process.env.TEST_M117_SECRET_VAL;
+    delete process.env.TEST_M117_B2_KEY;
     cleanupDir(dir);
   }
 });
 
-// B-3: run_dispatch fails BEFORE transcript/fork when credential missing.
-test("M11-7-B3: run_dispatch rejects missing-credential worker (zero transcript, zero fork)", async () => {
+// ===== Package B: dispatchRun readiness gate (real service) =====
+
+test("M11-7-B3: dispatchRun rejects missing-credential worker (zero transcript, zero fork)", async () => {
+  const { dispatchRun, CredentialMissingError } = await import("../src/application/runDispatch.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-m117-b3-"));
-  const wsDir = mkdtempSync(join(tmpdir(), "wao-m117-b3-ws-"));
   try {
-    makeGitRepo(wsDir);
-    delete process.env.TEST_M117_DISPATCH_MISSING;
-    const registryPath = makeRegistry(dir, {
-      w: { backend: "claude-code", cwd: wsDir, provider: { apiKeyEnv: "TEST_M117_DISPATCH_MISSING" } },
-    });
-    const runDir = join(dir, "runs");
-    mkdirSync(runDir, { recursive: true });
-    // MCP server with a fake dispatcher that MUST NOT be called.
-    let dispatchCalls = 0;
-    const { createWaoMcpServer } = await import("../src/mcp/server.js");
-    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
-    const { Client } = await import("@modelcontextprotocol/sdk/client");
-    const server = createWaoMcpServer({
-      registryPath, runDir,
-      dispatchRunFn: async () => { dispatchCalls += 1; return { runId: "x", accepted: true, state: "pending" }; },
-      userEnvReader: fakeUserEnvReader({}),
-    });
-    const client = new Client({ name: "t", version: "0" }, { capabilities: {} });
-    const [c, s] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(s), client.connect(c)]);
+    delete process.env.TEST_M117_B3_MISSING;
+    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_B3_MISSING" } } });
+    const runDir = join(dir, "runs"); mkdirSync(runDir, { recursive: true });
+    let spawnCalls = 0;
+    let threw = null;
     try {
-      // Bind a workspace first so the rejection is specifically credential_missing.
-      await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: wsDir } });
-      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "w", prompt: "do" } });
-      assert.ok(res.isError, "run_dispatch returned an error");
-      const text = res.content.find((b) => b.type === "text").text;
-      assert.match(text, /missing a required credential/i, "error is the credential-missing rejection");
-      assert.equal(dispatchCalls, 0, "dispatcher was NOT called (zero fork)");
-      // Zero transcript files created.
-      const jsonl = existsSync(runDir) ? readdirSync(runDir).filter((f) => f.endsWith(".jsonl")) : [];
-      assert.equal(jsonl.length, 0, "zero transcript files");
-    } finally {
-      await client.close();
-      await server.close();
-    }
-  } finally {
-    cleanupDir(dir); cleanupDir(wsDir);
-  }
+      await dispatchRun({
+        agentId: "w", prompt: "do", registryPath, runDir,
+        spawnFn: () => { spawnCalls += 1; return { unref() {} }; },
+        userEnvReader: fakeUserEnvReader({}),
+      });
+    } catch (e) { threw = e; }
+    assert.ok(threw instanceof CredentialMissingError, "threw CredentialMissingError");
+    assert.equal(spawnCalls, 0, "zero fork/spawn");
+    assert.equal(readdirSync(runDir).filter((f) => f.endsWith(".jsonl")).length, 0, "zero transcript");
+  } finally { cleanupDir(dir); }
 });
 
-// B-4: run_dispatch proceeds when credential is present (via user-env fallback).
-test("M11-7-B4: run_dispatch proceeds when credential present via user-env fallback", async () => {
+test("M11-7-B4: dispatchRun proceeds + threads user-env value into runner env", async () => {
+  const { dispatchRun } = await import("../src/application/runDispatch.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-m117-b4-"));
-  const wsDir = mkdtempSync(join(tmpdir(), "wao-m117-b4-ws-"));
   try {
-    makeGitRepo(wsDir);
-    delete process.env.TEST_M117_DISPATCH_OK;
-    const registryPath = makeRegistry(dir, {
-      w: { backend: "claude-code", cwd: wsDir, provider: { apiKeyEnv: "TEST_M117_DISPATCH_OK" } },
+    delete process.env.TEST_M117_B4_OK;
+    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_B4_OK" } } });
+    const runDir = join(dir, "runs"); mkdirSync(runDir, { recursive: true });
+    let capturedEnv = null;
+    let spawnCalls = 0;
+    const result = await dispatchRun({
+      agentId: "w", prompt: "do", registryPath, runDir,
+      spawnFn: (exe, args, opts) => { spawnCalls += 1; capturedEnv = opts.env; return { unref() {} }; },
+      userEnvReader: fakeUserEnvReader({ TEST_M117_B4_OK: "test-key-fallback" }),
     });
-    const runDir = join(dir, "runs");
-    mkdirSync(runDir, { recursive: true });
-    let dispatchCalls = 0;
-    const { createWaoMcpServer } = await import("../src/mcp/server.js");
-    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
-    const { Client } = await import("@modelcontextprotocol/sdk/client");
-    const server = createWaoMcpServer({
-      registryPath, runDir,
-      dispatchRunFn: async () => { dispatchCalls += 1; return { runId: "r1", accepted: true, state: "pending" }; },
-      userEnvReader: fakeUserEnvReader({ TEST_M117_DISPATCH_OK: "fallback-val-12345678" }),
-    });
-    const client = new Client({ name: "t", version: "0" }, { capabilities: {} });
-    const [c, s] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(s), client.connect(c)]);
-    try {
-      await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: wsDir } });
-      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "w", prompt: "do" } });
-      assert.ok(!res.isError, "run_dispatch accepted");
-      assert.equal(dispatchCalls, 1, "dispatcher called once");
-    } finally {
-      await client.close();
-      await server.close();
-    }
-  } finally {
-    cleanupDir(dir); cleanupDir(wsDir);
-  }
+    assert.equal(result.accepted, true);
+    assert.equal(spawnCalls, 1);
+    assert.equal(capturedEnv.TEST_M117_B4_OK, "test-key-fallback", "value threaded into runner env");
+  } finally { cleanupDir(dir); }
 });
 
-// A-9: ProcessBackend child env includes user-env fallback value.
-test("M11-7-A9: ProcessBackend child env includes resolved fallback credential", async () => {
+test("M11-7-B5: registry_list and dispatchRun agree on the same agent", async () => {
+  const { getRegistryInventory } = await import("../src/application/registryInventory.js");
+  const { dispatchRun, CredentialMissingError } = await import("../src/application/runDispatch.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m117-b5-"));
+  try {
+    delete process.env.TEST_M117_B5_KEY;
+    const reader = fakeUserEnvReader({});
+    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_B5_KEY" } } });
+    const runDir = join(dir, "runs"); mkdirSync(runDir, { recursive: true });
+    const agents = await getRegistryInventory({ registryPath, runDir, userEnvReader: reader });
+    assert.equal(agents[0].credentialAvailability, "missing");
+    let spawnCalls = 0;
+    let threw = null;
+    try {
+      await dispatchRun({ agentId: "w", prompt: "do", registryPath, runDir, spawnFn: () => { spawnCalls += 1; return { unref() {} }; }, userEnvReader: reader });
+    } catch (e) { threw = e; }
+    assert.ok(threw instanceof CredentialMissingError);
+    assert.equal(spawnCalls, 0);
+  } finally { cleanupDir(dir); }
+});
+
+// ===== ProcessBackend: child env + redaction =====
+
+test("M11-7-A9: ProcessBackend child env includes resolved credential", async () => {
   const { ProcessBackend } = await import("../src/backends/processBackend.js");
   const { FakeStreamParser } = await import("./_m117-fakes.mjs");
-  delete process.env.TEST_M117_PB_FALLBACK;
-  // Record the spawned child env via a fake spawn.
+  delete process.env.TEST_M117_PB;
   const captured = {};
-  const fakeSpawn = (binary, args, opts) => {
+  const fakeSpawn = (b, a, opts) => {
     Object.assign(captured, opts.env);
-    const child = {
-      pid: 12345,
-      exitCode: null,
-      signalCode: null,
-      stdout: { on() {} },
-      stderr: { on() {} },
-      once(ev, cb) { if (ev === "spawn") setImmediate(cb); if (ev === "error") {} },
-      on(ev, cb) { if (ev === "close") setImmediate(() => cb(0)); },
-      kill() {},
-    };
-    return child;
+    return { pid: 1, exitCode: null, signalCode: null, stdout: { on() {} }, stderr: { on() {} }, once(ev, cb) { if (ev === "spawn") setImmediate(cb); }, on(ev, cb) { if (ev === "close") setImmediate(() => cb(0)); }, kill() {} };
   };
-  const backend = new ProcessBackend({
-    parserClass: FakeStreamParser,
-    buildArgs: () => [],
-    credentialEnvNames: () => ["TEST_M117_PB_FALLBACK"],
-    spawnFn: fakeSpawn,
-  });
-  // task carries resolvedCredentials (as the runner/RunManager would pass them).
-  await backend.spawn(
-    { id: "w", cwd: ".", binary: "fake-binary" },
-    { prompt: "x", resolvedCredentials: { TEST_M117_PB_FALLBACK: "pb-fallback-val-12345678" } },
-  );
-  assert.equal(captured.TEST_M117_PB_FALLBACK, "pb-fallback-val-12345678", "child env has the fallback value");
+  const backend = new ProcessBackend({ parserClass: FakeStreamParser, buildArgs: () => [], credentialEnvNames: () => ["TEST_M117_PB"], spawnFn: fakeSpawn });
+  await backend.spawn({ id: "w", cwd: ".", binary: "fake" }, { prompt: "x", resolvedCredentials: { TEST_M117_PB: "test-key-pb" } });
+  assert.equal(captured.TEST_M117_PB, "test-key-pb");
 });
 
-// A-10: fallback credential value is redacted (sentinel zero-hit).
 test("M11-7-A10: resolved credential value redacted in handle output", async () => {
   const { ProcessBackend } = await import("../src/backends/processBackend.js");
   const { FakeStreamParser } = await import("./_m117-fakes.mjs");
-  delete process.env.TEST_M117_PB_REDACT;
-  const secret = "REDACTABLE_FALLBACK_SECRET_99";
-  let handle;
-  const fakeSpawn = () => {
-    const child = {
-      pid: 1, exitCode: null, signalCode: null,
-      stdout: { on(ev, cb) { if (ev === "data") setImmediate(() => cb(Buffer.from(secret))); } },
-      stderr: { on() {} },
-      once(ev, cb) { if (ev === "spawn") setImmediate(cb); },
-      on(ev, cb) { if (ev === "close") setImmediate(() => cb(0)); },
-      kill() {},
-    };
-    return child;
-  };
-  const backend = new ProcessBackend({
-    parserClass: FakeStreamParser,
-    buildArgs: () => [],
-    credentialEnvNames: () => ["TEST_M117_PB_REDACT"],
-    spawnFn: fakeSpawn,
-  });
-  handle = await backend.spawn(
-    { id: "w", cwd: ".", binary: "fake-binary" },
-    { prompt: "x", resolvedCredentials: { TEST_M117_PB_REDACT: secret } },
-  );
-  // The redactor must have scrubbed the secret from a value passed through it.
-  const redacted = handle.redact(`prefix ${secret} suffix`);
-  assert.ok(!redacted.includes(secret), "resolved secret redacted by handle.redact");
-  assert.ok(redacted.includes("[REDACTED:"), "redaction marker present");
-  // Sentinel zero-hit assertion.
+  delete process.env.TEST_M117_PB2;
+  // Use a value ≥ MIN_SECRET_LENGTH (8) so the redactor picks it up, but short
+  // enough and named to avoid the desensitization gate.
+  const value = "test-key-redact99";
+  const fakeSpawn = () => ({ pid: 1, exitCode: null, signalCode: null, stdout: { on(ev, cb) { if (ev === "data") setImmediate(() => cb(Buffer.from(value))); } }, stderr: { on() {} }, once(ev, cb) { if (ev === "spawn") setImmediate(cb); }, on(ev, cb) { if (ev === "close") setImmediate(() => cb(0)); }, kill() {} });
+  const backend = new ProcessBackend({ parserClass: FakeStreamParser, buildArgs: () => [], credentialEnvNames: () => ["TEST_M117_PB2"], spawnFn: fakeSpawn });
+  const handle = await backend.spawn({ id: "w", cwd: ".", binary: "fake" }, { prompt: "x", resolvedCredentials: { TEST_M117_PB2: value } });
+  const redacted = handle.redact(`prefix ${value} suffix`);
+  assert.ok(!redacted.includes(value));
+  assert.ok(redacted.includes("[REDACTED:"));
   assert.ok(!redacted.includes(CREDENTIAL_SENTINEL));
+});
+
+// ===== RED-2: foreground start bridge (RunManager) =====
+
+test("M11-7-R2: RunManager.start bridges user-env credential into spawn + rejects missing", async () => {
+  const { RunManager } = await import("../src/runManager.js");
+  const { readRegistry } = await import("../src/registry.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m117-r2-"));
+  try {
+    delete process.env.TEST_M117_R2;
+    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_R2" } } });
+    const runDir = join(dir, "runs"); mkdirSync(runDir, { recursive: true });
+    let spawnTask = null;
+    const fakeBackend = {
+      supportsRoleContract: false,
+      spawn: async (agent, task) => { spawnTask = task; return { backend: "fake", backendSessionId: "s", messageId: "m", admittedSeq: 1, events: async function* () {}, abort: async () => {}, isAlive: () => false }; },
+    };
+    const mgr = new RunManager({ config: { registry: registryPath, runDir }, readRegistry, backendFor: () => fakeBackend, userEnvReader: fakeUserEnvReader({ TEST_M117_R2: "test-key-bridge" }) });
+    await mgr.start("w", { prompt: "do", runDir, registry: registryPath });
+    assert.ok(spawnTask.resolvedCredentials, "spawn received resolvedCredentials");
+    assert.equal(spawnTask.resolvedCredentials.TEST_M117_R2, "test-key-bridge", "user-env value bridged into spawn");
+    const mgr2 = new RunManager({ config: { registry: registryPath, runDir }, readRegistry, backendFor: () => fakeBackend, userEnvReader: fakeUserEnvReader({}) });
+    let threw = false;
+    try { await mgr2.start("w", { prompt: "do", runDir: join(dir, "runs2"), registry: registryPath }); } catch { threw = true; }
+    assert.ok(threw, "missing required credential throws");
+  } finally { cleanupDir(dir); }
+});
+
+// ===== RED-4: real-event + transcript sentinel zero-hit =====
+
+test("M11-7-R4: sentinel zero-hit across events, errors, transcript (full RunManager flow)", async () => {
+  const { RunManager } = await import("../src/runManager.js");
+  const { readRegistry } = await import("../src/registry.js");
+  const { readFileSync: readSync } = await import("node:fs");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m117-r4-"));
+  try {
+    delete process.env.TEST_M117_R4;
+    const value = CREDENTIAL_SENTINEL;
+    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_R4" } } });
+    const runDir = join(dir, "runs"); mkdirSync(runDir, { recursive: true });
+    const collectedEvents = [];
+    const fakeBackend = {
+      supportsRoleContract: false,
+      spawn: async (agent, task) => {
+        const redactorEnv = { ...process.env, ...task.resolvedCredentials };
+        const { createSecretRedactor } = await import("../src/secretRedaction.js");
+        const redactor = createSecretRedactor(redactorEnv, ["TEST_M117_R4"]);
+        return {
+          backend: "fake", backendSessionId: "s", messageId: "m", admittedSeq: 1,
+          redact: (v) => redactor.redact(v),
+          events: async function* () {
+            yield { kind: "message", role: "assistant", parts: [{ type: "text", text: redactor.redactString(`leak: ${value}`) }] };
+            yield { kind: "tool_use", name: "echo", input: redactor.redact({ cmd: value }) };
+            collectedEvents.push(redactor.redact(`stderr: ${value}`));
+            yield { kind: "done", reason: "completed" };
+          },
+          abort: async () => {}, isAlive: () => false,
+        };
+      },
+    };
+    const mgr = new RunManager({ config: { registry: registryPath, runDir }, readRegistry, backendFor: () => fakeBackend, userEnvReader: fakeUserEnvReader({ TEST_M117_R4: value }) });
+    const run = await mgr.start("w", { prompt: "do", runDir, registry: registryPath });
+    await run.waitForCompletion({ waitTimeout: 2000, pollInterval: 5 });
+    const jsonl = readdirSync(runDir).filter((f) => f.endsWith(".jsonl"));
+    let transcriptText = "";
+    for (const f of jsonl) transcriptText += readSync(join(runDir, f), "utf8");
+    const allOutput = transcriptText + collectedEvents.join("\n");
+    assert.ok(!allOutput.includes(value), "sentinel (credential value) ZERO hit in transcript/events");
+  } finally { cleanupDir(dir); }
 });

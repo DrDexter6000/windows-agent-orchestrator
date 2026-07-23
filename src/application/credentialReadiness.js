@@ -1,95 +1,64 @@
 // src/application/credentialReadiness.js
 //
-// M11-7: Worker runtime readiness + credential env resolution.
+// M11-7 (CTO closeout): Worker credential availability + Windows user-env bridge.
 //
-// A worker's `certification` (from reliability-summary.json) records a HISTORICAL
-// reliability result — it does NOT mean the worker can start right now. A worker
-// is only runtime-ready when the credentials its backend needs are actually
-// available in the launching environment. This module resolves registry-declared
-// credential env names and checks their availability, so registry_list can show
-// `runtimeAvailability` and run_dispatch can fail BEFORE transcript/fork when a
-// worker would crash on startup for lack of a credential.
+// Assesses whether a worker's REQUIRED credentials (registry-declared via
+// provider.apiKeyEnv / legacy --api-key-env) are available in the launching
+// environment, and bridges values from the Windows Current-User scope into the
+// worker child process when they are absent from process.env.
+//
+// Env-name policy (which names are required vs optional-inherited) is the
+// runtime-neutral SSOT in src/envPolicy.js — this module delegates to it. There
+// is no mirrored algorithm here or in src/backends/*.
 //
 // Credential resolution precedence:
-//   1. process.env (the WAO process environment — what the MCP server / daemon
-//      inherited).
-//   2. Windows Current-User environment (the HKCU\Environment scope) — a
-//      fallback so a worker still starts when the Owner configured the key at
-//      the User scope but the launching process did not inherit it.
+//   1. process.env (the WAO process environment).
+//   2. Windows Current-User environment (HKCU\Environment).
 //   3. missing.
 //
-// Security contract:
-//   - Only the EXACT registry-declared env NAMES are read from the user scope.
-//     There is NO bulk import of the user environment.
-//   - No credential VALUE ever enters argv, logs, errors, transcript, or MCP
-//     output. Values are resolved into the worker child env (ProcessBackend)
-//     and into the secret redactor only.
-//   - The Windows user-env reader uses structured argv (no shell string
-//     concatenation). It is injectable for testing.
+// No permanent cache: each operation de-duplicates by name within itself, but
+// the NEXT registry_list/dispatch re-observes current state — so setting or
+// rotating a credential takes effect without restarting the Host.
 //
-// Architectural contract:
-//   - Does NOT import src/mcp/*, src/commands/*, MCP SDK, or zod.
-//   - Read-only (env probes); never writes/rotates credentials, never installs
-//     or fixes external runtimes, never modifies Host/global config.
+// Security contract:
+//   - Only the EXACT declared names are read from the user scope. No bulk
+//     import of the user environment.
+//   - No credential VALUE enters argv, logs, errors, transcript, or MCP output.
+//     Values flow only into the worker child env + the secret redactor.
+//   - Structured argv (base64-encoded PowerShell command); injectable reader.
+//
+// Honesty: this module only proves a CREDENTIAL blocker, not that the runtime
+// is executable/logged-in/provider-healthy. The field is named
+// credentialAvailability, not "runtime readiness".
+//
+// Architectural contract: no src/mcp/*, src/commands/*, MCP SDK, or zod imports.
 
 import { execFile } from "node:child_process";
-
-// Per-backend credential env-name resolution. This mirrors the per-backend
-// credentialEnvNames() functions in src/backends/* (claude-code derives from
-// provider.apiKeyEnv / legacy --api-key-env; codex/kimi are static). Kept here
-// as the application-layer SSOT for readiness so registry_list and run_dispatch
-// agree without importing the backend classes.
-const STATIC_CREDENTIAL_NAMES = {
-  codex: ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"],
-  "kimi-code": ["KIMI_API_KEY", "KIMI_BASE_URL", "KIMI_MODEL_NAME"],
-};
+import { requiredCredentialNames, inheritedEnvNames } from "../envPolicy.js";
 
 /**
- * Resolve the registry-declared credential env names a worker needs.
- * @param {object} agent — normalized agent from registry
- * @returns {string[]} env var names (deduped, may be empty)
+ * Re-export the env-name policy SSOT for convenience/compat.
+ * requiredCredentialNames: registry-declared REQUIRED names (gate participants).
+ * inheritedEnvNames: all names a backend MAY inherit (required + optional).
  */
-export function resolveWorkerCredentialNames(agent) {
-  if (!agent || typeof agent !== "object") return [];
-  const backend = agent.backend;
-  // claude-code: provider.apiKeyEnv (first-class) or legacy --api-key-env.
-  if (backend === "claude-code") {
-    const names = [];
-    const configured = agent.provider?.apiKeyEnv;
-    if (typeof configured === "string" && configured.length > 0) names.push(configured);
-    const prependArgs = Array.isArray(agent.prependArgs) ? agent.prependArgs : [];
-    const idx = prependArgs.indexOf("--api-key-env");
-    if (idx >= 0 && idx + 1 < prependArgs.length && prependArgs[idx + 1]) {
-      names.push(prependArgs[idx + 1]);
-    }
-    return [...new Set(names)];
-  }
-  if (Array.isArray(STATIC_CREDENTIAL_NAMES[backend])) return [...STATIC_CREDENTIAL_NAMES[backend]];
-  // opencode-serve and unknown backends: no process credential names.
-  return [];
-}
+export { requiredCredentialNames, inheritedEnvNames };
 
 /**
  * Default Windows user-env reader. Reads ONE exact name from the Current-User
- * scope via PowerShell `[System.Environment]::GetEnvironmentVariable`. Uses
- * structured argv (no shell string). On non-Windows or any failure → undefined.
+ * scope via PowerShell `[System.Environment]::GetEnvironmentVariable`. Structured
+ * argv (no shell string). On non-Windows or any failure → undefined.
  *
- * Per-process memoized: each requested name is read at most ONCE per process
- * (the user environment does not change during a process's lifetime). This
- * bounds PowerShell spawns to the number of distinct credential names, not the
- * number of inventory/dispatch calls — keeping registry_list cheap.
+ * NOT permanently cached: a fresh value is read on every call so credential
+ * rotation / addition takes effect without a Host restart. Callers de-duplicate
+ * within a single operation (assessWorkerReadiness) to avoid re-reading the same
+ * name twice in one assessment.
  * @param {string} name
  * @returns {Promise<string|undefined>}
  */
-const _userEnvCache = new Map();
 export function readWindowsUserEnv(name) {
   if (process.platform !== "win32") return Promise.resolve(undefined);
   if (typeof name !== "string" || name.length === 0) return Promise.resolve(undefined);
-  if (_userEnvCache.has(name)) return Promise.resolve(_userEnvCache.get(name));
   return new Promise((resolve) => {
-    // Structured argv: powershell -NoProfile -Command <script>. The name is
-    // passed as a base64-encoded command argument to avoid any shell injection
-    // through the variable name; the script reads exactly that one name.
     const script = `[System.Environment]::GetEnvironmentVariable('${name.replace(/'/g, "''")}', 'User')`;
     const encoded = Buffer.from(script, "utf16le").toString("base64");
     execFile(
@@ -97,21 +66,16 @@ export function readWindowsUserEnv(name) {
       ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
       { windowsHide: true, timeout: 5000 },
       (err, stdout) => {
-        if (err) {
-          _userEnvCache.set(name, undefined);
-          return resolve(undefined);
-        }
+        if (err) return resolve(undefined);
         const value = (stdout ?? "").replace(/\r?\n$/, "");
-        const resolved = value.length > 0 ? value : undefined;
-        _userEnvCache.set(name, resolved);
-        resolve(resolved);
+        resolve(value.length > 0 ? value : undefined);
       },
     );
   });
 }
 
 /**
- * Resolve a single credential env var: process.env first, then Windows user env.
+ * Resolve a single env var: process.env first, then Windows user env.
  * @param {string} name
  * @param {{ userEnvReader?: (name: string) => Promise<string|undefined> }} [opts]
  * @returns {Promise<{ name: string, source: "process_env"|"user_env"|"missing", value: string|undefined }>}
@@ -140,27 +104,43 @@ export async function resolveCredentialEnv(name, opts = {}) {
 export const CREDENTIAL_SENTINEL = "M117_CREDENTIAL_SENTINEL_VALUE";
 
 /**
- * Assess a single worker's runtime readiness.
+ * Assess a single worker's CREDENTIAL availability (not full runtime health).
+ * - "available": all REQUIRED declared credentials resolve (process.env or user env).
+ * - "missing":  at least one REQUIRED credential is absent.
+ * - "not_required": the worker declares no required credential (no gate applies).
+ *
+ * resolvedEnv carries ALL inherited names that resolved (required + optional)
+ * for the ProcessBackend to inject into the child env + redactor. It MUST NOT
+ * be logged/serialized.
+ *
+ * Within one call, each name is read at most once (operation-scoped de-dupe);
+ * the NEXT call re-observes current state (no permanent cache). readerCallCount
+ * is returned so tests can assert no duplicate reads.
  * @param {{ agent: object, userEnvReader?: (name: string) => Promise<string|undefined> }} input
- * @returns {Promise<{ runtimeAvailability: "ready"|"credential_missing", missingCredentialEnvNames: string[], resolvedEnv: Record<string,string> }>}
- *   resolvedEnv carries the resolved credential VALUES for the ProcessBackend
- *   to inject into the child env + redactor. It MUST NOT be logged/serialized.
+ * @returns {Promise<{ credentialAvailability: "available"|"missing"|"not_required", missingCredentialEnvNames: string[], resolvedEnv: Record<string,string>, readerCallCount: number }>}
  */
 export async function assessWorkerReadiness({ agent, userEnvReader }) {
-  const names = resolveWorkerCredentialNames(agent);
-  const missing = [];
+  const required = requiredCredentialNames(agent);
+  const inherited = inheritedEnvNames(agent);
   const resolvedEnv = {};
-  for (const name of names) {
-    const r = await resolveCredentialEnv(name, { userEnvReader });
-    if (r.source === "missing") {
-      missing.push(name);
-    } else if (typeof r.value === "string") {
-      resolvedEnv[name] = r.value;
-    }
-  }
-  return {
-    runtimeAvailability: missing.length > 0 ? "credential_missing" : "ready",
-    missingCredentialEnvNames: missing,
-    resolvedEnv,
+  const missing = [];
+  const seen = new Set(); // operation-scoped de-dupe
+  let readerCallCount = 0;
+  const reader = userEnvReader ?? readWindowsUserEnv;
+  const wrappedReader = async (name) => {
+    readerCallCount += 1;
+    return reader(name);
   };
+  for (const name of inherited) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const r = await resolveCredentialEnv(name, { userEnvReader: wrappedReader });
+    if (typeof r.value === "string") resolvedEnv[name] = r.value;
+    // Only REQUIRED names participate in the missing gate.
+    if (required.includes(name) && r.source === "missing") missing.push(name);
+  }
+  const credentialAvailability = required.length === 0
+    ? "not_required"
+    : (missing.length > 0 ? "missing" : "available");
+  return { credentialAvailability, missingCredentialEnvNames: missing, resolvedEnv, readerCallCount };
 }

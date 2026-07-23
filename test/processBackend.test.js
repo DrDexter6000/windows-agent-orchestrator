@@ -483,10 +483,12 @@ test("TD-104: process backends declare only their assigned credential channels",
   const kimi = new KimiCodeBackend();
   const codex = new CodexBackend();
 
-  assert.deepEqual(claude.credentialEnvNames({ provider: { apiKeyEnv: "ZHIPU_API_KEY" } }), ["ZHIPU_API_KEY"]);
-  assert.deepEqual(claude.credentialEnvNames({}), []);
-  assert.deepEqual(kimi.credentialEnvNames({}), ["KIMI_API_KEY", "KIMI_BASE_URL", "KIMI_MODEL_NAME"]);
-  assert.deepEqual(codex.credentialEnvNames({}), ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"]);
+  // credentialEnvNames delegates to the env-policy SSOT, which keys off
+  // agent.backend. Pass the backend field so the SSOT resolves the static list.
+  assert.deepEqual(claude.credentialEnvNames({ backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" } }), ["ZHIPU_API_KEY"]);
+  assert.deepEqual(claude.credentialEnvNames({ backend: "claude-code" }), []);
+  assert.deepEqual(kimi.credentialEnvNames({ backend: "kimi-code" }), ["KIMI_API_KEY", "KIMI_BASE_URL", "KIMI_MODEL_NAME"]);
+  assert.deepEqual(codex.credentialEnvNames({ backend: "codex" }), ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"]);
 });
 
 test("TD-104: secret-like values are rejected from agent.env", async () => {

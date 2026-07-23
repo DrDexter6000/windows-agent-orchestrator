@@ -86,7 +86,7 @@ async function buildCertMap(runDir, customReadFile) {
  * @param {Function} [input.readRegistryFn] — injectable readRegistry for testing
  * @param {Function} [input.readFileFn] — injectable readFile for testing
  * @param {Function} [input.userEnvReader] — injectable Windows user-env reader (M11-7)
- * @returns {Promise<Array<{id, backend, model, certification, cwd, runtimeAvailability, missingCredentialEnvNames}>>}
+ * @returns {Promise<Array<{id, backend, model, certification, cwd, credentialAvailability, missingCredentialEnvNames}>>}
  */
 export async function getRegistryInventory({
   registryPath,
@@ -109,7 +109,7 @@ export async function getRegistryInventory({
       model: displayModel(agent),
       certification: certMap[agent.id] ?? null,
       cwd: agent.cwd,
-      runtimeAvailability: readiness.runtimeAvailability,
+      credentialAvailability: readiness.credentialAvailability,
       missingCredentialEnvNames: readiness.missingCredentialEnvNames,
     });
   }
