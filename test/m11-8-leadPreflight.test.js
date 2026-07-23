@@ -290,14 +290,14 @@ test("M11-8-ADV1: runs_list failure → workspace + workers still returned", asy
 
 // ===== Advisory independence: registry failure does not swallow workspace =====
 
-test("M11-8-ADV2: registry failure → workspace still returned", async () => {
+test("M11-8-ADV2: registry failure → workspace still returned; workers=null (not [])", async () => {
   const result = await aggregateLeadPreflight({
     workspaceBinding: { bound: true, source: "lead_session", root: "/repo", gitHead: "e".repeat(40), dirty: false },
     registryPath: "/missing.json", runDir: "/runs", userEnvReader: noopReader,
   });
   assert.equal(result.workspace.bound, true, "workspace still returned");
   assert.equal(result.checkStatus.workers, "unknown", "workers unknown");
-  assert.deepEqual(result.workers, []);
+  assert.equal(result.workers, null, "unknown workers is null (NOT [] — distinct from known-empty)");
   assert.ok(result.warnings.some((w) => /registry_list|inventory/i.test(w)));
 });
 
@@ -352,4 +352,85 @@ test("M11-8-ADV5: manualChecks point at original tools for independent re-verify
   assert.ok(result.manualChecks.some((m) => /workspace_status/.test(m)));
   assert.ok(result.manualChecks.some((m) => /registry_list/.test(m)));
   assert.ok(result.manualChecks.some((m) => /runs_list/.test(m)));
+});
+
+// ===== Truthfulness/boundedness RED→GREEN (CTO micro-closeout) =====
+
+// T-1: bound A, request select illegal B → must NOT be complete; explicit failed_using_prior.
+test("M11-8-T1: failed selection → workspaceSelection=failed_using_prior, complete=false", async () => {
+  // All other sections succeed, so WITHOUT the fix complete would be true.
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "a".repeat(40), dirty: false },
+    selectionFailed: true,
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => [{ id: "w", backend: "claude-code", model: "m", certification: null, credentialAvailability: "not_required", cwd: "/A", missingCredentialEnvNames: [] }],
+    listRunsFn: async () => ({ runs: [], matchedCount: 0 }),
+  });
+  assert.equal(result.workspaceSelection, "failed_using_prior");
+  assert.equal(result.checkStatus.workspace, "warning");
+  assert.equal(result.complete, false, "failed selection MUST NOT be complete even if other sections observed");
+  assert.ok(result.warnings.some((w) => /selection failed/i.test(w)), "explicit warning about prior selection");
+});
+
+// T-2: resolver threw (binding null) → workspace=null + unknown (not faked bound:false).
+test("M11-8-T2: resolver threw → workspace=null, checkStatus.workspace=unknown", async () => {
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: null,
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => [],
+  });
+  assert.equal(result.workspace, null, "unknown workspace is null (NOT {bound:false})");
+  assert.equal(result.checkStatus.workspace, "unknown");
+});
+
+// T-3: registry throws → workers=null; listRuns throws → activeRuns=null (distinct from known-empty).
+test("M11-8-T3: registry/runs throw → null (not empty array)", async () => {
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "b".repeat(40), dirty: false },
+    registryPath: "/missing.json", runDir: "/runs",
+    listRunsFn: async () => { throw new Error("boom"); },
+  });
+  assert.equal(result.workers, null, "unreadable workers = null (not [])");
+  assert.equal(result.activeRuns, null, "unreadable activeRuns = null (not [])");
+  assert.equal(result.checkStatus.workers, "unknown");
+  assert.equal(result.checkStatus.activeRuns, "unknown");
+});
+
+// T-4: >10 active runs → capped at 10, activeRunCount + truncated reported.
+test("M11-8-T4: many active runs → capped at 10, count + truncated", async () => {
+  const many = Array.from({ length: 25 }, (_, i) => ({ runId: `run_${i}`, agentId: "w", state: "running", terminal: false, updatedAt: null }));
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "c".repeat(40), dirty: false },
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => [],
+    listRunsFn: async () => ({ runs: many, matchedCount: 25 }),
+  });
+  assert.ok(result.activeRuns.length <= 10, "active runs capped at 10");
+  assert.equal(result.activeRunCount, 25, "true count reported");
+  assert.equal(result.activeRunsTruncated, true, "truncation flag set");
+});
+
+// T-5: failed selection via real MCP tool → payload has workspaceSelection + complete=false.
+test("M11-8-T5: MCP lead_preflight failed selection → explicit failed_using_prior, not complete", async () => {
+  const { createWaoMcpServer } = await import("../src/mcp/server.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m118-t5-"));
+  const wsA = mkdtempSync(join(tmpdir(), "wao-m118-t5-a-"));
+  const notGit = mkdtempSync(join(tmpdir(), "wao-m118-t5-nogit-"));
+  try {
+    makeGitRepo(wsA);
+    const reg = makeRegistry(dir, { w: { backend: "claude-code", cwd: wsA } });
+    const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
+    const client = await buildClient(server);
+    try {
+      // Select A first.
+      await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: wsA } });
+      // Request B (illegal) — must report failed_using_prior, NOT complete.
+      const res = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: notGit } });
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(parsed.workspaceSelection, "failed_using_prior");
+      assert.equal(parsed.complete, false);
+      // The reported workspace is still A (prior), explicitly flagged.
+      assert.equal(parsed.workspace.bound, true);
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); cleanupDir(wsA); cleanupDir(notGit); }
 });

@@ -53,15 +53,32 @@ import { getRegistryInventory } from "./registryInventory.js";
  * @property {string|null} updatedAt
  */
 
+// Cap on active runs returned in one preflight (bounded to keep the advisory
+// result small even under runaway conditions). The TRUE count is reported
+// separately as activeRunCount + activeRunsTruncated.
+const ACTIVE_RUNS_CAP = 10;
+
 /**
  * Aggregate the mechanical preflight facts. Each section is settled
  * independently — a throw in one section is captured and reported as a warning,
  * never swallowing the others.
  *
+ * Truthfulness contract (M11-8A closeout):
+ *   - "unknown" (could not read) is NEVER faked as a known-empty/known-false
+ *     value. An unreadable section returns null (or unknown), NOT [] / false.
+ *     This keeps "could not confirm" structurally distinct from "confirmed none".
+ *   - A failed workspace selection is reported explicitly via workspaceSelection
+ *     = "failed_using_prior", checkStatus.workspace = "warning", complete = false
+ *     — so a Lead cannot misread "stuck on prior project A" as "selected B".
+ *   - complete is true ONLY when every requested check was reliably observed
+ *     AND no workspace selection failure occurred.
+ *
  * @param {object} input
- * @param {{bound:boolean, source?:string, root?:string, gitHead?:string, dirty?:boolean}} [input.workspaceBinding]
+ * @param {{bound:boolean, source?:string, root?:string, gitHead?:string, dirty?:boolean}|null} [input.workspaceBinding]
  *   The already-resolved workspace binding (from the MCP adapter's session state).
- *   Omitted/null → unbound.
+ *   null/undefined when the resolver itself threw (→ unknown, not faked unbound).
+ * @param {boolean} [input.selectionFailed] — true when an optional workspaceRoot
+ *   selection was requested but failed (the prior binding, if any, is unchanged).
  * @param {string} input.registryPath
  * @param {string} input.runDir
  * @param {Function} [input.userEnvReader] — for credential readiness
@@ -72,6 +89,7 @@ import { getRegistryInventory } from "./registryInventory.js";
  */
 export async function aggregateLeadPreflight({
   workspaceBinding,
+  selectionFailed = false,
   registryPath,
   runDir,
   userEnvReader,
@@ -82,30 +100,47 @@ export async function aggregateLeadPreflight({
   const warnings = [];
   const observations = [];
   const checkStatus = {};
+  let workspaceSelection = null;
 
   // --- Section 1: workspace (already resolved by the adapter) ---
-  const workspace = workspaceBinding && workspaceBinding.bound
-    ? {
-        bound: true,
-        source: workspaceBinding.source ?? null,
-        gitHead: workspaceBinding.gitHead ?? null,
-        dirty: workspaceBinding.dirty ?? null,
-      }
-    : { bound: false, source: null, gitHead: null, dirty: null };
-  checkStatus.workspace = "observed";
-  if (!workspace.bound) {
+  // Distinguish three cases:
+  //   (a) resolver threw → workspaceBinding is null → UNKNOWN (not faked unbound)
+  //   (b) bound → observed
+  //   (c) not bound (resolver returned bound:false) → observed (known unbound)
+  let workspace = null;
+  if (workspaceBinding == null) {
+    // Resolver threw — cannot confirm binding state.
+    checkStatus.workspace = "unknown";
+    warnings.push("workspace binding could not be resolved — use workspace_status to check directly");
+  } else if (workspaceBinding.bound) {
+    workspace = {
+      bound: true,
+      source: workspaceBinding.source ?? null,
+      gitHead: workspaceBinding.gitHead ?? null,
+      dirty: workspaceBinding.dirty ?? null,
+    };
+    checkStatus.workspace = "observed";
+    if (workspace.dirty) {
+      observations.push("workspace has uncommitted changes (reported only; not a dispatch blocker)");
+    }
+  } else {
+    workspace = { bound: false, source: null, gitHead: null, dirty: null };
+    checkStatus.workspace = "observed";
     observations.push("workspace not bound — call workspace_select or lead_preflight with workspaceRoot");
-  } else if (workspace.dirty) {
-    observations.push("workspace has uncommitted changes (reported only; not a dispatch blocker)");
+  }
+  // A failed selection must be EXPLICIT even if a prior binding is still active.
+  if (selectionFailed) {
+    workspaceSelection = "failed_using_prior";
+    checkStatus.workspace = "warning";
+    warnings.push("workspace selection failed — prior session selection (if any) is unchanged; the reported workspace is the PRIOR selection, not the requested one");
   }
 
   // --- Section 2: worker credential availability (independent) ---
-  let workers = [];
+  // unknown → null (NOT []), so "could not read" is distinct from "zero workers".
+  let workers = null;
   try {
     const invFn = getRegistryInventoryFn ?? getRegistryInventory;
     const agents = await invFn({ registryPath, runDir, userEnvReader });
-    // Project only safe fields (drop cwd, missingCredentialEnvNames values are
-    // names-only; the aggregator output keeps credentialAvailability only).
     workers = agents.map((a) => ({
       id: a.id,
       backend: a.backend,
@@ -114,7 +149,6 @@ export async function aggregateLeadPreflight({
       credentialAvailability: a.credentialAvailability,
     }));
     checkStatus.workers = "observed";
-    // Advisory observations about conditional / credential-missing workers.
     const conditional = workers.filter((w) => w.certification === "conditional");
     const missing = workers.filter((w) => w.credentialAvailability === "missing");
     if (conditional.length > 0) {
@@ -128,44 +162,51 @@ export async function aggregateLeadPreflight({
     warnings.push("worker inventory could not be read — use registry_list to check directly");
   }
 
-  // --- Section 3: active runs (independent; only when workspace is bound) ---
-  let activeRuns = [];
-  if (workspace.bound && typeof listRunsFn === "function") {
+  // --- Section 3: active runs (independent; bounded; only when bound & readable) ---
+  let activeRuns = null;
+  let activeRunCount = null;
+  let activeRunsTruncated = false;
+  if (workspace && workspace.bound && typeof listRunsFn === "function") {
     try {
       const result = await listRunsFn({
         runDir,
         activeOnly: true,
+        latest: ACTIVE_RUNS_CAP,
         authorizedWorkspaceRoot: workspaceBinding.root,
         knownAgentIds,
       });
-      activeRuns = (result.runs ?? []).map((r) => ({
+      const all = result.runs ?? [];
+      activeRunCount = typeof result.matchedCount === "number" ? result.matchedCount : all.length;
+      activeRuns = all.slice(0, ACTIVE_RUNS_CAP).map((r) => ({
         runId: r.runId,
         agentId: r.agentId,
         state: r.state,
         terminal: r.terminal,
         updatedAt: r.updatedAt ?? null,
       }));
+      activeRunsTruncated = activeRunCount > activeRuns.length;
       checkStatus.activeRuns = "observed";
-      if (activeRuns.length > 0) {
-        observations.push(`${activeRuns.length} active run(s) in this workspace (reported only; not auto-stopped)`);
+      if (activeRunCount > 0) {
+        observations.push(`${activeRunCount} active run(s) in this workspace (reported only; not auto-stopped)`);
       }
     } catch {
       checkStatus.activeRuns = "unknown";
       warnings.push("active-run query could not be read — use runs_list to check directly");
     }
-  } else if (!workspace.bound) {
+  } else if (workspace && !workspace.bound) {
     checkStatus.activeRuns = "unknown";
     observations.push("active-run recovery check skipped (workspace not bound)");
+  } else {
+    // workspace unknown (resolver threw) → cannot determine; leave activeRuns null.
+    checkStatus.activeRuns = "unknown";
   }
 
-  // complete = every section settled to "observed" (mechanical: were the facts
-  // readable?). It does NOT mean "safe to dispatch" — that is the Lead's call.
+  // complete = every section reliably observed AND no selection failure.
+  // A selection failure or any "unknown"/"warning" makes it false.
   const sections = ["workspace", "workers", "activeRuns"];
-  const complete = sections.every((s) => checkStatus[s] === "observed");
+  const allObserved = sections.every((s) => checkStatus[s] === "observed");
+  const complete = allObserved && !selectionFailed;
 
-  // manualChecks point at the original tools so the Lead can re-verify any
-  // section independently (and may reach a different conclusion from direct
-  // evidence — that is allowed and recorded as friction).
   const manualChecks = [
     "workspace_status — verify binding independently",
     "registry_list — verify worker certification + credential availability",
@@ -174,8 +215,11 @@ export async function aggregateLeadPreflight({
 
   return {
     workspace,
+    workspaceSelection,
     workers,
     activeRuns,
+    activeRunCount,
+    activeRunsTruncated,
     observations,
     warnings,
     manualChecks,
