@@ -787,6 +787,8 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 路径投影的安全边界：每个 path 经 `src/delivery.js` 的 repo-relative 校验 SSOT 复验（拒绝绝对 Windows/POSIX/UNC、`..`/`.` traversal、空 segment、尾分隔符），并额外限制长度 1..512、无控制字符、无 NUL、统一 forward-slash。任何 malformed path 一律 fail-closed —— 整个 projection 不返回部分结果，调用折叠为固定 `run_delivery failed`，不泄漏恶意值。失败返回固定 `run_delivery failed`（不拼接异常、路径或 secret）。
 
+**M11-8C packaging failure variant**：当 transcript 中没有 committed DeliveryRef、但存在绑定当前 runId 的 durable `run.delivery_failed`（如 `base_commit_mismatch`——worker 移动了 HEAD），`run_delivery` 返回**结构化失败变体**而非固定错误：`deliveryAvailable:false` + `deliveryFailure.code`（闭集安全 code，未知/损坏/注入 code 投影为 `unknown`，不回显原值；不返回 message/path/command/stderr/prompt/worktree）。成功 delivery 增加 `deliveryAvailable:true`（既有字段不变）。无 delivery request、transcript 缺失/损坏等情况仍返回固定 `run_delivery failed`（不假报 packaging failure）。`run_delivery_decide` 在没有 DeliveryRef 时仍不可调用成功。`run_diagnose` 对此类 run 返回 `category:"delivery_packaging_failed"`（消费 `run.delivery_failed`，只给事实不给处方/重试）。
+
 annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`。
 
 ### MCP `run_delivery_review`（安全 delivery diff 审查，M11-3C）

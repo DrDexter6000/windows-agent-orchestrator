@@ -147,6 +147,10 @@ const { OpenCodeServeBackend } = await import("../src/backends/opencodeServe.js"
 /** Build config with mock backend. */
 function makeConfig(runDir, repoDir, fetchImpl) {
   const backend = new OpenCodeServeBackend({ fetchImpl, timeout: 1000, retries: 0 });
+  // M11-8C: delivery mode requires role-contract support (to inject the
+  // Delivery Execution Contract). Production delivery uses process backends
+  // that declare this natively; this fake HTTP backend drives the lifecycle.
+  backend.supportsRoleContract = true;
   return {
     registry: "x",
     runDir,

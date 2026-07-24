@@ -43,6 +43,7 @@ export const DIAGNOSIS_CATEGORIES = Object.freeze([
   "no_effect",
   "crash",
   "aborted_manual",
+  "delivery_packaging_failed",
   "unknown",
   "none",
 ]);
@@ -80,6 +81,21 @@ export function diagnoseFailure(events) {
   // 空输入：无法判断发生了什么 → unknown。
   if (evs.length === 0) return { category: "unknown", evidence: [] };
   const state = findState(evs);
+
+  // M11-8C Package B: a durable run.delivery_failed means the WAO control plane
+  // could not package the delivery (e.g. base_commit_mismatch — the worker moved
+  // HEAD off the frozen base). This is checked BEFORE the completed-state short
+  // circuit because a delivery run may reach terminal=completed (the worker
+  // finished) yet still fail packaging afterward. The category is actionable;
+  // the signal uses only the safe event TYPE (no message/path/code echo). No
+  // prescription or auto-retry — the Lead decides.
+  const deliveryFailed = evs.find((e) => e.type === "run.delivery_failed");
+  if (deliveryFailed) {
+    return {
+      category: "delivery_packaging_failed",
+      evidence: [{ eventType: "run.delivery_failed", fact: "delivery packaging failed (control-plane-owned commit could not be created)" }],
+    };
+  }
 
   // 成功 run：无需诊断。
   if (state === "completed") return { category: "none", evidence: [] };

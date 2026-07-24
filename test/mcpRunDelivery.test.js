@@ -94,8 +94,11 @@ test("M9-6B-02: run_delivery returns safe fields incl. bounded changedPaths, no 
     const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     // M11-1A: changedPaths + changedPathsTruncated are now part of the safe output set.
-    const allowed = new Set(["runId", "terminalState", "baseCommit", "deliveryCommit", "changedFileCount", "changedPaths", "changedPathsTruncated", "verificationStatus", "verificationFailureCode", "acceptanceStatus", "decisionType"]);
+    // M11-8C: deliveryAvailable (success discriminator) + deliveryFailure (null on success).
+    const allowed = new Set(["runId", "deliveryAvailable", "terminalState", "baseCommit", "deliveryCommit", "changedFileCount", "changedPaths", "changedPathsTruncated", "verificationStatus", "verificationFailureCode", "acceptanceStatus", "decisionType", "deliveryFailure"]);
     for (const k of Object.keys(parsed)) assert.ok(allowed.has(k), `unexpected key: ${k}`);
+    assert.equal(parsed.deliveryAvailable, true, "success variant has deliveryAvailable:true");
+    assert.equal(parsed.deliveryFailure, null, "no deliveryFailure on success");
 
     assert.equal(parsed.changedFileCount, 2, "count derived from array length");
     assert.equal(parsed.verificationStatus, "passed");
@@ -419,13 +422,16 @@ test("M11-1A-01: run_delivery output field set is exactly old fields + changedPa
   try {
     const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    // M11-8C: added deliveryAvailable (success discriminator) + deliveryFailure (null here).
     const expectedKeys = new Set([
-      "runId", "terminalState", "baseCommit", "deliveryCommit",
+      "runId", "deliveryAvailable", "terminalState", "baseCommit", "deliveryCommit",
       "changedFileCount", "changedPaths", "changedPathsTruncated",
       "verificationStatus", "verificationFailureCode", "acceptanceStatus", "decisionType",
+      "deliveryFailure",
     ]);
     assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys,
       `field set mismatch; got ${Object.keys(parsed).sort()}`);
+    assert.equal(parsed.deliveryAvailable, true, "success variant");
   } finally { await client.close(); await server.close(); }
 });
 
@@ -636,10 +642,13 @@ test("M11-1A-08: run_delivery outputSchema declares changedPaths maxItems=64 + i
     const rd = tools.tools.find((t) => t.name === "run_delivery");
     const cp = rd.outputSchema?.properties?.changedPaths;
     assert.ok(cp, "run_delivery outputSchema must declare changedPaths");
-    assert.equal(cp.type, "array");
-    assert.equal(cp.maxItems, 64, "changedPaths outputSchema maxItems must be 64");
-    assert.equal(cp.items?.maxLength, 512, "changedPaths items maxLength must be 512");
-    assert.equal(cp.items?.minLength, 1, "changedPaths items minLength must be 1");
+    // M11-8C: changedPaths is now nullable (success/failure variant), so it
+    // serializes as anyOf:[array, null]. Resolve the array branch.
+    const arrBranch = cp.type === "array" ? cp : (cp.anyOf ?? []).find((b) => b.type === "array");
+    assert.ok(arrBranch, "changedPaths declares an array branch");
+    assert.equal(arrBranch.maxItems, 64, "changedPaths outputSchema maxItems must be 64");
+    assert.equal(arrBranch.items?.maxLength, 512, "changedPaths items maxLength must be 512");
+    assert.equal(arrBranch.items?.minLength, 1, "changedPaths items minLength must be 1");
   } finally { await client.close(); await server.close(); }
 });
 

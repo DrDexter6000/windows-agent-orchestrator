@@ -122,7 +122,17 @@ function makeManager(runDir, repoDir, fetchImpl, opts = {}) {
   return new RunManager({
     config,
     readRegistry,
-    backendFor: () => new OpenCodeServeBackend({ fetchImpl, timeout: 1000, retries: 0 }),
+    // M11-8C: delivery mode now requires a backend that supports role-contract
+    // injection (to deliver the control-owned Delivery Execution Contract).
+    // These integration tests drive the packager via an opencode-serve backend;
+    // declare the capability so the delivery contract can be carried (the fake
+    // HTTP event stream is unaffected). Production delivery uses claude-code/
+    // codex/kimi-code which declare supportsRoleContract = true natively.
+    backendFor: () => {
+      const b = new OpenCodeServeBackend({ fetchImpl, timeout: 1000, retries: 0 });
+      b.supportsRoleContract = true;
+      return b;
+    },
     ...opts.manager,
   });
 }
@@ -706,7 +716,14 @@ function makeManagerWithPackager(runDir, repoDir, fetchImpl, packageDeliveryFn, 
   return new RunManager({
     config,
     readRegistry,
-    backendFor: () => new OpenCodeServeBackend({ fetchImpl, timeout: 1000, retries: 0 }),
+    // M11-8C: declare role-contract support so delivery mode can inject the
+    // Delivery Execution Contract (production delivery uses process backends
+    // that declare this natively; this fake HTTP backend drives the packager).
+    backendFor: () => {
+      const b = new OpenCodeServeBackend({ fetchImpl, timeout: 1000, retries: 0 });
+      b.supportsRoleContract = true;
+      return b;
+    },
     packageDeliveryFn,
     verifyDeliveryFn: opts.verifyDeliveryFn ?? dummyVerifier,
   });

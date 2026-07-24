@@ -18,6 +18,52 @@ import { join } from "node:path";
 import { readTranscript, findState, findLastEventSeq, JsonlTranscript } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
 
+// M11-8C Package B: the closed set of delivery PACKAGING failure codes that
+// may appear on a durable run.delivery_failed event (the codes packageDelivery
+// throws as DeliveryError.deliveryCode). Used to project a safe, actionable
+// failure code — unknown/malformed values map to "unknown", never echoed.
+// Verification failure codes (SAFE_FAILURE_CODES in the MCP layer) are a
+// DISTINCT set and are not included here.
+const SAFE_PACKAGING_FAILURE_CODES = new Set([
+  "empty_diff",
+  "disallowed_path",
+  "pre_staged_changes",
+  "not_a_git_repo",
+  "primary_checkout",
+  "wrong_branch",
+  "base_commit_mismatch",
+  "detached_head",
+  "commit_integrity",
+  "staging_mismatch",
+  "commit_failed",
+  "cleanup_failed",
+  "worktree_path_mismatch",
+  "artifact_mismatch",
+  "invalid_allowed_paths",
+  "invalid_base_commit",
+  "invalid_input",
+  "invalid_isolation",
+  "invalid_mode",
+  "invalid_run_id",
+  "invalid_verification",
+]);
+
+/**
+ * Find the latest run.delivery_failed event bound to the given runId.
+ * Binding: the event's runId MUST equal the requested runId (defends against a
+ * cross-run event in a concatenated/corrupt transcript). Returns null if none.
+ * @param {Array} events
+ * @param {string} runId
+ * @returns {object|null}
+ */
+function _findBoundDeliveryFailed(events, runId) {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const e = events[i];
+    if (e.type === "run.delivery_failed" && e.runId === runId) return e;
+  }
+  return null;
+}
+
 // ===== Private: delivery reconstruction (migrated from runs.js) =====
 
 /**
@@ -83,7 +129,27 @@ export async function getRunDelivery({ runId, runDir, readTranscriptFn }) {
   const terminalState = findState(events);
   const { latestRef, decisionEvent, deliveryCommit } = _reconstructDelivery(events);
 
+  // M11-8C Package B: if there is no committed DeliveryRef, but there IS a
+  // durable run.delivery_failed bound to this runId, return a SAFE STRUCTURED
+  // FAILURE variant. This is the production-RED fix: previously getRunDelivery
+  // threw ("No committed delivery found"), so MCP collapsed it to the generic
+  // `run_delivery failed` and the Lead lost the actionable base_commit_mismatch
+  // fact. Now the failure code is projected through a closed set; unknown /
+  // malformed / injected values map to "unknown" and are never echoed.
   if (!latestRef || !deliveryCommit) {
+    const failedEvent = _findBoundDeliveryFailed(events, runId);
+    if (failedEvent) {
+      const rawCode = failedEvent.deliveryCode;
+      const code = typeof rawCode === "string" && SAFE_PACKAGING_FAILURE_CODES.has(rawCode)
+        ? rawCode
+        : "unknown";
+      return {
+        runId,
+        terminalState,
+        deliveryAvailable: false,
+        deliveryFailure: { code },
+      };
+    }
     throw new Error(`No committed delivery found for run ${runId}`);
   }
 
@@ -95,6 +161,7 @@ export async function getRunDelivery({ runId, runDir, readTranscriptFn }) {
   return {
     runId,
     terminalState,
+    deliveryAvailable: true,
     deliveryRef: latestRef,
     verification: {
       status: verificationStatus,

@@ -388,19 +388,41 @@ const RUN_DELIVERY_INPUT = z.object({
   runId: z.string().min(1),
 }).strict();
 
+// M11-8C Package B: a discriminated output expressed as a single strict object
+// with a `deliveryAvailable` discriminator. When true, the success fields are
+// present; when false, only `deliveryFailure` is present. A superRefine enforces
+// the mutual exclusivity at the zod layer (the MCP SDK's zod→JSON-Schema
+// conversion does not reliably handle z.discriminatedUnion, so the variant is
+// expressed as one strict object with optional fields + a refine).
+const PACKAGING_FAILURE_CODE_ENUM = z.enum([
+  "empty_diff", "disallowed_path", "pre_staged_changes", "not_a_git_repo",
+  "primary_checkout", "wrong_branch", "base_commit_mismatch", "detached_head",
+  "commit_integrity", "staging_mismatch", "commit_failed", "cleanup_failed",
+  "worktree_path_mismatch", "artifact_mismatch", "invalid_allowed_paths",
+  "invalid_base_commit", "invalid_input", "invalid_isolation", "invalid_mode",
+  "invalid_run_id", "invalid_verification", "unknown",
+]);
+
 const RUN_DELIVERY_OUTPUT = z.object({
   runId: z.string().min(1),
+  deliveryAvailable: z.boolean(),
   terminalState: TERMINAL_STATE_ENUM,
-  baseCommit: COMMIT_HASH_SCHEMA,
-  deliveryCommit: COMMIT_HASH_SCHEMA,
-  changedFileCount: z.number().int().nonnegative(),
-  changedPaths: z.array(z.string().min(1).max(512)).max(CHANGED_PATHS_LIMIT),
-  changedPathsTruncated: z.boolean(),
-  verificationStatus: VERIFICATION_STATUS_ENUM,
+  // Success-only fields (non-null iff deliveryAvailable === true). The handler
+  // builds exactly one variant; the mutual exclusivity is enforced by the
+  // handler's closed-set construction (not by a zod superRefine, which the MCP
+  // SDK's zod→JSON-Schema converter does not reliably serialize).
+  baseCommit: COMMIT_HASH_SCHEMA.nullable(),
+  deliveryCommit: COMMIT_HASH_SCHEMA.nullable(),
+  changedFileCount: z.number().int().nonnegative().nullable(),
+  changedPaths: z.array(z.string().min(1).max(512)).max(CHANGED_PATHS_LIMIT).nullable(),
+  changedPathsTruncated: z.boolean().nullable(),
+  verificationStatus: VERIFICATION_STATUS_ENUM.nullable(),
   verificationFailureCode: FAILURE_CODE_ENUM.nullable(),
-  acceptanceStatus: ACCEPTANCE_STATUS_ENUM,
+  acceptanceStatus: ACCEPTANCE_STATUS_ENUM.nullable(),
   decisionType: DECISION_TYPE_ENUM.nullable(),
-});
+  // Failure-only field (non-null iff deliveryAvailable === false).
+  deliveryFailure: z.object({ code: PACKAGING_FAILURE_CODE_ENUM }).nullable(),
+}).strict();
 
 const RUN_DELIVERY_ANNOTATIONS = {
   readOnlyHint: true,
@@ -1493,6 +1515,36 @@ export function createWaoMcpServer({
         // Use the request runId — never echo the service result's runId,
         // which could differ and leak arbitrary content.
         if (delivery.runId !== runId) throw new Error("runId mismatch");
+
+        // M11-8C Package B: structured packaging-failure variant. The service
+        // already projected the code through a closed set (unknown for
+        // malformed). Build + parse the failure payload; no message/path/command
+        // leak. terminalState is validated against the closed RUN_STATES set.
+        if (delivery.deliveryAvailable === false) {
+          const terminalState = delivery.terminalState;
+          if (!RUN_STATES.includes(terminalState)) throw new Error("bad terminalState");
+          const failurePayload = {
+            runId,
+            deliveryAvailable: false,
+            terminalState,
+            baseCommit: null,
+            deliveryCommit: null,
+            changedFileCount: null,
+            changedPaths: null,
+            changedPathsTruncated: null,
+            verificationStatus: null,
+            verificationFailureCode: null,
+            acceptanceStatus: null,
+            decisionType: null,
+            deliveryFailure: { code: delivery.deliveryFailure?.code ?? "unknown" },
+          };
+          const parsed = RUN_DELIVERY_OUTPUT.parse(failurePayload);
+          return {
+            content: [{ type: "text", text: JSON.stringify(parsed) }],
+            structuredContent: parsed,
+          };
+        }
+
         const ref = delivery.deliveryRef ?? {};
         // Every scalar must pass a closed-set check. Malformed values throw
         // → caught by the outer try/catch → fixed safe error.
@@ -1533,6 +1585,7 @@ export function createWaoMcpServer({
         if (!RUN_STATES.includes(terminalState)) throw new Error("bad terminalState");
         const payload = {
           runId,
+          deliveryAvailable: true,
           terminalState,
           baseCommit,
           deliveryCommit,
@@ -1543,11 +1596,12 @@ export function createWaoMcpServer({
           verificationFailureCode,
           acceptanceStatus,
           decisionType,
+          deliveryFailure: null,
         };
-        RUN_DELIVERY_OUTPUT.parse(payload);
+        const parsed = RUN_DELIVERY_OUTPUT.parse(payload);
         return {
-          content: [{ type: "text", text: JSON.stringify(payload) }],
-          structuredContent: payload,
+          content: [{ type: "text", text: JSON.stringify(parsed) }],
+          structuredContent: parsed,
         };
       } catch {
         return {
