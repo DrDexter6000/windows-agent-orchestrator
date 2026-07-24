@@ -48,6 +48,18 @@ export const CANONICAL_AGENT_ID_MAX = 128;
  */
 export const CANONICAL_AGENT_ID_PATTERN = "^[A-Za-z0-9._-]+$";
 
+/**
+ * Wire-visible pattern for a REAL canonical id — the alphabet above AND
+ * explicitly NOT the reserved "unknown" sentinel. This is the single
+ * JSON-Schema-level expression of "a real id, excluding the sentinel", so the
+ * MCP dispatch outputSchema can structurally reject "unknown" WITHOUT relying
+ * on zod .refine() (which JSON Schema serialization drops).
+ *
+ * The negative lookahead `(?!unknown$)` is standard regex and serializes into
+ * the wire pattern; it rejects exactly the literal "unknown" and nothing else.
+ */
+export const REAL_AGENT_ID_WIRE_PATTERN = "^(?!unknown$)[A-Za-z0-9._-]+$";
+
 const CANONICAL_AGENT_ID_RE = new RegExp(CANONICAL_AGENT_ID_PATTERN);
 
 /**

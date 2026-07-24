@@ -60,38 +60,38 @@ import {
   UNKNOWN_AGENT_ID,
   CANONICAL_AGENT_ID_MAX,
   CANONICAL_AGENT_ID_PATTERN,
+  REAL_AGENT_ID_WIRE_PATTERN,
 } from "../canonicalAgentId.js";
 
 // M11-8B final closeout: TWO distinct agentId schemas, both sourced from the
-// SAME SSOT pattern/max/sentinel (no hand-maintained second regex anywhere).
+// SAME SSOT (no hand-maintained second regex anywhere). The split is expressed
+// at the JSON-SCHEMA layer — it must NOT rely on zod .refine(), which JSON
+// Schema serialization drops (that was the prior gap: both schemas serialized
+// to the identical pattern, so the wire could not distinguish them).
 //
-//   REAL_AGENT_ID_SCHEMA — used by run_dispatch output. A dispatch result is a
-//     binding from the control plane: it MUST be a real canonical id (the one
-//     the Lead requested). The sentinel "unknown" is NOT allowed here — a
-//     dispatch may never return an unconfirmed identity.
+//   REAL_AGENT_ID_SCHEMA — used by run_dispatch output. Uses REAL_AGENT_ID_
+//     WIRE_PATTERN, whose negative lookahead `(?!unknown$)` structurally
+//     rejects the literal "unknown" at the wire layer. A dispatch result is a
+//     binding from the control plane: it MUST be a real canonical id.
 //
 //   READ_AGENT_ID_SCHEMA — used by run_status / run_wait / run_collect output.
-//     These read existing transcripts, which may be corrupt/stale. They return
-//     either a real canonical id OR the literal "unknown" sentinel (consumer-
-//     friendly: the Lead keeps supervising; the tool never fails on identity).
-//
-// Both reuse the SSOT pattern + max. The read schema additionally enumerates
-// the sentinel so it is structurally distinct from any real id.
+//     A union of the REAL pattern and the literal sentinel. It serializes to
+//     anyOf, so the wire visibly expresses "real id OR unknown". Read tools
+//     return the sentinel when a transcript is corrupt/stale.
 const REAL_AGENT_ID_SCHEMA = z.string()
-  .regex(new RegExp(CANONICAL_AGENT_ID_PATTERN))
+  .regex(new RegExp(REAL_AGENT_ID_WIRE_PATTERN))
   .min(1)
-  .max(CANONICAL_AGENT_ID_MAX)
-  // Exclude the reserved sentinel — a real id is never "unknown".
-  .refine((v) => v !== UNKNOWN_AGENT_ID, { message: "must not be the reserved sentinel" });
+  .max(CANONICAL_AGENT_ID_MAX);
 
-const READ_AGENT_ID_SCHEMA = z.string()
-  .regex(new RegExp(CANONICAL_AGENT_ID_PATTERN))
+const REAL_AGENT_ID_BRANCH = z.string()
+  .regex(new RegExp(REAL_AGENT_ID_WIRE_PATTERN))
   .min(1)
-  .max(CANONICAL_AGENT_ID_MAX)
-  // Read tools allow the literal sentinel OR any real id.
-  .refine((v) => v === UNKNOWN_AGENT_ID || isValidCanonicalAgentId(v), {
-    message: "must be a real canonical id or the 'unknown' sentinel",
-  });
+  .max(CANONICAL_AGENT_ID_MAX);
+
+const READ_AGENT_ID_SCHEMA = z.union([
+  REAL_AGENT_ID_BRANCH,
+  z.literal(UNKNOWN_AGENT_ID),
+]);
 
 // Stable server identity advertised at initialize.
 const SERVER_NAME = "wao-mcp";
@@ -1213,6 +1213,18 @@ export function createWaoMcpServer({
       annotations: RUN_DISPATCH_ANNOTATIONS,
     },
     async ({ agentId, prompt, delivery }) => {
+      // M11-8B final: validate the requested agentId at the VERY TOP, before
+      // workspace resolution or any dispatcher call. An invalid or reserved
+      // ("unknown") id collapses to the fixed dispatch error immediately — the
+      // workspace resolver is not invoked and the dispatcher call count stays
+      // 0. This is the first trust boundary: a non-canonical id never reaches
+      // the control plane's dispatch path.
+      if (!isValidCanonicalAgentId(agentId)) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: DISPATCH_ERROR_TEXT }],
+        };
+      }
       // M10-pre2: re-resolve and prove workspace BEFORE any dispatch.
       // State-changing calls do their own authority proof — they do NOT trust
       // a prior workspace_status result. If the workspace is not bound,

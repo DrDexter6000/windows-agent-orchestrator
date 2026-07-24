@@ -280,16 +280,14 @@ test("FINAL-READ: corrupt transcript status → agentId unknown, tool still usab
 // Schema split: dispatch agentId is real-only; read tools allow unknown literal
 // =====================================================================
 //
-// The wire-visible outputSchema (JSON Schema over the MCP transport) cannot
-// express zod .refine() predicates, so both schemas serialize to the same
-// shared SSOT pattern/max. The STRUCTURAL split (dispatch rejects "unknown";
-// read tools accept it) is enforced by the handler parse step, proven by the
-// RED1 / READ behavior tests above. This test asserts what IS verifiable over
-// the transport: both schemas reuse the exact SSOT alphabet + max (no second
-// hand-maintained regex anywhere), and the dispatch behavior rejects the
-// sentinel while the read behavior accepts it.
+// M11-8B wire closeout: the split is now expressible at the JSON-Schema layer
+// (no reliance on zod .refine(), which the wire drops). dispatch uses the
+// SSOT real-id wire pattern whose negative lookahead rejects "unknown"; read
+// tools use a union of that real pattern and the literal sentinel. The
+// comprehensive wire distinction is proven by WIRE-RED2; this test keeps a
+// focused assertion that the two schemas are NOT identical at the wire layer.
 
-test("FINAL-SCHEMA: dispatch + read agentId schemas share the SSOT alphabet/max; behavior enforces the sentinel split", async () => {
+test("FINAL-SCHEMA: dispatch and read agentId wire schemas are distinct (dispatch rejects unknown)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-final-schema-"));
   try {
     makeGitRepo(dir);
@@ -303,11 +301,13 @@ test("FINAL-SCHEMA: dispatch + read agentId schemas share the SSOT alphabet/max;
       const status = tools.tools.find((t) => t.name === "run_status");
       const dispatchSchema = dispatch.outputSchema.properties.agentId;
       const statusSchema = status.outputSchema.properties.agentId;
-      // Both reuse the exact SSOT pattern (no hand-maintained second regex).
-      assert.equal(dispatchSchema.pattern, "^[A-Za-z0-9._-]+$", "dispatch uses SSOT pattern");
-      assert.equal(statusSchema.pattern, "^[A-Za-z0-9._-]+$", "status uses SSOT pattern");
-      assert.equal(dispatchSchema.maxLength, 128, "dispatch uses SSOT max");
-      assert.equal(statusSchema.maxLength, 128, "status uses SSOT max");
+      // The two wire schemas must NOT be identical (the split is wire-visible).
+      assert.notDeepEqual(dispatchSchema, statusSchema,
+        "dispatch and status agentId schemas differ at the wire layer");
+      // dispatch pattern explicitly excludes the sentinel via lookahead.
+      const dispatchRe = new RegExp(dispatchSchema.pattern);
+      assert.ok(!dispatchRe.test("unknown"), "dispatch wire pattern rejects 'unknown'");
+      assert.ok(dispatchRe.test("coder_low"), "dispatch wire pattern accepts a real id");
     } finally {
       await client.close();
       await server.close();
