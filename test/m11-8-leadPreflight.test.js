@@ -525,3 +525,97 @@ test("M11-8-FBC2: workers truncated at WORKERS_CAP", async () => {
   assert.equal(result.workers.length, WORKERS_CAP, "workers capped");
   assert.ok(result.warnings.some((w) => /truncated/i.test(w)), "truncation warning");
 });
+
+// ===== Final evidence: real MCP handler behavior (not just application-layer) =====
+
+// FE-1: real MCP lead_preflight with registry failure → exactly 1 read, workers=null.
+test("M11-8-FE1: MCP handler reads registry exactly ONCE on failure (real transport)", async () => {
+  const { createWaoMcpServer } = await import("../src/mcp/server.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m118-fe1-"));
+  const ws = mkdtempSync(join(tmpdir(), "wao-m118-fe1-ws-"));
+  try {
+    makeGitRepo(ws);
+    const reg = makeRegistry(dir, { w: { backend: "claude-code", cwd: ws } });
+    let readCount = 0;
+    const server = createWaoMcpServer({
+      registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader,
+      getRegistryInventoryFn: async () => { readCount += 1; throw new Error("snapshot failed"); },
+    });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: ws } });
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(readCount, 1, "registry read exactly once via real MCP handler");
+      assert.equal(parsed.workers, null, "failed read → null via MCP");
+      assert.equal(parsed.checkStatus.workers, "unknown");
+      assert.equal(parsed.complete, false);
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); cleanupDir(ws); }
+});
+
+// FE-2: fresh unbound session + illegal workspaceRoot → failed_unbound (NOT failed_using_prior).
+test("M11-8-FE2: fresh unbound + bad selection → failed_unbound via real MCP", async () => {
+  const { createWaoMcpServer } = await import("../src/mcp/server.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m118-fe2-"));
+  const notGit = mkdtempSync(join(tmpdir(), "wao-m118-fe2-nogit-"));
+  try {
+    const reg = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } });
+    const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
+    const client = await buildClient(server);
+    try {
+      // NO prior selection — fresh unbound session.
+      const res = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: notGit } });
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(parsed.workspaceSelection, "failed_unbound", "fresh unbound → failed_unbound, not failed_using_prior");
+      assert.equal(parsed.complete, false);
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); cleanupDir(notGit); }
+});
+
+// FE-3: prior selection active + illegal workspaceRoot → failed_using_prior.
+test("M11-8-FE3: prior selection + bad selection → failed_using_prior via real MCP", async () => {
+  const { createWaoMcpServer } = await import("../src/mcp/server.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m118-fe3-"));
+  const wsA = mkdtempSync(join(tmpdir(), "wao-m118-fe3-a-"));
+  const notGit = mkdtempSync(join(tmpdir(), "wao-m118-fe3-nogit-"));
+  try {
+    makeGitRepo(wsA);
+    const reg = makeRegistry(dir, { w: { backend: "claude-code", cwd: wsA } });
+    const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
+    const client = await buildClient(server);
+    try {
+      // Select A first.
+      await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: wsA } });
+      // Now request illegal B.
+      const res = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: notGit } });
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(parsed.workspaceSelection, "failed_using_prior", "prior active → failed_using_prior");
+      assert.equal(parsed.complete, false);
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); cleanupDir(wsA); cleanupDir(notGit); }
+});
+
+// FE-4: real output schema maxItems matches SSOT caps (not just "constant exists").
+test("M11-8-FE4: lead_preflight outputSchema maxItems matches SSOT caps", async () => {
+  const { ACTIVE_RUNS_CAP, WORKERS_CAP } = await import("../src/application/leadPreflight.js");
+  const { createWaoMcpServer } = await import("../src/mcp/server.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m118-fe4-"));
+  try {
+    const reg = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } });
+    const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
+    const client = await buildClient(server);
+    try {
+      const { tools } = await client.listTools();
+      const t = tools.find((x) => x.name === "lead_preflight");
+      assert.ok(t.outputSchema, "output schema declared");
+      const schema = t.outputSchema;
+      // .nullable() serializes as anyOf; the array branch is anyOf[0].
+      const workersSchema = schema.properties?.workers;
+      const workersArr = workersSchema?.anyOf ? workersSchema.anyOf[0] : workersSchema;
+      assert.equal(workersArr?.maxItems, WORKERS_CAP, `workers.maxItems === WORKERS_CAP (${WORKERS_CAP})`);
+      const activeRunsSchema = schema.properties?.activeRuns;
+      const activeRunsArr = activeRunsSchema?.anyOf ? activeRunsSchema.anyOf[0] : activeRunsSchema;
+      assert.equal(activeRunsArr?.maxItems, ACTIVE_RUNS_CAP, `activeRuns.maxItems === ACTIVE_RUNS_CAP (${ACTIVE_RUNS_CAP})`);
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); }
+});

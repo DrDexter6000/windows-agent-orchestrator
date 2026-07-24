@@ -478,14 +478,14 @@ const LEAD_PREFLIGHT_INPUT = z.object({
 
 const LEAD_PREFLIGHT_OUTPUT = z.object({
   // workspace is null when the binding could not be resolved (unknown), NOT
-  // when known-unbound (that is {bound:false}). A failed selection sets
-  // workspaceSelection=failed_using_prior + checkStatus.workspace=warning.
+  // when known-unbound (that is {bound:false}). workspaceSelection is the
+  // closed-set outcome (see comment at the handler).
   workspace: z.object({
     bound: z.boolean(),
     source: z.enum(["lead_session", "server_config", "mcp_root"]).nullable(),
     gitHead: z.string().regex(/^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/).nullable(),
     dirty: z.boolean().nullable(),
-  }).nullable(),
+  }).strict().nullable(),
   workspaceSelection: z.enum([
     "not_requested", "selected",
     "failed_using_prior", "failed_unbound", "failed_unknown",
@@ -515,9 +515,9 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
     workspace: z.enum(["observed", "warning", "unknown"]),
     workers: z.enum(["observed", "warning", "unknown"]),
     activeRuns: z.enum(["observed", "warning", "unknown"]),
-  }),
+  }).strict(),
   complete: z.boolean(),
-});
+}).strict();
 
 const LEAD_PREFLIGHT_ANNOTATIONS = {
   readOnlyHint: false,
@@ -1068,8 +1068,9 @@ export function createWaoMcpServer({
       // the project via the SAME authority as workspace_select (setSessionWorkspace).
       // A failed selection does NOT overwrite the prior valid session selection
       // (setSessionWorkspace only stores on success) — and is reported EXPLICITLY
-      // via workspaceSelection (closed set: not_requested/selected/failed_using_prior/
-      // failed_unbound/failed_unknown) so a Lead cannot misread the outcome.
+      // via workspaceSelection, a closed set derived from the binding state:
+      //   not_requested / selected / failed_using_prior / failed_unbound / failed_unknown
+      // so a Lead cannot misread the outcome regardless of prior binding state.
       const selectionRequested = typeof workspaceRoot === "string" && workspaceRoot.length > 0;
       let selectionFailed = false;
       if (selectionRequested) {
@@ -1123,8 +1124,10 @@ export function createWaoMcpServer({
             ? (args) => listRunsService({ ...args, knownAgentIds })
             : undefined,
         });
-        // Validate the projected shape (drops any internal-only fields).
-        LEAD_PREFLIGHT_OUTPUT.parse(payload);
+        // Validate AND return the parsed safe object — not the raw payload.
+        // parse() with strict schemas strips any internal-only / unknown fields
+        // so the Lead never sees fields that bypassed the output contract.
+        payload = LEAD_PREFLIGHT_OUTPUT.parse(payload);
       } catch {
         // Even aggregate failure must NOT block independent tools, and must NOT
         // fake unknown as known-empty/false. Return null for unreadable sections.

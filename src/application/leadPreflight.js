@@ -70,9 +70,13 @@ export const WORKERS_CAP = 64;
  *   - "unknown" (could not read) is NEVER faked as a known-empty/known-false
  *     value. An unreadable section returns null (or unknown), NOT [] / false.
  *     This keeps "could not confirm" structurally distinct from "confirmed none".
- *   - A failed workspace selection is reported explicitly via workspaceSelection
- *     = "failed_using_prior", checkStatus.workspace = "warning", complete = false
- *     — so a Lead cannot misread "stuck on prior project A" as "selected B".
+ *   - A workspace selection outcome is reported via a closed set:
+ *       not_requested      — no workspaceRoot was provided.
+ *       selected           — selection succeeded.
+ *       failed_using_prior — selection failed but a prior binding is active.
+ *       failed_unbound     — selection failed and no prior binding exists.
+ *       failed_unknown     — selection failed and the resolver also threw.
+ *     All failure states set checkStatus.workspace="warning" and complete=false.
  *   - complete is true ONLY when every requested check was reliably observed
  *     AND no workspace selection failure occurred.
  *
@@ -89,9 +93,12 @@ export const WORKERS_CAP = 64;
  * @param {string} input.registryPath
  * @param {string} input.runDir
  * @param {Function} [input.userEnvReader] — for credential readiness
- * @param {Function} [input.getRegistryInventoryFn] — injectable for testing.
- *   Must be a function (never undefined) so the aggregator NEVER falls back to a
- *   default re-read — the caller replays its single snapshot outcome.
+ * @param {Function} [input.getRegistryInventoryFn] — injectable registry reader.
+ *   The MCP handler MUST pass a function that replays its single snapshot
+ *   outcome (success → returns the snapshot; failure → throws), so the
+ *   aggregator never falls back to a second default read. If omitted (direct
+ *   application-layer use / tests), the real getRegistryInventory is used — but
+ *   the MCP path always passes an explicit resolver to guarantee one read.
  * @param {Function} [input.listRunsFn] — injectable; signature matches listRuns
  * @param {string[]} [input.knownAgentIds]
  * @returns {Promise<object>} advisory preflight result (see output shape below)
