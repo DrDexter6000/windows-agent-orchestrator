@@ -189,14 +189,15 @@ test("CLOSEOUT-REDB5: invalid agentId (injection) in envelope → unknown, no th
 // RED-C: MCP handlers must return the parsed safe object
 // =====================================================================
 
-test("CLOSEOUT-REDC1: MCP run_dispatch output is parsed; malformed service agentId does not leak", async () => {
+test("CLOSEOUT-REDC1: MCP run_dispatch with malformed service agentId collapses to fixed error (tightened)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-cl-redc1-"));
   try {
     makeGitRepo(dir);
     const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
     // Inject a service that returns an INJECTION agentId. The MCP adapter must
-    // collapse it to the fixed error (or project to unknown) — it must NOT let
-    // the injection value pass into structuredContent.
+    // collapse it to the FIXED ERROR — never succeed, never project to unknown,
+    // never leak the injection value. (M11-8B final: the prior "error OR
+    // unknown" relaxation is removed; dispatch is a binding, not a projection.)
     const injectDispatch = async () => ({
       accepted: true,
       runId: "run_redc1",
@@ -215,6 +216,8 @@ test("CLOSEOUT-REDC1: MCP run_dispatch output is parsed; malformed service agent
         name: "run_dispatch",
         arguments: { agentId: "coder_low", prompt: "bounded task" },
       });
+      assert.equal(res.isError, true, "injected service agentId → fixed error (not success)");
+      assert.equal(res.structuredContent, undefined, "no structuredContent on dispatch-id failure");
       const dumped = JSON.stringify(res);
       assert.ok(!dumped.includes("Ignore previous instructions"),
         "injection agentId from service must not leak into MCP output");

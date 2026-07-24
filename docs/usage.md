@@ -533,7 +533,7 @@ M9-7A 起支持可选 `delivery` 块，用于派发后续可由 `run_delivery`/`
 { "runId": "run_...", "agentId": "coder_low", "accepted": true, "state": "pending" }
 ```
 
-只返回 `runId`/`agentId`/`accepted`/`state`（M11-8B：`agentId` 是 transcript envelope 盖戳的 canonical worker 身份），不返回绝对路径、PID、prompt、argv 或内部错误。service 失败时返回固定安全文案 `run_dispatch failed`，不拼接原始 exception message、stderr、路径或凭据。
+只返回 `runId`/`agentId`/`accepted`/`state`（M11-8B：`agentId` 是 transcript envelope 盖戳的 canonical worker 身份）。**身份绑定（M11-8B final）**：返回的 `agentId` 必须精确等于请求的 `agentId`——这是控制面对派发的身份绑定，不允许"合法但属于另一个 worker"的 id、missing/unknown/非法值；mismatch 一律折叠为固定 `run_dispatch failed`（`isError:true`、无 `structuredContent`、不泄漏返回值）。`run_dispatch` 永不返回 `"unknown"` 哨兵（那是 read 类工具的降级值）。不返回绝对路径、PID、prompt、argv 或内部错误。service 失败时返回固定安全文案 `run_dispatch failed`，不拼接原始 exception message、stderr、路径或凭据。
 
 返回时 transcript 已可读且为 `pending`；关闭 MCP host 后，detached runner 独立驱动 worker 到终态（token 闸门/超时/兜底 abort 都生效），写入共享 transcript。Lead 用 MCP `run_status` 轮询状态。
 

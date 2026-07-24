@@ -54,15 +54,44 @@ import { isValidRunId } from "../delivery.js";
 import { DIAGNOSIS_CATEGORIES } from "../diagnosis.js";
 import { RUN_STATES } from "../transcript.js";
 import { createSecretRedactor } from "../secretRedaction.js";
-import { isValidCanonicalAgentId, safeProjectAgentId, CANONICAL_AGENT_ID_MAX } from "../canonicalAgentId.js";
+import {
+  isValidCanonicalAgentId,
+  safeProjectAgentId,
+  UNKNOWN_AGENT_ID,
+  CANONICAL_AGENT_ID_MAX,
+  CANONICAL_AGENT_ID_PATTERN,
+} from "../canonicalAgentId.js";
 
-// M11-8B closeout: shared agentId schema. The closed-set alphabet (A-Z/a-z/0-9/
-// ._-) and length 1..CANONICAL_AGENT_ID_MAX are the single source of truth —
-// every MCP output schema that carries an agentId reuses this exact contract.
-// An agentId that fails this contract is projected to "unknown" by the handler
-// before the payload is returned, so a malformed/injected service value can
-// never reach the caller as a trusted identity.
-const AGENT_ID_SCHEMA = z.string().regex(/^[A-Za-z0-9._-]+$/).min(1).max(CANONICAL_AGENT_ID_MAX);
+// M11-8B final closeout: TWO distinct agentId schemas, both sourced from the
+// SAME SSOT pattern/max/sentinel (no hand-maintained second regex anywhere).
+//
+//   REAL_AGENT_ID_SCHEMA — used by run_dispatch output. A dispatch result is a
+//     binding from the control plane: it MUST be a real canonical id (the one
+//     the Lead requested). The sentinel "unknown" is NOT allowed here — a
+//     dispatch may never return an unconfirmed identity.
+//
+//   READ_AGENT_ID_SCHEMA — used by run_status / run_wait / run_collect output.
+//     These read existing transcripts, which may be corrupt/stale. They return
+//     either a real canonical id OR the literal "unknown" sentinel (consumer-
+//     friendly: the Lead keeps supervising; the tool never fails on identity).
+//
+// Both reuse the SSOT pattern + max. The read schema additionally enumerates
+// the sentinel so it is structurally distinct from any real id.
+const REAL_AGENT_ID_SCHEMA = z.string()
+  .regex(new RegExp(CANONICAL_AGENT_ID_PATTERN))
+  .min(1)
+  .max(CANONICAL_AGENT_ID_MAX)
+  // Exclude the reserved sentinel — a real id is never "unknown".
+  .refine((v) => v !== UNKNOWN_AGENT_ID, { message: "must not be the reserved sentinel" });
+
+const READ_AGENT_ID_SCHEMA = z.string()
+  .regex(new RegExp(CANONICAL_AGENT_ID_PATTERN))
+  .min(1)
+  .max(CANONICAL_AGENT_ID_MAX)
+  // Read tools allow the literal sentinel OR any real id.
+  .refine((v) => v === UNKNOWN_AGENT_ID || isValidCanonicalAgentId(v), {
+    message: "must be a real canonical id or the 'unknown' sentinel",
+  });
 
 // Stable server identity advertised at initialize.
 const SERVER_NAME = "wao-mcp";
@@ -159,10 +188,11 @@ const RUN_DISPATCH_INPUT = z.object({
 }).strict();
 
 // run_dispatch output: runId + agentId + accepted + state. No paths, PID, prompt, argv.
-// M11-8B closeout: strict root + shared agentId contract.
+// M11-8B final closeout: strict root; agentId is REAL-only (the binding from
+// the control plane — never the sentinel, never another worker's id).
 const RUN_DISPATCH_OUTPUT = z.object({
   runId: z.string(),
-  agentId: AGENT_ID_SCHEMA,
+  agentId: REAL_AGENT_ID_SCHEMA,
   accepted: z.boolean(),
   state: z.string(),
 }).strict();
@@ -196,7 +226,7 @@ const RUN_STATUS_INPUT = z.object({
 // when absent.
 const RUN_STATUS_OUTPUT = z.object({
   runId: z.string(),
-  agentId: AGENT_ID_SCHEMA,
+  agentId: READ_AGENT_ID_SCHEMA,
   state: z.string(),
   terminal: z.boolean(),
   lastEvent: z.object({
@@ -254,7 +284,7 @@ const COLLECTED_MESSAGE = z.object({
 
 const RUN_COLLECT_OUTPUT = z.object({
   runId: z.string(),
-  agentId: AGENT_ID_SCHEMA,
+  agentId: READ_AGENT_ID_SCHEMA,
   backend: z.string(),
   reconstructed: z.boolean(),
   itemCount: z.number(),
@@ -627,7 +657,7 @@ const RUN_WAIT_INPUT = z.object({
 
 const RUN_WAIT_OUTPUT = z.object({
   runId: z.string(),
-  agentId: AGENT_ID_SCHEMA,
+  agentId: READ_AGENT_ID_SCHEMA,
   state: z.enum([...RUN_STATES, "unknown"]),
   terminal: z.boolean(),
   cursor: z.number().int(),
@@ -1247,14 +1277,26 @@ export function createWaoMcpServer({
         };
       }
       // Only runId/agentId/accepted/state — strip transcriptPath and any internal detail.
-      // M11-8B closeout: project agentId through the SSOT before parse so a
-      // malformed/injected service value cannot reach the caller. The output
-      // schema (strict root + shared agentId contract) is the second boundary;
-      // a payload that fails parse collapses to the fixed dispatch error.
+      // M11-8B final closeout: the returned agentId MUST be the exact id the
+      // Lead requested. This is the dispatch identity binding: a service that
+      // returns a different valid id, a missing/unknown/injected value, or any
+      // non-canonical value collapses to the fixed dispatch error — it never
+      // succeeds, never returns structuredContent, and never leaks the
+      // mismatched value. The requested agentId is itself canonical-validated
+      // (it came from the strict input schema, but we re-check defensively).
+      // safeProjectAgentId is NOT used here: a dispatch may never return the
+      // "unknown" sentinel — that would disguise a binding failure as success.
       try {
+        if (!isValidCanonicalAgentId(agentId)) {
+          throw new Error("dispatch requested agentId is not canonical");
+        }
+        // Identity binding: the service MUST return exactly the requested id.
+        if (result.agentId !== agentId) {
+          throw new Error("dispatch agentId binding mismatch");
+        }
         const parsed = RUN_DISPATCH_OUTPUT.parse({
           runId: result.runId,
-          agentId: safeProjectAgentId(result.agentId),
+          agentId: result.agentId,
           accepted: result.accepted,
           state: result.state,
         });
