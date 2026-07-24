@@ -352,9 +352,12 @@ test("M11-5-C2: RunManager source never persists roleContract to transcript", ()
 // ---------------------------------------------------------------------
 test("M11-5-C3: resume spawn call passes roleContract (no bypass)", () => {
   const src = readFileSync(resolve(process.cwd(), "src/runManager.js"), "utf8");
-  // The resume spawn block must reference loadRoleContract and pass it.
-  assert.ok(/resumeRoleContract\s*=\s*loadRoleContract/.test(src),
-    "resume path calls loadRoleContract");
+  // M11-8B: resume composes the role contract with the identity header through
+  // composeRoleContractWithIdentity, but still loads via loadRoleContract and
+  // passes the result to backend.spawn. The structural guard verifies the
+  // resume path loads the role and the composed result reaches spawn.
+  assert.ok(/resumeRoleContract\s*=\s*composeRoleContractWithIdentity\(\s*\{\s*roleContract:\s*loadRoleContract/.test(src),
+    "resume path loads roleContract via loadRoleContract and composes it");
   // The resume backend.spawn call must include roleContract.
   assert.ok(/backend\.spawn\([^)]*roleContract:\s*resumeRoleContract/s.test(src),
     "resume backend.spawn passes roleContract");

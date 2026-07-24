@@ -251,6 +251,7 @@ export async function dispatchRun({
     return {
       accepted: false,
       runId: finalRunId,
+      agentId,
       state: pendingResult.state,
       transcriptPath,
       terminalState: pendingResult.state,
@@ -268,6 +269,10 @@ export async function dispatchRun({
   return {
     accepted: true,
     runId: finalRunId,
+    // M11-8B: echo the canonical agentId so the Lead gets a unified identity
+    // from dispatch onward. This is the registry id the caller supplied —
+    // the same value the transcript envelope will carry — never worker text.
+    agentId,
     state: "pending",
     transcriptPath,
   };

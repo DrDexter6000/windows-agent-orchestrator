@@ -167,9 +167,11 @@ test("M9-3B-03: run_status output is safe subset, no raw payload leak", async ()
       const textBlock = res.content.find((b) => b.type === "text");
       const parsed = JSON.parse(textBlock.text);
 
-      // Only these top-level keys.
-      assert.deepEqual(Object.keys(parsed).sort(), ["lastActivity", "lastEvent", "runId", "state", "terminal"],
-        "only runId/state/terminal/lastEvent/lastActivity");
+      // Only these top-level keys (M11-8B added agentId).
+      assert.deepEqual(Object.keys(parsed).sort(), ["agentId", "lastActivity", "lastEvent", "runId", "state", "terminal"],
+        "only runId/agentId/state/terminal/lastEvent/lastActivity");
+      // M11-8B: the durable agentId from the envelope, not worker text.
+      assert.equal(parsed.agentId, "w", "agentId is the durable envelope id");
 
       // lastEvent has only type + ts.
       assert.deepEqual(Object.keys(parsed.lastEvent).sort(), ["ts", "type"], "lastEvent has only type+ts");

@@ -149,9 +149,10 @@ const RUN_DISPATCH_INPUT = z.object({
   delivery: DELIVERY_INPUT.optional(),
 }).strict();
 
-// run_dispatch output: only runId + accepted + state. No paths, PID, prompt, argv.
+// run_dispatch output: runId + agentId + accepted + state. No paths, PID, prompt, argv.
 const RUN_DISPATCH_OUTPUT = z.object({
   runId: z.string(),
+  agentId: z.string(),
   accepted: z.boolean(),
   state: z.string(),
 });
@@ -185,6 +186,7 @@ const RUN_STATUS_INPUT = z.object({
 // when absent.
 const RUN_STATUS_OUTPUT = z.object({
   runId: z.string(),
+  agentId: z.string(),
   state: z.string(),
   terminal: z.boolean(),
   lastEvent: z.object({
@@ -242,6 +244,7 @@ const COLLECTED_MESSAGE = z.object({
 
 const RUN_COLLECT_OUTPUT = z.object({
   runId: z.string(),
+  agentId: z.string(),
   backend: z.string(),
   reconstructed: z.boolean(),
   itemCount: z.number(),
@@ -614,6 +617,7 @@ const RUN_WAIT_INPUT = z.object({
 
 const RUN_WAIT_OUTPUT = z.object({
   runId: z.string(),
+  agentId: z.string(),
   state: z.enum([...RUN_STATES, "unknown"]),
   terminal: z.boolean(),
   cursor: z.number().int(),
@@ -1232,9 +1236,10 @@ export function createWaoMcpServer({
           content: [{ type: "text", text: DISPATCH_ERROR_TEXT }],
         };
       }
-      // Only runId/accepted/state — strip transcriptPath and any internal detail.
+      // Only runId/agentId/accepted/state — strip transcriptPath and any internal detail.
       const payload = {
         runId: result.runId,
+        agentId: result.agentId,
         accepted: result.accepted,
         state: result.state,
       };
@@ -1279,6 +1284,7 @@ export function createWaoMcpServer({
           : null;
         const payload = {
           runId: status.runId,
+          agentId: typeof status.agentId === "string" && status.agentId.length > 0 ? status.agentId : "unknown",
           state: status.state,
           terminal: status.terminal,
           lastEvent,
@@ -1721,6 +1727,7 @@ export function createWaoMcpServer({
 
         const payload = {
           runId,
+          agentId: typeof result.agentId === "string" && result.agentId.length > 0 ? result.agentId : "unknown",
           state: result.state,
           terminal: result.terminal,
           cursor: result.cursor,

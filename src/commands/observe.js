@@ -49,6 +49,7 @@ export async function statusCommand(args, config) {
   const status = await getRunStatus({ runId, runDir });
   console.log(JSON.stringify({
     runId: status.runId,
+    agentId: status.agentId,
     state: status.state,
     last: status.last,
     lastActivityTs: status.lastActivityTs,

@@ -16,7 +16,7 @@
 
 import { join } from "node:path";
 
-import { readTranscript, findState, TERMINAL_STATES } from "../transcript.js";
+import { readTranscript, findState, TERMINAL_STATES, extractCanonicalAgentId } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
 
 // ===== Activity description (migrated from observe.js, TD-75 semantics) =====
@@ -116,6 +116,10 @@ export async function getRunStatus({
   const state = findState(events);
   const terminal = TERMINAL_STATES.includes(state);
 
+  // M11-8B: canonical agentId from the transcript envelope (the same snapshot
+  // already read above — no extra read). Never inferred from worker text.
+  const agentId = extractCanonicalAgentId(events);
+
   // Last event overall (any type).
   const last = events.at(-1) ?? null;
 
@@ -129,6 +133,7 @@ export async function getRunStatus({
 
   return {
     runId,
+    agentId,
     state,
     terminal,
     // CLI-compatible fields (TD-75 contract, byte-compatible output).

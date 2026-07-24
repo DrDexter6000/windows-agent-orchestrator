@@ -19,7 +19,7 @@
 import { join, resolve } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
 
-import { readTranscript, findState, TERMINAL_STATES, findLastEventSeq } from "../transcript.js";
+import { readTranscript, findState, TERMINAL_STATES, findLastEventSeq, extractCanonicalAgentId } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { checkOwnerLiveness } from "./ownerLiveness.js";
@@ -196,6 +196,10 @@ export async function runWait(input) {
   const terminal = TERMINAL_STATES.includes(state);
   const cursor = findLastEventSeq(events) ?? 0;
 
+  // M11-8B: canonical agentId from the transcript envelope (the same snapshot
+  // already read above — no extra read). Never inferred from worker text.
+  const agentId = extractCanonicalAgentId(events);
+
   // Resolve the activity baseline:
   //   omitted → cursor at first read (only window-new events count)
   //   explicit → the caller's cursor
@@ -205,6 +209,7 @@ export async function runWait(input) {
   if (terminal) {
     return {
       runId,
+      agentId,
       state,
       terminal: true,
       cursor,
@@ -256,6 +261,7 @@ export async function runWait(input) {
       // Terminal reached — early return
       return {
         runId,
+        agentId,
         state: currentState,
         terminal: true,
         cursor: currentCursor,
@@ -292,6 +298,7 @@ export async function runWait(input) {
 
   return {
     runId,
+    agentId,
     state: currentState,
     terminal: false,
     cursor: currentCursor,

@@ -168,8 +168,13 @@ test("M11-5-A-RED4a: RunManager.start passes roleContract to backend spawn (beha
     const mgr = makeManager({ runDir, registryPath, backend });
     await mgr.start("coder", { prompt: "do task", runDir, registry: registryPath });
     assert.ok(calls.length >= 1, "spawn was called");
-    assert.equal(calls[0].roleContract, "ROLE_BEHAVIORAL",
-      "backend received the role content");
+    // M11-8B: roleContract is now COMPOSED (identity header + role body). The
+    // role content is still delivered, but prefixed with the canonical-identity
+    // header. Assert the body is present inside the composed string.
+    assert.ok(typeof calls[0].roleContract === "string" && calls[0].roleContract.includes("ROLE_BEHAVIORAL"),
+      "backend received the composed role content (includes role body)");
+    assert.ok(/canonical WAO agentId/i.test(calls[0].roleContract),
+      "composed roleContract carries the identity header (M11-8B)");
     // Transcript must NOT contain role body.
     const transcriptPath = join(runDir, `${calls[0].agentId ? "" : ""}`);
     const jsonlFiles = readdirSync(runDir).filter(f => f.endsWith(".jsonl"));

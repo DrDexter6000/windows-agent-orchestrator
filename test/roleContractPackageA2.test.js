@@ -202,7 +202,9 @@ test("M11-5-A2-START2: start loads role and passes content to spawn for supporte
     const mgr = makeManager({ runDir, registryPath, backend });
     await mgr.start("coder", { prompt: "do task", runDir, registry: registryPath });
     assert.ok(calls.length >= 1, "spawn was called");
-    assert.equal(calls[0].roleContract, "ROLE_A2_START2", "backend received role content");
+    // M11-8B: roleContract is composed (identity header + role body).
+    assert.ok(typeof calls[0].roleContract === "string" && calls[0].roleContract.includes("ROLE_A2_START2"),
+      "backend received composed role content (includes role body)");
   } finally {
     cleanupDir(dir);
   }
@@ -301,7 +303,9 @@ test("M11-5-A2-RESUME2: resume supported backend reloads role, passes content to
     assert.ok(resumed, "resume returns a Run for supported backend");
     await resumed.waitForCompletion({ waitTimeout: 1000, pollInterval: 5 });
     assert.equal(calls.length, 1, "spawn called exactly once on resume");
-    assert.equal(calls[0].roleContract, "ROLE_A2_RESUME2", "role content reloaded and passed to spawn");
+    // M11-8B: roleContract is composed (identity header + role body) on resume too.
+    assert.ok(typeof calls[0].roleContract === "string" && calls[0].roleContract.includes("ROLE_A2_RESUME2"),
+      "composed role content reloaded and passed to spawn (includes role body)");
   } finally {
     cleanupDir(dir);
   }

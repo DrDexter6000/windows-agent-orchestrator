@@ -380,6 +380,14 @@ function safeSliceUtf16(str, start, end) {
 export function projectCollectResult(rawResult, { runId, cursor, env } = {}) {
   if (!rawResult || typeof rawResult !== "object") throw new Error("invalid collect result");
   if (!runId || typeof runId !== "string") throw new Error("runId required");
+  // M11-8B: canonical agentId from the transcript envelope, threaded by the
+  // collect service. Defensive: a non-string/empty value collapses to
+  // "unknown" so the projection never fabricates or omits identity. This is
+  // data carried verbatim — the agentId is a registry id (closed vocabulary),
+  // not worker free-text, so it cannot carry prompt-injection control.
+  const agentId = typeof rawResult.agentId === "string" && rawResult.agentId.length > 0
+    ? rawResult.agentId
+    : "unknown";
   // Fix A (CTO rework): the service MUST hand the projection layer the full
   // raw item list. A non-array data is a contract violation — fail closed
   // rather than silently treating it as an empty snapshot (which masks
@@ -479,6 +487,7 @@ export function projectCollectResult(rawResult, { runId, cursor, env } = {}) {
 
   return {
     runId,
+    agentId,
     backend: rawResult.backend ?? "unknown",
     reconstructed: Boolean(rawResult.reconstructed),
     itemCount,

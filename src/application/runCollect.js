@@ -19,7 +19,7 @@
 
 import { join } from "node:path";
 
-import { readTranscript, findLatest, JsonlTranscript, findLastEventSeq } from "../transcript.js";
+import { readTranscript, findLatest, JsonlTranscript, findLastEventSeq, extractCanonicalAgentId } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
 
 const DEFAULT_LIMIT = 50;
@@ -158,6 +158,11 @@ export async function collectRunMessages({
 
   const events = await _readTranscript(transcriptPath);
 
+  // M11-8B: canonical agentId from the transcript envelope (the same snapshot
+  // already read above — no extra read). Passed through to the projection so
+  // MCP/CLI expose a unified identity. Never inferred from worker text.
+  const agentId = extractCanonicalAgentId(events);
+
   // Session capability determines process vs serve path.
   const session = findLatest(events, "session.created");
   if (!session?.backendSessionId) {
@@ -207,13 +212,13 @@ export async function collectRunMessages({
     };
     if (isProjectionMode) {
       return {
-        data: reconstructed, reconstructed: true, backend: "process",
+        data: reconstructed, reconstructed: true, backend: "process", agentId,
         commitAppend: buildCommitAppend(appendCollectedFn, transcriptPath, runId, payload),
       };
     }
     const _append = appendCollectedFn ?? defaultAppendFn(transcriptPath, runId);
     await _append("messages.collected", payload);
-    return { data: reconstructed, reconstructed: true, backend: "process" };
+    return { data: reconstructed, reconstructed: true, backend: "process", agentId };
   }
 
   // Serve-backed: fetch messages via backend capability.
@@ -243,12 +248,13 @@ export async function collectRunMessages({
   if (isProjectionMode) {
     return {
       ...messages,
+      agentId,
       commitAppend: buildCommitAppend(appendCollectedFn, transcriptPath, runId, payload),
     };
   }
   const _append = appendCollectedFn ?? defaultAppendFn(transcriptPath, runId);
   await _append("messages.collected", payload);
-  return messages;
+  return { ...messages, agentId };
 }
 
 /**

@@ -164,7 +164,7 @@ test("M9-2B-02: run_dispatch calls dispatcher once with server paths and require
 // M9-2B-03: success output contains only runId/accepted/state — no paths/PID/prompt/argv.
 // ---------------------------------------------------------------------
 
-test("M9-2B-03: run_dispatch success output has only runId/accepted/state, no leaks", async () => {
+test("M9-2B-03: run_dispatch success output has only runId/agentId/accepted/state, no leaks", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m92b-03-"));
   try {
     makeGitRepo(dir);
@@ -172,6 +172,7 @@ test("M9-2B-03: run_dispatch success output has only runId/accepted/state, no le
     const fakeDispatch = async () => ({
       accepted: true,
       runId: "run_ok_m92b03",
+      agentId: "x",
       state: "pending",
       transcriptPath: "/secret/runs/run_ok_m92b03.jsonl",
     });
@@ -188,10 +189,11 @@ test("M9-2B-03: run_dispatch success output has only runId/accepted/state, no le
       const textBlock = res.content.find((b) => b.type === "text");
       const parsed = JSON.parse(textBlock.text);
 
-      // Only these three keys.
-      assert.deepEqual(Object.keys(parsed).sort(), ["accepted", "runId", "state"], "only runId/accepted/state");
+      // Only these four keys (M11-8B added agentId).
+      assert.deepEqual(Object.keys(parsed).sort(), ["accepted", "agentId", "runId", "state"], "only runId/agentId/accepted/state");
       assert.equal(parsed.accepted, true);
       assert.equal(parsed.runId, "run_ok_m92b03");
+      assert.equal(parsed.agentId, "x");
       assert.equal(parsed.state, "pending");
 
       // No leaks.
@@ -460,7 +462,7 @@ test("M9-7A-04: MCP run_dispatch with delivery passes delivery to service", asyn
     const fakeDispatch = async (input) => {
       callCount += 1;
       captured = input;
-      return { accepted: true, runId: "run_delivery_m97a", state: "pending", transcriptPath: "/x.jsonl" };
+      return { accepted: true, runId: "run_delivery_m97a", agentId: "coder_low", state: "pending", transcriptPath: "/x.jsonl" };
     };
     const server = createWaoMcpServer({
       registryPath, runDir: "/server/runs",
@@ -481,7 +483,7 @@ test("M9-7A-04: MCP run_dispatch with delivery passes delivery to service", asyn
     assert.equal(captured.delivery.mode, "git_commit_v1");
     assert.equal(captured.requireCertified, true, "still forced certified");
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
-    assert.deepEqual(Object.keys(parsed).sort(), ["accepted", "runId", "state"], "output unchanged");
+    assert.deepEqual(Object.keys(parsed).sort(), ["accepted", "agentId", "runId", "state"], "output has agentId (M11-8B)");
     } finally {
       await client.close();
       await server.close();

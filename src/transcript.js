@@ -506,3 +506,45 @@ export function findLastEventSeq(events) {
   }
   return max;
 }
+
+/**
+ * M11-8B: Derive the canonical WAO agentId from a transcript event sequence.
+ *
+ * This is the SSOT for structured worker identity. The agentId is the value
+ * stamped on the WAO transcript envelope by the control plane (see
+ * JsonlTranscript.append / transitionState / tryAppendDecision — every event
+ * carries `agentId: this.context.agentId`). It is NEVER inferred from:
+ *   - assistant message text (a worker may self-report "/root", "Coder-HQ",
+ *     or nothing at all — none of that changes the durable agentId);
+ *   - OS user, cwd, model name, backend output, or role title.
+ *
+ * Derivation rules (truthfulness contract):
+ *   - The agentId is taken from the FIRST event's envelope. The first event
+ *     is created at dispatch/start time by the control plane, before any
+ *     worker output exists, so it is the authoritative binding.
+ *   - Every event's envelope MUST carry the same agentId (the control plane
+ *     stamps them identically). If any later event's envelope agentId
+ *     DIFFERS, that is corruption (or a hand-edit) — return "unknown" rather
+ *     than silently picking one. "unknown" is never a throw: the tool stays
+ *     usable, the Lead keeps human judgment.
+ *   - A missing/non-string first-event agentId → "unknown".
+ *
+ * This function reads ONLY the already-loaded event array. It performs no
+ * extra transcript, registry, or filesystem read — callers pass the snapshot
+ * they already have (status/wait/collect all read the transcript once).
+ *
+ * @param {object[]} events — transcript event array (already read)
+ * @returns {string} the canonical agentId, or "unknown"
+ */
+export function extractCanonicalAgentId(events) {
+  if (!Array.isArray(events) || events.length === 0) return "unknown";
+  const first = events[0]?.agentId;
+  if (typeof first !== "string" || first.length === 0) return "unknown";
+  // Conflict detection: every envelope must agree. A divergent envelope is
+  // corruption → "unknown" (never fabricate an identity, never throw).
+  for (let i = 1; i < events.length; i += 1) {
+    const cur = events[i]?.agentId;
+    if (cur !== undefined && cur !== first) return "unknown";
+  }
+  return first;
+}

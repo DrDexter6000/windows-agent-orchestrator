@@ -139,10 +139,14 @@ test("M9-4B-03: run_collect output is bounded safe projection, no raw leak", asy
 
     // Top-level keys: only the safe projection.
     // M11-4: nextCursor added for continuation (null when result fits one page).
-    const allowedKeys = new Set(["runId", "backend", "reconstructed", "itemCount", "messages", "evidenceCounts", "truncated", "nextCursor"]);
+    // M11-8B: agentId added (canonical worker identity from the envelope).
+    const allowedKeys = new Set(["runId", "agentId", "backend", "reconstructed", "itemCount", "messages", "evidenceCounts", "truncated", "nextCursor"]);
     for (const k of Object.keys(parsed)) {
       assert.ok(allowedKeys.has(k), `unexpected key in output: ${k}`);
     }
+    // M11-8B: agentId present; the fixture has no envelope agentId so it degrades
+    // honestly to "unknown" (never fabricated, never omitted).
+    assert.equal(parsed.agentId, "unknown", "agentId present, degrades to unknown when envelope lacks it");
 
     // Messages: only assistant role, only text part, no raw envelope.
     assert.ok(Array.isArray(parsed.messages), "messages is array");

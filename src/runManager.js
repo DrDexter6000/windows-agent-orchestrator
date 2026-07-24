@@ -11,7 +11,7 @@ import { assessRunEvidence } from "./runEvidenceAssessment.js";
 import { createSecretRedactor } from "./secretRedaction.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError } from "./delivery.js";
 import { verifyDelivery as defaultVerifyDelivery } from "./deliveryVerification.js";
-import { loadRoleContract } from "./application/roleContract.js";
+import { loadRoleContract, composeRoleContractWithIdentity } from "./application/roleContract.js";
 import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./application/credentialReadiness.js";
 import { inheritedEnvNames } from "./envPolicy.js";
 
@@ -137,7 +137,10 @@ export class RunManager {
           `Remove systemPrompt from this agent, or switch to a backend that declares supportsRoleContract.`
         );
       }
-      roleContract = loadRoleContract(agent.systemPrompt);
+      roleContract = composeRoleContractWithIdentity({
+        roleContract: loadRoleContract(agent.systemPrompt),
+        agentId,
+      });
     }
 
     // M11-7 (CTO closeout): credential availability check BEFORE transcript
@@ -490,7 +493,10 @@ export class RunManager {
           `Remove systemPrompt from this agent, or switch to a backend that declares supportsRoleContract.`
         );
       }
-      resumeRoleContract = loadRoleContract(agent.systemPrompt);
+      resumeRoleContract = composeRoleContractWithIdentity({
+        roleContract: loadRoleContract(agent.systemPrompt),
+        agentId: transcript.context.agentId,
+      });
     }
 
     // M11-7 (CTO closeout): credential availability check on resume too — same

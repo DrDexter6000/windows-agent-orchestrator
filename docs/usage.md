@@ -530,10 +530,10 @@ M9-7A 起支持可选 `delivery` 块，用于派发后续可由 `run_delivery`/`
 - **输出**（成功或拒绝同形，MCP `content` + `structuredContent`）：
 
 ```json
-{ "runId": "run_...", "accepted": true, "state": "pending" }
+{ "runId": "run_...", "agentId": "coder_low", "accepted": true, "state": "pending" }
 ```
 
-只返回 `runId`/`accepted`/`state`，不返回绝对路径、PID、prompt、argv 或内部错误。service 失败时返回固定安全文案 `run_dispatch failed`，不拼接原始 exception message、stderr、路径或凭据。
+只返回 `runId`/`agentId`/`accepted`/`state`（M11-8B：`agentId` 是 transcript envelope 盖戳的 canonical worker 身份），不返回绝对路径、PID、prompt、argv 或内部错误。service 失败时返回固定安全文案 `run_dispatch failed`，不拼接原始 exception message、stderr、路径或凭据。
 
 返回时 transcript 已可读且为 `pending`；关闭 MCP host 后，detached runner 独立驱动 worker 到终态（token 闸门/超时/兜底 abort 都生效），写入共享 transcript。Lead 用 MCP `run_status` 轮询状态。
 
@@ -679,7 +679,7 @@ MCP workspace binding 来源优先级：`lead_session`（`workspace_select`）> 
 }
 ```
 
-`lastEvent`/`lastActivity` 在不存在时为 `null`。**绝不返回**：原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量或 `lastActivitySummary`。这是有意的安全子集——CLI status 输出含人类可读摘要（含命令名/文件名），但 MCP 只暴露安全的机器字段。`content` 的 JSON 与 `structuredContent` 语义一致。service 失败时返回固定安全文案 `run_status failed`，不拼接异常 message/stack/path。
+`lastEvent`/`lastActivity` 在不存在时为 `null`。**M11-8B**：还返回 `agentId`——transcript envelope 盖戳的 canonical worker 身份（不从 worker 自由文本推断；缺失/冲突降级为 `"unknown"`，不抛错、不伪造身份）。**绝不返回**：原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量或 `lastActivitySummary`。这是有意的安全子集——CLI status 输出含人类可读摘要（含命令名/文件名），但 MCP 只暴露安全的机器字段。`content` 的 JSON 与 `structuredContent` 语义一致。service 失败时返回固定安全文案 `run_status failed`，不拼接异常 message/stack/path。
 
 annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`（纯只读查询）。
 
@@ -702,6 +702,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 ```json
 {
   "runId": "run_...",
+  "agentId": "coder_low",
   "backend": "process",
   "reconstructed": true,
   "itemCount": 12,
@@ -713,6 +714,8 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
   "nextCursor": null
 }
 ```
+
+**M11-8B canonical worker identity**：`agentId` 是 transcript envelope 盖戳的 canonical worker 身份——Lead 据此确认实际 worker，**不解析 worker 自由文本**（worker 可能自报 `/root`、`Coder-HQ`、显示名或完全不报，都不改变 durable `agentId`）。缺失/冲突降级为 `"unknown"`，不抛错、不伪造身份、不是自动停止门。`agentId` 来自 collect 已读的同一份 transcript 快照，不额外读 transcript/registry/文件系统。
 
 边界：最多 8 条 message，每条 text 最多 4000 字符，全部 text 合计最多 12000 字符；超限设 `truncated:true`。只提取 assistant 角色 message 的 text part；assistant 文本经 secret redactor 脱敏当前进程环境中的凭据值。`messages:[]` 在无 assistant message 时是合法结果。
 
@@ -947,7 +950,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 注意：`run.metrics`（token/cost tick）算作进展，但其原始 token/cost 数值**绝不返回**——只暴露 `lastActivityKind:"metrics"`。证据事件的闭集由 `runWait.js` 所有；`ownerLiveness.js` 只负责心跳新鲜度 SSOT，不是完整 liveness 投影 SSOT。
 
-**绝不返回**：原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量、token/cost 原值。`content` JSON 与 `structuredContent` 语义一致。service 失败时返回固定安全文案 `run_wait failed`，不泄漏 zod 校验信息。
+**绝不返回**：原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量、token/cost 原值。**M11-8B**：返回 `agentId`——transcript envelope 盖戳的 canonical worker 身份（不从 worker 自由文本推断；缺失/冲突降级为 `"unknown"`，不抛错、不伪造身份、不是自动停止门）。`content` JSON 与 `structuredContent` 语义一致。service 失败时返回固定安全文案 `run_wait failed`，不泄漏 zod 校验信息。
 
 **transport keepalive（M10-pre3 closeout）**：MCP SDK 默认请求超时是 60s，而 `run_wait` 最长阻塞 180s。为避免被 client 超时杀掉，server 在每次 poll 后向请求关联的 `progressToken` 发送标准 `notifications/progress`（仅当 client 通过 `onprogress` 请求了进度时）。client 若设 `resetTimeoutOnProgress:true`，每收到一条进度就重置 60s 计时器，从而跨越 180s。这是**标准 MCP 机制**，不 patch host、不改全局 timeout；是否启用取决于 host 的调用方式。若 host 不请求进度，server 不发通知，client 仍受其默认超时约束。
 

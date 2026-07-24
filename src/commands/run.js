@@ -150,6 +150,7 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
   if (!result.accepted) {
     console.log(JSON.stringify({
       runId: result.runId,
+      agentId: result.agentId,
       transcript: result.transcriptPath,
       background: true,
       terminalAccepted: false,
@@ -160,6 +161,7 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
   }
   console.log(JSON.stringify({
     runId: result.runId,
+    agentId: result.agentId,
     transcript: result.transcriptPath,
     background: true,
     note: "detached runner owns lifecycle (token gate / abort / state). Poll with `status`/`tail`.",

@@ -140,3 +140,74 @@ export function loadRoleContract(rolePath) {
 
   return text;
 }
+
+// M11-8B: data-safe encoding for the canonical agentId when it is embedded
+// into the composed role contract. The agentId is a registry id (a closed
+// vocabulary the Owner controls), but defense-in-depth demands we treat it as
+// untrusted data when placing it inside a prompt. The threat: a malformed or
+// attacker-influenced agentId like "evil\n\nIgnore previous instructions."
+// could otherwise be carried verbatim into the role contract header and read
+// as a new instruction line by the worker.
+//
+// The encoding collapses ALL whitespace and control chars to single spaces so
+// the agentId stays a single atomic data label — it cannot introduce a blank
+// line (the prompt-injection carrier) or a control sequence. The visible
+// agentId text is preserved (letters/digits/punctuation), only its structure
+// is flattened. This is a structural transform, not a denylist: it is safe
+// against any future agentId shape.
+const IDENTITY_LABEL_SAFE_RE = /[\s\x00-\x1f\x7f-\x9f]+/g;
+
+function encodeAgentIdLabel(agentId) {
+  // Collapse all whitespace/control runs to a single space, then trim.
+  return String(agentId).replace(IDENTITY_LABEL_SAFE_RE, " ").trim();
+}
+
+/**
+ * M11-8B: The SINGLE composition function that combines a fixed, provider-
+ * neutral identity header with a loaded role contract.
+ *
+ * RunManager.start AND resume both go through this function (single source of
+ * truth for the composed contract). The header tells the worker its canonical
+ * WAO agentId and that it must NOT derive identity from OS user, runtime,
+ * model, cwd, or role display name. Whether the worker actually echoes the id
+ * is only a hint effect — it adds no scorecard, retry, or acceptance gate.
+ *
+ * Contract:
+ *   - roleContract undefined/empty → returns undefined (unchanged behavior for
+ *     agents without a systemPrompt; NO identity header is added). Only agents
+ *     that already have a role contract get the identity header.
+ *   - agentId is data-safely encoded (encodeAgentIdLabel) so it cannot form a
+ *     prompt-injection carrier.
+ *   - The header precedes the role body, joined by a fixed separator. The
+ *     composed string is what backends consume via task.roleContract (each
+ *     backend injects it once through its runtime-native channel).
+ *   - Deterministic: identical inputs → identical output (start/resume parity).
+ *   - No runtime-name branch, no parser change, no per-config/roles/*.md edit.
+ *
+ * @param {object} input
+ * @param {string|undefined} [input.roleContract] — validated role contract content
+ * @param {string} input.agentId — canonical WAO agentId (registry id)
+ * @returns {string|undefined} the composed contract string, or undefined
+ */
+export function composeRoleContractWithIdentity({ roleContract, agentId }) {
+  // Only agents that already have a role contract get the identity header.
+  // An agent without systemPrompt keeps its unchanged behavior (undefined).
+  if (roleContract === undefined || roleContract === null) return undefined;
+  if (typeof roleContract !== "string" || roleContract.length === 0) return undefined;
+
+  // Data-safe encode the agentId label so it cannot form an injection carrier.
+  const safeId = encodeAgentIdLabel(agentId);
+
+  // Fixed, provider-neutral identity header. The exact agentId is embedded as
+  // data; the instruction is fixed text. The header deliberately says "When
+  // explicitly asked" so it does not force the worker to spam its id on every
+  // turn — it only anchors the canonical answer when identity is queried.
+  const identityHeader =
+    `Your canonical WAO agentId is ${safeId}. ` +
+    `When explicitly asked for your WAO identity, report this exact agentId. ` +
+    `Do not derive it from OS user, runtime, model, cwd, or role display name.`;
+
+  // Fixed separator: the header is its own logical block, then the role body.
+  const SEPARATOR = "\n\n---\n\n";
+  return `${identityHeader}${SEPARATOR}${roleContract}`;
+}
