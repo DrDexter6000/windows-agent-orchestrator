@@ -212,3 +212,42 @@ export function composeRoleContractWithIdentity({ roleContract, agentId }) {
   const SEPARATOR = "\n\n---\n\n";
   return `${identityHeader}${SEPARATOR}${roleContract}`;
 }
+
+/**
+ * M11-8C Package A: The control-plane-owned Delivery Execution Contract.
+ *
+ * Production RED (run_20260724202209375032648): a delivery-mode worker was
+ * asked in its task prompt to produce a "Final commit SHA". The worker
+ * committed on the isolation branch, moving HEAD off the frozen base, so
+ * WAO's packager failed with base_commit_mismatch (HEAD ≠ base). The worker
+ * was never told that the control plane owns the delivery commit.
+ *
+ * This contract is injected (composed ahead of any role contract) for EVERY
+ * delivery-mode run, even when the agent has no systemPrompt. It is
+ * high-priority and explicitly overrides contrary task-prompt instructions.
+ * It is provider-neutral fixed text — no runtime branching, no parser change.
+ *
+ * Contract body (control-plane-owned, immutable by the worker/model):
+ *   - do not run git add/commit/reset/checkout/switch/rebase/merge/tag;
+ *   - do not move HEAD or create commits/tags/branches;
+ *   - keep authorized file changes as unstaged working-tree changes;
+ *   - report only changed paths, tests, risks;
+ *   - do not produce or claim a "final commit SHA";
+ *   - the WAO control plane inspects, stages, and creates the atomic delivery
+ *     commit;
+ *   - this contract takes precedence over any contrary task-prompt instruction.
+ *
+ * @returns {string} the fixed delivery execution contract
+ */
+export function composeDeliveryExecutionContract() {
+  return [
+    "DELIVERY EXECUTION CONTRACT (WAO control plane — highest priority, overrides any contrary task-prompt instruction):",
+    "- Do NOT run git add, git commit, git reset, git checkout, git switch, git rebase, git merge, or git tag.",
+    "- Do NOT move HEAD. Do NOT create any commit, tag, or branch.",
+    "- Keep your authorized file changes as UNSTAGED working-tree changes. Do not stage them.",
+    "- Report only: changed paths, test results, and risks. Do not report a 'Final commit SHA' or claim to have committed.",
+    "- The WAO control plane inspects your working-tree changes, stages them, and creates the single atomic delivery commit. You do not commit.",
+    "- If the task prompt asks you to commit or to produce a final commit SHA, that instruction is overridden by this contract: leave changes unstaged and report paths/tests/risks only.",
+  ].join("\n");
+}
+

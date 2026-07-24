@@ -11,7 +11,7 @@ import { assessRunEvidence } from "./runEvidenceAssessment.js";
 import { createSecretRedactor } from "./secretRedaction.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError } from "./delivery.js";
 import { verifyDelivery as defaultVerifyDelivery } from "./deliveryVerification.js";
-import { loadRoleContract, composeRoleContractWithIdentity } from "./application/roleContract.js";
+import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecutionContract } from "./application/roleContract.js";
 import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./application/credentialReadiness.js";
 import { inheritedEnvNames } from "./envPolicy.js";
 
@@ -141,6 +141,35 @@ export class RunManager {
         roleContract: loadRoleContract(agent.systemPrompt),
         agentId,
       });
+    }
+
+    // M11-8C Package A: delivery-mode runs ALWAYS inject the control-plane-owned
+    // Delivery Execution Contract, even when the agent has no systemPrompt. This
+    // forbids the worker from running git mutating commands, moving HEAD, or
+    // reporting a final commit SHA — the control plane owns the delivery commit.
+    // Production RED (run_20260724202209375032648): a delivery task prompt asked
+    // for a "Final commit SHA", the worker committed on the isolation branch,
+    // and the packager failed with base_commit_mismatch.
+    //
+    // The delivery contract is composed AHEAD of any role contract so it takes
+    // precedence, and is carried via task.roleContract (each backend injects it
+    // exactly once through its runtime-native channel). It is NOT persisted into
+    // prompt.sent (only the original task prompt is). An unsupported backend
+    // fails closed here — BEFORE worktree/transcript/spawn — because the
+    // contract cannot be delivered otherwise. No runtime-name branch; this path
+    // applies to every backend that declares supportsRoleContract === true.
+    if (delivery) {
+      if (backend.supportsRoleContract !== true) {
+        throw new Error(
+          `Agent ${agentId}: delivery mode requires role contract injection (to deliver the delivery execution contract), ` +
+          `but the selected backend does not support it. ` +
+          `Switch to a backend that declares supportsRoleContract.`
+        );
+      }
+      const deliveryContract = composeDeliveryExecutionContract();
+      roleContract = roleContract
+        ? `${deliveryContract}\n\n---\n\n${roleContract}`
+        : deliveryContract;
     }
 
     // M11-7 (CTO closeout): credential availability check BEFORE transcript
