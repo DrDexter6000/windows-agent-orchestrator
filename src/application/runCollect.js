@@ -158,10 +158,10 @@ export async function collectRunMessages({
 
   const events = await _readTranscript(transcriptPath);
 
-  // M11-8B: canonical agentId from the transcript envelope (the same snapshot
-  // already read above — no extra read). Passed through to the projection so
-  // MCP/CLI expose a unified identity. Never inferred from worker text.
-  const agentId = extractCanonicalAgentId(events);
+  // M11-8B closeout: canonical agentId from the transcript envelope, bound to
+  // the requested runId. Passed through to the projection so MCP/CLI expose a
+  // unified identity. Missing/conflicting/invalid/cross-run → "unknown".
+  const agentId = extractCanonicalAgentId(events, runId);
 
   // Session capability determines process vs serve path.
   const session = findLatest(events, "session.created");

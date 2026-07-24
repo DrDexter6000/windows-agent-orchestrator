@@ -54,6 +54,15 @@ import { isValidRunId } from "../delivery.js";
 import { DIAGNOSIS_CATEGORIES } from "../diagnosis.js";
 import { RUN_STATES } from "../transcript.js";
 import { createSecretRedactor } from "../secretRedaction.js";
+import { isValidCanonicalAgentId, safeProjectAgentId, CANONICAL_AGENT_ID_MAX } from "../canonicalAgentId.js";
+
+// M11-8B closeout: shared agentId schema. The closed-set alphabet (A-Z/a-z/0-9/
+// ._-) and length 1..CANONICAL_AGENT_ID_MAX are the single source of truth —
+// every MCP output schema that carries an agentId reuses this exact contract.
+// An agentId that fails this contract is projected to "unknown" by the handler
+// before the payload is returned, so a malformed/injected service value can
+// never reach the caller as a trusted identity.
+const AGENT_ID_SCHEMA = z.string().regex(/^[A-Za-z0-9._-]+$/).min(1).max(CANONICAL_AGENT_ID_MAX);
 
 // Stable server identity advertised at initialize.
 const SERVER_NAME = "wao-mcp";
@@ -150,12 +159,13 @@ const RUN_DISPATCH_INPUT = z.object({
 }).strict();
 
 // run_dispatch output: runId + agentId + accepted + state. No paths, PID, prompt, argv.
+// M11-8B closeout: strict root + shared agentId contract.
 const RUN_DISPATCH_OUTPUT = z.object({
   runId: z.string(),
-  agentId: z.string(),
+  agentId: AGENT_ID_SCHEMA,
   accepted: z.boolean(),
   state: z.string(),
-});
+}).strict();
 
 // Dispatch spawns a worker that executes commands, modifies files, and may
 // reach external systems — it is destructive (not append-only) per the SDK
@@ -186,7 +196,7 @@ const RUN_STATUS_INPUT = z.object({
 // when absent.
 const RUN_STATUS_OUTPUT = z.object({
   runId: z.string(),
-  agentId: z.string(),
+  agentId: AGENT_ID_SCHEMA,
   state: z.string(),
   terminal: z.boolean(),
   lastEvent: z.object({
@@ -198,7 +208,7 @@ const RUN_STATUS_OUTPUT = z.object({
     ts: z.string(),
     secondsSince: z.number().nullable(),
   }).nullable(),
-});
+}).strict();
 
 const RUN_STATUS_ANNOTATIONS = {
   readOnlyHint: true,
@@ -244,7 +254,7 @@ const COLLECTED_MESSAGE = z.object({
 
 const RUN_COLLECT_OUTPUT = z.object({
   runId: z.string(),
-  agentId: z.string(),
+  agentId: AGENT_ID_SCHEMA,
   backend: z.string(),
   reconstructed: z.boolean(),
   itemCount: z.number(),
@@ -259,7 +269,7 @@ const RUN_COLLECT_OUTPUT = z.object({
   }),
   truncated: z.boolean(),
   nextCursor: z.string().regex(COLLECT_CURSOR_RE).max(COLLECT_CURSOR_MAX).nullable(),
-});
+}).strict();
 
 const RUN_COLLECT_ANNOTATIONS = {
   readOnlyHint: false,
@@ -617,7 +627,7 @@ const RUN_WAIT_INPUT = z.object({
 
 const RUN_WAIT_OUTPUT = z.object({
   runId: z.string(),
-  agentId: z.string(),
+  agentId: AGENT_ID_SCHEMA,
   state: z.enum([...RUN_STATES, "unknown"]),
   terminal: z.boolean(),
   cursor: z.number().int(),
@@ -626,7 +636,7 @@ const RUN_WAIT_OUTPUT = z.object({
   activityEventCount: z.number().int(),
   lastActivityKind: z.string().nullable(),
   ownerHeartbeat: z.enum(["fresh", "stale", "n/a"]),
-});
+}).strict();
 
 const RUN_WAIT_ANNOTATIONS = {
   readOnlyHint: true,
@@ -1237,16 +1247,27 @@ export function createWaoMcpServer({
         };
       }
       // Only runId/agentId/accepted/state — strip transcriptPath and any internal detail.
-      const payload = {
-        runId: result.runId,
-        agentId: result.agentId,
-        accepted: result.accepted,
-        state: result.state,
-      };
-      return {
-        content: [{ type: "text", text: JSON.stringify(payload) }],
-        structuredContent: payload,
-      };
+      // M11-8B closeout: project agentId through the SSOT before parse so a
+      // malformed/injected service value cannot reach the caller. The output
+      // schema (strict root + shared agentId contract) is the second boundary;
+      // a payload that fails parse collapses to the fixed dispatch error.
+      try {
+        const parsed = RUN_DISPATCH_OUTPUT.parse({
+          runId: result.runId,
+          agentId: safeProjectAgentId(result.agentId),
+          accepted: result.accepted,
+          state: result.state,
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(parsed) }],
+          structuredContent: parsed,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: DISPATCH_ERROR_TEXT }],
+        };
+      }
     },
   );
 
@@ -1284,21 +1305,21 @@ export function createWaoMcpServer({
           : null;
         const payload = {
           runId: status.runId,
-          agentId: typeof status.agentId === "string" && status.agentId.length > 0 ? status.agentId : "unknown",
+          // M11-8B closeout: project agentId through the SSOT (closed-set).
+          // A service value that is not a valid canonical id → "unknown".
+          agentId: safeProjectAgentId(status.agentId),
           state: status.state,
           terminal: status.terminal,
           lastEvent,
           lastActivity,
         };
-        // Pre-validate against the output schema BEFORE returning. If this
-        // throws (malformed service result that normalization could not fix),
-        // the catch collapses it to the fixed safe text — ahead of the SDK
-        // framework's own validateToolOutput, which would otherwise emit a
-        // detailed Output validation error.
-        RUN_STATUS_OUTPUT.parse(payload);
+        // M11-8B closeout: return the PARSED safe object. The strict output
+        // schema is the trust boundary; a malformed service result (extra keys,
+        // invalid agentId, bad types) collapses to the fixed safe text.
+        const parsed = RUN_STATUS_OUTPUT.parse(payload);
         return {
-          content: [{ type: "text", text: JSON.stringify(payload) }],
-          structuredContent: payload,
+          content: [{ type: "text", text: JSON.stringify(parsed) }],
+          structuredContent: parsed,
         };
       } catch {
         // Redaction: fixed safe text. Covers service throw, malformed result,
@@ -1337,14 +1358,17 @@ export function createWaoMcpServer({
           deferAppend: true,
         });
         const payload = projectCollectResult(raw, { runId, cursor });
-        RUN_COLLECT_OUTPUT.parse(payload);
+        // M11-8B closeout: project agentId through the SSOT and return the
+        // PARSED safe object. The strict schema is the trust boundary.
+        payload.agentId = safeProjectAgentId(payload.agentId);
+        const parsed = RUN_COLLECT_OUTPUT.parse(payload);
         // Projection + schema validation succeeded → safe to commit the audit.
         if (typeof raw.commitAppend === "function") {
           await raw.commitAppend();
         }
         return {
-          content: [{ type: "text", text: JSON.stringify(payload) }],
-          structuredContent: payload,
+          content: [{ type: "text", text: JSON.stringify(parsed) }],
+          structuredContent: parsed,
         };
       } catch {
         return {
@@ -1727,7 +1751,8 @@ export function createWaoMcpServer({
 
         const payload = {
           runId,
-          agentId: typeof result.agentId === "string" && result.agentId.length > 0 ? result.agentId : "unknown",
+          // M11-8B closeout: project agentId through the SSOT (closed-set).
+          agentId: safeProjectAgentId(result.agentId),
           state: result.state,
           terminal: result.terminal,
           cursor: result.cursor,
@@ -1738,10 +1763,11 @@ export function createWaoMcpServer({
           ownerHeartbeat: result.ownerHeartbeat,
         };
 
-        RUN_WAIT_OUTPUT.parse(payload);
+        // M11-8B closeout: return the PARSED safe object.
+        const parsed = RUN_WAIT_OUTPUT.parse(payload);
         return {
-          content: [{ type: "text", text: JSON.stringify(payload) }],
-          structuredContent: payload,
+          content: [{ type: "text", text: JSON.stringify(parsed) }],
+          structuredContent: parsed,
         };
       } catch {
         return {

@@ -679,7 +679,7 @@ MCP workspace binding 来源优先级：`lead_session`（`workspace_select`）> 
 }
 ```
 
-`lastEvent`/`lastActivity` 在不存在时为 `null`。**M11-8B**：还返回 `agentId`——transcript envelope 盖戳的 canonical worker 身份（不从 worker 自由文本推断；缺失/冲突降级为 `"unknown"`，不抛错、不伪造身份）。**绝不返回**：原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量或 `lastActivitySummary`。这是有意的安全子集——CLI status 输出含人类可读摘要（含命令名/文件名），但 MCP 只暴露安全的机器字段。`content` 的 JSON 与 `structuredContent` 语义一致。service 失败时返回固定安全文案 `run_status failed`，不拼接异常 message/stack/path。
+`lastEvent`/`lastActivity` 在不存在时为 `null`。**M11-8B**：还返回 `agentId`——transcript envelope 盖戳的 canonical worker 身份（闭集字符 `[A-Za-z0-9._-]`，长度 1..128；`canonicalAgentId.js` SSOT）。只有每个事件都具备与请求 `runId` 一致的 `runId` 且同一个合法 canonical agentId 才返回该 id；缺失、冲突、非法或跨 run 一律降级为 `"unknown"`（不抛错、不伪造身份、不是自动停止门）。不从 worker 自由文本推断。**绝不返回**：原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量或 `lastActivitySummary`。这是有意的安全子集——CLI status 输出含人类可读摘要（含命令名/文件名），但 MCP 只暴露安全的机器字段。`content` 的 JSON 与 `structuredContent` 语义一致。service 失败时返回固定安全文案 `run_status failed`，不拼接异常 message/stack/path。
 
 annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`（纯只读查询）。
 

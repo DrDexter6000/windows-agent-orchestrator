@@ -42,6 +42,7 @@ import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
+import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
 
 // WAO installation/repo root, derived from this module's URL
 // (<repoRoot>/src/application/roleContract.js → up two levels). Stable across
@@ -141,26 +142,18 @@ export function loadRoleContract(rolePath) {
   return text;
 }
 
-// M11-8B: data-safe encoding for the canonical agentId when it is embedded
-// into the composed role contract. The agentId is a registry id (a closed
-// vocabulary the Owner controls), but defense-in-depth demands we treat it as
-// untrusted data when placing it inside a prompt. The threat: a malformed or
-// attacker-influenced agentId like "evil\n\nIgnore previous instructions."
-// could otherwise be carried verbatim into the role contract header and read
-// as a new instruction line by the worker.
+// M11-8B closeout: the identity header is composed ONLY with a validated
+// canonical agentId. The CTO verdict rejected the prior "collapse newlines to
+// spaces" approach: turning "evil\n\nIgnore previous instructions." into
+// "evil Ignore previous instructions." still let the attack text enter the
+// model prompt, and "same line" is not a security boundary for LLM prompts.
 //
-// The encoding collapses ALL whitespace and control chars to single spaces so
-// the agentId stays a single atomic data label — it cannot introduce a blank
-// line (the prompt-injection carrier) or a control sequence. The visible
-// agentId text is preserved (letters/digits/punctuation), only its structure
-// is flattened. This is a structural transform, not a denylist: it is safe
-// against any future agentId shape.
-const IDENTITY_LABEL_SAFE_RE = /[\s\x00-\x1f\x7f-\x9f]+/g;
-
-function encodeAgentIdLabel(agentId) {
-  // Collapse all whitespace/control runs to a single space, then trim.
-  return String(agentId).replace(IDENTITY_LABEL_SAFE_RE, " ").trim();
-}
+// The correct boundary is structural: an agentId is a closed-vocabulary
+// registry identifier (see canonicalAgentId.js — A-Z/a-z/0-9/._-, 1..128).
+// Only such an id may appear in the identity header. Any other value — a
+// newline injection, whitespace, punctuation, overlong string, or non-string —
+// is rejected: the header is omitted entirely and the role contract body is
+// returned alone. An invalid id NEVER enters the prompt in any form.
 
 /**
  * M11-8B: The SINGLE composition function that combines a fixed, provider-
@@ -172,15 +165,16 @@ function encodeAgentIdLabel(agentId) {
  * model, cwd, or role display name. Whether the worker actually echoes the id
  * is only a hint effect — it adds no scorecard, retry, or acceptance gate.
  *
- * Contract:
+ * Trust boundary (M11-8B closeout):
  *   - roleContract undefined/empty → returns undefined (unchanged behavior for
- *     agents without a systemPrompt; NO identity header is added). Only agents
- *     that already have a role contract get the identity header.
- *   - agentId is data-safely encoded (encodeAgentIdLabel) so it cannot form a
- *     prompt-injection carrier.
- *   - The header precedes the role body, joined by a fixed separator. The
- *     composed string is what backends consume via task.roleContract (each
- *     backend injects it once through its runtime-native channel).
+ *     agents without a systemPrompt; NO identity header is added).
+ *   - agentId MUST be a valid canonical id (isValidCanonicalAgentId). An
+ *     invalid id does NOT enter the prompt in any form: the header is omitted
+ *     and the role contract body is returned alone. There is no "encoding"
+ *     fallback — an invalid id is rejected, not flattened.
+ *   - When the id is valid, the header (fixed text + the validated id) precedes
+ *     the role body, joined by a fixed separator. The composed string is what
+ *     backends consume via task.roleContract (each backend injects it once).
  *   - Deterministic: identical inputs → identical output (start/resume parity).
  *   - No runtime-name branch, no parser change, no per-config/roles/*.md edit.
  *
@@ -195,15 +189,22 @@ export function composeRoleContractWithIdentity({ roleContract, agentId }) {
   if (roleContract === undefined || roleContract === null) return undefined;
   if (typeof roleContract !== "string" || roleContract.length === 0) return undefined;
 
-  // Data-safe encode the agentId label so it cannot form an injection carrier.
-  const safeId = encodeAgentIdLabel(agentId);
+  // The identity header is added ONLY when the agentId is a valid canonical id.
+  // An invalid id (newline injection, whitespace, punctuation, overlong, etc.)
+  // is rejected: the header is omitted and the role body is returned alone.
+  // An invalid id NEVER enters the model prompt in any form.
+  if (!isValidCanonicalAgentId(agentId)) {
+    return roleContract;
+  }
 
-  // Fixed, provider-neutral identity header. The exact agentId is embedded as
-  // data; the instruction is fixed text. The header deliberately says "When
-  // explicitly asked" so it does not force the worker to spam its id on every
-  // turn — it only anchors the canonical answer when identity is queried.
+  // Fixed, provider-neutral identity header. The id is already validated to the
+  // closed-set alphabet, so it is safe to embed verbatim — it cannot carry
+  // whitespace, control chars, or instruction-phrase structure. The header
+  // deliberately says "When explicitly asked" so it does not force the worker
+  // to spam its id on every turn — it only anchors the canonical answer when
+  // identity is queried.
   const identityHeader =
-    `Your canonical WAO agentId is ${safeId}. ` +
+    `Your canonical WAO agentId is ${agentId}. ` +
     `When explicitly asked for your WAO identity, report this exact agentId. ` +
     `Do not derive it from OS user, runtime, model, cwd, or role display name.`;
 

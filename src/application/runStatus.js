@@ -116,9 +116,11 @@ export async function getRunStatus({
   const state = findState(events);
   const terminal = TERMINAL_STATES.includes(state);
 
-  // M11-8B: canonical agentId from the transcript envelope (the same snapshot
-  // already read above — no extra read). Never inferred from worker text.
-  const agentId = extractCanonicalAgentId(events);
+  // M11-8B closeout: canonical agentId from the transcript envelope (the same
+  // snapshot already read above — no extra read). Bound to the requested runId:
+  // events from a different run, a missing/conflicting agentId, or an invalid
+  // id all degrade to "unknown" (no throw, no gate). Never inferred from worker text.
+  const agentId = extractCanonicalAgentId(events, runId);
 
   // Last event overall (any type).
   const last = events.at(-1) ?? null;

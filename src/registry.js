@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { isValidCanonicalAgentId } from "./canonicalAgentId.js";
 
 export async function readRegistry(filePath) {
   const raw = await readFile(filePath, "utf8");
@@ -22,6 +23,15 @@ export async function readRegistry(filePath) {
 }
 
 export function normalizeAgent(id, agent) {
+  // M11-8B closeout: the agentId must be a valid canonical id (closed-set
+  // alphabet A-Z/a-z/0-9/._-, 1..128). This is a configuration-validity check,
+  // not a Lead workflow gate — an invalid id is rejected before any
+  // transcript/spawn. The error is a FIXED SAFE SHAPE: it never echoes the
+  // supplied id (a malicious id could itself be sensitive or carry an
+  // injection payload into logs/errors).
+  if (!isValidCanonicalAgentId(id)) {
+    throw new Error("registry contains an agent with an invalid id (must match [A-Za-z0-9._-], 1..128 chars)");
+  }
   if (!agent.backend) {
     throw new Error(`Agent ${id} is missing backend`);
   }

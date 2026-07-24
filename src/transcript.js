@@ -1,6 +1,7 @@
 import { appendFile, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createSecretRedactor } from "./secretRedaction.js";
+import { isValidCanonicalAgentId } from "./canonicalAgentId.js";
 
 const APPEND_LOCK_TIMEOUT_MS = 5000;
 const APPEND_LOCK_STALE_MS = 30000;
@@ -518,33 +519,42 @@ export function findLastEventSeq(events) {
  *     or nothing at all — none of that changes the durable agentId);
  *   - OS user, cwd, model name, backend output, or role title.
  *
- * Derivation rules (truthfulness contract):
- *   - The agentId is taken from the FIRST event's envelope. The first event
- *     is created at dispatch/start time by the control plane, before any
- *     worker output exists, so it is the authoritative binding.
- *   - Every event's envelope MUST carry the same agentId (the control plane
- *     stamps them identically). If any later event's envelope agentId
- *     DIFFERS, that is corruption (or a hand-edit) — return "unknown" rather
- *     than silently picking one. "unknown" is never a throw: the tool stays
- *     usable, the Lead keeps human judgment.
- *   - A missing/non-string first-event agentId → "unknown".
+ * Trust-boundary derivation (M11-8B closeout):
+ *   - The id is returned ONLY when EVERY event in the sequence carries:
+ *       (a) a `runId` equal to `expectedRunId`, AND
+ *       (b) the SAME `agentId`, AND
+ *       (c) that agentId is a valid canonical id (closed-set alphabet).
+ *   - Any deviation — a missing agentId on any event, a runId that does not
+ *     match the request, a conflicting agentId, an invalid/non-canonical id,
+ *     or an empty/missing sequence — returns "unknown".
+ *   - "unknown" is NEVER a throw and NEVER a gate: the tool stays usable and
+ *     the Lead keeps human judgment. A corrupt or stale transcript degrades
+ *     honestly rather than fabricating a trusted identity.
+ *
+ * `expectedRunId` binds the read to the request: events from a different run
+ * (e.g. a transcript concatenated across runs, or a stale cursor replay) are
+ * rejected. Callers (status/wait/collect) pass the runId they were asked about.
  *
  * This function reads ONLY the already-loaded event array. It performs no
  * extra transcript, registry, or filesystem read — callers pass the snapshot
  * they already have (status/wait/collect all read the transcript once).
  *
  * @param {object[]} events — transcript event array (already read)
+ * @param {string} [expectedRunId] — the runId the caller requested
  * @returns {string} the canonical agentId, or "unknown"
  */
-export function extractCanonicalAgentId(events) {
+export function extractCanonicalAgentId(events, expectedRunId) {
   if (!Array.isArray(events) || events.length === 0) return "unknown";
-  const first = events[0]?.agentId;
-  if (typeof first !== "string" || first.length === 0) return "unknown";
-  // Conflict detection: every envelope must agree. A divergent envelope is
-  // corruption → "unknown" (never fabricate an identity, never throw).
-  for (let i = 1; i < events.length; i += 1) {
-    const cur = events[i]?.agentId;
-    if (cur !== undefined && cur !== first) return "unknown";
+  const first = events[0];
+  const candidate = first?.agentId;
+  // The candidate must be a valid canonical id (closed-set alphabet). An
+  // invalid/non-canonical id on the very first event → unknown, no throw.
+  if (!isValidCanonicalAgentId(candidate)) return "unknown";
+  // Every event must carry the SAME valid agentId AND the expected runId.
+  for (let i = 0; i < events.length; i += 1) {
+    const ev = events[i];
+    if (ev?.agentId !== candidate) return "unknown";
+    if (expectedRunId !== undefined && ev?.runId !== expectedRunId) return "unknown";
   }
-  return first;
+  return candidate;
 }

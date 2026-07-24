@@ -27,6 +27,7 @@
 
 import { createHash } from "node:crypto";
 import { createSecretRedactor } from "../secretRedaction.js";
+import { safeProjectAgentId } from "../canonicalAgentId.js";
 
 // ===== Page bounds (must match the legacy projectCollectResult constants) =====
 
@@ -380,14 +381,11 @@ function safeSliceUtf16(str, start, end) {
 export function projectCollectResult(rawResult, { runId, cursor, env } = {}) {
   if (!rawResult || typeof rawResult !== "object") throw new Error("invalid collect result");
   if (!runId || typeof runId !== "string") throw new Error("runId required");
-  // M11-8B: canonical agentId from the transcript envelope, threaded by the
-  // collect service. Defensive: a non-string/empty value collapses to
-  // "unknown" so the projection never fabricates or omits identity. This is
-  // data carried verbatim — the agentId is a registry id (closed vocabulary),
-  // not worker free-text, so it cannot carry prompt-injection control.
-  const agentId = typeof rawResult.agentId === "string" && rawResult.agentId.length > 0
-    ? rawResult.agentId
-    : "unknown";
+  // M11-8B closeout: canonical agentId from the transcript envelope, threaded
+  // by the collect service. Projected through the shared SSOT (closed-set
+  // alphabet) so a malformed/injected value degrades to "unknown" rather than
+  // being carried verbatim.
+  const agentId = safeProjectAgentId(rawResult.agentId);
   // Fix A (CTO rework): the service MUST hand the projection layer the full
   // raw item list. A non-array data is a contract violation — fail closed
   // rather than silently treating it as an empty snapshot (which masks

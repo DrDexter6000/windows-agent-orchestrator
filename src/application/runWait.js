@@ -196,9 +196,9 @@ export async function runWait(input) {
   const terminal = TERMINAL_STATES.includes(state);
   const cursor = findLastEventSeq(events) ?? 0;
 
-  // M11-8B: canonical agentId from the transcript envelope (the same snapshot
-  // already read above — no extra read). Never inferred from worker text.
-  const agentId = extractCanonicalAgentId(events);
+  // M11-8B closeout: canonical agentId from the transcript envelope, bound to
+  // the requested runId. Missing/conflicting/invalid/cross-run → "unknown".
+  const agentId = extractCanonicalAgentId(events, runId);
 
   // Resolve the activity baseline:
   //   omitted → cursor at first read (only window-new events count)
