@@ -28,6 +28,12 @@ export class KimiCodeBackend extends ProcessBackend {
     super({
       parserClass: KimiStreamParser,
       buildArgs: (agent, task) => {
+        // M11-9: model from canonical structured field. reasoning.effort is NOT
+        // supported (kimi 0.29.1 has no single-process effort override channel;
+        // effort is global in ~/.kimi-code/config.toml which WAO must not modify).
+        if (agent.reasoning?.effort) {
+          throw new Error("kimi-code backend does not support reasoning.effort (no single-process override channel; configure ~/.kimi-code/config.toml globally instead)");
+        }
         // M11-5（TD-89 修复）：kimi CLI 无 system/developer message 通道
         // （-p 只接受单个 prompt 字符串，无 system flag）。fallback：把角色
         // 合同与任务用固定分隔组合进同一个 prompt。role 在前、task 在后、
@@ -43,6 +49,8 @@ export class KimiCodeBackend extends ProcessBackend {
         return [
           "-p", prompt,
           "--output-format", "stream-json",
+          // M11-9: model from structured field (was previously in agent.args).
+          ...(agent.model?.id ? ["--model", agent.model.id] : []),
           ...(Array.isArray(agent.args) ? agent.args : []),
         ];
       },

@@ -46,10 +46,18 @@ export class ClaudeCodeBackend extends ProcessBackend {
         if (task.roleContract) {
           args.push("--append-system-prompt", task.roleContract);
         }
-        // P4 决策B：有 provider 时，claude CLI 的 --model/--effort 从 provider 推导
-        // （与 wrapper 同源，防漂移）。无 provider 时这些应在 agent.args 里（旧形态）。
+        // M11-9: model/reasoning from canonical structured fields (single source).
+        // When a provider exists, resolveProviderArgs returns cliFlags with
+        // --model/--effort derived from the same fields. When no provider
+        // (native OAuth direct-connect), we generate them here directly.
         const providerArgs = resolveProviderArgs(agent, WRAPPER_PATH);
-        if (providerArgs) args.push(...providerArgs.cliFlags);
+        if (providerArgs) {
+          args.push(...providerArgs.cliFlags);
+        } else {
+          // No provider: translate model/reasoning directly to CLI flags.
+          if (agent.model?.id) args.push("--model", agent.model.id);
+          if (agent.reasoning?.effort) args.push("--effort", agent.reasoning.effort);
+        }
         // ad-hoc CLI flag 透传（如 --dangerously-skip-permissions）
         args.push(...(Array.isArray(agent.args) ? agent.args : []));
         return args;

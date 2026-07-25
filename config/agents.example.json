@@ -11,19 +11,26 @@
       "_comment_task": "适合任务: 代码库调研/技术选型/可行性分析/文档生成/brief 输出",
       "backend": "claude-code",
       "provider": {
+        "protocol": "anthropic-compatible",
         "baseUrl": "https://api.deepseek.com/anthropic",
-        "apiKeyEnv": "DEEPSEEK_API_KEY",
-        "model": "deepseek-v4-flash",
-        "effort": "max",
-        "contextWindow": 1000000
+        "apiKeyEnv": "DEEPSEEK_API_KEY"
       },
       "cwd": "D:/projects/your-project",
       "systemPrompt": "config/roles/researcher.md",
-      "args": ["--dangerously-skip-permissions"],
+      "args": [
+        "--dangerously-skip-permissions"
+      ],
       "_comment_env": "TD-79 Python 环境隔离：researcher 是只读角色，不应改全局 Python env。PIP_REQUIRE_VIRTUALENV 让 pip 在无激活 venv 时直接拒绝安装；PYTHONNOUSERSITE 禁 user site-packages。两者都是 OS-native 机制，pip 自己拒绝，无需 WAO 包装命令。需真正装包的 worker（coder_*）不配此项。",
       "env": {
         "PIP_REQUIRE_VIRTUALENV": "1",
         "PYTHONNOUSERSITE": "1"
+      },
+      "model": {
+        "id": "deepseek-v4-flash",
+        "contextWindow": 1000000
+      },
+      "reasoning": {
+        "effort": "max"
       }
     },
     "coder_hq": {
@@ -33,15 +40,22 @@
       "_comment_task": "适合任务: 写/改代码/重构/修 bug/按 brief 实现",
       "backend": "claude-code",
       "provider": {
+        "protocol": "anthropic-compatible",
         "baseUrl": "https://open.bigmodel.cn/api/anthropic",
-        "apiKeyEnv": "ZHIPU_API_KEY",
-        "model": "glm-5.2",
-        "effort": "high",
-        "contextWindow": 1000000
+        "apiKeyEnv": "ZHIPU_API_KEY"
       },
       "cwd": "D:/projects/your-project",
       "systemPrompt": "config/roles/coder_hq.md",
-      "args": ["--dangerously-skip-permissions"]
+      "args": [
+        "--dangerously-skip-permissions"
+      ],
+      "model": {
+        "id": "glm-5.2",
+        "contextWindow": 1000000
+      },
+      "reasoning": {
+        "effort": "high"
+      }
     },
     "coder_low": {
       "_comment": "[Coder-Low] 轻活快速处理。杀鸡不用牛刀。对齐 team-roles.md Coder-Low。",
@@ -49,14 +63,19 @@
       "_comment_task": "适合任务: 小 bug 修复/跑脚本/简单文件改动/格式调整",
       "backend": "claude-code",
       "provider": {
+        "protocol": "anthropic-compatible",
         "baseUrl": "https://open.bigmodel.cn/api/anthropic",
-        "apiKeyEnv": "ZHIPU_API_KEY",
-        "model": "glm-5-turbo",
-        "contextWindow": 128000
+        "apiKeyEnv": "ZHIPU_API_KEY"
       },
       "cwd": "D:/projects/your-project",
       "systemPrompt": "config/roles/coder_low.md",
-      "args": ["--dangerously-skip-permissions"]
+      "args": [
+        "--dangerously-skip-permissions"
+      ],
+      "model": {
+        "id": "glm-5-turbo",
+        "contextWindow": 128000
+      }
     },
     "coder_mm": {
       "_comment": "[Coder-MM] 多模态处理。涉及图像/截图的任务。对齐 team-roles.md Coder-MM。",
@@ -86,7 +105,11 @@
       "backend": "claude-code",
       "cwd": "D:/projects/your-project",
       "systemPrompt": "config/roles/auditor.md",
-      "args": ["--model", "opus-4.8", "--dangerously-skip-permissions"]
+      "args": [
+        "--model",
+        "opus-4.8",
+        "--dangerously-skip-permissions"
+      ]
     },
     "coder_opencode_fallback": {
       "_comment": "[FALLBACK] opencode-serve worker。⚠ 默认不用——opencode 是 fallback 选项（决策 0005）。仅在需要 token 闸门精确控成本时用。",
@@ -114,7 +137,11 @@
         "profile": "strict",
         "providerID": "deepseek",
         "modelId": "deepseek-v4-flash",
-        "drills": ["sentinel", "scorecard", "workflowRunDir"]
+        "drills": [
+          "sentinel",
+          "scorecard",
+          "workflowRunDir"
+        ]
       },
       {
         "agentId": "coder_hq",
@@ -122,7 +149,12 @@
         "profile": "strict",
         "providerID": "zhipuai-coding-plan",
         "modelId": "glm-5.2",
-        "drills": ["sentinel", "scorecard", "isolation", "workflowRunDir"]
+        "drills": [
+          "sentinel",
+          "scorecard",
+          "isolation",
+          "workflowRunDir"
+        ]
       },
       {
         "agentId": "coder_low",
@@ -130,19 +162,28 @@
         "profile": "strict",
         "providerID": "zhipuai-coding-plan",
         "modelId": "glm-5-turbo",
-        "drills": ["sentinel", "scorecard"]
+        "drills": [
+          "sentinel",
+          "scorecard"
+        ]
       },
       {
         "agentId": "coder_mm",
         "label": "kimi-for-coding via kimi-code CLI",
         "profile": "strict",
-        "drills": ["sentinel", "scorecard"]
+        "drills": [
+          "sentinel",
+          "scorecard"
+        ]
       },
       {
         "agentId": "tester",
         "label": "Codex tester worker",
         "profile": "strict",
-        "drills": ["sentinel", "scorecard"]
+        "drills": [
+          "sentinel",
+          "scorecard"
+        ]
       }
     ]
   }

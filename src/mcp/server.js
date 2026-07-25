@@ -130,6 +130,8 @@ const AGENT_ENTRY = z.object({
   id: z.string(),
   backend: z.string(),
   model: z.string(),
+  // M11-9: reasoning effort from structured field; null when absent (runtime default).
+  reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).nullable(),
   certification: z.string().nullable(),
   cwd: z.string(),
   credentialAvailability: z.enum(["available", "missing", "not_required"]),
@@ -562,6 +564,7 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
     id: z.string().max(128),
     backend: z.string().max(64),
     model: z.string().max(128),
+    reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).nullable(),
     certification: z.string().nullable(),
     credentialAvailability: z.enum(["available", "missing", "not_required"]),
   }).strict()).max(WORKERS_CAP).nullable(),

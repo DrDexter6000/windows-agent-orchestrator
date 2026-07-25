@@ -99,6 +99,9 @@ export async function getRegistryInventory({
       id: agent.id,
       backend: agent.backend,
       model: displayModel(agent),
+      // M11-9: reasoningEffort from structured field. null when absent (runtime
+      // default) — never fabricated, never reverse-parsed from args.
+      reasoningEffort: agent.reasoning?.effort ?? null,
       certification: certMap[agent.id] ?? null,
       cwd: agent.cwd,
       credentialAvailability: readiness.credentialAvailability,

@@ -19,12 +19,21 @@ export class CodexBackend extends ProcessBackend {
   constructor(opts = {}) {
     super({
       parserClass: CodexStreamParser,
-      buildArgs: (_agent, task) => {
+      buildArgs: (agent, task) => {
         const args = [
           "exec",
           "--json",
           "--skip-git-repo-check",
         ];
+        // M11-9: model from canonical structured field.
+        if (agent.model?.id) {
+          args.push("--model", agent.model.id);
+        }
+        // M11-9: reasoning.effort — Codex supports -c model_reasoning_effort.
+        // No-model probe: codex exec accepts -c overrides (same as developer_instructions).
+        if (agent.reasoning?.effort) {
+          args.push("-c", `model_reasoning_effort="${agent.reasoning.effort}"`);
+        }
         // M11-5（TD-89 修复）：角色合同经共享加载器验证后以 task.roleContract
         // （字符串内容）传入。Codex 的 -c developer_instructions 是 append 到
         // developer message 的 config override（Stage 0 探针证明：不替换 base

@@ -90,14 +90,16 @@ function normalizeModelPolicy(id, agent) {
     if (p.model !== undefined || p.effort !== undefined || p.contextWindow !== undefined) {
       throw new Error(`Agent ${id}: provider must not carry model/effort/contextWindow (use top-level model/reasoning)`);
     }
-    if (p.protocol !== "anthropic-compatible") {
+    if (p.protocol !== undefined && p.protocol !== "anthropic-compatible") {
       throw new Error(`Agent ${id}: provider.protocol must be "anthropic-compatible"`);
     }
-    if (typeof p.baseUrl !== "string" || p.baseUrl.length === 0) {
-      throw new Error(`Agent ${id}: provider.baseUrl is required`);
-    }
+    // apiKeyEnv is required (credential policy reads it). baseUrl is required
+    // only for the wrapper path but optional for credential-only provider usage.
     if (typeof p.apiKeyEnv !== "string" || p.apiKeyEnv.length === 0) {
       throw new Error(`Agent ${id}: provider.apiKeyEnv is required`);
+    }
+    if (p.baseUrl !== undefined && (typeof p.baseUrl !== "string" || p.baseUrl.length === 0)) {
+      throw new Error(`Agent ${id}: provider.baseUrl must be a non-empty string when present`);
     }
   }
 

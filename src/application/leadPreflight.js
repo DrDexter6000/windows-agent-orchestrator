@@ -187,6 +187,7 @@ export async function aggregateLeadPreflight({
       id: a.id,
       backend: a.backend,
       model: a.model,
+      reasoningEffort: a.reasoningEffort ?? null,
       certification: a.certification,
       credentialAvailability: a.credentialAvailability,
     }));

@@ -17,19 +17,18 @@ import { resolveProviderArgs } from "../src/backends/claudeCodeProvider.js";
 
 const WRAPPER_PLACEHOLDER = "WRAPPER_PATH_PLACEHOLDER";
 
-test("resolveProviderArgs: 完整 provider → wrapper prependArgs + claude CLI flags", () => {
+test("resolveProviderArgs: 完整 canonical → wrapper prependArgs + claude CLI flags", () => {
   const agent = {
     id: "coder",
+    model: { id: "glm-5.2", contextWindow: 1000000 },
+    reasoning: { effort: "high" },
     provider: {
+      protocol: "anthropic-compatible",
       baseUrl: "https://open.bigmodel.cn/api/anthropic",
       apiKeyEnv: "ZHIPU_API_KEY",
-      model: "glm-5.2",
-      effort: "high",
-      contextWindow: 1000000,
     },
   };
   const { prependArgs, cliFlags } = resolveProviderArgs(agent, WRAPPER_PLACEHOLDER);
-  // wrapper 参数：wrapper 路径 + base-url/api-key-env/default-model/effort/context-window + --
   assert.equal(prependArgs[0], WRAPPER_PLACEHOLDER, "首项是 wrapper 路径");
   assert.ok(prependArgs.includes("--base-url"), "含 --base-url");
   assert.ok(prependArgs.includes("--api-key-env"), "含 --api-key-env");
@@ -37,35 +36,37 @@ test("resolveProviderArgs: 完整 provider → wrapper prependArgs + claude CLI 
   assert.ok(prependArgs.includes("--effort"), "含 --effort");
   assert.ok(prependArgs.includes("--context-window"), "含 --context-window");
   assert.equal(prependArgs.at(-1), "--", "末项是 -- 分隔符");
-  // 值正确
   assert.equal(prependArgs[prependArgs.indexOf("--base-url") + 1], "https://open.bigmodel.cn/api/anthropic");
   assert.equal(prependArgs[prependArgs.indexOf("--api-key-env") + 1], "ZHIPU_API_KEY");
   assert.equal(prependArgs[prependArgs.indexOf("--default-model") + 1], "glm-5.2");
   assert.equal(prependArgs[prependArgs.indexOf("--effort") + 1], "high");
   assert.equal(prependArgs[prependArgs.indexOf("--context-window") + 1], "1000000");
-  // claude CLI flags：--model + --effort，与 wrapper 同源（单一真相源，防漂移）
   assert.deepEqual(cliFlags, ["--model", "glm-5.2", "--effort", "high"]);
 });
 
-test("resolveProviderArgs: 无 effort/contextWindow → 不生成对应 flag", () => {
+test("resolveProviderArgs: 无 reasoning/contextWindow → 不生成对应 flag", () => {
   const agent = {
-    provider: { baseUrl: "https://x", apiKeyEnv: "KEY", model: "m" },
+    model: { id: "m" },
+    provider: { protocol: "anthropic-compatible", baseUrl: "https://x", apiKeyEnv: "KEY" },
   };
   const { prependArgs, cliFlags } = resolveProviderArgs(agent, WRAPPER_PLACEHOLDER);
-  assert.ok(!prependArgs.includes("--effort"), "无 effort → wrapper 不含 --effort");
+  assert.ok(!prependArgs.includes("--effort"), "无 reasoning → wrapper 不含 --effort");
   assert.ok(!prependArgs.includes("--context-window"), "无 contextWindow → wrapper 不含 --context-window");
   assert.deepEqual(cliFlags, ["--model", "m"], "无 effort → CLI 只 --model");
 });
 
-test("resolveProviderArgs: 无 provider → 返回 null（向后兼容旧形态）", () => {
-  const agent = { id: "coder" }; // 无 provider
+test("resolveProviderArgs: 无 provider → 返回 null（native OAuth 直连）", () => {
+  const agent = { id: "coder", model: { id: "m" } };
   const result = resolveProviderArgs(agent, WRAPPER_PLACEHOLDER);
-  assert.equal(result, null, "无 provider = 走旧 agent.prependArgs/args，不推导");
+  assert.equal(result, null, "无 provider = native 直连，不推导 wrapper");
 });
 
 test("resolveProviderArgs: model 是单一真相源——wrapper --default-model 与 CLI --model 同值", () => {
-  // 这是决策B 的核心承诺：opus-4.8 bug 是 model 两处不一致。两处从同一字段来 = 不可能漂移。
-  const agent = { provider: { baseUrl: "https://x", apiKeyEnv: "K", model: "glm-5.2", effort: "high" } };
+  const agent = {
+    model: { id: "glm-5.2" },
+    reasoning: { effort: "high" },
+    provider: { protocol: "anthropic-compatible", baseUrl: "https://x", apiKeyEnv: "K" },
+  };
   const { prependArgs, cliFlags } = resolveProviderArgs(agent, WRAPPER_PLACEHOLDER);
   const wrapperModel = prependArgs[prependArgs.indexOf("--default-model") + 1];
   const cliModel = cliFlags[cliFlags.indexOf("--model") + 1];
@@ -74,7 +75,11 @@ test("resolveProviderArgs: model 是单一真相源——wrapper --default-model
 });
 
 test("resolveProviderArgs: effort 同样是单一真相源（wrapper 与 CLI 同值）", () => {
-  const agent = { provider: { baseUrl: "https://x", apiKeyEnv: "K", model: "m", effort: "high" } };
+  const agent = {
+    model: { id: "m" },
+    reasoning: { effort: "high" },
+    provider: { protocol: "anthropic-compatible", baseUrl: "https://x", apiKeyEnv: "K" },
+  };
   const { prependArgs, cliFlags } = resolveProviderArgs(agent, WRAPPER_PLACEHOLDER);
   const wrapperEffort = prependArgs[prependArgs.indexOf("--effort") + 1];
   const cliEffort = cliFlags[cliFlags.indexOf("--effort") + 1];
