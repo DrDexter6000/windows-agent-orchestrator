@@ -106,13 +106,6 @@ export class RunManager {
     // vs `effectiveAgent` (post-worktree) yields the same instance.
     const backend = this.backendFor(agent);
 
-    // M11-9 CTO closeout: validate the backend can express the agent's canonical
-    // policy BEFORE any side effect (transcript, runDir, worktree, spawn). This
-    // is provider-neutral — RunManager does not branch on the runtime name; each
-    // backend overrides validateAgentPolicy to reject policies it cannot express
-    // (e.g. kimi-code rejects reasoning.effort).
-    backend.validateAgentPolicy?.(agent);
-
     // M11-5（TD-89 修复）：角色合同加载。在 transcript 创建前 fail-closed
     // （零 transcript、零 spawn）。agent.systemPrompt 是 registry 声明的角色
     // 文件路径；由 loadRoleContract 内部的 resolveRoleContractPath 相对 WAO
@@ -177,6 +170,21 @@ export class RunManager {
       roleContract = roleContract
         ? `${deliveryContract}\n\n---\n\n${roleContract}`
         : deliveryContract;
+    }
+
+    // M11-9 CTO closeout: validate the backend can express the agent's canonical
+    // policy BEFORE any side effect (transcript, runDir, worktree, spawn). This
+    // runs AFTER the role-contract / delivery-contract checks (which are more
+    // fundamental backend-capability gates). FAIL-CLOSED: when the agent has ANY
+    // structured policy (model/reasoning/provider), the backend MUST implement
+    // validateAgentPolicy and confirm it can express it. A backend lacking the
+    // method + a structured policy = reject. No structured policy → skip.
+    const hasStructuredPolicy = agent.model || agent.reasoning || agent.provider;
+    if (hasStructuredPolicy) {
+      if (typeof backend.validateAgentPolicy !== "function") {
+        throw new Error("backend does not implement validateAgentPolicy — cannot confirm it can express the configured policy");
+      }
+      backend.validateAgentPolicy(agent);
     }
 
     // M11-7 (CTO closeout): credential availability check BEFORE transcript
@@ -515,8 +523,15 @@ export class RunManager {
     const backend = this.backendFor(agent);
 
     // M11-9 CTO closeout: validate backend policy BEFORE any transcript append
-    // or spawn on the resume path (same as start).
-    backend.validateAgentPolicy?.(agent);
+    // or spawn on the resume path (same as start). FAIL-CLOSED only when a
+    // structured policy is present.
+    const resumeHasPolicy = agent.model || agent.reasoning || agent.provider;
+    if (resumeHasPolicy) {
+      if (typeof backend.validateAgentPolicy !== "function") {
+        throw new Error("backend does not implement validateAgentPolicy — cannot confirm it can express the configured policy");
+      }
+      backend.validateAgentPolicy(agent);
+    }
 
     // M11-5（TD-89 修复）：resume 也必须重新经过同一角色合同加载器，不得静默
     // 漏掉。与 start 路径同一 SSOT（roleContract.js），同一 fail-closed 边界。

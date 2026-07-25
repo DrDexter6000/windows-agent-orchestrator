@@ -396,6 +396,7 @@ test("M11-7-R2: RunManager.start bridges user-env credential into spawn + reject
     let spawnTask = null;
     const fakeBackend = {
       supportsRoleContract: false,
+      validateAgentPolicy: () => {},
       spawn: async (agent, task) => { spawnTask = task; return { backend: "fake", backendSessionId: "s", messageId: "m", admittedSeq: 1, events: async function* () {}, abort: async () => {}, isAlive: () => false }; },
     };
     const mgr = new RunManager({ config: { registry: registryPath, runDir }, readRegistry, backendFor: () => fakeBackend, userEnvReader: fakeUserEnvReader({ TEST_M117_R2: "test-key-bridge" }) });
@@ -424,6 +425,7 @@ test("M11-7-R4: sentinel zero-hit across events, errors, transcript (full RunMan
     const collectedEvents = [];
     const fakeBackend = {
       supportsRoleContract: false,
+      validateAgentPolicy: () => {},
       spawn: async (agent, task) => {
         const redactorEnv = { ...process.env, ...task.resolvedCredentials };
         const { createSecretRedactor } = await import("../src/secretRedaction.js");

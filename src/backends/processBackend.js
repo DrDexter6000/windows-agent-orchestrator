@@ -107,16 +107,22 @@ export class ProcessBackend {
    * M11-9: provider-neutral backend policy validation. Called by RunManager
    * BEFORE any transcript append, runDir creation, worktree, or spawn.
    *
-   * Default: no-op (no backend-specific policy constraints). Backends that
-   * cannot express certain canonical policies override this to throw a fixed
-   * safe error. RunManager must NOT branch on the runtime name — it calls this
-   * uniformly.
+   * FAIL-CLOSED default: if the agent has ANY structured policy (model,
+   * reasoning, provider) and this base class hasn't been overridden, the
+   * backend cannot express it → reject. Each backend MUST override this to
+   * declare exactly which fields it can translate; anything it cannot express
+   * must throw. This prevents "config looks set, runtime never received it."
    *
    * @param {object} agent — normalized agent (canonical model/reasoning/provider)
    * @throws {Error} if the backend cannot express a configured policy
    */
   validateAgentPolicy(agent) {
-    // Base: no constraints.
+    const hasPolicy = agent?.model || agent?.reasoning || agent?.provider;
+    if (hasPolicy) {
+      throw new Error(
+        "this backend does not declare validateAgentPolicy — cannot confirm it can express the configured model/reasoning/provider policy",
+      );
+    }
   }
 
   async spawn(agent, task) {

@@ -27,6 +27,33 @@ export class OpenCodeServeBackend {
   // on this backend must fail closed, not be silently dropped.
   supportsRoleContract = false;
 
+  /**
+   * M11-9 capability: OpenCodeServe uses its own legacy model shape
+   * (string or {providerID, id, variant}) — NOT the canonical {id, contextWindow}.
+   * It cannot express canonical reasoning, provider, or contextWindow.
+   * The canonical model shape (which has contextWindow or lacks providerID) is
+   * rejected; the OpenCode legacy shape ({providerID, id, variant}) is accepted.
+   */
+  validateAgentPolicy(agent) {
+    if (agent?.reasoning?.effort) {
+      throw new Error("opencode-serve backend cannot express reasoning.effort");
+    }
+    if (agent?.provider) {
+      throw new Error("opencode-serve backend cannot express provider");
+    }
+    // Reject canonical model {id, contextWindow} (no providerID → not OpenCode shape).
+    // Accept OpenCode legacy {providerID, id, variant}.
+    if (agent?.model && typeof agent?.model === "object") {
+      if (agent.model.contextWindow !== undefined) {
+        throw new Error("opencode-serve backend cannot express model.contextWindow");
+      }
+      // Canonical shape has bare {id} without providerID — reject.
+      if (agent.model.id !== undefined && agent.model.providerID === undefined) {
+        throw new Error("opencode-serve backend uses its own model shape ({providerID, id, variant}), not canonical {id, contextWindow}");
+      }
+    }
+  }
+
   constructor({ fetchImpl = globalThis.fetch, timeout = 30_000, retries = 2 } = {}) {
     if (!fetchImpl) {
       throw new Error("fetch is required");

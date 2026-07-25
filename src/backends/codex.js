@@ -16,6 +16,21 @@ export class CodexBackend extends ProcessBackend {
   // branch. codex injects via -c developer_instructions (append, not replace).
   supportsRoleContract = true;
 
+  /**
+   * M11-9 capability: Codex can express model (--model) and reasoning
+   * (-c model_reasoning_effort). It cannot express contextWindow (no CLI flag)
+   * or provider (Codex uses its own auth, not an anthropic-compatible wrapper).
+   */
+  validateAgentPolicy(agent) {
+    if (agent?.model?.contextWindow) {
+      throw new Error("codex backend cannot express model.contextWindow (no CLI flag for it)");
+    }
+    if (agent?.provider) {
+      throw new Error("codex backend cannot express provider (uses its own auth, not an anthropic-compatible wrapper)");
+    }
+    // model.id and reasoning.effort are fine.
+  }
+
   constructor(opts = {}) {
     super({
       parserClass: CodexStreamParser,

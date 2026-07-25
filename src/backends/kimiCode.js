@@ -29,6 +29,9 @@ export class KimiCodeBackend extends ProcessBackend {
    * channel (probe confirmed: no --effort/--config CLI flag; effort is global
    * in ~/.kimi-code/config.toml which WAO must not modify). Reject reasoning
    * BEFORE any side effects (transcript/worktree/spawn).
+   *
+   * Capability: kimi can express model.id (--model). It CANNOT express
+   * reasoning.effort, contextWindow, or provider.
    */
   validateAgentPolicy(agent) {
     if (agent?.reasoning?.effort) {
@@ -37,6 +40,12 @@ export class KimiCodeBackend extends ProcessBackend {
         "(no single-process override channel in 0.29.1; " +
         "configure ~/.kimi-code/config.toml globally instead)",
       );
+    }
+    if (agent?.model?.contextWindow) {
+      throw new Error("kimi-code backend cannot express model.contextWindow");
+    }
+    if (agent?.provider) {
+      throw new Error("kimi-code backend cannot express provider (uses its own managed auth)");
     }
   }
 

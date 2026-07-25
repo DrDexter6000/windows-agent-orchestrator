@@ -32,6 +32,26 @@ export class ClaudeCodeBackend extends ProcessBackend {
   // name. claude-code injects via --append-system-prompt (content, once).
   supportsRoleContract = true;
 
+  /**
+   * M11-9 capability: declare exactly what this backend can express.
+   *
+   * Provider path (wrapper): model, reasoning, contextWindow, provider — all
+   * translated by resolveProviderArgs.
+   * Native OAuth path (no provider): model, reasoning — translated by buildArgs
+   * directly. contextWindow and provider cannot be expressed natively (no
+   * wrapper to set --context-window; provider without wrapper is meaningless).
+   */
+  validateAgentPolicy(agent) {
+    const hasProvider = !!agent?.provider;
+    // Provider path: can express everything.
+    if (hasProvider) return; // model/reasoning/contextWindow/provider all OK.
+    // Native path: model + reasoning OK; contextWindow/provider NOT expressible.
+    if (agent?.model?.contextWindow) {
+      throw new Error("claude-code native path (no provider) cannot express model.contextWindow — requires a provider wrapper");
+    }
+    // model.id and reasoning.effort are fine on native path.
+  }
+
   constructor(opts = {}) {
     super({
       parserClass: ClaudeStreamParser,
