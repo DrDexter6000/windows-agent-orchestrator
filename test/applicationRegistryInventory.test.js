@@ -177,8 +177,8 @@ test("M9-0-07: fake dependency injection — no real filesystem touched", async 
     return {
       listAgents() {
         return [
-          { id: "coder_hq", backend: "claude-code", cwd: "/fake", args: ["--model", "glm-5.2"] },
-          { id: "researcher", backend: "claude-code", cwd: "/fake", args: ["--model", "opus"] },
+          { id: "coder_hq", backend: "claude-code", cwd: "/fake", model: { id: "glm-5.2" } },
+          { id: "researcher", backend: "claude-code", cwd: "/fake", model: { id: "opus" } },
         ];
       },
       getAgent(id) { throw new Error(`not implemented for fake: ${id}`); },

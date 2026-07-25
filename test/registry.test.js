@@ -145,7 +145,7 @@ test("混合 registry: opencode-serve + claude-code + codex 共存", async () =>
 // 数组里导致的漂移（opus-4.8 类 bug 的温床——同一 model 出现在 wrapper prependArgs 和
 // claude CLI args 两处）。normalizeAgent 认 provider:{baseUrl,apiKeyEnv,model,effort,contextWindow}。
 
-test("P4-T2: claude-code agent 带 provider 一等字段被正确解析", async () => {
+test("P4-T2: claude-code agent 带 canonical model/reasoning/provider 被正确解析", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wao-registry-"));
   const registryPath = join(dir, "agents.json");
   await writeFile(
@@ -155,12 +155,12 @@ test("P4-T2: claude-code agent 带 provider 一等字段被正确解析", async 
         coder: {
           backend: "claude-code",
           cwd: "D:/proj",
+          model: { id: "glm-5.2", contextWindow: 1000000 },
+          reasoning: { effort: "high" },
           provider: {
+            protocol: "anthropic-compatible",
             baseUrl: "https://open.bigmodel.cn/api/anthropic",
             apiKeyEnv: "ZHIPU_API_KEY",
-            model: "glm-5.2",
-            effort: "high",
-            contextWindow: 1000000,
           },
         },
       },
@@ -169,16 +169,17 @@ test("P4-T2: claude-code agent 带 provider 一等字段被正确解析", async 
   const registry = await readRegistry(registryPath);
   const agent = registry.getAgent("coder");
   assert.equal(agent.backend, "claude-code");
+  assert.equal(agent.model.id, "glm-5.2");
+  assert.equal(agent.model.contextWindow, 1000000);
+  assert.equal(agent.reasoning.effort, "high");
   assert.deepEqual(agent.provider, {
+    protocol: "anthropic-compatible",
     baseUrl: "https://open.bigmodel.cn/api/anthropic",
     apiKeyEnv: "ZHIPU_API_KEY",
-    model: "glm-5.2",
-    effort: "high",
-    contextWindow: 1000000,
   });
 });
 
-test("P4-T2: provider 部分字段可选（只 baseUrl+apiKeyEnv+model 也能解析）", async () => {
+test("P4-T2: provider 部分字段可选（只 protocol+baseUrl+apiKeyEnv 也能解析）", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wao-registry-"));
   const registryPath = join(dir, "agents.json");
   await writeFile(
@@ -188,18 +189,19 @@ test("P4-T2: provider 部分字段可选（只 baseUrl+apiKeyEnv+model 也能解
         coder: {
           backend: "claude-code",
           cwd: "D:/proj",
-          provider: { baseUrl: "https://x", apiKeyEnv: "KEY", model: "m" },
+          model: { id: "m" },
+          provider: { protocol: "anthropic-compatible", baseUrl: "https://x", apiKeyEnv: "KEY" },
         },
       },
     }),
   );
   const registry = await readRegistry(registryPath);
   const agent = registry.getAgent("coder");
-  assert.equal(agent.provider.effort, undefined);
-  assert.equal(agent.provider.contextWindow, undefined);
+  assert.equal(agent.reasoning, undefined);
+  assert.equal(agent.model.contextWindow, undefined);
 });
 
-test("P4-T2: claude-code 无 provider 仍可解析（向后兼容旧 args/prependArgs 形态）", async () => {
+test("P4-T2: claude-code 无 provider 仍可解析（legacy args --model 归一化为 canonical）", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wao-registry-"));
   const registryPath = join(dir, "agents.json");
   await writeFile(
@@ -209,7 +211,7 @@ test("P4-T2: claude-code 无 provider 仍可解析（向后兼容旧 args/prepen
         coder: {
           backend: "claude-code",
           cwd: "D:/proj",
-          // 旧形态：手拼 prependArgs + args
+          // 旧形态：手拼 prependArgs + args（无 structured 字段）
           binary: "node",
           prependArgs: ["wrapper.mjs", "--base-url", "https://x", "--"],
           args: ["--model", "m"],
@@ -220,5 +222,7 @@ test("P4-T2: claude-code 无 provider 仍可解析（向后兼容旧 args/prepen
   const registry = await readRegistry(registryPath);
   const agent = registry.getAgent("coder");
   assert.equal(agent.provider, undefined, "无 provider 字段 = 旧形态，不报错");
-  assert.equal(agent.args[1], "m");
+  // M11-9: legacy --model 被归一化为 structured model.id，从 args 移除。
+  assert.equal(agent.model.id, "m", "legacy --model extracted to structured field");
+  assert.ok(!agent.args.includes("--model"), "--model removed from args");
 });

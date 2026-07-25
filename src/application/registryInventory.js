@@ -24,31 +24,17 @@ import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.
 // ===== Private helpers (owned by this module) =====
 
 /**
- * Extract a --flag <value> from an args array.
- * @param {string[]} args
- * @param {string} flag
- * @returns {string|undefined}
- */
-function extractFlag(args, flag) {
-  if (!Array.isArray(args)) return undefined;
-  const i = args.indexOf(flag);
-  return i >= 0 && i + 1 < args.length ? args[i + 1] : undefined;
-}
-
-/**
  * Resolve the model display label for an agent.
- * This is the SSOT — shared.js re-exports it.
+ * M11-9: reads the structured `model.id` field (the canonical source after
+ * normalization). The legacy args/prependArgs fallbacks are removed — the
+ * normalizer already extracted them to structured fields, so there is no
+ * second authority to search. provider.model is gone (forbidden by contract).
  * @param {object} agent — normalized agent from registry
  * @returns {string}
  */
 export function displayModel(agent) {
   if (typeof agent.model === "string") return agent.model;
   return agent.model?.id
-    ?? agent.provider?.model
-    ?? extractFlag(agent.args, "--model")
-    ?? extractFlag(agent.args, "--default-model")
-    ?? extractFlag(agent.prependArgs, "--model")
-    ?? extractFlag(agent.prependArgs, "--default-model")
     ?? (["claude-code", "codex", "kimi-code"].includes(agent.backend) ? "(default)" : "-");
 }
 
