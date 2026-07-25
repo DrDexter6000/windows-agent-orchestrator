@@ -19,9 +19,10 @@ import { readTranscript, findState, findLastEventSeq, JsonlTranscript } from "..
 import { isValidRunId } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, safeProjectPackagingCode } from "../deliveryFailureCodes.js";
 
-// M11-8C closeout: packaging failure codes come from the SINGLE SSOT
-// (deliveryFailureCodes.js). The application projection and the MCP schema
-// both derive from PACKAGING_FAILURE_CODES — there is no second list.
+// M11-8C: packaging failure codes come from the shared safe-projection
+// allowlist (deliveryFailureCodes.js). The application projection and the MCP
+// schema both consume PACKAGING_FAILURE_CODES — there is no second projection
+// list (the producer delivery.js is a separate concern; see that module).
 
 /**
  * Find the latest run.delivery_failed event bound to the given runId.

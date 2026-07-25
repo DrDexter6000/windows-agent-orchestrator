@@ -50,7 +50,9 @@ export async function writeFrictionLog(runId, agentId, events, opts) {
   if (!isDebugMode(opts)) return null;
 
   const { diagnoseFailure } = await import("./diagnosis.js");
-  const result = diagnoseFailure(events);
+  // M11-8C final gate: bind runId so a cross-run run.delivery_failed cannot
+  // pollute this run's auto-captured category.
+  const result = diagnoseFailure(events, runId);
   // none=成功 run；unknown=信号不足。两者不写（噪声）。
   if (result.category === "none" || result.category === "unknown") return null;
 

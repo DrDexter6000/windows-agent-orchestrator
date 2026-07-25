@@ -1,25 +1,29 @@
 // src/deliveryFailureCodes.js
 //
-// M11-8C closeout: the SINGLE source of truth for delivery PACKAGING failure
-// codes — the closed set of codes that packageDelivery throws as
-// DeliveryError.deliveryCode (and that get persisted on run.delivery_failed).
+// M11-8C: the SHARED safe-projection allowlist for delivery PACKAGING failure
+// codes. This is the single contract that BOTH the application projection
+// (runDelivery.js → getRunDelivery → safeProjectPackagingCode) and the MCP
+// schema (server.js → PACKAGING_FAILURE_CODE_ENUM) consume. There is no second
+// hand-maintained projection list; the two cannot drift.
 //
-// Both the application projection (runDelivery.js → getRunDelivery) and the MCP
-// schema (server.js → RUN_DELIVERY_OUTPUT) derive from THIS frozen set. There
-// is no second hand-maintained list; the two cannot drift.
+// Scope note (accurate, not over-claimed): this is the application+MCP
+// safe-projection contract — the closed set of codes those two layers will
+// ever surface to a Lead. The PRODUCER (delivery.js → packageDelivery) still
+// defines its own DeliveryError.deliveryCode values independently; adding a new
+// producer code requires editing BOTH this allowlist and delivery.js for the
+// code to be surfaceable (otherwise it projects to "unknown"). A full producer
+// refactor to derive delivery.js from this list is out of scope for this change.
 //
 // These are DISTINCT from verification failure codes (command_failed /
-// command_timeout / artifact_mutated / execution_error), which describe a
+// command_timeout / artifact_mismatch / execution_error), which describe a
 // packaged delivery that then failed its verification commands. Packaging
 // codes describe the control plane's inability to CREATE the delivery commit
 // (e.g. base_commit_mismatch — the worker moved HEAD off the frozen base).
 
 /**
- * Frozen closed set of delivery packaging failure codes.
- *
- * Sourced from the codes packageDelivery throws (delivery.js). Adding a new
- * packaging code requires editing this list AND delivery.js together — they
- * are intentionally co-located as the single contract.
+ * Frozen closed set of delivery packaging failure codes — the application+MCP
+ * safe-projection allowlist. Producer codes (delivery.js) that are not in this
+ * set project to UNKNOWN_PACKAGING_CODE.
  */
 export const PACKAGING_FAILURE_CODES = Object.freeze([
   "empty_diff",

@@ -85,18 +85,20 @@ export function diagnoseFailure(events, expectedRunId) {
   if (evs.length === 0) return { category: "unknown", evidence: [] };
   const state = findState(evs);
 
-  // M11-8C closeout (Gap B): a durable run.delivery_failed means the WAO control
-  // plane could not package the delivery. This is checked BEFORE the completed-
-  // state short circuit (a delivery run may terminal=completed then fail
-  // packaging). BINDING: only an event whose runId === expectedRunId counts —
-  // a cross-run delivery_failed (e.g. in a concatenated/corrupt transcript)
-  // must NOT pollute this run's diagnosis. When expectedRunId is omitted
-  // (legacy/direct callers), the binding is not applied, but the service layer
-  // (getRunDiagnosis) always passes the requested runId. The signal uses only
-  // the safe event TYPE (no message/path/code echo). No prescription/retry.
-  const deliveryFailed = expectedRunId !== undefined
+  // M11-8C closeout (Gap B + final gate): a durable run.delivery_failed means
+  // the WAO control plane could not package the delivery. This is checked
+  // BEFORE the completed-state short circuit (a delivery run may
+  // terminal=completed then fail packaging). FAIL-CLOSED BINDING: a delivery
+  // failure is consumed ONLY when a valid expectedRunId is provided AND the
+  // event's runId matches it. When expectedRunId is missing/invalid, NO
+  // run.delivery_failed is consumed — an unbound caller must never attribute a
+  // delivery failure (defends against cross-run pollution in concatenated/
+  // corrupt transcripts). The signal uses only the safe event TYPE (no
+  // message/path/code echo). No prescription/retry.
+  const hasValidExpectedRunId = typeof expectedRunId === "string" && expectedRunId.length > 0;
+  const deliveryFailed = hasValidExpectedRunId
     ? evs.find((e) => e.type === "run.delivery_failed" && e.runId === expectedRunId)
-    : evs.find((e) => e.type === "run.delivery_failed");
+    : undefined;
   if (deliveryFailed) {
     return {
       category: "delivery_packaging_failed",

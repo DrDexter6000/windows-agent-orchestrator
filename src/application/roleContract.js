@@ -250,4 +250,3 @@ export function composeDeliveryExecutionContract() {
     "- If the task prompt asks you to commit or to produce a final commit SHA, that instruction is overridden by this contract: leave changes unstaged and report paths/tests/risks only.",
   ].join("\n");
 }
-

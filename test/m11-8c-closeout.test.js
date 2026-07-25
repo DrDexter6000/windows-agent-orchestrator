@@ -83,7 +83,7 @@ test("CLOSEOUT-C1: a single frozen packaging failure-code set is exported", asyn
   const codes = (ssotCandidates[0]?.PACKAGING_FAILURE_CODES ?? m.PACKAGING_FAILURE_CODES);
   assert.ok(Array.isArray(codes) && codes.includes("base_commit_mismatch"), "includes base_commit_mismatch");
   assert.ok(codes.includes("empty_diff"), "includes empty_diff");
-  assert.ok(Object.isFrozen(codes) || true, "frozen set");
+  assert.equal(Object.isFrozen(codes), true, "frozen set");
 });
 
 test("CLOSEOUT-C2: unknown/malformed code projects to 'unknown' via the SSOT", async () => {

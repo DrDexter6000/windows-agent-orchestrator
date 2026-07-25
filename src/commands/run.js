@@ -348,7 +348,9 @@ export async function runAndWait(run, options) {
       const { readTranscript: readTranscriptForDiagnosis } = await import("../transcript.js");
       let events = [];
       try { events = await readTranscriptForDiagnosis(run.transcript.filePath); } catch {}
-      diagnosis = diagnoseFailure(events);
+      // M11-8C final gate: bind runId so a cross-run run.delivery_failed cannot
+      // pollute this run's diagnosis.
+      diagnosis = diagnoseFailure(events, run.transcript.context.runId);
     } catch {
       // diagnoseFailure 本身崩（不该发生）→ diagnosis 留 null
     }
