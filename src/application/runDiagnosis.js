@@ -51,7 +51,10 @@ export async function getRunDiagnosis({
 
   const state = findState(events);
   const terminal = TERMINAL_STATES.includes(state);
-  const { category, evidence } = diagnoseFailure(events);
+  // M11-8C closeout (Gap B): pass the requested runId so diagnoseFailure can
+  // bind the delivery_packaging_failed classification — a cross-run
+  // run.delivery_failed event must NOT pollute this run's diagnosis.
+  const { category, evidence } = diagnoseFailure(events, runId);
 
   return { runId, state, terminal, category, evidence };
 }

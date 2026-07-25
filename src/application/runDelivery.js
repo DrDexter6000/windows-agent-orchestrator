@@ -17,36 +17,11 @@ import { join } from "node:path";
 
 import { readTranscript, findState, findLastEventSeq, JsonlTranscript } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
+import { PACKAGING_FAILURE_CODES, safeProjectPackagingCode } from "../deliveryFailureCodes.js";
 
-// M11-8C Package B: the closed set of delivery PACKAGING failure codes that
-// may appear on a durable run.delivery_failed event (the codes packageDelivery
-// throws as DeliveryError.deliveryCode). Used to project a safe, actionable
-// failure code — unknown/malformed values map to "unknown", never echoed.
-// Verification failure codes (SAFE_FAILURE_CODES in the MCP layer) are a
-// DISTINCT set and are not included here.
-const SAFE_PACKAGING_FAILURE_CODES = new Set([
-  "empty_diff",
-  "disallowed_path",
-  "pre_staged_changes",
-  "not_a_git_repo",
-  "primary_checkout",
-  "wrong_branch",
-  "base_commit_mismatch",
-  "detached_head",
-  "commit_integrity",
-  "staging_mismatch",
-  "commit_failed",
-  "cleanup_failed",
-  "worktree_path_mismatch",
-  "artifact_mismatch",
-  "invalid_allowed_paths",
-  "invalid_base_commit",
-  "invalid_input",
-  "invalid_isolation",
-  "invalid_mode",
-  "invalid_run_id",
-  "invalid_verification",
-]);
+// M11-8C closeout: packaging failure codes come from the SINGLE SSOT
+// (deliveryFailureCodes.js). The application projection and the MCP schema
+// both derive from PACKAGING_FAILURE_CODES — there is no second list.
 
 /**
  * Find the latest run.delivery_failed event bound to the given runId.
@@ -139,10 +114,7 @@ export async function getRunDelivery({ runId, runDir, readTranscriptFn }) {
   if (!latestRef || !deliveryCommit) {
     const failedEvent = _findBoundDeliveryFailed(events, runId);
     if (failedEvent) {
-      const rawCode = failedEvent.deliveryCode;
-      const code = typeof rawCode === "string" && SAFE_PACKAGING_FAILURE_CODES.has(rawCode)
-        ? rawCode
-        : "unknown";
+      const code = safeProjectPackagingCode(failedEvent.deliveryCode);
       return {
         runId,
         terminalState,

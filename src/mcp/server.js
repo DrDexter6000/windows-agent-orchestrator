@@ -51,6 +51,7 @@ import {
   validatePlaybookV1,
 } from "../application/playbookCatalog.js";
 import { isValidRunId } from "../delivery.js";
+import { PACKAGING_FAILURE_CODES, UNKNOWN_PACKAGING_CODE } from "../deliveryFailureCodes.js";
 import { DIAGNOSIS_CATEGORIES } from "../diagnosis.js";
 import { RUN_STATES } from "../transcript.js";
 import { createSecretRedactor } from "../secretRedaction.js";
@@ -388,20 +389,20 @@ const RUN_DELIVERY_INPUT = z.object({
   runId: z.string().min(1),
 }).strict();
 
-// M11-8C Package B: a discriminated output expressed as a single strict object
-// with a `deliveryAvailable` discriminator. When true, the success fields are
-// present; when false, only `deliveryFailure` is present. A superRefine enforces
-// the mutual exclusivity at the zod layer (the MCP SDK's zod→JSON-Schema
-// conversion does not reliably handle z.discriminatedUnion, so the variant is
-// expressed as one strict object with optional fields + a refine).
-const PACKAGING_FAILURE_CODE_ENUM = z.enum([
-  "empty_diff", "disallowed_path", "pre_staged_changes", "not_a_git_repo",
-  "primary_checkout", "wrong_branch", "base_commit_mismatch", "detached_head",
-  "commit_integrity", "staging_mismatch", "commit_failed", "cleanup_failed",
-  "worktree_path_mismatch", "artifact_mismatch", "invalid_allowed_paths",
-  "invalid_base_commit", "invalid_input", "invalid_isolation", "invalid_mode",
-  "invalid_run_id", "invalid_verification", "unknown",
-]);
+// M11-8C closeout: the packaging failure-code enum is DERIVED from the single
+// SSOT (deliveryFailureCodes.js) + the "unknown" projection sentinel. There is
+// no second hand-maintained list here.
+const PACKAGING_FAILURE_CODE_ENUM = z.enum([...PACKAGING_FAILURE_CODES, UNKNOWN_PACKAGING_CODE]);
+
+// M11-8C: run_delivery output is a single strict object carrying a
+// `deliveryAvailable` discriminator. The MCP SDK's zod→JSON-Schema conversion
+// does not reliably serialize z.discriminatedUnion or z.object().superRefine()
+// (the latter throws inside the SDK's output validator), so the two variants
+// are expressed as one strict object with nullable success/failure fields.
+// Mutual exclusivity is NOT claimed to be "auto-guaranteed" by the schema;
+// it is enforced by the handler, which constructs exactly one variant and
+// parses it. The real-MCP behavior test (CLOSEOUT-C3) proves success and
+// failure responses never mix shape.
 
 const RUN_DELIVERY_OUTPUT = z.object({
   runId: z.string().min(1),

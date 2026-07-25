@@ -528,6 +528,29 @@ export class RunManager {
       });
     }
 
+    // M11-8C closeout (Gap A): a DELIVERY run that resumes MUST re-inject the
+    // control-plane-owned Delivery Execution Contract — the same contract the
+    // start path injects. Production RED: the resume path previously omitted it,
+    // so a resumed delivery worker could self-commit again and reproduce the
+    // base_commit_mismatch incident. The contract is composed AHEAD of any role
+    // contract and carried via task.roleContract (each backend injects once).
+    // An unsupported backend fails closed here, BEFORE any append/spawn
+    // (transcript bytes unchanged) — delivery resume cannot proceed without a
+    // way to deliver the no-commit contract.
+    if (deliveryContext) {
+      if (backend.supportsRoleContract !== true) {
+        throw new Error(
+          `Agent ${transcript.context.agentId}: delivery resume requires role contract injection (to deliver the delivery execution contract), ` +
+          `but the selected backend does not support it. ` +
+          `Switch to a backend that declares supportsRoleContract.`
+        );
+      }
+      const deliveryContract = composeDeliveryExecutionContract();
+      resumeRoleContract = resumeRoleContract
+        ? `${deliveryContract}\n\n---\n\n${resumeRoleContract}`
+        : deliveryContract;
+    }
+
     // M11-7 (CTO closeout): credential availability check on resume too — same
     // SSOT as start/dispatchRun/registry_list. Missing REQUIRED credential →
     // throw (spawn count 0, transcript bytes unchanged). Resolved values are

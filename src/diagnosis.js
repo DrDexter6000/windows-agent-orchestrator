@@ -72,24 +72,31 @@ const PROVIDER_DISCONNECT_SILENCE_MS = 120_000;
  * 诊断一个 run transcript 的失败原因。只给证据，不给处方。
  *
  * @param {Array} events - run transcript 事件数组（按时间序）。
+ * @param {string} [expectedRunId] - the runId the caller requested (M11-8C
+ *   closeout: binds the delivery_packaging_failed classification so a
+ *   cross-run run.delivery_failed event cannot pollute this run's diagnosis).
  * @returns {{category: string, evidence: Array<{eventType: string, fact: string}>}}
  *   category ∈ provider_auth|timeout|scorecard_fail|budget|crash|aborted_manual|unknown|none。
  *   evidence 是事实证据（eventType 指向源事件，fact 陈述具体事实）。
  */
-export function diagnoseFailure(events) {
+export function diagnoseFailure(events, expectedRunId) {
   const evs = Array.isArray(events) ? events : [];
   // 空输入：无法判断发生了什么 → unknown。
   if (evs.length === 0) return { category: "unknown", evidence: [] };
   const state = findState(evs);
 
-  // M11-8C Package B: a durable run.delivery_failed means the WAO control plane
-  // could not package the delivery (e.g. base_commit_mismatch — the worker moved
-  // HEAD off the frozen base). This is checked BEFORE the completed-state short
-  // circuit because a delivery run may reach terminal=completed (the worker
-  // finished) yet still fail packaging afterward. The category is actionable;
-  // the signal uses only the safe event TYPE (no message/path/code echo). No
-  // prescription or auto-retry — the Lead decides.
-  const deliveryFailed = evs.find((e) => e.type === "run.delivery_failed");
+  // M11-8C closeout (Gap B): a durable run.delivery_failed means the WAO control
+  // plane could not package the delivery. This is checked BEFORE the completed-
+  // state short circuit (a delivery run may terminal=completed then fail
+  // packaging). BINDING: only an event whose runId === expectedRunId counts —
+  // a cross-run delivery_failed (e.g. in a concatenated/corrupt transcript)
+  // must NOT pollute this run's diagnosis. When expectedRunId is omitted
+  // (legacy/direct callers), the binding is not applied, but the service layer
+  // (getRunDiagnosis) always passes the requested runId. The signal uses only
+  // the safe event TYPE (no message/path/code echo). No prescription/retry.
+  const deliveryFailed = expectedRunId !== undefined
+    ? evs.find((e) => e.type === "run.delivery_failed" && e.runId === expectedRunId)
+    : evs.find((e) => e.type === "run.delivery_failed");
   if (deliveryFailed) {
     return {
       category: "delivery_packaging_failed",
