@@ -81,7 +81,7 @@ test("M9-1-01: MCP initialize succeeds, server identity stable", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m91-01-"));
   try {
     const registryPath = makeRegistry(dir, {
-      coder_low: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5-turbo"] },
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
     });
     const server = createWaoMcpServer({ registryPath, runDir: dir });
     const client = await buildInMemoryClient(server);
@@ -110,7 +110,7 @@ test("M9-1-02: listTools includes registry_list, no unauthorized write operation
   const dir = mkdtempSync(join(tmpdir(), "wao-m91-02-"));
   try {
     const registryPath = makeRegistry(dir, {
-      coder_low: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5-turbo"] },
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
     });
     const server = createWaoMcpServer({ registryPath, runDir: dir });
     const client = await buildInMemoryClient(server);
@@ -276,8 +276,8 @@ test("M9-1-06: real stdio subprocess completes initialize/listTools/callTool", a
   let client;
   try {
     const registryPath = makeRegistry(dir, {
-      coder_low: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5-turbo"] },
-      researcher: { backend: "claude-code", cwd: dir, args: ["--model", "opus"] },
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
+      researcher: { backend: "claude-code", cwd: dir, model: { id: "opus" } },
     });
     const runDir = makeSummary(dir, { coder_low: { status: "certified" } });
 
@@ -314,7 +314,7 @@ test("M9-1-07: real stdio result matches direct getRegistryInventory() semantics
   let client;
   try {
     const registryPath = makeRegistry(dir, {
-      coder_low: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5-turbo"] },
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
       tester: { backend: "codex", cwd: dir, args: [] },
     });
     const runDir = makeSummary(dir, {
@@ -356,7 +356,7 @@ test("M9-1-08: real stdio call adds no transcript/run files to runDir", async ()
   let client;
   try {
     const registryPath = makeRegistry(dir, {
-      coder_low: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5-turbo"] },
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
     });
     const runDir = makeSummary(dir, { coder_low: { status: "certified" } });
 
@@ -392,7 +392,7 @@ test("M9-1-09: subprocess stdout is protocol-pure, no banner/log/help text", asy
   let child;
   try {
     const registryPath = makeRegistry(dir, {
-      coder_low: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5-turbo"] },
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
     });
     const runDir = makeSummary(dir, { coder_low: { status: "certified" } });
 
@@ -556,7 +556,7 @@ test("M9-1-11: CLI registry list --format json contract unchanged", () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m91-11-"));
   try {
     const registryPath = makeRegistry(dir, {
-      coder_low: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5-turbo"] },
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
     });
     const out = execSync(
       `node src/cli.js registry list --registry ${registryPath} --format json`,
@@ -585,7 +585,7 @@ test("M9-1-12: Windows path with spaces — stdio entrypoint reads explicit regi
   let client;
   try {
     const registryPath = makeRegistry(dir, {
-      coder_low: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5-turbo"] },
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
     });
     const runDir = makeSummary(dir, { coder_low: { status: "certified" } });
     // The path contains literal spaces; argv must be passed as discrete args (no shell join).
@@ -747,7 +747,7 @@ test("M9-1-C4: real stdio stderr is fixed safe text, no paths/secrets/raw messag
   let child;
   try {
     const registryPath = makeRegistry(dir, {
-      coder_low: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5-turbo"] },
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
     });
     const runDir = makeSummary(dir, { coder_low: { status: "certified" } });
     const SECRET_HINT = "test-secret-stderr-hint-c4";
@@ -794,7 +794,7 @@ test("M9-1-C5: registry_list declares readOnly/destructive/idempotent/openWorld 
   const dir = mkdtempSync(join(tmpdir(), "wao-m91-c5-"));
   try {
     const registryPath = makeRegistry(dir, {
-      coder_low: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5-turbo"] },
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
     });
     const server = createWaoMcpServer({ registryPath, runDir: dir });
     const client = await buildInMemoryClient(server);

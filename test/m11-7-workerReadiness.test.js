@@ -72,7 +72,7 @@ test("M11-7-R1a: optional env names are NOT required (no false blocker)", () => 
 
 test("M11-7-R1b: explicitly-declared REQUIRED credential blocks when missing", async () => {
   delete process.env.TEST_M117_REQ_MISSING;
-  const agent = { backend: "claude-code", id: "researcher", provider: { apiKeyEnv: "TEST_M117_REQ_MISSING" } };
+  const agent = { backend: "claude-code", id: "researcher", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M117_REQ_MISSING" } };
   const r = await assessWorkerReadiness({ agent, resolver: createEnvResolver(fakeUserEnvReader({})) });
   assert.equal(r.credentialAvailability, "missing");
   assert.deepEqual(r.missingCredentialEnvNames, ["TEST_M117_REQ_MISSING"]);
@@ -94,7 +94,7 @@ test("M11-7-R1c: real registry — coder_mm/tester not blocked; researcher gated
 // ===== A: env-policy SSOT =====
 
 test("M11-7-A: provider.apiKeyEnv and legacy --api-key-env are required", () => {
-  assert.ok(requiredCredentialNames({ backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" } }).includes("DEEPSEEK_API_KEY"));
+  assert.ok(requiredCredentialNames({ backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "DEEPSEEK_API_KEY" } }).includes("DEEPSEEK_API_KEY"));
   assert.ok(requiredCredentialNames({ backend: "claude-code", prependArgs: ["--api-key-env", "DEEPSEEK_API_KEY", "--"] }).includes("DEEPSEEK_API_KEY"));
 });
 
@@ -105,14 +105,14 @@ test("M11-7-A6: worker with no required credential → not_required", async () =
 });
 
 test("M11-7-A8: readiness result does not carry certification", async () => {
-  const r = await assessWorkerReadiness({ agent: { backend: "claude-code", id: "x", provider: { apiKeyEnv: "TEST_M117_SEP" } }, resolver: createEnvResolver(fakeUserEnvReader({ TEST_M117_SEP: "test-key-abc" })) });
+  const r = await assessWorkerReadiness({ agent: { backend: "claude-code", id: "x", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M117_SEP" } }, resolver: createEnvResolver(fakeUserEnvReader({ TEST_M117_SEP: "test-key-abc" })) });
   assert.equal(r.certification, undefined);
 });
 
 // ===== RED-3: no permanent cache — rotation/recovery without restart =====
 
 test("M11-7-R3: rotation/recovery takes effect on next operation (no permanent cache)", async () => {
-  const agent = { backend: "claude-code", id: "x", provider: { apiKeyEnv: "TEST_M117_ROTATE" } };
+  const agent = { backend: "claude-code", id: "x", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M117_ROTATE" } };
   delete process.env.TEST_M117_ROTATE;
   let map = {};
   // First operation: missing.
@@ -126,7 +126,7 @@ test("M11-7-R3: rotation/recovery takes effect on next operation (no permanent c
 });
 
 test("M11-7-R3b: each name read at most once per operation (resolver.readerCallCount)", async () => {
-  const agent = { backend: "claude-code", id: "x", provider: { apiKeyEnv: "TEST_M117_DEDUPE" } };
+  const agent = { backend: "claude-code", id: "x", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M117_DEDUPE" } };
   delete process.env.TEST_M117_DEDUPE;
   const reader = fakeUserEnvReader({ TEST_M117_DEDUPE: "test-key-dedupe" });
   const resolver = createEnvResolver(reader);
@@ -144,8 +144,8 @@ test("M11-7-OP1: shared required name read exactly once across one inventory", a
   try {
     delete process.env.TEST_M117_OP_SHARED;
     const registryPath = makeRegistry(dir, {
-      a: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_OP_SHARED" } },
-      b: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_OP_SHARED" } },
+      a: { backend: "claude-code", cwd: dir, provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M117_OP_SHARED" } },
+      b: { backend: "claude-code", cwd: dir, provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M117_OP_SHARED" } },
     });
     const counts = {};
     const reader = async (name) => { counts[name] = (counts[name] ?? 0) + 1; return "test-key-op"; };
@@ -183,7 +183,7 @@ test("M11-7-OP3: second inventory re-reads and observes rotation", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m117-op3-"));
   try {
     delete process.env.TEST_M117_OP_ROT;
-    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_OP_ROT" } } });
+    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M117_OP_ROT" } } });
     // First inventory: missing.
     let map = {};
     let agents = await getRegistryInventory({ registryPath, runDir: dir, userEnvReader: async (n) => map[n] });
@@ -254,8 +254,8 @@ test("M11-7-B1: registry_list projects credentialAvailability + missingCredentia
     delete process.env.TEST_M117_B1_BAD;
     process.env.TEST_M117_B1_GOOD = "test-key-good";
     const registryPath = makeRegistry(dir, {
-      good: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_B1_GOOD" } },
-      bad: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_B1_BAD" } },
+      good: { backend: "claude-code", cwd: dir, provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M117_B1_GOOD" } },
+      bad: { backend: "claude-code", cwd: dir, provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M117_B1_BAD" } },
       none: { backend: "claude-code", cwd: dir },
     });
     const agents = await getRegistryInventory({ registryPath, runDir: dir, userEnvReader: fakeUserEnvReader({}) });
@@ -277,7 +277,7 @@ test("M11-7-B2: credential value not in registry_list output", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m117-b2-"));
   try {
     process.env.TEST_M117_B2_KEY = "test-key-leakcheck";
-    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_B2_KEY" } } });
+    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M117_B2_KEY" } } });
     const agents = await getRegistryInventory({ registryPath, runDir: dir, userEnvReader: fakeUserEnvReader({}) });
     assert.ok(!JSON.stringify(agents).includes("test-key-leakcheck"), "no credential value leak");
   } finally {
@@ -293,7 +293,7 @@ test("M11-7-B3: dispatchRun rejects missing-credential worker (zero transcript, 
   const dir = mkdtempSync(join(tmpdir(), "wao-m117-b3-"));
   try {
     delete process.env.TEST_M117_B3_MISSING;
-    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_B3_MISSING" } } });
+    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M117_B3_MISSING" } } });
     const runDir = join(dir, "runs"); mkdirSync(runDir, { recursive: true });
     let spawnCalls = 0;
     let threw = null;
@@ -315,7 +315,7 @@ test("M11-7-B4: dispatchRun proceeds + threads user-env value into runner env", 
   const dir = mkdtempSync(join(tmpdir(), "wao-m117-b4-"));
   try {
     delete process.env.TEST_M117_B4_OK;
-    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_B4_OK" } } });
+    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M117_B4_OK" } } });
     const runDir = join(dir, "runs"); mkdirSync(runDir, { recursive: true });
     let capturedEnv = null;
     let spawnCalls = 0;
@@ -337,7 +337,7 @@ test("M11-7-B5: registry_list and dispatchRun agree on the same agent", async ()
   try {
     delete process.env.TEST_M117_B5_KEY;
     const reader = fakeUserEnvReader({});
-    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_B5_KEY" } } });
+    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M117_B5_KEY" } } });
     const runDir = join(dir, "runs"); mkdirSync(runDir, { recursive: true });
     const agents = await getRegistryInventory({ registryPath, runDir, userEnvReader: reader });
     assert.equal(agents[0].credentialAvailability, "missing");
@@ -391,7 +391,7 @@ test("M11-7-R2: RunManager.start bridges user-env credential into spawn + reject
   const dir = mkdtempSync(join(tmpdir(), "wao-m117-r2-"));
   try {
     delete process.env.TEST_M117_R2;
-    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_R2" } } });
+    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M117_R2" } } });
     const runDir = join(dir, "runs"); mkdirSync(runDir, { recursive: true });
     let spawnTask = null;
     const fakeBackend = {
@@ -419,7 +419,7 @@ test("M11-7-R4: sentinel zero-hit across events, errors, transcript (full RunMan
   try {
     delete process.env.TEST_M117_R4;
     const value = CREDENTIAL_SENTINEL;
-    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M117_R4" } } });
+    const registryPath = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M117_R4" } } });
     const runDir = join(dir, "runs"); mkdirSync(runDir, { recursive: true });
     const collectedEvents = [];
     const fakeBackend = {

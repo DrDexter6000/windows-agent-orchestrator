@@ -24,6 +24,22 @@ export class KimiCodeBackend extends ProcessBackend {
   // (prompt-level guidance, not system-level isolation).
   supportsRoleContract = true;
 
+  /**
+   * M11-9 CTO closeout: kimi 0.29.1 has no single-process effort override
+   * channel (probe confirmed: no --effort/--config CLI flag; effort is global
+   * in ~/.kimi-code/config.toml which WAO must not modify). Reject reasoning
+   * BEFORE any side effects (transcript/worktree/spawn).
+   */
+  validateAgentPolicy(agent) {
+    if (agent?.reasoning?.effort) {
+      throw new Error(
+        "kimi-code backend does not support reasoning.effort " +
+        "(no single-process override channel in 0.29.1; " +
+        "configure ~/.kimi-code/config.toml globally instead)",
+      );
+    }
+  }
+
   constructor(opts = {}) {
     super({
       parserClass: KimiStreamParser,

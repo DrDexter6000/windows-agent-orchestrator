@@ -59,7 +59,7 @@ test("M9-2A-01: accepted dispatch writes initial durable facts and spawns detach
   const { fakeSpawn, calls } = makeFakeSpawn();
   try {
     const registryPath = makeRegistry(dir, {
-      coder_low: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5-turbo"] },
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
     });
     const runDir = join(dir, "runs");
 
@@ -105,7 +105,7 @@ test("M9-2A-02: spawn argv carries all required background runner params", async
   const { fakeSpawn, calls } = makeFakeSpawn();
   try {
     const registryPath = makeRegistry(dir, {
-      coder_low: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5-turbo"] },
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
     });
     const runDir = join(dir, "runs");
 

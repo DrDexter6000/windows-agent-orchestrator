@@ -150,8 +150,8 @@ test("M11-8-4: workers preserve certification + credentialAvailability", async (
     delete process.env.TEST_M118_GOOD;
     process.env.TEST_M118_GOOD = "test-key-good";
     const reg = makeRegistry(dir, {
-      good: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M118_GOOD" } },
-      bad: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M118_BAD" } },
+      good: { backend: "claude-code", cwd: dir, provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M118_GOOD" } },
+      bad: { backend: "claude-code", cwd: dir, provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M118_BAD" } },
       plain: { backend: "codex", cwd: dir },
     });
     const summaryDir = join(dir, "runs"); mkdirSync(summaryDir, { recursive: true });
@@ -198,7 +198,7 @@ test("M11-8-6: output leaks no paths, credential values, prompts, PIDs, sessions
   const dir = mkdtempSync(join(tmpdir(), "wao-m118-6-"));
   try {
     process.env.TEST_M118_SECRET = "test-key-leakcheck";
-    const reg = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { apiKeyEnv: "TEST_M118_SECRET" } } });
+    const reg = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir, provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "TEST_M118_SECRET" } } });
     const result = await aggregateLeadPreflight({
       workspaceBinding: { bound: true, source: "lead_session", root: dir, gitHead: "c".repeat(40), dirty: false },
       registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader,

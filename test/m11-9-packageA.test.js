@@ -60,37 +60,37 @@ test("A2-structured-provider: connection/model/reasoning separated", () => {
 
 // ===== A3: mixed authority rejection =====
 
-test("A3-mixed-model-args: structured model + --model in args → reject", () => {
+test("A3-managed-flag-in-args: --model in args → fixed migration error", () => {
   assert.throws(
     () => normalizeAgent("w", {
       ...VALID_BACKEND,
       model: { id: "glm-5.2" },
       args: ["--model", "evil"],
     }),
-    /duplicate|conflict|both|single source/i,
-    "structured model + --model in args must be rejected",
+    /migrate|no longer supported|structured/i,
+    "managed --model in args is rejected regardless of structured fields",
   );
 });
 
-test("A3b-mixed-effort-args: structured reasoning + --effort in args → reject", () => {
+test("A3b-managed-flag-effort: --effort in args → fixed migration error", () => {
   assert.throws(
     () => normalizeAgent("w", {
       ...VALID_BACKEND,
       reasoning: { effort: "high" },
       args: ["--effort", "low"],
     }),
-    /duplicate|conflict|both|single source/i,
+    /migrate|no longer supported|structured/i,
   );
 });
 
-test("A3c-mixed-prepend: structured model + --default-model in prependArgs → reject", () => {
+test("A3c-managed-flag-prepend: --default-model in prependArgs → fixed migration error", () => {
   assert.throws(
     () => normalizeAgent("w", {
       ...VALID_BACKEND,
       model: { id: "glm-5.2" },
       prependArgs: ["--default-model", "evil"],
     }),
-    /duplicate|conflict|both|single source/i,
+    /migrate|no longer supported|structured/i,
   );
 });
 
@@ -141,18 +141,27 @@ test("A4e-provider-old-shape: provider.model present → reject (model must be t
   );
 });
 
-// ===== A5: legacy-only compatibility (no structured fields, model in args) =====
+// ===== A5: managed flags in args/prependArgs → fixed migration error (no legacy extraction) =====
 
-test("A5-legacy-only: model only in args, no structured fields → normalize to canonical", () => {
-  const a = normalizeAgent("legacy_w", {
-    ...VALID_BACKEND,
-    args: ["--model", "glm-5.2", "--dangerously-skip-permissions"],
-  });
-  // legacy-only is accepted and normalized: model extracted to structured field.
-  assert.equal(a.model.id, "glm-5.2");
-  // --model removed from args; residual kept.
-  assert.ok(!a.args.includes("--model"), "--model extracted from args");
-  assert.ok(a.args.includes("--dangerously-skip-permissions"), "residual args kept");
+test("A5-managed-flag-rejected: --model in args → fixed migration error", () => {
+  assert.throws(
+    () => normalizeAgent("legacy_w", {
+      ...VALID_BACKEND,
+      args: ["--model", "glm-5.2", "--dangerously-skip-permissions"],
+    }),
+    /migrate|no longer supported|structured/i,
+    "managed flag in args must be a fixed migration error (no transparent extraction)",
+  );
+});
+
+test("A5b-managed-flag-effort: --effort in prependArgs → fixed migration error", () => {
+  assert.throws(
+    () => normalizeAgent("legacy_w", {
+      ...VALID_BACKEND,
+      prependArgs: ["--effort", "high"],
+    }),
+    /migrate|no longer supported|structured/i,
+  );
 });
 
 // ===== A6: displayModel reads structured field, not args =====

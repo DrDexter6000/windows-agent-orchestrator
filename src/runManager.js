@@ -106,6 +106,13 @@ export class RunManager {
     // vs `effectiveAgent` (post-worktree) yields the same instance.
     const backend = this.backendFor(agent);
 
+    // M11-9 CTO closeout: validate the backend can express the agent's canonical
+    // policy BEFORE any side effect (transcript, runDir, worktree, spawn). This
+    // is provider-neutral — RunManager does not branch on the runtime name; each
+    // backend overrides validateAgentPolicy to reject policies it cannot express
+    // (e.g. kimi-code rejects reasoning.effort).
+    backend.validateAgentPolicy?.(agent);
+
     // M11-5（TD-89 修复）：角色合同加载。在 transcript 创建前 fail-closed
     // （零 transcript、零 spawn）。agent.systemPrompt 是 registry 声明的角色
     // 文件路径；由 loadRoleContract 内部的 resolveRoleContractPath 相对 WAO
@@ -506,6 +513,10 @@ export class RunManager {
     // backend 能力（supportsRoleContract）驱动，不认识 runtime 名称。该 backend
     // 实例在下方 spawn/attach 复用。
     const backend = this.backendFor(agent);
+
+    // M11-9 CTO closeout: validate backend policy BEFORE any transcript append
+    // or spawn on the resume path (same as start).
+    backend.validateAgentPolicy?.(agent);
 
     // M11-5（TD-89 修复）：resume 也必须重新经过同一角色合同加载器，不得静默
     // 漏掉。与 start 路径同一 SSOT（roleContract.js），同一 fail-closed 边界。

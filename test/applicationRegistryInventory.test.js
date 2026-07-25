@@ -38,8 +38,8 @@ test("M9-0-01: summary exists → correctly merges certification status", async 
   const dir = mkdtempSync(join(tmpdir(), "wao-m90-01-"));
   try {
     const registryPath = makeRegistry(dir, {
-      coder_hq: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5.2"] },
-      researcher: { backend: "claude-code", cwd: dir, args: ["--model", "deepseek-v4-flash"] },
+      coder_hq: { backend: "claude-code", cwd: dir, model: { id: "glm-5.2" } },
+      researcher: { backend: "claude-code", cwd: dir, model: { id: "deepseek-v4-flash" } },
     });
     const runDir = makeSummary(dir, {
       coder_hq: { status: "certified" },
@@ -63,7 +63,7 @@ test("M9-0-02: summary missing → certification is null", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m90-02-"));
   try {
     const registryPath = makeRegistry(dir, {
-      coder_hq: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5.2"] },
+      coder_hq: { backend: "claude-code", cwd: dir, model: { id: "glm-5.2" } },
     });
     // No summary file, runDir points to empty dir
     const runDir = join(dir, "runs");
@@ -81,7 +81,7 @@ test("M9-0-03: summary corrupted JSON → certification is null", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m90-03-"));
   try {
     const registryPath = makeRegistry(dir, {
-      coder_hq: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5.2"] },
+      coder_hq: { backend: "claude-code", cwd: dir, model: { id: "glm-5.2" } },
     });
     const runDir = join(dir, "runs");
     mkdirSync(runDir, { recursive: true });
@@ -99,7 +99,7 @@ test("M9-0-04: explicit model and process backend (default) fallback", async () 
   const dir = mkdtempSync(join(tmpdir(), "wao-m90-04-"));
   try {
     const registryPath = makeRegistry(dir, {
-      coder_hq: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5.2"] },
+      coder_hq: { backend: "claude-code", cwd: dir, model: { id: "glm-5.2" } },
       coder_mm: { backend: "kimi-code", cwd: dir },
       tester: { backend: "codex", cwd: dir, args: [] },
     });
@@ -122,7 +122,7 @@ test("M9-0-05: service returns structured data and does not write to console", a
   const dir = mkdtempSync(join(tmpdir(), "wao-m90-05-"));
   try {
     const registryPath = makeRegistry(dir, {
-      coder_hq: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5.2"] },
+      coder_hq: { backend: "claude-code", cwd: dir, model: { id: "glm-5.2" } },
     });
     const runDir = makeSummary(dir, { coder_hq: { status: "certified" } });
 
@@ -151,8 +151,8 @@ test("M9-0-06: agent in registry but not in summary → certification null", asy
   const dir = mkdtempSync(join(tmpdir(), "wao-m90-06-"));
   try {
     const registryPath = makeRegistry(dir, {
-      coder_hq: { backend: "claude-code", cwd: dir, args: ["--model", "glm-5.2"] },
-      auditor: { backend: "claude-code", cwd: dir, args: ["--model", "opus"] },
+      coder_hq: { backend: "claude-code", cwd: dir, model: { id: "glm-5.2" } },
+      auditor: { backend: "claude-code", cwd: dir, model: { id: "opus" } },
     });
     const runDir = makeSummary(dir, {
       coder_hq: { status: "certified" },

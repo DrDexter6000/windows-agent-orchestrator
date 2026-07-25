@@ -201,7 +201,7 @@ test("P4-T2: provider 部分字段可选（只 protocol+baseUrl+apiKeyEnv 也能
   assert.equal(agent.model.contextWindow, undefined);
 });
 
-test("P4-T2: claude-code 无 provider 仍可解析（legacy args --model 归一化为 canonical）", async () => {
+test("P4-T2: managed --model in args → fixed migration error (no legacy extraction)", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wao-registry-"));
   const registryPath = join(dir, "agents.json");
   await writeFile(
@@ -211,7 +211,7 @@ test("P4-T2: claude-code 无 provider 仍可解析（legacy args --model 归一�
         coder: {
           backend: "claude-code",
           cwd: "D:/proj",
-          // 旧形态：手拼 prependArgs + args（无 structured 字段）
+          // M11-9 CTO closeout: managed flags in args are a fixed migration error.
           binary: "node",
           prependArgs: ["wrapper.mjs", "--base-url", "https://x", "--"],
           args: ["--model", "m"],
@@ -220,9 +220,10 @@ test("P4-T2: claude-code 无 provider 仍可解析（legacy args --model 归一�
     }),
   );
   const registry = await readRegistry(registryPath);
-  const agent = registry.getAgent("coder");
-  assert.equal(agent.provider, undefined, "无 provider 字段 = 旧形态，不报错");
-  // M11-9: legacy --model 被归一化为 structured model.id，从 args 移除。
-  assert.equal(agent.model.id, "m", "legacy --model extracted to structured field");
-  assert.ok(!agent.args.includes("--model"), "--model removed from args");
+  // listAgents triggers normalization → throws on the managed flag.
+  assert.throws(
+    () => registry.getAgent("coder"),
+    /migrate|no longer supported|structured/i,
+    "managed --model in args is rejected (no transparent extraction)",
+  );
 });

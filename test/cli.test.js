@@ -1064,8 +1064,8 @@ test("registry list 合并认证状态列（summary 存在时显示 cert 状态�
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({
       agents: {
-        coder_hq:   { backend: "claude-code", binary: "/x", cwd: dir, args: ["--model", "glm-5.2"] },
-        researcher: { backend: "claude-code", binary: "/x", cwd: dir, args: ["--model", "deepseek-v4-flash"] },
+        coder_hq:   { backend: "claude-code", binary: "/x", cwd: dir, model: { id: "glm-5.2" } },
+        researcher: { backend: "claude-code", binary: "/x", cwd: dir, model: { id: "deepseek-v4-flash" } },
       },
     }), "utf8");
     const runDir = join(dir, "runs");
@@ -1097,7 +1097,7 @@ test("registry list 无 summary 时不报错（cert 列显示 -）", () => {
   try {
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({
-      agents: { coder_hq: { backend: "claude-code", binary: "/x", cwd: dir, args: ["--model", "glm-5.2"] } },
+      agents: { coder_hq: { backend: "claude-code", binary: "/x", cwd: dir, model: { id: "glm-5.2" } } },
     }), "utf8");
 
     const out = execSync(`node src/cli.js registry list --registry ${registryPath}`, {
@@ -1141,8 +1141,8 @@ test("F17: registry list --format json 输出可解析 JSON（dogfood round 4 �
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({
       agents: {
-        coder_hq: { backend: "claude-code", binary: "/x", cwd: dir, args: ["--model", "glm-5.2"] },
-        researcher: { backend: "claude-code", binary: "/x", cwd: dir, args: ["--model", "deepseek-v4-flash"] },
+        coder_hq: { backend: "claude-code", binary: "/x", cwd: dir, model: { id: "glm-5.2" } },
+        researcher: { backend: "claude-code", binary: "/x", cwd: dir, model: { id: "deepseek-v4-flash" } },
       },
     }), "utf8");
 
@@ -1519,7 +1519,7 @@ test("wao doctor: auditor-only claude-code OAuth 不触发 provider worker WARN"
       agents: {
         auditor: {
           backend: "claude-code",
-          args: ["--model", "claude-opus-4-8"],
+          model: { id: "claude-opus-4-8" },
           cwd: dir,
         },
       },

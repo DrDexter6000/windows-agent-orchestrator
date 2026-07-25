@@ -103,6 +103,22 @@ export class ProcessBackend {
     this.credentialEnvNames = credentialEnvNames;
   }
 
+  /**
+   * M11-9: provider-neutral backend policy validation. Called by RunManager
+   * BEFORE any transcript append, runDir creation, worktree, or spawn.
+   *
+   * Default: no-op (no backend-specific policy constraints). Backends that
+   * cannot express certain canonical policies override this to throw a fixed
+   * safe error. RunManager must NOT branch on the runtime name — it calls this
+   * uniformly.
+   *
+   * @param {object} agent — normalized agent (canonical model/reasoning/provider)
+   * @throws {Error} if the backend cannot express a configured policy
+   */
+  validateAgentPolicy(agent) {
+    // Base: no constraints.
+  }
+
   async spawn(agent, task) {
     // resolveBinary 可返回字符串或 { binary, prependArgs }
     // （后者用于绕过 .cmd 包装器，直接 node 跑 .js 入口）
