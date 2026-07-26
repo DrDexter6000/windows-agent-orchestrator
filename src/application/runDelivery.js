@@ -16,7 +16,7 @@
 import { join, resolve } from "node:path";
 
 import { readTranscript, findState, findLastEventSeq, validateDeliveryFacts, JsonlTranscript } from "../transcript.js";
-import { isValidRunId } from "../delivery.js";
+import { isValidRunId, isCanonicalCommitId } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, safeProjectPackagingCode } from "../deliveryFailureCodes.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 
@@ -102,6 +102,29 @@ function _deliveryRefIsBound(e, runId) {
  */
 function _hasConflictDelivery(boundEvents, runId) {
   return boundEvents.some((e) => !_deliveryRefIsBound(e, runId));
+}
+
+/**
+ * A bound delivery event carries a USABLE DeliveryRef iff `delivery` is a non-null
+ * object whose own runId equals the requested runId (the binding rule shared with
+ * _deliveryRefIsBound) AND whose baseCommit and deliveryCommit are both canonical
+ * commit ids. The canonical-commit requirement is the SAME immutable-identity
+ * contract assertDeliveryCommitInRepository enforces — HEAD / short-SHA /
+ * uppercase / non-hex are rejected before any use — reused via isCanonicalCommitId
+ * so there is ONE commit validator and NO duplicated regex.
+ *
+ * Shared by the reconstruction layer (_reconstructDelivery): a malformed-but-
+ * truthy commit (e.g. "HEAD") on a created/verification/decision ref is a durable
+ * CONFLICT, not a usable fact, so it can never enter a success view.
+ * @param {object} e
+ * @param {string} runId
+ * @returns {boolean}
+ * @private
+ */
+function _deliveryRefIsUsable(e, runId) {
+  return _deliveryRefIsBound(e, runId)
+    && isCanonicalCommitId(e.delivery?.baseCommit)
+    && isCanonicalCommitId(e.delivery?.deliveryCommit);
 }
 
 export function projectDeliveryReadiness(events, runId) {
@@ -205,49 +228,71 @@ function _findBoundDeliveryFailed(events, runId) {
  * getRunDelivery and the wait/readiness handshake both use it via
  * _gatherDeliveryView.
  *
- * M11-10 closeout (auditor blocker 2): created/verification/decision scans are
- * ALL bound by the requested runId, so a foreign-run event in a
- * concatenated/corrupt transcript cannot leak its commit/changedPaths/acceptance
- * into this run's view. An envelope-bound event whose DeliveryRef.runId
- * disagrees with its envelope (cross-run injection), or whose delivery payload is
- * missing/non-object, is a durable CONFLICT: it sets `conflict` and is NOT used
- * as a success fact. The caller fail-closes a conflict to ambiguous — it must
- * never be disguised as "no delivery" by silently filtering it out.
+ * M11-10 closeout (auditor blocker 2 + Lead-review residue): created/
+ * verification/decision scans are ALL bound by the requested runId, so a
+ * foreign-run event in a concatenated/corrupt transcript cannot leak its
+ * commit/changedPaths/acceptance into this run's view. An envelope-bound event
+ * whose DeliveryRef is NOT USABLE — missing/non-object payload, a ref.runId that
+ * disagrees with its envelope (cross-run injection), or a non-canonical
+ * baseCommit/deliveryCommit (HEAD/short-SHA/uppercase/non-hex; reused via
+ * isCanonicalCommitId) — is a durable CONFLICT: it sets `conflict` and is NOT
+ * used as a success fact. The caller fail-closes a conflict to ambiguous — it
+ * must never be disguised as "no delivery" by silently filtering it out, and no
+ * ref/path/commit is echoed.
+ *
+ * Each category is FULL-scanned (newest→oldest) for a conflict BEFORE the newest
+ * usable fact is selected. The scan does NOT break on the first usable event:
+ * a reverse-order `break` would shadow an earlier malformed bound event behind a
+ * newer valid one (leaving conflict=false while the view echoed the newer ref).
+ * The durable-facts contract is "ANY bound malformed/injected/non-canonical
+ * event fails closed", so every conflict is recorded first.
+ *
+ * A formal run.delivery_accepted/rejected event always carries a delivery ref
+ * (see JsonlTranscript.tryAppendDecision); a decision missing delivery is a
+ * conflict, never a tolerated "decision without ref" that projects acceptance.
  * @param {Array} events
  * @param {string} runId
  * @returns {{latestRef: object|null, decisionEvent: object|null, deliveryCommit: string|null, conflict: boolean}}
  */
 function _reconstructDelivery(events, runId) {
-  let latestRef = null;
   let conflict = false;
+  let createdRef = null;
+  let verificationRef = null;
+  let decisionEvent = null;
+  let decisionRef = null;
 
+  // For each category: scan newest→oldest over ALL bound events (envelope
+  // runId === requested runId). Record a conflict for ANY event whose ref is not
+  // USABLE; the newest USABLE ref (first usable encountered) is the category's
+  // candidate. No `break`: an earlier malformed bound event must still set
+  // conflict even when a newer usable event exists.
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const e = events[i];
     if (!e || e.type !== "run.delivery_created" || e.runId !== runId) continue;
-    if (!_deliveryRefIsBound(e, runId)) { conflict = true; continue; }
-    latestRef = e.delivery;
-    break;
+    if (!_deliveryRefIsUsable(e, runId)) { conflict = true; continue; }
+    if (!createdRef) createdRef = e.delivery;
   }
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const e = events[i];
     if (!e || !DELIVERY_VERIFICATION_OUTCOME_TYPES.has(e.type) || e.runId !== runId) continue;
-    if (!_deliveryRefIsBound(e, runId)) { conflict = true; continue; }
-    latestRef = e.delivery;
-    break;
+    if (!_deliveryRefIsUsable(e, runId)) { conflict = true; continue; }
+    if (!verificationRef) verificationRef = e.delivery;
   }
-  let decisionEvent = null;
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const e = events[i];
     if (!e || (e.type !== "run.delivery_accepted" && e.type !== "run.delivery_rejected") || e.runId !== runId) continue;
-    // A decision event normally always carries a delivery ref. If it carries one
-    // that is malformed or bound to a different run, that is a conflict.
-    if (e.delivery !== undefined && !_deliveryRefIsBound(e, runId)) { conflict = true; continue; }
-    decisionEvent = e;
-    break;
+    // A bound decision that is missing delivery / non-object delivery / foreign
+    // ref.runId / non-canonical commit is a durable CONFLICT — it must never
+    // project acceptance. (Previously a missing delivery was tolerated.)
+    if (!_deliveryRefIsUsable(e, runId)) { conflict = true; continue; }
+    if (!decisionEvent) { decisionEvent = e; decisionRef = e.delivery; }
   }
-  if (decisionEvent?.delivery) {
-    latestRef = decisionEvent.delivery;
-  }
+
+  // Priority matches the prior algorithm: a usable decision overrides a usable
+  // verification, which overrides a usable created. When conflict is true the
+  // caller ignores latestRef entirely (ambiguous marker), so a conflict found in
+  // any category voids the whole view.
+  const latestRef = decisionRef ?? verificationRef ?? createdRef;
   const deliveryCommit = latestRef?.deliveryCommit ?? null;
   return { latestRef, decisionEvent, deliveryCommit, conflict };
 }

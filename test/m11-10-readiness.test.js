@@ -1219,3 +1219,165 @@ test("M11-10-MCP-03b (real default service): waiting_for_packaging maps to a tru
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); cleanupDir(runDir); }
 });
+
+// =====================================================================
+// Group 7: M11-10 closeout — Lead-review residue (real service RED → GREEN)
+//
+// Three narrow invariants the candidate left open, proven end to end with the
+// REAL application service + real disk transcripts (not stubs):
+//   CLZ1. A malformed-but-TRUTHY deliveryCommit (HEAD / short SHA / uppercase /
+//      non-hex) already collapses the readiness LABEL to ambiguous (via
+//      validateDeliveryFacts), but the reconstructed VIEW still entered the
+//      success path and echoed deliveryAvailable:true + deliveryRef/changedPaths.
+//      The reconstruction layer must fail closed too: such a ref is a durable
+//      conflict, so deliveryAvailable=false and no ref/path is echoed.
+//   CLZ2. A formal run.delivery_accepted/rejected event always carries a
+//      delivery ref (see JsonlTranscript.tryAppendDecision). A decision bound to
+//      this runId that is missing delivery / non-object / foreign-ref /
+//      non-canonical is a durable conflict — it must NOT project acceptance and
+//      must NOT echo. (A missing delivery was previously tolerated.)
+//   CLZ3. The reconstruction must FULL-scan each category for a conflict before
+//      selecting the newest usable fact; a reverse-order `break` would shadow an
+//      earlier malformed event behind a newer valid one (comment said ANY, code
+//      only checked up to the first valid event).
+// =====================================================================
+
+// --- CLZ1: malformed-but-truthy deliveryCommit/baseCommit → ambiguous, no echo ---
+
+test("M11-10-CLZ1-SVC (real service): non-canonical-but-truthy commit on created/verification → ambiguous, no ref/path echo", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "m1110-clz1-svc-"));
+  try {
+    // Truthy but non-canonical commit ids — each is rejected by the shared
+    // isCanonicalCommitId (no regex copied here). Applied to deliveryCommit on
+    // BOTH the created and verification ref (so the commits "match" — this
+    // isolates the canonical-check bug from the commit-mismatch bug).
+    const badCommits = ["HEAD", "abc1234", "D".repeat(40), "g".repeat(40)];
+    for (const bad of badCommits) {
+      const runId = "run_clz1";
+      const ref = { ...makeRef(runId), deliveryCommit: bad };
+      writeTranscript(runDir, runId, [
+        startedWithDelivery(runId),
+        { type: "run.delivery_created", runId, delivery: ref },
+        { type: "run.delivery_verification_passed", runId, delivery: ref },
+        ...terminal(runId),
+      ]);
+      // Non-waiting: created+verification with a non-canonical commit projects
+      // ambiguous via validateDeliveryFacts, so the service returns early.
+      const r = await getRunDeliveryReadiness({
+        runId, runDir, waitMs: 1000,
+        sleepFn: async () => {}, nowFn: () => 1_000_000,
+      });
+      assert.equal(r.readiness, "ambiguous", `deliveryCommit ${JSON.stringify(bad)} → ambiguous`);
+      assert.equal(r.deliveryAvailable, false, `deliveryCommit ${JSON.stringify(bad)} → not available`);
+      assert.equal(r.deliveryRef, null, `deliveryCommit ${JSON.stringify(bad)} → no ref echoed`);
+      // No dynamic ref/path/commit value may leak on the ambiguous path.
+      const dumped = JSON.stringify(r);
+      assert.ok(!dumped.includes(bad), `non-canonical commit ${JSON.stringify(bad)} not echoed`);
+      assert.ok(!dumped.includes("src/a.js"), `changedPath not echoed for deliveryCommit ${JSON.stringify(bad)}`);
+    }
+
+    // A non-canonical BASE commit (deliveryCommit canonical) is equally a
+    // conflict: the canonical DeliveryRef requirement covers baseCommit too, so
+    // the reconstruction must not echo a ref whose baseCommit is "HEAD" even when
+    // validateDeliveryFacts (which only checks deliveryCommit) would pass.
+    {
+      const runId = "run_clz1";
+      const ref = { ...makeRef(runId), baseCommit: "HEAD" };
+      writeTranscript(runDir, runId, [
+        startedWithDelivery(runId),
+        { type: "run.delivery_created", runId, delivery: ref },
+        { type: "run.delivery_verification_passed", runId, delivery: ref },
+        ...terminal(runId),
+      ]);
+      const r = await getRunDeliveryReadiness({
+        runId, runDir, waitMs: 1000,
+        sleepFn: async () => {}, nowFn: () => 1_000_000,
+      });
+      assert.equal(r.readiness, "ambiguous", "non-canonical baseCommit → ambiguous");
+      assert.equal(r.deliveryAvailable, false, "non-canonical baseCommit → not available");
+      assert.equal(r.deliveryRef, null, "non-canonical baseCommit → no ref echoed");
+      assert.ok(!JSON.stringify(r).includes("HEAD"), "non-canonical baseCommit not echoed");
+    }
+  } finally { cleanupDir(runDir); }
+});
+
+// --- CLZ2: malformed bound decision event → ambiguous, no acceptance projected ---
+
+test("M11-10-CLZ2-SVC (real service): malformed bound decision event → ambiguous, no acceptance/ref echo", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "m1110-clz2-svc-"));
+  try {
+    const runId = "run_clz2";
+    const goodRef = makeRef(runId); // canonical commits
+    // Each case seeds a fully valid created+verification (so the projection is
+    // reviewable and the ONLY reason to fail closed is the malformed bound
+    // decision), plus a bound run.delivery_accepted whose delivery violates the
+    // formal event contract (tryAppendDecision always writes a delivery ref).
+    const cases = [
+      { label: "missing delivery", decision: { type: "run.delivery_accepted", runId, reason: "leak-missing" } },
+      { label: "null delivery", decision: { type: "run.delivery_accepted", runId, delivery: null, reason: "leak-null" } },
+      { label: "string delivery", decision: { type: "run.delivery_accepted", runId, delivery: "not-a-ref", reason: "leak-string" } },
+      { label: "foreign ref.runId", decision: { type: "run.delivery_accepted", runId, delivery: makeRef("run_IMPOSTOR"), reason: "leak-foreign" } },
+      { label: "non-canonical commit", decision: { type: "run.delivery_accepted", runId, delivery: { ...makeRef(runId), deliveryCommit: "HEAD" }, reason: "leak-noncanonical" } },
+    ];
+    for (const c of cases) {
+      writeTranscript(runDir, runId, [
+        startedWithDelivery(runId),
+        { type: "run.delivery_created", runId, delivery: goodRef },
+        { type: "run.delivery_verification_passed", runId, delivery: goodRef },
+        ...terminal(runId),
+        c.decision,
+      ]);
+      const r = await getRunDeliveryReadiness({
+        runId, runDir, waitMs: 1000,
+        sleepFn: async () => {}, nowFn: () => 1_000_000,
+      });
+      assert.equal(r.readiness, "ambiguous", `${c.label}: malformed decision → ambiguous`);
+      assert.equal(r.deliveryAvailable, false, `${c.label}: not available`);
+      assert.equal(r.deliveryRef, null, `${c.label}: no ref echoed`);
+      // A malformed decision must never project acceptance.
+      assert.equal(r.acceptance, null, `${c.label}: acceptance must NOT be projected`);
+      // The malformed decision's reason / impostor ref must not leak either.
+      const dumped = JSON.stringify(r);
+      assert.ok(!dumped.includes(c.decision.reason), `${c.label}: decision reason not echoed`);
+      assert.ok(!dumped.includes("run_IMPOSTOR"), `${c.label}: impostor ref not echoed`);
+    }
+  } finally { cleanupDir(runDir); }
+});
+
+// --- CLZ3: full-scan — an earlier malformed event is not shadowed ---
+
+test("M11-10-CLZ3-SVC (real service): earlier malformed created not shadowed by newer valid one → ambiguous, no echo", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "m1110-clz3-svc-"));
+  try {
+    const runId = "run_clz3";
+    // Older created: bound object, but a NON-canonical (truthy) deliveryCommit.
+    // Newer created: fully canonical. A reverse-order `break` on the newer valid
+    // event would skip the older malformed one and leave conflict=false, so the
+    // view echoed the newer ref while the projection said ambiguous. The
+    // durable-facts contract is "ANY bound malformed event fails closed", so the
+    // full scan must record the older conflict and void the whole view.
+    const olderRef = { ...makeRef(runId), deliveryCommit: "HEAD", changedFiles: ["OLDER/leak.js"] };
+    const newerRef = { ...makeRef(runId), deliveryCommit: "c".repeat(40), changedFiles: ["src/newer.js"] };
+    writeTranscript(runDir, runId, [
+      startedWithDelivery(runId),
+      { type: "run.delivery_created", runId, delivery: olderRef }, // older, malformed
+      { type: "run.delivery_created", runId, delivery: newerRef }, // newer, valid
+      { type: "run.delivery_verification_passed", runId, delivery: newerRef },
+      ...terminal(runId),
+    ]);
+    const r = await getRunDeliveryReadiness({
+      runId, runDir, waitMs: 1000,
+      sleepFn: async () => {}, nowFn: () => 1_000_000,
+    });
+    // Projection: two bound created events → ambiguous (count). The VIEW must
+    // agree by fail-closing on the older malformed event — not by echoing the
+    // newer valid ref (which a `break`-on-first-valid scan would do).
+    assert.equal(r.readiness, "ambiguous");
+    assert.equal(r.deliveryAvailable, false, "the older malformed event voids the view");
+    assert.equal(r.deliveryRef, null);
+    const dumped = JSON.stringify(r);
+    assert.ok(!dumped.includes("OLDER/leak.js"), "older malformed changedPath not echoed");
+    assert.ok(!dumped.includes("src/newer.js"), "newer valid changedPath not echoed either (whole view fail-closed)");
+    assert.ok(!dumped.includes("HEAD"), "older non-canonical commit not echoed");
+  } finally { cleanupDir(runDir); }
+});
