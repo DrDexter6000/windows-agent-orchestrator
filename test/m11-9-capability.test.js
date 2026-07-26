@@ -286,6 +286,9 @@ test("CAP-B3: RunManager.resume with Kimi + reasoning → reject, transcript byt
       transcriptDir: join(dir, "runs"), backendFor: () => realKimi, userEnvReader: async () => ({}),
     });
 
+    // Snapshot the worktree list BEFORE resume (proves no worktree change).
+    const wtListBefore = execSync("git worktree list --porcelain", { cwd: dir, encoding: "utf8" });
+
     // resume must reject (kimi + reasoning).
     await assert.rejects(
       () => manager.resume(runId, { runDir: join(dir, "runs"), registry: registryPath }),
@@ -300,6 +303,9 @@ test("CAP-B3: RunManager.resume with Kimi + reasoning → reject, transcript byt
     // Verify no new events were appended (no run.rerun / session.created / prompt).
     const afterContent = readFileSync(transcriptPath, "utf8");
     assert.equal(afterContent, transcriptContent, "transcript content identical (no append)");
+    // Worktree list unchanged — resume did not create/delete/modify any worktree.
+    const wtListAfter = execSync("git worktree list --porcelain", { cwd: dir, encoding: "utf8" });
+    assert.equal(wtListAfter, wtListBefore, "worktree list unchanged (zero worktree side effects)");
   } finally {
     cleanupDir(dir);
   }
