@@ -238,3 +238,69 @@ test("CAP-C1: six current workers pass validateAgentPolicy", async () => {
     );
   }
 });
+
+// ===== B3: RunManager.resume + Kimi + reasoning → zero side effects =====
+
+test("CAP-B3: RunManager.resume with Kimi + reasoning → reject, transcript bytes unchanged, zero append/spawn", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-cap-b3-"));
+  try {
+    makeGitRepo(dir);
+    const runId = "run_cap_b3";
+    // Create a real linked worktree (so resume's proveLinkedWorktree passes).
+    const wtPath = join(dir, ".wt-b3");
+    execSync(`git worktree add "${wtPath}" -b wao/${runId}`, { cwd: dir, stdio: "pipe" });
+    const base = execSync("git rev-parse HEAD", { cwd: wtPath, encoding: "utf8" }).trim();
+
+    // Build an existing non-terminal transcript for a kimi-code delivery run.
+    const transcriptPath = join(dir, "runs", `${runId}.jsonl`);
+    mkdirSync(join(dir, "runs"), { recursive: true });
+    const events = [
+      { type: "run.started", backend: "kimi-code", cwd: dir, worktreePath: wtPath, worktreeBranch: `wao/${runId}`, delivery: { mode: "git_commit_v1", baseCommit: base, allowedPaths: ["src"], verificationCommands: ["echo ok"], scorecardRules: { requireEvidence: true, mode: "warn" } }, scorecardConfigured: true, ts: "2026-07-26T00:00:00.000Z", runId, agentId: "coder_mm", seq: 1 },
+      { type: "session.created", backend: "kimi-code", backendSessionId: "s1", ts: "2026-07-26T00:00:00.200Z", runId, agentId: "coder_mm", seq: 2 },
+      { type: "prompt.sent", prompt: "do it", ts: "2026-07-26T00:00:00.300Z", runId, agentId: "coder_mm", seq: 3 },
+      { type: "run.state_change", from: "pending", to: "submitted", reason: "spawned", ts: "2026-07-26T00:00:00.400Z", runId, agentId: "coder_mm", seq: 4 },
+    ];
+    const transcriptContent = events.map((e) => JSON.stringify(e)).join("\n") + "\n";
+    writeFileSync(transcriptPath, transcriptContent, "utf8");
+    const bytesBefore = readFileSync(transcriptPath, "utf8").length;
+
+    // Registry: coder_mm is kimi-code with reasoning.effort (which kimi cannot express).
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: { coder_mm: { backend: "kimi-code", cwd: dir, model: { id: "kimi-code/k3" }, reasoning: { effort: "high" } } },
+    }), "utf8");
+
+    const { RunManager } = await import("../src/runManager.js");
+    const { KimiCodeBackend } = await import("../src/backends/kimiCode.js");
+    // Use the REAL KimiCodeBackend (not a hand-written check) so the test
+    // exercises the actual policy validator.
+    let spawnCount = 0;
+    const realKimi = new KimiCodeBackend();
+    // Wrap spawn to count (the validator throws before spawn is reached).
+    const origSpawn = realKimi.spawn.bind(realKimi);
+    realKimi.spawn = async (...args) => { spawnCount++; return origSpawn(...args); };
+
+    const manager = new RunManager({
+      config: { registry: registryPath, runDir: join(dir, "runs"), defaultIsolation: "none" },
+      readRegistry: async () => { const { readRegistry } = await import("../src/registry.js"); return readRegistry(registryPath); },
+      transcriptDir: join(dir, "runs"), backendFor: () => realKimi, userEnvReader: async () => ({}),
+    });
+
+    // resume must reject (kimi + reasoning).
+    await assert.rejects(
+      () => manager.resume(runId, { runDir: join(dir, "runs"), registry: registryPath }),
+      /reasoning|cannot express|not supported/i,
+      "resume with kimi + reasoning must reject",
+    );
+
+    // Causality assertions: zero side effects.
+    assert.equal(spawnCount, 0, "zero spawn on resume rejection");
+    const bytesAfter = readFileSync(transcriptPath, "utf8").length;
+    assert.equal(bytesAfter, bytesBefore, "transcript bytes unchanged (zero append)");
+    // Verify no new events were appended (no run.rerun / session.created / prompt).
+    const afterContent = readFileSync(transcriptPath, "utf8");
+    assert.equal(afterContent, transcriptContent, "transcript content identical (no append)");
+  } finally {
+    cleanupDir(dir);
+  }
+});
