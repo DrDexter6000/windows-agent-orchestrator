@@ -723,10 +723,12 @@ CLI JSON 区分 `decisionAccepted:true`（winner）vs `decisionAccepted:false` +
 
 ### 4.10 Expert Session Reuse `[M11-11C]`
 
-> **实现状态**：M11-11C candidate（provider 中立契约 + claude-code 落地，真实 canary 后关单）。当同一 MCP Lead
+> **实现状态**：M11-11C 已完成（provider 中立契约 + claude-code 落地 + 真实双 run canary）。当同一 MCP Lead
 > server 实例在同一绑定 Git workspace 内再次询问同一**配置了 `sessionReuse: "lead_workspace"`**
 > 的专家（非 delivery），WAO 复用 provider 原生会话（Claude Code 会话）保留上下文/cache，
 > 同时**每次仍开全新 WAO run/transcript** 做独立监督。未配置该策略的 agent 保持现状行为。
+> 真实 canary 以 `run_20260726130105899fc4g0v` 首轮保存随机事实，再由独立 run
+> `run_20260726130112391y43ux7` 通过 resume 准确回忆；两个 runId 与 transcript 互不复用。
 
 **复用身份（provider 中立）**：`MCP server instance identity + 规范化 bound workspace + canonical agentId`
 三者经 sha256 派生为一个**不透明的 UUID v4**（设 version/variant 位）。该 opaque uuid 是
