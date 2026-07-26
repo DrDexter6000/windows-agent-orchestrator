@@ -937,7 +937,6 @@ src/
 ├── runEvent.js               # L1：RunEvent 类型（message/done/metrics + 证据 command/file_written/tool_use/tool_result）
 ├── scorecard.js              # 横切：证据链门控
 ├── diagnosis.js              # 横切：故障诊断（M8-3+C，给证据不给处方；类别 provider_auth/config_conflict/timeout/scorecard_fail/budget/crash/aborted_manual/unknown）
-├── costForecast.js           # 横切：成本预演（M8-4，历史中位数±区间）
 ├── smoke.js                  # L4：真实 CLI smoke 入口（npm run smoke）
 ├── mcp/                      # L4：MCP adapter（M9-1，agent-facing primary）
 │   ├── server.js             #   MCP server factory + 16 tools（lead_preflight/registry_list/workspace_status/workspace_select/run_dispatch/run_status/run_wait/run_collect/run_diagnose/run_delivery/run_delivery_review/run_delivery_decide/run_stop/runs_list/playbook_list/playbook_get）

@@ -38,13 +38,13 @@ progress.** Implemented so far: explicit state machine + JSONL transcript source
 of truth; multi-backend (opencode-serve + claude-code + codex); worktree
 isolation, resume, metrics aggregation; declarative DAG engine + parameterized
 workflow templates; daemon supervision + scorecard evidence gating + runtime
-certification + diagnostics + cost forecasting; MCP-first Lead closed loop with
+certification + diagnostics; MCP-first Lead closed loop with
 workspace-bound dispatch/recovery/stop + `run_wait` liveness supervision +
 durable decisions + restart recovery; real multi-worker dogfood on an external
 project; safe changed-path projection + exact delivery proof + bounded/redacted
 diff review (`run_delivery_review`); bounded `run_collect` continuation with
-opaque cursor pagination; adaptive playbook catalog. Still open under M11:
-Tester context/token efficiency, Advisor/Auditor on-demand ergonomics.
+opaque cursor pagination; adaptive playbook catalog; workspace-scoped expert
+session reuse. Still open under M11: Tester context/token efficiency.
 
 See [`docs/roadmap.md`](docs/roadmap.md) for full milestone status and
 [`docs/tech-debt.md`](docs/tech-debt.md) for the open tech-debt register.

@@ -164,8 +164,14 @@ test("M11-10-READY-03: waiting_for_verification — created present, no verifica
 
 test("M11-10-READY-04: waiting_for_packaging — delivery requested, no created/failed", () => {
   const runId = "run_wfp";
-  const events = [startedWithDelivery(runId), ...terminal(runId)];
+  const events = [startedWithDelivery(runId)];
   assert.equal(projectDeliveryReadiness(events, runId), "waiting_for_packaging");
+});
+
+test("M11-10-READY-04b: terminal delivery intent without packaging outcome is ambiguous", () => {
+  const runId = "run_wfp_terminal";
+  const events = [startedWithDelivery(runId), ...terminal(runId)];
+  assert.equal(projectDeliveryReadiness(events, runId), "ambiguous");
 });
 
 test("M11-10-READY-05: packaging_failed — bound run.delivery_failed, no created", () => {
@@ -218,14 +224,15 @@ test("M11-10-READY-07: ambiguous — conflicting durable facts fail closed", () 
 });
 
 test("M11-10-READY-08: cross-run envelope events are ignored (runId-bound)", () => {
-  // A delivery_created for a DIFFERENT runId must not affect this run's readiness.
+  // A delivery_created for a DIFFERENT runId must not affect this still-running
+  // run's readiness. Keeping the target non-terminal makes this test fail if
+  // foreign envelope filtering regresses.
   const runId = "run_self";
   const other = "run_other";
   assert.equal(projectDeliveryReadiness([
     startedWithDelivery(runId),
     { type: "run.delivery_created", runId: other, delivery: makeRef(other) },
     { type: "run.delivery_verification_passed", runId: other, delivery: makeRef(other) },
-    ...terminal(runId),
   ], runId), "waiting_for_packaging");
 });
 
@@ -532,9 +539,10 @@ test("M11-10-SVC-09: point-in-time getRunDelivery shape unchanged (backward comp
     ]);
     const view = await getRunDelivery({ runId, runDir });
     assert.equal(view.deliveryAvailable, true);
+    assert.equal(view.deliveryRequested, true);
     assert.deepEqual(
       Object.keys(view).sort(),
-      ["acceptance", "deliveryAvailable", "deliveryRef", "runId", "terminalState", "verification"].sort(),
+      ["acceptance", "deliveryAvailable", "deliveryRef", "deliveryRequested", "runId", "terminalState", "verification"].sort(),
     );
   } finally { cleanupDir(runDir); }
 });
@@ -669,7 +677,7 @@ test("M11-10-MCP-02: output schema — readiness/waitReturnedEarly present iff w
       const res = await client2.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
       const expectedKeys = new Set([
-        "runId", "deliveryAvailable", "terminalState", "baseCommit", "deliveryCommit",
+        "runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit",
         "changedFileCount", "changedPaths", "changedPathsTruncated",
         "verificationStatus", "verificationFailureCode", "acceptanceStatus", "decisionType",
         "deliveryFailure",
@@ -1193,7 +1201,6 @@ test("M11-10-MCP-03b (real default service): waiting_for_packaging maps to a tru
     writeTranscript(runDir, runId, [
       startedWithDelivery(runId),
       { type: "run.background_submitted", runId, background: true, cwd: dir },
-      ...terminal(runId),
     ]);
     const server = createWaoMcpServer({
       registryPath: "/r.json", runDir, workspaceRoot: dir,

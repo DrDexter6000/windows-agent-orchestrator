@@ -215,7 +215,7 @@ async function main(argv) {
 
 
 // TD-98 阶段 2b：runs 命令族（runsCommand + buildDashboard + runsDashboardCommand +
-// list/summary/prune/grep/metrics/scorecard/diagnose/forecast + loadRunFiles + parseDuration）
+// list/summary/prune/grep/metrics/scorecard/diagnose + loadRunFiles + parseDuration）
 // 已移至 src/commands/runs.js（上方 import + re-export）。
 
 
@@ -328,7 +328,6 @@ Commands:
   runs delivery <runId> [--run-dir DIR] [--format json]
   runs delivery <runId> --accept --reason-file FILE [--run-dir DIR] [--format json]
   runs delivery <runId> --reject --reason-file FILE [--run-dir DIR] [--format json]
-  runs forecast --agents a,b [--run-dir DIR] [--format json]
   workflow run <name|file.mjs> [--input TEXT] [--registry FILE] [--isolate] [--wait-timeout MS] [--run-dir DIR] [--vars key=value...]
   workflow list                  # 列出可用模板（workflows/templates/）
   playbook list [--format json]              # 列出内置 Lead playbook 摘要（只读）

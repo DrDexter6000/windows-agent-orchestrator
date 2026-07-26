@@ -262,6 +262,7 @@ const RUN_STATUS_OUTPUT = z.object({
   lastEvent: z.object({
     type: z.string(),
     ts: z.string(),
+    meaning: z.enum(["runtime_quiet_verified", "runtime_quiet_unverified"]).nullable(),
   }).nullable(),
   lastActivity: z.object({
     kind: z.string(),
@@ -444,6 +445,7 @@ const PACKAGING_FAILURE_CODE_ENUM = z.enum([...PACKAGING_FAILURE_CODES, UNKNOWN_
 const RUN_DELIVERY_OUTPUT = z.object({
   runId: z.string().min(1),
   deliveryAvailable: z.boolean(),
+  deliveryRequested: z.boolean(),
   terminalState: TERMINAL_STATE_ENUM,
   // Success-only fields (non-null iff deliveryAvailable === true). The handler
   // builds exactly one variant; the mutual exclusivity is enforced by the
@@ -513,9 +515,13 @@ function buildRunDeliveryPayload(runId, view) {
 
   if (view.deliveryAvailable === false) {
     const failure = view.deliveryFailure ?? null;
+    const deliveryRequested = typeof view.deliveryRequested === "boolean"
+      ? view.deliveryRequested
+      : failure !== null;
     return {
       runId,
       deliveryAvailable: false,
+      deliveryRequested,
       terminalState,
       baseCommit: null,
       deliveryCommit: null,
@@ -563,6 +569,7 @@ function buildRunDeliveryPayload(runId, view) {
   return {
     runId,
     deliveryAvailable: true,
+    deliveryRequested: true,
     terminalState,
     baseCommit,
     deliveryCommit,
@@ -1537,7 +1544,11 @@ export function createWaoMcpServer({
         // Incomplete pairs collapse to null rather than producing a payload that
         // would fail output-schema validation downstream.
         const lastEvent = isStringField(status.lastEventType) && isStringField(status.lastEventTs)
-          ? { type: status.lastEventType, ts: status.lastEventTs }
+          ? {
+              type: status.lastEventType,
+              ts: status.lastEventTs,
+              meaning: status.lastEventMeaning ?? null,
+            }
           : null;
         const lastActivity = isStringField(status.lastActivityTs) && isStringField(status.lastActivityEventKind)
           ? {

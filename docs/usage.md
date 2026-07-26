@@ -362,8 +362,8 @@ npm run cli -- daemon stop
 | `run.error` | 错误 | M0 |
 | `run.stop_requested` | 用户请求停止 | M0 |
 | `run.wait_policy` | M10-pre：实际生效的等待超时策略（waitTimeoutMs + source: explicit/agent/global/disabled）。M10-pre3 起默认 disabled（waitTimeoutMs:null） | M10-pre |
-| `run.stop_verified` | M10-pre：进程式 worker 终态后确认已退出（quiet） | M10-pre |
-| `run.stop_unverified` | M10-pre：进程式 worker 终态后无法确认退出（outcome: alive/probe_error） | M10-pre |
+| `run.stop_verified` | M10-pre：worker runtime 已确认静默；可能来自普通终态清理或显式 `run_stop`，不表示 Lead 一定调用过 stop | M10-pre |
+| `run.stop_unverified` | M10-pre：worker runtime 未能确认静默（outcome: alive/probe_error）；可能来自终态清理或显式 stop | M10-pre |
 | `messages.collected` | collect 命令拉取消息 | M0 |
 | `run.rerun` | 进程式 resume 重放（originalSessionId → newSessionId） | M3 |
 | `run.cleanup_done` | worktree 清理完成 | M3 |
@@ -676,12 +676,12 @@ MCP workspace binding 来源优先级：`lead_session`（`workspace_select`）> 
   "runId": "run_...",
   "state": "running",
   "terminal": false,
-  "lastEvent": { "type": "run.event", "ts": "2026-07-14T00:00:10.000Z" },
+  "lastEvent": { "type": "run.event", "ts": "2026-07-14T00:00:10.000Z", "meaning": null },
   "lastActivity": { "kind": "command", "ts": "2026-07-14T00:00:10.000Z", "secondsSince": 4 }
 }
 ```
 
-`lastEvent`/`lastActivity` 在不存在时为 `null`。**M11-8B**：还返回 `agentId`——transcript envelope 盖戳的 canonical worker 身份（闭集字符 `[A-Za-z0-9._-]`，长度 1..128；`canonicalAgentId.js` SSOT）。只有每个事件都具备与请求 `runId` 一致的 `runId` 且同一个合法 canonical agentId 才返回该 id；缺失、冲突、非法或跨 run 一律降级为 `"unknown"`（不抛错、不伪造身份、不是自动停止门）。不从 worker 自由文本推断。**绝不返回**：原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量或 `lastActivitySummary`。这是有意的安全子集——CLI status 输出含人类可读摘要（含命令名/文件名），但 MCP 只暴露安全的机器字段。`content` 的 JSON 与 `structuredContent` 语义一致。service 失败时返回固定安全文案 `run_status failed`，不拼接异常 message/stack/path。
+`lastEvent`/`lastActivity` 在不存在时为 `null`。`lastEvent.meaning` 只对停止验证事件给出安全闭集解释：`runtime_quiet_verified|runtime_quiet_unverified|null`。因此 `type:"run.stop_verified"` 的稳定含义是“worker runtime 已静默”，它既可能来自普通终态清理，也可能来自显式 `run_stop`，不得据此推断 Lead 调过 stop。**M11-8B**：还返回 `agentId`——transcript envelope 盖戳的 canonical worker 身份（闭集字符 `[A-Za-z0-9._-]`，长度 1..128；`canonicalAgentId.js` SSOT）。只有每个事件都具备与请求 `runId` 一致的 `runId` 且同一个合法 canonical agentId 才返回该 id；缺失、冲突、非法或跨 run 一律降级为 `"unknown"`（不抛错、不伪造身份、不是自动停止门）。不从 worker 自由文本推断。**绝不返回**：原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量或 `lastActivitySummary`。这是有意的安全子集——CLI status 输出含人类可读摘要（含命令名/文件名），但 MCP 只暴露安全的机器字段。`content` 的 JSON 与 `structuredContent` 语义一致。service 失败时返回固定安全文案 `run_status failed`，不拼接异常 message/stack/path。
 
 annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`（纯只读查询）。
 
@@ -765,6 +765,8 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 ```json
 {
   "runId": "run_...",
+  "deliveryAvailable": true,
+  "deliveryRequested": true,
   "terminalState": "completed",
   "baseCommit": "bbb...",
   "deliveryCommit": "ddd...",
@@ -789,7 +791,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 路径投影的安全边界：每个 path 经 `src/delivery.js` 的 repo-relative 校验 SSOT 复验（拒绝绝对 Windows/POSIX/UNC、`..`/`.` traversal、空 segment、尾分隔符），并额外限制长度 1..512、无控制字符、无 NUL、统一 forward-slash。任何 malformed path 一律 fail-closed —— 整个 projection 不返回部分结果，调用折叠为固定 `run_delivery failed`，不泄漏恶意值。失败返回固定 `run_delivery failed`（不拼接异常、路径或 secret）。
 
-**M11-8C packaging failure variant**：当 transcript 中没有 committed DeliveryRef、但存在绑定当前 runId 的 durable `run.delivery_failed`（如 `base_commit_mismatch`——worker 移动了 HEAD），`run_delivery` 返回**结构化失败变体**而非固定错误：`deliveryAvailable:false` + `deliveryFailure.code`（闭集安全 code，未知/损坏/注入 code 投影为 `unknown`，不回显原值；不返回 message/path/command/stderr/prompt/worktree）。成功 delivery 增加 `deliveryAvailable:true`（既有字段不变）。无 delivery request、transcript 缺失/损坏等情况仍返回固定 `run_delivery failed`（不假报 packaging failure）。`run_delivery_decide` 在没有 DeliveryRef 时仍不可调用成功。`run_diagnose` 对此类 run 返回 `category:"delivery_packaging_failed"`（消费 `run.delivery_failed`，只给事实不给处方/重试）。
+**结构化无交付 / packaging failure**：`deliveryRequested` 明确区分本次 run 是否声明过 delivery。普通非 delivery run 返回 `deliveryAvailable:false, deliveryRequested:false, deliveryFailure:null`，这是正常查询结果而非错误；已请求但尚未打包则返回 `deliveryAvailable:false, deliveryRequested:true, deliveryFailure:null`。当存在绑定当前 runId 的 durable `run.delivery_failed`（如 `base_commit_mismatch`），返回 `deliveryAvailable:false, deliveryRequested:true` + `deliveryFailure.code`（闭集安全 code，未知/损坏/注入 code 投影为 `unknown`，不回显原值）。transcript 缺失/损坏或 durable 事实冲突仍固定返回 `run_delivery failed`。`run_delivery_decide` 在没有 DeliveryRef 时仍不可调用成功。`run_diagnose` 对 packaging failure 返回 `category:"delivery_packaging_failed"`（只给事实不给处方/重试）。
 
 **M11-10 delivery readiness handshake（可选 bounded 只读 wait）**：提供 `waitMs` 时，`run_delivery` 在同一份共享 application service（`getRunDeliveryReadiness`，CLI/MCP 共用）内做 bounded read-only readiness wait，并额外返回：
 
@@ -809,7 +811,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 - `readiness` 为严格闭集 `waiting_for_packaging | waiting_for_verification | reviewable | packaging_failed | not_requested | ambiguous`（消费方必须视其为穷举，任何其它值都是 bug）。
 - `reviewable` 仅当存在 durable `delivery_created` **且**恰好一个绑定该 runId 的最终 verification outcome（passed/failed/unavailable），并复用共享 `validateDeliveryFacts` SSOT 作为最终权威；failed/unavailable 仍为 reviewable（不自动 reject，Lead 仍负责 accept）。
-- 冲突 durable 事实（多个 created/verification/packaging failure、commit 不匹配、跨 run ref、created+failed、有 verification outcome 但无 bound created）折叠为 `ambiguous`（fail-closed，不回显动态值）。
+- 冲突或不完整的 durable 事实（多个 created/verification/packaging failure、commit 不匹配、跨 run ref、created+failed、有 verification outcome 但无 bound created，或 run 已终态但声明的 delivery 没有 created/failed 结果）折叠为 `ambiguous`（fail-closed，不回显动态值）；后者会立即返回，不耗尽 wait 窗口。
 - wait 是 workspace/runId-bound、非忙等（两次 re-read 之间 sleep）、**零 transcript append**、bounded polling（deadline = 起始时间 + waitMs）。MCP 长 wait 复用 `run_wait` 的 SDK-native progress/timeout 模式（`notifications/progress` keepalive + `resetTimeoutOnProgress`）；`waitMs` 区间由共享常量 `DELIVERY_WAIT_MS_MIN=1000`/`DELIVERY_WAIT_MS_MAX=300000` 锁定，zod schema 与 service 业务边界都从同一常量构造，不可漂移。
 - pending-at-deadline 是**诚实的事实**（`waitReturnedEarly:false`），不是错误；wait 绝不 stop/retry/accept/reject。初始读取失败即抛错（不进入 wait）；wait 期间某次 re-read 失败时，不把 stale waiting 快照伪装成 deadline 到期，而是 fail-closed 为 `ambiguous` 并提前返回（`waitReturnedEarly:true`，不回显错误、不重试）。
 - 安全投影复用既有 `run_delivery` 投影（commit/path 校验、redaction、闭集、fail-closed 不变）；`run_delivery_review` 的 exact-proof / 安全投影 / 错误边界**未被放松**。
@@ -942,6 +944,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 `waitMs`（整数，**下限 180000** 即 180s，**默认 270000 即 4.5 分钟**，上限 600000）：Lead 的单次观察窗口。窗口到期只返回 liveness，**不表示 worker 失败，也不会中止 worker**。模型不能传 `runDir`、registry、`force`、timeout 控制面参数——这些是 server-owned 配置。
 
 - **返回时机**：服务在两种情况下返回——(1) run 到达终态（completed/failed/aborted/timed_out），此时 `returnedEarly:true`；(2) `waitMs` 到期仍未终态，此时 `returnedEarly:false` 并附带 liveness 摘要让 Lead 决定下一步。**普通新事件不会触发提前返回**——只有终态会；窗口内的新进展通过到期的 liveness=`progress` 体现。
+- 若返回 `terminal:true`，该终态事实已足够，Lead 直接进入 `run_collect`；除恢复、独立复核或没有 wait 结果外，不需要再调用一次 `run_status`。
 
 - **安全有界输出**（只返回机器字段 + liveness 摘要，不含内容/路径/session）：
 

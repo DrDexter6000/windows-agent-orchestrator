@@ -3,12 +3,12 @@
 // TD-98 阶段 2b：runs command family 从 cli.js 拆出（行为不变，纯搬迁）。
 //
 // 命令族：runs list / summary / prune / grep / metrics / scorecard /
-//         dashboard / diagnose / forecast
+//         dashboard / diagnose
 //
 // 依赖：
 //   - 外部模块：../transcript.js（readTranscript/findState）、../metrics.js
 //     （aggregateRunMetrics/aggregateSummary/formatDuration）、../diagnosis.js
-//     （diagnoseFailure）、../costForecast.js（forecastCost）、../waoDir.js
+//     （diagnoseFailure）、../waoDir.js
 //     （getWaoDir）、../waoDeclare.js（summarizeDeclares）、../waoStage.js
 //     （summarizeStages）
 //   - 共享工具：./shared.js（parseOptions/resolveTargetCwd，纯函数）
@@ -36,7 +36,6 @@ import {
 } from "../application/runDelivery.js";
 // M11-3C: delivery review projection delegated to shared application service.
 import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
-import { forecastCost } from "../costForecast.js";
 import { getWaoDir } from "../waoDir.js";
 import { summarizeDeclares } from "../waoDeclare.js";
 import { summarizeStages } from "../waoStage.js";
@@ -77,8 +76,7 @@ async function runsCommand(args, config) {
     return;
   }
   if (sub === "forecast") {
-    await runsForecastCommand(tail, config);
-    return;
+    throw new Error("runs forecast has been removed; use observed run facts instead of token estimates");
   }
   await runsListCommand(args, config);
 }
@@ -91,7 +89,7 @@ async function loadRunFiles(runDir) {
 
 /**
  * TD-102: 只加载 run_*.jsonl（排除 wf_* workflow transcript）。
- * list/summary/metrics --summary/dashboard/forecast 使用此函数——
+ * list/summary/metrics --summary/dashboard 使用此函数——
  * workflow transcript 不是 worker run，不应计入 run 聚合。
  * grep/prune 保持 loadRunFiles（所有 .jsonl）。
  */
@@ -438,58 +436,6 @@ async function runsDiagnoseCommand(args, config) {
 }
 
 /**
- * M8-4 成本预演：runs forecast --agents a,b [--run-dir DIR]（🟢 工具域 bonus）。
- * 基于历史 run 的 token/cost/duration 中位数 ± 区间，给 Lead 发射前估费/估时。
- * 不阻断发射，只算账。无历史 → insufficient_data（不编造）。
- */
-async function runsForecastCommand(args, config) {
-  const options = parseOptions(args);
-  const runDir = resolve(options.runDir ?? config.runDir);
-  const agentIds = options.agents
-    ? String(options.agents).split(",").map((s) => s.trim()).filter(Boolean)
-    : [];
-  if (agentIds.length === 0) {
-    throw new Error("runs forecast requires --agents a,b (comma-separated agent ids)");
-  }
-
-  // 从 runs 目录构建 history：读每个 jsonl，按 agentId 分组，算 aggregateRunMetrics。
-  const jsonlFiles = await loadRunOnlyFiles(runDir);
-  const history = {};
-  for (const f of jsonlFiles) {
-    const events = await readTranscript(join(runDir, f));
-    const agentId = events[0]?.agentId;
-    if (!agentId) continue;
-    const m = aggregateRunMetrics(events);
-    (history[agentId] ??= []).push(m);
-  }
-
-  const r = forecastCost({ agentIds, history });
-  if (options.format === "json") {
-    console.log(JSON.stringify(r, null, 2));
-    return;
-  }
-  for (const id of agentIds) {
-    const a = r.agents[id];
-    if (a.insufficient_data) {
-      console.log(`${id}: (insufficient data — no history)`);
-      continue;
-    }
-    const c = a.cost?.unavailable ? "n/a" : `$${a.cost.median.toFixed(4)} [${a.cost.min.toFixed(4)}–${a.cost.max.toFixed(4)}]`;
-    const t = a.tokens?.input ? `${a.tokens.input.median} [${a.tokens.input.min}–${a.tokens.input.max}]` : "n/a";
-    console.log(`${id}: cost=${c}  tokens(in)=${t}  samples=${a.sampleSize}`);
-  }
-  const tot = r.total;
-  if (tot.insufficient_data) {
-    console.log(`total: (insufficient data)`);
-  } else {
-    const parts = [];
-    if (tot.medianCostUsd !== undefined) parts.push(`cost=$${tot.medianCostUsd.toFixed(4)}`);
-    if (tot.medianTokens !== undefined) parts.push(`tokens=${tot.medianTokens}`);
-    console.log(`total: ${parts.join("  ")}`);
-  }
-}
-
-/**
  * M8-2 实时仪表盘：单一视图聚合所有 run 的状态/token/费用/证据，异常标红。
  * 🟢 工具域：只读聚合，绝不 retry/stop/改状态。省 Lead 在多命令间轮询的精力。
  * 支持：--watch N（N 秒重刷）/ --format json / --agent <id> 过滤 / --latest N 取最近 N 个。
@@ -757,8 +703,10 @@ function _printReadinessText(result) {
     console.log(`Acceptance: ${result.acceptance?.status ?? "(none)"}`);
   } else if (result.deliveryFailure) {
     console.log(`Packaging failed: ${result.deliveryFailure.code}`);
+  } else if (result.deliveryRequested) {
+    console.log("Delivery: (requested, not packaged yet)");
   } else {
-    console.log("Delivery: (none)");
+    console.log("Delivery: (not requested)");
   }
 }
 
@@ -798,9 +746,17 @@ async function runsDeliveryCommand(args, config, hostDeps) {
       console.log(JSON.stringify(view, null, 2));
     } else {
       console.log(`Run: ${view.runId} (${view.terminalState})`);
-      console.log(`Delivery: ${view.deliveryRef.deliveryCommit}`);
-      console.log(`Verification: ${view.verification.status}`);
-      console.log(`Acceptance: ${view.acceptance.status}`);
+      if (view.deliveryAvailable) {
+        console.log(`Delivery: ${view.deliveryRef.deliveryCommit}`);
+        console.log(`Verification: ${view.verification.status}`);
+        console.log(`Acceptance: ${view.acceptance.status}`);
+      } else if (view.deliveryFailure) {
+        console.log(`Packaging failed: ${view.deliveryFailure.code}`);
+      } else if (view.deliveryRequested) {
+        console.log("Delivery: (requested, not packaged yet)");
+      } else {
+        console.log("Delivery: (not requested)");
+      }
     }
     return;
   }

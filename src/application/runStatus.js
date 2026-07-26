@@ -75,6 +75,12 @@ function basenameSafe(p) {
   return parts[parts.length - 1] || "";
 }
 
+function describeLastEventMeaning(type) {
+  if (type === "run.stop_verified") return "runtime_quiet_verified";
+  if (type === "run.stop_unverified") return "runtime_quiet_unverified";
+  return null;
+}
+
 // ===== Service =====
 
 /**
@@ -147,9 +153,12 @@ export async function getRunStatus({
     // Extra machine fields for MCP (safe subset), not printed by CLI adapter.
     lastEventType: last?.type ?? null,
     lastEventTs: last?.ts ?? null,
+    // `run.stop_verified` may come from routine terminal cleanup or an explicit
+    // Lead stop. The stable meaning is only that the worker runtime is quiet.
+    lastEventMeaning: describeLastEventMeaning(last?.type),
     lastActivityEventKind: lastActivity?.kind ?? null,
   };
 }
 
 // Exported for CLI adapter reuse (avoids a second copy of the algorithm).
-export { describeActivity };
+export { describeActivity, describeLastEventMeaning };

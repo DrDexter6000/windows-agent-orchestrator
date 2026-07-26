@@ -87,11 +87,17 @@ test("M9-6A-03: invalid runId rejected before readTranscript", async () => {
   assert.equal(readCalls, 0);
 });
 
-test("M9-6A-04: missing committed delivery fails closed", async () => {
+test("M9-6A-04: ordinary run without delivery request returns structured truth", async () => {
   const { dir, runId, transcript } = makeDeliveryTranscript("s04");
   try {
     await transcript.append("run.state_change", { to: "completed", reason: "done" });
-    await assert.rejects(() => getRunDelivery({ runId, runDir: dir }));
+    assert.deepEqual(await getRunDelivery({ runId, runDir: dir }), {
+      runId,
+      terminalState: "completed",
+      deliveryAvailable: false,
+      deliveryRequested: false,
+      deliveryFailure: null,
+    });
   } finally { cleanupDir(dir); }
 });
 

@@ -173,8 +173,13 @@ test("M9-3B-03: run_status output is safe subset, no raw payload leak", async ()
       // M11-8B: the durable agentId from the envelope, not worker text.
       assert.equal(parsed.agentId, "w", "agentId is the durable envelope id");
 
-      // lastEvent has only type + ts.
-      assert.deepEqual(Object.keys(parsed.lastEvent).sort(), ["ts", "type"], "lastEvent has only type+ts");
+      // lastEvent has only type + ts + the closed-set Lead-readable meaning.
+      assert.deepEqual(
+        Object.keys(parsed.lastEvent).sort(),
+        ["meaning", "ts", "type"],
+        "lastEvent has only type/ts/meaning",
+      );
+      assert.equal(parsed.lastEvent.meaning, null, "ordinary events have no special meaning");
 
       // lastActivity has only kind + ts + secondsSince.
       assert.deepEqual(Object.keys(parsed.lastActivity).sort(), ["kind", "secondsSince", "ts"], "lastActivity has only kind/ts/secondsSince");

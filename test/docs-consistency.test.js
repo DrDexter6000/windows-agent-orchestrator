@@ -1313,3 +1313,36 @@ test("M11-5-C-DOC-4: docs document truthful load timing (start pre-transcript; r
   assert.ok(/resume.*读取.*transcript.*后|resume.*after read/i.test(arch),
     "architecture: resume loads after reading transcript");
 });
+
+// ===== M11-11D: Lead friction closeout guards =====
+
+test("M11-11D-DOC-01: terminal run_wait proceeds to collect without redundant status", () => {
+  const skill = read("SKILL.md");
+  const usage = read("docs/usage.md");
+  assert.ok(/run_wait.*terminal:true.*run_collect.*不.*run_status|terminal:true.*run_collect.*redundant.*run_status/is.test(skill),
+    "SKILL sends terminal run_wait directly to collect");
+  assert.ok(/terminal:true.*run_collect.*不需要.*run_status/is.test(usage),
+    "usage documents no redundant status call after terminal wait");
+});
+
+test("M11-11D-DOC-02: ordinary non-delivery query is structured truth", () => {
+  const usage = read("docs/usage.md");
+  assert.ok(/deliveryRequested.*普通非 delivery run.*deliveryAvailable:false.*deliveryRequested:false.*deliveryFailure:null/is.test(usage),
+    "usage distinguishes a normal non-delivery run from packaging failure");
+});
+
+test("M11-11D-DOC-03: stop_verified means runtime quiet, not necessarily explicit stop", () => {
+  const usage = read("docs/usage.md");
+  assert.ok(/run\.stop_verified.*runtime.*静默/is.test(usage),
+    "usage gives stop_verified a runtime-quiet meaning");
+  assert.ok(/run\.stop_verified.*不表示 Lead 一定调用过 stop/is.test(usage),
+    "usage does not infer an explicit Lead stop");
+});
+
+test("M11-11D-DOC-04: token forecast is retired from current product surfaces", () => {
+  const readme = read("README.md");
+  assert.ok(!existsSync(join(ROOT, "src", "costForecast.js")),
+    "retired costForecast module stays removed");
+  assert.ok(!/cost forecasting/i.test(readme),
+    "README no longer lists token forecasting as a current capability");
+});

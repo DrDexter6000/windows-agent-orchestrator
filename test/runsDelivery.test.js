@@ -109,6 +109,13 @@ test("3C2-Q01: query reconstructs pending delivery after verification passed", a
     assert.equal(parsed.deliveryRef.deliveryCommit, "d".repeat(40));
     assert.equal(parsed.verification.status, "passed");
     assert.equal(parsed.acceptance.status, "pending");
+
+    const text = await captureLog(async () => {
+      await runsDeliveryCommand([runId, "--run-dir", dir], {});
+    });
+    assert.match(text, /Delivery: d{40}/);
+    assert.match(text, /Verification: passed/);
+    assert.match(text, /Acceptance: pending/);
   } finally {
     await cleanupDir(dir);
   }
@@ -279,9 +286,9 @@ test("3C2-A07: accept+reject together fail before append", async () => {
 });
 
 /**
- * 3C2-08: no delivery / proposed delivery / malformed DeliveryRef fails closed.
+ * 3C2-08: ordinary non-delivery is a valid structured/text query result.
  */
-test("3C2-A08: no delivery fails closed", async () => {
+test("3C2-A08: ordinary non-delivery reports not requested", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-3c2-a08-"));
   const runId = "run_3c2_nodelivery";
   const transcript = new JsonlTranscript(join(dir, `${runId}.jsonl`), { runId, agentId: "test" });
@@ -291,14 +298,90 @@ test("3C2-A08: no delivery fails closed", async () => {
     await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
 
     const { runsDeliveryCommand } = await import("../src/commands/runs.js");
-    await assert.rejects(
-      () => runsDeliveryCommand([runId, "--run-dir", dir], {}),
-      /no.*delivery|committed delivery/i,
-      "run without delivery should fail closed",
-    );
+    const output = await captureLog(async () => {
+      await runsDeliveryCommand([runId, "--run-dir", dir], {});
+    });
+    assert.match(output, /Delivery: \(not requested\)/);
   } finally {
     await cleanupDir(dir);
   }
+});
+
+test("M11-11D-CLI: text output distinguishes pending packaging from packaging failure", async () => {
+  const pendingDir = mkdtempSync(join(tmpdir(), "wao-m111d-cli-pending-"));
+  const failedDir = mkdtempSync(join(tmpdir(), "wao-m111d-cli-failed-"));
+  try {
+    const pendingRunId = "run_m111d_cli_pending";
+    const pendingTranscript = new JsonlTranscript(
+      join(pendingDir, `${pendingRunId}.jsonl`),
+      { runId: pendingRunId, agentId: "test" },
+    );
+    await pendingTranscript.append("run.background_submitted", { deliveryRequested: true });
+    await pendingTranscript.append("run.started", { backend: "backgroundRunner" });
+
+    const failedRunId = "run_m111d_cli_failed";
+    const failedTranscript = new JsonlTranscript(
+      join(failedDir, `${failedRunId}.jsonl`),
+      { runId: failedRunId, agentId: "test" },
+    );
+    await failedTranscript.append("run.background_submitted", { deliveryRequested: true });
+    await failedTranscript.append("run.delivery_failed", { deliveryCode: "base_commit_mismatch" });
+
+    const { runsDeliveryCommand } = await import("../src/commands/runs.js");
+    const pendingOutput = await captureLog(async () => {
+      await runsDeliveryCommand([pendingRunId, "--run-dir", pendingDir], {});
+    });
+    const failedOutput = await captureLog(async () => {
+      await runsDeliveryCommand([failedRunId, "--run-dir", failedDir], {});
+    });
+
+    assert.match(pendingOutput, /Delivery: \(requested, not packaged yet\)/);
+    assert.match(failedOutput, /Packaging failed: base_commit_mismatch/);
+  } finally {
+    await cleanupDir(pendingDir);
+    await cleanupDir(failedDir);
+  }
+});
+
+test("M11-11D-CLI-WAIT: readiness text distinguishes requested from ordinary non-delivery", async () => {
+  const { runsDeliveryCommand } = await import("../src/commands/runs.js");
+  const requestedOutput = await captureLog(async () => {
+    await runsDeliveryCommand(
+      ["run_wait_requested", "--wait-ms", "1000", "--run-dir", "."],
+      {},
+      {
+        getRunDeliveryReadinessFn: async () => ({
+          runId: "run_wait_requested",
+          terminalState: "running",
+          readiness: "waiting_for_packaging",
+          waitReturnedEarly: false,
+          deliveryAvailable: false,
+          deliveryRequested: true,
+          deliveryFailure: null,
+        }),
+      },
+    );
+  });
+  const ordinaryOutput = await captureLog(async () => {
+    await runsDeliveryCommand(
+      ["run_wait_ordinary", "--wait-ms", "1000", "--run-dir", "."],
+      {},
+      {
+        getRunDeliveryReadinessFn: async () => ({
+          runId: "run_wait_ordinary",
+          terminalState: "completed",
+          readiness: "not_requested",
+          waitReturnedEarly: true,
+          deliveryAvailable: false,
+          deliveryRequested: false,
+          deliveryFailure: null,
+        }),
+      },
+    );
+  });
+
+  assert.match(requestedOutput, /Delivery: \(requested, not packaged yet\)/);
+  assert.match(ordinaryOutput, /Delivery: \(not requested\)/);
 });
 
 /**

@@ -1249,16 +1249,16 @@ test("TD-90: getWaoCliPath 在 win32 返回 .cmd shim（worker 不踩 v24 guard�
 
 // TD-52 守卫：help 必须列出 main() 真实路由的全部命令族。
 // _guardBypass.mjs 已全局设 WAO_SKIP_VERSION_GUARD=1，子进程继承，故任意 Node 可跑 help。
-// 防止 printHelp 与代码漂移（首装 e2e 摩擦日志 F1：曾漏列 dashboard/diagnose/forecast/wao 族/daemon supervise）。
+// 防止 printHelp 与代码漂移（首装 e2e 摩擦日志 F1：曾漏列 dashboard/diagnose/wao 族/daemon supervise）。
 test("help: 列出所有 main() 真实路由的命令族（防 help 与代码漂移，TD-52）", () => {
   const out = execSync("node src/cli.js help", { cwd: process.cwd(), encoding: "utf8" });
   assert.match(out, /run <agentId> .*--prompt-file FILE/, "help 必须列出 run --prompt-file FILE");
   assert.match(out, /--scorecard-rules-file FILE/, "help 必须列出 --scorecard-rules-file FILE");
   assert.match(out, /status <runId> .*--format json/, "help 必须列出 status --format json");
-  // runs 族（M8-2/3/4 新增，曾漏）
+  // runs 族（M8-2/3 新增，曾漏）
   assert.match(out, /runs dashboard/, "help 必须列出 runs dashboard（main() 路由）");
   assert.match(out, /runs diagnose/, "help 必须列出 runs diagnose（main() 路由）");
-  assert.match(out, /runs forecast/, "help 必须列出 runs forecast（main() 路由）");
+  assert.doesNotMatch(out, /runs forecast/, "已移除的 forecast 不得继续出现在 help");
   // wao 族（整族曾缺席）
   assert.match(out, /wao init/, "help 必须列出 wao init");
   assert.match(out, /wao state/, "help 必须列出 wao state");

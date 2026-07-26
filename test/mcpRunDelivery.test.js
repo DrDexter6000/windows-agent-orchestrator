@@ -95,9 +95,10 @@ test("M9-6B-02: run_delivery returns safe fields incl. bounded changedPaths, no 
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     // M11-1A: changedPaths + changedPathsTruncated are now part of the safe output set.
     // M11-8C: deliveryAvailable (success discriminator) + deliveryFailure (null on success).
-    const allowed = new Set(["runId", "deliveryAvailable", "terminalState", "baseCommit", "deliveryCommit", "changedFileCount", "changedPaths", "changedPathsTruncated", "verificationStatus", "verificationFailureCode", "acceptanceStatus", "decisionType", "deliveryFailure"]);
+    const allowed = new Set(["runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit", "changedFileCount", "changedPaths", "changedPathsTruncated", "verificationStatus", "verificationFailureCode", "acceptanceStatus", "decisionType", "deliveryFailure"]);
     for (const k of Object.keys(parsed)) assert.ok(allowed.has(k), `unexpected key: ${k}`);
     assert.equal(parsed.deliveryAvailable, true, "success variant has deliveryAvailable:true");
+    assert.equal(parsed.deliveryRequested, true, "success variant confirms delivery intent");
     assert.equal(parsed.deliveryFailure, null, "no deliveryFailure on success");
 
     assert.equal(parsed.changedFileCount, 2, "count derived from array length");
@@ -424,7 +425,7 @@ test("M11-1A-01: run_delivery output field set is exactly old fields + changedPa
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     // M11-8C: added deliveryAvailable (success discriminator) + deliveryFailure (null here).
     const expectedKeys = new Set([
-      "runId", "deliveryAvailable", "terminalState", "baseCommit", "deliveryCommit",
+      "runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit",
       "changedFileCount", "changedPaths", "changedPathsTruncated",
       "verificationStatus", "verificationFailureCode", "acceptanceStatus", "decisionType",
       "deliveryFailure",
@@ -432,6 +433,7 @@ test("M11-1A-01: run_delivery output field set is exactly old fields + changedPa
     assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys,
       `field set mismatch; got ${Object.keys(parsed).sort()}`);
     assert.equal(parsed.deliveryAvailable, true, "success variant");
+    assert.equal(parsed.deliveryRequested, true, "delivery intent is explicit");
   } finally { await client.close(); await server.close(); }
 });
 

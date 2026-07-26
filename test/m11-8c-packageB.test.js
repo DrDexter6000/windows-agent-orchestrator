@@ -104,19 +104,20 @@ test("PB-RED1: getRunDelivery returns structured failure when delivery_failed pr
   }
 });
 
-test("PB-RED2: getRunDelivery does NOT report a packaging failure for a plain non-delivery run", async () => {
+test("PB-RED2: getRunDelivery reports plain non-delivery truth without a packaging failure", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m118c-pb2-"));
   try {
     const runId = "run_pb2";
     writeTranscript(join(dir, "runs"), runId, plainFailedFixture(runId));
     const { getRunDelivery } = await import("../src/application/runDelivery.js");
-    // A plain failed run with no delivery request must still throw (no delivery
-    // at all) — it must NOT be misreported as a packaging failure.
-    await assert.rejects(
-      () => getRunDelivery({ runId, runDir: join(dir, "runs") }),
-      /No committed delivery|delivery/i,
-      "plain run without delivery request is not a packaging failure",
-    );
+    const d = await getRunDelivery({ runId, runDir: join(dir, "runs") });
+    assert.deepEqual(d, {
+      runId,
+      terminalState: "failed",
+      deliveryAvailable: false,
+      deliveryRequested: false,
+      deliveryFailure: null,
+    });
   } finally {
     cleanupDir(dir);
   }
@@ -277,12 +278,15 @@ test("PB-RED10: cross-run / conflicting delivery_failed does not fake a packagin
     ].join("");
     writeTranscript(join(dir, "runs"), runId, lines);
     const { getRunDelivery } = await import("../src/application/runDelivery.js");
-    // The cross-run delivery_failed must NOT bind → still throws (no delivery).
-    await assert.rejects(
-      () => getRunDelivery({ runId, runDir: join(dir, "runs") }),
-      /No committed delivery|delivery/i,
-      "cross-run delivery_failed does not fake a packaging failure",
-    );
+    // The cross-run delivery_failed must NOT bind or fake local delivery intent.
+    const d = await getRunDelivery({ runId, runDir: join(dir, "runs") });
+    assert.deepEqual(d, {
+      runId,
+      terminalState: "completed",
+      deliveryAvailable: false,
+      deliveryRequested: false,
+      deliveryFailure: null,
+    });
   } finally {
     cleanupDir(dir);
   }

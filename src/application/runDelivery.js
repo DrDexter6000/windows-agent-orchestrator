@@ -15,7 +15,14 @@
 
 import { join, resolve } from "node:path";
 
-import { readTranscript, findState, findLastEventSeq, validateDeliveryFacts, JsonlTranscript } from "../transcript.js";
+import {
+  readTranscript,
+  findState,
+  findLastEventSeq,
+  validateDeliveryFacts,
+  JsonlTranscript,
+  TERMINAL_STATES,
+} from "../transcript.js";
 import { isValidRunId, isCanonicalCommitId } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, safeProjectPackagingCode } from "../deliveryFailureCodes.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
@@ -42,7 +49,7 @@ export const DELIVERY_READINESS_STATES = Object.freeze([
   "reviewable", // durable delivery_created + exactly one bound final verification outcome
   "packaging_failed", // durable run.delivery_failed bound to this runId (no committed delivery)
   "not_requested", // no delivery intent declared, no delivery events
-  "ambiguous", // conflicting durable facts — fail closed
+  "ambiguous", // conflicting or terminal-incomplete durable chain — fail closed
 ]);
 
 const WAITING_READINESS_STATES = new Set(["waiting_for_packaging", "waiting_for_verification"]);
@@ -192,16 +199,18 @@ export function projectDeliveryReadiness(events, runId) {
   if (created.length === 1) return "waiting_for_verification";
 
   // No committed delivery and no packaging failure. Distinguish "delivery was
-  // requested but not yet packaged" from "delivery was never requested".
-  // runId-bound: only THIS run's own run.started declares intent. A foreign
-  // run's run.started in a concatenated/corrupt transcript must not project
-  // this run as waiting.
-  const deliveryRequested = events.some(
-    (e) => e && e.type === "run.started"
-      && e.runId === runId
-      && e.delivery && typeof e.delivery.mode === "string" && e.delivery.mode.length > 0,
-  );
-  return deliveryRequested ? "waiting_for_packaging" : "not_requested";
+  // requested but not yet packaged" from "delivery was never requested" using
+  // the shared runId-bound intent projection.
+  if (!_deliveryWasRequested(events, runId)) return "not_requested";
+
+  // A terminal run cannot truthfully be "waiting" for its first packaging
+  // outcome. With no created/failed fact, the durable chain is incomplete.
+  // Fail closed to the existing ambiguous state so bounded readiness queries
+  // return immediately instead of burning their full wait window.
+  const boundState = findState(events.filter((e) => e && e.runId === runId));
+  if (TERMINAL_STATES.includes(boundState)) return "ambiguous";
+
+  return "waiting_for_packaging";
 }
 
 /**
@@ -218,6 +227,20 @@ function _findBoundDeliveryFailed(events, runId) {
     if (e.type === "run.delivery_failed" && e.runId === runId) return e;
   }
   return null;
+}
+
+function _deliveryWasRequested(events, runId) {
+  return events.some(
+    (e) => e && e.runId === runId && (
+      (e.type === "run.background_submitted" && e.deliveryRequested === true)
+      || (
+        e.type === "run.started"
+        && e.delivery
+        && typeof e.delivery.mode === "string"
+        && e.delivery.mode.length > 0
+      )
+    ),
+  );
 }
 
 // ===== Private: delivery reconstruction (migrated from runs.js) =====
@@ -307,7 +330,8 @@ function _reconstructDelivery(events, runId) {
 // Returns one of:
 //   - success: { runId, terminalState, deliveryAvailable: true, deliveryRef, verification, acceptance }
 //   - failure: { runId, terminalState, deliveryAvailable: false, deliveryFailure: { code } }
-//   - noDelivery marker: { runId, terminalState, deliveryAvailable: false, noDelivery: true }
+//   - no-delivery view: { runId, terminalState, deliveryAvailable: false,
+//       deliveryRequested, deliveryFailure: null }
 //     (no committed delivery AND no bound packaging failure)
 //   - ambiguous marker: { runId, terminalState, deliveryAvailable: false, ambiguous: true }
 //     (a durable conflict: malformed bound event / cross-run injection. Never
@@ -320,7 +344,13 @@ function _gatherDeliveryView(events, runId, terminalState) {
   // would let a malformed/injected event masquerade as a clean waiting state)
   // and must NOT echo the conflicting ref. Fail closed to the ambiguous marker.
   if (conflict) {
-    return { runId, terminalState, deliveryAvailable: false, ambiguous: true };
+    return {
+      runId,
+      terminalState,
+      deliveryAvailable: false,
+      deliveryRequested: _deliveryWasRequested(events, runId),
+      ambiguous: true,
+    };
   }
 
   if (latestRef && deliveryCommit) {
@@ -332,6 +362,7 @@ function _gatherDeliveryView(events, runId, terminalState) {
       runId,
       terminalState,
       deliveryAvailable: true,
+      deliveryRequested: true,
       deliveryRef: latestRef,
       verification: {
         status: verificationStatus,
@@ -355,12 +386,21 @@ function _gatherDeliveryView(events, runId, terminalState) {
       runId,
       terminalState,
       deliveryAvailable: false,
+      deliveryRequested: true,
       deliveryFailure: { code },
     };
   }
 
-  // No committed delivery and no packaging failure.
-  return { runId, terminalState, deliveryAvailable: false, noDelivery: true };
+  // No committed delivery and no packaging failure. This is normal for an
+  // ordinary non-delivery run and a truthful pending state for a delivery run
+  // that has not packaged yet; neither is an application error.
+  return {
+    runId,
+    terminalState,
+    deliveryAvailable: false,
+    deliveryRequested: _deliveryWasRequested(events, runId),
+    deliveryFailure: null,
+  };
 }
 
 // ===== Service: getRunDelivery (read-only point-in-time query) =====
@@ -389,7 +429,6 @@ export async function getRunDelivery({ runId, runDir, readTranscriptFn }) {
   // event) must fail closed for the point-in-time query too — never echo a raw
   // ref/path. Fixed message; no dynamic ref content is leaked.
   if (view.ambiguous) throw new Error("delivery facts ambiguous");
-  if (view.noDelivery) throw new Error(`No committed delivery found for run ${runId}`);
   return view;
 }
 
@@ -435,6 +474,7 @@ function _buildReadinessResult(runId, events, terminalState, readiness, waitRetu
     waitReturnedEarly,
     terminalState,
     deliveryAvailable: view.deliveryAvailable,
+    deliveryRequested: view.deliveryRequested,
     deliveryRef: view.deliveryRef ?? null,
     deliveryFailure: view.deliveryFailure ?? null,
     verification: view.verification ?? null,

@@ -302,6 +302,9 @@ export async function dispatchRun({
     background: true,
     cwd,
     scorecardConfigured: Boolean(scorecardRules),
+    // Durable before the detached runner starts so startup failures still
+    // preserve whether the Lead requested a delivery.
+    deliveryRequested: Boolean(publicDelivery),
   });
 
   // pending via transitionState — first-terminal-wins arbitration. If the

@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readTranscript, findState, findLatest } from "../src/transcript.js";
 import { dispatchRun } from "../src/application/runDispatch.js";
+import { getRunDelivery } from "../src/application/runDelivery.js";
 
 // ===== Helpers =====
 
@@ -443,6 +444,22 @@ test("M9-7A-01: valid delivery passes through prepareDeliveryRequest, argv gets 
     assert.ok(!dj.verification, "no internal nested verification structure");
     // Isolate forced.
     assert.ok(argv.includes("--isolate"), "argv has --isolate");
+    const events = await readTranscript(join(dir, "runs", `${result.runId}.jsonl`));
+    const submitted = events.find((event) => event.type === "run.background_submitted");
+    assert.equal(
+      submitted?.deliveryRequested,
+      true,
+      "delivery intent is durable before the detached runner starts",
+    );
+    const deliveryView = await getRunDelivery({
+      runId: result.runId,
+      runDir: join(dir, "runs"),
+    });
+    assert.equal(
+      deliveryView.deliveryRequested,
+      true,
+      "the delivery query reads the durable pre-fork intent written by dispatch",
+    );
   } finally { cleanupDir(dir); }
 });
 
