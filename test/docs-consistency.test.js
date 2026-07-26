@@ -810,6 +810,22 @@ test("M11-10 closeout: roadmap records the fresh Lead delivery-readiness canary 
   assert.match(m11Row, /\| M11 \| 🔧 进行中 \|/);
 });
 
+test("M11-11A-RED-03: Lead identity states the full human-owned operating contract", () => {
+  const skill = read("SKILL.md");
+  const roles = read("docs/team-roles.md");
+  const leadHead = skill.split("\n").slice(0, 20).join("\n");
+  const leadContract = `${leadHead}\n${roles}`;
+
+  assert.match(leadContract, /understand(?:ing)? user needs|理解(?:和消化)?用户需求/i);
+  assert.match(leadContract, /define task goals|明确任务目标/i);
+  assert.match(leadContract, /decompos|拆解.*任务/i);
+  assert.match(leadContract, /parallel.*serial|并行.*串行/i);
+  assert.match(leadContract, /dispatch.*(?:suitable|appropriate).*worker|派发.*合适.*worker/i);
+  assert.match(leadContract, /accept.*reject|放行.*打回|验收.*(?:放行|打回)/i);
+  assert.match(leadContract, /aggregate.*integrat|汇总.*集成/i);
+  assert.match(leadContract, /execution.*report|执行总结报告|总结.*报告/i);
+});
+
 test("M10 closeout: Smash Bros delivery 未被宣称已集成", () => {
   const roadmap = read("docs/roadmap.md");
   const prd = read("docs/01-prd.md");

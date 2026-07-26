@@ -145,13 +145,15 @@ test("M11-8B-A3: runWait returns agentId from the transcript snapshot", async ()
   try {
     const runId = "run_m118b_wait_003";
     writeTranscript(join(dir, "runs"), runId, spoofingFixture(runId, "tester"));
-    // Already terminal-less; use a tiny waitMs to return fast.
+    // Advance a fake clock so the bounded wait returns without wall-clock delay.
+    let now = 0;
     const result = await runWait({
       runId,
       runDir: join(dir, "runs"),
       waitMs: 180000,
       pollIntervalMs: 60000,
-      sleepFn: async () => {}, // no real sleep; loop exits after one iteration
+      sleepFn: async () => {},
+      nowFn: () => (now += 60000),
     });
     assert.equal(result.agentId, "tester", "runWait exposes the durable agentId");
   } finally {

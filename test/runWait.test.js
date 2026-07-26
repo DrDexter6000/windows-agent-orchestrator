@@ -355,6 +355,75 @@ test("MCP-WAIT-05: annotations correct", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("M11-11A-RED-01: omitted service wait uses the 270-second observation default", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-wait-m1111a-01-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-wait-m1111a-01-rd-"));
+  try {
+    makeGitRepo(dir);
+    await seedRunningRun(runDir, "run_default_270", dir);
+    const { runWait } = await import("../src/application/runWait.js");
+    let now = 0;
+    let slept = 0;
+    const result = await runWait({
+      runId: "run_default_270",
+      runDir,
+      pollIntervalMs: 30000,
+      nowFn: () => now,
+      sleepFn: async (ms) => {
+        slept += ms;
+        now += ms;
+      },
+    });
+    assert.equal(result.returnedEarly, false);
+    assert.equal(slept, 270000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});
+
+test("M11-11A-RED-02: MCP omitted waitMs forwards the shared 270-second default", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mcpw-m1111a-02-"));
+  try {
+    makeGitRepo(dir);
+    let capturedInput = null;
+    const server = createWaoMcpServer({
+      registryPath: "/r.json",
+      runDir: dir,
+      workspaceRoot: dir,
+      runWaitFn: async (input) => {
+        capturedInput = input;
+        return {
+          runId: input.runId,
+          agentId: "tester",
+          state: "running",
+          terminal: false,
+          cursor: 0,
+          returnedEarly: false,
+          liveness: "silent",
+          activityEventCount: 0,
+          lastActivityKind: null,
+          ownerHeartbeat: "stale",
+        };
+      },
+    });
+    const client = await buildClient(server);
+    try {
+      await client.callTool({ name: "run_wait", arguments: { runId: "run_default_270" } });
+      const tools = await client.listTools();
+      const tool = tools.tools.find((item) => item.name === "run_wait");
+      assert.equal(tool.inputSchema.properties.waitMs.default, 270000);
+      assert.match(tool.description, /270000|270 seconds|4\.5 min/i);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+    assert.equal(capturedInput.waitMs, 270000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── Architecture ─────────────────────────────────────────────────────────────
 
 test("ARCH-WAIT-01: runWait.js does not import commands/mcp/SDK/zod", async () => {
@@ -714,7 +783,7 @@ test("KEEPALIVE-01 (P1-A/M10-pre3C): server emits progress + SDK onprogress rece
   // the server-side wait here uses a fake clock (no real wall-clock blocking),
   // so this test CANNOT prove real-time timeout reset — that requires a real
   // transport with wall-clock pacing and is the job of the later CTO Codex Host
-  // 180s gate. What this test proves: (1) the call RESOLVES, (2) onprogress
+  // 270s gate. What this test proves: (1) the call RESOLVES, (2) onprogress
   // fires at least once, (3) resetTimeoutOnProgress is wired. It does NOT catch
   // the call error — a rejection fails the test.
   const dir = mkdtempSync(join(tmpdir(), "wao-ka-01-"));

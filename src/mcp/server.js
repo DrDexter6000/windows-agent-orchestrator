@@ -43,7 +43,12 @@ import {
 import { projectDeliveryChangedPaths, CHANGED_PATHS_LIMIT } from "../application/deliveryReview.js";
 import { stopRun } from "../application/runStop.js";
 import { listRuns } from "../application/runList.js";
-import { runWait } from "../application/runWait.js";
+import {
+  runWait,
+  RUN_WAIT_MIN_MS,
+  RUN_WAIT_DEFAULT_MS,
+  RUN_WAIT_MAX_MS,
+} from "../application/runWait.js";
 import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
 import { projectReviewResult } from "../application/deliveryReviewProjection.js";
 import { projectCollectResult } from "../application/runCollectProjection.js";
@@ -793,7 +798,7 @@ const RUN_WAIT_ERROR_TEXT = "run_wait failed";
 const RUN_WAIT_INPUT = z.object({
   runId: z.string().min(1),
   afterSeq: z.number().int().nonnegative().optional(),
-  waitMs: z.number().int().min(180000).max(600000).optional(),
+  waitMs: z.number().int().min(RUN_WAIT_MIN_MS).max(RUN_WAIT_MAX_MS).default(RUN_WAIT_DEFAULT_MS),
 }).strict();
 
 const RUN_WAIT_OUTPUT = z.object({
@@ -826,11 +831,12 @@ const RUN_WAIT_DESCRIPTION =
   "includes run.metrics), process_only (runner alive but no progress), " +
   "silent (no progress, runner not provably fresh). " +
   "Does NOT stop the run — Lead decides based on liveness. " +
-  "waitMs minimum 180000 (3 min); does not terminate the worker. " +
+  "waitMs defaults to 270000 (4.5 min), allowed range 180000..600000; " +
+  "an expired observation window does not fail or terminate the worker. " +
   "Read-only: no transcript events, no owner file, no state change. " +
   "Sends standard notifications/progress during the poll when the client " +
   "requests progress (onprogress), so a resetTimeoutOnProgress client can " +
-  "span the 180s wait across the MCP 60s default request timeout.";
+  "span the wait across the MCP 60s default request timeout.";
 
 // ===== Lead Playbook Catalog (M11-2B) constants =====
 //
@@ -1944,7 +1950,7 @@ export function createWaoMcpServer({
           // The earlier `input?.afterSeq ?? 0` coercion collapsed both into 0,
           // which made every first poll misreport history as progress.
           ...(input?.afterSeq !== undefined ? { afterSeq: input.afterSeq } : {}),
-          waitMs: input?.waitMs ?? 180000,
+          waitMs: input?.waitMs ?? RUN_WAIT_DEFAULT_MS,
           authorizedWorkspaceRoot: binding.root,
           ...(onPoll ? { onPoll } : {}),
         });

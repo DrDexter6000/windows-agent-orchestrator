@@ -931,7 +931,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 - **输入**（strict schema，拒绝额外字段）：
 
 ```json
-{ "runId": "run_...", "afterSeq": 42, "waitMs": 180000 }
+{ "runId": "run_...", "afterSeq": 42, "waitMs": 270000 }
 ```
 
 `runId` 必填。`afterSeq`（整数 ≥0，可选）：
@@ -939,7 +939,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 - **省略**：service 把首次读取 transcript 时的最大 `seq` 作为基线——只统计等待窗口内出现的新进展，不把历史事件误报为 progress（这是首轮 poll 的默认行为）。
 - **显式 `0` 或正整数**：调用者有意统计 `seq > afterSeq` 的全部进展（含历史），用于续读。把上次返回的 `cursor` 当 `afterSeq` 传回即可增量续读。
 
-`waitMs`（整数，**下限 180000** 即 180s，默认 180000，上限 600000）：服务端最长阻塞时长。模型**不能**传 `runDir`、registry、`force`、timeout 控制面参数——这些是 server-owned 配置。
+`waitMs`（整数，**下限 180000** 即 180s，**默认 270000 即 4.5 分钟**，上限 600000）：Lead 的单次观察窗口。窗口到期只返回 liveness，**不表示 worker 失败，也不会中止 worker**。模型不能传 `runDir`、registry、`force`、timeout 控制面参数——这些是 server-owned 配置。
 
 - **返回时机**：服务在两种情况下返回——(1) run 到达终态（completed/failed/aborted/timed_out），此时 `returnedEarly:true`；(2) `waitMs` 到期仍未终态，此时 `returnedEarly:false` 并附带 liveness 摘要让 Lead 决定下一步。**普通新事件不会触发提前返回**——只有终态会；窗口内的新进展通过到期的 liveness=`progress` 体现。
 
@@ -981,13 +981,13 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 **绝不返回**：原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量、token/cost 原值。**M11-8B**：返回 `agentId`——transcript envelope 盖戳的 canonical worker 身份（不从 worker 自由文本推断；缺失/冲突降级为 `"unknown"`，不抛错、不伪造身份、不是自动停止门）。`content` JSON 与 `structuredContent` 语义一致。service 失败时返回固定安全文案 `run_wait failed`，不泄漏 zod 校验信息。
 
-**transport keepalive（M10-pre3 closeout）**：MCP SDK 默认请求超时是 60s，而 `run_wait` 最长阻塞 180s。为避免被 client 超时杀掉，server 在每次 poll 后向请求关联的 `progressToken` 发送标准 `notifications/progress`（仅当 client 通过 `onprogress` 请求了进度时）。client 若设 `resetTimeoutOnProgress:true`，每收到一条进度就重置 60s 计时器，从而跨越 180s。这是**标准 MCP 机制**，不 patch host、不改全局 timeout；是否启用取决于 host 的调用方式。若 host 不请求进度，server 不发通知，client 仍受其默认超时约束。
+**transport keepalive（M10-pre3 closeout）**：MCP SDK 的请求超时可能短于 `run_wait` 的 270s 默认观察窗口。为避免 client 在 server 仍正常观察时超时，server 在每次 poll 后向请求关联的 `progressToken` 发送标准 `notifications/progress`（仅当 client 通过 `onprogress` 请求了进度时）。client 若设 `resetTimeoutOnProgress:true`，每收到一条进度就重置自身计时器。这是标准 MCP 机制，不 patch host、不改全局 timeout；client 的最大总超时仍由 host 自己决定。若 host 不请求进度，server 不发通知，client 仍受其超时约束。
 
 **三钟分离（M10-pre3）**：WAO 现在有三个互相独立的时钟，不要混淆：
 
 1. **执行截止（execution deadline，默认禁用）**：worker run 上的 wall-clock 终止时钟。M10-pre3 起**默认禁用**——不再用 wall-clock 杀 worker，改由 Lead 观察驱动。显式配置时仍生效。
 2. **后端请求超时（backend request timeout，独立）**：单次后端调用（HTTP/进程 spawn/collect 拉取）的网络/IO 超时，与 run 生命周期正交，按 `config.timeout` 链生效。
-3. **Lead 观察等待（`run_wait`）**：Lead 侧的 long-poll 阻塞上限（`waitMs`，下限 180s），只决定 Lead 一次调用等多久，**不影响 worker 生命周期**。到时返回当前 liveness 让 Lead 决定继续等/collect/stop。
+3. **Lead 观察等待（`run_wait`）**：Lead 侧的 long-poll 阻塞上限（`waitMs`，默认 270s、下限 180s），只决定 Lead 一次调用等多久，**不影响 worker 生命周期**。到时返回当前 liveness 让 Lead 决定继续等/collect/stop。
 
 CLI fallback：`run_wait` 是 MCP-first 能力，等价的 CLI 长等待可由 `status` 轮询或 `tail --follow` 拼出，但语义不等同。
 

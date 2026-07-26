@@ -24,6 +24,10 @@ import { isValidRunId } from "../delivery.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { checkOwnerLiveness } from "./ownerLiveness.js";
 
+export const RUN_WAIT_MIN_MS = 180000;
+export const RUN_WAIT_DEFAULT_MS = 270000;
+export const RUN_WAIT_MAX_MS = 600000;
+
 // ── Progress event types (closed set) ────────────────────────────────────────
 //
 // NOTE: run.metrics is a DISTINCT transcript type written by runManager (see
@@ -126,7 +130,7 @@ function countProgressAfterSeq(events, afterSeq) {
  * @param {string} input.runId — must pass isValidRunId
  * @param {string} input.runDir
  * @param {number} [input.afterSeq] — cursor; omitted = baseline-at-first-read
- * @param {number} [input.waitMs=180000] — observation period (>= 180000)
+ * @param {number} [input.waitMs=270000] — observation period (>= 180000)
  * @param {string} [input.authorizedWorkspaceRoot] — MCP workspace binding
  * @param {Function} [input.sleepFn] — injectable sleep (testing)
  * @param {Function} [input.nowFn] — injectable clock (testing)
@@ -138,7 +142,7 @@ export async function runWait(input) {
   const {
     runId,
     runDir,
-    waitMs = 180000,
+    waitMs = RUN_WAIT_DEFAULT_MS,
     authorizedWorkspaceRoot,
   } = input;
 
@@ -165,8 +169,6 @@ export async function runWait(input) {
   // Validate waitMs — the service is the shared business boundary and must
   // enforce the same 180000..600000 range as the MCP adapter, independent of
   // zod. A direct service caller that passes 179999 or 600001 must be rejected.
-  const RUN_WAIT_MIN_MS = 180000;
-  const RUN_WAIT_MAX_MS = 600000;
   if (!Number.isInteger(waitMs) || waitMs < RUN_WAIT_MIN_MS || waitMs > RUN_WAIT_MAX_MS) {
     throw new Error(`waitMs must be an integer in [${RUN_WAIT_MIN_MS}, ${RUN_WAIT_MAX_MS}], got: ${JSON.stringify(waitMs)}`);
   }

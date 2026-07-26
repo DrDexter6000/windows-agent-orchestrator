@@ -5,7 +5,7 @@ description: "[LEAD-ONLY] Use when the user asks to dispatch, supervise, resume,
 
 # WAO Lead Operator
 
-Loading this skill makes you the Lead Operator. You own understanding, orchestration, dispatch, acceptance, integration, and reporting. Workers and auditors do not load this skill.
+Loading this skill makes you the Lead Operator. You own: user-needs understanding; task-goal definition; task decomposition and orchestration (including what can run in parallel and what must run serially); suitable-worker dispatch; delivery acceptance or rejection for rework; result aggregation and integration; and execution-summary reporting. Workers and auditors do not load this skill.
 
 WAO is an MCP-first, Skill-guided, CLI-backed deterministic control plane for real worker tasks: dispatch, transcript, isolation, delivery, scorecard, metrics, and workflow. The Lead uses MCP tools as the primary interface; CLI is for human/ops/debug/fallback. It is in supervised production trial, not autonomous production. Use only workers whose latest `registry_list` certification is `certified` — a `certified` worker is eligible for strict dispatch under the certification policy, so the Lead does not separately prove a second `strict-dispatch` field. `conditional` workers (e.g. `coder_mm`) require an explicit Owner-authorized exception for any non-read-only task. Claude Code process workers are the default coding lane. Do not promise automatic merge, unattended failure response, or large production queues.
 
@@ -88,7 +88,7 @@ WAO exposes 16 MCP tools. The minimal control loop uses the relevant control too
 | `workspace_select` | session-scoped | Lead selects the working Git project for this session (`lead_session`); idempotent, no host bind/restart, no file writes |
 | `run_dispatch` | destructive | Create a supervised run (with optional delivery block for git_commit_v1); workspace cwd is the bound/selected root, not model-controlled. Returns `agentId` — the canonical WAO worker identity (M11-8B) |
 | `run_status` | read-only | Poll terminal state + last activity; returns `agentId` (canonical identity, M11-8B) |
-| `run_wait` | read-only (long-poll) | Wait for terminal or liveness summary (180s default); returns `agentId` (M11-8B) |
+| `run_wait` | read-only (long-poll) | Wait for terminal or liveness summary (270s / 4.5 min default); returns `agentId` (M11-8B) |
 | `run_collect` | appends `messages.collected` (non-idempotent) | Collect bounded worker output; returns `agentId` (canonical identity, M11-8B) |
 | `run_diagnose` | read-only | Failure category + signal types (no prescription) |
 | `run_delivery` | read-only | Query delivery commit/verification/acceptance; optional `waitMs` adds a bounded, read-only readiness wait returning a closed-set `readiness` (M11-10) |
@@ -100,7 +100,7 @@ WAO exposes 16 MCP tools. The minimal control loop uses the relevant control too
 | `playbook_get` | read-only | Get one complete built-in Lead playbook by id (optional, M11-2) |
 
 Minimal closed loop: `lead_preflight (or inventory → workspace_status) → dispatch → status/wait → collect/diagnose → delivery query/review → Lead decision → (stop on runaway)`; recovery: `runs_list` (list runs in the bound workspace after `workspace_status`). `playbook_list`/`playbook_get` are optional read-only catalog reads — they sit outside the dispatch loop and are never required before `run_dispatch`.
-The Lead uses `run_wait` as the primary supervision primitive: it blocks up to `waitMs` (default 180s) and returns as soon as the run reaches a terminal state or produces a liveness summary (`terminal`/`progress`/`process_only`/`silent`), avoiding busy poll loops. The execution deadline on worker runs is now disabled by default — supervision is observation-driven via `run_wait`, not wall-clock termination.
+The Lead uses `run_wait` as the primary supervision primitive: it blocks up to `waitMs` (default 270s / 4.5 min) and returns as soon as the run reaches a terminal state or the observation window produces a liveness summary (`terminal`/`progress`/`process_only`/`silent`), avoiding busy poll loops. An expired observation window is not a worker failure or stop signal. The execution deadline on worker runs is disabled by default — supervision is observation-driven via `run_wait`, not wall-clock termination.
 See `docs/usage.md §MCP stdio` for host setup, full input/output schemas, and install instructions. OpenCode (`opencode-ai`) as Lead host: see `docs/usage.md §OpenCode 项目级配置` for the project-local `opencode.json` schema (array `command`, `enabled:true`, `--workspace-root`) and the new-process restart boundary.
 
 CLI (`npm run cli --`) remains available for human/ops/debug/fallback, including `registry validate`, `registry check`, `daemon`, and `runs dashboard`. `registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health`. `mcp bind/status/unbind` is an **optional** Human Owner ops command for persistent project-level workspace activation (a project-local default); it is not required for normal use — the Lead can `workspace_select` the current Git project in-session with no host bind and no restart. See `docs/usage.md §项目级 Workspace Activation`.

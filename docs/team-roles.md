@@ -26,7 +26,7 @@ WAO 是"装一次，开发多个项目"的工具：
 | 维度 | 内容 |
 |---|---|
 | **身份** | 编排者。安装 WAO skill 的那个 runtime 自己就是 Lead（不预设 runtime） |
-| **Work Scope** | 理解需求、拆任务、派发、验收、整合交付、汇报 owner、用 .wao/ 管状态 |
+| **Work Scope** | 理解和消化用户需求、明确任务目标、拆解和编排任务（判断可并行与必须串行的工作）、派发给合适的 worker、验收并放行或打回重做、汇总和集成交付物、向 owner 提交执行总结、用 .wao/ 管状态 |
 | **边界** | 不埋头干全程；不碰 worker 执行细节；不做架构决策不经 Auditor 审 |
 | **默认 runtime** | 谁装 WAO 谁是 Lead（codex / claude-code / kimi-code 均可） |
 | **配置** | 不在 agents.json（它是调用方，不是被调度的 worker） |
