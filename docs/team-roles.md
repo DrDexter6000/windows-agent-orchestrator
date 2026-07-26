@@ -39,9 +39,10 @@ WAO 是"装一次，开发多个项目"的工具：
 | **Work Scope** | 读代码库、技术选型、可行性分析、输出 brief/affectedFiles 清单 |
 | **边界** | 不改产品代码；不跑测试（只读）；不做实现决策（决策归 Lead+Auditor） |
 | **backend** | claude-code wrapper（进程式，弃 opencode——06-18 事故风险） |
-| **model** | deepseek-v4-flash（1M context + 低成本，适合调研） |
+| **model** | deepseek-v4-pro（1M context，适合深度调研） |
 | **effort** | max（深度分析） |
-| **配置要点** | variant=max 用 `--effort max`（**不能用 model id 后缀**，DeepSeek 端点只认 `deepseek-v4-flash`，probe 实测） |
+| **配置要点** | model/reasoning/context 从结构化 provider policy 单一编译，不手拼 CLI flags |
+| **会话复用** | `sessionReuse=lead_workspace`（M11-11C）：同一 MCP Lead server 实例在同一 workspace 内多次询问 Researcher 时，复用 provider 原生会话保留上下文/cache，每次仍是独立 run/transcript。Host/MCP 重启后开新会话；仅非 delivery；详见 `02-architecture.md §4.10` |
 
 ### Coder-HQ（码农-长程高质量）
 
@@ -52,18 +53,18 @@ WAO 是"装一次，开发多个项目"的工具：
 | **边界** | 不做架构决策（归 Lead+Auditor）；不验收自己（归 Auditor） |
 | **backend** | claude-code wrapper（进程式，已 probe） |
 | **model** | glm-5.2（1M context，编码能力强） |
-| **effort** | high |
+| **effort** | max |
 
 ### Coder-Low（码农-低成本快速）
 
 | 维度 | 内容 |
 |---|---|
-| **身份** | 轻活快速处理。杀鸡不用牛刀 |
-| **Work Scope** | 小 bug 修复、跑脚本、简单文件改动、格式调整 |
-| **边界** | 不接长程/高复杂任务（归 Coder-HQ）；不做架构改动 |
+| **身份** | 第二实现通道。与 Coder-HQ 使用不同 provider，适合独立实现包 |
+| **Work Scope** | 独立实现包、修 bug、跑脚本、文件改动 |
+| **边界** | 不做架构决策；不验收自己 |
 | **backend** | claude-code wrapper（进程式） |
-| **model** | glm-5-turbo（快速推理，低成本） |
-| **effort** | 默认（不强制 high） |
+| **model** | deepseek-v4-pro（1M context） |
+| **effort** | max |
 
 ### Coder-MM（码农-多模态）
 
@@ -73,8 +74,8 @@ WAO 是"装一次，开发多个项目"的工具：
 | **Work Scope** | UI 截图设计还原、带图文档、图像相关编码 |
 | **边界** | 纯文本编码归 Coder-HQ/Low；不做架构决策 |
 | **backend** | kimi-code（进程式，官方过 Kimi 白名单） |
-| **model** | kimi-for-coding（多模态能力） |
-| **配置要点** | 不要加 `--yolo`（与 -p 互斥，阶段 2 实测） |
+| **model** | kimi-code/k3 |
+| **配置要点** | 不要加 `--yolo`（与 -p 互斥）；WAO 不伪造 Kimi 不支持的 reasoning/context flags |
 
 ### Tester（测试员）+ 轮询职责
 
@@ -96,8 +97,9 @@ WAO 是"装一次，开发多个项目"的工具：
 | **Work Scope（后置验收）** | 独立复核 Coder 产出、查伪完成、质疑声明、给 PASS/FAIL |
 | **边界** | 不改代码（归 Coder）；不和 Coder 同源（独立性）；不跑测试（归 Tester） |
 | **backend** | claude-code（官方 Claude，最强判断力） |
-| **model** | opus-4.8 |
+| **model** | claude-opus-5 |
 | **effort** | xhigh（最关键的角色，给最强配置） |
+| **会话复用** | `sessionReuse=lead_workspace`（M11-11C）：同一 MCP Lead server 实例在同一 workspace 内多次询问 Auditor 时，复用 provider 原生会话保留上下文/cache，每次仍是独立 run/transcript。Host/MCP 重启后开新会话；仅非 delivery；详见 `02-architecture.md §4.10` |
 
 ## 标准开发流（角色协作）
 

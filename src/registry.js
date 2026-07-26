@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { isValidCanonicalAgentId } from "./canonicalAgentId.js";
+import { isValidSessionReuseMode } from "./application/sessionReuse.js";
 
 // M11-9: canonical model/reasoning/provider policy.
 // Closed-set effort enum — the complete set of reasoning effort values WAO
@@ -182,6 +183,15 @@ export function normalizeAgent(id, agent) {
     const sp = agent.systemPrompt;
     if (typeof sp !== "string" || sp.trim().length === 0) {
       throw new Error(`Agent ${id}: systemPrompt: must be a non-empty string when present`);
+    }
+  }
+  // M11-11C: sessionReuse policy is a closed set. A value outside the set is a
+  // malformed registry entry — rejected before any transcript/spawn. Absent is
+  // legitimate (agent retains current behavior). The error is a fixed safe
+  // shape; it does not echo the supplied value.
+  if (agent.sessionReuse !== undefined && agent.sessionReuse !== null) {
+    if (!isValidSessionReuseMode(agent.sessionReuse)) {
+      throw new Error(`Agent ${id}: sessionReuse must be one of the supported modes (got an unsupported value)`);
     }
   }
   // M11-9: canonical model/reasoning/provider policy validation + legacy normalization.

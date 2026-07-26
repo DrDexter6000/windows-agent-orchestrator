@@ -28,7 +28,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import { getRegistryInventory } from "../application/registryInventory.js";
-import { dispatchRun } from "../application/runDispatch.js";
+import { dispatchRun, ReuseBusyError } from "../application/runDispatch.js";
+import { randomUUID } from "node:crypto";
 import { getRunStatus } from "../application/runStatus.js";
 import { collectRunMessages } from "../application/runCollect.js";
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
@@ -146,6 +147,10 @@ const AGENT_ENTRY = z.object({
   reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).nullable(),
   certification: z.string().nullable(),
   cwd: z.string(),
+  // M11-11C: configured expert-session-reuse mode, nullable. Projects which
+  // experts retain a provider-native conversation across turns for the current
+  // Lead session + bound workspace. Closed set (today: "lead_workspace").
+  sessionReuse: z.enum(["lead_workspace"]).nullable(),
   credentialAvailability: z.enum(["available", "missing", "not_required"]),
   missingCredentialEnvNames: z.array(z.string()).max(32),
 });
@@ -179,6 +184,16 @@ const DISPATCH_CREDENTIAL_MISSING_TEXT =
   "run_dispatch refused: the worker is missing a required credential. " +
   "See registry_list (credentialAvailability / missingCredentialEnvNames) for the env var names, " +
   "then set them in the current process or Windows User environment and retry.";
+
+// M11-11C: fixed, actionable error when a reusable expert already has an
+// active run for the current Lead session + workspace (contract 6). The prior
+// run must reach a terminal state before a follow-up can resume the provider
+// conversation. Actionable (tells the Lead how to proceed) but never echoes the
+// active runId, the opaque session id, the Lead id, or the workspace path.
+const DISPATCH_REUSE_BUSY_TEXT =
+  "run_dispatch refused: this expert still has an active run for the current Lead session and workspace. " +
+  "A provider session cannot be driven concurrently. Wait for the prior run to reach a terminal state " +
+  "(poll with run_status / run_wait), then re-dispatch the follow-up to resume the conversation.";
 
 // run_dispatch input: agentId + prompt required; optional delivery block.
 // Server-owned config (runDir, runId, cwd, isolate, requireCertified, timeouts)
@@ -1007,6 +1022,13 @@ export function createWaoMcpServer({
   // M11-7: injectable Windows user-env reader (default reads HKCU\Environment).
   // Used by registry_list readiness + run_dispatch pre-check. Injectable for tests.
   userEnvReader,
+  // M11-11C: server-owned Lead session identity. Generated once per server
+  // (stable across calls in one server = one Lead session) and threaded to
+  // dispatchRun so reusable experts can resume the provider-native
+  // conversation. Injectable for tests. A host restart starts a new identity
+  // (fresh provider conversations) — never supplied by the model, never
+  // returned via MCP.
+  leadSession,
   getRegistryInventoryFn,
   dispatchRunFn,
   getRunStatusFn,
@@ -1026,6 +1048,13 @@ export function createWaoMcpServer({
   // M11-7: the Windows user-env reader for credential readiness. Defaults to
   // the real reader (PowerShell HKCU\Environment); tests inject a fake.
   const resolveUserEnv = userEnvReader ?? readWindowsUserEnv;
+  // M11-11C: server-owned Lead session identity — stable for the lifetime of
+  // this server (one Lead session), injectable for tests. Host restart yields
+  // a new identity, which starts fresh provider conversations for reusable
+  // experts (the opaque uuid is derived from this identity).
+  const resolveLeadSession = (typeof leadSession === "string" && leadSession.length > 0)
+    ? leadSession
+    : randomUUID();
   const dispatcher = dispatchRunFn ?? dispatchRun;
   const statusService = getRunStatusFn ?? getRunStatus;
   const collectService = collectRunMessagesFn ?? collectRunMessages;
@@ -1423,6 +1452,10 @@ export function createWaoMcpServer({
           ...(delivery ? { delivery } : {}),
           // M11-7: Windows user-env reader for the credential preflight + bridge.
           userEnvReader: resolveUserEnv,
+          // M11-11C: server-owned Lead session identity (never model-supplied).
+          // dispatchRun uses it ONLY to resolve reuse routing for agents that
+          // declare sessionReuse; it is never echoed in the result.
+          leadSession: resolveLeadSession,
         });
       } catch (e) {
         // Credential-missing: fixed actionable text (names are safe to surface;
@@ -1431,6 +1464,14 @@ export function createWaoMcpServer({
           return {
             isError: true,
             content: [{ type: "text", text: DISPATCH_CREDENTIAL_MISSING_TEXT }],
+          };
+        }
+        // M11-11C: reusable-expert busy — fixed actionable text. The active
+        // runId / opaque session id are NEVER surfaced (contract 8).
+        if (e && e.name === "ReuseBusyError") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DISPATCH_REUSE_BUSY_TEXT }],
           };
         }
         return {

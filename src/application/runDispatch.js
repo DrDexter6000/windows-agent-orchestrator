@@ -25,6 +25,7 @@ import { resolveWaitTimeout, validateBoundedWaitTimeout } from "./timeoutPolicy.
 import { readRegistry } from "../registry.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { inheritedEnvNames } from "../envPolicy.js";
+import { resolveReuseTurn } from "./sessionReuse.js";
 
 // M11-7: thrown when a worker's REQUIRED credential is missing at dispatch time.
 // Carries the missing env NAMES (never values). Callers (MCP) collapse to a
@@ -34,6 +35,18 @@ export class CredentialMissingError extends Error {
     super(`credential missing: ${missingNames.join(", ")}`);
     this.name = "CredentialMissingError";
     this.missingCredentialEnvNames = missingNames;
+  }
+}
+
+// M11-11C: thrown when a reusable expert already has an active (non-terminal)
+// run for the same Lead session + workspace + agent. Carries the active runId
+// for server-side routing only — it is NEVER surfaced via MCP. Callers (MCP)
+// collapse this to a fixed actionable busy text (contract 6).
+export class ReuseBusyError extends Error {
+  constructor(activeRunId) {
+    super("sessionReuse: prior run still active");
+    this.name = "ReuseBusyError";
+    this.activeRunId = activeRunId;
   }
 }
 
@@ -98,6 +111,11 @@ export async function dispatchRun({
   delivery,
   resolvedCredentials,
   userEnvReader,
+  // M11-11C: server-owned Lead session identity. Required when the agent is
+  // configured for sessionReuse; ignored otherwise. Generated/injected by the
+  // MCP server (stable per server/Lead session) — never supplied by the model,
+  // never returned via MCP. CLI callers pass a one-shot id (always first turn).
+  leadSession,
   // M11-7: skip the credential preflight (e.g. when the caller already did it
   // and is passing resolvedCredentials). Default false = always check.
   skipCredentialCheck = false,
@@ -167,10 +185,14 @@ export async function dispatchRun({
   // Dispatch resolves ALL inherited env names (required + optional) so optional
   // Kimi/Codex config is bridged too — unlike registry_list, which only reads
   // required names. One operation-scoped resolver per dispatch (no cross-op cache).
+  //
+  // M11-11C: the agent is ALWAYS resolved here (not only when credential
+  // preflight runs) so the sessionReuse policy can be read for reuse resolution
+  // below. The credential check reuses the same agent instance.
   let finalCredentials = resolvedCredentials ?? {};
+  const registry = await readRegistry(resolvedRegistry);
+  const agent = registry.getAgent(agentId);
   if (!skipCredentialCheck) {
-    const registry = await readRegistry(resolvedRegistry);
-    const agent = registry.getAgent(agentId);
     const resolver = createEnvResolver(userEnvReader);
     const readiness = await assessWorkerReadiness({
       agent, resolver, names: inheritedEnvNames(agent),
@@ -182,6 +204,38 @@ export async function dispatchRun({
       Object.entries({ ...finalCredentials, ...readiness.resolvedEnv })
         .filter(([, v]) => typeof v === "string" && v.length > 0),
     );
+  }
+
+  // M11-11C: expert session reuse — strictly NON-DELIVERY (delivery dispatch
+  // always starts a fresh backend conversation). Resolve the reuse turn
+  // (first/resume/busy) BEFORE the transcript write or fork. On busy, throw
+  // ReuseBusyError (zero transcript, zero fork — contract 6). The opaque
+  // routing {mode, opaqueUuid, turn} is threaded to the detached runner via
+  // argv; the opaque uuid is the ONLY identifier handed to the provider
+  // (--session-id/--resume). Raw Lead id / workspace / agentId never enter MCP
+  // output or the bounded audit event. The routing slot is claimed under a
+  // per-key file lock so two concurrent dispatches for the same identity
+  // cannot both fork (the second observes the first as busy).
+  let sessionReuseRouting = null;
+  const reuseEligible = agent.sessionReuse === "lead_workspace" && !publicDelivery;
+  if (reuseEligible) {
+    if (typeof leadSession !== "string" || leadSession.length === 0) {
+      throw new Error("dispatchRun: leadSession is required for a sessionReuse agent (server-owned Lead session identity)");
+    }
+    if (typeof cwd !== "string" || cwd.length === 0) {
+      throw new Error("dispatchRun: bound workspace (cwd) is required for a sessionReuse agent");
+    }
+    const reuseDecision = await resolveReuseTurn({
+      runDir: resolvedRunDir,
+      runId: finalRunId,
+      leadSession,
+      workspace: cwd,
+      agentId,
+    });
+    if (reuseDecision.kind === "busy") {
+      throw new ReuseBusyError(reuseDecision.activeRunId);
+    }
+    sessionReuseRouting = reuseDecision.routing;
   }
 
   // Construct runner argv BEFORE any transcript write. All static preflight
@@ -224,6 +278,13 @@ export async function dispatchRun({
     runnerArgs.push("--isolate");
     runnerArgs.push("--delivery-json", JSON.stringify(publicDelivery));
   }
+  // M11-11C: thread the resolved reuse routing to the detached runner. The
+  // payload is opaque ({mode, opaqueUuid, turn}) — it carries no raw Lead id,
+  // workspace path, or agentId. Detached-runner argv is server-side (never
+  // returned via MCP); the prompt already travels the same channel.
+  if (sessionReuseRouting) {
+    runnerArgs.push("--session-reuse-json", JSON.stringify(sessionReuseRouting));
+  }
 
   // Conservative total argv length guard — BEFORE transcript write.
   const ARGV_MAX_TOTAL = 24000;
@@ -256,6 +317,16 @@ export async function dispatchRun({
       transcriptPath,
       terminalState: pendingResult.state,
     };
+  }
+
+  // M11-11C: persist a BOUNDED routing audit fact for reusable runs (contract
+  // 8). Carries only {mode, turn} — never the opaque uuid, Lead id, workspace,
+  // prompt, argv, or provider payload. Non-reusable runs write nothing here.
+  if (sessionReuseRouting) {
+    await transcript.append("run.session_reuse", {
+      mode: sessionReuseRouting.mode,
+      turn: sessionReuseRouting.turn,
+    });
   }
 
   // detached: runner survives CLI/MCP process exit; stdio ignore (runner writes

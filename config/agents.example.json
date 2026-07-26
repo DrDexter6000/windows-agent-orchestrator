@@ -6,8 +6,8 @@
   "agents": {
     "researcher": {
       "_comment": "[Researcher] 调研/分析专家。只读分析不改产品代码。对齐 team-roles.md Researcher。",
-      "_comment_backend": "claude-code wrapper（进程式，弃 opencode——06-18 事故风险）。DeepSeek-v4-flash 1M context + 低成本。",
-      "_comment_effort": "variant=max 用 --effort max（不能用 model 后缀，DeepSeek 端点只认 deepseek-v4-flash，probe 实测见 team-roles.md）。",
+      "_comment_backend": "claude-code wrapper（进程式，弃 opencode——06-18 事故风险）。DeepSeek-v4-pro 1M context。",
+      "_comment_effort": "reasoning.effort=max，由 provider wrapper 统一编译。",
       "_comment_task": "适合任务: 代码库调研/技术选型/可行性分析/文档生成/brief 输出",
       "backend": "claude-code",
       "provider": {
@@ -17,6 +17,7 @@
       },
       "cwd": "D:/projects/your-project",
       "systemPrompt": "config/roles/researcher.md",
+      "sessionReuse": "lead_workspace",
       "args": [
         "--dangerously-skip-permissions"
       ],
@@ -26,7 +27,7 @@
         "PYTHONNOUSERSITE": "1"
       },
       "model": {
-        "id": "deepseek-v4-flash",
+        "id": "deepseek-v4-pro",
         "contextWindow": 1000000
       },
       "reasoning": {
@@ -36,7 +37,7 @@
     "coder_hq": {
       "_comment": "[Coder-HQ] 核心实现者。高质量/长程编码任务。对齐 team-roles.md Coder-HQ。",
       "_comment_backend": "claude-code wrapper（进程式，已 probe）。GLM-5.2 1M context 编码能力强。",
-      "_comment_effort": "effort=high（CLAUDE_CODE_EFFORT_LEVEL=high，probe 通过）。",
+      "_comment_effort": "effort=max，由 provider wrapper 统一编译。",
       "_comment_task": "适合任务: 写/改代码/重构/修 bug/按 brief 实现",
       "backend": "claude-code",
       "provider": {
@@ -54,18 +55,18 @@
         "contextWindow": 1000000
       },
       "reasoning": {
-        "effort": "high"
+        "effort": "max"
       }
     },
     "coder_low": {
-      "_comment": "[Coder-Low] 轻活快速处理。杀鸡不用牛刀。对齐 team-roles.md Coder-Low。",
-      "_comment_backend": "claude-code wrapper（进程式）。glm-5-turbo 快速推理低成本。",
-      "_comment_task": "适合任务: 小 bug 修复/跑脚本/简单文件改动/格式调整",
+      "_comment": "[Coder-Low] 第二实现通道。对齐 team-roles.md Coder-Low。",
+      "_comment_backend": "claude-code wrapper（进程式）。DeepSeek-v4-pro 1M context。",
+      "_comment_task": "适合任务: 独立实现包/修 bug/脚本与文件改动",
       "backend": "claude-code",
       "provider": {
         "protocol": "anthropic-compatible",
-        "baseUrl": "https://open.bigmodel.cn/api/anthropic",
-        "apiKeyEnv": "ZHIPU_API_KEY"
+        "baseUrl": "https://api.deepseek.com/anthropic",
+        "apiKeyEnv": "DEEPSEEK_API_KEY"
       },
       "cwd": "D:/projects/your-project",
       "systemPrompt": "config/roles/coder_low.md",
@@ -73,19 +74,25 @@
         "--dangerously-skip-permissions"
       ],
       "model": {
-        "id": "glm-5-turbo",
-        "contextWindow": 128000
+        "id": "deepseek-v4-pro",
+        "contextWindow": 1000000
+      },
+      "reasoning": {
+        "effort": "max"
       }
     },
     "coder_mm": {
       "_comment": "[Coder-MM] 多模态处理。涉及图像/截图的任务。对齐 team-roles.md Coder-MM。",
       "_comment_backend": "kimi-code（进程式，官方过 Kimi 白名单，无需伪装 header）。进程死即会话死，无 stop 虚假成功风险。",
       "_comment_yolo": "⚠ 不要加 --yolo：kimi -p 模式与 --yolo 互斥（CLI 报错）。-p 模式已默认无交互批准。",
-      "_comment_limit": "kimi stream-json 不含 usage/token，token 预算硬闸门（S1-1）对本 worker 无效；成本控制靠 kimi 自带超时（agent_task_timeout_s=900）+ WAO waitTimeout。",
+      "_comment_limit": "kimi stream-json 不含 usage/token；WAO 不伪造 reasoning/context flags，模型上下文与推理循环由 Kimi Code/K3 自身管理。",
       "_comment_task": "适合任务: UI 截图设计还原/带图文档/图像相关编码",
       "backend": "kimi-code",
       "cwd": "D:/projects/your-project",
-      "systemPrompt": "config/roles/coder_mm.md"
+      "systemPrompt": "config/roles/coder_mm.md",
+      "model": {
+        "id": "kimi-code/k3"
+      }
     },
     "tester": {
       "_comment": "[Tester] 执行层验证 + 运行监控（轮询）。对齐 team-roles.md Tester。",
@@ -99,17 +106,22 @@
     },
     "auditor": {
       "_comment": "[Auditor] 独立红队。前置审计方案 + 后置验收。与 Coder 不同源防伪完成。对齐 team-roles.md Auditor。",
-      "_comment_backend": "claude-code（官方 Claude，最强判断力）。opus-4.8 effort=xhigh。",
+      "_comment_backend": "claude-code（官方 Claude）。Claude Opus 5，effort=xhigh。",
       "_comment_auth": "owner 亲自验证 claude login 通过（2026-06-24）。用官方 Claude 不走 wrapper。",
       "_comment_task": "适合任务: 前置方案审计/后置独立复核/PASS-FAIL 判定",
       "backend": "claude-code",
       "cwd": "D:/projects/your-project",
       "systemPrompt": "config/roles/auditor.md",
+      "sessionReuse": "lead_workspace",
       "args": [
-        "--model",
-        "opus-4.8",
         "--dangerously-skip-permissions"
-      ]
+      ],
+      "model": {
+        "id": "claude-opus-5"
+      },
+      "reasoning": {
+        "effort": "xhigh"
+      }
     },
     "coder_opencode_fallback": {
       "_comment": "[FALLBACK] opencode-serve worker。⚠ 默认不用——opencode 是 fallback 选项（决策 0005）。仅在需要 token 闸门精确控成本时用。",
@@ -133,10 +145,10 @@
     "matrix": [
       {
         "agentId": "researcher",
-        "label": "DeepSeek-v4-flash max via claude-code wrapper",
+        "label": "DeepSeek-v4-pro max via claude-code wrapper",
         "profile": "strict",
         "providerID": "deepseek",
-        "modelId": "deepseek-v4-flash",
+        "modelId": "deepseek-v4-pro",
         "drills": [
           "sentinel",
           "scorecard",

@@ -23,6 +23,7 @@
 //   2. runAndWait 动态 import：./diagnosis.js → ../diagnosis.js，./transcript.js → ../transcript.js。
 
 import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -146,6 +147,12 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
     // M9-7A: forward validated delivery request for background delivery runs.
     delivery,
     runnerPath,
+    // M11-11C: CLI dispatch is a one-shot process — there is no stable Lead
+    // session across CLI invocations, so reusable experts always start a fresh
+    // provider conversation here (a one-shot leadSession yields a unique reuse
+    // key with no prior entry ⇒ first turn). The MCP server is the only caller
+    // that supplies a stable Lead session for actual reuse.
+    leadSession: randomUUID(),
   });
   if (!result.accepted) {
     console.log(JSON.stringify({

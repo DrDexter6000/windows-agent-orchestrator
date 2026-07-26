@@ -28,6 +28,7 @@ import { checkNodeVersion } from "./nodeVersionGuard.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { writeFileSync, unlinkSync } from "node:fs";
+import { validateSessionReuseRouting } from "./application/sessionReuse.js";
 
 // D-F3 修复：ownership 心跳文件。daemon --resume-on-start 用它判活，
 // 避免劫持 P2 runner 还在驱动的 run（双所有者 = 06-18 孤儿变体）。
@@ -122,7 +123,12 @@ export async function runBackground(opts = {}) {
     },
     readRegistry: registryResolver,
     transcriptDir: runDir,
-    backendFor: (agent) => backendFor(agent, { fetchImpl: opts.fetchImpl, waoCliPath }),
+    // M11-11C: test seam — an injected backendFor overrides the default
+    // runtime construction (used by the causal chain test to capture the
+    // compiled claude argv). Production leaves this unset.
+    backendFor: opts.backendFor
+      ? (agent) => opts.backendFor(agent, { fetchImpl: opts.fetchImpl, waoCliPath })
+      : (agent) => backendFor(agent, { fetchImpl: opts.fetchImpl, waoCliPath }),
   });
 
   let run;
@@ -144,6 +150,10 @@ export async function runBackground(opts = {}) {
       // M9-7A: delivery runs force persistent worktree isolation.
       ...(opts.isolate ? { isolate: true } : {}),
       ...(opts.delivery ? { delivery: opts.delivery } : {}),
+      // M11-11C: thread the resolved reuse routing (opaque {mode, opaqueUuid,
+      // turn}) to RunManager. The capability check + argv compilation happen
+      // there; the opaque uuid is the only identifier reaching the provider.
+      ...(opts.sessionReuse ? { sessionReuse: opts.sessionReuse } : {}),
     });
   } catch (error) {
     await writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error });
@@ -287,6 +297,10 @@ export async function runMain(argv = process.argv.slice(2)) {
     requireCertified: argv.includes("--require-certified"),
     delivery: parsedDelivery,
     isolate: argv.includes("--isolate"),
+    // M11-11C: opaque reuse routing threaded from dispatchRun. A malformed
+    // internal envelope fails closed: requested reuse must never silently turn
+    // into a fresh conversation.
+    sessionReuse: parseSessionReuseJson(opts["session-reuse-json"]),
   });
   // detached runner 把最终结果写 stdout 一行 JSON（供调试/日志；CLI 已返回，不依赖此）
   process.stdout.write(JSON.stringify(result) + "\n");
@@ -306,6 +320,18 @@ function parseSimpleFlags(argv) {
     }
   }
   return opts;
+}
+
+// M11-11C: parse + shape-validate the opaque reuse routing from the runner
+// argv. Absence means a normal non-reuse run. A supplied value must match the
+// closed routing shape or the runner fails with a fixed safe error.
+function parseSessionReuseJson(raw) {
+  if (!raw) return undefined;
+  try {
+    return validateSessionReuseRouting(JSON.parse(raw));
+  } catch {
+    throw new Error("sessionReuse: invalid internal routing envelope");
+  }
 }
 
 // 直接作为入口运行时（detached 子进程）：node backgroundRunner.js ...

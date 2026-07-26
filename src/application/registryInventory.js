@@ -104,6 +104,10 @@ export async function getRegistryInventory({
       reasoningEffort: agent.reasoning?.effort ?? null,
       certification: certMap[agent.id] ?? null,
       cwd: agent.cwd,
+      // M11-11C: project the configured reuse mode so the Lead sees which
+      // experts retain a provider-native conversation across turns. Nullable —
+      // most agents do not configure sessionReuse.
+      sessionReuse: agent.sessionReuse ?? null,
       credentialAvailability: readiness.credentialAvailability,
       missingCredentialEnvNames: readiness.missingCredentialEnvNames,
     });

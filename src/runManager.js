@@ -14,6 +14,7 @@ import { verifyDelivery as defaultVerifyDelivery } from "./deliveryVerification.
 import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecutionContract } from "./application/roleContract.js";
 import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./application/credentialReadiness.js";
 import { inheritedEnvNames } from "./envPolicy.js";
+import { validateSessionReuseRouting } from "./application/sessionReuse.js";
 
 /**
  * RunManager 持有活跃 run 的生命周期。
@@ -93,6 +94,10 @@ export class RunManager {
       // present = mode 必须为 "git_commit_v1"，要求 persistent worktree 隔离，
       // worker 完成后控制面打包 delivery commit。
       delivery = null,
+      // M11-11C: opaque provider-session reuse routing {mode, opaqueUuid, turn},
+      // resolved by dispatchRun from the agent's sessionReuse policy. Absent for
+      // non-reusable runs. The capability check below gates it provider-neutrally.
+      sessionReuse = null,
     } = options;
 
     const registryPath = resolve(registry ?? this.config.registry);
@@ -185,6 +190,24 @@ export class RunManager {
         throw new Error("backend does not implement validateAgentPolicy — cannot confirm it can express the configured policy");
       }
       backend.validateAgentPolicy(agent);
+    }
+
+    // M11-11C: provider-NEUTRAL session-reuse capability gate (contract 7).
+    // A backend that cannot express the configured reuse policy (resuming a
+    // provider-native conversation) MUST fail closed BEFORE transcript/spawn —
+    // it must not silently start a fresh one-off conversation. The decision
+    // reads backend.supportsSessionReuse (a boolean capability), never the
+    // runtime name. Only claude-code declares it today; the ProcessBackend base
+    // leaves it undefined → fail closed. Strict === true (truthy non-true like
+    // "false"/1/{} is rejected), mirroring the supportsRoleContract discipline.
+    if (sessionReuse) {
+      validateSessionReuseRouting(sessionReuse);
+      if (backend.supportsSessionReuse !== true) {
+        throw new Error(
+          `Agent ${agentId}: sessionReuse routing was supplied but the selected backend does not support provider session reuse. ` +
+          `Switch to a backend that declares supportsSessionReuse, or remove sessionReuse from this agent.`,
+        );
+      }
     }
 
     // M11-7 (CTO closeout): credential availability check BEFORE transcript
@@ -405,7 +428,14 @@ export class RunManager {
 
     let result;
     try {
-      result = await backend.spawn(effectiveAgent, { prompt, roleContract, resolvedCredentials });
+      result = await backend.spawn(effectiveAgent, {
+        prompt,
+        roleContract,
+        resolvedCredentials,
+        // M11-11C: opaque reuse routing → backend compiles --session-id/--resume.
+        // Absent for non-reusable runs (backends ignore the field).
+        ...(sessionReuse ? { sessionReuse } : {}),
+      });
     } catch (error) {
       await transcript.append("run.error", { phase: "spawn", error: error.message });
       await this._transition(transcript, "pending", "failed", "spawn_error");

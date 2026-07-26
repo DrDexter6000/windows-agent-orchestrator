@@ -102,6 +102,12 @@ interface RunHandle {
 }
 ```
 
+> **能力标志（provider 中立契约）**：Backend 还声明静态布尔能力，供 RunManager 在
+> spawn 前做能力驱动校验（fail-closed，不静默降级）：`supportsRoleContract`（角色契约
+> argv 注入）、`supportsSessionReuse`（M11-11C，provider 原生会话复用）。共享编排代码
+> 只读这些布尔值，**不**按 runtime 名/agentId 分支。ProcessBackend 基类对未实现的能力
+> 返回 false；ClaudeCodeBackend 按实际支持情况 override 为 true。
+
 ### 2.2 RunEvent（统一事件流）
 
 无论 opencode 的"轮询 /message"还是 claude-code 的"读 stdout"，
@@ -145,6 +151,11 @@ interface AgentDef {
   // 进程式 backend 字段（claude-code / codex）
   binary?: string;                 // 可执行文件路径或名
   args?: string[];                 // 额外启动参数
+  // M11-11C：可选专家会话复用策略。当前封闭集为 "lead_workspace"——同一 MCP Lead
+  // 会话在同一绑定 workspace 内再次询问同一配置的专家时，复用 provider 原生会话
+  // （Claude Code 会话）以保留上下文/cache，但每次仍开一个全新 WAO run/transcript
+  // 做独立监督。null/缺省 = 每次开全新 provider 会话（现状行为）。
+  sessionReuse?: "lead_workspace" | null;
 }
 ```
 
@@ -710,6 +721,46 @@ CLI JSON 区分 `decisionAccepted:true`（winner）vs `decisionAccepted:false` +
 
 ---
 
+### 4.10 Expert Session Reuse `[M11-11C]`
+
+> **实现状态**：M11-11C candidate（provider 中立契约 + claude-code 落地，真实 canary 后关单）。当同一 MCP Lead
+> server 实例在同一绑定 Git workspace 内再次询问同一**配置了 `sessionReuse: "lead_workspace"`**
+> 的专家（非 delivery），WAO 复用 provider 原生会话（Claude Code 会话）保留上下文/cache，
+> 同时**每次仍开全新 WAO run/transcript** 做独立监督。未配置该策略的 agent 保持现状行为。
+
+**复用身份（provider 中立）**：`MCP server instance identity + 规范化 bound workspace + canonical agentId`
+三者经 sha256 派生为一个**不透明的 UUID v4**（设 version/variant 位）。该 opaque uuid 是
+唯一进入 provider 的标识：claude-code 首轮 `--session-id <uuid>`，后续轮 `--resume <uuid>`。
+**绝不**把原始 Lead id / workspace 路径 / session id / agentId 经 MCP 返回或写入 provider
+payload——它们只停留在 dispatch 进程内。Host/MCP 重启会产生新 identity，因此开始新 provider 会话；本合同不宣称跨 Host 重启永久续用。
+
+**每请求仍是新 run**：每次派发生成新 runId + transcript；绝不复用/追加一个已 terminal 的 WAO
+run。被复用的对象只有 backend 原生会话本身。
+
+**严格非 delivery**：delivery 派发**总是**开全新 provider 会话，不复用 delivery
+worktree/session。`reuseEligible = agent.sessionReuse === "lead_workspace" && !publicDelivery`。
+
+**SSOT**：`src/application/sessionReuse.js`（纯计算 + 有限路由事实落盘）。决策矩阵
+（`resolveReuseTurn`）：无历史→`first`；prior run 非 terminal→`busy`；prior terminal 且有
+`session.created`→`resume`；prior terminal 但无 `session.created`（崩溃）→`first`；prior
+transcript 缺失且新鲜（<5min）→`busy`；缺失且陈旧→`first`。`first`/`resume` 在 per-key 文件锁
+内 claim slot，关闭并发竞态——同一身份绝不并发驱动同一 provider 会话。
+
+**能力驱动 fail-closed**：backend 若无法表达所配置的复用策略，detached runner 在 provider spawn 前失败
+（`backend.supportsSessionReuse !== true` 即抛错），绝不静默开新 provider 会话。初始 background transcript
+可记录这次 startup failure；不得把它误报成已复用成功。
+
+**有界审计**：仅落盘 `run.session_reuse {mode, turn}` 这一条路由事实。MCP 输出不返回
+backendSessionId / Lead id / workspace path / prompt / argv / PID / provider payload；
+`registry_list` 如实投影配置的复用模式（nullable）；busy 时返回固定可执行文案（指向
+active run / 等待 terminal / `run_status`/`run_wait`），不回显 runId 或 opaque uuid。
+
+**CLI 行为**：CLI 是一次性进程，无稳定 Lead 会话，因此 CLI 派发可复用专家时一律走 `first`
+（注入一次性 leadSession → 唯一复用 key、无历史 → 首轮）。MCP server 是唯一提供稳定 Lead
+会话的调用方。
+
+---
+
 ## 5. L3：编排层 `[M]`
 
 > 短期不实现，但 L1/L2 的设计必须为它留好接口。
@@ -903,6 +954,7 @@ src/
 │   ├── ownerLiveness.js      #   run liveness 投影 SSOT（M10-pre3，terminal/progress/process_only/silent，runWait 共用）
 │   ├── workspaceBinding.js   #   host-authorized workspace proof SSOT（M10-pre2，MCP 共用）
 │   ├── sessionWorkspace.js   #   Lead session workspace selection kernel（M11-6，无状态，委托 proveWorkspace）
+│   ├── sessionReuse.js       #   expert session reuse SSOT（M11-11C，provider 中立：opaque uuid 派生 + turn 决策 first/resume/busy + per-key 文件锁）
 │   ├── leadPreflight.js      #   advisory single-call preflight aggregator（M11-8A，组合 registryInventory+listRuns，advisory 非 gate）
 │   ├── mcpWorkspaceActivation.js # project-scoped workspace activation（M10 P0-1，CLI 用，委托 hostAdapters）
 │   ├── timeoutPolicy.js      #   wait timeout precedence SSOT（M10-pre，CLI + MCP 共用）

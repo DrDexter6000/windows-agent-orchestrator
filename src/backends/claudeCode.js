@@ -32,6 +32,15 @@ export class ClaudeCodeBackend extends ProcessBackend {
   // name. claude-code injects via --append-system-prompt (content, once).
   supportsRoleContract = true;
 
+  // M11-11C: explicit provider-session-reuse capability declaration.
+  // RunManager reads this boolean to gate sessionReuse routing provider-
+  // neutrally (no runtime-name branch). claude-code expresses reuse natively:
+  // first turn `--session-id <uuid>`, later turn `--resume <same uuid>`. The
+  // opaque uuid is the only identifier handed to the provider; it derives from
+  // (Lead session + bound workspace + agentId) deterministically, so the raw
+  // Lead id / workspace / agentId never reach the provider.
+  supportsSessionReuse = true;
+
   /**
    * M11-9 capability: declare exactly what this backend can express.
    *
@@ -61,6 +70,15 @@ export class ClaudeCodeBackend extends ProcessBackend {
           "--output-format", "stream-json",
           "--verbose",
         ];
+        // M11-11C: provider-native conversation reuse. First turn starts a named
+        // session (--session-id); later turns resume it (--resume). Exactly one
+        // flag, never both. The opaque uuid is supplied by the control plane
+        // (derived from the reuse identity) — never the raw Lead/workspace id.
+        if (task.sessionReuse && task.sessionReuse.turn === "first") {
+          args.push("--session-id", task.sessionReuse.opaqueUuid);
+        } else if (task.sessionReuse && task.sessionReuse.turn === "resume") {
+          args.push("--resume", task.sessionReuse.opaqueUuid);
+        }
         // M11-5：角色合同注入（config/roles/*.md，loader 已验证内容）。
         // --append-system-prompt <content> 恰好一次；用内容而非路径，消除 TOCTOU。
         if (task.roleContract) {
