@@ -82,18 +82,56 @@ const DELIVERY_WAIT_POLL_INTERVAL_MS = 1000;
  * @param {string} runId
  * @returns {string} one of DELIVERY_READINESS_STATES
  */
+// M11-10 closeout: a bound delivery event (envelope runId === requested runId)
+// carries a USABLE DeliveryRef iff `delivery` is an object whose own runId equals
+// the requested runId. A missing/non-object payload (malformed event) or a ref
+// whose runId disagrees with its envelope (cross-run injection) is a durable
+// CONFLICT, not merely "no delivery". Shared by projectDeliveryReadiness and
+// _reconstructDelivery so the readiness label and the reconstructed view apply
+// ONE binding rule.
+function _deliveryRefIsBound(e, runId) {
+  return !!e && typeof e.delivery === "object" && e.delivery !== null
+    && e.delivery.runId === runId;
+}
+
+/**
+ * @param {object[]} boundEvents — already envelope-bound to runId
+ * @param {string} runId
+ * @returns {boolean} true if ANY bound event has a malformed/cross-run delivery
+ * @private
+ */
+function _hasConflictDelivery(boundEvents, runId) {
+  return boundEvents.some((e) => !_deliveryRefIsBound(e, runId));
+}
+
 export function projectDeliveryReadiness(events, runId) {
   if (!Array.isArray(events)) return "ambiguous";
 
-  const created = events.filter(
-    (e) => e && e.type === "run.delivery_created" && e.runId === runId && e.delivery,
+  // Envelope-bound durable events: the event runId MUST equal the requested
+  // runId. A foreign-envelope event belongs to another run and is ignored (it is
+  // NOT a conflict — only an envelope/ref mismatch within a bound event is).
+  const boundCreated = events.filter(
+    (e) => e && e.type === "run.delivery_created" && e.runId === runId,
   );
-  const verification = events.filter(
+  const boundVerification = events.filter(
     (e) => e && DELIVERY_VERIFICATION_OUTCOME_TYPES.has(e.type) && e.runId === runId,
   );
   const failed = events.filter(
     (e) => e && e.type === "run.delivery_failed" && e.runId === runId,
   );
+
+  // M11-10 closeout (auditor blockers 2 & 3): a bound created/verification event
+  // with a missing/non-object delivery payload, or whose DeliveryRef.runId
+  // disagrees with its envelope, is a durable conflict. It must NEVER be filtered
+  // into a clean waiting_for_packaging / not_requested state — fail closed to
+  // ambiguous. No malformed/injected value is echoed (only the closed-set label).
+  if (_hasConflictDelivery(boundCreated, runId)) return "ambiguous";
+  if (_hasConflictDelivery(boundVerification, runId)) return "ambiguous";
+
+  // After the conflict checks, every bound created/verification event carries a
+  // usable, runId-bound DeliveryRef.
+  const created = boundCreated;
+  const verification = boundVerification;
 
   // Conflicting durable facts → ambiguous (fail closed).
   if (created.length > 1) return "ambiguous";
@@ -113,12 +151,16 @@ export function projectDeliveryReadiness(events, runId) {
     const verificationRef = verification[0].delivery;
     // Full durable-identity binding to the requested runId (cross-run defense)
     // and matching verification commit. Any drift → ambiguous.
-    if (createdRef?.runId !== runId) return "ambiguous";
-    if (verificationRef?.runId !== runId) return "ambiguous";
-    if (createdRef?.deliveryCommit !== verificationRef?.deliveryCommit) return "ambiguous";
+    if (createdRef.runId !== runId) return "ambiguous";
+    if (verificationRef.runId !== runId) return "ambiguous";
+    if (createdRef.deliveryCommit !== verificationRef.deliveryCommit) return "ambiguous";
     // SSOT authority: validateDeliveryFacts must agree this is an unambiguous,
-    // reviewable delivery (exactly one created + one matching final outcome).
-    const facts = validateDeliveryFacts(events);
+    // reviewable delivery (exactly one created + one matching final outcome, both
+    // commits canonical). Only THIS run's envelope-bound events are passed, so a
+    // foreign event in a concatenated/corrupt transcript cannot poison the
+    // durable-facts validator. The canonical-commit requirement lives in
+    // validateDeliveryFacts (single commit validator) — no second regex here.
+    const facts = validateDeliveryFacts(events.filter((e) => e && e.runId === runId));
     if (!facts.valid) return "ambiguous";
     return "reviewable";
   }
@@ -159,42 +201,55 @@ function _findBoundDeliveryFailed(events, runId) {
 
 /**
  * Reconstruct the latest delivery ref, decision event, and delivery commit
- * from transcript events. This is the single algorithm — CLI and MCP both
- * use it via getRunDelivery.
+ * from transcript events. This is the single algorithm — point-in-time
+ * getRunDelivery and the wait/readiness handshake both use it via
+ * _gatherDeliveryView.
+ *
+ * M11-10 closeout (auditor blocker 2): created/verification/decision scans are
+ * ALL bound by the requested runId, so a foreign-run event in a
+ * concatenated/corrupt transcript cannot leak its commit/changedPaths/acceptance
+ * into this run's view. An envelope-bound event whose DeliveryRef.runId
+ * disagrees with its envelope (cross-run injection), or whose delivery payload is
+ * missing/non-object, is a durable CONFLICT: it sets `conflict` and is NOT used
+ * as a success fact. The caller fail-closes a conflict to ambiguous — it must
+ * never be disguised as "no delivery" by silently filtering it out.
  * @param {Array} events
- * @returns {{latestRef: object|null, decisionEvent: object|null, deliveryCommit: string|null}}
+ * @param {string} runId
+ * @returns {{latestRef: object|null, decisionEvent: object|null, deliveryCommit: string|null, conflict: boolean}}
  */
-function _reconstructDelivery(events) {
+function _reconstructDelivery(events, runId) {
   let latestRef = null;
+  let conflict = false;
+
   for (let i = events.length - 1; i >= 0; i -= 1) {
-    if (events[i].type === "run.delivery_created" && events[i].delivery) {
-      latestRef = events[i].delivery;
-      break;
-    }
+    const e = events[i];
+    if (!e || e.type !== "run.delivery_created" || e.runId !== runId) continue;
+    if (!_deliveryRefIsBound(e, runId)) { conflict = true; continue; }
+    latestRef = e.delivery;
+    break;
   }
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const e = events[i];
-    if ((e.type === "run.delivery_verification_passed"
-      || e.type === "run.delivery_verification_failed"
-      || e.type === "run.delivery_verification_unavailable")
-      && e.delivery) {
-      latestRef = e.delivery;
-      break;
-    }
+    if (!e || !DELIVERY_VERIFICATION_OUTCOME_TYPES.has(e.type) || e.runId !== runId) continue;
+    if (!_deliveryRefIsBound(e, runId)) { conflict = true; continue; }
+    latestRef = e.delivery;
+    break;
   }
   let decisionEvent = null;
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const e = events[i];
-    if (e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected") {
-      decisionEvent = e;
-      break;
-    }
+    if (!e || (e.type !== "run.delivery_accepted" && e.type !== "run.delivery_rejected") || e.runId !== runId) continue;
+    // A decision event normally always carries a delivery ref. If it carries one
+    // that is malformed or bound to a different run, that is a conflict.
+    if (e.delivery !== undefined && !_deliveryRefIsBound(e, runId)) { conflict = true; continue; }
+    decisionEvent = e;
+    break;
   }
   if (decisionEvent?.delivery) {
     latestRef = decisionEvent.delivery;
   }
   const deliveryCommit = latestRef?.deliveryCommit ?? null;
-  return { latestRef, decisionEvent, deliveryCommit };
+  return { latestRef, decisionEvent, deliveryCommit, conflict };
 }
 
 // ===== Private: shared delivery-view gatherer =====
@@ -209,8 +264,19 @@ function _reconstructDelivery(events) {
 //   - failure: { runId, terminalState, deliveryAvailable: false, deliveryFailure: { code } }
 //   - noDelivery marker: { runId, terminalState, deliveryAvailable: false, noDelivery: true }
 //     (no committed delivery AND no bound packaging failure)
+//   - ambiguous marker: { runId, terminalState, deliveryAvailable: false, ambiguous: true }
+//     (a durable conflict: malformed bound event / cross-run injection. Never
+//     echoes a raw ref/commit/path; the caller fail-closes to ambiguous.)
 function _gatherDeliveryView(events, runId, terminalState) {
-  const { latestRef, decisionEvent, deliveryCommit } = _reconstructDelivery(events);
+  const { latestRef, decisionEvent, deliveryCommit, conflict } = _reconstructDelivery(events, runId);
+
+  // M11-10 closeout (auditor blocker 2): a durable conflict detected by the
+  // runId-bound reconstruction must NOT be disguised as "no delivery" (which
+  // would let a malformed/injected event masquerade as a clean waiting state)
+  // and must NOT echo the conflicting ref. Fail closed to the ambiguous marker.
+  if (conflict) {
+    return { runId, terminalState, deliveryAvailable: false, ambiguous: true };
+  }
 
   if (latestRef && deliveryCommit) {
     const verificationStatus = latestRef.verification?.status ?? "pending";
@@ -274,6 +340,10 @@ export async function getRunDelivery({ runId, runDir, readTranscriptFn }) {
 
   const terminalState = findState(events);
   const view = _gatherDeliveryView(events, runId, terminalState);
+  // M11-10 closeout: a durable conflict (cross-run injection / malformed bound
+  // event) must fail closed for the point-in-time query too — never echo a raw
+  // ref/path. Fixed message; no dynamic ref content is leaked.
+  if (view.ambiguous) throw new Error("delivery facts ambiguous");
   if (view.noDelivery) throw new Error(`No committed delivery found for run ${runId}`);
   return view;
 }
@@ -295,12 +365,28 @@ export async function getRunDelivery({ runId, runDir, readTranscriptFn }) {
 /**
  * Build the readiness result object from the current view. Centralizes the
  * shape so the early-return and deadline-expired paths cannot diverge.
+ *
+ * M11-10 closeout (auditor blockers 1 & 2): the readiness projection and the
+ * runId-bound reconstruction share ONE truth, enforced here:
+ *   - If the reconstruction detected a durable conflict (cross-run injection /
+ *     malformed bound event), the readiness collapses to `ambiguous` — never
+ *     echo the conflicting ref (the ambiguous view already carries no ref).
+ *   - Executable invariant: `reviewable ⇒ deliveryAvailable === true`. If the
+ *     two authorities ever disagree (e.g. a non-canonical commit slipped past
+ *     the label but the reconstruction found no usable delivery), fail closed to
+ *     `ambiguous` instead of surfacing an inconsistent reviewable +
+ *     deliveryAvailable:false state. The label and the view never carry raw
+ *     ref/path/reason on this path.
  * @private */
 function _buildReadinessResult(runId, events, terminalState, readiness, waitReturnedEarly) {
   const view = _gatherDeliveryView(events, runId, terminalState);
+  let effectiveReadiness = view.ambiguous ? "ambiguous" : readiness;
+  if (effectiveReadiness === "reviewable" && view.deliveryAvailable !== true) {
+    effectiveReadiness = "ambiguous";
+  }
   return {
     runId,
-    readiness,
+    readiness: effectiveReadiness,
     waitReturnedEarly,
     terminalState,
     deliveryAvailable: view.deliveryAvailable,

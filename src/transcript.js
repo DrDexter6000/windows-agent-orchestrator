@@ -2,6 +2,7 @@ import { appendFile, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createSecretRedactor } from "./secretRedaction.js";
 import { isValidCanonicalAgentId } from "./canonicalAgentId.js";
+import { isCanonicalCommitId } from "./delivery.js";
 
 const APPEND_LOCK_TIMEOUT_MS = 5000;
 const APPEND_LOCK_STALE_MS = 30000;
@@ -296,6 +297,17 @@ export function validateDeliveryFacts(events) {
   const verificationEvent = verificationEvents[0];
   const verificationRef = verificationEvent.delivery;
   const verificationCommit = verificationRef?.deliveryCommit;
+
+  // M11-10 closeout (auditor blocker 1): both commits must be CANONICAL commit
+  // ids AND equal. Reuses isCanonicalCommitId (the single commit validator from
+  // delivery.js) — no second regex here. Previously this block only compared
+  // `verificationCommit !== createdCommit`, so two undefined/null/empty/non-
+  // canonical values compared equal (`undefined !== undefined` is false) and
+  // falsely validated the delivery as reviewable. Now any non-canonical commit
+  // on either side fails closed.
+  if (!isCanonicalCommitId(createdCommit) || !isCanonicalCommitId(verificationCommit)) {
+    return { valid: false, latestRef: createdRef, deliveryCommit: createdCommit, verificationStatus: "pending", decisionEvent: null, error: "delivery_created and verification deliveryCommit must both be canonical 40/64-hex commit ids" };
+  }
 
   // Verification commit must match delivery_created commit
   if (verificationCommit !== createdCommit) {

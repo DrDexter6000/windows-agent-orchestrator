@@ -688,6 +688,7 @@ test("M11-10-MCP-03: wait path maps every readiness state to a truthful, non-err
     const cases = [
       { readiness: "reviewable", deliveryAvailable: true, deliveryRef: makeRef("r"), verification: { status: "passed" }, acceptance: { status: "pending" }, deliveryFailure: null },
       { readiness: "waiting_for_verification", deliveryAvailable: true, deliveryRef: makeRef("r"), verification: { status: "pending" }, acceptance: { status: "pending" }, deliveryFailure: null },
+      { readiness: "waiting_for_packaging", deliveryAvailable: false, deliveryRef: null, verification: null, acceptance: null, deliveryFailure: null },
       { readiness: "packaging_failed", deliveryAvailable: false, deliveryRef: null, verification: null, acceptance: null, deliveryFailure: { code: "base_commit_mismatch" } },
       { readiness: "not_requested", deliveryAvailable: false, deliveryRef: null, verification: null, acceptance: null, deliveryFailure: null },
       { readiness: "ambiguous", deliveryAvailable: false, deliveryRef: null, verification: null, acceptance: null, deliveryFailure: null },
@@ -961,4 +962,260 @@ test("M11-10-CONST-01: shared waitMs constants lock the schema bounds (1000..300
   assert.equal(DELIVERY_WAIT_MS_MAX, 300000);
   // The MCP schema is built FROM these constants (see server.js); the behavioral
   // proof is M11-10-MCP-01 (MIN/MAX accepted, MIN-1/MAX+1 rejected).
+});
+
+// =====================================================================
+// Group 6: M11-10 auditor-blocker closeout (real RED → GREEN)
+//
+// These tests are written BEFORE the fix and must FAIL on the candidate
+// (proving the auditor blockers), then PASS after the GREEN fix. They use the
+// REAL application service + real disk transcripts (not stubs) so the causal
+// chain — transcript → reconstruction → readiness/view — is exercised end to
+// end. Blockers covered:
+//   1. projectDeliveryReadiness + validateDeliveryFacts used only
+//      `createdCommit !== verificationCommit`; two undefined/null/empty/non-
+//      canonical values compared equal and falsely validated as reviewable, with
+//      deliveryAvailable:false (the inconsistent boundary).
+//   2. _reconstructDelivery scanned created/verification/decision WITHOUT
+//      binding by the requested runId, so a concatenated/corrupt transcript
+//      leaked a foreign run's commit/changedPaths/acceptance into this run's
+//      view (while readiness stayed correctly bound).
+//   3. A bound run.delivery_created with a missing/non-object delivery payload
+//      was silently filtered into a plain waiting_for_packaging instead of
+//      ambiguous.
+//   4. MCP-03 title claimed "every readiness state" but omitted
+//      waiting_for_packaging; coverage leaned on stubs.
+// =====================================================================
+
+// --- Blocker 1: non-canonical commits must never validate as reviewable ---
+
+test("M11-10-BLK1 (projection): created+verification commits both non-canonical → ambiguous (was false reviewable)", () => {
+  const runId = "run_blk1";
+  for (const bad of [undefined, null, "", "HEAD", "abc123", "g".repeat(40), "d".repeat(39), "D".repeat(40)]) {
+    const ref = { ...makeRef(runId), deliveryCommit: bad };
+    const events = [
+      startedWithDelivery(runId),
+      { type: "run.delivery_created", runId, delivery: ref },
+      { type: "run.delivery_verification_passed", runId, delivery: ref },
+      ...terminal(runId),
+    ];
+    assert.equal(
+      projectDeliveryReadiness(events, runId),
+      "ambiguous",
+      `non-canonical deliveryCommit ${JSON.stringify(bad)} must not be reviewable`,
+    );
+  }
+});
+
+test("M11-10-BLK1-SVC (real service): non-canonical commits never yield reviewable + deliveryAvailable:false", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "m1110-blk1-svc-"));
+  try {
+    const runId = "run_blk1svc";
+    const ref = { ...makeRef(runId), deliveryCommit: undefined };
+    writeTranscript(runDir, runId, [
+      startedWithDelivery(runId),
+      { type: "run.delivery_created", runId, delivery: ref },
+      { type: "run.delivery_verification_passed", runId, delivery: ref },
+      ...terminal(runId),
+    ]);
+    // Sleep-coupled clock: each sleep jumps past waitMs so the bounded wait
+    // terminates after one poll even when the readiness stays in a waiting state
+    // (e.g. the pre-fix masquerade this test must catch).
+    let t = 1_000_000;
+    const r = await getRunDeliveryReadiness({
+      runId, runDir, waitMs: 1000,
+      sleepFn: async () => { t += 6000; },
+      nowFn: () => t,
+    });
+    // Before the fix this was readiness:"reviewable" (undefined === undefined),
+    // which is the auditor's reviewable + deliveryAvailable:false inconsistency.
+    assert.equal(r.readiness, "ambiguous", "non-canonical commits collapse to ambiguous");
+    assert.equal(r.deliveryAvailable, false, "ambiguous carries no available delivery");
+    assert.equal(r.deliveryRef, null, "no raw ref echoed for ambiguous");
+    // Executable invariant: reviewable ⇒ deliveryAvailable === true. Before the
+    // fix this assertion failed (reviewable + false); after it the state is
+    // ambiguous so it holds trivially, and the guard enforces it in general.
+    assert.ok(
+      !(r.readiness === "reviewable" && r.deliveryAvailable !== true),
+      "reviewable must never coexist with deliveryAvailable:false",
+    );
+  } finally { cleanupDir(runDir); }
+});
+
+// --- Blocker 2: foreign-run events must not leak into this run's view ---
+
+test("M11-10-BLK2-SVC (real service): foreign-run events in the transcript must not leak into this run's readiness view", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "m1110-blk2-svc-"));
+  try {
+    const self = "run_blk2self";
+    const foreign = "run_blk2foreign";
+    const selfRef = makeRef(self, { changedFiles: ["src/self.js"] });
+    const foreignRef = makeRef(foreign, {
+      deliveryCommit: "f".repeat(40),
+      changedFiles: ["SECRET/foreign.js"],
+    });
+    writeTranscript(runDir, self, [
+      startedWithDelivery(self),
+      { type: "run.delivery_created", runId: self, delivery: selfRef },
+      { type: "run.delivery_verification_passed", runId: self, delivery: selfRef },
+      ...terminal(self),
+      // Foreign-run events concatenated into the same transcript file. Their
+      // envelope runId is a DIFFERENT run, so they must not contribute to THIS
+      // run's reconstruction.
+      { type: "run.delivery_created", runId: foreign, delivery: foreignRef },
+      { type: "run.delivery_verification_passed", runId: foreign, delivery: foreignRef },
+      { type: "run.delivery_accepted", runId: foreign, delivery: { ...foreignRef, acceptance: { status: "accepted" } } },
+    ]);
+
+    // Sleep-coupled clock: each sleep jumps past waitMs so the bounded wait
+    // terminates after one poll regardless of the projected readiness.
+    let t = 1_000_000;
+    const r = await getRunDeliveryReadiness({
+      runId: self, runDir, waitMs: 1000,
+      sleepFn: async () => { t += 6000; },
+      nowFn: () => t,
+    });
+    assert.equal(r.readiness, "reviewable", "self has its own bound reviewable facts");
+    assert.equal(r.deliveryAvailable, true);
+    // The view must reflect THIS run's delivery — never the foreign artifact.
+    assert.equal(r.deliveryRef.deliveryCommit, selfRef.deliveryCommit, "self commit, not foreign");
+    assert.equal(r.acceptance.status, "pending", "foreign accepted must not leak; self has no decision");
+    assert.ok(!JSON.stringify(r).includes("SECRET/foreign.js"), "no foreign changedPath leak");
+
+    // Point-in-time getRunDelivery shares the SAME reconstruction, so it must
+    // also reject the foreign artifact.
+    const view = await getRunDelivery({ runId: self, runDir });
+    assert.equal(view.deliveryRef.deliveryCommit, selfRef.deliveryCommit);
+    assert.equal(view.acceptance.status, "pending");
+    assert.ok(!JSON.stringify(view).includes("SECRET/foreign.js"));
+  } finally { cleanupDir(runDir); }
+});
+
+test("M11-10-BLK2b-SVC (real service): cross-run injection (bound envelope, foreign ref) → ambiguous view, no ref leak", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "m1110-blk2b-svc-"));
+  try {
+    const self = "run_blk2binj";
+    // Envelope runId is bound to `self`, but the DeliveryRef.runId is an
+    // impostor. This is an envelope/ref conflict, not a foreign-envelope event.
+    const injected = makeRef("run_IMPOSTOR", { changedFiles: ["SECRET/injected.js"] });
+    writeTranscript(runDir, self, [
+      startedWithDelivery(self),
+      { type: "run.delivery_created", runId: self, delivery: injected },
+      { type: "run.delivery_verification_passed", runId: self, delivery: injected },
+      ...terminal(self),
+    ]);
+    // Sleep-coupled clock: each sleep jumps past waitMs so the bounded wait
+    // terminates after one poll regardless of the projected readiness.
+    let t = 1_000_000;
+    const r = await getRunDeliveryReadiness({
+      runId: self, runDir, waitMs: 1000,
+      sleepFn: async () => { t += 6000; },
+      nowFn: () => t,
+    });
+    assert.equal(r.readiness, "ambiguous");
+    assert.equal(r.deliveryAvailable, false);
+    // Before the fix the readiness was ambiguous BUT the reconstructed view
+    // still echoed the injected ref (commit/changedPaths). The truthful
+    // reconstruction must fail closed — no raw ref, no path, no echo.
+    assert.equal(r.deliveryRef, null, "injected ref must not leak into the view");
+    assert.ok(!JSON.stringify(r).includes("SECRET/injected.js"));
+    assert.ok(!JSON.stringify(r).includes("run_IMPOSTOR"));
+  } finally { cleanupDir(runDir); }
+});
+
+// --- Blocker 3: malformed bound delivery_created must be ambiguous, not waiting ---
+
+test("M11-10-BLK3 (projection): bound run.delivery_created with missing/non-object delivery → ambiguous (was waiting)", () => {
+  const runId = "run_blk3";
+  // (a) delivery field absent → previously filtered to waiting_for_packaging.
+  assert.equal(projectDeliveryReadiness([
+    startedWithDelivery(runId),
+    { type: "run.delivery_created", runId },
+    ...terminal(runId),
+  ], runId), "ambiguous", "missing delivery payload");
+  // (b) delivery: null → previously filtered to waiting_for_packaging.
+  assert.equal(projectDeliveryReadiness([
+    startedWithDelivery(runId),
+    { type: "run.delivery_created", runId, delivery: null },
+    ...terminal(runId),
+  ], runId), "ambiguous", "null delivery payload");
+  // (c) delivery: non-object → previously masked as waiting_for_verification.
+  assert.equal(projectDeliveryReadiness([
+    startedWithDelivery(runId),
+    { type: "run.delivery_created", runId, delivery: "not-a-ref" },
+    ...terminal(runId),
+  ], runId), "ambiguous", "non-object delivery payload");
+  // (d) a malformed bound verification event (missing delivery) is also ambiguous.
+  assert.equal(projectDeliveryReadiness([
+    startedWithDelivery(runId),
+    { type: "run.delivery_created", runId, delivery: makeRef(runId) },
+    { type: "run.delivery_verification_passed", runId },
+    ...terminal(runId),
+  ], runId), "ambiguous", "malformed bound verification event");
+});
+
+test("M11-10-BLK3-SVC (real service): this run's malformed delivery_created is ambiguous, not waiting_for_packaging", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "m1110-blk3-svc-"));
+  try {
+    const runId = "run_blk3svc";
+    writeTranscript(runDir, runId, [
+      startedWithDelivery(runId),
+      { type: "run.delivery_created", runId, delivery: null },
+      ...terminal(runId),
+    ]);
+    // Sleep-coupled clock: each sleep jumps past waitMs so the bounded wait
+    // terminates after one poll even when the readiness stays in a waiting state
+    // (e.g. the pre-fix masquerade this test must catch).
+    let t = 1_000_000;
+    const r = await getRunDeliveryReadiness({
+      runId, runDir, waitMs: 1000,
+      sleepFn: async () => { t += 6000; },
+      nowFn: () => t,
+    });
+    // Before the fix a null delivery payload was filtered out, leaving only the
+    // delivery-mode run.started, so the service returned waiting_for_packaging.
+    assert.equal(r.readiness, "ambiguous", "malformed delivery_created must not masquerade as waiting");
+    assert.equal(r.deliveryAvailable, false);
+    assert.equal(r.deliveryRef, null);
+  } finally { cleanupDir(runDir); }
+});
+
+// --- Blocker 4: MCP-03 must cover waiting_for_packaging, with real service proof ---
+
+test("M11-10-MCP-03b (real default service): waiting_for_packaging maps to a truthful, non-error MCP output", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "m1110-mcp-03b-"));
+  const runDir = mkdtempSync(join(tmpdir(), "m1110-mcp-03b-rd-"));
+  try {
+    makeGitRepo(dir);
+    const runId = "run_wfp_real";
+    // Delivery requested (mode set) but no durable delivery_created yet →
+    // waiting_for_packaging through the REAL default service (no stub).
+    writeTranscript(runDir, runId, [
+      startedWithDelivery(runId),
+      { type: "run.background_submitted", runId, background: true, cwd: dir },
+      ...terminal(runId),
+    ]);
+    const server = createWaoMcpServer({
+      registryPath: "/r.json", runDir, workspaceRoot: dir,
+      // Sleep-coupled clock so the bounded wait polls once then expires while
+      // still pending — a truthful waiting_for_packaging fact, not an error.
+      getRunDeliveryReadinessFn: async (input) => {
+        const { getRunDeliveryReadiness } = await import("../src/application/runDelivery.js");
+        let t = Date.now();
+        return getRunDeliveryReadiness({
+          ...input,
+          sleepFn: () => { t += 6000; return Promise.resolve(); },
+          nowFn: () => t,
+        });
+      },
+    });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_delivery", arguments: { runId, waitMs: 2000 } });
+      assert.equal(res.isError, undefined, "waiting_for_packaging is not an error");
+      assert.equal(res.structuredContent.readiness, "waiting_for_packaging");
+      assert.equal(res.structuredContent.deliveryAvailable, false);
+      assert.equal(res.structuredContent.deliveryFailure, null, "waiting_for_packaging has no failure code");
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); cleanupDir(runDir); }
 });
