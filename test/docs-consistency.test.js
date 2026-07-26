@@ -1346,3 +1346,13 @@ test("M11-11D-DOC-04: token forecast is retired from current product surfaces", 
   assert.ok(!/cost forecasting/i.test(readme),
     "README no longer lists token forecasting as a current capability");
 });
+
+test("M11-12C-DOC-01: every delivery run queries delivery truth after terminal", () => {
+  const skill = read("SKILL.md");
+  assert.ok(/every run dispatched with a delivery block.*run_delivery.*terminal.*failed/is.test(skill),
+    "SKILL queries run_delivery after every delivery run, including failed terminal runs");
+  assert.ok(/deliveryAvailable=false.*deliveryFailure\.code.*do not call `?run_delivery_review`?.*`?run_delivery_decide`?/is.test(skill),
+    "SKILL routes packaging failure through its structured code without review or decision");
+  assert.ok(/run_diagnose.*does not replace.*run_delivery/is.test(skill),
+    "SKILL keeps general diagnosis supplementary to delivery truth");
+});
