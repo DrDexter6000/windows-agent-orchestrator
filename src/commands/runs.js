@@ -26,7 +26,14 @@ import { diagnoseFailure } from "../diagnosis.js";
 // M9-5A: diagnosis delegated to shared application service.
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
 // M9-6A: delivery query/decision delegated to shared application services.
-import { getRunDelivery, decideRunDelivery } from "../application/runDelivery.js";
+// M11-10: readiness/wait delegated to the SAME shared service the MCP tool uses.
+import {
+  getRunDelivery,
+  decideRunDelivery,
+  getRunDeliveryReadiness,
+  DELIVERY_WAIT_MS_MIN,
+  DELIVERY_WAIT_MS_MAX,
+} from "../application/runDelivery.js";
 // M11-3C: delivery review projection delegated to shared application service.
 import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
 import { forecastCost } from "../costForecast.js";
@@ -700,6 +707,9 @@ export { runsCommand, runsDeliveryCommand };
  * Read-only query:
  *   runs delivery <runId> [--format json]
  *
+ * Read-only bounded wait (M11-10):
+ *   runs delivery <runId> --wait-ms N [--format json]
+ *
  * Decision:
  *   runs delivery <runId> --accept --reason-file FILE [--format json]
  *   runs delivery <runId> --reject --reason-file FILE [--format json]
@@ -709,7 +719,49 @@ export { runsCommand, runsDeliveryCommand };
  *
  * M9-6A: query/decision logic delegated to shared application services
  * (getRunDelivery / decideRunDelivery). CLI owns argv parsing + text/JSON I/O only.
+ * M11-10: --wait-ms delegates to the SAME readiness/wait service the MCP
+ * run_delivery tool uses (getRunDeliveryReadiness); the CLI never re-parses the
+ * transcript or invents its own readiness algorithm.
  */
+
+/**
+ * Coerce the argv `--wait-ms` value into an integer in the shared bounds.
+ * Validates at the CLI boundary using the SAME constants the application
+ * service and the MCP zod schema are built from, so an invalid value is rejected
+ * before any service is called (and before the transcript is read).
+ * @private
+ */
+function _coerceWaitMs(raw) {
+  // parseOptions yields either the literal true (flag with no value) or a string.
+  if (raw === true || typeof raw !== "string") {
+    throw new Error("--wait-ms requires an integer value");
+  }
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < DELIVERY_WAIT_MS_MIN || n > DELIVERY_WAIT_MS_MAX) {
+    throw new Error(
+      `--wait-ms must be an integer in [${DELIVERY_WAIT_MS_MIN}, ${DELIVERY_WAIT_MS_MAX}], got: ${JSON.stringify(raw)}`,
+    );
+  }
+  return n;
+}
+
+/** Human-readable rendering of a readiness result (non-json --wait-ms output). */
+function _printReadinessText(result) {
+  console.log(`Run: ${result.runId} (${result.terminalState})`);
+  console.log(
+    `Readiness: ${result.readiness}${result.waitReturnedEarly ? " (settled)" : " (wait expired)"}`,
+  );
+  if (result.deliveryAvailable) {
+    console.log(`Delivery: ${result.deliveryRef?.deliveryCommit ?? "(none)"}`);
+    console.log(`Verification: ${result.verification?.status ?? "(none)"}`);
+    console.log(`Acceptance: ${result.acceptance?.status ?? "(none)"}`);
+  } else if (result.deliveryFailure) {
+    console.log(`Packaging failed: ${result.deliveryFailure.code}`);
+  } else {
+    console.log("Delivery: (none)");
+  }
+}
+
 async function runsDeliveryCommand(args, config, hostDeps) {
   // M11-3C: `runs delivery review` sub-command — must be recognized BEFORE the
   // ordinary query/accept/reject parsing so "review" is not mistaken for a runId.
@@ -727,6 +779,20 @@ async function runsDeliveryCommand(args, config, hostDeps) {
 
   // Read-only query (no --accept / --reject)
   if (!options.accept && !options.reject) {
+    // M11-10: optional bounded, read-only wait. The CLI delegates to the SAME
+    // readiness/wait service the MCP run_delivery tool uses — no second
+    // algorithm, no direct transcript parsing, zero transcript append.
+    if (options.waitMs !== undefined) {
+      const waitMs = _coerceWaitMs(options.waitMs);
+      const readinessService = hostDeps?.getRunDeliveryReadinessFn ?? getRunDeliveryReadiness;
+      const result = await readinessService({ runId, runDir, waitMs });
+      if (options.format === "json") {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        _printReadinessText(result);
+      }
+      return;
+    }
     const view = await getRunDelivery({ runId, runDir });
     if (options.format === "json") {
       console.log(JSON.stringify(view, null, 2));

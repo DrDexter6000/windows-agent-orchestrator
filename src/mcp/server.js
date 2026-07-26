@@ -32,7 +32,14 @@ import { dispatchRun } from "../application/runDispatch.js";
 import { getRunStatus } from "../application/runStatus.js";
 import { collectRunMessages } from "../application/runCollect.js";
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
-import { getRunDelivery, decideRunDelivery } from "../application/runDelivery.js";
+import {
+  getRunDelivery,
+  decideRunDelivery,
+  getRunDeliveryReadiness,
+  DELIVERY_READINESS_STATES,
+  DELIVERY_WAIT_MS_MIN,
+  DELIVERY_WAIT_MS_MAX,
+} from "../application/runDelivery.js";
 import { projectDeliveryChangedPaths, CHANGED_PATHS_LIMIT } from "../application/deliveryReview.js";
 import { stopRun } from "../application/runStop.js";
 import { listRuns } from "../application/runList.js";
@@ -387,9 +394,17 @@ const ACCEPTANCE_STATUS_ENUM = z.enum(["pending", "accepted", "rejected"]);
 const FAILURE_CODE_ENUM = z.enum(["command_failed", "command_timeout", "artifact_mutated", "artifact_mismatch", "execution_error", "unknown"]);
 const DECISION_TYPE_ENUM = z.enum(["run.delivery_accepted", "run.delivery_rejected"]);
 
+// M11-10: run_delivery gains an OPTIONAL bounded read-only wait. The waitMs
+// bounds are the shared application-layer constants (locked in runDelivery.js)
+// so the MCP schema and the service business boundary cannot drift. Omitted
+// waitMs ⇒ the exact point-in-time output (no readiness/waitReturnedEarly).
 const RUN_DELIVERY_INPUT = z.object({
   runId: z.string().min(1),
+  waitMs: z.number().int().min(DELIVERY_WAIT_MS_MIN).max(DELIVERY_WAIT_MS_MAX).optional(),
 }).strict();
+
+// M11-10: readiness closed set, derived from the application SSOT.
+const READINESS_ENUM = z.enum([...DELIVERY_READINESS_STATES]);
 
 // M11-8C closeout: the packaging failure-code enum is DERIVED from the single
 // SSOT (deliveryFailureCodes.js) + the "unknown" projection sentinel. There is
@@ -425,6 +440,11 @@ const RUN_DELIVERY_OUTPUT = z.object({
   decisionType: DECISION_TYPE_ENUM.nullable(),
   // Failure-only field (non-null iff deliveryAvailable === false).
   deliveryFailure: z.object({ code: PACKAGING_FAILURE_CODE_ENUM }).nullable(),
+  // M11-10: readiness handshake fields, present iff the caller supplied waitMs.
+  // readiness is the strict closed-set projection; waitReturnedEarly is true iff
+  // the readiness settled (or was never a waiting state) before the deadline.
+  readiness: READINESS_ENUM.optional(),
+  waitReturnedEarly: z.boolean().optional(),
 }).strict();
 
 const RUN_DELIVERY_ANNOTATIONS = {
@@ -440,7 +460,102 @@ const RUN_DELIVERY_DESCRIPTION =
   `(up to ${CHANGED_PATHS_LIMIT}, with a truncation flag), verification status, and acceptance status. ` +
   "Read-only. Only verificationStatus=passed means exact-artifact verification passed; " +
   "the Lead still owns semantic acceptance. Does not return raw diff, file content, " +
-  "worktree paths, verification commands/results, or decision reasons.";
+  "worktree paths, verification commands/results, or decision reasons. " +
+  "M11-10: optional waitMs (integer " + DELIVERY_WAIT_MS_MIN + ".." + DELIVERY_WAIT_MS_MAX + ") " +
+  "adds a bounded, read-only readiness handshake — the call waits (workspace-bound, " +
+  "non-busy, zero transcript append) for the delivery to become reviewable (or another " +
+  "settled readiness) and returns a strict readiness label plus waitReturnedEarly. " +
+  "A pending-at-deadline outcome is returned as a truthful fact, never an error; the tool " +
+  "never stop/retry/accept/rejects. readiness closed set: " +
+  DELIVERY_READINESS_STATES.join(", ") + ".";
+
+// M11-10: shared safe-projection for run_delivery. Both the point-in-time query
+// and the bounded-wait readiness handshake build their payload from this ONE
+// function so the closed-set validation, bounded path projection, exact-secret
+// redaction, and error boundaries cannot diverge between the two paths. It
+// throws on any malformed service output; each handler's single try/catch folds
+// the throw into the fixed `run_delivery failed` error.
+//
+// `view` shape (from getRunDelivery or getRunDeliveryReadiness):
+//   { runId, terminalState, deliveryAvailable, deliveryRef?, deliveryFailure?,
+//     verification?, acceptance? }
+// For deliveryAvailable:false with no deliveryFailure (not_requested /
+// waiting_for_packaging / ambiguous), every success field is null and
+// deliveryFailure is null — the readiness label (added by the wait path)
+// disambiguates. This helper does NOT include readiness/waitReturnedEarly; the
+// wait handler appends them after.
+function buildRunDeliveryPayload(runId, view) {
+  // Use the request runId — never echo the service result's runId, which could
+  // differ and leak arbitrary content.
+  if (view.runId !== runId) throw new Error("runId mismatch");
+  const terminalState = view.terminalState;
+  if (!RUN_STATES.includes(terminalState)) throw new Error("bad terminalState");
+
+  if (view.deliveryAvailable === false) {
+    const failure = view.deliveryFailure ?? null;
+    return {
+      runId,
+      deliveryAvailable: false,
+      terminalState,
+      baseCommit: null,
+      deliveryCommit: null,
+      changedFileCount: null,
+      changedPaths: null,
+      changedPathsTruncated: null,
+      verificationStatus: null,
+      verificationFailureCode: null,
+      acceptanceStatus: null,
+      decisionType: null,
+      deliveryFailure: failure ? { code: failure.code ?? "unknown" } : null,
+    };
+  }
+
+  const ref = view.deliveryRef ?? {};
+  // Every scalar must pass a closed-set check. Malformed values throw
+  // → caught by the outer try/catch → fixed safe error.
+  const baseCommit = COMMIT_HASH_SCHEMA.parse(ref.baseCommit);
+  const deliveryCommit = COMMIT_HASH_SCHEMA.parse(ref.deliveryCommit);
+  if (!Array.isArray(ref.changedFiles)) throw new Error("changedFiles not array");
+  // M11-1A: project changedFiles into a bounded, safe repo-relative list.
+  // projectDeliveryChangedPaths reuses the delivery.js path-validation SSOT,
+  // caps at CHANGED_PATHS_LIMIT, and throws on any malformed path.
+  const projection = projectDeliveryChangedPaths({ changedFiles: ref.changedFiles });
+  // M11-1A closeout: apply the existing exact-value secret redactor to each
+  // projected path. If redactString changes a path, the whole path collapses to
+  // the fixed "[REDACTED]" marker so no partial secret fragment leaks.
+  const deliveryRedactor = createSecretRedactor();
+  const changedPaths = projection.changedPaths.map((p) => {
+    const redacted = deliveryRedactor.redactString(p);
+    return redacted === p ? p : "[REDACTED]";
+  });
+  const rawVStatus = view.verification?.status ?? "pending";
+  if (!SAFE_VERIFICATION_STATUSES.has(rawVStatus)) throw new Error("bad verificationStatus");
+  const verificationStatus = rawVStatus;
+  const rawFailureCode = view.verification?.failureCode;
+  const verificationFailureCode = rawFailureCode
+    ? (SAFE_FAILURE_CODES.has(rawFailureCode) ? rawFailureCode : "unknown")
+    : null;
+  const rawAcceptance = view.acceptance?.status ?? "pending";
+  if (!SAFE_ACCEPTANCE_STATUSES.has(rawAcceptance)) throw new Error("bad acceptanceStatus");
+  const acceptanceStatus = rawAcceptance;
+  const rawDecisionType = view.acceptance?.decisionEvent?.type ?? null;
+  const decisionType = rawDecisionType && SAFE_DECISION_TYPES.has(rawDecisionType) ? rawDecisionType : null;
+  return {
+    runId,
+    deliveryAvailable: true,
+    terminalState,
+    baseCommit,
+    deliveryCommit,
+    changedFileCount: projection.changedFileCount,
+    changedPaths,
+    changedPathsTruncated: projection.changedPathsTruncated,
+    verificationStatus,
+    verificationFailureCode,
+    acceptanceStatus,
+    decisionType,
+    deliveryFailure: null,
+  };
+}
 
 // ===== run_delivery_decide (durable decision) constants =====
 
@@ -825,6 +940,7 @@ const PLAYBOOK_GET_DESCRIPTION =
  * @param {Function} [input.collectRunMessagesFn] — injectable collect service for testing
  * @param {Function} [input.getRunDiagnosisFn] — injectable diagnosis service for testing
  * @param {Function} [input.getRunDeliveryFn] — injectable delivery query service for testing
+ * @param {Function} [input.getRunDeliveryReadinessFn] — injectable readiness-wait service for testing (M11-10)
  * @param {Function} [input.decideRunDeliveryFn] — injectable delivery decision service for testing
  * @param {Function} [input.listLeadPlaybooksFn] — injectable playbook list service for testing
  * @param {Function} [input.getLeadPlaybookFn] — injectable playbook get service for testing
@@ -891,6 +1007,7 @@ export function createWaoMcpServer({
   collectRunMessagesFn,
   getRunDiagnosisFn,
   getRunDeliveryFn,
+  getRunDeliveryReadinessFn,
   decideRunDeliveryFn,
   stopRunFn,
   listRunsFn,
@@ -908,6 +1025,7 @@ export function createWaoMcpServer({
   const collectService = collectRunMessagesFn ?? collectRunMessages;
   const diagnosisService = getRunDiagnosisFn ?? getRunDiagnosis;
   const deliveryQueryService = getRunDeliveryFn ?? getRunDelivery;
+  const deliveryReadinessService = getRunDeliveryReadinessFn ?? getRunDeliveryReadiness;
   const deliveryDecideService = decideRunDeliveryFn ?? decideRunDelivery;
   const stopService = stopRunFn ?? stopRun;
   const listRunsService = listRunsFn ?? listRuns;
@@ -1513,95 +1631,65 @@ export function createWaoMcpServer({
       outputSchema: RUN_DELIVERY_OUTPUT,
       annotations: RUN_DELIVERY_ANNOTATIONS,
     },
-    async ({ runId }) => {
+    async (input, extra) => {
       try {
-        const delivery = await deliveryQueryService({ runId, runDir });
-        // Use the request runId — never echo the service result's runId,
-        // which could differ and leak arbitrary content.
-        if (delivery.runId !== runId) throw new Error("runId mismatch");
+        const runId = input?.runId;
+        const waitMs = input?.waitMs;
 
-        // M11-8C Package B: structured packaging-failure variant. The service
-        // already projected the code through a closed set (unknown for
-        // malformed). Build + parse the failure payload; no message/path/command
-        // leak. terminalState is validated against the closed RUN_STATES set.
-        if (delivery.deliveryAvailable === false) {
-          const terminalState = delivery.terminalState;
-          if (!RUN_STATES.includes(terminalState)) throw new Error("bad terminalState");
-          const failurePayload = {
+        // M11-10: bounded read-only readiness handshake. The long poll re-reads
+        // the transcript repeatedly, so it is workspace-bound (same proof as
+        // run_wait) and reuses the run_wait SDK-native notifications/progress
+        // keepalive so a resetTimeoutOnProgress client spans the wait across the
+        // MCP 60s default request timeout. The service never writes, never
+        // stop/retry/accept/rejects; a pending-at-deadline outcome is a truthful
+        // fact returned in the structured payload, never an error.
+        if (waitMs !== undefined) {
+          const binding = await resolveWorkspaceBinding();
+          if (!binding.bound) {
+            return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
+          }
+          const progressToken = extra?._meta?.progressToken;
+          const hasKeepalive = progressToken !== undefined && progressToken !== null
+            && typeof extra?.sendNotification === "function";
+          const onPoll = hasKeepalive
+            ? async ({ fraction }) => {
+                // progress must be monotonically non-decreasing; the service
+                // already clamps fraction to [0,1).
+                const progress = Math.max(1, Math.floor(fraction * 100));
+                await extra.sendNotification({
+                  method: "notifications/progress",
+                  params: { progressToken, progress, total: 100 },
+                });
+              }
+            : undefined;
+
+          const result = await deliveryReadinessService({
             runId,
-            deliveryAvailable: false,
-            terminalState,
-            baseCommit: null,
-            deliveryCommit: null,
-            changedFileCount: null,
-            changedPaths: null,
-            changedPathsTruncated: null,
-            verificationStatus: null,
-            verificationFailureCode: null,
-            acceptanceStatus: null,
-            decisionType: null,
-            deliveryFailure: { code: delivery.deliveryFailure?.code ?? "unknown" },
+            runDir,
+            waitMs,
+            authorizedWorkspaceRoot: binding.root,
+            ...(onPoll ? { onPoll } : {}),
+          });
+          // Validate the readiness label through the closed-set enum — a value
+          // outside the SSOT collapses to the fixed error.
+          READINESS_ENUM.parse(result.readiness);
+          if (typeof result.waitReturnedEarly !== "boolean") throw new Error("bad waitReturnedEarly");
+          const payload = {
+            ...buildRunDeliveryPayload(runId, result),
+            readiness: result.readiness,
+            waitReturnedEarly: result.waitReturnedEarly,
           };
-          const parsed = RUN_DELIVERY_OUTPUT.parse(failurePayload);
+          const parsed = RUN_DELIVERY_OUTPUT.parse(payload);
           return {
             content: [{ type: "text", text: JSON.stringify(parsed) }],
             structuredContent: parsed,
           };
         }
 
-        const ref = delivery.deliveryRef ?? {};
-        // Every scalar must pass a closed-set check. Malformed values throw
-        // → caught by the outer try/catch → fixed safe error.
-        const baseCommit = COMMIT_HASH_SCHEMA.parse(ref.baseCommit);
-        const deliveryCommit = COMMIT_HASH_SCHEMA.parse(ref.deliveryCommit);
-        if (!Array.isArray(ref.changedFiles)) throw new Error("changedFiles not array");
-        // M11-1A: project changedFiles into a bounded, safe repo-relative list.
-        // projectDeliveryChangedPaths reuses the delivery.js path-validation SSOT,
-        // caps at CHANGED_PATHS_LIMIT, and throws on any malformed path — which the
-        // outer try/catch folds into the fixed `run_delivery failed` error.
-        const projection = projectDeliveryChangedPaths({ changedFiles: ref.changedFiles });
-        const changedFileCount = projection.changedFileCount;
-        const changedPathsTruncated = projection.changedPathsTruncated;
-        // M11-1A closeout: apply the existing exact-value secret redactor to each
-        // projected path. A legitimate repo-relative path can still carry a known
-        // exact secret value (e.g. a token embedded in a filename). Reuse the same
-        // createSecretRedactor the collect path uses; if redactString changes a
-        // path, the whole path collapses to the fixed "[REDACTED]" marker so no
-        // partial secret fragment leaks. No new credential-pattern scanner.
-        const deliveryRedactor = createSecretRedactor();
-        const changedPaths = projection.changedPaths.map((p) => {
-          const redacted = deliveryRedactor.redactString(p);
-          return redacted === p ? p : "[REDACTED]";
-        });
-        const rawVStatus = delivery.verification?.status ?? "pending";
-        if (!SAFE_VERIFICATION_STATUSES.has(rawVStatus)) throw new Error("bad verificationStatus");
-        const verificationStatus = rawVStatus;
-        const rawFailureCode = delivery.verification?.failureCode;
-        const verificationFailureCode = rawFailureCode
-          ? (SAFE_FAILURE_CODES.has(rawFailureCode) ? rawFailureCode : "unknown")
-          : null;
-        const rawAcceptance = delivery.acceptance?.status ?? "pending";
-        if (!SAFE_ACCEPTANCE_STATUSES.has(rawAcceptance)) throw new Error("bad acceptanceStatus");
-        const acceptanceStatus = rawAcceptance;
-        const rawDecisionType = delivery.acceptance?.decisionEvent?.type ?? null;
-        const decisionType = rawDecisionType && SAFE_DECISION_TYPES.has(rawDecisionType) ? rawDecisionType : null;
-        const terminalState = delivery.terminalState;
-        if (!RUN_STATES.includes(terminalState)) throw new Error("bad terminalState");
-        const payload = {
-          runId,
-          deliveryAvailable: true,
-          terminalState,
-          baseCommit,
-          deliveryCommit,
-          changedFileCount,
-          changedPaths,
-          changedPathsTruncated,
-          verificationStatus,
-          verificationFailureCode,
-          acceptanceStatus,
-          decisionType,
-          deliveryFailure: null,
-        };
+        // Point-in-time query (unchanged shape — no readiness/waitReturnedEarly).
+        // The payload is built from the SAME projection as the wait path.
+        const delivery = await deliveryQueryService({ runId, runDir });
+        const payload = buildRunDeliveryPayload(runId, delivery);
         const parsed = RUN_DELIVERY_OUTPUT.parse(payload);
         return {
           content: [{ type: "text", text: JSON.stringify(parsed) }],

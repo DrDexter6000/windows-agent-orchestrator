@@ -755,12 +755,12 @@ annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:false, 
 
 annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`（纯只读查询，不触碰外部系统）。
 
-### MCP `run_delivery`（只读 delivery 查询，M9-6B + M11-1A）
+### MCP `run_delivery`（只读 delivery 查询，M9-6B + M11-1A + M11-10）
 
 `run_delivery` 让 MCP host 查询一个 run 的 delivery 状态。只读，不追加 transcript event。
 
-- **输入**（strict）：`{ "runId": "run_..." }`。
-- **安全输出**（不返回完整 DeliveryRef / raw diff / file content / reason / commands / results / worktreePath / branch / integration）：
+- **输入**（strict）：`{ "runId": "run_...", "waitMs"?: 1000..300000 }`。`runId` 必填；`waitMs` 为**可选**整数（共享常量锁定区间 `[1000, 300000]` ms，server-owned，模型不可越界）。省略 `waitMs` → 保持现有 point-in-time 输出（M9-6B + M11-1A + M11-8C，向后兼容）；提供 `waitMs` → 触发 bounded read-only readiness wait（M11-10）。MCP 自身不解析 transcript、不 shell-out CLI——只委托同一份 application service。
+- **安全输出**（不返回完整 DeliveryRef / raw diff / file content / reason / commands / results / worktreePath / branch /integration）：
 
 ```json
 {
@@ -790,6 +790,31 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 路径投影的安全边界：每个 path 经 `src/delivery.js` 的 repo-relative 校验 SSOT 复验（拒绝绝对 Windows/POSIX/UNC、`..`/`.` traversal、空 segment、尾分隔符），并额外限制长度 1..512、无控制字符、无 NUL、统一 forward-slash。任何 malformed path 一律 fail-closed —— 整个 projection 不返回部分结果，调用折叠为固定 `run_delivery failed`，不泄漏恶意值。失败返回固定 `run_delivery failed`（不拼接异常、路径或 secret）。
 
 **M11-8C packaging failure variant**：当 transcript 中没有 committed DeliveryRef、但存在绑定当前 runId 的 durable `run.delivery_failed`（如 `base_commit_mismatch`——worker 移动了 HEAD），`run_delivery` 返回**结构化失败变体**而非固定错误：`deliveryAvailable:false` + `deliveryFailure.code`（闭集安全 code，未知/损坏/注入 code 投影为 `unknown`，不回显原值；不返回 message/path/command/stderr/prompt/worktree）。成功 delivery 增加 `deliveryAvailable:true`（既有字段不变）。无 delivery request、transcript 缺失/损坏等情况仍返回固定 `run_delivery failed`（不假报 packaging failure）。`run_delivery_decide` 在没有 DeliveryRef 时仍不可调用成功。`run_diagnose` 对此类 run 返回 `category:"delivery_packaging_failed"`（消费 `run.delivery_failed`，只给事实不给处方/重试）。
+
+**M11-10 delivery readiness handshake（可选 bounded 只读 wait）**：提供 `waitMs` 时，`run_delivery` 在同一份共享 application service（`getRunDeliveryReadiness`，CLI/MCP 共用）内做 bounded read-only readiness wait，并额外返回：
+
+```json
+{
+  "runId": "run_...",
+  "readiness": "reviewable",
+  "waitReturnedEarly": true,
+  "terminalState": "completed",
+  "deliveryAvailable": true,
+  "deliveryRef": null,
+  "deliveryFailure": null,
+  "verification": { "status": "passed" },
+  "acceptance": { "status": "pending" }
+}
+```
+
+- `readiness` 为严格闭集 `waiting_for_packaging | waiting_for_verification | reviewable | packaging_failed | not_requested | ambiguous`（消费方必须视其为穷举，任何其它值都是 bug）。
+- `reviewable` 仅当存在 durable `delivery_created` **且**恰好一个绑定该 runId 的最终 verification outcome（passed/failed/unavailable），并复用共享 `validateDeliveryFacts` SSOT 作为最终权威；failed/unavailable 仍为 reviewable（不自动 reject，Lead 仍负责 accept）。
+- 冲突 durable 事实（多个 created/verification、commit 不匹配、跨 run ref、created+failed）折叠为 `ambiguous`（fail-closed，不回显动态值）。
+- wait 是 workspace/runId-bound、非忙等（两次 re-read 之间 sleep）、**零 transcript append**、bounded polling（deadline = 起始时间 + waitMs）。MCP 长 wait 复用 `run_wait` 的 SDK-native progress/timeout 模式（`notifications/progress` keepalive + `resetTimeoutOnProgress`）；`waitMs` 区间由共享常量 `DELIVERY_WAIT_MS_MIN=1000`/`DELIVERY_WAIT_MS_MAX=300000` 锁定，zod schema 与 service 业务边界都从同一常量构造，不可漂移。
+- pending-at-deadline 是**诚实的事实**（`waitReturnedEarly:false`），不是错误；wait 绝不 stop/retry/accept/reject。transcript 读取失败时返回最后已知事实（truthful，不报错）。
+- 安全投影复用既有 `run_delivery` 投影（commit/path 校验、redaction、闭集、fail-closed 不变）；`run_delivery_review` 的 exact-proof / 安全投影 / 错误边界**未被放松**。
+
+CLI 等价：`runs delivery <runId> --wait-ms N [--format json]`（`--wait-ms` 缺值或非整数/越界在 service 调用前拒绝；省略 `--wait-ms` 时保持旧 point-in-time 形状，无 `readiness` 字段）。
 
 annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`。
 
