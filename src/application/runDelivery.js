@@ -98,7 +98,15 @@ export function projectDeliveryReadiness(events, runId) {
   // Conflicting durable facts → ambiguous (fail closed).
   if (created.length > 1) return "ambiguous";
   if (verification.length > 1) return "ambiguous";
+  // Multiple bound failures are conflicting durable facts (no single
+  // authoritative failure) → ambiguous. A single bound failure falls through to
+  // packaging_failed below.
+  if (failed.length > 1) return "ambiguous";
   if (created.length === 1 && failed.length > 0) return "ambiguous";
+  // A verification outcome bound to this runId with NO bound delivery_created
+  // is an orphan durable fact (broken durable chain) → ambiguous. It must never
+  // fall through to waiting_for_packaging / not_requested.
+  if (verification.length > 0 && created.length === 0) return "ambiguous";
 
   if (created.length === 1 && verification.length === 1) {
     const createdRef = created[0].delivery;
@@ -120,8 +128,12 @@ export function projectDeliveryReadiness(events, runId) {
 
   // No committed delivery and no packaging failure. Distinguish "delivery was
   // requested but not yet packaged" from "delivery was never requested".
+  // runId-bound: only THIS run's own run.started declares intent. A foreign
+  // run's run.started in a concatenated/corrupt transcript must not project
+  // this run as waiting.
   const deliveryRequested = events.some(
     (e) => e && e.type === "run.started"
+      && e.runId === runId
       && e.delivery && typeof e.delivery.mode === "string" && e.delivery.mode.length > 0,
   );
   return deliveryRequested ? "waiting_for_packaging" : "not_requested";
@@ -365,6 +377,10 @@ export async function getRunDeliveryReadiness({
   const startNow = _now();
   const deadline = startNow + waitMs;
   let pollIndex = 0;
+  // Set when a re-read fails after the initial read succeeded. The post-loop
+  // path uses this to fail closed to `ambiguous` instead of returning the stale
+  // waiting snapshot as an ordinary deadline expiry.
+  let readFailed = false;
 
   while (_now() < deadline) {
     const remaining = deadline - _now();
@@ -376,7 +392,13 @@ export async function getRunDeliveryReadiness({
     try {
       events = await _readTranscript(filePath);
     } catch {
-      break; // cannot re-read — return the last-known fact (truthful, not an error)
+      // Initial read succeeded but a later re-read failed. Do NOT disguise the
+      // stale waiting snapshot as an ordinary deadline expiry (that would
+      // return readiness:<last waiting>, waitReturnedEarly:false). Fail closed
+      // to the EXISTING ambiguous closed-set value and return early below. No
+      // new state, no error echo, no auto stop/retry/decision — the Lead decides.
+      readFailed = true;
+      break;
     }
     terminalState = findState(events);
     readiness = projectDeliveryReadiness(events, runId);
@@ -392,6 +414,15 @@ export async function getRunDeliveryReadiness({
       const fraction = waitMs > 0 ? Math.min(Math.max(elapsed / waitMs, 0), 0.999) : 0;
       try { await onPoll({ index: pollIndex, fraction }); } catch { /* keepalive failure must not break the wait */ }
     }
+  }
+
+  // A re-read failed after the initial read succeeded. The `events` snapshot is
+  // now stale and cannot be trusted as a settled waiting fact. Fail closed to
+  // the EXISTING closed-set `ambiguous` value and return early (before the
+  // deadline-expiry path). This is not a new state, not an echoed error, and it
+  // never stop/retry/accept/rejects.
+  if (readFailed) {
+    return _buildReadinessResult(runId, events, terminalState, "ambiguous", true);
   }
 
   // Deadline expired while still pending. Return the truthful fact — this is

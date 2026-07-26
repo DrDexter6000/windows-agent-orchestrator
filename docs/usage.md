@@ -809,9 +809,9 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 - `readiness` 为严格闭集 `waiting_for_packaging | waiting_for_verification | reviewable | packaging_failed | not_requested | ambiguous`（消费方必须视其为穷举，任何其它值都是 bug）。
 - `reviewable` 仅当存在 durable `delivery_created` **且**恰好一个绑定该 runId 的最终 verification outcome（passed/failed/unavailable），并复用共享 `validateDeliveryFacts` SSOT 作为最终权威；failed/unavailable 仍为 reviewable（不自动 reject，Lead 仍负责 accept）。
-- 冲突 durable 事实（多个 created/verification、commit 不匹配、跨 run ref、created+failed）折叠为 `ambiguous`（fail-closed，不回显动态值）。
+- 冲突 durable 事实（多个 created/verification/packaging failure、commit 不匹配、跨 run ref、created+failed、有 verification outcome 但无 bound created）折叠为 `ambiguous`（fail-closed，不回显动态值）。
 - wait 是 workspace/runId-bound、非忙等（两次 re-read 之间 sleep）、**零 transcript append**、bounded polling（deadline = 起始时间 + waitMs）。MCP 长 wait 复用 `run_wait` 的 SDK-native progress/timeout 模式（`notifications/progress` keepalive + `resetTimeoutOnProgress`）；`waitMs` 区间由共享常量 `DELIVERY_WAIT_MS_MIN=1000`/`DELIVERY_WAIT_MS_MAX=300000` 锁定，zod schema 与 service 业务边界都从同一常量构造，不可漂移。
-- pending-at-deadline 是**诚实的事实**（`waitReturnedEarly:false`），不是错误；wait 绝不 stop/retry/accept/reject。transcript 读取失败时返回最后已知事实（truthful，不报错）。
+- pending-at-deadline 是**诚实的事实**（`waitReturnedEarly:false`），不是错误；wait 绝不 stop/retry/accept/reject。初始读取失败即抛错（不进入 wait）；wait 期间某次 re-read 失败时，不把 stale waiting 快照伪装成 deadline 到期，而是 fail-closed 为 `ambiguous` 并提前返回（`waitReturnedEarly:true`，不回显错误、不重试）。
 - 安全投影复用既有 `run_delivery` 投影（commit/path 校验、redaction、闭集、fail-closed 不变）；`run_delivery_review` 的 exact-proof / 安全投影 / 错误边界**未被放松**。
 
 CLI 等价：`runs delivery <runId> --wait-ms N [--format json]`（`--wait-ms` 缺值或非整数/越界在 service 调用前拒绝；省略 `--wait-ms` 时保持旧 point-in-time 形状，无 `readiness` 字段）。

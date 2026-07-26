@@ -229,6 +229,62 @@ test("M11-10-READY-08: cross-run envelope events are ignored (runId-bound)", () 
   ], runId), "waiting_for_packaging");
 });
 
+// --- M11-10 micro-closeout: fail-closed edge cases (causal RED → GREEN) ---
+
+test("M11-10-READY-09 (issue 1): verification outcome bound to this runId but NO bound delivery_created → ambiguous", () => {
+  const runId = "run_orphan_v";
+  const ref = makeRef(runId);
+  // (a) delivery-mode run.started present: the orphan verification must NOT be
+  // masked as waiting_for_packaging (the old fall-through did exactly that).
+  assert.equal(projectDeliveryReadiness([
+    startedWithDelivery(runId),
+    { type: "run.delivery_verification_passed", runId, delivery: ref },
+    ...terminal(runId),
+  ], runId), "ambiguous");
+  // (b) plain (non-delivery) run.started: the orphan verification must NOT be
+  // masked as not_requested either.
+  assert.equal(projectDeliveryReadiness([
+    startedPlain(runId),
+    { type: "run.delivery_verification_passed", runId, delivery: ref },
+    ...terminal(runId),
+  ], runId), "ambiguous");
+});
+
+test("M11-10-READY-10 (issue 2): foreign-run run.started must not project this run as waiting", () => {
+  const runId = "run_self";
+  // This run started plain (no delivery intent); a DIFFERENT run's run.started
+  // carries a delivery mode. deliveryRequested must be runId-bound, so the
+  // foreign intent cannot flip this run to waiting_for_packaging.
+  assert.equal(projectDeliveryReadiness([
+    startedPlain(runId),
+    { type: "run.started", runId: "run_FOREIGN", delivery: { mode: "git_commit_v1" } },
+    ...terminal(runId),
+  ], runId), "not_requested");
+  // And a transcript with ONLY the foreign delivery start (no self start) is
+  // also not_requested for this runId, never waiting_for_packaging.
+  assert.equal(projectDeliveryReadiness([
+    { type: "run.started", runId: "run_FOREIGN", delivery: { mode: "git_commit_v1" } },
+    ...terminal(runId),
+  ], runId), "not_requested");
+});
+
+test("M11-10-READY-11 (issue 3): multiple bound run.delivery_failed are conflicting → ambiguous; single → packaging_failed", () => {
+  const runId = "run_pf_multi";
+  // Regression guard: a single bound failure is still packaging_failed.
+  assert.equal(projectDeliveryReadiness([
+    startedWithDelivery(runId),
+    { type: "run.delivery_failed", runId, deliveryCode: "base_commit_mismatch" },
+    ...terminal(runId),
+  ], runId), "packaging_failed");
+  // Two bound failures are conflicting durable facts → ambiguous (fail closed).
+  assert.equal(projectDeliveryReadiness([
+    startedWithDelivery(runId),
+    { type: "run.delivery_failed", runId, deliveryCode: "base_commit_mismatch" },
+    { type: "run.delivery_failed", runId, deliveryCode: "worktree_dirty" },
+    ...terminal(runId),
+  ], runId), "ambiguous");
+});
+
 // =====================================================================
 // Group 2: getRunDeliveryReadiness wait service
 // =====================================================================
@@ -480,6 +536,49 @@ test("M11-10-SVC-09: point-in-time getRunDelivery shape unchanged (backward comp
       Object.keys(view).sort(),
       ["acceptance", "deliveryAvailable", "deliveryRef", "runId", "terminalState", "verification"].sort(),
     );
+  } finally { cleanupDir(runDir); }
+});
+
+test("M11-10-SVC-10 (issue 4): initial read ok but a later re-read throws → ambiguous early, not a disguised deadline expiry", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "m1110-svc-10-"));
+  try {
+    const runId = "run_svc10";
+    const tp = writeTranscript(runDir, runId, [
+      startedWithDelivery(runId),
+      { type: "run.delivery_created", runId, delivery: makeRef(runId) },
+      ...terminal(runId),
+      // NO verification → waiting_for_verification, so the wait enters the poll loop
+    ]);
+    const before = readFileSync(tp, "utf8");
+    let readCount = 0;
+    const readTranscriptFn = async (fp) => {
+      readCount += 1;
+      if (readCount === 1) {
+        // initial read succeeds → projects waiting_for_verification
+        const { readTranscript } = await import("../src/transcript.js");
+        return readTranscript(fp);
+      }
+      // every subsequent re-read fails (simulated IO/corruption mid-wait)
+      throw new Error("simulated transcript re-read failure");
+    };
+    // Deterministic clock with a far-away deadline, so the ONLY reason polling
+    // stops is the re-read failure — not time expiring.
+    let t = 1_000_000;
+    const result = await getRunDeliveryReadiness({
+      runId, runDir, waitMs: 5000,
+      sleepFn: async () => { t += 100; },
+      nowFn: () => t,
+      pollIntervalMs: 50,
+      readTranscriptFn,
+    });
+    // Fail-closed to the EXISTING ambiguous closed-set value — not a new state,
+    // not an echoed error, and NOT the stale waiting snapshot (the old
+    // break-then-deadline path returned readiness:"waiting_for_verification",
+    // waitReturnedEarly:false, disguising the read failure as a normal expiry).
+    assert.equal(result.readiness, "ambiguous");
+    assert.equal(result.waitReturnedEarly, true, "returned early; not disguised as a deadline expiry");
+    assert.ok(readCount >= 2, "initial successful read + at least one failed re-read");
+    assert.equal(readFileSync(tp, "utf8"), before, "zero transcript append on read failure");
   } finally { cleanupDir(runDir); }
 });
 
