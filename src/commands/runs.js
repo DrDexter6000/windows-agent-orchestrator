@@ -629,6 +629,17 @@ async function runsDeliveryReviewCommand(args, config, hostDeps = {}) {
     return;
   }
 
+  // Text mode. verification_pending is advisory, NOT a file identity and NOT an
+  // error: there is no proof-backed metadata to print (changedPath/count are
+  // null), so the normal "File: … (i/count)" line must be skipped entirely.
+  if (!result.available && result.unavailableReason === "verification_pending") {
+    console.log("[not reviewable yet: verification_pending]");
+    console.log("Exact delivery verification has not been recorded; no diff is available yet.");
+    console.log("Advisory only — wait via `runs delivery <runId> --wait-ms N` or retry review later.");
+    console.log(`requested fileIndex: ${result.fileIndex}`);
+    return;
+  }
+
   // Text mode: safe file identity + fragment or unavailable status + cursor.
   console.log(`File: ${result.changedPath} (${result.fileIndex + 1}/${result.changedFileCount})`);
   if (result.available) {

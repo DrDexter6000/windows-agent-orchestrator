@@ -50,6 +50,8 @@ import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 import { assertDeliveryCommitInRepository, isValidRunId } from "../delivery.js";
 import { validateProjectedPath } from "./deliveryReview.js";
+import { projectDeliveryReadiness } from "./runDelivery.js";
+import { REVIEW_PENDING_REASON } from "./reviewUnavailableReasons.js";
 
 /**
  * Validate a fileIndex against a verified changed-file list.
@@ -523,6 +525,71 @@ export async function getRunDeliveryReview(
   { runId, runDir, authorizedWorkspaceRoot, fileIndex, cursor },
   hostDependencies = {},
 ) {
+  // M11-12A: not-yet-reviewable truth. If exact delivery verification has not
+  // been recorded yet, surface a TRUTHFUL structured not-yet-reviewable result
+  // instead of the generic review error, so a Lead can wait (run_delivery
+  // waitMs) or retry review later. Pending is the ONLY readiness state handled
+  // here; it is valid for the EXACT `waiting_for_verification` state only. This
+  // gate runs AFTER workspace ownership but BEFORE resolveRunDeliveryReviewTarget
+  // (which reads the Git commit proof) and before any diff/numstat read — so the
+  // pending path performs ZERO Git proof / numstat / diff reader calls. Every
+  // other readiness state (reviewable, ambiguous, packaging_failed,
+  // waiting_for_packaging, not_requested) falls through to the existing
+  // fail-closed resolver path below, unchanged. No duplicate readiness logic:
+  // projectDeliveryReadiness is the SAME SSOT run_delivery uses.
+  if (!isValidRunId(runId)) {
+    throw new Error("invalid runId");
+  }
+  if (typeof runDir !== "string" || runDir.length === 0) {
+    throw new Error("runDir must be a non-empty string");
+  }
+  if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) {
+    throw new Error("authorizedWorkspaceRoot must be a non-empty string");
+  }
+  const _readTranscriptForGate = hostDependencies.readTranscriptFn ?? readTranscript;
+  const { join: _pathJoin } = await import("node:path");
+  const _gateFilePath = _pathJoin(runDir, `${runId}.jsonl`);
+  let _gateEvents;
+  try {
+    _gateEvents = await _readTranscriptForGate(_gateFilePath);
+  } catch {
+    throw new Error("transcript not readable");
+  }
+  if (!Array.isArray(_gateEvents)) {
+    throw new Error("transcript malformed");
+  }
+  // Workspace ownership FIRST — a cross-workspace request must never reach the
+  // readiness probe, the Git proof, or any content read.
+  verifyRunWorkspaceOwnership(_gateEvents, authorizedWorkspaceRoot);
+
+  const _readiness = projectDeliveryReadiness(_gateEvents, runId);
+  if (_readiness === "waiting_for_verification") {
+    // fileIndex must be a non-negative integer (it is echoed back so the Lead
+    // can correlate the advisory with its request). A supplied cursor is
+    // rejected: a not-yet-reviewable artifact is never paginated.
+    if (!Number.isInteger(fileIndex) || fileIndex < 0) {
+      throw new Error("fileIndex must be a non-negative integer");
+    }
+    if (cursor !== undefined && cursor !== null) {
+      throw new Error("invalid cursor: artifact not paginated");
+    }
+    return {
+      runId,
+      deliveryCommit: null,
+      fileIndex,
+      changedFileCount: null,
+      changedPath: null,
+      contentFormat: null,
+      artifactTextTrust: null,
+      available: false,
+      unavailableReason: REVIEW_PENDING_REASON,
+      fragment: "",
+      fragmentBytes: 0,
+      nextCursor: null,
+      truncated: false,
+    };
+  }
+
   // 1. Eligibility + exact target (M11-3A). All runId/ownership/proof/fileIndex
   //    gates run here, before any diff content is read.
   const target = await resolveRunDeliveryReviewTarget({

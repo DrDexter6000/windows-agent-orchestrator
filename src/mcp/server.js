@@ -52,6 +52,7 @@ import {
 } from "../application/runWait.js";
 import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
 import { projectReviewResult } from "../application/deliveryReviewProjection.js";
+import { REVIEW_UNAVAILABLE_REASONS } from "../application/reviewUnavailableReasons.js";
 import { projectCollectResult } from "../application/runCollectProjection.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
 import { selectSessionWorkspace } from "../application/sessionWorkspace.js";
@@ -989,16 +990,24 @@ const DELIVERY_REVIEW_INPUT = z.object({
   cursor: z.string().max(192).optional(),
 }).strict();
 
+// M11-12A: the five proof-backed fields are nullable — they are null ONLY for
+// the verification_pending variant (exact verification not yet recorded, so
+// there is no proof to surface). The closed-set unavailable-reason enum is the
+// SAME SSOT the application projection consumes (reviewUnavailableReasons.js),
+// so the two cannot drift. Cross-field rules (pending ⇒ all five null + empty
+// fragment; binary/diff_too_large ⇒ all five non-null) are enforced by the
+// shared projectReviewResult trust boundary BEFORE this schema parse; this
+// schema is the structural defense-in-depth layer.
 const DELIVERY_REVIEW_OUTPUT = z.object({
   runId: z.string(),
-  deliveryCommit: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/),
+  deliveryCommit: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/).nullable(),
   fileIndex: z.number().int().nonnegative(),
-  changedFileCount: z.number().int().nonnegative(),
-  changedPath: z.string().min(1).max(512),
-  contentFormat: z.literal("unified_diff_v1"),
-  artifactTextTrust: z.literal("untrusted_repository_text"),
+  changedFileCount: z.number().int().nonnegative().nullable(),
+  changedPath: z.string().min(1).max(512).nullable(),
+  contentFormat: z.literal("unified_diff_v1").nullable(),
+  artifactTextTrust: z.literal("untrusted_repository_text").nullable(),
   available: z.boolean(),
-  unavailableReason: z.enum(["binary", "diff_too_large"]).nullable(),
+  unavailableReason: z.enum(REVIEW_UNAVAILABLE_REASONS).nullable(),
   fragment: z.string().max(16384),
   fragmentBytes: z.number().int().nonnegative(),
   nextCursor: z.string().regex(/^[A-Za-z0-9_-]+$/).max(192).nullable(),
@@ -1020,7 +1029,12 @@ const DELIVERY_REVIEW_DESCRIPTION =
   "fileIndex addresses a verified changed file (from run_delivery changedFiles); " +
   "the model never supplies a raw path. cursor is an opaque continuation token " +
   "from a prior page's nextCursor. Returns at most 16 KiB per page; binary or " +
-  "over-256 KiB files return metadata only.";
+  "over-256 KiB files return metadata only. When exact delivery verification has " +
+  "not been recorded yet, the result is available:false with unavailableReason " +
+  "'verification_pending' (no fragment and no proof-backed metadata — only nulls): " +
+  "this is advisory only, NOT an error. The Lead may wait via run_delivery(waitMs) " +
+  "or retry run_delivery_review later; it is never an automatic stop, accept, or " +
+  "reject, and never a reason to read Git directly.";
 export function createWaoMcpServer({
   registryPath,
   runDir,

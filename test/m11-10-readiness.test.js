@@ -292,6 +292,52 @@ test("M11-10-READY-11 (issue 3): multiple bound run.delivery_failed are conflict
   ], runId), "ambiguous");
 });
 
+// --- M11-12A P1: malformed commit literal on a BOUND created/verification ref ---
+
+test("M11-10-READY-12 (M11-12A P1): bound created ref with a malformed commit literal → ambiguous, never waiting_for_verification", () => {
+  // Causal root-cause guard. A bound delivery_created (DeliveryRef.runId ===
+  // envelope runId, so NOT a cross-run ref) whose baseCommit/deliveryCommit is
+  // non-canonical must fail closed to ambiguous — it must NEVER reach
+  // waiting_for_verification, which would surface a verification_pending review
+  // result with nulls. The canonical check reuses isCanonicalCommitId via
+  // _deliveryRefIsUsable (the SSOT _reconstructDelivery already uses); no second
+  // regex. (RED on frozen main: _hasConflictDelivery used the weaker
+  // _deliveryRefIsBound → these projected waiting_for_verification.)
+  const runId = "run_mal_commit";
+  const cases = [
+    { label: "deliveryCommit=HEAD",       over: { deliveryCommit: "HEAD" } },
+    { label: "deliveryCommit short SHA",  over: { deliveryCommit: "d".repeat(7) } },
+    { label: "deliveryCommit uppercase",  over: { deliveryCommit: "D".repeat(40) } },
+    { label: "deliveryCommit non-hex",    over: { deliveryCommit: "z".repeat(40) } },
+    { label: "deliveryCommit missing",    over: { deliveryCommit: undefined } },
+    { label: "baseCommit=HEAD",           over: { baseCommit: "HEAD" } },
+    { label: "baseCommit missing",        over: { baseCommit: undefined } },
+    { label: "baseCommit non-hex",        over: { baseCommit: "g".repeat(40) } },
+  ];
+  for (const c of cases) {
+    const ref = makeRef(runId, c.over);
+    const got = projectDeliveryReadiness([
+      startedWithDelivery(runId),
+      { type: "run.delivery_created", runId, delivery: ref },
+      ...terminal(runId),
+    ], runId);
+    assert.equal(got, "ambiguous", `${c.label}: malformed commit must fail closed to ambiguous`);
+  }
+  // Boundary contrast: a CANONICAL created ref with no verification stays the
+  // legitimate transient pending state. There is NO terminal-state guard before
+  // waiting_for_verification (terminal+created+no verification is pending, not
+  // ambiguous) — the fix touches only commit-canonicality, not this path.
+  assert.equal(
+    projectDeliveryReadiness([
+      startedWithDelivery(runId),
+      { type: "run.delivery_created", runId, delivery: makeRef(runId) },
+      ...terminal(runId),
+    ], runId),
+    "waiting_for_verification",
+    "canonical created ref (no verification) stays waiting_for_verification",
+  );
+});
+
 // =====================================================================
 // Group 2: getRunDeliveryReadiness wait service
 // =====================================================================

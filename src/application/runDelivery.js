@@ -102,13 +102,26 @@ function _deliveryRefIsBound(e, runId) {
 }
 
 /**
+ * A bound created/verification event is a durable conflict unless its DeliveryRef
+ * is fully USABLE: bound (a missing/non-object payload, or a ref.runId that
+ * disagrees with its envelope = cross-run injection) AND both baseCommit and
+ * deliveryCommit canonical lowercase 40/64-hex. The canonical-commit requirement
+ * reuses the SAME isCanonicalCommitId SSOT that assertDeliveryCommitInRepository
+ * and validateDeliveryFacts enforce — HEAD / short SHA / uppercase / non-hex /
+ * missing commit is a conflict, never a usable fact. No second regex, no
+ * error-string matching: _deliveryRefIsUsable is the single usability rule,
+ * shared with _reconstructDelivery so the readiness label and the reconstructed
+ * view cannot diverge (M11-12A P1: projectDeliveryReadiness previously used the
+ * weaker _deliveryRefIsBound here, letting a malformed-commit created ref reach
+ * waiting_for_verification).
+ *
  * @param {object[]} boundEvents — already envelope-bound to runId
  * @param {string} runId
  * @returns {boolean} true if ANY bound event has a malformed/cross-run delivery
  * @private
  */
 function _hasConflictDelivery(boundEvents, runId) {
-  return boundEvents.some((e) => !_deliveryRefIsBound(e, runId));
+  return boundEvents.some((e) => !_deliveryRefIsUsable(e, runId));
 }
 
 /**
@@ -150,11 +163,15 @@ export function projectDeliveryReadiness(events, runId) {
     (e) => e && e.type === "run.delivery_failed" && e.runId === runId,
   );
 
-  // M11-10 closeout (auditor blockers 2 & 3): a bound created/verification event
-  // with a missing/non-object delivery payload, or whose DeliveryRef.runId
-  // disagrees with its envelope, is a durable conflict. It must NEVER be filtered
-  // into a clean waiting_for_packaging / not_requested state — fail closed to
-  // ambiguous. No malformed/injected value is echoed (only the closed-set label).
+  // M11-10 closeout (auditor blockers 2 & 3) + M11-12A P1: a bound created/
+  // verification event is a durable conflict unless its DeliveryRef is fully
+  // USABLE — a missing/non-object payload, a DeliveryRef.runId that disagrees
+  // with its envelope (cross-run injection), OR a non-canonical baseCommit /
+  // deliveryCommit (HEAD / short SHA / uppercase / non-hex / missing; reuses
+  // isCanonicalCommitId via _deliveryRefIsUsable). Such an event must NEVER reach
+  // waiting_for_verification — which would surface a verification_pending review
+  // result — so it fails closed to ambiguous. No malformed/injected value is
+  // echoed (only the closed-set label).
   if (_hasConflictDelivery(boundCreated, runId)) return "ambiguous";
   if (_hasConflictDelivery(boundVerification, runId)) return "ambiguous";
 
