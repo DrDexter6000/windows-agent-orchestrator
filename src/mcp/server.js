@@ -416,6 +416,30 @@ const ACCEPTANCE_STATUS_ENUM = z.enum(["pending", "accepted", "rejected"]);
 const FAILURE_CODE_ENUM = z.enum(["command_failed", "command_timeout", "artifact_mutated", "artifact_mismatch", "execution_error", "unknown"]);
 const DECISION_TYPE_ENUM = z.enum(["run.delivery_accepted", "run.delivery_rejected"]);
 
+// M11-12B: Windows exit codes are nonnegative 32-bit values (NOT POSIX 0..255).
+// Real Windows codes such as 9009 (command-not-found) must be preserved verbatim;
+// negative, fractional, non-number, and > 0xffffffff values are rejected/nulled
+// rather than masked. Node on Windows reports the OS code directly via the spawn
+// `close` event, so this is the real causal domain (finding A).
+const VERIFICATION_MAX_EXIT_CODE = 0xffffffff;
+
+// M11-12B: strict 8-key verification-failure summary schema. Non-null ONLY when
+// verificationStatus === "failed". Safe scalars only — never command text,
+// stdout/stderr content, signal, paths, env, credentials, or dynamic errors.
+// `code` reuses FAILURE_CODE_ENUM (the same safe closed set as
+// verificationFailureCode), so summary.code and verificationFailureCode cannot
+// diverge (finding C). `.strict()` rejects any extra key (finding D).
+const VERIFICATION_FAILURE_SUMMARY = z.object({
+  code: FAILURE_CODE_ENUM,
+  failedCommandIndex: z.number().int().nonnegative().nullable(),
+  declaredCommandCount: z.number().int().nonnegative().nullable(),
+  executedCommandCount: z.number().int().nonnegative().nullable(),
+  exitCode: z.number().int().min(0).max(VERIFICATION_MAX_EXIT_CODE).nullable(),
+  timedOut: z.boolean().nullable(),
+  stdoutBytes: z.number().int().nonnegative().nullable(),
+  stderrBytes: z.number().int().nonnegative().nullable(),
+}).strict();
+
 // M11-10: run_delivery gains an OPTIONAL bounded read-only wait. The waitMs
 // bounds are the shared application-layer constants (locked in runDelivery.js)
 // so the MCP schema and the service business boundary cannot drift. Omitted
@@ -459,6 +483,11 @@ const RUN_DELIVERY_OUTPUT = z.object({
   changedPathsTruncated: z.boolean().nullable(),
   verificationStatus: VERIFICATION_STATUS_ENUM.nullable(),
   verificationFailureCode: FAILURE_CODE_ENUM.nullable(),
+  // M11-12B: nullable verification-failure summary. Non-null ONLY when
+  // verificationStatus === "failed". Strict 8-key object of safe scalars;
+  // shared by the point-in-time query and the waitMs readiness handshake
+  // (both build their payload via buildRunDeliveryPayload).
+  verificationFailureSummary: VERIFICATION_FAILURE_SUMMARY.nullable(),
   acceptanceStatus: ACCEPTANCE_STATUS_ENUM.nullable(),
   decisionType: DECISION_TYPE_ENUM.nullable(),
   // Failure-only field (non-null iff deliveryAvailable === false).
@@ -491,6 +520,82 @@ const RUN_DELIVERY_DESCRIPTION =
   "A pending-at-deadline outcome is returned as a truthful fact, never an error; the tool " +
   "never stop/retry/accept/rejects. readiness closed set: " +
   DELIVERY_READINESS_STATES.join(", ") + ".";
+
+/**
+ * M11-12B: project a safe, factual verification-failure summary from the raw
+ * DeliveryRef verification object. Returns null unless verificationStatus ===
+ * "failed". Exact eight safe scalar fields; never command text, stdout/stderr
+ * content, signal, paths, env, credentials, or dynamic errors.
+ *
+ * Windows exit codes (finding A): preserve nonnegative 32-bit (0..0xffffffff),
+ * including real Windows values like 9009 (command-not-found). Negative,
+ * fractional, non-number, and > 0xffffffff are nulled — never clamped/masked.
+ *
+ * Result identity (finding B): the four per-command fields (exitCode/timedOut/
+ * stdoutBytes/stderrBytes) project ONLY from results[failedCommandIndex] when
+ * it is a plain object whose `index` is an integer exactly equal to
+ * failedCommandIndex. On mismatch/missing/malformed result, counts/index/code
+ * stay safe but the four per-command fields are null.
+ *
+ * `projectedFailureCode` is the SAME code computed for the top-level
+ * verificationFailureCode (finding C) — already through the safe closed set —
+ * so summary.code and verificationFailureCode cannot diverge. Malformed input
+ * (null/non-object ref, missing/non-object verification, non-array commands/
+ * results) fails safe: counts/code/index stay when valid, everything else nulls.
+ *
+ * Exported for direct unit testing of the causal A/B/C rules.
+ */
+export function projectVerificationFailureSummary(ref, verificationStatus, projectedFailureCode) {
+  if (verificationStatus !== "failed") return null;
+  const v = ref && typeof ref === "object" && ref.verification && typeof ref.verification === "object"
+    ? ref.verification
+    : {};
+
+  // code: the shared projected failure code (finding C). Always a safe enum
+  // member inside the summary; the "unknown" fallback is defensive.
+  const code = projectedFailureCode ?? "unknown";
+
+  // failedCommandIndex: nonnegative integer or null.
+  const rawFailedIdx = v.failedCommandIndex;
+  const failedCommandIndex = Number.isInteger(rawFailedIdx) && rawFailedIdx >= 0
+    ? rawFailedIdx
+    : null;
+
+  // Counts: nonnegative integer array lengths or null (non-array → null).
+  const declaredCommandCount = Array.isArray(v.commands) ? v.commands.length : null;
+  const executedCommandCount = Array.isArray(v.results) ? v.results.length : null;
+
+  // Per-command result fields (finding B): require a plain result object whose
+  // index is an integer exactly equal to failedCommandIndex. On any mismatch,
+  // keep counts/index/code safe; null the four per-command fields.
+  let exitCode = null;
+  let timedOut = null;
+  let stdoutBytes = null;
+  let stderrBytes = null;
+  if (failedCommandIndex !== null && Array.isArray(v.results)) {
+    const r = v.results[failedCommandIndex];
+    if (r && typeof r === "object" && Number.isInteger(r.index) && r.index === failedCommandIndex) {
+      // Finding A: nonnegative 32-bit only.
+      exitCode = Number.isInteger(r.exitCode) && r.exitCode >= 0 && r.exitCode <= VERIFICATION_MAX_EXIT_CODE
+        ? r.exitCode
+        : null;
+      timedOut = r.timedOut === true || r.timedOut === false ? r.timedOut : null;
+      stdoutBytes = Number.isInteger(r.stdoutBytes) && r.stdoutBytes >= 0 ? r.stdoutBytes : null;
+      stderrBytes = Number.isInteger(r.stderrBytes) && r.stderrBytes >= 0 ? r.stderrBytes : null;
+    }
+  }
+
+  return {
+    code,
+    failedCommandIndex,
+    declaredCommandCount,
+    executedCommandCount,
+    exitCode,
+    timedOut,
+    stdoutBytes,
+    stderrBytes,
+  };
+}
 
 // M11-10: shared safe-projection for run_delivery. Both the point-in-time query
 // and the bounded-wait readiness handshake build their payload from this ONE
@@ -531,6 +636,7 @@ function buildRunDeliveryPayload(runId, view) {
       changedPathsTruncated: null,
       verificationStatus: null,
       verificationFailureCode: null,
+      verificationFailureSummary: null,
       acceptanceStatus: null,
       decisionType: null,
       deliveryFailure: failure ? { code: failure.code ?? "unknown" } : null,
@@ -558,10 +664,23 @@ function buildRunDeliveryPayload(runId, view) {
   const rawVStatus = view.verification?.status ?? "pending";
   if (!SAFE_VERIFICATION_STATUSES.has(rawVStatus)) throw new Error("bad verificationStatus");
   const verificationStatus = rawVStatus;
-  const rawFailureCode = view.verification?.failureCode;
-  const verificationFailureCode = rawFailureCode
-    ? (SAFE_FAILURE_CODES.has(rawFailureCode) ? rawFailureCode : "unknown")
+  // M11-12B (finding C): a failureCode is meaningful ONLY for failed
+  // verification. Project the raw value through the safe closed set ONCE and
+  // reuse the result for BOTH the top-level verificationFailureCode and
+  // summary.code so the two cannot diverge. For failed status, missing/invalid/
+  // unknown collapses to the safe "unknown"; non-failed states are null (a
+  // failureCode carried on a non-failed ref is malformed/ignored, not echoed).
+  const projectedFailureCode = verificationStatus === "failed"
+    ? (SAFE_FAILURE_CODES.has(view.verification?.failureCode) ? view.verification.failureCode : "unknown")
     : null;
+  const verificationFailureCode = projectedFailureCode;
+  // M11-12B: safe factual summary, non-null only when failed. Reads the raw
+  // DeliveryRef verification (commands/results/failedCommandIndex) but emits
+  // only the eight safe scalars — never command text, stdout/stderr content,
+  // signal, or paths.
+  const verificationFailureSummary = projectVerificationFailureSummary(
+    ref, verificationStatus, projectedFailureCode,
+  );
   const rawAcceptance = view.acceptance?.status ?? "pending";
   if (!SAFE_ACCEPTANCE_STATUSES.has(rawAcceptance)) throw new Error("bad acceptanceStatus");
   const acceptanceStatus = rawAcceptance;
@@ -579,6 +698,7 @@ function buildRunDeliveryPayload(runId, view) {
     changedPathsTruncated: projection.changedPathsTruncated,
     verificationStatus,
     verificationFailureCode,
+    verificationFailureSummary,
     acceptanceStatus,
     decisionType,
     deliveryFailure: null,

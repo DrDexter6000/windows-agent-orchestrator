@@ -95,7 +95,7 @@ test("M9-6B-02: run_delivery returns safe fields incl. bounded changedPaths, no 
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     // M11-1A: changedPaths + changedPathsTruncated are now part of the safe output set.
     // M11-8C: deliveryAvailable (success discriminator) + deliveryFailure (null on success).
-    const allowed = new Set(["runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit", "changedFileCount", "changedPaths", "changedPathsTruncated", "verificationStatus", "verificationFailureCode", "acceptanceStatus", "decisionType", "deliveryFailure"]);
+    const allowed = new Set(["runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit", "changedFileCount", "changedPaths", "changedPathsTruncated", "verificationStatus", "verificationFailureCode", "verificationFailureSummary", "acceptanceStatus", "decisionType", "deliveryFailure"]);
     for (const k of Object.keys(parsed)) assert.ok(allowed.has(k), `unexpected key: ${k}`);
     assert.equal(parsed.deliveryAvailable, true, "success variant has deliveryAvailable:true");
     assert.equal(parsed.deliveryRequested, true, "success variant confirms delivery intent");
@@ -424,11 +424,12 @@ test("M11-1A-01: run_delivery output field set is exactly old fields + changedPa
     const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     // M11-8C: added deliveryAvailable (success discriminator) + deliveryFailure (null here).
+    // M11-12B: added nullable verificationFailureSummary (null here — status is passed).
     const expectedKeys = new Set([
       "runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit",
       "changedFileCount", "changedPaths", "changedPathsTruncated",
-      "verificationStatus", "verificationFailureCode", "acceptanceStatus", "decisionType",
-      "deliveryFailure",
+      "verificationStatus", "verificationFailureCode", "verificationFailureSummary",
+      "acceptanceStatus", "decisionType", "deliveryFailure",
     ]);
     assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys,
       `field set mismatch; got ${Object.keys(parsed).sort()}`);

@@ -775,6 +775,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
   "changedPathsTruncated": false,
   "verificationStatus": "passed",
   "verificationFailureCode": null,
+  "verificationFailureSummary": null,
   "acceptanceStatus": "pending",
   "decisionType": null
 }
@@ -788,6 +789,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 - `changedPathsTruncated` = `changedFileCount > changedPaths.length`（即真实总数超过 64 cap）。
 - `verificationStatus` ∈ `pending|passed|failed|unavailable`；只有 `passed` 表示 exact-artifact verification 已通过，Lead 仍负责语义判断。
 - `verificationFailureCode` ∈ 安全 enum 或 null；`decisionType` ∈ `run.delivery_accepted|run.delivery_rejected|null`。
+- `verificationFailureSummary`（M11-12B，nullable）仅当 `verificationStatus === "failed"` 时非 null，是**安全事实摘要**——让 Lead 定位哪个声明检查失败，但绝不泄漏命令文本/stdout·stderr 内容/signal/path/env/credential/prompt/动态错误。严格 8 键对象，且仅含安全标量：`code`（与 `verificationFailureCode` 同一闭集投影；`failed` 时缺失/非法/未知一律为 `unknown`）、`failedCommandIndex`、`declaredCommandCount`、`executedCommandCount`、`exitCode`、`timedOut`、`stdoutBytes`、`stderrBytes`。`exitCode` 保留 Windows 非负 32 位值（含 9009；不按 POSIX 0..255 截断），负/小数/非数/`> 0xffffffff` 一律 null。per-command 字段（`exitCode`/`timedOut`/`stdoutBytes`/`stderrBytes`）仅当 `results[failedCommandIndex]` 是 `result.index === failedCommandIndex` 的 plain object 时投影；不匹配/缺失/malformed 时保留 counts/index/code 但置空这四个字段。malformed 数据 fail-safe 且向后兼容（非 failed 状态为 null）。无产品 vs 环境分类、无处方/重试/stop/accept-reject、无新工具/日志子系统。
 
 路径投影的安全边界：每个 path 经 `src/delivery.js` 的 repo-relative 校验 SSOT 复验（拒绝绝对 Windows/POSIX/UNC、`..`/`.` traversal、空 segment、尾分隔符），并额外限制长度 1..512、无控制字符、无 NUL、统一 forward-slash。任何 malformed path 一律 fail-closed —— 整个 projection 不返回部分结果，调用折叠为固定 `run_delivery failed`，不泄漏恶意值。失败返回固定 `run_delivery failed`（不拼接异常、路径或 secret）。
 

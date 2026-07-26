@@ -725,10 +725,10 @@ test("M11-10-MCP-02: output schema — readiness/waitReturnedEarly present iff w
       const expectedKeys = new Set([
         "runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit",
         "changedFileCount", "changedPaths", "changedPathsTruncated",
-        "verificationStatus", "verificationFailureCode", "acceptanceStatus", "decisionType",
-        "deliveryFailure",
+        "verificationStatus", "verificationFailureCode", "verificationFailureSummary",
+        "acceptanceStatus", "decisionType", "deliveryFailure",
       ]);
-      assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys, "point-in-time field set unchanged");
+      assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys, "point-in-time field set (M11-12B adds nullable verificationFailureSummary)");
       assert.equal("readiness" in parsed, false, "no readiness in point-in-time output");
       assert.equal("waitReturnedEarly" in parsed, false, "no waitReturnedEarly in point-in-time output");
     } finally { await client2.close(); await server2.close(); }

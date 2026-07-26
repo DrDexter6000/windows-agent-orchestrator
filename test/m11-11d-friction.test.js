@@ -75,6 +75,7 @@ test("M11-11D-RED-2: MCP run_delivery preserves ordinary non-delivery as success
       changedPathsTruncated: null,
       verificationStatus: null,
       verificationFailureCode: null,
+      verificationFailureSummary: null,
       acceptanceStatus: null,
       decisionType: null,
       deliveryFailure: null,
