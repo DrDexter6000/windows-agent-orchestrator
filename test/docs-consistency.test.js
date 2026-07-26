@@ -799,6 +799,17 @@ test("M11 mainline: roadmap 存在且只存在一个 M11 Lead Experience + Adapt
     "M11 名称必须保留 Lead Experience + Adaptive Playbooks 两个核心");
 });
 
+test("M11-10 closeout: roadmap records the fresh Lead delivery-readiness canary without closing M11 overall", () => {
+  const roadmap = read("docs/roadmap.md");
+  const m11Row = roadmap.split("\n").find((line) => /^\| M11 \|/.test(line));
+  assert.ok(m11Row, "roadmap has an M11 row");
+  assert.match(m11Row, /M11-10 Delivery Readiness Handshake 已交付并通过 fresh Lead canary/);
+  assert.match(m11Row, /run_20260726093455485nl8l84/);
+  assert.match(m11Row, /delivery `df8bf65`/);
+  assert.match(m11Row, /唯一一次 `run_delivery\(waitMs\)` 返回 `reviewable` \+ verification passed，acceptance accepted/);
+  assert.match(m11Row, /\| M11 \| 🔧 进行中 \|/);
+});
+
 test("M10 closeout: Smash Bros delivery 未被宣称已集成", () => {
   const roadmap = read("docs/roadmap.md");
   const prd = read("docs/01-prd.md");
