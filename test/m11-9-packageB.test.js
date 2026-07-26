@@ -111,15 +111,19 @@ test("B8-kimi-model: model.id → --model", async () => {
   assert.ok(args.includes("kimi-code/k3"), "model id present");
 });
 
-test("B9-kimi-effort-rejected: reasoning.effort → throw (no single-process channel)", async () => {
+test("B9-kimi-effort: K3 max validates and is not duplicated as a CLI flag", async () => {
   const { KimiCodeBackend } = await import("../src/backends/kimiCode.js");
   const backend = new KimiCodeBackend();
-  const agent = { id: "coder_mm", backend: "kimi-code", cwd: "/x", reasoning: { effort: "high" } };
-  assert.throws(
-    () => backend.buildArgs(agent, { prompt: "task" }),
-    /kimi.*not.*support.*reasoning|no single-process/i,
-    "kimi rejects reasoning.effort",
-  );
+  const agent = {
+    id: "coder_mm",
+    backend: "kimi-code",
+    cwd: "/x",
+    model: { id: "kimi-code/k3" },
+    reasoning: { effort: "max" },
+  };
+  assert.doesNotThrow(() => backend.validateAgentPolicy(agent));
+  const args = backend.buildArgs(agent, { prompt: "task" });
+  assert.ok(!args.some((arg) => String(arg).includes("effort")), "effort uses child env, not argv");
 });
 
 test("B10-kimi-no-reasoning: absent → no error, no effort", async () => {

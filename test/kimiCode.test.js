@@ -32,6 +32,32 @@ function makeKimiAgent(overrides = {}) {
   };
 }
 
+function makeSpawnCapture(capture) {
+  return (binary, args, options) => {
+    capture.binary = binary;
+    capture.args = args;
+    capture.options = options;
+    const onceHandlers = new Map();
+    const onHandlers = new Map();
+    const child = {
+      pid: 43210,
+      exitCode: null,
+      signalCode: null,
+      stdout: { on() {} },
+      stderr: { on() {} },
+      once(event, handler) { onceHandlers.set(event, handler); },
+      on(event, handler) { onHandlers.set(event, handler); },
+      kill() {},
+    };
+    setImmediate(() => {
+      onceHandlers.get("spawn")?.();
+      child.exitCode = 0;
+      onHandlers.get("close")?.(0);
+    });
+    return child;
+  };
+}
+
 test("S2-2: KimiCodeBackend 构造不抛错", () => {
   assert.doesNotThrow(() => new KimiCodeBackend());
 });
@@ -47,6 +73,25 @@ test("S2-2: buildArgs 生成正确参数（-p + --output-format stream-json）",
   // 这里直接测 super 里传的 buildArgs（KimiCodeBackend 不暴露 buildArgs，用 agent.args 追加验证）
   // 完整参数验证留给端到端测试
   assert.ok(typeof backend.parserClass === "function");
+});
+
+test("M11-9: Kimi reasoning.max is injected only into the child process", async () => {
+  const capture = {};
+  const backend = new KimiCodeBackend({ spawnFn: makeSpawnCapture(capture) });
+  const agent = makeKimiAgent({
+    binary: "kimi",
+    model: { id: "kimi-code/k3" },
+    reasoning: { effort: "max" },
+  });
+  const originalEnv = process.env.KIMI_MODEL_THINKING_EFFORT;
+
+  await backend.spawn(agent, { prompt: "test" });
+
+  assert.equal(capture.options.env.KIMI_MODEL_THINKING_EFFORT, "max");
+  assert.equal(process.env.KIMI_MODEL_THINKING_EFFORT, originalEnv);
+  assert.equal(agent.env, undefined, "agent config is not mutated");
+  assert.equal(capture.args.filter((arg) => arg === "--model").length, 1);
+  assert.equal(capture.args[capture.args.indexOf("--model") + 1], "kimi-code/k3");
 });
 
 test("S2-2: agent.args 追加 --yolo 到参数末尾", async () => {

@@ -2,6 +2,10 @@ import { ProcessBackend } from "./processBackend.js";
 import { KimiStreamParser } from "./parsers/kimiCode.js";
 import { inheritedEnvNames } from "../envPolicy.js";
 
+const KIMI_K3_MODEL_ID = "kimi-code/k3";
+const KIMI_K3_EFFORTS = new Set(["low", "high", "max"]);
+const KIMI_REASONING_EFFORT_ENV = "KIMI_MODEL_THINKING_EFFORT";
+
 /**
  * Kimi Code CLI backend（S2-2，阶段 2）。
  * 薄封装：ProcessBackend + KimiStreamParser + 参数构造。
@@ -25,20 +29,26 @@ export class KimiCodeBackend extends ProcessBackend {
   supportsRoleContract = true;
 
   /**
-   * M11-9 CTO closeout: kimi 0.29.1 has no single-process effort override
-   * channel (probe confirmed: no --effort/--config CLI flag; effort is global
-   * in ~/.kimi-code/config.toml which WAO must not modify). Reject reasoning
-   * BEFORE any side effects (transcript/worktree/spawn).
+   * Kimi Code 0.29.1 exposes KIMI_MODEL_THINKING_EFFORT as a process-scoped
+   * override for the Kimi provider. K3 accepts low/high/max. WAO compiles the
+   * canonical reasoning field into that child-only environment variable.
    *
-   * Capability: kimi can express model.id (--model). It CANNOT express
-   * reasoning.effort, contextWindow, or provider.
+   * Capability: kimi can express model.id (--model) and K3 reasoning.effort.
+   * It cannot express a WAO contextWindow override or provider policy.
    */
   validateAgentPolicy(agent) {
-    if (agent?.reasoning?.effort) {
+    const effort = agent?.reasoning?.effort;
+    if (effort && (
+      agent?.model?.id !== KIMI_K3_MODEL_ID ||
+      !KIMI_K3_EFFORTS.has(effort)
+    )) {
       throw new Error(
-        "kimi-code backend does not support reasoning.effort " +
-        "(no single-process override channel in 0.29.1; " +
-        "configure ~/.kimi-code/config.toml globally instead)",
+        "kimi-code backend does not support the configured reasoning.effort for this model",
+      );
+    }
+    if (Object.hasOwn(agent?.env ?? {}, KIMI_REASONING_EFFORT_ENV)) {
+      throw new Error(
+        `${KIMI_REASONING_EFFORT_ENV} is managed by canonical reasoning.effort`,
       );
     }
     if (agent?.model?.contextWindow) {
@@ -53,12 +63,6 @@ export class KimiCodeBackend extends ProcessBackend {
     super({
       parserClass: KimiStreamParser,
       buildArgs: (agent, task) => {
-        // M11-9: model from canonical structured field. reasoning.effort is NOT
-        // supported (kimi 0.29.1 has no single-process effort override channel;
-        // effort is global in ~/.kimi-code/config.toml which WAO must not modify).
-        if (agent.reasoning?.effort) {
-          throw new Error("kimi-code backend does not support reasoning.effort (no single-process override channel; configure ~/.kimi-code/config.toml globally instead)");
-        }
         // M11-5（TD-89 修复）：kimi CLI 无 system/developer message 通道
         // （-p 只接受单个 prompt 字符串，无 system flag）。fallback：把角色
         // 合同与任务用固定分隔组合进同一个 prompt。role 在前、task 在后、
@@ -83,6 +87,21 @@ export class KimiCodeBackend extends ProcessBackend {
       credentialEnvNames: (agent) => inheritedEnvNames(agent),
       ...opts,
     });
+  }
+
+  async spawn(agent, task) {
+    this.validateAgentPolicy(agent);
+    const effort = agent?.reasoning?.effort;
+    const effectiveAgent = effort
+      ? {
+          ...agent,
+          env: {
+            ...(agent.env ?? {}),
+            [KIMI_REASONING_EFFORT_ENV]: effort,
+          },
+        }
+      : agent;
+    return super.spawn(effectiveAgent, task);
   }
 
   defaultBinary() {

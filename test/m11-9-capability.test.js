@@ -122,11 +122,22 @@ test("CAP-A4-kimi: model accepted", async () => {
   }));
 });
 
-test("CAP-A4b-kimi: reasoning → reject", async () => {
+test("CAP-A4b-kimi: supported reasoning max → accept", async () => {
+  const { KimiCodeBackend } = await import("../src/backends/kimiCode.js");
+  const backend = new KimiCodeBackend();
+  assert.doesNotThrow(
+    () => backend.validateAgentPolicy({
+      model: { id: "kimi-code/k3" },
+      reasoning: { effort: "max" },
+    }),
+  );
+});
+
+test("CAP-A4b2-kimi: unsupported reasoning xhigh → reject", async () => {
   const { KimiCodeBackend } = await import("../src/backends/kimiCode.js");
   const backend = new KimiCodeBackend();
   assert.throws(
-    () => backend.validateAgentPolicy({ reasoning: { effort: "high" } }),
+    () => backend.validateAgentPolicy({ reasoning: { effort: "xhigh" } }),
     /cannot express|not supported|reasoning/i,
   );
 });
@@ -148,29 +159,24 @@ test("CAP-B1: RunManager.start with Kimi + reasoning → reject, zero transcript
     makeGitRepo(dir);
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({
-      agents: { coder_mm: { backend: "kimi-code", cwd: dir, model: { id: "kimi-code/k3" }, reasoning: { effort: "high" } } },
+      agents: { coder_mm: { backend: "kimi-code", cwd: dir, model: { id: "kimi-code/k3" }, reasoning: { effort: "xhigh" } } },
     }), "utf8");
     const runDir = join(dir, "runs");
 
     const { RunManager } = await import("../src/runManager.js");
+    const { KimiCodeBackend } = await import("../src/backends/kimiCode.js");
     let spawnCount = 0;
-    const fakeBackend = {
-      supportsRoleContract: true, sessionOutlivesProcess: false,
-      validateAgentPolicy(agent) {
-        // Real KimiCodeBackend's actual validator logic
-        if (agent?.reasoning?.effort) throw new Error("kimi-code: reasoning.effort not supported");
-      },
-      async spawn() { spawnCount++; throw new Error("should not be called"); },
-      defaultBinary() { return "kimi"; }, credentialEnvNames: () => [],
-    };
+    const realKimi = new KimiCodeBackend();
+    const origSpawn = realKimi.spawn.bind(realKimi);
+    realKimi.spawn = async (...args) => { spawnCount++; return origSpawn(...args); };
     const manager = new RunManager({
       config: { registry: registryPath, runDir, defaultIsolation: "none" },
       readRegistry: async () => { const { readRegistry } = await import("../src/registry.js"); return readRegistry(registryPath); },
-      transcriptDir: runDir, backendFor: () => fakeBackend, userEnvReader: async () => ({}),
+      transcriptDir: runDir, backendFor: () => realKimi, userEnvReader: async () => ({}),
     });
     await assert.rejects(
       () => manager.start("coder_mm", { prompt: "x", runDir, registry: registryPath, fireAndForget: false }),
-      /reasoning.*not supported/i,
+      /reasoning|cannot express|not supported/i,
     );
     assert.equal(spawnCount, 0, "zero spawn");
     assert.ok(!existsSync(runDir) || readdirSync(runDir).filter((f) => f.endsWith(".jsonl")).length === 0,
@@ -264,10 +270,10 @@ test("CAP-B3: RunManager.resume with Kimi + reasoning → reject, transcript byt
     writeFileSync(transcriptPath, transcriptContent, "utf8");
     const bytesBefore = readFileSync(transcriptPath, "utf8").length;
 
-    // Registry: coder_mm is kimi-code with reasoning.effort (which kimi cannot express).
+    // Registry: coder_mm requests an effort K3 cannot express.
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({
-      agents: { coder_mm: { backend: "kimi-code", cwd: dir, model: { id: "kimi-code/k3" }, reasoning: { effort: "high" } } },
+      agents: { coder_mm: { backend: "kimi-code", cwd: dir, model: { id: "kimi-code/k3" }, reasoning: { effort: "xhigh" } } },
     }), "utf8");
 
     const { RunManager } = await import("../src/runManager.js");
