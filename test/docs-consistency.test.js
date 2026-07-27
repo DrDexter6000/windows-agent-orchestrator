@@ -666,8 +666,9 @@ test("M10-pre2: workspace_status tool documented in usage.md and SKILL.md", () =
   assert.ok(skill.includes("workspace_select"), "SKILL.md tool table must include workspace_select (M11-6)");
   // SKILL.md must reflect the current MCP tool count. History: 10 (M10-pre2/P0-2)
   // + runs_list (M10 P0-3) + run_wait (M10-pre3) = 11; + playbook_list/get (M11-2) = 13;
-  // + run_delivery_review (M11-3) = 14; + workspace_select (M11-6) = 15.
-  assert.ok(/16 MCP tools/.test(skill), "SKILL.md must reflect 16 MCP tools after M11-6");
+  // + run_delivery_review (M11-3) = 14; + workspace_select (M11-6) = 15; + lead_preflight
+  // (M11-8A) = 16; + run_delivery_repackage (M12-1S2) = 17.
+  assert.ok(/17 MCP tools/.test(skill), "SKILL.md must reflect 17 MCP tools after M12-1S2");
   // team-roles.md must mention workspace binding (MCP-first)
   const roles = read("docs/team-roles.md");
   assert.ok(/workspace binding|workspace-root|roots\/list/.test(roles),
@@ -874,10 +875,11 @@ test("M11-0A: usage.md 说明 --pure 用途、新进程重启边界、command �
   assert.ok(/command.*必须是数组|command 必须是数组|数组/.test(usage), "usage.md 必须说明 command 必须是数组");
 });
 
-test("M11-3D1: usage.md MCP 段反映当前 16 tools", () => {
+test("M11-3D1: usage.md MCP 段反映当前 17 tools", () => {
   const usage = read("docs/usage.md");
-  assert.ok(!/7 个工具/.test(usage), "usage.md MCP 段不得再声称只有 7 个工具");
-  assert.ok(/16 个工具/.test(usage), "usage.md MCP 段必须反映 16 个工具（含 M11-6 workspace_select）");
+  // 精确禁止"只有 7 个工具"的陈旧文案；用数字 lookbehind 排除 "17 个工具" 中的子串。
+  assert.ok(!/(?<!\d)7 个工具/.test(usage), "usage.md MCP 段不得再声称只有 7 个工具（排除 17 中的子串）");
+  assert.ok(/17 个工具/.test(usage), "usage.md MCP 段必须反映 17 个工具（含 M12-1S2 run_delivery_repackage）");
 });
 
 // ============================================================
@@ -1060,6 +1062,20 @@ test("M11-2C-07/M12-0: roadmap 标 M11-2 complete，M11 整体已由 M12-0 关�
   assert.ok(/🔧.*进行中|进行中/.test(m12Row), "roadmap M12 行必须标为 🔧 进行中");
 });
 
+test("M12-1 S1/S2: roadmap and README record implemented inventory + model-free repackage truth", () => {
+  const roadmap = read("docs/roadmap.md");
+  const readme = read("README.md");
+  for (const [name, text] of [["roadmap", roadmap], ["README", readme]]) {
+    assert.ok(/candidateInventory/.test(text), `${name} 必须记录 candidateInventory 已实现`);
+    assert.ok(/run_delivery_repackage/.test(text), `${name} 必须记录 model-free repackage 已实现`);
+    assert.ok(/不重调模型|model-free/i.test(text), `${name} 必须说明不重新调用 worker model`);
+  }
+  const m12Row = roadmap.split("\n").find((line) => /^\|\s*M12\s*\|/.test(line)) || "";
+  assert.ok(/M12-1 S1\/S2 已实现/.test(m12Row), "roadmap M12 行必须标记 S1/S2 已实现");
+  assert.ok(!/planned\/unimplemented slices only/.test(m12Row),
+    "roadmap 不得再把全部 M12 slice 描述为未实现");
+});
+
 test("M11-2C-08: usage 含 playbook 的 MCP 与 CLI 两种只读入口", () => {
   const usage = read("docs/usage.md");
   assert.ok(/playbook_list/.test(usage), "usage 提及 playbook_list MCP 工具");
@@ -1078,15 +1094,15 @@ test("M11-2C-09: SKILL/PRD 保持 Advisor/Auditor conditional（非默认流水�
   }
 });
 
-test("M11-3D1: SKILL/architecture 当前工具事实为 16 tools", () => {
+test("M11-3D1: SKILL/architecture 当前工具事实为 17 tools", () => {
   const skill = read("SKILL.md");
   const arch = read("docs/02-architecture.md");
-  assert.ok(/16 MCP tools|16 tools/i.test(skill),
-    "SKILL.md Minimal MCP Loop 当前工具数为 15（含 M11-6 workspace_select）");
+  assert.ok(/17 MCP tools|17 tools/i.test(skill),
+    "SKILL.md Minimal MCP Loop 当前工具数为 17（含 M12-1S2 run_delivery_repackage）");
   // 精确匹配 "server.js ... N tools" 的当前状态注释行。
   const serverLine = arch.split("\n").find((l) => /server\.js.*tools/.test(l)) || "";
-  assert.ok(/16 tools/.test(serverLine),
-    "architecture server.js 注释当前工具数为 15");
+  assert.ok(/17 tools/.test(serverLine),
+    "architecture server.js 注释当前工具数为 17");
 });
 
 // ============================================================
@@ -1118,10 +1134,10 @@ test("M11-2C-12: SKILL tool-count 文案不得声称 minimal loop 必须经过�
   const mandatoryAll = /full\s+minimal\s+loop\s+through\s+15|minimal\s+loop\s+必须.*全部\s*15|loop\s+must\s+(use|go through|include)\s+all\s+15/i;
   assert.ok(!mandatoryAll.test(skill),
     "SKILL tool-count 文案不得声称 minimal loop 必须经过全部工具");
-  // 必须表达：WAO 暴露 16 tools，但 minimal control loop 只用相关 control tools，
+  // 必须表达：WAO 暴露 17 tools，但 minimal control loop 只用相关 control tools，
   // playbook reads 是可选且在 dispatch loop 外。
-  assert.ok(/16 MCP tools|16 tools/i.test(skill),
-    "SKILL 声明 WAO 暴露 16 MCP tools");
+  assert.ok(/17 MCP tools|17 tools/i.test(skill),
+    "SKILL 声明 WAO 暴露 17 MCP tools");
   assert.ok(/optional|可选/i.test(skill) && /dispatch loop|control loop/i.test(skill),
     "SKILL 必须说明 playbook reads 可选且在 dispatch/control loop 之外");
 });
@@ -1454,10 +1470,11 @@ test("M12-0-05: SKILL 把 certification 定位为 advisory evidence，删除 per
     "SKILL 不得再使用 strict-dispatch 硬门框架");
 });
 
-// M12-0-06: M11 closed complete (Tester token efficiency retired/deferred out of
-// M11); M12 in progress with only planned/unimplemented slices. No invented tool
-// names; M12 must not claim runtime features are implemented.
-test("M12-0-06: roadmap 标 M11 ✅ 完成（Tester token efficiency retire/defer）、M12 🔧 进行中（planned/unimplemented slices）", () => {
+// M12-0-06: M11 stays closed complete (Tester token efficiency retired/deferred
+// out of M11); M12 stays in progress. M12-1 may replace its formerly planned
+// correction slice with implemented S1/S2 truth while the remaining slices stay
+// explicitly planned/unimplemented.
+test("M12-0-06: roadmap 标 M11 ✅ 完成；M12-1 已实现且其余 slices 仍 planned", () => {
   const roadmap = read("docs/roadmap.md");
   const m11Row = roadmap.split("\n").find((l) => /^\|\s*M11\s*\|/.test(l)) || "";
   assert.ok(m11Row, "roadmap 含 M11 行");
@@ -1468,19 +1485,20 @@ test("M12-0-06: roadmap 标 M11 ✅ 完成（Tester token efficiency retire/defe
   const m12Row = roadmap.split("\n").find((l) => /^\|\s*M12\s*\|/.test(l)) || "";
   assert.ok(m12Row, "roadmap 必须有 M12 行");
   assert.ok(/🔧.*进行中|进行中/.test(m12Row), "M12 行必须标为 🔧 进行中");
-  // planned slices — exact concepts, no invented tool names
+  assert.ok(/M12-1 S1\/S2 已实现/.test(m12Row), "M12-1 S1/S2 必须标为已实现");
+  assert.ok(/candidateInventory/.test(m12Row), "M12-1 S1 candidateInventory 必须记录");
+  assert.ok(/run_delivery_repackage/.test(m12Row), "M12-1 S2 run_delivery_repackage 必须记录");
+  // Remaining planned slices — exact concepts, no invented tool names.
   assert.ok(/compact\/delta observation|compact.*delta.*observation/i.test(m12Row),
     "M12 计划 compact/delta observation");
   assert.ok(/deterministic evidence\/handoff aggregation|evidence\/handoff aggregation/i.test(m12Row),
     "M12 计划 deterministic evidence/handoff aggregation");
-  assert.ok(/Lead-authored correction continuation|correction continuation.*lineage|correction continuation.*safe reuse/i.test(m12Row),
-    "M12 计划 Lead-authored correction continuation（explicit lineage / safe reuse）");
   assert.ok(/bounded actionable failure facts|actionable failure facts/i.test(m12Row),
     "M12 计划 bounded actionable failure facts");
   assert.ok(/factual readiness\/history projection|readiness\/history projection/i.test(m12Row),
     "M12 计划 factual readiness/history projection");
   assert.ok(/planned|unimplemented|规划|未实现|计划/i.test(m12Row),
-    "M12 slices 必须标 planned/unimplemented，不得声称已实现");
+    "M12 其余 slices 必须标 planned/unimplemented");
 });
 
 // M12-0-07: ADR-0018 exists at the exact filename, is accepted/dated 2026-07-27,

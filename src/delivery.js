@@ -1184,3 +1184,186 @@ export function packageDelivery(input) {
     integration: { ...proposed.integration },
   };
 }
+
+// ===== M12-1S2: model-free repackage resolution (package-or-recover) =====
+//
+// resolveDeliveryCommit is the deterministic, model-free entry point a repackage
+// service calls to obtain the unique DeliveryRef for a retained disallowed_path
+// failure. It NEVER calls a model, resumes a worker, or infers scope: it either
+// packages fresh (HEAD at base) or recovers the SAME commit from Git exact
+// objects (HEAD already past base — a previous package moved the branch but the
+// transcript append failed/crashed). Because Git is content-addressed, the same
+// inputs converge on the same commit, so "exactly one commit" is inherent.
+//
+// recoverDeliveryCommit strictly proves the existing HEAD commit against exact
+// objects (parent/count/files/message/identity/branch/clean worktree) before
+// rebuilding a DeliveryRef — no re-calling the model, no losing the result. The
+// rebuilt ref's verification is the ORIGINAL declaration from the caller (the
+// service passes run.started's value-for-value), never a caller override.
+
+/**
+ * Strictly prove an existing HEAD commit is the WAO delivery commit for this
+ * runId and rebuild a DeliveryRef from it. Used when a previous packageDelivery
+ * moved the branch to the delivery commit but the transcript append failed or
+ * the process crashed (contract #6 recovery).
+ *
+ * Proves (all against the worktree's shared object database, explicit commit
+ * args — never HEAD as a name): linked worktree on wao/<runId>; parent === base;
+ * exactly one commit base..HEAD; committed files; exact message; WAO identity;
+ * clean worktree. Throws on ANY proof failure — never trusts an unproven HEAD.
+ *
+ * @param {object} input — same shape as packageDelivery/inspectDelivery
+ * @returns {object} committed DeliveryRef rebuilt from the exact commit
+ * @throws {DeliveryError} on any proof failure
+ */
+function recoverDeliveryCommit(input) {
+  const validated = validateInput(input);
+  const cwd = validated.worktreePath;
+  const expectedBranch = `wao/${validated.runId}`;
+
+  // Canonicalize the persisted base (immutable literal — must resolve to itself).
+  const canonicalBase = String(
+    git(["rev-parse", "--verify", "--end-of-options", `${validated.baseCommit}^{commit}`], { cwd }),
+  ).trim();
+  if (canonicalBase !== validated.baseCommit) {
+    throw new DeliveryError("artifact_mismatch", "resolved baseCommit differs from the persisted literal");
+  }
+
+  // HEAD must be a real commit PAST base (the interrupted package moved it).
+  const head = String(git(["rev-parse", "HEAD"], { cwd })).trim();
+  if (head === canonicalBase) {
+    throw new DeliveryError(
+      "recovery_unavailable",
+      "HEAD is at baseCommit; nothing to recover",
+    );
+  }
+  const canonicalHead = String(
+    git(["rev-parse", "--verify", "--end-of-options", `${head}^{commit}`], { cwd }),
+  ).trim();
+  if (canonicalHead !== head) {
+    throw new DeliveryError("artifact_mismatch", "HEAD does not resolve to a canonical commit object");
+  }
+
+  // Linked worktree on wao/<runId> (not primary, right branch).
+  const toplevelRaw = gitSafe(["rev-parse", "--show-toplevel"], { cwd });
+  if (toplevelRaw === null) {
+    throw new DeliveryError("artifact_mismatch", "worktreePath is not a git repository");
+  }
+  if (normAbs(toplevelRaw.trim()) !== normAbs(cwd)) {
+    throw new DeliveryError("artifact_mismatch", "git toplevel does not match worktreePath");
+  }
+  const gitDir = normAbs(String(git(["rev-parse", "--absolute-git-dir"], { cwd })).trim());
+  let commonDirRaw = String(git(["rev-parse", "--git-common-dir"], { cwd })).trim();
+  if (!isAbsolute(commonDirRaw)) commonDirRaw = resolve(cwd, commonDirRaw);
+  if (gitDir === normAbs(commonDirRaw)) {
+    throw new DeliveryError("artifact_mismatch", "worktree is primary checkout, not linked");
+  }
+  const branchRaw = gitSafe(["symbolic-ref", "--short", "HEAD"], { cwd });
+  if (branchRaw === null) {
+    throw new DeliveryError("artifact_mismatch", "HEAD is detached");
+  }
+  if (branchRaw.trim() !== expectedBranch) {
+    throw new DeliveryError("artifact_mismatch", `HEAD on wrong branch: ${branchRaw.trim()} != ${expectedBranch}`);
+  }
+
+  // Parent must be exactly base.
+  const parent = String(
+    git(["rev-parse", "--verify", "--end-of-options", `${canonicalHead}^`], { cwd }),
+  ).trim();
+  if (parent !== canonicalBase) {
+    throw new DeliveryError("artifact_mismatch", "recovered commit parent does not match baseCommit");
+  }
+
+  // Exactly one commit base..HEAD.
+  const count = Number(
+    String(git(["rev-list", "--count", `${canonicalBase}..${canonicalHead}`], { cwd })).trim(),
+  );
+  if (count !== 1) {
+    throw new DeliveryError("artifact_mismatch", `expected 1 commit in base..HEAD, got ${count}`);
+  }
+
+  // Committed files (exact object query).
+  const committedFiles = parseNul(
+    git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", canonicalHead], { cwd }),
+  ).sort();
+  const disallowed = committedFiles.filter(
+    (p) => !isPathAllowed(p, validated.allowedPaths),
+  );
+  if (disallowed.length > 0) {
+    throw new DeliveryError(
+      "disallowed_path",
+      `recovered commit contains changes outside allowedPaths: ${disallowed.join(", ")}`,
+    );
+  }
+
+  // Exact message.
+  const msg = String(git(["show", "-s", "--format=%B", canonicalHead], { cwd })).trim();
+  const expectedMessage = `wao-delivery: ${validated.runId}`;
+  if (msg !== expectedMessage) {
+    throw new DeliveryError("artifact_mismatch", "recovered commit message mismatch");
+  }
+
+  // WAO identity (SSOT, explicit commit).
+  assertDeliveryIdentity(cwd, "artifact_mismatch", canonicalHead);
+
+  // Clean worktree.
+  const porcelain = String(git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd }));
+  if (porcelain.trim().length > 0) {
+    throw new DeliveryError("artifact_mismatch", "worktree is dirty during recovery");
+  }
+
+  // Rebuild the DeliveryRef from the exact commit. verification is the ORIGINAL
+  // declaration (validated.verification) — reused value-for-value.
+  return {
+    schemaVersion: 1,
+    kind: "git_commit",
+    runId: validated.runId,
+    baseCommit: canonicalBase,
+    deliveryCommit: canonicalHead,
+    branch: expectedBranch,
+    worktreePath: normAbs(cwd),
+    changedFiles: committedFiles,
+    verification: validated.verification,
+    acceptance: { status: "pending", reviewerType: "lead_agent" },
+    integration: { status: "pending", targetCommit: null },
+  };
+}
+
+/**
+ * Resolve the unique delivery commit for a model-free repackage: package fresh
+ * when HEAD is at base, or recover the existing commit when HEAD is already past
+ * base (crash/concurrency convergence). Deterministic — same inputs always yield
+ * the same commit. On a concurrent package race (update-ref CAS failure while
+ * HEAD was at base), falls back to recovering the now-current HEAD instead of
+ * erroring, so competing same-input requests converge on one commit.
+ *
+ * @param {object} input — same shape as packageDelivery/inspectDelivery
+ * @returns {{ref: object, source: "packaged"|"recovered"}}
+ * @throws {DeliveryError} on any packaging/proof failure
+ */
+export function resolveDeliveryCommit(input) {
+  const validated = validateInput(input);
+  const cwd = validated.worktreePath;
+
+  const canonicalBase = String(
+    git(["rev-parse", "--verify", "--end-of-options", `${validated.baseCommit}^{commit}`], { cwd }),
+  ).trim();
+  const head = String(git(["rev-parse", "HEAD"], { cwd })).trim();
+
+  if (head === canonicalBase) {
+    // Fresh package. The update-ref CAS makes a concurrent package fail; if HEAD
+    // has since advanced, recover the winner's commit (deterministic convergence).
+    try {
+      const ref = packageDelivery(input);
+      return { ref, source: "packaged" };
+    } catch (err) {
+      const headNow = String(git(["rev-parse", "HEAD"], { cwd })).trim();
+      if (headNow !== canonicalBase) {
+        return { ref: recoverDeliveryCommit(input), source: "recovered" };
+      }
+      throw err;
+    }
+  }
+  // HEAD is past base — recover the existing exact delivery commit.
+  return { ref: recoverDeliveryCommit(input), source: "recovered" };
+}

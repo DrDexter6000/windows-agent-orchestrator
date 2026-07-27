@@ -2,7 +2,11 @@ import { appendFile, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createSecretRedactor } from "./secretRedaction.js";
 import { isValidCanonicalAgentId } from "./canonicalAgentId.js";
-import { isCanonicalCommitId } from "./delivery.js";
+import {
+  isCanonicalCommitId,
+  isPathAllowed,
+  isValidRepoRelativePath,
+} from "./delivery.js";
 
 const APPEND_LOCK_TIMEOUT_MS = 5000;
 const APPEND_LOCK_STALE_MS = 30000;
@@ -18,6 +22,84 @@ export const RUN_STATES = [
 ];
 
 export const TERMINAL_STATES = ["completed", "failed", "aborted", "timed_out"];
+
+// M12-1S2: the closed set of final delivery verification outcome event types.
+// Shared by validateDeliveryFacts, tryAppendRepackageVerification, and the
+// repackage idempotency scans so there is one outcome-type set in this module.
+const DELIVERY_VERIFICATION_OUTCOME_TYPES = new Set([
+  "run.delivery_verification_passed",
+  "run.delivery_verification_failed",
+  "run.delivery_verification_unavailable",
+]);
+const DELIVERY_VERIFICATION_OUTCOMES = new Set(["passed", "failed", "unavailable"]);
+
+function _sameDeliveryIdentity(left, right, runId) {
+  return Boolean(
+    left
+      && right
+      && typeof left === "object"
+      && typeof right === "object"
+      && left.runId === runId
+      && right.runId === runId
+      && isCanonicalCommitId(left.baseCommit)
+      && isCanonicalCommitId(left.deliveryCommit)
+      && left.baseCommit === right.baseCommit
+      && left.deliveryCommit === right.deliveryCommit,
+  );
+}
+
+function _normalizeApprovedPaths(paths) {
+  if (!Array.isArray(paths) || paths.length === 0) return null;
+  if (!paths.every((p) => isValidRepoRelativePath(p))) return null;
+  const normalized = [...new Set(paths)].sort();
+  if (normalized.length !== paths.length) return null;
+  if (normalized.some((p, index) => p !== paths[index])) return null;
+  return normalized;
+}
+
+function _originalAllowedPaths(events, runId) {
+  const started = events.filter(
+    (e) => e && e.type === "run.started" && e.runId === runId,
+  );
+  if (started.length !== 1) return null;
+  return _normalizeApprovedPaths(started[0].delivery?.allowedPaths);
+}
+
+function _verificationOutcomeFromType(type) {
+  if (type === "run.delivery_verification_passed") return "passed";
+  if (type === "run.delivery_verification_failed") return "failed";
+  if (type === "run.delivery_verification_unavailable") return "unavailable";
+  return null;
+}
+
+/**
+ * Return the one valid recovery provenance for a created DeliveryRef, or null.
+ * This is the shared durable-chain authority for readiness and Lead acceptance.
+ */
+export function findValidRepackageProvenance(events, runId, createdRef) {
+  if (!Array.isArray(events) || !_sameDeliveryIdentity(createdRef, createdRef, runId)) return null;
+  if (!Array.isArray(createdRef.changedFiles) || createdRef.changedFiles.length === 0) return null;
+  if (!createdRef.changedFiles.every((p) => isValidRepoRelativePath(p))) return null;
+
+  const failures = events.filter(
+    (e) => e && e.type === "run.delivery_failed" && e.runId === runId,
+  );
+  if (failures.length !== 1 || failures[0].deliveryCode !== "disallowed_path") return null;
+
+  const provenance = events.filter(
+    (e) => e && e.type === "run.delivery_repackaged" && e.runId === runId,
+  );
+  if (provenance.length !== 1) return null;
+  const event = provenance[0];
+  if (!_sameDeliveryIdentity(event.delivery, createdRef, runId)) return null;
+  if (event.source !== "packaged" && event.source !== "recovered") return null;
+  const approved = _normalizeApprovedPaths(event.approvedAllowedPaths);
+  if (!approved) return null;
+  const original = _originalAllowedPaths(events, runId);
+  if (!original || original.some((p) => !isPathAllowed(p, approved))) return null;
+  if (createdRef.changedFiles.some((p) => !isPathAllowed(p, approved))) return null;
+  return event;
+}
 
 export class JsonlTranscript {
   constructor(filePath, context) {
@@ -196,11 +278,23 @@ export class JsonlTranscript {
       const terminalState = findState(events);
       const verificationStatus = facts.verificationStatus;
       if (decision === "accepted") {
-        if (terminalState !== "completed") {
-          throw new Error(`Cannot accept: run terminal state is ${terminalState}, must be completed`);
-        }
+        // Accept ALWAYS requires a passed verification, for both the normal
+        // completed path and the recovery path.
         if (verificationStatus !== "passed") {
           throw new Error(`Cannot accept: delivery verification is ${verificationStatus}, must be passed`);
+        }
+        // M12-1S2: widen the terminal gate to admit an explicit recovery accept.
+        // A terminally-failed run whose durable failure is exactly disallowed_path
+        // AND has been superseded by a provenance-bound model-free repackage
+        // (facts.recoveryAcceptable) may be Lead-accepted. The terminal failed is
+        // NOT rewritten to completed; this gate merely admits the accept. Any
+        // other failed/terminal state still rejects. Normal completed runs are
+        // untouched (zero drift).
+        const recoveryEligible = terminalState === "failed" && facts.recoveryAcceptable === true;
+        if (terminalState !== "completed" && !recoveryEligible) {
+          throw new Error(
+            `Cannot accept: run terminal state is ${terminalState}, must be completed (or a recovery-eligible failed run)`,
+          );
         }
       } else {
         // reject: only allowed when verification has a final outcome
@@ -251,6 +345,191 @@ export class JsonlTranscript {
       await releaseLock();
     }
   }
+
+  /**
+   * M12-1S2: lock-scoped idempotent append of the repackage delivery_created +
+   * recovery provenance (run.delivery_repackaged).
+   *
+   * Under the cross-process append lock: re-read events; if a bound
+   * run.delivery_created already exists, yield {created:false, ref}; otherwise
+   * validate the candidate DeliveryRef (canonical commits, runId-bound) and
+   * append BOTH run.delivery_created and run.delivery_repackaged atomically in a
+   * single appendFile (same lock, same batch) — so the provenance can never
+   * exist without its created event, and a concurrent/retry caller observes
+   * either both or neither.
+   *
+   * Narrow primitive: it does NOT package, verify, decide, or infer scope. The
+   * candidate DeliveryRef + approvedAllowedPaths + source are supplied by the
+   * caller (the model-free repackage service), which has already proved them
+   * against Git exact objects. Packaging/verification happen OUTSIDE this lock
+   * (contract #5); only the short read/validate/CAS-append is lock-scoped.
+   *
+   * @param {{delivery: object, approvedAllowedPaths: string[], source: "packaged"|"recovered"}} input
+   * @returns {Promise<{created:true, ref:object}|{created:false, ref:object}>}
+   * @throws {Error} if the candidate DeliveryRef is malformed/non-canonical
+   */
+  async tryAppendRepackageCreated({ delivery, approvedAllowedPaths, source } = {}) {
+    await mkdir(dirname(this.filePath), { recursive: true });
+    const releaseLock = await acquireAppendLock(this.filePath);
+    try {
+      let events = [];
+      try {
+        events = await readTranscript(this.filePath);
+      } catch {
+        events = [];
+      }
+
+      const existingEvents = events.filter(
+        (e) => e && e.type === "run.delivery_created" && e.runId === this.context.runId,
+      );
+      if (existingEvents.length > 1) {
+        throw new Error("tryAppendRepackageCreated: multiple delivery_created events");
+      }
+      if (existingEvents.length === 1) {
+        const existing = existingEvents[0];
+        const provenance = findValidRepackageProvenance(
+          events,
+          this.context.runId,
+          existing.delivery,
+        );
+        if (!provenance) {
+          throw new Error("tryAppendRepackageCreated: existing recovery chain is invalid");
+        }
+        const approved = _normalizeApprovedPaths(approvedAllowedPaths);
+        if (!approved || existing.delivery.changedFiles.some((p) => !isPathAllowed(p, approved))) {
+          throw new Error("tryAppendRepackageCreated: requested scope does not cover existing delivery");
+        }
+        return { created: false, ref: existing.delivery, provenance };
+      }
+
+      // Validate the candidate ref (fail closed before any append).
+      if (!delivery || typeof delivery !== "object") {
+        throw new Error("tryAppendRepackageCreated: delivery must be an object");
+      }
+      if (delivery.runId !== this.context.runId) {
+        throw new Error("tryAppendRepackageCreated: delivery.runId must match the transcript runId");
+      }
+      if (!isCanonicalCommitId(delivery.baseCommit) || !isCanonicalCommitId(delivery.deliveryCommit)) {
+        throw new Error("tryAppendRepackageCreated: baseCommit/deliveryCommit must be canonical commit ids");
+      }
+      if (source !== "packaged" && source !== "recovered") {
+        throw new Error("tryAppendRepackageCreated: source must be \"packaged\" or \"recovered\"");
+      }
+      const approved = _normalizeApprovedPaths(approvedAllowedPaths);
+      if (!approved) {
+        throw new Error("tryAppendRepackageCreated: approvedAllowedPaths must be canonical, sorted, and unique");
+      }
+      const original = _originalAllowedPaths(events, this.context.runId);
+      if (!original || original.some((p) => !isPathAllowed(p, approved))) {
+        throw new Error("tryAppendRepackageCreated: approvedAllowedPaths must cover the original scope");
+      }
+      if (!Array.isArray(delivery.changedFiles) || delivery.changedFiles.length === 0) {
+        throw new Error("tryAppendRepackageCreated: delivery.changedFiles must be non-empty");
+      }
+      if (delivery.changedFiles.some((p) => !isValidRepoRelativePath(p) || !isPathAllowed(p, approved))) {
+        throw new Error("tryAppendRepackageCreated: delivery.changedFiles exceed approvedAllowedPaths");
+      }
+
+      // Atomic batch: created + provenance in ONE appendFile.
+      const baseSeq = Math.max(this.seq, findLastEventSeq(events));
+      const ts = new Date().toISOString();
+      const ctx = { runId: this.context.runId, agentId: this.context.agentId };
+      const createdEvent = {
+        ...this.redact({ delivery }), ts, seq: baseSeq + 1, ...ctx, type: "run.delivery_created",
+      };
+      const provenanceEvent = {
+        ...this.redact({ delivery, approvedAllowedPaths: approved, source }),
+        ts, seq: baseSeq + 2, ...ctx, type: "run.delivery_repackaged",
+      };
+      await appendFile(this.filePath, `${JSON.stringify(createdEvent)}\n${JSON.stringify(provenanceEvent)}\n`, "utf8");
+      this.seq = baseSeq + 2;
+      return { created: true, ref: delivery, provenance: provenanceEvent };
+    } finally {
+      await releaseLock();
+    }
+  }
+
+  /**
+   * M12-1S2: lock-scoped idempotent append of the repackage verification outcome.
+   *
+   * Re-reads events under the lock and requires exactly one identity-matching
+   * delivery_created event. It yields {recorded:false} if a bound final outcome
+   * already exists (so a retry continues from the created stage WITHOUT creating
+   * a second outcome). Otherwise it appends exactly one outcome event. The
+   * verification itself runs OUTSIDE this lock (contract #5); only this
+   * CAS-append is lock-scoped.
+   *
+   * @param {{delivery: object, outcome: "passed"|"failed"|"unavailable"}} input
+   * @returns {Promise<{recorded:true, ref:object}|{recorded:false, ref:object}>}
+   * @throws {Error} if delivery/outcome are malformed
+   */
+  async tryAppendRepackageVerification({ delivery, outcome } = {}) {
+    await mkdir(dirname(this.filePath), { recursive: true });
+    const releaseLock = await acquireAppendLock(this.filePath);
+    try {
+      let events = [];
+      try {
+        events = await readTranscript(this.filePath);
+      } catch {
+        events = [];
+      }
+
+      if (!delivery || typeof delivery !== "object") {
+        throw new Error("tryAppendRepackageVerification: delivery must be an object");
+      }
+      if (!_sameDeliveryIdentity(delivery, delivery, this.context.runId)) {
+        throw new Error("tryAppendRepackageVerification: delivery identity is invalid");
+      }
+      if (!DELIVERY_VERIFICATION_OUTCOMES.has(outcome)) {
+        throw new Error("tryAppendRepackageVerification: outcome must be passed|failed|unavailable");
+      }
+
+      const createdEvents = events.filter(
+        (e) => e && e.type === "run.delivery_created" && e.runId === this.context.runId,
+      );
+      if (createdEvents.length !== 1) {
+        throw new Error("tryAppendRepackageVerification: expected exactly one delivery_created event");
+      }
+      if (!_sameDeliveryIdentity(createdEvents[0].delivery, delivery, this.context.runId)) {
+        throw new Error("tryAppendRepackageVerification: delivery does not match delivery_created");
+      }
+
+      // Idempotency: an existing bound final outcome wins.
+      const existingEvents = events.filter(
+        (e) => e && DELIVERY_VERIFICATION_OUTCOME_TYPES.has(e.type) && e.runId === this.context.runId,
+      );
+      if (existingEvents.length > 1) {
+        throw new Error("tryAppendRepackageVerification: multiple verification outcomes");
+      }
+      if (existingEvents.length === 1) {
+        const existing = existingEvents[0];
+        if (!_sameDeliveryIdentity(existing.delivery, delivery, this.context.runId)) {
+          throw new Error("tryAppendRepackageVerification: existing outcome belongs to another delivery");
+        }
+        return {
+          recorded: false,
+          ref: existing.delivery,
+          outcome: _verificationOutcomeFromType(existing.type),
+        };
+      }
+
+      const type = outcome === "passed"
+        ? "run.delivery_verification_passed"
+        : outcome === "failed"
+          ? "run.delivery_verification_failed"
+          : "run.delivery_verification_unavailable";
+
+      const baseSeq = Math.max(this.seq, findLastEventSeq(events));
+      const ts = new Date().toISOString();
+      const ctx = { runId: this.context.runId, agentId: this.context.agentId };
+      const event = { ...this.redact({ delivery }), ts, seq: baseSeq + 1, ...ctx, type };
+      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      this.seq = baseSeq + 1;
+      return { recorded: true, ref: delivery, outcome };
+    } finally {
+      await releaseLock();
+    }
+  }
 }
 
 /**
@@ -283,9 +562,7 @@ export function validateDeliveryFacts(events) {
 
   // Find verification outcome events
   const verificationEvents = events.filter((e) =>
-    e.type === "run.delivery_verification_passed"
-    || e.type === "run.delivery_verification_failed"
-    || e.type === "run.delivery_verification_unavailable");
+    DELIVERY_VERIFICATION_OUTCOME_TYPES.has(e.type));
 
   if (verificationEvents.length === 0) {
     return { valid: false, latestRef: createdRef, deliveryCommit: createdCommit, verificationStatus: "pending", decisionEvent: null, error: "No verification outcome event found (missing run.delivery_verification_*)" };
@@ -328,6 +605,19 @@ export function validateDeliveryFacts(events) {
   const decisionEvent = events.find((e) =>
     e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected") ?? null;
 
+  // M12-1S2: recoveryAcceptable — the strict recovery chain that lets a
+  // terminally-failed disallowed_path run be Lead-ACCEPTED after a model-free
+  // repackage. Additive flag only — it does NOT alter valid/latestRef/decision
+  // semantics, so the normal completed-run accept path is untouched. Requires:
+  //   - exactly one bound run.delivery_failed with code "disallowed_path";
+  //   - a run.delivery_repackaged provenance bound to the created commit; AND
+  //   - verification status "passed".
+  // The terminal failed is never rewritten to completed here — the decide gate
+  // consults this flag to admit an explicit Lead accept on the failed run.
+  const createdRunId = createdEvents[0].runId ?? null;
+  const recoveryProvenance = findValidRepackageProvenance(events, createdRunId, createdRef);
+  const recoveryAcceptable = recoveryProvenance !== null && verificationStatus === "passed";
+
   // M11-3A closeout: also surface the created ref and both envelope runIds so a
   // read-only consumer (runDeliveryReview) can bind the full durable identity
   // chain (created event/ref + verification event/ref) to the requested runId
@@ -339,6 +629,7 @@ export function validateDeliveryFacts(events) {
     deliveryCommit: createdCommit,
     verificationStatus,
     decisionEvent,
+    recoveryAcceptable,
     createdEventRunId: createdEvents[0].runId ?? null,
     verificationEventRunId: verificationEvent.runId ?? null,
     error: null,

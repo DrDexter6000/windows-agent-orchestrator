@@ -9,6 +9,7 @@ import {
   findLatest,
   findState,
   findLastEventSeq,
+  validateDeliveryFacts,
   RUN_STATES,
   TERMINAL_STATES,
 } from "../src/transcript.js";
@@ -260,4 +261,208 @@ test("findLatest returns the latest event of a given type", () => {
   const latest = findLatest(events, "run.state_change");
   assert.equal(latest.to, "running");
   assert.equal(findLatest(events, "nonexistent"), undefined);
+});
+
+// ============================================================
+// M12-1S2: lock-scoped idempotent repackage appends + recovery facts
+// ============================================================
+//
+// tryAppendRepackageCreated / tryAppendRepackageVerification are the lock-scoped
+// CAS primitives the model-free repackage service uses. Each appends at most one
+// event for the runId under the cross-process append lock (re-reading inside the
+// lock so a concurrent/retry caller yields to the existing event). validateDeliveryFacts
+// gains an additive `recoveryAcceptable` flag so the decide gate can admit a
+// recovery accept for a terminally-failed disallowed_path run WITHOUT drifting
+// the normal completed-run accept path.
+
+const M12_RUN = "run_m12s2_transcript";
+const M12_AGENT = "coder_hq";
+const GOOD_COMMIT = "d".repeat(40);
+const BASE_COMMIT = "b".repeat(40);
+
+function m12Ref(overrides = {}) {
+  return {
+    schemaVersion: 1, kind: "git_commit", runId: M12_RUN,
+    baseCommit: BASE_COMMIT, deliveryCommit: GOOD_COMMIT, branch: `wao/${M12_RUN}`,
+    worktreePath: "/fake/wt", changedFiles: ["root.txt", "src/a.js"],
+    verification: { status: "pending", commands: ["npm test"] },
+    acceptance: { status: "pending", reviewerType: "lead_agent" },
+    integration: { status: "pending", targetCommit: null },
+    ...overrides,
+  };
+}
+
+test("M12-1S2-T1: tryAppendRepackageCreated appends created+provenance once, yields on retry", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "m12s2-t1-"));
+  try {
+    const filePath = join(dir, `${M12_RUN}.jsonl`);
+    const t = new JsonlTranscript(filePath, { runId: M12_RUN, agentId: M12_AGENT });
+    await t.append("run.started", {
+      delivery: { allowedPaths: ["src"], baseCommit: BASE_COMMIT },
+    });
+    await t.append("run.delivery_failed", { deliveryCode: "disallowed_path" });
+    const first = await t.tryAppendRepackageCreated({
+      delivery: m12Ref(), approvedAllowedPaths: ["root.txt", "src"], source: "packaged",
+    });
+    assert.equal(first.created, true);
+    assert.equal(first.ref.deliveryCommit, GOOD_COMMIT);
+
+    const events = await readTranscript(filePath);
+    assert.equal(events.filter((e) => e.type === "run.delivery_created").length, 1);
+    const prov = events.find((e) => e.type === "run.delivery_repackaged");
+    assert.ok(prov, "provenance event appended atomically with created");
+    assert.deepEqual(prov.approvedAllowedPaths, ["root.txt", "src"]);
+    assert.equal(prov.source, "packaged");
+    assert.equal(prov.delivery.deliveryCommit, GOOD_COMMIT);
+
+    // Retry / concurrent caller yields to the existing created event.
+    const second = await t.tryAppendRepackageCreated({
+      delivery: m12Ref({ deliveryCommit: "e".repeat(40) }), approvedAllowedPaths: ["root.txt", "src"], source: "packaged",
+    });
+    assert.equal(second.created, false);
+    assert.equal(second.ref.deliveryCommit, GOOD_COMMIT, "yields the existing authoritative ref");
+
+    const events2 = await readTranscript(filePath);
+    assert.equal(events2.filter((e) => e.type === "run.delivery_created").length, 1, "still exactly one created");
+    assert.equal(events2.filter((e) => e.type === "run.delivery_repackaged").length, 1, "still one provenance");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("M12-1S2-T2: tryAppendRepackageVerification records exactly one outcome, yields on retry", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "m12s2-t2-"));
+  try {
+    const filePath = join(dir, `${M12_RUN}.jsonl`);
+    const t = new JsonlTranscript(filePath, { runId: M12_RUN, agentId: M12_AGENT });
+    await t.append("run.started", {
+      delivery: { allowedPaths: ["src"], baseCommit: BASE_COMMIT },
+    });
+    await t.append("run.delivery_failed", { deliveryCode: "disallowed_path" });
+    await t.tryAppendRepackageCreated({
+      delivery: m12Ref(), approvedAllowedPaths: ["root.txt", "src"], source: "packaged",
+    });
+
+    const first = await t.tryAppendRepackageVerification({
+      delivery: { ...m12Ref(), verification: { status: "passed", commands: ["npm test"], verifiedCommit: GOOD_COMMIT, results: [] } },
+      outcome: "passed",
+    });
+    assert.equal(first.recorded, true);
+
+    const second = await t.tryAppendRepackageVerification({
+      delivery: m12Ref(), outcome: "failed",
+    });
+    assert.equal(second.recorded, false, "yields to existing outcome");
+    assert.equal(second.outcome, "passed", "reports the durable winner, not the losing local outcome");
+
+    const events = await readTranscript(filePath);
+    assert.equal(events.filter((e) => e.type === "run.delivery_verification_passed").length, 1);
+    assert.equal(events.filter((e) => e.type === "run.delivery_verification_failed").length, 0);
+
+    await assert.rejects(
+      () => t.tryAppendRepackageVerification({
+        delivery: m12Ref({ deliveryCommit: "e".repeat(40) }),
+        outcome: "passed",
+      }),
+      /another delivery|identity|delivery_created/i,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("M12-1S2-T2B: tryAppendRepackageVerification rejects an orphan outcome without mutation", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "m12s2-t2b-"));
+  try {
+    const filePath = join(dir, `${M12_RUN}.jsonl`);
+    const t = new JsonlTranscript(filePath, { runId: M12_RUN, agentId: M12_AGENT });
+    await t.append("run.started", {
+      delivery: { allowedPaths: ["src"], baseCommit: BASE_COMMIT },
+    });
+    await t.append("run.delivery_failed", { deliveryCode: "disallowed_path" });
+    const before = await readFile(filePath, "utf8");
+
+    await assert.rejects(
+      () => t.tryAppendRepackageVerification({
+        delivery: m12Ref(),
+        outcome: "passed",
+      }),
+      /exactly one delivery_created/i,
+    );
+
+    assert.equal(await readFile(filePath, "utf8"), before, "orphan rejection is byte-identical");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("M12-1S2-T3: validateDeliveryFacts recoveryAcceptable true only on the strict recovery chain", () => {
+  const created = m12Ref();
+  const verified = { ...created, verification: { status: "passed", commands: ["npm test"], verifiedCommit: GOOD_COMMIT, results: [] } };
+  const provenance = {
+    type: "run.delivery_repackaged",
+    runId: M12_RUN,
+    delivery: created,
+    approvedAllowedPaths: ["root.txt", "src"],
+    source: "packaged",
+  };
+
+  // Full recovery chain: disallowed_path failed + provenance + passed.
+  const ok = [
+    {
+      type: "run.started",
+      runId: M12_RUN,
+      delivery: { allowedPaths: ["src"], baseCommit: BASE_COMMIT },
+    },
+    { type: "run.delivery_failed", runId: M12_RUN, deliveryCode: "disallowed_path" },
+    { type: "run.delivery_created", runId: M12_RUN, delivery: created },
+    provenance,
+    { type: "run.delivery_verification_passed", runId: M12_RUN, delivery: verified },
+  ];
+  const okFacts = validateDeliveryFacts(ok);
+  assert.equal(okFacts.valid, true);
+  assert.equal(okFacts.recoveryAcceptable, true);
+
+  // Missing provenance → not recovery-acceptable.
+  const noProv = ok.filter((e) => e.type !== "run.delivery_repackaged");
+  assert.equal(validateDeliveryFacts(noProv).recoveryAcceptable, false);
+
+  // Non-disallowed failure code → not recovery-acceptable.
+  const wrongCode = ok.map((e) => e.type === "run.delivery_failed" ? { ...e, deliveryCode: "empty_diff" } : e);
+  assert.equal(validateDeliveryFacts(wrongCode).recoveryAcceptable, false);
+
+  // Verification not passed → not recovery-acceptable.
+  const failed = ok.map((e) => e.type === "run.delivery_verification_passed"
+    ? { ...e, type: "run.delivery_verification_failed", delivery: { ...verified, verification: { ...verified.verification, status: "failed" } } }
+    : e);
+  assert.equal(validateDeliveryFacts(failed).recoveryAcceptable, false);
+
+  // Duplicate/malformed provenance cannot authorize recovery acceptance.
+  assert.equal(validateDeliveryFacts(ok.concat(provenance)).recoveryAcceptable, false);
+  const narrow = ok.map((e) => e.type === "run.delivery_repackaged"
+    ? { ...e, approvedAllowedPaths: ["src"] }
+    : e);
+  assert.equal(validateDeliveryFacts(narrow).recoveryAcceptable, false);
+
+  const originalWider = ok.map((e) => {
+    if (e.type === "run.started") {
+      return { ...e, delivery: { ...e.delivery, allowedPaths: ["docs", "src"] } };
+    }
+    if (e.type === "run.delivery_created" || e.type === "run.delivery_verification_passed") {
+      return { ...e, delivery: { ...e.delivery, changedFiles: ["src/a.js"] } };
+    }
+    if (e.type === "run.delivery_repackaged") {
+      return {
+        ...e,
+        delivery: { ...e.delivery, changedFiles: ["src/a.js"] },
+        approvedAllowedPaths: ["src"],
+      };
+    }
+    return e;
+  });
+  assert.equal(
+    validateDeliveryFacts(originalWider).recoveryAcceptable,
+    false,
+    "approved scope must also cover the original delivery contract",
+  );
 });

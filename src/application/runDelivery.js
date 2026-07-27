@@ -20,6 +20,7 @@ import {
   findState,
   findLastEventSeq,
   validateDeliveryFacts,
+  findValidRepackageProvenance,
   JsonlTranscript,
   TERMINAL_STATES,
 } from "../transcript.js";
@@ -181,6 +182,16 @@ export function projectDeliveryReadiness(events, runId) {
   const created = boundCreated;
   const verification = boundVerification;
 
+  // M12-1S2: a bound run.delivery_failed is SUPERSEDED when a recovery provenance
+  // (run.delivery_repackaged) binds the same delivery commit as the single bound
+  // delivery_created. A model-free repackage of a retained disallowed_path
+  // failure appends exactly that provenance atomically with delivery_created, so
+  // the pre-existing failure is no longer a durable conflict — it is the
+  // recovered state of the run. Without this, created+failed would collapse to
+  // ambiguous and the recovered delivery could never become reviewable.
+  const failureSuperseded = created.length === 1
+    && findValidRepackageProvenance(events, runId, created[0].delivery) !== null;
+
   // Conflicting durable facts → ambiguous (fail closed).
   if (created.length > 1) return "ambiguous";
   if (verification.length > 1) return "ambiguous";
@@ -188,7 +199,9 @@ export function projectDeliveryReadiness(events, runId) {
   // authoritative failure) → ambiguous. A single bound failure falls through to
   // packaging_failed below.
   if (failed.length > 1) return "ambiguous";
-  if (created.length === 1 && failed.length > 0) return "ambiguous";
+  // created+failed is a durable conflict UNLESS the failure was superseded by a
+  // recovery provenance bound to the created commit (M12-1S2).
+  if (created.length === 1 && failed.length > 0 && !failureSuperseded) return "ambiguous";
   // A verification outcome bound to this runId with NO bound delivery_created
   // is an orphan durable fact (broken durable chain) → ambiguous. It must never
   // fall through to waiting_for_packaging / not_requested.
@@ -213,7 +226,7 @@ export function projectDeliveryReadiness(events, runId) {
     return "reviewable";
   }
 
-  if (failed.length > 0) return "packaging_failed";
+  if (failed.length > 0 && !failureSuperseded) return "packaging_failed";
   if (created.length === 1) return "waiting_for_verification";
 
   // No committed delivery and no packaging failure. Distinguish "delivery was

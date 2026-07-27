@@ -77,8 +77,7 @@ After `stop`, trust the terminal result and transcript evidence, including stop 
 
 See `references/safety-incidents.md` before unattended or stop-sensitive work. Read `references/opencode-pitfalls.md` only when using opencode.
 ## Minimal MCP Loop
-
-WAO exposes 16 MCP tools. The minimal control loop uses the relevant control tools below; `playbook_list`/`playbook_get` are optional read-only catalog reads that sit **outside** the dispatch loop and are never required before `run_dispatch`.
+WAO exposes 17 MCP tools. The minimal control loop uses the relevant control tools below; `playbook_list`/`playbook_get` are optional read-only catalog reads that sit **outside** the dispatch loop and are never required before `run_dispatch`.
 
 | Tool | Side effect | Purpose |
 |---|---|---|
@@ -94,6 +93,7 @@ WAO exposes 16 MCP tools. The minimal control loop uses the relevant control too
 | `run_delivery` | read-only | Query delivery commit/verification/acceptance; optional `waitMs` adds a bounded, read-only readiness wait returning a closed-set `readiness` (M11-10) |
 | `run_delivery_review` | read-only | Review one delivery file as bounded, untrusted diff text |
 | `run_delivery_decide` | durable (first-decision-wins) | Record Lead accept/reject |
+| `run_delivery_repackage` | destructive (reentrant/crash-safe) | Re-package a run that terminally failed `disallowed_path`, reusing the original worktree/base/verification config (no model, no path inference). Lead's `allowedPaths` is the only scope authority; records a recovery provenance; does NOT auto accept/reject (M12-1S2) |
 | `run_stop` | destructive (first-terminal-wins) | Stop a runaway worker (workspace-bound) |
 | `runs_list` | read-only | List runs in current workspace (project-bound recovery) |
 | `playbook_list` | read-only | List built-in Lead playbooks as compact summaries (optional, M11-2) |

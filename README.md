@@ -34,7 +34,7 @@ and durable Lead accept/reject decision recording (it records the Lead's decisio
 it does not accept or reject for the Lead); workers receive only a bounded task
 prompt and stay out of orchestration.
 
-WAO exposes **16 MCP tools** covering the full supervised Lead loop:
+WAO exposes **17 MCP tools** covering the full supervised Lead loop:
 
 > `inventory → workspace_status → dispatch → status/wait → collect/diagnose → delivery query/review → Lead decision → (stop on runaway)`
 
@@ -55,10 +55,12 @@ project; safe changed-path projection + exact delivery proof + bounded/redacted
 diff review (`run_delivery_review`); bounded `run_collect` continuation with
 opaque cursor pagination; adaptive playbook catalog; workspace-scoped expert
 session reuse. M11 closed complete; the former "Tester context/token efficiency"
-item is retired/deferred out of M11. M12 plans only unimplemented slices
-(compact/delta observation, deterministic evidence/handoff aggregation,
-Lead-authored correction continuation with explicit lineage/safe reuse, bounded
-actionable failure facts, factual readiness/history projection).
+item is retired/deferred out of M11. M12-1 now includes advisory
+`candidateInventory` for retained `disallowed_path` failures and Lead-authorized,
+model-free `run_delivery_repackage` reuse of the original worktree, base, and
+verification declaration. Remaining planned slices include compact/delta
+observation, deterministic evidence/handoff aggregation, bounded actionable
+failure facts, and factual readiness/history projection.
 
 See [`docs/roadmap.md`](docs/roadmap.md) for full milestone status and
 [`docs/tech-debt.md`](docs/tech-debt.md) for the open tech-debt register.
@@ -100,7 +102,7 @@ Node 22–24 required (`node --version`; `engines.node` is `>=22 <25`).
 
 | You want to… | Read this |
 |---|---|
-| **Use the orchestrator as an agent / from a script** (16 MCP tools, commands, workflows, config) | [`SKILL.md`](SKILL.md) — the agent-facing usage manual + tool table |
+| **Use the orchestrator as an agent / from a script** (17 MCP tools, commands, workflows, config) | [`SKILL.md`](SKILL.md) — the agent-facing usage manual + tool table |
 | **Deploy / configure / operate it as a human** | [`docs/usage.md`](docs/usage.md) — full deployment + usage guide |
 | **Run real smoke tests** (claude/codex/opencode) | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
 | **Understand the architecture** (layers, interfaces, state machine) | [`docs/02-architecture.md`](docs/02-architecture.md) |

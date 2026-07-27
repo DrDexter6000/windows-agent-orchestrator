@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { getRunDelivery, decideRunDelivery } from "../src/application/runDelivery.js";
+import { getRunDelivery, decideRunDelivery, projectDeliveryReadiness } from "../src/application/runDelivery.js";
 import { JsonlTranscript, readTranscript } from "../src/transcript.js";
 
 function cleanupDir(dir) {
@@ -172,5 +172,113 @@ test("M9-6A-09: no console + dependency guard", async () => {
         assert.ok(!forbidden.test(line), `${f}: ${line.trim()}`);
       }
     }
+  } finally { cleanupDir(dir); }
+});
+
+// ============================================================
+// M12-1S2: recovery-aware readiness projection (zero-drift)
+// ============================================================
+//
+// A retained disallowed_path failure that has been model-free repackaged now
+// carries a run.delivery_created + run.delivery_repackaged provenance bound to
+// the same commit. The projection must NOT collapse created+failed to ambiguous
+// when the failure is superseded by that provenance — it must reach reviewable
+// (with a verification outcome) or waiting_for_verification (without). The
+// pre-recovery state (created absent, only the failed event) stays
+// packaging_failed, and a created+failed pair WITHOUT provenance stays
+// ambiguous — so the normal completed-run path is untouched.
+
+const S2_RUN = "run_m12s2_svc";
+const S2_COMMIT = "d".repeat(40);
+const S2_BASE = "b".repeat(40);
+
+function s2Ref(overrides = {}) {
+  return {
+    schemaVersion: 1, kind: "git_commit", runId: S2_RUN,
+    baseCommit: S2_BASE, deliveryCommit: S2_COMMIT, branch: `wao/${S2_RUN}`,
+    worktreePath: "/fake/wt", changedFiles: ["root.txt", "src/a.js"],
+    verification: { status: "pending", commands: ["npm test"] },
+    acceptance: { status: "pending", reviewerType: "lead_agent" },
+    integration: { status: "pending", targetCommit: null },
+    ...overrides,
+  };
+}
+
+test("M12-1S2-S1: projectDeliveryReadiness — recovery supersedes the retained failure", () => {
+  const created = s2Ref();
+  const verified = { ...created, verification: { status: "passed", commands: ["npm test"], verifiedCommit: S2_COMMIT, results: [] } };
+  const provenance = {
+    type: "run.delivery_repackaged",
+    runId: S2_RUN,
+    delivery: created,
+    approvedAllowedPaths: ["root.txt", "src"],
+    source: "packaged",
+  };
+
+  // Pre-recovery: only the failed event → packaging_failed.
+  const pre = [
+    { type: "run.background_submitted", runId: S2_RUN, deliveryRequested: true },
+    { type: "run.started", runId: S2_RUN, delivery: { mode: "git_commit_v1", baseCommit: S2_BASE, allowedPaths: ["src"], verificationCommands: ["npm test"] } },
+    { type: "run.delivery_failed", runId: S2_RUN, deliveryCode: "disallowed_path" },
+    { type: "run.state_change", runId: S2_RUN, from: "running", to: "failed", reason: "delivery_failed" },
+  ];
+  assert.equal(projectDeliveryReadiness(pre, S2_RUN), "packaging_failed");
+
+  // After repackage, no verification yet → waiting_for_verification (not ambiguous).
+  const noVerify = pre.concat([
+    { type: "run.delivery_created", runId: S2_RUN, delivery: created },
+    provenance,
+  ]);
+  assert.equal(projectDeliveryReadiness(noVerify, S2_RUN), "waiting_for_verification");
+
+  // After verification passed → reviewable.
+  const reviewable = noVerify.concat([{ type: "run.delivery_verification_passed", runId: S2_RUN, delivery: verified }]);
+  assert.equal(projectDeliveryReadiness(reviewable, S2_RUN), "reviewable");
+
+  // Duplicate or under-scoped provenance is not a valid recovery chain.
+  assert.equal(
+    projectDeliveryReadiness(noVerify.concat(provenance), S2_RUN),
+    "ambiguous",
+  );
+  const narrow = noVerify.map((e) => e.type === "run.delivery_repackaged"
+    ? { ...e, approvedAllowedPaths: ["src"] }
+    : e);
+  assert.equal(projectDeliveryReadiness(narrow, S2_RUN), "ambiguous");
+});
+
+test("M12-1S2-S2: projectDeliveryReadiness — created+failed WITHOUT provenance stays ambiguous (zero drift)", () => {
+  const created = s2Ref();
+  // No provenance: a created event coexisting with a bound delivery_failed is the
+  // pre-M12-1S2 durable conflict — must still collapse to ambiguous so the
+  // normal projection semantics do not drift.
+  const events = [
+    { type: "run.delivery_failed", runId: S2_RUN, deliveryCode: "disallowed_path" },
+    { type: "run.state_change", runId: S2_RUN, from: "running", to: "failed", reason: "delivery_failed" },
+    { type: "run.delivery_created", runId: S2_RUN, delivery: created },
+  ];
+  assert.equal(projectDeliveryReadiness(events, S2_RUN), "ambiguous");
+});
+
+test("M12-1S2-S3: decideRunDelivery recovery-accept admits a failed run only via the recovery chain", async () => {
+  const { dir, runId, transcript } = makeDeliveryTranscript("s2s3");
+  try {
+    // Build a failed disallowed_path run, repackaged (created+provenance),
+    // verification passed — then accept must succeed despite terminal=failed.
+    const ref = s2Ref({ runId });
+    const verified = { ...ref, verification: { status: "passed", commands: ["npm test"], verifiedCommit: S2_COMMIT, results: [] } };
+    await transcript.append("run.started", { delivery: { mode: "git_commit_v1", baseCommit: S2_BASE, allowedPaths: ["src"], verificationCommands: ["npm test"] }, worktreePath: "/fake/wt", worktreeBranch: `wao/${runId}` });
+    await transcript.append("run.delivery_failed", { deliveryCode: "disallowed_path" });
+    await transcript.append("run.state_change", { from: "running", to: "failed", reason: "delivery_failed" });
+    await transcript.append("run.delivery_created", { delivery: ref });
+    await transcript.append("run.delivery_repackaged", {
+      delivery: ref,
+      approvedAllowedPaths: ["root.txt", "src"],
+      source: "packaged",
+    });
+    await transcript.append("run.delivery_verification_passed", { delivery: verified });
+
+    const accept = await decideRunDelivery({ runId, runDir: dir, decision: "accepted", reason: "recovery verified" });
+    assert.equal(accept.accepted, true);
+    assert.equal(accept.event.type, "run.delivery_accepted");
   } finally { cleanupDir(dir); }
 });

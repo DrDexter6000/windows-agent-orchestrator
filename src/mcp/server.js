@@ -52,6 +52,10 @@ import {
   RUN_WAIT_MAX_MS,
 } from "../application/runWait.js";
 import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
+import {
+  runDeliveryRepackage,
+  REPACKAGE_ALLOWED_PATHS_LIMIT,
+} from "../application/runDeliveryRepackage.js";
 import { projectReviewResult } from "../application/deliveryReviewProjection.js";
 import { REVIEW_UNAVAILABLE_REASONS } from "../application/reviewUnavailableReasons.js";
 import { projectCollectResult } from "../application/runCollectProjection.js";
@@ -820,6 +824,48 @@ const RUN_DELIVERY_DECIDE_DESCRIPTION =
   "durable decision wins; later attempts lose without error. Does not decide correctness " +
   "automatically. Does not return the decision reason or delivery details.";
 
+// ===== run_delivery_repackage (model-free repackage) constants =====
+// M12-1S2: when a delivery run terminally failed with packaging code
+// disallowed_path, the Lead passes { runId, allowedPaths } and WAO re-packages by
+// REUSING the original run's persisted worktree/base/verification config — no
+// model, no worker resume, no path inference, no verification override, no auto
+// accept/reject. The Lead's allowedPaths is the ONLY scope authority. Produces an
+// auditable DeliveryRef with a recovery provenance; the original terminal failed
+// is NOT rewritten. Workspace-bound + destructive (moves a branch, appends
+// transcript events) but reentrant/crash-safe so idempotent in outcome.
+
+const DELIVERY_REPACKAGE_ERROR_TEXT = "run_delivery_repackage failed";
+
+const RUN_DELIVERY_REPACKAGE_INPUT = z.object({
+  runId: z.string().min(1),
+  allowedPaths: z.array(z.string().min(1).max(512)).min(1).max(REPACKAGE_ALLOWED_PATHS_LIMIT),
+}).strict();
+
+const RUN_DELIVERY_REPACKAGE_OUTPUT = z.object({
+  runId: z.string().min(1),
+  deliveryCommit: COMMIT_HASH_SCHEMA,
+  verificationStatus: z.enum(["passed", "failed", "unavailable"]),
+  source: z.enum(["packaged", "recovered"]),
+  created: z.boolean(),
+}).strict();
+
+const RUN_DELIVERY_REPACKAGE_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+const RUN_DELIVERY_REPACKAGE_DESCRIPTION =
+  "Re-package a delivery run that terminally failed with packaging code disallowed_path, " +
+  "reusing the original run's persisted worktree, base commit, and verification config (no " +
+  "model, no worker resume, no path inference, no verification override). The Lead's " +
+  "allowedPaths must include the original scope and cover every actual changed path; it is " +
+  "the only scope authority. Records a recovery provenance; the original terminal failed is " +
+  "not rewritten. Reentrant and crash-safe: a retry converges on the same delivery commit and " +
+  "exactly one verification outcome. Does not auto accept/reject — run_delivery_decide still " +
+  "owns the decision.";
+
 // ===== workspace_status (read-only binding proof) constants =====
 
 const WORKSPACE_ERROR_TEXT = "workspace_status failed";
@@ -1274,6 +1320,9 @@ export function createWaoMcpServer({
   listLeadPlaybooksFn,
   getLeadPlaybookFn,
   getRunDeliveryReviewFn,
+  // M12-1S2: injectable model-free delivery repackage service. Defaults to the
+  // real service; threaded only when a workspace binding authorizes the read.
+  getRunDeliveryRepackageFn,
 }) {
   const service = getRegistryInventoryFn ?? getRegistryInventory;
   // M11-7: the Windows user-env reader for credential readiness. Defaults to
@@ -1300,6 +1349,7 @@ export function createWaoMcpServer({
   const playbookListService = listLeadPlaybooksFn ?? listLeadPlaybooks;
   const playbookGetService = getLeadPlaybookFn ?? getLeadPlaybook;
   const deliveryReviewService = getRunDeliveryReviewFn ?? getRunDeliveryReview;
+  const deliveryRepackageService = getRunDeliveryRepackageFn ?? runDeliveryRepackage;
 
   const mcp = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -2411,6 +2461,70 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: DELIVERY_REVIEW_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  // ===== run_delivery_repackage (model-free repackage, workspace-bound destructive) =====
+  // M12-1S2: re-package a retained disallowed_path failure using the original
+  // run's persisted worktree/base/verification config. The service output is
+  // UNTRUSTED — the handler builds a NEW validated, bounded payload (no
+  // worktreePath / commands / stderr / reason leak) and collapses any violation
+  // to the fixed error with no structuredContent.
+
+  mcp.registerTool(
+    "run_delivery_repackage",
+    {
+      description: RUN_DELIVERY_REPACKAGE_DESCRIPTION,
+      inputSchema: RUN_DELIVERY_REPACKAGE_INPUT,
+      outputSchema: RUN_DELIVERY_REPACKAGE_OUTPUT,
+      annotations: RUN_DELIVERY_REPACKAGE_ANNOTATIONS,
+    },
+    async ({ runId, allowedPaths }) => {
+      try {
+        // Pre-validate runId before workspace binding or any service call.
+        if (!isValidRunId(runId)) {
+          return { isError: true, content: [{ type: "text", text: DELIVERY_REPACKAGE_ERROR_TEXT }] };
+        }
+        // Workspace-bound: the service needs the authorized workspace root to
+        // prove ownership + reuse the persisted linked worktree. No binding →
+        // the service is NEVER called.
+        const binding = await resolveWorkspaceBinding();
+        if (!binding.bound) {
+          return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
+        }
+        const result = await deliveryRepackageService({
+          runId,
+          runDir,
+          allowedPaths,
+          authorizedWorkspaceRoot: binding.root,
+        });
+        // Build a NEW payload from the service result — validate every field.
+        // Any violation throws → fixed error with no structuredContent.
+        if (result.runId !== runId) throw new Error("runId mismatch");
+        const deliveryCommit = COMMIT_HASH_SCHEMA.parse(result.deliveryCommit);
+        if (!["passed", "failed", "unavailable"].includes(result.verificationStatus)) {
+          throw new Error("bad verificationStatus");
+        }
+        if (!["packaged", "recovered"].includes(result.source)) throw new Error("bad source");
+        if (typeof result.created !== "boolean") throw new Error("created not boolean");
+        const payload = {
+          runId,
+          deliveryCommit,
+          verificationStatus: result.verificationStatus,
+          source: result.source,
+          created: result.created,
+        };
+        const parsed = RUN_DELIVERY_REPACKAGE_OUTPUT.parse(payload);
+        return {
+          content: [{ type: "text", text: JSON.stringify(parsed) }],
+          structuredContent: parsed,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: DELIVERY_REPACKAGE_ERROR_TEXT }],
         };
       }
     },

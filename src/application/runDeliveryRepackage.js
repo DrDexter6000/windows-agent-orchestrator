@@ -1,0 +1,383 @@
+// src/application/runDeliveryRepackage.js
+//
+// M12-1S2: model-free delivery repackage for a retained disallowed_path
+// packaging failure.
+//
+// When a delivery run terminally failed with packaging code `disallowed_path`,
+// the Lead may pass { runId, allowedPaths } and WAO re-packages by REUSING the
+// original run's persisted worktree / base / verification config:
+//   - No model is called. No worker is resumed. No path is inferred. No
+//     verification command is modified. Nothing is auto accepted/rejected.
+//   - The Lead's allowedPaths is the ONLY scope authority: it must include the
+//     ORIGINAL allowedPaths and cover EVERY actual changed path.
+//   - The ORIGINAL verificationCommands/unavailableReason are reused
+//     value-for-value; there is no caller override.
+//
+// Phased, reentrant, crash-recovery- and concurrency-safe state machine:
+//   Phase 0  read transcript + prove preconditions (workspace-bound, terminal
+//            failed, exactly one bound disallowed_path failure, original
+//            delivery requested, no existing decision, one usable run.started).
+//   Phase 1  recompute the FULL candidate inventory; reject on read-fail /
+//            truncate / empty; prove the new scope is a superset of the original
+//            and covers every actual changed path.
+//   Phase 2  resolve the delivery commit (package-or-recover) — OUTSIDE the
+//            transcript lock (contract #5). Deterministic: same inputs ⇒ same
+//            commit.
+//   Phase 3  lock-scoped CAS append of delivery_created + recovery provenance
+//            (run.delivery_repackaged). Yields to an existing created event — so
+//            a retry/competitor never creates a second commit or overwrites.
+//   Phase 4  verify the delivery — OUTSIDE the transcript lock (reuses the
+//            ORIGINAL verification config).
+//   Phase 5  lock-scoped CAS append of the verification outcome. Yields to an
+//            existing outcome — a retry continues from the created stage without
+//            re-packaging and without a second outcome.
+//
+// Architectural contract:
+//   - No argv parsing, no console.log, no process.exit.
+//   - Does not import src/commands/*, src/mcp/*, MCP SDK, or zod.
+//   - Depends on transcript.js, delivery.js, deliveryVerification.js,
+//     candidateInventory.js, and the workspace-ownership proof modules.
+
+import { join } from "node:path";
+
+import {
+  readTranscript,
+  findState,
+  findLastEventSeq,
+  JsonlTranscript,
+  TERMINAL_STATES,
+  validateDeliveryFacts,
+  findValidRepackageProvenance,
+} from "../transcript.js";
+import {
+  assertCommittedDeliveryRef,
+  isValidRunId,
+  isCanonicalCommitId,
+  isPathAllowed,
+  resolveDeliveryCommit,
+} from "../delivery.js";
+import { verifyDelivery } from "../deliveryVerification.js";
+import {
+  computeCandidateInventory,
+  INVENTORY_PATHS_LIMIT,
+} from "./candidateInventory.js";
+import { validateProjectedPath } from "./deliveryReview.js";
+import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
+import { proveWorkspace } from "./workspaceBinding.js";
+
+const REPACKAGE_VERIFICATION_OUTCOME_TYPES = new Set([
+  "run.delivery_verification_passed",
+  "run.delivery_verification_failed",
+  "run.delivery_verification_unavailable",
+]);
+
+export const REPACKAGE_ALLOWED_PATHS_LIMIT = INVENTORY_PATHS_LIMIT;
+
+/**
+ * Normalize + validate a Lead-supplied allowedPaths array to a sorted, deduped,
+ * forward-slash repo-relative list. Throws on any malformed entry — never
+ * silently rewrites. Reuses the SSOT path validator (isValidRepoRelativePath).
+ * @param {string[]} allowedPaths
+ * @returns {string[]}
+ */
+function _normalizeAllowedPaths(allowedPaths) {
+  if (!Array.isArray(allowedPaths) || allowedPaths.length === 0) {
+    throw new Error("runDeliveryRepackage: allowedPaths must be a non-empty array");
+  }
+  if (allowedPaths.length > REPACKAGE_ALLOWED_PATHS_LIMIT) {
+    throw new Error(`runDeliveryRepackage: allowedPaths exceeds ${REPACKAGE_ALLOWED_PATHS_LIMIT}`);
+  }
+  return [...new Set(allowedPaths.map((p) => validateProjectedPath(p)))].sort();
+}
+
+/** Newest bound event matching predicate, or null. */
+function _findBoundEvent(events, runId, predicate) {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const e = events[i];
+    if (e && e.runId === runId && predicate(e)) return e;
+  }
+  return null;
+}
+
+function _deliveryWasRequested(events, runId) {
+  return events.some(
+    (e) => e && e.runId === runId && (
+      (e.type === "run.background_submitted" && e.deliveryRequested === true)
+      || (e.type === "run.started" && e.delivery && typeof e.delivery.mode === "string" && e.delivery.mode.length > 0)
+    ),
+  );
+}
+
+/**
+ * Prove the repackage preconditions from the transcript. Fail-closed: any
+ * violation throws BEFORE any Git read or transcript append. Returns the
+ * reconstructed ORIGINAL delivery context (worktreePath / baseCommit /
+ * originalAllowedPaths / verification declaration) that the repackage reuses.
+ *
+ * @param {object[]} events
+ * @param {string} runId
+ * @param {string} authorizedWorkspaceRoot
+ * @returns {{worktreePath, baseCommit, originalAllowedPaths, verificationCommands?: string[], verificationUnavailableReason?: string}}
+ */
+function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot) {
+  // Workspace ownership — the run must belong to the authorized workspace.
+  if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) {
+    throw new Error("runDeliveryRepackage: authorizedWorkspaceRoot is required");
+  }
+  verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot);
+
+  // Terminal state must be failed (the retained failure).
+  const terminalState = findState(events.filter((e) => e && e.runId === runId));
+  if (terminalState !== "failed") {
+    throw new Error(`runDeliveryRepackage: run terminal state is ${terminalState}, must be failed`);
+  }
+
+  // Exactly one bound run.delivery_failed with code disallowed_path.
+  const failed = events.filter(
+    (e) => e && e.type === "run.delivery_failed" && e.runId === runId,
+  );
+  if (failed.length !== 1) {
+    throw new Error(`runDeliveryRepackage: expected exactly one bound delivery_failed, got ${failed.length}`);
+  }
+  if (failed[0].deliveryCode !== "disallowed_path") {
+    throw new Error(`runDeliveryRepackage: failure code is ${failed[0].deliveryCode}, must be disallowed_path`);
+  }
+
+  // No existing decision — once the Lead decided, repackage is not allowed.
+  const decision = events.find(
+    (e) => e && (e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected") && e.runId === runId,
+  );
+  if (decision) {
+    throw new Error("runDeliveryRepackage: a decision already exists for this run");
+  }
+
+  // Original delivery must have been requested.
+  if (!_deliveryWasRequested(events, runId)) {
+    throw new Error("runDeliveryRepackage: original delivery was not requested");
+  }
+
+  // Exactly one bound run.started with a usable delivery context + worktreePath.
+  const started = events.filter((e) => e && e.type === "run.started" && e.runId === runId);
+  if (started.length !== 1) {
+    throw new Error(`runDeliveryRepackage: expected exactly one bound run.started, got ${started.length}`);
+  }
+  const bound = started[0];
+  const delivery = bound.delivery;
+  if (!delivery || typeof delivery !== "object") {
+    throw new Error("runDeliveryRepackage: run.started has no delivery context");
+  }
+  if (!isCanonicalCommitId(delivery.baseCommit)) {
+    throw new Error("runDeliveryRepackage: run.started delivery.baseCommit is not canonical");
+  }
+  if (!Array.isArray(delivery.allowedPaths) || delivery.allowedPaths.length === 0) {
+    throw new Error("runDeliveryRepackage: run.started has no original allowedPaths");
+  }
+  if (typeof bound.worktreePath !== "string" || bound.worktreePath.length === 0) {
+    throw new Error("runDeliveryRepackage: run.started has no worktreePath");
+  }
+  // ORIGINAL verification declaration must be present (commands or reason).
+  const hasCommands = Array.isArray(delivery.verificationCommands) && delivery.verificationCommands.length > 0
+    && delivery.verificationCommands.every((c) => typeof c === "string" && c.trim().length > 0);
+  const hasReason = typeof delivery.verificationUnavailableReason === "string"
+    && delivery.verificationUnavailableReason.trim().length > 0;
+  if (!hasCommands && !hasReason) {
+    throw new Error("runDeliveryRepackage: run.started has no original verification declaration");
+  }
+  // The persisted worktreePath must be a real Git worktree top-level (defense).
+  proveWorkspace(bound.worktreePath);
+
+  const originalAllowedPaths = _normalizeAllowedPaths(delivery.allowedPaths);
+  return {
+    worktreePath: bound.worktreePath,
+    baseCommit: delivery.baseCommit,
+    originalAllowedPaths,
+    ...(hasCommands ? { verificationCommands: [...delivery.verificationCommands] } : {}),
+    ...(hasReason ? { verificationUnavailableReason: delivery.verificationUnavailableReason } : {}),
+  };
+}
+
+/**
+ * Repackage a retained disallowed_path failure into an auditable delivery.
+ *
+ * @param {object} input
+ * @param {string} input.runId — must pass isValidRunId
+ * @param {string} input.runDir — runs/ directory (host-owned)
+ * @param {string[]} input.allowedPaths — the Lead's NEW approved scope (must
+ *   include the ORIGINAL allowedPaths and cover every actual changed path)
+ * @param {string} input.authorizedWorkspaceRoot — MCP workspace binding
+ * @param {Function} [input.resolveDeliveryCommitFn] — injectable (default resolveDeliveryCommit)
+ * @param {Function} [input.verifyDeliveryFn] — injectable (default verifyDelivery)
+ * @param {Function} [input.computeInventoryFn] — injectable (default computeCandidateInventory)
+ * @param {Function} [input.readTranscriptFn] — injectable for testing
+ * @param {Function} [input.transcriptFactory] — injectable async (filePath, context) => transcript
+ * @returns {Promise<{runId, deliveryCommit, verificationStatus, outcome, source, created, verificationRecorded}>}
+ * @throws {Error} on any precondition / scope / inventory / packaging / proof failure
+ */
+export async function runDeliveryRepackage({
+  runId,
+  runDir,
+  allowedPaths,
+  authorizedWorkspaceRoot,
+  resolveDeliveryCommitFn,
+  verifyDeliveryFn,
+  computeInventoryFn,
+  readTranscriptFn,
+  transcriptFactory,
+}) {
+  if (!runId || typeof runId !== "string") throw new Error("runDeliveryRepackage: runId is required");
+  if (!runDir || typeof runDir !== "string") throw new Error("runDeliveryRepackage: runDir is required");
+  if (!isValidRunId(runId)) throw new Error(`Invalid runId: ${JSON.stringify(runId)}`);
+
+  // Validate + normalize the Lead's new scope BEFORE any read (fail closed).
+  const newAllowedPaths = _normalizeAllowedPaths(allowedPaths);
+
+  const _readTranscript = readTranscriptFn ?? readTranscript;
+  const _resolve = resolveDeliveryCommitFn ?? resolveDeliveryCommit;
+  const _verify = verifyDeliveryFn ?? verifyDelivery;
+  const _inventory = computeInventoryFn ?? computeCandidateInventory;
+
+  const filePath = join(runDir, `${runId}.jsonl`);
+  const events = await _readTranscript(filePath);
+
+  // Phase 0: preconditions.
+  const original = _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot);
+
+  // Idempotency pre-read: an existing created/outcome lets us skip the expensive
+  // package/verify steps. The lock-scoped CAS methods re-check authoritatively.
+  const existingCreated = _findBoundEvent(events, runId, (e) => e.type === "run.delivery_created");
+  const existingOutcome = _findBoundEvent(events, runId, (e) => REPACKAGE_VERIFICATION_OUTCOME_TYPES.has(e.type));
+  const createdEvents = events.filter(
+    (e) => e && e.type === "run.delivery_created" && e.runId === runId,
+  );
+  const outcomeEvents = events.filter(
+    (e) => e && REPACKAGE_VERIFICATION_OUTCOME_TYPES.has(e.type) && e.runId === runId,
+  );
+  if (createdEvents.length > 1 || outcomeEvents.length > 1) {
+    throw new Error("runDeliveryRepackage: ambiguous durable delivery chain");
+  }
+  if (outcomeEvents.length > 0 && createdEvents.length === 0) {
+    throw new Error("runDeliveryRepackage: orphan verification outcome");
+  }
+
+  // The Lead may widen but never narrow the original contract, including on
+  // idempotent retries after a delivery has already been created.
+  for (const orig of original.originalAllowedPaths) {
+    if (!isPathAllowed(orig, newAllowedPaths)) {
+      throw new Error("runDeliveryRepackage: new allowedPaths must include the original allowedPaths");
+    }
+  }
+
+  // Phase 1: recompute the FULL candidate inventory (NEW scope is validated below,
+  // but the inventory is computed vs the ORIGINAL contract to surface every
+  // actual changed path). Reject on read-fail / truncate / empty.
+  if (!existingCreated) {
+    const inventory = await _inventory(original.worktreePath, original.baseCommit, original.originalAllowedPaths);
+    if (!inventory) {
+      throw new Error("runDeliveryRepackage: candidate inventory unavailable (read failed)");
+    }
+    if (inventory.actualChangedTruncated) {
+      throw new Error("runDeliveryRepackage: candidate inventory truncated — verify manually");
+    }
+    if (inventory.actualChangedCount === 0 || inventory.actualChangedPaths.length === 0) {
+      throw new Error("runDeliveryRepackage: candidate inventory is empty");
+    }
+    // The Lead's scope must COVER every actual changed path.
+    const uncovered = inventory.actualChangedPaths.filter((p) => !isPathAllowed(p, newAllowedPaths));
+    if (uncovered.length > 0) {
+      throw new Error(
+        `runDeliveryRepackage: new allowedPaths do not cover actual changed paths: ${uncovered.join(", ")}`,
+      );
+    }
+  }
+
+  // Phase 2: resolve the delivery commit — package-or-recover, OUTSIDE the lock.
+  // Skipped when a created event already exists (idempotent retry).
+  let resolvedRef;
+  let source;
+  if (existingCreated) {
+    resolvedRef = existingCreated.delivery;
+    const provenance = findValidRepackageProvenance(events, runId, resolvedRef);
+    if (!provenance) {
+      throw new Error("runDeliveryRepackage: existing recovery provenance is invalid");
+    }
+    if (resolvedRef.changedFiles.some((p) => !isPathAllowed(p, newAllowedPaths))) {
+      throw new Error("runDeliveryRepackage: new allowedPaths do not cover the existing delivery");
+    }
+    assertCommittedDeliveryRef(resolvedRef);
+    source = provenance.source;
+  } else {
+    const deliveryCtx = {
+      runId,
+      worktreePath: original.worktreePath,
+      baseCommit: original.baseCommit,
+      isolation: { type: "worktree", strategy: "persistent" },
+      allowedPaths: newAllowedPaths,
+      ...(original.verificationCommands ? { verificationCommands: original.verificationCommands } : {}),
+      ...(original.verificationUnavailableReason
+        ? { verificationUnavailableReason: original.verificationUnavailableReason }
+        : {}),
+    };
+    const resolved = await _resolve(deliveryCtx);
+    resolvedRef = resolved.ref;
+    source = resolved.source;
+  }
+
+  // Phase 3: lock-scoped CAS append of created + provenance. Yields to an
+  // existing created event (retry / competing request) — no second commit.
+  const context = {
+    runId,
+    agentId: events[0]?.agentId ?? "unknown",
+    initialSeq: findLastEventSeq(events),
+  };
+  const transcript = transcriptFactory
+    ? await transcriptFactory(filePath, context)
+    : new JsonlTranscript(filePath, context);
+  const createdResult = await transcript.tryAppendRepackageCreated({
+    delivery: resolvedRef,
+    approvedAllowedPaths: newAllowedPaths,
+    source,
+  });
+  const authoritativeRef = createdResult.ref;
+  const authoritativeSource = createdResult.provenance?.source ?? source;
+
+  // Phase 4 + 5: verify (outside the lock) and record the outcome (lock-scoped
+  // CAS). Skipped when an outcome already exists (idempotent retry).
+  if (existingOutcome) {
+    const facts = validateDeliveryFacts(events);
+    if (!facts.valid || facts.deliveryCommit !== authoritativeRef.deliveryCommit) {
+      throw new Error("runDeliveryRepackage: existing verification outcome is not bound to the delivery");
+    }
+    return {
+      runId,
+      deliveryCommit: authoritativeRef.deliveryCommit,
+      verificationStatus: _outcomeFromEventType(existingOutcome.type),
+      outcome: _outcomeFromEventType(existingOutcome.type),
+      source: authoritativeSource,
+      created: createdResult.created,
+      verificationRecorded: false,
+    };
+  }
+
+  const verifyResult = await _verify(authoritativeRef);
+  const verificationResult = await transcript.tryAppendRepackageVerification({
+    delivery: verifyResult.delivery,
+    outcome: verifyResult.outcome,
+  });
+
+  return {
+    runId,
+    deliveryCommit: authoritativeRef.deliveryCommit,
+    verificationStatus: verificationResult.outcome,
+    outcome: verificationResult.outcome,
+    source: authoritativeSource,
+    created: createdResult.created,
+    verificationRecorded: verificationResult.recorded,
+  };
+}
+
+function _outcomeFromEventType(type) {
+  if (type === "run.delivery_verification_passed") return "passed";
+  if (type === "run.delivery_verification_failed") return "failed";
+  if (type === "run.delivery_verification_unavailable") return "unavailable";
+  return "pending";
+}

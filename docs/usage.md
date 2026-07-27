@@ -411,7 +411,7 @@ LLM 编排器（未来的 M5 DAG 或外部脚本）只需要：
 
 ### MCP stdio 接口（agent-facing primary，M9）
 
-WAO 是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude Desktop、Codex、OpenCode、其它 agent runtime）可通过 stdio 把 WAO 当作 MCP server 调用。MCP 暴露 16 个工具；常用 Lead 闭环为 inventory → workspace_status/select → dispatch → status/wait → collect/diagnose → delivery query/review → acceptance，另有 stop/list recovery 与可选 playbook catalog。每个 tool 直接调用共享 application service，不 shell-out CLI。当前工具清单权威表见 `SKILL.md` 与 `docs/02-architecture.md`。
+WAO 是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude Desktop、Codex、OpenCode、其它 agent runtime）可通过 stdio 把 WAO 当作 MCP server 调用。MCP 暴露 17 个工具；常用 Lead 闭环为 inventory → workspace_status/select → dispatch → status/wait → collect/diagnose → delivery query/review → acceptance，另有 stop/list recovery 与可选 playbook catalog。每个 tool 直接调用共享 application service，不 shell-out CLI。当前工具清单权威表见 `SKILL.md` 与 `docs/02-architecture.md`。
 
 **Host 注册说明**：`npm run mcp` 仅用于在 WAO repo 内手工 smoke；正式 host 注册应指向 Node shim 和 stdio entrypoint 的**绝对路径**，并为 registry 和 runDir 指定绝对路径——MCP host 的启动 cwd 不保证是 WAO repo。host 配置语法由 host 自己负责。注册后若当前会话未发现工具，重启或重载 host。Provider credential 必须由 host 通过其安全 env inheritance/allowlist 提供——不把 credential value 写入 repo、worker prompt 或 MCP args。WAO 不接管 host-global auth。
 
@@ -859,6 +859,24 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 失败返回固定 `run_delivery_decide failed`。Reason 在持久化前 trim+redact，但**绝不返回**给 MCP。
 
 annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:true, openWorldHint:false`（首决策不可逆；重复决策幂等返回 loser）。
+
+### MCP `run_delivery_repackage`（model-free 重打包，M12-1S2）
+
+`run_delivery_repackage` 在一次 delivery run 终态失败、打包失败码恰为 `disallowed_path` 时，由 Lead 传入 `{ runId, allowedPaths }` 重打包。它**复用**该 run 原始持久化的 worktree / base / verification 配置：不调用 model、不 resume worker、不推断 path、不修改 verification 命令、不自动 accept/reject。Lead 的 `allowedPaths` 是**唯一** scope 权威——必须包含原始 `allowedPaths` 且覆盖**所有**实际变更路径（先重算完整候选清单；read-fail/truncate/empty 一律拒绝）。原始 `verificationCommands`/`unavailableReason` 按 run.started 原值复用，不接受 caller 覆盖。
+
+- **输入**（strict）：`{ "runId": "run_...", "allowedPaths": ["src", "root.txt"] }`。
+- **可重入/崩溃恢复/并发安全**：相同输入的并发或重试 → 恰好一条 `run.delivery_created` 与恰好一个最终 verification 结果；不同 allowedPaths 的竞争请求不会互相覆盖。打包在 transcript append 锁外进行（长操作不持锁）；只有短读/校验/CAS-append 在锁内。包装移动了分支但 transcript append 失败/崩溃时，下次同名调用从 Git 精确对象恢复**同一个** commit（严格证明 parent/count/files/message/identity/branch/clean 后才落盘，不丢结果、不重调 model）。
+- **安全输出**（不返回 worktreePath/commands/stderr/reason）：
+
+```json
+{ "runId": "run_...", "deliveryCommit": "ddd...", "verificationStatus": "passed"|"failed"|"unavailable", "source": "packaged"|"recovered", "created": true }
+```
+
+追加一条 recovery provenance（`run.delivery_repackaged`），绑定 DeliveryRef / 请求 runId / 已批准 scope。原始终态 failed **不被改写**为 completed；但当且仅当（原始失败严格为 `disallowed_path` 打包失败 + recovery provenance + 唯一 DeliveryRef 共享同一 commit + verification=passed）时，`run_delivery_decide(accepted)` 可被 Lead 显式接受（仍由 Lead 决定，非自动）。verification failed/unavailable 仍可供 Lead review/reject，绝不自动 reject。
+
+失败返回固定 `run_delivery_repackage failed`。`run_delivery`（结果查询）与 `run_delivery_review` 仍是结果查询/审查 SSOT。
+
+annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:true, openWorldHint:false`。
 
 ### MCP `run_stop`（stop runaway worker，M10 P0-2）
 
