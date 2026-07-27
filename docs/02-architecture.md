@@ -5,6 +5,12 @@
 > 本文不再维护 per-item 进度标注（旧 `[S]`/`[M]` 标记保留作"阶段归属"参考，不代表"待实现"）。
 > 上游：`docs/01-prd.md`（需求）、`docs/research/05-key-decisions.md`（决策）。
 > 本文档定义**接口契约、数据模型、状态机、模块边界**，不包含具体算法实现。
+>
+> **权威边界（ADR 0018，WAO mechanical containment）**：WAO 自动监测，不自动监督；自动封装，不自动验收；自动呈现，不自动决策。 （English: WAO monitors, never supervises; packages, never accepts; presents, never decides.）
+> Lead 独占需求/目标/拆解/并行串行/worker 与 context 与 allowed paths/verification/acceptance criteria/
+> correction prompt/retry/switch/scope/fallback/语义审查/accept-reject/集成/报告。
+> WAO 只机械执行 validate/resolve/inject/execute/observe/preserve/redact/project/collect exact evidence/
+> run Lead-specified checks/package bounded artifact/record Lead decision。`run_wait` 是 liveness observation，supervision 属于 Lead。certification/readiness 是 advisory evidence，不是 permission gate。
 
 ---
 
@@ -52,7 +58,7 @@ CLI Adapter ─┘                 ↓
 - RunManager / transcript / delivery / Backend / workflow 不依赖 MCP——MCP 是 L4 adapter，不是 L1-L3 dependency。`src/mcp/**` 是唯一允许 import `@modelcontextprotocol/sdk` 与 `zod` 的位置（由边界测试守卫）。`src/application/**` 不得 import `src/commands/*`、`src/mcp/*`、MCP SDK 或 zod。
 - M9 已暴露 MCP `registry_list`（只读）、`run_dispatch`（destructive，delivery-capable）、`run_status`（只读）、`run_collect`（非只读非幂等）、`run_diagnose`（只读安全诊断）、`run_delivery`（只读 delivery 查询）、`run_delivery_decide`（destructive，持久 Lead 决策，first-decision-wins）。Codex + Claude Code/Fable 两个不同 Lead Runtime 真实 MCP dogfood 已通过（runId: `run_20260715122607417p5fbue` / `run_20260715124226755a97el2`）。M9 最小 Lead 闭环正式完成。M10-pre2 新增 `workspace_status`（只读，host-authorized workspace binding 状态查询）并使 `run_dispatch` 在调用 shared service 前重新解析并证明 workspace——证明后的 canonical Git root 作为 server-owned `cwd` 传入，模型不能通过 tool argument 提供任意路径。M11-6 新增 `workspace_select`（会话级，Lead 选择工作 Git 项目，`lead_session` 来源，最高优先级）——workspace 解析优先级变为 `lead_session` > `mcp_root` > `server_config` > fail-closed；Lead 无需 Human Owner bind、项目配置或重启即可在当前会话选择项目并派工。M10 P0-2 新增 `run_stop`（destructive，workspace-bound，停止失控 worker），委托共享 application service `runStop.js`（CLI `stop` 与 MCP 共用同一 service）。M10 P0-3 新增 `runs_list`（只读，project-bound run 列表，用于 recovery），委托共享 application service `runList.js`（workspace ownership 由 `runWorkspaceOwnership.js` 判定）。M10-pre3 新增 `run_wait`（只读 long-poll，终态/活性等待），委托共享 application service `runWait.js`（liveness 投影 SSOT 在 `ownerLiveness.js`）。M11-10 给 `run_delivery` 增加可选 `waitMs`（共享常量锁定 `[1000,300000]` ms），触发 bounded 只读 readiness wait 并返回严格闭集 `readiness`（`waiting_for_packaging|waiting_for_verification|reviewable|packaging_failed|not_requested|ambiguous`）；CLI `runs delivery --wait-ms N` 与 MCP 委托同一份 `getRunDeliveryReadiness` service——MCP 不解析 transcript、不 shell-out CLI，`run_delivery_review` 的 exact-proof/安全投影/错误边界未被放松，省略 `waitMs` 时 point-in-time 输出向后兼容。
 - **三钟分离（M10-pre3）**：WAO 有三个互相独立的时钟，职责不重叠、互不覆盖：(1) **执行截止（execution deadline，默认禁用）**——worker run 上的 wall-clock 终止时钟，M10-pre3 起默认禁用，改由 Lead 观察驱动（`run_wait`）；显式配置时仍生效。(2) **后端请求超时（backend request timeout，独立）**——单次后端调用（HTTP/进程 spawn/collect 拉取）的网络/IO 超时，与 run 生命周期正交，按 `config.timeout` 链生效。(3) **Lead 观察等待（`run_wait` 的 `waitMs`）**——Lead 侧 long-poll 阻塞上限（下限 180s），只决定 Lead 一次调用等多久，**不影响 worker 生命周期**。三者解耦：到时只返回当前 liveness 让 Lead 决策，不杀 worker。
-- **M10 架构验收结论**：真实外部项目验证了 WAO 架构闭环（多 worker 并行 dispatch、`run_wait` liveness supervision、delivery verification、durable decision、restart recovery）。详细 dogfood 进度、runId/commit 与过程证据只指向 `docs/roadmap.md` M10 行，不在本文复制。
+- **M10 架构验收结论**：真实外部项目验证了 WAO 架构闭环（多 worker 并行 dispatch、`run_wait` liveness observation、delivery verification、durable decision、restart recovery）。详细 dogfood 进度、runId/commit 与过程证据只指向 `docs/roadmap.md` M10 行，不在本文复制。
 - Backend 仍只负责 worker runtime。
 - Skill 是 Lead 指导层（`SKILL.md`），不在运行时依赖图中保存状态。
 - Transcript 继续是 run truth SSOT。等价的 state-changing operation（无论来自 MCP 还是 CLI）必须调用同一 service，产生相同 transcript durable facts 和 outcome；read-only query 不制造 transcript 事件，返回语义等价的结构化结果。
@@ -862,8 +868,8 @@ edges:
 // 内置节点处理器
 const nodeHandlers = {
   agent:      (node, ctx) => runManager.start(node.agentId, ...),
-  router:     (node, ctx) => evaluateRouting(node, ctx),   // 可由 LLM 驱动
-  gate:       (node, ctx) => scorecard.check(ctx),
+  router:     (node, ctx) => evaluateRouting(node, ctx),   // Lead-authored deterministic function; WAO does not auto semantic route
+  gate:       (node, ctx) => scorecard.check(ctx),         // Lead-specified mechanical condition, not semantic acceptance
   integrator: (node, ctx) => collectAndDedup(ctx.upstream), // M8-5: 拼初稿(不改判质量)
 };
 // 用户注册自定义
@@ -872,8 +878,12 @@ registry.registerNodeType("my-custom", MyHandler);
 
 `gate.requiredClaims` uses `"nodeId.field"` to require one predecessor field; a bare `"field"` searches all predecessors. This format is part of the workflow contract, not a Lead prompt convention.
 
-**LLM 编排器 `[L]`**：作为一种 `router` 节点实现，或作为独立的策略层客户端调用 L2 原语。
-它是**可插拔策略的一等公民**，但不焊死在引擎里。
+**节点语义（ADR 0018）**：`router` 是 **Lead-authored deterministic function**——分支条件由 Lead
+写定，引擎机械求值，WAO/LLM 不做自动语义路由。`gate` 是 **Lead-specified mechanical condition**
+（证据存在性、字段完整性等程序可判定事实），不是语义验收——验收由 Lead 拍板。WorkflowEngine
+（§7，`src/workflow/engine.js`）作为 Lead-authored expert mechanical executor 执行 Lead 写定的分层/
+并行/依赖，不构成 "LLM 编排器一等公民" 产品方向；如需把外部 LLM 判断接入某个节点，那是 Lead 在
+自己的 plan 里显式选择并自行负责的策略，不焊死在引擎里，也不由 WAO 自动驱动。
 
 ---
 

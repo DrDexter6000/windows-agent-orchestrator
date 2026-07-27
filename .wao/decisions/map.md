@@ -19,3 +19,4 @@
 0015 | Worker credential boundary: minimize now, broker before unsupervised release
 0016 | Supervised Phase 3C may resume; broker remains an unsupervised release boundary
 0017 | MCP-first control surface: MCP Server is agent-facing primary, CLI is fallback, shared application services
+0018 | WAO mechanical containment — no auto supervision (docs-only product-contract reset; partial supersedes 0010 product direction, retains 0017)

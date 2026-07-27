@@ -323,9 +323,9 @@ test("AGENT_ONBOARDING.md 最小安装闭环必须使用当前角色和显式 cw
   assert.equal(h2s.length, 1, "onboarding 不应有重复的 ## 4 章节编号");
 });
 
-test("SKILL.md 开头必须说明 WAO 的当前目标、上线边界和认证驱动调度", () => {
+test("SKILL.md 开头必须说明 WAO 的当前目标、上线边界和认证作为 advisory evidence", () => {
   const head = read("SKILL.md").slice(0, 3500);
-  for (const kw of ["deterministic control plane", "real worker tasks", "supervised production trial", "certified", "strict-dispatch"]) {
+  for (const kw of ["deterministic control plane", "real worker tasks", "supervised production trial", "certified", "advisory"]) {
     assert.ok(head.includes(kw), `SKILL.md 开头缺少第三方 lead 首读关键信息：${kw}`);
   }
   assert.ok(/Claude Code-first|Claude Code first|Claude-first|Claude Code process workers are the default coding lane/i.test(head), "SKILL.md 开头未声明当前 Claude Code-first 调度策略");
@@ -783,23 +783,22 @@ test("M10 closeout: roadmap 不出现 'unattended or multi-tenant release' / cre
     "PRD 必须声明 WAO 不为缺 goal/autonomy 的 Lead 补 goal loop");
 });
 
-test("M11 mainline: roadmap 存在且只存在一个 M11 Lead Experience + Adaptive Playbooks 行，标为进行中或规划中，不得整体完成", () => {
+test("M11 mainline: roadmap 存在且只存在一个 M11 Lead Experience + Adaptive Playbooks 行，标为已完成（M12-0 关闭 M11）", () => {
   const roadmap = read("docs/roadmap.md");
   const lines = roadmap.split("\n");
   // 进度跟踪表里 | M11 | 行
   const m11Rows = lines.filter((l) => /^\|\s*M11\b/.test(l));
   assert.equal(m11Rows.length, 1, `roadmap 必须恰好一个 M11 进度行；实际 ${m11Rows.length}`);
   const m11Row = m11Rows[0];
-  // 必须是进行中（🔧）或规划中（📋），不得标 ✅ 完成（M11 整体未完成）
-  assert.ok(/🔧 进行中|📋 规划中|🔧.*进行中|📋.*规划中/.test(m11Row),
-    "M11 必须标为进行中或规划中");
-  assert.ok(!/✅\s*完成/.test(m11Row), "M11 不得标为整体完成");
+  // M12-0 关闭 M11：必须标为 ✅ 完成，不得仍停在 🔧 进行中
+  assert.ok(/✅\s*完成/.test(m11Row), "M11 必须标为 ✅ 完成（M12-0 已退役 Tester token efficiency 并关闭 M11）");
+  assert.ok(!/🔧\s*进行中/.test(m11Row), "M11 不得仍标为 🔧 进行中（M12-0 已关闭 M11）");
   // 名称必须含两个核心（Lead Experience + Adaptive Playbooks 或同义）
   assert.ok(/Lead Experience/.test(m11Row) && /Adaptive Playbooks|playbook|template/i.test(m11Row),
     "M11 名称必须保留 Lead Experience + Adaptive Playbooks 两个核心");
 });
 
-test("M11-10 closeout: roadmap records the fresh Lead delivery-readiness canary without closing M11 overall", () => {
+test("M11-10 closeout: roadmap records the fresh Lead delivery-readiness canary (M11 now closed complete by M12-0)", () => {
   const roadmap = read("docs/roadmap.md");
   const m11Row = roadmap.split("\n").find((line) => /^\| M11 \|/.test(line));
   assert.ok(m11Row, "roadmap has an M11 row");
@@ -807,7 +806,7 @@ test("M11-10 closeout: roadmap records the fresh Lead delivery-readiness canary 
   assert.match(m11Row, /run_20260726093455485nl8l84/);
   assert.match(m11Row, /delivery `df8bf65`/);
   assert.match(m11Row, /唯一一次 `run_delivery\(waitMs\)` 返回 `reviewable` \+ verification passed，acceptance accepted/);
-  assert.match(m11Row, /\| M11 \| 🔧 进行中 \|/);
+  assert.match(m11Row, /\| M11 \| ✅ 完成 \|/);
 });
 
 test("M11-11A-RED-03: Lead identity states the full human-owned operating contract", () => {
@@ -922,14 +921,17 @@ test("M11-1A-closeout: usage.md 不得把 OpenCode 'enabled' 声明为必填或�
 // M11-1B: certification clarity + worktree hygiene authority guards
 // ============================================================
 
-test("M11-1B: SKILL.md 不再把 certified 与 strict-dispatch 当作两个独立返回字段", () => {
+test("M11-1B/M12-0: SKILL.md 把 certification 定位为 advisory evidence（非 permission hard gate）", () => {
   const skill = read("SKILL.md");
   // 旧文案 "latest certification says `certified` and `strict-dispatch`" 必须消失
   assert.ok(!/certified.*and.*strict-dispatch|certification says .*certified.*and.*strict-dispatch/i.test(skill),
     "SKILL.md 不得再要求 Lead 同时证明 certified 与 strict-dispatch 两个字段");
-  // 必须明确 certified 即 strict-dispatch 资格（单一字段）
-  assert.ok(/certified.*strict dispatch|certified.*eligible.*strict|certification.*single.*field|certified 意味|certified.*implies/i.test(skill),
-    "SKILL.md 必须明确 certified 即 strict-dispatch 资格（单一字段）");
+  // M12-0 重置：certification 是 advisory evidence，不是 permission gate
+  assert.ok(/advisory evidence|advisory.*not.*(?:a )?gate|not a permission gate|不是 permission gate|advisory.*非.*门/i.test(skill),
+    "SKILL.md 必须把 certification 定位为 advisory evidence，非 permission gate");
+  // 硬门措辞必须消失（M12-0 重置取代 M11-1B 的 strict-dispatch 资格框架）
+  assert.ok(!/strict-dispatch|strict dispatch/i.test(skill),
+    "SKILL.md 不得再使用 strict-dispatch 硬门框架（M12-0 改为 advisory）");
 });
 
 test("M11-1B: usage.md 记录 .wao-worktrees/ 仓库本地 exclude hygiene 规则", () => {
@@ -1041,20 +1043,21 @@ test("M11-2C-06: architecture 明确 Catalog ≠ WorkflowEngine（分离）", ()
     "architecture 明确 Catalog 与 WorkflowEngine 分离");
 });
 
-test("M11-2C-07: roadmap 只标 M11-2 complete，不标整个 M11 complete", () => {
+test("M11-2C-07/M12-0: roadmap 标 M11-2 complete，M11 整体已由 M12-0 关闭，M12 进行中", () => {
   const roadmap = read("docs/roadmap.md");
   // M11-2 必须被标记为完成（或已交付）。
   assert.ok(/M11-2.*完成|M11-2.*complete|M11-2.*✅|M11-2.*已交付|M11-2.*done/i.test(roadmap),
     "roadmap 标记 M11-2 完成");
-  // 但 M11 整体行不得是纯完成态（不得把整个 M11 标 ✅ 完成）。
-  // 允许 "M11 🔧 进行中" / "M11 整体未完成" 等措辞。
+  // M12-0 关闭 M11：M11 整体行已标 ✅ 完成（不再要求进行中）。
   const m11RowPattern = /\|\s*M11\s*\|[^|]*\|/g;
   const m11Rows = roadmap.match(m11RowPattern) || [];
   const m11Aggregate = m11Rows.join(" ");
-  assert.ok(!/M11.*✅\s*完成(?!.*进行中)/.test(m11Aggregate) || /进行中|未完成|in progress/i.test(m11Aggregate),
-    "roadmap 不得把整个 M11 标为已完成（M11 整体仍进行中）");
-  assert.ok(/M11.*进行中|M11.*未完成|M11.*in progress/i.test(m11Aggregate),
-    "roadmap 保持 M11 整体进行中");
+  assert.ok(/M11.*✅\s*完成/.test(m11Aggregate),
+    "roadmap M11 整体行已标 ✅ 完成（M12-0 关闭 M11）");
+  // M12 必须存在且进行中。
+  const m12Row = roadmap.split("\n").find((l) => /^\|\s*M12\s*\|/.test(l)) || "";
+  assert.ok(m12Row, "roadmap 必须有 M12 行（M12-0 产品合同重置）");
+  assert.ok(/🔧.*进行中|进行中/.test(m12Row), "roadmap M12 行必须标为 🔧 进行中");
 });
 
 test("M11-2C-08: usage 含 playbook 的 MCP 与 CLI 两种只读入口", () => {
@@ -1355,4 +1358,148 @@ test("M11-12C-DOC-01: every delivery run queries delivery truth after terminal",
     "SKILL routes packaging failure through its structured code without review or decision");
   assert.ok(/run_diagnose.*does not replace.*run_delivery/is.test(skill),
     "SKILL keeps general diagnosis supplementary to delivery truth");
+});
+
+// ============================================================
+// M12-0: Lead Token Efficiency + Assisted Orchestration product contract reset.
+// These guards lock the reset authority boundary across the five authority docs
+// + ADR-0018. The reset makes explicit that WAO's value is routing worker token
+// spend onto external provider quota, and that WAO is an assisted execution
+// control plane — not a gate or a second semantic supervisor. Failure → fix the
+// doc, not the test.
+// ============================================================
+
+const M12_AUTHORITY_DOCS = [
+  "docs/01-prd.md",
+  "docs/02-architecture.md",
+  "docs/roadmap.md",
+  "README.md",
+  "SKILL.md",
+];
+const M12_ADR = ".wao/decisions/0018-wao-mechanical-containment-no-auto-supervision.md";
+const M12_CN = "WAO 自动监测，不自动监督；自动封装，不自动验收；自动呈现，不自动决策。";
+const M12_EN = "WAO monitors, never supervises; packages, never accepts; presents, never decides.";
+
+// M12-0-01: every authority doc + ADR-0018 carries the exact mechanical-containment
+// sentence in both Chinese and English. This is the single canonical statement of
+// the reset; paraphrases drift, so the exact strings are pinned.
+test("M12-0-01: 五份 authority docs + ADR-0018 携带精确机械 containment 句（中+英逐字）", () => {
+  for (const rel of [...M12_AUTHORITY_DOCS, M12_ADR]) {
+    const text = read(rel);
+    assert.ok(text.includes(M12_CN), `${rel} 缺精确中文 containment 句`);
+    assert.ok(text.includes(M12_EN), `${rel} 缺精确英文 containment 句`);
+  }
+});
+
+// M12-0-02: forbid the old supervision alternative phrasings that blur the line
+// between process-liveness observation/containment (WAO-owned) and supervision
+// (Lead-owned). "不自动监督" (the exact sentence) is allowed; the alternatives
+// "自动监督过程" / "不做语义监督" must be gone.
+test("M12-0-02: authority docs + ADR 禁止旧监督替代表述（自动监督过程 / 不做语义监督）", () => {
+  for (const rel of [...M12_AUTHORITY_DOCS, M12_ADR]) {
+    const text = read(rel);
+    assert.ok(!/自动监督过程/.test(text), `${rel} 不得使用替代表述"自动监督过程"`);
+    assert.ok(!/不做语义监督/.test(text), `${rel} 不得使用替代表述"不做语义监督"`);
+  }
+});
+
+// M12-0-03: PRD must not retain the retracted LLM-router / auto-semantic-workflow
+// product directions. The Lead defines/selects/modifies the deterministic plan;
+// the already-shipped WorkflowEngine is only a Lead-authored expert mechanical
+// executor. The "LLM orchestrator as a first-class pluggable strategy" and "use
+// an LLM to decide routing" directions are gone.
+test("M12-0-03: PRD 删除 LLM router / 自动语义 workflow 产品方向", () => {
+  const prd = read("docs/01-prd.md");
+  assert.ok(!/LLM 编排器.*一等公民|一等公民.*LLM 编排器/.test(prd),
+    "PRD 不得保留'LLM 编排器（一等公民）'产品方向");
+  assert.ok(!/用 LLM 决定分流/.test(prd),
+    "PRD 不得保留'用 LLM 决定分流到哪个 agent'产品方向");
+  assert.ok(/Lead.*定义.*选择.*修改.*deterministic|Lead.*defines.*selects.*modifies.*deterministic|定义\/选择\/修改.*deterministic/i.test(prd),
+    "PRD 必须说明 Lead 定义/选择/修改 deterministic execution plan");
+  assert.ok(/Lead-authored.*mechanical|mechanical executor|专家级.*机械.*执行|Lead-authored expert mechanical/i.test(prd),
+    "PRD 必须把已实现 WorkflowEngine 定位为 Lead-authored expert mechanical executor");
+});
+
+// M12-0-04: architecture downgrades router/gate to mechanical. router is a
+// Lead-authored deterministic function; gate is a Lead-specified mechanical
+// condition. No WAO/LLM auto semantic routing or semantic acceptance. run_wait
+// is liveness observation; supervision belongs to the Lead.
+test("M12-0-04: architecture router=Lead-authored deterministic，gate=mechanical condition；run_wait 是 liveness observation", () => {
+  const arch = read("docs/02-architecture.md");
+  assert.ok(!/可由 LLM 驱动/.test(arch),
+    "architecture 不得把 router 描述为'可由 LLM 驱动'");
+  assert.ok(!/可插拔策略的一等公民/.test(arch),
+    "architecture 不得保留 LLM 编排器'可插拔策略的一等公民'方向");
+  assert.ok(/Lead-authored deterministic|router.*deterministic.*function|router 是.*Lead.*deterministic|Lead.*定义.*router.*deterministic/i.test(arch),
+    "architecture 必须把 router 定义为 Lead-authored deterministic function");
+  assert.ok(/mechanical condition|机械条件|Lead.*specified.*mechanical|Lead-specified mechanical/i.test(arch),
+    "architecture 必须把 gate 定义为 Lead-specified mechanical condition（非语义验收）");
+  assert.ok(/run_wait.*liveness|liveness observation|观察.*监督.*Lead|supervision.*Lead|监督.*属于 Lead|supervision belongs to the Lead/i.test(arch),
+    "architecture 必须说明 run_wait 是 liveness observation，supervision 属于 Lead");
+});
+
+// M12-0-05: certification/readiness is advisory evidence, not a permission gate.
+// The Lead may choose any configured worker subject to project governance. The
+// hard-gate phrasings ("require a certified worker for real changes", "Use only
+// workers whose certification is certified") must be gone from SKILL.
+test("M12-0-05: SKILL 把 certification 定位为 advisory evidence，删除 permission hard gate 措辞", () => {
+  const skill = read("SKILL.md");
+  assert.ok(/advisory evidence|advisory.*not.*(?:a )?gate|not a permission gate|certification.*advisory/i.test(skill),
+    "SKILL 必须把 certification 定位为 advisory evidence，非 permission gate");
+  assert.ok(!/require a `?certified`? worker for real changes/i.test(skill),
+    "SKILL 不得再硬性 require a certified worker for real changes");
+  assert.ok(!/Use only workers whose.*certification is `?certified`?/i.test(skill),
+    "SKILL 不得再要求 Use only workers whose certification is certified");
+  assert.ok(!/strict-dispatch|strict dispatch/i.test(skill),
+    "SKILL 不得再使用 strict-dispatch 硬门框架");
+});
+
+// M12-0-06: M11 closed complete (Tester token efficiency retired/deferred out of
+// M11); M12 in progress with only planned/unimplemented slices. No invented tool
+// names; M12 must not claim runtime features are implemented.
+test("M12-0-06: roadmap 标 M11 ✅ 完成（Tester token efficiency retire/defer）、M12 🔧 进行中（planned/unimplemented slices）", () => {
+  const roadmap = read("docs/roadmap.md");
+  const m11Row = roadmap.split("\n").find((l) => /^\|\s*M11\s*\|/.test(l)) || "";
+  assert.ok(m11Row, "roadmap 含 M11 行");
+  assert.ok(/✅\s*完成/.test(m11Row), "M11 行必须标为 ✅ 完成");
+  assert.ok(/Tester.*(?:token|context).*efficiency.*(退役|retire|defer|延后)/i.test(m11Row)
+    || /Tester.*efficiency.*(退役|retire|defer|延后)/i.test(m11Row),
+    "M11 行必须记录 Tester token efficiency retire/defer");
+  const m12Row = roadmap.split("\n").find((l) => /^\|\s*M12\s*\|/.test(l)) || "";
+  assert.ok(m12Row, "roadmap 必须有 M12 行");
+  assert.ok(/🔧.*进行中|进行中/.test(m12Row), "M12 行必须标为 🔧 进行中");
+  // planned slices — exact concepts, no invented tool names
+  assert.ok(/compact\/delta observation|compact.*delta.*observation/i.test(m12Row),
+    "M12 计划 compact/delta observation");
+  assert.ok(/deterministic evidence\/handoff aggregation|evidence\/handoff aggregation/i.test(m12Row),
+    "M12 计划 deterministic evidence/handoff aggregation");
+  assert.ok(/Lead-authored correction continuation|correction continuation.*lineage|correction continuation.*safe reuse/i.test(m12Row),
+    "M12 计划 Lead-authored correction continuation（explicit lineage / safe reuse）");
+  assert.ok(/bounded actionable failure facts|actionable failure facts/i.test(m12Row),
+    "M12 计划 bounded actionable failure facts");
+  assert.ok(/factual readiness\/history projection|readiness\/history projection/i.test(m12Row),
+    "M12 计划 factual readiness/history projection");
+  assert.ok(/planned|unimplemented|规划|未实现|计划/i.test(m12Row),
+    "M12 slices 必须标 planned/unimplemented，不得声称已实现");
+});
+
+// M12-0-07: ADR-0018 exists at the exact filename, is accepted/dated 2026-07-27,
+// docs-only, does not claim runtime features implemented, partial-supersedes 0010
+// product direction, and retains 0017 MCP-first. The decisions map lists 0018.
+test("M12-0-07: ADR-0018 精确路径 + accepted/date + docs-only + partial supersedes 0010 + retains 0017 + map 一致", () => {
+  assert.ok(existsSync(join(ROOT, M12_ADR)),
+    "ADR-0018 必须存在于精确路径 .wao/decisions/0018-wao-mechanical-containment-no-auto-supervision.md");
+  const adr = read(M12_ADR);
+  assert.ok(/^status:\s*accepted/im.test(adr), "ADR-0018 status 必须为 accepted");
+  assert.ok(/date:\s*2026-07-27/im.test(adr), "ADR-0018 date 必须为 2026-07-27");
+  assert.ok(/partial.*supersedes.*0010|supersedes.*0010.*product direction|partial.*取代.*0010/i.test(adr),
+    "ADR-0018 必须 partial supersedes 0010 product direction");
+  assert.ok(/retain.*0017|retains.*0017|保留.*0017/i.test(adr),
+    "ADR-0018 必须 retain 0017 MCP-first");
+  assert.ok(/docs-only|docs only|仅文档/i.test(adr), "ADR-0018 必须声明 docs-only");
+  assert.ok(!/runtime feature.*implemented|已实现.*runtime feature/i.test(adr),
+    "ADR-0018 不得声称 runtime feature implemented");
+  const map = read(".wao/decisions/map.md");
+  assert.ok(/0018.*wao-mechanical-containment-no-auto-supervision|0018 \| .*mechanical containment/i.test(map),
+    "decisions map 必须列出 0018 且与文件名一致");
 });

@@ -6,24 +6,30 @@
 
 ## 0. 产品定义
 
+**核心价值**：WAO 的价值是把 worker token 消耗路由到外部 provider quota——WAO 让 Lead 用确定性原语把任务派给外部 worker runtime（claude-code / codex / opencode-serve），把 token 账单落在 worker 的 provider 上，而不是把活揽回 Lead 自己的上下文。WAO 是 Lead 的**辅助执行控制面**，不是门禁，也不是第二个语义总管。
+
+> **权威边界（ADR 0018）**：WAO 自动监测，不自动监督；自动封装，不自动验收；自动呈现，不自动决策。
+> （English: WAO monitors, never supervises; packages, never accepts; presents, never decides.）
+> Lead 独占用户需求、目标、拆解、并行/串行、worker/context/allowed paths/verification/acceptance criteria、correction prompt、retry/switch/scope/fallback、语义审查、accept/reject、集成、报告。WAO 只机械执行 validate/resolve/inject/execute/observe/preserve/redact/project/collect exact evidence/run Lead-specified checks/package bounded artifact/record Lead decision。
+
 **WAO is a Lead-Agent-facing, Skill-guided multi-runtime collaboration toolkit with deterministic MCP and CLI control surfaces.**
 
-WAO 是面向 Lead Agent 的多 runtime 协作工具。它通过 MCP/CLI 提供可靠、确定性的派发、监督、恢复、交付与验收原语，通过 Skill/Playbook 提供可复用但不强制的工程思维与工作流；Lead 保留任务理解、语义拆解、编排选择和最终判断。
+WAO 是面向 Lead Agent 的多 runtime 协作工具。它通过 MCP/CLI 提供可靠、确定性的派发、活性观察（`run_wait`）、恢复、交付验证与 Lead 决策记录原语（监督与验收由 Lead 负责），通过 Skill/Playbook 提供可复用但不强制的工程思维与工作流；Lead 保留任务理解、语义拆解、编排选择和最终判断。
 
-- **MCP 是当前 primary agent-facing adapter，但不是产品存在的目的，也不是唯一可能形态**：任意支持 MCP 的 Agent Runtime 都可以作为 Lead Agent 使用 WAO。Lead 通过 MCP 调用 dispatch、supervise、collect、diagnose、delivery 和 acceptance 等确定性能力。Skill、CLI、plugin/MCP adapter 都服务于同一个产品核心。
+- **MCP 是当前 primary agent-facing adapter，但不是产品存在的目的，也不是唯一可能形态**：任意支持 MCP 的 Agent Runtime 都可以作为 Lead Agent 使用 WAO。Lead 通过 MCP 调用 dispatch、`run_wait`（liveness observation）、collect、diagnose、delivery 和 `run_delivery_decide`（记录 Lead accept/reject）等确定性能力；监督与验收始终由 Lead 负责。Skill、CLI、plugin/MCP adapter 都服务于同一个产品核心。
 - **Skill-guided**：`SKILL.md` 承载工程纪律、角色合同与 Lead guidance，并提供可复用但不强制的可选 Lead Playbook Catalog（Adaptive Playbooks 已在 M11-2 交付为只读、可选、Lead 可修改的决策脚手架：四个内置 playbook + `playbook_list`/`playbook_get`）。Skill 告诉 Lead 何时派工、如何验收和遵守边界。Skill 不保存运行状态，不代替 transcript，不实现控制逻辑。Lead 继续负责语义分解、失败响应和最终验收。WAO 不自动执行语义任务分解，Catalog 不自动拆解/选 worker/派发/推进 phase/验收，不存在 `playbook_run` 类执行入口。
 - **CLI-backed**：CLI 保留为人类操作、debug、运维、CI 和 fallback 接口。MCP 与 CLI 必须调用同一个 application-service 层。禁止 MCP Server 通过 shell 调 CLI 并解析文本输出。RunManager、transcript、delivery、Backend 不依赖 MCP。M9/M10 最小 Lead 闭环 shared application services 已完成提取；其它非闭环 use case 仍可留在 `src/commands/*.js`。
 - **配置责任**：WAO 可以提供自身 MCP Server 的启动和配置入口。WAO 不接管 host runtime 的全局 MCP 配置、provider 配置或认证系统。一个 runtime 可以作为 Lead host，也可以通过 Backend 作为 worker，但两种角色必须保持边界清楚。
 
 ### 0.1 两项一级目标
 
-1. **让任意有能力的 Lead runtime 稳定、可靠地协调多个 worker runtime** 的信息流转、任务派发、监督、交付和验收。
+1. **让任意有能力的 Lead runtime 稳定、可靠地协调多个 worker runtime** 的信息流转、任务派发、活性观察（`run_wait`）、交付验证与 Lead 决策记录；监督、语义审查与验收由 Lead 负责。
 2. **给 Lead 提供成熟的工程思维、角色合同和可选模板**，同时保留编排自由（是否持续自主思考、何时继续/停止属于用户选择的 Lead runtime）。
 
 ### 0.2 非目标 / 责任边界
 
 - **多租户、企业级权限系统和强身份隔离不是 WAO roadmap**；本地单用户下仍必须做好凭据最小暴露与输出脱敏（见 `docs/02-architecture.md` §2.5 TD-104）。
-- **WAO 不为缺少 goal/autonomy 的 Lead runtime 实现 goal loop**，不替 Lead 做持续语义推理；WAO 提供 durable execution、supervision、recovery 和 evidence。
+- **WAO 不为缺少 goal/autonomy 的 Lead runtime 实现 goal loop**，不替 Lead 做持续语义推理；WAO 提供 durable execution、liveness observation、recovery 和 evidence（监督由 Lead 负责）。
 - **WAO 不自动做语义任务分解**，不强制固定 workflow，不强制调用 Advisor/Auditor。
 - **Advisor/Auditor 是 Lead 低信心或高风险时的可选质量杠杆**，不是默认流水线节点。
 
@@ -86,7 +92,7 @@ Niuma 验证了"图编排 + 结构化 handoff + scorecard"的正确性，但它�
 - ❌ 与 `D:\projects\talking-cli` 的任何耦合
 - ❌ 兼容 Maestro 的 playbook 格式
 - ❌ 多租户、企业级权限系统和强身份隔离作为 roadmap 成熟度门（本地单用户凭据卫生仍是质量要求，但 credential broker / 多租户隔离不是产品目标）
-- ❌ 为缺少 goal/autonomy 的 Lead runtime 补齐 goal loop / 持续自主推理（WAO 提供 durable execution、supervision、recovery、evidence；是否持续在线自主思考属于用户选择的 Lead runtime）
+- ❌ 为缺少 goal/autonomy 的 Lead runtime 补齐 goal loop / 持续自主推理（WAO 提供 durable execution、liveness observation、recovery、evidence；监督由 Lead 负责；是否持续在线自主思考属于用户选择的 Lead runtime）
 
 ## 5. 用户故事
 
@@ -96,7 +102,7 @@ Niuma 验证了"图编排 + 结构化 handoff + scorecard"的正确性，但它�
 - **U2 后台跑 + 恢复**：我启动一批 run 后去做别的；机器重启或进程崩了，我能让它们接续跑，不丢失历史。
 - **U3 看清楚发生了什么**：对任意一个 run，我要知道它到底干了什么——跑了哪些命令、产出了什么、卡在哪。
 - **U4 重试不丢历史**：一个 run 失败了，我要基于它的原始 prompt 重跑，但保留旧 run 的完整记录。
-- **U5 等价驱动**：MCP-capable Agent Runtime 通过 MCP 调用 WAO 确定性能力（dispatch、supervise、collect、diagnose、delivery、acceptance）——这是 agent-facing primary interface。人类通过 CLI 做操作、debug、运维和 fallback。两者共享同一个 application-service 层。等价的 state-changing operation 必须调用同一 service，产生相同 transcript durable facts 和 outcome；read-only query 不制造 transcript 事件，MCP/CLI 返回语义等价的结构化结果。bash 脚本和 CI 通过 CLI 驱动。三者在同一套原语上**平权**。
+- **U5 等价驱动**：MCP-capable Agent Runtime 通过 MCP 调用 WAO 确定性能力（dispatch、`run_wait`（liveness observation）、collect、diagnose、delivery、`run_delivery_decide`（记录 Lead accept/reject）；监督与验收由 Lead 负责）——这是 agent-facing primary interface。人类通过 CLI 做操作、debug、运维和 fallback。两者共享同一个 application-service 层。等价的 state-changing operation 必须调用同一 service，产生相同 transcript durable facts 和 outcome；read-only query 不制造 transcript 事件，MCP/CLI 返回语义等价的结构化结果。bash 脚本和 CI 通过 CLI 驱动。三者在同一套原语上**平权**。
 
 ### 5.2 可靠性（短期→中期）
 
@@ -105,14 +111,19 @@ Niuma 验证了"图编排 + 结构化 handoff + scorecard"的正确性，但它�
 
 ### 5.3 工作流编排（中期目标）
 
+> **编排归属（ADR 0018）**：Lead 定义、选择、修改 deterministic execution plan——节点拓扑、
+> 分支条件、依赖语义都由 Lead 撰写。已实现的 WorkflowEngine（`workflow run`，见 §6 L3）只是
+> **Lead-authored expert mechanical executor**：它按 Lead 写定的分层/并行/依赖机械执行，不自动做
+> 语义拆解、不自动语义路由、不自动选择 worker。WAO 不提供由模型自动决定分流到哪个 worker 的语义编排方向。
+
 - **U8 定义可复用流程**：我要定义一次"分析→编码→测试→审查→提交"流程，之后对每个新任务复用，只换输入。
 - **U9 精确调度**：流程里"审查"节点必须等"测试"节点完成才能开始，即使"编码"的数据已经到了。
-- **U10 灵活扩展**：我要能注册自定义节点类型（比如"用 LLM 决定分流到哪个 agent"），不必改核心代码。
+- **U10 确定性扩展**：我要能注册自定义节点类型，按 Lead 写定的确定性规则扩展流程，不必改核心代码。
 - **U11 配置即改进**：我改进了一次流程定义，之后所有任务都按新标准执行，不必改代码。
 
 ### 5.4 长任务可监督与可恢复（中长期）
 
-- **U12 长任务可监督与可恢复**：我派发长任务后，系统持有 durable state、持续 liveness 监督（`run_wait`）、可在进程崩溃/机器重启后恢复，失败/卡住时把证据交回让我决定继续/collect/stop。系统不承诺自动产生 goal/autonomy 或自动故障策略——是否持续在线、自主继续或请求 Owner 介入由 Lead runtime 决定。
+- **U12 长任务可监督与可恢复**：我派发长任务后，系统持有 durable state、持续 liveness observation（`run_wait`，Lead 据此做监督）、可在进程崩溃/机器重启后恢复，失败/卡住时把证据交回让我决定继续/collect/stop。系统不承诺自动产生 goal/autonomy 或自动故障策略——是否持续在线、自主继续或请求 Owner 介入由 Lead runtime 决定。
 - **U13 无对照物也能判定对错**：全新项目没有"标准答案"，我要能通过用户定义的验收契约（行为快照/契约测试/验收脚本）判定产出是否合格。
 
 ## 6. 能力清单（按架构层组织）
@@ -144,14 +155,16 @@ Niuma 验证了"图编排 + 结构化 handoff + scorecard"的正确性，但它�
 
 ### L3 编排层
 
+> Lead 定义/选择/修改 deterministic execution plan；已实现 WorkflowEngine 只是 Lead-authored
+> expert mechanical executor（见 §5.3 与 ADR 0018）。编排引擎不把外部模型自动判断作为一等编排策略。
+
 | 能力 | 阶段 |
 |------|------|
 | 内置工作流模板（parallel / sequential） | [M] |
 | 声明式 DAG（YAML） | [M] |
 | 数据依赖 vs 执行依赖解耦 | [M] |
-| 可插拔节点类型 | [M] |
+| 可插拔节点类型（Lead-authored deterministic） | [M] |
 | 结构化 handoff（程序可校验） | [M] |
-| LLM 编排器（作为可插拔策略的一等公民） | [L] |
 
 ### L4 接口层
 

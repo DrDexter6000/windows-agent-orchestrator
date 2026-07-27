@@ -5,26 +5,36 @@ Windows-native, headless, runtime-agnostic orchestrator for local agent runtimes
 records everything to JSONL transcripts, provides git worktree isolation, resume,
 token/cost metrics, declarative DAG workflows, and evidence-chain scorecard gating.
 
+> **Value & boundary (ADR 0018):** WAO's value is routing worker token spend onto
+> external provider quota — it lets a Lead dispatch real work to external worker runtimes
+> so the token bill lands on the worker's provider, instead of pulling the work back into
+> the Lead's own context. WAO is an assisted execution control plane, not a gate and not a
+> second semantic supervisor. WAO 自动监测，不自动监督；自动封装，不自动验收；自动呈现，不自动决策。
+> (English: WAO monitors, never supervises; packages, never accepts; presents, never decides.)
+
 - **Minimal dependencies** — plain Node ESM; only `@modelcontextprotocol/sdk` + `zod` for the MCP control surface. No Docker/WSL.
 - **Transcript is source of truth** — every run reconstructable from `runs/<runId>.jsonl`.
 - **Windows-native** — worktree isolation + process-tree cleanup tuned for Windows.
 
 ## Vision
 
-WAO is a Windows-native control plane that lets a lead agent dispatch certified worker
-agents to do real repository work. It keeps orchestration out of worker system prompts:
-workers receive normal task prompts, while WAO owns transcripts, state, isolation,
-workflow execution, metrics, and evidence-chain scorecard gates.
+WAO is a Windows-native control plane that lets a lead agent dispatch external worker
+agents to do real repository work, routing the token spend onto each worker's provider
+quota. It keeps orchestration out of worker system prompts: workers receive normal task
+prompts, while WAO owns transcripts, state, isolation, workflow execution, metrics, and
+evidence-chain scorecard gates. Certification is advisory evidence about a worker's
+recorded reliability, not a dispatch permission gate.
 
 ## Current Status
 
 WAO is an **MCP-first control plane** (Decision 0017). A lead agent runtime —
 Claude Desktop, Codex CLI, OpenCode, or any MCP host — drives WAO as a stdio MCP
 server. WAO owns dispatch, state, isolation, transcripts, delivery verification,
-and Lead acceptance; workers receive only a bounded task prompt and stay out of
-orchestration.
+and durable Lead accept/reject decision recording (it records the Lead's decision;
+it does not accept or reject for the Lead); workers receive only a bounded task
+prompt and stay out of orchestration.
 
-WAO exposes **14 MCP tools** covering the full supervised Lead loop:
+WAO exposes **16 MCP tools** covering the full supervised Lead loop:
 
 > `inventory → workspace_status → dispatch → status/wait → collect/diagnose → delivery query/review → Lead decision → (stop on runaway)`
 
@@ -33,18 +43,22 @@ reads. Every state-changing operation calls the same shared application service
 as the CLI fallback, producing identical transcript durable facts. See
 [`SKILL.md`](SKILL.md) for the tool table and routing contract.
 
-**Milestones M0–M10 complete; M11 (Lead Experience + Adaptive Playbooks) in
-progress.** Implemented so far: explicit state machine + JSONL transcript source
+**Milestones M0–M11 complete; M12 (Lead Token Efficiency + Assisted Orchestration)
+in progress.** Implemented so far: explicit state machine + JSONL transcript source
 of truth; multi-backend (opencode-serve + claude-code + codex); worktree
 isolation, resume, metrics aggregation; declarative DAG engine + parameterized
 workflow templates; daemon supervision + scorecard evidence gating + runtime
 certification + diagnostics; MCP-first Lead closed loop with
-workspace-bound dispatch/recovery/stop + `run_wait` liveness supervision +
+workspace-bound dispatch/recovery/stop + `run_wait` liveness observation +
 durable decisions + restart recovery; real multi-worker dogfood on an external
 project; safe changed-path projection + exact delivery proof + bounded/redacted
 diff review (`run_delivery_review`); bounded `run_collect` continuation with
 opaque cursor pagination; adaptive playbook catalog; workspace-scoped expert
-session reuse. Still open under M11: Tester context/token efficiency.
+session reuse. M11 closed complete; the former "Tester context/token efficiency"
+item is retired/deferred out of M11. M12 plans only unimplemented slices
+(compact/delta observation, deterministic evidence/handoff aggregation,
+Lead-authored correction continuation with explicit lineage/safe reuse, bounded
+actionable failure facts, factual readiness/history projection).
 
 See [`docs/roadmap.md`](docs/roadmap.md) for full milestone status and
 [`docs/tech-debt.md`](docs/tech-debt.md) for the open tech-debt register.
@@ -86,7 +100,7 @@ Node 22–24 required (`node --version`; `engines.node` is `>=22 <25`).
 
 | You want to… | Read this |
 |---|---|
-| **Use the orchestrator as an agent / from a script** (14 MCP tools, commands, workflows, config) | [`SKILL.md`](SKILL.md) — the agent-facing usage manual + tool table |
+| **Use the orchestrator as an agent / from a script** (16 MCP tools, commands, workflows, config) | [`SKILL.md`](SKILL.md) — the agent-facing usage manual + tool table |
 | **Deploy / configure / operate it as a human** | [`docs/usage.md`](docs/usage.md) — full deployment + usage guide |
 | **Run real smoke tests** (claude/codex/opencode) | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
 | **Understand the architecture** (layers, interfaces, state machine) | [`docs/02-architecture.md`](docs/02-architecture.md) |
@@ -127,7 +141,7 @@ npm run cli -- workflow run <file.mjs> [--vars k=v]
 ```
 
 Full command reference: `npm run cli -- help`, or [`SKILL.md`](SKILL.md) for the
-14-tool MCP table and routing contract.
+16-tool MCP table and routing contract.
 
 ## Testing
 
