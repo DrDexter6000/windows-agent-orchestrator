@@ -95,11 +95,13 @@ test("M9-6B-02: run_delivery returns safe fields incl. bounded changedPaths, no 
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     // M11-1A: changedPaths + changedPathsTruncated are now part of the safe output set.
     // M11-8C: deliveryAvailable (success discriminator) + deliveryFailure (null on success).
-    const allowed = new Set(["runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit", "changedFileCount", "changedPaths", "changedPathsTruncated", "verificationStatus", "verificationFailureCode", "verificationFailureSummary", "acceptanceStatus", "decisionType", "deliveryFailure"]);
+    // M12-1S1: candidateInventory (additive nullable; null on success).
+    const allowed = new Set(["runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit", "changedFileCount", "changedPaths", "changedPathsTruncated", "verificationStatus", "verificationFailureCode", "verificationFailureSummary", "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory"]);
     for (const k of Object.keys(parsed)) assert.ok(allowed.has(k), `unexpected key: ${k}`);
     assert.equal(parsed.deliveryAvailable, true, "success variant has deliveryAvailable:true");
     assert.equal(parsed.deliveryRequested, true, "success variant confirms delivery intent");
     assert.equal(parsed.deliveryFailure, null, "no deliveryFailure on success");
+    assert.equal(parsed.candidateInventory, null, "no candidateInventory on success (M12-1S1)");
 
     assert.equal(parsed.changedFileCount, 2, "count derived from array length");
     assert.equal(parsed.verificationStatus, "passed");
@@ -425,11 +427,12 @@ test("M11-1A-01: run_delivery output field set is exactly old fields + changedPa
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     // M11-8C: added deliveryAvailable (success discriminator) + deliveryFailure (null here).
     // M11-12B: added nullable verificationFailureSummary (null here — status is passed).
+    // M12-1S1: added nullable candidateInventory (null here — success variant).
     const expectedKeys = new Set([
       "runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit",
       "changedFileCount", "changedPaths", "changedPathsTruncated",
       "verificationStatus", "verificationFailureCode", "verificationFailureSummary",
-      "acceptanceStatus", "decisionType", "deliveryFailure",
+      "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory",
     ]);
     assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys,
       `field set mismatch; got ${Object.keys(parsed).sort()}`);

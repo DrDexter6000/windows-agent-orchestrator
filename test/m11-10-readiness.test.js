@@ -726,9 +726,9 @@ test("M11-10-MCP-02: output schema — readiness/waitReturnedEarly present iff w
         "runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit",
         "changedFileCount", "changedPaths", "changedPathsTruncated",
         "verificationStatus", "verificationFailureCode", "verificationFailureSummary",
-        "acceptanceStatus", "decisionType", "deliveryFailure",
+        "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory",
       ]);
-      assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys, "point-in-time field set (M11-12B adds nullable verificationFailureSummary)");
+      assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys, "point-in-time field set (M11-12B adds nullable verificationFailureSummary; M12-1S1 adds nullable candidateInventory)");
       assert.equal("readiness" in parsed, false, "no readiness in point-in-time output");
       assert.equal("waitReturnedEarly" in parsed, false, "no waitReturnedEarly in point-in-time output");
     } finally { await client2.close(); await server2.close(); }

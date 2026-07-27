@@ -79,6 +79,9 @@ test("M11-11D-RED-2: MCP run_delivery preserves ordinary non-delivery as success
       acceptanceStatus: null,
       decisionType: null,
       deliveryFailure: null,
+      // M12-1S1: additive nullable candidateInventory (null outside a bound
+      // disallowed_path failure).
+      candidateInventory: null,
     });
   } finally {
     await client.close();

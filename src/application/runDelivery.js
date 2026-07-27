@@ -26,6 +26,7 @@ import {
 import { isValidRunId, isCanonicalCommitId } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, safeProjectPackagingCode } from "../deliveryFailureCodes.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
+import { proveWorkspace } from "./workspaceBinding.js";
 
 // M11-8C: packaging failure codes come from the shared safe-projection
 // allowlist (deliveryFailureCodes.js). The application projection and the MCP
@@ -420,6 +421,59 @@ function _gatherDeliveryView(events, runId, terminalState) {
   };
 }
 
+// ===== Private: M12-1S1 candidate inventory (read-only, fail-closed) =====
+//
+// When the durable bound packaging failure is exactly `disallowed_path`, the
+// failure view gains an additive nullable `candidateInventory`: the candidate's
+// ACTUAL changed paths vs the persisted ORIGINAL base/allowedPaths contract.
+// Advisory only — never expands scope, repackages, stops/retries, or decides.
+//
+// Every gate below runs BEFORE the inventory reader is invoked; ANY failure
+// collapses to null (never partial truth, never an unbound read):
+//   1. an inventory reader was injected (the service never defaults the kernel);
+//   2. a non-empty authorizedWorkspaceRoot authority was supplied;
+//   3. workspace ownership proof (verifyRunWorkspaceOwnership SSOT);
+//   4. exactly ONE bound run.started (envelope runId === requested runId) with a
+//      usable delivery context (canonical baseCommit, non-empty allowedPaths)
+//      and a worktreePath;
+//   5. linked-worktree-at-base proof: the persisted worktreePath is a real Git
+//      worktree top-level whose HEAD is EXACTLY the persisted original
+//      baseCommit (proveWorkspace SSOT) — HEAD drift voids the proof.
+// Only then is the reader invoked; a throwing reader also collapses to null.
+
+/**
+ * @param {object[]} events
+ * @param {string} runId
+ * @param {string} [authorizedWorkspaceRoot]
+ * @param {Function} [computeInventoryFn]
+ * @returns {object|null} the inventory, or null on any proof/read failure
+ * @private
+ */
+function _computeSafeCandidateInventory(events, runId, authorizedWorkspaceRoot, computeInventoryFn) {
+  try {
+    if (typeof computeInventoryFn !== "function") return null;
+    if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) return null;
+    verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot);
+    const started = events.filter((e) => e && e.type === "run.started" && e.runId === runId);
+    if (started.length !== 1) return null;
+    const bound = started[0];
+    const delivery = bound.delivery;
+    if (!delivery || typeof delivery !== "object") return null;
+    if (!isCanonicalCommitId(delivery.baseCommit)) return null;
+    if (!Array.isArray(delivery.allowedPaths) || delivery.allowedPaths.length === 0) return null;
+    if (typeof bound.worktreePath !== "string" || bound.worktreePath.length === 0) return null;
+    // Linked-worktree-at-base proof (reuses the proveWorkspace SSOT: the path
+    // must be a real Git worktree TOP-LEVEL — never a subdirectory — and all
+    // Git failures throw). HEAD must be EXACTLY the persisted original base.
+    const proof = proveWorkspace(bound.worktreePath);
+    if (proof.gitHead !== delivery.baseCommit) return null;
+    const inventory = computeInventoryFn(bound.worktreePath, delivery.baseCommit, delivery.allowedPaths);
+    return inventory ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ===== Service: getRunDelivery (read-only point-in-time query) =====
 
 /**
@@ -428,10 +482,14 @@ function _gatherDeliveryView(events, runId, terminalState) {
  * @param {object} input
  * @param {string} input.runId — must pass isValidRunId
  * @param {string} input.runDir — runs/ directory (host-owned)
+ * @param {string} [input.authorizedWorkspaceRoot] — M12-1S1: authority for the
+ *   read-only candidate inventory (omitted => candidateInventory null, no read)
+ * @param {Function} [input.computeInventoryFn] — M12-1S1: injectable inventory
+ *   reader; the service never defaults the kernel reader
  * @param {Function} [input.readTranscriptFn] — injectable for testing
  * @returns {Promise<object>} delivery view: {runId, terminalState, deliveryRef, verification, acceptance}
  */
-export async function getRunDelivery({ runId, runDir, readTranscriptFn }) {
+export async function getRunDelivery({ runId, runDir, authorizedWorkspaceRoot, computeInventoryFn, readTranscriptFn }) {
   if (!runId || typeof runId !== "string") throw new Error("getRunDelivery: runId is required");
   if (!runDir || typeof runDir !== "string") throw new Error("getRunDelivery: runDir is required");
   if (!isValidRunId(runId)) throw new Error(`Invalid runId: ${JSON.stringify(runId)}`);
@@ -446,6 +504,13 @@ export async function getRunDelivery({ runId, runDir, readTranscriptFn }) {
   // event) must fail closed for the point-in-time query too — never echo a raw
   // ref/path. Fixed message; no dynamic ref content is leaked.
   if (view.ambiguous) throw new Error("delivery facts ambiguous");
+  // M12-1S1: additive nullable candidateInventory on the bound disallowed_path
+  // failure ONLY. Other failure codes never gain the field.
+  if (view.deliveryFailure?.code === "disallowed_path") {
+    view.candidateInventory = _computeSafeCandidateInventory(
+      events, runId, authorizedWorkspaceRoot, computeInventoryFn,
+    );
+  }
   return view;
 }
 
@@ -478,14 +543,16 @@ export async function getRunDelivery({ runId, runDir, readTranscriptFn }) {
  *     `ambiguous` instead of surfacing an inconsistent reviewable +
  *     deliveryAvailable:false state. The label and the view never carry raw
  *     ref/path/reason on this path.
+ * @param {object} [inventoryOpts] — M12-1S1: { authorizedWorkspaceRoot,
+ *   computeInventoryFn } for the additive nullable candidateInventory
  * @private */
-function _buildReadinessResult(runId, events, terminalState, readiness, waitReturnedEarly) {
+function _buildReadinessResult(runId, events, terminalState, readiness, waitReturnedEarly, inventoryOpts = {}) {
   const view = _gatherDeliveryView(events, runId, terminalState);
   let effectiveReadiness = view.ambiguous ? "ambiguous" : readiness;
   if (effectiveReadiness === "reviewable" && view.deliveryAvailable !== true) {
     effectiveReadiness = "ambiguous";
   }
-  return {
+  const result = {
     runId,
     readiness: effectiveReadiness,
     waitReturnedEarly,
@@ -497,6 +564,14 @@ function _buildReadinessResult(runId, events, terminalState, readiness, waitRetu
     verification: view.verification ?? null,
     acceptance: view.acceptance ?? null,
   };
+  // M12-1S1: additive nullable candidateInventory on the bound disallowed_path
+  // failure ONLY (same proof gates as the point-in-time query).
+  if (result.deliveryFailure?.code === "disallowed_path") {
+    result.candidateInventory = _computeSafeCandidateInventory(
+      events, runId, inventoryOpts.authorizedWorkspaceRoot, inventoryOpts.computeInventoryFn,
+    );
+  }
+  return result;
 }
 
 /**
@@ -510,6 +585,8 @@ function _buildReadinessResult(runId, events, terminalState, readiness, waitRetu
  * @param {string} input.runDir — runs/ directory (host-owned)
  * @param {number} input.waitMs — integer in [DELIVERY_WAIT_MS_MIN, DELIVERY_WAIT_MS_MAX]
  * @param {string} [input.authorizedWorkspaceRoot] — MCP workspace binding
+ * @param {Function} [input.computeInventoryFn] — M12-1S1: injectable candidate
+ *   inventory reader (attached only on a bound disallowed_path failure)
  * @param {Function} [input.readTranscriptFn] — injectable for testing
  * @param {Function} [input.sleepFn] — injectable sleep (testing)
  * @param {Function} [input.nowFn] — injectable clock (testing)
@@ -524,6 +601,7 @@ export async function getRunDeliveryReadiness({
   runDir,
   waitMs,
   authorizedWorkspaceRoot,
+  computeInventoryFn,
   readTranscriptFn,
   sleepFn,
   nowFn,
@@ -553,11 +631,14 @@ export async function getRunDeliveryReadiness({
   }
   let terminalState = findState(events);
   let readiness = projectDeliveryReadiness(events, runId);
+  // M12-1S1: candidate-inventory authority/reader, threaded into every
+  // readiness result build (attached only on a bound disallowed_path failure).
+  const inventoryOpts = { authorizedWorkspaceRoot, computeInventoryFn };
 
   // Non-waiting readiness settles immediately: reviewable, packaging_failed,
   // not_requested, and ambiguous are durable facts — waiting cannot change them.
   if (!WAITING_READINESS_STATES.has(readiness)) {
-    return _buildReadinessResult(runId, events, terminalState, readiness, true);
+    return _buildReadinessResult(runId, events, terminalState, readiness, true, inventoryOpts);
   }
 
   // Bounded wait loop (non-busy: sleep between re-reads). Capture the start
@@ -591,7 +672,7 @@ export async function getRunDeliveryReadiness({
     terminalState = findState(events);
     readiness = projectDeliveryReadiness(events, runId);
     if (!WAITING_READINESS_STATES.has(readiness)) {
-      return _buildReadinessResult(runId, events, terminalState, readiness, true);
+      return _buildReadinessResult(runId, events, terminalState, readiness, true, inventoryOpts);
     }
 
     // Keepalive: notify the caller that the poll is still alive. The fraction
@@ -610,13 +691,13 @@ export async function getRunDeliveryReadiness({
   // deadline-expiry path). This is not a new state, not an echoed error, and it
   // never stop/retry/accept/rejects.
   if (readFailed) {
-    return _buildReadinessResult(runId, events, terminalState, "ambiguous", true);
+    return _buildReadinessResult(runId, events, terminalState, "ambiguous", true, inventoryOpts);
   }
 
   // Deadline expired while still pending. Return the truthful fact — this is
   // NOT an error: pending is a valid, honest readiness outcome. The caller
   // (Lead) decides what to do; the service never auto-stop/retry/accept/reject.
-  return _buildReadinessResult(runId, events, terminalState, readiness, false);
+  return _buildReadinessResult(runId, events, terminalState, readiness, false, inventoryOpts);
 }
 
 // ===== Service: decideRunDelivery (durable decision) =====

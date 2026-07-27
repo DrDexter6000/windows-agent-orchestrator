@@ -171,11 +171,16 @@ function validateAllowedPaths(allowedPaths) {
 /**
  * Check whether a changed path is covered by any allowed path entry
  * (exact match or descendant on a path-segment boundary).
+ *
+ * Exported (M12-1S1) so the read-only candidate inventory compares actual
+ * changed paths against the ORIGINAL allowedPaths contract via this single
+ * SSOT — no duplicated boundary semantics.
+ *
  * @param {string} changed
  * @param {string[]} allowed
  * @returns {boolean}
  */
-function isPathAllowed(changed, allowed) {
+export function isPathAllowed(changed, allowed) {
   const c = toFwd(changed);
   return allowed.some((a) => {
     if (c === a) return true;
@@ -566,6 +571,37 @@ export function assertCommittedDeliveryRef(deliveryRef) {
 }
 
 // ===== Change detection (read-only) =====
+
+/**
+ * M12-1S1: read-only change listing for the no-model-salvage candidate
+ * inventory. Tracked changes relative to baseCommit PLUS non-ignored
+ * untracked files — the same two reads detectChanges performs, but WITHOUT
+ * the pre-staged rejection and WITHOUT the empty-diff failure: the inventory
+ * reports facts (including a truthful empty set), it does not package.
+ *
+ * BOTH required Git reads must succeed; returns null when either fails —
+ * never partial truth. Strictly read-only: no staging, no reset, no writes;
+ * branch/HEAD/index/worktree contents are untouched.
+ *
+ * @param {string} cwd — worktree path
+ * @param {string} baseCommit — canonical full hash (callers validate via
+ *   isCanonicalCommitId before invoking; git is still invoked with structured
+ *   args, never a shell string)
+ * @returns {string[]|null} sorted unique repo-relative changed paths, or null
+ *   when either required Git read failed
+ */
+export function listWorktreeChangedPaths(cwd, baseCommit) {
+  // Tracked changes (modified/deleted) relative to base
+  const tracked = gitSafe(["diff", "--name-only", "-z", baseCommit, "--"], { cwd });
+  if (tracked === null) return null;
+
+  // Non-ignored untracked files
+  const untracked = gitSafe(["ls-files", "--others", "--exclude-standard", "-z"], { cwd });
+  if (untracked === null) return null;
+
+  // Combine, deduplicate, sort
+  return [...new Set([...parseNul(tracked), ...parseNul(untracked)])].sort();
+}
 
 /**
  * Detect all changes in the worktree relative to baseCommit.

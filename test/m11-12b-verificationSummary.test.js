@@ -642,11 +642,12 @@ test("M11-12B-P7: full run_delivery output for a failed delivery has the exact e
   const res = await callDelivery(server, { runId: "run_x" });
   const parsed = res.structuredContent;
   // Point-in-time field set now includes verificationFailureSummary.
+  // M12-1S1: adds nullable candidateInventory (null outside disallowed_path).
   const expectedKeys = new Set([
     "runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit",
     "changedFileCount", "changedPaths", "changedPathsTruncated",
     "verificationStatus", "verificationFailureCode", "verificationFailureSummary",
-    "acceptanceStatus", "decisionType", "deliveryFailure",
+    "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory",
   ]);
   assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys,
     `wire field set mismatch; got ${Object.keys(parsed).sort()}`);

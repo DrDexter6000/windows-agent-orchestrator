@@ -41,7 +41,8 @@ import {
   DELIVERY_WAIT_MS_MIN,
   DELIVERY_WAIT_MS_MAX,
 } from "../application/runDelivery.js";
-import { projectDeliveryChangedPaths, CHANGED_PATHS_LIMIT } from "../application/deliveryReview.js";
+import { projectDeliveryChangedPaths, CHANGED_PATHS_LIMIT, validateProjectedPath } from "../application/deliveryReview.js";
+import { computeCandidateInventory, INVENTORY_PATHS_LIMIT } from "../application/candidateInventory.js";
 import { stopRun } from "../application/runStop.js";
 import { listRuns } from "../application/runList.js";
 import {
@@ -467,6 +468,73 @@ const PACKAGING_FAILURE_CODE_ENUM = z.enum([...PACKAGING_FAILURE_CODES, UNKNOWN_
 // parses it. The real-MCP behavior test (CLOSEOUT-C3) proves success and
 // failure responses never mix shape.
 
+// M12-1S1: additive nullable candidate inventory on the bound disallowed_path
+// packaging failure ONLY. Bounded on the wire (maxItems/maxLength), strict
+// keys, safe repo-relative paths — never absolute paths, worktree locations,
+// or Git internals.
+const CANDIDATE_INVENTORY_PATH_SCHEMA = z.array(z.string().min(1).max(512)).max(INVENTORY_PATHS_LIMIT);
+const CANDIDATE_INVENTORY_SCHEMA = z.object({
+  actualChangedPaths: CANDIDATE_INVENTORY_PATH_SCHEMA,
+  actualChangedCount: z.number().int().nonnegative(),
+  actualChangedTruncated: z.boolean(),
+  disallowedPaths: CANDIDATE_INVENTORY_PATH_SCHEMA,
+  disallowedCount: z.number().int().nonnegative(),
+  disallowedTruncated: z.boolean(),
+}).strict();
+
+/**
+ * M12-1S1: validate an untrusted service-level candidate inventory for the
+ * wire. ANY malformed/unsafe value collapses the WHOLE inventory to null —
+ * never an error, never partial truth. Enforces: bounded sorted-unique path
+ * lists through the strict validateProjectedPath SSOT, exact-secret
+ * redaction, and count/truncation consistency (truncated iff count >
+ * paths.length, count >= paths.length).
+ *
+ * @param {unknown} raw
+ * @returns {object|null}
+ */
+function safeProjectCandidateInventory(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const redactor = createSecretRedactor();
+  const projectList = (paths, count, truncated) => {
+    if (!Array.isArray(paths) || paths.length > INVENTORY_PATHS_LIMIT) return null;
+    if (!Number.isInteger(count) || count < 0) return null;
+    if (typeof truncated !== "boolean") return null;
+    // Consistency: truncation flag must exactly reflect full cardinality vs
+    // the bounded list; the full count can never be below the list length.
+    if (count < paths.length || truncated !== (count > paths.length)) return null;
+    const seen = new Set();
+    let prev = null;
+    const projected = [];
+    for (const p of paths) {
+      try {
+        validateProjectedPath(p);
+      } catch {
+        return null;
+      }
+      if (seen.has(p) || (prev !== null && p < prev)) return null; // sorted unique
+      seen.add(p);
+      prev = p;
+      // Same exact-secret redaction rule as changedPaths: any redaction
+      // collapses the whole path to the fixed marker (no partial fragment).
+      const redacted = redactor.redactString(p);
+      projected.push(redacted === p ? p : "[REDACTED]");
+    }
+    return projected;
+  };
+  const actualChangedPaths = projectList(raw.actualChangedPaths, raw.actualChangedCount, raw.actualChangedTruncated);
+  const disallowedPaths = projectList(raw.disallowedPaths, raw.disallowedCount, raw.disallowedTruncated);
+  if (actualChangedPaths === null || disallowedPaths === null) return null;
+  return {
+    actualChangedPaths,
+    actualChangedCount: raw.actualChangedCount,
+    actualChangedTruncated: raw.actualChangedTruncated,
+    disallowedPaths,
+    disallowedCount: raw.disallowedCount,
+    disallowedTruncated: raw.disallowedTruncated,
+  };
+}
+
 const RUN_DELIVERY_OUTPUT = z.object({
   runId: z.string().min(1),
   deliveryAvailable: z.boolean(),
@@ -492,6 +560,10 @@ const RUN_DELIVERY_OUTPUT = z.object({
   decisionType: DECISION_TYPE_ENUM.nullable(),
   // Failure-only field (non-null iff deliveryAvailable === false).
   deliveryFailure: z.object({ code: PACKAGING_FAILURE_CODE_ENUM }).nullable(),
+  // M12-1S1: additive nullable candidate inventory. Non-null ONLY when
+  // deliveryFailure.code === "disallowed_path" AND every ownership/proof/read
+  // gate passed; otherwise null (Lead verifies manually — never an auto stop).
+  candidateInventory: CANDIDATE_INVENTORY_SCHEMA.nullable(),
   // M11-10: readiness handshake fields, present iff the caller supplied waitMs.
   // readiness is the strict closed-set projection; waitReturnedEarly is true iff
   // the readiness settled (or was never a waiting state) before the deadline.
@@ -519,7 +591,12 @@ const RUN_DELIVERY_DESCRIPTION =
   "settled readiness) and returns a strict readiness label plus waitReturnedEarly. " +
   "A pending-at-deadline outcome is returned as a truthful fact, never an error; the tool " +
   "never stop/retry/accept/rejects. readiness closed set: " +
-  DELIVERY_READINESS_STATES.join(", ") + ".";
+  DELIVERY_READINESS_STATES.join(", ") + ". " +
+  "M12-1S1: on a bound disallowed_path packaging failure, an additive nullable " +
+  "candidateInventory reports bounded safe actual/disallowed repo-relative paths " +
+  `(up to ${INVENTORY_PATHS_LIMIT} each, with exact counts and truncation flags). ` +
+  "It is advisory only (null = verify manually) — it never expands scope, " +
+  "repackages, stops, retries, or decides.";
 
 /**
  * M11-12B: project a safe, factual verification-failure summary from the raw
@@ -640,6 +717,12 @@ function buildRunDeliveryPayload(runId, view) {
       acceptanceStatus: null,
       decisionType: null,
       deliveryFailure: failure ? { code: failure.code ?? "unknown" } : null,
+      // M12-1S1: additive nullable candidate inventory, projected ONLY on the
+      // bound disallowed_path failure. Any malformed/unsafe service value
+      // collapses to null — never an error, never partial truth.
+      candidateInventory: failure && failure.code === "disallowed_path"
+        ? safeProjectCandidateInventory(view.candidateInventory)
+        : null,
     };
   }
 
@@ -702,6 +785,8 @@ function buildRunDeliveryPayload(runId, view) {
     acceptanceStatus,
     decisionType,
     deliveryFailure: null,
+    // M12-1S1: success views never carry the failure-only inventory.
+    candidateInventory: null,
   };
 }
 
@@ -1090,6 +1175,7 @@ const PLAYBOOK_GET_DESCRIPTION =
  * @param {Function} [input.getRunDiagnosisFn] — injectable diagnosis service for testing
  * @param {Function} [input.getRunDeliveryFn] — injectable delivery query service for testing
  * @param {Function} [input.getRunDeliveryReadinessFn] — injectable readiness-wait service for testing (M11-10)
+ * @param {Function} [input.computeCandidateInventoryFn] — injectable candidate-inventory reader for testing (M12-1S1)
  * @param {Function} [input.decideRunDeliveryFn] — injectable delivery decision service for testing
  * @param {Function} [input.listLeadPlaybooksFn] — injectable playbook list service for testing
  * @param {Function} [input.getLeadPlaybookFn] — injectable playbook get service for testing
@@ -1177,6 +1263,10 @@ export function createWaoMcpServer({
   getRunDiagnosisFn,
   getRunDeliveryFn,
   getRunDeliveryReadinessFn,
+  // M12-1S1: injectable candidate-inventory reader (defaults to the real
+  // read-only kernel reader; threaded to the delivery services only when a
+  // workspace binding authorizes the read).
+  computeCandidateInventoryFn,
   decideRunDeliveryFn,
   stopRunFn,
   listRunsFn,
@@ -1202,6 +1292,7 @@ export function createWaoMcpServer({
   const diagnosisService = getRunDiagnosisFn ?? getRunDiagnosis;
   const deliveryQueryService = getRunDeliveryFn ?? getRunDelivery;
   const deliveryReadinessService = getRunDeliveryReadinessFn ?? getRunDeliveryReadiness;
+  const candidateInventoryReader = computeCandidateInventoryFn ?? computeCandidateInventory;
   const deliveryDecideService = decideRunDeliveryFn ?? decideRunDelivery;
   const stopService = stopRunFn ?? stopRun;
   const listRunsService = listRunsFn ?? listRuns;
@@ -1860,6 +1951,10 @@ export function createWaoMcpServer({
             runDir,
             waitMs,
             authorizedWorkspaceRoot: binding.root,
+            // M12-1S1: the wait path is already workspace-bound; thread the
+            // inventory reader so a settled disallowed_path failure carries
+            // the same additive nullable candidateInventory.
+            computeInventoryFn: candidateInventoryReader,
             ...(onPoll ? { onPoll } : {}),
           });
           // Validate the readiness label through the closed-set enum — a value
@@ -1880,7 +1975,16 @@ export function createWaoMcpServer({
 
         // Point-in-time query (unchanged shape — no readiness/waitReturnedEarly).
         // The payload is built from the SAME projection as the wait path.
-        const delivery = await deliveryQueryService({ runId, runDir });
+        //
+        // M12-1S1: the candidate inventory reads the candidate worktree, so it
+        // is authority-gated by the workspace binding. An unbound/failed
+        // binding does NOT error the query — the service simply returns
+        // candidateInventory null (never an unbound worktree/Git read).
+        const binding = await resolveWorkspaceBinding();
+        const inventoryAuthority = binding.bound
+          ? { authorizedWorkspaceRoot: binding.root, computeInventoryFn: candidateInventoryReader }
+          : {};
+        const delivery = await deliveryQueryService({ runId, runDir, ...inventoryAuthority });
         const payload = buildRunDeliveryPayload(runId, delivery);
         const parsed = RUN_DELIVERY_OUTPUT.parse(payload);
         return {
