@@ -4,7 +4,7 @@
 // model-free delivery repackage application service over the MCP protocol.
 //
 // Coverage:
-//   - tool discovery (18 tools, run_delivery_repackage present) + annotations
+//   - tool discovery (current tool count, run_delivery_repackage present) + annotations
 //   - strict input (extra keys / non-string allowedPaths / empty array / missing
 //     runId rejected BEFORE the service is called)
 //   - workspace-bound authorization (no binding → service never called)
@@ -94,7 +94,7 @@ test("M12-1S2-M1: run_delivery_repackage registered; total tools = 17; destructi
       const { tools } = await client.listTools();
       const t = tools.find((x) => x.name === "run_delivery_repackage");
       assert.ok(t, "run_delivery_repackage present");
-      assert.equal(tools.length, 18, "exactly 18 tools after M12-3");
+      assert.equal(tools.length, 19, "exactly 19 tools after M12-3B");
       // Packaging moves a branch + appends transcript events: destructive, but
       // reentrant/crash-safe so idempotent in outcome.
       assert.equal(t.annotations.destructiveHint, true);

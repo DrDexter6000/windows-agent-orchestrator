@@ -1417,6 +1417,48 @@ const DELIVERY_REVIEW_DESCRIPTION =
   "this is advisory only, NOT an error. The Lead may wait via run_delivery(waitMs) " +
   "or retry run_delivery_review later; it is never an automatic stop, accept, or " +
   "reject, and never a reason to read Git directly.";
+
+// ===== run_delivery_review_bundle (M12-3B mechanical composition) =====
+//
+// One Lead-selected file page plus the delivery-readiness facts needed to know
+// whether that page is reviewable. This is a convenience composition, not a
+// semantic reviewer: it never selects/traverses files or cursors and never
+// stop/retry/repackage/accept/rejects. Atomic tools remain available.
+const DELIVERY_REVIEW_BUNDLE_ERROR_TEXT = "run_delivery_review_bundle failed";
+const DELIVERY_REVIEW_BUNDLE_DEFAULT_WAIT_MS = 270000;
+
+const DELIVERY_REVIEW_BUNDLE_INPUT = z.object({
+  runId: z.string().min(1),
+  fileIndex: z.number().int().nonnegative(),
+  cursor: z.string().max(192).optional(),
+  waitMs: z.number().int().min(DELIVERY_WAIT_MS_MIN).max(DELIVERY_WAIT_MS_MAX).optional(),
+}).strict();
+
+const DELIVERY_REVIEW_BUNDLE_OUTPUT = z.object({
+  runId: z.string().min(1),
+  delivery: RUN_DELIVERY_OUTPUT,
+  review: DELIVERY_REVIEW_OUTPUT.nullable(),
+}).strict();
+
+const DELIVERY_REVIEW_BUNDLE_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+const DELIVERY_REVIEW_BUNDLE_DESCRIPTION =
+  "Wait for delivery readiness and, only when the exact delivery is reviewable, " +
+  "return one Lead-selected bounded review page in the same read-only call. " +
+  `waitMs defaults to ${DELIVERY_REVIEW_BUNDLE_DEFAULT_WAIT_MS} and accepts ` +
+  `${DELIVERY_WAIT_MS_MIN}..${DELIVERY_WAIT_MS_MAX}; settled readiness returns early. ` +
+  "The response always carries the safe run_delivery facts. review is null when " +
+  "readiness is not reviewable; no Git diff is read in that case. fileIndex and " +
+  "cursor are supplied by the Lead and address exactly one page: the tool never " +
+  "chooses or traverses files/cursors, never summarizes repository text, and never " +
+  "stops, retries, repackages, accepts, or rejects. Existing run_delivery and " +
+  "run_delivery_review remain available for point-in-time and atomic control.";
+
 export function createWaoMcpServer({
   registryPath,
   runDir,
@@ -1484,6 +1526,26 @@ export function createWaoMcpServer({
   const playbookGetService = getLeadPlaybookFn ?? getLeadPlaybook;
   const deliveryReviewService = getRunDeliveryReviewFn ?? getRunDeliveryReview;
   const deliveryRepackageService = getRunDeliveryRepackageFn ?? runDeliveryRepackage;
+
+  /**
+   * Build the SDK-native readiness keepalive hook shared by run_delivery and
+   * run_delivery_review_bundle. No progress token means no notifications.
+   * Notification transport failure is owned by the application wait service,
+   * which treats the side channel as best-effort and preserves observation.
+   */
+  function makeDeliveryProgressPoll(extra) {
+    const progressToken = extra?._meta?.progressToken;
+    const hasKeepalive = progressToken !== undefined && progressToken !== null
+      && typeof extra?.sendNotification === "function";
+    if (!hasKeepalive) return undefined;
+    return async ({ fraction }) => {
+      const progress = Math.max(1, Math.floor(fraction * 100));
+      await extra.sendNotification({
+        method: "notifications/progress",
+        params: { progressToken, progress, total: 100 },
+      });
+    };
+  }
 
   const mcp = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -2126,20 +2188,7 @@ export function createWaoMcpServer({
           if (!binding.bound) {
             return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
           }
-          const progressToken = extra?._meta?.progressToken;
-          const hasKeepalive = progressToken !== undefined && progressToken !== null
-            && typeof extra?.sendNotification === "function";
-          const onPoll = hasKeepalive
-            ? async ({ fraction }) => {
-                // progress must be monotonically non-decreasing; the service
-                // already clamps fraction to [0,1).
-                const progress = Math.max(1, Math.floor(fraction * 100));
-                await extra.sendNotification({
-                  method: "notifications/progress",
-                  params: { progressToken, progress, total: 100 },
-                });
-              }
-            : undefined;
+          const onPoll = makeDeliveryProgressPoll(extra);
 
           const result = await deliveryReadinessService({
             runId,
@@ -2687,6 +2736,114 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: DELIVERY_REVIEW_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  // ===== run_delivery_review_bundle (M12-3B workspace-bound composition) =====
+
+  mcp.registerTool(
+    "run_delivery_review_bundle",
+    {
+      description: DELIVERY_REVIEW_BUNDLE_DESCRIPTION,
+      inputSchema: DELIVERY_REVIEW_BUNDLE_INPUT,
+      outputSchema: DELIVERY_REVIEW_BUNDLE_OUTPUT,
+      annotations: DELIVERY_REVIEW_BUNDLE_ANNOTATIONS,
+    },
+    async (input, extra) => {
+      try {
+        const runId = input?.runId;
+        if (!isValidRunId(runId)) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DELIVERY_REVIEW_BUNDLE_ERROR_TEXT }],
+          };
+        }
+        const cursor = input?.cursor;
+        if (cursor !== undefined
+            && (typeof cursor !== "string" || cursor.length === 0 || cursor.length > 192
+              || !/^[A-Za-z0-9_-]+$/.test(cursor))) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DELIVERY_REVIEW_BUNDLE_ERROR_TEXT }],
+          };
+        }
+
+        // Review content is workspace-bound. Resolve authority before either
+        // service so invalid/unbound requests perform zero transcript/Git reads.
+        const binding = await resolveWorkspaceBinding();
+        if (!binding.bound) {
+          return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
+        }
+
+        const waitMs = input?.waitMs ?? DELIVERY_REVIEW_BUNDLE_DEFAULT_WAIT_MS;
+        const onPoll = makeDeliveryProgressPoll(extra);
+        const readinessView = await deliveryReadinessService({
+          runId,
+          runDir,
+          waitMs,
+          authorizedWorkspaceRoot: binding.root,
+          computeInventoryFn: candidateInventoryReader,
+          ...(onPoll ? { onPoll } : {}),
+        });
+        READINESS_ENUM.parse(readinessView.readiness);
+        if (typeof readinessView.waitReturnedEarly !== "boolean") {
+          throw new Error("bad waitReturnedEarly");
+        }
+        const deliveryPayload = {
+          ...buildRunDeliveryPayload(runId, readinessView),
+          readiness: readinessView.readiness,
+          waitReturnedEarly: readinessView.waitReturnedEarly,
+        };
+        const delivery = RUN_DELIVERY_OUTPUT.parse(deliveryPayload);
+
+        let review = null;
+        if (readinessView.readiness === "reviewable") {
+          // `reviewable` is meaningful only for a concrete durable delivery.
+          // Reject a contradictory/malformed readiness service result before
+          // the review service can read any Git content.
+          if (!delivery.deliveryAvailable
+              || delivery.deliveryCommit === null
+              || delivery.changedFileCount === null) {
+            throw new Error("reviewable without delivery artifact");
+          }
+          const result = await deliveryReviewService({
+            runId,
+            runDir,
+            authorizedWorkspaceRoot: binding.root,
+            fileIndex: input.fileIndex,
+            ...(cursor !== undefined ? { cursor } : {}),
+          });
+          const projected = projectReviewResult(result, { runId });
+          review = DELIVERY_REVIEW_OUTPUT.parse(projected);
+
+          // A composition must never splice delivery truth from one artifact
+          // with review bytes from another. The application service proves both
+          // independently; this transport boundary binds their safe projections.
+          if (review.deliveryCommit !== delivery.deliveryCommit
+              || review.changedFileCount !== delivery.changedFileCount) {
+            throw new Error("delivery/review artifact mismatch");
+          }
+        } else if (cursor !== undefined) {
+          // A continuation token is meaningful only for an actually-returned
+          // review artifact. Never silently ignore a stale/cross-state cursor.
+          throw new Error("cursor without reviewable artifact");
+        }
+
+        const payload = DELIVERY_REVIEW_BUNDLE_OUTPUT.parse({
+          runId,
+          delivery,
+          review,
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(payload) }],
+          structuredContent: payload,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: DELIVERY_REVIEW_BUNDLE_ERROR_TEXT }],
         };
       }
     },

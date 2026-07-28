@@ -4,7 +4,7 @@
 // application service over the MCP protocol.
 //
 // Coverage:
-//   - tool discovery (14 tools, run_delivery_review present)
+//   - tool discovery (current tool count, run_delivery_review present)
 //   - strict input (extra keys rejected, negative/fractional/string fileIndex)
 //   - workspace-bound authorization (no binding → service never called)
 //   - safe output: first page, continuation, terminal page
@@ -55,7 +55,7 @@ function makeGitDir(prefix) {
 // Group 1: tool discovery + count + annotations
 // =====================================================================
 
-test("M11-3C-01: run_delivery_review is registered; total tools = 16; read-only annotations", async () => {
+test("M11-3C-01: run_delivery_review is registered; current tool count; read-only annotations", async () => {
   const dir = mkdtempSync(join(tmpdir(), "m113c-01-"));
   try {
     const rp = join(dir, "agents.json");
@@ -65,7 +65,7 @@ test("M11-3C-01: run_delivery_review is registered; total tools = 16; read-only 
     try {
       const { tools } = await client.listTools();
       assert.ok(tools.find((t) => t.name === "run_delivery_review"), "run_delivery_review present");
-      assert.equal(tools.length, 18, "exactly 18 tools (M12-3 added run_await_result)");
+      assert.equal(tools.length, 19, "exactly 19 tools (M12-3B added review bundle)");
       const t = tools.find((x) => x.name === "run_delivery_review");
       assert.equal(t.annotations.readOnlyHint, true);
       assert.equal(t.annotations.destructiveHint, false);

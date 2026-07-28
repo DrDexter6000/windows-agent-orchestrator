@@ -667,8 +667,9 @@ test("M10-pre2: workspace_status tool documented in usage.md and SKILL.md", () =
   // SKILL.md must reflect the current MCP tool count. History: 10 (M10-pre2/P0-2)
   // + runs_list (M10 P0-3) + run_wait (M10-pre3) = 11; + playbook_list/get (M11-2) = 13;
   // + run_delivery_review (M11-3) = 14; + workspace_select (M11-6) = 15; + lead_preflight
-  // (M11-8A) = 16; + run_delivery_repackage (M12-1S2) = 17; + run_await_result (M12-3) = 18.
-  assert.ok(/18 MCP tools/.test(skill), "SKILL.md must reflect 18 MCP tools after M12-3");
+  // (M11-8A) = 16; + run_delivery_repackage (M12-1S2) = 17; + run_await_result
+  // (M12-3A) = 18; + run_delivery_review_bundle (M12-3B) = 19.
+  assert.ok(/19 MCP tools/.test(skill), "SKILL.md must reflect 19 MCP tools after M12-3B");
   // team-roles.md must mention workspace binding (MCP-first)
   const roles = read("docs/team-roles.md");
   assert.ok(/workspace binding|workspace-root|roots\/list/.test(roles),
@@ -875,11 +876,11 @@ test("M11-0A: usage.md 说明 --pure 用途、新进程重启边界、command �
   assert.ok(/command.*必须是数组|command 必须是数组|数组/.test(usage), "usage.md 必须说明 command 必须是数组");
 });
 
-test("M11-3D1: usage.md MCP 段反映当前 18 tools", () => {
+test("M11-3D1: usage.md MCP 段反映当前 19 tools", () => {
   const usage = read("docs/usage.md");
-  // 精确禁止"只有 7 个工具"的陈旧文案；用数字 lookbehind 排除 "18 个工具" 中的子串。
-  assert.ok(!/(?<!\d)7 个工具/.test(usage), "usage.md MCP 段不得再声称只有 7 个工具（排除 18 中的子串）");
-  assert.ok(/18 个工具/.test(usage), "usage.md MCP 段必须反映 18 个工具（含 M12-3 run_await_result）");
+  // 精确禁止"只有 7 个工具"的陈旧文案。
+  assert.ok(!/(?<!\d)7 个工具/.test(usage), "usage.md MCP 段不得再声称只有 7 个工具");
+  assert.ok(/19 个工具/.test(usage), "usage.md MCP 段必须反映 19 个工具（含 M12-3B review bundle）");
 });
 
 // ============================================================
@@ -1094,15 +1095,15 @@ test("M11-2C-09: SKILL/PRD 保持 Advisor/Auditor conditional（非默认流水�
   }
 });
 
-test("M11-3D1: SKILL/architecture 当前工具事实为 18 tools", () => {
+test("M11-3D1: SKILL/architecture 当前工具事实为 19 tools", () => {
   const skill = read("SKILL.md");
   const arch = read("docs/02-architecture.md");
-  assert.ok(/18 MCP tools|18 tools/i.test(skill),
-    "SKILL.md Minimal MCP Loop 当前工具数为 18（含 M12-3 run_await_result）");
+  assert.ok(/19 MCP tools|19 tools/i.test(skill),
+    "SKILL.md Minimal MCP Loop 当前工具数为 19（含 M12-3B review bundle）");
   // 精确匹配 "server.js ... N tools" 的当前状态注释行。
   const serverLine = arch.split("\n").find((l) => /server\.js.*tools/.test(l)) || "";
-  assert.ok(/18 tools/.test(serverLine),
-    "architecture server.js 注释当前工具数为 18");
+  assert.ok(/19 tools/.test(serverLine),
+    "architecture server.js 注释当前工具数为 19");
 });
 
 // ============================================================
@@ -1134,10 +1135,10 @@ test("M11-2C-12: SKILL tool-count 文案不得声称 minimal loop 必须经过�
   const mandatoryAll = /full\s+minimal\s+loop\s+through\s+15|minimal\s+loop\s+必须.*全部\s*15|loop\s+must\s+(use|go through|include)\s+all\s+15/i;
   assert.ok(!mandatoryAll.test(skill),
     "SKILL tool-count 文案不得声称 minimal loop 必须经过全部工具");
-  // 必须表达：WAO 暴露 18 tools，但 minimal control loop 只用相关 control tools，
+  // 必须表达：WAO 暴露 19 tools，但 minimal control loop 只用相关 control tools，
   // playbook reads 是可选且在 dispatch loop 外。
-  assert.ok(/18 MCP tools|18 tools/i.test(skill),
-    "SKILL 声明 WAO 暴露 18 MCP tools");
+  assert.ok(/19 MCP tools|19 tools/i.test(skill),
+    "SKILL 声明 WAO 暴露 19 MCP tools");
   assert.ok(/optional|可选/i.test(skill) && /dispatch loop|control loop/i.test(skill),
     "SKILL 必须说明 playbook reads 可选且在 dispatch/control loop 之外");
 });
@@ -1471,10 +1472,9 @@ test("M12-0-05: SKILL 把 certification 定位为 advisory evidence，删除 per
 });
 
 // M12-0-06: M11 stays closed complete (Tester token efficiency retired/deferred
-// out of M11); M12 stays in progress. M12-1 may replace its formerly planned
-// correction slice with implemented S1/S2 truth while the remaining slices stay
-// explicitly planned/unimplemented.
-test("M12-0-06: roadmap 标 M11 ✅ 完成；M12-1 已实现且其余 slices 仍 planned", () => {
+// out of M11); M12 stays in progress. Implemented slices replace their planned
+// labels while the remaining slices stay explicitly planned/unimplemented.
+test("M12-0-06: roadmap 标 M11 ✅ 完成；M12-1/2A/3 已实现且其余 slices 仍 planned", () => {
   const roadmap = read("docs/roadmap.md");
   const m11Row = roadmap.split("\n").find((l) => /^\|\s*M11\s*\|/.test(l)) || "";
   assert.ok(m11Row, "roadmap 含 M11 行");
@@ -1488,9 +1488,13 @@ test("M12-0-06: roadmap 标 M11 ✅ 完成；M12-1 已实现且其余 slices 仍
   assert.ok(/M12-1 S1\/S2 已实现/.test(m12Row), "M12-1 S1/S2 必须标为已实现");
   assert.ok(/candidateInventory/.test(m12Row), "M12-1 S1 candidateInventory 必须记录");
   assert.ok(/run_delivery_repackage/.test(m12Row), "M12-1 S2 run_delivery_repackage 必须记录");
+  assert.ok(/M12-2A 已实现/.test(m12Row) && /run_collect/.test(m12Row),
+    "M12-2A compact run_collect 必须标为已实现");
+  assert.ok(/M12-3A\/B 已实现/.test(m12Row)
+    && /run_await_result/.test(m12Row)
+    && /run_delivery_review_bundle/.test(m12Row),
+  "M12-3A/B 两个组合工具必须标为已实现");
   // Remaining planned slices — exact concepts, no invented tool names.
-  assert.ok(/compact\/delta observation|compact.*delta.*observation/i.test(m12Row),
-    "M12 计划 compact/delta observation");
   assert.ok(/deterministic evidence\/handoff aggregation|evidence\/handoff aggregation/i.test(m12Row),
     "M12 计划 deterministic evidence/handoff aggregation");
   assert.ok(/bounded actionable failure facts|actionable failure facts/i.test(m12Row),
@@ -1499,6 +1503,21 @@ test("M12-0-06: roadmap 标 M11 ✅ 完成；M12-1 已实现且其余 slices 仍
     "M12 计划 factual readiness/history projection");
   assert.ok(/planned|unimplemented|规划|未实现|计划/i.test(m12Row),
     "M12 其余 slices 必须标 planned/unimplemented");
+});
+
+test("M12-3B docs: review bundle is mechanical, one-page, and preserves Lead decisions + atomic tools", () => {
+  const skill = read("SKILL.md");
+  const usage = read("docs/usage.md");
+  const arch = read("docs/02-architecture.md");
+  for (const [name, text] of [["SKILL.md", skill], ["docs/usage.md", usage], ["docs/02-architecture.md", arch]]) {
+    assert.ok(text.includes("run_delivery_review_bundle"), `${name} documents the bundle`);
+  }
+  assert.match(usage, /一个.*文件页|one.*page/i);
+  assert.match(usage, /不选择.*fileIndex|never.*select/i);
+  assert.match(usage, /不遍历文件|never.*travers/i);
+  assert.match(usage, /Lead.*run_delivery_decide|Lead.*accept|Lead.*reject/i);
+  assert.match(usage, /原子.*保留|atomic.*保留|atomic.*remain/i);
+  assert.match(usage, /review:null.*非.*reviewable|非.*reviewable.*review:null/i);
 });
 
 // M12-0-07: ADR-0018 exists at the exact filename, is accepted/dated 2026-07-27,
