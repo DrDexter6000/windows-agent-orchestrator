@@ -43,6 +43,7 @@ export const DIAGNOSIS_CATEGORIES = Object.freeze([
   "no_effect",
   "crash",
   "aborted_manual",
+  "workdir_escape",
   "delivery_packaging_failed",
   "unknown",
   "none",
@@ -72,9 +73,9 @@ const PROVIDER_DISCONNECT_SILENCE_MS = 120_000;
  * 诊断一个 run transcript 的失败原因。只给证据，不给处方。
  *
  * @param {Array} events - run transcript 事件数组（按时间序）。
- * @param {string} [expectedRunId] - the runId the caller requested (M11-8C
- *   closeout: binds the delivery_packaging_failed classification so a
- *   cross-run run.delivery_failed event cannot pollute this run's diagnosis).
+ * @param {string} [expectedRunId] - the runId the caller requested. Binds
+ *   control-plane failure classifications so cross-run events cannot pollute
+ *   this run's diagnosis.
  * @returns {{category: string, evidence: Array<{eventType: string, fact: string}>}}
  *   category ∈ provider_auth|timeout|scorecard_fail|budget|crash|aborted_manual|unknown|none。
  *   evidence 是事实证据（eventType 指向源事件，fact 陈述具体事实）。
@@ -84,6 +85,20 @@ export function diagnoseFailure(events, expectedRunId) {
   // 空输入：无法判断发生了什么 → unknown。
   if (evs.length === 0) return { category: "unknown", evidence: [] };
   const state = findState(evs);
+  const hasValidExpectedRunId = typeof expectedRunId === "string" && expectedRunId.length > 0;
+
+  const isolationViolation = hasValidExpectedRunId
+    ? evs.find((e) => e.type === "run.isolation_violation" && e.runId === expectedRunId)
+    : undefined;
+  if (isolationViolation) {
+    return {
+      category: "workdir_escape",
+      evidence: [{
+        eventType: "run.isolation_violation",
+        fact: "worker reported a file write outside the authorized delivery worktree",
+      }],
+    };
+  }
 
   // M11-8C closeout (Gap B + final gate): a durable run.delivery_failed means
   // the WAO control plane could not package the delivery. This is checked
@@ -95,7 +110,6 @@ export function diagnoseFailure(events, expectedRunId) {
   // delivery failure (defends against cross-run pollution in concatenated/
   // corrupt transcripts). The signal uses only the safe event TYPE (no
   // message/path/code echo). No prescription/retry.
-  const hasValidExpectedRunId = typeof expectedRunId === "string" && expectedRunId.length > 0;
   const deliveryFailed = hasValidExpectedRunId
     ? evs.find((e) => e.type === "run.delivery_failed" && e.runId === expectedRunId)
     : undefined;

@@ -155,10 +155,10 @@ test("M9-5B-03: output is safe projection, no raw fact/error/path/command leak",
 });
 
 // ---------------------------------------------------------------------
-// M9-5B-04: category enum from DIAGNOSIS_CATEGORIES SSOT; all 12 pass schema.
+// M9-5B-04: every category from DIAGNOSIS_CATEGORIES SSOT passes schema.
 // ---------------------------------------------------------------------
 
-test("M9-5B-04: all 12 categories pass output schema", async () => {
+test("M9-5B-04: all diagnosis categories pass output schema", async () => {
   for (const category of DIAGNOSIS_CATEGORIES) {
     const server = createWaoMcpServer({
       registryPath: "/server/r.json", runDir: "/server/runs",
@@ -173,6 +173,42 @@ test("M9-5B-04: all 12 categories pass output schema", async () => {
       await client.close();
       await server.close();
     }
+  }
+});
+
+test("M12-3-ISO-MCP: workdir_escape projects as one safe signal without path leakage", async () => {
+  const leakedPath = "C:\\Users\\owner\\source-checkout\\escaped.js";
+  const server = createWaoMcpServer({
+    registryPath: "/server/r.json",
+    runDir: "/server/runs",
+    getRunDiagnosisFn: async () => ({
+      runId: "run_m123",
+      state: "failed",
+      terminal: true,
+      category: "workdir_escape",
+      evidence: [{
+        eventType: "run.isolation_violation",
+        fact: `worker reported an escaped write at ${leakedPath}`,
+      }],
+    }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({
+      name: "run_diagnose",
+      arguments: { runId: "run_m123" },
+    });
+    assert.equal(res.isError, undefined);
+    const parsed = JSON.parse(res.content.find((block) => block.type === "text").text);
+    assert.equal(parsed.category, "workdir_escape");
+    assert.equal(parsed.signalCount, 1);
+    assert.equal(parsed.signalsTruncated, false);
+    assert.deepEqual(parsed.signalEventTypes, ["run.isolation_violation"]);
+    assert.ok(!JSON.stringify(res).includes(leakedPath));
+    assert.ok(!JSON.stringify(res).includes("source-checkout"));
+  } finally {
+    await client.close();
+    await server.close();
   }
 });
 

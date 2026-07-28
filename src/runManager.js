@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
-import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import { JsonlTranscript, TERMINAL_STATES, readTranscript, findState, findLatest } from "./transcript.js";
 import { createWorktree, removeWorktree } from "./isolation.js";
@@ -41,6 +41,38 @@ function installSigintHandler() {
     await gracefulShutdown("SIGINT");
     process.exit(130);
   });
+}
+
+function isReportedWriteInsideWorkdir(rawPath, effectiveCwd) {
+  if (typeof rawPath !== "string" || rawPath.trim().length === 0) return false;
+  if (typeof effectiveCwd !== "string" || effectiveCwd.trim().length === 0) return false;
+  try {
+    const lexicalBase = resolve(effectiveCwd);
+    const lexicalTarget = resolve(lexicalBase, rawPath);
+    const lexicalRelative = relative(lexicalBase, lexicalTarget);
+    const lexicallyInside = lexicalRelative === ""
+      || (
+        lexicalRelative !== ".."
+        && !lexicalRelative.startsWith(`..${sep}`)
+        && !isAbsolute(lexicalRelative)
+      );
+    if (!lexicallyInside) return false;
+
+    // A junction/symlink inside the worktree may resolve to an outside target.
+    // file_written is post-write evidence, so inability to prove the target's
+    // physical location fails closed for delivery runs.
+    const physicalBase = realpathSync.native(lexicalBase);
+    const physicalTarget = realpathSync.native(lexicalTarget);
+    const physicalRelative = relative(physicalBase, physicalTarget);
+    return physicalRelative === ""
+      || (
+        physicalRelative !== ".."
+        && !physicalRelative.startsWith(`..${sep}`)
+        && !isAbsolute(physicalRelative)
+      );
+  } catch {
+    return false;
+  }
 }
 
 export class RunManager {
@@ -992,6 +1024,7 @@ export class Run {
     let metrics = null;
     let budgetExceeded = false;
     let budgetUsed = 0;
+    let isolationViolation = false;
     const markRunningOnce = async (reason) => {
       if (this.state !== "running" && !TERMINAL_STATES.includes(this.state)) {
         await this._transition(this.state, "running", reason);
@@ -1001,6 +1034,9 @@ export class Run {
     try {
       for await (const rawEvent of this.handle.events(controller.signal, { pollInterval, silentTimeout })) {
         const ev = this._redact(rawEvent);
+        const reportedWriteEscapes = rawEvent?.kind === "file_written"
+          && this.deliveryContext
+          && !isReportedWriteInsideWorkdir(rawEvent.path, this.effectiveCwd);
         // 若已被 abort，停止处理后续事件（避免覆盖 aborted 状态）
         if (this._aborted) break;
         // TD-99：若 _transition 把内存 state 同步为终态（外部写了终态，仲裁 rejected），
@@ -1044,6 +1080,10 @@ export class Run {
           ev.kind === "tool_use" ||
           ev.kind === "tool_result"
         ) {
+          if (reportedWriteEscapes) {
+            isolationViolation = true;
+            break;
+          }
           await markRunningOnce("first_event");
           // 证据链事件（M6-2）：落盘到 transcript run.event，收集供 scorecard 核验。
           // 不触发状态转移（和 metrics 一样是旁路信息）。
@@ -1084,6 +1124,28 @@ export class Run {
       this.state = externalTerminalState;
       await this._runCleanup();
       return _loserResult(externalTerminalState, { messages, evidence, metrics });
+    }
+
+    if (isolationViolation) {
+      const tResult = await this._transition(this.state, "failed", "workdir_escape", {
+        factEvents: [
+          {
+            type: "run.isolation_violation",
+            payload: { code: "workdir_escape", eventKind: "file_written" },
+          },
+          {
+            type: "run.error",
+            payload: { phase: "isolation", code: "workdir_escape" },
+          },
+        ],
+      });
+      await this._runCleanup();
+      return _loserResult(tResult.state, {
+        messages,
+        evidence,
+        metrics,
+        isolationViolation: true,
+      });
     }
 
     // 预算硬闸门（S1-1）：超限即转 failed + 兜底 abort。独立于 done/timeout，

@@ -397,6 +397,7 @@ const SAFE_DIAGNOSIS_EVENT_TYPES = new Set([
   "run.timed_out",
   "scorecard.checked",
   "run.evidence_audit",
+  "run.isolation_violation",
   "run.event",
 ]);
 

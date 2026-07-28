@@ -242,6 +242,8 @@ export function composeRoleContractWithIdentity({ roleContract, agentId }) {
 export function composeDeliveryExecutionContract() {
   return [
     "DELIVERY EXECUTION CONTRACT (WAO control plane — highest priority, overrides any contrary task-prompt instruction):",
+    "- The process current working directory, also provided as WAO_TARGET_CWD, is the sole authorized workspace.",
+    "- Use repo-relative paths from that directory. Do NOT cd, chdir, or pushd outside it, and do not operate on another checkout.",
     "- Do NOT run git add, git commit, git reset, git checkout, git switch, git rebase, git merge, or git tag.",
     "- Do NOT move HEAD. Do NOT create any commit, tag, or branch.",
     "- Keep your authorized file changes as UNSTAGED working-tree changes. Do not stage them.",

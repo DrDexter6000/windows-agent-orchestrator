@@ -242,6 +242,12 @@ Delivery 模式在 worktree 隔离中运行 worker，完成后打包一个 atomi
 然后运行验证命令。`--format json` 返回完整 DeliveryRef 和 `verificationFailed` /
 `verificationUnavailable` 标志。schema 语义见 `docs/02-architecture.md` §4.6-4.8。
 
+WAO 会把 process cwd / `WAO_TARGET_CWD` 作为 delivery worker 的唯一授权 workspace。
+若 backend 报告的 `file_written` 经词法路径和 filesystem realpath（含 junction/symlink）
+不能证明位于该 worktree，run 会在 packaging 前以 `workdir_escape` 失败，transcript 只保留
+固定安全事实、不保留越界路径。该检查不解析 worker command，也不是 OS filesystem sandbox；
+它不会把语义判断或处置权从 Lead 手中拿走。
+
 限制：仅支持 `run`（foreground 和 background 均可），不支持 `spawn`。Background delivery 需要 `--isolate`。
 
 ### 场景 4c：Lead 验收（delivery acceptance）
@@ -771,7 +777,7 @@ annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:false, 
 }
 ```
 
-`category` 来自 `DIAGNOSIS_CATEGORIES` SSOT（12 类 enum）。`signalEventTypes` 只保留 evidence 的 event type（最多 8 条，每条 ≤64 字符，异常映射为 `unknown`），**绝不返回** raw fact/error/detail/reason/check name/command/tool payload/path/timestamp/prompt/PID/sessionId/provider stderr/环境变量，也**绝不返回** recommendation/advice/retry/nextStep。`content` JSON 与 `structuredContent` 语义一致。失败返回固定 `run_diagnose failed`。
+`category` 来自 `DIAGNOSIS_CATEGORIES` SSOT（13 类 enum，包含 delivery worktree 越界的 `workdir_escape`）。`signalEventTypes` 只保留 evidence 的 event type（最多 8 条，每条 ≤64 字符，异常映射为 `unknown`），**绝不返回** raw fact/error/detail/reason/check name/command/tool payload/path/timestamp/prompt/PID/sessionId/provider stderr/环境变量，也**绝不返回** recommendation/advice/retry/nextStep。`content` JSON 与 `structuredContent` 语义一致。失败返回固定 `run_diagnose failed`。
 
 annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`（纯只读查询，不触碰外部系统）。
 

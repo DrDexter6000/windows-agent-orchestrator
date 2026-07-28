@@ -482,6 +482,11 @@ interface SchedulerOpts { maxConcurrent: number; }
 
 控制平面（而非 worker）负责把 isolated worktree 里的 worker 产出打包成 atomic delivery commit。
 worker 只准备变更，不创建 commit。
+Delivery execution contract 将 process cwd / `WAO_TARGET_CWD` 声明为唯一授权 workspace；
+RunManager 对 backend 报告的 `file_written` 原始路径做词法路径 + filesystem realpath 边界判断
+（包括 junction/symlink 解析），越界或无法证明目标存在于 worktree 时写入不含路径的
+`run.isolation_violation(code=workdir_escape)` 并在 packaging 前转 failed。该机制不解析命令文本，
+也不等同于 OS filesystem sandbox；未被 backend 报告的写入仍需后续 artifact proof 发现。
 
 **模块边界**：`src/delivery.js` 是 deep module，只依赖 Node built-ins，不 import CLI / RunManager /
 workflow / transcript / backend / role 模块。Git 通过 `execFileSync("git", args)` 结构化参数调用，

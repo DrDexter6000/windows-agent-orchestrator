@@ -71,7 +71,7 @@ Before dispatch:
 1. Use MCP `registry_list` to confirm worker availability and certification status. Certification (`certified`/`conditional`) is advisory evidence about recorded reliability, not a permission gate — the Lead may choose any configured worker subject to project governance; weigh a `conditional` worker's lower recorded reliability rather than treating it as a hard exclusion.
 2. For static schema checks, `registry validate`/`doctor`/debug, use CLI fallback.
 3. Host MCP/provider/auth configuration belongs to the host runtime, not WAO. Never put credential values in worker prompts, MCP arguments, or the repository.
-4. Delivery runs force persistent worktree isolation automatically — the model cannot override `isolate`.
+4. Delivery runs force persistent worktree isolation. A reported write outside `WAO_TARGET_CWD` fails as `workdir_escape` before packaging; this is not an OS sandbox.
 
 After `stop`, trust the terminal result and transcript evidence, including stop verification; do not infer success from an HTTP response alone. Daemon liveness comes from `daemon ping`, `daemon list`, and `daemon status`, not `.wao/`.
 
