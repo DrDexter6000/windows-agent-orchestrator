@@ -110,12 +110,19 @@ async function buildInMemoryClient(server) {
 
 // ===== INV: computeCandidateInventory unit contract =====
 
-test("M12-1S1-INV-01: shared cap is 256; positive projection with dedup/sort/boundary", () => {
+test("M12-1S1-INV-01: inventory preserves the complete original scope, including unchanged paths", () => {
   assert.equal(INVENTORY_PATHS_LIMIT, 256, "one clearly shared exported cap");
-  const inv = computeCandidateInventory("C:/wt", BASE, ["src"], () => [
+  const inv = computeCandidateInventory("C:/wt", BASE, ["test/unchanged.test.js", "src"], () => [
     "src/b.js", "src/a.js", "README.md", "src2/c.js", "src/a.js",
   ]);
   assert.ok(inv, "inventory present");
+  assert.deepEqual(
+    inv.originalAllowedPaths,
+    ["src", "test/unchanged.test.js"],
+    "Lead can recover the unchanged original path required by run_delivery_repackage",
+  );
+  assert.equal(inv.originalAllowedCount, 2);
+  assert.equal(inv.originalAllowedTruncated, false);
   // Sorted + deduplicated; "src" allows descendants on a segment boundary but
   // NOT "src2/..." (reuses the isPathAllowed SSOT).
   assert.deepEqual(inv.actualChangedPaths, ["README.md", "src/a.js", "src/b.js", "src2/c.js"]);
@@ -246,6 +253,9 @@ test("M12-1S1-SVC-01: disallowed_path failure projects inventory; transcript/Git
     assert.equal(view.deliveryAvailable, false);
     assert.equal(view.deliveryFailure.code, "disallowed_path");
     assert.ok(view.candidateInventory, "inventory present for disallowed_path");
+    assert.deepEqual(view.candidateInventory.originalAllowedPaths, ["src"]);
+    assert.equal(view.candidateInventory.originalAllowedCount, 1);
+    assert.equal(view.candidateInventory.originalAllowedTruncated, false);
     assert.deepEqual(view.candidateInventory.actualChangedPaths, ["new.txt", "src/a.js"]);
     assert.equal(view.candidateInventory.actualChangedCount, 2);
     assert.equal(view.candidateInventory.actualChangedTruncated, false);
@@ -395,6 +405,7 @@ test("M12-1S1-SVC-07: settled packaging_failed readiness carries the same additi
     const wt = makeLinkedWorktree(repo, RUN_ID);
     seedTranscript(runDir, RUN_ID, disallowedPathEvents({ repo, worktreePath: wt, baseCommit }));
     const fakeInventory = {
+      originalAllowedPaths: ["src/a.js"], originalAllowedCount: 1, originalAllowedTruncated: false,
       actualChangedPaths: ["src/a.js"], actualChangedCount: 1, actualChangedTruncated: false,
       disallowedPaths: [], disallowedCount: 0, disallowedTruncated: false,
     };
@@ -435,6 +446,9 @@ test("M12-1S1-MCP-01: real MCP run_delivery returns schema-parsed inventory with
       assert.equal(parsed.deliveryFailure.code, "disallowed_path");
       assert.ok(parsed.candidateInventory, "candidateInventory present");
       assert.deepEqual(parsed.candidateInventory, {
+        originalAllowedPaths: ["src"],
+        originalAllowedCount: 1,
+        originalAllowedTruncated: false,
         actualChangedPaths: ["new.txt", "src/a.js"],
         actualChangedCount: 2,
         actualChangedTruncated: false,
@@ -469,10 +483,10 @@ test("M12-1S1-MCP-02: malformed/unsafe service inventory collapses to null (neve
       candidateInventory,
     });
     const badInventories = [
-      { actualChangedPaths: ["src/evil\n.sh"], actualChangedCount: 1, actualChangedTruncated: false, disallowedPaths: [], disallowedCount: 0, disallowedTruncated: false },
-      { actualChangedPaths: ["../escape.js"], actualChangedCount: 1, actualChangedTruncated: false, disallowedPaths: [], disallowedCount: 0, disallowedTruncated: false },
-      { actualChangedPaths: ["src/a.js"], actualChangedCount: 5, actualChangedTruncated: false, disallowedPaths: [], disallowedCount: 0, disallowedTruncated: false }, // count/paths mismatch
-      { actualChangedPaths: ["src/a.js"], actualChangedCount: 1, actualChangedTruncated: true, disallowedPaths: [], disallowedCount: 0, disallowedTruncated: false }, // flag mismatch
+      { originalAllowedPaths: ["src/a.js"], originalAllowedCount: 1, originalAllowedTruncated: false, actualChangedPaths: ["src/evil\n.sh"], actualChangedCount: 1, actualChangedTruncated: false, disallowedPaths: [], disallowedCount: 0, disallowedTruncated: false },
+      { originalAllowedPaths: ["../escape.js"], originalAllowedCount: 1, originalAllowedTruncated: false, actualChangedPaths: ["src/a.js"], actualChangedCount: 1, actualChangedTruncated: false, disallowedPaths: [], disallowedCount: 0, disallowedTruncated: false },
+      { originalAllowedPaths: ["src/a.js"], originalAllowedCount: 1, originalAllowedTruncated: false, actualChangedPaths: ["src/a.js"], actualChangedCount: 5, actualChangedTruncated: false, disallowedPaths: [], disallowedCount: 0, disallowedTruncated: false }, // count/paths mismatch
+      { originalAllowedPaths: ["src/a.js"], originalAllowedCount: 1, originalAllowedTruncated: false, actualChangedPaths: ["src/a.js"], actualChangedCount: 1, actualChangedTruncated: true, disallowedPaths: [], disallowedCount: 0, disallowedTruncated: false }, // flag mismatch
       "not-an-object",
     ];
     for (const bad of badInventories) {
@@ -501,6 +515,7 @@ test("M12-1S1-MCP-03: candidateInventory is null on success and on other failure
   const dir = await mkdtemp(join(tmpdir(), "m12s1-mcp03-"));
   try {
     const inventory = {
+      originalAllowedPaths: ["src/a.js"], originalAllowedCount: 1, originalAllowedTruncated: false,
       actualChangedPaths: ["src/a.js"], actualChangedCount: 1, actualChangedTruncated: false,
       disallowedPaths: [], disallowedCount: 0, disallowedTruncated: false,
     };
@@ -558,6 +573,7 @@ test("M12-1S1-MCP-04: wire schema exposes candidateInventory with maxItems/maxLe
       assert.ok(rd.outputSchema, "run_delivery has an output schema");
       const schemaDump = JSON.stringify(rd.outputSchema);
       assert.ok(schemaDump.includes("candidateInventory"), "candidateInventory is wire-visible");
+      assert.ok(schemaDump.includes("originalAllowedPaths"), "persisted original scope is wire-visible");
       assert.ok(schemaDump.includes('"maxItems":256'), "arrays bounded at 256 on the wire");
       assert.ok(schemaDump.includes('"maxLength":512'), "path strings bounded at 512 on the wire");
     } finally {
@@ -577,6 +593,7 @@ test("M12-1S1-MCP-05: wait path projects the same additive field", async () => {
   const dir = await mkdtemp(join(tmpdir(), "m12s1-mcp05-runs-"));
   try {
     const inventory = {
+      originalAllowedPaths: ["src/a.js"], originalAllowedCount: 1, originalAllowedTruncated: false,
       actualChangedPaths: ["new.txt", "src/a.js"], actualChangedCount: 2, actualChangedTruncated: false,
       disallowedPaths: ["new.txt"], disallowedCount: 1, disallowedTruncated: false,
     };

@@ -478,6 +478,9 @@ const PACKAGING_FAILURE_CODE_ENUM = z.enum([...PACKAGING_FAILURE_CODES, UNKNOWN_
 // or Git internals.
 const CANDIDATE_INVENTORY_PATH_SCHEMA = z.array(z.string().min(1).max(512)).max(INVENTORY_PATHS_LIMIT);
 const CANDIDATE_INVENTORY_SCHEMA = z.object({
+  originalAllowedPaths: CANDIDATE_INVENTORY_PATH_SCHEMA,
+  originalAllowedCount: z.number().int().nonnegative(),
+  originalAllowedTruncated: z.boolean(),
   actualChangedPaths: CANDIDATE_INVENTORY_PATH_SCHEMA,
   actualChangedCount: z.number().int().nonnegative(),
   actualChangedTruncated: z.boolean(),
@@ -526,10 +529,16 @@ function safeProjectCandidateInventory(raw) {
     }
     return projected;
   };
+  const originalAllowedPaths = projectList(
+    raw.originalAllowedPaths, raw.originalAllowedCount, raw.originalAllowedTruncated,
+  );
   const actualChangedPaths = projectList(raw.actualChangedPaths, raw.actualChangedCount, raw.actualChangedTruncated);
   const disallowedPaths = projectList(raw.disallowedPaths, raw.disallowedCount, raw.disallowedTruncated);
-  if (actualChangedPaths === null || disallowedPaths === null) return null;
+  if (originalAllowedPaths === null || actualChangedPaths === null || disallowedPaths === null) return null;
   return {
+    originalAllowedPaths,
+    originalAllowedCount: raw.originalAllowedCount,
+    originalAllowedTruncated: raw.originalAllowedTruncated,
     actualChangedPaths,
     actualChangedCount: raw.actualChangedCount,
     actualChangedTruncated: raw.actualChangedTruncated,
@@ -597,7 +606,7 @@ const RUN_DELIVERY_DESCRIPTION =
   "never stop/retry/accept/rejects. readiness closed set: " +
   DELIVERY_READINESS_STATES.join(", ") + ". " +
   "M12-1S1: on a bound disallowed_path packaging failure, an additive nullable " +
-  "candidateInventory reports bounded safe actual/disallowed repo-relative paths " +
+  "candidateInventory reports bounded safe original-allowed/actual/disallowed repo-relative paths " +
   `(up to ${INVENTORY_PATHS_LIMIT} each, with exact counts and truncation flags). ` +
   "It is advisory only (null = verify manually) — it never expands scope, " +
   "repackages, stops, retries, or decides.";

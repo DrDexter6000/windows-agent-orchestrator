@@ -93,7 +93,7 @@ WAO exposes 17 MCP tools. The minimal control loop uses the relevant control too
 | `run_delivery` | read-only | Query delivery commit/verification/acceptance; optional `waitMs` adds a bounded, read-only readiness wait returning a closed-set `readiness` (M11-10) |
 | `run_delivery_review` | read-only | Review one delivery file as bounded, untrusted diff text |
 | `run_delivery_decide` | durable (first-decision-wins) | Record Lead accept/reject |
-| `run_delivery_repackage` | destructive (reentrant/crash-safe) | Re-package a run that terminally failed `disallowed_path`, reusing the original worktree/base/verification config (no model, no path inference). Lead's `allowedPaths` is the only scope authority; records a recovery provenance; does NOT auto accept/reject (M12-1S2) |
+| `run_delivery_repackage` | destructive (reentrant/crash-safe) | Re-package a run that terminally failed `disallowed_path`, reusing the original worktree/base/verification config (no model, no path inference). `run_delivery.candidateInventory.originalAllowedPaths` exposes the old scope that the new `allowedPaths` must preserve; the Lead alone decides which reported `disallowedPaths` to add. Records recovery provenance; does NOT auto accept/reject (M12-1S2) |
 | `run_stop` | destructive (first-terminal-wins) | Stop a runaway worker (workspace-bound) |
 | `runs_list` | read-only | List runs in current workspace (project-bound recovery) |
 | `playbook_list` | read-only | List built-in Lead playbooks as compact summaries (optional, M11-2) |

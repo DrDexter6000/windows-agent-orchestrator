@@ -839,14 +839,14 @@ test("M12-1S2-FAIL-CLOSED-INVENTORY: empty/partial/truncated inventory rejects",
       runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"],
       authorizedWorkspaceRoot: repo, resolveDeliveryCommitFn: resolveDeliveryCommit,
       verifyDeliveryFn: passedVerifier,
-      computeInventoryFn: async () => ({ actualChangedPaths: [], actualChangedCount: 0, actualChangedTruncated: false, disallowedPaths: [], disallowedCount: 0, disallowedTruncated: false }),
+      computeInventoryFn: async () => ({ originalAllowedPaths: ["src/a.js"], originalAllowedCount: 1, originalAllowedTruncated: false, actualChangedPaths: [], actualChangedCount: 0, actualChangedTruncated: false, disallowedPaths: [], disallowedCount: 0, disallowedTruncated: false }),
     }), /inventory|empty/i);
     // truncated inventory.
     await assert.rejects(() => runDeliveryRepackage({
       runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"],
       authorizedWorkspaceRoot: repo, resolveDeliveryCommitFn: resolveDeliveryCommit,
       verifyDeliveryFn: passedVerifier,
-      computeInventoryFn: async () => ({ actualChangedPaths: ["src/a.js"], actualChangedCount: 300, actualChangedTruncated: true, disallowedPaths: ["root.txt"], disallowedCount: 1, disallowedTruncated: false }),
+      computeInventoryFn: async () => ({ originalAllowedPaths: ["src/a.js"], originalAllowedCount: 1, originalAllowedTruncated: false, actualChangedPaths: ["src/a.js"], actualChangedCount: 300, actualChangedTruncated: true, disallowedPaths: ["root.txt"], disallowedCount: 1, disallowedTruncated: false }),
     }), /inventory|truncat/i);
   } finally {
     await cleanupDir(repo);

@@ -4,9 +4,10 @@
 //
 // When a delivery run's durable bound packaging failure is exactly
 // `disallowed_path`, the Lead previously saw only a blind code. This module
-// computes a bounded, advisory inventory of the candidate's ACTUAL changed
-// paths (tracked diff vs the persisted original base + non-ignored untracked
-// files) and the subset that exceeded the ORIGINAL allowedPaths contract.
+// computes a bounded, advisory inventory of the ORIGINAL allowedPaths contract,
+// the candidate's ACTUAL changed paths (tracked diff vs the persisted original
+// base + non-ignored untracked files), and the subset that exceeded that
+// original contract.
 //
 // Hard boundaries:
 //   - Advisory facts only. NEVER expands scope, repackages, stops/retries,
@@ -50,6 +51,7 @@ export const INVENTORY_PATHS_LIMIT = 256;
  *   defaults to listWorktreeChangedPaths. Must return an array of
  *   repo-relative paths or null when either required Git read failed.
  * @returns {object|null} {
+ *   originalAllowedPaths, originalAllowedCount, originalAllowedTruncated,
  *   actualChangedPaths, actualChangedCount, actualChangedTruncated,
  *   disallowedPaths, disallowedCount, disallowedTruncated,
  * } or null on ANY validation/read failure (never partial truth)
@@ -90,12 +92,17 @@ export function computeCandidateInventory(worktreePath, baseCommit, allowedPaths
 
   // Deterministic: deduplicate + sort. Counts report the FULL cardinality of
   // the deduplicated set (not the capped length) so truncation is detectable.
+  const originalAllowed = [...new Set(allowed)].sort();
   const all = [...new Set(validated)].sort();
-  const disallowed = all.filter((p) => !isPathAllowed(p, allowed));
+  const disallowed = all.filter((p) => !isPathAllowed(p, originalAllowed));
 
+  const originalAllowedPaths = originalAllowed.slice(0, INVENTORY_PATHS_LIMIT);
   const actualChangedPaths = all.slice(0, INVENTORY_PATHS_LIMIT);
   const disallowedPaths = disallowed.slice(0, INVENTORY_PATHS_LIMIT);
   return {
+    originalAllowedPaths,
+    originalAllowedCount: originalAllowed.length,
+    originalAllowedTruncated: originalAllowed.length > originalAllowedPaths.length,
     actualChangedPaths,
     actualChangedCount: all.length,
     actualChangedTruncated: all.length > actualChangedPaths.length,
