@@ -667,8 +667,8 @@ test("M10-pre2: workspace_status tool documented in usage.md and SKILL.md", () =
   // SKILL.md must reflect the current MCP tool count. History: 10 (M10-pre2/P0-2)
   // + runs_list (M10 P0-3) + run_wait (M10-pre3) = 11; + playbook_list/get (M11-2) = 13;
   // + run_delivery_review (M11-3) = 14; + workspace_select (M11-6) = 15; + lead_preflight
-  // (M11-8A) = 16; + run_delivery_repackage (M12-1S2) = 17.
-  assert.ok(/17 MCP tools/.test(skill), "SKILL.md must reflect 17 MCP tools after M12-1S2");
+  // (M11-8A) = 16; + run_delivery_repackage (M12-1S2) = 17; + run_await_result (M12-3) = 18.
+  assert.ok(/18 MCP tools/.test(skill), "SKILL.md must reflect 18 MCP tools after M12-3");
   // team-roles.md must mention workspace binding (MCP-first)
   const roles = read("docs/team-roles.md");
   assert.ok(/workspace binding|workspace-root|roots\/list/.test(roles),
@@ -875,11 +875,11 @@ test("M11-0A: usage.md 说明 --pure 用途、新进程重启边界、command �
   assert.ok(/command.*必须是数组|command 必须是数组|数组/.test(usage), "usage.md 必须说明 command 必须是数组");
 });
 
-test("M11-3D1: usage.md MCP 段反映当前 17 tools", () => {
+test("M11-3D1: usage.md MCP 段反映当前 18 tools", () => {
   const usage = read("docs/usage.md");
-  // 精确禁止"只有 7 个工具"的陈旧文案；用数字 lookbehind 排除 "17 个工具" 中的子串。
-  assert.ok(!/(?<!\d)7 个工具/.test(usage), "usage.md MCP 段不得再声称只有 7 个工具（排除 17 中的子串）");
-  assert.ok(/17 个工具/.test(usage), "usage.md MCP 段必须反映 17 个工具（含 M12-1S2 run_delivery_repackage）");
+  // 精确禁止"只有 7 个工具"的陈旧文案；用数字 lookbehind 排除 "18 个工具" 中的子串。
+  assert.ok(!/(?<!\d)7 个工具/.test(usage), "usage.md MCP 段不得再声称只有 7 个工具（排除 18 中的子串）");
+  assert.ok(/18 个工具/.test(usage), "usage.md MCP 段必须反映 18 个工具（含 M12-3 run_await_result）");
 });
 
 // ============================================================
@@ -1094,15 +1094,15 @@ test("M11-2C-09: SKILL/PRD 保持 Advisor/Auditor conditional（非默认流水�
   }
 });
 
-test("M11-3D1: SKILL/architecture 当前工具事实为 17 tools", () => {
+test("M11-3D1: SKILL/architecture 当前工具事实为 18 tools", () => {
   const skill = read("SKILL.md");
   const arch = read("docs/02-architecture.md");
-  assert.ok(/17 MCP tools|17 tools/i.test(skill),
-    "SKILL.md Minimal MCP Loop 当前工具数为 17（含 M12-1S2 run_delivery_repackage）");
+  assert.ok(/18 MCP tools|18 tools/i.test(skill),
+    "SKILL.md Minimal MCP Loop 当前工具数为 18（含 M12-3 run_await_result）");
   // 精确匹配 "server.js ... N tools" 的当前状态注释行。
   const serverLine = arch.split("\n").find((l) => /server\.js.*tools/.test(l)) || "";
-  assert.ok(/17 tools/.test(serverLine),
-    "architecture server.js 注释当前工具数为 17");
+  assert.ok(/18 tools/.test(serverLine),
+    "architecture server.js 注释当前工具数为 18");
 });
 
 // ============================================================
@@ -1134,10 +1134,10 @@ test("M11-2C-12: SKILL tool-count 文案不得声称 minimal loop 必须经过�
   const mandatoryAll = /full\s+minimal\s+loop\s+through\s+15|minimal\s+loop\s+必须.*全部\s*15|loop\s+must\s+(use|go through|include)\s+all\s+15/i;
   assert.ok(!mandatoryAll.test(skill),
     "SKILL tool-count 文案不得声称 minimal loop 必须经过全部工具");
-  // 必须表达：WAO 暴露 17 tools，但 minimal control loop 只用相关 control tools，
+  // 必须表达：WAO 暴露 18 tools，但 minimal control loop 只用相关 control tools，
   // playbook reads 是可选且在 dispatch loop 外。
-  assert.ok(/17 MCP tools|17 tools/i.test(skill),
-    "SKILL 声明 WAO 暴露 17 MCP tools");
+  assert.ok(/18 MCP tools|18 tools/i.test(skill),
+    "SKILL 声明 WAO 暴露 18 MCP tools");
   assert.ok(/optional|可选/i.test(skill) && /dispatch loop|control loop/i.test(skill),
     "SKILL 必须说明 playbook reads 可选且在 dispatch/control loop 之外");
 });

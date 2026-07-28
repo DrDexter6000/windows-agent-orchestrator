@@ -77,7 +77,7 @@ After `stop`, trust the terminal result and transcript evidence, including stop 
 
 See `references/safety-incidents.md` before unattended or stop-sensitive work. Read `references/opencode-pitfalls.md` only when using opencode.
 ## Minimal MCP Loop
-WAO exposes 17 MCP tools. The minimal control loop uses the relevant control tools below; `playbook_list`/`playbook_get` are optional read-only catalog reads that sit **outside** the dispatch loop and are never required before `run_dispatch`.
+WAO exposes 18 MCP tools. The minimal control loop uses the relevant control tools below; `playbook_list`/`playbook_get` are optional read-only catalog reads that sit **outside** the dispatch loop and are never required before `run_dispatch`.
 
 | Tool | Side effect | Purpose |
 |---|---|---|
@@ -87,8 +87,9 @@ WAO exposes 17 MCP tools. The minimal control loop uses the relevant control too
 | `workspace_select` | session-scoped | Lead selects the working Git project for this session (`lead_session`); idempotent, no host bind/restart, no file writes |
 | `run_dispatch` | destructive | Create a supervised run (with optional delivery block for git_commit_v1); workspace cwd is the bound/selected root, not model-controlled. Returns `agentId` — the canonical WAO worker identity (M11-8B) |
 | `run_status` | read-only | Poll terminal state + last activity; returns `agentId` (canonical identity, M11-8B) |
-| `run_wait` | read-only (long-poll) | Wait for terminal or liveness summary (270s / 4.5 min default); returns `agentId` (M11-8B) |
-| `run_collect` | appends `messages.collected` (non-idempotent) | Collect bounded worker output; returns `agentId` (canonical identity, M11-8B) |
+| `run_wait` | read-only (long-poll) | Atomic liveness-only wait for terminal or liveness summary (270s / 4.5 min default); returns `agentId` (M11-8B) |
+| `run_await_result` | read-only (long-poll + compact) | Default convenience path: one call waits 0..270000 ms (default 270000), returns early on terminal, and then returns the safe compact final assistant text + evidence counts from the same transcript snapshot. Advisory only: zero audit append, never stop/retry/decide/repackage. Call it again with any allowed waitMs for long workers; all atomic tools remain available (M12-3) |
+| `run_collect` | appends `messages.collected` (non-idempotent) | Atomic bounded worker-output collection; returns `agentId` (canonical identity, M11-8B). Use compact/full explicitly when `run_await_result` is unavailable, too_large/empty, or deeper evidence is needed |
 | `run_diagnose` | read-only | Failure category + signal types (no prescription) |
 | `run_delivery` | read-only | Query delivery commit/verification/acceptance; optional `waitMs` adds a bounded, read-only readiness wait returning a closed-set `readiness` (M11-10) |
 | `run_delivery_review` | read-only | Review one delivery file as bounded, untrusted diff text |
@@ -98,9 +99,8 @@ WAO exposes 17 MCP tools. The minimal control loop uses the relevant control too
 | `runs_list` | read-only | List runs in current workspace (project-bound recovery) |
 | `playbook_list` | read-only | List built-in Lead playbooks as compact summaries (optional, M11-2) |
 | `playbook_get` | read-only | Get one complete built-in Lead playbook by id (optional, M11-2) |
-
-Minimal closed loop: `lead_preflight (or inventory → workspace_status) → dispatch → status/wait → collect/diagnose → delivery query/review → Lead decision → (stop on runaway)`; recovery: `runs_list` (list runs in the bound workspace after `workspace_status`). `playbook_list`/`playbook_get` are optional read-only catalog reads — they sit outside the dispatch loop and are never required before `run_dispatch`.
-The Lead uses `run_wait` as the primary supervision primitive: it blocks up to `waitMs` (default 270s / 4.5 min) and returns as soon as the run reaches a terminal state or the observation window produces a liveness summary (`terminal`/`progress`/`process_only`/`silent`), avoiding busy poll loops. An expired observation window is not a worker failure or stop signal. The execution deadline on worker runs is disabled by default — supervision is observation-driven via `run_wait`, not wall-clock termination.
+Minimal closed loop: `lead_preflight (or inventory → workspace_status) → dispatch → run_await_result → delivery query/review → Lead decision`; use `run_collect`/`run_diagnose` when deeper evidence is needed, `run_wait`/`run_status` for atomic observation, `run_stop` only when the Lead decides a worker is runaway, and `runs_list` for restart recovery. `playbook_list`/`playbook_get` are optional read-only catalog reads outside the dispatch loop.
+The Lead normally uses `run_await_result` as the supervision primitive: it blocks up to the caller-selected `waitMs` (default 270s / 4.5 min), returns early on terminal, and folds the safe compact result into the same read-only response. A non-terminal return is not a worker failure or stop signal; for a multi-hour worker, call it again with any allowed waitMs. Use atomic `run_wait` when only liveness is wanted, `run_status` for a point-in-time fact, and `run_collect` for explicit compact/full collection. No convenience tool removes or weakens these choices.
 See `docs/usage.md §MCP stdio` for host setup, full input/output schemas, and install instructions. OpenCode (`opencode-ai`) as Lead host: see `docs/usage.md §OpenCode 项目级配置` for the project-local `opencode.json` schema (array `command`, `enabled:true`, `--workspace-root`) and the new-process restart boundary.
 
 CLI (`npm run cli --`) remains available for human/ops/debug/fallback, including `registry validate`, `registry check`, `daemon`, and `runs dashboard`. `registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health`. `mcp bind/status/unbind` is an **optional** Human Owner ops command for persistent project-level workspace activation (a project-local default); it is not required for normal use — the Lead can `workspace_select` the current Git project in-session with no host bind and no restart. See `docs/usage.md §项目级 Workspace Activation`.

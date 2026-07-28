@@ -51,6 +51,13 @@ import {
   RUN_WAIT_DEFAULT_MS,
   RUN_WAIT_MAX_MS,
 } from "../application/runWait.js";
+import {
+  runAwaitResult,
+  RUN_AWAIT_RESULT_MIN_MS,
+  RUN_AWAIT_RESULT_DEFAULT_MS,
+  RUN_AWAIT_RESULT_MAX_MS,
+  RUN_AWAIT_RESULT_DEFAULT_PROGRESS_MS,
+} from "../application/runAwaitResult.js";
 import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
 import {
   runDeliveryRepackage,
@@ -1138,6 +1145,102 @@ const RUN_WAIT_DESCRIPTION =
   "requests progress (onprogress), so a resetTimeoutOnProgress client can " +
   "span the wait across the MCP 60s default request timeout.";
 
+// ===== run_await_result (M12-3 read-only composite) constants =====
+//
+// Advisory convenience that folds ONE bounded wait + a truthful run/liveness
+// observation + a safe terminal-then-compact collection into a single call.
+// It is strictly read-only and advisory: it never stops/retries/decides/
+// accepts/rejects/repackages, never appends transcript events, and performs NO
+// serve HTTP fetch (snapshot-only local projection). All atomic tools remain
+// available for arbitrary re-polling.
+
+const RUN_AWAIT_RESULT_ERROR_TEXT = "run_await_result failed";
+
+const RUN_AWAIT_RESULT_INPUT = z.object({
+  runId: z.string().min(1),
+  afterSeq: z.number().int().nonnegative().optional(),
+  // One shared composition budget. 0 = point-in-time (read once, return).
+  waitMs: z.number().int().min(RUN_AWAIT_RESULT_MIN_MS).max(RUN_AWAIT_RESULT_MAX_MS)
+    .default(RUN_AWAIT_RESULT_DEFAULT_MS),
+}).strict();
+
+// Numeric fields are int/nonnegative everywhere they are observed; unobserved
+// fields (status not_terminal/unavailable) are null, never fabricated zeros.
+const RUN_AWAIT_RESULT_EVIDENCE_COUNTS = z.object({
+  message: z.number().int().nonnegative(),
+  command: z.number().int().nonnegative(),
+  toolUse: z.number().int().nonnegative(),
+  toolResult: z.number().int().nonnegative(),
+  fileWritten: z.number().int().nonnegative(),
+  other: z.number().int().nonnegative(),
+}).strict();
+
+const RUN_AWAIT_RESULT_MESSAGE = z.object({
+  role: z.literal("assistant"),
+  text: z.string(),
+  truncated: z.boolean(),
+}).strict();
+
+const RUN_AWAIT_RESULT_RESULT = z.object({
+  status: z.enum(["available", "empty", "not_terminal", "too_large", "unavailable"]),
+  messages: z.array(RUN_AWAIT_RESULT_MESSAGE),
+  // Truthful null when nothing was collected (not_terminal / unavailable).
+  evidenceCounts: RUN_AWAIT_RESULT_EVIDENCE_COUNTS.nullable(),
+  itemCount: z.number().int().nonnegative().nullable(),
+  assistantMessageCount: z.number().int().nonnegative().nullable(),
+  reconstructed: z.boolean().nullable(),
+  backend: z.string().nullable(),
+}).strict();
+
+const RUN_AWAIT_RESULT_OUTPUT = z.object({
+  runId: z.string(),
+  agentId: READ_AGENT_ID_SCHEMA,
+  state: z.enum([...RUN_STATES, "unknown"]),
+  terminal: z.boolean(),
+  cursor: z.number().int().nullable(),
+  returnedEarly: z.boolean(),
+  waitedMs: z.number().int().nonnegative(),
+  // Mandatory closed-set field: clean read vs transcript read failure.
+  observationOutcome: z.enum(["observed", "read_failure"]),
+  // "unknown" only on a read failure (liveness must NOT be derived from stale
+  // events combined with a fresh heartbeat).
+  liveness: z.enum(["terminal", "progress", "process_only", "silent", "unknown"]),
+  activityEventCount: z.number().int().nonnegative().nullable(),
+  lastActivityKind: z.string().nullable(),
+  ownerHeartbeat: z.enum(["fresh", "stale", "n/a", "unknown"]),
+  result: RUN_AWAIT_RESULT_RESULT,
+}).strict();
+
+const RUN_AWAIT_RESULT_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  // Accurate: snapshot-only, no network I/O.
+  openWorldHint: false,
+};
+
+const RUN_AWAIT_RESULT_DESCRIPTION =
+  "One read-only call: wait up to waitMs (0..270000, default 270000) for a run " +
+  "to reach terminal, then return the safe compact final assistant result plus " +
+  "a truthful run/liveness observation. Returns early on terminal. waitMs=0 is a " +
+  "pure point-in-time read (read once, return). Advisory: never stops, retries, " +
+  "decides, accepts/rejects, repackages, or appends transcript events, and makes " +
+  "no semantic judgment. Snapshot-only: the compact text/counts/backend derive " +
+  "from ONE transcript snapshot (no serve fetch, no second read). result.status: " +
+  "available (terminal, last assistant text ≤4000), empty (terminal, no assistant " +
+  "text), too_large (terminal, last text >4000 → no partial text), not_terminal " +
+  "(not yet terminal — unobserved result fields are null), unavailable (collect " +
+  "or read failure). observationOutcome distinguishes a clean read (observed) " +
+  "from a transcript read failure (read_failure → liveness/ownerHeartbeat " +
+  "unknown, no stale+fresh combination). afterSeq omitted = baseline at first " +
+  "read; explicit afterSeq counts all seq > afterSeq. Read-only and idempotent: " +
+  "zero messages.collected on every path. All atomic tools (run_wait / " +
+  "run_collect / run_status …) remain available for arbitrary re-polling. " +
+  "Sends standard notifications/progress during the wait when the client " +
+  "requests progress (onprogress), throttled to a 30000 ms default independent " +
+  "of the internal poll interval, so a resetTimeoutOnProgress client can span " +
+  "the wait across the MCP 60s default request timeout.";
+
 // ===== Lead Playbook Catalog (M11-2B) constants =====
 //
 // Read-only, provider-neutral catalog of exactly four built-in Lead playbooks.
@@ -1343,6 +1446,9 @@ export function createWaoMcpServer({
   stopRunFn,
   listRunsFn,
   runWaitFn,
+  // M12-3: injectable read-only composite (bounded wait + observation + terminal
+  // compact). Defaults to the real service; threaded for transport tests.
+  runAwaitResultFn,
   listLeadPlaybooksFn,
   getLeadPlaybookFn,
   getRunDeliveryReviewFn,
@@ -1372,6 +1478,7 @@ export function createWaoMcpServer({
   const stopService = stopRunFn ?? stopRun;
   const listRunsService = listRunsFn ?? listRuns;
   const runWaitService = runWaitFn ?? runWait;
+  const runAwaitResultService = runAwaitResultFn ?? runAwaitResult;
   const playbookListService = listLeadPlaybooksFn ?? listLeadPlaybooks;
   const playbookGetService = getLeadPlaybookFn ?? getLeadPlaybook;
   const deliveryReviewService = getRunDeliveryReviewFn ?? getRunDeliveryReview;
@@ -2356,6 +2463,87 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: RUN_WAIT_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  // ===== run_await_result (M12-3 read-only composite) =====
+
+  mcp.registerTool(
+    "run_await_result",
+    {
+      description: RUN_AWAIT_RESULT_DESCRIPTION,
+      inputSchema: RUN_AWAIT_RESULT_INPUT,
+      outputSchema: RUN_AWAIT_RESULT_OUTPUT,
+      annotations: RUN_AWAIT_RESULT_ANNOTATIONS,
+    },
+    async (input, extra) => {
+      try {
+        const runId = input?.runId;
+        if (!isValidRunId(runId)) {
+          return { isError: true, content: [{ type: "text", text: RUN_AWAIT_RESULT_ERROR_TEXT }] };
+        }
+        const binding = await resolveWorkspaceBinding();
+        if (!binding.bound) {
+          return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
+        }
+
+        // Standard notifications/progress keepalive (opt-in via onprogress),
+        // exactly like run_wait. The service throttles to a 30000 ms default
+        // INDEPENDENT of its internal poll interval, so notifications stay
+        // bounded even with a tiny poll interval.
+        const progressToken = extra?._meta?.progressToken;
+        const hasKeepalive = progressToken !== undefined && progressToken !== null
+          && typeof extra?.sendNotification === "function";
+        const onProgress = hasKeepalive
+          ? async ({ fraction }) => {
+              const progress = Math.max(1, Math.floor(fraction * 100));
+              await extra.sendNotification({
+                method: "notifications/progress",
+                params: {
+                  progressToken,
+                  progress,
+                  total: 100,
+                },
+              });
+            }
+          : undefined;
+
+        const result = await runAwaitResultService({
+          runId,
+          runDir,
+          ...(input?.afterSeq !== undefined ? { afterSeq: input.afterSeq } : {}),
+          waitMs: input?.waitMs ?? RUN_AWAIT_RESULT_DEFAULT_MS,
+          authorizedWorkspaceRoot: binding.root,
+          ...(onProgress ? { onProgress } : {}),
+        });
+
+        const payload = {
+          runId,
+          agentId: safeProjectAgentId(result.agentId),
+          state: result.state,
+          terminal: result.terminal,
+          cursor: result.cursor,
+          returnedEarly: result.returnedEarly,
+          waitedMs: result.waitedMs,
+          observationOutcome: result.observationOutcome,
+          liveness: result.liveness,
+          activityEventCount: result.activityEventCount,
+          lastActivityKind: result.lastActivityKind,
+          ownerHeartbeat: result.ownerHeartbeat,
+          result: result.result,
+        };
+
+        const parsed = RUN_AWAIT_RESULT_OUTPUT.parse(payload);
+        return {
+          content: [{ type: "text", text: JSON.stringify(parsed) }],
+          structuredContent: parsed,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: RUN_AWAIT_RESULT_ERROR_TEXT }],
         };
       }
     },

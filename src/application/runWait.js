@@ -110,6 +110,41 @@ function countProgressAfterSeq(events, afterSeq) {
   return { count, lastKind };
 }
 
+// M12-3: shared non-terminal liveness summary. Extracted verbatim from the
+// runWait expiry path so the read-only runAwaitResult composite reuses the
+// EXACT same liveness algorithm (zero drift) rather than a second copy. This is
+// the SSOT for "given a clean final transcript read, is the run progressing,
+// process-only, or silent?". A read FAILURE must NOT route through here — the
+// composite reports observationOutcome="read_failure" with liveness="unknown"
+// instead, so stale events are never combined with a fresh owner heartbeat into
+// an apparently-current observation.
+//
+// @param {object} opts
+// @param {Array<object>} opts.events — the final transcript event snapshot (CLEAN read)
+// @param {string} opts.runDir — resolved runs/ directory (for the owner heartbeat file)
+// @param {string} opts.runId
+// @param {number} opts.activityBaseline — seq; only events with seq > baseline count
+// @param {number} opts.now — current timestamp (ms), for heartbeat freshness
+// @returns {{liveness: string, activityEventCount: number, lastActivityKind: string|null, ownerHeartbeat: string}}
+export function summarizeLiveness({ events, runDir, runId, activityBaseline, now }) {
+  const progress = countProgressAfterSeq(events, activityBaseline);
+  const ownerLiveness = checkOwnerLiveness(runDir, runId, now);
+  let liveness;
+  if (progress.count > 0) {
+    liveness = "progress";
+  } else if (ownerLiveness.fresh) {
+    liveness = "process_only";
+  } else {
+    liveness = "silent";
+  }
+  return {
+    liveness,
+    activityEventCount: progress.count,
+    lastActivityKind: progress.lastKind,
+    ownerHeartbeat: ownerLiveness.fresh ? "fresh" : "stale",
+  };
+}
+
 /**
  * Wait for a run to reach terminal state or observation period to expire.
  *
@@ -285,18 +320,16 @@ export async function runWait(input) {
     }
   }
 
-  // waitMs expired — compute liveness summary against the resolved baseline
-  const progress = countProgressAfterSeq(currentEvents, activityBaseline);
-  const ownerLiveness = checkOwnerLiveness(resolvedRunDir, runId, _now());
-
-  let liveness;
-  if (progress.count > 0) {
-    liveness = "progress";
-  } else if (ownerLiveness.fresh) {
-    liveness = "process_only";
-  } else {
-    liveness = "silent";
-  }
+  // waitMs expired — compute liveness summary against the resolved baseline.
+  // M12-3: delegate to the shared summarizeLiveness SSOT (zero drift — this is
+  // the verbatim extraction of the previous inline computation).
+  const liv = summarizeLiveness({
+    events: currentEvents,
+    runDir: resolvedRunDir,
+    runId,
+    activityBaseline,
+    now: _now(),
+  });
 
   return {
     runId,
@@ -305,9 +338,9 @@ export async function runWait(input) {
     terminal: false,
     cursor: currentCursor,
     returnedEarly: false,
-    liveness,
-    activityEventCount: progress.count,
-    lastActivityKind: progress.lastKind,
-    ownerHeartbeat: ownerLiveness.fresh ? "fresh" : "stale",
+    liveness: liv.liveness,
+    activityEventCount: liv.activityEventCount,
+    lastActivityKind: liv.lastActivityKind,
+    ownerHeartbeat: liv.ownerHeartbeat,
   };
 }

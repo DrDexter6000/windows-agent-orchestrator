@@ -73,6 +73,23 @@ function reconstructProcessEvent(ev) {
   }
 }
 
+// M12-3: shared snapshot reconstruction. Reconstruct the FULL set of worker-
+// authored items from an EXPLICIT transcript event snapshot, reusing the SAME
+// reconstructProcessEvent SSOT (no second parser). Both collectRunMessages
+// (process path) and the read-only runAwaitResult composite call this so the
+// reconstructed item sequence is byte-identical for a given snapshot — there is
+// exactly one reconstruction algorithm in the codebase.
+//
+// @param {Array<object>} events — explicit transcript event snapshot
+// @returns {Array<object>} reconstructed items (thinking dropped)
+function reconstructItemsFromEvents(events) {
+  const list = Array.isArray(events) ? events : [];
+  return list
+    .filter((e) => e && e.type === "run.event")
+    .map(reconstructProcessEvent)
+    .filter((e) => e !== null);
+}
+
 // ===== Default append implementation (writes to the real transcript) =====
 
 /**
@@ -196,10 +213,8 @@ export async function collectRunMessages({
 
   if (!session.serveUrl) {
     // Process-backed: reconstruct run.event entries from transcript.
-    const reconstructedAll = events
-      .filter((e) => e.type === "run.event")
-      .map(reconstructProcessEvent)
-      .filter((e) => e !== null);
+    // M12-3: reuse the shared reconstructItemsFromEvents SSOT (one algorithm).
+    const reconstructedAll = reconstructItemsFromEvents(events);
     const reconstructed = isProjectionMode
       ? reconstructedAll                     // full snapshot — pagination handles bounds
       : reconstructedAll.slice(-effectiveLimit);  // legacy raw CLI tail behavior
@@ -282,4 +297,4 @@ function defaultServeFetch() {
   };
 }
 
-export { reconstructProcessEvent };
+export { reconstructProcessEvent, reconstructItemsFromEvents };
