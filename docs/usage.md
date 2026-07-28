@@ -694,7 +694,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 - **输入**（strict schema）：
 
 ```json
-{ "runId": "run_...", "cursor": "<opaque continuation token, optional>" }
+{ "runId": "run_...", "cursor": "<opaque continuation token, optional, full only>", "mode": "<full|compact, optional, omitted≡full>" }
 ```
 
 模型**不能**传 `runDir`、`limit`、`serveUrl`、`sessionId`、`cwd`、`raw`、`includeTools` 等——这些是 server-owned 配置。
@@ -728,6 +728,26 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:false, openWorldHint:true`（成功调用追加审计事件；serve path 可能读取外部 runtime 服务；但不杀进程、不修改 worker checkout、不改变 run terminal）。
 
 **CLI 续读对等**：默认 `wao collect <runId>` 保持原 raw ops 输出（含完整 `data` 数组，供 ops/人读），并继续接受 `--limit N`（legacy tail 语义，`--limit 0` = 全部）。机器可读的续读入口是 `wao collect <runId> --format json`（首页）和 `wao collect <runId> --cursor <token> --format json`（续读页）；两者委托与 MCP 相同的 `projectCollectResult`，输出结构（messages/evidenceCounts/itemCount/truncated/nextCursor）与 MCP `structuredContent` 深度语义一致。投影模式是 strict parser：`--cursor`/`--format` 缺值或空值在读取 transcript 前即拒绝（不静默退回 raw collect）；`--limit` 在投影模式被拒绝（pagination 由投影层固定，用户 limit 会与之冲突）；未知 flag、重复 flag、多余 positional 均拒绝。投影模式从第一页起 defer audit append，projection + output validation 全成功后才追加一次。
+
+**M12-2A compact 模式**：可选输入 `mode` ∈ `{full, compact}`（省略 ≡ `full`）。`compact` 在**一次调用**内返回最后一条 assistant 文本（经与 full 完全相同的 redaction + C0/C1/DEL sanitization 后的原样文本，≤4000 字符）以及来自**同一份完整安全快照**的 `evidenceCounts`/`itemCount`——让 Lead 在终态后通常只需一次 collect 即可看到 worker 的最后结论与完整证据计数，而非 6-9 页 full 收集。compact **复用** full 的 `extractAssistantTexts`/脱敏/sanitization/`evidenceCounts` SSOT（不复制解析算法、**不做语义摘要**、**不决定**是否需要 full 输出）。compact **不接受 cursor**（cursor 仅 full 可带）；`compact+cursor` 在 service/read/append 之前 fail-closed 为固定 `run_collect failed`，非法 `mode` 同样 fail-closed。compact 输出在 full 全部安全 base 字段之外，**仅 compact** 额外返回三个字段：
+
+```json
+{
+  "runId": "run_...", "agentId": "coder_low", "backend": "process", "reconstructed": true,
+  "itemCount": 12,
+  "messages": [ { "role": "assistant", "text": "<last assistant verbatim, ≤4000 chars>", "truncated": false } ],
+  "evidenceCounts": { "message": 4, "command": 3, "toolUse": 2, "toolResult": 2, "fileWritten": 1, "other": 0 },
+  "truncated": false,
+  "nextCursor": null,
+  "view": "compact",
+  "compactStatus": "available",
+  "assistantMessageCount": 3
+}
+```
+
+`compactStatus` 为闭集三态：`available`（≥1 条 assistant 文本，且最后一条 ≤4000 字符 → `messages` 恰好一条完整原样文本，`truncated:false`）；`empty`（无 assistant 文本 → `messages:[]`）；`too_large`（最后一条 >4000 字符 → `messages:[]`，**不**给部分文本、**不**给 cursor）。三态均为 `truncated:false`、`nextCursor:null`；`assistantMessageCount` = 完整快照中 assistant 文本条数（注意它与 `evidenceCounts.message`——所有 message-shape 条目含 user——不同）。每个 compact **成功**严格追加**一个** `messages.collected`；任何 input/投影/schema/service 失败（含 `compact+cursor`、非法 `mode`、serve sentinel ≥10001）追加**零**个（投影模式 defer append，projection + output validation 全成功后才提交）。compact 不是摘要、不是 final-answer 决策，也不替代 full 续读。
+
+**CLI compact 对等**：`wao collect <runId> --mode compact` 进入与 MCP 相同的 compact 投影（`--mode compact --format json` 等价；`--mode` 单独即触发投影模式）。`--mode full` 与现有 `--format json` 机器投影兼容。strict parser：`--mode` 缺值、非法值（非 `full`/`compact`）、`--mode compact --cursor`、未知 flag、重复 flag 均在读取 transcript 前拒绝；默认 raw `wao collect <runId>` 保持不变。
 
 ### MCP `run_diagnose`（安全确定性诊断，M9-5B）
 

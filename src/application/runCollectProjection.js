@@ -374,11 +374,13 @@ function safeSliceUtf16(str, start, end) {
  * @param {object} opts
  * @param {string} opts.runId — the caller-requested runId
  * @param {string} [opts.cursor] — opaque continuation token (null/undefined for page 1)
+ * @param {"full"|"compact"} [opts.mode] — projection mode (omitted ≡ "full")
  * @param {object} [opts.env] — env for the secret redactor (default: process.env)
  * @returns {object} safe payload with messages, evidenceCounts, itemCount,
- *                   truncated, nextCursor (null | opaque token)
+ *                   truncated, nextCursor (null | opaque token). In compact
+ *                   mode also carries view, compactStatus, assistantMessageCount.
  */
-export function projectCollectResult(rawResult, { runId, cursor, env } = {}) {
+export function projectCollectResult(rawResult, { runId, cursor, mode, env } = {}) {
   if (!rawResult || typeof rawResult !== "object") throw new Error("invalid collect result");
   if (!runId || typeof runId !== "string") throw new Error("runId required");
   // M11-8B closeout: canonical agentId from the transcript envelope, threaded
@@ -391,6 +393,21 @@ export function projectCollectResult(rawResult, { runId, cursor, env } = {}) {
   // rather than silently treating it as an empty snapshot (which masks
   // service bugs and lets projection succeed when it should not).
   if (!Array.isArray(rawResult.data)) throw new Error("invalid collect result: data must be an array");
+
+  // M12-2A compact mode. mode is a closed set {full|compact}; omitted ≡ full.
+  // compact reads the SAME full safe snapshot and reuses the SAME
+  // extractAssistantTexts / redaction / sanitization / evidenceCounts SSOT — it
+  // does NOT duplicate the parsing algorithm and does NO semantic summary.
+  // compact does NOT accept a cursor (cursor is full-only). This is
+  // defense-in-depth: the MCP/CLI adapters reject compact+cursor BEFORE the
+  // service call. compact never paginates — every compact state is single-shot.
+  const modeNorm = mode ?? "full";
+  if (modeNorm !== "full" && modeNorm !== "compact") {
+    throw new Error("invalid collect mode");
+  }
+  if (modeNorm === "compact" && cursor !== undefined && cursor !== null) {
+    throw new Error("compact mode does not accept a cursor");
+  }
 
   const redactor = createSecretRedactor(env ?? process.env);
   const rawItems = rawResult.data;
@@ -446,6 +463,45 @@ export function projectCollectResult(rawResult, { runId, cursor, env } = {}) {
   // statistics are stable across pages. (For page 1, frozenItems === rawItems.)
   const { evidenceCounts, redactedTexts } = extractAssistantTexts({ data: frozenItems }, redactor);
   const itemCount = frozenRawCount;
+
+  // M12-2A compact branch. Reuse the already-extracted redactedTexts — the SAME
+  // SSOT that full mode paginates over — so redaction / C0/C1/DEL sanitization /
+  // evidenceCounts / itemCount are byte-identical to a full read. compact returns
+  // the existing safe base fields plus (compact only) view / compactStatus /
+  // assistantMessageCount. No pagination, no cursor; every compact state is
+  // truncated:false and nextCursor:null.
+  if (modeNorm === "compact") {
+    const assistantMessageCount = redactedTexts.length;
+    let compactStatus;
+    let messages;
+    if (assistantMessageCount === 0) {
+      compactStatus = "empty";
+      messages = [];
+    } else {
+      const lastText = redactedTexts[assistantMessageCount - 1];
+      if (lastText.length <= COLLECT_MAX_TEXT_CHARS) {
+        compactStatus = "available";
+        messages = [{ role: "assistant", text: lastText, truncated: false }];
+      } else {
+        compactStatus = "too_large";
+        messages = [];
+      }
+    }
+    return {
+      runId,
+      agentId,
+      backend: rawResult.backend ?? "unknown",
+      reconstructed: Boolean(rawResult.reconstructed),
+      itemCount,
+      messages,
+      evidenceCounts,
+      truncated: false,
+      nextCursor: null,
+      view: "compact",
+      compactStatus,
+      assistantMessageCount,
+    };
+  }
 
   let startMsgIdx = 0;
   let startOffset = 0;

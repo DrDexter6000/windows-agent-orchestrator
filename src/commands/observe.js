@@ -120,7 +120,7 @@ export async function tailCommand(args, config) {
 // pagination; a user-supplied limit would silently conflict. Legacy raw CLI
 // mode still honors --limit.
 const COLLECT_PROJECTION_KNOWN_FLAGS = new Set([
-  "cursor", "format", "runDir", "cwd",
+  "cursor", "format", "mode", "runDir", "cwd",
 ]);
 
 // base64url, no padding, ≤192 chars — same alphabet as the MCP cursor field.
@@ -143,13 +143,21 @@ export async function collectCommand(args, config) {
   if (options.format === true) {
     throw new Error("collect: --format requires a value");
   }
+  // M12-2A: --mode with NO value (parseOptions sets it to boolean true) is
+  // rejected BEFORE any read/append, regardless of mode.
+  if (options.mode === true) {
+    throw new Error("collect: --mode requires a value");
+  }
 
   // M11-4: projection mode is engaged by --cursor OR --format json. This is
   // the machine-readable continuation entry that delegates to the SAME safe
   // projection as MCP. The default `collect <runId>` (no cursor, no format)
   // keeps its existing raw-ops output byte-compatible.
+  // M12-2A: --mode (full|compact) also engages projection; compact delegates
+  // to the same shared projection as MCP.
   const hasCursor = typeof options.cursor === "string" && options.cursor.length > 0;
-  const isProjectionMode = hasCursor || options.format === "json";
+  const hasMode = options.mode !== undefined;
+  const isProjectionMode = hasCursor || options.format === "json" || hasMode;
 
   if (!isProjectionMode) {
     // Default raw-ops surface (unchanged since M9-4A). Prints the raw service
@@ -177,7 +185,7 @@ export async function collectCommand(args, config) {
   // positional. Only bare positionals (not preceded by a value-expecting
   // flag) count.
   let extraPositionals = 0;
-  const knownValueFlags = new Set(["--cursor", "--format", "--limit", "--run-dir", "--cwd"]);
+  const knownValueFlags = new Set(["--cursor", "--format", "--limit", "--mode", "--run-dir", "--cwd"]);
   for (let i = 0; i < tail.length; i += 1) {
     const a = tail[i];
     if (a.startsWith("--")) {
@@ -232,6 +240,15 @@ export async function collectCommand(args, config) {
     throw new Error("collect projection mode: --format only supports json");
   }
 
+  // M12-2A: --mode is a closed set {full|compact}. compact does NOT accept a
+  // cursor (cursor is full-only); rejected here BEFORE any read/append.
+  if (options.mode !== undefined && options.mode !== "full" && options.mode !== "compact") {
+    throw new Error("collect projection mode: --mode only supports full|compact");
+  }
+  if (options.mode === "compact" && hasCursor) {
+    throw new Error("collect projection mode: --mode compact does not accept --cursor");
+  }
+
   // M11-4 CTO rework (Fix E): --limit is REJECTED in projection mode. The
   // projection layer owns pagination (8/4000/12000 caps); a user-supplied
   // limit would silently conflict with the safe continuation contract.
@@ -244,8 +261,10 @@ export async function collectCommand(args, config) {
   // M11-4 CTO rework (Fix D): projection mode ALWAYS defers the audit append
   // until projection + output validation succeed. This covers page 1 too
   // (cursor-less), so any projection/schema failure produces ZERO appends.
+  // M12-2A: thread --mode into the shared projection (compact branch).
+  const mode = options.mode === "compact" ? "compact" : "full";
   const raw = await collectRunMessages({ runId, runDir, cursor, deferAppend: true });
-  const payload = projectCollectResult(raw, { runId, cursor });
+  const payload = projectCollectResult(raw, { runId, cursor, mode });
   // Projection succeeded → safe to commit the audit.
   if (typeof raw.commitAppend === "function") {
     await raw.commitAppend();

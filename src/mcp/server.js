@@ -311,6 +311,12 @@ const RUN_COLLECT_INPUT = z.object({
   // The schema here only accepts an optional string; the trust boundary is
   // the handler's try/catch.
   cursor: z.string().optional(),
+  // M12-2A: optional projection mode (closed set). omitted ≡ "full". compact
+  // returns the last assistant verbatim text + full evidence counts in one
+  // call; compact does NOT accept a cursor (rejected in the handler before the
+  // service call). compact is NOT a semantic summary and does NOT decide
+  // whether full output is needed.
+  mode: z.enum(["full", "compact"]).optional(),
 }).strict();
 
 const COLLECTED_MESSAGE = z.object({
@@ -336,6 +342,14 @@ const RUN_COLLECT_OUTPUT = z.object({
   }),
   truncated: z.boolean(),
   nextCursor: z.string().regex(COLLECT_CURSOR_RE).max(COLLECT_CURSOR_MAX).nullable(),
+  // M12-2A compact-only fields. Optional so full output (the default and the
+  // existing machine-projection contract) carries NONE of them. compact always
+  // sets all three; a strict-schema violation collapses to `run_collect failed`.
+  // No discriminatedUnion / superRefine (SDK-compat risk): the handler/projection
+  // causal tests lock which fields appear in which variant.
+  view: z.literal("compact").optional(),
+  compactStatus: z.enum(["available", "empty", "too_large"]).optional(),
+  assistantMessageCount: z.number().int().nonnegative().optional(),
 }).strict();
 
 const RUN_COLLECT_ANNOTATIONS = {
@@ -351,7 +365,10 @@ const RUN_COLLECT_DESCRIPTION =
   "payloads). Each successful call appends one messages.collected audit event to the " +
   "transcript (not idempotent). Accepts runId and an optional opaque cursor returned " +
   "in the previous page's nextCursor to continue reading a truncated result; the run " +
-  "directory and limit are fixed by the server.";
+  "directory and limit are fixed by the server. Optional mode compact returns, in one " +
+  "call, the last assistant text verbatim (<=4000 chars) plus the full evidence counts " +
+  "from the same safe snapshot; compact takes no cursor, does no semantic summary, and " +
+  "does not decide whether full output is needed (compactStatus available|empty|too_large).";
 
 // ===== run_diagnose safe projection constants =====
 
@@ -1881,7 +1898,7 @@ export function createWaoMcpServer({
       outputSchema: RUN_COLLECT_OUTPUT,
       annotations: RUN_COLLECT_ANNOTATIONS,
     },
-    async ({ runId, cursor }) => {
+    async ({ runId, cursor, mode }) => {
       // Entire service call + projection + redaction + output validation in ONE
       // try/catch. Any failure collapses to the fixed safe text — never leak
       // SDK output-validation error, raw exception, path, or secret.
@@ -1892,12 +1909,23 @@ export function createWaoMcpServer({
       // cursor-less page 1 whose service succeeded but projection failed
       // still appended an audit event (RED-3). Now page 1 also commits zero
       // on any failure.
+      //
+      // M12-2A: compact+cursor is rejected BEFORE the service call / read /
+      // append. compact reads the same snapshot but never paginates, so a
+      // cursor is meaningless and must not reach the service. Only the fixed
+      // safe text is returned.
       try {
+        if ((mode ?? "full") === "compact" && cursor != null) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: COLLECT_ERROR_TEXT }],
+          };
+        }
         const raw = await collectService({
           runId, runDir, limit: COLLECT_LIMIT, cursor,
           deferAppend: true,
         });
-        const payload = projectCollectResult(raw, { runId, cursor });
+        const payload = projectCollectResult(raw, { runId, cursor, mode });
         // M11-8B closeout: project agentId through the SSOT and return the
         // PARSED safe object. The strict schema is the trust boundary.
         payload.agentId = safeProjectAgentId(payload.agentId);

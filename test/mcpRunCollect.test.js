@@ -72,7 +72,8 @@ test("M9-4B-01: tools/list has registry_list + run_dispatch + run_status + run_c
       const rc = tools.tools.find((t) => t.name === "run_collect");
       assert.ok(rc, "run_collect present");
       // M11-4: input now accepts an optional opaque cursor for continuation.
-      assert.deepEqual(Object.keys(rc.inputSchema.properties ?? {}), ["runId", "cursor"], "input has runId + optional cursor");
+      // M12-2A: input also accepts an optional projection mode (full|compact).
+      assert.deepEqual(Object.keys(rc.inputSchema.properties ?? {}), ["runId", "cursor", "mode"], "input has runId + optional cursor + optional mode");
       assert.equal(rc.inputSchema.additionalProperties, false, "input strict");
       // annotations: not read-only, not idempotent (appends audit event), open-world.
       assert.equal(rc.annotations.readOnlyHint, false, "readOnlyHint:false");
