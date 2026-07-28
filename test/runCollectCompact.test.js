@@ -209,7 +209,7 @@ test("M12-2A-B3: multi-page full needs several calls; compact needs ONE (motivat
 // =====================================================================
 
 test("M12-2A-C1: exact secret in last assistant text is redacted (compact available)", () => {
-  const secret = "hunter2-secret-value-xyz"; // >=8 chars, unique
+  const secret = "test-secret-c1"; // >=8 chars, unique; scan-safe marker (desensitization ALLOW)
   const raw = procResult([assistant(`result: LEAKED_SECRET=${secret} done`)]);
   const compact = projectCollectResult(raw, {
     runId: "run_c1", mode: "compact", env: { LEAKED_SECRET: secret },
@@ -574,7 +574,7 @@ test("M12-2A-J2: run_collect wire outputSchema declares bounded optional compact
 });
 
 test("M12-2A-J3: compact error returns fixed text and leaks no secret/command/path", async () => {
-  const secret = "leak-secret-m122a-j3-value"; // >=8
+  const secret = "test-secret-j3"; // >=8; scan-safe marker (desensitization ALLOW)
   let callCount = 0;
   // Service throws (simulating a projection/schema/service failure) carrying a
   // secret + path + command in its thrown detail. The handler must collapse it.
