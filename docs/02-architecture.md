@@ -974,8 +974,8 @@ src/
 │   ├── runDiagnosis.js       #   read-only run diagnosis service（M9-5A，CLI + MCP 共用）
 │   ├── runDelivery.js        #   delivery query + decision service（M9-6A，CLI + MCP 共用）
 │   ├── runStop.js            #   runaway worker stop service（M10 P0-2，CLI + MCP 共用，workspace-bound）
-│   ├── runList.js            #   workspace-bound run list service（M10 P0-3，CLI + MCP 共用）
-│   ├── runWorkspaceOwnership.js # run workspace ownership判定（M10 P0-3，runList 共用）
+│   ├── runList.js            #   workspace-bound run list service（M10 P0-3；M12-5 查询内复用 ownership proof）
+│   ├── runWorkspaceOwnership.js # run workspace ownership判定（M10 P0-3；M12-5 query-scoped proof cache）
 │   ├── runWait.js            #   long-poll 终态/活性等待 service（M10-pre3，MCP 共用，只读）
 │   ├── runAwaitResult.js     #   read-only composite：bounded wait + observation + terminal compact（M12-3，snapshot-only，advisory）
 │   ├── ownerLiveness.js      #   run liveness 投影 SSOT（M10-pre3，terminal/progress/process_only/silent，runWait/runAwaitResult 共用）

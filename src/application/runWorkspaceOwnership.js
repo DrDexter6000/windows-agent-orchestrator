@@ -41,6 +41,56 @@ export function findRunWorkspaceOwnership(events) {
 }
 
 /**
+ * Create a query-scoped workspace verifier.
+ *
+ * The authorized root is proved once. Each distinct ownership cwd is then
+ * proved at most once for the lifetime of this verifier. This preserves the
+ * existing Git-top-level and realpath checks while avoiding repeated Git
+ * subprocesses when a run inventory contains many runs from the same project.
+ *
+ * @param {string} authorizedWorkspaceRoot
+ * @param {{proveWorkspaceFn?: Function}} [opts]
+ * @returns {(events: object[]) => {authorized: true, ownershipCwd: string}}
+ */
+export function createRunWorkspaceVerifier(authorizedWorkspaceRoot, opts = {}) {
+  const prove = opts.proveWorkspaceFn ?? proveWorkspace;
+  const authorizedProof = prove(authorizedWorkspaceRoot);
+  const proofCache = new Map([
+    [authorizedWorkspaceRoot, authorizedProof],
+    [authorizedProof.root, authorizedProof],
+  ]);
+  const failedProofs = new Set();
+
+  return function verify(events) {
+    const fact = findRunWorkspaceOwnership(events);
+    if (!fact) {
+      throw new Error("missing ownership: no run.background_submitted event");
+    }
+
+    if (failedProofs.has(fact.cwd)) {
+      throw new Error("unprovable ownership workspace");
+    }
+
+    let ownershipProof = proofCache.get(fact.cwd);
+    if (!ownershipProof) {
+      try {
+        ownershipProof = prove(fact.cwd);
+      } catch {
+        failedProofs.add(fact.cwd);
+        throw new Error("unprovable ownership workspace");
+      }
+      proofCache.set(fact.cwd, ownershipProof);
+      proofCache.set(ownershipProof.root, ownershipProof);
+    }
+
+    if (!pathsMatch(ownershipProof.root, authorizedProof.root)) {
+      throw new Error("workspace mismatch: run ownership does not match authorized workspace");
+    }
+    return { authorized: true, ownershipCwd: fact.cwd };
+  };
+}
+
+/**
  * Verify that a run's workspace ownership matches the authorized root.
  *
  * Uses proveWorkspace SSOT to canonicalize both paths (rejects subdirectories,
@@ -53,17 +103,5 @@ export function findRunWorkspaceOwnership(events) {
  * @throws {Error} if ownership is missing, malformed, ambiguous, or mismatched
  */
 export function verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot) {
-  const fact = findRunWorkspaceOwnership(events);
-  if (!fact) {
-    throw new Error("missing ownership: no run.background_submitted event");
-  }
-  // Prove the ownership cwd is a real Git top-level (rejects subdirectories)
-  const ownershipProof = proveWorkspace(fact.cwd);
-  // Prove the authorized root is a real Git top-level
-  const authorizedProof = proveWorkspace(authorizedWorkspaceRoot);
-  // Compare canonical roots using the SSOT pathsMatch helper
-  if (!pathsMatch(ownershipProof.root, authorizedProof.root)) {
-    throw new Error("workspace mismatch: run ownership does not match authorized workspace");
-  }
-  return { authorized: true, ownershipCwd: fact.cwd };
+  return createRunWorkspaceVerifier(authorizedWorkspaceRoot)(events);
 }

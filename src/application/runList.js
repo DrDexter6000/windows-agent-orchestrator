@@ -12,15 +12,15 @@
 // Architectural contract:
 //   - Does NOT import src/commands/*, src/mcp/*, MCP SDK, or zod.
 //   - Does NOT import daemon (no reverse dependency).
-//   - Reuses transcript readTranscript/findState, isValidRunId, and
-//     verifyRunWorkspaceOwnership SSOT.
+//   - Reuses transcript readTranscript/findState, isValidRunId, and the
+//     query-scoped workspace verifier SSOT.
 
 import { join, resolve } from "node:path";
 import { readdirSync, existsSync } from "node:fs";
 
 import { readTranscript, findState, RUN_STATES, TERMINAL_STATES } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
-import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
+import { createRunWorkspaceVerifier } from "./runWorkspaceOwnership.js";
 
 /**
  * Scan runDir for run_*.jsonl files (excludes wf_* workflow transcripts).
@@ -80,6 +80,7 @@ function summarizeRun(runId, events, knownAgentIds, input) {
  * @param {string} [input.authorizedWorkspaceRoot] — MCP workspace binding
  * @param {string[]} [input.knownAgentIds] — for agentId validation (default [])
  * @param {Function} [input.readTranscriptFn] — test injection
+ * @param {Function} [input.createWorkspaceVerifierFn] — test injection
  * @returns {Promise<{runs: Array, matchedCount: number}>}
  *   - runs: array of {runId, agentId, state, terminal, updatedAt}
  *   - matchedCount: number of eligible runs BEFORE limit (for MCP truncation)
@@ -97,6 +98,17 @@ export async function listRuns(input) {
 
   const resolvedRunDir = resolve(runDir);
   const files = scanRunFiles(resolvedRunDir);
+  let workspaceVerifier = null;
+  if (authorizedWorkspaceRoot !== undefined) {
+    const createVerifier = input.createWorkspaceVerifierFn ?? createRunWorkspaceVerifier;
+    try {
+      workspaceVerifier = createVerifier(authorizedWorkspaceRoot);
+    } catch {
+      // Invalid/unprovable authority yields no visible runs, matching the prior
+      // per-run fail-closed behavior without repeating the same failed proof.
+      return { runs: [], matchedCount: 0 };
+    }
+  }
 
   const summaries = [];
   for (const file of files) {
@@ -113,9 +125,9 @@ export async function listRuns(input) {
     }
 
     // Workspace ownership filter (MCP path)
-    if (authorizedWorkspaceRoot !== undefined) {
+    if (workspaceVerifier) {
       try {
-        verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot);
+        workspaceVerifier(events);
       } catch {
         // Other workspace, missing/duplicate/malformed ownership — skip silently
         continue;
