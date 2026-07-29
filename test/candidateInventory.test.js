@@ -2,8 +2,8 @@
 //
 // M12-1S1: read-only candidate inventory projection for run_delivery.
 //
-// When the durable bound packaging failure is exactly `disallowed_path`, the
-// run_delivery failure projection gains a nullable `candidateInventory`:
+// An eligible retained recovery candidate gains a nullable
+// `candidateInventory` plus a closed-set `candidateKind`:
 // the candidate's ACTUAL changed paths (tracked diff vs the persisted original
 // base + non-ignored untracked files) and the subset that exceeded the original
 // allowedPaths contract. The inventory is advisory only — it never expands
@@ -96,6 +96,20 @@ function disallowedPathEvents({ repo, worktreePath, baseCommit, allowedPaths = [
     { type: "run.state_change", from: "pending", to: "running", reason: "spawned" },
     { type: "run.delivery_failed", deliveryCode, message: "changes outside allowedPaths detected" },
     { type: "run.state_change", from: "running", to: "failed", reason: "delivery_failed" },
+  ];
+}
+
+function backendFailedEvents({ repo, worktreePath, baseCommit, allowedPaths = ["src"] }) {
+  return [
+    { type: "run.background_submitted", cwd: repo, deliveryRequested: true },
+    {
+      type: "run.started", backend: "test", cwd: repo, worktreePath,
+      delivery: { mode: "git_commit_v1", baseCommit, allowedPaths },
+    },
+    { type: "run.state_change", from: null, to: "pending", reason: "created" },
+    { type: "run.state_change", from: "pending", to: "running", reason: "spawned" },
+    { type: "run.state_change", from: "running", to: "failed", reason: "backend_error" },
+    { type: "run.stop_verified", path: "_runCleanup" },
   ];
 }
 
@@ -474,6 +488,38 @@ test("M12-1S1-MCP-01: real MCP run_delivery returns schema-parsed inventory with
   }
 });
 
+test("M12-4A-MCP-01: real MCP projects a verified-quiet backend candidate with its closed-set kind", async () => {
+  const { repo, baseCommit } = await makeRepo("m124a-mcp-");
+  const runDir = await mkdtemp(join(tmpdir(), "m124a-mcp-runs-"));
+  try {
+    const wt = makeLinkedWorktree(repo, RUN_ID);
+    await writeFile(join(wt, "src", "a.js"), "const a = 42;\n");
+    seedTranscript(runDir, RUN_ID, backendFailedEvents({
+      repo,
+      worktreePath: wt,
+      baseCommit,
+    }));
+
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: repo });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_delivery", arguments: { runId: RUN_ID } });
+      assert.equal(res.isError, undefined);
+      assert.equal(res.structuredContent.candidateKind, "backend_failed");
+      assert.deepEqual(res.structuredContent.candidateInventory.actualChangedPaths, ["src/a.js"]);
+      assert.equal(res.structuredContent.candidateInventory.actualChangedTruncated, false);
+      assert.equal(res.structuredContent.deliveryAvailable, false);
+      assert.equal(res.structuredContent.deliveryFailure, null);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
 test("M12-1S1-MCP-02: malformed/unsafe service inventory collapses to null (never an error)", async () => {
   const dir = await mkdtemp(join(tmpdir(), "m12s1-mcp02-"));
   try {
@@ -604,6 +650,7 @@ test("M12-1S1-MCP-05: wait path projects the same additive field", async () => {
         terminalState: "failed", deliveryAvailable: false, deliveryRequested: true,
         deliveryRef: null, deliveryFailure: { code: "disallowed_path" },
         verification: null, acceptance: null, candidateInventory: inventory,
+        candidateKind: "disallowed_scope",
       }),
     });
     const client = await buildInMemoryClient(server);
@@ -613,6 +660,7 @@ test("M12-1S1-MCP-05: wait path projects the same additive field", async () => {
       const parsed = res.structuredContent;
       assert.equal(parsed.readiness, "packaging_failed");
       assert.deepEqual(parsed.candidateInventory, inventory);
+      assert.equal(parsed.candidateKind, "disallowed_scope");
     } finally {
       await client.close();
       await server.close();

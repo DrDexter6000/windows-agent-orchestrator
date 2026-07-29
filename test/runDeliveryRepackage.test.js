@@ -188,9 +188,273 @@ async function setupDisallowedScenario({
   return { repo, baseCommit, runDir, worktreePath };
 }
 
+function backendFailureEvents({
+  repo,
+  worktreePath,
+  baseCommit,
+  reason = "backend_error",
+  allowedPaths = ["src"],
+  verificationCommands = ["npm test"],
+  extraEvents = [],
+  includeStopVerified = true,
+}) {
+  return [
+    { type: "run.background_submitted", cwd: repo, deliveryRequested: true },
+    {
+      type: "run.started",
+      backend: "test",
+      cwd: repo,
+      worktreePath,
+      worktreeBranch: `wao/${RUN_ID}`,
+      delivery: {
+        mode: "git_commit_v1",
+        baseCommit,
+        allowedPaths,
+        verificationCommands,
+      },
+    },
+    { type: "run.state_change", from: null, to: "pending", reason: "created" },
+    { type: "run.state_change", from: "pending", to: "running", reason: "spawned" },
+    ...extraEvents,
+    { type: "run.state_change", from: "running", to: "failed", reason },
+    ...(includeStopVerified ? [{ type: "run.stop_verified", path: "_runCleanup" }] : []),
+  ];
+}
+
+async function setupBackendFailureScenario({
+  reason = "backend_error",
+  extraEvents = [],
+  includeStopVerified = true,
+} = {}) {
+  const { repo, baseCommit } = await makeRepo("m124a-repo-");
+  const runDir = await mkdtemp(join(tmpdir(), "m124a-runs-"));
+  const worktreePath = makeLinkedWorktree(repo);
+  await writeFile(join(worktreePath, "src", "a.js"), "const a = 42;\n");
+  seedTranscript(runDir, RUN_ID, backendFailureEvents({
+    repo,
+    worktreePath,
+    baseCommit,
+    reason,
+    extraEvents,
+    includeStopVerified,
+  }));
+  return { repo, baseCommit, runDir, worktreePath };
+}
+
 function readEvents(runDir, runId = RUN_ID) {
   return readTranscript(join(runDir, `${runId}.jsonl`));
 }
+
+test("M12-4A-RED-OK: backend-failed retained candidate is projected and repackaged without a model", async () => {
+  for (const reason of ["backend_error", "backend_stream_ended"]) {
+    const { repo, baseCommit, runDir } = await setupBackendFailureScenario({ reason });
+    try {
+      const before = await getRunDelivery({
+        runId: RUN_ID,
+        runDir,
+        authorizedWorkspaceRoot: repo,
+        computeInventoryFn: computeCandidateInventory,
+      });
+      assert.equal(before.terminalState, "failed");
+      assert.equal(before.deliveryAvailable, false);
+      assert.equal(before.deliveryFailure, null);
+      assert.equal(before.candidateKind, "backend_failed");
+      assert.deepEqual(before.candidateInventory.actualChangedPaths, ["src/a.js"]);
+      assert.equal(before.candidateInventory.actualChangedTruncated, false);
+
+      const result = await runDeliveryRepackage({
+        runId: RUN_ID,
+        runDir,
+        allowedPaths: ["src"],
+        authorizedWorkspaceRoot: repo,
+        resolveDeliveryCommitFn: resolveDeliveryCommit,
+        verifyDeliveryFn: passedVerifier,
+        computeInventoryFn: computeCandidateInventory,
+      });
+      assert.equal(result.recoveryKind, "backend_failed");
+      assert.equal(result.verificationStatus, "passed");
+
+      const retry = await runDeliveryRepackage({
+        runId: RUN_ID,
+        runDir,
+        allowedPaths: ["src"],
+        authorizedWorkspaceRoot: repo,
+        resolveDeliveryCommitFn: resolveDeliveryCommit,
+        verifyDeliveryFn: passedVerifier,
+        computeInventoryFn: computeCandidateInventory,
+      });
+      assert.equal(retry.deliveryCommit, result.deliveryCommit);
+      assert.equal(retry.created, false);
+      assert.equal(retry.verificationRecorded, false);
+      assert.equal(retry.recoveryKind, "backend_failed");
+
+      const events = await readEvents(runDir);
+      const provenance = events.find((event) => event.type === "run.delivery_repackaged");
+      assert.equal(provenance.recoveryKind, "backend_failed");
+      assert.equal(events.filter((event) => event.type === "run.delivery_created").length, 1);
+      assert.equal(events.filter((event) => event.type === "run.delivery_verification_passed").length, 1);
+      assert.equal(events.filter(
+        (event) => event.type === "run.state_change" && event.to === "failed",
+      ).length, 1);
+
+      const after = await getRunDelivery({
+        runId: RUN_ID,
+        runDir,
+        authorizedWorkspaceRoot: repo,
+        computeInventoryFn: computeCandidateInventory,
+      });
+      assert.equal(after.deliveryAvailable, true);
+      assert.equal(after.deliveryRef.baseCommit, baseCommit);
+      assert.equal(after.verification.status, "passed");
+
+      const acceptance = await decideRunDelivery({
+        runId: RUN_ID,
+        runDir,
+        decision: "accepted",
+        reason: "backend recovery reviewed",
+      });
+      assert.equal(acceptance.accepted, true);
+      const finalEvents = await readEvents(runDir);
+      assert.equal(finalEvents.filter((event) => event.type === "run.delivery_accepted").length, 1);
+    } finally {
+      await cleanupDir(repo);
+      await cleanupDir(runDir);
+    }
+  }
+});
+
+test("M12-4A-RED-GATES: backend candidate requires quiet stop, exact base, complete non-empty diff, and no conflicts", async () => {
+  const cases = [
+    {
+      name: "missing stop_verified",
+      setup: { includeStopVerified: false },
+    },
+    {
+      name: "stop_unverified",
+      setup: { extraEvents: [{ type: "run.stop_unverified", outcome: "still_running" }] },
+    },
+    {
+      name: "isolation conflict",
+      setup: { extraEvents: [{ type: "run.isolation_violation" }] },
+    },
+    {
+      name: "failed scorecard",
+      setup: { extraEvents: [{ type: "scorecard.checked", passed: false }] },
+    },
+    {
+      name: "orphan recovery provenance",
+      setup: {
+        extraEvents: [{
+          type: "run.delivery_repackaged",
+          source: "packaged",
+          recoveryKind: "backend_failed",
+        }],
+      },
+    },
+  ];
+
+  for (const item of cases) {
+    const { repo, runDir } = await setupBackendFailureScenario(item.setup);
+    try {
+      const view = await getRunDelivery({
+        runId: RUN_ID,
+        runDir,
+        authorizedWorkspaceRoot: repo,
+        computeInventoryFn: computeCandidateInventory,
+      });
+      assert.equal(view.candidateInventory ?? null, null, item.name);
+      assert.equal(view.candidateKind ?? null, null, item.name);
+      await assert.rejects(
+        () => runDeliveryRepackage({
+          runId: RUN_ID,
+          runDir,
+          allowedPaths: ["src"],
+          authorizedWorkspaceRoot: repo,
+          resolveDeliveryCommitFn: resolveDeliveryCommit,
+          verifyDeliveryFn: passedVerifier,
+          computeInventoryFn: computeCandidateInventory,
+        }),
+        /runDeliveryRepackage/,
+        item.name,
+      );
+    } finally {
+      await cleanupDir(repo);
+      await cleanupDir(runDir);
+    }
+  }
+
+  const drift = await setupBackendFailureScenario();
+  try {
+    git(["commit", "--allow-empty", "-m", "advance"], drift.worktreePath);
+    const view = await getRunDelivery({
+      runId: RUN_ID,
+      runDir: drift.runDir,
+      authorizedWorkspaceRoot: drift.repo,
+      computeInventoryFn: computeCandidateInventory,
+    });
+    assert.equal(view.candidateInventory ?? null, null);
+    await assert.rejects(() => runDeliveryRepackage({
+      runId: RUN_ID,
+      runDir: drift.runDir,
+      allowedPaths: ["src"],
+      authorizedWorkspaceRoot: drift.repo,
+      resolveDeliveryCommitFn: resolveDeliveryCommit,
+      verifyDeliveryFn: passedVerifier,
+      computeInventoryFn: computeCandidateInventory,
+    }), /base|HEAD|candidate/i);
+  } finally {
+    await cleanupDir(drift.repo);
+    await cleanupDir(drift.runDir);
+  }
+
+  const invalidInventory = await setupBackendFailureScenario();
+  try {
+    for (const inventory of [
+      {
+        originalAllowedPaths: ["src"],
+        originalAllowedCount: 1,
+        originalAllowedTruncated: false,
+        actualChangedPaths: [],
+        actualChangedCount: 0,
+        actualChangedTruncated: false,
+        disallowedPaths: [],
+        disallowedCount: 0,
+        disallowedTruncated: false,
+      },
+      {
+        originalAllowedPaths: ["src"],
+        originalAllowedCount: 1,
+        originalAllowedTruncated: false,
+        actualChangedPaths: ["src/a.js"],
+        actualChangedCount: 257,
+        actualChangedTruncated: true,
+        disallowedPaths: [],
+        disallowedCount: 0,
+        disallowedTruncated: false,
+      },
+    ]) {
+      const view = await getRunDelivery({
+        runId: RUN_ID,
+        runDir: invalidInventory.runDir,
+        authorizedWorkspaceRoot: invalidInventory.repo,
+        computeInventoryFn: () => inventory,
+      });
+      assert.equal(view.candidateInventory ?? null, null);
+      await assert.rejects(() => runDeliveryRepackage({
+        runId: RUN_ID,
+        runDir: invalidInventory.runDir,
+        allowedPaths: ["src"],
+        authorizedWorkspaceRoot: invalidInventory.repo,
+        resolveDeliveryCommitFn: resolveDeliveryCommit,
+        verifyDeliveryFn: passedVerifier,
+        computeInventoryFn: () => inventory,
+      }), /inventory|candidate/i);
+    }
+  } finally {
+    await cleanupDir(invalidInventory.repo);
+    await cleanupDir(invalidInventory.runDir);
+  }
+});
 
 // ============================================================
 // Happy path: success + run_delivery becomes reviewable

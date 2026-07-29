@@ -21,6 +21,7 @@ import {
   findLastEventSeq,
   validateDeliveryFacts,
   findValidRepackageProvenance,
+  classifyRecoveryCandidate,
   JsonlTranscript,
   TERMINAL_STATES,
 } from "../transcript.js";
@@ -487,6 +488,44 @@ function _computeSafeCandidateInventory(events, runId, authorizedWorkspaceRoot, 
   }
 }
 
+function _computeSafeBackendCandidateInventory(
+  events,
+  runId,
+  authorizedWorkspaceRoot,
+  computeInventoryFn,
+) {
+  if (classifyRecoveryCandidate(events, runId) !== "backend_failed") return null;
+  const boundEvents = events.filter((event) => event.runId === runId);
+  if (boundEvents.some((event) => (
+    event.type === "run.delivery_repackaged"
+    || event.type === "run.delivery_created"
+    || event.type === "run.delivery_verification_passed"
+    || event.type === "run.delivery_verification_failed"
+    || event.type === "run.delivery_verification_unavailable"
+    || event.type === "run.delivery_accepted"
+    || event.type === "run.delivery_rejected"
+  ))) {
+    return null;
+  }
+  const inventory = _computeSafeCandidateInventory(
+    events,
+    runId,
+    authorizedWorkspaceRoot,
+    computeInventoryFn,
+  );
+  if (!inventory) return null;
+  if (
+    inventory.originalAllowedTruncated
+    || inventory.actualChangedTruncated
+    || inventory.disallowedTruncated
+    || inventory.actualChangedCount === 0
+    || inventory.actualChangedPaths.length === 0
+  ) {
+    return null;
+  }
+  return inventory;
+}
+
 // ===== Service: getRunDelivery (read-only point-in-time query) =====
 
 /**
@@ -517,12 +556,27 @@ export async function getRunDelivery({ runId, runDir, authorizedWorkspaceRoot, c
   // event) must fail closed for the point-in-time query too — never echo a raw
   // ref/path. Fixed message; no dynamic ref content is leaked.
   if (view.ambiguous) throw new Error("delivery facts ambiguous");
-  // M12-1S1: additive nullable candidateInventory on the bound disallowed_path
-  // failure ONLY. Other failure codes never gain the field.
+  // Candidate inventory is additive and authority-bound. The original
+  // disallowed_path recovery and M12-4A backend-failure recovery share the
+  // same exact-base inventory proof; every other state omits the fields.
   if (view.deliveryFailure?.code === "disallowed_path") {
     view.candidateInventory = _computeSafeCandidateInventory(
       events, runId, authorizedWorkspaceRoot, computeInventoryFn,
     );
+    view.candidateKind = view.candidateInventory ? "disallowed_scope" : null;
+  } else if (
+    view.deliveryAvailable === false
+    && view.deliveryFailure === null
+    && view.deliveryRequested === true
+    && view.terminalState === "failed"
+  ) {
+    const candidateInventory = _computeSafeBackendCandidateInventory(
+      events, runId, authorizedWorkspaceRoot, computeInventoryFn,
+    );
+    if (candidateInventory) {
+      view.candidateInventory = candidateInventory;
+      view.candidateKind = "backend_failed";
+    }
   }
   return view;
 }
@@ -577,12 +631,25 @@ function _buildReadinessResult(runId, events, terminalState, readiness, waitRetu
     verification: view.verification ?? null,
     acceptance: view.acceptance ?? null,
   };
-  // M12-1S1: additive nullable candidateInventory on the bound disallowed_path
-  // failure ONLY (same proof gates as the point-in-time query).
+  // Same candidate projection and proof gates as the point-in-time query.
   if (result.deliveryFailure?.code === "disallowed_path") {
     result.candidateInventory = _computeSafeCandidateInventory(
       events, runId, inventoryOpts.authorizedWorkspaceRoot, inventoryOpts.computeInventoryFn,
     );
+    result.candidateKind = result.candidateInventory ? "disallowed_scope" : null;
+  } else if (
+    result.deliveryAvailable === false
+    && result.deliveryFailure === null
+    && result.deliveryRequested === true
+    && result.terminalState === "failed"
+  ) {
+    const candidateInventory = _computeSafeBackendCandidateInventory(
+      events, runId, inventoryOpts.authorizedWorkspaceRoot, inventoryOpts.computeInventoryFn,
+    );
+    if (candidateInventory) {
+      result.candidateInventory = candidateInventory;
+      result.candidateKind = "backend_failed";
+    }
   }
   return result;
 }
@@ -598,8 +665,8 @@ function _buildReadinessResult(runId, events, terminalState, readiness, waitRetu
  * @param {string} input.runDir — runs/ directory (host-owned)
  * @param {number} input.waitMs — integer in [DELIVERY_WAIT_MS_MIN, DELIVERY_WAIT_MS_MAX]
  * @param {string} [input.authorizedWorkspaceRoot] — MCP workspace binding
- * @param {Function} [input.computeInventoryFn] — M12-1S1: injectable candidate
- *   inventory reader (attached only on a bound disallowed_path failure)
+ * @param {Function} [input.computeInventoryFn] — injectable candidate
+ *   inventory reader for an eligible recovery candidate
  * @param {Function} [input.readTranscriptFn] — injectable for testing
  * @param {Function} [input.sleepFn] — injectable sleep (testing)
  * @param {Function} [input.nowFn] — injectable clock (testing)
@@ -644,8 +711,8 @@ export async function getRunDeliveryReadiness({
   }
   let terminalState = findState(events);
   let readiness = projectDeliveryReadiness(events, runId);
-  // M12-1S1: candidate-inventory authority/reader, threaded into every
-  // readiness result build (attached only on a bound disallowed_path failure).
+  // Candidate-inventory authority/reader, threaded into every readiness
+  // result build and consumed only by an eligible recovery candidate.
   const inventoryOpts = { authorizedWorkspaceRoot, computeInventoryFn };
 
   // Non-waiting readiness settles immediately: reviewable, packaging_failed,

@@ -246,6 +246,7 @@ test("M12-3B-RED-05: packaging failure remains actionable and performs zero revi
         deliveryRequested: true,
         deliveryFailure: { code: "base_commit_mismatch" },
         candidateInventory: null,
+        candidateKind: null,
         readiness: "packaging_failed",
         waitReturnedEarly: true,
       }),

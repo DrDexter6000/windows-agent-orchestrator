@@ -1474,7 +1474,7 @@ test("M12-0-05: SKILL 把 certification 定位为 advisory evidence，删除 per
 // M12-0-06: M11 stays closed complete (Tester token efficiency retired/deferred
 // out of M11); M12 stays in progress. Implemented slices replace their planned
 // labels while the remaining slices stay explicitly planned/unimplemented.
-test("M12-0-06: roadmap 标 M11 ✅ 完成；M12-1/2A/3 已实现且其余 slices 仍 planned", () => {
+test("M12-0-06: roadmap 标 M11 ✅ 完成；M12-1/2A/3/4A 已实现且其余 slices 仍 planned", () => {
   const roadmap = read("docs/roadmap.md");
   const m11Row = roadmap.split("\n").find((l) => /^\|\s*M11\s*\|/.test(l)) || "";
   assert.ok(m11Row, "roadmap 含 M11 行");
@@ -1494,6 +1494,10 @@ test("M12-0-06: roadmap 标 M11 ✅ 完成；M12-1/2A/3 已实现且其余 slice
     && /run_await_result/.test(m12Row)
     && /run_delivery_review_bundle/.test(m12Row),
   "M12-3A/B 两个组合工具必须标为已实现");
+  assert.ok(/M12-4A 已实现/.test(m12Row)
+    && /backend_failed/.test(m12Row)
+    && /run_delivery_repackage/.test(m12Row),
+  "M12-4A backend failure retained-candidate recovery 必须标为已实现");
   // Remaining planned slices — exact concepts, no invented tool names.
   assert.ok(/deterministic evidence\/handoff aggregation|evidence\/handoff aggregation/i.test(m12Row),
     "M12 计划 deterministic evidence/handoff aggregation");
@@ -1503,6 +1507,20 @@ test("M12-0-06: roadmap 标 M11 ✅ 完成；M12-1/2A/3 已实现且其余 slice
     "M12 计划 factual readiness/history projection");
   assert.ok(/planned|unimplemented|规划|未实现|计划/i.test(m12Row),
     "M12 其余 slices 必须标 planned/unimplemented");
+});
+
+test("M12-4A docs: backend recovery is model-free and preserves Lead scope/decision authority", () => {
+  const skill = read("SKILL.md");
+  const usage = read("docs/usage.md");
+  const arch = read("docs/02-architecture.md");
+  const troubleshooting = read("docs/troubleshooting.md");
+  for (const [name, text] of Object.entries({ skill, usage, arch, troubleshooting })) {
+    assert.ok(/backend_failed/.test(text), `${name} 必须记录 backend_failed candidate kind`);
+  }
+  assert.ok(/不调用 model|no model/i.test(usage), "usage 必须明确恢复不调用模型");
+  assert.ok(/Lead.*allowedPaths|allowedPaths.*Lead/i.test(usage), "usage 必须保留 Lead scope 权威");
+  assert.ok(/不自动.*decision|不作 decision|不自动 accept\/reject/i.test(arch),
+    "architecture 必须保留 Lead decision 权威");
 });
 
 test("M12-3B docs: review bundle is mechanical, one-page, and preserves Lead decisions + atomic tools", () => {

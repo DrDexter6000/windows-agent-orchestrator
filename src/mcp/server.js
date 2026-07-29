@@ -79,7 +79,7 @@ import {
 import { isValidRunId } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, UNKNOWN_PACKAGING_CODE } from "../deliveryFailureCodes.js";
 import { DIAGNOSIS_CATEGORIES } from "../diagnosis.js";
-import { RUN_STATES } from "../transcript.js";
+import { RUN_STATES, RECOVERY_CANDIDATE_KINDS } from "../transcript.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 import {
   isValidCanonicalAgentId,
@@ -497,11 +497,11 @@ const PACKAGING_FAILURE_CODE_ENUM = z.enum([...PACKAGING_FAILURE_CODES, UNKNOWN_
 // parses it. The real-MCP behavior test (CLOSEOUT-C3) proves success and
 // failure responses never mix shape.
 
-// M12-1S1: additive nullable candidate inventory on the bound disallowed_path
-// packaging failure ONLY. Bounded on the wire (maxItems/maxLength), strict
-// keys, safe repo-relative paths — never absolute paths, worktree locations,
-// or Git internals.
+// Additive nullable inventory for a recognized retained recovery candidate.
+// Bounded on the wire (maxItems/maxLength), strict keys, safe repo-relative
+// paths — never absolute paths, worktree locations, or Git internals.
 const CANDIDATE_INVENTORY_PATH_SCHEMA = z.array(z.string().min(1).max(512)).max(INVENTORY_PATHS_LIMIT);
+const RECOVERY_CANDIDATE_KIND_SCHEMA = z.enum(RECOVERY_CANDIDATE_KINDS);
 const CANDIDATE_INVENTORY_SCHEMA = z.object({
   originalAllowedPaths: CANDIDATE_INVENTORY_PATH_SCHEMA,
   originalAllowedCount: z.number().int().nonnegative(),
@@ -598,10 +598,11 @@ const RUN_DELIVERY_OUTPUT = z.object({
   decisionType: DECISION_TYPE_ENUM.nullable(),
   // Failure-only field (non-null iff deliveryAvailable === false).
   deliveryFailure: z.object({ code: PACKAGING_FAILURE_CODE_ENUM }).nullable(),
-  // M12-1S1: additive nullable candidate inventory. Non-null ONLY when
-  // deliveryFailure.code === "disallowed_path" AND every ownership/proof/read
-  // gate passed; otherwise null (Lead verifies manually — never an auto stop).
+  // Additive nullable retained-candidate inventory + closed-set kind. Non-null
+  // only after the application service proves every ownership/base/fact/read
+  // condition; otherwise null (Lead verifies manually — never an auto stop).
   candidateInventory: CANDIDATE_INVENTORY_SCHEMA.nullable(),
+  candidateKind: RECOVERY_CANDIDATE_KIND_SCHEMA.nullable(),
   // M11-10: readiness handshake fields, present iff the caller supplied waitMs.
   // readiness is the strict closed-set projection; waitReturnedEarly is true iff
   // the readiness settled (or was never a waiting state) before the deadline.
@@ -630,8 +631,9 @@ const RUN_DELIVERY_DESCRIPTION =
   "A pending-at-deadline outcome is returned as a truthful fact, never an error; the tool " +
   "never stop/retry/accept/rejects. readiness closed set: " +
   DELIVERY_READINESS_STATES.join(", ") + ". " +
-  "M12-1S1: on a bound disallowed_path packaging failure, an additive nullable " +
-  "candidateInventory reports bounded safe original-allowed/actual/disallowed repo-relative paths " +
+  "M12-1S1/M12-4A: on a recognized retained recovery candidate, additive nullable " +
+  "candidateKind/candidateInventory report the closed-set origin plus bounded safe " +
+  "original-allowed/actual/disallowed repo-relative paths " +
   `(up to ${INVENTORY_PATHS_LIMIT} each, with exact counts and truncation flags). ` +
   "It is advisory only (null = verify manually) — it never expands scope, " +
   "repackages, stops, retries, or decides.";
@@ -739,6 +741,21 @@ function buildRunDeliveryPayload(runId, view) {
     const deliveryRequested = typeof view.deliveryRequested === "boolean"
       ? view.deliveryRequested
       : failure !== null;
+    let candidateInventory = null;
+    let candidateKind = null;
+    if (
+      failure?.code === "disallowed_path"
+      && view.candidateKind === "disallowed_scope"
+    ) {
+      candidateInventory = safeProjectCandidateInventory(view.candidateInventory);
+      candidateKind = candidateInventory ? "disallowed_scope" : null;
+    } else if (
+      failure === null
+      && view.candidateKind === "backend_failed"
+    ) {
+      candidateInventory = safeProjectCandidateInventory(view.candidateInventory);
+      candidateKind = candidateInventory ? "backend_failed" : null;
+    }
     return {
       runId,
       deliveryAvailable: false,
@@ -755,12 +772,11 @@ function buildRunDeliveryPayload(runId, view) {
       acceptanceStatus: null,
       decisionType: null,
       deliveryFailure: failure ? { code: failure.code ?? "unknown" } : null,
-      // M12-1S1: additive nullable candidate inventory, projected ONLY on the
-      // bound disallowed_path failure. Any malformed/unsafe service value
-      // collapses to null — never an error, never partial truth.
-      candidateInventory: failure && failure.code === "disallowed_path"
-        ? safeProjectCandidateInventory(view.candidateInventory)
-        : null,
+      // Additive candidate inventory is projected only for a recognized
+      // recovery kind. Any malformed/unsafe service value collapses to null,
+      // never an error or partial truth.
+      candidateInventory,
+      candidateKind,
     };
   }
 
@@ -825,6 +841,7 @@ function buildRunDeliveryPayload(runId, view) {
     deliveryFailure: null,
     // M12-1S1: success views never carry the failure-only inventory.
     candidateInventory: null,
+    candidateKind: null,
   };
 }
 
@@ -880,6 +897,7 @@ const RUN_DELIVERY_REPACKAGE_OUTPUT = z.object({
   deliveryCommit: COMMIT_HASH_SCHEMA,
   verificationStatus: z.enum(["passed", "failed", "unavailable"]),
   source: z.enum(["packaged", "recovered"]),
+  recoveryKind: RECOVERY_CANDIDATE_KIND_SCHEMA,
   created: z.boolean(),
 }).strict();
 
@@ -891,7 +909,8 @@ const RUN_DELIVERY_REPACKAGE_ANNOTATIONS = {
 };
 
 const RUN_DELIVERY_REPACKAGE_DESCRIPTION =
-  "Re-package a delivery run that terminally failed with packaging code disallowed_path, " +
+  "Re-package a retained delivery candidate after either a disallowed_path packaging failure " +
+  "or an eligible verified-quiet backend failure, " +
   "reusing the original run's persisted worktree, base commit, and verification config (no " +
   "model, no worker resume, no path inference, no verification override). The Lead's " +
   "allowedPaths must include the original scope and cover every actual changed path; it is " +
@@ -2891,12 +2910,16 @@ export function createWaoMcpServer({
           throw new Error("bad verificationStatus");
         }
         if (!["packaged", "recovered"].includes(result.source)) throw new Error("bad source");
+        if (!RECOVERY_CANDIDATE_KINDS.includes(result.recoveryKind)) {
+          throw new Error("bad recoveryKind");
+        }
         if (typeof result.created !== "boolean") throw new Error("created not boolean");
         const payload = {
           runId,
           deliveryCommit,
           verificationStatus: result.verificationStatus,
           source: result.source,
+          recoveryKind: result.recoveryKind,
           created: result.created,
         };
         const parsed = RUN_DELIVERY_REPACKAGE_OUTPUT.parse(payload);

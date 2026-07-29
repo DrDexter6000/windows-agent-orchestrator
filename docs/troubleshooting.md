@@ -325,6 +325,13 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **修复**：以 `docs/team-roles.md` 为权威，**两个文件都同步**。改 example 后复制到 agents.json（反之亦然）
 - **状态**：决策 0008 已把 example 对齐 team-roles；agents.json 也已跟齐（2026-06-24 验证）
 
+### 7.10 backend 最后失败，但 retained worktree 里已有候选改动
+
+- **症状**：delivery run 因 `backend_error` 或 `backend_stream_ended` 终态失败，没有 DeliveryRef；但 worker 在隔离 worktree 已写入文件。
+- **先查事实**：调用 `run_delivery`。只有返回 `candidateKind:"backend_failed"` 且 `candidateInventory` 完整非空，才表示 WAO 已证明 runtime quiet、exact base、workspace ownership 和候选清单；null 不是“无成果”，而是需由 Lead 人工核实。
+- **恢复**：Lead 审查 inventory 后明确提供完整 `allowedPaths`，调用 `run_delivery_repackage`。它不调用模型、不恢复 provider session，只在原 worktree 机械重算范围、打包并运行原验证声明。
+- **裁决**：重封装后仍逐文件审查，并由 Lead 单独 accept/reject。WAO 不判断候选语义、不自动扩域、不自动重试；缺 `run.stop_verified`、HEAD 漂移、冲突事件、空/截断 inventory 均不提供该恢复路径。
+
 ---
 
 ## 8. 新增条目（模板）

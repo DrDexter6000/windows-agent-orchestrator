@@ -32,6 +32,17 @@ const DELIVERY_VERIFICATION_OUTCOME_TYPES = new Set([
   "run.delivery_verification_unavailable",
 ]);
 const DELIVERY_VERIFICATION_OUTCOMES = new Set(["passed", "failed", "unavailable"]);
+export const RECOVERY_CANDIDATE_KINDS = Object.freeze([
+  "disallowed_scope",
+  "backend_failed",
+]);
+const BACKEND_RECOVERY_REASONS = new Set(["backend_error", "backend_stream_ended"]);
+const BACKEND_RECOVERY_CONFLICT_TYPES = new Set([
+  "run.isolation_violation",
+  "run.budget_exceeded",
+  "run.timed_out",
+  "run.aborted",
+]);
 
 function _sameDeliveryIdentity(left, right, runId) {
   return Boolean(
@@ -73,6 +84,44 @@ function _verificationOutcomeFromType(type) {
 }
 
 /**
+ * Classify the durable origin of a model-free recovery.
+ *
+ * Pure transcript projection only: it never reads Git or decides whether a
+ * candidate is semantically acceptable. The application layer adds workspace,
+ * exact-base, and complete-inventory proof before exposing or packaging a
+ * backend-failed candidate.
+ *
+ * @param {object[]} events
+ * @param {string} runId
+ * @returns {"disallowed_scope"|"backend_failed"|null}
+ */
+export function classifyRecoveryCandidate(events, runId) {
+  if (!Array.isArray(events) || typeof runId !== "string" || runId.length === 0) return null;
+  const bound = events.filter((event) => event && event.runId === runId);
+  const failures = bound.filter((event) => event.type === "run.delivery_failed");
+  if (failures.length === 1 && failures[0].deliveryCode === "disallowed_path") {
+    return "disallowed_scope";
+  }
+  if (failures.length !== 0) return null;
+
+  const terminalTransitions = bound.filter(
+    (event) => event.type === "run.state_change" && TERMINAL_STATES.includes(event.to),
+  );
+  if (
+    terminalTransitions.length !== 1
+    || terminalTransitions[0].to !== "failed"
+    || !BACKEND_RECOVERY_REASONS.has(terminalTransitions[0].reason)
+  ) {
+    return null;
+  }
+  if (!bound.some((event) => event.type === "run.stop_verified")) return null;
+  if (bound.some((event) => event.type === "run.stop_unverified")) return null;
+  if (bound.some((event) => BACKEND_RECOVERY_CONFLICT_TYPES.has(event.type))) return null;
+  if (bound.some((event) => event.type === "scorecard.checked" && event.passed === false)) return null;
+  return "backend_failed";
+}
+
+/**
  * Return the one valid recovery provenance for a created DeliveryRef, or null.
  * This is the shared durable-chain authority for readiness and Lead acceptance.
  */
@@ -81,10 +130,8 @@ export function findValidRepackageProvenance(events, runId, createdRef) {
   if (!Array.isArray(createdRef.changedFiles) || createdRef.changedFiles.length === 0) return null;
   if (!createdRef.changedFiles.every((p) => isValidRepoRelativePath(p))) return null;
 
-  const failures = events.filter(
-    (e) => e && e.type === "run.delivery_failed" && e.runId === runId,
-  );
-  if (failures.length !== 1 || failures[0].deliveryCode !== "disallowed_path") return null;
+  const recoveryKind = classifyRecoveryCandidate(events, runId);
+  if (!recoveryKind) return null;
 
   const provenance = events.filter(
     (e) => e && e.type === "run.delivery_repackaged" && e.runId === runId,
@@ -93,6 +140,12 @@ export function findValidRepackageProvenance(events, runId, createdRef) {
   const event = provenance[0];
   if (!_sameDeliveryIdentity(event.delivery, createdRef, runId)) return null;
   if (event.source !== "packaged" && event.source !== "recovered") return null;
+  // Older disallowed_path recovery events predate recoveryKind. Preserve those
+  // durable chains, while requiring every backend-failed provenance to carry
+  // the explicit closed-set kind.
+  const eventKind = event.recoveryKind
+    ?? (recoveryKind === "disallowed_scope" ? "disallowed_scope" : null);
+  if (eventKind !== recoveryKind) return null;
   const approved = _normalizeApprovedPaths(event.approvedAllowedPaths);
   if (!approved) return null;
   const original = _originalAllowedPaths(events, runId);
@@ -364,11 +417,18 @@ export class JsonlTranscript {
    * against Git exact objects. Packaging/verification happen OUTSIDE this lock
    * (contract #5); only the short read/validate/CAS-append is lock-scoped.
    *
-   * @param {{delivery: object, approvedAllowedPaths: string[], source: "packaged"|"recovered"}} input
+   * @param {{delivery: object, approvedAllowedPaths: string[],
+   *   source: "packaged"|"recovered",
+   *   recoveryKind?: "disallowed_scope"|"backend_failed"}} input
    * @returns {Promise<{created:true, ref:object}|{created:false, ref:object}>}
    * @throws {Error} if the candidate DeliveryRef is malformed/non-canonical
    */
-  async tryAppendRepackageCreated({ delivery, approvedAllowedPaths, source } = {}) {
+  async tryAppendRepackageCreated({
+    delivery,
+    approvedAllowedPaths,
+    source,
+    recoveryKind,
+  } = {}) {
     await mkdir(dirname(this.filePath), { recursive: true });
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
@@ -415,6 +475,12 @@ export class JsonlTranscript {
       if (source !== "packaged" && source !== "recovered") {
         throw new Error("tryAppendRepackageCreated: source must be \"packaged\" or \"recovered\"");
       }
+      const durableRecoveryKind = classifyRecoveryCandidate(events, this.context.runId);
+      const effectiveRecoveryKind = recoveryKind
+        ?? (durableRecoveryKind === "disallowed_scope" ? "disallowed_scope" : null);
+      if (!durableRecoveryKind || effectiveRecoveryKind !== durableRecoveryKind) {
+        throw new Error("tryAppendRepackageCreated: recoveryKind does not match durable recovery facts");
+      }
       const approved = _normalizeApprovedPaths(approvedAllowedPaths);
       if (!approved) {
         throw new Error("tryAppendRepackageCreated: approvedAllowedPaths must be canonical, sorted, and unique");
@@ -438,7 +504,12 @@ export class JsonlTranscript {
         ...this.redact({ delivery }), ts, seq: baseSeq + 1, ...ctx, type: "run.delivery_created",
       };
       const provenanceEvent = {
-        ...this.redact({ delivery, approvedAllowedPaths: approved, source }),
+        ...this.redact({
+          delivery,
+          approvedAllowedPaths: approved,
+          source,
+          recoveryKind: effectiveRecoveryKind,
+        }),
         ts, seq: baseSeq + 2, ...ctx, type: "run.delivery_repackaged",
       };
       await appendFile(this.filePath, `${JSON.stringify(createdEvent)}\n${JSON.stringify(provenanceEvent)}\n`, "utf8");

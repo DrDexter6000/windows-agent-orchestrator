@@ -60,6 +60,7 @@ function goodServiceResult(runId) {
     source: "packaged",
     created: true,
     verificationRecorded: true,
+    recoveryKind: "disallowed_scope",
   };
 }
 
@@ -191,12 +192,16 @@ test("M12-1S2-M4: bound success → bounded structured output; authorizedWorkspa
       assert.equal(r.isError, undefined, "success");
       const sc = r.structuredContent;
       // Bounded field set — no worktreePath / commands / stderr / reason leak.
-      assert.deepEqual(Object.keys(sc).sort(), ["created", "deliveryCommit", "runId", "source", "verificationStatus"]);
+      assert.deepEqual(
+        Object.keys(sc).sort(),
+        ["created", "deliveryCommit", "recoveryKind", "runId", "source", "verificationStatus"],
+      );
       assert.equal(sc.runId, "run_m4");
       assert.match(sc.deliveryCommit, /^[0-9a-f]{40}$/, "canonical commit only");
       assert.equal(sc.verificationStatus, "passed");
       assert.equal(sc.source, "packaged");
       assert.equal(sc.created, true);
+      assert.equal(sc.recoveryKind, "disallowed_scope");
       // The bound workspace root was threaded into the service call (canonical
       // forward-slash form from proveWorkspace — compare normalized, not raw dir).
       assert.equal(calls.length, 1);

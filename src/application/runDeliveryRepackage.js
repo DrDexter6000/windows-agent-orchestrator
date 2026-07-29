@@ -45,9 +45,9 @@ import {
   findState,
   findLastEventSeq,
   JsonlTranscript,
-  TERMINAL_STATES,
   validateDeliveryFacts,
   findValidRepackageProvenance,
+  classifyRecoveryCandidate,
 } from "../transcript.js";
 import {
   assertCommittedDeliveryRef,
@@ -119,7 +119,7 @@ function _deliveryWasRequested(events, runId) {
  * @param {string} authorizedWorkspaceRoot
  * @returns {{worktreePath, baseCommit, originalAllowedPaths, verificationCommands?: string[], verificationUnavailableReason?: string}}
  */
-function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot) {
+function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, hasCreated) {
   // Workspace ownership — the run must belong to the authorized workspace.
   if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) {
     throw new Error("runDeliveryRepackage: authorizedWorkspaceRoot is required");
@@ -132,15 +132,9 @@ function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot) {
     throw new Error(`runDeliveryRepackage: run terminal state is ${terminalState}, must be failed`);
   }
 
-  // Exactly one bound run.delivery_failed with code disallowed_path.
-  const failed = events.filter(
-    (e) => e && e.type === "run.delivery_failed" && e.runId === runId,
-  );
-  if (failed.length !== 1) {
-    throw new Error(`runDeliveryRepackage: expected exactly one bound delivery_failed, got ${failed.length}`);
-  }
-  if (failed[0].deliveryCode !== "disallowed_path") {
-    throw new Error(`runDeliveryRepackage: failure code is ${failed[0].deliveryCode}, must be disallowed_path`);
+  const recoveryKind = classifyRecoveryCandidate(events, runId);
+  if (!recoveryKind) {
+    throw new Error("runDeliveryRepackage: durable recovery facts are not eligible");
   }
 
   // No existing decision — once the Lead decided, repackage is not allowed.
@@ -184,13 +178,24 @@ function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot) {
     throw new Error("runDeliveryRepackage: run.started has no original verification declaration");
   }
   // The persisted worktreePath must be a real Git worktree top-level (defense).
-  proveWorkspace(bound.worktreePath);
+  // Before the first backend-failure recovery, HEAD must still be the exact
+  // original base. After delivery_created exists, idempotent re-entry is bound
+  // by the committed DeliveryRef + provenance instead.
+  const workspaceProof = proveWorkspace(bound.worktreePath);
+  if (
+    recoveryKind === "backend_failed"
+    && !hasCreated
+    && workspaceProof.gitHead !== delivery.baseCommit
+  ) {
+    throw new Error("runDeliveryRepackage: backend candidate HEAD does not match the original base");
+  }
 
   const originalAllowedPaths = _normalizeAllowedPaths(delivery.allowedPaths);
   return {
     worktreePath: bound.worktreePath,
     baseCommit: delivery.baseCommit,
     originalAllowedPaths,
+    recoveryKind,
     ...(hasCommands ? { verificationCommands: [...delivery.verificationCommands] } : {}),
     ...(hasReason ? { verificationUnavailableReason: delivery.verificationUnavailableReason } : {}),
   };
@@ -239,9 +244,6 @@ export async function runDeliveryRepackage({
   const filePath = join(runDir, `${runId}.jsonl`);
   const events = await _readTranscript(filePath);
 
-  // Phase 0: preconditions.
-  const original = _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot);
-
   // Idempotency pre-read: an existing created/outcome lets us skip the expensive
   // package/verify steps. The lock-scoped CAS methods re-check authoritatively.
   const existingCreated = _findBoundEvent(events, runId, (e) => e.type === "run.delivery_created");
@@ -252,12 +254,26 @@ export async function runDeliveryRepackage({
   const outcomeEvents = events.filter(
     (e) => e && REPACKAGE_VERIFICATION_OUTCOME_TYPES.has(e.type) && e.runId === runId,
   );
+  const provenanceEvents = events.filter(
+    (e) => e && e.type === "run.delivery_repackaged" && e.runId === runId,
+  );
   if (createdEvents.length > 1 || outcomeEvents.length > 1) {
     throw new Error("runDeliveryRepackage: ambiguous durable delivery chain");
   }
   if (outcomeEvents.length > 0 && createdEvents.length === 0) {
     throw new Error("runDeliveryRepackage: orphan verification outcome");
   }
+  if (provenanceEvents.length > 1 || (provenanceEvents.length > 0 && createdEvents.length === 0)) {
+    throw new Error("runDeliveryRepackage: orphan or ambiguous recovery provenance");
+  }
+
+  // Phase 0: preconditions.
+  const original = _proveRepackagePreconditions(
+    events,
+    runId,
+    authorizedWorkspaceRoot,
+    existingCreated !== null,
+  );
 
   // The Lead may widen but never narrow the original contract, including on
   // idempotent retries after a delivery has already been created.
@@ -277,6 +293,15 @@ export async function runDeliveryRepackage({
     }
     if (inventory.actualChangedTruncated) {
       throw new Error("runDeliveryRepackage: candidate inventory truncated — verify manually");
+    }
+    if (
+      original.recoveryKind === "backend_failed"
+      && (
+        inventory.originalAllowedTruncated
+        || inventory.disallowedTruncated
+      )
+    ) {
+      throw new Error("runDeliveryRepackage: backend candidate inventory is incomplete");
     }
     if (inventory.actualChangedCount === 0 || inventory.actualChangedPaths.length === 0) {
       throw new Error("runDeliveryRepackage: candidate inventory is empty");
@@ -336,9 +361,12 @@ export async function runDeliveryRepackage({
     delivery: resolvedRef,
     approvedAllowedPaths: newAllowedPaths,
     source,
+    recoveryKind: original.recoveryKind,
   });
   const authoritativeRef = createdResult.ref;
   const authoritativeSource = createdResult.provenance?.source ?? source;
+  const authoritativeRecoveryKind = createdResult.provenance?.recoveryKind
+    ?? original.recoveryKind;
 
   // Phase 4 + 5: verify (outside the lock) and record the outcome (lock-scoped
   // CAS). Skipped when an outcome already exists (idempotent retry).
@@ -353,6 +381,7 @@ export async function runDeliveryRepackage({
       verificationStatus: _outcomeFromEventType(existingOutcome.type),
       outcome: _outcomeFromEventType(existingOutcome.type),
       source: authoritativeSource,
+      recoveryKind: authoritativeRecoveryKind,
       created: createdResult.created,
       verificationRecorded: false,
     };
@@ -370,6 +399,7 @@ export async function runDeliveryRepackage({
     verificationStatus: verificationResult.outcome,
     outcome: verificationResult.outcome,
     source: authoritativeSource,
+    recoveryKind: authoritativeRecoveryKind,
     created: createdResult.created,
     verificationRecorded: verificationResult.recorded,
   };
