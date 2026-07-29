@@ -17,9 +17,21 @@ export const RUN_EVENT_KINDS = [
   "metrics",
   "command",
   "file_written",
+  "write_intent",
   "tool_use",
   "tool_result",
 ];
+
+export const WRITE_INTENT_CORRELATION_STATUS = Object.freeze({
+  TRACKED: "tracked",
+  MISSING_TOOL_CALL_ID: "missing_tool_call_id",
+  DUPLICATE_TOOL_CALL_ID: "duplicate_tool_call_id",
+  PENDING_LIMIT: "pending_limit",
+});
+
+const WRITE_INTENT_CORRELATION_STATUS_VALUES = new Set(
+  Object.values(WRITE_INTENT_CORRELATION_STATUS),
+);
 
 /** assistant/user/system 消息产出 */
 export function messageEvent(role, parts) {
@@ -71,9 +83,27 @@ export function commandEvent(command, exitCode, meta = {}) {
 /**
  * agent 写入文件（证据链用）。
  * @param {string} path 文件路径
+ * @param {{toolCallId?: string}} [meta] runtime 工具调用 id，用于确认对应 write_intent
  */
-export function fileWrittenEvent(path) {
-  return { kind: "file_written", path };
+export function fileWrittenEvent(path, meta = {}) {
+  const event = { kind: "file_written", path };
+  if (typeof meta.toolCallId === "string") event.toolCallId = meta.toolCallId;
+  return event;
+}
+
+/**
+ * Agent intends to write a path. This is containment telemetry, not confirmed
+ * write evidence; only a later matching successful tool result may produce
+ * file_written.
+ * @param {string} path target path
+ * @param {string} toolCallId opaque runtime tool call id
+ * @param {string} correlationStatus bounded correlation status
+ */
+export function writeIntentEvent(path, toolCallId, correlationStatus) {
+  if (!WRITE_INTENT_CORRELATION_STATUS_VALUES.has(correlationStatus)) {
+    throw new Error("writeIntentEvent correlationStatus is invalid");
+  }
+  return { kind: "write_intent", path, toolCallId, correlationStatus };
 }
 
 /**

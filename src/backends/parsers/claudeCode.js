@@ -5,10 +5,16 @@ import {
   metricsEvent,
   commandEvent,
   fileWrittenEvent,
+  writeIntentEvent,
   toolUseEvent,
   toolResultEvent,
   thinkingEvent,
+  WRITE_INTENT_CORRELATION_STATUS,
 } from "../../runEvent.js";
+
+const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit"]);
+const MAX_PENDING_WRITE_INTENTS = 256;
+const UNKNOWN_TOOL_CALL_ID = "unknown";
 
 /**
  * Claude Code stream-json 解析器（M2-3，M4 加 token 提取，M6-3 加证据链）。
@@ -32,6 +38,9 @@ export class ClaudeStreamParser extends LineStreamParser {
     // 按 id 去重，避免 transcript 重复 message + scorecard 计数偏高。
     // 每个 run 独立 parser 实例（见 ProcessBackend），故 Set 生命周期 = 单 run。
     this._seenMessageIds = new Set();
+    // M12-4B: runtime-specific write confirmation correlation. Map insertion
+    // order plus a fixed cap makes memory use bounded and deterministic.
+    this._pendingWrites = new Map();
   }
 
   handleLine(obj) {
@@ -57,7 +66,7 @@ export class ClaudeStreamParser extends LineStreamParser {
       }
       for (const block of content) {
         if (block.type === "tool_use") {
-          const ev = extractToolUse(block);
+          const ev = extractToolUse(block, this._pendingWrites);
           if (ev) events.push(ev);
         }
         // TD-76 thinking 信号（方案 A：只记存在不存内容）：见 thinking 块即 emit 心跳事件，
@@ -77,11 +86,19 @@ export class ClaudeStreamParser extends LineStreamParser {
       const events = [];
       for (const block of content) {
         if (block.type === "tool_result") {
-          events.push(toolResultEvent(
-            block.tool_use_id ?? "unknown",
-            block.content,
-            Boolean(block.is_error),
-          ));
+          const toolCallId = normalizeToolCallId(block.tool_use_id);
+          const pendingPath = this._pendingWrites.get(toolCallId);
+          const hasPendingWrite = pendingPath !== undefined;
+          const isError = Boolean(block.is_error);
+          if (hasPendingWrite) {
+            // First matching result wins, including malformed results. Removing
+            // before confirmation makes duplicate results idempotent.
+            this._pendingWrites.delete(toolCallId);
+          }
+          events.push(toolResultEvent(toolCallId, block.content, isError));
+          if (hasPendingWrite && !isError) {
+            events.push(fileWrittenEvent(pendingPath, { toolCallId }));
+          }
         }
       }
       return events;
@@ -115,13 +132,13 @@ export class ClaudeStreamParser extends LineStreamParser {
  *   （Windows 上 claude-code 暴露 PowerShell/Cmd 而非 Bash，input.command 字段相同。
  *    2026-06-24 实测：原只认 Bash → PowerShell 命令掉到通用 toolUse → commandsPassed 永远
  *    认证失败 → 误判 DeepSeek/GLM 不会跑命令。现三类命令工具都识别。）
- * - Write/Edit/MultiEdit → fileWrittenEvent（含 path）
+ * - Write/Edit/MultiEdit → writeIntentEvent（含 path + opaque toolCallId）
  * - 其它 → toolUseEvent（通用）
  * 字段缺失时返回 null（静默忽略，不崩）。
  */
 const COMMAND_TOOLS = new Set(["Bash", "PowerShell", "Cmd"]);
 
-function extractToolUse(block) {
+function extractToolUse(block, pendingWrites) {
   const name = block.name;
   const input = block.input ?? {};
   if (COMMAND_TOOLS.has(name)) {
@@ -130,11 +147,31 @@ function extractToolUse(block) {
     }
     return null;
   }
-  if (name === "Write" || name === "Edit" || name === "MultiEdit") {
+  if (WRITE_TOOLS.has(name)) {
     if (typeof input.file_path === "string") {
-      return fileWrittenEvent(input.file_path);
+      const toolCallId = normalizeToolCallId(block.id);
+      let correlationStatus;
+      if (toolCallId === UNKNOWN_TOOL_CALL_ID) {
+        correlationStatus = WRITE_INTENT_CORRELATION_STATUS.MISSING_TOOL_CALL_ID;
+      } else if (pendingWrites.has(toolCallId)) {
+        correlationStatus = WRITE_INTENT_CORRELATION_STATUS.DUPLICATE_TOOL_CALL_ID;
+      } else if (pendingWrites.size >= MAX_PENDING_WRITE_INTENTS) {
+        correlationStatus = WRITE_INTENT_CORRELATION_STATUS.PENDING_LIMIT;
+      } else {
+        pendingWrites.set(toolCallId, input.file_path);
+        correlationStatus = WRITE_INTENT_CORRELATION_STATUS.TRACKED;
+      }
+      return writeIntentEvent(input.file_path, toolCallId, correlationStatus);
     }
     return null;
   }
   return toolUseEvent(name ?? "unknown", input);
+}
+
+function normalizeToolCallId(value) {
+  return typeof value === "string"
+    && value.length > 0
+    && value !== UNKNOWN_TOOL_CALL_ID
+    ? value
+    : UNKNOWN_TOOL_CALL_ID;
 }

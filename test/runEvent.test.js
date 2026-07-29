@@ -1,6 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { messageEvent, doneEvent, metricsEvent, commandEvent, fileWrittenEvent, toolUseEvent, toolResultEvent, RUN_EVENT_KINDS } from "../src/runEvent.js";
+import {
+  messageEvent,
+  doneEvent,
+  metricsEvent,
+  commandEvent,
+  fileWrittenEvent,
+  writeIntentEvent,
+  toolUseEvent,
+  toolResultEvent,
+  RUN_EVENT_KINDS,
+} from "../src/runEvent.js";
 
 test("messageEvent constructs correct shape", () => {
   const ev = messageEvent("assistant", [{ type: "text", text: "hello" }]);
@@ -47,15 +57,16 @@ test("metricsEvent with empty object produces empty tokens", () => {
   assert.deepEqual(ev.tokens, {});
 });
 
-test("RUN_EVENT_KINDS contains all 7 kinds", () => {
+test("RUN_EVENT_KINDS contains all 8 kinds", () => {
   assert.ok(RUN_EVENT_KINDS.includes("message"));
   assert.ok(RUN_EVENT_KINDS.includes("done"));
   assert.ok(RUN_EVENT_KINDS.includes("metrics"));
   assert.ok(RUN_EVENT_KINDS.includes("command"));
   assert.ok(RUN_EVENT_KINDS.includes("file_written"));
+  assert.ok(RUN_EVENT_KINDS.includes("write_intent"));
   assert.ok(RUN_EVENT_KINDS.includes("tool_use"));
   assert.ok(RUN_EVENT_KINDS.includes("tool_result"));
-  assert.equal(RUN_EVENT_KINDS.length, 7);
+  assert.equal(RUN_EVENT_KINDS.length, 8);
 });
 
 // ===== M6-1: 证据链事件 =====
@@ -84,6 +95,47 @@ test("commandEvent with non-zero exitCode", () => {
 test("fileWrittenEvent shape", () => {
   const ev = fileWrittenEvent("src/result.js");
   assert.deepEqual(ev, { kind: "file_written", path: "src/result.js" });
+});
+
+test("fileWrittenEvent can carry an optional toolCallId for write confirmation", () => {
+  const ev = fileWrittenEvent("src/result.js", { toolCallId: "call_write_1" });
+  assert.deepEqual(ev, {
+    kind: "file_written",
+    path: "src/result.js",
+    toolCallId: "call_write_1",
+  });
+});
+
+test("writeIntentEvent carries only bounded path and opaque toolCallId", () => {
+  const ev = writeIntentEvent("src/new.js", "call_write_1", "tracked");
+  assert.deepEqual(ev, {
+    kind: "write_intent",
+    path: "src/new.js",
+    toolCallId: "call_write_1",
+    correlationStatus: "tracked",
+  });
+});
+
+test("writeIntentEvent rejects correlation statuses outside the closed set", () => {
+  for (const status of [
+    "tracked",
+    "missing_tool_call_id",
+    "duplicate_tool_call_id",
+    "pending_limit",
+  ]) {
+    assert.equal(
+      writeIntentEvent("src/new.js", "call_write_1", status).correlationStatus,
+      status,
+    );
+  }
+  assert.throws(
+    () => writeIntentEvent("src/new.js", "call_write_1", "raw_provider_reason"),
+    /correlationStatus/,
+  );
+  assert.throws(
+    () => writeIntentEvent("src/new.js", "call_write_1"),
+    /correlationStatus/,
+  );
 });
 
 test("toolUseEvent shape", () => {

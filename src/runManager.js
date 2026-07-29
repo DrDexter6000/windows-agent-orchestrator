@@ -1,6 +1,6 @@
 import { mkdir } from "node:fs/promises";
-import { readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import { JsonlTranscript, TERMINAL_STATES, readTranscript, findState, findLatest } from "./transcript.js";
 import { createWorktree, removeWorktree } from "./isolation.js";
@@ -15,6 +15,7 @@ import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecu
 import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./application/credentialReadiness.js";
 import { inheritedEnvNames } from "./envPolicy.js";
 import { validateSessionReuseRouting } from "./application/sessionReuse.js";
+import { WRITE_INTENT_CORRELATION_STATUS } from "./runEvent.js";
 
 /**
  * RunManager 持有活跃 run 的生命周期。
@@ -43,33 +44,79 @@ function installSigintHandler() {
   });
 }
 
-function isReportedWriteInsideWorkdir(rawPath, effectiveCwd) {
+const MAX_PENDING_DELIVERY_WRITE_INTENTS = 256;
+
+function isConfirmableToolCallId(value) {
+  return typeof value === "string"
+    && value.trim().length > 0
+    && value !== "unknown";
+}
+
+function isPathInside(base, target) {
+  const rel = relative(base, target);
+  return rel === ""
+    || (
+      rel !== ".."
+      && !rel.startsWith(`..${sep}`)
+      && !isAbsolute(rel)
+    );
+}
+
+function resolveLexicallyContainedWrite(rawPath, effectiveCwd) {
   if (typeof rawPath !== "string" || rawPath.trim().length === 0) return false;
   if (typeof effectiveCwd !== "string" || effectiveCwd.trim().length === 0) return false;
-  try {
-    const lexicalBase = resolve(effectiveCwd);
-    const lexicalTarget = resolve(lexicalBase, rawPath);
-    const lexicalRelative = relative(lexicalBase, lexicalTarget);
-    const lexicallyInside = lexicalRelative === ""
-      || (
-        lexicalRelative !== ".."
-        && !lexicalRelative.startsWith(`..${sep}`)
-        && !isAbsolute(lexicalRelative)
-      );
-    if (!lexicallyInside) return false;
+  const base = resolve(effectiveCwd);
+  const target = resolve(base, rawPath);
+  return isPathInside(base, target) ? { base, target } : false;
+}
 
+function isReportedWriteInsideWorkdir(rawPath, effectiveCwd) {
+  const lexical = resolveLexicallyContainedWrite(rawPath, effectiveCwd);
+  if (!lexical) return false;
+  try {
     // A junction/symlink inside the worktree may resolve to an outside target.
     // file_written is post-write evidence, so inability to prove the target's
     // physical location fails closed for delivery runs.
-    const physicalBase = realpathSync.native(lexicalBase);
-    const physicalTarget = realpathSync.native(lexicalTarget);
-    const physicalRelative = relative(physicalBase, physicalTarget);
-    return physicalRelative === ""
-      || (
-        physicalRelative !== ".."
-        && !physicalRelative.startsWith(`..${sep}`)
-        && !isAbsolute(physicalRelative)
-      );
+    const physicalBase = realpathSync.native(lexical.base);
+    const physicalTarget = realpathSync.native(lexical.target);
+    return isPathInside(physicalBase, physicalTarget);
+  } catch {
+    return false;
+  }
+}
+
+function isReportedWriteIntentInsideWorkdir(rawPath, effectiveCwd) {
+  const lexical = resolveLexicallyContainedWrite(rawPath, effectiveCwd);
+  if (!lexical) return false;
+  try {
+    const physicalBase = realpathSync.native(lexical.base);
+    try {
+      // lstat distinguishes a genuinely missing target from a dangling link.
+      // Only a genuine ENOENT may use nearest-existing-ancestor validation.
+      lstatSync(lexical.target);
+    } catch (error) {
+      if (error?.code !== "ENOENT") return false;
+      let ancestor = dirname(lexical.target);
+      while (true) {
+        try {
+          const physicalAncestor = realpathSync.native(ancestor);
+          return isPathInside(physicalBase, physicalAncestor);
+        } catch (ancestorError) {
+          if (ancestorError?.code !== "ENOENT") return false;
+          const parent = dirname(ancestor);
+          if (parent === ancestor) return false;
+          ancestor = parent;
+        }
+      }
+    }
+    try {
+      const physicalTarget = realpathSync.native(lexical.target);
+      return isPathInside(physicalBase, physicalTarget);
+    } catch {
+      // Existing but unresolvable targets (for example dangling links) fail
+      // closed; ancestor walking is reserved for lstat ENOENT above.
+      return false;
+    }
   } catch {
     return false;
   }
@@ -1024,7 +1071,8 @@ export class Run {
     let metrics = null;
     let budgetExceeded = false;
     let budgetUsed = 0;
-    let isolationViolation = false;
+    let isolationViolationKind = null;
+    const pendingDeliveryWriteToolCallIds = new Set();
     const markRunningOnce = async (reason) => {
       if (this.state !== "running" && !TERMINAL_STATES.includes(this.state)) {
         await this._transition(this.state, "running", reason);
@@ -1034,9 +1082,26 @@ export class Run {
     try {
       for await (const rawEvent of this.handle.events(controller.signal, { pollInterval, silentTimeout })) {
         const ev = this._redact(rawEvent);
-        const reportedWriteEscapes = rawEvent?.kind === "file_written"
-          && this.deliveryContext
-          && !isReportedWriteInsideWorkdir(rawEvent.path, this.effectiveCwd);
+        const unconfirmableTrackedWriteIntent = rawEvent?.kind === "write_intent"
+          && (
+            rawEvent.correlationStatus !== WRITE_INTENT_CORRELATION_STATUS.TRACKED
+            || !isConfirmableToolCallId(rawEvent.toolCallId)
+            || pendingDeliveryWriteToolCallIds.has(rawEvent.toolCallId)
+            || pendingDeliveryWriteToolCallIds.size >= MAX_PENDING_DELIVERY_WRITE_INTENTS
+          );
+        const reportedWriteEscapes = this.deliveryContext && (
+          (
+            rawEvent?.kind === "write_intent"
+            && (
+              unconfirmableTrackedWriteIntent
+              || !isReportedWriteIntentInsideWorkdir(rawEvent.path, this.effectiveCwd)
+            )
+          )
+          || (
+            rawEvent?.kind === "file_written"
+            && !isReportedWriteInsideWorkdir(rawEvent.path, this.effectiveCwd)
+          )
+        );
         // 若已被 abort，停止处理后续事件（避免覆盖 aborted 状态）
         if (this._aborted) break;
         // TD-99：若 _transition 把内存 state 同步为终态（外部写了终态，仲裁 rejected），
@@ -1071,17 +1136,26 @@ export class Run {
             }
           }
         } else if (ev.kind === "done") {
+          if (
+            this.deliveryContext
+            && ev.reason === "completed"
+            && pendingDeliveryWriteToolCallIds.size > 0
+          ) {
+            isolationViolationKind = "write_intent";
+            break;
+          }
           doneReason = ev.reason;
           doneError = ev.error;
           break;
         } else if (
           ev.kind === "command" ||
           ev.kind === "file_written" ||
+          ev.kind === "write_intent" ||
           ev.kind === "tool_use" ||
           ev.kind === "tool_result"
         ) {
           if (reportedWriteEscapes) {
-            isolationViolation = true;
+            isolationViolationKind = rawEvent.kind;
             break;
           }
           await markRunningOnce("first_event");
@@ -1089,7 +1163,16 @@ export class Run {
           // 不触发状态转移（和 metrics 一样是旁路信息）。
           const { kind, ...rest } = ev;
           await this.transcript.append("run.event", { kind, ...rest });
-          evidence.push(ev);
+          if (this.deliveryContext) {
+            if (rawEvent.kind === "write_intent") {
+              pendingDeliveryWriteToolCallIds.add(rawEvent.toolCallId);
+            } else if (rawEvent.kind === "tool_result" && rawEvent.isError === true) {
+              pendingDeliveryWriteToolCallIds.delete(rawEvent.tool);
+            } else if (rawEvent.kind === "file_written") {
+              pendingDeliveryWriteToolCallIds.delete(rawEvent.toolCallId);
+            }
+          }
+          if (ev.kind !== "write_intent") evidence.push(ev);
         }
       }
       // M10-pre3C: only the deadline timer may set timedOut. An external
@@ -1126,12 +1209,12 @@ export class Run {
       return _loserResult(externalTerminalState, { messages, evidence, metrics });
     }
 
-    if (isolationViolation) {
+    if (isolationViolationKind) {
       const tResult = await this._transition(this.state, "failed", "workdir_escape", {
         factEvents: [
           {
             type: "run.isolation_violation",
-            payload: { code: "workdir_escape", eventKind: "file_written" },
+            payload: { code: "workdir_escape", eventKind: isolationViolationKind },
           },
           {
             type: "run.error",

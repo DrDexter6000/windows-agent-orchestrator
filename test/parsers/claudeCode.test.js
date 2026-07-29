@@ -185,30 +185,151 @@ test("Windows 命令工具（PowerShell/Cmd）也 → command 事件（不只认
   assert.equal(cmds[1].command, "dir", "Cmd command 文本应保留");
 });
 
-test("M6-3: Write 工具 → file_written 事件，含 path", () => {
+test("M12-4B-A: Write 工具先发 write_intent，不提前发 file_written", () => {
   const p = new ClaudeStreamParser();
   const events = p.feed(
     '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_2","name":"Write","input":{"file_path":"src/result.js","content":"x"}}]}}\n',
   );
   assert.equal(events.length, 1);
-  assert.equal(events[0].kind, "file_written");
-  assert.equal(events[0].path, "src/result.js");
+  assert.deepEqual(events[0], {
+    kind: "write_intent",
+    path: "src/result.js",
+    toolCallId: "tu_2",
+    correlationStatus: "tracked",
+  });
 });
 
-test("M6-3: Edit / MultiEdit 工具 → file_written 事件", () => {
+test("M12-4B-A: Edit / MultiEdit 工具先发 write_intent", () => {
   const p = new ClaudeStreamParser();
   const events1 = p.feed(
     '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_3","name":"Edit","input":{"file_path":"a.js"}}]}}\n',
   );
-  assert.equal(events1[0].kind, "file_written");
-  assert.equal(events1[0].path, "a.js");
+  assert.deepEqual(events1[0], {
+    kind: "write_intent",
+    path: "a.js",
+    toolCallId: "tu_3",
+    correlationStatus: "tracked",
+  });
 
   p.flush();
   const events2 = p.feed(
     '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_4","name":"MultiEdit","input":{"file_path":"b.js"}}]}}\n',
   );
-  assert.equal(events2[0].kind, "file_written");
-  assert.equal(events2[0].path, "b.js");
+  assert.deepEqual(events2[0], {
+    kind: "write_intent",
+    path: "b.js",
+    toolCallId: "tu_4",
+    correlationStatus: "tracked",
+  });
+});
+
+test("M12-4B-B: matching successful write result confirms file_written exactly once", () => {
+  const p = new ClaudeStreamParser();
+  const events = p.feed(
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"write_ok","name":"Write","input":{"file_path":"src/new.js","content":"x"}}]}}\n'
+    + '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"write_ok","content":"created","is_error":false}]}}\n'
+    + '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"write_ok","content":"duplicate","is_error":false}]}}\n',
+  );
+  assert.deepEqual(events.map((event) => event.kind), [
+    "write_intent",
+    "tool_result",
+    "file_written",
+    "tool_result",
+  ]);
+  assert.deepEqual(
+    events.filter((event) => event.kind === "file_written"),
+    [{ kind: "file_written", path: "src/new.js", toolCallId: "write_ok" }],
+  );
+});
+
+test("M12-4B-B: failed and mismatched results never confirm file_written", () => {
+  const p = new ClaudeStreamParser();
+  const events = p.feed(
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"write_fail","name":"Write","input":{"file_path":"src/fail.js"}}]}}\n'
+    + '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"unknown_id","content":"ok","is_error":false}]}}\n'
+    + '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"write_fail","content":"denied","is_error":true}]}}\n',
+  );
+  assert.equal(events.filter((event) => event.kind === "file_written").length, 0);
+  assert.equal(events.filter((event) => event.kind === "tool_result").length, 2);
+});
+
+test("M12-4B-B: omitted is_error preserves success compatibility and confirms exactly once", () => {
+  const p = new ClaudeStreamParser();
+  const events = p.feed(
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"write_omitted","name":"Write","input":{"file_path":"src/omitted.js"}}]}}\n'
+    + '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"write_omitted","content":"created"}]}}\n'
+    + '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"write_omitted","content":"duplicate"}]}}\n',
+  );
+  assert.deepEqual(
+    events.filter((event) => event.kind === "file_written"),
+    [{ kind: "file_written", path: "src/omitted.js", toolCallId: "write_omitted" }],
+  );
+  assert.deepEqual(
+    events.filter((event) => event.kind === "tool_result").map((event) => event.isError),
+    [false, false],
+  );
+});
+
+test("M12-4B-B: missing and duplicate call ids expose bounded unconfirmable statuses", () => {
+  const p = new ClaudeStreamParser();
+  const events = p.feed(
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"missing.js"}}]}}\n'
+    + '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"duplicate","name":"Write","input":{"file_path":"first.js"}}]}}\n'
+    + '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"duplicate","name":"Edit","input":{"file_path":"second.js"}}]}}\n',
+  );
+  assert.deepEqual(
+    events.map((event) => ({
+      toolCallId: event.toolCallId,
+      correlationStatus: event.correlationStatus,
+    })),
+    [
+      { toolCallId: "unknown", correlationStatus: "missing_tool_call_id" },
+      { toolCallId: "duplicate", correlationStatus: "tracked" },
+      { toolCallId: "duplicate", correlationStatus: "duplicate_tool_call_id" },
+    ],
+  );
+});
+
+test("M12-4B-B: two open write intents correlate out of order", () => {
+  const p = new ClaudeStreamParser();
+  const events = p.feed(
+    '{"type":"assistant","message":{"content":['
+    + '{"type":"tool_use","id":"write_a","name":"Write","input":{"file_path":"a.js"}},'
+    + '{"type":"tool_use","id":"write_b","name":"Edit","input":{"file_path":"b.js"}}'
+    + ']}}\n'
+    + '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"write_b","content":"ok","is_error":false}]}}\n'
+    + '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"write_a","content":"ok","is_error":false}]}}\n',
+  );
+  assert.deepEqual(
+    events.filter((event) => event.kind === "file_written").map((event) => ({
+      path: event.path,
+      toolCallId: event.toolCallId,
+    })),
+    [
+      { path: "b.js", toolCallId: "write_b" },
+      { path: "a.js", toolCallId: "write_a" },
+    ],
+  );
+});
+
+test("M12-4B-B: pending write correlation is capped at 256 entries", () => {
+  const p = new ClaudeStreamParser();
+  const intents = Array.from({ length: 257 }, (_, index) => (
+    `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"write_${index}","name":"Write","input":{"file_path":"file_${index}.js"}}]}}`
+  ));
+  const results = Array.from({ length: 257 }, (_, index) => (
+    `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"write_${index}","content":"ok","is_error":false}]}}`
+  ));
+  const events = p.feed(`${[...intents, ...results].join("\n")}\n`);
+  const intentEvents = events.filter((event) => event.kind === "write_intent");
+  assert.equal(intentEvents[255].correlationStatus, "tracked");
+  assert.equal(intentEvents[256].correlationStatus, "pending_limit");
+  const confirmed = events.filter((event) => event.kind === "file_written");
+  assert.equal(confirmed.length, 256);
+  assert.equal(confirmed[0].path, "file_0.js");
+  assert.equal(confirmed[0].toolCallId, "write_0");
+  assert.equal(confirmed.at(-1).path, "file_255.js");
+  assert.equal(confirmed.at(-1).toolCallId, "write_255");
 });
 
 test("M6-3: 其它工具（如 Grep）→ tool_use 事件", () => {
