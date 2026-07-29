@@ -243,10 +243,12 @@ Delivery 模式在 worktree 隔离中运行 worker，完成后打包一个 atomi
 `verificationUnavailable` 标志。schema 语义见 `docs/02-architecture.md` §4.6-4.8。
 
 WAO 会把 process cwd / `WAO_TARGET_CWD` 作为 delivery worker 的唯一授权 workspace。
-若 backend 报告的 `file_written` 经词法路径和 filesystem realpath（含 junction/symlink）
+Claude Code 的 Write/Edit/MultiEdit 会先记录 `write_intent`；只有同一 `toolCallId` 的成功结果
+才确认 `file_written`。若写入意图无法关联、重复、超过 pending 上限、run 完成时仍未确认，
+或 backend 报告的意图/已确认写入经词法路径和 filesystem realpath（含 junction/symlink）
 不能证明位于该 worktree，run 会在 packaging 前以 `workdir_escape` 失败，transcript 只保留
-固定安全事实、不保留越界路径。该检查不解析 worker command，也不是 OS filesystem sandbox；
-它不会把语义判断或处置权从 Lead 手中拿走。
+固定安全事实、不保留越界路径。`write_intent` 不是“文件已写入”的证据。该检查不解析 worker
+command，也不是 OS filesystem sandbox；它不会把语义判断或处置权从 Lead 手中拿走。
 
 限制：仅支持 `run`（foreground 和 background 均可），不支持 `spawn`。Background delivery 需要 `--isolate`。
 
@@ -360,7 +362,7 @@ npm run cli -- daemon stop
 | `prompt.sent` | prompt 投递（含完整 prompt 文本） | M0 |
 | `run.submitted` | 投递完成，进入等待 | M0 |
 | `run.metrics` | token 用量 + 成本（旁路，不触发状态转移） | M4 |
-| `run.event` | 证据事件透传（kind: command/file_written/tool_use/tool_result） | M6 |
+| `run.event` | RunEvent 透传（含 command、write_intent、file_written、tool_use、tool_result；write_intent 仅是未确认的 containment telemetry） | M6/M12 |
 | `scorecard.checked` | scorecard 门控结果（passed + checks），仅配了 rules 时写 | M6 |
 | `run.completed` | 正常完成 | M0 |
 | `run.timed_out` | 超时 | M0 |

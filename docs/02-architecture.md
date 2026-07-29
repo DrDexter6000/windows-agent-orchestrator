@@ -126,7 +126,10 @@ type RunEvent =
   | { kind: "tool_use", tool: string, input: unknown }
   | { kind: "tool_result", tool: string, output: unknown, isError: boolean }
   | { kind: "command", command: string, exitCode?: number }   // agent 跑的 shell 命令（证据链用）
-  | { kind: "file_written", path: string }                     // agent 写文件（证据链用）
+  | { kind: "write_intent", path: string, toolCallId: string,
+      correlationStatus: "tracked"|"missing_tool_call_id"|"duplicate_tool_call_id"|"pending_limit" }
+                                                               // 尚未确认成功的写入意图（containment telemetry）
+  | { kind: "file_written", path: string, toolCallId?: string } // runtime 已确认成功的写入（证据链用）
   | { kind: "metrics", tokens?: TokenUsage, durationMs?: number }
   | { kind: "done", reason: "completed"|"aborted"|"failed", error?: string };
 ```
@@ -142,6 +145,9 @@ interface HealthResult { ok: boolean; status?: number; error?: string; }
 ```
 
 **关键**：`command` / `file_written` / `tool_result` 这几个事件是 scorecard 证据链的来源。
+`write_intent` 只表示 runtime 请求写入某路径，不能当作写入成功证据；只有与同一
+`toolCallId` 关联的成功结果才能确认 `file_written`。无法关联、重复或超过 pending
+上限的意图在 delivery 模式下 fail closed，不把不确定性投影成成功。
 Backend 实现有责任从 runtime 的原始输出里**提取**这些结构化证据（而非原样透传文本）。
 
 ### 2.3 AgentDef（registry 条目规范化后）
@@ -484,8 +490,11 @@ interface SchedulerOpts { maxConcurrent: number; }
 控制平面（而非 worker）负责把 isolated worktree 里的 worker 产出打包成 atomic delivery commit。
 worker 只准备变更，不创建 commit。
 Delivery execution contract 将 process cwd / `WAO_TARGET_CWD` 声明为唯一授权 workspace；
-RunManager 对 backend 报告的 `file_written` 原始路径做词法路径 + filesystem realpath 边界判断
-（包括 junction/symlink 解析），越界或无法证明目标存在于 worktree 时写入不含路径的
+RunManager 对 backend 报告的 `write_intent` 与已确认 `file_written` 原始路径做词法路径 +
+filesystem realpath 边界判断（包括 junction/symlink 解析）。Claude Code 的 Write/Edit/MultiEdit
+先产生带 opaque `toolCallId` 的 `write_intent`，只有匹配的成功 tool result 才产生
+`file_written`；run 完成时仍有未确认写入意图也 fail closed。越界、无法关联或无法证明目标存在于
+worktree 时写入不含路径的
 `run.isolation_violation(code=workdir_escape)` 并在 packaging 前转 failed。该机制不解析命令文本，
 也不等同于 OS filesystem sandbox；未被 backend 报告的写入仍需后续 artifact proof 发现。
 
