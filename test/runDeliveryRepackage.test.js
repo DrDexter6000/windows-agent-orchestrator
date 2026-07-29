@@ -197,21 +197,23 @@ function backendFailureEvents({
   verificationCommands = ["npm test"],
   extraEvents = [],
   includeStopVerified = true,
+  deliveryRequested = true,
+  includeDeliveryContext = true,
 }) {
   return [
-    { type: "run.background_submitted", cwd: repo, deliveryRequested: true },
+    { type: "run.background_submitted", cwd: repo, deliveryRequested },
     {
       type: "run.started",
       backend: "test",
       cwd: repo,
       worktreePath,
       worktreeBranch: `wao/${RUN_ID}`,
-      delivery: {
+      ...(includeDeliveryContext ? { delivery: {
         mode: "git_commit_v1",
         baseCommit,
         allowedPaths,
         verificationCommands,
-      },
+      } } : {}),
     },
     { type: "run.state_change", from: null, to: "pending", reason: "created" },
     { type: "run.state_change", from: "pending", to: "running", reason: "spawned" },
@@ -225,6 +227,8 @@ async function setupBackendFailureScenario({
   reason = "backend_error",
   extraEvents = [],
   includeStopVerified = true,
+  deliveryRequested = true,
+  includeDeliveryContext = true,
 } = {}) {
   const { repo, baseCommit } = await makeRepo("m124a-repo-");
   const runDir = await mkdtemp(join(tmpdir(), "m124a-runs-"));
@@ -237,6 +241,8 @@ async function setupBackendFailureScenario({
     reason,
     extraEvents,
     includeStopVerified,
+    deliveryRequested,
+    includeDeliveryContext,
   }));
   return { repo, baseCommit, runDir, worktreePath };
 }
@@ -342,6 +348,47 @@ test("M12-4A-RED-GATES: backend candidate requires quiet stop, exact base, compl
       setup: { extraEvents: [{ type: "scorecard.checked", passed: false }] },
     },
     {
+      name: "budget conflict",
+      setup: { extraEvents: [{ type: "run.budget_exceeded" }] },
+    },
+    {
+      name: "timeout conflict",
+      setup: { extraEvents: [{ type: "run.timed_out" }] },
+    },
+    {
+      name: "abort conflict",
+      setup: { extraEvents: [{ type: "run.aborted" }] },
+    },
+    {
+      name: "non-backend terminal reason",
+      setup: { reason: "scorecard_fail" },
+    },
+    {
+      name: "multiple terminal transitions",
+      setup: {
+        extraEvents: [{
+          type: "run.state_change",
+          from: "running",
+          to: "failed",
+          reason: "backend_error",
+        }],
+      },
+    },
+    {
+      name: "delivery not requested",
+      setup: { deliveryRequested: false, includeDeliveryContext: false },
+    },
+    {
+      name: "existing Lead acceptance",
+      setup: { extraEvents: [{ type: "run.delivery_accepted" }] },
+      queryRejects: true,
+    },
+    {
+      name: "existing Lead rejection",
+      setup: { extraEvents: [{ type: "run.delivery_rejected" }] },
+      queryRejects: true,
+    },
+    {
       name: "orphan recovery provenance",
       setup: {
         extraEvents: [{
@@ -356,14 +403,23 @@ test("M12-4A-RED-GATES: backend candidate requires quiet stop, exact base, compl
   for (const item of cases) {
     const { repo, runDir } = await setupBackendFailureScenario(item.setup);
     try {
-      const view = await getRunDelivery({
-        runId: RUN_ID,
-        runDir,
-        authorizedWorkspaceRoot: repo,
-        computeInventoryFn: computeCandidateInventory,
-      });
-      assert.equal(view.candidateInventory ?? null, null, item.name);
-      assert.equal(view.candidateKind ?? null, null, item.name);
+      if (item.queryRejects) {
+        await assert.rejects(() => getRunDelivery({
+          runId: RUN_ID,
+          runDir,
+          authorizedWorkspaceRoot: repo,
+          computeInventoryFn: computeCandidateInventory,
+        }), /ambiguous/, item.name);
+      } else {
+        const view = await getRunDelivery({
+          runId: RUN_ID,
+          runDir,
+          authorizedWorkspaceRoot: repo,
+          computeInventoryFn: computeCandidateInventory,
+        });
+        assert.equal(view.candidateInventory ?? null, null, item.name);
+        assert.equal(view.candidateKind ?? null, null, item.name);
+      }
       await assert.rejects(
         () => runDeliveryRepackage({
           runId: RUN_ID,
@@ -453,6 +509,41 @@ test("M12-4A-RED-GATES: backend candidate requires quiet stop, exact base, compl
   } finally {
     await cleanupDir(invalidInventory.repo);
     await cleanupDir(invalidInventory.runDir);
+  }
+});
+
+test("M12-4A-SCOPE: backend recovery never narrows original scope or omits an actual path", async () => {
+  const narrowing = await setupBackendFailureScenario();
+  try {
+    await assert.rejects(() => runDeliveryRepackage({
+      runId: RUN_ID,
+      runDir: narrowing.runDir,
+      allowedPaths: ["src/other.js"],
+      authorizedWorkspaceRoot: narrowing.repo,
+      resolveDeliveryCommitFn: resolveDeliveryCommit,
+      verifyDeliveryFn: passedVerifier,
+      computeInventoryFn: computeCandidateInventory,
+    }), /original|allowedPaths|scope/i);
+  } finally {
+    await cleanupDir(narrowing.repo);
+    await cleanupDir(narrowing.runDir);
+  }
+
+  const nonCovering = await setupBackendFailureScenario();
+  try {
+    await writeFile(join(nonCovering.worktreePath, "root.txt"), "outside original scope\n");
+    await assert.rejects(() => runDeliveryRepackage({
+      runId: RUN_ID,
+      runDir: nonCovering.runDir,
+      allowedPaths: ["src"],
+      authorizedWorkspaceRoot: nonCovering.repo,
+      resolveDeliveryCommitFn: resolveDeliveryCommit,
+      verifyDeliveryFn: passedVerifier,
+      computeInventoryFn: computeCandidateInventory,
+    }), /cover|actual|allowedPaths/i);
+  } finally {
+    await cleanupDir(nonCovering.repo);
+    await cleanupDir(nonCovering.runDir);
   }
 });
 
