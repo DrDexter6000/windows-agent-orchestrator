@@ -95,6 +95,74 @@ function unobservedResult(status) {
   };
 }
 
+// M12-6: usable-event snapshot shape boundary.
+//
+// Historical JSONL may contain JSON-valid but NON-usable entries — null, a
+// primitive (number/string/boolean), or an array — that are not transcript
+// events. The shared SSOT projections that drive this composite read envelope
+// fields directly:
+//   - findLastEventSeq reads event.seq (null.seq → TypeError),
+//   - findState reads event.type (null.type → TypeError),
+//   - findRunWorkspaceOwnership filters on event.type (null.type → TypeError),
+//   - summarizeLiveness/countProgressAfterSeq read event.seq/event.type.
+// A null entry therefore throws a TypeError that escapes as a top-level
+// "run_await_result failed"; a primitive/array entry silently derives a wrong
+// state/cursor. Every snapshot that can drive a returned fact is reduced to its
+// usable events FIRST, so none of those projections ever reads a field off a
+// non-usable entry. A structurally corrupt snapshot is then reported as a
+// read_failure (see readFailureResult) — never a clean "observed".
+function usableEvents(events) {
+  if (!Array.isArray(events)) return [];
+  const out = [];
+  for (const event of events) {
+    if (event !== null && typeof event === "object" && !Array.isArray(event)) {
+      out.push(event);
+    }
+  }
+  return out;
+}
+
+// A snapshot is shape-invalid if it is not an array, or contains any non-usable
+// entry (null / primitive / array). Such a snapshot is unreliable → the
+// observation is a read_failure, even when the usable subset still yields a
+// durable state.
+function snapshotHasInvalidShape(events) {
+  if (!Array.isArray(events)) return true;
+  for (const event of events) {
+    if (event === null || typeof event !== "object" || Array.isArray(event)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// M12-6: read_failure result builder.
+//
+// Trusted facts — runId, and whatever state/terminal were safely derived — are
+// preserved; the fields that depend on a clean FULL snapshot (cursor, agentId,
+// liveness, owner heartbeat, collect) are null/unknown/unavailable. No error
+// detail (message/path/prompt/command/raw event) is ever placed in the result.
+// `agentId`/`cursor` are parameters so the initial-failure (unknown/null) and
+// the wait-loop re-read failure (preserve the last trusted values) share ONE
+// truthful shape.
+function readFailureResult({ runId, agentId, state, terminal, cursor, waitedMs }) {
+  return {
+    runId,
+    agentId,
+    state,
+    terminal,
+    cursor,
+    returnedEarly: false,
+    waitedMs,
+    observationOutcome: "read_failure",
+    liveness: "unknown",
+    activityEventCount: null,
+    lastActivityKind: null,
+    ownerHeartbeat: "unknown",
+    result: unobservedResult("unavailable"),
+  };
+}
+
 /**
  * Project a compact terminal-then-collect result from ONE explicit transcript
  * snapshot, reusing the M12-2A projection SSOT (redaction + C0/C1/DEL
@@ -211,38 +279,58 @@ export async function runAwaitResult(input) {
   const begin = _now();
 
   // ===== INITIAL READ (read #1) =====
-  let events;
+  let rawEvents;
   try {
-    events = await _read(transcriptPath);
+    rawEvents = await _read(transcriptPath);
   } catch {
-    // Initial read failure: no facts at all. Report read_failure truthfully;
-    // do not invent a state/cursor. waitedMs is 0 (no waiting occurred).
-    return {
-      runId,
-      agentId: "unknown",
-      state: "unknown",
-      terminal: false,
-      cursor: null,
-      returnedEarly: false,
-      waitedMs: 0,
-      observationOutcome: "read_failure",
-      liveness: "unknown",
-      activityEventCount: null,
-      lastActivityKind: null,
-      ownerHeartbeat: "unknown",
-      result: unobservedResult("unavailable"),
-    };
+    // Initial read failure (file missing / unreadable / malformed JSON line):
+    // no facts at all. Report read_failure truthfully; do not invent a
+    // state/cursor. waitedMs is 0 (no waiting occurred).
+    return readFailureResult({
+      runId, agentId: "unknown", state: "unknown", terminal: false, cursor: null, waitedMs: 0,
+    });
   }
 
-  // Workspace authorization (MCP path) — needs the events snapshot.
+  // M12-6: reduce the snapshot to usable events BEFORE any SSOT derive, so a
+  // non-usable entry (null/primitive/array) can never throw a TypeError out of
+  // findState / findLastEventSeq / findRunWorkspaceOwnership / summarizeLiveness.
+  const events = usableEvents(rawEvents);
+  const invalidShape = snapshotHasInvalidShape(rawEvents);
+
+  // Workspace authorization (MCP path) is proved on the usable snapshot only,
+  // so a structural TypeError is impossible here. A valid cross-workspace run is
+  // STILL rejected — this boundary only prevents a non-usable event from
+  // crashing the check; the ownership Error propagates unchanged.
   if (authorizedWorkspaceRoot !== undefined) {
     verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot);
   }
 
-  const state = findState(events);
+  // Safe derive over the usable subset. Defense in depth: usable already
+  // excludes null/primitive/array, but any residual SSOT derive failure still
+  // collapses to read_failure — never a top-level throw.
+  let state;
+  let cursor;
+  let agentId;
+  try {
+    state = findState(events);
+    cursor = findLastEventSeq(events) ?? 0;
+    agentId = extractCanonicalAgentId(events, runId);
+  } catch {
+    return readFailureResult({
+      runId, agentId: "unknown", state: "unknown", terminal: false, cursor: null, waitedMs: 0,
+    });
+  }
   const terminal = TERMINAL_STATES.includes(state);
-  const cursor = findLastEventSeq(events) ?? 0;
-  const agentId = extractCanonicalAgentId(events, runId);
+
+  // M12-6: a structurally corrupt snapshot is a read_failure — never a clean
+  // "observed". The durable runId/state/terminal are preserved as a truthful
+  // hint; cursor/agentId/liveness/collect depend on a clean full snapshot and
+  // stay null/unknown/unavailable.
+  if (invalidShape) {
+    return readFailureResult({
+      runId, agentId: "unknown", state, terminal, cursor: null, waitedMs: 0,
+    });
+  }
 
   // Activity baseline: omitted → cursor at first read (only window-new events
   // count); explicit → the caller's cursor.
@@ -306,28 +394,29 @@ export async function runAwaitResult(input) {
     if (remaining <= 0) break;
     await _sleep(Math.min(pollIntervalMs, remaining));
 
-    let pollEvents;
+    let pollRaw;
     try {
-      pollEvents = await _read(transcriptPath);
+      pollRaw = await _read(transcriptPath);
     } catch {
-      // RE-READ FAILURE: do NOT combine stale events with a fresh owner
+      // RE-READ FAILURE (file): do NOT combine stale events with a fresh owner
       // heartbeat. Report read_failure with liveness/heartbeat unknown and a
-      // null activity tally — the observation is stale, not current.
-      return {
-        runId,
-        agentId,
-        state: currentState,
-        terminal: false,
-        cursor: currentCursor,
-        returnedEarly: false,
-        waitedMs: _now() - begin,
-        observationOutcome: "read_failure",
-        liveness: "unknown",
-        activityEventCount: null,
-        lastActivityKind: null,
-        ownerHeartbeat: "unknown",
-        result: unobservedResult("unavailable"),
-      };
+      // null activity tally — the observation is stale, not current. The last
+      // trusted agentId/state/cursor are preserved.
+      return readFailureResult({
+        runId, agentId, state: currentState, terminal: false, cursor: currentCursor, waitedMs: _now() - begin,
+      });
+    }
+
+    // M12-6: same usable-event boundary on every poll snapshot, so a non-usable
+    // entry that appeared between polls can never throw a TypeError.
+    const pollEvents = usableEvents(pollRaw);
+    if (snapshotHasInvalidShape(pollRaw)) {
+      // SHAPE FAILURE during wait: do NOT combine a corrupt snapshot with a
+      // fresh heartbeat. Preserve the last trusted agentId/state/cursor; same
+      // truthful read_failure shape as a re-read file failure.
+      return readFailureResult({
+        runId, agentId, state: currentState, terminal: false, cursor: currentCursor, waitedMs: _now() - begin,
+      });
     }
 
     // Every snapshot that can drive returned facts must independently prove
@@ -338,8 +427,18 @@ export async function runAwaitResult(input) {
     }
 
     currentEvents = pollEvents;
-    currentState = findState(currentEvents);
-    currentCursor = findLastEventSeq(currentEvents) ?? currentCursor;
+    let pollState;
+    let pollCursor;
+    try {
+      pollState = findState(currentEvents);
+      pollCursor = findLastEventSeq(currentEvents) ?? currentCursor;
+    } catch {
+      return readFailureResult({
+        runId, agentId, state: currentState, terminal: false, cursor: currentCursor, waitedMs: _now() - begin,
+      });
+    }
+    currentState = pollState;
+    currentCursor = pollCursor;
 
     if (TERMINAL_STATES.includes(currentState)) {
       // TERMINAL DURING WAIT — collect from THIS (terminal-observing) snapshot.

@@ -466,3 +466,42 @@ test("M12-1S2-T3: validateDeliveryFacts recoveryAcceptable true only on the stri
     "approved scope must also cover the original delivery contract",
   );
 });
+
+// ============================================================
+// M12-6: root cause for the runAwaitResult usable-event boundary.
+//
+// The shared transcript SSOT projections read envelope fields directly. A
+// JSON-valid but NON-usable event — null / primitive / array — is not a
+// transcript event:
+//   - null makes findState / findLastEventSeq throw a TypeError (null.type /
+//     null.seq), which is exactly what escaped as a top-level
+//     "run_await_result failed" before runAwaitResult reduced every snapshot to
+//     its usable events first;
+//   - primitive/array do NOT throw but silently derive a wrong state/cursor.
+// These tests pin the unsafe-on-non-usable behavior of the SHARED projections
+// so the runAwaitResult usable-event boundary is never removed without
+// re-exposing the crash.
+// ============================================================
+
+test("M12-6 root cause: findState/findLastEventSeq throw TypeError on a null event", () => {
+  assert.throws(() => findState([null]), TypeError);
+  assert.throws(() => findLastEventSeq([null]), TypeError);
+});
+
+test("M12-6 root cause: a null anywhere in the array still throws (no implicit skip)", () => {
+  // findState scans every event; a null after a usable event still throws.
+  assert.throws(() => findState([{ type: "run.completed" }, null]), TypeError);
+  assert.throws(() => findLastEventSeq([{ type: "run.completed", seq: 1 }, null]), TypeError);
+});
+
+test("M12-6 root cause: primitive/array events are non-usable (silent wrong derive, not a throw)", () => {
+  // A bare primitive/array is JSON-valid but not a transcript event. findState
+  // does not throw but silently infers "running" from a non-event;
+  // findLastEventSeq silently returns 0. They are non-usable and must be
+  // filtered before derive.
+  assert.equal(findState([42]), "running");
+  assert.equal(findLastEventSeq([42]), 0);
+  assert.doesNotThrow(() => findState([[1, 2]]));
+  assert.equal(findLastEventSeq([[1, 2]]), 0);
+  assert.equal(findState(["str"]), "running");
+});

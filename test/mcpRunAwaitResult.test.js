@@ -476,3 +476,53 @@ test("MAR-15: current tool count is 19 after the review bundle", async () => {
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+// =====================================================================
+// M12-6: non-usable transcript events (null/primitive/array) via the REAL MCP
+// client. Historical JSONL may contain JSON-valid but non-usable entries; the
+// composite reduces the snapshot to usable events and returns a STRUCTURED
+// read_failure — it must NOT collapse to the fixed "run_await_result failed"
+// text (which only happens when the service throws an uncaught TypeError). No
+// raw event content or error detail is leaked.
+// =====================================================================
+
+test("MAR-16: null/primitive/array transcript → structured read_failure via real client, no leak", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mar16-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-mar16-rd-"));
+  try {
+    makeGitRepo(dir);
+    const secret = "AKIAIOSFODNN7EXAMPLE"; // AWS docs example, not a live key
+    const a = "coder_low", id = "run_shape";
+    const lines = [
+      jl({ type: "run.submitted", agentId: a, ts: "2026-07-28T00:00:00.000Z", runId: id }),
+      jl({ type: "session.created", backend: "process", backendSessionId: "proc_await", runId: id, agentId: a }),
+      jl({ type: "run.background_submitted", background: true, cwd: dir, runId: id, agentId: a }),
+      jl({ type: "run.state_change", to: "running", reason: "first_event", ts: "2026-07-28T00:00:03.000Z", runId: id, agentId: a }),
+      jl({ type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: `leak ${secret} now` }], ts: "2026-07-28T00:00:10.000Z", runId: id, agentId: a }),
+      // JSON-valid but non-usable entries — the root cause of the reference crash.
+      "null\n",
+      "42\n",
+      "[1,2,3]\n",
+    ];
+    writeFileSync(join(runDir, `${id}.jsonl`), lines.join(""), "utf8");
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_await_result", arguments: { runId: id, waitMs: 0 } });
+      const parsed = res.structuredContent;
+      assert.ok(parsed, "structured read_failure returned (NOT the fixed error text)");
+      assert.equal(res.isError, undefined, "not an error response — no TypeError escaped the service");
+      assert.equal(parsed.observationOutcome, "read_failure");
+      assert.equal(parsed.result.status, "unavailable");
+      assert.deepEqual(parsed.result.messages, []);
+      assert.equal(parsed.runId, id, "trusted runId preserved");
+      assert.equal(parsed.state, "running", "durable state preserved from the usable subset");
+      assert.equal(parsed.terminal, false);
+      assert.equal(parsed.cursor, null, "cursor nulled (untrusted on a corrupt snapshot)");
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes("run_await_result failed"),
+        "no top-level failure text — the service did not throw");
+      assert.ok(!dumped.includes(secret), "no secret leak — collect never ran on the corrupt snapshot");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});
