@@ -21,6 +21,42 @@ import { join } from "node:path";
 import { readRegistry } from "../registry.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 
+// ===== M12-6 FR-02: provider readiness truth SSOT =====
+//
+// Strict truth projection: these fields state ONLY what THIS inventory call
+// actually observed — the registry entry was configured, and authentication /
+// entitlement / live status were NOT probed (this package never makes provider
+// network requests and never reads credential values). The MCP wire schemas
+// derive their enums from these frozen arrays (z.enum(CONFIGURATION_STATUSES)
+// etc.), so it is structurally impossible for any worker to be projected as
+// authenticated/entitled/checked from this inventory path.
+//
+// The single-element arrays are deliberate: the closed set for each field is
+// exactly one value today. Adding a second value requires changing this SSOT —
+// there is no second hand-maintained enum to drift.
+
+export const CONFIGURATION_STATUSES = Object.freeze(["configured"]);
+export const AUTHENTICATION_STATUSES = Object.freeze(["unknown"]);
+export const ENTITLEMENT_STATUSES = Object.freeze(["unknown"]);
+export const LIVE_CHECK_STATUSES = Object.freeze(["not_checked"]);
+
+/**
+ * Build the strict providerReadiness object for one worker.
+ * credentialAvailability (existing closed set) is embedded so the Lead sees
+ * registry-config truth and credential-presence truth together.
+ * @param {"available"|"missing"|"not_required"} credentialAvailability
+ * @returns {{configurationStatus: string, authenticationStatus: string, entitlementStatus: string, liveCheckStatus: string, credentialAvailability: string}}
+ */
+export function buildProviderReadiness(credentialAvailability) {
+  return {
+    configurationStatus: "configured",
+    authenticationStatus: "unknown",
+    entitlementStatus: "unknown",
+    liveCheckStatus: "not_checked",
+    credentialAvailability,
+  };
+}
+
 // ===== Private helpers (owned by this module) =====
 
 /**
@@ -72,7 +108,12 @@ async function buildCertMap(runDir, customReadFile) {
  * @param {Function} [input.readRegistryFn] — injectable readRegistry for testing
  * @param {Function} [input.readFileFn] — injectable readFile for testing
  * @param {Function} [input.userEnvReader] — injectable Windows user-env reader (M11-7)
- * @returns {Promise<Array<{id, backend, model, certification, cwd, credentialAvailability, missingCredentialEnvNames}>>}
+ * @returns {Promise<Array<{id, backend, model, certification, cwd, credentialAvailability, missingCredentialEnvNames, providerReadiness}>>}
+ *   providerReadiness — M12-6 FR-02 strict truth object (configurationStatus
+ *   "configured"; authenticationStatus/entitlementStatus "unknown";
+ *   liveCheckStatus "not_checked"). Never filled with probed values: this
+ *   service performs no provider network request and never reads credential
+ *   values, so it can never claim authenticated/entitled/checked.
  */
 export async function getRegistryInventory({
   registryPath,
@@ -110,6 +151,8 @@ export async function getRegistryInventory({
       sessionReuse: agent.sessionReuse ?? null,
       credentialAvailability: readiness.credentialAvailability,
       missingCredentialEnvNames: readiness.missingCredentialEnvNames,
+      // M12-6 FR-02: strict truth — never claims authenticated/entitled/live.
+      providerReadiness: buildProviderReadiness(readiness.credentialAvailability),
     });
   }
   return results;

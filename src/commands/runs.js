@@ -427,14 +427,19 @@ async function runsDiagnoseCommand(args, config) {
   }
   // M9-5A: diagnosis delegated to shared application service. CLI prints the
   // existing JSON/text output (raw factual evidence for human/ops/debug).
+  // M12-6 FR-02: `code` is a closed-set provider diagnosis label (human fact) —
+  // null unless category is provider_auth. Never the raw error message.
   const d = await getRunDiagnosis({ runId, runDir });
   if (options.format === "json") {
-    // CLI JSON shape unchanged: {runId, category, evidence} — no state/terminal.
-    console.log(JSON.stringify({ runId: d.runId, category: d.category, evidence: d.evidence }, null, 2));
+    // CLI JSON shape: {runId, category, code, evidence} — no state/terminal.
+    console.log(JSON.stringify({ runId: d.runId, category: d.category, code: d.code ?? null, evidence: d.evidence }, null, 2));
     return;
   }
   console.log(`runId:    ${d.runId}`);
   console.log(`category: ${d.category}`);
+  if (d.category === "provider_auth" && d.code) {
+    console.log(`code:     ${d.code}`);
+  }
   if (d.evidence.length > 0) {
     console.log(`evidence:`);
     for (const e of d.evidence) {

@@ -6,11 +6,15 @@
 // 处方权（retry/换 worker/接管/放弃）全在 Lead。这是用户理念的核心：
 //   "诊断可以工具辅助，但应对策略、下一步做什么由 Lead 实机判断，保留灵活性。"
 //
-// 实现上，返回结构只有 { category, evidence }，没有 recommendation 字段；
+// 实现上，返回结构只有 { category, code, evidence }，没有 recommendation 字段；
 // 所有 fact 字符串只陈述发生了什么，不陈述"该做什么"。
+// M12-6 FR-02：code 是 provider_auth 专属的可空闭集诊断码（见
+// PROVIDER_DIAGNOSIS_CODES）——它只给"事实分类"，永不给处方，也不回显原文。
 //
 // 完整分类（12 类，按优先级归类；信号不足归 unknown，不强归类）：
-//   provider_auth               — 401/身份验证失败/unauthor/auth fail
+//   provider_auth               — 401/身份验证失败/unauthor/auth fail；
+//                                 M12-6 FR-02 起含 entitlement 拒绝（subscription
+//                                 access disabled / org policy denied / API key missing）
 //   config_conflict             — 配置层冲突（API key 与登录打架等）
 //   timeout                     — run.timed_out 事件
 //   budget                      — run.state_change reason:budget_exceeded
@@ -49,6 +53,46 @@ export const DIAGNOSIS_CATEGORIES = Object.freeze([
   "none",
 ]);
 
+// M12-6 FR-02: safe closed-set provider diagnosis codes (nullable on the wire).
+// Derived from transcript-visible provider access denial FACTS only — a code
+// labels the denial, it never echoes the raw error message/path/command/key.
+// `unauthorized` is the fallback for plain 401/身份验证/unauthor matches that
+// carry no more specific denial token.
+export const PROVIDER_DIAGNOSIS_CODES = Object.freeze([
+  "subscription_access_disabled",
+  "organization_policy_denied",
+  "api_key_missing",
+  "unauthorized",
+  "invalid_credential",
+]);
+
+// Provider access denial facts that classify as provider_auth even when they
+// contain no AUTH_SIGNAL token. The production fact "Your organization has
+// disabled Claude subscription access for Claude Code ..." contains neither
+// AUTH_SIGNAL nor CONFIG_CONFLICT_SIGNAL tokens — without these signals it
+// falls through to no_effect, which misreads a real entitlement denial as
+// "worker did nothing". Ordered: the FIRST matching signal wins.
+const PROVIDER_DENIAL_SIGNALS = Object.freeze([
+  { code: "subscription_access_disabled", re: /organization has disabled.{0,80}subscription access|subscription access.{0,40}disabled/i },
+  { code: "organization_policy_denied", re: /organization.{0,60}policy.{0,60}(denied|disabled|blocked|does not allow)|policy.{0,40}(denied|blocked|disabled)/i },
+  { code: "api_key_missing", re: /missing.{0,60}api[_\s-]?key|api[_\s-]?key.{0,40}(missing|not (set|found|configured|present)|absent)|(no|without) (api[_\s-]?key|credential)/i },
+  { code: "invalid_credential", re: /invalid.{0,24}(api[_\s-]?key|credential|key|token)|(api[_\s-]?key|credential|key|token).{0,24}(invalid|incorrect|wrong)/i },
+]);
+
+/**
+ * Derive the closed-set code for a provider_auth error. Falls back to
+ * "unauthorized" for plain 401/身份验证/unauthor matches without a more
+ * specific denial token.
+ * @param {string} error - run.error text (never echoed back raw).
+ * @returns {string} code ∈ PROVIDER_DIAGNOSIS_CODES
+ */
+function classifyProviderAuthCode(error) {
+  for (const s of PROVIDER_DENIAL_SIGNALS) {
+    if (s.re.test(error)) return s.code;
+  }
+  return "unauthorized";
+}
+
 // 真正的认证失败：HTTP 401 / 身份验证失败 / unauthorized / 无效 key。
 // C2 收紧：去掉宽泛的 "auth.*fail"/裸 "api_key"（会把配置冲突误判为 provider_auth）。
 // 真实 401 样本含 "401"/"unauthorized"/"身份验证失败"；配置冲突含 "precedence"/"connectors"。
@@ -72,15 +116,33 @@ const PROVIDER_DISCONNECT_SILENCE_MS = 120_000;
 /**
  * 诊断一个 run transcript 的失败原因。只给证据，不给处方。
  *
+ * M12-6 FR-02: the return carries `code` — a nullable closed-set provider
+ * diagnosis code. It is present (∈ PROVIDER_DIAGNOSIS_CODES) ONLY for
+ * provider_auth, null for every other category, so a caller can never project
+ * a code for a non-auth failure and never receives a raw message echo.
+ *
  * @param {Array} events - run transcript 事件数组（按时间序）。
  * @param {string} [expectedRunId] - the runId the caller requested. Binds
  *   control-plane failure classifications so cross-run events cannot pollute
  *   this run's diagnosis.
- * @returns {{category: string, evidence: Array<{eventType: string, fact: string}>}}
+ * @returns {{category: string, code: string|null, evidence: Array<{eventType: string, fact: string}>}}
  *   category ∈ provider_auth|timeout|scorecard_fail|budget|crash|aborted_manual|unknown|none。
+ *   code 仅 provider_auth 非 null，且必属 PROVIDER_DIAGNOSIS_CODES 闭集。
  *   evidence 是事实证据（eventType 指向源事件，fact 陈述具体事实）。
  */
 export function diagnoseFailure(events, expectedRunId) {
+  const raw = diagnoseFailureInner(events, expectedRunId);
+  // Fail closed: only provider_auth may carry a closed-set code; anything else
+  // (including a future provider_auth branch that forgot its code) is null.
+  return {
+    ...raw,
+    code: raw.category === "provider_auth" && PROVIDER_DIAGNOSIS_CODES.includes(raw.code)
+      ? raw.code
+      : null,
+  };
+}
+
+function diagnoseFailureInner(events, expectedRunId) {
   const evs = Array.isArray(events) ? events : [];
   // 空输入：无法判断发生了什么 → unknown。
   if (evs.length === 0) return { category: "unknown", evidence: [] };
@@ -176,12 +238,27 @@ export function diagnoseFailure(events, expectedRunId) {
   }
 
   // 2) provider_auth：真正的 401/身份验证/unauthorized/无效 key（最优先，常见且确定）。
+  // M12-6 FR-02: subscription/org-policy/API-key denial FACTS also classify as
+  // provider_auth even when they carry no 401/unauthorized token (production
+  // fact: "Your organization has disabled Claude subscription access ...").
+  // The code is a closed-set label from PROVIDER_DENIAL_SIGNALS — the evidence
+  // fact carries the code, never the raw error message.
+  const denialError = evs.find(
+    (e) => e.type === "run.error" && typeof e.error === "string"
+      && PROVIDER_DENIAL_SIGNALS.some((s) => s.re.test(e.error)),
+  );
+  if (denialError) {
+    const code = classifyProviderAuthCode(denialError.error);
+    evidence.push({ eventType: "run.error", fact: `provider access denied（${code}）` });
+    return { category: "provider_auth", code, evidence };
+  }
+
   const authError = evs.find(
     (e) => e.type === "run.error" && typeof e.error === "string" && AUTH_SIGNAL.test(e.error),
   );
   if (authError) {
     evidence.push({ eventType: "run.error", fact: `认证/身份验证类错误：${authError.error}` });
-    return { category: "provider_auth", evidence };
+    return { category: "provider_auth", code: classifyProviderAuthCode(authError.error), evidence };
   }
 
   // 2) timeout：run.timed_out 事件。

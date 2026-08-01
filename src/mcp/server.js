@@ -27,7 +27,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-import { getRegistryInventory } from "../application/registryInventory.js";
+import {
+  getRegistryInventory,
+  CONFIGURATION_STATUSES,
+  AUTHENTICATION_STATUSES,
+  ENTITLEMENT_STATUSES,
+  LIVE_CHECK_STATUSES,
+} from "../application/registryInventory.js";
 import { dispatchRun, ReuseBusyError } from "../application/runDispatch.js";
 import { randomUUID } from "node:crypto";
 import { getRunStatus } from "../application/runStatus.js";
@@ -93,7 +99,7 @@ import {
 } from "../application/playbookCatalog.js";
 import { isValidRunId } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, UNKNOWN_PACKAGING_CODE } from "../deliveryFailureCodes.js";
-import { DIAGNOSIS_CATEGORIES } from "../diagnosis.js";
+import { DIAGNOSIS_CATEGORIES, PROVIDER_DIAGNOSIS_CODES } from "../diagnosis.js";
 import { RUN_STATES, RECOVERY_CANDIDATE_KINDS, REVERIFY_FAILURE_CODES } from "../transcript.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 import {
@@ -161,6 +167,21 @@ const SERVICE_ERROR_TEXT = "registry_list failed";
 // override server-side registryPath/runDir via tool arguments.
 const REGISTRY_LIST_INPUT = z.object({}).strict();
 
+// M12-6 FR-02: strict provider readiness truth projection. Enums derive from
+// the registryInventory.js SSOT (z.enum(CONFIGURATION_STATUSES) etc.), so the
+// wire can NEVER carry authenticated/entitled/checked — this inventory path
+// performs no provider probe. Fields state only what was observed: the registry
+// entry is configured; authentication/entitlement are unknown; no live check
+// was done. The strict object is REQUIRED on every agent (a service output
+// without it fails closed instead of silently omitting the truth).
+const PROVIDER_READINESS = z.object({
+  configurationStatus: z.enum(CONFIGURATION_STATUSES),
+  authenticationStatus: z.enum(AUTHENTICATION_STATUSES),
+  entitlementStatus: z.enum(ENTITLEMENT_STATUSES),
+  liveCheckStatus: z.enum(LIVE_CHECK_STATUSES),
+  credentialAvailability: z.enum(["available", "missing", "not_required"]),
+}).strict();
+
 // The structured output shape: { agents: [...] }. certification is nullable
 // because an agent may have no reliability-summary entry.
 // M11-7: credentialAvailability (available|missing|not_required) is DISTINCT
@@ -181,6 +202,7 @@ const AGENT_ENTRY = z.object({
   sessionReuse: z.enum(["lead_workspace"]).nullable(),
   credentialAvailability: z.enum(["available", "missing", "not_required"]),
   missingCredentialEnvNames: z.array(z.string()).max(32),
+  providerReadiness: PROVIDER_READINESS,
 });
 
 const REGISTRY_LIST_OUTPUT = z.object({
@@ -487,6 +509,11 @@ const RUN_DIAGNOSE_OUTPUT = z.object({
   state: z.string(),
   terminal: z.boolean(),
   category: DIAGNOSIS_CATEGORY_ENUM,
+  // M12-6 FR-02: nullable closed-set provider diagnosis code. Enum derives from
+  // the diagnosis.js SSOT — no second list. Only provider_auth may carry a
+  // non-null code; invalid/unknown values project to null (fail closed, no raw
+  // echo), enforced by the handler before this schema parses the payload.
+  code: z.enum(PROVIDER_DIAGNOSIS_CODES).nullable(),
   signalEventTypes: z.array(z.string().min(1).max(DIAGNOSE_MAX_TYPE_CHARS)).max(DIAGNOSE_MAX_SIGNALS),
   signalCount: z.number().int().nonnegative(),
   signalsTruncated: z.boolean(),
@@ -1221,6 +1248,8 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
     reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).nullable(),
     certification: z.string().nullable(),
     credentialAvailability: z.enum(["available", "missing", "not_required"]),
+    // M12-6 FR-02: same strict truth object as registry_list (shared SSOT enums).
+    providerReadiness: PROVIDER_READINESS,
   }).strict()).max(WORKERS_CAP).nullable(),
   activeRuns: z.array(z.object({
     runId: z.string().max(128),
@@ -2417,11 +2446,18 @@ export function createWaoMcpServer({
             return SAFE_DIAGNOSIS_EVENT_TYPES.has(t) ? t : "unknown";
           });
         const signalEventTypes = allTypes.slice(0, DIAGNOSE_MAX_SIGNALS);
+        // M12-6 FR-02: closed-set code projection. Only provider_auth may carry
+        // a code, and only if it is IN the kernel SSOT closed set — an invalid
+        // or attacker-controlled value fails closed to null, never echoed raw.
+        const code = diag.category === "provider_auth" && PROVIDER_DIAGNOSIS_CODES.includes(diag.code)
+          ? diag.code
+          : null;
         const payload = {
           runId: diag.runId,
           state: diag.state,
           terminal: diag.terminal,
           category: diag.category,
+          code,
           signalEventTypes,
           signalCount: allTypes.length,
           signalsTruncated: allTypes.length > DIAGNOSE_MAX_SIGNALS,

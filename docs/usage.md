@@ -494,7 +494,13 @@ OpenCode（`opencode-ai` npm 包，不是已废弃的 `opencode`）作为 MCP Le
   "agents": [
     { "id": "coder_low", "backend": "claude-code", "model": "glm-5-turbo",
       "certification": "certified", "cwd": "/repo",
-      "credentialAvailability": "available", "missingCredentialEnvNames": [] }
+      "credentialAvailability": "available", "missingCredentialEnvNames": [],
+      "providerReadiness": {
+        "configurationStatus": "configured",
+        "authenticationStatus": "unknown",
+        "entitlementStatus": "unknown",
+        "liveCheckStatus": "not_checked",
+        "credentialAvailability": "available" } }
   ]
 }
 ```
@@ -502,6 +508,14 @@ OpenCode（`opencode-ai` npm 包，不是已废弃的 `opencode`）作为 MCP Le
 字段语义与 CLI `registry list --format json` 的数组元素一致（MCP 仅多一层 `agents` 包装）。`registry_list` 是只读操作，调用前后 runDir 不会有新增 transcript/run 文件。
 
 **M11-7 凭据可用性**：`certification` 是历史可靠性认证结果，不等于"此刻可启动"。`credentialAvailability`（`available` / `missing` / `not_required`）只反映 worker **registry 显式声明为必需**的 credential（`provider.apiKeyEnv` / legacy `--api-key-env`）是否在当前环境可用——不声称 runtime 整体健康。优先 `process.env`，回退 Windows Current-User 环境，两处都缺失则为 `missing`；未声明必需凭据的 worker 为 `not_required`。**可选继承变量**（如 `OPENAI_BASE_URL`、`CODEX_HOME`、`KIMI_MODEL_NAME`）会被继承但不参与 missing gate——不会因缺少可选配置阻止派发。`missingCredentialEnvNames` 列出缺失的必需 env 变量**名**（绝不包含值）。`run_dispatch` 在 transcript 写入和 fork 前用同一 readiness 检查拒绝 `missing` 的 worker（零 transcript、零 fork），返回固定可行动错误。WAO 不保存/轮换凭据，不批量导入用户环境，只读取 registry 明确声明的精确变量名；设置或轮换凭据后**无需重启 Host**（每次评估重新观察当前状态）。
+
+**M12-6 FR-02 provider readiness 真相（truth）**：`providerReadiness` 是严格投影对象，字段含义：
+- `configurationStatus`（恒为 `"configured"`）——只证明该 registry 条目已配置，**不等于** worker 可运行；
+- `authenticationStatus` / `entitlementStatus`（恒为 `"unknown"`）——本次 inventory **没有做任何 provider 探测**，因此**永远不得**宣称已认证/已授权；
+- `liveCheckStatus`（恒为 `"not_checked"`）——本次调用**没有做 live check**；
+- `credentialAvailability`——同 M11-7 语义，只证明必需凭据 env 名存在（或无需凭据）。
+
+**语义铁律**：preflight/registry 查询"完成"只表示机械事实（registry 可读、必需凭据 env 名存在/不存在、配置条目存在）可读，**不是** authenticated/entitled/live-checked 的证明。本包不做 provider 网络请求、不读凭据值，所以结构上不可能投影出 `authenticated` / `entitled` / `checked`——MCP schema 的枚举直接派生自这些闭集常量（`src/application/registryInventory.js` 的 `CONFIGURATION_STATUSES` / `AUTHENTICATION_STATUSES` / `ENTITLEMENT_STATUSES` / `LIVE_CHECK_STATUSES`），不存在第二份手工维护列表。真实认证/授权状态只能来自实际运行/诊断（见 `run_diagnose` 的 `code`）。
 
 ### MCP `run_dispatch`（supervised background dispatch，M9-2B）
 
@@ -602,7 +616,7 @@ annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:true, o
 
 ### MCP `lead_preflight`（advisory 单调用启动检查，M11-8A）
 
-`lead_preflight` 让 Lead 一次调用完成 workspace 选择/确认 + worker credential 可用性 + active-run 查询，替代机械地依次调用 `workspace_select`/`workspace_status` + `registry_list` + `runs_list`。**ADVISORY ONLY，不是 gate**：每项检查独立结算（一项失败不吞其他），输出是事实供 Lead 判断，绝不自动中止——不产生 permit/token/approval 状态，`run_dispatch`/`workspace_select`/`registry_list`/`runs_list` 不依赖它曾成功。`complete` 仅表示机械事实是否可读取，不是"是否应派发"的裁定。
+`lead_preflight` 让 Lead 一次调用完成 workspace 选择/确认 + worker credential 可用性 + active-run 查询，替代机械地依次调用 `workspace_select`/`workspace_status` + `registry_list` + `runs_list`。**ADVISORY ONLY，不是 gate**：每项检查独立结算（一项失败不吞其他），输出是事实供 Lead 判断，绝不自动中止——不产生 permit/token/approval 状态，`run_dispatch`/`workspace_select`/`registry_list`/`runs_list` 不依赖它曾成功。`complete` 仅表示机械事实（registry 可读、必需凭据 env 名存在/不存在、active run 可数）是否可读取，**不是** authenticated/entitled/live-checked 的证明，也不是"是否应派发"的裁定——M12-6 FR-02：preflight 完成永不意味着任何 worker 已被认证/授权/做过 live check（每个 worker 的 `providerReadiness` 恒为 unknown/not_checked）。
 
 `lead_preflight` tool：
 
@@ -619,7 +633,7 @@ annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:true, o
 ```json
 {
   "workspace": { "bound": true, "source": "lead_session", "gitHead": "abc...", "dirty": false },
-  "workers": [ { "id": "...", "backend": "...", "model": "...", "certification": "certified", "credentialAvailability": "available" } ],
+  "workers": [ { "id": "...", "backend": "...", "model": "...", "certification": "certified", "credentialAvailability": "available", "providerReadiness": { "configurationStatus": "configured", "authenticationStatus": "unknown", "entitlementStatus": "unknown", "liveCheckStatus": "not_checked", "credentialAvailability": "available" } } ],
   "activeRuns": [ { "runId": "...", "agentId": "...", "state": "running", "terminal": false, "updatedAt": "..." } ],
   "observations": ["..."], "warnings": ["..."],
   "manualChecks": ["workspace_status — ...", "registry_list — ...", "runs_list — ..."],
@@ -775,7 +789,8 @@ annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:false, 
   "runId": "run_...",
   "state": "failed",
   "terminal": true,
-  "category": "provider_disconnect",
+  "category": "provider_auth",
+  "code": "subscription_access_disabled",
   "signalEventTypes": ["run.event", "run.error"],
   "signalCount": 2,
   "signalsTruncated": false
@@ -783,6 +798,8 @@ annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:false, 
 ```
 
 `category` 来自 `DIAGNOSIS_CATEGORIES` SSOT（13 类 enum，包含 delivery worktree 越界的 `workdir_escape`）。`signalEventTypes` 只保留 evidence 的 event type（最多 8 条，每条 ≤64 字符，异常映射为 `unknown`），**绝不返回** raw fact/error/detail/reason/check name/command/tool payload/path/timestamp/prompt/PID/sessionId/provider stderr/环境变量，也**绝不返回** recommendation/advice/retry/nextStep。`content` JSON 与 `structuredContent` 语义一致。失败返回固定 `run_diagnose failed`。
+
+**M12-6 FR-02 诊断码（`code`）**：可空闭集字段，仅当 `category === "provider_auth"` 时非 `null`，取值必须属于 `PROVIDER_DIAGNOSIS_CODES` SSOT（`src/diagnosis.js`）：`subscription_access_disabled`（组织禁用了 Claude subscription access）、`organization_policy_denied`（组织策略拒绝）、`api_key_missing`（必需 API key 缺失）、`unauthorized`（401/身份验证失败）、`invalid_credential`（无效 key/credential）。其他类别恒为 `null`。`code` 是**事实标签**——把此前被误归 `no_effect` 的 entitlement 拒绝（无 401/unauthor 字样、含 "Your organization has disabled Claude subscription access ..." 等真实文本）稳定归类为 `provider_auth` 并给出可机读原因；它**永远不**回显原始错误文本/path/command/key/payload，服务返回的非法/越集 code 一律折叠为 `null`（fail closed）。CLI `runs diagnose` 显示同一 category 与 code。
 
 annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`（纯只读查询，不触碰外部系统）。
 

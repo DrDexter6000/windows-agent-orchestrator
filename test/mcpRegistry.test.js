@@ -146,8 +146,8 @@ test("M9-1-03: registry_list calls injected service exactly once and returns str
     callCount += 1;
     capturedArgs = input;
     return [
-      { id: "coder_low", backend: "claude-code", model: "glm-5-turbo", reasoningEffort: null, certification: "certified", cwd: "/repo", sessionReuse: null, credentialAvailability: "available", missingCredentialEnvNames: [] },
-      { id: "researcher", backend: "claude-code", model: "opus", reasoningEffort: null, certification: null, cwd: "/repo", sessionReuse: null, credentialAvailability: "available", missingCredentialEnvNames: [] },
+      { id: "coder_low", backend: "claude-code", model: "glm-5-turbo", reasoningEffort: null, certification: "certified", cwd: "/repo", sessionReuse: null, credentialAvailability: "available", missingCredentialEnvNames: [], providerReadiness: { configurationStatus: "configured", authenticationStatus: "unknown", entitlementStatus: "unknown", liveCheckStatus: "not_checked", credentialAvailability: "available" } },
+      { id: "researcher", backend: "claude-code", model: "opus", reasoningEffort: null, certification: null, cwd: "/repo", sessionReuse: null, credentialAvailability: "available", missingCredentialEnvNames: [], providerReadiness: { configurationStatus: "configured", authenticationStatus: "unknown", entitlementStatus: "unknown", liveCheckStatus: "not_checked", credentialAvailability: "available" } },
     ];
   };
 
@@ -822,8 +822,8 @@ test("M9-1-C5: registry_list declares readOnly/destructive/idempotent/openWorld 
 
 test("M9-1-C6: output schema declared; structuredContent matches schema and text JSON", async () => {
   const fakeService = async () => [
-    { id: "coder_low", backend: "claude-code", model: "glm-5-turbo", reasoningEffort: null, certification: "certified", cwd: "/r", sessionReuse: null, credentialAvailability: "available", missingCredentialEnvNames: [] },
-    { id: "tester", backend: "codex", model: "(default)", reasoningEffort: null, certification: null, cwd: "/r", sessionReuse: null, credentialAvailability: "available", missingCredentialEnvNames: [] },
+    { id: "coder_low", backend: "claude-code", model: "glm-5-turbo", reasoningEffort: null, certification: "certified", cwd: "/r", sessionReuse: null, credentialAvailability: "available", missingCredentialEnvNames: [], providerReadiness: { configurationStatus: "configured", authenticationStatus: "unknown", entitlementStatus: "unknown", liveCheckStatus: "not_checked", credentialAvailability: "available" } },
+    { id: "tester", backend: "codex", model: "(default)", reasoningEffort: null, certification: null, cwd: "/r", sessionReuse: null, credentialAvailability: "available", missingCredentialEnvNames: [], providerReadiness: { configurationStatus: "configured", authenticationStatus: "unknown", entitlementStatus: "unknown", liveCheckStatus: "not_checked", credentialAvailability: "available" } },
   ];
 
   const server = createWaoMcpServer({

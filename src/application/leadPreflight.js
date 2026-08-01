@@ -27,7 +27,7 @@
 //     or persist anything.
 //   - Composes existing application services (getRegistryInventory, listRuns).
 
-import { getRegistryInventory } from "./registryInventory.js";
+import { getRegistryInventory, buildProviderReadiness } from "./registryInventory.js";
 
 /**
  * @typedef {Object} PreflightWorkspace
@@ -190,6 +190,11 @@ export async function aggregateLeadPreflight({
       reasoningEffort: a.reasoningEffort ?? null,
       certification: a.certification,
       credentialAvailability: a.credentialAvailability,
+      // M12-6 FR-02: strict provider readiness truth. The inventory service
+      // provides it; the fallback keeps this aggregator truthful even when a
+      // caller supplies a service-shaped inventory without the field (only
+      // unknown/not_checked values can be derived here — no probe exists).
+      providerReadiness: a.providerReadiness ?? buildProviderReadiness(a.credentialAvailability),
     }));
     checkStatus.workers = "observed";
     if (agents.length > WORKERS_CAP) {

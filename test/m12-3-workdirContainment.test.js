@@ -141,6 +141,9 @@ test("M12-3-ISO-R1: delivery run rejects an absolute file_written outside effect
       diagnoseFailure(output.events, "run_m123_containment"),
       {
         category: "workdir_escape",
+        // M12-6 FR-02: code is the nullable closed-set provider diagnosis code —
+        // null for every non-provider_auth category.
+        code: null,
         evidence: [{
           eventType: "run.isolation_violation",
           fact: "worker reported a file write outside the authorized delivery worktree",

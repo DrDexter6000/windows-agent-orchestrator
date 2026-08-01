@@ -28,7 +28,9 @@ import { diagnoseFailure } from "../diagnosis.js";
  * @param {string} input.runId — must pass isValidRunId
  * @param {string} input.runDir — runs/ directory (host-owned)
  * @param {Function} [input.readTranscriptFn] — injectable for testing
- * @returns {Promise<{runId, state, terminal, category, evidence}>}
+ * @returns {Promise<{runId, state, terminal, category, code, evidence}>}
+ *   code — nullable closed-set provider diagnosis code (M12-6 FR-02); only
+ *   provider_auth carries a non-null value, always ∈ PROVIDER_DIAGNOSIS_CODES.
  */
 export async function getRunDiagnosis({
   runId,
@@ -54,7 +56,7 @@ export async function getRunDiagnosis({
   // M11-8C closeout (Gap B): pass the requested runId so diagnoseFailure can
   // bind the delivery_packaging_failed classification — a cross-run
   // run.delivery_failed event must NOT pollute this run's diagnosis.
-  const { category, evidence } = diagnoseFailure(events, runId);
+  const { category, code, evidence } = diagnoseFailure(events, runId);
 
-  return { runId, state, terminal, category, evidence };
+  return { runId, state, terminal, category, code, evidence };
 }

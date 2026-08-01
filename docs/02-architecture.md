@@ -967,13 +967,13 @@ src/
 ├── metrics.js                # 横切：metrics 聚合
 ├── runEvent.js               # L1：RunEvent 类型（message/done/metrics + 证据 command/file_written/tool_use/tool_result）
 ├── scorecard.js              # 横切：证据链门控
-├── diagnosis.js              # 横切：故障诊断（M8-3+C，给证据不给处方；类别 provider_auth/config_conflict/timeout/scorecard_fail/budget/crash/aborted_manual/unknown）
+├── diagnosis.js              # 横切：故障诊断（M8-3+C，给证据不给处方；类别 provider_auth/config_conflict/timeout/scorecard_fail/budget/crash/aborted_manual/unknown；M12-6 FR-02 增 PROVIDER_DIAGNOSIS_CODES 闭集 code——provider_auth 专属、entitlement 拒绝（subscription access disabled/org policy denied/API key missing）不再漏归 no_effect，code 永不回显原文）
 ├── smoke.js                  # L4：真实 CLI smoke 入口（npm run smoke）
 ├── mcp/                      # L4：MCP adapter（M9-1，agent-facing primary）
 │   ├── server.js             #   MCP server factory + 20 tools（lead_preflight/registry_list/workspace_status/workspace_select/run_dispatch/run_status/run_wait/run_await_result/run_collect/run_diagnose/run_delivery/run_delivery_review/run_delivery_review_bundle/run_delivery_reverify/run_delivery_decide/run_delivery_repackage/run_stop/runs_list/playbook_list/playbook_get）
 │   └── stdio.js              #   stdio production entrypoint（StdioServerTransport，npm run mcp，--workspace-root）
 ├── application/              # L3：shared application services（M9 use-case 层）
-│   ├── registryInventory.js  #   registry inventory SSOT（M9-0，CLI + MCP 共用）
+│   ├── registryInventory.js  #   registry inventory SSOT（M9-0，CLI + MCP 共用；M12-6 FR-02 增 providerReadiness 严格真相投影——CONFIGURATION_STATUSES/AUTHENTICATION_STATUSES/ENTITLEMENT_STATUSES/LIVE_CHECK_STATUSES 闭集常量，MCP 枚举直接派生，无第二份列表）
 │   ├── runDispatch.js        #   background dispatch service（M9-2A，CLI + MCP 共用）
 │   ├── runStatus.js          #   read-only run status service（M9-3A，CLI + MCP 共用）
 │   ├── runCollect.js         #   run collection service（M9-4A，CLI + MCP 共用）
