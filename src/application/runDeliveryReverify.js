@@ -273,6 +273,17 @@ export async function runDeliveryReverify({
     authorizedWorkspaceRoot,
   );
 
+  // M12-6 Package 3B1: the durable reverify chain must be CLEAN before this call
+  // extends it. A malformed chain — a foreign-envelope reverify event, an
+  // identity mismatch, or a persisted request with an unknown reason / invalid
+  // setup commands — is a durable conflict: fail closed BEFORE any verifier
+  // execution or transcript append. A garbage request must never reach
+  // verifyDeliveryFn, and a conflict must never be extended.
+  const chainBefore = projectReverifyChain(events, runId, createdRef);
+  if (chainBefore.status === "malformed") {
+    throw new Error("runDeliveryReverify: reverify chain is malformed — refusing to verify or extend it");
+  }
+
   // Phase 1: lock-scoped CAS append of the requested event. Yields to an existing
   // request — a retry/competitor converges on the FIRST caller's recorded setup.
   const context = {
@@ -296,7 +307,6 @@ export async function runDeliveryReverify({
   // Phase 2 + 3: verify (outside the lock) + record the outcome (lock-scoped CAS).
   // Idempotent short-circuit: if the chain was already COMPLETE before this call,
   // the recorded outcome is authoritative — skip re-verification.
-  const chainBefore = projectReverifyChain(events, runId, createdRef);
   let effectiveOutcome;
   let effectiveFailureCode;
   let effectiveRef;
@@ -344,7 +354,12 @@ export async function runDeliveryReverify({
     }
   }
 
-  const state = requestedThisCall
+  // M12-6 Package 3B1: concurrent result-state truth. "created" requires THIS
+  // call to have durably created the request AND recorded the final outcome. If
+  // a concurrent caller recorded the outcome while we were verifying (verification
+  // runs OUTSIDE the transcript lock, contract #5), this call is a duplicate
+  // observer for the outcome — it must report idempotent, never created.
+  const state = requestedThisCall && outcomeThisCall
     ? "created"
     : (outcomeThisCall ? "resumed" : "idempotent");
 

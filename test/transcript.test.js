@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,6 +10,7 @@ import {
   findState,
   findLastEventSeq,
   validateDeliveryFacts,
+  projectReverifyChain,
   RUN_STATES,
   TERMINAL_STATES,
 } from "../src/transcript.js";
@@ -504,4 +505,364 @@ test("M12-6 root cause: primitive/array events are non-usable (silent wrong deri
   assert.doesNotThrow(() => findState([[1, 2]]));
   assert.equal(findLastEventSeq([[1, 2]]), 0);
   assert.equal(findState(["str"]), "running");
+});
+
+// ============================================================
+// M12-6 Package 3B1: fail-closed + identity-bound reverify chain.
+//
+// The reverify audit chain must fail closed and stay identity-bound:
+//   - A reverify event whose ENVELOPE runId differs from the requested run but
+//     whose embedded DeliveryRef targets the requested run is a durable
+//     CONFLICT — projectReverifyChain must project "malformed", never filter
+//     the event away into "none"/"pending"/"complete".
+//   - A persisted requested event with an unknown reason, blank/non-string/
+//     too-many/too-long setup commands, or a mismatched embedded identity
+//     (runId/commit/base/artifact) is malformed and must NEVER project an
+//     effective pass, reach decision acceptance, or be reused by the CAS
+//     primitives for verification.
+//   - The lock-scoped CAS appends consider ALL durable reverify events (any
+//     envelope) and refuse to append a second event onto a conflict.
+// ============================================================
+
+const REV_RUN = "run_m12p3b1_proj";
+const REV_AGENT = "coder_hq";
+const REV_COMMIT = "a".repeat(40);
+const REV_BASE = "b".repeat(40);
+
+function revRef(overrides = {}) {
+  return {
+    schemaVersion: 1,
+    kind: "git_commit",
+    runId: REV_RUN,
+    baseCommit: REV_BASE,
+    deliveryCommit: REV_COMMIT,
+    branch: `wao/${REV_RUN}`,
+    worktreePath: "/fake/wt",
+    changedFiles: ["src/a.js"],
+    verification: { status: "pending", commands: ["assert"] },
+    acceptance: { status: "pending", reviewerType: "lead_agent" },
+    integration: { status: "pending", targetCommit: null },
+    ...overrides,
+  };
+}
+
+function revRequested(overrides = {}) {
+  return {
+    type: "run.delivery_reverification_requested",
+    runId: REV_RUN,
+    delivery: revRef(),
+    deliveryCommit: REV_COMMIT,
+    reason: "tooling_invalid",
+    ...overrides,
+  };
+}
+
+function revOutcome(outcome, overrides = {}) {
+  const type = outcome === "passed"
+    ? "run.delivery_reverification_passed"
+    : outcome === "failed"
+      ? "run.delivery_reverification_failed"
+      : "run.delivery_reverification_unavailable";
+  return {
+    type,
+    runId: REV_RUN,
+    delivery: revRef({
+      verification: { status: outcome, commands: ["assert"], verifiedCommit: REV_COMMIT, results: [] },
+    }),
+    deliveryCommit: REV_COMMIT,
+    ...overrides,
+  };
+}
+
+test("M12-6-3B1-P1: a foreign-envelope requested event targeting this run is a visible conflict → malformed (never filtered to none)", () => {
+  const p = projectReverifyChain(
+    [revRequested({ runId: "run_foreign" })],
+    REV_RUN,
+    revRef(),
+  );
+  assert.equal(p.status, "malformed", "the foreign-envelope event must never be filtered away");
+  assert.equal(p.effectiveStatus, null);
+  assert.equal(p.reason, null);
+});
+
+test("M12-6-3B1-P2: a foreign-envelope outcome event is a conflict for EACH outcome type independently (never pending/complete)", () => {
+  for (const outcome of ["passed", "failed", "unavailable"]) {
+    // A valid bound request + a foreign-envelope outcome: the foreign outcome
+    // must not be filtered into a clean "pending" chain.
+    const p = projectReverifyChain(
+      [revRequested(), revOutcome(outcome, { runId: "run_foreign" })],
+      REV_RUN,
+      revRef(),
+    );
+    assert.equal(p.status, "malformed", `${outcome}: foreign outcome with valid request`);
+    assert.equal(p.effectiveStatus, null, `${outcome}: no effective status may project`);
+    // The foreign outcome alone must not look like a clean "none" chain.
+    const alone = projectReverifyChain(
+      [revOutcome(outcome, { runId: "run_foreign" })],
+      REV_RUN,
+      revRef(),
+    );
+    assert.equal(alone.status, "malformed", `${outcome}: foreign outcome alone`);
+  }
+});
+
+test("M12-6-3B1-P3: a persisted request with an unknown reason is malformed — never projects effective pass, never accepts", () => {
+  const p = projectReverifyChain(
+    [revRequested({ reason: "not_a_real_reason" }), revOutcome("passed")],
+    REV_RUN,
+    revRef(),
+  );
+  assert.equal(p.status, "malformed", "an unknown persisted reason must not make the chain complete");
+  assert.equal(p.effectiveStatus, null, "a garbage request must never project an effective pass");
+
+  // Decision acceptance path: validateDeliveryFacts must keep the EFFECTIVE
+  // status at the original failure for a malformed chain.
+  const facts = validateDeliveryFacts([
+    { type: "run.delivery_created", runId: REV_RUN, delivery: revRef() },
+    {
+      type: "run.delivery_verification_failed",
+      runId: REV_RUN,
+      delivery: revRef({
+        verification: { status: "failed", failureCode: "command_failed", commands: ["assert"], verifiedCommit: REV_COMMIT, results: [] },
+      }),
+      deliveryCommit: REV_COMMIT,
+    },
+    revRequested({ reason: "not_a_real_reason" }),
+    revOutcome("passed"),
+  ]);
+  assert.equal(facts.reverifyStatus, "malformed");
+  assert.equal(facts.effectiveVerificationStatus, "failed", "effective status stays at the original failure");
+});
+
+test("M12-6-3B1-P4: a persisted request with blank/non-string/too-many/too-long/non-array setup commands is malformed", () => {
+  const badSetup = [
+    ["blank command", ["  "]],
+    ["non-string command", ["ok", 7]],
+    ["too many commands", Array.from({ length: 33 }, () => "x")],
+    ["too long command", ["x".repeat(513)]],
+    ["non-array", { cmd: "x" }],
+  ];
+  for (const [label, setupCommands] of badSetup) {
+    const p = projectReverifyChain(
+      [revRequested({ setupCommands }), revOutcome("passed")],
+      REV_RUN,
+      revRef(),
+    );
+    assert.equal(p.status, "malformed", label);
+    assert.equal(p.effectiveStatus, null, `${label}: no effective pass`);
+  }
+});
+
+test("M12-6-3B1-P5: mismatched embedded identity (runId/commit/base/missing artifact) is malformed and never projects effective pass", () => {
+  const mismatches = [
+    ["embedded runId", { delivery: revRef({ runId: "run_other" }) }],
+    ["embedded deliveryCommit", { delivery: revRef({ deliveryCommit: "e".repeat(40) }) }],
+    ["embedded baseCommit", { delivery: revRef({ baseCommit: "f".repeat(40) }) }],
+    ["missing artifact (no delivery)", { delivery: undefined }],
+  ];
+  for (const [label, reqOverrides] of mismatches) {
+    const p = projectReverifyChain(
+      [revRequested(reqOverrides), revOutcome("passed")],
+      REV_RUN,
+      revRef(),
+    );
+    assert.equal(p.status, "malformed", label);
+    assert.equal(p.effectiveStatus, null, `${label}: no effective pass`);
+  }
+});
+
+test("M12-6-3B1-P6: valid chains still project none/pending/complete (regression)", () => {
+  assert.equal(projectReverifyChain([], REV_RUN, revRef()).status, "none");
+  const pending = projectReverifyChain([revRequested()], REV_RUN, revRef());
+  assert.equal(pending.status, "pending");
+  assert.equal(pending.reason, "tooling_invalid");
+  const complete = projectReverifyChain([revRequested(), revOutcome("passed")], REV_RUN, revRef());
+  assert.equal(complete.status, "complete");
+  assert.equal(complete.effectiveStatus, "passed");
+});
+
+test("M12-6-3B1-C1: tryAppendReverifyRequested never appends a second request onto a foreign-envelope requested event (fail closed, one chain maximum)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "m12p3b1-c1-"));
+  try {
+    const filePath = join(dir, `${REV_RUN}.jsonl`);
+    // A foreign-envelope requested event whose embedded DeliveryRef targets
+    // THIS run — the CAS must see it and refuse to start a second chain.
+    await writeFile(filePath, JSON.stringify({
+      ts: "2026-08-01T00:00:00.000Z",
+      seq: 1,
+      runId: "run_foreign",
+      agentId: REV_AGENT,
+      type: "run.delivery_reverification_requested",
+      delivery: revRef(),
+      deliveryCommit: REV_COMMIT,
+      reason: "tooling_invalid",
+    }) + "\n", "utf8");
+    const t = new JsonlTranscript(filePath, { runId: REV_RUN, agentId: REV_AGENT });
+    const before = await readFile(filePath, "utf8");
+    await assert.rejects(
+      () => t.tryAppendReverifyRequested({ delivery: revRef(), reason: "tooling_invalid" }),
+      /malformed|conflict|chain/i,
+      "must fail closed instead of appending a second request",
+    );
+    assert.equal(await readFile(filePath, "utf8"), before, "no second request appended");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("M12-6-3B1-C2: tryAppendReverifyRequested refuses to yield/reuse a persisted request with unknown reason or malformed setup", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "m12p3b1-c2-"));
+  try {
+    const filePath = join(dir, `${REV_RUN}.jsonl`);
+    const seed = (payload) => writeFile(filePath, JSON.stringify({
+      ts: "2026-08-01T00:00:00.000Z",
+      seq: 1,
+      runId: REV_RUN,
+      agentId: REV_AGENT,
+      type: "run.delivery_reverification_requested",
+      delivery: revRef(),
+      deliveryCommit: REV_COMMIT,
+      ...payload,
+    }) + "\n", "utf8");
+
+    for (const [label, payload] of [
+      ["unknown reason", { reason: "not_a_real_reason" }],
+      ["blank setup command", { reason: "tooling_invalid", setupCommands: ["  "] }],
+      ["non-string setup command", { reason: "tooling_invalid", setupCommands: ["ok", 7] }],
+      ["too many setup commands", { reason: "tooling_invalid", setupCommands: Array.from({ length: 33 }, () => "x") }],
+      ["too long setup command", { reason: "tooling_invalid", setupCommands: ["x".repeat(513)] }],
+    ]) {
+      await seed(payload);
+      const t = new JsonlTranscript(filePath, { runId: REV_RUN, agentId: REV_AGENT });
+      await assert.rejects(
+        () => t.tryAppendReverifyRequested({ delivery: revRef(), reason: "tooling_invalid" }),
+        /malformed|reason|setup|chain/i,
+        label,
+      );
+      assert.equal((await readFile(filePath, "utf8")).trim().split("\n").length, 1, `${label}: nothing appended`);
+      await rm(filePath, { force: true });
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("M12-6-3B1-C3: tryAppendReverifyOutcome never appends onto a foreign-envelope conflict or a garbage request", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "m12p3b1-c3-"));
+  try {
+    const filePath = join(dir, `${REV_RUN}.jsonl`);
+    const seedLine = (ev) => JSON.stringify({
+      ts: "2026-08-01T00:00:00.000Z",
+      seq: 1,
+      runId: REV_RUN,
+      agentId: REV_AGENT,
+      ...ev,
+    });
+
+    // 1. A foreign-envelope passed outcome (identity targets this run) exists.
+    await writeFile(filePath, seedLine({
+      type: "run.delivery_reverification_passed",
+      runId: "run_foreign",
+      delivery: revRef({ verification: { status: "passed", commands: ["assert"], verifiedCommit: REV_COMMIT, results: [] } }),
+      deliveryCommit: REV_COMMIT,
+    }) + "\n", "utf8");
+    let t = new JsonlTranscript(filePath, { runId: REV_RUN, agentId: REV_AGENT });
+    await assert.rejects(
+      () => t.tryAppendReverifyOutcome({ delivery: revRef(), outcome: "passed" }),
+      /malformed|exactly one|chain/i,
+      "must not append a second outcome onto the foreign-envelope conflict",
+    );
+    assert.equal((await readFile(filePath, "utf8")).trim().split("\n").length, 1, "no outcome appended");
+    await rm(filePath, { force: true });
+
+    // 2. A foreign-envelope requested event + a valid request: the exactly-one
+    //    count must span ALL durable events, so appending must be refused.
+    await writeFile(filePath, [
+      seedLine({ type: "run.delivery_reverification_requested", delivery: revRef(), deliveryCommit: REV_COMMIT, reason: "tooling_invalid" }),
+      seedLine({ type: "run.delivery_reverification_requested", runId: "run_foreign", delivery: revRef(), deliveryCommit: REV_COMMIT, reason: "tooling_invalid" }),
+    ].join("\n") + "\n", "utf8");
+    t = new JsonlTranscript(filePath, { runId: REV_RUN, agentId: REV_AGENT });
+    await assert.rejects(
+      () => t.tryAppendReverifyOutcome({ delivery: revRef(), outcome: "passed" }),
+      /malformed|exactly one|chain/i,
+      "must not append an outcome onto a duplicated request chain",
+    );
+    assert.equal((await readFile(filePath, "utf8")).trim().split("\n").length, 2, "no outcome appended");
+    await rm(filePath, { force: true });
+
+    // 3. A garbage-shaped persisted request (unknown reason): never append an
+    //    outcome onto it.
+    await writeFile(filePath, seedLine({
+      type: "run.delivery_reverification_requested",
+      reason: "not_a_real_reason",
+      delivery: revRef(),
+      deliveryCommit: REV_COMMIT,
+    }) + "\n", "utf8");
+    t = new JsonlTranscript(filePath, { runId: REV_RUN, agentId: REV_AGENT });
+    await assert.rejects(
+      () => t.tryAppendReverifyOutcome({ delivery: revRef(), outcome: "passed" }),
+      /malformed|reason|chain/i,
+      "must not append an outcome onto a garbage request",
+    );
+    assert.equal((await readFile(filePath, "utf8")).trim().split("\n").length, 1, "no outcome appended");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("M12-6-3B1-C4: CAS regression — valid persisted chains still yield the recorded reason/setup/outcome without duplicates", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "m12p3b1-c4-"));
+  try {
+    const filePath = join(dir, `${REV_RUN}.jsonl`);
+    await writeFile(filePath, [
+      JSON.stringify({
+        ts: "2026-08-01T00:00:00.000Z", seq: 1, runId: REV_RUN, agentId: REV_AGENT,
+        type: "run.delivery_reverification_requested", delivery: revRef(),
+        deliveryCommit: REV_COMMIT, reason: "environment_contaminated",
+        setupCommands: ["setup-prepare"],
+      }),
+      JSON.stringify({
+        ts: "2026-08-01T00:00:00.000Z", seq: 2, runId: REV_RUN, agentId: REV_AGENT,
+        type: "run.delivery_reverification_passed", delivery: revRef({
+          verification: { status: "passed", commands: ["assert"], verifiedCommit: REV_COMMIT, results: [] },
+        }),
+        deliveryCommit: REV_COMMIT,
+      }),
+    ].join("\n") + "\n", "utf8");
+    const t = new JsonlTranscript(filePath, { runId: REV_RUN, agentId: REV_AGENT });
+    const req = await t.tryAppendReverifyRequested({ delivery: revRef(), reason: "tooling_invalid" });
+    assert.equal(req.requested, false);
+    assert.equal(req.reason, "environment_contaminated", "yields the RECORDED reason, never the caller's");
+    assert.deepEqual(req.setupCommands, ["setup-prepare"], "yields the RECORDED setup, never the caller's");
+    const out = await t.tryAppendReverifyOutcome({ delivery: revRef(), outcome: "failed" });
+    assert.equal(out.recorded, false);
+    assert.equal(out.outcome, "passed", "yields the durable winner outcome");
+    assert.equal((await readFile(filePath, "utf8")).trim().split("\n").length, 2, "no duplicate events");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("M12-6-3B1-C5: CAS regression — identity-mismatched persisted reverify events fail closed (no reuse, no extension)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "m12p3b1-c5-"));
+  try {
+    const filePath = join(dir, `${REV_RUN}.jsonl`);
+    // Persisted request whose embedded deliveryCommit is a DIFFERENT canonical
+    // commit than the candidate.
+    await writeFile(filePath, JSON.stringify({
+      ts: "2026-08-01T00:00:00.000Z", seq: 1, runId: REV_RUN, agentId: REV_AGENT,
+      type: "run.delivery_reverification_requested",
+      delivery: revRef({ deliveryCommit: "e".repeat(40) }),
+      deliveryCommit: "e".repeat(40),
+      reason: "tooling_invalid",
+    }) + "\n", "utf8");
+    const t = new JsonlTranscript(filePath, { runId: REV_RUN, agentId: REV_AGENT });
+    await assert.rejects(
+      () => t.tryAppendReverifyRequested({ delivery: revRef(), reason: "tooling_invalid" }),
+      /malformed|another delivery|identity|chain/i,
+    );
+    assert.equal((await readFile(filePath, "utf8")).trim().split("\n").length, 1, "no second request appended");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

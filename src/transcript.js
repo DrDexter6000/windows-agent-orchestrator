@@ -233,20 +233,63 @@ function _reverificationOutcomeFromType(type) {
   return null;
 }
 
+// M12-6 Package 3B1: is this durable reverify REQUEST event envelope-bound to
+// runId, identity-bound to createdRef, and shape-valid (closed-set reason,
+// bounded setupCommands)? Any failure — a foreign envelope runId, a mismatched
+// embedded identity (runId/commit/base/artifact), an unknown reason, or
+// blank/non-string/too-many/too-long setup commands — marks the event as a
+// durable CONFLICT: the chain must project "malformed" and the CAS primitives
+// must refuse to reuse or extend it.
+function _isValidReverifyRequestedEvent(event, runId, createdRef) {
+  if (!event || typeof event !== "object") return false;
+  if (event.runId !== runId) return false;
+  if (!_sameDeliveryIdentity(event.delivery, createdRef, runId)) return false;
+  if (!REVERIFY_REASONS.includes(event.reason)) return false;
+  // setupCommands is optional (a reverify may re-run the original assertions
+  // with no new setup); when present it must be a bounded list of non-empty
+  // bounded strings — the same contract the appender enforces.
+  if (event.setupCommands === undefined) return true;
+  if (!Array.isArray(event.setupCommands)) return false;
+  if (event.setupCommands.length > REVERIFY_SETUP_COMMANDS_LIMIT) return false;
+  return event.setupCommands.every(
+    (cmd) => typeof cmd === "string"
+      && cmd.trim().length > 0
+      && cmd.length <= REVERIFY_SETUP_COMMAND_MAX_LENGTH,
+  );
+}
+
+// M12-6 Package 3B1: is this durable reverify OUTCOME event envelope-bound to
+// runId and identity-bound to createdRef? Outcome events carry no Lead-declared
+// shape of their own; envelope + identity binding is the whole conflict test.
+function _isBoundReverifyOutcomeEvent(event, runId, createdRef) {
+  return Boolean(
+    event
+      && typeof event === "object"
+      && event.runId === runId
+      && _sameDeliveryIdentity(event.delivery, createdRef, runId),
+  );
+}
+
 /**
- * M12-6 Package 3B: project the reverify audit chain for a run/delivery.
+ * M12-6 Package 3B (3B1 fail-closed): project the reverify audit chain for a
+ * run/delivery.
  *
- * Strict closed set: "none" | "pending" | "complete" | "malformed". RunId +
- * delivery-identity bound: only events whose envelope runId === runId AND whose
- * DeliveryRef identity matches createdRef count. A foreign-envelope event or an
- * identity-mismatched bound event is a durable conflict → "malformed" (never
- * hidden, never echoed).
+ * Strict closed set: "none" | "pending" | "complete" | "malformed". EVERY
+ * durable reverify event counts — never pre-filtered by envelope runId first.
+ * An event is part of the chain only when it is envelope-bound (runId === runId)
+ * AND identity-bound (embedded DeliveryRef matches createdRef: runId/baseCommit/
+ * deliveryCommit) AND — for a requested event — shape-valid (closed-set reason,
+ * bounded setupCommands). A reverify event in a FOREIGN envelope, or bound but
+ * identity/shape-mismatched, is a durable conflict → "malformed" (visible,
+ * never filtered away, never echoed as a clean chain).
  *
- *   none      — no bound requested, no bound outcome.
- *   pending   — exactly one bound requested, zero bound outcomes (crash-resumable).
- *   complete  — exactly one bound requested + exactly one bound outcome.
+ *   none      — no valid requested, no valid outcome.
+ *   pending   — exactly one valid requested, zero valid outcomes (crash-resumable).
+ *   complete  — exactly one valid requested + exactly one valid outcome.
  *   malformed — any other combination (duplicate requested/outcome, orphan
- *               outcome, or a bound event whose identity does not match createdRef).
+ *               outcome, a foreign-envelope event, or an identity/shape-mismatched
+ *               event). effectiveStatus is null → the decision gate and the
+ *               effective-pass projection stay at the ORIGINAL status.
  *
  * Pure transcript projection: never reads Git, never verifies, never decides.
  * The application layer adds workspace + eligibility proof before exposing a
@@ -268,15 +311,15 @@ export function projectReverifyChain(events, runId, createdRef) {
   if (!Array.isArray(events) || !_sameDeliveryIdentity(createdRef, createdRef, runId)) {
     return empty;
   }
-  const requested = events.filter(
-    (e) => e && e.type === "run.delivery_reverification_requested" && e.runId === runId,
-  );
-  const outcomes = events.filter(
-    (e) => e && DELIVERY_REVERIFICATION_OUTCOME_TYPES.has(e.type) && e.runId === runId,
-  );
-  const reqBound = requested.filter((e) => _sameDeliveryIdentity(e.delivery, createdRef, runId));
-  const outBound = outcomes.filter((e) => _sameDeliveryIdentity(e.delivery, createdRef, runId));
-  // A bound-but-identity-mismatched event is a durable conflict → malformed.
+  // M12-6 Package 3B1: consider ALL durable reverify events — a foreign-envelope
+  // event (e.g. a concatenated transcript) is a conflict, never silently ignored.
+  const requested = events.filter((e) => e && e.type === "run.delivery_reverification_requested");
+  const outcomes = events.filter((e) => e && DELIVERY_REVERIFICATION_OUTCOME_TYPES.has(e.type));
+  const reqBound = requested.filter((e) => _isValidReverifyRequestedEvent(e, runId, createdRef));
+  const outBound = outcomes.filter((e) => _isBoundReverifyOutcomeEvent(e, runId, createdRef));
+  // Any reverify event that is not fully bound + shape-valid is a durable
+  // conflict → malformed. The conflict is VISIBLE through the status, never
+  // filtered away by an envelope pre-filter.
   const hasConflict = requested.length !== reqBound.length || outcomes.length !== outBound.length;
   if (hasConflict) {
     return {
@@ -777,16 +820,20 @@ export class JsonlTranscript {
   }
 
   /**
-   * M12-6 Package 3B: lock-scoped idempotent append of the reverify REQUEST.
+   * M12-6 Package 3B (3B1 fail-closed): lock-scoped idempotent append of the
+   * reverify REQUEST.
    *
-   * Under the cross-process append lock: re-read events; if a bound
-   * run.delivery_reverification_requested already exists for this runId with a
-   * matching delivery identity, yield {requested:false} with the RECORDED reason
-   * + setupCommands — so a retry / concurrent competitor converges on the FIRST
-   * caller's declared setup (deterministic verification). Otherwise validate the
-   * inputs (canonical delivery identity, closed-set reason, bounded setup
-   * commands) and append exactly one event. A pre-existing >1 requested events
-   * is a malformed chain → throw (never silently coalesce).
+   * Under the cross-process append lock: re-read events and project the FULL
+   * durable reverify chain (all envelopes, identity- and shape-validated). If a
+   * valid requested event already exists for this runId, yield {requested:false}
+   * with the RECORDED reason + setupCommands — so a retry / concurrent competitor
+   * converges on the FIRST caller's declared setup (deterministic verification).
+   * Any durable conflict — a foreign-envelope reverify event, an identity or
+   * shape mismatch, an existing outcome without its request, or duplicate
+   * events — is a malformed chain → throw (never append a second request, never
+   * coalesce, never reuse garbage). Otherwise validate the inputs (canonical
+   * delivery identity, closed-set reason, bounded setup commands) and append
+   * exactly one event.
    *
    * Narrow primitive: it does NOT verify, decide, or check eligibility beyond
    * delivery identity + input shape. Eligibility (eligible original failure
@@ -825,17 +872,18 @@ export class JsonlTranscript {
       }
       const setup = _normalizeReverifySetup(setupCommands);
 
-      const requested = events.filter(
-        (e) => e && e.type === "run.delivery_reverification_requested" && e.runId === this.context.runId,
-      );
-      if (requested.length > 1) {
-        throw new Error("tryAppendReverifyRequested: multiple delivery_reverification_requested events");
+      // M12-6 Package 3B1: the durable chain — every reverify event in the file,
+      // validated for envelope/identity/shape — is the single authority. A
+      // malformed chain can never be extended; a valid one yields the RECORDED
+      // request (one chain maximum, no duplicate events).
+      const chain = projectReverifyChain(events, this.context.runId, delivery);
+      if (chain.status === "malformed") {
+        throw new Error("tryAppendReverifyRequested: reverify chain is malformed (foreign envelope, identity, or shape conflict)");
       }
-      if (requested.length === 1) {
-        const rec = requested[0];
-        if (!_sameDeliveryIdentity(rec.delivery, delivery, this.context.runId)) {
-          throw new Error("tryAppendReverifyRequested: existing request belongs to another delivery");
-        }
+      if (chain.status !== "none") {
+        // pending/complete: a valid requested event exists → yield the RECORDED
+        // reason + setup (deterministic convergence), never the caller's.
+        const rec = chain.requestedEvent;
         return {
           requested: false,
           ref: rec.delivery,
@@ -843,6 +891,7 @@ export class JsonlTranscript {
           setupCommands: Array.isArray(rec.setupCommands) ? [...rec.setupCommands] : [],
         };
       }
+      // chain.status === "none": no valid requested event → append exactly one.
 
       const baseSeq = Math.max(this.seq, findLastEventSeq(events));
       const ts = new Date().toISOString();
@@ -865,13 +914,18 @@ export class JsonlTranscript {
   }
 
   /**
-   * M12-6 Package 3B: lock-scoped idempotent append of the reverify OUTCOME.
+   * M12-6 Package 3B (3B1 fail-closed): lock-scoped idempotent append of the
+   * reverify OUTCOME.
    *
-   * Requires exactly one bound run.delivery_reverification_requested with a
-   * matching identity, then appends exactly one outcome event (passed/failed/
-   * unavailable). Idempotent: an existing bound outcome wins — a retry resumes
-   * after a crash between request and outcome without recording a second
-   * outcome. A >1 outcome (or an identity mismatch) is a malformed chain → throw.
+   * Under the lock: project the FULL durable reverify chain (all envelopes,
+   * identity- and shape-validated). Requires exactly one valid
+   * run.delivery_reverification_requested for this runId, then appends exactly
+   * one outcome event (passed/failed/unavailable). Idempotent: an existing
+   * outcome wins — a retry resumes after a crash between request and outcome
+   * without recording a second outcome. Any durable conflict — a foreign-envelope
+   * reverify event, an identity/shape mismatch, an orphan outcome, or duplicates
+   * — is a malformed chain → throw (never append onto a conflict, never extend a
+   * garbage request).
    *
    * Narrow primitive: the outcome is supplied by the caller (the reverify
    * service), which ran verifyDelivery OUTSIDE this lock against the exact same
@@ -881,7 +935,7 @@ export class JsonlTranscript {
    * @returns {Promise<{recorded:true, ref:object, outcome:string}
    *           |{recorded:false, ref:object, outcome:string}>}
    * @throws {Error} if delivery identity is invalid, outcome is not closed-set,
-   *   there is no exactly-one matching request, or the chain is malformed.
+   *   there is no exactly-one valid request, or the chain is malformed.
    */
   async tryAppendReverifyOutcome({ delivery, outcome } = {}) {
     await mkdir(dirname(this.filePath), { recursive: true });
@@ -904,33 +958,22 @@ export class JsonlTranscript {
         throw new Error("tryAppendReverifyOutcome: outcome must be passed|failed|unavailable");
       }
 
-      // Require exactly one bound requested event with matching identity.
-      const requested = events.filter(
-        (e) => e && e.type === "run.delivery_reverification_requested" && e.runId === this.context.runId,
-      );
-      if (requested.length !== 1) {
+      // M12-6 Package 3B1: the durable chain — every reverify event in the file,
+      // validated for envelope/identity/shape — is the single authority.
+      // pending → append exactly one outcome; complete → yield the durable
+      // winner; none (orphan outcome) / malformed → throw.
+      const chain = projectReverifyChain(events, this.context.runId, delivery);
+      if (chain.status === "malformed") {
+        throw new Error("tryAppendReverifyOutcome: reverify chain is malformed (foreign envelope, identity, or shape conflict)");
+      }
+      if (chain.status === "none") {
         throw new Error("tryAppendReverifyOutcome: expected exactly one delivery_reverification_requested event");
       }
-      if (!_sameDeliveryIdentity(requested[0].delivery, delivery, this.context.runId)) {
-        throw new Error("tryAppendReverifyOutcome: request belongs to another delivery");
-      }
-
-      // Idempotency: an existing bound outcome wins.
-      const existing = events.filter(
-        (e) => e && DELIVERY_REVERIFICATION_OUTCOME_TYPES.has(e.type) && e.runId === this.context.runId,
-      );
-      if (existing.length > 1) {
-        throw new Error("tryAppendReverifyOutcome: multiple reverify outcomes");
-      }
-      if (existing.length === 1) {
-        const rec = existing[0];
-        if (!_sameDeliveryIdentity(rec.delivery, delivery, this.context.runId)) {
-          throw new Error("tryAppendReverifyOutcome: existing outcome belongs to another delivery");
-        }
+      if (chain.status === "complete") {
         return {
           recorded: false,
-          ref: rec.delivery,
-          outcome: _reverificationOutcomeFromType(rec.type),
+          ref: chain.outcomeEvent.delivery,
+          outcome: chain.effectiveStatus,
         };
       }
 

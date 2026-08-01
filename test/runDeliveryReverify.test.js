@@ -692,3 +692,183 @@ test("P3B-13: REVERIFY_REASONS is the frozen closed set containing the three req
     assert.ok(REVERIFY_REASONS.includes(r), `contains ${r}`);
   }
 });
+
+// =====================================================================
+// Group 12 (M12-6 Package 3B1): fail-closed + identity-bound durable chain
+// =====================================================================
+
+test("P3B-14: when a concurrent caller records the final outcome, the loser reports the durable winner's truth (state idempotent, never created) — verification runs OUTSIDE the transcript lock", async () => {
+  const ctx = await setupReverifyScenario();
+  try {
+    const filePath = join(ctx.runDir, `${RUN_ID}.jsonl`);
+    let competitorRecorded = false;
+    const competingVerifier = async (ref) => {
+      // Simulate a concurrent caller completing the chain WHILE this call is
+      // still verifying. This is a lock-scoped CAS append — it would deadlock
+      // (5s append-lock timeout) if runDeliveryReverify held the transcript
+      // lock during verification. Succeeding here proves contract #5: the
+      // verifier executes outside the lock.
+      const t = new JsonlTranscript(filePath, {
+        runId: RUN_ID,
+        agentId: AGENT_ID,
+        initialSeq: readEvents(ctx.runDir).length,
+      });
+      const res = await t.tryAppendReverifyOutcome({ delivery: ref, outcome: "passed" });
+      competitorRecorded = res.recorded;
+      return { delivery: ref, outcome: "passed", failureCode: undefined };
+    };
+
+    const result = await runDeliveryReverify({
+      runId: RUN_ID,
+      runDir: ctx.runDir,
+      authorizedWorkspaceRoot: ctx.repo,
+      reason: "tooling_invalid",
+      setupCommands: ["setup-prepare"],
+      verifyDeliveryFn: competingVerifier,
+    });
+
+    assert.equal(competitorRecorded, true, "the concurrent caller recorded the final outcome first");
+    assert.equal(result.requested, true, "this call created the requested event");
+    assert.equal(result.outcomeRecorded, false, "this call did NOT record the outcome");
+    assert.equal(result.state, "idempotent", "the loser must not claim created — the final outcome is the durable winner's");
+    assert.equal(result.verificationStatus, "passed", "reports the durable winner's outcome");
+    const after = readEvents(ctx.runDir);
+    assert.equal(after.filter((e) => e.type === "run.delivery_reverification_requested").length, 1, "one requested");
+    assert.equal(after.filter((e) => e.type === "run.delivery_reverification_passed").length, 1, "one outcome");
+  } finally {
+    await cleanupDir(ctx.repo);
+    await cleanupDir(ctx.runDir);
+  }
+});
+
+test("P3B-15: malformed durable reverify chains (unknown reason / blank setup / foreign envelope / identity mismatch) fail closed BEFORE the verifier runs and append nothing", async () => {
+  const makeCountingVerifier = () => {
+    let calls = 0;
+    const v = (ref, opts) => {
+      calls += 1;
+      return realVerifierWith(makeFixingRunCommand())(ref, opts);
+    };
+    return { count: () => calls, v };
+  };
+  const seedAfter = (ctx, extraEvents) => {
+    const all = readEvents(ctx.runDir);
+    all.push(...extraEvents.map((e, i) => ({
+      ts: "2026-08-01T00:01:00.000Z",
+      seq: all.length + i + 1,
+      runId: RUN_ID,
+      agentId: AGENT_ID,
+      ...e,
+    })));
+    writeFileSync(join(ctx.runDir, `${RUN_ID}.jsonl`), all.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+  };
+  const reverifyCount = (runDir) => readEvents(runDir).filter((e) => e.type.startsWith("run.delivery_reverification")).length;
+  const base = (ctx) => ({
+    runId: RUN_ID,
+    runDir: ctx.runDir,
+    authorizedWorkspaceRoot: ctx.repo,
+    reason: "tooling_invalid",
+    setupCommands: ["setup-prepare"],
+  });
+
+  // 1. Persisted request with UNKNOWN reason + a passed outcome. Today this
+  //    short-circuits as "idempotent" with effective passed — it must instead
+  //    fail closed, and the verifier must never run.
+  {
+    const ctx = await setupReverifyScenario();
+    try {
+      const { count, v } = makeCountingVerifier();
+      seedAfter(ctx, [
+        { type: "run.delivery_reverification_requested", delivery: ctx.deliveryRef, deliveryCommit: ctx.deliveryCommit, reason: "not_a_real_reason" },
+        {
+          type: "run.delivery_reverification_passed",
+          delivery: { ...ctx.deliveryRef, verification: { status: "passed", commands: ["assert-needs-setup"], verifiedCommit: ctx.deliveryCommit, results: [] } },
+          deliveryCommit: ctx.deliveryCommit,
+        },
+      ]);
+      await assert.rejects(
+        () => runDeliveryReverify({ ...base(ctx), verifyDeliveryFn: v }),
+        /malformed|reason/i,
+      );
+      assert.equal(count(), 0, "verifier never executed for an unknown-reason request");
+      assert.equal(reverifyCount(ctx.runDir), 2, "nothing appended to the malformed chain");
+    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+  }
+  // 2. Persisted request with a BLANK setup command.
+  {
+    const ctx = await setupReverifyScenario();
+    try {
+      const { count, v } = makeCountingVerifier();
+      seedAfter(ctx, [
+        { type: "run.delivery_reverification_requested", delivery: ctx.deliveryRef, deliveryCommit: ctx.deliveryCommit, reason: "tooling_invalid", setupCommands: ["  "] },
+      ]);
+      await assert.rejects(
+        () => runDeliveryReverify({ ...base(ctx), verifyDeliveryFn: v }),
+        /malformed|setup|reason/i,
+      );
+      assert.equal(count(), 0, "verifier never executed for a blank setup command");
+      assert.equal(reverifyCount(ctx.runDir), 1, "nothing appended");
+    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+  }
+  // 3. FOREIGN-ENVELOPE requested event whose embedded DeliveryRef targets this
+  //    run (valid reason + identity): must be a visible conflict, not ignored.
+  {
+    const ctx = await setupReverifyScenario();
+    try {
+      const { count, v } = makeCountingVerifier();
+      seedAfter(ctx, [
+        { type: "run.delivery_reverification_requested", runId: "run_foreign", delivery: ctx.deliveryRef, deliveryCommit: ctx.deliveryCommit, reason: "tooling_invalid" },
+      ]);
+      await assert.rejects(
+        () => runDeliveryReverify({ ...base(ctx), verifyDeliveryFn: v }),
+        /malformed|conflict|chain/i,
+      );
+      assert.equal(count(), 0, "verifier never executed on a foreign-envelope request");
+      assert.equal(reverifyCount(ctx.runDir), 1, "no second request appended");
+    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+  }
+  // 4. FOREIGN-ENVELOPE passed outcome whose embedded DeliveryRef targets this
+  //    run: must be a visible conflict, never treated as pending/complete.
+  {
+    const ctx = await setupReverifyScenario();
+    try {
+      const { count, v } = makeCountingVerifier();
+      seedAfter(ctx, [
+        {
+          type: "run.delivery_reverification_passed",
+          runId: "run_foreign",
+          delivery: { ...ctx.deliveryRef, verification: { status: "passed", commands: ["assert-needs-setup"], verifiedCommit: ctx.deliveryCommit, results: [] } },
+          deliveryCommit: ctx.deliveryCommit,
+        },
+      ]);
+      await assert.rejects(
+        () => runDeliveryReverify({ ...base(ctx), verifyDeliveryFn: v }),
+        /malformed|conflict|chain/i,
+      );
+      assert.equal(count(), 0, "verifier never executed on a foreign-envelope outcome");
+      assert.equal(reverifyCount(ctx.runDir), 1, "nothing appended");
+    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+  }
+  // 5. Envelope-bound outcome with MISMATCHED embedded identity (different
+  //    canonical deliveryCommit): today the verifier RUNS and only the outcome
+  //    CAS throws afterwards — the chain gate must catch it before execution.
+  {
+    const ctx = await setupReverifyScenario();
+    try {
+      const { count, v } = makeCountingVerifier();
+      seedAfter(ctx, [
+        {
+          type: "run.delivery_reverification_passed",
+          runId: RUN_ID,
+          delivery: { ...ctx.deliveryRef, deliveryCommit: "e".repeat(40) },
+          deliveryCommit: "e".repeat(40),
+        },
+      ]);
+      await assert.rejects(
+        () => runDeliveryReverify({ ...base(ctx), verifyDeliveryFn: v }),
+        /malformed|identity|another delivery|chain/i,
+      );
+      assert.equal(count(), 0, "verifier never executed on an identity-mismatched outcome");
+      assert.equal(reverifyCount(ctx.runDir), 1, "nothing appended");
+    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+  }
+});
