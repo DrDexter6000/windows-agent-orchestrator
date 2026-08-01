@@ -96,11 +96,12 @@ test("M9-2B-01: tools/list has registry_list + run_dispatch with strict schema a
       const rd = tools.tools.find((t) => t.name === "run_dispatch");
       assert.ok(rd, "run_dispatch present");
       // Strict input: agentId + prompt required, delivery + the M12-6 (FR-03)
-      // optional workspace/head freeze inputs optional.
+      // optional workspace/head freeze inputs + the M12-7 optional continuable
+      // lineage opt-in optional.
       const inputKeys = Object.keys(rd.inputSchema.properties ?? {}).sort();
       assert.deepEqual(inputKeys,
-        ["agentId", "delivery", "expectedDirty", "expectedGitHead", "expectedWorkspaceRoot", "prompt"],
-        "input schema has agentId + prompt + optional delivery + optional expectations",
+        ["agentId", "continuable", "delivery", "expectedDirty", "expectedGitHead", "expectedWorkspaceRoot", "prompt"],
+        "input schema has agentId + prompt + optional delivery + optional expectations + optional continuable",
       );
       assert.equal(rd.inputSchema.additionalProperties, false, "input is strict");
       // Annotations: not read-only, destructive (worker may modify files/run commands),

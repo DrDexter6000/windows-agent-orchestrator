@@ -35,6 +35,22 @@ import {
   LIVE_CHECK_STATUSES,
 } from "../application/registryInventory.js";
 import { dispatchRun, ReuseBusyError } from "../application/runDispatch.js";
+// M12-7: Lead-authorized correction continuation. The service spawns a NEW child
+// run/transcript that resumes the parent's provider-native conversation IN the
+// parent's retained worktree. The MCP boundary resolves the workspace + Lead
+// session (same authority as run_dispatch) and collapses every closed-set
+// eligibility refusal to a structured rejectionReason.
+import { continueRun, CONTINUE_REJECTION_REASONS } from "../application/runContinue.js";
+// M12-7: the continuation service gates on backend.supportsSessionReuse (a
+// capability boolean) before any mutation. The backend objects are constructed
+// here at the control-plane boundary — the same tier backgroundRunner.js
+// constructs them at — so the application service stays backend-free. Never
+// branch on the runtime name; read the declared capability.
+import { ClaudeCodeBackend } from "../backends/claudeCode.js";
+import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
+import { CodexBackend } from "../backends/codex.js";
+import { KimiCodeBackend } from "../backends/kimiCode.js";
+import { getWaoCliPath } from "../waoCliPath.js";
 import { randomUUID } from "node:crypto";
 import { getRunStatus } from "../application/runStatus.js";
 import { collectRunMessages } from "../application/runCollect.js";
@@ -311,6 +327,13 @@ const RUN_DISPATCH_INPUT = z.object({
   expectedGitHead: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/).optional(),
   expectedDirty: z.boolean().optional(),
   expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
+  // M12-7: Lead opt-in marking this delivery as the ROOT of a continuable
+  // lineage. When true (delivery-only — the service enforces that invariant and
+  // a non-delivery continuable collapses to the fixed dispatch error), dispatch
+  // establishes the lineage provider session (turn:first) so a future Lead-
+  // authorized run_continue can resume the SAME provider conversation in the
+  // retained worktree. Default false = byte-compatible ordinary delivery.
+  continuable: z.boolean().optional(),
 }).strict();
 
 // M12-6 (FR-03): bounded safe workspace proof returned on a successful dispatch.
@@ -354,7 +377,84 @@ const RUN_DISPATCH_DESCRIPTION =
   "Dispatch a supervised background run to a worker agent. The worker receives " +
   "a bounded task prompt; WAO owns dispatch, the detached runner, and the transcript. " +
   "Returns a runId the Lead can supervise later. Only agentId and prompt are accepted; " +
-  "registry, run directory, and certification are fixed by the server.";
+  "registry, run directory, and certification are fixed by the server. " +
+  "M12-7: optional delivery.continuable (default false) marks a delivery as the root " +
+  "of a continuable lineage — dispatch establishes a provider session (turn:first) in " +
+  "the retained worktree so a later run_continue can resume the same conversation for a " +
+  "Lead-authorized correction. Continuable is delivery-only; it never starts a non-delivery " +
+  "lineage, and WAO never infers a continuation, scope, retry, or acceptance.";
+
+// ===== run_continue (M12-7 Lead-authorized correction continuation) constants =====
+//
+// A Lead reviews a terminal worker delivery, finds a narrow defect, and explicitly
+// authorizes ONE correction turn against that parent run. run_continue spawns a NEW
+// WAO run/transcript that RESUMES the parent's provider-native conversation IN the
+// parent's retained worktree — no fresh worktree, no fresh session, no scope inference,
+// no automatic retry/fallback/accept/reject. Eligibility is decided read-only with a
+// closed-set rejectionReason BEFORE any mutation; review/accept/reject of the child
+// delivery stays with the Lead (run_delivery_review / run_delivery_decide). Continuable
+// lineage scope = (Lead session + workspace + agent + ROOT runId), reused across one
+// lineage only — NOT project-wide coder reuse.
+
+const CONTINUE_ERROR_TEXT = "run_continue failed";
+const CONTINUE_CREDENTIAL_MISSING_TEXT =
+  "run_continue refused: the worker is missing a required credential. " +
+  "See registry_list (credentialAvailability / missingCredentialEnvNames) for the env var names, " +
+  "then set them in the current process or Windows User environment and retry.";
+
+// run_continue input: the terminal parent run to continue + the Lead's correction
+// prompt + the child delivery contract (required — a continuation is always a
+// delivery run). Same DELIVERY_INPUT SSOT as run_dispatch. runDir/registry/cert/
+// workspace/Lead-session are server-owned (never model-supplied).
+const RUN_CONTINUE_INPUT = z.object({
+  parentRunId: z.string().min(1),
+  prompt: z.string().min(1),
+  delivery: DELIVERY_INPUT,
+}).strict();
+
+// run_continue output: one strict object spanning the accepted and refused variants.
+// acceptance carries the new child dispatch identity + lineage facts (parentRunId +
+// continuation:true + rootRunId). refusal carries the closed-set rejectionReason. The
+// opaque provider uuid, Lead id, workspace path, active lineage runId, prompt, argv,
+// and PID are NEVER surfaced (the busy reason is surfaced as a label only — the active
+// runId stays internal, matching run_dispatch reuse-busy redaction).
+const RUN_CONTINUE_OUTPUT = z.object({
+  accepted: z.boolean(),
+  parentRunId: z.string(),
+  continuation: z.literal(true),
+  // Success-only (non-null iff accepted === true).
+  runId: z.string().nullable(),
+  agentId: REAL_AGENT_ID_SCHEMA.nullable(),
+  rootRunId: z.string().nullable(),
+  state: z.string().nullable(),
+  // Refusal-only (non-null iff accepted === false).
+  rejectionReason: z.enum(CONTINUE_REJECTION_REASONS).nullable(),
+}).strict();
+
+// run_continue spawns a worker that resumes a provider conversation and modifies the
+// retained worktree — destructive (not append-only). Workspace-bound (the parent must
+// belong to the bound workspace). Not idempotent (a continuation claims a lineage slot
+// and transitions the worktree), open world.
+const RUN_CONTINUE_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: true,
+};
+
+const RUN_CONTINUE_DESCRIPTION =
+  "Continue a terminal continuable delivery run with ONE Lead-authorized correction turn. " +
+  "Spawns a new run that resumes the parent's provider-native conversation IN the parent's " +
+  "retained worktree (no fresh worktree, no fresh session) and ships a new child delivery. " +
+  "WAO never infers correction, scope, verification, retry, or acceptance — the Lead owns all " +
+  "of those, and review/accept/reject of the child delivery stays with the Lead. Eligibility is " +
+  "decided read-only before any mutation: a closed-set rejectionReason (" +
+  CONTINUE_REJECTION_REASONS.join(", ") + ") is returned when the parent is missing, not terminal, " +
+  "not a continuable lineage run, belongs to another workspace, lacks a delivery context, runs on " +
+  "a backend without session reuse, or has a missing/drifted retained worktree; busy means a " +
+  "concurrent continuation of the same lineage is already in flight. Only parentRunId, prompt, " +
+  "and the child delivery are accepted; workspace, Lead session, registry, run directory, and " +
+  "certification are fixed by the server.";
 
 // Fixed safe text for run_status failure. Never concatenates dynamic content.
 const STATUS_ERROR_TEXT = "run_status failed";
@@ -1626,6 +1726,7 @@ const PLAYBOOK_GET_DESCRIPTION =
  * @param {Function} [input.listLeadPlaybooksFn] — injectable playbook list service for testing
  * @param {Function} [input.getLeadPlaybookFn] — injectable playbook get service for testing
  * @param {Function} [input.getRunDeliveryReviewFn] — injectable delivery review service for testing
+ * @param {Function} [input.continueRunFn] — injectable Lead-authorized continuation service for testing (M12-7)
  * @returns {import("@modelcontextprotocol/sdk/server/mcp.js").McpServer}
  */
 
@@ -1772,6 +1873,10 @@ export function createWaoMcpServer({
   // service. Defaults to the real service; workspace-bound — threaded only
   // when a workspace binding authorizes the read.
   runDeliveryReverifyFn,
+  // M12-7: injectable Lead-authorized correction continuation service. Defaults
+  // to the real service; workspace-bound + backend-capability-gated. Threaded
+  // for transport tests.
+  continueRunFn,
 }) {
   const service = getRegistryInventoryFn ?? getRegistryInventory;
   // M11-7: the Windows user-env reader for credential readiness. Defaults to
@@ -1801,6 +1906,21 @@ export function createWaoMcpServer({
   const deliveryReviewService = getRunDeliveryReviewFn ?? getRunDeliveryReview;
   const deliveryRepackageService = getRunDeliveryRepackageFn ?? runDeliveryRepackage;
   const deliveryReverifyService = runDeliveryReverifyFn ?? runDeliveryReverify;
+  const continueService = continueRunFn ?? continueRun;
+
+  // M12-7: backend capability resolver for the continuation service's
+  // supportsSessionReuse gate. Mirrors the backendFor in backgroundRunner.js /
+  // commands/shared.js (same construction tier) — reads the declared capability,
+  // never branches on the runtime name. Lives here so the application service
+  // stays backend-free; the constructed objects are read for one boolean only.
+  function resolveBackendFor(agent) {
+    const waoCliPath = getWaoCliPath();
+    if (agent.backend === "opencode-serve") return new OpenCodeServeBackend();
+    if (agent.backend === "claude-code") return new ClaudeCodeBackend({ waoCliPath });
+    if (agent.backend === "codex") return new CodexBackend({ waoCliPath });
+    if (agent.backend === "kimi-code") return new KimiCodeBackend({ waoCliPath });
+    return null;
+  }
 
   /**
    * Build the SDK-native readiness keepalive hook shared by run_delivery and
@@ -2144,7 +2264,7 @@ export function createWaoMcpServer({
       outputSchema: RUN_DISPATCH_OUTPUT,
       annotations: RUN_DISPATCH_ANNOTATIONS,
     },
-    async ({ agentId, prompt, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot }) => {
+    async ({ agentId, prompt, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable }) => {
       // M11-8B final: validate the requested agentId at the VERY TOP, before
       // workspace resolution or any dispatcher call. An invalid or reserved
       // ("unknown") id collapses to the fixed dispatch error immediately — the
@@ -2231,6 +2351,11 @@ export function createWaoMcpServer({
           globalWaitTimeout,
           // M9-7A: optional delivery request — service validates via prepareDeliveryRequest.
           ...(delivery ? { delivery } : {}),
+          // M12-7: Lead opt-in. continuable is threaded verbatim (default false
+          // = ordinary delivery). The service enforces delivery-only and a busy
+          // lineage slot refuses before any transcript/fork; those environmental
+          // throws collapse to the fixed dispatch error texts below.
+          ...(continuable ? { continuable: true } : {}),
           // M12-6 (P1-A): server-proven frozen HEAD threaded internally (never
           // model-supplied). RunManager.start revalidates/pins it.
           frozenGitHead: workspaceFrozenHead,
@@ -2310,6 +2435,96 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: DISPATCH_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "run_continue",
+    {
+      description: RUN_CONTINUE_DESCRIPTION,
+      inputSchema: RUN_CONTINUE_INPUT,
+      outputSchema: RUN_CONTINUE_OUTPUT,
+      annotations: RUN_CONTINUE_ANNOTATIONS,
+    },
+    async ({ parentRunId, prompt, delivery }) => {
+      // M12-7: re-resolve and prove the workspace BEFORE any continuation —
+      // state-changing calls do their own authority proof (same as run_dispatch).
+      // The parent must belong to the bound workspace; a missing binding refuses
+      // with the fixed not-bound text (zero mutation, zero fork).
+      let workspaceCwd;
+      try {
+        const binding = await resolveWorkspaceBinding();
+        if (!binding.bound) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
+          };
+        }
+        workspaceCwd = binding.root;
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
+        };
+      }
+
+      let result;
+      try {
+        result = await continueService({
+          parentRunId,
+          prompt,
+          delivery,
+          runDir,
+          registryPath,
+          authorizedWorkspaceRoot: workspaceCwd,
+          leadSession: resolveLeadSession,
+          userEnvReader: resolveUserEnv,
+          requireCertified: true,
+          globalWaitTimeout,
+          backendFor: resolveBackendFor,
+        });
+      } catch (e) {
+        // Credential-missing: fixed actionable text (names safe; values never).
+        if (e && e.name === "CredentialMissingError") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: CONTINUE_CREDENTIAL_MISSING_TEXT }],
+          };
+        }
+        // All other environmental failures (registry read, spawn, lineage store
+        // I/O, argv length): fixed safe text. Never concatenate dynamic content.
+        return {
+          isError: true,
+          content: [{ type: "text", text: CONTINUE_ERROR_TEXT }],
+        };
+      }
+
+      // Project the structured outcome through the output schema in ONE try/catch.
+      // Success → child dispatch identity + lineage facts. Refusal → closed-set
+      // rejectionReason. agentId is the canonical registry id the parent carried
+      // (validated by the service); on a refusal it is null. The opaque provider
+      // uuid, Lead id, workspace path, and any active lineage runId never appear.
+      try {
+        const parsed = RUN_CONTINUE_OUTPUT.parse({
+          accepted: result.accepted,
+          parentRunId: result.parentRunId,
+          continuation: true,
+          runId: result.accepted ? result.runId : null,
+          agentId: result.accepted ? result.agentId : null,
+          rootRunId: result.accepted ? result.rootRunId : null,
+          state: result.accepted ? result.state : null,
+          rejectionReason: result.accepted ? null : result.rejectionReason,
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(parsed) }],
+          structuredContent: parsed,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: CONTINUE_ERROR_TEXT }],
         };
       }
     },

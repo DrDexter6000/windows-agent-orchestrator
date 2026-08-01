@@ -669,8 +669,8 @@ test("M10-pre2: workspace_status tool documented in usage.md and SKILL.md", () =
   // + run_delivery_review (M11-3) = 14; + workspace_select (M11-6) = 15; + lead_preflight
   // (M11-8A) = 16; + run_delivery_repackage (M12-1S2) = 17; + run_await_result
   // (M12-3A) = 18; + run_delivery_review_bundle (M12-3B) = 19; + run_delivery_reverify
-  // (M12-6 Package 3B) = 20.
-  assert.ok(/20 MCP tools/.test(skill), "SKILL.md must reflect 20 MCP tools after M12-6 run_delivery_reverify");
+  // (M12-6 Package 3B) = 20; + run_continue (M12-7) = 21.
+  assert.ok(/21 MCP tools/.test(skill), "SKILL.md must reflect 21 MCP tools after M12-7 run_continue");
   assert.ok(skill.includes("run_delivery_reverify"), "SKILL.md tool table must include run_delivery_reverify");
   // team-roles.md must mention workspace binding (MCP-first)
   const roles = read("docs/team-roles.md");
@@ -878,11 +878,11 @@ test("M11-0A: usage.md 说明 --pure 用途、新进程重启边界、command �
   assert.ok(/command.*必须是数组|command 必须是数组|数组/.test(usage), "usage.md 必须说明 command 必须是数组");
 });
 
-test("M11-3D1: usage.md MCP 段反映当前 20 tools", () => {
+test("M11-3D1: usage.md MCP 段反映当前 21 tools", () => {
   const usage = read("docs/usage.md");
   // 精确禁止"只有 7 个工具"的陈旧文案。
   assert.ok(!/(?<!\d)7 个工具/.test(usage), "usage.md MCP 段不得再声称只有 7 个工具");
-  assert.ok(/20 个工具/.test(usage), "usage.md MCP 段必须反映 20 个工具（含 M12-6 run_delivery_reverify）");
+  assert.ok(/21 个工具/.test(usage), "usage.md MCP 段必须反映 21 个工具（含 M12-7 run_continue）");
 });
 
 // ============================================================
@@ -1132,15 +1132,15 @@ test("M12 coder_low example uses current DeepSeek V4 Flash policy", () => {
   assert.equal(low?.model?.contextWindow, 1000000);
 });
 
-test("M11-3D1: SKILL/architecture 当前工具事实为 20 tools", () => {
+test("M11-3D1: SKILL/architecture 当前工具事实为 21 tools", () => {
   const skill = read("SKILL.md");
   const arch = read("docs/02-architecture.md");
-  assert.ok(/20 MCP tools|20 tools/i.test(skill),
-    "SKILL.md Minimal MCP Loop 当前工具数为 20（含 M12-6 run_delivery_reverify）");
+  assert.ok(/21 MCP tools|21 tools/i.test(skill),
+    "SKILL.md Minimal MCP Loop 当前工具数为 21（含 M12-7 run_continue）");
   // 精确匹配 "server.js ... N tools" 的当前状态注释行。
   const serverLine = arch.split("\n").find((l) => /server\.js.*tools/.test(l)) || "";
-  assert.ok(/20 tools/.test(serverLine),
-    "architecture server.js 注释当前工具数为 20");
+  assert.ok(/21 tools/.test(serverLine),
+    "architecture server.js 注释当前工具数为 21");
 });
 
 // ============================================================
@@ -1172,10 +1172,10 @@ test("M11-2C-12: SKILL tool-count 文案不得声称 minimal loop 必须经过�
   const mandatoryAll = /full\s+minimal\s+loop\s+through\s+15|minimal\s+loop\s+必须.*全部\s*15|loop\s+must\s+(use|go through|include)\s+all\s+15/i;
   assert.ok(!mandatoryAll.test(skill),
     "SKILL tool-count 文案不得声称 minimal loop 必须经过全部工具");
-  // 必须表达：WAO 暴露 20 tools，但 minimal control loop 只用相关 control tools，
+  // 必须表达：WAO 暴露 21 tools，但 minimal control loop 只用相关 control tools，
   // playbook reads 是可选且在 dispatch loop 外。
-  assert.ok(/20 MCP tools|20 tools/i.test(skill),
-    "SKILL 声明 WAO 暴露 20 MCP tools");
+  assert.ok(/21 MCP tools|21 tools/i.test(skill),
+    "SKILL 声明 WAO 暴露 21 MCP tools");
   assert.ok(/optional|可选/i.test(skill) && /dispatch loop|control loop/i.test(skill),
     "SKILL 必须说明 playbook reads 可选且在 dispatch/control loop 之外");
 });
@@ -1695,14 +1695,14 @@ test("M12-6 FR-07 docs: usage 的 run_delivery_decide 区分 expected policy rej
     "usage 必须说明固定 tool error 只留给 unexpected/internal 错误");
 });
 
-test("M12-6 FR-07 docs: architecture 记录 reverify 共享 service 与 20-tool 事实", () => {
+test("M12-6 FR-07 docs: architecture 记录 reverify 共享 service 与 21-tool 事实", () => {
   const arch = read("docs/02-architecture.md");
   // Shared application service fact (M12-6) — no full usage contract copy.
   assert.ok(/runDeliveryReverify\.js/.test(arch),
     "architecture 必须记录 runDeliveryReverify.js 共享 application service");
   assert.ok(/M12-6/.test(arch),
     "architecture 必须把 reverify service 绑定到 M12-6");
-  // 20-tool fact on the server.js comment line (exact-count, already pinned by
+  // 21-tool fact on the server.js comment line (exact-count, already pinned by
   // the M11-3D1 guard — here only the full list must include the tool).
   assert.ok(/run_delivery_reverify/.test(arch),
     "architecture server.js 工具清单必须包含 run_delivery_reverify");

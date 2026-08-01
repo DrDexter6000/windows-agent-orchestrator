@@ -188,6 +188,13 @@ export class RunManager {
       // Absent for CLI callers (behavior unchanged). Never model-supplied: the
       // model-owned counterpart is expectedGitHead, consumed at the MCP boundary.
       frozenGitHead = null,
+      // M12-7: reuse a retained parent worktree for a Lead-authorized continuation.
+      // {path, branch} of an already-transitioned linked worktree
+      // (prepareContinuationWorktree re-pinned it to the persisted base on
+      // wao/<childRunId>). start() adopts it as effectiveCwd instead of creating
+      // a fresh worktree — no createWorktree, no cleanup (persistent). Mutually
+      // exclusive with frozenGitHead; requires delivery mode.
+      reuseWorktree = null,
     } = options;
 
     const registryPath = resolve(registry ?? this.config.registry);
@@ -353,6 +360,25 @@ export class RunManager {
       }
     }
 
+    // M12-7: validate continuation worktree-reuse inputs before any side effect.
+    // A continuation always delivers, and the transition already pinned the base,
+    // so reuseWorktree is mutually exclusive with frozenGitHead (which re-pins a
+    // freshly-created worktree against the live source HEAD).
+    if (reuseWorktree) {
+      if (!delivery) {
+        throw new Error("reuseWorktree requires delivery mode (continuation runs deliver a git_commit_v1)");
+      }
+      if (frozenGitHead) {
+        throw new Error("reuseWorktree and frozenGitHead are mutually exclusive (the continuation transition already pinned the base)");
+      }
+      if (typeof reuseWorktree.path !== "string" || reuseWorktree.path.length === 0) {
+        throw new Error("reuseWorktree.path must be a non-empty string");
+      }
+      if (typeof reuseWorktree.branch !== "string" || reuseWorktree.branch.length === 0) {
+        throw new Error("reuseWorktree.branch must be a non-empty string");
+      }
+    }
+
     let worktreeInfo = null;
     let effectiveCwd = agent.cwd;
     let cleanupFn = null;
@@ -382,7 +408,15 @@ export class RunManager {
       }
     }
 
-    if (isolationConfig.type === "worktree") {
+    if (reuseWorktree) {
+      // M12-7: adopt the retained parent worktree (already transitioned to
+      // wao/<childRunId> at the persisted base by prepareContinuationWorktree).
+      // No worktree creation, no cleanup — persistent by design. The base-commit
+      // capture below re-reads HEAD (which the transition re-pinned to base) so
+      // deliveryContext.baseCommit is the persisted base, value-for-value.
+      worktreeInfo = { path: reuseWorktree.path, branch: reuseWorktree.branch };
+      effectiveCwd = reuseWorktree.path;
+    } else if (isolationConfig.type === "worktree") {
       try {
         worktreeInfo = await this.createWorktreeFn(
           agent.cwd,

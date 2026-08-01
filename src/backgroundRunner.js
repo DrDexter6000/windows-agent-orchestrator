@@ -157,6 +157,10 @@ export async function runBackground(opts = {}) {
       // M12-6 (P1-A): thread the server-proven frozen HEAD so RunManager.start
       // revalidates the source HEAD and pins the worktree base. Absent for CLI.
       ...(opts.frozenGitHead ? { frozenGitHead: opts.frozenGitHead } : {}),
+      // M12-7: thread the retained parent worktree {path, branch} for a
+      // Lead-authorized continuation. RunManager.start adopts it as effectiveCwd
+      // (no fresh worktree). Absent for ordinary dispatch.
+      ...(opts.reuseWorktree ? { reuseWorktree: opts.reuseWorktree } : {}),
     });
   } catch (error) {
     await writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error });
@@ -283,6 +287,47 @@ export async function runMain(argv = process.argv.slice(2)) {
     }
   }
 
+  // M12-7: parse + shape-validate the retained-worktree descriptor for a
+  // Lead-authorized continuation. Malformed input fails closed — the child
+  // transcript must not be left pending and no worker may spawn against a
+  // corrupt descriptor. Mirrors the delivery-json fail-closed discipline.
+  let parsedReuseWorktree;
+  if (opts["reuse-worktree-json"]) {
+    try {
+      const parsed = JSON.parse(opts["reuse-worktree-json"]);
+      if (!parsed || typeof parsed.path !== "string" || parsed.path.length === 0
+        || typeof parsed.branch !== "string" || parsed.branch.length === 0) {
+        throw new Error("shape");
+      }
+      parsedReuseWorktree = { path: parsed.path, branch: parsed.branch };
+    } catch {
+      const runDir = opts["run-dir"];
+      const runId = opts["run-id"];
+      if (runDir && runId) {
+        const transcriptPath = join(runDir, `${runId}.jsonl`);
+        try {
+          let events = [];
+          try { events = await readTranscript(transcriptPath); } catch { events = []; }
+          const t = new JsonlTranscript(transcriptPath, {
+            runId, agentId: agentId ?? "unknown",
+            initialSeq: findLastEventSeq(events),
+          });
+          if (!TERMINAL_STATES.includes(findState(events))) {
+            await t.append("run.error", { phase: "reuse_worktree_parse", error: "malformed reuse-worktree JSON in runner argv" });
+            await t.transitionState("pending", "failed", "reuse_worktree_parse_error");
+          }
+        } catch { /* best effort — don't mask the original error */ }
+      }
+      const reuseFailResult = {
+        runId: opts["run-id"] ?? "unknown",
+        completed: false, failed: true, timedOut: false,
+        error: "malformed reuse-worktree JSON in runner argv",
+      };
+      process.stdout.write(JSON.stringify(reuseFailResult) + "\n");
+      return;
+    }
+  }
+
   const result = await runBackground({
     agentId,
     prompt: opts.prompt,
@@ -308,6 +353,9 @@ export async function runMain(argv = process.argv.slice(2)) {
     // for CLI runs; present for MCP dispatch so RunManager.start can revalidate/
     // pin the base against a frozen-base TOCTOU.
     frozenGitHead: opts["frozen-git-head"],
+    // M12-7: retained parent worktree descriptor {path, branch} for a
+    // Lead-authorized continuation. Absent for ordinary dispatch.
+    reuseWorktree: parsedReuseWorktree,
   });
   // detached runner 把最终结果写 stdout 一行 JSON（供调试/日志；CLI 已返回，不依赖此）
   process.stdout.write(JSON.stringify(result) + "\n");

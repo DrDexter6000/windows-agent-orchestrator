@@ -95,7 +95,7 @@ test("M12-1S2-M1: run_delivery_repackage registered; total tools = 17; destructi
       const { tools } = await client.listTools();
       const t = tools.find((x) => x.name === "run_delivery_repackage");
       assert.ok(t, "run_delivery_repackage present");
-      assert.equal(tools.length, 20, "exactly 20 tools after M12-6 run_delivery_reverify");
+      assert.equal(tools.length, 21, "exactly 21 tools after M12-7 run_continue");
       // Packaging moves a branch + appends transcript events: destructive, but
       // reentrant/crash-safe so idempotent in outcome.
       assert.equal(t.annotations.destructiveHint, true);

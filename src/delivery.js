@@ -1154,6 +1154,198 @@ function rollbackToBase(cwd, canonicalBase) {
   }
 }
 
+// ===== M12-7: retained-worktree transition for Lead-authorized continuation =====
+//
+// prepareContinuationWorktree mechanically restores the SAME retained delivery
+// worktree to the persisted base for a child continuation run, so the child can
+// resume the provider-native conversation in the parent's worktree WITHOUT a
+// fresh worktree, a fresh session, or any scope inference.
+//
+// Two parent outcomes, one convergence rule:
+//   - committed parent (deliveryCommit supplied): re-materialize the parent
+//     delivery commit's tree as UNSTAGED working changes at base. The parent
+//     commit object is NEVER deleted — it stays reviewable by exact SHA.
+//   - uncommitted / backend-failed parent (deliveryCommit null): preserve the
+//     retained candidate working tree AS-IS (bytes kept), only re-pinning HEAD
+//     to base on the child branch and unstaging.
+//
+// Crash-safe / idempotent: a retried request (even with a fresh childRunId)
+// converges on the same end state — child branch at base, working tree carrying
+// the delivery/candidate bytes, index clean — and never destroys the parent
+// commit or discards candidate bytes. No Git objects are ever deleted.
+//
+// Fail closed BEFORE any mutation for drift (detached / primary / wrong toplevel),
+// missing repo, non-canonical base/delivery literals, or a delivery commit whose
+// parent is not the persisted base.
+
+/**
+ * Read-only proof that cwd is a linked WAO worktree on a wao/<runId> branch with
+ * a canonical persisted base, and (when committed) a delivery commit whose parent
+ * is exactly that base. Shared by the continuation transition. Performs NO
+ * mutation — every Git read here runs before the transition touches anything.
+ *
+ * Accepts the worktree being on ANY wao/<validRunId> branch (the parent's, an
+ * already-transitioned child's, or a prior retry's) so a retried transition
+ * converges instead of failing. The binding to "the right worktree" is the path
+ * itself (the service resolved it from the parent's persisted delivery context);
+ * the safety invariant enforced here is "a linked WAO worktree on the persisted
+ * base lineage" — never the precious primary checkout.
+ *
+ * @param {string} cwd — worktree path
+ * @param {{baseCommit: string, deliveryCommit: string|null}} input
+ * @returns {{worktreePath: string, canonicalBase: string, branch: string}}
+ * @throws {DeliveryError} on any proof failure (before any mutation)
+ */
+export function proveContinuationWorktree(cwd, { baseCommit, deliveryCommit }) {
+  // 1. Must be a git repository whose toplevel is exactly this worktree.
+  const toplevelRaw = gitSafe(["rev-parse", "--show-toplevel"], { cwd });
+  if (toplevelRaw === null) {
+    throw new DeliveryError("not_a_git_repo", `worktreePath is not a git repository: ${cwd}`);
+  }
+  if (normAbs(toplevelRaw.trim()) !== normAbs(cwd)) {
+    throw new DeliveryError("worktree_path_mismatch", `git toplevel does not match worktreePath: ${cwd}`);
+  }
+
+  // 2. Must be a linked worktree, not the primary checkout.
+  const gitDir = normAbs(String(git(["rev-parse", "--absolute-git-dir"], { cwd })).trim());
+  let commonDirRaw = String(git(["rev-parse", "--git-common-dir"], { cwd })).trim();
+  if (!isAbsolute(commonDirRaw)) commonDirRaw = resolve(cwd, commonDirRaw);
+  if (gitDir === normAbs(commonDirRaw)) {
+    throw new DeliveryError("primary_checkout", `worktreePath is the primary checkout, not an isolated linked worktree: ${cwd}`);
+  }
+
+  // 3. HEAD must be attached to a wao/<validRunId> branch (not detached, not a
+  //    non-WAO branch). Accept any valid WAO lineage branch so retries converge.
+  const branchRaw = gitSafe(["symbolic-ref", "--short", "HEAD"], { cwd });
+  if (branchRaw === null) {
+    throw new DeliveryError("detached_head", "HEAD is detached in worktree, expected a wao/<runId> branch");
+  }
+  const branch = branchRaw.trim();
+  const branchMatch = /^wao\/([A-Za-z0-9_-]+)$/.exec(branch);
+  if (!branchMatch || !isValidRunId(branchMatch[1])) {
+    throw new DeliveryError("wrong_branch", `HEAD is on ${branch}, expected a wao/<runId> branch`);
+  }
+
+  // 4. Persisted base must canonicalize to itself (immutable literal, not a name).
+  const canonicalBase = String(
+    git(["rev-parse", "--verify", "--end-of-options", `${baseCommit}^{commit}`], { cwd }),
+  ).trim();
+  if (canonicalBase !== baseCommit) {
+    throw new DeliveryError("base_commit_mismatch", "resolved baseCommit differs from the persisted literal");
+  }
+
+  // 5. Delivery lineage proof (committed) or HEAD-at-base proof (uncommitted).
+  if (deliveryCommit !== null) {
+    const canonicalDelivery = String(
+      git(["rev-parse", "--verify", "--end-of-options", `${deliveryCommit}^{commit}`], { cwd }),
+    ).trim();
+    if (canonicalDelivery !== deliveryCommit) {
+      throw new DeliveryError("artifact_mismatch", "resolved deliveryCommit differs from the persisted literal");
+    }
+    // The delivery commit must be exactly one generation over the persisted base.
+    const parent = String(
+      git(["rev-parse", "--verify", "--end-of-options", `${canonicalDelivery}^`], { cwd }),
+    ).trim();
+    if (parent !== canonicalBase) {
+      throw new DeliveryError("artifact_mismatch", "delivery commit parent does not match baseCommit");
+    }
+  } else {
+    // Uncommitted / backend-failed parent: no commit was ever made, so HEAD must
+    // still rest at the persisted base. (On a retried transition this also holds,
+    // since the transition re-pins HEAD to base.)
+    const head = String(git(["rev-parse", "HEAD"], { cwd })).trim();
+    if (head !== canonicalBase) {
+      throw new DeliveryError("base_commit_mismatch", "uncommitted parent HEAD is not at baseCommit");
+    }
+  }
+
+  return { worktreePath: normAbs(cwd), canonicalBase, branch };
+}
+
+/**
+ * Mechanically restore a retained delivery worktree to the persisted base for a
+ * child continuation run, preserving the parent's delivery/candidate bytes as
+ * unstaged working changes. Creates / resets the child branch `wao/<childRunId>`
+ * at base and switches the worktree onto it; the parent branch and parent commit
+ * object are never moved or deleted (the parent commit stays reviewable by SHA).
+ *
+ * Idempotent: a retried transition converges on the same end state. Fails closed
+ * BEFORE any mutation on drift, missing repo, or a non-canonical lineage.
+ *
+ * @param {string} worktreePath — the retained parent delivery worktree
+ * @param {{parentRunId: string, childRunId: string, baseCommit: string, deliveryCommit?: string|null}} opts
+ * @returns {{worktreePath: string, branch: string, canonicalBase: string}}
+ * @throws {DeliveryError} on any proof or transition failure
+ */
+export function prepareContinuationWorktree(worktreePath, opts) {
+  if (!opts || typeof opts !== "object") {
+    throw new DeliveryError("invalid_input", "opts must be an object");
+  }
+  const { parentRunId, childRunId, baseCommit, deliveryCommit = null } = opts;
+
+  // Input validation — fail closed in JS before any Git command runs.
+  if (typeof worktreePath !== "string" || worktreePath.length === 0) {
+    throw new DeliveryError("invalid_input", "worktreePath must be a non-empty string");
+  }
+  if (!isValidRunId(parentRunId)) {
+    throw new DeliveryError("invalid_run_id", `parentRunId is not a valid run id: ${JSON.stringify(parentRunId)}`);
+  }
+  if (!isValidRunId(childRunId)) {
+    throw new DeliveryError("invalid_run_id", `childRunId is not a valid run id: ${JSON.stringify(childRunId)}`);
+  }
+  if (!isCanonicalCommitId(baseCommit)) {
+    throw new DeliveryError("invalid_base_commit", "baseCommit must be a canonical 40/64-hex commit id");
+  }
+  if (deliveryCommit !== null && !isCanonicalCommitId(deliveryCommit)) {
+    throw new DeliveryError("invalid_delivery_commit", "deliveryCommit must be a canonical 40/64-hex commit id or null");
+  }
+
+  const cwd = worktreePath;
+
+  // READ-ONLY PROOF — every Git read here happens before any mutation, so a
+  // drift / malformed / cross-workspace input is refused without side effects.
+  const proof = proveContinuationWorktree(cwd, { baseCommit, deliveryCommit });
+  const canonicalBase = proof.canonicalBase;
+  const childBranch = `wao/${childRunId}`;
+  const childRef = `refs/heads/${childBranch}`;
+
+  // Defensive: never clobber an existing child branch that already advanced past
+  // base (a prior continuation packaged it). The transition only ever owns a
+  // child branch at base; anything else is outside its contract — refuse.
+  const existingChild = gitSafe(["rev-parse", "--verify", "--end-of-options", childRef], { cwd });
+  if (existingChild !== null && String(existingChild).trim() !== canonicalBase) {
+    throw new DeliveryError("worktree_busy", `child branch ${childBranch} already advanced past base; refusing to clobber`);
+  }
+
+  // TRANSITION — idempotent, crash-safe.
+  // 1. Create / reset the child branch at the persisted base.
+  git(["update-ref", childRef, canonicalBase], { cwd });
+  // 2. Switch HEAD onto the child branch (now resolves to base).
+  git(["symbolic-ref", "HEAD", childRef], { cwd });
+  // 3. Committed parent: re-materialize the delivery commit's tree as the working
+  //    tree (the parent commit object is untouched; read-tree checks out its
+  //    tree). Uncommitted parent: skip — preserve the candidate bytes as-is.
+  if (deliveryCommit !== null) {
+    git(["read-tree", "-u", "--reset", deliveryCommit], { cwd });
+  }
+  // 4. Unstage everything so the index matches base (clean), while preserving the
+  //    working-tree bytes (delivery tree / candidate). restoreIndex verifies
+  //    HEAD === base and a clean index.
+  restoreIndex(cwd, canonicalBase);
+
+  // 5. Verify the end state: child branch at base.
+  const headFinal = String(git(["rev-parse", "HEAD"], { cwd })).trim();
+  if (headFinal !== canonicalBase) {
+    throw new DeliveryError("cleanup_failed", `post-transition HEAD (${headFinal}) != baseCommit (${canonicalBase})`);
+  }
+  const branchFinal = String(git(["symbolic-ref", "--short", "HEAD"], { cwd })).trim();
+  if (branchFinal !== childBranch) {
+    throw new DeliveryError("cleanup_failed", `post-transition branch (${branchFinal}) != ${childBranch}`);
+  }
+
+  return { worktreePath: proof.worktreePath, branch: childBranch, canonicalBase };
+}
+
 /**
  * Unified post-commit integrity gate. Checks:
  *   1. HEAD === candidateCommit

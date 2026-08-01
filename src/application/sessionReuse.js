@@ -42,13 +42,33 @@ import { TERMINAL_STATES, readTranscript, findState, findLatest } from "../trans
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
 
 /**
- * Closed set of supported reuse modes. Today: a single policy that reuses the
- * provider-native conversation scoped to (Lead session, bound workspace, agent).
- * Adding a mode is a deliberate contract change — values outside this set are
- * rejected by the registry normalizer.
+ * Closed set of AGENT-DECLARED reuse policies. Today: a single policy that
+ * reuses the provider-native conversation scoped to (Lead session, bound
+ * workspace, agent). Adding a policy is a deliberate contract change — values
+ * outside this set are rejected by the registry normalizer.
+ *
+ * NOTE: run_lineage is NOT an agent-declared policy. It is a routing-only mode
+ * derived from an explicit Lead `continuable` delivery (M12-7); agents never
+ * declare it. It therefore lives in SESSION_ROUTING_MODES (the envelope set),
+ * not here.
  */
 export const SESSION_REUSE_MODES = Object.freeze(["lead_workspace"]);
 export const SESSION_REUSE_TURNS = Object.freeze(["first", "resume"]);
+
+/**
+ * Closed set of modes permitted in the internal routing envelope
+ * {mode, opaqueUuid, turn} that reaches a backend. This is the union of the
+ * agent-declared policy (lead_workspace) and the lineage routing mode
+ * (run_lineage) introduced by M12-7. Both compile to the same provider flags
+ * (--session-id / --resume) via the capability gate; the mode only selects the
+ * opaque-uuid keyspace.
+ */
+export const SESSION_ROUTING_MODES = Object.freeze(["lead_workspace", "run_lineage"]);
+
+// Conservative runId component validator (mirrors delivery.isValidRunId without
+// importing delivery.js — keeps this module's dependency contract intact).
+// Rejects path separators, shell metacharacters, leading dot/dash.
+const RUN_ID_RE = /^[A-Za-z0-9_-]+$/;
 
 const OPAQUE_SESSION_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -65,8 +85,13 @@ export function isValidSessionReuseMode(value) {
  * Validate the internal routing envelope before it can reach a backend.
  * Requested reuse must never silently degrade into a fresh conversation.
  *
+ * The envelope is the closed 3-key shape {mode, opaqueUuid, turn}; mode must be
+ * a member of SESSION_ROUTING_MODES (lead_workspace policy OR run_lineage
+ * continuation routing). Any extra/missing key, unknown mode, bad turn, or
+ * non-uuid throws the fixed-shape error.
+ *
  * @param {unknown} value
- * @returns {{mode:"lead_workspace", turn:"first"|"resume", opaqueUuid:string}}
+ * @returns {{mode:string, turn:"first"|"resume", opaqueUuid:string}}
  */
 export function validateSessionReuseRouting(value) {
   const keys = value && typeof value === "object" && !Array.isArray(value)
@@ -76,7 +101,7 @@ export function validateSessionReuseRouting(value) {
     && keys[0] === "mode"
     && keys[1] === "opaqueUuid"
     && keys[2] === "turn"
-    && value.mode === "lead_workspace"
+    && SESSION_ROUTING_MODES.includes(value.mode)
     && SESSION_REUSE_TURNS.includes(value.turn)
     && typeof value.opaqueUuid === "string"
     && OPAQUE_SESSION_UUID.test(value.opaqueUuid);
@@ -334,5 +359,197 @@ export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, 
     // Claim the slot for this new first turn.
     await store.writeEntry(keyHash, { runId, updatedAt: clock });
     return { kind: "first", routing: { ...routing, turn: "first" } };
+  });
+}
+
+// ===== M12-7: lineage-scoped provider session reuse =====
+//
+// A Lead-authorized correction continuation reuses the provider-native
+// conversation scoped to ONE explicit run lineage (root runId), never to all
+// coder work in a project. The opaque provider UUID is derived from
+// (Lead session + canonical workspace + canonical agentId + rootRunId). It is
+// stable across the whole lineage (first turn + every continuation) and
+// isolated across lineages. The same per-key lock/busy discipline as
+// lead_workspace is reused, keyed by a sha256 of the lineage opaque uuid.
+
+/**
+ * Validate + canonicalize the lineage reuse identity inputs.
+ * @returns {{leadSession:string, workspace:string, agentId:string, rootRunId:string}}
+ * @throws {Error} on any missing/invalid input (fixed safe shape).
+ */
+function canonicalLineageReuseInput({ leadSession, workspace, agentId, rootRunId }) {
+  const c = canonicalReuseInput({ leadSession, workspace, agentId });
+  if (typeof rootRunId !== "string" || !RUN_ID_RE.test(rootRunId) || /^[.-]/.test(rootRunId)) {
+    throw new Error("sessionReuse: rootRunId must be a valid run id component");
+  }
+  return { ...c, rootRunId };
+}
+
+/**
+ * Derive a deterministic, OPAQUE UUID v4 for a run lineage.
+ *
+ * Same inputs across the lineage → same uuid → the provider conversation is
+ * resumed (`--resume <uuid>`). Distinct root runId → distinct uuid → isolated
+ * conversation. The `mode=run_lineage` tag guarantees the keyspace never
+ * collides with a lead_workspace uuid derived from the same triple.
+ *
+ * @param {{leadSession:string, workspace:string, agentId:string, rootRunId:string}} input
+ * @returns {string} a well-formed RFC 4122 v4 UUID
+ */
+export function deriveLineageOpaqueUuid(input) {
+  const c = canonicalLineageReuseInput(input);
+  const material = `mode=run_lineage\nlead=${c.leadSession}\nworkspace=${c.workspace}\nagent=${c.agentId}\nroot=${c.rootRunId}`;
+  const digest = createHash("sha256").update(material, "utf8").digest();
+  digest[6] = (digest[6] & 0x0f) | 0x40; // version 4
+  digest[8] = (digest[8] & 0x3f) | 0x80; // variant 10
+  const hex = digest.subarray(0, 16).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
+/**
+ * Derive the lineage routing-index key — sha256 of the lineage opaque uuid.
+ * Used as the lineage-store filename so the provider session id never appears
+ * in a discoverable filesystem path.
+ * @returns {string} 64-char hex
+ */
+export function deriveLineageReuseKeyHash(input) {
+  const opaque = deriveLineageOpaqueUuid(input);
+  return createHash("sha256").update(opaque, "utf8").digest("hex");
+}
+
+/**
+ * Default filesystem lineage routing store: one JSON file per lineage key under
+ * `<runDir>/.lineage-reuse/`. Each entry is a bounded routing fact
+ * `{ runId, updatedAt }`. The opaque uuid / Lead id / workspace / rootRunId are
+ * never persisted here — they are recomputed deterministically each turn.
+ */
+function defaultLineageStore(runDir) {
+  const dir = join(runDir, ".lineage-reuse");
+  const lockDir = join(dir, ".locks");
+  return {
+    dir,
+    lockDir,
+    async readEntry(keyHash) {
+      try {
+        const raw = await readFile(join(dir, `${keyHash}.json`), "utf8");
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.runId === "string") return parsed;
+        return null;
+      } catch {
+        return null;
+      }
+    },
+    async writeEntry(keyHash, entry) {
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, `${keyHash}.json`), JSON.stringify(entry), "utf8");
+    },
+  };
+}
+
+/**
+ * Decide the lineage turn for an INITIAL continuable delivery: always claims
+ * the lineage slot as turn:first under the per-key lock. The root runId is the
+ * new run's own id. A non-terminal prior owner (impossible for a fresh root,
+ * possible under adversarial reuse) is reported busy.
+ *
+ * @param {object} input
+ * @param {string} input.runDir
+ * @param {string} input.runId — the new root runId (=== rootRunId for the first turn)
+ * @param {string} input.leadSession
+ * @param {string} input.workspace
+ * @param {string} input.agentId
+ * @param {string} input.rootRunId
+ * @param {object} [input.reuseStore]
+ * @param {number} [input.now]
+ * @returns {Promise<{kind:"first", routing:{mode:"run_lineage", opaqueUuid:string, turn:"first"}} | {kind:"busy", activeRunId:string}>}
+ */
+export async function resolveLineageFirstTurn({ runDir, runId, leadSession, workspace, agentId, rootRunId, reuseStore, now }) {
+  const store = reuseStore ?? defaultLineageStore(runDir);
+  const clock = typeof now === "number" ? now : Date.now();
+  const keyHash = deriveLineageReuseKeyHash({ leadSession, workspace, agentId, rootRunId });
+  const opaqueUuid = deriveLineageOpaqueUuid({ leadSession, workspace, agentId, rootRunId });
+  const routing = { mode: "run_lineage", opaqueUuid };
+
+  return withKeyLock(store, keyHash, async () => {
+    const entry = await store.readEntry(keyHash);
+    if (entry && entry.runId && entry.runId !== runId) {
+      // A prior owner exists for this lineage key. If non-terminal, refuse.
+      const priorPath = join(runDir, `${entry.runId}.jsonl`);
+      let events = [];
+      let exists = true;
+      try { events = await readTranscript(priorPath); } catch { exists = false; events = []; }
+      if (exists && events.length > 0) {
+        const state = findState(events);
+        if (state && !TERMINAL_STATES.includes(state)) {
+          return { kind: "busy", activeRunId: entry.runId };
+        }
+      } else {
+        const age = clock - (Number(entry.updatedAt) || 0);
+        if (Number.isFinite(age) && age >= 0 && age < STALE_MS) {
+          return { kind: "busy", activeRunId: entry.runId };
+        }
+      }
+    }
+    await store.writeEntry(keyHash, { runId, updatedAt: clock });
+    return { kind: "first", routing: { ...routing, turn: "first" } };
+  });
+}
+
+/**
+ * Decide the lineage turn for a CORRECTION CONTINUATION of a terminal parent.
+ *
+ * The parent (or a prior continuation in the same lineage) must not be
+ * non-terminal: a lineage/provider session cannot be driven concurrently. When
+ * the slot is free (prior owner terminal or absent), it is claimed for the new
+ * child runId and turn:resume is returned with the SAME opaque uuid as the
+ * first turn — so the provider conversation resumes, not restarts.
+ *
+ * This is the per-key concurrency gate for run_continue: two concurrent
+ * continuations of the same parent serialize here; the loser observes the
+ * winner's non-terminal child and is refused busy before any worktree/spawn.
+ *
+ * @param {object} input
+ * @param {string} input.runDir
+ * @param {string} input.runId — the prospective NEW child runId
+ * @param {string} input.parentRunId — the direct parent (terminal)
+ * @param {string} input.rootRunId — the lineage root (stable across turns)
+ * @param {string} input.leadSession
+ * @param {string} input.workspace
+ * @param {string} input.agentId
+ * @param {object} [input.reuseStore]
+ * @param {number} [input.now]
+ * @returns {Promise<{kind:"resume", routing:{mode:"run_lineage", opaqueUuid:string, turn:"resume"}} | {kind:"busy", activeRunId:string}>}
+ */
+export async function resolveLineageContinuationTurn({ runDir, runId, parentRunId, rootRunId, leadSession, workspace, agentId, reuseStore, now }) {
+  const store = reuseStore ?? defaultLineageStore(runDir);
+  const clock = typeof now === "number" ? now : Date.now();
+  const keyHash = deriveLineageReuseKeyHash({ leadSession, workspace, agentId, rootRunId });
+  const opaqueUuid = deriveLineageOpaqueUuid({ leadSession, workspace, agentId, rootRunId });
+  const routing = { mode: "run_lineage", opaqueUuid };
+
+  return withKeyLock(store, keyHash, async () => {
+    const entry = await store.readEntry(keyHash);
+    if (entry && entry.runId && entry.runId !== runId) {
+      const priorPath = join(runDir, `${entry.runId}.jsonl`);
+      let events = [];
+      let exists = true;
+      try { events = await readTranscript(priorPath); } catch { exists = false; events = []; }
+      if (exists && events.length > 0) {
+        const state = findState(events);
+        if (state && !TERMINAL_STATES.includes(state)) {
+          // Non-terminal owner: a concurrent continuation or an in-flight
+          // sibling. Refuse before any worktree mutation or spawn.
+          return { kind: "busy", activeRunId: entry.runId };
+        }
+        // Terminal owner (the parent reached terminal). Reclaim for the child.
+      } else {
+        const age = clock - (Number(entry.updatedAt) || 0);
+        if (Number.isFinite(age) && age >= 0 && age < STALE_MS) {
+          return { kind: "busy", activeRunId: entry.runId };
+        }
+      }
+    }
+    await store.writeEntry(keyHash, { runId, updatedAt: clock });
+    return { kind: "resume", routing: { ...routing, turn: "resume" } };
   });
 }

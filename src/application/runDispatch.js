@@ -25,7 +25,7 @@ import { resolveWaitTimeout, validateBoundedWaitTimeout } from "./timeoutPolicy.
 import { readRegistry } from "../registry.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { inheritedEnvNames } from "../envPolicy.js";
-import { resolveReuseTurn } from "./sessionReuse.js";
+import { resolveReuseTurn, resolveLineageFirstTurn } from "./sessionReuse.js";
 
 // M11-7: thrown when a worker's REQUIRED credential is missing at dispatch time.
 // Carries the missing env NAMES (never values). Callers (MCP) collapse to a
@@ -122,6 +122,12 @@ export async function dispatchRun({
   // supplied — expectedGitHead is the model-owned counterpart and is consumed at
   // the MCP boundary. Absent for CLI callers (argv unchanged).
   frozenGitHead,
+  // M12-7: Lead opt-in marking this delivery as the root of a continuable
+  // lineage. When true (delivery-only), dispatch establishes the lineage
+  // provider session with turn:first so a future Lead-authorized run_continue
+  // can resume the SAME provider-native conversation in the retained worktree.
+  // Default false = byte-compatible ordinary delivery dispatch.
+  continuable = false,
   // M11-7: skip the credential preflight (e.g. when the caller already did it
   // and is passing resolvedCredentials). Default false = always check.
   skipCredentialCheck = false,
@@ -248,6 +254,39 @@ export async function dispatchRun({
     sessionReuseRouting = reuseDecision.routing;
   }
 
+  // M12-7: continuable delivery = lineage ROOT. Establish the lineage provider
+  // session (turn:first) under the lineage key (Lead session + workspace +
+  // agent + rootRunId). A future Lead-authorized run_continue resumes the SAME
+  // provider conversation (turn:resume) against this rootRunId, reusing the
+  // retained worktree. Mutually exclusive with lead_workspace above (that gate
+  // is non-delivery-only). Fail-closed: continuable is delivery-only, and a busy
+  // lineage slot refuses before any transcript write or fork.
+  let lineageRootRunId = null;
+  if (continuable) {
+    if (!publicDelivery) {
+      throw new Error("dispatchRun: continuable is delivery-only (a continuation lineage is rooted in a delivery run)");
+    }
+    if (typeof leadSession !== "string" || leadSession.length === 0) {
+      throw new Error("dispatchRun: leadSession is required for a continuable delivery (server-owned Lead session identity)");
+    }
+    if (typeof cwd !== "string" || cwd.length === 0) {
+      throw new Error("dispatchRun: bound workspace (cwd) is required for a continuable delivery");
+    }
+    const firstTurn = await resolveLineageFirstTurn({
+      runDir: resolvedRunDir,
+      runId: finalRunId,
+      leadSession,
+      workspace: cwd,
+      agentId,
+      rootRunId: finalRunId,
+    });
+    if (firstTurn.kind === "busy") {
+      throw new ReuseBusyError(firstTurn.activeRunId);
+    }
+    sessionReuseRouting = firstTurn.routing;
+    lineageRootRunId = finalRunId;
+  }
+
   // Construct runner argv BEFORE any transcript write. All static preflight
   // (argv length guard, delivery validation) must happen before a single
   // durable fact is written — otherwise a rejected dispatch leaves an
@@ -345,6 +384,13 @@ export async function dispatchRun({
     await transcript.append("run.session_reuse", {
       mode: sessionReuseRouting.mode,
       turn: sessionReuseRouting.turn,
+      // M12-7: persist the lineage root for run_lineage routing so a future
+      // run_continue can resolve the lineage key from any parent transcript.
+      // Absent for lead_workspace (zero drift). Carries only the WAO runId —
+      // never the opaque uuid, Lead id, or workspace.
+      ...(sessionReuseRouting.mode === "run_lineage" && lineageRootRunId
+        ? { rootRunId: lineageRootRunId }
+        : {}),
     });
   }
 
