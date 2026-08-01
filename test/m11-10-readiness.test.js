@@ -586,10 +586,21 @@ test("M11-10-SVC-09: point-in-time getRunDelivery shape unchanged (backward comp
     const view = await getRunDelivery({ runId, runDir });
     assert.equal(view.deliveryAvailable, true);
     assert.equal(view.deliveryRequested, true);
+    // M12-6 3B2a: ADDITIVE original/effective/reverify projection — the OLD
+    // fields are untouched; effectiveVerification + reverify are new keys.
     assert.deepEqual(
       Object.keys(view).sort(),
-      ["acceptance", "deliveryAvailable", "deliveryRef", "deliveryRequested", "runId", "terminalState", "verification"].sort(),
+      [
+        "acceptance", "deliveryAvailable", "deliveryRef", "deliveryRequested", "runId",
+        "terminalState", "verification", "effectiveVerification", "reverify",
+      ].sort(),
     );
+    // Zero-drift truth: a plain chain with NO reverify events → effective ===
+    // the original status as carried by the ref (makeRef's verification.status
+    // is "pending") and a clean "none" reverify projection.
+    assert.deepEqual(view.verification, { status: "pending" });
+    assert.deepEqual(view.effectiveVerification, { status: "pending" });
+    assert.deepEqual(view.reverify, { status: "none" });
   } finally { cleanupDir(runDir); }
 });
 
@@ -726,11 +737,17 @@ test("M11-10-MCP-02: output schema — readiness/waitReturnedEarly present iff w
         "runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit",
         "changedFileCount", "changedPaths", "changedPathsTruncated",
         "verificationStatus", "verificationFailureCode", "verificationFailureSummary",
+        "originalVerificationStatus", "effectiveVerificationStatus", "reverify",
         "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory", "candidateKind",
       ]);
-      assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys, "point-in-time field set (M11-12B adds nullable verificationFailureSummary; M12-1S1/M12-4A add nullable candidateInventory + candidateKind)");
+      assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys, "point-in-time field set (M11-12B adds nullable verificationFailureSummary; M12-1S1/M12-4A add nullable candidateInventory + candidateKind; M12-6 3B2a adds additive originalVerificationStatus/effectiveVerificationStatus/reverify)");
       assert.equal("readiness" in parsed, false, "no readiness in point-in-time output");
       assert.equal("waitReturnedEarly" in parsed, false, "no waitReturnedEarly in point-in-time output");
+      // Additive projection with no reverify chain: effective === original,
+      // reverify { status: "none", reason: null }.
+      assert.equal(parsed.originalVerificationStatus, "passed");
+      assert.equal(parsed.effectiveVerificationStatus, "passed");
+      assert.deepEqual(parsed.reverify, { status: "none", reason: null });
     } finally { await client2.close(); await server2.close(); }
   } finally { cleanupDir(dir); }
 });
@@ -764,6 +781,74 @@ test("M11-10-MCP-03: wait path maps every readiness state to a truthful, non-err
           assert.equal(res.structuredContent.deliveryFailure, null, `${c.readiness}: no failure code`);
         }
       } finally { await client.close(); await server.close(); }
+    }
+  } finally { cleanupDir(dir); }
+});
+
+test("M11-10-MCP-06: wait path exposes additive original/effective/reverify; reverify object validates strictly", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "m1110-mcp-06-"));
+  try {
+    makeGitRepo(dir);
+    // (a) complete reverify chain: original failed, effective passed — both visible.
+    const server = createWaoMcpServer({
+      registryPath: "/r.json", runDir: dir, workspaceRoot: dir,
+      getRunDeliveryReadinessFn: async (i) => ({
+        runId: i.runId, readiness: "reviewable", waitReturnedEarly: true, terminalState: "completed",
+        deliveryAvailable: true, deliveryRef: makeRef(i.runId), deliveryFailure: null,
+        verification: { status: "failed", failureCode: "command_failed" },
+        effectiveVerification: { status: "passed" },
+        reverify: { status: "complete", reason: "tooling_invalid" },
+        acceptance: { status: "pending" },
+      }),
+    });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x", waitMs: 2000 } });
+      assert.equal(res.isError, undefined);
+      const p = res.structuredContent;
+      assert.equal(p.verificationStatus, "failed", "old field keeps original truth");
+      assert.equal(p.originalVerificationStatus, "failed");
+      assert.equal(p.effectiveVerificationStatus, "passed");
+      assert.deepEqual(p.reverify, { status: "complete", reason: "tooling_invalid" });
+    } finally { await client.close(); await server.close(); }
+
+    // (b) malformed chain from the service view → reverify malformed, effective
+    // must fall back to original; a service claiming otherwise collapses to error.
+    for (const [view, expectError] of [
+      [{
+        runId: "run_x", readiness: "reviewable", waitReturnedEarly: true, terminalState: "completed",
+        deliveryAvailable: true, deliveryRef: makeRef("run_x"), deliveryFailure: null,
+        verification: { status: "failed", failureCode: "command_failed" },
+        effectiveVerification: { status: "failed" },
+        reverify: { status: "malformed", reason: null },
+        acceptance: { status: "pending" },
+      }, false],
+      [{
+        runId: "run_x", readiness: "reviewable", waitReturnedEarly: true, terminalState: "completed",
+        deliveryAvailable: true, deliveryRef: makeRef("run_x"), deliveryFailure: null,
+        verification: { status: "failed", failureCode: "command_failed" },
+        effectiveVerification: { status: "passed" }, // violation: malformed chain claims pass
+        reverify: { status: "malformed", reason: null },
+        acceptance: { status: "pending" },
+      }, true],
+    ]) {
+      const server2 = createWaoMcpServer({
+        registryPath: "/r.json", runDir: dir, workspaceRoot: dir,
+        getRunDeliveryReadinessFn: async () => view,
+      });
+      const client2 = await buildClient(server2);
+      try {
+        const res = await client2.callTool({ name: "run_delivery", arguments: { runId: "run_x", waitMs: 2000 } });
+        if (expectError) {
+          assert.equal(res.isError, true, "inconsistent malformed/passed projection fails closed");
+          assert.ok(!JSON.stringify(res).includes('"passed"'), "no fabricated pass leaks");
+        } else {
+          assert.equal(res.isError, undefined);
+          const p = res.structuredContent;
+          assert.equal(p.effectiveVerificationStatus, "failed");
+          assert.deepEqual(p.reverify, { status: "malformed", reason: null });
+        }
+      } finally { await client2.close(); await server2.close(); }
     }
   } finally { cleanupDir(dir); }
 });

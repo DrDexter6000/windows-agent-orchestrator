@@ -8,7 +8,10 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { getRunDelivery, decideRunDelivery, projectDeliveryReadiness } from "../src/application/runDelivery.js";
+import {
+  getRunDelivery, decideRunDelivery, projectDeliveryReadiness, getRunDeliveryReadiness,
+  DELIVERY_WAIT_MS_MIN, DELIVERY_DECISION_REJECTION_CODES, classifyDeliveryDecisionRejection,
+} from "../src/application/runDelivery.js";
 import { JsonlTranscript, readTranscript } from "../src/transcript.js";
 
 function cleanupDir(dir) {
@@ -280,5 +283,108 @@ test("M12-1S2-S3: decideRunDelivery recovery-accept admits a failed run only via
     const accept = await decideRunDelivery({ runId, runDir: dir, decision: "accepted", reason: "recovery verified" });
     assert.equal(accept.accepted, true);
     assert.equal(accept.event.type, "run.delivery_accepted");
+  } finally { cleanupDir(dir); }
+});
+
+// ============================================================
+// M12-6 Package 3B2a: structured decision-rejection classification
+// (single application-level authority) + additive reverify projection
+// on the readiness service.
+// ============================================================
+
+test("M12-6-3B2a-SVC-01: DELIVERY_DECISION_REJECTION_CODES is the frozen closed set", () => {
+  assert.deepEqual(DELIVERY_DECISION_REJECTION_CODES, [
+    "verification_failed",
+    "delivery_malformed",
+    "already_decided",
+    "terminal_not_eligible",
+    "delivery_unavailable",
+  ]);
+  assert.equal(Object.isFrozen(DELIVERY_DECISION_REJECTION_CODES), true);
+  assert.equal(new Set(DELIVERY_DECISION_REJECTION_CODES).size, DELIVERY_DECISION_REJECTION_CODES.length, "no duplicates");
+});
+
+test("M12-6-3B2a-SVC-02: classifyDeliveryDecisionRejection maps every durable gate to the closed set", () => {
+  const cases = [
+    // Gate errors from transcript.tryAppendDecision.
+    ["Cannot accept: delivery verification is failed, must be passed", "verification_failed"],
+    ["Cannot accept: delivery verification is unavailable, must be passed", "verification_failed"],
+    ["Cannot reject: delivery verification is pending, must be passed/failed/unavailable", "verification_failed"],
+    ["Cannot accept: run terminal state is running, must be completed (or a recovery-eligible failed run)", "terminal_not_eligible"],
+    // Durable-facts errors from transcript.validateDeliveryFacts.
+    ["No committed delivery found (missing run.delivery_created)", "delivery_unavailable"],
+    ["No verification outcome event found (missing run.delivery_verification_*)", "delivery_unavailable"],
+    ["Multiple delivery_created events found (2); exactly one required", "delivery_malformed"],
+    ["Multiple verification outcome events found (3); exactly one required", "delivery_malformed"],
+    ["delivery_created and verification deliveryCommit must both be canonical 40/64-hex commit ids", "delivery_malformed"],
+    ["Verification deliveryCommit (abc) does not match delivery_created commit (def)", "delivery_malformed"],
+  ];
+  for (const [message, code] of cases) {
+    assert.equal(classifyDeliveryDecisionRejection(new Error(message)), code, message.slice(0, 48));
+  }
+});
+
+test("M12-6-3B2a-SVC-03: classifier returns null for anything unexpected (stays a fixed MCP error)", () => {
+  assert.equal(classifyDeliveryDecisionRejection(new Error("disk full")), null);
+  assert.equal(classifyDeliveryDecisionRejection(new Error("getRunDeliveryReadiness: runId is required")), null);
+  assert.equal(classifyDeliveryDecisionRejection(null), null);
+  assert.equal(classifyDeliveryDecisionRejection(undefined), null);
+  assert.equal(classifyDeliveryDecisionRejection("Cannot accept: delivery verification is failed"), null, "non-Error input");
+  assert.equal(classifyDeliveryDecisionRejection(new Error("")), null);
+});
+
+test("M12-6-3B2a-SVC-04: service-layer decide semantics unchanged — policy violations still throw raw errors", async () => {
+  const { dir, runId, transcript } = makeDeliveryTranscript("s3b2asvc4");
+  try {
+    await writeFullDeliveryLifecycle(transcript, { verificationStatus: "failed", failureCode: "command_failed" });
+    await assert.rejects(() => decideRunDelivery({ runId, runDir: dir, decision: "accepted", reason: "x" }),
+      /Cannot accept: delivery verification is failed/);
+    // already-decided is NOT a throw at this layer: the first durable decision wins.
+    const t2 = makeDeliveryTranscript("s3b2asvc4b");
+    try {
+      await writeFullDeliveryLifecycle(t2.transcript);
+      await decideRunDelivery({ runId: t2.runId, runDir: t2.dir, decision: "accepted", reason: "LGTM" });
+      const second = await decideRunDelivery({ runId: t2.runId, runDir: t2.dir, decision: "rejected", reason: "no" });
+      assert.equal(second.accepted, false);
+      assert.equal(second.existing.status, "accepted");
+    } finally { cleanupDir(t2.dir); }
+  } finally { cleanupDir(dir); }
+});
+
+test("M12-6-3B2a-SVC-05: getRunDeliveryReadiness forwards effectiveVerification + reverify additively", async () => {
+  const { dir, runId, transcript } = makeDeliveryTranscript("s3b2asvc5");
+  try {
+    const ref = {
+      schemaVersion: 1, kind: "git_commit", runId,
+      baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
+      branch: `wao/${runId}`, worktreePath: "/fake/wt", changedFiles: ["src/a.js"],
+      verification: { status: "failed", commands: ["echo ok"], verifiedCommit: "d".repeat(40), results: [], failureCode: "command_failed" },
+      acceptance: { status: "pending", reviewerType: "lead_agent" },
+      integration: { status: "pending", targetCommit: null },
+    };
+    await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake/wt" });
+    await transcript.append("run.delivery_created", { delivery: ref });
+    await transcript.append("run.delivery_verification_failed", { delivery: ref });
+    await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+    await transcript.tryAppendReverifyRequested({ delivery: ref, reason: "tooling_invalid", setupCommands: ["fix-env"] });
+    const outcomeRef = { ...ref, verification: { ...ref.verification, status: "passed" } };
+    await transcript.tryAppendReverifyOutcome({ delivery: outcomeRef, outcome: "passed" });
+
+    const r = await getRunDeliveryReadiness({ runId, runDir: dir, waitMs: DELIVERY_WAIT_MS_MIN });
+    assert.equal(r.readiness, "reviewable");
+    assert.equal(r.verification.status, "failed", "original verification truth unchanged");
+    assert.deepEqual(r.effectiveVerification, { status: "passed" });
+    assert.deepEqual(r.reverify, { status: "complete", reason: "tooling_invalid" });
+  } finally { cleanupDir(dir); }
+});
+
+test("M12-6-3B2a-SVC-06: readiness result carries null additive fields when there is no delivery", async () => {
+  const { dir, runId, transcript } = makeDeliveryTranscript("s3b2asvc6");
+  try {
+    await transcript.append("run.state_change", { to: "completed", reason: "done" });
+    const r = await getRunDeliveryReadiness({ runId, runDir: dir, waitMs: DELIVERY_WAIT_MS_MIN });
+    assert.equal(r.effectiveVerification, null);
+    assert.equal(r.reverify, null);
+    assert.equal(r.verification, null);
   } finally { cleanupDir(dir); }
 });

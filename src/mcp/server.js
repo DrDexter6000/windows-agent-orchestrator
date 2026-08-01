@@ -40,7 +40,21 @@ import {
   DELIVERY_READINESS_STATES,
   DELIVERY_WAIT_MS_MIN,
   DELIVERY_WAIT_MS_MAX,
+  // M12-6 Package 3B2a: the single decision-rejection classification authority.
+  // Expected policy rejections map to a closed-set structured rejectionReason;
+  // everything else stays a fixed safe MCP error.
+  DELIVERY_DECISION_REJECTION_CODES,
+  classifyDeliveryDecisionRejection,
 } from "../application/runDelivery.js";
+import {
+  runDeliveryReverify,
+  REVERIFY_REASONS,
+  REVERIFY_SETUP_COMMANDS_LIMIT,
+  REVERIFY_SETUP_COMMAND_MAX_LENGTH,
+  REVERIFY_TIMEOUT_MS_MIN,
+  REVERIFY_TIMEOUT_MS_MAX,
+  REVERIFY_TIMEOUT_MS_DEFAULT,
+} from "../application/runDeliveryReverify.js";
 import { projectDeliveryChangedPaths, CHANGED_PATHS_LIMIT, validateProjectedPath } from "../application/deliveryReview.js";
 import { computeCandidateInventory, INVENTORY_PATHS_LIMIT } from "../application/candidateInventory.js";
 import { stopRun } from "../application/runStop.js";
@@ -80,7 +94,7 @@ import {
 import { isValidRunId } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, UNKNOWN_PACKAGING_CODE } from "../deliveryFailureCodes.js";
 import { DIAGNOSIS_CATEGORIES } from "../diagnosis.js";
-import { RUN_STATES, RECOVERY_CANDIDATE_KINDS } from "../transcript.js";
+import { RUN_STATES, RECOVERY_CANDIDATE_KINDS, REVERIFY_FAILURE_CODES } from "../transcript.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 import {
   isValidCanonicalAgentId,
@@ -656,6 +670,19 @@ const RUN_DELIVERY_OUTPUT = z.object({
   // shared by the point-in-time query and the waitMs readiness handshake
   // (both build their payload via buildRunDeliveryPayload).
   verificationFailureSummary: VERIFICATION_FAILURE_SUMMARY.nullable(),
+  // M12-6 Package 3B2a: ADDITIVE original/effective/reverify projection.
+  // originalVerificationStatus is the OLD verificationStatus semantics (the
+  // durable original outcome) under a new name; effectiveVerificationStatus is
+  // the reverify outcome when exactly one complete audited chain exists, else
+  // the original. reverify is the strict closed-set chain status + closed-set
+  // reason. A non-complete chain can never change the effective status — the
+  // handler enforces that boundary invariant and fails closed otherwise.
+  originalVerificationStatus: VERIFICATION_STATUS_ENUM.nullable(),
+  effectiveVerificationStatus: VERIFICATION_STATUS_ENUM.nullable(),
+  reverify: z.object({
+    status: z.enum(["none", "pending", "complete", "malformed"]),
+    reason: z.enum(REVERIFY_REASONS).nullable(),
+  }).strict().nullable(),
   acceptanceStatus: ACCEPTANCE_STATUS_ENUM.nullable(),
   decisionType: DECISION_TYPE_ENUM.nullable(),
   // Failure-only field (non-null iff deliveryAvailable === false).
@@ -841,6 +868,9 @@ function buildRunDeliveryPayload(runId, view) {
       verificationStatus: null,
       verificationFailureCode: null,
       verificationFailureSummary: null,
+      originalVerificationStatus: null,
+      effectiveVerificationStatus: null,
+      reverify: null,
       acceptanceStatus: null,
       decisionType: null,
       deliveryFailure: failure ? { code: failure.code ?? "unknown" } : null,
@@ -895,6 +925,38 @@ function buildRunDeliveryPayload(runId, view) {
   const acceptanceStatus = rawAcceptance;
   const rawDecisionType = view.acceptance?.decisionEvent?.type ?? null;
   const decisionType = rawDecisionType && SAFE_DECISION_TYPES.has(rawDecisionType) ? rawDecisionType : null;
+  // M12-6 Package 3B2a: additive original/effective/reverify projection.
+  // originalVerificationStatus keeps the OLD verificationStatus semantics —
+  // the durable ORIGINAL outcome. The effective status is the reverify outcome
+  // ONLY when a complete audited chain (requested + outcome) exists and the
+  // service claims the outcome status; a service view that omits the additive
+  // fields defaults to effective === original (wait-path fakes / older
+  // services see zero drift).
+  //
+  // Boundary invariant (fail closed): a NON-complete reverify chain (none /
+  // pending / malformed) can NEVER change the effective status — a malformed
+  // chain must never look passed. A service claiming otherwise throws →
+  // fixed safe error.
+  const rawEffective = view.effectiveVerification?.status
+    ?? view.effectiveVerificationStatus
+    ?? verificationStatus;
+  if (!SAFE_VERIFICATION_STATUSES.has(rawEffective)) throw new Error("bad effectiveVerificationStatus");
+  const effectiveVerificationStatus = rawEffective;
+  const rawReverify = view.reverify ?? null;
+  let reverify;
+  if (rawReverify === null || rawReverify === undefined) {
+    reverify = { status: "none", reason: null };
+  } else {
+    if (typeof rawReverify !== "object") throw new Error("bad reverify");
+    const rvStatus = rawReverify.status;
+    if (!["none", "pending", "complete", "malformed"].includes(rvStatus)) throw new Error("bad reverify status");
+    const rvReason = rawReverify.reason ?? null;
+    if (rvReason !== null && !REVERIFY_REASONS.includes(rvReason)) throw new Error("bad reverify reason");
+    reverify = { status: rvStatus, reason: rvReason };
+  }
+  if (reverify.status !== "complete" && effectiveVerificationStatus !== verificationStatus) {
+    throw new Error("reverify chain not complete cannot change effective verification");
+  }
   return {
     runId,
     deliveryAvailable: true,
@@ -908,6 +970,9 @@ function buildRunDeliveryPayload(runId, view) {
     verificationStatus,
     verificationFailureCode,
     verificationFailureSummary,
+    originalVerificationStatus: verificationStatus,
+    effectiveVerificationStatus,
+    reverify,
     acceptanceStatus,
     decisionType,
     deliveryFailure: null,
@@ -927,13 +992,22 @@ const RUN_DELIVERY_DECIDE_INPUT = z.object({
   reason: z.string().trim().min(1).max(2000),
 }).strict();
 
+// M12-6 Package 3B2a: EXPECTED policy rejections (verification not passed,
+// terminal not eligible, malformed/unavailable delivery facts, already-decided
+// first-wins) are normal structured outcomes with a CLOSED-SET rejectionReason
+// (the shared application-level authority, DELIVERY_DECISION_REJECTION_CODES) —
+// never MCP isError. deliveryCommit/acceptanceStatus are nullable because a
+// rejected decision records nothing and may have no delivery artifact. The
+// strict object means NO unknown keys (reason text, raw validator messages,
+// paths) can ever be spliced into the payload.
 const RUN_DELIVERY_DECIDE_OUTPUT = z.object({
   runId: z.string().min(1),
   decisionAccepted: z.boolean(),
-  deliveryCommit: COMMIT_HASH_SCHEMA,
-  acceptanceStatus: z.enum(["accepted", "rejected"]),
+  deliveryCommit: COMMIT_HASH_SCHEMA.nullable(),
+  acceptanceStatus: z.enum(["accepted", "rejected"]).nullable(),
   existingStatus: z.enum(["accepted", "rejected"]).nullable(),
-});
+  rejectionReason: z.enum(DELIVERY_DECISION_REJECTION_CODES).nullable(),
+}).strict();
 
 const RUN_DELIVERY_DECIDE_ANNOTATIONS = {
   readOnlyHint: false,
@@ -944,8 +1018,69 @@ const RUN_DELIVERY_DECIDE_ANNOTATIONS = {
 
 const RUN_DELIVERY_DECIDE_DESCRIPTION =
   "Record an explicit Lead decision (accepted or rejected) on a delivery. The first " +
-  "durable decision wins; later attempts lose without error. Does not decide correctness " +
-  "automatically. Does not return the decision reason or delivery details.";
+  "durable decision wins; later attempts lose without error. Expected policy " +
+  "rejections (verification not passed, terminal not eligible, delivery unavailable " +
+  "or malformed, already decided) return a normal outcome with a closed-set " +
+  "rejectionReason — only unexpected internal failures are errors. " +
+  "Does not decide correctness automatically. Does not return the decision reason " +
+  "or delivery details.";
+
+// ===== run_delivery_reverify (audited unchanged-artifact re-verification) constants =====
+// M12-6 Package 3B2a: the Lead invokes ONE audited re-verification of the SAME
+// committed artifact when the original verification outcome is not trustworthy
+// (tooling invalid / environment contaminated / dependency setup missing).
+// Delegates to the existing application service (runDeliveryReverify) which
+// re-runs verification commands against the persisted artifact, records a
+// durable reverify chain (run.delivery_reverification_requested/outcome), and
+// only then can the effective verification status be passed. Workspace-bound +
+// destructive (appends durable events, runs commands) but reentrant/crash-safe
+// so a retry converges in outcome. NEVER auto-accepts — run_delivery_decide
+// still owns the decision.
+
+const DELIVERY_REVERIFY_ERROR_TEXT = "run_delivery_reverify failed";
+
+const RUN_DELIVERY_REVERIFY_INPUT = z.object({
+  runId: z.string().min(1),
+  // Closed-set reverify reason — the exact REVERIFY_REASONS SSOT the
+  // application service validates against. Never an arbitrary text field.
+  reason: z.enum(REVERIFY_REASONS),
+  // Bounded optional setup commands (bound by the exported SSOT constants).
+  setupCommands: z.array(
+    z.string().min(1).max(REVERIFY_SETUP_COMMAND_MAX_LENGTH),
+  ).max(REVERIFY_SETUP_COMMANDS_LIMIT).optional(),
+  // Bounded optional timeout (bound by the exported SSOT constants).
+  timeoutMs: z.number().int().min(REVERIFY_TIMEOUT_MS_MIN).max(REVERIFY_TIMEOUT_MS_MAX).optional(),
+}).strict();
+
+const RUN_DELIVERY_REVERIFY_OUTPUT = z.object({
+  runId: z.string().min(1),
+  deliveryCommit: COMMIT_HASH_SCHEMA,
+  state: z.enum(["created", "resumed", "idempotent"]),
+  reason: z.enum(REVERIFY_REASONS),
+  verificationStatus: z.enum(["passed", "failed", "unavailable"]),
+  failureCode: z.enum(REVERIFY_FAILURE_CODES).nullable(),
+  requested: z.boolean(),
+  outcomeRecorded: z.boolean(),
+}).strict();
+
+const RUN_DELIVERY_REVERIFY_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+const RUN_DELIVERY_REVERIFY_DESCRIPTION =
+  "Re-verify the unchanged committed delivery artifact of a run after the original " +
+  "verification outcome was invalidated (reason is one of: " + REVERIFY_REASONS.join(", ") + "). " +
+  "Workspace-bound; runs the persisted verification commands against the SAME committed " +
+  "artifact, records one audited reverify chain, and returns the closed-set outcome. " +
+  `Optional setupCommands (up to ${REVERIFY_SETUP_COMMANDS_LIMIT}, each up to ` +
+  `${REVERIFY_SETUP_COMMAND_MAX_LENGTH} chars) and timeoutMs (` +
+  `${REVERIFY_TIMEOUT_MS_MIN}..${REVERIFY_TIMEOUT_MS_MAX}, default ` +
+  `${REVERIFY_TIMEOUT_MS_DEFAULT}). Reentrant: a retry converges on the same ` +
+  "delivery commit with at most one outcome. The decision remains the Lead's: " +
+  "run_delivery_decide still owns it.";
 
 // ===== run_delivery_repackage (model-free repackage) constants =====
 // M12-1S2: when a delivery run terminally failed with packaging code
@@ -1589,6 +1724,10 @@ export function createWaoMcpServer({
   // M12-1S2: injectable model-free delivery repackage service. Defaults to the
   // real service; threaded only when a workspace binding authorizes the read.
   getRunDeliveryRepackageFn,
+  // M12-6 Package 3B2a: injectable audited unchanged-artifact re-verification
+  // service. Defaults to the real service; workspace-bound — threaded only
+  // when a workspace binding authorizes the read.
+  runDeliveryReverifyFn,
 }) {
   const service = getRegistryInventoryFn ?? getRegistryInventory;
   // M11-7: the Windows user-env reader for credential readiness. Defaults to
@@ -1617,6 +1756,7 @@ export function createWaoMcpServer({
   const playbookGetService = getLeadPlaybookFn ?? getLeadPlaybook;
   const deliveryReviewService = getRunDeliveryReviewFn ?? getRunDeliveryReview;
   const deliveryRepackageService = getRunDeliveryRepackageFn ?? runDeliveryRepackage;
+  const deliveryReverifyService = runDeliveryReverifyFn ?? runDeliveryReverify;
 
   /**
    * Build the SDK-native readiness keepalive hook shared by run_delivery and
@@ -2404,17 +2544,21 @@ export function createWaoMcpServer({
             deliveryCommit,
             acceptanceStatus: decision,
             existingStatus: null,
+            rejectionReason: null,
           };
         } else {
           const existingStatus = result.existing?.status;
           if (existingStatus !== "accepted" && existingStatus !== "rejected") throw new Error("bad existing status");
           const deliveryCommit = COMMIT_HASH_SCHEMA.parse(result.existing?.deliveryCommit);
+          // First durable decision wins: the loser is a normal outcome with the
+          // closed-set already_decided reason — never an error.
           payload = {
             runId,
             decisionAccepted: false,
             deliveryCommit,
             acceptanceStatus: existingStatus,
             existingStatus,
+            rejectionReason: "already_decided",
           };
         }
         RUN_DELIVERY_DECIDE_OUTPUT.parse(payload);
@@ -2422,7 +2566,27 @@ export function createWaoMcpServer({
           content: [{ type: "text", text: JSON.stringify(payload) }],
           structuredContent: payload,
         };
-      } catch {
+      } catch (err) {
+        // M12-6 Package 3B2a: EXPECTED policy rejections are structured outcomes
+        // with the closed-set rejectionReason (single application authority) —
+        // no raw gate text, no validator message, no path/event leak. Only
+        // unexpected/internal exceptions stay the fixed safe MCP error.
+        const rejectionReason = classifyDeliveryDecisionRejection(err);
+        if (rejectionReason) {
+          const payload = {
+            runId,
+            decisionAccepted: false,
+            deliveryCommit: null,
+            acceptanceStatus: null,
+            existingStatus: null,
+            rejectionReason,
+          };
+          RUN_DELIVERY_DECIDE_OUTPUT.parse(payload);
+          return {
+            content: [{ type: "text", text: JSON.stringify(payload) }],
+            structuredContent: payload,
+          };
+        }
         return {
           isError: true,
           content: [{ type: "text", text: DELIVERY_DECIDE_ERROR_TEXT }],
@@ -3049,6 +3213,80 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: DELIVERY_REPACKAGE_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  // ===== run_delivery_reverify (audited unchanged-artifact re-verification) =====
+
+  mcp.registerTool(
+    "run_delivery_reverify",
+    {
+      description: RUN_DELIVERY_REVERIFY_DESCRIPTION,
+      inputSchema: RUN_DELIVERY_REVERIFY_INPUT,
+      outputSchema: RUN_DELIVERY_REVERIFY_OUTPUT,
+      annotations: RUN_DELIVERY_REVERIFY_ANNOTATIONS,
+    },
+    async ({ runId, reason, setupCommands, timeoutMs }) => {
+      try {
+        // Pre-validate runId before workspace binding or any service call.
+        if (!isValidRunId(runId)) {
+          return { isError: true, content: [{ type: "text", text: DELIVERY_REVERIFY_ERROR_TEXT }] };
+        }
+        // Workspace-bound: the service needs the authorized workspace root to
+        // prove ownership + verify the unchanged artifact. No binding → the
+        // service is NEVER called.
+        const binding = await resolveWorkspaceBinding();
+        if (!binding.bound) {
+          return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
+        }
+        const result = await deliveryReverifyService({
+          runId,
+          runDir,
+          reason,
+          ...(setupCommands !== undefined ? { setupCommands } : {}),
+          ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+          authorizedWorkspaceRoot: binding.root,
+        });
+        // Build a NEW payload from the service result — validate every field
+        // through closed sets. Any violation throws → fixed safe error with no
+        // structuredContent; no command/path/stderr/event/credential is echoed.
+        if (result.runId !== runId) throw new Error("runId mismatch");
+        const deliveryCommit = COMMIT_HASH_SCHEMA.parse(result.deliveryCommit);
+        if (!["created", "resumed", "idempotent"].includes(result.state)) {
+          throw new Error("bad reverify state");
+        }
+        if (!REVERIFY_REASONS.includes(result.reason)) throw new Error("bad reverify reason");
+        if (!["passed", "failed", "unavailable"].includes(result.verificationStatus)) {
+          throw new Error("bad verificationStatus");
+        }
+        if (result.failureCode !== null && result.failureCode !== undefined
+            && !REVERIFY_FAILURE_CODES.includes(result.failureCode)) {
+          throw new Error("bad failureCode");
+        }
+        const failureCode = result.failureCode ?? null;
+        if (typeof result.requested !== "boolean") throw new Error("requested not boolean");
+        if (typeof result.outcomeRecorded !== "boolean") throw new Error("outcomeRecorded not boolean");
+        const payload = {
+          runId,
+          deliveryCommit,
+          state: result.state,
+          reason: result.reason,
+          verificationStatus: result.verificationStatus,
+          failureCode,
+          requested: result.requested,
+          outcomeRecorded: result.outcomeRecorded,
+        };
+        const parsed = RUN_DELIVERY_REVERIFY_OUTPUT.parse(payload);
+        return {
+          content: [{ type: "text", text: JSON.stringify(parsed) }],
+          structuredContent: parsed,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: DELIVERY_REVERIFY_ERROR_TEXT }],
         };
       }
     },

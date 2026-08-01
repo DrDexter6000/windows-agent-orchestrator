@@ -96,13 +96,20 @@ test("M9-6B-02: run_delivery returns safe fields incl. bounded changedPaths, no 
     // M11-1A: changedPaths + changedPathsTruncated are now part of the safe output set.
     // M11-8C: deliveryAvailable (success discriminator) + deliveryFailure (null on success).
     // M12-1S1/M12-4A: candidate inventory and its closed-set kind are nullable on success.
-    const allowed = new Set(["runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit", "changedFileCount", "changedPaths", "changedPathsTruncated", "verificationStatus", "verificationFailureCode", "verificationFailureSummary", "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory", "candidateKind"]);
+    // M12-6 3B2a: ADDITIVE originalVerificationStatus/effectiveVerificationStatus/
+    // reverify — the old verificationStatus semantics are preserved exactly, and
+    // a service view with no reverify chain yields effective === original and
+    // reverify { status:"none", reason:null }.
+    const allowed = new Set(["runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit", "changedFileCount", "changedPaths", "changedPathsTruncated", "verificationStatus", "verificationFailureCode", "verificationFailureSummary", "originalVerificationStatus", "effectiveVerificationStatus", "reverify", "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory", "candidateKind"]);
     for (const k of Object.keys(parsed)) assert.ok(allowed.has(k), `unexpected key: ${k}`);
     assert.equal(parsed.deliveryAvailable, true, "success variant has deliveryAvailable:true");
     assert.equal(parsed.deliveryRequested, true, "success variant confirms delivery intent");
     assert.equal(parsed.deliveryFailure, null, "no deliveryFailure on success");
     assert.equal(parsed.candidateInventory, null, "no candidateInventory on success (M12-1S1)");
     assert.equal(parsed.candidateKind, null, "no candidateKind on success (M12-4A)");
+    assert.equal(parsed.originalVerificationStatus, "passed", "explicit original = old verificationStatus");
+    assert.equal(parsed.effectiveVerificationStatus, "passed", "no reverify chain → effective === original");
+    assert.deepEqual(parsed.reverify, { status: "none", reason: null }, "no reverify chain → none");
 
     assert.equal(parsed.changedFileCount, 2, "count derived from array length");
     assert.equal(parsed.verificationStatus, "passed");
@@ -224,11 +231,13 @@ test("M9-6B-06: run_delivery_decide winner output safe, no reason/deliveryRef le
       arguments: { runId: "run_x", decision: "accepted", reason: "LGTM" },
     });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
-    const allowed = new Set(["runId", "decisionAccepted", "deliveryCommit", "acceptanceStatus", "existingStatus"]);
+    // M12-6 3B2a: additive nullable rejectionReason (closed set) on every outcome.
+    const allowed = new Set(["runId", "decisionAccepted", "deliveryCommit", "acceptanceStatus", "existingStatus", "rejectionReason"]);
     for (const k of Object.keys(parsed)) assert.ok(allowed.has(k), `unexpected key: ${k}`);
     assert.equal(parsed.decisionAccepted, true);
     assert.equal(parsed.acceptanceStatus, "accepted");
     assert.equal(parsed.existingStatus, null);
+    assert.equal(parsed.rejectionReason, null, "winner carries no rejection");
 
     const dumped = JSON.stringify(res);
     assert.ok(!dumped.includes("secret-reason"), "no reason leak");
@@ -259,6 +268,10 @@ test("M9-6B-07: run_delivery_decide loser output", async () => {
     assert.equal(parsed.decisionAccepted, false);
     assert.equal(parsed.acceptanceStatus, "accepted");
     assert.equal(parsed.existingStatus, "accepted");
+    // M12-6 3B2a: a lost decision is a NORMAL structured outcome (first-wins),
+    // not an MCP error — with the closed-set rejectionReason.
+    assert.equal(res.isError, undefined, "loser is a normal structured outcome");
+    assert.equal(parsed.rejectionReason, "already_decided");
   } finally {
     await client.close();
     await server.close();
@@ -429,16 +442,25 @@ test("M11-1A-01: run_delivery output field set is exactly the approved safe proj
     // M11-8C: added deliveryAvailable (success discriminator) + deliveryFailure (null here).
     // M11-12B: added nullable verificationFailureSummary (null here — status is passed).
     // M12-1S1/M12-4A: added nullable candidateInventory + candidateKind.
+    // M12-6 3B2a: added nullable originalVerificationStatus / effectiveVerificationStatus
+    // and the strict reverify chain projection — STRICT field set updated, not weakened.
     const expectedKeys = new Set([
       "runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit",
       "changedFileCount", "changedPaths", "changedPathsTruncated",
-      "verificationStatus", "verificationFailureCode", "verificationFailureSummary",
+      "verificationStatus", "originalVerificationStatus", "effectiveVerificationStatus", "reverify",
+      "verificationFailureCode", "verificationFailureSummary",
       "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory", "candidateKind",
     ]);
     assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys,
       `field set mismatch; got ${Object.keys(parsed).sort()}`);
     assert.equal(parsed.deliveryAvailable, true, "success variant");
     assert.equal(parsed.deliveryRequested, true, "delivery intent is explicit");
+    // No reverify chain on this run: verificationStatus semantics preserved —
+    // all three verification fields equal the ORIGINAL status, chain is "none".
+    assert.equal(parsed.verificationStatus, "passed", "verificationStatus = original status");
+    assert.equal(parsed.originalVerificationStatus, "passed");
+    assert.equal(parsed.effectiveVerificationStatus, "passed");
+    assert.deepEqual(parsed.reverify, { status: "none", reason: null });
   } finally { await client.close(); await server.close(); }
 });
 
@@ -723,17 +745,26 @@ test("M9-6B-14: MCP accept through real service appends one event", async () => 
   } finally { cleanupDir(dir); }
 });
 
-test("M9-6B-15: failed verification blocks accept, allows reject", async () => {
+test("M9-6B-15: failed verification blocks accept as a STRUCTURED rejection, allows reject", async () => {
   const dir = mkdtempSync(join(tmpdir(), "m96b-15-"));
   try {
     const { runDir, rp } = await setupDeliveryRun(dir, "run_i15", "failed");
-    // Accept fails
+    // Accept is refused: a normal structured outcome with the closed-set
+    // rejectionReason — NOT an MCP isError (M12-6 3B2a). No decision is recorded.
     {
       const server = createWaoMcpServer({ registryPath: rp, runDir });
       const client = await buildInMemoryClient(server);
       try {
         const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i15", decision: "accepted", reason: "x" } });
-        assert.equal(res.isError, true, "accept on failed verification must error");
+        assert.equal(res.isError, undefined, "policy rejection is a normal structured outcome");
+        const p = JSON.parse(res.content.find((b) => b.type === "text").text);
+        assert.equal(p.decisionAccepted, false);
+        assert.equal(p.rejectionReason, "verification_failed", "closed-set machine-actionable reason");
+        assert.equal(p.deliveryCommit, null, "no delivery commit fabricated on rejection");
+        assert.equal(p.acceptanceStatus, null);
+        assert.equal(p.existingStatus, null);
+        const dumped = JSON.stringify(res);
+        assert.ok(!dumped.includes("must be passed"), "no raw reason text leaks");
       } finally { await client.close(); await server.close(); }
     }
     // Reject succeeds
@@ -744,6 +775,7 @@ test("M9-6B-15: failed verification blocks accept, allows reject", async () => {
         const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i15", decision: "rejected", reason: "bad" } });
         const p = JSON.parse(res.content.find((b) => b.type === "text").text);
         assert.equal(p.decisionAccepted, true, "reject succeeds");
+        assert.equal(p.rejectionReason, null);
       } finally { await client.close(); await server.close(); }
     }
     const { readTranscript } = await import("../src/transcript.js");
@@ -790,9 +822,386 @@ test("M9-6B-17: concurrent MCP decisions → one winner, one loser, one event", 
       const p2 = JSON.parse(r2.content.find((b) => b.type === "text").text);
       assert.equal([p1, p2].filter((p) => p.decisionAccepted).length, 1, "one winner");
       assert.equal([p1, p2].filter((p) => !p.decisionAccepted).length, 1, "one loser");
+      // M12-6 3B2a: the loser is a normal structured outcome with the closed-set reason.
+      for (const p of [p1, p2]) {
+        if (p.decisionAccepted) assert.equal(p.rejectionReason, null);
+        else assert.equal(p.rejectionReason, "already_decided");
+      }
     } finally { await c1.close(); await s1.close(); await c2.close(); await s2.close(); }
     const { readTranscript } = await import("../src/transcript.js");
     const events = await readTranscript(join(runDir, "run_i17.jsonl"));
     assert.equal(events.filter((e) => e.type === "run.delivery_accepted").length, 1, "one event");
+  } finally { cleanupDir(dir); }
+});
+
+// =====================================================================
+// M12-6 Package 3B2a: additive original/effective/reverify projection on
+// run_delivery + structured policy rejections on run_delivery_decide.
+// =====================================================================
+
+test("M12-6-3B2a-01: run_delivery exposes original/effective/reverify additively; old verificationStatus semantics preserved", async () => {
+  const server = createWaoMcpServer({
+    registryPath: "/r.json", runDir: "/runs",
+    getRunDeliveryFn: async () => ({
+      runId: "run_x",
+      terminalState: "completed",
+      deliveryRef: {
+        deliveryCommit: "d".repeat(40), baseCommit: "b".repeat(40), changedFiles: ["src/a.js"],
+        verification: { status: "failed", failureCode: "command_failed" },
+        acceptance: { status: "pending" },
+      },
+      verification: { status: "failed", failureCode: "command_failed" },
+      effectiveVerification: { status: "passed" },
+      reverify: { status: "complete", reason: "tooling_invalid" },
+      acceptance: { status: "pending" },
+    }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
+    assert.equal(res.isError, undefined);
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    // Old semantics: verificationStatus stays the ORIGINAL durable outcome.
+    assert.equal(parsed.verificationStatus, "failed", "verificationStatus = original (unchanged)");
+    assert.equal(parsed.originalVerificationStatus, "failed", "explicit original alias");
+    assert.equal(parsed.effectiveVerificationStatus, "passed", "effective = reverify outcome");
+    assert.deepEqual(parsed.reverify, { status: "complete", reason: "tooling_invalid" });
+    assert.equal(parsed.verificationFailureCode, "command_failed", "failure code still from the original");
+  } finally { await client.close(); await server.close(); }
+});
+
+test("M12-6-3B2a-02: malformed reverify chain — visible malformed status, effective stays original (never looks passed)", async () => {
+  // Application truth: chain malformed → effective falls back to the ORIGINAL status.
+  const server = createWaoMcpServer({
+    registryPath: "/r.json", runDir: "/runs",
+    getRunDeliveryFn: async () => ({
+      runId: "run_x",
+      terminalState: "completed",
+      deliveryRef: {
+        deliveryCommit: "d".repeat(40), baseCommit: "b".repeat(40), changedFiles: ["src/a.js"],
+        verification: { status: "failed", failureCode: "command_failed" },
+        acceptance: { status: "pending" },
+      },
+      verification: { status: "failed", failureCode: "command_failed" },
+      effectiveVerification: { status: "failed" },
+      reverify: { status: "malformed", reason: null },
+      acceptance: { status: "pending" },
+    }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    assert.equal(parsed.verificationStatus, "failed");
+    assert.equal(parsed.effectiveVerificationStatus, "failed", "malformed chain cannot change effective status");
+    assert.deepEqual(parsed.reverify, { status: "malformed", reason: null }, "malformed is visible, never hidden");
+  } finally { await client.close(); await server.close(); }
+});
+
+test("M12-6-3B2a-02b: inconsistent service output (malformed chain but effective passed) collapses to fixed error", async () => {
+  // Boundary invariant: a NON-complete reverify chain must never yield an
+  // effective status different from the original. The transport rejects a
+  // service view that violates it — a malformed chain can never look passed.
+  const server = createWaoMcpServer({
+    registryPath: "/r.json", runDir: "/runs",
+    getRunDeliveryFn: async () => ({
+      runId: "run_x",
+      terminalState: "completed",
+      deliveryRef: {
+        deliveryCommit: "d".repeat(40), baseCommit: "b".repeat(40), changedFiles: ["src/a.js"],
+        verification: { status: "failed", failureCode: "command_failed" },
+        acceptance: { status: "pending" },
+      },
+      verification: { status: "failed", failureCode: "command_failed" },
+      // Violation: chain malformed but effective claimed "passed".
+      effectiveVerification: { status: "passed" },
+      reverify: { status: "malformed", reason: null },
+      acceptance: { status: "pending" },
+    }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
+    assert.equal(res.isError, true, "inconsistent effective/malformed projection must fail closed");
+    const dumped = JSON.stringify(res);
+    assert.ok(!dumped.includes("passed"), "no fabricated pass leaks");
+  } finally { await client.close(); await server.close(); }
+});
+
+test("M12-6-3B2a-03: failure / not-requested variants carry null additive verification fields", async () => {
+  for (const [label, view] of [
+    ["packaging failure", {
+      runId: "run_x", terminalState: "failed", deliveryAvailable: false, deliveryRequested: true,
+      deliveryFailure: { code: "base_commit_mismatch" },
+    }],
+    ["not requested", {
+      runId: "run_x", terminalState: "completed", deliveryAvailable: false, deliveryRequested: false,
+      deliveryFailure: null,
+    }],
+  ]) {
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs", getRunDeliveryFn: async () => view });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(parsed.originalVerificationStatus, null, `${label}: no original status`);
+      assert.equal(parsed.effectiveVerificationStatus, null, `${label}: no effective status`);
+      assert.equal(parsed.reverify, null, `${label}: no reverify chain`);
+      assert.equal(parsed.verificationStatus, null, `${label}: old field also null`);
+    } finally { await client.close(); await server.close(); }
+  }
+});
+
+// ===== Real-service decision tests: reverify chains + structured rejections =====
+
+/**
+ * Build a real transcript: original verification FAILED with an eligible code,
+ * then a VALID reverify chain (requested + outcome) via the transcript CAS
+ * primitives. Returns the run dir + registry path.
+ */
+async function setupReverifiedDeliveryRun(dir, runId, reverifyOutcome) {
+  const { JsonlTranscript } = await import("../src/transcript.js");
+  const runDir = join(dir, "runs");
+  const transcript = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "test" });
+  const ref = {
+    schemaVersion: 1, kind: "git_commit", runId,
+    baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
+    branch: "wao/x", worktreePath: "/fake", changedFiles: ["a.js"],
+    verification: { status: "failed", commands: ["echo ok"], verifiedCommit: "d".repeat(40), results: [], failureCode: "command_failed" },
+    acceptance: { status: "pending" }, integration: { status: "pending", targetCommit: null },
+  };
+  await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake" });
+  await transcript.append("run.delivery_created", { delivery: ref });
+  await transcript.append("run.delivery_verification_failed", { delivery: ref });
+  await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+  // The Lead-declared reverify chain (valid, via the CAS primitives).
+  await transcript.tryAppendReverifyRequested({ delivery: ref, reason: "tooling_invalid", setupCommands: ["fix-env"] });
+  const outcomeRef = reverifyOutcome === "passed"
+    ? { ...ref, verification: { ...ref.verification, status: "passed" } }
+    : { ...ref, verification: { ...ref.verification, status: "failed" } };
+  await transcript.tryAppendReverifyOutcome({ delivery: outcomeRef, outcome: reverifyOutcome });
+  const rp = join(dir, "agents.json");
+  writeFileSync(rp, JSON.stringify({ agents: { w: { backend: "claude-code", cwd: dir } } }), "utf8");
+  return { runDir, rp };
+}
+
+test("M12-6-3B2a-04: failed original + valid PASSED reverify → run_delivery truthful fields + explicit accept succeeds (first durable decision)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "3b2a-04-"));
+  try {
+    const { runDir, rp } = await setupReverifiedDeliveryRun(dir, "run_3b2a_04", "passed");
+    const server = createWaoMcpServer({ registryPath: rp, runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      // run_delivery: original failed, effective passed, chain complete.
+      const rd = await client.callTool({ name: "run_delivery", arguments: { runId: "run_3b2a_04" } });
+      assert.equal(rd.isError, undefined);
+      const rdP = JSON.parse(rd.content.find((b) => b.type === "text").text);
+      assert.equal(rdP.verificationStatus, "failed");
+      assert.equal(rdP.originalVerificationStatus, "failed");
+      assert.equal(rdP.effectiveVerificationStatus, "passed");
+      assert.deepEqual(rdP.reverify, { status: "complete", reason: "tooling_invalid" });
+
+      // Explicit accept after the passed reverify — must succeed.
+      const dc = await client.callTool({
+        name: "run_delivery_decide",
+        arguments: { runId: "run_3b2a_04", decision: "accepted", reason: "reverify passed" },
+      });
+      assert.equal(dc.isError, undefined);
+      const dcP = JSON.parse(dc.content.find((b) => b.type === "text").text);
+      assert.equal(dcP.decisionAccepted, true);
+      assert.equal(dcP.acceptanceStatus, "accepted");
+      assert.equal(dcP.existingStatus, null);
+      assert.equal(dcP.rejectionReason, null);
+
+      // The FIRST durable decision wins: a second, opposite decision is a
+      // structured already_decided outcome, never an error.
+      const dc2 = await client.callTool({
+        name: "run_delivery_decide",
+        arguments: { runId: "run_3b2a_04", decision: "rejected", reason: "oops" },
+      });
+      const dc2P = JSON.parse(dc2.content.find((b) => b.type === "text").text);
+      assert.equal(dc2.isError, undefined, "first-wins loser is a normal outcome");
+      assert.equal(dc2P.decisionAccepted, false);
+      assert.equal(dc2P.existingStatus, "accepted");
+      assert.equal(dc2P.rejectionReason, "already_decided");
+    } finally { await client.close(); await server.close(); }
+    const { readTranscript } = await import("../src/transcript.js");
+    const events = await readTranscript(join(runDir, "run_3b2a_04.jsonl"));
+    assert.equal(events.filter((e) => e.type === "run.delivery_accepted").length, 1, "one durable decision");
+    assert.equal(events.filter((e) => e.type === "run.delivery_rejected").length, 0);
+  } finally { cleanupDir(dir); }
+});
+
+test("M12-6-3B2a-05: failed reverify outcome → accept returns STRUCTURED verification_failed rejection", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "3b2a-05-"));
+  try {
+    const { runDir, rp } = await setupReverifiedDeliveryRun(dir, "run_3b2a_05", "failed");
+    const server = createWaoMcpServer({ registryPath: rp, runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const dc = await client.callTool({
+        name: "run_delivery_decide",
+        arguments: { runId: "run_3b2a_05", decision: "accepted", reason: "x" },
+      });
+      assert.equal(dc.isError, undefined, "policy rejection is a structured outcome");
+      const p = JSON.parse(dc.content.find((b) => b.type === "text").text);
+      assert.equal(p.decisionAccepted, false);
+      assert.equal(p.rejectionReason, "verification_failed");
+      assert.equal(p.deliveryCommit, null);
+      const dumped = JSON.stringify(dc);
+      assert.ok(!dumped.includes("must be passed"), "no raw gate text leaks");
+    } finally { await client.close(); await server.close(); }
+    const { readTranscript } = await import("../src/transcript.js");
+    const events = await readTranscript(join(runDir, "run_3b2a_05.jsonl"));
+    assert.equal(events.filter((e) => e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected").length, 0,
+      "rejected decision records nothing");
+  } finally { cleanupDir(dir); }
+});
+
+test("M12-6-3B2a-06: malformed reverify chain in a real transcript → never passed, structured verification_failed rejection", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "3b2a-06-"));
+  try {
+    const { JsonlTranscript, readTranscript } = await import("../src/transcript.js");
+    const runDir = join(dir, "runs");
+    const runId = "run_3b2a_06";
+    const transcript = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "test" });
+    const ref = {
+      schemaVersion: 1, kind: "git_commit", runId,
+      baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
+      branch: "wao/x", worktreePath: "/fake", changedFiles: ["a.js"],
+      verification: { status: "failed", commands: ["echo ok"], verifiedCommit: "d".repeat(40), results: [], failureCode: "command_failed" },
+      acceptance: { status: "pending" }, integration: { status: "pending", targetCommit: null },
+    };
+    await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake" });
+    await transcript.append("run.delivery_created", { delivery: ref });
+    await transcript.append("run.delivery_verification_failed", { delivery: ref });
+    await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+    // A MALFORMED reverify request: unknown reason — a durable conflict.
+    await transcript.append("run.delivery_reverification_requested", {
+      delivery: ref,
+      deliveryCommit: ref.deliveryCommit,
+      reason: "INVALID-REASON",
+    });
+    const rp = join(dir, "agents.json");
+    writeFileSync(rp, JSON.stringify({ agents: { w: { backend: "claude-code", cwd: dir } } }), "utf8");
+
+    const server = createWaoMcpServer({ registryPath: rp, runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      // run_delivery: the malformed chain is VISIBLE and never looks passed.
+      const rd = await client.callTool({ name: "run_delivery", arguments: { runId } });
+      const rdP = JSON.parse(rd.content.find((b) => b.type === "text").text);
+      assert.equal(rdP.verificationStatus, "failed");
+      assert.equal(rdP.originalVerificationStatus, "failed");
+      assert.equal(rdP.effectiveVerificationStatus, "failed", "malformed chain cannot look passed");
+      assert.deepEqual(rdP.reverify, { status: "malformed", reason: null });
+
+      // Accept stays blocked as a structured verification_failed rejection.
+      const dc = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x" } });
+      assert.equal(dc.isError, undefined);
+      const p = JSON.parse(dc.content.find((b) => b.type === "text").text);
+      assert.equal(p.decisionAccepted, false);
+      assert.equal(p.rejectionReason, "verification_failed");
+      assert.ok(!JSON.stringify(dc).includes("INVALID-REASON"), "no raw reason leak");
+    } finally { await client.close(); await server.close(); }
+    const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+    assert.equal(events.filter((e) => e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected").length, 0);
+  } finally { cleanupDir(dir); }
+});
+
+test("M12-6-3B2a-07: terminal_not_eligible — passed verification on a non-completed terminal → structured rejection", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "3b2a-07-"));
+  try {
+    const { JsonlTranscript } = await import("../src/transcript.js");
+    const runDir = join(dir, "runs");
+    const runId = "run_3b2a_07";
+    const transcript = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "test" });
+    const ref = {
+      schemaVersion: 1, kind: "git_commit", runId,
+      baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
+      branch: "wao/x", worktreePath: "/fake", changedFiles: ["a.js"],
+      verification: { status: "passed", commands: [], verifiedCommit: "d".repeat(40), results: [] },
+      acceptance: { status: "pending" }, integration: { status: "pending", targetCommit: null },
+    };
+    await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake" });
+    await transcript.append("run.delivery_created", { delivery: ref });
+    await transcript.append("run.delivery_verification_passed", { delivery: ref });
+    // NO terminal state_change — the run is still running.
+    const rp = join(dir, "agents.json");
+    writeFileSync(rp, JSON.stringify({ agents: { w: { backend: "claude-code", cwd: dir } } }), "utf8");
+
+    const server = createWaoMcpServer({ registryPath: rp, runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const dc = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x" } });
+      assert.equal(dc.isError, undefined, "policy rejection is a structured outcome");
+      const p = JSON.parse(dc.content.find((b) => b.type === "text").text);
+      assert.equal(p.decisionAccepted, false);
+      assert.equal(p.rejectionReason, "terminal_not_eligible");
+      assert.equal(p.deliveryCommit, null);
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); }
+});
+
+test("M12-6-3B2a-08: delivery_malformed — conflicting durable facts → structured rejection", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "3b2a-08-"));
+  try {
+    const { JsonlTranscript } = await import("../src/transcript.js");
+    const runDir = join(dir, "runs");
+    const runId = "run_3b2a_08";
+    const transcript = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "test" });
+    const ref = {
+      schemaVersion: 1, kind: "git_commit", runId,
+      baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
+      branch: "wao/x", worktreePath: "/fake", changedFiles: ["a.js"],
+      verification: { status: "passed", commands: [], verifiedCommit: "d".repeat(40), results: [] },
+      acceptance: { status: "pending" }, integration: { status: "pending", targetCommit: null },
+    };
+    await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake" });
+    await transcript.append("run.delivery_created", { delivery: ref });
+    // TWO verification outcomes — conflicting durable facts.
+    await transcript.append("run.delivery_verification_passed", { delivery: ref });
+    await transcript.append("run.delivery_verification_failed", { delivery: ref });
+    await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+    const rp = join(dir, "agents.json");
+    writeFileSync(rp, JSON.stringify({ agents: { w: { backend: "claude-code", cwd: dir } } }), "utf8");
+
+    const server = createWaoMcpServer({ registryPath: rp, runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const dc = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x" } });
+      assert.equal(dc.isError, undefined, "policy rejection is a structured outcome");
+      const p = JSON.parse(dc.content.find((b) => b.type === "text").text);
+      assert.equal(p.decisionAccepted, false);
+      assert.equal(p.rejectionReason, "delivery_malformed");
+      const dumped = JSON.stringify(dc);
+      assert.ok(!dumped.includes("exactly one required"), "no raw validator text leaks");
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); }
+});
+
+test("M12-6-3B2a-09: delivery_unavailable — no committed delivery → structured rejection", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "3b2a-09-"));
+  try {
+    const { JsonlTranscript } = await import("../src/transcript.js");
+    const runDir = join(dir, "runs");
+    const runId = "run_3b2a_09";
+    const transcript = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "test" });
+    await transcript.append("run.started", { backend: "claude-code" });
+    await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+    const rp = join(dir, "agents.json");
+    writeFileSync(rp, JSON.stringify({ agents: { w: { backend: "claude-code", cwd: dir } } }), "utf8");
+
+    const server = createWaoMcpServer({ registryPath: rp, runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const dc = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x" } });
+      assert.equal(dc.isError, undefined, "policy rejection is a structured outcome");
+      const p = JSON.parse(dc.content.find((b) => b.type === "text").text);
+      assert.equal(p.decisionAccepted, false);
+      assert.equal(p.rejectionReason, "delivery_unavailable");
+      const dumped = JSON.stringify(dc);
+      assert.ok(!dumped.includes("run.delivery_created"), "no raw event names leak");
+    } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); }
 });
