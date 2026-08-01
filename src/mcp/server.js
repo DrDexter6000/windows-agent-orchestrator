@@ -68,6 +68,7 @@ import { REVIEW_UNAVAILABLE_REASONS } from "../application/reviewUnavailableReas
 import { projectCollectResult } from "../application/runCollectProjection.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
 import { selectSessionWorkspace } from "../application/sessionWorkspace.js";
+import { checkWorkspaceExpectation } from "../application/workspaceExpectation.js";
 import { readWindowsUserEnv } from "../application/credentialReadiness.js";
 import { aggregateLeadPreflight, ACTIVE_RUNS_CAP, WORKERS_CAP } from "../application/leadPreflight.js";
 import {
@@ -208,6 +209,24 @@ const DISPATCH_REUSE_BUSY_TEXT =
   "A provider session cannot be driven concurrently. Wait for the prior run to reach a terminal state " +
   "(poll with run_status / run_wait), then re-dispatch the follow-up to resume the conversation.";
 
+// M12-6 (FR-03): fixed, actionable error when a supplied workspace/head
+// expectation mismatches the freshly-proven binding at dispatch time. The ONLY
+// dynamic content is a closed-set category label (gitHead | dirty | workspaceRoot)
+// — never the expected value, the bound absolute path, the head hash, or any
+// arbitrary input. The literal token workspace_expectation_mismatch lets a Lead
+// recognize this category distinctly from not-bound / credential / busy /
+// generic dispatch failures, and the guidance is fixed.
+function dispatchExpectationMismatchText(field) {
+  const label = field === "gitHead" ? "gitHead"
+    : field === "dirty" ? "dirty"
+    : "workspaceRoot";
+  return "run_dispatch refused: workspace_expectation_mismatch (" + label + "). " +
+    "The bound workspace, its HEAD, or its dirty state differs from the frozen " +
+    "expectation, or the expectation was not canonical. Re-read workspace_status " +
+    "for the current workspace, head, and dirty state, then retry with current " +
+    "values or omit the expectation.";
+}
+
 // run_dispatch input: agentId + prompt required; optional delivery block.
 // Server-owned config (runDir, runId, cwd, isolate, requireCertified, timeouts)
 // is never accepted — delivery.force-isolate is enforced by the service.
@@ -228,16 +247,43 @@ const RUN_DISPATCH_INPUT = z.object({
   agentId: z.string().min(1),
   prompt: z.string().min(1),
   delivery: DELIVERY_INPUT.optional(),
+  // M12-6 (FR-03): optional workspace/head freeze. The Lead may pin dispatch to
+  // the workspace's current head/dirty/root so a stale or wrong workspace is
+  // rejected before any provider/transcript/worktree work. expectedGitHead is a
+  // canonical lowercase 40/64-hex literal (regex serializes to JSON Schema);
+  // expectedDirty is a boolean; expectedWorkspaceRoot is a bounded absolute path
+  // (absoluteness is enforced in the handler via the shared expectation SSOT).
+  // Omitted expectations are not checked (existing behavior preserved).
+  expectedGitHead: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/).optional(),
+  expectedDirty: z.boolean().optional(),
+  expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
 }).strict();
 
-// run_dispatch output: runId + agentId + accepted + state. No paths, PID, prompt, argv.
-// M11-8B final closeout: strict root; agentId is REAL-only (the binding from
-// the control plane — never the sentinel, never another worker's id).
+// M12-6 (FR-03): bounded safe workspace proof returned on a successful dispatch.
+// Exposes the binding source, canonical head, dirty flag, and nullable booleans
+// proving which expectations were supplied and matched. NEVER exposes the
+// absolute workspace path, prompt, argv, PID, credentials, or provider payload.
+// Always present on the success path (the binding is resolved before the
+// dispatcher runs); the match booleans are null for any omitted expectation.
+const WORKSPACE_PROOF = z.object({
+  source: z.enum(["lead_session", "server_config", "mcp_root"]),
+  gitHead: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/),
+  dirty: z.boolean(),
+  expectedGitHeadMatch: z.boolean().nullable(),
+  expectedDirtyMatch: z.boolean().nullable(),
+  expectedWorkspaceRootMatch: z.boolean().nullable(),
+}).strict();
+
+// run_dispatch output: runId + agentId + accepted + state + additive workspaceProof.
+// No paths, PID, prompt, argv. M11-8B final closeout: strict root; agentId is
+// REAL-only (the binding from the control plane — never the sentinel, never
+// another worker's id).
 const RUN_DISPATCH_OUTPUT = z.object({
   runId: z.string(),
   agentId: REAL_AGENT_ID_SCHEMA,
   accepted: z.boolean(),
   state: z.string(),
+  workspaceProof: WORKSPACE_PROOF,
 }).strict();
 
 // Dispatch spawns a worker that executes commands, modifies files, and may
@@ -1888,7 +1934,7 @@ export function createWaoMcpServer({
       outputSchema: RUN_DISPATCH_OUTPUT,
       annotations: RUN_DISPATCH_ANNOTATIONS,
     },
-    async ({ agentId, prompt, delivery }) => {
+    async ({ agentId, prompt, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot }) => {
       // M11-8B final: validate the requested agentId at the VERY TOP, before
       // workspace resolution or any dispatcher call. An invalid or reserved
       // ("unknown") id collapses to the fixed dispatch error immediately — the
@@ -1906,6 +1952,7 @@ export function createWaoMcpServer({
       // a prior workspace_status result. If the workspace is not bound,
       // the dispatcher is never called (zero transcript, zero fork).
       let workspaceCwd;
+      let workspaceProof = null;
       try {
         const binding = await resolveWorkspaceBinding();
         if (!binding.bound) {
@@ -1914,6 +1961,26 @@ export function createWaoMcpServer({
             content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
           };
         }
+        // M12-6 (FR-03): workspace/head expectation preflight. The binding is
+        // proven ONCE here at the dispatch boundary; any frozen expectation
+        // is compared against this fresh proof BEFORE the dispatcher is ever
+        // invoked. On mismatch the dispatch is refused (fixed safe text naming
+        // only the closed-set mismatch category) — zero provider process,
+        // transcript, worktree, or run. When expectations are omitted, behavior
+        // is unchanged and an additive bounded proof is still attached.
+        const expectation = checkWorkspaceExpectation({
+          binding,
+          expectedGitHead,
+          expectedDirty,
+          expectedWorkspaceRoot,
+        });
+        if (!expectation.matched) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: dispatchExpectationMismatchText(expectation.mismatch) }],
+          };
+        }
+        workspaceProof = expectation.proof;
         workspaceCwd = binding.root;
       } catch {
         return {
@@ -1994,11 +2061,16 @@ export function createWaoMcpServer({
         if (result.agentId !== agentId) {
           throw new Error("dispatch agentId binding mismatch");
         }
+        // M12-6 (FR-03): attach the bounded workspace proof derived from the
+        // single proven binding (resolved above). It exposes source, canonical
+        // head, dirty flag, and nullable match booleans — never the absolute
+        // workspace path, prompt, argv, PID, or credentials.
         const parsed = RUN_DISPATCH_OUTPUT.parse({
           runId: result.runId,
           agentId: result.agentId,
           accepted: result.accepted,
           state: result.state,
+          workspaceProof,
         });
         return {
           content: [{ type: "text", text: JSON.stringify(parsed) }],

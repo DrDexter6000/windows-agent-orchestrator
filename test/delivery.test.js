@@ -5,7 +5,13 @@ import { join } from "node:path";
 import { execSync, execFileSync } from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { inspectDelivery, packageDelivery, DeliveryError } from "../src/delivery.js";
+import {
+  inspectDelivery,
+  packageDelivery,
+  prepareDeliveryRequest,
+  detectAbsolutePathLiteral,
+  DeliveryError,
+} from "../src/delivery.js";
 
 // ===== Constants =====
 
@@ -1566,3 +1572,124 @@ test("2D-12: repo-local git identity remains unchanged after plumbing packaging"
 
 // Helper for reading file content in sync test
 import { readFile } from "node:fs/promises";
+
+// ===== M12-6 (FR-04): absolute-path verification command preflight =====
+//
+// Statically identifiable absolute path literals (Windows drive, UNC, POSIX) in
+// verification commands must be rejected with deliveryCode
+// "invalid_verification_path". The detector is a conservative command-literal
+// scan — NOT a shell interpreter — so URLs, relative paths, and flags are not
+// flagged (no false positives). Quote-aware: a quoted region with spaces is one
+// literal.
+
+test("M12-6-FR04-01: detectAbsolutePathLiteral flags Windows drive / UNC / POSIX literals", () => {
+  // Windows drive absolute (backslash + forward-slash separators).
+  assert.ok(detectAbsolutePathLiteral("C:\\Users\\me\\app\\test.exe"));
+  assert.ok(detectAbsolutePathLiteral("D:/projects/app test.exe"));
+  // Lowercase drive letter.
+  assert.ok(detectAbsolutePathLiteral("c:\\windows\\system32\\cmd.exe"));
+  // UNC paths (backslash + forward-slash forms).
+  assert.ok(detectAbsolutePathLiteral("\\\\server\\share\\app\\test.exe"));
+  assert.ok(detectAbsolutePathLiteral("//server/share/app/test.exe"));
+  // POSIX absolute.
+  assert.ok(detectAbsolutePathLiteral("/usr/local/bin/app"));
+  assert.ok(detectAbsolutePathLiteral("/etc/passwd"));
+});
+
+test("M12-6-FR04-02: detectAbsolutePathLiteral is quote-aware (spaces inside quotes)", () => {
+  // Quoted region with spaces is one literal — the path is detected.
+  assert.ok(detectAbsolutePathLiteral('"C:\\Program Files\\app\\test.exe" --flag'));
+  assert.ok(detectAbsolutePathLiteral('tester "D:/Program Files/app" --report'));
+  // Single quotes too.
+  assert.ok(detectAbsolutePathLiteral("'/etc/some path/app'"));
+  // The returned span is the verbatim offending literal (diagnostics only).
+  const span = detectAbsolutePathLiteral('run "C:\\Users\\me\\app.exe"');
+  assert.equal(span, '"C:\\Users\\me\\app.exe"');
+});
+
+test("M12-6-FR04-03: detectAbsolutePathLiteral does NOT flag URLs, relative paths, or flags", () => {
+  // URLs — scheme prefix precedes any "//", and "https:" has more than one
+  // letter before ":" so it is not a drive. No false positives.
+  assert.equal(detectAbsolutePathLiteral("curl https://example.com/health"), null);
+  assert.equal(detectAbsolutePathLiteral("open file:///relative/to/here"), null);
+  assert.equal(detectAbsolutePathLiteral("git clone http://host/repo.git"), null);
+  // Relative paths + flags + bare commands.
+  assert.equal(detectAbsolutePathLiteral("npm test"), null);
+  assert.equal(detectAbsolutePathLiteral("npm run build -- --coverage"), null);
+  assert.equal(detectAbsolutePathLiteral("./scripts/check.sh"), null);
+  assert.equal(detectAbsolutePathLiteral("node src/index.js"), null);
+  assert.equal(detectAbsolutePathLiteral("--help"), null);
+  // A bare "C:" without a following separator is NOT a drive (avoids matching
+  // a token like a single-letter flag).
+  assert.equal(detectAbsolutePathLiteral("echo C:backup"), null);
+});
+
+test("M12-6-FR04-04: detectAbsolutePathLiteral handles edge inputs safely", () => {
+  assert.equal(detectAbsolutePathLiteral(""), null);
+  assert.equal(detectAbsolutePathLiteral("   "), null);
+  assert.equal(detectAbsolutePathLiteral(null), null);
+  assert.equal(detectAbsolutePathLiteral(undefined), null);
+  assert.equal(detectAbsolutePathLiteral(123), null);
+  // Only a quote, no content, no closer.
+  assert.equal(detectAbsolutePathLiteral('"'), null);
+});
+
+test("M12-6-FR04-05: prepareDeliveryRequest rejects absolute path with invalid_verification_path", () => {
+  // Windows drive literal in a verification command.
+  assert.throws(
+    () => prepareDeliveryRequest({
+      mode: "git_commit_v1",
+      allowedPaths: ["src"],
+      verificationCommands: ['"C:\\Program Files\\app\\test.exe"'],
+    }),
+    (err) => err.name === "DeliveryError" && err.deliveryCode === "invalid_verification_path",
+  );
+  // UNC literal.
+  assert.throws(
+    () => prepareDeliveryRequest({
+      mode: "git_commit_v1",
+      allowedPaths: ["src"],
+      verificationCommands: ["\\\\server\\share\\app\\test.exe"],
+    }),
+    (err) => err.deliveryCode === "invalid_verification_path",
+  );
+  // POSIX literal mixed with a portable command.
+  assert.throws(
+    () => prepareDeliveryRequest({
+      mode: "git_commit_v1",
+      allowedPaths: ["src"],
+      verificationCommands: ["npm test", "/usr/local/bin/special-tool"],
+    }),
+    (err) => err.deliveryCode === "invalid_verification_path",
+  );
+});
+
+test("M12-6-FR04-06: prepareDeliveryRequest accepts portable verification commands", () => {
+  // URL-containing command and relative commands must pass (no false positive).
+  const out = prepareDeliveryRequest({
+    mode: "git_commit_v1",
+    allowedPaths: ["src"],
+    verificationCommands: ["npm test", "curl https://example.com/health", "./scripts/check.sh"],
+  });
+  assert.deepEqual(out.verification.commands, [
+    "npm test",
+    "curl https://example.com/health",
+    "./scripts/check.sh",
+  ]);
+});
+
+test("M12-6-FR04-07: prepareDeliveryRequest never echoes the offending path in the message", () => {
+  const SECRET_PATH = "Z:\\secret\\leak\\path\\m12-6-fr04-07";
+  try {
+    prepareDeliveryRequest({
+      mode: "git_commit_v1",
+      allowedPaths: ["src"],
+      verificationCommands: [`"${SECRET_PATH}"`],
+    });
+    assert.fail("should have thrown");
+  } catch (err) {
+    assert.equal(err.deliveryCode, "invalid_verification_path");
+    assert.ok(!err.message.includes(SECRET_PATH), "offending literal must not be in the message");
+    assert.ok(!err.message.includes("Z:"), "drive must not be in the message");
+  }
+});

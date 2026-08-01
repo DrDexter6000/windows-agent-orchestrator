@@ -95,10 +95,12 @@ test("M9-2B-01: tools/list has registry_list + run_dispatch with strict schema a
 
       const rd = tools.tools.find((t) => t.name === "run_dispatch");
       assert.ok(rd, "run_dispatch present");
-      // Strict input: agentId + prompt required, delivery optional.
+      // Strict input: agentId + prompt required, delivery + the M12-6 (FR-03)
+      // optional workspace/head freeze inputs optional.
       const inputKeys = Object.keys(rd.inputSchema.properties ?? {}).sort();
-      assert.deepEqual(inputKeys, ["agentId", "delivery", "prompt"],
-        "input schema has agentId + prompt + optional delivery",
+      assert.deepEqual(inputKeys,
+        ["agentId", "delivery", "expectedDirty", "expectedGitHead", "expectedWorkspaceRoot", "prompt"],
+        "input schema has agentId + prompt + optional delivery + optional expectations",
       );
       assert.equal(rd.inputSchema.additionalProperties, false, "input is strict");
       // Annotations: not read-only, destructive (worker may modify files/run commands),
@@ -189,18 +191,34 @@ test("M9-2B-03: run_dispatch success output has only runId/agentId/accepted/stat
       const textBlock = res.content.find((b) => b.type === "text");
       const parsed = JSON.parse(textBlock.text);
 
-      // Only these four keys (M11-8B added agentId).
-      assert.deepEqual(Object.keys(parsed).sort(), ["accepted", "agentId", "runId", "state"], "only runId/agentId/accepted/state");
+      // M11-8B added agentId; M12-6 (FR-03) adds the additive bounded workspaceProof.
+      assert.deepEqual(Object.keys(parsed).sort(),
+        ["accepted", "agentId", "runId", "state", "workspaceProof"],
+        "only runId/agentId/accepted/state + additive workspaceProof");
       assert.equal(parsed.accepted, true);
       assert.equal(parsed.runId, "run_ok_m92b03");
       assert.equal(parsed.agentId, "x");
       assert.equal(parsed.state, "pending");
+      // M12-6 (FR-03): the proof is bounded — source/head/dirty + nullable match
+      // booleans, NEVER the absolute workspace path.
+      assert.deepEqual(Object.keys(parsed.workspaceProof).sort(),
+        ["dirty", "expectedDirtyMatch", "expectedGitHeadMatch", "expectedWorkspaceRootMatch", "gitHead", "source"],
+        "workspaceProof has source/head/dirty + 3 nullable match booleans");
+      assert.ok(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(parsed.workspaceProof.gitHead), "proof gitHead is canonical hex");
+      assert.equal(typeof parsed.workspaceProof.dirty, "boolean", "proof dirty is boolean");
+      // No expectations were supplied → all match booleans are null.
+      assert.equal(parsed.workspaceProof.expectedGitHeadMatch, null);
+      assert.equal(parsed.workspaceProof.expectedDirtyMatch, null);
+      assert.equal(parsed.workspaceProof.expectedWorkspaceRootMatch, null);
 
       // No leaks.
       const dumped = JSON.stringify(res);
       assert.ok(!dumped.includes("/secret/runs"), "no transcriptPath leak");
       assert.ok(!dumped.includes("secret-prompt-value"), "no prompt leak");
       assert.ok(!dumped.includes("argv"), "no argv leak");
+      // M12-6 (FR-03): the workspace proof must NOT echo the absolute workspace
+      // root (forward-slash canonicalized form included for cross-platform safety).
+      assert.ok(!dumped.includes(dir.replace(/\\/g, "/")), "no absolute workspace root leak in proof");
       // structuredContent mirrors content.
       if (res.structuredContent) {
         assert.deepEqual(res.structuredContent, parsed, "structuredContent matches text JSON");
@@ -483,7 +501,9 @@ test("M9-7A-04: MCP run_dispatch with delivery passes delivery to service", asyn
     assert.equal(captured.delivery.mode, "git_commit_v1");
     assert.equal(captured.requireCertified, true, "still forced certified");
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
-    assert.deepEqual(Object.keys(parsed).sort(), ["accepted", "agentId", "runId", "state"], "output has agentId (M11-8B)");
+    assert.deepEqual(Object.keys(parsed).sort(),
+      ["accepted", "agentId", "runId", "state", "workspaceProof"],
+      "output has agentId (M11-8B) + additive workspaceProof (M12-6)");
     } finally {
       await client.close();
       await server.close();

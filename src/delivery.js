@@ -771,6 +771,120 @@ function validateInput(input) {
   };
 }
 
+// ===== M12-6 (FR-04): verification command absolute-path preflight =====
+//
+// A deterministic, conservative command-literal detector. It statically
+// identifies absolute path literals in a verification command string WITHOUT
+// attempting shell interpretation (no variable expansion, no command
+// substitution — only quote-aware tokenization). A portability/isolation rule:
+// delivery verification must be workspace-portable, so commands embedding
+// Windows drive paths (C:\..), UNC paths (\\host\share or //host/share), or
+// POSIX absolute paths (/etc/..) are rejected before dispatch.
+//
+// URL false positives are avoided structurally: a URL token (https://..,
+// file://..) never begins with a path indicator — its scheme prefix precedes
+// any "//" — so leading-character detection never matches a URL. Relative paths
+// (./x, src/y) and command flags (--foo) are not flagged.
+
+/**
+ * Test whether a token (a quoted region's content or an unquoted whitespace-
+ * delimited token) begins with an absolute path indicator.
+ * @param {string} token
+ * @returns {boolean}
+ */
+function isAbsolutePathLiteralStart(token) {
+  if (typeof token !== "string" || token.length === 0) return false;
+  // UNC: leading \\ or //
+  if (token.startsWith("\\\\") || token.startsWith("//")) return true;
+  // POSIX absolute: leading /
+  if (token.charCodeAt(0) === 47) return true; // '/'
+  // Windows drive: exactly one letter + ':' + '\' or '/' (the single-letter
+  // requirement distinguishes a drive "C:" from a URL scheme "https:").
+  if (token.length >= 3) {
+    const a = token.charCodeAt(0);
+    const isLetter = (a >= 65 && a <= 90) || (a >= 97 && a <= 122); // A-Z a-z
+    if (isLetter && token.charCodeAt(1) === 58) { // ':'
+      const sep = token.charCodeAt(2);
+      if (sep === 92 || sep === 47) return true; // '\' or '/'
+    }
+  }
+  return false;
+}
+
+/**
+ * Statically detect the first absolute path literal in a command string, or
+ * null if none. Quote-aware: a double- or single-quoted region is treated as
+ * one literal even when it contains spaces, so `"C:\Program Files\app"` is
+ * detected as one path.
+ *
+ * This is a conservative lexical scan — NOT a shell interpreter. It does not
+ * expand variables, run commands, or resolve redirects; it only recognizes
+ * path-indicating leading characters on quote-delimited literals.
+ *
+ * The returned span is for internal diagnostics ONLY — callers MUST NOT echo it
+ * across the MCP trust boundary (the fixed DeliveryError message carries no
+ * literal text).
+ *
+ * @param {string} command
+ * @returns {string|null} the verbatim offending span, or null
+ */
+export function detectAbsolutePathLiteral(command) {
+  if (typeof command !== "string") return null;
+  let i = 0;
+  const n = command.length;
+  while (i < n) {
+    const ch = command.charCodeAt(i);
+    // Skip whitespace (space, tab, LF, CR).
+    if (ch === 32 || ch === 9 || ch === 10 || ch === 13) { i += 1; continue; }
+    // Quoted region: "..." or '...' (content may contain spaces).
+    if (ch === 34 || ch === 39) { // " or '
+      const quote = ch;
+      const start = i;
+      i += 1;
+      let buf = "";
+      while (i < n && command.charCodeAt(i) !== quote) {
+        buf += command[i];
+        i += 1;
+      }
+      if (i < n && command.charCodeAt(i) === quote) i += 1; // consume closer
+      if (isAbsolutePathLiteralStart(buf)) return command.slice(start, i);
+      continue;
+    }
+    // Unquoted token: read until whitespace or a quote.
+    const start = i;
+    let buf = "";
+    while (i < n) {
+      const c = command.charCodeAt(i);
+      if (c === 32 || c === 9 || c === 10 || c === 13 || c === 34 || c === 39) break;
+      buf += command[i];
+      i += 1;
+    }
+    if (isAbsolutePathLiteralStart(buf)) return command.slice(start, i);
+  }
+  return null;
+}
+
+/**
+ * M12-6 (FR-04): reject statically identifiable absolute path literals across a
+ * verification command list. Conservative command-literal detection — no shell
+ * interpretation, URL-safe. Throws a DeliveryError whose code is a closed-set
+ * label; the offending literal is never placed in the message.
+ *
+ * @param {string[]} commands
+ * @throws {DeliveryError} deliveryCode="invalid_verification_path" if any
+ *   command contains a statically identifiable absolute path literal.
+ */
+function assertNoAbsolutePathInVerification(commands) {
+  for (const cmd of commands) {
+    if (detectAbsolutePathLiteral(cmd) !== null) {
+      throw new DeliveryError(
+        "invalid_verification_path",
+        "verification command contains a statically identifiable absolute path literal; use a portable workspace-relative command",
+      );
+    }
+  }
+}
+
 // ===== Public API: prepareDeliveryRequest =====
 
 /**
@@ -822,6 +936,15 @@ export function prepareDeliveryRequest(delivery) {
   const verification = hasCommands
     ? { commands: [...delivery.verificationCommands], unavailableReason: null }
     : { commands: [], unavailableReason: delivery.verificationUnavailableReason };
+
+  // M12-6 (FR-04): reject statically identifiable absolute path literals in
+  // verification commands. This is the dispatch preflight SSOT — callers invoke
+  // prepareDeliveryRequest before backend spawn, so the check runs before any
+  // registry/provider/transcript/worktree work. Conservative command-literal
+  // detection (no shell interpretation); URLs are not path literals.
+  if (verification.commands.length > 0) {
+    assertNoAbsolutePathInVerification(verification.commands);
+  }
 
   return { mode: "git_commit_v1", allowedPaths, verification };
 }

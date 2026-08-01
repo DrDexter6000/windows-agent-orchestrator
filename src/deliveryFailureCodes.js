@@ -47,6 +47,7 @@ export const PACKAGING_FAILURE_CODES = Object.freeze([
   "invalid_mode",
   "invalid_run_id",
   "invalid_verification",
+  "invalid_verification_path",
 ]);
 
 /** The safe projection for an unknown/malformed code. Never echoed verbatim. */

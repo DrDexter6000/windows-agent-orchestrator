@@ -31,8 +31,25 @@ import { isAbsolute, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 
 // Windows: normalize drive letter casing and slashes for comparison.
-function normalizePath(p) {
+/**
+ * Canonicalize an absolute path for comparison: realpath (resolves symlinks,
+ * canonicalizes casing on Windows) + forward-slash separators. This is the SAME
+ * canonicalization proveWorkspace applies to both the input and Git's top-level,
+ * so a comparison against a proveWorkspace root is consistent.
+ *
+ * Exported (M12-6/FR-03) as the SSOT so workspace-expectation comparison does
+ * not duplicate path canonicalization. Throws if the path does not exist or is
+ * inaccessible — callers that need fail-closed comparison wrap it in try/catch.
+ *
+ * @param {string} p
+ * @returns {string}
+ */
+export function canonicalizeWorkspacePath(p) {
   return realpathSync(p).replace(/\\/g, "/");
+}
+
+function normalizePath(p) {
+  return canonicalizeWorkspacePath(p);
 }
 
 // Compare two normalized path strings using platform-appropriate semantics.

@@ -490,6 +490,49 @@ test("M9-7A-02: invalid delivery rejected before transcript/fork", async () => {
   } finally { cleanupDir(dir); }
 });
 
+test("M12-6-FR04: absolute-path verification command rejected before transcript/fork (invalid_verification_path)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m126-fr04-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  const runDir = join(dir, "runs");
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    // A statically identifiable absolute path literal must be rejected at the
+    // prepareDeliveryRequest SSOT (before the registry read / spawn / transcript).
+    const absoluteCommands = [
+      ['"C:\\Program Files\\app\\test.exe"'],
+      ["\\\\server\\share\\app\\test.exe"],
+      ["/usr/local/bin/special-tool"],
+    ];
+    for (const verificationCommands of absoluteCommands) {
+      let caught = null;
+      try {
+        await dispatchRun({
+          agentId: "coder_low",
+          prompt: "x",
+          registryPath,
+          runDir,
+          spawnFn: fakeSpawn,
+          delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands },
+        });
+      } catch (e) { caught = e; }
+      assert.ok(caught, "absolute-path verification command must throw");
+      assert.equal(caught.name, "DeliveryError", "DeliveryError type");
+      assert.equal(caught.deliveryCode, "invalid_verification_path", "closed-set code");
+      // The offending path literal must never enter the error message.
+      for (const cmd of verificationCommands) {
+        const pathPart = cmd.replace(/^["']|["']$/g, "");
+        assert.ok(!caught.message.includes(pathPart), `no path echo in message: ${pathPart}`);
+      }
+    }
+    // No spawn, no transcript written — preflight runs before any durable side effect.
+    assert.equal(calls.length, 0, "no spawn for absolute-path verification");
+    const files = readdirSafe(runDir);
+    assert.equal(files.length, 0, "no transcript written for rejected dispatch");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 test("M9-7A-03: non-delivery dispatch argv unchanged (no --delivery-json, no --isolate)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m97a-03-"));
   const { fakeSpawn, calls } = makeFakeSpawn();
