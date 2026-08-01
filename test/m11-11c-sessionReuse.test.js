@@ -870,16 +870,50 @@ test("M11-11C MCP-3: run_dispatch output never leaks leadSession/opaqueUuid/work
     try {
       const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "researcher", prompt: "secret-prompt" } });
       const dumped = JSON.stringify(res);
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+
+      // Current exact safe key set: the four original scalars plus the additive
+      // bounded workspaceProof (M12-6 FR-03). Strict — the dispatcher's bait
+      // (transcriptPath/leadSession/opaqueUuid/workspace/argv) must never surface.
       assert.deepEqual(
-        Object.keys(JSON.parse(res.content.find((b) => b.type === "text").text)).sort(),
-        ["accepted", "agentId", "runId", "state"],
-        "only the four safe keys",
+        Object.keys(parsed).sort(),
+        ["accepted", "agentId", "runId", "state", "workspaceProof"],
+        "only the safe keys: four scalars + additive workspaceProof",
       );
+      assert.equal(parsed.accepted, true);
+      assert.equal(parsed.runId, "run_mcp3");
+      assert.equal(parsed.agentId, "researcher");
+      assert.equal(parsed.state, "pending");
+
+      // workspaceProof exposes ONLY the intended safe binding fields: source,
+      // canonical gitHead, dirty flag, and three nullable match booleans — never
+      // the absolute workspace path, prompt, argv, PID, or session id. Strict.
+      assert.deepEqual(
+        Object.keys(parsed.workspaceProof).sort(),
+        ["dirty", "expectedDirtyMatch", "expectedGitHeadMatch", "expectedWorkspaceRootMatch", "gitHead", "source"],
+        "workspaceProof has only source/head/dirty + 3 nullable match booleans",
+      );
+      assert.ok(
+        ["lead_session", "server_config", "mcp_root"].includes(parsed.workspaceProof.source),
+        "proof source is the closed-set enum",
+      );
+      assert.ok(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(parsed.workspaceProof.gitHead), "proof gitHead is canonical hex");
+      assert.equal(typeof parsed.workspaceProof.dirty, "boolean", "proof dirty is boolean");
+      // No expectations were supplied ⇒ all match booleans are null.
+      assert.equal(parsed.workspaceProof.expectedGitHeadMatch, null);
+      assert.equal(parsed.workspaceProof.expectedDirtyMatch, null);
+      assert.equal(parsed.workspaceProof.expectedWorkspaceRootMatch, null);
+
+      // Original no-leak guarantees preserved (leadSession/opaqueUuid/raw
+      // workspace path/prompt/argv) — none of the dispatcher bait may surface.
       assert.ok(!dumped.includes(OPAQUE), "no opaque uuid leak");
       assert.ok(!dumped.includes("leadSession"), "no leadSession key leak");
       assert.ok(!dumped.includes("/secret/run_mcp3"), "no transcript path leak");
       assert.ok(!dumped.includes("secret-prompt"), "no prompt leak");
       assert.ok(!dumped.includes("--session-id"), "no argv leak");
+      // The raw workspace path is never echoed by the proof (cross-platform
+      // forward-slash canonicalization, matching the canonical FR-03 contract).
+      assert.ok(!dumped.includes(dir.replace(/\\/g, "/")), "no raw workspace path leak in proof");
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); }
 });
