@@ -76,6 +76,11 @@ test("M11-11D-RED-2: MCP run_delivery preserves ordinary non-delivery as success
       verificationStatus: null,
       verificationFailureCode: null,
       verificationFailureSummary: null,
+      // M12-6/FR-07 additive: original/effective/reverify are null when the
+      // non-delivery failure path is taken (no reverify chain can exist).
+      originalVerificationStatus: null,
+      effectiveVerificationStatus: null,
+      reverify: null,
       acceptanceStatus: null,
       decisionType: null,
       deliveryFailure: null,
