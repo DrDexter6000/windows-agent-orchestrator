@@ -28,18 +28,13 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { rmrfRetry } from "./_rmrfHelper.mjs";
 
 // ===== Helpers (mirroring runAwaitResult.test.js) =====
 
 function cleanupDir(dir) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
-function sleepSync(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
-function isTransientRmError(e) { return e?.code === "EPERM" || e?.code === "EBUSY" || e?.code === "ENOTEMPTY"; }
-function rmrfRetry(dir, { retries = 20, delayMs = 50 } = {}) {
-  for (let attempt = 0; ; attempt += 1) {
-    try { rmSync(dir, { recursive: true, force: true }); return; }
-    catch (e) { if (!isTransientRmError(e) || attempt >= retries) throw e; sleepSync(delayMs); }
-  }
-}
+// rmrfRetry (bounded transient-rm retry, injectable rm/sleep) is the shared
+// test-only helper (TD-107) — see test/_rmrfHelper.mjs + test/rmrfRetry.test.js.
 
 function makeGitRepo(dir) {
   execFileSync("git", ["init", "-q"], { cwd: dir });

@@ -78,8 +78,10 @@ test("M11-7-R1b: explicitly-declared REQUIRED credential blocks when missing", a
   assert.deepEqual(r.missingCredentialEnvNames, ["TEST_M117_REQ_MISSING"]);
 });
 
-test("M11-7-R1c: real registry — coder_mm/tester not blocked; researcher gated on declared key", async () => {
-  const reg = JSON.parse(readFileSync("config/agents.json", "utf8"));
+test("M11-7-R1c: tracked synthetic six-worker fixture — coder_mm/tester not blocked; researcher gated on declared key", async () => {
+  // TD-107: read the tracked synthetic six-worker registry (canonical stand-in
+  // for the gitignored config/agents.json, reserved for operation acceptance).
+  const reg = JSON.parse(readFileSync("test/fixtures/agents.six.json", "utf8"));
   const reader = fakeUserEnvReader({});
   const results = {};
   for (const [id, a] of Object.entries(reg.agents)) {

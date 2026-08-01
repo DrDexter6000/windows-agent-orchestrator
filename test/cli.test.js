@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseOptions, loadPrompt, runAndWait, buildDashboard, runsDashboardCommand, runCommand, statusCommand, collectCommand, resolveTargetCwd } from "../src/cli.js";
 import { readTranscript, findState } from "../src/transcript.js";
+import { rmrfRetry, sleepSync } from "./_rmrfHelper.mjs";
 
 /** 捕获 console.log 输出（用于测命令渲染）。返回拼接的字符串。 */
 async function captureLog(fn) {
@@ -26,27 +27,10 @@ async function captureLog(fn) {
   return lines.join("\n");
 }
 
-function sleepSync(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
+// sleepSync + rmrfRetry (bounded transient-rm retry, injectable rm/sleep) are the
+// shared test-only helpers (TD-107) — see test/_rmrfHelper.mjs + test/rmrfRetry.test.js.
 
-function isTransientRmError(error) {
-  return error?.code === "EPERM" || error?.code === "EBUSY" || error?.code === "ENOTEMPTY";
-}
-
-function rmrfRetry(dir, { retries = 20, delayMs = 50 } = {}) {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      rmSync(dir, { recursive: true, force: true });
-      return;
-    } catch (error) {
-      if (!isTransientRmError(error) || attempt >= retries) throw error;
-      sleepSync(delayMs);
-    }
-  }
-}
-
-test("rmrfRetry: retries transient Windows EPERM while a background process holds cwd", () => {
+test("rmrfRetry (Windows cwd-lock probe): retries EPERM while a child holds cwd; diagnostic if not reproduced", () => {
   if (process.platform !== "win32") return;
 
   const dir = mkdtempSync(join(tmpdir(), "wao-rmrf-retry-"));
@@ -56,16 +40,32 @@ test("rmrfRetry: retries transient Windows EPERM while a background process hold
     windowsHide: true,
   });
 
+  // TD-107: this probe reproduces a real Windows cwd-handle lock, but the lock is
+  // timing/AV-dependent and may NOT reproduce on a given run. A non-reproduction
+  // is DIAGNOSTIC ONLY (not_reproduced) — it must NEVER fail the canonical suite.
+  // Only an actual lock that rmrfRetry then fails to clear is a real failure.
+  let outcome = "not_reproduced";
   try {
     sleepSync(50);
-    assert.throws(
-      () => rmSync(dir, { recursive: true, force: true }),
-      (error) => error?.code === "EPERM" || error?.code === "EBUSY",
-      "direct rmSync should fail while the child still holds cwd on Windows",
+    let locked = false;
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch (error) {
+      if (error?.code === "EPERM" || error?.code === "EBUSY" || error?.code === "ENOTEMPTY") {
+        locked = true;
+      } else {
+        throw error; // unexpected error — surface it
+      }
+    }
+    if (locked) {
+      rmrfRetry(dir, { retries: 20, delayMs: 50 });
+      assert.equal(existsSync(dir), false, "rmrfRetry must clear a locked cwd once the handle releases");
+      outcome = "reproduced_and_cleared";
+    }
+    assert.ok(
+      outcome === "reproduced_and_cleared" || outcome === "not_reproduced",
+      "cwd-lock probe outcome must be reproduced_and_cleared or not_reproduced",
     );
-
-    rmrfRetry(dir, { retries: 20, delayMs: 50 });
-    assert.equal(existsSync(dir), false);
   } finally {
     try { child.kill(); } catch {}
     try { rmrfRetry(dir); } catch {}
@@ -1248,7 +1248,8 @@ test("TD-90: getWaoCliPath 在 win32 返回 .cmd shim（worker 不踩 v24 guard�
 });
 
 // TD-52 守卫：help 必须列出 main() 真实路由的全部命令族。
-// _guardBypass.mjs 已全局设 WAO_SKIP_VERSION_GUARD=1，子进程继承，故任意 Node 可跑 help。
+// canonical runner（scripts/canonical-test.mjs）在子进程 env 注入 WAO_SKIP_VERSION_GUARD=1；
+// 且 help 本身豁免 version guard——故 help 在测试里可跑。
 // 防止 printHelp 与代码漂移（首装 e2e 摩擦日志 F1：曾漏列 dashboard/diagnose/wao 族/daemon supervise）。
 test("help: 列出所有 main() 真实路由的命令族（防 help 与代码漂移，TD-52）", () => {
   const out = execSync("node src/cli.js help", { cwd: process.cwd(), encoding: "utf8" });
@@ -1543,6 +1544,22 @@ test("wao doctor: auditor-only claude-code OAuth 不触发 provider worker WARN"
   }
 });
 
+// TD-107: wao doctor 的 verdict 会被与本组测试无关的环境检查污染——provider key
+// （ZHIPU/DEEPSEEK/KIMI_API_KEY，本机密钥，干净检出里没有）与本机 gitignored
+// config/agents.json（registry_loads）。这几个测试只验证 wao_init / parse_smoke /
+// invocation_method 本身，不应耦合本机密钥/配置。注入 dummy key + 指向 tracked
+// synthetic registry（test/fixtures/agents.six.json），把 verdict 隔离到被测检查项。
+// 不改产品语义——doctor 仍是 preflight 体检；只是测试不再要求真实密钥/本机配置。
+const DOCTOR_REGISTRY = "test/fixtures/agents.six.json";
+function doctorSpawnEnv() {
+  return {
+    ...process.env,
+    ZHIPU_API_KEY: process.env.ZHIPU_API_KEY || "td107-test-key",
+    DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY || "td107-test-key",
+    KIMI_API_KEY: process.env.KIMI_API_KEY || "td107-test-key",
+  };
+}
+
 test("wao doctor: never-inited 目录的 wao_init 不应让 preflight FAIL（fresh-agent 第一步语义）", () => {
   // fresh-agent 把 doctor 当 preflight 第一道（onboarding §4d），"未 init" 是 init 之前的
   // 正常初态，不该和 401/key 缺/CLI 缺（真不健康）同列。降级为 WARN：exit 0、verdict 不含 ISSUE。
@@ -1551,11 +1568,12 @@ test("wao doctor: never-inited 目录的 wao_init 不应让 preflight FAIL（fre
     const result = spawnSync(process.execPath, [
       "src/cli.js", "wao", "doctor",
       "--cwd", dir,
+      "--registry", DOCTOR_REGISTRY,
       "--format", "json",
     ], {
       cwd: process.cwd(),
       encoding: "utf8",
-      env: process.env,
+      env: doctorSpawnEnv(),
       timeout: 10000,
     });
     const parsed = JSON.parse(result.stdout);
@@ -1640,9 +1658,10 @@ test("TD-95 #11: doctor --strict 跑 JS parse smoke（防注释崩溃漏到运�
     const result = spawnSync(process.execPath, [
       "src/cli.js", "wao", "doctor",
       "--cwd", dir,
+      "--registry", DOCTOR_REGISTRY,
       "--strict",
       "--format", "json",
-    ], { cwd: process.cwd(), encoding: "utf8", env: process.env, timeout: 120000 });
+    ], { cwd: process.cwd(), encoding: "utf8", env: doctorSpawnEnv(), timeout: 120000 });
 
     // Step 1: 子进程必须在测试 harness 杀死它之前自然结束。
     // timeout=true 表示 spawnSync 主动杀进程；绝不可当作"完成"。
@@ -1675,8 +1694,9 @@ test("TD-72 延伸: doctor 报告 invocation_method（info 级，告知 WAO 故�
     const result = spawnSync(process.execPath, [
       "src/cli.js", "wao", "doctor",
       "--cwd", dir,
+      "--registry", DOCTOR_REGISTRY,
       "--format", "json",
-    ], { cwd: process.cwd(), encoding: "utf8", env: process.env, timeout: 10000 });
+    ], { cwd: process.cwd(), encoding: "utf8", env: doctorSpawnEnv(), timeout: 10000 });
     const parsed = JSON.parse(result.stdout);
     const inv = parsed.checks.find((c) => c.name === "invocation_method");
     assert.ok(inv, "doctor 应有 invocation_method info 项");

@@ -39,6 +39,7 @@ import { createWaoMcpServer } from "../src/mcp/server.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { DeliveryDecisionPolicyError } from "../src/transcript.js";
+import { rmrfRetry } from "./_rmrfHelper.mjs";
 
 // The exact closed set of safe read-failure reasons (single contract for the
 // whole file — service outputs AND the MCP schema enum must be these three).
@@ -51,14 +52,8 @@ const READ_FAILURE_REASONS = Object.freeze([
 // ===== Helpers =====
 
 function cleanupDir(dir) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
-function sleepSync(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
-function isTransientRmError(e) { return e?.code === "EPERM" || e?.code === "EBUSY" || e?.code === "ENOTEMPTY"; }
-function rmrfRetry(dir, { retries = 20, delayMs = 50 } = {}) {
-  for (let attempt = 0; ; attempt += 1) {
-    try { rmSync(dir, { recursive: true, force: true }); return; }
-    catch (e) { if (!isTransientRmError(e) || attempt >= retries) throw e; sleepSync(delayMs); }
-  }
-}
+// rmrfRetry (bounded transient-rm retry, injectable rm/sleep) is the shared
+// test-only helper (TD-107) — see test/_rmrfHelper.mjs + test/rmrfRetry.test.js.
 
 function jl(obj) { return JSON.stringify(obj) + "\n"; }
 

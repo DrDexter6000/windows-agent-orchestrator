@@ -220,16 +220,18 @@ test("CAP-B2: synthetic backend WITHOUT validateAgentPolicy override + structure
   }
 });
 
-// ===== C: six current workers pass policy validation =====
+// ===== C: tracked synthetic six-worker fixture passes policy validation =====
 
-test("CAP-C1: six current workers pass validateAgentPolicy", async () => {
-  // Read the live config/agents.json and verify each agent passes its backend's
-  // validateAgentPolicy. This is the real production config.
+test("CAP-C1: tracked synthetic six-worker fixture passes validateAgentPolicy", async () => {
+  // TD-107: validate the tracked synthetic six-worker registry — the canonical
+  // test stand-in for the gitignored config/agents.json (which does not exist in
+  // a clean checkout and is reserved for operation acceptance). Each agent must
+  // pass its backend's validateAgentPolicy.
   const { readRegistry } = await import("../src/registry.js");
   const { ClaudeCodeBackend } = await import("../src/backends/claudeCode.js");
   const { CodexBackend } = await import("../src/backends/codex.js");
   const { KimiCodeBackend } = await import("../src/backends/kimiCode.js");
-  const registry = await readRegistry("config/agents.json");
+  const registry = await readRegistry("test/fixtures/agents.six.json");
   const backends = {
     "claude-code": new ClaudeCodeBackend(),
     "codex": new CodexBackend(),

@@ -64,15 +64,18 @@ export async function assertDecisionsMapConsistency(waoDir) {
 
   // TD-83/TD-91：pipeline/ 的 STAGE-/DECL- 正文与 pipeline/map.md 索引计数一致。
   // 防 agent 绕过 wao stage/declare 命令直接写文件（写正文没更新 map）。
+  // TD-107：pipeline/ 是运行时槽位（由 wao stage 命令创建），在干净 worktree 里可能
+  // 不存在——此时 0 正文与空 map 计数一致（vacuously consistent），不应 ENOENT 崩。
   const pipelineDir = join(waoDir, "pipeline");
+  const pipelineExists = existsSync(pipelineDir);
   const pipelineMapPath = join(pipelineDir, "map.md");
   let pipelineMap = "";
   try { pipelineMap = await readFile(pipelineMapPath, "utf8"); } catch {}
-  const stageFiles = readdirSync(pipelineDir).filter((f) => /^STAGE-\d+-.*\.md$/.test(f));
+  const stageFiles = (pipelineExists ? readdirSync(pipelineDir) : []).filter((f) => /^STAGE-\d+-.*\.md$/.test(f));
   const stageMapLines = pipelineMap.split("\n").filter((l) => /^STAGE\s*\|/.test(l));
   assert.equal(stageFiles.length, stageMapLines.length,
     `pipeline STAGE- 正文 ${stageFiles.length} 个但 map 索引 ${stageMapLines.length} 行（脱节）`);
-  const declFiles = readdirSync(pipelineDir).filter((f) => /^DECL-.*\.md$/.test(f));
+  const declFiles = (pipelineExists ? readdirSync(pipelineDir) : []).filter((f) => /^DECL-.*\.md$/.test(f));
   const declMapLines = pipelineMap.split("\n").filter((l) => /^DECL\s*\|/.test(l));
   assert.equal(declFiles.length, declMapLines.length,
     `pipeline DECL- 正文 ${declFiles.length} 个但 map 索引 ${declMapLines.length} 行（脱节）`);

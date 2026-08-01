@@ -31,18 +31,13 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { JsonlTranscript } from "../src/transcript.js";
+import { rmrfRetry } from "./_rmrfHelper.mjs";
 
 // ===== Helpers =====
 
 function cleanupDir(dir) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
-function sleepSync(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
-function isTransientRmError(e) { return e?.code === "EPERM" || e?.code === "EBUSY" || e?.code === "ENOTEMPTY"; }
-function rmrfRetry(dir, { retries = 20, delayMs = 50 } = {}) {
-  for (let attempt = 0; ; attempt += 1) {
-    try { rmSync(dir, { recursive: true, force: true }); return; }
-    catch (e) { if (!isTransientRmError(e) || attempt >= retries) throw e; sleepSync(delayMs); }
-  }
-}
+// rmrfRetry (bounded transient-rm retry, injectable rm/sleep) is the shared
+// test-only helper (TD-107) — see test/_rmrfHelper.mjs + test/rmrfRetry.test.js.
 
 function makeGitRepo(dir) {
   execFileSync("git", ["init", "-q"], { cwd: dir });
@@ -576,7 +571,27 @@ test("P5: a never-settling progress hook cannot consume the composition budget",
     seedTranscript(runDir, "run_p5", { workspaceCwd: dir, messages: [], terminal: false });
     const clk = clockSleep();
     const { runAwaitResult } = await import("../src/application/runAwaitResult.js");
-    const operation = runAwaitResult({
+
+    // TD-107: prove the never-settling progress hook is fire-and-forget CAUSALLY,
+    // NOT with a wall-clock watchdog. Two independent mechanisms combine:
+    //   (1) LOGIC CLOCK — clk advances ONLY inside sleepFn. The wait loop drives
+    //       the clock to exactly waitMs (3000). If the impl ever awaited the hook,
+    //       the loop would block at the first notification, the clock could never
+    //       reach waitMs, and the composition would hang (never settle).
+    //   (2) POISON THENABLE — onProgress returns a thenable whose `.then` is
+    //       invoked ONLY if the implementation awaits it (await thenable ⇒ the
+    //       engine calls .then). Under correct fire-and-forget, `.then` is never
+    //       called. The poison throws on `.then`, so an accidental `await` fails
+    //       FAST (deterministic rejection/assertion) instead of hanging silently.
+    let hookAwaited = false;
+    const poison = {
+      then() {
+        hookAwaited = true;
+        throw new Error("P5 poison: progress hook was awaited — must be fire-and-forget");
+      },
+    };
+
+    const out = await runAwaitResult({
       runId: "run_p5",
       runDir,
       waitMs: 3000,
@@ -584,14 +599,11 @@ test("P5: a never-settling progress hook cannot consume the composition budget",
       pollIntervalMs: 1000,
       progressIntervalMs: 1000,
       sleepFn: async (ms) => { clk.sleep(ms); },
-      onProgress: () => new Promise(() => {}),
+      onProgress: () => poison,
     });
-    const out = await Promise.race([
-      operation,
-      new Promise((_, reject) => setTimeout(() => reject(new Error("progress hook blocked the wait")), 100)),
-    ]);
-    assert.equal(out.terminal, false);
-    assert.equal(out.waitedMs, 3000);
+    assert.equal(out.terminal, false, "window expiry, not terminal");
+    assert.equal(out.waitedMs, 3000, "full budget consumed on the logic clock — no hang");
+    assert.equal(hookAwaited, false, "never-settling hook was never awaited (fire-and-forget proved causally)");
   } finally { cleanupDir(dir); rmrfRetry(runDir); }
 });
 

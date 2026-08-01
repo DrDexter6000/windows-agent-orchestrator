@@ -11,7 +11,7 @@
     "url": "https://github.com/DrDexter6000/windows-agent-orchestrator.git"
   },
   "scripts": {
-    "test": "node --test --import ./test/_guardBypass.mjs",
+    "test": "node scripts/wao-node.cjs scripts/canonical-test.mjs",
     "test:report": "node --test --test-reporter ./test/reporter.mjs & node tools/generate-report.mjs",
     "report": "node tools/generate-report.mjs",
     "cli": "node scripts/wao-node.cjs src/cli.js",

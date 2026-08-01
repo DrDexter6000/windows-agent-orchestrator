@@ -42,6 +42,7 @@ import {
 import { collectRunMessages } from "../src/application/runCollect.js";
 import { createWaoMcpServer } from "../src/mcp/server.js";
 import { collectCommand } from "../src/cli.js";
+import { rmrfRetry } from "./_rmrfHelper.mjs";
 
 // ===== Helpers =====
 
@@ -49,18 +50,8 @@ function cleanupDir(dir) {
   try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
 }
 
-function sleepSync(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-function isTransientRmError(error) {
-  return error?.code === "EPERM" || error?.code === "EBUSY" || error?.code === "ENOTEMPTY";
-}
-function rmrfRetry(dir, { retries = 20, delayMs = 50 } = {}) {
-  for (let attempt = 0; ; attempt += 1) {
-    try { rmSync(dir, { recursive: true, force: true }); return; }
-    catch (error) { if (!isTransientRmError(error) || attempt >= retries) throw error; sleepSync(delayMs); }
-  }
-}
+// rmrfRetry (bounded transient-rm retry, injectable rm/sleep) is the shared
+// test-only helper (TD-107) — see test/_rmrfHelper.mjs + test/rmrfRetry.test.js.
 
 async function captureLog(fn) {
   const lines = [];
