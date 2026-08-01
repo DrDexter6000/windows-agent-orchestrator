@@ -11,6 +11,7 @@ import { DeliveryError } from "../src/delivery.js";
 import { OpenCodeServeBackend } from "../src/backends/opencodeServe.js";
 import { readTranscript, findState, JsonlTranscript } from "../src/transcript.js";
 import { packageDelivery } from "../src/delivery.js";
+import { createWorktree } from "../src/isolation.js";
 
 // ===== Helpers =====
 
@@ -148,6 +149,13 @@ function deliveryOpts(repoDir, baseCommit, overrides = {}) {
 }
 
 const norm = (p) => p.replace(/\\/g, "/");
+
+/** Commit a new file on the source repo, advancing HEAD (used for TOCTOU tests). */
+async function advanceHeadRepo(dir) {
+  await writeFile(join(dir, "advanced.md"), "# advanced\n");
+  execSync("git add advanced.md", { cwd: dir, stdio: "ignore" });
+  execSync('git commit -m advanced', { cwd: dir, stdio: "ignore" });
+}
 
 // ===== Batch 3A-1: Prepare run delivery context =====
 
@@ -3470,6 +3478,77 @@ test("3B2-MISMATCH: pre-verification artifact_mismatch → no throw, completed+v
     // No raw error message/stack in transcript
     const transcriptJson = JSON.stringify(events);
     assert.ok(!transcriptJson.includes("proof failed"), "no raw error message in transcript");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+// ===== M12-6 (P1-A): frozen-base TOCTOU revalidation + pinned worktree base =====
+//
+// The server-proven frozen head is threaded to RunManager.start. start revalidates
+// the source HEAD against it AS LATE AS PRACTICAL — immediately before the
+// worktree/spawn that derives the delivery base — so a HEAD that moved between
+// the dispatch proof and run start fails CLOSED (no worktree, no provider spawn,
+// no wrong-base DeliveryRef). In delivery mode the worktree is also PINNED to the
+// exact frozen commit, so a micro-race between revalidation and `git worktree add`
+// cannot silently change the base.
+
+test("M12-6 P1-A-1: stale frozenGitHead → start rejects before spawn (no wrong-base delivery)", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-p1a-stale-"));
+  let spawnCount = 0;
+  try {
+    const fetchImpl = createMockFetch();
+    const countingFetch = async (...a) => {
+      if (String(a[0]).includes("/api/session")) spawnCount += 1;
+      return fetchImpl(...a);
+    };
+    const mgr = makeManager(runDir, repo, countingFetch);
+    // The workspace HEAD advances AFTER the dispatch proof froze it — frozenGitHead
+    // is now stale. start must revalidate and fail CLOSED before worktree/spawn.
+    await advanceHeadRepo(repo);
+    await assert.rejects(
+      () => mgr.start("test", {
+        prompt: "hi", isolate: true, runId: "run_delivtest_p1a_stale",
+        delivery: deliveryOpts(repo, baseCommit),
+        frozenGitHead: baseCommit,
+      }),
+      /frozen_base_mismatch/,
+    );
+    assert.equal(spawnCount, 0, "no provider spawn when the frozen base is stale");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("M12-6 P1-A-2: frozen base is pinned into worktree creation (survives a post-revalidation micro-race)", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-p1a-pin-"));
+  let capturedCommitish = undefined;
+  try {
+    // Inject a worktree seam: capture the pinned commitish, THEN advance the
+    // source HEAD (a micro-race AFTER revalidation already passed, AT worktree
+    // creation), then delegate to the real createWorktree pinned to that commit.
+    const racingCreateWorktree = async (sourceCwd, name, opts = {}) => {
+      capturedCommitish = opts.commitish;
+      await advanceHeadRepo(sourceCwd);
+      return createWorktree(sourceCwd, name, opts);
+    };
+    const mgr = makeManager(runDir, repo, createMockFetch(), {
+      manager: { createWorktreeFn: racingCreateWorktree },
+    });
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_delivtest_p1a_pin",
+      delivery: deliveryOpts(repo, baseCommit),
+      frozenGitHead: baseCommit,
+    });
+    // The exact frozen commit was handed to worktree creation.
+    assert.equal(capturedCommitish, baseCommit, "worktree creation received the exact frozen commit");
+    // The delivery base is the frozen commit — NOT the raced-forward source HEAD.
+    assert.equal(run.deliveryContext.baseCommit, baseCommit,
+      "delivery base is the frozen commit (no wrong-base DeliveryRef despite the race)");
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);

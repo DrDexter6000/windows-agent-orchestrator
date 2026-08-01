@@ -27,9 +27,14 @@ import { ensureWaoWorktreeExclude } from "./gitLocalExclude.js";
  * 创建一个独立 worktree。
  * @param {string} sourceCwd 源仓库（主工作树）路径
  * @param {string} name worktree 名称（用作目录名 + 分支名）
+ * @param {{commitish?: string}} [opts] optional exact commit/ref to pin the
+ *   worktree base to. When supplied, `git worktree add` receives the commitish
+ *   so a micro-race on the source HEAD cannot silently change the base (frozen-
+ *   base TOCTOU defense). The caller is responsible for validating the value
+ *   (RunManager passes a canonical-hex frozen head).
  * @returns {Promise<{path: string, branch: string}>}
  */
-export async function createWorktree(sourceCwd, name) {
+export async function createWorktree(sourceCwd, name, opts = {}) {
   if (!isValidRunId(name)) {
     throw new Error(`Invalid worktree name (contains path separators, shell metacharacters, or traversal): ${JSON.stringify(name)}`);
   }
@@ -44,7 +49,14 @@ export async function createWorktree(sourceCwd, name) {
   //    no shell-built command string.
   const wtPath = join(cwd, ".wao-worktrees", name);
   const branch = `wao/${name}`;
-  execFileSync("git", ["worktree", "add", wtPath, "-b", branch], {
+  const args = ["worktree", "add", wtPath, "-b", branch];
+  if (opts && opts.commitish) {
+    // Pin the worktree to an exact commit/ref. --end-of-options is defense-in-
+    // depth against an option-like commit-ish (the threaded frozen head is
+    // already validated as canonical hex elsewhere).
+    args.push("--end-of-options", opts.commitish);
+  }
+  execFileSync("git", args, {
     cwd,
     stdio: "pipe",
     windowsHide: true,

@@ -123,7 +123,7 @@ function isReportedWriteIntentInsideWorkdir(rawPath, effectiveCwd) {
 }
 
 export class RunManager {
-  constructor({ config, readRegistry, transcriptDir, backendFor, packageDeliveryFn = defaultPackageDelivery, verifyDeliveryFn = defaultVerifyDelivery, userEnvReader }) {
+  constructor({ config, readRegistry, transcriptDir, backendFor, packageDeliveryFn = defaultPackageDelivery, verifyDeliveryFn = defaultVerifyDelivery, userEnvReader, createWorktreeFn = createWorktree }) {
     this.config = config;
     this.readRegistry = readRegistry;
     this.transcriptDir = transcriptDir;
@@ -133,6 +133,10 @@ export class RunManager {
     // M11-7: injectable Windows user-env reader for the credential bridge.
     // Default reads HKCU\Environment; tests inject a fake.
     this.userEnvReader = userEnvReader ?? readWindowsUserEnv;
+    // M12-6 (P1-A): injectable worktree creator. Tests inject a seam that can
+    // mutate the source HEAD between revalidation and `git worktree add` to
+    // prove the frozen-base TOCTOU defense. Production uses the real createWorktree.
+    this.createWorktreeFn = createWorktreeFn;
     this.activeRuns = new Map();
   }
 
@@ -177,6 +181,13 @@ export class RunManager {
       // resolved by dispatchRun from the agent's sessionReuse policy. Absent for
       // non-reusable runs. The capability check below gates it provider-neutrally.
       sessionReuse = null,
+      // M12-6 (P1-A): server-proven frozen HEAD threaded from the MCP boundary
+      // (binding.gitHead). When present, start revalidates the source HEAD against
+      // it AS LATE AS PRACTICAL — immediately before the worktree/spawn that
+      // derives the delivery base — and pins the worktree to this exact commit.
+      // Absent for CLI callers (behavior unchanged). Never model-supplied: the
+      // model-owned counterpart is expectedGitHead, consumed at the MCP boundary.
+      frozenGitHead = null,
     } = options;
 
     const registryPath = resolve(registry ?? this.config.registry);
@@ -346,9 +357,42 @@ export class RunManager {
     let effectiveCwd = agent.cwd;
     let cleanupFn = null;
 
+    // M12-6 (P1-A): frozen-base TOCTOU revalidation. When a server-proven
+    // frozenGitHead was threaded (MCP dispatch), re-prove the source HEAD equals
+    // it AS LATE AS PRACTICAL — immediately before the worktree/spawn that
+    // derives the delivery base. No durable run fact has been written yet (the
+    // transcript object exists but run.started is appended only after worktree
+    // creation), so a mismatch fails CLOSED: no worktree, no provider spawn, no
+    // wrong-base DeliveryRef. The message carries no hash/path/argv — only the
+    // closed-set label. (The structural pin below additionally defeats a micro-
+    // race between this rev-parse and `git worktree add`.)
+    if (frozenGitHead) {
+      const sourceHead = String(
+        execFileSync("git", ["rev-parse", "HEAD"], {
+          cwd: agent.cwd,
+          encoding: "utf8",
+          stdio: ["pipe", "pipe", "ignore"],
+          windowsHide: true,
+        }),
+      ).trim();
+      if (sourceHead !== frozenGitHead) {
+        throw new Error(
+          "frozen_base_mismatch: workspace HEAD moved between the dispatch proof and run start; refusing to spawn from a newer base. Re-prove the workspace (workspace_status) and re-issue run_dispatch with the current expectedGitHead.",
+        );
+      }
+    }
+
     if (isolationConfig.type === "worktree") {
       try {
-        worktreeInfo = await createWorktree(agent.cwd, finalRunId);
+        worktreeInfo = await this.createWorktreeFn(
+          agent.cwd,
+          finalRunId,
+          // Pin the worktree to the server-proven frozen commit (whenever one is
+          // threaded) so a micro-race on the source HEAD cannot silently shift
+          // the delivery base. Revalidation above already proved equality at the
+          // start of this window; the pin closes the remaining rev-parse→add gap.
+          frozenGitHead ? { commitish: frozenGitHead } : {},
+        );
         effectiveCwd = worktreeInfo.path;
         if (isolationConfig.strategy === "ephemeral") {
           cleanupFn = () => removeWorktree(worktreeInfo.path);

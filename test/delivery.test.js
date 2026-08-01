@@ -1693,3 +1693,49 @@ test("M12-6-FR04-07: prepareDeliveryRequest never echoes the offending path in t
     assert.ok(!err.message.includes("Z:"), "drive must not be in the message");
   }
 });
+
+// ===== M12-6 (FR-04) corner cases: prefixed absolute-path literals =====
+//
+// The conservative lexical detector originally only inspected the LEADING
+// characters of each whitespace/quote-delimited token. That misses absolute
+// paths introduced by a small safe delimiter set (assignment "=", redirection
+// ">" "<", command separators ";" "|") — e.g. `--require=C:\outside\x.js` or
+// `>C:\outside\out.txt`. The detector is extended to recognize an absolute path
+// literal appearing immediately after one of those delimiters, WITHOUT becoming
+// a shell parser. URL-like tokens (containing "://") are never split, so a URL
+// query string like `?file=/etc/passwd` cannot create a false positive.
+
+test("M12-6-FR04-08: detectAbsolutePathLiteral flags absolute paths after assignment/redirection/separators", () => {
+  // Assignment (--flag=VALUE, KEY=VALUE).
+  assert.ok(detectAbsolutePathLiteral("node --require=C:\\outside\\x.js"));
+  assert.ok(detectAbsolutePathLiteral("tester --reporter=/custom/reporter"));
+  assert.ok(detectAbsolutePathLiteral("PATH=C:\\tools\\bin run x"));
+  // Redirection (>, <, 2>).
+  assert.ok(detectAbsolutePathLiteral("run x >C:\\outside\\out.txt"));
+  assert.ok(detectAbsolutePathLiteral("run x <C:\\outside\\in.txt"));
+  assert.ok(detectAbsolutePathLiteral("run x 2>C:\\outside\\err.txt"));
+  // Command separators (;, |).
+  assert.ok(detectAbsolutePathLiteral("step1;C:\\evil\\step2.exe"));
+  assert.ok(detectAbsolutePathLiteral("gen|C:\\pipe\\tool.exe"));
+  // UNC after assignment.
+  assert.ok(detectAbsolutePathLiteral("--cert=\\\\server\\share\\ca.pem"));
+});
+
+test("M12-6-FR04-09: detectAbsolutePathLiteral does NOT flag relative/URL/flag values after delimiters", () => {
+  // Relative path value after "=".
+  assert.equal(detectAbsolutePathLiteral("node --require=./config/x.js"), null);
+  assert.equal(detectAbsolutePathLiteral("node --require=config/x.js"), null);
+  // URL value after "=" (scheme precedes "//"; the "=" inside a query string
+  // must NOT turn the value into a flagged path).
+  assert.equal(detectAbsolutePathLiteral("fetch --url=https://example.com/health"), null);
+  assert.equal(detectAbsolutePathLiteral("curl https://example.com/api?file=/etc/passwd"), null);
+  // Ordinary flag values (word, number).
+  assert.equal(detectAbsolutePathLiteral("run --reporter=dot"), null);
+  assert.equal(detectAbsolutePathLiteral("run --retries=3"), null);
+  // Redirect to a relative file / stream descriptor.
+  assert.equal(detectAbsolutePathLiteral("run x >out.txt"), null);
+  assert.equal(detectAbsolutePathLiteral("run x 2>&1"), null);
+  // Bare colon text / separator text is not a drive.
+  assert.equal(detectAbsolutePathLiteral("echo a;b"), null);
+  assert.equal(detectAbsolutePathLiteral("note=x:y"), null);
+});

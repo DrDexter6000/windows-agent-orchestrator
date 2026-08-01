@@ -154,6 +154,9 @@ export async function runBackground(opts = {}) {
       // turn}) to RunManager. The capability check + argv compilation happen
       // there; the opaque uuid is the only identifier reaching the provider.
       ...(opts.sessionReuse ? { sessionReuse: opts.sessionReuse } : {}),
+      // M12-6 (P1-A): thread the server-proven frozen HEAD so RunManager.start
+      // revalidates the source HEAD and pins the worktree base. Absent for CLI.
+      ...(opts.frozenGitHead ? { frozenGitHead: opts.frozenGitHead } : {}),
     });
   } catch (error) {
     await writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error });
@@ -301,6 +304,10 @@ export async function runMain(argv = process.argv.slice(2)) {
     // internal envelope fails closed: requested reuse must never silently turn
     // into a fresh conversation.
     sessionReuse: parseSessionReuseJson(opts["session-reuse-json"]),
+    // M12-6 (P1-A): server-proven frozen HEAD threaded from dispatchRun. Absent
+    // for CLI runs; present for MCP dispatch so RunManager.start can revalidate/
+    // pin the base against a frozen-base TOCTOU.
+    frozenGitHead: opts["frozen-git-head"],
   });
   // detached runner 把最终结果写 stdout 一行 JSON（供调试/日志；CLI 已返回，不依赖此）
   process.stdout.write(JSON.stringify(result) + "\n");

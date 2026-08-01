@@ -14,12 +14,14 @@
 //
 // FR-04 — invalid_verification_path:
 //   Verification commands containing a statically identifiable absolute path
-//   literal (Windows drive / UNC / POSIX) are rejected with deliveryCode
+//   literal (Windows drive / UNC / POSIX, including prefixed literals after
+//   assignment/redirection/separators) are rejected with deliveryCode
 //   invalid_verification_path before any durable side effect. URLs, relative
 //   paths, and flags are NOT flagged (no shell interpretation, no URL false
-//   positives). At the MCP boundary the typed error collapses to the fixed
-//   "run_dispatch failed" text (redaction contract) — the offending literal is
-//   never surfaced.
+//   positives). At the MCP boundary this typed error surfaces as a FIXED
+//   actionable text that names the closed-set code invalid_verification_path —
+//   the offending path/command/error is never echoed, but the code is (so the
+//   Lead can act on it rather than receiving an opaque "run_dispatch failed").
 //
 // Causality is proven with dispatcher call counts: a mismatch or an invalid path
 // keeps the count at 0; a correct dispatch calls the dispatcher exactly once.
@@ -524,7 +526,7 @@ test("M12-6-FR03-L: checkWorkspaceExpectation proof exposes no absolute workspac
 
 // ===== FR-04: invalid_verification_path at the MCP boundary (redaction) =====
 
-test("M12-6-FR04-MCP: delivery with absolute verification path → fixed 'run_dispatch failed', no leak, no transcript", async () => {
+test("M12-6-FR04-MCP: delivery with absolute verification path → closed-set invalid_verification_path, no path leak, no transcript", async () => {
   const { repo, aux, registryPath, runDir } = setup();
   try {
     // REAL dispatcher (no injection): the absolute-path check lives in
@@ -547,11 +549,14 @@ test("M12-6-FR04-MCP: delivery with absolute verification path → fixed 'run_di
       });
       assert.equal(res.isError, true, "absolute-path delivery is an error");
       const text = textOf(res);
-      assert.match(text, /run_dispatch failed/, "fixed redacted text at MCP boundary");
-      // The offending literal and the closed-set code are NOT surfaced at MCP.
+      // The closed-set code IS surfaced so the Lead can act on it (P1-B truth) —
+      // it is no longer collapsed to an opaque "run_dispatch failed".
+      assert.match(text, /invalid_verification_path/, "closed-set code surfaced at MCP");
+      assert.ok(!/run_dispatch failed/.test(text), "not collapsed to the generic dispatch text");
+      // The offending literal is NEVER echoed.
       const dumped = JSON.stringify(res);
       assert.ok(!dumped.includes(ABS), "absolute path not leaked");
-      assert.ok(!dumped.includes("invalid_verification_path"), "deliveryCode not surfaced at MCP");
+      assert.ok(!dumped.includes("C:\\\\Users"), "no path fragment leaked");
       // No durable side effect: no transcript written.
       assert.equal(readdirSafe(runDir).length, 0, "no transcript written before the preflight rejection");
     } finally {
@@ -589,6 +594,44 @@ test("M12-6-FR04-MCP: portable verification commands (URL/relative) dispatch nor
       assert.equal(fake.count, 1, "portable commands reach the dispatcher");
       assert.ok(!res.isError, "portable commands are accepted");
       assert.ok(fake.captured.delivery, "delivery forwarded to the service");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(repo);
+    cleanupDir(aux);
+  }
+});
+
+// ===== P1-A: the server-proven head is threaded internally as frozenGitHead =====
+//
+// The MCP boundary proves the workspace ONCE (binding.gitHead) and threads that
+// proven head to the dispatcher as frozenGitHead — an INTERNAL value, distinct
+// from the model-owned expectedGitHead (which is consumed at the boundary for the
+// expectation check and never forwarded). This is the value RunManager.start
+// revalidates to defeat the frozen-base TOCTOU.
+
+test("M12-6 P1-A: run_dispatch threads the server-proven frozenGitHead to the dispatcher", async () => {
+  const { repo, aux, registryPath, runDir } = setup();
+  try {
+    const fake = makeFakeDispatch();
+    const server = createWaoMcpServer({ registryPath, runDir, workspaceRoot: repo, dispatchRunFn: fake.fn });
+    const client = await buildInMemoryClient(server);
+    try {
+      // (1) Without an explicit freeze: the server STILL threads its proven head
+      // internally (TOCTOU protection is on by default for MCP dispatch).
+      await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "a" } });
+      assert.equal(fake.captured.frozenGitHead, gitHead(repo), "frozenGitHead threaded even without an explicit freeze");
+      assert.equal(fake.captured.expectedGitHead, undefined, "expectedGitHead is a boundary-only model input");
+
+      // (2) With a matching explicit freeze: the threaded frozen head equals the
+      // proven head, and expectedGitHead is still NOT forwarded past the boundary.
+      const head = gitHead(repo);
+      await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "b", expectedGitHead: head } });
+      assert.equal(fake.captured.frozenGitHead, head, "frozenGitHead = proven binding head");
+      assert.equal(fake.captured.expectedGitHead, undefined, "expectedGitHead not forwarded past the boundary");
+      assert.equal(fake.count, 2, "both dispatches reached the dispatcher");
     } finally {
       await client.close();
       await server.close();

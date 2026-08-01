@@ -237,3 +237,50 @@ test("TD-54: runBackground 启动失败也写 failed transcript（不产生 ghos
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// M12-6 (P1-A): the detached runner threads the server-proven frozenGitHead to
+// RunManager.start. A HEAD that moved between the dispatch proof and run start
+// must fail the run CLOSED (no worker session), proving the full
+// argv → backgroundRunner → RunManager.start chain carries the frozen head.
+test("M12-6 P1-A: runBackground threads frozenGitHead; stale HEAD fails the run before worker spawn", async () => {
+  const repo = await mkdtemp(path.join(os.tmpdir(), "wao-bg-p1a-repo-"));
+  const runDir = await mkdtemp(path.join(os.tmpdir(), "wao-bg-p1a-runs-"));
+  try {
+    execSync("git init -b main", { cwd: repo, stdio: "ignore" });
+    execSync('git config user.email "t@t"', { cwd: repo, stdio: "ignore" });
+    execSync('git config user.name "t"', { cwd: repo, stdio: "ignore" });
+    await writeFile(path.join(repo, "README.md"), "# t\n");
+    execSync("git add .", { cwd: repo, stdio: "ignore" });
+    execSync('git commit -m init', { cwd: repo, stdio: "ignore" });
+    const frozen = execSync("git rev-parse HEAD", { cwd: repo, encoding: "utf8" }).trim();
+    // Mutate HEAD after the (simulated) dispatch proof froze it.
+    await writeFile(path.join(repo, "next.md"), "# n\n");
+    execSync("git add .", { cwd: repo, stdio: "ignore" });
+    execSync('git commit -m next', { cwd: repo, stdio: "ignore" });
+
+    let sessionCreations = 0;
+    const baseFetch = makeMockFetch();
+    const countingFetch = async (url, init = {}) => {
+      if (init.method === "POST" && String(url).endsWith("/api/session")) sessionCreations += 1;
+      return baseFetch(url, init);
+    };
+
+    const result = await runBackground({
+      agentId: "bg_p1a",
+      prompt: "x",
+      cwd: repo,
+      frozenGitHead: frozen,
+      registry: { agents: { bg_p1a: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4299", agent: "build", cwd: repo, model: { providerID: "p", id: "m" } } } },
+      runDir,
+      fetchImpl: countingFetch,
+      waitTimeout: 1000,
+      pollInterval: 10,
+    });
+    assert.equal(result.failed, true, "stale frozen head fails the run");
+    assert.match(result.error ?? "", /frozen_base_mismatch/, "failure reason is the frozen-base mismatch");
+    assert.equal(sessionCreations, 0, "no worker session created (no provider spawn)");
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+    await rm(runDir, { recursive: true, force: true });
+  }
+});

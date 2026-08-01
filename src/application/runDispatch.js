@@ -116,6 +116,12 @@ export async function dispatchRun({
   // MCP server (stable per server/Lead session) — never supplied by the model,
   // never returned via MCP. CLI callers pass a one-shot id (always first turn).
   leadSession,
+  // M12-6 (P1-A): server-proven frozen HEAD (the MCP boundary's binding.gitHead),
+  // threaded to the detached runner as --frozen-git-head so RunManager.start can
+  // revalidate the source HEAD against it and pin the worktree base. Never model-
+  // supplied — expectedGitHead is the model-owned counterpart and is consumed at
+  // the MCP boundary. Absent for CLI callers (argv unchanged).
+  frozenGitHead,
   // M11-7: skip the credential preflight (e.g. when the caller already did it
   // and is passing resolvedCredentials). Default false = always check.
   skipCredentialCheck = false,
@@ -277,6 +283,12 @@ export async function dispatchRun({
   if (publicDelivery) {
     runnerArgs.push("--isolate");
     runnerArgs.push("--delivery-json", JSON.stringify(publicDelivery));
+  }
+  // M12-6 (P1-A): thread the server-proven frozen HEAD to the detached runner so
+  // RunManager.start can revalidate/pin the base. Server-side argv only (never
+  // returned via MCP); absent for CLI callers.
+  if (frozenGitHead) {
+    runnerArgs.push("--frozen-git-head", frozenGitHead);
   }
   // M11-11C: thread the resolved reuse routing to the detached runner. The
   // payload is opaque ({mode, opaqueUuid, turn}) — it carries no raw Lead id,

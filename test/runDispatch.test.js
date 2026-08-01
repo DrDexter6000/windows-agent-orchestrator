@@ -588,3 +588,36 @@ test("M9-7A-09: delivery with unavailableReason uses public shape in argv", asyn
     assert.ok(!dj.verification, "no internal nested structure");
   } finally { cleanupDir(dir); }
 });
+
+// M12-6 (P1-A): the server-proven frozen head is threaded internally through the
+// detached-runner argv as --frozen-git-head. It is NOT a model-owned input
+// (expectedGitHead stays at the MCP boundary); CLI callers that do not supply it
+// are unchanged.
+
+test("M12-6 P1-A: dispatchRun threads --frozen-git-head into runner argv (absent when omitted)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m126-p1a-argv-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const runDir = join(dir, "runs");
+    const FROZEN = "a".repeat(40);
+    await dispatchRun({
+      agentId: "coder_low", prompt: "x", registryPath, runDir,
+      cwd: dir, spawnFn: fakeSpawn,
+      frozenGitHead: FROZEN,
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
+    });
+    const argv = calls[0].args;
+    const idx = argv.indexOf("--frozen-git-head");
+    assert.ok(idx >= 0, "--frozen-git-head present when threaded");
+    assert.equal(argv[idx + 1], FROZEN, "frozen head value threaded verbatim");
+
+    // Absent when not supplied (CLI preservation).
+    calls.length = 0;
+    await dispatchRun({
+      agentId: "coder_low", prompt: "x", registryPath, runDir: join(dir, "runs2"),
+      spawnFn: fakeSpawn,
+    });
+    assert.ok(!calls[0].args.includes("--frozen-git-head"), "no --frozen-git-head when not supplied");
+  } finally { cleanupDir(dir); }
+});

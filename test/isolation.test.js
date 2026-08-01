@@ -113,3 +113,29 @@ test("TD-21: removeWorktree 幂等 + 容错（重试不抛，删不存在的路�
     await rm(repo, { recursive: true, force: true });
   }
 });
+
+// M12-6 (P1-A): createWorktree accepts an optional commitish to pin the worktree
+// HEAD to an exact commit. This is the structural defense against a frozen-base
+// TOCTOU micro-race: even if the source HEAD moves between revalidation and
+// `git worktree add`, the worktree lands on the pinned commit, not the raced
+// HEAD.
+test("M12-6 P1-A: createWorktree pins the worktree HEAD to an exact commitish", async () => {
+  const repo = await makeTempRepo(); // HEAD = C1
+  try {
+    const c1 = execSync("git rev-parse HEAD", { cwd: repo, encoding: "utf8" }).trim();
+    // Advance the source to a second commit so current HEAD (C2) != the pinned base.
+    await writeFile(join(repo, "second.md"), "# 2\n");
+    execSync("git add second.md", { cwd: repo, stdio: "ignore" });
+    execSync('git commit -m second', { cwd: repo, stdio: "ignore" });
+    const c2 = execSync("git rev-parse HEAD", { cwd: repo, encoding: "utf8" }).trim();
+    assert.notEqual(c1, c2, "setup: two distinct commits");
+
+    // Pin the worktree to C1 even though the source HEAD is now C2.
+    const wt = await createWorktree(repo, "wt-pin-m126", { commitish: c1 });
+    const wtHead = execSync("git rev-parse HEAD", { cwd: wt.path, encoding: "utf8" }).trim();
+    assert.equal(wtHead, c1, "worktree HEAD is the pinned commit, not the moved source HEAD");
+    assert.notEqual(wtHead, c2, "worktree did not silently follow the source HEAD race");
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});

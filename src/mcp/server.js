@@ -209,6 +209,16 @@ const DISPATCH_REUSE_BUSY_TEXT =
   "A provider session cannot be driven concurrently. Wait for the prior run to reach a terminal state " +
   "(poll with run_status / run_wait), then re-dispatch the follow-up to resume the conversation.";
 
+// M12-6 (FR-04 / P1-B): fixed, actionable text for an invalid_verification_path
+// DeliveryError. Unlike the generic dispatch failure, this surfaces the closed-
+// set code invalid_verification_path so the Lead can act on it (the verification
+// command was rejected for portability). It echoes NO offending path, command,
+// or internal error detail — only the closed-set label and fixed guidance.
+const DISPATCH_INVALID_VERIFICATION_PATH_TEXT =
+  "run_dispatch refused: invalid_verification_path. A verification command contained a statically identifiable " +
+  "absolute path literal, which is not workspace-portable. Re-issue the delivery with portable verification commands " +
+  "(workspace-relative paths, URLs, or flags — no absolute paths).";
+
 // M12-6 (FR-03): fixed, actionable error when a supplied workspace/head
 // expectation mismatches the freshly-proven binding at dispatch time. The ONLY
 // dynamic content is a closed-set category label (gitHead | dirty | workspaceRoot)
@@ -1953,6 +1963,12 @@ export function createWaoMcpServer({
       // the dispatcher is never called (zero transcript, zero fork).
       let workspaceCwd;
       let workspaceProof = null;
+      // M12-6 (P1-A): the server-proven frozen HEAD threaded internally to the
+      // dispatcher. This is binding.gitHead — distinct from the model-owned
+      // expectedGitHead (consumed above for the expectation check and never
+      // forwarded). RunManager.start revalidates/pins it to defeat a frozen-base
+      // TOCTOU. Defaults null when the workspace is not bound.
+      let workspaceFrozenHead = null;
       try {
         const binding = await resolveWorkspaceBinding();
         if (!binding.bound) {
@@ -1982,6 +1998,7 @@ export function createWaoMcpServer({
         }
         workspaceProof = expectation.proof;
         workspaceCwd = binding.root;
+        workspaceFrozenHead = binding.gitHead;
       } catch {
         return {
           isError: true,
@@ -2014,6 +2031,9 @@ export function createWaoMcpServer({
           globalWaitTimeout,
           // M9-7A: optional delivery request — service validates via prepareDeliveryRequest.
           ...(delivery ? { delivery } : {}),
+          // M12-6 (P1-A): server-proven frozen HEAD threaded internally (never
+          // model-supplied). RunManager.start revalidates/pins it.
+          frozenGitHead: workspaceFrozenHead,
           // M11-7: Windows user-env reader for the credential preflight + bridge.
           userEnvReader: resolveUserEnv,
           // M11-11C: server-owned Lead session identity (never model-supplied).
@@ -2036,6 +2056,16 @@ export function createWaoMcpServer({
           return {
             isError: true,
             content: [{ type: "text", text: DISPATCH_REUSE_BUSY_TEXT }],
+          };
+        }
+        // M12-6 (FR-04 / P1-B): invalid_verification_path — surface the closed-set
+        // code (actionable) WITHOUT echoing the offending path/command/error. This
+        // is a typed DeliveryError from prepareDeliveryRequest, thrown before any
+        // transcript/fork; it must not collapse to the opaque generic dispatch text.
+        if (e && e.name === "DeliveryError" && e.deliveryCode === "invalid_verification_path") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DISPATCH_INVALID_VERIFICATION_PATH_TEXT }],
           };
         }
         return {

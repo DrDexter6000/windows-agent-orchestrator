@@ -811,6 +811,33 @@ function isAbsolutePathLiteralStart(token) {
   return false;
 }
 
+// M12-6 (FR-04 corner cases): a small EXPLICIT safe delimiter set that may
+// introduce an absolute-path literal — assignment ("="), redirection (">" "<"),
+// and command separators (";" "|"). A path appearing immediately after one of
+// these (e.g. `--require=C:\outside\x.js` or `>C:\outside\out.txt`) is just as
+// non-portable as a bare absolute path, so it is flagged too.
+//
+// This deliberately does NOT split on ":" (a drive needs ":" but so do URL
+// schemes and ordinary colon text — splitting there would mass false-positive).
+// URL-like tokens (containing "://") are never split: their scheme precedes any
+// "//", and an "=" or ";" inside a URL query string (e.g. `?file=/etc/passwd`)
+// must not turn the value into a flagged path. This stays a conservative lexical
+// scan — NOT a shell interpreter.
+const PATH_INTRODUCING_DELIMITERS = /[=<>;|]/;
+function tokenHasAbsolutePathLiteral(token) {
+  if (isAbsolutePathLiteralStart(token)) return true;
+  if (typeof token !== "string" || token.length === 0) return false;
+  // URL-like token: only its start matters (checked above); do not split.
+  if (token.includes("://")) return false;
+  // Prefixed literal: any segment introduced by a safe delimiter that itself
+  // begins with an absolute-path indicator.
+  const segments = token.split(PATH_INTRODUCING_DELIMITERS);
+  for (const seg of segments) {
+    if (isAbsolutePathLiteralStart(seg)) return true;
+  }
+  return false;
+}
+
 /**
  * Statically detect the first absolute path literal in a command string, or
  * null if none. Quote-aware: a double- or single-quoted region is treated as
@@ -859,7 +886,7 @@ export function detectAbsolutePathLiteral(command) {
       buf += command[i];
       i += 1;
     }
-    if (isAbsolutePathLiteralStart(buf)) return command.slice(start, i);
+    if (tokenHasAbsolutePathLiteral(buf)) return command.slice(start, i);
   }
   return null;
 }
