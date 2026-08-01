@@ -550,7 +550,7 @@ M9-7A 起支持可选 `delivery` 块，用于派发后续可由 `run_delivery`/`
 
 `delivery` 可选。`verificationCommands` 与 `verificationUnavailableReason` 二选一（互斥）。WAO 强制 persistent worktree isolation——模型不能传 `isolate`。模型**不能**传 `registryPath`、`runDir`、`runId`、`cwd`、`workspaceRoot`、`requireCertified`、timeout 或 `isolate`——这些是 server-owned 配置。MCP 固定以 `requireCertified: true` 调 shared service。
 
-**M12-7 continuable 续谱根（delivery-only 可选）**：delivery 块可带 `"continuable": true`，把这次 delivery 标记为一条**可续谱系（continuable lineage）的根**。dispatch 会以 `run_lineage` / `turn:first` 建立一个 provider-native 会话（opaque uuid 由 server-owned Lead session + canonical workspace + canonical agentId + 该 run 的 rootRunId 派生），保留 retained worktree。这样日后 Lead 若审阅该终态 delivery、发现窄缺陷，可用 `run_continue` 对其续 ONE 修正回合——复用同一 retained worktree、以 `turn:resume` 续同一 provider 会话（同一 opaque uuid）。`continuable` 默认 `false`，省略时与普通 delivery dispatch 字节兼容；`continuable:true` 必须配 `delivery`（service 强制 delivery-only，否则 fail-closed）。WAO 从不在 dispatch 时推断或触发任何续跑/修正——是否续跑完全由 Lead 事后显式调用 `run_continue` 决定。
+**M12-7 continuable 续谱根（delivery-only 可选）**：`run_dispatch` 顶层可带 `"continuable": true`（与 `delivery` 同级，不在 delivery 块内），把这次 delivery 标记为一条**可续谱系（continuable lineage）的根**。dispatch 会以 `run_lineage` / `turn:first` 建立一个 provider-native 会话（opaque uuid 由 server-owned Lead session + canonical workspace + canonical agentId + 该 run 的 rootRunId 派生），保留 retained worktree。这样日后 Lead 若审阅该终态 delivery、发现窄缺陷，可用 `run_continue` 对其续 ONE 修正回合——复用同一 retained worktree、以 `turn:resume` 续同一 provider 会话（同一 opaque uuid）。`continuable` 默认 `false`，省略时与普通 delivery dispatch 字节兼容；`continuable:true` 必须配 `delivery`（service 强制 delivery-only，否则 fail-closed）。WAO 从不在 dispatch 时推断或触发任何续跑/修正——是否续跑完全由 Lead 事后显式调用 `run_continue` 决定。
 
 **verification 环境合同（M12-6 FR-05/FR-06）**：Lead 可选声明 `verificationSetupCommands: string[]`——在 assertion 命令（`verificationCommands`）之前顺序执行的"环境准备命令"（如 `npm ci` 安装依赖、生成构建产物）。setup 与 assertion 分开验证、持久化与投影：setup 失败投影为闭集 `setup_failed` / `setup_timeout` / `setup_environment_error`，**绝不**伪装成 assertion 的 `command_failed`，不泄漏命令体/路径/stderr。每条 setup 与每条 assertion 之后都重做 exact delivery commit / 受跟踪工件证明，任何 tracked artifact 或 lockfile 漂移 = `artifact_mutated`（setup 漂移时 assertion 不执行）。exact-artifact verifier 运行在**独立的 per-attempt 临时环境**：每次 setup / assertion 命令各创建唯一 temp 目录并注入 `TMP` / `TEMP` / `TMPDIR`，两个 attempt 不复用、不复用 worker temp，仅持久化安全布尔事实（不含绝对路径）。**依赖不继承**：selected / worker worktree 的 `node_modules` 等 ignored / untracked 依赖**不会**自动出现在 exact verifier 环境——需要 Lead 声明 `verificationSetupCommands` 来准备。
 
@@ -570,7 +570,7 @@ annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:false, o
 
 ### MCP `run_continue`（Lead 授权修正续跑，M12-7）
 
-`run_continue` 让 Lead 对一个**终态 continuable delivery** 续 ONE 修正回合。典型场景：Lead 审阅一个 delivery、发现窄缺陷（如一个漏改的边界条件），显式授权一次修正——WAO 创建**新** run/transcript，**复用父 run 的 retained worktree**（不开新 worktree、不开新 provider 会话），以 `turn:resume` 续同一 provider-native 对话，并打包新的 child delivery。它直接复用与 CLI 同一层次的 application service（`continueRun()`），不 shell-out CLI。
+`run_continue` 让 Lead 对一个**终态 continuable delivery** 续 ONE 修正回合。典型场景：Lead 审阅一个 delivery、发现窄缺陷（如一个漏改的边界条件），显式授权一次修正——WAO 创建**新** run/transcript，**复用父 run 的 retained worktree**（不开新 worktree、不开新 provider 会话），以 `turn:resume` 续同一 provider-native 对话，并打包新的 child delivery。MCP adapter 直接委托 application service `continueRun()`，不 shell-out CLI；M12-7 没有新增 CLI 子命令。
 
 **Lead 语义唯一，WAO 不推断**：correction 的存在、范围、verification、retry、acceptance 全部由 Lead 决定——`run_continue` 只在 Lead 显式调用时发生一次，从不自动续跑、从不扩大范围、从不自动重试/接受/拒绝。child delivery 的 review/accept/reject 仍走 `run_delivery_review` / `run_delivery_review_bundle` / `run_delivery_decide`，归 Lead。
 
@@ -592,9 +592,9 @@ annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:false, o
 }
 ```
 
-`parentRunId` 必须是一个**终态**且 `continuable` 的父 run（其 `run_dispatch` 带了 `delivery.continuable:true`）。`delivery` 必填（续跑总是 delivery run，child 会从父的 baseCommit 打包新 delivery）。模型不能传 workspace/registry/runDir/cert——这些 server-owned，由 MCP 边界从绑定 workspace 解析。
+`parentRunId` 必须是一个**终态**且 `continuable` 的父 run（其 `run_dispatch` 顶层带了 `continuable:true`）。已 accepted 的父 delivery 不可续；Lead 应为已接收成果另建新 run。`delivery` 必填（续跑总是 delivery run，child 会从父的 baseCommit 打包新 delivery）。模型不能传 workspace/registry/runDir/cert——这些 server-owned，由 MCP 边界从绑定 workspace 解析。
 
-- **资格检查（read-only，先于任何 mutation）**：WAO 在 claim 续谱槽 / 转换 worktree / 写 transcript / fork 之前，以 closed-set `rejectionReason` 拒绝不合格的续跑：`malformed_input` / `invalid_delivery` / `parent_not_found` / `parent_not_terminal` / `not_continuable`（父 run 非 lineage 续谱根，legacy 不可续）/ `workspace_mismatch`（父 run 不属于当前绑定 workspace）/ `no_delivery`（父 run 缺 delivery 上下文）/ `unsupported_backend`（backend 未声明 session reuse）/ `missing_worktree` / `worktree_drift`（retained worktree 丢失或 base/分支漂移）/ `busy`（同一谱系已有非终态 owner 在跑）。这些是**正常结构化结果**（`accepted:false` + `rejectionReason`），不是 MCP error。
+- **资格检查（read-only，先于任何 mutation）**：WAO 在 claim 续谱槽 / 转换 worktree / 写 transcript / fork 之前，以 closed-set `rejectionReason` 拒绝不合格的续跑：`malformed_input` / `invalid_delivery` / `parent_not_found` / `parent_not_terminal` / `parent_accepted` / `not_continuable`（父 run 非 lineage 续谱根，legacy 不可续）/ `no_provider_session` / `workspace_mismatch`（父 run 不属于当前绑定 workspace）/ `no_delivery`（父 run 缺 delivery 上下文）/ `worker_configuration_changed`（当前 backend/model 已不同，不能继承旧 provider session）/ `unsupported_backend`（backend 未声明 session reuse）/ `missing_worktree` / `worktree_drift`（retained worktree 丢失或 base/分支漂移）/ `busy`（同一谱系已有非终态 owner 在跑）。静态 argv 与 credential 检查也在 mutation 前完成；开始转换后若 transcript 或同步 spawn 失败，WAO 机械恢复父 worktree、删除 orphan child transcript 并释放谱系 claim。第二次 worktree 证明若发现外部漂移，只报告事实，不覆盖外部状态。这些 closed-set refusal 是**正常结构化结果**（`accepted:false` + `rejectionReason`），不是 MCP error；环境/内部执行错误仍保持既有固定安全错误边界。
 
 - **输出**（成功 / 拒绝同形，MCP `content` + `structuredContent`）：
 

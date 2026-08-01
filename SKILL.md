@@ -84,7 +84,7 @@ WAO exposes 21 MCP tools. The minimal control loop uses the relevant control too
 | `registry_list` | read-only | Inventory + certification status |
 | `workspace_status` | read-only | Query current workspace binding (source, workspaceRoot, gitHead, dirty) |
 | `workspace_select` | session-scoped | Lead selects the working Git project for this session (`lead_session`); idempotent, no host bind/restart, no file writes |
-| `run_dispatch` | destructive | Create a supervised run (with optional delivery block for git_commit_v1); workspace cwd is the bound/selected root, not model-controlled. Returns `agentId` — the canonical WAO worker identity (M11-8B). Optional `delivery.continuable:true` marks a delivery as the root of a M12-7 continuable lineage |
+| `run_dispatch` | destructive | Create a supervised run (with optional delivery block for git_commit_v1); workspace cwd is the bound/selected root, not model-controlled. Returns `agentId` — the canonical WAO worker identity (M11-8B). Optional top-level `continuable:true` (a sibling of `delivery`) marks a delivery as the root of a M12-7 continuable lineage |
 | `run_continue` | destructive (workspace-bound) | Lead-authorized ONE-turn correction of a terminal `continuable` delivery: resume the parent's provider conversation in its retained worktree and ship a new child delivery. Eligibility is read-only before any mutation; WAO never infers correction/scope/retry/acceptance. Full contract: `docs/usage.md §run_continue` (M12-7) |
 | `run_status` | read-only | Poll terminal state + last activity; returns `agentId` (canonical identity, M11-8B) |
 | `run_wait` | read-only (long-poll) | Atomic liveness-only wait for terminal or liveness summary (270s / 4.5 min default); returns `agentId` (M11-8B) |

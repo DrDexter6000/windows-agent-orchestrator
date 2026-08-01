@@ -16,7 +16,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -68,7 +68,8 @@ async function seedParent({
   runDir, runId, agentId, cwd, backend = "claude-code",
   worktreePath, worktreeBranch, baseCommit, allowedPaths = ["src", "keep.txt"],
   deliveryCommit = null, rootRunId, terminalState = "completed",
-  withLineage = true, withDeliveryContext = true,
+  withLineage = true, withDeliveryContext = true, withProviderSession = true,
+  decision = null,
 }) {
   mkdirSync(runDir, { recursive: true });
   const t = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId });
@@ -90,6 +91,9 @@ async function seedParent({
   if (withLineage) {
     await t.append("run.session_reuse", { mode: "run_lineage", turn: "first", rootRunId: rootRunId ?? runId });
   }
+  if (withProviderSession) {
+    await t.append("session.created", { backend, backendSessionId: "provider-session-1", serveUrl: null });
+  }
   if (deliveryCommit) {
     await t.append("run.delivery_created", {
       deliveryCommit,
@@ -104,6 +108,14 @@ async function seedParent({
   }
   if (terminalState) {
     await t.transitionState("pending", terminalState, "done");
+  }
+  if (decision) {
+    await t.append(`run.delivery_${decision}`, {
+      delivery: {
+        schemaVersion: 1, kind: "git_commit", runId,
+        baseCommit, deliveryCommit, branch: worktreeBranch, worktreePath, allowedPaths,
+      },
+    });
   }
 }
 
@@ -352,5 +364,243 @@ test("M12-7-RC-10: busy lineage slot refused as busy (concurrent continuation), 
     assert.equal(r.activeRunId, "run_child_inflight");
     // Parent worktree untouched (still on the parent branch at the delivery commit).
     assert.equal(git("symbolic-ref --short HEAD", parent.wt), "wao/run_parent_busy");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("M12-7-RC-11: accepted parent is immutable and refused as parent_accepted", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParent(repo, "run_parent_accepted");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-rc-accepted-"));
+  try {
+    await seedParent({
+      runDir: dir, runId: "run_parent_accepted", agentId: "coder_hq", cwd: repo,
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit, decision: "accepted",
+    });
+    const r = await continueRun({
+      parentRunId: "run_parent_accepted", prompt: "change it again",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }),
+    });
+    assert.equal(r.accepted, false);
+    assert.equal(r.rejectionReason, "parent_accepted");
+    assert.equal(git("symbolic-ref --short HEAD", parent.wt), parent.branch);
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("M12-7-RC-12: no provider session cannot be resumed", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParent(repo, "run_parent_no_session");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-rc-no-session-"));
+  try {
+    await seedParent({
+      runDir: dir, runId: "run_parent_no_session", agentId: "coder_hq", cwd: repo,
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit, withProviderSession: false,
+    });
+    const r = await continueRun({
+      parentRunId: "run_parent_no_session", prompt: "fix",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }),
+    });
+    assert.equal(r.accepted, false);
+    assert.equal(r.rejectionReason, "no_provider_session");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("M12-7-RC-13: cross-run envelope injection invalidates parent identity before mutation", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParent(repo, "run_parent_cross");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-rc-cross-"));
+  try {
+    await seedParent({
+      runDir: dir, runId: "run_parent_cross", agentId: "coder_hq", cwd: repo,
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit,
+    });
+    appendFileSync(join(dir, "run_parent_cross.jsonl"), `${JSON.stringify({
+      type: "run.session_reuse", runId: "run_attacker", agentId: "coder_hq",
+      ts: new Date().toISOString(), seq: 999, mode: "run_lineage", turn: "resume",
+      rootRunId: "run_attacker",
+    })}\n`, "utf8");
+    const r = await continueRun({
+      parentRunId: "run_parent_cross", prompt: "fix",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }),
+    });
+    assert.equal(r.accepted, false);
+    assert.equal(r.rejectionReason, "parent_not_found");
+    assert.equal(git("symbolic-ref --short HEAD", parent.wt), parent.branch);
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("M12-7-RC-14: Windows user-env credential bridge reaches the continuation runner", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParent(repo, "run_parent_cred");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-rc-cred-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  const keyName = "WAO_M127_TEST_KEY";
+  const oldValue = process.env[keyName];
+  delete process.env[keyName];
+  try {
+    await seedParent({
+      runDir: dir, runId: "run_parent_cred", agentId: "coder_hq", cwd: repo,
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit,
+    });
+    const r = await continueRun({
+      parentRunId: "run_parent_cred", prompt: "fix",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir,
+      registryPath: makeRegistry(dir, { coder_hq: {
+        backend: "claude-code", cwd: repo,
+        provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.invalid", apiKeyEnv: keyName },
+      } }),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }),
+      userEnvReader: async (name) => (name === keyName ? "user-env-secret" : undefined),
+      spawnFn: fakeSpawn,
+    });
+    assert.equal(r.accepted, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].opts.env[keyName], "user-env-secret");
+  } finally {
+    if (oldValue === undefined) delete process.env[keyName]; else process.env[keyName] = oldValue;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("M12-7-RC-14b: changed backend/model cannot inherit a different provider session", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParent(repo, "run_parent_config");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-rc-config-"));
+  try {
+    await seedParent({
+      runDir: dir, runId: "run_parent_config", agentId: "coder_hq", cwd: repo,
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit,
+    });
+    const r = await continueRun({
+      parentRunId: "run_parent_config", prompt: "fix",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir,
+      registryPath: makeRegistry(dir, { coder_hq: { backend: "codex", cwd: repo, model: { id: "other" } } }),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }),
+    });
+    assert.equal(r.accepted, false);
+    assert.equal(r.rejectionReason, "worker_configuration_changed");
+    assert.equal(git("symbolic-ref --short HEAD", parent.wt), parent.branch);
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("M12-7-RC-15: argv rejection is pre-mutation and leaves the lineage immediately retryable", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParent(repo, "run_parent_argv");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-rc-argv-"));
+  try {
+    await seedParent({
+      runDir: dir, runId: "run_parent_argv", agentId: "coder_hq", cwd: repo,
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit,
+    });
+    await assert.rejects(() => continueRun({
+      parentRunId: "run_parent_argv", prompt: "x".repeat(25000),
+      delivery: { mode: "git_commit_v1", allowedPaths: ["keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }),
+      spawnFn: () => { throw new Error("must not spawn"); },
+    }), /argv too long/);
+    assert.equal(git("symbolic-ref --short HEAD", parent.wt), parent.branch, "argv guard runs before worktree transition");
+
+    const { fakeSpawn, calls } = makeFakeSpawn();
+    const retry = await continueRun({
+      parentRunId: "run_parent_argv", prompt: "narrow correction",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: join(dir, "agents.json"),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }), spawnFn: fakeSpawn,
+    });
+    assert.equal(retry.accepted, true, "no stale claim blocks an immediate valid retry");
+    assert.equal(calls.length, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("M12-7-RC-16: synchronous spawn failure rolls back worktree, transcript, and lineage claim", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParent(repo, "run_parent_spawn");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-rc-spawn-"));
+  try {
+    await seedParent({
+      runDir: dir, runId: "run_parent_spawn", agentId: "coder_hq", cwd: repo,
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit,
+    });
+    await assert.rejects(() => continueRun({
+      parentRunId: "run_parent_spawn", prompt: "narrow correction",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }),
+      spawnFn: () => { throw new Error("synthetic spawn failure"); },
+    }), /synthetic spawn failure/);
+    assert.equal(git("symbolic-ref --short HEAD", parent.wt), parent.branch);
+    assert.equal(git("rev-parse HEAD", parent.wt), parent.deliveryCommit);
+    const childTranscripts = (await import("node:fs")).readdirSync(dir)
+      .filter((name) => name.startsWith("run_") && name.endsWith(".jsonl") && name !== "run_parent_spawn.jsonl");
+    assert.deepEqual(childTranscripts, [], "failed pre-spawn child leaves no orphan transcript");
+
+    const { fakeSpawn, calls } = makeFakeSpawn();
+    const retry = await continueRun({
+      parentRunId: "run_parent_spawn", prompt: "retry correction",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: join(dir, "agents.json"),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }), spawnFn: fakeSpawn,
+    });
+    assert.equal(retry.accepted, true);
+    assert.equal(calls.length, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("M12-7-RC-17: second-proof drift is reported without overwriting external worktree state", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParent(repo, "run_parent_toctou");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-rc-toctou-"));
+  try {
+    await seedParent({
+      runDir: dir, runId: "run_parent_toctou", agentId: "coder_hq", cwd: repo,
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit,
+    });
+    const r = await continueRun({
+      parentRunId: "run_parent_toctou", prompt: "narrow correction",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }),
+      prepareContinuationWorktreeFn: (worktreePath) => {
+        git("branch external-drift", worktreePath);
+        git("symbolic-ref HEAD refs/heads/external-drift", worktreePath);
+        writeFileSync(join(worktreePath, "external.txt"), "external-owner-state\n", "utf8");
+        throw new Error("synthetic second-proof drift");
+      },
+      spawnFn: () => { throw new Error("must not spawn"); },
+    });
+    assert.equal(r.accepted, false);
+    assert.equal(r.rejectionReason, "worktree_drift");
+    assert.equal(git("symbolic-ref --short HEAD", parent.wt), "external-drift");
+    assert.equal((await import("node:fs")).readFileSync(join(parent.wt, "external.txt"), "utf8"), "external-owner-state\n");
+    const childTranscripts = (await import("node:fs")).readdirSync(dir)
+      .filter((name) => name.startsWith("run_") && name.endsWith(".jsonl") && name !== "run_parent_toctou.jsonl");
+    assert.deepEqual(childTranscripts, []);
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
 });

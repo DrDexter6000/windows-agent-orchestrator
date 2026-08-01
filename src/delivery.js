@@ -1317,33 +1317,109 @@ export function prepareContinuationWorktree(worktreePath, opts) {
     throw new DeliveryError("worktree_busy", `child branch ${childBranch} already advanced past base; refusing to clobber`);
   }
 
-  // TRANSITION — idempotent, crash-safe.
-  // 1. Create / reset the child branch at the persisted base.
-  git(["update-ref", childRef, canonicalBase], { cwd });
-  // 2. Switch HEAD onto the child branch (now resolves to base).
-  git(["symbolic-ref", "HEAD", childRef], { cwd });
-  // 3. Committed parent: re-materialize the delivery commit's tree as the working
-  //    tree (the parent commit object is untouched; read-tree checks out its
-  //    tree). Uncommitted parent: skip — preserve the candidate bytes as-is.
-  if (deliveryCommit !== null) {
-    git(["read-tree", "-u", "--reset", deliveryCommit], { cwd });
-  }
-  // 4. Unstage everything so the index matches base (clean), while preserving the
-  //    working-tree bytes (delivery tree / candidate). restoreIndex verifies
-  //    HEAD === base and a clean index.
-  restoreIndex(cwd, canonicalBase);
+  // TRANSITION — idempotent and transactional. The read-only proof above can
+  // fail without cleanup touching externally changed state. Once this function
+  // performs its first mutation, any later failure restores the proven parent.
+  let mutationStarted = false;
+  try {
+    // 1. Create / reset the child branch at the persisted base.
+    git(["update-ref", childRef, canonicalBase], { cwd });
+    mutationStarted = true;
+    // 2. Switch HEAD onto the child branch (now resolves to base).
+    git(["symbolic-ref", "HEAD", childRef], { cwd });
+    // 3. Committed parent: re-materialize the delivery commit's tree as the working
+    //    tree (the parent commit object is untouched; read-tree checks out its
+    //    tree). Uncommitted parent: skip — preserve the candidate bytes as-is.
+    if (deliveryCommit !== null) {
+      git(["read-tree", "-u", "--reset", deliveryCommit], { cwd });
+    }
+    // 4. Unstage everything so the index matches base (clean), while preserving the
+    //    working-tree bytes (delivery tree / candidate). restoreIndex verifies
+    //    HEAD === base and a clean index.
+    restoreIndex(cwd, canonicalBase);
 
-  // 5. Verify the end state: child branch at base.
-  const headFinal = String(git(["rev-parse", "HEAD"], { cwd })).trim();
-  if (headFinal !== canonicalBase) {
-    throw new DeliveryError("cleanup_failed", `post-transition HEAD (${headFinal}) != baseCommit (${canonicalBase})`);
-  }
-  const branchFinal = String(git(["symbolic-ref", "--short", "HEAD"], { cwd })).trim();
-  if (branchFinal !== childBranch) {
-    throw new DeliveryError("cleanup_failed", `post-transition branch (${branchFinal}) != ${childBranch}`);
+    // 5. Verify the end state: child branch at base.
+    const headFinal = String(git(["rev-parse", "HEAD"], { cwd })).trim();
+    if (headFinal !== canonicalBase) {
+      throw new DeliveryError("cleanup_failed", `post-transition HEAD (${headFinal}) != baseCommit (${canonicalBase})`);
+    }
+    const branchFinal = String(git(["symbolic-ref", "--short", "HEAD"], { cwd })).trim();
+    if (branchFinal !== childBranch) {
+      throw new DeliveryError("cleanup_failed", `post-transition branch (${branchFinal}) != ${childBranch}`);
+    }
+  } catch (error) {
+    if (mutationStarted) {
+      rollbackContinuationWorktree(cwd, {
+        originalBranch: proof.branch,
+        childRunId,
+        baseCommit,
+        deliveryCommit,
+      });
+    }
+    throw error;
   }
 
   return { worktreePath: proof.worktreePath, branch: childBranch, canonicalBase };
+}
+
+/**
+ * Roll back a continuation transition that failed before the detached runner
+ * was successfully spawned. The original retained-worktree state is restored:
+ * committed parents return to their delivery commit with a clean tree;
+ * uncommitted/backend-failed parents return to their original branch at base
+ * while preserving candidate bytes. The temporary child branch is deleted only
+ * when it still points at the persisted base.
+ *
+ * @param {string} worktreePath
+ * @param {{originalBranch:string,childRunId:string,baseCommit:string,deliveryCommit?:string|null}} opts
+ * @returns {{worktreePath:string,branch:string}}
+ */
+export function rollbackContinuationWorktree(worktreePath, opts) {
+  if (!opts || typeof opts !== "object") {
+    throw new DeliveryError("invalid_input", "opts must be an object");
+  }
+  const { originalBranch, childRunId, baseCommit, deliveryCommit = null } = opts;
+  if (typeof worktreePath !== "string" || worktreePath.length === 0) {
+    throw new DeliveryError("invalid_input", "worktreePath must be a non-empty string");
+  }
+  const branchMatch = /^wao\/([A-Za-z0-9_-]+)$/.exec(originalBranch ?? "");
+  if (!branchMatch || !isValidRunId(branchMatch[1]) || !isValidRunId(childRunId)) {
+    throw new DeliveryError("invalid_run_id", "continuation rollback requires valid WAO branch/run ids");
+  }
+  if (!isCanonicalCommitId(baseCommit)
+    || (deliveryCommit !== null && !isCanonicalCommitId(deliveryCommit))) {
+    throw new DeliveryError("invalid_input", "continuation rollback requires canonical commits");
+  }
+
+  const cwd = worktreePath;
+  const originalRef = `refs/heads/${originalBranch}`;
+  const childRef = `refs/heads/wao/${childRunId}`;
+  const originalTarget = deliveryCommit ?? baseCommit;
+  const canonicalOriginal = String(
+    git(["rev-parse", "--verify", "--end-of-options", `${originalTarget}^{commit}`], { cwd }),
+  ).trim();
+  if (canonicalOriginal !== originalTarget) {
+    throw new DeliveryError("artifact_mismatch", "rollback target differs from persisted commit");
+  }
+
+  git(["symbolic-ref", "HEAD", originalRef], { cwd });
+  if (deliveryCommit !== null) {
+    git(["reset", "--hard", deliveryCommit], { cwd });
+  } else {
+    restoreIndex(cwd, baseCommit);
+  }
+
+  const child = gitSafe(["rev-parse", "--verify", "--end-of-options", childRef], { cwd });
+  if (child !== null && String(child).trim() === baseCommit) {
+    git(["update-ref", "-d", childRef, baseCommit], { cwd });
+  }
+
+  const finalBranch = String(git(["symbolic-ref", "--short", "HEAD"], { cwd })).trim();
+  const finalHead = String(git(["rev-parse", "HEAD"], { cwd })).trim();
+  if (finalBranch !== originalBranch || finalHead !== originalTarget) {
+    throw new DeliveryError("cleanup_failed", "continuation rollback did not restore the retained worktree");
+  }
+  return { worktreePath: normAbs(cwd), branch: originalBranch };
 }
 
 /**

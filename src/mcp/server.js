@@ -378,7 +378,7 @@ const RUN_DISPATCH_DESCRIPTION =
   "a bounded task prompt; WAO owns dispatch, the detached runner, and the transcript. " +
   "Returns a runId the Lead can supervise later. Only agentId and prompt are accepted; " +
   "registry, run directory, and certification are fixed by the server. " +
-  "M12-7: optional delivery.continuable (default false) marks a delivery as the root " +
+  "M12-7: optional top-level continuable (default false; sibling of delivery) marks a delivery as the root " +
   "of a continuable lineage — dispatch establishes a provider session (turn:first) in " +
   "the retained worktree so a later run_continue can resume the same conversation for a " +
   "Lead-authorized correction. Continuable is delivery-only; it never starts a non-delivery " +
@@ -2365,6 +2365,9 @@ export function createWaoMcpServer({
           // dispatchRun uses it ONLY to resolve reuse routing for agents that
           // declare sessionReuse; it is never echoed in the result.
           leadSession: resolveLeadSession,
+          // M12-7: a continuable root must prove the selected backend can resume
+          // provider sessions before it claims the lineage slot or forks.
+          ...(continuable ? { backendFor: resolveBackendFor } : {}),
         });
       } catch (e) {
         // Credential-missing: fixed actionable text (names are safe to surface;

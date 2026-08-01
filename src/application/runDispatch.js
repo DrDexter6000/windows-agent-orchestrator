@@ -122,6 +122,9 @@ export async function dispatchRun({
   // supplied — expectedGitHead is the model-owned counterpart and is consumed at
   // the MCP boundary. Absent for CLI callers (argv unchanged).
   frozenGitHead,
+  // Server-owned backend capability resolver. Required only for a continuable
+  // root so unsupported runtimes fail before the lineage slot/transcript/fork.
+  backendFor,
   // M12-7: Lead opt-in marking this delivery as the root of a continuable
   // lineage. When true (delivery-only), dispatch establishes the lineage
   // provider session with turn:first so a future Lead-authorized run_continue
@@ -271,6 +274,10 @@ export async function dispatchRun({
     }
     if (typeof cwd !== "string" || cwd.length === 0) {
       throw new Error("dispatchRun: bound workspace (cwd) is required for a continuable delivery");
+    }
+    const continuationBackend = typeof backendFor === "function" ? backendFor(agent) : null;
+    if (!continuationBackend || continuationBackend.supportsSessionReuse !== true) {
+      throw new Error("dispatchRun: continuable delivery requires a backend that supports provider session reuse");
     }
     const firstTurn = await resolveLineageFirstTurn({
       runDir: resolvedRunDir,

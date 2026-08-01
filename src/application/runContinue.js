@@ -29,17 +29,29 @@
 import { spawn } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { existsSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
-import { JsonlTranscript, readTranscript, findState, findLatest, TERMINAL_STATES } from "../transcript.js";
+import {
+  JsonlTranscript,
+  readTranscript,
+  findState,
+  findLatest,
+  extractCanonicalAgentId,
+  TERMINAL_STATES,
+} from "../transcript.js";
 import {
   isValidRunId,
   isCanonicalCommitId,
   prepareDeliveryRequest,
   prepareContinuationWorktree,
   proveContinuationWorktree,
+  rollbackContinuationWorktree,
 } from "../delivery.js";
-import { resolveLineageContinuationTurn } from "./sessionReuse.js";
+import {
+  releaseLineageContinuationTurn,
+  resolveLineageContinuationTurn,
+} from "./sessionReuse.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { readRegistry } from "../registry.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
@@ -61,19 +73,43 @@ const ARGV_MAX_TOTAL = 24000;
 // continuation, scope, retry, or acceptance. The MCP schema enum derives from
 // this ONE list (no second hand-maintained list at the boundary). Order matches
 // the eligibility check order in continueRun (most general → most specific).
-export const CONTINUE_REJECTION_REASONS = [
+export const CONTINUE_REJECTION_REASONS = Object.freeze([
   "malformed_input", // parentRunId / prompt / required-binding shape
   "invalid_delivery", // child delivery contract failed prepareDeliveryRequest
   "parent_not_found", // no parent transcript / no agentId envelope
   "parent_not_terminal", // parent is not in a terminal state
+  "parent_accepted", // accepted delivery is immutable; Lead starts a new run instead
   "not_continuable", // parent has no run_lineage session_reuse root (legacy)
+  "no_provider_session", // parent never established a provider conversation to resume
   "workspace_mismatch", // parent ownership != authorized workspace
   "no_delivery", // parent run.started lacks canonical base + retained worktree
+  "worker_configuration_changed", // current backend/model differs from the parent session
   "unsupported_backend", // backend does not declare supportsSessionReuse
   "missing_worktree", // retained worktree path no longer exists on disk
   "worktree_drift", // retained worktree base/branch/detached state drifted
   "busy", // a non-terminal lineage owner already holds the resume slot
-];
+]);
+
+async function rollbackPreSpawnContinuation({
+  worktreePath,
+  originalBranch,
+  childRunId,
+  baseCommit,
+  deliveryCommit,
+  transcriptPath,
+  resolvedRunDir,
+  claim,
+}) {
+  rollbackContinuationWorktree(worktreePath, {
+    originalBranch,
+    childRunId,
+    baseCommit,
+    deliveryCommit,
+  });
+  await rm(transcriptPath, { force: true }).catch(() => {});
+  await rm(`${transcriptPath}.seq.lock`, { force: true }).catch(() => {});
+  await releaseLineageContinuationTurn({ runDir: resolvedRunDir, claim });
+}
 
 /**
  * Generate a runId in the same format RunManager / dispatchRun use.
@@ -114,6 +150,7 @@ function toPublicDelivery(validated) {
  * @param {string} input.leadSession — server-owned Lead session identity (lineage key input)
  * @param {Function} [input.spawnFn] — injectable spawn (tests)
  * @param {Function} [input.backendFor] — injectable (agent) => backend instance (tests)
+ * @param {Function} [input.prepareContinuationWorktreeFn] — injectable transition (tests)
  * @param {string} [input.runnerPath]
  * @param {string} [input.execPath]
  * @param {object} [input.userEnvReader]
@@ -136,6 +173,7 @@ export async function continueRun({
   leadSession,
   spawnFn,
   backendFor,
+  prepareContinuationWorktreeFn = prepareContinuationWorktree,
   runnerPath,
   execPath,
   userEnvReader,
@@ -171,7 +209,9 @@ export async function continueRun({
   }
   const publicDelivery = toPublicDelivery(validatedDelivery);
 
-  // 3. Parent transcript must exist and carry an agentId envelope.
+  // 3. Parent transcript must exist and every envelope must bind the requested
+  //    runId + one canonical agentId. A single cross-run/corrupt event invalidates
+  //    identity rather than donating another run's worker/session lineage.
   const resolvedRunDir = resolve(runDir);
   const parentTranscriptPath = join(resolvedRunDir, `${parentRunId}.jsonl`);
   let parentEvents;
@@ -183,9 +223,8 @@ export async function continueRun({
   if (!Array.isArray(parentEvents) || parentEvents.length === 0) {
     return refuse("parent_not_found");
   }
-  const agentIdEvent = parentEvents.find((e) => e && typeof e.agentId === "string" && e.agentId.length > 0);
-  if (!agentIdEvent) return refuse("parent_not_found");
-  const agentId = agentIdEvent.agentId;
+  const agentId = extractCanonicalAgentId(parentEvents, parentRunId);
+  if (agentId === "unknown") return refuse("parent_not_found");
 
   // 4. Parent must be terminal (a correction continues a FINISHED delivery).
   const parentState = findState(parentEvents);
@@ -193,17 +232,30 @@ export async function continueRun({
     return refuse("parent_not_terminal", { parentState: parentState ?? null });
   }
 
+  // An accepted delivery is immutable. Correction continues a rejected or
+  // undecided terminal candidate; accepted work requires a new Lead-authored run.
+  if (parentEvents.some((e) => e.type === "run.delivery_accepted" && e.runId === parentRunId)) {
+    return refuse("parent_accepted");
+  }
+
   // 5. Parent must be a continuable lineage run (run.session_reuse run_lineage).
   //    A plain delivery (no lineage event) is legacy and NOT continuable — WAO
   //    never infers a continuation where the Lead did not opt in.
   const lineageEvent = findLatest(parentEvents, "run.session_reuse");
   if (!lineageEvent
+    || lineageEvent.runId !== parentRunId
     || lineageEvent.mode !== "run_lineage"
+    || (lineageEvent.turn !== "first" && lineageEvent.turn !== "resume")
     || typeof lineageEvent.rootRunId !== "string"
-    || !isValidRunId(lineageEvent.rootRunId)) {
+    || !isValidRunId(lineageEvent.rootRunId)
+    || (lineageEvent.turn === "first" && lineageEvent.rootRunId !== parentRunId)) {
     return refuse("not_continuable");
   }
   const rootRunId = lineageEvent.rootRunId;
+
+  if (!parentEvents.some((e) => e.type === "session.created" && e.runId === parentRunId)) {
+    return refuse("no_provider_session");
+  }
 
   // 6. Parent workspace ownership must match the authorized binding.
   try {
@@ -240,13 +292,17 @@ export async function continueRun({
   //    decides from the declared capability.
   const registry = await readRegistry(resolve(registryPath));
   const agent = registry.getAgent(agentId);
-  const resolveBackend = backendFor ?? defaultBackendFor;
-  const backend = resolveBackend(agent);
+  if (started.backend !== agent.backend
+    || JSON.stringify(started.model ?? null) !== JSON.stringify(agent.model ?? null)) {
+    return refuse("worker_configuration_changed");
+  }
+  const backend = typeof backendFor === "function" ? backendFor(agent) : null;
   if (!backend || backend.supportsSessionReuse !== true) {
     return refuse("unsupported_backend");
   }
 
   // 10. Credential preflight (environmental — throws, like dispatchRun).
+  let finalCredentials = {};
   if (!skipCredentialCheck) {
     const readiness = await assessWorkerReadiness({
       agent,
@@ -256,22 +312,67 @@ export async function continueRun({
     if (readiness.credentialAvailability === "missing") {
       throw new CredentialMissingError(readiness.missingCredentialEnvNames);
     }
+    finalCredentials = Object.fromEntries(
+      Object.entries(readiness.resolvedEnv ?? {})
+        .filter(([, value]) => typeof value === "string" && value.length > 0),
+    );
   }
 
   // 11. Read-only retained-worktree proof (drift / missing) BEFORE the lineage
   //     claim — so a drifted or gone worktree refuses with no stale slot left.
+  let worktreeProof;
   try {
-    proveContinuationWorktree(worktreePath, { baseCommit, deliveryCommit });
+    worktreeProof = proveContinuationWorktree(worktreePath, { baseCommit, deliveryCommit });
   } catch {
     return refuse(existsSync(worktreePath) ? "worktree_drift" : "missing_worktree");
   }
 
-  // ---- Mutation phase: lineage claim → worktree transition → transcript → fork ----
-
   const childRunId = generateRunId();
   if (!isValidRunId(childRunId)) return refuse("malformed_input");
 
-  // 12. Lineage continuation turn (turn:resume, SAME opaque uuid as the root).
+  // 12. Construct every static spawn input BEFORE lineage/worktree/transcript
+  //     mutation. A bad argv is a request failure, not a half-created child run.
+  const _spawn = spawnFn ?? spawn;
+  const _execPath = execPath ?? process.execPath;
+  const _runnerPath = runnerPath ?? DEFAULT_RUNNER_PATH;
+  const effectivePollInterval = pollInterval ?? DEFAULT_POLL_INTERVAL;
+  const childBranch = `wao/${childRunId}`;
+
+  const sessionReuseRouting = {
+    mode: "run_lineage",
+    // resolveLineageContinuationTurn derives the authoritative opaque UUID; this
+    // placeholder is replaced after the claim. Static argv size is independent
+    // of UUID value because every valid routing UUID has a fixed length.
+    opaqueUuid: "00000000-0000-4000-8000-000000000000",
+    turn: "resume",
+  };
+  const runnerArgs = [
+    _runnerPath,
+    agentId,
+    "--prompt", prompt,
+    "--run-dir", resolvedRunDir,
+    "--run-id", childRunId,
+    "--registry", resolve(registryPath),
+    "--poll-interval", String(effectivePollInterval),
+    "--cwd", authorizedWorkspaceRoot,
+    "--isolate",
+    "--delivery-json", JSON.stringify(publicDelivery),
+    "--reuse-worktree-json", JSON.stringify({ path: worktreePath, branch: childBranch }),
+    "--session-reuse-json", JSON.stringify(sessionReuseRouting),
+  ];
+  if (globalWaitTimeout !== undefined && globalWaitTimeout !== null) {
+    runnerArgs.push("--global-wait-timeout", String(globalWaitTimeout));
+  }
+  if (requireCertified) runnerArgs.push("--require-certified");
+
+  const totalArgvLen = runnerArgs.reduce((sum, arg) => sum + String(arg).length + 1, 0);
+  if (totalArgvLen > ARGV_MAX_TOTAL) {
+    throw new Error(`runner argv too long (${totalArgvLen} > ${ARGV_MAX_TOTAL}); reduce prompt/delivery size`);
+  }
+
+  // ---- Mutation phase: lineage claim → worktree transition → transcript → fork ----
+
+  // 13. Lineage continuation turn (turn:resume, SAME opaque uuid as the root).
   //     The per-key concurrency gate: a non-terminal lineage owner is busy, so
   //     two concurrent continuations of the same parent cannot both proceed.
   const contTurn = await resolveLineageContinuationTurn({
@@ -286,98 +387,66 @@ export async function continueRun({
   if (contTurn.kind === "busy") {
     return refuse("busy", { activeRunId: contTurn.activeRunId });
   }
-  const sessionReuseRouting = contTurn.routing;
+  runnerArgs[runnerArgs.indexOf("--session-reuse-json") + 1] = JSON.stringify(contTurn.routing);
+  const claim = contTurn.claim;
+  const transcriptPath = join(resolvedRunDir, `${childRunId}.jsonl`);
 
-  // 13. Worktree transition: re-pin the retained worktree to base on the CHILD
+  // 14. Worktree transition: re-pin the retained worktree to base on the CHILD
   //     branch, preserving the parent delivery/candidate bytes as unstaged
   //     working changes. Re-proves authoritatively (TOCTOU since step 11); a
   //     drift here refuses (the lineage slot self-heals as stale).
-  let transition;
   try {
-    transition = prepareContinuationWorktree(worktreePath, {
+    prepareContinuationWorktreeFn(worktreePath, {
       parentRunId,
       childRunId,
       baseCommit,
       deliveryCommit,
     });
   } catch {
+    await releaseLineageContinuationTurn({ runDir: resolvedRunDir, claim });
     return refuse("worktree_drift");
   }
 
-  // 14. Child transcript durable facts, in order: continuation-marked
+  // 15. Child transcript durable facts, in order: continuation-marked
   //     background_submitted → pending → run.session_reuse (run_lineage resume).
-  const transcriptPath = join(resolvedRunDir, `${childRunId}.jsonl`);
   const transcript = new JsonlTranscript(transcriptPath, { runId: childRunId, agentId });
-
-  await transcript.append("run.background_submitted", {
-    background: true,
-    cwd: authorizedWorkspaceRoot,
-    scorecardConfigured: false,
-    deliveryRequested: true,
-    // Bounded continuation lineage facts (WAO runIds only — never the opaque
-    // uuid, Lead id, or workspace).
-    continuation: true,
-    parentRunId,
-    rootRunId,
-  });
-
-  const pendingResult = await transcript.transitionState(null, "pending", "background_spawned");
-  if (!pendingResult.accepted) {
-    return {
-      accepted: false,
-      runId: childRunId,
-      agentId,
-      parentRunId,
+  try {
+    await transcript.append("run.background_submitted", {
+      background: true,
+      cwd: authorizedWorkspaceRoot,
+      scorecardConfigured: false,
+      deliveryRequested: true,
       continuation: true,
-      state: pendingResult.state,
-      terminalState: pendingResult.state,
+      parentRunId,
+      rootRunId,
+    });
+
+    const pendingResult = await transcript.transitionState(null, "pending", "background_spawned");
+    if (!pendingResult.accepted) {
+      throw new Error("continuation child runId collision");
+    }
+
+    await transcript.append("run.session_reuse", {
+      mode: contTurn.routing.mode,
+      turn: contTurn.routing.turn,
+      rootRunId,
+    });
+
+    const runnerEnv = { ...process.env, ...finalCredentials };
+    _spawn(_execPath, runnerArgs, { detached: true, stdio: "ignore", env: runnerEnv }).unref();
+  } catch (error) {
+    await rollbackPreSpawnContinuation({
+      worktreePath,
+      originalBranch: worktreeProof.branch,
+      childRunId,
+      baseCommit,
+      deliveryCommit,
       transcriptPath,
-    };
+      resolvedRunDir,
+      claim,
+    });
+    throw error;
   }
-
-  await transcript.append("run.session_reuse", {
-    mode: sessionReuseRouting.mode,
-    turn: sessionReuseRouting.turn,
-    rootRunId,
-  });
-
-  // 15. Build the detached-runner argv (reusing the worktree + resuming the
-  //     lineage session + shipping the child delivery). NO --frozen-git-head:
-  //     reuseWorktree is mutually exclusive with it (the transition pinned base).
-  const _spawn = spawnFn ?? spawn;
-  const _execPath = execPath ?? process.execPath;
-  const _runnerPath = runnerPath ?? DEFAULT_RUNNER_PATH;
-  const effectivePollInterval = pollInterval ?? DEFAULT_POLL_INTERVAL;
-
-  const runnerArgs = [
-    _runnerPath,
-    agentId,
-    "--prompt", prompt,
-    "--run-dir", resolvedRunDir,
-    "--run-id", childRunId,
-    "--registry", resolve(registryPath),
-    "--poll-interval", String(effectivePollInterval),
-    "--cwd", authorizedWorkspaceRoot,
-    "--isolate",
-    "--delivery-json", JSON.stringify(publicDelivery),
-    // Carry the ORIGINAL persisted worktreePath (run.started source of truth),
-    // not the git-normalized transition.worktreePath — the runner adopts this as
-    // effectiveCwd and it must round-trip the retained-worktree path verbatim.
-    "--reuse-worktree-json", JSON.stringify({ path: worktreePath, branch: transition.branch }),
-    "--session-reuse-json", JSON.stringify(sessionReuseRouting),
-  ];
-  if (globalWaitTimeout !== undefined && globalWaitTimeout !== null) {
-    runnerArgs.push("--global-wait-timeout", String(globalWaitTimeout));
-  }
-  if (requireCertified) runnerArgs.push("--require-certified");
-
-  const totalArgvLen = runnerArgs.reduce((sum, a) => sum + String(a).length + 1, 0);
-  if (totalArgvLen > ARGV_MAX_TOTAL) {
-    throw new Error(`runner argv too long (${totalArgvLen} > ${ARGV_MAX_TOTAL}); reduce prompt/delivery size`);
-  }
-
-  const runnerEnv = { ...process.env };
-  _spawn(_execPath, runnerArgs, { detached: true, stdio: "ignore", env: runnerEnv }).unref();
 
   return {
     accepted: true,
@@ -389,20 +458,4 @@ export async function continueRun({
     state: "pending",
     transcriptPath,
   };
-}
-
-/**
- * Minimal default backend capability resolver (mirrors the backendFor functions
- * in cli.js / backgroundRunner.js / runManager.js). Used only when no backendFor
- * is injected. Reads the declared `supportsSessionReuse` capability — never the
- * runtime name — so the unsupported_backend gate stays runtime-neutral.
- */
-function defaultBackendFor(agent) {
-  const name = agent?.backend;
-  if (name === "claude-code") {
-    // Lazy import keeps the application service from pulling every backend at
-    // module load when an injectable backendFor is supplied (tests / server).
-    // eslint-disable-next-line no-undef
-  }
-  return null;
 }

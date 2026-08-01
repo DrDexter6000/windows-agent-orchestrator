@@ -443,6 +443,11 @@ function defaultLineageStore(runDir) {
       await mkdir(dir, { recursive: true });
       await writeFile(join(dir, `${keyHash}.json`), JSON.stringify(entry), "utf8");
     },
+    async deleteEntry(keyHash) {
+      await unlink(join(dir, `${keyHash}.json`)).catch((error) => {
+        if (error?.code !== "ENOENT") throw error;
+      });
+    },
   };
 }
 
@@ -550,6 +555,45 @@ export async function resolveLineageContinuationTurn({ runDir, runId, parentRunI
       }
     }
     await store.writeEntry(keyHash, { runId, updatedAt: clock });
-    return { kind: "resume", routing: { ...routing, turn: "resume" } };
+    return {
+      kind: "resume",
+      routing: { ...routing, turn: "resume" },
+      // Internal rollback token. It never crosses the application/MCP boundary.
+      claim: { keyHash, runId, parentRunId, previousEntry: entry ?? null },
+    };
+  });
+}
+
+/**
+ * Release a continuation claim after a pre-spawn failure. The compare-and-
+ * restore happens under the same per-lineage lock, so this cleanup can never
+ * overwrite a newer continuation owner. When no prior entry existed, restore a
+ * terminal parent marker (injectable stores need not implement deleteEntry).
+ *
+ * @param {object} input
+ * @param {string} input.runDir
+ * @param {{keyHash:string,runId:string,parentRunId:string,previousEntry:object|null}} input.claim
+ * @param {object} [input.reuseStore]
+ * @returns {Promise<boolean>} true when this claim was still current and released
+ */
+export async function releaseLineageContinuationTurn({ runDir, claim, reuseStore }) {
+  if (!claim || typeof claim !== "object"
+    || typeof claim.keyHash !== "string"
+    || typeof claim.runId !== "string"
+    || typeof claim.parentRunId !== "string") {
+    throw new Error("sessionReuse: invalid continuation claim token");
+  }
+  const store = reuseStore ?? defaultLineageStore(runDir);
+  return withKeyLock(store, claim.keyHash, async () => {
+    const current = await store.readEntry(claim.keyHash);
+    if (!current || current.runId !== claim.runId) return false;
+    if (claim.previousEntry && typeof claim.previousEntry.runId === "string") {
+      await store.writeEntry(claim.keyHash, claim.previousEntry);
+    } else if (typeof store.deleteEntry === "function") {
+      await store.deleteEntry(claim.keyHash);
+    } else {
+      await store.writeEntry(claim.keyHash, { runId: claim.parentRunId, updatedAt: 0 });
+    }
+    return true;
   });
 }

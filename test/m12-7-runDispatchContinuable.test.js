@@ -68,6 +68,7 @@ test("M12-7-DCT-01: continuable:true establishes the lineage first turn (argv en
       delivery: DELIVERY,
       continuable: true,
       leadSession: "lead-session-dct",
+      backendFor: () => ({ supportsSessionReuse: true }),
       spawnFn: fakeSpawn,
     });
     assert.equal(r.accepted, true);
@@ -144,6 +145,7 @@ test("M12-7-DCT-03: continuable without delivery is refused before any transcrip
         // NO delivery — continuable is delivery-only.
         continuable: true,
         leadSession: "lead-session-dct",
+        backendFor: () => ({ supportsSessionReuse: true }),
         spawnFn: fakeSpawn,
       }),
       /delivery-only/i,
@@ -152,5 +154,28 @@ test("M12-7-DCT-03: continuable without delivery is refused before any transcrip
     assert.equal(calls.length, 0, "no spawn on continuable-without-delivery");
     const { readdirSync } = await import("node:fs");
     assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".jsonl")), [], "no transcript written");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("M12-7-DCT-04: continuable root refuses an unsupported backend before transcript/fork", async () => {
+  const repo = makeRepo();
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-dct04-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    await assert.rejects(() => dispatchRun({
+      agentId: "coder_hq",
+      prompt: "do the work",
+      registryPath: makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: repo } }),
+      runDir: dir,
+      cwd: repo,
+      delivery: DELIVERY,
+      continuable: true,
+      leadSession: "lead-session-dct",
+      backendFor: () => ({ supportsSessionReuse: false }),
+      spawnFn: fakeSpawn,
+    }), /supports provider session reuse/);
+    assert.equal(calls.length, 0);
+    const { readdirSync } = await import("node:fs");
+    assert.deepEqual(readdirSync(dir).filter((name) => name.endsWith(".jsonl")), []);
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
 });
