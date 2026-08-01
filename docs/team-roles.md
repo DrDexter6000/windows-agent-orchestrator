@@ -16,7 +16,7 @@ WAO 是"装一次，开发多个项目"的工具：
 1. 每个角色有明确的 work scope（做什么）和边界（不做什么）
 2. Worker 通过最终 assistant response 交付结果；编排层（Lead / 控制面）负责记录和传递
 3. Lead 负责编排+验收，worker 只做 bounded 任务
-4. Chief-Auditor 是 Lead Agent 的平级审计合作伙伴（独立于 Coder，不同源，防伪完成）
+4. Chief-Advisor / Auditor 是 Lead Agent 的平级合作伙伴；canonical `agentId` 保持 `auditor`，同一专家按需承担前置建议与后置审计
 5. 默认进程式 backend（安全），opencode 仅在需要 token 闸门精确控成本时用
 
 ## 角色清单
@@ -27,7 +27,7 @@ WAO 是"装一次，开发多个项目"的工具：
 |---|---|
 | **身份** | 编排者。安装 WAO skill 的那个 runtime 自己就是 Lead（不预设 runtime） |
 | **Work Scope** | 理解和消化用户需求、明确任务目标、拆解和编排任务（判断可并行与必须串行的工作）、派发给合适的 worker、验收并放行或打回重做、汇总和集成交付物、向 owner 提交执行总结、用 .wao/ 管状态 |
-| **边界** | 不埋头干全程；不碰 worker 执行细节；不做架构决策不经 Auditor 审 |
+| **边界** | 不把所有工作留给自己消耗 Lead quota；不把机械执行冒充语义判断；Advisor/Auditor 是按需参考，最终方案、路由与验收仍由 Lead 决定 |
 | **默认 runtime** | 谁装 WAO 谁是 Lead（codex / claude-code / kimi-code 均可） |
 | **配置** | 不在 agents.json（它是调用方，不是被调度的 worker） |
 
@@ -48,8 +48,8 @@ WAO 是"装一次，开发多个项目"的工具：
 
 | 维度 | 内容 |
 |---|---|
-| **身份** | 核心实现者。处理需要高质量/长程的编码任务 |
-| **Work Scope** | 写/改代码、跑 lint/build、修 bug、按 brief 实现 |
+| **身份** | 高耦合与长程连贯实现通道 |
+| **Work Scope** | 跨模块高耦合实现、歧义较高且需要持续统筹的编码任务、难以经济拆分的长程实现，以及按 brief 写/改代码、跑 lint/build、修 bug |
 | **边界** | 不做架构决策（归 Lead+Auditor）；不验收自己（归 Auditor） |
 | **backend** | claude-code wrapper（进程式，已 probe） |
 | **model** | glm-5.2（1M context，编码能力强） |
@@ -59,23 +59,24 @@ WAO 是"装一次，开发多个项目"的工具：
 
 | 维度 | 内容 |
 |---|---|
-| **身份** | 第二实现通道。与 Coder-HQ 使用不同 provider，适合独立实现包 |
-| **Work Scope** | 独立实现包、修 bug、跑脚本、文件改动 |
-| **边界** | 不做架构决策；不验收自己 |
+| **身份** | 低成本高吞吐的通用第二实现通道；`Low` 不表示低能力 |
+| **Work Scope** | 默认承担边界明确的实现包、TDD、修 bug、重构、兼容性、脚本、文档/配置与窄修正；适合独立并行包 |
+| **边界** | 不替 Lead 作架构、范围、拆包或转派决策；不自行扩域；不验收自己。不得仅因文件数、prompt 长度、耗时或规模自行拒绝，是否拆分/转派由 Lead 决定 |
 | **backend** | claude-code wrapper（进程式） |
-| **model** | deepseek-v4-pro（1M context） |
+| **model** | deepseek-v4-flash（1M context） |
 | **effort** | max |
 
-### Coder-MM（码农-多模态）
+### Coder-MM（多模态创意与高质量工程）
 
 | 维度 | 内容 |
 |---|---|
-| **身份** | 多模态处理。涉及图像/截图的任务 |
-| **Work Scope** | UI 截图设计还原、带图文档、图像相关编码 |
-| **边界** | 纯文本编码归 Coder-HQ/Low；不做架构决策 |
+| **身份** | 多模态、视觉创意与高质量工程通道 |
+| **Work Scope** | 图像/截图/视频内容理解；前端设计与实现；UI 截图还原；视觉/美术审核；带图文档与图像相关编码；产品、内容和体验策略方案起草；文案写作；高质量工程与代码实现 |
+| **边界** | 不替 Lead 做最终产品/策略/架构决策；不验收自己的产出；常规低风险纯文本编码默认归 Coder-HQ/Low |
 | **backend** | kimi-code（进程式，官方过 Kimi 白名单） |
-| **model** | kimi-code/k3 |
-| **配置要点** | 不要加 `--yolo`（与 -p 互斥）；WAO 不伪造 Kimi 不支持的 reasoning/context flags |
+| **model** | kimi-code/k3（原生最高 1M context；实际可用窗口取决于 Kimi Code 账户档位） |
+| **配置要点** | 不要加 `--yolo`（与 -p 互斥）；Kimi Code/K3 自主管理上下文，WAO 不配置 backend 无法表达的 `contextWindow` override |
+| **派工策略** | 多模态、视觉、前端、创意、策略或文案任务优先；工程与代码能力强，可在 Coder-HQ 不可用、并行容量不足，或任务明显受益于 K3 长上下文/多模态能力时作为高质量替补。token 价格较高，不作为常规低风险编码的默认通道 |
 
 ### Tester（测试员）+ 轮询职责
 
@@ -88,30 +89,39 @@ WAO 是"装一次，开发多个项目"的工具：
 | **backend** | codex（进程式，command_execution exitCode 最准） |
 | **effort** | medium（测试是确定性任务，不需高推理） |
 
-### Chief-Auditor（审计员）— 前置 + 后置审计
+### Chief-Advisor / Auditor（首席顾问与审计员）— 按需双模式
 
 | 维度 | 内容 |
 |---|---|
-| **身份** | Lead Agent 的平级审计合作伙伴，独立红队。与 Coder 不同源，防伪完成 |
-| **Work Scope（前置审计）** | Lead Agent 出执行方案/编排后，审计方案合理性、给建议（在执行前拦截错误编排） |
-| **Work Scope（后置验收）** | 独立复核 Coder 产出、查伪完成、质疑声明、给 PASS/FAIL |
+| **身份** | Lead Agent 的平级顾问与审计合作伙伴，独立红队。canonical `agentId` 固定为 `auditor`，不另建 `advisor` worker |
+| **Work Scope（前置 advisory）** | 对 Lead 明确提出的未决问题做头脑风暴、红队挑战和方案审查，给可验证的替代方向，不替 Lead 拍板 |
+| **Work Scope（后置 audit）** | 独立复核 Coder 产出、查伪完成、质疑声明、给 PASS/FAIL，不把验收扩张成新方案 |
 | **边界** | 不改代码（归 Coder）；不和 Coder 同源（独立性）；不跑测试（归 Tester） |
 | **backend** | claude-code（官方 Claude，最强判断力） |
 | **model** | claude-opus-5 |
 | **effort** | xhigh（最关键的角色，给最强配置） |
 | **会话复用** | `sessionReuse=lead_workspace`（M11-11C）：同一 MCP Lead server 实例在同一 workspace 内多次询问 Auditor 时，复用 provider 原生会话保留上下文/cache，每次仍是独立 run/transcript。Host/MCP 重启后开新会话；仅非 delivery；详见 `02-architecture.md §4.10` |
 
+## Lead 派工策略
+
+1. **Lead 拥有路由权**：worker 可以报告合同矛盾、缺少授权或能力风险，但不得自行决定拆包、缩减合同或转派。认证、provider 状态、成本和既往表现都是 Lead 的决策事实，不是自动门禁。
+2. **按任务性质选通道**：主要判断语义耦合度、需求歧义、长程上下文连续性、验收边界、是否可独立并行、多模态需求、provider 可用性与成本；不按 `Low`/`HQ` 名称、prompt 长度、文件数量或预计耗时机械路由。
+3. **默认 bounded coding lane**：边界明确、可验证、可独立交付的实现包默认优先 `coder_low`；包较大但合同清楚并不构成自动转派理由。
+4. **高耦合 lane**：跨模块语义强耦合、歧义较高、需要一次长程保持整体设计，或拆包会显著损失上下文时优先 `coder_hq`。
+5. **多模态与高质量替补**：视觉、前端、创意和多模态任务优先 `coder_mm`；也可在 `coder_hq` 不可用或任务明显受益于 K3 能力时作为高质量替补。
+6. **拆包条件**：只有工作确实可独立验收、并行能降低等待或单包合同难以清晰表达时才拆；最终是否拆分或转派由 Lead 决定。
+7. **顾问/审计按需**：同一个 `auditor` 专家在执行前使用 advisory 模式、交付后使用 audit 模式。只有存在明确未决问题且确定性证据不足时调用；不设默认必经审查流水线。
+
 ## 标准开发流（角色协作）
 
 ```
 Lead 收到需求
-  → 派 Researcher 调研（输出 brief + affectedFiles）
+  → 必要时派 Researcher 调研（输出 brief + affectedFiles）
   → Lead 出执行方案
-  → 派 Auditor 前置审计方案（给建议，拦截错误编排）
-  → Lead 按审计建议调整方案
-  → 派 Coder-HQ/Low/MM 实现（按 brief + 方案干活）
-  → 派 Tester 测试 + 轮询监控（验证 exitCode + 文件 + 运行状态）
-  → 派 Auditor 后置验收（独立复核，PASS/FAIL）
+  → 有明确高风险未决问题时，派 auditor 走 advisory 模式提供挑战与建议
+  → Lead 独立裁定方案并选择 Coder-HQ/Low/MM
+  → 必要时派 Tester 提供独立执行证据
+  → 高风险或 Lead 低信心时，派同一 auditor 走 audit 模式独立复核
   → Lead 整合，汇报 owner
 ```
 

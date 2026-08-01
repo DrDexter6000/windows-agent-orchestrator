@@ -104,3 +104,33 @@ test("1A: auditor.md expresses independence, non-decision, alternatives, proport
   assert.ok(/不.*修改.*文件|未.*授权.*不.*改|does not mutate|not.*authorized.*edit/i.test(content),
     "must express no unauthorized file mutation");
 });
+
+// ---------------------------------------------------------------------------
+// 6. coder_low is a general bounded implementation lane, not a tiny-task gate
+// ---------------------------------------------------------------------------
+test("M12 role routing: coder_low does not self-reject by size and leaves reassignment to Lead", async () => {
+  const content = await readFile(join(ROLES_DIR, "coder_low.md"), "utf8");
+  assert.ok(/通用.*实现|第二.*实现|bounded implementation|边界明确.*实现/i.test(content),
+    "coder_low must be described as a general/secondary bounded implementation lane");
+  assert.ok(/Lead.*决定.*拆分|Lead.*决定.*转派|拆分.*Lead|转派.*Lead/i.test(content),
+    "Lead must retain package split and reassignment authority");
+  assert.ok(/不.*仅因.*(?:文件|耗时|规模|长程).*拒绝|不得.*仅因.*(?:文件|耗时|规模|长程).*拒绝/i.test(content),
+    "coder_low must not self-reject solely because of package size or elapsed time");
+  assert.ok(!/不接长程或高复杂任务|立刻报告 Lead 转派 Coder-HQ/i.test(content),
+    "stale tiny-task-only refusal wording must be removed");
+});
+
+// ---------------------------------------------------------------------------
+// 7. auditor is one stable worker identity with advisory and audit modes
+// ---------------------------------------------------------------------------
+test("M12 role naming: auditor.md exposes Chief-Advisor/Auditor dual-mode semantics", async () => {
+  const content = await readFile(join(ROLES_DIR, "auditor.md"), "utf8");
+  assert.ok(/Chief-Advisor.*Auditor|Advisor.*Auditor|顾问.*审计/i.test(content),
+    "human-facing role name must expose both advisor and auditor responsibilities");
+  assert.ok(/前置.*建议|advisory|头脑风暴|方案.*建议/i.test(content),
+    "the advisory mode must be explicit");
+  assert.ok(/后置.*审计|后置.*验收|audit/i.test(content),
+    "the audit mode must be explicit");
+  assert.ok(/agentId.*auditor|canonical.*auditor/i.test(content),
+    "the stable canonical agentId auditor must remain explicit");
+});

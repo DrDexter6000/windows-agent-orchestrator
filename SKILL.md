@@ -38,13 +38,13 @@ For an active safety incident, contain immediate harm first. Full remediation is
 1. A narrow implementation with a clear acceptance oracle: dispatch one coder first.
 2. Truly independent tasks: dispatch workers in parallel.
 3. Tiny, tightly coupled, or Lead-context-heavy work: the Lead may do it directly.
-4. Add a Tester when independent execution evidence is useful. Add an Auditor only for high risk, semantic uncertainty, or low Lead confidence.
+4. Add a Tester when independent execution evidence is useful. The stable canonical `agentId` `auditor` represents one Chief-Advisor / Auditor expert: use advisory mode before execution or audit mode after delivery, only for high risk, semantic uncertainty, or low Lead confidence.
 5. Do not manufacture subtasks or reviewers to satisfy a worker count.
 
 Use `docs/team-roles.md` and the current registry to choose a worker. The Lead owns the verdict even when deterministic gates pass.
+Worker routing follows task semantics (semantic coupling, ambiguity, long-horizon coherence, acceptance clarity, independent parallelism, modality, provider health/reliability, latency, and cost): do not mechanically route by `Low`/`HQ` name. `coder_low` 是默认 bounded implementation lane；高耦合或需要长程连贯上下文的工作优先 `coder_hq`，多模态/视觉/创意工作或刻意选择的高质量替补使用 `coder_mm`. File count, prompt length, and elapsed time are not automatic routing or reassignment triggers. A worker reports concrete blockers; 拆分与转派由 Lead 决定. Detailed role guidance remains in `docs/team-roles.md`.
 
 ## Workflow Size
-
 - Simple read-only or tiny Lead task: do it directly.
 - One bounded worker task: dispatch, supervise, accept, report.
 - Two or more independent workers, cross-session work, or an explicitly audited engagement: use the six-stage pipeline: understand, plan, dispatch, accept, integrate, report.
@@ -131,7 +131,7 @@ On failure, the Lead decides the response from the available delivery truth and 
 
 ## Advisor / Auditor Discipline
 
-Lead 必须先自行审查方案和结果。Advisor/Auditor 默认不调用；只有 Lead 能明确写出一个尚未解决的问题，以及现有确定性证据为何不足时，才调用一次窄审查。没有新证据，不重复审查。Advisor 不替代 Lead 的基础判断或最终验收。
+Lead 必须先自行审查方案和结果。canonical `agentId` `auditor` 对应同一个 Chief-Advisor / Auditor 专家：前置 advisory 用于建议、头脑风暴和红队挑战，后置 audit 用于独立证据复核。两种模式默认都不调用；只有 Lead 能明确写出一个尚未解决的问题，以及现有确定性证据为何不足时，才调用一次窄审查。没有新证据，不重复审查。该专家不替代 Lead 的基础判断、路由权或最终验收。
 
 ## Scorecard
 

@@ -1097,6 +1097,41 @@ test("M11-2C-09: SKILL/PRD 保持 Advisor/Auditor conditional（非默认流水�
   }
 });
 
+test("M12 worker routing: SKILL keeps semantic routing and Lead authority", () => {
+  const skill = read("SKILL.md");
+  assert.ok(/语义耦合|semantic coupling/i.test(skill),
+    "SKILL must route coding work by semantic coupling");
+  assert.ok(/不.*(?:Low|HQ|名称).*(?:机械|自动).*路由|not.*route.*(?:Low|HQ|name)/i.test(skill),
+    "SKILL must not route mechanically by worker name");
+  assert.ok(/不.*(?:文件数|prompt.*长度|耗时).*(?:自动|单独).*转派|file count.*not.*routing|prompt length.*not.*routing/i.test(skill),
+    "SKILL must not use package surface size as an automatic reassignment rule");
+  assert.ok(/拆分.*转派.*Lead|Lead.*(?:拆分|转派).*决定/i.test(skill),
+    "Lead must own package split and reassignment decisions");
+  assert.ok(/coder_low.*默认|默认.*coder_low/i.test(skill),
+    "SKILL must identify coder_low as the default bounded implementation lane");
+  assert.ok(/coder_hq.*高耦合|高耦合.*coder_hq|coder_hq.*长程连贯/i.test(skill),
+    "SKILL must reserve coder_hq for highly coupled or long-horizon work");
+});
+
+test("M12 role naming: stable auditor id represents one advisory/audit expert", () => {
+  const skill = read("SKILL.md");
+  const roles = read("docs/team-roles.md");
+  for (const [name, text] of [["SKILL.md", skill], ["team-roles.md", roles]]) {
+    assert.ok(/agentId.*auditor|canonical.*auditor/i.test(text),
+      `${name} must preserve the canonical auditor agentId`);
+    assert.ok(/Advisor.*Auditor|顾问.*审计/i.test(text),
+      `${name} must describe the same expert's advisory and audit modes`);
+  }
+});
+
+test("M12 coder_low example uses current DeepSeek V4 Flash policy", () => {
+  const parsed = JSON.parse(read("config/agents.example.json"));
+  const low = parsed.agents?.coder_low;
+  assert.equal(low?.model?.id, "deepseek-v4-flash");
+  assert.equal(low?.reasoning?.effort, "max");
+  assert.equal(low?.model?.contextWindow, 1000000);
+});
+
 test("M11-3D1: SKILL/architecture 当前工具事实为 20 tools", () => {
   const skill = read("SKILL.md");
   const arch = read("docs/02-architecture.md");

@@ -59,9 +59,9 @@
       }
     },
     "coder_low": {
-      "_comment": "[Coder-Low] 第二实现通道。对齐 team-roles.md Coder-Low。",
-      "_comment_backend": "claude-code wrapper（进程式）。DeepSeek-v4-pro 1M context。",
-      "_comment_task": "适合任务: 独立实现包/修 bug/脚本与文件改动",
+      "_comment": "[Coder-Low] 低成本高吞吐的通用第二实现通道；Low 不表示低能力。对齐 team-roles.md Coder-Low。",
+      "_comment_backend": "claude-code wrapper（进程式）。DeepSeek-v4-flash，1M context，effort=max。",
+      "_comment_task": "默认适合: 边界明确的实现包/TDD/修 bug/重构/兼容性/脚本/文档配置/窄修正；是否拆分或转派由 Lead 决定",
       "backend": "claude-code",
       "provider": {
         "protocol": "anthropic-compatible",
@@ -74,7 +74,7 @@
         "--dangerously-skip-permissions"
       ],
       "model": {
-        "id": "deepseek-v4-pro",
+        "id": "deepseek-v4-flash",
         "contextWindow": 1000000
       },
       "reasoning": {
@@ -82,11 +82,11 @@
       }
     },
     "coder_mm": {
-      "_comment": "[Coder-MM] 多模态处理。涉及图像/截图的任务。对齐 team-roles.md Coder-MM。",
-      "_comment_backend": "kimi-code（进程式，官方过 Kimi 白名单，无需伪装 header）。进程死即会话死，无 stop 虚假成功风险。",
+      "_comment": "[Coder-MM] 多模态、视觉创意与高质量工程通道；可作为 Coder-HQ 的高价替补。对齐 team-roles.md Coder-MM。",
+      "_comment_backend": "kimi-code（进程式，官方过 Kimi 白名单，无需伪装 header）。K3 原生最高 1M context，实际可用窗口取决于 Kimi Code 账户档位。",
       "_comment_yolo": "⚠ 不要加 --yolo：kimi -p 模式与 --yolo 互斥（CLI 报错）。-p 模式已默认无交互批准。",
-      "_comment_limit": "kimi stream-json 不含 usage/token；WAO 不伪造 reasoning/context flags，模型上下文与推理循环由 Kimi Code/K3 自身管理。",
-      "_comment_task": "适合任务: UI 截图设计还原/带图文档/图像相关编码",
+      "_comment_limit": "kimi stream-json 不含 usage/token；Kimi Code/K3 自主管理上下文，WAO 不配置 backend 无法表达的 contextWindow override。token 价格较高，不作为常规低风险编码的默认通道。",
+      "_comment_task": "适合任务: 图像/视频内容理解、前端设计与实现、视觉/美术审核、策略策划、文案写作、图像相关编码；也可作为 Coder-HQ 的高质量工程替补",
       "backend": "kimi-code",
       "cwd": "D:/projects/your-project",
       "systemPrompt": "config/roles/coder_mm.md",
@@ -105,7 +105,7 @@
       "systemPrompt": "config/roles/tester.md"
     },
     "auditor": {
-      "_comment": "[Auditor] 独立红队。前置审计方案 + 后置验收。与 Coder 不同源防伪完成。对齐 team-roles.md Auditor。",
+      "_comment": "[Chief-Advisor / Auditor] 同一个 auditor agentId 的按需双模式专家：前置建议/红队挑战 + 后置独立审计。与 Coder 不同源。",
       "_comment_backend": "claude-code（官方 Claude）。Claude Opus 5，effort=xhigh。",
       "_comment_auth": "owner 亲自验证 claude login 通过（2026-06-24）。用官方 Claude 不走 wrapper。",
       "_comment_task": "适合任务: 前置方案审计/后置独立复核/PASS-FAIL 判定",
@@ -170,10 +170,10 @@
       },
       {
         "agentId": "coder_low",
-        "label": "glm-5-turbo via claude-code wrapper",
+        "label": "DeepSeek V4 Flash max via claude-code wrapper",
         "profile": "strict",
-        "providerID": "zhipuai-coding-plan",
-        "modelId": "glm-5-turbo",
+        "providerID": "deepseek",
+        "modelId": "deepseek-v4-flash",
         "drills": [
           "sentinel",
           "scorecard"
@@ -181,7 +181,7 @@
       },
       {
         "agentId": "coder_mm",
-        "label": "kimi-for-coding via kimi-code CLI",
+        "label": "Kimi K3 via kimi-code CLI",
         "profile": "strict",
         "drills": [
           "sentinel",
