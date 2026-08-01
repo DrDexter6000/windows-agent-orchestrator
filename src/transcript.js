@@ -32,6 +32,48 @@ const DELIVERY_VERIFICATION_OUTCOME_TYPES = new Set([
   "run.delivery_verification_unavailable",
 ]);
 const DELIVERY_VERIFICATION_OUTCOMES = new Set(["passed", "failed", "unavailable"]);
+
+// M12-6 Package 3B: the reverify audit chain. A Lead may request ONE audited
+// re-verification of the SAME immutable DeliveryRef after an environment/
+// tooling-invalid verification failure. The reverify chain is a SEPARATE audit
+// dimension from the original verification outcome: its event types are
+// `run.delivery_reverification_*` (distinct from `run.delivery_verification_*`),
+// so validateDeliveryFacts's "exactly one verification outcome" counting is
+// unaffected (zero drift for every existing caller). The effective verification
+// truth is the reverify outcome ONLY when exactly one bound requested + one
+// bound outcome exist; otherwise the original verification status stands, and a
+// malformed chain is surfaced (reverifyStatus) — never hidden.
+const DELIVERY_REVERIFICATION_OUTCOME_TYPES = new Set([
+  "run.delivery_reverification_passed",
+  "run.delivery_reverification_failed",
+  "run.delivery_reverification_unavailable",
+]);
+const DELIVERY_REVERIFICATION_OUTCOMES = new Set(["passed", "failed", "unavailable"]);
+
+// M12-6 Package 3B: the frozen closed set of Lead-declared reverify reasons. A
+// reverify is an EXCEPTIONAL Lead-declared recovery — never a retry, never
+// command replacement, never automatic acceptance. The reason records WHY the
+// original verification failure is treated as environment/tooling-invalid.
+// Defined + frozen here (not the application service) so the transcript CAS
+// primitive can validate it without an import cycle; the application service
+// and the MCP schema consume this same SSOT.
+export const REVERIFY_REASONS = Object.freeze([
+  "tooling_invalid",
+  "environment_contaminated",
+  "dependency_setup_missing",
+]);
+
+// M12-6 Package 3B: shared input bounds for the reverify setup contract. Bound
+// here for the same cycle-free reason as REVERIFY_REASONS — the transcript CAS
+// primitive, the application service, and the MCP schema all consume one SSOT.
+// setupCommands is OPTIONAL (a reverify may re-run the original assertions with
+// no new setup); each declared command is a non-empty bounded string.
+export const REVERIFY_SETUP_COMMANDS_LIMIT = 32;
+export const REVERIFY_SETUP_COMMAND_MAX_LENGTH = 512;
+export const REVERIFY_TIMEOUT_MS_MIN = 1000;
+export const REVERIFY_TIMEOUT_MS_MAX = 600_000;
+export const REVERIFY_TIMEOUT_MS_DEFAULT = 300_000;
+
 export const RECOVERY_CANDIDATE_KINDS = Object.freeze([
   "disallowed_scope",
   "backend_failed",
@@ -66,6 +108,36 @@ function _normalizeApprovedPaths(paths) {
   if (normalized.length !== paths.length) return null;
   if (normalized.some((p, index) => p !== paths[index])) return null;
   return normalized;
+}
+
+// M12-6 Package 3B: normalize + bound the optional reverify setupCommands. Each
+// command is a non-empty bounded string (trimmed); the list length is capped.
+// setupCommands is the ONLY thing a Lead may add on a reverify (original
+// assertion commands are immutable) — so it is validated defensively at the
+// transcript CAS layer as well as in the application service.
+function _normalizeReverifySetup(setupCommands) {
+  if (setupCommands === undefined || setupCommands === null) return [];
+  if (!Array.isArray(setupCommands)) {
+    throw new Error("setupCommands must be an array");
+  }
+  if (setupCommands.length > REVERIFY_SETUP_COMMANDS_LIMIT) {
+    throw new Error(`setupCommands exceeds ${REVERIFY_SETUP_COMMANDS_LIMIT} entries`);
+  }
+  const out = [];
+  for (const cmd of setupCommands) {
+    if (typeof cmd !== "string") {
+      throw new Error("setupCommands must be strings");
+    }
+    const trimmed = cmd.trim();
+    if (trimmed.length === 0) {
+      throw new Error("setupCommands must be non-empty");
+    }
+    if (trimmed.length > REVERIFY_SETUP_COMMAND_MAX_LENGTH) {
+      throw new Error(`setupCommand exceeds ${REVERIFY_SETUP_COMMAND_MAX_LENGTH} characters`);
+    }
+    out.push(trimmed);
+  }
+  return out;
 }
 
 function _originalAllowedPaths(events, runId) {
@@ -152,6 +224,98 @@ export function findValidRepackageProvenance(events, runId, createdRef) {
   if (!original || original.some((p) => !isPathAllowed(p, approved))) return null;
   if (createdRef.changedFiles.some((p) => !isPathAllowed(p, approved))) return null;
   return event;
+}
+
+function _reverificationOutcomeFromType(type) {
+  if (type === "run.delivery_reverification_passed") return "passed";
+  if (type === "run.delivery_reverification_failed") return "failed";
+  if (type === "run.delivery_reverification_unavailable") return "unavailable";
+  return null;
+}
+
+/**
+ * M12-6 Package 3B: project the reverify audit chain for a run/delivery.
+ *
+ * Strict closed set: "none" | "pending" | "complete" | "malformed". RunId +
+ * delivery-identity bound: only events whose envelope runId === runId AND whose
+ * DeliveryRef identity matches createdRef count. A foreign-envelope event or an
+ * identity-mismatched bound event is a durable conflict → "malformed" (never
+ * hidden, never echoed).
+ *
+ *   none      — no bound requested, no bound outcome.
+ *   pending   — exactly one bound requested, zero bound outcomes (crash-resumable).
+ *   complete  — exactly one bound requested + exactly one bound outcome.
+ *   malformed — any other combination (duplicate requested/outcome, orphan
+ *               outcome, or a bound event whose identity does not match createdRef).
+ *
+ * Pure transcript projection: never reads Git, never verifies, never decides.
+ * The application layer adds workspace + eligibility proof before exposing a
+ * reverify; this projector only describes the auditable chain shape.
+ *
+ * @param {object[]} events
+ * @param {string} runId
+ * @param {object} createdRef
+ * @returns {{status, requestedEvent, outcomeEvent, reason, effectiveStatus}}
+ */
+export function projectReverifyChain(events, runId, createdRef) {
+  const empty = {
+    status: "none",
+    requestedEvent: null,
+    outcomeEvent: null,
+    reason: null,
+    effectiveStatus: null,
+  };
+  if (!Array.isArray(events) || !_sameDeliveryIdentity(createdRef, createdRef, runId)) {
+    return empty;
+  }
+  const requested = events.filter(
+    (e) => e && e.type === "run.delivery_reverification_requested" && e.runId === runId,
+  );
+  const outcomes = events.filter(
+    (e) => e && DELIVERY_REVERIFICATION_OUTCOME_TYPES.has(e.type) && e.runId === runId,
+  );
+  const reqBound = requested.filter((e) => _sameDeliveryIdentity(e.delivery, createdRef, runId));
+  const outBound = outcomes.filter((e) => _sameDeliveryIdentity(e.delivery, createdRef, runId));
+  // A bound-but-identity-mismatched event is a durable conflict → malformed.
+  const hasConflict = requested.length !== reqBound.length || outcomes.length !== outBound.length;
+  if (hasConflict) {
+    return {
+      status: "malformed",
+      requestedEvent: reqBound[0] ?? null,
+      outcomeEvent: outBound[0] ?? null,
+      reason: reqBound[0]?.reason ?? null,
+      effectiveStatus: null,
+    };
+  }
+  if (reqBound.length === 0 && outBound.length === 0) {
+    // No conflict (above) and no bound events at all → a clean "none" chain.
+    return empty;
+  }
+  if (reqBound.length === 1 && outBound.length === 0) {
+    return {
+      status: "pending",
+      requestedEvent: reqBound[0],
+      outcomeEvent: null,
+      reason: reqBound[0].reason ?? null,
+      effectiveStatus: null,
+    };
+  }
+  if (reqBound.length === 1 && outBound.length === 1) {
+    return {
+      status: "complete",
+      requestedEvent: reqBound[0],
+      outcomeEvent: outBound[0],
+      reason: reqBound[0].reason ?? null,
+      effectiveStatus: _reverificationOutcomeFromType(outBound[0].type),
+    };
+  }
+  return {
+    status: "malformed",
+    requestedEvent: reqBound[0] ?? null,
+    outcomeEvent: outBound[0] ?? null,
+    reason: reqBound[0]?.reason ?? null,
+    effectiveStatus: null,
+  };
 }
 
 export class JsonlTranscript {
@@ -329,10 +493,17 @@ export class JsonlTranscript {
 
       // Decision-specific gate (also in-lock).
       const terminalState = findState(events);
-      const verificationStatus = facts.verificationStatus;
+      // M12-6 Package 3B: the accept/reject gate consults the EFFECTIVE
+      // verification status. With no reverify chain this equals the original
+      // status (zero drift). With a complete valid reverify chain it equals the
+      // reverify outcome — so a Lead may ACCEPT after a reverify that passed,
+      // even though the original verification failed. A malformed reverify chain
+      // leaves the effective status at the (still-failed) original, so acceptance
+      // fails closed; it is never auto-accepted and never silently hidden.
+      const verificationStatus = facts.effectiveVerificationStatus;
       if (decision === "accepted") {
-        // Accept ALWAYS requires a passed verification, for both the normal
-        // completed path and the recovery path.
+        // Accept ALWAYS requires a passed (effective) verification, for both the
+        // normal completed path, the recovery path, and the reverify path.
         if (verificationStatus !== "passed") {
           throw new Error(`Cannot accept: delivery verification is ${verificationStatus}, must be passed`);
         }
@@ -357,7 +528,10 @@ export class JsonlTranscript {
       }
 
       const deliveryCommit = facts.deliveryCommit;
-      const deliveryRef = facts.latestRef;
+      // M12-6 Package 3B: stamp acceptance onto the EFFECTIVE DeliveryRef when a
+      // complete reverify chain exists (its outcome ref carries the effective
+      // verification status); otherwise the original latest verification ref.
+      const deliveryRef = facts.effectiveRef ?? facts.latestRef;
       const decisionType = decision === "accepted"
         ? "run.delivery_accepted"
         : "run.delivery_rejected";
@@ -601,6 +775,188 @@ export class JsonlTranscript {
       await releaseLock();
     }
   }
+
+  /**
+   * M12-6 Package 3B: lock-scoped idempotent append of the reverify REQUEST.
+   *
+   * Under the cross-process append lock: re-read events; if a bound
+   * run.delivery_reverification_requested already exists for this runId with a
+   * matching delivery identity, yield {requested:false} with the RECORDED reason
+   * + setupCommands — so a retry / concurrent competitor converges on the FIRST
+   * caller's declared setup (deterministic verification). Otherwise validate the
+   * inputs (canonical delivery identity, closed-set reason, bounded setup
+   * commands) and append exactly one event. A pre-existing >1 requested events
+   * is a malformed chain → throw (never silently coalesce).
+   *
+   * Narrow primitive: it does NOT verify, decide, or check eligibility beyond
+   * delivery identity + input shape. Eligibility (eligible original failure
+   * code, no existing decision) is proved by the application service BEFORE this
+   * call; verification runs OUTSIDE this lock (contract #5). Never echoes the
+   * recorded command text back in a way that leaks — the returned setupCommands
+   * are consumed by the in-process service only (the safe result / MCP output
+   * never surfaces them).
+   *
+   * @param {{delivery: object, reason: string, setupCommands?: string[]}} input
+   * @returns {Promise<{requested:true, ref:object, reason:string, setupCommands:string[]}
+   *           |{requested:false, ref:object, reason:string, setupCommands:string[]}>}
+   * @throws {Error} if delivery identity is invalid, reason is not closed-set,
+   *   setupCommands is malformed, or the chain is already malformed.
+   */
+  async tryAppendReverifyRequested({ delivery, reason, setupCommands = [] } = {}) {
+    await mkdir(dirname(this.filePath), { recursive: true });
+    const releaseLock = await acquireAppendLock(this.filePath);
+    try {
+      let events = [];
+      try {
+        events = await readTranscript(this.filePath);
+      } catch {
+        events = [];
+      }
+
+      // Validate inputs (fail closed before any append).
+      if (!delivery || typeof delivery !== "object") {
+        throw new Error("tryAppendReverifyRequested: delivery must be an object");
+      }
+      if (!_sameDeliveryIdentity(delivery, delivery, this.context.runId)) {
+        throw new Error("tryAppendReverifyRequested: delivery identity is invalid");
+      }
+      if (!REVERIFY_REASONS.includes(reason)) {
+        throw new Error("tryAppendReverifyRequested: reason must be a closed-set reverify reason");
+      }
+      const setup = _normalizeReverifySetup(setupCommands);
+
+      const requested = events.filter(
+        (e) => e && e.type === "run.delivery_reverification_requested" && e.runId === this.context.runId,
+      );
+      if (requested.length > 1) {
+        throw new Error("tryAppendReverifyRequested: multiple delivery_reverification_requested events");
+      }
+      if (requested.length === 1) {
+        const rec = requested[0];
+        if (!_sameDeliveryIdentity(rec.delivery, delivery, this.context.runId)) {
+          throw new Error("tryAppendReverifyRequested: existing request belongs to another delivery");
+        }
+        return {
+          requested: false,
+          ref: rec.delivery,
+          reason: rec.reason,
+          setupCommands: Array.isArray(rec.setupCommands) ? [...rec.setupCommands] : [],
+        };
+      }
+
+      const baseSeq = Math.max(this.seq, findLastEventSeq(events));
+      const ts = new Date().toISOString();
+      const ctx = { runId: this.context.runId, agentId: this.context.agentId };
+      const payload = { delivery, deliveryCommit: delivery.deliveryCommit, reason };
+      if (setup.length > 0) payload.setupCommands = setup;
+      const event = {
+        ...this.redact(payload),
+        ts,
+        seq: baseSeq + 1,
+        ...ctx,
+        type: "run.delivery_reverification_requested",
+      };
+      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      this.seq = baseSeq + 1;
+      return { requested: true, ref: delivery, reason, setupCommands: setup };
+    } finally {
+      await releaseLock();
+    }
+  }
+
+  /**
+   * M12-6 Package 3B: lock-scoped idempotent append of the reverify OUTCOME.
+   *
+   * Requires exactly one bound run.delivery_reverification_requested with a
+   * matching identity, then appends exactly one outcome event (passed/failed/
+   * unavailable). Idempotent: an existing bound outcome wins — a retry resumes
+   * after a crash between request and outcome without recording a second
+   * outcome. A >1 outcome (or an identity mismatch) is a malformed chain → throw.
+   *
+   * Narrow primitive: the outcome is supplied by the caller (the reverify
+   * service), which ran verifyDelivery OUTSIDE this lock against the exact same
+   * immutable delivery commit. This method never verifies and never decides.
+   *
+   * @param {{delivery: object, outcome: "passed"|"failed"|"unavailable"}} input
+   * @returns {Promise<{recorded:true, ref:object, outcome:string}
+   *           |{recorded:false, ref:object, outcome:string}>}
+   * @throws {Error} if delivery identity is invalid, outcome is not closed-set,
+   *   there is no exactly-one matching request, or the chain is malformed.
+   */
+  async tryAppendReverifyOutcome({ delivery, outcome } = {}) {
+    await mkdir(dirname(this.filePath), { recursive: true });
+    const releaseLock = await acquireAppendLock(this.filePath);
+    try {
+      let events = [];
+      try {
+        events = await readTranscript(this.filePath);
+      } catch {
+        events = [];
+      }
+
+      if (!delivery || typeof delivery !== "object") {
+        throw new Error("tryAppendReverifyOutcome: delivery must be an object");
+      }
+      if (!_sameDeliveryIdentity(delivery, delivery, this.context.runId)) {
+        throw new Error("tryAppendReverifyOutcome: delivery identity is invalid");
+      }
+      if (!DELIVERY_REVERIFICATION_OUTCOMES.has(outcome)) {
+        throw new Error("tryAppendReverifyOutcome: outcome must be passed|failed|unavailable");
+      }
+
+      // Require exactly one bound requested event with matching identity.
+      const requested = events.filter(
+        (e) => e && e.type === "run.delivery_reverification_requested" && e.runId === this.context.runId,
+      );
+      if (requested.length !== 1) {
+        throw new Error("tryAppendReverifyOutcome: expected exactly one delivery_reverification_requested event");
+      }
+      if (!_sameDeliveryIdentity(requested[0].delivery, delivery, this.context.runId)) {
+        throw new Error("tryAppendReverifyOutcome: request belongs to another delivery");
+      }
+
+      // Idempotency: an existing bound outcome wins.
+      const existing = events.filter(
+        (e) => e && DELIVERY_REVERIFICATION_OUTCOME_TYPES.has(e.type) && e.runId === this.context.runId,
+      );
+      if (existing.length > 1) {
+        throw new Error("tryAppendReverifyOutcome: multiple reverify outcomes");
+      }
+      if (existing.length === 1) {
+        const rec = existing[0];
+        if (!_sameDeliveryIdentity(rec.delivery, delivery, this.context.runId)) {
+          throw new Error("tryAppendReverifyOutcome: existing outcome belongs to another delivery");
+        }
+        return {
+          recorded: false,
+          ref: rec.delivery,
+          outcome: _reverificationOutcomeFromType(rec.type),
+        };
+      }
+
+      const type = outcome === "passed"
+        ? "run.delivery_reverification_passed"
+        : outcome === "failed"
+          ? "run.delivery_reverification_failed"
+          : "run.delivery_reverification_unavailable";
+
+      const baseSeq = Math.max(this.seq, findLastEventSeq(events));
+      const ts = new Date().toISOString();
+      const ctx = { runId: this.context.runId, agentId: this.context.agentId };
+      const event = {
+        ...this.redact({ delivery, deliveryCommit: delivery.deliveryCommit }),
+        ts,
+        seq: baseSeq + 1,
+        ...ctx,
+        type,
+      };
+      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      this.seq = baseSeq + 1;
+      return { recorded: true, ref: delivery, outcome };
+    } finally {
+      await releaseLock();
+    }
+  }
 }
 
 /**
@@ -689,6 +1045,28 @@ export function validateDeliveryFacts(events) {
   const recoveryProvenance = findValidRepackageProvenance(events, createdRunId, createdRef);
   const recoveryAcceptable = recoveryProvenance !== null && verificationStatus === "passed";
 
+  // M12-6 Package 3B: project the reverify audit chain (ADDITIVE). The
+  // effective verification status used for the Lead accept/reject decision
+  // becomes the reverify outcome ONLY when exactly one bound requested + one
+  // bound outcome exist (status "complete"). A malformed chain is NEVER hidden:
+  // it leaves effectiveVerificationStatus at the original status (so acceptance
+  // fails closed against a still-failed original) and surfaces reverifyStatus
+  // "malformed" for the Lead to see. Original verificationStatus + latestRef are
+  // unchanged, so every existing caller (no reverify chain) sees zero drift.
+  const reverifyChain = projectReverifyChain(events, createdRunId, createdRef);
+  const effectiveVerificationStatus =
+    reverifyChain.status === "complete" && reverifyChain.effectiveStatus
+      ? reverifyChain.effectiveStatus
+      : verificationStatus;
+  // The effective DeliveryRef is the reverify outcome's ref (with the effective
+  // verification status baked in) ONLY for a complete chain; otherwise the
+  // original verification ref stands. tryAppendDecision stamps acceptance onto
+  // this ref.
+  const effectiveRef =
+    reverifyChain.status === "complete" && reverifyChain.outcomeEvent?.delivery
+      ? reverifyChain.outcomeEvent.delivery
+      : null;
+
   // M11-3A closeout: also surface the created ref and both envelope runIds so a
   // read-only consumer (runDeliveryReview) can bind the full durable identity
   // chain (created event/ref + verification event/ref) to the requested runId
@@ -699,8 +1077,14 @@ export function validateDeliveryFacts(events) {
     createdRef,
     deliveryCommit: createdCommit,
     verificationStatus,
+    effectiveVerificationStatus,
+    effectiveRef,
     decisionEvent,
     recoveryAcceptable,
+    reverifyStatus: reverifyChain.status,
+    reverifyReason: reverifyChain.reason,
+    reverifyRequestedEvent: reverifyChain.requestedEvent,
+    reverifyOutcomeEvent: reverifyChain.outcomeEvent,
     createdEventRunId: createdEvents[0].runId ?? null,
     verificationEventRunId: verificationEvent.runId ?? null,
     error: null,

@@ -20,6 +20,7 @@ import {
   findState,
   findLastEventSeq,
   validateDeliveryFacts,
+  projectReverifyChain,
   findValidRepackageProvenance,
   classifyRecoveryCandidate,
   JsonlTranscript,
@@ -349,7 +350,7 @@ function _reconstructDelivery(events, runId) {
   // any category voids the whole view.
   const latestRef = decisionRef ?? verificationRef ?? createdRef;
   const deliveryCommit = latestRef?.deliveryCommit ?? null;
-  return { latestRef, decisionEvent, deliveryCommit, conflict };
+  return { latestRef, createdRef, decisionEvent, deliveryCommit, conflict };
 }
 
 // ===== Private: shared delivery-view gatherer =====
@@ -369,7 +370,7 @@ function _reconstructDelivery(events, runId) {
 //     (a durable conflict: malformed bound event / cross-run injection. Never
 //     echoes a raw ref/commit/path; the caller fail-closes to ambiguous.)
 function _gatherDeliveryView(events, runId, terminalState) {
-  const { latestRef, decisionEvent, deliveryCommit, conflict } = _reconstructDelivery(events, runId);
+  const { latestRef, createdRef, decisionEvent, deliveryCommit, conflict } = _reconstructDelivery(events, runId);
 
   // M11-10 closeout (auditor blocker 2): a durable conflict detected by the
   // runId-bound reconstruction must NOT be disguised as "no delivery" (which
@@ -390,6 +391,19 @@ function _gatherDeliveryView(events, runId, terminalState) {
     const acceptanceStatus = decisionEvent
       ? (decisionEvent.type === "run.delivery_accepted" ? "accepted" : "rejected")
       : (latestRef.acceptance?.status ?? "pending");
+    // M12-6 Package 3B: ADDITIVE original/effective/reverify projection. The
+    // `verification` field stays the ORIGINAL truth (the durable verification
+    // outcome on the run) so existing callers see zero drift. The effective
+    // verification status equals the reverify outcome ONLY when exactly one bound
+    // requested + one bound outcome exist (status "complete"); otherwise it
+    // equals the original. projectReverifyChain never reads Git and never
+    // echoes a raw ref/commit/path — only the closed-set status/reason.
+    const reverify = createdRef
+      ? projectReverifyChain(events, runId, createdRef)
+      : { status: "none", reason: null, effectiveStatus: null };
+    const effectiveStatus = reverify.status === "complete" && reverify.effectiveStatus
+      ? reverify.effectiveStatus
+      : verificationStatus;
     return {
       runId,
       terminalState,
@@ -399,6 +413,11 @@ function _gatherDeliveryView(events, runId, terminalState) {
       verification: {
         status: verificationStatus,
         ...(latestRef.verification?.failureCode ? { failureCode: latestRef.verification.failureCode } : {}),
+      },
+      effectiveVerification: { status: effectiveStatus },
+      reverify: {
+        status: reverify.status,
+        ...(reverify.reason ? { reason: reverify.reason } : {}),
       },
       acceptance: {
         status: acceptanceStatus,
