@@ -13,6 +13,8 @@ import {
   projectReverifyChain,
   RUN_STATES,
   TERMINAL_STATES,
+  DELIVERY_DECISION_POLICY_CODES,
+  DeliveryDecisionPolicyError,
 } from "../src/transcript.js";
 import { createSecretRedactor } from "../src/secretRedaction.js";
 
@@ -1133,5 +1135,198 @@ test("M12-6-3B1-C7: tryAppendReverifyOutcome never writes a self-poisoning outco
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ============================================================
+// M12-9: typed delivery-decision policy codes (machine protocol)
+//
+// The decision authority produces a typed, closed-set rejection CODE — never a
+// parsed human message. validateDeliveryFacts returns the structured fact
+// category per invalid branch; tryAppendDecision throws the dedicated
+// DeliveryDecisionPolicyError carrying that code. The human message is kept
+// ONLY for internal diagnostics and is NOT the machine protocol.
+// ============================================================
+
+const DEC_RUN = "run_decision_codes";
+const DEC_BASE = "b".repeat(40);
+const DEC_COMMIT = "d".repeat(40);
+const DEC_OTHER_COMMIT = "e".repeat(40);
+
+function decRef(overrides = {}) {
+  return {
+    schemaVersion: 1, kind: "git_commit", runId: DEC_RUN,
+    baseCommit: DEC_BASE, deliveryCommit: DEC_COMMIT,
+    branch: "wao/x", worktreePath: "/fake", changedFiles: ["a.js"],
+    verification: { status: "passed", commands: [], verifiedCommit: DEC_COMMIT, results: [] },
+    acceptance: { status: "pending" }, integration: { status: "pending", targetCommit: null },
+    ...overrides,
+  };
+}
+
+test("M12-9-T1: DELIVERY_DECISION_POLICY_CODES is the frozen closed set of policy codes", () => {
+  assert.deepEqual(DELIVERY_DECISION_POLICY_CODES, [
+    "verification_failed",
+    "delivery_malformed",
+    "terminal_not_eligible",
+    "delivery_unavailable",
+  ]);
+  assert.equal(Object.isFrozen(DELIVERY_DECISION_POLICY_CODES), true);
+  assert.equal(
+    new Set(DELIVERY_DECISION_POLICY_CODES).size,
+    DELIVERY_DECISION_POLICY_CODES.length,
+    "no duplicates",
+  );
+});
+
+test("M12-9-T2: DeliveryDecisionPolicyError carries a machine code + a human message", () => {
+  const err = new DeliveryDecisionPolicyError("verification_failed", "human diagnostics only");
+  assert.ok(err instanceof DeliveryDecisionPolicyError);
+  assert.ok(err instanceof Error);
+  assert.equal(err.code, "verification_failed");
+  assert.equal(err.message, "human diagnostics only");
+});
+
+test("M12-9-T3: every invalid validateDeliveryFacts branch returns the structured fact category", () => {
+  const cases = [
+    ["missing delivery_created", [], "delivery_unavailable"],
+    ["missing verification outcome", [
+      { type: "run.delivery_created", runId: DEC_RUN, delivery: decRef() },
+    ], "delivery_unavailable"],
+    ["multiple delivery_created", [
+      { type: "run.delivery_created", runId: DEC_RUN, delivery: decRef() },
+      { type: "run.delivery_created", runId: DEC_RUN, delivery: decRef() },
+    ], "delivery_malformed"],
+    ["multiple verification outcomes", [
+      { type: "run.delivery_created", runId: DEC_RUN, delivery: decRef() },
+      { type: "run.delivery_verification_passed", runId: DEC_RUN, delivery: decRef() },
+      { type: "run.delivery_verification_failed", runId: DEC_RUN, delivery: decRef() },
+    ], "delivery_malformed"],
+    ["non-canonical commit", [
+      { type: "run.delivery_created", runId: DEC_RUN, delivery: decRef({ deliveryCommit: "HEAD" }) },
+      { type: "run.delivery_verification_passed", runId: DEC_RUN, delivery: decRef({ deliveryCommit: "HEAD" }) },
+    ], "delivery_malformed"],
+    ["commit mismatch", [
+      { type: "run.delivery_created", runId: DEC_RUN, delivery: decRef() },
+      { type: "run.delivery_verification_passed", runId: DEC_RUN, delivery: decRef({ deliveryCommit: DEC_OTHER_COMMIT }) },
+    ], "delivery_malformed"],
+  ];
+  for (const [label, events, code] of cases) {
+    const facts = validateDeliveryFacts(events);
+    assert.equal(facts.valid, false, label);
+    assert.equal(facts.code, code, `${label}: structured category`);
+    assert.equal(typeof facts.error, "string", `${label}: human diagnostics kept`);
+    assert.ok(facts.error.length > 0, `${label}: human message non-empty`);
+  }
+});
+
+test("M12-9-T4: tryAppendDecision throws the dedicated type with the machine code, appends nothing", async () => {
+  const cases = [
+    ["missing delivery_created", [], "delivery_unavailable"],
+    ["multiple delivery_created", [
+      ["run.delivery_created", { delivery: decRef() }],
+      ["run.delivery_created", { delivery: decRef() }],
+    ], "delivery_malformed"],
+    ["commit mismatch", [
+      ["run.delivery_created", { delivery: decRef() }],
+      ["run.delivery_verification_passed", { delivery: decRef({ deliveryCommit: DEC_OTHER_COMMIT }) }],
+    ], "delivery_malformed"],
+  ];
+  for (const [label, seed, expectedCode] of cases) {
+    // A benign run.started seeds the file first (so the transcript exists even
+    // for the no-created case); it never counts as a delivery fact.
+    seed.unshift(["run.started", { backend: "claude-code" }]);
+    const dir = await mkdtemp(join(tmpdir(), "m12-9-t4-"));
+    try {
+      const filePath = join(dir, `${DEC_RUN}.jsonl`);
+      const t = new JsonlTranscript(filePath, { runId: DEC_RUN, agentId: "test" });
+      for (const [type, payload] of seed) await t.append(type, payload);
+      await assert.rejects(
+        () => t.tryAppendDecision({ decision: "accepted", reason: "x" }),
+        (err) => {
+          assert.ok(err instanceof DeliveryDecisionPolicyError, `${label}: dedicated type`);
+          assert.equal(err.code, expectedCode, `${label}: machine code`);
+          assert.equal(typeof err.message, "string", `${label}: human message retained`);
+          assert.ok(err.message.length > 0, `${label}: human message non-empty`);
+          return true;
+        },
+      );
+      const events = await readTranscript(filePath);
+      assert.equal(
+        events.filter((e) => e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected").length,
+        0,
+        `${label}: no decision event appended`,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("M12-9-T5: tryAppendDecision verification/terminal gates throw the dedicated type; reject stays reachable on unavailable", async () => {
+  // Verification gate: accept requires passed (effective) verification.
+  {
+    const dir = await mkdtemp(join(tmpdir(), "m12-9-t5a-"));
+    try {
+      const filePath = join(dir, `${DEC_RUN}.jsonl`);
+      const t = new JsonlTranscript(filePath, { runId: DEC_RUN, agentId: "test" });
+      await t.append("run.delivery_created", { delivery: decRef() });
+      await t.append("run.delivery_verification_failed", { delivery: decRef() });
+      await t.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+      await assert.rejects(
+        () => t.tryAppendDecision({ decision: "accepted", reason: "x" }),
+        (err) => {
+          assert.ok(err instanceof DeliveryDecisionPolicyError, "verification gate: dedicated type");
+          assert.equal(err.code, "verification_failed", "verification gate: machine code");
+          assert.match(err.message, /Cannot accept: delivery verification is failed/, "human message kept");
+          return true;
+        },
+      );
+      const events = await readTranscript(filePath);
+      assert.equal(
+        events.filter((e) => e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected").length,
+        0,
+        "verification gate: no decision event appended",
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+  // Terminal gate: passed verification but the run never reached a terminal state.
+  {
+    const dir = await mkdtemp(join(tmpdir(), "m12-9-t5b-"));
+    try {
+      const filePath = join(dir, `${DEC_RUN}.jsonl`);
+      const t = new JsonlTranscript(filePath, { runId: DEC_RUN, agentId: "test" });
+      await t.append("run.delivery_created", { delivery: decRef() });
+      await t.append("run.delivery_verification_passed", { delivery: decRef() });
+      await assert.rejects(
+        () => t.tryAppendDecision({ decision: "accepted", reason: "x" }),
+        (err) => {
+          assert.ok(err instanceof DeliveryDecisionPolicyError, "terminal gate: dedicated type");
+          assert.equal(err.code, "terminal_not_eligible", "terminal gate: machine code");
+          assert.match(err.message, /Cannot accept: run terminal state is running/, "human message kept");
+          return true;
+        },
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+  // Reject with an unavailable verification is ALLOWED (no bogus code thrown).
+  {
+    const dir = await mkdtemp(join(tmpdir(), "m12-9-t5c-"));
+    try {
+      const filePath = join(dir, `${DEC_RUN}.jsonl`);
+      const t = new JsonlTranscript(filePath, { runId: DEC_RUN, agentId: "test" });
+      await t.append("run.delivery_created", { delivery: decRef() });
+      await t.append("run.delivery_verification_unavailable", { delivery: decRef() });
+      await t.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+      const result = await t.tryAppendDecision({ decision: "rejected", reason: "bad" });
+      assert.equal(result.accepted, true, "reject on unavailable verification succeeds");
+      assert.equal(result.event.type, "run.delivery_rejected");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   }
 });

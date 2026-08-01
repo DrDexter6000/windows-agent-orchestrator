@@ -12,7 +12,10 @@ import {
   getRunDelivery, decideRunDelivery, projectDeliveryReadiness, getRunDeliveryReadiness,
   DELIVERY_WAIT_MS_MIN, DELIVERY_DECISION_REJECTION_CODES, classifyDeliveryDecisionRejection,
 } from "../src/application/runDelivery.js";
-import { JsonlTranscript, readTranscript } from "../src/transcript.js";
+import {
+  JsonlTranscript, readTranscript,
+  DELIVERY_DECISION_POLICY_CODES, DeliveryDecisionPolicyError,
+} from "../src/transcript.js";
 
 function cleanupDir(dir) {
   try { rmSync(dir, { recursive: true, force: true }); } catch {}
@@ -292,53 +295,84 @@ test("M12-1S2-S3: decideRunDelivery recovery-accept admits a failed run only via
 // on the readiness service.
 // ============================================================
 
-test("M12-6-3B2a-SVC-01: DELIVERY_DECISION_REJECTION_CODES is the frozen closed set", () => {
-  assert.deepEqual(DELIVERY_DECISION_REJECTION_CODES, [
-    "verification_failed",
-    "delivery_malformed",
-    "already_decided",
-    "terminal_not_eligible",
-    "delivery_unavailable",
-  ]);
+test("M12-6-3B2a-SVC-01: DELIVERY_DECISION_REJECTION_CODES derives from the transcript policy-code SSOT", () => {
+  // The rejection codes are DERIVED from the transcript decision-facts SSOT
+  // (the 4 throwable policy codes) plus the non-error already_decided OUTCOME
+  // (first-decision-wins is expressed via accepted:false/existing, never thrown).
+  assert.deepEqual(DELIVERY_DECISION_REJECTION_CODES, [...DELIVERY_DECISION_POLICY_CODES, "already_decided"]);
   assert.equal(Object.isFrozen(DELIVERY_DECISION_REJECTION_CODES), true);
   assert.equal(new Set(DELIVERY_DECISION_REJECTION_CODES).size, DELIVERY_DECISION_REJECTION_CODES.length, "no duplicates");
+  assert.ok(
+    DELIVERY_DECISION_POLICY_CODES.every((code) => DELIVERY_DECISION_REJECTION_CODES.includes(code)),
+    "every SSOT policy code is re-exported",
+  );
 });
 
-test("M12-6-3B2a-SVC-02: classifyDeliveryDecisionRejection maps every durable gate to the closed set", () => {
-  const cases = [
-    // Gate errors from transcript.tryAppendDecision.
-    ["Cannot accept: delivery verification is failed, must be passed", "verification_failed"],
-    ["Cannot accept: delivery verification is unavailable, must be passed", "verification_failed"],
-    ["Cannot reject: delivery verification is pending, must be passed/failed/unavailable", "verification_failed"],
-    ["Cannot accept: run terminal state is running, must be completed (or a recovery-eligible failed run)", "terminal_not_eligible"],
-    // Durable-facts errors from transcript.validateDeliveryFacts.
-    ["No committed delivery found (missing run.delivery_created)", "delivery_unavailable"],
-    ["No verification outcome event found (missing run.delivery_verification_*)", "delivery_unavailable"],
-    ["Multiple delivery_created events found (2); exactly one required", "delivery_malformed"],
-    ["Multiple verification outcome events found (3); exactly one required", "delivery_malformed"],
-    ["delivery_created and verification deliveryCommit must both be canonical 40/64-hex commit ids", "delivery_malformed"],
-    ["Verification deliveryCommit (abc) does not match delivery_created commit (def)", "delivery_malformed"],
+test("M12-6-3B2a-SVC-02: classifier maps codes from the DEDICATED type — the message is NOT the protocol", () => {
+  // Same code, arbitrarily different human messages (including the byte-identical
+  // old gate sentences and unrelated wording) → the SAME classification. The
+  // human message is internal diagnostics; it must never drive the machine code.
+  const arbitrary = [
+    "anything at all",
+    "",
+    "Cannot accept: delivery verification is failed, must be passed",
+    "Some completely unrelated wording for humans",
   ];
-  for (const [message, code] of cases) {
-    assert.equal(classifyDeliveryDecisionRejection(new Error(message)), code, message.slice(0, 48));
+  for (const code of DELIVERY_DECISION_POLICY_CODES) {
+    for (const message of arbitrary) {
+      assert.equal(
+        classifyDeliveryDecisionRejection(new DeliveryDecisionPolicyError(code, message)),
+        code,
+        `${code} / ${JSON.stringify(message)}`,
+      );
+    }
   }
 });
 
-test("M12-6-3B2a-SVC-03: classifier returns null for anything unexpected (stays a fixed MCP error)", () => {
-  assert.equal(classifyDeliveryDecisionRejection(new Error("disk full")), null);
-  assert.equal(classifyDeliveryDecisionRejection(new Error("getRunDeliveryReadiness: runId is required")), null);
+test("M12-6-3B2a-SVC-03: only the dedicated type classifies — ordinary Errors never, unknown codes fail closed", () => {
+  // Plain Errors — even with the byte-identical old gate/validator sentences —
+  // are NOT the dedicated type and must never classify: no message parsing
+  // remains in the machine protocol.
+  for (const message of [
+    "Cannot accept: delivery verification is failed, must be passed",
+    "Cannot accept: delivery verification is unavailable, must be passed",
+    "Cannot reject: delivery verification is pending, must be passed/failed/unavailable",
+    "Cannot accept: run terminal state is running, must be completed (or a recovery-eligible failed run)",
+    "No committed delivery found (missing run.delivery_created)",
+    "No verification outcome event found (missing run.delivery_verification_*)",
+    "Multiple delivery_created events found (2); exactly one required",
+    "Multiple verification outcome events found (3); exactly one required",
+    "delivery_created and verification deliveryCommit must both be canonical 40/64-hex commit ids",
+    "Verification deliveryCommit (abc) does not match delivery_created commit (def)",
+    "disk full",
+  ]) {
+    assert.equal(classifyDeliveryDecisionRejection(new Error(message)), null, message.slice(0, 48));
+  }
   assert.equal(classifyDeliveryDecisionRejection(null), null);
   assert.equal(classifyDeliveryDecisionRejection(undefined), null);
   assert.equal(classifyDeliveryDecisionRejection("Cannot accept: delivery verification is failed"), null, "non-Error input");
   assert.equal(classifyDeliveryDecisionRejection(new Error("")), null);
+  // Unknown / out-of-set code on the dedicated type fails closed.
+  assert.equal(classifyDeliveryDecisionRejection(new DeliveryDecisionPolicyError("not_a_real_code", "x")), null);
+  assert.equal(classifyDeliveryDecisionRejection(new DeliveryDecisionPolicyError("already_decided", "x")), null,
+    "already_decided is an outcome, never a thrown code");
+  // A forged plain object pretending to be the type is not accepted.
+  assert.equal(classifyDeliveryDecisionRejection({ code: "verification_failed", message: "x" }), null);
 });
 
-test("M12-6-3B2a-SVC-04: service-layer decide semantics unchanged — policy violations still throw raw errors", async () => {
+test("M12-6-3B2a-SVC-04: service-layer decide semantics unchanged — policy violations throw the DEDICATED type with code", async () => {
   const { dir, runId, transcript } = makeDeliveryTranscript("s3b2asvc4");
   try {
     await writeFullDeliveryLifecycle(transcript, { verificationStatus: "failed", failureCode: "command_failed" });
-    await assert.rejects(() => decideRunDelivery({ runId, runDir: dir, decision: "accepted", reason: "x" }),
-      /Cannot accept: delivery verification is failed/);
+    await assert.rejects(
+      () => decideRunDelivery({ runId, runDir: dir, decision: "accepted", reason: "x" }),
+      (err) => {
+        assert.ok(err instanceof DeliveryDecisionPolicyError, "dedicated type, not a plain Error");
+        assert.equal(err.code, "verification_failed", "machine code on the real-service throw");
+        assert.match(err.message, /Cannot accept: delivery verification is failed/, "human message kept for diagnostics");
+        return true;
+      },
+    );
     // already-decided is NOT a throw at this layer: the first durable decision wins.
     const t2 = makeDeliveryTranscript("s3b2asvc4b");
     try {

@@ -92,6 +92,35 @@ export const REVERIFY_TIMEOUT_MS_MIN = 1000;
 export const REVERIFY_TIMEOUT_MS_MAX = 600_000;
 export const REVERIFY_TIMEOUT_MS_DEFAULT = 300_000;
 
+// M12-9: the frozen closed set of delivery-decision POLICY codes. Defined at
+// the transcript decision-facts authority (validateDeliveryFacts +
+// tryAppendDecision) so the thrower and the machine protocol share ONE SSOT.
+// The application layer re-exports these (appending the non-error
+// already_decided outcome); the MCP schema enum is built from that derivation.
+// A code is thrown ONLY via DeliveryDecisionPolicyError — never parsed from a
+// human message.
+export const DELIVERY_DECISION_POLICY_CODES = Object.freeze([
+  "verification_failed",
+  "delivery_malformed",
+  "terminal_not_eligible",
+  "delivery_unavailable",
+]);
+
+/**
+ * M12-9: the dedicated error type for delivery-decision policy rejections.
+ *
+ * `code` is the machine protocol (a member of DELIVERY_DECISION_POLICY_CODES);
+ * `message` is human diagnostics ONLY and is never parsed by consumers — the
+ * application classifier accepts nothing but this type + its closed-set code.
+ */
+export class DeliveryDecisionPolicyError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = "DeliveryDecisionPolicyError";
+    this.code = code;
+  }
+}
+
 export const RECOVERY_CANDIDATE_KINDS = Object.freeze([
   "disallowed_scope",
   "backend_failed",
@@ -584,7 +613,8 @@ export class JsonlTranscript {
    *
    * @param {{decision: "accepted"|"rejected", reason: string}} input
    * @returns {Promise<{accepted:true, event:object}|{accepted:false, existing:object}>}
-   * @throws {Error} if durable preconditions are not met
+   * @throws {DeliveryDecisionPolicyError} with the closed-set code if durable
+   *   preconditions are not met (message is human diagnostics only)
    */
   async tryAppendDecision({ decision, reason }) {
     await mkdir(dirname(this.filePath), { recursive: true });
@@ -600,7 +630,10 @@ export class JsonlTranscript {
       // In-lock fact validation — single owner of delivery facts.
       const facts = validateDeliveryFacts(events);
       if (facts.error) {
-        throw new Error(facts.error);
+        // M12-9: throw the DEDICATED policy type carrying the structured fact
+        // category (facts.code). The human `facts.error` message is retained
+        // ONLY for internal diagnostics — it is never the machine protocol.
+        throw new DeliveryDecisionPolicyError(facts.code, facts.error);
       }
 
       // Decision-specific gate (also in-lock).
@@ -617,7 +650,8 @@ export class JsonlTranscript {
         // Accept ALWAYS requires a passed (effective) verification, for both the
         // normal completed path, the recovery path, and the reverify path.
         if (verificationStatus !== "passed") {
-          throw new Error(`Cannot accept: delivery verification is ${verificationStatus}, must be passed`);
+          // M12-9: typed policy rejection; message kept for diagnostics only.
+          throw new DeliveryDecisionPolicyError("verification_failed", `Cannot accept: delivery verification is ${verificationStatus}, must be passed`);
         }
         // M12-1S2: widen the terminal gate to admit an explicit recovery accept.
         // A terminally-failed run whose durable failure is exactly disallowed_path
@@ -628,14 +662,15 @@ export class JsonlTranscript {
         // untouched (zero drift).
         const recoveryEligible = terminalState === "failed" && facts.recoveryAcceptable === true;
         if (terminalState !== "completed" && !recoveryEligible) {
-          throw new Error(
+          throw new DeliveryDecisionPolicyError(
+            "terminal_not_eligible",
             `Cannot accept: run terminal state is ${terminalState}, must be completed (or a recovery-eligible failed run)`,
           );
         }
       } else {
         // reject: only allowed when verification has a final outcome
         if (!["passed", "failed", "unavailable"].includes(verificationStatus)) {
-          throw new Error(`Cannot reject: delivery verification is ${verificationStatus}, must be passed/failed/unavailable`);
+          throw new DeliveryDecisionPolicyError("verification_failed", `Cannot reject: delivery verification is ${verificationStatus}, must be passed/failed/unavailable`);
         }
       }
 
@@ -1099,15 +1134,17 @@ export class JsonlTranscript {
  * tryAppendDecision or introducing a second reconstruction algorithm.
  *
  * @param {object[]} events
- * @returns {{valid:boolean, latestRef:object|null, deliveryCommit:string|null, verificationStatus:string, decisionEvent:object|null, error:string|null}}
+ * @returns {{valid:boolean, latestRef:object|null, deliveryCommit:string|null, verificationStatus:string, decisionEvent:object|null, code:string|null, error:string|null}}
  */
 export function validateDeliveryFacts(events) {
   const createdEvents = events.filter((e) => e.type === "run.delivery_created" && e.delivery);
   if (createdEvents.length === 0) {
-    return { valid: false, latestRef: null, deliveryCommit: null, verificationStatus: "pending", decisionEvent: null, error: "No committed delivery found (missing run.delivery_created)" };
+    // M12-9: structured fact category — no committed delivery → delivery_unavailable.
+    return { valid: false, latestRef: null, deliveryCommit: null, verificationStatus: "pending", decisionEvent: null, code: "delivery_unavailable", error: "No committed delivery found (missing run.delivery_created)" };
   }
   if (createdEvents.length > 1) {
-    return { valid: false, latestRef: null, deliveryCommit: null, verificationStatus: "pending", decisionEvent: null, error: `Multiple delivery_created events found (${createdEvents.length}); exactly one required` };
+    // M12-9: conflicting durable facts → delivery_malformed.
+    return { valid: false, latestRef: null, deliveryCommit: null, verificationStatus: "pending", decisionEvent: null, code: "delivery_malformed", error: `Multiple delivery_created events found (${createdEvents.length}); exactly one required` };
   }
 
   const createdRef = createdEvents[0].delivery;
@@ -1118,10 +1155,12 @@ export function validateDeliveryFacts(events) {
     DELIVERY_VERIFICATION_OUTCOME_TYPES.has(e.type));
 
   if (verificationEvents.length === 0) {
-    return { valid: false, latestRef: createdRef, deliveryCommit: createdCommit, verificationStatus: "pending", decisionEvent: null, error: "No verification outcome event found (missing run.delivery_verification_*)" };
+    // M12-9: no verification outcome → delivery_unavailable.
+    return { valid: false, latestRef: createdRef, deliveryCommit: createdCommit, verificationStatus: "pending", decisionEvent: null, code: "delivery_unavailable", error: "No verification outcome event found (missing run.delivery_verification_*)" };
   }
   if (verificationEvents.length > 1) {
-    return { valid: false, latestRef: createdRef, deliveryCommit: createdCommit, verificationStatus: "pending", decisionEvent: null, error: `Multiple verification outcome events found (${verificationEvents.length}); exactly one required` };
+    // M12-9: conflicting durable facts → delivery_malformed.
+    return { valid: false, latestRef: createdRef, deliveryCommit: createdCommit, verificationStatus: "pending", decisionEvent: null, code: "delivery_malformed", error: `Multiple verification outcome events found (${verificationEvents.length}); exactly one required` };
   }
 
   const verificationEvent = verificationEvents[0];
@@ -1136,12 +1175,14 @@ export function validateDeliveryFacts(events) {
   // falsely validated the delivery as reviewable. Now any non-canonical commit
   // on either side fails closed.
   if (!isCanonicalCommitId(createdCommit) || !isCanonicalCommitId(verificationCommit)) {
-    return { valid: false, latestRef: createdRef, deliveryCommit: createdCommit, verificationStatus: "pending", decisionEvent: null, error: "delivery_created and verification deliveryCommit must both be canonical 40/64-hex commit ids" };
+    // M12-9: non-canonical commit → delivery_malformed.
+    return { valid: false, latestRef: createdRef, deliveryCommit: createdCommit, verificationStatus: "pending", decisionEvent: null, code: "delivery_malformed", error: "delivery_created and verification deliveryCommit must both be canonical 40/64-hex commit ids" };
   }
 
   // Verification commit must match delivery_created commit
   if (verificationCommit !== createdCommit) {
-    return { valid: false, latestRef: createdRef, deliveryCommit: createdCommit, verificationStatus: "pending", decisionEvent: null, error: `Verification deliveryCommit (${verificationCommit}) does not match delivery_created commit (${createdCommit})` };
+    // M12-9: commit mismatch → delivery_malformed.
+    return { valid: false, latestRef: createdRef, deliveryCommit: createdCommit, verificationStatus: "pending", decisionEvent: null, code: "delivery_malformed", error: `Verification deliveryCommit (${verificationCommit}) does not match delivery_created commit (${createdCommit})` };
   }
 
   // Extract verification status
@@ -1213,6 +1254,7 @@ export function validateDeliveryFacts(events) {
     reverifyOutcomeEvent: reverifyChain.outcomeEvent,
     createdEventRunId: createdEvents[0].runId ?? null,
     verificationEventRunId: verificationEvent.runId ?? null,
+    code: null,
     error: null,
   };
 }

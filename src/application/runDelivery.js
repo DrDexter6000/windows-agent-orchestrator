@@ -25,6 +25,8 @@ import {
   classifyRecoveryCandidate,
   JsonlTranscript,
   TERMINAL_STATES,
+  DELIVERY_DECISION_POLICY_CODES,
+  DeliveryDecisionPolicyError,
 } from "../transcript.js";
 import { isValidRunId, isCanonicalCommitId } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, safeProjectPackagingCode } from "../deliveryFailureCodes.js";
@@ -853,7 +855,7 @@ export async function decideRunDelivery({ runId, runDir, decision, reason, readT
   return transcript.tryAppendDecision({ decision, reason: trimmedReason });
 }
 
-// ===== M12-6 Package 3B2a: decision-rejection classification (single authority) =====
+// ===== M12-6 Package 3B2a + M12-9: decision-rejection classification (single authority) =====
 //
 // The MCP transport maps EXPECTED policy rejections to structured outcomes with
 // a CLOSED-SET rejectionReason instead of MCP isError. This module is the ONE
@@ -865,17 +867,19 @@ export async function decideRunDelivery({ runId, runDir, decision, reason, readT
 // "already_decided" is not a throw: the primitive returns {accepted:false,
 // existing}, and the transport emits it on that result path.
 //
-// Anything not in this closed set is an unexpected/internal exception and MUST
-// stay a fixed safe MCP error (classifier returns null). The classifier is
-// prefix-based on the primitive messages so it cannot diverge when wording
-// after the first clause changes; it never returns raw message text.
+// M12-9: the machine protocol is a TYPED code, never a parsed message. The
+// decision authority (transcript.js) throws the dedicated
+// DeliveryDecisionPolicyError carrying a code from its frozen
+// DELIVERY_DECISION_POLICY_CODES SSOT. This module DERIVES its rejection codes
+// from that SSOT (appending the non-error already_decided outcome code) and
+// classifies ONLY the dedicated type whose code is in the SSOT set. A plain
+// Error — even with byte-identical old gate wording — is never classified
+// (stays a fixed safe MCP error); an unknown code fails closed the same way.
+// The classifier never returns raw message text.
 
 export const DELIVERY_DECISION_REJECTION_CODES = Object.freeze([
-  "verification_failed",
-  "delivery_malformed",
+  ...DELIVERY_DECISION_POLICY_CODES,
   "already_decided",
-  "terminal_not_eligible",
-  "delivery_unavailable",
 ]);
 
 /**
@@ -886,25 +890,7 @@ export const DELIVERY_DECISION_REJECTION_CODES = Object.freeze([
  * @returns {string|null} one of DELIVERY_DECISION_REJECTION_CODES, or null
  */
 export function classifyDeliveryDecisionRejection(err) {
-  if (!err || !(err instanceof Error) || typeof err.message !== "string") return null;
-  const m = err.message;
-  // Verification gate: accept requires passed; reject requires passed/failed/unavailable.
-  if (m.startsWith("Cannot accept: delivery verification is ")
-      || m.startsWith("Cannot reject: delivery verification is ")) {
-    return "verification_failed";
-  }
-  if (m.startsWith("Cannot accept: run terminal state is ")) {
-    return "terminal_not_eligible";
-  }
-  if (m.startsWith("No committed delivery found")
-      || m.startsWith("No verification outcome event found")) {
-    return "delivery_unavailable";
-  }
-  if (m.startsWith("Multiple delivery_created events found")
-      || m.startsWith("Multiple verification outcome events found")
-      || m.startsWith("delivery_created and verification deliveryCommit must both be canonical")
-      || m.startsWith("Verification deliveryCommit (")) {
-    return "delivery_malformed";
-  }
-  return null;
+  if (!(err instanceof DeliveryDecisionPolicyError)) return null;
+  if (!DELIVERY_DECISION_POLICY_CODES.includes(err.code)) return null;
+  return err.code;
 }

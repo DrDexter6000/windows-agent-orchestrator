@@ -1205,3 +1205,79 @@ test("M12-6-3B2a-09: delivery_unavailable — no committed delivery → structur
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); }
 });
+
+test("M12-9-MCP-01: transport classification is TYPE-gated — plain Errors and unknown codes stay fixed MCP errors", async () => {
+  const { DeliveryDecisionPolicyError } = await import("../src/transcript.js");
+  const runId = "run_m12_9";
+  // 1. A plain Error carrying the EXACT old gate sentence must NOT classify:
+  //    the machine protocol is the typed code, never message text.
+  {
+    const server = createWaoMcpServer({
+      registryPath: "/r.json", runDir: "/runs",
+      decideRunDeliveryFn: async () => {
+        throw new Error("Cannot accept: delivery verification is failed, must be passed");
+      },
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x" } });
+      assert.equal(res.isError, true, "plain Error with an old sentence stays the fixed MCP error");
+      assert.ok(!JSON.stringify(res).includes("rejectionReason"), "no structured rejection for a plain Error");
+      assert.ok(!JSON.stringify(res).includes("must be passed"), "no raw gate text leaks");
+    } finally { await client.close(); await server.close(); }
+  }
+  // 2. The DEDICATED type with an ARBITRARY message → structured rejection with
+  //    the code; the human wording is irrelevant to classification.
+  {
+    const server = createWaoMcpServer({
+      registryPath: "/r.json", runDir: "/runs",
+      decideRunDeliveryFn: async () => {
+        throw new DeliveryDecisionPolicyError("verification_failed", "completely different human wording");
+      },
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x" } });
+      assert.equal(res.isError, undefined, "typed policy rejection is a structured outcome");
+      const p = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(p.decisionAccepted, false);
+      assert.equal(p.rejectionReason, "verification_failed", "code survives arbitrary message wording");
+      assert.equal(p.deliveryCommit, null);
+      assert.ok(!JSON.stringify(res).includes("completely different human wording"), "no raw message leak");
+    } finally { await client.close(); await server.close(); }
+  }
+  // 3. Unknown code on the dedicated type fails closed → fixed MCP error.
+  {
+    const server = createWaoMcpServer({
+      registryPath: "/r.json", runDir: "/runs",
+      decideRunDeliveryFn: async () => {
+        throw new DeliveryDecisionPolicyError("not_a_real_code", "x");
+      },
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x" } });
+      assert.equal(res.isError, true, "unknown code fails closed");
+    } finally { await client.close(); await server.close(); }
+  }
+  // 4. already_decided stays a NORMAL OUTCOME (accepted:false/existing) — it is
+  //    never expressed through the exception type.
+  {
+    const server = createWaoMcpServer({
+      registryPath: "/r.json", runDir: "/runs",
+      decideRunDeliveryFn: async () => ({
+        accepted: false,
+        existing: { type: "run.delivery_accepted", status: "accepted", deliveryCommit: "d".repeat(40) },
+      }),
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId, decision: "accepted", reason: "x" } });
+      assert.equal(res.isError, undefined, "already_decided is a normal structured outcome");
+      const p = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(p.decisionAccepted, false);
+      assert.equal(p.existingStatus, "accepted");
+      assert.equal(p.rejectionReason, "already_decided");
+    } finally { await client.close(); await server.close(); }
+  }
+});
