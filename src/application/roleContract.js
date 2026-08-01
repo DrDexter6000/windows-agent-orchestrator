@@ -155,6 +155,38 @@ export function loadRoleContract(rolePath) {
 // is rejected: the header is omitted entirely and the role contract body is
 // returned alone. An invalid id NEVER enters the prompt in any form.
 
+// M12-6 WQ-01/WQ-02: worker evidence discipline block.
+//
+// Production RED (delivery dogfood runs): a worker made concrete repository
+// claims (paths, symbols, test behavior) without inspecting any evidence, and
+// async/stateful changes shipped without considering applicable states — the
+// Lead had no shared, provider-neutral first-pass evidence standard to delegate
+// against. WAO never makes the semantic decision; it only states the
+// reporting discipline every role-bearing worker follows.
+//
+// This is ONE fixed, provider-neutral, control-plane-owned block, composed
+// exactly once (via composeRoleContractWithIdentity) between the identity
+// header and the role body. It is deliberately NOT a semantic acceptance rule:
+// no parser, scorecard, auto-retry, auto-reject, automatic gate, or acceptance
+// decision — the Lead remains the sole semantic judge.
+//
+// WQ-01 GROUNDING: before making concrete claims about a repository path,
+// endpoint, symbol, module, API shape, or test behavior, inspect the relevant
+// repository evidence and identify the supporting repo-relative path/symbol/
+// test in the final report; unverified claims are labeled explicitly as
+// unverified/uncertain, not stated as fact.
+//
+// WQ-02 ASYNC/STATE: when changing async or stateful UI/query-gating behavior,
+// enumerate the applicable states (normal, loading, error, missing,
+// unparseable, stale-data-plus-error), test each applicable state and the
+// high-risk combinations, and state why a listed state is not applicable when
+// it is omitted.
+export const WORKER_EVIDENCE_DISCIPLINE = [
+  "WORKER EVIDENCE DISCIPLINE (WAO control plane — execution/reporting discipline only; the Lead remains the sole semantic judge):",
+  "- WQ-01 GROUNDING: before concrete claims about a repository path, endpoint, symbol, module, API shape, or test behavior, inspect the relevant repository evidence and cite the supporting repo-relative path/symbol/test in the final report; if not verified, label it explicitly as unverified/uncertain, not as fact.",
+  "- WQ-02 ASYNC/STATE: when changing async or stateful UI/query-gating behavior, enumerate the applicable states (including normal, loading, error, missing, unparseable, and stale-data-plus-error), test each applicable state and the high-risk combinations, and state why a listed state is not applicable when you omit it.",
+].join("\n");
+
 /**
  * M11-8B: The SINGLE composition function that combines a fixed, provider-
  * neutral identity header with a loaded role contract.
@@ -165,6 +197,13 @@ export function loadRoleContract(rolePath) {
  * model, cwd, or role display name. Whether the worker actually echoes the id
  * is only a hint effect — it adds no scorecard, retry, or acceptance gate.
  *
+ * M12-6 WQ-01/WQ-02: the fixed WORKER_EVIDENCE_DISCIPLINE block is composed
+ * between the identity header and the role body — exactly once, for every
+ * valid canonical agentId with a non-empty role contract, with zero
+ * per-runtime/per-seat branching (same block for every worker). It rides the
+ * existing roleContract transport; no backend gains or loses a capability and
+ * no agent without a role contract is forced to carry it.
+ *
  * Trust boundary (M11-8B closeout):
  *   - roleContract undefined/empty → returns undefined (unchanged behavior for
  *     agents without a systemPrompt; NO identity header is added).
@@ -172,9 +211,10 @@ export function loadRoleContract(rolePath) {
  *     invalid id does NOT enter the prompt in any form: the header is omitted
  *     and the role contract body is returned alone. There is no "encoding"
  *     fallback — an invalid id is rejected, not flattened.
- *   - When the id is valid, the header (fixed text + the validated id) precedes
- *     the role body, joined by a fixed separator. The composed string is what
- *     backends consume via task.roleContract (each backend injects it once).
+ *   - When the id is valid, the composed string is: identity header + fixed
+ *     separator + WQ evidence discipline block + fixed separator + role body.
+ *     The header and the role body remain intact and ordered; the block is the
+ *     only insertion.
  *   - Deterministic: identical inputs → identical output (start/resume parity).
  *   - No runtime-name branch, no parser change, no per-config/roles/*.md edit.
  *
@@ -208,9 +248,12 @@ export function composeRoleContractWithIdentity({ roleContract, agentId }) {
     `When explicitly asked for your WAO identity, report this exact agentId. ` +
     `Do not derive it from OS user, runtime, model, cwd, or role display name.`;
 
-  // Fixed separator: the header is its own logical block, then the role body.
+  // Fixed separator: the header is its own logical block, then the WQ evidence
+  // discipline block, then the role body. The block is the SAME fixed constant
+  // for every worker — no runtime-name or worker-seat branch. It rides the
+  // existing roleContract transport; composition adds no gate or decision.
   const SEPARATOR = "\n\n---\n\n";
-  return `${identityHeader}${SEPARATOR}${roleContract}`;
+  return `${identityHeader}${SEPARATOR}${WORKER_EVIDENCE_DISCIPLINE}${SEPARATOR}${roleContract}`;
 }
 
 /**
