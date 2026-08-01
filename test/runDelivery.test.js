@@ -3554,3 +3554,74 @@ test("M12-6 P1-A-2: frozen base is pinned into worktree creation (survives a pos
     await cleanupDir(runDir);
   }
 });
+
+// ===== M12-6 Package 3A: cleanup/quiet-before-verification causal order + setup threading =====
+
+test("M126-CAUSAL: verification starts only after worker cleanup/quiet check completes", async () => {
+  const { repo, baseCommit } = await makeRepo("wao-m126-causal-");
+  const runDir = await mkdtemp(join(tmpdir(), "wao-m126-causal-rd-"));
+  let transcriptPath = null;
+  let verifierObserved = null;
+  // Causal observable: _runCleanup invokes this.handle.abort() before it hands
+  // control to _verifyDeliveryResult (see RunManager._runCleanup → the
+  // _sessionKilled/abort path, awaited before the verifier). The mock opencode
+  // handle exposes abort(); we wrap it so the verifier can assert cleanup ran.
+  // (We do NOT rely on run.stop_verified/run.cleanup_done transcript events:
+  // those are backend-specific — the mock handle lacks session/messages, so the
+  // quiet-check is a no-op and emits nothing. abort() is the universal signal.)
+  let abortCalled = false;
+  try {
+    const mgr = makeManagerWithPackager(
+      runDir, repo, createMockFetch(),
+      (input) => packageDelivery(input),
+      {
+        // The verifier observes, at the moment it is invoked: (a) that worker
+        // cleanup (handle.abort) already ran (proving verification runs AFTER
+        // cleanup), and (b) that the DeliveryRef it receives carries the setup
+        // command contract declared by the Lead.
+        verifyDeliveryFn: async (ref) => {
+          verifierObserved = {
+            abortCalled,
+            setupCommands: ref.verification?.setupCommands ?? null,
+            deliveryCommit: ref.deliveryCommit,
+          };
+          return { delivery: { ...ref, verification: { ...ref.verification, status: "passed", verifiedCommit: ref.deliveryCommit, results: [] } }, outcome: "passed" };
+        },
+      },
+    );
+    const run = await mgr.start("test", {
+      prompt: "hi", isolate: true, runId: "run_m126_causal_01",
+      delivery: {
+        mode: "git_commit_v1",
+        allowedPaths: ["src"],
+        verificationSetupCommands: ["npm ci"],
+        verificationCommands: ["npm test"],
+      },
+    });
+    transcriptPath = run.transcript.filePath;
+    // Wrap the worker handle's abort so cleanup is observable to the verifier.
+    const origAbort = run.handle.abort.bind(run.handle);
+    run.handle.abort = async (...args) => {
+      abortCalled = true;
+      return origAbort(...args);
+    };
+    // Drive a worker change so packaging has a non-empty diff.
+    const { writeFile: wf } = await import("node:fs/promises");
+    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
+
+    const result = await run.waitForCompletion({});
+    assert.equal(result.completed, true);
+
+    assert.ok(verifierObserved, "verifier must have been invoked");
+    assert.equal(verifierObserved.abortCalled, true,
+      "worker cleanup (handle.abort) must complete before verification starts (causal order)");
+    assert.deepEqual(verifierObserved.setupCommands, ["npm ci"],
+      "Lead-declared setup commands must reach the verifier DeliveryRef contract");
+    assert.equal(verifierObserved.deliveryCommit,
+      (await readTranscript(transcriptPath)).find((e) => e.type === "run.delivery_created")?.delivery?.deliveryCommit,
+      "environment facts must bind to the exact deliveryCommit");
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});

@@ -667,6 +667,12 @@ function buildProposedRef({
       status: "pending",
       ...(verification.commands.length > 0 ? { commands: verification.commands } : { commands: [] }),
       ...(verification.unavailableReason ? { unavailableReason: verification.unavailableReason } : {}),
+      // M12-6 (FR-05): Lead-authored setup commands. Append-only optional
+      // extension — persisted ONLY when declared, so refs without setup stay
+      // byte-identical (zero drift). Readers treat absence as "no setup phase".
+      ...(verification.setupCommands && verification.setupCommands.length > 0
+        ? { setupCommands: [...verification.setupCommands] }
+        : {}),
     },
     acceptance: {
       status: "pending",
@@ -756,10 +762,15 @@ function validateInput(input) {
   // allowedPaths
   const allowedPaths = validateAllowedPaths(input.allowedPaths);
 
+  // M12-6 (FR-05): optional Lead-authored setup commands. Validated with the
+  // same trim-aware rule as assertions. Optional — absent/empty → [] (no setup
+  // phase). Allowed alongside either verificationCommands or unavailableReason.
+  const setupCommands = normalizeOptionalVerificationCommands(input.verificationSetupCommands);
+
   // Verification object
   const verification = hasCommands
-    ? { commands: [...input.verificationCommands], unavailableReason: null }
-    : { commands: [], unavailableReason: input.verificationUnavailableReason };
+    ? { commands: [...input.verificationCommands], unavailableReason: null, setupCommands }
+    : { commands: [], unavailableReason: input.verificationUnavailableReason, setupCommands };
 
   return {
     runId: input.runId,
@@ -912,6 +923,38 @@ function assertNoAbsolutePathInVerification(commands) {
   }
 }
 
+/**
+ * M12-6 (FR-05): normalize the optional Lead-authored environment setup command
+ * list. Same trim-aware validation rule as assertion commands, but optional —
+ * absent / null / empty yields [] (zero drift: no setup phase). A non-array or
+ * any non-string / whitespace-only entry fails closed with invalid_verification.
+ *
+ * Setup commands only ever come from Lead delivery input, never from worker
+ * output. Returned as a defensive copy.
+ *
+ * @param {unknown} value — input.verificationSetupCommands
+ * @returns {string[]} normalized command list (possibly empty)
+ * @throws {DeliveryError} deliveryCode="invalid_verification" on a malformed list
+ */
+function normalizeOptionalVerificationCommands(value) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new DeliveryError(
+      "invalid_verification",
+      "verificationSetupCommands must be an array of non-empty command strings",
+    );
+  }
+  for (const c of value) {
+    if (typeof c !== "string" || c.trim().length === 0) {
+      throw new DeliveryError(
+        "invalid_verification",
+        "verificationSetupCommands must contain only non-empty command strings",
+      );
+    }
+  }
+  return [...value];
+}
+
 // ===== Public API: prepareDeliveryRequest =====
 
 /**
@@ -964,6 +1007,9 @@ export function prepareDeliveryRequest(delivery) {
     ? { commands: [...delivery.verificationCommands], unavailableReason: null }
     : { commands: [], unavailableReason: delivery.verificationUnavailableReason };
 
+  // M12-6 (FR-05): optional Lead-authored setup commands, same trim-aware rule.
+  const setupCommands = normalizeOptionalVerificationCommands(delivery.verificationSetupCommands);
+
   // M12-6 (FR-04): reject statically identifiable absolute path literals in
   // verification commands. This is the dispatch preflight SSOT — callers invoke
   // prepareDeliveryRequest before backend spawn, so the check runs before any
@@ -972,8 +1018,21 @@ export function prepareDeliveryRequest(delivery) {
   if (verification.commands.length > 0) {
     assertNoAbsolutePathInVerification(verification.commands);
   }
+  // M12-6 (FR-05): the same portability preflight applies to setup commands.
+  if (setupCommands.length > 0) {
+    assertNoAbsolutePathInVerification(setupCommands);
+  }
 
-  return { mode: "git_commit_v1", allowedPaths, verification };
+  // Setup commands are an append-only optional extension: persist only when
+  // declared, so requests without setup stay byte-identical (zero drift).
+  return {
+    mode: "git_commit_v1",
+    allowedPaths,
+    verification: {
+      ...verification,
+      ...(setupCommands.length > 0 ? { setupCommands } : {}),
+    },
+  };
 }
 
 // ===== Public API: inspectDelivery =====

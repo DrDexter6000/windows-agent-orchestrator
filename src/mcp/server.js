@@ -245,6 +245,10 @@ const DELIVERY_INPUT = z.object({
   allowedPaths: z.array(z.string().min(1).max(512)).min(1).max(64),
   verificationCommands: z.array(z.string().trim().min(1).max(512)).min(1).max(32).optional(),
   verificationUnavailableReason: z.string().trim().min(1).max(512).optional(),
+  // M12-6 (FR-05): optional Lead-authored environment setup commands that run
+  // sequentially BEFORE the assertion commands. Same shape rule as assertions;
+  // may accompany either verificationCommands or verificationUnavailableReason.
+  verificationSetupCommands: z.array(z.string().trim().min(1).max(512)).min(1).max(32).optional(),
 }).strict().refine(
   (d) => !d.verificationCommands || !d.verificationUnavailableReason,
   "cannot provide both verificationCommands and verificationUnavailableReason",
@@ -493,13 +497,15 @@ const DELIVERY_QUERY_ERROR_TEXT = "run_delivery failed";
 const COMMIT_HASH_RE = /^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/;
 const COMMIT_HASH_SCHEMA = z.string().regex(COMMIT_HASH_RE);
 const SAFE_VERIFICATION_STATUSES = new Set(["pending", "passed", "failed", "unavailable"]);
-const SAFE_FAILURE_CODES = new Set(["command_failed", "command_timeout", "artifact_mutated", "artifact_mismatch", "execution_error", "unknown"]);
+const SAFE_FAILURE_CODES = new Set(["command_failed", "command_timeout", "artifact_mutated", "artifact_mismatch", "execution_error", "setup_failed", "setup_timeout", "setup_environment_error", "unknown"]);
 const SAFE_ACCEPTANCE_STATUSES = new Set(["pending", "accepted", "rejected"]);
 const SAFE_DECISION_TYPES = new Set(["run.delivery_accepted", "run.delivery_rejected"]);
 const TERMINAL_STATE_ENUM = z.enum(RUN_STATES);
 const VERIFICATION_STATUS_ENUM = z.enum(["pending", "passed", "failed", "unavailable"]);
 const ACCEPTANCE_STATUS_ENUM = z.enum(["pending", "accepted", "rejected"]);
-const FAILURE_CODE_ENUM = z.enum(["command_failed", "command_timeout", "artifact_mutated", "artifact_mismatch", "execution_error", "unknown"]);
+// M12-6 (FR-05/FR-06): setup-phase failures are a closed, actionable set,
+// distinct from assertion codes — they never masquerade as command_failed.
+const FAILURE_CODE_ENUM = z.enum(["command_failed", "command_timeout", "artifact_mutated", "artifact_mismatch", "execution_error", "setup_failed", "setup_timeout", "setup_environment_error", "unknown"]);
 const DECISION_TYPE_ENUM = z.enum(["run.delivery_accepted", "run.delivery_rejected"]);
 
 // M11-12B: Windows exit codes are nonnegative 32-bit values (NOT POSIX 0..255).
@@ -734,9 +740,19 @@ export function projectVerificationFailureSummary(ref, verificationStatus, proje
     ? rawFailedIdx
     : null;
 
+  // M12-6 (FR-05/FR-06): phase-aware counts. The `code` already distinguishes
+  // setup (setup_failed/setup_timeout/setup_environment_error) from assertion
+  // failures, so the counts and per-command fields must describe the FAILED
+  // phase: when failedPhase === "setup", read the setup command/result arrays;
+  // otherwise read the assertion arrays (existing behavior, zero drift for
+  // pre-M12-6 refs that carry no failedPhase).
+  const isSetupPhase = v.failedPhase === "setup";
+  const declaredList = isSetupPhase ? v.setupCommands : v.commands;
+  const resultsList = isSetupPhase ? v.setupResults : v.results;
+
   // Counts: nonnegative integer array lengths or null (non-array → null).
-  const declaredCommandCount = Array.isArray(v.commands) ? v.commands.length : null;
-  const executedCommandCount = Array.isArray(v.results) ? v.results.length : null;
+  const declaredCommandCount = Array.isArray(declaredList) ? declaredList.length : null;
+  const executedCommandCount = Array.isArray(resultsList) ? resultsList.length : null;
 
   // Per-command result fields (finding B): require a plain result object whose
   // index is an integer exactly equal to failedCommandIndex. On any mismatch,
@@ -745,8 +761,8 @@ export function projectVerificationFailureSummary(ref, verificationStatus, proje
   let timedOut = null;
   let stdoutBytes = null;
   let stderrBytes = null;
-  if (failedCommandIndex !== null && Array.isArray(v.results)) {
-    const r = v.results[failedCommandIndex];
+  if (failedCommandIndex !== null && Array.isArray(resultsList)) {
+    const r = resultsList[failedCommandIndex];
     if (r && typeof r === "object" && Number.isInteger(r.index) && r.index === failedCommandIndex) {
       // Finding A: nonnegative 32-bit only.
       exitCode = Number.isInteger(r.exitCode) && r.exitCode >= 0 && r.exitCode <= VERIFICATION_MAX_EXIT_CODE

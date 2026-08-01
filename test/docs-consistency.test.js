@@ -1558,3 +1558,26 @@ test("M12-0-07: ADR-0018 精确路径 + accepted/date + docs-only + partial supe
   assert.ok(/0018.*wao-mechanical-containment-no-auto-supervision|0018 \| .*mechanical containment/i.test(map),
     "decisions map 必须列出 0018 且与文件名一致");
 });
+
+// M12-6 Package 3A (FR-05/FR-06): docs guard for the verifier environment contract.
+// Contract #8 + RED coverage "文档守卫说明依赖不继承". The exact-artifact verifier
+// runs in an isolated, per-attempt temp env. Ignored/untracked deps from the
+// worker (or selected) worktree — node_modules, build artifacts, etc. — must NOT
+// auto-appear there; Lead declares verificationSetupCommands to prepare them.
+// This guard pins the doc invariant so it cannot silently drift.
+test("M12-6 docs: exact verifier env does NOT inherit worker node_modules — Lead setup commands required", () => {
+  const usage = read("docs/usage.md");
+  const arch = read("docs/02-architecture.md");
+  // (1) The verifier runs in an isolated per-attempt temp env, not the worktree.
+  assert.ok(/isolat.*verifier|verifier.*isolat|独立.*临时|per-attempt.*temp|每次.*attempt.*temp/i.test(usage),
+    "usage 必须说明 exact verifier 运行在独立的 per-attempt 临时环境");
+  // (2) Ignored/untracked deps (node_modules) are NOT inherited into that env.
+  assert.ok(/node_modules|ignored.*dependenc|untracked.*dependenc|依赖.*不继承|不继承.*依赖/i.test(usage),
+    "usage 必须说明 node_modules 等 ignored 依赖不会自动进入 exact verifier 环境");
+  // (3) Lead declares verificationSetupCommands to make such deps available.
+  assert.ok(/verificationSetupCommands/.test(usage),
+    "usage 必须记录 verificationSetupCommands 作为 Lead 声明的环境准备入口");
+  // (4) Architecture carries the same invariant (single-source consistency).
+  assert.ok(/node_modules|ignored.*dependenc|依赖.*不继承|不继承.*依赖/i.test(arch),
+    "architecture 必须说明 ignored 依赖不进入 verifier 环境");
+});

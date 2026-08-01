@@ -92,6 +92,10 @@ async function loadDeliverySpec(options) {
     ...(validated.verification.commands.length > 0
       ? { verificationCommands: validated.verification.commands }
       : { verificationUnavailableReason: validated.verification.unavailableReason }),
+    // M12-6 (FR-05): forward Lead-authored setup commands when declared.
+    ...(validated.verification.setupCommands?.length > 0
+      ? { verificationSetupCommands: validated.verification.setupCommands }
+      : {}),
   };
 }
 

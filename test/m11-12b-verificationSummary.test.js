@@ -652,3 +652,47 @@ test("M11-12B-P7: full run_delivery output for a failed delivery has the exact e
   assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys,
     `wire field set mismatch; got ${Object.keys(parsed).sort()}`);
 });
+
+// M12-6 (FR-05/FR-06): setup-phase failure must project the SETUP command/result
+// arrays — NOT the assertion arrays. Contract #2 requires setup and assertion to
+// be separately verified, persisted, AND projected. A setup failure leaves the
+// assertion `results` empty (assertions never ran); a non-phase-aware projection
+// would read `v.results`/`v.commands` and report declaredCommandCount from the
+// assertions and null per-command facts. This test would have been RED before the
+// phase-aware projection change (it would see declaredCommandCount=1 from the
+// single assertion command and exitCode=null from the empty assertion results).
+test("M12-6: setup-phase failure projects setup counts + per-command facts, not assertion arrays", () => {
+  const setupFailedRef = failedRef({
+    verification: {
+      status: "failed",
+      commands: ["npm test"],                 // assertions declared but NOT reached
+      setupCommands: ["npm ci", "node setup.js"], // the failed phase's commands
+      verifiedCommit: "d".repeat(40),
+      timeoutMs: 300000,
+      setupResults: [
+        { index: 0, command: "npm ci", exitCode: 0, signal: null, timedOut: false, durationMs: 100, stdoutBytes: 50, stderrBytes: 0 },
+        { index: 1, command: "node setup.js", exitCode: 5, signal: null, timedOut: false, durationMs: 50, stdoutBytes: 10, stderrBytes: 200 },
+      ],
+      results: [],                             // assertions never ran
+      failureCode: "setup_failed",
+      failedPhase: "setup",
+      failedCommandIndex: 1,
+      environment: { tempPerAttempt: true },
+    },
+  });
+
+  const summary = projectVerificationFailureSummary(setupFailedRef, "failed", "setup_failed");
+
+  // Phase-aware counts: describe the FAILED phase (setup), not the assertions.
+  assert.equal(summary.code, "setup_failed");
+  assert.equal(summary.failedCommandIndex, 1);
+  assert.equal(summary.declaredCommandCount, 2, "declared count = setup commands (failed phase)");
+  assert.equal(summary.executedCommandCount, 2, "executed count = setup results");
+  // Per-command facts come from setupResults[1] (the failed setup command).
+  assert.equal(summary.exitCode, 5);
+  assert.equal(summary.timedOut, false);
+  assert.equal(summary.stdoutBytes, 10);
+  assert.equal(summary.stderrBytes, 200);
+  // The exact eight-key shape is unchanged.
+  assert.deepEqual([...Object.keys(summary)].sort(), [...EXACT_SUMMARY_KEYS].sort());
+});

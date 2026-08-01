@@ -178,6 +178,10 @@ export async function dispatchRun({
     ...(validatedDelivery.verification.commands.length > 0
       ? { verificationCommands: validatedDelivery.verification.commands }
       : { verificationUnavailableReason: validatedDelivery.verification.unavailableReason }),
+    // M12-6 (FR-05): forward Lead-authored setup commands when declared.
+    ...(validatedDelivery.verification.setupCommands?.length > 0
+      ? { verificationSetupCommands: validatedDelivery.verification.setupCommands }
+      : {}),
   } : null;
 
   const resolvedRunDir = resolve(runDir);

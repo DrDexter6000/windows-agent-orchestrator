@@ -117,7 +117,7 @@ function _deliveryWasRequested(events, runId) {
  * @param {object[]} events
  * @param {string} runId
  * @param {string} authorizedWorkspaceRoot
- * @returns {{worktreePath, baseCommit, originalAllowedPaths, verificationCommands?: string[], verificationUnavailableReason?: string}}
+ * @returns {{worktreePath, baseCommit, originalAllowedPaths, verificationCommands?: string[], verificationUnavailableReason?: string, verificationSetupCommands?: string[]}}
  */
 function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, hasCreated) {
   // Workspace ownership — the run must belong to the authorized workspace.
@@ -177,6 +177,12 @@ function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, ha
   if (!hasCommands && !hasReason) {
     throw new Error("runDeliveryRepackage: run.started has no original verification declaration");
   }
+  // M12-6 (FR-05): reuse the ORIGINAL setup commands too, so a repackaged
+  // DeliveryRef preserves the Lead-declared environment contract (otherwise
+  // setup would be silently dropped on disallowed_path/backend_failed recovery).
+  const hasSetup = Array.isArray(delivery.verificationSetupCommands)
+    && delivery.verificationSetupCommands.length > 0
+    && delivery.verificationSetupCommands.every((c) => typeof c === "string" && c.trim().length > 0);
   // The persisted worktreePath must be a real Git worktree top-level (defense).
   // Before the first backend-failure recovery, HEAD must still be the exact
   // original base. After delivery_created exists, idempotent re-entry is bound
@@ -198,6 +204,7 @@ function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, ha
     recoveryKind,
     ...(hasCommands ? { verificationCommands: [...delivery.verificationCommands] } : {}),
     ...(hasReason ? { verificationUnavailableReason: delivery.verificationUnavailableReason } : {}),
+    ...(hasSetup ? { verificationSetupCommands: [...delivery.verificationSetupCommands] } : {}),
   };
 }
 
@@ -340,6 +347,9 @@ export async function runDeliveryRepackage({
       ...(original.verificationCommands ? { verificationCommands: original.verificationCommands } : {}),
       ...(original.verificationUnavailableReason
         ? { verificationUnavailableReason: original.verificationUnavailableReason }
+        : {}),
+      ...(original.verificationSetupCommands
+        ? { verificationSetupCommands: original.verificationSetupCommands }
         : {}),
     };
     const resolved = await _resolve(deliveryCtx);

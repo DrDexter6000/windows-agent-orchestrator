@@ -1,4 +1,7 @@
 import { spawn, execFileSync } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { assertCommittedDeliveryRef, DeliveryError } from "./delivery.js";
 
 /**
@@ -37,12 +40,20 @@ const DEFAULT_TIMEOUT_MS = 300_000;
  * Uses `spawn(command, {shell:true})` — the one intentional shell boundary.
  * stdout/stderr are piped and drained (byte-counted only, not stored).
  *
+ * The subprocess runs with `opts.env` (a full environment) so the caller can
+ * inject a unique per-attempt TMP/TEMP/TMPDIR. When omitted, process.env is
+ * used (zero drift for existing callers).
+ *
  * @param {string} command — shell command string (Lead-authored)
  * @param {string} cwd — worktree path (exact delivery commit worktree)
- * @param {number} timeoutMs — positive integer timeout
- * @returns {Promise<{command, exitCode, signal, timedOut, durationMs, stdoutBytes, stderrBytes}>}
+ * @param {{timeoutMs?: number, env?: object}|number} [opts] — options, or a
+ *   legacy positive-integer timeout (back-compat for direct numeric callers)
+ * @returns {Promise<{command, exitCode, signal, timedOut, durationMs, stdoutBytes, stderrBytes, launchError?}>}
  */
-export async function runVerificationCommand(command, cwd, timeoutMs = DEFAULT_TIMEOUT_MS) {
+export async function runVerificationCommand(command, cwd, opts = DEFAULT_TIMEOUT_MS) {
+  // Back-compat: a bare number is the legacy timeout form.
+  const timeoutMs = typeof opts === "number" ? opts : (opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const env = (opts && typeof opts === "object" && !Array.isArray(opts)) ? (opts.env ?? process.env) : process.env;
   return new Promise((resolve) => {
     const startTime = Date.now();
     let stdoutBytes = 0;
@@ -52,6 +63,7 @@ export async function runVerificationCommand(command, cwd, timeoutMs = DEFAULT_T
 
     const child = spawn(command, {
       cwd,
+      env,
       shell: true,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -127,6 +139,71 @@ function _validateTimeout(timeoutMs) {
   }
 }
 
+// ===== M12-6 (FR-05/FR-06): per-attempt temp isolation =====
+
+/**
+ * Build a unique per-attempt temp dir under the OS temp root and a full
+ * subprocess environment pointing TMP/TEMP (Windows) and TMPDIR (POSIX) at it.
+ * Each verification command (setup OR assertion) is its own attempt — two
+ * attempts never share a temp dir, and none reuses a worker temp.
+ *
+ * On mkdtemp failure (rare OS/tooling error) the environment degrades honestly:
+ * the OS temp root is still injected so subprocesses resolve a TMP/TEMP, but
+ * `isolated` is false so the persisted environment fact records the degradation
+ * rather than lying. This never aborts a run on a transient temp-dir failure.
+ *
+ * @returns {Promise<{env: object, tempDir: string|null, isolated: boolean}>}
+ */
+async function _prepareAttemptEnv() {
+  try {
+    const dir = await mkdtemp(join(tmpdir(), "wao-verify-"));
+    return { env: { ...process.env, TMP: dir, TEMP: dir, TMPDIR: dir }, tempDir: dir, isolated: true };
+  } catch {
+    const fallback = tmpdir();
+    return {
+      env: { ...process.env, TMP: fallback, TEMP: fallback, TMPDIR: fallback },
+      tempDir: null,
+      isolated: false,
+    };
+  }
+}
+
+/** Best-effort cleanup of a per-attempt temp dir. Never throws. */
+async function _cleanupAttemptEnv(attempt) {
+  if (!attempt || !attempt.tempDir) return;
+  try {
+    await rm(attempt.tempDir, { recursive: true, force: true });
+  } catch {
+    // Best-effort — the OS temp dir is reaped independently.
+  }
+}
+
+/**
+ * Record a single command outcome. Carries ONLY safe, byte-counted facts — no
+ * stdout/stderr body, no extra command echo beyond the Lead-authored command
+ * string itself (contract: no command/path/stderr leakage).
+ */
+function _recordResult(index, command, result) {
+  return {
+    index,
+    command,
+    exitCode: result.exitCode,
+    signal: result.signal,
+    timedOut: result.timedOut,
+    durationMs: result.durationMs,
+    stdoutBytes: result.stdoutBytes,
+    stderrBytes: result.stderrBytes,
+  };
+}
+
+/**
+ * Safe environment facts persisted on the DeliveryRef. Boolean scalars only —
+ * the per-attempt temp dir PATH is never persisted (no absolute path leakage).
+ */
+function _envFacts(isolationFullyHeld) {
+  return { tempPerAttempt: Boolean(isolationFullyHeld) };
+}
+
 // ===== Public API: verifyDelivery =====
 
 /**
@@ -159,12 +236,18 @@ export async function verifyDelivery(deliveryRef, opts = {}) {
   // Validate timeout before any command execution
   _validateTimeout(timeoutMs);
 
-  // Determine verification commands from the deliveryRef
+  // Determine verification commands from the deliveryRef. assertion commands
+  // (`commands`) remain the verification authority; `setupCommands` are the
+  // optional Lead-authored environment preparation that runs BEFORE assertions.
   const commands = deliveryRef?.verification?.commands ?? [];
+  const setupCommands = deliveryRef?.verification?.setupCommands ?? [];
   const unavailableReason = deliveryRef?.verification?.unavailableReason;
 
-  // Unavailable: no commands, reason present.
-  // CTO RED #1 fix: must prove exact committed DeliveryRef BEFORE returning unavailable.
+  // No assertion commands → unavailable / fail-closed. Setup does NOT run when
+  // there are no assertions to prepare for (contract #3: setup precedes
+  // assertions; M12-6 #19 — declared setup with no assertions is a no-op).
+  // CTO RED #1 fix: must prove exact committed DeliveryRef BEFORE returning
+  // unavailable.
   if (commands.length === 0) {
     if (typeof unavailableReason === "string" && unavailableReason.trim().length > 0) {
       // Exact proof before declaring unavailable — a forged/dirty ref must fail here.
@@ -187,100 +270,60 @@ export async function verifyDelivery(deliveryRef, opts = {}) {
   // Pre-execution exact proof
   assertCommittedDeliveryRef(deliveryRef);
 
+  // Per-attempt temp isolation is tracked across all commands (setup + assertion).
+  const isolation = { fullyHeld: true };
+
+  // ===== SETUP PHASE (contract #3): sequential, before assertions =====
+  // Setup failure is a closed, actionable, safe set (setup_failed /
+  // setup_timeout / setup_environment_error) — NEVER disguised as assertion
+  // command_failed. Each setup step is followed by an exact delivery-commit /
+  // tracked-artifact proof; tracked-artifact or lockfile drift is
+  // artifact_mutated and assertions do NOT run.
+  const setupResults = [];
+  for (let i = 0; i < setupCommands.length; i++) {
+    const r = await _runOneCommand(
+      runCommand, setupCommands[i], deliveryRef.worktreePath, timeoutMs, deliveryRef, isolation, SETUP_CODES,
+    );
+    setupResults.push(_recordResult(i, setupCommands[i], r.result));
+
+    if (r.outcome === "mutated") {
+      return _failDelivery(deliveryRef, {
+        setupCommands, commands, setupResults, results: [],
+        failureCode: "artifact_mutated", failedPhase: "setup", failedCommandIndex: i,
+        verifiedCommit: deliveryRef.deliveryCommit, timeoutMs, isolation,
+      });
+    }
+    if (r.outcome === "failed") {
+      return _failDelivery(deliveryRef, {
+        setupCommands, commands, setupResults, results: [],
+        failureCode: r.failureCode, failedPhase: "setup", failedCommandIndex: i,
+        verifiedCommit: deliveryRef.deliveryCommit, timeoutMs, isolation,
+      });
+    }
+  }
+
+  // ===== ASSERTION PHASE (existing authority; zero drift on codes) =====
   const results = [];
   for (let i = 0; i < commands.length; i++) {
-    const result = await runCommand(commands[i], deliveryRef.worktreePath, timeoutMs);
-    results.push({
-      index: i,
-      command: commands[i],
-      exitCode: result.exitCode,
-      signal: result.signal,
-      timedOut: result.timedOut,
-      durationMs: result.durationMs,
-      stdoutBytes: result.stdoutBytes,
-      stderrBytes: result.stderrBytes,
-    });
+    const r = await _runOneCommand(
+      runCommand, commands[i], deliveryRef.worktreePath, timeoutMs, deliveryRef, isolation, ASSERT_CODES,
+    );
+    results.push(_recordResult(i, commands[i], r.result));
 
-    // CTO RED #2 fix: re-run exact proof after EVERY command outcome
-    // (exit 0, non-zero, timeout, launch-error). If the proof fails, the
-    // artifact was mutated — artifact_mutated takes priority over the
-    // command's own failure code.
-    let mutated = false;
-    try {
-      assertCommittedDeliveryRef(deliveryRef);
-    } catch {
-      mutated = true;
+    if (r.outcome === "mutated") {
+      return _failDelivery(deliveryRef, {
+        setupCommands, commands, setupResults, results,
+        failureCode: "artifact_mutated", failedPhase: "assertion", failedCommandIndex: i,
+        verifiedCommit: deliveryRef.deliveryCommit, timeoutMs, isolation,
+      });
     }
-
-    if (mutated) {
-      return {
-        delivery: _buildUpdatedRef(deliveryRef, {
-          status: "failed",
-          commands,
-          verifiedCommit: deliveryRef.deliveryCommit,
-          timeoutMs,
-          results,
-          failureCode: "artifact_mutated",
-          failedCommandIndex: i,
-        }),
-        outcome: "failed",
-        failureCode: "artifact_mutated",
-      };
+    if (r.outcome === "failed") {
+      return _failDelivery(deliveryRef, {
+        setupCommands, commands, setupResults, results,
+        failureCode: r.failureCode, failedPhase: "assertion", failedCommandIndex: i,
+        verifiedCommit: deliveryRef.deliveryCommit, timeoutMs, isolation,
+      });
     }
-
-    // Artifact intact — classify the command's own outcome.
-    // Launch error → execution_error
-    if (result.launchError) {
-      return {
-        delivery: _buildUpdatedRef(deliveryRef, {
-          status: "failed",
-          commands,
-          verifiedCommit: deliveryRef.deliveryCommit,
-          timeoutMs,
-          results,
-          failureCode: "execution_error",
-          failedCommandIndex: i,
-        }),
-        outcome: "failed",
-        failureCode: "execution_error",
-      };
-    }
-
-    // Timeout → command_timeout
-    if (result.timedOut) {
-      return {
-        delivery: _buildUpdatedRef(deliveryRef, {
-          status: "failed",
-          commands,
-          verifiedCommit: deliveryRef.deliveryCommit,
-          timeoutMs,
-          results,
-          failureCode: "command_timeout",
-          failedCommandIndex: i,
-        }),
-        outcome: "failed",
-        failureCode: "command_timeout",
-      };
-    }
-
-    // Non-zero exit → command_failed
-    if (result.exitCode !== 0) {
-      return {
-        delivery: _buildUpdatedRef(deliveryRef, {
-          status: "failed",
-          commands,
-          verifiedCommit: deliveryRef.deliveryCommit,
-          timeoutMs,
-          results,
-          failureCode: "command_failed",
-          failedCommandIndex: i,
-        }),
-        outcome: "failed",
-        failureCode: "command_failed",
-      };
-    }
-
-    // Exit 0 + proof passed → continue to next command
   }
 
   // All commands passed + final proof still holds (checked after last command)
@@ -288,12 +331,89 @@ export async function verifyDelivery(deliveryRef, opts = {}) {
     delivery: _buildUpdatedRef(deliveryRef, {
       status: "passed",
       commands,
+      // setup contract is an append-only extension: persist ONLY when declared,
+      // so deliveries without setup stay byte-identical (zero drift).
+      ...(setupCommands.length > 0 ? { setupCommands, setupResults } : {}),
       verifiedCommit: deliveryRef.deliveryCommit,
       timeoutMs,
       results,
+      environment: _envFacts(isolation.fullyHeld),
     }),
     outcome: "passed",
   };
+}
+
+// ===== M12-6 (FR-05/FR-06): per-command runner + phase failure codes =====
+
+// Closed-set failure code per phase. artifact_mutated is phase-agnostic (it
+// takes priority over any command code) and is tagged with failedPhase by the
+// caller. These are the ONLY setup-vs-assertion-distinct codes; setup failures
+// never surface as assertion command_failed (contract #3).
+const SETUP_CODES = { launch: "setup_environment_error", timeout: "setup_timeout", nonzero: "setup_failed" };
+const ASSERT_CODES = { launch: "execution_error", timeout: "command_timeout", nonzero: "command_failed" };
+
+/**
+ * Run one verification command (setup or assertion) with per-attempt temp
+ * isolation, then re-prove the exact delivery commit / tracked artifacts.
+ *
+ * @param {Function} runCommand — command runner (real or fake)
+ * @param {string} command — Lead-authored command string
+ * @param {string} cwd — exact delivery commit worktree
+ * @param {number} timeoutMs
+ * @param {object} deliveryRef — for the post-command exact proof
+ * @param {{fullyHeld: boolean}} isolation — shared flag flipped false on degradation
+ * @param {{launch:string,timeout:string,nonzero:string}} codes — phase failure codes
+ * @returns {Promise<{outcome:"ok"|"mutated"|"failed", failureCode?:string, result:object}>}
+ */
+async function _runOneCommand(runCommand, command, cwd, timeoutMs, deliveryRef, isolation, codes) {
+  const attempt = await _prepareAttemptEnv();
+  if (!attempt.isolated) isolation.fullyHeld = false;
+  let result;
+  try {
+    result = await runCommand(command, cwd, { timeoutMs, env: attempt.env });
+  } finally {
+    await _cleanupAttemptEnv(attempt);
+  }
+
+  // CTO RED #2 fix: re-run exact proof after EVERY command outcome (exit 0,
+  // non-zero, timeout, launch-error). If the proof fails, the artifact was
+  // mutated — artifact_mutated takes priority over the command's own code.
+  let mutated = false;
+  try {
+    assertCommittedDeliveryRef(deliveryRef);
+  } catch {
+    mutated = true;
+  }
+  if (mutated) return { outcome: "mutated", result };
+
+  // Artifact intact — classify the command's own outcome into the phase codes.
+  if (result.launchError) return { outcome: "failed", failureCode: codes.launch, result };
+  if (result.timedOut) return { outcome: "failed", failureCode: codes.timeout, result };
+  if (result.exitCode !== 0) return { outcome: "failed", failureCode: codes.nonzero, result };
+  return { outcome: "ok", result };
+}
+
+/**
+ * Build a failed-verification result. Persists the setup/assertion command
+ * contract, the phase that failed, and safe environment facts — all bound to
+ * the exact deliveryCommit. Never mutates the input ref.
+ */
+function _failDelivery(originalRef, f) {
+  const hasSetup = Array.isArray(f.setupCommands) && f.setupCommands.length > 0;
+  const delivery = _buildUpdatedRef(originalRef, {
+    status: "failed",
+    commands: f.commands,
+    // setup contract persisted ONLY when declared (zero drift for no-setup runs).
+    ...(hasSetup ? { setupCommands: f.setupCommands, setupResults: f.setupResults } : {}),
+    results: f.results,
+    verifiedCommit: f.verifiedCommit,
+    timeoutMs: f.timeoutMs,
+    failureCode: f.failureCode,
+    failedPhase: f.failedPhase,
+    failedCommandIndex: f.failedCommandIndex,
+    environment: _envFacts(f.isolation.fullyHeld),
+  });
+  return { delivery, outcome: "failed", failureCode: f.failureCode };
 }
 
 // ===== Helper: build updated DeliveryRef =====

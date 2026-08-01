@@ -433,10 +433,14 @@ export class RunManager {
           ? deliveryPrepared.verification.commands : undefined,
         verificationUnavailableReason: deliveryPrepared.verification.unavailableReason
           ?? undefined,
+        // M12-6 (FR-05): Lead-authored environment setup commands (optional).
+        verificationSetupCommands: deliveryPrepared.verification.setupCommands?.length > 0
+          ? deliveryPrepared.verification.setupCommands : undefined,
       };
       // Clean undefined keys
       if (!deliveryContext.verificationCommands) delete deliveryContext.verificationCommands;
       if (!deliveryContext.verificationUnavailableReason) delete deliveryContext.verificationUnavailableReason;
+      if (!deliveryContext.verificationSetupCommands) delete deliveryContext.verificationSetupCommands;
     }
 
     // worktree 路径（若有）作为 backend 的 cwd
@@ -461,6 +465,12 @@ export class RunManager {
           ...(deliveryContext.verificationCommands
             ? { verificationCommands: deliveryContext.verificationCommands }
             : { verificationUnavailableReason: deliveryContext.verificationUnavailableReason }),
+          // M12-6 (FR-05): persist Lead-authored setup commands so resume and the
+          // exact verifier restore the same environment contract. Absent when
+          // none declared (event shape unchanged for ordinary deliveries).
+          ...(deliveryContext.verificationSetupCommands
+            ? { verificationSetupCommands: deliveryContext.verificationSetupCommands }
+            : {}),
           // TD-103 Phase 3A: persist resolved scorecardRules inside delivery
           // metadata so resume restores the exact same gate. Ordinary runs
           // (no delivery) keep their original event shape unchanged.
@@ -656,6 +666,9 @@ export class RunManager {
           ...(deliveryContext.verificationCommands
             ? { verificationCommands: deliveryContext.verificationCommands }
             : { verificationUnavailableReason: deliveryContext.verificationUnavailableReason }),
+          ...(deliveryContext.verificationSetupCommands
+            ? { verificationSetupCommands: deliveryContext.verificationSetupCommands }
+            : {}),
         });
         proveLinkedWorktree(deliveryContext);
       } catch {
@@ -934,6 +947,8 @@ function _reconstructDeliveryContext(runStarted, runId) {
   const hasCommands = Array.isArray(d.verificationCommands) && d.verificationCommands.length > 0;
   const hasReason = typeof d.verificationUnavailableReason === "string" && d.verificationUnavailableReason.length > 0;
   if (!hasCommands && !hasReason) return null;
+  // M12-6 (FR-05): reconstruct optional setup commands if persisted.
+  const hasSetup = Array.isArray(d.verificationSetupCommands) && d.verificationSetupCommands.length > 0;
   return {
     mode: d.mode,
     runId,
@@ -944,6 +959,7 @@ function _reconstructDeliveryContext(runStarted, runId) {
     ...(hasCommands
       ? { verificationCommands: [...d.verificationCommands] }
       : { verificationUnavailableReason: d.verificationUnavailableReason }),
+    ...(hasSetup ? { verificationSetupCommands: [...d.verificationSetupCommands] } : {}),
   };
 }
 

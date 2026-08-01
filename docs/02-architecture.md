@@ -278,7 +278,7 @@ interface TranscriptEvent {
 | **`run.delivery_created`** | TD-103 Phase 3A：delivery 打包成功——`delivery` 含完整 DeliveryRef（deliveryCommit/baseCommit/branch/changedFiles/verification/acceptance/integration） | Phase 3A |
 | **`run.delivery_failed`** | TD-103 Phase 3A：delivery 打包失败——`deliveryCode`（empty_diff/disallowed_path/commit_integrity/delivery_error 等）+ `message`（脱敏摘要） | Phase 3A |
 | **`run.delivery_verification_passed`** | TD-103 Phase 3B：delivery 验证通过——`delivery.verification.status:"passed"`，含 verifiedCommit/results | Phase 3B |
-| **`run.delivery_verification_failed`** | TD-103 Phase 3B：delivery 验证失败——`delivery.verification.status:"failed"`，含 failureCode/command_failed/command_timeout/artifact_mutated/execution_error | Phase 3B |
+| **`run.delivery_verification_failed`** | TD-103 Phase 3B：delivery 验证失败——`delivery.verification.status:"failed"`，含 failureCode/command_failed/command_timeout/artifact_mutated/execution_error（M12-6 setup 阶段另含 setup_failed/setup_timeout/setup_environment_error，并带 failedPhase/setupResults） | Phase 3B |
 | **`run.delivery_verification_unavailable`** | TD-103 Phase 3B：无验证命令——`delivery.verification.status:"unavailable"`，含 unavailableReason | Phase 3B |
 | `messages.collected` | collect 命令 | ✅ 现有 |
 | **`scorecard.checked`** | scorecard 审计一次 | `[M]` |
@@ -525,6 +525,11 @@ packageDelivery(input) -> committed DeliveryRef  // re-inspect + stage + one com
     "status": "pending",           // pending | passed | failed
     "commands": [],                // or "unavailableReason" when no verification
     "unavailableReason": "..."     // (optional) present only when commands is empty
+    // M12-6 (FR-05/FR-06) optional, append-only — present only when declared:
+    //   "setupCommands": [...]                      Lead-authored env prep, runs before commands
+    //   "setupResults": [...]                       per-setup-command safe facts (failed/passed paths)
+    //   "environment": { "tempPerAttempt": true }   safe per-attempt temp-isolation facts (no paths)
+    //   "failedPhase": "setup" | "assertion"        present on failed (which phase failed)
   },
   "acceptance": {
     "status": "pending",           // pending | accepted | rejected
@@ -669,6 +674,7 @@ packageDelivery success → transitionState(completed)
 2. **每命令后 re-proof**：每个 attempted command 结束后（exit 0、非零、timeout、launch error），都先重新执行完整 proof，再分类命令结果。
 3. **artifact_mutated 优先**：若命令同时失败并造成 artifact mutation，`artifact_mutated` 优先于 `command_failed`/`command_timeout`/`execution_error`。
 4. **不 reset/clean**：verification 不修改被命令改动的 worktree 状态（proof 是只读的）。
+5. **M12-6 setup 阶段与环境合同**（FR-05/FR-06）：Lead 可选声明 `verificationSetupCommands`，在 assertion 命令（`verificationCommands`）之前**顺序**执行；setup 与 assertion 分开验证、持久化与投影，setup 失败投影为闭集 `setup_failed` / `setup_timeout` / `setup_environment_error`（**不**伪装成 assertion `command_failed`），不泄漏命令体/路径/stderr。每条 setup 与每条 assertion 之后都 re-proof，tracked artifact 或 lockfile 漂移 = `artifact_mutated`（setup 漂移时 assertion 不执行；`failedPhase` 标记 setup/assertion）。每次 attempt（setup 或 assertion 命令）创建唯一 temp 目录并注入 `TMP` / `TEMP` / `TMPDIR`，两个 attempt 不复用、不复用 worker temp，仅持久化安全布尔事实（`environment.tempPerAttempt`，不含绝对路径）。**依赖不继承**：worker / selected worktree 的 `node_modules` 等 ignored / untracked 依赖**不会**自动进入 exact verifier 环境——需要 Lead 声明 `verificationSetupCommands` 来准备。命令只来自 Lead 输入，不从 worker 输出推断。
 
 **Transcript 原子可信语义**（`Run._verifyDeliveryResult`）：
 
