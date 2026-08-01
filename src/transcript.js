@@ -50,6 +50,24 @@ const DELIVERY_REVERIFICATION_OUTCOME_TYPES = new Set([
 ]);
 const DELIVERY_REVERIFICATION_OUTCOMES = new Set(["passed", "failed", "unavailable"]);
 
+// M12-6 Package 3B1: the frozen closed set of verification failure codes a
+// durable reverify OUTCOME ref may carry — the verification contract's setup/
+// assertion phase codes plus artifact_mutated (priority content-integrity
+// code). The SINGLE allowlist, shared by the transcript CAS projection + append
+// gate and the application service's safe-result echo — there is no second
+// allowlist. Defined + frozen here (not the application service) so the
+// transcript CAS primitive can validate without an import cycle, same as
+// REVERIFY_REASONS.
+export const REVERIFY_FAILURE_CODES = Object.freeze([
+  "command_failed",
+  "command_timeout",
+  "execution_error",
+  "setup_failed",
+  "setup_timeout",
+  "setup_environment_error",
+  "artifact_mutated",
+]);
+
 // M12-6 Package 3B: the frozen closed set of Lead-declared reverify reasons. A
 // reverify is an EXCEPTIONAL Lead-declared recovery — never a retry, never
 // command replacement, never automatic acceptance. The reason records WHY the
@@ -234,16 +252,23 @@ function _reverificationOutcomeFromType(type) {
 }
 
 // M12-6 Package 3B1: is this durable reverify REQUEST event envelope-bound to
-// runId, identity-bound to createdRef, and shape-valid (closed-set reason,
-// bounded setupCommands)? Any failure — a foreign envelope runId, a mismatched
-// embedded identity (runId/commit/base/artifact), an unknown reason, or
-// blank/non-string/too-many/too-long setup commands — marks the event as a
+// runId, identity-bound to createdRef, top-level-commit-bound, and shape-valid
+// (closed-set reason, bounded setupCommands)? Any failure — a foreign envelope
+// runId, a mismatched embedded identity (runId/commit/base/artifact), a
+// missing/noncanonical/different top-level deliveryCommit, an unknown reason,
+// or blank/non-string/too-many/too-long setup commands — marks the event as a
 // durable CONFLICT: the chain must project "malformed" and the CAS primitives
 // must refuse to reuse or extend it.
 function _isValidReverifyRequestedEvent(event, runId, createdRef) {
   if (!event || typeof event !== "object") return false;
   if (event.runId !== runId) return false;
   if (!_sameDeliveryIdentity(event.delivery, createdRef, runId)) return false;
+  // M12-6 Package 3B1: the event's top-level deliveryCommit must be canonical
+  // AND equal to the embedded immutable deliveryCommit (hence the created
+  // commit). A missing/noncanonical/different value is a durable conflict —
+  // the CAS must never reuse the request for verification.
+  if (!isCanonicalCommitId(event.deliveryCommit)) return false;
+  if (event.deliveryCommit !== event.delivery.deliveryCommit) return false;
   if (!REVERIFY_REASONS.includes(event.reason)) return false;
   // setupCommands is optional (a reverify may re-run the original assertions
   // with no new setup); when present it must be a bounded list of non-empty
@@ -259,15 +284,54 @@ function _isValidReverifyRequestedEvent(event, runId, createdRef) {
 }
 
 // M12-6 Package 3B1: is this durable reverify OUTCOME event envelope-bound to
-// runId and identity-bound to createdRef? Outcome events carry no Lead-declared
-// shape of their own; envelope + identity binding is the whole conflict test.
+// runId, identity-bound to createdRef, AND top-level-commit-bound (canonical
+// top-level deliveryCommit equal to the embedded immutable commit)?
+// Verification-contract validation is a separate step
+// (_isValidReverifyOutcomeEvent); this helper is the envelope/identity/binding
+// half of the conflict test.
 function _isBoundReverifyOutcomeEvent(event, runId, createdRef) {
   return Boolean(
     event
       && typeof event === "object"
       && event.runId === runId
-      && _sameDeliveryIdentity(event.delivery, createdRef, runId),
+      && _sameDeliveryIdentity(event.delivery, createdRef, runId)
+      && isCanonicalCommitId(event.deliveryCommit)
+      && event.deliveryCommit === event.delivery.deliveryCommit,
   );
+}
+
+// M12-6 Package 3B1: does this bound reverify OUTCOME event satisfy the
+// verification event contract — the same contract the original verification
+// outcome events must satisfy (canonical commit equality + status derived from
+// the closed-set type), plus the durable reverify shape:
+//   - the event type agrees EXACTLY with the embedded delivery.verification.status;
+//   - verifiedCommit is canonical AND equal to the immutable deliveryCommit
+//     (the embedded commit — already bound to the created commit above);
+//   - a failed ref carries a CLOSED-SET failureCode (REVERIFY_FAILURE_CODES —
+//     the single shared allowlist, never duplicated);
+//   - an unavailable ref carries a non-empty unavailableReason.
+// Any violation is a durable CONFLICT: the chain projects "malformed", the CAS
+// never reuses it and never appends onto it, and the decision path never sees
+// an effective pass from it.
+function _isValidReverifyOutcomeEvent(event, runId, createdRef) {
+  if (!_isBoundReverifyOutcomeEvent(event, runId, createdRef)) return false;
+  const status = _reverificationOutcomeFromType(event.type);
+  const verification = event.delivery?.verification;
+  if (!status || !verification || typeof verification !== "object") return false;
+  if (verification.status !== status) return false;
+  if (!isCanonicalCommitId(verification.verifiedCommit)) return false;
+  if (verification.verifiedCommit !== event.delivery.deliveryCommit) return false;
+  if (status === "failed") {
+    if (!REVERIFY_FAILURE_CODES.includes(verification.failureCode)) return false;
+  } else if (status === "unavailable") {
+    if (
+      typeof verification.unavailableReason !== "string"
+      || verification.unavailableReason.trim().length === 0
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -278,18 +342,23 @@ function _isBoundReverifyOutcomeEvent(event, runId, createdRef) {
  * durable reverify event counts — never pre-filtered by envelope runId first.
  * An event is part of the chain only when it is envelope-bound (runId === runId)
  * AND identity-bound (embedded DeliveryRef matches createdRef: runId/baseCommit/
- * deliveryCommit) AND — for a requested event — shape-valid (closed-set reason,
- * bounded setupCommands). A reverify event in a FOREIGN envelope, or bound but
- * identity/shape-mismatched, is a durable conflict → "malformed" (visible,
- * never filtered away, never echoed as a clean chain).
+ * deliveryCommit) AND top-level-commit-bound (canonical top-level deliveryCommit
+ * equal to the embedded immutable commit) AND — for a requested event —
+ * shape-valid (closed-set reason, bounded setupCommands), and — for an outcome
+ * event — verification-contract-valid (type agrees EXACTLY with the embedded
+ * delivery.verification.status; verifiedCommit canonical + equal to the
+ * immutable deliveryCommit; closed-set failure/unavailable shape). A reverify
+ * event in a FOREIGN envelope, or bound but identity/shape/contract-mismatched,
+ * is a durable conflict → "malformed" (visible, never filtered away, never
+ * echoed as a clean chain).
  *
  *   none      — no valid requested, no valid outcome.
  *   pending   — exactly one valid requested, zero valid outcomes (crash-resumable).
  *   complete  — exactly one valid requested + exactly one valid outcome.
  *   malformed — any other combination (duplicate requested/outcome, orphan
- *               outcome, a foreign-envelope event, or an identity/shape-mismatched
- *               event). effectiveStatus is null → the decision gate and the
- *               effective-pass projection stay at the ORIGINAL status.
+ *               outcome, a foreign-envelope event, or an identity/shape/contract-
+ *               mismatched event). effectiveStatus is null → the decision gate
+ *               and the effective-pass projection stay at the ORIGINAL status.
  *
  * Pure transcript projection: never reads Git, never verifies, never decides.
  * The application layer adds workspace + eligibility proof before exposing a
@@ -316,7 +385,7 @@ export function projectReverifyChain(events, runId, createdRef) {
   const requested = events.filter((e) => e && e.type === "run.delivery_reverification_requested");
   const outcomes = events.filter((e) => e && DELIVERY_REVERIFICATION_OUTCOME_TYPES.has(e.type));
   const reqBound = requested.filter((e) => _isValidReverifyRequestedEvent(e, runId, createdRef));
-  const outBound = outcomes.filter((e) => _isBoundReverifyOutcomeEvent(e, runId, createdRef));
+  const outBound = outcomes.filter((e) => _isValidReverifyOutcomeEvent(e, runId, createdRef));
   // Any reverify event that is not fully bound + shape-valid is a durable
   // conflict → malformed. The conflict is VISIBLE through the status, never
   // filtered away by an envelope pre-filter.
@@ -964,7 +1033,7 @@ export class JsonlTranscript {
       // winner; none (orphan outcome) / malformed → throw.
       const chain = projectReverifyChain(events, this.context.runId, delivery);
       if (chain.status === "malformed") {
-        throw new Error("tryAppendReverifyOutcome: reverify chain is malformed (foreign envelope, identity, or shape conflict)");
+        throw new Error("tryAppendReverifyOutcome: reverify chain is malformed (foreign envelope, identity, top-level commit, or shape conflict)");
       }
       if (chain.status === "none") {
         throw new Error("tryAppendReverifyOutcome: expected exactly one delivery_reverification_requested event");
@@ -982,6 +1051,20 @@ export class JsonlTranscript {
         : outcome === "failed"
           ? "run.delivery_reverification_failed"
           : "run.delivery_reverification_unavailable";
+
+      // M12-6 Package 3B1: the CAS must never write a self-poisoning outcome.
+      // The caller-supplied ref must satisfy the SAME verification event
+      // contract the projection enforces (status agrees exactly with the
+      // declared outcome; verifiedCommit canonical + equal to the immutable
+      // deliveryCommit; closed-set failure/unavailable shape) — otherwise the
+      // appended event would make the durable chain malformed on the next read.
+      if (!_isValidReverifyOutcomeEvent(
+        { type, runId: this.context.runId, delivery, deliveryCommit: delivery.deliveryCommit },
+        this.context.runId,
+        delivery,
+      )) {
+        throw new Error("tryAppendReverifyOutcome: outcome ref violates the verification event contract (status must agree with the outcome; verifiedCommit canonical + equal to the deliveryCommit; closed-set failure/unavailable shape)");
+      }
 
       const baseSeq = Math.max(this.seq, findLastEventSeq(events));
       const ts = new Date().toISOString();

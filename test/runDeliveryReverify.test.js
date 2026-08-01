@@ -708,14 +708,21 @@ test("P3B-14: when a concurrent caller records the final outcome, the loser repo
       // (5s append-lock timeout) if runDeliveryReverify held the transcript
       // lock during verification. Succeeding here proves contract #5: the
       // verifier executes outside the lock.
+      // The fake's ref satisfies the verification event contract (status agrees
+      // with the declared outcome + verifiedCommit pinned), exactly as a real
+      // verifyDelivery result would.
+      const contractRef = {
+        ...ref,
+        verification: { ...ref.verification, status: "passed", verifiedCommit: ref.deliveryCommit, results: [] },
+      };
       const t = new JsonlTranscript(filePath, {
         runId: RUN_ID,
         agentId: AGENT_ID,
         initialSeq: readEvents(ctx.runDir).length,
       });
-      const res = await t.tryAppendReverifyOutcome({ delivery: ref, outcome: "passed" });
+      const res = await t.tryAppendReverifyOutcome({ delivery: contractRef, outcome: "passed" });
       competitorRecorded = res.recorded;
-      return { delivery: ref, outcome: "passed", failureCode: undefined };
+      return { delivery: contractRef, outcome: "passed", failureCode: undefined };
     };
 
     const result = await runDeliveryReverify({
@@ -869,6 +876,231 @@ test("P3B-15: malformed durable reverify chains (unknown reason / blank setup / 
       );
       assert.equal(count(), 0, "verifier never executed on an identity-mismatched outcome");
       assert.equal(reverifyCount(ctx.runDir), 1, "nothing appended");
+    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+  }
+});
+
+// =====================================================================
+// Group 13 (M12-6 Package 3B1 correction): outcome verification-event
+// contract + top-level deliveryCommit fail closed BEFORE the verifier
+// =====================================================================
+
+test("P3B-16: outcome events violating the verification event contract (passed-with-failed-ref, failed-with-passed-ref, unavailable-with-passed-ref, mismatched/missing verifiedCommit) fail closed BEFORE the verifier runs and append nothing", async () => {
+  const makeCountingVerifier = () => {
+    let calls = 0;
+    const v = (ref, opts) => {
+      calls += 1;
+      return realVerifierWith(makeFixingRunCommand())(ref, opts);
+    };
+    return { count: () => calls, v };
+  };
+  const seedAfter = (ctx, extraEvents) => {
+    const all = readEvents(ctx.runDir);
+    all.push(...extraEvents.map((e, i) => ({
+      ts: "2026-08-01T00:01:00.000Z",
+      seq: all.length + i + 1,
+      runId: RUN_ID,
+      agentId: AGENT_ID,
+      ...e,
+    })));
+    writeFileSync(join(ctx.runDir, `${RUN_ID}.jsonl`), all.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+  };
+  const reverifyCount = (runDir) => readEvents(runDir).filter((e) => e.type.startsWith("run.delivery_reverification")).length;
+  const base = (ctx) => ({
+    runId: RUN_ID,
+    runDir: ctx.runDir,
+    authorizedWorkspaceRoot: ctx.repo,
+    reason: "tooling_invalid",
+    setupCommands: ["setup-prepare"],
+  });
+  const validRequest = (ctx) => ({ type: "run.delivery_reverification_requested", delivery: ctx.deliveryRef, deliveryCommit: ctx.deliveryCommit, reason: "tooling_invalid" });
+  const refWith = (ctx, verification) => ({ ...ctx.deliveryRef, verification });
+
+  // 1. PASSED event whose embedded ref says FAILED (passed-event-with-failed-ref).
+  {
+    const ctx = await setupReverifyScenario();
+    try {
+      const { count, v } = makeCountingVerifier();
+      seedAfter(ctx, [
+        validRequest(ctx),
+        { type: "run.delivery_reverification_passed", delivery: refWith(ctx, { status: "failed", failureCode: "command_failed", commands: ["assert-needs-setup"], verifiedCommit: ctx.deliveryCommit, results: [] }), deliveryCommit: ctx.deliveryCommit },
+      ]);
+      await assert.rejects(
+        () => runDeliveryReverify({ ...base(ctx), verifyDeliveryFn: v }),
+        /malformed|status|verification|contract|chain/i,
+        "passed-event-with-failed-ref must fail closed",
+      );
+      assert.equal(count(), 0, "verifier never executed on a passed-event-with-failed-ref");
+      assert.equal(reverifyCount(ctx.runDir), 2, "nothing appended to the malformed chain");
+    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+  }
+  // 2. FAILED event whose embedded ref says PASSED (failed-event-with-passed-ref).
+  {
+    const ctx = await setupReverifyScenario();
+    try {
+      const { count, v } = makeCountingVerifier();
+      seedAfter(ctx, [
+        validRequest(ctx),
+        { type: "run.delivery_reverification_failed", delivery: refWith(ctx, { status: "passed", commands: ["assert-needs-setup"], verifiedCommit: ctx.deliveryCommit, results: [] }), deliveryCommit: ctx.deliveryCommit },
+      ]);
+      await assert.rejects(
+        () => runDeliveryReverify({ ...base(ctx), verifyDeliveryFn: v }),
+        /malformed|status|verification|contract|chain/i,
+        "failed-event-with-passed-ref must fail closed",
+      );
+      assert.equal(count(), 0, "verifier never executed on a failed-event-with-passed-ref");
+      assert.equal(reverifyCount(ctx.runDir), 2, "nothing appended to the malformed chain");
+    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+  }
+  // 3. UNAVAILABLE event whose embedded ref says PASSED (unavailable-event-with-passed-ref).
+  {
+    const ctx = await setupReverifyScenario();
+    try {
+      const { count, v } = makeCountingVerifier();
+      seedAfter(ctx, [
+        validRequest(ctx),
+        { type: "run.delivery_reverification_unavailable", delivery: refWith(ctx, { status: "passed", commands: ["assert-needs-setup"], verifiedCommit: ctx.deliveryCommit, results: [] }), deliveryCommit: ctx.deliveryCommit },
+      ]);
+      await assert.rejects(
+        () => runDeliveryReverify({ ...base(ctx), verifyDeliveryFn: v }),
+        /malformed|status|verification|contract|chain/i,
+        "unavailable-event-with-passed-ref must fail closed",
+      );
+      assert.equal(count(), 0, "verifier never executed on an unavailable-event-with-passed-ref");
+      assert.equal(reverifyCount(ctx.runDir), 2, "nothing appended to the malformed chain");
+    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+  }
+  // 4. PASSED event with a MISMATCHED canonical verifiedCommit (≠ deliveryCommit).
+  {
+    const ctx = await setupReverifyScenario();
+    try {
+      const { count, v } = makeCountingVerifier();
+      seedAfter(ctx, [
+        validRequest(ctx),
+        { type: "run.delivery_reverification_passed", delivery: refWith(ctx, { status: "passed", commands: ["assert-needs-setup"], verifiedCommit: "e".repeat(40), results: [] }), deliveryCommit: ctx.deliveryCommit },
+      ]);
+      await assert.rejects(
+        () => runDeliveryReverify({ ...base(ctx), verifyDeliveryFn: v }),
+        /malformed|verifiedCommit|commit|verification|contract|chain/i,
+        "mismatched verifiedCommit must fail closed",
+      );
+      assert.equal(count(), 0, "verifier never executed on a mismatched verifiedCommit");
+      assert.equal(reverifyCount(ctx.runDir), 2, "nothing appended to the malformed chain");
+    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+  }
+  // 5. PASSED event with a MISSING verifiedCommit.
+  {
+    const ctx = await setupReverifyScenario();
+    try {
+      const { count, v } = makeCountingVerifier();
+      seedAfter(ctx, [
+        validRequest(ctx),
+        { type: "run.delivery_reverification_passed", delivery: refWith(ctx, { status: "passed", commands: ["assert-needs-setup"], results: [] }), deliveryCommit: ctx.deliveryCommit },
+      ]);
+      await assert.rejects(
+        () => runDeliveryReverify({ ...base(ctx), verifyDeliveryFn: v }),
+        /malformed|verifiedCommit|commit|verification|contract|chain/i,
+        "missing verifiedCommit must fail closed",
+      );
+      assert.equal(count(), 0, "verifier never executed on a missing verifiedCommit");
+      assert.equal(reverifyCount(ctx.runDir), 2, "nothing appended to the malformed chain");
+    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+  }
+});
+
+test("P3B-17: missing/noncanonical/different top-level deliveryCommit on requested or outcome events fails closed BEFORE the verifier; decision never sees an effective pass", async () => {
+  const makeCountingVerifier = () => {
+    let calls = 0;
+    const v = (ref, opts) => {
+      calls += 1;
+      return realVerifierWith(makeFixingRunCommand())(ref, opts);
+    };
+    return { count: () => calls, v };
+  };
+  const seedAfter = (ctx, extraEvents) => {
+    const all = readEvents(ctx.runDir);
+    all.push(...extraEvents.map((e, i) => ({
+      ts: "2026-08-01T00:01:00.000Z",
+      seq: all.length + i + 1,
+      runId: RUN_ID,
+      agentId: AGENT_ID,
+      ...e,
+    })));
+    writeFileSync(join(ctx.runDir, `${RUN_ID}.jsonl`), all.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf8");
+  };
+  const reverifyCount = (runDir) => readEvents(runDir).filter((e) => e.type.startsWith("run.delivery_reverification")).length;
+  const base = (ctx) => ({
+    runId: RUN_ID,
+    runDir: ctx.runDir,
+    authorizedWorkspaceRoot: ctx.repo,
+    reason: "tooling_invalid",
+    setupCommands: ["setup-prepare"],
+  });
+  const passedRef = (ctx) => ({ ...ctx.deliveryRef, verification: { status: "passed", commands: ["assert-needs-setup"], verifiedCommit: ctx.deliveryCommit, results: [] } });
+
+  // Each top-level-commit violation independently: verifier must never run,
+  // nothing appended.
+  const violations = [
+    ["requested missing top-level", (ctx) => [{ type: "run.delivery_reverification_requested", delivery: ctx.deliveryRef, reason: "tooling_invalid" }], /malformed|commit|chain/i],
+    ["requested noncanonical top-level", (ctx) => [{ type: "run.delivery_reverification_requested", delivery: ctx.deliveryRef, deliveryCommit: "not-a-commit", reason: "tooling_invalid" }], /malformed|commit|chain/i],
+    ["requested different top-level", (ctx) => [{ type: "run.delivery_reverification_requested", delivery: ctx.deliveryRef, deliveryCommit: "e".repeat(40), reason: "tooling_invalid" }], /malformed|commit|chain/i],
+    ["outcome missing top-level", (ctx) => [{ type: "run.delivery_reverification_requested", delivery: ctx.deliveryRef, deliveryCommit: ctx.deliveryCommit, reason: "tooling_invalid" }, { type: "run.delivery_reverification_passed", delivery: passedRef(ctx) }], /malformed|commit|chain/i],
+    ["outcome noncanonical top-level", (ctx) => [{ type: "run.delivery_reverification_requested", delivery: ctx.deliveryRef, deliveryCommit: ctx.deliveryCommit, reason: "tooling_invalid" }, { type: "run.delivery_reverification_passed", delivery: passedRef(ctx), deliveryCommit: "not-a-commit" }], /malformed|commit|chain/i],
+    ["outcome different top-level", (ctx) => [{ type: "run.delivery_reverification_requested", delivery: ctx.deliveryRef, deliveryCommit: ctx.deliveryCommit, reason: "tooling_invalid" }, { type: "run.delivery_reverification_passed", delivery: passedRef(ctx), deliveryCommit: "e".repeat(40) }], /malformed|commit|chain/i],
+  ];
+  for (const [label, seed, re] of violations) {
+    const ctx = await setupReverifyScenario();
+    try {
+      const { count, v } = makeCountingVerifier();
+      seedAfter(ctx, seed(ctx));
+      await assert.rejects(
+        () => runDeliveryReverify({ ...base(ctx), verifyDeliveryFn: v }),
+        re,
+        `${label}: must fail closed`,
+      );
+      assert.equal(count(), 0, `verifier never executed on ${label}`);
+      const expected = seed(ctx).length;
+      assert.equal(reverifyCount(ctx.runDir), expected, `${label}: nothing appended`);
+    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+  }
+
+  // DECISION path: a full-looking chain whose ONLY deviation is the outcome's
+  // top-level deliveryCommit must not yield an effective pass — the Lead accept
+  // stays fail-closed (original failed stands).
+  {
+    const ctx = await setupReverifyScenario();
+    try {
+      seedAfter(ctx, [
+        { type: "run.delivery_reverification_requested", delivery: ctx.deliveryRef, deliveryCommit: ctx.deliveryCommit, reason: "tooling_invalid" },
+        { type: "run.delivery_reverification_passed", delivery: passedRef(ctx), deliveryCommit: "e".repeat(40) },
+      ]);
+      const facts = validateDeliveryFacts(readEvents(ctx.runDir));
+      assert.equal(facts.reverifyStatus, "malformed", "top-level mismatch projects malformed");
+      assert.equal(facts.effectiveVerificationStatus, "failed", "effective stays at the original failure");
+      await assert.rejects(
+        () => decideRunDelivery({ runId: RUN_ID, runDir: ctx.runDir, decision: "accepted", reason: "no" }),
+        /must be passed/i,
+        "accept must fail closed on a top-level-mismatched chain",
+      );
+    } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
+  }
+  // DECISION path: a passed event whose embedded ref says FAILED must also
+  // keep acceptance fail-closed.
+  {
+    const ctx = await setupReverifyScenario();
+    try {
+      seedAfter(ctx, [
+        { type: "run.delivery_reverification_requested", delivery: ctx.deliveryRef, deliveryCommit: ctx.deliveryCommit, reason: "tooling_invalid" },
+        { type: "run.delivery_reverification_passed", delivery: { ...ctx.deliveryRef, verification: { status: "failed", failureCode: "command_failed", commands: ["assert-needs-setup"], verifiedCommit: ctx.deliveryCommit, results: [] } }, deliveryCommit: ctx.deliveryCommit },
+      ]);
+      const facts = validateDeliveryFacts(readEvents(ctx.runDir));
+      assert.equal(facts.reverifyStatus, "malformed");
+      assert.equal(facts.effectiveVerificationStatus, "failed");
+      await assert.rejects(
+        () => decideRunDelivery({ runId: RUN_ID, runDir: ctx.runDir, decision: "accepted", reason: "no" }),
+        /must be passed/i,
+        "accept must fail closed on a type/status-disagreeing chain",
+      );
     } finally { await cleanupDir(ctx.repo); await cleanupDir(ctx.runDir); }
   }
 });

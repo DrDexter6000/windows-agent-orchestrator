@@ -563,12 +563,20 @@ function revOutcome(outcome, overrides = {}) {
     : outcome === "failed"
       ? "run.delivery_reverification_failed"
       : "run.delivery_reverification_unavailable";
+  // The verification-event contract shape: status agrees EXACTLY with the type,
+  // verifiedCommit is canonical + equal to the immutable deliveryCommit, and a
+  // failed ref carries a closed-set failureCode while an unavailable ref
+  // carries a non-empty unavailableReason. Tests that break one aspect override
+  // it independently.
+  const verification = outcome === "passed"
+    ? { status: "passed", commands: ["assert"], verifiedCommit: REV_COMMIT, results: [] }
+    : outcome === "failed"
+      ? { status: "failed", commands: ["assert"], failureCode: "command_failed", verifiedCommit: REV_COMMIT, results: [] }
+      : { status: "unavailable", commands: [], unavailableReason: "no_assertions", verifiedCommit: REV_COMMIT, results: [] };
   return {
     type,
     runId: REV_RUN,
-    delivery: revRef({
-      verification: { status: outcome, commands: ["assert"], verifiedCommit: REV_COMMIT, results: [] },
-    }),
+    delivery: revRef({ verification }),
     deliveryCommit: REV_COMMIT,
     ...overrides,
   };
@@ -862,6 +870,267 @@ test("M12-6-3B1-C5: CAS regression — identity-mismatched persisted reverify ev
       /malformed|another delivery|identity|chain/i,
     );
     assert.equal((await readFile(filePath, "utf8")).trim().split("\n").length, 1, "no second request appended");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ============================================================
+// M12-6 Package 3B1 (correction): top-level deliveryCommit +
+// outcome verification-event contract.
+//
+// The reverify audit chain must fail closed on TWO additional durable
+// conflicts, independently for requested and EVERY outcome type:
+//   - TOP-LEVEL COMMIT BINDING: the event's top-level `deliveryCommit` must be
+//     canonical AND equal to the embedded DeliveryRef.deliveryCommit (hence the
+//     created commit). Missing / noncanonical / different → malformed. The CAS
+//     must never reuse such a request (yielding its recorded setup for
+//     verification) and must never extend such a chain, and the decision path
+//     must never see an effective pass from it.
+//   - OUTCOME VERIFICATION-EVENT CONTRACT: an outcome event's type must agree
+//     EXACTLY with its embedded delivery.verification.status (closed-set
+//     agreement), its verifiedCommit must be canonical + equal to the immutable
+//     deliveryCommit, and its failure/unavailable shape must be closed-set
+//     (failed → closed-set failureCode; unavailable → non-empty
+//     unavailableReason) — the same verification event contract, with a single
+//     shared allowlist (no duplication).
+// ============================================================
+
+test("M12-6-3B1-P7: a missing/noncanonical/different top-level deliveryCommit is malformed for the requested event AND each outcome type (never complete, never effective pass)", () => {
+  const badTop = [
+    ["missing", undefined],
+    ["noncanonical", "not-a-commit"],
+    ["different canonical", "e".repeat(40)],
+  ];
+  for (const [label, top] of badTop) {
+    // Requested event with the bad top-level commit + a fully valid passed
+    // outcome: the request must not bind, so the chain is malformed.
+    const withReq = projectReverifyChain(
+      [revRequested({ deliveryCommit: top }), revOutcome("passed")],
+      REV_RUN,
+      revRef(),
+    );
+    assert.equal(withReq.status, "malformed", `${label} top-level on requested: malformed`);
+    assert.equal(withReq.effectiveStatus, null, `${label} requested: no effective pass`);
+    // Outcome event with the bad top-level commit + a valid request: for EACH
+    // outcome type independently.
+    for (const outcome of ["passed", "failed", "unavailable"]) {
+      const withOut = projectReverifyChain(
+        [revRequested(), revOutcome(outcome, { deliveryCommit: top })],
+        REV_RUN,
+        revRef(),
+      );
+      assert.equal(withOut.status, "malformed", `${label} top-level on ${outcome} outcome: malformed`);
+      assert.equal(withOut.effectiveStatus, null, `${label} ${outcome}: no effective pass`);
+    }
+  }
+});
+
+test("M12-6-3B1-P8: outcome type must agree exactly with the embedded delivery.verification.status — passed-with-failed-ref, failed-with-passed-ref, unavailable-with-passed-ref each malformed independently", () => {
+  const mismatches = [
+    ["passed event with failed ref", "passed", { status: "failed", commands: ["assert"], failureCode: "command_failed", verifiedCommit: REV_COMMIT, results: [] }],
+    ["failed event with passed ref", "failed", { status: "passed", commands: ["assert"], verifiedCommit: REV_COMMIT, results: [] }],
+    ["unavailable event with passed ref", "unavailable", { status: "passed", commands: ["assert"], verifiedCommit: REV_COMMIT, results: [] }],
+  ];
+  for (const [label, outcome, verification] of mismatches) {
+    const p = projectReverifyChain(
+      [revRequested(), revOutcome(outcome, { delivery: revRef({ verification }) })],
+      REV_RUN,
+      revRef(),
+    );
+    assert.equal(p.status, "malformed", label);
+    assert.equal(p.effectiveStatus, null, `${label}: no effective status may project`);
+    // The mismatched outcome ALONE (no request) must also be a conflict, never
+    // a clean "none".
+    const alone = projectReverifyChain(
+      [revOutcome(outcome, { delivery: revRef({ verification }) })],
+      REV_RUN,
+      revRef(),
+    );
+    assert.equal(alone.status, "malformed", `${label}: alone`);
+  }
+});
+
+test("M12-6-3B1-P8b: a missing/noncanonical/mismatched verifiedCommit is malformed for each outcome type (never complete, never effective pass)", () => {
+  const badVC = [
+    ["missing", undefined],
+    ["noncanonical", "HEAD"],
+    ["mismatched canonical", "e".repeat(40)],
+  ];
+  for (const [label, vc] of badVC) {
+    for (const outcome of ["passed", "failed", "unavailable"]) {
+      const verification = { status: outcome, commands: ["assert"], verifiedCommit: vc, results: [] };
+      if (outcome === "failed") verification.failureCode = "command_failed";
+      if (outcome === "unavailable") verification.unavailableReason = "no_assertions";
+      const p = projectReverifyChain(
+        [revRequested(), revOutcome(outcome, { delivery: revRef({ verification }) })],
+        REV_RUN,
+        revRef(),
+      );
+      assert.equal(p.status, "malformed", `${label} verifiedCommit on ${outcome} outcome`);
+      assert.equal(p.effectiveStatus, null, `${label} ${outcome}: no effective pass`);
+    }
+  }
+});
+
+test("M12-6-3B1-P8c: failed outcomes need a closed-set failureCode; unavailable outcomes need a non-empty unavailableReason (same verification event contract, one shared allowlist)", () => {
+  // failed with an unknown failureCode
+  const unknownCode = projectReverifyChain(
+    [revRequested(), revOutcome("failed", { delivery: revRef({ verification: { status: "failed", commands: ["assert"], failureCode: "not_a_real_code", verifiedCommit: REV_COMMIT, results: [] } }) })],
+    REV_RUN,
+    revRef(),
+  );
+  assert.equal(unknownCode.status, "malformed", "failed with unknown failureCode");
+  assert.equal(unknownCode.effectiveStatus, null);
+  // failed with a MISSING failureCode
+  const missingCode = projectReverifyChain(
+    [revRequested(), revOutcome("failed", { delivery: revRef({ verification: { status: "failed", commands: ["assert"], verifiedCommit: REV_COMMIT, results: [] } }) })],
+    REV_RUN,
+    revRef(),
+  );
+  assert.equal(missingCode.status, "malformed", "failed with missing failureCode");
+  assert.equal(missingCode.effectiveStatus, null);
+  // unavailable with a MISSING unavailableReason
+  const missingReason = projectReverifyChain(
+    [revRequested(), revOutcome("unavailable", { delivery: revRef({ verification: { status: "unavailable", commands: [], verifiedCommit: REV_COMMIT, results: [] } }) })],
+    REV_RUN,
+    revRef(),
+  );
+  assert.equal(missingReason.status, "malformed", "unavailable with missing unavailableReason");
+  assert.equal(missingReason.effectiveStatus, null);
+  // unavailable with a BLANK unavailableReason
+  const blankReason = projectReverifyChain(
+    [revRequested(), revOutcome("unavailable", { delivery: revRef({ verification: { status: "unavailable", commands: [], unavailableReason: "   ", verifiedCommit: REV_COMMIT, results: [] } }) })],
+    REV_RUN,
+    revRef(),
+  );
+  assert.equal(blankReason.status, "malformed", "unavailable with blank unavailableReason");
+  assert.equal(blankReason.effectiveStatus, null);
+  // Regression: contract-valid failed / unavailable chains stay complete.
+  const failedOk = projectReverifyChain([revRequested(), revOutcome("failed")], REV_RUN, revRef());
+  assert.equal(failedOk.status, "complete");
+  assert.equal(failedOk.effectiveStatus, "failed");
+  const unavailableOk = projectReverifyChain([revRequested(), revOutcome("unavailable")], REV_RUN, revRef());
+  assert.equal(unavailableOk.status, "complete");
+  assert.equal(unavailableOk.effectiveStatus, "unavailable");
+});
+
+test("M12-6-3B1-P9: decision acceptance never sees an effective pass for top-level commit mismatch, type/status disagreement, or verifiedCommit mismatch", () => {
+  const originalFailed = {
+    type: "run.delivery_verification_failed",
+    runId: REV_RUN,
+    delivery: revRef({
+      verification: { status: "failed", failureCode: "command_failed", commands: ["assert"], verifiedCommit: REV_COMMIT, results: [] },
+    }),
+    deliveryCommit: REV_COMMIT,
+  };
+  const cases = [
+    ["top-level outcome commit differs", [revRequested(), revOutcome("passed", { deliveryCommit: "e".repeat(40) })]],
+    ["passed event with failed ref", [revRequested(), revOutcome("passed", { delivery: revRef({ verification: { status: "failed", failureCode: "command_failed", commands: ["assert"], verifiedCommit: REV_COMMIT, results: [] } }) })]],
+    ["verifiedCommit differs", [revRequested(), revOutcome("passed", { delivery: revRef({ verification: { status: "passed", commands: ["assert"], verifiedCommit: "e".repeat(40), results: [] } }) })]],
+  ];
+  for (const [label, chain] of cases) {
+    const facts = validateDeliveryFacts([
+      { type: "run.delivery_created", runId: REV_RUN, delivery: revRef() },
+      originalFailed,
+      ...chain,
+    ]);
+    assert.equal(facts.reverifyStatus, "malformed", label);
+    assert.equal(
+      facts.effectiveVerificationStatus,
+      "failed",
+      `${label}: the effective status must stay at the original failure — acceptance must fail closed`,
+    );
+  }
+});
+
+test("M12-6-3B1-C6: CAS refuses to reuse or extend a chain whose top-level deliveryCommit is missing/noncanonical/different (requested + outcome)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "m12p3b1-c6-"));
+  try {
+    const filePath = join(dir, `${REV_RUN}.jsonl`);
+    // A full-looking chain: valid request + passed outcome, but BOTH top-level
+    // deliveryCommit values differ from the embedded immutable commit. The
+    // embedded identity targets this run — the CAS must neither yield the
+    // garbage request nor extend the garbage chain.
+    await writeFile(filePath, [
+      JSON.stringify({
+        ts: "2026-08-01T00:00:00.000Z", seq: 1, runId: REV_RUN, agentId: REV_AGENT,
+        type: "run.delivery_reverification_requested", delivery: revRef(),
+        deliveryCommit: "e".repeat(40), reason: "tooling_invalid",
+      }),
+      JSON.stringify({
+        ts: "2026-08-01T00:00:00.000Z", seq: 2, runId: REV_RUN, agentId: REV_AGENT,
+        type: "run.delivery_reverification_passed", delivery: revRef({
+          verification: { status: "passed", commands: ["assert"], verifiedCommit: REV_COMMIT, results: [] },
+        }),
+        deliveryCommit: "e".repeat(40),
+      }),
+    ].join("\n") + "\n", "utf8");
+    const t = new JsonlTranscript(filePath, { runId: REV_RUN, agentId: REV_AGENT });
+    await assert.rejects(
+      () => t.tryAppendReverifyRequested({ delivery: revRef(), reason: "tooling_invalid" }),
+      /malformed|commit|chain/i,
+      "must not yield/reuse the request with the mismatched top-level commit",
+    );
+    await assert.rejects(
+      () => t.tryAppendReverifyOutcome({ delivery: revRef(), outcome: "passed" }),
+      /malformed|commit|chain/i,
+      "must not extend the chain with the mismatched top-level commit",
+    );
+    assert.equal((await readFile(filePath, "utf8")).trim().split("\n").length, 2, "nothing appended to the malformed chain");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("M12-6-3B1-C7: tryAppendReverifyOutcome never writes a self-poisoning outcome (type/status disagreement, missing verifiedCommit, unknown failureCode)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "m12p3b1-c7-"));
+  try {
+    const filePath = join(dir, `${REV_RUN}.jsonl`);
+    // A valid persisted request — the chain is pending, so the CAS would append.
+    await writeFile(filePath, JSON.stringify({
+      ts: "2026-08-01T00:00:00.000Z", seq: 1, runId: REV_RUN, agentId: REV_AGENT,
+      type: "run.delivery_reverification_requested", delivery: revRef(),
+      deliveryCommit: REV_COMMIT, reason: "tooling_invalid",
+    }) + "\n", "utf8");
+
+    // 1. Declared outcome "passed" but the ref's embedded status is "failed".
+    {
+      const t = new JsonlTranscript(filePath, { runId: REV_RUN, agentId: REV_AGENT });
+      await assert.rejects(
+        () => t.tryAppendReverifyOutcome({
+          delivery: revRef({ verification: { status: "failed", failureCode: "command_failed", commands: ["assert"], verifiedCommit: REV_COMMIT, results: [] } }),
+          outcome: "passed",
+        }),
+        /status|agree|verification|contract|outcome/i,
+        "must refuse a passed outcome whose ref says failed",
+      );
+      assert.equal((await readFile(filePath, "utf8")).trim().split("\n").length, 1, "no self-poisoning event appended");
+    }
+    // 2. Declared outcome "passed" with a MISSING verifiedCommit.
+    {
+      const t = new JsonlTranscript(filePath, { runId: REV_RUN, agentId: REV_AGENT });
+      await assert.rejects(
+        () => t.tryAppendReverifyOutcome({
+          delivery: revRef({ verification: { status: "passed", commands: ["assert"], results: [] } }),
+          outcome: "passed",
+        }),
+        /verifiedCommit|commit|verification|contract/i,
+      );
+      assert.equal((await readFile(filePath, "utf8")).trim().split("\n").length, 1, "no event without verifiedCommit appended");
+    }
+    // 3. Declared outcome "failed" with an UNKNOWN failureCode.
+    {
+      const t = new JsonlTranscript(filePath, { runId: REV_RUN, agentId: REV_AGENT });
+      await assert.rejects(
+        () => t.tryAppendReverifyOutcome({
+          delivery: revRef({ verification: { status: "failed", failureCode: "not_a_real_code", commands: ["assert"], verifiedCommit: REV_COMMIT, results: [] } }),
+          outcome: "failed",
+        }),
+        /failureCode|closed|contract|failure/i,
+      );
+      assert.equal((await readFile(filePath, "utf8")).trim().split("\n").length, 1, "no event with an unknown failureCode appended");
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

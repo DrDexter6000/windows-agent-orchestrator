@@ -47,6 +47,7 @@ import {
   validateDeliveryFacts,
   projectReverifyChain,
   REVERIFY_REASONS,
+  REVERIFY_FAILURE_CODES,
   REVERIFY_SETUP_COMMANDS_LIMIT,
   REVERIFY_SETUP_COMMAND_MAX_LENGTH,
   REVERIFY_TIMEOUT_MS_MIN,
@@ -87,19 +88,12 @@ const ELIGIBLE_REVERIFY_FAILURE_CODES = new Set([
   "setup_environment_error",
 ]);
 
-// Closed set of failure codes a reverify may surface in its safe result. Every
-// code verifyDelivery can produce for a failed reverify, plus artifact_mutated
-// (priority content-integrity code). artifact_mismatch is a thrown pre-check,
-// never a reverify outcome. Unknown values are dropped (never echoed).
-const SAFE_REVERIFY_FAILURE_CODES = new Set([
-  "command_failed",
-  "command_timeout",
-  "execution_error",
-  "setup_failed",
-  "setup_timeout",
-  "setup_environment_error",
-  "artifact_mutated",
-]);
+// The safe-result echo reuses REVERIFY_FAILURE_CODES — the SINGLE closed set of
+// verification failure codes, shared with the transcript CAS projection/append
+// gate (no second allowlist). Every code verifyDelivery can produce for a failed
+// reverify, plus artifact_mutated (priority content-integrity code).
+// artifact_mismatch is a thrown pre-check, never a reverify outcome. Unknown
+// values are dropped (never echoed).
 
 /**
  * Normalize + bound the optional reverify setupCommands. Each command is a
@@ -364,7 +358,7 @@ export async function runDeliveryReverify({
     : (outcomeThisCall ? "resumed" : "idempotent");
 
   // Safe result: bounded fields only — never commands, paths, stderr, secrets.
-  const safeFailureCode = effectiveOutcome === "failed" && SAFE_REVERIFY_FAILURE_CODES.has(effectiveFailureCode)
+  const safeFailureCode = effectiveOutcome === "failed" && REVERIFY_FAILURE_CODES.includes(effectiveFailureCode)
     ? effectiveFailureCode
     : undefined;
 
