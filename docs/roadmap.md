@@ -128,4 +128,10 @@ spec §4.3 的 cleanup 钩子是确定性的，即使没有 Job Object 也能保
 
 重启后的 Codex Host 加载了 M12-6 发布态的 **20 个 MCP tools**。单次 `lead_preflight` 在 WAO 开发仓精确 HEAD 上返回 `workspaceSelection:selected`、workspace/workers/activeRuns 三项 `observed`、active run 为 0 且 `complete:true`；故意提供错误 `expectedGitHead` 的 `run_dispatch` 在创建 run 前固定拒绝，随后以正确 workspace/HEAD/dirty 期望派发真实 certified `coder_hq`，得到 run `run_20260801134619889cxvx2v`。这组证据关单的是 **Host 已加载、单调用启动检查、workspace/head expectation 与真实 runtime dispatch 路径**；该 run 后续因 Lead 预声明路径不完整而发生的 delivery scope failure 没有被伪装成 M12-6 通过，也不构成 accepted delivery，候选已由 Lead 持久拒绝并作为 M12-7 续跑体验的真实输入。M12-6 verdict：`PASS_HOST_ACCEPTANCE_AND_TEXT_CLOSEOUT`。
 
+### M12-7 真实 provider continuation 验收（2026-08-01）
+
+重启后的 Codex Host 加载了包含 `run_continue` 的 **21 个 MCP tools**。在一次性合成 Git 仓库的 clean base `368377bdc56218ced9f019ee0c9d88c1edfaf1c3` 上，Lead 以 `continuable:true` 派发真实 `coder_hq` 根 run `run_202608011845146861hsubm`；其 V1 delivery `375c9e20a4890c48ea7535e74c98a599701c428a` 经完整单文件 review 与精确 verification 后被 Lead 有意拒绝。Lead 随后显式调用 `run_continue` 创建 child `run_20260801184704043af91q5`：durable facts 证明 `turn:first -> turn:resume`、stable root/parent lineage 与同一 retained worktree；WAO 隔离的 Claude 会话存储证明父、子两轮内容落入同一个 provider conversation 文件（仅验证同一性，不披露 provider session id）。child 交付 `70b59898efdb0b1a68da945e6c5c2392b5aecb4a` 将 V1 窄纠正为 V2，精确 verification passed，经 Lead 完整 review 后 durable accepted。合成仓 source checkout 仍停在原 base、clean，最终 active runs 为 0。
+
+候选验证：M12-7 focused `42/42`、continuation worktree/TOCTOU `23/23`、affected regression `376/376`、首轮全量失败面在自包含环境中 `174/174`、`runAwaitResult` 隔离 `34/34`。原样全量 `npm test` 在 Windows 高并发下出现每轮位置不同的历史锁/子进程/墙钟假红；本关单不以重复运行碰巧全绿替代因果证据，也不虚报 canonical 0 fail，后续可靠性改造登记为 TD-107。M12-7 verdict：`PASS_M12_7_REAL_CONTINUATION_CANARY`。
+
 **M11-12A/B 消费者摩擦收口已完成**：`run_delivery_review` 将 verification pending 投影为可等待/重试的结构化只读事实；`run_delivery` 在 exact verification 失败时提供 nullable 8 字段安全摘要（失败命令索引、声明/执行计数、Windows 退出码与字节计数），不暴露命令或输出内容。当前合同见 `docs/usage.md`。
