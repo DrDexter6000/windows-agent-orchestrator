@@ -79,7 +79,7 @@ function reviewPage(runId, overrides = {}) {
   };
 }
 
-test("M12-3B-RED-01: bundle tool is discoverable as the 19th read-only tool", async () => {
+test("M12-3B-RED-01: bundle tool is discoverable; current count is 20 after run_delivery_reverify", async () => {
   const dir = makeGitDir("m123b-discovery-");
   try {
     const server = createWaoMcpServer({ registryPath: "/registry.json", runDir: dir, workspaceRoot: dir });
@@ -88,7 +88,7 @@ test("M12-3B-RED-01: bundle tool is discoverable as the 19th read-only tool", as
       const { tools } = await client.listTools();
       const tool = tools.find((entry) => entry.name === "run_delivery_review_bundle");
       assert.ok(tool, "run_delivery_review_bundle must be registered");
-      assert.equal(tools.length, 19);
+      assert.equal(tools.length, 20);
       assert.deepEqual(
         Object.keys(tool.inputSchema.properties).sort(),
         ["cursor", "fileIndex", "runId", "waitMs"],

@@ -668,8 +668,10 @@ test("M10-pre2: workspace_status tool documented in usage.md and SKILL.md", () =
   // + runs_list (M10 P0-3) + run_wait (M10-pre3) = 11; + playbook_list/get (M11-2) = 13;
   // + run_delivery_review (M11-3) = 14; + workspace_select (M11-6) = 15; + lead_preflight
   // (M11-8A) = 16; + run_delivery_repackage (M12-1S2) = 17; + run_await_result
-  // (M12-3A) = 18; + run_delivery_review_bundle (M12-3B) = 19.
-  assert.ok(/19 MCP tools/.test(skill), "SKILL.md must reflect 19 MCP tools after M12-3B");
+  // (M12-3A) = 18; + run_delivery_review_bundle (M12-3B) = 19; + run_delivery_reverify
+  // (M12-6 Package 3B) = 20.
+  assert.ok(/20 MCP tools/.test(skill), "SKILL.md must reflect 20 MCP tools after M12-6 run_delivery_reverify");
+  assert.ok(skill.includes("run_delivery_reverify"), "SKILL.md tool table must include run_delivery_reverify");
   // team-roles.md must mention workspace binding (MCP-first)
   const roles = read("docs/team-roles.md");
   assert.ok(/workspace binding|workspace-root|roots\/list/.test(roles),
@@ -876,11 +878,11 @@ test("M11-0A: usage.md 说明 --pure 用途、新进程重启边界、command �
   assert.ok(/command.*必须是数组|command 必须是数组|数组/.test(usage), "usage.md 必须说明 command 必须是数组");
 });
 
-test("M11-3D1: usage.md MCP 段反映当前 19 tools", () => {
+test("M11-3D1: usage.md MCP 段反映当前 20 tools", () => {
   const usage = read("docs/usage.md");
   // 精确禁止"只有 7 个工具"的陈旧文案。
   assert.ok(!/(?<!\d)7 个工具/.test(usage), "usage.md MCP 段不得再声称只有 7 个工具");
-  assert.ok(/19 个工具/.test(usage), "usage.md MCP 段必须反映 19 个工具（含 M12-3B review bundle）");
+  assert.ok(/20 个工具/.test(usage), "usage.md MCP 段必须反映 20 个工具（含 M12-6 run_delivery_reverify）");
 });
 
 // ============================================================
@@ -1095,15 +1097,15 @@ test("M11-2C-09: SKILL/PRD 保持 Advisor/Auditor conditional（非默认流水�
   }
 });
 
-test("M11-3D1: SKILL/architecture 当前工具事实为 19 tools", () => {
+test("M11-3D1: SKILL/architecture 当前工具事实为 20 tools", () => {
   const skill = read("SKILL.md");
   const arch = read("docs/02-architecture.md");
-  assert.ok(/19 MCP tools|19 tools/i.test(skill),
-    "SKILL.md Minimal MCP Loop 当前工具数为 19（含 M12-3B review bundle）");
+  assert.ok(/20 MCP tools|20 tools/i.test(skill),
+    "SKILL.md Minimal MCP Loop 当前工具数为 20（含 M12-6 run_delivery_reverify）");
   // 精确匹配 "server.js ... N tools" 的当前状态注释行。
   const serverLine = arch.split("\n").find((l) => /server\.js.*tools/.test(l)) || "";
-  assert.ok(/19 tools/.test(serverLine),
-    "architecture server.js 注释当前工具数为 19");
+  assert.ok(/20 tools/.test(serverLine),
+    "architecture server.js 注释当前工具数为 20");
 });
 
 // ============================================================
@@ -1135,10 +1137,10 @@ test("M11-2C-12: SKILL tool-count 文案不得声称 minimal loop 必须经过�
   const mandatoryAll = /full\s+minimal\s+loop\s+through\s+15|minimal\s+loop\s+必须.*全部\s*15|loop\s+must\s+(use|go through|include)\s+all\s+15/i;
   assert.ok(!mandatoryAll.test(skill),
     "SKILL tool-count 文案不得声称 minimal loop 必须经过全部工具");
-  // 必须表达：WAO 暴露 19 tools，但 minimal control loop 只用相关 control tools，
+  // 必须表达：WAO 暴露 20 tools，但 minimal control loop 只用相关 control tools，
   // playbook reads 是可选且在 dispatch loop 外。
-  assert.ok(/19 MCP tools|19 tools/i.test(skill),
-    "SKILL 声明 WAO 暴露 19 MCP tools");
+  assert.ok(/20 MCP tools|20 tools/i.test(skill),
+    "SKILL 声明 WAO 暴露 20 MCP tools");
   assert.ok(/optional|可选/i.test(skill) && /dispatch loop|control loop/i.test(skill),
     "SKILL 必须说明 playbook reads 可选且在 dispatch/control loop 之外");
 });
@@ -1580,4 +1582,93 @@ test("M12-6 docs: exact verifier env does NOT inherit worker node_modules — Le
   // (4) Architecture carries the same invariant (single-source consistency).
   assert.ok(/node_modules|ignored.*dependenc|依赖.*不继承|不继承.*依赖/i.test(arch),
     "architecture 必须说明 ignored 依赖不进入 verifier 环境");
+});
+
+// ============================================================
+// M12-6 FR-07 (Package 3B closeout): audited unchanged-artifact reverify docs.
+// The MCP tool already exists; this closeout pins the docs contract for the CLI
+// fallback + the Lead guidance. Failure → fix the doc, not the test.
+// ============================================================
+
+test("M12-6 FR-07 docs: SKILL 把 reverify 放在 run_delivery 与 decide 之间并限定使用条件", async () => {
+  const skill = read("SKILL.md");
+  const { REVERIFY_REASONS } = await import("../src/application/runDeliveryReverify.js");
+  // (1) Tool-table order: run_delivery_reverify sits between run_delivery and
+  // run_delivery_decide (same discipline as the review tools).
+  assert.ok(skill.indexOf("`run_delivery_reverify`") > skill.indexOf("`run_delivery`")
+    && skill.indexOf("`run_delivery_reverify`") < skill.indexOf("`run_delivery_decide`"),
+    "SKILL 工具表把 reverify 放在 run_delivery 与 run_delivery_decide 之间");
+  // (2) Use only when the ORIGINAL verification FAILED and the Lead has judged a
+  // closed-set environment cause.
+  assert.ok(/original verification.*failed|原.*verification.*failed|原始终态.*failed|original.*失败/i.test(skill),
+    "SKILL 必须说明仅当 original verification failed 时使用 reverify");
+  assert.ok(REVERIFY_REASONS.length > 0 && /tooling_invalid|environment_contaminated|dependency_setup_missing/.test(skill),
+    "SKILL 必须携带闭集环境原因（tooling_invalid/environment_contaminated/dependency_setup_missing）");
+  // (3) The delivery commit is UNCHANGED; new setup may be APPENDED, the ORIGINAL
+  // assertions can never be modified.
+  assert.ok(/unchanged|不变|同一.*commit|same.*commit/i.test(skill),
+    "SKILL 必须说明 reverify 针对 unchanged 同一 delivery commit");
+  assert.ok(/append|追加|新增.*setup|setup.*新增/.test(skill)
+    && /原.*assertions.*不可改|assertions?.*(?:不可改|不变|immutable|never be modified|cannot be modified|can never be modified)|不.*替换.*assertion/i.test(skill),
+    "SKILL 必须说明新 setup 可追加、原 assertions 不可改");
+  // (4) The result NEVER auto-decides.
+  assert.ok(/不.*自动.*decision|不.*自动.*accept|never auto.*decide|不自动 accept\/reject/i.test(skill),
+    "SKILL 必须说明 reverify 结果不自动决定");
+});
+
+test("M12-6 FR-07 docs: usage 记录 reverify 的 MCP/CLI 输入输出、eligible failure、幂等与原\/有效 verification", () => {
+  const usage = read("docs/usage.md");
+  // (1) Both surfaces documented: the MCP tool and the CLI fallback.
+  assert.ok(/run_delivery_reverify/.test(usage), "usage 必须记录 MCP run_delivery_reverify");
+  assert.ok(/runs delivery reverify/.test(usage), "usage 必须记录 CLI runs delivery reverify");
+  assert.ok(/--setup-commands-file/.test(usage) && /--timeout-ms/.test(usage) && /--reason/.test(usage),
+    "usage 必须记录 CLI 的 --reason / --setup-commands-file / --timeout-ms");
+  // (2) Input/output: closed-set reason enum + setupCommands/timeoutMs + safe fields.
+  assert.ok(/"reason"/.test(usage) && /"setupCommands"/.test(usage) && /"timeoutMs"/.test(usage),
+    "usage 必须记录 MCP 输入字段 reason/setupCommands/timeoutMs");
+  assert.ok(/"state"/.test(usage) && /"verificationStatus"/.test(usage) && /"failureCode"/.test(usage),
+    "usage 必须记录安全输出字段 state/verificationStatus/failureCode");
+  // (3) Eligible failure: the ORIGINAL verification failed with an
+  // environment/tooling-invalid code (never content-integrity codes).
+  assert.ok(/original.*verification.*failed|原.*verification.*failed|original.*失败/i.test(usage)
+    && /command_failed|command_timeout|execution_error|setup_failed|setup_timeout|setup_environment_error/.test(usage),
+    "usage 必须说明 eligible failure 是 original verification failed + 环境/工具闭集 code");
+  // (4) Idempotency / concurrency: reentrant, converges on the first caller's
+  // setup, at most one outcome.
+  assert.ok(/reentrant|幂等|idempotent|并发|concurren/i.test(usage) && /first.*caller|首个.*调用|先.*声明.*setup|converge/i.test(usage),
+    "usage 必须记录 reverify 的幂等/并发收敛语义");
+  // (5) Original vs effective verification: the original outcome is preserved;
+  // the effective status is the reverify outcome.
+  assert.ok(/original.*verification|原.*verification.*保留|原始终态.*不改写/.test(usage)
+    && /effective|有效 verification|reverify.*outcome|reverify 结果/i.test(usage),
+    "usage 必须区分原 verification 与 effective（reverify）verification");
+  // (6) Lead still owns full review + decide.
+  assert.ok(/Lead.*仍|仍由 Lead|Lead 仍须|run_delivery_decide.*仍|不自动.*decide/i.test(usage),
+    "usage 必须说明 Lead 仍须完整 review + decide，reverify 不自动决定");
+});
+
+test("M12-6 FR-07 docs: usage 的 run_delivery_decide 区分 expected policy rejection 与固定 tool error", () => {
+  const usage = read("docs/usage.md");
+  // Expected policy rejection (e.g. already_decided) is a NORMAL structured
+  // outcome decisionAccepted:false + closed-set rejectionReason — NOT the fixed
+  // tool error. Only unexpected/internal errors are the fixed error.
+  assert.ok(/decisionAccepted:\s*false/.test(usage) && /"rejectionReason"|rejectionReason/.test(usage),
+    "usage 必须记录 decisionAccepted:false + rejectionReason 结构化结果");
+  assert.ok(/expected|预期|正常|policy rejection|策略拒绝|already_decided/.test(usage),
+    "usage 必须说明 expected policy rejection 是正常结构化结果");
+  assert.ok(/unexpected|internal|意外|内部.*错误|只有.*unexpected/.test(usage),
+    "usage 必须说明固定 tool error 只留给 unexpected/internal 错误");
+});
+
+test("M12-6 FR-07 docs: architecture 记录 reverify 共享 service 与 20-tool 事实", () => {
+  const arch = read("docs/02-architecture.md");
+  // Shared application service fact (M12-6) — no full usage contract copy.
+  assert.ok(/runDeliveryReverify\.js/.test(arch),
+    "architecture 必须记录 runDeliveryReverify.js 共享 application service");
+  assert.ok(/M12-6/.test(arch),
+    "architecture 必须把 reverify service 绑定到 M12-6");
+  // 20-tool fact on the server.js comment line (exact-count, already pinned by
+  // the M11-3D1 guard — here only the full list must include the tool).
+  assert.ok(/run_delivery_reverify/.test(arch),
+    "architecture server.js 工具清单必须包含 run_delivery_reverify");
 });

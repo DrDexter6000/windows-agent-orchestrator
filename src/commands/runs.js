@@ -20,7 +20,7 @@ import { readdir, unlink, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import { readTranscript, findState } from "../transcript.js";
+import { readTranscript, findState, REVERIFY_FAILURE_CODES } from "../transcript.js";
 import { aggregateRunMetrics, aggregateSummary, formatDuration } from "../metrics.js";
 import { diagnoseFailure } from "../diagnosis.js";
 // M9-5A: diagnosis delegated to shared application service.
@@ -36,6 +36,18 @@ import {
 } from "../application/runDelivery.js";
 // M11-3C: delivery review projection delegated to shared application service.
 import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
+// M12-6 FR-07 closeout: audited unchanged-artifact reverify delegated to the SAME
+// application service the MCP run_delivery_reverify tool uses. The CLI never
+// re-implements the algorithm, never parses the transcript, and never copies
+// boundary constants — every bound below is the service export.
+import {
+  runDeliveryReverify,
+  REVERIFY_REASONS,
+  REVERIFY_SETUP_COMMANDS_LIMIT,
+  REVERIFY_SETUP_COMMAND_MAX_LENGTH,
+  REVERIFY_TIMEOUT_MS_MIN,
+  REVERIFY_TIMEOUT_MS_MAX,
+} from "../application/runDeliveryReverify.js";
 import { getWaoDir } from "../waoDir.js";
 import { summarizeDeclares } from "../waoDeclare.js";
 import { summarizeStages } from "../waoStage.js";
@@ -652,6 +664,191 @@ async function runsDeliveryReviewCommand(args, config, hostDeps = {}) {
   }
 }
 
+/**
+ * M12-6 FR-07: `runs delivery reverify <runId> --reason <code>`
+ * `[--setup-commands-file FILE] [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]`
+ *
+ * CLI fallback for the audited unchanged-artifact re-verification. Delegates to
+ * the SAME runDeliveryReverify application service the MCP run_delivery_reverify
+ * tool uses — no copied algorithm, no transcript parsing, no second set of
+ * boundary constants.
+ *
+ * The CLI owns only:
+ *   - strict argv parsing (reverify recognized before ordinary delivery parsing)
+ *   - --setup-commands-file: UTF-8 JSON string array; missing = empty array;
+ *     rejects non-array / extra semantics / blank / oversize (service exports)
+ *   - --timeout-ms: strict integer in the service [MIN, MAX] (service exports)
+ *   - authorizedWorkspaceRoot from the existing cwd/workspace proof path —
+ *     caller input cannot name a workspace root
+ *   - safe JSON/text output of the service-approved closed-set fields ONLY
+ *
+ * No reverify auto-accepts/rejects. The original verification and its assertion
+ * commands are permanently preserved by the service; the CLI exposes NO
+ * assertion-command override flag.
+ *
+ * @param {string[]} args — everything after `delivery reverify`
+ * @param {object} config
+ * @param {object} [hostDeps] — { runDeliveryReverifyFn } for testing
+ */
+async function runsDeliveryReverifyCommand(args, config, hostDeps = {}) {
+  // Narrow strict parsing (same discipline as runs delivery review): every
+  // flag value must be non-empty / non-whitespace; no duplicates; exactly one
+  // positional; unknown flags rejected (the ONLY way to reach the service).
+  const KNOWN_FLAGS = new Set([
+    "--reason", "--setup-commands-file", "--timeout-ms",
+    "--run-dir", "--cwd", "--format",
+  ]);
+  const seenFlags = new Set();
+  const flags = {};
+  const positionals = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i];
+    if (KNOWN_FLAGS.has(a)) {
+      if (seenFlags.has(a)) throw new Error(`${a} specified multiple times`);
+      seenFlags.add(a);
+      const v = args[i + 1];
+      if (v === undefined || v.startsWith("--")) throw new Error(`${a} requires a value`);
+      if (v.trim().length === 0) throw new Error(`${a} must be non-empty`);
+      const key = a.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      flags[key] = v;
+      i += 1;
+    } else if (a.startsWith("--")) {
+      throw new Error(`unknown flag for delivery reverify: ${a}`);
+    } else {
+      positionals.push(a);
+    }
+  }
+
+  if (positionals.length !== 1) {
+    throw new Error("runs delivery reverify requires exactly one <runId>");
+  }
+  const runId = positionals[0];
+  if (runId.trim().length === 0 || !/^[A-Za-z0-9_-]+$/.test(runId)) {
+    throw new Error("runs delivery reverify requires a valid <runId>");
+  }
+
+  // Closed-set reason — the exact REVERIFY_REASONS SSOT the service validates.
+  if (flags.reason === undefined) {
+    throw new Error(
+      "runs delivery reverify requires --reason (tooling_invalid | environment_contaminated | dependency_setup_missing)",
+    );
+  }
+  if (!REVERIFY_REASONS.includes(flags.reason)) {
+    throw new Error(`--reason must be one of: ${REVERIFY_REASONS.join(", ")}`);
+  }
+
+  // --setup-commands-file: UTF-8 JSON string array. Missing = empty array (the
+  // service default). Rejected: non-JSON / non-array / non-string elements /
+  // blank elements / oversize (bounded by the SERVICE exports — no second copy).
+  let setupCommands;
+  if (flags.setupCommandsFile !== undefined) {
+    let parsed;
+    try {
+      parsed = JSON.parse(await readFile(resolve(flags.setupCommandsFile), "utf8"));
+    } catch {
+      throw new Error(`--setup-commands-file must be valid UTF-8 JSON: ${flags.setupCommandsFile}`);
+    }
+    if (!Array.isArray(parsed)) {
+      throw new Error("--setup-commands-file must contain a JSON array of strings");
+    }
+    if (parsed.length > REVERIFY_SETUP_COMMANDS_LIMIT) {
+      throw new Error(`--setup-commands-file exceeds ${REVERIFY_SETUP_COMMANDS_LIMIT} commands`);
+    }
+    const out = [];
+    for (const cmd of parsed) {
+      if (typeof cmd !== "string") {
+        throw new Error("--setup-commands-file must contain only strings");
+      }
+      if (cmd.trim().length === 0) {
+        throw new Error("--setup-commands-file must not contain blank commands");
+      }
+      if (cmd.length > REVERIFY_SETUP_COMMAND_MAX_LENGTH) {
+        throw new Error(`setup command exceeds ${REVERIFY_SETUP_COMMAND_MAX_LENGTH} characters`);
+      }
+      out.push(cmd);
+    }
+    setupCommands = out;
+  }
+
+  // --timeout-ms: strict integer in the service [MIN, MAX]; missing = service
+  // default (bounded by the SERVICE exports — no second copy).
+  let timeoutMs;
+  if (flags.timeoutMs !== undefined) {
+    if (!/^\d+$/.test(flags.timeoutMs)) {
+      throw new Error(`--timeout-ms must be an integer in [${REVERIFY_TIMEOUT_MS_MIN}, ${REVERIFY_TIMEOUT_MS_MAX}]`);
+    }
+    const n = Number(flags.timeoutMs);
+    if (!Number.isInteger(n) || n < REVERIFY_TIMEOUT_MS_MIN || n > REVERIFY_TIMEOUT_MS_MAX) {
+      throw new Error(`--timeout-ms must be an integer in [${REVERIFY_TIMEOUT_MS_MIN}, ${REVERIFY_TIMEOUT_MS_MAX}]`);
+    }
+    timeoutMs = n;
+  }
+
+  // format must be json or omitted (text).
+  if (flags.format !== undefined && flags.format !== "json") {
+    throw new Error("--format only supports 'json' (text mode is default)");
+  }
+
+  // Resolve the authorized workspace root via the EXISTING CLI cwd/workspace
+  // proof path (same as runs delivery review). Caller input cannot name a
+  // workspace root directly — only --cwd, resolved like every other cwd flag.
+  const cwd = flags.cwd ? resolve(flags.cwd) : resolveTargetCwd({ cwd: undefined }, config);
+  const runDir = resolve(flags.runDir ?? config.runDir);
+
+  const service = hostDeps.runDeliveryReverifyFn ?? runDeliveryReverify;
+  const raw = await service({
+    runId,
+    runDir,
+    authorizedWorkspaceRoot: cwd,
+    reason: flags.reason,
+    ...(setupCommands !== undefined ? { setupCommands } : {}),
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+  });
+
+  // Safe projection: the SAME closed-set fields the MCP tool approves, each
+  // validated through its closed set. Any violation fails closed — no
+  // command/path/stderr/env/raw-event is ever echoed.
+  if (raw.runId !== runId) throw new Error("reverify runId mismatch");
+  if (!/^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/.test(raw.deliveryCommit)) {
+    throw new Error("reverify bad deliveryCommit");
+  }
+  if (!["created", "resumed", "idempotent"].includes(raw.state)) {
+    throw new Error("reverify bad state");
+  }
+  if (!REVERIFY_REASONS.includes(raw.reason)) throw new Error("reverify bad reason");
+  if (!["passed", "failed", "unavailable"].includes(raw.verificationStatus)) {
+    throw new Error("reverify bad verificationStatus");
+  }
+  if (
+    raw.failureCode !== null && raw.failureCode !== undefined
+    && !REVERIFY_FAILURE_CODES.includes(raw.failureCode)
+  ) {
+    throw new Error("reverify bad failureCode");
+  }
+  if (typeof raw.requested !== "boolean") throw new Error("reverify requested not boolean");
+  if (typeof raw.outcomeRecorded !== "boolean") throw new Error("reverify outcomeRecorded not boolean");
+
+  const result = {
+    runId,
+    deliveryCommit: raw.deliveryCommit,
+    state: raw.state,
+    reason: raw.reason,
+    verificationStatus: raw.verificationStatus,
+    failureCode: raw.failureCode ?? null,
+    requested: raw.requested,
+    outcomeRecorded: raw.outcomeRecorded,
+  };
+
+  if (flags.format === "json") {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log(`Run: ${result.runId}`);
+  console.log(`Delivery: ${result.deliveryCommit}`);
+  console.log(`Reason: ${result.reason} (${result.state})`);
+  console.log(`Verification: ${result.verificationStatus}${result.failureCode ? ` (${result.failureCode})` : ""}`);
+}
+
 export { runsCommand, runsDeliveryCommand };
 
 // ===== TD-103 Phase 3C-2: Lead acceptance record =====
@@ -726,6 +923,13 @@ async function runsDeliveryCommand(args, config, hostDeps) {
   // ordinary query/accept/reject parsing so "review" is not mistaken for a runId.
   if (args[0] === "review") {
     await runsDeliveryReviewCommand(args.slice(1), config, hostDeps);
+    return;
+  }
+  // M12-6 FR-07: `runs delivery reverify` sub-command — recognized BEFORE the
+  // ordinary query/accept/reject parsing so "reverify" is not mistaken for a
+  // runId. Same dispatch discipline as "review".
+  if (args[0] === "reverify") {
+    await runsDeliveryReverifyCommand(args.slice(1), config, hostDeps);
     return;
   }
 

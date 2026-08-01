@@ -419,7 +419,7 @@ LLM 编排器（未来的 M5 DAG 或外部脚本）只需要：
 
 ### MCP stdio 接口（agent-facing primary，M9）
 
-WAO 是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude Desktop、Codex、OpenCode、其它 agent runtime）可通过 stdio 把 WAO 当作 MCP server 调用。MCP 暴露 19 个工具；常用 Lead 闭环为 inventory → workspace_status/select → dispatch → await result → delivery review bundle → acceptance，另有原子 status/wait/collect/diagnose、delivery query/review、stop/list recovery 与可选 playbook catalog。`run_await_result` 是 advisory 只读便捷工具：一次调用等待终态（waitMs 0..270000，默认 270000；0 为 point-in-time）后返回安全 compact 终态结果 + 真实 run/liveness 观测，snapshot-only 零 audit，绝不 stop/decide/repackage；非终态时 Lead 可按任意合法 waitMs 再调，所有原子工具（run_wait/run_collect/run_status…）始终可用。`waitMs` 约束工具主动 sleep/poll 的总等待预算，而不是给每个内部阶段各分配一份预算；本地 transcript 文件读取与同步 snapshot 投影不能在 JavaScript 执行中途抢占，极端存储停顿可能让实际墙钟略超预算，工具不把这种环境延迟谎报成 worker 失败。每个 tool 直接调用共享 application service，不 shell-out CLI。当前工具清单权威表见 `SKILL.md` 与 `docs/02-architecture.md`。
+WAO 是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude Desktop、Codex、OpenCode、其它 agent runtime）可通过 stdio 把 WAO 当作 MCP server 调用。MCP 暴露 20 个工具；常用 Lead 闭环为 inventory → workspace_status/select → dispatch → await result → delivery review bundle → acceptance，另有原子 status/wait/collect/diagnose、delivery query/review/reverify、stop/list recovery 与可选 playbook catalog。`run_await_result` 是 advisory 只读便捷工具：一次调用等待终态（waitMs 0..270000，默认 270000；0 为 point-in-time）后返回安全 compact 终态结果 + 真实 run/liveness 观测，snapshot-only 零 audit，绝不 stop/decide/repackage；非终态时 Lead 可按任意合法 waitMs 再调，所有原子工具（run_wait/run_collect/run_status…）始终可用。`waitMs` 约束工具主动 sleep/poll 的总等待预算，而不是给每个内部阶段各分配一份预算；本地 transcript 文件读取与同步 snapshot 投影不能在 JavaScript 执行中途抢占，极端存储停顿可能让实际墙钟略超预算，工具不把这种环境延迟谎报成 worker 失败。每个 tool 直接调用共享 application service，不 shell-out CLI。当前工具清单权威表见 `SKILL.md` 与 `docs/02-architecture.md`。
 
 **Host 注册说明**：`npm run mcp` 仅用于在 WAO repo 内手工 smoke；正式 host 注册应指向 Node shim 和 stdio entrypoint 的**绝对路径**，并为 registry 和 runDir 指定绝对路径——MCP host 的启动 cwd 不保证是 WAO repo。host 配置语法由 host 自己负责。注册后若当前会话未发现工具，重启或重载 host。Provider credential 必须由 host 通过其安全 env inheritance/allowlist 提供——不把 credential value 写入 repo、worker prompt 或 MCP args。WAO 不接管 host-global auth。
 
@@ -885,6 +885,32 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`。
 
+### MCP `run_delivery_reverify`（audited 未变工件重验证，M12-6）
+
+`run_delivery_reverify` 是 Lead 声明的一次性**审计式重验证**：仅当原始终态 verification **failed** 且 Lead 已判断为闭集环境/工具原因（`tooling_invalid` / `environment_contaminated` / `dependency_setup_missing`）时，对**同一个未变 delivery commit** 重跑验证。它委托共享 application service `runDeliveryReverify.js`（与 CLI fallback 同一份），**不调用 model、不 resume worker、不解析 transcript**。原始 assertion 命令**逐字节重跑且不可修改**；Lead 只能追加新的 setup 命令。任何 reverify 都**不自动 accept/reject**——decision 仍只由 Lead 经 `run_delivery_decide` 作出。
+
+- **输入**（strict）：`{ "runId": "run_...", "reason": "tooling_invalid"|"environment_contaminated"|"dependency_setup_missing", "setupCommands": ["npm ci", ...], "timeoutMs": 300000 }`。`setupCommands` 可选（每条非空、上限 32 条、每条 ≤512 字符，常量与 service 同源）；`timeoutMs` 可选（整数 `[1000,600000]`，省略用 service 默认 300000）。模型不能传 runDir/cwd/命令覆盖/force 等控制参数。
+- **eligible failure**：原 verification 的失败 code 必须是环境/工具闭集（`command_failed`/`command_timeout`/`execution_error`/`setup_failed`/`setup_timeout`/`setup_environment_error`）；内容完整性失败（`artifact_mutated`/`artifact_mismatch`）**不可** reverify。已有 Lead decision 或 reverify 链损坏一律 fail-closed。
+- **幂等/并发**：reentrant + crash-safe——重试/并发收敛到**首个调用者**记录的 setup 与同一个 commit，最多一条 durable outcome（`run.delivery_reverification_requested` → `run.delivery_reverification_outcome`）。原始终态 verification **不被改写**。
+- **原 vs effective verification**：`run_delivery` 投影同时保留 `originalVerificationStatus`（durable 原始 outcome）与 `effectiveVerificationStatus`（reverify 结果，含 `reverify: {status, reason}` 链事实）；只有完整 reverify 链（requested + outcome）存在时 effective 才可取，非完整链（none/pending/malformed）**不允许**改变 effective 状态（fail-closed）。
+- **安全输出**（不返回 commands/worktree 路径/stderr/reason/env/raw events）：
+
+```json
+{ "runId": "run_...", "deliveryCommit": "ddd...", "state": "created"|"resumed"|"idempotent", "reason": "tooling_invalid", "verificationStatus": "passed"|"failed"|"unavailable", "failureCode": "command_timeout"|null, "requested": true, "outcomeRecorded": true }
+```
+
+Lead 仍须在 decision 前完整 review（`run_delivery_review` / `run_delivery_review_bundle`）并独立决定；reverify passed 不构成 acceptance，reverify failed 也不自动 reject。失败返回固定 `run_delivery_reverify failed`，无 partial structured output、路径或 secret 泄漏。
+
+当 MCP transport 不可用时，WAO CLI adapter fallback 调用同一 application service 与安全输出投影，JSON 语义与 MCP 一致；它不是绕过安全投影的 raw 通道，也不提供 assertion-command override：
+
+```bash
+npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--setup-commands-file FILE] [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]
+```
+
+`--setup-commands-file` 是 UTF-8 JSON string array（缺失 = 空数组；拒绝非数组/非字符串/空白/超界，边界常量与 service 同源）；`--timeout-ms` 缺失由 service 默认，提供时必须为 `[1000,600000]` 内严格整数；`authorizedWorkspaceRoot` 由 CLI 既有 cwd/workspace proof 路径产生，调用方输入不能绕过 workspace ownership。
+
+annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:true, openWorldHint:false`。
+
 ### MCP `run_delivery_decide`（持久 Lead 决策，M9-6B）
 
 `run_delivery_decide` 让 MCP host 记录一个 Lead 决策（accept/reject）。**不可逆**（首决策 wins，后续 lose）。调用共享 service 委托 `tryAppendDecision` 的锁内原子 first-decision-wins 语义。
@@ -899,7 +925,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 { "runId": "run_...", "decisionAccepted": false, "deliveryCommit": "ddd...", "acceptanceStatus": "accepted", "existingStatus": "accepted" }
 ```
 
-失败返回固定 `run_delivery_decide failed`。Reason 在持久化前 trim+redact，但**绝不返回**给 MCP。
+**expected policy rejection 是正常结构化结果，不是错误**：已存在决策（first-decision-wins 的 loser）或其它 durable 策略拒绝（verification/终态/reject-gate/durable facts 冲突）返回 `decisionAccepted:false` + 闭集 `rejectionReason`（如 `already_decided`）——这是结构化 outcome，消费方按正常结果处理，不视为 tool failure。只有 unexpected/internal 异常（非策略拒绝）才返回固定 `run_delivery_decide failed`，无 partial structured output。Reason 在持久化前 trim+redact，但**绝不返回**给 MCP。
 
 annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:true, openWorldHint:false`（首决策不可逆；重复决策幂等返回 loser）。
 
