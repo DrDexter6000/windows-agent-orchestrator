@@ -38,6 +38,16 @@
 // event liveness is never combined with a fresh owner heartbeat into an
 // apparently-current observation.
 //
+// READ-FAILURE REASON (M12-6 FR-08): a read_failure additionally carries a
+// mandatory nullable closed-set machine code (readFailureReason) so expected,
+// safely classifiable control-plane failures are machine-actionable WITHOUT
+// leaking raw errors: transcript read/JSON parse exception ⇒
+// "transcript_parse_failed"; structurally incompatible legacy event/snapshot
+// shape ⇒ "legacy_event_shape"; any other safe non-parse failure to obtain a
+// usable snapshot ⇒ "snapshot_unavailable". observed outcomes always carry
+// null. The reason is a closed-set code — no error message/path/command/
+// credential ever enters the result.
+//
 // REAL THROTTLING (correction 5): the default progress interval is 30000 ms,
 // INDEPENDENT of the internal poll interval. The first notification is not
 // emitted before one full interval, and a slow notification transport is never
@@ -79,6 +89,17 @@ export const RUN_AWAIT_RESULT_MAX_MS = 270000;
 // of notifications. 30000 ms keeps a long poll alive without flooding the
 // client, and yields a structural upper bound of floor(waitMs/30000)+1.
 export const RUN_AWAIT_RESULT_DEFAULT_PROGRESS_MS = 30000;
+
+// M12-6 FR-08: the frozen closed set of safe read-failure reasons. `observed`
+// outcomes carry readFailureReason=null; a read_failure carries exactly ONE of
+// these machine codes — never an error message/path/command/credential. The MCP
+// schema enum is built from this single set (see src/mcp/server.js) so the
+// service and the schema cannot drift.
+export const READ_FAILURE_REASONS = Object.freeze([
+  "transcript_parse_failed", // transcript read or JSON parse exception
+  "legacy_event_shape", // structurally incompatible legacy event/snapshot shape
+  "snapshot_unavailable", // any other safe non-parse failure to obtain a usable snapshot
+]);
 
 // A result partition whose fields were NOT observed (not_terminal / unavailable
 // / read-failure). Null — never a fabricated zero/false. The key set is uniform
@@ -145,7 +166,13 @@ function snapshotHasInvalidShape(events) {
 // `agentId`/`cursor` are parameters so the initial-failure (unknown/null) and
 // the wait-loop re-read failure (preserve the last trusted values) share ONE
 // truthful shape.
-function readFailureResult({ runId, agentId, state, terminal, cursor, waitedMs }) {
+//
+// M12-6 FR-08: `reason` is the mandatory closed-set machine code (a member of
+// READ_FAILURE_REASONS) classifying WHY the read failed — transcript read/JSON
+// parse exception, structurally incompatible legacy shape, or another safe
+// non-parse failure. The caller classifies; this builder never inspects an
+// error object, so no raw error detail can reach the result.
+function readFailureResult({ runId, agentId, state, terminal, cursor, waitedMs, reason }) {
   return {
     runId,
     agentId,
@@ -155,6 +182,7 @@ function readFailureResult({ runId, agentId, state, terminal, cursor, waitedMs }
     returnedEarly: false,
     waitedMs,
     observationOutcome: "read_failure",
+    readFailureReason: reason,
     liveness: "unknown",
     activityEventCount: null,
     lastActivityKind: null,
@@ -285,9 +313,11 @@ export async function runAwaitResult(input) {
   } catch {
     // Initial read failure (file missing / unreadable / malformed JSON line):
     // no facts at all. Report read_failure truthfully; do not invent a
-    // state/cursor. waitedMs is 0 (no waiting occurred).
+    // state/cursor. waitedMs is 0 (no waiting occurred). Any throw from the
+    // reader is a transcript read/JSON parse exception → transcript_parse_failed.
     return readFailureResult({
       runId, agentId: "unknown", state: "unknown", terminal: false, cursor: null, waitedMs: 0,
+      reason: "transcript_parse_failed",
     });
   }
 
@@ -316,8 +346,12 @@ export async function runAwaitResult(input) {
     cursor = findLastEventSeq(events) ?? 0;
     agentId = extractCanonicalAgentId(events, runId);
   } catch {
+    // Defense in depth: usable already excludes null/primitive/array, so a
+    // residual SSOT derive failure is NOT a shape violation and NOT a parse
+    // error — it is another safe non-parse failure → snapshot_unavailable.
     return readFailureResult({
       runId, agentId: "unknown", state: "unknown", terminal: false, cursor: null, waitedMs: 0,
+      reason: "snapshot_unavailable",
     });
   }
   const terminal = TERMINAL_STATES.includes(state);
@@ -325,10 +359,12 @@ export async function runAwaitResult(input) {
   // M12-6: a structurally corrupt snapshot is a read_failure — never a clean
   // "observed". The durable runId/state/terminal are preserved as a truthful
   // hint; cursor/agentId/liveness/collect depend on a clean full snapshot and
-  // stay null/unknown/unavailable.
+  // stay null/unknown/unavailable. Non-usable entries are the legacy shape
+  // case → legacy_event_shape.
   if (invalidShape) {
     return readFailureResult({
       runId, agentId: "unknown", state, terminal, cursor: null, waitedMs: 0,
+      reason: "legacy_event_shape",
     });
   }
 
@@ -349,6 +385,7 @@ export async function runAwaitResult(input) {
       returnedEarly: true,
       waitedMs: 0,
       observationOutcome: "observed",
+      readFailureReason: null,
       liveness: "terminal",
       activityEventCount: 0,
       lastActivityKind: null,
@@ -370,6 +407,7 @@ export async function runAwaitResult(input) {
       returnedEarly: false,
       waitedMs: 0,
       observationOutcome: "observed",
+      readFailureReason: null,
       liveness: liv.liveness,
       activityEventCount: liv.activityEventCount,
       lastActivityKind: liv.lastActivityKind,
@@ -401,9 +439,11 @@ export async function runAwaitResult(input) {
       // RE-READ FAILURE (file): do NOT combine stale events with a fresh owner
       // heartbeat. Report read_failure with liveness/heartbeat unknown and a
       // null activity tally — the observation is stale, not current. The last
-      // trusted agentId/state/cursor are preserved.
+      // trusted agentId/state/cursor are preserved. A re-read throw is still a
+      // transcript read/JSON parse exception → transcript_parse_failed.
       return readFailureResult({
         runId, agentId, state: currentState, terminal: false, cursor: currentCursor, waitedMs: _now() - begin,
+        reason: "transcript_parse_failed",
       });
     }
 
@@ -413,9 +453,10 @@ export async function runAwaitResult(input) {
     if (snapshotHasInvalidShape(pollRaw)) {
       // SHAPE FAILURE during wait: do NOT combine a corrupt snapshot with a
       // fresh heartbeat. Preserve the last trusted agentId/state/cursor; same
-      // truthful read_failure shape as a re-read file failure.
+      // truthful read_failure shape as a re-read file failure → legacy shape.
       return readFailureResult({
         runId, agentId, state: currentState, terminal: false, cursor: currentCursor, waitedMs: _now() - begin,
+        reason: "legacy_event_shape",
       });
     }
 
@@ -433,8 +474,11 @@ export async function runAwaitResult(input) {
       pollState = findState(currentEvents);
       pollCursor = findLastEventSeq(currentEvents) ?? currentCursor;
     } catch {
+      // Residual poll derive failure on an otherwise-usable snapshot — the
+      // snapshot could not be derived, a safe non-parse reason → snapshot_unavailable.
       return readFailureResult({
         runId, agentId, state: currentState, terminal: false, cursor: currentCursor, waitedMs: _now() - begin,
+        reason: "snapshot_unavailable",
       });
     }
     currentState = pollState;
@@ -453,6 +497,7 @@ export async function runAwaitResult(input) {
         returnedEarly: true,
         waitedMs: _now() - begin,
         observationOutcome: "observed",
+        readFailureReason: null,
         liveness: "terminal",
         activityEventCount: 0,
         lastActivityKind: null,
@@ -490,6 +535,7 @@ export async function runAwaitResult(input) {
     returnedEarly: false,
     waitedMs: _now() - begin,
     observationOutcome: "observed",
+    readFailureReason: null,
     liveness: liv.liveness,
     activityEventCount: liv.activityEventCount,
     lastActivityKind: liv.lastActivityKind,

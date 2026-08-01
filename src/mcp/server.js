@@ -77,6 +77,10 @@ import {
   RUN_AWAIT_RESULT_DEFAULT_MS,
   RUN_AWAIT_RESULT_MAX_MS,
   RUN_AWAIT_RESULT_DEFAULT_PROGRESS_MS,
+  // M12-6 FR-08: the schema enum for readFailureReason is built from this ONE
+  // closed set — the service and the MCP schema cannot drift (same pattern as
+  // DELIVERY_READINESS_STATES / PACKAGING_FAILURE_CODES).
+  READ_FAILURE_REASONS,
 } from "../application/runAwaitResult.js";
 import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
 import {
@@ -1458,6 +1462,12 @@ const RUN_AWAIT_RESULT_OUTPUT = z.object({
   waitedMs: z.number().int().nonnegative(),
   // Mandatory closed-set field: clean read vs transcript read failure.
   observationOutcome: z.enum(["observed", "read_failure"]),
+  // M12-6 FR-08: mandatory nullable closed-set machine code classifying WHY a
+  // read_failure happened — transcript_parse_failed (transcript read/JSON parse
+  // exception) / legacy_event_shape (structurally incompatible legacy
+  // event/snapshot shape) / snapshot_unavailable (other safe non-parse reason).
+  // null on every observed outcome; never an error message/path/command.
+  readFailureReason: z.enum([...READ_FAILURE_REASONS]).nullable(),
   // "unknown" only on a read failure (liveness must NOT be derived from stale
   // events combined with a fresh heartbeat).
   liveness: z.enum(["terminal", "progress", "process_only", "silent", "unknown"]),
@@ -1488,7 +1498,12 @@ const RUN_AWAIT_RESULT_DESCRIPTION =
   "(not yet terminal — unobserved result fields are null), unavailable (collect " +
   "or read failure). observationOutcome distinguishes a clean read (observed) " +
   "from a transcript read failure (read_failure → liveness/ownerHeartbeat " +
-  "unknown, no stale+fresh combination). afterSeq omitted = baseline at first " +
+  "unknown, no stale+fresh combination). readFailureReason is the mandatory " +
+  "nullable closed-set machine code classifying a read_failure: " +
+  "transcript_parse_failed (transcript read/JSON parse exception), " +
+  "legacy_event_shape (structurally incompatible legacy event/snapshot shape), " +
+  "snapshot_unavailable (other safe non-parse reason); null on every observed " +
+  "outcome — never an error message/path/command/credential. afterSeq omitted = baseline at first " +
   "read; explicit afterSeq counts all seq > afterSeq. Read-only and idempotent: " +
   "zero messages.collected on every path. All atomic tools (run_wait / " +
   "run_collect / run_status …) remain available for arbitrary re-polling. " +
@@ -2906,6 +2921,27 @@ export function createWaoMcpServer({
           ...(onProgress ? { onProgress } : {}),
         });
 
+        // M12-6 FR-08: cross-field truth boundary BEFORE any structured content
+        // is published. The service contract is
+        //   observationOutcome==="observed"    ⇔ readFailureReason===null
+        //   observationOutcome==="read_failure" ⇔ readFailureReason∈READ_FAILURE_REASONS
+        // A malformed/injected service result violating either direction must
+        // NEVER be silently coerced into a valid-looking outcome (e.g. a
+        // read_failure with a null reason, or an observed outcome carrying a
+        // reason) — it collapses to the fixed opaque error below with no
+        // structuredContent and no dynamic detail. This is an explicit adapter
+        // check, NOT a zod superRefine: the SDK's serialization of custom
+        // refinements into the JSON output schema is not reliable, and the
+        // check must run before the schema parse regardless.
+        const outcome = result?.observationOutcome;
+        const reason = result?.readFailureReason;
+        const invariantHolds = (outcome === "observed" && reason === null)
+          || (outcome === "read_failure" && READ_FAILURE_REASONS.includes(reason));
+        if (!invariantHolds) {
+          // Fixed opaque error — the catch below must not see any dynamic text.
+          throw new Error("run_await_result service contract violation");
+        }
+
         const payload = {
           runId,
           agentId: safeProjectAgentId(result.agentId),
@@ -2914,7 +2950,8 @@ export function createWaoMcpServer({
           cursor: result.cursor,
           returnedEarly: result.returnedEarly,
           waitedMs: result.waitedMs,
-          observationOutcome: result.observationOutcome,
+          observationOutcome: outcome,
+          readFailureReason: reason,
           liveness: result.liveness,
           activityEventCount: result.activityEventCount,
           lastActivityKind: result.lastActivityKind,

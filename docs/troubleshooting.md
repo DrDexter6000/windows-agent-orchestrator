@@ -181,6 +181,17 @@ serve 后台进程不一定。
 - **修复**：`taskkill /IM opencode.exe /F` 杀 serve（连带所有 session），用 serve.ps1 重启
 - **诊断**：`netstat -ano | findstr :4298 | findstr ESTABLISHED` 看 session 数
 
+### 4.3 run_await_result 返回 read_failure（transcript 读失败）
+
+- **症状**：`run_await_result` 返回 `observationOutcome=read_failure`，`result.status=unavailable`
+- **机器协议（M12-6 FR-08）**：同时携带闭集 `readFailureReason`，Lead 可直接按码决策，不需要读错误原文：
+  - `transcript_parse_failed` — transcript 读取/JSON 解析异常（文件缺失、不可读、某行 JSON 损坏）
+  - `legacy_event_shape` — 快照含 JSON 合法但不可用的历史条目（null / 原始值 / 数组），或快照不是数组
+  - `snapshot_unavailable` — 其他安全的非解析类失败（如残留投影派生失败）
+- **根因**：transcript 文件损坏或被截断写入（进程被杀、磁盘满、跨进程并发写同一 jsonl）
+- **修复**：检查 `runs/<runId>.jsonl` 完整性；`transcript_parse_failed` 多为写入中断，`legacy_event_shape` 多为旧格式历史数据。控制面**绝不泄漏**错误 message/path/command/credential——字段只有闭集码，成功路径（observed）为 `null`
+- **注意**：unexpected 内部异常仍是固定 opaque 错误（`run_await_result failed`），不会变成 success 形状
+
 ---
 
 ## 5. 证据完整性
