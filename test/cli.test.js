@@ -27,6 +27,21 @@ async function captureLog(fn) {
   return lines.join("\n");
 }
 
+// 用字面 `node`（PATH 上的 node）执行 `node src/cli.js <cmd>` 并返回 stdout。
+// 这些 registry list/validate 行为测试的子进程验证的是 CLI 行为本身，不是
+// version guard（guard 的行为由 test/nodeVersionGuard.test.js 专测）。字面
+// `node` 常是 PATH 上的 v24，会被 src/cli.js 的 version guard 拒——canonical
+// runner（scripts/canonical-test.mjs）在父进程 env 注入 WAO_SKIP_VERSION_GUARD=1，
+// 直接 focused 执行时没有。因此本 helper 在 child env 显式注入同一变量，让测试
+// 自包含；不写全局/用户 env，不改生产代码。
+function runCliOnPathNode(cmd) {
+  return execSync(`node src/cli.js ${cmd}`, {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" },
+  });
+}
+
 // sleepSync + rmrfRetry (bounded transient-rm retry, injectable rm/sleep) are the
 // shared test-only helpers (TD-107) — see test/_rmrfHelper.mjs + test/rmrfRetry.test.js.
 
@@ -1077,9 +1092,7 @@ test("registry list 合并认证状态列（summary 存在时显示 cert 状态�
       },
     }));
 
-    const out = execSync(`node src/cli.js registry list --registry ${registryPath} --run-dir ${runDir}`, {
-      cwd: process.cwd(), encoding: "utf8",
-    });
+    const out = runCliOnPathNode(`registry list --registry ${registryPath} --run-dir ${runDir}`);
     const lines = out.trim().split(/\r?\n/);
     assert.equal(lines.length, 2, "应列出 2 个 agent");
     const hqLine = lines.find((l) => l.startsWith("coder_hq"));
@@ -1100,9 +1113,7 @@ test("registry list 无 summary 时不报错（cert 列显示 -）", () => {
       agents: { coder_hq: { backend: "claude-code", binary: "/x", cwd: dir, model: { id: "glm-5.2" } } },
     }), "utf8");
 
-    const out = execSync(`node src/cli.js registry list --registry ${registryPath}`, {
-      cwd: process.cwd(), encoding: "utf8",
-    });
+    const out = runCliOnPathNode(`registry list --registry ${registryPath}`);
     assert.match(out.trim(), /coder_hq\tclaude-code\tglm-5\.2.*-/, "无 summary 时 cert 列显示 -");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1120,9 +1131,7 @@ test("WF-8: registry list 对 kimi/codex 默认模型显示非 '-'", () => {
       },
     }), "utf8");
 
-    const out = execSync(`node src/cli.js registry list --registry ${registryPath}`, {
-      cwd: process.cwd(), encoding: "utf8",
-    });
+    const out = runCliOnPathNode(`registry list --registry ${registryPath}`);
     const lines = out.trim().split(/\r?\n/);
     for (const id of ["coder_mm", "tester"]) {
       const line = lines.find((l) => l.startsWith(`${id}\t`));
@@ -1146,9 +1155,7 @@ test("F17: registry list --format json 输出可解析 JSON（dogfood round 4 �
       },
     }), "utf8");
 
-    const out = execSync(`node src/cli.js registry list --registry ${registryPath} --run-dir ${dir} --format json`, {
-      cwd: process.cwd(), encoding: "utf8",
-    });
+    const out = runCliOnPathNode(`registry list --registry ${registryPath} --run-dir ${dir} --format json`);
     // 必须是合法 JSON 数组（原 bug：接受 --format json 但仍输出 tab 表格，JSON.parse 会抛）
     const parsed = JSON.parse(out);
     assert.ok(Array.isArray(parsed), "输出应是 JSON 数组");
@@ -1173,9 +1180,7 @@ test("TD-87: registry validate 对 kimi-code 配 tokenBudget 给 ⚠ warning（�
       },
     }), "utf8");
 
-    const out = execSync(`node src/cli.js registry validate --registry ${registryPath}`, {
-      cwd: process.cwd(), encoding: "utf8",
-    });
+    const out = runCliOnPathNode(`registry validate --registry ${registryPath}`);
     // validate 通过（✔），但有 ⚠ warning 提示 tokenBudget 对 kimi 无效
     assert.match(out, /✔\s*coder_mm/, "kimi worker validate 通过");
     assert.match(out, /⚠.*kimi-code.*tokenBudget.*不生效/, "配了 tokenBudget 的 kimi worker 应有 ⚠ warning");
@@ -1202,9 +1207,7 @@ test("TD-89 (M11-5 resolved): registry validate accepts systemPrompt for all bac
       },
     }), "utf8");
 
-    const out = execSync(`node src/cli.js registry validate --registry ${registryPath}`, {
-      cwd: process.cwd(), encoding: "utf8",
-    });
+    const out = runCliOnPathNode(`registry validate --registry ${registryPath}`);
     // 三个都 pass（无 ✖，无旧 ⚠ "不消费 systemPrompt" warning）
     assert.match(out, /✔\s*coder_mm/, "kimi-code + systemPrompt passes");
     assert.match(out, /✔\s*tester/, "codex + systemPrompt passes");

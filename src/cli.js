@@ -17,6 +17,8 @@ import { daemonCommand } from "./commands/daemon.js";
 import { registryCommand } from "./commands/registry.js";
 // TD-98 阶段 2b：runs 命令族拆到 src/commands/runs.js（行为不变，纯搬迁）。
 import { runsCommand, buildDashboard, runsDashboardCommand, runDashboardWeb } from "./commands/runs.js";
+// M12-8F: top-level `dashboard` 命令族（人类 Owner 启动器，wao dashboard）。
+import { dashboardCommand } from "./commands/dashboard.js";
 // TD-98 阶段 2c：workflow + worktree 命令族拆到 src/commands/（行为不变，纯搬迁）。
 import { workflowCommand } from "./commands/workflow.js";
 import { worktreeCommand } from "./commands/worktree.js";
@@ -163,6 +165,10 @@ async function main(argv) {
   }
   if (command === "runs") {
     await runsCommand(rest, config);
+    return;
+  }
+  if (command === "dashboard") {
+    await dashboardCommand(rest, config);
     return;
   }
   if (command === "workflow") {
@@ -326,6 +332,7 @@ Commands:
   runs scorecard <runId> [--run-dir DIR] [--format json]
   runs dashboard [--watch N] [--agent ID] [--latest N] [--format json] [--run-dir DIR]
   runs dashboard --web [--port N] [--run-dir DIR] [--cwd DIR]   # local read-only Owner dashboard
+  dashboard [--cwd DIR] [--port N] [--run-dir DIR] [--no-open]  # Owner dashboard launcher (global wao command; auto-opens browser)
   runs diagnose <runId> [--run-dir DIR] [--format json]
   runs delivery <runId> [--run-dir DIR] [--format json]
   runs delivery <runId> --accept --reason-file FILE [--run-dir DIR] [--format json]

@@ -20,6 +20,9 @@
     "reliability": "node scripts/wao-node.cjs scripts/run-reliability.mjs",
     "long-run": "node scripts/wao-node.cjs scripts/long-run-probe.mjs"
   },
+  "bin": {
+    "wao": "bin/wao.js"
+  },
   "engines": {
     "node": ">=22 <25"
   },

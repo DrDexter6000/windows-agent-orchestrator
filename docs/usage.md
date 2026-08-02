@@ -68,6 +68,15 @@ cd D:\projects\windows-agent-orchestrator-poc
 npm ci
 ```
 
+**一次性开发安装（M12-8F）：** 在 WAO 开发仓库内执行一次 `npm link`，即可在任何目录使用全局 `wao` 命令（它总是执行当前链接的这份 checkout）：
+
+```powershell
+cd D:\projects\windows-agent-orchestrator-poc
+npm link
+```
+
+此后 `wao dashboard`、`wao doctor` 等顶层命令可直接运行，不必 `cd` 进 WAO 仓库，也不用担心 `npm run cli` 从其它目录报 "Missing script: cli"。
+
 ### 配置
 
 **1. 复制 registry 模板并编辑：**
@@ -178,6 +187,8 @@ npm run cli -- <command> [options]
 ```
 
 > **不要**直接 `node src/cli.js <command>`：系统默认 `node` 常是 v24（WAO 硬拒），`npm run cli` 走 v22 shim 才是可靠入口。下面为简洁省略前缀。
+
+**已执行 `npm link` 后（M12-8F），优先用全局 `wao` 命令**：`wao <command> [options]` 与 `npm run cli -- <command> [options]` 等价（同一个 CLI、同一个 v22 shim），且可从任意目录调用。`npm run cli --` 嵌套形式仍完整保留。
 
 ### 场景 1：让 agent 做一件事并等结果
 
@@ -932,9 +943,25 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 - 安全顺序：完整动态文本先 exact-secret redaction，再清洗 C0/C1/DEL，再截断/分页。绝不返回 raw command、tool input/output、error text、credential、PID、provider session 或绝对路径。
 - cursor 绑定 runId、冻结快照前缀、audience/filter/afterSeq 视图和位置；append-only 增长可继续，历史变更/收缩、跨 run/view/audience、malformed 或越界 cursor 固定失败。Lead 可任意时点重复读第一页，或沿 `nextCursor` 逐页下钻。
 
-### Owner 本地只读看板（M12-8C/D）
+### Owner 本地只读看板（M12-8C/D/F）
 
-人类 Owner 可在 WAO 仓库入口启动本地网页，而不把完整 worker 活动灌入 Lead context：
+人类 Owner 可在 WAO 仓库入口启动本地网页，而不把完整 worker 活动灌入 Lead context。**主用命令（M12-8F，需一次性 `npm link`，见 §安装本工具）**：
+
+```powershell
+# 在目标 Git 项目内（或任意目录加 --cwd 指向 Git 项目）
+wao dashboard
+wao dashboard --cwd "D:\path with spaces\project"   # 从任意目录启动
+wao dashboard --no-open                             # 启动但不自动打开浏览器
+wao dashboard --port 8123 [--run-dir DIR]           # 固定端口 / 自定义 run 目录
+```
+
+行为契约：
+
+- 目标目录默认是当前目录（`process.cwd()`）；`--cwd` 显式指定目标项目。目标必须在某个 Git 仓库内——命令解析出 canonical Git root 作为看板 workspace（嵌套子目录也自动解析到仓库根）；**不在 Git 仓库内时，在监听之前就失败**并给出可操作提示（在 Git 项目内运行，或用 `--cwd`）。
+- 默认在 Windows 默认浏览器打开生成的 fragment-token URL **恰好一次**（无 shell 拼接，URL 只作为结构化 argv 传给系统默认处理器）；`--no-open` 不做任何打开尝试。
+- 浏览器打开失败只是提示：URL 已打印，打印一行简短警告后服务器继续运行，按 `Ctrl-C` 停止。
+
+旧式嵌套命令仍支持（不会自动打开浏览器，非 Git 目录仍 fail-soft 启动）：
 
 ```powershell
 npm run cli -- runs dashboard --web [--port 0|1024..65535] [--run-dir DIR] [--cwd GIT_ROOT]

@@ -602,6 +602,12 @@ export async function runsDashboardCommand(args, config, injections = {}) {
  * @param {Function} [injections.readRegistryFn] — registry reader (testing)
  * @param {{wait:Function, cancel?:Function}} [injections.lifecycle] — shutdown waitable (testing)
  * @param {Function} [injections.log] — stdout sink (testing)
+ * @param {string} [injections.targetCwd] — pre-resolved target cwd (M12-8F
+ *   `wao dashboard` launcher; absent → legacy resolveTargetCwd chain)
+ * @param {string} [injections.workspaceRoot] — pre-resolved STRICT canonical
+ *   Git root (M12-8F launcher; absent → legacy fail-soft prove fallback)
+ * @param {Function} [injections.afterListen] — advisory post-listen hook,
+ *   receives the printed URL (M12-8F auto-open; absent → never opens)
  */
 export async function runDashboardWeb(options, config, injections = {}) {
   const createServer = injections.createServerFn ?? createOwnerDashboardServer;
@@ -610,17 +616,26 @@ export async function runDashboardWeb(options, config, injections = {}) {
   const lifecycle = injections.lifecycle ?? createProcessLifecycle();
   const log = injections.log ?? ((s) => console.log(s));
 
-  const targetCwd = resolveTargetCwd(options);
+  // M12-8F: the `wao dashboard` launcher pre-resolves BOTH the target cwd and
+  // the STRICT canonical Git root and threads them in. Legacy `runs dashboard
+  // --web` passes neither and keeps the existing resolveTargetCwd + fail-soft
+  // prove behavior byte-for-byte.
+  const targetCwd = injections.targetCwd ?? resolveTargetCwd(options);
   const runDir = resolve(options.runDir ?? config.runDir);
 
   // Shared workspace authority: the canonical Git root of the target cwd. If the
   // cwd is not a provable workspace, the dashboard still starts — no run matches
   // ownership (shown as cross_workspace) rather than crashing the command.
+  // (M12-8F: the launcher already proved the root strictly before listen.)
   let workspaceRoot;
-  try {
-    workspaceRoot = prove(targetCwd).root;
-  } catch {
-    workspaceRoot = targetCwd;
+  if (injections.workspaceRoot !== undefined) {
+    workspaceRoot = injections.workspaceRoot;
+  } else {
+    try {
+      workspaceRoot = prove(targetCwd).root;
+    } catch {
+      workspaceRoot = targetCwd;
+    }
   }
 
   // Shared registry authority: agent ids for agentId validation. Registry
@@ -648,6 +663,18 @@ export async function runDashboardWeb(options, config, injections = {}) {
   const url = `http://127.0.0.1:${addr.port}/#token=${server.token}`;
   log(url);
   log("(Ctrl-C to stop)");
+
+  // M12-8F: advisory post-listen hook — the `wao dashboard` launcher auto-opens
+  // the printed URL here (exactly once) unless --no-open. Legacy passes no hook
+  // and never opens. A failing hook is ADVISORY: the URL is already printed, so
+  // warn concisely and keep serving.
+  if (typeof injections.afterListen === "function") {
+    try {
+      await injections.afterListen(url);
+    } catch (error) {
+      log(`⚠ 无法自动打开浏览器（${error.message}）——请手动打开上面的 URL。`);
+    }
+  }
 
   // Block until SIGINT/SIGTERM, then close the boundary and return.
   try {
