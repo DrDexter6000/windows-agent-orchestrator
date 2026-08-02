@@ -63,7 +63,17 @@ test("M11-11D-RED-2: MCP run_delivery preserves ordinary non-delivery as success
   try {
     const response = await client.callTool({ name: "run_delivery", arguments: { runId } });
     assert.notEqual(response.isError, true);
-    assert.deepEqual(response.structuredContent, {
+    const structured = response.structuredContent;
+    // M12-8B: availableDrilldowns is the bounded progressive-disclosure
+    // metadata (asserted separately so the legacy object comparison stays
+    // exact for every other field).
+    const { availableDrilldowns, ...rest } = structured;
+    assert.ok(Array.isArray(availableDrilldowns) && availableDrilldowns.length >= 1 && availableDrilldowns.length <= 4,
+      "bounded availableDrilldowns present");
+    for (const e of availableDrilldowns) {
+      assert.equal(e.readOnly, true, "every drilldown entry readOnly:true");
+    }
+    assert.deepEqual(rest, {
       runId,
       terminalState: "completed",
       deliveryAvailable: false,

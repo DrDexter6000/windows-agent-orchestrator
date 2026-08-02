@@ -923,6 +923,28 @@ CLI 等价：`runs delivery <runId> --wait-ms N [--format json]`（`--wait-ms` �
 
 annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`。
 
+### MCP `availableDrilldowns`（有界渐进式披露元数据，M12-8B）
+
+`run_await_result`、`run_status`、`run_diagnose`、`run_collect`、`run_delivery`、`run_activity` 六个工具的输出**统一携带（schema REQUIRED）** `availableDrilldowns`：**≤4 条静态披露元数据**（`readOnly` 按被披露工具如实标注），告诉 Lead 哪个安全观察工具可以揭示更多、以什么深度、多大代价——**只披露，不自动调用，不做任何语义决策**。它削减 Lead 的 token/注意力成本，同时把判断和后续工具选择完全留给 Lead。
+
+每条 entry 是严格七键对象：
+
+- `tool` ∈ 闭集 `run_status | run_activity | run_collect | run_delivery | run_delivery_review | run_diagnose`（**观察类闭集**，永不出现 `run_stop`/`run_continue`/`run_dispatch`/`run_delivery_decide`/`run_delivery_repackage`/`run_delivery_reverify`/`workspace_select` 等 control/mutation 工具）。`readOnly` 是**按工具如实的布尔值**：`run_collect` 每次成功调用追加一条 `messages.collected` audit（与其 `readOnlyHint:false/idempotentHint:false` 一致），其三条 entry 报 `readOnly:false`；其余五个工具零 append，报 `readOnly:true`。
+- `view` ∈ 闭集 `compact | timeline | evidence | delivery | diagnosis`（深度由浅到深：compact 最后一助手文本 → timeline 活动时间线一页 → evidence 一页有界 worker 输出 → delivery 交付事实 → diagnosis 故障诊断）。
+- `detail` = 一行人性化深度短语；`purpose` = Lead 为何可能想看它；`reveals` = 展开后能看到哪些额外事实（均为字段/文本级别的既有安全输出，绝无新内容）。
+- `cost` ∈ 闭集 `low | medium | high`——`low` 单次快照读取；`medium` 分页/较大输出；`high` 完整 delivery diff 审阅。
+
+每个工具的输出都基于**已返回的机器事实**选择披露，不做推断、不给处方、不选文件、不遍历 cursor；内容全是 WAO 代码选定的静态字符串，绝不含 transcript/provider/仓库文本。上限（≤4 条、序列化 ≤2048 字节、字段 ≤160 字符）由共享模块 `src/application/runDrilldowns.js` 硬性强制（≤4 条同时反映到 schema `maxItems`；序列化字节上限仅由 selector 强制，schema 不 enforce 字节数），MCP schema 枚举/上限由同一模块导出派生。代表性披露：
+
+- `run_await_result` 终态 compact 可用 → `run_activity`（timeline，medium）+ `run_collect`（evidence，medium）；`too_large` → `run_collect` 优先；非终态 / 静默 / read_failure → `run_status`（timeline，low）+ `run_activity`。
+- `run_status` 失败终态 → `run_diagnose`（diagnosis，low）+ `run_activity`；completed → `run_activity` + `run_collect` compact（low）。
+- `run_diagnose` 类别 `delivery_packaging_failed` → `run_delivery`（delivery，low）+ `run_activity`；其它失败类别 → `run_activity` + `run_collect` compact。
+- `run_collect` compact 可用 → `run_collect` full（evidence，medium）+ `run_activity`；full 带 `nextCursor` → 续页 + `run_activity`；单页读完 → `run_activity`。
+- `run_delivery` reviewable（verification 已有终态结果）→ `run_delivery_review`（delivery diff，high）+ `run_activity`；packaging failure / `deliveryFailure.code` → `run_activity` + `run_diagnose`；未请求 → `run_activity` + `run_status`。waitMs readiness 路径与 point-in-time 路径披露一致。
+- `run_activity` 有 `nextCursor` → 同工具续页；终态读完 → `run_collect` compact；非终态 → `run_status`。
+
+该字段是**加法字段**：既有输出字段、行为、audit 语义（只读工具零 append；`run_collect` 成功仍恰好一次 append）完全不变；Lead 完全可以忽略它，直接用原子工具。`run_delivery_review_bundle` 的输出**不**携带该字段——其嵌套 `delivery` 保持既有合同（只有 standalone `run_delivery` 带）。
+
 ### MCP `run_delivery_review`（安全 delivery diff 审查，M11-3C）
 
 `run_delivery_review` 在持久 Lead 决策前读取一个已证明 delivery commit 的单文件 diff 页面。它只读、workspace-bound，不写 transcript，也不接受 path/cwd/runDir/commit/command 等控制参数。

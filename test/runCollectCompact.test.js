@@ -474,10 +474,12 @@ test("M12-2A-I1: MCP default (no mode) keeps exact full key set + pagination", a
     try {
       const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_i1" } });
       const parsed = res.structuredContent;
-      // Exact key set — NO compact fields leak into default full output.
+      // Exact key set — NO compact fields leak into default full output
+      // (M12-8B adds availableDrilldowns, the bounded progressive-disclosure
+      // metadata field shared by the six disclosure tools).
       assert.deepEqual(
         Object.keys(parsed).sort(),
-        ["agentId", "backend", "evidenceCounts", "itemCount", "messages", "nextCursor", "reconstructed", "runId", "truncated"].sort(),
+        ["agentId", "availableDrilldowns", "backend", "evidenceCounts", "itemCount", "messages", "nextCursor", "reconstructed", "runId", "truncated"].sort(),
       );
       assert.equal(parsed.view, undefined);
       assert.equal(parsed.compactStatus, undefined);

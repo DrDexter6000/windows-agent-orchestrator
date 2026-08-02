@@ -120,6 +120,19 @@ import {
   ACTIVITY_CURSOR_MAX_CHARS,
 } from "../application/runActivityProjection.js";
 import { readRunActivity } from "../application/runActivity.js";
+// M12-8B: bounded Lead progressive-disclosure metadata. The closed-set catalog,
+// selection rules, and hard bounds (entry count + serialized-size cap) live in
+// the ONE shared application module; the schema constants below are built from
+// its exported caps so the MCP schema and the application enforcement cannot
+// drift (same SSOT pattern as DELIVERY_READINESS_STATES / PACKAGING_FAILURE_CODES).
+import {
+  selectDrilldowns,
+  DRILLDOWN_MAX_ENTRIES,
+  DRILLDOWN_FIELD_MAX_LEN,
+  DRILLDOWN_VIEWS,
+  DRILLDOWN_COSTS,
+  DRILLDOWN_TOOLS,
+} from "../application/runDrilldowns.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
 import { selectSessionWorkspace } from "../application/sessionWorkspace.js";
 import { checkWorkspaceExpectation } from "../application/workspaceExpectation.js";
@@ -473,6 +486,36 @@ const RUN_CONTINUE_DESCRIPTION =
 // Fixed safe text for run_status failure. Never concatenates dynamic content.
 const STATUS_ERROR_TEXT = "run_status failed";
 
+// ===== M12-8B: shared bounded progressive-disclosure metadata schema =====
+//
+// `availableDrilldowns` is the ADDITIVE metadata field carried by EXACTLY six
+// tools (run_await_result, run_status, run_diagnose, run_collect, run_delivery,
+// run_activity). It tells the Lead which safe read-only tool can reveal more
+// about the returned result — never auto-calls it, never makes a semantic
+// decision, never advertises a destructive/mutating tool, and never contains
+// transcript/provider/repository text (every string is static, chosen by
+// src/application/runDrilldowns.js). Entry shape and bounds are built from the
+// application module's exported closed sets + caps — schema parity is enforced
+// by construction.
+// M12-8B: readOnly is the truthful boolean per advertised tool — false for
+// run_collect entries (one messages.collected audit append per call), true for
+// the genuinely read-only observation tools. The array is bounded here by
+// DRILLDOWN_MAX_ENTRIES; the serialized-size cap is enforced by the application
+// selector (src/application/runDrilldowns.js), not by this schema.
+const DRILLDOWN_ENTRY = z.object({
+  tool: z.enum(DRILLDOWN_TOOLS),
+  view: z.enum(DRILLDOWN_VIEWS),
+  detail: z.string().min(1).max(DRILLDOWN_FIELD_MAX_LEN),
+  purpose: z.string().min(1).max(DRILLDOWN_FIELD_MAX_LEN),
+  reveals: z.string().min(1).max(DRILLDOWN_FIELD_MAX_LEN),
+  cost: z.enum(DRILLDOWN_COSTS),
+  readOnly: z.boolean(),
+}).strict();
+
+// 1..DRILLDOWN_MAX_ENTRIES: every selector returns at least one entry, so an
+// empty list is a contract violation, never a legitimate result.
+const AVAILABLE_DRILLDOWNS = z.array(DRILLDOWN_ENTRY).min(1).max(DRILLDOWN_MAX_ENTRIES);
+
 // run_status input: only runId. runDir is server-owned; a model cannot override it.
 const RUN_STATUS_INPUT = z.object({
   runId: z.string().min(1),
@@ -496,6 +539,11 @@ const RUN_STATUS_OUTPUT = z.object({
     ts: z.string(),
     secondsSince: z.number().nullable(),
   }).nullable(),
+  // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
+  // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
+  // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
+  // deliberately does not carry the field.
+  availableDrilldowns: AVAILABLE_DRILLDOWNS,
 }).strict();
 
 const RUN_STATUS_ANNOTATIONS = {
@@ -571,6 +619,11 @@ const RUN_COLLECT_OUTPUT = z.object({
   view: z.literal("compact").optional(),
   compactStatus: z.enum(["available", "empty", "too_large"]).optional(),
   assistantMessageCount: z.number().int().nonnegative().optional(),
+  // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
+  // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
+  // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
+  // deliberately does not carry the field.
+  availableDrilldowns: AVAILABLE_DRILLDOWNS,
 }).strict();
 
 const RUN_COLLECT_ANNOTATIONS = {
@@ -635,7 +688,12 @@ const RUN_DIAGNOSE_OUTPUT = z.object({
   signalEventTypes: z.array(z.string().min(1).max(DIAGNOSE_MAX_TYPE_CHARS)).max(DIAGNOSE_MAX_SIGNALS),
   signalCount: z.number().int().nonnegative(),
   signalsTruncated: z.boolean(),
-});
+  // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
+  // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
+  // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
+  // deliberately does not carry the field.
+  availableDrilldowns: AVAILABLE_DRILLDOWNS,
+}).strict();
 
 const RUN_DIAGNOSE_ANNOTATIONS = {
   readOnlyHint: true,
@@ -794,7 +852,12 @@ function safeProjectCandidateInventory(raw) {
   };
 }
 
-const RUN_DELIVERY_OUTPUT = z.object({
+// Delivery base shape: the legacy run_delivery contract WITHOUT M12-8B
+// metadata. The standalone output below extends it with the REQUIRED
+// availableDrilldowns; run_delivery_review_bundle embeds this base so its
+// established nested delivery contract stays byte-identical and never
+// accidentally acquires the progressive-disclosure field.
+const RUN_DELIVERY_OUTPUT_BASE = z.object({
   runId: z.string().min(1),
   deliveryAvailable: z.boolean(),
   deliveryRequested: z.boolean(),
@@ -843,6 +906,15 @@ const RUN_DELIVERY_OUTPUT = z.object({
   readiness: READINESS_ENUM.optional(),
   waitReturnedEarly: z.boolean().optional(),
 }).strict();
+
+// Standalone run_delivery output: the legacy base plus the REQUIRED M12-8B
+// progressive-disclosure metadata. Only this standalone shape carries the
+// field — the review bundle embeds RUN_DELIVERY_OUTPUT_BASE instead.
+const RUN_DELIVERY_OUTPUT = RUN_DELIVERY_OUTPUT_BASE.extend({
+  // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
+  // AVAILABLE_DRILLDOWNS).
+  availableDrilldowns: AVAILABLE_DRILLDOWNS,
+});
 
 const RUN_DELIVERY_ANNOTATIONS = {
   readOnlyHint: true,
@@ -973,6 +1045,21 @@ export function projectVerificationFailureSummary(ref, verificationStatus, proje
 // deliveryFailure is null — the readiness label (added by the wait path)
 // disambiguates. This helper does NOT include readiness/waitReturnedEarly; the
 // wait handler appends them after.
+//
+// M12-8B: one shared drilldown projection for BOTH delivery payload paths (the
+// point-in-time query and the waitMs readiness handshake) so the metadata
+// cannot diverge between them. Reads only already-projected payload facts.
+function selectDeliveryDrilldowns(payload) {
+  return selectDrilldowns("run_delivery", {
+    deliveryAvailable: payload.deliveryAvailable,
+    deliveryRequested: payload.deliveryRequested ?? null,
+    terminalState: payload.terminalState,
+    verificationStatus: payload.verificationStatus ?? null,
+    acceptanceStatus: payload.acceptanceStatus ?? null,
+    readiness: payload.readiness ?? null,
+    deliveryFailureCode: payload.deliveryFailure?.code ?? null,
+  });
+}
 function buildRunDeliveryPayload(runId, view) {
   // Use the request runId — never echo the service result's runId, which could
   // differ and leak arbitrary content.
@@ -1589,6 +1676,11 @@ const RUN_AWAIT_RESULT_OUTPUT = z.object({
   lastActivityKind: z.string().nullable(),
   ownerHeartbeat: z.enum(["fresh", "stale", "n/a", "unknown"]),
   result: RUN_AWAIT_RESULT_RESULT,
+  // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
+  // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
+  // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
+  // deliberately does not carry the field.
+  availableDrilldowns: AVAILABLE_DRILLDOWNS,
 }).strict();
 
 const RUN_AWAIT_RESULT_ANNOTATIONS = {
@@ -1745,6 +1837,11 @@ const RUN_ACTIVITY_OUTPUT = z.object({
   pageSize: z.number().int().min(1).max(LEAD_PAGE_HARD_CAP),
   truncated: z.boolean(),
   nextCursor: z.string().regex(RUN_ACTIVITY_CURSOR_RE).max(ACTIVITY_CURSOR_MAX_CHARS).nullable(),
+  // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
+  // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
+  // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
+  // deliberately does not carry the field.
+  availableDrilldowns: AVAILABLE_DRILLDOWNS,
 }).strict();
 
 const RUN_ACTIVITY_ANNOTATIONS = {
@@ -1972,7 +2069,10 @@ const DELIVERY_REVIEW_BUNDLE_INPUT = z.object({
 
 const DELIVERY_REVIEW_BUNDLE_OUTPUT = z.object({
   runId: z.string().min(1),
-  delivery: RUN_DELIVERY_OUTPUT,
+  // M12-8B: the nested delivery is the legacy BASE shape — the bundle keeps
+  // its established contract and never acquires the progressive-disclosure
+  // field (the standalone run_delivery output carries it instead).
+  delivery: RUN_DELIVERY_OUTPUT_BASE,
   review: DELIVERY_REVIEW_OUTPUT.nullable(),
 }).strict();
 
@@ -2749,6 +2849,12 @@ export function createWaoMcpServer({
           lastEvent,
           lastActivity,
         };
+        // M12-8B: bounded progressive-disclosure metadata — a pure function of
+        // the already-projected machine facts (no extra reads, no semantics).
+        payload.availableDrilldowns = selectDrilldowns("run_status", {
+          state: payload.state,
+          terminal: payload.terminal,
+        });
         // M11-8B closeout: return the PARSED safe object. The strict output
         // schema is the trust boundary; a malformed service result (extra keys,
         // invalid agentId, bad types) collapses to the fixed safe text.
@@ -2808,6 +2914,15 @@ export function createWaoMcpServer({
         // M11-8B closeout: project agentId through the SSOT and return the
         // PARSED safe object. The strict schema is the trust boundary.
         payload.agentId = safeProjectAgentId(payload.agentId);
+        // M12-8B: bounded progressive-disclosure metadata — computed BEFORE the
+        // schema parse so the deferred-audit semantics hold unchanged: any
+        // drilldown failure would collapse to the fixed error with zero append
+        // (commitAppend still runs only after parse succeeds).
+        payload.availableDrilldowns = selectDrilldowns("run_collect", {
+          view: payload.view ?? "full",
+          nextCursor: payload.nextCursor,
+          compactStatus: payload.compactStatus ?? null,
+        });
         const parsed = RUN_COLLECT_OUTPUT.parse(payload);
         // Projection + schema validation succeeded → safe to commit the audit.
         if (typeof raw.commitAppend === "function") {
@@ -2865,10 +2980,21 @@ export function createWaoMcpServer({
           signalCount: allTypes.length,
           signalsTruncated: allTypes.length > DIAGNOSE_MAX_SIGNALS,
         };
-        RUN_DIAGNOSE_OUTPUT.parse(payload);
+        // M12-8B: bounded progressive-disclosure metadata — a pure function of
+        // the already-projected safe fields.
+        payload.availableDrilldowns = selectDrilldowns("run_diagnose", {
+          state: payload.state,
+          terminal: payload.terminal,
+          category: payload.category,
+        });
+        // M12-8B closeout: the strict output schema is the trust boundary —
+        // return the PARSED safe object. Any unknown field or out-of-set value
+        // collapses to the fixed safe error with no partial structuredContent,
+        // never a raw echo of the pre-parse payload.
+        const parsed = RUN_DIAGNOSE_OUTPUT.parse(payload);
         return {
-          content: [{ type: "text", text: JSON.stringify(payload) }],
-          structuredContent: payload,
+          content: [{ type: "text", text: JSON.stringify(parsed) }],
+          structuredContent: parsed,
         };
       } catch {
         return {
@@ -2926,6 +3052,9 @@ export function createWaoMcpServer({
             readiness: result.readiness,
             waitReturnedEarly: result.waitReturnedEarly,
           };
+          // M12-8B: bounded progressive-disclosure metadata (wait path — same
+          // projection as the point-in-time path via selectDeliveryDrilldowns).
+          payload.availableDrilldowns = selectDeliveryDrilldowns(payload);
           const parsed = RUN_DELIVERY_OUTPUT.parse(payload);
           return {
             content: [{ type: "text", text: JSON.stringify(parsed) }],
@@ -2946,6 +3075,8 @@ export function createWaoMcpServer({
           : {};
         const delivery = await deliveryQueryService({ runId, runDir, ...inventoryAuthority });
         const payload = buildRunDeliveryPayload(runId, delivery);
+        // M12-8B: bounded progressive-disclosure metadata (point-in-time path).
+        payload.availableDrilldowns = selectDeliveryDrilldowns(payload);
         const parsed = RUN_DELIVERY_OUTPUT.parse(payload);
         return {
           content: [{ type: "text", text: JSON.stringify(parsed) }],
@@ -3347,6 +3478,17 @@ export function createWaoMcpServer({
           result: result.result,
         };
 
+        // M12-8B: bounded progressive-disclosure metadata — a pure function of
+        // the already-projected machine facts (state/outcome/result status).
+        payload.availableDrilldowns = selectDrilldowns("run_await_result", {
+          state: payload.state,
+          terminal: payload.terminal,
+          observationOutcome: payload.observationOutcome,
+          readFailureReason: payload.readFailureReason ?? null,
+          liveness: payload.liveness,
+          resultStatus: payload.result?.status ?? "unavailable",
+        });
+
         const parsed = RUN_AWAIT_RESULT_OUTPUT.parse(payload);
         return {
           content: [{ type: "text", text: JSON.stringify(parsed) }],
@@ -3398,6 +3540,13 @@ export function createWaoMcpServer({
           ...(input?.afterSeq !== undefined ? { afterSeq: input.afterSeq } : {}),
           ...(input?.cursor ? { cursor: input.cursor } : {}),
           ...(input?.pageSize !== undefined ? { pageSize: input.pageSize } : {}),
+        });
+
+        // M12-8B: bounded progressive-disclosure metadata — a pure function of
+        // the projected page facts (zero extra reads, zero append).
+        page.availableDrilldowns = selectDrilldowns("run_activity", {
+          terminal: page.terminal,
+          nextCursor: page.nextCursor,
         });
 
         const parsed = RUN_ACTIVITY_OUTPUT.parse(page);
@@ -3611,7 +3760,11 @@ export function createWaoMcpServer({
           readiness: readinessView.readiness,
           waitReturnedEarly: readinessView.waitReturnedEarly,
         };
-        const delivery = RUN_DELIVERY_OUTPUT.parse(deliveryPayload);
+        // M12-8B: parse against the legacy BASE shape — the bundle's nested
+        // delivery must never carry the progressive-disclosure field. If a
+        // future change adds it to buildRunDeliveryPayload, this strict parse
+        // fails closed instead of leaking the field into the bundle.
+        const delivery = RUN_DELIVERY_OUTPUT_BASE.parse(deliveryPayload);
 
         let review = null;
         if (readinessView.readiness === "reviewable") {

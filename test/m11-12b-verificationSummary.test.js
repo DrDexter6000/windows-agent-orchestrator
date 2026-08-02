@@ -651,6 +651,8 @@ test("M11-12B-P7: full run_delivery output for a failed delivery has the exact e
     "verificationStatus", "verificationFailureCode", "verificationFailureSummary",
     "originalVerificationStatus", "effectiveVerificationStatus", "reverify",
     "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory", "candidateKind",
+    // M12-8B: bounded progressive-disclosure metadata (additive).
+    "availableDrilldowns",
   ]);
   assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys,
     `wire field set mismatch; got ${Object.keys(parsed).sort()}`);

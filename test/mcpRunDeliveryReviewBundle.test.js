@@ -143,6 +143,13 @@ test("M12-3B-RED-02: one call waits once and returns one requested review page",
       assert.equal(result.structuredContent.delivery.waitReturnedEarly, true);
       assert.equal(result.structuredContent.review.fileIndex, 1);
       assert.equal(result.structuredContent.review.changedPath, "src/b.js");
+      // M12-8B correction: the bundle keeps its established nested delivery
+      // contract — it never acquires the progressive-disclosure field, neither
+      // at the top level nor inside the nested delivery sub-object.
+      assert.equal("availableDrilldowns" in result.structuredContent, false,
+        "bundle top level must NOT carry availableDrilldowns");
+      assert.equal("availableDrilldowns" in result.structuredContent.delivery, false,
+        "bundle nested delivery must NOT carry availableDrilldowns");
       assert.equal(readinessCalls.length, 1, "exactly one readiness call");
       assert.equal(readinessCalls[0].waitMs, 120000);
       assert.equal(reviewCalls.length, 1, "exactly one review page");

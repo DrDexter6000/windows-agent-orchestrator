@@ -141,7 +141,8 @@ test("M9-4B-03: run_collect output is bounded safe projection, no raw leak", asy
     // Top-level keys: only the safe projection.
     // M11-4: nextCursor added for continuation (null when result fits one page).
     // M11-8B: agentId added (canonical worker identity from the envelope).
-    const allowedKeys = new Set(["runId", "agentId", "backend", "reconstructed", "itemCount", "messages", "evidenceCounts", "truncated", "nextCursor"]);
+    // M12-8B: availableDrilldowns added (bounded progressive-disclosure metadata).
+    const allowedKeys = new Set(["runId", "agentId", "backend", "reconstructed", "itemCount", "messages", "evidenceCounts", "truncated", "nextCursor", "availableDrilldowns"]);
     for (const k of Object.keys(parsed)) {
       assert.ok(allowedKeys.has(k), `unexpected key in output: ${k}`);
     }
