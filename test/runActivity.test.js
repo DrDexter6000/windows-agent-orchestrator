@@ -173,9 +173,9 @@ test("#12c missing run.background_submitted fails closed", async () => {
 });
 
 // =====================================================================
-// Reader-derived facts: agentId (canonical/unknown), backend, state, terminal.
+// Reader-derived facts: agentId (canonical), backend, state, terminal.
 // =====================================================================
-test("reader derives agentId canonical and degrades cross-run to unknown", async () => {
+test("reader derives agentId canonical when the envelope is bound to the requested run", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-act-id-"));
   const runDir = mkdtempSync(join(tmpdir(), "wao-act-id-rd-"));
   try {
@@ -184,17 +184,96 @@ test("reader derives agentId canonical and degrades cross-run to unknown", async
     const { readRunActivity } = await import("../src/application/runActivity.js");
     const ok = await readRunActivity({ runId: "run_id", runDir });
     assert.equal(ok.agentId, "coder_low");
+  } finally { cleanupDir(dir); rmrfRetry(runDir); }
+});
 
-    // Cross-run contamination: file run_OTHER.jsonl carries runId "run_id".
+// =====================================================================
+// Exact run binding: a cross-run envelope FAILS CLOSED before any structured
+// result — it must NOT degrade agentId to "unknown" while still projecting.
+// =====================================================================
+test("reader FAILS CLOSED on cross-run envelope (never degrades and projects)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-act-xrun-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-act-xrun-rd-"));
+  try {
+    makeGitRepo(dir);
+    // File run_OTHER.jsonl carries envelope runId "run_id" — every event
+    // mismatches the requested "run_OTHER".
     const cross = [
       jl({ type: "run.submitted", agentId: "coder_low", ts: "2026-08-02T00:00:00.000Z", runId: "run_id" }),
       jl({ type: "session.created", backend: "process", backendSessionId: "p2", runId: "run_id", agentId: "coder_low" }),
       jl({ type: "run.background_submitted", background: true, cwd: dir, runId: "run_id", agentId: "coder_low" }),
       jl({ type: "run.state_change", to: "running", reason: "x", ts: "2026-08-02T00:00:03.000Z", runId: "run_id", agentId: "coder_low" }),
     ];
+    mkdirSync(runDir, { recursive: true });
     writeFileSync(join(runDir, "run_OTHER.jsonl"), cross.join(""), "utf8");
-    const out = await readRunActivity({ runId: "run_OTHER", runDir });
-    assert.equal(out.agentId, "unknown");
+    const { readRunActivity } = await import("../src/application/runActivity.js");
+    await assert.rejects(
+      () => readRunActivity({ runId: "run_OTHER", runDir }),
+      /runId/,
+    );
+  } finally { cleanupDir(dir); rmrfRetry(runDir); }
+});
+
+// =====================================================================
+// Exact run binding: a single mismatched event carrying assistant text and a
+// secret fails closed — no partial facts, no content, no leak.
+// =====================================================================
+test("reader FAILS CLOSED on one mismatched event (assistant text + secret never surface)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-act-mis-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-act-mis-rd-"));
+  try {
+    makeGitRepo(dir);
+    const secret = "test-secret-reader-mismatch";
+    const id = "run_mism", a = "coder_low";
+    const lines = [
+      jl({ type: "run.submitted", agentId: a, ts: "2026-08-02T00:00:00.000Z", runId: id }),
+      jl({ type: "session.created", backend: "process", backendSessionId: "p", runId: id, agentId: a }),
+      jl({ type: "run.background_submitted", background: true, cwd: dir, runId: id, agentId: a }),
+      // The mismatched event carries assistant text + a secret but envelope runId "run_OTHER".
+      jl({
+        type: "run.event", kind: "message", role: "assistant",
+        parts: [{ type: "text", text: `done here: ${secret}` }],
+        ts: "2026-08-02T00:00:10.000Z", runId: "run_OTHER", agentId: a,
+      }),
+    ];
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, `${id}.jsonl`), lines.join(""), "utf8");
+    const { readRunActivity } = await import("../src/application/runActivity.js");
+    await assert.rejects(
+      () => readRunActivity({ runId: id, runDir, authorizedWorkspaceRoot: dir }),
+      (e) => /runId/.test(e.message) && !String(e.message).includes(secret),
+    );
+  } finally { cleanupDir(dir); rmrfRetry(runDir); }
+});
+
+// =====================================================================
+// Exact run binding: an event with a MISSING runId field fails closed.
+// =====================================================================
+test("reader FAILS CLOSED on an event with a missing runId envelope field", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-act-miss-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-act-miss-rd-"));
+  try {
+    makeGitRepo(dir);
+    const id = "run_missing", a = "coder_low";
+    const withMissing = {
+      type: "run.event", kind: "message", role: "assistant",
+      parts: [{ type: "text", text: "leak" }],
+      ts: "2026-08-02T00:00:10.000Z", agentId: a,
+      // NO runId field.
+    };
+    const lines = [
+      jl({ type: "run.submitted", agentId: a, ts: "2026-08-02T00:00:00.000Z", runId: id }),
+      jl({ type: "session.created", backend: "process", backendSessionId: "p", runId: id, agentId: a }),
+      jl({ type: "run.background_submitted", background: true, cwd: dir, runId: id, agentId: a }),
+      jl(withMissing),
+    ];
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, `${id}.jsonl`), lines.join(""), "utf8");
+    const { readRunActivity } = await import("../src/application/runActivity.js");
+    await assert.rejects(
+      () => readRunActivity({ runId: id, runDir, authorizedWorkspaceRoot: dir }),
+      /runId/,
+    );
   } finally { cleanupDir(dir); rmrfRetry(runDir); }
 });
 

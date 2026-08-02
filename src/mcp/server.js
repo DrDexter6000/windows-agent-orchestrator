@@ -111,6 +111,13 @@ import {
   ACTIVITY_CATEGORIES,
   LEAD_PAGE_DEFAULT,
   LEAD_PAGE_HARD_CAP,
+  LEAD_TEXT_EXCERPT_CAP,
+  ACTIVITY_ROLE_CAP,
+  ACTIVITY_LABEL_CAP,
+  ACTIVITY_TOOL_NAME_CAP,
+  ACTIVITY_PATH_CAP,
+  ACTIVITY_TS_CAP,
+  ACTIVITY_CURSOR_MAX_CHARS,
 } from "../application/runActivityProjection.js";
 import { readRunActivity } from "../application/runActivity.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
@@ -1632,67 +1639,76 @@ const RUN_AWAIT_RESULT_DESCRIPTION =
 
 const RUN_ACTIVITY_ERROR_TEXT = "run_activity failed";
 
+// Cursor wire contract: opaque base64url, ≤ ACTIVITY_CURSOR_MAX_CHARS — the
+// exact bounds enforced by the projector codec (parity, no drift).
+const RUN_ACTIVITY_CURSOR_RE = /^[A-Za-z0-9_-]+$/;
+
 const RUN_ACTIVITY_INPUT = z.object({
   runId: z.string().min(1),
-  categories: z.array(z.enum([...ACTIVITY_CATEGORIES])).min(1).optional(),
+  // Closed set, at most one entry per category (duplicates are schema-rejected;
+  // the projector additionally canonicalizes to a unique sorted set).
+  categories: z.array(z.enum([...ACTIVITY_CATEGORIES])).min(1).max(ACTIVITY_CATEGORIES.length)
+    .refine((c) => new Set(c).size === c.length, "duplicate category in filter").optional(),
   afterSeq: z.number().int().nonnegative().optional(),
-  cursor: z.string().optional(),
+  cursor: z.string().regex(RUN_ACTIVITY_CURSOR_RE).max(ACTIVITY_CURSOR_MAX_CHARS).optional(),
   pageSize: z.number().int().min(1).max(LEAD_PAGE_HARD_CAP).optional(),
 }).strict();
 
 // Entry variants — a discriminated union on `category`. Each variant carries
 // ONLY closed-set safe fields. No variant exposes raw command text, tool
-// input/output, error text, exit code, callId, or absolute path.
+// input/output, error text, exit code, callId, or absolute path. Every dynamic
+// string bound matches the projector's exported *_CAP constant (parity, no
+// drift): the projector caps AFTER redaction, so these maxima are exact.
 const RUN_ACTIVITY_ENTRY_MESSAGE = z.object({
   category: z.literal("message"),
-  ts: z.string(),
+  ts: z.string().max(ACTIVITY_TS_CAP),
   seq: z.number().int(),
-  role: z.string(),
-  text: z.string(),
+  role: z.string().max(ACTIVITY_ROLE_CAP),
+  text: z.string().max(LEAD_TEXT_EXCERPT_CAP),
   truncated: z.boolean(),
 }).strict();
 
 const RUN_ACTIVITY_ENTRY_COMMAND = z.object({
   category: z.literal("command"),
-  ts: z.string(),
+  ts: z.string().max(ACTIVITY_TS_CAP),
   seq: z.number().int(),
   exitStatus: z.enum(["ok", "failed", "unknown"]),
 }).strict();
 
 const RUN_ACTIVITY_ENTRY_TOOL_USE = z.object({
   category: z.literal("tool_use"),
-  ts: z.string(),
+  ts: z.string().max(ACTIVITY_TS_CAP),
   seq: z.number().int(),
-  tool: z.string(),
+  tool: z.string().max(ACTIVITY_TOOL_NAME_CAP),
 }).strict();
 
 const RUN_ACTIVITY_ENTRY_TOOL_RESULT = z.object({
   category: z.literal("tool_result"),
-  ts: z.string(),
+  ts: z.string().max(ACTIVITY_TS_CAP),
   seq: z.number().int(),
   isError: z.boolean(),
 }).strict();
 
 const RUN_ACTIVITY_ENTRY_FILE_WRITTEN = z.object({
   category: z.literal("file_written"),
-  ts: z.string(),
+  ts: z.string().max(ACTIVITY_TS_CAP),
   seq: z.number().int(),
-  path: z.string(),
+  path: z.string().max(ACTIVITY_PATH_CAP),
 }).strict();
 
 const RUN_ACTIVITY_ENTRY_STATE = z.object({
   category: z.literal("state"),
-  ts: z.string(),
+  ts: z.string().max(ACTIVITY_TS_CAP),
   seq: z.number().int(),
-  to: z.string(),
+  to: z.string().max(ACTIVITY_LABEL_CAP),
   terminal: z.boolean(),
 }).strict();
 
 const RUN_ACTIVITY_ENTRY_OTHER = z.object({
   category: z.literal("other"),
-  ts: z.string(),
+  ts: z.string().max(ACTIVITY_TS_CAP),
   seq: z.number().int(),
-  label: z.string(),
+  label: z.string().max(ACTIVITY_LABEL_CAP),
 }).strict();
 
 const RUN_ACTIVITY_ENTRY = z.union([
@@ -1718,15 +1734,17 @@ const RUN_ACTIVITY_COUNTS = z.object({
 const RUN_ACTIVITY_OUTPUT = z.object({
   runId: z.string(),
   agentId: READ_AGENT_ID_SCHEMA,
-  backend: z.string(),
-  state: z.string(),
+  // backend/state are sanitized+bounded to ACTIVITY_LABEL_CAP by the projector.
+  backend: z.string().max(ACTIVITY_LABEL_CAP),
+  state: z.string().max(ACTIVITY_LABEL_CAP),
   terminal: z.boolean(),
   counts: RUN_ACTIVITY_COUNTS,
   total: z.number().int().nonnegative(),
-  entries: z.array(RUN_ACTIVITY_ENTRY),
-  pageSize: z.number().int().min(1),
+  // At most LEAD_PAGE_HARD_CAP entries per page — the projector's page cap.
+  entries: z.array(RUN_ACTIVITY_ENTRY).max(LEAD_PAGE_HARD_CAP),
+  pageSize: z.number().int().min(1).max(LEAD_PAGE_HARD_CAP),
   truncated: z.boolean(),
-  nextCursor: z.string().nullable(),
+  nextCursor: z.string().regex(RUN_ACTIVITY_CURSOR_RE).max(ACTIVITY_CURSOR_MAX_CHARS).nullable(),
 }).strict();
 
 const RUN_ACTIVITY_ANNOTATIONS = {
@@ -1749,10 +1767,11 @@ const RUN_ACTIVITY_DESCRIPTION =
   "pagination, so a secret spanning an excerpt or page boundary never leaks. " +
   "C0/C1/DEL control characters are neutralized (LF/TAB preserved). Makes NO " +
   "semantic summary, recommendation, or progress estimate. Paginated via an " +
-  "opaque cursor that binds runId + frozen snapshot + view (category filter + " +
-  "afterSeq) + position; append-only growth is safe, any history mutation, " +
-  "shrink, cross-run, cross-filter, malformed, or out-of-range cursor fails " +
-  "closed. categories filters the timeline (closed set); afterSeq returns only " +
+  "opaque cursor that binds runId + frozen snapshot + view (audience + " +
+  "category filter + afterSeq) + position; append-only growth is safe, any " +
+  "history mutation, shrink, cross-run, cross-view, cross-audience, " +
+  "malformed, or out-of-range cursor fails closed. categories filters the " +
+  "timeline (closed set, at most one per category); afterSeq returns only " +
   "events with seq > afterSeq; pageSize ≤ " + LEAD_PAGE_HARD_CAP + " (default " +
   LEAD_PAGE_DEFAULT + "). Read-only and idempotent: zero transcript appends on " +
   "every path. Workspace-bound: a run whose ownership cwd does not match the " +

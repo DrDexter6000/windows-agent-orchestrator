@@ -1484,3 +1484,37 @@ export function extractCanonicalAgentId(events, expectedRunId) {
   }
   return candidate;
 }
+
+/**
+ * Fail-closed runId envelope binding (M12-8 activity path SSOT).
+ *
+ * Strictly stronger than extractCanonicalAgentId's degrade-to-"unknown"
+ * behavior: EVERY object event in the snapshot must carry a `runId` string
+ * field EXACTLY equal to the requested runId. Missing (undefined/null/empty/
+ * non-string), mismatched, or conflicting (mixed runIds within one snapshot)
+ * envelope facts THROW — the caller must fail closed BEFORE deriving any
+ * structured output (backend/state/terminal/agentId/activity) from the
+ * snapshot. Never returns a degraded value.
+ *
+ * Non-object lines (corrupt primitives such as null/numbers/raw strings)
+ * cannot influence state/backend/terminal/activity output — classification
+ * skips them — so they are skipped here; they remain inside the raw-snapshot
+ * cursor digest, so they are still bound to the frozen-prefix cursor.
+ *
+ * @param {object[]} events — transcript event array (untrusted)
+ * @param {string} runId — the caller-requested runId
+ * @throws {Error} when any object event carries a missing or mismatched runId
+ */
+export function assertEventsBoundToRunId(events, runId) {
+  if (!Array.isArray(events)) throw new Error("invalid activity snapshot: events must be an array");
+  for (let i = 0; i < events.length; i += 1) {
+    const ev = events[i];
+    if (ev === null || typeof ev !== "object") continue; // corrupt primitive line — cannot influence output
+    if (typeof ev.runId !== "string" || ev.runId.length === 0) {
+      throw new Error("runId binding failed: event envelope missing runId");
+    }
+    if (ev.runId !== runId) {
+      throw new Error("runId binding failed: event envelope runId mismatch");
+    }
+  }
+}

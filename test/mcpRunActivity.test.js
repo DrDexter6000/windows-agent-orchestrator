@@ -23,6 +23,17 @@ import { execFileSync } from "node:child_process";
 import { createWaoMcpServer } from "../src/mcp/server.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import {
+  ACTIVITY_CATEGORIES,
+  LEAD_PAGE_HARD_CAP,
+  LEAD_TEXT_EXCERPT_CAP,
+  ACTIVITY_ROLE_CAP,
+  ACTIVITY_LABEL_CAP,
+  ACTIVITY_TOOL_NAME_CAP,
+  ACTIVITY_PATH_CAP,
+  ACTIVITY_TS_CAP,
+  ACTIVITY_CURSOR_MAX_CHARS,
+} from "../src/application/runActivityProjection.js";
 
 // ===== Helpers =====
 
@@ -218,8 +229,10 @@ test("MAA-06: pageSize bounds — 0 rejected, over hard cap rejected", async () 
       const tools = await client.listTools();
       const t = tools.tools.find((x) => x.name === "run_activity");
       const ps = t.inputSchema.properties.pageSize;
-      assert.ok(ps.minimum >= 1, "pageSize min >= 1");
-      assert.ok(ps.maximum >= 1, "pageSize hard cap declared");
+      // Tightened: EXACT caps, not >=1 (the wire schema must match the
+      // projector's LEAD_PAGE_HARD_CAP exactly — no drift).
+      assert.equal(ps.minimum, 1, "pageSize min exactly 1");
+      assert.equal(ps.maximum, LEAD_PAGE_HARD_CAP, "pageSize max exactly the projector hard cap");
       // pageSize=0 must be rejected pre-handler.
       let zeroRejected = false;
       try {
@@ -234,6 +247,29 @@ test("MAA-06: pageSize bounds — 0 rejected, over hard cap rejected", async () 
         if (res?.isError || !res?.structuredContent) overRejected = true;
       } catch { overRejected = true; }
       assert.ok(overRejected, "pageSize over hard cap rejected");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});
+
+test("MAA-17: duplicate categories rejected at the wire (at most one per category)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-maa17-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-maa17-rd-"));
+  try {
+    makeGitRepo(dir);
+    seedTranscript(runDir, "run_x", { workspaceCwd: dir, messages: ["a"], terminal: true });
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      let rejected = false;
+      try {
+        const res = await client.callTool({ name: "run_activity", arguments: { runId: "run_x", categories: ["message", "message"] } });
+        if (res?.isError || !res?.structuredContent) rejected = true;
+      } catch { rejected = true; }
+      assert.ok(rejected, "duplicate categories rejected pre-handler");
+      // positive control: a single category still returns structured entries.
+      const ok = await client.callTool({ name: "run_activity", arguments: { runId: "run_x", categories: ["message"] } });
+      assert.equal(ok.isError, undefined, "single category accepted");
+      assert.ok(Array.isArray(ok.structuredContent?.entries));
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
@@ -432,6 +468,153 @@ test("MAA-13: tool count is 22 after run_activity (was 21)", async () => {
       const tools = await client.listTools();
       assert.ok(tools.tools.find((x) => x.name === "run_activity"), "run_activity present");
       assert.equal(tools.tools.length, 22, "exactly 22 tools after M12-8 run_activity");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// =====================================================================
+// Exact run binding at the MCP boundary: one mismatched event carrying
+// assistant text + a secret fails closed — fixed error text, NO partial
+// structuredContent, no text/secret in the raw response dump.
+// =====================================================================
+test("MAA-14: envelope runId mismatch (assistant text + secret) → fixed error, no leak", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-maa14-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-maa14-rd-"));
+  try {
+    makeGitRepo(dir);
+    const secret = "test-secret-maa14";
+    const a = "coder_low", id = "run_mism";
+    const lines = [
+      jl({ type: "run.submitted", agentId: a, ts: "2026-08-02T00:00:00.000Z", runId: id }),
+      jl({ type: "session.created", backend: "process", backendSessionId: "p", runId: id, agentId: a }),
+      jl({ type: "run.background_submitted", background: true, cwd: dir, runId: id, agentId: a }),
+      // The mismatched event: assistant text + a secret, envelope runId "run_OTHER".
+      jl({
+        type: "run.event", kind: "message", role: "assistant",
+        parts: [{ type: "text", text: `assistant says ${secret}` }],
+        ts: "2026-08-02T00:00:10.000Z", runId: "run_OTHER", agentId: a,
+      }),
+    ];
+    writeFileSync(join(runDir, `${id}.jsonl`), lines.join(""), "utf8");
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_activity", arguments: { runId: id } });
+      const dumped = JSON.stringify(res);
+      assert.ok(dumped.includes("run_activity failed"), "fixed safe error text on envelope mismatch");
+      assert.ok(!res.structuredContent, "no partial structuredContent on envelope mismatch");
+      assert.ok(!dumped.includes(secret), "secret never crosses");
+      assert.ok(!dumped.includes("assistant says"), "mismatched assistant text never crosses");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});
+
+// =====================================================================
+// Uniform dynamic-string safety at the MCP boundary: secrets in tool name /
+// backend / role / unknown kind label / relative path are redacted or
+// sentineled — the raw secret NEVER crosses a single output field.
+// =====================================================================
+test("MAA-15: secrets in tool name / backend / role / unknown label / relative path never cross", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-maa15-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-maa15-rd-"));
+  try {
+    makeGitRepo(dir);
+    const secret = "test-secret-maa15";
+    const a = "coder_low", id = "run_dyn";
+    const lines = [
+      jl({ type: "run.submitted", agentId: a, ts: "2026-08-02T00:00:00.000Z", runId: id }),
+      // secret inside the BACKEND fact.
+      jl({ type: "session.created", backend: "process_" + secret, backendSessionId: "p", runId: id, agentId: a }),
+      jl({ type: "run.background_submitted", background: true, cwd: dir, runId: id, agentId: a }),
+      jl({ type: "run.state_change", to: "running", reason: "x", ts: "2026-08-02T00:00:02.000Z", runId: id, agentId: a }),
+      // secret inside the TOOL NAME.
+      jl({ type: "run.event", kind: "tool_use", tool: "Bash_" + secret, input: {}, runId: id, agentId: a }),
+      // secret inside a RELATIVE PATH.
+      jl({ type: "run.event", kind: "file_written", path: "src/" + secret + "/keep.js", runId: id, agentId: a }),
+      // secret inside the ROLE.
+      jl({ type: "run.event", kind: "message", role: "assistant_" + secret, parts: [{ type: "text", text: "hi" }], ts: "2026-08-02T00:00:10.000Z", runId: id, agentId: a }),
+      // UNKNOWN KIND whose name itself is the secret → must become the fixed
+      // sentinel label, never echo the secret as a label.
+      jl({ type: "run.event", kind: secret + "_kind", runId: id, agentId: a }),
+    ];
+    writeFileSync(join(runDir, `${id}.jsonl`), lines.join(""), "utf8");
+    const prev = process.env.MAA15_TOKEN;
+    process.env.MAA15_TOKEN = secret;
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_activity", arguments: { runId: id } });
+      assert.equal(res.isError, undefined, "call succeeds — every dynamic field sanitized");
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes(secret), "raw secret NEVER crosses any output field");
+      assert.ok(dumped.includes("[REDACTED"), "redaction markers present");
+      assert.ok(dumped.includes("[unknown_event]"), "unknown kind → fixed sentinel label, not the secret");
+      const parsed = res.structuredContent;
+      assert.ok(parsed.backend.includes("[REDACTED"), "backend redacted in place");
+      const tu = parsed.entries.find((e) => e.category === "tool_use");
+      assert.ok(tu.tool.includes("[REDACTED"), "tool name redacted in place");
+      const fw = parsed.entries.find((e) => e.category === "file_written");
+      assert.ok(fw.path.includes("[REDACTED") && fw.path.startsWith("src/"), "relative path redacted in place");
+      const msg = parsed.entries.find((e) => e.category === "message");
+      assert.ok(msg.role.includes("[REDACTED"), "role redacted in place");
+    } finally {
+      await client.close(); await server.close();
+      if (prev === undefined) delete process.env.MAA15_TOKEN; else process.env.MAA15_TOKEN = prev;
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});
+
+// =====================================================================
+// Wire schema parity: every declared bound is EXACTLY the projector constant
+// (cursor base64url+256 both directions, categories ≤ closed-set count,
+// entries ≤ LEAD_PAGE_HARD_CAP, every dynamic string ≤ its *_CAP, pageSize
+// exact [1, LEAD_PAGE_HARD_CAP], message text ≤ LEAD_TEXT_EXCERPT_CAP).
+// =====================================================================
+test("MAA-16: wire schema declares EXACT caps — cursor, categories, entries, strings, pageSize", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-maa16-"));
+  try {
+    makeGitRepo(dir);
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir: dir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const tools = await client.listTools();
+      const t = tools.tools.find((x) => x.name === "run_activity");
+      const input = t.inputSchema.properties;
+      // Input cursor: base64url + max ACTIVITY_CURSOR_MAX_CHARS.
+      assert.equal(input.cursor.pattern, "^[A-Za-z0-9_-]+$", "input cursor base64url pattern");
+      assert.equal(input.cursor.maxLength, ACTIVITY_CURSOR_MAX_CHARS, "input cursor max 256");
+      // categories: closed set, at most the closed-set count.
+      assert.deepEqual(input.categories.items.enum, [...ACTIVITY_CATEGORIES], "categories enum = closed set");
+      assert.equal(input.categories.minItems, 1);
+      assert.equal(input.categories.maxItems, ACTIVITY_CATEGORIES.length, "categories max = closed-set count");
+      // pageSize exact bounds.
+      assert.equal(input.pageSize.minimum, 1);
+      assert.equal(input.pageSize.maximum, LEAD_PAGE_HARD_CAP);
+
+      const output = t.outputSchema.properties;
+      // Entries per page ≤ LEAD_PAGE_HARD_CAP; pageSize exact.
+      assert.equal(output.entries.maxItems, LEAD_PAGE_HARD_CAP, "entries max = LEAD_PAGE_HARD_CAP");
+      assert.equal(output.pageSize.maximum, LEAD_PAGE_HARD_CAP, "output pageSize max = LEAD_PAGE_HARD_CAP");
+      // nextCursor: base64url + max 256. The SDK serializes nullable as
+      // anyOf [{type:string, pattern, maxLength}, {type:null}] — the exact
+      // bounds live on the string branch.
+      const nextCursorString = output.nextCursor.anyOf?.[0] ?? output.nextCursor;
+      assert.equal(nextCursorString.pattern, "^[A-Za-z0-9_-]+$", "nextCursor base64url pattern");
+      assert.equal(nextCursorString.maxLength, ACTIVITY_CURSOR_MAX_CHARS, "nextCursor max 256");
+      // backend/state bounded by the label cap.
+      assert.equal(output.backend.maxLength, ACTIVITY_LABEL_CAP);
+      assert.equal(output.state.maxLength, ACTIVITY_LABEL_CAP);
+      // Every dynamic string in every entry variant matches its projector cap.
+      const members = output.entries.items.oneOf ?? output.entries.items.anyOf ?? [];
+      const byCat = {};
+      for (const m of members) byCat[m.properties.category.const] = m.properties;
+      assert.equal(byCat.message.ts.maxLength, ACTIVITY_TS_CAP);
+      assert.equal(byCat.message.role.maxLength, ACTIVITY_ROLE_CAP);
+      assert.equal(byCat.message.text.maxLength, LEAD_TEXT_EXCERPT_CAP, "message text max = LEAD_TEXT_EXCERPT_CAP");
+      assert.equal(byCat.tool_use.tool.maxLength, ACTIVITY_TOOL_NAME_CAP);
+      assert.equal(byCat.file_written.path.maxLength, ACTIVITY_PATH_CAP);
+      assert.equal(byCat.state.to.maxLength, ACTIVITY_LABEL_CAP);
+      assert.equal(byCat.other.label.maxLength, ACTIVITY_LABEL_CAP);
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -8,6 +8,9 @@
 //   - verify workspace ownership when an authorized root is supplied (fail-closed
 //     BEFORE the snapshot is projected/published),
 //   - derive agentId / backend / state / terminal from that one snapshot,
+//   - fail closed (BEFORE any fact derivation or projection) when any event's
+//     envelope carries a missing/mismatched/conflicting runId — never degrade
+//     to a partial result while still projecting content,
 //   - NEVER append (no messages.collected, no audit event, no commitAppend),
 //   - perform NO serve HTTP fetch (snapshot-only local read).
 //
@@ -18,12 +21,20 @@
 // Architectural contract:
 //   - Does NOT import src/commands/*, src/mcp/*, MCP SDK, or zod.
 //   - Reuses readTranscript, findState, findLatest, TERMINAL_STATES,
-//     extractCanonicalAgentId SSOTs from transcript.js; isValidRunId SSOT from
-//     delivery.js; verifyRunWorkspaceOwnership SSOT from runWorkspaceOwnership.js.
+//     extractCanonicalAgentId, assertEventsBoundToRunId SSOTs from transcript.js;
+//     isValidRunId SSOT from delivery.js; verifyRunWorkspaceOwnership SSOT from
+//     runWorkspaceOwnership.js.
 
 import { join } from "node:path";
 
-import { readTranscript, findState, findLatest, TERMINAL_STATES, extractCanonicalAgentId } from "../transcript.js";
+import {
+  readTranscript,
+  findState,
+  findLatest,
+  TERMINAL_STATES,
+  extractCanonicalAgentId,
+  assertEventsBoundToRunId,
+} from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 
@@ -47,6 +58,11 @@ export async function readRunActivity({ runId, runDir, authorizedWorkspaceRoot, 
 
   // Single read. No wait loop, no re-read, no append.
   const events = await reader(filePath);
+
+  // Exact run binding: every object event must carry runId === the requested
+  // runId. Missing/mismatched/conflicting envelope facts fail closed BEFORE
+  // any fact derivation or projection — never degrade-and-project.
+  assertEventsBoundToRunId(events, runId);
 
   // Trust-boundary workspace ownership (fail-closed before projection).
   if (authorizedWorkspaceRoot !== undefined && authorizedWorkspaceRoot !== null) {

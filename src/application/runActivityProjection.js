@@ -5,8 +5,18 @@
 // Both the Lead-view MCP tool (run_activity, via src/mcp/server.js) and the
 // internal owner view call projectRunActivity. Neither may return raw service
 // output. The projector owns:
+//   - exact run binding: EVERY object event in the snapshot must carry
+//     runId === the requested runId; missing/mismatched/conflicting envelope
+//     facts fail closed BEFORE any structured activity result — never degrade
+//     agentId to unknown while still projecting content;
 //   - shape-driven classification of every transcript event into a closed set
 //     of 7 activity categories (NO backend/runtime branching);
+//   - uniform dynamic-string safety: EVERY transcript-derived dynamic string
+//     that crosses output (ts, role, message text, tool name, relative path,
+//     backend, state, unknown-event label) goes through ONE redact -> sanitize
+//     -> bound path, or a stricter closed-set/sentinel (terminal target is
+//     TERMINAL_STATES-gated; unknown event labels are a fixed sentinel and
+//     never echo arbitrary kind/type text);
 //   - exact-secret redaction of each full text/payload BEFORE sanitization,
 //     excerpt, and pagination (a secret spanning an excerpt or page boundary is
 //     already [REDACTED] before any slice);
@@ -14,28 +24,37 @@
 //   - closed-set safe activity facts ONLY — never raw command text, tool input,
 //     tool output, error text, credentials, PID/session id, absolute path, or
 //     unknown payload; NO semantic summary/recommendation/progress estimate;
-//   - per-page caps (entries + text excerpt) bounded per audience;
+//   - per-page caps (entries + text excerpt) bounded per audience; an
+//     explicitly provided invalid pageSize is REJECTED, never silently clamped;
 //   - opaque base64url cursor codec binding runId digest + frozen raw-snapshot
-//     digest + event count + view (filter+afterSeq) digest + position;
+//     digest + event count + view (audience + canonicalized unique sorted
+//     filter set + afterSeq) digest + position — so a Lead cursor can never be
+//     accepted by the owner view or vice versa;
 //   - frozen-prefix replay protection: append-only safe, mutation/shrink/
-//     cross-run/cross-filter/malformed/noncanonical/oversized/out-of-range all
-//     fail closed.
+//     cross-run/cross-view/cross-audience/malformed/noncanonical/oversized/
+//     out-of-range all fail closed.
 //
 // Architectural contract:
 //   - No file I/O, no MCP SDK / zod / command imports.
-//   - Reuses createSecretRedactor SSOT, safeProjectAgentId SSOT, and the
-//     TERMINAL_STATES closed set from transcript.js. The cursor/digest/
+//   - Reuses createSecretRedactor SSOT, safeProjectAgentId SSOT,
+//     assertEventsBoundToRunId SSOT, and the TERMINAL_STATES closed set from
+//     transcript.js; isValidRunId SSOT from delivery.js. The cursor/digest/
 //     sanitize helpers are re-implemented locally (mirroring the collect
 //     projection's proven algorithm) so this module stays self-contained and
 //     the collect projection is not perturbed (zero regression risk).
 //   - The cursor carries ONLY digests + integers — never raw runId, sessionId,
 //     serveUrl, cwd, prompt, path, secret, or worker text.
+//
+// The exported *_CAP constants are the SINGLE source for the MCP output
+// schema bounds (src/mcp/server.js imports them) — schema and projector can
+// never drift.
 
 import { createHash } from "node:crypto";
 
 import { createSecretRedactor } from "../secretRedaction.js";
 import { safeProjectAgentId } from "../canonicalAgentId.js";
-import { TERMINAL_STATES } from "../transcript.js";
+import { TERMINAL_STATES, assertEventsBoundToRunId } from "../transcript.js";
+import { isValidRunId } from "../delivery.js";
 
 // ===== Closed-set activity categories (drives BOTH the service and the MCP
 // input schema — single source, no drift). =====
@@ -49,6 +68,10 @@ export const ACTIVITY_CATEGORIES = Object.freeze([
   "state",
   "other",
 ]);
+
+// Fixed sentinel for unrecognized event shapes. `other` entries NEVER echo the
+// raw type/kind (arbitrary transcript text) — the label is this constant only.
+export const OTHER_EVENT_LABEL = "[unknown_event]";
 
 function emptyCounts() {
   return { message: 0, command: 0, tool_use: 0, tool_result: 0, file_written: 0, state: 0, other: 0 };
@@ -66,11 +89,13 @@ export const OWNER_PAGE_DEFAULT = 50;
 // Owner and Lead share the same absolute page hard cap (the cursor/replay bound).
 const PAGE_HARD_CAP = LEAD_PAGE_HARD_CAP;
 
-const ROLE_CAP = 32;
-const LABEL_CAP = 64;
-const TOOL_NAME_CAP = 64;
-const PATH_CAP = 256;
-const TS_CAP = 64;
+// Dynamic-string caps (exported so the MCP output schema reuses the EXACT
+// same bounds — no hand-maintained second copy).
+export const ACTIVITY_ROLE_CAP = 32;
+export const ACTIVITY_LABEL_CAP = 64;
+export const ACTIVITY_TOOL_NAME_CAP = 64;
+export const ACTIVITY_PATH_CAP = 256;
+export const ACTIVITY_TS_CAP = 64;
 
 // ===== Cursor codec =====
 //
@@ -80,14 +105,17 @@ const TS_CAP = 64;
 //     "r": "<runIdDigest>",   // sha256(runId).slice(0,16) base64url — 16 bytes
 //     "s": "<snapDigest>",    // raw-event snapshot prefix digest
 //     "n": <eventCount>,      // raw-event count of the frozen prefix
-//     "f": "<viewDigest>",    // digest of the view (category filter + afterSeq)
+//     "f": "<viewDigest>",    // digest of the view (audience + filter set + afterSeq)
 //     "p": <position>         // index into the filtered+ordered entry list
 //   }
 //
 // Never carries raw runId, snapshot content, filter list, or text.
 
 const CURSOR_VERSION = 1;
-const CURSOR_MAX_CHARS = 256;
+// Opaque cursor token bound: base64url, ≤ 256 chars. Exported so the MCP
+// input/output schemas declare the EXACT same bound.
+export const ACTIVITY_CURSOR_MAX_CHARS = 256;
+const CURSOR_MAX_CHARS = ACTIVITY_CURSOR_MAX_CHARS;
 const DIGEST_BYTES = 16; // 128-bit digests — enough binding, compact token
 const DIGEST_B64_LEN = 22; // ceil(16/3)*4 without padding → 22 base64url chars
 
@@ -152,17 +180,22 @@ function sortKeysDeep(obj) {
   return sorted;
 }
 
-// ===== View digest (category filter + afterSeq) =====
+// ===== View digest (audience + category filter + afterSeq) =====
 //
-// Binds the continuation to the EXACT view page 1 used. A different category
-// set or a different afterSeq is a different view → reject (cross-filter).
-// null/undefined categories ≡ "all" (canonical null); a provided subset is the
-// sorted joined list.
+// Binds the continuation to the EXACT view page 1 used. A different audience
+// (lead vs owner), a different category set, or a different afterSeq is a
+// different view → reject (cross-view). null/undefined categories ≡ "all"
+// (canonical null); a provided subset is canonicalized to its UNIQUE sorted
+// set (duplicates collapse — ["message","message"] ≡ ["message"]).
+//
+// The audience is part of the digest so a Lead-view cursor can never be
+// accepted by the future owner view (or vice versa).
 
-function computeViewDigest(categories, afterSeq) {
-  const c = categories == null ? null : categories.slice().sort();
+function computeViewDigest(categories, afterSeq, audience) {
+  const c = categories == null ? null : [...new Set(categories)].sort();
   const a = afterSeq == null ? null : afterSeq;
-  return sha256Base64url(JSON.stringify({ c, a }));
+  const u = audience === "owner" ? "owner" : "lead";
+  return sha256Base64url(JSON.stringify({ c, a, u }));
 }
 
 /**
@@ -237,9 +270,27 @@ function safeSliceUtf16(str, start, end) {
   return str.slice(start, adjustedEnd);
 }
 
-function cap(text, max) {
-  const s = sanitizeControls(text);
-  return s.length <= max ? s : safeSliceUtf16(s, 0, max);
+/**
+ * THE single dynamic-string safety path: redact → sanitize → bound.
+ *
+ * Every transcript-derived dynamic string that crosses output (ts, role,
+ * message text, tool name, backend, state, label) goes through this one
+ * helper: exact-secret redaction FIRST (a secret straddling a cap boundary is
+ * already [REDACTED:NAME] before any slice), then C0/C1/DEL sanitization, then
+ * the surrogate-safe bound. Fields with a stricter guarantee (terminal target
+ * via the TERMINAL_STATES gate, unknown-event label via OTHER_EVENT_LABEL,
+ * relative paths via safeFilePath) do NOT pass through here.
+ */
+function safeDynamicText(raw, redactor, max) {
+  return boundText(raw, redactor, max).text;
+}
+
+/** Same path, but also reports whether the bound truncated the safe text. */
+function boundText(raw, redactor, max) {
+  const redacted = redactor.redactString(raw);
+  const sanitized = sanitizeControls(redacted);
+  const truncated = sanitized.length > max;
+  return { text: truncated ? safeSliceUtf16(sanitized, 0, max) : sanitized, truncated };
 }
 
 // ===== Closed-set safe field derivations =====
@@ -253,15 +304,17 @@ function commandExitStatus(event) {
 
 function safeFilePath(raw, redactor) {
   if (typeof raw !== "string" || raw.length === 0) return "[path_withheld]";
-  const s = sanitizeControls(raw);
+  // Redact FIRST (same order as safeDynamicText — a secret is replaced before
+  // any sanitization/slice can mangle or straddle it).
+  const redacted = redactor.redactString(raw);
+  const s = sanitizeControls(redacted);
   // Absolute (windows drive / posix / UNC) or traversal → never cross.
   if (/^[A-Za-z]:[\\/]/.test(s)) return "[path_withheld]";
   if (s.startsWith("/") || s.startsWith("\\")) return "[path_withheld]";
   if (/(?:^|[\\/])\.\.(?:[\\/]|$)/.test(s)) return "[path_withheld]";
-  // Relative + safe: redact any embedded secret, then cap. Redaction happens
-  // BEFORE the cap so a secret straddling the cap boundary cannot leak.
-  const redacted = redactor.redactString(s);
-  return redacted.length <= PATH_CAP ? redacted : safeSliceUtf16(redacted, 0, PATH_CAP);
+  // Relative + safe: bound. Redaction happened BEFORE the cap so a secret
+  // straddling the cap boundary cannot leak.
+  return s.length <= ACTIVITY_PATH_CAP ? s : safeSliceUtf16(s, 0, ACTIVITY_PATH_CAP);
 }
 
 // Bookkeeping envelope types are NOT worker activity — skipped (never counted,
@@ -301,40 +354,46 @@ function classifyEvent(event) {
 /**
  * Build the closed-set safe entry for one event. Redaction is applied to the
  * FULL text/payload BEFORE excerpt/sanitization. Only safe fields are emitted.
+ * Every transcript-derived dynamic string uses the uniform
+ * safeDynamicText path or a stricter closed-set/sentinel.
  */
 function buildEntry(event, category, redactor, textCap) {
-  const ts = cap(event.ts ?? "", TS_CAP);
+  const ts = safeDynamicText(event.ts ?? "", redactor, ACTIVITY_TS_CAP);
   const seq = Number.isInteger(event.seq) ? event.seq : 0;
   switch (category) {
     case "message": {
-      const role = cap(event.role ?? "", ROLE_CAP);
+      const role = safeDynamicText(event.role ?? "", redactor, ACTIVITY_ROLE_CAP);
       const parts = Array.isArray(event.parts) ? event.parts : [];
       const textParts = parts
         .filter((p) => p && p.type === "text" && typeof p.text === "string" && p.text.length > 0)
         .map((p) => p.text);
       const full = textParts.length > 0 ? textParts.join("\n") : "";
-      // Redact the FULL message, then sanitize, THEN excerpt (truncation last).
-      const safe = sanitizeControls(redactor.redactString(full));
-      const truncated = safe.length > textCap;
-      const text = truncated ? safeSliceUtf16(safe, 0, textCap) : safe;
-      return { category, ts, seq, role, text, truncated };
+      // Uniform path: redact the FULL message, then sanitize, THEN excerpt.
+      const { text: safe, truncated } = boundText(full, redactor, textCap);
+      return { category, ts, seq, role, text: safe, truncated };
     }
     case "command":
       return { category, ts, seq, exitStatus: commandExitStatus(event) };
     case "tool_use":
-      return { category, ts, seq, tool: cap(event.tool ?? event.name ?? "unknown", TOOL_NAME_CAP) };
+      return {
+        category, ts, seq,
+        tool: safeDynamicText(event.tool ?? event.name ?? "unknown", redactor, ACTIVITY_TOOL_NAME_CAP),
+      };
     case "tool_result":
       // tool_result.tool is often an opaque callId (unreliable) — emit isError only.
       return { category, ts, seq, isError: Boolean(event.isError) };
     case "file_written":
       return { category, ts, seq, path: safeFilePath(event.path, redactor) };
-    case "state":
-      return { category, ts, seq, to: cap(event.to ?? "", LABEL_CAP), terminal: TERMINAL_STATES.includes(event.to) };
+    case "state": {
+      // Closed-set gate: classification only surfaces TERMINAL_STATES here;
+      // the guard keeps the set closed even if the classifier ever widens.
+      const to = TERMINAL_STATES.includes(event.to) ? event.to : OTHER_EVENT_LABEL;
+      return { category, ts, seq, to, terminal: to !== OTHER_EVENT_LABEL };
+    }
     default: {
-      // `other`: bounded label derived from the event's own type/kind name only.
-      // NEVER echo the payload (command/input/output/error/deep fields).
-      const label = cap(event.kind ?? event.type ?? "unknown", LABEL_CAP);
-      return { category: "other", ts, seq, label };
+      // `other`: FIXED sentinel label. NEVER echoes the event's own type/kind
+      // (arbitrary transcript text) and NEVER the payload.
+      return { category: "other", ts, seq, label: OTHER_EVENT_LABEL };
     }
   }
 }
@@ -352,7 +411,8 @@ function buildEntry(event, category, redactor, textCap) {
  * @param {string[]|null} [opts.categories] — closed-set category filter (null/undefined ≡ all)
  * @param {number} [opts.afterSeq] — only events with seq > afterSeq (null/undefined ≡ none)
  * @param {"lead"|"owner"} [opts.audience] — caps selector (default "lead")
- * @param {number} [opts.pageSize] — entries per page (default per audience; clamped to hard cap)
+ * @param {number} [opts.pageSize] — entries per page (default per audience;
+ *        an explicitly provided invalid pageSize is REJECTED, never clamped)
  * @param {object} [opts.env] — env for the secret redactor (default process.env)
  * @returns {object} safe payload: runId, agentId, backend, state, terminal,
  *                   counts, total, entries, pageSize, truncated, nextCursor
@@ -361,8 +421,14 @@ export function projectRunActivity(rawSnapshot, {
   runId, cursor, categories, afterSeq, audience, pageSize, env,
 } = {}) {
   if (!rawSnapshot || typeof rawSnapshot !== "object") throw new Error("invalid activity snapshot");
-  if (!runId || typeof runId !== "string") throw new Error("runId required");
+  if (!isValidRunId(runId)) throw new Error("invalid runId");
   if (!Array.isArray(rawSnapshot.events)) throw new Error("invalid activity snapshot: events must be an array");
+
+  // Exact run binding (fail closed BEFORE any structured result): every object
+  // event must carry runId exactly equal to the requested runId. Missing/
+  // mismatched/conflicting envelope facts throw — no degrade-and-project.
+  const events = rawSnapshot.events;
+  assertEventsBoundToRunId(events, runId);
 
   // Closed-set category filter (null/undefined ≡ all). Validate membership.
   let catSet = null;
@@ -382,13 +448,24 @@ export function projectRunActivity(rawSnapshot, {
   const isOwner = audience === "owner";
   const textCap = isOwner ? OWNER_TEXT_EXCERPT_CAP : LEAD_TEXT_EXCERPT_CAP;
   const pageDefault = isOwner ? OWNER_PAGE_DEFAULT : LEAD_PAGE_DEFAULT;
-  const size = clampInt(pageSize == null ? pageDefault : pageSize, 1, PAGE_HARD_CAP);
+  // Reject invalid explicitly-provided pageSize rather than silently clamp:
+  // the MCP schema already rejects out-of-range values, and a direct caller
+  // must get an error, not a surprise page size (project convention: invalid
+  // values are nulled/rejected, never clamped/masked).
+  let size = pageDefault;
+  if (pageSize !== undefined && pageSize !== null) {
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > PAGE_HARD_CAP) {
+      throw new Error("invalid pageSize");
+    }
+    size = pageSize;
+  }
 
   const redactor = createSecretRedactor(env ?? process.env);
-  const events = rawSnapshot.events;
 
-  // View digest (page-1 emission + continuation binding share this).
-  const viewDigest = computeViewDigest(categories, afterSeq);
+  // View digest (page-1 emission + continuation binding share this). Binds
+  // audience + canonicalized unique sorted filter set + afterSeq, so a Lead
+  // cursor can never be accepted by an owner view or vice versa.
+  const viewDigest = computeViewDigest(categories, afterSeq, audience);
 
   // Cursor decode + binding (runId / frozen snapshot / view / position).
   let cursorObj = null;
@@ -463,8 +540,10 @@ export function projectRunActivity(rawSnapshot, {
   return {
     runId,
     agentId: safeProjectAgentId(rawSnapshot.agentId),
-    backend: cap(rawSnapshot.backend ?? "unknown", LABEL_CAP),
-    state: cap(rawSnapshot.state ?? "unknown", LABEL_CAP),
+    // backend/state are transcript-derived dynamic strings (not closed-set) —
+    // uniform redact → sanitize → bound path.
+    backend: safeDynamicText(rawSnapshot.backend ?? "unknown", redactor, ACTIVITY_LABEL_CAP),
+    state: safeDynamicText(rawSnapshot.state ?? "unknown", redactor, ACTIVITY_LABEL_CAP),
     terminal: Boolean(rawSnapshot.terminal),
     counts,
     total,
@@ -473,11 +552,4 @@ export function projectRunActivity(rawSnapshot, {
     truncated,
     nextCursor,
   };
-}
-
-function clampInt(value, min, max) {
-  if (!Number.isInteger(value)) return min;
-  if (value < min) return min;
-  if (value > max) return max;
-  return value;
 }

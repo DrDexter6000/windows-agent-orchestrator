@@ -21,6 +21,7 @@ import {
   LEAD_PAGE_DEFAULT,
   LEAD_PAGE_HARD_CAP,
   OWNER_TEXT_EXCERPT_CAP,
+  OTHER_EVENT_LABEL,
   computeEventSnapshotDigestForTest,
 } from "../src/application/runActivityProjection.js";
 
@@ -383,8 +384,11 @@ test("#10 raw command/tool/file payloads and absolute paths never cross the lead
   const tr = r.entries.find((e) => e.category === "tool_result");
   assert.deepEqual(Object.keys(tr).sort(), ["category", "isError", "seq", "ts"]);
   // file_written paths are withheld markers (never the absolute/traversal raw).
+  // Tightened: the ONLY emitted alternative for an unsafe path is the exact
+  // "[path_withheld]" marker — the "[REDACTED]" alternative was dead code
+  // (safeFilePath never returns it) and must not be re-introduced.
   const fw = r.entries.filter((e) => e.category === "file_written").map((e) => e.path);
-  assert.ok(fw.every((p) => p === "[path_withheld]" || p === "[REDACTED]"), "unsafe paths withheld");
+  assert.ok(fw.every((p) => p === "[path_withheld]"), "unsafe paths ALWAYS withheld with the exact marker");
   // run.error becomes a bounded `other` (label only), never the raw error.
   const other = r.entries.find((e) => e.category === "other");
   assert.ok(other.label, "other has a bounded label");
@@ -406,7 +410,7 @@ test("#10b exitStatus maps ok/failed/unknown without leaking the raw exit code",
 // =====================================================================
 // #11 unknown/legacy event shapes become bounded `other` or fail closed, never echo
 // =====================================================================
-test("#11 unknown run.event kinds + unknown top-level types become bounded other, never echo payload", () => {
+test("#11 unknown run.event kinds + unknown top-level types become bounded other with the FIXED sentinel label, never echo kind/type/payload", () => {
   resetSeq();
   const events = [
     ev({ kind: "weird_future_kind", deep: { secret: "leak" }, blob: "x".repeat(2000) }),
@@ -422,11 +426,15 @@ test("#11 unknown run.event kinds + unknown top-level types become bounded other
   const json = JSON.stringify(r.entries);
   assert.ok(!json.includes("leak"), "unknown payload never echoed");
   assert.ok(!json.includes("hidden"), "unknown payload never echoed");
-  // each `other` entry is bounded: only seq/ts/category/label.
+  // Tightened: the label is the fixed sentinel — arbitrary kind/type text is
+  // NEVER echoed (an attacker-controlled kind must not cross as a label).
   for (const o of others) {
     assert.deepEqual(Object.keys(o).sort(), ["category", "label", "seq", "ts"]);
+    assert.equal(o.label, OTHER_EVENT_LABEL, "unknown label is the fixed sentinel");
     assert.ok(o.label.length <= 64, "label bounded");
   }
+  assert.ok(!json.includes("weird_future_kind"), "raw kind never echoed as a label");
+  assert.ok(!json.includes("future.durable_event"), "raw type never echoed as a label");
 });
 
 // =====================================================================
@@ -494,4 +502,141 @@ test("afterSeq filters events with seq > afterSeq", () => {
   const r = project(events, { afterSeq: 1 });
   assert.deepEqual(r.entries.map((e) => e.text), ["b", "c"]);
   assert.equal(r.total, 2);
+});
+
+// =====================================================================
+// EXACT RUN BINDING (closeout): missing/mismatched/conflicting envelope facts
+// fail closed BEFORE any structured activity result — never degrade and
+// project. Every case asserts the throw AND that no partial result escaped.
+// =====================================================================
+test("envelope runId mismatch on a message with assistant text + secret FAILS CLOSED (no result, no leak)", () => {
+  resetSeq();
+  const SECRET = "test-secret-env-bound-1";
+  const good = [msgEvent("assistant", "benign")];
+  const mismatch = [...good, msgEvent("assistant", `leak here ${SECRET}`, { runId: "run_OTHER" })];
+  assert.throws(
+    () => project(mismatch, { env: { LEAK_TOKEN: SECRET } }),
+    (e) => /runId/.test(e.message) && !String(e.message).includes(SECRET),
+    "mismatched event fails closed; the error itself never carries the secret",
+  );
+});
+
+test("envelope facts missing / empty / non-string runId each FAIL CLOSED", () => {
+  resetSeq();
+  const base = [msgEvent("assistant", "ok")];
+  const missingField = ev({ kind: "message", role: "assistant", parts: [{ type: "text", text: "x" }] });
+  delete missingField.runId;
+  const emptyRunId = ev({ kind: "message", role: "assistant", parts: [{ type: "text", text: "x" }], runId: "" });
+  const nonStringRunId = ev({ kind: "message", role: "assistant", parts: [{ type: "text", text: "x" }], runId: 42 });
+  for (const [label, events] of [
+    ["missing field", [...base, missingField]],
+    ["empty string", [...base, emptyRunId]],
+    ["non-string", [...base, nonStringRunId]],
+  ]) {
+    assert.throws(() => project(events), /runId/, `${label} fails closed`);
+  }
+});
+
+test("conflicting envelope runIds within one snapshot FAIL CLOSED", () => {
+  resetSeq();
+  const events = [
+    msgEvent("assistant", "a", { runId: "run_one" }),
+    msgEvent("assistant", "b", { runId: "run_two" }),
+  ];
+  assert.throws(() => project(events, { runId: "run_one" }), /runId/, "conflicting runIds fail closed");
+});
+
+// =====================================================================
+// UNIFORM DYNAMIC-STRING SAFETY (closeout): every transcript-derived dynamic
+// string crosses output via the single redact → sanitize → bound path. A
+// secret in tool name / backend / role / relative path / state / ts must be
+// replaced by the marker BEFORE any cap — the raw secret never crosses.
+// =====================================================================
+test("secrets in tool name, role, and relative path are redacted IN PLACE (never leak)", () => {
+  resetSeq();
+  const SECRET = "test-secret-dynfields-1";
+  const events = [
+    toolUseEvent("Bash_" + SECRET, { command: "x" }),
+    fileWrittenEvent("src/" + SECRET + "/keep.js"),
+    msgEvent("assistant_" + SECRET, "hello"),
+    stateEvent("completed"),
+  ];
+  const r = project(events, { env: { LEAK_TOKEN: SECRET } });
+  const dump = JSON.stringify(r);
+  assert.ok(!dump.includes(SECRET), "raw secret never crosses any field");
+  const tu = r.entries.find((e) => e.category === "tool_use");
+  assert.ok(tu.tool.includes("[REDACTED"), "tool name redacted in place");
+  const fw = r.entries.find((e) => e.category === "file_written");
+  assert.ok(fw.path.includes("[REDACTED") && fw.path.startsWith("src/"), "relative path redacted in place, still relative");
+  const msg = r.entries.find((e) => e.category === "message");
+  assert.ok(msg.role.includes("[REDACTED"), "role redacted in place");
+});
+
+test("secrets in backend and state (top-level facts) are redacted before the label cap", () => {
+  resetSeq();
+  const SECRET = "test-secret-dynfacts-1";
+  const events = [msgEvent("assistant", "hi"), stateEvent("completed")];
+  const r = projectRunActivity(
+    snap(events, { backend: "process_" + SECRET, state: "running_" + SECRET }),
+    { runId: RUN_ID, env: { LEAK_TOKEN: SECRET } },
+  );
+  const dump = JSON.stringify(r);
+  assert.ok(!dump.includes(SECRET), "raw secret never crosses backend/state");
+  assert.ok(r.backend.includes("[REDACTED"), "backend redacted in place");
+  assert.ok(r.state.includes("[REDACTED"), "state redacted in place");
+});
+
+// =====================================================================
+// CURSOR VIEW BINDING (closeout): the view digest now includes the audience
+// and the canonicalized UNIQUE sorted filter set, so a Lead cursor can never
+// be accepted by the owner view, and duplicate-category filters are one view.
+// =====================================================================
+test("a Lead cursor is REJECTED by the owner view (audience bound in view digest)", () => {
+  resetSeq();
+  const events = [];
+  for (let i = 0; i < 15; i += 1) events.push(msgEvent("assistant", `m${i}`));
+  const leadPage = projectRunActivity(snap(events), { runId: RUN_ID, audience: "lead", pageSize: 5 });
+  assert.ok(leadPage.nextCursor, "lead page 1 has a cursor");
+  assert.throws(
+    () => projectRunActivity(snap(events), { runId: RUN_ID, audience: "owner", cursor: leadPage.nextCursor, pageSize: 5 }),
+    /view|filter/,
+    "owner view must reject a Lead cursor",
+  );
+});
+
+test("duplicate categories collapse: a continuation with a canonical-equivalent filter set is accepted", () => {
+  resetSeq();
+  // 3 messages + 1 command → the ["message"] view spans two pages at size 1.
+  const events = [msgEvent("assistant", "a"), msgEvent("assistant", "b"), msgEvent("assistant", "c"), cmdEvent(0)];
+  const page1 = project(events, { categories: ["message"], pageSize: 1 });
+  assert.ok(page1.nextCursor, "page 1 has a cursor");
+  const page2 = project(events, { categories: ["message", "message"], cursor: page1.nextCursor, pageSize: 1 });
+  assert.deepEqual(page2.entries.map((e) => e.category), ["message"], "same canonical view, accepted");
+});
+
+test("cross-afterSeq cursor REJECTS (afterSeq bound in view digest)", () => {
+  resetSeq();
+  const events = [msgEvent("assistant", "a"), msgEvent("assistant", "b"), msgEvent("assistant", "c")];
+  const page1 = project(events, { afterSeq: 0, pageSize: 1 });
+  assert.ok(page1.nextCursor);
+  assert.throws(
+    () => project(events, { afterSeq: 1, cursor: page1.nextCursor, pageSize: 1 }),
+    /view|filter/,
+  );
+});
+
+// =====================================================================
+// PAGESIZE (closeout): an explicitly provided invalid pageSize is REJECTED,
+// never silently clamped (project convention: invalid values are rejected,
+// not masked). Omitted/null still means the per-audience default.
+// =====================================================================
+test("invalid explicitly-provided pageSize REJECTED, never silently clamped", () => {
+  resetSeq();
+  const events = [msgEvent("assistant", "a"), msgEvent("assistant", "b")];
+  for (const bad of [0, -1, LEAD_PAGE_HARD_CAP + 1, 1.5, "5", NaN, Infinity]) {
+    assert.throws(() => project(events, { pageSize: bad }), /pageSize/, `rejects ${String(bad)}`);
+  }
+  assert.equal(project(events, { pageSize: 1 }).entries.length, 1, "pageSize 1 accepted");
+  assert.equal(project(events, { pageSize: LEAD_PAGE_HARD_CAP }).entries.length, 2, "hard cap accepted");
+  assert.equal(project(events).pageSize, LEAD_PAGE_DEFAULT, "omitted pageSize → lead default");
 });
