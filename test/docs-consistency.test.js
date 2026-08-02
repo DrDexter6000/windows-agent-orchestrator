@@ -1174,31 +1174,33 @@ test("M12-9 docs: executionProfileId is a TOP-LEVEL run_dispatch input; inline v
   }
 });
 
-test("M12-9 roadmap records durable Lead decisions and the re-integration truth, deferring canonical result to WAO verification", () => {
+test("M12-9 roadmap records final durable Lead decisions and exact-artifact verification truth", () => {
   const roadmap = read("docs/roadmap.md");
   assert.ok(!/M12-9 已实现（本地，待 Lead 验收）/.test(roadmap),
     "roadmap 不得保留已经过时的待 Lead 验收状态");
-  assert.ok(/run_20260802162736427rmxxvj/.test(roadmap)
-    && /run_2026080219443391071irlp/.test(roadmap),
-    "roadmap 必须绑定 M12-9 root/child runId");
-  assert.ok(/44917ef0f2d0c050a2fa7e0b98b783e80c20d376/.test(roadmap)
-    && /durable accepted child/.test(roadmap)
+  assert.ok(/run_20260802214029613xyobfm/.test(roadmap)
+    && /run_20260802221931019rlzegp/.test(roadmap)
+    && /run_20260802230308130x7tuh1/.test(roadmap),
+    "roadmap 必须绑定最终 M12-9 root/child/reviewer runId");
+  assert.ok(/a58aa73376044a167d2776a4f3bc33b44b4ed75a/.test(roadmap)
+    && /durable accepted/.test(roadmap)
     && /durable rejected/.test(roadmap),
-    "roadmap 必须记录 child delivery 与 Lead 的 accepted/rejected 决策");
-  // The OLD non-green canonical attempt wording is no longer current acceptance
-  // truth. The roadmap must NOT keep the stale gate framing (BLOCKED_CANONICAL_GATE
-  // / 175 pass / 17/17) nor the old candidate/base-isolation or "发布门待修复"
-  // wording. The authoritative exact-artifact canonical result is deferred to the
-  // WAO verification phase — the roadmap states neither green nor non-green.
+    "roadmap 必须记录最终 child delivery 与 Lead 的 accepted/rejected 决策");
+  // Old attempts are historical implementation inputs, not the final acceptance
+  // truth. The roadmap must pin both original and effective verification facts:
+  // the 300-second timeout remains visible, and the unchanged artifact's audited
+  // tooling-invalid reverify is the effective passed outcome.
   assert.ok(!/BLOCKED_CANONICAL_GATE/.test(roadmap)
     && !/175 pass/.test(roadmap)
     && !/17\/17/.test(roadmap),
-    "roadmap 不得保留旧的非绿 canonical 尝试作为当前验收事实（canonical 结果由 WAO 验收阶段给出）");
+    "roadmap 不得保留旧的非绿 canonical 尝试作为当前验收事实");
   assert.ok(!/本地隔离候选|发布门待修复|隔离集成为|主 checkout 的并发修改/.test(roadmap),
     "roadmap 不得保留旧候选/base 隔离或'发布门待修复'作为当前事实（已按 Lead 修正重集成到当前 main）");
-  assert.ok(/exact-artifact canonical/.test(roadmap)
-    && /WAO 验收阶段/.test(roadmap),
-    "roadmap 必须把权威 exact-artifact canonical 结果明确推迟到 WAO 验收阶段");
+  assert.ok(/originalVerificationStatus:failed/.test(roadmap)
+    && /effectiveVerificationStatus:passed/.test(roadmap)
+    && /tooling_invalid/.test(roadmap)
+    && /同一已提交 artifact/.test(roadmap),
+    "roadmap 必须同时保留原超时与同一 artifact 审计重验通过的真相");
   assert.ok(/不声称已发布|未发布/.test(roadmap),
     "roadmap 不得把本地接受误写为已发布");
 });
