@@ -180,22 +180,33 @@ function sortKeysDeep(obj) {
   return sorted;
 }
 
-// ===== View digest (audience + category filter + afterSeq) =====
+// ===== View digest (audience + category filter + afterSeq + order) =====
 //
 // Binds the continuation to the EXACT view page 1 used. A different audience
-// (lead vs owner), a different category set, or a different afterSeq is a
-// different view → reject (cross-view). null/undefined categories ≡ "all"
-// (canonical null); a provided subset is canonicalized to its UNIQUE sorted
-// set (duplicates collapse — ["message","message"] ≡ ["message"]).
+// (lead vs owner), a different category set, a different afterSeq, or a
+// different order is a different view → reject (cross-view). null/undefined
+// categories ≡ "all" (canonical null); a provided subset is canonicalized to
+// its UNIQUE sorted set (duplicates collapse — ["message","message"] ≡
+// ["message"]).
 //
 // The audience is part of the digest so a Lead-view cursor can never be
-// accepted by the future owner view (or vice versa).
+// accepted by the owner view (or vice versa).
+//
+// M12-8C Package C — order binding. The asc DEFAULT MUST preserve the EXACT
+// legacy digest ({c,a,u}) so every existing asc cursor — Lead view, every wild
+// token issued before order existed — stays byte-valid under the SAME digest
+// algorithm. desc is a distinct view ({c,a,u,o:"desc"}), so a desc cursor can
+// never be accepted by an asc view (or vice versa): a desc Owner bootstrap is
+// cursor-bound and rejects cross-order continuation.
 
-function computeViewDigest(categories, afterSeq, audience) {
+function computeViewDigest(categories, afterSeq, audience, order) {
   const c = categories == null ? null : [...new Set(categories)].sort();
   const a = afterSeq == null ? null : afterSeq;
   const u = audience === "owner" ? "owner" : "lead";
-  return sha256Base64url(JSON.stringify({ c, a, u }));
+  if (order !== "desc") {
+    return sha256Base64url(JSON.stringify({ c, a, u }));
+  }
+  return sha256Base64url(JSON.stringify({ c, a, u, o: "desc" }));
 }
 
 /**
@@ -413,12 +424,20 @@ function buildEntry(event, category, redactor, textCap) {
  * @param {"lead"|"owner"} [opts.audience] — caps selector (default "lead")
  * @param {number} [opts.pageSize] — entries per page (default per audience;
  *        an explicitly provided invalid pageSize is REJECTED, never clamped)
+ * @param {"asc"|"desc"} [opts.order] — closed-set entry order (default "asc").
+ *        asc preserves every existing Lead behavior AND old asc cursor digest
+ *        compatibility; desc gives latest-first Owner bootstrap. desc is
+ *        cursor-bound, stable on an append-only frozen snapshot, and rejects
+ *        cross-order/cross-audience/cross-run/filter cursors. desc NEVER changes
+ *        the classifier, redaction-before-bound, caps, counts, or total — it
+ *        only reverses the filtered safe-entry list before pagination. NOT
+ *        exposed on the MCP run_activity tool (Lead view stays asc-only).
  * @param {object} [opts.env] — env for the secret redactor (default process.env)
  * @returns {object} safe payload: runId, agentId, backend, state, terminal,
  *                   counts, total, entries, pageSize, truncated, nextCursor
  */
 export function projectRunActivity(rawSnapshot, {
-  runId, cursor, categories, afterSeq, audience, pageSize, env,
+  runId, cursor, categories, afterSeq, audience, pageSize, order, env,
 } = {}) {
   if (!rawSnapshot || typeof rawSnapshot !== "object") throw new Error("invalid activity snapshot");
   if (!isValidRunId(runId)) throw new Error("invalid runId");
@@ -460,12 +479,23 @@ export function projectRunActivity(rawSnapshot, {
     size = pageSize;
   }
 
+  // Closed-set order (default asc). An invalid value is REJECTED, never
+  // silently treated as asc (project convention: invalid values are rejected,
+  // not masked). asc is byte-compatible with every existing cursor; desc is a
+  // distinct, cursor-bound view.
+  let ord = "asc";
+  if (order !== undefined && order !== null) {
+    if (order !== "asc" && order !== "desc") throw new Error("invalid order");
+    ord = order;
+  }
+
   const redactor = createSecretRedactor(env ?? process.env);
 
   // View digest (page-1 emission + continuation binding share this). Binds
-  // audience + canonicalized unique sorted filter set + afterSeq, so a Lead
-  // cursor can never be accepted by an owner view or vice versa.
-  const viewDigest = computeViewDigest(categories, afterSeq, audience);
+  // audience + canonicalized unique sorted filter set + afterSeq + order, so a
+  // Lead cursor can never be accepted by an owner view, and an asc cursor can
+  // never be accepted by a desc view (or vice versa).
+  const viewDigest = computeViewDigest(categories, afterSeq, audience, ord);
 
   // Cursor decode + binding (runId / frozen snapshot / view / position).
   let cursorObj = null;
@@ -515,6 +545,14 @@ export function projectRunActivity(rawSnapshot, {
   }
   const total = allEntries.length;
 
+  // Closed-set entry order. desc reverses the filtered safe-entry list BEFORE
+  // pagination so the Owner bootstrap is latest-first. counts/total describe the
+  // SAME filtered timeline (order-independent); only the entry order differs.
+  // The reversal is over the FROZEN snapshot's filtered entries, so it is
+  // deterministic and append-only stable (a continuation cursor binds the frozen
+  // prefix + the desc view, so the reversed page is stable across appends).
+  const orderedEntries = ord === "desc" ? allEntries.slice().reverse() : allEntries;
+
   // Position binding + pagination.
   let start = 0;
   if (cursorObj) {
@@ -522,7 +560,7 @@ export function projectRunActivity(rawSnapshot, {
     if (start > total) throw new Error("cursor position out of range");
   }
   const end = Math.min(start + size, total);
-  const pageEntries = allEntries.slice(start, end);
+  const pageEntries = orderedEntries.slice(start, end);
   const truncated = end < total;
 
   let nextCursor = null;

@@ -640,3 +640,196 @@ test("invalid explicitly-provided pageSize REJECTED, never silently clamped", ()
   assert.equal(project(events, { pageSize: LEAD_PAGE_HARD_CAP }).entries.length, 2, "hard cap accepted");
   assert.equal(project(events).pageSize, LEAD_PAGE_DEFAULT, "omitted pageSize → lead default");
 });
+
+// =====================================================================
+// M12-8C Package C — optional closed-set order (asc default | desc).
+//
+// asc default preserves EVERY existing Lead behavior AND old asc cursor
+// digest compatibility (byte-identical view digest). desc gives latest-first
+// Owner bootstrap, is cursor-bound, stable on an append-only frozen snapshot,
+// and rejects cross-order/cross-audience/cross-run/filter cursors. desc never
+// changes the closed-set classifier, redaction-before-bound, or caps.
+// =====================================================================
+
+// Build a multi-page snapshot so cursors are emitted.
+function multiPageEvents(n) {
+  resetSeq();
+  const events = [];
+  for (let i = 0; i < n; i += 1) events.push(msgEvent("assistant", `m${i}`));
+  events.push(stateEvent("completed"));
+  return events;
+}
+
+test("ORDER asc default: omitted order ≡ explicit 'asc' (byte-identical cursor)", () => {
+  const events = multiPageEvents(15);
+  const omitted = project(events, { pageSize: 5 });
+  const explicitAsc = project(events, { order: "asc", pageSize: 5 });
+  // Same digest algorithm ⇒ identical cursor token (byte-for-byte).
+  assert.equal(omitted.nextCursor, explicitAsc.nextCursor, "omitted and explicit asc share one digest");
+  // And the page contents are identical.
+  assert.deepEqual(omitted.entries, explicitAsc.entries);
+});
+
+test("ORDER asc default: an asc cursor remains a valid continuation under the SAME (asc) digest", () => {
+  const events = multiPageEvents(15);
+  const page1 = project(events, { pageSize: 5 });
+  assert.ok(page1.nextCursor, "page 1 has an asc cursor");
+  // A continuation with NO order (default asc) accepts the asc cursor — this is
+  // the byte-compat guarantee for every cursor already in the wild.
+  const page2 = project(events, { cursor: page1.nextCursor, pageSize: 5 });
+  assert.deepEqual(page2.entries.map((e) => e.text), ["m5", "m6", "m7", "m8", "m9"]);
+});
+
+test("ORDER desc: distinct digest from asc (cursor tokens differ)", () => {
+  const events = multiPageEvents(15);
+  const asc = project(events, { pageSize: 5 });
+  const desc = project(events, { order: "desc", pageSize: 5 });
+  assert.ok(asc.nextCursor);
+  assert.ok(desc.nextCursor);
+  assert.notEqual(asc.nextCursor, desc.nextCursor, "desc is a distinct view (distinct digest)");
+});
+
+test("ORDER desc: entries are the EXACT reverse of the asc safe filtered entries", () => {
+  const events = multiPageEvents(6); // m0..m5 + state
+  const asc = project(events);
+  const desc = project(events, { order: "desc" });
+  const ascSeqs = asc.entries.map((e) => e.seq);
+  const descSeqs = desc.entries.map((e) => e.seq);
+  assert.deepEqual(descSeqs, [...ascSeqs].reverse(), "desc is the exact reverse of asc");
+  // Shared classifier: counts + total are order-independent.
+  assert.deepEqual(desc.counts, asc.counts);
+  assert.equal(desc.total, asc.total);
+  // desc page-1 surfaces the LATEST activity first (the terminal state here).
+  assert.equal(desc.entries[0].category, "state");
+  assert.equal(desc.entries[0].to, "completed");
+});
+
+test("ORDER desc: paginating the whole chain reconstructs the exact reverse deterministically", () => {
+  const events = multiPageEvents(25); // m0..m24 + state (26 entries)
+  let cursor = null;
+  const collected = [];
+  let guard = 0;
+  while (true) {
+    const page = project(events, { order: "desc", cursor, pageSize: 10 });
+    collected.push(...page.entries);
+    cursor = page.nextCursor;
+    if (!cursor) break;
+    guard += 1;
+    if (guard > 10) throw new Error("runaway pagination");
+  }
+  assert.equal(collected.length, 26, "full reconstruction");
+  // Exact reverse: state first, then m24..m0.
+  assert.equal(collected[0].category, "state");
+  for (let i = 0; i < 25; i += 1) {
+    assert.equal(collected[1 + i].text, `m${24 - i}`, `desc reconstruction m${24 - i}`);
+  }
+});
+
+test("ORDER desc: append-only growth after page 1 keeps frozen desc reconstruction stable", () => {
+  const base = multiPageEvents(15); // m0..m14 + state (16 entries), seqs reset
+  const page1 = project(base, { order: "desc", pageSize: 5 });
+  assert.ok(page1.nextCursor, "desc page 1 has a cursor");
+  // First desc page = latest 5 of the frozen prefix: state, m14, m13, m12, m11.
+  assert.deepEqual(
+    page1.entries.map((e) => (e.category === "state" ? "state" : e.text)),
+    ["state", "m14", "m13", "m12", "m11"],
+  );
+  // Append-only growth: add m15..m19 (5 more messages) AFTER page 1.
+  const grown = [...base];
+  for (let i = 15; i < 20; i += 1) grown.push(msgEvent("assistant", `m${i}`));
+  // Continuation is frozen to the page-1 prefix — grown entries never appear.
+  const page2 = project(grown, { order: "desc", cursor: page1.nextCursor, pageSize: 5 });
+  assert.deepEqual(
+    page2.entries.map((e) => (e.category === "state" ? "state" : e.text)),
+    ["m10", "m9", "m8", "m7", "m6"],
+    "frozen desc prefix continues m10..m6, never grown m15+",
+  );
+  assert.equal(page2.total, 16, "total frozen at page-1 prefix");
+});
+
+test("ORDER cross-order cursor REJECTS both directions (view digest binds order)", () => {
+  const events = multiPageEvents(15);
+  const ascPage = project(events, { pageSize: 5 });
+  const descPage = project(events, { order: "desc", pageSize: 5 });
+  assert.ok(ascPage.nextCursor && descPage.nextCursor);
+  // asc cursor must be rejected by a desc view.
+  assert.throws(
+    () => project(events, { order: "desc", cursor: ascPage.nextCursor, pageSize: 5 }),
+    /view|filter|order/,
+    "desc view rejects an asc cursor",
+  );
+  // desc cursor must be rejected by an asc view.
+  assert.throws(
+    () => project(events, { cursor: descPage.nextCursor, pageSize: 5 }),
+    /view|filter|order/,
+    "asc view rejects a desc cursor",
+  );
+});
+
+test("ORDER cross-audience cursor still rejects for desc (audience+order both bound)", () => {
+  const events = multiPageEvents(15);
+  const ownerDesc = projectRunActivity(snap(events), { runId: RUN_ID, audience: "owner", order: "desc", pageSize: 5 });
+  assert.ok(ownerDesc.nextCursor);
+  // A lead desc view must reject the owner desc cursor (audience differs).
+  assert.throws(
+    () => projectRunActivity(snap(events), { runId: RUN_ID, audience: "lead", order: "desc", cursor: ownerDesc.nextCursor, pageSize: 5 }),
+    /view|filter|order/,
+  );
+});
+
+test("ORDER desc with category filter + afterSeq still reverses the filtered set", () => {
+  resetSeq();
+  // 3 messages + 2 commands; filter to commands with afterSeq 0.
+  const events = [
+    msgEvent("assistant", "a"), // seq 1
+    cmdEvent(0), // seq 2
+    msgEvent("assistant", "b"), // seq 3
+    cmdEvent(1), // seq 4
+    stateEvent("completed"), // seq 5
+  ];
+  const asc = project(events, { categories: ["command"], afterSeq: 0 });
+  const desc = project(events, { categories: ["command"], order: "desc", afterSeq: 0 });
+  assert.deepEqual(asc.entries.map((e) => e.seq), [2, 4]);
+  assert.deepEqual(desc.entries.map((e) => e.seq), [4, 2], "desc reverses the filtered set");
+});
+
+test("ORDER desc with filter: cross-filter cursor still rejects", () => {
+  resetSeq();
+  const events = [];
+  for (let i = 0; i < 8; i += 1) events.push(msgEvent("assistant", `m${i}`));
+  for (let i = 0; i < 3; i += 1) events.push(cmdEvent(0));
+  const msgDesc = project(events, { categories: ["message"], order: "desc", pageSize: 3 });
+  assert.ok(msgDesc.nextCursor);
+  assert.throws(
+    () => project(events, { categories: ["command"], order: "desc", cursor: msgDesc.nextCursor, pageSize: 3 }),
+    /view|filter|order/,
+  );
+});
+
+test("ORDER invalid value REJECTED (closed set, never silently treated as asc)", () => {
+  resetSeq();
+  const events = [msgEvent("assistant", "a"), msgEvent("assistant", "b")];
+  for (const bad of ["sideways", "ASC", "descending", "", 1, true, "reverse"]) {
+    assert.throws(() => project(events, { order: bad }), /order/i, `rejects order=${JSON.stringify(bad)}`);
+  }
+  // null/undefined are the legitimate "asc default" — accepted, not rejected.
+  assert.equal(project(events, { order: undefined }).entries.length, 2);
+  assert.equal(project(events, { order: null }).entries.length, 2);
+});
+
+test("ORDER desc: redaction-before-bound still holds (secret never crosses in desc output)", () => {
+  resetSeq();
+  const SECRET = "test-secret-desc-order-m128c";
+  const events = [
+    msgEvent("assistant", `safe ${SECRET} tail`),
+    cmdEvent(0),
+    stateEvent("completed"),
+  ];
+  const desc = project(events, { order: "desc", env: { LEAK_TOKEN: SECRET } });
+  const dump = JSON.stringify(desc);
+  assert.ok(!dump.includes(SECRET), "raw secret never crosses desc output");
+  assert.ok(dump.includes("[REDACTED"), "secret redacted before the desc bound");
+  // desc first entry is the latest (state), and the message secret was redacted.
+  const msg = desc.entries.find((e) => e.category === "message");
+  assert.ok(msg.text.includes("[REDACTED"));
+});
