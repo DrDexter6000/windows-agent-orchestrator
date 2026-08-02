@@ -106,6 +106,13 @@ import {
 import { projectReviewResult } from "../application/deliveryReviewProjection.js";
 import { REVIEW_UNAVAILABLE_REASONS } from "../application/reviewUnavailableReasons.js";
 import { projectCollectResult } from "../application/runCollectProjection.js";
+import {
+  projectRunActivity,
+  ACTIVITY_CATEGORIES,
+  LEAD_PAGE_DEFAULT,
+  LEAD_PAGE_HARD_CAP,
+} from "../application/runActivityProjection.js";
+import { readRunActivity } from "../application/runActivity.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
 import { selectSessionWorkspace } from "../application/sessionWorkspace.js";
 import { checkWorkspaceExpectation } from "../application/workspaceExpectation.js";
@@ -1612,6 +1619,145 @@ const RUN_AWAIT_RESULT_DESCRIPTION =
   "of the internal poll interval, so a resetTimeoutOnProgress client can span " +
   "the wait across the MCP 60s default request timeout.";
 
+// ===== run_activity (M12-8 read-only activity timeline) constants =====
+//
+// The bounded Lead-view MCP tool over the shared read-only activity projector.
+// Reads ONE transcript snapshot (zero append), classifies every event into a
+// closed set of safe activity categories (shape-driven, no backend/runtime
+// branching), redacts secrets BEFORE sanitization/excerpt/pagination, and
+// exposes ONLY closed-set safe facts. NEVER raw command text, tool input/output,
+// error text, credentials, PID/session id, absolute path, or unknown payload;
+// NO semantic summary/recommendation/progress estimate. Workspace-bound and
+// idempotent. Cursor continuity binds runId + frozen snapshot + view + position.
+
+const RUN_ACTIVITY_ERROR_TEXT = "run_activity failed";
+
+const RUN_ACTIVITY_INPUT = z.object({
+  runId: z.string().min(1),
+  categories: z.array(z.enum([...ACTIVITY_CATEGORIES])).min(1).optional(),
+  afterSeq: z.number().int().nonnegative().optional(),
+  cursor: z.string().optional(),
+  pageSize: z.number().int().min(1).max(LEAD_PAGE_HARD_CAP).optional(),
+}).strict();
+
+// Entry variants — a discriminated union on `category`. Each variant carries
+// ONLY closed-set safe fields. No variant exposes raw command text, tool
+// input/output, error text, exit code, callId, or absolute path.
+const RUN_ACTIVITY_ENTRY_MESSAGE = z.object({
+  category: z.literal("message"),
+  ts: z.string(),
+  seq: z.number().int(),
+  role: z.string(),
+  text: z.string(),
+  truncated: z.boolean(),
+}).strict();
+
+const RUN_ACTIVITY_ENTRY_COMMAND = z.object({
+  category: z.literal("command"),
+  ts: z.string(),
+  seq: z.number().int(),
+  exitStatus: z.enum(["ok", "failed", "unknown"]),
+}).strict();
+
+const RUN_ACTIVITY_ENTRY_TOOL_USE = z.object({
+  category: z.literal("tool_use"),
+  ts: z.string(),
+  seq: z.number().int(),
+  tool: z.string(),
+}).strict();
+
+const RUN_ACTIVITY_ENTRY_TOOL_RESULT = z.object({
+  category: z.literal("tool_result"),
+  ts: z.string(),
+  seq: z.number().int(),
+  isError: z.boolean(),
+}).strict();
+
+const RUN_ACTIVITY_ENTRY_FILE_WRITTEN = z.object({
+  category: z.literal("file_written"),
+  ts: z.string(),
+  seq: z.number().int(),
+  path: z.string(),
+}).strict();
+
+const RUN_ACTIVITY_ENTRY_STATE = z.object({
+  category: z.literal("state"),
+  ts: z.string(),
+  seq: z.number().int(),
+  to: z.string(),
+  terminal: z.boolean(),
+}).strict();
+
+const RUN_ACTIVITY_ENTRY_OTHER = z.object({
+  category: z.literal("other"),
+  ts: z.string(),
+  seq: z.number().int(),
+  label: z.string(),
+}).strict();
+
+const RUN_ACTIVITY_ENTRY = z.union([
+  RUN_ACTIVITY_ENTRY_MESSAGE,
+  RUN_ACTIVITY_ENTRY_COMMAND,
+  RUN_ACTIVITY_ENTRY_TOOL_USE,
+  RUN_ACTIVITY_ENTRY_TOOL_RESULT,
+  RUN_ACTIVITY_ENTRY_FILE_WRITTEN,
+  RUN_ACTIVITY_ENTRY_STATE,
+  RUN_ACTIVITY_ENTRY_OTHER,
+]);
+
+const RUN_ACTIVITY_COUNTS = z.object({
+  message: z.number().int().nonnegative(),
+  command: z.number().int().nonnegative(),
+  tool_use: z.number().int().nonnegative(),
+  tool_result: z.number().int().nonnegative(),
+  file_written: z.number().int().nonnegative(),
+  state: z.number().int().nonnegative(),
+  other: z.number().int().nonnegative(),
+}).strict();
+
+const RUN_ACTIVITY_OUTPUT = z.object({
+  runId: z.string(),
+  agentId: READ_AGENT_ID_SCHEMA,
+  backend: z.string(),
+  state: z.string(),
+  terminal: z.boolean(),
+  counts: RUN_ACTIVITY_COUNTS,
+  total: z.number().int().nonnegative(),
+  entries: z.array(RUN_ACTIVITY_ENTRY),
+  pageSize: z.number().int().min(1),
+  truncated: z.boolean(),
+  nextCursor: z.string().nullable(),
+}).strict();
+
+const RUN_ACTIVITY_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  // Accurate: single transcript snapshot, no network I/O.
+  openWorldHint: false,
+};
+
+const RUN_ACTIVITY_DESCRIPTION =
+  "Read-only activity timeline for a run, derived from ONE transcript snapshot " +
+  "(zero append). Classifies every event into a closed set of safe activity " +
+  "categories — message, command, tool_use, tool_result, file_written, state, " +
+  "other — and exposes ONLY closed-set safe facts: assistant text excerpts, " +
+  "command exit status (ok/failed/unknown, never the raw argv), tool names " +
+  "(never tool input/output), file paths (relative only — absolute/traversal " +
+  "paths are withheld), terminal state transitions, and bounded labels for " +
+  "unrecognized shapes. Secrets are redacted BEFORE sanitization, excerpt, and " +
+  "pagination, so a secret spanning an excerpt or page boundary never leaks. " +
+  "C0/C1/DEL control characters are neutralized (LF/TAB preserved). Makes NO " +
+  "semantic summary, recommendation, or progress estimate. Paginated via an " +
+  "opaque cursor that binds runId + frozen snapshot + view (category filter + " +
+  "afterSeq) + position; append-only growth is safe, any history mutation, " +
+  "shrink, cross-run, cross-filter, malformed, or out-of-range cursor fails " +
+  "closed. categories filters the timeline (closed set); afterSeq returns only " +
+  "events with seq > afterSeq; pageSize ≤ " + LEAD_PAGE_HARD_CAP + " (default " +
+  LEAD_PAGE_DEFAULT + "). Read-only and idempotent: zero transcript appends on " +
+  "every path. Workspace-bound: a run whose ownership cwd does not match the " +
+  "authorized workspace fails closed.";
+
 // ===== Lead Playbook Catalog (M11-2B) constants =====
 //
 // Read-only, provider-neutral catalog of exactly four built-in Lead playbooks.
@@ -1863,6 +2009,10 @@ export function createWaoMcpServer({
   // M12-3: injectable read-only composite (bounded wait + observation + terminal
   // compact). Defaults to the real service; threaded for transport tests.
   runAwaitResultFn,
+  // M12-8: injectable shared read-only activity reader. Defaults to the real
+  // service; workspace-bound — threaded only when a workspace binding authorizes
+  // the read.
+  readRunActivityFn,
   listLeadPlaybooksFn,
   getLeadPlaybookFn,
   getRunDeliveryReviewFn,
@@ -1901,6 +2051,7 @@ export function createWaoMcpServer({
   const listRunsService = listRunsFn ?? listRuns;
   const runWaitService = runWaitFn ?? runWait;
   const runAwaitResultService = runAwaitResultFn ?? runAwaitResult;
+  const runActivityReader = readRunActivityFn ?? readRunActivity;
   const playbookListService = listLeadPlaybooksFn ?? listLeadPlaybooks;
   const playbookGetService = getLeadPlaybookFn ?? getLeadPlaybook;
   const deliveryReviewService = getRunDeliveryReviewFn ?? getRunDeliveryReview;
@@ -3186,6 +3337,59 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: RUN_AWAIT_RESULT_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  // ===== run_activity (M12-8 read-only activity timeline) =====
+
+  mcp.registerTool(
+    "run_activity",
+    {
+      description: RUN_ACTIVITY_DESCRIPTION,
+      inputSchema: RUN_ACTIVITY_INPUT,
+      outputSchema: RUN_ACTIVITY_OUTPUT,
+      annotations: RUN_ACTIVITY_ANNOTATIONS,
+    },
+    async (input) => {
+      try {
+        const runId = input?.runId;
+        if (!isValidRunId(runId)) {
+          return { isError: true, content: [{ type: "text", text: RUN_ACTIVITY_ERROR_TEXT }] };
+        }
+        const binding = await resolveWorkspaceBinding();
+        if (!binding.bound) {
+          return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
+        }
+
+        // Single read-only snapshot (zero append). The reader verifies workspace
+        // ownership fail-closed; the returned snapshot is UNTRUSTED and handed
+        // to the pure projector for all classification/redaction/cursor shaping.
+        const snapshot = await runActivityReader({
+          runId,
+          runDir,
+          authorizedWorkspaceRoot: binding.root,
+        });
+
+        const page = projectRunActivity(snapshot, {
+          runId,
+          audience: "lead",
+          ...(input?.categories ? { categories: input.categories } : {}),
+          ...(input?.afterSeq !== undefined ? { afterSeq: input.afterSeq } : {}),
+          ...(input?.cursor ? { cursor: input.cursor } : {}),
+          ...(input?.pageSize !== undefined ? { pageSize: input.pageSize } : {}),
+        });
+
+        const parsed = RUN_ACTIVITY_OUTPUT.parse(page);
+        return {
+          content: [{ type: "text", text: JSON.stringify(parsed) }],
+          structuredContent: parsed,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: RUN_ACTIVITY_ERROR_TEXT }],
         };
       }
     },
