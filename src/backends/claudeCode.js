@@ -69,6 +69,8 @@ export class ClaudeCodeBackend extends ProcessBackend {
           "-p", task.prompt,
           "--output-format", "stream-json",
           "--verbose",
+          "--include-partial-messages",
+          "--exclude-dynamic-system-prompt-sections",
         ];
         // M11-11C: provider-native conversation reuse. First turn starts a named
         // session (--session-id); later turns resume it (--resume). Exactly one
@@ -78,6 +80,8 @@ export class ClaudeCodeBackend extends ProcessBackend {
           args.push("--session-id", task.sessionReuse.opaqueUuid);
         } else if (task.sessionReuse && task.sessionReuse.turn === "resume") {
           args.push("--resume", task.sessionReuse.opaqueUuid);
+        } else {
+          args.push("--no-session-persistence");
         }
         // M11-5：角色合同注入（config/roles/*.md，loader 已验证内容）。
         // --append-system-prompt <content> 恰好一次；用内容而非路径，消除 TOCTOU。
@@ -104,6 +108,10 @@ export class ClaudeCodeBackend extends ProcessBackend {
       // algorithm). inheritedEnvNames returns the declared credential name(s)
       // for claude-code (provider.apiKeyEnv / legacy --api-key-env).
       credentialEnvNames: (agent) => inheritedEnvNames(agent),
+      runtimeEnv: (_agent, task) => ({
+        CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS: "1",
+        ...(task.deliveryMode ? { CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS: "1" } : {}),
+      }),
       ...opts,
     });
   }

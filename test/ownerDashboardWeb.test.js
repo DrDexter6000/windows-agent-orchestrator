@@ -329,6 +329,10 @@ test("CLIENT SAFE: describeEntry reads only safe fields per category", () => {
   assert.equal(app.describeEntry({ category: "tool_result", isError: true, ts: "t", seq: 1 }).body, "tool result · error");
   assert.equal(app.describeEntry({ category: "tool_result", isError: false, ts: "t", seq: 1 }).body, "tool result · ok");
   assert.equal(app.describeEntry({ category: "file_written", path: "src/x.js", ts: "t", seq: 1 }).body, "wrote · src/x.js");
+  assert.equal(app.describeEntry({ category: "runtime_status", status: "provider_retry", ts: "t", seq: 1 }).body,
+    "runtime · provider retry");
+  assert.equal(app.describeEntry({ category: "runtime_status", status: "SECRET", ts: "t", seq: 1 }).body,
+    "runtime · unknown");
   assert.equal(app.describeEntry({ category: "state", to: "completed", ts: "t", seq: 1 }).body, "state → completed");
   assert.equal(app.describeEntry({ category: "other", ts: "t", seq: 1 }).body, "[unknown_event]");
 });

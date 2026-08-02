@@ -31,6 +31,7 @@ const childEnv = {
   ANTHROPIC_BASE_URL: options.baseUrl,
   ANTHROPIC_AUTH_TOKEN: token,
   CLAUDE_CONFIG_DIR: isolatedClaudeConfigDir,
+  CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS: "1",
 };
 if (options.apiKeyEnv.toUpperCase() !== "ANTHROPIC_AUTH_TOKEN") {
   for (const key of Object.keys(childEnv)) {
@@ -51,6 +52,7 @@ if (options.contextWindow) {
 }
 if (options.effort) {
   childEnv.CLAUDE_CODE_EFFORT_LEVEL = options.effort;
+  childEnv.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT = "1";
 }
 
 const binary = resolveBinary(options.claudeBinary ?? "claude");

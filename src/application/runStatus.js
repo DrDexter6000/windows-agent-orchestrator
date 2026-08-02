@@ -65,6 +65,17 @@ function describeActivity(ev) {
       return { lastActivityKind: "收工具结果", lastActivitySummary: `${ev.tool ?? "?"} 返回${ev.isError ? "（错误）" : ""}` };
     case "file_written":
       return { lastActivityKind: "在写文件", lastActivitySummary: basenameSafe(ev.path ?? "") };
+    case "runtime_activity": {
+      const summaries = {
+        initialized: "provider 已初始化",
+        streaming: "provider 正在输出",
+        provider_retry: "provider 正在重试",
+      };
+      return {
+        lastActivityKind: "运行时状态",
+        lastActivitySummary: summaries[ev.status] ?? "provider 状态未知",
+      };
+    }
     default:
       return { lastActivityKind: ev.kind ?? "未知", lastActivitySummary: "" };
   }

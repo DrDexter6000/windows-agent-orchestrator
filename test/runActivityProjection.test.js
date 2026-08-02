@@ -64,6 +64,9 @@ function stateEvent(to, overrides = {}) {
 function lifecycleEvent(type, overrides = {}) {
   return ev({ type, ...overrides });
 }
+function runtimeStatusEvent(status, overrides = {}) {
+  return ev({ kind: "runtime_activity", status, ...overrides });
+}
 
 function snap(events, opts = {}) {
   return {
@@ -100,6 +103,7 @@ test("#1 normal ordered activity page preserves seq order and surfaces terminal 
     toolUseEvent("Read", { command: "rm -rf /" }),
     toolResultEvent(false, "raw output"),
     fileWrittenEvent("src/a.js"),
+    runtimeStatusEvent("provider_retry", { error: "SECRET_RAW_PROVIDER_ERROR" }),
     stateEvent("completed"),
   ];
   const r = project(events);
@@ -110,16 +114,26 @@ test("#1 normal ordered activity page preserves seq order and surfaces terminal 
   const seqs = r.entries.map((e) => e.seq);
   assert.deepEqual(seqs, [...seqs].sort((a, b) => a - b), "entries seq-ordered");
   // categories present in order.
-  assert.deepEqual(r.entries.map((e) => e.category), ["message", "command", "tool_use", "tool_result", "file_written", "state"]);
+  assert.deepEqual(r.entries.map((e) => e.category), [
+    "message", "command", "tool_use", "tool_result", "file_written", "runtime_status", "state",
+  ]);
+  assert.deepEqual(r.entries[5], {
+    category: "runtime_status",
+    ts: "2026-08-02T00:00:00.000Z",
+    seq: 6,
+    status: "provider_retry",
+  });
+  assert.ok(!JSON.stringify(r.entries[5]).includes("SECRET_RAW_PROVIDER_ERROR"));
   // the state entry carries the terminal fact.
   const st = r.entries.at(-1);
   assert.equal(st.to, "completed");
   assert.equal(st.terminal, true);
   // counts cover the frozen filtered snapshot, not just the page.
   assert.deepEqual(r.counts, {
-    message: 1, command: 1, tool_use: 1, tool_result: 1, file_written: 1, state: 1, other: 0,
+    message: 1, command: 1, tool_use: 1, tool_result: 1, file_written: 1,
+    runtime_status: 1, state: 1, other: 0,
   });
-  assert.equal(r.total, 6);
+  assert.equal(r.total, 7);
   // assistant text excerpt surfaced.
   assert.equal(r.entries[0].role, "assistant");
   assert.equal(r.entries[0].text, "hello one");
@@ -136,7 +150,8 @@ test("#2 empty snapshot yields empty entries and zero counts, no cursor", () => 
   assert.equal(r.truncated, false);
   assert.equal(r.nextCursor, null);
   assert.deepEqual(r.counts, {
-    message: 0, command: 0, tool_use: 0, tool_result: 0, file_written: 0, state: 0, other: 0,
+    message: 0, command: 0, tool_use: 0, tool_result: 0, file_written: 0,
+    runtime_status: 0, state: 0, other: 0,
   });
 });
 

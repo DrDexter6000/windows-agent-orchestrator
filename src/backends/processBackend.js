@@ -79,6 +79,7 @@ export class ProcessBackend {
     waoCliPath = null,
     rawCapturePath = null,
     credentialEnvNames = () => [],
+    runtimeEnv = () => ({}),
     spawnFn = null,
   } = {}) {
     if (!parserClass) throw new Error("parserClass is required");
@@ -101,6 +102,7 @@ export class ProcessBackend {
     // 按 run 隔离走构造参数（未来 backendFor 传 runId）。
     this.rawCapturePath = rawCapturePath ?? (process.env.WAO_RAW_CAPTURE || null);
     this.credentialEnvNames = credentialEnvNames;
+    this.runtimeEnv = runtimeEnv;
   }
 
   /**
@@ -159,7 +161,10 @@ export class ProcessBackend {
     // both cover them — preventing both "credential missing" crashes and
     // stdout/stderr secret leaks of the fallback values.
     const resolvedCredentials = task.resolvedCredentials ?? {};
+    const backendRuntimeEnv = this.runtimeEnv(agent, task) ?? {};
+    assertRuntimeEnv(backendRuntimeEnv);
     const childEnv = buildChildEnv(inheritedNames, agentEnv, {
+      ...backendRuntimeEnv,
       ...(this.waoCliPath ? { WAO_CLI: this.waoCliPath } : {}),
       WAO_TARGET_CWD: agent.cwd,
     }, resolvedCredentials);
@@ -376,6 +381,17 @@ function buildChildEnv(inheritedNames, agentEnv, waoEnv, resolvedCredentials = {
     }
   }
   return { ...inherited, ...credEnv, ...agentEnv, ...waoEnv };
+}
+
+function assertRuntimeEnv(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("backend runtimeEnv must return an object");
+  }
+  for (const [name, entry] of Object.entries(value)) {
+    if (!name || typeof entry !== "string") {
+      throw new Error("backend runtimeEnv entries must be non-empty string pairs");
+    }
+  }
 }
 
 function isWindowsCommandScript(filePath) {

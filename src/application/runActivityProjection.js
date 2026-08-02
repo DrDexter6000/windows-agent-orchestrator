@@ -10,7 +10,7 @@
 //     facts fail closed BEFORE any structured activity result — never degrade
 //     agentId to unknown while still projecting content;
 //   - shape-driven classification of every transcript event into a closed set
-//     of 7 activity categories (NO backend/runtime branching);
+//     of 8 activity categories (NO backend/runtime branching);
 //   - uniform dynamic-string safety: EVERY transcript-derived dynamic string
 //     that crosses output (ts, role, message text, tool name, relative path,
 //     backend, state, unknown-event label) goes through ONE redact -> sanitize
@@ -55,6 +55,7 @@ import { createSecretRedactor } from "../secretRedaction.js";
 import { safeProjectAgentId } from "../canonicalAgentId.js";
 import { TERMINAL_STATES, assertEventsBoundToRunId } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
+import { RUNTIME_ACTIVITY_STATUSES } from "../runEvent.js";
 
 // ===== Closed-set activity categories (drives BOTH the service and the MCP
 // input schema — single source, no drift). =====
@@ -65,6 +66,7 @@ export const ACTIVITY_CATEGORIES = Object.freeze([
   "tool_use",
   "tool_result",
   "file_written",
+  "runtime_status",
   "state",
   "other",
 ]);
@@ -74,7 +76,16 @@ export const ACTIVITY_CATEGORIES = Object.freeze([
 export const OTHER_EVENT_LABEL = "[unknown_event]";
 
 function emptyCounts() {
-  return { message: 0, command: 0, tool_use: 0, tool_result: 0, file_written: 0, state: 0, other: 0 };
+  return {
+    message: 0,
+    command: 0,
+    tool_use: 0,
+    tool_result: 0,
+    file_written: 0,
+    runtime_status: 0,
+    state: 0,
+    other: 0,
+  };
 }
 
 // ===== Per-audience caps. Owner sees a larger excerpt + larger default page;
@@ -354,6 +365,7 @@ function classifyEvent(event) {
   }
   if (t === "run.event") {
     const k = event.kind;
+    if (k === "runtime_activity") return "runtime_status";
     if (k === "message" || k === "command" || k === "tool_use"
       || k === "tool_result" || k === "file_written") return k;
     return "other";
@@ -395,6 +407,12 @@ function buildEntry(event, category, redactor, textCap) {
       return { category, ts, seq, isError: Boolean(event.isError) };
     case "file_written":
       return { category, ts, seq, path: safeFilePath(event.path, redactor) };
+    case "runtime_status": {
+      const status = RUNTIME_ACTIVITY_STATUSES.includes(event.status)
+        ? event.status
+        : "unknown";
+      return { category, ts, seq, status };
+    }
     case "state": {
       // Closed-set gate: classification only surfaces TERMINAL_STATES here;
       // the guard keeps the set closed even if the classifier ever widens.

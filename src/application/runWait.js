@@ -68,6 +68,7 @@ const ACTIVITY_KIND_MAP = {
   tool_use: "tool_use",
   tool_result: "tool_result",
   file_written: "file_written",
+  runtime_activity: "runtime_status",
 };
 
 /**

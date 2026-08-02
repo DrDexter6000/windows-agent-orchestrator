@@ -940,8 +940,8 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 `run_activity` 是 workspace-bound、只读、幂等的活动下钻工具。它从**同一份 transcript 快照**投影一页事实，不追加 audit，不直接返回 JSONL，也不做进度估计、总结、建议或下一步裁决。
 
-- 输入：`{runId, categories?, afterSeq?, cursor?, pageSize?}`。`categories` 是 `message | command | tool_use | tool_result | file_written | state | other` 的闭集；`pageSize` 为 1..50；`cursor` 是由上一页返回的 opaque token。
-- 输出：当前 state/terminal、七类总计、当前页 entries、`truncated`/`nextCursor` 和 `availableDrilldowns`。message 只给脱敏后的有界文本；command 只给 `ok|failed|unknown`，不返回 argv；tool 只给名称/错误布尔；文件只给安全 repo-relative path；未知事件只用固定 sentinel。
+- 输入：`{runId, categories?, afterSeq?, cursor?, pageSize?}`。`categories` 是 `message | command | tool_use | tool_result | file_written | runtime_status | state | other` 的闭集；`pageSize` 为 1..50；`cursor` 是由上一页返回的 opaque token。
+- 输出：当前 state/terminal、八类总计、当前页 entries、`truncated`/`nextCursor` 和 `availableDrilldowns`。message 只给脱敏后的有界文本；command 只给 `ok|failed|unknown`，不返回 argv；tool 只给名称/错误布尔；文件只给安全 repo-relative path；`runtime_status` 只给 `initialized|streaming|provider_retry|unknown`，不返回 stream delta/retry error/session/model；未知事件只用固定 sentinel。
 - 安全顺序：完整动态文本先 exact-secret redaction，再清洗 C0/C1/DEL，再截断/分页。绝不返回 raw command、tool input/output、error text、credential、PID、provider session 或绝对路径。
 - cursor 绑定 runId、冻结快照前缀、audience/filter/afterSeq 视图和位置；append-only 增长可继续，历史变更/收缩、跨 run/view/audience、malformed 或越界 cursor 固定失败。Lead 可任意时点重复读第一页，或沿 `nextCursor` 逐页下钻。
 
@@ -1207,13 +1207,13 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 - `returnedEarly`：`true` = 因终态提前返回；`false` = `waitMs` 到期返回。
 - `liveness`（见下）。
 - `activityEventCount`：相对 baseline 的证据事件数。
-- `lastActivityKind`：最近一条证据事件的闭合安全标签（`message`/`thinking`/`command`/`tool_use`/`tool_result`/`file_written`/`metrics`/`state`/`delivery`/`scorecard` 等）；不存在为 `null`。
+- `lastActivityKind`：最近一条证据事件的闭合安全标签（`message`/`thinking`/`command`/`tool_use`/`tool_result`/`file_written`/`runtime_status`/`metrics`/`state`/`delivery`/`scorecard` 等）；不存在为 `null`。
 - `ownerHeartbeat`：owner 心跳新鲜度投影，枚举 `"fresh"`（.owner 文件存在且心跳在阈值内）/`"stale"`（存在但过时）/`"n/a"`（终态返回，无 owner 概念）。**是字符串枚举，不是对象**。
 
 `liveness` 取值（从 transcript 事件流 + owner 心跳投影，**不引 isAlive**）：
 
 - `terminal` —— run 已到终态（completed/failed/aborted/timed_out）。
-- `progress` —— baseline 之后有证据事件（message/command/tool_use/tool_result/file_written/`run.metrics`），worker 在产出。
+- `progress` —— baseline 之后有证据事件（message/command/tool_use/tool_result/file_written/payload-free runtime status/`run.metrics`），worker 在产出。
 - `process_only` —— baseline 之后无证据事件，但 owner 心跳新鲜（worker 进程仍在，疑似思考或卡顿）。
 - `silent` —— baseline 之后无证据事件，且 owner 心跳过时或不存在（排队或疑似卡住）。
 

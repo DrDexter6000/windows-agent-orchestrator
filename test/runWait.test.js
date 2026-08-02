@@ -66,6 +66,27 @@ function fakeNow(start = 1000000) {
   return { advance: (ms) => { t += ms; }, fn: () => t };
 }
 
+test("WAIT-RUNTIME-1: runtime activity counts as safe progress without exposing provider payload", async () => {
+  const { summarizeLiveness } = await import("../src/application/runWait.js");
+  const result = summarizeLiveness({
+    events: [{
+      type: "run.event",
+      kind: "runtime_activity",
+      status: "provider_retry",
+      error: "SECRET_PROVIDER_ERROR",
+      seq: 2,
+    }],
+    runDir: "D:/does-not-exist",
+    runId: "run_runtime_progress",
+    activityBaseline: 0,
+    now: Date.now(),
+  });
+  assert.equal(result.liveness, "progress");
+  assert.equal(result.activityEventCount, 1);
+  assert.equal(result.lastActivityKind, "runtime_status");
+  assert.ok(!JSON.stringify(result).includes("SECRET_PROVIDER_ERROR"));
+});
+
 // ── Service tests ────────────────────────────────────────────────────────────
 
 test("WAIT-01: already terminal → immediate return", async () => {

@@ -22,7 +22,7 @@
 // ===== Closed sets (mirror the server-side safe contract; client defense-in-depth) =====
 
 export const CATEGORIES = Object.freeze([
-  "message", "command", "tool_use", "tool_result", "file_written", "state", "other",
+  "message", "command", "tool_use", "tool_result", "file_written", "runtime_status", "state", "other",
 ]);
 
 // Bounded timeline window. Live polling appends newest entries and trims oldest
@@ -182,6 +182,15 @@ export function describeEntry(entry) {
       const path = typeof e.path === "string" && e.path.length ? e.path : "[path_withheld]";
       body = `wrote · ${path}`;
       mono = true;
+      break;
+    }
+    case "runtime_status": {
+      const labels = {
+        initialized: "initialized",
+        streaming: "streaming",
+        provider_retry: "provider retry",
+      };
+      body = `runtime · ${labels[e.status] ?? "unknown"}`;
       break;
     }
     case "state": {

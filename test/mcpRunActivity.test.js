@@ -132,7 +132,7 @@ test("MAA-02: input schema — runId required, categories enum, afterSeq int≥0
       // categories is a closed set matching ACTIVITY_CATEGORIES.
       const catEnum = props.categories.items?.enum ?? props.categories.enum ?? [];
       assert.deepEqual([...catEnum].sort(),
-        ["command", "file_written", "message", "other", "state", "tool_result", "tool_use"].sort(),
+        [...ACTIVITY_CATEGORIES].sort(),
         "categories closed set");
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -156,15 +156,15 @@ test("MAA-03: output schema strict; entries discriminated by category; counts cl
       for (const k of ["runId", "agentId", "backend", "state", "terminal", "counts", "total", "entries", "pageSize", "truncated", "nextCursor"]) {
         assert.ok(props[k], `output has ${k}`);
       }
-      // counts covers exactly the 7 closed-set categories.
+      // counts covers exactly the closed-set categories.
       assert.deepEqual(Object.keys(props.counts.properties ?? {}).sort(),
-        ["command", "file_written", "message", "other", "state", "tool_result", "tool_use"].sort());
+        ["command", "file_written", "message", "other", "runtime_status", "state", "tool_result", "tool_use"].sort());
       // entries is a discriminated union on `category` (serialized under items.anyOf).
       const entryItems = props.entries.items ?? props.entries;
       const members = entryItems.oneOf ?? entryItems.anyOf ?? [];
       const cats = members.map((m) => m.properties?.category?.const ?? m.properties?.category?.enum?.[0]).filter(Boolean);
       assert.deepEqual([...cats].sort(),
-        ["command", "file_written", "message", "other", "state", "tool_result", "tool_use"].sort(),
+        ["command", "file_written", "message", "other", "runtime_status", "state", "tool_result", "tool_use"].sort(),
         "entry variants cover the closed-set categories");
       // Flatten every field name appearing across entry variants: NONE may be a
       // raw payload channel (command/input/output/error/payload/path-absolute).

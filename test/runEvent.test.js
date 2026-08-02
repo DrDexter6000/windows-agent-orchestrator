@@ -9,6 +9,7 @@ import {
   writeIntentEvent,
   toolUseEvent,
   toolResultEvent,
+  runtimeActivityEvent,
   RUN_EVENT_KINDS,
 } from "../src/runEvent.js";
 
@@ -38,9 +39,22 @@ test("doneEvent rejects invalid reason", () => {
 });
 
 test("metricsEvent with tokens and cost", () => {
-  const ev = metricsEvent({ input: 100, output: 50, reasoning: 10, costUsd: 0.01 });
+  const ev = metricsEvent({
+    input: 100,
+    output: 50,
+    reasoning: 10,
+    cacheRead: 7,
+    cacheWrite: 3,
+    costUsd: 0.01,
+  });
   assert.equal(ev.kind, "metrics");
-  assert.deepEqual(ev.tokens, { input: 100, output: 50, reasoning: 10 });
+  assert.deepEqual(ev.tokens, {
+    input: 100,
+    output: 50,
+    reasoning: 10,
+    cacheRead: 7,
+    cacheWrite: 3,
+  });
   assert.equal(ev.costUsd, 0.01);
 });
 
@@ -57,7 +71,23 @@ test("metricsEvent with empty object produces empty tokens", () => {
   assert.deepEqual(ev.tokens, {});
 });
 
-test("RUN_EVENT_KINDS contains all 8 kinds", () => {
+test("runtimeActivityEvent emits only a closed payload-free status", () => {
+  assert.deepEqual(runtimeActivityEvent("initialized"), {
+    kind: "runtime_activity",
+    status: "initialized",
+  });
+  assert.deepEqual(runtimeActivityEvent("streaming"), {
+    kind: "runtime_activity",
+    status: "streaming",
+  });
+  assert.deepEqual(runtimeActivityEvent("provider_retry"), {
+    kind: "runtime_activity",
+    status: "provider_retry",
+  });
+  assert.throws(() => runtimeActivityEvent("raw-provider-payload"), /runtime activity status/i);
+});
+
+test("RUN_EVENT_KINDS contains all 10 kinds", () => {
   assert.ok(RUN_EVENT_KINDS.includes("message"));
   assert.ok(RUN_EVENT_KINDS.includes("done"));
   assert.ok(RUN_EVENT_KINDS.includes("metrics"));
@@ -66,7 +96,9 @@ test("RUN_EVENT_KINDS contains all 8 kinds", () => {
   assert.ok(RUN_EVENT_KINDS.includes("write_intent"));
   assert.ok(RUN_EVENT_KINDS.includes("tool_use"));
   assert.ok(RUN_EVENT_KINDS.includes("tool_result"));
-  assert.equal(RUN_EVENT_KINDS.length, 8);
+  assert.ok(RUN_EVENT_KINDS.includes("thinking"));
+  assert.ok(RUN_EVENT_KINDS.includes("runtime_activity"));
+  assert.equal(RUN_EVENT_KINDS.length, 10);
 });
 
 // ===== M6-1: 证据链事件 =====

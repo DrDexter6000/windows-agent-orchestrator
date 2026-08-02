@@ -5,7 +5,7 @@ import { commandEvent, fileWrittenEvent, toolUseEvent, toolResultEvent } from ".
 
 // 真实 claude stream-json 样本（基于实测，已精简到关键字段）
 const CLAUDE_SAMPLE = [
-  // system init（应被忽略）
+  // system init（仅投影闭集状态，不泄漏 session/model）
   '{"type":"system","subtype":"init","session_id":"abc","model":"claude-3-5"}',
   // assistant 消息，含 thinking + text（只应取 text）
   '{"type":"assistant","message":{"id":"msg_1","role":"assistant","content":[{"type":"thinking","thinking":"let me think"},{"type":"text","text":"Hello!"}]}}',
@@ -13,18 +13,21 @@ const CLAUDE_SAMPLE = [
   '{"type":"result","subtype":"success","is_error":false,"result":"Hello!","session_id":"abc"}',
 ].join("\n");
 
-test("claude 样本：emit message(assistant text) + thinking + done(completed)", () => {
+test("claude 样本：emit init + message(assistant text) + thinking + done(completed)", () => {
   const p = new ClaudeStreamParser();
   const events = p.feed(CLAUDE_SAMPLE + "\n");
   // TD-76：thinking 块现 emit 心跳事件（不存内容）。parser 先 emit message（text 循环），
   // 再 emit thinking（block 循环）——顺序 message,thinking,done（不影响心跳语义）。
-  assert.equal(events.length, 3);
-  assert.equal(events[0].kind, "message");
-  assert.equal(events[0].role, "assistant");
-  assert.deepEqual(events[0].parts, [{ type: "text", text: "Hello!" }]);
-  assert.equal(events[1].kind, "thinking");
-  assert.equal(events[2].kind, "done");
-  assert.equal(events[2].reason, "completed");
+  assert.equal(events.length, 4);
+  assert.deepEqual(events[0], { kind: "runtime_activity", status: "initialized" });
+  assert.equal(events[1].kind, "message");
+  assert.equal(events[1].role, "assistant");
+  assert.deepEqual(events[1].parts, [{ type: "text", text: "Hello!" }]);
+  assert.equal(events[2].kind, "thinking");
+  assert.equal(events[3].kind, "done");
+  assert.equal(events[3].reason, "completed");
+  assert.ok(!JSON.stringify(events[0]).includes("abc"), "session id never crosses the parser boundary");
+  assert.ok(!JSON.stringify(events[0]).includes("claude-3-5"), "model id never crosses the parser boundary");
 });
 
 test("TD-76: thinking 块 emit 心跳事件（不存内容），text 仍取", () => {
@@ -119,6 +122,33 @@ test("system/rate_limit 事件被忽略", () => {
   assert.deepEqual(events, []);
 });
 
+test("system/api_retry 投影为闭集 provider_retry，不泄漏错误或重试 payload", () => {
+  const p = new ClaudeStreamParser();
+  const events = p.feed(
+    '{"type":"system","subtype":"api_retry","error":"SECRET_PROVIDER_ERROR","attempt":3,"delay_ms":9000}\n',
+  );
+  assert.deepEqual(events, [{ kind: "runtime_activity", status: "provider_retry" }]);
+  assert.ok(!JSON.stringify(events).includes("SECRET_PROVIDER_ERROR"));
+  assert.ok(!JSON.stringify(events).includes("9000"));
+});
+
+test("partial stream events are sampled into bounded payload-free streaming activity", () => {
+  const p = new ClaudeStreamParser();
+  const lines = [];
+  for (let i = 0; i < 65; i += 1) {
+    lines.push(JSON.stringify({
+      type: "stream_event",
+      event: { type: "content_block_delta", delta: { type: "text_delta", text: `SECRET-${i}` } },
+    }));
+  }
+  const events = p.feed(lines.join("\n") + "\n");
+  assert.deepEqual(events, [
+    { kind: "runtime_activity", status: "streaming" },
+    { kind: "runtime_activity", status: "streaming" },
+  ]);
+  assert.ok(!JSON.stringify(events).includes("SECRET-"), "raw text deltas never cross the parser boundary");
+});
+
 test("TD-76: assistant 无 text 块（纯 thinking）emit thinking 心跳（非 message，非空）", () => {
   const p = new ClaudeStreamParser();
   const events = p.feed(
@@ -134,7 +164,7 @@ test("result 含 usage → emit metrics + done", () => {
   const p = new ClaudeStreamParser();
   const events = p.feed(
     '{"type":"result","subtype":"success","is_error":false,' +
-    '"usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":10},' +
+    '"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":12,"cache_creation_input_tokens":10},' +
     '"total_cost_usd":0.02}\n',
   );
   // metrics 在 done 之前
@@ -142,7 +172,10 @@ test("result 含 usage → emit metrics + done", () => {
   assert.equal(events[0].kind, "metrics");
   assert.equal(events[0].tokens.input, 100);
   assert.equal(events[0].tokens.output, 50);
-  assert.equal(events[0].tokens.reasoning, 10);
+  assert.equal(events[0].tokens.cacheRead, 12);
+  assert.equal(events[0].tokens.cacheWrite, 10);
+  assert.equal(events[0].tokens.reasoning, undefined,
+    "Claude cache creation tokens are not reasoning tokens");
   assert.equal(events[0].costUsd, 0.02);
   assert.equal(events[1].kind, "done");
   assert.equal(events[1].reason, "completed");

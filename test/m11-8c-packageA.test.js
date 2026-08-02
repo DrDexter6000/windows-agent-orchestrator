@@ -113,6 +113,8 @@ test("PA-RED1: delivery mode injects the delivery contract even WITHOUT a system
 
     assert.equal(spawnCount, 1, "spawn called exactly once");
     assert.ok(capturedTask, "backend received a task");
+    assert.equal(capturedTask.deliveryMode, true,
+      "delivery mode is threaded to the backend for runtime-level containment");
     assert.ok(capturedTask.roleContract, "roleContract is set in delivery mode even without systemPrompt");
     assert.match(capturedTask.roleContract, /git add/i, "delivery contract forbids git add");
     assert.match(capturedTask.roleContract, /commit SHA|final commit|do not.*SHA/i,
@@ -239,6 +241,8 @@ test("PA-RED3: non-delivery run has ZERO behavior change (no delivery contract)"
     // No systemPrompt + non-delivery → roleContract must be undefined (unchanged).
     assert.equal(capturedTask.roleContract, undefined,
       "non-delivery run without systemPrompt has no roleContract (unchanged)");
+    assert.equal(capturedTask.deliveryMode, undefined,
+      "ordinary run does not receive delivery-only runtime containment");
     assert.ok(!capturedTask.deliveryExecutionContract,
       "non-delivery run has no deliveryExecutionContract");
   } finally {

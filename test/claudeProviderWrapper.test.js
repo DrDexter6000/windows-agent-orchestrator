@@ -22,6 +22,9 @@ test("claude provider wrapper forwards angle-bracket prompts without shell repar
     "    sourceToken: process.env.DEEPSEEK_API_KEY,",
     "    model: process.env.ANTHROPIC_MODEL,",
     "    compact: process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,",
+    "    builtinAgentsDisabled: process.env.CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS,",
+    "    effort: process.env.CLAUDE_CODE_EFFORT_LEVEL,",
+    "    effortEnabled: process.env.CLAUDE_CODE_ALWAYS_ENABLE_EFFORT,",
     "    configDir: process.env.CLAUDE_CONFIG_DIR,",
     "  },",
     "}) + '\\n');",
@@ -41,6 +44,7 @@ test("claude provider wrapper forwards angle-bracket prompts without shell repar
       "--api-key-env", "deepseek_api_key",
       "--default-model", "deepseek-v4-flash",
       "--context-window", "200000",
+      "--effort", "max",
       "--",
       fakeClaude,
       "-p", "Read <sent_a.txt content> and <sent_b.txt content>",
@@ -66,6 +70,9 @@ test("claude provider wrapper forwards angle-bracket prompts without shell repar
     assert.equal(parsed.env.sourceToken, undefined);
     assert.equal(parsed.env.model, "deepseek-v4-flash");
     assert.equal(parsed.env.compact, "200000");
+    assert.equal(parsed.env.builtinAgentsDisabled, "1");
+    assert.equal(parsed.env.effort, "max");
+    assert.equal(parsed.env.effortEnabled, "1");
     assert.ok(parsed.env.configDir, "wrapper must set CLAUDE_CONFIG_DIR for provider workers");
     assert.notEqual(path.resolve(parsed.env.configDir), oauthDir);
     assert.ok(!path.resolve(parsed.env.configDir).startsWith(path.resolve(oauthDir)));

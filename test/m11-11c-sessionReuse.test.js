@@ -105,6 +105,29 @@ function makeCapturingSpawn() {
   return { spawnFn, captures };
 }
 
+function makeScriptedClaudeSpawn(lines) {
+  const captures = [];
+  const spawnFn = (binary, args, opts) => {
+    captures.push({ binary, args: [...args], opts });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.pid = 4343 + captures.length;
+    child.exitCode = null;
+    child.signalCode = null;
+    setImmediate(() => {
+      child.emit("spawn");
+      setImmediate(() => {
+        child.stdout.emit("data", Buffer.from(`${lines.join("\n")}\n`, "utf8"));
+        child.exitCode = 0;
+        child.emit("close", 0);
+      });
+    });
+    return child;
+  };
+  return { spawnFn, captures };
+}
+
 function reusableClaudeAgent(dir, extra = {}) {
   return {
     backend: "claude-code",
@@ -658,6 +681,11 @@ test("M11-11C ARGV-1: first turn → claude argv has --session-id <uuid> exactly
     assert.equal(args[sidIdx + 1], uuid, "--session-id value is the opaque uuid");
     assert.equal(args.filter((a) => a === "--session-id").length, 1, "--session-id appears exactly once");
     assert.equal(args.indexOf("--resume"), -1, "no --resume on first turn");
+    assert.equal(args.indexOf("--no-session-persistence"), -1,
+      "reusable first turn must persist the provider session");
+    assert.equal(args.filter((a) => a === "--include-partial-messages").length, 1);
+    assert.equal(args.filter((a) => a === "--exclude-dynamic-system-prompt-sections").length, 1);
+    assert.equal(captures[0].opts.env.CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS, "1");
   } finally { cleanupDir(dir); }
 });
 
@@ -674,6 +702,8 @@ test("M11-11C ARGV-2: resume turn → claude argv has --resume <uuid> exactly on
     assert.equal(args[resIdx + 1], uuid, "--resume value is the same opaque uuid");
     assert.equal(args.filter((a) => a === "--resume").length, 1, "--resume appears exactly once");
     assert.equal(args.indexOf("--session-id"), -1, "no --session-id on resume turn");
+    assert.equal(args.indexOf("--no-session-persistence"), -1,
+      "resume turn must retain the provider session");
   } finally { cleanupDir(dir); }
 });
 
@@ -686,6 +716,89 @@ test("M11-11C ARGV-3: no sessionReuse task ⇒ neither --session-id nor --resume
     const args = captures[0].args;
     assert.equal(args.indexOf("--session-id"), -1);
     assert.equal(args.indexOf("--resume"), -1);
+    assert.equal(args.filter((a) => a === "--no-session-persistence").length, 1,
+      "ordinary one-shot runs do not leave provider session state behind");
+  } finally { cleanupDir(dir); }
+});
+
+test("M12-Claude ENV-1: delivery mode disables Claude built-in agents and Git instructions", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-claude-env-delivery-"));
+  const { spawnFn, captures } = makeCapturingSpawn();
+  try {
+    const backend = new ClaudeCodeBackend({ spawnFn });
+    await backend.spawn(reusableClaudeAgent(dir), { prompt: "delivery", deliveryMode: true });
+    const env = captures[0].opts.env;
+    assert.equal(env.CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS, "1");
+    assert.equal(env.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS, "1");
+  } finally { cleanupDir(dir); }
+});
+
+test("M12-Claude ENV-2: ordinary mode disables built-in agents but leaves Git instructions unchanged", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-claude-env-ordinary-"));
+  const { spawnFn, captures } = makeCapturingSpawn();
+  try {
+    const backend = new ClaudeCodeBackend({ spawnFn });
+    await backend.spawn(reusableClaudeAgent(dir), { prompt: "ordinary" });
+    const env = captures[0].opts.env;
+    assert.equal(env.CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS, "1");
+    assert.equal(env.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS, undefined);
+  } finally { cleanupDir(dir); }
+});
+
+test("M12-Claude TRANSCRIPT-1: latest stream activity and cache metrics persist without raw payload leakage", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-claude-latest-transcript-"));
+  const rawSecrets = ["SECRET_INIT_PAYLOAD", "SECRET_RETRY_DETAIL", "SECRET_STREAM_DELTA"];
+  const { spawnFn, captures } = makeScriptedClaudeSpawn([
+    JSON.stringify({ type: "system", subtype: "init", session_id: rawSecrets[0] }),
+    JSON.stringify({ type: "system", subtype: "api_retry", error: rawSecrets[1] }),
+    JSON.stringify({ type: "stream_event", event: { delta: { text: rawSecrets[2] } } }),
+    JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      usage: {
+        input_tokens: 11,
+        output_tokens: 7,
+        cache_read_input_tokens: 101,
+        cache_creation_input_tokens: 13,
+      },
+      total_cost_usd: 0.02,
+    }),
+  ]);
+  try {
+    const result = await runBackground({
+      agentId: "researcher",
+      prompt: "no-model transcript probe",
+      registry: { agents: { researcher: reusableClaudeAgent(dir) } },
+      runDir: dir,
+      backendFor: () => new ClaudeCodeBackend({ spawnFn }),
+      waitTimeout: 5000,
+      pollInterval: 10,
+    });
+    assert.equal(result.completed, true);
+
+    const events = await readTranscript(join(dir, `${result.runId}.jsonl`));
+    const statuses = events
+      .filter((event) => event.type === "run.event" && event.kind === "runtime_activity")
+      .map((event) => event.status);
+    assert.deepEqual(statuses, ["initialized", "provider_retry", "streaming"]);
+
+    const metrics = findLatest(events, "run.metrics");
+    assert.deepEqual(metrics.tokens, {
+      input: 11,
+      output: 7,
+      cacheRead: 101,
+      cacheWrite: 13,
+    });
+    assert.equal(metrics.tokens.reasoning, undefined, "cache creation is not reasoning");
+
+    const transcriptText = readFileSync(join(dir, `${result.runId}.jsonl`), "utf8");
+    for (const secret of rawSecrets) {
+      assert.equal(transcriptText.includes(secret), false, `raw provider payload is not persisted: ${secret}`);
+    }
+    assert.ok(captures[0].args.includes("--include-partial-messages"));
+    assert.ok(captures[0].args.includes("--exclude-dynamic-system-prompt-sections"));
+    assert.equal(captures[0].opts.env.CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS, "1");
   } finally { cleanupDir(dir); }
 });
 

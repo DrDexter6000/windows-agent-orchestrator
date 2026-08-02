@@ -106,6 +106,7 @@ import {
 import { projectReviewResult } from "../application/deliveryReviewProjection.js";
 import { REVIEW_UNAVAILABLE_REASONS } from "../application/reviewUnavailableReasons.js";
 import { projectCollectResult } from "../application/runCollectProjection.js";
+import { RUNTIME_ACTIVITY_STATUSES } from "../runEvent.js";
 import {
   projectRunActivity,
   ACTIVITY_CATEGORIES,
@@ -1789,6 +1790,13 @@ const RUN_ACTIVITY_ENTRY_FILE_WRITTEN = z.object({
   path: z.string().max(ACTIVITY_PATH_CAP),
 }).strict();
 
+const RUN_ACTIVITY_ENTRY_RUNTIME_STATUS = z.object({
+  category: z.literal("runtime_status"),
+  ts: z.string().max(ACTIVITY_TS_CAP),
+  seq: z.number().int(),
+  status: z.enum([...RUNTIME_ACTIVITY_STATUSES, "unknown"]),
+}).strict();
+
 const RUN_ACTIVITY_ENTRY_STATE = z.object({
   category: z.literal("state"),
   ts: z.string().max(ACTIVITY_TS_CAP),
@@ -1810,6 +1818,7 @@ const RUN_ACTIVITY_ENTRY = z.union([
   RUN_ACTIVITY_ENTRY_TOOL_USE,
   RUN_ACTIVITY_ENTRY_TOOL_RESULT,
   RUN_ACTIVITY_ENTRY_FILE_WRITTEN,
+  RUN_ACTIVITY_ENTRY_RUNTIME_STATUS,
   RUN_ACTIVITY_ENTRY_STATE,
   RUN_ACTIVITY_ENTRY_OTHER,
 ]);
@@ -1820,6 +1829,7 @@ const RUN_ACTIVITY_COUNTS = z.object({
   tool_use: z.number().int().nonnegative(),
   tool_result: z.number().int().nonnegative(),
   file_written: z.number().int().nonnegative(),
+  runtime_status: z.number().int().nonnegative(),
   state: z.number().int().nonnegative(),
   other: z.number().int().nonnegative(),
 }).strict();
@@ -1856,11 +1866,11 @@ const RUN_ACTIVITY_ANNOTATIONS = {
 const RUN_ACTIVITY_DESCRIPTION =
   "Read-only activity timeline for a run, derived from ONE transcript snapshot " +
   "(zero append). Classifies every event into a closed set of safe activity " +
-  "categories — message, command, tool_use, tool_result, file_written, state, " +
+  "categories — message, command, tool_use, tool_result, file_written, runtime_status, state, " +
   "other — and exposes ONLY closed-set safe facts: assistant text excerpts, " +
   "command exit status (ok/failed/unknown, never the raw argv), tool names " +
   "(never tool input/output), file paths (relative only — absolute/traversal " +
-  "paths are withheld), terminal state transitions, and bounded labels for " +
+  "paths are withheld), payload-free provider runtime status, terminal state transitions, and bounded labels for " +
   "unrecognized shapes. Secrets are redacted BEFORE sanitization, excerpt, and " +
   "pagination, so a secret spanning an excerpt or page boundary never leaks. " +
   "C0/C1/DEL control characters are neutralized (LF/TAB preserved). Makes NO " +

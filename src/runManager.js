@@ -613,6 +613,7 @@ export class RunManager {
         // M11-11C: opaque reuse routing → backend compiles --session-id/--resume.
         // Absent for non-reusable runs (backends ignore the field).
         ...(sessionReuse ? { sessionReuse } : {}),
+        ...(deliveryContext ? { deliveryMode: true } : {}),
       });
     } catch (error) {
       await transcript.append("run.error", { phase: "spawn", error: error.message });
@@ -832,6 +833,7 @@ export class RunManager {
         prompt: promptEvent.prompt,
         roleContract: resumeRoleContract,
         resolvedCredentials: resumeResolvedCredentials,
+        ...(deliveryContext ? { deliveryMode: true } : {}),
       });
       await transcript.append("run.rerun", {
         originalSessionId,
@@ -1257,6 +1259,13 @@ export class Run {
           doneReason = ev.reason;
           doneError = ev.error;
           break;
+        } else if (ev.kind === "thinking" || ev.kind === "runtime_activity") {
+          await markRunningOnce("first_event");
+          // Provider activity is a payload-free supervision fact. Persist it
+          // for run_wait/run_activity/dashboard visibility, but do not count it
+          // as delivery evidence or expose the provider's raw stream payload.
+          const { kind, ...rest } = ev;
+          await this.transcript.append("run.event", { kind, ...rest });
         } else if (
           ev.kind === "command" ||
           ev.kind === "file_written" ||

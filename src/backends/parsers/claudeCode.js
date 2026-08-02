@@ -9,12 +9,14 @@ import {
   toolUseEvent,
   toolResultEvent,
   thinkingEvent,
+  runtimeActivityEvent,
   WRITE_INTENT_CORRELATION_STATUS,
 } from "../../runEvent.js";
 
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit"]);
 const MAX_PENDING_WRITE_INTENTS = 256;
 const UNKNOWN_TOOL_CALL_ID = "unknown";
+const STREAM_ACTIVITY_SAMPLE_INTERVAL = 64;
 
 /**
  * Claude Code stream-json 解析器（M2-3，M4 加 token 提取，M6-3 加证据链）。
@@ -25,7 +27,9 @@ const UNKNOWN_TOOL_CALL_ID = "unknown";
  *   type:"user" + content 含 tool_result 块   → toolResultEvent（证据链用）
  *   type:"result" + success                   → metricsEvent(usage) + doneEvent("completed")
  *   type:"result" + error                     → metricsEvent(usage) + doneEvent("failed")
- *   其它（system/rate_limit）                  → 忽略
+ *   system init/api_retry                     → payload-free runtime activity
+ *   stream_event                              → sampled payload-free activity
+ *   其它 system/rate_limit                    → 忽略
  *
  * assistant 消息可能同时含 text + tool_use：message 和证据事件都 emit。
  * 顺序：先 message（text），后证据（tool_use），与 content 块顺序无关——
@@ -41,9 +45,23 @@ export class ClaudeStreamParser extends LineStreamParser {
     // M12-4B: runtime-specific write confirmation correlation. Map insertion
     // order plus a fixed cap makes memory use bounded and deterministic.
     this._pendingWrites = new Map();
+    this._streamActivityCount = 0;
   }
 
   handleLine(obj) {
+    if (obj.type === "system") {
+      if (obj.subtype === "init") return [runtimeActivityEvent("initialized")];
+      if (obj.subtype === "api_retry") return [runtimeActivityEvent("provider_retry")];
+      return [];
+    }
+    if (obj.type === "stream_event") {
+      this._streamActivityCount += 1;
+      if (this._streamActivityCount === 1
+        || this._streamActivityCount % STREAM_ACTIVITY_SAMPLE_INTERVAL === 0) {
+        return [runtimeActivityEvent("streaming")];
+      }
+      return [];
+    }
     if (obj.type === "assistant") {
       const content = obj.message?.content;
       if (!Array.isArray(content)) return [];
@@ -111,7 +129,8 @@ export class ClaudeStreamParser extends LineStreamParser {
         events.push(metricsEvent({
           input: u.input_tokens,
           output: u.output_tokens,
-          reasoning: u.cache_creation_input_tokens,
+          cacheRead: u.cache_read_input_tokens,
+          cacheWrite: u.cache_creation_input_tokens,
           costUsd: typeof obj.total_cost_usd === "number" ? obj.total_cost_usd : undefined,
         }));
       }

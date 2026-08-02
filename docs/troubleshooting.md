@@ -343,6 +343,14 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **恢复**：Lead 审查 inventory 后明确提供完整 `allowedPaths`，调用 `run_delivery_repackage`。它不调用模型、不恢复 provider session，只在原 worktree 机械重算范围、打包并运行原验证声明。
 - **裁决**：重封装后仍逐文件审查，并由 Lead 单独 accept/reject。WAO 不判断候选语义、不自动扩域、不自动重试；缺 `run.stop_verified`、HEAD 漂移、冲突事件、空/截断 inventory 均不提供该恢复路径。
 
+### 7.11 Claude Code 新版 partial stream / retry 状态与 cache token
+
+- **症状**：长推理期间只看到粗粒度 thinking；provider retry 看起来像静默；或 Claude 的 cache creation token 被统计成 reasoning token。
+- **根因**：旧 adapter 未启用 `--include-partial-messages`，忽略 `system/api_retry`，并把 `cache_creation_input_tokens` 错映射到 `reasoning`。
+- **修复**：Claude backend 启用 partial stream，并把 init/streaming/retry 只投影成 payload-free 闭集 `runtime_activity`；stream delta 按固定间隔采样，原始文本/error/session/model 不落 transcript。cache read/write 使用独立指标字段。
+- **隔离**：WAO Claude worker 设置 `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1`；delivery mode 额外设置 `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1`。普通一次性 run 使用 `--no-session-persistence`，显式 session reuse 不使用该 flag。
+- **验收边界**：本地 parser/wrapper/argv/env 与 synthetic stream 可 no-model 验证；官方 Claude/真实 provider 行为仍需具备对应订阅或 credential 后单独 canary，不得用本地测试冒充真实 runtime 验收。
+
 ---
 
 ## 8. 新增条目（模板）

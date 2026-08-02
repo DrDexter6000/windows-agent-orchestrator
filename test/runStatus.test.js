@@ -17,7 +17,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, statSync, readFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { getRunStatus } from "../src/application/runStatus.js";
+import { getRunStatus, describeActivity } from "../src/application/runStatus.js";
 import { TERMINAL_STATES } from "../src/transcript.js";
 
 // ===== Helpers =====
@@ -47,6 +47,27 @@ function sampleEvents() {
 }
 
 // ===== Tests =====
+
+test("M12-Claude STATUS-1: runtime activity is rendered from a closed status only", () => {
+  assert.deepEqual(
+    describeActivity({
+      kind: "runtime_activity",
+      status: "provider_retry",
+      error: "SECRET_PROVIDER_ERROR",
+    }),
+    {
+      lastActivityKind: "运行时状态",
+      lastActivitySummary: "provider 正在重试",
+    },
+  );
+  assert.deepEqual(
+    describeActivity({ kind: "runtime_activity", status: "SECRET_STATUS" }),
+    {
+      lastActivityKind: "运行时状态",
+      lastActivitySummary: "provider 状态未知",
+    },
+  );
+});
 
 // ---------------------------------------------------------------------
 // M9-3A-01: states map correctly to state + terminal flag.

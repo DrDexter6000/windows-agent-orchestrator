@@ -131,6 +131,9 @@ type RunEvent =
       correlationStatus: "tracked"|"missing_tool_call_id"|"duplicate_tool_call_id"|"pending_limit" }
                                                                // 尚未确认成功的写入意图（containment telemetry）
   | { kind: "file_written", path: string, toolCallId?: string } // runtime 已确认成功的写入（证据链用）
+  | { kind: "thinking" }                                      // payload-free reasoning heartbeat
+  | { kind: "runtime_activity",
+      status: "initialized"|"streaming"|"provider_retry" }    // payload-free provider status
   | { kind: "metrics", tokens?: TokenUsage, durationMs?: number }
   | { kind: "done", reason: "completed"|"aborted"|"failed", error?: string };
 ```
@@ -140,7 +143,13 @@ interface Part {
   type: "text";
   text: string;
 }
-interface TokenUsage { input?: number; output?: number; reasoning?: number; }
+interface TokenUsage {
+  input?: number;
+  output?: number;
+  reasoning?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+}
 interface MessagePage { data: Message[]; cursor: { previous: string|null; next: string|null }; }
 interface HealthResult { ok: boolean; status?: number; error?: string; }
 ```
@@ -150,6 +159,9 @@ interface HealthResult { ok: boolean; status?: number; error?: string; }
 `toolCallId` 关联的成功结果才能确认 `file_written`。无法关联、重复或超过 pending
 上限的意图在 delivery 模式下 fail closed，不把不确定性投影成成功。
 Backend 实现有责任从 runtime 的原始输出里**提取**这些结构化证据（而非原样透传文本）。
+`runtime_activity` 是严格闭集、零 payload 的活性投影：provider 原始 stream delta、
+retry error、session/model id 和延迟数据不得进入 RunEvent。`cacheRead`/`cacheWrite`
+与 `reasoning` 是不同计量维度；Claude 的 cache creation token 不得伪装成 reasoning token。
 
 ### 2.3 AgentDef（registry 条目规范化后）
 
@@ -229,6 +241,7 @@ interface StreamParser {
 - Process workers do not inherit `process.env` wholesale. The backend copies a fixed OS/runtime allowlist, the credential channel assigned to that backend, non-secret `agent.env`, and WAO control variables.
 - Secret-like names are forbidden in `agent.env`; registry configuration names an inherited credential channel instead of storing credential values.
 - Values from explicitly assigned credential channels are redacted regardless of channel name. Values of at least eight characters from credential-like environment names (including proxy URLs) are also exact-match redacted before parsed events enter RunManager memory, before JSONL persistence, and in raw-capture/stdout/stderr diagnostic sinks. Raw capture uses a UTF-8 streaming redactor, so a value split across chunks or code-point bytes is still removed.
+- ProcessBackend 允许 backend 声明纯字符串 `runtimeEnv(agent, task)` 控制变量；该钩子不承载 credential。Claude Code 用它在所有 WAO worker 上禁用 runtime 内建 subagent，并仅在 delivery mode 禁用 runtime 自带 Git instructions，避免绕过 WAO 的派发与 commit 所有权。
 - This is exposure minimization, not a strong secret boundary. A worker under the same OS identity can still inspect its assigned runtime credential or credential files. Strong isolation requires the broker/identity boundary recorded in decision 0015 and TD-104.
 
 ### 2.6 现有 OpenCodeServeBackend 的迁移 `[S]`

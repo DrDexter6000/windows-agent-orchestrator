@@ -20,7 +20,17 @@ export const RUN_EVENT_KINDS = [
   "write_intent",
   "tool_use",
   "tool_result",
+  "thinking",
+  "runtime_activity",
 ];
+
+export const RUNTIME_ACTIVITY_STATUSES = Object.freeze([
+  "initialized",
+  "streaming",
+  "provider_retry",
+]);
+
+const RUNTIME_ACTIVITY_STATUS_VALUES = new Set(RUNTIME_ACTIVITY_STATUSES);
 
 export const WRITE_INTENT_CORRELATION_STATUS = Object.freeze({
   TRACKED: "tracked",
@@ -52,11 +62,13 @@ export function doneEvent(reason, error) {
  * metrics 事件（M4）：token 用量 + 成本。
  * 从各 backend 的 usage 字段提取。字段缺失时省略（不强制所有 backend 都有）。
  */
-export function metricsEvent({ input, output, reasoning, costUsd } = {}) {
+export function metricsEvent({ input, output, reasoning, cacheRead, cacheWrite, costUsd } = {}) {
   const tokens = {};
   if (typeof input === "number") tokens.input = input;
   if (typeof output === "number") tokens.output = output;
   if (typeof reasoning === "number") tokens.reasoning = reasoning;
+  if (typeof cacheRead === "number") tokens.cacheRead = cacheRead;
+  if (typeof cacheWrite === "number") tokens.cacheWrite = cacheWrite;
   const event = { kind: "metrics", tokens };
   if (typeof costUsd === "number") event.costUsd = costUsd;
   return event;
@@ -114,6 +126,18 @@ export function writeIntentEvent(path, toolCallId, correlationStatus) {
  */
 export function thinkingEvent() {
   return { kind: "thinking" };
+}
+
+/**
+ * Provider runtime activity projected into a payload-free closed set.
+ * Raw retry errors, stream deltas, session ids, models, and timing payloads
+ * never cross this boundary.
+ */
+export function runtimeActivityEvent(status) {
+  if (!RUNTIME_ACTIVITY_STATUS_VALUES.has(status)) {
+    throw new Error("runtime activity status is invalid");
+  }
+  return { kind: "runtime_activity", status };
 }
 
 /**
