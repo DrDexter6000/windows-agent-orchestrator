@@ -1,0 +1,214 @@
+/* WAO Owner Dashboard — dense, quiet, operational. Light theme, single calm
+   accent, flat sections with thin dividers (no nested cards, no hero, no
+   decorative gradients/orbs). Desktop-first two-column; stacks under 860px. */
+
+:root {
+  --bg: #f6f7f8;
+  --surface: #ffffff;
+  --border: #e3e5e8;
+  --border-strong: #cfd3d8;
+  --text: #1f2328;
+  --muted: #6a737d;
+  --accent: #2b6cb0;
+  --accent-soft: #eaf1f8;
+  --warn: #8a6d00;
+  --warn-soft: #fff8e1;
+
+  --running-fg: #8a5a00;   --running-bg: #fdf3d8;
+  --completed-fg: #1f6f3a; --completed-bg: #def3e2;
+  --failed-fg: #9b1c1c;    --failed-bg: #fbe0e0;
+  --timed_out-fg: #8a3a12; --timed_out-bg: #fbe6d6;
+  --stopped-fg: #4b5563;   --stopped-bg: #eef1f4;
+  --unknown-fg: #5b6470;   --unknown-bg: #eceef1;
+
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* ===== Top bar ===== */
+.topbar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+.topbar-title { font-weight: 600; letter-spacing: .01em; }
+.topbar-status { font-size: 12px; color: var(--muted); }
+.topbar-status.stale { color: var(--warn); font-weight: 600; }
+.topbar-status.live::before {
+  content: "";
+  display: inline-block;
+  width: 7px; height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--completed-fg);
+  vertical-align: middle;
+}
+
+/* ===== Layout ===== */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 380px) 1fr;
+  gap: 1px;
+  background: var(--border);
+  min-height: calc(100vh - 38px);
+}
+.pane {
+  background: var(--surface);
+  min-width: 0;
+  padding: 10px 12px;
+}
+.runs-pane { display: flex; flex-direction: column; gap: 8px; }
+.detail-pane { display: flex; flex-direction: column; gap: 10px; }
+
+/* ===== Filters ===== */
+.pane-head { display: flex; gap: 8px; }
+.filter-input, .filters select {
+  width: 100%;
+  padding: 5px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+.filters { display: flex; gap: 8px; }
+.filter { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.filter-label { font-size: 11px; color: var(--muted); text-transform: lowercase; }
+
+/* ===== Run list ===== */
+.run-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.run-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 8px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.run-row + .run-row { margin-top: 1px; }
+.run-row:hover { background: var(--accent-soft); }
+.run-row.selected { background: var(--accent-soft); border-color: var(--accent); }
+.run-row .rid { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-row .meta { display: flex; gap: 8px; align-items: center; font-size: 11px; color: var(--muted); }
+.run-row .ago { font-family: var(--mono); }
+
+/* ===== State pill ===== */
+.state-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+.state-pill.s-running   { color: var(--running-fg);   background: var(--running-bg); }
+.state-pill.s-completed { color: var(--completed-fg); background: var(--completed-bg); }
+.state-pill.s-failed    { color: var(--failed-fg);    background: var(--failed-bg); }
+.state-pill.s-timed_out { color: var(--timed_out-fg); background: var(--timed_out-bg); }
+.state-pill.s-stopped   { color: var(--stopped-fg);   background: var(--stopped-bg); }
+.state-pill.s-unknown   { color: var(--unknown-fg);   background: var(--unknown-bg); }
+.state-pill.s-na        { color: var(--unknown-fg);   background: var(--unknown-bg); }
+
+/* ===== Detail ===== */
+.detail-head { display: flex; flex-direction: column; gap: 6px; }
+.detail-run { display: flex; align-items: center; gap: 8px; }
+.detail-facts { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.fact { font-size: 12px; color: var(--muted); }
+.fact.mono, .mono { font-family: var(--mono); }
+#detail-runid { font-weight: 600; font-size: 13px; }
+
+.link-button {
+  background: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--accent);
+  cursor: pointer;
+}
+.link-button:hover { background: var(--accent-soft); }
+.link-button[hidden] { display: none; }
+
+/* ===== Category filter chips ===== */
+.cat-filters { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
+.chip .n { color: var(--muted); font-family: var(--mono); }
+
+/* ===== Timeline (flat, chronological, bounded) ===== */
+.timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+  max-height: calc(100vh - 280px);
+  overflow-y: auto;
+}
+.tl-row {
+  display: grid;
+  grid-template-columns: 92px 92px 1fr;
+  gap: 8px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  align-items: baseline;
+}
+.tl-row .tl-ts { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.tl-row .tl-cat { font-size: 11px; color: var(--muted); text-transform: lowercase; }
+.tl-row .tl-body { min-width: 0; word-break: break-word; font-size: 12px; }
+.tl-row .tl-body.mono { font-size: 12px; }
+.tl-trunc { color: var(--muted); font-style: italic; }
+
+/* ===== Shared ===== */
+.muted { color: var(--muted); }
+.empty { padding: 16px 4px; font-size: 12px; }
+.unavailable { padding: 24px 14px; }
+.unavailable p { margin: 0 0 6px; }
+.unavailable-inline { font-size: 12px; padding: 6px 0; }
+code { font-family: var(--mono); font-size: 12px; background: var(--unknown-bg); padding: 0 4px; border-radius: 3px; }
+[hidden] { display: none !important; }
+
+/* ===== Responsive: stack to one column under 860px ===== */
+@media (max-width: 860px) {
+  .layout { grid-template-columns: 1fr; }
+  .runs-pane { border-bottom: 1px solid var(--border); }
+  /* Bound the runs list so a long (e.g. 100-item) list scrolls internally and
+     does not push the selected-run activity below every run; the detail pane
+     stays reachable in the same narrow-viewport flow. Desktop is unaffected. */
+  .run-list { max-height: 45vh; overflow-y: auto; }
+  .timeline { max-height: 60vh; }
+}

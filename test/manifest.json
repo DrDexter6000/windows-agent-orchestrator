@@ -44,6 +44,8 @@
       "nodeVersionGuard.test.js",
       "opencodeServe.test.js",
       "ownerDashboardServer.test.js",
+      "ownerDashboardCli.test.js",
+      "ownerDashboardWeb.test.js",
       "opencodeStopVerify.test.js",
       "parsers/claudeCode.test.js",
       "parsers/codex.test.js",

@@ -165,7 +165,16 @@ test("METHOD: non-GET → 405 with Allow: GET (incl. OPTIONS = no CORS)", async 
 // =====================================================================
 test("ROUTE: unknown GET route → fixed 404", async () => {
   const s = makeServer();
-  for (const url of ["/", "/unknown", "/api/foo", "/api/", "/api/runs/extra"]) {
+  // "/" now serves the dashboard index.html (Package D); other unknown routes 404.
+  const root = await drive(s.handler, { url: "/" });
+  assert.equal(root.status, 200);
+  assert.equal(root.headers["content-type"], "text/html; charset=utf-8");
+  assert.equal(root.headers["cache-control"], "no-store");
+  assert.equal(root.headers["x-content-type-options"], "nosniff");
+  assert.equal(root.headers["referrer-policy"], "no-referrer");
+  assert.ok(root.headers["content-security-policy"], "CSP set on html");
+  assert.ok(!("access-control-allow-origin" in root.headers), "no CORS opt-in on html");
+  for (const url of ["/unknown", "/api/foo", "/api/", "/api/runs/extra"]) {
     const r = await drive(s.handler, { url });
     assert.equal(r.status, 404, `${url} → 404`);
     assert.deepEqual(jsonOf(r), { error: "not_found" });
@@ -388,9 +397,9 @@ test("TOKEN AUTHORITY: public arbitrary config.token is NOT accepted (always fre
   // issues a fresh 64-hex crypto-random token via randomBytes.
   const s = createOwnerDashboardServer({
     runDir: "/x", workspaceRoot: "/y",
-    token: "fixed-injected-token-that-must-be-ignored",
+    token: "fixed-injected-token-must-not-be-used",
   });
-  assert.notEqual(s.token, "fixed-injected-token-that-must-be-ignored");
+  assert.notEqual(s.token, "fixed-injected-token-must-not-be-used");
   assert.match(s.token, /^[0-9a-f]{64}$/);
 });
 

@@ -31,7 +31,9 @@
 
 import http from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { URL } from "node:url";
+import { URL, fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import {
   getOwnerRuns,
@@ -92,14 +94,63 @@ const ERR = Object.freeze({
 });
 
 // Mandatory safe headers for EVERY response. No CORS opt-in (no ACAO / ACRM /
-// ACAH). CSP same-origin static (Package D) — safe for the future dashboard.
+// ACAH). Strict same-origin CSP — the dashboard ships ONLY same-origin static
+// assets (no inline scripts/styles, no remote assets, no fetch beyond /api/*).
+// The single least-privilege exception is img-src data:, which permits the one
+// inline data-image favicon so the browser never auto-requests /favicon.ico and
+// never logs a CSP console error; no 'unsafe-inline'/'unsafe-eval' is granted.
 const SAFE_HEADERS = Object.freeze({
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store",
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
-  "content-security-policy": "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
+  "content-security-policy": "default-src 'self'; img-src 'self' data:; base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
 });
+
+// ===== Package D: the Owner read-only dashboard UI =====
+//
+// The server serves EXACTLY three fixed static assets (the dashboard UI). There
+// is no second HTTP framework and no client-supplied path is ever read from
+// disk: the request pathname is matched against a FIXED route→asset table whose
+// bodies are preloaded ONCE at server creation. A request for any other path
+// (including every traversal form — the pathname is never used as a filesystem
+// path) simply matches no key and falls through to the fixed 404.
+//
+// The three assets are loaded relative to this module (src/owner-dashboard/).
+// Loading is EAGER and FAIL-CLOSED at createOwnerDashboardServer time: if any of
+// the three fixed assets is missing/unreadable the factory throws BEFORE any
+// token is issued or socket opened — a dashboard that cannot serve its own UI
+// never starts. Tests may inject `loadAssetFn(name)` to avoid the disk.
+const STATIC_DIR = fileURLToPath(new URL("./owner-dashboard/", import.meta.url));
+const STATIC_ASSETS = Object.freeze([
+  { route: "/", file: "index.html", type: "text/html; charset=utf-8" },
+  { route: "/index.html", file: "index.html", type: "text/html; charset=utf-8" },
+  { route: "/styles.css", file: "styles.css", type: "text/css; charset=utf-8" },
+  { route: "/app.js", file: "app.js", type: "text/javascript; charset=utf-8" },
+]);
+
+// Preload the three fixed assets into an immutable route→{body,type} map. The
+// bodies are Buffers (exact bytes served verbatim; content-length is the byte
+// length). A fixed map keyed by the EXACT pathname makes traversal impossible:
+// "/../x", "/%2e", "/foo" match no key → 404, and no client input reaches fs.
+function loadStaticAssets(loadAssetFn) {
+  const read = typeof loadAssetFn === "function"
+    ? loadAssetFn
+    : (name) => readFileSync(join(STATIC_DIR, name));
+  const map = new Map();
+  for (const a of STATIC_ASSETS) {
+    // Skip re-reading a file already loaded under another route (e.g. "/" and
+    // "/index.html" share index.html) — same bytes, one read.
+    let body = null;
+    for (const existing of map.values()) {
+      if (existing.file === a.file) { body = existing.body; break; }
+    }
+    if (body === null) body = Buffer.from(read(a.file));
+    if (!Buffer.isBuffer(body)) body = Buffer.from(body);
+    map.set(a.route, { file: a.file, type: a.type, body });
+  }
+  return map;
+}
 
 // Strict query parse failures throw this sentinel; the handler maps it to 400.
 class BadRequest extends Error {}
@@ -111,6 +162,18 @@ function sendJson(res, status, payload, extra) {
   if (extra) for (const [k, v] of Object.entries(extra)) res.setHeader(k, v);
   res.writeHead(status);
   res.end(body);
+}
+
+// Serve a preloaded fixed asset. Same strict safe headers as JSON (no-store /
+// nosniff / no-referrer / strict CSP); only the content-type is overridden to
+// the asset's real media type (required under nosniff). The body is the exact
+// preloaded Buffer — no disk read, no client path, no reflection.
+function sendAsset(res, asset) {
+  for (const [k, v] of Object.entries(SAFE_HEADERS)) res.setHeader(k, v);
+  res.setHeader("content-type", asset.type);
+  res.setHeader("content-length", asset.body.length);
+  res.writeHead(200);
+  res.end(asset.body);
 }
 
 // Constant-time bearer comparison. Accepts ONLY the exact "Bearer <token>"
@@ -212,6 +275,15 @@ function createHandler(ctx) {
       return sendJson(res, 200, { status: "ok" });
     }
 
+    // Package D: the three fixed dashboard assets. NO auth — the bearer lives
+    // only in the URL fragment (client-side, never sent to the server), so a
+    // browser navigation cannot carry it. The pathname is matched against a
+    // fixed preloaded map; any other path (incl. traversal forms) → 404 below.
+    const asset = ctx.assets.get(u.pathname);
+    if (asset) {
+      return sendAsset(res, asset);
+    }
+
     if (u.pathname === "/api/runs") {
       if (!bearerOk(req.headers.authorization, ctx.token)) {
         return sendJson(res, 401, ERR.unauthorized);
@@ -297,6 +369,10 @@ function createHandler(ctx) {
  *   `(size:number) => Buffer|Uint8Array` for tests; default crypto.randomBytes.
  *   Output is validated fail-closed (exactly 32 bytes → 64 lowercase hex).
  * @param {Function} [config.nowFn] — clock (ms) for liveness (testing)
+ * @param {Function} [config.loadAssetFn] — injectable fixed-asset loader
+ *   `(name:string) => Buffer|Uint8Array|string` for tests; default reads the
+ *   three fixed assets from src/owner-dashboard/ relative to this module.
+ *   Loading is eager + fail-closed: a missing asset throws BEFORE listen.
  * @returns {{token: string, handler: Function, server: http.Server,
  *   listen: Function, close: Function, address: Function}}
  */
@@ -305,7 +381,7 @@ export function createOwnerDashboardServer(config) {
     runDir, workspaceRoot, knownAgentIds = [], env,
     host = LOOPBACK_HOST, port,
     getOwnerRunsFn, getOwnerActivityFn,
-    randomBytesFn, nowFn,
+    randomBytesFn, nowFn, loadAssetFn,
   } = config;
 
   // Reject any non-loopback host BEFORE listen.
@@ -324,6 +400,11 @@ export function createOwnerDashboardServer(config) {
     resolvedPort = port;
   }
 
+  // Package D: preload the three fixed dashboard assets EAGER and FAIL-CLOSED
+  // BEFORE the token is issued or any socket opened. A dashboard that cannot
+  // serve its own UI never starts. The map is immutable for the server lifetime.
+  const assets = loadStaticAssets(loadAssetFn);
+
   // Issue + fail-closed-validate the bearer BEFORE constructing the server
   // object (no side effect, no listen). Public arbitrary config.token was
   // removed; only the injectable randomBytesFn entropy source is accepted.
@@ -335,6 +416,7 @@ export function createOwnerDashboardServer(config) {
     knownAgentIds,
     env,
     token: issuedToken,
+    assets,
     getOwnerRuns: getOwnerRunsFn ?? getOwnerRuns,
     getOwnerActivity: getOwnerActivityFn ?? getOwnerActivity,
     now: typeof nowFn === "function" ? nowFn : () => Date.now(),

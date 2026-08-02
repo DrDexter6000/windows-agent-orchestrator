@@ -52,6 +52,12 @@ import { getWaoDir } from "../waoDir.js";
 import { summarizeDeclares } from "../waoDeclare.js";
 import { summarizeStages } from "../waoStage.js";
 import { parseOptions, resolveTargetCwd } from "./shared.js";
+// M12-8D: `runs dashboard --web` reuses the ownerDashboardServer boundary (which
+// reuses the SINGLE application SSOTs — no second parser/classifier/redactor).
+// Shared workspace authority (proveWorkspace) + registry IDs (readRegistry).
+import { createOwnerDashboardServer } from "../ownerDashboardServer.js";
+import { proveWorkspace } from "../application/workspaceBinding.js";
+import { readRegistry } from "../registry.js";
 
 async function runsCommand(args, config) {
   const [sub, ...tail] = args;
@@ -457,8 +463,23 @@ async function runsDiagnoseCommand(args, config) {
  * 🟢 工具域：只读聚合，绝不 retry/stop/改状态。省 Lead 在多命令间轮询的精力。
  * 支持：--watch N（N 秒重刷）/ --format json / --agent <id> 过滤 / --latest N 取最近 N 个。
  */
-export async function runsDashboardCommand(args, config) {
+export async function runsDashboardCommand(args, config, injections = {}) {
   const options = parseOptions(args);
+
+  // M12-8D: `--web` launches a local read-only Owner dashboard HTTP boundary.
+  // It is mutually exclusive with the live text refresh and JSON output. The
+  // non-web path below is byte-compatible with the prior behavior.
+  if (options.web) {
+    if (options.watch !== undefined && options.watch !== false) {
+      throw new Error("--web cannot be combined with --watch");
+    }
+    if (options.format === "json") {
+      throw new Error("--web cannot be combined with --format json");
+    }
+    await runDashboardWeb(options, config, injections);
+    return;
+  }
+
   const runDir = resolve(options.runDir ?? config.runDir);
   const agentFilter = options.agent;
   const latestN = options.latest ? Number(options.latest) : null;
@@ -553,6 +574,105 @@ export async function runsDashboardCommand(args, config) {
     await new Promise(() => {});
     clearInterval(timer);
   }
+}
+
+/**
+ * M12-8D: launch the local Owner read-only dashboard HTTP boundary and stay alive
+ * until SIGINT/SIGTERM. Reuses ownerDashboardServer (the single loopback
+ * read-only boundary) — there is no second parser/classifier/redactor here.
+ *
+ * Server-owned inputs (never client-supplied) come from the SHARED authorities:
+ *   - runDir         — config.runDir (same SSOT as the text dashboard),
+ *   - workspaceRoot  — proveWorkspace(targetCwd) canonical Git root (the SAME
+ *                      ownership authority runStop/listRuns use),
+ *   - knownAgentIds  — readRegistry() agent ids (the SAME registry authority).
+ *
+ * It prints exactly one URL — http://127.0.0.1:<port>/#token=<64hex> — plus a
+ * Ctrl-C line, then blocks until a shutdown signal. It performs NO control
+ * action, opens no browser, writes no config, and changes no selection.
+ *
+ * Every external dependency is injectable so tests cover startup / fragment /
+ * conflict / shutdown WITHOUT a real socket, git, registry, or signal.
+ *
+ * @param {object} options — parsed CLI options (web/port/runDir/cwd/…)
+ * @param {object} config — process config (runDir/registry/stateDir)
+ * @param {object} [injections]
+ * @param {Function} [injections.createServerFn] — server factory (testing)
+ * @param {Function} [injections.proveWorkspaceFn] — workspace authority (testing)
+ * @param {Function} [injections.readRegistryFn] — registry reader (testing)
+ * @param {{wait:Function, cancel?:Function}} [injections.lifecycle] — shutdown waitable (testing)
+ * @param {Function} [injections.log] — stdout sink (testing)
+ */
+export async function runDashboardWeb(options, config, injections = {}) {
+  const createServer = injections.createServerFn ?? createOwnerDashboardServer;
+  const prove = injections.proveWorkspaceFn ?? proveWorkspace;
+  const readReg = injections.readRegistryFn ?? readRegistry;
+  const lifecycle = injections.lifecycle ?? createProcessLifecycle();
+  const log = injections.log ?? ((s) => console.log(s));
+
+  const targetCwd = resolveTargetCwd(options);
+  const runDir = resolve(options.runDir ?? config.runDir);
+
+  // Shared workspace authority: the canonical Git root of the target cwd. If the
+  // cwd is not a provable workspace, the dashboard still starts — no run matches
+  // ownership (shown as cross_workspace) rather than crashing the command.
+  let workspaceRoot;
+  try {
+    workspaceRoot = prove(targetCwd).root;
+  } catch {
+    workspaceRoot = targetCwd;
+  }
+
+  // Shared registry authority: agent ids for agentId validation. Registry
+  // unavailable → agentIds render as "unknown" (fail soft, do not crash).
+  let knownAgentIds = [];
+  try {
+    const reg = await readReg(resolve(config.registry ?? "config/agents.json"));
+    if (reg && Array.isArray(reg.agents)) {
+      knownAgentIds = reg.agents.map((a) => a && a.id).filter((id) => typeof id === "string");
+    }
+  } catch { /* registry unavailable → "unknown" agentIds */ }
+
+  // Optional --port: 0 (ephemeral, default) or integer. The server validates the
+  // full 0|1024..65535 range fail-closed; here we only coerce the CLI string.
+  let port = 0;
+  if (options.port !== undefined && options.port !== null && options.port !== true) {
+    const n = Number(options.port);
+    if (!Number.isInteger(n)) throw new Error("--port must be an integer");
+    port = n;
+  }
+
+  const server = createServer({ runDir, workspaceRoot, knownAgentIds, port });
+  const addr = await server.listen();
+  // The token lives ONLY in the URL fragment; the server never receives it.
+  const url = `http://127.0.0.1:${addr.port}/#token=${server.token}`;
+  log(url);
+  log("(Ctrl-C to stop)");
+
+  // Block until SIGINT/SIGTERM, then close the boundary and return.
+  try {
+    await lifecycle.wait();
+  } finally {
+    if (typeof server.close === "function") await server.close();
+    if (typeof lifecycle.cancel === "function") lifecycle.cancel();
+  }
+}
+
+/**
+ * Production shutdown lifecycle: a promise that resolves on SIGINT or SIGTERM.
+ * Registering the listeners suppresses Node's default termination so we can
+ * close the HTTP boundary cleanly first.
+ */
+function createProcessLifecycle() {
+  let resolveWait;
+  const done = new Promise((resolve) => { resolveWait = resolve; });
+  const signals = ["SIGINT", "SIGTERM"];
+  const onSignal = () => resolveWait();
+  for (const sig of signals) process.on(sig, onSignal);
+  return {
+    wait: () => done,
+    cancel() { for (const sig of signals) process.off(sig, onSignal); },
+  };
 }
 
 /**
