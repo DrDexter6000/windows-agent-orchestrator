@@ -948,7 +948,7 @@ npm run cli -- runs dashboard --web [--port 0|1024..65535] [--run-dir DIR] [--cw
 
 ### MCP `availableDrilldowns`（有界渐进式披露元数据，M12-8B）
 
-`run_await_result`、`run_status`、`run_diagnose`、`run_collect`、`run_delivery`、`run_activity` 六个工具的输出**统一携带（schema REQUIRED）** `availableDrilldowns`：**≤4 条静态披露元数据**（`readOnly` 按被披露工具如实标注），告诉 Lead 哪个安全观察工具可以揭示更多、以什么深度、多大代价——**只披露，不自动调用，不做任何语义决策**。它削减 Lead 的 token/注意力成本，同时把判断和后续工具选择完全留给 Lead。
+`run_wait`、`run_await_result`、`run_status`、`run_diagnose`、`run_collect`、`run_delivery`、`run_activity` 七个工具的输出**统一携带（schema REQUIRED）** `availableDrilldowns`：**≤4 条静态披露元数据**（`readOnly` 按被披露工具如实标注），告诉 Lead 哪个安全观察工具可以揭示更多、以什么深度、多大代价——**只披露，不自动调用，不做任何语义决策**。运行中的 `run_wait` 直接提示 `run_activity`；终态成功提示 activity + compact result，终态失败提示 diagnosis + activity。它削减 Lead 的 token/注意力成本，同时把判断、停止与后续工具选择完全留给 Lead。
 
 每条 entry 是严格七键对象：
 
@@ -1188,7 +1188,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 注意：`run.metrics`（token/cost tick）算作进展，但其原始 token/cost 数值**绝不返回**——只暴露 `lastActivityKind:"metrics"`。证据事件的闭集由 `runWait.js` 所有；`ownerLiveness.js` 只负责心跳新鲜度 SSOT，不是完整 liveness 投影 SSOT。
 
-**绝不返回**：原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量、token/cost 原值。**M11-8B**：返回 `agentId`——transcript envelope 盖戳的 canonical worker 身份（不从 worker 自由文本推断；缺失/冲突降级为 `"unknown"`，不抛错、不伪造身份、不是自动停止门）。`content` JSON 与 `structuredContent` 语义一致。service 失败时返回固定安全文案 `run_wait failed`，不泄漏 zod 校验信息。
+**绝不返回**：原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量、token/cost 原值。**M11-8B**：返回 `agentId`——transcript envelope 盖戳的 canonical worker 身份（不从 worker 自由文本推断；缺失/冲突降级为 `"unknown"`，不抛错、不伪造身份、不是自动停止门）。**M12-8E**：返回静态有界 `availableDrilldowns`，让 Lead 在需要时下钻 `run_activity`/`run_diagnose`/`run_collect`；它不包含 worker 动态文本，不自动调用工具或停止 run。`content` JSON 与 `structuredContent` 语义一致。service 失败时返回固定安全文案 `run_wait failed`，不泄漏 zod 校验信息。
 
 **transport keepalive（M10-pre3 closeout）**：MCP SDK 的请求超时可能短于 `run_wait` 的 270s 默认观察窗口。为避免 client 在 server 仍正常观察时超时，server 在每次 poll 后向请求关联的 `progressToken` 发送标准 `notifications/progress`（仅当 client 通过 `onprogress` 请求了进度时）。client 若设 `resetTimeoutOnProgress:true`，每收到一条进度就重置自身计时器。这是标准 MCP 机制，不 patch host、不改全局 timeout；client 的最大总超时仍由 host 自己决定。若 host 不请求进度，server 不发通知，client 仍受其超时约束。
 

@@ -58,6 +58,10 @@ const FACT_MATRIX = [
   ["run_status", { state: "timed_out", terminal: true }],
   ["run_status", { state: "stopped", terminal: true }],
   ["run_status", { state: "weird_state", terminal: true }],
+  // run_wait
+  ["run_wait", { state: "running", terminal: false, liveness: "progress" }],
+  ["run_wait", { state: "completed", terminal: true, liveness: "terminal" }],
+  ["run_wait", { state: "failed", terminal: true, liveness: "terminal" }],
   // run_await_result
   ["run_await_result", { state: "running", terminal: false, observationOutcome: "observed", readFailureReason: null, liveness: "progress", resultStatus: "not_terminal" }],
   ["run_await_result", { state: "running", terminal: false, observationOutcome: "observed", readFailureReason: null, liveness: "silent", resultStatus: "not_terminal" }],
@@ -282,6 +286,12 @@ test("U-06: representative context-sensitive selections (facts-driven, no infere
 
   // non-terminal / silent → point-in-time status + activity choices.
   expect("run_await_result", { state: "running", terminal: false, observationOutcome: "observed", readFailureReason: null, liveness: "silent", resultStatus: "not_terminal" }, ["run_status", "run_activity"]);
+  // atomic wait already reports state/liveness; non-terminal work drills directly into activity.
+  expect("run_wait", { state: "running", terminal: false, liveness: "progress" }, ["run_activity"]);
+  // terminal success exposes activity plus the compact final result.
+  expect("run_wait", { state: "completed", terminal: true, liveness: "terminal" }, ["run_activity", "run_collect"]);
+  // terminal failure exposes diagnosis plus activity facts.
+  expect("run_wait", { state: "failed", terminal: true, liveness: "terminal" }, ["run_diagnose", "run_activity"]);
   // read-failure → point-in-time status + activity choices.
   expect("run_await_result", { state: "running", terminal: false, observationOutcome: "read_failure", readFailureReason: "transcript_parse_failed", liveness: "unknown", resultStatus: "unavailable" }, ["run_status", "run_activity"]);
   // terminal compact result → activity + full collect.

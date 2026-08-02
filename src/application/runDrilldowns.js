@@ -172,6 +172,14 @@ function selectForRunStatus(f) {
   return ["activity"];
 }
 
+function selectForRunWait(f) {
+  // run_wait already returns point-in-time state and liveness, so repeating
+  // run_status is not a deeper disclosure. Reuse the status selector for
+  // terminal outcomes; while still running, lead directly to safe activity.
+  if (f.terminal === true) return selectForRunStatus(f);
+  return ["activity"];
+}
+
 function selectForRunAwaitResult(f) {
   if (f.observationOutcome === "read_failure") {
     return ["status", "activity"];
@@ -250,6 +258,7 @@ function selectForRunActivity(f) {
 
 const SOURCE_SELECTORS = Object.freeze({
   run_status: selectForRunStatus,
+  run_wait: selectForRunWait,
   run_await_result: selectForRunAwaitResult,
   run_diagnose: selectForRunDiagnose,
   run_collect: selectForRunCollect,
@@ -263,7 +272,7 @@ const SOURCE_SELECTORS = Object.freeze({
  * Select the bounded drilldown metadata for one source tool from its
  * already-available machine facts.
  *
- * @param {string} toolName — one of the six source tools
+ * @param {string} toolName — one of the seven source tools
  * @param {object} [facts] — flat machine facts (see the per-tool selectors)
  * @returns {Array<object>} 1..DRILLDOWN_MAX_ENTRIES validated seven-key entries
  * @throws {Error} /unknown tool/ for any non-source tool name

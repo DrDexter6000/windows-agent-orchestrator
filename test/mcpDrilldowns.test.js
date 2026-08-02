@@ -2,19 +2,19 @@
 //
 // M12-8B: bounded Lead progressive-disclosure metadata — MCP wiring TDD
 // RED→GREEN. The REQUIRED `availableDrilldowns` field must appear on EXACTLY
-// six tools: run_await_result, run_status, run_diagnose, run_collect,
-// run_delivery, run_activity — with the exact bounded entry shape
+// seven tools: run_wait, run_await_result, run_status, run_diagnose,
+// run_collect, run_delivery, run_activity — with the exact bounded entry shape
 // { tool, view, detail, purpose, reveals, cost, readOnly }, at most 4 entries,
 // readOnly the truthful boolean (false for run_collect's audit-appending
 // entries, true otherwise), no mutation tools, no behavior change to any
 // existing output field, and no extra transcript appends (run_collect still
-// appends exactly one messages.collected on success; the five read-only tools
+// appends exactly one messages.collected on success; the six read-only tools
 // append zero). The run_delivery_review_bundle output keeps its established
 // nested delivery contract and never acquires the field.
 //
 // Delivery/diagnosis cases use the DI fakes (getRunDeliveryFn /
 // getRunDiagnosisFn) so the drilldown projection is the causal subject; the
-// other four tools run through the REAL services against seeded transcripts.
+// other five tools run through the REAL services against seeded transcripts.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -82,10 +82,10 @@ async function buildClient(server) {
 const SEVEN_KEYS = ["cost", "detail", "purpose", "readOnly", "reveals", "tool", "view"];
 
 // =====================================================================
-// 1. All six output schemas expose the exact bounded metadata.
+// 1. All seven output schemas expose the exact bounded metadata.
 // =====================================================================
 
-test("MD-01: six output schemas REQUIRE availableDrilldowns with the exact bounded shape; the bundle never acquires it", async () => {
+test("MD-01: seven output schemas REQUIRE availableDrilldowns with the exact bounded shape; the bundle never acquires it", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-md01-"));
   try {
     makeGitRepo(dir);
@@ -93,8 +93,8 @@ test("MD-01: six output schemas REQUIRE availableDrilldowns with the exact bound
     const client = await buildClient(server);
     try {
       const tools = await client.listTools();
-      const SIX = ["run_await_result", "run_status", "run_diagnose", "run_collect", "run_delivery", "run_activity"];
-      for (const name of SIX) {
+      const SEVEN = ["run_wait", "run_await_result", "run_status", "run_diagnose", "run_collect", "run_delivery", "run_activity"];
+      for (const name of SEVEN) {
         const t = tools.tools.find((x) => x.name === name);
         assert.ok(t, `${name} discoverable`);
         const props = t.outputSchema.properties ?? {};
@@ -130,7 +130,7 @@ test("MD-01: six output schemas REQUIRE availableDrilldowns with the exact bound
         "run_diagnose output schema is strict");
       // No OTHER tool may carry the field.
       for (const t of tools.tools) {
-        if (SIX.includes(t.name)) continue;
+        if (SEVEN.includes(t.name)) continue;
         assert.equal(t.outputSchema?.properties?.availableDrilldowns, undefined,
           `${t.name} must NOT carry availableDrilldowns`);
       }
@@ -153,7 +153,7 @@ test("MD-01: six output schemas REQUIRE availableDrilldowns with the exact bound
 });
 
 // =====================================================================
-// 2. Six handlers return parsed output WITH metadata, legacy fields intact.
+// 2. Seven handlers return parsed output WITH metadata, legacy fields intact.
 // =====================================================================
 
 test("MD-02: run_status returns availableDrilldowns; legacy fields unchanged", async () => {
@@ -509,7 +509,7 @@ test("MD-09: run_activity — terminal → compact collect; non-terminal → sta
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
 
-test("MD-10: drilldown metadata never triggers nested tool invocation or extra appends across all six tools", async () => {
+test("MD-10: drilldown metadata never triggers nested tool invocation or extra appends across all seven tools", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-md10-"));
   const runDir = mkdtempSync(join(tmpdir(), "wao-md10-rd-"));
   try {
@@ -522,6 +522,7 @@ test("MD-10: drilldown metadata never triggers nested tool invocation or extra a
     try {
       const calls = [
         { name: "run_status", arguments: { runId: "run_all" } },
+        { name: "run_wait", arguments: { runId: "run_all", waitMs: 180000 } },
         { name: "run_diagnose", arguments: { runId: "run_all" } },
         { name: "run_await_result", arguments: { runId: "run_all", waitMs: 0 } },
         { name: "run_activity", arguments: { runId: "run_all" } },

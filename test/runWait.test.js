@@ -335,6 +335,11 @@ test("MCP-WAIT-04: safe output — no path/prompt/command/session", async () => 
       assert.ok(!json.includes(dir), "no absolute path");
       assert.ok(!json.includes("proc_"), "no session id");
       assert.ok(!json.includes("prompt"), "no prompt");
+      assert.deepEqual(
+        res.structuredContent.availableDrilldowns.map((entry) => entry.tool),
+        ["run_activity"],
+        "non-terminal run_wait points the Lead to the bounded activity timeline",
+      );
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });

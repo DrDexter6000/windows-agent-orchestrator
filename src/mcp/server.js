@@ -1580,6 +1580,7 @@ const RUN_WAIT_OUTPUT = z.object({
   activityEventCount: z.number().int(),
   lastActivityKind: z.string().nullable(),
   ownerHeartbeat: z.enum(["fresh", "stale", "n/a"]),
+  availableDrilldowns: AVAILABLE_DRILLDOWNS,
 }).strict();
 
 const RUN_WAIT_ANNOTATIONS = {
@@ -3373,6 +3374,11 @@ export function createWaoMcpServer({
           lastActivityKind: result.lastActivityKind,
           ownerHeartbeat: result.ownerHeartbeat,
         };
+        payload.availableDrilldowns = selectDrilldowns("run_wait", {
+          state: payload.state,
+          terminal: payload.terminal,
+          liveness: payload.liveness,
+        });
 
         // M11-8B closeout: return the PARSED safe object.
         const parsed = RUN_WAIT_OUTPUT.parse(payload);
