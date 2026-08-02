@@ -42,6 +42,7 @@
       "mcpRunDiagnose.test.js",
       "metrics.test.js",
       "nodeVersionGuard.test.js",
+      "opencodeRequalification.test.js",
       "opencodeServe.test.js",
       "ownerDashboardServer.test.js",
       "ownerDashboardCli.test.js",

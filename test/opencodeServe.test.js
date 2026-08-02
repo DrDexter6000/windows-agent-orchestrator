@@ -492,6 +492,9 @@ test("first-stable: 首条 assistant 有 step-finish 后判定完成，emit 首�
   const abortCalls = [];
   const fetchImpl = async (url) => {
     const urlStr = String(url);
+    if (urlStr.includes("/session/status")) {
+      return jsonResponse({ ses_test: { type: "busy" } });
+    }
     if (urlStr.includes("/abort")) {
       abortCalls.push(urlStr);
       return noContentResponse();
@@ -535,7 +538,7 @@ test("first-stable: 首条 assistant 有 step-finish 后判定完成，emit 首�
 test("first-stable: metrics 从 session endpoint 取（不用 message.info.tokens，后者偏小）", async () => {
   // codex 实测：researcher-01 CLI metrics input:408，但 session 实际 29706。
   // message.info.tokens 是首条 message 的瞬时值（偏小），session.tokens 是累计值（真实）。
-  // first-stable 完成后必须从 session endpoint 取 metrics（abort 前取）。
+  // first-stable 完成后必须从 session endpoint 取已结算 metrics。
   const answerMsg = {
     info: { id: "a1", role: "assistant", tokens: { input: 408, output: 35, reasoning: 48 } },
     parts: [

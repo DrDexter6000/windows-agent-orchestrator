@@ -123,11 +123,11 @@ function writeSeedTranscript(transcriptPath, runId, agentId, { backend = "claude
 
 // ---------------------------------------------------------------------
 // A2-CAP1: each backend declares supportsRoleContract via capability, not
-//          runtime name. Three process backends = true, opencode = false.
+//          runtime name. Every current backend supports the transport.
 // ---------------------------------------------------------------------
 test("M11-5-A2-CAP1: backends declare supportsRoleContract capability", () => {
-  assert.equal(new OpenCodeServeBackend().supportsRoleContract, false,
-    "opencode-serve must NOT support role contract");
+  assert.equal(new OpenCodeServeBackend().supportsRoleContract, true,
+    "OpenCode native system field carries the role contract");
   assert.equal(new ClaudeCodeBackend().supportsRoleContract, true,
     "claude-code supports role contract");
   assert.equal(new CodexBackend().supportsRoleContract, true,

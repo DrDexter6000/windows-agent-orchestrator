@@ -20,7 +20,7 @@ Wrong: `"providerID": "deepseek-coding-plan"` → 401。Correct: `"providerID": 
 
 DeepSeek-v4-flash 回答后无限生成确认轮（不设 time.completed）。默认 snapshot-stable 模式下 WAO 轮询到 waitTimeout，期间 serve 端无限烧 token。配 `completionMode: "first-stable"`：首条含非空 text 的 assistant message 即完成 + abort。
 
-**Abort now verified (Safety Gate 2026-06-23)**：stop 后轮询 3 轮，未停则 taskkill + 告警（TD-37）。`_runCleanup` 路径未验证（TD-38），靠 tokenBudget 兜底。
+**Abort verification**：stop 与 `_runCleanup` 都会在 abort 后联合观察 session status 与 token/message 稳定性（TD-37/TD-38）。观察不可用或仍 active 都只报告 unverified + 告警；WAO 不自动全局 taskkill 其他 OpenCode session，必要的整机止血由 Human Owner 明确执行。
 
 **必配 tokenBudget**：opencode agent 加 `"tokenBudget": <number>` + `"tokenBudgetMultiplier": <number>`（默认 100）。超限即 failed + abort + 告警。唯一不依赖 abort 生效的防线。
 

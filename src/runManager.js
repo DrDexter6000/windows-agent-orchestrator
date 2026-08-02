@@ -52,6 +52,13 @@ function isConfirmableToolCallId(value) {
     && value !== "unknown";
 }
 
+async function validateRoleContractTransport(backend, agent, roleContract) {
+  if (typeof roleContract !== "string" || roleContract.length === 0) return;
+  if (typeof backend.validateRoleContractTransport === "function") {
+    await backend.validateRoleContractTransport(agent, { roleContract });
+  }
+}
+
 function isPathInside(base, target) {
   const rel = relative(base, target);
   return rel === ""
@@ -274,6 +281,27 @@ export class RunManager {
         : deliveryContract;
     }
 
+    // Validate deterministic delivery inputs before consulting an external
+    // runtime capability. These checks are pure and must retain precedence over
+    // network availability/version errors while still happening before every
+    // run side effect.
+    const isolationConfig = resolveIsolation(isolate, agent.isolation, this.config.defaultIsolation);
+    let deliveryPrepared = null;
+    if (delivery) {
+      deliveryPrepared = prepareDeliveryRequest(delivery);
+      if (isolationConfig.type !== "worktree" || isolationConfig.strategy !== "persistent") {
+        throw new Error(
+          `Delivery mode requires persistent worktree isolation, got: ${JSON.stringify(isolationConfig)}. `
+          + `Use isolate:true or agent isolation {type:"worktree", strategy:"persistent"}.`,
+        );
+      }
+    }
+
+    // Runtime-managed transports may need to prove a dynamic capability (for
+    // example an OpenCode server version) in addition to the static flag. The
+    // hook is provider-neutral and runs before runDir/transcript/worktree/spawn.
+    await validateRoleContractTransport(backend, agent, roleContract);
+
     // M11-9 CTO closeout: validate the backend can express the agent's canonical
     // policy BEFORE any side effect (transcript, runDir, worktree, spawn). This
     // runs AFTER the role-contract / delivery-contract checks (which are more
@@ -342,23 +370,6 @@ export class RunManager {
       runId: finalRunId,
       agentId,
     });
-
-    // 隔离：isolate flag > agent.isolation > config.defaultIsolation
-    const isolationConfig = resolveIsolation(isolate, agent.isolation, this.config.defaultIsolation);
-
-    // TD-103 Phase 3A: delivery mode preflight — validate before any Git/spawn work.
-    // Delivery requires persistent worktree isolation. Validate the request shape
-    // through the delivery kernel SSOT (prepareDeliveryRequest), then enforce isolation.
-    let deliveryPrepared = null; // validated {mode, allowedPaths, verification}
-    if (delivery) {
-      deliveryPrepared = prepareDeliveryRequest(delivery);
-      if (isolationConfig.type !== "worktree" || isolationConfig.strategy !== "persistent") {
-        throw new Error(
-          `Delivery mode requires persistent worktree isolation, got: ${JSON.stringify(isolationConfig)}. `
-          + `Use isolate:true or agent isolation {type:"worktree", strategy:"persistent"}.`,
-        );
-      }
-    }
 
     // M12-7: validate continuation worktree-reuse inputs before any side effect.
     // A continuation always delivers, and the transition already pinned the base,
@@ -776,6 +787,11 @@ export class RunManager {
         ? `${deliveryContract}\n\n---\n\n${resumeRoleContract}`
         : deliveryContract;
     }
+
+    // Same dynamic transport proof as start. Resume may read the existing
+    // transcript to reconstruct context, but this runs before append/spawn and
+    // therefore preserves transcript bytes on refusal.
+    await validateRoleContractTransport(backend, agent, resumeRoleContract);
 
     // M11-7 (CTO closeout): credential availability check on resume too — same
     // SSOT as start/dispatchRun/registry_list. Missing REQUIRED credential →

@@ -5,9 +5,10 @@
  * transcript 写 run.aborted，但 serve 端 session 继续烧 token 7.4h。
  * "成功停止"必须由实测定义（token/message 不再增长），不能由"调用没报错"定义。
  *
- * 契约：abort 后调用本函数，连续 rounds 轮询 session + messages，比对增长。
+ * 契约：abort 后调用本函数，连续 rounds 轮询 status + session + messages。
  *   - 全部 rounds 轮无增长 → { quiet: true }
  *   - 任一轮增长 → { quiet: false, delta, metric }
+ *   - 任一事实面不可观察 → { quiet: null, observation: "unavailable" }
  *
  * 两个独立指标（任一增长都算未停）：
  *   1. session.tokens（input+output+reasoning 累计，session 级，比 message 级可靠）
@@ -26,7 +27,7 @@
  * @param {string} serveUrl
  * @param {string} sessionId
  * @param {{cwd?: string, rounds?: number, intervalMs?: number}} opts
- * @returns {Promise<{quiet: boolean, delta?: object, metric?: string}>}
+ * @returns {Promise<{quiet: boolean|null, delta?: object, metric?: string, observation?: string}>}
  */
 export async function verifyStopQuiet(backend, serveUrl, sessionId, opts = {}) {
   const cwd = opts.cwd;
@@ -35,12 +36,24 @@ export async function verifyStopQuiet(backend, serveUrl, sessionId, opts = {}) {
 
   // 第 1 轮采样作为基线（含 MessageAbortedError 尾随 message）
   const baseline = await sample(backend, serveUrl, sessionId, cwd);
+  if (!baseline.observed) {
+    return { quiet: null, observation: "unavailable" };
+  }
+  if (isActiveStatus(baseline.status)) {
+    return { quiet: false, metric: "session_status" };
+  }
   let baselineTokens = baseline.tokens;
   let baselineMsgCount = baseline.msgCount;
 
   for (let i = 1; i < rounds; i += 1) {
     await sleep(intervalMs);
     const cur = await sample(backend, serveUrl, sessionId, cwd);
+    if (!cur.observed) {
+      return { quiet: null, observation: "unavailable" };
+    }
+    if (isActiveStatus(cur.status)) {
+      return { quiet: false, metric: "session_status" };
+    }
 
     // 指标 1：session tokens 增长
     if (cur.tokens > baselineTokens) {
@@ -67,28 +80,61 @@ export async function verifyStopQuiet(backend, serveUrl, sessionId, opts = {}) {
 
 /**
  * 采样一次：取 session tokens 累计 + messages 数量。
- * 失败（endpoint 报错）当作"无法验证"，返回当前已知值不增长——
- * 避免因网络抖动误判 quiet=false 触发激进的 taskkill。
+ * 任一 endpoint 报错都标为不可观察。不可观察既不是 quiet，也不是
+ * active；调用方必须报告 unverified，且不得据此杀掉其他 session。
  */
 async function sample(backend, serveUrl, sessionId, cwd) {
   let tokens = 0;
   let msgCount = 0;
+  let status = null;
+  let statusObserved = false;
+  let sessionObserved = false;
+  let messagesObserved = false;
+  try {
+    if (typeof backend?.sessionStatus !== "function") {
+      throw new Error("session status unavailable");
+    }
+    status = await backend.sessionStatus(serveUrl, sessionId, { cwd });
+    statusObserved = isKnownStatus(status);
+  } catch {
+    statusObserved = false;
+  }
   try {
     const sess = await backend.session(serveUrl, sessionId, { cwd });
     const t = sess?.tokens;
     if (t) {
       tokens = (t.input ?? 0) + (t.output ?? 0) + (t.reasoning ?? 0);
     }
+    sessionObserved = true;
   } catch {
-    // session endpoint 报错：保持 tokens=0（不增长），不阻断验证
+    sessionObserved = false;
   }
   try {
     const page = await backend.messages(serveUrl, sessionId, { cwd });
-    msgCount = Array.isArray(page?.data) ? page.data.length : 0;
+    msgCount = Array.isArray(page?.data)
+      ? page.data.filter((message) => message?.info?.error?.name !== "MessageAbortedError").length
+      : 0;
+    messagesObserved = true;
   } catch {
-    // messages endpoint 报错：保持 msgCount=0（不增长）
+    messagesObserved = false;
   }
-  return { tokens, msgCount };
+  return {
+    tokens,
+    msgCount,
+    status,
+    observed: statusObserved && sessionObserved && messagesObserved,
+  };
+}
+
+function isActiveStatus(status) {
+  const type = typeof status === "string" ? status : status?.type;
+  return type === "busy" || type === "retry";
+}
+
+function isKnownStatus(status) {
+  if (status === null || status === undefined) return true;
+  const type = typeof status === "string" ? status : status?.type;
+  return type === "idle" || type === "busy" || type === "retry";
 }
 
 function sleep(ms) {
@@ -98,13 +144,13 @@ function sleep(ms) {
 // ---------------------------------------------------------------------------
 // executeStopWithVerification（S1-2 高层编排）
 //
-// 编排：abort → verifyStopQuiet → quiet=false 时强制 taskkill 兜底。
+// 编排：abort → verifyStopQuiet → optionally invoke an explicit caller-owned
+// fallback only when the session is positively observed active.
 // 返回结构化结果（该写什么 transcript 事件由调用方决定），纯函数，不依赖 transcript/CLI。
 //
-// taskkill 兜底：abort 是"基于意图"的停止，可能虚假成功（06-18 事故）。
-// 当 verifyStopQuiet 判定后台未停时，唯一可靠的兜底是杀 opencode 进程本身。
-// 生产环境用 taskkill /IM opencode.exe /F（杀所有 session，宁可误杀不可继续烧）。
-// taskkill 动作通过 opts.taskkill 注入，便于测试 mock。
+// WAO must not turn an unknown observation into either verified success or a
+// global process kill. A taskkill callback is therefore explicit and optional;
+// the default path never kills unrelated OpenCode sessions.
 // ---------------------------------------------------------------------------
 
 /**
@@ -118,8 +164,7 @@ export async function executeStopWithVerification(backend, serveUrl, sessionId, 
   const cwd = opts.cwd;
   const rounds = opts.rounds ?? 3;
   const intervalMs = opts.intervalMs ?? 2000;
-  // 默认 taskkill 动作：杀 opencode 进程（Windows）。非 Windows 或无 opencode 时 no-op。
-  const taskkill = opts.taskkill ?? defaultTaskkill;
+  const taskkill = opts.taskkill;
 
   let abortCalled = false;
   let abortError = null;
@@ -135,8 +180,8 @@ export async function executeStopWithVerification(backend, serveUrl, sessionId, 
   const verifyResult = await verifyStopQuiet(backend, serveUrl, sessionId, { cwd, rounds, intervalMs });
 
   let taskkillCalled = false;
-  if (!verifyResult.quiet) {
-    // 后台仍在烧：abort 无效，强制杀进程兜底（不依赖 abort 是否生效）
+  if (verifyResult.quiet === false && typeof taskkill === "function") {
+    // Positive active evidence permits an explicit caller-owned fallback.
     try {
       await taskkill();
       taskkillCalled = true;
@@ -146,28 +191,10 @@ export async function executeStopWithVerification(backend, serveUrl, sessionId, 
   }
 
   return {
-    verified: verifyResult.quiet,
+    verified: verifyResult.quiet === true,
     abortCalled,
     taskkillCalled,
     verifyResult,
     ...(abortError ? { abortError } : {}),
   };
-}
-
-/**
- * 默认 taskkill 动作（生产）：杀 opencode 进程树。
- * 06-18 事故止血用的就是这条命令。会杀所有 opencode session——预期行为，
- * 失控时宁可全杀也不继续烧 quota。
- */
-async function defaultTaskkill() {
-  if (process.platform !== "win32") return; // 非 Windows 无 taskkill，no-op
-  const { spawn } = await import("node:child_process");
-  return new Promise((resolve) => {
-    const child = spawn("taskkill", ["/IM", "opencode.exe", "/F"], {
-      windowsHide: true,
-      stdio: "ignore",
-    });
-    child.on("close", () => resolve());
-    child.on("error", () => resolve()); // opencode 进程名不符等，resolve 不抛
-  });
 }

@@ -177,7 +177,7 @@ serve 后台进程不一定。
 
 - **症状**：serve 进程里有多个 ESTABLISHED session，对应已结束的 run，仍在烧 token
 - **根因**：2026-06-16 之前的 run 没有兜底 abort（bug 已补）。DeepSeek/GLM 这类模型会一直烧到 quota。
-- **现状**：`stop` 命令和 RunManager 终态清理路径都已接入后台 quietness 验证（TD-37/TD-38）——abort 后轮询 token/message，仍增长则强制 taskkill + 告警。**仍务必给每个 opencode agent 配 `tokenBudget`**，这是不依赖 abort 生效的最后一道防线。
+- **现状**：`stop` 命令和 RunManager 终态清理路径都接入后台 quietness 验证（TD-37/TD-38）——abort 后联合观察 OpenCode session status 与 token/message 稳定性。观察面不可读会诚实记录 unverified；确认仍 active 时告警，但不会自动全局 taskkill 其他 session。**仍务必给每个 opencode agent 配 `tokenBudget`**，这是不依赖 abort 生效的最后一道防线。
 - **修复**：`taskkill /IM opencode.exe /F` 杀 serve（连带所有 session），用 serve.ps1 重启
 - **诊断**：`netstat -ano | findstr :4298 | findstr ESTABLISHED` 看 session 数
 

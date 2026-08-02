@@ -12,6 +12,7 @@ import {
 // 真实验证暴露：原版只在完成判定后取 token，失控 run 永不完成 → 预算闸门永不触发。
 // 每 5 轮取一次，兼顾及时性（interval×5 ≈ 5-25s）和 HTTP 开销（不每轮都加请求）。
 const METRICS_POLL_EVERY = 5;
+const OPENCODE_NATIVE_SYSTEM_MIN_VERSION = Object.freeze([1, 18, 0]);
 
 export class OpenCodeServeBackend {
   // TD-39 / 审计 P0：HTTP-session 类 backend 的会话存活在 WAO 进程之外（serve 端持有）。
@@ -21,11 +22,34 @@ export class OpenCodeServeBackend {
   // sessionOutlivesProcess 让控制平面按 backend *属性* 判定（非 runtime 名分支，runtime-agnostic）。
   sessionOutlivesProcess = true;
 
-  // M11-5 Package A2: opencode-serve has no system/developer message channel,
-  // so it cannot receive a role contract. Declared explicitly so RunManager
-  // decides by capability (never by runtime name); a configured systemPrompt
-  // on this backend must fail closed, not be silently dropped.
-  supportsRoleContract = false;
+  // OpenCode 1.18 exposes a native `system` field on the message endpoint.
+  // RunManager may therefore use the same role-contract capability boundary as
+  // the process backends; the task remains a separate user text part.
+  supportsRoleContract = true;
+
+  /**
+   * The `system` transport is runtime-versioned. Prove it before RunManager
+   * creates a transcript or worktree; a static capability flag alone is not
+   * sufficient for an externally managed server.
+   */
+  async validateRoleContractTransport(agent, { roleContract } = {}) {
+    if (typeof roleContract !== "string" || roleContract.length === 0) return;
+    try {
+      const response = await this.request(`${trimSlash(agent.serveUrl)}/global/health`, {
+        method: "GET",
+      });
+      const health = response?.data ?? response;
+      if (
+        health?.healthy === true
+        && isVersionAtLeast(health.version, OPENCODE_NATIVE_SYSTEM_MIN_VERSION)
+      ) {
+        return;
+      }
+    } catch {
+      // Project no network/provider details through this pre-side-effect gate.
+    }
+    throw new Error("opencode-serve role contract transport is unavailable");
+  }
 
   /**
    * M11-9 capability: OpenCodeServe uses its own legacy model shape
@@ -54,18 +78,26 @@ export class OpenCodeServeBackend {
     }
   }
 
-  constructor({ fetchImpl = globalThis.fetch, timeout = 30_000, retries = 2 } = {}) {
+  constructor({
+    fetchImpl = globalThis.fetch,
+    timeout = 30_000,
+    retries = 2,
+    metricsSettleAttempts = 12,
+    metricsSettleIntervalMs = 200,
+  } = {}) {
     if (!fetchImpl) {
       throw new Error("fetch is required");
     }
     this.fetch = fetchImpl;
     this.timeout = timeout;
     this.retries = retries;
+    this.metricsSettleAttempts = metricsSettleAttempts;
+    this.metricsSettleIntervalMs = metricsSettleIntervalMs;
   }
 
   async spawn(agent, task) {
     const session = await this.createSession(agent);
-    const admitted = await this.sendPrompt(agent, session.id, task.prompt);
+    const admitted = await this.sendPrompt(agent, session.id, task.prompt, task.roleContract);
     const serveUrl = agent.serveUrl;
     const sessionId = session.id;
     const cwd = agent.cwd;
@@ -73,6 +105,8 @@ export class OpenCodeServeBackend {
     return {
       backend: "opencode-serve",
       backendSessionId: sessionId,
+      serveUrl,
+      cwd,
       messageId: admitted.id,
       admittedSeq: admitted.admittedSeq,
       // events 工厂：RunManager 传 signal 控制超时，传 pollInterval 控制轮询频率
@@ -83,6 +117,9 @@ export class OpenCodeServeBackend {
         silentTimeout: opts?.silentTimeout,
       }),
       abort: async () => this.abort(serveUrl, sessionId),
+      session: (...args) => this.session(...args),
+      messages: (...args) => this.messages(...args),
+      sessionStatus: (...args) => this.sessionStatus(...args),
     };
   }
 
@@ -99,7 +136,7 @@ export class OpenCodeServeBackend {
     return response.data;
   }
 
-  async sendPrompt(agent, sessionId, text) {
+  async sendPrompt(agent, sessionId, text, roleContract) {
     const messageId = `msg_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
     const body = {
       messageID: messageId,
@@ -110,6 +147,9 @@ export class OpenCodeServeBackend {
       },
       parts: [{ type: "text", text }],
     };
+    if (typeof roleContract === "string" && roleContract.length > 0) {
+      body.system = roleContract;
+    }
     if (agent.model.variant) {
       body.variant = agent.model.variant;
     }
@@ -149,24 +189,78 @@ export class OpenCodeServeBackend {
   }
 
   /**
+   * OpenCode's status endpoint is the authoritative active/idle projection.
+   * Idle sessions are commonly omitted from the returned map.
+   */
+  async sessionStatus(serveUrl, sessionId, { cwd } = {}) {
+    const url = new URL(`${trimSlash(serveUrl)}/session/status`);
+    if (cwd) {
+      url.searchParams.set("directory", cwd);
+    }
+    const statuses = await this.request(url, { method: "GET" });
+    return statuses && typeof statuses === "object"
+      ? statuses[sessionId] ?? null
+      : null;
+  }
+
+  async trySessionStatus(serveUrl, sessionId, cwd) {
+    try {
+      return {
+        observed: true,
+        status: await this.sessionStatus(serveUrl, sessionId, { cwd }),
+      };
+    } catch {
+      return { observed: false, status: null };
+    }
+  }
+
+  /**
    * S1-1：尝试取 session token 并构造 metrics 事件（供周期性轮询用）。
    * 失败（endpoint 报错 / 无 token）返回 null，不阻断轮询。
    * 和完成判定路径里的 session token 提取逻辑一致，但独立为可复用方法。
    */
   async trySessionMetrics(serveUrl, sessionId, cwd) {
+    const result = await this.readSessionMetrics(serveUrl, sessionId, cwd);
+    return result.event;
+  }
+
+  async readSessionMetrics(serveUrl, sessionId, cwd) {
     try {
       const sess = await this.session(serveUrl, sessionId, { cwd });
-      const t = sess?.tokens;
-      if (!t) return null;
-      return metricsEvent({
-        input: t.input,
-        output: t.output,
-        reasoning: t.reasoning,
-        costUsd: typeof sess.cost === "number" ? sess.cost : undefined,
-      });
+      return {
+        observed: true,
+        terminal: !sess?.tokens,
+        event: metricsEventFromSession(sess),
+      };
     } catch {
-      return null;
+      return { observed: false, terminal: true, event: null };
     }
+  }
+
+  /**
+   * OpenCode may settle session usage shortly after abort. Poll a bounded
+   * number of times and return only a nonzero snapshot that is stable twice.
+   */
+  async settleSessionMetrics(serveUrl, sessionId, cwd) {
+    let latest = null;
+    let latestKey = null;
+    let stableReads = 0;
+    for (let attempt = 0; attempt < this.metricsSettleAttempts; attempt += 1) {
+      const result = await this.readSessionMetrics(serveUrl, sessionId, cwd);
+      const event = result.event;
+      if (event) {
+        const key = JSON.stringify(event);
+        latest = event;
+        stableReads = key === latestKey ? stableReads + 1 : 1;
+        latestKey = key;
+        if (stableReads >= 2) return event;
+      }
+      if (!result.observed || result.terminal) return null;
+      if (attempt < this.metricsSettleAttempts - 1) {
+        await sleep(this.metricsSettleIntervalMs);
+      }
+    }
+    return null;
   }
 
   async abort(serveUrl, sessionId) {
@@ -230,6 +324,7 @@ export class OpenCodeServeBackend {
     let assistantSeen = false;
     const startTime = Date.now();
     let pollCount = 0;
+    let busySeen = false;
     while (!signal?.aborted) {
       let msgs;
       try {
@@ -240,6 +335,19 @@ export class OpenCodeServeBackend {
         return;
       }
       pollCount += 1;
+      const hasAnyAssistantMessage = msgs.some((m) => m.info?.role === "assistant");
+      if (!hasAnyAssistantMessage) {
+        const statusResult = await this.trySessionStatus(serveUrl, sessionId, cwd);
+        if (statusResult.observed) {
+          const type = sessionStatusType(statusResult.status);
+          if (type === "busy" || type === "retry") {
+            busySeen = true;
+          } else if (type === "idle" && busySeen) {
+            yield doneEvent("failed", "session ended without assistant output");
+            return;
+          }
+        }
+      }
       // S1-1 修复（2026-06-23 真实验证暴露）：周期性 yield metrics 事件。
       // 原版只在 completed 判定后才取 session token → 失控 run 永不完成 → 永不 emit metrics
       // → token 预算闸门（挂在 metrics 事件上）永不触发。现每 metricsPollEvery 轮主动取
@@ -312,21 +420,24 @@ export class OpenCodeServeBackend {
               yield messageEvent(m.info.role, m.parts);
             }
           }
-          // metrics：用 session 级累计 tokens（比 message.info.tokens 可靠——
-          // message 的 tokens 在流式期间是 0，session.tokens 是 serve 维护的累计值）。
+          // End the provider session before reading final usage. OpenCode 1.18
+          // may settle session tokens shortly after abort, so a single read at
+          // this point can produce a false zero.
           try {
-            const sess = await this.session(serveUrl, sessionId, { cwd });
-            const t = sess?.tokens;
-            if (t) {
-              yield metricsEvent({
-                input: t.input,
-                output: t.output,
-                reasoning: t.reasoning,
-                costUsd: typeof sess.cost === "number" ? sess.cost : undefined,
-              });
-            }
+            await this.abort(serveUrl, sessionId);
           } catch {
-            // session metrics 取不到不阻断完成（done 照常 emit）
+            // A completed answer remains usable; cleanup will retry abort.
+          }
+          const settledMetrics = await this.settleSessionMetrics(serveUrl, sessionId, cwd);
+          if (settledMetrics) {
+            yield settledMetrics;
+          } else {
+            const finalAssistant = msgs.findLast(
+              (m) => m.info?.role === "assistant"
+                && m.parts?.some((p) => p.type === "text" && p.text),
+            );
+            const messageMetrics = metricsEventFromMessage(finalAssistant);
+            if (messageMetrics) yield messageMetrics;
           }
           yield doneEvent("completed");
           return;
@@ -352,6 +463,7 @@ export class OpenCodeServeBackend {
   async *streamEventsFirstStable(serveUrl, sessionId, { cwd, signal, interval = 1000, silentTimeout }) {
     const startTime = Date.now();
     let pollCount = 0;
+    let busySeen = false;
     while (!signal?.aborted) {
       let msgs;
       try {
@@ -362,6 +474,19 @@ export class OpenCodeServeBackend {
         return;
       }
       pollCount += 1;
+      const hasAnyAssistant = msgs.some((m) => m.info?.role === "assistant");
+      if (!hasAnyAssistant) {
+        const statusResult = await this.trySessionStatus(serveUrl, sessionId, cwd);
+        if (statusResult.observed) {
+          const type = sessionStatusType(statusResult.status);
+          if (type === "busy" || type === "retry") {
+            busySeen = true;
+          } else if (type === "idle" && busySeen) {
+            yield doneEvent("failed", "session ended without assistant output");
+            return;
+          }
+        }
+      }
       // S1-1 修复：周期性 yield metrics（同 snapshot-stable），让预算闸门能在 first-stable
       // 等待首条 text 答案期间也检测到 token 增长。
       if (pollCount % METRICS_POLL_EVERY === 0) {
@@ -370,7 +495,6 @@ export class OpenCodeServeBackend {
       }
 
       // 静默早失败：同 snapshot-stable。
-      const hasAnyAssistant = msgs.some((m) => m.info?.role === "assistant");
       if (!hasAnyAssistant && silentTimeout && (Date.now() - startTime) > silentTimeout) {
         yield doneEvent("failed", `silent timeout: no assistant response within ${silentTimeout}ms (provider may have silently rejected)`);
         return;
@@ -404,21 +528,8 @@ export class OpenCodeServeBackend {
                m.parts?.some((p) => p.type === "text" && p.text),
       );
       if (firstAssistantFinished) {
-        // 一旦首条 assistant 给出 text 答案，先取 session metrics（abort 前取，值最准），
-        // 再发送 abort，最后交付 done。
-        // DeepSeek-v4-flash 会在首轮结束后立刻开下一轮；多等一轮就是 token 泄漏窗口。
-        let sessionMetrics = null;
-        try {
-          const sess = await this.session(serveUrl, sessionId, { cwd });
-          if (sess?.tokens) {
-            sessionMetrics = {
-              tokens: sess.tokens,
-              cost: typeof sess.cost === "number" ? sess.cost : undefined,
-            };
-          }
-        } catch {
-          // session metrics 取不到用 message 级兜底
-        }
+        // DeepSeek-v4-flash can immediately start another round. Abort first,
+        // then wait briefly for OpenCode's session-level usage to settle.
         try {
           await this.abort(serveUrl, sessionId);
         } catch {
@@ -435,15 +546,12 @@ export class OpenCodeServeBackend {
           }
         }
         yield messageEvent("assistant", firstAssistantFinished.parts);
-        // metrics：优先 session endpoint 累计值（真实），回退 message.info.tokens
-        const t = sessionMetrics?.tokens ?? firstAssistantFinished.info?.tokens;
-        if (t) {
-          yield metricsEvent({
-            input: t.input,
-            output: t.output,
-            reasoning: t.reasoning,
-            costUsd: sessionMetrics?.cost ?? (typeof firstAssistantFinished.info?.cost === "number" ? firstAssistantFinished.info.cost : undefined),
-          });
+        const settledMetrics = await this.settleSessionMetrics(serveUrl, sessionId, cwd);
+        if (settledMetrics) {
+          yield settledMetrics;
+        } else {
+          const messageMetrics = metricsEventFromMessage(firstAssistantFinished);
+          if (messageMetrics) yield messageMetrics;
         }
         yield doneEvent("completed");
         return;
@@ -487,6 +595,53 @@ export class OpenCodeServeBackend {
     }
     throw lastError;
   }
+}
+
+function metricsEventFromSession(session) {
+  const tokens = session?.tokens;
+  if (!tokens || !hasNonzeroUsage(tokens, session?.cost)) return null;
+  return metricsEvent({
+    input: tokens.input,
+    output: tokens.output,
+    reasoning: tokens.reasoning,
+    costUsd: typeof session.cost === "number" ? session.cost : undefined,
+  });
+}
+
+function metricsEventFromMessage(message) {
+  const tokens = message?.info?.tokens;
+  const cost = message?.info?.cost;
+  if (!tokens || !hasNonzeroUsage(tokens, cost)) return null;
+  return metricsEvent({
+    input: tokens.input,
+    output: tokens.output,
+    reasoning: tokens.reasoning,
+    costUsd: typeof cost === "number" ? cost : undefined,
+  });
+}
+
+function hasNonzeroUsage(tokens, cost) {
+  return [tokens?.input, tokens?.output, tokens?.reasoning, cost]
+    .some((value) => typeof value === "number" && value !== 0);
+}
+
+function sessionStatusType(status) {
+  if (status === null || status === undefined) return "idle";
+  if (typeof status === "string") return status;
+  if (status && typeof status.type === "string") return status.type;
+  return "unknown";
+}
+
+function isVersionAtLeast(value, minimum) {
+  if (typeof value !== "string") return false;
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(value.trim());
+  if (!match) return false;
+  const actual = match.slice(1).map(Number);
+  for (let i = 0; i < minimum.length; i += 1) {
+    if (actual[i] > minimum[i]) return true;
+    if (actual[i] < minimum[i]) return false;
+  }
+  return true;
 }
 
 function sleep(ms) {

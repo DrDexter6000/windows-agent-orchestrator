@@ -151,6 +151,7 @@ function makeConfig(runDir, repoDir, fetchImpl) {
   // Delivery Execution Contract). Production delivery uses process backends
   // that declare this natively; this fake HTTP backend drives the lifecycle.
   backend.supportsRoleContract = true;
+  backend.validateRoleContractTransport = async () => {};
   return {
     registry: "x",
     runDir,

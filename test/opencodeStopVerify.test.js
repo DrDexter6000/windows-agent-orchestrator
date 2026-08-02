@@ -15,6 +15,9 @@ function mockBackend({ sessionTokensSeq, messagesSeq }) {
   let messagesCalls = 0;
   return {
     calls: () => ({ session: sessionCalls, messages: messagesCalls }),
+    async sessionStatus() {
+      return null;
+    },
     async session() {
       const tokens = sessionTokensSeq[Math.min(sessionCalls, sessionTokensSeq.length - 1)];
       sessionCalls += 1;
@@ -78,6 +81,27 @@ test("S1-2: MessageAbortedError 尾随 message 不被误判为增长（作为 ab
   });
   const result = await verifyStopQuiet(backend, "http://x", "ses_test", { cwd: "/tmp", rounds: 3, intervalMs: 1 });
   assert.equal(result.quiet, true, "aborted message 是 abort 基线，不算增长");
+});
+
+test("S1-2: delayed MessageAbortedError 不被误判为后台继续生成", async () => {
+  const backend = mockBackend({
+    sessionTokensSeq: [
+      { input: 1000, output: 500, reasoning: 0 },
+      { input: 1000, output: 500, reasoning: 0 },
+      { input: 1000, output: 500, reasoning: 0 },
+    ],
+    messagesSeq: [
+      [userMsg, assistantMsg],
+      [userMsg, assistantMsg, abortedMsg],
+      [userMsg, assistantMsg, abortedMsg],
+    ],
+  });
+  const result = await verifyStopQuiet(backend, "http://x", "ses_test", {
+    cwd: "/tmp",
+    rounds: 3,
+    intervalMs: 1,
+  });
+  assert.equal(result.quiet, true, "delayed abort marker is not active generation");
 });
 
 test("S1-2: messages 数量增长（新 message 出现）→ quiet=false，即使 token 稳定", async () => {

@@ -132,6 +132,7 @@ function makeManager(runDir, repoDir, fetchImpl, opts = {}) {
     backendFor: () => {
       const b = new OpenCodeServeBackend({ fetchImpl, timeout: 1000, retries: 0 });
       b.supportsRoleContract = true;
+      b.validateRoleContractTransport = async () => {};
       return b;
     },
     ...opts.manager,
@@ -730,6 +731,7 @@ function makeManagerWithPackager(runDir, repoDir, fetchImpl, packageDeliveryFn, 
     backendFor: () => {
       const b = new OpenCodeServeBackend({ fetchImpl, timeout: 1000, retries: 0 });
       b.supportsRoleContract = true;
+      b.validateRoleContractTransport = async () => {};
       return b;
     },
     packageDeliveryFn,

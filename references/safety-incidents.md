@@ -26,7 +26,7 @@
 - 两个失控 session 后台 input 合计 ~86 万逻辑 token，按 provider 计费口径烧光半周 quota
 
 **修复**：
-1. **TD-37**：新增 `verifyStopQuiet`——stop 后轮询 3 轮 token/message，未停则强制 taskkill + 告警
+1. **TD-37**：新增 `verifyStopQuiet`——stop 后有界轮询 status/token/message；确认仍忙或观测不可用时报告 unverified + 告警，不对共享 OpenCode server 做全局 taskkill
 2. **S1-1 token 闸门**：run 累计 token × multiplier 超 budget 即 failed + abort（唯一不依赖 stop 生效的防线）
 3. **S1-3 告警**：budget_exceeded / stop_unverified → msg.exe 弹窗 + ALERTS.log
 
@@ -35,7 +35,7 @@
 - 任何模型（含 GLM）在特定 task+context 下都可能无限运行，不能假设"某模型会自然停止"
 - 06-17 复盘曾据此判定"GLM 无害"，导致 06-18 对 GLM 零设防——**这个错误结论已废弃**
 
-**当前状态**：stop 路径已修（TD-37 ✅）；`_runCleanup` 终态路径的静默验证未做（TD-38 🟡，由 token 闸门兜底）。
+**当前状态**：stop 路径（TD-37）和 `_runCleanup` 终态静默验证（TD-38）均已接入；未知或不可用观测保持 unverified，不伪报安静，也不终止可能承载无关 session 的共享 server。
 
 ---
 
@@ -44,7 +44,7 @@
 | 维度 | opencode（HTTP） | claude-code / kimi-code（进程式） |
 |---|---|---|
 | 会话生命周期 | HTTP session，stop 可能虚假成功 | 进程死即会话死（OS 保证） |
-| 失控后能停吗 | 靠 abort（可能失效）+ taskkill 兜底 | kill 进程即彻底停 |
+| 失控后能停吗 | abort + 有界静默验证；无法证明时告警并由 Lead 决策 | kill 进程即彻底停 |
 | token 闸门 | ✅ 有效（有 session endpoint） | ❌ 无效（无 session endpoint） |
 | 历史事故 | 06-17 + 06-18（两次） | 无 |
 

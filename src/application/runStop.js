@@ -27,6 +27,7 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { JsonlTranscript, readTranscript, findState, findLatest } from "../transcript.js";
+import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { executeStopWithVerification } from "../backends/opencodeStopVerify.js";
 import { raiseAlert } from "../alerts.js";
 import { isValidRunId } from "../delivery.js";
@@ -307,6 +308,9 @@ async function processStop({ transcript, session, fromState, runId, pid, deps, s
 async function opencodeStop({ transcript, session, fromState, runId, config, deps, stopRequestedAttempt }) {
   const executeStop = deps.executeStop ?? ((b, url, sid, opts) => executeStopWithVerification(b, url, sid, opts));
   const alert = deps.alert ?? (async (level, msg, opts) => raiseAlert(level, msg, opts));
+  const backend = deps.opencodeBackend ?? new OpenCodeServeBackend({
+    fetchImpl: deps.fetchImpl ?? globalThis.fetch,
+  });
 
   const termResult = await transcript.transitionState(fromState, "aborted", "stop_requested", {
     attemptEvents: stopRequestedAttempt ? [stopRequestedAttempt] : [],
@@ -332,9 +336,15 @@ async function opencodeStop({ transcript, session, fromState, runId, config, dep
   }
 
   // Winner: execute backend abort
+  const stopVerify = deps.stopVerify ?? {};
   const stopResult = await executeStop(
-    null, session.serveUrl, session.backendSessionId,
-    { cwd: session.cwd, rounds: 3, intervalMs: 2000 },
+    backend, session.serveUrl, session.backendSessionId,
+    {
+      cwd: session.cwd,
+      rounds: stopVerify.rounds ?? 3,
+      intervalMs: stopVerify.intervalMs ?? 2000,
+      ...(typeof deps.taskkill === "function" ? { taskkill: deps.taskkill } : {}),
+    },
   );
 
   if (stopResult.verified) {
