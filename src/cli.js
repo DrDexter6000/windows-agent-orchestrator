@@ -2,6 +2,9 @@
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+// M12-8F: trusted installation-root resolver. Only the global `wao` bin opts in
+// (via WAO_INSTALL_ROOT); the legacy `npm run cli` path keeps cwd resolution.
+import { readInstallRoot, resolveConfigPath, rebaseConfigPaths } from "./installRoot.js";
 import {
   connectDaemon,
   readHandshake as readDaemonHandshake,
@@ -72,13 +75,18 @@ const hardcodedDefaults = {
 };
 
 async function loadConfig() {
-  const configPath = resolve("config/default.json");
-  if (!existsSync(configPath)) return { ...hardcodedDefaults };
+  // M12-8F: when the global `wao` bin opts in via WAO_INSTALL_ROOT, config/
+  // default.json and the WAO-owned relative state paths (runDir/registry) anchor
+  // at the trusted install root — never the caller cwd. Legacy `npm run cli`
+  // (no env) keeps process.cwd() resolution byte-for-byte (installRoot === null).
+  const installRoot = readInstallRoot();
+  const configPath = resolveConfigPath("config/default.json", installRoot);
+  if (!existsSync(configPath)) return rebaseConfigPaths({ ...hardcodedDefaults }, installRoot);
   try {
     const raw = await readFile(configPath, "utf8");
-    return { ...hardcodedDefaults, ...JSON.parse(raw) };
+    return rebaseConfigPaths({ ...hardcodedDefaults, ...JSON.parse(raw) }, installRoot);
   } catch {
-    return { ...hardcodedDefaults };
+    return rebaseConfigPaths({ ...hardcodedDefaults }, installRoot);
   }
 }
 

@@ -77,6 +77,8 @@ npm link
 
 此后顶层命令可直接运行——如 `wao dashboard`（本启动器，见 §Owner 本地只读看板）——不必 `cd` 进 WAO 仓库，也不用担心 `npm run cli` 从其它目录报 "Missing script: cli"。注意只有顶层命令可用 `wao <command>` 形式；嵌套在命令族下的命令（如 `wao doctor`）仍需 `npm run cli -- wao doctor` 原形式。
 
+**共享状态解析根（M12-8F）：** 经全局 `wao` 命令调用时，WAO 把 `config/default.json`、run 目录（`runs/`）与 agent registry（`config/`）从**受信安装根**（即 `npm link` 链接的这份 checkout）解析，而非当前目录。该安装根由 `bin/wao.js` 自身位置（`import.meta.url`）派生，作为子进程 env（`WAO_INSTALL_ROOT`）传给 CLI 子进程——不经 argv、不拼 shell 字符串，并覆盖调用方任何同名值（受信、不可注入）。因此 `--cwd` 仍只决定命令观察/过滤哪个 Git 项目（如看板按 ownership 过滤的目标 workspace），显式 `--run-dir`/`--registry` 覆盖照原样使用、不被重定位；`npm run cli -- ...`（不设该 env）保持从当前目录解析的遗留行为不变。
+
 ### 配置
 
 **1. 复制 registry 模板并编辑：**
@@ -958,6 +960,7 @@ wao dashboard --port 8123 [--run-dir DIR]           # 固定端口 / 自定义 r
 行为契约：
 
 - 目标目录默认是当前目录（`process.cwd()`）；`--cwd` 显式指定目标项目。目标必须在某个 Git 仓库内——命令解析出 canonical Git root 作为看板 workspace（嵌套子目录也自动解析到仓库根）；**不在 Git 仓库内时，在监听之前就失败**并给出可操作提示（在 Git 项目内运行，或用 `--cwd`）。
+- **run/registry 来自安装根（M12-8F）**：经全局 `wao` 调用时，看板读取的 run 目录与 agent registry 从受信安装根解析（见 §安装本工具「共享状态解析根」），不会静默落到当前目录的 `runs/` 或 `config/`；当前目录仅作为默认 target workspace（`--cwd` 可覆盖），显式 `--run-dir` 覆盖照原样使用、不被重定位。
 - 默认在 Windows 默认浏览器打开生成的 fragment-token URL **恰好一次**（无 shell 拼接，URL 只作为结构化 argv 传给系统默认处理器）；`--no-open` 不做任何打开尝试。打开是 spawn 型的：处理器子进程在 spawn 后即被 unref，即使默认处理器进程滞留也不会阻塞本命令的 Ctrl-C 关闭。
 - 浏览器打开失败只是提示：URL 已打印，打印一行简短警告后服务器继续运行，按 `Ctrl-C` 停止。
 - **已接受的瞬时本机暴露（如实披露）**：生成的 fragment-token URL 会打印给人类 Owner，并会短暂出现在本地 `rundll32` 子进程的命令行中（Windows 上本机其它进程/工具可瞬时读到该命令行）——这是让默认浏览器打开该 URL 的必要传递方式。服务边界未因此改变：服务器仍只监听 `127.0.0.1`，token 生命周期随服务器关闭（Ctrl-C/进程退出）结束，看板 API 只接受带该 bearer 的只读 GET。

@@ -132,6 +132,8 @@
       "mcpWorkspace.test.js",
       "mcpWorkspaceSmoke.test.js",
       "ownerDashboard.test.js",
+      "ownerDashboardInstallRoot.test.js",
+      "ownerDashboardLauncher.test.js",
       "runActivity.test.js",
       "runActivitySmoke.test.js",
       "runAwaitResult.test.js",
