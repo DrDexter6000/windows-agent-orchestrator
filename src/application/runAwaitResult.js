@@ -74,6 +74,21 @@ import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { summarizeLiveness } from "./runWait.js";
 import { reconstructItemsFromEvents } from "./runCollect.js";
 import { projectCollectResult } from "./runCollectProjection.js";
+// M12-9 Package C: reuse the diagnosis + delivery SSOTs for the terminal
+// outcome. diagnoseFailure / gatherDeliveryView / projectDeliveryReadiness are
+// PURE events projectors — the outcome adds NO second transcript/Git read and
+// NO run_collect call; it derives from the SAME in-memory snapshot.
+import { diagnoseFailure, DIAGNOSIS_CATEGORIES, PROVIDER_DIAGNOSIS_CODES } from "../diagnosis.js";
+import {
+  gatherDeliveryView,
+  projectDeliveryReadiness,
+  DELIVERY_READINESS_STATES,
+  DELIVERY_VERIFICATION_STATUSES,
+  DELIVERY_VERIFICATION_FAILURE_CODES,
+  DELIVERY_ACCEPTANCE_STATUSES,
+  DELIVERY_DECISION_TYPES,
+} from "./runDelivery.js";
+import { PACKAGING_FAILURE_CODES } from "../deliveryFailureCodes.js";
 
 // waitMs is a single composition budget. 0 = pure point-in-time (read once,
 // return immediately). The default matches run_wait's default observation
@@ -188,6 +203,9 @@ function readFailureResult({ runId, agentId, state, terminal, cursor, waitedMs, 
     lastActivityKind: null,
     ownerHeartbeat: "unknown",
     result: unobservedResult("unavailable"),
+    // M12-9 Package C: outcome is unavailable on a read failure — the snapshot
+    // was not cleanly observed, so no terminal outcome is projected.
+    outcome: null,
   };
 }
 
@@ -239,6 +257,115 @@ function collectCompactFromSnapshot(events, runId, agentId, env, projectFn) {
     // collapse to unavailable. The terminal run facts are preserved upstream;
     // NO error detail is placed in the result (redaction contract).
     return unobservedResult("unavailable");
+  }
+}
+
+// M12-9 Package C: project a bounded, FAIL-CLOSED terminal outcome from ONE
+// transcript snapshot. Reuses the diagnosis SSOT (diagnoseFailure) and the
+// delivery SSOT (gatherDeliveryView + projectDeliveryReadiness) — there is NO
+// second transcript read, NO Git read via getRunDelivery, and NO run_collect
+// call; every fact derives from the SAME in-memory `events` snapshot the wait
+// already holds.
+//
+// Closed-set safe facts ONLY:
+//   - terminalState ∈ TERMINAL_STATES;
+//   - diagnosis { category ∈ DIAGNOSIS_CATEGORIES, code ∈ PROVIDER_DIAGNOSIS_CODES
+//     | null, signalCount (a count of diagnosis evidence signals) };
+//   - delivery { requested, readiness ∈ DELIVERY_READINESS_STATES, available,
+//     failureCode ∈ PACKAGING_FAILURE_CODES | null, verificationStatus ∈
+//     DELIVERY_VERIFICATION_STATUSES | null, verificationFailureCode ∈
+//     DELIVERY_VERIFICATION_FAILURE_CODES | null, acceptanceStatus ∈
+//     DELIVERY_ACCEPTANCE_STATUSES | null, decisionType ∈ DELIVERY_DECISION_TYPES
+//     | null }.
+//
+// It NEVER carries a commit id, changed paths, candidateInventory, diff, command
+// text, message/stderr, absolute path, or recommendation. ambiguous/malformed
+// inputs collapse to a safe closed-set fact (readiness "ambiguous", statuses
+// null) — never a raw value. The projector NEVER throws: any unexpected failure
+// returns null (outcome unavailable), so it can never turn a wait response into
+// a generic error.
+//
+// @param {object[]} events — explicit transcript event snapshot (already clean)
+// @param {string} runId
+// @param {string} terminalState
+// @param {object} [injectables] — diagnoseFn/gatherViewFn/readinessFn for tests
+// @returns {object|null} the bounded outcome, or null when unavailable
+export function projectTerminalOutcome(events, runId, terminalState, injectables = {}) {
+  try {
+    // Defense in depth: the caller only invokes this on a clean terminal
+    // snapshot, but a non-terminal/garbage terminalState makes the outcome
+    // unavailable rather than echoing an unbounded value.
+    if (!TERMINAL_STATES.includes(terminalState)) return null;
+
+    const diagnose = injectables.diagnoseFn ?? diagnoseFailure;
+    const gatherView = injectables.gatherViewFn ?? gatherDeliveryView;
+    const readinessFn = injectables.readinessFn ?? projectDeliveryReadiness;
+
+    // ===== diagnosis (closed-set category/code + signal count) =====
+    const diag = diagnose(events, runId) || {};
+    const diagnosis = {
+      category: DIAGNOSIS_CATEGORIES.includes(diag.category) ? diag.category : "unknown",
+      // code is meaningful ONLY for provider_auth; null for every other category.
+      code: diag.category === "provider_auth" && PROVIDER_DIAGNOSIS_CODES.includes(diag.code)
+        ? diag.code
+        : null,
+      signalCount: Array.isArray(diag.evidence) ? diag.evidence.length : 0,
+    };
+
+    // ===== delivery (bounded closed-set projection from the shared view) =====
+    const view = gatherView(events, runId, terminalState) || {};
+
+    let readiness;
+    try {
+      readiness = readinessFn(events, runId);
+    } catch {
+      readiness = "ambiguous";
+    }
+    if (!DELIVERY_READINESS_STATES.includes(readiness)) readiness = "ambiguous";
+
+    // Each raw status is projected through its closed set; unknown/malformed
+    // values collapse to null (never echoed). A verificationFailureCode is
+    // meaningful ONLY when verificationStatus === "failed".
+    const verificationStatus = view.verification
+      && DELIVERY_VERIFICATION_STATUSES.includes(view.verification.status)
+      ? view.verification.status
+      : null;
+    const verificationFailureCode = verificationStatus === "failed"
+      && view.verification
+      && DELIVERY_VERIFICATION_FAILURE_CODES.includes(view.verification.failureCode)
+      ? view.verification.failureCode
+      : null;
+    const acceptanceStatus = view.acceptance
+      && DELIVERY_ACCEPTANCE_STATUSES.includes(view.acceptance.status)
+      ? view.acceptance.status
+      : null;
+    const rawDecisionType = view.acceptance?.decisionEvent?.type;
+    const decisionType = rawDecisionType && DELIVERY_DECISION_TYPES.includes(rawDecisionType)
+      ? rawDecisionType
+      : null;
+    // gatherDeliveryView already projects deliveryFailure.code through
+    // safeProjectPackagingCode; re-check the closed set defensively.
+    const failureCode = view.deliveryFailure
+      && PACKAGING_FAILURE_CODES.includes(view.deliveryFailure.code)
+      ? view.deliveryFailure.code
+      : null;
+
+    const delivery = {
+      requested: view.deliveryRequested === true,
+      readiness,
+      available: view.deliveryAvailable === true,
+      failureCode,
+      verificationStatus,
+      verificationFailureCode,
+      acceptanceStatus,
+      decisionType,
+    };
+
+    return { terminalState, diagnosis, delivery };
+  } catch {
+    // Fail closed: outcome unavailable. The run observation is preserved by the
+    // caller; the outcome is strictly additive and must never break the wait.
+    return null;
   }
 }
 
@@ -391,6 +518,9 @@ export async function runAwaitResult(input) {
       lastActivityKind: null,
       ownerHeartbeat: "n/a",
       result: collectCompactFromSnapshot(events, runId, agentId, input.env, projectFn),
+      // M12-9 Package C: terminal AND cleanly observed → project the bounded
+      // outcome from THIS snapshot (diagnosis + delivery SSOTs, single read).
+      outcome: projectTerminalOutcome(events, runId, state),
     };
   }
 
@@ -413,6 +543,8 @@ export async function runAwaitResult(input) {
       lastActivityKind: liv.lastActivityKind,
       ownerHeartbeat: liv.ownerHeartbeat,
       result: unobservedResult("not_terminal"),
+      // M12-9 Package C: non-terminal → outcome is unavailable (null).
+      outcome: null,
     };
   }
 
@@ -503,6 +635,9 @@ export async function runAwaitResult(input) {
         lastActivityKind: null,
         ownerHeartbeat: "n/a",
         result: collectCompactFromSnapshot(currentEvents, runId, termAgentId, input.env, projectFn),
+        // M12-9 Package C: terminal during wait → project the bounded outcome
+        // from THIS (terminal-observing) snapshot. Single read — no extra I/O.
+        outcome: projectTerminalOutcome(currentEvents, runId, currentState),
       };
     }
 
@@ -541,5 +676,7 @@ export async function runAwaitResult(input) {
     lastActivityKind: liv.lastActivityKind,
     ownerHeartbeat: liv.ownerHeartbeat,
     result: unobservedResult("not_terminal"),
+    // M12-9 Package C: window expiry, still non-terminal → outcome unavailable.
+    outcome: null,
   };
 }

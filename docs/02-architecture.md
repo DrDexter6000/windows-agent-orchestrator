@@ -984,11 +984,13 @@ src/
 ├── diagnosis.js              # 横切：故障诊断（M8-3+C，给证据不给处方；类别 provider_auth/config_conflict/timeout/scorecard_fail/budget/crash/aborted_manual/unknown；M12-6 FR-02 增 PROVIDER_DIAGNOSIS_CODES 闭集 code——provider_auth 专属、entitlement 拒绝（subscription access disabled/org policy denied/API key missing）不再漏归 no_effect，code 永不回显原文）
 ├── smoke.js                  # L4：真实 CLI smoke 入口（npm run smoke）
 ├── mcp/                      # L4：MCP adapter（M9-1，agent-facing primary）
-│   ├── server.js             #   MCP server factory + 22 tools（lead_preflight/registry_list/workspace_status/workspace_select/run_dispatch/run_continue/run_status/run_wait/run_await_result/run_collect/run_activity/run_diagnose/run_delivery/run_delivery_review/run_delivery_review_bundle/run_delivery_reverify/run_delivery_decide/run_delivery_repackage/run_stop/runs_list/playbook_list/playbook_get）
+│   ├── server.js             #   MCP server factory + 23 tools（lead_preflight/registry_list/workspace_status/workspace_select/run_dispatch/run_dispatch_contract_check/run_continue/run_status/run_wait/run_await_result/run_collect/run_activity/run_diagnose/run_delivery/run_delivery_review/run_delivery_review_bundle/run_delivery_reverify/run_delivery_decide/run_delivery_repackage/run_stop/runs_list/playbook_list/playbook_get）
 │   └── stdio.js              #   stdio production entrypoint（StdioServerTransport，npm run mcp，--workspace-root）
 ├── application/              # L3：shared application services（M9 use-case 层）
 │   ├── registryInventory.js  #   registry inventory SSOT（M9-0，CLI + MCP 共用；M12-6 FR-02 增 providerReadiness 严格真相投影——CONFIGURATION_STATUSES/AUTHENTICATION_STATUSES/ENTITLEMENT_STATUSES/LIVE_CHECK_STATUSES 闭集常量，MCP 枚举直接派生，无第二份列表）
-│   ├── runDispatch.js        #   background dispatch service（M9-2A，CLI + MCP 共用；M12-7 增 continuable 选项——delivery-only 续谱根，建立 run_lineage turn:first provider 会话）
+│   ├── runDispatch.js        #   background dispatch service（M9-2A，CLI + MCP 共用；M12-7 增 continuable 选项——delivery-only 续谱根，建立 run_lineage turn:first provider 会话；M12-9：MCP adapter 派发前经共享 executionProfiles resolver 解析可选 executionProfileId（profile/inline 互斥），把解析后的 verification 折入 effective delivery 传入；runDispatch.js 自身不解析 profile）
+│   ├── runDispatchContract.js #   advisory pre-dispatch contract check service（M12-9，MCP）：MCP adapter 在 run_dispatch 与本工具间共享输入 schema（service 自身不导入 Zod），service 复用同一 application 校验（共享 resolver + prepareDeliveryRequest），返回闭集 workspace/registry/contract 视图 + 有界 issue 码；contractValid 只反映 delivery/profile 机械合同（不预评 expectedGitHead/expectedDirty/expectedWorkspaceRoot、continuable/backend/session 资格或凭据），非门禁（sections 独立 observed/unknown、advisory 恒 true）、零副作用、run_dispatch 不可依赖它
+│   ├── executionProfiles.js   #   frozen trusted execution-profile catalog + 共享 delivery 验证解析器（M12-9）：node-npm-test-v1 / node-npm-ci-test-v1 / python-pytest-v1 仅提供 verificationSetup/verificationCommands；profile 与 inline verification 互斥，未知/冲突由共享 resolver 稳定拒绝
 │   ├── runContinue.js        #   Lead 授权修正续跑 service（M12-7，由 MCP adapter 直接委托）：对终态 continuable delivery 续 ONE 修正回合，复用父 run 的 retained worktree + 续 provider 会话（turn:resume，同一 opaque uuid）；closed-set 资格/身份/配置/worktree 检查先于 mutation，spawn 前失败事务回滚；从不推断 correction/scope/retry/accept
 │   ├── runStatus.js          #   read-only run status service（M9-3A，CLI + MCP 共用）
 │   ├── runCollect.js         #   run collection service（M9-4A，CLI + MCP 共用）
@@ -998,7 +1000,7 @@ src/
 │   ├── runList.js            #   workspace-bound run list service（M10 P0-3；M12-5 查询内复用 ownership proof）
 │   ├── runWorkspaceOwnership.js # run workspace ownership判定（M10 P0-3；M12-5 query-scoped proof cache）
 │   ├── runWait.js            #   long-poll 终态/活性等待 service（M10-pre3，MCP 共用，只读）
-│   ├── runAwaitResult.js     #   read-only composite：bounded wait + observation + terminal compact（M12-3，snapshot-only，advisory；M12-6 FR-08 readFailureReason 闭集）
+│   ├── runAwaitResult.js     #   read-only composite：bounded wait + observation + terminal compact（M12-3，snapshot-only，advisory；M12-6 FR-08 readFailureReason 闭集；M12-9 终态+快照干净时投影有界闭集 outcome——diagnosis+delivery 安全事实，无 commit/path/diff/命令/推荐，复用同一 snapshot、零额外读）
 │   ├── ownerLiveness.js      #   run liveness 投影 SSOT（M10-pre3，terminal/progress/process_only/silent，runWait/runAwaitResult 共用）
 │   ├── workspaceBinding.js   #   host-authorized workspace proof SSOT（M10-pre2，MCP 共用）
 │   ├── sessionWorkspace.js   #   Lead session workspace selection kernel（M11-6，无状态，委托 proveWorkspace）

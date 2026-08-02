@@ -67,6 +67,13 @@ import {
   // everything else stays a fixed safe MCP error.
   DELIVERY_DECISION_REJECTION_CODES,
   classifyDeliveryDecisionRejection,
+  // M12-9 Package C: the shared delivery status closed sets. Consumed by the
+  // run_delivery projection AND the run_await_result terminal-outcome schema so
+  // the two cannot drift on verification/acceptance/decision status values.
+  DELIVERY_VERIFICATION_STATUSES,
+  DELIVERY_VERIFICATION_FAILURE_CODES,
+  DELIVERY_ACCEPTANCE_STATUSES,
+  DELIVERY_DECISION_TYPES,
 } from "../application/runDelivery.js";
 import {
   runDeliveryReverify,
@@ -98,6 +105,19 @@ import {
   // DELIVERY_READINESS_STATES / PACKAGING_FAILURE_CODES).
   READ_FAILURE_REASONS,
 } from "../application/runAwaitResult.js";
+// M12-9 Package B: the shared execution-profile resolver + the optional
+// advisory dispatch-contract precheck. The resolver is the SINGLE authority used
+// by BOTH run_dispatch and run_dispatch_contract_check (profile vs inline
+// mutual exclusivity, known/unknown/conflict/non-delivery).
+import {
+  resolveDeliveryVerification,
+  EXECUTION_PROFILE_IDS,
+} from "../application/executionProfiles.js";
+import {
+  runDispatchContractCheck,
+  CONTRACT_CHECK_ISSUE_CODES,
+  CONTRACT_CHECK_SECTIONS,
+} from "../application/runDispatchContract.js";
 import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
 import {
   runDeliveryRepackage,
@@ -148,7 +168,7 @@ import {
 import { isValidRunId } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, UNKNOWN_PACKAGING_CODE } from "../deliveryFailureCodes.js";
 import { DIAGNOSIS_CATEGORIES, PROVIDER_DIAGNOSIS_CODES } from "../diagnosis.js";
-import { RUN_STATES, RECOVERY_CANDIDATE_KINDS, REVERIFY_FAILURE_CODES } from "../transcript.js";
+import { RUN_STATES, RECOVERY_CANDIDATE_KINDS, REVERIFY_FAILURE_CODES, TERMINAL_STATES } from "../transcript.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 import {
   isValidCanonicalAgentId,
@@ -324,23 +344,45 @@ function dispatchExpectationMismatchText(field) {
 // run_dispatch input: agentId + prompt required; optional delivery block.
 // Server-owned config (runDir, runId, cwd, isolate, requireCertified, timeouts)
 // is never accepted — delivery.force-isolate is enforced by the service.
+//
+// M12-9 Package B: the inline verification requirement is NO LONGER enforced
+// inside DELIVERY_INPUT itself. When an executionProfileId is selected the
+// delivery carries NO inline verification (the profile supplies it), so the
+// delivery block here is allowed to omit verification entirely. The XOR between
+// "inline verification" and "a selected profile", and the "inline verification
+// required when no profile" rule, are enforced ONE level up at RUN_DISPATCH_INPUT
+// (and again by the shared resolver + prepareDeliveryRequest in the service).
+// The max number of verification (setup OR assertion) commands a delivery may
+// declare. Single SSOT: bounds DELIVERY_INPUT here AND the profile command-count
+// projections in RUN_DISPATCH_CONTRACT_CHECK_OUTPUT, so the precheck cannot drift
+// from what a delivery accepts.
+const DELIVERY_VERIFICATION_COMMANDS_MAX = 32;
+
 const DELIVERY_INPUT = z.object({
   mode: z.literal("git_commit_v1"),
   allowedPaths: z.array(z.string().min(1).max(512)).min(1).max(64),
-  verificationCommands: z.array(z.string().trim().min(1).max(512)).min(1).max(32).optional(),
+  verificationCommands: z.array(z.string().trim().min(1).max(512)).min(1).max(DELIVERY_VERIFICATION_COMMANDS_MAX).optional(),
   verificationUnavailableReason: z.string().trim().min(1).max(512).optional(),
   // M12-6 (FR-05): optional Lead-authored environment setup commands that run
   // sequentially BEFORE the assertion commands. Same shape rule as assertions;
   // may accompany either verificationCommands or verificationUnavailableReason.
-  verificationSetupCommands: z.array(z.string().trim().min(1).max(512)).min(1).max(32).optional(),
+  verificationSetupCommands: z.array(z.string().trim().min(1).max(512)).min(1).max(DELIVERY_VERIFICATION_COMMANDS_MAX).optional(),
 }).strict().refine(
   (d) => !d.verificationCommands || !d.verificationUnavailableReason,
   "cannot provide both verificationCommands and verificationUnavailableReason",
-).refine(
-  (d) => d.verificationCommands || d.verificationUnavailableReason,
-  "must provide either verificationCommands or verificationUnavailableReason",
 );
 
+// M12-9 Package B: a profile id is a bounded free-form string here on purpose.
+// KNOWN/UNKNOWN/conflict/non-delivery is decided by the shared resolver (the
+// single source of truth), so an unknown id still reaches
+// run_dispatch_contract_check and is reported as the advisory code
+// profile_unknown — NOT a hard schema rejection. The profile-vs-inline mutual
+// exclusivity and the "delivery must declare verification when no profile is
+// selected" rules are enforced in the run_dispatch HANDLER (via the shared
+// resolver) BEFORE the dispatcher is called — they cannot live here as a
+// top-level .refine(), because that breaks this schema's JSON-schema property
+// serialization in tools/list (M9-2B-01). The handler enforces them with the
+// fixed dispatch error, so the dispatcher call count stays 0 on any bad combo.
 const RUN_DISPATCH_INPUT = z.object({
   agentId: z.string().min(1),
   prompt: z.string().min(1),
@@ -362,6 +404,15 @@ const RUN_DISPATCH_INPUT = z.object({
   // authorized run_continue can resume the SAME provider conversation in the
   // retained worktree. Default false = byte-compatible ordinary delivery.
   continuable: z.boolean().optional(),
+  // M12-9 Package B: optional Lead-selected execution profile id. When set, the
+  // delivery's verification (setup + assertion commands) comes from the frozen
+  // trusted catalog (src/application/executionProfiles.js) instead of the inline
+  // block. The profile supplies ONLY verification commands — it never selects a
+  // worker, changes the prompt, infers/expands allowedPaths, sets continuable,
+  // or sets expected workspace/head/dirty. Known/unknown/conflict is decided by
+  // the shared resolver; this field is a bounded free-form string so an unknown
+  // id reaches run_dispatch_contract_check as advisory code profile_unknown.
+  executionProfileId: z.string().trim().min(1).max(64).optional(),
 }).strict();
 
 // M12-6 (FR-03): bounded safe workspace proof returned on a successful dispatch.
@@ -412,6 +463,84 @@ const RUN_DISPATCH_DESCRIPTION =
   "Lead-authorized correction. Continuable is delivery-only; it never starts a non-delivery " +
   "lineage, and WAO never infers a continuation, scope, retry, or acceptance.";
 
+// ===== run_dispatch_contract_check (M12-9 advisory precheck) constants =====
+//
+// An OPTIONAL read-only / ADVISORY precheck that folds the mechanical facts a
+// Lead might want BEFORE run_dispatch — workspace binding, worker registry
+// presence, and the delivery contract (inline verification OR a frozen execution
+// profile) — into ONE bounded result. It is NOT a gate: warning/unknown/
+// contractValid=false do NOT auto-block an independent run_dispatch.
+//
+// It shares run_dispatch's INPUT schema (RUN_DISPATCH_INPUT) and the SAME
+// application validators (the shared resolveDeliveryVerification resolver +
+// prepareDeliveryRequest). Output is bounded/strict/closed-set/safe.
+const CONTRACT_CHECK_ERROR_TEXT = "run_dispatch_contract_check failed";
+
+// Closed-set section status (each section settles independently; read failure
+// is "unknown", never faked observed).
+const CONTRACT_SECTION_STATUS = z.enum(["observed", "unknown"]);
+
+// Selected profile projection: id + COUNTS only — never command text. Counts are
+// bounded by the same delivery command cap (DELIVERY_VERIFICATION_COMMANDS_MAX).
+const CONTRACT_SELECTED_PROFILE = z.object({
+  id: z.enum([...EXECUTION_PROFILE_IDS]),
+  setupCommandCount: z.number().int().nonnegative().max(DELIVERY_VERIFICATION_COMMANDS_MAX),
+  assertionCommandCount: z.number().int().nonnegative().max(DELIVERY_VERIFICATION_COMMANDS_MAX),
+}).strict();
+
+// Bounded catalog summary, surfaced ONLY when no profile is selected. id +
+// counts + a short FIXED summary — never command text.
+const CONTRACT_AVAILABLE_PROFILE = z.object({
+  id: z.enum([...EXECUTION_PROFILE_IDS]),
+  setupCommandCount: z.number().int().nonnegative().max(DELIVERY_VERIFICATION_COMMANDS_MAX),
+  assertionCommandCount: z.number().int().nonnegative().max(DELIVERY_VERIFICATION_COMMANDS_MAX),
+  summary: z.string().min(1).max(160),
+}).strict();
+
+const RUN_DISPATCH_CONTRACT_CHECK_OUTPUT = z.object({
+  advisory: z.literal(true),
+  contractValid: z.boolean(),
+  sections: z.object({
+    workspace: CONTRACT_SECTION_STATUS,
+    registry: CONTRACT_SECTION_STATUS,
+    contract: CONTRACT_SECTION_STATUS,
+  }).strict(),
+  // Explicit maxima derived from the frozen closed set / catalog / section SSOT
+  // — no second hand-maintained allowlist: issueCodes can never exceed the code
+  // set; observations never exceed one-per-section (CONTRACT_CHECK_SECTIONS);
+  // availableProfiles never exceeds the catalog. A malformed/oversized service
+  // object is rejected by the .parse() in the handler and collapses to
+  // CONTRACT_CHECK_ERROR_TEXT.
+  issueCodes: z.array(z.enum([...CONTRACT_CHECK_ISSUE_CODES])).max(CONTRACT_CHECK_ISSUE_CODES.length),
+  observations: z.array(z.string()).max(CONTRACT_CHECK_SECTIONS.length),
+  profile: CONTRACT_SELECTED_PROFILE.nullable(),
+  availableProfiles: z.array(CONTRACT_AVAILABLE_PROFILE).max(EXECUTION_PROFILE_IDS.length).optional(),
+}).strict();
+
+const RUN_DISPATCH_CONTRACT_CHECK_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
+const RUN_DISPATCH_CONTRACT_CHECK_DESCRIPTION =
+  "Optional read-only ADVISORY precheck of a would-be run_dispatch: resolves the " +
+  "delivery contract (inline verification OR a frozen execution profile), observes " +
+  "the workspace binding and the worker's registry presence, and returns a bounded " +
+  "closed-set result (section statuses, issue codes, selected profile id + setup/" +
+  "assertion counts; availableProfiles id+counts+summary when no profile is chosen). " +
+  "The MCP adapter shares run_dispatch's input schema; the service reuses the same " +
+  "application validators (shared resolver + prepareDeliveryRequest) but imports no " +
+  "validation library itself. NOT a gate: contractValid reflects ONLY the delivery/" +
+  "profile MECHANICAL contract (profile<->inline mutual exclusivity + structural " +
+  "validity) and never auto-blocks an independent run_dispatch. It does NOT pre-" +
+  "evaluate expectedGitHead/expectedDirty/expectedWorkspaceRoot, continuable lineage " +
+  "or backend/session-reuse eligibility, or worker credential readiness; run_dispatch " +
+  "remains authoritative for all of those and never depends on this tool having been " +
+  "called. Returns no prompt text, command text, absolute paths, credentials, or " +
+  "PID/session/provider payload.";
+
 // ===== run_continue (M12-7 Lead-authorized correction continuation) constants =====
 //
 // A Lead reviews a terminal worker delivery, finds a narrow defect, and explicitly
@@ -425,6 +554,12 @@ const RUN_DISPATCH_DESCRIPTION =
 // lineage only — NOT project-wide coder reuse.
 
 const CONTINUE_ERROR_TEXT = "run_continue failed";
+// M12-9: run_continue does not support execution profiles, so its delivery must
+// declare inline verification (commands OR unavailable reason). Fixed safe text
+// (no dynamic content); enforced in the handler before the service is called.
+const CONTINUE_VERIFICATION_REQUIRED_TEXT =
+  "run_continue refused: the delivery must declare inline verification " +
+  "(verificationCommands or verificationUnavailableReason); execution profiles are not supported here.";
 const CONTINUE_CREDENTIAL_MISSING_TEXT =
   "run_continue refused: the worker is missing a required credential. " +
   "See registry_list (credentialAvailability / missingCredentialEnvNames) for the env var names, " +
@@ -434,6 +569,14 @@ const CONTINUE_CREDENTIAL_MISSING_TEXT =
 // prompt + the child delivery contract (required — a continuation is always a
 // delivery run). Same DELIVERY_INPUT SSOT as run_dispatch. runDir/registry/cert/
 // workspace/Lead-session are server-owned (never model-supplied).
+// M12-9 Package B: DELIVERY_INPUT no longer enforces inline verification itself
+// (a profile can supply it for run_dispatch). run_continue does NOT support
+// profiles, so its delivery MUST still declare inline verification. That rule is
+// enforced in the run_continue HANDLER (below), NOT as a top-level .refine()
+// here — a top-level .refine() on an inputSchema breaks its JSON-schema property
+// serialization in tools/list (the same root cause fixed for RUN_DISPATCH_INPUT;
+// see M9-2B-01). The handler rejects a profile-less delivery carrying no inline
+// verification before the service is called, so the service call count stays 0.
 const RUN_CONTINUE_INPUT = z.object({
   parentRunId: z.string().min(1),
   prompt: z.string().min(1),
@@ -714,17 +857,20 @@ const RUN_DIAGNOSE_DESCRIPTION =
 const DELIVERY_QUERY_ERROR_TEXT = "run_delivery failed";
 const COMMIT_HASH_RE = /^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/;
 const COMMIT_HASH_SCHEMA = z.string().regex(COMMIT_HASH_RE);
-const SAFE_VERIFICATION_STATUSES = new Set(["pending", "passed", "failed", "unavailable"]);
-const SAFE_FAILURE_CODES = new Set(["command_failed", "command_timeout", "artifact_mutated", "artifact_mismatch", "execution_error", "setup_failed", "setup_timeout", "setup_environment_error", "unknown"]);
-const SAFE_ACCEPTANCE_STATUSES = new Set(["pending", "accepted", "rejected"]);
-const SAFE_DECISION_TYPES = new Set(["run.delivery_accepted", "run.delivery_rejected"]);
+// M12-9 Package C: these Sets/Enums derive from the SHARED closed sets in
+// runDelivery.js (DELIVERY_VERIFICATION_STATUSES etc.) so the run_delivery
+// projection and the run_await_result outcome schema cannot drift.
+const SAFE_VERIFICATION_STATUSES = new Set(DELIVERY_VERIFICATION_STATUSES);
+const SAFE_FAILURE_CODES = new Set(DELIVERY_VERIFICATION_FAILURE_CODES);
+const SAFE_ACCEPTANCE_STATUSES = new Set(DELIVERY_ACCEPTANCE_STATUSES);
+const SAFE_DECISION_TYPES = new Set(DELIVERY_DECISION_TYPES);
 const TERMINAL_STATE_ENUM = z.enum(RUN_STATES);
-const VERIFICATION_STATUS_ENUM = z.enum(["pending", "passed", "failed", "unavailable"]);
-const ACCEPTANCE_STATUS_ENUM = z.enum(["pending", "accepted", "rejected"]);
+const VERIFICATION_STATUS_ENUM = z.enum([...DELIVERY_VERIFICATION_STATUSES]);
+const ACCEPTANCE_STATUS_ENUM = z.enum([...DELIVERY_ACCEPTANCE_STATUSES]);
 // M12-6 (FR-05/FR-06): setup-phase failures are a closed, actionable set,
 // distinct from assertion codes — they never masquerade as command_failed.
-const FAILURE_CODE_ENUM = z.enum(["command_failed", "command_timeout", "artifact_mutated", "artifact_mismatch", "execution_error", "setup_failed", "setup_timeout", "setup_environment_error", "unknown"]);
-const DECISION_TYPE_ENUM = z.enum(["run.delivery_accepted", "run.delivery_rejected"]);
+const FAILURE_CODE_ENUM = z.enum([...DELIVERY_VERIFICATION_FAILURE_CODES]);
+const DECISION_TYPE_ENUM = z.enum([...DELIVERY_DECISION_TYPES]);
 
 // M11-12B: Windows exit codes are nonnegative 32-bit values (NOT POSIX 0..255).
 // Real Windows codes such as 9009 (command-not-found) must be preserved verbatim;
@@ -1655,6 +1801,38 @@ const RUN_AWAIT_RESULT_RESULT = z.object({
   backend: z.string().nullable(),
 }).strict();
 
+// M12-9 Package C: the bounded terminal OUTCOME, projected ONLY when the run is
+// terminal AND the snapshot was cleanly observed (outcome is null otherwise).
+// Reuses the diagnosis + delivery SSOTs' closed sets (the SAME enums the
+// run_delivery projection uses, so the two cannot drift). Closed-set safe facts
+// ONLY — terminalState, diagnosis (category/code/signalCount), and delivery
+// (requested/readiness/available/failureCode/verificationStatus/
+// verificationFailureCode/acceptanceStatus/decisionType). It NEVER carries a
+// commit id, changed paths, candidateInventory, diff, command text, message,
+// stderr, absolute path, or recommendation.
+const RUN_AWAIT_RESULT_OUTCOME_DIAGNOSIS = z.object({
+  category: z.enum([...DIAGNOSIS_CATEGORIES]),
+  code: z.enum([...PROVIDER_DIAGNOSIS_CODES]).nullable(),
+  signalCount: z.number().int().nonnegative(),
+}).strict();
+
+const RUN_AWAIT_RESULT_OUTCOME_DELIVERY = z.object({
+  requested: z.boolean(),
+  readiness: z.enum([...DELIVERY_READINESS_STATES]),
+  available: z.boolean(),
+  failureCode: z.enum([...PACKAGING_FAILURE_CODES]).nullable(),
+  verificationStatus: z.enum([...DELIVERY_VERIFICATION_STATUSES]).nullable(),
+  verificationFailureCode: z.enum([...DELIVERY_VERIFICATION_FAILURE_CODES]).nullable(),
+  acceptanceStatus: z.enum([...DELIVERY_ACCEPTANCE_STATUSES]).nullable(),
+  decisionType: z.enum([...DELIVERY_DECISION_TYPES]).nullable(),
+}).strict();
+
+const RUN_AWAIT_RESULT_OUTCOME = z.object({
+  terminalState: z.enum([...TERMINAL_STATES]),
+  diagnosis: RUN_AWAIT_RESULT_OUTCOME_DIAGNOSIS,
+  delivery: RUN_AWAIT_RESULT_OUTCOME_DELIVERY,
+}).strict();
+
 const RUN_AWAIT_RESULT_OUTPUT = z.object({
   runId: z.string(),
   agentId: READ_AGENT_ID_SCHEMA,
@@ -1678,6 +1856,10 @@ const RUN_AWAIT_RESULT_OUTPUT = z.object({
   lastActivityKind: z.string().nullable(),
   ownerHeartbeat: z.enum(["fresh", "stale", "n/a", "unknown"]),
   result: RUN_AWAIT_RESULT_RESULT,
+  // M12-9 Package C: bounded terminal outcome — projected ONLY when terminal
+  // AND cleanly observed; null on non-terminal or read_failure. Closed-set safe
+  // facts only (diagnosis + delivery); the Lead retains all semantic judgment.
+  outcome: RUN_AWAIT_RESULT_OUTCOME.nullable(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
   // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
   // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
@@ -2157,6 +2339,9 @@ export function createWaoMcpServer({
   // to the real service; workspace-bound + backend-capability-gated. Threaded
   // for transport tests.
   continueRunFn,
+  // M12-9: injectable advisory dispatch-contract precheck service. Defaults to
+  // the real read-only service; threaded for transport tests.
+  runDispatchContractCheckFn,
 }) {
   const service = getRegistryInventoryFn ?? getRegistryInventory;
   // M11-7: the Windows user-env reader for credential readiness. Defaults to
@@ -2188,6 +2373,7 @@ export function createWaoMcpServer({
   const deliveryRepackageService = getRunDeliveryRepackageFn ?? runDeliveryRepackage;
   const deliveryReverifyService = runDeliveryReverifyFn ?? runDeliveryReverify;
   const continueService = continueRunFn ?? continueRun;
+  const contractCheckService = runDispatchContractCheckFn ?? runDispatchContractCheck;
 
   // M12-7: backend capability resolver for the continuation service's
   // supportsSessionReuse gate. Mirrors the backendFor in backgroundRunner.js /
@@ -2545,7 +2731,7 @@ export function createWaoMcpServer({
       outputSchema: RUN_DISPATCH_OUTPUT,
       annotations: RUN_DISPATCH_ANNOTATIONS,
     },
-    async ({ agentId, prompt, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable }) => {
+    async ({ agentId, prompt, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable, executionProfileId }) => {
       // M11-8B final: validate the requested agentId at the VERY TOP, before
       // workspace resolution or any dispatcher call. An invalid or reserved
       // ("unknown") id collapses to the fixed dispatch error immediately — the
@@ -2607,6 +2793,55 @@ export function createWaoMcpServer({
         };
       }
 
+      // M12-9 Package B: resolve the delivery verification from the selected
+      // profile OR the inline block via the SHARED resolver — the single
+      // authority used by run_dispatch AND run_dispatch_contract_check, so the
+      // two tools cannot drift on what a valid profile/inline combination is.
+      // run_dispatch never depends on the precheck having been called — this IS
+      // its own real structural validation. It runs BEFORE the dispatcher is
+      // called, so any invalid contract collapses to the fixed dispatch error
+      // with the dispatcher call count at 0:
+      //   - unknown profile id             → resolver !ok (profile_unknown);
+      //   - profile without a delivery     → resolver !ok (profile_requires_delivery);
+      //   - profile + inline verification  → resolver !ok (profile_inline_conflict);
+      //   - no profile, delivery without verification (no commands AND no
+      //     reason) → rejected here (prepareDeliveryRequest would also reject it
+      //     downstream, but we refuse at the boundary so nothing reaches the
+      //     dispatcher).
+      let effectiveDelivery = delivery;
+      if (delivery || executionProfileId) {
+        const resolved = resolveDeliveryVerification({ delivery, executionProfileId });
+        if (!resolved.ok) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DISPATCH_ERROR_TEXT }],
+          };
+        }
+        if (
+          resolved.source === "inline"
+          && resolved.verification.commands.length === 0
+          && !resolved.verification.unavailableReason
+        ) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DISPATCH_ERROR_TEXT }],
+          };
+        }
+        // A profile supplies ONLY verification commands — mode/allowedPaths are
+        // the Lead's inline delivery. Fold the profile's verification into the
+        // effective delivery the dispatcher consumes.
+        if (resolved.profileId) {
+          effectiveDelivery = {
+            mode: delivery.mode,
+            allowedPaths: delivery.allowedPaths,
+            verificationCommands: resolved.verification.commands,
+            ...(resolved.verification.setupCommands.length > 0
+              ? { verificationSetupCommands: resolved.verification.setupCommands }
+              : {}),
+          };
+        }
+      }
+
       // M11-7 (CTO closeout): the MCP adapter does NOT re-read the registry or
       // re-implement readiness. dispatchRun owns the background-preflight: it
       // reads the registry, assesses credential availability via the shared SSOT
@@ -2631,7 +2866,11 @@ export function createWaoMcpServer({
           // detached runner. This is NOT --wait-timeout (never externally controllable).
           globalWaitTimeout,
           // M9-7A: optional delivery request — service validates via prepareDeliveryRequest.
-          ...(delivery ? { delivery } : {}),
+          // M12-9: pass the profile-resolved EFFECTIVE delivery (inline block, or the
+          // frozen profile's verification commands folded into the delivery). The
+          // profile supplies ONLY verification commands; mode/allowedPaths are the
+          // Lead's inline delivery.
+          ...(effectiveDelivery ? { delivery: effectiveDelivery } : {}),
           // M12-7: Lead opt-in. continuable is threaded verbatim (default false
           // = ordinary delivery). The service enforces delivery-only and a busy
           // lineage slot refuses before any transcript/fork; those environmental
@@ -2725,6 +2964,62 @@ export function createWaoMcpServer({
   );
 
   mcp.registerTool(
+    "run_dispatch_contract_check",
+    {
+      description: RUN_DISPATCH_CONTRACT_CHECK_DESCRIPTION,
+      // Shares run_dispatch's INPUT schema — the same agentId/prompt/delivery/
+      // executionProfileId surface, validated identically. Known/unknown/
+      // conflict for the profile is decided downstream by the shared resolver.
+      inputSchema: RUN_DISPATCH_INPUT,
+      outputSchema: RUN_DISPATCH_CONTRACT_CHECK_OUTPUT,
+      annotations: RUN_DISPATCH_CONTRACT_CHECK_ANNOTATIONS,
+    },
+    async ({ agentId, prompt, delivery, executionProfileId }) => {
+      // Read-only advisory precheck. Resolve the workspace binding so the result
+      // can report workspace status, but — unlike run_dispatch — a binding
+      // failure is NOT a hard refusal: it surfaces as the closed-set "unknown"
+      // workspace section (never faked observed/unbound). The service never
+      // dispatches, forks, or writes a transcript; it only reads the registry
+      // and consumes the resolved binding.
+      let workspaceBinding = null;
+      try {
+        workspaceBinding = await resolveWorkspaceBinding();
+      } catch {
+        workspaceBinding = null;
+      }
+      try {
+        const result = await contractCheckService({
+          agentId,
+          prompt,
+          delivery,
+          executionProfileId,
+          workspaceBinding,
+          registryPath,
+        });
+        // Output boundary: parse through RUN_DISPATCH_CONTRACT_CHECK_OUTPUT so
+        // unknown/internal fields cannot cross the wire and an oversized or
+        // malformed service object collapses to the fixed error text below
+        // (strict root + the derived maxima above). Only the validated object is
+        // returned as structuredContent.
+        const parsed = RUN_DISPATCH_CONTRACT_CHECK_OUTPUT.parse(result);
+        return {
+          content: [{ type: "text", text: JSON.stringify(parsed) }],
+          structuredContent: parsed,
+        };
+      } catch {
+        // The service is fail-closed internally and should never throw, but a
+        // defensive collapse keeps the tool contract (bounded result or fixed
+        // safe text — never an unstructured error). This also catches any
+        // output-schema parse failure (unknown or oversized fields).
+        return {
+          isError: true,
+          content: [{ type: "text", text: CONTRACT_CHECK_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  mcp.registerTool(
     "run_continue",
     {
       description: RUN_CONTINUE_DESCRIPTION,
@@ -2751,6 +3046,19 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
+        };
+      }
+
+      // M12-9 Package B: run_continue does NOT support execution profiles, so
+      // the delivery MUST declare inline verification (commands OR unavailable
+      // reason). Enforced HERE — before the service is called — and NOT as a
+      // top-level schema .refine() (which would break this tool's inputSchema
+      // property serialization in tools/list). Rejecting here keeps the service
+      // call count at 0 for malformed input.
+      if (!delivery?.verificationCommands && !delivery?.verificationUnavailableReason) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: CONTINUE_VERIFICATION_REQUIRED_TEXT }],
         };
       }
 
@@ -3492,6 +3800,7 @@ export function createWaoMcpServer({
           lastActivityKind: result.lastActivityKind,
           ownerHeartbeat: result.ownerHeartbeat,
           result: result.result,
+          outcome: result.outcome ?? null,
         };
 
         // M12-8B: bounded progressive-disclosure metadata — a pure function of
@@ -3503,6 +3812,11 @@ export function createWaoMcpServer({
           readFailureReason: payload.readFailureReason ?? null,
           liveness: payload.liveness,
           resultStatus: payload.result?.status ?? "unavailable",
+          // M12-9 Package C: outcome-derived read facts pick the most relevant
+          // read-only drilldown (delivery review / diagnose) on a terminal run.
+          outcomeReadiness: payload.outcome?.delivery?.readiness ?? null,
+          outcomeVerificationStatus: payload.outcome?.delivery?.verificationStatus ?? null,
+          outcomeDeliveryFailureCode: payload.outcome?.delivery?.failureCode ?? null,
         });
 
         const parsed = RUN_AWAIT_RESULT_OUTPUT.parse(payload);

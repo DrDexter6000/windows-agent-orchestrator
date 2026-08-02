@@ -4,7 +4,6 @@
     "pure": [
       "alerts.test.js",
       "applicationRegistryInventory.test.js",
-      "backgroundRunner.test.js",
       "canonicalRunner.test.js",
       "claudeCodeProvider.test.js",
       "claudeProviderWrapper.test.js",
@@ -34,6 +33,10 @@
       "m12-6-wq-workerQualityContract.test.js",
       "m12-7-runDispatchContinuable.test.js",
       "m12-7-sessionReuseLineage.test.js",
+      "m12-9-executionProfiles.test.js",
+      "m12-9-dispatchContractCheck.test.js",
+      "m12-9-runAwaitOutcome.test.js",
+      "m12-9-smoke.test.js",
       "mcpPlaybook.test.js",
       "mcpRunCollect.test.js",
       "mcpRunContinue.test.js",
@@ -128,6 +131,7 @@
       "mcpRunAwaitResult.test.js",
       "mcpRunDeliveryReverify.test.js",
       "mcpRunDispatch.test.js",
+      "m12-9-mcpDispatchContract.test.js",
       "mcpRunStatus.test.js",
       "mcpRunStop.test.js",
       "mcpWorkspace.test.js",
@@ -169,6 +173,7 @@
       "runDelivery.test.js"
     ],
     "process": [
+      "backgroundRunner.test.js",
       "cli.test.js",
       "daemon.test.js",
       "gitLocalExcludeCloseout.test.js",

@@ -187,6 +187,21 @@ function selectForRunAwaitResult(f) {
   if (f.terminal !== true) {
     return ["status", "activity"];
   }
+  // M12-9 Package C: terminal + cleanly observed — use the bounded OUTCOME to
+  // suggest the most relevant READ-ONLY drilldowns. These are read-path
+  // SUGGESTIONS only (the Lead decides whether to call them); they NEVER
+  // include stop/retry/repackage/accept/reject. Outcome facts are absent on the
+  // legacy fact matrix and on any caller that did not project an outcome, so
+  // these branches fall through cleanly to the result-status branches below.
+  if (f.outcomeReadiness === "reviewable") {
+    return ["deliveryReview", "delivery", "activity"];
+  }
+  if (f.outcomeVerificationStatus === "failed") {
+    return ["deliveryReview", "diagnose", "activity"];
+  }
+  if (f.outcomeReadiness === "packaging_failed" || f.outcomeDeliveryFailureCode != null) {
+    return ["diagnose", "delivery", "activity"];
+  }
   if (f.resultStatus === "available") {
     return ["activity", "collectFull"];
   }

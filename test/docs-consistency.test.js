@@ -669,8 +669,9 @@ test("M10-pre2: workspace_status tool documented in usage.md and SKILL.md", () =
   // + run_delivery_review (M11-3) = 14; + workspace_select (M11-6) = 15; + lead_preflight
   // (M11-8A) = 16; + run_delivery_repackage (M12-1S2) = 17; + run_await_result
   // (M12-3A) = 18; + run_delivery_review_bundle (M12-3B) = 19; + run_delivery_reverify
-  // (M12-6 Package 3B) = 20; + run_continue (M12-7) = 21; + run_activity (M12-8A) = 22.
-  assert.ok(/22 MCP tools/.test(skill), "SKILL.md must reflect 22 MCP tools after M12-8A run_activity");
+  // (M12-6 Package 3B) = 20; + run_continue (M12-7) = 21; + run_activity (M12-8A) = 22;
+  // + run_dispatch_contract_check (M12-9) = 23.
+  assert.ok(/23 MCP tools/.test(skill), "SKILL.md must reflect 23 MCP tools after M12-9 run_dispatch_contract_check");
   assert.ok(skill.includes("run_delivery_reverify"), "SKILL.md tool table must include run_delivery_reverify");
   // team-roles.md must mention workspace binding (MCP-first)
   const roles = read("docs/team-roles.md");
@@ -878,11 +879,11 @@ test("M11-0A: usage.md 说明 --pure 用途、新进程重启边界、command �
   assert.ok(/command.*必须是数组|command 必须是数组|数组/.test(usage), "usage.md 必须说明 command 必须是数组");
 });
 
-test("M12-8A: usage.md MCP 段反映当前 22 tools", () => {
+test("M12-8A/M12-9: usage.md MCP 段反映当前 23 tools", () => {
   const usage = read("docs/usage.md");
   // 精确禁止"只有 7 个工具"的陈旧文案。
   assert.ok(!/(?<!\d)7 个工具/.test(usage), "usage.md MCP 段不得再声称只有 7 个工具");
-  assert.ok(/22 个工具/.test(usage), "usage.md MCP 段必须反映 22 个工具（含 M12-8A run_activity）");
+  assert.ok(/23 个工具/.test(usage), "usage.md MCP 段必须反映 23 个工具（含 M12-8A run_activity + M12-9 run_dispatch_contract_check）");
 });
 
 // ============================================================
@@ -1132,15 +1133,74 @@ test("M12 coder_low example uses current DeepSeek V4 Flash policy", () => {
   assert.equal(low?.model?.contextWindow, 1000000);
 });
 
-test("M12-8A: SKILL/architecture 当前工具事实为 22 tools", () => {
+test("M12-8A/M12-9: SKILL/architecture 当前工具事实为 23 tools", () => {
   const skill = read("SKILL.md");
   const arch = read("docs/02-architecture.md");
-  assert.ok(/22 MCP tools|22 tools/i.test(skill),
-    "SKILL.md Minimal MCP Loop 当前工具数为 22（含 M12-8A run_activity）");
+  assert.ok(/23 MCP tools|23 tools/i.test(skill),
+    "SKILL.md Minimal MCP Loop 当前工具数为 23（含 M12-8A run_activity + M12-9 run_dispatch_contract_check）");
   // 精确匹配 "server.js ... N tools" 的当前状态注释行。
   const serverLine = arch.split("\n").find((l) => /server\.js.*tools/.test(l)) || "";
-  assert.ok(/22 tools/.test(serverLine),
-    "architecture server.js 注释当前工具数为 22");
+  assert.ok(/23 tools/.test(serverLine),
+    "architecture server.js 注释当前工具数为 23");
+});
+
+test("M12-9 docs: executionProfileId is a TOP-LEVEL run_dispatch input; inline verification is delivery.verificationCommands etc.; contract check is schema-not-Zod and contractValid is mechanical-only", () => {
+  const skill = read("SKILL.md");
+  const usage = read("docs/usage.md");
+  const roadmap = read("docs/roadmap.md");
+  for (const [name, text] of [["SKILL.md", skill], ["docs/usage.md", usage], ["docs/roadmap.md", roadmap]]) {
+    // The NONEXISTENT nested shape (delivery.verification.executionProfileId) must
+    // never be documented — it does not exist in the run_dispatch input schema.
+    assert.ok(!/verification\.executionProfileId/i.test(text),
+      `${name} 不得记录不存在的 delivery.verification.executionProfileId 形状`);
+    // executionProfileId is a top-level run_dispatch input, sibling of delivery.
+    assert.ok(/top-level|顶层|同级/i.test(text),
+      `${name} 必须把 executionProfileId 记为顶层（与 delivery 同级）`);
+    // Inline verification uses the real delivery-level field names.
+    assert.ok(/verificationCommands/.test(text), `${name} 必须记录 delivery.verificationCommands`);
+  }
+  // contractValid scope (SKILL + usage carry the full scope sentence): mechanical
+  // contract only; it must NOT pre-evaluate the run_dispatch expectations.
+  for (const [name, text] of [["SKILL.md", skill], ["docs/usage.md", usage]]) {
+    assert.ok(/contractValid/.test(text), `${name} 必须记录 contractValid`);
+    assert.ok(/expectedGitHead|expectedDirty|expectedWorkspaceRoot/.test(text),
+      `${name} 必须列出 contractValid 不预评的 expectedGitHead/expectedDirty/expectedWorkspaceRoot`);
+  }
+  // The contract check shares the INPUT SCHEMA (not "Zod"), and the service does
+  // not import a validation library. Regression guard for the stale "共享输入 Zod"
+  // wording that wrongly attributed a Zod import to the service.
+  for (const [name, text] of [["SKILL.md", skill], ["docs/usage.md", usage], ["docs/roadmap.md", roadmap]]) {
+    assert.ok(!/共享输入 Zod/.test(text), `${name} 不得再用过时的"共享输入 Zod"措辞`);
+  }
+});
+
+test("M12-9 roadmap records durable Lead decisions and the re-integration truth, deferring canonical result to WAO verification", () => {
+  const roadmap = read("docs/roadmap.md");
+  assert.ok(!/M12-9 已实现（本地，待 Lead 验收）/.test(roadmap),
+    "roadmap 不得保留已经过时的待 Lead 验收状态");
+  assert.ok(/run_20260802162736427rmxxvj/.test(roadmap)
+    && /run_2026080219443391071irlp/.test(roadmap),
+    "roadmap 必须绑定 M12-9 root/child runId");
+  assert.ok(/44917ef0f2d0c050a2fa7e0b98b783e80c20d376/.test(roadmap)
+    && /durable accepted child/.test(roadmap)
+    && /durable rejected/.test(roadmap),
+    "roadmap 必须记录 child delivery 与 Lead 的 accepted/rejected 决策");
+  // The OLD non-green canonical attempt wording is no longer current acceptance
+  // truth. The roadmap must NOT keep the stale gate framing (BLOCKED_CANONICAL_GATE
+  // / 175 pass / 17/17) nor the old candidate/base-isolation or "发布门待修复"
+  // wording. The authoritative exact-artifact canonical result is deferred to the
+  // WAO verification phase — the roadmap states neither green nor non-green.
+  assert.ok(!/BLOCKED_CANONICAL_GATE/.test(roadmap)
+    && !/175 pass/.test(roadmap)
+    && !/17\/17/.test(roadmap),
+    "roadmap 不得保留旧的非绿 canonical 尝试作为当前验收事实（canonical 结果由 WAO 验收阶段给出）");
+  assert.ok(!/本地隔离候选|发布门待修复|隔离集成为|主 checkout 的并发修改/.test(roadmap),
+    "roadmap 不得保留旧候选/base 隔离或'发布门待修复'作为当前事实（已按 Lead 修正重集成到当前 main）");
+  assert.ok(/exact-artifact canonical/.test(roadmap)
+    && /WAO 验收阶段/.test(roadmap),
+    "roadmap 必须把权威 exact-artifact canonical 结果明确推迟到 WAO 验收阶段");
+  assert.ok(/不声称已发布|未发布/.test(roadmap),
+    "roadmap 不得把本地接受误写为已发布");
 });
 
 // ============================================================
@@ -1172,10 +1232,10 @@ test("M11-2C-12: SKILL tool-count 文案不得声称 minimal loop 必须经过�
   const mandatoryAll = /full\s+minimal\s+loop\s+through\s+15|minimal\s+loop\s+必须.*全部\s*15|loop\s+must\s+(use|go through|include)\s+all\s+15/i;
   assert.ok(!mandatoryAll.test(skill),
     "SKILL tool-count 文案不得声称 minimal loop 必须经过全部工具");
-  // 必须表达：WAO 暴露 22 tools，但 minimal control loop 只用相关 control tools，
+  // 必须表达：WAO 暴露 23 tools，但 minimal control loop 只用相关 control tools，
   // playbook reads 是可选且在 dispatch loop 外。
-  assert.ok(/22 MCP tools|22 tools/i.test(skill),
-    "SKILL 声明 WAO 暴露 22 MCP tools");
+  assert.ok(/23 MCP tools|23 tools/i.test(skill),
+    "SKILL 声明 WAO 暴露 23 MCP tools");
   assert.ok(/optional|可选/i.test(skill) && /dispatch loop|control loop/i.test(skill),
     "SKILL 必须说明 playbook reads 可选且在 dispatch/control loop 之外");
 });
@@ -1535,13 +1595,20 @@ test("M12-0-06: roadmap 标 M11 ✅ 完成；M12-1/2A/3/4A 已实现且其余 sl
     && /backend_failed/.test(m12Row)
     && /run_delivery_repackage/.test(m12Row),
   "M12-4A backend failure retained-candidate recovery 必须标为已实现");
-  // Remaining planned slices — exact concepts, no invented tool names.
-  assert.ok(/deterministic evidence\/handoff aggregation|evidence\/handoff aggregation/i.test(m12Row),
-    "M12 计划 deterministic evidence/handoff aggregation");
-  assert.ok(/bounded actionable failure facts|actionable failure facts/i.test(m12Row),
-    "M12 计划 bounded actionable failure facts");
-  assert.ok(/factual readiness\/history projection|readiness\/history projection/i.test(m12Row),
-    "M12 计划 factual readiness/history projection");
+  // Remaining planned slice is NARROWED (M12-9 closeout): bounded actionable
+  // failure facts (run_diagnose) and factual readiness projection (run_delivery)
+  // were already delivered, and M12-9 closes the single-snapshot bounded terminal
+  // outcome/handoff projection. Only the broader cross-run / historical
+  // evidence/handoff aggregation remains planned. The stale wording that listed
+  // readiness/history projection as unimplemented must NOT reappear.
+  assert.ok(/evidence\/handoff aggregation/i.test(m12Row),
+    "M12 其余 slices：仅更广的 evidence/handoff aggregation 仍 planned");
+  assert.ok(/run_diagnose/.test(m12Row) && /bounded actionable failure facts/i.test(m12Row),
+    "M12 必须把 bounded actionable failure facts 归于已交付（run_diagnose）");
+  assert.ok(/run_delivery/.test(m12Row) && /readiness\s*投影|readiness\s*projection/i.test(m12Row),
+    "M12 必须把 factual readiness 投影归于已交付（run_delivery）");
+  assert.ok(/bounded terminal outcome\/handoff\s*投影|terminal outcome\/handoff\s*projection/i.test(m12Row),
+    "M12-9 收口单快照 bounded terminal outcome/handoff 投影");
   assert.ok(/planned|unimplemented|规划|未实现|计划/i.test(m12Row),
     "M12 其余 slices 必须标 planned/unimplemented");
 });

@@ -467,7 +467,7 @@ test("MAA-13: tool count is 22 after run_activity (was 21)", async () => {
     try {
       const tools = await client.listTools();
       assert.ok(tools.tools.find((x) => x.name === "run_activity"), "run_activity present");
-      assert.equal(tools.tools.length, 22, "exactly 22 tools after M12-8 run_activity");
+      assert.equal(tools.tools.length, 23, "exactly 23 tools after M12-8 run_activity + M12-9 run_dispatch_contract_check");
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -102,7 +102,7 @@ test("M12-7-MRC-M1: run_continue registered; total tools = 21; destructive + wor
       const { tools } = await client.listTools();
       const t = tools.find((x) => x.name === "run_continue");
       assert.ok(t, "run_continue present");
-      assert.equal(tools.length, 22, "exactly 22 tools after M12-7 run_continue + M12-8 run_activity");
+      assert.equal(tools.length, 23, "exactly 23 tools after M12-7 run_continue + M12-8 run_activity + M12-9 run_dispatch_contract_check");
       // Resumes a provider conversation + mutates the retained worktree: destructive.
       assert.equal(t.annotations.destructiveHint, true);
       assert.equal(t.annotations.readOnlyHint, false);

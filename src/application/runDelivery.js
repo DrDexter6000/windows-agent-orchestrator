@@ -73,6 +73,50 @@ export const DELIVERY_WAIT_MS_MIN = 1000;
 export const DELIVERY_WAIT_MS_MAX = 300000;
 const DELIVERY_WAIT_POLL_INTERVAL_MS = 1000;
 
+// M12-9 Package C: the closed sets for delivery verification / acceptance /
+// decision projection. These are the SHARED authority consumed by BOTH the
+// run_delivery MCP projection (src/mcp/server.js) AND the run_await_result
+// terminal-outcome projector (src/application/runAwaitResult.js) so the two
+// cannot drift on what a verification/acceptance status or a verification
+// failure code is. Each is frozen; the MCP zod enums are built FROM these
+// arrays. Mirrors the producer-side closed sets without re-deriving them.
+
+// A committed DeliveryRef's verification outcome status (original/effective).
+export const DELIVERY_VERIFICATION_STATUSES = Object.freeze([
+  "pending",
+  "passed",
+  "failed",
+  "unavailable",
+]);
+
+// A verification failure code — meaningful ONLY when verificationStatus is
+// "failed". Includes setup-phase failures (distinct from assertion codes) and
+// the safe projection for an unknown/malformed value.
+export const DELIVERY_VERIFICATION_FAILURE_CODES = Object.freeze([
+  "command_failed",
+  "command_timeout",
+  "artifact_mutated",
+  "artifact_mismatch",
+  "execution_error",
+  "setup_failed",
+  "setup_timeout",
+  "setup_environment_error",
+  "unknown",
+]);
+
+// A committed DeliveryRef's acceptance outcome.
+export const DELIVERY_ACCEPTANCE_STATUSES = Object.freeze([
+  "pending",
+  "accepted",
+  "rejected",
+]);
+
+// The durable decision event types that settle acceptance.
+export const DELIVERY_DECISION_TYPES = Object.freeze([
+  "run.delivery_accepted",
+  "run.delivery_rejected",
+]);
+
 /**
  * Project the delivery readiness of a run from its transcript events.
  *
@@ -284,7 +328,7 @@ function _deliveryWasRequested(events, runId) {
  * Reconstruct the latest delivery ref, decision event, and delivery commit
  * from transcript events. This is the single algorithm — point-in-time
  * getRunDelivery and the wait/readiness handshake both use it via
- * _gatherDeliveryView.
+ * gatherDeliveryView.
  *
  * M11-10 closeout (auditor blocker 2 + Lead-review residue): created/
  * verification/decision scans are ALL bound by the requested runId, so a
@@ -371,7 +415,11 @@ function _reconstructDelivery(events, runId) {
 //   - ambiguous marker: { runId, terminalState, deliveryAvailable: false, ambiguous: true }
 //     (a durable conflict: malformed bound event / cross-run injection. Never
 //     echoes a raw ref/commit/path; the caller fail-closes to ambiguous.)
-function _gatherDeliveryView(events, runId, terminalState) {
+// M12-9 Package C: exported as the pure events-based delivery view SSOT so the
+// run_await_result terminal-outcome projector can reuse it WITHOUT a second
+// transcript/Git read via getRunDelivery and WITHOUT a run_collect call. Pure:
+// reads ONLY the in-memory `events` snapshot (no filesystem, no Git, no async).
+export function gatherDeliveryView(events, runId, terminalState) {
   const { latestRef, createdRef, decisionEvent, deliveryCommit, conflict } = _reconstructDelivery(events, runId);
 
   // M11-10 closeout (auditor blocker 2): a durable conflict detected by the
@@ -572,7 +620,7 @@ export async function getRunDelivery({ runId, runDir, authorizedWorkspaceRoot, c
   const events = await _readTranscript(filePath);
 
   const terminalState = findState(events);
-  const view = _gatherDeliveryView(events, runId, terminalState);
+  const view = gatherDeliveryView(events, runId, terminalState);
   // M11-10 closeout: a durable conflict (cross-run injection / malformed bound
   // event) must fail closed for the point-in-time query too — never echo a raw
   // ref/path. Fixed message; no dynamic ref content is leaked.
@@ -635,7 +683,7 @@ export async function getRunDelivery({ runId, runDir, authorizedWorkspaceRoot, c
  *   computeInventoryFn } for the additive nullable candidateInventory
  * @private */
 function _buildReadinessResult(runId, events, terminalState, readiness, waitReturnedEarly, inventoryOpts = {}) {
-  const view = _gatherDeliveryView(events, runId, terminalState);
+  const view = gatherDeliveryView(events, runId, terminalState);
   let effectiveReadiness = view.ambiguous ? "ambiguous" : readiness;
   if (effectiveReadiness === "reviewable" && view.deliveryAvailable !== true) {
     effectiveReadiness = "ambiguous";
