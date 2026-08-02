@@ -494,3 +494,193 @@ test("FAVICON (defect #2): no /favicon.ico server route — fix is client-side o
   assert.equal(r.status, 404, "/favicon.ico is not a server route (no endpoint/path added)");
   assert.deepEqual(JSON.parse(r.body), { error: "not_found" });
 });
+
+// =====================================================================
+// B9) M12-8 POLLING-TRUTH CORRECTIONS
+//   M1: every continuation page in a live-poll snapshot preserves the exact
+//       afterSeq + order=asc binding (cursor-follow used to drop afterSeq).
+//   M2: runs-list freshness and selected-activity freshness are separate; a
+//       failed/unavailable activity read stays visibly stale/unavailable and
+//       cannot be healed by a successful runs-list refresh. A later successful
+//       activity poll may restore live.
+// Deterministic tests over the pure state machine / URL builder the polling
+// surface reduces to (no DOM, no source-text assertions).
+// =====================================================================
+
+// ---- M1: pollRequestUrl preserves the snapshot afterSeq on every page ----
+
+test("M1 POLL URL: page 1 carries afterSeq+order+pageSize and no cursor", () => {
+  const u = app.pollRequestUrl("run_x", app.pollParams(42), null);
+  assert.match(u, /^\/api\/activity\?runId=run_x/);
+  assert.match(u, /afterSeq=42/);
+  assert.match(u, /order=asc/);
+  assert.match(u, /pageSize=50/);
+  assert.doesNotMatch(u, /cursor=/);
+});
+
+test("M1 POLL URL: every cursor continuation carries the SAME afterSeq binding", () => {
+  // The defect: cursor-follow requests dropped afterSeq, so a continuation page
+  // was no longer bound to the snapshot's "seq > afterSeq" view — a cursor
+  // view/filter mismatch. Every page in the snapshot must carry the identical
+  // afterSeq + order=asc that page 1 established.
+  const params = app.pollParams(77);
+  const first = app.pollRequestUrl("run_a", params, null);
+  const cont1 = app.pollRequestUrl("run_a", params, "cur-1");
+  const cont2 = app.pollRequestUrl("run_a", params, "cur-2");
+  for (const u of [first, cont1, cont2]) {
+    assert.match(u, /afterSeq=77/, "page carries the snapshot afterSeq");
+    assert.match(u, /order=asc/, "page carries order=asc");
+  }
+  assert.doesNotMatch(first, /cursor=/, "page 1 has no cursor");
+  assert.match(cont1, /cursor=cur-1/);
+  assert.match(cont2, /cursor=cur-2/);
+  // The afterSeq value is byte-identical across the whole snapshot.
+  const seq = (u) => u.match(/afterSeq=(\d+)/)[1];
+  assert.equal(seq(first), "77");
+  assert.equal(seq(cont1), "77", "continuation preserves the exact afterSeq");
+  assert.equal(seq(cont2), "77", "continuation preserves the exact afterSeq");
+});
+
+test("M1 POLL URL: continuation omits pageSize (cursor paging behavior unchanged; only afterSeq is added)", () => {
+  // Continuation pages intentionally omit pageSize so a cursor read uses the
+  // same server default as before — the fix adds ONLY afterSeq, leaving paging
+  // behavior unchanged. Page 1 still carries pageSize=50.
+  const params = app.pollParams(5);
+  const first = app.pollRequestUrl("run_b", params, null);
+  const cont = app.pollRequestUrl("run_b", params, "abc");
+  assert.match(first, /pageSize=50/);
+  assert.doesNotMatch(cont, /pageSize=/, "continuation has no pageSize (unchanged)");
+});
+
+test("M1 POLL URL: simulates the pollOnce cursor-follow loop — every URL preserves afterSeq", () => {
+  // Mirrors pollOnce: page 1 then up to 4 cursor continuations. The collected
+  // URL list is the exact request sequence the surface issues; every URL must
+  // carry the snapshot's afterSeq. The old inline builder dropped afterSeq on
+  // continuations, so this loop would emit afterSeq-less URLs and fail here.
+  function snapshot(maxSeq, cursors) {
+    const params = app.pollParams(maxSeq);
+    const urls = [app.pollRequestUrl("run_c", params, null)];
+    for (const c of cursors) urls.push(app.pollRequestUrl("run_c", params, c));
+    return urls;
+  }
+  const urls = snapshot(99, ["c1", "c2", "c3", "c4"]); // guard < 4 mirrors the loop cap
+  assert.equal(urls.length, 5);
+  for (const u of urls) {
+    assert.match(u, /afterSeq=99/, "every continuation preserves afterSeq");
+    assert.match(u, /order=asc/);
+  }
+  // Snapshot binding invariant: one identical afterSeq across all pages.
+  const vals = new Set(urls.map((u) => u.match(/afterSeq=(\d+)/)[1]));
+  assert.deepEqual([...vals], ["99"]);
+});
+
+test("M1 POLL URL: afterSeq clamped to 0 on every page (matches pollParams)", () => {
+  for (const bad of [0, -5, NaN, "x", undefined]) {
+    const params = { afterSeq: bad, order: "asc" };
+    const first = app.pollRequestUrl("run_d", params, null);
+    const cont = app.pollRequestUrl("run_d", params, "z");
+    assert.match(first, /afterSeq=0/, `page 1 clamps afterSeq=${String(bad)}`);
+    assert.match(cont, /afterSeq=0/, `continuation clamps afterSeq=${String(bad)}`);
+  }
+});
+
+// ---- M2: deriveStatus — the pure status state machine the surface uses ----
+
+test("M2 STATUS: both fresh + run selected + activity live → live", () => {
+  assert.deepEqual(
+    app.deriveStatus({ runsFresh: true, activityFresh: true, sessionEnded: false, runSelected: true }),
+    { stale: false, text: "live" },
+  );
+});
+
+test("M2 STATUS: no run selected, runs fresh → connected", () => {
+  assert.deepEqual(
+    app.deriveStatus({ runsFresh: true, activityFresh: null, sessionEnded: false, runSelected: false }),
+    { stale: false, text: "connected" },
+  );
+});
+
+test("M2 STATUS: unavailable/failed activity is stale EVEN when runs are fresh (the defect)", () => {
+  // The defect: an unavailable/failed activity read preserved last-good entries
+  // but the shared status was reset to live/connected. With separated freshness,
+  // activityFresh === false keeps the evidence visibly stale regardless of runs.
+  for (const runsFresh of [true, false]) {
+    const s = app.deriveStatus({ runsFresh, activityFresh: false, sessionEnded: false, runSelected: true });
+    assert.equal(s.stale, true, `stale when runsFresh=${runsFresh}`);
+    assert.equal(s.text, "refresh failed — showing last view");
+  }
+});
+
+test("M2 STATUS: a successful runs-list refresh CANNOT heal a stale activity", () => {
+  // Sequence over the pure state machine the polling surface reduces to:
+  //   1) activity read unavailable/failed → stale
+  //   2) runs-list refresh succeeds (runsFresh true; activityFresh unchanged)
+  //      → STILL stale. The old shared-flag code healed at step 2 (refreshRuns
+  //      set stale=false and status "connected").
+  let st = { runsFresh: true, activityFresh: false, sessionEnded: false, runSelected: true };
+  assert.equal(app.deriveStatus(st).stale, true);
+  // Runs-list refresh owns ONLY runsFresh.
+  st = { ...st, runsFresh: true };
+  const after = app.deriveStatus(st);
+  assert.equal(after.stale, true, "runs refresh does not heal activity staleness");
+  assert.equal(after.text, "refresh failed — showing last view");
+});
+
+test("M2 STATUS: a subsequent successful activity poll RESTORES live", () => {
+  let st = { runsFresh: true, activityFresh: false, sessionEnded: false, runSelected: true };
+  assert.equal(app.deriveStatus(st).stale, true);
+  st = { ...st, activityFresh: true };
+  assert.deepEqual(app.deriveStatus(st), { stale: false, text: "live" });
+});
+
+test("M2 STATUS: runs-list failure is stale even with activity live (stale if EITHER source stale)", () => {
+  const s = app.deriveStatus({ runsFresh: false, activityFresh: true, sessionEnded: false, runSelected: true });
+  assert.equal(s.stale, true);
+  assert.equal(s.text, "refresh failed — showing last view");
+});
+
+test("M2 STATUS: runs-list failure with no run selected → stale", () => {
+  const s = app.deriveStatus({ runsFresh: false, activityFresh: null, sessionEnded: false, runSelected: false });
+  assert.equal(s.stale, true);
+  assert.equal(s.text, "refresh failed — showing last view");
+});
+
+test("M2 STATUS: session ended overrides everything (token revoked)", () => {
+  for (const runSelected of [true, false]) {
+    for (const activityFresh of [true, false, null]) {
+      const s = app.deriveStatus({ runsFresh: true, activityFresh, sessionEnded: true, runSelected });
+      assert.equal(s.stale, true, `stale (runSelected=${runSelected}, activityFresh=${activityFresh})`);
+      assert.equal(s.text, "session ended — reopen from CLI");
+    }
+  }
+});
+
+test("M2 STATUS: a freshly-selected run (activity loading) is NOT falsely stale", () => {
+  // Selecting a run resets activity and starts bootstrap; during that in-flight
+  // read the status must not flash "refresh failed". activityFresh === null is
+  // "unknown/loading", not "failed".
+  const loading = app.deriveStatus({ runsFresh: true, activityFresh: null, sessionEnded: false, runSelected: true });
+  assert.equal(loading.stale, false);
+  assert.equal(loading.text, "connected");
+});
+
+test("M2 STATUS: end-to-end state walk over the polling/refresh surface (deterministic)", () => {
+  // Walks the exact freshness transitions the dashboard's polling + runs-refresh
+  // surface produces, reducing each via deriveStatus (the pure machine setStatus
+  // applies to the DOM). Proves the corrected truth: an unavailable activity
+  // stays stale across a runs refresh, then restores live on the next good poll.
+  let s = { runsFresh: true, activityFresh: null, sessionEnded: false, runSelected: false };
+  assert.equal(app.deriveStatus(s).text, "connected");        // boot, no selection
+  s = { ...s, runSelected: true };                             // user selects a run
+  assert.equal(app.deriveStatus(s).text, "connected");        // loading — not stale
+  s = { ...s, activityFresh: true };                           // bootstrap ok
+  assert.equal(app.deriveStatus(s).text, "live");
+  s = { ...s, activityFresh: false };                          // poll available:false / fails
+  assert.equal(app.deriveStatus(s).stale, true);
+  s = { ...s, runsFresh: true };                               // runs-list refresh succeeds
+  assert.equal(app.deriveStatus(s).stale, true, "runs refresh cannot heal activity");
+  s = { ...s, runsFresh: false };                              // runs refresh fails too
+  assert.equal(app.deriveStatus(s).stale, true);
+  s = { ...s, runsFresh: true, activityFresh: true };          // activity poll succeeds again
+  assert.equal(app.deriveStatus(s).text, "live");             // restored
+});

@@ -276,6 +276,73 @@ export function pollParams(maxSeq) {
 }
 
 /**
+ * Build the URL for ONE page of a live-poll snapshot. EVERY page in the same
+ * snapshot — page 1 and each cursor continuation — carries the IDENTICAL
+ * afterSeq + order=asc binding that pollParams(maxSeq) established for that
+ * snapshot. Dropping afterSeq on a continuation page would let older entries
+ * (seq <= afterSeq) leak into a view page 1 filtered to seq > afterSeq — a
+ * cursor view/filter mismatch.
+ *
+ * Page 1 also carries pageSize=50 (the continuation loop's full-page threshold).
+ * Continuation pages carry only the cursor + the snapshot binding; pageSize is
+ * intentionally omitted there so a cursor read uses the same server default as
+ * before (only afterSeq is added — the fix), leaving paging behavior unchanged.
+ *
+ * @param {string} runId
+ * @param {{afterSeq:number, order:string}} params  snapshot binding (from pollParams)
+ * @param {string|null} [cursor]                    continuation cursor, or null/"" for page 1
+ * @returns {string}
+ */
+export function pollRequestUrl(runId, params, cursor) {
+  const afterSeq = (params && Number.isInteger(params.afterSeq) && params.afterSeq > 0) ? params.afterSeq : 0;
+  const rid = encodeURIComponent(runId);
+  const base = `/api/activity?runId=${rid}&afterSeq=${afterSeq}&order=asc`;
+  if (cursor && typeof cursor === "string" && cursor.length) {
+    return `${base}&cursor=${encodeURIComponent(cursor)}`;
+  }
+  return `${base}&pageSize=50`;
+}
+
+/**
+ * Aggregate the dashboard status from TWO independent freshness signals — the
+ * runs list (runsFresh) and the selected-run activity (activityFresh) — plus the
+ * token/session state. This is the pure state machine the polling + runs-refresh
+ * surface reduces to (via setStatus) before it touches the DOM.
+ *
+ * The separation is load-bearing (M12-8): a failed or unavailable activity read
+ * (activityFresh === false) keeps the last-good evidence visibly stale and
+ * CANNOT be healed by a successful runs-list refresh, which owns only runsFresh.
+ * A subsequent successful activity read (activityFresh === true) may restore
+ * "live". activityFresh === null means "no selection / loading" — neither stale
+ * nor live, so selecting a run never flashes a false "refresh failed".
+ *
+ * State coverage: normal (both fresh), loading (activityFresh null), error
+ * (either source === false), and stale-data-plus-error (one fresh, one stale).
+ * "missing"/"unparseable" reduce to the error branch: a non-available payload is
+ * treated as activityFresh === false, and an unparseable response throws →
+ * onFetchError → activityFresh === false.
+ *
+ * @param {{runsFresh?:boolean, activityFresh?:boolean|null, sessionEnded?:boolean, runSelected?:boolean}} s
+ * @returns {{stale:boolean, text:string}}
+ */
+export function deriveStatus(s) {
+  const st = s || {};
+  if (st.sessionEnded) {
+    return { stale: true, text: "session ended — reopen from CLI" };
+  }
+  const runsStale = st.runsFresh === false;
+  // Activity freshness is meaningful only while a run is selected.
+  const activityStale = st.runSelected === true && st.activityFresh === false;
+  if (runsStale || activityStale) {
+    return { stale: true, text: "refresh failed — showing last view" };
+  }
+  if (st.runSelected === true && st.activityFresh === true) {
+    return { stale: false, text: "live" };
+  }
+  return { stale: false, text: "connected" };
+}
+
+/**
  * Relative age label ("now", "12s", "3m", "2h", "—") from an ISO updatedAt and a
  * current epoch-ms. Pure (clock injected) for deterministic tests.
  * @param {string|null|undefined} updatedAt
@@ -351,7 +418,11 @@ function boot() {
     filters: { q: "", state: "", agent: "" },
     lastGoodActivity: null,
     unavailableReason: null,
-    stale: false,
+    // Two INDEPENDENT freshness signals (M12-8): a runs-list refresh owns only
+    // runsFresh, the selected-run poll owns only activityFresh. Neither heals the
+    // other; deriveStatus (via setStatus) aggregates them into the visible status.
+    runsFresh: true,
+    activityFresh: null,
     sessionEnded: false,
   };
 
@@ -419,7 +490,10 @@ async function refreshRuns(state) {
   try {
     const data = await fetchJson(state.token, `/api/runs?limit=${RUNS_LIMIT}`);
     state.runs = data && Array.isArray(data.runs) ? data.runs : [];
-    state.stale = false;
+    // Runs-list freshness owns ONLY runsFresh + sessionEnded. It must NOT touch
+    // activityFresh: a successful runs refresh cannot heal a failed/unavailable
+    // activity read (M12-8 separation). A 200 also proves the token still works.
+    state.runsFresh = true;
     state.sessionEnded = false;
     renderAgentFilter(state);
     renderRunList(state);
@@ -431,9 +505,9 @@ async function refreshRuns(state) {
       state.olderCursor = null;
       renderDetail(state);
     }
-    setStatus(state, false, "connected");
+    setStatus(state);
   } catch (err) {
-    onFetchError(state, err);
+    onFetchError(state, err, "runs");
     renderRunList(state);
   }
 }
@@ -517,6 +591,7 @@ function selectRun(state, runId) {
   state.olderCursor = null;
   state.lastGoodActivity = null;
   state.unavailableReason = null;
+  state.activityFresh = null;
   renderRunList(state);
   bootstrapActivity(state);
 }
@@ -530,12 +605,18 @@ async function bootstrapActivity(state, opts = {}) {
       `/api/activity?runId=${encodeURIComponent(runId)}&order=desc&pageSize=50`,
     );
     applyBootstrapPage(state, page);
-    state.stale = false;
-    state.sessionEnded = false;
+    // Activity freshness follows THIS read's availability: available:false keeps
+    // the evidence visibly stale/unavailable; an available read restores live.
+    if (page && page.available !== false) {
+      state.activityFresh = true;
+      state.sessionEnded = false;
+    } else {
+      state.activityFresh = false;
+    }
     renderDetail(state);
-    setStatus(state, false, "live");
+    setStatus(state);
   } catch (err) {
-    onFetchError(state, err);
+    onFetchError(state, err, "activity");
     renderDetail(state);
   }
 }
@@ -571,8 +652,11 @@ async function pollOnce(state) {
   if (!runId) return;
   const params = pollParams(state.maxSeq);
   try {
-    let url = `/api/activity?runId=${encodeURIComponent(runId)}`
-      + `&afterSeq=${params.afterSeq}&order=asc&pageSize=50`;
+    // Every page in this snapshot — page 1 and each cursor continuation — is
+    // built by pollRequestUrl so it carries the SAME afterSeq + order=asc
+    // binding. A cursor follow can no longer drop afterSeq and widen the
+    // "seq > afterSeq" view page 1 established.
+    let url = pollRequestUrl(runId, params, null);
     let page = await fetchJson(state.token, url);
     applyPollPage(state, page);
     // Follow cursors mechanically while a full page indicates more new entries
@@ -582,18 +666,23 @@ async function pollOnce(state) {
       && page.activity.nextCursor.length
       && Array.isArray(page.activity.entries) && page.activity.entries.length >= 50
       && guard < 4) {
-      url = `/api/activity?runId=${encodeURIComponent(runId)}`
-        + `&cursor=${encodeURIComponent(page.activity.nextCursor)}&order=asc`;
+      url = pollRequestUrl(runId, params, page.activity.nextCursor);
       page = await fetchJson(state.token, url);
       applyPollPage(state, page);
       guard += 1;
     }
-    state.stale = false;
-    state.sessionEnded = false;
+    // Activity freshness follows the read's availability: available:false keeps
+    // the last-good evidence visibly stale/unavailable; an available read is live.
+    if (page && page.available !== false) {
+      state.activityFresh = true;
+      state.sessionEnded = false;
+    } else {
+      state.activityFresh = false;
+    }
     renderDetail(state);
-    setStatus(state, false, "live");
+    setStatus(state);
   } catch (err) {
-    onFetchError(state, err);
+    onFetchError(state, err, "activity");
     renderDetail(state);
   }
 }
@@ -627,22 +716,25 @@ async function loadOlder(state) {
       renderDetail(state);
     }
   } catch (err) {
-    onFetchError(state, err);
+    onFetchError(state, err, "activity");
     renderDetail(state);
   }
 }
 
 // ===== Error handling: preserve last good snapshot + stale indicator =====
 
-function onFetchError(state, err) {
+function onFetchError(state, err, source) {
   if (err && err.code === "unauthorized") {
     // Token invalid/revoked → session ended. Keep last view + concise note; the
     // token itself is never surfaced.
     state.sessionEnded = true;
   }
-  state.stale = true;
-  const note = state.sessionEnded ? "session ended — reopen from CLI" : "refresh failed — showing last view";
-  setStatus(state, true, note);
+  // Mark ONLY the failing source not-fresh: a runs-list error touches runsFresh,
+  // an activity error touches activityFresh. The two never heal each other
+  // (M12-8 separation); deriveStatus aggregates them into the visible status.
+  if (source === "runs") state.runsFresh = false;
+  else state.activityFresh = false; // "activity" (poll / bootstrap / loadOlder)
+  setStatus(state);
 }
 
 // ===== Render: detail =====
@@ -765,9 +857,13 @@ function shortTs(ts) {
   return ts.slice(0, 19);
 }
 
-function setStatus(state, stale, text) {
+function setStatus(state) {
+  // The visible status is the pure aggregation of the two independent freshness
+  // signals (deriveStatus) — never re-derived ad hoc at a call site, so a runs
+  // refresh can never overwrite a stale/unavailable activity read.
+  const { stale, text } = deriveStatus(state);
   const el = state.els.statusLine;
-  el.classList.toggle("stale", Boolean(stale));
+  el.classList.toggle("stale", stale);
   el.classList.toggle("live", !stale && text === "live");
   el.textContent = stale ? text : (text || "connected");
 }
