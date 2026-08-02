@@ -490,7 +490,7 @@ const STATUS_ERROR_TEXT = "run_status failed";
 //
 // `availableDrilldowns` is the ADDITIVE metadata field carried by EXACTLY six
 // tools (run_await_result, run_status, run_diagnose, run_collect, run_delivery,
-// run_activity). It tells the Lead which safe read-only tool can reveal more
+// run_activity). It tells the Lead which safe observation tool can reveal more
 // about the returned result — never auto-calls it, never makes a semantic
 // decision, never advertises a destructive/mutating tool, and never contains
 // transcript/provider/repository text (every string is static, chosen by

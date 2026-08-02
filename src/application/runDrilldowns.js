@@ -3,7 +3,7 @@
 // M12-8B: bounded Lead progressive-disclosure metadata.
 //
 // This is the SINGLE shared application module that tells the Lead which safe
-// read-only MCP tool can reveal more about an already-returned result — WITHOUT
+// observation MCP tool can reveal more about an already-returned result — WITHOUT
 // auto-calling it, without any semantic inference, prescription, file choice,
 // or cursor traversal, and without ever advertising a destructive or mutating
 // tool. It exists to cut the Lead's token/attention cost while preserving Lead
