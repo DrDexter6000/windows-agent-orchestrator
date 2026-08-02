@@ -19,9 +19,15 @@
 // The opener is shell-free by construction: the URL is passed as ONE structured
 // argv element to a real executable (rundll32 url.dll,FileProtocolHandler) —
 // no shell builtin, no shell string, no URL interpolation.
+//
+// Lifecycle risk correction (M12-8F): the opener child is spawned detached and
+// unref()ed, and the opener promise resolves on the child's SPAWN event — not
+// on exit. A lingering default-handler process can therefore never block the
+// dashboard: Ctrl-C resolves the lifecycle and the server closes even while
+// the handler is still alive.
 
 import { resolve } from "node:path";
-import { execFileSync, execFile } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { parseOptions } from "./shared.js";
 import { runDashboardWeb } from "./runs.js";
 import { canonicalizeWorkspacePath } from "../application/workspaceBinding.js";
@@ -53,15 +59,41 @@ export function resolveCanonicalGitRoot(cwd, opts = {}) {
  * with structured argv — NO shell, NO cmd.exe, and the URL is never interpolated
  * into a shell string (it travels as a single argv element).
  *
+ * Lifecycle (M12-8F risk correction): the child is spawned detached with ignored
+ * stdio and a hidden console; the promise resolves on the child's SPAWN event,
+ * NOT on exit. A lingering default-handler process can therefore never hold the
+ * dashboard open — after spawn the child is unref()ed so it cannot keep the
+ * parent event loop alive, and Ctrl-C closes the server regardless of the
+ * handler's lifetime. A pre-spawn failure (ENOENT/EACCES/invalid argv) rejects
+ * so the existing advisory warning path in runDashboardWeb runs; raw child
+ * errors are never surfaced beyond that concise Owner warning.
+ *
  * @param {string} url — the printed fragment-token dashboard URL
- * @returns {Promise<void>} resolves on spawn success, rejects on failure
+ * @param {{spawnFn?: Function}} [opts] — spawn injection seam (tests)
+ * @returns {Promise<void>} resolves on spawn success, rejects on pre-spawn failure
  */
-export function openInWindowsDefaultBrowser(url) {
+export function openInWindowsDefaultBrowser(url, { spawnFn } = {}) {
   return new Promise((resolveOpen, rejectOpen) => {
-    execFile("rundll32", ["url.dll,FileProtocolHandler", url], { windowsHide: true }, (err) => {
-      if (err) rejectOpen(err);
-      else resolveOpen();
+    const spawnChild = spawnFn ?? spawn;
+    let child;
+    try {
+      child = spawnChild("rundll32", ["url.dll,FileProtocolHandler", url], {
+        detached: true,    // run outside the dashboard process group
+        stdio: "ignore",   // no pipes — nothing to feed or read
+        windowsHide: true, // no console flash
+      });
+    } catch (error) {
+      rejectOpen(error); // synchronous spawn failure (e.g. invalid argv)
+      return;
+    }
+    child.once("spawn", () => {
+      child.unref(); // after spawn the child cannot hold the dashboard open
+      resolveOpen();
     });
+    // Pre-spawn failures (e.g. ENOENT) reject → the advisory warning runs.
+    // Errors after spawn are ignored: the promise already settled and the URL
+    // was printed.
+    child.once("error", (error) => rejectOpen(error));
   });
 }
 
@@ -82,6 +114,8 @@ export function openInWindowsDefaultBrowser(url) {
  * @param {object} [injections]
  * @param {Function} [injections.gitRootFn] — strict canonical-root resolver
  * @param {Function} [injections.openUrlFn] — default-browser opener
+ * @param {Function} [injections.spawnFn] — spawn factory for the production
+ *   opener (tests; only used when openUrlFn is absent)
  * @param {Function} [injections.createServerFn] — server factory (passthrough)
  * @param {Function} [injections.readRegistryFn] — registry reader (passthrough)
  * @param {{wait:Function, cancel?:Function}} [injections.lifecycle] — shutdown waitable (passthrough)
@@ -106,6 +140,11 @@ export async function dashboardCommand(args, config, injections = {}) {
     );
   }
 
+  // The production opener takes the spawn seam; a fully injected openUrlFn
+  // (tests) bypasses it entirely.
+  const openUrl =
+    injections.openUrlFn ?? ((url) => openInWindowsDefaultBrowser(url, { spawnFn: injections.spawnFn }));
+
   await runDashboardWeb(options, config, {
     ...injections,
     targetCwd,
@@ -116,7 +155,7 @@ export async function dashboardCommand(args, config, injections = {}) {
     // the server running — the URL is already printed.
     afterListen: async (url) => {
       if (options.noOpen) return;
-      await (injections.openUrlFn ?? openInWindowsDefaultBrowser)(url);
+      await openUrl(url);
     },
   });
 }

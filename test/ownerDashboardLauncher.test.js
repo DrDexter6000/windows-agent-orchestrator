@@ -20,6 +20,12 @@
 //   C) LEGACY — `runs dashboard --web` does not auto-open and keeps its
 //      fail-soft non-Git fallback; `node src/cli.js help` documents the primary
 //      `wao dashboard` command.
+//
+//   F) OPENER — the injected spawn seam of the production Windows opener:
+//      resolve on the child's spawn event (NOT exit), unref() after spawn,
+//      pre-spawn errors reject, detached / stdio-ignored / hidden, structured
+//      argv with no shell. Causal: a fake browser child that never exits must
+//      not delay the dashboard lifecycle or server close.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -29,7 +35,7 @@ import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { dashboardCommand, resolveCanonicalGitRoot } from "../src/commands/dashboard.js";
+import { dashboardCommand, resolveCanonicalGitRoot, openInWindowsDefaultBrowser } from "../src/commands/dashboard.js";
 import { runDashboardWeb, runsDashboardCommand } from "../src/commands/runs.js";
 import { canonicalizeWorkspacePath } from "../src/application/workspaceBinding.js";
 import { rmrfRetry } from "./_rmrfHelper.mjs";
@@ -323,16 +329,115 @@ test("HELP: `wao dashboard` is listed with its launcher flags", () => {
 });
 
 // =====================================================================
-// E) PRODUCTION CODE CONTRACT — no shell-built browser command
+// E) PRODUCTION CODE CONTRACT — spawn, structured argv, no shell
 // =====================================================================
-test("SECURITY: launcher source uses structured argv only (no shell, no shell-built browser command)", () => {
+test("SECURITY: launcher source uses structured argv only (spawn opener, detached+unref, no shell)", () => {
   const src = readFileSync(join(ROOT, "src", "commands", "dashboard.js"), "utf8");
   // Code-level checks (patterns that can only appear in real invocations, not prose).
   assert.ok(!/shell\s*:\s*true/.test(src), "never shell:true");
   assert.ok(!/["'(`]cmd\.exe/.test(src), "cmd.exe is never invoked as a program");
   assert.ok(!/["']\/c["']/.test(src), "cmd /c builtin is never used");
   assert.ok(!/start\s+["']?http/i.test(src), "no shell `start <url>` builtin command");
-  // The opener must pass the URL as an argv element to a real executable.
+  // The opener must pass the URL as an argv element to a real executable via
+  // spawn (structured argv), resolve on the spawn event, and unref the child so
+  // a lingering default-handler process cannot hold the dashboard open.
   assert.ok(/rundll32/.test(src), "Windows default handler via rundll32 (executable, no shell)");
-  assert.ok(/execFile\(/.test(src), "uses execFile (structured argv)");
+  assert.ok(/\bspawn\b/.test(src), "uses spawn (structured argv)");
+  assert.ok(!/execFile\(/.test(src), "no execFile-based opener (that would resolve only on child exit)");
+  assert.ok(/unref\(\)/.test(src), "opener unref()es the child after spawn");
+  assert.ok(/detached\s*:\s*true/.test(src), "child detached from the dashboard process");
+  assert.ok(/windowsHide\s*:\s*true/.test(src), "child console hidden");
+});
+
+// =====================================================================
+// F) OPENER — injected spawn seam: resolve on spawn, unref, reject pre-spawn
+// =====================================================================
+// Guard: the behavioral opener tests require the injected spawn seam. On the
+// pre-fix code the seam does not exist, so these tests are RED by contract and
+// never reach the production opener (which would launch a real browser).
+function assertOpenerSeamPresent() {
+  const src = readFileSync(join(ROOT, "src", "commands", "dashboard.js"), "utf8");
+  assert.ok(/spawnFn/.test(src), "opener spawn seam injected (RED pre-fix: seam absent)");
+}
+
+test("OPENER: a child that emits spawn but never exits → opener resolves and unref()es it", async () => {
+  assertOpenerSeamPresent();
+  const url = `http://127.0.0.1:7654/#token=${"ab".repeat(32)}`;
+  let spawnCb = null;
+  let unrefCalled = false;
+  let got = null;
+  const fakeChild = {
+    once(ev, cb) { if (ev === "spawn") spawnCb = cb; return this; },
+    unref() { unrefCalled = true; },
+  };
+  const opened = openInWindowsDefaultBrowser(url, {
+    spawnFn: (cmd, args, opts) => { got = { cmd, args, opts }; return fakeChild; },
+  });
+  assert.ok(spawnCb, "spawn listener registered");
+  // The child "spawns" (asynchronously, like the real one) and NEVER exits.
+  spawnCb();
+  await Promise.race([
+    opened,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("opener did not resolve on spawn")), 3000)),
+  ]);
+  assert.equal(unrefCalled, true, "unref() called after spawn → child cannot hold the dashboard open");
+  assert.equal(got.cmd, "rundll32", "real executable, structured argv, no shell");
+  assert.deepEqual(got.args, ["url.dll,FileProtocolHandler", url], "URL travels as ONE argv element");
+  assert.equal(got.opts.shell, undefined, "no shell");
+  assert.equal(got.opts.detached, true, "detached: handler runs outside the dashboard process group");
+  assert.deepEqual(got.opts.stdio, "ignore", "stdio ignored: no pipes to read");
+  assert.equal(got.opts.windowsHide, true, "hidden: no console flash");
+});
+
+test("OPENER: a pre-spawn error rejects (so the advisory warning path runs)", async () => {
+  assertOpenerSeamPresent();
+  const fakeChild = {
+    once(ev, cb) {
+      if (ev === "error") setImmediate(() => cb(new Error("ENOENT: rundll32 missing")));
+      return this;
+    },
+    unref() { throw new Error("must not unref a child that failed to spawn"); },
+  };
+  await assert.rejects(
+    openInWindowsDefaultBrowser(`http://127.0.0.1:7654/#token=${"ab".repeat(32)}`, { spawnFn: () => fakeChild }),
+    /ENOENT/,
+    "pre-spawn error rejects so runDashboardWeb logs the concise advisory warning",
+  );
+});
+
+test("OPENER: a spawnFn that throws synchronously also rejects", async () => {
+  assertOpenerSeamPresent();
+  await assert.rejects(
+    openInWindowsDefaultBrowser(`http://127.0.0.1:7654/#token=${"ab".repeat(32)}`, {
+      spawnFn: () => { throw new Error("invalid argv"); },
+    }),
+    /invalid argv/,
+  );
+});
+
+test("LAUNCHER: lifecycle completes and the server closes though the fake browser child never exits", async () => {
+  assertOpenerSeamPresent();
+  const lc = makeControllableLifecycle();
+  const server = makeFakeServer();
+  // Fake browser child: emits spawn asynchronously (like the real one) and NEVER exits.
+  const fakeChild = {
+    once(ev, cb) { if (ev === "spawn") setImmediate(() => cb()); return this; },
+    unref() {},
+  };
+  const p = dashboardCommand([], baseConfig, launcherInjections(server, lc, {
+    // Inject the SPAWN SEAM (and clear the default openUrlFn) so the REAL
+    // opener path — spawn → resolve-on-spawn → unref — is what lets the
+    // lifecycle finish. No real browser is ever launched.
+    openUrlFn: undefined,
+    spawnFn: () => fakeChild,
+  }));
+  await flush(); // open completed on spawn; runDashboardWeb parked at lifecycle.wait()
+  assert.equal(server.listenCalled, true);
+  assert.equal(server.closeCalled, false);
+  lc.resolve(); // Ctrl-C equivalent while the child is still "running"
+  await Promise.race([
+    p,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("dashboard did not settle (opener still pending?)")), 3000)),
+  ]);
+  assert.equal(server.closeCalled, true, "server closed though the browser child never exited");
 });

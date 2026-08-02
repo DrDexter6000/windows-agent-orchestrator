@@ -75,7 +75,7 @@ cd D:\projects\windows-agent-orchestrator-poc
 npm link
 ```
 
-此后 `wao dashboard`、`wao doctor` 等顶层命令可直接运行，不必 `cd` 进 WAO 仓库，也不用担心 `npm run cli` 从其它目录报 "Missing script: cli"。
+此后顶层命令可直接运行——如 `wao dashboard`（本启动器，见 §Owner 本地只读看板）——不必 `cd` 进 WAO 仓库，也不用担心 `npm run cli` 从其它目录报 "Missing script: cli"。注意只有顶层命令可用 `wao <command>` 形式；嵌套在命令族下的命令（如 `wao doctor`）仍需 `npm run cli -- wao doctor` 原形式。
 
 ### 配置
 
@@ -958,8 +958,9 @@ wao dashboard --port 8123 [--run-dir DIR]           # 固定端口 / 自定义 r
 行为契约：
 
 - 目标目录默认是当前目录（`process.cwd()`）；`--cwd` 显式指定目标项目。目标必须在某个 Git 仓库内——命令解析出 canonical Git root 作为看板 workspace（嵌套子目录也自动解析到仓库根）；**不在 Git 仓库内时，在监听之前就失败**并给出可操作提示（在 Git 项目内运行，或用 `--cwd`）。
-- 默认在 Windows 默认浏览器打开生成的 fragment-token URL **恰好一次**（无 shell 拼接，URL 只作为结构化 argv 传给系统默认处理器）；`--no-open` 不做任何打开尝试。
+- 默认在 Windows 默认浏览器打开生成的 fragment-token URL **恰好一次**（无 shell 拼接，URL 只作为结构化 argv 传给系统默认处理器）；`--no-open` 不做任何打开尝试。打开是 spawn 型的：处理器子进程在 spawn 后即被 unref，即使默认处理器进程滞留也不会阻塞本命令的 Ctrl-C 关闭。
 - 浏览器打开失败只是提示：URL 已打印，打印一行简短警告后服务器继续运行，按 `Ctrl-C` 停止。
+- **已接受的瞬时本机暴露（如实披露）**：生成的 fragment-token URL 会打印给人类 Owner，并会短暂出现在本地 `rundll32` 子进程的命令行中（Windows 上本机其它进程/工具可瞬时读到该命令行）——这是让默认浏览器打开该 URL 的必要传递方式。服务边界未因此改变：服务器仍只监听 `127.0.0.1`，token 生命周期随服务器关闭（Ctrl-C/进程退出）结束，看板 API 只接受带该 bearer 的只读 GET。
 
 旧式嵌套命令仍支持（不会自动打开浏览器，非 Git 目录仍 fail-soft 启动）：
 
