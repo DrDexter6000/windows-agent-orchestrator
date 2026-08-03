@@ -1942,3 +1942,19 @@ test("M12-10 closeout: roadmap records the released 21-tool Fresh Host truth", (
   assert.match(roadmap, /PASS_M12_10_FRESH_HOST_PROGRESSIVE_DISCLOSURE/,
     "roadmap must record the M12-10 Fresh Host verdict");
 });
+
+test("M12-11 closeout: roadmap records local unified wait and termination truth", () => {
+  const roadmap = read("docs/roadmap.md");
+  assert.match(roadmap, /PASS_M12_11_LOCAL_UNIFIED_WAIT_TERMINATION_SEMANTICS/,
+    "roadmap must record the M12-11 local-candidate verdict");
+  assert.match(roadmap, /本地候选[\s\S]*尚未发布或完成 Fresh Host 验收/,
+    "roadmap must not present M12-11 as released or Fresh Host loaded");
+  assert.match(roadmap, /run_20260803180538526wqiofq/,
+    "roadmap records the M12-11 root run");
+  assert.match(roadmap, /run_20260803191330702am48mx/,
+    "roadmap records the accepted correction run");
+  assert.match(roadmap, /canonical `181\/181`/,
+    "roadmap records the frozen-candidate canonical result");
+  assert.match(roadmap, /durable `run\.timed_out`[^;；]*才投影 `execution_deadline`/,
+    "roadmap binds execution_deadline to a durable same-run timeout event");
+});
