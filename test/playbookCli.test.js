@@ -134,11 +134,13 @@ test("PB-B08f: malformed id raises PlaybookValidationError via the CLI", async (
 });
 
 // =====================================================================
-// PB-B09: CLI JSON output is deeply equal to MCP structuredContent.
-// (Parity between the two adapters over the same service.)
+// PB-B09: CLI JSON output is deeply equal to the MCP RESOURCE content.
+// (Parity between the two adapters over the same service. M12-10 moved the
+// MCP presentation from tools to resources — wao://playbooks — so the CLI JSON
+// is now compared against the resource read content, not tool structuredContent.)
 // =====================================================================
 
-test("PB-B09: CLI JSON output is deeply equal to MCP structuredContent", async () => {
+test("PB-B09: CLI JSON output is deeply equal to the MCP resource content", async () => {
   const { createWaoMcpServer } = await import("../src/mcp/server.js");
   const { Client } = await import("@modelcontextprotocol/sdk/client");
   const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -148,20 +150,22 @@ test("PB-B09: CLI JSON output is deeply equal to MCP structuredContent", async (
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(st), client.connect(ct)]);
   try {
-    // list parity
-    const mList = await client.callTool({ name: "playbook_list", arguments: {} });
+    // list parity: CLI list JSON == summary resource wao://playbooks content.
+    const mSummary = await client.readResource({ uri: "wao://playbooks" });
+    const mSummaryJson = JSON.parse(mSummary.contents.map((c) => c.text ?? "").join(""));
     const cliList = JSON.parse(await captureLog(() =>
       playbookCommand(["list", "--format", "json"], {})));
-    assert.deepEqual(cliList, mList.structuredContent,
-      "CLI list JSON deeply equal MCP structuredContent");
+    assert.deepEqual(cliList, mSummaryJson,
+      "CLI list JSON deeply equal MCP summary resource content");
 
-    // get parity (for each built-in id)
-    const ids = mList.structuredContent.playbooks.map((p) => p.id);
+    // get parity (for each built-in id): CLI show JSON == detail resource content.
+    const ids = mSummaryJson.playbooks.map((p) => p.id);
     for (const id of ids) {
-      const mGet = await client.callTool({ name: "playbook_get", arguments: { id } });
+      const mDetail = await client.readResource({ uri: `wao://playbooks/${id}` });
+      const mDetailJson = JSON.parse(mDetail.contents.map((c) => c.text ?? "").join(""));
       const cliGet = JSON.parse(await captureLog(() =>
         playbookCommand(["show", id, "--format", "json"], {})));
-      assert.deepEqual(cliGet, mGet.structuredContent,
+      assert.deepEqual(cliGet, mDetailJson,
         `CLI/MCP get JSON deeply equal for ${id}`);
     }
   } finally {

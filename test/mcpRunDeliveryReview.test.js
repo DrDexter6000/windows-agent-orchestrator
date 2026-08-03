@@ -65,7 +65,7 @@ test("M11-3C-01: run_delivery_review is registered; current tool count; read-onl
     try {
       const { tools } = await client.listTools();
       assert.ok(tools.find((t) => t.name === "run_delivery_review"), "run_delivery_review present");
-      assert.equal(tools.length, 23, "exactly 23 tools (M12-7 run_continue + M12-8 run_activity + M12-9 run_dispatch_contract_check)");
+      assert.equal(tools.length, 21, "exactly 21 tools (M12-10 moved playbook catalog to resources)");
       const t = tools.find((x) => x.name === "run_delivery_review");
       assert.equal(t.annotations.readOnlyHint, true);
       assert.equal(t.annotations.destructiveHint, false);

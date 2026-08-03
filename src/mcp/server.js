@@ -24,7 +24,7 @@
 // returns a FIXED safe text and never concatenates err.message, stack, paths,
 // env, or stderr into the result.
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import {
@@ -164,6 +164,7 @@ import {
   getLeadPlaybook,
   validatePlaybookSummaryList,
   validatePlaybookV1,
+  PLAYBOOK_IDS,
 } from "../application/playbookCatalog.js";
 import { isValidRunId } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, UNKNOWN_PACKAGING_CODE } from "../deliveryFailureCodes.js";
@@ -178,11 +179,12 @@ import {
   CANONICAL_AGENT_ID_PATTERN,
   REAL_AGENT_ID_WIRE_PATTERN,
 } from "../canonicalAgentId.js";
-// M12-10: protocol-neutral static tool surface. A profile is a closed,
-// Host-neutral subset selected at server construction (startup-fixed). It owns
-// the ONLY closed-set definitions; this module consumes them so the parser, the
-// server, and the tests cannot drift. No Host/runtime-name branching lives here.
-import { resolveToolProfile, exposedToolSet } from "./toolProfiles.js";
+// M12-10 progressive-disclosure correction: the FROZEN tool surface. WAO exposes
+// exactly 21 always-registered tools (no profile, no flag, no restart). The
+// single frozen definition lives in toolSurface.js; the tool-surface tests
+// assert the live tools/list order is byte-equal to that SSOT, so this module
+// and the SSOT cannot drift. No Host/runtime-name branching lives here.
+import { TOOLS as FROZEN_TOOL_SURFACE } from "./toolSurface.js";
 
 // M11-8B final closeout: TWO distinct agentId schemas, both sourced from the
 // SAME SSOT (no hand-maintained second regex anywhere). The split is expressed
@@ -2002,96 +2004,34 @@ const RUN_ACTIVITY_DESCRIPTION =
 // ===== Lead Playbook Catalog (M11-2B) constants =====
 //
 // Read-only, provider-neutral catalog of exactly four built-in Lead playbooks.
-// Both tools delegate to the M11-2A application service (playbookCatalog.js).
-// They do NOT require a workspace binding, do NOT read the registry or any run
-// transcript, and create no filesystem mutation. There is no playbook_run /
-// _start / _next / _recommend — the catalog is a decision scaffold, not an
-// executor (see .dev/m11-2-adaptive-playbooks-spec-tdd-plan.md §3).
+// Since M12-10 the catalog is presented as MCP RESOURCES (wao://playbooks), not
+// tools (see the resource registration below). The resource read callbacks
+// delegate to the M11-2A application service (playbookCatalog.js) — the only
+// catalog SSOT. They do NOT require a workspace binding, do NOT read the
+// registry or any run transcript, and create no filesystem mutation. There is no
+// playbook_run / _start / _next / _recommend — the catalog is a decision
+// scaffold, not an executor.
 
-const PLAYBOOK_LIST_ERROR_TEXT = "playbook_list failed";
-const PLAYBOOK_GET_ERROR_TEXT = "playbook_get failed";
+// M12-10 progressive-disclosure correction: the built-in playbook catalog is
+// presented as MCP RESOURCES (wao://playbooks), not tools. playbook_list /
+// playbook_get are no longer tools. The catalog SSOT is unchanged
+// (application/playbookCatalog.js): the resource read callbacks reuse
+// validatePlaybookSummaryList / validatePlaybookV1 so exactly-four-approved-ids,
+// strict keys, per-field bounds, min<=max, Advisor/Auditor-not-core, the 12 KiB
+// bound, and id-binding are enforced identically to the (now-removed) tool path.
+// CLI `playbook list` / `playbook show` are unchanged.
+const PLAYBOOK_SUMMARY_URI = "wao://playbooks";
+const PLAYBOOK_DETAIL_TEMPLATE = "wao://playbooks/{id}";
+const PLAYBOOK_MIME = "application/json";
 
-// list input: strict empty object. A model cannot inject a catalog path.
-const PLAYBOOK_LIST_INPUT = z.object({}).strict();
-
-// get input: only id, lowercase kebab-case 1..64, strict object.
-const PLAYBOOK_GET_INPUT = z.object({
-  id: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).min(1).max(64),
-}).strict();
-
-// PlaybookV1 output schema bounds — these mirror the M11-2A service contract
-// exactly. The service validates fail-closed and returns deep clones; the
-// outputSchema here is a second boundary that collapses any malformed service
-// payload to the fixed error inside the single try/catch per tool.
-const PLAYBOOK_SUMMARY_ENTRY = z.object({
-  id: z.string().min(1).max(64),
-  version: z.literal(1),
-  title: z.string().min(1).max(80),
-  summary: z.string().min(1).max(240),
-  lanePattern: z.enum(["single", "parallel-independent", "serial-discovery", "read-only"]),
-}).strict();
-
-const PLAYBOOK_LIST_OUTPUT = z.object({
-  playbooks: z.array(PLAYBOOK_SUMMARY_ENTRY).min(4).max(4),
-}).strict();
-
-const PLAYBOOK_ROLE = z.object({
-  capability: z.enum(["coder", "researcher", "tester", "advisor", "auditor"]),
-  importance: z.enum(["core", "conditional"]),
-  min: z.number().int().min(0).max(4),
-  max: z.number().int().min(0).max(4),
-}).strict();
-
-const PLAYBOOK_PHASE = z.object({
-  id: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).min(1).max(64),
-  intent: z.string().min(1).max(240),
-  importance: z.enum(["core", "conditional"]),
-  evidence: z.array(z.string().min(1).max(240)).min(1).max(4),
-  adaptations: z.array(z.string().min(1).max(240)).min(1).max(4),
-}).strict();
-
-const PLAYBOOK_V1 = z.object({
-  id: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).min(1).max(64),
-  version: z.literal(1),
-  title: z.string().min(1).max(80),
-  summary: z.string().min(1).max(240),
-  useWhen: z.array(z.string().min(1).max(240)).min(1).max(4),
-  avoidWhen: z.array(z.string().min(1).max(240)).min(1).max(4),
-  lanePattern: z.enum(["single", "parallel-independent", "serial-discovery", "read-only"]),
-  roles: z.array(PLAYBOOK_ROLE).min(1).max(5),
-  phases: z.array(PLAYBOOK_PHASE).min(1).max(6),
-  completionEvidence: z.array(z.string().min(1).max(240)).min(1).max(6),
-  escalation: z.object({
-    advisor: z.string().min(1).max(240),
-    auditor: z.string().min(1).max(240),
-  }).strict(),
-}).strict();
-
-const PLAYBOOK_GET_OUTPUT = z.object({
-  playbook: PLAYBOOK_V1,
-}).strict();
-
-const PLAYBOOK_TOOL_ANNOTATIONS = {
-  readOnlyHint: true,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false,
-};
-
-const PLAYBOOK_LIST_DESCRIPTION =
-  "List the built-in Lead playbooks as compact summaries (id, version, title, " +
-  "summary, lanePattern). Read-only, idempotent. A playbook is a read-only " +
-  "decision scaffold with evidence gates and adaptation points — the Lead " +
-  "chooses and adapts it; the catalog never dispatches or executes a workflow. " +
-  "Accepts no arguments; the catalog is fixed. Requires no workspace binding.";
-
-const PLAYBOOK_GET_DESCRIPTION =
-  "Get one complete built-in Lead playbook by id. Read-only, idempotent. " +
-  "Returns the full playbook (roles, phases with evidence gates, completion " +
-  "evidence, escalation conditions). The Lead keeps, skips, or changes defaults " +
-  "and then uses normal WAO tools; the catalog does not dispatch, advance phases, " +
-  "or accept delivery. Accepts only the playbook id (lowercase kebab-case). " +
-  "Requires no workspace binding.";
+// Fixed safe text returned when a resource read fails. Intentionally constant —
+// never concatenate dynamic content (no err.message, no id, no path, no catalog
+// content). Resource-oriented vocabulary (these are MCP resources, not tools):
+// the summary resource and the detail resource/template each carry a distinct
+// fixed text. docs/usage.md is bound to these exact values (docs-consistency
+// M12-10c), so the fail-closed vocabulary cannot drift back to removed-tool names.
+const PLAYBOOK_SUMMARY_ERROR_TEXT = "playbook summary failed";
+const PLAYBOOK_DETAIL_ERROR_TEXT = "playbook detail failed";
 
 /**
  * Create a WAO MCP server with registry_list, run_dispatch, run_status, run_collect, run_diagnose, run_delivery, run_delivery_decide.
@@ -2265,19 +2205,7 @@ export function createWaoMcpServer({
   // M12-9: injectable advisory dispatch-contract precheck service. Defaults to
   // the real read-only service; threaded for transport tests.
   runDispatchContractCheckFn,
-  // M12-10: protocol-neutral static tool profile. undefined (or "full") = the
-  // default 23-tool surface (zero behavior change). "lead" = the smaller closed
-  // Lead subset. Resolved + validated BEFORE any tool is registered; an unknown
-  // value throws (fail closed) so a misconfiguration is never silently coerced.
-  toolProfile,
 }) {
-  // M12-10: resolve + validate the profile first (fail closed on an unknown
-  // value, before constructing the server or resolving services). exposedToolSet
-  // returns a fresh, caller-isolated Set; captured once here as this connection's
-  // startup-fixed exposed surface (the profile SELECTION is frozen for the
-  // connection — the Set object itself is never assumed frozen).
-  const exposedTools = exposedToolSet(toolProfile);
-
   const service = getRegistryInventoryFn ?? getRegistryInventory;
   // M11-7: the Windows user-env reader for credential readiness. Defaults to
   // the real reader (PowerShell HKCU\Environment); tests inject a fake.
@@ -2349,15 +2277,15 @@ export function createWaoMcpServer({
     { version: SERVER_VERSION },
   );
 
-  // M12-10: unified registration gate. A tool's handle is attached ONLY when the
-  // active startup profile exposes it. This uses only the SDK's public
-  // registerTool API (no private fields). The profile SELECTS the set; it never
-  // edits a tool — name/description/inputSchema/outputSchema/annotations are
-  // identical for a given tool under any profile. A hidden tool is simply not
-  // registered, so tools/list omits it and tools/call returns the SDK's fixed
-  // not-found result without ever reaching the handler/service.
+  // M12-10: every tool is ALWAYS registered (no profile gate, no flag, no
+  // restart). This uses only the SDK's public registerTool API (no private
+  // fields). Each registered name is recorded so a construction-time self-check
+  // ties the live surface to the frozen toolSurface.js SSOT (count + set +
+  // registration order) — if the two drift, server construction fails loudly
+  // rather than emitting a tool list that disagrees with the SSOT.
+  const registered = [];
   const register = (name, metadata, handler) => {
-    if (!exposedTools.has(name)) return;
+    registered.push(name);
     mcp.registerTool(name, metadata, handler);
   };
 
@@ -3840,81 +3768,82 @@ export function createWaoMcpServer({
     },
   );
 
-  // ===== playbook_list (M11-2B read-only Lead Playbook Catalog) =====
+  // ===== playbook catalog MCP resources (M12-10: the catalog moved OFF the
+  //       tool surface to progressive-disclosure resources) =====
+  //
+  // A Lead discovers and reads the catalog via resources/list + resources/read:
+  //   wao://playbooks            — static summary (the four built-in ids).
+  //   wao://playbooks/{id}       — per-id detail, registered as a STATIC
+  //                                resource for each known id (so resources/list
+  //                                advertises them deterministically) PLUS a
+  //                                ResourceTemplate that handles arbitrary ids
+  //                                with the same fixed safe-not-found behavior.
+  // No workspace binding, no registry/runDir read, no transcript mutation. Every
+  // read validates through the catalog SSOT and collapses any malformed/injected
+  // service output (or an unknown id) to a fixed safe text inside one try/catch —
+  // no err.message, id, path, or catalog content is echoed.
 
-  register(
-    "playbook_list",
+  // --- summary resource: the four built-in ids as compact summaries. ---
+  mcp.registerResource(
+    "playbooks-summary",
+    PLAYBOOK_SUMMARY_URI,
     {
-      description: PLAYBOOK_LIST_DESCRIPTION,
-      inputSchema: PLAYBOOK_LIST_INPUT,
-      outputSchema: PLAYBOOK_LIST_OUTPUT,
-      annotations: PLAYBOOK_TOOL_ANNOTATIONS,
+      description: "Built-in Lead playbooks as compact summaries (id, version, title, summary, lanePattern). Read-only; a decision scaffold the Lead adapts.",
+      mimeType: PLAYBOOK_MIME,
     },
-    async () => {
-      // M11-2B CTO closeout: the service output is UNTRUSTED. We validate it
-      // through the application-service SSOT (validatePlaybookSummaryList),
-      // which enforces exactly-four-approved-ids, stable order, strict
-      // five-key summary entries, and the closed lanePattern enum. The payload
-      // is built from the VALIDATED return value, never the raw service output
-      // — so an unknown field, unknown id, or ordering violation collapses to
-      // the fixed error inside this single try/catch. outputSchema.parse is a
-      // second defensive boundary.
+    async (uri) => {
+      // The service output is UNTRUSTED. validatePlaybookSummaryList enforces
+      // exactly-four-approved-ids, stable order, strict five-key entries, and the
+      // closed lanePattern enum; the text is built from the VALIDATED return.
       try {
-        const raw = playbookListService();
-        const playbooks = validatePlaybookSummaryList(raw);
-        const payload = { playbooks };
-        PLAYBOOK_LIST_OUTPUT.parse(payload);
-        return {
-          content: [{ type: "text", text: JSON.stringify(payload) }],
-          structuredContent: payload,
-        };
+        const playbooks = validatePlaybookSummaryList(playbookListService());
+        return { contents: [{ uri: uri.href, mimeType: PLAYBOOK_MIME, text: JSON.stringify({ playbooks }) }] };
       } catch {
-        return {
-          isError: true,
-          content: [{ type: "text", text: PLAYBOOK_LIST_ERROR_TEXT }],
-        };
+        return { contents: [{ uri: uri.href, mimeType: "text/plain", text: PLAYBOOK_SUMMARY_ERROR_TEXT }] };
       }
     },
   );
 
-  // ===== playbook_get (M11-2B read-only Lead Playbook Catalog) =====
+  // --- per-id detail: a static resource per known id + the {id} template. ---
+  // The static resources make resources/list deterministic (advertise all four
+  // known ids without depending on a Host honoring a template list callback).
+  // The template handles arbitrary ids: an unknown id reaches the template,
+  // validatePlaybookV1 binds it to the catalog closed set and fails closed, and
+  // the fixed safe text is returned (static resources take precedence for known
+  // ids, so a known id never routes here).
+  const readPlaybookDetail = async (uri, id) => {
+    // validatePlaybookV1 binds the returned object to the REQUESTED id and runs
+    // the full contract (min<=max, Advisor/Auditor-not-core, strict keys,
+    // per-field bounds, 12 KiB). A valid-shaped-but-unknown id, an id mismatch,
+    // and any semantic violation all collapse to the fixed error here.
+    try {
+      const playbook = validatePlaybookV1(playbookGetService({ id }), id);
+      return { contents: [{ uri: uri.href, mimeType: PLAYBOOK_MIME, text: JSON.stringify({ playbook }) }] };
+    } catch {
+      return { contents: [{ uri: uri.href, mimeType: "text/plain", text: PLAYBOOK_DETAIL_ERROR_TEXT }] };
+    }
+  };
 
-  register(
-    "playbook_get",
+  for (const id of PLAYBOOK_IDS) {
+    mcp.registerResource(
+      `playbook-detail-${id}`,
+      `wao://playbooks/${id}`,
+      {
+        description: `The built-in Lead playbook '${id}' (full detail: roles, phases, evidence gates, completion evidence, escalation). Read-only; the Lead adapts it.`,
+        mimeType: PLAYBOOK_MIME,
+      },
+      async (uri) => readPlaybookDetail(uri, id),
+    );
+  }
+
+  mcp.registerResource(
+    "playbook-detail",
+    new ResourceTemplate(PLAYBOOK_DETAIL_TEMPLATE, { list: undefined }),
     {
-      description: PLAYBOOK_GET_DESCRIPTION,
-      inputSchema: PLAYBOOK_GET_INPUT,
-      outputSchema: PLAYBOOK_GET_OUTPUT,
-      annotations: PLAYBOOK_TOOL_ANNOTATIONS,
+      description: "A built-in Lead playbook by id (full detail). Unknown ids return a fixed safe error.",
+      mimeType: PLAYBOOK_MIME,
     },
-    async ({ id }) => {
-      // M11-2B CTO closeout + ID-binding micro-closeout: the service output is
-      // UNTRUSTED. We validate it through the application-service SSOT
-      // (validatePlaybookV1), binding it to the REQUESTED id — so the service
-      // cannot answer A with B or return an unapproved id. validatePlaybookV1
-      // reuses the SAME validatePlaybook the loader uses, so min<=max,
-      // Advisor/Auditor-not-core, strict keys, per-field bounds, AND the 12 KiB
-      // serialized-object bound are enforced identically at load time and here.
-      // The payload is built from the VALIDATED deep clone, never the raw
-      // service output. A valid-shaped-but-unknown id (PlaybookNotFoundError),
-      // an id mismatch, and any semantic violation (PlaybookValidationError)
-      // all collapse to the fixed error inside this try/catch.
-      try {
-        const raw = playbookGetService({ id });
-        const playbook = validatePlaybookV1(raw, id);
-        const payload = { playbook };
-        PLAYBOOK_GET_OUTPUT.parse(payload);
-        return {
-          content: [{ type: "text", text: JSON.stringify(payload) }],
-          structuredContent: payload,
-        };
-      } catch {
-        return {
-          isError: true,
-          content: [{ type: "text", text: PLAYBOOK_GET_ERROR_TEXT }],
-        };
-      }
-    },
+    async (uri, variables) => readPlaybookDetail(uri, variables.id),
   );
 
   // ===== run_delivery_review (M11-3C workspace-bound read-only diff projection) =====
@@ -4235,6 +4164,19 @@ export function createWaoMcpServer({
       }
     },
   );
+
+  // M12-10: construction-time SSOT self-check. The names registered above (in
+  // push order) must be byte-equal to the frozen toolSurface.js SSOT — same
+  // count, same set, same registration order. If a tool is added/removed/
+  // reordered without updating the SSOT (or vice versa), server construction
+  // fails loudly here instead of emitting a tools/list that disagrees with the
+  // single source of truth. Uses only the recorded names + the public SSOT.
+  if (registered.length !== FROZEN_TOOL_SURFACE.length
+      || !registered.every((name, i) => name === FROZEN_TOOL_SURFACE[i])) {
+    throw new Error(
+      "tool surface drift: registered tools do not match the frozen toolSurface.js SSOT",
+    );
+  }
 
   return mcp;
 }

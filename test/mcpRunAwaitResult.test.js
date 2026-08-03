@@ -463,7 +463,7 @@ test("MAR-14: repeated terminal calls append ZERO audits (idempotent read-only)"
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
 
-test("MAR-15: current tool count is 23 after run_continue + run_activity + run_dispatch_contract_check", async () => {
+test("MAR-15: current tool count is 21 (M12-10 moved playbook catalog to resources)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mar15-"));
   try {
     makeGitRepo(dir);
@@ -472,7 +472,7 @@ test("MAR-15: current tool count is 23 after run_continue + run_activity + run_d
     try {
       const tools = await client.listTools();
       assert.ok(tools.tools.find((x) => x.name === "run_await_result"), "run_await_result present");
-      assert.equal(tools.tools.length, 23, "exactly 23 tools after M12-7 run_continue + M12-8 run_activity + M12-9 run_dispatch_contract_check");
+      assert.equal(tools.tools.length, 21, "exactly 21 tools (M12-10 moved playbook catalog to resources)");
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

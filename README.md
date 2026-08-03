@@ -34,13 +34,14 @@ and durable Lead accept/reject decision recording (it records the Lead's decisio
 it does not accept or reject for the Lead); workers receive only a bounded task
 prompt and stay out of orchestration.
 
-WAO exposes **18 MCP tools** covering the full supervised Lead loop:
+WAO exposes **21 MCP tools** covering the full supervised Lead loop:
 
 > `inventory → workspace_status → dispatch → await result → delivery query/review → Lead decision`
 
-plus `runs_list` recovery and optional `playbook_list`/`playbook_get` catalog
-reads. Every state-changing operation calls the same shared application service
-as the CLI fallback, producing identical transcript durable facts. See
+plus `runs_list` recovery. The playbook catalog is read on demand via MCP
+resources (`wao://playbooks`), not tools. Every state-changing operation calls
+the same shared application service as the CLI fallback, producing identical
+transcript durable facts. See
 [`SKILL.md`](SKILL.md) for the tool table and routing contract.
 
 **Milestones M0–M11 complete; M12 (Lead Token Efficiency + Assisted Orchestration)

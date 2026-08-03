@@ -432,45 +432,21 @@ LLM 编排器（未来的 M5 DAG 或外部脚本）只需要：
 
 ### MCP stdio 接口（agent-facing primary，M9）
 
-WAO 是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude Desktop、Codex、OpenCode、其它 agent runtime）可通过 stdio 把 WAO 当作 MCP server 调用。MCP 暴露 23 个工具；常用 Lead 闭环为 inventory → workspace_status/select → dispatch → await result → delivery review bundle → acceptance，另有原子 status/wait/collect/activity/diagnose、delivery query/review/reverify、stop/list recovery、Lead 授权修正续跑 run_continue 与可选 playbook catalog。`run_await_result` 是 advisory 只读便捷工具：一次调用等待终态（waitMs 0..270000，默认 270000；0 为 point-in-time）后返回安全 compact 终态结果 + 真实 run/liveness 观测，snapshot-only 零 audit，绝不 stop/decide/repackage；非终态时 Lead 可按任意合法 waitMs 再调，所有原子工具（run_wait/run_collect/run_status…）始终可用。`waitMs` 约束工具主动 sleep/poll 的总等待预算，而不是给每个内部阶段各分配一份预算；本地 transcript 文件读取与同步 snapshot 投影不能在 JavaScript 执行中途抢占，极端存储停顿可能让实际墙钟略超预算，工具不把这种环境延迟谎报成 worker 失败。`observationOutcome` 区分干净读取（observed）与 transcript 读失败（read_failure）；读失败时必带闭集机器码 `readFailureReason`（`transcript_parse_failed`=读取/JSON 解析异常、`legacy_event_shape`=历史非可用条目/快照形状不兼容、`snapshot_unavailable`=其他安全非解析类失败；observed 为 null），供 Lead 机器化决策——字段只含闭集码，绝不泄漏错误 message/path/command/credential，unexpected 内部异常仍保持固定 opaque 错误（M12-6 FR-08）。每个 tool 直接调用共享 application service，不 shell-out CLI。当前工具清单权威表见 `SKILL.md` 与 `docs/02-architecture.md`。
+WAO 是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude Desktop、Codex、OpenCode、其它 agent runtime）可通过 stdio 把 WAO 当作 MCP server 调用。MCP 暴露 21 个工具；常用 Lead 闭环为 inventory → workspace_status/select → dispatch → await result → delivery review bundle → acceptance，另有原子 status/wait/collect/activity/diagnose、delivery query/review/reverify、stop/list recovery、Lead 授权修正续跑 run_continue。built-in playbook catalog **不在工具面**——它是按需读取的 MCP resources（`wao://playbooks`，见下文）。`run_await_result` 是 advisory 只读便捷工具：一次调用等待终态（waitMs 0..270000，默认 270000；0 为 point-in-time）后返回安全 compact 终态结果 + 真实 run/liveness 观测，snapshot-only 零 audit，绝不 stop/decide/repackage；非终态时 Lead 可按任意合法 waitMs 再调，所有原子工具（run_wait/run_collect/run_status…）始终可用。`waitMs` 约束工具主动 sleep/poll 的总等待预算，而不是给每个内部阶段各分配一份预算；本地 transcript 文件读取与同步 snapshot 投影不能在 JavaScript 执行中途抢占，极端存储停顿可能让实际墙钟略超预算，工具不把这种环境延迟谎报成 worker 失败。`observationOutcome` 区分干净读取（observed）与 transcript 读失败（read_failure）；读失败时必带闭集机器码 `readFailureReason`（`transcript_parse_failed`=读取/JSON 解析异常、`legacy_event_shape`=历史非可用条目/快照形状不兼容、`snapshot_unavailable`=其他安全非解析类失败；observed 为 null），供 Lead 机器化决策——字段只含闭集码，绝不泄漏错误 message/path/command/credential，unexpected 内部异常仍保持固定 opaque 错误（M12-6 FR-08）。每个 tool 直接调用共享 application service，不 shell-out CLI。当前工具清单权威表见 `SKILL.md` 与 `docs/02-architecture.md`。
 
 **M12-9 三项机械增强**（均不改 control/语义边界，不新增门禁）：① `run_dispatch` 输入新增可选顶层 `executionProfileId`（与 `delivery` 同级；取自冻结可信 profile catalog，仅提供 delivery 验证的 setup/assertion 命令，与 inline `delivery.verificationCommands`/`delivery.verificationSetupCommands`/`delivery.verificationUnavailableReason` 互斥、仅 delivery 使用、派发前解析；未知/冲突由共享 resolver 稳定拒绝）；② 新增 advisory 只读工具 `run_dispatch_contract_check`（MCP adapter 在它与 `run_dispatch` 间共享输入 schema——service 自身不导入 Zod；service 复用同一 application 校验即共享 resolver + prepareDeliveryRequest，返回闭集 workspace/registry/contract 视图 + 有界 issue 码；`contractValid` 只反映 delivery/profile 机械合同，不预评 `expectedGitHead`/`expectedDirty`/`expectedWorkspaceRoot`、continuable/backend/session 资格或 worker 凭据——非门禁，sections 独立 settle 为 `observed`/`unknown`、`advisory` 恒为 `true`，零副作用，`run_dispatch` 不可依赖它，其部分失败不影响派发）；③ `run_await_result` 在终态且快照干净时附带有界闭集 `outcome`（terminalState / diagnosis(category/code/signalCount) / delivery(requested/readiness/available/failureCode/verificationStatus/verificationFailureCode/acceptanceStatus/decisionType) 安全事实；不含 commit id、changed paths、diff、command 文本、message/stderr、绝对路径或推荐，复用同一 snapshot 一次读取、零额外 transcript/Git 读、零 messages.collected 追加；非终态/read_failure → `outcome` 为 null）。
 
 **Host 注册说明**：`npm run mcp` 仅用于在 WAO repo 内手工 smoke；正式 host 注册应指向 Node shim 和 stdio entrypoint 的**绝对路径**，并为 registry 和 runDir 指定绝对路径——MCP host 的启动 cwd 不保证是 WAO repo。host 配置语法由 host 自己负责。注册后若当前会话未发现工具，重启或重载 host。Provider credential 必须由 host 通过其安全 env inheritance/allowlist 提供——不把 credential value 写入 repo、worker prompt 或 MCP args。WAO 不接管 host-global auth。
 
-#### 工具面 profile（`--tool-profile full|lead`，M12-10，protocol-neutral）
+#### 冻结工具面（21 个 always-registered tools，M12-10 progressive-disclosure correction）
 
-任何 Lead Host 都能通过**一个 Host 中立的启动参数**选择更小的日常 WAO 工具面，降低上下文/认知成本。这是一个**静态呈现层**：只在 server 构造时选定、连接建立后冻结、运行期不可变；它**不是**权限层、**不是**路由层、**不按** host/runtime 名分支（Claude/Codex/Kimi/OpenCode 一视同仁，无任何 `if host==…`）。每个工具的 `name`/`description`/`inputSchema`/`outputSchema`/`annotations` 在两个 profile 下**逐字节相同**——profile 只决定 Host 看到并能调用哪些工具。
+WAO 暴露**恰好 21 个 MCP 工具**，且它们**全部始终注册**：无 profile、无启动 flag、无 restart-to-recover——每个操作工具对连接的整个生命周期都可独立调用。这是一个**静态呈现层**：它**不是**权限层、**不是**路由层、**不按** host/runtime 名分支（Claude/Codex/Kimi/OpenCode 一视同仁，无任何 `if host==…`），也不依赖 `tools/list_changed` 或运行期动态注册。每个工具的 `name`/`description`/`inputSchema`/`outputSchema`/`annotations` 固定且逐字节稳定。
 
-- **`full`（默认，23 个工具）**：不传 `--tool-profile` 时即 `full`，暴露全部 23 个工具。**对任何既有 Host 配置零行为变化**——旧命令、旧 JSON 配置原样可用，工具清单完全不变。
-- **`lead`（18 个工具，显式 opt-in）**：隐藏 5 个已被 lead 集合内其他工具覆盖的工具——`workspace_select`（`lead_preflight(workspaceRoot)` 已覆盖项目选择）、`run_dispatch_contract_check`（可选 advisory precheck）、`run_wait`（`run_await_result` 已覆盖默认等待）、`playbook_list`/`playbook_get`（可选只读 catalog）。所有 `DRILLDOWN_TOOLS` 闭集成员（6 个：`run_status`/`run_activity`/`run_collect`/`run_delivery`/`run_delivery_review`/`run_diagnose`）均在 lead 集合内，故 `availableDrilldowns` 渐进式披露提示永远不会广告一个被隐藏的工具。
+21 = 原 23 减去两个原 playbook 工具——built-in playbook catalog **整体移出工具面**，改为按需读取的 MCP resources（`wao://playbooks`，见下文）。这 21 个工具（含 `workspace_select`、`run_dispatch_contract_check`、`run_wait`）不再被任何子集隐藏，因此一个永不重启的 Host 保留全部操作能力。所有 `DRILLDOWN_TOOLS` 闭集成员（`run_status`/`run_activity`/`run_collect`/`run_delivery`/`run_delivery_review`/`run_diagnose`）均在 21 集合内，故 `availableDrilldowns` 渐进式披露提示永远只广告可安全调用的观察工具；它只披露、不自动调用、不决策、不广告 mutation/control 工具。
 
-**fail-closed**：`--tool-profile` 缺失值、重复、空值或非 `full`/`lead` 的未知值一律启动失败（固定安全致命文本 `[wao-mcp] fatal: startup failed`，不回显值、不静默回退 full）。它是**加性**参数，不改变 `--registry`/`--run-dir`/`--workspace-root` 语义。
+单一冻结来源在 `src/mcp/toolSurface.js`（21 个名字的 frozen 数组 + 唯一性/计数/无 playbook 工具的模块加载不变量）；`server.js` 在构造期对实际注册序列做 deepEqual 自检，绑定 production 到该 SSOT。
 
-在任意 Host 的 stdio 配置里加一行即可（以通用 JSON 为例；OpenCode 项目级 `command` 数组同理追加）：
-
-```json
-{
-  "mcpServers": {
-    "wao": {
-      "command": "node",
-      "args": ["C:\\path\\to\\wao\\scripts\\wao-node.cjs",
-               "C:\\path\\to\\wao\\src\\mcp\\stdio.js",
-               "--registry", "C:\\path\\to\\wao\\config\\agents.json",
-               "--run-dir", "C:\\path\\to\\wao\\runs",
-               "--tool-profile", "lead"]
-    }
-  }
-}
-```
-
-要点：
-
-- **默认即 full**：省略 `--tool-profile` 与显式 `--tool-profile full` 完全等价（逐字节相同的工具清单、顺序与 wire）。无需为既有配置做任何迁移。
-- **切换需重启 Host**：profile 在连接建立时冻结，运行期不可变。要切回 full，删除该参数并**启动新的 Host 进程**——已运行的旧进程不会热加载新工具面。
-- **lead 下缺失的工具**：被隐藏的 5 个工具在 lead 下不出现，对其 `tools/call` 返回 fail-closed 的 "not found"（handler 从不执行，service 从不被调用）；它们的全部能力由 lead 集合内的对应工具覆盖。
-- **恢复全部能力**：任何时候需要被隐藏的工具，重启 Host 并使用 `--tool-profile full`（或省略参数）即可——没有任何能力被永久移除或弱化。两个 profile 下工具的输出校验、read/write 注解与 Lead 决策权完全一致。
-- **未做 host 适配**：本参数对所有 Host 行为相同。若某 Host 不支持本参数也无关——`full` 仍是默认，既有配置零变化。
+**legacy argv 兼容**：stdio argv parser 将任何残留的旧 profile 参数视为**普通未知 flag** 忽略——不解析值、不出现在解析输出、不改变 server 面、不失败启动；`--registry`/`--run-dir`/`--workspace-root` 解析与 fail-closed 语义逐字节不变。无需为既有 Host 配置做任何迁移。
 
 在 WAO repo 内手工 smoke（所有生产入口走 Node v22 shim）：
 
@@ -1271,25 +1247,18 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 ---
 
-### MCP `playbook_list` / `playbook_get`（可选只读 Lead Playbook Catalog，M11-2）
+### MCP resources `wao://playbooks`（可选只读 Lead Playbook Catalog，M11-2 / M12-10）
 
-这两个工具暴露一个小型只读 Lead Playbook Catalog——可选的决策脚手架（evidence gate、adaptation point）。一个 playbook 给 Lead 紧凑的默认值、证据门和适应点；Lead 保留、跳过或修改任何条件步骤。**不要求**每次派发前调用，偏离 playbook 也无需 Owner 批准（除非既有权威规则已要求）。Catalog 不自动拆解任务、不选 worker、不派发、不推进 phase、不验收；**不存在** `playbook_run`/`playbook_start`/`playbook_next`/`playbook_recommend`。
+built-in Lead Playbook Catalog 通过 **MCP resources** 暴露（M12-10 起从工具面移出），是一个小型只读决策脚手架（evidence gate、adaptation point）。一个 playbook 给 Lead 紧凑的默认值、证据门和适应点；Lead 保留、跳过或修改任何条件步骤。**不要求**每次派发前读取，偏离 playbook 也无需 Owner 批准（除非既有权威规则已要求）。Catalog 不自动拆解任务、不选 worker、不派发、不推进 phase、不验收；**不存在** `playbook_run`/`playbook_start`/`playbook_next`/`playbook_recommend`。
 
-`playbook_list` tool：
-
-```
-输入：{}（strict empty object）
-输出：{ playbooks: [{ id, version, title, summary, lanePattern }] }   // 恰好四个内置 playbook，稳定顺序
-```
-
-`playbook_get` tool：
+两个只读 resources（`resources/read`，mimeType `application/json`）：
 
 ```
-输入：{ id }   // id = lowercase kebab-case 1..64，strict object
-输出：{ playbook: <完整 PlaybookV1> }   // roles/phases/completionEvidence/escalation
+wao://playbooks              → { playbooks: [{ id, version, title, summary, lanePattern }] }   // summary，恰好四个内置 playbook，稳定顺序
+wao://playbooks/{id}         → { playbook: <完整 PlaybookV1> }   // 详情：roles/phases/completionEvidence/escalation
 ```
 
-两个工具 annotations 均为 `readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`。不要求 workspace binding，不读 transcript/registry/runDir，不产生任何 transcript 或文件副作用。任意 malformed service output（未知字段、非批准 id、id 不匹配请求、min>max、Advisor/Auditor 为 core、>12 KiB）折叠为固定错误 `playbook_list failed` / `playbook_get failed`，不泄漏 err.message、id、路径或 catalog 原始内容。
+`resources/list` 返回 summary resource + 四个已知 id 的 detail resource（`wao://playbooks/<id>`）；`resources/templates/list` 返回 `wao://playbooks/{id}` 模板。读取委托同一 `application/playbookCatalog.js` SSOT（`validatePlaybookSummaryList`/`validatePlaybookV1` 校验）。不要求 workspace binding，不读 transcript/registry/runDir，不产生任何 transcript 或文件副作用。未知 id 与 service 失败折叠为**固定安全错误**（`playbook summary failed`（summary resource）/ `playbook detail failed`（detail resource，含未知 id）），不回显 id、路径或 catalog 原始内容——唯一例外是协议要求回显 caller 提供的 `uri`。
 
 四个内置 playbook：
 
@@ -1309,7 +1278,7 @@ npm run cli -- playbook show <id>               # 完整 PlaybookV1 pretty JSON
 npm run cli -- playbook show <id> --format json # { playbook: { ...完整 PlaybookV1... } }
 ```
 
-CLI 只做 argv/format/console，数据逻辑委托同一 `application/playbookCatalog.js` service，因此 CLI `--format json` 与 MCP `structuredContent` 语义精确一致。unknown/malformed id 透传 M11-2A 固定 typed error（`PlaybookNotFoundError`/`PlaybookValidationError`），不输出 raw catalog/path。
+CLI 只做 argv/format/console，数据逻辑委托同一 `application/playbookCatalog.js` service，因此 CLI `--format json` 与 MCP resource content 语义精确一致。unknown/malformed id 透传 M11-2A 固定 typed error（`PlaybookNotFoundError`/`PlaybookValidationError`），不输出 raw catalog/path。
 
 ---
 

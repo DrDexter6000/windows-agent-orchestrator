@@ -458,7 +458,7 @@ test("MAA-12: a cursor bound to a different run is rejected (fixed error)", asyn
 // =====================================================================
 // Tool count guard: adding run_activity brings the total to 22.
 // =====================================================================
-test("MAA-13: tool count is 22 after run_activity (was 21)", async () => {
+test("MAA-13: tool count is 21 (M12-10 moved playbook catalog to resources)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-maa13-"));
   try {
     makeGitRepo(dir);
@@ -467,7 +467,7 @@ test("MAA-13: tool count is 22 after run_activity (was 21)", async () => {
     try {
       const tools = await client.listTools();
       assert.ok(tools.tools.find((x) => x.name === "run_activity"), "run_activity present");
-      assert.equal(tools.tools.length, 23, "exactly 23 tools after M12-8 run_activity + M12-9 run_dispatch_contract_check");
+      assert.equal(tools.tools.length, 21, "exactly 21 tools (M12-10 moved playbook catalog to resources)");
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

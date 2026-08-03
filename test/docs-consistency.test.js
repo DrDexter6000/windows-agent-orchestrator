@@ -328,7 +328,55 @@ test("SKILL.md 开头必须说明 WAO 的当前目标、上线边界和认证作
   for (const kw of ["deterministic control plane", "real worker tasks", "supervised production trial", "certified", "advisory"]) {
     assert.ok(head.includes(kw), `SKILL.md 开头缺少第三方 lead 首读关键信息：${kw}`);
   }
-  assert.ok(/Claude Code-first|Claude Code first|Claude-first|Claude Code process workers are the default coding lane/i.test(head), "SKILL.md 开头未声明当前 Claude Code-first 调度策略");
+});
+
+// M12-10b (Lead review): WAO and its Lead Host contract are Host/runtime-neutral.
+// A specific Host (Claude Code / Codex / Kimi / OpenCode) may be a worker backend
+// or a default dispatch lane, but it must never be named as the WAO product
+// identity or as a correctness dependency. Scoped to the positioning/head region
+// so legitimate backend-specific operational references (worker routing, dispatch
+// lanes, `backend:` values) further down the doc are not affected.
+test("M12-10b: SKILL/产品定位必须 Host-neutral，不得把具体 Host/runtime 作为产品身份或正确性依赖", () => {
+  const head = read("SKILL.md").slice(0, 3500);
+  // 产品定位不得声称某个具体 Host/runtime 是产品身份（X-first）。
+  for (const bad of [
+    "Claude Code-first", "Claude Code first", "Claude-first",
+    "Codex-first", "Codex first",
+    "Kimi-first", "Kimi first",
+    "OpenCode-first", "OpenCode first", "opencode-first",
+  ]) {
+    assert.ok(!head.includes(bad), `SKILL.md 产品定位不得以具体 Host/runtime 为身份：${bad}`);
+  }
+  // 定位仍必须用 Host-neutral 栈表达（MCP-first + Skill/CLI），证明替换是中性的而非空洞。
+  assert.ok(/MCP-first/i.test(head), "SKILL.md 产品定位必须以 MCP-first 为 Host-neutral 基座");
+  assert.ok(/Skill-guided|CLI-backed/i.test(head), "SKILL.md 产品定位必须保留 Host-neutral 的 Skill/CLI 表述");
+});
+
+// M12-10c (Lead-authorized correction): the playbook catalog moved from TOOLS to
+// MCP RESOURCES (wao://playbooks). The fixed fail-closed error vocabulary must be
+// resource-oriented (summary/detail), never the removed-tool names. This guard
+// binds docs/usage.md to the runtime constants in src/mcp/server.js so the
+// vocabulary cannot drift: it reads the constant values from the server source
+// (the SSOT) and asserts the doc documents exactly those strings, and that the
+// removed-tool vocabulary survives in neither doc nor runtime.
+test("M12-10c: usage.md playbook resource fixed-error vocabulary is bound to server.js runtime constants (no drift)", () => {
+  const server = read("src/mcp/server.js");
+  const usage = read("docs/usage.md");
+  // Extract the runtime constant values (the SSOT) from server.js source.
+  const summaryErr = server.match(/PLAYBOOK_SUMMARY_ERROR_TEXT\s*=\s*"([^"]*)"/)?.[1];
+  const detailErr = server.match(/PLAYBOOK_DETAIL_ERROR_TEXT\s*=\s*"([^"]*)"/)?.[1];
+  assert.ok(summaryErr, "src/mcp/server.js must define PLAYBOOK_SUMMARY_ERROR_TEXT");
+  assert.ok(detailErr, "src/mcp/server.js must define PLAYBOOK_DETAIL_ERROR_TEXT");
+  // Documented vocabulary must equal the runtime constants exactly (no drift).
+  assert.ok(usage.includes(summaryErr),
+    `docs/usage.md must document the summary resource fixed error "${summaryErr}"`);
+  assert.ok(usage.includes(detailErr),
+    `docs/usage.md must document the detail resource fixed error "${detailErr}"`);
+  // The removed tool-named vocabulary must not survive in doc or runtime.
+  assert.ok(!/playbook_list failed|playbook_get failed/.test(server),
+    "server.js must not emit removed-tool error names (playbook_list/playbook_get failed)");
+  assert.ok(!/playbook_list failed|playbook_get failed/.test(usage),
+    "docs/usage.md must not document removed-tool error names (playbook_list/playbook_get failed)");
 });
 
 test("活文档页首状态必须反映 M0-M10 当前能力（usage + architecture），不得停留在 M0-M9 或更早", () => {
@@ -671,7 +719,10 @@ test("M10-pre2: workspace_status tool documented in usage.md and SKILL.md", () =
   // (M12-3A) = 18; + run_delivery_review_bundle (M12-3B) = 19; + run_delivery_reverify
   // (M12-6 Package 3B) = 20; + run_continue (M12-7) = 21; + run_activity (M12-8A) = 22;
   // + run_dispatch_contract_check (M12-9) = 23.
-  assert.ok(/23 MCP tools/.test(skill), "SKILL.md must reflect 23 MCP tools after M12-9 run_dispatch_contract_check");
+  // M12-10 progressive-disclosure correction: the playbook catalog moved OFF the
+  // tool surface to MCP resources, so the surface dropped playbook_list +
+  // playbook_get → 23 - 2 = 21 always-registered tools (no profile, no restart).
+  assert.ok(/21 MCP tools/.test(skill), "SKILL.md must reflect 21 MCP tools after the M12-10 playbook-to-resources move");
   assert.ok(skill.includes("run_delivery_reverify"), "SKILL.md tool table must include run_delivery_reverify");
   // team-roles.md must mention workspace binding (MCP-first)
   const roles = read("docs/team-roles.md");
@@ -879,11 +930,14 @@ test("M11-0A: usage.md 说明 --pure 用途、新进程重启边界、command �
   assert.ok(/command.*必须是数组|command 必须是数组|数组/.test(usage), "usage.md 必须说明 command 必须是数组");
 });
 
-test("M12-8A/M12-9: usage.md MCP 段反映当前 23 tools", () => {
+test("M12-8A/M12-9/M12-10: usage.md MCP 段反映当前 21 tools", () => {
   const usage = read("docs/usage.md");
   // 精确禁止"只有 7 个工具"的陈旧文案。
   assert.ok(!/(?<!\d)7 个工具/.test(usage), "usage.md MCP 段不得再声称只有 7 个工具");
-  assert.ok(/23 个工具/.test(usage), "usage.md MCP 段必须反映 23 个工具（含 M12-8A run_activity + M12-9 run_dispatch_contract_check）");
+  // M12-10: playbook catalog moved to resources → 23 - 2 = 21 tools.
+  assert.ok(/21 个工具/.test(usage), "usage.md MCP 段必须反映 21 个工具（playbook catalog 已转为 resources）");
+  // The stale 23-tool claim must be gone.
+  assert.ok(!/23 个工具/.test(usage), "usage.md 不得再声称 23 个工具");
 });
 
 // ============================================================
@@ -997,10 +1051,14 @@ test("M11-2C-02: SKILL 明确 run_dispatch 返回 runId 才算 WAO worker dispat
     "SKILL.md 必须说明仅加载 Skill / 借用纪律不算通过 WAO 派工");
 });
 
-test("M11-2C-03: SKILL 含 playbook_list/playbook_get 且说明 optional/adaptable", () => {
+test("M11-2C-03: SKILL 把 playbook catalog 呈现为 resources（非工具），且说明 optional/adaptable", () => {
   const skill = read("SKILL.md");
-  assert.ok(/playbook_list/.test(skill), "SKILL.md 提及 playbook_list");
-  assert.ok(/playbook_get/.test(skill), "SKILL.md 提及 playbook_get");
+  // M12-10: the playbook catalog moved OFF the tool surface. SKILL must present
+  // it as MCP resources (wao://playbooks summary + wao://playbooks/{id} detail),
+  // NOT as playbook_list / playbook_get tools.
+  assert.ok(/wao:\/\/playbooks/.test(skill), "SKILL.md 把 playbook catalog 呈现为 wao://playbooks resources");
+  assert.ok(!/\bplaybook_list\b/.test(skill), "SKILL.md 不得再把 playbook_list 当作工具呈现");
+  assert.ok(!/\bplaybook_get\b/.test(skill), "SKILL.md 不得再把 playbook_get 当作工具呈现");
   // 必须说明 optional + Lead 可保留/跳过/修改条件步骤。
   assert.ok(/optional|可选/i.test(skill), "SKILL.md 说明 playbook 为 optional");
   assert.ok(/skip|跳过|adaptable|可修改|保留/i.test(skill),
@@ -1080,10 +1138,12 @@ test("M12-1 S1/S2: roadmap and README record implemented inventory + model-free 
     "roadmap 不得再把全部 M12 slice 描述为未实现");
 });
 
-test("M11-2C-08: usage 含 playbook 的 MCP 与 CLI 两种只读入口", () => {
+test("M11-2C-08: usage 含 playbook 的 MCP resources 与 CLI 两种只读入口", () => {
   const usage = read("docs/usage.md");
-  assert.ok(/playbook_list/.test(usage), "usage 提及 playbook_list MCP 工具");
-  assert.ok(/playbook_get/.test(usage), "usage 提及 playbook_get MCP 工具");
+  // M12-10: the MCP entry is now RESOURCES (wao://playbooks), not tools.
+  assert.ok(/wao:\/\/playbooks/.test(usage), "usage 把 MCP playbook 入口记为 wao://playbooks resources");
+  assert.ok(!/\bplaybook_list\b/.test(usage), "usage 不得再把 playbook_list 当作 MCP 工具");
+  assert.ok(!/\bplaybook_get\b/.test(usage), "usage 不得再把 playbook_get 当作 MCP 工具");
   assert.ok(/playbook list/.test(usage), "usage 提及 `playbook list` CLI");
   assert.ok(/playbook show/.test(usage), "usage 提及 `playbook show` CLI");
   assert.ok(/--format json/i.test(usage), "usage 提及 playbook --format json");
@@ -1133,15 +1193,18 @@ test("M12 coder_low example uses current DeepSeek V4 Flash policy", () => {
   assert.equal(low?.model?.contextWindow, 1000000);
 });
 
-test("M12-8A/M12-9: SKILL/architecture 当前工具事实为 23 tools", () => {
+test("M12-8A/M12-9/M12-10: SKILL/architecture 当前工具事实为 21 tools", () => {
   const skill = read("SKILL.md");
   const arch = read("docs/02-architecture.md");
-  assert.ok(/23 MCP tools|23 tools/i.test(skill),
-    "SKILL.md Minimal MCP Loop 当前工具数为 23（含 M12-8A run_activity + M12-9 run_dispatch_contract_check）");
+  assert.ok(/21 MCP tools|21 tools/i.test(skill),
+    "SKILL.md Minimal MCP Loop 当前工具数为 21（M12-10 把 playbook catalog 转为 resources：23 - 2）");
+  // The stale 23-tool claim must be gone from SKILL.
+  assert.ok(!/23 MCP tools|23 tools/i.test(skill),
+    "SKILL.md 不得再声称 23 tools（playbook catalog 已转为 resources）");
   // 精确匹配 "server.js ... N tools" 的当前状态注释行。
   const serverLine = arch.split("\n").find((l) => /server\.js.*tools/.test(l)) || "";
-  assert.ok(/23 tools/.test(serverLine),
-    "architecture server.js 注释当前工具数为 23");
+  assert.ok(/21 tools/.test(serverLine),
+    "architecture server.js 注释当前工具数为 21");
 });
 
 test("M12-9 docs: executionProfileId is a TOP-LEVEL run_dispatch input; inline verification is delivery.verificationCommands etc.; contract check is schema-not-Zod and contractValid is mechanical-only", () => {
@@ -1232,15 +1295,17 @@ test("M11-2C-11: SKILL 不得要求任何 worker（含 native 路线）都执行
 
 test("M11-2C-12: SKILL tool-count 文案不得声称 minimal loop 必须经过全部工具", () => {
   const skill = read("SKILL.md");
-  // 禁止暗示全部工具都是 mandatory loop。playbook_list/get 是可选、
-  // 位于 dispatch loop 外的 catalog reads。
+  // 禁止暗示全部工具都是 mandatory loop。playbook catalog 是可选、位于
+  // dispatch loop 外的只读 resources（M12-10 起为 MCP resources，非工具）。
   const mandatoryAll = /full\s+minimal\s+loop\s+through\s+15|minimal\s+loop\s+必须.*全部\s*15|loop\s+must\s+(use|go through|include)\s+all\s+15/i;
   assert.ok(!mandatoryAll.test(skill),
     "SKILL tool-count 文案不得声称 minimal loop 必须经过全部工具");
-  // 必须表达：WAO 暴露 23 tools，但 minimal control loop 只用相关 control tools，
-  // playbook reads 是可选且在 dispatch loop 外。
-  assert.ok(/23 MCP tools|23 tools/i.test(skill),
-    "SKILL 声明 WAO 暴露 23 MCP tools");
+  // 必须表达：WAO 暴露 21 tools，但 minimal control loop 只用相关 control tools，
+  // playbook resources 是可选且在 dispatch loop 外。
+  assert.ok(/21 MCP tools|21 tools/i.test(skill),
+    "SKILL 声明 WAO 暴露 21 MCP tools");
+  assert.ok(!/23 MCP tools|23 tools/i.test(skill),
+    "SKILL 不得再声称 23 tools");
   assert.ok(/optional|可选/i.test(skill) && /dispatch loop|control loop/i.test(skill),
     "SKILL 必须说明 playbook reads 可选且在 dispatch/control loop 之外");
 });
@@ -1778,4 +1843,91 @@ test("M12-6 FR-07 docs: architecture 记录 reverify 共享 service 与当前 to
   // the M12-8A guard — here only the full list must include the tool).
   assert.ok(/run_delivery_reverify/.test(arch),
     "architecture server.js 工具清单必须包含 run_delivery_reverify");
+});
+
+// ============================================================
+// M12-10 progressive-disclosure correction guards
+//
+// The startup-fixed tool-profile model (full/lead + --tool-profile +
+// restart-to-recover) is REVERSED: WAO now exposes exactly 21 always-registered
+// tools with no profile and no restart, and the built-in playbook catalog is
+// presented as MCP resources (wao://playbooks), not tools. These guards lock
+// that truth across the live docs and the SKILL entrypoint size cap.
+// ============================================================
+
+test("M12-10: SKILL.md stays a slim entrypoint (≤ 12000 bytes)", () => {
+  const skill = read("SKILL.md");
+  const bytes = Buffer.byteLength(skill, "utf8");
+  assert.ok(bytes <= 12000,
+    `SKILL.md must stay a slim entrypoint ≤ 12000 bytes (got ${bytes}); move detail to authority docs`);
+});
+
+test("M12-10: live docs carry NO tool-profile / restart-to-recover wording", () => {
+  // The full/lead profile model, the --tool-profile flag, and the deleted
+  // toolProfiles.js module must be gone from the entrypoint + MCP docs.
+  for (const [name, text] of [
+    ["SKILL.md", read("SKILL.md")],
+    ["docs/usage.md", read("docs/usage.md")],
+    ["docs/02-architecture.md", read("docs/02-architecture.md")],
+    ["README.md", read("README.md")],
+  ]) {
+    assert.ok(!/--tool-profile/.test(text), `${name}: no --tool-profile flag`);
+    assert.ok(!/tool-profile/i.test(text), `${name}: no tool-profile wording`);
+    assert.ok(!/toolProfile\b/.test(text), `${name}: no toolProfile identifier`);
+    assert.ok(!/toolProfiles\.js/.test(text), `${name}: no reference to deleted toolProfiles.js`);
+    // The closed profile pair (full/lead) and their counts must be gone.
+    assert.ok(!/full profile|lead profile|full\/lead/i.test(text),
+      `${name}: no full/lead profile model`);
+    assert.ok(!/`lead` profile|lead` profile/i.test(text), `${name}: no lead profile opt-in`);
+  }
+});
+
+test("M12-10: live docs present the playbook catalog as MCP resources", () => {
+  for (const [name, text] of [
+    ["SKILL.md", read("SKILL.md")],
+    ["docs/usage.md", read("docs/usage.md")],
+    ["docs/02-architecture.md", read("docs/02-architecture.md")],
+  ]) {
+    assert.ok(/wao:\/\/playbooks/.test(text),
+      `${name}: presents the playbook catalog as wao://playbooks resources`);
+    // The former playbook tools must not be presented as tools anywhere.
+    assert.ok(!/playbook_list tool|playbook_get tool/i.test(text),
+      `${name}: no playbook_list/playbook_get tool wording`);
+  }
+});
+
+test("M12-10: architecture records toolSurface.js as the frozen tool-surface SSOT", () => {
+  const arch = read("docs/02-architecture.md");
+  assert.ok(/toolSurface\.js/.test(arch),
+    "architecture records src/mcp/toolSurface.js as the 21-tool SSOT");
+  // The deleted profile module must not be named as an SSOT.
+  assert.ok(!/toolProfiles\.js/.test(arch),
+    "architecture must not reference the deleted toolProfiles.js");
+});
+
+test("M12-10: the 21 always-registered tools are listed in architecture", () => {
+  const arch = read("docs/02-architecture.md");
+  // The server.js tool-list comment line must carry the 21-tool truth and must
+  // NOT list the removed playbook tools.
+  const serverLine = arch.split("\n").find((l) => /server\.js.*tools/.test(l)) || "";
+  assert.ok(/21 tools/.test(serverLine), "architecture server.js line says 21 tools");
+  assert.ok(!/playbook_list/.test(serverLine), "architecture tool list omits playbook_list");
+  assert.ok(!/playbook_get/.test(serverLine), "architecture tool list omits playbook_get");
+  // workspace_select / run_dispatch_contract_check / run_wait (formerly hidden
+  // under lead) must remain in the always-registered list.
+  assert.ok(/workspace_select/.test(serverLine), "architecture tool list includes workspace_select");
+  assert.ok(/run_dispatch_contract_check/.test(serverLine), "architecture tool list includes run_dispatch_contract_check");
+  assert.ok(/\brun_wait\b/.test(serverLine), "architecture tool list includes run_wait");
+});
+
+test("M12-10: SKILL documents response-driven progressive disclosure (availableDrilldowns)", () => {
+  const skill = read("SKILL.md");
+  // availableDrilldowns is response-driven: tool results may advertise deeper
+  // SAFE reads, but never auto-call or advertise mutating actions.
+  assert.ok(/availableDrilldowns/.test(skill),
+    "SKILL documents availableDrilldowns as response-driven progressive disclosure");
+  assert.ok(/progressive disclosure/i.test(skill) || /渐进式披露|按需披露/.test(skill),
+    "SKILL frames availableDrilldowns as progressive disclosure");
+  assert.ok(/never auto-call|does not auto-call|不自动调用|不自动 call/i.test(skill),
+    "SKILL states drilldowns never auto-call");
 });

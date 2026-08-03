@@ -88,7 +88,7 @@ test("M12-3B-RED-01: bundle tool is discoverable; current count is 21 after run_
       const { tools } = await client.listTools();
       const tool = tools.find((entry) => entry.name === "run_delivery_review_bundle");
       assert.ok(tool, "run_delivery_review_bundle must be registered");
-      assert.equal(tools.length, 23);
+      assert.equal(tools.length, 21, "exactly 21 tools (M12-10 moved playbook catalog to resources)");
       assert.deepEqual(
         Object.keys(tool.inputSchema.properties).sort(),
         ["cursor", "fileIndex", "runId", "waitMs"],
