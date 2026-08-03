@@ -1824,7 +1824,9 @@ const RUN_WAIT_DESCRIPTION =
   "configuredMs, policySource} — termination is non-null ONLY on a cleanly observed terminal " +
   "(null on window expiry or read_failure, so an expired observation window never means a stop). " +
   "Workspace-bound. Returns early ONLY on terminal state; otherwise waits the full waitMs " +
-  "(default 270000 ms / 4.5 min). afterSeq omitted = baseline at first read; explicit afterSeq " +
+  `(integer ${RUN_WAIT_MIN_MS}..${RUN_WAIT_MAX_MS} ms; default ${RUN_WAIT_DEFAULT_MS} ms / 4.5 min). ` +
+  "waitMs=0 is intentionally invalid here; for a point-in-time read use " +
+  "run_await_result(waitMs:0) or run_status. afterSeq omitted = baseline at first read; explicit afterSeq " +
   "counts seq > afterSeq. Does NOT stop the run — the Lead decides; an expired window neither " +
   "fails nor terminates. Read-only: no transcript events, owner file, or state change. Sends " +
   "progress on request to span the MCP 60s default timeout. Host-neutral transport recovery: if " +

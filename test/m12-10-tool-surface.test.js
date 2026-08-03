@@ -384,6 +384,11 @@ test("M12-10-G: descriptions retain the key semantic guards", async () => {
     assert.match(d("run_delivery_decide"), /first/i);
     // run_dispatch: only agentId + prompt are accepted.
     assert.match(d("run_dispatch"), /agentId/i);
+    // run_wait is a long observation primitive, not a point-in-time alias.
+    assert.match(d("run_wait"), /180000\.\.600000/);
+    assert.match(d("run_wait"), /default 270000/);
+    assert.match(d("run_wait"), /waitMs=0 is intentionally invalid/i);
+    assert.match(d("run_wait"), /run_await_result\(waitMs:0\).*run_status/i);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -424,7 +429,11 @@ const RED_23_WIRE = 75492;
 // response parsing and the application SSOT as the catalog-membership authority.
 // Ceiling re-frozen to the new achieved value (71495 bytes: 21 tools). The 21-tool
 // wire (71495) remains below the 23-tool baseline (75492) with comfortable margin.
-const FROZEN_21_WIRE_CEILING = 71495;
+//
+// Follow-up UX correction: run_wait now self-describes its accepted waitMs range
+// and the point-in-time alternative. This adds 138 description bytes and no
+// schema/tool/runtime behavior. Ceiling re-frozen at the measured 71633 bytes.
+const FROZEN_21_WIRE_CEILING = 71633;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));

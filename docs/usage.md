@@ -1192,7 +1192,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 - **省略**：service 把首次读取 transcript 时的最大 `seq` 作为基线——只统计等待窗口内出现的新进展，不把历史事件误报为 progress（这是首轮 poll 的默认行为）。
 - **显式 `0` 或正整数**：调用者有意统计 `seq > afterSeq` 的全部进展（含历史），用于续读。把上次返回的 `cursor` 当 `afterSeq` 传回即可增量续读。
 
-`waitMs`（整数，**下限 180000** 即 180s，**默认 270000 即 4.5 分钟**，上限 600000）：Lead 的单次观察窗口。窗口到期只返回 liveness，**不表示 worker 失败，也不会中止 worker**。模型不能传 `runDir`、registry、`force`、timeout 控制面参数——这些是 server-owned 配置。
+`waitMs`（整数，**下限 180000** 即 180s，**默认 270000 即 4.5 分钟**，上限 600000）：Lead 的单次观察窗口。`waitMs:0` 在这里有意无效；point-in-time 读取使用 `run_await_result({waitMs:0})` 或 `run_status`。窗口到期只返回 liveness，**不表示 worker 失败，也不会中止 worker**。模型不能传 `runDir`、registry、`force`、timeout 控制面参数——这些是 server-owned 配置。
 
 - **返回时机**：服务在两种情况下返回——(1) run 到达终态（completed/failed/aborted/timed_out），此时 `returnedEarly:true`；(2) `waitMs` 到期仍未终态，此时 `returnedEarly:false` 并附带 liveness 摘要让 Lead 决定下一步。**普通新事件不会触发提前返回**——只有终态会；窗口内的新进展通过到期的 liveness=`progress` 体现。
 - 若返回 `terminal:true`，该终态事实已足够，Lead 直接进入 `run_collect`；除恢复、独立复核或没有 wait 结果外，不需要再调用一次 `run_status`。
