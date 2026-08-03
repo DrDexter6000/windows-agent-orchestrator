@@ -434,6 +434,8 @@ LLM 编排器（未来的 M5 DAG 或外部脚本）只需要：
 
 WAO 是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude Desktop、Codex、OpenCode、其它 agent runtime）可通过 stdio 把 WAO 当作 MCP server 调用。MCP 暴露 21 个工具；常用 Lead 闭环为 inventory → workspace_status/select → dispatch → await result → delivery review bundle → acceptance，另有原子 status/wait/collect/activity/diagnose、delivery query/review/reverify、stop/list recovery、Lead 授权修正续跑 run_continue。built-in playbook catalog **不在工具面**——它是按需读取的 MCP resources（`wao://playbooks`，见下文）。`run_await_result` 是 advisory 只读便捷工具：一次调用等待终态（waitMs 0..270000，默认 270000；0 为 point-in-time）后返回安全 compact 终态结果 + 真实 run/liveness 观测，snapshot-only 零 audit，绝不 stop/decide/repackage；非终态时 Lead 可按任意合法 waitMs 再调，所有原子工具（run_wait/run_collect/run_status…）始终可用。`waitMs` 约束工具主动 sleep/poll 的总等待预算，而不是给每个内部阶段各分配一份预算；本地 transcript 文件读取与同步 snapshot 投影不能在 JavaScript 执行中途抢占，极端存储停顿可能让实际墙钟略超预算，工具不把这种环境延迟谎报成 worker 失败。`observationOutcome` 区分干净读取（observed）与 transcript 读失败（read_failure）；读失败时必带闭集机器码 `readFailureReason`（`transcript_parse_failed`=读取/JSON 解析异常、`legacy_event_shape`=历史非可用条目/快照形状不兼容、`snapshot_unavailable`=其他安全非解析类失败；observed 为 null），供 Lead 机器化决策——字段只含闭集码，绝不泄漏错误 message/path/command/credential，unexpected 内部异常仍保持固定 opaque 错误（M12-6 FR-08）。每个 tool 直接调用共享 application service，不 shell-out CLI。当前工具清单权威表见 `SKILL.md` 与 `docs/02-architecture.md`。
 
+**M12-11 统一观察/终止事实**（`run_wait` 与 `run_await_result` 同形附加闭集字段，零 control/语义边界变更）：两者都附带 `observation: { outcome, waitedMs, windowMs }` 与 `termination: null | { state, source, configuredMs, policySource }`。`observation.outcome ∈ { point_in_time, window_expired, terminal, read_failure }` 让 Lead 不再猜测"窗口到期 / 终态 / 读失败"；`termination` **仅在干净观测到终态时非空**——窗口到期/读失败/transport 丢失一律 `null`，绝不折叠成 worker 已停止。`termination.source ∈ { completion, execution_deadline, manual, provider, backend, control_plane, unknown }` 是闭集终止来源（`execution_deadline` 仅当 WAO 截止定时器真触发；provider/backend/control_plane 由诊断 SSOT 投影，不含 raw error/reason/path/command/credential）。所有事实从**同一 snapshot** 派生并绑定 runId，零额外读、零 transcript 追加。`run_wait` 因此获得与 `run_await_result` 一致的 fail-closed 读失败语义（liveness/ownerHeartbeat 为 `unknown`，不拼陈旧事件 + 新鲜心跳）。Transport 恢复：若调用无返回结果，观察状态 unknown，这两个只读工具未做任何 control-plane 变更、未停 worker——point-in-time 重读 `run_await_result(waitMs:0)` 或 `run_status`，**绝不从 transport 丢失推断 worker alive/dead**。
+
 **M12-9 三项机械增强**（均不改 control/语义边界，不新增门禁）：① `run_dispatch` 输入新增可选顶层 `executionProfileId`（与 `delivery` 同级；取自冻结可信 profile catalog，仅提供 delivery 验证的 setup/assertion 命令，与 inline `delivery.verificationCommands`/`delivery.verificationSetupCommands`/`delivery.verificationUnavailableReason` 互斥、仅 delivery 使用、派发前解析；未知/冲突由共享 resolver 稳定拒绝）；② 新增 advisory 只读工具 `run_dispatch_contract_check`（MCP adapter 在它与 `run_dispatch` 间共享输入 schema——service 自身不导入 Zod；service 复用同一 application 校验即共享 resolver + prepareDeliveryRequest，返回闭集 workspace/registry/contract 视图 + 有界 issue 码；`contractValid` 只反映 delivery/profile 机械合同，不预评 `expectedGitHead`/`expectedDirty`/`expectedWorkspaceRoot`、continuable/backend/session 资格或 worker 凭据——非门禁，sections 独立 settle 为 `observed`/`unknown`、`advisory` 恒为 `true`，零副作用，`run_dispatch` 不可依赖它，其部分失败不影响派发）；③ `run_await_result` 在终态且快照干净时附带有界闭集 `outcome`（terminalState / diagnosis(category/code/signalCount) / delivery(requested/readiness/available/failureCode/verificationStatus/verificationFailureCode/acceptanceStatus/decisionType) 安全事实；不含 commit id、changed paths、diff、command 文本、message/stderr、绝对路径或推荐，复用同一 snapshot 一次读取、零额外 transcript/Git 读、零 messages.collected 追加；非终态/read_failure → `outcome` 为 null）。
 
 **Host 注册说明**：`npm run mcp` 仅用于在 WAO repo 内手工 smoke；正式 host 注册应指向 Node shim 和 stdio entrypoint 的**绝对路径**，并为 registry 和 runDir 指定绝对路径——MCP host 的启动 cwd 不保证是 WAO repo。host 配置语法由 host 自己负责。注册后若当前会话未发现工具，重启或重载 host。Provider credential 必须由 host 通过其安全 env inheritance/allowlist 提供——不把 credential value 写入 repo、worker prompt 或 MCP args。WAO 不接管 host-global auth。
@@ -1204,10 +1206,18 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
   "terminal": false,
   "cursor": 42,
   "returnedEarly": false,
+  "observationOutcome": "observed",
+  "readFailureReason": null,
   "liveness": "progress",
   "activityEventCount": 3,
   "lastActivityKind": "command",
-  "ownerHeartbeat": "fresh"
+  "ownerHeartbeat": "fresh",
+  "observation": {
+    "outcome": "window_expired",
+    "waitedMs": 270000,
+    "windowMs": 270000
+  },
+  "termination": null
 }
 ```
 
@@ -1215,12 +1225,16 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 - `state`：从 transcript 投影的当前状态（含 `unknown`）。
 - `terminal`：是否已到终态。
-- `cursor`：返回时已观测到的最大 `seq`，作为下次 `afterSeq` 的续读点。
+- `cursor`：返回时已观测到的最大 `seq`，作为下次 `afterSeq` 的续读点（读失败时为 `null`）。
 - `returnedEarly`：`true` = 因终态提前返回；`false` = `waitMs` 到期返回。
-- `liveness`（见下）。
-- `activityEventCount`：相对 baseline 的证据事件数。
+- `observationOutcome`（M12-11）：闭集 `observed` / `read_failure`。`read_failure` 表示 snapshot 无法读取/不可信——**fail-closed**：不把陈旧事件 liveness 与新鲜 owner 心跳拼成"看似当前"的观测。
+- `readFailureReason`：仅 `observationOutcome==="read_failure"` 时为闭集机器码（`transcript_parse_failed`/`legacy_event_shape`/`snapshot_unavailable`），否则 `null`；绝不带 error message/path/command/credential。
+- `liveness`（见下；读失败时为 `unknown`）。
+- `activityEventCount`：相对 baseline 的证据事件数（读失败时为 `null`）。
 - `lastActivityKind`：最近一条证据事件的闭合安全标签（`message`/`thinking`/`command`/`tool_use`/`tool_result`/`file_written`/`runtime_status`/`metrics`/`state`/`delivery`/`scorecard` 等）；不存在为 `null`。
-- `ownerHeartbeat`：owner 心跳新鲜度投影，枚举 `"fresh"`（.owner 文件存在且心跳在阈值内）/`"stale"`（存在但过时）/`"n/a"`（终态返回，无 owner 概念）。**是字符串枚举，不是对象**。
+- `ownerHeartbeat`：owner 心跳新鲜度投影，枚举 `"fresh"`（.owner 文件存在且心跳在阈值内）/`"stale"`（存在但过时）/`"n/a"`（终态返回，无 owner 概念）/`"unknown"`（读失败，不查心跳）。**是字符串枚举，不是对象**。
+- `observation`（M12-11，附加闭集事实）：`{ outcome, waitedMs, windowMs }`。`outcome ∈ { point_in_time, window_expired, terminal, read_failure }` 清楚区分"窗口到期"与"终态"与"读失败"——一个到期的观察窗口**绝不意味着 worker 已停止**。
+- `termination`（M12-11，附加闭集事实）：`null`（非终态/读失败/窗口到期），或 `{ state, source, configuredMs, policySource }`——**仅在干净观测到终态时非空**。`source ∈ { completion, execution_deadline, manual, provider, backend, control_plane, unknown }` 说明**谁/什么**导致终态：`execution_deadline` 仅当 WAO 的 wall-clock 截止定时器真的触发（有 bound `run.timed_out` 事实）——没有该事实的 `timed_out` 态降级为 `unknown`，Lead 绝不会误判 WAO 停了 worker。`configuredMs`/`policySource` 来自绑定的 `run.wait_policy` 事实（缺失/冲突/畸形 → `null`/`unknown`，**缺失绝不等于 disabled**）。
 
 `liveness` 取值（从 transcript 事件流 + owner 心跳投影，**不引 isAlive**）：
 
@@ -1234,6 +1248,8 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 **绝不返回**：原始 event payload、command/tool input/message/reason/error 内容、绝对路径、PID、prompt、argv、环境变量、token/cost 原值。**M11-8B**：返回 `agentId`——transcript envelope 盖戳的 canonical worker 身份（不从 worker 自由文本推断；缺失/冲突降级为 `"unknown"`，不抛错、不伪造身份、不是自动停止门）。**M12-8E**：返回静态有界 `availableDrilldowns`，让 Lead 在需要时下钻 `run_activity`/`run_diagnose`/`run_collect`；它不包含 worker 动态文本，不自动调用工具或停止 run。`content` JSON 与 `structuredContent` 语义一致。service 失败时返回固定安全文案 `run_wait failed`，不泄漏 zod 校验信息。
 
 **transport keepalive（M10-pre3 closeout）**：MCP SDK 的请求超时可能短于 `run_wait` 的 270s 默认观察窗口。为避免 client 在 server 仍正常观察时超时，server 在每次 poll 后向请求关联的 `progressToken` 发送标准 `notifications/progress`（仅当 client 通过 `onprogress` 请求了进度时）。client 若设 `resetTimeoutOnProgress:true`，每收到一条进度就重置自身计时器。这是标准 MCP 机制，不 patch host、不改全局 timeout；client 的最大总超时仍由 host 自己决定。若 host 不请求进度，server 不发通知，client 仍受其超时约束。
+
+**transport 恢复契约（M12-11，Host-neutral）**：`run_wait` / `run_await_result` 都是只读 advisory 工具。若一次调用**没有返回结果**（transport drop/超时被 host 中断），观察状态是 **unknown**——这两个工具**没有做任何 control-plane 变更**，也没有停止 worker。恢复方式是 point-in-time 重读：再调一次 `run_await_result(waitMs:0)` 或 `run_status`。**绝不能从 transport 丢失推断 worker 是 alive 还是 dead**；只有干净观测到的终态（`termination` 非空、`observation.outcome==="terminal"`）才陈述终止事实，且终止来源是闭集 `termination.source`，不是从 transport 状态猜测。
 
 **三钟分离（M10-pre3）**：WAO 现在有三个互相独立的时钟，不要混淆：
 

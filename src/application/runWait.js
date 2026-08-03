@@ -23,10 +23,48 @@ import { readTranscript, findState, TERMINAL_STATES, findLastEventSeq, extractCa
 import { isValidRunId } from "../delivery.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { checkOwnerLiveness } from "./ownerLiveness.js";
+// M12-11: the pure backend-neutral observation/termination projector (SSOT).
+// Re-export READ_FAILURE_REASONS from the projector so the MCP schema for BOTH
+// run_wait and run_await_result is built from one closed set, with no import
+// cycle (runAwaitResult already imports summarizeLiveness from here).
+import { projectObservation, READ_FAILURE_REASONS } from "./runObservationProjection.js";
 
 export const RUN_WAIT_MIN_MS = 180000;
 export const RUN_WAIT_DEFAULT_MS = 270000;
 export const RUN_WAIT_MAX_MS = 600000;
+
+// M12-11: re-export so src/mcp/server.js imports the closed set from ONE place.
+export { READ_FAILURE_REASONS };
+
+// M12-11: build the fail-closed read_failure result for run_wait. A snapshot
+// that cannot be read/trusted MUST NOT be combined with a fresh owner heartbeat
+// into an apparently-current observation (red flag A): liveness/heartbeat go
+// "unknown", the activity tally goes null, and termination stays null — the
+// observation is stale, not current. This mirrors run_await_result's
+// readFailureResult exactly. `reason` is a member of READ_FAILURE_REASONS; no
+// raw error/message/path/command/credential is ever placed in the result.
+function waitReadFailureResult({ runId, agentId, state, cursor, waitedMs, windowMs, reason }) {
+  const { observation, termination } = projectObservation({
+    events: [], runId, currentState: state, terminal: false, readFailure: true,
+    waitedMs, windowMs,
+  });
+  return {
+    runId,
+    agentId,
+    state,
+    terminal: false,
+    cursor,
+    returnedEarly: false,
+    observationOutcome: "read_failure",
+    readFailureReason: reason,
+    liveness: "unknown",
+    activityEventCount: null,
+    lastActivityKind: null,
+    ownerHeartbeat: "unknown",
+    observation,
+    termination,
+  };
+}
 
 // ── Progress event types (closed set) ────────────────────────────────────────
 //
@@ -221,8 +259,17 @@ export async function runWait(input) {
   let events;
   try {
     events = await _readTranscript(transcriptPath);
-  } catch (err) {
-    throw new Error(`cannot read transcript: ${err.message}`);
+  } catch {
+    // M12-11: initial read failure fails CLOSED with the same closed-set
+    // semantics as run_await_result — it does NOT throw a generic error. The
+    // observation is a read_failure: no state/cursor is invented, liveness and
+    // owner heartbeat are "unknown", termination is null. waitedMs is 0 (no
+    // waiting occurred). Any throw from the reader is a transcript read/JSON
+    // parse exception → transcript_parse_failed. No raw error reaches the result.
+    return waitReadFailureResult({
+      runId, agentId: "unknown", state: "unknown", cursor: null,
+      waitedMs: 0, windowMs: waitMs, reason: "transcript_parse_failed",
+    });
   }
 
   // Workspace authorization (MCP path)
@@ -245,6 +292,10 @@ export async function runWait(input) {
 
   // If already terminal, return immediately
   if (terminal) {
+    const { observation, termination } = projectObservation({
+      events, runId, currentState: state, terminal: true, readFailure: false,
+      waitedMs: 0, windowMs: waitMs,
+    });
     return {
       runId,
       agentId,
@@ -252,10 +303,14 @@ export async function runWait(input) {
       terminal: true,
       cursor,
       returnedEarly: true,
+      observationOutcome: "observed",
+      readFailureReason: null,
       liveness: "terminal",
       activityEventCount: 0,
       lastActivityKind: null,
       ownerHeartbeat: "n/a",
+      observation,
+      termination,
     };
   }
 
@@ -289,14 +344,29 @@ export async function runWait(input) {
     try {
       currentEvents = await _readTranscript(transcriptPath);
     } catch {
-      break; // Can't re-read — return what we have
+      // M12-11 RED FLAG A: a mid-wait re-read failure FAILS CLOSED. Previously
+      // this `break`d and then combined the STALE events (from the initial
+      // read) with a FRESH owner heartbeat into a clean-looking expiry — so a
+      // Lead could believe the window expired normally when in fact the
+      // snapshot could no longer be trusted. It now returns the same fail-closed
+      // read_failure shape as run_await_result: liveness/heartbeat "unknown",
+      // activity tally null, termination null, and the last trusted
+      // agentId/state/cursor preserved. No stale+fresh combination is possible.
+      return waitReadFailureResult({
+        runId, agentId, state: currentState, cursor: currentCursor,
+        waitedMs: _now() - startNow, windowMs: waitMs, reason: "transcript_parse_failed",
+      });
     }
 
     currentState = findState(currentEvents);
     currentCursor = findLastEventSeq(currentEvents) ?? currentCursor;
 
     if (TERMINAL_STATES.includes(currentState)) {
-      // Terminal reached — early return
+      // Terminal reached — early return.
+      const { observation, termination } = projectObservation({
+        events: currentEvents, runId, currentState, terminal: true, readFailure: false,
+        waitedMs: _now() - startNow, windowMs: waitMs,
+      });
       return {
         runId,
         agentId,
@@ -304,10 +374,14 @@ export async function runWait(input) {
         terminal: true,
         cursor: currentCursor,
         returnedEarly: true,
+        observationOutcome: "observed",
+        readFailureReason: null,
         liveness: "terminal",
         activityEventCount: 0,
         lastActivityKind: null,
         ownerHeartbeat: "n/a",
+        observation,
+        termination,
       };
     }
 
@@ -332,6 +406,13 @@ export async function runWait(input) {
     now: _now(),
   });
 
+  // M12-11: an expired observation window is read-only and advisory — it NEVER
+  // means the worker stopped. termination is null; outcome is window_expired.
+  const { observation, termination } = projectObservation({
+    events: currentEvents, runId, currentState, terminal: false, readFailure: false,
+    waitedMs: _now() - startNow, windowMs: waitMs,
+  });
+
   return {
     runId,
     agentId,
@@ -339,9 +420,13 @@ export async function runWait(input) {
     terminal: false,
     cursor: currentCursor,
     returnedEarly: false,
+    observationOutcome: "observed",
+    readFailureReason: null,
     liveness: liv.liveness,
     activityEventCount: liv.activityEventCount,
     lastActivityKind: liv.lastActivityKind,
     ownerHeartbeat: liv.ownerHeartbeat,
+    observation,
+    termination,
   };
 }

@@ -105,6 +105,15 @@ import {
   // DELIVERY_READINESS_STATES / PACKAGING_FAILURE_CODES).
   READ_FAILURE_REASONS,
 } from "../application/runAwaitResult.js";
+// M12-11: the additive observation/termination facts + their closed-set enums
+// come from the pure application SSOT (runObservationProjection), so the schema
+// and the service cannot drift. termination.state reuses TERMINAL_STATES
+// (imported above from transcript — the projector mirrors it exactly).
+import {
+  OBSERVATION_OUTCOMES,
+  TERMINATION_SOURCES,
+  WAIT_POLICY_SOURCES,
+} from "../application/runObservationProjection.js";
 // M12-9 Package B: the shared execution-profile resolver + the optional
 // advisory dispatch-contract precheck. The resolver is the SINGLE authority used
 // by BOTH run_dispatch and run_dispatch_contract_check (profile vs inline
@@ -1688,17 +1697,45 @@ const RUN_WAIT_INPUT = z.object({
   waitMs: z.number().int().min(RUN_WAIT_MIN_MS).max(RUN_WAIT_MAX_MS).default(RUN_WAIT_DEFAULT_MS),
 }).strict();
 
+// M12-11: the additive observation + termination facts, shared verbatim by
+// run_wait and run_await_result. Closed-set enums are built from the pure
+// application SSOT (runObservationProjection) so the wire schema and the service
+// cannot drift. observation is always present; termination is null unless a
+// terminal state was cleanly observed (an expired window / transport loss /
+// read failure NEVER produces a termination fact — it cannot be collapsed into
+// a worker-stop claim).
+const OBSERVATION_FACT = z.object({
+  outcome: z.enum([...OBSERVATION_OUTCOMES]),
+  waitedMs: z.number().int().nonnegative(),
+  windowMs: z.number().int().nonnegative(),
+}).strict();
+
+const TERMINATION_FACT = z.object({
+  state: z.enum([...TERMINAL_STATES]),
+  source: z.enum([...TERMINATION_SOURCES]),
+  configuredMs: z.number().int().positive().nullable(),
+  policySource: z.enum([...WAIT_POLICY_SOURCES]),
+}).strict();
+
 const RUN_WAIT_OUTPUT = z.object({
   runId: z.string(),
   agentId: READ_AGENT_ID_SCHEMA,
   state: z.enum([...RUN_STATES, "unknown"]),
   terminal: z.boolean(),
-  cursor: z.number().int(),
+  cursor: z.number().int().nullable(),
   returnedEarly: z.boolean(),
-  liveness: z.enum(["terminal", "progress", "process_only", "silent"]),
-  activityEventCount: z.number().int(),
+  // M12-11: observationOutcome/readFailureReason bring run_wait to parity with
+  // run_await_result. "unknown" liveness/ownerHeartbeat + null activity tally
+  // appear ONLY on a read_failure (the snapshot could not be trusted, so stale
+  // event liveness is never combined with a fresh heartbeat).
+  observationOutcome: z.enum(["observed", "read_failure"]),
+  readFailureReason: z.enum([...READ_FAILURE_REASONS]).nullable(),
+  liveness: z.enum(["terminal", "progress", "process_only", "silent", "unknown"]),
+  activityEventCount: z.number().int().nonnegative().nullable(),
   lastActivityKind: z.string().nullable(),
-  ownerHeartbeat: z.enum(["fresh", "stale", "n/a"]),
+  ownerHeartbeat: z.enum(["fresh", "stale", "n/a", "unknown"]),
+  observation: OBSERVATION_FACT,
+  termination: TERMINATION_FACT.nullable(),
   availableDrilldowns: AVAILABLE_DRILLDOWNS,
 }).strict();
 
@@ -1711,11 +1748,19 @@ const RUN_WAIT_ANNOTATIONS = {
 
 const RUN_WAIT_DESCRIPTION =
   "Wait for a run to reach terminal state or for the observation window to expire, then return " +
-  "a liveness summary. Workspace-bound. Returns early ONLY on terminal state; otherwise waits " +
-  "the full waitMs (default 270000 ms / 4.5 min). afterSeq omitted = baseline at first read; " +
-  "explicit afterSeq counts seq > afterSeq. Does NOT stop the run — the Lead decides; an " +
-  "expired window neither fails nor terminates the worker. Read-only: no transcript events, " +
-  "owner file, or state change. Sends progress on request to span the MCP 60s default timeout.";
+  "a liveness summary plus additive closed-set facts: observation {outcome in point_in_time/" +
+  "window_expired/terminal/read_failure, waitedMs, windowMs} and termination {state, source, " +
+  "configuredMs, policySource} — termination is non-null ONLY on a cleanly observed terminal " +
+  "(null on window expiry or read_failure, so an expired observation window never means a stop). " +
+  "Workspace-bound. Returns early ONLY on terminal state; otherwise waits the full waitMs " +
+  "(default 270000 ms / 4.5 min). afterSeq omitted = baseline at first read; explicit afterSeq " +
+  "counts seq > afterSeq. Does NOT stop the run — the Lead decides; an expired window neither " +
+  "fails nor terminates. Read-only: no transcript events, owner file, or state change. Sends " +
+  "progress on request to span the MCP 60s default timeout. Host-neutral transport recovery: if " +
+  "this call returns no result (transport dropped/timed out), the observation is unknown — these " +
+  "read-only tools did NO control-plane mutation and did not stop anything. Re-read point-in-" +
+  "time via run_await_result(waitMs:0) or run_status; never infer liveness or a stop from " +
+  "transport loss.";
 
 // ===== run_await_result (M12-3 read-only composite) constants =====
 //
@@ -1823,6 +1868,9 @@ const RUN_AWAIT_RESULT_OUTPUT = z.object({
   // AND cleanly observed; null on non-terminal or read_failure. Closed-set safe
   // facts only (diagnosis + delivery); the Lead retains all semantic judgment.
   outcome: RUN_AWAIT_RESULT_OUTCOME.nullable(),
+  // M12-11: additive observation/termination facts (same shape as run_wait).
+  observation: OBSERVATION_FACT,
+  termination: TERMINATION_FACT.nullable(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
   // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
   // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
@@ -1840,13 +1888,20 @@ const RUN_AWAIT_RESULT_ANNOTATIONS = {
 
 const RUN_AWAIT_RESULT_DESCRIPTION =
   "One read-only call: wait up to waitMs for a run to reach terminal, then return the safe " +
-  "compact final assistant result plus a truthful run/liveness observation. Returns early on " +
-  "terminal; waitMs=0 is a point-in-time read. Advisory: never stop/retry/decide/accept/reject/" +
-  "repackage/append transcript events, and makes no semantic judgment. Snapshot-only. " +
-  "result.status distinguishes terminal from not_terminal/unavailable; a read failure yields a " +
-  "closed-set readFailureReason (null otherwise — never an error message/path/credential). " +
-  "Idempotent (zero messages.collected); atomic tools (run_wait/run_collect/run_status) remain " +
-  "available.";
+  "compact final assistant result plus a truthful run/liveness observation and additive " +
+  "closed-set facts: observation {outcome in point_in_time/window_expired/terminal/read_failure, " +
+  "waitedMs, windowMs} and termination {state, source, configuredMs, policySource} — termination " +
+  "is non-null ONLY on a cleanly observed terminal (null on window expiry or read_failure, so an " +
+  "expired window never means a stop). Returns early on terminal; waitMs=0 is a point-in-time " +
+  "read. Advisory: never stop/retry/decide/accept/reject/repackage/append transcript events, and " +
+  "makes no semantic judgment. Snapshot-only. result.status distinguishes terminal from " +
+  "not_terminal/unavailable; a read failure yields a closed-set readFailureReason (null " +
+  "otherwise — never an error message/path/credential). Idempotent (zero messages.collected). " +
+  "Host-neutral transport recovery: if this call returns no result (transport dropped/timed " +
+  "out), the observation is unknown — these read-only tools did NO control-plane mutation and " +
+  "did not stop anything. Re-read point-in-time via run_await_result(waitMs:0) or run_status; " +
+  "never infer liveness or a stop from transport loss. Atomic tools (run_wait/run_collect/" +
+  "run_status) remain available.";
 
 // ===== run_activity (M12-8 read-only activity timeline) constants =====
 //
@@ -3562,10 +3617,18 @@ export function createWaoMcpServer({
           terminal: result.terminal,
           cursor: result.cursor,
           returnedEarly: result.returnedEarly,
+          // M12-11: parity with run_await_result — closed-set observation outcome
+          // + nullable readFailureReason, plus the additive observation/
+          // termination facts. No fabricated fields; missing service values
+          // collapse to null/unknown via the schema.
+          observationOutcome: result.observationOutcome,
+          readFailureReason: result.readFailureReason ?? null,
           liveness: result.liveness,
           activityEventCount: result.activityEventCount,
           lastActivityKind: result.lastActivityKind,
           ownerHeartbeat: result.ownerHeartbeat,
+          observation: result.observation,
+          termination: result.termination ?? null,
         };
         payload.availableDrilldowns = selectDrilldowns("run_wait", {
           state: payload.state,
@@ -3676,6 +3739,11 @@ export function createWaoMcpServer({
           ownerHeartbeat: result.ownerHeartbeat,
           result: result.result,
           outcome: result.outcome ?? null,
+          // M12-11: additive observation/termination facts (same shape as
+          // run_wait). No fabricated fields — termination is null unless a
+          // terminal state was cleanly observed.
+          observation: result.observation,
+          termination: result.termination ?? null,
         };
 
         // M12-8B: bounded progressive-disclosure metadata — a pure function of

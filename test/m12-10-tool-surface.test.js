@@ -398,12 +398,18 @@ test("M12-10-G: descriptions retain the key semantic guards", async () => {
 // is materially smaller than the 23-tool baseline.
 const RED_23_WIRE = 75492;
 
-// Frozen deterministic ceiling — tightened to the achieved GREEN value
-// (65625 bytes: 21 tools, desc total 10642), to prevent wire regression creep.
-// The measurement is deterministic (same code ⇒ identical bytes), so freezing
-// at the achieved value gives full regression protection: any description growth
-// or tool-schema bloat trips the ceiling.
-const FROZEN_21_WIRE_CEILING = 65625;
+// Frozen deterministic ceiling — frozen at the achieved GREEN value, to prevent
+// wire regression creep. The measurement is deterministic (same code ⇒ identical
+// bytes), so freezing at the achieved value gives full regression protection:
+// any further description growth or tool-schema bloat trips the ceiling.
+//
+// Re-baselined for M12-11: run_wait and run_await_result gained the bounded,
+// closed-set `observation`/`termination` nested facts (additive; no arrays or
+// dynamic payloads) and Host-neutral transport-recovery description text.
+// Ceiling re-frozen to the new achieved value (69031 bytes: 21 tools, desc total
+// 11958). Prior M12-10 value was 65625 (desc total 10642); the ~3.4k delta is
+// the sanctioned M12-11 addition, still well under the 23-tool baseline below.
+const FROZEN_21_WIRE_CEILING = 69031;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));

@@ -79,6 +79,13 @@ import { projectCollectResult } from "./runCollectProjection.js";
 // PURE events projectors — the outcome adds NO second transcript/Git read and
 // NO run_collect call; it derives from the SAME in-memory snapshot.
 import { diagnoseFailure, DIAGNOSIS_CATEGORIES, PROVIDER_DIAGNOSIS_CODES } from "../diagnosis.js";
+// M12-11: the pure backend-neutral observation/termination projector (SSOT).
+// projectObservation derives the additive observation {outcome, waitedMs,
+// windowMs} + termination facts from the SAME in-memory snapshot, for every
+// return path of this composite. READ_FAILURE_REASONS is re-exported from the
+// projector so the MCP schema (run_wait + run_await_result) is built from ONE
+// closed set, with no import cycle (runWait imports it from the projector too).
+import { projectObservation } from "./runObservationProjection.js";
 import {
   gatherDeliveryView,
   projectDeliveryReadiness,
@@ -105,16 +112,13 @@ export const RUN_AWAIT_RESULT_MAX_MS = 270000;
 // client, and yields a structural upper bound of floor(waitMs/30000)+1.
 export const RUN_AWAIT_RESULT_DEFAULT_PROGRESS_MS = 30000;
 
-// M12-6 FR-08: the frozen closed set of safe read-failure reasons. `observed`
-// outcomes carry readFailureReason=null; a read_failure carries exactly ONE of
-// these machine codes — never an error message/path/command/credential. The MCP
-// schema enum is built from this single set (see src/mcp/server.js) so the
-// service and the schema cannot drift.
-export const READ_FAILURE_REASONS = Object.freeze([
-  "transcript_parse_failed", // transcript read or JSON parse exception
-  "legacy_event_shape", // structurally incompatible legacy event/snapshot shape
-  "snapshot_unavailable", // any other safe non-parse failure to obtain a usable snapshot
-]);
+// M12-6 FR-08 / M12-11: the frozen closed set of safe read-failure reasons.
+// `observed` outcomes carry readFailureReason=null; a read_failure carries
+// exactly ONE of these machine codes — never an error message/path/command/
+// credential. The SSOT now lives in runObservationProjection.js (shared with
+// run_wait); re-exported here so existing consumers (and the MCP schema enum)
+// import from ONE place with no drift.
+export { READ_FAILURE_REASONS } from "./runObservationProjection.js";
 
 // A result partition whose fields were NOT observed (not_terminal / unavailable
 // / read-failure). Null — never a fabricated zero/false. The key set is uniform
@@ -187,7 +191,16 @@ function snapshotHasInvalidShape(events) {
 // parse exception, structurally incompatible legacy shape, or another safe
 // non-parse failure. The caller classifies; this builder never inspects an
 // error object, so no raw error detail can reach the result.
-function readFailureResult({ runId, agentId, state, terminal, cursor, waitedMs, reason }) {
+function readFailureResult({ runId, agentId, state, terminal, cursor, waitedMs, windowMs, reason }) {
+  // M12-11: the additive observation/termination facts derive from the SAME
+  // fail-closed inputs. A read failure is outcome=read_failure with termination
+  // null — even if a terminal state was carried over from a prior trusted
+  // snapshot, the un-trusted current read must never produce a termination
+  // claim (it cannot be collapsed into a worker-stop claim).
+  const { observation, termination } = projectObservation({
+    events: [], runId, currentState: state, terminal, readFailure: true,
+    waitedMs, windowMs,
+  });
   return {
     runId,
     agentId,
@@ -206,6 +219,8 @@ function readFailureResult({ runId, agentId, state, terminal, cursor, waitedMs, 
     // M12-9 Package C: outcome is unavailable on a read failure — the snapshot
     // was not cleanly observed, so no terminal outcome is projected.
     outcome: null,
+    observation,
+    termination,
   };
 }
 
@@ -444,7 +459,7 @@ export async function runAwaitResult(input) {
     // reader is a transcript read/JSON parse exception → transcript_parse_failed.
     return readFailureResult({
       runId, agentId: "unknown", state: "unknown", terminal: false, cursor: null, waitedMs: 0,
-      reason: "transcript_parse_failed",
+      windowMs: waitMs, reason: "transcript_parse_failed",
     });
   }
 
@@ -478,7 +493,7 @@ export async function runAwaitResult(input) {
     // error — it is another safe non-parse failure → snapshot_unavailable.
     return readFailureResult({
       runId, agentId: "unknown", state: "unknown", terminal: false, cursor: null, waitedMs: 0,
-      reason: "snapshot_unavailable",
+      windowMs: waitMs, reason: "snapshot_unavailable",
     });
   }
   const terminal = TERMINAL_STATES.includes(state);
@@ -491,7 +506,7 @@ export async function runAwaitResult(input) {
   if (invalidShape) {
     return readFailureResult({
       runId, agentId: "unknown", state, terminal, cursor: null, waitedMs: 0,
-      reason: "legacy_event_shape",
+      windowMs: waitMs, reason: "legacy_event_shape",
     });
   }
 
@@ -503,6 +518,10 @@ export async function runAwaitResult(input) {
   // Single snapshot: the same `events` feeds the observation AND the compact
   // collect. No post-terminal reread.
   if (terminal) {
+    const { observation, termination } = projectObservation({
+      events, runId, currentState: state, terminal: true, readFailure: false,
+      waitedMs: 0, windowMs: waitMs,
+    });
     return {
       runId,
       agentId,
@@ -521,6 +540,8 @@ export async function runAwaitResult(input) {
       // M12-9 Package C: terminal AND cleanly observed → project the bounded
       // outcome from THIS snapshot (diagnosis + delivery SSOTs, single read).
       outcome: projectTerminalOutcome(events, runId, state),
+      observation,
+      termination,
     };
   }
 
@@ -528,6 +549,10 @@ export async function runAwaitResult(input) {
   // Read once, return immediately. No sleep, no loop.
   if (waitMs === 0) {
     const liv = summarizeLiveness({ events, runDir: resolvedRunDir, runId, activityBaseline, now: _now() });
+    const { observation, termination } = projectObservation({
+      events, runId, currentState: state, terminal: false, readFailure: false,
+      waitedMs: 0, windowMs: 0,
+    });
     return {
       runId,
       agentId,
@@ -545,6 +570,8 @@ export async function runAwaitResult(input) {
       result: unobservedResult("not_terminal"),
       // M12-9 Package C: non-terminal → outcome is unavailable (null).
       outcome: null,
+      observation,
+      termination,
     };
   }
 
@@ -575,7 +602,7 @@ export async function runAwaitResult(input) {
       // transcript read/JSON parse exception → transcript_parse_failed.
       return readFailureResult({
         runId, agentId, state: currentState, terminal: false, cursor: currentCursor, waitedMs: _now() - begin,
-        reason: "transcript_parse_failed",
+        windowMs: waitMs, reason: "transcript_parse_failed",
       });
     }
 
@@ -588,7 +615,7 @@ export async function runAwaitResult(input) {
       // truthful read_failure shape as a re-read file failure → legacy shape.
       return readFailureResult({
         runId, agentId, state: currentState, terminal: false, cursor: currentCursor, waitedMs: _now() - begin,
-        reason: "legacy_event_shape",
+        windowMs: waitMs, reason: "legacy_event_shape",
       });
     }
 
@@ -610,7 +637,7 @@ export async function runAwaitResult(input) {
       // snapshot could not be derived, a safe non-parse reason → snapshot_unavailable.
       return readFailureResult({
         runId, agentId, state: currentState, terminal: false, cursor: currentCursor, waitedMs: _now() - begin,
-        reason: "snapshot_unavailable",
+        windowMs: waitMs, reason: "snapshot_unavailable",
       });
     }
     currentState = pollState;
@@ -620,6 +647,10 @@ export async function runAwaitResult(input) {
       // TERMINAL DURING WAIT — collect from THIS (terminal-observing) snapshot.
       // Single snapshot: collect adds ZERO extra reads.
       const termAgentId = extractCanonicalAgentId(currentEvents, runId);
+      const { observation, termination } = projectObservation({
+        events: currentEvents, runId, currentState, terminal: true, readFailure: false,
+        waitedMs: _now() - begin, windowMs: waitMs,
+      });
       return {
         runId,
         agentId: termAgentId,
@@ -638,6 +669,8 @@ export async function runAwaitResult(input) {
         // M12-9 Package C: terminal during wait → project the bounded outcome
         // from THIS (terminal-observing) snapshot. Single read — no extra I/O.
         outcome: projectTerminalOutcome(currentEvents, runId, currentState),
+        observation,
+        termination,
       };
     }
 
@@ -661,6 +694,12 @@ export async function runAwaitResult(input) {
 
   // ===== WINDOW EXPIRY (clean final read) =====
   const liv = summarizeLiveness({ events: currentEvents, runDir: resolvedRunDir, runId, activityBaseline, now: _now() });
+  // M12-11: window expiry is advisory — the worker is NOT stopped. termination
+  // stays null; outcome is window_expired (not terminal, not a read failure).
+  const { observation, termination } = projectObservation({
+    events: currentEvents, runId, currentState, terminal: false, readFailure: false,
+    waitedMs: _now() - begin, windowMs: waitMs,
+  });
   return {
     runId,
     agentId,
@@ -678,5 +717,7 @@ export async function runAwaitResult(input) {
     result: unobservedResult("not_terminal"),
     // M12-9 Package C: window expiry, still non-terminal → outcome unavailable.
     outcome: null,
+    observation,
+    termination,
   };
 }

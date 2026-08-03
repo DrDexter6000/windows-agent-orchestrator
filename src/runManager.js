@@ -1552,14 +1552,31 @@ export class Run {
       if (!endedResult.accepted) return _loserResult(endedResult.state, { messages, evidence, metrics });
       throw new Error("backend stream ended without done");
     }
-    const tResult = await this._transition(this.state, "timed_out", "timeout", {
-      factEvents: [{
-        type: "run.timed_out",
-        payload: { backendSessionId: this.result.backendSessionId },
-      }],
+    // M12-11 RED FLAG B: an unknown non-null done reason is a backend failure,
+    // NOT a timeout. Only waitTimerExpired may create run.timed_out (see the
+    // `if (timedOut)` branch above). The fallthrough previously ALWAYS wrote
+    // run.timed_out for any truthy doneReason that was neither "completed" nor
+    // "failed" — so a backend that emitted done("cancelled"/"stream_error"/…)
+    // with NO deadline timer was mislabeled as a WAO execution deadline, and a
+    // Lead could infer WAO stopped the worker when it did not.
+    //
+    // It now fails closed: transition to failed with a safe closed-set reason
+    // (backend_unknown_reason), record a safe run.error, and throw — exactly
+    // like the done(failed) / backend_stream_ended paths. The raw backend
+    // reason (doneReason) is NEVER echoed on the wire or in the transition
+    // reason; only the safe closed-set label is recorded. This is the ONLY way
+    // an unknown terminal reaches failed without a deadline, and it can never
+    // produce run.timed_out.
+    await this.transcript.append("run.error", {
+      phase: "wait",
+      error: "backend stream ended with unknown done reason",
     });
+    const unknownResult = await this._transition(this.state, "failed", "backend_unknown_reason");
     await this._runCleanup();
-    return _loserResult(tResult.state, { messages, evidence, metrics });
+    if (!unknownResult.accepted) {
+      return _loserResult(unknownResult.state, { messages, evidence, metrics });
+    }
+    throw new Error("backend stream ended with unknown done reason");
   }
 
   async abort(reason = "user") {
