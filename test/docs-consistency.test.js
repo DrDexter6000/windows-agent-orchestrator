@@ -1958,3 +1958,19 @@ test("M12-11 closeout: roadmap records local unified wait and termination truth"
   assert.match(roadmap, /durable `run\.timed_out`[^;；]*才投影 `execution_deadline`/,
     "roadmap binds execution_deadline to a durable same-run timeout event");
 });
+
+test("M12-12 closeout: roadmap records local self-describing result truth", () => {
+  const roadmap = read("docs/roadmap.md");
+  assert.match(roadmap, /PASS_M12_12_LOCAL_SELF_DESCRIBING_RESULTS/,
+    "roadmap must record the M12-12 local-candidate verdict");
+  assert.match(roadmap, /`run_wait`、`run_await_result`、`run_delivery`、`run_diagnose`[\s\S]*`semanticNotes`/,
+    "roadmap records the four self-describing result surfaces");
+  assert.match(roadmap, /工具面仍为 \*\*21\*\*[\s\S]*69031 bytes[\s\S]*71495 bytes[\s\S]*75492 bytes/,
+    "roadmap records the honest wire-size comparison without changing the tool count");
+  assert.match(roadmap, /run_20260803200250648hhmiex[\s\S]*durable rejected[\s\S]*run_20260803205951066j3txpq[\s\S]*durable accepted/,
+    "roadmap records the rejected root and accepted same-session correction");
+  assert.match(roadmap, /本段只记录本地候选，尚未发布或完成 Fresh Host 验收/,
+    "roadmap must not present M12-12 as released or Fresh Host loaded");
+  assert.match(roadmap, /canonical `182\/182` files、0 fail/,
+    "roadmap records the frozen-candidate canonical result");
+});

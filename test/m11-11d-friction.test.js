@@ -67,12 +67,17 @@ test("M11-11D-RED-2: MCP run_delivery preserves ordinary non-delivery as success
     // M12-8B: availableDrilldowns is the bounded progressive-disclosure
     // metadata (asserted separately so the legacy object comparison stays
     // exact for every other field).
-    const { availableDrilldowns, ...rest } = structured;
+    const { availableDrilldowns, semanticNotes, ...rest } = structured;
     assert.ok(Array.isArray(availableDrilldowns) && availableDrilldowns.length >= 1 && availableDrilldowns.length <= 4,
       "bounded availableDrilldowns present");
     for (const e of availableDrilldowns) {
       assert.equal(e.readOnly, true, "every drilldown entry readOnly:true");
     }
+    assert.deepEqual(semanticNotes, [{
+      id: "delivery.not_requested",
+      meaning: "No delivery was requested for this run.",
+      doesNotMean: ["It does not indicate a packaging or verification failure."],
+    }]);
     assert.deepEqual(rest, {
       runId,
       terminalState: "completed",
