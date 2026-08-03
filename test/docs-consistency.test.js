@@ -1931,3 +1931,14 @@ test("M12-10: SKILL documents response-driven progressive disclosure (availableD
   assert.ok(/never auto-call|does not auto-call|不自动调用|不自动 call/i.test(skill),
     "SKILL states drilldowns never auto-call");
 });
+
+test("M12-10 closeout: roadmap records the released 21-tool Fresh Host truth", () => {
+  const roadmap = read("docs/roadmap.md");
+  const m12Row = roadmap.split("\n").find((line) => line.startsWith("| M12 |")) ?? "";
+  assert.match(m12Row, /M12-10.*Fresh Host.*21/s,
+    "M12 row must include the M12-10 Fresh Host release and current 21-tool truth");
+  assert.doesNotMatch(m12Row, /当前 MCP 工具数升至 23/,
+    "M12 row must not retain the pre-M12-10 current tool-count claim");
+  assert.match(roadmap, /PASS_M12_10_FRESH_HOST_PROGRESSIVE_DISCLOSURE/,
+    "roadmap must record the M12-10 Fresh Host verdict");
+});
