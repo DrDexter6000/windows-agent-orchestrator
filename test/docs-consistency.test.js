@@ -1174,7 +1174,7 @@ test("M12-9 docs: executionProfileId is a TOP-LEVEL run_dispatch input; inline v
   }
 });
 
-test("M12-9 roadmap records final durable Lead decisions and exact-artifact verification truth", () => {
+test("M12-9 roadmap records durable decisions, exact-artifact truth, and Fresh Host release acceptance", () => {
   const roadmap = read("docs/roadmap.md");
   assert.ok(!/M12-9 已实现（本地，待 Lead 验收）/.test(roadmap),
     "roadmap 不得保留已经过时的待 Lead 验收状态");
@@ -1201,8 +1201,11 @@ test("M12-9 roadmap records final durable Lead decisions and exact-artifact veri
     && /tooling_invalid/.test(roadmap)
     && /同一已提交 artifact/.test(roadmap),
     "roadmap 必须同时保留原超时与同一 artifact 审计重验通过的真相");
-  assert.ok(/不声称已发布|未发布/.test(roadmap),
-    "roadmap 不得把本地接受误写为已发布");
+  assert.ok(/c3e9e5304a26515086ea9fad3f2b6e6f1f6a7654/.test(roadmap)
+    && /23 个 MCP tools/.test(roadmap)
+    && /profile_inline_conflict/.test(roadmap)
+    && /PASS_M12_9_FRESH_HOST_CONTRACT_AND_OUTCOME_ACCEPTANCE/.test(roadmap),
+    "roadmap 必须记录精确发布 SHA、Fresh Host 工具面、合同冲突证据与最终 verdict");
 });
 
 // ============================================================
