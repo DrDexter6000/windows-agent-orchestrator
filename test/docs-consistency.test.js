@@ -1947,8 +1947,8 @@ test("M12-11 closeout: roadmap records local unified wait and termination truth"
   const roadmap = read("docs/roadmap.md");
   assert.match(roadmap, /PASS_M12_11_LOCAL_UNIFIED_WAIT_TERMINATION_SEMANTICS/,
     "roadmap must record the M12-11 local-candidate verdict");
-  assert.match(roadmap, /本地候选[\s\S]*尚未发布或完成 Fresh Host 验收/,
-    "roadmap must not present M12-11 as released or Fresh Host loaded");
+  assert.match(roadmap, /PASS_M12_11_12_FRESH_HOST_SELF_DESCRIBING_WAIT_RESULTS/,
+    "roadmap must record the superseding M12-11/12 Fresh Host verdict");
   assert.match(roadmap, /run_20260803180538526wqiofq/,
     "roadmap records the M12-11 root run");
   assert.match(roadmap, /run_20260803191330702am48mx/,
@@ -1970,7 +1970,9 @@ test("M12-12 closeout: roadmap records local self-describing result truth", () =
   assert.match(roadmap, /run_20260803200250648hhmiex[\s\S]*durable rejected[\s\S]*run_20260803205951066j3txpq[\s\S]*durable accepted/,
     "roadmap records the rejected root and accepted same-session correction");
   assert.match(roadmap, /本段只记录本地候选，尚未发布或完成 Fresh Host 验收/,
-    "roadmap must not present M12-12 as released or Fresh Host loaded");
+    "roadmap retains the frozen local-candidate evidence as history");
+  assert.match(roadmap, /main@dc981ca3e4088ad2bbc1e00040d37ad61fa0f95f[\s\S]*精确 \*\*21 个 MCP tools\*\*[\s\S]*wao:\/\/semantics\/delivery\.verification_passed/,
+    "roadmap records the released SHA, Fresh Host tool count, and semantic detail resource proof");
   assert.match(roadmap, /canonical `182\/182` files、0 fail/,
     "roadmap records the frozen-candidate canonical result");
 });
