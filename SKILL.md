@@ -76,7 +76,7 @@ After `stop`, trust the terminal result and transcript evidence, including stop 
 
 See `references/safety-incidents.md` before unattended or stop-sensitive work. Read `references/opencode-pitfalls.md` only when using opencode.
 ## Minimal MCP Loop
-WAO exposes 23 MCP tools. The minimal control loop uses the relevant control tools below; `playbook_list`/`playbook_get` are optional read-only catalog reads that sit **outside** the dispatch loop and are never required before `run_dispatch`.
+WAO exposes 23 MCP tools by default (`full` profile). A Host may instead opt into the smaller **`lead` profile (18 tools)** via the startup param `--tool-profile lead` (see `docs/usage.md §工具面 profile`): it is a protocol-neutral, startup-fixed presentation surface — NOT a permission/routing layer and NOT a host adapter — so the Lead operates identically either way. `lead` hides 5 tools already covered by others in the set (`workspace_select`, `run_dispatch_contract_check`, `run_wait`, `playbook_list`, `playbook_get`) and keeps every `availableDrilldowns` carrier callable; every tool's schema/semantics are byte-identical across profiles, so no separate `lead` table is needed. Default is `full` and requires no flag; switching profiles restarts the Host. The minimal control loop uses the relevant control tools below; `playbook_list`/`playbook_get` are optional read-only catalog reads that sit **outside** the dispatch loop and are never required before `run_dispatch`.
 
 | Tool | Side effect | Purpose |
 |---|---|---|

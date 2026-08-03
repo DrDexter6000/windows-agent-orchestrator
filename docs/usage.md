@@ -438,6 +438,40 @@ WAO 是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude De
 
 **Host 注册说明**：`npm run mcp` 仅用于在 WAO repo 内手工 smoke；正式 host 注册应指向 Node shim 和 stdio entrypoint 的**绝对路径**，并为 registry 和 runDir 指定绝对路径——MCP host 的启动 cwd 不保证是 WAO repo。host 配置语法由 host 自己负责。注册后若当前会话未发现工具，重启或重载 host。Provider credential 必须由 host 通过其安全 env inheritance/allowlist 提供——不把 credential value 写入 repo、worker prompt 或 MCP args。WAO 不接管 host-global auth。
 
+#### 工具面 profile（`--tool-profile full|lead`，M12-10，protocol-neutral）
+
+任何 Lead Host 都能通过**一个 Host 中立的启动参数**选择更小的日常 WAO 工具面，降低上下文/认知成本。这是一个**静态呈现层**：只在 server 构造时选定、连接建立后冻结、运行期不可变；它**不是**权限层、**不是**路由层、**不按** host/runtime 名分支（Claude/Codex/Kimi/OpenCode 一视同仁，无任何 `if host==…`）。每个工具的 `name`/`description`/`inputSchema`/`outputSchema`/`annotations` 在两个 profile 下**逐字节相同**——profile 只决定 Host 看到并能调用哪些工具。
+
+- **`full`（默认，23 个工具）**：不传 `--tool-profile` 时即 `full`，暴露全部 23 个工具。**对任何既有 Host 配置零行为变化**——旧命令、旧 JSON 配置原样可用，工具清单完全不变。
+- **`lead`（18 个工具，显式 opt-in）**：隐藏 5 个已被 lead 集合内其他工具覆盖的工具——`workspace_select`（`lead_preflight(workspaceRoot)` 已覆盖项目选择）、`run_dispatch_contract_check`（可选 advisory precheck）、`run_wait`（`run_await_result` 已覆盖默认等待）、`playbook_list`/`playbook_get`（可选只读 catalog）。所有 `DRILLDOWN_TOOLS` 闭集成员（6 个：`run_status`/`run_activity`/`run_collect`/`run_delivery`/`run_delivery_review`/`run_diagnose`）均在 lead 集合内，故 `availableDrilldowns` 渐进式披露提示永远不会广告一个被隐藏的工具。
+
+**fail-closed**：`--tool-profile` 缺失值、重复、空值或非 `full`/`lead` 的未知值一律启动失败（固定安全致命文本 `[wao-mcp] fatal: startup failed`，不回显值、不静默回退 full）。它是**加性**参数，不改变 `--registry`/`--run-dir`/`--workspace-root` 语义。
+
+在任意 Host 的 stdio 配置里加一行即可（以通用 JSON 为例；OpenCode 项目级 `command` 数组同理追加）：
+
+```json
+{
+  "mcpServers": {
+    "wao": {
+      "command": "node",
+      "args": ["C:\\path\\to\\wao\\scripts\\wao-node.cjs",
+               "C:\\path\\to\\wao\\src\\mcp\\stdio.js",
+               "--registry", "C:\\path\\to\\wao\\config\\agents.json",
+               "--run-dir", "C:\\path\\to\\wao\\runs",
+               "--tool-profile", "lead"]
+    }
+  }
+}
+```
+
+要点：
+
+- **默认即 full**：省略 `--tool-profile` 与显式 `--tool-profile full` 完全等价（逐字节相同的工具清单、顺序与 wire）。无需为既有配置做任何迁移。
+- **切换需重启 Host**：profile 在连接建立时冻结，运行期不可变。要切回 full，删除该参数并**启动新的 Host 进程**——已运行的旧进程不会热加载新工具面。
+- **lead 下缺失的工具**：被隐藏的 5 个工具在 lead 下不出现，对其 `tools/call` 返回 fail-closed 的 "not found"（handler 从不执行，service 从不被调用）；它们的全部能力由 lead 集合内的对应工具覆盖。
+- **恢复全部能力**：任何时候需要被隐藏的工具，重启 Host 并使用 `--tool-profile full`（或省略参数）即可——没有任何能力被永久移除或弱化。两个 profile 下工具的输出校验、read/write 注解与 Lead 决策权完全一致。
+- **未做 host 适配**：本参数对所有 Host 行为相同。若某 Host 不支持本参数也无关——`full` 仍是默认，既有配置零变化。
+
 在 WAO repo 内手工 smoke（所有生产入口走 Node v22 shim）：
 
 ```bash

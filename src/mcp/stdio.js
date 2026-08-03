@@ -28,6 +28,7 @@ import process from "node:process";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { createWaoMcpServer } from "./server.js";
+import { isKnownProfileValue } from "./toolProfiles.js";
 
 const DEFAULT_REGISTRY = "config/agents.json";
 const DEFAULT_RUN_DIR = "runs";
@@ -89,8 +90,9 @@ async function loadGlobalWaitTimeout(configOverride) {
 export { loadGlobalWaitTimeout as loadGlobalWaitTimeoutForTest };
 
 /**
- * Parse --registry/--run-dir/--workspace-root from argv as discrete flag pairs.
- * Structural parse only — never shell-joins. Unknown flags are ignored.
+ * Parse --registry/--run-dir/--workspace-root/--tool-profile from argv as
+ * discrete flag pairs. Structural parse only — never shell-joins. Unknown flags
+ * are ignored.
  *
  * --workspace-root has strict fail-closed semantics:
  *   - Missing value (flag at end of argv): throw
@@ -100,17 +102,30 @@ export { loadGlobalWaitTimeout as loadGlobalWaitTimeoutForTest };
  *   The throw propagates to main().catch() which prints the fixed startup fatal
  *   text — the path value is never printed.
  *
+ * --tool-profile (M12-10) is the protocol-neutral static tool surface selector.
+ * It is ADDITIVE — it never changes --registry/--run-dir/--workspace-root
+ * semantics. Strict fail-closed:
+ *   - Missing value (flag at end of argv): throw
+ *   - Empty string or whitespace-only value: throw
+ *   - Duplicate flag: throw
+ *   - Value outside the closed set {full, lead}: throw
+ *   Absent flag => toolProfile undefined, and the server resolves that to "full"
+ *   (the default 23-tool surface — zero behavior change for any existing Host).
+ *   The throw propagates to main().catch() which prints the fixed startup fatal
+ *   text — the offending value is never printed.
+ *
  * --registry and --run-dir keep their existing lenient behavior (last-wins,
  * missing value ignored) to avoid regressions in existing host configurations.
  *
  * @param {string[]} argv
- * @returns {{registryPath: string, runDir: string, workspaceRoot: string|undefined}}
- * @throws {Error} on malformed --workspace-root (missing/empty/whitespace/relative/duplicate)
+ * @returns {{registryPath: string, runDir: string, workspaceRoot: string|undefined, toolProfile: string|undefined}}
+ * @throws {Error} on malformed --workspace-root or --tool-profile
  */
 export function parseMcpArgs(argv) {
-  const out = { registryPath: DEFAULT_REGISTRY, runDir: DEFAULT_RUN_DIR, workspaceRoot: undefined };
+  const out = { registryPath: DEFAULT_REGISTRY, runDir: DEFAULT_RUN_DIR, workspaceRoot: undefined, toolProfile: undefined };
   if (!Array.isArray(argv)) return out;
   let workspaceRootSeen = false;
+  let toolProfileSeen = false;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--registry" && i + 1 < argv.length) {
@@ -118,6 +133,27 @@ export function parseMcpArgs(argv) {
       i += 1;
     } else if (arg === "--run-dir" && i + 1 < argv.length) {
       out.runDir = argv[i + 1];
+      i += 1;
+    } else if (arg === "--tool-profile") {
+      // Duplicate detection — fail closed on ambiguity.
+      if (toolProfileSeen) {
+        throw new Error("tool-profile: duplicate flag");
+      }
+      toolProfileSeen = true;
+      // Missing value — flag at end of argv with no following argument.
+      if (i + 1 >= argv.length) {
+        throw new Error("tool-profile: missing value");
+      }
+      const value = argv[i + 1];
+      // Empty or whitespace-only value.
+      if (typeof value !== "string" || value.trim().length === 0) {
+        throw new Error("tool-profile: empty value");
+      }
+      // Closed-set membership — never silently coerce an unknown value to full.
+      if (!isKnownProfileValue(value)) {
+        throw new Error("tool-profile: unknown value");
+      }
+      out.toolProfile = value;
       i += 1;
     } else if (arg === "--workspace-root") {
       // Duplicate detection — fail closed on ambiguity.
@@ -156,7 +192,7 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  const { registryPath, runDir, workspaceRoot } = parsed;
+  const { registryPath, runDir, workspaceRoot, toolProfile } = parsed;
   // M10-pre2: workspaceRoot has already been validated by parseMcpArgs
   // (absolute, non-empty, non-duplicate). Resolve it for canonical form.
   let validatedWorkspaceRoot;
@@ -170,6 +206,10 @@ async function main() {
     registryPath: resolve(registryPath),
     runDir: resolve(runDir),
     globalWaitTimeout,
+    // M12-10: toolProfile is undefined when no --tool-profile flag is present;
+    // the server then resolves the default full 23-tool surface. Only forward
+    // it when explicitly set.
+    ...(toolProfile ? { toolProfile } : {}),
     ...(validatedWorkspaceRoot ? { workspaceRoot: validatedWorkspaceRoot } : {}),
   });
   const transport = new StdioServerTransport();

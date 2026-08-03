@@ -37,6 +37,7 @@
       "m12-9-dispatchContractCheck.test.js",
       "m12-9-runAwaitOutcome.test.js",
       "m12-9-smoke.test.js",
+      "m12-10-tool-surface.test.js",
       "mcpPlaybook.test.js",
       "mcpRunCollect.test.js",
       "mcpRunContinue.test.js",
