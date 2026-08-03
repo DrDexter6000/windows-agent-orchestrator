@@ -126,7 +126,8 @@ test("M9-5B-03: output is safe projection, no raw fact/error/path/command leak",
     // legitimate output field; it is null here because the fixture is provider_auth
     // without a closed-set code, so the fail-closed projection nulls it.
     // M12-8B: availableDrilldowns added (bounded progressive-disclosure metadata).
-    const allowedKeys = new Set(["runId", "state", "terminal", "category", "code", "signalEventTypes", "signalCount", "signalsTruncated", "availableDrilldowns"]);
+    // M12-12: semanticNotes added (REQUIRED self-describing notes; see wao://semantics).
+    const allowedKeys = new Set(["runId", "state", "terminal", "category", "code", "signalEventTypes", "signalCount", "signalsTruncated", "availableDrilldowns", "semanticNotes"]);
     assert.equal(parsed.code, null, "provider_auth without a closed-set code projects to null");
     for (const k of Object.keys(parsed)) {
       assert.ok(allowedKeys.has(k), `unexpected key: ${k}`);

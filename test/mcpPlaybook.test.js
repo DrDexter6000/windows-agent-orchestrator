@@ -21,8 +21,10 @@
 // are unchanged. No workspace binding is required.
 //
 // Contracts under test:
-//   R-01 — resources/list advertises summary + four per-id detail resources.
-//   R-02 — resources/templates/list advertises exactly the one detail template.
+//   R-01 — resources/list advertises summary + four per-id detail resources
+//          (subset contract; other read-only resources may coexist).
+//   R-02 — resources/templates/list advertises the wao://playbooks/{id} template
+//          (subset contract; other read-only detail templates may coexist).
 //   R-03 — resources/read of the summary returns SSOT-validated summary JSON.
 //   R-04 — resources/read of a known id returns the full playbook, id-bound,
 //          byte-equal to the catalog SSOT.
@@ -75,10 +77,11 @@ function readText(readResult) {
 }
 
 // =====================================================================
-// R-01 — resources/list advertises summary + four per-id detail resources.
+// R-01 — resources/list advertises summary + four per-id detail resources
+//        (subset contract; other read-only resources may coexist).
 // =====================================================================
 
-test("R-01: resources/list has summary + four per-id detail resources (5 total)", async () => {
+test("R-01: resources/list has summary + four per-id detail resources (playbook subset)", async () => {
   const server = createWaoMcpServer({ registryPath: "/x", runDir: "/x" });
   const client = await buildInMemoryClient(server);
   try {
@@ -90,8 +93,16 @@ test("R-01: resources/list has summary + four per-id detail resources (5 total)"
     for (const id of PLAYBOOK_IDS) {
       assert.ok(uris.has(detailUri(id)), `detail resource for ${id} present`);
     }
-    // Exactly summary + four details = five (no extras, no dynamic leakage).
-    assert.equal(resources.length, 5, "exactly 5 resources advertised");
+    // The playbook resources are present as a subset (summary + four details =
+    // five). Other read-only resources (e.g. M12-12 wao://semantics) may also be
+    // advertised; this file only owns the playbook surface, so a subset check is
+    // the honest contract.
+    const playbookUris = [SUMMARY_URI, ...PLAYBOOK_IDS.map(detailUri)];
+    for (const u of playbookUris) {
+      assert.ok(uris.has(u), `${u}: playbook resource present as subset`);
+    }
+    assert.ok(resources.length >= playbookUris.length,
+      "playbook resources present (additional read-only resources allowed)");
   } finally {
     await client.close();
     await server.close();
@@ -99,17 +110,23 @@ test("R-01: resources/list has summary + four per-id detail resources (5 total)"
 });
 
 // =====================================================================
-// R-02 — resources/templates/list advertises exactly the one detail template.
+// R-02 — resources/templates/list advertises the wao://playbooks/{id} template
+//        (subset contract; other read-only detail templates may coexist).
 // =====================================================================
 
-test("R-02: resources/templates/list advertises exactly the wao://playbooks/{id} template", async () => {
+test("R-02: resources/templates/list advertises the wao://playbooks/{id} template (playbook subset)", async () => {
   const server = createWaoMcpServer({ registryPath: "/x", runDir: "/x" });
   const client = await buildInMemoryClient(server);
   try {
     const { resourceTemplates } = await client.listResourceTemplates();
     const uris = resourceTemplates.map((t) => t.uriTemplate);
     assert.ok(uris.includes("wao://playbooks/{id}"), "detail template present");
-    assert.equal(resourceTemplates.length, 1, "exactly one template advertised");
+    // The playbook detail template is advertised as a subset. Other read-only
+    // detail templates (e.g. M12-12 wao://semantics/{id}) may also be advertised;
+    // this file only owns the playbook surface, so a subset check is the honest
+    // contract.
+    assert.ok(resourceTemplates.length >= 1,
+      "playbook detail template present (additional read-only templates allowed)");
   } finally {
     await client.close();
     await server.close();

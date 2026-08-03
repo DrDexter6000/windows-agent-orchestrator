@@ -653,6 +653,8 @@ test("M11-12B-P7: full run_delivery output for a failed delivery has the exact e
     "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory", "candidateKind",
     // M12-8B: bounded progressive-disclosure metadata (additive).
     "availableDrilldowns",
+    // M12-12: REQUIRED self-describing notes (additive; see wao://semantics).
+    "semanticNotes",
   ]);
   assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys,
     `wire field set mismatch; got ${Object.keys(parsed).sort()}`);

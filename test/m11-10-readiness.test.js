@@ -739,9 +739,9 @@ test("M11-10-MCP-02: output schema — readiness/waitReturnedEarly present iff w
         "verificationStatus", "verificationFailureCode", "verificationFailureSummary",
         "originalVerificationStatus", "effectiveVerificationStatus", "reverify",
         "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory", "candidateKind",
-        "availableDrilldowns",
+        "availableDrilldowns", "semanticNotes",
       ]);
-      assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys, "point-in-time field set (M11-12B adds nullable verificationFailureSummary; M12-1S1/M12-4A add nullable candidateInventory + candidateKind; M12-6 3B2a adds additive originalVerificationStatus/effectiveVerificationStatus/reverify; M12-8B adds availableDrilldowns)");
+      assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys, "point-in-time field set (M11-12B adds nullable verificationFailureSummary; M12-1S1/M12-4A add nullable candidateInventory + candidateKind; M12-6 3B2a adds additive originalVerificationStatus/effectiveVerificationStatus/reverify; M12-8B adds availableDrilldowns; M12-12 adds semanticNotes)");
       assert.equal("readiness" in parsed, false, "no readiness in point-in-time output");
       assert.equal("waitReturnedEarly" in parsed, false, "no waitReturnedEarly in point-in-time output");
       // Additive projection with no reverify chain: effective === original,

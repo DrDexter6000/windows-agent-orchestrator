@@ -163,6 +163,22 @@ import {
   DRILLDOWN_COSTS,
   DRILLDOWN_TOOLS,
 } from "../application/runDrilldowns.js";
+// M12-12: Self-Describing Results. The frozen semantic-note catalog, pure
+// selectors, and hard bounds (entry count + serialized-size cap) live in the
+// ONE shared application module; the schema constants below are built from its
+// exported caps + closed set so the MCP schema and the application enforcement
+// cannot drift (same SSOT pattern as availableDrilldowns). The note text is
+// static — never transcript/provider/path/prompt/command/session content.
+import {
+  selectSemanticNotes,
+  SEMANTIC_NOTE_MAX_ENTRIES,
+  SEMANTIC_NOTE_FIELD_MAX_LEN,
+  SEMANTIC_NOTE_MAX_DOES_NOT_MEAN,
+  SEMANTIC_NOTE_ID_MAX_LEN,
+  SEMANTIC_NOTE_ID_PATTERN,
+  getSemanticSummary,
+  getSemanticNoteById,
+} from "../application/runSemanticsNotes.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
 import { selectSessionWorkspace } from "../application/sessionWorkspace.js";
 import { checkWorkspaceExpectation } from "../application/workspaceExpectation.js";
@@ -660,6 +676,36 @@ const DRILLDOWN_ENTRY = z.object({
 // empty list is a contract violation, never a legitimate result.
 const AVAILABLE_DRILLDOWNS = z.array(DRILLDOWN_ENTRY).min(1).max(DRILLDOWN_MAX_ENTRIES);
 
+// M12-12: Self-Describing Results — the REQUIRED `semanticNotes` field carried
+// by EXACTLY four standalone MCP success results (run_wait, run_await_result,
+// run_delivery, run_diagnose). Every note self-explains a CURRENT fact as plain
+// English with the EXACT three-key shape { id, meaning, doesNotMean }: meaning is
+// one deterministic factual sentence, doesNotMean is 0..2 deterministic factual
+// non-implications. There is no `scope` and no per-entry semanticsRef; the detail
+// URI is mechanical wao://semantics/{id}. Every string is static (chosen by
+// src/application/runSemanticsNotes.js) — never transcript/provider/path/prompt/
+// command/session text. The array is bounded here by SEMANTIC_NOTE_MAX_ENTRIES;
+// the serialized-size cap (2048 bytes) is enforced by the application selector.
+//
+// `id` is a bounded SHAPE here — the frozen namespace pattern + a max length
+// derived from the SSOT (SEMANTIC_NOTE_ID_PATTERN / SEMANTIC_NOTE_ID_MAX_LEN) —
+// NOT the full catalog enum. Serializing a 33+-element zod enum once per output
+// schema dominated the tools/list wire; the bounded shape keeps the wire small.
+// The application SSOT (validateSemanticNote → ID_SET) remains the EXACT
+// catalog-membership authority, and every selector only ever emits catalog ids,
+// so a non-catalog-but-pattern-matching id can never reach a handler result. zod
+// `.regex()` (not refine/superRefine) serializes to a JSON-Schema `pattern`.
+const SEMANTIC_NOTE_ENTRY = z.object({
+  id: z.string().min(1).max(SEMANTIC_NOTE_ID_MAX_LEN).regex(SEMANTIC_NOTE_ID_PATTERN),
+  meaning: z.string().min(1).max(SEMANTIC_NOTE_FIELD_MAX_LEN),
+  doesNotMean: z.array(z.string().min(1).max(SEMANTIC_NOTE_FIELD_MAX_LEN))
+    .min(0).max(SEMANTIC_NOTE_MAX_DOES_NOT_MEAN),
+}).strict();
+
+// 1..SEMANTIC_NOTE_MAX_ENTRIES: every selector returns at least one note, so an
+// empty list is a contract violation, never a legitimate result.
+const SEMANTIC_NOTES = z.array(SEMANTIC_NOTE_ENTRY).min(1).max(SEMANTIC_NOTE_MAX_ENTRIES);
+
 // run_status input: only runId. runDir is server-owned; a model cannot override it.
 const RUN_STATUS_INPUT = z.object({
   runId: z.string().min(1),
@@ -835,6 +881,10 @@ const RUN_DIAGNOSE_OUTPUT = z.object({
   // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
   // deliberately does not carry the field.
   availableDrilldowns: AVAILABLE_DRILLDOWNS,
+  // M12-12: REQUIRED self-describing notes (see SEMANTIC_NOTES). Only the four
+  // standalone tools that own a current outcome/delivery/diagnosis carry them;
+  // the review bundle's nested delivery BASE deliberately does not.
+  semanticNotes: SEMANTIC_NOTES,
 }).strict();
 
 const RUN_DIAGNOSE_ANNOTATIONS = {
@@ -848,7 +898,9 @@ const RUN_DIAGNOSE_DESCRIPTION =
   "Diagnose a run's failure category and signal event types. Read-only, idempotent. " +
   "Returns only safe machine fields (category, event types, counts). Does not return " +
   "raw error text, commands, file paths, or tool payloads. The Lead decides what to " +
-  "do next; this tool gives facts only.";
+  "do next; this tool gives facts only. Each result carries semanticNotes that " +
+  "self-explain the current facts (meaning + doesNotMean); per-note detail: " +
+  "wao://semantics/{id}.";
 
 // ===== run_delivery (read-only query) constants =====
 
@@ -1059,6 +1111,9 @@ const RUN_DELIVERY_OUTPUT = RUN_DELIVERY_OUTPUT_BASE.extend({
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
   // AVAILABLE_DRILLDOWNS).
   availableDrilldowns: AVAILABLE_DRILLDOWNS,
+  // M12-12: REQUIRED self-describing notes (see SEMANTIC_NOTES). Only this
+  // standalone shape carries them; the review bundle embeds the BASE instead.
+  semanticNotes: SEMANTIC_NOTES,
 });
 
 const RUN_DELIVERY_ANNOTATIONS = {
@@ -1077,7 +1132,9 @@ const RUN_DELIVERY_DESCRIPTION =
   "waitMs adds a bounded read-only readiness handshake (workspace-bound, zero transcript " +
   "append) returning a readiness label + waitReturnedEarly; pending-at-deadline is truthful, " +
   "never an error, and the tool never stop/retry/accept/rejects. candidateKind/" +
-  "candidateInventory on a recovery candidate are advisory only.";
+  "candidateInventory on a recovery candidate are advisory only. Each result carries " +
+  "semanticNotes that self-explain the current facts (meaning + doesNotMean); " +
+  "per-note detail: wao://semantics/{id}.";
 
 /**
  * M11-12B: project a safe, factual verification-failure summary from the raw
@@ -1191,6 +1248,18 @@ function selectDeliveryDrilldowns(payload) {
     terminalState: payload.terminalState,
     verificationStatus: payload.verificationStatus ?? null,
     acceptanceStatus: payload.acceptanceStatus ?? null,
+    readiness: payload.readiness ?? null,
+    deliveryFailureCode: payload.deliveryFailure?.code ?? null,
+  });
+}
+// M12-12: one shared semantic-note projection for BOTH delivery payload paths
+// (the point-in-time query and the waitMs readiness handshake) so the notes
+// cannot diverge between them. Reads only already-projected payload facts.
+function selectDeliverySemanticNotes(payload) {
+  return selectSemanticNotes("run_delivery", {
+    deliveryAvailable: payload.deliveryAvailable,
+    deliveryRequested: payload.deliveryRequested ?? null,
+    verificationStatus: payload.verificationStatus ?? null,
     readiness: payload.readiness ?? null,
     deliveryFailureCode: payload.deliveryFailure?.code ?? null,
   });
@@ -1737,6 +1806,8 @@ const RUN_WAIT_OUTPUT = z.object({
   observation: OBSERVATION_FACT,
   termination: TERMINATION_FACT.nullable(),
   availableDrilldowns: AVAILABLE_DRILLDOWNS,
+  // M12-12: REQUIRED self-describing notes (see SEMANTIC_NOTES).
+  semanticNotes: SEMANTIC_NOTES,
 }).strict();
 
 const RUN_WAIT_ANNOTATIONS = {
@@ -1760,7 +1831,8 @@ const RUN_WAIT_DESCRIPTION =
   "this call returns no result (transport dropped/timed out), the observation is unknown — these " +
   "read-only tools did NO control-plane mutation and did not stop anything. Re-read point-in-" +
   "time via run_await_result(waitMs:0) or run_status; never infer liveness or a stop from " +
-  "transport loss.";
+  "transport loss. Each result carries semanticNotes that self-explain the current facts " +
+  "(meaning + doesNotMean); per-note detail: wao://semantics/{id}.";
 
 // ===== run_await_result (M12-3 read-only composite) constants =====
 //
@@ -1876,6 +1948,8 @@ const RUN_AWAIT_RESULT_OUTPUT = z.object({
   // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
   // deliberately does not carry the field.
   availableDrilldowns: AVAILABLE_DRILLDOWNS,
+  // M12-12: REQUIRED self-describing notes (see SEMANTIC_NOTES).
+  semanticNotes: SEMANTIC_NOTES,
 }).strict();
 
 const RUN_AWAIT_RESULT_ANNOTATIONS = {
@@ -1901,7 +1975,8 @@ const RUN_AWAIT_RESULT_DESCRIPTION =
   "out), the observation is unknown — these read-only tools did NO control-plane mutation and " +
   "did not stop anything. Re-read point-in-time via run_await_result(waitMs:0) or run_status; " +
   "never infer liveness or a stop from transport loss. Atomic tools (run_wait/run_collect/" +
-  "run_status) remain available.";
+  "run_status) remain available. Each result carries semanticNotes that self-explain the " +
+  "current facts (meaning + doesNotMean); per-note detail: wao://semantics/{id}.";
 
 // ===== run_activity (M12-8 read-only activity timeline) constants =====
 //
@@ -2087,6 +2162,22 @@ const PLAYBOOK_MIME = "application/json";
 // M12-10c), so the fail-closed vocabulary cannot drift back to removed-tool names.
 const PLAYBOOK_SUMMARY_ERROR_TEXT = "playbook summary failed";
 const PLAYBOOK_DETAIL_ERROR_TEXT = "playbook detail failed";
+
+// M12-12: Self-Describing Results — read-only MCP RESOURCES for the semantic-note
+// catalog. A Lead discovers and reads them via resources/list + resources/read:
+//   wao://semantics        — static summary (every note id + meaning).
+//   wao://semantics/{id}   — per-id full detail (id + meaning + doesNotMean),
+//                            registered ONLY as a ResourceTemplate (NOT a static
+//                            resource per id — the template serves every id).
+// Unlike playbooks, there is no per-id static resource: the {id} template handles
+// known and unknown ids alike. Unknown/malformed ids collapse to a fixed safe
+// text inside one try/catch — no err.message, id, path, or catalog content is
+// echoed. The summary/template use the SAME catalog SSOT as the note selectors.
+const SEMANTICS_SUMMARY_URI = "wao://semantics";
+const SEMANTICS_DETAIL_TEMPLATE = "wao://semantics/{id}";
+const SEMANTICS_MIME = "application/json";
+const SEMANTICS_SUMMARY_ERROR_TEXT = "semantics summary failed";
+const SEMANTICS_DETAIL_ERROR_TEXT = "semantics detail failed";
 
 /**
  * Create a WAO MCP server with registry_list, run_dispatch, run_status, run_collect, run_diagnose, run_delivery, run_delivery_decide.
@@ -3236,6 +3327,13 @@ export function createWaoMcpServer({
           terminal: payload.terminal,
           category: payload.category,
         });
+        // M12-12: self-describing notes — a pure function of the already-projected
+        // safe fields. Attached immediately before the strict parse so any
+        // out-of-set value collapses to the fixed safe error with no partial
+        // structuredContent (same trust boundary as availableDrilldowns).
+        payload.semanticNotes = selectSemanticNotes("run_diagnose", {
+          category: payload.category,
+        });
         // M12-8B closeout: the strict output schema is the trust boundary —
         // return the PARSED safe object. Any unknown field or out-of-set value
         // collapses to the fixed safe error with no partial structuredContent,
@@ -3304,6 +3402,9 @@ export function createWaoMcpServer({
           // M12-8B: bounded progressive-disclosure metadata (wait path — same
           // projection as the point-in-time path via selectDeliveryDrilldowns).
           payload.availableDrilldowns = selectDeliveryDrilldowns(payload);
+          // M12-12: self-describing notes (same shared projection as the
+          // point-in-time path via selectDeliverySemanticNotes).
+          payload.semanticNotes = selectDeliverySemanticNotes(payload);
           const parsed = RUN_DELIVERY_OUTPUT.parse(payload);
           return {
             content: [{ type: "text", text: JSON.stringify(parsed) }],
@@ -3326,6 +3427,8 @@ export function createWaoMcpServer({
         const payload = buildRunDeliveryPayload(runId, delivery);
         // M12-8B: bounded progressive-disclosure metadata (point-in-time path).
         payload.availableDrilldowns = selectDeliveryDrilldowns(payload);
+        // M12-12: self-describing notes (point-in-time path).
+        payload.semanticNotes = selectDeliverySemanticNotes(payload);
         const parsed = RUN_DELIVERY_OUTPUT.parse(payload);
         return {
           content: [{ type: "text", text: JSON.stringify(parsed) }],
@@ -3635,6 +3738,15 @@ export function createWaoMcpServer({
           terminal: payload.terminal,
           liveness: payload.liveness,
         });
+        // M12-12: self-describing notes — a pure function of the M12-11
+        // observation outcome + termination source. Attached immediately before
+        // the strict parse (same trust boundary as availableDrilldowns).
+        payload.semanticNotes = selectSemanticNotes("run_wait", {
+          observationOutcome: payload.observationOutcome,
+          outcome: payload.observation?.outcome,
+          terminal: payload.terminal,
+          terminationSource: payload.termination?.source ?? null,
+        });
 
         // M11-8B closeout: return the PARSED safe object.
         const parsed = RUN_WAIT_OUTPUT.parse(payload);
@@ -3760,6 +3872,21 @@ export function createWaoMcpServer({
           outcomeReadiness: payload.outcome?.delivery?.readiness ?? null,
           outcomeVerificationStatus: payload.outcome?.delivery?.verificationStatus ?? null,
           outcomeDeliveryFailureCode: payload.outcome?.delivery?.failureCode ?? null,
+        });
+        // M12-12: self-describing notes — a pure function of the M12-11
+        // observation outcome + termination source, plus (on a terminal run) the
+        // M12-9 outcome diagnosis category + delivery facts. Attached immediately
+        // before the strict parse (same trust boundary as availableDrilldowns).
+        payload.semanticNotes = selectSemanticNotes("run_await_result", {
+          observationOutcome: payload.observationOutcome,
+          outcome: payload.observation?.outcome,
+          terminal: payload.terminal,
+          terminationSource: payload.termination?.source ?? null,
+          diagnosisCategory: payload.outcome?.diagnosis?.category ?? null,
+          deliveryReadiness: payload.outcome?.delivery?.readiness ?? null,
+          deliveryVerificationStatus: payload.outcome?.delivery?.verificationStatus ?? null,
+          deliveryFailureCode: payload.outcome?.delivery?.failureCode ?? null,
+          deliveryRequested: payload.outcome?.delivery?.requested ?? null,
         });
 
         const parsed = RUN_AWAIT_RESULT_OUTPUT.parse(payload);
@@ -3912,6 +4039,57 @@ export function createWaoMcpServer({
       mimeType: PLAYBOOK_MIME,
     },
     async (uri, variables) => readPlaybookDetail(uri, variables.id),
+  );
+
+  // ===== M12-12 semantic-notes catalog resources (read-only) =====
+  //
+  // A Lead discovers the self-describing note catalog via resources/list +
+  // resources/read. The summary lists every note id + meaning; the {id} template
+  // serves the full three-key note for any id. There is NO per-id static resource
+  // (the template handles all ids). Every read validates through the catalog SSOT
+  // and collapses any unknown/malformed id to a fixed safe text inside one
+  // try/catch — no err.message, id, path, or catalog content is echoed.
+
+  // --- summary resource: every note id + meaning, in SSOT order. ---
+  mcp.registerResource(
+    "semantics-summary",
+    SEMANTICS_SUMMARY_URI,
+    {
+      description: "Self-describing result note catalog: every semanticNote id with its meaning. Read-only; full detail per note at wao://semantics/{id}.",
+      mimeType: SEMANTICS_MIME,
+    },
+    async (uri) => {
+      try {
+        const semantics = getSemanticSummary();
+        return { contents: [{ uri: uri.href, mimeType: SEMANTICS_MIME, text: JSON.stringify({ semantics }) }] };
+      } catch {
+        return { contents: [{ uri: uri.href, mimeType: "text/plain", text: SEMANTICS_SUMMARY_ERROR_TEXT }] };
+      }
+    },
+  );
+
+  // --- per-id detail: a ResourceTemplate only (NO static resource per id). ---
+  // A known id resolves to the full validated three-key note; an unknown/malformed
+  // id reaches the template, getSemanticNoteById returns null, and the fixed safe
+  // text is returned — the requested id is never echoed.
+  mcp.registerResource(
+    "semantics-detail",
+    new ResourceTemplate(SEMANTICS_DETAIL_TEMPLATE, { list: undefined }),
+    {
+      description: "A self-describing result note by id (full detail: meaning + doesNotMean). Unknown ids return a fixed safe error.",
+      mimeType: SEMANTICS_MIME,
+    },
+    async (uri, variables) => {
+      try {
+        const note = getSemanticNoteById(variables?.id);
+        if (!note) {
+          return { contents: [{ uri: uri.href, mimeType: "text/plain", text: SEMANTICS_DETAIL_ERROR_TEXT }] };
+        }
+        return { contents: [{ uri: uri.href, mimeType: SEMANTICS_MIME, text: JSON.stringify({ note }) }] };
+      } catch {
+        return { contents: [{ uri: uri.href, mimeType: "text/plain", text: SEMANTICS_DETAIL_ERROR_TEXT }] };
+      }
+    },
   );
 
   // ===== run_delivery_review (M11-3C workspace-bound read-only diff projection) =====

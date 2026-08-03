@@ -1296,6 +1296,21 @@ npm run cli -- playbook show <id> --format json # { playbook: { ...完整 Playbo
 
 CLI 只做 argv/format/console，数据逻辑委托同一 `application/playbookCatalog.js` service，因此 CLI `--format json` 与 MCP resource content 语义精确一致。unknown/malformed id 透传 M11-2A 固定 typed error（`PlaybookNotFoundError`/`PlaybookValidationError`），不输出 raw catalog/path。
 
+### MCP `semanticNotes` + resources `wao://semantics`（Self-Describing Results，M12-12）
+
+恰好四个 standalone 只读成功结果——`run_wait`/`run_await_result`/`run_delivery`/`run_diagnose`——携带 REQUIRED `semanticNotes`（1..4 条）。每条恰好三键 `{ id, meaning, doesNotMean }`：`id` 是冻结的 namespaced 闭集值（`observation.*`/`termination.*`/`delivery.*`/`diagnosis.*`），`meaning` 是一句确定性事实，`doesNotMean` 是 0..2 条确定性非含义。**没有** `scope` 字段、**没有** per-entry `semanticsRef`；详情 URI 机械派生 `wao://semantics/{id}`。
+
+notes 完全由既有机器事实决定（M12-11 observation outcome / termination source、diagnosis category、delivery readiness / verification status），由单一纯 SSOT `src/application/runSemanticsNotes.js` 选择——**永不**回显 transcript/provider/path/prompt/command/session，**永不**建议 accept/reject/repackage/stop/retry/dispatch。关键不变量：`observation.read_failure` **不**产生任何终止 note；delivery note 明确 verification passed **不是** Lead acceptance；diagnosis note 只陈述事实、不给处方。`run_delivery_review_bundle` 嵌入的 nested delivery BASE **不含** `semanticNotes`。
+
+两个只读 resources（`resources/read`，mimeType `application/json`）：
+
+```
+wao://semantics            → { semantics: [{ id, meaning }] }                 // summary：每个 id + meaning（无 doesNotMean）
+wao://semantics/{id}       → { note: { id, meaning, doesNotMean } }           // 详情：单条完整 note
+```
+
+`resources/list` 返回 summary resource（`wao://semantics`）；`resources/templates/list` 返回 `wao://semantics/{id}` 模板。**不**把每个 detail id 注册为独立静态 resource。读取委托同一 `runSemanticsNotes.js` SSOT。未知/畸形 id 与 service 失败折叠为**固定安全文本**（`semantics summary failed`（summary）/ `semantics detail failed`（detail，含未知 id）），不回显请求 id 或目录原始内容——唯一例外是协议要求回显 caller 提供的 `uri`。
+
 ---
 
 ## 五、常见问题

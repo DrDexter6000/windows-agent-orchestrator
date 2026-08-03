@@ -409,7 +409,22 @@ const RED_23_WIRE = 75492;
 // Ceiling re-frozen to the new achieved value (69031 bytes: 21 tools, desc total
 // 11958). Prior M12-10 value was 65625 (desc total 10642); the ~3.4k delta is
 // the sanctioned M12-11 addition, still well under the 23-tool baseline below.
-const FROZEN_21_WIRE_CEILING = 69031;
+//
+// Re-baselined for M12-12 (Self-Describing Results): the four standalone
+// observation/delivery/diagnosis tools (run_wait, run_await_result, run_delivery,
+// run_diagnose) gained the REQUIRED `semanticNotes` array — a 1..4-entry array of
+// three-key notes plus a concise description sentence on each. No new tools, no
+// validation removed, no hidden tools.
+//
+// M12-12 wire correction: the note `id` is a BOUNDED SHAPE in the output schema —
+// the frozen namespace pattern + max length derived from the SSOT — NOT the full
+// catalog enum. Serializing a 33+-element zod enum once per output schema had
+// pushed the wire to 74559; the bounded shape (zod `.regex()` → JSON-Schema
+// `pattern`, no enum) drops it back to 71495 while keeping exact three-key strict
+// response parsing and the application SSOT as the catalog-membership authority.
+// Ceiling re-frozen to the new achieved value (71495 bytes: 21 tools). The 21-tool
+// wire (71495) remains below the 23-tool baseline (75492) with comfortable margin.
+const FROZEN_21_WIRE_CEILING = 71495;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
