@@ -72,7 +72,7 @@ On failure, the Lead decides the response from delivery truth + supplementary di
 
 ## Advisor / Auditor Discipline
 
-Lead 必须先自行审查方案和结果。canonical `agentId` `auditor` 是同一个 Chief-Advisor / Auditor 专家（前置 advisory 建议/红队，后置 audit 复核），默认不调用，仅当 Lead 能明确写出尚未解决且确定性证据不足的问题时调用一次窄审查、无新证据不重复。该专家不替代 Lead 的路由权或最终验收；Advisor/Auditor remain conditional.
+Lead 先自审方案和结果。`auditor` 是 Chief-Advisor/Auditor（前置建议/红队，后置复核），仅在语义仍不确定时窄调一次，无新证据不重复。不可用、超时或无 verdict 时可换 `coder_mm`，不阻断 dispatch；仅项目权威明令必审时停为 governance block，不得称 WAO control-plane failure。意见不替代 Lead 裁决；Advisor/Auditor remain conditional.
 
 ## Scorecard
 
