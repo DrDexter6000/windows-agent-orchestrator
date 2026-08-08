@@ -132,11 +132,12 @@ Copy-Item config/agents.example.json config/agents.json
     "coder_low": {
       "backend": "claude-code",
       "provider": {
-        "baseUrl": "https://open.bigmodel.cn/api/anthropic",
-        "apiKeyEnv": "ZHIPU_API_KEY",
-        "model": "glm-5-turbo",
-        "contextWindow": 128000
+        "protocol": "anthropic-compatible",
+        "baseUrl": "https://api.deepseek.com/anthropic",
+        "apiKeyEnv": "DEEPSEEK_API_KEY"
       },
+      "model": { "id": "deepseek-v4-flash", "contextWindow": 1000000 },
+      "reasoning": { "effort": "max" },
       "cwd": "D:/projects/my-app",
       "args": ["--dangerously-skip-permissions"]
     },
@@ -519,7 +520,7 @@ OpenCode（`opencode-ai` npm 包，不是已废弃的 `opencode`）作为 MCP Le
 ```json
 {
   "agents": [
-    { "id": "coder_low", "backend": "claude-code", "model": "glm-5-turbo",
+    { "id": "coder_low", "backend": "claude-code", "model": "deepseek-v4-flash",
       "certification": "certified", "cwd": "/repo",
       "credentialAvailability": "available", "missingCredentialEnvNames": [],
       "providerReadiness": {

@@ -32,15 +32,15 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 **关键区分**：
 - WAO skill 本身**装在 runtime 目录，不装在被开发项目里**。装到项目目录会污染项目（owner 明确要求不污染）。
 - `.wao/` 建在**被开发的目标项目里**（因为它记的是那个项目的开发状态）。
-- agents.json 里 worker 的 `cwd` 是**动态的**——派发时由 Lead 用 `--cwd <目标项目>` 指定，不写死。agents.json 只配 backend/model/认证。
+- worker 的 `cwd` 是**动态的**——CLI 派发时由 Lead 用 `--cwd <目标项目>` 指定；MCP 派发时 workspace 来自 host 授权绑定（`--workspace-root` / `roots/list` / `workspace_select`）。agents.json 只配 backend/model/认证，不写死 cwd。
 
 ## 3. 前置条件检查
 
-在安装前，确认环境满足（不满足的项要先用 WAO 的 doctor 报告给 owner）：
+在安装前，确认环境满足（不满足的项先跑 §4d 的 doctor 报告给 owner——doctor 是建议性报告，不是使用门禁）：
 
-- **Node.js >= 22**（WAO 是 Node ESM，零 npm 依赖）
-- **worker CLI 在 PATH**：至少一个你想调度的 runtime（claude / codex / kimi / opencode）
-- **provider API key**：在 Windows User 环境变量里（ZHIPU_API_KEY / DEEPSEEK_API_KEY / KIMI_API_KEY）
+- **Node.js >= 22**（WAO 是 Node ESM，依赖 `@modelcontextprotocol/sdk` + `zod`，用 `npm install` 安装）
+- **worker CLI 在 PATH**：至少一个你想调度的 runtime（claude / codex / kimi）——**一个 runtime 就够**，不需要全部装齐
+- **认证任选其一**：官方 Claude OAuth（`claude login`）、provider key（`DEEPSEEK_API_KEY` / `ZHIPU_API_KEY`）、`codex login`、或 Kimi Code 登录态——选你有的那一种即可，见 §4c 选择表
 - **WAO 项目目录**：owner 会告诉你 WAO 装在哪（通常是 `D:/projects/windows-agent-orchestrator-poc`）。**这个目录是 WAO 的源码 + 配置所在，不是被开发项目。**
 - **Claude OAuth trap 已隔离**：provider-wrapped claude-code worker（researcher/coder_hq/coder_low）会用 WAO wrapper 设置独立 `CLAUDE_CONFIG_DIR`，避免读取用户 `~/.claude` 里的 `claudeAiOauth` 凭证并覆盖 provider key；auditor 不走 wrapper，仍使用官方 Claude OAuth。
 
@@ -53,8 +53,21 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 > 系统 PATH 里的默认 `node` 可能是 v24，**直接 `node <WAO>/src/cli.js` 会被 version guard 拒绝**；
 > `npm run cli` 走 `scripts/wao-node.cjs`（自动用 v22 shim），是唯一可靠的入口。
 > 下面命令里的 `<WAO目录>` 指 WAO 仓的根路径，`<目标项目>` 指你要开发的项目根。
+>
+> 第一次必读：**`SKILL.md`**（命令参考、workflow、安全铁律）和 **`references/safety-incidents.md`**（铁律背后的真实事故）。不读懂不要派发任务。
 
-### 4a. 装 WAO skill 到 runtime 目录（一次性）
+### 4a. 装 WAO 本体（一次性）
+
+```powershell
+git clone https://github.com/DrDexter6000/windows-agent-orchestrator.git <WAO目录>
+cd <WAO目录>
+npm ci             # 按入库的 package-lock 精确安装；`npm install` 只在需要放宽版本时作回退
+npm link           # 可选，每台机器一次：暴露顶层 `wao` 命令（如 `wao dashboard`）
+```
+
+`npm link` 的作用范围：只提供**顶层** `wao` 命令（`wao dashboard` 这类单个词命令）；**嵌套命令族**（如 `npm run cli -- wao doctor`、`npm run cli -- registry list`）仍用 `npm run cli --` 调——npm link 不是它们的全局拼写替代。不 link 时全部命令都用 `npm run cli -- <command>`。
+
+### 4b. 装 WAO skill 到 runtime 目录（一次性）
 
 WAO 的 `SKILL.md` 符合 anthropic skill-creator 规范。各 runtime 的 skill 发现机制不同：
 
@@ -65,48 +78,72 @@ WAO 的 `SKILL.md` 符合 anthropic skill-creator 规范。各 runtime 的 skill
 
 **不要把 WAO skill 装到被开发项目目录**（如 `<目标项目>`）——那是目标项目，不是 runtime 目录。装错位置会污染项目。
 
-**WAO 故意不进 PATH**——它是本地仓内工具，用 `npm run cli -- <command>` 调（走 v22 shim）。系统 PATH 里**没有 `wao` 命令是正常的，不是安装缺失**。原因：WAO 必须跑 Node v22，若链进 PATH 会被系统默认 node（常是 v24）拉起、被 version guard 拒绝。所以别 `npm link` / 别加 PATH，始终从 WAO 仓根用 `npm run cli --` 调。
+### 4c. 配置 worker registry：一个 worker 就够
 
-### 4b. 读 WAO 文档（第一次必读）
+先分清两个文件的作用域，不要混淆：
 
-1. **读 `SKILL.md`**：WAO 的技能定义（命令参考、workflow、避坑、安全铁律）。
-2. **读 `references/safety-incidents.md`**：安全铁律的详细背景（真实事故）。**不读懂不要派发任务**。
+- **`config/agents.example.json`（入库的模板）**：与 `docs/team-roles.md` 规范角色**一一对应**，保持六个角色 worker（researcher / coder_hq / coder_low / coder_mm / tester / auditor + opencode fallback）全量——它是上游样例，不需要编辑它本身。
+- **`config/agents.json`（你的私人副本，gitignored 不入库）**：复制后**可以删到只剩你实际能认证的 worker**。
 
-### 4c. 在目标项目初始化 .wao/（每个被开发项目一次）
-
-切换到你要开发的目标项目目录，跑（在 WAO 仓根目录下执行）：
-
-```
-npm run cli -- wao init --cwd <目标项目>
+```powershell
+Copy-Item config/agents.example.json config/agents.json
 ```
 
-这会在目标项目根建 `.wao/`（5 槽位：project/state/decisions/handoff/runs），并追加到该项目的 `.gitignore`。
+**一个 runtime 就够用 WAO**——按你手上有的认证选一行，把其它 worker 条目从你的 agents.json 删掉：
 
-### 4d. 安装后自检（必做）
+| 你有的 runtime/认证 | 保留的 worker | 认证方式 |
+|---|---|---|
+| claude-code + 官方 Claude OAuth | auditor | `claude login`（原生 OAuth，不走 provider wrapper） |
+| claude-code + DeepSeek key | researcher 或 coder_low | `DEEPSEEK_API_KEY`（Windows User 环境变量） |
+| claude-code + GLM key | coder_hq | `ZHIPU_API_KEY`（Windows User 环境变量） |
+| codex | tester | `codex login` |
+| Kimi Code | coder_mm | Kimi Code 登录态（无需 API key） |
+
+删到只剩一个 worker 也完全可用。每个保留的 worker 里的 `cwd` 可留模板值，派发时覆盖。
+
+### 4d. 自检 registry 与环境（必做）
+
+验证 registry 并自检环境（在 WAO 仓根目录下执行）：
 
 ```
-npm run cli -- wao doctor --cwd <目标项目>
+npm run cli -- registry list --registry config/agents.json      # inventory + certification 状态
+npm run cli -- registry validate --registry config/agents.json  # 静态 schema 校验（不改任何文件）
+npm run cli -- wao doctor --cwd <目标项目>                        # 环境自检
 ```
-
-这会检查：Node 版本、各 CLI 在 PATH、provider key、agents.json 配置（opencode worker 有没有配 tokenBudget——06-18 事故防线）、目标项目的 .wao/ 是否初始化。
-
-**doctor 必须报 HEALTHY 才能开始用。** 任何 FAIL 项都是潜在风险，报告给 owner 决定是否修复后再用。
 
 Registry command split: registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health.
+
+`registry check` 只适用于 opencode-serve 后端（需要先起 `scripts/serve.ps1` 注入 provider key）；没保留 opencode fallback worker 就跳过它。
+
+**doctor 是建议性（advisory）自检报告，不是使用门禁**：它检查 Node 版本、各 CLI 在 PATH、provider key、agents.json 配置（opencode worker 有没有配 tokenBudget——06-18 事故防线）、目标项目的 `.wao/` 是否初始化。FAIL 项是潜在风险，报告给 owner 由 owner 裁决是否修复后再用，不自动阻断。
+
+**（可选）`.wao init` 项目规划记录**：`npm run cli -- wao init --cwd <目标项目>` 会在目标项目根建 `.wao/`（project/state/decisions/handoff/runs 5 槽位），用于记录项目的计划/状态/决策/交接——它不是 MCP workspace 绑定或 `run_dispatch` 的前提，没有 `.wao/` 照样能派发任务；需要项目级记录时再补。
+
+### 4e. 连接 MCP Host（主控通道，Decision 0017）
+
+在 MCP host（Claude Desktop / Codex CLI / OpenCode / 任意 MCP client）里把 WAO 注册为 stdio server：
+
+```
+npm run mcp -- --registry config/agents.json --run-dir runs
+```
+
+- **CLI `--cwd` 只控制 workspace 观察/过滤**（哪些路径算改动、canary 在哪个项目里跑）。
+- **MCP 派发的 workspace 来自 host 授权的绑定**：`--workspace-root` / `roots/list` / `workspace_select` 协商出 host 批准的目录，与 CLI `--cwd` 是两回事，别混。
+- 完整的 host 配置示例见 `docs/usage.md` §MCP stdio。
+
+### 4f. 首次只读 canary
+
+用一个**进程式 worker**（claude-code / codex / kimi-code 都行，不是 opencode）跑一个最小只读任务，验证端到端。`<agentId>` 填你在 §4c 保留的那个 worker——从 `registry list` 的输出里挑它的 id 复制过来：
+
+```
+npm run cli -- run <agentId> --prompt "Read package.json and report the package name. One sentence." --cwd <目标项目> --registry <WAO目录>/config/agents.json --format json
+```
+
+进程式 worker 进程死即会话死，适合最小验证。如果这个跑通返回 `completed: true` + assistant 文本，说明 WAO 调度链路通了。`--cwd <目标项目>` 指定被开发项目，`--registry <WAO目录>/config/agents.json` 指定 WAO worker registry；首次上手不要省略这两个参数。
 
 ---
 
 ## 5. 开始用：最小闭环
-
-### 第一个任务（最安全的验证）
-
-用一个**进程式 worker**（claude-code 或 kimi-code，不是 opencode）跑一个最小任务，验证端到端：
-
-```
-npm run cli -- run coder_low --prompt "Read package.json and report the package name. One sentence." --cwd <目标项目> --registry <WAO目录>/config/agents.json --format json
-```
-
-`coder_low` 是当前标准 registry 里的轻量 claude-code worker（进程式，进程死即会话死，适合最小验证）。如果这个跑通返回 `completed: true` + assistant 文本，说明 WAO 调度链路通了。`--cwd <目标项目>` 指定被开发项目，`--registry <WAO目录>/config/agents.json` 指定 WAO worker registry；首次上手不要省略这两个参数。
 
 ### 派发 GLM 任务（推荐用 coder_hq 或 coder_low，不是 opencode coder）
 
@@ -114,7 +151,7 @@ npm run cli -- run coder_low --prompt "Read package.json and report the package 
 npm run cli -- run coder_hq --prompt "你的任务" --cwd <目标项目> --registry <WAO目录>/config/agents.json --format json
 ```
 
-`coder_hq` 是 GLM-5.2 via claude-code wrapper（进程式 + 已 probe 验证），适合较重编码任务；轻量任务继续用 `coder_low`。**不要默认用 opencode worker**——它有 stop 虚假成功风险（06-18 事故），只在需要 token 闸门精确控成本时用，且必配 tokenBudget。
+`coder_hq` 是 GLM-5.2 via claude-code wrapper（进程式 + 已 probe 验证），适合较重编码任务；轻量任务用 `coder_low`（若保留了它）。**不要默认用 opencode worker**——它有 stop 虚假成功风险（06-18 事故），只在需要 token 闸门精确控成本时用，且必配 tokenBudget。
 
 ### 记录状态（每次任务后）
 
@@ -160,7 +197,7 @@ workflow 跑的过程中，`.wao/state/current.md` 会自动更新（每个节�
 - **worker 401**：provider key 没配（`wao doctor` 会查出）
 - **opencode worker 卡住**：serve 没起 或 key 没注入 serve 进程（用 `scripts/serve.ps1` 起 serve）
 - **run 失控（烧 token）**：立即 `npm run cli -- stop <runId>`，看 `stop_verified`；未验证则 `taskkill /IM opencode.exe /F`
-- **不确定环境**：跑 `wao doctor`
+- **不确定环境**：跑 `wao doctor`（advisory，报告给 owner 裁决）
 
 详细排障：`docs/troubleshooting.md`。
 
@@ -171,7 +208,7 @@ workflow 跑的过程中，`.wao/state/current.md` 会自动更新（每个节�
 这份文档是给 agent runtime 读的。如果你（owner）要让一个新 runtime 上手 WAO：
 1. 把 WAO 目录路径告诉它
 2. 让它读本文件
-3. 让它跑 `wao doctor`
-4. doctor HEALTHY 后，让它跑 §5 的最小任务验证
+3. 让它跑 `registry list` / `registry validate` + `wao doctor`
+4. doctor 报告无阻点（或你裁决可继续）后，让它跑 §4f 的只读 canary
 
 onboarding 文档本身用 `.wao/` 机制维护——更新时用 `wao decision add` 记录变更原因，不要直接堆砌版本历史。

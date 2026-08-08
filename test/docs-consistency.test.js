@@ -2007,3 +2007,164 @@ test("M12 closeout: roadmap marks the milestone complete and records the current
     "roadmap records the current published Fresh Host SHA");
   assert.match(roadmap, /PASS_M12_COMPLETE/, "roadmap records the M12 closeout verdict");
 });
+
+// ============================================================
+// M12 closeout: documentation-truth + third-party onboarding closeout
+// (README → AGENT_ONBOARDING one-worker path → registry validate/list →
+// MCP host → read-only canary). Failure → fix the doc, not the test.
+// ============================================================
+
+test("onboarding closeout: README 是新读者入口——21-tool / M12 complete / 突出链接 AGENT_ONBOARDING.md", () => {
+  const readme = read("README.md");
+  // Current tool truth (21); stale counts (18/16) gone.
+  assert.ok(/21 MCP tools|21 tools/.test(readme),
+    "README 必须声明当前 21 MCP tools");
+  assert.ok(!/18 MCP tools|16-tool|16 MCP/.test(readme),
+    "README 不得再声称 18/16-tool（当前 21 always-registered MCP tools）");
+  // M12 complete, not in progress.
+  assert.ok(!/M12[^\n]*\s*in progress/.test(readme),
+    "README 不得再把 M12 标为 in progress（M12 已 complete）");
+  assert.ok(/M0.M12 complete/.test(readme),
+    "README 必须说明 M0–M12 complete");
+  // Newcomer entrypoint: prominent AGENT_ONBOARDING.md link + one-worker path.
+  assert.ok(/AGENT_ONBOARDING\.md/.test(readme),
+    "README 必须链接 AGENT_ONBOARDING.md（新读者入口）");
+  assert.ok(/config\/agents\.example\.json/.test(readme),
+    "README 快速开始必须复制 agents.example.json 模板");
+  assert.ok(/registry validate/.test(readme) && /registry list/.test(readme),
+    "README 快速开始必须包含 registry validate/list");
+  assert.ok(/registry check[^\n]*(?:opencode|只对)/.test(readme),
+    "README 必须说明 registry check 只对 opencode-serve backend");
+  assert.ok(/MCP host|MCP Host/.test(readme),
+    "README 必须指向 MCP Host 配置路径");
+  // Correction review (Lead): npm ci canonical (package-lock tracked);
+  // generic <agentId> canary; npm-link bounded to top-level wao; MCP stdio
+  // command executes from the WAO install root.
+  assert.ok(/npm ci/.test(readme),
+    "README 必须以 npm ci 为克隆/安装规范命令（package-lock 已入库）");
+  assert.ok(/run <agentId>/.test(readme),
+    "README 首次只读 canary 必须用通用 <agentId> 占位（从 registry list 挑）");
+  assert.ok(!/run (coder_low|coder_hq|researcher|auditor|tester|coder_mm)/.test(readme),
+    "README 不得把 canary/命令示例硬编码到具体 worker（首个 canary 对任意保留 worker 可用）");
+  assert.ok(/wao dashboard/.test(readme),
+    "README npm link 说明必须落在顶层 wao 命令（如 wao dashboard）");
+  assert.ok(/install root/.test(readme),
+    "README MCP 步骤必须说明 stdio 命令在 WAO 安装根目录执行");
+});
+
+test("onboarding closeout: AGENT_ONBOARDING.md 自包含单 worker 安装路径（复制模板/一个 runtime 就够/选择表/registry validate/list）", () => {
+  const ob = read("AGENT_ONBOARDING.md");
+  // Explicit template copy: agents.example.json → agents.json.
+  assert.ok(/config\/agents\.example\.json config\/agents\.json/.test(ob),
+    "onboarding 必须显式给出 agents.example.json → agents.json 复制命令");
+  // One runtime/auth path is enough.
+  assert.ok(/一个就够|一个.*(?:runtime|运行时).*就够|装一个就能用|one runtime/.test(ob),
+    "onboarding 必须说明只配一个 runtime/认证路径就够");
+  // Keep/delete workers as desired.
+  assert.ok(/删到只剩|删掉|删除|prune/.test(ob),
+    "onboarding 必须说明可按需保留/删除 worker");
+  // Compact choice table: native Claude OAuth / DeepSeek / GLM / Codex login / Kimi Code.
+  for (const kw of ["claude login", "DEEPSEEK_API_KEY", "ZHIPU_API_KEY", "codex login", "Kimi"]) {
+    assert.ok(ob.includes(kw), `onboarding 选择表必须覆盖：${kw}`);
+  }
+  // Registry validate/list shown.
+  assert.ok(/registry validate/.test(ob) && /registry list/.test(ob),
+    "onboarding 必须展示 registry validate/list");
+  // Correction review (Lead): generic <agentId> canary (works for ANY retained
+  // worker, codex included as a process worker); tracked template vs copied
+  // gitignored registry as separate scopes.
+  const canary = ob.slice(ob.indexOf("### 4f"), ob.indexOf("## 5"));
+  assert.ok(/run <agentId>/.test(canary) && !/run coder_/.test(canary),
+    "4f 首次只读 canary 必须用 <agentId> 占位（从 registry list 挑），不得硬编码具体 worker");
+  assert.ok(/claude-code \/ codex \/ kimi-code/.test(canary),
+    "canary 的进程式 worker 必须并列 claude-code / codex / kimi-code");
+  assert.ok(/入库/.test(ob) && /一一对应/.test(ob) && /gitignored/.test(ob),
+    "onboarding 必须区分入库模板（与 team-roles 一一对应）与 gitignored 私人 agents.json 副本");
+});
+
+test("onboarding closeout: 陈旧 claims 已纠正（零依赖 / 禁 npm link / doctor HEALTHY 硬门 / CLI --cwd vs MCP workspace）", () => {
+  const ob = read("AGENT_ONBOARDING.md");
+  // WAO is not zero-dependency.
+  assert.ok(!/零 npm 依赖|零依赖/.test(ob),
+    "onboarding 不得再声称零 npm 依赖（WAO 有 @modelcontextprotocol/sdk + zod）");
+  assert.ok(/npm install|npm ci/.test(ob),
+    "onboarding 必须包含依赖安装步骤");
+  // Top-level `wao` via the documented one-time npm link.
+  assert.ok(!/别 `?npm link`?|不要 `?npm link`?/.test(ob),
+    "onboarding 不得再禁止 npm link（M12-8F 已文档化一次性 npm link 暴露顶层 wao）");
+  assert.ok(/npm link/.test(ob),
+    "onboarding 必须说明一次性 npm link 暴露顶层 wao 的路径");
+  // Doctor is advisory, not a HEALTHY hard gate.
+  assert.ok(!/doctor 必须报 HEALTHY 才能开始用/.test(ob),
+    "onboarding 不得再把 doctor 写成 HEALTHY 硬门");
+  assert.ok(/advisory|建议性|参考/.test(ob),
+    "onboarding 必须把 doctor/preflight 定位为 advisory 事实");
+  // CLI --cwd vs MCP session workspace binding distinguished.
+  assert.ok(/--cwd/.test(ob) && /workspace/.test(ob),
+    "onboarding 必须同时出现 CLI --cwd 与 workspace binding");
+  assert.ok(/--workspace-root|roots\/list|workspace_select/.test(ob),
+    "onboarding 必须指向 MCP workspace binding 来源");
+  // Correction review (Lead): npm ci canonical; npm-link wording bounded to
+  // top-level `wao` (not a blanket replacement for `npm run cli --` nested
+  // families, doctor invocation preserved); .wao init optional — not a
+  // MCP-workspace-binding / run_dispatch prerequisite.
+  assert.ok(/npm ci/.test(ob),
+    "onboarding 必须以 npm ci 为规范安装命令（package-lock 已入库）");
+  assert.ok(/wao dashboard/.test(ob),
+    "npm link 说明必须落在顶层 wao 命令（如 wao dashboard）");
+  assert.ok(/不是[^。]{0,80}拼写替代/.test(ob),
+    "npm link 必须被限定为顶层命令，不得声称整体替代 npm run cli -- 嵌套命令族");
+  assert.ok(/npm run cli -- wao doctor/.test(ob),
+    "必须保留现行 doctor 调用形式 npm run cli -- wao doctor");
+  assert.ok(/可选[\s\S]{0,60}wao init/.test(ob) && /wao init[^。]{0,120}不是[^。]{0,80}前提/.test(ob),
+    "wao init 必须标注为可选且不是 MCP workspace 绑定 / run_dispatch 的前提");
+});
+
+test("onboarding closeout: usage.md claude-code registry 示例为当前结构化 schema + DeepSeek V4 Flash policy", () => {
+  const usage = read("docs/usage.md");
+  const start = usage.indexOf("// ── claude-code");
+  const end = usage.indexOf("// ── codex");
+  assert.ok(start !== -1 && end > start, "usage.md 必须保留 claude-code 配置示例块");
+  const ex = usage.slice(start, end);
+  // provider carries protocol/baseUrl/apiKeyEnv; model/effort are SIBLINGS.
+  assert.ok(/\"protocol\": "anthropic-compatible"/.test(ex)
+    && /\"baseUrl\"/.test(ex) && /\"apiKeyEnv\"/.test(ex),
+    "usage claude-code 示例的 provider 必须含 protocol/baseUrl/apiKeyEnv");
+  assert.ok(/\"model\"[\s\S]{0,300}\"contextWindow\"/.test(ex),
+    "usage claude-code 示例必须有 sibling model {id, contextWindow}（不在 provider 内）");
+  assert.ok(/\"reasoning\"[\s\S]{0,300}\"effort\"/.test(ex),
+    "usage claude-code 示例必须有 sibling reasoning {effort}（不在 provider 内）");
+  // Stale inlined shape gone; current coder_low policy.
+  assert.ok(!/glm-5-turbo/.test(ex),
+    "usage claude-code 示例不得再出现旧 provider.model=glm-5-turbo 内联形状");
+  assert.ok(/deepseek-v4-flash/.test(ex) && /DEEPSEEK_API_KEY/.test(ex),
+    "usage claude-code 示例必须是当前 coder_low DeepSeek V4 Flash policy");
+});
+
+test("onboarding closeout: agents.example.json 移除 managed-flag 向后兼容声明、coder_hq 标为 max、标注可裁剪示例", () => {
+  // No legacy managed-flag compatibility claim in any editable doc.
+  for (const rel of ["config/agents.example.json", "README.md", "AGENT_ONBOARDING.md", "docs/usage.md"]) {
+    assert.ok(!/prependArgs[^。\n]*向后兼容|手拼 prependArgs[^。\n]*兼容/.test(read(rel)),
+      `${rel} 不得再声称手拼 managed model/effort flags（args/prependArgs）向后兼容（provider 一等字段编译）`);
+  }
+  // coder_hq certification label: max, not high.
+  const parsed = JSON.parse(read("config/agents.example.json"));
+  const hqCert = parsed.certification.matrix.find((m) => m.agentId === "coder_hq");
+  assert.equal(hqCert?.label, "GLM-5.2 max via claude-code wrapper",
+    "agents.example.json 的 coder_hq 认证 label 必须为 max（不是 high）");
+  // File labeled a complete example prunable to one worker.
+  const raw = read("config/agents.example.json");
+  assert.ok(/完整示例|complete example/.test(raw),
+    "agents.example.json 必须标注为完整示例/推荐配置");
+  assert.ok(/一个 worker|one worker|删到只剩/.test(raw),
+    "agents.example.json 必须说明可删减到只剩一个 worker");
+  // Correction review (Lead): tracked template stays aligned one-to-one with
+  // the canonical team roles; pruning happens on the gitignored private copy
+  // (agents.json), never on the tracked template itself.
+  assert.ok(/入库/.test(raw) && /一一对应/.test(raw) && /team-roles/.test(raw),
+    "agents.example.json 必须自述为入库模板且与 team-roles.md 角色一一对应");
+  assert.ok(/config\/agents\.json（gitignored|复制为 config\/agents\.json/.test(raw),
+    "裁剪作用域必须指向 gitignored 的私人 agents.json 副本，而非模板本身");
+  assert.ok(!/本文件[^。]{0,40}(?:按可用认证|删减|编辑|修改)/.test(raw),
+    "入库模板不得声称按认证删减/编辑它本身（删减只发生在私人副本）");
+});
