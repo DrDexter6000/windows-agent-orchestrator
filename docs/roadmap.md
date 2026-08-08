@@ -171,6 +171,12 @@ Lead 验收：主体 WAO run `run_20260808035415042u5vf6a` 产出 delivery `8694
 
 第三方 onboarding helper 已以普通 fast-forward 发布到 `main@4c06496146827f2d0dd993fde3d0ba372ae28d8d`。从公开 GitHub URL 创建的全新 clone 精确落在该 SHA；锁定依赖安装成功，默认 preview 与选定 worker preview 均为零写入，`--apply` 生成仅含 `coder_low` 的有效私有 registry，生产 `registry validate` 通过，显式 `--endorse-worker coder_low` 只写既有 `manualOverride:"cleared"` Owner 信号且不伪造认证状态。一次性 headless Codex Fresh Host 仅通过进程级 host-neutral MCP 配置连接该 clone，正式执行 `lead_preflight -> run_dispatch`（只读、no delivery）`-> run_await_result`；真实 run `run_20260808195141854w5bypg` 终态为 `completed`，返回唯一非空 assistant 文本 `CANARY_OK` / `project: windows-agent-orchestrator-poc`，无失败诊断，fresh clone HEAD/branch/tracked status 前后不变。首次无交互 Host 尝试在 `run_dispatch` 前因 Host approval 取消而结束，无 runId、无遗留 run；修正 Host 调用环境后在同一发布候选上完成上述唯一 worker canary。Verdict：`PASS_THIRD_PARTY_ONBOARDING_FRESH_HOST`。
 
+### 第三方 onboarding bounded acceptance projection（2026-08-08，本地候选）
+
+`wao onboarding` 的 JSON 与人类输出现在从同一纯函数投影最小 MCP 验收链 `lead_preflight -> run_dispatch -> run_await_result`、严格 PASS 三事实，以及 `host-not-invoked` / `transport-unknown` / `workspace/preflight` / `provider/runtime` 四个 Host-neutral 恢复分支。投影只给事实：调用前取消不是 WAO run；调用后响应丢失是 unknown，任何重派前必须先查 `runs_list` / point-in-time 事实，绝不自动重试。它不改 Host 配置、不绕过权限、不自动派发或决策，也不携带路径、凭据、prompt、argv、PID 或 session。
+
+实现根 run `run_20260808200902105uv77da` 的首笔 delivery 因 tracked 文件引用 gitignored `.dev` 私有合同且文档守卫过弱，被 Lead durable rejected；同一 provider 会话与 retained worktree 经 correction child `run_20260808203412672fr66mh` 修正后，delivery `4aefaae310111b1cdb24b6f30c8ff4ac8244c5f2` exact verification passed、五文件审查后 accepted。独立 `coder_mm` reviewer `run_20260808204107393h8ujob` 返回无阻塞问题；focused onboarding/docs `192/192`、冻结候选 canonical `185/185` files、0 fail。一次性 clean clone 精确检出该 commit，`npm ci` 后运行 JSON 与人类 preview：两者均给出同一三步链与四分支、结果为 `needs-selection`、registry/endorsement 零写入且 clone tracked clean。Verdict：`READY_FOR_RELEASE_THIRD_PARTY_ONBOARDING_ACCEPTANCE_PROJECTION`；本段仅记录本地候选，尚未发布。
+
 ### M12-9 Claude Code 最新本地能力适配（2026-08-02）
 
 - 本地 CLI 能力探针确认 partial stream、动态 system-prompt section 排除、一次性 session 不持久化与 provider retry 事件可用；WAO Claude backend 以结构化 argv/env 接入，不使用 shell 拼接。
