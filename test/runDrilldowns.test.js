@@ -98,6 +98,9 @@ const FACT_MATRIX = [
   ["run_delivery", { deliveryAvailable: false, deliveryRequested: true, terminalState: "running", verificationStatus: null, acceptanceStatus: null, readiness: "waiting_for_verification", deliveryFailureCode: null }],
   ["run_delivery", { deliveryAvailable: false, deliveryRequested: true, terminalState: "failed", verificationStatus: null, acceptanceStatus: null, readiness: "packaging_failed", deliveryFailureCode: null }],
   ["run_delivery", { deliveryAvailable: false, deliveryRequested: true, terminalState: "failed", verificationStatus: null, acceptanceStatus: null, readiness: "isolation_failed", deliveryFailureCode: null }],
+  // M12-13: point-in-time path (no readiness) carrying the already
+  // safe-projected isolation-escape code — valid bounded list either way.
+  ["run_delivery", { deliveryAvailable: false, deliveryRequested: true, terminalState: "failed", verificationStatus: null, acceptanceStatus: null, readiness: null, deliveryFailureCode: null, isolationFailureCode: "workdir_escape" }],
   ["run_delivery", { deliveryAvailable: false, deliveryRequested: false, terminalState: "completed", verificationStatus: null, acceptanceStatus: null, readiness: "not_requested", deliveryFailureCode: null }],
   ["run_delivery", { deliveryAvailable: false, deliveryRequested: null, terminalState: "running", verificationStatus: null, acceptanceStatus: null, readiness: "ambiguous", deliveryFailureCode: null }],
   ["run_delivery", { deliveryAvailable: true, deliveryRequested: true, terminalState: "completed", verificationStatus: "passed", acceptanceStatus: "pending", readiness: "reviewable", deliveryFailureCode: null }],
@@ -336,4 +339,62 @@ test("U-07: unknown source tool fails closed; unknown fact values degrade determ
   const b = selectDrilldowns("run_status", {});
   assert.deepEqual(a, b, "missing/unknown facts are deterministic");
   assert.ok(a.length >= 1);
+});
+
+test("U-09: M12-13 point-in-time isolationFailure (no readiness) projects the SAME drilldowns as readiness:isolation_failed", () => {
+  // The point-in-time path carries NO readiness label, but the payload already
+  // holds the safe-projected isolation-escape code. It must project the SAME
+  // isolation-safe drilldown intent as the authoritative readiness:"isolation_failed"
+  // path: run_activity + run_diagnose — NEVER run_delivery_review / repackage /
+  // decision (an isolation escape has no packaging/diff/decision surface).
+  const pointInTime = {
+    deliveryAvailable: false, deliveryRequested: true, terminalState: "failed",
+    verificationStatus: null, acceptanceStatus: null, readiness: null,
+    deliveryFailureCode: null, isolationFailureCode: "workdir_escape",
+  };
+  const viaReadiness = {
+    deliveryAvailable: false, deliveryRequested: true, terminalState: "failed",
+    verificationStatus: null, acceptanceStatus: null, readiness: "isolation_failed",
+    deliveryFailureCode: null,
+  };
+  const ptTools = selectDrilldowns("run_delivery", pointInTime).map((e) => e.tool);
+  const rdTools = selectDrilldowns("run_delivery", viaReadiness).map((e) => e.tool);
+  assert.deepEqual(ptTools, rdTools,
+    "point-in-time isolationFailure must match readiness:isolation_failed drilldown intent");
+  assert.deepEqual(ptTools, ["run_activity", "run_diagnose"],
+    `point-in-time isolationFailure → run_activity + run_diagnose, got [${ptTools}]`);
+  assert.ok(!ptTools.includes("run_delivery_review"),
+    "isolation escape must NEVER advertise run_delivery_review");
+});
+
+test("U-09b: M12-13 malformed/unknown/missing isolationFailureCode does NOT promote to isolation-safe drilldowns", () => {
+  // Only the EXACT safe code "workdir_escape" promotes; anything else keeps the
+  // existing point-in-time behavior (activity + status). Readiness stays
+  // authoritative when present, even if the code is also set.
+  const base = {
+    deliveryAvailable: false, deliveryRequested: true, terminalState: "failed",
+    verificationStatus: null, acceptanceStatus: null, readiness: null,
+    deliveryFailureCode: null,
+  };
+  assert.deepEqual(
+    selectDrilldowns("run_delivery", base).map((e) => e.tool),
+    ["run_activity", "run_status"], "missing code → waiting path, NOT isolation");
+  assert.deepEqual(
+    selectDrilldowns("run_delivery", { ...base, isolationFailureCode: null }).map((e) => e.tool),
+    ["run_activity", "run_status"], "null code → waiting path, NOT isolation");
+  assert.deepEqual(
+    selectDrilldowns("run_delivery", { ...base, isolationFailureCode: "other" }).map((e) => e.tool),
+    ["run_activity", "run_status"], "unknown code → waiting path, NOT isolation");
+  // Readiness present wins (authoritative) even when the code is also set: a
+  // reviewable readiness yields run_delivery_review, which the isolation path
+  // would NEVER advertise.
+  assert.deepEqual(
+    selectDrilldowns("run_delivery", {
+      deliveryAvailable: true, deliveryRequested: true, terminalState: "completed",
+      verificationStatus: "passed", acceptanceStatus: "pending",
+      readiness: "reviewable", deliveryFailureCode: null,
+      isolationFailureCode: "workdir_escape",
+    }).map((e) => e.tool),
+    ["run_delivery_review", "run_activity"],
+    "readiness authoritative when present, even with isolationFailureCode set");
 });

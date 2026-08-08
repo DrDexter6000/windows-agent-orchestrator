@@ -362,6 +362,57 @@ test("S-12: detailUriForId is mechanical wao://semantics/{id}", async () => {
   }
 });
 
+test("S-13: M12-13 point-in-time isolationFailure (no readiness) → delivery.isolation_failed, same as readiness path", async () => {
+  const { selectSemanticNotes, getSemanticNoteById } = await import("../src/application/runSemanticsNotes.js");
+  const ids = (tool, facts) => selectSemanticNotes(tool, facts).map((n) => n.id);
+  // Point-in-time path: NO readiness label, but the payload carries the already
+  // safe-projected isolation-escape code. It must project the SAME note as the
+  // authoritative readiness:"isolation_failed" path: delivery.isolation_failed
+  // (NEVER delivery.waiting / delivery.packaging_failed).
+  const pointInTime = {
+    deliveryAvailable: false, deliveryRequested: true, verificationStatus: null,
+    readiness: null, deliveryFailureCode: null, isolationFailureCode: "workdir_escape",
+  };
+  const viaReadiness = {
+    deliveryAvailable: false, deliveryRequested: true, verificationStatus: null,
+    readiness: "isolation_failed", deliveryFailureCode: null,
+  };
+  assert.deepEqual(ids("run_delivery", pointInTime), ["delivery.isolation_failed"],
+    "point-in-time isolationFailure → delivery.isolation_failed (NOT delivery.waiting)");
+  assert.deepEqual(ids("run_delivery", pointInTime), ids("run_delivery", viaReadiness),
+    "point-in-time code path == readiness:isolation_failed path");
+  // Byte-equal to the catalog entry — proves no dynamic echo of any payload
+  // value (the note IS the frozen catalog text). The catalog's own meaning
+  // mentions the closed-set word "workdir_escape"; that is static, not an echo
+  // of the payload, so we assert byte-equality rather than substring absence.
+  const notes = selectSemanticNotes("run_delivery", pointInTime);
+  assert.deepEqual(notes[0], getSemanticNoteById("delivery.isolation_failed"),
+    "isolation_failed note is byte-equal to the catalog entry");
+});
+
+test("S-13b: M12-13 malformed/unknown/missing isolationFailureCode does NOT promote to delivery.isolation_failed", async () => {
+  const { selectSemanticNotes } = await import("../src/application/runSemanticsNotes.js");
+  const ids = (tool, facts) => selectSemanticNotes(tool, facts).map((n) => n.id);
+  const base = {
+    deliveryAvailable: false, deliveryRequested: true, verificationStatus: null,
+    readiness: null, deliveryFailureCode: null,
+  };
+  // Missing / null / unknown code → the existing point-in-time waiting note,
+  // NOT isolation_failed. The code must never be promoted or echoed.
+  assert.deepEqual(ids("run_delivery", base), ["delivery.waiting"], "missing code → delivery.waiting");
+  assert.deepEqual(ids("run_delivery", { ...base, isolationFailureCode: null }),
+    ["delivery.waiting"], "null code → delivery.waiting");
+  assert.deepEqual(ids("run_delivery", { ...base, isolationFailureCode: "other" }),
+    ["delivery.waiting"], "unknown code → delivery.waiting");
+  // Readiness stays authoritative when present, even with the code also set: a
+  // reviewable readiness projects delivery.reviewable, NOT isolation_failed.
+  assert.deepEqual(ids("run_delivery", {
+    deliveryAvailable: true, deliveryRequested: true, verificationStatus: "passed",
+    readiness: "reviewable", deliveryFailureCode: null, isolationFailureCode: "workdir_escape",
+  }), ["delivery.reviewable"],
+    "readiness authoritative when present, even with isolationFailureCode set");
+});
+
 // =====================================================================
 // M-* — REAL MCP handlers (all four) attach semanticNotes before parse.
 // =====================================================================

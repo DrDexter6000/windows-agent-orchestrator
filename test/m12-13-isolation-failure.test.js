@@ -429,3 +429,75 @@ test("IR-10: ambiguous isolation evidence → run_delivery fails with the fixed 
     cleanupDir(dir);
   }
 });
+
+test("IR-11: MCP run_delivery point-in-time isolationFailure → delivery.isolation_failed + run_activity/run_diagnose (same intent as readiness:isolation_failed)", async () => {
+  // The bug: on the point-in-time path the payload carries isolationFailure but
+  // NO readiness label, so the Lead saw delivery.waiting + run_activity/run_status
+  // instead of the truthful delivery.isolation_failed + run_activity/run_diagnose.
+  // The wait-path workspace-ownership containment (run_delivery(waitMs) on a
+  // foreign run) is untouched — this only fixes the safe semantic projection.
+  const dir = mkdtempSync(join(tmpdir(), "wao-ir11-"));
+  try {
+    const repo = join(dir, "repo");
+    mkdirSync(repo);
+    makeGitRepo(repo);
+    seedDeliveryRequestedRun({ runDir: dir, cwd: repo });
+    const { createWaoMcpServer } = await import("../src/mcp/server.js");
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const { getRunDelivery } = await import("../src/application/runDelivery.js");
+    const { getRunDeliveryReadiness } = await import("../src/application/runDelivery.js");
+
+    const server = createWaoMcpServer({
+      registryPath: join(dir, "agents.json"),
+      runDir: dir,
+      workspaceRoot: repo,
+      getRunDeliveryFn: async (input) => getRunDelivery({ ...input, runDir: dir }),
+      getRunDeliveryReadinessFn: async (input) => getRunDeliveryReadiness({ ...input, runDir: dir }),
+    });
+    const client = new Client({ name: "wao-test", version: "0.0.1" }, { capabilities: {} });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(st), client.connect(ct)]);
+    try {
+      // Point-in-time (no waitMs): no readiness label, but isolationFailure is set.
+      const res = await client.callTool({
+        name: "run_delivery",
+        arguments: { runId: "run_x" },
+      });
+      assert.ok(res && !res.isError, `point-in-time must succeed: ${JSON.stringify(res)}`);
+      const payload = JSON.parse(res.content[0].text);
+      assert.deepEqual(payload.isolationFailure, { code: "workdir_escape" });
+      assert.equal(payload.readiness, undefined,
+        "point-in-time path carries no readiness label");
+      // RED actual today: [delivery.waiting]. GREEN target: [delivery.isolation_failed].
+      assert.deepEqual(payload.semanticNotes.map((n) => n.id), ["delivery.isolation_failed"],
+        "point-in-time isolationFailure → delivery.isolation_failed (NOT delivery.waiting)");
+      // RED actual today: [run_activity, run_status]. GREEN target: [run_activity, run_diagnose].
+      const ddTools = payload.availableDrilldowns.map((d) => d.tool);
+      assert.deepEqual(ddTools, ["run_activity", "run_diagnose"],
+        "point-in-time isolationFailure → run_activity + run_diagnose (NOT run_status)");
+      assert.ok(!ddTools.includes("run_delivery_review"),
+        "isolation escape must NEVER advertise run_delivery_review");
+
+      // Wait path (readiness:"isolation_failed") must project the EXACT SAME
+      // isolation-safe drilldown + semantic intent as the point-in-time path.
+      const waitRes = await client.callTool({
+        name: "run_delivery",
+        arguments: { runId: "run_x", waitMs: 1000 },
+      });
+      assert.ok(waitRes && !waitRes.isError, `wait path must succeed: ${JSON.stringify(waitRes)}`);
+      const waitPayload = JSON.parse(waitRes.content[0].text);
+      assert.equal(waitPayload.readiness, "isolation_failed");
+      assert.deepEqual(waitPayload.semanticNotes.map((n) => n.id), ["delivery.isolation_failed"]);
+      assert.deepEqual(
+        waitPayload.availableDrilldowns.map((d) => d.tool),
+        payload.availableDrilldowns.map((d) => d.tool),
+        "wait-path and point-in-time drilldown intents are identical for an isolation escape");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});

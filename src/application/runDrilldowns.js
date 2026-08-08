@@ -259,6 +259,16 @@ function selectForRunDelivery(f) {
     // Any other settled/waiting readiness → point-in-time status + activity.
     return ["activity", "status"];
   }
+  // M12-13: point-in-time isolation escape (the payload carries the already
+  // safe-projected code but no readiness label on this path). Reached ONLY when
+  // readiness is absent, so the explicit readiness path above stays
+  // authoritative. Same isolation-safe drilldowns as readiness:"isolation_failed"
+  // — activity + diagnose, never deliveryReview (no packaging/diff/decision
+  // surface exists for an isolation escape). Only the exact safe code matches;
+  // any other/missing value falls through unchanged.
+  if (f.isolationFailureCode === "workdir_escape") {
+    return ["activity", "diagnose"];
+  }
   if (f.deliveryAvailable === true) {
     if (f.acceptanceStatus === "accepted" || f.acceptanceStatus === "rejected") {
       return ["activity"];

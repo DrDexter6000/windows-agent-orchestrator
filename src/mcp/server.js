@@ -1283,6 +1283,10 @@ function selectDeliveryDrilldowns(payload) {
     acceptanceStatus: payload.acceptanceStatus ?? null,
     readiness: payload.readiness ?? null,
     deliveryFailureCode: payload.deliveryFailure?.code ?? null,
+    // M12-13: thread the ALREADY safe-projected isolation-escape code so the
+    // shared selector recognizes a point-in-time isolation failure (no readiness
+    // label) — null/absent everywhere else (readiness stays authoritative).
+    isolationFailureCode: payload.isolationFailure?.code ?? null,
   });
 }
 // M12-12: one shared semantic-note projection for BOTH delivery payload paths
@@ -1295,6 +1299,10 @@ function selectDeliverySemanticNotes(payload) {
     verificationStatus: payload.verificationStatus ?? null,
     readiness: payload.readiness ?? null,
     deliveryFailureCode: payload.deliveryFailure?.code ?? null,
+    // M12-13: thread the ALREADY safe-projected isolation-escape code so the
+    // shared selector recognizes a point-in-time isolation failure (no readiness
+    // label) — null/absent everywhere else (readiness stays authoritative).
+    isolationFailureCode: payload.isolationFailure?.code ?? null,
   });
 }
 function buildRunDeliveryPayload(runId, view) {

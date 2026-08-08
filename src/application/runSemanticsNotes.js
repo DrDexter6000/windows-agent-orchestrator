@@ -362,6 +362,12 @@ function deliveryKey(f) {
   if (r === "not_requested") return "delivery.not_requested";
   if (r === "ambiguous") return "delivery.ambiguous";
   if (r === "waiting_for_packaging" || r === "waiting_for_verification") return "delivery.waiting";
+  // M12-13: no explicit readiness label (point-in-time path) but the payload
+  // already carries the safe-projected isolation-escape code → project the SAME
+  // note as readiness:"isolation_failed". Gated on readiness being ABSENT (r ==
+  // null) so the explicit readiness path above stays authoritative when present.
+  // Only the exact safe code matches; any other/missing value is not promoted.
+  if (r == null && f.isolationFailureCode === "workdir_escape") return "delivery.isolation_failed";
   const v = f.verificationStatus ?? f.deliveryVerificationStatus;
   if (v === "passed") return "delivery.verification_passed";
   if (v === "failed") return "delivery.verification_failed";
