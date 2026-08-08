@@ -252,39 +252,10 @@ export class RunManager {
       });
     }
 
-    // M11-8C Package A: delivery-mode runs ALWAYS inject the control-plane-owned
-    // Delivery Execution Contract, even when the agent has no systemPrompt. This
-    // forbids the worker from running git mutating commands, moving HEAD, or
-    // reporting a final commit SHA — the control plane owns the delivery commit.
-    // Production RED (run_20260724202209375032648): a delivery task prompt asked
-    // for a "Final commit SHA", the worker committed on the isolation branch,
-    // and the packager failed with base_commit_mismatch.
-    //
-    // The delivery contract is composed AHEAD of any role contract so it takes
-    // precedence, and is carried via task.roleContract (each backend injects it
-    // exactly once through its runtime-native channel). It is NOT persisted into
-    // prompt.sent (only the original task prompt is). An unsupported backend
-    // fails closed here — BEFORE worktree/transcript/spawn — because the
-    // contract cannot be delivered otherwise. No runtime-name branch; this path
-    // applies to every backend that declares supportsRoleContract === true.
-    if (delivery) {
-      if (backend.supportsRoleContract !== true) {
-        throw new Error(
-          `Agent ${agentId}: delivery mode requires role contract injection (to deliver the delivery execution contract), ` +
-          `but the selected backend does not support it. ` +
-          `Switch to a backend that declares supportsRoleContract.`
-        );
-      }
-      const deliveryContract = composeDeliveryExecutionContract();
-      roleContract = roleContract
-        ? `${deliveryContract}\n\n---\n\n${roleContract}`
-        : deliveryContract;
-    }
-
-    // Validate deterministic delivery inputs before consulting an external
-    // runtime capability. These checks are pure and must retain precedence over
-    // network availability/version errors while still happening before every
-    // run side effect.
+    // Validate deterministic delivery inputs before composing the contract and
+    // before consulting an external runtime capability. These checks are pure and
+    // must retain precedence over network availability/version errors while still
+    // happening before every run side effect.
     const isolationConfig = resolveIsolation(isolate, agent.isolation, this.config.defaultIsolation);
     let deliveryPrepared = null;
     if (delivery) {
@@ -295,6 +266,44 @@ export class RunManager {
           + `Use isolate:true or agent isolation {type:"worktree", strategy:"persistent"}.`,
         );
       }
+    }
+
+    // M11-8C Package A + M12-14 Package 1: delivery-mode runs ALWAYS inject the
+    // control-plane-owned Delivery Execution Contract, even when the agent has no
+    // systemPrompt. This forbids the worker from running git mutating commands,
+    // moving HEAD, or reporting a final commit SHA — the control plane owns the
+    // delivery commit. Production RED (run_20260724202209375032648): a delivery
+    // task prompt asked for a "Final commit SHA", the worker committed on the
+    // isolation branch, and the packager failed with base_commit_mismatch.
+    //
+    // The delivery contract is composed AHEAD of any role contract so it takes
+    // precedence, and is carried via task.roleContract (each backend injects it
+    // exactly once through its runtime-native channel). It is NOT persisted into
+    // prompt.sent (only the original task prompt is). An unsupported backend
+    // fails closed here — BEFORE worktree/transcript/spawn — because the
+    // contract cannot be delivered otherwise. No runtime-name branch; this path
+    // applies to every backend that declares supportsRoleContract === true.
+    //
+    // M12-14 Package 1 (Worker-visible Work Order SSOT): the contract is composed
+    // FROM the prepared allowedPaths (deliveryPrepared.allowedPaths), so the
+    // worker receives the EXACT authorized-paths list the control plane
+    // persisted — eliminating the disallowed_path late-failure. prepare runs
+    // BEFORE compose (single source of truth); the same allowedPaths is what the
+    // packager enforces at closeout, so start and packager can never disagree.
+    if (delivery) {
+      if (backend.supportsRoleContract !== true) {
+        throw new Error(
+          `Agent ${agentId}: delivery mode requires role contract injection (to deliver the delivery execution contract), ` +
+          `but the selected backend does not support it. ` +
+          `Switch to a backend that declares supportsRoleContract.`
+        );
+      }
+      const deliveryContract = composeDeliveryExecutionContract({
+        allowedPaths: deliveryPrepared.allowedPaths,
+      });
+      roleContract = roleContract
+        ? `${deliveryContract}\n\n---\n\n${roleContract}`
+        : deliveryContract;
     }
 
     // Runtime-managed transports may need to prove a dynamic capability (for
@@ -353,6 +362,33 @@ export class RunManager {
       );
     }
     const resolvedCredentials = credentialReadiness.resolvedEnv;
+
+    // M12-14 Package 1: preflight the process invocation BEFORE any side effect
+    // (runDir, transcript, worktree, spawn). For process backends that declare
+    // preflightInvocation, resolve the binary + build the argv + run the SAME
+    // compileInvocation budget check spawn runs — fail fixed-safe here if the
+    // composed role contract would exceed the Windows command-line budget.
+    // cmd.exe over-limit behavior is not a safe transport contract (it can
+    // reject/truncate/misparse by boundary); WAO refuses deterministically.
+    // Failing here means zero transcript bytes, zero worktree, zero spawn.
+    //
+    // Provider-neutral: keyed on the capability (the method), never the runtime
+    // name — OpenCodeServe (an HTTP backend with no preflightInvocation) is
+    // unaffected. This is a best-effort EARLY gate, NOT a byte-identity guarantee:
+    // it assumes buildArgs and binary resolution are deterministic and
+    // cwd-independent for the configured process backends (preflight uses the
+    // pre-worktree `agent`). spawn re-runs compileInvocation as the authoritative
+    // defense-in-depth check, so a preflight pass can never let an overflowing
+    // invocation reach the OS. By this point roleContract already carries the
+    // merged delivery contract + scope block, so buildArgs produces the final
+    // argv here.
+    if (typeof backend.preflightInvocation === "function") {
+      await backend.preflightInvocation(agent, {
+        prompt,
+        roleContract,
+        ...(sessionReuse ? { sessionReuse } : {}),
+      });
+    }
 
     const finalRunId = runId ?? `run_${new Date().toISOString().replace(/[-:.TZ]/g, "")}${Math.random().toString(36).slice(2, 8)}`;
 
@@ -794,6 +830,11 @@ export class RunManager {
     // An unsupported backend fails closed here, BEFORE any append/spawn
     // (transcript bytes unchanged) — delivery resume cannot proceed without a
     // way to deliver the no-commit contract.
+    //
+    // M12-14 Package 1: the contract is composed FROM the persisted
+    // deliveryContext.allowedPaths — the exact list the control plane froze at
+    // start. start and resume therefore deliver the byte-identical work-order
+    // SSOT; a resumed worker sees the same authorized scope it started with.
     if (deliveryContext) {
       if (backend.supportsRoleContract !== true) {
         throw new Error(
@@ -802,7 +843,9 @@ export class RunManager {
           `Switch to a backend that declares supportsRoleContract.`
         );
       }
-      const deliveryContract = composeDeliveryExecutionContract();
+      const deliveryContract = composeDeliveryExecutionContract({
+        allowedPaths: deliveryContext.allowedPaths,
+      });
       resumeRoleContract = resumeRoleContract
         ? `${deliveryContract}\n\n---\n\n${resumeRoleContract}`
         : deliveryContract;
@@ -847,6 +890,19 @@ export class RunManager {
       const promptEvent = findLatest(events, "prompt.sent");
       if (!promptEvent?.prompt) return null;
       const originalSessionId = session.backendSessionId;
+      // M12-14 Package 1: preflight the re-spawn BEFORE any append/spawn, mirroring
+      // start. The persisted prompt + re-composed roleContract (carrying the
+      // delivery contract + scope block) feed the SAME compileInvocation budget
+      // check spawn runs; an overflow fails fixed-safe here — no run.rerun append,
+      // no spawn. Same determinism assumption as start's preflight (best-effort
+      // early gate, not a byte-identity guarantee); spawn rechecks authoritatively.
+      if (typeof backend.preflightInvocation === "function") {
+        await backend.preflightInvocation(agent, {
+          prompt: promptEvent.prompt,
+          roleContract: resumeRoleContract,
+          ...(deliveryContext ? { deliveryMode: true } : {}),
+        });
+      }
       // 重新 spawn 新进程
       const newResult = await backend.spawn(agent, {
         prompt: promptEvent.prompt,

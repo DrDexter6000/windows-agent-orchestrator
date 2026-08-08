@@ -127,7 +127,40 @@ export class ProcessBackend {
     }
   }
 
-  async spawn(agent, task) {
+  /**
+   * M12-14 Package 1: resolve the binary + build the full argv and run the SAME
+   * compileInvocation budget check spawn runs, WITHOUT any side effect.
+   * resolveBinary runs a read-only `where` query (no transcript, no worktree, no
+   * spawn); buildArgs is assumed deterministic. This lets RunManager fail
+   * fixed-safe BEFORE it creates a transcript, worktree, or process — when the
+   * composed role contract would exceed the Windows command-line budget. cmd.exe
+   * over-limit behavior is not a safe transport contract (reject/truncate/
+   * misparse by boundary); WAO refuses deterministically.
+   *
+   * This is a best-effort EARLY gate, NOT a byte-identity guarantee: it assumes
+   * buildArgs and binary resolution are deterministic and cwd-independent for the
+   * configured process backends (preflight runs with the pre-worktree agent).
+   * spawn re-runs compileInvocation as the authoritative defense-in-depth check,
+   * so a preflight pass can never let an overflowing invocation reach the OS.
+   *
+   * Provider-neutral: the budget is a function of the resolved binary's
+   * capability (.cmd/.bat vs .exe), never of the backend name. OpenCodeServe
+   * (an HTTP backend) has no preflightInvocation and is unaffected.
+   */
+  async preflightInvocation(agent, task) {
+    const built = await this._resolveAndBuildArgs(agent, task);
+    return compileInvocation({ binary: built.binary, builtArgs: built.args, platform: process.platform });
+  }
+
+  /**
+   * Shared binary+argv resolution for spawn and preflightInvocation. For the
+   * configured process backends, buildArgs and binary resolution are
+   * deterministic and cwd-independent, so preflight (pre-worktree) and spawn
+   * (post-worktree) resolve the same { binary, args }; this is an assumption
+   * about the current backends, NOT a guarantee for arbitrary injectable
+   * buildArgs. spawn's own compileInvocation remains the authoritative check.
+   */
+  async _resolveAndBuildArgs(agent, task) {
     // resolveBinary 可返回字符串或 { binary, prependArgs }
     // （后者用于绕过 .cmd 包装器，直接 node 跑 .js 入口）
     let binary = agent.binary;
@@ -142,13 +175,34 @@ export class ProcessBackend {
       }
     }
     const configuredPrependArgs = Array.isArray(agent.prependArgs) ? agent.prependArgs : [];
-    let args = [...prependArgs, ...configuredPrependArgs, ...this.buildArgs(agent, task)];
-    let windowsVerbatimArguments = false;
-    if (process.platform === "win32" && isWindowsCommandScript(binary)) {
-      args = ["/d", "/s", "/c", buildCmdLine(binary, args)];
-      binary = process.env.ComSpec || "cmd.exe";
-      windowsVerbatimArguments = true;
-    }
+    const args = [...prependArgs, ...configuredPrependArgs, ...this.buildArgs(agent, task)];
+    return { binary, args };
+  }
+
+  async spawn(agent, task) {
+    const built = await this._resolveAndBuildArgs(agent, task);
+    // compileInvocation 是纯 kernel：保守检查 Windows 命令行预算（.cmd/.bat 含
+    // /d /s /c 外包装、.exe 含引号膨胀上界），超限即固定失败。WAO 不依赖 cmd.exe
+    // 超限行为（按边界可能拒绝/截断/误解析，不是安全传输契约），而是确定性拒绝。
+    // 非溢出情形与旧逻辑字节级一致（binary/args/windowsVerbatimArguments 不变）。
+    //
+    // defense-in-depth：保留 spawn 侧复检，不复用 preflight 的预编译结果。preflight
+    // 用 pre-worktree 的 agent 在副作用前先查一次；这里用 spawn 实际使用的 argv 再
+    // 查一次，两次各自独立地 _resolveAndBuildArgs + compile。这【假定】当前已配置的
+    // 进程式 backend 的 buildArgs 与 binary 解析是确定性的、且不依赖 cwd（preflight
+    // 用源 cwd、spawn 用 worktree cwd）——这是对现有 backend 实现的假设，不是对任意
+    // 可注入 buildArgs 的字节级同一性保证。保留 spawn 侧重查：即使某个 buildArgs 在
+    // preflight 与 spawn 之间因 agent 状态变化而产出不同 argv，spawn 这次的
+    // compileInvocation 仍是权威检查；且任何直接调用 spawn、绕过 preflight 的路径也
+    // 不会漏检。
+    const compiled = compileInvocation({
+      binary: built.binary,
+      builtArgs: built.args,
+      platform: process.platform,
+    });
+    const binary = compiled.binary;
+    const args = compiled.args;
+    const windowsVerbatimArguments = compiled.windowsVerbatimArguments;
     const agentEnv = agent.env ?? {};
     const forbiddenAgentEnv = Object.keys(agentEnv).find(isSecretEnvName);
     if (forbiddenAgentEnv) {
@@ -407,6 +461,130 @@ function quoteCmdArg(value) {
   const text = String(value);
   if (text.length === 0) return "\"\"";
   return `"${text.replace(/%/g, "%%").replace(/"/g, "\\\"")}"`;
+}
+
+// M12-14 Package 1: Windows process command-line budgets. Provider-neutral —
+// the limit is a function of the resolved binary's capability, not the backend.
+//   - WIN_CMDLINE_MAX_CMD (8191): the NOMINAL cmd.exe command-line ceiling. The
+//     ACTUAL over-limit behavior is NOT a safe transport contract: depending on
+//     the boundary and the Windows/build version, cmd.exe may reject, truncate,
+//     or misparse the command. WAO never relies on it — it refuses deterministically
+//     below the nominal ceiling (see WIN_CMDLINE_SAFETY_MARGIN).
+//   - WIN_CMDLINE_MAX_EXE (32767): the CreateProcess lpCommandLine ceiling. An
+//     .exe invocation that exceeds it fails loudly (CreateProcess returns an
+//     error); WAO rejects conservatively before that point.
+export const WIN_CMDLINE_MAX_CMD = 8191;
+export const WIN_CMDLINE_MAX_EXE = 32767;
+// Documented safety margin below the nominal cmd.exe ceiling. The exact .cmd/.bat
+// command-line boundary is environment-dependent, so WAO rejects deterministically
+// at (8191 − margin) rather than at the fuzzy nominal edge. Applied to the .cmd
+// path only (the .exe 32767 ceiling is a hard CreateProcess limit).
+export const WIN_CMDLINE_SAFETY_MARGIN = 64;
+
+/**
+ * Provable upper bound on the Windows-QUOTED form of a single argv element.
+ *
+ * libuv/CreateProcess quoting (MSDN "Parsing C Command-Line Arguments") can
+ * EXPAND a source string: a run of backslashes immediately before a quote is
+ * doubled, the quote is escaped as \", and the whole element is wrapped in outer
+ * quotes when it contains whitespace/quotes. Every source character therefore
+ * maps to at most two command-line characters, and the outer quotes add two — so
+ * `2 * len + 2` is a provable upper bound on the quoted length. Used as a
+ * conservative estimator so WAO never false-accepts a string whose QUOTED form
+ * overflows even though its raw form fits (e.g. a long run of backslashes).
+ *
+ * @param {string} s — a single argv element (raw, pre-quoting)
+ * @returns {number} an upper bound on its length after Windows quoting
+ */
+export function quotedLengthBound(s) {
+  return 2 * String(s).length + 2;
+}
+
+/**
+ * Conservative upper bound on the FULL lpCommandLine libuv/CreateProcess builds
+ * for an invocation of `binary` with `args`: each element bounded by
+ * quotedLengthBound, joined by single-space separators. Always ≥ the actual
+ * command-line length, so a rejection here can never be a false success.
+ *
+ * @param {string} binary — resolved binary path
+ * @param {string[]} args — full argv
+ * @returns {number} conservative upper bound on the final command-line length
+ */
+export function cmdLineLengthBound(binary, args) {
+  let len = quotedLengthBound(binary);
+  for (const a of args) len += 1 + quotedLengthBound(a);
+  return len;
+}
+
+/**
+ * M12-14 Package 1: pure compile kernel shared by spawn and preflightInvocation.
+ *
+ * Takes an already-resolved binary and the already-built full argv and returns
+ * the final { binary, args, windowsVerbatimArguments }, applying the Windows
+ * .cmd/.bat wrapping AND enforcing the command-line budget as a fixed failure.
+ * On non-Windows there is no process-argv budget (POSIX ARG_MAX is far larger
+ * and not a truncation risk) → passed through unchanged.
+ *
+ * Budget model (correctness over false success):
+ *   - .cmd/.bat: the FINAL command line is `<ComSpec> /d /s /c <cmdLine>` with
+ *     windowsVerbatimArguments:true, so libuv passes the already-quoted cmdLine
+ *     VERBATIM (no re-quoting). The bound is therefore measured over the FULL
+ *     line — ComSpec (conservatively quoted-bounded) + the literal " /d /s /c "
+ *     wrapper + the EXACT cmdLine length — and compared to (8191 − SAFETY_MARGIN),
+ *     never to the inner cmdLine alone. cmd.exe's over-limit behavior is not a
+ *     safe transport contract (reject/truncate/misparse by boundary); WAO refuses
+ *     deterministically.
+ *   - .exe/other: libuv applies Windows quoting (windowsVerbatimArguments:false),
+ *     so the bound uses cmdLineLengthBound (a conservative quoting-aware
+ *     estimator) vs 32767 — a string whose RAW join fits but whose QUOTED form
+ *     overflows (e.g. a long backslash run) is rejected.
+ *
+ * Non-overflow behavior is BYTE-IDENTICAL to the historical spawn logic:
+ *   - .cmd/.bat on win32 → wrapped via cmd.exe /d /s /c, verbatim args.
+ *   - .exe / unknown on win32 → plain, no wrapping.
+ *   - non-win32 → plain, no wrapping.
+ * The ONLY behavioral addition is a deterministic throw when the budget would be
+ * exceeded. Error messages are a fixed safe shape — they never echo argv, prompt,
+ * path, or contract content.
+ *
+ * @param {object} input
+ * @param {string} input.binary — resolved binary path
+ * @param {string[]} input.builtArgs — full argv (prepend + configured + buildArgs)
+ * @param {string} input.platform — process.platform (so the kernel is testable)
+ * @returns {{ binary: string, args: string[], windowsVerbatimArguments: boolean }}
+ * @throws {Error} on win32 when the compiled command line exceeds the budget.
+ */
+export function compileInvocation({ binary, builtArgs, platform }) {
+  if (platform !== "win32") {
+    return { binary, args: builtArgs, windowsVerbatimArguments: false };
+  }
+  if (isWindowsCommandScript(binary)) {
+    const comspec = process.env.ComSpec || "cmd.exe";
+    const cmdLine = buildCmdLine(binary, builtArgs);
+    // Bound the FULL cmd.exe command line. cmdLine is passed VERBATIM
+    // (windowsVerbatimArguments:true → libuv does not re-quote it), so its length
+    // is exact; only ComSpec is given a conservative quoting bound. The literal
+    // " /d /s /c " is the wrapper between ComSpec and the verbatim command.
+    const fullLineLen = quotedLengthBound(comspec) + " /d /s /c ".length + cmdLine.length;
+    if (fullLineLen > WIN_CMDLINE_MAX_CMD - WIN_CMDLINE_SAFETY_MARGIN) {
+      throw new Error(
+        "Windows command-script invocation exceeds the conservative command-line budget; refusing to spawn (cmd.exe over-limit behavior is not a safe transport contract)",
+      );
+    }
+    return {
+      binary: comspec,
+      args: ["/d", "/s", "/c", cmdLine],
+      windowsVerbatimArguments: true,
+    };
+  }
+  // .exe / other: libuv applies Windows quoting → use the conservative quoting-
+  // aware bound so a raw-join that fits but a quoted form that overflows is rejected.
+  if (cmdLineLengthBound(binary, builtArgs) > WIN_CMDLINE_MAX_EXE) {
+    throw new Error(
+      "Windows invocation exceeds the conservative process command-line budget; refusing to spawn",
+    );
+  }
+  return { binary, args: builtArgs, windowsVerbatimArguments: false };
 }
 
 // TD-77B：原 trimStderrTail 通用化为 trimTail（stderr/stdout 共用尾部截取）。

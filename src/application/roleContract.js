@@ -280,10 +280,26 @@ export function composeRoleContractWithIdentity({ roleContract, agentId }) {
  *     commit;
  *   - this contract takes precedence over any contrary task-prompt instruction.
  *
+ * M12-14 Package 1 (Worker-visible Work Order SSOT): when the control plane
+ * has prepared an authorized-paths list (deliveryPrepared.allowedPaths), it is
+ * appended as a fixed AUTHORIZED WORK SCOPE block — the single source of truth
+ * the worker sees BEFORE it starts, via the same runtime-native role-contract
+ * channel. This eliminates the disallowed_path late-failure: the worker now
+ * knows the exact list up front and must report (not edit on) any path outside
+ * it. Packaging containment is unchanged — the block states scope, it does not
+ * relax the packager.
+ *
+ * No allowedPaths (undefined / empty / non-array) → the base contract is
+ * returned byte-identical, preserving every existing no-arg caller (m12-3
+ * ISO-C1, m12-6 WQ-RED-04, m11-8c package tests, non-delivery resume).
+ *
+ * @param {object} [input]
+ * @param {string[]} [input.allowedPaths] — the control-plane-prepared (validated,
+ *   normalized) authorized-paths list; omit/empty to get the base contract.
  * @returns {string} the fixed delivery execution contract
  */
-export function composeDeliveryExecutionContract() {
-  return [
+export function composeDeliveryExecutionContract({ allowedPaths } = {}) {
+  const base = [
     "DELIVERY EXECUTION CONTRACT (WAO control plane — highest priority, overrides any contrary task-prompt instruction):",
     "- The process current working directory, also provided as WAO_TARGET_CWD, is the sole authorized workspace.",
     "- Use repo-relative paths from that directory. Do NOT cd, chdir, or pushd outside it, and do not operate on another checkout.",
@@ -294,4 +310,43 @@ export function composeDeliveryExecutionContract() {
     "- The WAO control plane inspects your working-tree changes, stages them, and creates the single atomic delivery commit. You do not commit.",
     "- If the task prompt asks you to commit or to produce a final commit SHA, that instruction is overridden by this contract: leave changes unstaged and report paths/tests/risks only.",
   ].join("\n");
+
+  // M12-14: no authorized-paths list → base contract, unchanged (backward compat).
+  if (!Array.isArray(allowedPaths) || allowedPaths.length === 0) {
+    return base;
+  }
+
+  // The single source of truth for the worker's authorized scope. The list is
+  // already prepared (validated/normalized) by the control plane; this block
+  // only states and encodes it — it never re-derives or re-validates scope.
+  return base + "\n" + [
+    "- AUTHORIZED WORK SCOPE (single source of truth — the WAO control plane persists and delivers this exact list before you start; do not infer, widen, or observe scope from the filesystem):",
+    `- AUTHORIZED_PATHS_JSON: ${encodeAuthorizedPathsJson(allowedPaths)}`,
+    '- Each changed path must be EXACTLY one of the entries above, or a descendant on a "/" segment boundary: "src" authorizes "src/a.js" and "src/d/b.js", but NOT "src2/a.js" or "srcfoo". Matching is case-sensitive — case-shape is authoritative ("src" does not authorize "SRC/a.js").',
+    "- If your task requires a path NOT covered by the list above, do NOT edit it: STOP, leave your changes as unstaged working-tree changes, report `SCOPE_EXPANSION_REQUIRED: <repo-relative-path> — <reason>`, and await instructions.",
+  ].join("\n");
+}
+
+/**
+ * M12-14 Package 1: encode the authorized-paths array as a single-line JSON
+ * literal safe to embed verbatim in the delivery contract.
+ *
+ * JSON.stringify escapes C0 (<0x20), the double-quote, and the backslash, but
+ * leaves U+2028 / U+2029 (line separators — line terminators that would break
+ * the single-line invariant and let a buried directive start a new line),
+ * DEL (0x7F), and C1 (0x80-0x9F) as raw code points. None of these carry
+ * legitimate path semantics; they are escaped to \uXXXX here so the
+ * AUTHORIZED_PATHS_JSON value is always exactly one line and a path can never
+ * forge a new contract field. The output round-trips through JSON.parse back
+ * to the original array (including spaces, [], colons, quotes, backticks,
+ * backslashes, and embedded newlines, which survive as escaped values).
+ *
+ * @param {string[]} paths — the control-plane-prepared allowed-paths array
+ * @returns {string} a single-line JSON literal
+ */
+function encodeAuthorizedPathsJson(paths) {
+  const raw = JSON.stringify(paths);
+  // eslint-disable-next-line no-control-regex
+  return raw.replace(/[\u2028\u2029\x7f-\x9f]/g, (ch) =>
+    "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0"));
 }
