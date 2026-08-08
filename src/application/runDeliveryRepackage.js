@@ -55,6 +55,8 @@ import {
   isCanonicalCommitId,
   isPathAllowed,
   resolveDeliveryCommit,
+  VERIFICATION_TIMEOUT_MS_MIN,
+  VERIFICATION_TIMEOUT_MS_MAX,
 } from "../delivery.js";
 import { verifyDelivery } from "../deliveryVerification.js";
 import {
@@ -88,6 +90,36 @@ function _normalizeAllowedPaths(allowedPaths) {
     throw new Error(`runDeliveryRepackage: allowedPaths exceeds ${REPACKAGE_ALLOWED_PATHS_LIMIT}`);
   }
   return [...new Set(allowedPaths.map((p) => validateProjectedPath(p)))].sort();
+}
+
+/**
+ * M12-13: validate the ORIGINAL per-command execution timeout persisted on
+ * run.started.delivery.verificationTimeoutMs. Absent (undefined) → returns
+ * undefined (zero drift: the verifier's consumer default applies). Present but
+ * malformed — null / non-number / non-integer / outside the SHARED bounds —
+ * throws BEFORE any inventory read, Git packaging, transcript append, or
+ * verification: a corrupt persisted value is never silently defaulted and never
+ * widened (fail closed).
+ *
+ * Reuses the SAME shared bounds as prepareDeliveryRequest (the wire SSOT) and
+ * the reverify resolver (REVERIFY_TIMEOUT_MS_*, aliases of these constants), so
+ * the repackage cannot drift on what a valid per-command budget is.
+ * @param {unknown} value — delivery.verificationTimeoutMs
+ * @returns {number|undefined} validated integer ms, or undefined when absent
+ */
+function _validateVerificationTimeoutMs(value) {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "number"
+    || !Number.isInteger(value)
+    || value < VERIFICATION_TIMEOUT_MS_MIN
+    || value > VERIFICATION_TIMEOUT_MS_MAX
+  ) {
+    throw new Error(
+      `runDeliveryRepackage: persisted verificationTimeoutMs must be an integer in [${VERIFICATION_TIMEOUT_MS_MIN}, ${VERIFICATION_TIMEOUT_MS_MAX}]`,
+    );
+  }
+  return value;
 }
 
 /** Newest bound event matching predicate, or null. */
@@ -183,6 +215,14 @@ function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, ha
   const hasSetup = Array.isArray(delivery.verificationSetupCommands)
     && delivery.verificationSetupCommands.length > 0
     && delivery.verificationSetupCommands.every((c) => typeof c === "string" && c.trim().length > 0);
+  // M12-13: validate the ORIGINAL per-command execution budget persisted on
+  // run.started BEFORE any inventory read, Git packaging, transcript append, or
+  // verification. Absent → undefined (the verifier's consumer default applies);
+  // present-but-malformed/out-of-range → fail closed (never defaulted, never
+  // widened). Preserved through reconstruction, the repackage-created ref, and
+  // the exact verifier call so a Lead-declared long budget does not drift to the
+  // 300000 default.
+  const verificationTimeoutMs = _validateVerificationTimeoutMs(delivery.verificationTimeoutMs);
   // The persisted worktreePath must be a real Git worktree top-level (defense).
   // Before the first backend-failure recovery, HEAD must still be the exact
   // original base. After delivery_created exists, idempotent re-entry is bound
@@ -205,6 +245,7 @@ function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, ha
     ...(hasCommands ? { verificationCommands: [...delivery.verificationCommands] } : {}),
     ...(hasReason ? { verificationUnavailableReason: delivery.verificationUnavailableReason } : {}),
     ...(hasSetup ? { verificationSetupCommands: [...delivery.verificationSetupCommands] } : {}),
+    ...(verificationTimeoutMs !== undefined ? { verificationTimeoutMs } : {}),
   };
 }
 
@@ -351,6 +392,9 @@ export async function runDeliveryRepackage({
       ...(original.verificationSetupCommands
         ? { verificationSetupCommands: original.verificationSetupCommands }
         : {}),
+      ...(original.verificationTimeoutMs !== undefined
+        ? { verificationTimeoutMs: original.verificationTimeoutMs }
+        : {}),
     };
     const resolved = await _resolve(deliveryCtx);
     resolvedRef = resolved.ref;
@@ -397,7 +441,16 @@ export async function runDeliveryRepackage({
     };
   }
 
-  const verifyResult = await _verify(authoritativeRef);
+  const verifyResult = await _verify(
+    authoritativeRef,
+    // M12-13: supply the ORIGINAL declared per-command budget as the authoritative
+    // timeout. Absent → no timeoutMs key (verifyDelivery applies its consumer
+    // default), preserving zero drift. Idempotent existing-created paths remain
+    // bound to authoritativeRef; only the budget opts differ by presence.
+    original.verificationTimeoutMs !== undefined
+      ? { timeoutMs: original.verificationTimeoutMs }
+      : {},
+  );
   const verificationResult = await transcript.tryAppendRepackageVerification({
     delivery: verifyResult.delivery,
     outcome: verifyResult.outcome,

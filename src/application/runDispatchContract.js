@@ -104,6 +104,14 @@ function buildEffectiveDelivery(delivery, verification) {
       ? { verificationSetupCommands: verification.setupCommands }
       : {}),
     ...(verification.unavailableReason ? { verificationUnavailableReason: verification.unavailableReason } : {}),
+    // M12-13: forward the per-command execution timeout to the shared structural
+    // validator ONLY when declared, so a direct application-service contract
+    // check cannot report contractValid despite an invalid timeout. Absent stays
+    // absent (zero drift); a present-but-malformed value is classified by the
+    // shared prepareDeliveryRequest SSOT exactly as run_dispatch would.
+    ...(delivery.verificationTimeoutMs !== undefined
+      ? { verificationTimeoutMs: delivery.verificationTimeoutMs }
+      : {}),
   };
 }
 

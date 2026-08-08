@@ -23,7 +23,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -108,6 +108,7 @@ function disallowedPathEvents({
   verificationCommands = ["npm test"],
   verificationUnavailableReason = null,
   deliveryCode = "disallowed_path",
+  verificationTimeoutMs = undefined,
 }) {
   const verification = verificationCommands
     ? { verificationCommands }
@@ -120,7 +121,17 @@ function disallowedPathEvents({
       cwd: repo,
       worktreePath,
       worktreeBranch: `wao/${RUN_ID}`,
-      delivery: { mode: "git_commit_v1", baseCommit, allowedPaths, ...verification },
+      delivery: {
+        mode: "git_commit_v1",
+        baseCommit,
+        allowedPaths,
+        ...verification,
+        // M12-13: the original per-command execution budget is persisted on
+        // run.started.delivery.verificationTimeoutMs. Only included when declared
+        // (zero drift when absent); malformed values are seeded deliberately in
+        // the fail-closed causal tests below.
+        ...(verificationTimeoutMs !== undefined ? { verificationTimeoutMs } : {}),
+      },
     },
     { type: "run.state_change", from: null, to: "pending", reason: "created" },
     { type: "run.state_change", from: "pending", to: "running", reason: "spawned" },
@@ -173,6 +184,7 @@ async function setupDisallowedScenario({
   allowedPaths = ["src"],
   verificationCommands = ["npm test"],
   verificationUnavailableReason = null,
+  verificationTimeoutMs = undefined,
 } = {}) {
   const { repo, baseCommit } = await makeRepo();
   const runDir = await mkdtemp(join(tmpdir(), "m12s2-runs-"));
@@ -183,7 +195,7 @@ async function setupDisallowedScenario({
   await writeFile(join(worktreePath, "src", "a.js"), "const a = 2;\n");
   seedTranscript(runDir, RUN_ID, disallowedPathEvents({
     repo, worktreePath, baseCommit, allowedPaths, verificationCommands,
-    verificationUnavailableReason,
+    verificationUnavailableReason, verificationTimeoutMs,
   }));
   return { repo, baseCommit, runDir, worktreePath };
 }
@@ -1248,5 +1260,150 @@ test("M12-1S2-IDEMPOTENT: retrying a completed repackage yields the same deliver
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);
+  }
+});
+
+// ============================================================
+// M12-13: the ORIGINAL per-command execution budget must survive
+// reconstruction and reach the verifier (Problem A). Absent stays zero-drift;
+// present-but-malformed fails closed before any side effect.
+// ============================================================
+
+test("M12-13-REPKG-TIMEOUT-OK: a valid long persisted verificationTimeoutMs is preserved through reconstruction, the repackage-created ref, and the verifier call", async () => {
+  const { repo, runDir } = await setupDisallowedScenario({
+    // A Lead-declared long per-command budget (10 min) that would otherwise drift
+    // to the 300000 default if dropped during reconstruction.
+    verificationTimeoutMs: 600000,
+  });
+  try {
+    const verifyCalls = [];
+    const result = await runDeliveryRepackage({
+      runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"],
+      authorizedWorkspaceRoot: repo, resolveDeliveryCommitFn: resolveDeliveryCommit,
+      verifyDeliveryFn: async (ref, opts) => {
+        verifyCalls.push({ ref, opts });
+        return {
+          delivery: {
+            ...ref,
+            verification: {
+              ...ref.verification,
+              status: "passed",
+              verifiedCommit: ref.deliveryCommit,
+              results: [],
+            },
+          },
+          outcome: "passed",
+        };
+      },
+      computeInventoryFn: computeCandidateInventory,
+    });
+    assert.equal(result.verificationStatus, "passed");
+
+    // The verifier received the ORIGINAL declared per-command budget — NOT the
+    // 300000 default.
+    assert.equal(verifyCalls.length, 1, "verifier called exactly once");
+    assert.equal(verifyCalls[0].opts.timeoutMs, 600000,
+      "repackage verification is supplied the authoritative declared timeout");
+
+    // The repackage-created DeliveryRef carries the declared budget (preserved
+    // through reconstruction -> packaging).
+    const events = await readEvents(runDir);
+    const created = events.find((e) => e.type === "run.delivery_created");
+    assert.equal(created.delivery.verification.verificationTimeoutMs, 600000,
+      "repackage-created DeliveryRef persists the declared timeout");
+
+    // An idempotent retry must still supply the SAME authoritative budget to the
+    // (now-skipped) verifier path — the bound ref + budget survive re-entry.
+    const retryVerifyCalls = [];
+    const retry = await runDeliveryRepackage({
+      runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"],
+      authorizedWorkspaceRoot: repo, resolveDeliveryCommitFn: resolveDeliveryCommit,
+      verifyDeliveryFn: async (ref, opts) => {
+        retryVerifyCalls.push(opts);
+        return { delivery: { ...ref, verification: { ...ref.verification, status: "passed", verifiedCommit: ref.deliveryCommit, results: [] } }, outcome: "passed" };
+      },
+      computeInventoryFn: computeCandidateInventory,
+    });
+    assert.equal(retry.created, false, "idempotent retry yielded to the existing delivery");
+    assert.equal(retry.verificationRecorded, false, "outcome already recorded");
+    // No re-verify on the idempotent path (existing outcome is authoritative).
+    assert.equal(retryVerifyCalls.length, 0);
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("M12-13-REPKG-TIMEOUT-ABSENT: absent verificationTimeoutMs is zero drift — verifier receives no timeoutMs, created ref gains no key", async () => {
+  const { repo, runDir } = await setupDisallowedScenario();
+  try {
+    const verifyCalls = [];
+    await runDeliveryRepackage({
+      runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"],
+      authorizedWorkspaceRoot: repo, resolveDeliveryCommitFn: resolveDeliveryCommit,
+      verifyDeliveryFn: async (ref, opts = {}) => {
+        verifyCalls.push(opts);
+        return { delivery: { ...ref, verification: { ...ref.verification, status: "passed", verifiedCommit: ref.deliveryCommit, results: [] } }, outcome: "passed" };
+      },
+      computeInventoryFn: computeCandidateInventory,
+    });
+    assert.equal(verifyCalls.length, 1);
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(verifyCalls[0], "timeoutMs"),
+      false,
+      "absent timeout → verifier receives NO timeoutMs (consumer default applies)",
+    );
+    const events = await readEvents(runDir);
+    const created = events.find((e) => e.type === "run.delivery_created");
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(created.delivery.verification, "verificationTimeoutMs"),
+      false,
+      "absent timeout → created ref gains NO verificationTimeoutMs key (zero drift)",
+    );
+  } finally {
+    await cleanupDir(repo);
+    await cleanupDir(runDir);
+  }
+});
+
+test("M12-13-REPKG-TIMEOUT-MALFORMED: a malformed/out-of-range persisted verificationTimeoutMs fails closed BEFORE inventory / packaging / append / verification", async () => {
+  // A present-but-malformed persisted value must never be silently defaulted or
+  // widened: it rejects in Phase 0 (preconditions) BEFORE any inventory read, Git
+  // packaging, transcript append, or verifier execution. All closed-set malformations
+  // (string / fraction / below-min / above-max / null) must behave identically.
+  for (const bad of ["600000", 600000.5, 999, 7200001, null, "oops"]) {
+    const { repo, runDir } = await setupDisallowedScenario({ verificationTimeoutMs: bad });
+    const filePath = join(runDir, `${RUN_ID}.jsonl`);
+    const bytesBefore = readFileSync(filePath, "utf8").length;
+    let inventoryCalls = 0;
+    let resolveCalls = 0;
+    let verifyCalls = 0;
+    let transcriptCalls = 0;
+    try {
+      await assert.rejects(
+        () => runDeliveryRepackage({
+          runId: RUN_ID, runDir, allowedPaths: ["src", "root.txt"],
+          authorizedWorkspaceRoot: repo,
+          computeInventoryFn: async () => { inventoryCalls += 1; return null; },
+          resolveDeliveryCommitFn: async () => { resolveCalls += 1; throw new Error("must not package"); },
+          verifyDeliveryFn: async () => { verifyCalls += 1; throw new Error("must not verify"); },
+          transcriptFactory: async () => { transcriptCalls += 1; throw new Error("must not append"); },
+        }),
+        /verificationTimeoutMs|integer/i,
+        `malformed ${JSON.stringify(bad)} must fail closed`,
+      );
+      assert.equal(inventoryCalls, 0, `inventory NOT called for ${JSON.stringify(bad)}`);
+      assert.equal(resolveCalls, 0, `resolve NOT called for ${JSON.stringify(bad)}`);
+      assert.equal(verifyCalls, 0, `verify NOT called for ${JSON.stringify(bad)}`);
+      assert.equal(transcriptCalls, 0, `transcript append NOT called for ${JSON.stringify(bad)}`);
+      assert.equal(
+        readFileSync(filePath, "utf8").length,
+        bytesBefore,
+        `transcript bytes unchanged for ${JSON.stringify(bad)}`,
+      );
+    } finally {
+      await cleanupDir(repo);
+      await cleanupDir(runDir);
+    }
   }
 });

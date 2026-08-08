@@ -28,6 +28,7 @@ import { runDispatchContractCheck, CONTRACT_CHECK_ISSUE_CODES } from "../src/app
 import { EXECUTION_PROFILE_IDS } from "../src/application/executionProfiles.js";
 import { JsonlTranscript } from "../src/transcript.js";
 import { readRegistry } from "../src/registry.js";
+import { prepareDeliveryRequest } from "../src/delivery.js";
 
 function cleanupDir(dir) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
 
@@ -358,4 +359,84 @@ test("B4: profile selected + delivery valid → contractValid true and profile c
   assert.equal(r.profile.id, "python-pytest-v1");
   assert.equal(r.profile.setupCommandCount, 0);
   assert.equal(r.profile.assertionCommandCount, 1);
+});
+
+// ===== M12-13 (Problem B): the per-command execution timeout must flow through
+// buildEffectiveDelivery to the shared structural validator, so a direct
+// application-service contract check cannot report contractValid=true for an
+// invalid timeout. Valid + invalid values are classified by the SAME shared
+// SSOT run_dispatch uses (prepareDeliveryRequest). Advisory semantics preserved:
+// the result never gates or permits run_dispatch.
+
+test("M12-13-CONTRACT-TIMEOUT-OK: a valid contract-check verificationTimeoutMs reaches the shared validator and keeps contractValid true", async () => {
+  let captured = null;
+  const r = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: {
+      mode: "git_commit_v1",
+      allowedPaths: ["src/**"],
+      verificationCommands: ["npm test"],
+      verificationTimeoutMs: 600000,
+    },
+    workspaceBinding: BOUND,
+    registryPath: "ignored",
+    readRegistryFn: fakeRegistry(["coder_low"]),
+    // Delegating spy: record the effective delivery the service built, then
+    // delegate to the REAL shared SSOT so classification is authentic.
+    prepareDeliveryRequestFn: (delivery) => {
+      captured = delivery;
+      return prepareDeliveryRequest(delivery);
+    },
+  });
+  // The declared timeout reached the shared structural validator (not dropped).
+  assert.equal(captured.verificationTimeoutMs, 600000,
+    "buildEffectiveDelivery forwards verificationTimeoutMs to prepareDeliveryRequest");
+  assert.equal(r.contractValid, true, "a valid timeout keeps the contract valid");
+  assert.ok(!r.issueCodes.includes("delivery_invalid"), "no delivery_invalid for a valid timeout");
+  assert.equal(r.advisory, true, "advisory semantics preserved");
+});
+
+test("M12-13-CONTRACT-TIMEOUT-OK-PROFILE: a valid verificationTimeoutMs survives the execution-profile fold (profile supplies commands; Lead timeout preserved)", async () => {
+  let captured = null;
+  const r = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: {
+      mode: "git_commit_v1",
+      allowedPaths: ["src/**"],
+      verificationTimeoutMs: 600000,
+    },
+    executionProfileId: "node-npm-test-v1",
+    workspaceBinding: BOUND,
+    registryPath: "ignored",
+    readRegistryFn: fakeRegistry(["coder_low"]),
+    prepareDeliveryRequestFn: (delivery) => { captured = delivery; return prepareDeliveryRequest(delivery); },
+  });
+  assert.equal(captured.verificationCommands.join(" "), "npm test", "profile still supplies the commands");
+  assert.equal(captured.verificationTimeoutMs, 600000, "profile fold must NOT drop the declared timeout");
+  assert.equal(r.contractValid, true);
+});
+
+test("M12-13-CONTRACT-TIMEOUT-INVALID: an invalid contract-check verificationTimeoutMs is classified by the shared validator as delivery_invalid (contractValid false)", async () => {
+  for (const bad of ["600000", 600000.5, 999, 7200001, null]) {
+    const r = await runDispatchContractCheck({
+      agentId: "coder_low",
+      prompt: "x",
+      delivery: {
+        mode: "git_commit_v1",
+        allowedPaths: ["src/**"],
+        verificationCommands: ["npm test"],
+        verificationTimeoutMs: bad,
+      },
+      workspaceBinding: BOUND,
+      registryPath: "ignored",
+      readRegistryFn: fakeRegistry(["coder_low"]),
+    });
+    assert.equal(r.contractValid, false,
+      `invalid timeout ${JSON.stringify(bad)} → contractValid false`);
+    assert.ok(r.issueCodes.includes("delivery_invalid"),
+      `invalid timeout ${JSON.stringify(bad)} classified by the shared validator as delivery_invalid`);
+    assert.equal(r.advisory, true, "advisory semantics preserved even on an invalid contract");
+  }
 });
