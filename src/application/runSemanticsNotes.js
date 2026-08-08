@@ -206,6 +206,14 @@ const CATALOG = Object.freeze({
       "It does not recommend re-packaging or any specific recovery.",
     ],
   }),
+  "delivery.isolation_failed": Object.freeze({
+    id: "delivery.isolation_failed",
+    meaning: "The delivery failed on a working-directory isolation escape (workdir_escape) and was never packaged.",
+    doesNotMean: [
+      "It is NOT a packaging failure and does not expose a candidate inventory or diff.",
+      "It does not recommend re-packaging, salvage, retry, stop, or a decision.",
+    ],
+  }),
   "delivery.waiting": Object.freeze({
     id: "delivery.waiting",
     meaning: "The delivery is waiting for packaging or verification to settle.",
@@ -350,6 +358,7 @@ function deliveryKey(f) {
   const r = f.readiness ?? f.deliveryReadiness;
   if (r === "reviewable") return "delivery.reviewable";
   if (r === "packaging_failed") return "delivery.packaging_failed";
+  if (r === "isolation_failed") return "delivery.isolation_failed";
   if (r === "not_requested") return "delivery.not_requested";
   if (r === "ambiguous") return "delivery.ambiguous";
   if (r === "waiting_for_packaging" || r === "waiting_for_verification") return "delivery.waiting";

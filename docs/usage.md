@@ -436,7 +436,7 @@ WAO 是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude De
 
 **M12-11 统一观察/终止事实**（`run_wait` 与 `run_await_result` 同形附加闭集字段，零 control/语义边界变更）：两者都附带 `observation: { outcome, waitedMs, windowMs }` 与 `termination: null | { state, source, configuredMs, policySource }`。`observation.outcome ∈ { point_in_time, window_expired, terminal, read_failure }` 让 Lead 不再猜测"窗口到期 / 终态 / 读失败"；`termination` **仅在干净观测到终态时非空**——窗口到期/读失败/transport 丢失一律 `null`，绝不折叠成 worker 已停止。`termination.source ∈ { completion, execution_deadline, manual, provider, backend, control_plane, unknown }` 是闭集终止来源（`execution_deadline` 仅当 WAO 截止定时器真触发；provider/backend/control_plane 由诊断 SSOT 投影，不含 raw error/reason/path/command/credential）。所有事实从**同一 snapshot** 派生并绑定 runId，零额外读、零 transcript 追加。`run_wait` 因此获得与 `run_await_result` 一致的 fail-closed 读失败语义（liveness/ownerHeartbeat 为 `unknown`，不拼陈旧事件 + 新鲜心跳）。Transport 恢复：若调用无返回结果，观察状态 unknown，这两个只读工具未做任何 control-plane 变更、未停 worker——point-in-time 重读 `run_await_result(waitMs:0)` 或 `run_status`，**绝不从 transport 丢失推断 worker alive/dead**。
 
-**M12-9 三项机械增强**（均不改 control/语义边界，不新增门禁）：① `run_dispatch` 输入新增可选顶层 `executionProfileId`（与 `delivery` 同级；取自冻结可信 profile catalog，仅提供 delivery 验证的 setup/assertion 命令，与 inline `delivery.verificationCommands`/`delivery.verificationSetupCommands`/`delivery.verificationUnavailableReason` 互斥、仅 delivery 使用、派发前解析；未知/冲突由共享 resolver 稳定拒绝）；② 新增 advisory 只读工具 `run_dispatch_contract_check`（MCP adapter 在它与 `run_dispatch` 间共享输入 schema——service 自身不导入 Zod；service 复用同一 application 校验即共享 resolver + prepareDeliveryRequest，返回闭集 workspace/registry/contract 视图 + 有界 issue 码；`contractValid` 只反映 delivery/profile 机械合同，不预评 `expectedGitHead`/`expectedDirty`/`expectedWorkspaceRoot`、continuable/backend/session 资格或 worker 凭据——非门禁，sections 独立 settle 为 `observed`/`unknown`、`advisory` 恒为 `true`，零副作用，`run_dispatch` 不可依赖它，其部分失败不影响派发）；③ `run_await_result` 在终态且快照干净时附带有界闭集 `outcome`（terminalState / diagnosis(category/code/signalCount) / delivery(requested/readiness/available/failureCode/verificationStatus/verificationFailureCode/acceptanceStatus/decisionType) 安全事实；不含 commit id、changed paths、diff、command 文本、message/stderr、绝对路径或推荐，复用同一 snapshot 一次读取、零额外 transcript/Git 读、零 messages.collected 追加；非终态/read_failure → `outcome` 为 null）。
+**M12-9 三项机械增强**（均不改 control/语义边界，不新增门禁）：① `run_dispatch` 输入新增可选顶层 `executionProfileId`（与 `delivery` 同级；取自冻结可信 profile catalog，仅提供 delivery 验证的 setup/assertion 命令，与 inline `delivery.verificationCommands`/`delivery.verificationSetupCommands`/`delivery.verificationUnavailableReason` 互斥、仅 delivery 使用、派发前解析；未知/冲突由共享 resolver 稳定拒绝）；② 新增 advisory 只读工具 `run_dispatch_contract_check`（MCP adapter 在它与 `run_dispatch` 间共享输入 schema——service 自身不导入 Zod；service 复用同一 application 校验即共享 resolver + prepareDeliveryRequest，返回闭集 workspace/registry/contract 视图 + 有界 issue 码；`contractValid` 只反映 delivery/profile 机械合同，不预评 `expectedGitHead`/`expectedDirty`/`expectedWorkspaceRoot`、continuable/backend/session 资格或 worker 凭据——非门禁，sections 独立 settle 为 `observed`/`unknown`、`advisory` 恒为 `true`，零副作用，`run_dispatch` 不可依赖它，其部分失败不影响派发）；③ `run_await_result` 在终态且快照干净时附带有界闭集 `outcome`（terminalState / diagnosis(category/code/signalCount) / delivery(requested/readiness/available/failureCode/verificationStatus/verificationFailureCode/acceptanceStatus/decisionType) 安全事实；不含 commit id、changed paths、diff、command 文本、message/stderr、绝对路径或推荐，复用同一 snapshot 一次读取、零额外 transcript/Git 读、零 messages.collected 追加；非终态/read_failure → `outcome` 为 null）。**M12-13 增补**：`outcome.delivery` 追加 `isolationFailureCode`（闭集码或 null）——终端 delivery-requested run 且隔离违反为唯一较高优先级 delivery 事实时投影（见 `run_delivery` readiness `isolation_failed`），与 `deliveryFailure`（packaging 失败）严格分离。
 
 **Host 注册说明**：`npm run mcp` 仅用于在 WAO repo 内手工 smoke；正式 host 注册应指向 Node shim 和 stdio entrypoint 的**绝对路径**，并为 registry 和 runDir 指定绝对路径——MCP host 的启动 cwd 不保证是 WAO repo。host 配置语法由 host 自己负责。注册后若当前会话未发现工具，重启或重载 host。Provider credential 必须由 host 通过其安全 env inheritance/allowlist 提供——不把 credential value 写入 repo、worker prompt 或 MCP args。WAO 不接管 host-global auth。
 
@@ -570,12 +570,19 @@ M9-7A 起支持可选 `delivery` 块，用于派发后续可由 `run_delivery`/`
     "mode": "git_commit_v1",
     "allowedPaths": ["src"],
     "verificationSetupCommands": ["npm ci"],
-    "verificationCommands": ["npm test"]
+    "verificationCommands": ["npm test"],
+    "verificationTimeoutMs": 600000
   }
 }
 ```
 
 `delivery` 可选。`verificationCommands` 与 `verificationUnavailableReason` 二选一（互斥）。WAO 强制 persistent worktree isolation——模型不能传 `isolate`。模型**不能**传 `registryPath`、`runDir`、`runId`、`cwd`、`workspaceRoot`、`requireCertified`、timeout 或 `isolate`——这些是 server-owned 配置。MCP 固定以 `requireCertified: true` 调 shared service。
+
+**M12-13 per-command 执行预算（可选，`verificationTimeoutMs`）**：Lead 可选为 delivery 声明**单条 verification 命令的执行超时/预算**（整数 ms，共享闭界 `[1000, 7200000]`，默认 300000 **仅在字段缺失时**应用）。这不是 `run_wait` / `run_await_result` 的观察窗口——它约束 exact verifier 的逐条 setup/assertion 命令执行。语义：
+- **验证先于副作用**：非法值（字符串/小数/越界）在派发/start/resume 的任何 transcript append、worktree 创建、spawn/attach、打包、验证之前经 `prepareDeliveryRequest` SSOT 拒绝（`invalid_verification`），零转录、零 worktree、零 spawn；
+- **零漂移**：仅在显式声明时持久化（`run.started.delivery.verificationTimeoutMs`、`delivery_created` ref、verification outcome ref 都保留该值）；未声明则任何事件/ref 都不出现该字段，消费者才用默认值；
+- **持久值权威**：贯穿 start / resume（resume 重新经 SSOT 校验，持久值损坏则 resume 直接拒绝 null，零副作用）、profile 折叠（profile 只供命令，Lead 声明的预算保留）、MCP/CLI 转发、reverify 继承（省略 `timeoutMs` 时继承 ref 上持久化的预算，持久值损坏则 fail closed；显式值同样必须落在共享闭界内）；
+- **无自动动作**：从不自动加宽、从不重试、从不因超时自动 stop/decision——超时结果如实投影为闭集 `command_timeout` / `setup_timeout`。
 
 **M12-7 continuable 续谱根（delivery-only 可选）**：`run_dispatch` 顶层可带 `"continuable": true`（与 `delivery` 同级，不在 delivery 块内），把这次 delivery 标记为一条**可续谱系（continuable lineage）的根**。dispatch 会以 `run_lineage` / `turn:first` 建立一个 provider-native 会话（opaque uuid 由 server-owned Lead session + canonical workspace + canonical agentId + 该 run 的 rootRunId 派生），保留 retained worktree。这样日后 Lead 若审阅该终态 delivery、发现窄缺陷，可用 `run_continue` 对其续 ONE 修正回合——复用同一 retained worktree、以 `turn:resume` 续同一 provider 会话（同一 opaque uuid）。`continuable` 默认 `false`，省略时与普通 delivery dispatch 字节兼容；`continuable:true` 必须配 `delivery`（service 强制 delivery-only，否则 fail-closed）。WAO 从不在 dispatch 时推断或触发任何续跑/修正——是否续跑完全由 Lead 事后显式调用 `run_continue` 决定。
 
@@ -919,6 +926,8 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 路径投影的安全边界：每个 path 经 `src/delivery.js` 的 repo-relative 校验 SSOT 复验（拒绝绝对 Windows/POSIX/UNC、`..`/`.` traversal、空 segment、尾分隔符），并额外限制长度 1..512、无控制字符、无 NUL、统一 forward-slash。任何 malformed path 一律 fail-closed —— 整个 projection 不返回部分结果，调用折叠为固定 `run_delivery failed`，不泄漏恶意值。失败返回固定 `run_delivery failed`（不拼接异常、路径或 secret）。
 
+**M12-13 isolation_failed（隔离违反 readiness）**：终端（已到终态）且已请求 delivery 的 run，若其**唯一**较高优先级 delivery 事实是恰好一条 run-bound 的安全 `run.isolation_violation`（payload code 为闭集 `workdir_escape` 字符串），readiness 立即 settle 为 `isolation_failed` 并投影 `isolationFailure:{code:"workdir_escape"}`——这是与 packaging failure（`deliveryFailure`）**严格分离**的第三类失败形状。规则：任何既有 delivery 事实（delivery_created / verification outcome / packaging failure / Lead decision）**优先于**隔离事实；isolation_violation 缺失、多于一条、跨 run、code 非安全闭集或 payload malformed → fail-closed 折叠为 `ambiguous`。`isolation_failed` 意味着**无 packaging、无 diff、无 review、无 decision 面**——不出现 `candidateInventory`、不触发 repackage/salvage/retry/stop/decision 任何动作，Lead 只能另行派发。`run_await_result` 的 `outcome.delivery.isolationFailureCode` 投影同一事实（无隔离失败时 `null`）。
+
 **结构化无交付 / packaging failure**：`deliveryRequested` 明确区分本次 run 是否声明过 delivery。普通非 delivery run 返回 `deliveryAvailable:false, deliveryRequested:false, deliveryFailure:null`，这是正常查询结果而非错误；已请求但尚未打包则返回 `deliveryAvailable:false, deliveryRequested:true, deliveryFailure:null`。当存在绑定当前 runId 的 durable `run.delivery_failed`（如 `base_commit_mismatch`），返回 `deliveryAvailable:false, deliveryRequested:true` + `deliveryFailure.code`（闭集安全 code，未知/损坏/注入 code 投影为 `unknown`，不回显原值）。transcript 缺失/损坏或 durable 事实冲突仍固定返回 `run_delivery failed`。`run_delivery_decide` 在没有 DeliveryRef 时仍不可调用成功。`run_diagnose` 对 packaging failure 返回 `category:"delivery_packaging_failed"`（只给事实不给处方/重试）。
 
 **Candidate inventory（M12-1S1/M12-4A 附加只读投影）**：可恢复候选附加 nullable `candidateInventory` 与 `candidateKind:"disallowed_scope"|"backend_failed"`——持久化的**原始批准路径**、candidate 的**实际**改动路径（相对持久化原始 base 的 tracked diff + 非 ignored untracked，两次必需 Git read 都成功才产出），以及其中超出原始合同的子集。`disallowed_scope` 来自绑定的 `disallowed_path` packaging failure；`backend_failed` 只来自已请求 delivery、唯一终态 `failed` 原因为 `backend_error|backend_stream_ended`、存在绑定 `run.stop_verified` 且无 stop/isolation/budget/scorecard/既有 delivery chain 冲突的 retained worktree。形状：`{ originalAllowedPaths, originalAllowedCount, originalAllowedTruncated, actualChangedPaths, actualChangedCount, actualChangedTruncated, disallowedPaths, disallowedCount, disallowedTruncated }`；每条路径列表 cap 256（wire schema `maxItems:256`/`maxLength:512` 可见），count 永远是去重排序后的完整基数，truncated 精确反映截断。它是**纯 advisory 事实**：null 表示 Lead 人工核实，绝不自动 scope 扩展/repackage/stop/retry/decision/推荐。失败关闭规则：workspace ownership、恰好一个绑定 `run.started`（含可用 delivery 上下文）、linked-worktree-at-base 证明（worktree HEAD 恰好等于持久化原始 baseCommit）任一失败、任一必需 Git read 失败、任一路径未过严格投影 SSOT（`validateProjectedPath`），或 backend 候选 inventory 为空/任一列表截断 → 整个候选投影为 null（绝不部分真实）；无 authority => null 且零 worktree/Git read。其它 failure code、success 和非候选状态不携带候选字段；point-in-time 与 waitMs readiness 两条路径投影一致。严格只读：transcript 字节、HEAD/branch、index/worktree 内容不变。
@@ -934,12 +943,13 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
   "deliveryAvailable": true,
   "deliveryRef": null,
   "deliveryFailure": null,
+  "isolationFailure": null,
   "verification": { "status": "passed" },
   "acceptance": { "status": "pending" }
 }
 ```
 
-- `readiness` 为严格闭集 `waiting_for_packaging | waiting_for_verification | reviewable | packaging_failed | not_requested | ambiguous`（消费方必须视其为穷举，任何其它值都是 bug）。
+- `readiness` 为严格闭集 `waiting_for_packaging | waiting_for_verification | reviewable | packaging_failed | isolation_failed | not_requested | ambiguous`（消费方必须视其为穷举，任何其它值都是 bug；`isolation_failed` 为 M12-13 新增，见上）。
 - `reviewable` 仅当存在 durable `delivery_created` **且**恰好一个绑定该 runId 的最终 verification outcome（passed/failed/unavailable），并复用共享 `validateDeliveryFacts` SSOT 作为最终权威；failed/unavailable 仍为 reviewable（不自动 reject，Lead 仍负责 accept）。
 - 冲突或不完整的 durable 事实（多个 created/verification/packaging failure、commit 不匹配、跨 run ref、created+failed、有 verification outcome 但无 bound created，或 run 已终态但声明的 delivery 没有 created/failed 结果）折叠为 `ambiguous`（fail-closed，不回显动态值）；后者会立即返回，不耗尽 wait 窗口。
 - wait 是 workspace/runId-bound、非忙等（两次 re-read 之间 sleep）、**零 transcript append**、bounded polling（deadline = 起始时间 + waitMs）。MCP 长 wait 复用 `run_wait` 的 SDK-native progress/timeout 模式（`notifications/progress` keepalive + `resetTimeoutOnProgress`）；`waitMs` 区间由共享常量 `DELIVERY_WAIT_MS_MIN=1000`/`DELIVERY_WAIT_MS_MAX=300000` 锁定，zod schema 与 service 业务边界都从同一常量构造，不可漂移。
@@ -1008,7 +1018,7 @@ npm run cli -- runs dashboard --web [--port 0|1024..65535] [--run-dir DIR] [--cw
 - `run_status` 失败终态 → `run_diagnose`（diagnosis，low）+ `run_activity`；completed → `run_activity` + `run_collect` compact（low）。
 - `run_diagnose` 类别 `delivery_packaging_failed` → `run_delivery`（delivery，low）+ `run_activity`；其它失败类别 → `run_activity` + `run_collect` compact。
 - `run_collect` compact 可用 → `run_collect` full（evidence，medium）+ `run_activity`；full 带 `nextCursor` → 续页 + `run_activity`；单页读完 → `run_activity`。
-- `run_delivery` reviewable（verification 已有终态结果）→ `run_delivery_review`（delivery diff，high）+ `run_activity`；packaging failure / `deliveryFailure.code` → `run_activity` + `run_diagnose`；未请求 → `run_activity` + `run_status`。waitMs readiness 路径与 point-in-time 路径披露一致。
+- `run_delivery` reviewable（verification 已有终态结果）→ `run_delivery_review`（delivery diff，high）+ `run_activity`；packaging failure / `deliveryFailure.code` → `run_activity` + `run_diagnose`；`isolation_failed` / `isolationFailure.code`（M12-13）→ `run_activity` + `run_diagnose`（无 packaging/diff/decision 面，不外广告 `run_delivery_review`）；未请求 → `run_activity` + `run_status`。waitMs readiness 路径与 point-in-time 路径披露一致。
 - `run_activity` 有 `nextCursor` → 同工具续页；终态读完 → `run_collect` compact；非终态 → `run_status`。
 
 该字段是**加法字段**：既有输出字段、行为、audit 语义（只读工具零 append；`run_collect` 成功仍恰好一次 append）完全不变；Lead 完全可以忽略它，直接用原子工具。`run_delivery_review_bundle` 的输出**不**携带该字段——其嵌套 `delivery` 保持既有合同（只有 standalone `run_delivery` 带）。
@@ -1047,7 +1057,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 `run_delivery_reverify` 是 Lead 声明的一次性**审计式重验证**：仅当原始终态 verification **failed** 且 Lead 已判断为闭集环境/工具原因（`tooling_invalid` / `environment_contaminated` / `dependency_setup_missing`）时，对**同一个未变 delivery commit** 重跑验证。它委托共享 application service `runDeliveryReverify.js`（与 CLI fallback 同一份），**不调用 model、不 resume worker、不解析 transcript**。原始 assertion 命令**逐字节重跑且不可修改**；Lead 只能追加新的 setup 命令。任何 reverify 都**不自动 accept/reject**——decision 仍只由 Lead 经 `run_delivery_decide` 作出。
 
-- **输入**（strict）：`{ "runId": "run_...", "reason": "tooling_invalid"|"environment_contaminated"|"dependency_setup_missing", "setupCommands": ["npm ci", ...], "timeoutMs": 300000 }`。`setupCommands` 可选（每条非空、上限 32 条、每条 ≤512 字符，常量与 service 同源）；`timeoutMs` 可选（整数 `[1000,600000]`，省略用 service 默认 300000）。模型不能传 runDir/cwd/命令覆盖/force 等控制参数。
+- **输入**（strict）：`{ "runId": "run_...", "reason": "tooling_invalid"|"environment_contaminated"|"dependency_setup_missing", "setupCommands": ["npm ci", ...], "timeoutMs": 300000 }`。`setupCommands` 可选（每条非空、上限 32 条、每条 ≤512 字符，常量与 service 同源）；`timeoutMs` 可选（整数，与 M12-13 `verificationTimeoutMs` 共享闭界 `[1000,7200000]`，zod 边界与 service 常量同源）——省略时**继承**该 delivery ref 上持久化的执行预算，ref 无持久值才用 service 默认 300000；持久值缺失/损坏/越界 fail-closed 拒绝（不自动回退默认值）。模型不能传 runDir/cwd/命令覆盖/force 等控制参数。
 - **eligible failure**：原 verification 的失败 code 必须是环境/工具闭集（`command_failed`/`command_timeout`/`execution_error`/`setup_failed`/`setup_timeout`/`setup_environment_error`）；内容完整性失败（`artifact_mutated`/`artifact_mismatch`）**不可** reverify。已有 Lead decision 或 reverify 链损坏一律 fail-closed。
 - **幂等/并发**：reentrant + crash-safe——重试/并发收敛到**首个调用者**记录的 setup 与同一个 commit，最多一条 durable outcome（`run.delivery_reverification_requested` → `run.delivery_reverification_outcome`）。原始终态 verification **不被改写**。
 - **原 vs effective verification**：`run_delivery` 投影同时保留 `originalVerificationStatus`（durable 原始 outcome）与 `effectiveVerificationStatus`（reverify 结果，含 `reverify: {status, reason}` 链事实）；只有完整 reverify 链（requested + outcome）存在时 effective 才可取，非完整链（none/pending/malformed）**不允许**改变 effective 状态（fail-closed）。
@@ -1065,7 +1075,7 @@ Lead 仍须在 decision 前完整 review（`run_delivery_review` / `run_delivery
 npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--setup-commands-file FILE] [--timeout-ms N] [--run-dir DIR] [--cwd DIR] [--format json]
 ```
 
-`--setup-commands-file` 是 UTF-8 JSON string array（缺失 = 空数组；拒绝非数组/非字符串/空白/超界，边界常量与 service 同源）；`--timeout-ms` 缺失由 service 默认，提供时必须为 `[1000,600000]` 内严格整数；`authorizedWorkspaceRoot` 由 CLI 既有 cwd/workspace proof 路径产生，调用方输入不能绕过 workspace ownership。
+`--setup-commands-file` 是 UTF-8 JSON string array（缺失 = 空数组；拒绝非数组/非字符串/空白/超界，边界常量与 service 同源）；`--timeout-ms` 缺失由 service 解析（继承 ref 持久预算，否则默认 300000），提供时必须为共享闭界 `[1000,7200000]`（与 M12-13 `verificationTimeoutMs` 同源）内严格整数；`authorizedWorkspaceRoot` 由 CLI 既有 cwd/workspace proof 路径产生，调用方输入不能绕过 workspace ownership。
 
 annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:true, openWorldHint:false`。
 

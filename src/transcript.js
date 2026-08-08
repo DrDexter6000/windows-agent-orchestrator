@@ -6,6 +6,9 @@ import {
   isCanonicalCommitId,
   isPathAllowed,
   isValidRepoRelativePath,
+  VERIFICATION_TIMEOUT_MS_MIN,
+  VERIFICATION_TIMEOUT_MS_MAX,
+  VERIFICATION_TIMEOUT_MS_DEFAULT,
 } from "./delivery.js";
 
 const APPEND_LOCK_TIMEOUT_MS = 5000;
@@ -88,9 +91,14 @@ export const REVERIFY_REASONS = Object.freeze([
 // no new setup); each declared command is a non-empty bounded string.
 export const REVERIFY_SETUP_COMMANDS_LIMIT = 32;
 export const REVERIFY_SETUP_COMMAND_MAX_LENGTH = 512;
-export const REVERIFY_TIMEOUT_MS_MIN = 1000;
-export const REVERIFY_TIMEOUT_MS_MAX = 600_000;
-export const REVERIFY_TIMEOUT_MS_DEFAULT = 300_000;
+// M12-13: the reverify timeout IS the per-command execution timeout. The
+// REVERIFY_* constants are ALIASES of the shared bounds in delivery.js — one
+// range, no second authority — so the reverify CLI/MCP wire bounds cannot drift
+// from start/resume verification. The DEFAULT applies only when the field is
+// absent; a malformed PRESENT value fails closed.
+export const REVERIFY_TIMEOUT_MS_MIN = VERIFICATION_TIMEOUT_MS_MIN;
+export const REVERIFY_TIMEOUT_MS_MAX = VERIFICATION_TIMEOUT_MS_MAX;
+export const REVERIFY_TIMEOUT_MS_DEFAULT = VERIFICATION_TIMEOUT_MS_DEFAULT;
 
 // M12-9: the frozen closed set of delivery-decision POLICY codes. Defined at
 // the transcript decision-facts authority (validateDeliveryFacts +

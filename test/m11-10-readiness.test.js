@@ -118,10 +118,10 @@ async function buildClient(server) {
 // Group 1: projectDeliveryReadiness closed set (pure projection)
 // =====================================================================
 
-test("M11-10-READY-01: closed set is exactly the 6 values", () => {
+test("M11-10-READY-01: closed set is exactly the 7 values (M12-13 added isolation_failed)", () => {
   assert.deepEqual(
     [...DELIVERY_READINESS_STATES].sort(),
-    ["ambiguous", "not_requested", "packaging_failed", "reviewable", "waiting_for_packaging", "waiting_for_verification"].sort(),
+    ["ambiguous", "isolation_failed", "not_requested", "packaging_failed", "reviewable", "waiting_for_packaging", "waiting_for_verification"].sort(),
   );
 });
 
@@ -739,9 +739,9 @@ test("M11-10-MCP-02: output schema — readiness/waitReturnedEarly present iff w
         "verificationStatus", "verificationFailureCode", "verificationFailureSummary",
         "originalVerificationStatus", "effectiveVerificationStatus", "reverify",
         "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory", "candidateKind",
-        "availableDrilldowns", "semanticNotes",
+        "availableDrilldowns", "semanticNotes", "isolationFailure",
       ]);
-      assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys, "point-in-time field set (M11-12B adds nullable verificationFailureSummary; M12-1S1/M12-4A add nullable candidateInventory + candidateKind; M12-6 3B2a adds additive originalVerificationStatus/effectiveVerificationStatus/reverify; M12-8B adds availableDrilldowns; M12-12 adds semanticNotes)");
+      assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys, "point-in-time field set (M11-12B adds nullable verificationFailureSummary; M12-1S1/M12-4A add nullable candidateInventory + candidateKind; M12-6 3B2a adds additive originalVerificationStatus/effectiveVerificationStatus/reverify; M12-8B adds availableDrilldowns; M12-12 adds semanticNotes; M12-13 adds nullable isolationFailure)");
       assert.equal("readiness" in parsed, false, "no readiness in point-in-time output");
       assert.equal("waitReturnedEarly" in parsed, false, "no waitReturnedEarly in point-in-time output");
       // Additive projection with no reverify chain: effective === original,

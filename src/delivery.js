@@ -31,6 +31,16 @@ export class DeliveryError extends Error {
 
 // ===== Constants =====
 
+// M12-13: the shared per-command execution timeout/budget bounds (integer ms)
+// for delivery verification. ONE range locked here — consumers (the reverify
+// CLI constants, the MCP zod schemas, the verification service) alias THESE
+// constants so the wire bounds cannot drift. The default applies ONLY when the
+// field is ABSENT; a PRESENT-but-malformed value fails closed (never silently
+// defaulted, never widened, never retried).
+export const VERIFICATION_TIMEOUT_MS_MIN = 1000;
+export const VERIFICATION_TIMEOUT_MS_MAX = 7_200_000; // 120 minutes
+export const VERIFICATION_TIMEOUT_MS_DEFAULT = 300_000; // 5 minutes
+
 const DELIVERY_IDENTITY = {
   name: "WAO Delivery",
   email: "wao-delivery@local",
@@ -673,6 +683,12 @@ function buildProposedRef({
       ...(verification.setupCommands && verification.setupCommands.length > 0
         ? { setupCommands: [...verification.setupCommands] }
         : {}),
+      // M12-13: per-command execution timeout/budget. Append-only optional
+      // extension — persisted ONLY when declared, so refs without it stay
+      // byte-identical (zero drift). Readers apply the default only on absence.
+      ...(verification.verificationTimeoutMs !== undefined
+        ? { verificationTimeoutMs: verification.verificationTimeoutMs }
+        : {}),
     },
     acceptance: {
       status: "pending",
@@ -767,10 +783,16 @@ function validateInput(input) {
   // phase). Allowed alongside either verificationCommands or unavailableReason.
   const setupCommands = normalizeOptionalVerificationCommands(input.verificationSetupCommands);
 
+  // M12-13: optional per-command execution timeout. Absent → not persisted
+  // (zero drift); present but malformed → invalid_verification BEFORE any side
+  // effect (this SSOT runs before worktree/spawn/packaging/verification).
+  const verificationTimeoutMs = normalizeVerificationTimeoutMs(input.verificationTimeoutMs);
+
   // Verification object
   const verification = hasCommands
     ? { commands: [...input.verificationCommands], unavailableReason: null, setupCommands }
     : { commands: [], unavailableReason: input.verificationUnavailableReason, setupCommands };
+  if (verificationTimeoutMs !== undefined) verification.verificationTimeoutMs = verificationTimeoutMs;
 
   return {
     runId: input.runId,
@@ -955,6 +977,41 @@ function normalizeOptionalVerificationCommands(value) {
   return [...value];
 }
 
+/**
+ * M12-13: normalize the OPTIONAL per-command execution timeout (integer ms).
+ *
+ * Absent (undefined) → returns undefined (callers MUST NOT persist the key —
+ * zero drift). Present but malformed — null, non-integer (string/fraction), or
+ * outside the SHARED bounds [VERIFICATION_TIMEOUT_MS_MIN, VERIFICATION_TIMEOUT_MS_MAX]
+ * — fails closed with DeliveryError "invalid_verification". Distinguishing
+ * absent from present is deliberate: an invalid present value must never be
+ * silently defaulted.
+ *
+ * This leaf is called from prepareDeliveryRequest (start/resume revalidation)
+ * BEFORE any side effect — transcript append, worktree mutation, spawn/attach,
+ * packaging, verification.
+ *
+ * @param {unknown} value — delivery.verificationTimeoutMs
+ * @returns {number|undefined} validated integer ms, or undefined when absent
+ * @throws {DeliveryError} deliveryCode="invalid_verification"
+ */
+function normalizeVerificationTimeoutMs(value) {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new DeliveryError(
+      "invalid_verification",
+      `verificationTimeoutMs must be an integer number of milliseconds in [${VERIFICATION_TIMEOUT_MS_MIN}, ${VERIFICATION_TIMEOUT_MS_MAX}], got: ${JSON.stringify(value)}`,
+    );
+  }
+  if (value < VERIFICATION_TIMEOUT_MS_MIN || value > VERIFICATION_TIMEOUT_MS_MAX) {
+    throw new DeliveryError(
+      "invalid_verification",
+      `verificationTimeoutMs must be an integer number of milliseconds in [${VERIFICATION_TIMEOUT_MS_MIN}, ${VERIFICATION_TIMEOUT_MS_MAX}], got: ${JSON.stringify(value)}`,
+    );
+  }
+  return value;
+}
+
 // ===== Public API: prepareDeliveryRequest =====
 
 /**
@@ -1010,6 +1067,12 @@ export function prepareDeliveryRequest(delivery) {
   // M12-6 (FR-05): optional Lead-authored setup commands, same trim-aware rule.
   const setupCommands = normalizeOptionalVerificationCommands(delivery.verificationSetupCommands);
 
+  // M12-13: optional per-command execution timeout. Validated HERE — before any
+  // side effect (transcript append, worktree mutation, spawn/attach, packaging,
+  // verification). Absent → NOT persisted (zero drift); present-but-malformed →
+  // invalid_verification, never silently defaulted.
+  const verificationTimeoutMs = normalizeVerificationTimeoutMs(delivery.verificationTimeoutMs);
+
   // M12-6 (FR-04): reject statically identifiable absolute path literals in
   // verification commands. This is the dispatch preflight SSOT — callers invoke
   // prepareDeliveryRequest before backend spawn, so the check runs before any
@@ -1025,12 +1088,15 @@ export function prepareDeliveryRequest(delivery) {
 
   // Setup commands are an append-only optional extension: persist only when
   // declared, so requests without setup stay byte-identical (zero drift).
+  // The execution timeout follows the same append-only rule (M12-13): only a
+  // DECLARED value is persisted — absence means "consumer default applies".
   return {
     mode: "git_commit_v1",
     allowedPaths,
     verification: {
       ...verification,
       ...(setupCommands.length > 0 ? { setupCommands } : {}),
+      ...(verificationTimeoutMs !== undefined ? { verificationTimeoutMs } : {}),
     },
   };
 }

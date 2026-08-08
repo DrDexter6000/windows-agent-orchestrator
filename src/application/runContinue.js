@@ -134,6 +134,11 @@ function toPublicDelivery(validated) {
     ...(validated.verification.setupCommands?.length > 0
       ? { verificationSetupCommands: validated.verification.setupCommands }
       : {}),
+    // M12-13: forward the per-command execution timeout when declared (absent →
+    // zero drift on the continuation payload).
+    ...(validated.verification.verificationTimeoutMs !== undefined
+      ? { verificationTimeoutMs: validated.verification.verificationTimeoutMs }
+      : {}),
   };
 }
 

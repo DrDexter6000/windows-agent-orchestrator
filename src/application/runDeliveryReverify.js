@@ -128,13 +128,16 @@ function _normalizeSetup(setupCommands) {
 }
 
 /**
- * Validate the optional timeoutMs: an integer in [MIN, MAX]. Defaults when
- * omitted. Rejects negative / zero / fractional / out-of-range values.
+ * Validate an EXPLICIT timeoutMs: an integer in the SHARED bounds
+ * [REVERIFY_TIMEOUT_MS_MIN, REVERIFY_TIMEOUT_MS_MAX] (aliases of the per-command
+ * execution bounds). Omitted (undefined/null) → undefined (the caller resolves
+ * the persisted value / default). Rejects negative / zero / fractional /
+ * out-of-range values BEFORE any transcript read.
  * @param {number|undefined} timeoutMs
- * @returns {number}
+ * @returns {number|undefined}
  */
 function _validateTimeout(timeoutMs) {
-  if (timeoutMs === undefined || timeoutMs === null) return REVERIFY_TIMEOUT_MS_DEFAULT;
+  if (timeoutMs === undefined || timeoutMs === null) return undefined;
   if (
     typeof timeoutMs !== "number"
     || !Number.isInteger(timeoutMs)
@@ -146,6 +149,38 @@ function _validateTimeout(timeoutMs) {
     );
   }
   return timeoutMs;
+}
+
+/**
+ * M12-13: resolve the EFFECTIVE reverify timeout (per-command execution budget).
+ *   - an EXPLICIT timeoutMs wins (already validated);
+ *   - when omitted, the PERSISTED budget on the created ref is authoritative:
+ *     inherited when it is a valid integer in bounds, REFUSED (throw) when
+ *     present-but-malformed — a corrupt persisted value is never silently
+ *     defaulted (fail closed before any append/verify);
+ *   - only when the field is entirely ABSENT does the shared default apply.
+ * @param {number|undefined} explicitTimeoutMs
+ * @param {object|null} createdRef — the delivery_created DeliveryRef
+ * @returns {number}
+ */
+function resolveEffectiveTimeoutMs(explicitTimeoutMs, createdRef) {
+  if (explicitTimeoutMs !== undefined) return explicitTimeoutMs;
+  const persisted = createdRef?.verification ?? {};
+  if (Object.prototype.hasOwnProperty.call(persisted, "verificationTimeoutMs")) {
+    const value = persisted.verificationTimeoutMs;
+    if (
+      typeof value !== "number"
+      || !Number.isInteger(value)
+      || value < REVERIFY_TIMEOUT_MS_MIN
+      || value > REVERIFY_TIMEOUT_MS_MAX
+    ) {
+      throw new Error(
+        `runDeliveryReverify: persisted verificationTimeoutMs must be an integer in [${REVERIFY_TIMEOUT_MS_MIN}, ${REVERIFY_TIMEOUT_MS_MAX}]`,
+      );
+    }
+    return value;
+  }
+  return REVERIFY_TIMEOUT_MS_DEFAULT;
 }
 
 /**
@@ -226,7 +261,10 @@ function _proveReverifyPreconditions(events, runId, authorizedWorkspaceRoot) {
  * @param {string} input.authorizedWorkspaceRoot — MCP workspace binding
  * @param {string} input.reason — closed-set reverify reason
  * @param {string[]} [input.setupCommands] — optional new setup (original assertions unchanged)
- * @param {number} [input.timeoutMs] — optional bounded integer
+ * @param {number} [input.timeoutMs] — optional per-command execution budget
+ *   (bounded integer). When omitted, the persisted budget on the delivery ref
+ *   is inherited (fail closed on a malformed persisted value); the shared
+ *   default applies only when the field is absent.
  * @param {Function} [input.verifyDeliveryFn] — injectable (default verifyDelivery)
  * @param {Function} [input.readTranscriptFn] — injectable for testing
  * @param {Function} [input.transcriptFactory] — injectable async (filePath, context) => transcript
@@ -252,7 +290,7 @@ export async function runDeliveryReverify({
     throw new Error(`runDeliveryReverify: reason must be one of ${REVERIFY_REASONS.join(", ")}`);
   }
   const setup = _normalizeSetup(setupCommands);
-  const effectiveTimeoutMs = _validateTimeout(timeoutMs);
+  const explicitTimeoutMs = _validateTimeout(timeoutMs);
 
   const _readTranscript = readTranscriptFn ?? readTranscript;
   const _verify = verifyDeliveryFn ?? verifyDelivery;
@@ -277,6 +315,12 @@ export async function runDeliveryReverify({
   if (chainBefore.status === "malformed") {
     throw new Error("runDeliveryReverify: reverify chain is malformed — refusing to verify or extend it");
   }
+
+  // M12-13: resolve the effective per-command execution budget BEFORE any
+  // transcript append — an explicit value wins; an omitted value inherits the
+  // persisted budget on the created ref (fail closed on a malformed persisted
+  // value); the shared default applies only when the field is absent.
+  const effectiveTimeoutMs = resolveEffectiveTimeoutMs(explicitTimeoutMs, createdRef);
 
   // Phase 1: lock-scoped CAS append of the requested event. Yields to an existing
   // request — a retry/competitor converges on the FIRST caller's recorded setup.

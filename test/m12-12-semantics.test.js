@@ -299,6 +299,10 @@ test("S-09: selector matrix — representative facts map to the expected ids", a
   // run_delivery (wait-path readiness drives the note)
   assert.deepEqual(ids("run_delivery", { readiness: "reviewable", deliveryRequested: true }), ["delivery.reviewable"]);
   assert.deepEqual(ids("run_delivery", { readiness: "packaging_failed", deliveryRequested: true }), ["delivery.packaging_failed"]);
+  // M12-13: terminal isolation escape → its OWN note, NEVER delivery.waiting / packaging_failed.
+  assert.deepEqual(ids("run_delivery", { readiness: "isolation_failed", deliveryRequested: true }), ["delivery.isolation_failed"]);
+  assert.deepEqual(ids("run_await_result", { outcome: "terminal", terminationSource: "control_plane", deliveryRequested: true, deliveryReadiness: "isolation_failed" }),
+    ["observation.terminal", "termination.control_plane", "delivery.isolation_failed"]);
   assert.deepEqual(ids("run_delivery", { readiness: "not_requested", deliveryRequested: false }), ["delivery.not_requested"]);
   assert.deepEqual(ids("run_delivery", { readiness: "ambiguous", deliveryRequested: true }), ["delivery.ambiguous"]);
   assert.deepEqual(ids("run_delivery", { readiness: "waiting_for_verification", deliveryRequested: true }), ["delivery.waiting"]);

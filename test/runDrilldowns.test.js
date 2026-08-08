@@ -72,6 +72,7 @@ const FACT_MATRIX = [
   ["run_await_result", { state: "running", terminal: false, observationOutcome: "read_failure", readFailureReason: "legacy_event_shape", liveness: "unknown", resultStatus: "unavailable" }],
   ["run_await_result", { state: "running", terminal: false, observationOutcome: "read_failure", readFailureReason: "snapshot_unavailable", liveness: "unknown", resultStatus: "unavailable" }],
   ["run_await_result", { state: "failed", terminal: true, observationOutcome: "observed", readFailureReason: null, liveness: "terminal", resultStatus: "unavailable" }],
+  ["run_await_result", { state: "failed", terminal: true, observationOutcome: "terminal", readFailureReason: null, liveness: "terminal", outcomeReadiness: "isolation_failed", outcomeVerificationStatus: null, resultStatus: null }],
   // run_diagnose
   ["run_diagnose", { state: "failed", terminal: true, category: "delivery_packaging_failed" }],
   ["run_diagnose", { state: "failed", terminal: true, category: "provider_auth" }],
@@ -96,6 +97,7 @@ const FACT_MATRIX = [
   ["run_delivery", { deliveryAvailable: false, deliveryRequested: true, terminalState: "running", verificationStatus: null, acceptanceStatus: null, readiness: "waiting_for_packaging", deliveryFailureCode: null }],
   ["run_delivery", { deliveryAvailable: false, deliveryRequested: true, terminalState: "running", verificationStatus: null, acceptanceStatus: null, readiness: "waiting_for_verification", deliveryFailureCode: null }],
   ["run_delivery", { deliveryAvailable: false, deliveryRequested: true, terminalState: "failed", verificationStatus: null, acceptanceStatus: null, readiness: "packaging_failed", deliveryFailureCode: null }],
+  ["run_delivery", { deliveryAvailable: false, deliveryRequested: true, terminalState: "failed", verificationStatus: null, acceptanceStatus: null, readiness: "isolation_failed", deliveryFailureCode: null }],
   ["run_delivery", { deliveryAvailable: false, deliveryRequested: false, terminalState: "completed", verificationStatus: null, acceptanceStatus: null, readiness: "not_requested", deliveryFailureCode: null }],
   ["run_delivery", { deliveryAvailable: false, deliveryRequested: null, terminalState: "running", verificationStatus: null, acceptanceStatus: null, readiness: "ambiguous", deliveryFailureCode: null }],
   ["run_delivery", { deliveryAvailable: true, deliveryRequested: true, terminalState: "completed", verificationStatus: "passed", acceptanceStatus: "pending", readiness: "reviewable", deliveryFailureCode: null }],
@@ -306,6 +308,10 @@ test("U-06: representative context-sensitive selections (facts-driven, no infere
   expect("run_delivery", { deliveryAvailable: true, deliveryRequested: true, terminalState: "completed", verificationStatus: "passed", acceptanceStatus: "pending", readiness: null, deliveryFailureCode: null }, ["run_delivery_review", "run_activity"]);
   // delivery failed → activity + diagnosis (as facts permit).
   expect("run_delivery", { deliveryAvailable: false, deliveryRequested: true, terminalState: "failed", verificationStatus: null, acceptanceStatus: null, readiness: null, deliveryFailureCode: "commit_failed" }, ["run_activity", "run_diagnose"]);
+  // M12-13 isolation_failed → activity + diagnosis, NEVER delivery review/delivery
+  // (there is no packaging/diff/decision surface for an isolation escape).
+  expect("run_delivery", { deliveryAvailable: false, deliveryRequested: true, terminalState: "failed", verificationStatus: null, acceptanceStatus: null, readiness: "isolation_failed", deliveryFailureCode: null }, ["run_activity", "run_diagnose"]);
+  expect("run_await_result", { state: "failed", terminal: true, observationOutcome: "terminal", readFailureReason: null, liveness: "terminal", outcomeReadiness: "isolation_failed", outcomeVerificationStatus: null, resultStatus: null }, ["run_diagnose", "run_activity"]);
   // terminal activity → compact collect.
   expect("run_activity", { terminal: true, nextCursor: null }, ["run_collect"]);
   // non-terminal activity → point-in-time status.

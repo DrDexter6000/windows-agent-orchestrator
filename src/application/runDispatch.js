@@ -191,6 +191,11 @@ export async function dispatchRun({
     ...(validatedDelivery.verification.setupCommands?.length > 0
       ? { verificationSetupCommands: validatedDelivery.verification.setupCommands }
       : {}),
+    // M12-13: forward the per-command execution timeout when declared. Absent →
+    // the --delivery-json payload stays byte-identical (zero drift on the wire).
+    ...(validatedDelivery.verification.verificationTimeoutMs !== undefined
+      ? { verificationTimeoutMs: validatedDelivery.verification.verificationTimeoutMs }
+      : {}),
   } : null;
 
   const resolvedRunDir = resolve(runDir);

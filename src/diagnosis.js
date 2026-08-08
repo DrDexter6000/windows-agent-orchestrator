@@ -149,8 +149,17 @@ function diagnoseFailureInner(events, expectedRunId) {
   const state = findState(evs);
   const hasValidExpectedRunId = typeof expectedRunId === "string" && expectedRunId.length > 0;
 
+  // M12-13: consume an isolation violation ONLY when it carries the safe
+  // structured code "workdir_escape" (string, top-level durable fact — the
+  // transcript spreads event payloads flat). A malformed/missing code or an
+  // unknown value is NOT this diagnosis — the safe-code check keeps the signal
+  // type-bound, matching the readiness projection's safe closed set.
   const isolationViolation = hasValidExpectedRunId
-    ? evs.find((e) => e.type === "run.isolation_violation" && e.runId === expectedRunId)
+    ? evs.find(
+      (e) => e.type === "run.isolation_violation"
+        && e.runId === expectedRunId
+        && e.code === "workdir_escape",
+    )
     : undefined;
   if (isolationViolation) {
     return {

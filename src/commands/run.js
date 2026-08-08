@@ -96,6 +96,11 @@ async function loadDeliverySpec(options) {
     ...(validated.verification.setupCommands?.length > 0
       ? { verificationSetupCommands: validated.verification.setupCommands }
       : {}),
+    // M12-13: forward the per-command execution timeout when declared (absent →
+    // zero drift on the spec-derived request).
+    ...(validated.verification.verificationTimeoutMs !== undefined
+      ? { verificationTimeoutMs: validated.verification.verificationTimeoutMs }
+      : {}),
   };
 }
 

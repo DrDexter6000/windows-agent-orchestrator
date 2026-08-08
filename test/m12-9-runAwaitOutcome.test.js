@@ -7,7 +7,8 @@
 //     observed; non-terminal / read_failure / unavailable → outcome=null. (C1)
 //   - Closed-set safe facts ONLY: terminalState; diagnosis(category/code/
 //     signalCount); delivery(requested/readiness/available/failureCode/
-//     verificationStatus/verificationFailureCode/acceptanceStatus/decisionType).
+//     verificationStatus/verificationFailureCode/acceptanceStatus/decisionType/
+//     isolationFailureCode).
 //     NO commit id, changed paths, candidateInventory, diff, command text,
 //     message/stderr, absolute path, or recommendation. (C2)
 //   - Reuses the diagnosis + delivery SSOTs from ONE snapshot — no second
@@ -25,6 +26,7 @@ import { projectTerminalOutcome } from "../src/application/runAwaitResult.js";
 import { runAwaitResult } from "../src/application/runAwaitResult.js";
 import {
   DELIVERY_READINESS_STATES,
+  SAFE_ISOLATION_VIOLATION_CODES,
   DELIVERY_VERIFICATION_STATUSES,
   DELIVERY_VERIFICATION_FAILURE_CODES,
   DELIVERY_ACCEPTANCE_STATUSES,
@@ -89,6 +91,7 @@ function assertOutcomeClosedSet(o) {
   assert.equal(o.delivery.verificationFailureCode === null || DELIVERY_VERIFICATION_FAILURE_CODES.includes(o.delivery.verificationFailureCode), true, "verificationFailureCode ∈ closed set | null");
   assert.equal(o.delivery.acceptanceStatus === null || DELIVERY_ACCEPTANCE_STATUSES.includes(o.delivery.acceptanceStatus), true, "acceptanceStatus ∈ closed set | null");
   assert.equal(o.delivery.decisionType === null || DELIVERY_DECISION_TYPES.includes(o.delivery.decisionType), true, "decisionType ∈ closed set | null");
+  assert.equal(o.delivery.isolationFailureCode === null || SAFE_ISOLATION_VIOLATION_CODES.includes(o.delivery.isolationFailureCode), true, "isolationFailureCode ∈ closed set | null (M12-13)");
 }
 
 // Assert the outcome leaks NO raw dynamic value (commit/path/command/message).
@@ -103,7 +106,10 @@ function assertOutcomeNoLeak(o, runId) {
 }
 
 // Declared in ALREADY-SORTED order so they compare equal to Object.keys(o).sort().
-const DELIVERY_KEYS = ["acceptanceStatus", "available", "decisionType", "failureCode", "readiness", "requested", "verificationFailureCode", "verificationStatus"];
+// M12-13: isolationFailureCode added (nullable; closed-set code only when the
+// terminal delivery-requested run carried exactly one safe workdir_escape
+// isolation violation with no higher-priority delivery fact).
+const DELIVERY_KEYS = ["acceptanceStatus", "available", "decisionType", "failureCode", "isolationFailureCode", "readiness", "requested", "verificationFailureCode", "verificationStatus"];
 const DIAGNOSIS_KEYS = ["category", "code", "signalCount"];
 const OUTCOME_KEYS = ["delivery", "diagnosis", "terminalState"];
 

@@ -202,6 +202,11 @@ function selectForRunAwaitResult(f) {
   if (f.outcomeReadiness === "packaging_failed" || f.outcomeDeliveryFailureCode != null) {
     return ["diagnose", "delivery", "activity"];
   }
+  // M12-13: terminal isolation escape (workdir_escape) — no packaging/diff/
+  // decision surface exists, so never advertise deliveryReview or delivery.
+  if (f.outcomeReadiness === "isolation_failed") {
+    return ["diagnose", "activity"];
+  }
   if (f.resultStatus === "available") {
     return ["activity", "collectFull"];
   }
@@ -243,6 +248,11 @@ function selectForRunDelivery(f) {
     return ["deliveryReview", "activity"];
   }
   if (f.readiness === "packaging_failed") {
+    return ["activity", "diagnose"];
+  }
+  if (f.readiness === "isolation_failed") {
+    // M12-13: isolation escape — no packaging/diff/decision surface, so never
+    // advertise deliveryReview; diagnose + activity are the safe reads.
     return ["activity", "diagnose"];
   }
   if (f.readiness != null) {

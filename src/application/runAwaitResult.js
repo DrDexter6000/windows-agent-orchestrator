@@ -94,6 +94,7 @@ import {
   DELIVERY_VERIFICATION_FAILURE_CODES,
   DELIVERY_ACCEPTANCE_STATUSES,
   DELIVERY_DECISION_TYPES,
+  SAFE_ISOLATION_VIOLATION_CODES,
 } from "./runDelivery.js";
 import { PACKAGING_FAILURE_CODES } from "../deliveryFailureCodes.js";
 
@@ -365,11 +366,21 @@ export function projectTerminalOutcome(events, runId, terminalState, injectables
       ? view.deliveryFailure.code
       : null;
 
+    // M12-13: a structured isolation failure (e.g. workdir_escape) is a SEPARATE
+    // settlement from a packaging failure — projected through the shared closed
+    // set (SAFE_ISOLATION_VIOLATION_CODES), never echoed raw. Null for every
+    // other delivery state.
+    const isolationFailureCode = view.isolationFailure
+      && SAFE_ISOLATION_VIOLATION_CODES.includes(view.isolationFailure.code)
+      ? view.isolationFailure.code
+      : null;
+
     const delivery = {
       requested: view.deliveryRequested === true,
       readiness,
       available: view.deliveryAvailable === true,
       failureCode,
+      isolationFailureCode,
       verificationStatus,
       verificationFailureCode,
       acceptanceStatus,

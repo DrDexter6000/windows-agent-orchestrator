@@ -102,7 +102,9 @@ test("M9-6B-02: run_delivery returns safe fields incl. bounded changedPaths, no 
     // reverify { status:"none", reason:null }.
     // M12-8B: availableDrilldowns added (bounded progressive-disclosure metadata).
     // M12-12: semanticNotes added (REQUIRED self-describing notes; see wao://semantics).
-    const allowed = new Set(["runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit", "changedFileCount", "changedPaths", "changedPathsTruncated", "verificationStatus", "verificationFailureCode", "verificationFailureSummary", "originalVerificationStatus", "effectiveVerificationStatus", "reverify", "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory", "candidateKind", "availableDrilldowns", "semanticNotes"]);
+    // M12-13: isolationFailure added (nullable; present only when the terminal run
+    // carries a safe run-bound workdir_escape isolation violation — null here).
+    const allowed = new Set(["runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit", "changedFileCount", "changedPaths", "changedPathsTruncated", "verificationStatus", "verificationFailureCode", "verificationFailureSummary", "originalVerificationStatus", "effectiveVerificationStatus", "reverify", "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory", "candidateKind", "availableDrilldowns", "semanticNotes", "isolationFailure"]);
     for (const k of Object.keys(parsed)) assert.ok(allowed.has(k), `unexpected key: ${k}`);
     assert.equal(parsed.deliveryAvailable, true, "success variant has deliveryAvailable:true");
     assert.equal(parsed.deliveryRequested, true, "success variant confirms delivery intent");
@@ -448,13 +450,15 @@ test("M11-1A-01: run_delivery output field set is exactly the approved safe proj
     // and the strict reverify chain projection — STRICT field set updated, not weakened.
     // M12-8B: added availableDrilldowns (bounded progressive-disclosure metadata).
     // M12-12: added semanticNotes (REQUIRED self-describing notes; see wao://semantics).
+    // M12-13: added isolationFailure (nullable; only populated for an isolation-escaped
+    // terminal run, else null — success variant stays null).
     const expectedKeys = new Set([
       "runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit",
       "changedFileCount", "changedPaths", "changedPathsTruncated",
       "verificationStatus", "originalVerificationStatus", "effectiveVerificationStatus", "reverify",
       "verificationFailureCode", "verificationFailureSummary",
       "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory", "candidateKind",
-      "availableDrilldowns", "semanticNotes",
+      "availableDrilldowns", "semanticNotes", "isolationFailure",
     ]);
     assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys,
       `field set mismatch; got ${Object.keys(parsed).sort()}`);

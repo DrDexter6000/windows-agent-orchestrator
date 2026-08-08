@@ -655,6 +655,9 @@ test("M11-12B-P7: full run_delivery output for a failed delivery has the exact e
     "availableDrilldowns",
     // M12-12: REQUIRED self-describing notes (additive; see wao://semantics).
     "semanticNotes",
+    // M12-13: nullable isolationFailure (null on a packaging-failed run — this
+    // failure shape belongs to packaging, not an isolation escape; additive).
+    "isolationFailure",
   ]);
   assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys,
     `wire field set mismatch; got ${Object.keys(parsed).sort()}`);

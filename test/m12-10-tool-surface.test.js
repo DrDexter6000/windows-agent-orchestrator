@@ -433,7 +433,15 @@ const RED_23_WIRE = 75492;
 // Follow-up UX correction: run_wait now self-describes its accepted waitMs range
 // and the point-in-time alternative. This adds 138 description bytes and no
 // schema/tool/runtime behavior. Ceiling re-frozen at the measured 71633 bytes.
-const FROZEN_21_WIRE_CEILING = 71633;
+//
+// M12-13 re-baseline: run_dispatch, run_continue, run_reverify and the profile
+// paths gained the shared per-command execution timeout/budget —
+// delivery.verificationTimeoutMs [1000, 7200000] — and run_delivery/run_await_result
+// gained the nullable isolationFailure / isolationFailureCode projection fields.
+// No new tools, no validation removed. The measured wire grew +602 bytes over
+// M12-12; ceiling re-frozen at the achieved value, still comfortably below the
+// 23-tool baseline.
+const FROZEN_21_WIRE_CEILING = 72235;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));

@@ -481,6 +481,11 @@ export class RunManager {
         // M12-6 (FR-05): Lead-authored environment setup commands (optional).
         verificationSetupCommands: deliveryPrepared.verification.setupCommands?.length > 0
           ? deliveryPrepared.verification.setupCommands : undefined,
+        // M12-13: per-command execution timeout/budget (optional). Persisted
+        // ONLY when declared — absence means "consumer default applies".
+        ...(deliveryPrepared.verification.verificationTimeoutMs !== undefined
+          ? { verificationTimeoutMs: deliveryPrepared.verification.verificationTimeoutMs }
+          : {}),
       };
       // Clean undefined keys
       if (!deliveryContext.verificationCommands) delete deliveryContext.verificationCommands;
@@ -515,6 +520,12 @@ export class RunManager {
           // none declared (event shape unchanged for ordinary deliveries).
           ...(deliveryContext.verificationSetupCommands
             ? { verificationSetupCommands: deliveryContext.verificationSetupCommands }
+            : {}),
+          // M12-13: persist the per-command execution timeout/budget so resume
+          // and the exact verifier restore the same budget. Absent when not
+          // declared (event shape unchanged for ordinary deliveries).
+          ...(deliveryContext.verificationTimeoutMs !== undefined
+            ? { verificationTimeoutMs: deliveryContext.verificationTimeoutMs }
             : {}),
           // TD-103 Phase 3A: persist resolved scorecardRules inside delivery
           // metadata so resume restores the exact same gate. Ordinary runs
@@ -714,6 +725,14 @@ export class RunManager {
             : { verificationUnavailableReason: deliveryContext.verificationUnavailableReason }),
           ...(deliveryContext.verificationSetupCommands
             ? { verificationSetupCommands: deliveryContext.verificationSetupCommands }
+            : {}),
+          // M12-13: re-validate the persisted per-command execution budget
+          // through the SAME SSOT. A malformed persisted value makes resume
+          // refuse (null) BEFORE any transcript append / spawn / attach /
+          // packaging — the persisted value is authoritative and must survive
+          // resume exactly as declared.
+          ...(deliveryContext.verificationTimeoutMs !== undefined
+            ? { verificationTimeoutMs: deliveryContext.verificationTimeoutMs }
             : {}),
         });
         proveLinkedWorktree(deliveryContext);
@@ -1001,6 +1020,11 @@ function _reconstructDeliveryContext(runStarted, runId) {
   if (!hasCommands && !hasReason) return null;
   // M12-6 (FR-05): reconstruct optional setup commands if persisted.
   const hasSetup = Array.isArray(d.verificationSetupCommands) && d.verificationSetupCommands.length > 0;
+  // M12-13: reconstruct the persisted per-command execution budget if present.
+  // hasOwnProperty distinguishes ABSENT from PRESENT-BUT-MALFORMED: an invalid
+  // persisted value IS forwarded, so prepareDeliveryRequest revalidation rejects
+  // it and resume refuses (null) — never silently defaults a corrupt value.
+  const hasTimeout = Object.prototype.hasOwnProperty.call(d, "verificationTimeoutMs");
   return {
     mode: d.mode,
     runId,
@@ -1012,6 +1036,7 @@ function _reconstructDeliveryContext(runStarted, runId) {
       ? { verificationCommands: [...d.verificationCommands] }
       : { verificationUnavailableReason: d.verificationUnavailableReason }),
     ...(hasSetup ? { verificationSetupCommands: [...d.verificationSetupCommands] } : {}),
+    ...(hasTimeout ? { verificationTimeoutMs: d.verificationTimeoutMs } : {}),
   };
 }
 
@@ -1700,7 +1725,14 @@ export class Run {
    */
   async _computeVerification(deliveryRef) {
     try {
-      const result = await this._verifyDeliveryFn(deliveryRef);
+      // M12-13: forward the persisted per-command execution budget to the
+      // verifier. Absent → empty opts (the verifier's default applies); the
+      // persisted value is authoritative — never widened, never retried.
+      const verifyOpts = this.deliveryContext
+        && Object.prototype.hasOwnProperty.call(this.deliveryContext, "verificationTimeoutMs")
+        ? { timeoutMs: this.deliveryContext.verificationTimeoutMs }
+        : {};
+      const result = await this._verifyDeliveryFn(deliveryRef, verifyOpts);
       this._pendingVerificationResult = result;
       return result;
     } catch (err) {

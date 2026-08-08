@@ -74,6 +74,10 @@ import {
   DELIVERY_VERIFICATION_FAILURE_CODES,
   DELIVERY_ACCEPTANCE_STATUSES,
   DELIVERY_DECISION_TYPES,
+  // M12-13: the shared safe isolation-violation closed set — consumed by the
+  // run_await_result outcome schema so the wire enum cannot drift from the
+  // readiness projection.
+  SAFE_ISOLATION_VIOLATION_CODES,
 } from "../application/runDelivery.js";
 import {
   runDeliveryReverify,
@@ -191,7 +195,11 @@ import {
   validatePlaybookV1,
   PLAYBOOK_IDS,
 } from "../application/playbookCatalog.js";
-import { isValidRunId } from "../delivery.js";
+import {
+  isValidRunId,
+  VERIFICATION_TIMEOUT_MS_MIN,
+  VERIFICATION_TIMEOUT_MS_MAX,
+} from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, UNKNOWN_PACKAGING_CODE } from "../deliveryFailureCodes.js";
 import { DIAGNOSIS_CATEGORIES, PROVIDER_DIAGNOSIS_CODES } from "../diagnosis.js";
 import { RUN_STATES, RECOVERY_CANDIDATE_KINDS, REVERIFY_FAILURE_CODES, TERMINAL_STATES } from "../transcript.js";
@@ -399,6 +407,11 @@ const DELIVERY_INPUT = z.object({
   // sequentially BEFORE the assertion commands. Same shape rule as assertions;
   // may accompany either verificationCommands or verificationUnavailableReason.
   verificationSetupCommands: z.array(z.string().trim().min(1).max(512)).min(1).max(DELIVERY_VERIFICATION_COMMANDS_MAX).optional(),
+  // M12-13: optional per-command execution timeout/budget (integer ms). Bounds
+  // are the SHARED constants from delivery.js — the schema and the business
+  // boundary cannot drift. Absent → default applies; a present out-of-bounds
+  // value is rejected at the wire (zero dispatcher/run side effects).
+  verificationTimeoutMs: z.number().int().min(VERIFICATION_TIMEOUT_MS_MIN).max(VERIFICATION_TIMEOUT_MS_MAX).optional(),
 }).strict().refine(
   (d) => !d.verificationCommands || !d.verificationUnavailableReason,
   "cannot provide both verificationCommands and verificationUnavailableReason",
@@ -1104,6 +1117,22 @@ const RUN_DELIVERY_OUTPUT_BASE = z.object({
   waitReturnedEarly: z.boolean().optional(),
 }).strict();
 
+// M12-13: strict structured isolation-failure shape. Standalone run_delivery
+// ONLY — the review bundle embeds RUN_DELIVERY_OUTPUT_BASE (strict), which must
+// stay byte-identical and never acquire this field.
+const ISOLATION_FAILURE_SCHEMA = z.object({
+  code: z.literal("workdir_escape"),
+}).strict();
+
+// M12-13: project the isolation-failure evidence through the strict closed
+// shape. Only the exact safe code survives; anything else (missing/malformed/
+// injected/unknown) collapses to null — never echoed raw, never an error.
+function safeProjectIsolationFailure(value) {
+  if (!value || typeof value !== "object") return null;
+  if (value.code !== "workdir_escape") return null;
+  return { code: "workdir_escape" };
+}
+
 // Standalone run_delivery output: the legacy base plus the REQUIRED M12-8B
 // progressive-disclosure metadata. Only this standalone shape carries the
 // field — the review bundle embeds RUN_DELIVERY_OUTPUT_BASE instead.
@@ -1114,6 +1143,10 @@ const RUN_DELIVERY_OUTPUT = RUN_DELIVERY_OUTPUT_BASE.extend({
   // M12-12: REQUIRED self-describing notes (see SEMANTIC_NOTES). Only this
   // standalone shape carries them; the review bundle embeds the BASE instead.
   semanticNotes: SEMANTIC_NOTES,
+  // M12-13: structured isolation failure (e.g. { code: "workdir_escape" }) —
+  // a SEPARATE settlement from deliveryFailure (a packaging failure). No
+  // candidateInventory/repackage/salvage/retry/stop/decision surface.
+  isolationFailure: ISOLATION_FAILURE_SCHEMA.nullable(),
 });
 
 const RUN_DELIVERY_ANNOTATIONS = {
@@ -1903,6 +1936,10 @@ const RUN_AWAIT_RESULT_OUTCOME_DELIVERY = z.object({
   readiness: z.enum([...DELIVERY_READINESS_STATES]),
   available: z.boolean(),
   failureCode: z.enum([...PACKAGING_FAILURE_CODES]).nullable(),
+  // M12-13: closed-set isolation-failure code — a SEPARATE settlement from a
+  // packaging failure; null for every other delivery state. Built from the
+  // shared SAFE_ISOLATION_VIOLATION_CODES closed set.
+  isolationFailureCode: z.enum([...SAFE_ISOLATION_VIOLATION_CODES]).nullable(),
   verificationStatus: z.enum([...DELIVERY_VERIFICATION_STATUSES]).nullable(),
   verificationFailureCode: z.enum([...DELIVERY_VERIFICATION_FAILURE_CODES]).nullable(),
   acceptanceStatus: z.enum([...DELIVERY_ACCEPTANCE_STATUSES]).nullable(),
@@ -2852,7 +2889,8 @@ export function createWaoMcpServer({
         }
         // A profile supplies ONLY verification commands — mode/allowedPaths are
         // the Lead's inline delivery. Fold the profile's verification into the
-        // effective delivery the dispatcher consumes.
+        // effective delivery the dispatcher consumes. All OTHER Lead-declared
+        // fields (M12-13: the per-command execution timeout) are preserved.
         if (resolved.profileId) {
           effectiveDelivery = {
             mode: delivery.mode,
@@ -2860,6 +2898,9 @@ export function createWaoMcpServer({
             verificationCommands: resolved.verification.commands,
             ...(resolved.verification.setupCommands.length > 0
               ? { verificationSetupCommands: resolved.verification.setupCommands }
+              : {}),
+            ...(delivery.verificationTimeoutMs !== undefined
+              ? { verificationTimeoutMs: delivery.verificationTimeoutMs }
               : {}),
           };
         }
@@ -3401,6 +3442,10 @@ export function createWaoMcpServer({
             readiness: result.readiness,
             waitReturnedEarly: result.waitReturnedEarly,
           };
+          // M12-13: isolation-failure evidence is projected AFTER the shared
+          // builder (the review bundle strict-parses the builder output against
+          // the BASE and must stay byte-identical) — standalone only.
+          payload.isolationFailure = safeProjectIsolationFailure(result.isolationFailure);
           // M12-8B: bounded progressive-disclosure metadata (wait path — same
           // projection as the point-in-time path via selectDeliveryDrilldowns).
           payload.availableDrilldowns = selectDeliveryDrilldowns(payload);
@@ -3427,6 +3472,10 @@ export function createWaoMcpServer({
           : {};
         const delivery = await deliveryQueryService({ runId, runDir, ...inventoryAuthority });
         const payload = buildRunDeliveryPayload(runId, delivery);
+        // M12-13: isolation-failure evidence is projected AFTER the shared
+        // builder (the review bundle strict-parses the builder output against
+        // the BASE and must stay byte-identical) — standalone only.
+        payload.isolationFailure = safeProjectIsolationFailure(delivery.isolationFailure);
         // M12-8B: bounded progressive-disclosure metadata (point-in-time path).
         payload.availableDrilldowns = selectDeliveryDrilldowns(payload);
         // M12-12: self-describing notes (point-in-time path).

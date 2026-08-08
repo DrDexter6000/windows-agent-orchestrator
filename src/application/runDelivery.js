@@ -54,9 +54,50 @@ export const DELIVERY_READINESS_STATES = Object.freeze([
   "waiting_for_verification", // durable delivery_created, no final verification outcome yet
   "reviewable", // durable delivery_created + exactly one bound final verification outcome
   "packaging_failed", // durable run.delivery_failed bound to this runId (no committed delivery)
+  "isolation_failed", // M12-13: terminal delivery-requested run with exactly one
+  // safe run-bound run.isolation_violation { code: "workdir_escape" } and no
+  // higher-priority delivery fact. A SEPARATE settlement from packaging_failed:
+  // no candidateInventory / repackage / salvage / retry / stop / decision.
   "not_requested", // no delivery intent declared, no delivery events
   "ambiguous", // conflicting or terminal-incomplete durable chain — fail closed
 ]);
+
+// M12-13: the closed set of SAFE isolation-violation codes the projection
+// accepts as delivery-readiness evidence. Anything else (missing/non-string
+// code, unknown value, multiple violations) is NOT evidence → ambiguous. Also
+// consumed by run_await_result (isolationFailureCode) — one closed set.
+export const SAFE_ISOLATION_VIOLATION_CODES = Object.freeze(["workdir_escape"]);
+
+/**
+ * M12-13: project the isolation-violation evidence for a run.
+ *
+ * Exactly ONE run-bound run.isolation_violation whose code (a top-level
+ * durable fact — transcript append spreads event payloads flat, the same
+ * idiom as deliveryCode / verificationStatus) is a member of the safe closed
+ * set → that code. Zero bound violations → null (no evidence). Multiple bound
+ * violations, or a single one with a missing / malformed / non-safe code →
+ * "ambiguous" (fail closed — never treated as evidence, never echoed raw).
+ *
+ * Envelope-bound: only events whose runId equals the requested runId count — a
+ * foreign-run violation in a concatenated/corrupt transcript is ignored, not
+ * evidence.
+ *
+ * @param {object[]} events
+ * @param {string} runId
+ * @returns {string|null} safe code, "ambiguous", or null
+ */
+export function projectIsolationViolationCode(events, runId) {
+  if (!Array.isArray(events)) return null;
+  const bound = events.filter(
+    (e) => e && e.type === "run.isolation_violation" && e.runId === runId,
+  );
+  if (bound.length === 0) return null;
+  if (bound.length > 1) return "ambiguous";
+  const code = bound[0].code;
+  return typeof code === "string" && SAFE_ISOLATION_VIOLATION_CODES.includes(code)
+    ? code
+    : "ambiguous";
+}
 
 const WAITING_READINESS_STATES = new Set(["waiting_for_packaging", "waiting_for_verification"]);
 
@@ -282,12 +323,23 @@ export function projectDeliveryReadiness(events, runId) {
   // the shared runId-bound intent projection.
   if (!_deliveryWasRequested(events, runId)) return "not_requested";
 
-  // A terminal run cannot truthfully be "waiting" for its first packaging
-  // outcome. With no created/failed fact, the durable chain is incomplete.
-  // Fail closed to the existing ambiguous state so bounded readiness queries
-  // return immediately instead of burning their full wait window.
+  // M12-13: a TERMINAL delivery-requested run with exactly one safe run-bound
+  // workdir_escape violation (and no higher-priority delivery fact — the
+  // created/verification/failed branches above already won) settles as
+  // isolation_failed. Malformed/multiple violations fail closed to ambiguous;
+  // a non-terminal run keeps waiting for its first packaging outcome.
   const boundState = findState(events.filter((e) => e && e.runId === runId));
-  if (TERMINAL_STATES.includes(boundState)) return "ambiguous";
+  if (TERMINAL_STATES.includes(boundState)) {
+    const isolationCode = projectIsolationViolationCode(events, runId);
+    if (isolationCode === "ambiguous") return "ambiguous";
+    if (isolationCode === "workdir_escape") return "isolation_failed";
+    // No isolation evidence — a terminal run cannot truthfully be "waiting" for
+    // its first packaging outcome. With no created/failed fact, the durable
+    // chain is incomplete. Fail closed to the existing ambiguous state so
+    // bounded readiness queries return immediately instead of burning their
+    // full wait window.
+    return "ambiguous";
+  }
 
   return "waiting_for_packaging";
 }
@@ -492,6 +544,34 @@ export function gatherDeliveryView(events, runId, terminalState) {
     };
   }
 
+  // M12-13: a TERMINAL delivery-requested run with exactly one safe run-bound
+  // workdir_escape violation surfaces isolationFailure — a SEPARATE settlement
+  // from a packaging failure (deliveryFailure stays null; NO candidateInventory /
+  // repackage / salvage / retry / stop / decision surface). Malformed/multiple
+  // violations fail closed to the ambiguous marker.
+  if (_deliveryWasRequested(events, runId) && TERMINAL_STATES.includes(terminalState)) {
+    const isolationCode = projectIsolationViolationCode(events, runId);
+    if (isolationCode === "ambiguous") {
+      return {
+        runId,
+        terminalState,
+        deliveryAvailable: false,
+        deliveryRequested: true,
+        ambiguous: true,
+      };
+    }
+    if (isolationCode === "workdir_escape") {
+      return {
+        runId,
+        terminalState,
+        deliveryAvailable: false,
+        deliveryRequested: true,
+        deliveryFailure: null,
+        isolationFailure: { code: "workdir_escape" },
+      };
+    }
+  }
+
   // No committed delivery and no packaging failure. This is normal for an
   // ordinary non-delivery run and a truthful pending state for a delivery run
   // that has not packaged yet; neither is an application error.
@@ -628,7 +708,9 @@ export async function getRunDelivery({ runId, runDir, authorizedWorkspaceRoot, c
   // Candidate inventory is additive and authority-bound. The original
   // disallowed_path recovery and M12-4A backend-failure recovery share the
   // same exact-base inventory proof; every other state omits the fields.
-  if (view.deliveryFailure?.code === "disallowed_path") {
+  // M12-13: an isolation-failure settlement is NOT a recovery candidate — no
+  // candidateInventory surfaces on that path.
+  if (view.deliveryFailure?.code === "disallowed_path" && !view.isolationFailure) {
     view.candidateInventory = _computeSafeCandidateInventory(
       events, runId, authorizedWorkspaceRoot, computeInventoryFn,
     );
@@ -636,6 +718,7 @@ export async function getRunDelivery({ runId, runDir, authorizedWorkspaceRoot, c
   } else if (
     view.deliveryAvailable === false
     && view.deliveryFailure === null
+    && !view.isolationFailure
     && view.deliveryRequested === true
     && view.terminalState === "failed"
   ) {
@@ -697,6 +780,10 @@ function _buildReadinessResult(runId, events, terminalState, readiness, waitRetu
     deliveryRequested: view.deliveryRequested,
     deliveryRef: view.deliveryRef ?? null,
     deliveryFailure: view.deliveryFailure ?? null,
+    // M12-13: structured isolation failure (e.g. { code: "workdir_escape" }).
+    // SEPARATE from deliveryFailure (a packaging failure); never a candidate
+    // inventory / repackage / salvage / retry / stop / decision surface.
+    isolationFailure: view.isolationFailure ?? null,
     verification: view.verification ?? null,
     // M12-6 Package 3B2a: forward the additive original/effective/reverify
     // projection from the shared view gatherer — same truth as the
@@ -706,7 +793,9 @@ function _buildReadinessResult(runId, events, terminalState, readiness, waitRetu
     acceptance: view.acceptance ?? null,
   };
   // Same candidate projection and proof gates as the point-in-time query.
-  if (result.deliveryFailure?.code === "disallowed_path") {
+  // M12-13: an isolation-failure settlement is NOT a packaging/backend-failure
+  // recovery candidate — no candidateInventory surfaces on that path.
+  if (result.deliveryFailure?.code === "disallowed_path" && !result.isolationFailure) {
     result.candidateInventory = _computeSafeCandidateInventory(
       events, runId, inventoryOpts.authorizedWorkspaceRoot, inventoryOpts.computeInventoryFn,
     );
@@ -714,6 +803,7 @@ function _buildReadinessResult(runId, events, terminalState, readiness, waitRetu
   } else if (
     result.deliveryAvailable === false
     && result.deliveryFailure === null
+    && !result.isolationFailure
     && result.deliveryRequested === true
     && result.terminalState === "failed"
   ) {

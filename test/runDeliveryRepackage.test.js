@@ -340,8 +340,20 @@ test("M12-4A-RED-GATES: backend candidate requires quiet stop, exact base, compl
       setup: { extraEvents: [{ type: "run.stop_unverified", outcome: "still_running" }] },
     },
     {
+      // M12-13: the durable isolation fact carries the flat top-level code the
+      // system writes (runManager appends { code: "workdir_escape" }); the query
+      // stays unambiguous and surfaces isolationFailure — and this run is NOT a
+      // recovery candidate (candidateInventory stays null, repackage rejects).
       name: "isolation conflict",
+      setup: { extraEvents: [{ type: "run.isolation_violation", code: "workdir_escape" }] },
+    },
+    {
+      // M12-13: a violation WITHOUT a classifiable code is a malformed isolation
+      // fact — the delivery view fails closed to ambiguous at the query
+      // (identical to the malformed matrix in m12-13-isolation-failure IR-02).
+      name: "malformed isolation violation (no code) → ambiguous",
       setup: { extraEvents: [{ type: "run.isolation_violation" }] },
+      queryRejects: true,
     },
     {
       name: "failed scorecard",

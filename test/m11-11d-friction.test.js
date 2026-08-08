@@ -102,6 +102,9 @@ test("M11-11D-RED-2: MCP run_delivery preserves ordinary non-delivery as success
       // M12-1S1/M12-4A: candidate fields are null outside an eligible failure.
       candidateInventory: null,
       candidateKind: null,
+      // M12-13: isolationFailure is null when no isolation violation settles
+      // the run (a non-delivery run can never carry one).
+      isolationFailure: null,
     });
   } finally {
     await client.close();
