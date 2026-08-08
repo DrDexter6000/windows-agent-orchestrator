@@ -235,6 +235,8 @@ lead_preflight  →  run_dispatch（只读、no-delivery canary）  →  run_awa
 
 **host-neutral MCP 片段**：`wao onboarding` 会打印一段通用 `mcpServers.wao` stdio 片段（入口是 Node v22 shim `scripts/wao-node.cjs`，绝对路径正斜杠规范化、带空格也能用）。完整的 host 配置示例以 `docs/usage.md` §MCP stdio 为权威——本文不复制。
 
+**`wao onboarding` 结果携带 bounded acceptance projection**：`wao onboarding` 的 JSON 与人类可读输出都附一段 bounded **acceptance projection**——**advisory**、**host-neutral**，列出三个 MCP 步骤（`lead_preflight` → `run_dispatch` → `run_await_result`，canary 只读、no-delivery）、PASS 判据（clean terminal + completed + 非空 assistant 文本，`run_dispatch` accepted ≠ PASS）、以及四个 closed recovery 分支：`host-not-invoked`（Host 在调用前被证取消，不是一次 WAO run）、`transport-unknown`（结果缺失/传输丢失是 unknown、非证明 worker 未启动——任何重试前必先查 `runs_list` / point-in-time 事实：unknown ⇒ no blind redispatch，无自动重试、不盲目重新派发）、`workspace/preflight`（workspace 绑定或 preflight 问题阻断派发就绪）、`provider/runtime`（provider/runtime 失败是 post-run 分支，只在 runId 绑定的 WAO run 存在后诊断）。它只给事实不给处方、不点名 Host、不带绝对路径/凭证/prompt/argv/PID/session，也不触发任何自动重试或 mutation。本节是这段投影的权威说明；命令输出只是它的载体，不复制 `docs/usage.md` 全量配置。
+
 ---
 
 ## 给 owner 的话

@@ -2236,6 +2236,65 @@ test("onboarding docs: CLI canary is diagnostic-only (not formal acceptance)", (
     "AGENT_ONBOARDING.md must state the CLI canary is diagnostic-only, not formal acceptance");
 });
 
+// Fresh Host acceptance contract: the wao onboarding result emits a bounded,
+// host-neutral, advisory `acceptance` projection (shared by JSON and human
+// output) naming the three MCP steps, the PASS facts, and the four closed
+// recovery branches. This guard CAUSALLY LOCKS the doc to the implementation
+// SSOT (buildAcceptance) — not generic keywords — so the doc and code cannot
+// drift apart: it derives the four branch keys from buildAcceptance, pins them
+// as a closed set, asserts the doc names each, and locks the critical linked
+// semantics (host-not-invoked ⇒ not a WAO run; transport-unknown ⇒ unknown +
+// runs_list/point-in-time inspection + NO blind redispatch; provider/runtime ⇒
+// post-run only). Failure → fix the doc, not the test.
+test("onboarding docs: AGENT_ONBOARDING.md causally locks the four host-neutral acceptance branches + transport-unknown no-blind-redispatch to buildAcceptance", async () => {
+  const { buildAcceptance } = await import("../src/application/onboarding.js");
+  const a = buildAcceptance();
+  const ob = read("AGENT_ONBOARDING.md");
+
+  // The projection is documented as advisory + host-neutral.
+  assert.ok(/acceptance/i.test(ob), "AGENT_ONBOARDING.md must mention the bounded acceptance projection");
+  assert.ok(/advisory|建议性/i.test(ob), "the acceptance projection must be stated advisory");
+  assert.ok(/host-neutral|host neutral|Host-neutral|Host 中立/i.test(ob),
+    "the acceptance projection must be stated host-neutral");
+
+  // Causal lock #1 — the four branch keys are a CLOSED SET sourced from
+  // buildAcceptance (the SSOT). If the implementation changes the set, this
+  // deepEqual fails; the closed set is part of the contract, not free prose.
+  const branchKeys = a.branches.map((b) => b.key);
+  assert.deepEqual(branchKeys,
+    ["host-not-invoked", "transport-unknown", "workspace/preflight", "provider/runtime"],
+    "buildAcceptance must expose exactly the four closed recovery branches");
+
+  // Causal lock #2 — the doc must name every branch the implementation exposes.
+  for (const key of branchKeys) {
+    assert.ok(ob.includes(key),
+      `AGENT_ONBOARDING.md must name the acceptance recovery branch ${key} (bound to buildAcceptance)`);
+  }
+
+  // Causal lock #3 — critical SEMANTICS (not keywords). Each branch's meaning
+  // is locked so the doc cannot silently drop the safety-critical facts.
+
+  // host-not-invoked: a Host cancellation proven before invocation is NOT a
+  // WAO run (WAO never received the dispatch).
+  assert.ok(/不是一次 WAO run|not a WAO run|did not receive/i.test(ob),
+    "host-not-invoked must state a proven-before-invocation cancellation is not a WAO run");
+
+  // transport-unknown: the outcome is UNKNOWN (not proof a worker did not
+  // start), redispatch is gated on prior runs_list/point-in-time inspection,
+  // and there is NO blind/automatic redispatch. All three linked facts required.
+  assert.ok(/unknown/i.test(ob),
+    "transport-unknown outcome must be stated as unknown, not proof");
+  assert.ok(/runs_list|point-in-time/i.test(ob),
+    "transport-unknown recovery must direct to runs_list / point-in-time inspection before any retry");
+  assert.ok(/无自动重试|不盲目重新派发|no blind redispatch|no automatic retry/i.test(ob),
+    "transport-unknown must forbid blind/automatic redispatch (unknown ⇒ no blind redispatch)");
+
+  // provider/runtime: a POST-RUN branch only — diagnosed after a runId-bound
+  // WAO run exists (never before dispatch).
+  assert.ok(/post-run|runId 绑定|only after/i.test(ob),
+    "provider/runtime must be a post-run branch (only after a runId-bound run exists)");
+});
+
 test("onboarding docs: four canary diagnosis branches, including transport/window expiry ≠ worker stopped", () => {
   const ob = read("AGENT_ONBOARDING.md");
   // The four branches are enumerated.

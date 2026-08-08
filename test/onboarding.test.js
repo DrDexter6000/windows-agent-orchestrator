@@ -31,9 +31,15 @@ import {
   buildCandidateList,
   buildMinimalRegistry,
   buildMcpSnippet,
+  buildAcceptance,
   runOnboarding,
   MAX_CANDIDATES,
 } from "../src/application/onboarding.js";
+
+// The human renderer lives in the (thin) command layer; importing it does NOT
+// execute the command — it only pulls the pure render function used to assert
+// the acceptance guidance is shared by human output, not just --json.
+import { renderHuman } from "../src/commands/onboarding.js";
 
 // ── Template fixtures ────────────────────────────────────────────────────────
 // A faithful miniature of config/agents.example.json: top-level + per-agent
@@ -816,4 +822,189 @@ test("real fs: endorsement creates the missing runs/ dir on a real tmpdir (no pr
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── 16. bounded Host-neutral acceptance projection ───────────────────────────
+//
+// Fresh Host acceptance contract (Fresh Lead-facing authority: AGENT_ONBOARDING.md §9):
+// every runOnboarding result carries ONE bounded `acceptance` object — the single
+// source shared by --json and human output. It names exactly the three MCP steps,
+// the PASS facts, and the four closed recovery branches. It is advisory + host-neutral:
+// it never names a Host, and carries no absolute path, credential value, prompt body,
+// command argv, PID, session id, or automatic mutation. A Fresh Lead can read it to
+// learn the acceptance chain, the PASS condition, and the safe recovery branches
+// without loading the full Skill. The helper never dispatches, retries, or decides.
+
+test("buildAcceptance names exactly the three MCP steps in order (read-only, no-delivery canary)", () => {
+  const a = buildAcceptance();
+  assert.ok(a && typeof a === "object", "acceptance must be an object");
+  assert.ok(Array.isArray(a.chain), "chain must be an array");
+  assert.deepEqual(
+    a.chain.map((s) => s.step),
+    ["lead_preflight", "run_dispatch", "run_await_result"],
+    "chain must name exactly the three MCP steps in order",
+  );
+  // The canary is read-only and no-delivery (no commit packaging).
+  assert.equal(a.canary.readOnly, true, "canary must be read-only");
+  assert.equal(a.canary.noDelivery, true, "canary must be no-delivery");
+});
+
+test("buildAcceptance PASS requires all three facts together; accepted is not PASS", () => {
+  const a = buildAcceptance();
+  assert.ok(Array.isArray(a.pass.facts), "pass.facts must be an array");
+  // Exactly the three PASS facts, as a closed set.
+  assert.deepEqual(
+    a.pass.facts,
+    ["clean terminal", "completed", "non-empty assistant text"],
+    "PASS must require exactly these three facts",
+  );
+  assert.equal(a.pass.acceptedIsNotPass, true, "run_dispatch accepted is not PASS");
+});
+
+test("buildAcceptance: a returned runId binds all later observation", () => {
+  const a = buildAcceptance();
+  assert.equal(a.runIdBindsObservation, true, "a returned runId binds all later observation");
+});
+
+test("buildAcceptance declares itself advisory and host-neutral", () => {
+  const a = buildAcceptance();
+  assert.equal(a.advisory, true, "acceptance must declare itself advisory");
+  assert.equal(a.hostNeutral, true, "acceptance must declare itself host-neutral");
+});
+
+test("buildAcceptance names exactly the four closed recovery branches (advisory)", () => {
+  const a = buildAcceptance();
+  assert.ok(Array.isArray(a.branches), "branches must be an array");
+  const keys = a.branches.map((b) => b.key);
+  assert.deepEqual(
+    keys,
+    ["host-not-invoked", "transport-unknown", "workspace/preflight", "provider/runtime"],
+    "branches must be exactly the four closed recovery branches",
+  );
+  // Each branch carries a non-empty advisory FACT (not a prescription).
+  for (const b of a.branches) {
+    assert.equal(typeof b.advisory, "string", `branch ${b.key} must carry advisory text`);
+    assert.ok(b.advisory.trim().length > 10, `branch ${b.key} advisory must be non-trivial`);
+  }
+});
+
+test("buildAcceptance truth contract: host-not-invoked is not a WAO run; transport-unknown needs runs_list before retry", () => {
+  const a = buildAcceptance();
+  const byKey = Object.fromEntries(a.branches.map((b) => [b.key, b.advisory]));
+  // Host cancellation proven before invocation ⇒ not a WAO run.
+  assert.ok(/not a WAO run|did not receive/i.test(byKey["host-not-invoked"]),
+    "host-not-invoked must state a proven-before-invocation cancellation is not a WAO run");
+  // Missing result / transport loss ⇒ unknown, not proof; inspect runs_list before retry; no auto-retry.
+  assert.ok(/unknown/i.test(byKey["transport-unknown"]),
+    "transport-unknown must be labeled unknown, not proof");
+  assert.ok(/runs_list|point-in-time/i.test(byKey["transport-unknown"]),
+    "transport-unknown must direct to runs_list / point-in-time facts before retry");
+  assert.ok(/no automatic retry|no auto/i.test(byKey["transport-unknown"]),
+    "transport-unknown must state no automatic retry");
+  // provider/runtime is a POST-RUN branch (only after a runId-bound run exists).
+  assert.ok(/post-run|after a runId-bound|only after/i.test(byKey["provider/runtime"]),
+    "provider/runtime must be a post-run branch");
+});
+
+test("every runOnboarding outcome carries the same bounded acceptance projection", async () => {
+  const modes = [
+    {},                                      // needs-selection
+    { agentId: "coder_low" },                // previewed
+    { agentId: "coder_low", apply: true },   // applied
+    { agentId: "ghost" },                    // refused (unknown id)
+    { agentId: "coder_low", endorseWorker: "coder_mm" }, // refused (mismatch)
+  ];
+  for (const m of modes) {
+    const { result } = await memRun(m);
+    const r = await result;
+    assert.ok(r.acceptance && typeof r.acceptance === "object",
+      `mode ${JSON.stringify(m)} must carry acceptance`);
+    assert.deepEqual(
+      r.acceptance.chain.map((s) => s.step),
+      ["lead_preflight", "run_dispatch", "run_await_result"],
+      `mode ${JSON.stringify(m)} chain`,
+    );
+    assert.equal(r.acceptance.pass.acceptedIsNotPass, true);
+    assert.deepEqual(
+      r.acceptance.branches.map((b) => b.key),
+      ["host-not-invoked", "transport-unknown", "workspace/preflight", "provider/runtime"],
+    );
+  }
+});
+
+test("the error outcome (unreadable template) also carries the acceptance projection", async () => {
+  const fs = makeMemFs({}); // no template seeded → bounded error
+  const r = await runOnboarding({
+    installRoot: "D:/wao",
+    exampleRegistryPath: "D:/wao/config/agents.example.json",
+    targetRegistryPath: "D:/wao/config/agents.json",
+    reliabilitySummaryPath: "D:/wao/runs/reliability-summary.json",
+    fs,
+  });
+  assert.equal(r.outcome, "error");
+  assert.deepEqual(
+    r.acceptance.chain.map((s) => s.step),
+    ["lead_preflight", "run_dispatch", "run_await_result"],
+  );
+});
+
+test("acceptance is JSON-serializable (it drives both --json and human output)", () => {
+  const a = buildAcceptance();
+  const round = JSON.parse(JSON.stringify(a));
+  assert.deepEqual(round.chain.map((s) => s.step), ["lead_preflight", "run_dispatch", "run_await_result"]);
+  assert.deepEqual(round.branches.map((b) => b.key),
+    ["host-not-invoked", "transport-unknown", "workspace/preflight", "provider/runtime"]);
+  assert.equal(round.pass.acceptedIsNotPass, true);
+  assert.equal(round.hostNeutral, true);
+});
+
+test("acceptance is advisory + host-neutral: no Host name, path, credential, prompt, argv, PID, session, or auto-mutation", () => {
+  const serialized = JSON.stringify(buildAcceptance());
+  // No specific Host/runtime named as identity (host-neutral).
+  for (const host of ["claude-code", "codex", "kimi", "opencode"]) {
+    assert.ok(!new RegExp(host, "i").test(serialized),
+      `acceptance must not name a Host/runtime (${host})`);
+  }
+  // No absolute path (Windows drive or unix home), no credential value, no PID,
+  // no session id, no prompt body.
+  assert.ok(!/[A-Za-z]:[\\/]/.test(serialized), "acceptance must not carry an absolute path");
+  assert.ok(!/\/home\/|\/Users\//.test(serialized), "acceptance must not carry a unix home path");
+  assert.ok(!/sk-[A-Za-z0-9]{6,}|api[_-]?key|token=/i.test(serialized),
+    "acceptance must not carry a credential value");
+  assert.ok(!/\bpid\b|session[_-]?id/i.test(serialized), "acceptance must not carry a PID/session id");
+  // No automatic mutation: WAO never promises to auto-dispatch / auto-retry / decide-continue.
+  assert.ok(!/automatically (dispatch|retry|continue)|auto-dispatch|will retry/i.test(serialized),
+    "acceptance must not promise automatic mutation");
+});
+
+test("human output renders the acceptance chain, PASS facts, and recovery branches from the shared object", async () => {
+  const r = await (await memRun({ agentId: "coder_low" })).result;
+  const text = renderHuman(r);
+  // The three MCP steps appear in the human output.
+  for (const step of ["lead_preflight", "run_dispatch", "run_await_result"]) {
+    assert.ok(text.includes(step), `human output must name the MCP step ${step}`);
+  }
+  // PASS facts and the accepted≠PASS distinction.
+  assert.ok(/clean terminal/i.test(text), "human output must state the clean-terminal PASS fact");
+  assert.ok(/completed/i.test(text), "human output must state the completed PASS fact");
+  assert.ok(/non-empty assistant/i.test(text), "human output must state the non-empty-assistant PASS fact");
+  assert.ok(/accepted/i.test(text) && /not\s*pass/i.test(text),
+    "human output must state run_dispatch accepted is not PASS");
+  // The four recovery branches.
+  for (const key of ["host-not-invoked", "transport-unknown", "workspace/preflight", "provider/runtime"]) {
+    assert.ok(text.includes(key), `human output must name the recovery branch ${key}`);
+  }
+});
+
+test("acceptance adds no new writes and does not disturb preview/apply/endorsement behavior", async () => {
+  // Preview still zero-write; acceptance is advisory and writes nothing.
+  const preview = await (await memRun({ agentId: "coder_low" })).result;
+  assert.equal(preview.writes.registry, false);
+  assert.equal(preview.writes.endorsement, false);
+  assert.ok(preview.acceptance);
+  // Apply still writes only the registry; endorsement stays false.
+  const applied = await (await memRun({ agentId: "coder_low", apply: true })).result;
+  assert.equal(applied.writes.registry, true);
+  assert.equal(applied.writes.endorsement, false);
+  assert.ok(applied.acceptance);
 });

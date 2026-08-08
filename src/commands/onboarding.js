@@ -84,8 +84,9 @@ export async function onboardingCommand(args, config) {
 }
 
 // Human-readable rendering of the bounded result. Single-sourced from the same
-// object that --json emits.
-function renderHuman(r) {
+// object that --json emits. Exported so the acceptance guidance shared by human
+// output (not just --json) is covered by focused tests.
+export function renderHuman(r) {
   const lines = [];
   const tag = r.outcome.toUpperCase();
   lines.push(`wao onboarding: ${tag}`);
@@ -115,6 +116,24 @@ function renderHuman(r) {
   }
 
   if (r.reason) lines.push(`Reason: ${r.reason}`);
+
+  // Acceptance recipe — bounded, host-neutral, advisory. Single-sourced from
+  // r.acceptance (the same object --json emits). Gives a Fresh Lead the three
+  // MCP steps, the PASS facts, and the four closed recovery branches without
+  // loading the full Skill. Advisory only — no prescription, no auto-mutation.
+  if (r.acceptance) {
+    const a = r.acceptance;
+    lines.push("");
+    lines.push("Acceptance recipe (advisory, host-neutral):");
+    lines.push(`MCP chain: ${a.chain.map((s) => s.step).join(" → ")} (canary is read-only, no delivery)`);
+    lines.push(`PASS requires ALL: ${a.pass.facts.join(" + ")}.`);
+    lines.push("run_dispatch accepted (runId returned) is NOT PASS.");
+    lines.push("A returned runId binds all later observation.");
+    lines.push("Recovery branches:");
+    for (const b of a.branches) {
+      lines.push(`  ${b.key.padEnd(18)} — ${b.advisory}`);
+    }
+  }
 
   // The host-neutral MCP stdio snippet — the practical wiring output.
   lines.push("");

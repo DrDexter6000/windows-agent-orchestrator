@@ -176,6 +176,69 @@ export function buildMcpSnippet({ installRoot }) {
   };
 }
 
+/**
+ * Build the bounded Host-neutral acceptance projection. Pure, deterministic,
+ * advisory guidance shared by --json and human output. It names exactly the
+ * three MCP steps, the PASS facts, and the four closed recovery branches so a
+ * Fresh Lead can learn the acceptance chain without loading the full Skill.
+ *
+ * Truth contract (Fresh Lead-facing authority: AGENT_ONBOARDING.md §9):
+ *   - chain: lead_preflight → run_dispatch (read-only, no-delivery canary)
+ *     → run_await_result. run_dispatch returning a runId means accepted, not PASS.
+ *   - PASS requires ALL of: clean observed terminal + terminal state completed
+ *     + non-empty assistant text.
+ *   - A returned runId binds all later observation (diagnosis, retry decisions).
+ *   - Four closed recovery branches:
+ *       host-not-invoked   — a Host cancellation proven before tool invocation is
+ *                            not a WAO run (WAO never received the dispatch).
+ *       transport-unknown  — a missing tool result / transport loss after
+ *                            invocation is unknown, not proof that no worker
+ *                            started; inspect runs_list / point-in-time facts
+ *                            before any retry; NO automatic retry.
+ *       workspace/preflight — a workspace binding or preflight problem prevents a
+ *                             dispatch-ready chain.
+ *       provider/runtime   — provider / worker-runtime failure is a POST-RUN
+ *                            branch, diagnosed only after a runId-bound run exists.
+ *
+ * Boundary: this projection is informational + advisory only. It never names a
+ * Host, never carries an absolute path / credential value / prompt body / command
+ * argv / PID / session id, and never describes an automatic mutation (no
+ * auto-dispatch / auto-retry / decide-continue). It adds no MCP tool, no Host
+ * profile, no config mutation, no permission bypass, and no new persistent state.
+ *
+ * @returns {{
+ *   advisory: true, hostNeutral: true,
+ *   chain: {step: string, advisory: string}[],
+ *   canary: {readOnly: true, noDelivery: true},
+ *   pass: {facts: string[], acceptedIsNotPass: true},
+ *   runIdBindsObservation: true,
+ *   branches: {key: string, advisory: string}[],
+ * }}
+ */
+export function buildAcceptance() {
+  return {
+    advisory: true,
+    hostNeutral: true,
+    chain: [
+      { step: "lead_preflight", advisory: "confirm registry and environment are dispatch-ready (advisory, not a hard gate)" },
+      { step: "run_dispatch", advisory: "issue a read-only, no-delivery canary; a returned runId means accepted, not passed" },
+      { step: "run_await_result", advisory: "await the terminal state and the assistant text" },
+    ],
+    canary: { readOnly: true, noDelivery: true },
+    pass: {
+      facts: ["clean terminal", "completed", "non-empty assistant text"],
+      acceptedIsNotPass: true,
+    },
+    runIdBindsObservation: true,
+    branches: [
+      { key: "host-not-invoked", advisory: "a Host cancellation proven before tool invocation means WAO did not receive the dispatch — this is not a WAO run" },
+      { key: "transport-unknown", advisory: "a missing tool result or transport loss after invocation is unknown, not proof that no worker started — inspect runs_list / point-in-time facts before any retry; no automatic retry" },
+      { key: "workspace/preflight", advisory: "a workspace binding or preflight problem prevents a dispatch-ready chain — resolve the binding before retrying the chain" },
+      { key: "provider/runtime", advisory: "provider or worker-runtime failure is a post-run branch — diagnosed only after a runId-bound WAO run exists" },
+    ],
+  };
+}
+
 // ── Default trusted install root ─────────────────────────────────────────────
 // Derived from THIS module's location (src/application/onboarding.js → repo root
 // is two levels up), matching the installRoot.js philosophy: the trusted root is
@@ -506,6 +569,10 @@ function baseResult(partial) {
     candidates: partial.candidates,
     registry: partial.registry,
     mcpSnippet: partial.mcpSnippet,
+    // Bounded Host-neutral advisory acceptance projection (see buildAcceptance).
+    // Carried by EVERY outcome — including refused/error — so a Fresh Lead always
+    // sees the acceptance chain, PASS facts, and closed recovery branches.
+    acceptance: buildAcceptance(),
     certification: partial.certification,
     writes: partial.writes,
     reason: partial.reason ?? null,
