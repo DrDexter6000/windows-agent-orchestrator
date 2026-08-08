@@ -579,7 +579,7 @@ M9-7A 起支持可选 `delivery` 块，用于派发后续可由 `run_delivery`/`
 }
 ```
 
-`delivery` 可选。`verificationCommands` 与 `verificationUnavailableReason` 二选一（互斥）。WAO 强制 persistent worktree isolation——模型不能传 `isolate`。模型**不能**传 `registryPath`、`runDir`、`runId`、`cwd`、`workspaceRoot`、`requireCertified`、timeout 或 `isolate`——这些是 server-owned 配置。MCP 固定以 `requireCertified: true` 调 shared service。
+`delivery` 可选。`verificationCommands` 与 `verificationUnavailableReason` 二选一（互斥）。WAO 强制 persistent worktree isolation——模型不能传 `isolate`。模型**不能**传 `registryPath`、`runDir`、`runId`、`cwd`、`workspaceRoot`、`requireCertified`、timeout 或 `isolate`——这些是 server-owned 配置。registry certification 是 **advisory 证据，不是 permission gate**：`registry_list` / `lead_preflight` 把每个 worker 的 `certification` 状态报告给 Lead，MCP dispatch/continuation 以 `requireCertified: false` 调 shared service，**不**强制认证——没有 reliability-summary.json 的 Fresh 克隆同样可派发（lead_preflight 已报告 configured/credential 事实，认证仅作参考）。显式 CLI `--require-certified` 与 RunManager 的 opt-in 认证门保持完整——CLI 或项目治理仍可要求认证。
 
 **M12-13 per-command 执行预算（可选，`verificationTimeoutMs`）**：Lead 可选为 delivery 声明**单条 verification 命令的执行超时/预算**（整数 ms，共享闭界 `[1000, 7200000]`，默认 300000 **仅在字段缺失时**应用）。这不是 `run_wait` / `run_await_result` 的观察窗口——它约束 exact verifier 的逐条 setup/assertion 命令执行。语义：
 - **验证先于副作用**：非法值（字符串/小数/越界）在派发/start/resume 的任何 transcript append、worktree 创建、spawn/attach、打包、验证之前经 `prepareDeliveryRequest` SSOT 拒绝（`invalid_verification`），零转录、零 worktree、零 spawn；

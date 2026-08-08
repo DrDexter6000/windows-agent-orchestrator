@@ -2931,9 +2931,15 @@ export function createWaoMcpServer({
           // M10-pre2: server-owned canonical workspace root as cwd.
           // The model cannot provide this — it comes from host-authorized binding.
           cwd: workspaceCwd,
-          // MCP always requires certification — the control plane decides this,
-          // never the model. Background path now propagates it (M9-2A).
-          requireCertified: true,
+          // Certification advisory closeout: registry certification is recorded
+          // reliability evidence, NOT a permission gate — the MCP control plane
+          // must never force it, or a Fresh clone with no reliability-summary
+          // fails at the gate before the provider even spawns. The Lead may
+          // dispatch any configured worker. Explicit --require-certified (CLI)
+          // and RunManager's opt-in gate remain fully intact. The field stays
+          // server-owned — the model cannot inject or override it (strict input
+          // schema rejects it before the service is called).
+          requireCertified: false,
           // M10-pre closeout: thread server-owned global config.waitTimeout to the
           // detached runner. This is NOT --wait-timeout (never externally controllable).
           globalWaitTimeout,
@@ -3145,7 +3151,10 @@ export function createWaoMcpServer({
           authorizedWorkspaceRoot: workspaceCwd,
           leadSession: resolveLeadSession,
           userEnvReader: resolveUserEnv,
-          requireCertified: true,
+          // Certification advisory (same contract as run_dispatch): registry
+          // certification is evidence, never a permission gate. Server-owned —
+          // the model cannot inject or override the field.
+          requireCertified: false,
           globalWaitTimeout,
           backendFor: resolveBackendFor,
         });

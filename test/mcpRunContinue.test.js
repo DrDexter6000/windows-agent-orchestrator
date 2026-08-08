@@ -8,7 +8,9 @@
 //     strict input (parentRunId/prompt/delivery required; extra keys rejected)
 //   - workspace-bound authorization (no binding → service never called)
 //   - service threading: authorizedWorkspaceRoot = bound root, server-owned
-//     leadSession, requireCertified:true, backendFor capability resolver
+//     leadSession, advisory requireCertified:false (certification is recorded
+//     reliability evidence, never a permission gate), backendFor capability
+//     resolver
 //   - structured success output (dispatch identity + parentRunId + continuation +
 //     rootRunId) and refusal output (closed-set rejectionReason)
 //   - redaction: the opaque provider uuid, Lead session id, workspace path, and
@@ -125,6 +127,9 @@ test("M12-7-MRC-M2: extra key / missing fields rejected before service", async (
     try {
       const cases = [
         { args: { parentRunId: "run_p", prompt: "fix", delivery: DELIVERY, unexpected: 1 }, label: "extra key" },
+        // requireCertified is server-owned: a client cannot force the gate via
+        // tool arguments — rejected before the service is ever called.
+        { args: { parentRunId: "run_p", prompt: "fix", delivery: DELIVERY, requireCertified: true }, label: "client cannot force requireCertified" },
         { args: { parentRunId: "run_p", delivery: DELIVERY }, label: "missing prompt" },
         { args: { prompt: "fix", delivery: DELIVERY }, label: "missing parentRunId" },
         { args: { parentRunId: "run_p", prompt: "fix" }, label: "missing delivery" },
@@ -187,7 +192,7 @@ test("M12-7-MRC-M4: service threaded with bound workspace + leadSession + requir
       assert.equal(call.prompt, "correct the bug");
       assert.equal(toFwd(call.authorizedWorkspaceRoot), toFwd(dir), "bound workspace root threaded");
       assert.equal(call.leadSession, SENTINEL_LEAD, "server-owned Lead session threaded");
-      assert.equal(call.requireCertified, true, "MCP always requires certification");
+      assert.equal(call.requireCertified, false, "certification is advisory: MCP never forces it (not a permission gate)");
       assert.equal(call.runDir, dir);
       assert.equal(call.globalWaitTimeout, 60000, "global wait timeout threaded");
       assert.equal(typeof call.backendFor, "function", "backend capability resolver threaded");

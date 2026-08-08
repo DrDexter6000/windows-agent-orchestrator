@@ -5,9 +5,14 @@
 // Proves that an MCP host can dispatch a supervised background run via the
 // run_dispatch tool, which calls the M9-2A dispatchRun() application service.
 // Covers: tool list shape, exactly-once service invocation, server-owned paths,
-// fixed requireCertified:true, safe output (no paths/PID/prompt/argv), strict
-// input rejection, error redaction, real stdio no-model integration, detached
-// runner terminal state after MCP host closes, and CLI/MCP parity.
+// advisory requireCertified:false (certification is recorded reliability
+// evidence, never a permission gate — the Lead may dispatch any configured
+// worker), safe output (no paths/PID/prompt/argv), strict input rejection (a
+// client cannot inject or override the server-owned flag), error redaction,
+// real stdio no-model integration, detached runner terminal state after MCP
+// host closes, CLI/MCP parity, and the summary-less Fresh clone regression
+// (no reliability-summary.json → dispatch reaches the detached path, never a
+// certification-gate refusal).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -123,10 +128,11 @@ test("M9-2B-01: tools/list has registry_list + run_dispatch with strict schema a
 
 // ---------------------------------------------------------------------
 // M9-2B-02: injected dispatcher called exactly once, receives server-owned paths
-//           and requireCertified:true; model cannot override paths.
+//           and advisory requireCertified:false; model cannot override paths or
+//           the certification flag.
 // ---------------------------------------------------------------------
 
-test("M9-2B-02: run_dispatch calls dispatcher once with server paths and requireCertified:true", async () => {
+test("M9-2B-02: run_dispatch calls dispatcher once with server paths and advisory requireCertified:false", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m92b-02-"));
   try {
     makeGitRepo(dir);
@@ -151,7 +157,7 @@ test("M9-2B-02: run_dispatch calls dispatcher once with server paths and require
       assert.equal(callCount, 1, "dispatcher called exactly once");
       assert.ok(captured.registryPath, "server-owned registryPath passed through");
       assert.equal(captured.runDir, "/server/runs", "server-owned runDir");
-      assert.equal(captured.requireCertified, true, "requireCertified fixed true");
+      assert.equal(captured.requireCertified, false, "certification is advisory: requireCertified fixed false (not a permission gate)");
       assert.equal(captured.agentId, "coder_low");
       assert.equal(captured.prompt, "do it");
     } finally {
@@ -251,7 +257,11 @@ test("M9-2B-04: control-plane args rejected, dispatcher not called", async () =>
     const badArgsList = [
       { agentId: "x", prompt: "y", registryPath: "/attacker/r.json" },
       { agentId: "x", prompt: "y", runDir: "/attacker/runs" },
+      // requireCertified is server-owned: a client can neither disable the gate
+      // (false) nor force it (true) via tool arguments — both are rejected by
+      // the strict schema before the service is ever called.
       { agentId: "x", prompt: "y", requireCertified: false },
+      { agentId: "x", prompt: "y", requireCertified: true },
       { agentId: "x", prompt: "y", runId: "run_evil" },
       { agentId: "x", prompt: "y", cwd: "/evil" },
       { agentId: "x", prompt: "y", evil: true },
@@ -393,6 +403,87 @@ test("M9-2B-06: real stdio run_dispatch reaches pending, runner drives to failed
 });
 
 // ---------------------------------------------------------------------
+// M9-2B-08 (Fresh Host onboarding regression): a configured worker with NO
+// reliability-summary.json must dispatch through the real MCP boundary + real
+// application service + detached runner. Certification is advisory evidence,
+// never a permission gate — the run must NOT die at the certification gate
+// before the provider spawns. Fixture is fully synthetic: nonexistent binary,
+// no credentials, no model call.
+// ---------------------------------------------------------------------
+
+test("M9-2B-08: summary-less Fresh clone dispatches via real MCP + detached runner, no certification-gate refusal", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m92b-08-"));
+  let client;
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, {
+      fresh_worker: {
+        backend: "claude-code",
+        binary: "definitely-nonexistent-m92b-08",
+        cwd: dir,
+      },
+    });
+    const runDir = join(dir, "runs");
+    mkdirSync(runDir, { recursive: true });
+    // Causal precondition: this Fresh clone (wao onboarding --apply) has NO
+    // reliability-summary.json. Under a hardcoded certification gate the first
+    // MCP run would be refused here before the provider ever spawns.
+    assert.ok(!existsSync(join(runDir, "reliability-summary.json")),
+      "fixture has no reliability-summary.json");
+
+    const { Client } = await import("@modelcontextprotocol/sdk/client");
+    client = new Client({ name: "wao-m92b-08", version: "0.0.1" }, { capabilities: {} });
+    const transport = await buildStdioSubprocessTransport({ registryPath, runDir, workspaceRoot: dir });
+    await client.connect(transport);
+
+    const res = await client.callTool({
+      name: "run_dispatch",
+      arguments: { agentId: "fresh_worker", prompt: "bounded task" },
+    });
+    // The certification gate must NOT fire anywhere in the path. Note the gate
+    // (when enabled) fires INSIDE the detached runner — RunManager.start appends
+    // a certification-gate run.error and refuses before the provider spawns —
+    // so the MCP boundary still returns an acceptance; the causal proof lives
+    // in the transcript below (no certification-gate event, worker reaches the
+    // real detached path).
+    assert.equal(res.isError, undefined, "tool returns a normal (non-error) result");
+    const textBlock = res.content.find((b) => b.type === "text");
+    const parsed = JSON.parse(textBlock.text);
+    assert.equal(parsed.accepted, true, "dispatch accepted");
+    assert.equal(parsed.state, "pending", "initial state pending");
+    const runId = parsed.runId;
+    assert.ok(runId, "runId returned");
+
+    // The application/detached path ran: a transcript exists at MCP return and
+    // the detached runner drove the nonexistent binary to a terminal failure.
+    const transcriptPath = join(runDir, `${runId}.jsonl`);
+    assert.ok(existsSync(transcriptPath), "transcript exists at MCP return (application path ran)");
+    const earlyEvents = await readTranscript(transcriptPath);
+    assert.equal(findState(earlyEvents), "pending", "transcript pending at return");
+
+    // Close MCP host — detached runner must continue independently.
+    await client.close();
+    client = null;
+
+    let events = earlyEvents;
+    for (let i = 0; i < 80; i += 1) {
+      events = await readTranscript(transcriptPath);
+      if (["failed", "completed", "aborted", "timed_out"].includes(findState(events))) break;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    // Terminal "failed" from the nonexistent binary — under the old hardcoded
+    // gate this terminal would be reached via a certification-gate refusal
+    // (run.error phase=certification-gate appended, provider never spawned).
+    assert.equal(findState(events), "failed", "runner drove nonexistent binary to failed terminal");
+    assert.ok(!events.some((e) => e.type === "run.error" && e.phase === "certification-gate"),
+      "no certification-gate error event in transcript (gate never fired)");
+  } finally {
+    if (client) await client.close();
+    cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
 // M9-2B-07: CLI and MCP dispatch the same agent produce the same initial durable
 //           facts (background_submitted + pending) and the same outcome type.
 // ---------------------------------------------------------------------
@@ -500,7 +591,7 @@ test("M9-7A-04: MCP run_dispatch with delivery passes delivery to service", asyn
     assert.equal(callCount, 1);
     assert.ok(captured.delivery, "service received delivery");
     assert.equal(captured.delivery.mode, "git_commit_v1");
-    assert.equal(captured.requireCertified, true, "still forced certified");
+    assert.equal(captured.requireCertified, false, "certification advisory on delivery runs too (never forced)");
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     assert.deepEqual(Object.keys(parsed).sort(),
       ["accepted", "agentId", "runId", "state", "workspaceProof"],
