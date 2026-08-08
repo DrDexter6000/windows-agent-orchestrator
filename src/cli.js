@@ -381,6 +381,7 @@ Project state (.wao/):
   wao handoff write --from R --to R --summary S [--artifacts a,b]
   wao handoff read <role>  # latest incoming handoff addressed to role
   wao doctor [--cwd DIR] [--format json]
+  wao onboarding [--agent <id>] [--apply] [--endorse-worker <id>] [--json]  # third-party: generate one minimal private registry from the tracked template (+ host-neutral MCP snippet)
 `);
 }
 

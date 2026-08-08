@@ -88,6 +88,8 @@ Copy-Item config/agents.example.json config/agents.json
 
 编辑 `config/agents.json`，把 `cwd` 改成你的项目目录，按需增删 agent。
 
+> 第三方从全新 clone 只配一个 worker：`npm run cli -- wao onboarding --agent <agentId> --apply` 自动从入库模板生成单 worker registry + host-neutral MCP 片段（零手编）。正式验收链见 `AGENT_ONBOARDING.md` §9。
+
 当前派发策略：
 - 真实编码/文件修改/命令执行优先用 certified Claude Code worker（如 `coder_hq` / `coder_low`）。
 - 标准角色以 `docs/team-roles.md` 为权威，配置落地以 `config/agents.example.json` 为模板。

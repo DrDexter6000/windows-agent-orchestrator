@@ -2168,3 +2168,112 @@ test("onboarding closeout: agents.example.json 移除 managed-flag 向后兼容�
   assert.ok(!/本文件[^。]{0,40}(?:按可用认证|删减|编辑|修改)/.test(raw),
     "入库模板不得声称按认证删减/编辑它本身（删减只发生在私人副本）");
 });
+
+// ============================================================
+// Third-party onboarding helper docs.
+// The approved contract forbids a new durable onboarding document, so the
+// authority lives in the EXISTING AGENT_ONBOARDING.md (§9). These guards bind
+// that section to the implemented contract: the MCP-native acceptance chain,
+// PASS criterion, dispatch≠PASS, CLI canary as diagnostic-only, the four
+// diagnosis branches, and the transport/window-expiry ≠ worker-stopped
+// distinction. They also anti-regress: docs/onboarding.md must NOT exist, and
+// no live doc may dangle a pointer at it. Failure → fix the doc, not the test.
+// ============================================================
+
+test("onboarding docs: no durable docs/onboarding.md (contract forbids it) and no dangling pointers", () => {
+  // Anti-regression: the contract forbids a new durable onboarding document.
+  assert.ok(!existsSync(join(ROOT, "docs", "onboarding.md")),
+    "docs/onboarding.md must not exist (authority lives in AGENT_ONBOARDING.md §9)");
+  // No live doc may dangle a pointer at the removed file.
+  for (const f of ["AGENT_ONBOARDING.md", "docs/usage.md"]) {
+    assert.ok(!read(f).includes("docs/onboarding.md"),
+      `${f} must not reference the removed docs/onboarding.md (dangling pointer)`);
+  }
+});
+
+test("onboarding docs: AGENT_ONBOARDING.md documents the wao onboarding command + host-neutral snippet summary", () => {
+  const ob = read("AGENT_ONBOARDING.md");
+  // The command and its key flags.
+  assert.ok(/wao onboarding/.test(ob), "AGENT_ONBOARDING.md must document the `wao onboarding` command");
+  assert.ok(/--agent/.test(ob) && /--apply/.test(ob) && /--endorse-worker/.test(ob),
+    "AGENT_ONBOARDING.md must document --agent / --apply / --endorse-worker");
+  // The host-neutral MCP stdio snippet summary (generic mcpServers.wao, Node v22 shim).
+  assert.ok(/mcpServers/.test(ob) && /wao-node\.cjs/.test(ob),
+    "AGENT_ONBOARDING.md must reference the host-neutral MCP stdio snippet (mcpServers.wao via the v22 shim); full snippet authority is docs/usage.md");
+});
+
+test("onboarding docs: formal acceptance chain is MCP-native (lead_preflight → run_dispatch no-delivery canary → run_await_result)", () => {
+  const ob = read("AGENT_ONBOARDING.md");
+  // The three MCP tools of the chain.
+  assert.ok(/lead_preflight/.test(ob), "AGENT_ONBOARDING.md must name lead_preflight");
+  assert.ok(/run_dispatch/.test(ob), "AGENT_ONBOARDING.md must name run_dispatch");
+  assert.ok(/run_await_result/.test(ob), "AGENT_ONBOARDING.md must name run_await_result");
+  // The canary is read-only and no-delivery (no commit packaging).
+  assert.ok(/no-delivery|no delivery|read-only|只读/.test(ob),
+    "AGENT_ONBOARDING.md must describe the canary as read-only / no-delivery");
+  // Formal acceptance is MCP-native, not the CLI.
+  assert.ok(/MCP-native|MCP native/i.test(ob),
+    "AGENT_ONBOARDING.md must state the formal acceptance chain is MCP-native");
+});
+
+test("onboarding docs: PASS = clean terminal + completed + non-empty assistant text; run_dispatch accepted ≠ PASS", () => {
+  const ob = read("AGENT_ONBOARDING.md");
+  // PASS requires all three signals together.
+  assert.ok(/clean terminal/i.test(ob), "AGENT_ONBOARDING.md PASS must require a clean terminal");
+  assert.ok(/completed/.test(ob), "AGENT_ONBOARDING.md PASS must require terminal state completed");
+  assert.ok(/non-empty assistant|非空 assistant|assistant 文本|assistant text/i.test(ob),
+    "AGENT_ONBOARDING.md PASS must require non-empty assistant text");
+  // run_dispatch accepted (runId returned) is NOT a PASS.
+  assert.ok(/accepted[^\n]*≠[^\n]*PASS|accepted is not PASS|runId.*does not mean|runId.*只表示/i.test(ob),
+    "AGENT_ONBOARDING.md must state run_dispatch accepted ≠ PASS");
+});
+
+test("onboarding docs: CLI canary is diagnostic-only (not formal acceptance)", () => {
+  const ob = read("AGENT_ONBOARDING.md");
+  assert.ok(/CLI[^\n]{0,12}canary|CLI 只读 canary|CLI one-shot canary/.test(ob),
+    "AGENT_ONBOARDING.md must reference the CLI canary");
+  assert.ok(/诊断工具|diagnostic|不是正式验收|not.*formal acceptance/i.test(ob),
+    "AGENT_ONBOARDING.md must state the CLI canary is diagnostic-only, not formal acceptance");
+});
+
+test("onboarding docs: four canary diagnosis branches, including transport/window expiry ≠ worker stopped", () => {
+  const ob = read("AGENT_ONBOARDING.md");
+  // The four branches are enumerated.
+  assert.ok(/四个诊断分支|four diagnosis branches|four branches|4 branches/i.test(ob),
+    "AGENT_ONBOARDING.md must enumerate four diagnosis branches");
+  // Branch: provider/auth.
+  assert.ok(/provider_auth/.test(ob),
+    "AGENT_ONBOARDING.md must document the provider/auth diagnosis branch");
+  // Branch: worker stopped empty (crash / no_effect / provider_disconnect).
+  assert.ok(/crash|no_effect|provider_disconnect/.test(ob),
+    "AGENT_ONBOARDING.md must document the worker-stopped-empty branch (crash/no_effect/provider_disconnect)");
+  // Branch: timeout / transport-window expiry.
+  assert.ok(/timeout|传输窗口|transport/.test(ob),
+    "AGENT_ONBOARDING.md must document the timeout / transport-window branch");
+  // The critical distinction: transport/window expiry is NOT the worker stopping.
+  assert.ok(/传输.*≠.*worker|窗口.*≠.*worker|transport.*not.*worker|window.*not.*worker|not the worker stopping/i.test(ob),
+    "AGENT_ONBOARDING.md must state transport/window expiry ≠ worker stopped");
+});
+
+test("onboarding docs: two readiness paths (strict reliability OR manual endorsement), no fabrication, bounded write set", () => {
+  const ob = read("AGENT_ONBOARDING.md");
+  // Path A: reliability certification (strict) — the helper instructs, never runs.
+  assert.ok(/npm run reliability/.test(ob), "AGENT_ONBOARDING.md must point at the strict reliability path");
+  // Path B: manual endorsement via manualOverride:cleared.
+  assert.ok(/manualOverride/.test(ob),
+    "AGENT_ONBOARDING.md must document the manual endorsement path (manualOverride:cleared)");
+  // The helper never fabricates readiness status.
+  assert.ok(/不捏造|never fabricat|does not fabricat|不产生就绪/i.test(ob),
+    "AGENT_ONBOARDING.md must state the helper never fabricates readiness");
+  // The safety boundary: the bounded write set is named.
+  assert.ok(/config\/agents\.example\.json/.test(ob) && /config\/agents\.json/.test(ob) && /reliability-summary\.json/.test(ob),
+    "AGENT_ONBOARDING.md must name the exact read/write surface (template, agents.json, reliability-summary.json)");
+});
+
+test("onboarding docs: docs/usage.md points at the existing authority AGENT_ONBOARDING.md", () => {
+  // SSOT: usage.md carries only a pointer to the existing onboarding authority.
+  const usage = read("docs/usage.md");
+  assert.ok(/wao onboarding/.test(usage), "docs/usage.md must mention the wao onboarding command");
+  assert.ok(/AGENT_ONBOARDING\.md/.test(usage),
+    "docs/usage.md must point at AGENT_ONBOARDING.md (the existing onboarding authority), not a new doc");
+});

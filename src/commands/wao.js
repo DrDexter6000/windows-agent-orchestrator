@@ -2,7 +2,7 @@
 //
 // TD-98 阶段 2d：wao command family 从 cli.js 拆出（行为不变，纯搬迁）。
 //
-// 命令族：wao init | state | decision | handoff | declare | stage | ask | doctor
+// 命令族：wao init | state | decision | handoff | declare | stage | ask | doctor | onboarding
 //
 // 依赖：
 //   - 外部模块：../waoDir.js、../waoState.js、../waoDecisions.js、../waoDeclare.js、
@@ -29,6 +29,7 @@ import { addStage, summarizeStages, STAGE_NUMBERS } from "../waoStage.js";
 import { writeHandoff, readHandoff } from "../waoHandoff.js";
 import { parseOptions, resolveTargetCwd } from "./shared.js";
 import { waoDoctorCommand } from "./doctor.js";
+import { onboardingCommand } from "./onboarding.js";
 
 /**
  * TD-95 #7：解析 stage artifact 路径（随 wao stage 搬迁）。
@@ -298,5 +299,9 @@ export async function waoCommand(args, config, deps = {}) {
     await waoDoctorCommand(tail, config);
     return;
   }
-  throw new Error(`Unknown wao subcommand: ${sub ?? "(none)"}. Try: wao init | wao state | wao decision | wao handoff | wao declare | wao stage | wao ask | wao doctor`);
+  if (sub === "onboarding") {
+    await onboardingCommand(tail, config);
+    return;
+  }
+  throw new Error(`Unknown wao subcommand: ${sub ?? "(none)"}. Try: wao init | wao state | wao decision | wao handoff | wao declare | wao stage | wao ask | wao doctor | wao onboarding`);
 }

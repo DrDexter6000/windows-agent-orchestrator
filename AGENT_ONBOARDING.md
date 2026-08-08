@@ -85,6 +85,8 @@ WAO 的 `SKILL.md` 符合 anthropic skill-creator 规范。各 runtime 的 skill
 - **`config/agents.example.json`（入库的模板）**：与 `docs/team-roles.md` 规范角色**一一对应**，保持六个角色 worker（researcher / coder_hq / coder_low / coder_mm / tester / auditor + opencode fallback）全量——它是上游样例，不需要编辑它本身。
 - **`config/agents.json`（你的私人副本，gitignored 不入库）**：复制后**可以删到只剩你实际能认证的 worker**。
 
+> **自动化（可选）**：`npm run cli -- wao onboarding --agent <你保留的 worker id> --apply` 从入库模板自动生成只含一个 worker 的 `config/agents.json`（零手编、带该 worker 的认证矩阵、并打印 host-neutral MCP 片段）。下面的手动复制+裁剪是同一结果的等价做法。正式验收链见本文档 §9。
+
 ```powershell
 Copy-Item config/agents.example.json config/agents.json
 ```
@@ -200,6 +202,38 @@ workflow 跑的过程中，`.wao/state/current.md` 会自动更新（每个节�
 - **不确定环境**：跑 `wao doctor`（advisory，报告给 owner 裁决）
 
 详细排障：`docs/troubleshooting.md`。
+
+---
+
+## 9. 正式验收与认证（MCP-native）
+
+§4f 的 CLI 只读 canary 是**诊断工具**，不是正式验收。**正式验收只能走 MCP-native 链**，且 worker 须先带一个就绪信号。
+
+**就绪信号二选一**（helper 本身不产生就绪，只指路/写手册式放行）：
+- **严格认证（推荐）**：`npm run reliability -- --agent <agentId>` 写真实状态（certified/conditional/...）进 `runs/reliability-summary.json`。helper 只报告这条命令，不替你跑。
+- **手册式放行**：`npm run cli -- wao onboarding --agent <agentId> --endorse-worker <agentId>` 仅写 `manualOverride: "cleared"`（既有 Owner 信号），不动 status、不捏造就绪。`--endorse-worker` 必须与 `--agent` 完全一致；可单独或配合 `--apply` 使用。
+
+**正式验收链**（三个 MCP 工具，按序）：
+
+```
+lead_preflight  →  run_dispatch（只读、no-delivery canary）  →  run_await_result
+```
+
+1. `lead_preflight`：确认 registry/环境可派发（advisory，非硬门）。
+2. `run_dispatch` 发一个**只读、不带 delivery** 的 canary（如"读某文件，一句话汇报"），只验证 dispatch/transcript/worker 链路通，不产出交付。
+3. `run_await_result`：等终态 + assistant 文本。
+
+**PASS 判据**（三者同时成立）：**clean terminal**（transcript 无 `run.error`/失败事件）+ **终态 `completed`** + **非空 assistant 文本**。缺一不可。
+
+**`run_dispatch` accepted ≠ PASS**：返回 `runId` 只表示派发被接受、开了 transcript，不等于 worker 成功。只有 `run_await_result` 到 `completed` + 非空 assistant 文本 + clean terminal 才算 PASS。
+
+**非 PASS 的四个诊断分支**（映射控制平面 closed-set `DIAGNOSIS_CATEGORIES`，只给事实不给处方）：
+1. **provider / 认证**（`provider_auth` / `config_conflict`）：401、key 缺失/无效、OAuth 与 provider key 优先级冲突。
+2. **worker 空停**（`crash` / `no_effect` / `provider_disconnect`）：进程非零退出、有活动无产出、或静默≥120s 后死。
+3. **超时 / 传输窗口到期**（`timeout` / 等待窗口 / MCP 传输断）：**传输或窗口到期 ≠ worker 停止**——是控制器不再等/stdio 断了，worker 进程可能还活着，别当成 crash，先查进程/重新 await。
+4. **PASS**：clean terminal + `completed` + 非空 assistant 文本。
+
+**host-neutral MCP 片段**：`wao onboarding` 会打印一段通用 `mcpServers.wao` stdio 片段（入口是 Node v22 shim `scripts/wao-node.cjs`，绝对路径正斜杠规范化、带空格也能用）。完整的 host 配置示例以 `docs/usage.md` §MCP stdio 为权威——本文不复制。
 
 ---
 

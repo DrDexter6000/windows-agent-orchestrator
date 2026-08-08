@@ -1,0 +1,127 @@
+// src/commands/onboarding.js
+//
+// `wao onboarding` — third-party onboarding helper command (parsing/printing only).
+//
+// A fresh third-party clone generates ONE minimal private worker registry from the
+// tracked config/agents.example.json template, without hand-editing the seven-worker
+// template. Zero-write by default; --apply writes only the gitignored
+// config/agents.json; --endorse-worker writes only the manualOverride:"cleared"
+// Owner signal into runs/reliability-summary.json. The command also prints a
+// host-neutral MCP stdio snippet for wiring the worker into an MCP host.
+//
+// This module is THIN: it parses args, wires the real (injectable) filesystem,
+// calls the pure service (src/application/onboarding.js), and prints ONE bounded
+// structured result as JSON (--json) or human text. All policy/safety logic lives
+// in the service; this layer adds none. It does not import the MCP SDK, child
+// processes, or the registry/backend run path.
+
+import { readFile, writeFile, rename, unlink, mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { resolve, join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { parseOptions } from "./shared.js";
+import { runOnboarding } from "../application/onboarding.js";
+
+// The trusted WAO installation root = where THIS command lives, three levels up
+// (src/commands/onboarding.js → repo root). Independent of the caller cwd, matching
+// the installRoot.js philosophy. Injectable via --install-root.
+const DEFAULT_INSTALL_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+/**
+ * `wao onboarding` command.
+ *
+ * @param {string[]} args
+ * @param {object} config — merged CLI config (config.registry / config.runDir are
+ *   already rebased to the trusted install root by loadConfig when WAO_INSTALL_ROOT
+ *   is set; legacy resolution otherwise).
+ */
+export async function onboardingCommand(args, config) {
+  const options = parseOptions(args);
+
+  const agentId = options.agent; // undefined ⇒ needs-selection
+  const apply = options.apply === true;
+  const json = options.json === true;
+  // --endorse-worker requires an explicit <id>; a bare flag is malformed usage.
+  if (options.endorseWorker === true) {
+    throw new Error("wao onboarding --endorse-worker requires an <id> (must match --agent)");
+  }
+  const endorseWorker = options.endorseWorker;
+
+  const installRoot = options.installRoot ?? DEFAULT_INSTALL_ROOT;
+  const exampleRegistryPath = options.exampleRegistry
+    ?? join(installRoot, "config/agents.example.json");
+  // The private registry path authority is config.registry (same path every wao
+  // command uses); --registry is an explicit override.
+  const targetRegistryPath = options.registry ?? config.registry;
+  // The reliability summary lives under the shared runDir; --reliability-summary
+  // is an explicit override.
+  const reliabilitySummaryPath = options.reliabilitySummary
+    ?? join(resolve(config.runDir), "reliability-summary.json");
+
+  const result = await runOnboarding({
+    agentId,
+    apply,
+    endorseWorker,
+    installRoot,
+    exampleRegistryPath,
+    targetRegistryPath,
+    reliabilitySummaryPath,
+    fs: { readFile, writeFile, rename, existsSync, unlink, mkdir },
+  });
+
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    process.stdout.write(renderHuman(result));
+  }
+
+  // Soft outcomes (refused/error) are reported truthfully but exit non-zero so
+  // scripts/CI can gate on them without parsing JSON.
+  if (result.outcome === "refused" || result.outcome === "error") {
+    process.exitCode = 1;
+  }
+}
+
+// Human-readable rendering of the bounded result. Single-sourced from the same
+// object that --json emits.
+function renderHuman(r) {
+  const lines = [];
+  const tag = r.outcome.toUpperCase();
+  lines.push(`wao onboarding: ${tag}`);
+
+  if (r.needsSelection) {
+    lines.push("No --agent selected — mutation requires an explicit selection.");
+    lines.push("Candidates from the tracked template:");
+    for (const c of r.candidates) {
+      lines.push(`  - ${c.id}  (backend: ${c.backend ?? "?"}, model: ${c.model ?? "?"})`);
+    }
+    lines.push("");
+    lines.push("Re-run with: wao onboarding --agent <id>            # preview");
+    lines.push("            wao onboarding --agent <id> --apply      # write config/agents.json");
+  } else if (r.selected) {
+    const written = [];
+    if (r.writes.registry) written.push("config/agents.json");
+    if (r.writes.endorsement) written.push("runs/reliability-summary.json (manualOverride:cleared)");
+    lines.push(r.writes.registry || r.writes.endorsement
+      ? `Applied. Wrote: ${written.join(", ")}.`
+      : "Preview only — no files written. Add --apply to write config/agents.json.");
+    if (r.certification?.strictCommand) {
+      const endorseTxt = r.certification.endorsed
+        ? " (endorsed: manualOverride:cleared written)"
+        : " (--endorse-worker <id> writes the manual clearance instead)";
+      lines.push(`Strict certification path: \`${r.certification.strictCommand}\`${endorseTxt}`);
+    }
+  }
+
+  if (r.reason) lines.push(`Reason: ${r.reason}`);
+
+  // The host-neutral MCP stdio snippet — the practical wiring output.
+  lines.push("");
+  lines.push("Host-neutral MCP stdio snippet (add to your MCP host config):");
+  lines.push("```json");
+  lines.push(JSON.stringify(r.mcpSnippet, null, 2));
+  lines.push("```");
+
+  return `${lines.join("\n")}\n`;
+}

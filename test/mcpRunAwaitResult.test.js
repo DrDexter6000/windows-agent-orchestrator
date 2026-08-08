@@ -18,7 +18,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -27,6 +27,9 @@ import { createWaoMcpServer } from "../src/mcp/server.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { CompatibilityCallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { rmrfRetry } from "./_rmrfHelper.mjs";
+// rmrfRetry (bounded transient-rm retry, injectable rm/sleep) is the shared
+// test-only helper (TD-107) — see test/_rmrfHelper.mjs + test/rmrfRetry.test.js.
 
 // ===== Helpers =====
 
@@ -121,7 +124,7 @@ test("MAR-01: tool discoverable; read-only/idempotent/openWorldHint:false annota
       // Snapshot-only: no network I/O → openWorldHint:false is accurate.
       assert.equal(t.annotations.openWorldHint, false, "snapshot-only → openWorld stays false");
     } finally { await client.close(); await server.close(); }
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { rmrfRetry(dir); }
 });
 
 test("MAR-02: input schema — runId required, waitMs default+max 270000 min 0, afterSeq optional, strict", async () => {
@@ -140,7 +143,7 @@ test("MAR-02: input schema — runId required, waitMs default+max 270000 min 0, 
       assert.equal(props.waitMs.maximum, 270000, "max 270000");
       assert.equal(props.waitMs.minimum, 0, "min 0 (point-in-time)");
     } finally { await client.close(); await server.close(); }
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { rmrfRetry(dir); }
 });
 
 test("MAR-03: output schema is strict + partitioned; status closed set has NO deferred; observationOutcome closed set; nullable result fields", async () => {
@@ -175,7 +178,7 @@ test("MAR-03: output schema is strict + partitioned; status closed set has NO de
         assert.ok(nullable, `result.${k} must be nullable (truthful unobserved)`);
       }
     } finally { await client.close(); await server.close(); }
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { rmrfRetry(dir); }
 });
 
 // =====================================================================
@@ -197,7 +200,7 @@ test("MAR-04: invalid runId → fixed error, service not called", async () => {
     } catch { /* may throw or isError */ }
     finally { await client.close(); await server.close(); }
     assert.equal(calls, 0, "service must not run for invalid runId");
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { rmrfRetry(dir); }
 });
 
 test("MAR-05: extra args rejected (strict input)", async () => {
@@ -215,7 +218,7 @@ test("MAR-05: extra args rejected (strict input)", async () => {
     } catch { /* zod rejects */ }
     finally { await client.close(); await server.close(); }
     assert.equal(calls, 0);
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { rmrfRetry(dir); }
 });
 
 test("MAR-06: waitMs bounds — >270000 rejected; 0 accepted (point-in-time)", async () => {
@@ -241,7 +244,7 @@ test("MAR-06: waitMs bounds — >270000 rejected; 0 accepted (point-in-time)", a
       assert.equal(res.structuredContent.result.status, "not_terminal");
       assert.equal(res.structuredContent.observationOutcome, "observed");
     } finally { await client.close(); await server.close(); }
-  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+  } finally { rmrfRetry(dir); rmrfRetry(runDir); }
 });
 
 // =====================================================================
@@ -268,7 +271,7 @@ test("MAR-07: terminal → compact result via real service, ZERO audit (read-onl
       assert.equal(parsed.result.assistantMessageCount, 2);
       assert.equal(countAudits(tp), 0, "run_await_result must NOT append messages.collected");
     } finally { await client.close(); await server.close(); }
-  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+  } finally { rmrfRetry(dir); rmrfRetry(runDir); }
 });
 
 test("MAR-08: non-terminal → not_terminal with NULL unobserved result fields (point-in-time)", async () => {
@@ -291,7 +294,7 @@ test("MAR-08: non-terminal → not_terminal with NULL unobserved result fields (
       assert.equal(parsed.result.reconstructed, null);
       assert.equal(parsed.result.backend, null);
     } finally { await client.close(); await server.close(); }
-  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+  } finally { rmrfRetry(dir); rmrfRetry(runDir); }
 });
 
 // =====================================================================
@@ -315,7 +318,7 @@ test("MAR-09: malformed service result → fixed safe text, no SDK leak", async 
         "no zod validation leak");
       assert.ok(!res.structuredContent, "no partial structuredContent");
     } finally { await client.close(); await server.close(); }
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { rmrfRetry(dir); }
 });
 
 test("MAR-10: malicious transcript payload → no secret/path/command/session leak", async () => {
@@ -352,7 +355,7 @@ test("MAR-10: malicious transcript payload → no secret/path/command/session le
       assert.ok(!dumped.includes("proc_await"), "no backend session id");
       assert.ok(dumped.includes("Done: result is 42."), "benign assistant text is returned");
     } finally { await client.close(); await server.close(); }
-  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+  } finally { rmrfRetry(dir); rmrfRetry(runDir); }
 });
 
 test("MAR-11: cross-workspace → fixed error (workspace-bound)", async () => {
@@ -369,7 +372,7 @@ test("MAR-11: cross-workspace → fixed error (workspace-bound)", async () => {
       const dumped = JSON.stringify(res);
       assert.ok(dumped.includes("run_await_result failed"), "fixed safe text on cross-workspace");
     } finally { await client.close(); await server.close(); }
-  } finally { rmSync(dirA, { recursive: true, force: true }); rmSync(dirB, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+  } finally { rmrfRetry(dirA); rmrfRetry(dirB); rmrfRetry(runDir); }
 });
 
 // =====================================================================
@@ -407,7 +410,7 @@ test("MAR-12: default 30s progress bound via real transport — notifications �
       assert.ok(progressCb <= bound,
         `progress bound violated via real transport: ${progressCb} > ${bound}`);
     } finally { await client.close(); await server.close(); }
-  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+  } finally { rmrfRetry(dir); rmrfRetry(runDir); }
 });
 
 test("MAR-13: no progressToken → zero notifications (standard opt-in)", async () => {
@@ -439,7 +442,7 @@ test("MAR-13: no progressToken → zero notifications (standard opt-in)", async 
       await client.callTool({ name: "run_await_result", arguments: { runId: "run_nopr", waitMs: 30000 } });
     } finally { await client.close(); await server.close(); }
     assert.equal(notifications.length, 0, "no progress notifications when client did not request them");
-  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+  } finally { rmrfRetry(dir); rmrfRetry(runDir); }
 });
 
 // =====================================================================
@@ -460,7 +463,7 @@ test("MAR-14: repeated terminal calls append ZERO audits (idempotent read-only)"
       await client.callTool({ name: "run_await_result", arguments: { runId: "run_idem", waitMs: 0 } });
     } finally { await client.close(); await server.close(); }
     assert.equal(countAudits(tp), 0, "two terminal calls → zero audit appends");
-  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+  } finally { rmrfRetry(dir); rmrfRetry(runDir); }
 });
 
 test("MAR-15: current tool count is 21 (M12-10 moved playbook catalog to resources)", async () => {
@@ -474,7 +477,7 @@ test("MAR-15: current tool count is 21 (M12-10 moved playbook catalog to resourc
       assert.ok(tools.tools.find((x) => x.name === "run_await_result"), "run_await_result present");
       assert.equal(tools.tools.length, 21, "exactly 21 tools (M12-10 moved playbook catalog to resources)");
     } finally { await client.close(); await server.close(); }
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { rmrfRetry(dir); }
 });
 
 // =====================================================================
@@ -524,5 +527,5 @@ test("MAR-16: null/primitive/array transcript → structured read_failure via re
         "no top-level failure text — the service did not throw");
       assert.ok(!dumped.includes(secret), "no secret leak — collect never ran on the corrupt snapshot");
     } finally { await client.close(); await server.close(); }
-  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+  } finally { rmrfRetry(dir); rmrfRetry(runDir); }
 });
