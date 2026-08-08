@@ -1018,7 +1018,7 @@ npm run cli -- runs dashboard --web [--port 0|1024..65535] [--run-dir DIR] [--cw
 - `run_status` 失败终态 → `run_diagnose`（diagnosis，low）+ `run_activity`；completed → `run_activity` + `run_collect` compact（low）。
 - `run_diagnose` 类别 `delivery_packaging_failed` → `run_delivery`（delivery，low）+ `run_activity`；其它失败类别 → `run_activity` + `run_collect` compact。
 - `run_collect` compact 可用 → `run_collect` full（evidence，medium）+ `run_activity`；full 带 `nextCursor` → 续页 + `run_activity`；单页读完 → `run_activity`。
-- `run_delivery` reviewable（verification 已有终态结果）→ `run_delivery_review`（delivery diff，high）+ `run_activity`；packaging failure / `deliveryFailure.code` → `run_activity` + `run_diagnose`；`isolation_failed` / `isolationFailure.code`（M12-13）→ `run_activity` + `run_diagnose`（无 packaging/diff/decision 面，不外广告 `run_delivery_review`）；未请求 → `run_activity` + `run_status`。waitMs readiness 路径与 point-in-time 路径披露一致。
+- `run_delivery` reviewable（verification 已有终态结果）→ `run_delivery_review`（delivery diff，high）+ `run_activity`；packaging failure / `deliveryFailure.code` → `run_activity` + `run_diagnose`；`isolation_failed` / `isolationFailure.code`（M12-13）→ `run_activity` + `run_diagnose`（无 packaging/diff/decision 面，不外广告 `run_delivery_review`）；未请求 → `run_activity` + `run_status`。waitMs readiness 路径与 point-in-time 路径披露一致；point-in-time 即使不携带 `readiness`，也会由已安全投影的 `isolationFailure.code:"workdir_escape"` 驱动同一语义，未知 code 不提升。
 - `run_activity` 有 `nextCursor` → 同工具续页；终态读完 → `run_collect` compact；非终态 → `run_status`。
 
 该字段是**加法字段**：既有输出字段、行为、audit 语义（只读工具零 append；`run_collect` 成功仍恰好一次 append）完全不变；Lead 完全可以忽略它，直接用原子工具。`run_delivery_review_bundle` 的输出**不**携带该字段——其嵌套 `delivery` 保持既有合同（只有 standalone `run_delivery` 带）。
