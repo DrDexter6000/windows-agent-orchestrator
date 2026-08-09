@@ -472,8 +472,11 @@ export function assertDeliveryCommitInRepository({ repoRoot, deliveryRef }) {
   }
 
   // 5. Committed files must exactly equal sorted changedFiles.
+  //    --no-renames: committed path identity is raw, independent of Git rename
+  //    heuristics/config (diff-tree never enables renames by default, but this
+  //    pins the contract explicitly).
   const committedFiles = parseNul(
-    git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", canonicalDelivery], { cwd }),
+    git(["diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", "-z", canonicalDelivery], { cwd }),
   ).sort();
   const expectedFiles = [...deliveryRef.changedFiles].sort();
   if (committedFiles.length !== expectedFiles.length ||
@@ -601,8 +604,11 @@ export function assertCommittedDeliveryRef(deliveryRef) {
  *   when either required Git read failed
  */
 export function listWorktreeChangedPaths(cwd, baseCommit) {
-  // Tracked changes (modified/deleted) relative to base
-  const tracked = gitSafe(["diff", "--name-only", "-z", baseCommit, "--"], { cwd });
+  // Tracked changes (modified/deleted) relative to base. --no-renames keeps the
+  // path set as RAW repository path identity: rename detection (diff.renames)
+  // would collapse a delete+similar-add into one rename pair and drop the
+  // deleted source from containment checks.
+  const tracked = gitSafe(["diff", "--no-renames", "--name-only", "-z", baseCommit, "--"], { cwd });
   if (tracked === null) return null;
 
   // Non-ignored untracked files
@@ -623,9 +629,10 @@ export function listWorktreeChangedPaths(cwd, baseCommit) {
  * @throws {DeliveryError}
  */
 function detectChanges(cwd, baseCommit) {
-  // Reject pre-staged changes first
+  // Reject pre-staged changes first. --no-renames: nonempty-truth check, but
+  // kept in the same deterministic (rename-free) form as every path-set read.
   const staged = parseNul(
-    git(["diff", "--name-only", "--cached", "-z"], { cwd }),
+    git(["diff", "--no-renames", "--name-only", "--cached", "-z"], { cwd }),
   );
   if (staged.length > 0) {
     throw new DeliveryError(
@@ -634,9 +641,11 @@ function detectChanges(cwd, baseCommit) {
     );
   }
 
-  // Tracked changes (modified/deleted) relative to base
+  // Tracked changes (modified/deleted) relative to base. --no-renames: raw
+  // path identity — rename detection must not hide a deleted source from the
+  // allowedPaths containment check below.
   const tracked = parseNul(
-    git(["diff", "--name-only", "-z", baseCommit, "--"], { cwd }),
+    git(["diff", "--no-renames", "--name-only", "-z", baseCommit, "--"], { cwd }),
   );
 
   // Non-ignored untracked files
@@ -1173,9 +1182,9 @@ function restoreIndex(cwd, canonicalBase) {
     );
   }
 
-  // Verify index clean
+  // Verify index clean (--no-renames: deterministic rename-free path-set form)
   const stagedAfter = parseNul(
-    git(["diff", "--name-only", "--cached", "-z"], { cwd }),
+    git(["diff", "--no-renames", "--name-only", "--cached", "-z"], { cwd }),
   );
   if (stagedAfter.length > 0) {
     throw new DeliveryError(
@@ -1208,9 +1217,9 @@ function rollbackToBase(cwd, canonicalBase) {
     );
   }
 
-  // Re-verify: index must be clean
+  // Re-verify: index must be clean (--no-renames: deterministic rename-free form)
   const stagedAfter = parseNul(
-    git(["diff", "--name-only", "--cached", "-z"], { cwd }),
+    git(["diff", "--no-renames", "--name-only", "--cached", "-z"], { cwd }),
   );
   if (stagedAfter.length > 0) {
     throw new DeliveryError(
@@ -1546,9 +1555,10 @@ function verifyPostCommitIntegrity(cwd, candidateCommit, canonicalBase, expected
     );
   }
 
-  // 5. Committed files must exactly equal inspected changedFiles
+  // 5. Committed files must exactly equal inspected changedFiles (--no-renames:
+  //    raw committed path identity, same rename-free contract as staging)
   const committedFiles = parseNul(
-    git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"], { cwd }),
+    git(["diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", "-z", "HEAD"], { cwd }),
   ).sort();
   const changedSorted = [...changedFiles].sort();
   if (
@@ -1626,8 +1636,14 @@ export function packageDelivery(input) {
   // 2. Stage exact inspected authorized paths
   git(["add", "-A", "--", ...changedFiles], { cwd });
 
-  // 3. Re-read staged paths and require exact set equality
-  const staged = parseNul(git(["diff", "--name-only", "--cached", "-z"], { cwd }));
+  // 3. Re-read staged paths and require exact set equality. --no-renames is
+  //    REQUIRED here: with rename detection on (diff.renames defaults to true),
+  //    a deleted old file + a highly similar added new file collapse into one
+  //    rename pair, and --name-only lists only the destination — so the staged
+  //    set would drop the raw deleted source and fail exact equality with
+  //    inspected changedFiles (staging_mismatch) even though every changed
+  //    path is authorized. Delivery path identity is raw, not rename-derived.
+  const staged = parseNul(git(["diff", "--no-renames", "--name-only", "--cached", "-z"], { cwd }));
   const stagedSet = new Set(staged);
   const changedSet = new Set(changedFiles);
   if (stagedSet.size !== changedSet.size ||
@@ -1825,9 +1841,11 @@ function recoverDeliveryCommit(input) {
     throw new DeliveryError("artifact_mismatch", `expected 1 commit in base..HEAD, got ${count}`);
   }
 
-  // Committed files (exact object query).
+  // Committed files (exact object query). --no-renames: raw committed path
+  // identity, so a recovered split still checks BOTH deleted source and added
+  // destination against allowedPaths below.
   const committedFiles = parseNul(
-    git(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", canonicalHead], { cwd }),
+    git(["diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", "-z", canonicalHead], { cwd }),
   ).sort();
   const disallowed = committedFiles.filter(
     (p) => !isPathAllowed(p, validated.allowedPaths),

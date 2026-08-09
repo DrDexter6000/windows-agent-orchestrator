@@ -1739,3 +1739,152 @@ test("M12-6-FR04-09: detectAbsolutePathLiteral does NOT flag relative/URL/flag v
   assert.equal(detectAbsolutePathLiteral("echo a;b"), null);
   assert.equal(detectAbsolutePathLiteral("note=x:y"), null);
 });
+
+// ===== 2E Tests: Rename-detection path identity (M12 regression) =====
+//
+// Retained continuation worktrees frequently SPLIT delivery content: an old
+// monolithic file is deleted and several highly similar files are added.
+// inspectDelivery records the raw deleted old paths (tracked diff vs base)
+// plus the raw untracked new paths (ls-files --others). But after staging,
+// Git's rename detection (diff.renames defaults to true) pairs a deleted old
+// file with a highly similar added new file and reports the pair as ONE
+// rename — `git diff --name-only --cached` then lists only the destination,
+// so the staged set no longer equals the inspected set and packaging fails
+// with staging_mismatch even though every changed path is authorized.
+//
+// Delivery path identity MUST be raw repository path identity, independent of
+// Git rename heuristics or configuration: a rename or split must still check
+// BOTH the deleted source and the added destination against allowedPaths.
+// This section pins that contract. diff.renames=true is forced repo-locally so
+// the regression is deterministic even when the machine's global config
+// disables rename detection; --no-renames on every delivery path-set read
+// overrides it.
+
+/** Monolithic test body used as a rename candidate (high similarity). */
+const MONO_ALPHA = [
+  "import { describe, it } from 'node:test';",
+  "import assert from 'node:assert/strict';",
+  "describe('monolithic alpha suite', () => {",
+  "  it('verifies the alpha core invariant', () => {",
+  "    assert.equal(1 + 1, 2);",
+  "  });",
+  "});",
+].join("\n") + "\n";
+
+/** Second body with a distinct core so cross-pairing cannot outrank same-body pairing. */
+const MONO_BETA = [
+  "import { describe, it } from 'node:test';",
+  "import assert from 'node:assert/strict';",
+  "describe('monolithic beta suite', () => {",
+  "  it('verifies the beta schema round-trip', () => {",
+  "    const value = { id: 7, label: 'seven' };",
+  "    assert.equal(value.id, 7);",
+  "  });",
+  "});",
+].join("\n") + "\n";
+
+/** Repo whose base contains two monolithic test files with rename detection forced on. */
+async function makeRenameRepo() {
+  const dir = await mkdtemp(join(tmpdir(), "wao-renam-"));
+  execSync("git init -b main", { cwd: dir, stdio: "ignore" });
+  execSync('git config user.email "test@test"', { cwd: dir, stdio: "ignore" });
+  execSync('git config user.name "test"', { cwd: dir, stdio: "ignore" });
+  // Force rename detection repo-locally: without --no-renames, git diff
+  // collapses a delete + highly-similar add into a single rename pair.
+  // Repo-local config makes the regression deterministic independent of the
+  // machine's global diff.renames setting (which --no-renames overrides).
+  execSync("git config diff.renames true", { cwd: dir, stdio: "ignore" });
+  await mkdir(join(dir, "src"), { recursive: true });
+  await writeFile(join(dir, "src", "mono_alpha.test.js"), MONO_ALPHA);
+  await writeFile(join(dir, "src", "mono_beta.test.js"), MONO_BETA);
+  await writeFile(join(dir, ".gitignore"), "node_modules/\n*.env\nsecret/\n");
+  execSync("git add .", { cwd: dir, stdio: "ignore" });
+  execSync('git commit -m "init"', { cwd: dir, stdio: "ignore" });
+  const baseCommit = execSync("git rev-parse HEAD", {
+    cwd: dir,
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "ignore"],
+  }).trim();
+  return { repo: dir, baseCommit };
+}
+
+test("2E-01: rename-detection collapse must not mask raw delete+add path identity", async () => {
+  const { repo, baseCommit } = await makeRenameRepo();
+  const wtPath = makeWorktree(repo);
+  try {
+    // Continuation-style split: delete two monolithic tests, add five highly
+    // similar split files (untracked). Every path is under allowed "src".
+    await rm(join(wtPath, "src", "mono_alpha.test.js"));
+    await rm(join(wtPath, "src", "mono_beta.test.js"));
+    await writeFile(join(wtPath, "src", "split_a1.test.js"), MONO_ALPHA + "// split a1\n");
+    await writeFile(join(wtPath, "src", "split_a2.test.js"), MONO_ALPHA + "// split a2\n");
+    await writeFile(join(wtPath, "src", "split_a3.test.js"), MONO_ALPHA + "// split a3\n");
+    await writeFile(join(wtPath, "src", "split_b1.test.js"), MONO_BETA + "// split b1\n");
+    await writeFile(join(wtPath, "src", "split_b2.test.js"), MONO_BETA + "// split b2\n");
+
+    const expected = [
+      "src/mono_alpha.test.js",
+      "src/mono_beta.test.js",
+      "src/split_a1.test.js",
+      "src/split_a2.test.js",
+      "src/split_a3.test.js",
+      "src/split_b1.test.js",
+      "src/split_b2.test.js",
+    ];
+
+    // Pre-fix regression: git diff --name-only --cached collapses the rename
+    // pairs to destinations only -> staged set != inspected set -> staging_mismatch.
+    // Post-fix: raw path identity -> packaging succeeds.
+    const ref = packageDelivery(baseInput(wtPath, baseCommit));
+
+    // changedFiles carries BOTH raw deleted sources and raw added destinations
+    assert.deepEqual(ref.changedFiles, expected);
+    // Committed file identity is the raw path set too (delete + add both present)
+    assert.deepEqual(commitFiles(wtPath, ref.deliveryCommit), expected);
+  } finally {
+    await cleanupRepo(repo);
+  }
+});
+
+test("2E-02: omitting rename destinations or sources from allowedPaths fails disallowed_path", async () => {
+  // Destinations omitted: only the deleted source is allowed — the split
+  // destination is outside allowedPaths and must fail closed.
+  const { repo, baseCommit } = await makeRenameRepo();
+  const wt1 = makeWorktree(repo, RUN_ID);
+  try {
+    await rm(join(wt1, "src", "mono_alpha.test.js"));
+    await writeFile(join(wt1, "src", "split_a1.test.js"), MONO_ALPHA + "// split a1\n");
+    assertDeliveryError(
+      () =>
+        packageDelivery(
+          baseInput(wt1, baseCommit, {
+            allowedPaths: ["src/mono_alpha.test.js"],
+          }),
+        ),
+      "disallowed_path",
+    );
+    assert.equal(getHead(wt1), baseCommit, "no commit may be created for a disallowed path");
+  } finally {
+    await cleanupRepo(repo);
+  }
+
+  // Sources omitted: only the added destination is allowed — the deleted source
+  // is outside allowedPaths and must fail closed (no containment relaxation).
+  const { repo: repo2, baseCommit: base2 } = await makeRenameRepo();
+  const wt2 = makeWorktree(repo2, RUN_ID);
+  try {
+    await rm(join(wt2, "src", "mono_alpha.test.js"));
+    await writeFile(join(wt2, "src", "split_a1.test.js"), MONO_ALPHA + "// split a1\n");
+    assertDeliveryError(
+      () =>
+        inspectDelivery(
+          baseInput(wt2, base2, {
+            allowedPaths: ["src/split_a1.test.js"],
+          }),
+        ),
+      "disallowed_path",
+    );
+  } finally {
+    await cleanupRepo(repo2);
+  }
+});
