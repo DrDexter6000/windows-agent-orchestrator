@@ -91,7 +91,7 @@ import {
 import { projectDeliveryChangedPaths, CHANGED_PATHS_LIMIT, validateProjectedPath } from "../application/deliveryReview.js";
 import { computeCandidateInventory, INVENTORY_PATHS_LIMIT } from "../application/candidateInventory.js";
 import { stopRun } from "../application/runStop.js";
-import { listRuns } from "../application/runList.js";
+import { listRuns, ACTIVITY_STATUSES, ACTIVITY_BASES } from "../application/runList.js";
 import {
   runWait,
   RUN_WAIT_MIN_MS,
@@ -1742,6 +1742,10 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
   }).strict()).max(ACTIVE_RUNS_CAP).nullable(),
   activeRunCount: z.number().int().nullable(),
   activeRunsTruncated: z.boolean(),
+  // M12-15: count of known non-terminal runs lacking a fresh owner heartbeat,
+  // from the SAME scan that produced activeRuns (lead_preflight does not
+  // rescan). null when the active-run query was unreadable (unknown, NOT 0).
+  unresolvedRunCount: z.number().int().nullable(),
   observations: z.array(z.string().max(512)).max(64),
   warnings: z.array(z.string().max(512)).max(64),
   manualChecks: z.array(z.string().max(512)).max(32),
@@ -1815,9 +1819,18 @@ const RUNS_LIST_OUTPUT = z.object({
     state: z.enum([...RUN_STATES, "unknown"]),
     terminal: z.boolean(),
     updatedAt: z.string().datetime().nullable(),
+    // M12-15: closed-set activity projection. activityStatus=active requires a
+    // known non-terminal transcript + a fresh owner heartbeat; unresolved means
+    // non-terminal without a fresh heartbeat (never inferred failed/stopped);
+    // terminal/unknown are never active. Shared SSOT enums from runList.js.
+    activityStatus: z.enum(ACTIVITY_STATUSES),
+    activityBasis: z.enum(ACTIVITY_BASES),
   })),
   returnedCount: z.number().int(),
   truncated: z.boolean(),
+  // Full-scan count of known non-terminal runs lacking a fresh owner heartbeat
+  // (pre-limit, independent of activeOnly) — so lead_preflight need not rescan.
+  unresolvedCount: z.number().int(),
 });
 
 const RUNS_LIST_ANNOTATIONS = {
@@ -1828,10 +1841,11 @@ const RUNS_LIST_ANNOTATIONS = {
 };
 
 const RUNS_LIST_DESCRIPTION =
-  "List only runs owned by the currently bound workspace. " +
-  "Returns runId, agentId, state, terminal, and updatedAt for each run. " +
-  "Optional activeOnly filters to non-terminal runs; limit caps results (default 50). " +
-  "Read-only, idempotent. No prompts, paths, commands, PIDs, sessions, or excluded-run counts.";
+  "List runs owned by the bound workspace. Each item carries activityStatus/activityBasis: active " +
+  "requires a known non-terminal transcript with a fresh owner heartbeat; unresolved (non-terminal, " +
+  "no fresh heartbeat) is never inferred failed/dead/stopped and is counted in unresolvedCount. " +
+  "activeOnly returns only active runs; limit caps results (default 50). Read-only, idempotent. " +
+  "No prompts, paths, commands, PIDs, or sessions.";
 
 // ===== run_wait (workspace-bound liveness-aware long-poll) constants =====
 
@@ -2832,6 +2846,7 @@ export function createWaoMcpServer({
           activeRuns: null,
           activeRunCount: null,
           activeRunsTruncated: false,
+          unresolvedRunCount: null,
           observations: [],
           warnings: ["lead_preflight could not aggregate — use workspace_status, registry_list, and runs_list directly"],
           manualChecks: [
@@ -3758,9 +3773,12 @@ export function createWaoMcpServer({
             state: r.state,
             terminal: r.terminal,
             updatedAt: r.updatedAt,
+            activityStatus: r.activityStatus,
+            activityBasis: r.activityBasis,
           })),
           returnedCount: result.runs.length,
           truncated: result.matchedCount > result.runs.length,
+          unresolvedCount: typeof result.unresolvedCount === "number" ? result.unresolvedCount : 0,
         };
 
         RUNS_LIST_OUTPUT.parse(payload);

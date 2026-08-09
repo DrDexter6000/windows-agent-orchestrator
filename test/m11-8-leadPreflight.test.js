@@ -16,7 +16,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { aggregateLeadPreflight } from "../src/application/leadPreflight.js";
@@ -618,4 +618,137 @@ test("M11-8-FE4: lead_preflight outputSchema maxItems matches SSOT caps", async 
       assert.equal(activeRunsArr?.maxItems, ACTIVE_RUNS_CAP, `activeRuns.maxItems === ACTIVE_RUNS_CAP (${ACTIVE_RUNS_CAP})`);
     } finally { await client.close(); await server.close(); }
   } finally { cleanupDir(dir); }
+});
+
+// ===== M12-15: stale active-run truth projection =====
+//
+// lead_preflight consumes the single shared listRuns projection (activeOnly:true)
+// and counts ONLY proven-active runs in activeRunCount. Non-terminal runs that
+// lack a fresh owner heartbeat are NOT counted active and are NOT inferred
+// failed/dead/stopped — they are exposed as unresolvedRunCount plus an advisory
+// observation, so an empty activeRuns list is never mistaken for a clean
+// workspace. These tests drive the aggregator's listRunsFn directly; the
+// matching listRuns behavior is pinned in runsList*.test.js.
+
+const PRE_NOW = 1_700_000_000_000;
+
+function preEvents(runId, cwd) {
+  const ts = "2026-07-01T00:00:00Z";
+  return [
+    { type: "run.started", runId, agentId: "w", ts, seq: 1 },
+    { type: "run.background_submitted", runId, agentId: "w", cwd, background: true, ts, seq: 2 },
+    { type: "run.state_change", runId, agentId: "w", from: "pending", to: "running", reason: "go", ts, seq: 3 },
+  ];
+}
+
+function preVerifier(authorizedRoot) {
+  return (events) => {
+    const cwd = events.find((e) => e.type === "run.background_submitted")?.cwd;
+    if (cwd !== authorizedRoot) throw new Error("workspace mismatch");
+    return { authorized: true, ownershipCwd: cwd };
+  };
+}
+
+// PRE-01: activeRunCount counts only proven active; unresolvedRunCount exposed separately.
+test("M12-15-PRE-01: activeRunCount counts only proven active; unresolvedRunCount exposed", async () => {
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "a".repeat(40), dirty: false },
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => [],
+    listRunsFn: async () => ({
+      runs: [{
+        runId: "run_active", agentId: "w", state: "running", terminal: false, updatedAt: null,
+        activityStatus: "active", activityBasis: "fresh_owner_heartbeat",
+      }],
+      matchedCount: 1,
+      unresolvedCount: 4, // the four stale June transcripts
+    }),
+  });
+  assert.equal(result.activeRunCount, 1, "only proven-active runs count");
+  assert.equal(result.unresolvedRunCount, 4, "unresolved runs exposed separately (not counted active)");
+  assert.equal(result.activeRuns.length, 1);
+  assert.equal(result.checkStatus.activeRuns, "observed");
+});
+
+// PRE-02: unresolved runs produce an advisory observation (omitted + do not prove failure/stop).
+test("M12-15-PRE-02: unresolved runs → advisory observation (omitted from activeRuns; not failure/stop)", async () => {
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "b".repeat(40), dirty: false },
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => [],
+    listRunsFn: async () => ({ runs: [], matchedCount: 0, unresolvedCount: 4 }),
+  });
+  assert.equal(result.activeRunCount, 0, "no proven-active run");
+  assert.equal(result.unresolvedRunCount, 4);
+  assert.ok(result.observations.some((o) => /unresolved/i.test(o)), "observation mentions unresolved");
+  assert.ok(
+    result.observations.some((o) => /omitted from activeRuns/i.test(o) && /do not prove failure or stop/i.test(o)),
+    "observation states unresolved runs were omitted and do not prove failure or stop",
+  );
+});
+
+// PRE-03: no unresolved advisory when unresolvedRunCount is 0.
+test("M12-15-PRE-03: no unresolved advisory observation when unresolvedRunCount is 0", async () => {
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "c".repeat(40), dirty: false },
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => [],
+    listRunsFn: async () => ({ runs: [], matchedCount: 0, unresolvedCount: 0 }),
+  });
+  assert.equal(result.unresolvedRunCount, 0);
+  assert.ok(!result.observations.some((o) => /unresolved/i.test(o)), "no unresolved advisory when zero");
+});
+
+// PRE-04: listRuns failure → activeRuns=null + unresolvedRunCount=null (unknown, not faked 0).
+test("M12-15-PRE-04: listRuns failure → activeRuns=null + unresolvedRunCount=null (unknown, not faked 0)", async () => {
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "d".repeat(40), dirty: false },
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => [],
+    listRunsFn: async () => { throw new Error("simulated runs_list failure"); },
+  });
+  assert.equal(result.activeRuns, null);
+  assert.equal(result.activeRunCount, null);
+  assert.equal(result.unresolvedRunCount, null, "unknown is null, NOT faked 0");
+  assert.equal(result.checkStatus.activeRuns, "unknown");
+});
+
+// PRE-05: end-to-end composition with the REAL listRuns — stale June runs are
+// unresolved, only the fresh-heartbeat run counts as active.
+test("M12-15-PRE-05: real listRuns composition — activeRunCount excludes stale June runs", async () => {
+  const { listRuns } = await import("../src/application/runList.js");
+  const ROOT = "C:\\Target\\Repo";
+  const active = "run_20260601120000001juneA";
+  const stale = "run_20260601120000002juneB";
+  const runDir = mkdtempSync(join(tmpdir(), "wao-m1215-pre05-"));
+  try {
+    writeFileSync(join(runDir, `${active}.jsonl`), "", "utf8");
+    writeFileSync(join(runDir, `${stale}.jsonl`), "", "utf8");
+    const eventsByFile = new Map([
+      [`${active}.jsonl`, preEvents(active, ROOT)],
+      [`${stale}.jsonl`, preEvents(stale, ROOT)],
+    ]);
+    const livenessMap = {
+      [active]: { fresh: true, heartbeatAt: PRE_NOW - 500 },
+      [stale]: { fresh: false, heartbeatAt: PRE_NOW - 99999 },
+    };
+    const livenessFn = (runDir, runId, now) => livenessMap[runId] ?? { fresh: false, heartbeatAt: null };
+    const result = await aggregateLeadPreflight({
+      workspaceBinding: { bound: true, source: "lead_session", root: ROOT, gitHead: "e".repeat(40), dirty: false },
+      registryPath: "/r.json", runDir,
+      getRegistryInventoryFn: async () => [],
+      listRunsFn: (args) => listRuns({
+        ...args,
+        nowMs: PRE_NOW,
+        checkLivenessFn: livenessFn,
+        readTranscriptFn: async (p) => eventsByFile.get(basename(p)),
+        createWorkspaceVerifierFn: () => preVerifier(ROOT),
+      }),
+    });
+    assert.equal(result.activeRunCount, 1, "only the fresh-heartbeat run is active");
+    assert.equal(result.unresolvedRunCount, 1, "the stale June run is unresolved");
+    assert.equal(result.activeRuns.length, 1);
+    assert.equal(result.activeRuns[0].runId, active);
+    assert.ok(result.observations.some((o) => /unresolved/i.test(o)), "advisory observation present");
+  } finally { cleanupDir(runDir); }
 });

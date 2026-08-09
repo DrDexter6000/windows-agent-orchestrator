@@ -21,6 +21,20 @@ import { readdirSync, existsSync } from "node:fs";
 import { readTranscript, findState, RUN_STATES, TERMINAL_STATES } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
 import { createRunWorkspaceVerifier } from "./runWorkspaceOwnership.js";
+import { checkOwnerLiveness, DEFAULT_OWNER_LIVENESS_THRESHOLD_MS } from "./ownerLiveness.js";
+
+// M12-15: closed-set activity projection. A run is reported activityStatus=active
+// ONLY when a known non-terminal transcript has a FRESH owner heartbeat. A
+// non-terminal run without a fresh heartbeat is unresolved — NEVER inferred
+// failed/dead/stopped, and still discoverable in the ordinary list. These
+// enums are the single SSOT for the MCP output schemas (server.js imports them).
+export const ACTIVITY_STATUSES = ["terminal", "active", "unresolved", "unknown"];
+export const ACTIVITY_BASES = [
+  "terminal_state",
+  "fresh_owner_heartbeat",
+  "no_fresh_owner_heartbeat",
+  "unknown_state",
+];
 
 /**
  * Scan runDir for run_*.jsonl files (excludes wf_* workflow transcripts).
@@ -79,11 +93,18 @@ function summarizeRun(runId, events, knownAgentIds, input) {
  * @param {boolean} [input.activeOnly] — only non-terminal runs
  * @param {string} [input.authorizedWorkspaceRoot] — MCP workspace binding
  * @param {string[]} [input.knownAgentIds] — for agentId validation (default [])
+ * @param {number} [input.nowMs] — activity snapshot timestamp (default Date.now())
+ * @param {Function} [input.checkLivenessFn] — ownerLiveness injection (tests)
+ * @param {number} [input.livenessThresholdMs] — heartbeat staleness threshold
+ *   (default DEFAULT_OWNER_LIVENESS_THRESHOLD_MS)
  * @param {Function} [input.readTranscriptFn] — test injection
  * @param {Function} [input.createWorkspaceVerifierFn] — test injection
- * @returns {Promise<{runs: Array, matchedCount: number}>}
- *   - runs: array of {runId, agentId, state, terminal, updatedAt}
- *   - matchedCount: number of eligible runs BEFORE limit (for MCP truncation)
+ * @returns {Promise<{runs: Array, matchedCount: number, unresolvedCount: number}>}
+ *   - runs: array of {runId, agentId, state, terminal, updatedAt,
+ *             activityStatus, activityBasis}
+ *   - matchedCount: eligible runs AFTER the activeOnly filter, BEFORE the limit
+ *   - unresolvedCount: full-scan count of known non-terminal runs lacking a
+ *     fresh owner heartbeat (pre-limit, independent of activeOnly)
  */
 export async function listRuns(input) {
   const {
@@ -93,8 +114,20 @@ export async function listRuns(input) {
     activeOnly = false,
     authorizedWorkspaceRoot,
     knownAgentIds = [],
+    nowMs,
+    checkLivenessFn,
+    livenessThresholdMs,
   } = input;
   const _readTranscript = input.readTranscriptFn ?? readTranscript;
+  // M12-15: one nowMs snapshot per call (truthful "is it active RIGHT NOW").
+  // Tests inject a fixed value for determinism; real callers omit it and get the
+  // wall clock. ownerLiveness is the ONLY freshness SSOT — invoked once per
+  // eligible (known non-terminal, in-workspace) run with the default threshold.
+  const now = typeof nowMs === "number" ? nowMs : Date.now();
+  const livenessThreshold = typeof livenessThresholdMs === "number"
+    ? livenessThresholdMs
+    : DEFAULT_OWNER_LIVENESS_THRESHOLD_MS;
+  const _checkLiveness = checkLivenessFn ?? checkOwnerLiveness;
 
   const resolvedRunDir = resolve(runDir);
   const files = scanRunFiles(resolvedRunDir);
@@ -111,6 +144,7 @@ export async function listRuns(input) {
   }
 
   const summaries = [];
+  let unresolvedCount = 0;
   for (const file of files) {
     const runId = file.replace(/\.jsonl$/, "");
     // Validate runId from filename
@@ -139,15 +173,48 @@ export async function listRuns(input) {
     const rawAgentId = events[0]?.agentId;
     if (agentId && rawAgentId !== agentId) continue;
 
-    // Active-only filter: only return known non-terminal states.
-    // "unknown" state is NOT provably active — exclude it for honesty.
-    if (activeOnly) {
-      const state = findState(events);
-      if (!RUN_STATES.includes(state) || TERMINAL_STATES.includes(state)) continue;
+    // M12-15: closed-set activity classification. Computed once per run AFTER
+    // workspace + agent filtering. Only known non-terminal runs trigger the
+    // ownerLiveness SSOT (once each); terminal and unknown-state runs are
+    // classified WITHOUT a heartbeat check and are NEVER reported active.
+    const state = findState(events);
+    const safeState = RUN_STATES.includes(state) ? state : "unknown";
+    const isTerminal = TERMINAL_STATES.includes(safeState);
+    let activityStatus;
+    let activityBasis;
+    if (isTerminal) {
+      activityStatus = "terminal";
+      activityBasis = "terminal_state";
+    } else if (safeState === "unknown") {
+      // Fail-closed: an unrecognized state is NOT provably active.
+      activityStatus = "unknown";
+      activityBasis = "unknown_state";
+    } else {
+      // Known non-terminal: require a FRESH owner heartbeat to be active.
+      // A stale / missing / corrupt heartbeat → unresolved, NEVER inferred
+      // failed/dead/stopped (the run may legitimately still be running).
+      const liveness = _checkLiveness(resolvedRunDir, runId, now, livenessThreshold);
+      if (liveness && liveness.fresh) {
+        activityStatus = "active";
+        activityBasis = "fresh_owner_heartbeat";
+      } else {
+        activityStatus = "unresolved";
+        activityBasis = "no_fresh_owner_heartbeat";
+        unresolvedCount += 1;
+      }
     }
 
+    // activeOnly returns ONLY proven-active runs. Terminal / unknown /
+    // unresolved runs are excluded here — but unresolved stays discoverable via
+    // the ordinary list and is counted in unresolvedCount (full scan, pre-limit,
+    // independent of activeOnly).
+    if (activeOnly && activityStatus !== "active") continue;
+
     const summary = summarizeRun(runId, events, knownAgentIds, input);
-    if (summary) summaries.push(summary);
+    if (!summary) continue;
+    summary.activityStatus = activityStatus;
+    summary.activityBasis = activityBasis;
+    summaries.push(summary);
   }
 
   // Sort by updatedAt descending; null/invalid timestamps go last;
@@ -167,5 +234,5 @@ export async function listRuns(input) {
     summaries.length = limit;
   }
 
-  return { runs: summaries, matchedCount };
+  return { runs: summaries, matchedCount, unresolvedCount };
 }

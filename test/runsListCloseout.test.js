@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { JsonlTranscript } from "../src/transcript.js";
@@ -126,6 +126,10 @@ test("ACTIVEONLY-01: unknown state run excluded by activeOnly", async () => {
     const { listRuns } = await import("../src/application/runList.js");
     const result = await listRuns({
       runDir, activeOnly: true, authorizedWorkspaceRoot: dir, knownAgentIds: ["coder_low"],
+      // M12-15: a running run is active only with a FRESH owner heartbeat.
+      // Inject a fresh liveness result so run_active is provably active.
+      nowMs: 1_700_000_000_000,
+      checkLivenessFn: () => ({ fresh: true, heartbeatAt: 1_700_000_000_000 - 1000 }),
     });
     const ids = result.runs.map((r) => r.runId);
     assert.ok(ids.includes("run_active"), "known active run must be returned");
@@ -167,9 +171,125 @@ test("ACTIVEONLY-03: terminal states excluded by activeOnly", async () => {
     const { listRuns } = await import("../src/application/runList.js");
     const result = await listRuns({
       runDir, activeOnly: true, authorizedWorkspaceRoot: dir, knownAgentIds: ["coder_low"],
+      // M12-15: a running run is active only with a FRESH owner heartbeat.
+      // Inject a fresh liveness result so run_active is provably active.
+      nowMs: 1_700_000_000_000,
+      checkLivenessFn: () => ({ fresh: true, heartbeatAt: 1_700_000_000_000 - 1000 }),
     });
     const ids = result.runs.map((r) => r.runId);
     assert.ok(ids.includes("run_active"), "running must be returned");
     assert.ok(!ids.includes("run_done"), "completed must be excluded");
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});
+
+// ── M12-15: real ownerLiveness SSOT integration (deterministic via nowMs) ────
+//
+// Proves the REAL checkOwnerLiveness SSOT (no injected checker) classifies
+// fresh / stale / missing / corrupt heartbeat files correctly under a single
+// injected nowMs snapshot. Transcripts + workspace proof are injected; only the
+// heartbeat files are real on disk so the SSOT's existsSync/readFileSync path
+// is exercised truthfully.
+
+const CLOSEOUT_NOW = 1_700_000_000_000;
+
+function closeoutReader(eventsByFile) {
+  return async (filePath) => eventsByFile.get(basename(filePath));
+}
+
+function closeoutEvents(runId, cwd) {
+  const ts = "2026-07-01T00:00:00Z";
+  return [
+    { type: "run.started", runId, agentId: "coder_low", ts, seq: 1 },
+    { type: "run.background_submitted", runId, agentId: "coder_low", cwd, background: true, ts, seq: 2 },
+    { type: "run.state_change", runId, agentId: "coder_low", from: "pending", to: "running", reason: "go", ts, seq: 3 },
+  ];
+}
+
+function closeoutVerifier(authorizedRoot) {
+  return (events) => {
+    const cwd = events.find((e) => e.type === "run.background_submitted")?.cwd;
+    if (cwd !== authorizedRoot) throw new Error("workspace mismatch");
+    return { authorized: true, ownershipCwd: cwd };
+  };
+}
+
+test("M12-15-REAL-01: real ownerLiveness — fresh/stale/missing/corrupt heartbeat classified truthfully", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "wao-m1215-real-01-"));
+  const ROOT = "C:\\Target\\Repo";
+  const fresh = "run_20260701170000040alpha";
+  const stale = "run_20260701170000041bravo";
+  const missing = "run_20260701170000042charlie";
+  const corrupt = "run_20260701170000043delta";
+  for (const id of [fresh, stale, missing, corrupt]) {
+    writeFileSync(join(runDir, `${id}.jsonl`), "", "utf8");
+  }
+  // Real heartbeat files — exactly what backgroundRunner writes to .owner-<runId>.
+  writeFileSync(join(runDir, `.owner-${fresh}`), JSON.stringify({ heartbeatAt: CLOSEOUT_NOW - 1000 }));
+  writeFileSync(join(runDir, `.owner-${stale}`), JSON.stringify({ heartbeatAt: CLOSEOUT_NOW - 99999 }));
+  writeFileSync(join(runDir, `.owner-${corrupt}`), "NOT VALID JSON");
+  // `missing` gets NO heartbeat file.
+  const eventsByFile = new Map([
+    [`${fresh}.jsonl`, closeoutEvents(fresh, ROOT)],
+    [`${stale}.jsonl`, closeoutEvents(stale, ROOT)],
+    [`${missing}.jsonl`, closeoutEvents(missing, ROOT)],
+    [`${corrupt}.jsonl`, closeoutEvents(corrupt, ROOT)],
+  ]);
+  try {
+    const { listRuns } = await import("../src/application/runList.js");
+    const result = await listRuns({
+      runDir, nowMs: CLOSEOUT_NOW,
+      readTranscriptFn: closeoutReader(eventsByFile),
+      createWorkspaceVerifierFn: () => closeoutVerifier(ROOT),
+      knownAgentIds: ["coder_low"],
+    });
+    const byId = new Map(result.runs.map((r) => [r.runId, r]));
+    assert.equal(byId.get(fresh).activityStatus, "active", "fresh heartbeat → active");
+    assert.equal(byId.get(fresh).activityBasis, "fresh_owner_heartbeat");
+    assert.equal(byId.get(stale).activityStatus, "unresolved", "stale heartbeat → unresolved");
+    assert.equal(byId.get(missing).activityStatus, "unresolved", "missing heartbeat → unresolved");
+    assert.equal(byId.get(corrupt).activityStatus, "unresolved", "corrupt heartbeat → unresolved");
+    assert.equal(result.unresolvedCount, 3, "stale + missing + corrupt are all unresolved");
+
+    // activeOnly must surface ONLY the one provably-active run.
+    const activeOnly = await listRuns({
+      runDir, activeOnly: true, nowMs: CLOSEOUT_NOW,
+      readTranscriptFn: closeoutReader(eventsByFile),
+      createWorkspaceVerifierFn: () => closeoutVerifier(ROOT),
+      knownAgentIds: ["coder_low"],
+    });
+    assert.deepEqual(activeOnly.runs.map((r) => r.runId), [fresh]);
+    assert.equal(activeOnly.matchedCount, 1);
+    assert.equal(activeOnly.unresolvedCount, 3);
+  } finally { rmSync(runDir, { recursive: true, force: true }); }
+});
+
+test("M12-15-REAL-02: a legitimately long-running run with a fresh heartbeat stays active (never silently terminal/hidden)", async () => {
+  // Independent-review question guard: a long-running / sleeping run MUST NOT be
+  // silently labeled terminal/failed/hidden. As long as the owner heartbeat is
+  // fresh, it is active — regardless of how long the run has been running.
+  const runDir = mkdtempSync(join(tmpdir(), "wao-m1215-real-02-"));
+  const ROOT = "C:\\Target\\Repo";
+  const longRun = "run_20260601120000000june"; // a "historical June" run id
+  writeFileSync(join(runDir, `${longRun}.jsonl`), "", "utf8");
+  // Heartbeat updated 1 second ago — the runner is alive RIGHT NOW.
+  writeFileSync(join(runDir, `.owner-${longRun}`), JSON.stringify({ heartbeatAt: CLOSEOUT_NOW - 1000 }));
+  const eventsByFile = new Map([[`${longRun}.jsonl`, closeoutEvents(longRun, ROOT)]]);
+  try {
+    const { listRuns } = await import("../src/application/runList.js");
+    const ordinary = await listRuns({
+      runDir, nowMs: CLOSEOUT_NOW,
+      readTranscriptFn: closeoutReader(eventsByFile),
+      createWorkspaceVerifierFn: () => closeoutVerifier(ROOT),
+      knownAgentIds: ["coder_low"],
+    });
+    assert.equal(ordinary.runs[0].activityStatus, "active", "fresh heartbeat → active (not hidden)");
+    assert.equal(ordinary.runs[0].activityBasis, "fresh_owner_heartbeat");
+    const activeOnly = await listRuns({
+      runDir, activeOnly: true, nowMs: CLOSEOUT_NOW,
+      readTranscriptFn: closeoutReader(eventsByFile),
+      createWorkspaceVerifierFn: () => closeoutVerifier(ROOT),
+      knownAgentIds: ["coder_low"],
+    });
+    assert.deepEqual(activeOnly.runs.map((r) => r.runId), [longRun], "discoverable as active");
+  } finally { rmSync(runDir, { recursive: true, force: true }); }
 });

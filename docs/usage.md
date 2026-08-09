@@ -723,6 +723,9 @@ annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:true, o
   "workspace": { "bound": true, "source": "lead_session", "gitHead": "abc...", "dirty": false },
   "workers": [ { "id": "...", "backend": "...", "model": "...", "certification": "certified", "credentialAvailability": "available", "providerReadiness": { "configurationStatus": "configured", "authenticationStatus": "unknown", "entitlementStatus": "unknown", "liveCheckStatus": "not_checked", "credentialAvailability": "available" } } ],
   "activeRuns": [ { "runId": "...", "agentId": "...", "state": "running", "terminal": false, "updatedAt": "..." } ],
+  "activeRunCount": 1,
+  "activeRunsTruncated": false,
+  "unresolvedRunCount": 0,
   "observations": ["..."], "warnings": ["..."],
   "manualChecks": ["workspace_status — ...", "registry_list — ...", "runs_list — ..."],
   "checkStatus": { "workspace": "observed", "workers": "observed", "activeRuns": "observed" },
@@ -731,6 +734,8 @@ annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:true, o
 ```
 
 不返回 `PASS`/`FAIL`；check-level 状态为 `observed`/`warning`/`unknown`。`manualChecks` 指向原始 MCP 工具，允许 Lead 独立复核（与聚合结论不同时，Lead 可依据直接证据继续并记录 friction）。Active run、conditional worker、dirty workspace 只是事实，不自动禁止派发。
+
+**M12-15 stale active-run truth**：`activeRuns`/`activeRunCount` 只计**经证明 active** 的 run——即 transcript 为已知非终态**且**有 fresh owner heartbeat（`ownerLiveness` SSOT，默认 10s 阈值）。一个非终态但缺少 fresh heartbeat 的 run（例如历史 6 月的 stale transcript）**不算** active，但也**绝不**据此推断它 failed/dead/stopped——它仍可能在长时间运行/休眠。这类 run 计入 `unresolvedRunCount`（与 `activeRuns` 同一次扫描/快照，Lead 无需重新扫描），并在 `unresolvedRunCount > 0` 时追加一条 advisory observation（说明这些 run 被排除出 `activeRuns`、不证明失败或停止，请用 `runs_list` 独立查看）。因此 `activeRunCount=0` 永远不应被误读为"工作区干净"——当 `unresolvedRunCount > 0` 时尤其如此。active-run 查询不可读时 `activeRuns`/`activeRunCount`/`unresolvedRunCount` 均为 `null`（unknown，绝不伪造为 0）。
 
 ### 项目级 Workspace Activation（M10 P0-1，**可选** Human Owner ops 命令）
 
@@ -1165,21 +1170,27 @@ annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:false, o
 { "activeOnly": false, "limit": 50 }
 ```
 
-两个字段均可选。`activeOnly`（bool，默认 `false`）：只返回未到终态的 run。`limit`（整数 1..100，默认 `50`）：返回条目数上限。模型**不能**传 `runDir`、registry、`agentId`、`cwd`、`workspaceRoot` 等 server-owned 配置——workspace 绑定由 server 解析，不能通过 tool argument 提供。
+两个字段均可选。`activeOnly`（bool，默认 `false`）：只返回**经证明 active** 的 run——即 transcript 为已知非终态**且**有 fresh owner heartbeat（`ownerLiveness` SSOT，默认 10s 阈值）。注意（M12-15）：单纯"未到终态"**不足以**算 active；一个非终态但缺少 fresh heartbeat 的 run 不在 `activeOnly` 结果里，但也**绝不**据此推断它 failed/dead/stopped（仍可能长时间运行/休眠），它计入 `unresolvedCount` 并仍出现在普通（非 `activeOnly`）列表中。`limit`（整数 1..100，默认 `50`）：返回条目数上限。模型**不能**传 `runDir`、registry、`agentId`、`cwd`、`workspaceRoot` 等 server-owned 配置——workspace 绑定由 server 解析，不能通过 tool argument 提供。
 
-- **安全有界输出**（只返回机器字段 + 终态事实，不含路径/session/prompt）：
+- **安全有界输出**（只返回机器字段 + 终态/活动事实，不含路径/session/prompt）：
 
 ```json
 {
   "runs": [
-    { "runId": "run_...", "agentId": "coder_low", "state": "running", "terminal": false, "updatedAt": "2026-07-15T00:00:10.000Z" }
+    { "runId": "run_...", "agentId": "coder_low", "state": "running", "terminal": false, "updatedAt": "2026-07-15T00:00:10.000Z", "activityStatus": "active", "activityBasis": "fresh_owner_heartbeat" }
   ],
   "returnedCount": 1,
-  "truncated": false
+  "truncated": false,
+  "unresolvedCount": 0
 }
 ```
 
-`runs` 每个元素只含 `runId`/`agentId`/`state`/`terminal`/`updatedAt`。`returnedCount` = `runs.length`；`truncated` 表示因 `limit` 截断而仍有更多匹配 run。**绝不返回**：PID、进程路径、session id、argv、command、绝对路径、prompt、环境变量、messages、evidence 或异常 message/stack。失败返回固定安全文案 `runs_list failed`。
+`runs` 每个元素含 `runId`/`agentId`/`state`/`terminal`/`updatedAt` 以及 M12-15 的闭环活动投影字段：
+
+- `activityStatus` ∈ `terminal` | `active` | `unresolved` | `unknown`
+- `activityBasis` ∈ `terminal_state` | `fresh_owner_heartbeat` | `no_fresh_owner_heartbeat` | `unknown_state`
+
+`active` 要求已知非终态 + fresh owner heartbeat；`unresolved` = 非终态但无 fresh heartbeat（**绝不**等同于 failed/dead/stopped）；终态与无法识别的 state 永不为 `active`。`returnedCount` = `runs.length`；`truncated` 表示因 `limit` 截断而仍有更多匹配 run；`unresolvedCount` = 全量扫描中已知非终态但缺 fresh heartbeat 的 run 数（受 `limit` 之前、与 `activeOnly` 无关），供 `lead_preflight` 复用而无需重新扫描。**绝不返回**：PID、进程路径、session id、argv、command、绝对路径、prompt、环境变量、messages、evidence 或异常 message/stack。失败返回固定安全文案 `runs_list failed`。
 
 一次 `runs_list` / `lead_preflight` 查询会先证明授权 workspace，再按查询范围缓存每个不同 ownership cwd 的 Git 顶层证明（包括 fail-closed 的不可证明结果）；不会为同一项目的每个历史 run 重复启动 Git 证明进程。缓存只活在单次查询内，不跨调用持久化，也不改变 workspace 隔离、过滤或错误投影。
 

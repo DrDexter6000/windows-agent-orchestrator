@@ -217,6 +217,10 @@ export async function aggregateLeadPreflight({
   let activeRuns = null;
   let activeRunCount = null;
   let activeRunsTruncated = false;
+  // M12-15: unresolvedRunCount comes from the SAME listRuns scan/snapshot that
+  // produced activeRuns — the Lead must NOT rescan. null = unknown (unreadable),
+  // NEVER faked as 0, so "could not confirm" stays distinct from "confirmed none".
+  let unresolvedRunCount = null;
   if (workspace && workspace.bound && typeof listRunsFn === "function") {
     try {
       const result = await listRunsFn({
@@ -228,6 +232,10 @@ export async function aggregateLeadPreflight({
       });
       const all = result.runs ?? [];
       activeRunCount = typeof result.matchedCount === "number" ? result.matchedCount : all.length;
+      unresolvedRunCount = typeof result.unresolvedCount === "number" ? result.unresolvedCount : null;
+      // Keep activeRuns entries minimal — no per-run activityStatus. The closed-set
+      // activity projection lives on runs_list summaries; here we only report the
+      // proven-active count + the bounded run list.
       activeRuns = all.slice(0, ACTIVE_RUNS_CAP).map((r) => ({
         runId: r.runId,
         agentId: r.agentId,
@@ -240,9 +248,20 @@ export async function aggregateLeadPreflight({
       if (activeRunCount > 0) {
         observations.push(`${activeRunCount} active run(s) in this workspace (reported only; not auto-stopped)`);
       }
+      // Advisory: a non-terminal run without a fresh owner heartbeat was omitted
+      // from activeRuns. It does NOT prove failure or stop — it may still be a
+      // legitimately long-running/sleeping run. Surfaced so an empty activeRuns
+      // list is never mistaken for a clean workspace.
+      if (typeof unresolvedRunCount === "number" && unresolvedRunCount > 0) {
+        observations.push(
+          `${unresolvedRunCount} unresolved non-terminal run(s) were omitted from activeRuns — ` +
+          "they lack a fresh owner heartbeat and do not prove failure or stop; use runs_list to inspect them",
+        );
+      }
     } catch {
       checkStatus.activeRuns = "unknown";
       warnings.push("active-run query could not be read — use runs_list to check directly");
+      // unresolvedRunCount stays null (unknown, NOT faked 0).
     }
   } else if (workspace && !workspace.bound) {
     checkStatus.activeRuns = "unknown";
@@ -272,6 +291,7 @@ export async function aggregateLeadPreflight({
     activeRuns,
     activeRunCount,
     activeRunsTruncated,
+    unresolvedRunCount,
     observations,
     warnings,
     manualChecks,

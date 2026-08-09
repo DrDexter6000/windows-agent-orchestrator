@@ -127,6 +127,10 @@ test("SMOKE: runs_list isolation + restart recovery + bytes unchanged", async ()
     }
 
     // --- activeOnly filter ---
+    // M12-15: activeOnly returns only runs with a FRESH owner heartbeat. Write a
+    // real .owner-<runId> heartbeat (the same file backgroundRunner writes) so
+    // run_a_run is provably active under the real checkOwnerLiveness SSOT.
+    writeFileSync(join(runDir, ".owner-run_a_run"), JSON.stringify({ heartbeatAt: Date.now() }), "utf8");
     const server3 = createWaoMcpServer({
       registryPath: join(process.cwd(), "config", "agents.json"),
       runDir, workspaceRoot: dirA,
