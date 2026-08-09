@@ -441,7 +441,14 @@ const RED_23_WIRE = 75492;
 // No new tools, no validation removed. The measured wire grew +602 bytes over
 // M12-12; ceiling re-frozen at the achieved value, still comfortably below the
 // 23-tool baseline.
-const FROZEN_21_WIRE_CEILING = 72235;
+//
+// M12-15 re-baseline: runs_list gained two closed-set per-run activity facts and
+// unresolvedCount; lead_preflight gained unresolvedRunCount. These additive,
+// bounded fields distinguish proven-active runs from historical non-terminal
+// transcripts without hiding evidence or inferring failure. No new tools or
+// validation were removed. Ceiling re-frozen at the measured 72739 bytes, still
+// below the 23-tool baseline.
+const FROZEN_21_WIRE_CEILING = 72739;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
