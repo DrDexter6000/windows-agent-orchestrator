@@ -358,6 +358,18 @@ export async function runWait(input) {
       });
     }
 
+    // M12-14 poll-snapshot closeout: EVERY successful re-read re-proves
+    // workspace ownership BEFORE any state/liveness/result is derived from the
+    // new snapshot (same gating and same fail-closed authorization throw as the
+    // initial read — it is NOT a read_failure). The initial read's authorization
+    // must not carry over: a transcript replaced between polls with facts from
+    // outside the authorized workspace must never drive terminal/state/liveness
+    // results. The throw propagates, so the caller sees the SAME fixed error the
+    // initial read would raise.
+    if (authorizedWorkspaceRoot !== undefined) {
+      verifyRunWorkspaceOwnership(currentEvents, authorizedWorkspaceRoot, runId);
+    }
+
     currentState = findState(currentEvents);
     currentCursor = findLastEventSeq(currentEvents) ?? currentCursor;
 

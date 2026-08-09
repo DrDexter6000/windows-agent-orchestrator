@@ -647,6 +647,69 @@ test("M11-10-SVC-10 (issue 4): initial read ok but a later re-read throws → am
   } finally { cleanupDir(runDir); }
 });
 
+test("M11-10-SVC-11 (M12-14 poll closeout): a foreign transcript replacement between polls re-proves ownership — it cannot return readiness facts", async () => {
+  // Causal: the initial read binds ownership to the requested run (cwd=repoA)
+  // and projects waiting_for_verification, so the wait enters the poll loop
+  // AUTHORIZED. A replacement snapshot for the SAME runId from a DIFFERENT
+  // workspace (cwd=repoB) carrying a complete reviewable chain must NOT inherit
+  // that authorization: every successful poll re-read must re-prove ownership
+  // and fail closed with the SAME authorization error as the initial read —
+  // never return the foreign readiness/delivery facts. (RED on the candidate:
+  // the re-read drove readiness=reviewable and echoed the foreign deliveryRef.)
+  const repoA = mkdtempSync(join(tmpdir(), "m1110-svc-11a-"));
+  const repoB = mkdtempSync(join(tmpdir(), "m1110-svc-11b-"));
+  const runDir = mkdtempSync(join(tmpdir(), "m1110-svc-11-rd-"));
+  try {
+    makeGitRepo(repoA);
+    makeGitRepo(repoB);
+    const runId = "run_svc11";
+    const ref = makeRef(runId);
+    // Initial snapshot: valid ownership (cwd=repoA) + created, NO verification →
+    // waiting_for_verification (a waiting state, so the poll loop runs).
+    const initialEvents = [
+      startedWithDelivery(runId),
+      { type: "run.background_submitted", runId, background: true, cwd: repoA },
+      { type: "run.delivery_created", runId, delivery: ref },
+      ...terminal(runId),
+    ];
+    // Replacement snapshot: SAME runId, DIFFERENT workspace, complete chain →
+    // would project reviewable for the requested runId if not re-authorized.
+    const foreignRef = makeRef(runId, {
+      deliveryCommit: "f".repeat(40),
+      changedFiles: ["SECRET/foreign.js"],
+    });
+    const replacementEvents = [
+      startedWithDelivery(runId),
+      { type: "run.background_submitted", runId, background: true, cwd: repoB },
+      { type: "run.delivery_created", runId, delivery: foreignRef },
+      { type: "run.delivery_verification_passed", runId, delivery: foreignRef },
+      ...terminal(runId),
+    ];
+    let reads = 0;
+    let rejection = null;
+    try {
+      await getRunDeliveryReadiness({
+        runId, runDir, waitMs: 1000,
+        authorizedWorkspaceRoot: repoA,
+        // Constant clock: the deadline is far away, so only the re-read's
+        // authorization failure stops the poll (never time expiry).
+        sleepFn: async () => {},
+        nowFn: () => 1000000,
+        pollIntervalMs: 50,
+        readTranscriptFn: async () => {
+          reads += 1;
+          return reads === 1 ? initialEvents : replacementEvents;
+        },
+      });
+    } catch (err) { rejection = err; }
+    assert.ok(rejection, "foreign replacement must fail closed, not return readiness facts");
+    assert.match(rejection.message, /workspace mismatch|missing ownership|unprovable/i,
+      "same fail-closed authorization error family as the initial read");
+    assert.ok(!rejection.message.includes(repoB), "no foreign path echoed");
+    assert.ok(reads >= 2, "initial read + at least one re-read (the replacement snapshot)");
+  } finally { cleanupDir(repoA); cleanupDir(repoB); cleanupDir(runDir); }
+});
+
 // =====================================================================
 // Group 3: MCP run_delivery waitMs (real Client + InMemoryTransport)
 // =====================================================================

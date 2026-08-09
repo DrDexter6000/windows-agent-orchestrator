@@ -280,6 +280,63 @@ test("WAIT-08: transcript bytes unchanged after wait", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
 
+// ── M12-14 poll-snapshot closeout: re-prove ownership on every re-read ──────
+
+test("M12-14-POLL-OWN-01: a foreign transcript replacement between polls re-proves ownership — it cannot return terminal facts", async () => {
+  // Causal: the initial read binds ownership to the requested run (cwd=dirA),
+  // so the wait enters the poll loop AUTHORIZED. A replacement snapshot for the
+  // SAME runId but a DIFFERENT workspace (cwd=dirB, terminal) must NOT inherit
+  // that authorization: every successful re-read must re-prove ownership and
+  // fail closed with the SAME authorization error as the initial read — never
+  // return the foreign terminal/state facts. (RED on the candidate: the re-read
+  // drove currentState="completed" and returned terminal:true.)
+  const dirA = mkdtempSync(join(tmpdir(), "wao-pollown-01a-"));
+  const dirB = mkdtempSync(join(tmpdir(), "wao-pollown-01b-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-pollown-01-rd-"));
+  try {
+    makeGitRepo(dirA);
+    makeGitRepo(dirB);
+    const runId = "run_pollown01";
+    // Initial snapshot: valid ownership (cwd=dirA), still running → poll loop.
+    const initialEvents = [
+      { type: "run.started", runId, cwd: dirA, ts: "2026-01-01T00:00:00Z", seq: 1 },
+      { type: "run.state_change", runId, ts: "2026-01-01T00:00:01Z", seq: 2, from: "pending", to: "running" },
+    ];
+    // Replacement snapshot: SAME runId, DIFFERENT workspace, terminal.
+    const replacementEvents = [
+      { type: "run.started", runId, cwd: dirB, ts: "2026-01-01T00:00:00Z", seq: 1 },
+      { type: "run.completed", runId, ts: "2026-01-01T00:00:01Z", seq: 2 },
+      { type: "run.state_change", runId, ts: "2026-01-01T00:00:02Z", seq: 3, from: "running", to: "completed" },
+    ];
+    let reads = 0;
+    const { runWait } = await import("../src/application/runWait.js");
+    let rejection = null;
+    try {
+      await runWait({
+        runId, runDir, waitMs: 180000, authorizedWorkspaceRoot: dirA,
+        // Constant clock: the deadline is far away, so only the re-read's
+        // authorization failure stops the poll (never time expiry).
+        sleepFn: async () => {},
+        nowFn: () => 1000000,
+        pollIntervalMs: 50,
+        readTranscriptFn: async () => {
+          reads += 1;
+          return reads === 1 ? initialEvents : replacementEvents;
+        },
+      });
+    } catch (err) { rejection = err; }
+    assert.ok(rejection, "foreign replacement must fail closed, not return terminal facts");
+    assert.match(rejection.message, /workspace mismatch|missing ownership|unprovable/i,
+      "same fail-closed authorization error family as the initial read");
+    assert.ok(!rejection.message.includes(dirB), "no foreign path echoed");
+    assert.ok(reads >= 2, "initial read + at least one re-read (the replacement snapshot)");
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
+    rmSync(dirA, { recursive: true, force: true });
+    rmSync(dirB, { recursive: true, force: true });
+  }
+});
+
 // ── MCP adapter tests ────────────────────────────────────────────────────────
 
 test("MCP-WAIT-01: tool list includes run_wait (11th tool)", async () => {

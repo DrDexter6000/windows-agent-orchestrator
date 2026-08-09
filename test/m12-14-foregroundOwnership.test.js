@@ -610,6 +610,44 @@ test("M12-14-FG-OWN-17: mixed bound+unbound ownership facts fail closed as missi
   assert.deepEqual(proofCalls, ["C:\\Target\\Repo"], "neither cwd may reach the Git proof");
 });
 
+test("M12-14-FG-OWN-18: a valid bound fact for the requested run uses ONLY the bound fact; an unbound runId-less fact is not a candidate", () => {
+  // Causal: the legacy runId-less tolerance attributes unbound ownership events
+  // ONLY when NO ownership event in the file carries ANY runId. When the
+  // requested run HAS a bound fact, the unbound fact is not a candidate at all:
+  // it can neither authorize, conflict with, nor poison the bound fact — and
+  // its cwd never reaches the Git proof (proven by the spy: the only proven
+  // path is the authorized root / bound cwd).
+  const proofCalls = [];
+  const verifier = createVerifierWithSpy(proofCalls);
+  // (a) unbound background (DIFFERENT cwd) + bound background for the requested run.
+  {
+    const events = [
+      { type: "run.background_submitted", cwd: "D:\\Other\\Repo", ts: "2026-01-01T00:00:00Z", seq: 1 },
+      { type: "run.background_submitted", runId: "run_fgown_18", cwd: "C:\\Target\\Repo", ts: "2026-01-01T00:00:01Z", seq: 2 },
+    ];
+    const result = verifier(events, "run_fgown_18");
+    assert.equal(result.authorized, true);
+    assert.equal(result.ownershipCwd, "C:\\Target\\Repo", "the bound fact is the only fact used");
+    assert.deepEqual(proofCalls, ["C:\\Target\\Repo"], "the unbound cwd must never reach the Git proof");
+  }
+  // (b) unbound background with a DISAGREEING cwd + bound foreground started:
+  // the unbound fact cannot conflict with the bound fact either. The verifier
+  // cache already holds the bound cwd's proof from construction, so the spy is
+  // called only for NEW paths — the causal invariant is that the unbound cwd
+  // (D:\Other\Repo) never appears among them.
+  {
+    proofCalls.length = 0;
+    const events = [
+      { type: "run.background_submitted", cwd: "D:\\Other\\Repo", ts: "2026-01-01T00:00:00Z", seq: 1 },
+      { type: "run.started", runId: "run_fgown_18", cwd: "C:\\Target\\Repo", ts: "2026-01-01T00:00:01Z", seq: 2 },
+    ];
+    const result = verifier(events, "run_fgown_18");
+    assert.equal(result.authorized, true);
+    assert.equal(result.ownershipCwd, "C:\\Target\\Repo", "the bound fact is the only fact used");
+    assert.ok(!proofCalls.includes("D:\\Other\\Repo"), "the unbound cwd must never reach the Git proof");
+  }
+});
+
 // ── helper used by the fail-closed tests ─────────────────────────────────────
 // The spy proves ONLY the authorized root (verifier construction). Any call
 // with an ownership cwd means the finder let an ownership fact reach the Git

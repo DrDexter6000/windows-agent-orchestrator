@@ -947,6 +947,18 @@ export async function getRunDeliveryReadiness({
       readFailed = true;
       break;
     }
+    // M12-14 poll-snapshot closeout: EVERY successful poll re-read re-proves
+    // workspace ownership BEFORE findState / projectDeliveryReadiness / result
+    // building derive anything from the new snapshot (same gating and same
+    // fail-closed authorization throw as the initial read — it is NOT a read
+    // failure). The initial read's authorization must not carry over: a
+    // transcript replaced between polls with facts from outside the authorized
+    // workspace must never drive readiness/delivery results. The throw
+    // propagates, so the caller sees the SAME fixed error the initial read
+    // would raise.
+    if (authorizedWorkspaceRoot !== undefined) {
+      verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
+    }
     terminalState = findState(events);
     readiness = projectDeliveryReadiness(events, runId);
     if (!WAITING_READINESS_STATES.has(readiness)) {
