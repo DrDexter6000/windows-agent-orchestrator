@@ -34,6 +34,12 @@ import {
   ACTIVITY_TS_CAP,
   ACTIVITY_CURSOR_MAX_CHARS,
 } from "../src/application/runActivityProjection.js";
+import {
+  SCOPE_OBSERVATION_STATUSES,
+  SCOPE_OBSERVATION_SOURCE,
+  SCOPE_OBSERVATION_OUTSIDE_PATHS_CAP,
+  SCOPE_OBSERVATION_PATH_CAP,
+} from "../src/application/runScopeObservation.js";
 
 // ===== Helpers =====
 
@@ -617,4 +623,164 @@ test("MAA-16: wire schema declares EXACT caps — cursor, categories, entries, s
       assert.equal(byCat.other.label.maxLength, ACTIVITY_LABEL_CAP);
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// =====================================================================
+// M12-14 advisory scopeObservation — wire schema + behavior.
+// The additive scopeObservation output field is declared from the SSOT
+// constants (enum, source literal, array cap, per-path cap — no drift), and
+// the projected facts cross the wire as today: parsed via the strict schema.
+// =====================================================================
+
+// Seed a transcript with a full delivery contract (run.started carrying an
+// absolute worktreePath + delivery.allowedPaths) plus confirmed file_written
+// events, so scopeObservation is fully evaluable through the real service.
+function seedDeliveryTranscript(runDir, runId, { worktreePath, allowedPaths, written = [], terminal = true }) {
+  mkdirSync(runDir, { recursive: true });
+  const a = "coder_low";
+  const lines = [
+    jl({ type: "run.submitted", agentId: a, ts: "2026-08-02T00:00:00.000Z", runId }),
+    jl({ type: "session.created", backend: "process", backendSessionId: "proc_scp", runId, agentId: a }),
+    jl({
+      type: "run.started", backend: "claude-code", ts: "2026-08-02T00:00:01.000Z", runId, agentId: a,
+      worktreePath,
+      delivery: {
+        mode: "git_commit_v1",
+        baseCommit: "a".repeat(40),
+        allowedPaths,
+        verificationCommands: ["node --test"],
+      },
+    }),
+    jl({ type: "run.background_submitted", background: true, cwd: worktreePath, runId, agentId: a }),
+    jl({ type: "run.state_change", to: "running", reason: "first_event", ts: "2026-08-02T00:00:02.000Z", runId, agentId: a }),
+  ];
+  for (const [i, path] of written.entries()) {
+    lines.push(jl({
+      type: "run.event", kind: "file_written", path,
+      ts: `2026-08-02T00:00:${10 + i}.000Z`, runId, agentId: a,
+    }));
+  }
+  if (terminal) {
+    lines.push(jl({ type: "run.completed", ts: "2026-08-02T00:10:00.000Z", runId, agentId: a }));
+    lines.push(jl({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-08-02T00:10:01.000Z", runId, agentId: a }));
+  }
+  writeFileSync(join(runDir, `${runId}.jsonl`), lines.join(""), "utf8");
+}
+
+test("MAA-18: wire schema declares scopeObservation with EXACT SSOT bounds (enum, source, caps)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-maa18-"));
+  try {
+    makeGitRepo(dir);
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir: dir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const tools = await client.listTools();
+      const t = tools.tools.find((x) => x.name === "run_activity");
+      const so = t.outputSchema.properties.scopeObservation;
+      assert.ok(so, "scopeObservation declared on the output schema");
+      assert.equal(so.additionalProperties, false, "strict scopeObservation object");
+      assert.deepEqual(so.properties.status.enum, [...SCOPE_OBSERVATION_STATUSES],
+        "status enum = SSOT closed set");
+      assert.equal(so.properties.source.const, SCOPE_OBSERVATION_SOURCE,
+        "source = SSOT literal");
+      assert.equal(so.properties.complete.type, "boolean");
+      assert.equal(so.properties.observedFileCount.type, "integer");
+      assert.equal(so.properties.observedFileCount.minimum, 0, "nonnegative");
+      assert.equal(so.properties.outsidePathCount.type, "integer");
+      assert.equal(so.properties.outsidePathCount.minimum, 0, "nonnegative");
+      assert.equal(so.properties.outsidePathsTruncated.type, "boolean");
+      assert.equal(so.properties.outsidePaths.maxItems, SCOPE_OBSERVATION_OUTSIDE_PATHS_CAP,
+        "outsidePaths array cap = SSOT constant");
+      assert.equal(so.properties.outsidePaths.items.maxLength, SCOPE_OBSERVATION_PATH_CAP,
+        "per-path bound = SSOT constant");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("MAA-19: outside_declared_paths over the real service; terminal complete=true; zero append + zero mutation", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-maa19-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-maa19-rd-"));
+  try {
+    makeGitRepo(dir);
+    seedDeliveryTranscript(runDir, "run_scp_out", {
+      worktreePath: dir,
+      allowedPaths: ["src"],
+      written: ["src/ok.js", "test/out.js"],
+      terminal: true,
+    });
+    const tp = join(runDir, "run_scp_out.jsonl");
+    const before = readFileSync(tp, "utf8");
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_activity", arguments: { runId: "run_scp_out" } });
+      assert.equal(res.isError, undefined, "call succeeds");
+      assert.deepEqual(res.structuredContent.scopeObservation, {
+        status: "outside_declared_paths",
+        source: "transcript_file_events",
+        complete: true,
+        observedFileCount: 2,
+        outsidePaths: ["test/out.js"],
+        outsidePathCount: 1,
+        outsidePathsTruncated: false,
+      }, "scopeObservation facts cross the wire parsed exactly");
+      assert.equal(countAudits(tp), 0, "zero audit append");
+      assert.equal(readFileSync(tp, "utf8"), before, "transcript bytes unchanged (zero append, zero mutation)");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});
+
+test("MAA-20: within_declared_paths over the real service; terminal complete=true; zero append", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-maa20-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-maa20-rd-"));
+  try {
+    makeGitRepo(dir);
+    seedDeliveryTranscript(runDir, "run_scp_in", {
+      worktreePath: dir,
+      allowedPaths: ["src", "test/manifest.json"],
+      written: ["src/ok.js", "test/manifest.json"],
+      terminal: true,
+    });
+    const tp = join(runDir, "run_scp_in.jsonl");
+    const before = readFileSync(tp, "utf8");
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_activity", arguments: { runId: "run_scp_in" } });
+      assert.equal(res.isError, undefined, "call succeeds");
+      const so = res.structuredContent.scopeObservation;
+      assert.equal(so.status, "within_declared_paths");
+      assert.equal(so.complete, true);
+      assert.equal(so.observedFileCount, 2);
+      assert.equal(so.outsidePathCount, 0);
+      assert.deepEqual(so.outsidePaths, []);
+      assert.equal(countAudits(tp), 0, "zero audit append");
+      assert.equal(readFileSync(tp, "utf8"), before, "transcript bytes unchanged");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});
+
+test("MAA-21: historical non-delivery transcript stays readable as unknown via MCP, zero append", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-maa21-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-maa21-rd-"));
+  try {
+    makeGitRepo(dir);
+    // seedTranscript writes run.started WITHOUT worktreePath/delivery — a
+    // historical non-delivery run.
+    seedTranscript(runDir, "run_scp_hist", { workspaceCwd: dir, messages: ["hello"], terminal: true });
+    const tp = join(runDir, "run_scp_hist.jsonl");
+    const before = readFileSync(tp, "utf8");
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_activity", arguments: { runId: "run_scp_hist" } });
+      assert.equal(res.isError, undefined, "historical transcript stays readable");
+      assert.equal(res.structuredContent.scopeObservation.status, "unknown");
+      assert.equal(res.structuredContent.scopeObservation.complete, false);
+      assert.equal(res.structuredContent.scopeObservation.observedFileCount, 0);
+      // message + the terminal state entry — the activity page is intact.
+      assert.equal(res.structuredContent.entries.length, 2, "activity page intact");
+      assert.equal(readFileSync(tp, "utf8"), before, "transcript bytes unchanged (zero append)");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });

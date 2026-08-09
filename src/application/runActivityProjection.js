@@ -56,6 +56,11 @@ import { safeProjectAgentId } from "../canonicalAgentId.js";
 import { TERMINAL_STATES, assertEventsBoundToRunId } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
 import { RUNTIME_ACTIVITY_STATUSES } from "../runEvent.js";
+// M12-14: advisory scope observation. The pure projector derives the
+// scopeObservation fact from the SAME frozenEvents prefix that drives the
+// activity page/cursor, so a continuation cursor never sees later appends
+// while a fresh page-1 call may observe them.
+import { projectScopeObservation } from "./runScopeObservation.js";
 
 // ===== Closed-set activity categories (drives BOTH the service and the MCP
 // input schema — single source, no drift). =====
@@ -452,6 +457,7 @@ function buildEntry(event, category, redactor, textCap) {
  *        exposed on the MCP run_activity tool (Lead view stays asc-only).
  * @param {object} [opts.env] — env for the secret redactor (default process.env)
  * @returns {object} safe payload: runId, agentId, backend, state, terminal,
+ *                   scopeObservation (M12-14 advisory, from the frozen prefix),
  *                   counts, total, entries, pageSize, truncated, nextCursor
  */
 export function projectRunActivity(rawSnapshot, {
@@ -593,6 +599,16 @@ export function projectRunActivity(rawSnapshot, {
     });
   }
 
+  // M12-14: advisory scope observation over the SAME frozenEvents prefix that
+  // drives the page/cursor above — a continuation cursor projects its frozen
+  // prefix (append-only stable), while a fresh page-1 call observes the full
+  // current snapshot. Facts only, fail-closed, never throws.
+  const scopeObservation = projectScopeObservation(frozenEvents, {
+    runId,
+    terminal: Boolean(rawSnapshot.terminal),
+    env,
+  });
+
   return {
     runId,
     agentId: safeProjectAgentId(rawSnapshot.agentId),
@@ -601,6 +617,7 @@ export function projectRunActivity(rawSnapshot, {
     backend: safeDynamicText(rawSnapshot.backend ?? "unknown", redactor, ACTIVITY_LABEL_CAP),
     state: safeDynamicText(rawSnapshot.state ?? "unknown", redactor, ACTIVITY_LABEL_CAP),
     terminal: Boolean(rawSnapshot.terminal),
+    scopeObservation,
     counts,
     total,
     entries: pageEntries,

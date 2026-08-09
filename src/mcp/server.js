@@ -154,6 +154,16 @@ import {
   ACTIVITY_CURSOR_MAX_CHARS,
 } from "../application/runActivityProjection.js";
 import { readRunActivity } from "../application/runActivity.js";
+// M12-14: advisory scope observation. The additive scopeObservation output
+// field is declared from the ONE application SSOT (closed status set, source
+// literal, outsidePaths array cap, per-path cap) so the MCP schema and the
+// projector can never drift — same pattern as the ACTIVITY_* caps above.
+import {
+  SCOPE_OBSERVATION_STATUSES,
+  SCOPE_OBSERVATION_SOURCE,
+  SCOPE_OBSERVATION_OUTSIDE_PATHS_CAP,
+  SCOPE_OBSERVATION_PATH_CAP,
+} from "../application/runScopeObservation.js";
 // M12-8B: bounded Lead progressive-disclosure metadata. The closed-set catalog,
 // selection rules, and hard bounds (entry count + serialized-size cap) live in
 // the ONE shared application module; the schema constants below are built from
@@ -2172,6 +2182,21 @@ const RUN_ACTIVITY_COUNTS = z.object({
   other: z.number().int().nonnegative(),
 }).strict();
 
+// M12-14: advisory scope observation — the additive top-level field the
+// projector derives from the frozen snapshot prefix. Bounds are the SSOT
+// constants from runScopeObservation.js (statuses, source, outsidePaths
+// array cap, per-path cap) — no hand-maintained second copy.
+const RUN_ACTIVITY_SCOPE_OBSERVATION = z.object({
+  status: z.enum([...SCOPE_OBSERVATION_STATUSES]),
+  source: z.literal(SCOPE_OBSERVATION_SOURCE),
+  complete: z.boolean(),
+  observedFileCount: z.number().int().nonnegative(),
+  outsidePaths: z.array(z.string().max(SCOPE_OBSERVATION_PATH_CAP))
+    .max(SCOPE_OBSERVATION_OUTSIDE_PATHS_CAP),
+  outsidePathCount: z.number().int().nonnegative(),
+  outsidePathsTruncated: z.boolean(),
+}).strict();
+
 const RUN_ACTIVITY_OUTPUT = z.object({
   runId: z.string(),
   agentId: READ_AGENT_ID_SCHEMA,
@@ -2179,6 +2204,7 @@ const RUN_ACTIVITY_OUTPUT = z.object({
   backend: z.string().max(ACTIVITY_LABEL_CAP),
   state: z.string().max(ACTIVITY_LABEL_CAP),
   terminal: z.boolean(),
+  scopeObservation: RUN_ACTIVITY_SCOPE_OBSERVATION,
   counts: RUN_ACTIVITY_COUNTS,
   total: z.number().int().nonnegative(),
   // At most LEAD_PAGE_HARD_CAP entries per page — the projector's page cap.
@@ -2206,7 +2232,10 @@ const RUN_ACTIVITY_DESCRIPTION =
   "ONLY closed-set safe facts: assistant excerpts, command exit status (never raw argv), tool " +
   "names (never input/output), repo-relative paths only (absolute/traversal withheld), terminal " +
   "transitions, and bounded labels for unknown shapes. Secrets redacted before " +
-  "excerpt/pagination. Makes NO semantic summary/recommendation/progress estimate. Paginated via " +
+  "excerpt/pagination. Makes NO semantic summary/recommendation/progress estimate. Carries an " +
+  "advisory scopeObservation (M12-14): whether the confirmed file_written events in the same " +
+  "frozen snapshot are still within the persisted delivery.allowedPaths contract — facts only, " +
+  "never a stop/retry/repackage decision. Paginated via " +
   "an opaque cursor (malformed/cross-run/cross-view cursors fail closed); pageSize defaults to " +
   LEAD_PAGE_DEFAULT + ". Read-only and idempotent; workspace-bound (ownership-cwd mismatch " +
   "fails closed).";

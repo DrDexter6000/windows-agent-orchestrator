@@ -848,3 +848,62 @@ test("ORDER desc: redaction-before-bound still holds (secret never crosses in de
   const msg = desc.entries.find((e) => e.category === "message");
   assert.ok(msg.text.includes("[REDACTED"));
 });
+
+// =====================================================================
+// M12-14 additive scopeObservation (frozen prefix + historical readability)
+// =====================================================================
+function scopeStartedEvent() {
+  return lifecycleEvent("run.started", {
+    backend: "claude-code",
+    worktreePath: "D:/wao-runs/scope_1",
+    delivery: {
+      mode: "git_commit_v1",
+      baseCommit: "a".repeat(40),
+      allowedPaths: ["src"],
+      verificationCommands: ["node --test"],
+    },
+  });
+}
+
+test("M12-14 additive: scopeObservation derives from the FROZEN prefix on page 1 AND continuation", () => {
+  resetSeq();
+  const base = [
+    scopeStartedEvent(),
+    ...Array.from({ length: 15 }, (_, i) => msgEvent("assistant", `m${i}`)),
+    fileWrittenEvent("src/a.js"),
+  ];
+  const page1 = project(base, { pageSize: 8 });
+  assert.ok(page1.nextCursor, "page 1 has a cursor");
+  assert.equal(page1.scopeObservation.status, "within_declared_paths");
+  assert.equal(page1.scopeObservation.source, "transcript_file_events");
+  assert.equal(page1.scopeObservation.complete, false);
+
+  // Append a later OUTSIDE file write after page 1.
+  const grown = [...base, fileWrittenEvent("test/bad.js")];
+  const page2 = project(grown, { cursor: page1.nextCursor, pageSize: 8 });
+  assert.equal(page2.scopeObservation.status, "within_declared_paths",
+    "a continuation cursor projects scopeObservation from its frozen prefix only");
+  assert.equal(page2.scopeObservation.observedFileCount, 1);
+  assert.equal(page2.scopeObservation.outsidePathCount, 0);
+
+  // A FRESH page-1 call may observe the appended outside write.
+  const fresh = project(grown, { pageSize: 8 });
+  assert.equal(fresh.scopeObservation.status, "outside_declared_paths");
+  assert.equal(fresh.scopeObservation.observedFileCount, 2);
+  assert.deepEqual(fresh.scopeObservation.outsidePaths, ["test/bad.js"]);
+});
+
+test("M12-14 historical / non-delivery snapshot stays readable: scopeObservation unknown, no throw", () => {
+  resetSeq();
+  const events = [
+    lifecycleEvent("run.submitted"),
+    msgEvent("assistant", "hi"),
+    fileWrittenEvent("src/a.js"),
+  ];
+  const r = project(events);
+  assert.equal(r.scopeObservation.status, "unknown", "absent scope facts never throw");
+  assert.equal(r.scopeObservation.complete, false);
+  assert.equal(r.scopeObservation.observedFileCount, 0);
+  assert.deepEqual(r.scopeObservation.outsidePaths, []);
+  assert.equal(r.entries.length, 2, "activity entries still project normally");
+});

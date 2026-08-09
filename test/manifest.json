@@ -39,6 +39,7 @@
       "m12-9-smoke.test.js",
       "m12-10-tool-surface.test.js",
       "m12-13-isolation-failure.test.js",
+      "m12-14-scopeObservation.test.js",
       "mcpPlaybook.test.js",
       "mcpRunCollect.test.js",
       "mcpRunContinue.test.js",
