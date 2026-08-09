@@ -340,9 +340,9 @@ test("malformed raw path non-leakage: non-string / empty / NUL paths -> unknown,
   const r2 = scope([startedEvent(), writtenEvent("malformed\u0000raw.js")]);
   assert.equal(r2.status, "unknown");
   assert.ok(!JSON.stringify(r2).includes("malformed"), "raw malformed path never crosses");
-  const r3 = scope([startedEvent(), writtenEvent("C:/Users/secret/key.pem")]);
+  const r3 = scope([startedEvent(), writtenEvent("C:/Windows/system32/key.pem")]);
   assert.equal(r3.status, "unknown");
-  assert.ok(!JSON.stringify(r3).includes("Users"), "absolute outside path never crosses");
+  assert.ok(!JSON.stringify(r3).includes("system32"), "absolute outside path never crosses");
 });
 
 test("unevaluable among evaluable: the whole observation is unknown; observedFileCount keeps the evaluable count", () => {

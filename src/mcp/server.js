@@ -509,7 +509,7 @@ const RUN_DISPATCH_ANNOTATIONS = {
 
 const RUN_DISPATCH_DESCRIPTION =
   "Dispatch a supervised background run to a worker agent. WAO owns dispatch, the detached " +
-  "runner, and the transcript, and returns a runId the Lead supervises later. Only agentId and " +
+  "runner, and the transcript, returning a runId for Lead supervision. Only agentId and " +
   "prompt are accepted; registry, run directory, and certification are server-owned. Optional " +
   "top-level continuable (delivery-only, default false) roots a lineage a later run_continue " +
   "can resume in the retained worktree for a Lead-authorized correction. WAO never infers " +
@@ -577,13 +577,14 @@ const RUN_DISPATCH_CONTRACT_CHECK_ANNOTATIONS = {
 };
 
 const RUN_DISPATCH_CONTRACT_CHECK_DESCRIPTION =
-  "Optional read-only ADVISORY precheck of a would-be run_dispatch: resolves the delivery " +
+  "Optional read-only ADVISORY precheck of a run_dispatch: resolves the delivery " +
   "contract (inline verification or a frozen execution profile), observes the workspace binding " +
   "and worker registry presence, and returns a bounded closed-set result. Shares run_dispatch's " +
   "input schema. NOT a gate: contractValid reflects ONLY the mechanical contract and never " +
   "auto-blocks an independent run_dispatch. It does not evaluate credential readiness, " +
-  "workspace/head expectations, or session-reuse eligibility — run_dispatch remains " +
-  "authoritative. Returns no prompt/command text, paths, credentials, or session payload.";
+  "workspace/head expectations, or session-reuse eligibility; run_dispatch remains " +
+  "authoritative. Returns no prompt/command text, " +
+  "paths, credentials, or session payload.";
 
 // ===== run_continue (M12-7 Lead-authorized correction continuation) constants =====
 //
@@ -852,8 +853,8 @@ const RUN_COLLECT_DESCRIPTION =
   "successful call appends one messages.collected audit event (not idempotent). Accepts runId " +
   "and an optional opaque cursor (from a prior page's nextCursor) to continue a truncated " +
   "result; run directory and limit are server-owned. Optional mode compact returns the last " +
-  "assistant text verbatim (<=4000 chars) plus full evidence counts in one call; compact takes " +
-  "no cursor and does no semantic summary.";
+  "assistant text verbatim (<=4000 chars) plus full evidence counts in one call; no cursor, no " +
+  "semantic summary.";
 
 // ===== run_diagnose safe projection constants =====
 
@@ -920,8 +921,8 @@ const RUN_DIAGNOSE_ANNOTATIONS = {
 const RUN_DIAGNOSE_DESCRIPTION =
   "Diagnose a run's failure category and signal event types. Read-only, idempotent. " +
   "Returns only safe machine fields (category, event types, counts). Does not return " +
-  "raw error text, commands, file paths, or tool payloads. The Lead decides what to " +
-  "do next; this tool gives facts only. Each result carries self-explaining " +
+  "raw error text, commands, file paths, or tool payloads. The Lead decides; this tool gives " +
+  "facts only. Carries self-explaining " +
   "semanticNotes; per-note detail: wao://semantics/{id}.";
 
 // ===== run_delivery (read-only query) constants =====
@@ -1195,15 +1196,16 @@ const RUN_DELIVERY_ANNOTATIONS = {
 };
 
 const RUN_DELIVERY_DESCRIPTION =
-  "Query a run's delivery status: terminal state, delivery/base commit hashes, changed file " +
+  "Query a run's delivery status: terminal state, delivery/base hashes, changed file " +
   "count, bounded repo-relative changed paths (truncation flag), verification status, and " +
   "acceptance status. Read-only — the Lead still owns semantic acceptance; only " +
-  "verificationStatus=passed means exact-artifact verification passed. Returns no raw diff, " +
+  "verificationStatus=passed means exact-artifact verification passed; this read never " +
+  "stop/retry/accept/rejects. Returns no raw diff, " +
   "file content, worktree paths, verification commands/results, or decision reasons. Optional " +
   "waitMs adds a bounded read-only readiness handshake (workspace-bound, zero transcript " +
   "append) returning a readiness label + waitReturnedEarly; pending-at-deadline is truthful, " +
-  "never an error, and the tool never stop/retry/accept/rejects. candidateKind/" +
-  "candidateInventory on a recovery candidate are advisory only. Each result carries " +
+  "never an error. candidateKind/" +
+  "candidateInventory on a recovery candidate are advisory only. Carries " +
   "self-explaining semanticNotes; per-note detail: wao://semantics/{id}.";
 
 /**
@@ -1532,11 +1534,11 @@ const RUN_DELIVERY_DECIDE_ANNOTATIONS = {
 
 const RUN_DELIVERY_DECIDE_DESCRIPTION =
   "Record an explicit Lead decision (accepted or rejected) on a delivery. The first durable " +
-  "decision wins; later attempts lose without error. Expected-policy rejections (verification " +
+  "decision wins; later attempts lose. Expected-policy rejections (verification " +
   "not passed, terminal not eligible, delivery unavailable or malformed, already decided) return " +
   "a normal outcome with a closed-set rejectionReason — only unexpected internal failures are " +
-  "errors. Does not decide correctness automatically, and does not return the decision reason " +
-  "or delivery details.";
+  "errors. Does not decide correctness automatically or return the decision " +
+  "reason/delivery details.";
 
 // ===== run_delivery_reverify (audited unchanged-artifact re-verification) constants =====
 // M12-6 Package 3B2a: the Lead invokes ONE audited re-verification of the SAME
@@ -1584,7 +1586,7 @@ const RUN_DELIVERY_REVERIFY_ANNOTATIONS = {
 };
 
 const RUN_DELIVERY_REVERIFY_DESCRIPTION =
-  "Re-verify the unchanged committed delivery artifact of a run after the original verification " +
+  "Re-verify the committed delivery artifact of a run after the original verification " +
   "outcome was invalidated (closed-set reason). Workspace-bound; runs the persisted verification " +
   "commands against the SAME committed artifact, records one audited reverify chain, and returns " +
   "the closed-set outcome. Optional setupCommands and timeoutMs are bounded by the run_delivery " +
@@ -1760,12 +1762,11 @@ const LEAD_PREFLIGHT_ANNOTATIONS = {
 
 const LEAD_PREFLIGHT_DESCRIPTION =
   "Advisory single-call preflight: gather workspace binding, worker credential availability, " +
-  "and active runs in one result. Optional workspaceRoot selects the project (lead_session) " +
+  "and active runs. Optional workspaceRoot selects the project (lead_session) " +
   "using the same authority as workspace_select. ADVISORY ONLY — not a gate: warnings and " +
-  "observations are facts for the Lead to judge, never an auto-stop. Each section settles " +
-  "independently; use the original tools (workspace_status, registry_list, runs_list) to " +
-  "re-verify any section. No credential values, paths, prompts, commands, PIDs, or sessions " +
-  "are returned.";
+  "observations are facts for the Lead to judge, never an auto-stop. Sections settle " +
+  "independently; re-verify any section via the original tools. No credential values, paths, " +
+  "prompts, commands, PIDs, or sessions are returned.";
 
 // ===== run_stop (workspace-bound destructive) constants =====
 
@@ -1791,11 +1792,10 @@ const RUN_STOP_ANNOTATIONS = {
 };
 
 const RUN_STOP_DESCRIPTION =
-  "Stop a run dispatched from the currently bound workspace. Uses first-terminal-wins: the first " +
+  "Stop only runs owned by the currently bound workspace. Uses first-terminal-wins: the first " +
   "stop caller claims the terminal 'aborted' state and executes the destructive side effect " +
   "(process kill or backend abort); concurrent or late callers are rejected with zero side " +
-  "effects. Workspace-bound: can only stop runs whose dispatch cwd matches the bound workspace " +
-  "root. Not idempotent: a second call after terminal is already claimed writes a rejection " +
+  "effects. Not idempotent: a second call after terminal is claimed writes a rejection " +
   "audit fact. Returns only safe machine fields (no PID, path, session id, command, stderr, or " +
   "alert content).";
 
@@ -1828,11 +1828,10 @@ const RUNS_LIST_ANNOTATIONS = {
 };
 
 const RUNS_LIST_DESCRIPTION =
-  "List runs dispatched from the currently bound workspace. " +
+  "List only runs owned by the currently bound workspace. " +
   "Returns runId, agentId, state, terminal, and updatedAt for each run. " +
-  "Workspace-bound: only runs whose dispatch cwd matches the bound workspace root are visible. " +
   "Optional activeOnly filters to non-terminal runs; limit caps results (default 50). " +
-  "Read-only, idempotent. Does not return prompts, paths, commands, PIDs, sessions, or counts of excluded runs.";
+  "Read-only, idempotent. No prompts, paths, commands, PIDs, sessions, or excluded-run counts.";
 
 // ===== run_wait (workspace-bound liveness-aware long-poll) constants =====
 
@@ -1897,21 +1896,22 @@ const RUN_WAIT_ANNOTATIONS = {
 
 const RUN_WAIT_DESCRIPTION =
   "Wait for a run to reach terminal state or for the observation window to expire, then return " +
-  "a liveness summary plus additive closed-set facts: observation {outcome in point_in_time/" +
-  "window_expired/terminal/read_failure, waitedMs, windowMs} and termination {state, source, " +
-  "configuredMs, policySource} — termination is non-null ONLY on a cleanly observed terminal " +
-  "(null on window expiry or read_failure, so an expired observation window never means a stop). " +
-  "Workspace-bound. Returns early ONLY on terminal state; otherwise waits the full waitMs " +
-  `(integer ${RUN_WAIT_MIN_MS}..${RUN_WAIT_MAX_MS} ms; default ${RUN_WAIT_DEFAULT_MS} ms / 4.5 min). ` +
-  "waitMs=0 is intentionally invalid here; for a point-in-time read use " +
-  "run_await_result(waitMs:0) or run_status. afterSeq omitted = baseline at first read; explicit afterSeq " +
-  "counts seq > afterSeq. Does NOT stop the run — the Lead decides; an expired window neither " +
-  "fails nor terminates. Read-only: no transcript events, owner file, or state change. Sends " +
-  "progress on request to span the MCP 60s default timeout. Host-neutral transport recovery: if " +
-  "this call returns no result (transport dropped/timed out), the observation is unknown — these " +
-  "read-only tools did NO control-plane mutation and did not stop anything. Re-read point-in-" +
-  "time via run_await_result(waitMs:0) or run_status; never infer liveness or a stop from " +
-  "transport loss. Each result carries self-explaining semanticNotes; " +
+  "a liveness summary plus additive closed-set facts: observation {outcome (point_in_time/" +
+  "window_expired/terminal/read_failure), waitedMs, windowMs} and termination {state, source, " +
+  "configuredMs, policySource} — non-null only on a cleanly observed terminal (null on window " +
+  "expiry or read_failure). Workspace-bound; read-only, no transcript/owner/state changes. " +
+  "Returns early ONLY on terminal state; otherwise " +
+  "waits the full waitMs " +
+  `(${RUN_WAIT_MIN_MS}..${RUN_WAIT_MAX_MS} ms; default ${RUN_WAIT_DEFAULT_MS} ms / 4.5 min). ` +
+  "waitMs=0 is intentionally invalid; for a point-in-time read use " +
+  "run_await_result(waitMs:0) or run_status. afterSeq omitted = baseline; explicit afterSeq " +
+  "counts seq > it. Does NOT stop the run — the Lead decides; expiry never fails/terminates. " +
+  "Host-neutral transport " +
+  "recovery: if " +
+  "this call returns no result (transport dropped/timed out), the observation is unknown — " +
+  "read-only, no control-plane mutation. Re-read via run_await_result or run_status; never " +
+  "infer liveness or a stop from " +
+  "transport loss. Carries self-explaining semanticNotes; " +
   "per-note detail: wao://semantics/{id}.";
 
 // ===== run_await_result (M12-3 read-only composite) constants =====
@@ -2055,17 +2055,18 @@ const RUN_AWAIT_RESULT_ANNOTATIONS = {
 const RUN_AWAIT_RESULT_DESCRIPTION =
   "One read-only call: wait up to waitMs for a run to reach terminal, then return the safe " +
   "compact final assistant result plus a truthful run/liveness observation and additive " +
-  "closed-set facts: observation {outcome in point_in_time/window_expired/terminal/read_failure, " +
-  "waitedMs, windowMs} and termination {state, source, configuredMs, policySource} — termination " +
-  "is non-null ONLY on a cleanly observed terminal (null on window expiry or read_failure, so an " +
-  "expired window never means a stop). Returns early on terminal. Advisory: never stop/retry/" +
-  "decide/accept/reject/repackage/append transcript events, and makes no semantic judgment. " +
-  "Snapshot-only. result.status distinguishes terminal from not_terminal/unavailable; a read " +
+  "closed-set facts: observation {outcome (point_in_time/window_expired/terminal/read_failure), " +
+  "waitedMs, windowMs} and termination {state, source, configuredMs, policySource} — non-null " +
+  "only on a cleanly observed terminal (null on window expiry or read_failure). Returns early " +
+  "on terminal. Advisory: never stop/retry/" +
+  "decide/accept/reject/repackage/append transcript events; no semantic judgment. " +
+  "result.status distinguishes terminal from not_terminal/unavailable; a read " +
   "failure yields a closed-set readFailureReason (null otherwise — never an error message/" +
-  "path/credential). Idempotent. Host-neutral transport recovery: if this call returns no " +
-  "result (transport dropped/timed out), the observation is unknown — these read-only tools " +
-  "did NO control-plane mutation. Re-read point-in-time via run_await_result(waitMs:0) or " +
-  "run_status; never infer liveness or a stop from transport loss. Each result carries " +
+  "path/credential). Idempotent. Snapshot-only. Host-neutral transport recovery: if this call " +
+  "returns no " +
+  "result (transport dropped/timed out), the observation is unknown — read-only, no control-" +
+  "plane mutation. Re-read via run_await_result or run_status; never infer liveness or a stop " +
+  "from transport loss. Carries " +
   "self-explaining semanticNotes; per-note detail: wao://semantics/{id}.";
 
 // ===== run_activity (M12-8 read-only activity timeline) constants =====
@@ -2233,8 +2234,8 @@ const RUN_ACTIVITY_DESCRIPTION =
   "names (never input/output), repo-relative paths only (absolute/traversal withheld), terminal " +
   "transitions, and bounded labels for unknown shapes. Secrets redacted before " +
   "excerpt/pagination. Makes NO semantic summary/recommendation/progress estimate. Carries an " +
-  "advisory scopeObservation (M12-14): whether the confirmed file_written events in the same " +
-  "frozen snapshot are still within the persisted delivery.allowedPaths contract — facts only, " +
+  "advisory scopeObservation: whether the frozen snapshot's confirmed file_written events " +
+  "remain within the persisted delivery.allowedPaths contract — facts only, " +
   "never a stop/retry/repackage decision. Paginated via " +
   "an opaque cursor (malformed/cross-run/cross-view cursors fail closed); pageSize defaults to " +
   LEAD_PAGE_DEFAULT + ". Read-only and idempotent; workspace-bound (ownership-cwd mismatch " +
@@ -2404,7 +2405,7 @@ const DELIVERY_REVIEW_BUNDLE_DESCRIPTION =
   "run_delivery facts; review is null when not reviewable (no Git diff read then). fileIndex and " +
   "cursor are Lead-supplied and address exactly one page: the tool never chooses/traverses files " +
   "or cursors, never summarizes repository text, and never stop/retry/repackage/accept/reject. " +
-  "run_delivery and run_delivery_review remain available for point-in-time and atomic control.";
+  "run_delivery/run_delivery_review remain for atomic control.";
 
 export function createWaoMcpServer({
   registryPath,
