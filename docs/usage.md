@@ -971,6 +971,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 - 输出：当前 state/terminal、八类总计、当前页 entries、`truncated`/`nextCursor` 和 `availableDrilldowns`。message 只给脱敏后的有界文本；command 只给 `ok|failed|unknown`，不返回 argv；tool 只给名称/错误布尔；文件只给安全 repo-relative path；`runtime_status` 只给 `initialized|streaming|provider_retry|unknown`，不返回 stream delta/retry error/session/model；未知事件只用固定 sentinel。
 - 安全顺序：完整动态文本先 exact-secret redaction，再清洗 C0/C1/DEL，再截断/分页。绝不返回 raw command、tool input/output、error text、credential、PID、provider session 或绝对路径。
 - cursor 绑定 runId、冻结快照前缀、audience/filter/afterSeq 视图和位置；append-only 增长可继续，历史变更/收缩、跨 run/view/audience、malformed 或越界 cursor 固定失败。Lead 可任意时点重复读第一页，或沿 `nextCursor` 逐页下钻。
+- `scopeObservation`（M12-14，advisory、additive）：闭集 `within_declared_paths | outside_declared_paths | unknown`，`source` 恒为 `"transcript_file_events"`，附 `observedFileCount`、`outsidePaths`（脱敏后的安全 repo-relative 路径，上限 25 条）/`outsidePathCount`/`outsidePathsTruncated`。`complete:true` 的准确语义：观察到的 transcript 快照已是**终态**，且该快照中每一条确认的 `file_written` 路径都能在**恰好一个有效合同权威**（绑定 runId 的 `run.started` 绝对 worktreePath + 非空合法 `delivery.allowedPaths`）下求值；它**不**证明文件系统完整性、语义正确性、交付验证或 Lead 验收，也**不**表示 worker 仍在运行（`complete` 的前提是快照终态）。快照未终态或任一确认路径无法求值 → `unknown`（`complete:false`）。
 
 ### Owner 本地只读看板（M12-8C/D/F）
 

@@ -39,6 +39,7 @@
       "m12-9-smoke.test.js",
       "m12-10-tool-surface.test.js",
       "m12-13-isolation-failure.test.js",
+      "m12-14-claudeContextIsolation.test.js",
       "m12-14-scopeObservation.test.js",
       "mcpPlaybook.test.js",
       "mcpRunCollect.test.js",
@@ -130,6 +131,7 @@
       "m12-11-wait-semantics.test.js",
       "m12-12-semantics.test.js",
       "m12-14-foregroundOwnership.test.js",
+      "m12-14-isolationReason.test.js",
       "mcpBind.test.js",
       "mcpDrilldowns.test.js",
       "mcpRunActivity.test.js",
@@ -174,6 +176,7 @@
       "m12-7-continuationWorktree.test.js",
       "m12-7-runContinue.test.js",
       "m12-13-verification-timeout.test.js",
+      "m12-14-workerScopeContract.test.js",
       "mcpRunDeliveryReview.test.js",
       "mcpRunDeliveryReviewBundle.test.js",
       "runDelivery.test.js"
