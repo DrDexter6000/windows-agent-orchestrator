@@ -13,7 +13,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { resolveProviderArgs } from "../src/backends/claudeCodeProvider.js";
+import { ClaudeCodeBackend } from "../src/backends/claudeCode.js";
 
 const WRAPPER_PLACEHOLDER = "WRAPPER_PATH_PLACEHOLDER";
 
@@ -85,4 +87,51 @@ test("resolveProviderArgs: effort 同样是单一真相源（wrapper 与 CLI 同
   const cliEffort = cliFlags[cliFlags.indexOf("--effort") + 1];
   assert.equal(wrapperEffort, cliEffort, "wrapper 与 CLI 的 effort 必须同值");
   assert.equal(wrapperEffort, "high");
+});
+
+// ── M12-14：provider 路径的 auto-memory 隔离（backend 级）─────────────────
+// resolveProviderArgs 只推导 argv；子进程 env 由 ProcessBackend 组装。这里钉死：
+// provider wrapper 路径的 supervised 子进程 env 同样强制
+// CLAUDE_CODE_DISABLE_AUTO_MEMORY=1（wrapper 起的是同一个 claude CLI，隔离不
+// 能有 native/provider 双标），且 wrapper argv 推导不受 env 变更影响。
+test("M12-14: provider wrapper 子进程 env 强制 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1，argv 推导不变", async () => {
+  const captures = [];
+  const spawnFn = (binary, args, opts) => {
+    captures.push({ binary, args: [...args], opts });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.pid = 8383;
+    child.exitCode = null;
+    child.signalCode = null;
+    setImmediate(() => {
+      child.emit("spawn");
+      setImmediate(() => { child.exitCode = 0; child.emit("close", 0); });
+    });
+    return child;
+  };
+  const agent = {
+    id: "coder",
+    backend: "claude-code",
+    cwd: process.cwd(),
+    model: { id: "glm-5.2", contextWindow: 1000000 },
+    reasoning: { effort: "high" },
+    provider: {
+      protocol: "anthropic-compatible",
+      baseUrl: "https://open.bigmodel.cn/api/anthropic",
+      apiKeyEnv: "ZHIPU_API_KEY",
+    },
+  };
+  const backend = new ClaudeCodeBackend({ spawnFn });
+  const handle = await backend.spawn(agent, { prompt: "do" });
+  for await (const _ev of handle.events(new AbortController().signal)) { /* drain */ }
+  const cap = captures[0];
+  assert.equal(cap.opts.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, "1", "provider 子进程必须关闭 auto-memory");
+  // wrapper 推导不回归：node 起 wrapper，prependArgs 在 '--' 分隔后接 claude CLI flags
+  assert.equal(cap.binary, process.execPath);
+  assert.ok(cap.args.some((a) => a.includes("claude-code-provider-wrapper")), "argv 以 wrapper 开头");
+  const sep = cap.args.indexOf("--");
+  assert.ok(sep > 0, "wrapper 参数以 -- 分隔");
+  assert.deepEqual(cap.args.slice(sep + 1, sep + 5), ["-p", "do", "--output-format", "stream-json"], "-- 之后是 claude CLI argv");
+  assert.ok(cap.args.includes("--model") && cap.args.includes("glm-5.2"), "CLI --model 仍从 canonical 字段推导");
 });

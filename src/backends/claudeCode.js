@@ -8,6 +8,13 @@ import { inheritedEnvNames } from "../envPolicy.js";
 // claude-code-provider-wrapper.mjs 的绝对路径（本文件同目录的 ../../scripts/wrappers/）。
 const WRAPPER_PATH = resolve(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts", "wrappers", "claude-code-provider-wrapper.mjs"));
 
+// M12-14 worker 上下文隔离：provider auto-memory 让 supervised worker 在 WAO 检测
+// workdir_escape 之前编辑了 worktree 之外的全局 memory 文件。对【每一个】claude 子
+// 进程（native OAuth / provider wrapper / start / resume）强制关闭 auto-memory。
+// 经 backend 自己的 runtimeEnv 注入——runtimeEnv 在每次 spawn 都跑，无需 RunManager
+// 或 runtime-name 分支；buildChildEnv 合并序保证它压过同名 agent.env。
+const DISABLE_AUTO_MEMORY_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
+
 /**
  * Claude Code backend（M2-6）。
  * 薄封装：ProcessBackend + ClaudeStreamParser + 参数构造。
@@ -110,10 +117,35 @@ export class ClaudeCodeBackend extends ProcessBackend {
       credentialEnvNames: (agent) => inheritedEnvNames(agent),
       runtimeEnv: (_agent, task) => ({
         CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS: "1",
+        // M12-14: auto-memory 必须对每个 supervised claude 子进程关闭（见顶部常量注释）。
+        [DISABLE_AUTO_MEMORY_ENV]: "1",
         ...(task.deliveryMode ? { CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS: "1" } : {}),
       }),
       ...opts,
     });
+  }
+
+  /**
+   * M12-14：backend 安全 env 必须扛住 agent.env 的反设企图。
+   *
+   * buildChildEnv 让 runtimeEnv（waoEnv 段）压过【同名】agent.env，但 Windows
+   * env 大小写不敏感：agent.env 里的小写/混合大小写变体会与权威值并存进子进程
+   * env block，解析结果不确定。spawn 前把 agent.env 中该名字的任意大小写变体
+   * 剥离，让 runtimeEnv 成为唯一权威来源（同 KimiCodeBackend.spawn 的
+   * backend-owned env 模式）。不改变凭据优先级，不读取、不暴露任何 env 值。
+   */
+  async spawn(agent, task) {
+    const agentEnv = agent?.env ?? {};
+    const stripped = {};
+    let removed = false;
+    for (const [name, value] of Object.entries(agentEnv)) {
+      if (name.toUpperCase() === DISABLE_AUTO_MEMORY_ENV) {
+        removed = true;
+        continue;
+      }
+      stripped[name] = value;
+    }
+    return super.spawn(removed ? { ...agent, env: stripped } : agent, task);
   }
 
   // P4 决策B：有 provider 时，binary=node + prependArgs 从 provider 推导（wrapper 调起）。

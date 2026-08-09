@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -551,4 +552,38 @@ test("TD-105: done queued while consumer is paused is drained before closed stre
   assert.equal(second.done, false);
   assert.equal(second.value?.kind, "done");
   assert.equal(second.value?.reason, "completed");
+});
+
+// ── M12-14：控制面 env（runtimeEnv/waoEnv）优先级钉死 ─────────────────────
+// claude-code 的 auto-memory 隔离依赖这条机制：buildChildEnv 合并序
+// { ...inherited, ...credEnv, ...agentEnv, ...waoEnv }——backend runtimeEnv
+// （waoEnv 段）必须压过同名 agent.env，否则 agent/task 配置可以反设安全 flag。
+// 这是 provider-neutral 的共享层不变量，单独钉死，防未来重排合并序。
+test("M12-14: backend runtimeEnv 覆盖同名 agent.env（控制面 env 优先级最高）", async () => {
+  const captures = [];
+  const spawnFn = (binary, args, opts) => {
+    captures.push({ binary, args: [...args], opts });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.pid = 7171;
+    child.exitCode = null;
+    child.signalCode = null;
+    setImmediate(() => {
+      child.emit("spawn");
+      setImmediate(() => { child.exitCode = 0; child.emit("close", 0); });
+    });
+    return child;
+  };
+  const backend = new ProcessBackend({
+    parserClass: ClaudeStreamParser,
+    buildArgs: () => ["-e", "process.exit(0)"],
+    runtimeEnv: () => ({ WAO_MANAGED_SAFETY_FLAG: "1" }),
+    spawnFn,
+  });
+  const agent = makeAgent({ env: { WAO_MANAGED_SAFETY_FLAG: "0" } });
+  const handle = await backend.spawn(agent, { prompt: "t" });
+  for await (const _ev of handle.events(new AbortController().signal)) { /* drain */ }
+  assert.equal(captures.length, 1, "恰好一次 spawn");
+  assert.equal(captures[0].opts.env.WAO_MANAGED_SAFETY_FLAG, "1", "runtimeEnv（waoEnv）必须压过 agent.env");
 });
