@@ -136,7 +136,7 @@ export async function stopRun(input) {
   // HTTP stop, or alert. Authorization failure = zero events, zero side effects.
   if (authorizedWorkspaceRoot !== undefined) {
     try {
-      verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot);
+      verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
     } catch (err) {
       return {
         runId,

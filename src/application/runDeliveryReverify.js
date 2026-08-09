@@ -199,7 +199,7 @@ function _proveReverifyPreconditions(events, runId, authorizedWorkspaceRoot) {
   if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) {
     throw new Error("runDeliveryReverify: authorizedWorkspaceRoot is required");
   }
-  verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot);
+  verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
 
   // No existing decision — once the Lead decided, reverify is not allowed.
   const decision = events.find(

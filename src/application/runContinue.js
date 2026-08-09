@@ -264,7 +264,7 @@ export async function continueRun({
 
   // 6. Parent workspace ownership must match the authorized binding.
   try {
-    verifyRunWorkspaceOwnership(parentEvents, authorizedWorkspaceRoot);
+    verifyRunWorkspaceOwnership(parentEvents, authorizedWorkspaceRoot, parentRunId);
   } catch {
     return refuse("workspace_mismatch");
   }

@@ -508,7 +508,7 @@ export async function runAwaitResult(input) {
   // STILL rejected — this boundary only prevents a non-usable event from
   // crashing the check; the ownership Error propagates unchanged.
   if (authorizedWorkspaceRoot !== undefined) {
-    verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot);
+    verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
   }
 
   // Safe derive over the usable subset. Defense in depth: usable already
@@ -662,7 +662,7 @@ export async function runAwaitResult(input) {
     // workspace ownership. A transcript replacement between polls must not let
     // foreign terminal data pass on the authority of the initial snapshot.
     if (authorizedWorkspaceRoot !== undefined) {
-      verifyRunWorkspaceOwnership(pollEvents, authorizedWorkspaceRoot);
+      verifyRunWorkspaceOwnership(pollEvents, authorizedWorkspaceRoot, runId);
     }
 
     currentEvents = pollEvents;

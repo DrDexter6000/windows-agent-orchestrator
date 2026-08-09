@@ -129,6 +129,7 @@
       "m12-6-fr08-safeFailures.test.js",
       "m12-11-wait-semantics.test.js",
       "m12-12-semantics.test.js",
+      "m12-14-foregroundOwnership.test.js",
       "mcpBind.test.js",
       "mcpDrilldowns.test.js",
       "mcpRunActivity.test.js",

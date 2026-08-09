@@ -156,7 +156,7 @@ function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, ha
   if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) {
     throw new Error("runDeliveryRepackage: authorizedWorkspaceRoot is required");
   }
-  verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot);
+  verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
 
   // Terminal state must be failed (the retained failure).
   const terminalState = findState(events.filter((e) => e && e.runId === runId));

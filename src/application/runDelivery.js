@@ -650,7 +650,7 @@ function _computeSafeCandidateInventory(events, runId, authorizedWorkspaceRoot, 
   try {
     if (typeof computeInventoryFn !== "function") return null;
     if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) return null;
-    verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot);
+    verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
     const started = events.filter((e) => e && e.type === "run.started" && e.runId === runId);
     if (started.length !== 1) return null;
     const bound = started[0];
@@ -905,7 +905,7 @@ export async function getRunDeliveryReadiness({
 
   let events = await _readTranscript(filePath);
   if (authorizedWorkspaceRoot !== undefined) {
-    verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot);
+    verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
   }
   let terminalState = findState(events);
   let readiness = projectDeliveryReadiness(events, runId);

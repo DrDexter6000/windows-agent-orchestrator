@@ -124,10 +124,11 @@ export async function listRuns(input) {
       continue;
     }
 
-    // Workspace ownership filter (MCP path)
+    // Workspace ownership filter (MCP path). The verifier binds ownership
+    // facts to THIS run (runId from the transcript filename).
     if (workspaceVerifier) {
       try {
-        workspaceVerifier(events);
+        workspaceVerifier(events, runId);
       } catch {
         // Other workspace, missing/duplicate/malformed ownership — skip silently
         continue;

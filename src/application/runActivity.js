@@ -66,7 +66,7 @@ export async function readRunActivity({ runId, runDir, authorizedWorkspaceRoot, 
 
   // Trust-boundary workspace ownership (fail-closed before projection).
   if (authorizedWorkspaceRoot !== undefined && authorizedWorkspaceRoot !== null) {
-    verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot);
+    verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
   }
 
   const agentId = extractCanonicalAgentId(events, runId);

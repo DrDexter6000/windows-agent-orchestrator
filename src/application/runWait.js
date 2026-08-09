@@ -274,7 +274,7 @@ export async function runWait(input) {
 
   // Workspace authorization (MCP path)
   if (authorizedWorkspaceRoot !== undefined) {
-    verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot);
+    verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
   }
 
   const state = findState(events);

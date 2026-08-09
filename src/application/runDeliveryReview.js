@@ -160,7 +160,7 @@ export async function resolveRunDeliveryReviewTarget({
   // 5. Workspace ownership — the run must belong to the authorized source repo.
   //    This must pass BEFORE the Git proof, so a cross-workspace request never
   //    reaches the object database.
-  verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot);
+  verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
 
   // 6. Exact delivery commit proof in the authorized source repo. The kernel
   //    uses explicit commit args (not HEAD), so a dirty or advanced source
@@ -560,7 +560,7 @@ export async function getRunDeliveryReview(
   }
   // Workspace ownership FIRST — a cross-workspace request must never reach the
   // readiness probe, the Git proof, or any content read.
-  verifyRunWorkspaceOwnership(_gateEvents, authorizedWorkspaceRoot);
+  verifyRunWorkspaceOwnership(_gateEvents, authorizedWorkspaceRoot, runId);
 
   const _readiness = projectDeliveryReadiness(_gateEvents, runId);
   if (_readiness === "waiting_for_verification") {
