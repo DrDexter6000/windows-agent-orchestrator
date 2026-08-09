@@ -170,6 +170,16 @@ test("within: backslash separators normalize to POSIX for containment + comparis
   assert.equal(r2.status, "within_declared_paths", "exact-match allowed entry");
 });
 
+test("Windows containment: absolute worktree/event path casing differences remain the same path", () => {
+  const r = scope([
+    startedEvent({ worktreePath: "D:/WAO-Runs/Scope_1" }),
+    writtenEvent("d:/wao-runs/scope_1/src/case.js"),
+  ]);
+  assert.equal(r.status, "within_declared_paths",
+    "Windows drive paths are case-insensitive for absolute containment proof");
+  assert.equal(r.observedFileCount, 1);
+});
+
 test("within: '..' segments that stay inside the worktree normalize and remain evaluable", () => {
   const r = scope([startedEvent(), writtenEvent("src/../test/manifest.json")]);
   assert.equal(r.status, "within_declared_paths", "normalizes to test/manifest.json (allowed)");
@@ -383,6 +393,21 @@ test("secret redaction: status decided on ACTUAL paths; output paths redacted be
   const within = scope([startedEvent(), writtenEvent("src/TKN9SECRET9/x.js")], { env });
   assert.equal(within.status, "within_declared_paths", "decision on the actual path (allowed)");
   assert.ok(!JSON.stringify(within).includes("TKN9SECRET9"));
+});
+
+test("secret-redaction collisions preserve one safe list entry per distinct outside fact", () => {
+  const env = { SCOPE_TOKEN: "TKN9SECRET9" };
+  const r = scope([
+    startedEvent(),
+    writtenEvent("test/TKN9SECRET9/a.js"),
+    writtenEvent("test/[REDACTED:SCOPE_TOKEN]/a.js"),
+  ], { env });
+  assert.equal(r.status, "outside_declared_paths");
+  assert.equal(r.outsidePathCount, 2);
+  assert.equal(r.outsidePaths.length, 2,
+    "redaction must not silently collapse two distinct observed paths into one list item");
+  assert.equal(r.outsidePathsTruncated, false);
+  assert.ok(!JSON.stringify(r).includes("TKN9SECRET9"));
 });
 
 // =====================================================================

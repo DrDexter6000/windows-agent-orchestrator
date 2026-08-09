@@ -98,6 +98,10 @@ function isAbsPathText(s) {
   return /^[A-Za-z]:[\\/]/.test(s);
 }
 
+function isWindowsAbsPathText(s) {
+  return /^[A-Za-z]:\//.test(s) || s.startsWith("//");
+}
+
 /**
  * Pure lexical POSIX normalization ("." / ".." / empty segments) with NO
  * filesystem. Returns null when the segments escape the root — ".." with
@@ -130,9 +134,16 @@ function deriveRelativePath(eventPath, worktreePath) {
   const wt = toPosix(worktreePath).replace(/\/+$/, ""); // root without trailing slash
   if (isAbsPathText(norm)) {
     // Absolute event path: proven inside ONLY when it equals the worktree or
-    // is a descendant on a segment boundary. The worktree itself is not a
-    // file write.
-    if (norm === wt || !norm.startsWith(wt + "/")) return null;
+    // is a descendant on a segment boundary. Windows drive and UNC paths use
+    // Windows' case-insensitive absolute-path semantics for this containment
+    // proof only; the derived Git path still goes through the existing
+    // case-sensitive delivery.isPathAllowed SSOT below.
+    const windowsComparison = isWindowsAbsPathText(norm) && isWindowsAbsPathText(wt);
+    const normForContainment = windowsComparison ? norm.toLowerCase() : norm;
+    const wtForContainment = windowsComparison ? wt.toLowerCase() : wt;
+    // The worktree itself is not a file write.
+    if (normForContainment === wtForContainment
+      || !normForContainment.startsWith(wtForContainment + "/")) return null;
     const rel = norm.slice(wt.length + 1);
     if (rel.length === 0) return null;
     return isValidRepoRelativePath(rel) ? rel : null;
@@ -275,25 +286,22 @@ export function projectScopeObservation(events, { runId, terminal, env } = {}) {
     const outsidePathCount = outside.length;
     const status = outsidePathCount > 0 ? "outside_declared_paths" : "within_declared_paths";
 
-    // Output list: redact -> sanitize -> bound, then dedupe + sort + cap.
-    const safeList = [];
-    const seen = new Set();
-    for (const rel of outside) {
-      const safe = safePath(rel, redactor);
-      if (seen.has(safe)) continue;
-      seen.add(safe);
-      safeList.push(safe);
-    }
+    // Output list: redact -> sanitize -> bound, then sort + cap. Do NOT dedupe
+    // after redaction: two distinct actual paths can intentionally collapse to
+    // the same safe placeholder, and each remains a distinct observed fact.
+    const safeList = outside.map((rel) => safePath(rel, redactor));
     safeList.sort();
+
+    const outsidePaths = safeList.slice(0, SCOPE_OBSERVATION_OUTSIDE_PATHS_CAP);
 
     return {
       status,
       source: SCOPE_OBSERVATION_SOURCE,
       complete: Boolean(terminal),
       observedFileCount: actual.length,
-      outsidePaths: safeList.slice(0, SCOPE_OBSERVATION_OUTSIDE_PATHS_CAP),
+      outsidePaths,
       outsidePathCount,
-      outsidePathsTruncated: outsidePathCount > SCOPE_OBSERVATION_OUTSIDE_PATHS_CAP,
+      outsidePathsTruncated: outsidePathCount > outsidePaths.length,
     };
   } catch {
     return unknown;
