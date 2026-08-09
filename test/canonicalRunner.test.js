@@ -4,7 +4,7 @@
 // The runner is a zero-dependency, repository-owned Node runner; these tests pin
 // its deterministic invariants WITHOUT spawning children:
 //   - manifest validation hard-fails on missing/duplicate/stale/unknown/unknown-group,
-//   - the resource-category set is the closed six,
+//   - the resource-category set is the closed seven,
 //   - the frozen WAVE PLAN covers every category in EXACTLY one wave,
 //   - isolation classification can NEVER wash a first-round failure into PASS.
 //
@@ -33,6 +33,7 @@ function manifestFixture() {
       process: [],
       lock: [],
       timeout: [],
+      mcp: [],
     },
   };
 }
@@ -87,8 +88,8 @@ test("validateManifest: unknown GROUP name is rejected", () => {
   assert.ok(r.errors.some((e) => /unknown group/.test(e) && e.includes("bogus")));
 });
 
-test("MANIFEST_GROUPS is exactly the closed set of six resource categories", () => {
-  assert.deepEqual([...MANIFEST_GROUPS].sort(), ["git", "lock", "process", "pure", "timeout", "worktree"]);
+test("MANIFEST_GROUPS is exactly the closed set of seven resource categories", () => {
+  assert.deepEqual([...MANIFEST_GROUPS].sort(), ["git", "lock", "mcp", "process", "pure", "timeout", "worktree"]);
 });
 
 test("classifyIsolation: fail-alone→pass stays isolation_pass (NEVER washed to PASS)", () => {
@@ -401,6 +402,7 @@ test("causal: building wave specs from the manifest never duplicates a file acro
       process: ["pr1.test.js"],
       lock: ["l1.test.js"],
       timeout: ["t1.test.js"],
+      mcp: ["mc1.test.js"],
     },
   };
   const seen = new Map(); // path -> wave
@@ -426,5 +428,25 @@ test("causal: category→wave coverage is exact and total (every category in exa
   assert.equal(categoryToWave.get("worktree"), "filesystem");
   assert.equal(categoryToWave.get("git"), categoryToWave.get("worktree"), "git and worktree share one wave");
   // every other category is its own wave.
-  for (const cat of ["pure", "process", "lock", "timeout"]) assert.equal(categoryToWave.get(cat), cat);
+  for (const cat of ["pure", "process", "lock", "timeout", "mcp"]) assert.equal(categoryToWave.get(cat), cat);
+});
+
+test("causal: the mcp wave is a serial, exclusive wave that never pools with git/worktree", () => {
+  // Long-lived in-memory MCP request tests get their OWN serial wave so a per-file
+  // request never competes with cross-file load for the SDK request budget.
+  const byName = new Map(WAVE_PLAN.map((w) => [w.name, w]));
+  const mcpWave = byName.get("mcp");
+  assert.ok(mcpWave, "a dedicated 'mcp' wave exists");
+  assert.equal(mcpWave.concurrency, 1, "the mcp wave runs serially (concurrency 1)");
+  assert.deepEqual([...mcpWave.categories].sort(), ["mcp"], "the mcp wave owns exactly the mcp category");
+  // It must NOT be pooled into the filesystem wave (which carries git/worktree at concurrency 16).
+  const fsWave = byName.get("filesystem");
+  assert.ok(fsWave, "filesystem wave exists");
+  assert.ok(!fsWave.categories.includes("mcp"), "mcp is NOT pooled into the filesystem wave");
+  assert.ok(!mcpWave.categories.includes("git") && !mcpWave.categories.includes("worktree"),
+    "the mcp wave carries neither git nor worktree");
+  // mcp is owned by EXACTLY one wave, and that wave is 'mcp'.
+  const owners = WAVE_PLAN.filter((w) => w.categories.includes("mcp"));
+  assert.equal(owners.length, 1, "exactly one wave owns mcp");
+  assert.equal(owners[0].name, "mcp", "the mcp category's owning wave is named 'mcp'");
 });

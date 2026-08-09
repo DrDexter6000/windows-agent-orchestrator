@@ -38,6 +38,8 @@
       "m12-9-runAwaitOutcome.test.js",
       "m12-9-smoke.test.js",
       "m12-10-tool-surface.test.js",
+      "m12-11-wait-projection.test.js",
+      "m12-12-semantics-catalog.test.js",
       "m12-13-isolation-failure.test.js",
       "m12-14-claudeContextIsolation.test.js",
       "m12-14-scopeObservation.test.js",
@@ -128,14 +130,12 @@
       "m11-8c-packageB.test.js",
       "m12-6-dispatchPreflight.test.js",
       "m12-6-fr08-safeFailures.test.js",
-      "m12-11-wait-semantics.test.js",
-      "m12-12-semantics.test.js",
+      "m12-11-wait-services.test.js",
       "m12-14-foregroundOwnership.test.js",
       "m12-14-isolationReason.test.js",
       "mcpBind.test.js",
       "mcpDrilldowns.test.js",
       "mcpRunActivity.test.js",
-      "mcpRunAwaitResult.test.js",
       "mcpRunDeliveryReverify.test.js",
       "mcpRunDispatch.test.js",
       "m12-9-mcpDispatchContract.test.js",
@@ -202,6 +202,11 @@
     "timeout": [
       "reliabilityCertification.test.js",
       "reliabilityMatrix.test.js"
+    ],
+    "mcp": [
+      "m12-11-wait-mcp.test.js",
+      "m12-12-semantics-mcp.test.js",
+      "mcpRunAwaitResult.test.js"
     ]
   }
 }

@@ -56,11 +56,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { availableParallelism, cpus } from "node:os";
 
 // ── Resource categories: the closed set named in the TD-107 contract. ─────────
-// These six are the MANIFEST categories used for ownership + drift detection.
+// These seven are the MANIFEST categories used for ownership + drift detection.
 // They are NOT the execution units — execution is organized into WAVES (below),
-// and one wave may pool several resource categories.
+// and one wave may pool several resource categories. `mcp` is the long-lived
+// in-memory MCP request category (real SDK transport over an in-memory pair);
+// it gets its OWN serial wave so those requests never share the filesystem
+// wave's pooled concurrency budget.
 export const MANIFEST_GROUPS = Object.freeze([
-  "pure", "git", "worktree", "process", "lock", "timeout",
+  "pure", "git", "worktree", "process", "lock", "timeout", "mcp",
 ]);
 
 // ── Execution waves: serial stages derived from the resource categories. ─────
@@ -70,8 +73,11 @@ export const MANIFEST_GROUPS = Object.freeze([
 // serially. The filesystem wave pools git + worktree (both do real git/worktree
 // I/O on isolated temp fixtures) so their two long poles (runDeliveryReverify in
 // git, runDelivery in worktree) overlap instead of running back-to-back; lock
-// stays serial (real singleton port/terminal arbiter). Every manifest category
-// must appear in exactly one wave (validated before execution).
+// stays serial (real singleton port/terminal arbiter). The mcp wave is ALSO
+// serial (concurrency 1): long-lived in-memory MCP request tests run one at a
+// time, isolated from the filesystem wave's pooled budget, so a per-file request
+// never competes with cross-file load for the SDK request budget. Every manifest
+// category must appear in exactly one wave (validated before execution).
 //
 // Concurrency is tuned from MEASURED evidence (filesystem wave, 54 files):
 //   @8  = 212s  (argv-order scheduling strands the alphabetically-late pole)
@@ -86,6 +92,7 @@ const HW = hardwareParallelism();
 export const WAVE_PLAN = Object.freeze([
   { name: "pure", concurrency: 8, categories: ["pure"] },
   { name: "filesystem", concurrency: 16, categories: ["git", "worktree"] },
+  { name: "mcp", concurrency: 1, categories: ["mcp"] },
   { name: "process", concurrency: 3, categories: ["process"] },
   { name: "lock", concurrency: 1, categories: ["lock"] },
   { name: "timeout", concurrency: 2, categories: ["timeout"] },
