@@ -78,7 +78,7 @@ import { projectCollectResult } from "./runCollectProjection.js";
 // outcome. diagnoseFailure / gatherDeliveryView / projectDeliveryReadiness are
 // PURE events projectors — the outcome adds NO second transcript/Git read and
 // NO run_collect call; it derives from the SAME in-memory snapshot.
-import { diagnoseFailure, DIAGNOSIS_CATEGORIES, PROVIDER_DIAGNOSIS_CODES } from "../diagnosis.js";
+import { diagnoseFailure, DIAGNOSIS_CATEGORIES, PROVIDER_DIAGNOSIS_CODES, ISOLATION_VIOLATION_REASONS } from "../diagnosis.js";
 // M12-11: the pure backend-neutral observation/termination projector (SSOT).
 // projectObservation derives the additive observation {outcome, waitedMs,
 // windowMs} + termination facts from the SAME in-memory snapshot, for every
@@ -220,9 +220,32 @@ function readFailureResult({ runId, agentId, state, terminal, cursor, waitedMs, 
     // M12-9 Package C: outcome is unavailable on a read failure — the snapshot
     // was not cleanly observed, so no terminal outcome is projected.
     outcome: null,
+    // M12-14: no isolation reason can be projected from an un-trusted read.
+    isolationFailureReason: null,
     observation,
     termination,
   };
+}
+
+// M12-14: additive top-level isolationFailureReason — the closed-set reason
+// behind an isolation-failure settlement, projected from the SAME in-memory
+// snapshot through the SAME shared delivery view the terminal outcome uses
+// (the outcome.delivery key set is a frozen M12-9 contract, so the reason
+// rides as a top-level sibling of `outcome`). Null unless the run is terminal
+// with a safe workdir_escape isolation failure whose persisted reason is an
+// exact ISOLATION_VIOLATION_REASONS member; a historical reason-absent or
+// malformed reason is NEVER upgraded and never echoed. Never throws.
+function projectIsolationFailureReason(events, runId, terminalState) {
+  try {
+    if (!TERMINAL_STATES.includes(terminalState)) return null;
+    const view = gatherDeliveryView(events, runId, terminalState);
+    const reason = view?.isolationFailure?.reason;
+    return typeof reason === "string" && ISOLATION_VIOLATION_REASONS.includes(reason)
+      ? reason
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -551,6 +574,9 @@ export async function runAwaitResult(input) {
       // M12-9 Package C: terminal AND cleanly observed → project the bounded
       // outcome from THIS snapshot (diagnosis + delivery SSOTs, single read).
       outcome: projectTerminalOutcome(events, runId, state),
+      // M12-14: additive closed-set isolation reason (null unless a safe
+      // workdir_escape settlement with an exact-member reason was persisted).
+      isolationFailureReason: projectIsolationFailureReason(events, runId, state),
       observation,
       termination,
     };
@@ -581,6 +607,8 @@ export async function runAwaitResult(input) {
       result: unobservedResult("not_terminal"),
       // M12-9 Package C: non-terminal → outcome is unavailable (null).
       outcome: null,
+      // M12-14: non-terminal → no terminal settlement reason exists.
+      isolationFailureReason: null,
       observation,
       termination,
     };
@@ -680,6 +708,8 @@ export async function runAwaitResult(input) {
         // M12-9 Package C: terminal during wait → project the bounded outcome
         // from THIS (terminal-observing) snapshot. Single read — no extra I/O.
         outcome: projectTerminalOutcome(currentEvents, runId, currentState),
+        // M12-14: additive closed-set isolation reason from the same snapshot.
+        isolationFailureReason: projectIsolationFailureReason(currentEvents, runId, currentState),
         observation,
         termination,
       };
@@ -728,6 +758,8 @@ export async function runAwaitResult(input) {
     result: unobservedResult("not_terminal"),
     // M12-9 Package C: window expiry, still non-terminal → outcome unavailable.
     outcome: null,
+    // M12-14: window expiry is non-terminal → no terminal settlement reason.
+    isolationFailureReason: null,
     observation,
     termination,
   };

@@ -30,6 +30,7 @@ import {
 } from "../transcript.js";
 import { isValidRunId, isCanonicalCommitId } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, safeProjectPackagingCode } from "../deliveryFailureCodes.js";
+import { ISOLATION_VIOLATION_REASONS } from "../diagnosis.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { proveWorkspace } from "./workspaceBinding.js";
 
@@ -69,14 +70,19 @@ export const DELIVERY_READINESS_STATES = Object.freeze([
 export const SAFE_ISOLATION_VIOLATION_CODES = Object.freeze(["workdir_escape"]);
 
 /**
- * M12-13: project the isolation-violation evidence for a run.
+ * M12-14: project the isolation-violation evidence for a run, including the
+ * additive closed-set REASON.
  *
  * Exactly ONE run-bound run.isolation_violation whose code (a top-level
  * durable fact — transcript append spreads event payloads flat, the same
  * idiom as deliveryCode / verificationStatus) is a member of the safe closed
- * set → that code. Zero bound violations → null (no evidence). Multiple bound
- * violations, or a single one with a missing / malformed / non-safe code →
- * "ambiguous" (fail closed — never treated as evidence, never echoed raw).
+ * set → { code, reason }. The reason is an exact ISOLATION_VIOLATION_REASONS
+ * member, or null when the durable fact is historical (reason-absent) or the
+ * persisted reason is malformed/unknown — an unknown reason is NEVER upgraded
+ * to a closed-set value and the raw malformed value is never echoed. Zero
+ * bound violations → null (no evidence). Multiple bound violations, or a
+ * single one with a missing / malformed / non-safe code → "ambiguous" (fail
+ * closed — never treated as evidence).
  *
  * Envelope-bound: only events whose runId equals the requested runId count — a
  * foreign-run violation in a concatenated/corrupt transcript is ignored, not
@@ -84,9 +90,9 @@ export const SAFE_ISOLATION_VIOLATION_CODES = Object.freeze(["workdir_escape"]);
  *
  * @param {object[]} events
  * @param {string} runId
- * @returns {string|null} safe code, "ambiguous", or null
+ * @returns {{code: string, reason: string|null}|"ambiguous"|null}
  */
-export function projectIsolationViolationCode(events, runId) {
+export function projectIsolationViolation(events, runId) {
   if (!Array.isArray(events)) return null;
   const bound = events.filter(
     (e) => e && e.type === "run.isolation_violation" && e.runId === runId,
@@ -94,9 +100,34 @@ export function projectIsolationViolationCode(events, runId) {
   if (bound.length === 0) return null;
   if (bound.length > 1) return "ambiguous";
   const code = bound[0].code;
-  return typeof code === "string" && SAFE_ISOLATION_VIOLATION_CODES.includes(code)
-    ? code
-    : "ambiguous";
+  if (typeof code !== "string" || !SAFE_ISOLATION_VIOLATION_CODES.includes(code)) {
+    return "ambiguous";
+  }
+  const reason = bound[0].reason;
+  return {
+    code,
+    reason: typeof reason === "string" && ISOLATION_VIOLATION_REASONS.includes(reason)
+      ? reason
+      : null,
+  };
+}
+
+/**
+ * M12-13: project the isolation-violation CODE for a run.
+ *
+ * Exactly ONE run-bound run.isolation_violation whose code is a member of the
+ * safe closed set → that code. Zero bound violations → null. Multiple bound
+ * violations, or a single one with a missing / malformed / non-safe code →
+ * "ambiguous" (fail closed). Delegates to projectIsolationViolation (M12-14)
+ * so code and reason projections can never diverge on what counts as evidence.
+ *
+ * @param {object[]} events
+ * @param {string} runId
+ * @returns {string|null} safe code, "ambiguous", or null
+ */
+export function projectIsolationViolationCode(events, runId) {
+  const violation = projectIsolationViolation(events, runId);
+  return violation === "ambiguous" ? "ambiguous" : violation?.code ?? null;
 }
 
 const WAITING_READINESS_STATES = new Set(["waiting_for_packaging", "waiting_for_verification"]);
@@ -549,9 +580,12 @@ export function gatherDeliveryView(events, runId, terminalState) {
   // from a packaging failure (deliveryFailure stays null; NO candidateInventory /
   // repackage / salvage / retry / stop / decision surface). Malformed/multiple
   // violations fail closed to the ambiguous marker.
+  // M12-14: isolationFailure carries the additive closed-set { code, reason };
+  // a historical reason-absent or malformed reason projects reason:null —
+  // never upgraded, never echoed raw.
   if (_deliveryWasRequested(events, runId) && TERMINAL_STATES.includes(terminalState)) {
-    const isolationCode = projectIsolationViolationCode(events, runId);
-    if (isolationCode === "ambiguous") {
+    const isolation = projectIsolationViolation(events, runId);
+    if (isolation === "ambiguous") {
       return {
         runId,
         terminalState,
@@ -560,14 +594,14 @@ export function gatherDeliveryView(events, runId, terminalState) {
         ambiguous: true,
       };
     }
-    if (isolationCode === "workdir_escape") {
+    if (isolation?.code === "workdir_escape") {
       return {
         runId,
         terminalState,
         deliveryAvailable: false,
         deliveryRequested: true,
         deliveryFailure: null,
-        isolationFailure: { code: "workdir_escape" },
+        isolationFailure: { code: "workdir_escape", reason: isolation.reason },
       };
     }
   }

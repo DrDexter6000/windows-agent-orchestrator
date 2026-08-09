@@ -66,6 +66,66 @@ export const PROVIDER_DIAGNOSIS_CODES = Object.freeze([
   "invalid_credential",
 ]);
 
+// M12-14: the frozen closed-set SSOT of isolation-violation REASONS — WHY the
+// delivery containment gate fired. The compat code stays "workdir_escape"; the
+// additive reason distinguishes a confirmed outside path (lexical / physical)
+// from a missing/duplicate/pending/unconfirmed write correlation and from an
+// unresolvable physical path. Produced ONLY by runManager's delivery
+// containment gate; consumed by the delivery/await projections and this
+// module's fact wording. This module is the single home because it must stay
+// import-pure (the observation projector's architectural contract) while both
+// the write side (runManager) and the read side (runDelivery/runAwaitResult/
+// MCP schema) need the one set — every consumer imports it from HERE.
+export const ISOLATION_VIOLATION_REASONS = Object.freeze([
+  // write_intent (pre-write telemetry)
+  "write_intent_lexical_outside", // reported intent path is lexically not contained
+  "write_intent_physical_outside", // intent resolves (junction/link) outside the worktree
+  "write_intent_physical_unresolved", // physical location of the intent cannot be proven
+  "write_intent_missing_tool_call_id", // no correlatable tool call id
+  "write_intent_duplicate_tool_call_id", // tool call id already has an open write
+  "write_intent_pending_limit", // pending write-intent cap reached
+  "write_intent_pending_at_completion", // tracked write still unconfirmed at done
+  "write_intent_correlation_unconfirmed", // unrecognized correlation state (fail closed)
+  // file_written (post-write evidence)
+  "file_written_lexical_outside", // reported write path is lexically not contained
+  "file_written_physical_outside", // write resolves (junction/link) outside the worktree
+  "file_written_physical_unresolved", // physical location of the write cannot be proven
+]);
+
+// Static fact wording per reason. Correlation and physical-unresolved facts
+// must NEVER claim "outside" — they state a confirmation failure, not an
+// escape. A historical (reason-absent) or malformed reason maps to the
+// generic fact, which also never invents "outside". No dynamic content ever
+// enters these strings.
+const ISOLATION_VIOLATION_FACTS = Object.freeze({
+  write_intent_lexical_outside: "worker reported an intended write path outside the authorized delivery worktree",
+  write_intent_physical_outside: "worker reported an intended write path that physically resolves outside the authorized delivery worktree",
+  write_intent_physical_unresolved: "the physical location of an intended write path could not be confirmed inside the authorized delivery worktree",
+  write_intent_missing_tool_call_id: "a write intent had no correlatable tool call id, so the write could not be confirmed",
+  write_intent_duplicate_tool_call_id: "a write intent reused a tool call id, so the write could not be confirmed",
+  write_intent_pending_limit: "the pending write-intent cap was reached, so the write could not be confirmed",
+  write_intent_pending_at_completion: "a write intent was still unconfirmed when the worker reported completion",
+  write_intent_correlation_unconfirmed: "a write intent's correlation state was not confirmable, so the write could not be confirmed",
+  file_written_lexical_outside: "worker reported a file write outside the authorized delivery worktree",
+  file_written_physical_outside: "worker reported a file write that physically resolves outside the authorized delivery worktree",
+  file_written_physical_unresolved: "the physical location of a reported file write could not be confirmed inside the authorized delivery worktree",
+});
+const ISOLATION_VIOLATION_FACT_UNKNOWN =
+  "the delivery containment gate rejected a reported write (no trusted reason recorded)";
+
+/**
+ * Project the safe fact wording for an isolation violation's persisted reason.
+ * Only an exact closed-set member selects its wording; anything else (absent,
+ * non-string, unknown value) falls back to the generic no-"outside" fact.
+ * @param {unknown} reason
+ * @returns {string}
+ */
+function factForIsolationViolation(reason) {
+  return typeof reason === "string" && Object.hasOwn(ISOLATION_VIOLATION_FACTS, reason)
+    ? ISOLATION_VIOLATION_FACTS[reason]
+    : ISOLATION_VIOLATION_FACT_UNKNOWN;
+}
+
 // Provider access denial facts that classify as provider_auth even when they
 // contain no AUTH_SIGNAL token. The production fact "Your organization has
 // disabled Claude subscription access for Claude Code ..." contains neither
@@ -162,11 +222,17 @@ function diagnoseFailureInner(events, expectedRunId) {
     )
     : undefined;
   if (isolationViolation) {
+    // M12-14: the fact wording is reason-aware. Only an exact closed-set
+    // reason selects its wording (confirmed-outside reasons may say
+    // "outside"; correlation/physical-unresolved reasons state a confirmation
+    // failure instead). A historical reason-absent or malformed reason falls
+    // back to the generic fact — it never invents "outside" and the raw
+    // malformed value is never echoed.
     return {
       category: "workdir_escape",
       evidence: [{
         eventType: "run.isolation_violation",
-        fact: "worker reported a file write outside the authorized delivery worktree",
+        fact: factForIsolationViolation(isolationViolation.reason),
       }],
     };
   }

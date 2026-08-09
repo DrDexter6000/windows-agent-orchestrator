@@ -16,6 +16,7 @@ import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./
 import { inheritedEnvNames } from "./envPolicy.js";
 import { validateSessionReuseRouting } from "./application/sessionReuse.js";
 import { WRITE_INTENT_CORRELATION_STATUS } from "./runEvent.js";
+import { ISOLATION_VIOLATION_REASONS } from "./diagnosis.js";
 
 /**
  * RunManager 持有活跃 run 的生命周期。
@@ -69,63 +70,90 @@ function isPathInside(base, target) {
     );
 }
 
+// M12-14: win32-only MSYS (Git-Bash) drive-path normalization. A Claude worker
+// running under Git-Bash reports the in-worktree target in MSYS form
+// ("/d/proj/.../src/a.js" for "D:\proj\...\src\a.js"). Without normalization,
+// win32 resolve() treats that as a rooted path on the worktree's drive
+// ("<drive>:\d\...") — always outside the worktree — falsely terminalizing an
+// honest in-worktree write as workdir_escape. Normalize ONLY the anchored
+// absolute drive pattern ("/d/..." or exactly "/d") to the equivalent
+// drive-root path BEFORE lexical containment. Arbitrary slash paths ("/tmp",
+// "//share", relative paths) are never rewritten, and off win32 the input
+// passes through unchanged.
+const MSYS_DRIVE_PATH_RE = /^\/([A-Za-z])(?:\/|$)/;
+
+function normalizeMsysDrivePath(rawPath) {
+  if (process.platform !== "win32" || typeof rawPath !== "string") return rawPath;
+  const match = MSYS_DRIVE_PATH_RE.exec(rawPath);
+  if (!match) return rawPath;
+  return `${match[1].toUpperCase()}:/${rawPath.slice(match[0].length)}`;
+}
+
+// M12-14: containment verdicts — the reason suffixes of ISOLATION_VIOLATION_REASONS.
+// "inside" passes; "lexical_outside" is a confirmed lexical escape (or an
+// unusable/blank path, which cannot be contained); "physical_outside" is a
+// confirmed physical escape (junction/link resolves outside); "physical_unresolved"
+// means the physical location could not be proven (fail closed without
+// claiming outside).
 function resolveLexicallyContainedWrite(rawPath, effectiveCwd) {
   if (typeof rawPath !== "string" || rawPath.trim().length === 0) return false;
   if (typeof effectiveCwd !== "string" || effectiveCwd.trim().length === 0) return false;
+  const candidate = normalizeMsysDrivePath(rawPath);
   const base = resolve(effectiveCwd);
-  const target = resolve(base, rawPath);
+  const target = resolve(base, candidate);
   return isPathInside(base, target) ? { base, target } : false;
 }
 
-function isReportedWriteInsideWorkdir(rawPath, effectiveCwd) {
+// file_written is post-write evidence, so inability to prove the target's
+// physical location fails closed for delivery runs (physical_unresolved).
+function classifyReportedWriteContainment(rawPath, effectiveCwd) {
   const lexical = resolveLexicallyContainedWrite(rawPath, effectiveCwd);
-  if (!lexical) return false;
+  if (!lexical) return "lexical_outside";
   try {
     // A junction/symlink inside the worktree may resolve to an outside target.
-    // file_written is post-write evidence, so inability to prove the target's
-    // physical location fails closed for delivery runs.
     const physicalBase = realpathSync.native(lexical.base);
     const physicalTarget = realpathSync.native(lexical.target);
-    return isPathInside(physicalBase, physicalTarget);
+    return isPathInside(physicalBase, physicalTarget) ? "inside" : "physical_outside";
   } catch {
-    return false;
+    return "physical_unresolved";
   }
 }
 
-function isReportedWriteIntentInsideWorkdir(rawPath, effectiveCwd) {
+function classifyReportedWriteIntentContainment(rawPath, effectiveCwd) {
   const lexical = resolveLexicallyContainedWrite(rawPath, effectiveCwd);
-  if (!lexical) return false;
+  if (!lexical) return "lexical_outside";
+  let physicalBase;
   try {
-    const physicalBase = realpathSync.native(lexical.base);
-    try {
-      // lstat distinguishes a genuinely missing target from a dangling link.
-      // Only a genuine ENOENT may use nearest-existing-ancestor validation.
-      lstatSync(lexical.target);
-    } catch (error) {
-      if (error?.code !== "ENOENT") return false;
-      let ancestor = dirname(lexical.target);
-      while (true) {
-        try {
-          const physicalAncestor = realpathSync.native(ancestor);
-          return isPathInside(physicalBase, physicalAncestor);
-        } catch (ancestorError) {
-          if (ancestorError?.code !== "ENOENT") return false;
-          const parent = dirname(ancestor);
-          if (parent === ancestor) return false;
-          ancestor = parent;
-        }
+    physicalBase = realpathSync.native(lexical.base);
+  } catch {
+    return "physical_unresolved";
+  }
+  try {
+    // lstat distinguishes a genuinely missing target from a dangling link.
+    // Only a genuine ENOENT may use nearest-existing-ancestor validation.
+    lstatSync(lexical.target);
+  } catch (error) {
+    if (error?.code !== "ENOENT") return "physical_unresolved";
+    let ancestor = dirname(lexical.target);
+    while (true) {
+      try {
+        const physicalAncestor = realpathSync.native(ancestor);
+        return isPathInside(physicalBase, physicalAncestor) ? "inside" : "physical_outside";
+      } catch (ancestorError) {
+        if (ancestorError?.code !== "ENOENT") return "physical_unresolved";
+        const parent = dirname(ancestor);
+        if (parent === ancestor) return "physical_unresolved";
+        ancestor = parent;
       }
     }
-    try {
-      const physicalTarget = realpathSync.native(lexical.target);
-      return isPathInside(physicalBase, physicalTarget);
-    } catch {
-      // Existing but unresolvable targets (for example dangling links) fail
-      // closed; ancestor walking is reserved for lstat ENOENT above.
-      return false;
-    }
+  }
+  try {
+    const physicalTarget = realpathSync.native(lexical.target);
+    return isPathInside(physicalBase, physicalTarget) ? "inside" : "physical_outside";
   } catch {
-    return false;
+    // Existing but unresolvable targets (for example dangling links) fail
+    // closed; ancestor walking is reserved for lstat ENOENT above.
+    return "physical_unresolved";
   }
 }
 
@@ -1265,7 +1293,47 @@ export class Run {
     let budgetExceeded = false;
     let budgetUsed = 0;
     let isolationViolationKind = null;
+    let isolationViolationReason = null;
     const pendingDeliveryWriteToolCallIds = new Set();
+    // M12-14: classify WHY a reported write fails the delivery containment
+    // gate. Returns a closed-set ISOLATION_VIOLATION_REASONS member, or null
+    // when the event is not a violating write. Non-delivery runs are never
+    // gated (unchanged). Correlation failures are checked BEFORE the path
+    // checks, mirroring the prior boolean short-circuit exactly — the gate
+    // itself (what fails closed) is unchanged; only the truthful reason is new.
+    const classifyDeliveryWriteViolation = (rawEvent) => {
+      if (!this.deliveryContext) return null;
+      if (rawEvent?.kind === "write_intent") {
+        if (rawEvent.correlationStatus !== WRITE_INTENT_CORRELATION_STATUS.TRACKED) {
+          switch (rawEvent.correlationStatus) {
+            case WRITE_INTENT_CORRELATION_STATUS.MISSING_TOOL_CALL_ID:
+              return "write_intent_missing_tool_call_id";
+            case WRITE_INTENT_CORRELATION_STATUS.DUPLICATE_TOOL_CALL_ID:
+              return "write_intent_duplicate_tool_call_id";
+            case WRITE_INTENT_CORRELATION_STATUS.PENDING_LIMIT:
+              return "write_intent_pending_limit";
+            default:
+              return "write_intent_correlation_unconfirmed";
+          }
+        }
+        if (!isConfirmableToolCallId(rawEvent.toolCallId)) {
+          return "write_intent_missing_tool_call_id";
+        }
+        if (pendingDeliveryWriteToolCallIds.has(rawEvent.toolCallId)) {
+          return "write_intent_duplicate_tool_call_id";
+        }
+        if (pendingDeliveryWriteToolCallIds.size >= MAX_PENDING_DELIVERY_WRITE_INTENTS) {
+          return "write_intent_pending_limit";
+        }
+        const verdict = classifyReportedWriteIntentContainment(rawEvent.path, this.effectiveCwd);
+        return verdict === "inside" ? null : `write_intent_${verdict}`;
+      }
+      if (rawEvent?.kind === "file_written") {
+        const verdict = classifyReportedWriteContainment(rawEvent.path, this.effectiveCwd);
+        return verdict === "inside" ? null : `file_written_${verdict}`;
+      }
+      return null;
+    };
     const markRunningOnce = async (reason) => {
       if (this.state !== "running" && !TERMINAL_STATES.includes(this.state)) {
         await this._transition(this.state, "running", reason);
@@ -1275,26 +1343,6 @@ export class Run {
     try {
       for await (const rawEvent of this.handle.events(controller.signal, { pollInterval, silentTimeout })) {
         const ev = this._redact(rawEvent);
-        const unconfirmableTrackedWriteIntent = rawEvent?.kind === "write_intent"
-          && (
-            rawEvent.correlationStatus !== WRITE_INTENT_CORRELATION_STATUS.TRACKED
-            || !isConfirmableToolCallId(rawEvent.toolCallId)
-            || pendingDeliveryWriteToolCallIds.has(rawEvent.toolCallId)
-            || pendingDeliveryWriteToolCallIds.size >= MAX_PENDING_DELIVERY_WRITE_INTENTS
-          );
-        const reportedWriteEscapes = this.deliveryContext && (
-          (
-            rawEvent?.kind === "write_intent"
-            && (
-              unconfirmableTrackedWriteIntent
-              || !isReportedWriteIntentInsideWorkdir(rawEvent.path, this.effectiveCwd)
-            )
-          )
-          || (
-            rawEvent?.kind === "file_written"
-            && !isReportedWriteInsideWorkdir(rawEvent.path, this.effectiveCwd)
-          )
-        );
         // 若已被 abort，停止处理后续事件（避免覆盖 aborted 状态）
         if (this._aborted) break;
         // TD-99：若 _transition 把内存 state 同步为终态（外部写了终态，仲裁 rejected），
@@ -1335,6 +1383,7 @@ export class Run {
             && pendingDeliveryWriteToolCallIds.size > 0
           ) {
             isolationViolationKind = "write_intent";
+            isolationViolationReason = "write_intent_pending_at_completion";
             break;
           }
           doneReason = ev.reason;
@@ -1354,8 +1403,10 @@ export class Run {
           ev.kind === "tool_use" ||
           ev.kind === "tool_result"
         ) {
-          if (reportedWriteEscapes) {
+          const writeViolationReason = classifyDeliveryWriteViolation(rawEvent);
+          if (writeViolationReason) {
             isolationViolationKind = rawEvent.kind;
+            isolationViolationReason = writeViolationReason;
             break;
           }
           await markRunningOnce("first_event");
@@ -1410,11 +1461,17 @@ export class Run {
     }
 
     if (isolationViolationKind) {
+      // M12-14: persist ONLY the closed-set code/eventKind/reason — never the
+      // rejected raw path. The additive reason is persisted only when it is an
+      // exact closed-set member; readers treat an absent reason as unknown.
+      const isolationReasonPayload = ISOLATION_VIOLATION_REASONS.includes(isolationViolationReason)
+        ? { reason: isolationViolationReason }
+        : {};
       const tResult = await this._transition(this.state, "failed", "workdir_escape", {
         factEvents: [
           {
             type: "run.isolation_violation",
-            payload: { code: "workdir_escape", eventKind: isolationViolationKind },
+            payload: { code: "workdir_escape", eventKind: isolationViolationKind, ...isolationReasonPayload },
           },
           {
             type: "run.error",

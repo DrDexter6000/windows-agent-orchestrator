@@ -257,7 +257,9 @@ test("IR-06: gatherDeliveryView surfaces isolationFailure (and NO candidateInven
     assert.equal(Object.prototype.hasOwnProperty.call(v, "ambiguous"), false,
       "isolation-failure view is NOT the ambiguous marker");
     assert.equal(v.deliveryFailure, null);
-    assert.deepEqual(v.isolationFailure, { code: "workdir_escape" });
+    // M12-14: the seeded (historical-shaped) violation carries no reason, so the
+    // additive closed-set reason projects null — never upgraded, never invented.
+    assert.deepEqual(v.isolationFailure, { code: "workdir_escape", reason: null });
     assert.equal(Object.prototype.hasOwnProperty.call(v, "candidateInventory"), false,
       "isolation failure must NOT surface a candidateInventory");
     assert.equal(Object.prototype.hasOwnProperty.call(v, "repackageAvailable"), false);
@@ -314,6 +316,10 @@ test("IR-08: MCP run_await_result — real handler + schema expose isolationFail
       const payload = JSON.parse(res.content[0].text);
       assert.equal(payload.outcome.delivery.isolationFailureCode, "workdir_escape",
         "run_await_result outcome.delivery.isolationFailureCode");
+      // M12-14: the historical reason-absent violation projects the additive
+      // top-level reason as null — never upgraded, never invented.
+      assert.equal(payload.isolationFailureReason, null,
+        "run_await_result isolationFailureReason (reason-absent → null)");
       assert.equal(payload.outcome.delivery.available, false);
       // The strict output schema validates the new field (no extra keys, closed set).
       assert.ok(payload.outcome, "strict schema parse passed");
@@ -361,7 +367,7 @@ test("IR-09: MCP run_delivery — point-in-time AND wait path surface isolationF
       assert.equal(payload.deliveryRequested, true);
       assert.equal(Object.prototype.hasOwnProperty.call(payload, "ambiguous"), false,
         "isolation-failure payload is NOT the ambiguous marker");
-      assert.deepEqual(payload.isolationFailure, { code: "workdir_escape" });
+      assert.deepEqual(payload.isolationFailure, { code: "workdir_escape", reason: null });
       // No recovery surface: candidateInventory/candidateKind stay NULL (the
       // wire schema always carries them as nullable) and no repackage surface.
       assert.equal(payload.candidateInventory, null);
@@ -375,7 +381,7 @@ test("IR-09: MCP run_delivery — point-in-time AND wait path surface isolationF
       });
       assert.ok(waitRes && !waitRes.isError, `wait path must succeed: ${JSON.stringify(waitRes)}`);
       const waitPayload = JSON.parse(waitRes.content[0].text);
-      assert.deepEqual(waitPayload.isolationFailure, { code: "workdir_escape" });
+      assert.deepEqual(waitPayload.isolationFailure, { code: "workdir_escape", reason: null });
       assert.equal(waitPayload.readiness, "isolation_failed");
     } finally {
       await client.close();
@@ -466,7 +472,7 @@ test("IR-11: MCP run_delivery point-in-time isolationFailure → delivery.isolat
       });
       assert.ok(res && !res.isError, `point-in-time must succeed: ${JSON.stringify(res)}`);
       const payload = JSON.parse(res.content[0].text);
-      assert.deepEqual(payload.isolationFailure, { code: "workdir_escape" });
+      assert.deepEqual(payload.isolationFailure, { code: "workdir_escape", reason: null });
       assert.equal(payload.readiness, undefined,
         "point-in-time path carries no readiness label");
       // RED actual today: [delivery.waiting]. GREEN target: [delivery.isolation_failed].

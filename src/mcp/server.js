@@ -201,7 +201,7 @@ import {
   VERIFICATION_TIMEOUT_MS_MAX,
 } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, UNKNOWN_PACKAGING_CODE } from "../deliveryFailureCodes.js";
-import { DIAGNOSIS_CATEGORIES, PROVIDER_DIAGNOSIS_CODES } from "../diagnosis.js";
+import { DIAGNOSIS_CATEGORIES, PROVIDER_DIAGNOSIS_CODES, ISOLATION_VIOLATION_REASONS } from "../diagnosis.js";
 import { RUN_STATES, RECOVERY_CANDIDATE_KINDS, REVERIFY_FAILURE_CODES, TERMINAL_STATES } from "../transcript.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 import {
@@ -911,9 +911,8 @@ const RUN_DIAGNOSE_DESCRIPTION =
   "Diagnose a run's failure category and signal event types. Read-only, idempotent. " +
   "Returns only safe machine fields (category, event types, counts). Does not return " +
   "raw error text, commands, file paths, or tool payloads. The Lead decides what to " +
-  "do next; this tool gives facts only. Each result carries semanticNotes that " +
-  "self-explain the current facts (meaning + doesNotMean); per-note detail: " +
-  "wao://semantics/{id}.";
+  "do next; this tool gives facts only. Each result carries self-explaining " +
+  "semanticNotes; per-note detail: wao://semantics/{id}.";
 
 // ===== run_delivery (read-only query) constants =====
 
@@ -1120,17 +1119,46 @@ const RUN_DELIVERY_OUTPUT_BASE = z.object({
 // M12-13: strict structured isolation-failure shape. Standalone run_delivery
 // ONLY — the review bundle embeds RUN_DELIVERY_OUTPUT_BASE (strict), which must
 // stay byte-identical and never acquire this field.
+// M12-14: additive nullable `reason` — the closed-set containment-failure
+// reason. The wire shape is a BOUNDED pattern (derived from the SSOT's
+// event-kind namespaces + max length), NOT a serialized enum — the same
+// wire-size discipline as the M12-12 semantic-note id shape. The application
+// SSOT (ISOLATION_VIOLATION_REASONS) remains the EXACT membership authority:
+// safeProjectIsolationFailure admits only exact members, so an
+// absent/malformed/unknown reason always crosses the wire as null.
+const ISOLATION_FAILURE_REASON_MAX_LEN = ISOLATION_VIOLATION_REASONS.reduce(
+  (max, reason) => Math.max(max, reason.length),
+  0,
+);
+const ISOLATION_FAILURE_REASON_KINDS = Object.freeze([
+  ...new Set(ISOLATION_VIOLATION_REASONS.map((reason) => (
+    reason.startsWith("write_intent_") ? "write_intent" : "file_written"
+  ))),
+]);
+const ISOLATION_FAILURE_REASON_PATTERN = new RegExp(
+  `^(${ISOLATION_FAILURE_REASON_KINDS.join("|")})_[a-z0-9_]+$`,
+);
+const ISOLATION_FAILURE_REASON_SCHEMA = z.string()
+  .max(ISOLATION_FAILURE_REASON_MAX_LEN)
+  .regex(ISOLATION_FAILURE_REASON_PATTERN);
+
 const ISOLATION_FAILURE_SCHEMA = z.object({
   code: z.literal("workdir_escape"),
+  reason: ISOLATION_FAILURE_REASON_SCHEMA.nullable(),
 }).strict();
 
 // M12-13: project the isolation-failure evidence through the strict closed
 // shape. Only the exact safe code survives; anything else (missing/malformed/
 // injected/unknown) collapses to null — never echoed raw, never an error.
+// M12-14: the reason is admitted ONLY as an exact ISOLATION_VIOLATION_REASONS
+// member; an absent/malformed/unknown reason projects null (never upgraded).
 function safeProjectIsolationFailure(value) {
   if (!value || typeof value !== "object") return null;
   if (value.code !== "workdir_escape") return null;
-  return { code: "workdir_escape" };
+  const reason = typeof value.reason === "string" && ISOLATION_VIOLATION_REASONS.includes(value.reason)
+    ? value.reason
+    : null;
+  return { code: "workdir_escape", reason };
 }
 
 // Standalone run_delivery output: the legacy base plus the REQUIRED M12-8B
@@ -1166,8 +1194,7 @@ const RUN_DELIVERY_DESCRIPTION =
   "append) returning a readiness label + waitReturnedEarly; pending-at-deadline is truthful, " +
   "never an error, and the tool never stop/retry/accept/rejects. candidateKind/" +
   "candidateInventory on a recovery candidate are advisory only. Each result carries " +
-  "semanticNotes that self-explain the current facts (meaning + doesNotMean); " +
-  "per-note detail: wao://semantics/{id}.";
+  "self-explaining semanticNotes; per-note detail: wao://semantics/{id}.";
 
 /**
  * M11-12B: project a safe, factual verification-failure summary from the raw
@@ -1874,8 +1901,8 @@ const RUN_WAIT_DESCRIPTION =
   "this call returns no result (transport dropped/timed out), the observation is unknown — these " +
   "read-only tools did NO control-plane mutation and did not stop anything. Re-read point-in-" +
   "time via run_await_result(waitMs:0) or run_status; never infer liveness or a stop from " +
-  "transport loss. Each result carries semanticNotes that self-explain the current facts " +
-  "(meaning + doesNotMean); per-note detail: wao://semantics/{id}.";
+  "transport loss. Each result carries self-explaining semanticNotes; " +
+  "per-note detail: wao://semantics/{id}.";
 
 // ===== run_await_result (M12-3 read-only composite) constants =====
 //
@@ -1987,6 +2014,14 @@ const RUN_AWAIT_RESULT_OUTPUT = z.object({
   // AND cleanly observed; null on non-terminal or read_failure. Closed-set safe
   // facts only (diagnosis + delivery); the Lead retains all semantic judgment.
   outcome: RUN_AWAIT_RESULT_OUTCOME.nullable(),
+  // M12-14: additive nullable closed-set isolation-failure REASON — a top-level
+  // sibling of `outcome` because the outcome.delivery key set is a frozen M12-9
+  // contract. Non-null ONLY when the outcome carries a workdir_escape isolation
+  // settlement AND the persisted reason is an exact SSOT member; a historical
+  // reason-absent or malformed reason is null — never upgraded, never echoed.
+  // Bounded pattern shape (not a serialized enum): same wire discipline as the
+  // M12-12 note-id shape; ISOLATION_VIOLATION_REASONS is the exact authority.
+  isolationFailureReason: ISOLATION_FAILURE_REASON_SCHEMA.nullable(),
   // M12-11: additive observation/termination facts (same shape as run_wait).
   observation: OBSERVATION_FACT,
   termination: TERMINATION_FACT.nullable(),
@@ -2013,17 +2048,15 @@ const RUN_AWAIT_RESULT_DESCRIPTION =
   "closed-set facts: observation {outcome in point_in_time/window_expired/terminal/read_failure, " +
   "waitedMs, windowMs} and termination {state, source, configuredMs, policySource} — termination " +
   "is non-null ONLY on a cleanly observed terminal (null on window expiry or read_failure, so an " +
-  "expired window never means a stop). Returns early on terminal; waitMs=0 is a point-in-time " +
-  "read. Advisory: never stop/retry/decide/accept/reject/repackage/append transcript events, and " +
-  "makes no semantic judgment. Snapshot-only. result.status distinguishes terminal from " +
-  "not_terminal/unavailable; a read failure yields a closed-set readFailureReason (null " +
-  "otherwise — never an error message/path/credential). Idempotent (zero messages.collected). " +
-  "Host-neutral transport recovery: if this call returns no result (transport dropped/timed " +
-  "out), the observation is unknown — these read-only tools did NO control-plane mutation and " +
-  "did not stop anything. Re-read point-in-time via run_await_result(waitMs:0) or run_status; " +
-  "never infer liveness or a stop from transport loss. Atomic tools (run_wait/run_collect/" +
-  "run_status) remain available. Each result carries semanticNotes that self-explain the " +
-  "current facts (meaning + doesNotMean); per-note detail: wao://semantics/{id}.";
+  "expired window never means a stop). Returns early on terminal. Advisory: never stop/retry/" +
+  "decide/accept/reject/repackage/append transcript events, and makes no semantic judgment. " +
+  "Snapshot-only. result.status distinguishes terminal from not_terminal/unavailable; a read " +
+  "failure yields a closed-set readFailureReason (null otherwise — never an error message/" +
+  "path/credential). Idempotent. Host-neutral transport recovery: if this call returns no " +
+  "result (transport dropped/timed out), the observation is unknown — these read-only tools " +
+  "did NO control-plane mutation. Re-read point-in-time via run_await_result(waitMs:0) or " +
+  "run_status; never infer liveness or a stop from transport loss. Each result carries " +
+  "self-explaining semanticNotes; per-note detail: wao://semantics/{id}.";
 
 // ===== run_activity (M12-8 read-only activity timeline) constants =====
 //
@@ -3919,6 +3952,14 @@ export function createWaoMcpServer({
           ownerHeartbeat: result.ownerHeartbeat,
           result: result.result,
           outcome: result.outcome ?? null,
+          // M12-14: additive closed-set isolation reason. Gated on the ALREADY
+          // safe-projected outcome code so the reason can never appear without
+          // a workdir_escape settlement, and admitted only as an exact SSOT
+          // member — an absent/malformed/unknown value collapses to null.
+          isolationFailureReason: result.outcome?.delivery?.isolationFailureCode === "workdir_escape"
+            && ISOLATION_VIOLATION_REASONS.includes(result.isolationFailureReason)
+            ? result.isolationFailureReason
+            : null,
           // M12-11: additive observation/termination facts (same shape as
           // run_wait). No fabricated fields — termination is null unless a
           // terminal state was cleanly observed.
