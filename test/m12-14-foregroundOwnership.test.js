@@ -24,6 +24,11 @@
 //     conflicting background-vs-started / unprovable / cross-workspace facts;
 //   - fixed error messages never echo paths or dynamic values;
 //   - stop authorization keeps using the SAME verified ownership SSOT.
+//   - M12-16: the authorized root is proved exactly ONCE; per-run ownership
+//     identity is canonical-path equality with that proof (absolute + realpath
+//     resolve to the same proven directory ⇒ identical proven workspace) —
+//     relative / missing / un-realpathable / different / ambiguous /
+//     conflicting / cross-run facts remain fail-closed with fixed messages.
 //
 // Real-git cases use isolated temp repos; fail-closed-before-Git cases use an
 // injected proveWorkspaceFn spy that must never be reached by the ownership
@@ -652,6 +657,11 @@ test("M12-14-FG-OWN-18: a valid bound fact for the requested run uses ONLY the b
 // The spy proves ONLY the authorized root (verifier construction). Any call
 // with an ownership cwd means the finder let an ownership fact reach the Git
 // proof — exactly what the "before Git access" tests forbid.
+//
+// M12-16: ownership identity is established by canonical path equality, not
+// per-run Git. The injectable canonicalizeWorkspacePathFn double mirrors
+// realpathSync for the fake C:\... fixtures (realpath would throw — the
+// fail-closed fixture paths below rely on THIS throw).
 
 function createVerifierWithSpy(proofCalls) {
   const proveWorkspaceFn = (path) => {
@@ -667,5 +677,122 @@ function createVerifierWithSpy(proofCalls) {
     }
     throw new Error("probe sentinel: unexpected ownership path reached Git");
   };
-  return createRunWorkspaceVerifier("C:\\Target\\Repo", { proveWorkspaceFn });
+  const canonicalizeWorkspacePathFn = (path) => {
+    if (path === "C:\\Target\\Repo" || path === "C:\\TARGET\\REPO") return "C:/Target/Repo";
+    if (path === "D:\\Other\\Repo") return "D:/Other/Repo";
+    throw new Error("unrealpathable probe sentinel must not escape");
+  };
+  return createRunWorkspaceVerifier("C:\\Target\\Repo", { proveWorkspaceFn, canonicalizeWorkspacePathFn });
 }
+
+// ── M12-16: causal Git-proof removal — identity via canonical path, no per-run Git ──
+//
+// The authorized root is proved ONCE as a canonical Git top-level. An absolute
+// ownership cwd whose realpath is the same canonical directory is already the
+// identical proven workspace — running Git status/rev-parse again cannot add
+// identity information, so NO per-run Git proof may occur. Relative, missing,
+// un-realpathable, different, ambiguous, conflicting, and cross-run facts stay
+// fail-closed. These tests pin the NEW contract with Git-proof and
+// canonicalization spies (deterministic, no wall clock, no second cache).
+
+function createM1216Verifier(proofCalls, canonicalCalls) {
+  const proveWorkspaceFn = (path) => {
+    proofCalls.push(path);
+    if (path === "C:\\Target\\Repo") {
+      return { root: "C:/Target/Repo", gitHead: "a".repeat(40), dirty: false };
+    }
+    throw new Error("probe sentinel: unexpected ownership path reached Git");
+  };
+  const canonicalizeWorkspacePathFn = (path) => {
+    canonicalCalls.push(path);
+    if (path === "C:\\Target\\Repo" || path === "C:\\TARGET\\REPO") return "C:/Target/Repo";
+    if (path === "D:\\Other\\Repo") return "D:/Other\\Repo";
+    throw new Error("unrealpathable probe sentinel must not escape");
+  };
+  return createRunWorkspaceVerifier("C:\\Target\\Repo", { proveWorkspaceFn, canonicalizeWorkspacePathFn });
+}
+
+test("M12-16-01: authorized root proved exactly once; a same-root alias is accepted with zero extra Git proof", () => {
+  const proofCalls = [];
+  const canonicalCalls = [];
+  const verifier = createM1216Verifier(proofCalls, canonicalCalls);
+  // Alias raw cwd: different casing of the SAME canonical directory.
+  const events = [simpleEvent("run.started", "run_m1216_01", { cwd: "C:\\TARGET\\REPO" })];
+  const result = verifier(events, "run_m1216_01");
+  assert.equal(result.authorized, true);
+  assert.equal(result.ownershipCwd, "C:\\TARGET\\REPO");
+  assert.deepEqual(proofCalls, ["C:\\Target\\Repo"], "the ONLY Git proof is the authorized root at construction");
+  assert.deepEqual(canonicalCalls, ["C:\\TARGET\\REPO"], "the alias is canonicalized once, not per run");
+});
+
+test("M12-16-02: relative ownership cwd is rejected fail-closed before canonicalization or Git", () => {
+  const proofCalls = [];
+  const canonicalCalls = [];
+  const verifier = createM1216Verifier(proofCalls, canonicalCalls);
+  const events = [simpleEvent("run.background_submitted", "run_m1216_02", { cwd: "." })];
+  assert.throws(() => verifier(events, "run_m1216_02"), /unprovable ownership workspace/);
+  assert.deepEqual(proofCalls, ["C:\\Target\\Repo"], "a relative cwd must never reach the Git proof");
+  assert.deepEqual(canonicalCalls, [], "a relative cwd must be rejected before any canonicalization");
+});
+
+test("M12-16-03: unrealpathable and different canonical identities stay fail-closed with no Git", () => {
+  const proofCalls = [];
+  const canonicalCalls = [];
+  const verifier = createM1216Verifier(proofCalls, canonicalCalls);
+  assert.throws(
+    () => verifier([simpleEvent("run.started", "run_m1216_03", { cwd: "C:\\Missing\\Repo" })], "run_m1216_03"),
+    /unprovable ownership workspace/,
+  );
+  assert.throws(
+    () => verifier([simpleEvent("run.started", "run_m1216_03", { cwd: "D:\\Other\\Repo" })], "run_m1216_03"),
+    /workspace mismatch/,
+  );
+  assert.deepEqual(proofCalls, ["C:\\Target\\Repo"], "no ownership cwd ever reaches the Git proof");
+  assert.deepEqual(canonicalCalls, ["C:\\Missing\\Repo", "D:\\Other\\Repo"], "each distinct cwd canonicalized once");
+});
+
+test("M12-16-04: duplicate, conflicting, and cross-run ownership facts still fail closed (fixed messages)", () => {
+  const proofCalls = [];
+  const canonicalCalls = [];
+  const verifier = createM1216Verifier(proofCalls, canonicalCalls);
+  const cases = [
+    {
+      name: "duplicate foreground started",
+      events: [
+        simpleEvent("run.started", "run_m1216_04", { cwd: "C:\\Target\\Repo" }),
+        { type: "run.started", runId: "run_m1216_04", cwd: "C:\\Target\\Repo", ts: "2026-01-01T00:00:01Z", seq: 2 },
+      ],
+      pattern: /ambiguous/,
+    },
+    {
+      name: "conflicting background-vs-started",
+      events: [
+        { type: "run.background_submitted", runId: "run_m1216_04", cwd: "C:\\Target\\Repo", ts: "2026-01-01T00:00:00Z", seq: 1 },
+        { type: "run.started", runId: "run_m1216_04", cwd: "D:\\Other\\Repo", ts: "2026-01-01T00:00:01Z", seq: 2 },
+      ],
+      pattern: /conflicting/,
+    },
+    {
+      name: "cross-run only",
+      events: [simpleEvent("run.started", "run_other", { cwd: "C:\\Target\\Repo" })],
+      pattern: /missing ownership/,
+    },
+  ];
+  for (const c of cases) {
+    assert.throws(() => verifier(c.events, "run_m1216_04"), c.pattern, `case '${c.name}'`);
+  }
+  assert.deepEqual(proofCalls, ["C:\\Target\\Repo"], "rejection precedes any ownership cwd reaching Git");
+  assert.deepEqual(canonicalCalls, [], "rejected facts never reach canonicalization");
+});
+
+test("M12-16-05: repeated raw ownership cwd is canonicalized once and cached for the verifier lifetime", () => {
+  const proofCalls = [];
+  const canonicalCalls = [];
+  const verifier = createM1216Verifier(proofCalls, canonicalCalls);
+  const events = [simpleEvent("run.started", "run_m1216_05", { cwd: "C:\\Target\\Repo" })];
+  assert.equal(verifier(events, "run_m1216_05").authorized, true);
+  assert.equal(verifier(events, "run_m1216_05").authorized, true);
+  assert.equal(verifier(events, "run_m1216_05").authorized, true);
+  assert.deepEqual(proofCalls, ["C:\\Target\\Repo"], "no per-run Git proof on repeats");
+  assert.deepEqual(canonicalCalls, ["C:\\Target\\Repo"], "the repeated raw cwd is canonicalized exactly once");
+});

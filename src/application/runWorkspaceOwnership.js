@@ -48,8 +48,18 @@
 //   - Reuses proveWorkspace + pathsMatch (and canonicalizeWorkspacePath, the
 //     exact normalization proveWorkspace applies) from workspaceBinding.js.
 //   - Never reads process.platform or implements path comparison.
+//
+// M12-16 (Package B): the authorized root is proved EXACTLY ONCE as a
+// canonical Git top-level. Per-run ownership identity is then canonical-path
+// equality with that proof — an absolute cwd whose realpath resolves to the
+// same canonical directory is already the identical proven workspace, so
+// running Git status/rev-parse again cannot add identity information and NO
+// per-run Git proof occurs. Relative, missing, un-realpathable, different,
+// ambiguous, conflicting, and cross-run facts remain fail-closed with the
+// same fixed messages.
 
 import { proveWorkspace, pathsMatch, canonicalizeWorkspacePath } from "./workspaceBinding.js";
+import { isAbsolute } from "node:path";
 
 /**
  * Find the workspace ownership fact for the requested run from transcript
@@ -179,23 +189,36 @@ function cwdsAgree(submittedCwd, startedCwd) {
 /**
  * Create a query-scoped workspace verifier.
  *
- * The authorized root is proved once. Each distinct ownership cwd is then
- * proved at most once for the lifetime of this verifier. This preserves the
- * existing Git-top-level and realpath checks while avoiding repeated Git
- * subprocesses when a run inventory contains many runs from the same project.
+ * The authorized root is proved EXACTLY ONCE (at construction) as a canonical
+ * Git top-level. Per-run ownership identity is canonical-path equality with
+ * that proof: an absolute ownership cwd whose realpath resolves to the same
+ * canonical directory IS the identical proven workspace — running Git
+ * status/rev-parse again cannot add identity information, so no per-run Git
+ * proof (or any other per-run process) occurs. Each DISTINCT raw ownership
+ * cwd is canonicalized at most once for the lifetime of this verifier
+ * (failures cache as null), so a run inventory with many runs from the same
+ * project costs one in-process canonicalization per distinct spelling.
+ *
+ * Fail-closed, in order: relative cwds are rejected BEFORE any
+ * canonicalization (resolving "." against the process cwd would carry no
+ * run-workspace identity); un-realpathable cwds and canonical identities
+ * different from the authorized proof's root are rejected.
+ * findRunWorkspaceOwnership still rejects missing / malformed / ambiguous /
+ * conflicting / cross-run facts with its fixed messages.
  *
  * @param {string} authorizedWorkspaceRoot
- * @param {{proveWorkspaceFn?: Function}} [opts]
+ * @param {{proveWorkspaceFn?: Function, canonicalizeWorkspacePathFn?: Function, pathsMatchFn?: Function}} [opts]
  * @returns {(events: object[], requestedRunId?: string) => {authorized: true, ownershipCwd: string}}
  */
 export function createRunWorkspaceVerifier(authorizedWorkspaceRoot, opts = {}) {
   const prove = opts.proveWorkspaceFn ?? proveWorkspace;
+  const canonicalize = opts.canonicalizeWorkspacePathFn ?? canonicalizeWorkspacePath;
+  const match = opts.pathsMatchFn ?? pathsMatch;
   const authorizedProof = prove(authorizedWorkspaceRoot);
-  const proofCache = new Map([
-    [authorizedWorkspaceRoot, authorizedProof],
-    [authorizedProof.root, authorizedProof],
-  ]);
-  const failedProofs = new Set();
+  // Raw ownership cwd → canonical identity, or null when it cannot be
+  // canonicalized. Keyed by the EXACT raw string: repeated facts (and repeated
+  // runs sharing one spelling) never pay canonicalization twice.
+  const canonicalCache = new Map();
 
   return function verify(events, requestedRunId) {
     const fact = findRunWorkspaceOwnership(events, requestedRunId);
@@ -203,23 +226,27 @@ export function createRunWorkspaceVerifier(authorizedWorkspaceRoot, opts = {}) {
       throw new Error("missing ownership: no run.background_submitted or run.started ownership event");
     }
 
-    if (failedProofs.has(fact.cwd)) {
+    // A relative cwd carries no identity: canonicalizing it would resolve
+    // against the PROCESS cwd, never the run's workspace — fail closed before
+    // any canonicalization.
+    if (!isAbsolute(fact.cwd)) {
       throw new Error("unprovable ownership workspace");
     }
 
-    let ownershipProof = proofCache.get(fact.cwd);
-    if (!ownershipProof) {
+    let canonical = canonicalCache.get(fact.cwd);
+    if (canonical === undefined) {
       try {
-        ownershipProof = prove(fact.cwd);
+        canonical = canonicalize(fact.cwd);
       } catch {
-        failedProofs.add(fact.cwd);
-        throw new Error("unprovable ownership workspace");
+        canonical = null; // cached: repeated facts fail without re-attempting
       }
-      proofCache.set(fact.cwd, ownershipProof);
-      proofCache.set(ownershipProof.root, ownershipProof);
+      canonicalCache.set(fact.cwd, canonical);
     }
 
-    if (!pathsMatch(ownershipProof.root, authorizedProof.root)) {
+    if (canonical == null) {
+      throw new Error("unprovable ownership workspace");
+    }
+    if (!match(canonical, authorizedProof.root)) {
       throw new Error("workspace mismatch: run ownership does not match authorized workspace");
     }
     return { authorized: true, ownershipCwd: fact.cwd };
@@ -233,9 +260,11 @@ export function createRunWorkspaceVerifier(authorizedWorkspaceRoot, opts = {}) {
  * Accepts the two unambiguous durable shapes for the requested run
  * (background_submitted; foreground run.started), each bound to
  * `requestedRunId` by exact envelope equality, and rejects everything else
- * with fixed messages. Uses proveWorkspace SSOT to canonicalize both paths
- * (rejects subdirectories, non-existent paths, non-Git dirs). Uses pathsMatch
- * SSOT for platform-aware comparison (case-insensitive on win32).
+ * with fixed messages. The authorized root is proved once via proveWorkspace
+ * SSOT; the ownership cwd must be absolute and its canonical identity (realpath)
+ * must equal the proved root's canonical identity (subdirectories, non-existent
+ * paths, and different workspaces fail closed). Uses pathsMatch SSOT for
+ * platform-aware comparison (case-insensitive on win32).
  *
  * @param {object[]} events
  * @param {string} authorizedWorkspaceRoot — canonical Git root from server binding
