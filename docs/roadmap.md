@@ -182,13 +182,15 @@ Canonical 资源调度收口：原两个测试文件按 section 拆为五个文�
 
 发布与 Fresh Host 验收：12 笔候选已普通 fast-forward 发布至 `main@bdf79b42472f433adfe4de960f03dab481e786a2`；重启后的 Host 暴露精确 21 个工具并加载该 Git HEAD。一次性 clean 合成仓库经 `lead_preflight` 选择后 active run 为 0，`run_dispatch_contract_check` 返回 `contractValid:true`。真实 `coder_low` delivery run `run_20260809210606536wfms9v` 的自然语言 prompt 未包含文件名，worker 从控制面 Work Order 精确报告 `CONTRACT_PATH_SEEN=src/allowed.txt`，只写该文件并通过 `node verify.mjs`；`run_activity.scopeObservation` 返回 `within_declared_paths`、`complete:true`、`observedFileCount:1`、零 outside path。delivery `8e65e18d103481534c667a3b8cf025da49fc2ca2` 仅含该一条路径，exact verification passed，唯一 diff 页完整 review 后由 Lead accepted；合成源仓库仍 clean 且停在 baseline `970d7bc69994737662373f894acacfae04cd3c46`，active run 归零。Verdict：`PASS_M12_14_FRESH_HOST`。
 
-### M12-15 stale active-run truth（2026-08-09，本地候选，待发布后 Fresh Host 验收）
+### M12-15 stale active-run truth（2026-08-09，已发布并完成 Fresh Host 验收）
 
 M12-14 Fresh Host 关单后，WAO 开发仓的单次 `lead_preflight` 把四笔 2026-06 历史非终态 transcript（`run_20260612231914070`、`run_20260612231845365`、`run_20260612231424018`、`run_20260612231053027`）报告为 active。只读复现证明四者 transcript state 均为 `running`，但 owner heartbeat 为 stale、没有当前 runtime 活性正证据；根因是 `listRuns(activeOnly:true)` 旧逻辑只检查“已知非终态”，把历史未闭合事实误当成当前执行事实。
 
 修复后 `listRuns` 在一次查询内冻结一个 `nowMs`，并复用 `ownerLiveness` SSOT 对每个 workspace/agent 过滤后的已知非终态 run 恰好检查一次：终态投影为 `terminal/terminal_state`；新鲜 owner heartbeat 投影为 `active/fresh_owner_heartbeat`；无新鲜 heartbeat 投影为 `unresolved/no_fresh_owner_heartbeat`；未知 state 投影为 `unknown/unknown_state`。`activeOnly:true` 只返回有正向活性证明的 run；普通 `runs_list` 仍返回 unresolved 历史证据，并在同一扫描、limit 之前给出 `unresolvedCount`。`lead_preflight` 的 `activeRunCount` 只计 proven-active run，另给 `unresolvedRunCount` 与 advisory observation；缺少 heartbeat **不表示** failed/dead/stopped，WAO 不写 transcript、不自动终态化、不停止、不重试、不清理。
 
-真实四 transcript smoke 在冻结候选上得到：四者全部 `activityStatus:"unresolved"`、`activityBasis:"no_fresh_owner_heartbeat"`，`unresolvedCount=4`；`activeOnly` 对这四者返回空，`activeMatchedCount=0`，但 `activeUnresolvedCount=4` 保留事实；四个 JSONL 的 SHA-256 前后一致。实现 run `run_202608092122458676po43z` 的 delivery `453794933d677c6cfb0992be3c634eecc7954b67` 经 8 文件/全部 diff 页审查、exact focused verification 后由 Lead accepted；集成后 focused `131/131`，MCP 21-tool wire 以新增闭集字段后的实测 `72739` 重新冻结且仍低于旧 23-tool baseline `75492`，canonical 一次通过 `193/193` files、0 fail、0 missing、0 crashed、0 isolation。当前 verdict：`READY_FOR_M12_15_RELEASE_AND_FRESH_HOST_ACCEPTANCE`。
+真实四 transcript smoke 在冻结候选上得到：四者全部 `activityStatus:"unresolved"`、`activityBasis:"no_fresh_owner_heartbeat"`，`unresolvedCount=4`；`activeOnly` 对这四者返回空，`activeMatchedCount=0`，但 `activeUnresolvedCount=4` 保留事实；四个 JSONL 的 SHA-256 前后一致。实现 run `run_202608092122458676po43z` 的 delivery `453794933d677c6cfb0992be3c634eecc7954b67` 经 8 文件/全部 diff 页审查、exact focused verification 后由 Lead accepted；集成后 focused `131/131`，MCP 21-tool wire 以新增闭集字段后的实测 `72739` 重新冻结且仍低于旧 23-tool baseline `75492`，canonical 一次通过 `193/193` files、0 fail、0 missing、0 crashed、0 isolation。
+
+发布与 Fresh Host 验收：M12-15 候选已普通 fast-forward 发布至 `main@bd3df87986e965657f93ca1d85b05ede4828f873`。重启后的 Host 一次调用 `lead_preflight` 即加载该 HEAD：workspace 与 workers 均为 observed，`activeRuns=[]`、`activeRunCount=0`，四笔历史非终态 run 仅计入 `unresolvedRunCount=4` 并附 advisory observation；`complete=true`、`warnings=[]`。验收未调用模型或 worker，未写 transcript，也未改变运行状态。Verdict：`PASS_M12_15_FRESH_HOST`。
 
 ### 第三方 onboarding helper 发布与 Fresh Host 验收（2026-08-08）
 
