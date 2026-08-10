@@ -40,6 +40,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 // ---- Frozen closed set (the contract) ----
 
@@ -448,7 +449,16 @@ const RED_23_WIRE = 75492;
 // transcripts without hiding evidence or inferring failure. No new tools or
 // validation were removed. Ceiling re-frozen at the measured 72739 bytes, still
 // below the 23-tool baseline.
-const FROZEN_21_WIRE_CEILING = 72739;
+//
+// M12-16 re-baseline (Package A — lossless context slimming): every tool's
+// human-language description was materially shortened to drop tools/list context
+// cost. The same 21 tools, the exact same wire schema/annotations/names/order —
+// proven by M12-16-A's description-stripped SHA-256 contract, which is unchanged.
+// Description bytes fell 11812 -> 8873 (-2939, -25%); the wire fell by the same
+// 2939 bytes (description is the only variable field) to 69800. No schema,
+// handler, annotation, name, order, or behavior change. Ceiling re-frozen at the
+// measured 69800 bytes, still well below the 23-tool baseline.
+const FROZEN_21_WIRE_CEILING = 69800;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -486,4 +496,131 @@ test("M12-10-H: deterministic 21-tool wire below frozen ceiling and below the 23
   // Frozen ceiling prevents creep.
   assert.ok(m.wireBytes <= FROZEN_21_WIRE_CEILING,
     `21-tool wire (${m.wireBytes}) <= frozen ceiling (${FROZEN_21_WIRE_CEILING})`);
+});
+
+// =====================================================================
+// M12-16 — lossless tools/list context slimming (Package A)
+// =====================================================================
+//
+// The 21-tool tools/list payload is large because each tool carries a verbose
+// human-language description. M12-16 shortens every description to drop context
+// cost WITHOUT touching anything else: the same 21 tools, the exact same wire
+// schema/annotations/names/order. Two guards prove the slimming is lossless:
+//
+//   M12-16-A — the description-stripped tools/list payload hashes to a FROZEN
+//     SHA-256. Recursively removing every `description` key (the 21 top-level
+//     tool descriptions plus any nested schema descriptions) leaves names,
+//     order, input/output schemas, annotations, and every other field
+//     byte-identical. If a schema, annotation, name, or order changes by a
+//     single byte, this hash breaks — so it is the losslessness proof.
+//
+//   M12-16-B — the description total is materially below the M12-15 baseline
+//     (frozen at the achieved GREEN value). This is the regression ceiling: it
+//     proves the slimming was real (not cosmetic) and prevents description creep.
+//
+// The frozen hash below was measured against the PRE-slimming code (it is
+// independent of description TEXT — only structure matters), and it MUST NOT
+// change across the slimming.
+
+// Frozen description-stripped tools/list contract (names + order + input/output
+// schemas + annotations + every non-description field, recursively stripped of
+// all `description` keys, then JSON.stringify'd). Measured on the M12-15 surface.
+const DESC_STRIPPED_CONTRACT_SHA =
+  "e413c92c24ddf6366b3d31263446fa1c4db763dbc615b810f9746d590ce93604";
+
+// Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
+const PRE_M12_16_DESC_BASELINE = 11812;
+// Material-reduction floor: the slimming must cut at least this many description
+// bytes, so a one-word edit cannot satisfy the ceiling (not a cosmetic change).
+const M12_16_DESC_REDUCTION_MIN = 2900;
+// Frozen at the achieved GREEN value AFTER slimming. Prevents description creep.
+const FROZEN_21_DESC_CEILING = 8873;
+
+// Recursively remove every `description` key from a tools/list payload (the 21
+// top-level tool descriptions and any nested schema descriptions). Returns a new
+// object graph; the input is untouched.
+function stripDescriptions(value) {
+  if (Array.isArray(value)) return value.map(stripDescriptions);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [key, val] of Object.entries(value)) {
+      if (key === "description") continue;
+      out[key] = stripDescriptions(val);
+    }
+    return out;
+  }
+  return value;
+}
+
+// Measure the live 21-tool surface: byte totals (wire + description), the frozen
+// names/order, and the SHA-256 of the description-stripped payload.
+async function measureSurface() {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1216-"));
+  try {
+    makeGitRepo(dir);
+    const { server, client } = await buildServerClient({ dir, registryPath: makeRegistry(dir) });
+    try {
+      const tools = (await client.listTools()).tools;
+      const wire = JSON.stringify({ tools });
+      const descTotal = tools.reduce((s, t) => s + byteLen(t.description), 0);
+      // The frozen contract hash is over the tools ARRAY with every `description`
+      // key recursively removed (the 21 top-level tool descriptions; there are no
+      // nested schema descriptions today), then JSON.stringify'd. Hashing the
+      // array — not the {tools} envelope — matches the frozen contract exactly.
+      const stripped = stripDescriptions(tools);
+      const schemaSha = createHash("sha256").update(JSON.stringify(stripped)).digest("hex");
+      return {
+        count: tools.length,
+        wireBytes: byteLen(wire),
+        descBytes: descTotal,
+        names: tools.map((t) => t.name),
+        schemaSha,
+        stripped,
+      };
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("M12-16-A: description-stripped tools/list contract is byte-stable (SHA-256 losslessness guard)", async () => {
+  const m = await measureSurface();
+  // Same 21 tools, same names, same order.
+  assert.equal(m.count, 21, `measured count is 21 (got ${m.count})`);
+  assert.deepEqual(m.names, TOOL_SET, "names/order unchanged by slimming");
+  // The description-stripped payload must hash to the frozen contract. ANY change
+  // to a schema, annotation, name, or order — anything but a tool's description
+  // text — breaks this hash. This is the losslessness proof for the slimming.
+  assert.equal(
+    m.schemaSha,
+    DESC_STRIPPED_CONTRACT_SHA,
+    `description-stripped SHA-256 must equal the frozen contract; got ${m.schemaSha}`,
+  );
+  // Defense-in-depth: stripping removed only `description`; every tool still
+  // carries its non-description fields intact.
+  for (const t of m.stripped) {
+    assert.equal("description" in t, false, `${t.name} has no description key after strip`);
+    assert.ok(t.inputSchema, `${t.name} retains inputSchema`);
+    assert.ok(t.annotations, `${t.name} retains annotations`);
+  }
+});
+
+test("M12-16-B: descriptions are materially shorter (frozen ceiling below the M12-15 baseline)", async () => {
+  const m = await measureSurface();
+  // Frozen ceiling at the achieved GREEN value — prevents description creep.
+  assert.ok(
+    m.descBytes <= FROZEN_21_DESC_CEILING,
+    `desc bytes (${m.descBytes}) <= frozen ceiling (${FROZEN_21_DESC_CEILING})`,
+  );
+  // Material reduction (not cosmetic): the slimming cut a real margin off the
+  // M12-15 description baseline.
+  assert.ok(
+    m.descBytes <= PRE_M12_16_DESC_BASELINE - M12_16_DESC_REDUCTION_MIN,
+    `material reduction: desc bytes (${m.descBytes}) <= ${
+      PRE_M12_16_DESC_BASELINE - M12_16_DESC_REDUCTION_MIN
+    } (baseline ${PRE_M12_16_DESC_BASELINE} minus ${M12_16_DESC_REDUCTION_MIN})`,
+  );
 });
