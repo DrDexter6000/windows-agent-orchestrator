@@ -688,3 +688,507 @@ test("M2 STATUS: end-to-end state walk over the polling/refresh surface (determi
   s = { ...s, runsFresh: true, activityFresh: true };          // activity poll succeeds again
   assert.equal(app.deriveStatus(s).text, "live");             // restored
 });
+
+// =====================================================================
+// C) M12-17 — OWNER DETAILS + OPT-IN TERMINAL NOTIFICATION
+//   1. state-filter closed set matches RUN_STATES + "unknown" (no "stopped").
+//   2. A selected run that falls out of the bounded top-100 list stays
+//      selected and keeps refreshing; absence is NEVER reported as terminal.
+//   3. The detail pane renders ONLY the safe /api/runs + /api/activity
+//      projection fields (backend, terminal flag, activity total/counts,
+//      liveness, scopeObservation summary) — never prompt/token/session/
+//      absolute path/raw command.
+//   4. Browser notifications are opt-in via an explicit button (user
+//      gesture); the post-load baseline never notifies; only a run observed
+//      non-terminal THEN terminal notifies, at most once per run per page
+//      session; unsupported/denied degrades quietly.
+//   5. Notification payloads carry ONLY fixed safe fields (terminal state,
+//      agentId, runId).
+// =====================================================================
+
+// ---- C1) STATE FILTER CLOSED SET ----
+
+test("M12-17 STATES: FILTER_STATES is the exact closed set (RUN_STATES + unknown); no stopped", () => {
+  assert.ok(Array.isArray(app.FILTER_STATES), "FILTER_STATES exported");
+  assert.deepEqual([...app.FILTER_STATES], [
+    "pending", "submitted", "running", "completed", "failed", "aborted", "timed_out", "unknown",
+  ]);
+  assert.ok(Object.isFrozen(app.FILTER_STATES), "closed set is frozen");
+  assert.ok(!app.FILTER_STATES.includes("stopped"), "nonexistent stopped state is gone");
+});
+
+test("M12-17 STATES: HTML state-filter options equal the closed set exactly (all + 8 states, in order)", () => {
+  const html = readAsset("index.html");
+  const sel = html.match(/<select id="state-filter"[\s\S]*?<\/select>/);
+  assert.ok(sel, "state-filter select exists");
+  const values = [...sel[0].matchAll(/<option value="([^"]*)"/g)].map((m) => m[1]);
+  assert.deepEqual(values, ["", ...app.FILTER_STATES], "options = all + closed set, in closed-set order");
+  assert.ok(!values.includes("stopped"), "stopped option removed from the HTML");
+});
+
+test("M12-17 STATES: filterRuns applies only closed-set states; an out-of-set value is ignored", () => {
+  const runs = ["pending", "submitted", "running", "completed", "failed", "aborted", "timed_out", "unknown"]
+    .map((st) => ({ runId: `r_${st}`, state: st, agentId: "a" }));
+  for (const st of app.FILTER_STATES) {
+    assert.deepEqual(app.filterRuns(runs, { state: st }).map((r) => r.runId), [`r_${st}`],
+      `state=${st} filters exactly`);
+  }
+  // "stopped" matches no real state (server never emits it): the filter must
+  // not silently filter by an arbitrary out-of-set string — it is ignored.
+  assert.equal(app.filterRuns(runs, { state: "stopped" }).length, runs.length,
+    "out-of-set state filter is ignored, not exact-matched");
+});
+
+// ---- C2) SELECTION RETENTION (selected run outside the bounded list) ----
+
+test("M12-17 RETENTION: retainSelectedRun resolves the listed run or null — selection itself survives", () => {
+  const runs = [{ runId: "run_a", state: "running" }, { runId: "run_b", state: "completed" }];
+  assert.equal(app.retainSelectedRun(runs, "run_a").state, "running", "listed → the run facts");
+  assert.equal(app.retainSelectedRun(runs, "run_z"), null, "unlisted → null (detail keeps polling)");
+  assert.equal(app.retainSelectedRun([], "run_a"), null);
+  assert.equal(app.retainSelectedRun(runs, null), null);
+  assert.equal(app.retainSelectedRun(null, "run_a"), null);
+});
+
+test("M12-17 RETENTION: no code path clears the selection on a runs-list refresh", () => {
+  const js = readAsset("app.js");
+  // The old defect cleared state.selectedRunId when the run left the bounded
+  // top-100. Boot initialization uses the object literal `selectedRunId: null`
+  // (a colon) — an assignment `selectedRunId = null` must not exist anywhere.
+  assert.doesNotMatch(js, /selectedRunId\s*=\s*null/, "selection is never cleared after boot");
+  assert.match(js, /retainSelectedRun\(/, "detail render resolves listed facts via the pure helper");
+});
+
+test("M12-17 RETENTION: selected run unlisted + activity unavailable degrades to n/a, NEVER terminal", () => {
+  // High-risk combination (WQ-02): the selected run fell out of the bounded
+  // list AND the last activity read failed/been unavailable. Every fact helper
+  // must degrade to blank/n-a — "missing" is never misreported as terminal.
+  assert.equal(app.retainSelectedRun([], "run_gone"), null);
+  assert.equal(app.detailStateText(null, null), null, "no state → n/a pill, not a terminal label");
+  assert.equal(app.terminalFact(null, null), "", "no terminal fact → blank, not terminal");
+  assert.equal(app.backendFact(null), "");
+  assert.equal(app.activityTotalFact(null), "");
+  assert.equal(app.scopeObservationSummary(undefined), "scope n/a");
+});
+
+// ---- C3) DETAIL PANEL — safe projection fields only ----
+
+test("M12-17 DETAIL: statePillClass gates class names to the closed set", () => {
+  assert.equal(app.statePillClass("pending"), "s-pending");
+  assert.equal(app.statePillClass("submitted"), "s-submitted");
+  assert.equal(app.statePillClass("aborted"), "s-aborted");
+  assert.equal(app.statePillClass("running"), "s-running");
+  assert.equal(app.statePillClass("unknown"), "s-unknown");
+  assert.equal(app.statePillClass("garbage state"), "s-na", "unparseable/arbitrary → s-na");
+  assert.equal(app.statePillClass(""), "s-na");
+  assert.equal(app.statePillClass(null), "s-na");
+});
+
+test("M12-17 DETAIL: detailStateText prefers the fresher activity state, falls back to the listed run", () => {
+  const listed = { runId: "r", state: "running" };
+  assert.equal(app.detailStateText({ state: "completed" }, listed), "completed",
+    "activity poll (2s) is fresher than the runs list (5s)");
+  assert.equal(app.detailStateText(null, listed), "running", "activity loading → listed run state");
+  assert.equal(app.detailStateText({ state: "garbage" }, null), null, "out-of-set collapses to n/a");
+  assert.equal(app.detailStateText(null, null), null);
+  assert.equal(app.detailStateText({ state: 42 }, { state: "unknown" }), "unknown");
+});
+
+test("M12-17 DETAIL: backend/terminal/total facts come from the safe activity projection only", () => {
+  const act = { backend: "stream-json", terminal: true, total: 42 };
+  assert.equal(app.backendFact(act), "backend stream-json");
+  assert.equal(app.backendFact(null), "");
+  assert.equal(app.backendFact({}), "");
+  assert.equal(app.terminalFact(act, null), "terminal");
+  assert.equal(app.terminalFact({ terminal: false }, null), "non-terminal");
+  assert.equal(app.terminalFact(null, { terminal: true }), "terminal", "activity missing → listed run fact");
+  assert.equal(app.terminalFact(null, { terminal: false }), "non-terminal");
+  assert.equal(app.terminalFact(null, null), "", "neither source → blank (missing, not terminal)");
+  assert.equal(app.activityTotalFact(act), "42 events");
+  assert.equal(app.activityTotalFact({ total: 0 }), "0 events");
+  assert.equal(app.activityTotalFact({}), "");
+  assert.equal(app.activityTotalFact(null), "");
+});
+
+test("M12-17 DETAIL: scopeObservationSummary is closed-set and never echoes any path", () => {
+  assert.equal(app.scopeObservationSummary(null), "scope n/a");
+  assert.equal(app.scopeObservationSummary({}), "scope unknown");
+  assert.equal(app.scopeObservationSummary({ status: "unknown" }), "scope unknown");
+  assert.equal(app.scopeObservationSummary({ status: "garbage", outsidePaths: ["D:/x"] }), "scope unknown",
+    "out-of-set status collapses to unknown");
+  const within = app.scopeObservationSummary({ status: "within_declared_paths", observedFileCount: 7 });
+  assert.match(within, /within declared paths · 7/, "within summary carries the observed count");
+  const out = app.scopeObservationSummary({
+    status: "outside_declared_paths", observedFileCount: 5, outsidePathCount: 2,
+    outsidePaths: ["D:/secret/abs", "prompt text"], outsidePathsTruncated: false,
+  });
+  assert.match(out, /outside declared paths · 2 of 5/, "outside summary carries counts only");
+  assert.ok(!out.includes("D:/secret"), "never an absolute path");
+  assert.ok(!out.includes("prompt text"), "never the path list content");
+});
+
+test("M12-17 HTML: detail pane exposes backend/terminal/total/scope/unlisted safe slots", () => {
+  const html = readAsset("index.html");
+  for (const id of ["detail-backend", "detail-terminal", "detail-total", "detail-scope", "detail-unlisted"]) {
+    assert.ok(html.includes(`id="${id}"`), `#${id} present`);
+  }
+});
+
+test("M12-17 APP: detail render composes the pure fact helpers (no ad-hoc DOM derivation)", () => {
+  const js = readAsset("app.js");
+  for (const fn of [
+    "detailStateText", "backendFact", "terminalFact", "activityTotalFact", "scopeObservationSummary", "statePillClass",
+  ]) {
+    assert.match(js, new RegExp(fn + "\\("), `${fn} used`);
+  }
+});
+
+test("M12-17 SAFE: app.js never reads prompt/session/absolute-path/raw-command fields", () => {
+  const js = readAsset("app.js");
+  assert.doesNotMatch(js, /\.(prompt|sessionId|serveUrl|worktreePath|cwd|rawCommand|argv|pid)\b/,
+    "detail/notification rendering reads only fixed safe fields");
+});
+
+// ---- C4) OPT-IN TERMINAL NOTIFICATIONS ----
+
+test("M12-17 NOTIFY: notificationPermission maps the capability honestly (quiet degrade)", () => {
+  assert.equal(app.notificationPermission(undefined), "unsupported");
+  assert.equal(app.notificationPermission(null), "unsupported");
+  assert.equal(app.notificationPermission({}), "unsupported");
+  assert.equal(app.notificationPermission({ permission: "garbage" }), "unsupported");
+  assert.equal(app.notificationPermission({ permission: "granted" }), "granted");
+  assert.equal(app.notificationPermission({ permission: "denied" }), "denied");
+  assert.equal(app.notificationPermission({ permission: "default" }), "default");
+});
+
+test("M12-17 NOTIFY: notifyButtonState — enable only by click; denied/unsupported quiet", () => {
+  assert.deepEqual(app.notifyButtonState("granted", true), { disabled: true, label: "notifications on" });
+  assert.deepEqual(app.notifyButtonState("default", true), { disabled: true, label: "notifications on" });
+  assert.deepEqual(app.notifyButtonState("granted", false), { disabled: false, label: "enable notifications" });
+  assert.deepEqual(app.notifyButtonState("default", false), { disabled: false, label: "enable notifications" });
+  assert.deepEqual(app.notifyButtonState("denied", false), { disabled: true, label: "notifications blocked" });
+  assert.deepEqual(app.notifyButtonState("unsupported", false), { disabled: true, label: "notifications n/a" });
+});
+
+test("M12-17 NOTIFY: reload baseline — already-terminal runs at first observation NEVER notify", () => {
+  const plan = app.planTerminalNotifications({}, [
+    { runId: "run_a", agentId: "coder_low", state: "completed", terminal: true },
+    { runId: "run_b", agentId: "coder_low", state: "failed", terminal: true },
+    { runId: "run_c", agentId: "coder_low", state: "running", terminal: false },
+  ]);
+  assert.deepEqual(plan.notifications, [], "first observation is the baseline — zero notifications");
+  assert.deepEqual(plan.observed, { run_a: true, run_b: true, run_c: false });
+});
+
+test("M12-17 NOTIFY: running→terminal notifies EXACTLY once; repeated terminal polls never re-notify", () => {
+  let plan = app.planTerminalNotifications({}, [
+    { runId: "run_a", agentId: "coder_low", state: "running", terminal: false },
+  ]);
+  assert.equal(plan.notifications.length, 0, "baseline: running observed");
+  plan = app.planTerminalNotifications(plan.observed, [
+    { runId: "run_a", agentId: "coder_low", state: "completed", terminal: true },
+  ]);
+  assert.equal(plan.notifications.length, 1, "the observed transition fires exactly one notification");
+  const n = plan.notifications[0];
+  assert.equal(n.runId, "run_a");
+  assert.equal(n.agentId, "coder_low");
+  assert.equal(n.state, "completed");
+  assert.equal(n.body, "run_a");
+  assert.equal(typeof n.title, "string");
+  for (let i = 0; i < 3; i += 1) {
+    plan = app.planTerminalNotifications(plan.observed, [
+      { runId: "run_a", agentId: "coder_low", state: "completed", terminal: true },
+    ]);
+    assert.equal(plan.notifications.length, 0, `repeat poll ${i + 1} must not re-notify`);
+  }
+});
+
+test("M12-17 NOTIFY: non-terminal→non-terminal never notifies; the input observed map is not mutated", () => {
+  const observed = { run_a: false };
+  const plan = app.planTerminalNotifications(observed, [
+    { runId: "run_a", agentId: "a", state: "running", terminal: false },
+  ]);
+  assert.deepEqual(plan.notifications, []);
+  assert.deepEqual(observed, { run_a: false }, "input object untouched (pure)");
+  assert.notEqual(plan.observed, observed, "a new map is returned");
+});
+
+test("M12-17 NOTIFY: absence from the bounded list is NEVER terminal; a later observed re-entry transition notifies", () => {
+  let plan = app.planTerminalNotifications({}, [
+    { runId: "run_a", agentId: "a", state: "running", terminal: false },
+  ]);
+  // The run falls out of the bounded top-100: no observation, no notification,
+  // and the prior non-terminal observation is PRESERVED (not reset, not terminal).
+  plan = app.planTerminalNotifications(plan.observed, []);
+  assert.deepEqual(plan.notifications, [], "absence notifies nothing");
+  assert.deepEqual(plan.observed, { run_a: false }, "absence never marks terminal");
+  // The run re-enters the list as terminal: the transition (from the last
+  // observed non-terminal state) is exactly what must notify — once.
+  plan = app.planTerminalNotifications(plan.observed, [
+    { runId: "run_a", agentId: "a", state: "failed", terminal: true },
+  ]);
+  assert.equal(plan.notifications.length, 1);
+  assert.equal(plan.notifications[0].state, "failed");
+});
+
+test("M12-17 NOTIFY: payload carries ONLY runId/agentId/state — never prompt/path/token/session/command", () => {
+  const plan = app.planTerminalNotifications({ run_a: false }, [{
+    runId: "run_a", agentId: "coder_mm", state: "completed", terminal: true,
+    prompt: "SECRET PROMPT", path: "D:/abs/secret", token: "deadbeef",
+    sessionId: "sess-1", command: "rm -rf /", worktreePath: "D:/wt",
+  }]);
+  assert.equal(plan.notifications.length, 1);
+  const s = JSON.stringify(plan.notifications[0]);
+  for (const bad of ["SECRET PROMPT", "D:/abs", "deadbeef", "sess-1", "rm -rf", "D:/wt"]) {
+    assert.ok(!s.includes(bad), `notification must not contain ${bad}`);
+  }
+});
+
+test("M12-17 NOTIFY: terminalNotification gates the state to the terminal closed set", () => {
+  assert.equal(app.terminalNotification({ runId: "r", agentId: "a", state: "running", terminal: false }), null,
+    "non-terminal → no notification descriptor");
+  assert.equal(app.terminalNotification({ terminal: true, state: "completed" }), null, "runId required");
+  assert.equal(app.terminalNotification(null), null);
+  const weird = app.terminalNotification({ runId: "r", agentId: "a", state: "garbage", terminal: true });
+  assert.equal(weird.state, "unknown", "out-of-set terminal state collapses to unknown");
+  const ok = app.terminalNotification({ runId: "r", agentId: "a", state: "timed_out", terminal: true });
+  assert.equal(ok.state, "timed_out");
+  assert.ok(ok.title.includes("timed_out"), "title carries the terminal state");
+  assert.ok(ok.title.includes("a"), "title carries the agentId");
+  assert.equal(ok.body, "r", "body is the runId");
+});
+
+test("M12-17 HTML: notification enable control is an explicit button (user gesture), initially hidden", () => {
+  const html = readAsset("index.html");
+  const btn = html.match(/<button id="notify-toggle"[^>]*>/);
+  assert.ok(btn, "notify-toggle button exists");
+  assert.match(btn[0], /type="button"/);
+  assert.match(btn[0], /hidden/, "starts hidden until boot validates the session");
+});
+
+test("M12-17 APP: Notification is feature-detected; permission is requested ONLY from the click gesture", () => {
+  const js = readAsset("app.js");
+  assert.match(js, /typeof Notification/, "Notification access is feature-detected");
+  assert.match(js, /requestPermission/, "a permission request path exists");
+  assert.match(js, /notifyToggle\.addEventListener\("click",\s*\(\)\s*=>\s*enableNotifications\(state\)\)/,
+    "the ONLY enable path is the explicit button click");
+  assert.match(js, /planTerminalNotifications\(/, "transition planning goes through the pure planner");
+});
+
+// ---- C5) CSS — state pills cover the whole closed set ----
+
+test("M12-17 CSS: state pill styles cover the full closed set; the stopped style is gone", () => {
+  const css = readAsset("styles.css");
+  for (const st of ["pending", "submitted", "running", "completed", "failed", "aborted", "timed_out", "unknown"]) {
+    assert.match(css, new RegExp(`\\.state-pill\\.s-${st}\\b`), `pill style for ${st}`);
+  }
+  assert.doesNotMatch(css, /s-stopped/, "stopped style removed with the nonexistent state");
+});
+
+// =====================================================================
+// D) M12-17 RACE — selection-bound activity commits (the late-response fix)
+//   A selection epoch advances on every selection change. An in-flight
+//   activity request captures (runId, epoch) at issue time; its response
+//   commits ONLY when BOTH still equal the current selection. A late
+//   response from a superseded selection is dropped silently and never
+//   mutates the current selection's lastGoodActivity / activityFresh /
+//   timeline / detail / terminal observation. BOTH bootstrap and poll (and
+//   load-older) are bound; a late fetch error never marks the current
+//   selection stale/error.
+//   States covered (WQ-02): normal (current response committed), loading
+//   (captured, unresolved), late-success, late-unavailable (available:false),
+//   late-error (fetch rejected), and the epoch-vs-runId distinction (a
+//   superseded binding for the SAME runId is still dropped).
+// Deterministic over the pure binding gate + advanceSelection the commit
+// surface reduces to (no DOM, no fetch, no timers).
+// =====================================================================
+
+// A selection-shaped state object with ONLY the fields the binding reads or
+// the commit mutates — the same shape selectRun/bootstrapActivity/pollOnce use.
+function freshSelectionState() {
+  return {
+    selectedRunId: null,
+    selectionEpoch: 0,
+    lastGoodActivity: null,
+    unavailableReason: null,
+    activityFresh: null,
+    sessionEnded: false,
+    timeline: [],
+    maxSeq: 0,
+    olderCursor: null,
+    observedTerminal: {},
+  };
+}
+
+// Mirrors the commit site in bootstrapActivity/pollOnce/loadOlder exactly:
+// the page is applied ONLY when the captured binding is still the current
+// selection. A dropped late response performs NO mutation.
+function commit(state, captured, apply) {
+  if (app.isCurrentSelection(state, captured)) apply(state);
+}
+
+// ---- D1) THE BINDING GATE (pure) ----
+
+test("RACE GATE: isCurrentSelection accepts only an exact (runId, epoch) match", () => {
+  const state = { selectedRunId: "run_b", selectionEpoch: 2 };
+  assert.equal(app.isCurrentSelection(state, { runId: "run_b", epoch: 2 }), true, "exact match → current");
+  assert.equal(app.isCurrentSelection(state, { runId: "run_a", epoch: 1 }), false, "late A (different run + epoch)");
+  assert.equal(app.isCurrentSelection(state, { runId: "run_b", epoch: 1 }), false, "same run, superseded epoch");
+  assert.equal(app.isCurrentSelection(state, { runId: "run_a", epoch: 2 }), false, "different run, same epoch");
+  assert.equal(app.isCurrentSelection(state, null), false, "missing capture");
+  assert.equal(app.isCurrentSelection(null, { runId: "run_b", epoch: 2 }), false, "missing state");
+  assert.equal(app.isCurrentSelection(state, { runId: "run_b" }), false, "missing epoch");
+  assert.equal(app.isCurrentSelection(state, { runId: "run_b", epoch: "x" }), false, "non-integer epoch");
+  assert.equal(app.isCurrentSelection(state, { runId: "", epoch: 2 }), false, "empty runId");
+  assert.equal(app.isCurrentSelection({ selectedRunId: null, selectionEpoch: 0 }, { runId: "run_a", epoch: 1 }),
+    false, "no current selection");
+});
+
+test("RACE GATE: advanceSelection bumps the epoch, resets activity state, returns the new binding", () => {
+  const state = freshSelectionState();
+  state.lastGoodActivity = { stale: true };
+  state.timeline = [{ seq: 9 }];
+  state.maxSeq = 9;
+  const capA = app.advanceSelection(state, "run_a");
+  assert.equal(state.selectedRunId, "run_a");
+  assert.equal(state.selectionEpoch, 1);
+  assert.equal(state.lastGoodActivity, null, "activity reset on selection change");
+  assert.deepEqual(state.timeline, []);
+  assert.equal(state.maxSeq, 0);
+  assert.equal(state.activityFresh, null);
+  assert.deepEqual(capA, { runId: "run_a", epoch: 1 }, "returns the captured binding for the new bootstrap");
+  // A second selection advances the epoch again — capA is now stale.
+  const capB = app.advanceSelection(state, "run_b");
+  assert.equal(state.selectionEpoch, 2);
+  assert.deepEqual(capB, { runId: "run_b", epoch: 2 });
+  assert.equal(app.isCurrentSelection(state, capA), false, "capA is stale after advancing to B");
+  assert.equal(app.isCurrentSelection(state, capB), true);
+});
+
+// ---- D2) THE FOUR SCENARIOS (A late success / unavailable / error; B normal) ----
+
+test("RACE: A late SUCCESS after select B is dropped — B's lastGoodActivity/timeline/activityFresh untouched", () => {
+  const state = freshSelectionState();
+  const capA = app.advanceSelection(state, "run_a"); // bootstrap A in flight
+  const capB = app.advanceSelection(state, "run_b"); // Owner switches to B; bootstrap B in flight
+  // A's late SUCCESS page resolves first (would poison B if committed):
+  commit(state, capA, (s) => {
+    s.lastGoodActivity = { runId: "run_a", activity: { total: 999, backend: "A", state: "running", terminal: false } };
+    s.timeline = [{ seq: 1, poison: true }];
+    s.activityFresh = true;
+  });
+  assert.equal(state.lastGoodActivity, null, "A's late success did NOT write B's lastGoodActivity");
+  assert.deepEqual(state.timeline, [], "A's late success did NOT append to B's timeline");
+  assert.equal(state.activityFresh, null, "A's late success did NOT flip B's activityFresh");
+  // B's own SUCCESS commits normally:
+  commit(state, capB, (s) => {
+    s.lastGoodActivity = { runId: "run_b", activity: { runId: "run_b", total: 3, backend: "B", state: "running", terminal: false } };
+    s.activityFresh = true;
+  });
+  assert.equal(state.lastGoodActivity.activity.runId, "run_b", "B's facts are B's");
+  assert.equal(state.activityFresh, true);
+});
+
+test("RACE: A late UNAVAILABLE (available:false) after select B is dropped — B not marked stale/unavailable", () => {
+  const state = freshSelectionState();
+  const capA = app.advanceSelection(state, "run_a");
+  const capB = app.advanceSelection(state, "run_b");
+  // A's late read returned available:false (would poison B if committed):
+  commit(state, capA, (s) => {
+    s.lastGoodActivity = null;
+    s.unavailableReason = "unavailable";
+    s.activityFresh = false;
+  });
+  assert.equal(state.unavailableReason, null, "A's unavailable did NOT set B's unavailableReason");
+  assert.equal(state.activityFresh, null, "A's unavailable did NOT mark B stale");
+  assert.equal(state.lastGoodActivity, null);
+  // B's own read commits normally:
+  commit(state, capB, (s) => { s.activityFresh = true; });
+  assert.equal(state.activityFresh, true);
+});
+
+test("RACE: A late ERROR (fetch rejected) after select B is dropped — B not marked stale/session-ended", () => {
+  const state = freshSelectionState();
+  const capA = app.advanceSelection(state, "run_a");
+  const capB = app.advanceSelection(state, "run_b");
+  // A's late fetch rejected — onFetchError would mark the source stale / a 401
+  // would set sessionEnded. Neither may touch the current (B) selection.
+  commit(state, capA, (s) => {
+    s.activityFresh = false; // onFetchError(state, err, "activity")
+    s.sessionEnded = true;   // the unauthorized branch
+  });
+  assert.equal(state.activityFresh, null, "A's late error did NOT mark B stale");
+  assert.equal(state.sessionEnded, false, "A's late error did NOT end B's session");
+  // B's own successful read commits normally:
+  commit(state, capB, (s) => { s.activityFresh = true; s.sessionEnded = false; });
+  assert.equal(state.activityFresh, true);
+  assert.equal(state.sessionEnded, false);
+});
+
+test("RACE: a fresh, current B response IS committed (no false drops on the live path)", () => {
+  const state = freshSelectionState();
+  const capB = app.advanceSelection(state, "run_b");
+  let applied = false;
+  commit(state, capB, () => { applied = true; });
+  assert.equal(applied, true, "the current selection's response is accepted");
+  // No further selection change → a later B response (same epoch) is still current.
+  assert.equal(app.isCurrentSelection(state, capB), true);
+});
+
+test("RACE: epoch (not runId alone) distinguishes superseded bindings for the SAME run", () => {
+  // selectRun early-outs when the SAME runId is re-clicked, but a B→A→B round
+  // trip advances the epoch, so a response captured for the FIRST B selection
+  // must NOT be applied against the SECOND B selection (its timeline/maxSeq
+  // were captured under the older bootstrap).
+  const state = freshSelectionState();
+  const capB1 = app.advanceSelection(state, "run_b");   // epoch 1
+  app.advanceSelection(state, "run_a");                 // epoch 2
+  const capB2 = app.advanceSelection(state, "run_b");   // epoch 3 — back to B
+  assert.equal(state.selectedRunId, "run_b");
+  assert.equal(app.isCurrentSelection(state, capB1), false, "first B binding is stale (epoch advanced)");
+  assert.equal(app.isCurrentSelection(state, capB2), true, "second B binding is current");
+  commit(state, capB1, (s) => { s.lastGoodActivity = { poison: "B1" }; });
+  assert.equal(state.lastGoodActivity, null, "the stale B1 binding did not commit");
+});
+
+test("RACE: stale-data-plus-error — A's late error does not corrupt a live B snapshot", () => {
+  // High-risk combination (WQ-02): B already has good data, then A's late error
+  // resolves. The error must not flip B stale nor clear B's good snapshot.
+  const state = freshSelectionState();
+  const capA = app.advanceSelection(state, "run_a");
+  const capB = app.advanceSelection(state, "run_b");
+  commit(state, capB, (s) => {
+    s.lastGoodActivity = { runId: "run_b", activity: { total: 5 } };
+    s.activityFresh = true;
+  });
+  // A's late error arrives AFTER B is already live:
+  commit(state, capA, (s) => { s.activityFresh = false; });
+  assert.equal(state.activityFresh, true, "B stays live — A's late error ignored");
+  assert.equal(state.lastGoodActivity.activity.total, 5, "B's good snapshot preserved");
+});
+
+// ---- D3) WIRING CONTRACT — the gate guards every commit site ----
+
+test("RACE WIRING: bootstrap/poll/loadOlder each capture the binding and gate success AND error", () => {
+  const js = readAsset("app.js");
+  // selectRun advances the epoch via the pure helper (the binding source).
+  assert.match(js, /advanceSelection\(state,\s*runId\)/, "selectRun advances the epoch");
+  // Each of the three activity-fetch paths captures the SAME binding shape.
+  const captures = js.match(/const captured\s*=\s*\{\s*runId,\s*epoch:\s*state\.selectionEpoch\s*\}/g) || [];
+  assert.ok(captures.length >= 3,
+    `bootstrap/poll/loadOlder each capture the binding (found ${captures.length})`);
+  // Every capture is guarded in BOTH the try (success) and catch (error):
+  // ≥ 2 isCurrentSelection guards per capture.
+  const guards = js.match(/isCurrentSelection\(state,\s*captured\)/g) || [];
+  assert.ok(guards.length >= captures.length * 2,
+    `every path guards success AND error (guards ${guards.length} >= ${captures.length * 2})`);
+  // The protected commit sites are reached ONLY after a guard (late → return).
+  assert.match(js, /isCurrentSelection\(state,\s*captured\)\)\s*return;[\s\S]*?applyBootstrapPage/,
+    "applyBootstrapPage is guarded");
+  assert.match(js, /isCurrentSelection\(state,\s*captured\)\)\s*return;[\s\S]*?applyPollPage/,
+    "applyPollPage is guarded");
+  assert.match(js, /isCurrentSelection\(state,\s*captured\)\)\s*return;[\s\S]*?onFetchError/,
+    "the error path's onFetchError is guarded");
+  // The boot state carries the epoch counter.
+  assert.match(js, /selectionEpoch:\s*0/, "boot state initializes the epoch");
+});

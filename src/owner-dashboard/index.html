@@ -12,7 +12,14 @@
 <body>
   <header class="topbar">
     <div class="topbar-title">WAO Owner Dashboard</div>
-    <div class="topbar-status" id="status-line" aria-live="polite">starting…</div>
+    <div class="topbar-side">
+      <!-- Opt-in terminal notifications (M12-17). Enable happens ONLY from
+           this explicit button click (a user gesture); the post-load baseline
+           never notifies; at most one notification per run per page session;
+           the payload carries only state + agentId + runId. -->
+      <button id="notify-toggle" class="link-button" type="button" hidden>enable notifications</button>
+      <div class="topbar-status" id="status-line" aria-live="polite">starting…</div>
+    </div>
   </header>
 
   <!-- Concise unavailable state: shown only when there is no usable token.
@@ -34,11 +41,13 @@
           <span class="filter-label">state</span>
           <select id="state-filter" aria-label="Filter runs by state">
             <option value="">all</option>
+            <option value="pending">pending</option>
+            <option value="submitted">submitted</option>
             <option value="running">running</option>
             <option value="completed">completed</option>
             <option value="failed">failed</option>
+            <option value="aborted">aborted</option>
             <option value="timed_out">timed out</option>
-            <option value="stopped">stopped</option>
             <option value="unknown">unknown</option>
           </select>
         </label>
@@ -63,10 +72,15 @@
           <div class="detail-facts">
             <span id="detail-state" class="state-pill"></span>
             <span id="detail-agent" class="fact"></span>
+            <span id="detail-backend" class="fact"></span>
+            <span id="detail-terminal" class="fact"></span>
             <span id="detail-liveness" class="fact"></span>
+            <span id="detail-total" class="fact"></span>
+            <span id="detail-scope" class="fact"></span>
             <button id="refresh-run" class="link-button" type="button">refresh</button>
           </div>
         </div>
+        <div id="detail-unlisted" class="unavailable-inline muted" hidden></div>
         <div id="detail-unavailable" class="unavailable-inline muted" hidden></div>
         <div class="cat-filters" id="cat-filters" role="group" aria-label="Filter activity by category"></div>
         <ol id="timeline" class="timeline" role="list"></ol>

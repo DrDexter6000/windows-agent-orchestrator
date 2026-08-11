@@ -1,6 +1,13 @@
 // src/owner-dashboard/app.js
 //
 // M12-8D Package D — Owner read-only dashboard client.
+// M12-17 — owner details (backend / terminal flag / activity total / scope
+// summary from the SAME safe projections), selected-run retention when the run
+// leaves the bounded top-100 list (absence is never reported as terminal),
+// opt-in terminal notifications (explicit Owner button; the post-load baseline
+// never notifies; at most once per run per page session; fixed safe fields),
+// and selection-bound activity commits: a late response from a superseded
+// selection is dropped silently and never mutates the current selection's facts.
 //
 // A zero-dependency browser module. It renders a bounded, read-only view of
 // recent runs + selected-run activity by calling the SAME ownerDashboardServer
@@ -32,6 +39,18 @@ export const POLL_MS = 2000;
 export const RUNS_REFRESH_MS = 5000;
 export const RUNS_LIMIT = 100;
 const TOKEN_KEY = "wao_owner_token";
+
+// M12-17: the state-filter closed set — every RUN_STATES member (pending /
+// submitted / running / completed / failed / aborted / timed_out) plus the
+// server's "unknown" mapping. The nonexistent "stopped" state is NOT a member.
+// The HTML state-filter options mirror this set exactly (test-enforced).
+export const FILTER_STATES = Object.freeze([
+  "pending", "submitted", "running", "completed", "failed", "aborted", "timed_out", "unknown",
+]);
+
+// Terminal run states (mirrors the transcript TERMINAL_STATES closed set) —
+// client defense-in-depth for notification payloads.
+const TERMINAL_RUN_STATES = Object.freeze(["completed", "failed", "aborted", "timed_out"]);
 const TOKEN_RE = /^[0-9a-f]{64}$/;
 
 // ===== Pure helpers (DOM-free; the tested contract) =====
@@ -243,7 +262,9 @@ export function runIndex(runs, runId) {
 
 /**
  * Client-side run filters over the bounded recent list. q is a case-insensitive
- * substring on runId; state/agent are exact matches ("" = any).
+ * substring on runId; agent is an exact match; state applies only when it is a
+ * FILTER_STATES closed-set member ("" = any; an out-of-set value — e.g. the
+ * nonexistent "stopped" — is ignored, never exact-matched).
  * @param {object[]} runs
  * @param {{q?:string, state?:string, agent?:string}} f
  * @returns {object[]}
@@ -251,7 +272,7 @@ export function runIndex(runs, runId) {
 export function filterRuns(runs, f = {}) {
   if (!Array.isArray(runs)) return [];
   const q = typeof f.q === "string" ? f.q.trim().toLowerCase() : "";
-  const state = typeof f.state === "string" ? f.state : "";
+  const state = typeof f.state === "string" && FILTER_STATES.includes(f.state) ? f.state : "";
   const agent = typeof f.agent === "string" ? f.agent : "";
   return runs.filter((r) => {
     if (!r || typeof r.runId !== "string") return false;
@@ -371,6 +392,238 @@ export function relativeAge(updatedAt, nowMs) {
   return `${Math.round(d / 86400)}d`;
 }
 
+// ===== M12-17 pure helpers (DOM-free; the tested contract) =====
+
+/**
+ * The detail state-pill class for a state string, gated to FILTER_STATES.
+ * Arbitrary/unparseable text collapses to "s-na" — never a class injection.
+ * @param {*} state
+ * @returns {string}
+ */
+export function statePillClass(state) {
+  return (typeof state === "string" && FILTER_STATES.includes(state)) ? "s-" + state : "s-na";
+}
+
+/**
+ * Resolve the LISTED run facts for the current selection, or null when the
+ * selected run is temporarily outside the bounded recent list. Selection
+ * retention (M12-17): the caller NEVER clears the selection on a null here —
+ * the detail pane keeps refreshing from the activity poll instead.
+ * @param {object[]} runs
+ * @param {string|null} selectedRunId
+ * @returns {object|null}
+ */
+export function retainSelectedRun(runs, selectedRunId) {
+  if (typeof selectedRunId !== "string" || selectedRunId.length === 0) return null;
+  const i = runIndex(runs, selectedRunId);
+  return i >= 0 ? runs[i] : null;
+}
+
+/**
+ * The detail state text: prefer the fresher activity-projection state (2s
+ * poll), fall back to the listed run state (5s list refresh). Gated to the
+ * closed set — an unparseable/arbitrary value collapses to null (rendered as
+ * "n/a"), never a raw string.
+ * @param {object|null} activity — safe activity page (or null)
+ * @param {object|null} listedRun — listed run summary (or null when unlisted)
+ * @returns {string|null}
+ */
+export function detailStateText(activity, listedRun) {
+  const fromAct = activity && typeof activity.state === "string" ? activity.state : "";
+  const fromList = listedRun && typeof listedRun.state === "string" ? listedRun.state : "";
+  const raw = fromAct || fromList;
+  return FILTER_STATES.includes(raw) ? raw : null;
+}
+
+/** Backend fact text from the safe activity projection, or "" when absent. */
+export function backendFact(activity) {
+  const b = activity && typeof activity.backend === "string" ? activity.backend : "";
+  return b.length ? `backend ${b}` : "";
+}
+
+/**
+ * Terminal/non-terminal fact text. Prefers the activity projection's terminal
+ * flag; falls back to the listed run's. Neither source → "" — a missing fact
+ * is never reported as terminal.
+ */
+export function terminalFact(activity, listedRun) {
+  const t = activity && typeof activity.terminal === "boolean"
+    ? activity.terminal
+    : (listedRun && typeof listedRun.terminal === "boolean" ? listedRun.terminal : null);
+  if (t === null) return "";
+  return t ? "terminal" : "non-terminal";
+}
+
+/** Activity total fact text ("N events"), or "" when no total is available. */
+export function activityTotalFact(activity) {
+  const t = activity && Number.isInteger(activity.total) ? activity.total : null;
+  return t === null ? "" : `${t} events`;
+}
+
+/**
+ * One-line scopeObservation summary: closed-set status + counts ONLY. Never
+ * echoes the outsidePaths list — counts suffice here; redacted relative paths
+ * already appear per-entry in the timeline.
+ * @param {object|null|undefined} obs
+ * @returns {string}
+ */
+export function scopeObservationSummary(obs) {
+  if (!obs || typeof obs !== "object") return "scope n/a";
+  const observed = Number.isInteger(obs.observedFileCount) ? obs.observedFileCount : 0;
+  if (obs.status === "within_declared_paths") {
+    return `scope within declared paths · ${observed} observed`;
+  }
+  if (obs.status === "outside_declared_paths") {
+    const outside = Number.isInteger(obs.outsidePathCount) ? obs.outsidePathCount : 0;
+    return `scope outside declared paths · ${outside} of ${observed} observed`;
+  }
+  return "scope unknown";
+}
+
+/**
+ * Honest Notification capability: "granted" | "denied" | "default" |
+ * "unsupported" (API missing or an unexpected permission value). Used to
+ * degrade quietly — never to nag.
+ * @param {*} NotificationApi — window.Notification or undefined
+ * @returns {string}
+ */
+export function notificationPermission(NotificationApi) {
+  if (!NotificationApi || typeof NotificationApi.permission !== "string") return "unsupported";
+  return ["granted", "denied", "default"].includes(NotificationApi.permission)
+    ? NotificationApi.permission
+    : "unsupported";
+}
+
+/**
+ * The notify-toggle button descriptor for a (permission, enabled) pair.
+ * Enabled → disabled "on" (reload resets). granted/default → clickable
+ * "enable". denied/unsupported → quietly disabled.
+ * @param {string} permission — from notificationPermission
+ * @param {boolean} enabled
+ * @returns {{disabled:boolean, label:string}}
+ */
+export function notifyButtonState(permission, enabled) {
+  if (enabled) return { disabled: true, label: "notifications on" };
+  if (permission === "granted" || permission === "default") {
+    return { disabled: false, label: "enable notifications" };
+  }
+  if (permission === "denied") return { disabled: true, label: "notifications blocked" };
+  return { disabled: true, label: "notifications n/a" };
+}
+
+/**
+ * Build the fixed-safe-fields notification descriptor for a terminal run, or
+ * null when the run is not notifiable (non-terminal / missing runId). The
+ * state is gated to the terminal closed set (an unexpected value collapses to
+ * "unknown"). The payload carries ONLY runId/agentId/state — never a path,
+ * prompt, token, session, or command.
+ * @param {object} run — safe run summary ({runId, agentId, state, terminal})
+ * @returns {{title:string, body:string, runId:string, agentId:string, state:string}|null}
+ */
+export function terminalNotification(run) {
+  if (!run || run.terminal !== true) return null;
+  if (typeof run.runId !== "string" || run.runId.length === 0) return null;
+  const state = TERMINAL_RUN_STATES.includes(run.state) ? run.state : "unknown";
+  const agentId = typeof run.agentId === "string" && run.agentId.length ? run.agentId : "unknown";
+  return {
+    title: `run ${state} · ${agentId}`,
+    body: run.runId,
+    runId: run.runId,
+    agentId,
+    state,
+  };
+}
+
+/**
+ * THE terminal-transition planner (pure, page-session scoped). Folds a fresh
+ * bounded runs snapshot into the observed-terminal map and returns the
+ * notifications to fire:
+ *   - the FIRST observation of a run (the post-load/reload baseline) records
+ *     its terminal flag and NEVER notifies;
+ *   - only a run previously observed NON-terminal that is now terminal
+ *     notifies — exactly once (terminal is absorbing in the map);
+ *   - runs absent from the snapshot keep their prior observation — absence is
+ *     never treated as terminal and never resets the baseline.
+ * The input map is not mutated; a new map is returned.
+ *
+ * @param {Object<string,boolean>} observed
+ * @param {object[]} runs — safe run summaries ({runId, agentId, state, terminal})
+ * @returns {{notifications: object[], observed: Object<string,boolean>}}
+ */
+export function planTerminalNotifications(observed, runs) {
+  const prev = observed && typeof observed === "object" ? observed : {};
+  const next = { ...prev };
+  const notifications = [];
+  if (Array.isArray(runs)) {
+    for (const run of runs) {
+      if (!run || typeof run.runId !== "string" || run.runId.length === 0) continue;
+      const id = run.runId;
+      const isTerminal = run.terminal === true;
+      if (!(id in next)) {
+        next[id] = isTerminal; // baseline: record, never notify
+        continue;
+      }
+      if (next[id] === false && isTerminal) {
+        next[id] = true;
+        const n = terminalNotification(run);
+        if (n) notifications.push(n);
+      } else if (isTerminal) {
+        next[id] = true; // absorbing: once terminal, never re-notifies
+      }
+    }
+  }
+  return { notifications, observed: next };
+}
+
+// ===== M12-17 race helpers — selection-bound activity commits (DOM-free) =====
+//
+// A selection epoch advances on every selection change. An in-flight activity
+// request (bootstrap / poll / load-older) captures {runId, epoch} at issue
+// time; when its response resolves it commits ONLY when BOTH still equal the
+// current selection. A late response from a superseded selection is dropped
+// silently — it never mutates the current selection's lastGoodActivity /
+// activityFresh / timeline / detail / terminal observation, and a late fetch
+// error never marks the current selection stale.
+
+/**
+ * Advance the selection to runId: bump the epoch (so every in-flight request
+ * for the PREVIOUS selection becomes stale), reset the per-selection activity
+ * state, and return the binding the NEW selection's bootstrap captures. Pure
+ * (mutates only the given state object's selection/activity fields; no DOM).
+ * @param {object} state
+ * @param {string} runId
+ * @returns {{runId:string, epoch:number}}
+ */
+export function advanceSelection(state, runId) {
+  if (!state || typeof state !== "object") return { runId, epoch: 0 };
+  state.selectionEpoch = (Number.isInteger(state.selectionEpoch) ? state.selectionEpoch : 0) + 1;
+  state.selectedRunId = runId;
+  state.timeline = [];
+  state.maxSeq = 0;
+  state.olderCursor = null;
+  state.lastGoodActivity = null;
+  state.unavailableReason = null;
+  state.activityFresh = null;
+  return { runId, epoch: state.selectionEpoch };
+}
+
+/**
+ * The commit gate: true ONLY when the captured (runId, epoch) is still the
+ * current selection. A late response (the run or the epoch no longer matches)
+ * returns false and the caller MUST drop it without mutating anything.
+ * @param {{selectedRunId:string|null, selectionEpoch:number}} state
+ * @param {{runId:string, epoch:number}} captured
+ * @returns {boolean}
+ */
+export function isCurrentSelection(state, captured) {
+  if (!state || !captured) return false;
+  if (typeof captured.runId !== "string" || captured.runId.length === 0) return false;
+  if (!Number.isInteger(captured.epoch)) return false;
+  if (state.selectedRunId !== captured.runId) return false;
+  if (state.selectionEpoch !== captured.epoch) return false;
+  return true;
+}
+
 // ===== Browser bootstrap (runs ONLY with a DOM present) =====
 
 if (typeof document !== "undefined" && typeof window !== "undefined") {
@@ -400,13 +653,19 @@ function boot() {
     detailRunid: $("detail-runid"),
     detailState: $("detail-state"),
     detailAgent: $("detail-agent"),
+    detailBackend: $("detail-backend"),
+    detailTerminal: $("detail-terminal"),
     detailLiveness: $("detail-liveness"),
+    detailTotal: $("detail-total"),
+    detailScope: $("detail-scope"),
+    detailUnlisted: $("detail-unlisted"),
     detailUnavailable: $("detail-unavailable"),
     refreshRun: $("refresh-run"),
     catFilters: $("cat-filters"),
     timeline: $("timeline"),
     timelineEmpty: $("timeline-empty"),
     loadOlder: $("load-older"),
+    notifyToggle: $("notify-toggle"),
   };
 
   if (!isValidToken(token)) {
@@ -433,11 +692,23 @@ function boot() {
     runsFresh: true,
     activityFresh: null,
     sessionEnded: false,
+    // M12-17 selection epoch: advances on every selection change so an in-flight
+    // activity request for a SUPERSEDED selection is dropped (isCurrentSelection).
+    selectionEpoch: 0,
+    // M12-17: opt-in notifications. notifyEnabled flips ONLY from the explicit
+    // button click; observedTerminal is the per-page-session terminal map the
+    // pure planner folds every runs/activity snapshot into (baseline-safe).
+    notifyEnabled: false,
+    observedTerminal: {},
   };
 
   els.app.hidden = false;
   els.unavailable.hidden = true;
   wireUi(state);
+  // The toggle is revealed only with a valid session; its state reflects the
+  // honest Notification capability (unsupported/denied → quietly disabled).
+  els.notifyToggle.hidden = false;
+  renderNotifyToggle(state);
 
   refreshRuns(state);
   state.runsTimer = setInterval(() => refreshRuns(state), RUNS_REFRESH_MS);
@@ -488,9 +759,79 @@ function wireUi(state) {
   });
   els.refreshRun.addEventListener("click", () => bootstrapActivity(state, { force: true }));
   els.loadOlder.addEventListener("click", () => loadOlder(state));
+  // The ONLY notification-enable path: an explicit Owner click (user gesture).
+  els.notifyToggle.addEventListener("click", () => enableNotifications(state));
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && state.selectedRunId) pollOnce(state);
   });
+}
+
+// ===== Opt-in terminal notifications (M12-17) =====
+//
+// Enable ONLY from the explicit Owner button click (a user gesture). The
+// post-load baseline never notifies; the pure planner fires at most one
+// notification per run per page session; unsupported/denied degrades quietly.
+
+function renderNotifyToggle(state) {
+  const el = state.els.notifyToggle;
+  const perm = notificationPermission(typeof Notification !== "undefined" ? Notification : undefined);
+  const b = notifyButtonState(perm, state.notifyEnabled);
+  el.disabled = b.disabled;
+  el.textContent = b.label;
+}
+
+function enableNotifications(state) {
+  if (state.notifyEnabled) return;
+  const perm = notificationPermission(typeof Notification !== "undefined" ? Notification : undefined);
+  if (perm === "granted") {
+    state.notifyEnabled = true;
+    renderNotifyToggle(state);
+    return;
+  }
+  if (perm !== "default") { renderNotifyToggle(state); return; } // denied/unsupported — quiet
+  let settled = false;
+  const done = (p) => {
+    if (settled) return;
+    settled = true;
+    state.notifyEnabled = p === "granted";
+    renderNotifyToggle(state);
+  };
+  try {
+    // Called ONLY from the button click — a genuine user gesture. Handles both
+    // the promise and the legacy callback form; settled guards double-firing.
+    const req = Notification.requestPermission(done);
+    if (req && typeof req.then === "function") req.then(done, () => done("denied"));
+  } catch {
+    done("denied"); // quiet degrade
+  }
+}
+
+// Fire one already-planned notification. Payload fields are fixed + safe
+// (title = state · agentId; body/tag = runId). tag dedups at the platform
+// level; renotify stays off. Any failure degrades quietly.
+function fireNotification(n) {
+  if (typeof Notification === "undefined") return;
+  if (notificationPermission(Notification) !== "granted") return;
+  try {
+    new Notification(n.title, { body: n.body, tag: n.runId, renotify: false });
+  } catch { /* quiet degrade */ }
+}
+
+// Feed the selected run's activity-page terminal fact into the SAME planner
+// (the activity page carries runId/agentId/state/terminal). Keeps the
+// observation current even while the selected run is outside the bounded runs
+// list. An unavailable page contributes nothing — absence is not terminal.
+// Called ONLY for the current selection (the race gate has already dropped any
+// late response from a superseded selection).
+function observeActivityTerminal(state, page) {
+  if (!page || page.available === false || !page.activity) return;
+  const act = page.activity;
+  if (typeof act.runId !== "string" || act.runId.length === 0) return;
+  const plan = planTerminalNotifications(state.observedTerminal, [{
+    runId: act.runId, agentId: act.agentId, state: act.state, terminal: act.terminal,
+  }]);
+  state.observedTerminal = plan.observed;
+  if (state.notifyEnabled) for (const n of plan.notifications) fireNotification(n);
 }
 
 // ===== Run list =====
@@ -504,16 +845,20 @@ async function refreshRuns(state) {
     // activity read (M12-8 separation). A 200 also proves the token still works.
     state.runsFresh = true;
     state.sessionEnded = false;
+    // Terminal-transition observation (M12-17): the pure planner folds the new
+    // list into the per-session observed map. The map updates whether or not
+    // notifications are enabled (enabling later never fires a backlog), the
+    // post-load baseline never notifies, and absence from the bounded list is
+    // never treated as terminal.
+    const plan = planTerminalNotifications(state.observedTerminal, state.runs);
+    state.observedTerminal = plan.observed;
+    if (state.notifyEnabled) for (const n of plan.notifications) fireNotification(n);
     renderAgentFilter(state);
     renderRunList(state);
-    // Preserve selection unless the selected run is gone.
-    if (state.selectedRunId && runIndex(state.runs, state.selectedRunId) < 0) {
-      state.selectedRunId = null;
-      state.timeline = [];
-      state.maxSeq = 0;
-      state.olderCursor = null;
-      renderDetail(state);
-    }
+    // Selection retention (M12-17): a selected run that falls out of the
+    // bounded list STAYS selected — the detail keeps refreshing via the
+    // activity poll, and "not in the list" is never reported as terminal.
+    if (state.selectedRunId) renderDetail(state);
     setStatus(state);
   } catch (err) {
     onFetchError(state, err, "runs");
@@ -585,7 +930,7 @@ function runRow(state, r) {
 
 function statePill(state) {
   const span = document.createElement("span");
-  span.className = "state-pill s-" + (typeof state === "string" && state.length ? state : "na");
+  span.className = "state-pill " + statePillClass(state);
   span.textContent = typeof state === "string" && state.length ? state : "n/a";
   return span;
 }
@@ -594,13 +939,7 @@ function statePill(state) {
 
 function selectRun(state, runId) {
   if (state.selectedRunId === runId) return;
-  state.selectedRunId = runId;
-  state.timeline = [];
-  state.maxSeq = 0;
-  state.olderCursor = null;
-  state.lastGoodActivity = null;
-  state.unavailableReason = null;
-  state.activityFresh = null;
+  advanceSelection(state, runId);
   renderRunList(state);
   bootstrapActivity(state);
 }
@@ -608,12 +947,18 @@ function selectRun(state, runId) {
 async function bootstrapActivity(state, opts = {}) {
   const runId = state.selectedRunId;
   if (!runId) return;
+  // M12-17 race binding: capture the selection at issue time. If the Owner
+  // selects another run while this read is in flight, the late response is
+  // dropped — it must NEVER mutate the current selection's facts or freshness.
+  const captured = { runId, epoch: state.selectionEpoch };
   try {
     const page = await fetchJson(
       state.token,
       `/api/activity?runId=${encodeURIComponent(runId)}&order=desc&pageSize=50`,
     );
+    if (!isCurrentSelection(state, captured)) return; // late — drop, never mutate
     applyBootstrapPage(state, page);
+    observeActivityTerminal(state, page);
     // Activity freshness follows THIS read's availability: available:false keeps
     // the evidence visibly stale/unavailable; an available read restores live.
     if (page && page.available !== false) {
@@ -625,6 +970,7 @@ async function bootstrapActivity(state, opts = {}) {
     renderDetail(state);
     setStatus(state);
   } catch (err) {
+    if (!isCurrentSelection(state, captured)) return; // late error — drop, never mark stale
     onFetchError(state, err, "activity");
     renderDetail(state);
   }
@@ -659,6 +1005,10 @@ async function pollOnce(state) {
   if (document.hidden) return;
   const runId = state.selectedRunId;
   if (!runId) return;
+  // M12-17 race binding: the snapshot (afterSeq + every cursor page) belongs to
+  // THIS selection. A selection change mid-snapshot drops the whole poll — a
+  // late page never mutates the current selection's timeline/freshness.
+  const captured = { runId, epoch: state.selectionEpoch };
   const params = pollParams(state.maxSeq);
   try {
     // Every page in this snapshot — page 1 and each cursor continuation — is
@@ -667,6 +1017,7 @@ async function pollOnce(state) {
     // "seq > afterSeq" view page 1 established.
     let url = pollRequestUrl(runId, params, null);
     let page = await fetchJson(state.token, url);
+    if (!isCurrentSelection(state, captured)) return; // late — drop, never mutate
     applyPollPage(state, page);
     // Follow cursors mechanically while a full page indicates more new entries
     // may exist — bounded by a small safety counter so a burst can't loop.
@@ -677,9 +1028,11 @@ async function pollOnce(state) {
       && guard < 4) {
       url = pollRequestUrl(runId, params, page.activity.nextCursor);
       page = await fetchJson(state.token, url);
+      if (!isCurrentSelection(state, captured)) return; // late mid-snapshot — drop
       applyPollPage(state, page);
       guard += 1;
     }
+    observeActivityTerminal(state, page);
     // Activity freshness follows the read's availability: available:false keeps
     // the last-good evidence visibly stale/unavailable; an available read is live.
     if (page && page.available !== false) {
@@ -691,6 +1044,7 @@ async function pollOnce(state) {
     renderDetail(state);
     setStatus(state);
   } catch (err) {
+    if (!isCurrentSelection(state, captured)) return; // late error — drop, never mark stale
     onFetchError(state, err, "activity");
     renderDetail(state);
   }
@@ -712,11 +1066,16 @@ function applyPollPage(state, page) {
 }
 
 async function loadOlder(state) {
-  if (!state.olderCursor || !state.selectedRunId) return;
+  const runId = state.selectedRunId;
+  if (!runId || !state.olderCursor) return;
+  // M12-17 race binding: a selection change while loading older drops the
+  // late page — it never mutates the current selection's timeline/cursor.
+  const captured = { runId, epoch: state.selectionEpoch };
   try {
-    const url = `/api/activity?runId=${encodeURIComponent(state.selectedRunId)}`
+    const url = `/api/activity?runId=${encodeURIComponent(runId)}`
       + `&cursor=${encodeURIComponent(state.olderCursor)}&order=desc`;
     const page = await fetchJson(state.token, url);
+    if (!isCurrentSelection(state, captured)) return; // late — drop, never mutate
     if (page && page.available !== false && page.activity) {
       const older = chronological(Array.isArray(page.activity.entries) ? page.activity.entries : []);
       state.timeline = trimOldest(older.concat(state.timeline), TIMELINE_CAP);
@@ -725,6 +1084,7 @@ async function loadOlder(state) {
       renderDetail(state);
     }
   } catch (err) {
+    if (!isCurrentSelection(state, captured)) return; // late error — drop, never mark stale
     onFetchError(state, err, "activity");
     renderDetail(state);
   }
@@ -758,24 +1118,41 @@ function renderDetail(state) {
   els.detail.hidden = false;
   els.noSelection.hidden = true;
 
-  const run = (state.runs.find((r) => r && r.runId === state.selectedRunId)) || null;
+  // Selection retention (M12-17): listed facts resolve via the pure helper; an
+  // unlisted (but still selected) run yields null — never a terminal claim.
+  const listed = retainSelectedRun(state.runs, state.selectedRunId);
+  const page = state.lastGoodActivity;
+  const act = page && page.available !== false && page.activity ? page.activity : null;
   els.detailRunid.textContent = state.selectedRunId;
 
-  // Facts
+  // Facts — ONLY the safe /api/runs + /api/activity projection fields. The
+  // activity poll (2s) is fresher than the runs list (5s); listed facts are
+  // the fallback while activity is loading/stale or the run is unlisted.
+  const stateText = detailStateText(act, listed);
   els.detailState.textContent = "";
   els.detailState.className = "state-pill";
-  if (run) {
-    els.detailState.classList.add("s-" + (typeof run.state === "string" && run.state.length ? run.state : "na"));
-    els.detailState.textContent = run.state || "n/a";
-  } else {
-    els.detailState.classList.add("s-na");
-    els.detailState.textContent = "n/a";
-  }
-  els.detailAgent.textContent = run && typeof run.agentId === "string" ? run.agentId : "";
+  els.detailState.classList.add(statePillClass(stateText));
+  els.detailState.textContent = stateText || "n/a";
+  els.detailAgent.textContent = (act && typeof act.agentId === "string" && act.agentId)
+    || (listed && typeof listed.agentId === "string" ? listed.agentId : "");
+  els.detailBackend.textContent = backendFact(act);
+  els.detailTerminal.textContent = terminalFact(act, listed);
+  els.detailTotal.textContent = activityTotalFact(act);
+  els.detailScope.textContent = act ? scopeObservationSummary(act.scopeObservation) : "";
 
   // Liveness (safe shape only)
-  const live = state.lastGoodActivity && state.lastGoodActivity.liveness;
+  const live = page && page.liveness;
   els.detailLiveness.textContent = live ? livenessDescription(live) : "";
+
+  // Retention is explicit: a selected run outside the bounded list keeps
+  // refreshing — say so instead of implying it vanished.
+  if (!listed) {
+    els.detailUnlisted.hidden = false;
+    els.detailUnlisted.textContent = "not in the recent runs list — still refreshing";
+  } else {
+    els.detailUnlisted.hidden = true;
+    els.detailUnlisted.textContent = "";
+  }
 
   // Unavailable reason (closed set, never raw)
   if (state.unavailableReason) {

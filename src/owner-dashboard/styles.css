@@ -18,7 +18,9 @@
   --completed-fg: #1f6f3a; --completed-bg: #def3e2;
   --failed-fg: #9b1c1c;    --failed-bg: #fbe0e0;
   --timed_out-fg: #8a3a12; --timed_out-bg: #fbe6d6;
-  --stopped-fg: #4b5563;   --stopped-bg: #eef1f4;
+  --aborted-fg: #4b5563;   --aborted-bg: #eef1f4;
+  --pending-fg: #44506b;   --pending-bg: #e8ecf3;
+  --submitted-fg: #20548f; --submitted-bg: #e2edf8;
   --unknown-fg: #5b6470;   --unknown-bg: #eceef1;
 
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
@@ -40,6 +42,7 @@ html, body {
 /* ===== Top bar ===== */
 .topbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
   gap: 12px;
@@ -51,6 +54,7 @@ html, body {
   z-index: 2;
 }
 .topbar-title { font-weight: 600; letter-spacing: .01em; }
+.topbar-side { display: flex; align-items: baseline; gap: 12px; }
 .topbar-status { font-size: 12px; color: var(--muted); }
 .topbar-status.stale { color: var(--warn); font-weight: 600; }
 .topbar-status.live::before {
@@ -130,7 +134,9 @@ html, body {
 .state-pill.s-completed { color: var(--completed-fg); background: var(--completed-bg); }
 .state-pill.s-failed    { color: var(--failed-fg);    background: var(--failed-bg); }
 .state-pill.s-timed_out { color: var(--timed_out-fg); background: var(--timed_out-bg); }
-.state-pill.s-stopped   { color: var(--stopped-fg);   background: var(--stopped-bg); }
+.state-pill.s-aborted   { color: var(--aborted-fg);   background: var(--aborted-bg); }
+.state-pill.s-pending   { color: var(--pending-fg);   background: var(--pending-bg); }
+.state-pill.s-submitted { color: var(--submitted-fg); background: var(--submitted-bg); }
 .state-pill.s-unknown   { color: var(--unknown-fg);   background: var(--unknown-bg); }
 .state-pill.s-na        { color: var(--unknown-fg);   background: var(--unknown-bg); }
 
@@ -153,6 +159,8 @@ html, body {
   cursor: pointer;
 }
 .link-button:hover { background: var(--accent-soft); }
+.link-button:disabled { color: var(--muted); cursor: default; }
+.link-button:disabled:hover { background: none; }
 .link-button[hidden] { display: none; }
 
 /* ===== Category filter chips ===== */
