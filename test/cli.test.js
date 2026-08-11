@@ -1739,6 +1739,54 @@ test("TD-75: status 输出心跳字段 lastActivityTs + secondsSinceActivity（�
   }
 });
 
+test("M12-17-C1: status 输出 executionStage（无 runId 信封的 legacy 种子仍正确投影）", async () => {
+  // 与 TD-75 同形：seed 全部事件没有 runId 信封（legacy transcript 形态）。
+  // 投影必须把缺信封的 legacy 行当作 in-scope（不 throw、不跳过），
+  // 只在信封 runId 存在且不同时才视为 cross-run 外圈事件。
+  const dir = mkdtempSync(join(tmpdir(), "wao-stage-cli-"));
+  try {
+    // 1) 活跃 run：submitted → running → run.event → active
+    writeFileSync(join(dir, "run_stage_a.jsonl"),
+      JSON.stringify({ type: "run.submitted", agentId: "coder_hq", ts: "2026-06-28T18:40:00.000Z" }) + "\n" +
+      JSON.stringify({ type: "run.state_change", to: "running", ts: "2026-06-28T18:40:01.000Z" }) + "\n" +
+      JSON.stringify({ type: "run.event", kind: "command", command: "ls", ts: "2026-06-28T18:44:53.000Z" }) + "\n");
+    const out = await captureLog(async () => {
+      await statusCommand(["run_stage_a", "--run-dir", dir], { runDir: dir });
+    });
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.executionStage.phase, "active", "legacy 无信封种子仍投影出 active");
+    assert.equal(parsed.executionStage.sinceTs, "2026-06-28T18:44:53.000Z", "sinceTs = 首个 run.event 的 ts");
+    assert.ok(typeof parsed.executionStage.secondsSince === "number" && parsed.executionStage.secondsSince > 0,
+      "secondsSince 是正数（距 sinceTs 的秒数）");
+
+    // 2) 终态 run：run.error + state_change failed（TD-99 原子配对）→ terminal
+    writeFileSync(join(dir, "run_stage_t.jsonl"),
+      JSON.stringify({ type: "run.submitted", agentId: "coder_hq", ts: "2026-06-28T18:40:00.000Z" }) + "\n" +
+      JSON.stringify({ type: "run.event", kind: "message", role: "assistant", parts: [], ts: "2026-06-28T18:44:51.000Z" }) + "\n" +
+      JSON.stringify({ type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-06-28T18:45:14.000Z" }) + "\n" +
+      JSON.stringify({ type: "run.state_change", to: "failed", reason: "backend_error", ts: "2026-06-28T18:45:14.000Z" }) + "\n");
+    const outT = await captureLog(async () => {
+      await statusCommand(["run_stage_t", "--run-dir", dir], { runDir: dir });
+    });
+    const parsedT = JSON.parse(outT);
+    assert.equal(parsedT.executionStage.phase, "terminal", "失败终态投影为 terminal");
+    assert.equal(parsedT.executionStage.sinceTs, "2026-06-28T18:45:14.000Z", "sinceTs = 首个终态事实的 ts");
+
+    // 3) 冲突终态（completed + failed）→ unknown，绝不替 Lead 选赢家
+    writeFileSync(join(dir, "run_stage_c.jsonl"),
+      JSON.stringify({ type: "run.state_change", to: "completed", ts: "2026-06-28T18:45:00.000Z" }) + "\n" +
+      JSON.stringify({ type: "run.state_change", to: "failed", reason: "recount", ts: "2026-06-28T18:45:14.000Z" }) + "\n");
+    const outC = await captureLog(async () => {
+      await statusCommand(["run_stage_c", "--run-dir", dir], { runDir: dir });
+    });
+    const parsedC = JSON.parse(outC);
+    assert.deepEqual(parsedC.executionStage, { phase: "unknown", sinceTs: null, secondsSince: null },
+      "冲突终态 → unknown，null 年龄");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
 test("TD-75 补全: lastActivityKind 按事件 kind 映射成 Lead 可读活动类型", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-hb-kind-"));
   try {

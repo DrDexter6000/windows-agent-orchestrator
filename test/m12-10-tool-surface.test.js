@@ -479,7 +479,15 @@ const RED_23_WIRE = 75492;
 // prompt/body/reason/provider session/path. No new tools, no validation removed,
 // no description change (M12-16-B still passes). The wire grew +451 bytes
 // (schema-only); ceiling re-frozen at 72128, still well below the 23-tool baseline.
-const FROZEN_22_WIRE_CEILING = 72128;
+//
+// M12-17 re-baseline (submitted-stage execution semantics): the run_status
+// OUTPUT schema gained the REQUIRED closed-set `executionStage` object
+// ({ phase, sinceTs, secondsSince } — phases from the runStageProjection.js SSOT
+// enum, nullable sinceTs/secondsSince). No new tools, no validation removed, no
+// description text change (M12-16-B still passes — desc bytes unchanged). The
+// wire grew +307 bytes (schema-only); ceiling re-frozen at the measured 72435,
+// still well below the 23-tool baseline (75492).
+const FROZEN_22_WIRE_CEILING = 72435;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -551,9 +559,12 @@ test("M12-10-H: deterministic 22-tool wire below frozen ceiling and below the 23
 // annotations are part of the stripped payload, so the SHA changed truthfully);
 // re-measured again for the M12-16 correction-category run_activity output-schema
 // variant (a new union member + counts key change the stripped payload, so the SHA
-// changed truthfully).
+// changed truthfully); re-measured once more for M12-17 (the run_status output
+// schema gained the closed-set `executionStage` object — its zod enum + strict
+// object are part of the stripped payload, so the SHA changed truthfully; no
+// description text changed).
 const DESC_STRIPPED_CONTRACT_SHA =
-  "21d67a541d3273d171e7f88f098b30e045138f66e2980d3fd1dcf031d92a980e";
+  "b978f211cf904b102454f68c2b18543b4b2f6d44394d0bca16fc40aee792943c";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

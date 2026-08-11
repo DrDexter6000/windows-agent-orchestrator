@@ -192,6 +192,106 @@ test("M9-3A-05: fixed nowFn → secondsSinceActivity exact", async () => {
 });
 
 // ---------------------------------------------------------------------
+// M12-17-S1..S5: submitted-stage executionStage is ADDITIVE to getRunStatus —
+// same read-only snapshot, closed-set projection, deterministic age, no
+// payload echo.
+// ---------------------------------------------------------------------
+
+test("M12-17-S1: executionStage active on sampleEvents with exact deterministic age", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1217-s1-"));
+  try {
+    const runDir = join(dir, "runs");
+    writeTranscript(runDir, SAMPLE_RUN, sampleEvents());
+    // Last run.event at 00:00:10, now fixed at 00:00:14 → exactly 4 seconds.
+    const fixedNow = () => new Date("2026-07-14T00:00:14.000Z").getTime();
+    const result = await getRunStatus({ runId: SAMPLE_RUN, runDir, nowFn: fixedNow });
+    assert.deepEqual(result.executionStage, {
+      phase: "active",
+      sinceTs: "2026-07-14T00:00:10.000Z",
+      secondsSince: 4,
+    }, "active stage from first run.event, exact age");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M12-17-S2: terminal state_change → executionStage terminal, age from the transition", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1217-s2-"));
+  try {
+    const runId = "run_term_m1217";
+    writeTranscript(dir, runId,
+      ev({ type: "run.submitted", ts: "2026-07-14T00:00:00.000Z", runId, agentId: "w", seq: 1 }) +
+      ev({ type: "run.state_change", to: "running", reason: "started", ts: "2026-07-14T00:00:01.000Z", runId, agentId: "w", seq: 2 }) +
+      ev({ type: "run.event", kind: "command", command: "npm test", ts: "2026-07-14T00:00:02.000Z", runId, agentId: "w", seq: 3 }) +
+      ev({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-07-14T00:00:05.000Z", runId, agentId: "w", seq: 4 }),
+    );
+    const fixedNow = () => new Date("2026-07-14T00:00:14.000Z").getTime();
+    const result = await getRunStatus({ runId, runDir: dir, nowFn: fixedNow });
+    assert.equal(result.state, "completed");
+    assert.equal(result.terminal, true);
+    assert.deepEqual(result.executionStage, {
+      phase: "terminal",
+      sinceTs: "2026-07-14T00:00:05.000Z",
+      secondsSince: 9,
+    });
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M12-17-S3: legacy run.completed (no state_change) → executionStage terminal", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1217-s3-"));
+  try {
+    const runId = "run_legacy_stage_m1217";
+    writeTranscript(dir, runId,
+      ev({ type: "run.event", kind: "command", command: "echo hi", ts: "2026-07-14T00:00:01.000Z", runId, agentId: "w", seq: 1 }) +
+      ev({ type: "run.completed", ts: "2026-07-14T00:00:02.000Z", runId, agentId: "w", seq: 2 }),
+    );
+    const result = await getRunStatus({ runId, runDir: dir });
+    assert.equal(result.executionStage.phase, "terminal", "legacy terminal fact establishes terminal");
+    assert.equal(result.executionStage.sinceTs, "2026-07-14T00:00:02.000Z");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M12-17-S4: distinct conflicting terminal states → executionStage unknown", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1217-s4-"));
+  try {
+    const runId = "run_conflict_stage_m1217";
+    writeTranscript(dir, runId,
+      ev({ type: "run.state_change", to: "running", reason: "started", ts: "2026-07-14T00:00:01.000Z", runId, agentId: "w", seq: 1 }) +
+      ev({ type: "run.event", kind: "command", command: "npm test", ts: "2026-07-14T00:00:02.000Z", runId, agentId: "w", seq: 2 }) +
+      ev({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-07-14T00:00:05.000Z", runId, agentId: "w", seq: 3 }) +
+      ev({ type: "run.state_change", to: "failed", reason: "recount", ts: "2026-07-14T00:00:06.000Z", runId, agentId: "w", seq: 4 }),
+    );
+    const result = await getRunStatus({ runId, runDir: dir });
+    assert.deepEqual(result.executionStage, { phase: "unknown", sinceTs: null, secondsSince: null },
+      "conflicting terminals never pick a winner");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M12-17-S5: executionStage is additive and leak-free (shape + no payload echo)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1217-s5-"));
+  try {
+    const runDir = join(dir, "runs");
+    writeTranscript(runDir, SAMPLE_RUN, sampleEvents());
+    const result = await getRunStatus({ runId: SAMPLE_RUN, runDir });
+    // Exactly the closed stage shape, nothing more (no kind/summary/command echo).
+    assert.deepEqual(Object.keys(result.executionStage).sort(), ["phase", "secondsSince", "sinceTs"]);
+    assert.ok(!JSON.stringify(result.executionStage).includes("npm test"), "no command payload in executionStage");
+    // The pre-existing status contract is untouched (additive).
+    assert.equal(result.state, "running");
+    assert.equal(result.terminal, false);
+    assert.equal(result.lastActivityTs, "2026-07-14T00:00:10.000Z");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
 // M9-3A-06: malicious/path-traversal/blank runId rejected before readTranscript.
 // ---------------------------------------------------------------------
 

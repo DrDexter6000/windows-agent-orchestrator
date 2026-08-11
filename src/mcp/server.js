@@ -67,6 +67,7 @@ import { KimiCodeBackend } from "../backends/kimiCode.js";
 import { getWaoCliPath } from "../waoCliPath.js";
 import { randomUUID } from "node:crypto";
 import { getRunStatus } from "../application/runStatus.js";
+import { EXECUTION_STAGES } from "../application/runStageProjection.js";
 import { collectRunMessages } from "../application/runCollect.js";
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
 import {
@@ -819,6 +820,16 @@ const RUN_STATUS_OUTPUT = z.object({
   agentId: READ_AGENT_ID_SCHEMA,
   state: z.string(),
   terminal: z.boolean(),
+  // M12-17: submitted-stage execution semantics — closed-set phases derived
+  // from the runStageProjection.js SSOT (z.enum(EXECUTION_STAGES)), so the
+  // wire can NEVER carry a phase the projector cannot produce. sinceTs is the
+  // raw ts of the stage-establishing event, secondsSince the deterministic
+  // rounded age; both null when unknowable.
+  executionStage: z.object({
+    phase: z.enum(EXECUTION_STAGES),
+    sinceTs: z.string().nullable(),
+    secondsSince: z.number().nullable(),
+  }).strict(),
   lastEvent: z.object({
     type: z.string(),
     ts: z.string(),
@@ -3453,6 +3464,21 @@ export function createWaoMcpServer({
                 : null,
             }
           : null;
+        // M12-17: normalize the stage defensively — a service value whose phase
+        // is outside the closed set (or a missing/malformed stage object)
+        // degrades to "unknown" with null age; it can never leak an unvalidated
+        // string onto the wire or crash the strict output schema.
+        const rawStage = status.executionStage;
+        const executionStage =
+          rawStage && typeof rawStage === "object" && EXECUTION_STAGES.includes(rawStage.phase)
+            ? {
+                phase: rawStage.phase,
+                sinceTs: isStringField(rawStage.sinceTs) ? rawStage.sinceTs : null,
+                secondsSince: typeof rawStage.secondsSince === "number" && Number.isFinite(rawStage.secondsSince)
+                  ? rawStage.secondsSince
+                  : null,
+              }
+            : { phase: "unknown", sinceTs: null, secondsSince: null };
         const payload = {
           runId: status.runId,
           // M11-8B closeout: project agentId through the SSOT (closed-set).
@@ -3460,6 +3486,7 @@ export function createWaoMcpServer({
           agentId: safeProjectAgentId(status.agentId),
           state: status.state,
           terminal: status.terminal,
+          executionStage,
           lastEvent,
           lastActivity,
         };

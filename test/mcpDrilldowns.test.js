@@ -170,12 +170,16 @@ test("MD-02: run_status returns availableDrilldowns; legacy fields unchanged", a
       const res = await client.callTool({ name: "run_status", arguments: { runId: "run_s" } });
       assert.equal(res.isError, undefined);
       const parsed = res.structuredContent;
-      // Legacy fields preserved exactly.
+      // Legacy fields preserved exactly (M12-17 added executionStage — the
+      // closed-set submitted-stage projection, additive).
       assert.deepEqual(Object.keys(parsed).sort(),
-        ["agentId", "availableDrilldowns", "lastActivity", "lastEvent", "runId", "state", "terminal"].sort());
+        ["agentId", "availableDrilldowns", "executionStage", "lastActivity", "lastEvent", "runId", "state", "terminal"].sort());
       assert.equal(parsed.runId, "run_s");
       assert.equal(parsed.state, "running");
       assert.equal(parsed.terminal, false);
+      // M12-17: run_s has a run.event message at 00:00:10 → active, sinceTs exact.
+      assert.equal(parsed.executionStage.phase, "active", "run_s projects active (first run.event)");
+      assert.equal(parsed.executionStage.sinceTs, "2026-07-28T00:00:10.000Z", "sinceTs = first run.event ts");
       assert.ok(parsed.lastEvent && typeof parsed.lastEvent.type === "string", "lastEvent intact");
       assert.ok(parsed.lastActivity && typeof parsed.lastActivity.kind === "string", "lastActivity intact");
       assert.equal(parsed.agentId, "coder_low", "agentId intact");

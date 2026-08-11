@@ -13,11 +13,15 @@
 //   - Does not import src/commands/*, src/mcp/*, MCP SDK, or zod.
 //   - Depends on transcript.js (readTranscript/findState/TERMINAL_STATES) and
 //     delivery.js (isValidRunId).
+//   - M12-17: executionStage via projectExecutionStage (pure closed-set
+//     projection over the SAME read-only snapshot; never writes, never probes
+//     liveness, never makes a semantic judgment).
 
 import { join } from "node:path";
 
 import { readTranscript, findState, TERMINAL_STATES, extractCanonicalAgentId } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
+import { projectExecutionStage } from "./runStageProjection.js";
 
 // ===== Activity description (migrated from observe.js, TD-75 semantics) =====
 
@@ -150,11 +154,22 @@ export async function getRunStatus({
     : null;
   const { lastActivityKind, lastActivitySummary } = describeActivity(lastActivity);
 
+  // M12-17: submitted-stage execution semantics — pure closed-set projection
+  // over the SAME read-only snapshot, bound to the requested runId. Same
+  // injectable clock as secondsSinceActivity, so all ages are deterministic
+  // together. Purely additive; state/terminal/activity stay untouched.
+  const stage = projectExecutionStage({ events }, { runId, nowFn: _now });
+
   return {
     runId,
     agentId,
     state,
     terminal,
+    executionStage: {
+      phase: stage.phase,
+      sinceTs: stage.sinceTs,
+      secondsSince: stage.secondsSince,
+    },
     // CLI-compatible fields (TD-75 contract, byte-compatible output).
     last,
     lastActivityTs,

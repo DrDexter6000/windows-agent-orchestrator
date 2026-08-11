@@ -168,9 +168,10 @@ test("M9-3B-03: run_status output is safe subset, no raw payload leak", async ()
       const parsed = JSON.parse(textBlock.text);
 
       // Only these top-level keys (M11-8B added agentId; M12-8B added
-      // availableDrilldowns — bounded progressive-disclosure metadata).
-      assert.deepEqual(Object.keys(parsed).sort(), ["agentId", "availableDrilldowns", "lastActivity", "lastEvent", "runId", "state", "terminal"],
-        "only runId/agentId/state/terminal/lastEvent/lastActivity/availableDrilldowns");
+      // availableDrilldowns — bounded progressive-disclosure metadata;
+      // M12-17 added executionStage — submitted-stage closed-set projection).
+      assert.deepEqual(Object.keys(parsed).sort(), ["agentId", "availableDrilldowns", "executionStage", "lastActivity", "lastEvent", "runId", "state", "terminal"],
+        "only runId/agentId/state/terminal/executionStage/lastEvent/lastActivity/availableDrilldowns");
       // M11-8B: the durable agentId from the envelope, not worker text.
       assert.equal(parsed.agentId, "w", "agentId is the durable envelope id");
 
@@ -399,6 +400,120 @@ test("M9-3B-06: repeated status calls leave transcript unchanged", async () => {
     assert.equal(after, before, "transcript bytes unchanged after repeated status calls");
   } finally {
     cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// M12-17-M1: run_status carries the executionStage closed-set projection over
+//            real transcripts (active on worker activity, terminal on the
+//            transition) — additive, no payload leak.
+// ---------------------------------------------------------------------
+
+test("M12-17-M1: run_status exposes executionStage (active / terminal) via structuredContent", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1217-m1-"));
+  try {
+    const runDir = join(dir, "runs");
+    const activeRun = "run_stage_active_m1217";
+    writeTranscript(runDir, activeRun,
+      ev({ type: "run.background_submitted", ts: "2026-07-14T00:00:00.000Z", runId: activeRun, agentId: "w", seq: 1 }) +
+      ev({ type: "run.state_change", to: "running", reason: "started", ts: "2026-07-14T00:00:01.000Z", runId: activeRun, agentId: "w", seq: 2 }) +
+      ev({ type: "run.event", kind: "command", command: "npm test", ts: "2026-07-14T00:00:02.000Z", runId: activeRun, agentId: "w", seq: 3 }),
+    );
+    const doneRun = "run_stage_done_m1217";
+    writeTranscript(runDir, doneRun,
+      ev({ type: "run.submitted", ts: "2026-07-14T00:00:00.000Z", runId: doneRun, agentId: "w", seq: 1 }) +
+      ev({ type: "run.state_change", to: "running", reason: "started", ts: "2026-07-14T00:00:01.000Z", runId: doneRun, agentId: "w", seq: 2 }) +
+      ev({ type: "run.event", kind: "command", command: "npm test", ts: "2026-07-14T00:00:02.000Z", runId: doneRun, agentId: "w", seq: 3 }) +
+      ev({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-07-14T00:00:05.000Z", runId: doneRun, agentId: "w", seq: 4 }),
+    );
+
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const active = await client.callTool({ name: "run_status", arguments: { runId: activeRun } });
+      const activeParsed = JSON.parse(active.content.find((b) => b.type === "text").text);
+      assert.equal(activeParsed.executionStage.phase, "active");
+      assert.equal(activeParsed.executionStage.sinceTs, "2026-07-14T00:00:02.000Z");
+      assert.equal(typeof activeParsed.executionStage.secondsSince, "number", "age present for active stage");
+      assert.deepEqual(Object.keys(activeParsed.executionStage).sort(), ["phase", "secondsSince", "sinceTs"],
+        "executionStage carries exactly phase/sinceTs/secondsSince");
+
+      const done = await client.callTool({ name: "run_status", arguments: { runId: doneRun } });
+      const doneParsed = JSON.parse(done.content.find((b) => b.type === "text").text);
+      assert.equal(doneParsed.executionStage.phase, "terminal", "completed transition → terminal");
+      assert.equal(doneParsed.executionStage.sinceTs, "2026-07-14T00:00:05.000Z");
+
+      // No worker payload (command text) ever reaches the wire.
+      const dumped = JSON.stringify([active, done]);
+      assert.ok(!dumped.includes("npm test"), "no run.event payload leak in executionStage path");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// M12-17-M2: a service result WITHOUT executionStage (older/other DI fakes)
+//            degrades to phase "unknown" with null ages — the strict output
+//            schema still validates (defensive normalization, no crash).
+// ---------------------------------------------------------------------
+
+test("M12-17-M2: missing/malformed executionStage in service result → phase unknown, no schema crash", async () => {
+  const server = createWaoMcpServer({
+    registryPath: "/server/r.json",
+    runDir: "/server/runs",
+    getRunStatusFn: async (input) => ({
+      runId: input.runId, state: "running", terminal: false,
+      last: null, lastActivityTs: null, secondsSinceActivity: null,
+      lastActivityKind: null, lastActivitySummary: null,
+      lastEventType: null, lastEventTs: null, lastActivityEventKind: null,
+      // NOTE: no executionStage at all (missing) and no malformed stage.
+    }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_status", arguments: { runId: "run_x" } });
+    // Successful tool results in this SDK omit isError (only error results carry true).
+    assert.equal(res.isError, undefined, "missing executionStage must not crash run_status");
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    assert.deepEqual(parsed.executionStage, { phase: "unknown", sinceTs: null, secondsSince: null },
+      "missing stage degrades to unknown with null ages");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("M12-17-M2b: malformed executionStage values in service result normalize defensively", async () => {
+  const server = createWaoMcpServer({
+    registryPath: "/server/r.json",
+    runDir: "/server/runs",
+    getRunStatusFn: async (input) => ({
+      runId: input.runId, state: "running", terminal: false,
+      last: null, lastActivityTs: null, secondsSinceActivity: null,
+      lastActivityKind: null, lastActivitySummary: null,
+      lastEventType: null, lastEventTs: null, lastActivityEventKind: null,
+      executionStage: {
+        phase: "SUPER_TERMINAL", // outside the closed set
+        sinceTs: 12345, // non-string
+        secondsSince: "nine", // non-number
+      },
+    }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_status", arguments: { runId: "run_x" } });
+    // Successful tool results in this SDK omit isError (only error results carry true).
+    assert.equal(res.isError, undefined, "malformed stage must normalize, not crash");
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    assert.deepEqual(parsed.executionStage, { phase: "unknown", sinceTs: null, secondsSince: null },
+      "out-of-set phase / bad types degrade to unknown with null ages");
+  } finally {
+    await client.close();
+    await server.close();
   }
 });
 

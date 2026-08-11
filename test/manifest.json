@@ -90,6 +90,7 @@
       "runEvent.test.js",
       "runEvidenceAssessment.test.js",
       "runManager.test.js",
+      "runStageProjection.test.js",
       "runStatus.test.js",
       "runs.test.js",
       "runsDelivery.test.js",

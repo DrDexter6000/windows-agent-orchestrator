@@ -51,6 +51,9 @@ export async function statusCommand(args, config) {
     runId: status.runId,
     agentId: status.agentId,
     state: status.state,
+    // M12-17: submitted-stage execution semantics — printed via the service's
+    // additive executionStage projection (never re-derived in the CLI).
+    executionStage: status.executionStage,
     last: status.last,
     lastActivityTs: status.lastActivityTs,
     secondsSinceActivity: status.secondsSinceActivity,
