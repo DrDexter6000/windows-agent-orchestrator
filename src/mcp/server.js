@@ -107,6 +107,7 @@ import { projectDeliveryChangedPaths, CHANGED_PATHS_LIMIT, validateProjectedPath
 import { computeCandidateInventory, INVENTORY_PATHS_LIMIT } from "../application/candidateInventory.js";
 import { stopRun } from "../application/runStop.js";
 import { listRuns, ACTIVITY_STATUSES, ACTIVITY_BASES } from "../application/runList.js";
+import { createRunSummaryCache } from "../application/runSummaryCache.js";
 import {
   runWait,
   RUN_WAIT_MIN_MS,
@@ -2542,7 +2543,21 @@ export function createWaoMcpServer({
   // M12-9: injectable advisory dispatch-contract precheck service. Defaults to
   // the real read-only service; threaded for transport tests.
   runDispatchContractCheckFn,
+  // M12-18: injectable bounded in-memory run-transcript cache. Defaults to a
+  // fresh cache owned by THIS server instance. The SAME cache is shared by the
+  // long-lived read-only query handlers (lead_preflight and runs_list) — never
+  // by decision/append/status/wait/collect/stop/reverify/correction paths. The
+  // cache stores the smallest exact static run facts (extractRunFacts)
+  // keyed/validated by file metadata; every query still re-applies the current
+  // workspace binding, knownAgentIds, owner heartbeat, activeOnly, sorting and
+  // limit against those facts.
+  runSummaryCache,
 }) {
+  // M12-18: one cache instance per server. Handlers receive a facts reader
+  // that serves the metadata-validated run facts; listRuns re-applies the
+  // current binding, registry, heartbeat and filters against them per query.
+  const summaryCache = runSummaryCache ?? createRunSummaryCache();
+  const cachedRunFactsReader = (filePath) => summaryCache.read(filePath);
   const service = getRegistryInventoryFn ?? getRegistryInventory;
   // M11-7: the Windows user-env reader for credential readiness. Defaults to
   // the real reader (PowerShell HKCU\Environment); tests inject a fake.
@@ -2897,7 +2912,7 @@ export function createWaoMcpServer({
           userEnvReader: resolveUserEnv,
           getRegistryInventoryFn: inventoryResolver,
           listRunsFn: (workspaceBinding && workspaceBinding.bound)
-            ? (args) => listRunsService({ ...args, knownAgentIds })
+            ? (args) => listRunsService({ ...args, knownAgentIds, readSummaryFn: cachedRunFactsReader })
             : undefined,
         });
         // Validate AND return the parsed safe object — not the raw payload.
@@ -3927,6 +3942,7 @@ export function createWaoMcpServer({
           latest: limit,
           authorizedWorkspaceRoot: binding.root,
           knownAgentIds,
+          readSummaryFn: cachedRunFactsReader,
         });
 
         const payload = {

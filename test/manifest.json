@@ -146,6 +146,7 @@
       "mcpRunStop.test.js",
       "mcpWorkspace.test.js",
       "mcpWorkspaceSmoke.test.js",
+      "m12-18-runSummaryCache.test.js",
       "ownerDashboard.test.js",
       "ownerDashboardInstallRoot.test.js",
       "ownerDashboardLauncher.test.js",

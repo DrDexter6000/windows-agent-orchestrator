@@ -50,27 +50,29 @@ function scanRunFiles(runDir) {
 }
 
 /**
- * Extract a run summary from events.
- * Returns null if the run is malformed or unreadable.
+ * Extract the smallest EXACT static run facts from parsed transcript events.
  *
- * @param {string} runId — from filename (already isValidRunId-checked)
+ * This is the cache payload SSOT (M12-18): the static facts listRuns derives
+ * from a transcript, plus the exact run.background_submitted / run.started
+ * ownership events the workspace verifier consumes (findRunWorkspaceOwnership
+ * filters by those types, so this projection is exact-equivalence for
+ * re-applying CURRENT workspace authorization on every query). The facts are
+ * derived from the full exact parse — never a selective parser.
+ *
+ * Returns null when the transcript yields no run (empty / non-array events).
+ *
  * @param {object[]} events
- * @param {string[]} knownAgentIds — for agentId validation
- * @returns {{runId, agentId, state, terminal, updatedAt}|null}
+ * @returns {{agentId, state, terminal, updatedAt, ownershipEvents}|null}
  */
-function summarizeRun(runId, events, knownAgentIds, input) {
+export function extractRunFacts(events) {
   if (!Array.isArray(events) || events.length === 0) return null;
   const state = findState(events);
   // Map unknown states to "unknown" (don't leak arbitrary strings)
   const safeState = RUN_STATES.includes(state) ? state : "unknown";
   const terminal = TERMINAL_STATES.includes(safeState);
-  // agentId from first event; validate against known registry.
-  // MCP path: always validate (even if registry unavailable → all "unknown").
-  // CLI path (validateAgentIds=false): preserve raw agentId.
+  // agentId raw, pre-validation — the registry mapping is re-applied per query
+  // (finalizeSummary) so cached facts stay registry-independent.
   const rawAgentId = events[0]?.agentId;
-  const agentId = input.validateAgentIds === false
-    ? (typeof rawAgentId === "string" ? rawAgentId : "unknown")
-    : (typeof rawAgentId === "string" && knownAgentIds.includes(rawAgentId) ? rawAgentId : "unknown");
   // updatedAt: last event's ts, validated as ISO timestamp
   const lastTs = events[events.length - 1]?.ts ?? null;
   let updatedAt = null;
@@ -80,7 +82,50 @@ function summarizeRun(runId, events, knownAgentIds, input) {
       updatedAt = parsed.toISOString();
     }
   }
-  return { runId, agentId, state: safeState, terminal, updatedAt };
+  return {
+    agentId: rawAgentId,
+    state: safeState,
+    terminal,
+    updatedAt,
+    ownershipEvents: events.filter(
+      (e) => e.type === "run.background_submitted" || e.type === "run.started",
+    ),
+  };
+}
+
+// Empty-transcript sentinel: preserves the pre-M12-18 flow EXACTLY for an
+// empty file — ownership and activity are still evaluated (an empty file
+// without a verifier is an unresolved run in the count) and the run is
+// finally dropped at summary completion (finalizeSummary returns null).
+const EMPTY_TRANSCRIPT_FACTS = Object.freeze({
+  agentId: undefined,
+  state: "pending",
+  terminal: false,
+  updatedAt: null,
+  ownershipEvents: [],
+  emptyTranscript: true,
+});
+
+/**
+ * Complete a run summary from static facts, re-applying the CURRENT registry
+ * (knownAgentIds) and CLI validateAgentIds flag per query.
+ *
+ * @param {string} runId — from filename (already isValidRunId-checked)
+ * @param {object} facts — extractRunFacts payload (or the empty sentinel)
+ * @param {string[]} knownAgentIds — for agentId validation
+ * @param {object} input — listRuns input (validateAgentIds flag)
+ * @returns {{runId, agentId, state, terminal, updatedAt}|null}
+ */
+function finalizeSummary(runId, facts, knownAgentIds, input) {
+  if (facts.emptyTranscript) return null;
+  const rawAgentId = facts.agentId;
+  // agentId from first event; validate against known registry.
+  // MCP path: always validate (even if registry unavailable → all "unknown").
+  // CLI path (validateAgentIds=false): preserve raw agentId.
+  const agentId = input.validateAgentIds === false
+    ? (typeof rawAgentId === "string" ? rawAgentId : "unknown")
+    : (typeof rawAgentId === "string" && knownAgentIds.includes(rawAgentId) ? rawAgentId : "unknown");
+  return { runId, agentId, state: facts.state, terminal: facts.terminal, updatedAt: facts.updatedAt };
 }
 
 /**
@@ -98,6 +143,11 @@ function summarizeRun(runId, events, knownAgentIds, input) {
  * @param {number} [input.livenessThresholdMs] — heartbeat staleness threshold
  *   (default DEFAULT_OWNER_LIVENESS_THRESHOLD_MS)
  * @param {Function} [input.readTranscriptFn] — test injection
+ * @param {Function} [input.readSummaryFn] — M12-18: metadata-validated cached
+ *   run facts reader (extractRunFacts payload). When provided it takes
+ *   precedence over readTranscriptFn — same output contract, no transcript
+ *   read. Every query still re-applies workspace authorization,
+ *   knownAgentIds, heartbeat, activeOnly, sorting and limit.
  * @param {Function} [input.createWorkspaceVerifierFn] — test injection
  * @returns {Promise<{runs: Array, matchedCount: number, unresolvedCount: number}>}
  *   - runs: array of {runId, agentId, state, terminal, updatedAt,
@@ -150,19 +200,46 @@ export async function listRuns(input) {
     // Validate runId from filename
     if (!isValidRunId(runId)) continue;
 
-    let events;
-    try {
-      events = await _readTranscript(join(resolvedRunDir, file));
-    } catch {
-      // Malformed/unreadable transcript — skip silently (fail-closed per file)
-      continue;
+    // Static run facts come from ONE of two exact sources:
+    //   - readSummaryFn (M12-18): metadata-validated in-memory facts served by
+    //     the MCP query cache — the same extractRunFacts payload, stored only
+    //     when the file's pre/post metadata agree (never on a parse failure).
+    //   - readTranscriptFn (default): the full transcript parsed this query.
+    // Both flow through the SAME downstream re-validation below (CURRENT
+    // workspace binding, agentId registry, heartbeat, activeOnly, sorting,
+    // limit), so the cache can never freeze a query result.
+    let facts;
+    let ownershipView;
+    if (input.readSummaryFn) {
+      try {
+        facts = await input.readSummaryFn(join(resolvedRunDir, file));
+      } catch {
+        // Unreadable/vanished/corrupt file — skip silently (fail-closed per file)
+        continue;
+      }
+      if (!facts || !Array.isArray(facts.ownershipEvents)) continue; // malformed payload — fail closed
+      ownershipView = facts.ownershipEvents;
+    } else {
+      let events;
+      try {
+        events = await _readTranscript(join(resolvedRunDir, file));
+      } catch {
+        // Malformed/unreadable transcript — skip silently (fail-closed per file)
+        continue;
+      }
+      facts = extractRunFacts(events);
+      // An empty transcript preserves the exact pre-M12-18 flow: ownership and
+      // activity are still evaluated, and the run is dropped at completion.
+      if (!facts) facts = EMPTY_TRANSCRIPT_FACTS;
+      ownershipView = events;
     }
 
     // Workspace ownership filter (MCP path). The verifier binds ownership
-    // facts to THIS run (runId from the transcript filename).
+    // facts to THIS run (runId from the transcript filename) — re-applied to
+    // the CURRENT authorized binding on every query, cached facts included.
     if (workspaceVerifier) {
       try {
-        workspaceVerifier(events, runId);
+        workspaceVerifier(ownershipView, runId);
       } catch {
         // Other workspace, missing/duplicate/malformed ownership — skip silently
         continue;
@@ -170,16 +247,14 @@ export async function listRuns(input) {
     }
 
     // Agent filter (CLI path)
-    const rawAgentId = events[0]?.agentId;
-    if (agentId && rawAgentId !== agentId) continue;
+    if (agentId && facts.agentId !== agentId) continue;
 
     // M12-15: closed-set activity classification. Computed once per run AFTER
     // workspace + agent filtering. Only known non-terminal runs trigger the
     // ownerLiveness SSOT (once each); terminal and unknown-state runs are
     // classified WITHOUT a heartbeat check and are NEVER reported active.
-    const state = findState(events);
-    const safeState = RUN_STATES.includes(state) ? state : "unknown";
-    const isTerminal = TERMINAL_STATES.includes(safeState);
+    const safeState = facts.state;
+    const isTerminal = facts.terminal;
     let activityStatus;
     let activityBasis;
     if (isTerminal) {
@@ -210,7 +285,7 @@ export async function listRuns(input) {
     // independent of activeOnly).
     if (activeOnly && activityStatus !== "active") continue;
 
-    const summary = summarizeRun(runId, events, knownAgentIds, input);
+    const summary = finalizeSummary(runId, facts, knownAgentIds, input);
     if (!summary) continue;
     summary.activityStatus = activityStatus;
     summary.activityBasis = activityBasis;
