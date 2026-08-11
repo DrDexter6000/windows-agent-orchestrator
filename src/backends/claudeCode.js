@@ -48,6 +48,15 @@ export class ClaudeCodeBackend extends ProcessBackend {
   // Lead id / workspace / agentId never reach the provider.
   supportsSessionReuse = true;
 
+  // M12-16: explicit in-flight-correction capability declaration. claude-code
+  // drives ONE stream-json process whose prompt is fed over stdin
+  // (`-p --input-format stream-json`), so a follow-up user turn can be queued to
+  // the SAME live process. RunManager + dispatchRun read this boolean to gate
+  // correctable runs provider-neutrally (no runtime-name branch). "delivered"
+  // proves the bytes were accepted by the runtime stdin — NOT that the model
+  // executed the turn.
+  supportsInFlightCorrection = true;
+
   /**
    * M11-9 capability: declare exactly what this backend can express.
    *
@@ -71,14 +80,31 @@ export class ClaudeCodeBackend extends ProcessBackend {
   constructor(opts = {}) {
     super({
       parserClass: ClaudeStreamParser,
+      // M12-16: claude stream-json user-message wire format. ONE whole line per
+      // turn, fed to the child stdin. Used for BOTH the initial prompt and
+      // every queued correction on a correctable run (the SAME live process).
+      encodeUserMessage: (text) => JSON.stringify({
+        type: "user",
+        message: { role: "user", content: [{ type: "text", text: text }] },
+      }),
       buildArgs: (agent, task) => {
-        const args = [
-          "-p", task.prompt,
+        const args = [];
+        // M12-16: a correctable run feeds its prompt (and later corrections) to
+        // the SAME process over stdin as stream-json user messages, so it uses
+        // `-p` (print mode, boolean) + `--input-format stream-json` and NO
+        // positional prompt. A normal run keeps the byte-compatible `-p <prompt>`
+        // positional form.
+        if (task.correctable) {
+          args.push("-p", "--input-format", "stream-json");
+        } else {
+          args.push("-p", task.prompt);
+        }
+        args.push(
           "--output-format", "stream-json",
           "--verbose",
           "--include-partial-messages",
           "--exclude-dynamic-system-prompt-sections",
-        ];
+        );
         // M11-11C: provider-native conversation reuse. First turn starts a named
         // session (--session-id); later turns resume it (--resume). Exactly one
         // flag, never both. The opaque uuid is supplied by the control plane

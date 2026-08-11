@@ -131,6 +131,13 @@ export async function dispatchRun({
   // can resume the SAME provider-native conversation in the retained worktree.
   // Default false = byte-compatible ordinary delivery dispatch.
   continuable = false,
+  // M12-16: Lead opt-in marking this run as correctable — a follow-up user turn
+  // may be queued to the RUNNING provider process via run_correct (the
+  // transcript-backed durable queue the detached runner drains over stdin).
+  // Requires the selected backend to declare supportsInFlightCorrection (gated
+  // below, before any transcript write/fork). Default false = byte-compatible
+  // ordinary dispatch (argv/stdin/events unchanged).
+  correctable = false,
   // M11-7: skip the credential preflight (e.g. when the caller already did it
   // and is passing resolvedCredentials). Default false = always check.
   skipCredentialCheck = false,
@@ -262,6 +269,21 @@ export async function dispatchRun({
     sessionReuseRouting = reuseDecision.routing;
   }
 
+  // M12-16: correctable opt-in gate. Only a backend that declares
+  // supportsInFlightCorrection (a provider-neutral capability boolean) may
+  // accept a correctable run — read the declared capability, never branch on
+  // the runtime name. This runs BEFORE the continuable lineage-slot claim (and
+  // before any transcript write / fork) so a dispatch opting into BOTH
+  // continuable + correctable on a backend that supports session reuse but NOT
+  // in-flight correction fails closed WITHOUT first claiming — and so leaking —
+  // a busy lineage slot. Non-opt-in dispatch skips this entirely (byte-compatible).
+  if (correctable) {
+    const correctionBackend = typeof backendFor === "function" ? backendFor(agent) : null;
+    if (!correctionBackend || correctionBackend.supportsInFlightCorrection !== true) {
+      throw new Error("dispatchRun: correctable requires a backend that declares supportsInFlightCorrection");
+    }
+  }
+
   // M12-7: continuable delivery = lineage ROOT. Establish the lineage provider
   // session (turn:first) under the lineage key (Lead session + workspace +
   // agent + rootRunId). A future Lead-authorized run_continue resumes the SAME
@@ -352,6 +374,12 @@ export async function dispatchRun({
   if (sessionReuseRouting) {
     runnerArgs.push("--session-reuse-json", JSON.stringify(sessionReuseRouting));
   }
+  // M12-16: thread correctable to the detached runner so RunManager.start spawns
+  // the child with a piped stdin + the stream-json input format and drains the
+  // correction queue. Server-side argv only (never returned via MCP).
+  if (correctable) {
+    runnerArgs.push("--correctable");
+  }
 
   // Conservative total argv length guard — BEFORE transcript write.
   const ARGV_MAX_TOTAL = 24000;
@@ -372,6 +400,10 @@ export async function dispatchRun({
     // Durable before the detached runner starts so startup failures still
     // preserve whether the Lead requested a delivery.
     deliveryRequested: Boolean(publicDelivery),
+    // M12-16: durable correctable marker. The MCP correction service reads this
+    // stable fact to gate run_correct (a correction may only queue against a
+    // run dispatched correctable). Written before the runner forks.
+    ...(correctable ? { correctable: true } : {}),
   });
 
   // pending via transitionState — first-terminal-wins arbitration. If the

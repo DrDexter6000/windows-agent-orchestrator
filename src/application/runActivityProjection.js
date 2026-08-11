@@ -73,12 +73,34 @@ export const ACTIVITY_CATEGORIES = Object.freeze([
   "file_written",
   "runtime_status",
   "state",
+  "correction",
   "other",
 ]);
 
 // Fixed sentinel for unrecognized event shapes. `other` entries NEVER echo the
 // raw type/kind (arbitrary transcript text) — the label is this constant only.
 export const OTHER_EVENT_LABEL = "[unknown_event]";
+
+// M12-16: correction lifecycle visibility. Each run.correction_* transcript type
+// maps to a FIXED closed-set status derived ONLY from the event type — never from
+// the payload. The prompt/body/reason are NEVER emitted; only the closed-set
+// status (from the type) and a bounded, redacted correctionId (Lead-authored id
+// for correlation, NOT the prompt). classifyEvent gates this category, so the
+// resolved status is always a member of CORRECTION_ACTIVITY_STATUSES.
+export const CORRECTION_ACTIVITY_STATUSES = Object.freeze([
+  "requested",
+  "claimed",
+  "delivered",
+  "delivery_failed",
+  "rejected",
+]);
+const CORRECTION_TYPE_TO_STATUS = Object.freeze({
+  "run.correction_requested": "requested",
+  "run.correction_claimed": "claimed",
+  "run.correction_delivered": "delivered",
+  "run.correction_delivery_failed": "delivery_failed",
+  "run.correction_rejected": "rejected",
+});
 
 function emptyCounts() {
   return {
@@ -89,6 +111,7 @@ function emptyCounts() {
     file_written: 0,
     runtime_status: 0,
     state: 0,
+    correction: 0,
     other: 0,
   };
 }
@@ -376,6 +399,9 @@ function classifyEvent(event) {
     return "other";
   }
   if (typeof t === "string" && SKIP_TYPES.has(t)) return null;
+  // M12-16: correction lifecycle — a meaningful closed-set status (not the
+  // opaque `other` sentinel). The prompt/body/reason never reach the surface.
+  if (CORRECTION_TYPE_TO_STATUS[t]) return "correction";
   return "other";
 }
 
@@ -423,6 +449,17 @@ function buildEntry(event, category, redactor, textCap) {
       // the guard keeps the set closed even if the classifier ever widens.
       const to = TERMINAL_STATES.includes(event.to) ? event.to : OTHER_EVENT_LABEL;
       return { category, ts, seq, to, terminal: to !== OTHER_EVENT_LABEL };
+    }
+    case "correction": {
+      // M12-16: closed-set status derived ONLY from the event type. correctionId
+      // is a bounded Lead-authored id (redacted + sanitized + capped) surfaced
+      // for correlation — it is NOT the prompt. The prompt/body/reason payload
+      // is NEVER emitted (classifyEvent gates the type → status is always valid).
+      const status = CORRECTION_TYPE_TO_STATUS[event.type] ?? "requested";
+      return {
+        category, ts, seq, status,
+        correctionId: safeDynamicText(event.correctionId ?? "", redactor, ACTIVITY_LABEL_CAP),
+      };
     }
     default: {
       // `other`: FIXED sentinel label. NEVER echoes the event's own type/kind

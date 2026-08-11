@@ -81,6 +81,12 @@ export class ProcessBackend {
     credentialEnvNames = () => [],
     runtimeEnv = () => ({}),
     spawnFn = null,
+    // M12-16: optional provider wire encoder for in-flight corrections. When a
+    // backend declares supportsInFlightCorrection it supplies a function
+    // (text) => string that produces ONE whole stream-json user-message line
+    // for that provider. The base ProcessBackend has no provider wire format,
+    // so this defaults to null (non-correctable byte-compatible behavior).
+    encodeUserMessage = null,
   } = {}) {
     if (!parserClass) throw new Error("parserClass is required");
     if (!buildArgs) throw new Error("buildArgs is required");
@@ -103,7 +109,17 @@ export class ProcessBackend {
     this.rawCapturePath = rawCapturePath ?? (process.env.WAO_RAW_CAPTURE || null);
     this.credentialEnvNames = credentialEnvNames;
     this.runtimeEnv = runtimeEnv;
+    // M12-16: in-flight correction wire encoder (provider-specific). null on the
+    // base class → correctable tasks are rejected by capability, never by name.
+    this.encodeUserMessage = typeof encodeUserMessage === "function" ? encodeUserMessage : null;
   }
+
+  // M12-16: provider-neutral in-flight correction capability. The base
+  // ProcessBackend does NOT support queuing a follow-up turn to a running child
+  // (no provider wire encoder, stdin is "ignore"). A backend opts in by
+  // overriding this to true AND supplying an encodeUserMessage constructor opt.
+  // Shared orchestration reads this boolean — never the runtime name.
+  supportsInFlightCorrection = false;
 
   /**
    * M11-9: provider-neutral backend policy validation. Called by RunManager
@@ -227,9 +243,16 @@ export class ProcessBackend {
     const redactorEnv = { ...process.env, ...resolvedCredentials };
     const redactor = createSecretRedactor(redactorEnv, inheritedNames);
     const rawRedactor = redactor.createStream();
+    // M12-16: a correctable task needs a stdin pipe so the runner can queue
+    // follow-up user turns to the SAME live provider process. Only when this
+    // backend declared the capability (supportsInFlightCorrection + an
+    // encodeUserMessage wire encoder) does the child get a piped stdin; every
+    // other run is byte-compatible (stdin "ignore").
+    const correctable = task.correctable === true && this.supportsInFlightCorrection === true
+      && typeof this.encodeUserMessage === "function";
     const child = this._spawnFn(binary, args, {
       cwd: agent.cwd,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: correctable ? ["pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
       windowsHide: true,
       windowsVerbatimArguments,
       // 注入 WAO env：让 worker 能调 wao 命令记录状态（角色 prompt 教 worker 用 $WAO_CLI）。
@@ -286,6 +309,27 @@ export class ProcessBackend {
     // 若 spawn 本身失败（ENOENT），这里 reject，调用方 catch
     await spawned;
 
+    // M12-16: deliver the initial prompt as the FIRST stream-json user message
+    // on stdin (the correctable wire). The process reads its prompt from stdin
+    // (claude -p --input-format stream-json), so this is byte-equivalent to the
+    // positional prompt on the wire — just routed through stdin so later turns
+    // can be queued to the SAME process. A write failure here is a startup
+    // failure: the child cannot receive its task, so we kill it and reject.
+    if (correctable) {
+      const stdin = child.stdin;
+      try {
+        const line = `${this.encodeUserMessage(task.prompt)}\n`;
+        await new Promise((resolve, reject) => {
+          const ok = stdin.write(line, (err) => (err ? reject(err) : resolve()));
+          // backpressure: drain before resolving so the full line is queued
+          if (!ok) stdin.once("drain", resolve);
+        });
+      } catch (error) {
+        this._kill(child);
+        throw new Error(`correctable spawn failed to write initial prompt to stdin: ${error.message}`);
+      }
+    }
+
     return {
       backend: "process",
       backendSessionId: sessionId,
@@ -297,16 +341,78 @@ export class ProcessBackend {
         child,
         signal,
         silentTimeout: opts.silentTimeout,
+        onPollTick: opts.onPollTick,
+        pollIntervalMs: opts.pollInterval,
         getExitCode: () => exitCode,
         getStderrTail: () => stderrTail,
         getStdoutTail: () => stdoutTail,
       }),
       abort: async () => this._kill(child),
       isAlive: () => child.exitCode === null && child.signalCode === null,
+      // M12-16: in-flight correction delivery. Present ONLY on correctable runs
+      // (capability-declaring backend + piped stdin). Returns {ok:true} when the
+      // whole stream-json line was accepted by the runtime stdin (queued for the
+      // model) — this proves byte delivery, NOT model execution. {ok:false,reason}
+      // is a closed-set refusal (stdin_closed | send_failed).
+      ...(correctable
+        ? {
+            supportsSendCorrection: true,
+            sendCorrection: (text) => this._sendCorrection(child.stdin, this.encodeUserMessage, text),
+          }
+        : {}),
     };
   }
 
-  async *_streamEvents({ queue, child, signal, silentTimeout, getExitCode, getStderrTail = () => "", getStdoutTail = () => "" }) {
+  /**
+   * M12-16: write one correction turn to the provider child's stdin as a whole
+   * stream-json user-message line. Bounded, whole-line, backpressure- and
+   * closed-stdin-aware. "ok" proves the bytes were accepted by the runtime stdin
+   * — NOT that the model executed the turn (queued ≠ delivered ≠ executed).
+   * @returns {Promise<{ok:true}|{ok:false, reason:"stdin_closed"|"send_failed"}>}
+   */
+  async _sendCorrection(stdin, encodeUserMessage, text) {
+    if (typeof text !== "string" || text.length === 0) return { ok: false, reason: "send_failed" };
+    // Pre-check: ONLY a genuinely closed stdin is stdin_closed. Any later
+    // encode/write/error is a bounded send failure (handled below).
+    if (!stdin || stdin.destroyed || stdin.writableEnded
+      || (typeof stdin.writable === "boolean" && !stdin.writable)) {
+      return { ok: false, reason: "stdin_closed" };
+    }
+    try {
+      const line = `${encodeUserMessage(text)}\n`;
+      await new Promise((resolve, reject) => {
+        let settled = false;
+        // Single settle point: detach BOTH per-correction listeners (error +
+        // drain) so they never accumulate across corrections, regardless of
+        // whether the promise settles via the write callback, drain, an async
+        // stream error, or a synchronous write throw (routed through settle
+        // below).
+        const settle = (err) => {
+          if (settled) return;
+          settled = true;
+          stdin.removeListener("error", onErr);
+          stdin.removeListener("drain", onDrain);
+          if (err) reject(err); else resolve();
+        };
+        const onErr = (err) => settle(err);
+        const onDrain = () => settle(null);
+        stdin.once("error", onErr);
+        try {
+          const ok = stdin.write(line, (err) => settle(err));
+          if (!ok) stdin.once("drain", onDrain);
+        } catch (syncErr) {
+          settle(syncErr);
+        }
+      });
+      return { ok: true };
+    } catch {
+      // Closed stdin was ruled out by the pre-check; anything else (encode
+      // failure, write error, a stream error mid-write) is a bounded send_failed.
+      return { ok: false, reason: "send_failed" };
+    }
+  }
+
+  async *_streamEvents({ queue, child, signal, silentTimeout, onPollTick = null, pollIntervalMs = null, getExitCode, getStderrTail = () => "", getStdoutTail = () => "" }) {
     let emittedDone = false;
     let anyEventSeen = false;
     const startTime = Date.now();
@@ -355,15 +461,28 @@ export class ProcessBackend {
           this._kill(child);
           return;
         }
-        // 等待新事件或 close。
-        // 若启用了 silentTimeout 且尚未见事件，用有界等待（到期回来重新检查 silentTimeout）；
-        // 否则无界等待（向后兼容，靠 signal abort 唤醒）。
+        // M12-16: in-flight correction polling. For a correctable run the runner
+        // passes onPollTick; it runs in THIS loop (the single control loop that
+        // also consumes backend events — no second semantic owner). A bounded
+        // pollIntervalMs wait guarantees the tick fires periodically even when
+        // the provider is silent, so a queued correction is claimed + delivered
+        // promptly. Non-correctable runs pass no onPollTick and keep the exact
+        // legacy wait cadence (byte-compatible).
+        if (typeof onPollTick === "function") {
+          try { await onPollTick(); } catch { /* best-effort: never kill the event stream */ }
+        }
         const silentRemain = silentTimeout && !anyEventSeen
           ? Math.max(0, silentTimeout - (Date.now() - startTime))
           : Infinity;
+        // When polling, bound the wait by pollIntervalMs (min with silentRemain)
+        // so we wake to poll even without a backend event. Otherwise the legacy
+        // indefinite/ silent-bounded wait is unchanged.
+        const waitMs = (typeof onPollTick === "function" && Number.isFinite(pollIntervalMs) && pollIntervalMs > 0)
+          ? Math.min(silentRemain, pollIntervalMs)
+          : silentRemain;
         await new Promise((r) => {
           queue.resolveWait = r;
-          if (Number.isFinite(silentRemain)) setTimeout(r, silentRemain);
+          if (Number.isFinite(waitMs)) setTimeout(r, waitMs);
         });
       }
     } finally {

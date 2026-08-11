@@ -164,13 +164,13 @@ test("MAA-03: output schema strict; entries discriminated by category; counts cl
       }
       // counts covers exactly the closed-set categories.
       assert.deepEqual(Object.keys(props.counts.properties ?? {}).sort(),
-        ["command", "file_written", "message", "other", "runtime_status", "state", "tool_result", "tool_use"].sort());
+        ["command", "correction", "file_written", "message", "other", "runtime_status", "state", "tool_result", "tool_use"].sort());
       // entries is a discriminated union on `category` (serialized under items.anyOf).
       const entryItems = props.entries.items ?? props.entries;
       const members = entryItems.oneOf ?? entryItems.anyOf ?? [];
       const cats = members.map((m) => m.properties?.category?.const ?? m.properties?.category?.enum?.[0]).filter(Boolean);
       assert.deepEqual([...cats].sort(),
-        ["command", "file_written", "message", "other", "runtime_status", "state", "tool_result", "tool_use"].sort(),
+        ["command", "correction", "file_written", "message", "other", "runtime_status", "state", "tool_result", "tool_use"].sort(),
         "entry variants cover the closed-set categories");
       // Flatten every field name appearing across entry variants: NONE may be a
       // raw payload channel (command/input/output/error/payload/path-absolute).
@@ -464,7 +464,7 @@ test("MAA-12: a cursor bound to a different run is rejected (fixed error)", asyn
 // =====================================================================
 // Tool count guard: adding run_activity brings the total to 22.
 // =====================================================================
-test("MAA-13: tool count is 21 (M12-10 moved playbook catalog to resources)", async () => {
+test("MAA-13: tool count is 22 (M12-10 moved playbook catalog to resources; M12-16 added run_correct)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-maa13-"));
   try {
     makeGitRepo(dir);
@@ -473,7 +473,7 @@ test("MAA-13: tool count is 21 (M12-10 moved playbook catalog to resources)", as
     try {
       const tools = await client.listTools();
       assert.ok(tools.tools.find((x) => x.name === "run_activity"), "run_activity present");
-      assert.equal(tools.tools.length, 21, "exactly 21 tools (M12-10 moved playbook catalog to resources)");
+      assert.equal(tools.tools.length, 22, "exactly 22 tools (M12-10 moved playbook catalog to resources; M12-16 added run_correct)");
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -567,6 +567,59 @@ test("MAA-15: secrets in tool name / backend / role / unknown label / relative p
       await client.close(); await server.close();
       if (prev === undefined) delete process.env.MAA15_TOKEN; else process.env.MAA15_TOKEN = prev;
     }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});
+
+// =====================================================================
+// M12-16: correction lifecycle is visible through run_activity as a closed-set
+// `correction` category with a meaningful status per type. The prompt/body/
+// reason payload NEVER crosses the MCP surface — only status + correctionId.
+// =====================================================================
+test("MAA-CORR: correction lifecycle → closed-set status over MCP; NEVER prompt/body/reason", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-maa-corr-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-maa-corr-rd-"));
+  try {
+    makeGitRepo(dir);
+    const secret = "test-secret-maacorr";
+    const id = "run_corr_act";
+    const a = "coder_hq";
+    const lines = [
+      jl({ type: "run.submitted", agentId: a, ts: "2026-08-02T00:00:00.000Z", runId: id }),
+      jl({ type: "session.created", backend: "claude-code", backendSessionId: "proc_corr", runId: id, agentId: a }),
+      jl({ type: "run.background_submitted", background: true, cwd: dir, runId: id, agentId: a }),
+      jl({ type: "run.state_change", to: "running", reason: "first_event", ts: "2026-08-02T00:00:02.000Z", runId: id, agentId: a }),
+      jl({ type: "run.correction_requested", correctionId: "fix-1", prompt: secret, runId: id, agentId: a }),
+      jl({ type: "run.correction_claimed", correctionId: "fix-1", runId: id, agentId: a }),
+      jl({ type: "run.correction_delivered", correctionId: "fix-1", runId: id, agentId: a }),
+      jl({ type: "run.correction_delivery_failed", correctionId: "fix-2", reason: "stdin_closed", runId: id, agentId: a }),
+      jl({ type: "run.correction_rejected", correctionId: "fix-3", reason: "terminal_race", runId: id, agentId: a }),
+    ];
+    writeFileSync(join(runDir, `${id}.jsonl`), lines.join(""), "utf8");
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_activity", arguments: { runId: id } });
+      assert.equal(res.isError, undefined, "call succeeds");
+      const sc = res.structuredContent;
+      assert.equal(sc.counts.correction, 5, "five correction lifecycle events counted");
+      const corr = sc.entries.filter((e) => e.category === "correction");
+      assert.equal(corr.length, 5);
+      assert.deepEqual(
+        corr.map((e) => e.status),
+        ["requested", "claimed", "delivered", "delivery_failed", "rejected"],
+        "closed-set status derived from the event type, in order",
+      );
+      assert.deepEqual(corr.map((e) => e.correctionId), ["fix-1", "fix-1", "fix-1", "fix-2", "fix-3"]);
+      for (const e of corr) {
+        assert.deepEqual(Object.keys(e).sort(), ["category", "correctionId", "seq", "status", "ts"],
+          "correction entry is exactly the safe closed-set shape");
+      }
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes(secret), "correction prompt body NEVER crosses MCP");
+      assert.ok(!dumped.includes("prompt"), "no prompt field/key");
+      assert.ok(!dumped.includes("stdin_closed") && !dumped.includes("terminal_race"),
+        "raw delivery_failed/rejected reason NEVER emitted");
+    } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
 

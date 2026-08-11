@@ -161,6 +161,10 @@ export async function runBackground(opts = {}) {
       // Lead-authorized continuation. RunManager.start adopts it as effectiveCwd
       // (no fresh worktree). Absent for ordinary dispatch.
       ...(opts.reuseWorktree ? { reuseWorktree: opts.reuseWorktree } : {}),
+      // M12-16: thread the correctable opt-in so RunManager.start spawns the
+      // child with a piped stdin + stream-json input and drains the correction
+      // queue in waitForCompletion. Absent for ordinary dispatch.
+      ...(opts.correctable ? { correctable: true } : {}),
     });
   } catch (error) {
     await writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error });
@@ -356,6 +360,10 @@ export async function runMain(argv = process.argv.slice(2)) {
     // M12-7: retained parent worktree descriptor {path, branch} for a
     // Lead-authorized continuation. Absent for ordinary dispatch.
     reuseWorktree: parsedReuseWorktree,
+    // M12-16: correctable opt-in (boolean flag threaded from dispatchRun). The
+    // runner tells RunManager.start to spawn a correctable child + drain the
+    // correction queue. Absent for ordinary dispatch (byte-compatible).
+    correctable: argv.includes("--correctable"),
   });
   // detached runner 把最终结果写 stdout 一行 JSON（供调试/日志；CLI 已返回，不依赖此）
   process.stdout.write(JSON.stringify(result) + "\n");

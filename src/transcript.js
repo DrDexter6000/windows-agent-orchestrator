@@ -84,6 +84,74 @@ export const REVERIFY_REASONS = Object.freeze([
   "dependency_setup_missing",
 ]);
 
+// M12-16: the in-flight correction queue. A Lead may queue a bounded follow-up
+// user turn to a RUNNING correctable run (opt-in at dispatch) through the
+// transcript, which a detached runner reads + claims + delivers over the live
+// provider stdin. WAO never interrupts/preempts, never auto-stops/retries, and
+// never judges semantics — "delivered" proves only that the bytes were accepted
+// by the runtime stdin, NOT that the model executed the turn.
+//
+// The durable correction lifecycle is a chain of events on the SAME run
+// transcript, bound to the runId envelope like every other fact:
+//   run.correction_requested { correctionId, prompt }   — MCP appends (queue)
+//   run.correction_claimed   { correctionId }            — runner atomically claims
+//   run.correction_delivered { correctionId }            — runner wrote to provider stdin
+//   run.correction_delivery_failed { correctionId, reason } — stdin write refused
+//   run.correction_rejected  { correctionId, reason }    — terminal race / no delivery
+//
+// correctionId is a Lead-supplied stable id (closed alphabet, ≤64 chars): the
+// exactly-once key. prompt is bounded (≤15000 chars) and redacted on store like
+// prompt.sent. The prompt is re-read by the runner for delivery; safe query
+// surfaces (run_activity) project these events as status only — never the body.
+//
+// Defined + frozen here so the transcript CAS primitives, the application
+// service, and the MCP schema consume ONE closed set (no drift, no import cycle).
+const CORRECTION_ID_RE = /^[A-Za-z0-9_-]+$/;
+const CORRECTION_ID_MAX_LEN = 64;
+const CORRECTION_PROMPT_MAX_LEN = 15000;
+
+// M12-16: the closed set of Lead-facing correction OUTCOMES returned by
+// run_correct (queued = just appended this call; pending = already queued, not
+// yet delivered; delivered = the runner wrote it to provider stdin; rejected =
+// refused or never deliverable). queued≠delivered≠executed.
+export const CORRECTION_OUTCOMES = Object.freeze(["queued", "pending", "delivered", "rejected"]);
+
+// M12-16: the closed set of correction rejection / non-delivery reasons. Every
+// refusal (at queue time or at delivery time) records one of these — it is a
+// normal closed-set outcome, NEVER a generic tool error. The runner's delivery
+// failures use stdin_closed / send_failed; terminal race (provider finished
+// before the queued turn could be delivered) uses terminal_race; queue-time
+// refusals use the rest.
+export const CORRECTION_REJECTION_REASONS = Object.freeze([
+  "malformed_input", // correctionId / prompt shape failed validation
+  "unknown_run", // no transcript / no envelope for the runId
+  "workspace_mismatch", // run ownership != authorized workspace
+  "not_correctable", // run was not dispatched with correctable:true
+  "not_ready", // run not yet at a correctable-eligible state
+  "terminal_run", // run already terminal at queue time (queue-time race)
+  "duplicate", // correctionId already queued with a DIFFERENT prompt body
+  "already_delivered", // correctionId already delivered; re-queue refused
+  "terminal_race", // queued but provider terminated before delivery
+  "stdin_closed", // provider stdin was closed when delivery was attempted
+  "send_failed", // bounded stdin write failed for another reason
+]);
+
+// M12-16: the reasons a runner-side delivery may fail (closed subset of
+// CORRECTION_REJECTION_REASONS). The sendCorrection handle contract returns one
+// of these; the runner records run.correction_delivery_failed with it.
+const CORRECTION_DELIVERY_FAIL_REASONS = Object.freeze(["stdin_closed", "send_failed"]);
+
+// M12-16: internal (richer) per-correction status derived by projectCorrections.
+// Excludes "queued" (that is a per-call outcome the service derives, not a
+// stored status): a stored requested-but-unclaimed correction is "pending".
+const CORRECTION_STATUSES = Object.freeze([
+  "pending", // requested, not yet claimed
+  "claimed", // runner claimed, delivery not yet recorded
+  "delivered", // runner wrote the turn to provider stdin
+  "delivery_failed", // delivery attempted, stdin write refused (terminal for it)
+  "rejected", // terminal race / never deliverable (terminal for it)
+]);
+
 // M12-6 Package 3B: shared input bounds for the reverify setup contract. Bound
 // here for the same cycle-free reason as REVERIFY_REASONS — the transcript CAS
 // primitive, the application service, and the MCP schema all consume one SSOT.
@@ -1126,6 +1194,310 @@ export class JsonlTranscript {
       await releaseLock();
     }
   }
+
+  // =====================================================================
+  // M12-16: in-flight correction queue primitives.
+  //
+  // The transcript is the cross-process durable queue: the MCP process appends
+  // run.correction_requested; the detached runner (a different process holding
+  // the provider handle) reads + claims + delivers. Every primitive below runs
+  // under the SAME cross-process append lock (acquireAppendLock) so the queue is
+  // race-free across processes. They mirror the tryAppendReverify* CAS pattern:
+  // read events IN LOCK → re-validate IN LOCK → append IN LOCK.
+  // =====================================================================
+
+  /**
+   * Atomically append a correction request (the queue enqueue).
+   *
+   * Under the lock: re-validate correctionId/prompt shape, refuse a duplicate
+   * correctionId (return the recorded status), and refuse if the run is already
+   * terminal (queue-time terminal race). Only a non-duplicate, non-terminal run
+   * gets exactly one run.correction_requested appended. The prompt is redacted
+   * on store (consistent with prompt.sent).
+   *
+   * The broader eligibility checks (workspace ownership, correctable flag) are
+   * STABLE facts that do not change after dispatch, so the application service
+   * performs them on its own read and calls this primitive for the atomic
+   * no-duplicate / non-terminal append that closes the terminal TOCTOU window.
+   *
+   * @returns {Promise<{queued:true, correctionId}|{queued:false, reason:"duplicate"|"terminal_run", existing?:object}>}
+   * @throws {Error} on invalid correctionId/prompt shape (the service validates
+   *   first; this is defense-in-depth at the CAS boundary).
+   */
+  async tryAppendCorrectionRequested({ correctionId, prompt } = {}) {
+    if (typeof correctionId !== "string" || !correctionId
+      || correctionId.length > CORRECTION_ID_MAX_LEN || !CORRECTION_ID_RE.test(correctionId)) {
+      throw new Error("tryAppendCorrectionRequested: correctionId must be 1..64 [A-Za-z0-9_-] chars");
+    }
+    if (typeof prompt !== "string" || prompt.length === 0
+      || prompt.length > CORRECTION_PROMPT_MAX_LEN) {
+      throw new Error("tryAppendCorrectionRequested: prompt must be 1..15000 chars");
+    }
+    await mkdir(dirname(this.filePath), { recursive: true });
+    const releaseLock = await acquireAppendLock(this.filePath);
+    try {
+      let events = [];
+      try {
+        events = await readTranscript(this.filePath);
+      } catch {
+        events = [];
+      }
+      const proj = projectCorrections(events, this.context.runId);
+      if (proj.has(correctionId)) {
+        return { queued: false, reason: "duplicate", existing: proj.get(correctionId) };
+      }
+      // Re-check terminal IN LOCK: closes the TOCTOU between the service's read
+      // and this append (the run could have terminated in that window).
+      const state = findState(events);
+      if (TERMINAL_STATES.includes(state)) {
+        return { queued: false, reason: "terminal_run" };
+      }
+      const baseSeq = Math.max(this.seq, findLastEventSeq(events));
+      const ts = new Date().toISOString();
+      const ctx = { runId: this.context.runId, agentId: this.context.agentId };
+      const event = {
+        ...this.redact({ correctionId, prompt }),
+        ts,
+        seq: baseSeq + 1,
+        ...ctx,
+        type: "run.correction_requested",
+      };
+      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      this.seq = baseSeq + 1;
+      return { queued: true, correctionId };
+    } finally {
+      await releaseLock();
+    }
+  }
+
+  /**
+   * Atomically claim an outstanding correction for delivery (runner-side).
+   *
+   * Under the lock: the claim is the durable marker that this correction will
+   * be delivered by THIS runner. A correction already claimed/delivered/rejected/
+   * delivery_failed is NOT re-claimable (no double turn). A terminal run refuses
+   * (the caller then records a terminal_race rejection). Crash-safety: the claim
+   * is durable, so a crash after claim but before delivery leaves the correction
+   * "claimed" — it is never re-delivered (no double turn); it is rejected at the
+   * terminal cleanup.
+   *
+   * @returns {Promise<{claimed:true, correctionId, prompt}|{claimed:false, reason:"not_found"|"already_handled"|"terminal_run"}>}
+   */
+  async tryClaimCorrection({ correctionId } = {}) {
+    if (typeof correctionId !== "string" || !correctionId || !CORRECTION_ID_RE.test(correctionId)) {
+      return { claimed: false, reason: "not_found" };
+    }
+    const releaseLock = await acquireAppendLock(this.filePath);
+    try {
+      let events = [];
+      try {
+        events = await readTranscript(this.filePath);
+      } catch {
+        events = [];
+      }
+      const proj = projectCorrections(events, this.context.runId);
+      if (!proj.has(correctionId)) return { claimed: false, reason: "not_found" };
+      const info = proj.get(correctionId);
+      // Only a pending (requested, never claimed) correction is claimable.
+      if (info.status !== "pending") return { claimed: false, reason: "already_handled" };
+      const state = findState(events);
+      if (TERMINAL_STATES.includes(state)) return { claimed: false, reason: "terminal_run" };
+      const baseSeq = Math.max(this.seq, findLastEventSeq(events));
+      const ts = new Date().toISOString();
+      const ctx = { runId: this.context.runId, agentId: this.context.agentId };
+      const event = { ts, seq: baseSeq + 1, ...ctx, correctionId, type: "run.correction_claimed" };
+      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      this.seq = baseSeq + 1;
+      return { claimed: true, correctionId, prompt: info.prompt ?? "" };
+    } finally {
+      await releaseLock();
+    }
+  }
+
+  /**
+   * Record that a claimed correction was delivered to the provider stdin.
+   * Idempotent: if already delivered, no-op. Bounded closed-set, no body echoed.
+   * @returns {Promise<{recorded:boolean, correctionId}>}
+   */
+  async appendCorrectionDelivered({ correctionId } = {}) {
+    if (typeof correctionId !== "string" || !correctionId || !CORRECTION_ID_RE.test(correctionId)) {
+      throw new Error("appendCorrectionDelivered: invalid correctionId");
+    }
+    const releaseLock = await acquireAppendLock(this.filePath);
+    try {
+      let events = [];
+      try {
+        events = await readTranscript(this.filePath);
+      } catch {
+        events = [];
+      }
+      const proj = projectCorrections(events, this.context.runId);
+      const info = proj.get(correctionId);
+      if (info && info.status === "delivered") return { recorded: false, correctionId };
+      const baseSeq = Math.max(this.seq, findLastEventSeq(events));
+      const ts = new Date().toISOString();
+      const ctx = { runId: this.context.runId, agentId: this.context.agentId };
+      const event = { ts, seq: baseSeq + 1, ...ctx, correctionId, type: "run.correction_delivered" };
+      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      this.seq = baseSeq + 1;
+      return { recorded: true, correctionId };
+    } finally {
+      await releaseLock();
+    }
+  }
+
+  /**
+   * Record that a delivery attempt was refused by the provider stdin
+   * (closed/failed). Closed-set reason only. Terminal for that correction.
+   * @returns {Promise<{recorded:boolean, correctionId, reason}>}
+   */
+  async appendCorrectionDeliveryFailed({ correctionId, reason } = {}) {
+    if (typeof correctionId !== "string" || !correctionId || !CORRECTION_ID_RE.test(correctionId)) {
+      throw new Error("appendCorrectionDeliveryFailed: invalid correctionId");
+    }
+    const safeReason = CORRECTION_DELIVERY_FAIL_REASONS.includes(reason) ? reason : "send_failed";
+    const releaseLock = await acquireAppendLock(this.filePath);
+    try {
+      let events = [];
+      try {
+        events = await readTranscript(this.filePath);
+      } catch {
+        events = [];
+      }
+      const proj = projectCorrections(events, this.context.runId);
+      const info = proj.get(correctionId);
+      // Already terminal for this correction → no-op (no duplicate fact).
+      if (info && (info.status === "delivered" || info.status === "delivery_failed"
+        || info.status === "rejected")) {
+        return { recorded: false, correctionId, reason: safeReason };
+      }
+      const baseSeq = Math.max(this.seq, findLastEventSeq(events));
+      const ts = new Date().toISOString();
+      const ctx = { runId: this.context.runId, agentId: this.context.agentId };
+      const event = {
+        ts, seq: baseSeq + 1, ...ctx, correctionId, reason: safeReason,
+        type: "run.correction_delivery_failed",
+      };
+      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      this.seq = baseSeq + 1;
+      return { recorded: true, correctionId, reason: safeReason };
+    } finally {
+      await releaseLock();
+    }
+  }
+
+  /**
+   * Atomically reject EVERY outstanding (pending/claimed, not yet terminal)
+   * correction as terminal_race. Called from Run._runCleanup on every terminal
+   * branch so no correction request is ever stranded after the provider done.
+   * Closed-set reason only; no body echoed.
+   * @param {object} [opts]
+   * @param {string} [opts.reason="terminal_race"]
+   * @returns {Promise<{rejected:string[], reason:string}>} the correctionIds rejected
+   */
+  async rejectOutstandingCorrections({ reason = "terminal_race" } = {}) {
+    const safeReason = reason === "stdin_closed" ? "stdin_closed" : "terminal_race";
+    const releaseLock = await acquireAppendLock(this.filePath);
+    try {
+      let events = [];
+      try {
+        events = await readTranscript(this.filePath);
+      } catch {
+        events = [];
+      }
+      const proj = projectCorrections(events, this.context.runId);
+      const outstanding = [];
+      for (const [cid, info] of proj) {
+        if (info.status === "pending" || info.status === "claimed") outstanding.push(cid);
+      }
+      if (outstanding.length === 0) return { rejected: [], reason: safeReason };
+      const baseSeq = Math.max(this.seq, findLastEventSeq(events));
+      const ts = new Date().toISOString();
+      const ctx = { runId: this.context.runId, agentId: this.context.agentId };
+      const lines = [];
+      let seq = baseSeq;
+      const ordered = outstanding.sort(); // deterministic order (independent of Map order)
+      for (const cid of ordered) {
+        seq += 1;
+        lines.push(JSON.stringify({ ts, seq, ...ctx, correctionId: cid, reason: safeReason, type: "run.correction_rejected" }));
+      }
+      await appendFile(this.filePath, `${lines.join("\n")}\n`, "utf8");
+      this.seq = seq;
+      return { rejected: ordered, reason: safeReason };
+    } finally {
+      await releaseLock();
+    }
+  }
+}
+
+/**
+ * M12-16: project the durable correction chain for one run into a Map keyed by
+ * correctionId → { status, reason, prompt }. Pure function over an event array
+ * (no I/O). status ∈ CORRECTION_STATUSES. Events whose envelope runId !== runId
+ * or whose correctionId is malformed are skipped (defensive; the snapshot is
+ * already run-bound by readers). Map insertion order = first-requested order, so
+ * the runner delivers in queue order.
+ *
+ * @param {object[]} events
+ * @param {string} runId
+ * @returns {Map<string, {status:string, reason:string|null, prompt:string}>}
+ */
+export function projectCorrections(events, runId) {
+  const map = new Map();
+  if (!Array.isArray(events)) return map;
+  for (const ev of events) {
+    if (!ev || typeof ev !== "object") continue;
+    if (typeof runId === "string" && runId.length > 0 && ev.runId !== runId) continue;
+    const cid = ev.correctionId;
+    if (typeof cid !== "string" || !cid || !CORRECTION_ID_RE.test(cid)) continue;
+    let entry = map.get(cid);
+    if (!entry) {
+      entry = { status: null, reason: null, prompt: "" };
+      map.set(cid, entry);
+    }
+    if (ev.type === "run.correction_requested") {
+      // A fresh request resets the chain (defensive: should only happen once).
+      entry.status = "pending";
+      entry.reason = null;
+      if (typeof ev.prompt === "string") entry.prompt = ev.prompt;
+    } else if (ev.type === "run.correction_claimed") {
+      if (entry.status === "pending") entry.status = "claimed";
+    } else if (ev.type === "run.correction_delivered") {
+      entry.status = "delivered";
+      entry.reason = null;
+    } else if (ev.type === "run.correction_delivery_failed") {
+      if (entry.status !== "delivered" && entry.status !== "rejected") {
+        entry.status = "delivery_failed";
+        entry.reason = CORRECTION_DELIVERY_FAIL_REASONS.includes(ev.reason) ? ev.reason : "send_failed";
+      }
+    } else if (ev.type === "run.correction_rejected") {
+      if (entry.status !== "delivered") {
+        entry.status = "rejected";
+        entry.reason = CORRECTION_REJECTION_REASONS.includes(ev.reason) ? ev.reason : "terminal_race";
+      }
+    }
+  }
+  // Any correctionId that appeared only via a non-request event (orphan) with no
+  // resolved status defaults to pending defensively; an entry with status null
+  // (should not happen for a bound request) is dropped.
+  for (const [cid, entry] of map) {
+    if (entry.status === null) map.delete(cid);
+  }
+  return map;
+}
+
+/**
+ * M12-16: project the status of ONE correctionId, or {found:false}. The status
+ * object never echoes the prompt body (the Lead-facing outcome derives status +
+ * reason only; prompt is internal-to-runner delivery data).
+ *
+ * @returns {{found:true, status:string, reason:string|null}|{found:false}}
+ */
+export function projectCorrectionStatus(events, runId, correctionId) {
+  const map = projectCorrections(events, runId);
+  if (!map.has(correctionId)) return { found: false };
+  const info = map.get(correctionId);
+  return { found: true, status: info.status, reason: info.reason };
 }
 
 /**

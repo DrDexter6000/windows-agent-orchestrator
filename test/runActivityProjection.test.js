@@ -131,7 +131,7 @@ test("#1 normal ordered activity page preserves seq order and surfaces terminal 
   // counts cover the frozen filtered snapshot, not just the page.
   assert.deepEqual(r.counts, {
     message: 1, command: 1, tool_use: 1, tool_result: 1, file_written: 1,
-    runtime_status: 1, state: 1, other: 0,
+    runtime_status: 1, state: 1, correction: 0, other: 0,
   });
   assert.equal(r.total, 7);
   // assistant text excerpt surfaced.
@@ -151,7 +151,7 @@ test("#2 empty snapshot yields empty entries and zero counts, no cursor", () => 
   assert.equal(r.nextCursor, null);
   assert.deepEqual(r.counts, {
     message: 0, command: 0, tool_use: 0, tool_result: 0, file_written: 0,
-    runtime_status: 0, state: 0, other: 0,
+    runtime_status: 0, state: 0, correction: 0, other: 0,
   });
 });
 
@@ -450,6 +450,59 @@ test("#11 unknown run.event kinds + unknown top-level types become bounded other
   }
   assert.ok(!json.includes("weird_future_kind"), "raw kind never echoed as a label");
   assert.ok(!json.includes("future.durable_event"), "raw type never echoed as a label");
+});
+
+// =====================================================================
+// #11c M12-16: correction lifecycle surfaces as a closed-set `correction`
+// category with a meaningful status per type. The prompt/body/reason payload is
+// NEVER emitted; only the type-derived status + a bounded correctionId cross.
+// =====================================================================
+test("#11c M12-16: correction lifecycle → closed-set correction category, meaningful status, NEVER prompt/body/reason", () => {
+  resetSeq();
+  const SECRET = "test-secret-correction-body";
+  const events = [
+    lifecycleEvent("run.correction_requested", { correctionId: "fix-1", prompt: SECRET }),
+    lifecycleEvent("run.correction_claimed", { correctionId: "fix-1" }),
+    lifecycleEvent("run.correction_delivered", { correctionId: "fix-1" }),
+    lifecycleEvent("run.correction_delivery_failed", { correctionId: "fix-2", reason: "stdin_closed" }),
+    lifecycleEvent("run.correction_rejected", { correctionId: "fix-3", reason: "terminal_race" }),
+  ];
+  const r = project(events);
+  // Five correction entries, each the meaningful closed-set status for its type.
+  const corr = r.entries.filter((e) => e.category === "correction");
+  assert.equal(corr.length, 5, "all five correction lifecycle events classified");
+  assert.deepEqual(
+    corr.map((e) => e.status),
+    ["requested", "claimed", "delivered", "delivery_failed", "rejected"],
+    "status derived closed-set from the event type, in order",
+  );
+  assert.equal(r.counts.correction, 5);
+  // correctionId is a bounded Lead-authored id surfaced for correlation.
+  assert.deepEqual(corr.map((e) => e.correctionId), ["fix-1", "fix-1", "fix-1", "fix-2", "fix-3"]);
+  // Each correction entry is exactly the safe closed-set shape — NO prompt/body/reason field.
+  for (const e of corr) {
+    assert.deepEqual(Object.keys(e).sort(), ["category", "correctionId", "seq", "status", "ts"]);
+  }
+  const json = JSON.stringify(r);
+  assert.ok(!json.includes(SECRET), "correction prompt body NEVER emitted");
+  assert.ok(!json.includes("prompt"), "no prompt field/key crosses the surface");
+  assert.ok(!json.includes("stdin_closed") && !json.includes("terminal_race"),
+    "raw delivery_failed/rejected reason text NEVER emitted (status conveys the outcome)");
+});
+
+test("#11c-filter M12-16: correction is a member of ACTIVITY_CATEGORIES (filterable + counted)", () => {
+  assert.ok(ACTIVITY_CATEGORIES.includes("correction"), "correction is a first-class category");
+  resetSeq();
+  const events = [
+    msgEvent("assistant", "hi"),
+    lifecycleEvent("run.correction_requested", { correctionId: "c1", prompt: "secret" }),
+    lifecycleEvent("run.correction_delivered", { correctionId: "c1" }),
+  ];
+  // Filter to the correction category only.
+  const r = project(events, { categories: ["correction"] });
+  assert.equal(r.entries.length, 2, "category filter narrows to correction entries");
+  assert.equal(r.counts.correction, 2);
+  assert.equal(r.counts.message, 0, "non-correction category counted 0 in the filtered view");
 });
 
 // =====================================================================

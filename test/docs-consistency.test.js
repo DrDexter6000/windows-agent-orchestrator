@@ -722,7 +722,8 @@ test("M10-pre2: workspace_status tool documented in usage.md and SKILL.md", () =
   // M12-10 progressive-disclosure correction: the playbook catalog moved OFF the
   // tool surface to MCP resources, so the surface dropped playbook_list +
   // playbook_get → 23 - 2 = 21 always-registered tools (no profile, no restart).
-  assert.ok(/21 MCP tools/.test(skill), "SKILL.md must reflect 21 MCP tools after the M12-10 playbook-to-resources move");
+  // M12-16 added run_correct (queued in-flight correction) → 21 + 1 = 22.
+  assert.ok(/22 MCP tools/.test(skill), "SKILL.md must reflect 22 MCP tools (M12-10 playbook-to-resources move; M12-16 added run_correct)");
   assert.ok(skill.includes("run_delivery_reverify"), "SKILL.md tool table must include run_delivery_reverify");
   // team-roles.md must mention workspace binding (MCP-first)
   const roles = read("docs/team-roles.md");
@@ -930,12 +931,12 @@ test("M11-0A: usage.md 说明 --pure 用途、新进程重启边界、command �
   assert.ok(/command.*必须是数组|command 必须是数组|数组/.test(usage), "usage.md 必须说明 command 必须是数组");
 });
 
-test("M12-8A/M12-9/M12-10: usage.md MCP 段反映当前 21 tools", () => {
+test("M12-8A/M12-9/M12-10/M12-16: usage.md MCP 段反映当前 22 tools", () => {
   const usage = read("docs/usage.md");
   // 精确禁止"只有 7 个工具"的陈旧文案。
   assert.ok(!/(?<!\d)7 个工具/.test(usage), "usage.md MCP 段不得再声称只有 7 个工具");
-  // M12-10: playbook catalog moved to resources → 23 - 2 = 21 tools.
-  assert.ok(/21 个工具/.test(usage), "usage.md MCP 段必须反映 21 个工具（playbook catalog 已转为 resources）");
+  // M12-10: playbook catalog moved to resources → 23 - 2 = 21; M12-16 added run_correct → 22.
+  assert.ok(/22 个工具/.test(usage), "usage.md MCP 段必须反映 22 个工具（M12-10 playbook 转 resources；M12-16 加 run_correct）");
   // The stale 23-tool claim must be gone.
   assert.ok(!/23 个工具/.test(usage), "usage.md 不得再声称 23 个工具");
 });
@@ -1202,18 +1203,18 @@ test("M12 coder_low example uses current DeepSeek V4 Flash policy", () => {
   assert.equal(low?.model?.contextWindow, 1000000);
 });
 
-test("M12-8A/M12-9/M12-10: SKILL/architecture 当前工具事实为 21 tools", () => {
+test("M12-8A/M12-9/M12-10/M12-16: SKILL/architecture 当前工具事实为 22 tools", () => {
   const skill = read("SKILL.md");
   const arch = read("docs/02-architecture.md");
-  assert.ok(/21 MCP tools|21 tools/i.test(skill),
-    "SKILL.md Minimal MCP Loop 当前工具数为 21（M12-10 把 playbook catalog 转为 resources：23 - 2）");
+  assert.ok(/22 MCP tools|22 tools/i.test(skill),
+    "SKILL.md Minimal MCP Loop 当前工具数为 22（M12-10 playbook 转 resources：23 - 2；M12-16 加 run_correct）");
   // The stale 23-tool claim must be gone from SKILL.
   assert.ok(!/23 MCP tools|23 tools/i.test(skill),
     "SKILL.md 不得再声称 23 tools（playbook catalog 已转为 resources）");
   // 精确匹配 "server.js ... N tools" 的当前状态注释行。
   const serverLine = arch.split("\n").find((l) => /server\.js.*tools/.test(l)) || "";
-  assert.ok(/21 tools/.test(serverLine),
-    "architecture server.js 注释当前工具数为 21");
+  assert.ok(/22 tools/.test(serverLine),
+    "architecture server.js 注释当前工具数为 22");
 });
 
 test("M12-9 docs: executionProfileId is a TOP-LEVEL run_dispatch input; inline verification is delivery.verificationCommands etc.; contract check is schema-not-Zod and contractValid is mechanical-only", () => {
@@ -1309,10 +1310,10 @@ test("M11-2C-12: SKILL tool-count 文案不得声称 minimal loop 必须经过�
   const mandatoryAll = /full\s+minimal\s+loop\s+through\s+15|minimal\s+loop\s+必须.*全部\s*15|loop\s+must\s+(use|go through|include)\s+all\s+15/i;
   assert.ok(!mandatoryAll.test(skill),
     "SKILL tool-count 文案不得声称 minimal loop 必须经过全部工具");
-  // 必须表达：WAO 暴露 21 tools，但 minimal control loop 只用相关 control tools，
+  // 必须表达：WAO 暴露 22 tools，但 minimal control loop 只用相关 control tools，
   // playbook resources 是可选且在 dispatch loop 外。
-  assert.ok(/21 MCP tools|21 tools/i.test(skill),
-    "SKILL 声明 WAO 暴露 21 MCP tools");
+  assert.ok(/22 MCP tools|22 tools/i.test(skill),
+    "SKILL 声明 WAO 暴露 22 MCP tools");
   assert.ok(!/23 MCP tools|23 tools/i.test(skill),
     "SKILL 不得再声称 23 tools");
   assert.ok(/optional|可选/i.test(skill) && /dispatch loop|control loop/i.test(skill),
@@ -1860,7 +1861,7 @@ test("M12-6 FR-07 docs: architecture 记录 reverify 共享 service 与当前 to
 // M12-10 progressive-disclosure correction guards
 //
 // The startup-fixed tool-profile model (full/lead + --tool-profile +
-// restart-to-recover) is REVERSED: WAO now exposes exactly 21 always-registered
+// restart-to-recover) is REVERSED: WAO now exposes exactly 22 always-registered
 // tools with no profile and no restart, and the built-in playbook catalog is
 // presented as MCP resources (wao://playbooks), not tools. These guards lock
 // that truth across the live docs and the SKILL entrypoint size cap.
@@ -1916,12 +1917,12 @@ test("M12-10: architecture records toolSurface.js as the frozen tool-surface SSO
     "architecture must not reference the deleted toolProfiles.js");
 });
 
-test("M12-10: the 21 always-registered tools are listed in architecture", () => {
+test("M12-10: the 22 always-registered tools are listed in architecture", () => {
   const arch = read("docs/02-architecture.md");
-  // The server.js tool-list comment line must carry the 21-tool truth and must
+  // The server.js tool-list comment line must carry the 22-tool truth and must
   // NOT list the removed playbook tools.
   const serverLine = arch.split("\n").find((l) => /server\.js.*tools/.test(l)) || "";
-  assert.ok(/21 tools/.test(serverLine), "architecture server.js line says 21 tools");
+  assert.ok(/22 tools/.test(serverLine), "architecture server.js line says 22 tools");
   assert.ok(!/playbook_list/.test(serverLine), "architecture tool list omits playbook_list");
   assert.ok(!/playbook_get/.test(serverLine), "architecture tool list omits playbook_get");
   // workspace_select / run_dispatch_contract_check / run_wait (formerly hidden
@@ -2014,13 +2015,13 @@ test("M12 closeout: roadmap marks the milestone complete and records the current
 // MCP host → read-only canary). Failure → fix the doc, not the test.
 // ============================================================
 
-test("onboarding closeout: README 是新读者入口——21-tool / M12 complete / 突出链接 AGENT_ONBOARDING.md", () => {
+test("onboarding closeout: README 是新读者入口——22-tool / M12 complete / 突出链接 AGENT_ONBOARDING.md", () => {
   const readme = read("README.md");
-  // Current tool truth (21); stale counts (18/16) gone.
-  assert.ok(/21 MCP tools|21 tools/.test(readme),
-    "README 必须声明当前 21 MCP tools");
+  // Current tool truth (22); stale counts (18/16) gone.
+  assert.ok(/22 MCP tools|22 tools/.test(readme),
+    "README 必须声明当前 22 MCP tools");
   assert.ok(!/18 MCP tools|16-tool|16 MCP/.test(readme),
-    "README 不得再声称 18/16-tool（当前 21 always-registered MCP tools）");
+    "README 不得再声称 18/16-tool（当前 22 always-registered MCP tools）");
   // M12 complete, not in progress.
   assert.ok(!/M12[^\n]*\s*in progress/.test(readme),
     "README 不得再把 M12 标为 in progress（M12 已 complete）");

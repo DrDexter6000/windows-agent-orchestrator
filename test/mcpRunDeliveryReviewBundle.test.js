@@ -79,7 +79,7 @@ function reviewPage(runId, overrides = {}) {
   };
 }
 
-test("M12-3B-RED-01: bundle tool is discoverable; current count is 21 after run_continue", async () => {
+test("M12-3B-RED-01: bundle tool is discoverable; current count is 22 after run_continue", async () => {
   const dir = makeGitDir("m123b-discovery-");
   try {
     const server = createWaoMcpServer({ registryPath: "/registry.json", runDir: dir, workspaceRoot: dir });
@@ -88,7 +88,7 @@ test("M12-3B-RED-01: bundle tool is discoverable; current count is 21 after run_
       const { tools } = await client.listTools();
       const tool = tools.find((entry) => entry.name === "run_delivery_review_bundle");
       assert.ok(tool, "run_delivery_review_bundle must be registered");
-      assert.equal(tools.length, 21, "exactly 21 tools (M12-10 moved playbook catalog to resources)");
+      assert.equal(tools.length, 22, "exactly 22 tools (M12-10 moved playbook catalog to resources; M12-16 added run_correct)");
       assert.deepEqual(
         Object.keys(tool.inputSchema.properties).sort(),
         ["cursor", "fileIndex", "runId", "waitMs"],

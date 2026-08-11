@@ -587,3 +587,174 @@ test("M12-14: backend runtimeEnv 覆盖同名 agent.env（控制面 env 优先�
   assert.equal(captures.length, 1, "恰好一次 spawn");
   assert.equal(captures[0].opts.env.WAO_MANAGED_SAFETY_FLAG, "1", "runtimeEnv（waoEnv）必须压过 agent.env");
 });
+
+// ── M12-16：correctable wire（单 stream-json 进程 + stdin 投递）─────────────
+//
+// provider-neutral 能力 + Claude wire。correctable 任务把首个 prompt 经 stdin
+// 投递（claude -p --input-format stream-json，无 positional prompt），并在 handle
+// 上挂 sendCorrection，使后续纠正轮次投递到【同一】live 进程。非 correctable 路径
+// 字节级兼容（stdio "ignore"，-p <prompt> positional，无 sendCorrection）。
+// "delivered" 只证明字节进入 runtime stdin，不证明模型执行（queued≠delivered≠executed）。
+
+// fake 子进程：捕获 argv/stdio/stdin 写入，emit spawn。stdout/close 不触发
+// （argv/stdin 断言不需要 drain events）。
+function makeCapturingChild() {
+  const stdinChunks = [];
+  const stdin = new EventEmitter();
+  stdin.writable = true;
+  stdin.destroyed = false;
+  stdin.writableEnded = false;
+  stdin.write = (chunk, cb) => {
+    stdinChunks.push(Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk));
+    if (typeof cb === "function") setImmediate(() => cb(null));
+    return true; // no backpressure
+  };
+  stdin.end = () => { stdin.writableEnded = true; };
+  const child = new EventEmitter();
+  child.stdin = stdin;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.pid = 80808;
+  child.exitCode = null;
+  child.signalCode = null;
+  setImmediate(() => child.emit("spawn"));
+  return { child, stdinChunks, stdinText: () => stdinChunks.join("") };
+}
+
+test("M12-16: capability 声明 — base ProcessBackend=false，ClaudeCodeBackend=true（读 boolean 不认 runtime 名）", () => {
+  const base = new ProcessBackend({ parserClass: ClaudeStreamParser, buildArgs: () => [] });
+  assert.equal(base.supportsInFlightCorrection, false, "base ProcessBackend 默认不支持");
+  const claude = new ClaudeCodeBackend({});
+  assert.equal(claude.supportsInFlightCorrection, true, "ClaudeCodeBackend 声明支持");
+});
+
+test("M12-16: correctable ClaudeCode argv = -p --input-format stream-json（无 positional prompt）；初始 prompt 经 stdin 投递为 stream-json", async () => {
+  const cap = makeCapturingChild();
+  const argv = [];
+  const spawnFn = (binary, args, opts) => {
+    argv.push([...args]);
+    return cap.child;
+  };
+  const backend = new ClaudeCodeBackend({ spawnFn });
+  const handle = await backend.spawn(makeAgent(), { prompt: "do the thing", correctable: true });
+
+  const args = argv[0];
+  assert.ok(args.includes("-p"), "correctable 仍带 -p（print mode）");
+  assert.ok(args.includes("--input-format"), "correctable 带 --input-format");
+  assert.equal(args[args.indexOf("--input-format") + 1], "stream-json", "input-format=stream-json");
+  // positional prompt 绝不出现（prompt 改走 stdin）
+  assert.equal(args.includes("do the thing"), false, "correctable 不把 prompt 作为 positional argv");
+  // stdio[0] 必须是 pipe（否则无法投递）
+  // 初始 prompt 已作为一条整 stream-json 行写入 stdin
+  const lines = cap.stdinText().split("\n").filter((l) => l.length > 0);
+  assert.equal(lines.length, 1, "恰好一条初始 prompt 行");
+  const envelope = JSON.parse(lines[0]);
+  assert.equal(envelope.type, "user");
+  assert.equal(envelope.message.role, "user");
+  assert.equal(envelope.message.content[0].text, "do the thing");
+  // correctable handle 必须挂 sendCorrection
+  assert.equal(typeof handle.sendCorrection, "function");
+  assert.equal(handle.supportsSendCorrection, true);
+});
+
+test("M12-16: sendCorrection 投递一条整 stream-json user-message 行；返回 {ok:true}", async () => {
+  const cap = makeCapturingChild();
+  const backend = new ClaudeCodeBackend({ spawnFn: () => cap.child });
+  const handle = await backend.spawn(makeAgent(), { prompt: "initial", correctable: true });
+  const before = cap.stdinText();
+  const res = await handle.sendCorrection("fix the off-by-one");
+  assert.deepEqual(res, { ok: true });
+  const added = cap.stdinText().slice(before.length);
+  const envelope = JSON.parse(added.trim());
+  assert.equal(envelope.type, "user");
+  assert.equal(envelope.message.content[0].text, "fix the off-by-one");
+  // 一条整行（以换行结尾）
+  assert.ok(added.endsWith("\n"), "sendCorrection 写一条以换行结尾的整行");
+});
+
+test("M12-16: sendCorrection 在 stdin 已关闭时返回 closed-set {ok:false, reason:'stdin_closed'}", async () => {
+  const cap = makeCapturingChild();
+  const backend = new ClaudeCodeBackend({ spawnFn: () => cap.child });
+  const handle = await backend.spawn(makeAgent(), { prompt: "initial", correctable: true });
+  // 模拟 provider 进程已关闭 stdin（进程退出/管道断开）
+  cap.child.stdin.destroyed = true;
+  const res = await handle.sendCorrection("late correction");
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, "stdin_closed");
+  // 没有新字节进入（写被拒）
+  assert.equal(cap.stdinText().includes("late correction"), false);
+});
+
+test("M12-16: sendCorrection write error (NOT a closed stdin) → closed-set {ok:false, reason:'send_failed'}; listeners never accumulate across corrections", async () => {
+  const cap = makeCapturingChild();
+  const backend = new ClaudeCodeBackend({ spawnFn: () => cap.child });
+  const handle = await backend.spawn(makeAgent(), { prompt: "initial", correctable: true });
+  // stdin is OPEN (passes the pre-check), but the write itself fails — a bounded
+  // send failure, NOT stdin_closed. Route the failure via the async write
+  // callback (the realistic mid-write error path).
+  cap.child.stdin.write = (chunk, cb) => {
+    if (typeof cb === "function") setImmediate(() => cb(new Error("EPIPE")));
+    return true;
+  };
+  const beforeErr = cap.child.stdin.listenerCount("error");
+  const beforeDrain = cap.child.stdin.listenerCount("drain");
+  for (let i = 0; i < 3; i += 1) {
+    const res = await handle.sendCorrection(`turn ${i}`);
+    assert.equal(res.ok, false, `turn ${i} refused`);
+    assert.equal(res.reason, "send_failed", `turn ${i} is send_failed, not stdin_closed`);
+  }
+  // Tail (b): the per-correction error/drain listeners must detach on settle,
+  // NOT accumulate with the correction count.
+  assert.equal(cap.child.stdin.listenerCount("error"), beforeErr, "no error-listener accumulation");
+  assert.equal(cap.child.stdin.listenerCount("drain"), beforeDrain, "no drain-listener accumulation");
+});
+
+test("M12-16: sendCorrection synchronous write throw → {ok:false, reason:'send_failed'}; error listener detached (no leak)", async () => {
+  const cap = makeCapturingChild();
+  const backend = new ClaudeCodeBackend({ spawnFn: () => cap.child });
+  const handle = await backend.spawn(makeAgent(), { prompt: "initial", correctable: true });
+  cap.child.stdin.write = () => { throw new Error("sync write boom"); };
+  const beforeErr = cap.child.stdin.listenerCount("error");
+  const res = await handle.sendCorrection("late");
+  assert.equal(res.ok, false);
+  assert.equal(res.reason, "send_failed");
+  assert.equal(cap.child.stdin.listenerCount("error"), beforeErr, "sync-throw path detaches the error listener too");
+});
+
+test("M12-16: 非 correctable 路径字节级兼容 — -p <prompt> positional，stdio[0]='ignore'，无 sendCorrection", async () => {
+  const cap = makeCapturingChild();
+  const argv = [];
+  const stdioSeen = [];
+  const spawnFn = (binary, args, opts) => {
+    argv.push([...args]);
+    stdioSeen.push(opts.stdio);
+    return cap.child;
+  };
+  const backend = new ClaudeCodeBackend({ spawnFn });
+  const handle = await backend.spawn(makeAgent(), { prompt: "ordinary run" });
+  const args = argv[0];
+  assert.equal(stdioSeen[0][0], "ignore", "非 correctable stdin='ignore'（字节兼容）");
+  assert.ok(args.includes("-p"), "非 correctable 仍带 -p");
+  assert.ok(args.includes("ordinary run"), "非 correctable 把 prompt 作为 positional argv");
+  assert.equal(args.includes("--input-format"), false, "非 correctable 不带 --input-format");
+  assert.equal(handle.sendCorrection, undefined, "非 correctable handle 不挂 sendCorrection");
+  assert.equal(handle.supportsSendCorrection, undefined);
+  assert.equal(cap.stdinText(), "", "非 correctable 不向 stdin 写任何字节");
+});
+
+test("M12-16: base ProcessBackend（supportsInFlightCorrection=false）即使 task.correctable=true 也不启用 correctable（能力门 defense-in-depth）", async () => {
+  const cap = makeCapturingChild();
+  const stdioSeen = [];
+  const spawnFn = (binary, args, opts) => { stdioSeen.push(opts.stdio); return cap.child; };
+  // 显式 encodeUserMessage，但 supportsInFlightCorrection 仍是 base 的 false
+  const backend = new ProcessBackend({
+    parserClass: ClaudeStreamParser,
+    buildArgs: (_a, task) => ["-p", task.prompt],
+    spawnFn,
+    encodeUserMessage: (text) => JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } }),
+  });
+  const handle = await backend.spawn(makeAgent(), { prompt: "x", correctable: true });
+  assert.equal(stdioSeen[0][0], "ignore", "无能力声明 → 不 pipe stdin（即使 task.correctable=true）");
+  assert.equal(handle.supportsSendCorrection, undefined, "无能力 → 不挂 sendCorrection");
+  assert.equal(cap.stdinText(), "", "无能力 → 不写 stdin");
+});

@@ -2,13 +2,13 @@
 //
 // M12-10 progressive-disclosure correction — the FROZEN tool surface SSOT.
 //
-// WAO exposes EXACTLY 21 always-registered MCP tools. There is NO tool-profile
+// WAO exposes EXACTLY 22 always-registered MCP tools. There is NO tool-profile
 // model, NO startup flag, and NO restart-to-recover: every operational tool is
 // independently callable for the lifetime of the connection. The built-in
 // playbook catalog moved OFF the tool surface (it is presented as MCP resources
 // — wao://playbooks); what used to be the two playbook tools
-// (`playbook_list`, `playbook_get`) are no longer tools at all. The remaining 21
-// are the former 23-tool set minus those two.
+// (`playbook_list`, `playbook_get`) are no longer tools at all. M12-16 added
+// `run_correct` (queued in-flight correction), taking the surface from 21 to 22.
 //
 // This module is the single frozen definition of that surface (names + the exact
 // registration order emitted by tools/list). server.js registers these tools
@@ -23,8 +23,9 @@
 // mid-conversation. Progressive disclosure is RESPONSE-DRIVEN via
 // availableDrilldowns on tool results, not via hiding tools.
 
-// The 21 always-registered tools, in the exact registration order emitted by
-// tools/list. Former 23-tool set MINUS playbook_list + playbook_get.
+// The 22 always-registered tools, in the exact registration order emitted by
+// tools/list. Former 23-tool set MINUS playbook_list + playbook_get (= 21), PLUS
+// run_correct (M12-16) = 22.
 export const TOOLS = Object.freeze([
   "registry_list",
   "workspace_status",
@@ -33,6 +34,7 @@ export const TOOLS = Object.freeze([
   "run_dispatch",
   "run_dispatch_contract_check",
   "run_continue",
+  "run_correct",
   "run_status",
   "run_collect",
   "run_diagnose",
@@ -60,8 +62,8 @@ export const TOOLS = Object.freeze([
     }
     seen.add(name);
   }
-  if (TOOLS.length !== 21) {
-    throw new Error(`toolSurface: TOOLS must contain exactly 21 tools (got ${TOOLS.length})`);
+  if (TOOLS.length !== 22) {
+    throw new Error(`toolSurface: TOOLS must contain exactly 22 tools (got ${TOOLS.length})`);
   }
   if (TOOLS.includes("playbook_list") || TOOLS.includes("playbook_get")) {
     throw new Error("toolSurface: playbook tools must not be on the tool surface (catalog is resources)");

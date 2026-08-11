@@ -94,7 +94,7 @@ function successResult(args) {
 // Group 1: tool discovery + count + annotations + strict input
 // =====================================================================
 
-test("M12-7-MRC-M1: run_continue registered; total tools = 21; destructive + workspace-bound", async () => {
+test("M12-7-MRC-M1: run_continue registered; total tools = 22; destructive + workspace-bound", async () => {
   const dir = makeGitDir("m127-mrc-m1-");
   try {
     writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { coder_hq: { backend: "claude-code", cwd: dir } } }), "utf8");
@@ -104,7 +104,7 @@ test("M12-7-MRC-M1: run_continue registered; total tools = 21; destructive + wor
       const { tools } = await client.listTools();
       const t = tools.find((x) => x.name === "run_continue");
       assert.ok(t, "run_continue present");
-      assert.equal(tools.length, 21, "exactly 21 tools (M12-10 moved playbook catalog to resources)");
+      assert.equal(tools.length, 22, "exactly 22 tools (M12-10 moved playbook catalog to resources; M12-16 added run_correct)");
       // Resumes a provider conversation + mutates the retained worktree: destructive.
       assert.equal(t.annotations.destructiveHint, true);
       assert.equal(t.annotations.readOnlyHint, false);

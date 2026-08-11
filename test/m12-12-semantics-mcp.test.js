@@ -11,7 +11,7 @@
 // This slice carries:
 //   M-*   REAL MCP handlers (all four) attach semanticNotes before parse; the
 //         schema/catalog/resource parity; the review_bundle exclusion; the
-//         run_diagnose trust boundary; unchanged 21-tool surface.
+//         run_diagnose trust boundary; unchanged 22-tool surface.
 //   R-*   RESOURCES: wao://semantics summary + wao://semantics/{id} template;
 //         NO per-id static resources; summary/detail parity with the SSOT;
 //         unknown/malformed id → fixed safe text, never echoes the id.
@@ -372,7 +372,7 @@ test("M-09: run_diagnose trust boundary — unknown/extra field collapses to fix
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("M-10: unchanged 21-tool surface; all four tools carry semanticNotes; no extra tools", async () => {
+test("M-10: unchanged 22-tool surface; all four tools carry semanticNotes; no extra tools", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1212-m10-"));
   try {
     makeGitRepo(dir);
@@ -380,9 +380,9 @@ test("M-10: unchanged 21-tool surface; all four tools carry semanticNotes; no ex
     const client = await buildClient(server);
     try {
       const tools = await client.listTools();
-      assert.equal(tools.tools.length, 21, "exactly 21 tools");
+      assert.equal(tools.tools.length, 22, "exactly 22 tools");
       const names = new Set(tools.tools.map((t) => t.name));
-      assert.equal(names.size, 21, "21 distinct tool names");
+      assert.equal(names.size, 22, "22 distinct tool names");
       for (const n of FOUR_TOOLS) assert.ok(names.has(n), `${n} present`);
       // No new tools named anything semantic-related.
       assert.ok(![...names].some((n) => /semantic/i.test(n)), "no semantic-named tool added");

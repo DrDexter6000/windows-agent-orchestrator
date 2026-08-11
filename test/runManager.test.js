@@ -1,5 +1,5 @@
 import { mkdtemp, readFile } from "node:fs/promises";
-import { rmSync } from "node:fs";
+import { rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -2134,6 +2134,63 @@ test("TD-99: backend.spawn 返回前由第二个 writer claim aborted → submit
     await assert.rejects(startPromise, /became terminal/);
     assert.equal(handleAborted, true, "rejected 时新 handle 被 abort");
     assert.equal(manager.activeRuns.has(runId), false, "不注册到 activeRuns");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── M12-16：RunManager.start 的 correctable 能力门 + 透传 ──────────────────
+// correctable 是 Lead opt-in：只有声明 supportsInFlightCorrection 的 backend 才能接受。
+// 能力门在 backend 解析后、transcript/spawn 前执行（defense-in-depth，零副作用）。
+
+test("M12-16: correctable + 无能力 backend → start 抛错，零 transcript 字节（能力门在副作用前）", async () => {
+  const dir = await makeTempDir();
+  try {
+    // createMockEvidenceBackend 不声明 supportsInFlightCorrection（undefined）。
+    const manager = makeProcessManager(dir, createMockEvidenceBackend([]));
+    await assert.rejects(
+      manager.start("test", { prompt: "x", correctable: true }),
+      /supportsInFlightCorrection/,
+      "correctable 必须拒绝无能力 backend",
+    );
+    // 零副作用：runDir 里没有任何 .jsonl transcript
+    const jsonl = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+    assert.equal(jsonl.length, 0, "能力门拒绝在 transcript 写入前 → 零 transcript 字节");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("M12-16: correctable + 有能力 backend → start 透传 correctable，Run.correctable=true 且 handle 挂 sendCorrection", async () => {
+  const dir = await makeTempDir();
+  try {
+    const captured = {};
+    const capableBackend = {
+      supportsInFlightCorrection: true,
+      async spawn(agent, task) {
+        captured.task = task;
+        return {
+          backend: "process",
+          backendSessionId: "proc_capable",
+          events: async function* () { /* 不 yield，本测试不 waitForCompletion */ },
+          abort: async () => {},
+          isAlive: () => false,
+          // 与真实 processBackend 一致：correctable handle 同时挂能力标记 + sendCorrection。
+          supportsSendCorrection: true,
+          sendCorrection: async () => ({ ok: true }),
+        };
+      },
+    };
+    const manager = makeProcessManager(dir, capableBackend);
+    const run = await manager.start("test", { prompt: "do it", correctable: true });
+    try {
+      assert.equal(run.correctable, true, "Run.correctable=true");
+      assert.equal(captured.task.correctable, true, "backend.spawn 收到 task.correctable=true");
+      assert.equal(typeof run.handle.sendCorrection, "function", "handle 挂 sendCorrection");
+      assert.equal(run.handle.supportsSendCorrection, true);
+    } finally {
+      await manager.abort(run.runId);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

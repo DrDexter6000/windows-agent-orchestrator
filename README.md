@@ -39,7 +39,7 @@ and durable Lead accept/reject decision recording (it records the Lead's decisio
 it does not accept or reject for the Lead); workers receive only a bounded task
 prompt and stay out of orchestration.
 
-WAO exposes **21 MCP tools** covering the full supervised Lead loop:
+WAO exposes **22 MCP tools** covering the full supervised Lead loop:
 
 > `inventory → workspace_status → dispatch → await result → delivery query/review → Lead decision`
 
@@ -68,7 +68,7 @@ item is retired/deferred out of M11. M12-1+ delivered advisory
 Lead-authorized, model-free `run_delivery_repackage` reuse of the original
 worktree, base, and verification declaration, plus compact collect, delivery
 review bundles, backend-failure candidate recovery, `run_continue`, the
-21-tool frozen MCP surface with playbook/semantics resources, and per-command
+22-tool frozen MCP surface with playbook/semantics resources, and per-command
 execution budgets. The only remaining non-blocking candidate is broader
 cross-run/historical evidence aggregation — explicitly out of the M12
 completion definition.
@@ -127,7 +127,7 @@ Node 22–24 required (`node --version`; `engines.node` is `>=22 <25`).
 | You want to… | Read this |
 |---|---|
 | **Start from zero — install, one worker, validate, MCP host, first canary** | [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md) — the single new-user setup path |
-| **Use the orchestrator as an agent / from a script** (21 MCP tools, commands, workflows, config) | [`SKILL.md`](SKILL.md) — the agent-facing usage manual + tool table |
+| **Use the orchestrator as an agent / from a script** (22 MCP tools, commands, workflows, config) | [`SKILL.md`](SKILL.md) — the agent-facing usage manual + tool table |
 | **Deploy / configure / operate it as a human** | [`docs/usage.md`](docs/usage.md) — full deployment + usage guide |
 | **Run real smoke tests** (claude/codex/opencode) | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
 | **Understand the architecture** (layers, interfaces, state machine) | [`docs/02-architecture.md`](docs/02-architecture.md) |
@@ -168,7 +168,7 @@ npm run cli -- workflow run <file.mjs> [--vars k=v]
 ```
 
 Full command reference: `npm run cli -- help`, or [`SKILL.md`](SKILL.md) for the
-21-tool MCP table and routing contract.
+22-tool MCP table and routing contract.
 
 ## Testing
 

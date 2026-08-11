@@ -126,8 +126,11 @@ test("P2 CLI --background: 立即返回 + detached runner 推进状态机到终�
     const runDir = path.join(dir, "runs");
 
     // CLI --background：应立即返回 background JSON（多行 pretty-printed）
+    // 用仓库选定的 Node v22 执行边界（scripts/wao-node.cjs shim）启动 CLI，而非
+    // 环境 PATH 的 node（本机为 v24，会被 product versionGuard 拒绝）。shim 透传 argv
+    // 到 v22 node，guard 自然通过——不设全局 bypass、不削弱 guard。
     const out = execSync(
-      `node src/cli.js run bgw --prompt "x" --background --run-dir ${runDir} --registry ${registryPath} --wait-timeout 2000 --format json`,
+      `node scripts/wao-node.cjs src/cli.js run bgw --prompt "x" --background --run-dir ${runDir} --registry ${registryPath} --wait-timeout 2000 --format json`,
       { cwd: path.resolve(import.meta.dirname, ".."), encoding: "utf8", timeout: 10000 },
     );
     // 整块是 pretty JSON，从第一个 { 到最后一个 } 解析

@@ -2,36 +2,37 @@
 //
 // M12-10 progressive-disclosure correction — the FROZEN tool surface.
 //
-// WAO exposes EXACTLY 21 always-registered MCP tools. There is NO tool-profile
+// WAO exposes EXACTLY 22 always-registered MCP tools. There is NO tool-profile
 // model, NO startup flag, and NO restart-to-recover: every operational tool is
 // independently callable for the lifetime of the connection. The built-in
 // playbook catalog moved OFF the tool surface entirely (it is presented as MCP
 // resources — see test/mcpPlaybook.test.js). What used to be the two playbook
 // tools (`playbook_list`, `playbook_get`) are no longer tools at all; the
-// remaining 21 are the former 23 minus those two.
+// remaining 21 are the former 23 minus those two, and M12-16 (queued in-flight
+// correction) added `run_correct`, taking the surface to 22.
 //
 // This is a PRESENTATION/TRUTH lock, not a permission or routing layer. There
 // is no branching on Host/runtime name, no `tools/list_changed` dependency, and
-// no dynamic registration — the 21 tools are registered unconditionally at
+// no dynamic registration — the 22 tools are registered unconditionally at
 // server construction.
 //
 // Contracts under test:
-//   A — tools/list returns EXACTLY the deterministic 21-tool set, in the frozen
+//   A — tools/list returns EXACTLY the deterministic 22-tool set, in the frozen
 //       registration order, with NO `playbook_list`/`playbook_get` and NO
 //       profile-driven variance.
 //   B — the three tools the old `lead` profile HID (`workspace_select`,
 //       `run_dispatch_contract_check`, `run_wait`) are now advertised AND their
 //       handlers are reached on call (not "not found"); every tool is callable.
 //   C — the toolProfile model is GONE: `createWaoMcpServer({toolProfile})` does
-//       not throw and does not change the 21-tool surface for ANY value.
+//       not throw and does not change the 22-tool surface for ANY value.
 //   D — stdio `parseMcpArgs` IGNORES legacy `--tool-profile` as an ordinary
 //       unknown flag (no parse, no output key, no throw); the legacy
 //       `--registry`/`--run-dir`/`--workspace-root` parsing is byte-unchanged.
-//   E — `src/mcp/toolSurface.js` is the single frozen SSOT (21 names, frozen,
+//   E — `src/mcp/toolSurface.js` is the single frozen SSOT (22 names, frozen,
 //       unique, registration order); every DRILLDOWN_TOOLS carrier is a member.
 //   F — `src/mcp/toolProfiles.js` is DELETED (the profile model is gone).
 //   G — compacted descriptions retain the key semantic guards.
-//   H — no-model wire measurement: deterministic 21-tool wire, bounded by a
+//   H — no-model wire measurement: deterministic 22-tool wire, bounded by a
 //       frozen ceiling (regression protection), and honestly recorded.
 
 import { test } from "node:test";
@@ -45,11 +46,12 @@ import { createHash } from "node:crypto";
 // ---- Frozen closed set (the contract) ----
 
 // Registration order exactly as emitted by tools/list. The former 23-tool full
-// set MINUS playbook_list + playbook_get (the catalog is now resources).
+// set MINUS playbook_list + playbook_get (the catalog is now resources) = 21,
+// PLUS run_correct (M12-16 queued in-flight correction) = 22.
 const TOOL_SET = Object.freeze([
   "registry_list", "workspace_status", "workspace_select", "lead_preflight",
-  "run_dispatch", "run_dispatch_contract_check", "run_continue", "run_status",
-  "run_collect", "run_diagnose", "run_delivery", "run_delivery_decide",
+  "run_dispatch", "run_dispatch_contract_check", "run_continue", "run_correct",
+  "run_status", "run_collect", "run_diagnose", "run_delivery", "run_delivery_decide",
   "run_stop", "runs_list", "run_wait", "run_await_result", "run_activity",
   "run_delivery_review", "run_delivery_review_bundle", "run_delivery_repackage",
   "run_delivery_reverify",
@@ -113,10 +115,10 @@ function notFound(res) {
 }
 
 // =====================================================================
-// A — exact deterministic 21-tool set, no playbook tools, no profile variance
+// A — exact deterministic 22-tool set, no playbook tools, no profile variance
 // =====================================================================
 
-test("M12-10-A1: tools/list returns exactly the 21-tool set in deterministic order", async () => {
+test("M12-10-A1: tools/list returns exactly the 22-tool set in deterministic order", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-a1-"));
   try {
     makeGitRepo(dir);
@@ -124,8 +126,8 @@ test("M12-10-A1: tools/list returns exactly the 21-tool set in deterministic ord
     try {
       const tools = await client.listTools();
       const names = tools.tools.map((t) => t.name);
-      assert.deepEqual(names, TOOL_SET, "exactly the 21-tool set in registration order");
-      assert.equal(names.length, 21, "exactly 21");
+      assert.deepEqual(names, TOOL_SET, "exactly the 22-tool set in registration order");
+      assert.equal(names.length, 22, "exactly 22");
     } finally {
       await client.close();
       await server.close();
@@ -163,7 +165,7 @@ test("M12-10-A3: every advertised tool is a member of the frozen TOOL_SET (close
       const surface = new Set(TOOL_SET);
       const names = (await client.listTools()).tools.map((t) => t.name);
       for (const name of names) {
-        assert.ok(surface.has(name), `advertised tool ${name} is in the frozen 21-set`);
+        assert.ok(surface.has(name), `advertised tool ${name} is in the frozen 22-set`);
       }
     } finally {
       await client.close();
@@ -242,13 +244,13 @@ test("M12-10-B2: calling formerly-hidden tools reaches the service (not 'not fou
 // C — the toolProfile model is gone (ignored, never throws, never varies)
 // =====================================================================
 
-test("M12-10-C1: createWaoMcpServer ignores toolProfile — same 21 tools for any value, no throw", async () => {
+test("M12-10-C1: createWaoMcpServer ignores toolProfile — same 22 tools for any value, no throw", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-c1-"));
   try {
     makeGitRepo(dir);
     const registryPath = makeRegistry(dir);
     // The legacy values "full" and "lead", plus a totally unknown value, must
-    // all yield the SAME 21-tool surface and must NOT throw. (HEAD throws on
+    // all yield the SAME 22-tool surface and must NOT throw. (HEAD throws on
     // "bogus" and yields 18 on "lead" — this test reverses that.)
     for (const profile of ["full", "lead", "bogus", undefined]) {
       const { createWaoMcpServer } = await import("../src/mcp/server.js");
@@ -259,15 +261,15 @@ test("M12-10-C1: createWaoMcpServer ignores toolProfile — same 21 tools for an
         createWaoMcpServer({ toolProfile: profile, registryPath, runDir: join(dir, "runs"), workspaceRoot: dir });
       }, `toolProfile=${String(profile)} must not throw`);
     }
-    // Connected cross-check: default vs explicit "lead" produce identical 21-tool
+    // Connected cross-check: default vs explicit "lead" produce identical 22-tool
     // surfaces in the same deterministic order.
     const a = await buildServerClient({ dir, registryPath });
     const b = await buildServerClient({ dir, registryPath, overrides: { toolProfile: "lead" } });
     try {
       const na = (await a.client.listTools()).tools.map((t) => t.name);
       const nb = (await b.client.listTools()).tools.map((t) => t.name);
-      assert.deepEqual(na, TOOL_SET, "default = 21");
-      assert.deepEqual(nb, TOOL_SET, "toolProfile:'lead' ignored → still 21");
+      assert.deepEqual(na, TOOL_SET, "default = 22");
+      assert.deepEqual(nb, TOOL_SET, "toolProfile:'lead' ignored → still 22");
       assert.deepEqual(nb, na, "no profile variance");
     } finally {
       await a.client.close(); await a.server.close();
@@ -312,13 +314,13 @@ test("M12-10-D2: legacy --registry/--run-dir/--workspace-root parsing is byte-un
 });
 
 // =====================================================================
-// E — toolSurface.js SSOT: frozen 21-set, unique, DRILLDOWN_TOOLS ⊆ surface
+// E — toolSurface.js SSOT: frozen 22-set, unique, DRILLDOWN_TOOLS ⊆ surface
 // =====================================================================
 
-test("M12-10-E1: src/mcp/toolSurface.js exports the frozen 21-tool SSOT", async () => {
+test("M12-10-E1: src/mcp/toolSurface.js exports the frozen 22-tool SSOT", async () => {
   const { TOOLS } = await import("../src/mcp/toolSurface.js");
-  assert.deepEqual(TOOLS, TOOL_SET, "TOOLS == frozen 21-tool set in registration order");
-  assert.equal(TOOLS.length, 21);
+  assert.deepEqual(TOOLS, TOOL_SET, "TOOLS == frozen 22-tool set in registration order");
+  assert.equal(TOOLS.length, 22);
   assert.ok(Object.isFrozen(TOOLS), "TOOLS is frozen");
   // Uniqueness (no tool registered twice).
   assert.equal(new Set(TOOLS).size, TOOLS.length, "TOOLS has no duplicates");
@@ -458,7 +460,26 @@ const RED_23_WIRE = 75492;
 // 2939 bytes (description is the only variable field) to 69800. No schema,
 // handler, annotation, name, order, or behavior change. Ceiling re-frozen at the
 // measured 69800 bytes, still well below the 23-tool baseline.
-const FROZEN_21_WIRE_CEILING = 69800;
+//
+// M12-16 re-baseline (queued in-flight correction — run_correct added): the
+// surface grew from 21 to 22 tools. run_correct carries its own
+// input/output schemas + annotations + a 517-byte description, and run_dispatch
+// gained a one-sentence correctable clause. The description-stripped SHA-256
+// therefore changed (a new tool's schema is in the stripped payload) and was
+// re-measured truthfully (see DESC_STRIPPED_CONTRACT_SHA). Description bytes rose
+// 8873 -> 9576 (+703); the wire rose by the same description delta plus run_correct's
+// schema bytes to 71677. Ceiling re-frozen at the measured 71677 bytes, STILL below
+// the 23-tool baseline (75492) — 22 tools now vs 23 then, with more function.
+//
+// M12-16 re-baseline (correction lifecycle visibility in run_activity): the
+// run_activity output schema gained the closed-set `correction` activity variant
+// (status enum over requested/claimed/delivered/delivery_failed/rejected + a
+// bounded correctionId) and a `correction` counts key, so the correction lifecycle
+// is visible as meaningful safe labels WITHOUT ever exposing correction
+// prompt/body/reason/provider session/path. No new tools, no validation removed,
+// no description change (M12-16-B still passes). The wire grew +451 bytes
+// (schema-only); ceiling re-frozen at 72128, still well below the 23-tool baseline.
+const FROZEN_22_WIRE_CEILING = 72128;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -484,18 +505,19 @@ async function measureWire() {
   }
 }
 
-test("M12-10-H: deterministic 21-tool wire below frozen ceiling and below the 23-tool baseline", async () => {
+test("M12-10-H: deterministic 22-tool wire below frozen ceiling and below the 23-tool baseline", async () => {
   const m = await measureWire();
-  // The surface is exactly 21 (re-asserted for the measured server).
-  assert.equal(m.count, 21, `measured count is 21 (got ${m.count})`);
-  assert.deepEqual(m.names, TOOL_SET, "measured set == frozen 21-set");
-  // Honest regression narrative: the 21-tool wire must be smaller than the prior
-  // 23-tool baseline (the two playbook tools and their schemas are gone).
+  // The surface is exactly 22 (re-asserted for the measured server).
+  assert.equal(m.count, 22, `measured count is 22 (got ${m.count})`);
+  assert.deepEqual(m.names, TOOL_SET, "measured set == frozen 22-set");
+  // Honest regression narrative: the 22-tool wire must be smaller than the prior
+  // 23-tool baseline (the two playbook tools and their schemas are gone; run_correct
+  // added one back but the surface is still leaner and more capable).
   assert.ok(m.wireBytes < RED_23_WIRE,
-    `21-tool wire (${m.wireBytes}) < 23-tool baseline (${RED_23_WIRE})`);
+    `22-tool wire (${m.wireBytes}) < 23-tool baseline (${RED_23_WIRE})`);
   // Frozen ceiling prevents creep.
-  assert.ok(m.wireBytes <= FROZEN_21_WIRE_CEILING,
-    `21-tool wire (${m.wireBytes}) <= frozen ceiling (${FROZEN_21_WIRE_CEILING})`);
+  assert.ok(m.wireBytes <= FROZEN_22_WIRE_CEILING,
+    `22-tool wire (${m.wireBytes}) <= frozen ceiling (${FROZEN_22_WIRE_CEILING})`);
 });
 
 // =====================================================================
@@ -524,17 +546,25 @@ test("M12-10-H: deterministic 21-tool wire below frozen ceiling and below the 23
 
 // Frozen description-stripped tools/list contract (names + order + input/output
 // schemas + annotations + every non-description field, recursively stripped of
-// all `description` keys, then JSON.stringify'd). Measured on the M12-15 surface.
+// all `description` keys, then JSON.stringify'd). Measured on the M12-15 surface,
+// re-measured for M12-16 run_correct (the added tool's input/output schemas +
+// annotations are part of the stripped payload, so the SHA changed truthfully);
+// re-measured again for the M12-16 correction-category run_activity output-schema
+// variant (a new union member + counts key change the stripped payload, so the SHA
+// changed truthfully).
 const DESC_STRIPPED_CONTRACT_SHA =
-  "e413c92c24ddf6366b3d31263446fa1c4db763dbc615b810f9746d590ce93604";
+  "21d67a541d3273d171e7f88f098b30e045138f66e2980d3fd1dcf031d92a980e";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;
 // Material-reduction floor: the slimming must cut at least this many description
-// bytes, so a one-word edit cannot satisfy the ceiling (not a cosmetic change).
-const M12_16_DESC_REDUCTION_MIN = 2900;
-// Frozen at the achieved GREEN value AFTER slimming. Prevents description creep.
-const FROZEN_21_DESC_CEILING = 8873;
+// bytes vs the M12-15 baseline, so a one-word edit cannot satisfy the ceiling.
+// Re-based for the run_correct addition (M12-16 in-flight correction): the added
+// tool raised the description total, so the net cut vs M12-15 is now 2236 bytes
+// (11812 − 9576). 2000 keeps the "material, not cosmetic" intent with headroom.
+const M12_16_DESC_REDUCTION_MIN = 2000;
+// Frozen at the achieved GREEN value AFTER run_correct was added. Prevents creep.
+const FROZEN_22_DESC_CEILING = 9576;
 
 // Recursively remove every `description` key from a tools/list payload (the 21
 // top-level tool descriptions and any nested schema descriptions). Returns a new
@@ -588,8 +618,8 @@ async function measureSurface() {
 
 test("M12-16-A: description-stripped tools/list contract is byte-stable (SHA-256 losslessness guard)", async () => {
   const m = await measureSurface();
-  // Same 21 tools, same names, same order.
-  assert.equal(m.count, 21, `measured count is 21 (got ${m.count})`);
+  // Same 22 tools, same names, same order.
+  assert.equal(m.count, 22, `measured count is 22 (got ${m.count})`);
   assert.deepEqual(m.names, TOOL_SET, "names/order unchanged by slimming");
   // The description-stripped payload must hash to the frozen contract. ANY change
   // to a schema, annotation, name, or order — anything but a tool's description
@@ -612,11 +642,11 @@ test("M12-16-B: descriptions are materially shorter (frozen ceiling below the M1
   const m = await measureSurface();
   // Frozen ceiling at the achieved GREEN value — prevents description creep.
   assert.ok(
-    m.descBytes <= FROZEN_21_DESC_CEILING,
-    `desc bytes (${m.descBytes}) <= frozen ceiling (${FROZEN_21_DESC_CEILING})`,
+    m.descBytes <= FROZEN_22_DESC_CEILING,
+    `desc bytes (${m.descBytes}) <= frozen ceiling (${FROZEN_22_DESC_CEILING})`,
   );
-  // Material reduction (not cosmetic): the slimming cut a real margin off the
-  // M12-15 description baseline.
+  // Material reduction (not cosmetic): even with run_correct added, the 22-tool
+  // description total remains materially below the 21-tool M12-15 baseline.
   assert.ok(
     m.descBytes <= PRE_M12_16_DESC_BASELINE - M12_16_DESC_REDUCTION_MIN,
     `material reduction: desc bytes (${m.descBytes}) <= ${

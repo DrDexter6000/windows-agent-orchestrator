@@ -2,7 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
-import { JsonlTranscript, TERMINAL_STATES, readTranscript, findState, findLatest } from "./transcript.js";
+import { JsonlTranscript, TERMINAL_STATES, readTranscript, findState, findLatest, projectCorrections } from "./transcript.js";
 import { createWorktree, removeWorktree } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
@@ -230,6 +230,12 @@ export class RunManager {
       // a fresh worktree — no createWorktree, no cleanup (persistent). Mutually
       // exclusive with frozenGitHead; requires delivery mode.
       reuseWorktree = null,
+    // M12-16: Lead opt-in marking this run correctable — the runner drains the
+    // transcript-backed correction queue (appended cross-process by run_correct)
+    // and delivers each queued turn to the live provider stdin in
+    // waitForCompletion. Requires the backend to declare
+    // supportsInFlightCorrection (gated below). Default false = byte-compatible.
+    correctable = false,
     } = options;
 
     const registryPath = resolve(registry ?? this.config.registry);
@@ -242,6 +248,15 @@ export class RunManager {
     // not touch cwd/binary until spawn, so selecting it from `agent` (pre-worktree)
     // vs `effectiveAgent` (post-worktree) yields the same instance.
     const backend = this.backendFor(agent);
+
+    // M12-16: correctable capability gate (defense-in-depth at the spawn
+    // authority — dispatchRun already gates, but RunManager.start is the spawn
+    // owner). Only a backend declaring supportsInFlightCorrection may accept a
+    // correctable run; fail closed BEFORE any transcript write/spawn. Reads the
+    // declared capability — never branches on the runtime name.
+    if (correctable && backend?.supportsInFlightCorrection !== true) {
+      throw new Error("RunManager.start: correctable requires a backend that declares supportsInFlightCorrection");
+    }
 
     // M11-5（TD-89 修复）：角色合同加载。在 transcript 创建前 fail-closed
     // （零 transcript、零 spawn）。agent.systemPrompt 是 registry 声明的角色
@@ -689,6 +704,9 @@ export class RunManager {
         // Absent for non-reusable runs (backends ignore the field).
         ...(sessionReuse ? { sessionReuse } : {}),
         ...(deliveryContext ? { deliveryMode: true } : {}),
+        // M12-16: correctable → backend spawns with a piped stdin + stream-json
+        // input and attaches sendCorrection to the handle. Absent = byte-compatible.
+        ...(correctable ? { correctable: true } : {}),
       });
     } catch (error) {
       await transcript.append("run.error", { phase: "spawn", error: error.message });
@@ -734,6 +752,7 @@ export class RunManager {
       deliveryContext,
       packageDeliveryFn: this.packageDeliveryFn,
       verifyDeliveryFn: this.verifyDeliveryFn,
+      correctable,
     });
     this.activeRuns.set(finalRunId, run);
     this._ensureSigintHandler();
@@ -1168,6 +1187,7 @@ export class Run {
     deliveryContext = null,
     packageDeliveryFn = defaultPackageDelivery,
     verifyDeliveryFn = defaultVerifyDelivery,
+    correctable = false,
   }) {
     this.runId = runId;
     this.agentId = agentId;
@@ -1199,6 +1219,10 @@ export class Run {
     this.deliveryContext = deliveryContext;
     this._packageDeliveryFn = packageDeliveryFn;
     this._verifyDeliveryFn = verifyDeliveryFn;
+    // M12-16: correctable runs drain the transcript-backed correction queue in
+    // waitForCompletion (onPollTick) and reject outstanding requests at cleanup.
+    this.correctable = correctable === true;
+    this._correctionsClosed = false;
     this._deliveryPackaged = false; // guard: package at most once
     // TD-103 Phase 3B concurrency final closeout: transcript-atomic verification.
     //
@@ -1341,7 +1365,16 @@ export class Run {
     };
 
     try {
-      for await (const rawEvent of this.handle.events(controller.signal, { pollInterval, silentTimeout })) {
+      for await (const rawEvent of this.handle.events(controller.signal, {
+        pollInterval,
+        silentTimeout,
+        // M12-16: for a correctable run, drain the transcript-backed correction
+        // queue on each wake of THIS control loop (the same loop that consumes
+        // backend events — no second semantic owner). The bounded pollInterval
+        // wait in _streamEvents guarantees the tick fires periodically even while
+        // the provider is silent. Absent for non-correctable runs (byte-compatible).
+        ...(this.correctable ? { onPollTick: () => this._pollCorrections() } : {}),
+      })) {
         const ev = this._redact(rawEvent);
         // 若已被 abort，停止处理后续事件（避免覆盖 aborted 状态）
         if (this._aborted) break;
@@ -1909,6 +1942,18 @@ export class Run {
 
   /** 终态时清理 worktree（ephemeral 策略）。幂等，失败不阻塞。 */
   async _runCleanup() {
+    // M12-16: a correctable run must leave NO correction request stranded. On
+    // every terminal branch, atomically reject every still-outstanding
+    // (pending/claimed) correction as terminal_race (the provider finished
+    // before the queued turn could be delivered). This runs BEFORE the session
+    // abort so the rejection is durable regardless of abort outcome. Best-effort
+    // (never blocks terminal) and runs at most once.
+    if (this.correctable && !this._correctionsClosed) {
+      this._correctionsClosed = true;
+      try {
+        await this.transcript.rejectOutstandingCorrections({ reason: "terminal_race" });
+      } catch { /* best-effort: never block terminal */ }
+    }
     // 会话兜底 abort（事故修复 2026-06-17）：无论哪条终态路径（completed/failed/
     // timed_out/user-abort），清理时都必须向 serve 端 session 发送 abort。
     // HTTP 类 backend（opencode-serve）的 session 不一定随 run 结束自行死——
@@ -1936,6 +1981,63 @@ export class Run {
       await this.transcript.append("run.cleanup_done", {});
     } catch (error) {
       await this.transcript.append("run.cleanup_error", { error: error.message });
+    }
+  }
+
+  /**
+   * M12-16: drain the transcript-backed correction queue. Invoked as the
+   * onPollTick of the waitForCompletion event loop (the single control loop that
+   * also consumes backend events — no second semantic owner). For each
+   * OUTSTANDING correction (requested, never claimed), atomically claim it IN
+   * LOCK, deliver it to the live provider stdin via handle.sendCorrection, then
+   * record delivered / delivery_failed. A claimed-but-undelivered correction
+   * (crash window) is never re-claimed — no double turn; it is rejected at the
+   * terminal cleanup. "delivered" proves byte delivery, NOT model execution.
+   *
+   * Never changes run state, never stops/retries/re-scopes the run (purely
+   * additive transport). Best-effort: any error is swallowed so it can never
+   * kill the event stream.
+   */
+  async _pollCorrections() {
+    if (!this.correctable || this._correctionsClosed) return;
+    let events;
+    try {
+      events = await readTranscript(this.transcript.filePath);
+    } catch {
+      return;
+    }
+    const proj = projectCorrections(events, this.runId);
+    for (const [correctionId, info] of proj) {
+      if (info.status !== "pending") continue; // only claim un-claimed requests
+      let claim;
+      try {
+        claim = await this.transcript.tryClaimCorrection({ correctionId });
+      } catch {
+        continue;
+      }
+      if (!claim.claimed) continue; // already handled or terminal race
+      const handle = this.handle;
+      if (!handle || typeof handle.sendCorrection !== "function") {
+        try {
+          await this.transcript.appendCorrectionDeliveryFailed({ correctionId, reason: "send_failed" });
+        } catch { /* best-effort */ }
+        continue;
+      }
+      let res;
+      try {
+        res = await handle.sendCorrection(info.prompt ?? claim.prompt ?? "");
+      } catch {
+        res = { ok: false, reason: "send_failed" };
+      }
+      try {
+        if (res && res.ok) {
+          await this.transcript.appendCorrectionDelivered({ correctionId });
+        } else {
+          const reason = res && (res.reason === "stdin_closed" || res.reason === "send_failed")
+            ? res.reason : "send_failed";
+          await this.transcript.appendCorrectionDeliveryFailed({ correctionId, reason });
+        }
+      } catch { /* best-effort: the claim is durable, cleanup will reject if needed */ }
     }
   }
 

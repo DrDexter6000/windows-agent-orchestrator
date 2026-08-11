@@ -41,6 +41,20 @@ import { dispatchRun, ReuseBusyError } from "../application/runDispatch.js";
 // session (same authority as run_dispatch) and collapses every closed-set
 // eligibility refusal to a structured rejectionReason.
 import { continueRun, CONTINUE_REJECTION_REASONS } from "../application/runContinue.js";
+// M12-16: queued in-flight correction application service. Atomically appends a
+// run.correction_requested durable fact under workspace ownership + runId +
+// non-terminal + persisted correctable=true, with a closed-set outcome
+// (queued/pending/delivered/rejected) that NEVER echoes the prompt. Purely
+// additive transport: the detached runner drains the queue and delivers to the
+// live provider stdin; WAO never auto-stops/retries/re-scopes/accepts.
+import {
+  correctRun,
+  CORRECTION_OUTCOMES,
+  CORRECTION_REJECTION_REASONS,
+  CORRECTION_ID_PATTERN,
+  CORRECTION_ID_MAX_LEN,
+  CORRECTION_PROMPT_MAX_LEN,
+} from "../application/runCorrection.js";
 // M12-7: the continuation service gates on backend.supportsSessionReuse (a
 // capability boolean) before any mutation. The backend objects are constructed
 // here at the control-plane boundary — the same tier backgroundRunner.js
@@ -143,6 +157,7 @@ import { RUNTIME_ACTIVITY_STATUSES } from "../runEvent.js";
 import {
   projectRunActivity,
   ACTIVITY_CATEGORIES,
+  CORRECTION_ACTIVITY_STATUSES,
   LEAD_PAGE_DEFAULT,
   LEAD_PAGE_HARD_CAP,
   LEAD_TEXT_EXCERPT_CAP,
@@ -458,6 +473,13 @@ const RUN_DISPATCH_INPUT = z.object({
   // authorized run_continue can resume the SAME provider conversation in the
   // retained worktree. Default false = byte-compatible ordinary delivery.
   continuable: z.boolean().optional(),
+  // M12-16: Lead opt-in marking this run correctable — the detached runner
+  // spawns the worker with a piped stdin + stream-json input (one live process)
+  // so a future run_correct can queue a follow-up user turn to the SAME process
+  // without waiting for terminal state. Requires a backend that declares
+  // supportsInFlightCorrection; the dispatcher refuses before any side effect if
+  // the selected backend cannot. Default false = byte-compatible ordinary run.
+  correctable: z.boolean().optional(),
   // M12-9 Package B: optional Lead-selected execution profile id. When set, the
   // delivery's verification (setup + assertion commands) comes from the frozen
   // trusted catalog (src/application/executionProfiles.js) instead of the inline
@@ -510,8 +532,10 @@ const RUN_DISPATCH_DESCRIPTION =
   "Dispatch a supervised background run to a worker; WAO owns the runner/transcript and " +
   "returns a runId. Only agentId and prompt are accepted; registry, run directory, and " +
   "certification are server-owned. Optional continuable (delivery-only, default false) roots a " +
-  "lineage run_continue can resume for a Lead-authorized correction. WAO never infers " +
-  "continuation, scope, retry, or acceptance.";
+  "lineage run_continue can resume for a Lead-authorized correction. Optional correctable " +
+  "(default false) spawns one live stream-json process so run_correct can queue a follow-up " +
+  "turn in flight; requires a correction-capable backend. WAO never infers continuation, " +
+  "correction delivery, scope, retry, or acceptance.";
 
 // ===== run_dispatch_contract_check (M12-9 advisory precheck) constants =====
 //
@@ -660,6 +684,64 @@ const RUN_CONTINUE_DESCRIPTION =
   "verification, retry, or acceptance; the Lead reviews and accepts/rejects. Eligibility is " +
   "decided read-only before any mutation via a closed-set rejectionReason. Only parentRunId, " +
   "prompt, and the child delivery are accepted; all else is server-owned.";
+
+// ===== run_correct (M12-16 queued in-flight correction) constants =====
+//
+// DISTINCT from run_continue (M12-7): run_continue spawns a NEW child run against
+// a TERMINAL parent; run_correct queues a follow-up user turn to a RUNNING worker
+// via stdin (one live stream-json process). WAO is a deterministic transport:
+// "queued" proves a durable append, "delivered" (visible later via run_activity)
+// proves bytes reached the provider stdin — NEITHER proves the model executed the
+// turn (queued ≠ delivered ≠ executed). WAO never auto-stops/retries/re-scopes/
+// accepts/rejects. The prompt is accepted here, persisted as the bounded queue
+// payload, and NEVER returned through this safe query surface.
+
+const CORRECT_ERROR_TEXT = "run_correct failed";
+
+// run_correct input: the RUNNING correctable run to correct + a stable id + the
+// correction prompt. correctionId is 1..64 chars over the safe closed alphabet
+// [A-Za-z0-9_-] (regex serializes to JSON Schema); prompt is 1..15000 chars
+// (bounded). runDir/registry/workspace are server-owned (never model-supplied).
+const RUN_CORRECT_INPUT = z.object({
+  runId: z.string().min(1),
+  correctionId: z.string().min(1).max(CORRECTION_ID_MAX_LEN).regex(CORRECTION_ID_PATTERN),
+  prompt: z.string().min(1).max(CORRECTION_PROMPT_MAX_LEN),
+}).strict();
+
+// run_correct output: one strict object with a closed-set outcome that spans the
+// queued (just-appended), pending (idempotent re-queue of an existing request),
+// delivered, and rejected variants. Rejection carries a closed-set reason. The
+// prompt, session id, workspace path, PID, provider name, and argv are NEVER
+// surfaced — only the safe status. `delivered` is reported when a prior call was
+// already delivered (or transitively reached delivery); the runner, not this tool,
+// performs delivery.
+const RUN_CORRECT_OUTPUT = z.object({
+  runId: z.string(),
+  correctionId: z.string(),
+  outcome: z.enum(CORRECTION_OUTCOMES),
+  // null iff outcome !== "rejected".
+  reason: z.enum(CORRECTION_REJECTION_REASONS).nullable(),
+}).strict();
+
+// run_correct appends a durable correction request to a running run's transcript
+// (the cross-process queue the detached runner drains). It is NOT read-only
+// (one bounded append), but it does NOT spawn/stop/retry the worker or change run
+// state — the run keeps running. Workspace-bound (the run must belong to the bound
+// workspace), idempotent (same correctionId is no-op), open world.
+const RUN_CORRECT_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+};
+
+const RUN_CORRECT_DESCRIPTION =
+  "Queue ONE follow-up correction turn to a RUNNING correctable worker: appends a durable " +
+  "request the detached runner delivers to the live provider stdin (one stream-json process). " +
+  "outcome is a closed set (queued/pending/delivered/rejected). queued means durably appended — " +
+  "NOT that the model executed the turn; run_activity later shows delivered/delivery_failed. " +
+  "WAO never auto-stops/retries/re-scopes/accepts. Only runId, correctionId, and prompt are " +
+  "accepted; all else is server-owned. The prompt is never returned.";
 
 // Fixed safe text for run_status failure. Never concatenates dynamic content.
 const STATUS_ERROR_TEXT = "run_status failed";
@@ -2139,6 +2221,17 @@ const RUN_ACTIVITY_ENTRY_OTHER = z.object({
   label: z.string().max(ACTIVITY_LABEL_CAP),
 }).strict();
 
+// M12-16: correction lifecycle entry. status is the closed set derived from the
+// event TYPE (never the payload); correctionId is the bounded Lead-authored id
+// for correlation. The prompt/body/reason are NEVER emitted (no field for them).
+const RUN_ACTIVITY_ENTRY_CORRECTION = z.object({
+  category: z.literal("correction"),
+  ts: z.string().max(ACTIVITY_TS_CAP),
+  seq: z.number().int(),
+  status: z.enum([...CORRECTION_ACTIVITY_STATUSES]),
+  correctionId: z.string().max(ACTIVITY_LABEL_CAP),
+}).strict();
+
 const RUN_ACTIVITY_ENTRY = z.union([
   RUN_ACTIVITY_ENTRY_MESSAGE,
   RUN_ACTIVITY_ENTRY_COMMAND,
@@ -2147,6 +2240,7 @@ const RUN_ACTIVITY_ENTRY = z.union([
   RUN_ACTIVITY_ENTRY_FILE_WRITTEN,
   RUN_ACTIVITY_ENTRY_RUNTIME_STATUS,
   RUN_ACTIVITY_ENTRY_STATE,
+  RUN_ACTIVITY_ENTRY_CORRECTION,
   RUN_ACTIVITY_ENTRY_OTHER,
 ]);
 
@@ -2158,6 +2252,7 @@ const RUN_ACTIVITY_COUNTS = z.object({
   file_written: z.number().int().nonnegative(),
   runtime_status: z.number().int().nonnegative(),
   state: z.number().int().nonnegative(),
+  correction: z.number().int().nonnegative(),
   other: z.number().int().nonnegative(),
 }).strict();
 
@@ -2430,6 +2525,9 @@ export function createWaoMcpServer({
   // to the real service; workspace-bound + backend-capability-gated. Threaded
   // for transport tests.
   continueRunFn,
+  // M12-16: injectable queued in-flight correction service. Defaults to the real
+  // service; workspace-bound + correctable-gated. Threaded for transport tests.
+  correctRunFn,
   // M12-9: injectable advisory dispatch-contract precheck service. Defaults to
   // the real read-only service; threaded for transport tests.
   runDispatchContractCheckFn,
@@ -2464,6 +2562,7 @@ export function createWaoMcpServer({
   const deliveryRepackageService = getRunDeliveryRepackageFn ?? runDeliveryRepackage;
   const deliveryReverifyService = runDeliveryReverifyFn ?? runDeliveryReverify;
   const continueService = continueRunFn ?? continueRun;
+  const correctService = correctRunFn ?? correctRun;
   const contractCheckService = runDispatchContractCheckFn ?? runDispatchContractCheck;
 
   // M12-7: backend capability resolver for the continuation service's
@@ -2835,7 +2934,7 @@ export function createWaoMcpServer({
       outputSchema: RUN_DISPATCH_OUTPUT,
       annotations: RUN_DISPATCH_ANNOTATIONS,
     },
-    async ({ agentId, prompt, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable, executionProfileId }) => {
+    async ({ agentId, prompt, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable, correctable, executionProfileId }) => {
       // M11-8B final: validate the requested agentId at the VERY TOP, before
       // workspace resolution or any dispatcher call. An invalid or reserved
       // ("unknown") id collapses to the fixed dispatch error immediately — the
@@ -2990,6 +3089,11 @@ export function createWaoMcpServer({
           // lineage slot refuses before any transcript/fork; those environmental
           // throws collapse to the fixed dispatch error texts below.
           ...(continuable ? { continuable: true } : {}),
+          // M12-16: Lead opt-in. correctable is threaded verbatim (default false
+          // = ordinary run). The service gates on backend.supportsInFlightCorrection
+          // before any side effect; a non-capable backend refuses (zero transcript,
+          // zero fork) and collapses to the fixed dispatch error below.
+          ...(correctable ? { correctable: true } : {}),
           // M12-6 (P1-A): server-proven frozen HEAD threaded internally (never
           // model-supplied). RunManager.start revalidates/pins it.
           frozenGitHead: workspaceFrozenHead,
@@ -3001,7 +3105,9 @@ export function createWaoMcpServer({
           leadSession: resolveLeadSession,
           // M12-7: a continuable root must prove the selected backend can resume
           // provider sessions before it claims the lineage slot or forks.
-          ...(continuable ? { backendFor: resolveBackendFor } : {}),
+          // M12-16: a correctable run must prove the selected backend can queue an
+          // in-flight correction before it forks. Both read the declared capability.
+          ...(continuable || correctable ? { backendFor: resolveBackendFor } : {}),
         });
       } catch (e) {
         // Credential-missing: fixed actionable text (names are safe to surface;
@@ -3234,6 +3340,78 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: CONTINUE_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  register(
+    "run_correct",
+    {
+      description: RUN_CORRECT_DESCRIPTION,
+      inputSchema: RUN_CORRECT_INPUT,
+      outputSchema: RUN_CORRECT_OUTPUT,
+      annotations: RUN_CORRECT_ANNOTATIONS,
+    },
+    async ({ runId, correctionId, prompt }) => {
+      // M12-16: re-resolve and prove the workspace BEFORE any correction —
+      // state-changing calls do their own authority proof (same as run_dispatch /
+      // run_continue). The run must belong to the bound workspace; a missing
+      // binding refuses with the fixed not-bound text (zero append, zero fork).
+      let workspaceCwd;
+      try {
+        const binding = await resolveWorkspaceBinding();
+        if (!binding.bound) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
+          };
+        }
+        workspaceCwd = binding.root;
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }],
+        };
+      }
+
+      let result;
+      try {
+        result = await correctService({
+          runId,
+          correctionId,
+          prompt,
+          runDir,
+          authorizedWorkspaceRoot: workspaceCwd,
+        });
+      } catch {
+        // Any environmental failure (transcript I/O, lock contention): fixed
+        // safe text. Never concatenate dynamic content; the prompt is never echoed.
+        return {
+          isError: true,
+          content: [{ type: "text", text: CORRECT_ERROR_TEXT }],
+        };
+      }
+
+      // Project the closed-set outcome through the output schema in ONE try/catch.
+      // Success spans queued (just appended), pending (idempotent re-queue),
+      // delivered, and rejected (closed-set reason). The prompt, session id,
+      // workspace path, PID, provider name, and argv NEVER appear in the result.
+      try {
+        const parsed = RUN_CORRECT_OUTPUT.parse({
+          runId: result.runId,
+          correctionId: result.correctionId,
+          outcome: result.outcome,
+          reason: result.outcome === "rejected" ? result.reason : null,
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(parsed) }],
+          structuredContent: parsed,
+        };
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: CORRECT_ERROR_TEXT }],
         };
       }
     },

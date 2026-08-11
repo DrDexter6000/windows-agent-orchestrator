@@ -466,7 +466,7 @@ test("MAR-14: repeated terminal calls append ZERO audits (idempotent read-only)"
   } finally { rmrfRetry(dir); rmrfRetry(runDir); }
 });
 
-test("MAR-15: current tool count is 21 (M12-10 moved playbook catalog to resources)", async () => {
+test("MAR-15: current tool count is 22 (M12-10 moved playbook catalog to resources; M12-16 added run_correct)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-mar15-"));
   try {
     makeGitRepo(dir);
@@ -475,7 +475,7 @@ test("MAR-15: current tool count is 21 (M12-10 moved playbook catalog to resourc
     try {
       const tools = await client.listTools();
       assert.ok(tools.tools.find((x) => x.name === "run_await_result"), "run_await_result present");
-      assert.equal(tools.tools.length, 21, "exactly 21 tools (M12-10 moved playbook catalog to resources)");
+      assert.equal(tools.tools.length, 22, "exactly 22 tools (M12-10 moved playbook catalog to resources; M12-16 added run_correct)");
     } finally { await client.close(); await server.close(); }
   } finally { rmrfRetry(dir); }
 });
