@@ -713,6 +713,109 @@ test("M12-15-PRE-04: listRuns failure → activeRuns=null + unresolvedRunCount=n
   assert.equal(result.checkStatus.activeRuns, "unknown");
 });
 
+// ===== M12-19: recovery truth in the lead_preflight workspace projection =====
+
+// PRE-A: bound workspace → unboundReason projects null (never a string when bound).
+test("M12-19-PRE-A: bound workspace → unboundReason=null", async () => {
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "a".repeat(40), dirty: false },
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => [],
+  });
+  assert.equal(result.workspace.bound, true);
+  assert.equal(result.workspace.unboundReason, null);
+});
+
+// PRE-B: every closed-set unboundReason projects verbatim (truthful passthrough).
+test("M12-19-PRE-B: each closed-set unboundReason projects verbatim", async () => {
+  for (const reason of ["lead_session_git_proof_failed", "server_config_git_proof_failed", "no_workspace_authority"]) {
+    const result = await aggregateLeadPreflight({
+      workspaceBinding: { bound: false, unboundReason: reason },
+      registryPath: "/r.json", runDir: "/runs",
+      getRegistryInventoryFn: async () => [],
+    });
+    assert.equal(result.workspace.bound, false);
+    assert.equal(result.workspace.unboundReason, reason, `verbatim: ${reason}`);
+    assert.equal(result.workspace.source, null);
+    assert.equal(result.workspace.gitHead, null);
+    assert.equal(result.workspace.dirty, null);
+  }
+});
+
+// PRE-C: caller-supplied {bound:false} WITHOUT unboundReason (legacy shape) →
+// null, never a fabricated value.
+test("M12-19-PRE-C: absent unboundReason → null (never fabricated)", async () => {
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: false },
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => [],
+  });
+  assert.equal(result.workspace.bound, false);
+  assert.equal(result.workspace.unboundReason, null);
+});
+
+// PRE-F: a dependency-injected or malformed reason OUTSIDE the closed set
+// fails closed at the application boundary to null — never returned verbatim,
+// never rendered as dynamic text (unknown, not fabricated).
+test("M12-19-PRE-F: unknown unboundReason fails closed to null at the application boundary", async () => {
+  for (const unknown of ["not_in_closed_set", 42, { code: "x" }, ""]) {
+    const result = await aggregateLeadPreflight({
+      workspaceBinding: { bound: false, unboundReason: unknown },
+      registryPath: "/r.json", runDir: "/runs",
+      getRegistryInventoryFn: async () => [],
+    });
+    assert.equal(result.workspace.bound, false, `still known-unbound for ${JSON.stringify(unknown)}`);
+    assert.equal(result.workspace.unboundReason, null, `fails closed to null for ${JSON.stringify(unknown)}`);
+  }
+});
+
+// PRE-D: real MCP — lead_session selection breaks (repo deleted) →
+// lead_preflight reports workspace.unboundReason=lead_session_git_proof_failed
+// with workspaceSelection=not_requested (no re-select attempted).
+test("M12-19-PRE-D: real MCP — broken lead_session → unboundReason=lead_session_git_proof_failed", async () => {
+  const { createWaoMcpServer } = await import("../src/mcp/server.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1219-pred-"));
+  const ws = mkdtempSync(join(tmpdir(), "wao-m1219-pred-ws-"));
+  try {
+    makeGitRepo(ws);
+    const reg = makeRegistry(dir, { w: { backend: "claude-code", cwd: ws } });
+    const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
+    const client = await buildClient(server);
+    try {
+      // Bind via lead_preflight's select.
+      const r1 = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: ws } });
+      assert.equal(JSON.parse(r1.content.find((b) => b.type === "text").text).workspace.bound, true);
+      // Break the session repo, then re-run preflight WITHOUT workspaceRoot.
+      rmSync(ws, { recursive: true, force: true });
+      const r2 = await client.callTool({ name: "lead_preflight", arguments: {} });
+      const parsed = JSON.parse(r2.content.find((b) => b.type === "text").text);
+      assert.equal(parsed.workspace.bound, false);
+      assert.equal(parsed.workspace.unboundReason, "lead_session_git_proof_failed");
+      assert.equal(parsed.workspace.source, null);
+      assert.equal(parsed.workspaceSelection, "not_requested");
+      assert.ok(!r2.isError, "recovery fact is a payload field, never an error");
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); cleanupDir(ws); }
+});
+
+// PRE-E: real MCP — fresh unbound server → workspace.unboundReason=no_workspace_authority.
+test("M12-19-PRE-E: real MCP — fresh unbound → unboundReason=no_workspace_authority", async () => {
+  const { createWaoMcpServer } = await import("../src/mcp/server.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1219-pree-"));
+  try {
+    const reg = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } });
+    const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "lead_preflight", arguments: {} });
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(parsed.workspace.bound, false);
+      assert.equal(parsed.workspace.unboundReason, "no_workspace_authority");
+      assert.ok(!res.isError, "recovery fact is a payload field, never an error");
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); }
+});
+
 // PRE-05: end-to-end composition with the REAL listRuns — stale June runs are
 // unresolved, only the fresh-heartbeat run counts as active.
 test("M12-15-PRE-05: real listRuns composition — activeRunCount excludes stale June runs", async () => {

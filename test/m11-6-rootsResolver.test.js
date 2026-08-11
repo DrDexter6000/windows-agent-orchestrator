@@ -238,3 +238,76 @@ test("M11-6-CAUSE-5: failed workspace_select keeps the prior valid selection", a
     cleanupDir(dirA); cleanupDir(notGit);
   }
 });
+
+// ===== M12-19: recovery truth in the resolver =====
+
+// M12-19-CAUSE-6: server_config root whose Git proof fails (not a repo) →
+// unboundReason=server_config_git_proof_failed (distinct from no_workspace_authority).
+test("M11-6-M12-19-CAUSE-6: server_config root fails proof → unboundReason=server_config_git_proof_failed", async () => {
+  const notGit = mkdtempSync(join(tmpdir(), "wao-m116-m1219-c6-nogit-"));
+  try {
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs", workspaceRoot: notGit });
+    const spy = spyListRoots(server);
+    try {
+      // Client WITHOUT roots capability: server_config is the only authority.
+      const client = await buildInMemoryClient(server, {});
+      try {
+        const parsed = await status(client);
+        assert.equal(parsed.bound, false);
+        assert.equal(parsed.unboundReason, "server_config_git_proof_failed");
+        assert.equal(parsed.source, null);
+        assert.equal(spy.count(), 0, "listRoots NOT called (no roots capability)");
+      } finally {
+        await client.close();
+      }
+    } finally {
+      spy.restore();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(notGit);
+  }
+});
+
+// M12-19-CAUSE-7: lead_session proof fails even though server_config and mcp_root
+// are valid → NO fall-through. The failed lead_session still outranks: bound:false,
+// unboundReason=lead_session_git_proof_failed, and listRoots is NOT consulted.
+test("M11-6-M12-19-CAUSE-7: broken lead_session never falls through to valid server_config/mcp_root", async () => {
+  const dirSession = mkdtempSync(join(tmpdir(), "wao-m116-m1219-c7-sess-"));
+  const dirCfg = mkdtempSync(join(tmpdir(), "wao-m116-m1219-c7-cfg-"));
+  try {
+    makeGitRepo(dirSession);
+    makeGitRepo(dirCfg);
+    const { pathToFileURL } = await import("node:url");
+    const { ListRootsRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
+    // server_config points at a VALID repo; the client ALSO advertises a valid root.
+    // Only the lead_session is broken — it must still win (no fall-through).
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs", workspaceRoot: dirCfg });
+    const spy = spyListRoots(server);
+    try {
+      const client = await buildInMemoryClient(server, { roots: { listChanged: false } });
+      try {
+        client.setRequestHandler(ListRootsRequestSchema, async () => ({
+          roots: [{ uri: pathToFileURL(dirCfg).href, name: "root" }],
+        }));
+        // Select the session repo, then delete it so its proof fails.
+        const sel = await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: dirSession } });
+        assert.equal(JSON.parse(sel.content.find((b) => b.type === "text").text).source, "lead_session");
+        rmSync(dirSession, { recursive: true, force: true });
+        const countAfterSelect = spy.count();
+        const parsed = await status(client);
+        assert.equal(parsed.bound, false, "no fall-through: a failed lead_session keeps the server unbound");
+        assert.equal(parsed.unboundReason, "lead_session_git_proof_failed");
+        assert.equal(parsed.source, null);
+        assert.equal(spy.count(), countAfterSelect, "listRoots NOT consulted when a broken lead_session outranks");
+      } finally {
+        await client.close();
+      }
+    } finally {
+      spy.restore();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dirSession); cleanupDir(dirCfg);
+  }
+});

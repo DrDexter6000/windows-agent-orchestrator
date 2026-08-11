@@ -837,3 +837,29 @@ test("MAA-21: historical non-delivery transcript stays readable as unknown via M
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
+
+// ===== M12-19: recovery-truth description contract =====
+
+// MAA-22: run_activity's description states the cursor-rejection recovery path:
+// a rejected cursor fails closed to a FIXED generic error; recover by re-requesting
+// page 1 (fresh cursor chain) or by using afterSeq from a known wait/activity sequence.
+test("MAA-22: description tells cursor-rejection recovery (fixed generic error; page-1 or afterSeq)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-maa22-"));
+  try {
+    makeGitRepo(dir);
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir: dir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const { tools } = await client.listTools();
+      const t = tools.find((x) => x.name === "run_activity");
+      assert.ok(t, "run_activity present");
+      const desc = t.description ?? "";
+      assert.match(desc, /fixed generic error/, "rejected cursor = fixed generic error");
+      assert.match(desc, /malformed, cross-run, or cross-view/, "rejection categories stated");
+      assert.match(desc, /page 1/, "recover by re-requesting page 1");
+      assert.match(desc, /fresh chain/, "page 1 starts a fresh cursor chain");
+      assert.match(desc, /afterSeq/, "afterSeq recovery alternative named");
+      assert.match(desc, /known wait\/activity sequence/, "afterSeq sourced from a known wait/activity sequence");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

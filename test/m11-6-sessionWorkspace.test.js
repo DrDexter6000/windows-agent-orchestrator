@@ -395,3 +395,156 @@ test("M11-6-A-UNIT-3: selectSessionWorkspace error does not leak absolute path",
     cleanupDir(dir);
   }
 });
+
+// ===== M12-19: supervision recovery truth (unboundReason closed set) =====
+
+// M12-19-1: unbound server (no authority at all) → workspace_status reports the
+// closed-set reason "no_workspace_authority" (recovery fact, not an error).
+test("M11-6-M12-19-1: unbound server → unboundReason=no_workspace_authority, no dynamic text", async () => {
+  const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs" });
+  try {
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "workspace_status", arguments: {} });
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(parsed.bound, false);
+      assert.equal(parsed.unboundReason, "no_workspace_authority");
+      assert.equal(parsed.source, null);
+      assert.equal(parsed.workspaceRoot, null);
+      assert.equal(parsed.gitHead, null);
+      assert.equal(parsed.dirty, null);
+      // No dynamic error / path text anywhere in the payload (closed set only).
+      assert.ok(!JSON.stringify(parsed).includes("/runs"), "no path leakage in unbound payload");
+      assert.ok(!JSON.stringify(parsed).includes("Error"), "no dynamic error text in unbound payload");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {}
+});
+
+// M12-19-2: bound (lead_session) → unboundReason is null (not a string, not a path).
+test("M11-6-M12-19-2: bound lead_session → unboundReason=null", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m116-m1219-2-"));
+  try {
+    makeGitRepo(dir);
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs" });
+    try {
+      const client = await buildInMemoryClient(server);
+      try {
+        await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: dir } });
+        const res = await client.callTool({ name: "workspace_status", arguments: {} });
+        const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+        assert.equal(parsed.bound, true);
+        assert.equal(parsed.source, "lead_session");
+        assert.equal(parsed.unboundReason, null);
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    } finally {}
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// M12-19-3: previously valid lead_session whose Git proof now fails (repo deleted)
+// → bound:false with unboundReason=lead_session_git_proof_failed, no rebind, no fall-through.
+test("M11-6-M12-19-3: broken lead_session selection → unboundReason=lead_session_git_proof_failed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m116-m1219-3-"));
+  try {
+    makeGitRepo(dir);
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs" });
+    try {
+      const client = await buildInMemoryClient(server);
+      try {
+        const sel = await client.callTool({ name: "workspace_select", arguments: { workspaceRoot: dir } });
+        assert.equal(JSON.parse(sel.content.find((b) => b.type === "text").text).bound, true);
+        // Delete the repo out from under the session: re-proving must now fail.
+        rmSync(dir, { recursive: true, force: true });
+        const res = await client.callTool({ name: "workspace_status", arguments: {} });
+        const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+        assert.equal(parsed.bound, false);
+        assert.equal(parsed.unboundReason, "lead_session_git_proof_failed");
+        assert.equal(parsed.source, null);
+        assert.equal(parsed.workspaceRoot, null);
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    } finally {}
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// M12-19-5: the workspace_status handler passes BOTH payload shapes through
+// WORKSPACE_STATUS_OUTPUT.parse and returns the PARSED value. (a) A valid
+// closed-set reason injected at the resolver seam is parsed and returned.
+// (b) An out-of-set reason never crosses the output boundary: the handler's
+// parse fails closed to the fixed error text — no raw payload, no dynamic
+// value, no reliance on SDK post-validation alone.
+test("M11-6-M12-19-5: unbound payload parsed at the handler boundary (valid kept, invalid fails closed)", async () => {
+  // (a) valid closed-set reason injected via the resolver seam → normal result.
+  {
+    const server = createWaoMcpServer({
+      registryPath: "/r.json", runDir: "/runs",
+      resolveWorkspaceBindingFn: async () => ({ bound: false, unboundReason: "server_config_git_proof_failed" }),
+    });
+    try {
+      const client = await buildInMemoryClient(server);
+      try {
+        const res = await client.callTool({ name: "workspace_status", arguments: {} });
+        assert.equal(res.isError, undefined, "valid unbound payload is a normal result");
+        const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+        assert.equal(parsed.bound, false);
+        assert.equal(parsed.unboundReason, "server_config_git_proof_failed");
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    } finally {}
+  }
+  // (b) out-of-set reason → the handler's parse throws → fixed error text.
+  {
+    const server = createWaoMcpServer({
+      registryPath: "/r.json", runDir: "/runs",
+      resolveWorkspaceBindingFn: async () => ({ bound: false, unboundReason: "malicious_injected_reason" }),
+    });
+    try {
+      const client = await buildInMemoryClient(server);
+      try {
+        const res = await client.callTool({ name: "workspace_status", arguments: {} });
+        assert.equal(res.isError, true, "invalid unboundReason fails closed");
+        const text = res.content.find((b) => b.type === "text").text;
+        assert.equal(text, "workspace_status failed");
+        assert.ok(!text.includes("malicious_injected_reason"), "no dynamic value leaked");
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    } finally {}
+  }
+});
+
+// M12-19-4: workspace_status description makes the recovery fact discoverable
+// (mentions unboundReason and its closed set).
+test("M11-6-M12-19-4: workspace_status description names unboundReason closed set", async () => {
+  const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs" });
+  try {
+    const client = await buildInMemoryClient(server);
+    try {
+      const { tools } = await client.listTools();
+      const t = tools.find((x) => x.name === "workspace_status");
+      assert.ok(t, "workspace_status present");
+      const desc = t.description ?? "";
+      assert.match(desc, /unboundReason/);
+      assert.match(desc, /lead_session_git_proof_failed/);
+      assert.match(desc, /server_config_git_proof_failed/);
+      assert.match(desc, /no_workspace_authority/);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {}
+});

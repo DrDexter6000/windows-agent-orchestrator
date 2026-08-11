@@ -214,7 +214,7 @@ import { proveWorkspace } from "../application/workspaceBinding.js";
 import { selectSessionWorkspace } from "../application/sessionWorkspace.js";
 import { checkWorkspaceExpectation } from "../application/workspaceExpectation.js";
 import { readWindowsUserEnv } from "../application/credentialReadiness.js";
-import { aggregateLeadPreflight, ACTIVE_RUNS_CAP, WORKERS_CAP } from "../application/leadPreflight.js";
+import { aggregateLeadPreflight, ACTIVE_RUNS_CAP, WORKERS_CAP, WORKSPACE_UNBOUND_REASONS } from "../application/leadPreflight.js";
 import {
   listLeadPlaybooks,
   getLeadPlaybook,
@@ -1282,10 +1282,13 @@ const RUN_DELIVERY_DESCRIPTION =
   "Query a run's delivery status: terminal state, base/delivery commits, changed-file count " +
   "with bounded repo-relative changed paths (truncation flag), and verification/acceptance " +
   "status. Read-only — the Lead owns semantic acceptance; only verificationStatus=passed means " +
-  "verification passed; this read never stop/retry/accept/rejects. Optional waitMs: a bounded " +
-  "read-only readiness handshake returning readiness + waitReturnedEarly; pending-at-deadline " +
-  "is truthful, never an error. candidateKind/candidateInventory are advisory only. " +
-  "Self-explaining semanticNotes; wao://semantics/{id}.";
+  "verification passed; this read never stop/retry/accept/rejects. Optional waitMs: " +
+  `${DELIVERY_WAIT_MS_MIN}..${DELIVERY_WAIT_MS_MAX} ms (waitMs=0 is invalid; omit for a ` +
+  "point-in-time read), a bounded read-only readiness handshake returning readiness + " +
+  "waitReturnedEarly; pending-at-deadline is truthful, never an error. Host transport " +
+  "loss/cancellation does not stop the detached run — re-read point-in-time to observe. " +
+  "candidateKind/candidateInventory are advisory only. Self-explaining semanticNotes; " +
+  "wao://semantics/{id}.";
 
 /**
  * M11-12B: project a safe, factual verification-failure summary from the raw
@@ -1726,6 +1729,9 @@ const WORKSPACE_STATUS_OUTPUT = z.object({
   workspaceRoot: z.string().nullable(),
   gitHead: z.string().regex(/^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/).nullable(),
   dirty: z.boolean().nullable(),
+  // M12-19: closed-set recovery fact — which authority failed to re-prove.
+  // null when bound (or when no reason applies). Shares the application SSOT.
+  unboundReason: z.enum(WORKSPACE_UNBOUND_REASONS).nullable(),
 });
 
 const WORKSPACE_STATUS_ANNOTATIONS = {
@@ -1737,9 +1743,11 @@ const WORKSPACE_STATUS_ANNOTATIONS = {
 
 const WORKSPACE_STATUS_DESCRIPTION =
   "Query the current workspace binding: bound flag, source (lead_session/server_config/" +
-  "mcp_root), canonical Git workspaceRoot, HEAD commit, dirty status. Read-only. Use " +
-  "workspace_select to choose a Git project in-session (lead_session) without host bind or " +
-  "restart.";
+  "mcp_root), canonical Git workspaceRoot, HEAD commit, dirty status. Read-only. When unbound, " +
+  "unboundReason is a closed-set recovery fact — lead_session_git_proof_failed / " +
+  "server_config_git_proof_failed / no_workspace_authority — telling which authority failed to " +
+  "re-prove; it is null when bound. Use workspace_select to choose a Git project in-session " +
+  "(lead_session) without host bind or restart.";
 
 // ===== workspace_select (Lead session-level workspace selection) constants =====
 // M11-6: lets a Lead choose the working Git project in the current MCP session.
@@ -1794,6 +1802,9 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
     source: z.enum(["lead_session", "server_config", "mcp_root"]).nullable(),
     gitHead: z.string().regex(/^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/).nullable(),
     dirty: z.boolean().nullable(),
+    // M12-19: closed-set recovery fact, same SSOT enum as workspace_status.
+    // null when bound, or when the binding carried no reason (never fabricated).
+    unboundReason: z.enum(WORKSPACE_UNBOUND_REASONS).nullable(),
   }).strict().nullable(),
   workspaceSelection: z.enum([
     "not_requested", "selected",
@@ -1845,9 +1856,11 @@ const LEAD_PREFLIGHT_ANNOTATIONS = {
 const LEAD_PREFLIGHT_DESCRIPTION =
   "Advisory single-call preflight: gather workspace binding, worker credential availability, " +
   "and active runs. Optional workspaceRoot selects the project (lead_session) with the same " +
-  "authority as workspace_select. ADVISORY ONLY — not a gate: warnings and observations are " +
-  "facts for the Lead to judge, never an auto-stop. Sections settle independently; re-verify " +
-  "via the original tools.";
+  "authority as workspace_select. When unbound, workspace.unboundReason is a closed-set " +
+  "recovery fact (lead_session_git_proof_failed / server_config_git_proof_failed / " +
+  "no_workspace_authority), null when bound. ADVISORY ONLY — not a gate: warnings and " +
+  "observations are facts for the Lead to judge, never an auto-stop. Sections settle " +
+  "independently; re-verify via the original tools.";
 
 // ===== run_stop (workspace-bound destructive) constants =====
 
@@ -1990,9 +2003,10 @@ const RUN_WAIT_DESCRIPTION =
   "waitMs " +
   `(${RUN_WAIT_MIN_MS}..${RUN_WAIT_MAX_MS} ms; default ${RUN_WAIT_DEFAULT_MS} ms / 4.5 min). ` +
   "waitMs=0 is intentionally invalid; for a point-in-time read use run_await_result(waitMs:0) " +
-  "or run_status. Does NOT stop the run — the Lead decides; expiry never terminates. Transport " +
-  "loss leaves liveness unknown; read-only, no mutation; re-read via run_status, never infer a " +
-  "stop. Self-explaining semanticNotes; wao://semantics/{id}.";
+  "or run_status. Does NOT stop the run — the Lead decides; expiry never terminates. Host " +
+  "transport loss/cancellation does not stop the detached run — the call just ends and " +
+  "liveness stays unknown; re-read point-in-time via run_status, never infer a stop. " +
+  "Self-explaining semanticNotes; wao://semantics/{id}.";
 
 // ===== run_await_result (M12-3 read-only composite) constants =====
 //
@@ -2137,8 +2151,9 @@ const RUN_AWAIT_RESULT_DESCRIPTION =
   "assistant result plus a truthful liveness observation. Returns early on terminal. Advisory " +
   "— never stop/retry/decide/accept/reject/repackage/append transcript events; no semantic " +
   "judgment. result.status distinguishes terminal from not_terminal/unavailable; a read failure " +
-  "yields a closed-set readFailureReason. Idempotent, snapshot-only. Transport loss leaves " +
-  "liveness unknown; read-only, no mutation; re-read via run_status, never infer a stop. " +
+  "yields a closed-set readFailureReason. Idempotent, snapshot-only. Host transport " +
+  "loss/cancellation does not stop the detached run — the call just ends and liveness stays " +
+  "unknown; re-read point-in-time (waitMs:0) or via run_status, never infer a stop. " +
   "Self-explaining semanticNotes; wao://semantics/{id}.";
 
 // ===== run_activity (M12-8 read-only activity timeline) constants =====
@@ -2318,8 +2333,10 @@ const RUN_ACTIVITY_DESCRIPTION =
   "Closed-set safe facts only (raw argv, tool I/O, absolute/traversal paths withheld); secrets " +
   "redacted; no semantic summary or progress estimate. Advisory scopeObservation: whether " +
   "confirmed file_written events remain within delivery.allowedPaths — facts only, never a " +
-  "stop/retry/repackage decision. Paginated via an opaque cursor (malformed/cross-run/cross-view " +
-  "cursors fail closed); pageSize defaults to " +
+  "stop/retry/repackage decision. Paginated via an opaque cursor; a rejected cursor " +
+  "(malformed, cross-run, or cross-view) fails closed to a fixed generic error — recover by " +
+  "re-requesting page 1 without a cursor (fresh chain) or by using afterSeq from a known " +
+  "wait/activity sequence; pageSize defaults to " +
   LEAD_PAGE_DEFAULT + ". Idempotent; workspace-bound.";
 
 // ===== Lead Playbook Catalog (M11-2B) constants =====
@@ -2480,10 +2497,14 @@ const DELIVERY_REVIEW_BUNDLE_ANNOTATIONS = {
 
 const DELIVERY_REVIEW_BUNDLE_DESCRIPTION =
   "Wait for delivery readiness and, only when reviewable, return one Lead-selected bounded " +
-  "review page (settled readiness returns early). The response always carries the safe " +
-  "run_delivery facts; review is null when not reviewable (no Git diff read then). fileIndex " +
-  "and cursor are Lead-supplied for one page: the tool never chooses/traverses files or " +
-  "cursors, never summarizes repository text, and never stop/retry/repackage/accept/reject. " +
+  "review page (settled readiness returns early). Optional waitMs: " +
+  `${DELIVERY_WAIT_MS_MIN}..${DELIVERY_WAIT_MS_MAX} ms (waitMs=0 is invalid; omit for a ` +
+  "point-in-time read) — one bounded read-only readiness wait; pending-at-deadline is " +
+  "truthful, never an error. The response always carries the safe run_delivery facts; review " +
+  "is null when not reviewable (no Git diff read then). Host transport loss/cancellation does " +
+  "not stop the detached run — re-read point-in-time to observe. fileIndex and cursor are " +
+  "Lead-supplied for one page: the tool never chooses/traverses files or cursors, never " +
+  "summarizes repository text, and never stop/retry/repackage/accept/reject. " +
   "run_delivery/run_delivery_review remain for atomic control.";
 
 export function createWaoMcpServer({
@@ -2494,6 +2515,10 @@ export function createWaoMcpServer({
   // M11-7: injectable Windows user-env reader (default reads HKCU\Environment).
   // Used by registry_list readiness + run_dispatch pre-check. Injectable for tests.
   userEnvReader,
+  // M12-19: injectable workspace-binding resolver (test seam, same pattern as
+  // dispatchRunFn). Defaults to the internal resolver; lets causal tests inject
+  // out-of-set unboundReason values at the handler boundary.
+  resolveWorkspaceBindingFn,
   // M11-11C: server-owned Lead session identity. Generated once per server
   // (stable across calls in one server = one Lead session) and threaded to
   // dispatchRun so reusable experts can resume the provider-native
@@ -2677,7 +2702,10 @@ export function createWaoMcpServer({
         const proof = proveWorkspace(leadSelection.root);
         return { bound: true, source: "lead_session", ...proof };
       } catch {
-        return { bound: false };
+        // M12-19: recovery fact, closed set. A failed lead_session NEVER falls
+        // through to lower authorities — the Lead's explicit selection still
+        // outranks, and its brokenness is reported, not papered over.
+        return { bound: false, unboundReason: "lead_session_git_proof_failed" };
       }
     }
 
@@ -2731,11 +2759,12 @@ export function createWaoMcpServer({
         const proof = proveWorkspace(workspaceRoot);
         return { bound: true, source: "server_config", ...proof };
       } catch {
-        return { bound: false };
+        return { bound: false, unboundReason: "server_config_git_proof_failed" };
       }
     }
 
-    return { bound: false };
+    // No usable authority (mcp_root failures collapse here via fall-through).
+    return { bound: false, unboundReason: "no_workspace_authority" };
   }
 
   register(
@@ -2776,28 +2805,33 @@ export function createWaoMcpServer({
     },
     async () => {
       try {
-        const binding = await resolveWorkspaceBinding();
-        if (!binding.bound) {
-          const payload = { bound: false, source: null, workspaceRoot: null, gitHead: null, dirty: null };
-          return {
-            content: [{ type: "text", text: JSON.stringify(payload) }],
-            structuredContent: payload,
-          };
-        }
-        const payload = {
-          bound: true,
-          source: binding.source,
-          // M11-6: workspaceRoot is the Lead-/host-chosen canonical Git root.
-          // It is not a credential — the Lead explicitly submitted it via
-          // workspace_select, or the host supplied it via --workspace-root/MCP root.
-          workspaceRoot: binding.root,
-          gitHead: binding.gitHead,
-          dirty: binding.dirty,
-        };
-        WORKSPACE_STATUS_OUTPUT.parse(payload);
+        // M12-19: BOTH the bound and unbound payloads are constructed, passed
+        // through WORKSPACE_STATUS_OUTPUT.parse, and returned as the PARSED
+        // value — the handler never returns a raw, unvalidated payload and never
+        // relies on SDK post-validation alone. An out-of-set unboundReason
+        // (dependency-injected or future caller) fails closed right here to the
+        // fixed error text; a valid one survives parse and is returned.
+        const binding = await (resolveWorkspaceBindingFn ?? resolveWorkspaceBinding)();
+        const payload = binding.bound
+          ? {
+              bound: true,
+              source: binding.source,
+              // M11-6: workspaceRoot is the Lead-/host-chosen canonical Git root.
+              // It is not a credential — the Lead explicitly submitted it via
+              // workspace_select, or the host supplied it via --workspace-root/MCP root.
+              workspaceRoot: binding.root,
+              gitHead: binding.gitHead,
+              dirty: binding.dirty,
+              unboundReason: null,
+            }
+          : {
+              bound: false, source: null, workspaceRoot: null, gitHead: null, dirty: null,
+              unboundReason: binding.unboundReason ?? null,
+            };
+        const validated = WORKSPACE_STATUS_OUTPUT.parse(payload);
         return {
-          content: [{ type: "text", text: JSON.stringify(payload) }],
-          structuredContent: payload,
+          content: [{ type: "text", text: JSON.stringify(validated) }],
+          structuredContent: validated,
         };
       } catch {
         return {

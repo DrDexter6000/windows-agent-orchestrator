@@ -686,10 +686,12 @@ annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:true, op
 - **输出**：
 
 ```json
-{ "bound": true, "source": "lead_session", "workspaceRoot": "/abs/canonical/git/root", "gitHead": "abc123...", "dirty": false }
+{ "bound": true, "source": "lead_session", "workspaceRoot": "/abs/canonical/git/root", "gitHead": "abc123...", "dirty": false, "unboundReason": null }
 ```
 
-`source` 为 `"lead_session"`（Lead 会话选择）、`"mcp_root"`（client roots/list）或 `"server_config"`（显式 `--workspace-root`）。`workspaceRoot` 是当前绑定的 canonical Git 顶层绝对路径（Lead/host 已显式提交，非 credential，故返回）；`bound=false` 时 `source`/`workspaceRoot`/`gitHead`/`dirty` 均为 `null`。失败返回固定安全文案 `workspace_status failed`。
+`source` 为 `"lead_session"`（Lead 会话选择）、`"mcp_root"`（client roots/list）或 `"server_config"`（显式 `--workspace-root`）。`workspaceRoot` 是当前绑定的 canonical Git 顶层绝对路径（Lead/host 已显式提交，非 credential，故返回）；`bound=false` 时 `source`/`workspaceRoot`/`gitHead`/`dirty` 均为 `null`。
+
+**M12-19 unboundReason（recovery truth，闭集）**：未绑定时 `unboundReason` 是闭集恢复事实（恒为 `null`，当已绑定）：`"lead_session_git_proof_failed"`（既有 Lead 会话选择的 Git proof 现在失败，如 repo 被删除——**不**回退到更低优先级 authority）、`"server_config_git_proof_failed"`（显式 `--workspace-root` 的 proof 失败）或 `"no_workspace_authority"`（无可用 workspace authority；mcp_root 失败折叠于此）。只区分"哪个 authority 的证明失败"，**绝不**返回路径或动态错误。失败返回固定安全文案 `workspace_status failed`。
 
 annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`。
 
@@ -737,7 +739,7 @@ annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:true, o
 
 ```json
 {
-  "workspace": { "bound": true, "source": "lead_session", "gitHead": "abc...", "dirty": false },
+  "workspace": { "bound": true, "source": "lead_session", "gitHead": "abc...", "dirty": false, "unboundReason": null },
   "workers": [ { "id": "...", "backend": "...", "model": "...", "certification": "certified", "credentialAvailability": "available", "providerReadiness": { "configurationStatus": "configured", "authenticationStatus": "unknown", "entitlementStatus": "unknown", "liveCheckStatus": "not_checked", "credentialAvailability": "available" } } ],
   "activeRuns": [ { "runId": "...", "agentId": "...", "state": "running", "terminal": false, "updatedAt": "..." } ],
   "activeRunCount": 1,
@@ -751,6 +753,8 @@ annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:true, o
 ```
 
 不返回 `PASS`/`FAIL`；check-level 状态为 `observed`/`warning`/`unknown`。`manualChecks` 指向原始 MCP 工具，允许 Lead 独立复核（与聚合结论不同时，Lead 可依据直接证据继续并记录 friction）。Active run、conditional worker、dirty workspace 只是事实，不自动禁止派发。
+
+**M12-19 recovery truth**：未绑定时 `workspace.unboundReason` 与 `workspace_status` 同一闭集（`lead_session_git_proof_failed` / `server_config_git_proof_failed` / `no_workspace_authority`，已绑定恒为 `null`）——让 Lead 在单次 preflight 内直接看到"哪个 authority 的证明失败"，绝不返回路径或动态错误。
 
 **M12-15 stale active-run truth**：`activeRuns`/`activeRunCount` 只计**经证明 active** 的 run——即 transcript 为已知非终态**且**有 fresh owner heartbeat（`ownerLiveness` SSOT，默认 10s 阈值）。一个非终态但缺少 fresh heartbeat 的 run（例如历史 6 月的 stale transcript）**不算** active，但也**绝不**据此推断它 failed/dead/stopped——它仍可能在长时间运行/休眠。这类 run 计入 `unresolvedRunCount`（与 `activeRuns` 同一次扫描/快照，Lead 无需重新扫描），并在 `unresolvedRunCount > 0` 时追加一条 advisory observation（说明这些 run 被排除出 `activeRuns`、不证明失败或停止，请用 `runs_list` 独立查看）。因此 `activeRunCount=0` 永远不应被误读为"工作区干净"——当 `unresolvedRunCount > 0` 时尤其如此。active-run 查询不可读时 `activeRuns`/`activeRunCount`/`unresolvedRunCount` 均为 `null`（unknown，绝不伪造为 0）。
 
@@ -917,7 +921,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 
 `run_delivery` 让 MCP host 查询一个 run 的 delivery 状态。只读，不追加 transcript event。
 
-- **输入**（strict）：`{ "runId": "run_...", "waitMs"?: 1000..300000 }`。`runId` 必填；`waitMs` 为**可选**整数（共享常量锁定区间 `[1000, 300000]` ms，server-owned，模型不可越界）。省略 `waitMs` → 保持现有 point-in-time 输出（M9-6B + M11-1A + M11-8C，向后兼容）；提供 `waitMs` → 触发 bounded read-only readiness wait（M11-10）。MCP 自身不解析 transcript、不 shell-out CLI——只委托同一份 application service。
+- **输入**（strict）：`{ "runId": "run_...", "waitMs"?: 1000..300000 }`。`runId` 必填；`waitMs` 为**可选**整数（共享常量锁定区间 `[1000, 300000]` ms，server-owned，模型不可越界；`waitMs=0` **无效**，point-in-time 读法 = 省略 `waitMs`）。省略 `waitMs` → 保持现有 point-in-time 输出（M9-6B + M11-1A + M11-8C，向后兼容）；提供 `waitMs` → 触发 bounded read-only readiness wait（M11-10）。**Host 传输丢失/取消不会停止 detached run**——调用只是结束，run 继续运行；Lead 应重新 point-in-time 读取观察（`run_delivery`/`run_wait`/`run_await_result`/`run_delivery_review_bundle` 均如此，绝不可据传输中断推断 run 已停止）。MCP 自身不解析 transcript、不 shell-out CLI——只委托同一份 application service。
 - **安全输出**（不返回完整 DeliveryRef / raw diff / file content / reason / commands / results / worktreePath / branch /integration）：
 
 ```json
@@ -992,7 +996,7 @@ annotations：`readOnlyHint:true, destructiveHint:false, idempotentHint:true, op
 - 输入：`{runId, categories?, afterSeq?, cursor?, pageSize?}`。`categories` 是 `message | command | tool_use | tool_result | file_written | runtime_status | state | other` 的闭集；`pageSize` 为 1..50；`cursor` 是由上一页返回的 opaque token。
 - 输出：当前 state/terminal、八类总计、当前页 entries、`truncated`/`nextCursor` 和 `availableDrilldowns`。message 只给脱敏后的有界文本；command 只给 `ok|failed|unknown`，不返回 argv；tool 只给名称/错误布尔；文件只给安全 repo-relative path；`runtime_status` 只给 `initialized|streaming|provider_retry|unknown`，不返回 stream delta/retry error/session/model；未知事件只用固定 sentinel。
 - 安全顺序：完整动态文本先 exact-secret redaction，再清洗 C0/C1/DEL，再截断/分页。绝不返回 raw command、tool input/output、error text、credential、PID、provider session 或绝对路径。
-- cursor 绑定 runId、冻结快照前缀、audience/filter/afterSeq 视图和位置；append-only 增长可继续，历史变更/收缩、跨 run/view/audience、malformed 或越界 cursor 固定失败。Lead 可任意时点重复读第一页，或沿 `nextCursor` 逐页下钻。
+- cursor 绑定 runId、冻结快照前缀、audience/filter/afterSeq 视图和位置；append-only 增长可继续，历史变更/收缩、跨 run/view/audience、malformed 或越界 cursor **固定失败**为固定通用错误（`run_activity failed`，不回显 cursor 内容）。恢复路径（M12-19）：**重新请求无 cursor 的第一页**（全新 cursor 链），或用已知 wait/activity 序列中的 `afterSeq`（如来自 `run_wait`/`run_await_result` 的数值 cursor）重入。Lead 可任意时点重复读第一页，或沿 `nextCursor` 逐页下钻。
 - `scopeObservation`（M12-14，advisory、additive）：闭集 `within_declared_paths | outside_declared_paths | unknown`，`source` 恒为 `"transcript_file_events"`，附 `observedFileCount`、`outsidePaths`（脱敏后的安全 repo-relative 路径，上限 25 条）/`outsidePathCount`/`outsidePathsTruncated`。`complete:true` 的准确语义：观察到的 transcript 快照已是**终态**，且该快照中每一条确认的 `file_written` 路径都能在**恰好一个有效合同权威**（绑定 runId 的 `run.started` 绝对 worktreePath + 非空合法 `delivery.allowedPaths`）下求值；它**不**证明文件系统完整性、语义正确性、交付验证或 Lead 验收，也**不**表示 worker 仍在运行（`complete` 的前提是快照终态）。快照未终态或任一确认路径无法求值 → `unknown`（`complete:false`）。
 
 ### Owner 本地只读看板（M12-8C/D/F）

@@ -392,6 +392,22 @@ test("M12-10-G: descriptions retain the key semantic guards", async () => {
     assert.match(d("run_wait"), /default 270000/);
     assert.match(d("run_wait"), /waitMs=0 is intentionally invalid/i);
     assert.match(d("run_wait"), /run_await_result\(waitMs:0\).*run_status/i);
+    // M12-19: wait-capable tools truthfully state that Host transport
+    // loss/cancellation does not stop the detached run — re-read point-in-time.
+    assert.match(d("run_wait"), /Host transport loss\/cancellation does not stop the detached run/);
+    assert.match(d("run_wait"), /re-read point-in-time/);
+    assert.match(d("run_await_result"), /Host transport loss\/cancellation does not stop the detached run/);
+    assert.match(d("run_await_result"), /re-read point-in-time/);
+    // M12-19: run_activity tells the cursor-rejection recovery path (fixed
+    // generic error; page-1 fresh chain or afterSeq from a known sequence).
+    assert.match(d("run_activity"), /fixed generic error/);
+    assert.match(d("run_activity"), /afterSeq/);
+    // M12-19: the delivery waitMs contract is stated truthfully on both
+    // wait-capable delivery tools (no hidden clamp, no altered range/default).
+    assert.match(d("run_delivery"), /1000\.\.300000/);
+    assert.match(d("run_delivery"), /waitMs=0 is invalid/);
+    assert.match(d("run_delivery_review_bundle"), /1000\.\.300000/);
+    assert.match(d("run_delivery_review_bundle"), /waitMs=0 is invalid/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -487,7 +503,18 @@ const RED_23_WIRE = 75492;
 // description text change (M12-16-B still passes — desc bytes unchanged). The
 // wire grew +307 bytes (schema-only); ceiling re-frozen at the measured 72435,
 // still well below the 23-tool baseline (75492).
-const FROZEN_22_WIRE_CEILING = 72435;
+//
+// M12-19 re-baseline (supervision recovery truth): workspace_status AND the
+// lead_preflight workspace projection gained the REQUIRED closed-set
+// `unboundReason` nullable enum (zod enum derived from the WORKSPACE_UNBOUND_REASONS
+// application SSOT) — additive schema on two output schemas, plus sanctioned
+// recovery-truth description text on workspace_status/lead_preflight/run_wait/
+// run_await_result/run_activity/run_delivery/run_delivery_review_bundle (waitMs
+// range + 0-invalid + point-in-time alternative + cursor-rejection recovery +
+// Host transport-loss truth; NO wait ranges, defaults, or behavior changed).
+// No new tools, no validation removed. The wire grew +1512 bytes; ceiling
+// re-frozen at the measured 73947, still well below the 23-tool baseline (75492).
+const FROZEN_22_WIRE_CEILING = 73947;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -562,9 +589,12 @@ test("M12-10-H: deterministic 22-tool wire below frozen ceiling and below the 23
 // changed truthfully); re-measured once more for M12-17 (the run_status output
 // schema gained the closed-set `executionStage` object — its zod enum + strict
 // object are part of the stripped payload, so the SHA changed truthfully; no
-// description text changed).
+// description text changed); re-measured for M12-19 (workspace_status AND the
+// lead_preflight workspace projection gained the closed-set `unboundReason`
+// nullable enum — both output schemas are part of the stripped payload, so the
+// SHA changed truthfully; no description text is in the stripped payload).
 const DESC_STRIPPED_CONTRACT_SHA =
-  "b978f211cf904b102454f68c2b18543b4b2f6d44394d0bca16fc40aee792943c";
+  "6bc66bf348d009505040a2a55df50d5efbd20afb0c3889999062407f78e7695e";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;
@@ -573,9 +603,17 @@ const PRE_M12_16_DESC_BASELINE = 11812;
 // Re-based for the run_correct addition (M12-16 in-flight correction): the added
 // tool raised the description total, so the net cut vs M12-15 is now 2236 bytes
 // (11812 − 9576). 2000 keeps the "material, not cosmetic" intent with headroom.
-const M12_16_DESC_REDUCTION_MIN = 2000;
+// Re-based for M12-19 (supervision recovery truth): the sanctioned
+// recovery-truth clauses on workspace_status/lead_preflight/run_wait/
+// run_await_result/run_activity/run_delivery/run_delivery_review_bundle raised
+// the description total to 10734, so the net cut vs M12-15 is now 1078 bytes
+// (11812 − 10734). 1000 keeps the "material, not cosmetic" intent with headroom
+// while acknowledging the sanctioned M12-19 addition.
+const M12_16_DESC_REDUCTION_MIN = 1000;
 // Frozen at the achieved GREEN value AFTER run_correct was added. Prevents creep.
-const FROZEN_22_DESC_CEILING = 9576;
+// Re-baselined for M12-19 (recovery-truth descriptions, +1158 bytes over the
+// M12-17 value); re-frozen at the measured 10734.
+const FROZEN_22_DESC_CEILING = 10734;
 
 // Recursively remove every `description` key from a tools/list payload (the 21
 // top-level tool descriptions and any nested schema descriptions). Returns a new

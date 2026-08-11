@@ -1290,3 +1290,24 @@ test("M12-9-MCP-01: transport classification is TYPE-gated — plain Errors and 
     } finally { await client.close(); await server.close(); }
   }
 });
+
+// ===== M12-19: recovery-truth description contract =====
+
+// M9-6B-16: run_delivery's description states the waitMs contract truthfully:
+// valid range 1000..300000, waitMs=0 invalid, point-in-time alternative, and the
+// detached-run truth (Host transport loss/cancellation does not stop the run).
+test("M9-6B-16: run_delivery description states waitMs range, 0 invalid, point-in-time, detached-run truth", async () => {
+  const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs" });
+  const client = await buildInMemoryClient(server);
+  try {
+    const { tools } = await client.listTools();
+    const t = tools.find((x) => x.name === "run_delivery");
+    assert.ok(t, "run_delivery present");
+    const desc = t.description ?? "";
+    assert.match(desc, /1000\.\.300000/, "waitMs range 1000..300000 stated");
+    assert.match(desc, /waitMs=0 is invalid/, "waitMs=0 explicitly invalid");
+    assert.match(desc, /point-in-time/, "point-in-time alternative named");
+    assert.match(desc, /Host transport loss\/cancellation does not stop the detached run/, "detached-run truth");
+    assert.match(desc, /re-read point-in-time/, "recovery: re-read point-in-time");
+  } finally { await client.close(); await server.close(); }
+});

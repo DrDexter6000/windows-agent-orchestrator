@@ -35,6 +35,9 @@ import { getRegistryInventory, buildProviderReadiness } from "./registryInventor
  * @property {("lead_session"|"server_config"|"mcp_root"|null)} source
  * @property {string|null} gitHead
  * @property {boolean|null} dirty
+ * @property {("lead_session_git_proof_failed"|"server_config_git_proof_failed"|"no_workspace_authority"|null)} unboundReason
+ *   Recovery fact (M12-19): closed-set reason the workspace is not bound.
+ *   null when bound, or when the caller supplied no reason (never fabricated).
  */
 /**
  * @typedef {Object} PreflightWorker
@@ -60,6 +63,18 @@ import { getRegistryInventory, buildProviderReadiness } from "./registryInventor
 export const ACTIVE_RUNS_CAP = 10;
 // Cap on workers returned (defensive against a pathological registry).
 export const WORKERS_CAP = 64;
+// Closed set of unbound workspace reasons (M12-19 recovery truth). The smallest
+// truthful set distinguishing: (a) a lead_session whose Git proof now fails,
+// (b) an explicit server_config whose proof fails, (c) no usable workspace
+// authority. mcp_root failures collapse into (c) via the existing fall-through.
+// A closed set — the MCP layer derives its zod enums from this SSOT; dynamic
+// error text and paths are NEVER returned. Exported so the MCP output schemas
+// enforce the SAME set (single SSOT).
+export const WORKSPACE_UNBOUND_REASONS = Object.freeze([
+  "lead_session_git_proof_failed",
+  "server_config_git_proof_failed",
+  "no_workspace_authority",
+]);
 
 /**
  * Aggregate the mechanical preflight facts. Each section is settled
@@ -135,13 +150,29 @@ export async function aggregateLeadPreflight({
       source: workspaceBinding.source ?? null,
       gitHead: workspaceBinding.gitHead ?? null,
       dirty: workspaceBinding.dirty ?? null,
+      unboundReason: null,
     };
     checkStatus.workspace = "observed";
     if (workspace.dirty) {
       observations.push("workspace has uncommitted changes (reported only; not a dispatch blocker)");
     }
   } else {
-    workspace = { bound: false, source: null, gitHead: null, dirty: null };
+    // M12-19: project the resolver's closed-set recovery fact. The application
+    // boundary ENFORCES membership: a reason outside WORKSPACE_UNBOUND_REASONS
+    // (dependency-injected or malformed) fails closed to null — the same
+    // "unknown, never fabricated" semantics as an absent reason — and is never
+    // returned verbatim and never rendered as dynamic text. The MCP wire schema
+    // mirrors the same closed set as defense in depth.
+    const unboundReason = WORKSPACE_UNBOUND_REASONS.includes(workspaceBinding.unboundReason)
+      ? workspaceBinding.unboundReason
+      : null;
+    workspace = {
+      bound: false,
+      source: null,
+      gitHead: null,
+      dirty: null,
+      unboundReason,
+    };
     checkStatus.workspace = "observed";
     observations.push("workspace not bound — call workspace_select or lead_preflight with workspaceRoot");
   }

@@ -662,3 +662,24 @@ test("M12-3B-SMOKE: default services read one real verified delivery page withou
     rmSync(runDir, { recursive: true, force: true });
   }
 });
+
+// ===== M12-19: recovery-truth description contract =====
+
+// M12-3B-12: run_delivery_review_bundle's description states the same waitMs
+// contract as run_delivery: valid range 1000..300000, waitMs=0 invalid,
+// point-in-time alternative, detached-run truth.
+test("M12-3B-12: bundle description states waitMs range, 0 invalid, point-in-time, detached-run truth", async () => {
+  const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs" });
+  const client = await buildClient(server);
+  try {
+    const { tools } = await client.listTools();
+    const t = tools.find((x) => x.name === "run_delivery_review_bundle");
+    assert.ok(t, "run_delivery_review_bundle present");
+    const desc = t.description ?? "";
+    assert.match(desc, /1000\.\.300000/, "waitMs range 1000..300000 stated");
+    assert.match(desc, /waitMs=0 is invalid/, "waitMs=0 explicitly invalid");
+    assert.match(desc, /point-in-time/, "point-in-time alternative named");
+    assert.match(desc, /Host transport loss\/cancellation does not stop the detached run/, "detached-run truth");
+    assert.match(desc, /re-read point-in-time/, "recovery: re-read point-in-time");
+  } finally { await client.close(); await server.close(); }
+});
