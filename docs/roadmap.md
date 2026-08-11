@@ -192,17 +192,19 @@ M12-14 Fresh Host 关单后，WAO 开发仓的单次 `lead_preflight` 把四笔 
 
 发布与 Fresh Host 验收：M12-15 候选已普通 fast-forward 发布至 `main@bd3df87986e965657f93ca1d85b05ede4828f873`。重启后的 Host 一次调用 `lead_preflight` 即加载该 HEAD：workspace 与 workers 均为 observed，`activeRuns=[]`、`activeRunCount=0`，四笔历史非终态 run 仅计入 `unresolvedRunCount=4` 并附 advisory observation；`complete=true`、`warnings=[]`。验收未调用模型或 worker，未写 transcript，也未改变运行状态。Verdict：`PASS_M12_15_FRESH_HOST`。
 
-### M12-16 MCP 上下文/查询延迟与运行中显式纠正（2026-08-11，本地候选，待发布）
+### M12-16 MCP 上下文/查询延迟与运行中显式纠正（2026-08-11，已发布并完成 Fresh Host 验收）
 
-MCP `tools/list` 在真实 server 上先做无损测量：21 tools 的 wire 为 `72739` bytes，其中 descriptions `11812`、input schemas `7924`、output schemas `48389`；只压缩重复说明、不改 name/schema/annotations/能力后，wire 为 `69800`（`-2939`），descriptions 为 `8873`（`-24.9%`），input/output schemas 与合同 hash 不变。随后新增 `run_correct` 并给 `run_activity`/`run_status` 增加有界闭集字段，最终聚合候选为 22 tools、wire `72435`、descriptions `9576`，仍低于旧 23-tool baseline `75492`；增长来自新增能力的 schema/说明，不是描述回膨。`runs_list`/`lead_preflight` 的旧 Host 实测分别为 `16.2..22.2s` / `15.2..17.1s`；根因是 1753 条、约 141MB transcript 中按 67 个 cwd 字符串重复做 Git proof。修复在单次请求内只证明 authorized root 一次，再以 realpath 后的绝对 run cwd 做进程内比较；relative/missing/different/conflicting/cross-run 继续 fail closed。相同 300-run 应用层 benchmark 为 `2.27/2.99/2.51s`，matched=300、unresolved=4 不变；**Fresh Host MCP 延迟仍待本候选发布并重启后复测**。
+MCP `tools/list` 在真实 server 上先做无损测量：21 tools 的 wire 为 `72739` bytes，其中 descriptions `11812`、input schemas `7924`、output schemas `48389`；只压缩重复说明、不改 name/schema/annotations/能力后，wire 为 `69800`（`-2939`），descriptions 为 `8873`（`-24.9%`），input/output schemas 与合同 hash 不变。随后新增 `run_correct` 并给 `run_activity`/`run_status` 增加有界闭集字段，最终聚合候选为 22 tools、wire `72435`、descriptions `9576`，仍低于旧 23-tool baseline `75492`；增长来自新增能力的 schema/说明，不是描述回膨。`runs_list`/`lead_preflight` 的旧 Host 实测分别为 `16.2..22.2s` / `15.2..17.1s`；根因是 1753 条、约 141MB transcript 中按 67 个 cwd 字符串重复做 Git proof。修复在单次请求内只证明 authorized root 一次，再以 realpath 后的绝对 run cwd 做进程内比较；relative/missing/different/conflicting/cross-run 继续 fail closed。相同 300-run 应用层 benchmark 为 `2.27/2.99/2.51s`，matched=300、unresolved=4 不变；发布后 Fresh Host 实测 `lead_preflight=6.125s`、`runs_list(activeOnly)=3.614s`，active=0、unresolved=4，较旧 Host 明显下降且运行真相不变。
 
 `run_dispatch` 新增 opt-in `correctable:true`，`run_correct` 用 bounded id/prompt 向原 run 的同一 provider 进程发送 Lead 明确纠正；queued/delivered/executed 语义严格分离，不创建 child run、不换 worktree、不自动扩大范围或作决定。实现经历一笔 Lead 拒绝候选后，由 correction run `run_20260810235351249kt5nwd` 交付 `4e6864cfacb282b1357518683d2d1eda59027924`，独立 `coder_mm` 复核通过。真实合成 canary `run_2026081101094860377dqy8` 在原 worktree 内得到 `queued -> delivered`，仅修改 `CANARY.txt`，delivery `2d8532e7fd53c9d919b78c2ded42eada657d716e` exact verification passed 并由 Lead accepted；源仓保持 clean。Verdict：`PASS_M12_16_REAL_CORRECTION_CANARY`。
 
-### M12-17 submitted 阶段与 Owner Dashboard 详情/通知（2026-08-11，本地候选，待发布）
+### M12-17 submitted 阶段与 Owner Dashboard 详情/通知（2026-08-11，已发布并完成 Fresh Host 验收）
 
 `executionStage` 现在只从 durable transcript 事实投影 `accepted | spawned | active | terminal | unknown`：submitted 只表示控制面已接受，spawned 只表示 worker 进程已建立，active 只表示出现 worker activity；不预测完成度、不判断方向、不替 Lead 决策。实现 delivery `d7ed13964dd1f2bfe5687a6e996d026bf7b38e31` 经 11 文件完整审查、exact `npm test` 与独立 `coder_mm` review 后 accepted。
 
 Owner Dashboard 增加选中 run 的 backend/stage/terminal/event count/scope/liveness/有界 timeline，以及人类显式 opt-in、权限受控、非终态→终态恰好一次的浏览器通知。首笔候选因 A→B 异步响应可覆盖 B 详情，被独立 `coder_low` reviewer 找出并由 Lead rejected；修正 run `run_2026081103053590503rurr` 的 delivery `9d32dec827408caa737f7b7065e4f719285529d9` 用 `runId + selection epoch` 绑定所有异步状态变更，79/79 focused 与 34/34 controlled interleaving 通过，同一 reviewer 返回 `REVIEW_PASS`，Lead accepted。真实 headed Playwright 验证 desktop、`390x844` mobile 无横向溢出、A→B→A 无串 run、console 零 error/warning；浏览器拒绝通知权限时明确显示 `notifications blocked`。看板仍为 read-only，不新增控制或语义决策。Verdict：`PASS_M12_17_OWNER_OBSERVABILITY_CANARY`。
+
+发布与 Fresh Host 验收：M12-16/17 七笔候选已普通 fast-forward 发布至 `main@68bda1b2e0cee4ee70dac458c76d5a3baf381e8b`。重启后的 Host 精确暴露 22 个工具并包含 `run_correct`；一次 `lead_preflight` 完成 workspace/workers/active-runs 三项观察，`complete=true`、active=0、unresolved=4、warnings 为空。WAO 开发仓既有 accepted run `run_20260810235351249kt5nwd` 经新版 `run_status` 投影为 `executionStage.phase="terminal"`，`run_activity` 返回 `scopeObservation.status="within_declared_paths"`、`complete=true`；跨 workspace 的历史合成 run 查询仍按隔离合同拒绝。本次只读验收未调用模型、未创建 run、未改变 transcript 或运行状态。Verdict：`PASS_M12_16_17_FRESH_HOST`。
 
 ### 第三方 onboarding helper 发布与 Fresh Host 验收（2026-08-08）
 
