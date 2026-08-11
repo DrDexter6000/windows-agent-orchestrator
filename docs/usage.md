@@ -654,6 +654,23 @@ annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:false, o
 
 annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:false, openWorldHint:true`（续 provider 会话 + 在 retained worktree 上改动）。workspace-bound：父 run 必须属于当前绑定 workspace，否则 `workspace_mismatch`。
 
+### MCP `run_correct`（运行中显式纠正，M12-16）
+
+`run_correct` 让 Lead 对一条仍在执行、且派发时显式声明 `correctable:true` 的 run 发送一条**有界纠正消息**。它与 `run_continue` 不同：`run_correct` 不创建 child run、不切换 worktree、不重新派发 worker，而是把 Lead 明确提供的纠正写入原 run 的 durable transcript 队列，再由原 runner 串行投递给同一 provider 进程。普通 `run_dispatch` 省略 `correctable` 时保持原行为；backend 未声明 in-flight correction 能力时，`correctable:true` 在创建 run 前 fail closed。
+
+输入是严格对象 `{runId, correctionId, prompt}`：`correctionId` 为 1..64 字符的 `[A-Za-z0-9_-]` 幂等键，`prompt` 为 1..15000 字符。相同 `correctionId` + 相同 prompt 可安全重查；同一 id 配不同 prompt 固定拒绝。工具只接受 workspace-bound、处于 submitted/running 阶段的 run；pending 尚未可投递，终态 run、未 opt-in run、跨 workspace run 或不支持的 backend 均返回闭集拒绝事实，不自动 retry、stop、continue 或改状态。
+
+输出 `{runId, correctionId, outcome, reason}` 的 `outcome` 是 `queued | pending | delivered | rejected`。语义必须逐层区分：
+
+- `queued` 只证明纠正已 durable append，等待 runner claim；
+- `pending` 表示已有请求但尚无可确认的最终投递事实；
+- `delivered` 只证明字节已送入 provider stdin，**不证明模型已读取、理解或执行**；
+- `rejected` 携带闭集 `reason`，不回显 prompt、provider payload、session、路径或内部错误。
+
+runner 以 requested → claimed → delivered/delivery_failed 的 durable 事件链串行处理；`run_activity` 只暴露安全的 correction 生命周期状态，不返回纠正正文。WAO 不判断纠正内容是否合理，也不会据此扩大 `allowedPaths`、改 verification、自动停止或接受交付；这些语义和最终决策仍完全属于 Lead。
+
+annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:true, openWorldHint:true`（向正在运行的外部 provider 会话发送 Lead 指令；幂等性由 `correctionId` 绑定）。
+
 ### MCP `workspace_status`（workspace binding 状态查询，M10-pre2 + M11-6）
 
 `workspace_status` 查询当前 workspace 绑定状态。只读、幂等——不修改任何持久状态。`run_dispatch` 在执行前**自行重新证明** workspace，不信任此工具的先前结果。
@@ -1006,7 +1023,9 @@ npm run cli -- runs dashboard --web [--port 0|1024..65535] [--run-dir DIR] [--cw
 
 命令打印一次 `http://127.0.0.1:<port>/#token=<64hex>` 和停止提示；在浏览器打开该 URL，按 `Ctrl-C` 关闭。省略 `--port` 时使用临时端口。`--web` 不与 `--watch` 或 `--format json` 共用，也不会自动打开浏览器。
 
-看板展示当前 workspace 的最近 runs、状态、最后活动和有界详细消息，支持筛选、选择 run、继续读取旧页与自动轮询；移动端 recent-runs 区域独立滚动。它调用与 `run_activity` 相同的读取/分类/redaction/cursor SSOT，只使用 Owner 较大的 excerpt/page 默认值，不直接读 JSONL。
+看板展示当前 workspace 的最近 runs、状态、最后活动和有界详细消息，支持筛选、选择 run、继续读取旧页与自动轮询；移动端 recent-runs 区域独立滚动。选中 run 的详情面板给出 backend、execution stage、terminal、事件总量、scope observation、liveness 与有界活动时间线；这些均是 transcript/application projection 的只读事实，不是语义进度判断。它调用与 `run_activity` 相同的读取/分类/redaction/cursor SSOT，只使用 Owner 较大的 excerpt/page 默认值，不直接读 JSONL。
+
+M12-17 增加**人类显式 opt-in** 的浏览器终态通知：只有 Owner 点击启用且浏览器授予 Notification permission 后，页面才在观察到同一选中 run 从非终态变为终态时通知恰好一次；首次加载/刷新时已终态的 run 不补发，重复 polling 不重复发送，拒绝权限会明确显示 `notifications blocked`。通知只含固定安全字段，不含 worker 消息、路径、command/tool payload、credential 或 session。所有异步 activity 请求同时绑定选中 `runId` 与 selection epoch，A→B→A 快速切换时，旧响应不得覆盖当前 run 的详情。
 
 安全边界：服务只监听 `127.0.0.1`，API 要求每进程随机 bearer；token 只从 URL fragment 进入 `sessionStorage`，不进 query/server log/localStorage。服务仅接受 GET 和严格有界 query，固定静态资源、no-store/nosniff/no-referrer、严格 CSP、无 CORS opt-in。页面没有 mutation 控件；不会 stop/retry/continue/repackage/decide，也不会写 transcript、worktree 或配置。Owner 视图仍会隐藏 credential/secret、raw command/tool payload、PID/session/绝对路径；其余 worker 消息按 Owner 观察用途提供较丰富但有界的脱敏文本。
 

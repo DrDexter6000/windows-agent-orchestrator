@@ -101,11 +101,11 @@ const SPAWNED_BASIS_TYPES = new Set(["run.started"]);
 // active basis: worker activity (any kind).
 const ACTIVE_BASIS_TYPES = new Set(["run.event"]);
 
-// Legacy terminal FACT types → the terminal state they prove. Used only as a
-// terminal claim in the consistency union — the same fallback family as
-// findState's legacy inference (run.completed/run.timed_out/run.aborted/
-// run.error). run.stop_requested is deliberately NOT here: it is a stop
-// INTENT, not a terminal fact (no semantic judgment about its effect).
+// Legacy terminal FACT types → the terminal state they prove. This projector
+// intentionally uses a narrower terminal-fact subset than findState: only
+// durable completion/error/timeout/abort facts establish this stage.
+// run.stop_requested is deliberately NOT here: it is a stop INTENT, not a
+// terminal fact (no semantic judgment about its effect).
 const LEGACY_TERMINAL_FACT_STATES = Object.freeze({
   "run.completed": "completed",
   "run.timed_out": "timed_out",
