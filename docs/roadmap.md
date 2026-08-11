@@ -206,11 +206,13 @@ Owner Dashboard 增加选中 run 的 backend/stage/terminal/event count/scope/li
 
 发布与 Fresh Host 验收：M12-16/17 七笔候选已普通 fast-forward 发布至 `main@68bda1b2e0cee4ee70dac458c76d5a3baf381e8b`。重启后的 Host 精确暴露 22 个工具并包含 `run_correct`；一次 `lead_preflight` 完成 workspace/workers/active-runs 三项观察，`complete=true`、active=0、unresolved=4、warnings 为空。WAO 开发仓既有 accepted run `run_20260810235351249kt5nwd` 经新版 `run_status` 投影为 `executionStage.phase="terminal"`，`run_activity` 返回 `scopeObservation.status="within_declared_paths"`、`complete=true`；跨 workspace 的历史合成 run 查询仍按隔离合同拒绝。本次只读验收未调用模型、未创建 run、未改变 transcript 或运行状态。Verdict：`PASS_M12_16_17_FRESH_HOST`。
 
-### M12-18 MCP 历史查询热缓存（2026-08-11，本地候选，待发布与 Fresh Host 验收）
+### M12-18 MCP 历史查询热缓存（2026-08-11，已发布并通过 Fresh Host 验收）
 
 这是 M12 完成后的消费者效率优化，不重写 M12 完成定义。真实 WAO 开发仓已累积约 1800 份、152MB transcript；`lead_preflight` / `runs_list` 的长驻 MCP server 每次全量解析会重复消耗 Lead 等待时间。候选新增 process-memory-only、4096-cap 的 static-facts LRU：`runs/<runId>.jsonl` 仍是唯一事实源；只有文件 pre/post `size + mtimeMs + ino` 一致时才缓存；每次查询仍重新执行当前 workspace 授权、registry identity、owner heartbeat、active/unresolved、filter、sort 与 limit。它不写 sidecar、不改 transcript writer、不缓存完整查询结果，也不覆盖 CLI dashboard/diagnose。
 
-首笔实现 run `run_2026081115230980948tsan` 的 delivery `05be0dd4...` 虽通过 exact verification 与独立 review，但默认 128-cap 在约 1800 份顺序扫描下会循环抖动，Lead 因此 durable rejected；同一 provider 会话与 retained worktree 经 continuation child `run_202608111555068144vfcw0` 修正为 4096-cap，delivery `0a28f4444063779ee0fc33820890f7ff57e8dabe` 在 1800 份真实格式 fixture 上证明 cold 1800 reads、warm 0 reads 且结果深相等，exact `npm test` 通过，五文件逐页审查完成，独立 `coder_mm` final review `run_20260811162342201zg1fka` 返回 APPROVE，随后由 Lead accepted 并 fast-forward 集成到本地 `main`。集成后的同进程真实 `runs/` 只读探针覆盖 1801 份 transcript：cold `lead_preflight` 1.745s / 1801 reads，随后 warm `runs_list` 0.419s / 0 reads、warm `lead_preflight` 0.949s / 0 reads，active=0、unresolved=4 保持不变。当前只证明冻结候选与本地长驻 server 冷热行为；发布、Host 重启后的消费者延迟仍是后续验收边界，不得提前写成 Fresh Host PASS。
+首笔实现 run `run_2026081115230980948tsan` 的 delivery `05be0dd4...` 虽通过 exact verification 与独立 review，但默认 128-cap 在约 1800 份顺序扫描下会循环抖动，Lead 因此 durable rejected；同一 provider 会话与 retained worktree 经 continuation child `run_202608111555068144vfcw0` 修正为 4096-cap，delivery `0a28f4444063779ee0fc33820890f7ff57e8dabe` 在 1800 份真实格式 fixture 上证明 cold 1800 reads、warm 0 reads 且结果深相等，exact `npm test` 通过，五文件逐页审查完成，独立 `coder_mm` final review `run_20260811162342201zg1fka` 返回 APPROVE，随后由 Lead accepted。实现与文字提交已普通 fast-forward 发布至 `main@964490ad9f672d29bba3d536ef80be14ddb9eb3e`。集成后的同进程真实 `runs/` 只读探针覆盖 1801 份 transcript：cold `lead_preflight` 1.745s / 1801 reads，随后 warm `runs_list` 0.419s / 0 reads、warm `lead_preflight` 0.949s / 0 reads，active=0、unresolved=4 保持不变。
+
+重启后的 Fresh Host 在该精确 HEAD 上完成一次只读消费者验收：cold `lead_preflight` 3.422s，随后 warm `runs_list(limit:10)` 0.556s、warm `lead_preflight` 0.848s；两次 preflight 都返回 `complete=true`、6 workers、active=0、unresolved=4、warnings 为空，workspace HEAD 与结果事实一致。验收未派发 worker、未修改 transcript 或仓库。Verdict：`PASS_M12_18_FRESH_HOST_QUERY_CACHE`。
 
 ### 第三方 onboarding helper 发布与 Fresh Host 验收（2026-08-08）
 
