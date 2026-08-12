@@ -214,13 +214,23 @@ Owner Dashboard 增加选中 run 的 backend/stage/terminal/event count/scope/li
 
 重启后的 Fresh Host 在该精确 HEAD 上完成一次只读消费者验收：cold `lead_preflight` 3.422s，随后 warm `runs_list(limit:10)` 0.556s、warm `lead_preflight` 0.848s；两次 preflight 都返回 `complete=true`、6 workers、active=0、unresolved=4、warnings 为空，workspace HEAD 与结果事实一致。验收未派发 worker、未修改 transcript 或仓库。Verdict：`PASS_M12_18_FRESH_HOST_QUERY_CACHE`。
 
-### M12-20 Owner Dashboard active-first / history-on-demand（2026-08-12，本地候选）
+### M12-19 supervision recovery truth / worker 进程消失成果恢复（2026-08-12，本地验收，待发布）
+
+工作区监督事实不再把 authority 证明失败折叠成普通 unbound：`workspace_status`、`lead_preflight` 与相关 drilldown 共享闭集 `unboundReason`，只说明哪一类 authority 证明失败，不返回路径或动态错误，也不替 Lead 停止、重绑或改派。实现 run `run_20260811181643314t83hj4` 的 delivery `9e6255f75e1b9ba5c24fc6d826582813bcbd4e58` 已由 Lead 完整审查并 accepted。
+
+当 delivery run 仍处非终态、detached runner/provider 进程被保守证明已经消失、原 worktree 保留且全部合同与路径事实可证明时，`run_delivery` 只读投影 `candidateKind:"process_missing"`；只有 Lead 显式调用既有 `run_delivery_repackage` 才会原子结算 orphan、重用原 base/worktree/verification 并封装成果，不调用模型、不扩大 scope、不自动 accept/reject。首版因轮询复用冻结 `now` 而可能把新鲜 lease 误判为 stale，候选未被接受；修正 run `run_20260812143825898iaolt2` 改为每次轮询重建 liveness 时间快照，delivery `c6b28504fd00a57f9ae39dd803cbd40f1cce90c1` 经 focused、真实 transcript smoke、完整审查与 exact verification 后由 Lead accepted。M12-19 两笔实现已本地 fast-forward 集成，尚未发布或完成 Fresh Host 验收。
+
+### M12-20 Owner Dashboard active-first / history-on-demand（2026-08-12，本地验收，待发布）
 
 目标是降低人类 Owner 的观察延迟，且不改变 Lead MCP 语义。Owner 看板默认打开 **Active** 模式：只列出当前有新鲜 owner 心跳、经证明 active 的 run；候选集是当前的 `.owner-*` 租约文件（backgroundRunner 每 2s 写入、退出删除）——候选枚举只 `readdirSync` 一次 runDir 目录（成本随目录条目总数增长、包括历史 transcript，但仅一次目录读），随后只有当前租约候选者的 transcript 被打开/解析/验证。机器可检地，50 份历史 + 1 个当前租约时 active 恰好打开/解析 1 份 transcript（`M12-20-LAT-01`），即昂贵的 per-run 工作（transcript 解析 + per-run workspace 验证 + `ownerLiveness`）随当前租约数而非历史库存规模放大（目录枚举除外）。Active 响应固定标注 `scanScope=active`，且**不**携带 `unresolvedCount`（active scope 不做全库存 unresolved 分类，故该计数**恒缺失而非 0**）；缺省 scope（`/api/runs?limit=N`）即 active。
 
 历史是**显式、有界、按需**：Owner 选择 `1h`/`24h`/`7d` 预设或有界自定义 from/to（上限 7d；HTTP 闭集严格校验，禁止未知/重复/ malformed/未来/倒序/越界/不一致范围，固定 400）。范围按 transcript 派生的 summary `updatedAt` 过滤（非文件系统 mtime），并复用 M12-18 长驻看板服务进程内的元数据校验 summary 缓存做热读——**无第二个持久索引**。看板每 5s 仅在 Active 自动刷新；历史**不**自动轮询，每个历史 fetch 都是显式 Owner 操作。前端绑定 runs-mode epoch：迟到的 Active 或 History 响应**不得**覆盖当前模式或更新的查询（runs 列表的 race guard，类比既有 selection epoch guard）；run 从 active 集或有界历史窗口消失**绝不**构成终态迁移、**不**触发通知。
 
-单一 `listRuns` 应用 SSOT 以 `scanScope`/`historyRange` 输入扩展（`active` 枚举租约候选、`history` 有界范围过滤、缺省行为字节不变），**不是**第二个分类器；复用既有 `ownerLiveness` 心跳真相与 closed-set activity 分类。MCP `lead_preflight`/`runs_list` 热路径、CLI 文本看板、transcript writer、delivery 语义、依赖与验收权威**均未改动**；运行时仍无第三方依赖。本段只记录本地候选，尚未发布或完成 Fresh Host 验收。
+单一 `listRuns` 应用 SSOT 以 `scanScope`/`historyRange` 输入扩展（`active` 枚举租约候选、`history` 有界范围过滤、缺省行为字节不变），**不是**第二个分类器；复用既有 `ownerLiveness` 心跳真相与 closed-set activity 分类。MCP `lead_preflight`/`runs_list` 热路径、CLI 文本看板、transcript writer、delivery 语义、依赖与验收权威**均未改动**；运行时仍无第三方依赖。
+
+初始 coder_hq delivery `e30a156b9bd49a24e9ae13dd3177883995d30b32` 虽通过 exact verification，但独立 coder_mm reviewer 证明历史模式切换调用的 refresh 会被“历史不自动轮询”短路，Owner 点击历史范围实际发出零请求；Lead 因此 durable rejected。Lead 使用同一 provider 会话和 retained worktree 发出精确 correction，child run `run_20260812162021591piz7t3` 将 fetch 决策拆成 `explicit`/`timer`：Owner 显式选择 active/history 恰好请求一次，timer 只刷新 active；成功响应和错误均以 scope + epoch 丢弃迟到结果。修正 delivery `b4c8a8838916cb1303297d81e8b9e959a6b96f5f` 经 14 文件完整审查、行为级 race 测试与 exact verification 后由 Lead accepted 并本地 fast-forward 集成。
+
+本机真实 `runs/` 只读 smoke 使用 Node 22，覆盖 2425 个目录项、1831 份 run transcript 与 1 个 owner lease：active 冷读 223.632ms、返回 0 个经证明 active 的 run，只产生 1 次 summary miss；最近 1h 历史冷读 1943.304ms、返回 3 个 run，随后同一长驻缓存热读 233.296ms、1831 次 cache hit。该结果证明 active-first 避免打开/解析历史 transcript，且历史 warm read 显著降低重复解析；同时诚实保留一次 `readdirSync` 的 O(目录条目数) 枚举成本。M12-20 尚未发布或完成 Fresh Host 验收。
 
 ### 第三方 onboarding helper 发布与 Fresh Host 验收（2026-08-08）
 
