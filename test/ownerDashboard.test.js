@@ -47,6 +47,11 @@ function jl(obj) { return JSON.stringify(obj) + "\n"; }
 function seedTranscript(runDir, runId, {
   agentId = "coder_low", messages = [], terminal = false, workspaceCwd,
   backend = "process", seqBase = 0, extraLines = [],
+  // M12-20: when provided, the terminal events' ts (and thus the transcript-
+  // derived updatedAt) is set to this ISO ts instead of the default 00:20:0x.
+  // Used by the history-range test to place each terminal run at a distinct
+  // point in time. Default preserves the pre-M12-20 behavior exactly.
+  terminalTs = "2026-08-02T00:20:01.000Z",
 } = {}) {
   mkdirSync(runDir, { recursive: true });
   const lines = [
@@ -63,8 +68,8 @@ function seedTranscript(runDir, runId, {
   }
   for (const l of extraLines) lines.push(l);
   if (terminal) {
-    lines.push(jl({ type: "run.completed", ts: "2026-08-02T00:20:00.000Z", runId, agentId }));
-    lines.push(jl({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-08-02T00:20:01.000Z", runId, agentId }));
+    lines.push(jl({ type: "run.completed", ts: terminalTs, runId, agentId }));
+    lines.push(jl({ type: "run.state_change", to: "completed", reason: "done", ts: terminalTs, runId, agentId }));
   }
   writeFileSync(join(runDir, `${runId}.jsonl`), lines.join(""), "utf8");
 }
@@ -487,6 +492,80 @@ test("HTTP /api/activity real-chain: redacts secret, withholds prompt/command/pa
     assert.equal(readFileSync(transcriptPath).equals(bytesBefore), true, "transcript bytes unchanged across reads");
     assert.equal(readFileSync(join(runDir, `.owner-${runId}`)).equals(ownerBefore), true, "owner heartbeat file unchanged");
     assert.equal(gitPorcelain(dir), "", "Git worktree unchanged across reads");
+  } finally { cleanupDir(dir); rmrfRetry(runDir); }
+});
+
+// =====================================================================
+// M12-20 — active-first / history-on-demand (getOwnerRuns threads scanScope)
+//   The composition service is a THIN pass-through to the ONE listRuns SSOT:
+//   it threads scanScope / historyRange / now / readSummaryFn and echoes
+//   scanScope in its result so the HTTP client can guard mode/epoch races.
+//   The service result NEVER carries unresolvedCount (it is dropped at this
+//   layer for every scope), so "absent, never 0" holds trivially here.
+// =====================================================================
+test("M12-20 getOwnerRuns active scope: only fresh-lease runs; scanScope echoed; never unresolvedCount", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-od-act-ws-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-od-act-rd-"));
+  try {
+    makeGitRepo(dir);
+    seedTranscript(runDir, "run_active", { workspaceCwd: dir, terminal: false });
+    seedTranscript(runDir, "run_done", { workspaceCwd: dir, terminal: true });
+    const NOW = 100_000_000;
+    // A CURRENT owner lease on the non-terminal run → it is an active candidate.
+    writeOwnerHeartbeat(runDir, "run_active", NOW - 1000);
+    // run_done is terminal and has NO lease → not an active candidate.
+    const { getOwnerRuns } = await svc();
+    const res = await getOwnerRuns({
+      runDir, workspaceRoot: dir, knownAgentIds: ["coder_low"],
+      scanScope: "active", now: NOW,
+    });
+    assert.equal(res.scanScope, "active", "active scope is echoed for the client race guard");
+    assert.deepEqual(res.runs.map((r) => r.runId), ["run_active"], "only the proven-active run");
+    assert.equal(res.runs[0].activityStatus, "active");
+    assert.ok(!("unresolvedCount" in res), "service result never carries unresolvedCount");
+  } finally { cleanupDir(dir); rmrfRetry(runDir); }
+});
+
+test("M12-20 getOwnerRuns history scope: bounded inclusive range on transcript updatedAt; scanScope echoed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-od-hist-ws-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-od-hist-rd-"));
+  try {
+    makeGitRepo(dir);
+    // Three terminal runs whose LAST event ts places each one in time. The range
+    // is keyed on the transcript-derived updatedAt (the terminal event's ts via
+    // terminalTs), NOT on filesystem mtime.
+    const before = "run_hist_before";
+    const insideA = "run_hist_inside_a";
+    const insideB = "run_hist_inside_b";
+    const at = (hh, mm, ss) => `2026-08-02T${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}.000Z`;
+    seedTranscript(runDir, before, { workspaceCwd: dir, terminal: true, terminalTs: at(0, 0, 1) });
+    seedTranscript(runDir, insideA, { workspaceCwd: dir, terminal: true, terminalTs: at(0, 10, 0) });
+    seedTranscript(runDir, insideB, { workspaceCwd: dir, terminal: true, terminalTs: at(0, 20, 0) });
+    const fromMs = Date.parse(at(0, 5, 0));
+    const toMs = Date.parse(at(0, 25, 0));
+    const { getOwnerRuns } = await svc();
+    const res = await getOwnerRuns({
+      runDir, workspaceRoot: dir, knownAgentIds: ["coder_low"],
+      scanScope: "history", historyRange: { fromMs, toMs },
+    });
+    assert.equal(res.scanScope, "history");
+    assert.deepEqual(res.runs.map((r) => r.runId).sort(), [insideA, insideB].sort(), "inclusive of in-range; before excluded");
+    assert.ok(!("unresolvedCount" in res));
+  } finally { cleanupDir(dir); rmrfRetry(runDir); }
+});
+
+test("M12-20 getOwnerRuns default scope: unchanged result shape (no scanScope field)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-od-def-ws-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-od-def-rd-"));
+  try {
+    makeGitRepo(dir);
+    seedTranscript(runDir, "run_a", { workspaceCwd: dir, messages: ["a"], terminal: true });
+    seedTranscript(runDir, "run_b", { workspaceCwd: dir, messages: ["b"], terminal: true });
+    const { getOwnerRuns } = await svc();
+    const res = await getOwnerRuns({ runDir, workspaceRoot: dir, knownAgentIds: ["coder_low"] });
+    assert.ok(!("scanScope" in res), "default scope (no scanScope) is byte-identical: no scanScope field");
+    assert.equal(res.runs.length, 2);
+    assert.deepEqual(Object.keys(res).sort(), ["matchedCount", "returnedCount", "runs", "truncated"]);
   } finally { cleanupDir(dir); rmrfRetry(runDir); }
 });
 

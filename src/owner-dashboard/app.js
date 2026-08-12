@@ -53,6 +53,20 @@ export const FILTER_STATES = Object.freeze([
 const TERMINAL_RUN_STATES = Object.freeze(["completed", "failed", "aborted", "timed_out"]);
 const TOKEN_RE = /^[0-9a-f]{64}$/;
 
+// M12-20: the active-first / history-on-demand model. The dashboard opens in
+// Active mode (only currently proven-active runs + live activity, auto-refreshed
+// every RUNS_REFRESH_MS). History is a bounded, EXPLICIT, on-demand window: a
+// closed-set preset {1h,24h,7d} or a custom [from,to] epoch-ms pair capped at
+// 7d. These constants are the single client-side closed set; the HTTP boundary
+// re-validates them server-side (defense-in-depth, never trusting the client).
+export const HISTORY_PRESETS = Object.freeze(["1h", "24h", "7d"]);
+export const HISTORY_PRESET_MS = Object.freeze({
+  "1h": 3_600_000,
+  "24h": 86_400_000,
+  "7d": 604_800_000,
+});
+export const HISTORY_MAX_RANGE_MS = 604_800_000;
+
 // ===== Pure helpers (DOM-free; the tested contract) =====
 
 /**
@@ -624,6 +638,223 @@ export function isCurrentSelection(state, captured) {
   return true;
 }
 
+// ===== M12-20 pure helpers — active-first / history-on-demand (DOM-free) =====
+//
+// The runs list has a MODE {scope:"active"} (the boot default) or
+// {scope:"history", preset|fromMs,toMs}. A runs-mode epoch (runsEpoch) advances
+// on every Owner mode action so an in-flight runs response for a prior mode OR
+// a prior query can NEVER overwrite the current view — the runs-list analogue of
+// the D-series selection race guard. History is fetched ONLY on an explicit
+// Owner action; active auto-refreshes, history never polls. Absence from the
+// active set or a bounded history window is never a terminal transition (the
+// existing planTerminalNotifications planner already preserves observations on
+// absence — the mode change never clears observedTerminal).
+
+/**
+ * The boot default: active-first. The dashboard opens showing only currently
+ * proven-active runs + live activity.
+ * @returns {{scope:"active"}}
+ */
+export function defaultRunsMode() {
+  return { scope: "active" };
+}
+
+/**
+ * Resolve a closed-set preset + server clock to a bounded history mode:
+ * {scope:"history", preset, fromMs: now-dur, toMs: now}. Returns null for an
+ * out-of-set preset (never an arbitrary window). The HTTP boundary re-validates.
+ * @param {string} preset — one of HISTORY_PRESETS
+ * @param {number} nowMs — server clock (ms)
+ * @returns {object|null}
+ */
+export function historyPresetMode(preset, nowMs) {
+  if (typeof preset !== "string" || !HISTORY_PRESETS.includes(preset)) return null;
+  const dur = HISTORY_PRESET_MS[preset];
+  const to = Number.isFinite(nowMs) ? nowMs : Date.now();
+  return { scope: "history", preset, fromMs: to - dur, toMs: to };
+}
+
+/**
+ * Resolve an explicit custom [from,to] epoch-ms window to a bounded history
+ * mode, or null when the window is inverted / over-cap (>7d) / future / non-
+ * finite. Mirrors the server's bounded-window rules so a malformed client
+ * computation never reaches the boundary.
+ * @param {number} fromMs
+ * @param {number} toMs
+ * @param {number} nowMs — server clock (ms)
+ * @returns {object|null}
+ */
+export function historyCustomMode(fromMs, toMs, nowMs) {
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return null;
+  if (fromMs > toMs) return null;
+  if ((toMs - fromMs) > HISTORY_MAX_RANGE_MS) return null;
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  if (toMs > now) return null;
+  return { scope: "history", fromMs, toMs };
+}
+
+/**
+ * Serialize a runs mode to the /api/runs query (no leading "?"). Active →
+ * scope=active + limit; a preset history → scope=history&range=<preset> + limit;
+ * a custom history → scope=history&from=&to= + limit. The HTTP boundary treats
+ * scope as a closed set and defaults to active.
+ * @param {object} mode
+ * @param {{limit?:number}} [opts]
+ * @returns {string}
+ */
+export function runsQuery(mode, opts = {}) {
+  const limit = (Number.isInteger(opts.limit) && opts.limit > 0) ? opts.limit : RUNS_LIMIT;
+  const m = mode && mode.scope === "history" ? mode : { scope: "active" };
+  if (m.scope === "history") {
+    if (HISTORY_PRESETS.includes(m.preset)) return `scope=history&range=${m.preset}&limit=${limit}`;
+    if (Number.isFinite(m.fromMs) && Number.isFinite(m.toMs)) {
+      return `scope=history&from=${m.fromMs}&to=${m.toMs}&limit=${limit}`;
+    }
+  }
+  return `scope=active&limit=${limit}`;
+}
+
+/**
+ * Whether the runs list auto-refreshes in this mode. Active auto-refreshes every
+ * RUNS_REFRESH_MS; history is on-demand only and NEVER polls. refreshRuns
+ * consults this before issuing a fetch, so the 5s timer is a no-op in history.
+ * @param {object} mode
+ * @returns {boolean}
+ */
+export function shouldAutoRefreshRuns(mode) {
+  return !mode || mode.scope !== "history";
+}
+
+/**
+ * Render the local-time range label for a history mode. A preset renders
+ * "last <preset>"; a custom window renders "<from> – <to>" via the injected
+ * local-time formatter (the browser passes Date#toLocaleString; tests inject a
+ * deterministic formatter). Active / absent mode → "". Never an absolute path
+ * or session detail — only the window bounds the Owner already chose.
+ * @param {object|null} mode
+ * @param {(ms:number)=>string} [formatLocal]
+ * @returns {string}
+ */
+export function historyRangeLabel(mode, formatLocal) {
+  if (!mode || mode.scope !== "history") return "";
+  if (HISTORY_PRESETS.includes(mode.preset)) return `last ${mode.preset}`;
+  if (Number.isFinite(mode.fromMs) && Number.isFinite(mode.toMs)) {
+    const f = typeof formatLocal === "function" ? formatLocal(mode.fromMs) : String(mode.fromMs);
+    const t = typeof formatLocal === "function" ? formatLocal(mode.toMs) : String(mode.toMs);
+    return `${f} – ${t}`;
+  }
+  return "";
+}
+
+/**
+ * Read the runs-mode binding {scope, epoch} for the CURRENT mode WITHOUT bumping
+ * the epoch. Used by the active auto-refresh: it captures the current epoch so a
+ * response is committed only while the mode and epoch are unchanged. A later
+ * Owner action (setRunsMode) bumps the epoch, so an in-flight refresh for the
+ * prior epoch is dropped — it can never overwrite the current view.
+ * @param {object} state
+ * @returns {{scope:string, epoch:number}}
+ */
+export function runsRequestBinding(state) {
+  if (!state || typeof state !== "object") return { scope: "active", epoch: 0 };
+  const scope = (state.runsMode && typeof state.runsMode.scope === "string") ? state.runsMode.scope : "active";
+  const epoch = Number.isInteger(state.runsEpoch) ? state.runsEpoch : 0;
+  return { scope, epoch };
+}
+
+/**
+ * An Owner mode action: switch to a new runs mode. Sets the mode, clears the
+ * prior mode's list (the new view opens in a bounded loading state — the two
+ * modes' runs are never silently mixed), bumps the runs epoch (so every in-
+ * flight runs response for the prior mode/query becomes stale), and returns the
+ * captured binding for the new mode's fetch. Pure w.r.t. the state object.
+ * @param {object} state
+ * @param {object} mode
+ * @returns {{scope:string, epoch:number}}
+ */
+export function setRunsMode(state, mode) {
+  if (!state || typeof state !== "object") return { scope: "active", epoch: 0 };
+  state.runsMode = mode;
+  state.runs = [];
+  state.runsFresh = null;
+  state.runsEpoch = (Number.isInteger(state.runsEpoch) ? state.runsEpoch : 0) + 1;
+  return { scope: (mode && mode.scope) || "active", epoch: state.runsEpoch };
+}
+
+/**
+ * The runs-mode commit gate: true ONLY when the captured (scope, epoch) is still
+ * the current mode+epoch. A late response (the scope changed, or the epoch
+ * advanced under a newer query) returns false and the caller MUST drop it
+ * without mutating the runs list / freshness / observation.
+ * @param {{runsMode:{scope:string}, runsEpoch:number}} state
+ * @param {{scope:string, epoch:number}} captured
+ * @returns {boolean}
+ */
+export function isCurrentRunsMode(state, captured) {
+  if (!state || !captured) return false;
+  if (typeof captured.scope !== "string" || captured.scope.length === 0) return false;
+  if (!Number.isInteger(captured.epoch)) return false;
+  const cur = state.runsMode && state.runsMode.scope;
+  if (typeof cur !== "string" || cur !== captured.scope) return false;
+  if (state.runsEpoch !== captured.epoch) return false;
+  return true;
+}
+
+/**
+ * The SINGLE runs-fetch decision: given the current mode and a trigger, return
+ * the /api/runs query to fetch, or null when this trigger must NOT fetch. There
+ * are exactly two triggers, and this is the only place that decides fetch-or-not
+ * (the bootstrap has no second fetch path and no second state machine):
+ *   - "explicit" — an Owner mode action (preset / custom / active button). It
+ *     ALWAYS fetches exactly once for the new mode, active OR history. Crucially
+ *     it is NEVER gated by shouldAutoRefreshRuns, so switching to a bounded
+ *     history window forces its one fetch and cannot stall in Loading.
+ *   - "timer" — the 5s auto-refresh tick. It fetches ONLY in active (history is
+ *     on-demand and never polled), so it returns null in any history mode.
+ * @param {object} mode — the current runsMode
+ * @param {"explicit"|"timer"} trigger
+ * @returns {string|null} the query (no leading "?"), or null = do not fetch
+ */
+export function runsFetchDecision(mode, trigger) {
+  if (trigger === "explicit") return runsQuery(mode);
+  if (trigger === "timer" && shouldAutoRefreshRuns(mode)) return runsQuery(mode);
+  return null;
+}
+
+/**
+ * The SINGLE runs-fetch executor (DOM-free): consult runsFetchDecision, and when
+ * a fetch is due, capture the runs-mode binding {scope, epoch} at issue time,
+ * await the injected deps.fetch, and commit ONLY while (scope, epoch) is still
+ * current — a late response for a prior mode or a newer query is dropped without
+ * mutating state. Both the auto-refresh timer (trigger "timer") and explicit
+ * Owner mode switches (trigger "explicit") route through here. deps is injected
+ * so the browser supplies the real fetch + DOM commit and tests supply a
+ * recorder — the decision/capture/gate logic is exercised identically in both.
+ * @param {{token:*, runsMode:object, runsEpoch:number}} state
+ * @param {"explicit"|"timer"} trigger
+ * @param {{fetch:(token:*, query:string)=>Promise<object>, commit?:(state:object, data:object)=>void, error?:(state:object, err:unknown)=>void}} deps
+ * @returns {Promise<{fetched:boolean, applied:boolean, error?:boolean}>}
+ */
+export async function runsFetchOnce(state, trigger, deps) {
+  const query = runsFetchDecision(state && state.runsMode, trigger);
+  if (query === null) return { fetched: false };
+  const captured = runsRequestBinding(state);
+  try {
+    const data = await deps.fetch(state.token, query);
+    // A late response (the scope changed, or the epoch advanced under a newer
+    // query) MUST be dropped — never mutate runs / freshness / observation.
+    if (!isCurrentRunsMode(state, captured)) return { fetched: true, applied: false };
+    if (deps.commit) deps.commit(state, data);
+    return { fetched: true, applied: true };
+  } catch (err) {
+    // A late error is dropped the same way — a stale error never marks the
+    // current view stale.
+    if (!isCurrentRunsMode(state, captured)) return { fetched: true, applied: false };
+    if (deps.error) deps.error(state, err);
+    return { fetched: true, applied: false, error: true };
+  }
+}
+
 // ===== Browser bootstrap (runs ONLY with a DOM present) =====
 
 if (typeof document !== "undefined" && typeof window !== "undefined") {
@@ -648,6 +879,12 @@ function boot() {
     agentFilter: $("agent-filter"),
     runList: $("run-list"),
     runsEmpty: $("runs-empty"),
+    runsLoading: $("runs-loading"),
+    modeBar: $("mode-bar"),
+    rangeLabel: $("range-label"),
+    histFrom: $("hist-from"),
+    histTo: $("hist-to"),
+    histApply: $("hist-apply"),
     noSelection: $("no-selection"),
     detail: $("detail"),
     detailRunid: $("detail-runid"),
@@ -695,6 +932,12 @@ function boot() {
     // M12-17 selection epoch: advances on every selection change so an in-flight
     // activity request for a SUPERSEDED selection is dropped (isCurrentSelection).
     selectionEpoch: 0,
+    // M12-20 active-first / history-on-demand. runsMode defaults to active; the
+    // Owner switches to a bounded history window ONLY via an explicit action.
+    // runsEpoch advances on every mode action so an in-flight runs response for
+    // a prior mode/query can never overwrite the current view (isCurrentRunsMode).
+    runsMode: defaultRunsMode(),
+    runsEpoch: 0,
     // M12-17: opt-in notifications. notifyEnabled flips ONLY from the explicit
     // button click; observedTerminal is the per-page-session terminal map the
     // pure planner folds every runs/activity snapshot into (baseline-safe).
@@ -709,6 +952,8 @@ function boot() {
   // honest Notification capability (unsupported/denied → quietly disabled).
   els.notifyToggle.hidden = false;
   renderNotifyToggle(state);
+  // M12-20: render the active-first mode bar (no history fetched at boot).
+  renderModeBar(state);
 
   refreshRuns(state);
   state.runsTimer = setInterval(() => refreshRuns(state), RUNS_REFRESH_MS);
@@ -761,6 +1006,33 @@ function wireUi(state) {
   els.loadOlder.addEventListener("click", () => loadOlder(state));
   // The ONLY notification-enable path: an explicit Owner click (user gesture).
   els.notifyToggle.addEventListener("click", () => enableNotifications(state));
+  // M12-20: history is on-demand ONLY — fetched by an explicit Owner gesture,
+  // never at boot and never on the auto-refresh timer. Each preset button
+  // resolves a bounded window; the custom apply button resolves from/to. The
+  // active button returns to the active auto-refreshing view.
+  const presetBtns = els.modeBar ? els.modeBar.querySelectorAll("[data-preset]") : [];
+  for (const btn of presetBtns) {
+    btn.addEventListener("click", () => {
+      const mode = historyPresetMode(btn.dataset.preset, state.nowMs());
+      if (mode) switchRunsMode(state, mode);
+    });
+  }
+  if (els.histApply) {
+    els.histApply.addEventListener("click", () => {
+      const from = Date.parse(els.histFrom.value);
+      const to = Date.parse(els.histTo.value);
+      // historyCustomMode mirrors the server's bounded-window rules; a malformed
+      // / inverted / over-cap / future window is rejected client-side (the HTTP
+      // boundary re-validates). A failed parse shows a bounded error state.
+      const mode = historyCustomMode(from, to, state.nowMs());
+      if (mode) switchRunsMode(state, mode);
+      else renderModeBar(state, "invalid window — choose a bounded range up to 7d, not in the future");
+    });
+  }
+  const activeBtn = els.modeBar ? els.modeBar.querySelector('[data-mode="active"]') : null;
+  if (activeBtn) {
+    activeBtn.addEventListener("click", () => switchRunsMode(state, defaultRunsMode()));
+  }
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && state.selectedRunId) pollOnce(state);
   });
@@ -836,34 +1108,89 @@ function observeActivityTerminal(state, page) {
 
 // ===== Run list =====
 
-async function refreshRuns(state) {
-  try {
-    const data = await fetchJson(state.token, `/api/runs?limit=${RUNS_LIMIT}`);
-    state.runs = data && Array.isArray(data.runs) ? data.runs : [];
-    // Runs-list freshness owns ONLY runsFresh + sessionEnded. It must NOT touch
-    // activityFresh: a successful runs refresh cannot heal a failed/unavailable
-    // activity read (M12-8 separation). A 200 also proves the token still works.
-    state.runsFresh = true;
-    state.sessionEnded = false;
-    // Terminal-transition observation (M12-17): the pure planner folds the new
-    // list into the per-session observed map. The map updates whether or not
-    // notifications are enabled (enabling later never fires a backlog), the
-    // post-load baseline never notifies, and absence from the bounded list is
-    // never treated as terminal.
-    const plan = planTerminalNotifications(state.observedTerminal, state.runs);
-    state.observedTerminal = plan.observed;
-    if (state.notifyEnabled) for (const n of plan.notifications) fireNotification(n);
-    renderAgentFilter(state);
-    renderRunList(state);
-    // Selection retention (M12-17): a selected run that falls out of the
-    // bounded list STAYS selected — the detail keeps refreshing via the
-    // activity poll, and "not in the list" is never reported as terminal.
-    if (state.selectedRunId) renderDetail(state);
-    setStatus(state);
-  } catch (err) {
-    onFetchError(state, err, "runs");
-    renderRunList(state);
+// M12-20: switch the runs view to a new mode (active / a history preset / a
+// custom history window). Owner action only — setRunsMode clears the prior
+// mode's list (bounded loading state), bumps the runs epoch (dropping any
+// in-flight response for the prior mode/query), then one fetch is issued for
+// the new mode. History is fetched exactly once per action; the auto-refresh
+// timer stays a no-op until the Owner returns to active.
+function switchRunsMode(state, mode) {
+  setRunsMode(state, mode);
+  renderModeBar(state);
+  renderRunList(state);
+  // An explicit Owner mode action forces EXACTLY ONE fetch for the new mode
+  // (active OR history). force:true routes through the "explicit" trigger, which
+  // is never gated by shouldAutoRefreshRuns — so a history switch always fetches
+  // once and never stalls in Loading. The 5s timer keeps the gated "timer"
+  // trigger and is a no-op in history. One fetch path, no second state machine.
+  refreshRuns(state, { force: true });
+}
+
+// Render the mode bar: the active/preset highlight, the bounded history-window
+// label (local time), and the bounded loading/empty/error states. The label
+// carries ONLY the window bounds the Owner already chose — never a path/session.
+function renderModeBar(state, errMsg) {
+  const els = state.els;
+  if (!els.modeBar) return;
+  const mode = state.runsMode;
+  const isActive = !mode || mode.scope !== "history";
+  // Highlight the current mode control (active button / matching preset).
+  const activeBtn = els.modeBar.querySelector('[data-mode="active"]');
+  if (activeBtn) activeBtn.classList.toggle("current", isActive);
+  for (const btn of els.modeBar.querySelectorAll("[data-preset]")) {
+    btn.classList.toggle("current", !isActive && mode.preset === btn.dataset.preset);
   }
+  // Range label: "last <preset>" or a custom local-time window. Active → blank.
+  if (els.rangeLabel) {
+    els.rangeLabel.textContent = historyRangeLabel(mode, (ms) => new Date(ms).toLocaleString());
+  }
+  // Bounded error state (closed-set message, never raw exception/path text).
+  if (els.rangeLabel && typeof errMsg === "string" && errMsg.length) {
+    els.rangeLabel.textContent = errMsg;
+  }
+}
+
+// Apply a committed runs response: set the list + freshness, fold terminal
+// transitions, and re-render. Shared by the single runsFetchOnce commit path.
+function applyRunsResult(state, data) {
+  state.runs = data && Array.isArray(data.runs) ? data.runs : [];
+  // Runs-list freshness owns ONLY runsFresh + sessionEnded. It must NOT touch
+  // activityFresh: a successful runs refresh cannot heal a failed/unavailable
+  // activity read (M12-8 separation). A 200 also proves the token still works.
+  state.runsFresh = true;
+  state.sessionEnded = false;
+  // Terminal-transition observation (M12-17): the pure planner folds the new
+  // list into the per-session observed map. The map updates whether or not
+  // notifications are enabled (enabling later never fires a backlog), the
+  // post-load baseline never notifies, and absence from the bounded list is
+  // never treated as terminal. M12-20: this holds across mode changes too —
+  // a run leaving the active set or a history window is never marked terminal.
+  const plan = planTerminalNotifications(state.observedTerminal, state.runs);
+  state.observedTerminal = plan.observed;
+  if (state.notifyEnabled) for (const n of plan.notifications) fireNotification(n);
+  renderAgentFilter(state);
+  renderRunList(state);
+  // Selection retention (M12-17): a selected run that falls out of the bounded
+  // list STAYS selected — the detail keeps refreshing via the activity poll, and
+  // "not in the list" is never reported as terminal.
+  if (state.selectedRunId) renderDetail(state);
+  setStatus(state);
+}
+
+// The SINGLE runs-fetch entry. Both the auto-refresh timer and explicit Owner
+// mode switches route through here — there is no second fetch path. An explicit
+// switch passes {force:true} so runsFetchOnce uses the "explicit" trigger (always
+// exactly one fetch for the new mode, active OR history, never gated — so
+// switching to a bounded history window cannot stall in Loading). The timer uses
+// the default "timer" trigger (fetches only in active; a no-op in history, so
+// history is never polled). The decision/capture/gate logic lives in
+// runsFetchOnce; this just wires the real fetch + DOM commit/error.
+async function refreshRuns(state, opts = {}) {
+  await runsFetchOnce(state, opts.force ? "explicit" : "timer", {
+    fetch: (token, query) => fetchJson(token, `/api/runs?${query}`),
+    commit: applyRunsResult,
+    error: (s, err) => { onFetchError(s, err, "runs"); renderRunList(s); },
+  });
 }
 
 function renderAgentFilter(state) {
@@ -889,8 +1216,13 @@ function renderRunList(state) {
   const ul = state.els.runList;
   const filtered = filterRuns(state.runs, state.filters);
   ul.textContent = "";
+  // M12-20 bounded states: a mode switch clears the list and marks it loading
+  // (runsFresh === null) — show "loading" rather than "no runs" until the new
+  // view's first response. Empty vs loading are distinct, never conflated.
+  const loading = state.runsFresh === null && state.runs.length === 0;
+  if (state.els.runsLoading) state.els.runsLoading.hidden = !loading;
   if (filtered.length === 0) {
-    state.els.runsEmpty.hidden = false;
+    state.els.runsEmpty.hidden = loading; // hide "no runs" while loading
     return;
   }
   state.els.runsEmpty.hidden = true;

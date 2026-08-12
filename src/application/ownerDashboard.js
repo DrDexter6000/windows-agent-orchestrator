@@ -105,17 +105,30 @@ function projectLiveness(checkFn, runDir, runId, nowMs) {
  * Delegates to listRuns (workspace-bound, fail-closed per run, safe summaries).
  * Never throws on a missing runDir — listRuns returns an empty list.
  *
+ * M12-20: threads scanScope / historyRange / now / readSummaryFn into the ONE
+ * listRuns SSOT for the dashboard active-first / history-on-demand model, and
+ * echoes scanScope in the result so the HTTP client can guard mode/epoch races.
+ * The service result NEVER carries unresolvedCount (dropped here for every
+ * scope); active/history merely add the scanScope label.
+ *
  * @param {object} input
  * @param {string} input.runDir — server-owned runs/ directory
  * @param {string} input.workspaceRoot — server-owned canonical Git root
  * @param {string[]} [input.knownAgentIds] — registry ids for agentId validation
  * @param {number} [input.latest] — bounded recent-runs cap (1..OWNER_RUNS_LIMIT_MAX)
+ * @param {"active"|"history"} [input.scanScope] — M12-20 active/history scope
+ * @param {{fromMs:number, toMs:number}} [input.historyRange] — bounded history window
+ * @param {number} [input.now] — clock (ms) for liveness (default Date.now())
+ * @param {Function} [input.readSummaryFn] — M12-18/M12-20 cached facts reader
+ *   (the long-lived dashboard server threads the run-summary cache here so warm
+ *   history reads do not reparse transcripts)
  * @param {Function} [input.listRunsFn] — injectable (testing)
- * @returns {Promise<{runs: object[], returnedCount: number, matchedCount: number, truncated: boolean}>}
+ * @returns {Promise<{runs: object[], returnedCount: number, matchedCount: number, truncated: boolean, scanScope?: string}>}
  */
 export async function getOwnerRuns(input) {
   const {
     runDir, workspaceRoot, knownAgentIds = [], latest,
+    scanScope, historyRange, now, readSummaryFn,
     listRunsFn,
   } = input;
   const list = listRunsFn ?? listRuns;
@@ -125,14 +138,21 @@ export async function getOwnerRuns(input) {
     authorizedWorkspaceRoot: workspaceRoot,
     knownAgentIds,
     ...(latest !== undefined && latest !== null ? { latest } : {}),
+    ...(scanScope ? { scanScope } : {}),
+    ...(scanScope === "history" && historyRange ? { historyRange } : {}),
+    ...(typeof now === "number" && Number.isFinite(now) ? { nowMs: now } : {}),
+    ...(readSummaryFn ? { readSummaryFn } : {}),
   });
 
-  return {
+  const out = {
     runs: result.runs,
     returnedCount: result.runs.length,
     matchedCount: result.matchedCount,
     truncated: latest != null && result.matchedCount > result.runs.length,
   };
+  // Echo the scope so a client can guard mode/epoch races (absent in default).
+  if (typeof result.scanScope === "string") out.scanScope = result.scanScope;
+  return out;
 }
 
 /**

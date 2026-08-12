@@ -770,3 +770,360 @@ test("M12-15-MCP-02: runs_list maps activityStatus/activityBasis + unresolvedCou
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+// ── M12-20: Owner Dashboard active-first / history-on-demand (listRuns scope) ──
+//
+// The dashboard fast-path extends the ONE listRuns SSOT with a scanScope input
+// (it is NOT a second classifier). scanScope:"active" enumerates owner-lease
+// candidates (.owner-<runId> files) instead of opening/parsing every run
+// transcript, reuses the same per-run workspace + activity classification,
+// includes ONLY proven-active runs, returns scanScope:"active", and OMITS
+// unresolvedCount (active scope skips the full-inventory unresolved
+// classification, so a count would be a lie). scanScope:"history" scans run
+// files but filters by the transcript-derived summary updatedAt over a bounded
+// inclusive range. The default scope (no scanScope — MCP runs_list / CLI) is
+// byte-identical to before: full scan, unresolvedCount present.
+
+// A run with a current owner lease (the active-mode candidate signal). The file
+// body is irrelevant here because freshness is injected via checkLivenessFn; the
+// enumeration only needs the .owner-<runId> file to EXIST.
+function mActiveLease(runDir, runId) {
+  writeFileSync(join(runDir, `.owner-${runId}`), "{}", "utf8");
+}
+
+test("M12-20-ACT-01: active scope enumerates .owner-* lease candidates, NOT every transcript", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "wao-m1220-act01-"));
+  const ROOT = "C:\\Target\\Repo";
+  const active = "run_20260701170000020alpha";
+  const stale = "run_20260701170000021bravo";
+  const historical = "run_20260701170000022charlie"; // NO lease → not a candidate
+  for (const id of [active, stale, historical]) m1215EmptyRunFile(runDir, id);
+  mActiveLease(runDir, active);
+  mActiveLease(runDir, stale);
+  // historical intentionally gets NO .owner-* lease.
+  const eventsByFile = new Map([
+    [`${active}.jsonl`, m1215Events(active, ROOT, "running")],
+    [`${stale}.jsonl`, m1215Events(stale, ROOT, "running")],
+    [`${historical}.jsonl`, m1215Events(historical, ROOT, "completed")],
+  ]);
+  const reads = [];
+  const liveness = m1215LivenessSpy({
+    [active]: { fresh: true, heartbeatAt: M12_15_NOW - 500 },
+    [stale]: { fresh: false, heartbeatAt: M12_15_NOW - 99999 },
+  });
+  try {
+    const { listRuns } = await import("../src/application/runList.js");
+    const result = await listRuns({
+      runDir, scanScope: "active",
+      nowMs: M12_15_NOW, checkLivenessFn: liveness.fn,
+      readTranscriptFn: async (fp) => { reads.push(basename(fp)); return eventsByFile.get(basename(fp)); },
+      createWorkspaceVerifierFn: () => m1215Verifier(ROOT),
+      knownAgentIds: ["coder_low"],
+    });
+    assert.deepEqual(result.runs.map((r) => r.runId), [active], "only the proven-active run is included");
+    assert.equal(result.runs[0].activityStatus, "active");
+    assert.equal(result.scanScope, "active");
+    assert.ok(!("unresolvedCount" in result), "unresolvedCount ABSENT (active scope skips the full-inventory unresolved classification, never 0)");
+    // Only candidate transcripts (current lease holders) were parsed; the
+    // historical transcript was never opened/parsed — the expensive per-run work
+    // is O(current leases), not the inventory (the directory is still enumerated).
+    assert.ok(reads.includes(`${active}.jsonl`), "active candidate parsed");
+    assert.ok(reads.includes(`${stale}.jsonl`), "stale-lease candidate parsed (it IS a candidate)");
+    assert.ok(!reads.includes(`${historical}.jsonl`), "historical transcript never opened/parsed in active mode");
+  } finally { rmSync(runDir, { recursive: true, force: true }); }
+});
+
+test("M12-20-ACT-02: stale / missing / corrupt heartbeat candidates are excluded, NEVER inferred terminal", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "wao-m1220-act02-"));
+  const ROOT = "C:\\Target\\Repo";
+  const fresh = "run_20260701170000030delta";
+  const stale = "run_20260701170000031echo";
+  const missing = "run_20260701170000032foxtrot";
+  const corruptHb = "run_20260701170000033golf";
+  for (const id of [fresh, stale, missing, corruptHb]) {
+    m1215EmptyRunFile(runDir, id);
+    mActiveLease(runDir, id);
+  }
+  const eventsByFile = new Map(
+    [fresh, stale, missing, corruptHb].map((id) => [`${id}.jsonl`, m1215Events(id, ROOT, "running")]),
+  );
+  const liveness = m1215LivenessSpy({
+    [fresh]: { fresh: true, heartbeatAt: M12_15_NOW - 500 },
+    [stale]: { fresh: false, heartbeatAt: M12_15_NOW - 99999 },
+    [missing]: { fresh: false, heartbeatAt: null },
+    [corruptHb]: { fresh: false, heartbeatAt: null },
+  });
+  try {
+    const { listRuns } = await import("../src/application/runList.js");
+    const result = await listRuns({
+      runDir, scanScope: "active", nowMs: M12_15_NOW, checkLivenessFn: liveness.fn,
+      readTranscriptFn: m1215Reader(eventsByFile),
+      createWorkspaceVerifierFn: () => m1215Verifier(ROOT),
+      knownAgentIds: ["coder_low"],
+    });
+    assert.deepEqual(result.runs.map((r) => r.runId), [fresh], "only the fresh-lease run is active");
+    // None of the excluded candidates is ever labeled failed/dead/stopped/terminal.
+    for (const r of result.runs) {
+      assert.equal(r.terminal, false);
+      assert.notEqual(r.activityStatus, "failed");
+    }
+    assert.ok(!("unresolvedCount" in result), "active scope never reports unresolvedCount");
+  } finally { rmSync(runDir, { recursive: true, force: true }); }
+});
+
+test("M12-20-ACT-03: candidate with corrupt/missing transcript is excluded fail-closed (not terminal)", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "wao-m1220-act03-"));
+  const ROOT = "C:\\Target\\Repo";
+  const fresh = "run_20260701170000040hotel";
+  const ghost = "run_20260701170000041india"; // lease exists, transcript read throws
+  for (const id of [fresh, ghost]) {
+    m1215EmptyRunFile(runDir, id);
+    mActiveLease(runDir, id);
+  }
+  const eventsByFile = new Map([[`${fresh}.jsonl`, m1215Events(fresh, ROOT, "running")]]);
+  const liveness = m1215LivenessSpy({
+    [fresh]: { fresh: true, heartbeatAt: M12_15_NOW - 500 },
+    [ghost]: { fresh: true, heartbeatAt: M12_15_NOW - 500 },
+  });
+  try {
+    const { listRuns } = await import("../src/application/runList.js");
+    const result = await listRuns({
+      runDir, scanScope: "active", nowMs: M12_15_NOW, checkLivenessFn: liveness.fn,
+      readTranscriptFn: async (fp) => {
+        if (basename(fp) === `${ghost}.jsonl`) throw new Error("ENOENT");
+        return eventsByFile.get(basename(fp));
+      },
+      createWorkspaceVerifierFn: () => m1215Verifier(ROOT),
+      knownAgentIds: ["coder_low"],
+    });
+    // The fresh run is active; the ghost candidate (unreadable transcript) is
+    // silently excluded — never surfaced as terminal/failed.
+    assert.deepEqual(result.runs.map((r) => r.runId), [fresh]);
+    assert.equal(result.runs[0].activityStatus, "active");
+  } finally { rmSync(runDir, { recursive: true, force: true }); }
+});
+
+test("M12-20-ACT-04: cross-workspace candidate excluded; terminal-state candidate excluded", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "wao-m1220-act04-"));
+  const ROOT = "C:\\Target\\Repo";
+  const active = "run_20260701170000050juliet";
+  const foreign = "run_20260701170000051kilo"; // lease in ANOTHER workspace
+  const done = "run_20260701170000052lima"; // lease present but run already terminal
+  for (const id of [active, foreign, done]) {
+    m1215EmptyRunFile(runDir, id);
+    mActiveLease(runDir, id);
+  }
+  const eventsByFile = new Map([
+    [`${active}.jsonl`, m1215Events(active, ROOT, "running")],
+    [`${foreign}.jsonl`, m1215Events(foreign, "D:\\Other\\Repo", "running")],
+    [`${done}.jsonl`, m1215Events(done, ROOT, "completed")],
+  ]);
+  const liveness = m1215LivenessSpy({
+    [active]: { fresh: true, heartbeatAt: M12_15_NOW - 500 },
+    [foreign]: { fresh: true, heartbeatAt: M12_15_NOW - 500 },
+    [done]: { fresh: true, heartbeatAt: M12_15_NOW - 500 },
+  });
+  try {
+    const { listRuns } = await import("../src/application/runList.js");
+    const result = await listRuns({
+      runDir, scanScope: "active", nowMs: M12_15_NOW, checkLivenessFn: liveness.fn,
+      readTranscriptFn: m1215Reader(eventsByFile),
+      authorizedWorkspaceRoot: ROOT,
+      createWorkspaceVerifierFn: () => m1215Verifier(ROOT),
+      knownAgentIds: ["coder_low"],
+    });
+    assert.deepEqual(result.runs.map((r) => r.runId), [active], "foreign + terminal candidates excluded");
+    assert.equal(result.scanScope, "active");
+  } finally { rmSync(runDir, { recursive: true, force: true }); }
+});
+
+test("M12-20-ACT-05: default scope (no scanScope) is byte-identical — full scan, unresolvedCount present", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "wao-m1220-act05-"));
+  const ROOT = "C:\\Target\\Repo";
+  const active = "run_20260701170000060mike";
+  const stale = "run_20260701170000061november";
+  const done = "run_20260701170000062oscar";
+  for (const id of [active, stale, done]) m1215EmptyRunFile(runDir, id);
+  // NOTE: no .owner-* leases are required for the default full scan.
+  const eventsByFile = new Map([
+    [`${active}.jsonl`, m1215Events(active, ROOT, "running")],
+    [`${stale}.jsonl`, m1215Events(stale, ROOT, "running")],
+    [`${done}.jsonl`, m1215Events(done, ROOT, "completed")],
+  ]);
+  const liveness = m1215LivenessSpy({
+    [active]: { fresh: true, heartbeatAt: M12_15_NOW - 500 },
+    [stale]: { fresh: false, heartbeatAt: M12_15_NOW - 99999 },
+  });
+  try {
+    const { listRuns } = await import("../src/application/runList.js");
+    const result = await listRuns({
+      runDir, nowMs: M12_15_NOW, checkLivenessFn: liveness.fn,
+      readTranscriptFn: m1215Reader(eventsByFile),
+      createWorkspaceVerifierFn: () => m1215Verifier(ROOT),
+      knownAgentIds: ["coder_low"],
+    });
+    // MCP/CLI default path unchanged: every run scanned, unresolvedCount present.
+    assert.equal(result.runs.length, 3);
+    assert.ok(!("scanScope" in result), "default scope carries no scanScope");
+    assert.equal(result.unresolvedCount, 1, "default scope still reports the full-scan count");
+  } finally { rmSync(runDir, { recursive: true, force: true }); }
+});
+
+// History events with a controllable updatedAt (the transcript-derived summary
+// timestamp the range filter keys on — NOT filesystem mtime).
+function histEvents(runId, cwd, updatedAtIso, state = "running") {
+  const base = m1215Events(runId, cwd, state);
+  // Tag the last event with the requested ts so extractRunFacts derives it.
+  base[base.length - 1].ts = updatedAtIso;
+  return base;
+}
+
+test("M12-20-HIST-01: history scope filters by transcript updatedAt; inclusive boundaries", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "wao-m1220-hist01-"));
+  const ROOT = "C:\\Target\\Repo";
+  const anchor = Date.parse("2026-07-01T00:00:00.000Z");
+  const atFrom = "run_20260701170000070papa"; // updatedAt == fromMs (inclusive)
+  const inside = "run_20260701170000071quebec"; // inside the range
+  const atTo = "run_20260701170000072romeo"; // updatedAt == toMs (inclusive)
+  const before = "run_20260701170000073sierra"; // before the range
+  const after = "run_20260701170000074tango"; // after the range
+  for (const id of [atFrom, inside, atTo, before, after]) m1215EmptyRunFile(runDir, id);
+  const iso = (off) => new Date(anchor + off).toISOString();
+  const eventsByFile = new Map([
+    [`${atFrom}.jsonl`, histEvents(atFrom, ROOT, iso(-1000))],
+    [`${inside}.jsonl`, histEvents(inside, ROOT, iso(-400))],
+    [`${atTo}.jsonl`, histEvents(atTo, ROOT, iso(0))],
+    [`${before}.jsonl`, histEvents(before, ROOT, iso(-9999))],
+    [`${after}.jsonl`, histEvents(after, ROOT, iso(5000))],
+  ]);
+  try {
+    const { listRuns } = await import("../src/application/runList.js");
+    const result = await listRuns({
+      runDir, scanScope: "history", historyRange: { fromMs: anchor - 1000, toMs: anchor },
+      readTranscriptFn: m1215Reader(eventsByFile),
+      createWorkspaceVerifierFn: () => m1215Verifier(ROOT),
+      knownAgentIds: ["coder_low"],
+    });
+    const ids = result.runs.map((r) => r.runId).sort();
+    assert.deepEqual(ids, [atFrom, atTo, inside].sort(), "inclusive of both boundaries; before/after excluded");
+    assert.equal(result.scanScope, "history");
+    assert.ok(!("unresolvedCount" in result), "history scope omits unresolvedCount (bounded, not full inventory)");
+  } finally { rmSync(runDir, { recursive: true, force: true }); }
+});
+
+test("M12-20-HIST-02: history shows terminal+active+unresolved runs (activeOnly NOT forced); null updatedAt excluded", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "wao-m1220-hist02-"));
+  const ROOT = "C:\\Target\\Repo";
+  const anchor = Date.parse("2026-07-01T00:00:00.000Z");
+  const inRange = ["run_20260701170000080uniform", "run_20260701170000081victor", "run_20260701170000082whiskey"];
+  const noTs = "run_20260701170000083xray"; // events with no parseable ts → updatedAt null
+  for (const id of [...inRange, noTs]) m1215EmptyRunFile(runDir, id);
+  const iso = (off) => new Date(anchor + off).toISOString();
+  const eventsByFile = new Map([
+    [`${inRange[0]}.jsonl`, histEvents(inRange[0], ROOT, iso(-100), "running")],
+    [`${inRange[1]}.jsonl`, histEvents(inRange[1], ROOT, iso(-100), "completed")],
+    [`${inRange[2]}.jsonl`, histEvents(inRange[2], ROOT, iso(-100), "running")],
+    // No ts on any event → extractRunFacts yields updatedAt:null → excluded.
+    [`${noTs}.jsonl`, [
+      { type: "run.started", runId: noTs, agentId: "coder_low" },
+      { type: "run.background_submitted", runId: noTs, agentId: "coder_low", cwd: ROOT, background: true },
+    ]],
+  ]);
+  const liveness = m1215LivenessSpy({
+    [inRange[0]]: { fresh: true, heartbeatAt: anchor - 500 },
+    [inRange[2]]: { fresh: false, heartbeatAt: anchor - 99999 },
+  });
+  try {
+    const { listRuns } = await import("../src/application/runList.js");
+    const result = await listRuns({
+      runDir, scanScope: "history", historyRange: { fromMs: anchor - 1000, toMs: anchor },
+      nowMs: anchor, checkLivenessFn: liveness.fn,
+      readTranscriptFn: m1215Reader(eventsByFile),
+      createWorkspaceVerifierFn: () => m1215Verifier(ROOT),
+      knownAgentIds: ["coder_low"],
+    });
+    const byId = new Map(result.runs.map((r) => [r.runId, r]));
+    assert.equal(result.runs.length, 3, "terminal + active + unresolved all visible in range");
+    assert.equal(byId.get(inRange[0]).activityStatus, "active");
+    assert.equal(byId.get(inRange[1]).activityStatus, "terminal");
+    assert.equal(byId.get(inRange[2]).activityStatus, "unresolved");
+    assert.ok(!byId.has(noTs), "run with null updatedAt cannot be placed in time → excluded");
+  } finally { rmSync(runDir, { recursive: true, force: true }); }
+});
+
+test("M12-20-HIST-03: history reuses readSummaryFn (warm cache) — cold first read, warm second read, no reparse", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "wao-m1220-hist03-"));
+  const ROOT = "C:\\Target\\Repo";
+  const anchor = Date.parse("2026-07-01T00:00:00.000Z");
+  const id = "run_20260701170000090yankee";
+  m1215EmptyRunFile(runDir, id);
+  const events = histEvents(id, ROOT, new Date(anchor - 100).toISOString(), "completed");
+  // A tiny stand-in for createRunSummaryCache: serves facts keyed by resolved
+  // path. The FIRST read for a path is cold (reparse); the SAME path read again
+  // is warm (facts reused — no reparse). This is the contract the long-lived
+  // dashboard server relies on by threading readSummaryFn = (fp) => cache.read(fp).
+  const { extractRunFacts } = await import("../src/application/runList.js");
+  const facts = extractRunFacts(events);
+  const underlying = new Map(); // empty → first read is cold
+  const stats = { warmHits: 0, coldReads: 0 };
+  const readSummaryFn = async (fp) => {
+    if (underlying.has(fp)) { stats.warmHits += 1; return underlying.get(fp); }
+    stats.coldReads += 1;
+    underlying.set(fp, facts);
+    return facts;
+  };
+  try {
+    const { listRuns } = await import("../src/application/runList.js");
+    const once = await listRuns({
+      runDir, scanScope: "history", historyRange: { fromMs: anchor - 1000, toMs: anchor },
+      readSummaryFn,
+      createWorkspaceVerifierFn: () => m1215Verifier(ROOT),
+      knownAgentIds: ["coder_low"],
+    });
+    assert.equal(once.runs.length, 1);
+    assert.equal(stats.coldReads, 1, "first bounded history read is cold (one parse)");
+    assert.equal(stats.warmHits, 0, "no warm hit on the first read");
+    const twice = await listRuns({
+      runDir, scanScope: "history", historyRange: { fromMs: anchor - 1000, toMs: anchor },
+      readSummaryFn,
+      createWorkspaceVerifierFn: () => m1215Verifier(ROOT),
+      knownAgentIds: ["coder_low"],
+    });
+    assert.equal(twice.runs.length, 1);
+    assert.equal(stats.coldReads, 1, "warm history read reuses facts — still one parse total");
+    assert.equal(stats.warmHits, 1, "second bounded read is warm (no reparse)");
+  } finally { rmSync(runDir, { recursive: true, force: true }); }
+});
+
+test("M12-20-HIST-04: corrupt transcript in history scope is skipped fail-closed (never terminal); limits truncate", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "wao-m1220-hist04-"));
+  const ROOT = "C:\\Target\\Repo";
+  const anchor = Date.parse("2026-07-01T00:00:00.000Z");
+  const good1 = "run_20260701170000091zulu";
+  const good2 = "run_20260701170000092alpha"; // later updatedAt → sorts first
+  const broken = "run_20260701170000093bravo"; // read throws → skipped, never terminal
+  for (const id of [good1, good2, broken]) m1215EmptyRunFile(runDir, id);
+  const iso = (off) => new Date(anchor + off).toISOString();
+  const eventsByFile = new Map([
+    [`${good1}.jsonl`, histEvents(good1, ROOT, iso(-300), "completed")],
+    [`${good2}.jsonl`, histEvents(good2, ROOT, iso(-100), "completed")],
+  ]);
+  try {
+    const { listRuns } = await import("../src/application/runList.js");
+    // latest:1 truncates to the newest in-range run; the corrupt run is skipped.
+    const result = await listRuns({
+      runDir, scanScope: "history", historyRange: { fromMs: anchor - 1000, toMs: anchor },
+      latest: 1,
+      readTranscriptFn: async (fp) => {
+        if (basename(fp) === `${broken}.jsonl`) throw new Error("ENOENT");
+        return eventsByFile.get(basename(fp));
+      },
+      createWorkspaceVerifierFn: () => m1215Verifier(ROOT),
+      knownAgentIds: ["coder_low"],
+    });
+    assert.deepEqual(result.runs.map((r) => r.runId), [good2], "newest in-range run after limit; corrupt skipped");
+    assert.equal(result.matchedCount, 2, "matchedCount is the in-range count BEFORE the limit");
+    assert.equal(result.scanScope, "history");
+    for (const r of result.runs) assert.equal(r.runId !== broken, true, "broken run never surfaced");
+  } finally { rmSync(runDir, { recursive: true, force: true }); }
+});

@@ -214,6 +214,14 @@ Owner Dashboard 增加选中 run 的 backend/stage/terminal/event count/scope/li
 
 重启后的 Fresh Host 在该精确 HEAD 上完成一次只读消费者验收：cold `lead_preflight` 3.422s，随后 warm `runs_list(limit:10)` 0.556s、warm `lead_preflight` 0.848s；两次 preflight 都返回 `complete=true`、6 workers、active=0、unresolved=4、warnings 为空，workspace HEAD 与结果事实一致。验收未派发 worker、未修改 transcript 或仓库。Verdict：`PASS_M12_18_FRESH_HOST_QUERY_CACHE`。
 
+### M12-20 Owner Dashboard active-first / history-on-demand（2026-08-12，本地候选）
+
+目标是降低人类 Owner 的观察延迟，且不改变 Lead MCP 语义。Owner 看板默认打开 **Active** 模式：只列出当前有新鲜 owner 心跳、经证明 active 的 run；候选集是当前的 `.owner-*` 租约文件（backgroundRunner 每 2s 写入、退出删除）——候选枚举只 `readdirSync` 一次 runDir 目录（成本随目录条目总数增长、包括历史 transcript，但仅一次目录读），随后只有当前租约候选者的 transcript 被打开/解析/验证。机器可检地，50 份历史 + 1 个当前租约时 active 恰好打开/解析 1 份 transcript（`M12-20-LAT-01`），即昂贵的 per-run 工作（transcript 解析 + per-run workspace 验证 + `ownerLiveness`）随当前租约数而非历史库存规模放大（目录枚举除外）。Active 响应固定标注 `scanScope=active`，且**不**携带 `unresolvedCount`（active scope 不做全库存 unresolved 分类，故该计数**恒缺失而非 0**）；缺省 scope（`/api/runs?limit=N`）即 active。
+
+历史是**显式、有界、按需**：Owner 选择 `1h`/`24h`/`7d` 预设或有界自定义 from/to（上限 7d；HTTP 闭集严格校验，禁止未知/重复/ malformed/未来/倒序/越界/不一致范围，固定 400）。范围按 transcript 派生的 summary `updatedAt` 过滤（非文件系统 mtime），并复用 M12-18 长驻看板服务进程内的元数据校验 summary 缓存做热读——**无第二个持久索引**。看板每 5s 仅在 Active 自动刷新；历史**不**自动轮询，每个历史 fetch 都是显式 Owner 操作。前端绑定 runs-mode epoch：迟到的 Active 或 History 响应**不得**覆盖当前模式或更新的查询（runs 列表的 race guard，类比既有 selection epoch guard）；run 从 active 集或有界历史窗口消失**绝不**构成终态迁移、**不**触发通知。
+
+单一 `listRuns` 应用 SSOT 以 `scanScope`/`historyRange` 输入扩展（`active` 枚举租约候选、`history` 有界范围过滤、缺省行为字节不变），**不是**第二个分类器；复用既有 `ownerLiveness` 心跳真相与 closed-set activity 分类。MCP `lead_preflight`/`runs_list` 热路径、CLI 文本看板、transcript writer、delivery 语义、依赖与验收权威**均未改动**；运行时仍无第三方依赖。本段只记录本地候选，尚未发布或完成 Fresh Host 验收。
+
 ### 第三方 onboarding helper 发布与 Fresh Host 验收（2026-08-08）
 
 第三方 onboarding helper 已以普通 fast-forward 发布到 `main@4c06496146827f2d0dd993fde3d0ba372ae28d8d`。从公开 GitHub URL 创建的全新 clone 精确落在该 SHA；锁定依赖安装成功，默认 preview 与选定 worker preview 均为零写入，`--apply` 生成仅含 `coder_low` 的有效私有 registry，生产 `registry validate` 通过，显式 `--endorse-worker coder_low` 只写既有 `manualOverride:"cleared"` Owner 信号且不伪造认证状态。一次性 headless Codex Fresh Host 仅通过进程级 host-neutral MCP 配置连接该 clone，正式执行 `lead_preflight -> run_dispatch`（只读、no delivery）`-> run_await_result`；真实 run `run_20260808195141854w5bypg` 终态为 `completed`，返回唯一非空 assistant 文本 `CANARY_OK` / `project: windows-agent-orchestrator-poc`，无失败诊断，fresh clone HEAD/branch/tracked status 前后不变。首次无交互 Host 尝试在 `run_dispatch` 前因 Host approval 取消而结束，无 runId、无遗留 run；修正 Host 调用环境后在同一发布候选上完成上述唯一 worker canary。Verdict：`PASS_THIRD_PARTY_ONBOARDING_FRESH_HOST`。

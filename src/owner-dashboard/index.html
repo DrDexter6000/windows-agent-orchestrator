@@ -31,6 +31,31 @@
 
   <main id="app" class="layout" hidden>
     <section class="pane runs-pane" aria-label="Recent runs">
+      <!-- M12-20 active-first / history-on-demand. The dashboard defaults to
+           Active (only currently proven-active runs, auto-refreshed). History is
+           a bounded, EXPLICIT, on-demand window: a 1h/24h/7d preset or a custom
+           from/to capped at 7d. No history is fetched at boot or auto-polled;
+           every history fetch is an explicit Owner click (wired in app.js, no
+           inline handlers). The range label shows the chosen window in local
+           time; absence from either view is never a terminal transition. -->
+      <div id="mode-bar" class="mode-bar" data-default-mode="active">
+        <button class="mode-btn" type="button" data-mode="active">active</button>
+        <span class="mode-sep" aria-hidden="true">·</span>
+        <button class="mode-btn" type="button" data-preset="1h">1h</button>
+        <button class="mode-btn" type="button" data-preset="24h">24h</button>
+        <button class="mode-btn" type="button" data-preset="7d">7d</button>
+        <span class="mode-sep" aria-hidden="true">·</span>
+        <label class="hist-field">
+          <span class="visually-hidden">history from (local time)</span>
+          <input id="hist-from" type="datetime-local" aria-label="History from (local time)">
+        </label>
+        <label class="hist-field">
+          <span class="visually-hidden">history to (local time)</span>
+          <input id="hist-to" type="datetime-local" aria-label="History to (local time)">
+        </label>
+        <button id="hist-apply" class="mode-btn" type="button">show history</button>
+        <span id="range-label" class="range-label" aria-live="polite"></span>
+      </div>
       <div class="pane-head">
         <input id="search" class="filter-input" type="search"
                placeholder="filter run id…" autocomplete="off"
@@ -59,6 +84,7 @@
         </label>
       </div>
       <ul id="run-list" class="run-list" role="list"></ul>
+      <p id="runs-loading" class="empty muted" hidden>Loading…</p>
       <p id="runs-empty" class="empty muted" hidden>No runs.</p>
     </section>
 

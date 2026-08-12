@@ -49,6 +49,27 @@ function scanRunFiles(runDir) {
     .sort();
 }
 
+// M12-20: enumerate the CURRENT owner-lease candidates — the .owner-<runId>
+// heartbeat files backgroundRunner writes while a runner is alive (and deletes
+// on exit). This reads runDir once with readdirSync and filters to .owner-*
+// files: the directory read touches every entry (its cost grows with the total
+// directory size, including historical transcripts), but the EXPENSIVE downstream
+// work — opening/parsing each transcript, per-run workspace verification, and
+// ownerLiveness — runs ONLY for these lease candidates, so no historical
+// transcript is opened, parsed, or verified. The corresponding transcript file
+// is <runId>.jsonl (validated and read downstream exactly like a default-scan
+// file). isValidRunId filters any oddly-named lease file; the runId slice
+// matches ownerFilePath()'s naming.
+function scanOwnerLeaseCandidates(runDir) {
+  if (!existsSync(runDir)) return [];
+  const files = readdirSync(runDir);
+  return files
+    .filter((f) => f.startsWith(".owner-"))
+    .map((f) => f.slice(".owner-".length))
+    .filter((runId) => isValidRunId(runId))
+    .sort();
+}
+
 /**
  * Extract the smallest EXACT static run facts from parsed transcript events.
  *
@@ -149,12 +170,31 @@ function finalizeSummary(runId, facts, knownAgentIds, input) {
  *   read. Every query still re-applies workspace authorization,
  *   knownAgentIds, heartbeat, activeOnly, sorting and limit.
  * @param {Function} [input.createWorkspaceVerifierFn] — test injection
- * @returns {Promise<{runs: Array, matchedCount: number, unresolvedCount: number}>}
+ * @param {"active"|"history"} [input.scanScope] — M12-20: extends the ONE listRuns
+ *   SSOT (NOT a second classifier). "active" enumerates owner-lease candidates
+ *   (.owner-<runId>) via a single readdirSync of runDir and includes ONLY
+ *   proven-active runs — so the expensive per-run work (transcript open/parse +
+ *   workspace verification + ownerLiveness) is O(current lease candidates); no
+ *   historical transcript is opened or parsed (the directory read itself still
+ *   touches every entry). "history" scans run_*.jsonl and filters by a bounded
+ *   inclusive transcript-updated range. When ABSENT (MCP runs_list / CLI)
+ *   behavior is byte-identical to before: full scan + unresolvedCount.
+ * @param {{fromMs:number, toMs:number}} [input.historyRange] — M12-20: the
+ *   bounded inclusive [fromMs, toMs] window for scanScope:"history", keyed on
+ *   the transcript-derived summary updatedAt (not filesystem mtime). Ignored
+ *   unless scanScope === "history".
+ * @returns {Promise<{runs: Array, matchedCount: number, unresolvedCount?: number, scanScope?: string}>}
  *   - runs: array of {runId, agentId, state, terminal, updatedAt,
  *             activityStatus, activityBasis}
- *   - matchedCount: eligible runs AFTER the activeOnly filter, BEFORE the limit
- *   - unresolvedCount: full-scan count of known non-terminal runs lacking a
- *     fresh owner heartbeat (pre-limit, independent of activeOnly)
+ *   - matchedCount: eligible runs AFTER the activeOnly / active-scope / history
+ *     filter, BEFORE the limit
+ *   - unresolvedCount: ONLY in the default scope (scanScope absent): the
+ *     full-scan count of known non-terminal runs lacking a fresh owner
+ *     heartbeat (pre-limit, independent of activeOnly). ABSENT for
+ *     scanScope "active"|"history" (the full inventory is intentionally not
+ *     scanned in active; history reports a bounded window, not full health).
+ *   - scanScope: ONLY for scanScope "active"|"history" (echoes the input so a
+ *     client can guard mode/epoch races). ABSENT in the default scope.
  */
 export async function listRuns(input) {
   const {
@@ -167,6 +207,8 @@ export async function listRuns(input) {
     nowMs,
     checkLivenessFn,
     livenessThresholdMs,
+    scanScope,
+    historyRange,
   } = input;
   const _readTranscript = input.readTranscriptFn ?? readTranscript;
   // M12-15: one nowMs snapshot per call (truthful "is it active RIGHT NOW").
@@ -180,7 +222,6 @@ export async function listRuns(input) {
   const _checkLiveness = checkLivenessFn ?? checkOwnerLiveness;
 
   const resolvedRunDir = resolve(runDir);
-  const files = scanRunFiles(resolvedRunDir);
   let workspaceVerifier = null;
   if (authorizedWorkspaceRoot !== undefined) {
     const createVerifier = input.createWorkspaceVerifierFn ?? createRunWorkspaceVerifier;
@@ -189,15 +230,35 @@ export async function listRuns(input) {
     } catch {
       // Invalid/unprovable authority yields no visible runs, matching the prior
       // per-run fail-closed behavior without repeating the same failed proof.
-      return { runs: [], matchedCount: 0 };
+      // Echo scanScope for active/history so a client always knows the mode.
+      if (scanScope === undefined) return { runs: [], matchedCount: 0 };
+      return { runs: [], matchedCount: 0, scanScope };
     }
+  }
+
+  // M12-20: the candidate set depends on scanScope. "active" enumerates the
+  // CURRENT owner-lease candidates (.owner-<runId>) via a single readdirSync of
+  // runDir — the expensive per-run work (transcript open/parse + workspace
+  // verification + ownerLiveness) is O(current lease candidates); no historical
+  // transcript is opened or parsed. "history" and the default scope scan the
+  // run_*.jsonl inventory (history then filters by a bounded transcript-updated
+  // range below). Each candidate flows through the SAME downstream pipeline
+  // (facts → workspace → activity), so scanScope is an input to the ONE
+  // classifier, never a second classifier.
+  let candidates;
+  if (scanScope === "active") {
+    candidates = scanOwnerLeaseCandidates(resolvedRunDir)
+      .map((runId) => ({ runId, file: `${runId}.jsonl` }));
+  } else {
+    candidates = scanRunFiles(resolvedRunDir)
+      .map((file) => ({ runId: file.replace(/\.jsonl$/, ""), file }));
   }
 
   const summaries = [];
   let unresolvedCount = 0;
-  for (const file of files) {
-    const runId = file.replace(/\.jsonl$/, "");
-    // Validate runId from filename
+  for (const { runId, file } of candidates) {
+    // Validate runId from filename / lease-name (active candidates are already
+    // pre-filtered; this is a no-op for them and kept for default/history).
     if (!isValidRunId(runId)) continue;
 
     // Static run facts come from ONE of two exact sources:
@@ -249,6 +310,19 @@ export async function listRuns(input) {
     // Agent filter (CLI path)
     if (agentId && facts.agentId !== agentId) continue;
 
+    // M12-20 history: bounded INCLUSIVE range filter on the transcript-derived
+    // summary updatedAt (NOT filesystem mtime). A run whose updatedAt cannot be
+    // placed in time (null/unparseable) is excluded — it cannot be proven
+    // in-window. Terminal + active + unresolved runs are all eligible here;
+    // history never forces activeOnly.
+    if (scanScope === "history") {
+      const range = historyRange && Number.isFinite(historyRange.fromMs) && Number.isFinite(historyRange.toMs)
+        ? historyRange : null;
+      if (!range) continue;
+      const ms = facts.updatedAt != null ? Date.parse(facts.updatedAt) : NaN;
+      if (!Number.isFinite(ms) || ms < range.fromMs || ms > range.toMs) continue;
+    }
+
     // M12-15: closed-set activity classification. Computed once per run AFTER
     // workspace + agent filtering. Only known non-terminal runs trigger the
     // ownerLiveness SSOT (once each); terminal and unknown-state runs are
@@ -275,15 +349,23 @@ export async function listRuns(input) {
       } else {
         activityStatus = "unresolved";
         activityBasis = "no_fresh_owner_heartbeat";
-        unresolvedCount += 1;
+        // unresolvedCount is the FULL-INVENTORY health signal — it is only
+        // meaningful in the default scope (the only scope that scans the whole
+        // inventory). active/history intentionally do not surface it.
+        if (scanScope === undefined) unresolvedCount += 1;
       }
     }
 
-    // activeOnly returns ONLY proven-active runs. Terminal / unknown /
-    // unresolved runs are excluded here — but unresolved stays discoverable via
-    // the ordinary list and is counted in unresolvedCount (full scan, pre-limit,
-    // independent of activeOnly).
+    // activeOnly (default scope, MCP runs_list / CLI) returns ONLY proven-active
+    // runs. Terminal / unknown / unresolved runs are excluded — but unresolved
+    // stays discoverable via the ordinary list and is counted in unresolvedCount
+    // (full scan, pre-limit, independent of activeOnly).
     if (activeOnly && activityStatus !== "active") continue;
+    // M12-20 active scope: include ONLY proven-active runs. A stale / corrupt /
+    // missing heartbeat, a terminal state, or an unknown state is excluded —
+    // NEVER inferred failed/dead/stopped (the run may still be running; the
+    // Owner can find it via the default list or a history window).
+    if (scanScope === "active" && activityStatus !== "active") continue;
 
     const summary = finalizeSummary(runId, facts, knownAgentIds, input);
     if (!summary) continue;
@@ -309,5 +391,13 @@ export async function listRuns(input) {
     summaries.length = limit;
   }
 
-  return { runs: summaries, matchedCount, unresolvedCount };
+  // M12-20: the default scope (no scanScope — MCP runs_list / CLI) reports the
+  // full-scan unresolvedCount. active/history instead echo scanScope so a client
+  // can guard mode/epoch races; they NEVER surface unresolvedCount (the full
+  // inventory is intentionally not scanned in active, and history is a bounded
+  // window — neither is the full-inventory health signal).
+  if (scanScope === undefined) {
+    return { runs: summaries, matchedCount, unresolvedCount };
+  }
+  return { runs: summaries, matchedCount, scanScope };
 }

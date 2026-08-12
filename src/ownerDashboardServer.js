@@ -44,6 +44,7 @@ import {
   LEAD_PAGE_HARD_CAP,
   isValidRunId,
 } from "./application/ownerDashboard.js";
+import { createRunSummaryCache } from "./application/runSummaryCache.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const PORT_MIN = 1024;
@@ -51,6 +52,15 @@ const PORT_MAX = 65535;
 const TOKEN_BYTES = 32; // 256-bit bearer → exactly 64 lowercase hex chars
 // Issued token contract: derived from exactly 32 bytes → 64 lowercase hex.
 const TOKEN_HEX_RE = /^[0-9a-f]{64}$/;
+
+// M12-20: bounded history-on-demand range contract. Presets are a fixed closed
+// set; the maximum window (7d) bounds every history query — preset and custom.
+// Custom from/to are non-negative integer epoch-ms; the server rejects unknown,
+// inverted, future, and over-cap windows with a fixed 400 (never a reflection
+// of client input). 7d is exactly the cap, so the 7d preset is accepted.
+const HISTORY_PRESETS = Object.freeze({ "1h": 3_600_000, "24h": 86_400_000, "7d": 604_800_000 });
+const HISTORY_MAX_RANGE_MS = 604_800_000; // 7d
+const EPOCH_MS_MAX = 9_999_999_999_999; // ~year 2286 in ms; a generous integer bound
 
 /**
  * Issue the per-process bearer token. In production this is ALWAYS 32 bytes
@@ -235,10 +245,58 @@ function parseOrder(raw) {
   return raw;
 }
 
-function parseRunsQuery(sp) {
-  assertStrictKeys(sp, new Set(["limit"]));
+// M12-20: parse /api/runs into a closed-set query. scope defaults to "active"
+// (dashboard active-first). history REQUIRES a bounded range — a preset range
+// (1h/24h/7d) OR an explicit from+to epoch-ms pair — and rejects unknown,
+// ambiguous, inverted, future, and over-cap (>7d) windows. active rejects any
+// range as inconsistent. Every failure throws BadRequest → fixed 400.
+function parseRunsQuery(sp, nowMs) {
+  assertStrictKeys(sp, new Set(["limit", "scope", "range", "from", "to"]));
   const q = {};
   if (sp.has("limit")) q.latest = parseBoundedInt(sp.get("limit"), 1, OWNER_RUNS_LIMIT_MAX);
+
+  // scope: closed-set {active, history}; default active (dashboard active-first).
+  let scope = "active";
+  if (sp.has("scope")) {
+    const raw = sp.get("scope");
+    if (raw !== "active" && raw !== "history") throw new BadRequest();
+    scope = raw;
+  }
+
+  const hasRange = sp.has("range");
+  const hasFrom = sp.has("from");
+  const hasTo = sp.has("to");
+
+  if (scope === "active") {
+    // active carries NO range — range/from/to are inconsistent with the
+    // active fast-path (which enumerates current leases, not a time window).
+    if (hasRange || hasFrom || hasTo) throw new BadRequest();
+    q.scanScope = "active";
+    return q;
+  }
+
+  // scope === "history": a bounded range is REQUIRED. Exactly one source: a
+  // preset range OR an explicit from+to pair (both required together).
+  if (hasRange && (hasFrom || hasTo)) throw new BadRequest(); // preset + custom is ambiguous
+  if (!hasRange && !(hasFrom && hasTo)) throw new BadRequest(); // history needs a bounded range
+  let fromMs;
+  let toMs;
+  if (hasRange) {
+    const dur = HISTORY_PRESETS[sp.get("range")];
+    if (dur === undefined) throw new BadRequest();
+    toMs = nowMs;
+    fromMs = nowMs - dur;
+  } else {
+    fromMs = parseBoundedInt(sp.get("from"), 0, EPOCH_MS_MAX);
+    toMs = parseBoundedInt(sp.get("to"), 0, EPOCH_MS_MAX);
+  }
+  // Semantic range checks: inverted, future upper bound, over-cap window.
+  if (fromMs > toMs) throw new BadRequest();
+  if (toMs > nowMs) throw new BadRequest();
+  if (toMs - fromMs > HISTORY_MAX_RANGE_MS) throw new BadRequest();
+
+  q.scanScope = "history";
+  q.historyRange = { fromMs, toMs };
   return q;
 }
 
@@ -290,7 +348,7 @@ function createHandler(ctx) {
       }
       let query;
       try {
-        query = parseRunsQuery(sp);
+        query = parseRunsQuery(sp, ctx.now());
       } catch (e) {
         if (!(e instanceof BadRequest)) return sendJson(res, 500, ERR.internal);
         return sendJson(res, 400, ERR.bad_request);
@@ -301,6 +359,14 @@ function createHandler(ctx) {
           workspaceRoot: ctx.workspaceRoot,
           knownAgentIds: ctx.knownAgentIds,
           ...(query.latest !== undefined ? { latest: query.latest } : {}),
+          ...(query.scanScope ? { scanScope: query.scanScope } : {}),
+          ...(query.historyRange ? { historyRange: query.historyRange } : {}),
+          now: ctx.now(),
+          // M12-18/M12-20: thread the long-lived in-memory run-summary cache so
+          // warm history reads reuse facts without re-parsing transcripts. The
+          // cache stores only metadata-validated facts; every query still
+          // re-applies workspace/agent/heartbeat/range/limit fresh.
+          readSummaryFn: ctx.readSummaryFn,
         });
         return sendJson(res, 200, result);
       } catch {
@@ -410,6 +476,13 @@ export function createOwnerDashboardServer(config) {
   // removed; only the injectable randomBytesFn entropy source is accepted.
   const issuedToken = issueToken(randomBytesFn);
 
+  // M12-18/M12-20: the ONE in-memory run-summary cache for the long-lived
+  // dashboard server. It stores only metadata-validated extractRunFacts payloads
+  // (no second index/sidecar, no disk); warm reads reuse facts without
+  // re-parsing. Every query still re-applies workspace/agent/heartbeat/range/
+  // limit against the current binding, so the cache can never freeze a result.
+  const summaryCache = createRunSummaryCache();
+
   const ctx = {
     runDir,
     workspaceRoot,
@@ -419,6 +492,7 @@ export function createOwnerDashboardServer(config) {
     assets,
     getOwnerRuns: getOwnerRunsFn ?? getOwnerRuns,
     getOwnerActivity: getOwnerActivityFn ?? getOwnerActivity,
+    readSummaryFn: (filePath) => summaryCache.read(filePath),
     now: typeof nowFn === "function" ? nowFn : () => Date.now(),
   };
 

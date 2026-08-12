@@ -1192,3 +1192,366 @@ test("RACE WIRING: bootstrap/poll/loadOlder each capture the binding and gate su
   // The boot state carries the epoch counter.
   assert.match(js, /selectionEpoch:\s*0/, "boot state initializes the epoch");
 });
+
+// =====================================================================
+// E) M12-20 — OWNER DASHBOARD ACTIVE-FIRST / HISTORY-ON-DEMAND
+//   The dashboard opens in Active mode (only currently proven-active runs +
+//   live activity) and auto-refreshes every 5s. Historical runs load ONLY on
+//   an explicit Owner action (a 1h/24h/7d preset or a bounded custom from/to);
+//   history is never auto-polled. A late Active or History runs response can
+//   never overwrite the current mode or a newer query (a runs-mode epoch guard,
+//   the runs-list analogue of the D-series selection race guard). Absence from
+//   the active set or a bounded history window is NEVER a terminal transition
+//   and never triggers a notification. History windows render a local-time label.
+// Deterministic over the pure mode/binding helpers the surface reduces to
+// (no DOM, no fetch, no timers), plus HTML/CSS contract assertions.
+// =====================================================================
+
+const M1220_NOW = 10_000_000_000;
+
+// ---- E1) DEFAULT ACTIVE ----
+
+test("M12-20 MODE: defaultRunsMode is active-first {scope:'active'}; preset closed set frozen", () => {
+  assert.deepEqual(app.defaultRunsMode(), { scope: "active" });
+  assert.ok(Object.isFrozen(app.HISTORY_PRESETS), "preset closed set frozen");
+});
+
+test("M12-20 QUERY: active mode serializes to scope=active + limit; never range/from/to", () => {
+  const q = app.runsQuery(app.defaultRunsMode());
+  assert.match(q, /(^|&)scope=active(&|$)/);
+  assert.match(q, /limit=100/);
+  assert.doesNotMatch(q, /range=|from=|to=/, "active carries no history window");
+});
+
+test("M12-20 HTML: a mode bar defaults to active (no history fetched at boot) + a range-label slot", () => {
+  const html = readAsset("index.html");
+  assert.match(html, /id="mode-bar"/, "a mode bar exists");
+  // Active is the declared default mode (history is opt-in only).
+  assert.match(html, /data-default-mode="active"/, "active is the default mode");
+  // A range-label slot renders the history window label.
+  assert.match(html, /id="range-label"/);
+});
+
+// ---- E2) EXPLICIT HISTORY ACTIONS ONLY ----
+
+test("M12-20 PRESETS: HISTORY_PRESETS is the exact closed set {1h,24h,7d}", () => {
+  assert.deepEqual([...app.HISTORY_PRESETS], ["1h", "24h", "7d"]);
+});
+
+test("M12-20 PRESETS: historyPresetMode resolves a preset to a bounded [now-dur, now] window; out-of-set → null", () => {
+  assert.deepEqual(app.historyPresetMode("24h", M1220_NOW),
+    { scope: "history", preset: "24h", fromMs: M1220_NOW - 86_400_000, toMs: M1220_NOW });
+  assert.deepEqual(app.historyPresetMode("1h", M1220_NOW),
+    { scope: "history", preset: "1h", fromMs: M1220_NOW - 3_600_000, toMs: M1220_NOW });
+  assert.equal(app.historyPresetMode("7d", M1220_NOW).fromMs, M1220_NOW - 604_800_000);
+  for (const bad of ["2h", "30m", "8d", "", "week", "all", null, 5]) {
+    assert.equal(app.historyPresetMode(bad, M1220_NOW), null, `preset ${JSON.stringify(bad)} → null`);
+  }
+});
+
+test("M12-20 QUERY: history preset serializes to scope=history&range=<preset>; custom to from/to", () => {
+  const preset = app.runsQuery(app.historyPresetMode("24h", M1220_NOW));
+  assert.match(preset, /scope=history/);
+  assert.match(preset, /range=24h/);
+  assert.match(preset, /limit=100/);
+  assert.doesNotMatch(preset, /from=|to=/, "preset uses range, not from/to");
+  const custom = app.runsQuery({ scope: "history", fromMs: 100, toMs: 200 });
+  assert.match(custom, /scope=history/);
+  assert.match(custom, /from=100/);
+  assert.match(custom, /to=200/);
+  assert.doesNotMatch(custom, /range=/, "custom uses from/to, not range");
+});
+
+test("M12-20 CUSTOM: historyCustomMode rejects inverted / over-cap / future / non-finite windows", () => {
+  assert.deepEqual(app.historyCustomMode(100, 200, M1220_NOW), { scope: "history", fromMs: 100, toMs: 200 });
+  assert.equal(app.historyCustomMode(200, 100, M1220_NOW), null, "inverted → null");
+  assert.equal(app.historyCustomMode(0, M1220_NOW, M1220_NOW), null, "over-cap (>7d) → null");
+  assert.equal(app.historyCustomMode(M1220_NOW - 10, M1220_NOW + 10, M1220_NOW), null, "future to → null");
+  assert.equal(app.historyCustomMode(NaN, 200, M1220_NOW), null, "non-finite → null");
+});
+
+test("M12-20 HTML: history preset buttons + custom from/to controls exist; explicit gesture only", () => {
+  const html = readAsset("index.html");
+  for (const p of ["1h", "24h", "7d"]) {
+    assert.match(html, new RegExp(`data-preset="${p}"`), `preset button ${p} present`);
+  }
+  assert.match(html, /id="hist-from"/, "custom from input");
+  assert.match(html, /id="hist-to"/, "custom to input");
+  assert.match(html, /id="hist-apply"/, "explicit apply button (no auto-fetch)");
+  // No inline handlers anywhere in the new controls.
+  assert.doesNotMatch(html, /\son[a-z]+\s*=\s*"/i);
+});
+
+// ---- E3) NO HISTORY POLLING ----
+
+test("M12-20 POLL: shouldAutoRefreshRuns is true ONLY for active; history never auto-refreshes", () => {
+  assert.equal(app.shouldAutoRefreshRuns(app.defaultRunsMode()), true);
+  assert.equal(app.shouldAutoRefreshRuns({ scope: "active" }), true);
+  assert.equal(app.shouldAutoRefreshRuns({ scope: "history", preset: "24h" }), false);
+  assert.equal(app.shouldAutoRefreshRuns({ scope: "history", fromMs: 1, toMs: 2 }), false);
+});
+
+// ---- E3b) RUNS FETCH POLICY — BEHAVIORAL (one path, two triggers) ----
+//
+// The runs list has ONE fetch path (runsFetchOnce) driven by TWO triggers:
+//   - "explicit": an Owner mode action (preset / custom / active button). It
+//     ALWAYS issues exactly one fetch for the new mode — active OR history — so
+//     switching to a bounded history window can never stall in Loading. It is
+//     never gated by the auto-refresh rule.
+//   - "timer": the 5s auto-refresh tick. It fetches ONLY in active; in history it
+//     issues NO fetch (history is on-demand, never polled).
+// runsFetchDecision is the single decision core both triggers consult. The tests
+// below prove the behavior by driving the REAL functions with an injected fetch
+// recorder (and deferred promises for the race cases) — they do NOT grep source
+// text. This is the direct evidence for the causal contract: an explicit switch
+// forces exactly one fetch; the timer never fetches in history; a late response
+// for a prior mode/query is rejected by (scope, epoch) and never committed.
+
+function runsFetchRecorder() {
+  const calls = [];
+  const fetch = (token, query) => {
+    calls.push({ token, query });
+    return Promise.resolve({
+      runs: [{ runId: "r1", agentId: "coder_low", state: "running", terminal: false }],
+    });
+  };
+  return { fetch, calls };
+}
+
+function deferredFetch() {
+  const calls = [];
+  let settle = null;
+  const fetch = (token, query) => {
+    calls.push({ token, query });
+    return new Promise((res, rej) => { settle = { res, rej }; });
+  };
+  return {
+    fetch,
+    calls,
+    resolve: (data) => settle.res(data),
+    reject: (err) => settle.rej(err),
+  };
+}
+
+test("M12-20 FETCH DECISION: explicit fetches in BOTH active and history; timer fetches ONLY in active", () => {
+  const active = app.defaultRunsMode();
+  const hist24 = app.historyPresetMode("24h", M1220_NOW);
+  const histCustom = app.historyCustomMode(100, 200, M1220_NOW);
+  // An explicit Owner action always issues exactly one fetch — any mode.
+  assert.match(app.runsFetchDecision(active, "explicit"), /^scope=active&limit=\d+$/);
+  assert.match(app.runsFetchDecision(hist24, "explicit"), /^scope=history&range=24h&limit=\d+$/);
+  assert.match(app.runsFetchDecision(histCustom, "explicit"), /^scope=history&from=100&to=200&limit=\d+$/);
+  // A timer tick fetches ONLY in active; history is on-demand and never polled.
+  assert.match(app.runsFetchDecision(active, "timer"), /^scope=active&limit=\d+$/, "timer fetches in active");
+  assert.equal(app.runsFetchDecision(hist24, "timer"), null, "timer does NOT fetch a preset history window");
+  assert.equal(app.runsFetchDecision(histCustom, "timer"), null, "timer does NOT fetch a custom history window");
+});
+
+test("M12-20 FETCH BEHAVIOR: an explicit history switch issues EXACTLY ONE scope=history fetch with the right query", async () => {
+  const state = {
+    token: "tok", runsMode: app.historyPresetMode("24h", M1220_NOW),
+    runsEpoch: 0, runs: [], runsFresh: null,
+  };
+  const rec = runsFetchRecorder();
+  let committed = 0;
+  const res = await app.runsFetchOnce(state, "explicit", {
+    fetch: rec.fetch,
+    commit: () => { committed++; },
+  });
+  assert.equal(rec.calls.length, 1, "exactly one fetch for an explicit history switch (never zero / never two)");
+  assert.match(rec.calls[0].query, /^scope=history&range=24h&limit=\d+$/, "the one fetch targets the history scope");
+  assert.equal(rec.calls[0].token, "tok", "the token is threaded to the fetch");
+  assert.equal(committed, 1, "the single history response IS committed (no permanent Loading)");
+  assert.deepEqual(res, { fetched: true, applied: true });
+});
+
+test("M12-20 FETCH BEHAVIOR: the 5s timer issues ZERO fetches while viewing history (history is never polled)", async () => {
+  const state = {
+    token: "tok", runsMode: app.historyPresetMode("24h", M1220_NOW),
+    runsEpoch: 0, runs: [], runsFresh: null,
+  };
+  const rec = runsFetchRecorder();
+  for (let i = 0; i < 5; i++) {
+    const res = await app.runsFetchOnce(state, "timer", { fetch: rec.fetch, commit() {} });
+    assert.deepEqual(res, { fetched: false }, `timer tick ${i} in history issues no fetch`);
+  }
+  assert.equal(rec.calls.length, 0, "five timer ticks in history → zero fetches (no polling)");
+});
+
+test("M12-20 FETCH BEHAVIOR: the timer DOES fetch in active (auto-refresh stays live)", async () => {
+  const state = {
+    token: "tok", runsMode: app.defaultRunsMode(),
+    runsEpoch: 0, runs: [], runsFresh: null,
+  };
+  const rec = runsFetchRecorder();
+  const res = await app.runsFetchOnce(state, "timer", { fetch: rec.fetch, commit() {} });
+  assert.equal(rec.calls.length, 1, "timer fetches once in active");
+  assert.match(rec.calls[0].query, /^scope=active&limit=\d+$/);
+  assert.deepEqual(res, { fetched: true, applied: true });
+});
+
+// ---- E4) RUNS-MODE EPOCH RACE GUARD ----
+
+function freshRunsState() {
+  return {
+    runsMode: app.defaultRunsMode(),
+    runsEpoch: 0,
+    runs: [{ runId: "stale" }],
+    runsFresh: true,
+  };
+}
+
+test("M12-20 RACE GATE: isCurrentRunsMode accepts only an exact (scope, epoch) match", () => {
+  const state = { runsMode: { scope: "history" }, runsEpoch: 2 };
+  assert.equal(app.isCurrentRunsMode(state, { scope: "history", epoch: 2 }), true, "exact → current");
+  assert.equal(app.isCurrentRunsMode(state, { scope: "active", epoch: 1 }), false, "different scope+epoch");
+  assert.equal(app.isCurrentRunsMode(state, { scope: "active", epoch: 2 }), false, "different scope");
+  assert.equal(app.isCurrentRunsMode(state, { scope: "history", epoch: 1 }), false, "same scope, stale epoch");
+  assert.equal(app.isCurrentRunsMode(state, null), false, "missing capture");
+  assert.equal(app.isCurrentRunsMode(null, { scope: "history", epoch: 2 }), false, "missing state");
+  assert.equal(app.isCurrentRunsMode(state, { scope: "history" }), false, "missing epoch");
+  assert.equal(app.isCurrentRunsMode(state, { scope: "", epoch: 2 }), false, "empty scope");
+  assert.equal(app.isCurrentRunsMode(state, { scope: "history", epoch: "x" }), false, "non-integer epoch");
+});
+
+test("M12-20 RACE: setRunsMode clears the prior list, bumps the epoch, returns the new binding", () => {
+  const state = freshRunsState();
+  assert.ok(state.runs.length > 0, "precondition: prior runs present");
+  const cap = app.setRunsMode(state, app.historyPresetMode("24h", M1220_NOW));
+  assert.deepEqual(state.runsMode, app.historyPresetMode("24h", M1220_NOW));
+  assert.equal(state.runsEpoch, 1, "epoch bumped");
+  assert.deepEqual(state.runs, [], "prior mode's list cleared (bounded loading state)");
+  assert.equal(state.runsFresh, null, "freshness reset to loading");
+  assert.deepEqual(cap, { scope: "history", epoch: 1 }, "returns the captured binding");
+});
+
+test("M12-20 RACE: a late ACTIVE response is dropped after the Owner switches to HISTORY", () => {
+  const state = freshRunsState();
+  // An active auto-refresh is in flight (captures the CURRENT epoch, no bump):
+  const capActive = app.runsRequestBinding(state);
+  // The Owner switches to history 24h → the epoch bumps and the mode changes.
+  const capHist = app.setRunsMode(state, app.historyPresetMode("24h", M1220_NOW));
+  // The late active response must NOT commit (it would mix active runs into the
+  // history view). The current history response commits normally.
+  assert.equal(app.isCurrentRunsMode(state, capActive), false, "late active dropped vs current history");
+  assert.equal(app.isCurrentRunsMode(state, capHist), true);
+});
+
+test("M12-20 RACE: a newer history QUERY (different range) drops the prior history response", () => {
+  const state = freshRunsState();
+  app.setRunsMode(state, app.historyPresetMode("24h", M1220_NOW)); // epoch 1
+  const cap24 = app.runsRequestBinding(state);                      // capture {history,1}
+  app.setRunsMode(state, app.historyPresetMode("7d", M1220_NOW));   // epoch 2 — newer query
+  assert.equal(app.isCurrentRunsMode(state, cap24), false,
+    "the 24h response is dropped against the newer 7d query (same scope, stale epoch)");
+});
+
+test("M12-20 RACE: a fresh, current response IS committed (no false drops on the live path)", () => {
+  const state = freshRunsState();
+  const cap = app.runsRequestBinding(state);
+  assert.equal(app.isCurrentRunsMode(state, cap), true, "the current binding commits");
+});
+
+// ---- E4b) RUNS FETCH RACE — INTEGRATED LATE-RESPONSE REJECTION (behavioral) ----
+//
+// End-to-end proof through the single runsFetchOnce path: the binding is
+// captured at issue time, and a response that resolves AFTER an Owner mode
+// action (setRunsMode bumps the epoch and/or changes the scope) is rejected and
+// never committed. These drive the real executor with a deferred fetch whose
+// resolution is held until AFTER the mode change — the opposite of a source-text
+// assertion: they observe that commit() is not called and state runs are untouched.
+
+test("M12-20 FETCH RACE: a late ACTIVE response is REJECTED after the Owner switches to HISTORY", async () => {
+  // Start in active; an auto-refresh is in flight (timer trigger, captures epoch 0).
+  const state = {
+    token: "tok", runsMode: app.defaultRunsMode(),
+    runsEpoch: 0, runs: [], runsFresh: null,
+  };
+  const rec = deferredFetch();
+  let committed = 0;
+  const pending = app.runsFetchOnce(state, "timer", {
+    fetch: rec.fetch,
+    commit: () => { committed++; },
+  });
+  // While the active fetch is still pending, the Owner switches to history 24h →
+  // the epoch bumps to 1 and the scope changes active → history.
+  app.setRunsMode(state, app.historyPresetMode("24h", M1220_NOW));
+  // The late active response finally arrives.
+  rec.resolve({ runs: [{ runId: "active_only", terminal: false }] });
+  const res = await pending;
+  assert.equal(rec.calls.length, 1, "the active fetch WAS issued");
+  assert.deepEqual(res, { fetched: true, applied: false }, "the late active response is dropped, not committed");
+  assert.equal(committed, 0, "no active run is mixed into the history view");
+  assert.equal(state.runs.length, 0, "state runs untouched by the late response");
+});
+
+test("M12-20 FETCH RACE: a late HISTORY response is REJECTED after a newer history query (same scope, stale epoch)", async () => {
+  const state = {
+    token: "tok", runsMode: app.historyPresetMode("24h", M1220_NOW),
+    runsEpoch: 0, runs: [], runsFresh: null,
+  };
+  const rec = deferredFetch();
+  let committed = 0;
+  const pending = app.runsFetchOnce(state, "explicit", {
+    fetch: rec.fetch,
+    commit: () => { committed++; },
+  });
+  // The Owner picks a newer history window (7d) before the 24h response arrives.
+  app.setRunsMode(state, app.historyPresetMode("7d", M1220_NOW));
+  rec.resolve({ runs: [{ runId: "only_in_24h", terminal: true }] });
+  const res = await pending;
+  assert.deepEqual(res, { fetched: true, applied: false }, "same scope but stale epoch → dropped");
+  assert.equal(committed, 0, "the older 24h response is not applied over the newer 7d query");
+});
+
+test("M12-20 FETCH RACE: a late ERROR is also dropped (a stale error never marks the current view stale)", async () => {
+  const state = {
+    token: "tok", runsMode: app.defaultRunsMode(),
+    runsEpoch: 0, runs: [], runsFresh: null,
+  };
+  const rec = deferredFetch();
+  let errored = 0;
+  const pending = app.runsFetchOnce(state, "timer", {
+    fetch: rec.fetch,
+    error: () => { errored++; },
+  });
+  app.setRunsMode(state, app.historyPresetMode("24h", M1220_NOW));
+  rec.reject(new Error("boom"));
+  const res = await pending;
+  assert.deepEqual(res, { fetched: true, applied: false }, "late error dropped");
+  assert.equal(errored, 0, "a stale error is not surfaced against the current view");
+});
+
+// ---- E5) ABSENCE IS NEVER TERMINAL (mode-aware) ----
+
+test("M12-20 NOTIFY: a run vanishing from the active set is NEVER terminal; re-entry as terminal notifies once", () => {
+  // Observe a proven-active (non-terminal) run in the active list.
+  let plan = app.planTerminalNotifications({}, [
+    { runId: "run_alive", agentId: "coder_low", state: "running", terminal: false },
+  ]);
+  assert.deepEqual(plan.notifications, [], "baseline: no notification");
+  // Its lease expires → it leaves the active list. Absence notifies nothing and
+  // never marks it terminal (it may still be running).
+  plan = app.planTerminalNotifications(plan.observed, []);
+  assert.deepEqual(plan.notifications, [], "leaving active notifies nothing");
+  assert.deepEqual(plan.observed, { run_alive: false }, "absence never marks terminal");
+  // The Owner opens a history window where the run is now terminal → the
+  // observed non-terminal→terminal transition notifies exactly once.
+  plan = app.planTerminalNotifications(plan.observed, [
+    { runId: "run_alive", agentId: "coder_low", state: "completed", terminal: true },
+  ]);
+  assert.equal(plan.notifications.length, 1);
+  assert.equal(plan.notifications[0].state, "completed");
+});
+
+// ---- E6) LOCAL-TIME RANGE LABELS ----
+
+test("M12-20 LABEL: historyRangeLabel renders preset 'last <p>' and custom local-time windows", () => {
+  const fmt = (ms) => `L(${ms})`;
+  assert.equal(app.historyRangeLabel(app.historyPresetMode("24h", M1220_NOW), fmt), "last 24h");
+  assert.equal(app.historyRangeLabel(app.historyPresetMode("1h", M1220_NOW), fmt), "last 1h");
+  const custom = app.historyRangeLabel({ scope: "history", fromMs: 100, toMs: 200 }, fmt);
+  assert.equal(custom, "L(100) – L(200)", "custom window uses the local-time formatter");
+  assert.equal(app.historyRangeLabel(app.defaultRunsMode(), fmt), "", "active → no label");
+  assert.equal(app.historyRangeLabel(null, fmt), "", "absent mode → no label");
+});

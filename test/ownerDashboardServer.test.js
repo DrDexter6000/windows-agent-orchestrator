@@ -447,3 +447,161 @@ test("ownerDashboardServer.js uses only node:http/crypto/url + the service (no S
   assert.ok(!src.includes('from "zod"'), "no zod");
   assert.ok(!src.includes('from "./commands/'), "no commands/");
 });
+
+// =====================================================================
+// M12-20 — /api/runs active-first / bounded history query parsing
+//   scope defaults to "active" (dashboard active-first). history REQUIRES a
+//   bounded range: a preset range ∈ {1h,24h,7d} OR an explicit from+to epoch-ms
+//   pair. Inverted / future / over-cap (>7d) / inconsistent ranges are rejected
+//   with fixed 400. Server-owned paths stay server-owned (no client runDir/ws).
+//   A history server clock (HIST_NOW) makes every branch deterministic.
+// =====================================================================
+const HIST_NOW = 10_000_000_000;
+function historyServer(capture) {
+  return createOwnerDashboardServer({
+    runDir: "/server/owned/runs", workspaceRoot: "/server/owned/ws",
+    knownAgentIds: ["coder_low"], env: {},
+    getOwnerRunsFn: async (input) => {
+      if (capture) capture.input = input;
+      return { runs: [], returnedCount: 0, matchedCount: 0, truncated: false };
+    },
+    nowFn: () => HIST_NOW,
+  });
+}
+const histAuth = (s) => ({ authorization: "Bearer " + s.token });
+
+test("M12-20 SCOPE: default (no scope) is active-first — captured scanScope=active, no range", async () => {
+  const cap = {};
+  const s = historyServer(cap);
+  const r = await drive(s.handler, { url: "/api/runs?limit=5", headers: histAuth(s) });
+  assert.equal(r.status, 200);
+  assert.equal(cap.input.scanScope, "active");
+  assert.ok(!("historyRange" in cap.input), "active carries no range");
+  assert.equal(cap.input.latest, 5);
+});
+
+test("M12-20 SCOPE: scope=active explicit; active + any range is inconsistent → 400", async () => {
+  const cap = {};
+  const s = historyServer(cap);
+  const ok = await drive(s.handler, { url: "/api/runs?scope=active", headers: histAuth(s) });
+  assert.equal(ok.status, 200);
+  assert.equal(cap.input.scanScope, "active");
+  // range/from/to are meaningless with active — reject as inconsistent.
+  for (const url of [
+    "/api/runs?scope=active&range=24h",
+    "/api/runs?scope=active&from=1&to=2",
+  ]) {
+    const r = await drive(s.handler, { url, headers: histAuth(s) });
+    assert.equal(r.status, 400, `${url} → 400 (active + range inconsistent)`);
+  }
+});
+
+test("M12-20 SCOPE: bad scope value → 400 (closed set active|history)", async () => {
+  const s = historyServer({});
+  for (const sc of ["Active", "ACTIVE", "all", "x", "history ", "live"]) {
+    const r = await drive(s.handler, { url: `/api/runs?scope=${encodeURIComponent(sc)}`, headers: histAuth(s) });
+    assert.equal(r.status, 400, `scope=${sc} → 400`);
+    assert.deepEqual(jsonOf(r), { error: "bad_request" });
+  }
+});
+
+test("M12-20 HISTORY preset: range=24h/1h/7d → historyRange computed from the server clock; 7d is exactly the cap", async () => {
+  for (const [preset, dur] of [["1h", 3_600_000], ["24h", 86_400_000], ["7d", 604_800_000]]) {
+    const cap = {};
+    const s = historyServer(cap);
+    const r = await drive(s.handler, { url: `/api/runs?scope=history&range=${preset}`, headers: histAuth(s) });
+    assert.equal(r.status, 200, `range=${preset} accepted`);
+    assert.equal(cap.input.scanScope, "history");
+    assert.equal(cap.input.historyRange.toMs, HIST_NOW);
+    assert.equal(cap.input.historyRange.toMs - cap.input.historyRange.fromMs, dur);
+  }
+});
+
+test("M12-20 HISTORY preset: bad range value → 400 (closed set 1h|24h|7d)", async () => {
+  const s = historyServer({});
+  for (const rg of ["2h", "30m", "8d", "week", "", "0"]) {
+    const r = await drive(s.handler, { url: `/api/runs?scope=history&range=${encodeURIComponent(rg)}`, headers: histAuth(s) });
+    assert.equal(r.status, 400, `range=${rg} → 400`);
+  }
+});
+
+test("M12-20 HISTORY custom: from+to epoch-ms → historyRange {fromMs,toMs}", async () => {
+  const cap = {};
+  const s = historyServer(cap);
+  const from = HIST_NOW - 1000, to = HIST_NOW - 100;
+  const r = await drive(s.handler, { url: `/api/runs?scope=history&from=${from}&to=${to}`, headers: histAuth(s) });
+  assert.equal(r.status, 200);
+  assert.equal(cap.input.scanScope, "history");
+  assert.equal(cap.input.historyRange.fromMs, from);
+  assert.equal(cap.input.historyRange.toMs, to);
+});
+
+test("M12-20 HISTORY: history WITHOUT a bounded range, or only one of from/to, or preset+custom → 400", async () => {
+  const s = historyServer({});
+  const from = HIST_NOW - 1000, to = HIST_NOW - 100;
+  for (const url of [
+    `/api/runs?scope=history`,
+    `/api/runs?scope=history&from=${from}`,
+    `/api/runs?scope=history&to=${to}`,
+    `/api/runs?scope=history&range=24h&from=${from}&to=${to}`,
+  ]) {
+    const r = await drive(s.handler, { url, headers: histAuth(s) });
+    assert.equal(r.status, 400, `${url} → 400`);
+    assert.deepEqual(jsonOf(r), { error: "bad_request" });
+  }
+});
+
+test("M12-20 HISTORY custom: inverted (from>to) → 400", async () => {
+  const s = historyServer({});
+  const r = await drive(s.handler, {
+    url: `/api/runs?scope=history&from=${HIST_NOW - 10}&to=${HIST_NOW - 1000}`,
+    headers: histAuth(s),
+  });
+  assert.equal(r.status, 400);
+});
+
+test("M12-20 HISTORY custom: over-cap window (>7d) → 400", async () => {
+  const s = historyServer({});
+  // from=0 .. to=HIST_NOW spans far more than 7d, but to is not in the future.
+  const r = await drive(s.handler, {
+    url: `/api/runs?scope=history&from=0&to=${HIST_NOW}`,
+    headers: histAuth(s),
+  });
+  assert.equal(r.status, 400);
+});
+
+test("M12-20 HISTORY custom: future upper bound (to>now) → 400", async () => {
+  const s = historyServer({});
+  const r = await drive(s.handler, {
+    url: `/api/runs?scope=history&from=${HIST_NOW - 1000}&to=${HIST_NOW + 1000}`,
+    headers: histAuth(s),
+  });
+  assert.equal(r.status, 400);
+});
+
+test("M12-20 HISTORY custom: malformed/negative/non-integer from/to → 400", async () => {
+  const s = historyServer({});
+  for (const url of [
+    `/api/runs?scope=history&from=abc&to=${HIST_NOW - 1}`,
+    `/api/runs?scope=history&from=-5&to=${HIST_NOW - 1}`,
+    `/api/runs?scope=history&from=1.5&to=${HIST_NOW - 1}`,
+    `/api/runs?scope=history&from=${HIST_NOW - 1}&to=1.5`,
+  ]) {
+    const r = await drive(s.handler, { url, headers: histAuth(s) });
+    assert.equal(r.status, 400, `${url} → 400`);
+  }
+});
+
+test("M12-20 SCOPE: unknown query param still rejected (strict closed-set); server-owned paths untouched", async () => {
+  const cap = {};
+  const s = historyServer(cap);
+  for (const url of ["/api/runs?window=1h", "/api/runs?duration=5", "/api/runs?scope=active&activeOnly=1"]) {
+    const r = await drive(s.handler, { url, headers: histAuth(s) });
+    assert.equal(r.status, 400, `${url} → 400 (unknown param)`);
+  }
+  // A clean history request threads ONLY server-owned paths (never client ones).
+  const ok = await drive(s.handler, { url: `/api/runs?scope=history&from=${HIST_NOW - 10}&to=${HIST_NOW}`, headers: histAuth(s) });
+  assert.equal(ok.status, 200);
+  assert.equal(cap.input.runDir, "/server/owned/runs");
+  assert.equal(cap.input.workspaceRoot, "/server/owned/ws");
+});

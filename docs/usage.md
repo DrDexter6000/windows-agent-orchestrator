@@ -1031,6 +1031,8 @@ npm run cli -- runs dashboard --web [--port 0|1024..65535] [--run-dir DIR] [--cw
 
 M12-17 增加**人类显式 opt-in** 的浏览器终态通知：只有 Owner 点击启用且浏览器授予 Notification permission 后，页面才在观察到同一选中 run 从非终态变为终态时通知恰好一次；首次加载/刷新时已终态的 run 不补发，重复 polling 不重复发送，拒绝权限会明确显示 `notifications blocked`。通知只含固定安全字段，不含 worker 消息、路径、command/tool payload、credential 或 session。所有异步 activity 请求同时绑定选中 `runId` 与 selection epoch，A→B→A 快速切换时，旧响应不得覆盖当前 run 的详情。
 
+M12-20 改为 **active-first / history-on-demand**：看板默认打开 Active 模式——只列出当前有新鲜 owner 心跳、经证明 active 的 run（候选集是当前的 `.owner-*` 租约文件——候选枚举只 `readdirSync` 一次 runDir 目录，但只有当前租约候选者的 transcript 被打开/解析/验证，无任何历史 transcript 被打开/解析），并每 5s 自动刷新；历史 run 仅在 Owner 显式选择 `1h`/`24h`/`7d` 预设或有界自定义 from/to（上限 7d；禁止未来/倒序/越界/未知参数，固定 400）后**按需加载一次**，历史模式**不**自动轮询。Active 响应固定标注 `scanScope=active`，且不携带 `unresolvedCount`（active scope 不做全库存 unresolved 分类，故该计数**恒缺失而非 0**）。范围按 transcript 派生的 `updatedAt` 过滤（非文件系统 mtime），并复用长驻看板服务进程内的**元数据校验 summary 缓存**做热读（无第二个持久索引）。模式切换绑定 runs-mode epoch：迟到的 Active 或 History 响应**不得**覆盖当前模式或更新的查询；run 从 active 集或有界历史窗口中消失**绝不**构成终态迁移，也**不**触发通知。HTTP `/api/runs` 的 `scope` 为闭集 `{active,history}`、缺省即 active；MCP `runs_list` 与 CLI 文本看板行为**不变**（仍是全库存扫描 + `unresolvedCount`）。
+
 安全边界：服务只监听 `127.0.0.1`，API 要求每进程随机 bearer；token 只从 URL fragment 进入 `sessionStorage`，不进 query/server log/localStorage。服务仅接受 GET 和严格有界 query，固定静态资源、no-store/nosniff/no-referrer、严格 CSP、无 CORS opt-in。页面没有 mutation 控件；不会 stop/retry/continue/repackage/decide，也不会写 transcript、worktree 或配置。Owner 视图仍会隐藏 credential/secret、raw command/tool payload、PID/session/绝对路径；其余 worker 消息按 Owner 观察用途提供较丰富但有界的脱敏文本。
 
 ### MCP `availableDrilldowns`（有界渐进式披露元数据，M12-8B）

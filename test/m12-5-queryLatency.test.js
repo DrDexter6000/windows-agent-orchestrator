@@ -274,3 +274,106 @@ test("M12-16-LAT-02: runs_list over 40 runs with distinct raw cwds performs ZERO
     rmSync(runDir, { recursive: true, force: true });
   }
 });
+
+// M12-20: the Owner Dashboard active fast-path keeps the EXPENSIVE per-run work
+// O(current lease candidates). Active scope enumerates owner-lease candidates
+// (.owner-<runId> files — the CURRENT leases) and opens/parses ONLY those
+// transcripts (plus per-run workspace verification + ownerLiveness). The runDir
+// directory IS still enumerated once by readdirSync (its cost grows with the
+// total entry count, including historical transcripts), but no historical
+// transcript is opened, parsed, or verified. With one active lease amid 50
+// historical runs, active scope reads exactly ONE transcript. This is the
+// machine-checked answer to the independent-review question: "Can the expensive
+// active-scope work still scale with the entire historical transcript
+// inventory?" — No; only the single directory read touches the inventory.
+test("M12-20-LAT-01: active scope opens/parses O(current lease candidates) — no historical transcript is read", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "wao-m1220-lat-"));
+  const AUTHORIZED = "C:\\Target\\Repo";
+  const HIST_COUNT = 50;
+  const historical = Array.from({ length: HIST_COUNT }, (_, i) => `run_2026080100000${String(i).padStart(2, "0")}hist`);
+  const active = "run_20260812000000000alive";
+  const eventsByFile = new Map();
+  const proofCalls = [];
+  const canonicalCalls = [];
+  const ownership = await import("../src/application/runWorkspaceOwnership.js");
+  try {
+    // Every run has a transcript file on disk; only `active` has a CURRENT lease.
+    for (const id of [...historical, active]) writeFileSync(join(runDir, `${id}.jsonl`), "", "utf8");
+    writeFileSync(join(runDir, `.owner-${active}`), JSON.stringify({ heartbeatAt: 1_700_000_000_000 - 1000, pid: 12345 }), "utf8");
+    historical.forEach((runId, i) => {
+      eventsByFile.set(`${runId}.jsonl`, runEvents(runId, AUTHORIZED, `2026-08-01T00:00:${String(i).padStart(2, "0")}.000Z`));
+    });
+    eventsByFile.set(`${active}.jsonl`, [
+      { type: "run.started", runId: active, agentId: "coder_low", ts: "2026-08-12T00:00:00.000Z", seq: 1 },
+      { type: "run.background_submitted", runId: active, agentId: "coder_low", cwd: AUTHORIZED, ts: "2026-08-12T00:00:00.000Z", seq: 2 },
+      { type: "run.state_change", runId: active, agentId: "coder_low", from: "pending", to: "running", reason: "go", ts: "2026-08-12T00:00:00.000Z", seq: 3 },
+    ]);
+
+    const reads = [];
+    const result = await listRuns({
+      runDir,
+      scanScope: "active",
+      nowMs: 1_700_000_000_000,
+      authorizedWorkspaceRoot: AUTHORIZED,
+      knownAgentIds: ["coder_low"],
+      readTranscriptFn: async (filePath) => { reads.push(basename(filePath)); return eventsByFile.get(basename(filePath)); },
+      createWorkspaceVerifierFn: (root) => ownership.createRunWorkspaceVerifier(root, {
+        proveWorkspaceFn: authorizedOnlyProve(proofCalls, AUTHORIZED),
+        canonicalizeWorkspacePathFn: fixtureCanonicalizer(canonicalCalls),
+      }),
+    });
+
+    // Exactly ONE transcript read — the active candidate. None of the 50
+    // historical transcripts was opened or parsed (the directory was enumerated
+    // once by readdirSync, but only the active candidate's transcript is read).
+    assert.equal(reads.length, 1, `active opened exactly ONE transcript (got ${reads.length}); no historical transcript read`);
+    assert.equal(reads[0], `${active}.jsonl`);
+    assert.deepEqual(result.runs.map((r) => r.runId), [active]);
+    assert.equal(result.runs[0].activityStatus, "active");
+    assert.equal(result.scanScope, "active");
+    assert.ok(!("unresolvedCount" in result), "active never reports a full-inventory count");
+    // The active enumeration also spawns no per-run Git (one construction proof).
+    assert.deepEqual(proofCalls, [AUTHORIZED]);
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});
+
+// The default scope (MCP runs_list / CLI — no scanScope) STILL scans the full
+// inventory and reports unresolvedCount. This guards against accidentally
+// narrowing the default path: the active fast-path is opt-in via scanScope only.
+test("M12-20-LAT-02: default scope (no scanScope) still scans the full inventory and reports unresolvedCount", async () => {
+  const ownership = await import("../src/application/runWorkspaceOwnership.js");
+  const runDir = mkdtempSync(join(tmpdir(), "wao-m1220-def-"));
+  const AUTHORIZED = "C:\\Target\\Repo";
+  const ids = [
+    "run_20260801000000001def",
+    "run_20260801000000002def",
+    "run_20260801000000003def",
+  ];
+  const eventsByFile = new Map();
+  try {
+    ids.forEach((runId, i) => {
+      writeFileSync(join(runDir, `${runId}.jsonl`), "", "utf8");
+      eventsByFile.set(`${runId}.jsonl`, runEvents(runId, AUTHORIZED, `2026-08-01T00:00:0${i}.000Z`));
+    });
+    const reads = [];
+    const result = await listRuns({
+      runDir,
+      authorizedWorkspaceRoot: AUTHORIZED,
+      knownAgentIds: ["coder_low"],
+      nowMs: 1_700_000_000_000,
+      readTranscriptFn: async (filePath) => { reads.push(basename(filePath)); return eventsByFile.get(basename(filePath)); },
+      createWorkspaceVerifierFn: (root) => ownership.createRunWorkspaceVerifier(root, {
+        proveWorkspaceFn: authorizedOnlyProve([], AUTHORIZED),
+        canonicalizeWorkspacePathFn: fixtureCanonicalizer([]),
+      }),
+    });
+    assert.equal(reads.length, ids.length, "default scope reads EVERY transcript (full inventory)");
+    assert.equal(result.matchedCount, ids.length);
+    assert.ok(!("scanScope" in result), "default scope carries no scanScope");
+    assert.equal(typeof result.unresolvedCount, "number", "default scope reports the full-scan unresolvedCount");
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});
