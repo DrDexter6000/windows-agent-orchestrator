@@ -232,6 +232,8 @@ Owner Dashboard 增加选中 run 的 backend/stage/terminal/event count/scope/li
 
 本机真实 `runs/` 只读 smoke 使用 Node 22，覆盖 2425 个目录项、1831 份 run transcript 与 1 个 owner lease：active 冷读 223.632ms、返回 0 个经证明 active 的 run，只产生 1 次 summary miss；最近 1h 历史冷读 1943.304ms、返回 3 个 run，随后同一长驻缓存热读 233.296ms、1831 次 cache hit。该结果证明 active-first 避免打开/解析历史 transcript，且历史 warm read 显著降低重复解析；同时诚实保留一次 `readdirSync` 的 O(目录条目数) 枚举成本。M12-20 尚未发布或完成 Fresh Host 验收。
 
+最终冻结候选 `2d6833d7b6381c49d7aa0ab1f31df2cdbdcb04c9` 的一次 canonical 执行发现 198/执行 198：首轮 197 文件通过、唯一 `mcpBind.test.js` 在 16 并发 Git/filesystem 波次失败，runner 自动隔离复核该文件通过并分类为 `isolation_pass`；pure 112/112、MCP 3/3、process 12/12、lock 2/2、timeout 2/2 均通过。权威 `finalVerdict` 仍为 `fail`，不把隔离通过冒充全绿，也不对未变化候选重复全量测试抽奖；M12-19 process recovery、M12-20 Dashboard、Host-neutral wait/MCP 相关文件均在本次执行中通过。
+
 ### 第三方 onboarding helper 发布与 Fresh Host 验收（2026-08-08）
 
 第三方 onboarding helper 已以普通 fast-forward 发布到 `main@4c06496146827f2d0dd993fde3d0ba372ae28d8d`。从公开 GitHub URL 创建的全新 clone 精确落在该 SHA；锁定依赖安装成功，默认 preview 与选定 worker preview 均为零写入，`--apply` 生成仅含 `coder_low` 的有效私有 registry，生产 `registry validate` 通过，显式 `--endorse-worker coder_low` 只写既有 `manualOverride:"cleared"` Owner 信号且不伪造认证状态。一次性 headless Codex Fresh Host 仅通过进程级 host-neutral MCP 配置连接该 clone，正式执行 `lead_preflight -> run_dispatch`（只读、no delivery）`-> run_await_result`；真实 run `run_20260808195141854w5bypg` 终态为 `completed`，返回唯一非空 assistant 文本 `CANARY_OK` / `project: windows-agent-orchestrator-poc`，无失败诊断，fresh clone HEAD/branch/tracked status 前后不变。首次无交互 Host 尝试在 `run_dispatch` 前因 Host approval 取消而结束，无 runId、无遗留 run；修正 Host 调用环境后在同一发布候选上完成上述唯一 worker canary。Verdict：`PASS_THIRD_PARTY_ONBOARDING_FRESH_HOST`。
