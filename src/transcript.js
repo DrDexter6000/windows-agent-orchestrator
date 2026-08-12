@@ -200,8 +200,18 @@ export class DeliveryDecisionPolicyError extends Error {
 export const RECOVERY_CANDIDATE_KINDS = Object.freeze([
   "disallowed_scope",
   "backend_failed",
+  "process_missing",
 ]);
 const BACKEND_RECOVERY_REASONS = new Set(["backend_error", "backend_stream_ended"]);
+
+// M12-19: the closed-set terminal reason + safe confirmation fact type that mark
+// a Lead-authorized, zero-model settlement of an orphaned process-backed run
+// whose detached runner/provider process is provably gone. Defined here (next
+// to classifyRecoveryCandidate, the durable authority on the reason) so the
+// application liveness SSOT (processRecovery.js) and run_delivery_repackage can
+// import them without a circular dependency.
+export const PROCESS_MISSING_RECOVERY_REASON = "process_missing";
+export const PROCESS_MISSING_CONFIRMED_TYPE = "run.process_missing_confirmed";
 const BACKEND_RECOVERY_CONFLICT_TYPES = new Set([
   "run.isolation_violation",
   "run.budget_exceeded",
@@ -286,9 +296,19 @@ function _verificationOutcomeFromType(type) {
  * exact-base, and complete-inventory proof before exposing or packaging a
  * backend-failed candidate.
  *
+ * For process_missing, the durable proof is a Lead-confirmed settlement: one
+ * terminal transition to failed carrying PROCESS_MISSING_RECOVERY_REASON AND
+ * exactly one PROCESS_MISSING_CONFIRMED_TYPE confirmation fact, written
+ * atomically with the transition by run_delivery_repackage. The conservative
+ * liveness proof (owner lease + dead child PID) that justified the settlement is
+ * a runtime fact owned by processRecovery.js — this pure projection only
+ * recognizes the durable record it left behind. A lone terminal transition
+ * carrying the reason WITHOUT the paired confirmation fact does NOT classify
+ * (defensive: never recover on an incomplete durable record).
+ *
  * @param {object[]} events
  * @param {string} runId
- * @returns {"disallowed_scope"|"backend_failed"|null}
+ * @returns {"disallowed_scope"|"backend_failed"|"process_missing"|null}
  */
 export function classifyRecoveryCandidate(events, runId) {
   if (!Array.isArray(events) || typeof runId !== "string" || runId.length === 0) return null;
@@ -302,13 +322,26 @@ export function classifyRecoveryCandidate(events, runId) {
   const terminalTransitions = bound.filter(
     (event) => event.type === "run.state_change" && TERMINAL_STATES.includes(event.to),
   );
-  if (
-    terminalTransitions.length !== 1
-    || terminalTransitions[0].to !== "failed"
-    || !BACKEND_RECOVERY_REASONS.has(terminalTransitions[0].reason)
-  ) {
-    return null;
+  if (terminalTransitions.length !== 1) return null;
+  const terminalTransition = terminalTransitions[0];
+  if (terminalTransition.to !== "failed") return null;
+
+  // process_missing: a Lead-confirmed orphan settlement. The closed-set terminal
+  // reason + exactly one safe confirmation fact (written atomically with the
+  // transition) is the durable record; same conflict / scorecard gates as the
+  // other recovery kinds. No stop_verified requirement — the orphaned process
+  // died without a clean stop; the confirmation fact is the safe substitute.
+  if (terminalTransition.reason === PROCESS_MISSING_RECOVERY_REASON) {
+    const confirmations = bound.filter(
+      (event) => event.type === PROCESS_MISSING_CONFIRMED_TYPE,
+    );
+    if (confirmations.length !== 1) return null;
+    if (bound.some((event) => BACKEND_RECOVERY_CONFLICT_TYPES.has(event.type))) return null;
+    if (bound.some((event) => event.type === "scorecard.checked" && event.passed === false)) return null;
+    return "process_missing";
   }
+
+  if (!BACKEND_RECOVERY_REASONS.has(terminalTransition.reason)) return null;
   if (!bound.some((event) => event.type === "run.stop_verified")) return null;
   if (bound.some((event) => event.type === "run.stop_unverified")) return null;
   if (bound.some((event) => BACKEND_RECOVERY_CONFLICT_TYPES.has(event.type))) return null;

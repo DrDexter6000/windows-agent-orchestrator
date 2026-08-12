@@ -1287,8 +1287,10 @@ const RUN_DELIVERY_DESCRIPTION =
   "point-in-time read), a bounded read-only readiness handshake returning readiness + " +
   "waitReturnedEarly; pending-at-deadline is truthful, never an error. Host transport " +
   "loss/cancellation does not stop the detached run — re-read point-in-time to observe. " +
-  "candidateKind/candidateInventory are advisory only. Self-explaining semanticNotes; " +
-  "wao://semantics/{id}.";
+  "candidateKind/candidateInventory are advisory only; candidateKind=process_missing means the " +
+  "detached runner/provider process is provably gone and the retained work is recoverable — it " +
+  "is still NOT acceptance, and only an explicit run_delivery_repackage call settles it. " +
+  "Self-explaining semanticNotes; wao://semantics/{id}.";
 
 /**
  * M11-12B: project a safe, factual verification-failure summary from the raw
@@ -1452,6 +1454,15 @@ function buildRunDeliveryPayload(runId, view) {
     ) {
       candidateInventory = safeProjectCandidateInventory(view.candidateInventory);
       candidateKind = candidateInventory ? "backend_failed" : null;
+    } else if (
+      // M12-19: advisory process_missing candidate — a NONTERMINAL orphan whose
+      // detached runner/provider process is provably gone. Read-only: it is never
+      // semantic acceptance; only an explicit run_delivery_repackage settles it.
+      failure === null
+      && view.candidateKind === "process_missing"
+    ) {
+      candidateInventory = safeProjectCandidateInventory(view.candidateInventory);
+      candidateKind = candidateInventory ? "process_missing" : null;
     }
     return {
       runId,
@@ -1708,13 +1719,16 @@ const RUN_DELIVERY_REPACKAGE_ANNOTATIONS = {
 };
 
 const RUN_DELIVERY_REPACKAGE_DESCRIPTION =
-  "Re-package a retained delivery candidate after a disallowed_path packaging failure or an " +
-  "eligible verified-quiet backend failure, reusing the original run's persisted worktree, base " +
-  "commit, and verification config (no model, no worker resume, no path inference, no " +
-  "verification override). The Lead's allowedPaths must include the original scope and cover " +
-  "every actual changed path — the only scope authority. Records a recovery provenance; the " +
-  "original terminal failed is not rewritten. Reentrant and crash-safe: retries converge on one " +
-  "commit and one outcome. run_delivery_decide still owns accept/reject.";
+  "Re-package a retained delivery candidate after a disallowed_path packaging failure, an " +
+  "eligible verified-quiet backend failure, OR a process_missing orphan (the detached " +
+  "runner/provider process is provably gone), reusing the original run's persisted worktree, " +
+  "base commit, and verification config (no model, no worker resume, no path inference, no " +
+  "verification override). For process_missing the run is settled to failed with a safe " +
+  "confirmation fact first-terminal-wins, then packaged exactly like the other recovery kinds. " +
+  "The Lead's allowedPaths must include the original scope and cover every actual changed path " +
+  "— the only scope authority. Records a recovery provenance; recovery is never semantic " +
+  "acceptance. Reentrant and crash-safe: retries and competing requests converge on one " +
+  "terminal fact, one commit, and one outcome. run_delivery_decide still owns accept/reject.";
 
 // ===== workspace_status (read-only binding proof) constants =====
 

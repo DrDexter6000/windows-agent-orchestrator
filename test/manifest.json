@@ -183,6 +183,7 @@
       "m12-14-workerScopeContract.test.js",
       "mcpRunDeliveryReview.test.js",
       "mcpRunDeliveryReviewBundle.test.js",
+      "m12-19-processRecovery.test.js",
       "runDelivery.test.js"
     ],
     "process": [

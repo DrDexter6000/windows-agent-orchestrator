@@ -514,7 +514,23 @@ const RED_23_WIRE = 75492;
 // Host transport-loss truth; NO wait ranges, defaults, or behavior changed).
 // No new tools, no validation removed. The wire grew +1512 bytes; ceiling
 // re-frozen at the measured 73947, still well below the 23-tool baseline (75492).
-const FROZEN_22_WIRE_CEILING = 73947;
+//
+// M12-19 re-baseline (process-missing delivery recovery): RECOVERY_CANDIDATE_KINDS
+// gained the REQUIRED closed-set member `process_missing` — the wire
+// RECOVERY_CANDIDATE_KIND_SCHEMA (zod enum derived from that application SSOT,
+// auto-extending with the array) now serializes three members instead of two in
+// the run_delivery / run_delivery_repackage / run_delivery_decide output schemas
+// (+54 bytes, part of the stripped payload — see DESC_STRIPPED_CONTRACT_SHA),
+// plus sanctioned host-neutral advisory/settlement description text on
+// run_delivery and run_delivery_repackage (candidateKind=process_missing means the
+// detached runner/provider process is provably gone and retained work is
+// recoverable but not accepted; settlement is a first-terminal-wins failed with a
+// safe confirmation fact; NO PID/path/error leakage, no auto-accept). No new
+// tools, no validation removed. Description bytes rose 10734 -> 11225 (+491); the
+// wire rose by the same description delta plus the enum bytes (+545 total).
+// Ceiling re-frozen at the measured 74492, still well below the 23-tool baseline
+// (75492).
+const FROZEN_22_WIRE_CEILING = 74492;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -592,9 +608,15 @@ test("M12-10-H: deterministic 22-tool wire below frozen ceiling and below the 23
 // description text changed); re-measured for M12-19 (workspace_status AND the
 // lead_preflight workspace projection gained the closed-set `unboundReason`
 // nullable enum — both output schemas are part of the stripped payload, so the
-// SHA changed truthfully; no description text is in the stripped payload).
+// SHA changed truthfully; no description text is in the stripped payload);
+// re-measured once more for the M12-19 process-missing delivery recovery (the
+// RECOVERY_CANDIDATE_KINDS closed set gained `process_missing` — the wire
+// RECOVERY_CANDIDATE_KIND_SCHEMA enum serializes three members instead of two in
+// the run_delivery / run_delivery_repackage / run_delivery_decide output schemas,
+// which ARE part of the stripped payload, so the SHA changed truthfully; no
+// description text is in the stripped payload).
 const DESC_STRIPPED_CONTRACT_SHA =
-  "6bc66bf348d009505040a2a55df50d5efbd20afb0c3889999062407f78e7695e";
+  "3aa57b689b46f14781ead9570d4137189cb1d28217c2503e6819bbdd52b7ffcf";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;
@@ -609,11 +631,20 @@ const PRE_M12_16_DESC_BASELINE = 11812;
 // the description total to 10734, so the net cut vs M12-15 is now 1078 bytes
 // (11812 − 10734). 1000 keeps the "material, not cosmetic" intent with headroom
 // while acknowledging the sanctioned M12-19 addition.
-const M12_16_DESC_REDUCTION_MIN = 1000;
+// Re-based again for the M12-19 process-missing delivery recovery: the sanctioned
+// host-neutral advisory/settlement description text on run_delivery and
+// run_delivery_repackage raised the description total to 11225, so the net cut vs
+// M12-15 is now 587 bytes (11812 − 11225). 500 keeps the "material, not cosmetic"
+// intent with headroom while acknowledging the sanctioned process_missing
+// addition.
+const M12_16_DESC_REDUCTION_MIN = 500;
 // Frozen at the achieved GREEN value AFTER run_correct was added. Prevents creep.
 // Re-baselined for M12-19 (recovery-truth descriptions, +1158 bytes over the
 // M12-17 value); re-frozen at the measured 10734.
-const FROZEN_22_DESC_CEILING = 10734;
+// Re-baselined again for the M12-19 process-missing delivery recovery (the
+// sanctioned advisory/settlement description text, +491 bytes over the
+// supervision-recovery-truth value); re-frozen at the measured 11225.
+const FROZEN_22_DESC_CEILING = 11225;
 
 // Recursively remove every `description` key from a tools/list payload (the 21
 // top-level tool descriptions and any nested schema descriptions). Returns a new

@@ -25,6 +25,7 @@ import {
   classifyRecoveryCandidate,
   JsonlTranscript,
   TERMINAL_STATES,
+  RUN_STATES,
   DELIVERY_DECISION_POLICY_CODES,
   DeliveryDecisionPolicyError,
 } from "../transcript.js";
@@ -33,6 +34,7 @@ import { PACKAGING_FAILURE_CODES, safeProjectPackagingCode } from "../deliveryFa
 import { ISOLATION_VIOLATION_REASONS } from "../diagnosis.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { proveWorkspace } from "./workspaceBinding.js";
+import { proveProcessMissing } from "./processRecovery.js";
 
 // M11-8C: packaging failure codes come from the shared safe-projection
 // allowlist (deliveryFailureCodes.js). The application projection and the MCP
@@ -709,6 +711,95 @@ function _computeSafeBackendCandidateInventory(
   return inventory;
 }
 
+/**
+ * M12-19: process_missing candidate inventory for a NONTERMINAL orphan whose
+ * detached runner/provider process is provably gone.
+ *
+ * Unlike disallowed_scope/backend_failed (terminal-failed), process_missing is
+ * the only NONTERMINAL recovery kind: the run is still "running" but the owning
+ * process has disappeared. This mirrors _computeSafeBackendCandidateInventory's
+ * shape but gates on the runtime liveness proof (proveProcessMissing) instead of
+ * a terminal durable classification. The same exact-base workspace + complete
+ * non-empty untruncated inventory proof applies; a single "unknown" liveness
+ * result yields no candidate (it is always safe to not project).
+ *
+ * The liveness deps default to the real ownerLease/probe when omitted (production
+ * point-in-time query); tests inject deterministic fakes. No PID/path is ever
+ * placed on the returned inventory — only the bounded candidate paths.
+ * @param {object[]} events
+ * @param {string} runId
+ * @param {string} [authorizedWorkspaceRoot]
+ * @param {Function} [computeInventoryFn]
+ * @param {{runDir?:string, now?:number, isAliveFn?:Function, ownerLeaseReader?:Function, thresholdMs?:number}} [livenessDeps]
+ * @returns {object|null}
+ * @private
+ */
+function _computeSafeProcessMissingCandidateInventory(
+  events,
+  runId,
+  authorizedWorkspaceRoot,
+  computeInventoryFn,
+  livenessDeps,
+) {
+  if (!livenessDeps || typeof livenessDeps.runDir !== "string" || livenessDeps.runDir.length === 0) {
+    return null;
+  }
+  if (proveProcessMissing(events, runId, livenessDeps).eligible !== true) return null;
+  // A process_missing candidate must not coexist with any settled delivery fact
+  // (the classifier's disqualifying durable-fact set already covers this, but
+  // the inventory gate mirrors _computeSafeBackendCandidateInventory's shape).
+  const boundEvents = events.filter((event) => event && event.runId === runId);
+  if (boundEvents.some((event) => (
+    event.type === "run.delivery_repackaged"
+    || event.type === "run.delivery_created"
+    || event.type === "run.delivery_verification_passed"
+    || event.type === "run.delivery_verification_failed"
+    || event.type === "run.delivery_verification_unavailable"
+    || event.type === "run.delivery_accepted"
+    || event.type === "run.delivery_rejected"
+  ))) {
+    return null;
+  }
+  const inventory = _computeSafeCandidateInventory(
+    events,
+    runId,
+    authorizedWorkspaceRoot,
+    computeInventoryFn,
+  );
+  if (!inventory) return null;
+  if (
+    inventory.originalAllowedTruncated
+    || inventory.actualChangedTruncated
+    || inventory.disallowedTruncated
+    || inventory.actualChangedCount === 0
+    || inventory.actualChangedPaths.length === 0
+  ) {
+    return null;
+  }
+  return inventory;
+}
+
+/**
+ * M12-19: build the process_missing liveness deps from the service injectables.
+ * Undefined probes are omitted so proveProcessMissing applies its real defaults
+ * (the production point-in-time query); tests pass deterministic fakes.
+ *
+ * Lead correction (independent review): callers that re-prove liveness across a
+ * bounded wait must NOT keep the returned object — `now` is a point-in-time
+ * observation. Build a fresh object (re-invoking nowFn()) for every proof so a
+ * lease that is fresh at wait entry but crosses the staleness threshold mid-wait
+ * is re-evaluated against the live clock when each result is built.
+ * @private
+ */
+function _livenessDeps(runDir, nowFn, isAliveFn, ownerLeaseReader) {
+  return {
+    runDir,
+    now: typeof nowFn === "function" ? nowFn() : Date.now(),
+    ...(typeof isAliveFn === "function" ? { isAliveFn } : {}),
+    ...(typeof ownerLeaseReader === "function" ? { ownerLeaseReader } : {}),
+  };
+}
+
 // ===== Service: getRunDelivery (read-only point-in-time query) =====
 
 /**
@@ -722,9 +813,24 @@ function _computeSafeBackendCandidateInventory(
  * @param {Function} [input.computeInventoryFn] — M12-1S1: injectable inventory
  *   reader; the service never defaults the kernel reader
  * @param {Function} [input.readTranscriptFn] — injectable for testing
+ * @param {Function} [input.nowFn] — M12-19: injectable clock for the
+ *   process_missing owner-lease freshness proof
+ * @param {Function} [input.isAliveFn] — M12-19: injectable conservative PID
+ *   probe for the process_missing liveness proof
+ * @param {Function} [input.ownerLeaseReader] — M12-19: injectable owner-lease
+ *   reader for the process_missing liveness proof
  * @returns {Promise<object>} delivery view: {runId, terminalState, deliveryRef, verification, acceptance}
  */
-export async function getRunDelivery({ runId, runDir, authorizedWorkspaceRoot, computeInventoryFn, readTranscriptFn }) {
+export async function getRunDelivery({
+  runId,
+  runDir,
+  authorizedWorkspaceRoot,
+  computeInventoryFn,
+  readTranscriptFn,
+  nowFn,
+  isAliveFn,
+  ownerLeaseReader,
+}) {
   if (!runId || typeof runId !== "string") throw new Error("getRunDelivery: runId is required");
   if (!runDir || typeof runDir !== "string") throw new Error("getRunDelivery: runDir is required");
   if (!isValidRunId(runId)) throw new Error(`Invalid runId: ${JSON.stringify(runId)}`);
@@ -762,6 +868,37 @@ export async function getRunDelivery({ runId, runDir, authorizedWorkspaceRoot, c
     if (candidateInventory) {
       view.candidateInventory = candidateInventory;
       view.candidateKind = "backend_failed";
+    }
+  } else if (
+    // M12-19: a NONTERMINAL orphan whose detached runner/provider process is
+    // provably gone projects an advisory process_missing candidate — same
+    // exact-base workspace + complete non-empty untruncated inventory proof,
+    // gated on the runtime liveness SSOT. Read-only: appends nothing, never
+    // terminalizes. The Lead must explicitly call run_delivery_repackage to
+    // settle it; this projection is never semantic acceptance.
+    view.deliveryAvailable === false
+    && view.deliveryFailure === null
+    && !view.isolationFailure
+    && view.deliveryRequested === true
+    && RUN_STATES.includes(view.terminalState)
+    && !TERMINAL_STATES.includes(view.terminalState)
+  ) {
+    const candidateInventory = _computeSafeProcessMissingCandidateInventory(
+      events, runId, authorizedWorkspaceRoot, computeInventoryFn,
+      _livenessDeps(runDir, nowFn, isAliveFn, ownerLeaseReader),
+    );
+    if (candidateInventory) {
+      view.candidateInventory = candidateInventory;
+      view.candidateKind = "process_missing";
+    } else {
+      // M12-19: the orphan entered the advisory branch (delivery requested,
+      // nonterminal) but the runtime liveness proof failed (child alive, fresh/
+      // corrupt owner, malformed session, …). The advisory collapses to an
+      // explicit null — matches the MCP wire contract (candidateKind/
+      // candidateInventory are .nullable()). Scoped to THIS branch so ordinary
+      // non-delivery runs keep the legacy absent-key shape (zero drift).
+      view.candidateInventory = null;
+      view.candidateKind = null;
     }
   }
   return view;
@@ -848,6 +985,33 @@ function _buildReadinessResult(runId, events, terminalState, readiness, waitRetu
       result.candidateInventory = candidateInventory;
       result.candidateKind = "backend_failed";
     }
+  } else if (
+    // M12-19: advisory process_missing candidate on the wait path too — same
+    // proof gates as the point-in-time query. A nonterminal orphan that stays
+    // unsettled through the bounded wait surfaces its advisory candidate at
+    // deadline, so a Lead's bounded read sees it without a second model turn.
+    //
+    // Lead correction (independent review): construct FRESH liveness deps for
+    // every _buildReadinessResult invocation. Do NOT reuse a `now` captured at
+    // wait entry — the poll early-return, read-failure/ambiguous, and deadline
+    // builds must each observe the CURRENT now/owner/PID. A lease fresh at wait
+    // start that crosses the staleness threshold mid-wait must be re-evaluated
+    // against the live clock when this result is built.
+    result.deliveryAvailable === false
+    && result.deliveryFailure === null
+    && !result.isolationFailure
+    && result.deliveryRequested === true
+    && RUN_STATES.includes(result.terminalState)
+    && !TERMINAL_STATES.includes(result.terminalState)
+  ) {
+    const candidateInventory = _computeSafeProcessMissingCandidateInventory(
+      events, runId, inventoryOpts.authorizedWorkspaceRoot, inventoryOpts.computeInventoryFn,
+      inventoryOpts.buildLivenessDeps(),
+    );
+    if (candidateInventory) {
+      result.candidateInventory = candidateInventory;
+      result.candidateKind = "process_missing";
+    }
   }
   return result;
 }
@@ -868,6 +1032,10 @@ function _buildReadinessResult(runId, events, terminalState, readiness, waitRetu
  * @param {Function} [input.readTranscriptFn] — injectable for testing
  * @param {Function} [input.sleepFn] — injectable sleep (testing)
  * @param {Function} [input.nowFn] — injectable clock (testing)
+ * @param {Function} [input.isAliveFn] — M12-19: injectable conservative PID
+ *   probe for the process_missing liveness proof
+ * @param {Function} [input.ownerLeaseReader] — M12-19: injectable owner-lease
+ *   reader for the process_missing liveness proof
  * @param {number} [input.pollIntervalMs] — internal poll interval (testing)
  * @param {Function} [input.onPoll] — optional keepalive hook ({index,fraction});
  *   the MCP adapter wires it to notifications/progress. Read-only: a notification, not a write.
@@ -883,6 +1051,8 @@ export async function getRunDeliveryReadiness({
   readTranscriptFn,
   sleepFn,
   nowFn,
+  isAliveFn,
+  ownerLeaseReader,
   pollIntervalMs,
   onPoll,
 }) {
@@ -911,7 +1081,22 @@ export async function getRunDeliveryReadiness({
   let readiness = projectDeliveryReadiness(events, runId);
   // Candidate-inventory authority/reader, threaded into every readiness
   // result build and consumed only by an eligible recovery candidate.
-  const inventoryOpts = { authorizedWorkspaceRoot, computeInventoryFn };
+  //
+  // M12-19 Lead correction (independent review): do NOT capture nowFn()/Date.now
+  // at wait entry. The process_missing liveness proof depends on owner-lease
+  // freshness, which is a function of the current clock — and the clock advances
+  // during the bounded wait. Stash a buildLivenessDeps() thunk instead of a
+  // pre-built object: every _buildReadinessResult invocation (the non-waiting
+  // early-return, each poll early-return, the read-failure/ambiguous build, and
+  // the deadline build) calls it to construct a FRESH { runDir, now, probes }
+  // against the live clock, so a lease that is fresh at wait start but crosses
+  // the staleness threshold mid-wait is re-evaluated when the result is built.
+  // Point-in-time getRunDelivery is unaffected: it builds a single observation.
+  const inventoryOpts = {
+    authorizedWorkspaceRoot,
+    computeInventoryFn,
+    buildLivenessDeps: () => _livenessDeps(resolve(runDir), nowFn, isAliveFn, ownerLeaseReader),
+  };
 
   // Non-waiting readiness settles immediately: reviewable, packaging_failed,
   // not_requested, and ambiguous are durable facts — waiting cannot change them.

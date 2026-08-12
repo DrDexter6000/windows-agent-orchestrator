@@ -32,6 +32,10 @@ import { executeStopWithVerification } from "../backends/opencodeStopVerify.js";
 import { raiseAlert } from "../alerts.js";
 import { isValidRunId } from "../delivery.js";
 import { findRunWorkspaceOwnership, verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
+// M12-19: the conservative process-alive probe now lives in ownerLiveness (the
+// liveness SSOT), shared with the process_missing recovery proof. Imported here
+// and re-exported below so commands/stop.js and existing tests keep working.
+import { isPidAlive } from "./ownerLiveness.js";
 
 // ── Process primitives (owned here, not in commands/) ────────────────────────
 
@@ -46,19 +50,6 @@ function killProcessTree(pid) {
     return { called: true, exitCode: result.status };
   } catch {
     return { called: true, exitCode: null };
-  }
-}
-
-/**
- * Check if a PID is alive. Conservative: ESRCH = dead, EPERM/unknown = alive.
- */
-function isPidAlive(pid, probe = process.kill) {
-  try {
-    probe(pid, 0);
-    return true;
-  } catch (e) {
-    if (/^(Error: )?.*ESRCH/.test(e.message)) return false;
-    return true;
   }
 }
 

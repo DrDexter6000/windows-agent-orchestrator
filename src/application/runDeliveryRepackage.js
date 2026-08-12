@@ -48,6 +48,10 @@ import {
   validateDeliveryFacts,
   findValidRepackageProvenance,
   classifyRecoveryCandidate,
+  TERMINAL_STATES,
+  RECOVERY_CANDIDATE_KINDS,
+  PROCESS_MISSING_RECOVERY_REASON,
+  PROCESS_MISSING_CONFIRMED_TYPE,
 } from "../transcript.js";
 import {
   assertCommittedDeliveryRef,
@@ -66,6 +70,7 @@ import {
 import { validateProjectedPath } from "./deliveryReview.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { proveWorkspace } from "./workspaceBinding.js";
+import { proveProcessMissing } from "./processRecovery.js";
 
 const REPACKAGE_VERIFICATION_OUTCOME_TYPES = new Set([
   "run.delivery_verification_passed",
@@ -138,6 +143,187 @@ function _deliveryWasRequested(events, runId) {
       || (e.type === "run.started" && e.delivery && typeof e.delivery.mode === "string" && e.delivery.mode.length > 0)
     ),
   );
+}
+
+/**
+ * M12-19: prove the FULL process_missing precondition set BEFORE any durable
+ * mutation. Throws on any failure — the transcript and worktree are untouched on
+ * a throw (the caller has not yet transitioned state or packaged Git).
+ *
+ * Proves, in order: workspace ownership; runtime liveness (the detached
+ * runner/provider process is provably gone); the original run.started contract;
+ * that the Lead's new scope includes the ORIGINAL allowedPaths (no narrowing);
+ * and a FULL non-empty untruncated candidate inventory whose every actual
+ * changed path is covered by the Lead's new scope. The runtime liveness probes
+ * default to the real ownerLease/PID probe; tests inject deterministic fakes.
+ *
+ * @param {object} opts
+ * @private
+ */
+function _proveProcessMissingEligibility({
+  events,
+  runId,
+  runDir,
+  authorizedWorkspaceRoot,
+  newAllowedPaths,
+  computeInventoryFn,
+  nowFn,
+  isAliveFn,
+  ownerLeaseReader,
+}) {
+  if (typeof authorizedWorkspaceRoot !== "string" || authorizedWorkspaceRoot.length === 0) {
+    throw new Error("runDeliveryRepackage: authorizedWorkspaceRoot is required");
+  }
+  verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
+
+  const livenessDeps = {
+    runDir,
+    now: typeof nowFn === "function" ? nowFn() : Date.now(),
+    ...(typeof isAliveFn === "function" ? { isAliveFn } : {}),
+    ...(typeof ownerLeaseReader === "function" ? { ownerLeaseReader } : {}),
+  };
+  if (proveProcessMissing(events, runId, livenessDeps).eligible !== true) {
+    throw new Error("runDeliveryRepackage: process_missing liveness proof failed");
+  }
+
+  const started = events.filter((e) => e && e.type === "run.started" && e.runId === runId);
+  if (started.length !== 1) {
+    throw new Error("runDeliveryRepackage: expected exactly one bound run.started");
+  }
+  const bound = started[0];
+  const delivery = bound.delivery;
+  if (
+    !delivery || typeof delivery !== "object"
+    || !isCanonicalCommitId(delivery.baseCommit)
+    || !Array.isArray(delivery.allowedPaths) || delivery.allowedPaths.length === 0
+    || typeof bound.worktreePath !== "string" || bound.worktreePath.length === 0
+  ) {
+    throw new Error("runDeliveryRepackage: run.started delivery contract is malformed");
+  }
+  const originalAllowedPaths = _normalizeAllowedPaths(delivery.allowedPaths);
+  // The Lead may widen but never narrow the original contract.
+  for (const orig of originalAllowedPaths) {
+    if (!isPathAllowed(orig, newAllowedPaths)) {
+      throw new Error("runDeliveryRepackage: new allowedPaths must include the original allowedPaths");
+    }
+  }
+
+  // FULL non-empty untruncated inventory + coverage of every actual changed path.
+  const inventory = computeInventoryFn(bound.worktreePath, delivery.baseCommit, originalAllowedPaths);
+  if (!inventory) {
+    throw new Error("runDeliveryRepackage: candidate inventory unavailable (read failed)");
+  }
+  if (
+    inventory.actualChangedTruncated
+    || inventory.originalAllowedTruncated
+    || inventory.disallowedTruncated
+  ) {
+    throw new Error("runDeliveryRepackage: process_missing candidate inventory is incomplete");
+  }
+  if (inventory.actualChangedCount === 0 || inventory.actualChangedPaths.length === 0) {
+    throw new Error("runDeliveryRepackage: candidate inventory is empty");
+  }
+  const uncovered = inventory.actualChangedPaths.filter((p) => !isPathAllowed(p, newAllowedPaths));
+  if (uncovered.length > 0) {
+    throw new Error("runDeliveryRepackage: new allowedPaths do not cover actual changed paths");
+  }
+}
+
+/**
+ * M12-19: settle a NONTERMINAL process_missing orphan with first-terminal-wins.
+ *
+ * Pre-conditions to enter this path: no existing delivery_created, and the run's
+ * authoritative state is NONTERMINAL (terminal runs and idempotent retries are
+ * handled by Phase 0). Proves the full precondition set (fail closed BEFORE any
+ * mutation), then atomically transitions the orphan to failed carrying the
+ * closed-set process_missing reason AND a safe confirmation fact (one
+ * appendFile batch, under the cross-process append lock). Re-reads the
+ * authoritative events afterward.
+ *
+ * Race semantics:
+ *   - This caller wins the terminal → returns the authoritative (now terminal
+ *     process_missing) events.
+ *   - A concurrent caller won the terminal → the transition is rejected and only
+ *     an audit event is written. This caller proceeds ONLY when the
+ *     authoritative terminal facts are independently eligible under an existing
+ *     recovery kind (disallowed_scope/backend_failed/process_missing); otherwise
+ *     it rejects WITHOUT Git packaging.
+ *
+ * @param {object} opts
+ * @returns {Promise<object[]>} the authoritative events to feed Phase 0
+ * @private
+ */
+async function _settleProcessMissingOrphan({
+  events,
+  runId,
+  runDir,
+  authorizedWorkspaceRoot,
+  newAllowedPaths,
+  computeInventoryFn,
+  readTranscriptFn,
+  transcriptFactory,
+  filePath,
+  nowFn,
+  isAliveFn,
+  ownerLeaseReader,
+}) {
+  const existingCreated = _findBoundEvent(events, runId, (e) => e.type === "run.delivery_created");
+  if (existingCreated) return events;
+
+  const boundState = findState(events.filter((e) => e && e.runId === runId));
+  if (TERMINAL_STATES.includes(boundState)) return events;
+
+  // M12-19 correction: a pre-existing bound confirmation fact in a NONTERMINAL
+  // run is an inconsistent durable record — the safe confirmation is only ever
+  // written ATOMICALLY with the terminal transition, so a nonterminal run
+  // carrying one is already recovered (or its record is corrupt). Fail closed
+  // BEFORE any mutation: never re-confirm or re-transition an already-recovered
+  // orphan, never package on an ambiguous durable record.
+  if (events.some((e) => e && e.runId === runId && e.type === PROCESS_MISSING_CONFIRMED_TYPE)) {
+    throw new Error("runDeliveryRepackage: run.process_missing_confirmed already exists for this run");
+  }
+
+  // Prove the full precondition set BEFORE mutation. A throw leaves the
+  // transcript and worktree byte-identical (no state change, no Git op).
+  _proveProcessMissingEligibility({
+    events,
+    runId,
+    runDir,
+    authorizedWorkspaceRoot,
+    newAllowedPaths,
+    computeInventoryFn,
+    nowFn,
+    isAliveFn,
+    ownerLeaseReader,
+  });
+
+  const context = {
+    runId,
+    agentId: events[0]?.agentId ?? "unknown",
+    initialSeq: findLastEventSeq(events),
+  };
+  const transcript = transcriptFactory
+    ? await transcriptFactory(filePath, context)
+    : new JsonlTranscript(filePath, context);
+  const termResult = await transcript.transitionState(
+    boundState,
+    "failed",
+    PROCESS_MISSING_RECOVERY_REASON,
+    { factEvents: [{ type: PROCESS_MISSING_CONFIRMED_TYPE, payload: {} }] },
+  );
+
+  const authoritativeEvents = await readTranscriptFn(filePath);
+  if (termResult.accepted) {
+    return authoritativeEvents;
+  }
+  // A concurrent terminal won. Admit ONLY an independently eligible recovery
+  // kind; anything else (completed/aborted/timed_out/unknown) rejects without
+  // touching Git.
+  const authoritativeKind = classifyRecoveryCandidate(authoritativeEvents, runId);
+  if (!RECOVERY_CANDIDATE_KINDS.includes(authoritativeKind)) {
+    throw new Error("runDeliveryRepackage: a concurrent terminal state is not recovery-eligible");
+  }
+  return authoritativeEvents;
 }
 
 /**
@@ -229,11 +415,11 @@ function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, ha
   // by the committed DeliveryRef + provenance instead.
   const workspaceProof = proveWorkspace(bound.worktreePath);
   if (
-    recoveryKind === "backend_failed"
+    (recoveryKind === "backend_failed" || recoveryKind === "process_missing")
     && !hasCreated
     && workspaceProof.gitHead !== delivery.baseCommit
   ) {
-    throw new Error("runDeliveryRepackage: backend candidate HEAD does not match the original base");
+    throw new Error("runDeliveryRepackage: candidate HEAD does not match the original base");
   }
 
   const originalAllowedPaths = _normalizeAllowedPaths(delivery.allowedPaths);
@@ -263,6 +449,9 @@ function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, ha
  * @param {Function} [input.computeInventoryFn] — injectable (default computeCandidateInventory)
  * @param {Function} [input.readTranscriptFn] — injectable for testing
  * @param {Function} [input.transcriptFactory] — injectable async (filePath, context) => transcript
+ * @param {Function} [input.nowFn] — M12-19: injectable clock for the process_missing liveness proof
+ * @param {Function} [input.isAliveFn] — M12-19: injectable conservative PID probe
+ * @param {Function} [input.ownerLeaseReader] — M12-19: injectable owner-lease reader
  * @returns {Promise<{runId, deliveryCommit, verificationStatus, outcome, source, created, verificationRecorded}>}
  * @throws {Error} on any precondition / scope / inventory / packaging / proof failure
  */
@@ -276,6 +465,9 @@ export async function runDeliveryRepackage({
   computeInventoryFn,
   readTranscriptFn,
   transcriptFactory,
+  nowFn,
+  isAliveFn,
+  ownerLeaseReader,
 }) {
   if (!runId || typeof runId !== "string") throw new Error("runDeliveryRepackage: runId is required");
   if (!runDir || typeof runDir !== "string") throw new Error("runDeliveryRepackage: runDir is required");
@@ -290,7 +482,7 @@ export async function runDeliveryRepackage({
   const _inventory = computeInventoryFn ?? computeCandidateInventory;
 
   const filePath = join(runDir, `${runId}.jsonl`);
-  const events = await _readTranscript(filePath);
+  let events = await _readTranscript(filePath);
 
   // Idempotency pre-read: an existing created/outcome lets us skip the expensive
   // package/verify steps. The lock-scoped CAS methods re-check authoritatively.
@@ -314,6 +506,29 @@ export async function runDeliveryRepackage({
   if (provenanceEvents.length > 1 || (provenanceEvents.length > 0 && createdEvents.length === 0)) {
     throw new Error("runDeliveryRepackage: orphan or ambiguous recovery provenance");
   }
+
+  // Phase -1 (M12-19): process_missing orphan settlement. When the run is a
+  // NONTERMINAL orphan whose detached runner/provider process is provably gone,
+  // prove the FULL precondition set (workspace + liveness + contract + inventory
+  // + coverage) BEFORE any mutation, then first-terminal-wins transition to
+  // failed with a safe confirmation fact, and re-read authoritative facts. A
+  // concurrent terminal winner is admitted only if it is independently eligible
+  // under an existing recovery kind. Terminal/existing-created runs pass through
+  // unchanged (Phase 0 handles them).
+  events = await _settleProcessMissingOrphan({
+    events,
+    runId,
+    runDir,
+    authorizedWorkspaceRoot,
+    newAllowedPaths,
+    computeInventoryFn: _inventory,
+    readTranscriptFn: _readTranscript,
+    transcriptFactory,
+    filePath,
+    nowFn,
+    isAliveFn,
+    ownerLeaseReader,
+  });
 
   // Phase 0: preconditions.
   const original = _proveRepackagePreconditions(
@@ -343,13 +558,13 @@ export async function runDeliveryRepackage({
       throw new Error("runDeliveryRepackage: candidate inventory truncated — verify manually");
     }
     if (
-      original.recoveryKind === "backend_failed"
+      (original.recoveryKind === "backend_failed" || original.recoveryKind === "process_missing")
       && (
         inventory.originalAllowedTruncated
         || inventory.disallowedTruncated
       )
     ) {
-      throw new Error("runDeliveryRepackage: backend candidate inventory is incomplete");
+      throw new Error("runDeliveryRepackage: candidate inventory is incomplete");
     }
     if (inventory.actualChangedCount === 0 || inventory.actualChangedPaths.length === 0) {
       throw new Error("runDeliveryRepackage: candidate inventory is empty");
