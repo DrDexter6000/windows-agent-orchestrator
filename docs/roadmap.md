@@ -216,7 +216,7 @@ Owner Dashboard 增加选中 run 的 backend/stage/terminal/event count/scope/li
 
 ### M12-19 supervision recovery truth / worker 进程消失成果恢复（2026-08-12，本地验收，待发布）
 
-工作区监督事实不再把 authority 证明失败折叠成普通 unbound：`workspace_status`、`lead_preflight` 与相关 drilldown 共享闭集 `unboundReason`，只说明哪一类 authority 证明失败，不返回路径或动态错误，也不替 Lead 停止、重绑或改派。实现 run `run_20260811181643314t83hj4` 的 delivery `9e6255f75e1b9ba5c24fc6d826582813bcbd4e58` 已由 Lead 完整审查并 accepted。
+工作区监督事实不再把 authority 证明失败折叠成普通 unbound：`workspace_status`、`lead_preflight` 与相关 drilldown 共享闭集 `unboundReason`，只说明哪一类 authority 证明失败，不返回路径或动态错误，也不替 Lead 停止、重绑或改派。实现 run `run_20260811181643314t83hj4` 的 delivery `9e6255f75e1b9ba5c24fc6d826582813bcbd4e58` 已由 Lead 完整审查并 accepted。最终组合候选的首轮 canonical 稳定暴露 `run_wait` / `run_await_result` descriptions 丢失既有 Host-neutral transport-recovery 锚点；发布门据此阻断，随后恢复“transport loss 只表示 observation unknown、无 control-plane mutation，应 point-in-time 重读且不得推断 stop”的紧凑合同，同时保持 22-tool wire 与 description byte ceiling，定向 MCP/tool-surface 守卫 26/26 通过。
 
 当 delivery run 仍处非终态、detached runner/provider 进程被保守证明已经消失、原 worktree 保留且全部合同与路径事实可证明时，`run_delivery` 只读投影 `candidateKind:"process_missing"`；只有 Lead 显式调用既有 `run_delivery_repackage` 才会原子结算 orphan、重用原 base/worktree/verification 并封装成果，不调用模型、不扩大 scope、不自动 accept/reject。首版因轮询复用冻结 `now` 而可能把新鲜 lease 误判为 stale，候选未被接受；修正 run `run_20260812143825898iaolt2` 改为每次轮询重建 liveness 时间快照，delivery `c6b28504fd00a57f9ae39dd803cbd40f1cce90c1` 经 focused、真实 transcript smoke、完整审查与 exact verification 后由 Lead accepted。M12-19 两笔实现已本地 fast-forward 集成，尚未发布或完成 Fresh Host 验收。
 

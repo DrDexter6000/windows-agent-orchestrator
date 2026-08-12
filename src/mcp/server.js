@@ -2017,9 +2017,9 @@ const RUN_WAIT_DESCRIPTION =
   "waitMs " +
   `(${RUN_WAIT_MIN_MS}..${RUN_WAIT_MAX_MS} ms; default ${RUN_WAIT_DEFAULT_MS} ms / 4.5 min). ` +
   "waitMs=0 is intentionally invalid; for a point-in-time read use run_await_result(waitMs:0) " +
-  "or run_status. Does NOT stop the run — the Lead decides; expiry never terminates. Host " +
-  "transport loss/cancellation does not stop the detached run — the call just ends and " +
-  "liveness stays unknown; re-read point-in-time via run_status, never infer a stop. " +
+  "or run_status. Expiry never terminates. Host transport loss/cancellation does not stop the " +
+  "detached run: observation unknown; no control-plane mutation. re-read point-in-time via " +
+  "run_status; never infer a stop. " +
   "Self-explaining semanticNotes; wao://semantics/{id}.";
 
 // ===== run_await_result (M12-3 read-only composite) constants =====
@@ -2166,8 +2166,8 @@ const RUN_AWAIT_RESULT_DESCRIPTION =
   "— never stop/retry/decide/accept/reject/repackage/append transcript events; no semantic " +
   "judgment. result.status distinguishes terminal from not_terminal/unavailable; a read failure " +
   "yields a closed-set readFailureReason. Idempotent, snapshot-only. Host transport " +
-  "loss/cancellation does not stop the detached run — the call just ends and liveness stays " +
-  "unknown; re-read point-in-time (waitMs:0) or via run_status, never infer a stop. " +
+  "loss/cancellation does not stop the detached run: observation unknown; no control-plane " +
+  "mutation. re-read point-in-time with waitMs:0 or run_status; never infer a stop. " +
   "Self-explaining semanticNotes; wao://semantics/{id}.";
 
 // ===== run_activity (M12-8 read-only activity timeline) constants =====
