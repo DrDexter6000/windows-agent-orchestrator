@@ -13,6 +13,10 @@ import {
 
 const APPEND_LOCK_TIMEOUT_MS = 5000;
 const APPEND_LOCK_STALE_MS = 30000;
+// TD-71: the append-lock poll interval. Reused by BOTH the EEXIST wait path and
+// the transient EPERM/EBUSY retry path so there is one timeout/poll policy — no
+// second timeout source is introduced by the Windows retry fix.
+const APPEND_LOCK_POLL_MS = 5;
 
 export const RUN_STATES = [
   "pending",
@@ -1709,34 +1713,108 @@ function _detectExistingTerminal(events) {
   return TERMINAL_STATES.includes(inferred) ? inferred : null;
 }
 
-async function acquireAppendLock(filePath) {
+// TD-71: minimal filesystem/clock seam for the append-lock subsystem ONLY
+// (acquireAppendLock + removeStaleLock). Production resolves to the real
+// node:fs/promises primitives + Date.now()/setTimeout; tests override it via
+// __setAppendLockFsForTest to deterministically simulate a transient Windows
+// EPERM/EBUSY on lock creation and advance the clock, WITHOUT depending on the
+// OS to reproduce a lock race. The rest of this module's I/O (appendFile, mkdir,
+// readTranscript, readMaxSeq, ...) is untouched and always uses the real
+// primitives — the seam never widens past the lock subsystem.
+const _realAppendLockFs = {
+  open,
+  readFile,
+  unlink,
+  now: () => Date.now(),
+  sleep,
+};
+let _appendLockFs = _realAppendLockFs;
+
+/**
+ * TD-71 test-only seam: override one or more append-lock filesystem/clock
+ * primitives for deterministic retry tests. Pass a PARTIAL object; unspecified
+ * primitives keep their real defaults. Always pair with
+ * __resetAppendLockFsForTest() in a finally block so the seam cannot leak.
+ */
+export function __setAppendLockFsForTest(seam) {
+  _appendLockFs = { ..._realAppendLockFs, ...seam };
+}
+
+/** TD-71 test-only seam: restore the real append-lock filesystem/clock primitives. */
+export function __resetAppendLockFsForTest() {
+  _appendLockFs = _realAppendLockFs;
+}
+
+export async function acquireAppendLock(filePath) {
   const lockPath = `${filePath}.seq.lock`;
-  const start = Date.now();
+  const fs = _appendLockFs;
+  const start = fs.now();
+  // TD-71: the most recent RETRIABLE error, preserved as the timeout's `.cause`
+  // so a bound-exhaustion failure stays truthful about WHY (e.g. repeated Windows
+  // EPERM, or sustained lock contention) instead of masking a real
+  // permission/configuration problem. Non-retriable errors throw before this is
+  // ever read, so it only ever holds EEXIST/EPERM/EBUSY.
+  let lastRetriedError = null;
   while (true) {
+    // ── Lock CREATION: the only step whose EPERM/EBUSY is a Windows-transient
+    // retryable failure. EEXIST is the ONLY code routed to stale-lock recovery
+    // (it is the only code that means "another process holds the lock"); EPERM/
+    // EBUSY retry within the SAME timeout/poll budget and NEVER delete a lock
+    // (none was created). Any other code throws immediately, cause preserved.
+    let handle;
     try {
-      const handle = await open(lockPath, "wx");
-      await handle.writeFile(JSON.stringify({ pid: process.pid, ts: Date.now() }), "utf8");
-      return async () => {
-        await handle.close().catch(() => {});
-        await unlink(lockPath).catch(() => {});
-      };
+      handle = await fs.open(lockPath, "wx");
     } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-      await removeStaleLock(lockPath);
-      if (Date.now() - start > APPEND_LOCK_TIMEOUT_MS) {
-        throw new Error(`Timed out waiting for transcript append lock: ${lockPath}`);
+      const code = error?.code;
+      if (code === "EEXIST") {
+        await removeStaleLock(lockPath);
+      } else if (code === "EPERM" || code === "EBUSY") {
+        // TD-71: Windows-transient filesystem errors (antivirus / indexer /
+        // filter briefly blocking the new lock path). Retried below; no lock was
+        // created, so stale-lock deletion must NOT run.
+      } else {
+        // Non-transient (ENOSPC, EACCES, EMFILE, ...): throw immediately and
+        // preserve the causal code verbatim. The retry set is intentionally the
+        // closed {EEXIST, EPERM, EBUSY} — never widened to swallow real errors.
+        throw error;
       }
-      await sleep(5);
+      lastRetriedError = error;
+      // Single bound for EEXIST, EPERM, and EBUSY — no second timeout source.
+      if (fs.now() - start > APPEND_LOCK_TIMEOUT_MS) {
+        throw new Error(
+          `Timed out waiting for transcript append lock: ${lockPath}`,
+          { cause: lastRetriedError },
+        );
+      }
+      await fs.sleep(APPEND_LOCK_POLL_MS);
+      continue;
     }
+    // ── Lock OWNED: fs.open succeeded, so THIS invocation created the lock.
+    // The metadata write is NOT a retryable open failure. If it fails for ANY
+    // code, close the owned handle and unlink ONLY this lock path, then throw
+    // the original causal error unchanged — no second open, no retry, no stale
+    // logic. (Otherwise the owned handle + lock leak, and the next open EEXISTs
+    // on our own just-created lock.)
+    try {
+      await handle.writeFile(JSON.stringify({ pid: process.pid, ts: fs.now() }), "utf8");
+    } catch (error) {
+      await handle.close().catch(() => {});
+      await fs.unlink(lockPath).catch(() => {});
+      throw error;
+    }
+    return async () => {
+      await handle.close().catch(() => {});
+      await fs.unlink(lockPath).catch(() => {});
+    };
   }
 }
 
 async function removeStaleLock(lockPath) {
   try {
-    const raw = await readFile(lockPath, "utf8");
+    const raw = await _appendLockFs.readFile(lockPath, "utf8");
     const data = JSON.parse(raw);
-    if (Date.now() - Number(data.ts) > APPEND_LOCK_STALE_MS) {
-      await unlink(lockPath).catch(() => {});
+    if (_appendLockFs.now() - Number(data.ts) > APPEND_LOCK_STALE_MS) {
+      await _appendLockFs.unlink(lockPath).catch(() => {});
     }
   } catch {
     // If the lock is unreadable, let the normal timeout path decide.

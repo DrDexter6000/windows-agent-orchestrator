@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, open as realOpen } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,6 +11,9 @@ import {
   findLastEventSeq,
   validateDeliveryFacts,
   projectReverifyChain,
+  acquireAppendLock,
+  __setAppendLockFsForTest,
+  __resetAppendLockFsForTest,
   RUN_STATES,
   TERMINAL_STATES,
   DELIVERY_DECISION_POLICY_CODES,
@@ -1328,5 +1331,335 @@ test("M12-9-T5: tryAppendDecision verification/terminal gates throw the dedicate
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  }
+});
+
+// ============================================================
+// TD-71: Windows append-lock transient EPERM/EBUSY bounded retry.
+//
+// On Windows, creating runs/<runId>.jsonl.seq.lock can fail TRANSIENTLY with
+// EPERM or EBUSY (antivirus / search indexer / filesystem filter briefly
+// blocking the new path) even when no other process holds the lock. The pre-fix
+// acquireAppendLock retried ONLY EEXIST, so a single transient EPERM/EBUSY
+// aborted an otherwise healthy append. These tests pin the bounded-retry fix:
+//   - EPERM/EBUSY are retried within the SAME append-lock timeout/poll budget
+//     (no second timeout source);
+//   - EPERM/EBUSY never reach the stale-lock deletion path (EEXIST-only) — a
+//     live lock is never deleted to paper over a transient filesystem error;
+//   - a transient blip followed by success appends EXACTLY ONCE with correct seq;
+//   - repeated transient failure exhausts at the existing bound and throws the
+//     stable timeout, preserving the causal error (no infinite retry, nothing
+//     hidden);
+//   - any non-transient error throws immediately and preserves its causal code.
+//
+// Determinism: the OS is NEVER relied on to reproduce a lock. The append-lock
+// filesystem/clock seam (__setAppendLockFsForTest) injects synthetic EPERM/EBUSY
+// and a controllable clock so the retry bound is exercised in microseconds; each
+// test resets the seam in a finally block so it cannot leak.
+// ============================================================
+
+// A lock-path-shaped string used by the direct (fully-fake-FS) tests; no real
+// file is created because open is fully faked.
+const TD71_LOCK_FILE = join(tmpdir(), "td71-direct.jsonl");
+const TD71_LOCK_PATH = `${TD71_LOCK_FILE}.seq.lock`;
+
+function transientLockError(code) {
+  const err = new Error(code === "EPERM" ? "operation not permitted" : "resource busy");
+  err.code = code;
+  return err;
+}
+
+function fakeHandle() {
+  return { writeFile: async () => {}, close: async () => {} };
+}
+
+test("TD-71: a transient EPERM on lock create is retried and then succeeds (never throws the raw EPERM)", async () => {
+  const reads = [];
+  let openCalls = 0;
+  __setAppendLockFsForTest({
+    open: async () => {
+      openCalls += 1;
+      if (openCalls === 1) throw transientLockError("EPERM");
+      return fakeHandle();
+    },
+    readFile: async (p) => { reads.push(p); return "{}"; },
+    unlink: async () => {},
+    now: () => 0,
+    sleep: async () => {},
+  });
+  try {
+    const release = await acquireAppendLock(TD71_LOCK_FILE);
+    assert.equal(openCalls, 2, "lock create retried exactly once after the transient EPERM");
+    await release();
+    assert.deepEqual(reads, [], "EPERM never triggered stale-lock readFile (no live-lock deletion)");
+  } finally {
+    __resetAppendLockFsForTest();
+  }
+});
+
+test("TD-71: a transient EBUSY on lock create is retried and then succeeds", async () => {
+  let openCalls = 0;
+  __setAppendLockFsForTest({
+    open: async () => {
+      openCalls += 1;
+      if (openCalls === 1) throw transientLockError("EBUSY");
+      return fakeHandle();
+    },
+    now: () => 0,
+    sleep: async () => {},
+  });
+  try {
+    const release = await acquireAppendLock(TD71_LOCK_FILE);
+    assert.equal(openCalls, 2, "lock create retried exactly once after the transient EBUSY");
+    await release();
+  } finally {
+    __resetAppendLockFsForTest();
+  }
+});
+
+test("TD-71: a real append after one transient EPERM writes exactly one event with seq 1", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "td71-append-once-"));
+  try {
+    const filePath = join(dir, "run.jsonl");
+    let openCalls = 0;
+    // Only the lock `open` is faked; the first attempt fails EPERM, the second
+    // delegates to the real FS. Everything else (mkdir, appendFile, readMaxSeq,
+    // stale handling) keeps using the real FS.
+    __setAppendLockFsForTest({
+      open: async (path, flags) => {
+        openCalls += 1;
+        if (openCalls === 1) throw transientLockError("EPERM");
+        return realOpen(path, flags);
+      },
+    });
+    try {
+      const t = new JsonlTranscript(filePath, { runId: "run_td71", agentId: "agent_td71" });
+      const event = await t.append("run.started", { cwd: "D:/projects/worktree" });
+      assert.equal(openCalls, 2, "lock create retried once after the transient EPERM");
+      assert.equal(event.seq, 1);
+      const events = await readTranscript(filePath);
+      assert.equal(events.length, 1, "exactly one event appended (no double-append from the retry)");
+      assert.equal(events[0].seq, 1);
+      assert.equal(events[0].type, "run.started");
+    } finally {
+      __resetAppendLockFsForTest();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-71: repeated EPERM exhausts at the existing bound and throws the stable timeout, preserving the causal error, never deleting the lock", async () => {
+  const lockReads = [];
+  const lockUnlinks = [];
+  let openCalls = 0;
+  let clock = 0;
+  __setAppendLockFsForTest({
+    open: async () => {
+      openCalls += 1;
+      throw transientLockError("EPERM");
+    },
+    readFile: async (p) => { lockReads.push(p); return "{}"; },
+    unlink: async (p) => { lockUnlinks.push(p); },
+    // Advance the fake clock 1s per bound check; the existing bound is 5000ms,
+    // so the retry exhausts in a small bounded number of iterations.
+    now: () => { clock += 1000; return clock; },
+    sleep: async () => {},
+  });
+  try {
+    await assert.rejects(
+      () => acquireAppendLock(TD71_LOCK_FILE),
+      (err) => {
+        assert.match(err.message, /Timed out waiting for transcript append lock/,
+          "bound exhaustion throws the stable timeout message");
+        assert.equal(err.code, undefined,
+          "the exhaustion failure is the stable timeout, NOT the raw EPERM");
+        assert.equal(err.cause?.code, "EPERM",
+          "the causal transient error is preserved as .cause — a real permission problem is not hidden");
+        return true;
+      },
+    );
+    assert.ok(openCalls > 1, "the lock was retried within the bound before exhausting (no immediate abort)");
+    assert.deepEqual(lockReads, [], "EPERM never triggered stale-lock readFile");
+    assert.deepEqual(lockUnlinks, [], "EPERM never deleted the lock file");
+  } finally {
+    __resetAppendLockFsForTest();
+  }
+});
+
+test("TD-71: a non-transient error throws immediately and preserves its causal code (no retry)", async () => {
+  let openCalls = 0;
+  __setAppendLockFsForTest({
+    open: async () => {
+      openCalls += 1;
+      const err = new Error("no space left on device");
+      err.code = "ENOSPC";
+      throw err;
+    },
+    now: () => 0,
+    sleep: async () => {},
+  });
+  try {
+    await assert.rejects(
+      () => acquireAppendLock(TD71_LOCK_FILE),
+      (err) => {
+        assert.equal(err.code, "ENOSPC", "causal code preserved verbatim");
+        return true;
+      },
+    );
+    assert.equal(openCalls, 1, "a non-transient error is never retried");
+  } finally {
+    __resetAppendLockFsForTest();
+  }
+});
+
+test("TD-71: EEXIST still routes to stale-lock handling (regression — retry set must not widen stale deletion)", async () => {
+  const lockReads = [];
+  let openCalls = 0;
+  __setAppendLockFsForTest({
+    open: async () => {
+      openCalls += 1;
+      if (openCalls <= 2) {
+        const err = new Error("file exists");
+        err.code = "EEXIST";
+        throw err;
+      }
+      return fakeHandle();
+    },
+    readFile: async (p) => { lockReads.push(p); return JSON.stringify({ pid: 1, ts: 0 }); },
+    unlink: async () => {},
+    now: () => 0,
+    sleep: async () => {},
+  });
+  try {
+    const release = await acquireAppendLock(TD71_LOCK_FILE);
+    assert.ok(openCalls >= 2, "EEXIST is retried within the bound (unchanged behavior)");
+    assert.equal(lockReads.length, 2,
+      "EEXIST triggers the stale-lock read on each retry — stale handling is preserved for EEXIST only");
+    await release();
+  } finally {
+    __resetAppendLockFsForTest();
+  }
+});
+
+test("TD-71: multi-process ordering preserved under transient EPERM — concurrent writers still get unique monotonic seqs", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "td71-concurrent-"));
+  try {
+    const filePath = join(dir, "run.jsonl");
+    let transientRemaining = 3; // inject a few transient blips, then real FS
+    __setAppendLockFsForTest({
+      open: async (path, flags) => {
+        if (transientRemaining > 0) {
+          transientRemaining -= 1;
+          throw transientLockError("EPERM");
+        }
+        return realOpen(path, flags);
+      },
+      sleep: async () => {}, // instant poll — keeps the contended race fast and deterministic
+    });
+    try {
+      const a = new JsonlTranscript(filePath, { runId: "run_td71_race", agentId: "agent_x" });
+      const b = new JsonlTranscript(filePath, { runId: "run_td71_race", agentId: "agent_x" });
+      await Promise.all(Array.from({ length: 10 }, (_, i) => {
+        const writer = i % 2 === 0 ? a : b;
+        return writer.append("run.event", { kind: "test", index: i });
+      }));
+      const events = await readTranscript(filePath);
+      const seqs = events.map((e) => e.seq);
+      assert.equal(new Set(seqs).size, events.length, "seq values must be unique across writers");
+      assert.deepEqual(seqs, Array.from({ length: events.length }, (_, i) => i + 1),
+        "seq values must be monotonic in transcript order");
+    } finally {
+      __resetAppendLockFsForTest();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ============================================================
+// TD-71 (Lead correction): metadata-write ownership bug.
+//
+// fs.open(lockPath, "wx") and handle.writeFile(metadata) must NOT share one
+// try/catch. If open SUCCEEDS, this invocation OWNS/created the lock, so a
+// metadata-write failure (any code) is NOT a retryable open failure: it must
+// close the owned handle, unlink ONLY the lock path it just created, and throw
+// the original causal error unchanged — no second open, no retry, no stale
+// logic. The pre-fix code reclassified a metadata-write EPERM as a transient
+// OPEN failure, leaking the handle and the lock it had just created (which then
+// surfaced as self-inflicted EEXIST/timeout on the next open).
+// ============================================================
+
+test("TD-71: a metadata-write EPERM after a successful open cleans up the owned handle and rethrows (no open retry)", async () => {
+  let openCalls = 0;
+  let closeCalls = 0;
+  const unlinkPaths = [];
+  let clock = 0;
+  __setAppendLockFsForTest({
+    open: async () => {
+      openCalls += 1;
+      return {
+        writeFile: async () => { throw transientLockError("EPERM"); },
+        close: async () => { closeCalls += 1; },
+      };
+    },
+    unlink: async (p) => { unlinkPaths.push(p); },
+    // Advance the clock so a buggy "retry-open-on-metadata-failure" implementation
+    // still terminates at the bound instead of hanging the suite.
+    now: () => { clock += 1000; return clock; },
+    sleep: async () => {},
+  });
+  try {
+    await assert.rejects(
+      () => acquireAppendLock(TD71_LOCK_FILE),
+      (err) => {
+        assert.equal(err.code, "EPERM", "original causal code preserved unchanged");
+        return true;
+      },
+    );
+    assert.equal(openCalls, 1, "no second open — a metadata-write failure is not a retryable open failure");
+    assert.equal(closeCalls, 1, "the owned handle was closed exactly once");
+    assert.deepEqual(unlinkPaths, [TD71_LOCK_PATH],
+      "unlinked exactly once, only the lock path this handle created");
+  } finally {
+    __resetAppendLockFsForTest();
+  }
+});
+
+test("TD-71: a metadata-write non-transient error after a successful open cleans up the owned handle and rethrows the original code", async () => {
+  let openCalls = 0;
+  let closeCalls = 0;
+  const unlinkPaths = [];
+  let clock = 0;
+  __setAppendLockFsForTest({
+    open: async () => {
+      openCalls += 1;
+      return {
+        writeFile: async () => {
+          const err = new Error("i/o error");
+          err.code = "EIO";
+          throw err;
+        },
+        close: async () => { closeCalls += 1; },
+      };
+    },
+    unlink: async (p) => { unlinkPaths.push(p); },
+    now: () => { clock += 1000; return clock; },
+    sleep: async () => {},
+  });
+  try {
+    await assert.rejects(
+      () => acquireAppendLock(TD71_LOCK_FILE),
+      (err) => {
+        assert.equal(err.code, "EIO", "original causal code preserved (not swallowed or reclassified)");
+        return true;
+      },
+    );
+    assert.equal(openCalls, 1, "no second open");
+    assert.equal(closeCalls, 1, "owned handle closed exactly once");
+    assert.deepEqual(unlinkPaths, [TD71_LOCK_PATH],
+      "unlinked exactly once, only the owned lock path");
+  } finally {
+    __resetAppendLockFsForTest();
   }
 });
