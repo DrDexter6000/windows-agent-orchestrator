@@ -254,6 +254,16 @@ Owner Dashboard 增加选中 run 的 backend/stage/terminal/event count/scope/li
 
 2026-08-13 Fresh Host 在一次性 clean synthetic repo 上真实派发 continuable `coder_low` 父 run `run_20260813105343298gigmow`，父 delivery `d28fdd4ec482ed57a6a833c60d2a1ca33c3f4f29` 修改并验证 `a.txt/b.txt/c.txt` 后由 Lead 为 continuation canary 明确 rejected。第一次 child 仅授权 `d.txt`：`run_continue` 返回 `accepted=false` / `continuation_scope_incomplete`，精确列出 inherited 与 uncovered `a.txt/b.txt/c.txt`，调用前后 run inventory 均只有父 run（零 child run、零模型调用）。Lead 随后显式授权累计 `a/b/c/d`，child `run_20260813105504682pnmeb3` 在同一 continuation lineage/worktree 中保留父三文件、只新增 `d.txt`，最终 delivery `a8e19e86d7c292633a22aa4cbf32729ea18d4f8a` verification passed、4 文件逐项审查并 accepted；active runs 回到 0，一次性仓库清理完成。Verdict：`PASS_M12_22_FRESH_HOST_CUMULATIVE_SCOPE_CONTINUATION`。
 
+### M12-23 post-M12 runtime reliability truth（2026-08-13，本地候选，发布待授权）
+
+Auditor 真实 fresh/resume 对照均成功：fresh `run_20260813121845752xjmrki` 返回精确 canary 文本，resume `run_20260813121903407dgqn1a` 在同一 Lead/workspace expert session 中返回另一条精确文本；两者均有非空 assistant 结果，因此没有事实支持关闭 Auditor session reuse，也没有为本对照修改产品代码。
+
+TD-80 以窄 legacy fallback 偿还：只有 transcript 完全缺少 `run.evidence_audit` 时才复用共享 evidence assessment，显式 audit 始终优先；真实历史 transcript `run_20260702142549160dfqmrt` 只读回放现返回 `evidence_passed_backend_failed`，同时保持命令、路径和 provider 原文不外泄。
+
+TD-71 的根 delivery `run_20260813123526210jd19dv` 虽通过 focused verification，但 Lead 审查发现 metadata write 失败可能在未清理自己持有的 lock 时错误重试，因此 durable rejected；同一 provider session/worktree 经 correction child `run_20260813130405682nt4f6t` 收窄为仅对 open 阶段的 `EPERM`/`EBUSY` 有界重试，并保证 open 后失败 cleanup ownership，最终 delivery accepted 后集成本地 `main`。
+
+TD-48 经当前规模实测关单：CLI diagnose 只读单个 transcript；CLI dashboard 对约 1887 runs / 180MB 的全量历史扫描仍低于 5s 触发条件，不为假设规模提前增加缓存。TD-106 按 Owner 裁定归档为 WAO 非目标：Tester context efficiency 属于 Codex 产品/runtime，不在本包实现或验证范围内。
+
 ### 第三方 onboarding helper 发布与 Fresh Host 验收（2026-08-08）
 
 第三方 onboarding helper 已以普通 fast-forward 发布到 `main@4c06496146827f2d0dd993fde3d0ba372ae28d8d`。从公开 GitHub URL 创建的全新 clone 精确落在该 SHA；锁定依赖安装成功，默认 preview 与选定 worker preview 均为零写入，`--apply` 生成仅含 `coder_low` 的有效私有 registry，生产 `registry validate` 通过，显式 `--endorse-worker coder_low` 只写既有 `manualOverride:"cleared"` Owner 信号且不伪造认证状态。一次性 headless Codex Fresh Host 仅通过进程级 host-neutral MCP 配置连接该 clone，正式执行 `lead_preflight -> run_dispatch`（只读、no delivery）`-> run_await_result`；真实 run `run_20260808195141854w5bypg` 终态为 `completed`，返回唯一非空 assistant 文本 `CANARY_OK` / `project: windows-agent-orchestrator-poc`，无失败诊断，fresh clone HEAD/branch/tracked status 前后不变。首次无交互 Host 尝试在 `run_dispatch` 前因 Host approval 取消而结束，无 runId、无遗留 run；修正 Host 调用环境后在同一发布候选上完成上述唯一 worker canary。Verdict：`PASS_THIRD_PARTY_ONBOARDING_FRESH_HOST`。

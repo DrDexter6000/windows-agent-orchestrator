@@ -463,12 +463,16 @@ test("M7/M8/M9 当前状态不得在活文档里回退为未开始或旧测试�
   const openSection = (techDebt.split("## 开放")[1] ?? "").split("## 设计性约束")[0] ?? "";
   assert.ok(!/TD-52|TD-53/.test(openSection),
     "tech-debt.md 仍把 TD-52/TD-53 留在开放区，但条目语义已是已偿还");
-  // TD-106 must be in open section, not in repaid section.
+  // TD-106 is an Owner-declared WAO non-goal: it belongs in design constraints,
+  // not in the repaid or open debt sections.
   const repaidSection = (techDebt.split("## 已偿还")[1] ?? "").split("## 开放")[0] ?? "";
+  const designSection = techDebt.split("## 设计性约束")[1] ?? "";
   assert.ok(!/TD-106/.test(repaidSection),
-    "tech-debt.md TD-106 must not be in repaid section");
-  assert.ok(/TD-106/.test(openSection),
-    "tech-debt.md TD-106 must be in open section");
+    "tech-debt.md TD-106 must not be in repaid section (no WAO code debt was repaid)");
+  assert.ok(!/TD-106/.test(openSection),
+    "tech-debt.md TD-106 must not remain open after Owner declared it a Codex product concern");
+  assert.ok(/TD-106/.test(designSection),
+    "tech-debt.md TD-106 must be recorded exactly as a WAO non-goal/design constraint");
 });
 
 test("历史 SSOT 审计和 M7 phase 文档必须归档，不得继续作为 docs 根目录活文档", () => {
@@ -794,19 +798,23 @@ test("M10 closeout: PRD 不声称 Adaptive Playbooks 当前已经提供（属 M1
     "PRD 不得声称 Skill 已提供可选工作流模板（Adaptive Playbooks 属 M11）");
 });
 
-test("M10 closeout: TD-106 恰好存在一次且仍在开放区，不进入已偿还区", () => {
+test("post-M12 closeout: TD-106 恰好存在一次且归档为 WAO 非目标", () => {
   const td = read("docs/tech-debt.md");
-  // 切出"已偿还"区与"开放"区
+  // 切出"已偿还"、"开放"与"设计性约束"三区。
   const repaidIdx = td.indexOf("## 已偿还");
   const openIdx = td.indexOf("## 开放");
-  assert.ok(repaidIdx >= 0 && openIdx > repaidIdx, "tech-debt.md 必须有 已偿还 与 开放 两区");
+  const designIdx = td.indexOf("## 设计性约束");
+  assert.ok(repaidIdx >= 0 && openIdx > repaidIdx && designIdx > openIdx,
+    "tech-debt.md 必须有 已偿还、开放与设计性约束三区");
   const repaidSection = td.slice(repaidIdx, openIdx);
-  const openSection = td.slice(openIdx);
+  const openSection = td.slice(openIdx, designIdx);
+  const designSection = td.slice(designIdx);
   // TD-106 不得出现在已偿还区
-  assert.ok(!/^\|\s*TD-106\b/m.test(repaidSection), "TD-106 不得进入已偿还区（仍开放）");
-  // TD-106 必须在开放区恰好一次
-  const openMatches = openSection.match(/^\|\s*TD-106\b/gm) || [];
-  assert.equal(openMatches.length, 1, `TD-106 必须在开放区恰好一次；实际 ${openMatches.length}`);
+  assert.ok(!/^\|\s*TD-106\b/m.test(repaidSection), "TD-106 不得进入已偿还区");
+  assert.ok(!/^\|\s*TD-106\b/m.test(openSection), "TD-106 不得继续留在开放区");
+  const designMatches = designSection.match(/^\|\s*TD-106\b/gm) || [];
+  assert.equal(designMatches.length, 1,
+    `TD-106 必须在设计性约束区恰好一次；实际 ${designMatches.length}`);
 });
 
 test("M10 closeout: roadmap 当前总览/完成定义不再用'无人值守'作为 M7 产品目标", () => {
@@ -1460,8 +1468,37 @@ test("M11-4-DOC-05: TD-106 records M11-3/M11-4 capabilities as resolved, old ope
     "TD-106 no longer lists raw artifact/diff review as open (M11-3 resolved it)");
   assert.ok(!/run_collect.*截断时.*可能回退|run_collect.*截断时.*Lead 可能/.test(td106Row),
     "TD-106 no longer declares run_collect truncation raw-transcript fallback as an open gap (M11-4 resolved it)");
-  // TD-106 uniqueness + open-section placement are pinned by existing M10
+  // TD-106 uniqueness + design-constraint placement are pinned by the post-M12
   // closeout guards — not repeated here.
+});
+
+test("post-M12 runtime reliability closeout: TD-48/71/80 resolved, TD-106 non-goal, roadmap facts pinned", () => {
+  const td = read("docs/tech-debt.md");
+  const roadmap = read("docs/roadmap.md");
+  const repaidSection = (td.split("## 已偿还")[1] ?? "").split("## 开放")[0] ?? "";
+  const openSection = (td.split("## 开放")[1] ?? "").split("## 设计性约束")[0] ?? "";
+  const designSection = td.split("## 设计性约束")[1] ?? "";
+
+  for (const id of ["TD-48", "TD-71", "TD-80"]) {
+    assert.match(repaidSection, new RegExp(`^\\|\\s*${id}\\b`, "m"), `${id} must be in repaid section`);
+    assert.doesNotMatch(openSection, new RegExp(`^\\|\\s*${id}\\b`, "m"), `${id} must not remain open`);
+  }
+  assert.match(designSection, /^\|\s*TD-106\b/m, "TD-106 must be a WAO non-goal/design constraint");
+  assert.match(td, /TD-48[^\n]*(diagnose[^\n]*single|single[^\n]*diagnose|单[^\n]*run)[^\n]*(dashboard|1\.8)/i,
+    "TD-48 must record current CLI diagnose/dashboard measurement truth");
+  assert.match(td, /TD-71[^\n]*EPERM[^\n]*EBUSY[^\n]*(bounded|有界)/i,
+    "TD-71 must record bounded Windows append-lock retry");
+  assert.match(td, /TD-80[^\n]*legacy[^\n]*evidence_passed_backend_failed/i,
+    "TD-80 must record the legacy transcript projection fix");
+
+  assert.match(roadmap, /M12-23[^\n]*runtime reliability truth/i,
+    "roadmap must record the post-M12 runtime reliability package");
+  assert.match(roadmap, /run_20260813121845752xjmrki[^\n]*run_20260813121903407dgqn1a/,
+    "roadmap must pin the Auditor fresh/resume canary runIds");
+  assert.match(roadmap, /run_20260702142549160dfqmrt[^\n]*evidence_passed_backend_failed/,
+    "roadmap must pin the real legacy transcript replay result");
+  assert.match(roadmap, /run_20260813123526210jd19dv[^\n]*(rejected|拒绝)[^\n]*run_20260813130405682nt4f6t/,
+    "roadmap must preserve the rejected root delivery and continuation correction lineage");
 });
 
 // ===== M11-5 Package C: documentation truthfulness guards =====
