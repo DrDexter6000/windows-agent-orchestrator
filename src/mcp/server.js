@@ -655,6 +655,14 @@ const RUN_CONTINUE_INPUT = z.object({
 // opaque provider uuid, Lead id, workspace path, active lineage runId, prompt, argv,
 // and PID are NEVER surfaced (the busy reason is surfaced as a label only — the active
 // runId stays internal, matching run_dispatch reuse-busy redaction).
+//
+// M12-22: the continuation_scope_incomplete refusal additionally carries bounded
+// cumulative-scope facts (inherited/uncovered repo-relative paths + counts +
+// truncation flags) so a Lead can explicitly approve a cumulative scope and retry.
+// They are OPTIONAL: success and every other refusal omit them, so the established
+// success/refusal key set is byte-identical (zero drift). Each path list is bounded
+// by the repository's existing INVENTORY_PATHS_LIMIT cap; the safe projection below
+// re-validates every path and redacts exact-secret-shaped entries before parse.
 const RUN_CONTINUE_OUTPUT = z.object({
   accepted: z.boolean(),
   parentRunId: z.string(),
@@ -666,7 +674,72 @@ const RUN_CONTINUE_OUTPUT = z.object({
   state: z.string().nullable(),
   // Refusal-only (non-null iff accepted === false).
   rejectionReason: z.enum(CONTINUE_REJECTION_REASONS).nullable(),
+  // M12-22: cumulative-scope facts — surfaced ONLY on a continuation_scope_incomplete
+  // refusal (absent on success and every other refusal). Safe repo-relative paths
+  // only; never absolute paths, prompt, command, provider/session data, or Git errors.
+  inheritedChangedPaths: z.array(z.string().min(1).max(512)).max(INVENTORY_PATHS_LIMIT).nullable().optional(),
+  inheritedChangedCount: z.number().int().nonnegative().nullable().optional(),
+  inheritedChangedTruncated: z.boolean().nullable().optional(),
+  uncoveredInheritedPaths: z.array(z.string().min(1).max(512)).max(INVENTORY_PATHS_LIMIT).nullable().optional(),
+  uncoveredInheritedCount: z.number().int().nonnegative().nullable().optional(),
+  uncoveredInheritedTruncated: z.boolean().nullable().optional(),
 }).strict();
+
+// M12-22: validate an untrusted service-level cumulative-scope refusal for the wire.
+// ANY malformed/unsafe value collapses the WHOLE projection to null — never an
+// error, never partial truth — so the refusal still carries its closed-set reason
+// but the untrustworthy facts are dropped (the Lead verifies manually). Mirrors
+// safeProjectCandidateInventory: bounded sorted-unique path lists through the strict
+// validateProjectedPath SSOT, exact-secret redaction, and count/truncation
+// consistency (truncated iff count > paths.length, count >= paths.length).
+//
+// @param {unknown} raw — the service refusal object
+// @returns {object|null}
+function safeProjectContinuationScope(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const redactor = createSecretRedactor();
+  const projectList = (paths, count, truncated) => {
+    if (!Array.isArray(paths) || paths.length > INVENTORY_PATHS_LIMIT) return null;
+    if (!Number.isInteger(count) || count < 0) return null;
+    if (typeof truncated !== "boolean") return null;
+    // Consistency: truncation flag must exactly reflect full cardinality vs the
+    // bounded list; the full count can never be below the list length.
+    if (count < paths.length || truncated !== (count > paths.length)) return null;
+    const seen = new Set();
+    let prev = null;
+    const projected = [];
+    for (const p of paths) {
+      try {
+        validateProjectedPath(p);
+      } catch {
+        return null;
+      }
+      if (seen.has(p) || (prev !== null && p < prev)) return null; // sorted unique
+      seen.add(p);
+      prev = p;
+      // Same exact-secret redaction rule as candidateInventory/changedPaths: any
+      // redaction collapses the whole path to the fixed marker (no partial fragment).
+      const redacted = redactor.redactString(p);
+      projected.push(redacted === p ? p : "[REDACTED]");
+    }
+    return projected;
+  };
+  const inheritedChangedPaths = projectList(
+    raw.inheritedChangedPaths, raw.inheritedChangedCount, raw.inheritedChangedTruncated,
+  );
+  const uncoveredInheritedPaths = projectList(
+    raw.uncoveredInheritedPaths, raw.uncoveredInheritedCount, raw.uncoveredInheritedTruncated,
+  );
+  if (inheritedChangedPaths === null || uncoveredInheritedPaths === null) return null;
+  return {
+    inheritedChangedPaths,
+    inheritedChangedCount: raw.inheritedChangedCount,
+    inheritedChangedTruncated: raw.inheritedChangedTruncated,
+    uncoveredInheritedPaths,
+    uncoveredInheritedCount: raw.uncoveredInheritedCount,
+    uncoveredInheritedTruncated: raw.uncoveredInheritedTruncated,
+  };
+}
 
 // run_continue spawns a worker that resumes a provider conversation and modifies the
 // retained worktree — destructive (not append-only). Workspace-bound (the parent must
@@ -3401,7 +3474,15 @@ export function createWaoMcpServer({
       // rejectionReason. agentId is the canonical registry id the parent carried
       // (validated by the service); on a refusal it is null. The opaque provider
       // uuid, Lead id, workspace path, and any active lineage runId never appear.
+      //
+      // M12-22: a continuation_scope_incomplete refusal also carries the bounded
+      // cumulative-scope facts, projected through safeProjectContinuationScope
+      // (re-validates + redacts). If that projection fails closed (null), the facts
+      // are omitted — the closed-set reason still tells the Lead it is a scope issue.
       try {
+        const projectedScope = (!result.accepted && result.rejectionReason === "continuation_scope_incomplete")
+          ? safeProjectContinuationScope(result)
+          : null;
         const parsed = RUN_CONTINUE_OUTPUT.parse({
           accepted: result.accepted,
           parentRunId: result.parentRunId,
@@ -3411,6 +3492,14 @@ export function createWaoMcpServer({
           rootRunId: result.accepted ? result.rootRunId : null,
           state: result.accepted ? result.state : null,
           rejectionReason: result.accepted ? null : result.rejectionReason,
+          ...(projectedScope ? {
+            inheritedChangedPaths: projectedScope.inheritedChangedPaths,
+            inheritedChangedCount: projectedScope.inheritedChangedCount,
+            inheritedChangedTruncated: projectedScope.inheritedChangedTruncated,
+            uncoveredInheritedPaths: projectedScope.uncoveredInheritedPaths,
+            uncoveredInheritedCount: projectedScope.uncoveredInheritedCount,
+            uncoveredInheritedTruncated: projectedScope.uncoveredInheritedTruncated,
+          } : {}),
         });
         return {
           content: [{ type: "text", text: JSON.stringify(parsed) }],

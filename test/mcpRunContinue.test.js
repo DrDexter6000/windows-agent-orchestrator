@@ -319,3 +319,113 @@ test("M12-7-MRC-M7: credential-missing → fixed actionable text; generic throw 
     } finally { await c2.close(); await s2.close(); }
   } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
 });
+
+// =====================================================================
+// Group 6: M12-22 continuation_scope_incomplete — cumulative-scope truth
+// =====================================================================
+
+test("M12-7-MRC-M8: continuation_scope_incomplete refusal surfaces bounded cumulative facts; wire-visible schema; unknown fields cannot pass", async () => {
+  const dir = makeGitDir("m127-mrc-m8-");
+  try {
+    writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { coder_hq: { backend: "claude-code", cwd: dir } } }), "utf8");
+    const { server } = makeServer({
+      dir,
+      serviceResult: () => ({
+        accepted: false,
+        parentRunId: "run_parent_scope",
+        continuation: true,
+        rejectionReason: "continuation_scope_incomplete",
+        inheritedChangedPaths: ["a.txt", "b.txt", "c.txt"],
+        inheritedChangedCount: 3,
+        inheritedChangedTruncated: false,
+        uncoveredInheritedPaths: ["a.txt", "b.txt"],
+        uncoveredInheritedCount: 2,
+        uncoveredInheritedTruncated: false,
+        // Unknown / leak-attempt fields that MUST NOT cross the MCP boundary.
+        evilSecret: "SHOULD-NOT-APPEAR",
+        absolutePath: "C:\\secrets\\key.txt",
+      }),
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      // Wire-visible schema: the cumulative-scope fields are declared on the
+      // run_continue outputSchema, so a Lead/host can see the shape on tools/list.
+      const { tools } = await client.listTools();
+      const t = tools.find((x) => x.name === "run_continue");
+      const props = t.outputSchema.properties;
+      for (const field of [
+        "inheritedChangedPaths", "inheritedChangedCount", "inheritedChangedTruncated",
+        "uncoveredInheritedPaths", "uncoveredInheritedCount", "uncoveredInheritedTruncated",
+      ]) {
+        assert.ok(props[field], `wire-visible schema declares ${field}`);
+      }
+
+      const r = await client.callTool({
+        name: "run_continue",
+        arguments: { parentRunId: "run_parent_scope", prompt: "fix", delivery: DELIVERY },
+      });
+      assert.equal(r.isError, undefined, "a closed-set refusal is a normal outcome, not an error");
+
+      // Parsed structured output with the bounded cumulative facts.
+      const parsed = r.structuredContent;
+      assert.equal(parsed.accepted, false);
+      assert.equal(parsed.rejectionReason, "continuation_scope_incomplete");
+      assert.deepEqual(parsed.inheritedChangedPaths, ["a.txt", "b.txt", "c.txt"]);
+      assert.equal(parsed.inheritedChangedCount, 3);
+      assert.equal(parsed.inheritedChangedTruncated, false);
+      assert.deepEqual(parsed.uncoveredInheritedPaths, ["a.txt", "b.txt"]);
+      assert.equal(parsed.uncoveredInheritedCount, 2);
+      assert.equal(parsed.uncoveredInheritedTruncated, false);
+      // Success-only fields stay null on a refusal.
+      assert.equal(parsed.runId, null);
+      assert.equal(parsed.state, null);
+
+      // Unknown fields cannot pass; nothing leaked (incl. the absolute path).
+      const dumped = JSON.stringify(r);
+      assert.ok(!dumped.includes("evilSecret"), "unknown field never in output");
+      assert.ok(!dumped.includes("SHOULD-NOT-APPEAR"), "unknown value never in output");
+      assert.ok(!dumped.includes("absolutePath"), "absolute-path field never in output");
+      assert.ok(!dumped.includes("secrets"), "absolute path value never in output");
+    } finally { await client.close(); await server.close(); }
+  } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
+});
+
+test("M12-7-MRC-M9: a malformed path inside the cumulative arrays fails closed — reason stays, arrays drop, nothing leaks", async () => {
+  const dir = makeGitDir("m127-mrc-m9-");
+  try {
+    writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { coder_hq: { backend: "claude-code", cwd: dir } } }), "utf8");
+    const { server } = makeServer({
+      dir,
+      serviceResult: () => ({
+        accepted: false,
+        parentRunId: "run_parent_scope",
+        continuation: true,
+        rejectionReason: "continuation_scope_incomplete",
+        // An absolute path inside the array is NOT a safe repo-relative fact.
+        inheritedChangedPaths: ["a.txt", "/etc/passwd"],
+        inheritedChangedCount: 2,
+        inheritedChangedTruncated: false,
+        uncoveredInheritedPaths: ["/etc/passwd"],
+        uncoveredInheritedCount: 1,
+        uncoveredInheritedTruncated: false,
+      }),
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const r = await client.callTool({
+        name: "run_continue",
+        arguments: { parentRunId: "run_parent_scope", prompt: "fix", delivery: DELIVERY },
+      });
+      assert.equal(r.isError, undefined, "refusal still a normal outcome");
+      const parsed = r.structuredContent;
+      // The closed-set reason survives so the Lead still knows it is a scope
+      // issue, but the untrustworthy arrays are dropped (verify manually).
+      assert.equal(parsed.rejectionReason, "continuation_scope_incomplete");
+      assert.equal(parsed.inheritedChangedPaths, undefined);
+      assert.equal(parsed.uncoveredInheritedPaths, undefined);
+      // The absolute path never leaks.
+      const dumped = JSON.stringify(r);
+      assert.ok(!dumped.includes("/etc/passwd"), "absolute path never leaks");
+    } finally { await client.close(); await server.close(); }
+  } finally { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
+});

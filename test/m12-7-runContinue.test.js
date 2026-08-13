@@ -16,9 +16,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 
 import { readTranscript, findState, findLatest, JsonlTranscript } from "../src/transcript.js";
 import { continueRun } from "../src/application/runContinue.js";
@@ -127,6 +127,24 @@ function buildCommittedParent(repo, runId) {
   writeFileSync(join(wt, "keep.txt"), "keep-changed\n", "utf8");
   git("add -A", wt);
   // Use the WAO delivery identity so the commit is a legitimate delivery commit.
+  git('-c user.name="WAO Delivery" -c user.email="wao-delivery@local" commit -m "wao-delivery: ' + runId + '"', wt);
+  const deliveryCommit = git("rev-parse HEAD", wt);
+  return { wt, base, deliveryCommit, branch: `wao/${runId}` };
+}
+
+// M12-22: build a committed parent whose retained worktree carries an arbitrary
+// set of changed files (relative to base). The cumulative-scope eligibility
+// check derives the inherited changed paths from these real worktree facts.
+function buildCommittedParentWithChanges(repo, runId, files) {
+  const wt = join(repo, ".wao-worktrees", runId);
+  git(`worktree add -b wao/${runId} "${wt}"`, repo);
+  const base = git("rev-parse HEAD", repo);
+  for (const f of files) {
+    const parent = dirname(f);
+    if (parent && parent !== ".") mkdirSync(join(wt, parent), { recursive: true });
+    writeFileSync(join(wt, f), `changed ${f}\n`, "utf8");
+  }
+  git("add -A", wt);
   git('-c user.name="WAO Delivery" -c user.email="wao-delivery@local" commit -m "wao-delivery: ' + runId + '"', wt);
   const deliveryCommit = git("rev-parse HEAD", wt);
   return { wt, base, deliveryCommit, branch: `wao/${runId}` };
@@ -603,4 +621,222 @@ test("M12-7-RC-17: second-proof drift is reported without overwriting external w
       .filter((name) => name.startsWith("run_") && name.endsWith(".jsonl") && name !== "run_parent_toctou.jsonl");
     assert.deepEqual(childTranscripts, []);
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+// ----- M12-22: continuation cumulative-scope truth (read-only eligibility) -----
+//
+// A Lead continuing a terminal rejected/undecided delivery must learn BEFORE
+// dispatch whether the retained parent changes are outside the child scope. The
+// cumulative-scope check derives the retained candidate's actual changed paths
+// from authoritative Git/worktree facts and compares them to the child delivery
+// allowedPaths. Uncovered inherited paths => continuation_scope_incomplete, a
+// safe structured refusal naming the bounded repo-relative facts so the Lead can
+// explicitly approve a cumulative scope and retry. It runs read-only BEFORE any
+// lineage claim / worktree transition / transcript / spawn, so a refusal has
+// zero side effects.
+
+function childTranscriptsFor(dir, parentRunId) {
+  return readdirSync(dir)
+    .filter((name) => name.startsWith("run_") && name.endsWith(".jsonl") && name !== `${parentRunId}.jsonl`);
+}
+
+test("M12-22-RC-01: parent retains A/B/C; child allows only D => continuation_scope_incomplete with bounded facts, zero side effects", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParentWithChanges(repo, "run_parent_scope", ["a.txt", "b.txt", "c.txt"]);
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1222-rc01-"));
+  try {
+    await seedParent({
+      runDir: dir, runId: "run_parent_scope", agentId: "coder_hq", cwd: repo,
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit, allowedPaths: ["a.txt", "b.txt", "c.txt"],
+    });
+    const r = await continueRun({
+      parentRunId: "run_parent_scope", prompt: "narrow correction",
+      // Child scope is only D — it does NOT cover the inherited A/B/C.
+      delivery: { mode: "git_commit_v1", allowedPaths: ["d.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }),
+      spawnFn: () => { throw new Error("must not spawn"); },
+    });
+
+    // Closed-set refusal + continuation marker.
+    assert.equal(r.accepted, false);
+    assert.equal(r.rejectionReason, "continuation_scope_incomplete");
+    assert.equal(r.continuation, true);
+
+    // Exact bounded, sorted, deduplicated inherited + uncovered facts.
+    assert.deepEqual(r.inheritedChangedPaths, ["a.txt", "b.txt", "c.txt"]);
+    assert.equal(r.inheritedChangedCount, 3);
+    assert.equal(r.inheritedChangedTruncated, false);
+    assert.deepEqual(r.uncoveredInheritedPaths, ["a.txt", "b.txt", "c.txt"]);
+    assert.equal(r.uncoveredInheritedCount, 3);
+    assert.equal(r.uncoveredInheritedTruncated, false);
+
+    // Zero side effects: parent worktree untouched (still on parent branch at the
+    // delivery commit), no child transcript written, no spawn.
+    assert.equal(git("symbolic-ref --short HEAD", parent.wt), parent.branch);
+    assert.equal(git("rev-parse HEAD", parent.wt), parent.deliveryCommit);
+    assert.deepEqual(childTranscriptsFor(dir, "run_parent_scope"), []);
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("M12-22-RC-02: child allowedPaths is a cumulative superset (A/B/C/D) => continuation proceeds in the same worktree/session", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParentWithChanges(repo, "run_parent_superset", ["a.txt", "b.txt", "c.txt"]);
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1222-rc02-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    await seedParent({
+      runDir: dir, runId: "run_parent_superset", agentId: "coder_hq", cwd: repo,
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit, allowedPaths: ["a.txt", "b.txt", "c.txt"],
+    });
+    const r = await continueRun({
+      parentRunId: "run_parent_superset", prompt: "narrow correction",
+      // Cumulative superset: covers inherited A/B/C plus the correction delta D.
+      // A path authorized here may later be restored to base and disappear from
+      // the final delivery; WAO does not interpret that semantic choice — final
+      // packaging stays governed by the existing containment gate (unchanged).
+      delivery: { mode: "git_commit_v1", allowedPaths: ["a.txt", "b.txt", "c.txt", "d.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      spawnFn: fakeSpawn,
+      backendFor: () => ({ supportsSessionReuse: true }),
+    });
+
+    assert.equal(r.accepted, true);
+    assert.equal(r.continuation, true);
+    assert.equal(r.rootRunId, "run_parent_superset");
+    assert.equal(calls.length, 1, "spawned once");
+    // Same retained worktree + lineage resume: no fresh worktree/session.
+    const reuse = JSON.parse(argVal(calls, "--reuse-worktree-json"));
+    assert.equal(reuse.path, parent.wt);
+    const routing = JSON.parse(argVal(calls, "--session-reuse-json"));
+    assert.equal(routing.turn, "resume");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("M12-22-RC-03: directory allowedPaths cover descendants on a segment boundary; sibling/outside paths are uncovered", async () => {
+  // Positive: "src" covers src/x.js and src/y.js on the segment boundary.
+  const repo1 = makeRepo();
+  const parent1 = buildCommittedParentWithChanges(repo1, "run_parent_dir_ok", ["src/x.js", "src/y.js"]);
+  const dir1 = mkdtempSync(join(tmpdir(), "wao-m1222-rc03a-"));
+  const { fakeSpawn: spawn1, calls: calls1 } = makeFakeSpawn();
+  try {
+    await seedParent({
+      runDir: dir1, runId: "run_parent_dir_ok", agentId: "coder_hq", cwd: repo1,
+      worktreePath: parent1.wt, worktreeBranch: parent1.branch, baseCommit: parent1.base,
+      deliveryCommit: parent1.deliveryCommit, allowedPaths: ["src"],
+    });
+    const r1 = await continueRun({
+      parentRunId: "run_parent_dir_ok", prompt: "narrow correction",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["node --test"] },
+      runDir: dir1, registryPath: makeRegistry(dir1, { coder_hq: { backend: "claude-code", cwd: repo1 } }),
+      authorizedWorkspaceRoot: repo1, leadSession: "lead-session-1",
+      spawnFn: spawn1, backendFor: () => ({ supportsSessionReuse: true }),
+    });
+    assert.equal(r1.accepted, true, "directory allowedPath covers its descendants");
+    assert.equal(calls1.length, 1);
+  } finally { rmSync(dir1, { recursive: true, force: true }); rmSync(repo1, { recursive: true, force: true }); }
+
+  // Negative: "src" does NOT cover src2/z.js (segment boundary) nor other.js.
+  const repo2 = makeRepo();
+  const parent2 = buildCommittedParentWithChanges(repo2, "run_parent_dir_no", ["src/x.js", "src2/z.js", "other.js"]);
+  const dir2 = mkdtempSync(join(tmpdir(), "wao-m1222-rc03b-"));
+  try {
+    await seedParent({
+      runDir: dir2, runId: "run_parent_dir_no", agentId: "coder_hq", cwd: repo2,
+      worktreePath: parent2.wt, worktreeBranch: parent2.branch, baseCommit: parent2.base,
+      deliveryCommit: parent2.deliveryCommit, allowedPaths: ["src"],
+    });
+    const r2 = await continueRun({
+      parentRunId: "run_parent_dir_no", prompt: "narrow correction",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["node --test"] },
+      runDir: dir2, registryPath: makeRegistry(dir2, { coder_hq: { backend: "claude-code", cwd: repo2 } }),
+      authorizedWorkspaceRoot: repo2, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }),
+      spawnFn: () => { throw new Error("must not spawn"); },
+    });
+    assert.equal(r2.accepted, false);
+    assert.equal(r2.rejectionReason, "continuation_scope_incomplete");
+    // Segment boundary: src2/z.js and other.js are uncovered; src/x.js is covered.
+    assert.deepEqual(r2.inheritedChangedPaths, ["other.js", "src/x.js", "src2/z.js"]);
+    assert.deepEqual(r2.uncoveredInheritedPaths, ["other.js", "src2/z.js"]);
+    assert.equal(r2.uncoveredInheritedCount, 2);
+    // Zero side effects.
+    assert.equal(git("symbolic-ref --short HEAD", parent2.wt), parent2.branch);
+    assert.deepEqual(childTranscriptsFor(dir2, "run_parent_dir_no"), []);
+  } finally { rmSync(dir2, { recursive: true, force: true }); rmSync(repo2, { recursive: true, force: true }); }
+});
+
+test("M12-22-RC-04: malformed/absolute/traversal derived facts fail closed without leaking; cross-run stays parent_not_found", async () => {
+  const { computeContinuationCumulativeScope } = await import("../src/application/runContinue.js");
+  const base = "0".repeat(40);
+
+  // Pure helper: traversal / absolute / backslash / read-failure / throwing
+  // reader all collapse to null — never partial truth, never an echo.
+  assert.equal(computeContinuationCumulativeScope("/wt", base, ["src"], () => ["../etc/passwd"]), null);
+  assert.equal(computeContinuationCumulativeScope("/wt", base, ["src"], () => ["/abs/secret"]), null);
+  assert.equal(computeContinuationCumulativeScope("/wt", base, ["src"], () => ["C:\\secrets\\key"]), null);
+  assert.equal(computeContinuationCumulativeScope("/wt", base, ["src"], () => null), null);
+  assert.equal(computeContinuationCumulativeScope("/wt", base, ["src"], () => { throw new Error("git boom"); }), null);
+  // Malformed child allowedPaths also fail closed (defense in depth).
+  assert.equal(computeContinuationCumulativeScope("/wt", base, ["../bad"], () => ["src/x.js"]), null);
+
+  // Service-level: a proven parent whose injected reader yields a traversal path
+  // fails closed (generic, non-leaking error) with zero side effects — the
+  // malformed path never reaches the refusal facts or the error text.
+  const repo = makeRepo();
+  const parent = buildCommittedParent(repo, "run_parent_mal");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1222-rc04-"));
+  try {
+    await seedParent({
+      runDir: dir, runId: "run_parent_mal", agentId: "coder_hq", cwd: repo,
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit,
+    });
+    const leakToken = "../escape/secret.txt";
+    let captured;
+    await assert.rejects(() => continueRun({
+      parentRunId: "run_parent_mal", prompt: "x",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }),
+      spawnFn: () => { throw new Error("must not spawn"); },
+      listChangedPathsFn: () => [leakToken],
+    }), (err) => { captured = err; return true; });
+    assert.ok(captured instanceof Error);
+    assert.ok(!String(captured.message).includes(leakToken), "malformed path never leaks into the error");
+    assert.equal(git("symbolic-ref --short HEAD", parent.wt), parent.branch, "zero worktree mutation");
+    assert.deepEqual(childTranscriptsFor(dir, "run_parent_mal"), [], "zero transcript mutation");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("M12-22-RC-05: cumulative-scope inventory caps at the existing inventory limit with truthful truncation flags", async () => {
+  const { computeContinuationCumulativeScope } = await import("../src/application/runContinue.js");
+  const { INVENTORY_PATHS_LIMIT } = await import("../src/application/candidateInventory.js");
+  const base = "0".repeat(40);
+
+  // 300 covered paths under "cov/" — complete, but the inherited list truncates.
+  const manyCovered = Array.from({ length: 300 }, (_, i) => `cov/file${i}.js`);
+  const r1 = computeContinuationCumulativeScope("/wt", base, ["cov"], () => manyCovered);
+  assert.equal(r1.complete, true);
+  assert.equal(r1.inheritedChangedCount, 300);
+  assert.equal(r1.inheritedChangedPaths.length, INVENTORY_PATHS_LIMIT);
+  assert.equal(r1.inheritedChangedTruncated, true);
+  assert.equal(r1.uncoveredInheritedCount, 0);
+  assert.equal(r1.uncoveredInheritedPaths.length, 0);
+  assert.equal(r1.uncoveredInheritedTruncated, false);
+
+  // 300 uncovered paths under "out/" — incomplete, BOTH lists truncate.
+  const manyOutside = Array.from({ length: 300 }, (_, i) => `out/file${i}.js`);
+  const r2 = computeContinuationCumulativeScope("/wt", base, ["cov"], () => manyOutside);
+  assert.equal(r2.complete, false);
+  assert.equal(r2.inheritedChangedCount, 300);
+  assert.equal(r2.inheritedChangedTruncated, true);
+  assert.equal(r2.uncoveredInheritedCount, 300);
+  assert.equal(r2.uncoveredInheritedPaths.length, INVENTORY_PATHS_LIMIT);
+  assert.equal(r2.uncoveredInheritedTruncated, true);
 });

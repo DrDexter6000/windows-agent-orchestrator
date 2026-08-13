@@ -47,11 +47,19 @@ import {
   prepareContinuationWorktree,
   proveContinuationWorktree,
   rollbackContinuationWorktree,
+  listWorktreeChangedPaths,
+  isPathAllowed,
 } from "../delivery.js";
 import {
   releaseLineageContinuationTurn,
   resolveLineageContinuationTurn,
 } from "./sessionReuse.js";
+// M12-22: cumulative-scope truth reuses the existing path-validation SSOT and the
+// repository's existing inventory cap — no second path-identity algorithm and no
+// second cap. validateProjectedPath is the same MCP-boundary validator the
+// candidate inventory uses; INVENTORY_PATHS_LIMIT is the same hard ceiling.
+import { validateProjectedPath } from "./deliveryReview.js";
+import { INVENTORY_PATHS_LIMIT } from "./candidateInventory.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { readRegistry } from "../registry.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
@@ -87,8 +95,95 @@ export const CONTINUE_REJECTION_REASONS = Object.freeze([
   "unsupported_backend", // backend does not declare supportsSessionReuse
   "missing_worktree", // retained worktree path no longer exists on disk
   "worktree_drift", // retained worktree base/branch/detached state drifted
+  "continuation_scope_incomplete", // retained parent changes fall outside the child allowedPaths (cumulative)
   "busy", // a non-terminal lineage owner already holds the resume slot
 ]);
+
+// M12-22: continuation cumulative-scope truth.
+//
+// A child continuation re-packages the CUMULATIVE candidate from the lineage
+// base (parent result + this correction), NOT just the correction delta. So the
+// child delivery allowedPaths must COVER every retained parent change that is
+// still present in the worktree. This read-only helper derives the retained
+// candidate's actual changed paths from authoritative Git/worktree facts and
+// compares them to the child allowedPaths via the SAME containment SSOT
+// (isPathAllowed) the packaging/inspection gate uses — no second boundary
+// semantics, no runtime-name branches, no ad-hoc shell parsing.
+//
+// Mirrors computeCandidateInventory's fail-closed contract: returns null on ANY
+// read/validation failure (a throwing reader, a non-array result, or a single
+// traversal/absolute/control-char path) — never partial truth. Counts report
+// the FULL deduplicated cardinality (not the capped length) so truncation is
+// detectable against the repository's existing INVENTORY_PATHS_LIMIT cap.
+//
+// Pure + strictly read-only: no staging, no reset, no transcript/Git mutation,
+// no console.log, no process.exit. Does not import src/commands/*, src/mcp/*,
+// the MCP SDK, or zod. Workspace/lineage ownership is the CALLER's job and must
+// be settled BEFORE this is invoked; this helper trusts an already-proven
+// (worktreePath, baseCommit, childAllowedPaths) triple but validates defensively.
+//
+// @param {string} worktreePath — the proven retained parent delivery worktree
+// @param {string} baseCommit — canonical full hash (lineage base)
+// @param {string[]} childAllowedPaths — the child delivery allowedPaths contract
+// @param {Function} [listFn] — injectable change-listing reader (tests);
+//   defaults to listWorktreeChangedPaths. Must return an array of repo-relative
+//   paths or null when either required Git read failed.
+// @returns {object|null} {
+//   inheritedChangedPaths, inheritedChangedCount, inheritedChangedTruncated,
+//   uncoveredInheritedPaths, uncoveredInheritedCount, uncoveredInheritedTruncated,
+//   complete,
+// } or null on ANY validation/read failure (never partial truth)
+export function computeContinuationCumulativeScope(worktreePath, baseCommit, childAllowedPaths, listFn) {
+  // Malformed inputs fail closed.
+  if (typeof worktreePath !== "string" || worktreePath.length === 0) return null;
+  if (!isCanonicalCommitId(baseCommit)) return null;
+  if (!Array.isArray(childAllowedPaths) || childAllowedPaths.length === 0) return null;
+
+  // Validate the child contract through the SAME strict projection SSOT so a
+  // traversal/absolute/control-char entry can never reach the comparison.
+  let allowed;
+  try {
+    allowed = childAllowedPaths.map((p) => validateProjectedPath(p));
+  } catch {
+    return null;
+  }
+
+  const _list = listFn ?? listWorktreeChangedPaths;
+  let raw;
+  try {
+    raw = _list(worktreePath, baseCommit);
+  } catch {
+    return null; // a throwing reader is a failed read — never partial truth
+  }
+  if (!Array.isArray(raw)) return null; // required read failed => null
+
+  // Validate EVERY derived path through the strict projection SSOT; any unsafe
+  // path nulls the WHOLE result (no partial truth across the eligibility gate).
+  const validated = [];
+  try {
+    for (const p of raw) validated.push(validateProjectedPath(p));
+  } catch {
+    return null;
+  }
+
+  // Deterministic: deduplicate + sort. Counts report the FULL cardinality of the
+  // deduplicated set (not the capped length) so truncation is detectable.
+  const allowedCanon = [...new Set(allowed)].sort();
+  const inherited = [...new Set(validated)].sort();
+  const uncovered = inherited.filter((p) => !isPathAllowed(p, allowedCanon));
+
+  const inheritedPaths = inherited.slice(0, INVENTORY_PATHS_LIMIT);
+  const uncoveredPaths = uncovered.slice(0, INVENTORY_PATHS_LIMIT);
+  return {
+    inheritedChangedPaths: inheritedPaths,
+    inheritedChangedCount: inherited.length,
+    inheritedChangedTruncated: inherited.length > inheritedPaths.length,
+    uncoveredInheritedPaths: uncoveredPaths,
+    uncoveredInheritedCount: uncovered.length,
+    uncoveredInheritedTruncated: uncovered.length > uncoveredPaths.length,
+    complete: uncovered.length === 0,
+  };
+}
 
 async function rollbackPreSpawnContinuation({
   worktreePath,
@@ -156,6 +251,7 @@ function toPublicDelivery(validated) {
  * @param {Function} [input.spawnFn] — injectable spawn (tests)
  * @param {Function} [input.backendFor] — injectable (agent) => backend instance (tests)
  * @param {Function} [input.prepareContinuationWorktreeFn] — injectable transition (tests)
+ * @param {Function} [input.listChangedPathsFn] — injectable cumulative-scope change reader (tests)
  * @param {string} [input.runnerPath]
  * @param {string} [input.execPath]
  * @param {object} [input.userEnvReader]
@@ -179,6 +275,7 @@ export async function continueRun({
   spawnFn,
   backendFor,
   prepareContinuationWorktreeFn = prepareContinuationWorktree,
+  listChangedPathsFn,
   runnerPath,
   execPath,
   userEnvReader,
@@ -330,6 +427,44 @@ export async function continueRun({
     worktreeProof = proveContinuationWorktree(worktreePath, { baseCommit, deliveryCommit });
   } catch {
     return refuse(existsSync(worktreePath) ? "worktree_drift" : "missing_worktree");
+  }
+
+  // 11b. M12-22: continuation cumulative-scope truth — STILL read-only, BEFORE
+  //      any lineage claim / worktree transition / transcript / spawn. A child
+  //      continuation re-packages the CUMULATIVE candidate from the lineage base
+  //      (parent result + correction), so the child allowedPaths must cover every
+  //      retained parent change. Derive the retained candidate's actual changed
+  //      paths from authoritative Git/worktree facts and compare them to the
+  //      child allowedPaths via the existing containment SSOT. Uncovered inherited
+  //      paths => continuation_scope_incomplete, naming the bounded repo-relative
+  //      facts so the Lead can explicitly approve a cumulative scope and retry.
+  //      WAO never auto-expands scope, auto-restores files, retries, accepts, or
+  //      infers semantic intent — a path authorized here may later be restored to
+  //      base and disappear from the final delivery; final packaging stays
+  //      governed by the existing containment gate (unchanged).
+  const cumulativeScope = computeContinuationCumulativeScope(
+    worktreePath,
+    baseCommit,
+    validatedDelivery.allowedPaths,
+    listChangedPathsFn,
+  );
+  if (cumulativeScope === null) {
+    // The authoritative facts could not be derived cleanly after a proven
+    // worktree (Git read failure or an unprojectable path). Fail closed: do NOT
+    // spawn with an unverified scope. This is an environmental/internal anomaly,
+    // not a Lead-eligible condition — it propagates as the existing fixed
+    // "run_continue failed" boundary (no path, prompt, or Git error leaked).
+    throw new Error("continuation cumulative-scope facts could not be derived");
+  }
+  if (!cumulativeScope.complete) {
+    return refuse("continuation_scope_incomplete", {
+      inheritedChangedPaths: cumulativeScope.inheritedChangedPaths,
+      inheritedChangedCount: cumulativeScope.inheritedChangedCount,
+      inheritedChangedTruncated: cumulativeScope.inheritedChangedTruncated,
+      uncoveredInheritedPaths: cumulativeScope.uncoveredInheritedPaths,
+      uncoveredInheritedCount: cumulativeScope.uncoveredInheritedCount,
+      uncoveredInheritedTruncated: cumulativeScope.uncoveredInheritedTruncated,
+    });
   }
 
   const childRunId = generateRunId();

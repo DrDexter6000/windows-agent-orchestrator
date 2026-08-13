@@ -629,9 +629,9 @@ annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:false, o
 }
 ```
 
-`parentRunId` 必须是一个**终态**且 `continuable` 的父 run（其 `run_dispatch` 顶层带了 `continuable:true`）。已 accepted 的父 delivery 不可续；Lead 应为已接收成果另建新 run。`delivery` 必填（续跑总是 delivery run，child 会从谱系原始 baseCommit 打包累计 candidate，而不是只打包本轮 correction delta）。因此 child 的 `allowedPaths` 必须覆盖 Lead 批准的**累计 changed paths**（父成果 + 本轮修正）；WAO 不会替 Lead 推断或扩展范围。若 Lead 只列 correction delta，`disallowed_path` 会保留候选并等待 Lead 决定是否按累计清单重封装。模型不能传 workspace/registry/runDir/cert——这些 server-owned，由 MCP 边界从绑定 workspace 解析。
+`parentRunId` 必须是一个**终态**且 `continuable` 的父 run（其 `run_dispatch` 顶层带了 `continuable:true`）。已 accepted 的父 delivery 不可续；Lead 应为已接收成果另建新 run。`delivery` 必填（续跑总是 delivery run，child 会从谱系原始 baseCommit 打包累计 candidate，而不是只打包本轮 correction delta）。因此 child 的 `allowedPaths` 必须**覆盖父 retained 成果的全部累计 changed paths**（父成果 + 本轮修正）；WAO 不会替 Lead 推断或扩展范围。**M12-22 累计范围真相**：这一覆盖关系在 read-only 资格阶段即被核对——`run_continue` 从权威 Git/worktree 事实派生父 retained worktree 中**仍存在**的实际变更，复用既有 containment SSOT（`isPathAllowed`，segment-boundary 语义）与既有 inventory 上限，在任何 mutation 之前与 child `allowedPaths` 比对。若存在未被覆盖的继承路径，`run_continue` 以 `continuation_scope_incomplete` 拒绝，并返回**有界的仓库相对事实**（`inheritedChangedPaths` / `inheritedChangedCount` / `inheritedChangedTruncated` 与 `uncoveredInheritedPaths` / `uncoveredInheritedCount` / `uncoveredInheritedTruncated`，已排序去重、按既有 inventory cap 截断），供 Lead 显式批准累计范围后重试。WAO 绝不自动扩展范围、自动恢复文件、重试或接受，也不暴露绝对路径、prompt、command、provider/session 数据或任意 Git 错误。一个被授权用于 correction 的路径随后可被 restore 回 base 并从最终 delivery 中消失——WAO 不解读该语义选择；child 自身最终 diff 仍由既有 packaging containment 闸门（`disallowed_path`）治理，本检查**未削弱** packaging。模型不能传 workspace/registry/runDir/cert——这些 server-owned，由 MCP 边界从绑定 workspace 解析。
 
-- **资格检查（read-only，先于任何 mutation）**：WAO 在 claim 续谱槽 / 转换 worktree / 写 transcript / fork 之前，以 closed-set `rejectionReason` 拒绝不合格的续跑：`malformed_input` / `invalid_delivery` / `parent_not_found` / `parent_not_terminal` / `parent_accepted` / `not_continuable`（父 run 非 lineage 续谱根，legacy 不可续）/ `no_provider_session` / `workspace_mismatch`（父 run 不属于当前绑定 workspace）/ `no_delivery`（父 run 缺 delivery 上下文）/ `worker_configuration_changed`（当前 backend/model 已不同，不能继承旧 provider session）/ `unsupported_backend`（backend 未声明 session reuse）/ `missing_worktree` / `worktree_drift`（retained worktree 丢失或 base/分支漂移）/ `busy`（同一谱系已有非终态 owner 在跑）。静态 argv 与 credential 检查也在 mutation 前完成；开始转换后若 transcript 或同步 spawn 失败，WAO 机械恢复父 worktree、删除 orphan child transcript 并释放谱系 claim。第二次 worktree 证明若发现外部漂移，只报告事实，不覆盖外部状态。这些 closed-set refusal 是**正常结构化结果**（`accepted:false` + `rejectionReason`），不是 MCP error；环境/内部执行错误仍保持既有固定安全错误边界。
+- **资格检查（read-only，先于任何 mutation）**：WAO 在 claim 续谱槽 / 转换 worktree / 写 transcript / fork 之前，以 closed-set `rejectionReason` 拒绝不合格的续跑：`malformed_input` / `invalid_delivery` / `parent_not_found` / `parent_not_terminal` / `parent_accepted` / `not_continuable`（父 run 非 lineage 续谱根，legacy 不可续）/ `no_provider_session` / `workspace_mismatch`（父 run 不属于当前绑定 workspace）/ `no_delivery`（父 run 缺 delivery 上下文）/ `worker_configuration_changed`（当前 backend/model 已不同，不能继承旧 provider session）/ `unsupported_backend`（backend 未声明 session reuse）/ `missing_worktree` / `worktree_drift`（retained worktree 丢失或 base/分支漂移）/ `continuation_scope_incomplete`（M12-22：child `allowedPaths` 未覆盖父 retained 累计变更——retained-worktree 证明之后、claim 续谱槽之前的 read-only 阶段即返回有界 inherited/uncovered 事实，零 side effect，不自动扩展范围）/ `busy`（同一谱系已有非终态 owner 在跑）。静态 argv 与 credential 检查也在 mutation 前完成；开始转换后若 transcript 或同步 spawn 失败，WAO 机械恢复父 worktree、删除 orphan child transcript 并释放谱系 claim。第二次 worktree 证明若发现外部漂移，只报告事实，不覆盖外部状态。这些 closed-set refusal 是**正常结构化结果**（`accepted:false` + `rejectionReason`），不是 MCP error；环境/内部执行错误仍保持既有固定安全错误边界。
 
 - **输出**（成功 / 拒绝同形，MCP `content` + `structuredContent`）：
 
@@ -648,7 +648,28 @@ annotations：`readOnlyHint:false, destructiveHint:true, idempotentHint:false, o
 }
 ```
 
-成功返回新 child 的 dispatch 身份 + 谱系事实（`parentRunId` + `continuation:true` + `rootRunId`）。拒绝时 `accepted:false`、`rejectionReason` 为闭集码、其余成功字段为 `null`。**`busy` 只回 label，不回 active runId**——opaque provider uuid、Lead id、workspace 路径、active lineage runId、transcript 路径**永不**出现在 MCP 输出（与 `run_dispatch` reuse-busy 脱敏合同一致）。
+拒绝示例（M12-22 累计范围未覆盖，返回有界事实供 Lead 显式批准后重试）：
+
+```json
+{
+  "accepted": false,
+  "runId": null,
+  "agentId": null,
+  "parentRunId": "run_终态父run",
+  "continuation": true,
+  "rootRunId": null,
+  "state": null,
+  "rejectionReason": "continuation_scope_incomplete",
+  "inheritedChangedPaths": ["a.txt", "b.txt", "c.txt"],
+  "inheritedChangedCount": 3,
+  "inheritedChangedTruncated": false,
+  "uncoveredInheritedPaths": ["a.txt", "b.txt"],
+  "uncoveredInheritedCount": 2,
+  "uncoveredInheritedTruncated": false
+}
+```
+
+成功返回新 child 的 dispatch 身份 + 谱系事实（`parentRunId` + `continuation:true` + `rootRunId`）。拒绝时 `accepted:false`、`rejectionReason` 为闭集码、其余成功字段为 `null`。**`busy` 只回 label，不回 active runId**——opaque provider uuid、Lead id、workspace 路径、active lineage runId、transcript 路径**永不**出现在 MCP 输出（与 `run_dispatch` reuse-busy 脱敏合同一致）。`continuation_scope_incomplete` 是唯一携带累计范围事实（`inheritedChangedPaths`/`inheritedChangedCount`/`inheritedChangedTruncated` 与 `uncoveredInheritedPaths`/`uncoveredInheritedCount`/`uncoveredInheritedTruncated`）的拒绝码——这些有界仓库相对字段仅在 `continuation_scope_incomplete` 拒绝中出现，成功与其余拒绝均不携带；任何畸形/不安全路径在该字段投射时 fail closed 为整体省略（闭集 reason 仍保留），绝不泄漏绝对路径或 Git 错误。
 
 - **retained-worktree 转换（幂等、崩溃安全）**：把父的 retained worktree 重新钉到 base 上、切到 child 分支 `wao/<childRunId>`，把父的 delivery/candidate 字节保留为 unstaged 工作改动；**父 commit 对象永不删除**，仍可按 SHA 审阅。child 从 base 打包自己的 delivery。
 

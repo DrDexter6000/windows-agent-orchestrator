@@ -530,7 +530,19 @@ const RED_23_WIRE = 75492;
 // wire rose by the same description delta plus the enum bytes (+545 total).
 // Ceiling re-frozen at the measured 74492, still well below the 23-tool baseline
 // (75492).
-const FROZEN_22_WIRE_CEILING = 74492;
+//
+// M12-22 re-baseline (continuation cumulative-scope truth): the run_continue
+// output schema (RUN_CONTINUE_OUTPUT) gained six nullable-optional cumulative-
+// scope fields (inheritedChangedPaths/Count/Truncated +
+// uncoveredInheritedPaths/Count/Truncated), populated ONLY on the new closed-set
+// `continuation_scope_incomplete` eligibility refusal — additive optional schema,
+// so success and every other refusal stay byte-identical (zero drift). No new
+// tools (count stays 22), no validation removed, no description text changed
+// (FROZEN_22_DESC_CEILING unchanged at 11225). The output schema is part of the
+// stripped payload, so DESC_STRIPPED_CONTRACT_SHA changed truthfully (see below).
+// The wire grew +583 bytes; ceiling re-frozen at the measured 75075, still well
+// below the 23-tool baseline (75492).
+const FROZEN_22_WIRE_CEILING = 75075;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -621,8 +633,15 @@ test("M12-10-H: deterministic 22-tool wire below frozen ceiling and below the 23
 // provider-only enum on the wire, so both output schemas serialize one more enum
 // member as part of the stripped payload, and the SHA changed truthfully; no
 // description text is in the stripped payload.
+// Re-measured for M12-22 (continuation cumulative-scope truth): the run_continue
+// output schema (RUN_CONTINUE_OUTPUT) gained six nullable-optional cumulative-
+// scope fields (inheritedChangedPaths/Count/Truncated +
+// uncoveredInheritedPaths/Count/Truncated), present ONLY on the new closed-set
+// `continuation_scope_incomplete` refusal. Additive optional output-schema
+// members are part of the stripped payload, so the SHA changed truthfully; no
+// description text is in the stripped payload.
 const DESC_STRIPPED_CONTRACT_SHA =
-  "6fabda0aba189558c59ffc8230e404ec992c58fa388bf9a28586f4666c475672";
+  "f53cafa6e1cee071e7028523cf87f4805cb350903bad65892ee271e3d07eb74d";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;
