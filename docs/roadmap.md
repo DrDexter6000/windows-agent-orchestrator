@@ -214,13 +214,13 @@ Owner Dashboard 增加选中 run 的 backend/stage/terminal/event count/scope/li
 
 重启后的 Fresh Host 在该精确 HEAD 上完成一次只读消费者验收：cold `lead_preflight` 3.422s，随后 warm `runs_list(limit:10)` 0.556s、warm `lead_preflight` 0.848s；两次 preflight 都返回 `complete=true`、6 workers、active=0、unresolved=4、warnings 为空，workspace HEAD 与结果事实一致。验收未派发 worker、未修改 transcript 或仓库。Verdict：`PASS_M12_18_FRESH_HOST_QUERY_CACHE`。
 
-### M12-19 supervision recovery truth / worker 进程消失成果恢复（2026-08-12，已发布 main@6673363b256ac0cc4b4dcd8dff1ac785587e67b1，Fresh Host 验收推迟）
+### M12-19 supervision recovery truth / worker 进程消失成果恢复（2026-08-12，已发布并完成 Fresh Host 验收）
 
 工作区监督事实不再把 authority 证明失败折叠成普通 unbound：`workspace_status`、`lead_preflight` 与相关 drilldown 共享闭集 `unboundReason`，只说明哪一类 authority 证明失败，不返回路径或动态错误，也不替 Lead 停止、重绑或改派。实现 run `run_20260811181643314t83hj4` 的 delivery `9e6255f75e1b9ba5c24fc6d826582813bcbd4e58` 已由 Lead 完整审查并 accepted。最终组合候选的首轮 canonical 稳定暴露 `run_wait` / `run_await_result` descriptions 丢失既有 Host-neutral transport-recovery 锚点；发布门据此阻断，随后恢复“transport loss 只表示 observation unknown、无 control-plane mutation，应 point-in-time 重读且不得推断 stop”的紧凑合同，同时保持 22-tool wire 与 description byte ceiling，定向 MCP/tool-surface 守卫 26/26 通过。
 
-当 delivery run 仍处非终态、detached runner/provider 进程被保守证明已经消失、原 worktree 保留且全部合同与路径事实可证明时，`run_delivery` 只读投影 `candidateKind:"process_missing"`；只有 Lead 显式调用既有 `run_delivery_repackage` 才会原子结算 orphan、重用原 base/worktree/verification 并封装成果，不调用模型、不扩大 scope、不自动 accept/reject。首版因轮询复用冻结 `now` 而可能把新鲜 lease 误判为 stale，候选未被接受；修正 run `run_20260812143825898iaolt2` 改为每次轮询重建 liveness 时间快照，delivery `c6b28504fd00a57f9ae39dd803cbd40f1cce90c1` 经 focused、真实 transcript smoke、完整审查与 exact verification 后由 Lead accepted。M12-19 两笔实现已本地 fast-forward 集成，并经 `main@6673363b256ac0cc4b4dcd8dff1ac785587e67b1` 发布；Fresh Host 只读验收推迟到 Owner 可安全重启时进行——既非"待发布"，亦非已完成 Fresh Host 验收。
+当 delivery run 仍处非终态、detached runner/provider 进程被保守证明已经消失、原 worktree 保留且全部合同与路径事实可证明时，`run_delivery` 只读投影 `candidateKind:"process_missing"`；只有 Lead 显式调用既有 `run_delivery_repackage` 才会原子结算 orphan、重用原 base/worktree/verification 并封装成果，不调用模型、不扩大 scope、不自动 accept/reject。首版因轮询复用冻结 `now` 而可能把新鲜 lease 误判为 stale，候选未被接受；修正 run `run_20260812143825898iaolt2` 改为每次轮询重建 liveness 时间快照，delivery `c6b28504fd00a57f9ae39dd803cbd40f1cce90c1` 经 focused、真实 transcript smoke、完整审查与 exact verification 后由 Lead accepted。M12-19 两笔实现经 `main@6673363b256ac0cc4b4dcd8dff1ac785587e67b1` 发布。2026-08-13 Fresh Host 在 `main@0773f004864b6d497e57f3afb6f7e84097c5c6ed` 加载 22 个 MCP 工具并完成 workspace preflight；当前生产 inventory 没有可安全结算的 `process_missing` 候选，因此未对历史 run 执行 repackage，转而在同一发布树上完成 no-model 全链验收 48/48（含真实临时 Git、只读 candidate 投影、MCP wire 与显式零模型结算）。Verdict：`PASS_M12_19_FRESH_HOST_RECOVERY_TRUTH`。
 
-### M12-20 Owner Dashboard active-first / history-on-demand（2026-08-12，已发布 main@6673363b256ac0cc4b4dcd8dff1ac785587e67b1，Fresh Host 验收推迟）
+### M12-20 Owner Dashboard active-first / history-on-demand（2026-08-12，已发布并完成 Fresh Host 验收）
 
 目标是降低人类 Owner 的观察延迟，且不改变 Lead MCP 语义。Owner 看板默认打开 **Active** 模式：只列出当前有新鲜 owner 心跳、经证明 active 的 run；候选集是当前的 `.owner-*` 租约文件（backgroundRunner 每 2s 写入、退出删除）——候选枚举只 `readdirSync` 一次 runDir 目录（成本随目录条目总数增长、包括历史 transcript，但仅一次目录读），随后只有当前租约候选者的 transcript 被打开/解析/验证。机器可检地，50 份历史 + 1 个当前租约时 active 恰好打开/解析 1 份 transcript（`M12-20-LAT-01`），即昂贵的 per-run 工作（transcript 解析 + per-run workspace 验证 + `ownerLiveness`）随当前租约数而非历史库存规模放大（目录枚举除外）。Active 响应固定标注 `scanScope=active`，且**不**携带 `unresolvedCount`（active scope 不做全库存 unresolved 分类，故该计数**恒缺失而非 0**）；缺省 scope（`/api/runs?limit=N`）即 active。
 
@@ -230,11 +230,11 @@ Owner Dashboard 增加选中 run 的 backend/stage/terminal/event count/scope/li
 
 初始 coder_hq delivery `e30a156b9bd49a24e9ae13dd3177883995d30b32` 虽通过 exact verification，但独立 coder_mm reviewer 证明历史模式切换调用的 refresh 会被“历史不自动轮询”短路，Owner 点击历史范围实际发出零请求；Lead 因此 durable rejected。Lead 使用同一 provider 会话和 retained worktree 发出精确 correction，child run `run_20260812162021591piz7t3` 将 fetch 决策拆成 `explicit`/`timer`：Owner 显式选择 active/history 恰好请求一次，timer 只刷新 active；成功响应和错误均以 scope + epoch 丢弃迟到结果。修正 delivery `b4c8a8838916cb1303297d81e8b9e959a6b96f5f` 经 14 文件完整审查、行为级 race 测试与 exact verification 后由 Lead accepted 并本地 fast-forward 集成。
 
-本机真实 `runs/` 只读 smoke 使用 Node 22，覆盖 2425 个目录项、1831 份 run transcript 与 1 个 owner lease：active 冷读 223.632ms、返回 0 个经证明 active 的 run，只产生 1 次 summary miss；最近 1h 历史冷读 1943.304ms、返回 3 个 run，随后同一长驻缓存热读 233.296ms、1831 次 cache hit。该结果证明 active-first 避免打开/解析历史 transcript，且历史 warm read 显著降低重复解析；同时诚实保留一次 `readdirSync` 的 O(目录条目数) 枚举成本。M12-20 已经 `main@6673363b256ac0cc4b4dcd8dff1ac785587e67b1` 发布；Fresh Host 只读验收推迟到 Owner 可安全重启时进行——既非"待发布"，亦非已完成 Fresh Host 验收。
+本机真实 `runs/` 只读 smoke 使用 Node 22，覆盖 2425 个目录项、1831 份 run transcript 与 1 个 owner lease：active 冷读 223.632ms、返回 0 个经证明 active 的 run，只产生 1 次 summary miss；最近 1h 历史冷读 1943.304ms、返回 3 个 run，随后同一长驻缓存热读 233.296ms、1831 次 cache hit。该结果证明 active-first 避免打开/解析历史 transcript，且历史 warm read 显著降低重复解析；同时诚实保留一次 `readdirSync` 的 O(目录条目数) 枚举成本。M12-20 已经 `main@6673363b256ac0cc4b4dcd8dff1ac785587e67b1` 发布。2026-08-13 Fresh Host 从当前发布树启动真实 loopback Dashboard server：缺省 `/api/runs` 返回 `scanScope:"active"`、0 个 proven-active run 且不伪造 `unresolvedCount`；Owner 显式选择 `24h` 后返回 `scanScope:"history"`、匹配 19 条并按 limit 10 正确标记 truncated。服务使用 ephemeral port，验收后正常关闭，未修改 transcript 或仓库。Verdict：`PASS_M12_20_FRESH_HOST_DASHBOARD`。
 
 最终冻结候选 `2d6833d7b6381c49d7aa0ab1f31df2cdbdcb04c9` 的一次 canonical 执行发现 198/执行 198：首轮 197 文件通过、唯一 `mcpBind.test.js` 在 16 并发 Git/filesystem 波次失败，runner 自动隔离复核该文件通过并分类为 `isolation_pass`；pure 112/112、MCP 3/3、process 12/12、lock 2/2、timeout 2/2 均通过。权威 `finalVerdict` 仍为 `fail`，不把隔离通过冒充全绿，也不对未变化候选重复全量测试抽奖；M12-19 process recovery、M12-20 Dashboard、Host-neutral wait/MCP 相关文件均在本次执行中通过。
 
-### M12-21 completed-empty truth / 进程 exit 0 ≠ 有用 worker 结果（2026-08-13，已本地集成，待发布与 Fresh Host 验收）
+### M12-21 completed-empty truth / 进程 exit 0 ≠ 有用 worker 结果（2026-08-13，已发布并完成 Fresh Host 验收）
 
 确立一条主控真相：**Lead 绝不能把一个"成功 exit、却没做任何模型工作"的 worker 运行，误当成一次有效的 completed review 或 delivery**。进程 exit 0 / parser `done(completed)` 只是**传输完成**，不是 worker 产出可用结果的证据——这点同时适用于 claude-code parser 的 `type:"result"` 成功路径与 ProcessBackend exit-0 兜底路径。
 
@@ -244,7 +244,7 @@ Owner Dashboard 增加选中 run 的 backend/stage/terminal/event count/scope/li
 
 实现以严格 TDD（RED→GREEN）落地：parser fallback+去重 5 例、completed-empty 诊断 8 例（含 tool-only/command-only/file-written/tool_use 守卫与 m12-9 minimal-stub 不回归）、MCP 线路 parity 2 例、process backend fresh-vs-resume 2 例、真实 `getRunDiagnosis` 服务只读 smoke（production-shaped transcript 经真实只读服务投影为 no_effect/completed_empty 且字节不变、无 provider payload 回显）。最终机械重投 run `run_20260812235300186r5645e` 产出 delivery `056db537a45514b6591edce65ab2b9e617697e4d`，其 tree 与已完成语义审查的校正候选逐字一致；初始 exact verification 因 profile 时限短于本机 canonical 耗时返回 `command_timeout`，Lead 以 `tooling_invalid` 理由执行一次有审计的依赖安装与长时限 reverify，最终 `effectiveVerificationStatus=passed`，delivery 经完整路径审查后 accepted，并已 fast-forward 集成本地 `main`。
 
-本地集成树已通过冻结候选 canonical `198/198`、精确验证与 `git diff --check`；**尚未 push、tag、Release，也未完成 Fresh Host 验收**。M12-19、M12-20 已发布于 `main@6673363b256ac0cc4b4dcd8dff1ac785587e67b1`，两者的 Fresh Host 只读验收仍按 Owner 要求推迟；M12-21 与它们都不得在安全重启前宣称 Fresh Host accepted。
+冻结候选通过 canonical `198/198`、精确验证与 `git diff --check`，并以两笔提交普通 fast-forward 发布至 `main@0773f004864b6d497e57f3afb6f7e84097c5c6ed`（未 tag/Release）。2026-08-13 Fresh Host 先按所属 workspace authority 查询历史 Auditor run `run_20260812134036069q1rxlz`：`run_await_result` 返回 `state=completed`、`result.status=empty`、assistant/command/tool/file 全为 0，并同时投影 `diagnosis.category=no_effect` 与 `diagnosis.code=completed_empty`；随后会话 workspace 恢复至 WAO 当前 HEAD。该验收未调用模型、worker 或任何 delivery 决策。Verdict：`PASS_M12_21_FRESH_HOST_COMPLETED_EMPTY`。
 
 ### 第三方 onboarding helper 发布与 Fresh Host 验收（2026-08-08）
 
