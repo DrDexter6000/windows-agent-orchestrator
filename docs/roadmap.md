@@ -234,7 +234,7 @@ Owner Dashboard 增加选中 run 的 backend/stage/terminal/event count/scope/li
 
 最终冻结候选 `2d6833d7b6381c49d7aa0ab1f31df2cdbdcb04c9` 的一次 canonical 执行发现 198/执行 198：首轮 197 文件通过、唯一 `mcpBind.test.js` 在 16 并发 Git/filesystem 波次失败，runner 自动隔离复核该文件通过并分类为 `isolation_pass`；pure 112/112、MCP 3/3、process 12/12、lock 2/2、timeout 2/2 均通过。权威 `finalVerdict` 仍为 `fail`，不把隔离通过冒充全绿，也不对未变化候选重复全量测试抽奖；M12-19 process recovery、M12-20 Dashboard、Host-neutral wait/MCP 相关文件均在本次执行中通过。
 
-### M12-21 completed-empty truth / 进程 exit 0 ≠ 有用 worker 结果（2026-08-12，本地候选，待发布）
+### M12-21 completed-empty truth / 进程 exit 0 ≠ 有用 worker 结果（2026-08-13，已本地集成，待发布与 Fresh Host 验收）
 
 确立一条主控真相：**Lead 绝不能把一个"成功 exit、却没做任何模型工作"的 worker 运行，误当成一次有效的 completed review 或 delivery**。进程 exit 0 / parser `done(completed)` 只是**传输完成**，不是 worker 产出可用结果的证据——这点同时适用于 claude-code parser 的 `type:"result"` 成功路径与 ProcessBackend exit-0 兜底路径。
 
@@ -242,9 +242,9 @@ Owner Dashboard 增加选中 run 的 backend/stage/terminal/event count/scope/li
 
 配套 parser 修复：claude-code stream parser 在成功 result 事件含非空 `result.result`、且此前未流式输出过相同 assistant 文本时，会补发恰好一条 assistant 消息再 `done(completed)`（避免 resume 场景下最终答案只出现在 result 而非流式文本时丢失）；若该文本已被流式输出过，则按既有 TD-12 去重合同不重复；空/纯空白 `result.result`、或 error result，均不触发补发，正常 streaming/metrics/error/done 保持不变。
 
-实现以严格 TDD（RED→GREEN）落地：parser fallback+去重 5 例、completed-empty 诊断 8 例（含 tool-only/command-only/file-written/tool_use 守卫与 m12-9 minimal-stub 不回归）、MCP 线路 parity 2 例、process backend fresh-vs-resume 2 例、真实 `getRunDiagnosis` 服务只读 smoke（production-shaped transcript 经真实只读服务投影为 no_effect/completed_empty 且字节不变、无 provider payload 回显）。本段只记录本地候选真相，**尚未发布或完成 Fresh Host 验收**；M12-19、M12-20 均已经 `main@6673363b256ac0cc4b4dcd8dff1ac785587e67b1` 发布，各自的 Fresh Host 只读验收推迟到 Owner 可安全重启时进行（既非"待发布"，亦非已完成 Fresh Host 验收）；本段同样不主张 Fresh Host 验收。
+实现以严格 TDD（RED→GREEN）落地：parser fallback+去重 5 例、completed-empty 诊断 8 例（含 tool-only/command-only/file-written/tool_use 守卫与 m12-9 minimal-stub 不回归）、MCP 线路 parity 2 例、process backend fresh-vs-resume 2 例、真实 `getRunDiagnosis` 服务只读 smoke（production-shaped transcript 经真实只读服务投影为 no_effect/completed_empty 且字节不变、无 provider payload 回显）。最终机械重投 run `run_20260812235300186r5645e` 产出 delivery `056db537a45514b6591edce65ab2b9e617697e4d`，其 tree 与已完成语义审查的校正候选逐字一致；初始 exact verification 因 profile 时限短于本机 canonical 耗时返回 `command_timeout`，Lead 以 `tooling_invalid` 理由执行一次有审计的依赖安装与长时限 reverify，最终 `effectiveVerificationStatus=passed`，delivery 经完整路径审查后 accepted，并已 fast-forward 集成本地 `main`。
 
-> 注（Lead 校正已落地，2026-08-12）：上方"MCP 线路 parity / wire code 透出 completed_empty"的描述即校正后的最终真相。Lead 授权的 M12-21 校正已实现：`run_diagnose` / `run_await_result` 在 wire 上对 completed-empty 同时返回 `category=no_effect` 与 `code=completed_empty`（不再折叠为 null）；MCP wire schema 的 `code` 闭集改为单一通用 `DIAGNOSIS_CODES` SSOT（provider 码 + completed_empty），经 `isValidDiagnosisCode(category, code)` 配对校验，无第二份手维护 enum；既有 FR-02 守卫（`test/m12-6-fr02-providerReadiness.test.js`、`test/m12-9-runAwaitOutcome.test.js`）已改为从该通用 SSOT 派生；ProcessBackend 在流边界对"成功但无可用产出"的完成（parser `done(completed)` 与 exit-0 兜底两条路径）直接打 `completed_empty` marker，并以 `runEventIsUsableEffect` 判定 usable effect（assistant 文本/command/file_written/tool_use/tool_result 计数，runtime_activity/thinking/metrics 不计）；原 wire-null parity 测试已替换为精确的 completed_empty parity 测试，并新增确定性 ProcessBackend marker 测试。
+本地集成树已通过冻结候选 canonical `198/198`、精确验证与 `git diff --check`；**尚未 push、tag、Release，也未完成 Fresh Host 验收**。M12-19、M12-20 已发布于 `main@6673363b256ac0cc4b4dcd8dff1ac785587e67b1`，两者的 Fresh Host 只读验收仍按 Owner 要求推迟；M12-21 与它们都不得在安全重启前宣称 Fresh Host accepted。
 
 ### 第三方 onboarding helper 发布与 Fresh Host 验收（2026-08-08）
 
