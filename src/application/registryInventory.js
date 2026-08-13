@@ -71,13 +71,13 @@ export function buildProviderReadiness(credentialAvailability) {
 export function displayModel(agent) {
   if (typeof agent.model === "string") return agent.model;
   return agent.model?.id
-    ?? (["claude-code", "codex", "kimi-code"].includes(agent.backend) ? "(default)" : "-");
+    ?? (["claude-code", "codex", "kimi-code", "deepseek-harness"].includes(agent.backend) ? "(default)" : "-");
 }
 
 // ===== Service implementation =====
 
 /**
- * Read reliability-summary.json and build a certification map.
+ * Read reliability-summary.json and build a certification record map.
  * Returns {} on missing file or corrupted JSON (no throw).
  * @param {string} runDir
  * @param {Function} [customReadFile] — injectable for testing
@@ -91,7 +91,11 @@ async function buildCertMap(runDir, customReadFile) {
     const summary = JSON.parse(raw);
     const certMap = {};
     for (const [id, w] of Object.entries(summary?.workers ?? {})) {
-      certMap[id] = w.status ?? "-";
+      certMap[id] = {
+        status: w.status ?? "-",
+        backend: w.backend,
+        modelId: w.modelId,
+      };
     }
     return certMap;
   } catch {
@@ -143,7 +147,7 @@ export async function getRegistryInventory({
       // M11-9: reasoningEffort from structured field. null when absent (runtime
       // default) — never fabricated, never reverse-parsed from args.
       reasoningEffort: agent.reasoning?.effort ?? null,
-      certification: certMap[agent.id] ?? null,
+      certification: certificationFor(agent, certMap[agent.id]),
       cwd: agent.cwd,
       // M11-11C: project the configured reuse mode so the Lead sees which
       // experts retain a provider-native conversation across turns. Nullable —
@@ -156,4 +160,12 @@ export async function getRegistryInventory({
     });
   }
   return results;
+}
+
+function certificationFor(agent, record) {
+  if (!record) return null;
+  if (record.backend !== undefined && record.backend !== agent.backend) return null;
+  const modelId = agent.model?.id ?? null;
+  if (record.modelId !== undefined && record.modelId !== modelId) return null;
+  return record.status;
 }

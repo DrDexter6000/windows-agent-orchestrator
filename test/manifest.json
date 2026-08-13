@@ -11,6 +11,7 @@
       "daemonHealth.test.js",
       "daemonSupervisor.test.js",
       "deliveryReview.test.js",
+      "deepSeekHarness.test.js",
       "diagnosis.test.js",
       "frictionLog.test.js",
       "integration.test.js",

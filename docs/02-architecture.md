@@ -89,7 +89,8 @@ CLI Adapter ─┘                 ↓
 
 ### 2.1 Backend 接口（核心）
 
-所有 runtime（opencode-serve / claude-code / codex）实现同一接口。
+所有 runtime（opencode-serve / claude-code / codex / kimi-code /
+deepseek-harness）实现同一接口。
 上层只面对这个接口，永远不碰传输细节（HTTP / stdio）。
 
 ```js
@@ -173,7 +174,7 @@ retry error、session/model id 和延迟数据不得进入 RunEvent。`cacheRead
 ```js
 interface AgentDef {
   id: string;
-  backend: "opencode-serve" | "claude-code" | "codex" | "kimi-code";   // 可扩展
+  backend: "opencode-serve" | "claude-code" | "codex" | "kimi-code" | "deepseek-harness";
   cwd: string;
   // backend 特定字段
   serveUrl?: string;               // opencode-serve 必填
@@ -182,6 +183,10 @@ interface AgentDef {
   // 进程式 backend 字段（claude-code / codex）
   binary?: string;                 // 可执行文件路径或名
   args?: string[];                 // 额外启动参数
+  // deepseek-harness 的独立 JSON-RPC composition
+  dshConfigPath?: string;          // 可读 Cordis config，DSH 必填
+  credentialEnv?: string;          // 只声明 env 名，DSH 必填；值不进 registry
+  dshProvider?: string;            // 缺省 deepseek-official
   // M11-11C：可选专家会话复用策略。当前封闭集为 "lead_workspace"——同一 MCP Lead
   // 会话在同一绑定 workspace 内再次询问同一配置的专家时，复用 provider 原生会话
   // （Claude Code 会话）以保留上下文/cache，但每次仍开一个全新 WAO run/transcript
@@ -201,6 +206,7 @@ function backendFor(agent: AgentDef): Backend {
     case "opencode-serve": return new OpenCodeServeBackend();
     case "claude-code":    return new ProcessBackend({ ... });
     case "codex":          return new ProcessBackend({ ... });
+    case "deepseek-harness": return new DeepSeekHarnessBackend({ ... });
   }
 }
 ```
@@ -248,6 +254,19 @@ interface StreamParser {
 - Values from explicitly assigned credential channels are redacted regardless of channel name. Values of at least eight characters from credential-like environment names (including proxy URLs) are also exact-match redacted before parsed events enter RunManager memory, before JSONL persistence, and in raw-capture/stdout/stderr diagnostic sinks. Raw capture uses a UTF-8 streaming redactor, so a value split across chunks or code-point bytes is still removed.
 - ProcessBackend 允许 backend 声明纯字符串 `runtimeEnv(agent, task)` 控制变量；该钩子不承载 credential。Claude Code 用它在所有 WAO worker 上禁用 runtime 内建 subagent，并仅在 delivery mode 禁用 runtime 自带 Git instructions，避免绕过 WAO 的派发与 commit 所有权。
 - This is exposure minimization, not a strong secret boundary. A worker under the same OS identity can still inspect its assigned runtime credential or credential files. Strong isolation requires the broker/identity boundary recorded in decision 0015 and TD-104.
+
+#### 2.5a DeepSeekHarnessBackend（实验性 JSON-RPC runtime）
+
+`DeepSeekHarnessBackend` 不解析人类 TUI，也不依赖 DSH GUI 当前选中的 preset。它启动一个由
+用户单独安装和配置的 `dsh-jsonrpc-agent`，以 stdio JSON-RPC 调用 `initialize` 和
+`session/prompt`，再把绑定当前 `sessionId` 与 prompt receipt `messageId` 的通知投影为同一套
+`RunEvent`。只有已绑定 receipt 之后的 `assistant/message`、tool、usage 和 `turn/end` 才可进入
+WAO transcript；对应 `idle` 才完成 run。transport 提前关闭、runtime identity 不符、未绑定事件
+或 DSH 内部 subagent 活动均 fail closed。
+
+DSH 只拥有单次模型/tool loop；WAO 继续独占 worktree、transcript、stop、delivery、verification
+与 Lead decision。该 backend 当前不支持 provider session reuse 或运行中 correction；恢复只能把
+durable prompt 重放到新 DSH 进程。配置和运维边界见 `docs/usage.md`。
 
 ### 2.6 现有 OpenCodeServeBackend 的迁移 `[S]`
 
@@ -1045,6 +1064,7 @@ src/
 │   ├── processBackend.js     # L1：进程式 backend 基类
 │   ├── claudeCode.js         # L1：claude-code 后端（M12-14：`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` 注入【每一个】supervised 子进程 env——native OAuth / provider wrapper / start / resume 会话复用；backend 安全值压过 agent.env 反设，含 Windows 大小写不敏感的变体；阻止/抑制 provider auto-memory 写入；仅 claude-code 接收该变量，其它 backend 不注入）
 │   ├── codex.js              # L1：codex 后端
+│   ├── deepSeekHarness.js    # L1：实验性 DSH stdio JSON-RPC 后端
 │   └── parsers/
 │       ├── lineStream.js     # stdout 行流解析基类
 │       ├── claudeCode.js     # claude-code stream-json 解析

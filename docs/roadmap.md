@@ -264,6 +264,12 @@ TD-71 的根 delivery `run_20260813123526210jd19dv` 虽通过 focused verificati
 
 TD-48 经当前规模实测关单：CLI diagnose 只读单个 transcript；CLI dashboard 对约 1887 runs / 180MB 的全量历史扫描仍低于 5s 触发条件，不为假设规模提前增加缓存。TD-106 按 Owner 裁定归档为 WAO 非目标：Tester context efficiency 属于 Codex 产品/runtime，不在本包实现或验证范围内。
 
+### DeepSeek Harness 实验性 backend 试接（2026-08-13，本地验收，发布待授权）
+
+WAO 新增独立 `DeepSeekHarnessBackend`，通过用户提供的 DSH SDK stdio JSON-RPC runtime 接收严格绑定当前 session/prompt receipt 的事件，并投影为既有 RunEvent；没有引入 production npm dependency，也未解析 GUI/TUI。DSH 内部 subagent、错误 runtime identity、提前 transport close 与未绑定事件均 fail closed；WAO 继续独占 worktree、transcript、stop、delivery、verification 和 Lead decision。认证记录现按 agent id + backend + model 绑定，避免同名 `coder_low` 从 claude-code 切换到 DSH 后继承旧认证。
+
+本机 gitignored `coder_low` 已切到 `@deepseek-ai/dsh@0.1.0-rc.6`、上游源码 `47f943859bef60e4160492346772ded9b24f765a` 的 dedicated JSON-RPC composition。no-model initialize 和真实 backend probe 通过；只读 run `run_20260813160935509hkxwj7` 返回 `DSH_WAO_CANARY_OK` 与非零 usage。合成 Git 仓 delivery run `run_202608131611020836qoleg` 只创建授权的 `canary.txt`，精确 verification passed，单文件 diff 完整审查并由 Lead accepted。该结果只证明本机 experimental lane 可运行，不等同 reliability certification；tracked 默认 worker 模板保持不变。
+
 ### 第三方 onboarding helper 发布与 Fresh Host 验收（2026-08-08）
 
 第三方 onboarding helper 已以普通 fast-forward 发布到 `main@4c06496146827f2d0dd993fde3d0ba372ae28d8d`。从公开 GitHub URL 创建的全新 clone 精确落在该 SHA；锁定依赖安装成功，默认 preview 与选定 worker preview 均为零写入，`--apply` 生成仅含 `coder_low` 的有效私有 registry，生产 `registry validate` 通过，显式 `--endorse-worker coder_low` 只写既有 `manualOverride:"cleared"` Owner 信号且不伪造认证状态。一次性 headless Codex Fresh Host 仅通过进程级 host-neutral MCP 配置连接该 clone，正式执行 `lead_preflight -> run_dispatch`（只读、no delivery）`-> run_await_result`；真实 run `run_20260808195141854w5bypg` 终态为 `completed`，返回唯一非空 assistant 文本 `CANARY_OK` / `project: windows-agent-orchestrator-poc`，无失败诊断，fresh clone HEAD/branch/tracked status 前后不变。首次无交互 Host 尝试在 `run_dispatch` 前因 Host approval 取消而结束，无 runId、无遗留 run；修正 Host 调用环境后在同一发布候选上完成上述唯一 worker canary。Verdict：`PASS_THIRD_PARTY_ONBOARDING_FRESH_HOST`。

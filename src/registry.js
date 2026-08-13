@@ -158,6 +158,17 @@ export function normalizeAgent(id, agent) {
   } else if (agent.backend === "claude-code" || agent.backend === "codex" || agent.backend === "kimi-code") {
     // 进程式 backend：serveUrl/model 非必填（进程自带模型配置）。
     // binary 可选（默认走 PATH 里的 claude/codex/kimi）。
+  } else if (agent.backend === "deepseek-harness") {
+    if (typeof agent.dshConfigPath !== "string" || agent.dshConfigPath.trim().length === 0) {
+      throw new Error(`Agent ${id} is missing dshConfigPath`);
+    }
+    if (typeof agent.credentialEnv !== "string" || agent.credentialEnv.trim().length === 0) {
+      throw new Error(`Agent ${id}: credentialEnv is required and must be a non-blank string`);
+    }
+    if (Object.prototype.hasOwnProperty.call(agent, "dshProvider")
+      && (typeof agent.dshProvider !== "string" || agent.dshProvider.trim().length === 0)) {
+      throw new Error(`Agent ${id}: dshProvider must be a non-blank string when present`);
+    }
   } else {
     throw new Error(`Agent ${id} has unknown backend: ${agent.backend}`);
   }

@@ -930,9 +930,13 @@ export class RunManager {
       resumeScorecardRules = runStarted.delivery.scorecardRules;
     }
 
-    // 进程式 backend（进程已死）→ 重放 prompt 重新 spawn
-    const isProcess = runStarted.backend === "claude-code" || runStarted.backend === "codex" || runStarted.backend === "kimi-code";
-    if (isProcess) {
+    // Process-style backends replay the persisted prompt into a fresh process.
+    // Production backends declare replayByRespawn explicitly. The capability
+    // fallback preserves the long-standing contract for injected/test backends:
+    // a backend that can spawn but has no attach stream cannot be treated as an
+    // HTTP/session backend. This remains provider-neutral and avoids routing an
+    // otherwise resumable backend into a missing streamEvents method.
+    if (backend.replayByRespawn === true || typeof backend.streamEvents !== "function") {
       // TD-54：prompt.sent 可能写两条，取最后一条（两条都有 .prompt，无差别）。
       const promptEvent = findLatest(events, "prompt.sent");
       if (!promptEvent?.prompt) return null;

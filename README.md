@@ -1,7 +1,8 @@
 # Windows Agent Orchestrator (WAO)
 
 Windows-native, headless, runtime-agnostic orchestrator for local agent runtimes
-(claude-code / codex / opencode-serve). Drives agents via subprocess or HTTP,
+(claude-code / codex / kimi-code / opencode-serve, plus an experimental
+DeepSeek Harness JSON-RPC adapter). Drives agents via subprocess or HTTP,
 records everything to JSONL transcripts, provides git worktree isolation, resume,
 token/cost metrics, declarative DAG workflows, and evidence-chain scorecard gating.
 
@@ -51,7 +52,8 @@ transcript durable facts. See
 
 **Milestones M0–M12 complete** (M12: Lead Token Efficiency + Assisted
 Orchestration). Implemented: explicit state machine + JSONL transcript source
-of truth; multi-backend (opencode-serve + claude-code + codex + kimi-code);
+of truth; multi-backend (opencode-serve + claude-code + codex + kimi-code,
+with DeepSeek Harness available as an experimental, uncertified adapter);
 worktree isolation, resume, metrics aggregation; declarative DAG engine +
 parameterized workflow templates; daemon supervision + scorecard evidence
 gating + runtime certification + diagnostics; MCP-first Lead closed loop with

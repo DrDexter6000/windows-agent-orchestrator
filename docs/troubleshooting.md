@@ -352,6 +352,14 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **隔离**：WAO Claude worker 设置 `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1`；delivery mode 额外设置 `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1`。普通一次性 run 使用 `--no-session-persistence`，显式 session reuse 不使用该 flag。
 - **验收边界**：本地 parser/wrapper/argv/env 与 synthetic stream 可 no-model 验证；官方 Claude/真实 provider 行为仍需具备对应订阅或 credential 后单独 canary，不得用本地测试冒充真实 runtime 验收。
 
+### 7.12 DeepSeek Harness JSON-RPC backend 启动或空结果
+
+- **先确认边界**：WAO 只 detect/invoke/report，不安装、升级、登录或修复 DSH。GUI 中选择的 preset 不会自动成为 WAO worker；WAO 使用 registry 明确指定的 dedicated `dsh-jsonrpc-agent` + Cordis config。
+- **preflight 报配置错误**：确认 `binary` 可执行、`dshConfigPath` 可读、`credentialEnv` 为非空环境变量名；用 `registry validate` 检查静态合同，用 `registry list` 检查 credential availability。
+- **runtime identity mismatch / malformed JSON-RPC / transport closed**：这是 DSH composition 或 transport 故障，不是模型语义失败。直接运行同一 binary 做 `initialize` no-model probe；不得改成抓 TUI 文本或把未知输出投影为 completed。
+- **内部 subagent 事件导致失败**：这是预期 containment。WAO 的 worker 不能再通过 DSH 内部编排绕过 Lead/WAO；关闭 composition 中的 subagent/workflow 后再派发。
+- **认证显示 null**：认证按 agent id + backend + model 绑定。把同名 worker 从 claude-code 切到 DSH 后，旧认证不会继承；先做真实 canary，再由 Owner 决定是否运行完整 reliability。
+
 ---
 
 ## 8. 新增条目（模板）

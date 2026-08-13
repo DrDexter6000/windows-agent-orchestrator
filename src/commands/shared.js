@@ -18,6 +18,7 @@ import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { ClaudeCodeBackend } from "../backends/claudeCode.js";
 import { CodexBackend } from "../backends/codex.js";
 import { KimiCodeBackend } from "../backends/kimiCode.js";
+import { DeepSeekHarnessBackend } from "../backends/deepSeekHarness.js";
 import { getWaoCliPath } from "../waoCliPath.js";
 import { readTranscript, findLastEventSeq, JsonlTranscript } from "../transcript.js";
 // M9-0: displayModel SSOT lives in application/registryInventory.js;
@@ -108,6 +109,9 @@ export function backendFor(agent) {
   }
   if (agent.backend === "kimi-code") {
     return new KimiCodeBackend({ waoCliPath });
+  }
+  if (agent.backend === "deepseek-harness") {
+    return new DeepSeekHarnessBackend();
   }
   throw new Error(`Unsupported backend: ${agent.backend}`);
 }

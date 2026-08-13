@@ -64,6 +64,7 @@ import { ClaudeCodeBackend } from "../backends/claudeCode.js";
 import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { CodexBackend } from "../backends/codex.js";
 import { KimiCodeBackend } from "../backends/kimiCode.js";
+import { DeepSeekHarnessBackend } from "../backends/deepSeekHarness.js";
 import { getWaoCliPath } from "../waoCliPath.js";
 import { randomUUID } from "node:crypto";
 import { getRunStatus } from "../application/runStatus.js";
@@ -2720,6 +2721,7 @@ export function createWaoMcpServer({
     if (agent.backend === "claude-code") return new ClaudeCodeBackend({ waoCliPath });
     if (agent.backend === "codex") return new CodexBackend({ waoCliPath });
     if (agent.backend === "kimi-code") return new KimiCodeBackend({ waoCliPath });
+    if (agent.backend === "deepseek-harness") return new DeepSeekHarnessBackend();
     return null;
   }
 

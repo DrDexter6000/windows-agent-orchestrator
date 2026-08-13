@@ -21,6 +21,7 @@ import { RunManager } from "./runManager.js";
 import { ClaudeCodeBackend } from "./backends/claudeCode.js";
 import { CodexBackend } from "./backends/codex.js";
 import { OpenCodeServeBackend } from "./backends/opencodeServe.js";
+import { DeepSeekHarnessBackend } from "./backends/deepSeekHarness.js";
 import { readTranscript } from "./transcript.js";
 
 const SMOKE_PROMPT = "Reply with exactly: smoke ok";
@@ -53,6 +54,7 @@ function backendFor(agent) {
   if (agent.backend === "opencode-serve") return new OpenCodeServeBackend();
   if (agent.backend === "claude-code") return new ClaudeCodeBackend();
   if (agent.backend === "codex") return new CodexBackend();
+  if (agent.backend === "deepseek-harness") return new DeepSeekHarnessBackend();
   throw new Error(`unknown backend ${agent.backend}`);
 }
 

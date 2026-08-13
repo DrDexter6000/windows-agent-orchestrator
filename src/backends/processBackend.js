@@ -71,6 +71,10 @@ class EventQueue {
  * 不实现自定义 Job Object：违反零依赖（需 N-API/FFI 原生模块）且业界无人这样做（内置已够用，见 ADR 0013）。
  */
 export class ProcessBackend {
+  // A dead process-backed run can only be recovered by replaying its durable
+  // prompt into a fresh process. RunManager consumes this provider-neutral
+  // capability instead of maintaining a runtime-name allowlist.
+  replayByRespawn = true;
   constructor({
     parserClass,
     buildArgs,
@@ -554,7 +558,7 @@ export class ProcessBackend {
   }
 }
 
-function buildChildEnv(inheritedNames, agentEnv, waoEnv, resolvedCredentials = {}) {
+export function buildChildEnv(inheritedNames, agentEnv, waoEnv, resolvedCredentials = {}) {
   const requested = new Set(
     [...SAFE_INHERITED_ENV, ...(inheritedNames ?? [])]
       .filter((name) => typeof name === "string" && name.length > 0)

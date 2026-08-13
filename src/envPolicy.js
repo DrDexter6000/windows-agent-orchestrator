@@ -31,6 +31,7 @@ const INHERITED_ENV_NAMES = {
   "claude-code": null,
   codex: ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"],
   "kimi-code": ["KIMI_API_KEY", "KIMI_BASE_URL", "KIMI_MODEL_NAME"],
+  "deepseek-harness": [],
   "opencode-serve": [],
 };
 
@@ -43,11 +44,14 @@ const INHERITED_ENV_NAMES = {
  */
 export function requiredCredentialNames(agent) {
   if (!agent || typeof agent !== "object") return [];
-  // Only claude-code declares required creds via the registry today.
-  if (agent.backend !== "claude-code") return [];
   const names = [];
-  const configured = agent.provider?.apiKeyEnv;
+  const configured = agent.backend === "deepseek-harness"
+    ? agent.credentialEnv
+    : agent.backend === "claude-code"
+      ? agent.provider?.apiKeyEnv
+      : undefined;
   if (typeof configured === "string" && configured.length > 0) names.push(configured);
+  if (agent.backend !== "claude-code") return [...new Set(names)];
   const prependArgs = Array.isArray(agent.prependArgs) ? agent.prependArgs : [];
   const idx = prependArgs.indexOf("--api-key-env");
   if (idx >= 0 && idx + 1 < prependArgs.length && prependArgs[idx + 1]) {

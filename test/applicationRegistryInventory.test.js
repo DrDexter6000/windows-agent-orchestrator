@@ -167,6 +167,33 @@ test("M9-0-06: agent in registry but not in summary → certification null", asy
   }
 });
 
+test("M9-0-06b: certification is not inherited after backend or model changes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m90-06b-"));
+  try {
+    const registryPath = makeRegistry(dir, {
+      coder_low: {
+        backend: "deepseek-harness",
+        cwd: dir,
+        dshConfigPath: join(dir, "dsh.yml"),
+        credentialEnv: "DEEPSEEK_API_KEY",
+        model: { id: "deepseek-v4-flash" },
+      },
+    });
+    const runDir = makeSummary(dir, {
+      coder_low: {
+        status: "certified",
+        backend: "claude-code",
+        modelId: "deepseek-v4-flash",
+      },
+    });
+
+    const [result] = await getRegistryInventory({ registryPath, runDir });
+    assert.equal(result.certification, null);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 test("M9-0-07: fake dependency injection — no real filesystem touched", async () => {
   let readRegistryCalled = false;
   let readFileCalled = false;

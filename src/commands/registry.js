@@ -105,7 +105,7 @@ async function registryValidateCommand(args, config) {
     return;
   }
 
-  const KNOWN_BACKENDS = ["opencode-serve", "claude-code", "codex", "kimi-code"];
+  const KNOWN_BACKENDS = ["opencode-serve", "claude-code", "codex", "kimi-code", "deepseek-harness"];
   let allOk = true;
   let checked = 0;
 

@@ -20,6 +20,7 @@ import { OpenCodeServeBackend } from "./backends/opencodeServe.js";
 import { ClaudeCodeBackend } from "./backends/claudeCode.js";
 import { CodexBackend } from "./backends/codex.js";
 import { KimiCodeBackend } from "./backends/kimiCode.js";
+import { DeepSeekHarnessBackend } from "./backends/deepSeekHarness.js";
 import { getWaoCliPath } from "./waoCliPath.js";
 import { readRegistry } from "./registry.js";
 import { normalizeAgent } from "./registry.js";
@@ -71,6 +72,7 @@ function backendFor(agent, { fetchImpl, waoCliPath } = {}) {
   if (agent.backend === "claude-code") return new ClaudeCodeBackend({ waoCliPath });
   if (agent.backend === "codex") return new CodexBackend({ waoCliPath });
   if (agent.backend === "kimi-code") return new KimiCodeBackend({ waoCliPath });
+  if (agent.backend === "deepseek-harness") return new DeepSeekHarnessBackend();
   throw new Error(`Unsupported backend: ${agent.backend}`);
 }
 
