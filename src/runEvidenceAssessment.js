@@ -29,6 +29,7 @@
  *   hasAssistantText: boolean,
  *   hasToolUse: boolean,
  *   hasAnyEvidence: boolean,
+ *   hasTransportActivity: boolean,
  *   fileWrittenCount: number,
  *   commandExit0Count: number,
  *   assistantTextCount: number,
@@ -55,12 +56,23 @@ export function assessRunEvidence(events) {
   const activityKinds = new Set(["command", "file_written", "tool_use", "tool_result", "message"]);
   const activityEventCount = evs.filter((e) => _isEvidenceKind(e, null) && activityKinds.has(e.kind)).length;
 
+  // M12-21: transport activity — proof that the backend runtime initialized /
+  // streamed / reported usage, but NOT itself a usable model effect. Runtime
+  // init heartbeats, thinking heartbeats, and (zero- or non-zero) usage metrics
+  // are transport. The completed-empty gate uses this to distinguish a real
+  // "ran but produced nothing" completion from a synthetic minimal stub.
+  const transportKinds = new Set(["runtime_activity", "thinking", "metrics"]);
+  const hasTransportActivity = evs.some(
+    (e) => _isEvidenceKind(e, null) && transportKinds.has(e.kind),
+  );
+
   return {
     hasFileWritten: fileWrittenEvents.length > 0,
     hasCommandExit0: commandExit0Events.length > 0,
     hasAssistantText: assistantMessages.length > 0,
     hasToolUse: toolUseEvents.length > 0,
     hasAnyEvidence: evidenceEventCount > 0,
+    hasTransportActivity,
     fileWrittenCount: fileWrittenEvents.length,
     commandExit0Count: commandExit0Events.length,
     assistantTextCount: assistantMessages.length,

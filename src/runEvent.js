@@ -48,14 +48,60 @@ export function messageEvent(role, parts) {
   return { kind: "message", role, parts };
 }
 
+/**
+ * M12-21: closed-set done markers. A done event may carry ONE marker recording a
+ * machine truth about the completion. "completed_empty" = the backend completed
+ * (process exit 0 / parser done(completed)) but produced NO usable model effect
+ * — transport success is NOT proof of a useful worker result, so this must never
+ * read as ordinary success. Closed-set: only an exact member is ever attached,
+ * and only on a completed done (a failed done never carries this marker). The
+ * marker is a live in-stream signal; diagnoseFailure independently retrofits the
+ * same truth from transcript evidence, so historical transcripts are covered too.
+ */
+export const DONE_MARKERS = Object.freeze(["completed_empty"]);
+const DONE_MARKER_VALUES = new Set(DONE_MARKERS);
+
 /** run 完成 / 失败。reason 决定 RunManager 怎么转状态。 */
-export function doneEvent(reason, error) {
+export function doneEvent(reason, error, marker) {
   if (reason !== "completed" && reason !== "failed") {
     throw new Error(`doneEvent reason must be completed|failed, got: ${reason}`);
   }
   const event = { kind: "done", reason };
   if (error) event.error = error;
+  if (marker !== undefined) {
+    if (!DONE_MARKER_VALUES.has(marker)) {
+      throw new Error(`doneEvent marker must be one of ${JSON.stringify(DONE_MARKERS)}, got: ${marker}`);
+    }
+    event.marker = marker;
+  }
   return event;
+}
+
+/**
+ * M12-21: does this RunEvent represent a USABLE model effect? Usable effect =
+ * non-blank assistant text, a command, a file_written, a tool_use, or a
+ * tool_result. Runtime activity (runtime_activity/thinking) and metrics are
+ * TRANSPORT activity (the runtime initialized/streamed) but NOT usable effect.
+ * ProcessBackend tracks this at the stream boundary to decide whether a
+ * completion carries the completed_empty marker. Non-blank text (trim) matches
+ * assessRunEvidence._hasNonEmptyTextPart, so the live marker decision and the
+ * historical evidence retrofit cannot disagree on whitespace-only output.
+ */
+export function runEventIsUsableEffect(ev) {
+  if (!ev || typeof ev !== "object") return false;
+  switch (ev.kind) {
+    case "message":
+      return ev.role === "assistant"
+        && Array.isArray(ev.parts)
+        && ev.parts.some((p) => p && typeof p.text === "string" && p.text.trim().length > 0);
+    case "command":
+    case "file_written":
+    case "tool_use":
+    case "tool_result":
+      return true;
+    default:
+      return false;
+  }
 }
 
 /**

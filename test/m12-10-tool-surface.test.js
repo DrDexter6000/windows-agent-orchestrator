@@ -615,8 +615,14 @@ test("M12-10-H: deterministic 22-tool wire below frozen ceiling and below the 23
 // the run_delivery / run_delivery_repackage / run_delivery_decide output schemas,
 // which ARE part of the stripped payload, so the SHA changed truthfully; no
 // description text is in the stripped payload).
+// Re-measured for M12-21 (completed-empty wire truth): the run_diagnose and
+// run_await_result terminal-outcome diagnosis `code` enums gained the closed-set
+// `completed_empty` member — the unified DIAGNOSIS_CODES SSOT replaced the
+// provider-only enum on the wire, so both output schemas serialize one more enum
+// member as part of the stripped payload, and the SHA changed truthfully; no
+// description text is in the stripped payload.
 const DESC_STRIPPED_CONTRACT_SHA =
-  "3aa57b689b46f14781ead9570d4137189cb1d28217c2503e6819bbdd52b7ffcf";
+  "6fabda0aba189558c59ffc8230e404ec992c58fa388bf9a28586f4666c475672";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

@@ -210,3 +210,52 @@ import { existsSync } from "node:fs";
 function existsSyncSafe(p) {
   try { return existsSync(p); } catch { return false; }
 }
+
+// ---------------------------------------------------------------------
+// M12-21: completed-empty truth — real-transcript smoke via the shared
+// read-only diagnosis service.
+//
+// Writes a production-shaped completed-empty transcript (transport activity,
+// zero usable effect), then calls the REAL getRunDiagnosis service (no mock
+// reader) to prove: (1) the service surfaces the kernel fact
+// { category:"no_effect", code:"completed_empty" }; (2) the call is strictly
+// read-only — transcript bytes are byte-identical before and after. No real
+// model is involved; this is a transcript replay through repository services.
+// ---------------------------------------------------------------------
+
+test("M12-21: completed-empty transcript via real getRunDiagnosis → no_effect/completed_empty, bytes unchanged", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1221-diag-"));
+  try {
+    const runId = "run_ce";
+    const runDir = join(dir, "runs");
+    writeTranscript(runDir, runId, [
+      jl({ type: "run.submitted", runId, agentId: "coder_low", ts: "2026-08-12T10:00:00.000Z" }),
+      jl({ type: "run.started", runId, backend: "claude-code", ts: "2026-08-12T10:00:01.000Z" }),
+      jl({ type: "run.event", runId, kind: "runtime_activity", status: "initialized", ts: "2026-08-12T10:00:02.000Z" }),
+      jl({ type: "run.event", runId, kind: "runtime_activity", status: "streaming", ts: "2026-08-12T10:00:03.000Z" }),
+      jl({ type: "run.event", runId, kind: "metrics", tokens: { input: 0, output: 0 }, ts: "2026-08-12T10:00:04.000Z" }),
+      jl({ type: "run.state_change", runId, from: "running", to: "completed", reason: "done", ts: "2026-08-12T10:00:05.000Z" }),
+    ].join(""));
+    const path = join(runDir, `${runId}.jsonl`);
+    const before = readFileSync(path, "utf8");
+
+    const result = await getRunDiagnosis({ runId, runDir });
+
+    assert.equal(result.state, "completed");
+    assert.equal(result.terminal, true);
+    assert.equal(result.category, "no_effect",
+      "completed-empty transcript diagnosed no_effect via the real service");
+    assert.equal(result.code, "completed_empty",
+      "kernel code completed_empty surfaces through the read-only service");
+
+    // Read-only: byte-identical after the diagnosis call.
+    const after = readFileSync(path, "utf8");
+    assert.equal(after, before, "transcript bytes unchanged by getRunDiagnosis");
+
+    // No provider payload echo in the returned evidence.
+    const dumped = JSON.stringify(result);
+    assert.ok(!/input_tokens|output_tokens|prompt|secret|argv/i.test(dumped), "no provider payload echo");
+  } finally {
+    cleanupDir(dir);
+  }
+});

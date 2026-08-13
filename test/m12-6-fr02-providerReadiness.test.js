@@ -23,7 +23,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { diagnoseFailure, PROVIDER_DIAGNOSIS_CODES } from "../src/diagnosis.js";
+import { diagnoseFailure, PROVIDER_DIAGNOSIS_CODES, DIAGNOSIS_CODES } from "../src/diagnosis.js";
 import { getRunDiagnosis } from "../src/application/runDiagnosis.js";
 import { getRegistryInventory } from "../src/application/registryInventory.js";
 import { aggregateLeadPreflight } from "../src/application/leadPreflight.js";
@@ -276,7 +276,7 @@ test("M12-6-FR02-C3: lead_preflight passes a service-provided providerReadiness 
 
 // ===== (d) MCP wire: schema exposes strict closed sets; handler projects safely =====
 
-test("M12-6-FR02-D1: run_diagnose output schema exposes code enum == closed set, nullable", async () => {
+test("M12-6-FR02-D1: run_diagnose output schema exposes code enum == general SSOT, nullable", async () => {
   const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs" });
   const client = await buildInMemoryClient(server);
   try {
@@ -286,7 +286,12 @@ test("M12-6-FR02-D1: run_diagnose output schema exposes code enum == closed set,
     assert.ok(codeSchema, "code property present");
     // This SDK renders z.enum().nullable() as anyOf: [enum, null].
     const enumBranch = codeSchema.anyOf?.[0] ?? codeSchema;
-    assert.deepEqual(enumBranch.enum, [...PROVIDER_DIAGNOSIS_CODES], "wire enum == kernel SSOT");
+    // M12-21: the wire enum derives from the single DIAGNOSIS_CODES SSOT
+    // (provider-auth codes plus completed_empty) — no second hand-maintained list.
+    assert.deepEqual(enumBranch.enum, [...DIAGNOSIS_CODES], "wire enum == general kernel SSOT");
+    assert.ok(enumBranch.enum.includes("completed_empty"), "completed_empty is on the wire enum");
+    // completed_empty is NOT folded into PROVIDER_DIAGNOSIS_CODES (contract #2).
+    assert.ok(!PROVIDER_DIAGNOSIS_CODES.includes("completed_empty"), "completed_empty stays out of PROVIDER_DIAGNOSIS_CODES");
     assert.ok(JSON.stringify(codeSchema).includes('"null"'), "code is nullable");
   } finally {
     await client.close();
@@ -380,7 +385,10 @@ test("M12-6-FR02-D5: attacker-controlled code from service → code null, no raw
   }
 });
 
-test("M12-6-FR02-D6: non-provider_auth with a stray code → code null", async () => {
+test("M12-6-FR02-D6: a code under the wrong category (invalid pair) → code null", async () => {
+  // M12-21: a provider code under no_effect is an invalid (category, code) pair.
+  // no_effect's only valid code is completed_empty; anything else fails closed
+  // to null. (The valid no_effect/completed_empty pair is covered separately.)
   const server = createWaoMcpServer({
     registryPath: "/r.json", runDir: "/runs",
     getRunDiagnosisFn: async () => ({
@@ -394,7 +402,7 @@ test("M12-6-FR02-D6: non-provider_auth with a stray code → code null", async (
     const res = await client.callTool({ name: "run_diagnose", arguments: { runId: "r" } });
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     assert.equal(parsed.category, "no_effect");
-    assert.equal(parsed.code, null, "only provider_auth may carry a code");
+    assert.equal(parsed.code, null, "an invalid category-code pair fails closed to null");
   } finally {
     await client.close();
     await server.close();

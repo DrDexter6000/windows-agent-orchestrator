@@ -78,7 +78,7 @@ import { projectCollectResult } from "./runCollectProjection.js";
 // outcome. diagnoseFailure / gatherDeliveryView / projectDeliveryReadiness are
 // PURE events projectors — the outcome adds NO second transcript/Git read and
 // NO run_collect call; it derives from the SAME in-memory snapshot.
-import { diagnoseFailure, DIAGNOSIS_CATEGORIES, PROVIDER_DIAGNOSIS_CODES, ISOLATION_VIOLATION_REASONS } from "../diagnosis.js";
+import { diagnoseFailure, DIAGNOSIS_CATEGORIES, isValidDiagnosisCode, ISOLATION_VIOLATION_REASONS } from "../diagnosis.js";
 // M12-11: the pure backend-neutral observation/termination projector (SSOT).
 // projectObservation derives the additive observation {outcome, waitedMs,
 // windowMs} + termination facts from the SAME in-memory snapshot, for every
@@ -308,8 +308,9 @@ function collectCompactFromSnapshot(events, runId, agentId, env, projectFn) {
 //
 // Closed-set safe facts ONLY:
 //   - terminalState ∈ TERMINAL_STATES;
-//   - diagnosis { category ∈ DIAGNOSIS_CATEGORIES, code ∈ PROVIDER_DIAGNOSIS_CODES
-//     | null, signalCount (a count of diagnosis evidence signals) };
+//   - diagnosis { category ∈ DIAGNOSIS_CATEGORIES, code ∈ DIAGNOSIS_CODES
+//     | null (valid category-code pair only: provider_auth → provider code,
+//     no_effect → completed_empty), signalCount (count of evidence signals) };
 //   - delivery { requested, readiness ∈ DELIVERY_READINESS_STATES, available,
 //     failureCode ∈ PACKAGING_FAILURE_CODES | null, verificationStatus ∈
 //     DELIVERY_VERIFICATION_STATUSES | null, verificationFailureCode ∈
@@ -344,10 +345,10 @@ export function projectTerminalOutcome(events, runId, terminalState, injectables
     const diag = diagnose(events, runId) || {};
     const diagnosis = {
       category: DIAGNOSIS_CATEGORIES.includes(diag.category) ? diag.category : "unknown",
-      // code is meaningful ONLY for provider_auth; null for every other category.
-      code: diag.category === "provider_auth" && PROVIDER_DIAGNOSIS_CODES.includes(diag.code)
-        ? diag.code
-        : null,
+      // M12-21: code is surfaced only for a valid (category, code) pair —
+      // provider_auth → a provider code; no_effect → completed_empty; null
+      // otherwise. Same pair discipline as the run_diagnose wire projection.
+      code: isValidDiagnosisCode(diag.category, diag.code) ? diag.code : null,
       signalCount: Array.isArray(diag.evidence) ? diag.evidence.length : 0,
     };
 

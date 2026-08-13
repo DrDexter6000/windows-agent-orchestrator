@@ -425,3 +425,48 @@ test("M9-5B-09b: each legitimate eventType passes through verbatim", async () =>
     await server.close();
   }
 });
+
+// =====================================================================
+// M12-21: completed-empty truth — run_diagnose wire parity.
+//
+// The kernel SSOT (diagnoseFailure) projects a completed completion-with-no-
+// usable-effect as { category:"no_effect", code:"completed_empty" }. Per the
+// Lead M12-21 correction, the wire exposes BOTH the category AND the code:
+// completed_empty is a Lead-visible machine fact derived from the single
+// DIAGNOSIS_CODES SSOT (provider codes + completed_empty) with valid
+// category-code pair checks. So run_diagnose returns category=no_effect,
+// code=completed_empty — never a raw provider payload echo.
+// =====================================================================
+
+test("M12-21: run_diagnose exposes no_effect category AND completed_empty code on the wire", async () => {
+  // Inject the kernel-level completed-empty diagnosis directly (what the real
+  // diagnoseFailure produces for a completed-empty transcript).
+  const server = createWaoMcpServer({
+    registryPath: "/server/r.json", runDir: "/server/runs",
+    getRunDiagnosisFn: async () => ({
+      runId: "run_ce", state: "completed", terminal: true,
+      category: "no_effect", code: "completed_empty",
+      // The raw evidence FACT carries provider-shaped payload the handler must
+      // strip — only its eventType is projected, never the fact text.
+      evidence: [{ eventType: "run.state_change", fact: "RAW_PROVIDER_STDERR sk-leak-9f3a --prompt hidden-secret" }],
+    }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_diagnose", arguments: { runId: "run_ce" } });
+    assert.equal(res.isError, undefined, "completed-empty diagnosis is a valid wire value, not an error");
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    // Category AND code are both surfaced — a Lead must not mistake completed-empty
+    // for a valid completion, and the closed-set code names the machine fact.
+    assert.equal(parsed.category, "no_effect", "the no_effect category is exposed on the wire");
+    assert.equal(parsed.code, "completed_empty", "completed_empty code is exposed on the wire (Lead-visible fact)");
+    // The closed-set marker rides alone: the raw evidence fact (provider payload)
+    // must NOT be echoed — only its eventType is projected.
+    const dumped = JSON.stringify(parsed);
+    assert.ok(!dumped.includes("sk-leak-9f3a"), "raw provider secret from evidence fact does not leak");
+    assert.ok(!dumped.includes("hidden-secret"), "raw prompt text from evidence fact does not leak");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});

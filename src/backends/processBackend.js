@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import path from "node:path";
-import { doneEvent } from "../runEvent.js";
+import { doneEvent, DONE_MARKERS, runEventIsUsableEffect } from "../runEvent.js";
 import { createSecretRedactor, isSecretEnvName } from "../secretRedaction.js";
 
 const SAFE_INHERITED_ENV = new Set([
@@ -415,6 +415,14 @@ export class ProcessBackend {
   async *_streamEvents({ queue, child, signal, silentTimeout, onPollTick = null, pollIntervalMs = null, getExitCode, getStderrTail = () => "", getStdoutTail = () => "" }) {
     let emittedDone = false;
     let anyEventSeen = false;
+    // M12-21: track whether the stream produced any USABLE model effect before
+    // completion. A completion (parser done(completed) or the exit-code-0
+    // fallback) with no usable effect is NOT ordinary success — it carries the
+    // closed-set completed_empty marker. Usable effect = non-empty assistant
+    // text, command, file_written, tool_use, or tool_result; runtime_activity /
+    // thinking / metrics are transport activity only and do NOT count.
+    let hasUsableEffect = false;
+    const completedEmptyMarker = DONE_MARKERS[0];
     const startTime = Date.now();
     const onAbort = () => this._kill(child);
     if (signal) signal.addEventListener("abort", onAbort);
@@ -423,7 +431,18 @@ export class ProcessBackend {
       while (true) {
         // 排空队列
         for (const ev of queue.drain()) {
-          if (ev.kind === "done") emittedDone = true;
+          if (ev.kind === "done") {
+            emittedDone = true;
+            // M12-21: a successful completion that did no model work carries the
+            // completed_empty marker (a failed done never does). diagnoseFailure
+            // independently retrofits this from transcript evidence, so this live
+            // marker is defense-in-depth — it never echoes provider text/argv/path.
+            if (ev.reason === "completed" && !hasUsableEffect) {
+              ev.marker = completedEmptyMarker;
+            }
+          } else if (runEventIsUsableEffect(ev)) {
+            hasUsableEffect = true;
+          }
           if (!anyEventSeen) anyEventSeen = true;
           yield ev;
         }
@@ -433,7 +452,9 @@ export class ProcessBackend {
           if (!emittedDone && !queue.sawDone) {
             const code = getExitCode();
             if (code === 0) {
-              yield doneEvent("completed");
+              // M12-21: exit-0 is transport completion only. With no usable
+              // effect it carries completed_empty; otherwise ordinary completed.
+              yield doneEvent("completed", undefined, hasUsableEffect ? undefined : completedEmptyMarker);
             } else {
               // TD-77 子项 B：stderr 优先；无 stderr 时回落到 stdout 尾部摘要。
               // 进程崩时往往没写 stderr（物理缺失），旧实现只给 exit code 让诊断黑盒化。

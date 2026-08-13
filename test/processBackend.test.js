@@ -9,6 +9,18 @@ import { ClaudeCodeBackend } from "../src/backends/claudeCode.js";
 import { CodexBackend } from "../src/backends/codex.js";
 import { KimiCodeBackend } from "../src/backends/kimiCode.js";
 import { ClaudeStreamParser } from "../src/backends/parsers/claudeCode.js";
+import {
+  runEventIsUsableEffect,
+  DONE_MARKERS,
+  messageEvent,
+  commandEvent,
+  fileWrittenEvent,
+  toolUseEvent,
+  toolResultEvent,
+  thinkingEvent,
+  runtimeActivityEvent,
+  metricsEvent,
+} from "../src/runEvent.js";
 
 const NODE = process.execPath;
 
@@ -757,4 +769,210 @@ test("M12-16: base ProcessBackend（supportsInFlightCorrection=false）即使 ta
   assert.equal(stdioSeen[0][0], "ignore", "无能力声明 → 不 pipe stdin（即使 task.correctable=true）");
   assert.equal(handle.supportsSendCorrection, undefined, "无能力 → 不挂 sendCorrection");
   assert.equal(cap.stdinText(), "", "无能力 → 不写 stdin");
+});
+
+// ── M12-21：completed-empty truth — result.result fallback through the real ──
+// process backend (fresh-vs-resume determinism).
+//
+// A provider runtime may deliver the worker's final answer ONLY in the terminal
+// `result.result` field (no streamed assistant text) — a "resumed"/non-streamed
+// completion. The parser must recover it as exactly one assistant message so
+// the run is not misread as completed-empty. When the same text WAS already
+// streamed ("fresh" streamed completion), the result repeat must NOT duplicate.
+// These run the recovery through the real ProcessBackend + ClaudeStreamParser
+// (the _emittedAssistantTexts Set lives for one run = one parser instance).
+
+test("M12-21: resumed-style completion (result.result only, no streamed text) → recover one assistant message", async () => {
+  // system init + result success with the answer ONLY in result.result.
+  const lines = [
+    '{"type":"system","subtype":"init"}',
+    '{"type":"result","subtype":"success","is_error":false,"result":"recovered answer"}',
+  ];
+  const backend = makeBackend(ClaudeStreamParser, () => ["-e", mockScript(lines)]);
+  const handle = await backend.spawn(makeAgent(), { prompt: "test" });
+  const events = [];
+  for await (const ev of handle.events(new AbortController().signal)) {
+    events.push(ev);
+  }
+  const messages = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.equal(messages.length, 1, "exactly one recovered assistant message");
+  assert.equal(messages[0].parts[0].text, "recovered answer");
+  assert.ok(events.some((e) => e.kind === "done" && e.reason === "completed"), "done(completed) preserved");
+});
+
+test("M12-21: fresh-style completion (streamed text + identical result.result) → no duplicate", async () => {
+  // The answer is streamed as an assistant message, then the result event
+  // repeats the identical text. The fallback must NOT emit a second message.
+  const lines = [
+    '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"live answer"}]}}',
+    '{"type":"result","subtype":"success","is_error":false,"result":"live answer"}',
+  ];
+  const backend = makeBackend(ClaudeStreamParser, () => ["-e", mockScript(lines)]);
+  const handle = await backend.spawn(makeAgent(), { prompt: "test" });
+  const events = [];
+  for await (const ev of handle.events(new AbortController().signal)) {
+    events.push(ev);
+  }
+  const messages = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.equal(messages.length, 1, "identical streamed + result text must not duplicate");
+  assert.equal(messages[0].parts[0].text, "live answer");
+  assert.ok(events.some((e) => e.kind === "done" && e.reason === "completed"));
+});
+
+// ── M12-21 Lead correction: completed-empty marker at the ProcessBackend stream ──
+//
+// Contract #1/#4: a completion (parser done(completed) OR the exit-code-0
+// fallback) that produced NO usable model effect must NOT read as ordinary
+// success — ProcessBackend attaches the closed-set `completed_empty` marker to
+// the done event. A completion WITH a usable effect (assistant text / command /
+// file_written / tool_use / tool_result) stays an ordinary completed (no
+// marker). A FAILED done never carries the marker. runtime_activity / thinking /
+// metrics are transport activity, NOT usable effect.
+//
+// These are deterministic end-to-end tests through the real ProcessBackend +
+// ClaudeStreamParser (the hasUsableEffect flag lives for one run = one stream).
+
+test("M12-21: parser done(completed) with NO usable effect → done carries completed_empty marker", async () => {
+  // A bare success result (no streamed assistant text, no result.result, no
+  // tool/command evidence): the parser emits done(completed) and nothing usable.
+  const lines = ['{"type":"result","subtype":"success","is_error":false}'];
+  const backend = makeBackend(ClaudeStreamParser, () => ["-e", mockScript(lines)]);
+  const handle = await backend.spawn(makeAgent(), { prompt: "test" });
+  const events = [];
+  for await (const ev of handle.events(new AbortController().signal)) {
+    events.push(ev);
+  }
+  const done = events.find((e) => e.kind === "done");
+  assert.equal(done?.reason, "completed", "parser emitted a completion");
+  assert.equal(done?.marker, "completed_empty", "no-effect completion carries the closed-set marker");
+});
+
+test("M12-21: exit-code-0 fallback with NO usable effect → done carries completed_empty marker", async () => {
+  // Parser ignores the system line → emits no done; process exits 0 → the
+  // exit-code-0 fallback synthesizes done(completed). With no usable effect it
+  // carries completed_empty (transport success is not a useful result).
+  const lines = ['{"type":"system","subtype":"init"}'];
+  const backend = makeBackend(ClaudeStreamParser, () => ["-e", mockScript(lines, 0)]);
+  const handle = await backend.spawn(makeAgent(), { prompt: "test" });
+  const events = [];
+  for await (const ev of handle.events(new AbortController().signal)) {
+    events.push(ev);
+  }
+  const done = events.find((e) => e.kind === "done");
+  assert.equal(done?.reason, "completed", "exit-0 fallback synthesizes a completion");
+  assert.equal(done?.marker, "completed_empty", "no-effect exit-0 completion carries the marker");
+});
+
+test("M12-21: completion WITH assistant text → ordinary completed, NO marker", async () => {
+  // Streamed assistant text is a usable effect → completion stays ordinary.
+  const backend = makeBackend(ClaudeStreamParser, () => ["-e", mockScript(CLAUDE_LINES)]);
+  const handle = await backend.spawn(makeAgent(), { prompt: "test" });
+  const events = [];
+  for await (const ev of handle.events(new AbortController().signal)) {
+    events.push(ev);
+  }
+  const done = events.find((e) => e.kind === "done");
+  assert.equal(done?.reason, "completed");
+  assert.equal(done?.marker, undefined, "a real assistant effect suppresses the marker");
+});
+
+test("M12-21B: completion with WHITESPACE-ONLY assistant text → done carries completed_empty marker", async () => {
+  // M12-21B gap #2 (live path): a worker that emits only whitespace assistant
+  // text did no usable model work. runEventIsUsableEffect trims (matching
+  // assessRunEvidence._hasNonEmptyTextPart), so the live ProcessBackend
+  // hasUsableEffect gate treats whitespace-only text as no effect and the
+  // completion still carries completed_empty. This is the live counterpart to
+  // the historical retrofit test in diagnosis.test.js — the two decisions must
+  // agree on blank output.
+  const lines = [
+    '{"type":"assistant","message":{"id":"m_ws","content":[{"type":"text","text":"   \\n\\t  "}]}}',
+    '{"type":"result","subtype":"success","is_error":false}',
+  ];
+  const backend = makeBackend(ClaudeStreamParser, () => ["-e", mockScript(lines)]);
+  const handle = await backend.spawn(makeAgent(), { prompt: "test" });
+  const events = [];
+  for await (const ev of handle.events(new AbortController().signal)) {
+    events.push(ev);
+  }
+  const msg = events.find((e) => e.kind === "message" && e.role === "assistant");
+  assert.ok(msg, "the whitespace-only assistant message was emitted");
+  const done = events.find((e) => e.kind === "done");
+  assert.equal(done?.reason, "completed");
+  assert.equal(done?.marker, "completed_empty", "whitespace-only output does not suppress the marker");
+});
+
+test("M12-21: completion WITH a tool_use only (no text) → ordinary completed, NO marker", async () => {
+  // An assistant turn whose only content is a tool_use (no text) still counts
+  // as a usable effect — the worker took an action. The completion must NOT be
+  // misread as completed-empty.
+  const lines = [
+    '{"type":"assistant","message":{"id":"m_tu","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{"file_path":"/x"}}]}}',
+    '{"type":"result","subtype":"success","is_error":false}',
+  ];
+  const backend = makeBackend(ClaudeStreamParser, () => ["-e", mockScript(lines)]);
+  const handle = await backend.spawn(makeAgent(), { prompt: "test" });
+  const events = [];
+  for await (const ev of handle.events(new AbortController().signal)) {
+    events.push(ev);
+  }
+  assert.ok(events.some((e) => e.kind === "tool_use"), "the tool_use evidence was emitted");
+  const done = events.find((e) => e.kind === "done");
+  assert.equal(done?.reason, "completed");
+  assert.equal(done?.marker, undefined, "a tool_use effect suppresses the marker");
+});
+
+test("M12-21: failed done NEVER carries the completed_empty marker", async () => {
+  // The marker is completion-only. A failed run keeps its failure shape.
+  const lines = ['{"type":"result","subtype":"error","is_error":true,"result":"boom"}'];
+  const backend = makeBackend(ClaudeStreamParser, () => ["-e", mockScript(lines)]);
+  const handle = await backend.spawn(makeAgent(), { prompt: "test" });
+  const events = [];
+  for await (const ev of handle.events(new AbortController().signal)) {
+    events.push(ev);
+  }
+  const done = events.find((e) => e.kind === "done");
+  assert.equal(done?.reason, "failed", "error result → failed");
+  assert.equal(done?.marker, undefined, "a failed done never carries the completion marker");
+});
+
+// ── M12-21: runEventIsUsableEffect predicate (the usable-effect definition) ──
+//
+// Pins the exact definition of "usable model effect" so the marker gate above
+// cannot drift: the five evidence/effect kinds + non-empty assistant text count;
+// transport-only signals (thinking / runtime_activity / metrics) and
+// write_intent (containment telemetry, not a confirmed write) do NOT.
+
+test("M12-21: DONE_MARKERS is the exact closed set [completed_empty]", () => {
+  assert.deepEqual([...DONE_MARKERS], ["completed_empty"]);
+});
+
+test("M12-21: runEventIsUsableEffect — five effect kinds + non-blank assistant text count; transport does not", () => {
+  // Usable effects.
+  assert.equal(runEventIsUsableEffect(messageEvent("assistant", [{ type: "text", text: "hi" }])), true);
+  assert.equal(runEventIsUsableEffect(commandEvent("ls", 0)), true);
+  assert.equal(runEventIsUsableEffect(fileWrittenEvent("/p", {})), true);
+  assert.equal(runEventIsUsableEffect(toolUseEvent("Read", {})), true);
+  assert.equal(runEventIsUsableEffect(toolResultEvent("Read", "ok", false)), true);
+  // NOT usable: empty-text / non-assistant messages.
+  assert.equal(runEventIsUsableEffect(messageEvent("assistant", [{ type: "text", text: "" }])), false, "empty assistant text is not usable");
+  assert.equal(runEventIsUsableEffect(messageEvent("assistant", [])), false, "no parts is not usable");
+  assert.equal(runEventIsUsableEffect(messageEvent("user", [{ type: "text", text: "hi" }])), false, "user message is not a worker effect");
+  // M12-21B: whitespace-only assistant text is NOT a usable effect — it must not
+  // suppress the completed_empty marker. This matches assessRunEvidence._hasNonEmptyTextPart
+  // (trim), so the live ProcessBackend marker decision and the historical evidence retrofit
+  // cannot disagree on blank output.
+  assert.equal(runEventIsUsableEffect(messageEvent("assistant", [{ type: "text", text: "   " }])), false, "whitespace-only assistant text is not usable");
+  assert.equal(runEventIsUsableEffect(messageEvent("assistant", [{ type: "text", text: "\n\t  \r\n" }])), false, "newline/tab-only assistant text is not usable");
+  assert.equal(runEventIsUsableEffect(messageEvent("assistant", [{ type: "text", text: "  " }, { type: "text", text: "ok" }])), true, "a non-blank part among blank parts is usable");
+
+  // NOT usable: transport-only signals (runtime activity / thinking / metrics).
+  assert.equal(runEventIsUsableEffect(runtimeActivityEvent("streaming")), false);
+  assert.equal(runEventIsUsableEffect(thinkingEvent()), false);
+  assert.equal(runEventIsUsableEffect(metricsEvent({ input: 1 })), false);
+  // NOT usable: write_intent is containment telemetry, not a confirmed write.
+  assert.equal(runEventIsUsableEffect({ kind: "write_intent", path: "/p", toolCallId: "t1", correlationStatus: "tracked" }), false);
+  // NOT usable: garbage / missing.
+  assert.equal(runEventIsUsableEffect(null), false);
+  assert.equal(runEventIsUsableEffect(undefined), false);
+  assert.equal(runEventIsUsableEffect({ kind: "no_such_kind" }), false);
 });

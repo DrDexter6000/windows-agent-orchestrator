@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { RunManager, gracefulShutdown } from "../src/runManager.js";
 import { OpenCodeServeBackend } from "../src/backends/opencodeServe.js";
 import { JsonlTranscript, findLastEventSeq, readTranscript, findState } from "../src/transcript.js";
+import { diagnoseFailure } from "../src/diagnosis.js";
 import { createSecretRedactor } from "../src/secretRedaction.js";
 
 // 复用 integration.test.js 的 mock fetch 模式
@@ -1015,6 +1016,83 @@ test("TD-56: first active tool/command/metrics event marks run as running", asyn
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  }
+});
+
+// ===== M12-21B/21C: durable completed_empty marker — RunManager/transcript causality =====
+//
+// ProcessBackend stamps the closed-set completed_empty marker on a no-effect
+// completion (proven directly in processBackend.test.js). These tests prove the
+// REST of the chain RunManager owns: the marker is captured from the accepted
+// done event, persisted on the run.completed fact (bound to the run envelope
+// runId), and the read-only diagnosis (diagnoseFailure) consumes that durable
+// marker — under the M12-21C trust boundary — only because it is diagnosed with
+// the REAL runId matching run.completed.runId. A valid completion carries none.
+
+test("M12-21C: no-effect completion → terminal completed + bound run.completed.completionMarker; diagnosis (real runId) projects no_effect/completed_empty", async () => {
+  const dir = await makeTempDir();
+  const runId = "m12_21c_no_effect";
+  try {
+    // Mirrors a real exit-0 / parser-done(completed) no-effect run: the runtime
+    // streamed (transport activity) but did no model work, so ProcessBackend
+    // stamps completed_empty on the done event.
+    const events = [
+      { kind: "runtime_activity", status: "streaming" },
+      { kind: "done", reason: "completed", marker: "completed_empty" },
+    ];
+    const manager = makeProcessManager(dir, createMockEvidenceBackend(events));
+    const run = await manager.start("test", { prompt: "noop", runId });
+    const result = await run.waitForCompletion({});
+
+    // Terminal truth: state=completed (transport success) — NOT a new terminal
+    // state, NOT auto-retry/stop. completed_empty is a marker, not a verdict.
+    assert.equal(result.completed, true, "no-effect completion is still terminal completed");
+    assert.equal(findState(await readTranscript(run.transcript.filePath)), "completed");
+
+    const transcript = await readTranscript(run.transcript.filePath);
+    // The closed-set marker is persisted on the accepted run.completed fact,
+    // bound to the run envelope runId (the trust boundary needs a matching runId).
+    const completedFact = transcript.find((e) => e.type === "run.completed");
+    assert.ok(completedFact, "run.completed fact was written");
+    assert.equal(completedFact.runId, runId, "run.completed carries the run envelope runId");
+    assert.equal(completedFact.completionMarker, "completed_empty", "durable marker persisted on run.completed");
+    // Terminal state_change to completed is present.
+    assert.ok(
+      transcript.some((e) => e.type === "run.state_change" && e.to === "completed"),
+      "terminal completed state_change present",
+    );
+
+    // Read-only diagnosis consumes the durable marker via the trust boundary:
+    // the REAL runId binds run.completed.runId → no_effect / completed_empty.
+    const d = diagnoseFailure(transcript, runId);
+    assert.equal(d.category, "no_effect");
+    assert.equal(d.code, "completed_empty");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("M12-21C: valid completion (assistant text) → run.completed carries NO marker; diagnosis (real runId)=none", async () => {
+  const dir = await makeTempDir();
+  const runId = "m12_21c_valid";
+  try {
+    const events = [
+      { kind: "message", role: "assistant", parts: [{ type: "text", text: "review looks good" }] },
+      { kind: "done", reason: "completed" },
+    ];
+    const manager = makeProcessManager(dir, createMockEvidenceBackend(events));
+    const run = await manager.start("test", { prompt: "review", runId });
+    await run.waitForCompletion({});
+
+    const transcript = await readTranscript(run.transcript.filePath);
+    const completedFact = transcript.find((e) => e.type === "run.completed");
+    assert.ok(completedFact, "run.completed fact was written");
+    assert.equal(completedFact.completionMarker, undefined, "valid output carries no marker");
+    const d = diagnoseFailure(transcript, runId);
+    assert.equal(d.category, "none", "valid completion is not diagnosed as no-effect");
+    assert.equal(d.code, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

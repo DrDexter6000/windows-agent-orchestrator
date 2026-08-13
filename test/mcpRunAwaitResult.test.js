@@ -529,3 +529,55 @@ test("MAR-16: null/primitive/array transcript → structured read_failure via re
     } finally { await client.close(); await server.close(); }
   } finally { rmrfRetry(dir); rmrfRetry(runDir); }
 });
+
+// =====================================================================
+// M12-21: completed-empty truth — run_await_result wire parity.
+//
+// A terminal COMPLETED run whose runtime initialized/streamed/reported metrics
+// but produced NO usable model effect (no assistant text, command, file write,
+// tool use) must project outcome.diagnosis={category:"no_effect",code:
+// "completed_empty"} on the wire — NOT "none" — so a Lead never mistakes a
+// no-op completion for a valid review. Per the Lead M12-21 correction BOTH the
+// category and the closed-set code are Lead-visible (derived from the single
+// DIAGNOSIS_CODES SSOT). This mirrors run_diagnose's parity.
+// =====================================================================
+
+test("MAR-M12-21: completed-empty terminal run → outcome diagnosis category=no_effect, code=completed_empty on the wire", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mar-m1221-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-mar-m1221-rd-"));
+  try {
+    makeGitRepo(dir);
+    const id = "run_ce";
+    const agentId = "coder_low";
+    // Full bookkeeping (mirrors seedTranscript) + transport activity (runtime
+    // initialized + metrics) but ZERO usable effect: no assistant text, no
+    // command, no file_written, no tool use → a completed completion-with-no-
+    // model-work. Terminal completed.
+    const lines = [
+      jl({ type: "run.submitted", agentId, ts: "2026-08-12T00:00:00.000Z", runId: id }),
+      jl({ type: "session.created", backend: "process", backendSessionId: "proc_ce", runId: id, agentId }),
+      jl({ type: "run.started", backend: "claude-code", ts: "2026-08-12T00:00:01.000Z", runId: id, agentId }),
+      jl({ type: "run.background_submitted", background: true, cwd: dir, runId: id, agentId }),
+      jl({ type: "run.state_change", to: "pending", reason: "created", ts: "2026-08-12T00:00:02.000Z", runId: id, agentId }),
+      jl({ type: "run.state_change", to: "running", reason: "first_event", ts: "2026-08-12T00:00:03.000Z", runId: id, agentId }),
+      jl({ type: "run.event", kind: "runtime_activity", status: "initialized", ts: "2026-08-12T00:00:04.000Z", runId: id, agentId }),
+      jl({ type: "run.event", kind: "metrics", tokens: { input: 0, output: 0 }, ts: "2026-08-12T00:00:05.000Z", runId: id, agentId }),
+      jl({ type: "run.completed", ts: "2026-08-12T00:10:00.000Z", runId: id, agentId }),
+      jl({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-08-12T00:10:01.000Z", runId: id, agentId }),
+    ];
+    writeFileSync(join(runDir, `${id}.jsonl`), lines.join(""), "utf8");
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_await_result", arguments: { runId: id, waitMs: 0 } });
+      assert.equal(res.isError, undefined, "service must not throw on a completed-empty transcript");
+      const parsed = res.structuredContent;
+      assert.equal(parsed.terminal, true, "completed run is terminal");
+      assert.ok(parsed.outcome, "terminal observed run projects an outcome");
+      assert.equal(parsed.outcome.diagnosis.category, "no_effect",
+        "completed-empty must surface as no_effect, NOT none — a Lead must not mistake it for a valid completion");
+      assert.equal(parsed.outcome.diagnosis.code, "completed_empty",
+        "completed_empty code is exposed on the wire as a Lead-visible machine fact");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmrfRetry(dir); rmrfRetry(runDir); }
+});

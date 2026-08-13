@@ -25,7 +25,11 @@ const STREAM_ACTIVITY_SAMPLE_INTERVAL = 64;
  *   type:"assistant" + content 含 text 块     → messageEvent("assistant", text块们)
  *   type:"assistant" + content 含 tool_use 块 → 证据事件（见 extractToolUse）
  *   type:"user" + content 含 tool_result 块   → toolResultEvent（证据链用）
- *   type:"result" + success                   → metricsEvent(usage) + doneEvent("completed")
+ *   type:"result" + success                   → metricsEvent(usage) + doneEvent("completed");
+ *                                              if non-blank result.result carries the final
+ *                                              answer and no identical assistant text was
+ *                                              streamed, emit one assistant message first
+ *                                              (M12-21 completed-empty recovery)
  *   type:"result" + error                     → metricsEvent(usage) + doneEvent("failed")
  *   system init/api_retry                     → payload-free runtime activity
  *   stream_event                              → sampled payload-free activity
@@ -46,6 +50,13 @@ export class ClaudeStreamParser extends LineStreamParser {
     // order plus a fixed cap makes memory use bounded and deterministic.
     this._pendingWrites = new Map();
     this._streamActivityCount = 0;
+    // M12-21: completed-empty truth — result.result fallback dedupe. A provider
+    // runtime may deliver the worker's final answer ONLY in the terminal
+    // `result.result` field (no streamed assistant text). To recover it without
+    // duplicating an already-streamed identical answer, record the joined text
+    // of every emitted assistant message and skip a result fallback whose text
+    // is identical. Bounded: one entry per assistant message in this run.
+    this._emittedAssistantTexts = new Set();
   }
 
   handleLine(obj) {
@@ -81,6 +92,9 @@ export class ClaudeStreamParser extends LineStreamParser {
         .map((c) => ({ type: "text", text: c.text }));
       if (textParts.length > 0) {
         events.push(messageEvent("assistant", textParts));
+        // M12-21: record the streamed answer so a terminal result.result that
+        // merely repeats it is not emitted again (exact-text dedupe).
+        this._emittedAssistantTexts.add(textParts.map((p) => p.text).join(""));
       }
       for (const block of content) {
         if (block.type === "tool_use") {
@@ -137,6 +151,18 @@ export class ClaudeStreamParser extends LineStreamParser {
       if (obj.is_error || obj.subtype === "error") {
         events.push(doneEvent("failed", obj.result ?? obj.subtype ?? "claude error"));
       } else {
+        // M12-21: completed-empty truth — recover a final answer that the
+        // provider delivered ONLY in the terminal result.result field (no
+        // streamed assistant text). Without this recovery the answer is lost
+        // and the run looks empty, letting a Lead mistake real output for a
+        // completed-empty worker. Emit exactly one assistant message before
+        // done, and only when the text is non-blank and not identical to text
+        // already streamed (exact dedupe). Normal metrics/done are preserved.
+        const resultText = typeof obj.result === "string" ? obj.result : "";
+        if (resultText.trim() && !this._emittedAssistantTexts.has(resultText)) {
+          events.push(messageEvent("assistant", [{ type: "text", text: resultText }]));
+          this._emittedAssistantTexts.add(resultText);
+        }
         events.push(doneEvent("completed"));
       }
       return events;

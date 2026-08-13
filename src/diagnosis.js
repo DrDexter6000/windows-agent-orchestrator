@@ -66,6 +66,51 @@ export const PROVIDER_DIAGNOSIS_CODES = Object.freeze([
   "invalid_credential",
 ]);
 
+// M12-21: completed-empty truth — the closed-set machine fact that labels a
+// backend COMPLETION which produced no usable model effect. Distinct from the
+// failed no_effect path: this is a successful completion (state=completed,
+// exit 0 / parser-done(completed)) that did no model work. Per the Lead M12-21
+// correction the wire and the kernel share ONE truth: run_diagnose and
+// run_await_result project (category=no_effect, code=completed_empty) through
+// the unified DIAGNOSIS_CODES SSOT + isValidDiagnosisCode pair check below, so
+// a Lead sees completed_empty directly — never as a raw provider payload.
+export const NO_EFFECT_DIAGNOSIS_CODES = Object.freeze([
+  "completed_empty",
+]);
+
+// M12-21: ONE general diagnosis-code SSOT. It DERIVES the provider-auth codes
+// plus completed_empty — it never duplicates them and never folds completed_empty
+// into PROVIDER_DIAGNOSIS_CODES (these are distinct category-code pairs). The MCP
+// wire schemas derive their `code` enum from this single set, so there is no
+// second hand-maintained enum on the wire.
+export const DIAGNOSIS_CODES = Object.freeze([
+  ...PROVIDER_DIAGNOSIS_CODES,
+  ...NO_EFFECT_DIAGNOSIS_CODES,
+]);
+
+// Valid (category → code) pairs. Only provider_auth may carry a provider code and
+// only no_effect may carry completed_empty; every other category has no code.
+// This is the single authority for both the kernel projection and the wire
+// projections, enforcing the pair discipline the Lead contract requires.
+const CATEGORY_CODE_SETS = Object.freeze({
+  provider_auth: PROVIDER_DIAGNOSIS_CODES,
+  no_effect: NO_EFFECT_DIAGNOSIS_CODES,
+});
+
+/**
+ * Is (category, code) a valid diagnosis-code pair? An exact member of the
+ * category's closed code set; anything else (wrong category, unknown/absent/
+ * attacker-controlled code) is invalid → the caller fails closed to null.
+ * @param {unknown} category
+ * @param {unknown} code
+ * @returns {boolean}
+ */
+export function isValidDiagnosisCode(category, code) {
+  if (typeof category !== "string" || typeof code !== "string") return false;
+  const set = CATEGORY_CODE_SETS[category];
+  return Array.isArray(set) && set.includes(code);
+}
+
 // M12-14: the frozen closed-set SSOT of isolation-violation REASONS — WHY the
 // delivery containment gate fired. The compat code stays "workdir_escape"; the
 // additive reason distinguishes a confirmed outside path (lexical / physical)
@@ -192,14 +237,30 @@ const PROVIDER_DISCONNECT_SILENCE_MS = 120_000;
  */
 export function diagnoseFailure(events, expectedRunId) {
   const raw = diagnoseFailureInner(events, expectedRunId);
-  // Fail closed: only provider_auth may carry a closed-set code; anything else
-  // (including a future provider_auth branch that forgot its code) is null.
+  // Fail closed: a closed-set code is surfaced ONLY for a valid (category, code)
+  // pair — provider_auth carries a PROVIDER_DIAGNOSIS_CODES member, and no_effect
+  // carries the M12-21 completed_empty machine fact. Anything else (a branch that
+  // forgot its code, a wrong-category pairing, an attacker-controlled value)
+  // collapses to null. The wire projections (run_diagnose / run_await_result) use
+  // the SAME isValidDiagnosisCode pair check, so completed_empty reaches a Lead as
+  // code=no_effect/completed_empty on the wire (category=no_effect), derived from
+  // the single DIAGNOSIS_CODES SSOT — never a raw provider payload echo.
   return {
     ...raw,
-    code: raw.category === "provider_auth" && PROVIDER_DIAGNOSIS_CODES.includes(raw.code)
-      ? raw.code
-      : null,
+    code: kernelDiagnosisCode(raw.category, raw.code),
   };
+}
+
+/**
+ * Kernel-safe closed-set code projection via the (category, code) pair check.
+ * Allows the provider code for provider_auth and completed_empty for no_effect;
+ * null otherwise. The wire projections share this exact pair discipline.
+ * @param {string} category
+ * @param {string|null|undefined} code
+ * @returns {string|null}
+ */
+function kernelDiagnosisCode(category, code) {
+  return isValidDiagnosisCode(category, code) ? code : null;
 }
 
 function diagnoseFailureInner(events, expectedRunId) {
@@ -257,8 +318,66 @@ function diagnoseFailureInner(events, expectedRunId) {
     };
   }
 
-  // 成功 run：无需诊断。
-  if (state === "completed") return { category: "none", evidence: [] };
+  // M12-21: completed-empty truth (provider-neutral). A backend COMPLETION
+  // that produced NO usable model effect must not read as an ordinary
+  // completed run — a Lead must never mistake "runtime exited 0 after doing
+  // no model work" for a valid completed review or delivery. Usable effect =
+  // non-blank assistant text, command activity, file-written evidence, or
+  // tool use/result. Runtime init / thinking / (zero- or non-zero) usage
+  // metrics are TRANSPORT activity (the runtime initialized/streamed) but NOT
+  // usable effect. A minimal synthetic stub with no transport activity is NOT
+  // completed-empty (no evidence the backend even ran) — it stays "none",
+  // preserving the m12-9 completed contract. Both reach state=completed here:
+  // the parser-done(completed) path and the process exit-code-0 fallback.
+  // Closed-set code "completed_empty"; no provider text/argv/path/prompt is
+  // exposed.
+  //
+  // M12-21B gap #1 / M12-21C trust boundary: consume the durable marker FIRST,
+  // but ONLY under a fail-closed run binding. RunManager persists
+  // completionMarker on the accepted run.completed fact — the closed-set
+  // completed_empty value ProcessBackend stamps when a completion did no
+  // usable model work. It is a control-plane fact, so it is consumed ONLY when
+  // a valid expectedRunId is provided AND the run.completed event's runId
+  // matches it — same fail-closed shape as run.delivery_failed /
+  // run.isolation_violation above. No expectedRunId, a cross-run marker
+  // (runId !== expectedRunId), a missing runId, or an unknown marker value
+  // must NOT drive no_effect/completed_empty: an unbound caller must never
+  // attribute completed-empty, defending against cross-run pollution in
+  // concatenated/corrupt transcripts. The evidence-based retrofit below is
+  // retained exactly as before for historical transcripts without a bound
+  // marker (it does not consult completionMarker).
+  if (state === "completed") {
+    const completedMarkerFact = hasValidExpectedRunId
+      ? evs.find(
+        (e) => e.type === "run.completed"
+          && e.runId === expectedRunId
+          && e.completionMarker === "completed_empty",
+      )
+      : undefined;
+    if (completedMarkerFact) {
+      return {
+        category: "no_effect",
+        code: "completed_empty",
+        evidence: [{
+          eventType: "run.completed",
+          fact: "worker completed with no usable effect (durable completionMarker=completed_empty)",
+        }],
+      };
+    }
+    const a = assessRunEvidence(evs);
+    const hasUsableEffect = a.hasAssistantText || a.hasAnyEvidence;
+    if (!hasUsableEffect && a.hasTransportActivity) {
+      return {
+        category: "no_effect",
+        code: "completed_empty",
+        evidence: [{
+          eventType: "run.state_change",
+          fact: `worker completed with no usable effect: transport activity observed (${a.activityEventCount} activity event(s)) but no assistant text, command activity, file write, or tool use`,
+        }],
+      };
+    }
+    return { category: "none", evidence: [] };
+  }
 
   const evidence = [];
 

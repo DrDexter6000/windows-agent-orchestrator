@@ -274,8 +274,11 @@ const CATALOG = Object.freeze({
   }),
   "diagnosis.no_effect": Object.freeze({
     id: "diagnosis.no_effect",
-    meaning: "The failure category is no observable effect from the worker.",
-    doesNotMean: ["It is a factual category, not a prescription or a fix."],
+    meaning: "The worker produced no usable effect; when code is completed_empty the run completed (exit 0 / parser done) without doing any model work.",
+    doesNotMean: [
+      "completed_empty is transport success, not a useful result; a failed no_effect run keeps code null.",
+      "It does not echo provider text, argv, paths, prompt, or any secret.",
+    ],
   }),
   "diagnosis.crash": Object.freeze({
     id: "diagnosis.crash",

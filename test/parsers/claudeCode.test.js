@@ -426,3 +426,86 @@ test("M6-3: Write 工具无 file_path → 忽略（不崩）", () => {
   );
   assert.deepEqual(events, []);
 });
+
+// ---------------------------------------------------------------------------
+// M12-21: completed-empty truth — result.result fallback recovery.
+//
+// Production fact: a provider runtime may reach a successful `result` event
+// carrying the worker's final answer ONLY in `result.result` (no streamed
+// assistant text). Without recovery, that text is lost → the run looks empty
+// → a Lead can mistake a worker that produced real output for completed-empty.
+//
+// Contract:
+//   - On a successful result event with NON-BLANK `result.result` AND no
+//     identical assistant text already emitted, emit EXACTLY ONE assistant
+//     message BEFORE done(completed).
+//   - If identical assistant text was already streamed, do NOT duplicate.
+//   - Blank/whitespace-only `result.result` emits NO fallback message.
+//   - Normal metrics/error/done are preserved.
+// ---------------------------------------------------------------------------
+
+test("M12-21: result success with non-blank result + no prior assistant → emit one assistant message before done", () => {
+  const p = new ClaudeStreamParser();
+  const events = p.feed(
+    '{"type":"system","subtype":"init"}\n'
+    + '{"type":"result","subtype":"success","is_error":false,"result":"final answer"}\n',
+  );
+  const messages = events.filter((e) => e.kind === "message");
+  const doneIdx = events.findIndex((e) => e.kind === "done");
+  const msgIdx = events.findIndex((e) => e.kind === "message");
+  assert.equal(messages.length, 1, "exactly one fallback assistant message");
+  assert.equal(messages[0].role, "assistant");
+  assert.deepEqual(messages[0].parts, [{ type: "text", text: "final answer" }]);
+  assert.ok(msgIdx !== -1 && doneIdx !== -1 && msgIdx < doneIdx, "fallback message precedes done");
+});
+
+test("M12-21: result with usage + non-blank result + no prior assistant → metrics then message then done", () => {
+  const p = new ClaudeStreamParser();
+  const events = p.feed(
+    '{"type":"result","subtype":"success","is_error":false,' +
+    '"usage":{"input_tokens":10,"output_tokens":5},' +
+    '"result":"recovered"}\n',
+  );
+  assert.deepEqual(events.map((e) => e.kind), ["metrics", "message", "done"]);
+  assert.equal(events[1].role, "assistant");
+  assert.deepEqual(events[1].parts, [{ type: "text", text: "recovered" }]);
+});
+
+test("M12-21: result.result identical to already-streamed assistant text → NOT duplicated", () => {
+  // The worker streamed "Hello!" then the result event repeats "Hello!".
+  // The fallback must NOT emit a second assistant message.
+  const p = new ClaudeStreamParser();
+  const events = p.feed(
+    '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Hello!"}]}}\n'
+    + '{"type":"result","subtype":"success","is_error":false,"result":"Hello!"}\n',
+  );
+  const messages = events.filter((e) => e.kind === "message");
+  assert.equal(messages.length, 1, "identical result text must not duplicate the streamed message");
+  assert.equal(messages[0].parts[0].text, "Hello!");
+});
+
+test("M12-21: blank / whitespace-only result.result → NO fallback assistant message", () => {
+  const p = new ClaudeStreamParser();
+  const blank = p.feed('{"type":"result","subtype":"success","is_error":false,"result":"   "}\n');
+  assert.equal(blank.filter((e) => e.kind === "message").length, 0, "whitespace result emits no message");
+  assert.equal(blank.at(-1).kind, "done");
+  assert.equal(blank.at(-1).reason, "completed");
+
+  const empty = p.feed('{"type":"result","subtype":"success","is_error":false,"result":""}\n');
+  assert.equal(empty.filter((e) => e.kind === "message").length, 0, "empty result emits no message");
+
+  const missing = p.feed('{"type":"result","subtype":"success","is_error":false}\n');
+  assert.equal(missing.filter((e) => e.kind === "message").length, 0, "missing result emits no message");
+});
+
+test("M12-21: error result with result text → done(failed), NO fallback assistant message", () => {
+  // The fallback is for SUCCESSFUL completions only. An error result must keep
+  // routing to done(failed) and must not invent a recovered assistant message.
+  const p = new ClaudeStreamParser();
+  const events = p.feed(
+    '{"type":"result","subtype":"error","is_error":true,"result":"boom details"}\n',
+  );
+  assert.equal(events.filter((e) => e.kind === "message").length, 0);
+  assert.equal(events.at(-1).kind, "done");
+  assert.equal(events.at(-1).reason, "failed");
+});

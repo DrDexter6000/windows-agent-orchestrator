@@ -15,7 +15,7 @@ import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecu
 import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./application/credentialReadiness.js";
 import { inheritedEnvNames } from "./envPolicy.js";
 import { validateSessionReuseRouting } from "./application/sessionReuse.js";
-import { WRITE_INTENT_CORRELATION_STATUS } from "./runEvent.js";
+import { WRITE_INTENT_CORRELATION_STATUS, DONE_MARKERS } from "./runEvent.js";
 import { ISOLATION_VIOLATION_REASONS } from "./diagnosis.js";
 
 /**
@@ -1312,6 +1312,12 @@ export class Run {
     const evidence = [];
     let doneReason = null;
     let doneError = null;
+    // M12-21B gap #1: the closed-set completion marker ProcessBackend stamps on
+    // a no-effect completion (only "completed_empty" today). Captured from the
+    // accepted done event and persisted on run.completed so diagnoseFailure can
+    // consume the durable truth even without a transport-activity event. Only a
+    // DONE_MARKERS member is ever captured — raw/unknown values are dropped.
+    let doneMarker = null;
     let timedOut = false;
     let metrics = null;
     let budgetExceeded = false;
@@ -1421,6 +1427,14 @@ export class Run {
           }
           doneReason = ev.reason;
           doneError = ev.error;
+          // M12-21B gap #1: capture only the closed-set valid marker. The
+          // DONE_MARKERS membership check is the gate that guarantees we never
+          // persist an unknown/raw value onto the run.completed fact.
+          if (ev.reason === "completed"
+            && typeof ev.marker === "string"
+            && DONE_MARKERS.includes(ev.marker)) {
+            doneMarker = ev.marker;
+          }
           break;
         } else if (ev.kind === "thinking" || ev.kind === "runtime_activity") {
           await markRunningOnce("first_event");
@@ -1620,6 +1634,7 @@ export class Run {
               payload: {
                 backendSessionId: this.result.backendSessionId,
                 messageCount: messages.length,
+                ...(doneMarker ? { completionMarker: doneMarker } : {}),
               },
             }],
           });
@@ -1675,6 +1690,7 @@ export class Run {
           payload: {
             backendSessionId: this.result.backendSessionId,
             messageCount: messages.length,
+            ...(doneMarker ? { completionMarker: doneMarker } : {}),
           },
         }],
       });

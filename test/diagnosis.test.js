@@ -18,7 +18,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { diagnoseFailure } from "../src/diagnosis.js";
+import {
+  diagnoseFailure,
+  DIAGNOSIS_CATEGORIES,
+  DIAGNOSIS_CODES,
+  isValidDiagnosisCode,
+  PROVIDER_DIAGNOSIS_CODES,
+  NO_EFFECT_DIAGNOSIS_CODES,
+} from "../src/diagnosis.js";
 
 // ---------------------------------------------------------------------------
 // 分类准确性（给证据）
@@ -490,4 +497,295 @@ test("审计 P2 fixture: 真实脱敏 transcript → evidence_passed_backend_fai
   assert.ok(d.evidence.length > 0, "应附证据");
   assert.ok(d.evidence.some((e) => e.fact.includes("证据通过")),
     "证据应说明'证据通过'——让 Lead 知道任务可能做对了");
+});
+
+// ---------------------------------------------------------------------------
+// M12-21: completed-empty truth (provider-neutral).
+//
+// Mainline: a Lead must NEVER mistake a worker runtime that exits successfully
+// without doing any model work for a valid completed review or delivery.
+//
+// Contract:
+//   - A backend COMPLETION (state=completed) with NO usable effect AND
+//     transport activity (runtime initialized/streamed / metrics) must NOT
+//     become an ordinary completed run. It is diagnosed:
+//       category = "no_effect", code = "completed_empty"
+//   - Usable effect (→ stays category "none"): non-empty assistant text,
+//     command activity (exit 0), file-written evidence, tool use/result.
+//   - Runtime init/thinking/zero-usage metrics are transport activity, NOT
+//     usable effect.
+//   - A minimal completed stub with NO transport activity stays "none"
+//     (the m12-9 completed-non-delivery contract).
+//   - The completed_empty code names the completed-empty machine truth; it is
+//     Lead-visible on the wire (category=no_effect, code=completed_empty) via
+//     the unified DIAGNOSIS_CODES SSOT + category-code pair check. No provider
+//     text/raw argv/path/prompt/secret is ever exposed.
+// ---------------------------------------------------------------------------
+
+test("M12-21: completed + transport activity + zero usable effect → no_effect / completed_empty", () => {
+  // Production completed-empty signature: the runtime initialized, streamed,
+  // and reported token usage, but produced NO assistant text, NO command,
+  // NO file write, NO tool use. A process-exit-0 / parser-done(completed) that
+  // did no model work.
+  const events = [
+    { type: "run.submitted", agentId: "coder_low", ts: "2026-08-12T10:00:00.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "initialized", ts: "2026-08-12T10:00:01.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "streaming", ts: "2026-08-12T10:00:02.000Z" },
+    { type: "run.event", kind: "metrics", tokens: { input: 0, output: 0 }, ts: "2026-08-12T10:00:03.000Z" },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done", ts: "2026-08-12T10:00:04.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "no_effect", "completed + transport activity + zero usable effect → no_effect");
+  assert.equal(d.code, "completed_empty", "kernel code labels the completed-empty truth");
+  assert.ok(DIAGNOSIS_CATEGORIES.includes(d.category), "category ∈ closed set");
+  assert.ok(d.evidence.length > 0, "must carry fact evidence");
+  // No raw provider text / payload leaks into evidence.
+  const blob = JSON.stringify(d);
+  assert.ok(!/input_tokens|output_tokens|prompt|secret|argv/i.test(blob), "no provider payload echo");
+});
+
+test("M12-21: completed + metrics-only (no runtime_activity) is still transport → completed_empty", () => {
+  // A result-success path that emitted zero-usage metrics but no assistant text
+  // and no tools. Metrics alone is transport activity → completed_empty.
+  const events = [
+    { type: "run.submitted", agentId: "coder_low", ts: "2026-08-12T10:00:00.000Z" },
+    { type: "run.event", kind: "metrics", tokens: { input: 0, output: 0 }, ts: "2026-08-12T10:00:01.000Z" },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done", ts: "2026-08-12T10:00:02.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "no_effect");
+  assert.equal(d.code, "completed_empty");
+});
+
+test("M12-21 guard: completed + non-empty assistant text → none (valid completion)", () => {
+  // Usable effect = non-empty assistant text → NOT completed-empty.
+  const events = [
+    { type: "run.submitted", agentId: "reviewer", ts: "2026-08-12T10:00:00.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "initialized", ts: "2026-08-12T10:00:01.000Z" },
+    { type: "run.event", kind: "metrics", tokens: { input: 12, output: 8 }, ts: "2026-08-12T10:00:02.000Z" },
+    { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "review looks good" }], ts: "2026-08-12T10:00:03.000Z" },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done", ts: "2026-08-12T10:00:04.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "none", "assistant text is a usable effect → valid completion");
+  assert.equal(d.code, null);
+});
+
+test("M12-21 guard: completed + command exit 0 → none (valid command-only run)", () => {
+  const events = [
+    { type: "run.submitted", agentId: "coder_low", ts: "2026-08-12T10:00:00.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "initialized", ts: "2026-08-12T10:00:01.000Z" },
+    { type: "run.event", kind: "command", command: "npm test", exitCode: 0, ts: "2026-08-12T10:00:02.000Z" },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done", ts: "2026-08-12T10:00:03.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "none", "command exit 0 is a usable effect → valid completion");
+  assert.equal(d.code, null);
+});
+
+test("M12-21 guard: completed + file_written → none (valid file-only run)", () => {
+  const events = [
+    { type: "run.submitted", agentId: "coder_low", ts: "2026-08-12T10:00:00.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "initialized", ts: "2026-08-12T10:00:01.000Z" },
+    { type: "run.event", kind: "file_written", path: "src/a.js", ts: "2026-08-12T10:00:02.000Z" },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done", ts: "2026-08-12T10:00:03.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "none", "file_written is a usable effect → valid completion");
+  assert.equal(d.code, null);
+});
+
+test("M12-21 guard: completed + tool_use/tool_result → none (valid pure-tool run)", () => {
+  const events = [
+    { type: "run.submitted", agentId: "researcher", ts: "2026-08-12T10:00:00.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "initialized", ts: "2026-08-12T10:00:01.000Z" },
+    { type: "run.event", kind: "tool_use", tool: "Grep", input: {}, ts: "2026-08-12T10:00:02.000Z" },
+    { type: "run.event", kind: "tool_result", tool: "Grep", isError: false, ts: "2026-08-12T10:00:03.000Z" },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done", ts: "2026-08-12T10:00:04.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "none", "tool activity is a usable effect → valid completion");
+  assert.equal(d.code, null);
+});
+
+test("M12-21 guard: completed minimal stub with NO transport activity → none (m12-9 contract)", () => {
+  // A synthetic completed stub that lacks runtime_activity/metrics/thinking
+  // must NOT be misread as completed-empty. This is the m12-9 completed
+  // non-delivery contract: no transport activity → no completed-empty gate.
+  const events = [
+    { type: "run.submitted", agentId: "researcher", ts: "2026-08-12T10:00:00.000Z" },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done", ts: "2026-08-12T10:00:01.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "none", "no transport activity → stays none");
+  assert.equal(d.code, null);
+});
+
+test("M12-21: failed run no_effect keeps null code (completed_empty is completion-only)", () => {
+  // The existing failed no_effect path must NOT adopt completed_empty — that
+  // code labels a successful-completion-with-no-effect, not a failed run.
+  const events = [
+    { type: "run.submitted", agentId: "coder_hq", ts: "2026-08-12T10:00:00.000Z" },
+    { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "reading..." }], ts: "2026-08-12T10:00:30.000Z" },
+    { type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-08-12T10:05:00.000Z" },
+    { type: "run.state_change", from: "running", to: "failed", reason: "backend_error", ts: "2026-08-12T10:05:01.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "no_effect");
+  assert.equal(d.code, null, "failed no_effect is NOT completed_empty");
+});
+
+// ---------------------------------------------------------------------------
+// M12-21B gap #2 (historical retrofit, trim): whitespace-only assistant text
+// is NOT a usable effect. assessRunEvidence._hasNonEmptyTextPart trims, so the
+// historical evidence retrofit treats whitespace-only output as no effect — the
+// read-only counterpart to the live ProcessBackend marker test. Live and
+// historical decisions cannot diverge on blank output.
+// ---------------------------------------------------------------------------
+test("M12-21B: completed + transport activity + WHITESPACE-ONLY assistant text → completed_empty (retrofit trims)", () => {
+  // A historical transcript (no durable marker) whose only assistant output is
+  // whitespace. The retrofit must trim and project completed_empty.
+  const events = [
+    { type: "run.submitted", agentId: "reviewer", ts: "2026-08-12T10:00:00.000Z" },
+    { type: "run.event", kind: "runtime_activity", status: "initialized", ts: "2026-08-12T10:00:01.000Z" },
+    { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "   \n\t  " }], ts: "2026-08-12T10:00:02.000Z" },
+    { type: "run.state_change", from: "running", to: "completed", reason: "done", ts: "2026-08-12T10:00:03.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "no_effect", "whitespace-only text is no usable effect");
+  assert.equal(d.code, "completed_empty", "retrofit projects completed_empty for blank output");
+});
+
+// ---------------------------------------------------------------------------
+// M12-21B gap #1 / M12-21C trust boundary (durable marker): RunManager persists
+// completionMarker on the accepted run.completed fact. It is a control-plane
+// fact, so diagnoseFailure consumes it ONLY under a fail-closed run binding:
+// a valid expectedRunId AND run.completed.runId === expectedRunId (same shape
+// as run.delivery_failed / run.isolation_violation). No expectedRunId, a
+// cross-run marker, a missing runId, or an unknown marker value must NOT drive
+// no_effect/completed_empty. The evidence retrofit above is unchanged and does
+// not consult completionMarker, so historical transcripts without a bound
+// marker are still covered exactly as before.
+// ---------------------------------------------------------------------------
+
+const MARKER_RUN = "run_marker_a";
+
+function markerBaseEvents(runId, completionMarker) {
+  // A no-transport completion (no runtime_activity/metrics) so the ONLY thing
+  // that can project completed_empty here is the durable marker — the retrofit
+  // cannot fire without transport activity. runId is bound on every fact.
+  const completed = { type: "run.completed", runId, backendSessionId: "bs-1", messageCount: 0, ts: "2026-08-12T10:00:01.000Z" };
+  if (completionMarker !== undefined) completed.completionMarker = completionMarker;
+  return [
+    { type: "run.submitted", runId, agentId: "coder_low", ts: "2026-08-12T10:00:00.000Z" },
+    { type: "run.state_change", runId, from: "running", to: "completed", reason: "done", ts: "2026-08-12T10:00:01.000Z" },
+    completed,
+  ];
+}
+
+test("M12-21C: same-run bound marker → completed_empty (valid expectedRunId + runId match)", () => {
+  const events = markerBaseEvents(MARKER_RUN, "completed_empty");
+  const d = diagnoseFailure(events, MARKER_RUN);
+  assert.equal(d.category, "no_effect", "bound same-run marker → no_effect even with no transport activity");
+  assert.equal(d.code, "completed_empty");
+  assert.ok(d.evidence.some((e) => /completionMarker=completed_empty/.test(e.fact)), "evidence cites the durable marker");
+});
+
+test("M12-21C: cross-run marker is ignored (runId !== expectedRunId) → none", () => {
+  // A concatenated/corrupt transcript: the requested run (MARKER_RUN) completed
+  // with no marker of its own, but a DIFFERENT run's run.completed carries the
+  // marker. The cross-run marker must NOT pollute the requested run.
+  const events = [
+    ...markerBaseEvents(MARKER_RUN, undefined),
+    { type: "run.completed", runId: "run_marker_other", backendSessionId: "bs-2", messageCount: 0, completionMarker: "completed_empty", ts: "2026-08-12T10:00:02.000Z" },
+  ];
+  const d = diagnoseFailure(events, MARKER_RUN);
+  assert.equal(d.category, "none", "cross-run marker must not drive completed_empty");
+  assert.equal(d.code, null);
+});
+
+test("M12-21C: unbound caller (no expectedRunId) → marker NOT consumed → none", () => {
+  // No expectedRunId: an unbound caller must never attribute completed-empty.
+  const events = markerBaseEvents(MARKER_RUN, "completed_empty");
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "none", "unbound caller ignores the durable marker");
+  assert.equal(d.code, null);
+});
+
+test("M12-21C: run.completed missing runId is NOT consumed (fail-closed binding) → none", () => {
+  // A run.completed with a marker but no runId envelope cannot be bound to the
+  // requested run → ignored (defends against malformed/hand-crafted facts).
+  const events = [
+    { type: "run.submitted", runId: MARKER_RUN, agentId: "coder_low", ts: "2026-08-12T10:00:00.000Z" },
+    { type: "run.state_change", runId: MARKER_RUN, from: "running", to: "completed", reason: "done", ts: "2026-08-12T10:00:01.000Z" },
+    { type: "run.completed", backendSessionId: "bs-1", messageCount: 0, completionMarker: "completed_empty", ts: "2026-08-12T10:00:01.000Z" },
+  ];
+  const d = diagnoseFailure(events, MARKER_RUN);
+  assert.equal(d.category, "none", "missing runId → marker not bound → none");
+  assert.equal(d.code, null);
+});
+
+test("M12-21C: unknown marker value is NOT consumed (closed-set only, even when bound) → none", () => {
+  // Bound to the right run, but the marker is not the closed-set member.
+  // RunManager never persists raw values, so this could only appear in a
+  // hand-crafted/legacy transcript; it is not trusted.
+  const events = markerBaseEvents(MARKER_RUN, "totally_raw_value");
+  const d = diagnoseFailure(events, MARKER_RUN);
+  assert.equal(d.category, "none", "unknown marker value ignored even when bound");
+  assert.equal(d.code, null);
+});
+
+test("M12-21C: valid completion (assistant text) bound → none, no marker projected", () => {
+  // Real assistant output is a usable effect; run.completed carries no marker.
+  const events = [
+    { type: "run.submitted", runId: MARKER_RUN, agentId: "reviewer", ts: "2026-08-12T10:00:00.000Z" },
+    { type: "run.event", runId: MARKER_RUN, kind: "runtime_activity", status: "initialized", ts: "2026-08-12T10:00:01.000Z" },
+    { type: "run.event", runId: MARKER_RUN, kind: "message", role: "assistant", parts: [{ type: "text", text: "review looks good" }], ts: "2026-08-12T10:00:02.000Z" },
+    { type: "run.state_change", runId: MARKER_RUN, from: "running", to: "completed", reason: "done", ts: "2026-08-12T10:00:03.000Z" },
+    { type: "run.completed", runId: MARKER_RUN, backendSessionId: "bs-1", messageCount: 1, ts: "2026-08-12T10:00:03.000Z" },
+  ];
+  const d = diagnoseFailure(events, MARKER_RUN);
+  assert.equal(d.category, "none", "valid completion is not diagnosed as no-effect");
+  assert.equal(d.code, null);
+});
+
+// ---------------------------------------------------------------------------
+// M12-21 Lead correction: the single general diagnosis-code SSOT + the
+// category-code pair check that BOTH the kernel (diagnoseFailure) and the wire
+// (run_diagnose / run_await_result) project through. No second hand-maintained
+// enum; completed_empty is NOT folded into PROVIDER_DIAGNOSIS_CODES.
+// ---------------------------------------------------------------------------
+
+test("M12-21: DIAGNOSIS_CODES is the single general SSOT (provider codes ∪ completed_empty, no fold)", () => {
+  // The general SSOT is exactly the provider codes plus the no-effect code.
+  assert.deepEqual([...DIAGNOSIS_CODES], [...PROVIDER_DIAGNOSIS_CODES, ...NO_EFFECT_DIAGNOSIS_CODES]);
+  // completed_empty is present and is the only no-effect code.
+  assert.ok(DIAGNOSIS_CODES.includes("completed_empty"));
+  assert.deepEqual([...NO_EFFECT_DIAGNOSIS_CODES], ["completed_empty"]);
+  // Contract #2: completed_empty is NOT folded into PROVIDER_DIAGNOSIS_CODES.
+  assert.equal(PROVIDER_DIAGNOSIS_CODES.includes("completed_empty"), false);
+  // Every provider code is a member of the general SSOT (no drift).
+  for (const c of PROVIDER_DIAGNOSIS_CODES) assert.ok(DIAGNOSIS_CODES.includes(c));
+});
+
+test("M12-21: isValidDiagnosisCode enforces exact category-code pairs (fail closed)", () => {
+  // Valid pairs.
+  for (const c of PROVIDER_DIAGNOSIS_CODES) {
+    assert.equal(isValidDiagnosisCode("provider_auth", c), true, `provider_auth × ${c} is valid`);
+  }
+  assert.equal(isValidDiagnosisCode("no_effect", "completed_empty"), true, "no_effect × completed_empty is valid");
+  // Invalid pairings: a provider code under no_effect, or completed_empty under provider_auth.
+  assert.equal(isValidDiagnosisCode("no_effect", "unauthorized"), false, "provider code under no_effect is invalid");
+  assert.equal(isValidDiagnosisCode("provider_auth", "completed_empty"), false, "completed_empty under provider_auth is invalid");
+  // Every other category never carries a code.
+  for (const category of DIAGNOSIS_CATEGORIES) {
+    if (category === "provider_auth" || category === "no_effect") continue;
+    assert.equal(isValidDiagnosisCode(category, "completed_empty"), false, `${category} never carries a code`);
+    assert.equal(isValidDiagnosisCode(category, "unauthorized"), false, `${category} never carries a code`);
+  }
+  // Non-arguments fail closed.
+  assert.equal(isValidDiagnosisCode("provider_auth", null), false);
+  assert.equal(isValidDiagnosisCode("provider_auth", undefined), false);
+  assert.equal(isValidDiagnosisCode(null, "unauthorized"), false);
+  assert.equal(isValidDiagnosisCode("not_a_category", "unauthorized"), false);
 });

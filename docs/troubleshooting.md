@@ -115,7 +115,7 @@ serve 后台进程不一定。
 - **配置**：`backend: "kimi-code"`，`cwd` 必填。不要加 `--yolo`：`kimi -p` 模式与 `--yolo` 互斥。binary 默认走 PATH 里的 `kimi`（本机 `~/.kimi-code/bin/kimi.exe`）。
 - **vs opencode Kimi**：kimi-code 更安全（进程式 + kimi 自带 max_steps_per_turn=100 + agent_task_timeout_s=900）。新任务优先 `coder_mm`。
 - **已知局限：token 预算硬闸门（S1-1）对 kimi-code 无效**。kimi stream-json 不含 usage/token 字段，进程式 backend 无 session endpoint 可轮询。给 kimi agent 配 tokenBudget 不会报错但不生效。kimi 的成本控制靠：kimi 自带超时（15min）+ WAO `waitTimeout`。这是进程式 backend 的固有限制（claude-code/codex 同样无 session endpoint，但 claude-code 的 result 事件含 usage，kimi 不含）。
-- **完成判定**：kimi 无显式 done 事件，靠进程 exit（exit 0 → done(completed)，非 0 → done(failed)），由 ProcessBackend 兜底。
+- **完成判定**：kimi 无显式 done 事件，靠进程 exit（exit 0 → done(completed)，非 0 → done(failed)），由 ProcessBackend 兜底。注意 exit 0 仅表示传输完成，不等于 worker 产出了可用结果——见 §6.3 末尾的 completed-empty 说明。
 
 ---
 
@@ -234,6 +234,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **根因（已排除）**：ProcessBackend 流结束时**已有** exit-code 兜底——无 done 时按 exit code：0→completed，非 0→done(failed)。实测确认：进程式 worker exit 1 → `run.error "process exited with code 1"` → state failed
 - **metrics 缺失（不可避免）**：claude 进程在打印最终 `type:"result"`（含 token usage）**之前**崩溃 → result 事件从未产生 → metrics 无法提取。这不是 WAO bug，是进程崩溃的固有后果
 - **结论**：exit-1→failed 链路正确；crash run 的 metrics 丢失不可修复（数据源没产生）
+- **M12-21 completed-empty（exit 0 ≠ 有用结果）**：进程 exit 0 → `done(completed)` 仅是**传输完成**，不是 worker 产出可用结果的证据。一个 completed run 若只有 transport 活动（runtime initialized/streaming、thinking、zero-usage metrics）而**没有任何可用产出**（assistant 文本、命令活动、文件写入、tool_use/tool_result），不再被当成一次正常完成：诊断归类 `no_effect` + 事实码 `completed_empty`（`src/diagnosis.js` 的 `NO_EFFECT_DIAGNOSIS_CODES`），主控据此不会把空转 worker 误判为有效 review/delivery。Lead 校正后**线路与内核统一**：MCP `run_diagnose`/`run_await_result` 把 `category=no_effect` 与 `code=completed_empty` **同时**透出到 wire（`code` 闭集为单一通用 `DIAGNOSIS_CODES` SSOT，经 `isValidDiagnosisCode(category, code)` 配对校验；**failed** 的 `no_effect` run 仍 `code=null`，正常 completed 仍 `none/null`）；ProcessBackend 也在流边界对"成功但无可用产出"的完成直接打 `completed_empty` 机器事实（parser `done(completed)` 与 exit-0 兜底两条路径同时生效）。有效的 tool-only / command-only / file-written 完成仍判 `none`。
 
 ### 6.4 worker 失败时主控收不到证据（已修复）
 

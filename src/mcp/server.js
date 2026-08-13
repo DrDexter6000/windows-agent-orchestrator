@@ -228,7 +228,7 @@ import {
   VERIFICATION_TIMEOUT_MS_MAX,
 } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, UNKNOWN_PACKAGING_CODE } from "../deliveryFailureCodes.js";
-import { DIAGNOSIS_CATEGORIES, PROVIDER_DIAGNOSIS_CODES, ISOLATION_VIOLATION_REASONS } from "../diagnosis.js";
+import { DIAGNOSIS_CATEGORIES, DIAGNOSIS_CODES, isValidDiagnosisCode, ISOLATION_VIOLATION_REASONS } from "../diagnosis.js";
 import { RUN_STATES, RECOVERY_CANDIDATE_KINDS, REVERIFY_FAILURE_CODES, TERMINAL_STATES } from "../transcript.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 import {
@@ -977,11 +977,14 @@ const RUN_DIAGNOSE_OUTPUT = z.object({
   state: z.string(),
   terminal: z.boolean(),
   category: DIAGNOSIS_CATEGORY_ENUM,
-  // M12-6 FR-02: nullable closed-set provider diagnosis code. Enum derives from
-  // the diagnosis.js SSOT — no second list. Only provider_auth may carry a
-  // non-null code; invalid/unknown values project to null (fail closed, no raw
-  // echo), enforced by the handler before this schema parses the payload.
-  code: z.enum(PROVIDER_DIAGNOSIS_CODES).nullable(),
+  // M12-6 FR-02 / M12-21: nullable closed-set diagnosis code. The enum derives
+  // from the single DIAGNOSIS_CODES SSOT (provider-auth codes plus the
+  // completed_empty machine fact) — no second hand-maintained list. A non-null
+  // code is allowed only for a valid (category, code) pair (provider_auth → a
+  // provider code; no_effect → completed_empty); any other pairing or an
+  // attacker-controlled value projects to null (fail closed, no raw echo),
+  // enforced by the handler via isValidDiagnosisCode before this schema parses.
+  code: z.enum(DIAGNOSIS_CODES).nullable(),
   signalEventTypes: z.array(z.string().min(1).max(DIAGNOSE_MAX_TYPE_CHARS)).max(DIAGNOSE_MAX_SIGNALS),
   signalCount: z.number().int().nonnegative(),
   signalsTruncated: z.boolean(),
@@ -2080,7 +2083,10 @@ const RUN_AWAIT_RESULT_RESULT = z.object({
 // stderr, absolute path, or recommendation.
 const RUN_AWAIT_RESULT_OUTCOME_DIAGNOSIS = z.object({
   category: z.enum([...DIAGNOSIS_CATEGORIES]),
-  code: z.enum([...PROVIDER_DIAGNOSIS_CODES]).nullable(),
+  // M12-21: code enum derives from the single DIAGNOSIS_CODES SSOT (provider
+  // codes + completed_empty). A non-null code appears only for a valid pair:
+  // provider_auth → a provider code; no_effect → completed_empty.
+  code: z.enum([...DIAGNOSIS_CODES]).nullable(),
   signalCount: z.number().int().nonnegative(),
 }).strict();
 
@@ -3668,10 +3674,11 @@ export function createWaoMcpServer({
             return SAFE_DIAGNOSIS_EVENT_TYPES.has(t) ? t : "unknown";
           });
         const signalEventTypes = allTypes.slice(0, DIAGNOSE_MAX_SIGNALS);
-        // M12-6 FR-02: closed-set code projection. Only provider_auth may carry
-        // a code, and only if it is IN the kernel SSOT closed set — an invalid
-        // or attacker-controlled value fails closed to null, never echoed raw.
-        const code = diag.category === "provider_auth" && PROVIDER_DIAGNOSIS_CODES.includes(diag.code)
+        // M12-6 FR-02 / M12-21: closed-set code projection via the (category,
+        // code) pair check. provider_auth carries a provider code; no_effect
+        // carries completed_empty; every other category is null. An invalid
+        // pairing or attacker-controlled value fails closed to null, never raw.
+        const code = isValidDiagnosisCode(diag.category, diag.code)
           ? diag.code
           : null;
         const payload = {

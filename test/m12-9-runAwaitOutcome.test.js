@@ -32,7 +32,7 @@ import {
   DELIVERY_ACCEPTANCE_STATUSES,
   DELIVERY_DECISION_TYPES,
 } from "../src/application/runDelivery.js";
-import { DIAGNOSIS_CATEGORIES, PROVIDER_DIAGNOSIS_CODES } from "../src/diagnosis.js";
+import { DIAGNOSIS_CATEGORIES, DIAGNOSIS_CODES } from "../src/diagnosis.js";
 import { PACKAGING_FAILURE_CODES } from "../src/deliveryFailureCodes.js";
 import { TERMINAL_STATES } from "../src/transcript.js";
 
@@ -81,7 +81,7 @@ function writeTranscript(runDir, runId, partials) {
 function assertOutcomeClosedSet(o) {
   assert.ok(TERMINAL_STATES.includes(o.terminalState), "terminalState ∈ TERMINAL_STATES");
   assert.ok(DIAGNOSIS_CATEGORIES.includes(o.diagnosis.category), "diagnosis.category ∈ closed set");
-  assert.equal(o.diagnosis.code === null || PROVIDER_DIAGNOSIS_CODES.includes(o.diagnosis.code), true, "diagnosis.code ∈ closed set | null");
+  assert.equal(o.diagnosis.code === null || DIAGNOSIS_CODES.includes(o.diagnosis.code), true, "diagnosis.code ∈ general closed set | null");
   assert.equal(Number.isInteger(o.diagnosis.signalCount) && o.diagnosis.signalCount >= 0, true, "signalCount non-negative int");
   assert.ok(DELIVERY_READINESS_STATES.includes(o.delivery.readiness), "readiness ∈ closed set");
   assert.equal(typeof o.delivery.requested, "boolean");
