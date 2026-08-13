@@ -1,0 +1,17 @@
+{"type":"prompt.sent","agentId":"tester","prompt":"monitor CI run status and report (redacted)","ts":"2026-07-02T14:25:49.000Z","seq":1,"runId":"run_legacy_evidence_backend_failed"}
+{"type":"run.submitted","agentId":"tester","ts":"2026-07-02T14:25:49.001Z","seq":2,"runId":"run_legacy_evidence_backend_failed"}
+{"type":"session.created","backend":"codex","backendSessionId":"proc_redacted","ts":"2026-07-02T14:25:49.500Z","seq":3,"runId":"run_legacy_evidence_backend_failed"}
+{"type":"run.started","ts":"2026-07-02T14:25:49.501Z","seq":4,"runId":"run_legacy_evidence_backend_failed"}
+{"type":"run.state_change","from":"pending","to":"submitted","reason":"start","ts":"2026-07-02T14:25:49.502Z","seq":5,"runId":"run_legacy_evidence_backend_failed"}
+{"type":"run.state_change","from":"submitted","to":"running","reason":"first_message","ts":"2026-07-02T14:25:50.000Z","seq":6,"runId":"run_legacy_evidence_backend_failed"}
+{"type":"run.event","kind":"tool_use","name":"Read","toolCallId":"tu1","ts":"2026-07-02T14:25:51.000Z","seq":7,"runId":"run_legacy_evidence_backend_failed"}
+{"type":"run.event","kind":"tool_result","toolCallId":"tu1","isError":false,"ts":"2026-07-02T14:25:51.500Z","seq":8,"runId":"run_legacy_evidence_backend_failed"}
+{"type":"run.event","kind":"tool_use","name":"Bash","toolCallId":"tu2","ts":"2026-07-02T14:25:52.000Z","seq":9,"runId":"run_legacy_evidence_backend_failed"}
+{"type":"run.event","kind":"command","command":"<redacted>","exitCode":0,"ts":"2026-07-02T14:25:52.100Z","seq":10,"runId":"run_legacy_evidence_backend_failed"}
+{"type":"run.event","kind":"tool_result","toolCallId":"tu2","isError":false,"output":"<redacted>","ts":"2026-07-02T14:25:55.000Z","seq":11,"runId":"run_legacy_evidence_backend_failed"}
+{"type":"run.event","kind":"tool_use","name":"Bash","toolCallId":"tu3","ts":"2026-07-02T14:26:00.000Z","seq":12,"runId":"run_legacy_evidence_backend_failed"}
+{"type":"run.event","kind":"command","command":"<redacted>","exitCode":0,"ts":"2026-07-02T14:26:00.200Z","seq":13,"runId":"run_legacy_evidence_backend_failed"}
+{"type":"run.event","kind":"tool_result","toolCallId":"tu3","isError":false,"output":"<redacted>","ts":"2026-07-02T14:26:05.000Z","seq":14,"runId":"run_legacy_evidence_backend_failed"}
+{"type":"run.event","kind":"message","role":"assistant","parts":[{"type":"text","text":"CI run status polled (redacted)"}],"ts":"2026-07-02T14:26:10.000Z","seq":15,"runId":"run_legacy_evidence_backend_failed"}
+{"type":"run.error","phase":"wait","error":"process exited with code 1","ts":"2026-07-02T14:26:40.000Z","seq":16,"runId":"run_legacy_evidence_backend_failed"}
+{"type":"run.state_change","from":"running","to":"failed","reason":"backend_error","ts":"2026-07-02T14:26:40.100Z","seq":17,"runId":"run_legacy_evidence_backend_failed"}

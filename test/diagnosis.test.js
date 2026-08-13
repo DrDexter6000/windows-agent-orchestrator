@@ -500,6 +500,165 @@ test("审计 P2 fixture: 真实脱敏 transcript → evidence_passed_backend_fai
 });
 
 // ---------------------------------------------------------------------------
+// TD-80：legacy transcript（无 run.evidence_audit）证据提升。
+//
+// 背景：TD-95 之后 runManager 才在 failed 路径写 run.evidence_audit。此前的历史
+// transcript（如 run_20260702142549160dfqmrt：worker 命令轮询有产出，backend 却
+// 非零退出）没有 audit 事件——原诊断把这类 run 归 crash，Lead 无法把结果当
+// clean pass/fail。修复：无 audit 时复用 assessRunEvidence（同一 SSOT）重建证据，
+// 仅当 hasFileWritten || hasCommandExit0 才提升为 evidence_passed_backend_failed。
+//
+// 铁律（fail-closed）：
+//   1. 只要存在任意 run.evidence_audit 事件，audit 就是唯一权威——显式
+//      passed:false（或畸形值）绝不被重建的原始证据推翻。
+//   2. 仅 assistant text / tool_use 活动不构成"证据通过"，不得提升。
+//   3. 优先级不变：provider_auth/config/timeout/budget/scorecard 仍先于提升判；
+//      提升仍先于 provider_disconnect/no_effect/crash。
+//   4. 终态 truthfulness 不变：state=failed 就是 failed，不加新 category。
+// ---------------------------------------------------------------------------
+
+test("TD-80: legacy failed run（无 audit）+ file_written → evidence_passed_backend_failed（不是 crash）", () => {
+  // 历史 transcript 形状：有 file_written，无 run.evidence_audit，backend exit 1。
+  // 旧行为：no_effect 不适用（有 file_written）→ 被 crash 抢归。
+  const events = [
+    { type: "run.submitted", agentId: "coder_low", ts: "2026-07-02T10:00:00.000Z" },
+    { type: "run.event", kind: "file_written", path: "src/foo.js", ts: "2026-07-02T10:01:00.000Z" },
+    { type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-07-02T10:02:00.000Z" },
+    { type: "run.state_change", from: "running", to: "failed", reason: "backend_error", ts: "2026-07-02T10:02:01.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "evidence_passed_backend_failed",
+    "legacy failed run 含成功文件证据应提升为 evidence_passed_backend_failed（不是 crash）");
+  assert.ok(d.evidence.some((e) => e.fact.includes("证据通过")), "证据应说明'证据通过'");
+  assert.ok(d.evidence.some((e) => e.fact.includes("1 个文件写入")), "事实应含 SSOT 文件写入计数");
+  // 不暴露原始路径/命令。
+  assert.ok(!JSON.stringify(d.evidence).includes("src/foo.js"), "证据不得回显原始 path");
+});
+
+test("TD-80: legacy failed run（无 audit）+ command exit0 → evidence_passed_backend_failed（不是 crash）", () => {
+  // run_20260702142549160dfqmrt 形状：命令轮询正常产出（exitCode 0），backend 非零退出。
+  // 只有 command exit0 证据（无 file_written）也应提升。
+  const events = [
+    { type: "run.submitted", agentId: "tester", ts: "2026-07-02T14:25:49.000Z" },
+    { type: "run.event", kind: "command", command: "gh run view --redacted", exitCode: 0, ts: "2026-07-02T14:25:52.000Z" },
+    { type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-07-02T14:26:40.000Z" },
+    { type: "run.state_change", from: "running", to: "failed", reason: "backend_error", ts: "2026-07-02T14:26:40.100Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "evidence_passed_backend_failed",
+    "legacy failed run 含成功命令证据应提升为 evidence_passed_backend_failed（不是 crash）");
+  assert.ok(d.evidence.some((e) => e.fact.includes("1 个命令 exit0")), "事实应含 SSOT 命令 exit0 计数");
+  // 不暴露原始命令/路径/transcript 文本。
+  const blob = JSON.stringify(d.evidence);
+  assert.ok(!blob.includes("gh run view"), "证据不得回显原始 command");
+});
+
+test("TD-80 guard: legacy failed run 只有 assistant text（无 file/command）→ 仍 no_effect，不提升", () => {
+  // 只有 assistant text 是"活动"不是"证据通过"——不得提升为 evidence_passed_backend_failed。
+  const events = [
+    { type: "run.submitted", agentId: "coder_hq", ts: "2026-07-02T10:00:00.000Z" },
+    { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "let me read the files first" }], ts: "2026-07-02T10:00:30.000Z" },
+    { type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-07-02T10:05:00.000Z" },
+    { type: "run.state_change", from: "running", to: "failed", reason: "backend_error", ts: "2026-07-02T10:05:01.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "no_effect", "assistant text 单独不构成证据通过 → 仍 no_effect");
+  assert.notEqual(d.category, "evidence_passed_backend_failed", "不得仅凭 assistant text 提升");
+});
+
+test("TD-80 guard: legacy failed run 只有 tool_use 活动（无 file/command exit0）→ 仍 no_effect，不提升", () => {
+  // tool_use/tool_result 是活动证据，不是"通过"证据（无 file_written + 无 command exit0）。
+  const events = [
+    { type: "run.submitted", agentId: "coder_hq", ts: "2026-07-02T10:00:00.000Z" },
+    { type: "run.event", kind: "tool_use", name: "Read", ts: "2026-07-02T10:00:30.000Z" },
+    { type: "run.event", kind: "tool_result", isError: false, ts: "2026-07-02T10:00:31.000Z" },
+    { type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-07-02T10:02:30.000Z" },
+    { type: "run.state_change", from: "running", to: "failed", reason: "backend_error", ts: "2026-07-02T10:02:31.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "no_effect", "tool_use 活动单独不构成证据通过 → 仍 no_effect");
+  assert.notEqual(d.category, "evidence_passed_backend_failed", "不得仅凭 tool_use 提升");
+});
+
+test("TD-80 guard: 显式 audit passed:false + 原始 file 证据 → audit 权威，不被重建证据推翻（仍 crash）", () => {
+  // 只要存在 run.evidence_audit，audit 就是唯一权威。显式 passed:false 绝不能被
+  // 重建的 file_written 证据覆盖——即使原始证据看起来"通过了"。
+  const events = [
+    { type: "run.submitted", agentId: "coder_low", ts: "2026-07-08T10:00:00.000Z" },
+    { type: "run.event", kind: "file_written", path: "src/foo.js", ts: "2026-07-08T10:01:00.000Z" },
+    { type: "run.evidence_audit", passed: false, note: "evidence audit rejected", ts: "2026-07-08T10:01:10.000Z" },
+    { type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-07-08T10:02:00.000Z" },
+    { type: "run.state_change", from: "running", to: "failed", reason: "backend_error", ts: "2026-07-08T10:02:01.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "crash",
+    "显式 audit passed:false 是权威——原始 file 证据不得把 crash 提升为 evidence_passed_backend_failed");
+});
+
+test("TD-80 guard: 畸形 audit（passed 非布尔）+ 原始 file 证据 → audit 权威，不回退重建 → 仍 crash", () => {
+  // "ANY audit exists" 即权威：畸形 audit 也不得触发重建提升（fail-closed）。
+  const events = [
+    { type: "run.submitted", agentId: "coder_low", ts: "2026-07-08T10:00:00.000Z" },
+    { type: "run.event", kind: "file_written", path: "src/foo.js", ts: "2026-07-08T10:01:00.000Z" },
+    { type: "run.evidence_audit", passed: "yes", ts: "2026-07-08T10:01:10.000Z" },
+    { type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-07-08T10:02:00.000Z" },
+    { type: "run.state_change", from: "running", to: "failed", reason: "backend_error", ts: "2026-07-08T10:02:01.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "crash", "畸形 audit 存在 → 不回退到重建提升 → 仍 crash");
+});
+
+test("TD-80 priority: legacy 证据 run 同时满足断流签名 → 仍 evidence_passed_backend_failed（优先级不变）", () => {
+  // 与 M9-5P audit 版回归同形：≥3 events + ≥120s 静默 + exit crash + file 证据、无 audit。
+  // evidence_passed_backend_failed 的优先级槽位不变——仍高于 provider_disconnect。
+  const events = [
+    { type: "run.state_change", to: "running", ts: "2026-07-02T00:00:00.000Z", runId: "r", agentId: "w" },
+    { type: "run.event", kind: "tool_use", tool: "X", input: {}, ts: "2026-07-02T00:01:00.000Z", runId: "r", agentId: "w" },
+    { type: "run.event", kind: "tool_result", tool: "X", output: "y", ts: "2026-07-02T00:01:01.000Z", runId: "r", agentId: "w" },
+    { type: "run.event", kind: "file_written", path: "src/foo.js", ts: "2026-07-02T00:01:02.000Z", runId: "r", agentId: "w" },
+    { type: "run.event", kind: "tool_use", tool: "Y", input: {}, ts: "2026-07-02T00:01:03.000Z", runId: "r", agentId: "w" },
+    { type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-07-02T00:05:00.000Z", runId: "r", agentId: "w" },
+    { type: "run.state_change", to: "failed", reason: "backend_error", ts: "2026-07-02T00:05:00.000Z", runId: "r", agentId: "w" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "evidence_passed_backend_failed",
+    "legacy 证据通过仍优先于 provider_disconnect 和 no_effect（优先级槽位不变）");
+});
+
+test("TD-80 priority: legacy 证据 run 含 auth 信号 → 仍 provider_auth（更高优先级不被证据提升抢走）", () => {
+  // 提升只发生在 4.5 槽位——provider_auth 等更高优先级分类先判，不得被重建证据覆盖。
+  const events = [
+    { type: "run.submitted", agentId: "coder_hq", ts: "2026-07-02T10:00:00.000Z" },
+    { type: "run.event", kind: "file_written", path: "src/foo.js", ts: "2026-07-02T10:01:00.000Z" },
+    { type: "run.error", phase: "wait", error: "provider error [401]: 身份验证失败", ts: "2026-07-02T10:02:00.000Z" },
+    { type: "run.state_change", from: "running", to: "failed", reason: "backend_error", ts: "2026-07-02T10:02:01.000Z" },
+  ];
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "provider_auth", "auth 信号仍先于证据提升判（优先级不变）");
+});
+
+test("TD-80 fixture: 真实脱敏 legacy transcript（run_20260702142549160dfqmrt 形状）→ evidence_passed_backend_failed", async () => {
+  // 从历史 run_20260702142549160dfqmrt（Codex tester，CI 监控只读任务）脱敏提取：
+  // 命令轮询有产出（command exitCode 0 ×2），无 run.evidence_audit（TD-95 之前的 legacy），
+  // backend 非零退出 → 旧行为 crash。修复后应提升为 evidence_passed_backend_failed。
+  const { readFileSync } = await import("node:fs");
+  const { join, dirname } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const fixturePath = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "transcript-legacy-evidence-backend-failed.jsonl");
+  const raw = readFileSync(fixturePath, "utf8");
+  const events = raw.trim().split("\n").map((l) => JSON.parse(l));
+  assert.ok(!events.some((e) => e.type === "run.evidence_audit"), "fixture 必须是无 audit 的 legacy transcript");
+  const d = diagnoseFailure(events);
+  assert.equal(d.category, "evidence_passed_backend_failed",
+    "真实脱敏 legacy transcript 应诊断为 evidence_passed_backend_failed（不是 crash）");
+  assert.ok(d.evidence.some((e) => e.fact.includes("证据通过")),
+    "证据应说明'证据通过'——让 Lead 知道任务可能做对了");
+  assert.ok(d.evidence.some((e) => e.fact.includes("2 个命令 exit0")), "事实应含 SSOT 命令 exit0 计数");
+  const blob = JSON.stringify(d);
+  assert.ok(!/redacted|gh run|proc_redacted/.test(blob), "不得回显脱敏占位文本（fixture 内容不泄漏）");
+});
+
+// ---------------------------------------------------------------------------
 // M12-21: completed-empty truth (provider-neutral).
 //
 // Mainline: a Lead must NEVER mistake a worker runtime that exits successfully

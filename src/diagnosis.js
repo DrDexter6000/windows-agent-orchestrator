@@ -489,19 +489,34 @@ function diagnoseFailureInner(events, expectedRunId) {
     return { category: "scorecard_fail", evidence };
   }
 
-  // 4.5) TD-95 #5 evidence_passed_backend_failed：backend 崩了但证据通过了。
+  // 4.5) TD-95 #5 + TD-80 evidence_passed_backend_failed：backend 崩了但证据通过了。
   //   runManager 的 _auditEvidenceOnFailure 在 failed 路径写 run.evidence_audit {passed:true}。
   //   必须在 crash/provider_disconnect/no_effect 之前判——否则会被 exit code 抢归 crash。
   //   让 Lead 知道"任务可能做对了，需人工确认"，而非被 'crash' 误导。
-  const evidenceAudit = evs.find((e) => e.type === "run.evidence_audit" && e.passed === true);
-  if (evidenceAudit && state === "failed") {
+  //   TD-80：TD-95 之前的历史 transcript 没有 run.evidence_audit，这类 legacy run
+  //   原本被 crash 抢归（如 run_20260702142549160dfqmrt：命令轮询有产出但 backend 非零退出）。
+  //   Fail-closed 规则（不削弱终态 truthfulness）：
+  //     - 只要存在任意 run.evidence_audit 事件，audit 就是唯一权威——仅 passed===true
+  //       提升；显式 passed:false 或畸形值绝不被重建的原始证据推翻。
+  //     - 无任何 audit（legacy）时，用同一 assessRunEvidence SSOT 重建证据，仅当
+  //       hasFileWritten || hasCommandExit0 才提升——assistant text / tool_use 只是
+  //       活动，不是"证据通过"，不得提升。
+  //     - 优先级槽位不变：仍先于 provider_disconnect/no_effect/crash，后于
+  //       auth/config/timeout/budget/scorecard。
+  const hasEvidenceAudit = evs.some((e) => e.type === "run.evidence_audit");
+  if (state === "failed") {
     // TD-97：复用统一证据评估获取 file/command 计数
     const a = assessRunEvidence(evs);
-    evidence.push({
-      eventType: "run.evidence_audit",
-      fact: `backend 进程失败但证据通过：${a.fileWrittenCount} 个文件写入 + ${a.commandExit0Count} 个命令 exit0。任务可能做对了，需人工确认`,
-    });
-    return { category: "evidence_passed_backend_failed", evidence };
+    const evidenceAudit = hasEvidenceAudit
+      ? evs.find((e) => e.type === "run.evidence_audit" && e.passed === true)
+      : undefined;
+    if (evidenceAudit || (!hasEvidenceAudit && (a.hasFileWritten || a.hasCommandExit0))) {
+      evidence.push({
+        eventType: hasEvidenceAudit ? "run.evidence_audit" : "run.event",
+        fact: `backend 进程失败但证据通过：${a.fileWrittenCount} 个文件写入 + ${a.commandExit0Count} 个命令 exit0。任务可能做对了，需人工确认`,
+      });
+      return { category: "evidence_passed_backend_failed", evidence };
+    }
   }
 
   // 4.6) provider_disconnect：worker 活跃工作后，末段静默 ≥阈值 才 exit≠0 →
