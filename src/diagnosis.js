@@ -8,13 +8,13 @@
 //
 // 实现上，返回结构只有 { category, code, evidence }，没有 recommendation 字段；
 // 所有 fact 字符串只陈述发生了什么，不陈述"该做什么"。
-// M12-6 FR-02：code 是 provider_auth 专属的可空闭集诊断码（见
-// PROVIDER_DIAGNOSIS_CODES）——它只给"事实分类"，永不给处方，也不回显原文。
+// code 是少数诊断类别专属的可空闭集事实码；它永不给处方，也不回显原文。
 //
-// 完整分类（12 类，按优先级归类；信号不足归 unknown，不强归类）：
+// 完整分类（按优先级归类；信号不足归 unknown，不强归类）：
 //   provider_auth               — 401/身份验证失败/unauthor/auth fail；
 //                                 M12-6 FR-02 起含 entitlement 拒绝（subscription
 //                                 access disabled / org policy denied / API key missing）
+//   provider_capacity           — terminal provider rate limit / quota exhausted
 //   config_conflict             — 配置层冲突（API key 与登录打架等）
 //   timeout                     — run.timed_out 事件
 //   budget                      — run.state_change reason:budget_exceeded
@@ -38,6 +38,7 @@ import { assessRunEvidence } from "./runEvidenceAssessment.js";
  */
 export const DIAGNOSIS_CATEGORIES = Object.freeze([
   "provider_auth",
+  "provider_capacity",
   "config_conflict",
   "timeout",
   "budget",
@@ -66,6 +67,15 @@ export const PROVIDER_DIAGNOSIS_CODES = Object.freeze([
   "invalid_credential",
 ]);
 
+// M12-24: terminal provider-capacity facts. Credentials and entitlement may be
+// valid while the current provider account is rate-limited or out of quota.
+// Informational runtime rate-limit events are not consumed here; only a failed
+// run with a persisted run.error can carry one of these safe labels.
+export const PROVIDER_CAPACITY_DIAGNOSIS_CODES = Object.freeze([
+  "rate_limited",
+  "quota_exhausted",
+]);
+
 // M12-21: completed-empty truth — the closed-set machine fact that labels a
 // backend COMPLETION which produced no usable model effect. Distinct from the
 // failed no_effect path: this is a successful completion (state=completed,
@@ -78,22 +88,22 @@ export const NO_EFFECT_DIAGNOSIS_CODES = Object.freeze([
   "completed_empty",
 ]);
 
-// M12-21: ONE general diagnosis-code SSOT. It DERIVES the provider-auth codes
-// plus completed_empty — it never duplicates them and never folds completed_empty
-// into PROVIDER_DIAGNOSIS_CODES (these are distinct category-code pairs). The MCP
-// wire schemas derive their `code` enum from this single set, so there is no
-// second hand-maintained enum on the wire.
+// ONE general diagnosis-code SSOT. It derives the provider-auth,
+// provider-capacity, and completed-empty code sets without merging their
+// category meanings. MCP wire schemas derive their enum from this set.
 export const DIAGNOSIS_CODES = Object.freeze([
   ...PROVIDER_DIAGNOSIS_CODES,
+  ...PROVIDER_CAPACITY_DIAGNOSIS_CODES,
   ...NO_EFFECT_DIAGNOSIS_CODES,
 ]);
 
-// Valid (category → code) pairs. Only provider_auth may carry a provider code and
-// only no_effect may carry completed_empty; every other category has no code.
+// Valid (category → code) pairs. Each coded category owns its exact code set;
+// every other category has no code.
 // This is the single authority for both the kernel projection and the wire
 // projections, enforcing the pair discipline the Lead contract requires.
 const CATEGORY_CODE_SETS = Object.freeze({
   provider_auth: PROVIDER_DIAGNOSIS_CODES,
+  provider_capacity: PROVIDER_CAPACITY_DIAGNOSIS_CODES,
   no_effect: NO_EFFECT_DIAGNOSIS_CODES,
 });
 
@@ -208,6 +218,36 @@ const AUTH_SIGNAL = /401|身份验证|unauthor|invalid.{0,12}(api[_\s-]?key|key)
 // 这不是 401 认证失败，是配置层冲突——归类不同，Lead 处置方式不同。
 const CONFIG_CONFLICT_SIGNAL = /precedence|connectors.{0,30}disabled|auth source/i;
 
+// M12-24: capacity matching is intentionally narrow and terminal-only at the
+// call site. Local filesystem/cgroup/memory limits are not provider capacity,
+// and a bare 429 may be a source line/count rather than an HTTP status.
+const QUOTA_EXHAUSTED_SIGNAL = /quota.{0,40}(exhausted|exceeded|depleted|reached)|(?:usage|spending).{0,40}(?:upper\s+)?limit.{0,30}(exceeded|reached|hit)|hit.{0,40}(?:\d+[- ]?hour|usage|message|token).{0,30}limit|(?:\d+[- ]?hour|usage|message|token).{0,40}limit.{0,30}(?:reached|resets?)/i;
+const LOCAL_RESOURCE_LIMIT_SIGNAL = /\b(?:disk|filesystem|file system|storage|cgroup|cpu|memory)\b.{0,40}\b(?:quota|usage|limit)\b|\b(?:quota|usage|limit)\b.{0,40}\b(?:disk|filesystem|file system|storage|cgroup|cpu|memory)\b/i;
+const RATE_LIMIT_SIGNAL = /too many requests|rate[\s_-]*limit(?:ed|ing)?|\b(?:provider|http|status|response|api|request)\b[^\r\n]{0,32}\b429\b|\b429\b[^\r\n]{0,32}too many requests/i;
+
+function classifyProviderCapacityCode(error) {
+  if (LOCAL_RESOURCE_LIMIT_SIGNAL.test(error)) return null;
+  if (QUOTA_EXHAUSTED_SIGNAL.test(error)) return "quota_exhausted";
+  if (RATE_LIMIT_SIGNAL.test(error)) return "rate_limited";
+  return null;
+}
+
+function findTerminalProviderError(events, expectedRunId) {
+  if (typeof expectedRunId !== "string" || expectedRunId.length === 0) return null;
+  const terminalIndex = events.findLastIndex(
+    (event) => event.type === "run.state_change"
+      && event.runId === expectedRunId
+      && TERMINAL_STATES.includes(event.to),
+  );
+  if (terminalIndex < 0 || events[terminalIndex].to !== "failed") return null;
+  for (let index = terminalIndex - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.runId !== expectedRunId || event.type !== "run.error") continue;
+    return event.phase === "wait" && typeof event.error === "string" ? event : null;
+  }
+  return null;
+}
+
 // 进程被信号杀死 / 异常退出（C1 新增）："process exited with code N"，N≠0。
 // 143=SIGTERM(被杀)，137=SIGKILL(OOM/强杀)，1=通用失败，130=SIGINT。
 const CRASH_EXIT_SIGNAL = /exited with code\s+(\d+)/i;
@@ -231,8 +271,8 @@ const PROVIDER_DISCONNECT_SILENCE_MS = 120_000;
  *   control-plane failure classifications so cross-run events cannot pollute
  *   this run's diagnosis.
  * @returns {{category: string, code: string|null, evidence: Array<{eventType: string, fact: string}>}}
- *   category ∈ provider_auth|timeout|scorecard_fail|budget|crash|aborted_manual|unknown|none。
- *   code 仅 provider_auth 非 null，且必属 PROVIDER_DIAGNOSIS_CODES 闭集。
+ *   category 必属 DIAGNOSIS_CATEGORIES 闭集。
+ *   code 仅 coded category 非 null，且必须通过 category-code pair 校验。
  *   evidence 是事实证据（eventType 指向源事件，fact 陈述具体事实）。
  */
 export function diagnoseFailure(events, expectedRunId) {
@@ -455,7 +495,23 @@ function diagnoseFailureInner(events, expectedRunId) {
     return { category: "provider_auth", code: classifyProviderAuthCode(authError.error), evidence };
   }
 
-  // 2) timeout：run.timed_out 事件。
+  // A capacity limit is a bound terminal execution fact, not static registry
+  // readiness. Use only the last run.error immediately preceding an explicit,
+  // same-run failed transition. This prevents findState's legacy run.error
+  // fallback, an earlier transient 429, or cross-run text from preempting the
+  // actual terminal cause. Process backends report provider exits in phase=wait.
+  const terminalError = findTerminalProviderError(evs, expectedRunId);
+  const capacityError = terminalError
+    && classifyProviderCapacityCode(terminalError.error) !== null
+    ? terminalError
+    : null;
+  if (capacityError) {
+    const code = classifyProviderCapacityCode(capacityError.error);
+    evidence.push({ eventType: "run.error", fact: `provider capacity unavailable（${code}）` });
+    return { category: "provider_capacity", code, evidence };
+  }
+
+  // 3) timeout：run.timed_out 事件。
   const timedOut = evs.find((e) => e.type === "run.timed_out");
   if (timedOut) {
     evidence.push({ eventType: "run.timed_out", fact: "等待超时，控制器 abort 打断事件流" });

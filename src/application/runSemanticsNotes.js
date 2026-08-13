@@ -141,7 +141,7 @@ const CATALOG = Object.freeze({
   }),
   "termination.provider": Object.freeze({
     id: "termination.provider",
-    meaning: "The terminal outcome is attributed to the provider side (access denial or stream disconnect).",
+    meaning: "The terminal outcome is attributed to the provider side (access denial, capacity limit, or stream disconnect).",
     doesNotMean: [
       "It does not prove a backend crash or a WAO control-plane gate.",
     ],
@@ -241,6 +241,14 @@ const CATALOG = Object.freeze({
     id: "diagnosis.provider_auth",
     meaning: "The failure category is provider access denial (authentication or authorization).",
     doesNotMean: ["It is a factual category, not a prescription or a fix."],
+  }),
+  "diagnosis.provider_capacity": Object.freeze({
+    id: "diagnosis.provider_capacity",
+    meaning: "The provider rejected this execution because of a rate limit or exhausted quota.",
+    doesNotMean: [
+      "It does not mean the WAO control plane or static worker configuration is unavailable.",
+      "It is a factual category, not an instruction to retry or switch workers.",
+    ],
   }),
   "diagnosis.config_conflict": Object.freeze({
     id: "diagnosis.config_conflict",

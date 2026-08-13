@@ -30,8 +30,8 @@ import { diagnoseFailure } from "../diagnosis.js";
  * @param {Function} [input.readTranscriptFn] — injectable for testing
  * @returns {Promise<{runId, state, terminal, category, code, evidence}>}
  *   code — nullable closed-set diagnosis code, a member of the single general
- *   DIAGNOSIS_CODES SSOT (PROVIDER_DIAGNOSIS_CODES ∪ NO_EFFECT_DIAGNOSIS_CODES).
- *   provider_auth carries a PROVIDER_DIAGNOSIS_CODES member; no_effect carries
+ *   DIAGNOSIS_CODES SSOT (provider-auth ∪ provider-capacity ∪ no-effect).
+ *   provider_auth/provider_capacity carry their category code; no_effect carries
  *   completed_empty (M12-21) — the durable completionMarker=completed_empty on
  *   the accepted run.completed fact, or the evidence retrofit for a historical
  *   transcript without the marker, for a completion with no usable effect;

@@ -202,6 +202,7 @@ function deriveFailedSource(events, runId, diagnose) {
   }
   switch (diag.category) {
     case "provider_auth":
+    case "provider_capacity":
     case "provider_disconnect":
       return "provider";
     case "crash":

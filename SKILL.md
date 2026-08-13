@@ -7,7 +7,7 @@ description: "[LEAD-ONLY] Use when the user asks to dispatch, supervise, resume,
 
 Loading this skill makes you the Lead Operator. You own user-needs understanding, task-goal definition, decomposition and orchestration (parallel vs serial), suitable-worker dispatch, delivery acceptance or rejection, aggregation and integration, and execution-summary reporting. WAO is an MCP-first, Skill-guided, CLI-backed deterministic control plane for real worker tasks under supervised production trial, not autonomous production.
 
-`registry_list` certification (`certified`/`conditional`) is advisory evidence about recorded reliability, not a permission gate — the Lead may dispatch any configured worker subject to project governance. registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health. WAO 自动监测，不自动监督；自动封装，不自动验收；自动呈现，不自动决策。 (WAO monitors, never supervises; packages, never accepts; presents, never decides.)
+`registry_list` certification (`certified`/`conditional`) is advisory evidence about recorded reliability, not a permission gate — the Lead may dispatch any configured worker subject to project governance. registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health. Registry/preflight also reports required-credential presence; it does **not** probe current provider authentication, entitlement, quota, or rate limits. WAO 自动监测，不自动监督；自动封装，不自动验收；自动呈现，不自动决策。 (WAO monitors, never supervises; packages, never accepts; presents, never decides.)
 
 ## Routing Contract
 
@@ -43,7 +43,7 @@ A delivery task prompt must NOT ask the worker to commit, run `git add/commit/..
 
 ## Safety Preflight
 
-Before dispatch: `registry_list` for availability + certification (advisory, not a gate); `registry validate`/`doctor` via CLI fallback; host MCP/provider/auth config belongs to the host runtime — never put credential values in prompts, MCP args, or the repo; delivery runs force persistent worktree isolation (a write outside `WAO_TARGET_CWD` fails as `workdir_escape` before packaging, not an OS sandbox). After `stop`, trust the terminal result + transcript; daemon liveness comes from `daemon ping/list/status`, not `.wao/`. See `references/safety-incidents.md` before unattended/stop-sensitive work; `references/opencode-pitfalls.md` only when using opencode.
+Before dispatch: `registry_list` for configured inventory + required-credential presence + recorded certification (advisory, not a gate; **not** live provider quota/readiness); `registry validate`/`doctor` via CLI fallback; host MCP/provider/auth config belongs to the host runtime — never put credential values in prompts, MCP args, or the repo; delivery runs force persistent worktree isolation (a write outside `WAO_TARGET_CWD` fails as `workdir_escape` before packaging, not an OS sandbox). A terminal `provider_capacity` diagnosis (`rate_limited` / `quota_exhausted`) is the live execution fact; WAO reports it but never auto-retries or swaps workers. After `stop`, trust the terminal result + transcript; daemon liveness comes from `daemon ping/list/status`, not `.wao/`. See `references/safety-incidents.md` before unattended/stop-sensitive work; `references/opencode-pitfalls.md` only when using opencode.
 
 ## Minimal MCP Loop
 

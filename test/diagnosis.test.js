@@ -24,6 +24,7 @@ import {
   DIAGNOSIS_CODES,
   isValidDiagnosisCode,
   PROVIDER_DIAGNOSIS_CODES,
+  PROVIDER_CAPACITY_DIAGNOSIS_CODES,
   NO_EFFECT_DIAGNOSIS_CODES,
 } from "../src/diagnosis.js";
 
@@ -915,9 +916,11 @@ test("M12-21C: valid completion (assistant text) bound → none, no marker proje
 // enum; completed_empty is NOT folded into PROVIDER_DIAGNOSIS_CODES.
 // ---------------------------------------------------------------------------
 
-test("M12-21: DIAGNOSIS_CODES is the single general SSOT (provider codes ∪ completed_empty, no fold)", () => {
-  // The general SSOT is exactly the provider codes plus the no-effect code.
-  assert.deepEqual([...DIAGNOSIS_CODES], [...PROVIDER_DIAGNOSIS_CODES, ...NO_EFFECT_DIAGNOSIS_CODES]);
+test("M12-24: DIAGNOSIS_CODES is the single general SSOT (auth ∪ capacity ∪ no-effect)", () => {
+  assert.deepEqual(
+    [...DIAGNOSIS_CODES],
+    [...PROVIDER_DIAGNOSIS_CODES, ...PROVIDER_CAPACITY_DIAGNOSIS_CODES, ...NO_EFFECT_DIAGNOSIS_CODES],
+  );
   // completed_empty is present and is the only no-effect code.
   assert.ok(DIAGNOSIS_CODES.includes("completed_empty"));
   assert.deepEqual([...NO_EFFECT_DIAGNOSIS_CODES], ["completed_empty"]);
@@ -925,6 +928,7 @@ test("M12-21: DIAGNOSIS_CODES is the single general SSOT (provider codes ∪ com
   assert.equal(PROVIDER_DIAGNOSIS_CODES.includes("completed_empty"), false);
   // Every provider code is a member of the general SSOT (no drift).
   for (const c of PROVIDER_DIAGNOSIS_CODES) assert.ok(DIAGNOSIS_CODES.includes(c));
+  for (const c of PROVIDER_CAPACITY_DIAGNOSIS_CODES) assert.ok(DIAGNOSIS_CODES.includes(c));
 });
 
 test("M12-21: isValidDiagnosisCode enforces exact category-code pairs (fail closed)", () => {
@@ -932,13 +936,16 @@ test("M12-21: isValidDiagnosisCode enforces exact category-code pairs (fail clos
   for (const c of PROVIDER_DIAGNOSIS_CODES) {
     assert.equal(isValidDiagnosisCode("provider_auth", c), true, `provider_auth × ${c} is valid`);
   }
+  for (const c of PROVIDER_CAPACITY_DIAGNOSIS_CODES) {
+    assert.equal(isValidDiagnosisCode("provider_capacity", c), true, `provider_capacity × ${c} is valid`);
+  }
   assert.equal(isValidDiagnosisCode("no_effect", "completed_empty"), true, "no_effect × completed_empty is valid");
   // Invalid pairings: a provider code under no_effect, or completed_empty under provider_auth.
   assert.equal(isValidDiagnosisCode("no_effect", "unauthorized"), false, "provider code under no_effect is invalid");
   assert.equal(isValidDiagnosisCode("provider_auth", "completed_empty"), false, "completed_empty under provider_auth is invalid");
   // Every other category never carries a code.
   for (const category of DIAGNOSIS_CATEGORIES) {
-    if (category === "provider_auth" || category === "no_effect") continue;
+    if (category === "provider_auth" || category === "provider_capacity" || category === "no_effect") continue;
     assert.equal(isValidDiagnosisCode(category, "completed_empty"), false, `${category} never carries a code`);
     assert.equal(isValidDiagnosisCode(category, "unauthorized"), false, `${category} never carries a code`);
   }

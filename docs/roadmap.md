@@ -264,6 +264,12 @@ TD-71 的根 delivery `run_20260813123526210jd19dv` 虽通过 focused verificati
 
 TD-48 经当前规模实测关单：CLI diagnose 只读单个 transcript；CLI dashboard 对约 1887 runs / 180MB 的全量历史扫描仍低于 5s 触发条件，不为假设规模提前增加缓存。TD-106 按 Owner 裁定归档为 WAO 非目标：Tester context efficiency 属于 Codex 产品/runtime，不在本包实现或验证范围内。
 
+### M12-24 provider capacity consumer truth（2026-08-13，本地候选，发布待授权）
+
+WAO 现在明确区分三层事实：控制面可调用、registry/`lead_preflight` 可观察的是静态配置与凭据存在性，真实 provider quota/rate limit 只有实际 run 的持久终态证据才能证明。`lead_preflight.complete=true` 只表示工作区、worker inventory 与 active runs 的观察完整，不表示 provider 当前一定可执行；结果与 manual drilldown 均自带该语义，避免 Lead 把 Auditor/`coder_mm` 的五小时额度耗尽误判成 WAO 工具失效，或把工具仍可调用误判成 worker 仍有额度。
+
+诊断内核新增 provider-neutral `provider_capacity`，闭集事实码为 `rate_limited` / `quota_exhausted`，并经 `DIAGNOSIS_CODES` 与类别—码配对 SSOT 投影到 `run_diagnose` / `run_await_result`；只消费 failed 终态且绑定目标 runId 的 `run.error`，非终态 runtime rate-limit 活动不升级为失败，原始 provider 文本不进入 Lead 输出。WAO 不主动探测额度，不自动重试、换 worker、停止或改变路由，处置仍归 Lead。
+
 ### DeepSeek Harness 实验性 backend 试接（2026-08-13，本地验收，发布待授权）
 
 WAO 新增独立 `DeepSeekHarnessBackend`，通过用户提供的 DSH SDK stdio JSON-RPC runtime 接收严格绑定当前 session/prompt receipt 的事件，并投影为既有 RunEvent；没有引入 production npm dependency，也未解析 GUI/TUI。DSH 内部 subagent、错误 runtime identity、提前 transport close 与未绑定事件均 fail closed；WAO 继续独占 worktree、transcript、stop、delivery、verification 和 Lead decision。认证记录现按 agent id + backend + model 绑定，避免同名 `coder_low` 从 claude-code 切换到 DSH 后继承旧认证。

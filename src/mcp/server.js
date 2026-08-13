@@ -1051,11 +1051,10 @@ const RUN_DIAGNOSE_OUTPUT = z.object({
   state: z.string(),
   terminal: z.boolean(),
   category: DIAGNOSIS_CATEGORY_ENUM,
-  // M12-6 FR-02 / M12-21: nullable closed-set diagnosis code. The enum derives
-  // from the single DIAGNOSIS_CODES SSOT (provider-auth codes plus the
-  // completed_empty machine fact) — no second hand-maintained list. A non-null
-  // code is allowed only for a valid (category, code) pair (provider_auth → a
-  // provider code; no_effect → completed_empty); any other pairing or an
+  // Nullable closed-set diagnosis code derived from the single DIAGNOSIS_CODES
+  // SSOT (provider-auth, provider-capacity, and completed-empty facts). A
+  // non-null code is allowed only for a valid category/code pair; any other
+  // pairing or an
   // attacker-controlled value projects to null (fail closed, no raw echo),
   // enforced by the handler via isValidDiagnosisCode before this schema parses.
   code: z.enum(DIAGNOSIS_CODES).nullable(),

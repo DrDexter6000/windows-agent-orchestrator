@@ -542,7 +542,10 @@ const RED_23_WIRE = 75492;
 // stripped payload, so DESC_STRIPPED_CONTRACT_SHA changed truthfully (see below).
 // The wire grew +583 bytes; ceiling re-frozen at the measured 75075, still well
 // below the 23-tool baseline (75492).
-const FROZEN_22_WIRE_CEILING = 75075;
+// M12-24 adds the provider_capacity category and two safe diagnosis codes to
+// existing output enums. The surface remains 22 tools; the intentional schema
+// change adds 106 bytes, so the ceiling is re-frozen at the exact 75181.
+const FROZEN_22_WIRE_CEILING = 75181;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -640,8 +643,11 @@ test("M12-10-H: deterministic 22-tool wire below frozen ceiling and below the 23
 // `continuation_scope_incomplete` refusal. Additive optional output-schema
 // members are part of the stripped payload, so the SHA changed truthfully; no
 // description text is in the stripped payload.
+// Re-measured for M12-24: existing diagnosis/wait output enums gained only
+// provider_capacity + rate_limited/quota_exhausted. M12-24-MCP2 locks those
+// intended members explicitly; this hash continues to catch all other drift.
 const DESC_STRIPPED_CONTRACT_SHA =
-  "f53cafa6e1cee071e7028523cf87f4805cb350903bad65892ee271e3d07eb74d";
+  "76505427e750c41774d7f4c0099746c9a6aac9ac16175780ba2ac69944ab324d";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

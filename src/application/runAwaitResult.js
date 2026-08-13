@@ -309,7 +309,7 @@ function collectCompactFromSnapshot(events, runId, agentId, env, projectFn) {
 // Closed-set safe facts ONLY:
 //   - terminalState ∈ TERMINAL_STATES;
 //   - diagnosis { category ∈ DIAGNOSIS_CATEGORIES, code ∈ DIAGNOSIS_CODES
-//     | null (valid category-code pair only: provider_auth → provider code,
+//     | null (provider_auth/provider_capacity → their category code,
 //     no_effect → completed_empty), signalCount (count of evidence signals) };
 //   - delivery { requested, readiness ∈ DELIVERY_READINESS_STATES, available,
 //     failureCode ∈ PACKAGING_FAILURE_CODES | null, verificationStatus ∈
@@ -346,8 +346,8 @@ export function projectTerminalOutcome(events, runId, terminalState, injectables
     const diagnosis = {
       category: DIAGNOSIS_CATEGORIES.includes(diag.category) ? diag.category : "unknown",
       // M12-21: code is surfaced only for a valid (category, code) pair —
-      // provider_auth → a provider code; no_effect → completed_empty; null
-      // otherwise. Same pair discipline as the run_diagnose wire projection.
+      // provider_auth/provider_capacity → their category code; no_effect →
+      // completed_empty; null otherwise. Same pair discipline as run_diagnose.
       code: isValidDiagnosisCode(diag.category, diag.code) ? diag.code : null,
       signalCount: Array.isArray(diag.evidence) ? diag.evidence.length : 0,
     };

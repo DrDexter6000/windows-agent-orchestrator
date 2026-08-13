@@ -239,6 +239,10 @@ export async function aggregateLeadPreflight({
     if (missing.length > 0) {
       observations.push(`${missing.length} worker(s) are missing a required credential — see registry_list for env names`);
     }
+    observations.push(
+      "live provider authentication, entitlement, quota, and rate limits were not checked; " +
+      "complete means observation completeness, not provider execution readiness",
+    );
   } catch {
     checkStatus.workers = "unknown";
     warnings.push("worker inventory could not be read — use registry_list to check directly");
@@ -311,7 +315,7 @@ export async function aggregateLeadPreflight({
 
   const manualChecks = [
     "workspace_status — verify binding independently",
-    "registry_list — verify worker certification + credential availability",
+    "registry_list — verify configured workers, recorded certification, and credential presence (not live provider quota)",
     "runs_list — verify active runs independently",
   ];
 
