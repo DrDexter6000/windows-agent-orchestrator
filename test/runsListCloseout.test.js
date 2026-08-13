@@ -105,6 +105,44 @@ test("KNOWN-AGENT-02: unknown agentId still maps to 'unknown'", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
 
+// ── RED (M12-25B finding 1): the DEFAULT inventory service is the partial
+// projection, which returns the OBJECT {agents, issues, issuesTruncated} — NOT a
+// bare array. KNOWN-AGENT-01/02 inject an array-shaped fake, so they never
+// exercised the default path. The production default path consumed that object
+// as if it were an array (Array.isArray(object) === false → knownAgentIds=[]),
+// which erased EVERY run's agentId to 'unknown' even for a valid registry. This
+// test uses a REAL registry file and injects NOTHING, so the production default
+// service runs — it reproduces the erasure and then guards the identity fix.
+test("KNOWN-AGENT-03: default partial-inventory service preserves known agentId (real registry, no injected fake)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-known-03-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-known-03-rd-"));
+  try {
+    makeGitRepo(dir);
+    // Real registry the DEFAULT service (getRegistryInventoryWithIssues) reads.
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: {
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
+    } }), "utf8");
+    await seedRun(runDir, "run_default_service", dir, "running", "coder_low");
+    // NOTE: no getRegistryInventoryFn injected → the production default service
+    // (object-shaped partial projection) is the code path under test.
+    const server = createWaoMcpServer({ registryPath, runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "runs_list", arguments: {} });
+      assert.equal(res.isError, undefined, "runs_list must succeed for a valid registry");
+      const parsed = JSON.parse(res.content[0].text);
+      const run = parsed.runs.find((r) => r.runId === "run_default_service");
+      assert.ok(run, "run must appear in list");
+      assert.equal(run.agentId, "coder_low",
+        "default partial-inventory service must preserve the known agentId, not erase it to 'unknown'");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});
+
 // ── RED-2: activeOnly excludes unknown state ─────────────────────────────────
 
 test("ACTIVEONLY-01: unknown state run excluded by activeOnly", async () => {

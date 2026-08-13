@@ -184,7 +184,12 @@ test("FINAL-RED1c: normal coder_low → coder_low succeeds", async () => {
     makeGitRepo(dir);
     const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
     const fakeDispatch = async () => ({
+      // M12-25: providerSessionRouting is a required closed-set field on every
+      // run_dispatch success output (no MCP fallback); the success-path fake
+      // carries the ordinary no-reuse value. Mismatch/injection fakes below do
+      // not reach this success schema and are intentionally unchanged.
       accepted: true, runId: "run_ok", agentId: "coder_low", state: "pending", transcriptPath: "/x.jsonl",
+      providerSessionRouting: "not_used",
     });
     const { createWaoMcpServer } = await import("../src/mcp/server.js");
     const server = createWaoMcpServer({

@@ -545,7 +545,14 @@ const RED_23_WIRE = 75492;
 // M12-24 adds the provider_capacity category and two safe diagnosis codes to
 // existing output enums. The surface remains 22 tools; the intentional schema
 // change adds 106 bytes, so the ceiling is re-frozen at the exact 75181.
-const FROZEN_22_WIRE_CEILING = 75181;
+// M12-25 adds the bounded registry-issue projection (issues/issuesTruncated on
+// registry_list, registryIssues/registryIssuesTruncated on lead_preflight) and
+// the providerSessionRouting closed set on run_dispatch. The surface remains 22
+// tools; the intentional additive output schemas add 786 bytes (75181 → 75967),
+// which crosses the historical 75492 23-tool baseline (the "leaner than 23 tools"
+// narrative no longer holds — see M12-10-H). The regression guard is this frozen
+// ceiling, re-frozen at the exact measured 75967.
+const FROZEN_22_WIRE_CEILING = 75967;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -571,17 +578,20 @@ async function measureWire() {
   }
 }
 
-test("M12-10-H: deterministic 22-tool wire below frozen ceiling and below the 23-tool baseline", async () => {
+test("M12-10-H: deterministic 22-tool wire at or below the frozen ceiling", async () => {
   const m = await measureWire();
   // The surface is exactly 22 (re-asserted for the measured server).
   assert.equal(m.count, 22, `measured count is 22 (got ${m.count})`);
   assert.deepEqual(m.names, TOOL_SET, "measured set == frozen 22-set");
-  // Honest regression narrative: the 22-tool wire must be smaller than the prior
-  // 23-tool baseline (the two playbook tools and their schemas are gone; run_correct
-  // added one back but the surface is still leaner and more capable).
-  assert.ok(m.wireBytes < RED_23_WIRE,
-    `22-tool wire (${m.wireBytes}) < 23-tool baseline (${RED_23_WIRE})`);
-  // Frozen ceiling prevents creep.
+  // Honest regression narrative (M12-25 re-baseline): the 22-tool wire (75967)
+  // now EXCEEDS the historical 75492 23-tool baseline (RED_23_WIRE). The smaller
+  // tool count carries materially richer OUTPUT-CONTRACT schemas accumulated
+  // across M12-16..M12-25 (delivery correction/execution-stage/recovery-truth/
+  // capacity/routing fields), so the old "leaner than the 23-tool surface"
+  // comparison no longer holds and is retired here. The meaningful regression
+  // guard is the frozen ceiling below (re-frozen at the measured value); the
+  // M12-16-A description-stripped SHA guard is the losslessness proof. RED_23_WIRE
+  // is retained as a documented historical reference, not an active assertion.
   assert.ok(m.wireBytes <= FROZEN_22_WIRE_CEILING,
     `22-tool wire (${m.wireBytes}) <= frozen ceiling (${FROZEN_22_WIRE_CEILING})`);
 });
@@ -646,8 +656,14 @@ test("M12-10-H: deterministic 22-tool wire below frozen ceiling and below the 23
 // Re-measured for M12-24: existing diagnosis/wait output enums gained only
 // provider_capacity + rate_limited/quota_exhausted. M12-24-MCP2 locks those
 // intended members explicitly; this hash continues to catch all other drift.
+// Re-measured for M12-25: registry_list/lead_preflight output schemas gained the
+// bounded issue projection (issues/registryIssues + issuesTruncated, with the
+// closed-set REGISTRY_ISSUE object), and run_dispatch gained the closed-set
+// providerSessionRouting enum. Those additive schemas are part of the stripped
+// payload, so the SHA changed truthfully; no description text changed. M12-10-H
+// re-freezes the wire ceiling; this hash remains the losslessness proof.
 const DESC_STRIPPED_CONTRACT_SHA =
-  "76505427e750c41774d7f4c0099746c9a6aac9ac16175780ba2ac69944ab324d";
+  "a0b9a119c5341b7d1905a76e689badea277b1f761086c8465bdd8d32c1b66e22";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

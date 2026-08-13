@@ -184,6 +184,9 @@ test("M9-2B-03: run_dispatch success output has only runId/agentId/accepted/stat
       runId: "run_ok_m92b03",
       agentId: "x",
       state: "pending",
+      // M12-25: providerSessionRouting is required truth (no MCP fallback), so a
+      // fake dispatcher must return it explicitly like the real dispatchRun does.
+      providerSessionRouting: "not_used",
       transcriptPath: "/secret/runs/run_ok_m92b03.jsonl",
     });
 
@@ -199,10 +202,11 @@ test("M9-2B-03: run_dispatch success output has only runId/agentId/accepted/stat
       const textBlock = res.content.find((b) => b.type === "text");
       const parsed = JSON.parse(textBlock.text);
 
-      // M11-8B added agentId; M12-6 (FR-03) adds the additive bounded workspaceProof.
+      // M11-8B added agentId; M12-6 (FR-03) adds the additive bounded workspaceProof;
+      // M12-25 adds additive providerSessionRouting (routing REQUEST truth).
       assert.deepEqual(Object.keys(parsed).sort(),
-        ["accepted", "agentId", "runId", "state", "workspaceProof"],
-        "only runId/agentId/accepted/state + additive workspaceProof");
+        ["accepted", "agentId", "providerSessionRouting", "runId", "state", "workspaceProof"],
+        "only runId/agentId/accepted/state + additive workspaceProof + additive providerSessionRouting");
       assert.equal(parsed.accepted, true);
       assert.equal(parsed.runId, "run_ok_m92b03");
       assert.equal(parsed.agentId, "x");
@@ -573,7 +577,7 @@ test("M9-7A-04: MCP run_dispatch with delivery passes delivery to service", asyn
     const fakeDispatch = async (input) => {
       callCount += 1;
       captured = input;
-      return { accepted: true, runId: "run_delivery_m97a", agentId: "coder_low", state: "pending", transcriptPath: "/x.jsonl" };
+      return { accepted: true, runId: "run_delivery_m97a", agentId: "coder_low", state: "pending", providerSessionRouting: "not_used", transcriptPath: "/x.jsonl" };
     };
     const server = createWaoMcpServer({
       registryPath, runDir: "/server/runs",
@@ -595,8 +599,8 @@ test("M9-7A-04: MCP run_dispatch with delivery passes delivery to service", asyn
     assert.equal(captured.requireCertified, false, "certification advisory on delivery runs too (never forced)");
     const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
     assert.deepEqual(Object.keys(parsed).sort(),
-      ["accepted", "agentId", "runId", "state", "workspaceProof"],
-      "output has agentId (M11-8B) + additive workspaceProof (M12-6)");
+      ["accepted", "agentId", "providerSessionRouting", "runId", "state", "workspaceProof"],
+      "output has agentId (M11-8B) + additive workspaceProof (M12-6) + additive providerSessionRouting (M12-25)");
     } finally {
       await client.close();
       await server.close();
@@ -716,5 +720,184 @@ test("M9-7A-08: empty/whitespace verification values rejected at adapter, servic
   } finally {
     await client.close();
     await server.close();
+  }
+});
+
+// =====================================================================
+// M12-25 (Outcome 2): run_dispatch providerSessionRouting — schema + leak guard.
+//
+// providerSessionRouting ∈ {not_used, first_turn_requested, resume_requested}
+// describes the ROUTING REQUEST dispatchRun selected, never provider success. The
+// MCP schema declares the enum; the handler cherry-picks ONLY the allowed fields,
+// so a malicious/injected dispatcher cannot leak opaque session ids / Lead ids /
+// workspace / argv, and cannot claim a resumed session with an out-of-set value.
+// =====================================================================
+
+test("M12-25-MCP-ROUT-1: run_dispatch outputSchema declares the providerSessionRouting closed-set enum", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1225-mcpr1-"));
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const server = createWaoMcpServer({ registryPath, runDir: dir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const tools = await client.listTools();
+      const rd = tools.tools.find((t) => t.name === "run_dispatch");
+      const schemaText = JSON.stringify(rd.outputSchema);
+      assert.ok(/providerSessionRouting/.test(schemaText), "outputSchema declares providerSessionRouting");
+      assert.ok(/not_used/.test(schemaText), "enum has not_used");
+      assert.ok(/first_turn_requested/.test(schemaText), "enum has first_turn_requested");
+      assert.ok(/resume_requested/.test(schemaText), "enum has resume_requested");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M12-25-MCP-ROUT-2: malicious injected dispatcher (bad routing + leak fields) → isError, nothing leaks", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1225-mcpr2-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { x: { backend: "claude-code", cwd: dir } });
+    const OPAQUE = "opaque-session-uuid-LEAK";
+    const LEAD = "lead-identity-LEAK";
+    const WS = "C:\\Users\\secret\\workspace-LEAK";
+    const fakeDispatch = async () => ({
+      accepted: true,
+      runId: "run_evil",
+      agentId: "x",
+      state: "pending",
+      // Out-of-set value: a dispatcher must NEVER be able to claim a provider
+      // session resumed when only routing was requested.
+      providerSessionRouting: "session_resumed",
+      // Leak attempts — must never reach the model.
+      opaqueSessionId: OPAQUE,
+      leadSession: LEAD,
+      workspace: WS,
+    });
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y" } });
+      assert.equal(res.isError, true, "out-of-set providerSessionRouting is rejected (cannot claim a resumed session)");
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes(OPAQUE), "no opaque session id leak");
+      assert.ok(!dumped.includes(LEAD), "no Lead id leak");
+      assert.ok(!dumped.includes(WS), "no workspace path leak");
+      assert.ok(!dumped.includes("session_resumed"), "the malicious routing value is not echoed");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M12-25-MCP-ROUT-3: injected dispatcher returning valid routing + leak fields → fields dropped, no leak", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1225-mcpr3-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { x: { backend: "claude-code", cwd: dir } });
+    const OPAQUE = "opaque-uuid-LEAK-mcpr3";
+    const fakeDispatch = async () => ({
+      accepted: true,
+      runId: "run_ok_mcpr3",
+      agentId: "x",
+      state: "pending",
+      providerSessionRouting: "not_used",
+      opaqueSessionId: OPAQUE,
+      leadSession: "lead-LEAK-mcpr3",
+    });
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y" } });
+      assert.equal(res.isError, undefined, "valid routing value accepted");
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(parsed.providerSessionRouting, "not_used", "valid routing threaded through");
+      // Only the allowed keys are present — leak fields stripped by the handler + strict parse.
+      assert.deepEqual(Object.keys(parsed).sort(),
+        ["accepted", "agentId", "providerSessionRouting", "runId", "state", "workspaceProof"]);
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes(OPAQUE), "opaque session id never leaks");
+      assert.ok(!dumped.includes("lead-LEAK-mcpr3"), "Lead id never leaks");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("M12-25-MCP-ROUT-4: injected first_turn_requested threads through verbatim", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1225-mcpr4-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { x: { backend: "claude-code", cwd: dir } });
+    const fakeDispatch = async () => ({
+      accepted: true, runId: "run_first_mcpr4", agentId: "x", state: "pending",
+      providerSessionRouting: "first_turn_requested",
+    });
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y" } });
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(parsed.providerSessionRouting, "first_turn_requested", "first_turn_requested accepted + threaded");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// M12-25-MCP-ROUT-5: providerSessionRouting is REQUIRED truth, not a compatibility
+// default. A malformed/injected dispatcher that returns a valid success shape BUT
+// omits providerSessionRouting must make output validation fail to the fixed safe
+// run_dispatch error — the handler NEVER fabricates not_used, and nothing leaks.
+test("M12-25-MCP-ROUT-5: dispatcher omits providerSessionRouting → fixed safe error (no fabricated not_used, no leak)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1225-mcpr5-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { x: { backend: "claude-code", cwd: dir } });
+    const OPAQUE = "opaque-session-LEAK-mcpr5";
+    // Valid success shape EXCEPT providerSessionRouting is missing. (Bait fields
+    // prove the failure path still does not forward anything internal.)
+    const fakeDispatch = async () => ({
+      accepted: true, runId: "run_omit_mcpr5", agentId: "x", state: "pending",
+      opaqueSessionId: OPAQUE,
+    });
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "x", prompt: "y" } });
+      assert.equal(res.isError, true, "missing required providerSessionRouting → output validation fails");
+      assert.equal(res.structuredContent, undefined, "no structuredContent on the fixed safe error");
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes("not_used"), "the handler never fabricates a not_used default");
+      assert.ok(!dumped.includes(OPAQUE), "no opaque session id leak on the failure path");
+      assert.ok(!dumped.includes("run_omit_mcpr5"), "no runId leak on the failure path");
+      const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+      assert.ok(/run_dispatch failed/.test(text), "fixed safe text present");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
   }
 });

@@ -129,6 +129,15 @@ export async function readRegistry(filePath) {
       );
       return normalizeAgent(id, { ...agents[id], ...definedOverrides });
     },
+    // M12-25: raw [id, agentConfig] pairs WITHOUT normalization. Used ONLY by the
+    // partial inventory projector (getRegistryInventoryWithIssues) so a single
+    // malformed/unsupported entry cannot abort the whole list — the projector
+    // normalizes each entry individually and collects bounded safe issues. The
+    // strict paths (listAgents / getAgent) remain strict and are NOT weakened:
+    // they still throw on the first bad entry (CLI `registry list`/`validate`).
+    rawEntries() {
+      return Object.entries(agents);
+    },
   };
 }
 

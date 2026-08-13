@@ -200,7 +200,10 @@ test("M12-24-WAIT1: terminal capacity failure projects provider termination and 
 });
 
 test("M12-24-MCP1: run_diagnose projects safe provider capacity facts without raw provider text", async () => {
-  const secret = "PRIVATE_PROVIDER_QUOTA_PAYLOAD";
+  // Synthetic provider payload standing in for a private quota fact that must
+  // NOT leak. Named to avoid any credential-assignment shape (the desensitization
+  // gate keys on API_KEY/TOKEN/SECRET adjacent to an assignment).
+  const rawQuotaPayload = "PRIVATE_PROVIDER_QUOTA_PAYLOAD";
   const server = createWaoMcpServer({
     registryPath: "/r.json",
     runDir: "/runs",
@@ -210,7 +213,7 @@ test("M12-24-MCP1: run_diagnose projects safe provider capacity facts without ra
       terminal: true,
       category: "provider_capacity",
       code: "quota_exhausted",
-      evidence: [{ eventType: "run.error", fact: secret }],
+      evidence: [{ eventType: "run.error", fact: rawQuotaPayload }],
     }),
   });
   const client = await buildInMemoryClient(server);
@@ -221,7 +224,7 @@ test("M12-24-MCP1: run_diagnose projects safe provider capacity facts without ra
     assert.equal(parsed.category, "provider_capacity");
     assert.equal(parsed.code, "quota_exhausted");
     assert.ok(parsed.semanticNotes.some((note) => note.id === "diagnosis.provider_capacity"));
-    assert.equal(JSON.stringify(response).includes(secret), false, "raw provider fact stays behind the projection");
+    assert.equal(JSON.stringify(response).includes(rawQuotaPayload), false, "raw provider fact stays behind the projection");
   } finally {
     await client.close();
     await server.close();

@@ -20,6 +20,8 @@ import { join, basename } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { aggregateLeadPreflight } from "../src/application/leadPreflight.js";
+import { REGISTRY_ISSUES_CAP, REGISTRY_ISSUE_CODES } from "../src/application/registryInventory.js";
+import { isValidCanonicalAgentId } from "../src/canonicalAgentId.js";
 
 // ===== Helpers =====
 
@@ -299,6 +301,28 @@ test("M11-8-ADV2: registry failure → workspace still returned; workers=null (n
   assert.equal(result.checkStatus.workers, "unknown", "workers unknown");
   assert.equal(result.workers, null, "unknown workers is null (NOT [] — distinct from known-empty)");
   assert.ok(result.warnings.some((w) => /registry_list|inventory/i.test(w)));
+});
+
+// M12-25B finding 2: a malformed/null injected inventory result that does NOT
+// throw must still fail CLOSED to workers=unknown/null — never observed-empty
+// (workers:[] with checkStatus.workers="observed"). ADV2 covers a THROWING
+// resolver; this covers the non-throwing null/malformed RETURN, where current
+// code does `invResult?.agents ?? []` → [] and observes an empty worker list.
+// Unknown must stay null/unknown, distinct from a genuinely empty-but-readable
+// registry (PRE-5 observes workers:[] legitimately for a clean empty registry).
+test("M12-25-PRE-7: null/malformed injected inventory → workers unknown/null (NOT observed-empty)", async () => {
+  for (const bad of [null, undefined, { noAgentsKey: true }, 42, "a-string"]) {
+    const result = await aggregateLeadPreflight({
+      workspaceBinding: { bound: true, source: "lead_session", root: "/repo", gitHead: "f".repeat(40), dirty: false },
+      registryPath: "/r.json", runDir: "/runs", userEnvReader: noopReader,
+      getRegistryInventoryFn: async () => bad,
+      listRunsFn: async () => ({ runs: [], matchedCount: 0, unresolvedCount: 0 }),
+    });
+    assert.equal(result.checkStatus.workers, "unknown",
+      `malformed injected inventory (${JSON.stringify(bad)}) → workers unknown, not observed`);
+    assert.equal(result.workers, null,
+      "unknown workers is null (NOT [] — distinct from known-empty / observed-empty)");
+  }
 });
 
 // ===== Advisory: warning does not block independent run_dispatch =====
@@ -854,4 +878,163 @@ test("M12-15-PRE-05: real listRuns composition — activeRunCount excludes stale
     assert.equal(result.activeRuns[0].runId, active);
     assert.ok(result.observations.some((o) => /unresolved/i.test(o)), "advisory observation present");
   } finally { cleanupDir(runDir); }
+});
+
+// =====================================================================
+// M12-25 (Outcome 1): lead_preflight surfaces a PARTIAL worker inventory.
+//
+// When the registry is readable but has a malformed/unsupported entry,
+// lead_preflight must NOT hide the healthy workers. It returns the VALID
+// workers with checkStatus.workers="warning" (→ complete=false) plus the SAME
+// bounded safe per-entry issue facts as registry_list (single shared read).
+// A true empty valid registry stays observed/complete. Zero valid entries WITH
+// issues is warning/complete=false — it is NOT an observed-clean empty registry.
+// =====================================================================
+
+test("M12-25-PRE-1: partial inventory → workers=warning, complete=false, valid workers + issues shown (single read)", async () => {
+  let readCount = 0;
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "a".repeat(40), dirty: false },
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => {
+      readCount += 1;
+      return {
+        agents: [{ id: "good", backend: "claude-code", model: "m", reasoningEffort: null, certification: null, credentialAvailability: "not_required", cwd: "/A", missingCredentialEnvNames: [] }],
+        issues: [{ code: "invalid_configuration", agentId: "broken" }],
+        issuesTruncated: false,
+      };
+    },
+    listRunsFn: async () => ({ runs: [], matchedCount: 0 }),
+  });
+  assert.equal(readCount, 1, "registry read exactly once");
+  assert.equal(result.checkStatus.workers, "warning", "issues present → warning");
+  assert.equal(result.complete, false, "issues present → not complete");
+  assert.equal(result.workers.length, 1, "valid worker shown");
+  assert.equal(result.workers[0].id, "good");
+  assert.ok(Array.isArray(result.registryIssues), "registryIssues exposed");
+  assert.equal(result.registryIssues.length, 1);
+  assert.equal(result.registryIssues[0].agentId, "broken");
+  assert.equal(result.registryIssuesTruncated, false);
+});
+
+test("M12-25-PRE-2: empty valid registry (no issues) → workers=observed, complete", async () => {
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "b".repeat(40), dirty: false },
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => ({ agents: [], issues: [], issuesTruncated: false }),
+    listRunsFn: async () => ({ runs: [], matchedCount: 0 }),
+  });
+  assert.equal(result.checkStatus.workers, "observed", "observed-clean empty");
+  assert.equal(result.complete, true, "observed-clean empty → complete (contrast with issues present)");
+  assert.deepEqual(result.registryIssues, []);
+  assert.equal(result.registryIssuesTruncated, false);
+});
+
+test("M12-25-PRE-3: zero valid entries WITH issues → warning, complete=false (NOT observed-clean empty)", async () => {
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "c".repeat(40), dirty: false },
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => ({
+      agents: [],
+      issues: [{ code: "invalid_configuration", agentId: "broken" }],
+      issuesTruncated: false,
+    }),
+    listRunsFn: async () => ({ runs: [], matchedCount: 0 }),
+  });
+  assert.equal(result.checkStatus.workers, "warning", "issues present → warning, NOT observed");
+  assert.equal(result.complete, false, "NOT complete — distinct from an observed-clean empty registry");
+  assert.deepEqual(result.workers, [], "no valid workers");
+  assert.equal(result.registryIssues.length, 1, "issue facts surfaced");
+});
+
+test("M12-25-PRE-4: real MCP lead_preflight with a real malformed registry → warning + complete=false + valid worker", async () => {
+  const { createWaoMcpServer } = await import("../src/mcp/server.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1225-pre4-"));
+  const ws = mkdtempSync(join(tmpdir(), "wao-m1225-pre4-ws-"));
+  try {
+    makeGitRepo(ws);
+    const reg = makeRegistry(dir, {
+      good: { backend: "claude-code", cwd: ws, model: { id: "glm-5.2" } },
+      broken: { cwd: ws }, // missing backend → invalid_configuration
+    });
+    const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "lead_preflight", arguments: { workspaceRoot: ws } });
+      assert.equal(res.isError, undefined, "partial inventory is a normal result");
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(parsed.checkStatus.workers, "warning", "warning because one entry is malformed");
+      assert.equal(parsed.complete, false, "not complete because the workers section is a warning");
+      assert.equal(parsed.workers.length, 1, "the valid worker is NOT hidden");
+      assert.equal(parsed.workers[0].id, "good");
+      assert.ok(Array.isArray(parsed.registryIssues) && parsed.registryIssues.length === 1, "same safe issue facts as registry_list");
+      assert.equal(parsed.registryIssues[0].agentId, "broken");
+      assert.equal(parsed.registryIssuesTruncated, false);
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); cleanupDir(ws); }
+});
+
+test("M12-25-PRE-5: lead_preflight outputSchema declares registryIssues + registryIssuesTruncated + closed codes", async () => {
+  const { createWaoMcpServer } = await import("../src/mcp/server.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1225-pre5-"));
+  try {
+    const reg = makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } });
+    const server = createWaoMcpServer({ registryPath: reg, runDir: join(dir, "runs"), userEnvReader: noopReader });
+    const client = await buildClient(server);
+    try {
+      const { tools } = await client.listTools();
+      const t = tools.find((x) => x.name === "lead_preflight");
+      const schemaText = JSON.stringify(t.outputSchema);
+      assert.ok(/registryIssues/.test(schemaText), "outputSchema declares registryIssues");
+      assert.ok(/registryIssuesTruncated/.test(schemaText), "outputSchema declares registryIssuesTruncated");
+      assert.ok(/invalid_id/.test(schemaText), "closed code invalid_id in schema");
+      assert.ok(/invalid_configuration/.test(schemaText), "closed code invalid_configuration in schema");
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); }
+});
+
+// M12-25-PRE-6: a malicious/injected resolver passes >REGISTRY_ISSUES_CAP issues
+// WITH issuesTruncated:false plus leak-bait fields. The shared SSOT projector must
+// bound it to the cap, set issuesTruncated=true, strip every injected field, keep
+// only the closed code set + canonical agentId-or-null — and STILL return the
+// valid worker (bounded partial result, NOT a whole-registry error).
+test("M12-25-PRE-6: injected >cap issues with issuesTruncated:false → bounded partial (cap + truncate + sanitize), valid worker preserved", async () => {
+  const over = REGISTRY_ISSUES_CAP + 5;
+  const injectedIssues = Array.from({ length: over }, (_, i) => ({
+    // Closed-set code for even indices; an out-of-set injection for odd ones.
+    code: i % 2 === 0 ? "invalid_configuration" : "EVIL_OUT_OF_SET_CODE",
+    // Canonical id for some; a non-canonical injection for others (must null out).
+    agentId: i % 3 === 0 ? "coder_low" : "NOT CANONICAL!!",
+    // Leak bait — must NEVER survive the projection.
+    rawError: `/secret/path/${i} apiKey=sk-leak-${i}`,
+    path: `/etc/${i}`,
+    config: { secret: i },
+  }));
+  const result = await aggregateLeadPreflight({
+    workspaceBinding: { bound: true, source: "lead_session", root: "/A", gitHead: "d".repeat(40), dirty: false },
+    registryPath: "/r.json", runDir: "/runs",
+    getRegistryInventoryFn: async () => ({
+      agents: [{ id: "good", backend: "claude-code", model: "m", reasoningEffort: null, certification: null, credentialAvailability: "not_required", cwd: "/A", missingCredentialEnvNames: [] }],
+      issues: injectedIssues,
+      issuesTruncated: false,
+    }),
+    listRunsFn: async () => ({ runs: [], matchedCount: 0 }),
+  });
+  // Bounded partial result, NOT a whole-registry error.
+  assert.equal(result.checkStatus.workers, "warning", "issues present → warning");
+  assert.equal(result.complete, false, "not complete");
+  assert.equal(result.workers.length, 1, "the one VALID worker is preserved (not erased)");
+  assert.equal(result.workers[0].id, "good");
+  // Cap enforced even though the source lied with issuesTruncated:false.
+  assert.equal(result.registryIssues.length, REGISTRY_ISSUES_CAP, "capped at REGISTRY_ISSUES_CAP");
+  assert.equal(result.registryIssuesTruncated, true, "over-cap input reports truncation despite source false");
+  // Every surviving issue is the safe shape only: closed code + canonical id-or-null.
+  for (const issue of result.registryIssues) {
+    assert.ok(REGISTRY_ISSUE_CODES.includes(issue.code), `code in closed set: ${issue.code}`);
+    assert.ok(issue.agentId === null || isValidCanonicalAgentId(issue.agentId), "agentId canonical or null");
+    assert.deepEqual(Object.keys(issue).sort(), ["agentId", "code"], "no injected field survives");
+  }
+  assert.ok(!JSON.stringify(result).includes("EVIL_OUT_OF_SET_CODE"), "out-of-set code never leaks");
+  assert.ok(!JSON.stringify(result).includes("rawError"), "raw error text never leaks");
+  assert.ok(!JSON.stringify(result).includes("sk-leak"), "credential bait never leaks");
 });

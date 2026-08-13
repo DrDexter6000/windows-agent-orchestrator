@@ -198,6 +198,19 @@ interface AgentDef {
 **现状**：`registry.js` 已实现 `normalizeAgent`，校验 opencode-serve 字段。
 **目标 `[S]`**：扩展校验逻辑支持进程式 backend 字段；`getAgent(id, overrides)` 保持不变。
 
+**M12-25 strict vs partial inventory（Outcome 1）**：严格路径不变——`listAgents()`/`getAgent()`/CLI
+`registry validate`/`registry list`/严格 `getRegistryInventory` 遇首条不可 normalize 的条目即抛错
+（`normalizeAgent` 合同字节不变）。`readRegistry` 句柄**加法式**新增 `rawEntries()`——返回未过滤、
+未 normalize 的 `[id, rawConfig]` 对，仅供独立的部分投影器
+`getRegistryInventoryWithIssues({registryPath, runDir, ...})` 使用：逐条 normalize，有效条目经共享
+`projectInventoryEntry` 与严格路径**逐字同形**投影（CLI/MCP parity 不变），失败条目投影为一条有界
+安全 issue（闭集 `code ∈ {invalid_id, invalid_configuration}`；`agentId` 仅 canonical 时投影否则
+`null`；绝不回显原始 id/error 文本/配置/路径/凭据；上限 `REGISTRY_ISSUES_CAP=32` + `issuesTruncated`）。
+返回 `{agents, issues, issuesTruncated}`。整表源不可读或非法 JSON 仍由 `readRegistry` 抛错（另一类
+失败，绝不伪造成部分结果）。MCP `registry_list`/`lead_preflight` 走此部分路径；registry 源每次操作
+只读/解析一次，`lead_preflight` 经依赖注入 seam 复用 `registry_list` 同一快照、绝不回退二次读取。
+WAO 始终 advisory：部分结果从不 auto-stop 派发、从不换 worker、从不把坏条目标记 healthy。
+
 ### 2.4 Backend 工厂
 
 ```js
@@ -841,6 +854,16 @@ backendSessionId / Lead id / workspace path / prompt / argv / PID / provider pay
 `registry_list` 如实投影配置的复用模式（nullable）；busy 时返回固定可执行文案（指向
 active run / 等待 terminal / `run_status`/`run_wait`），不回显 runId 或 opaque uuid。
 
+**M12-25 routing-request truth（Outcome 2）**：`run_dispatch` 输出**额外**投影闭集
+`providerSessionRouting: "not_used" | "first_turn_requested" | "resume_requested"`——这是
+**路由请求**真相（由 `dispatchRun` 内部已选定的 `routing.turn` 派生：普通派发/普通 delivery 的
+`lead_workspace` 有意不复用→`not_used`；first→`first_turn_requested`；resume→`resume_requested`；
+`accepted:false` 恒 `not_used`），**不是** provider 会话成功/建立的证明。该字段只说"请求了什么路由"，
+**绝不**暴露 routing mode、opaque uuid、Lead id、workspace path、argv 或 provider payload；provider
+是否真正 resume 成功仍由后续传输/终态证据决定。闭集由 `runDispatch.js` 的冻结
+`PROVIDER_SESSION_ROUTING` SSOT 派生，MCP `z.enum` 直接引用，注入的越界值被拒绝并折叠为固定
+dispatch error。`run_continue` 的 resume 路由语义不变。
+
 **CLI 行为**：CLI 是一次性进程，无稳定 Lead 会话，因此 CLI 派发可复用专家时一律走 `first`
 （注入一次性 leadSession → 唯一复用 key、无历史 → 首轮）。MCP server 是唯一提供稳定 Lead
 会话的调用方。
@@ -1032,8 +1055,8 @@ src/
 │   ├── toolSurface.js        #   M12-10 冻结工具面 SSOT：22 个 always-registered tools 的 frozen 数组（原 23 减去两个原 playbook 工具、M12-16 增 run_correct，已迁至 MCP resources）+ 唯一性/计数不变量；server.js 构造期 deepEqual 自检，无 Host/runtime 分支、无 profile
 │   └── stdio.js              #   stdio production entrypoint（StdioServerTransport，npm run mcp，--workspace-root；残留旧 profile 参数视为未知 flag 忽略）
 ├── application/              # L3：shared application services（M9 use-case 层）
-│   ├── registryInventory.js  #   registry inventory SSOT（M9-0，CLI + MCP 共用；M12-6 FR-02 增 providerReadiness 严格真相投影——CONFIGURATION_STATUSES/AUTHENTICATION_STATUSES/ENTITLEMENT_STATUSES/LIVE_CHECK_STATUSES 闭集常量，MCP 枚举直接派生，无第二份列表）
-│   ├── runDispatch.js        #   background dispatch service（M9-2A，CLI + MCP 共用；M12-7 增 continuable 选项——delivery-only 续谱根，建立 run_lineage turn:first provider 会话；M12-9：MCP adapter 派发前经共享 executionProfiles resolver 解析可选 executionProfileId（profile/inline 互斥），把解析后的 verification 折入 effective delivery 传入；runDispatch.js 自身不解析 profile）
+│   ├── registryInventory.js  #   registry inventory SSOT（M9-0，CLI + MCP 共用；M12-6 FR-02 增 providerReadiness 严格真相投影——CONFIGURATION_STATUSES/AUTHENTICATION_STATUSES/ENTITLEMENT_STATUSES/LIVE_CHECK_STATUSES 闭集常量，MCP 枚举直接派生，无第二份列表；M12-25 增独立部分投影 getRegistryInventoryWithIssues + REGISTRY_ISSUE_CODES/REGISTRY_ISSUES_CAP 闭集——registry 可读但单条坏条目时返回有效 worker + 有界安全 issues 而非整表失败，严格路径不变）
+│   ├── runDispatch.js        #   background dispatch service（M9-2A，CLI + MCP 共用；M12-7 增 continuable 选项——delivery-only 续谱根，建立 run_lineage turn:first provider 会话；M12-9：MCP adapter 派发前经共享 executionProfiles resolver 解析可选 executionProfileId（profile/inline 互斥），把解析后的 verification 折入 effective delivery 传入；runDispatch.js 自身不解析 profile；M12-25 增 providerSessionRouting 闭集输出——仅由内部已选 routing.turn 派生的路由请求真相，非 provider 成功证明，不暴露 mode/opaque uuid）
 │   ├── runDispatchContract.js #   advisory pre-dispatch contract check service（M12-9，MCP）：MCP adapter 在 run_dispatch 与本工具间共享输入 schema（service 自身不导入 Zod），service 复用同一 application 校验（共享 resolver + prepareDeliveryRequest），返回闭集 workspace/registry/contract 视图 + 有界 issue 码；contractValid 只反映 delivery/profile 机械合同（不预评 expectedGitHead/expectedDirty/expectedWorkspaceRoot、continuable/backend/session 资格或凭据），非门禁（sections 独立 observed/unknown、advisory 恒 true）、零副作用、run_dispatch 不可依赖它
 │   ├── executionProfiles.js   #   frozen trusted execution-profile catalog + 共享 delivery 验证解析器（M12-9）：node-npm-test-v1 / node-npm-ci-test-v1 / python-pytest-v1 仅提供 verificationSetup/verificationCommands；profile 与 inline verification 互斥，未知/冲突由共享 resolver 稳定拒绝
 │   ├── runContinue.js        #   Lead 授权修正续跑 service（M12-7，由 MCP adapter 直接委托）：对终态 continuable delivery 续 ONE 修正回合，复用父 run 的 retained worktree + 续 provider 会话（turn:resume，同一 opaque uuid）；closed-set 资格/身份/配置/worktree 检查先于 mutation，spawn 前失败事务回滚；从不推断 correction/scope/retry/accept
@@ -1050,7 +1073,7 @@ src/
 │   ├── workspaceBinding.js   #   host-authorized workspace proof SSOT（M10-pre2，MCP 共用）
 │   ├── sessionWorkspace.js   #   Lead session workspace selection kernel（M11-6，无状态，委托 proveWorkspace）
 │   ├── sessionReuse.js       #   expert session reuse SSOT（M11-11C，provider 中立：opaque uuid 派生 + turn 决策 first/resume/busy + per-key 文件锁；M12-7 增 run_lineage routing——续谱作用域 = Lead session + workspace + agent + rootRunId，复用同一 opaque provider id；run_lineage 是 routing-only，不是 agent 可声明策略）
-│   ├── leadPreflight.js      #   advisory single-call preflight aggregator（M11-8A，组合 registryInventory+listRuns，advisory 非 gate）
+│   ├── leadPreflight.js      #   advisory single-call preflight aggregator（M11-8A，组合 registryInventory+listRuns，advisory 非 gate；M12-25 增 registryIssues/registryIssuesTruncated——复用 registry_list 同一闭集 issue 形状与同一单读快照，非空时 checkStatus.workers=warning→complete:false 但有效 worker 照常返回）
 │   ├── mcpWorkspaceActivation.js # project-scoped workspace activation（M10 P0-1，CLI 用，委托 hostAdapters）
 │   ├── timeoutPolicy.js      #   wait timeout precedence SSOT（M10-pre，CLI + MCP 共用）
 │   ├── processStopVerify.js  #   bounded process exit verification（M10-pre）

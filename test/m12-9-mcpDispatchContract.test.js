@@ -244,7 +244,9 @@ test("B1: run_dispatch works without any prior precheck call (independence)", as
   }, {
     dispatchRunFn: async (input) => {
       dispatchCalls += 1;
-      return { accepted: true, runId: "run_indep", agentId: input.agentId, state: "pending", transcriptPath: "/x.jsonl" };
+      // M12-25: providerSessionRouting is a required closed-set field on every
+      // run_dispatch success output (no MCP fallback).
+      return { accepted: true, runId: "run_indep", agentId: input.agentId, state: "pending", transcriptPath: "/x.jsonl", providerSessionRouting: "not_used" };
     },
   });
   assert.equal(dispatchCalls, 1, "dispatcher called exactly once");
@@ -271,7 +273,9 @@ test("B3: run_dispatch with executionProfileId folds profile verification into t
     dispatchRunFn: async (input) => {
       dispatchCalls += 1;
       captured = input;
-      return { accepted: true, runId: "run_prof", agentId: input.agentId, state: "pending", transcriptPath: "/x.jsonl" };
+      // M12-25: providerSessionRouting is a required closed-set field on every
+      // run_dispatch success output (no MCP fallback).
+      return { accepted: true, runId: "run_prof", agentId: input.agentId, state: "pending", transcriptPath: "/x.jsonl", providerSessionRouting: "not_used" };
     },
   });
   assert.equal(dispatchCalls, 1, "dispatcher called once");

@@ -120,7 +120,10 @@ function makeFakeDispatch() {
   const fn = async (input) => {
     callCount += 1;
     captured = input;
-    return { accepted: true, runId: "run_m12_6_fake", agentId: input.agentId, state: "pending" };
+    // M12-25: providerSessionRouting is now a required closed-set field on every
+    // run_dispatch success output (no MCP fallback), so the success-path fake
+    // carries the ordinary no-reuse value.
+    return { accepted: true, runId: "run_m12_6_fake", agentId: input.agentId, state: "pending", providerSessionRouting: "not_used" };
   };
   return {
     fn,

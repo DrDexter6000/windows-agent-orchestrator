@@ -17,7 +17,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readTranscript, findState, findLatest } from "../src/transcript.js";
-import { dispatchRun } from "../src/application/runDispatch.js";
+import { dispatchRun, PROVIDER_SESSION_ROUTING } from "../src/application/runDispatch.js";
 import { getRunDelivery } from "../src/application/runDelivery.js";
 
 // ===== Helpers =====
@@ -619,5 +619,158 @@ test("M12-6 P1-A: dispatchRun threads --frozen-git-head into runner argv (absent
       spawnFn: fakeSpawn,
     });
     assert.ok(!calls[0].args.includes("--frozen-git-head"), "no --frozen-git-head when not supplied");
+  } finally { cleanupDir(dir); }
+});
+
+// =====================================================================
+// M12-25 (Outcome 2): providerSessionRouting — ROUTING REQUEST truth.
+//
+// dispatchRun exposes providerSessionRouting ∈ {not_used, first_turn_requested,
+// resume_requested}, derived ONLY from the internal routing turn dispatchRun
+// already selected. It describes what routing dispatch REQUESTED, never whether
+// the provider accepted/resumed. It never exposes the routing mode, the opaque
+// session uuid, Lead ids, workspace paths, argv, or provider payload.
+// =====================================================================
+
+// A reusable claude-code expert (sessionReuse:"lead_workspace").
+function reusableClaudeAgent(dir, extra = {}) {
+  return {
+    backend: "claude-code",
+    binary: "fake-claude",
+    cwd: dir,
+    model: { id: "glm-5.2" },
+    sessionReuse: "lead_workspace",
+    ...extra,
+  };
+}
+
+// Seed a prior run transcript to a terminal state (with/without session.created).
+async function seedTranscript(runDir, runId, agentId, { terminal, sessionCreated } = {}) {
+  const { JsonlTranscript } = await import("../src/transcript.js");
+  const t = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId });
+  await t.transitionState(null, "pending", "seed");
+  await t.append("run.started", { backend: "claude-code" });
+  if (sessionCreated) {
+    await t.append("session.created", { backend: "process", backendSessionId: "proc_1" });
+  }
+  await t.transitionState("pending", "submitted", "seed");
+  if (terminal) {
+    await t.transitionState("submitted", "completed", "seed_done", {
+      factEvents: [{ type: "run.completed", payload: {} }],
+    });
+  }
+  return t;
+}
+
+test("M12-25-ROUT-0: PROVIDER_SESSION_ROUTING is the frozen closed set", () => {
+  assert.ok(Object.isFrozen(PROVIDER_SESSION_ROUTING), "closed set is frozen");
+  assert.deepEqual([...PROVIDER_SESSION_ROUTING], ["not_used", "first_turn_requested", "resume_requested"]);
+});
+
+test("M12-25-ROUT-1: ordinary no-reuse dispatch → providerSessionRouting not_used", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1225-rout1-"));
+  const { fakeSpawn } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, {
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
+    });
+    const result = await dispatchRun({
+      agentId: "coder_low", prompt: "x", registryPath, runDir: join(dir, "runs"), spawnFn: fakeSpawn,
+    });
+    assert.equal(result.accepted, true);
+    assert.equal(result.providerSessionRouting, "not_used", "ordinary dispatch did not request a provider session");
+  } finally { cleanupDir(dir); }
+});
+
+test("M12-25-ROUT-2: ordinary delivery (non-reusable agent) → providerSessionRouting not_used", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1225-rout2-"));
+  const { fakeSpawn } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const result = await dispatchRun({
+      agentId: "coder_low", prompt: "x", registryPath, runDir: join(dir, "runs"), spawnFn: fakeSpawn,
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
+    });
+    assert.equal(result.accepted, true);
+    assert.equal(result.providerSessionRouting, "not_used", "delivery always starts a fresh backend conversation");
+  } finally { cleanupDir(dir); }
+});
+
+test("M12-25-ROUT-3: reusable expert first turn → providerSessionRouting first_turn_requested", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1225-rout3-"));
+  const { fakeSpawn } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { researcher: reusableClaudeAgent(dir) });
+    const result = await dispatchRun({
+      agentId: "researcher", prompt: "q1", registryPath, runDir: join(dir, "runs"),
+      cwd: dir, leadSession: "lead-A", spawnFn: fakeSpawn,
+    });
+    assert.equal(result.accepted, true);
+    assert.equal(result.providerSessionRouting, "first_turn_requested", "first turn REQUESTS a new provider session");
+    // The result must not leak the opaque uuid / mode / Lead id / workspace.
+    const dumped = JSON.stringify(result);
+    assert.ok(!/opaqueUuid|opaqueSessionId|leadSession|mode/.test(dumped), "no routing internals leaked");
+  } finally { cleanupDir(dir); }
+});
+
+test("M12-25-ROUT-4: reusable expert resume turn → providerSessionRouting resume_requested", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1225-rout4-"));
+  const { fakeSpawn } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { researcher: reusableClaudeAgent(dir) });
+    const runDir = join(dir, "runs");
+    // Turn 1.
+    const r1 = await dispatchRun({
+      agentId: "researcher", prompt: "q1", registryPath, runDir,
+      cwd: dir, leadSession: "lead-A", spawnFn: fakeSpawn,
+    });
+    assert.equal(r1.providerSessionRouting, "first_turn_requested");
+    // Mark turn-1 terminal WITH session.created so turn-2 resumes.
+    await seedTranscript(runDir, r1.runId, "researcher", { terminal: true, sessionCreated: true });
+    // Turn 2.
+    const r2 = await dispatchRun({
+      agentId: "researcher", prompt: "q2", registryPath, runDir,
+      cwd: dir, leadSession: "lead-A", spawnFn: fakeSpawn,
+    });
+    assert.equal(r2.accepted, true);
+    assert.equal(r2.providerSessionRouting, "resume_requested", "resume REQUESTS resuming the provider session (not provider success)");
+    assert.notEqual(r1.runId, r2.runId, "fresh runId per turn");
+  } finally { cleanupDir(dir); }
+});
+
+test("M12-25-ROUT-5: continuable delivery root → providerSessionRouting first_turn_requested", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1225-rout5-"));
+  const { fakeSpawn } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const result = await dispatchRun({
+      agentId: "coder_low", prompt: "deliver", registryPath, runDir: join(dir, "runs"), spawnFn: fakeSpawn,
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
+      continuable: true, cwd: dir, leadSession: "lead-A",
+      backendFor: () => ({ supportsSessionReuse: true }),
+    });
+    assert.equal(result.accepted, true);
+    assert.equal(result.providerSessionRouting, "first_turn_requested", "continuable root REQUESTS the lineage provider session (turn:first)");
+  } finally { cleanupDir(dir); }
+});
+
+test("M12-25-ROUT-6: accepted:false (terminal transcript) → providerSessionRouting not_used", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1225-rout6-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const runDir = join(dir, "runs");
+    mkdirSync(runDir, { recursive: true });
+    const runId = "run_preexist_terminal_rout6";
+    const { JsonlTranscript } = await import("../src/transcript.js");
+    const t = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "coder_low" });
+    await t.transitionState(null, "pending", "seed");
+    await t.transitionState("pending", "failed", "seed_terminal");
+    const result = await dispatchRun({
+      agentId: "coder_low", prompt: "x", registryPath, runDir, runId, spawnFn: fakeSpawn,
+    });
+    assert.equal(result.accepted, false, "rejected (terminal transcript)");
+    assert.equal(result.providerSessionRouting, "not_used", "a rejected dispatch never requested a provider session");
+    assert.equal(calls.length, 0, "no spawn");
   } finally { cleanupDir(dir); }
 });

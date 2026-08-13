@@ -21,6 +21,8 @@ import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
 
 import { createWaoMcpServer } from "../src/mcp/server.js";
+import { REGISTRY_ISSUES_CAP, REGISTRY_ISSUE_CODES } from "../src/application/registryInventory.js";
+import { isValidCanonicalAgentId } from "../src/canonicalAgentId.js";
 
 // ===== Helpers =====
 
@@ -862,3 +864,251 @@ import { readFileSync } from "node:fs";
 function readFileSyncCompat(p) {
   return readFileSync(p, "utf8");
 }
+
+// =====================================================================
+// M12-25 (Outcome 1): registry_list surfaces a PARTIAL inventory.
+//
+// A readable registry with one malformed/unsupported entry must NOT erase the
+// healthy entries. registry_list returns the valid agents PLUS a bounded, safe
+// per-entry issue list (closed code set; agentId projected only when canonical;
+// issuesTruncated flag). A whole-file invalid-JSON registry stays a hard error
+// (isError) — never faked as a partial result. The output schema declares the
+// closed issue shape; a bare-array injected service (legacy) is normalized to
+// issues:[] so existing fakes keep working.
+// =====================================================================
+
+test("M12-25-REG-1: real subprocess registry_list with valid + malformed → healthy agents + bounded issues", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1225-reg1-"));
+  let client;
+  try {
+    const registryPath = makeRegistry(dir, {
+      good: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
+      // Missing backend → invalid_configuration issue; healthy entry preserved.
+      broken: { cwd: dir },
+    });
+    const runDir = makeSummary(dir, { good: { status: "certified" } });
+
+    const { Client } = await import("@modelcontextprotocol/sdk/client");
+    client = new Client({ name: "wao-m1225-reg1", version: "0.0.1" }, { capabilities: {} });
+    const transport = await buildStdioSubprocessTransport({ registryPath, runDir });
+    await client.connect(transport);
+
+    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    assert.equal(res.isError, undefined, "partial inventory is a normal (non-error) result");
+    const textBlock = res.content.find((b) => b.type === "text");
+    const parsed = JSON.parse(textBlock.text);
+    assert.ok(Array.isArray(parsed.agents), "agents array present");
+    assert.equal(parsed.agents.length, 1, "only the healthy entry is returned");
+    assert.equal(parsed.agents[0].id, "good");
+    assert.ok(Array.isArray(parsed.issues), "issues array present");
+    assert.equal(parsed.issues.length, 1, "one bounded issue for the malformed entry");
+    assert.deepEqual(Object.keys(parsed.issues[0]).sort(), ["agentId", "code"], "issue shape is exactly {code, agentId}");
+    assert.equal(parsed.issues[0].code, "invalid_configuration");
+    assert.equal(parsed.issues[0].agentId, "broken", "canonical id projected");
+    assert.equal(parsed.issuesTruncated, false);
+    // structuredContent mirrors the text JSON (schema-validated).
+    if (res.structuredContent) {
+      assert.deepEqual(res.structuredContent, parsed, "structuredContent equals text JSON");
+    }
+  } finally {
+    if (client) await client.close();
+    cleanupDir(dir);
+  }
+});
+
+test("M12-25-REG-2: whole-file invalid JSON registry → MCP error (NOT a partial result)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1225-reg2-"));
+  let client;
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, "{ not valid json at all ]", "utf8");
+    const runDir = makeSummary(dir, {});
+
+    const { Client } = await import("@modelcontextprotocol/sdk/client");
+    client = new Client({ name: "wao-m1225-reg2", version: "0.0.1" }, { capabilities: {} });
+    const transport = await buildStdioSubprocessTransport({ registryPath, runDir });
+    await client.connect(transport);
+
+    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    assert.equal(res.isError, true, "unreadable/invalid-JSON registry source is a hard error");
+    const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+    assert.ok(/registry_list failed/.test(text), "fixed safe error text");
+    assert.ok(!res.structuredContent, "no partial payload leaked on a whole-file failure");
+  } finally {
+    if (client) await client.close();
+    cleanupDir(dir);
+  }
+});
+
+test("M12-25-REG-3: empty valid registry → agents [], issues [] (distinct from issues present)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m1225-reg3-"));
+  let client;
+  try {
+    const registryPath = makeRegistry(dir, {});
+    const runDir = makeSummary(dir, {});
+
+    const { Client } = await import("@modelcontextprotocol/sdk/client");
+    client = new Client({ name: "wao-m1225-reg3", version: "0.0.1" }, { capabilities: {} });
+    const transport = await buildStdioSubprocessTransport({ registryPath, runDir });
+    await client.connect(transport);
+
+    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    assert.deepEqual(parsed.agents, []);
+    assert.deepEqual(parsed.issues, []);
+    assert.equal(parsed.issuesTruncated, false);
+  } finally {
+    if (client) await client.close();
+    cleanupDir(dir);
+  }
+});
+
+test("M12-25-REG-4: registry_list outputSchema declares the closed issue code set + issuesTruncated", async () => {
+  const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs" });
+  const client = await buildInMemoryClient(server);
+  try {
+    const tools = await client.listTools();
+    const t = tools.tools.find((x) => x.name === "registry_list");
+    assert.ok(t.outputSchema, "output schema declared");
+    const schemaText = JSON.stringify(t.outputSchema);
+    assert.ok(/issues/.test(schemaText), "output schema declares issues");
+    assert.ok(/issuesTruncated/.test(schemaText), "output schema declares issuesTruncated");
+    // Closed-set issue codes derived from the SSOT (no dynamic text).
+    assert.ok(/invalid_id/.test(schemaText), "invalid_id code in the schema enum");
+    assert.ok(/invalid_configuration/.test(schemaText), "invalid_configuration code in the schema enum");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("M12-25-REG-5: bare-array injected service (legacy) normalized to issues:[]", async () => {
+  // Backward compatibility: an injected service that returns the legacy bare
+  // array shape must still work — the handler normalizes it to {agents, issues:[]}.
+  const fakeService = async () => [
+    { id: "coder_low", backend: "claude-code", model: "glm-5-turbo", reasoningEffort: null, certification: null, cwd: "/r", sessionReuse: null, credentialAvailability: "available", missingCredentialEnvNames: [], providerReadiness: { configurationStatus: "configured", authenticationStatus: "unknown", entitlementStatus: "unknown", liveCheckStatus: "not_checked", credentialAvailability: "available" } },
+  ];
+  const server = createWaoMcpServer({
+    registryPath: "/r.json", runDir: "/runs", getRegistryInventoryFn: fakeService,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    assert.equal(parsed.agents.length, 1);
+    assert.deepEqual(parsed.issues, [], "legacy bare-array service → no issues");
+    assert.equal(parsed.issuesTruncated, false);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("M12-25-REG-6: partial injected service {agents, issues} threads both through, parsed schema", async () => {
+  const fakeService = async () => ({
+    agents: [
+      { id: "good", backend: "claude-code", model: "glm-5-turbo", reasoningEffort: null, certification: null, cwd: "/r", sessionReuse: null, credentialAvailability: "available", missingCredentialEnvNames: [], providerReadiness: { configurationStatus: "configured", authenticationStatus: "unknown", entitlementStatus: "unknown", liveCheckStatus: "not_checked", credentialAvailability: "available" } },
+    ],
+    issues: [{ code: "invalid_configuration", agentId: "broken", rawError: "SECRET_LEAK", path: "/etc/agents.json" }],
+    issuesTruncated: false,
+  });
+  const server = createWaoMcpServer({
+    registryPath: "/r.json", runDir: "/runs", getRegistryInventoryFn: fakeService,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    assert.ok(res.structuredContent, "schema-validated structuredContent present");
+    assert.equal(res.structuredContent.agents.length, 1);
+    assert.equal(res.structuredContent.issues.length, 1);
+    assert.equal(res.structuredContent.issues[0].agentId, "broken");
+    assert.equal(res.structuredContent.issuesTruncated, false);
+    // A malicious injected issue carrying extra fields must be stripped by the
+    // strict schema parse — never echoed back to the model.
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    assert.deepEqual(Object.keys(parsed.issues[0]).sort(), ["agentId", "code"]);
+    const dumped = JSON.stringify(parsed);
+    assert.ok(!dumped.includes("SECRET_LEAK"), "malicious injected issue field stripped");
+    assert.ok(!dumped.includes("/etc/agents.json"), "malicious injected path stripped");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+// M12-25-REG-7: a malicious injected service returns >REGISTRY_ISSUES_CAP issues
+// WITH issuesTruncated:false plus leak bait. The MCP boundary must return a
+// bounded partial result (NOT a whole-registry error): the valid agent is still
+// present, issues are capped, issuesTruncated becomes true, and no injected
+// field/code/id leaks. Proves the shared SSOT projector bounds at the MCP edge.
+test("M12-25-REG-7: injected >cap issues + issuesTruncated:false → bounded partial (valid worker kept, cap + truncate, no leak)", async () => {
+  const over = REGISTRY_ISSUES_CAP + 4;
+  const fakeService = async () => ({
+    agents: [
+      { id: "good", backend: "claude-code", model: "glm-5-turbo", reasoningEffort: null, certification: null, cwd: "/r", sessionReuse: null, credentialAvailability: "available", missingCredentialEnvNames: [], providerReadiness: { configurationStatus: "configured", authenticationStatus: "unknown", entitlementStatus: "unknown", liveCheckStatus: "not_checked", credentialAvailability: "available" } },
+    ],
+    issues: Array.from({ length: over }, (_, i) => ({
+      code: i % 2 === 0 ? "invalid_configuration" : "EVIL_CODE",
+      agentId: i % 3 === 0 ? "coder_low" : "NOT CANONICAL!!",
+      rawError: `leak-${i}`,
+      path: `/secret/${i}`,
+    })),
+    issuesTruncated: false,
+  });
+  const server = createWaoMcpServer({
+    registryPath: "/r.json", runDir: "/runs", getRegistryInventoryFn: fakeService,
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "registry_list", arguments: {} });
+    // Bounded partial result — NOT a generic whole-registry error.
+    assert.equal(res.isError, undefined, "bounded partial result, not a whole-registry error");
+    assert.ok(res.structuredContent, "schema-validated structuredContent present");
+    assert.equal(res.structuredContent.agents.length, 1, "valid worker preserved (not erased)");
+    assert.equal(res.structuredContent.agents[0].id, "good");
+    assert.equal(res.structuredContent.issues.length, REGISTRY_ISSUES_CAP, "capped at REGISTRY_ISSUES_CAP");
+    assert.equal(res.structuredContent.issuesTruncated, true, "over-cap input reports truncation despite source false");
+    for (const issue of res.structuredContent.issues) {
+      assert.ok(REGISTRY_ISSUE_CODES.includes(issue.code), `closed-set code only: ${issue.code}`);
+      assert.ok(issue.agentId === null || isValidCanonicalAgentId(issue.agentId), "canonical agentId or null");
+      assert.deepEqual(Object.keys(issue).sort(), ["agentId", "code"], "no injected field survives the schema");
+    }
+    const dumped = JSON.stringify(res);
+    assert.ok(!dumped.includes("EVIL_CODE"), "out-of-set code never leaks");
+    assert.ok(!dumped.includes("rawError"), "injected field name never leaks");
+    assert.ok(!dumped.includes("leak-"), "raw error text never leaks");
+    assert.ok(!dumped.includes("/secret/"), "injected path never leaks");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+// M12-25B finding 2: registry_list must FAIL CLOSED on a malformed/null injected
+// inventory result — return the fixed MCP error (isError), NEVER an
+// observed-empty success payload (agents:[]). A null/malformed result means
+// "could not read", which must stay distinct from a genuinely empty-but-readable
+// registry (REG-3 observes agents:[] legitimately). Current code does
+// `invResult?.agents ?? []`, so most malformed shapes collapse to [] and parse
+// into an empty SUCCESS — i.e. it FAILS OPEN. This RED reproduces that and guards
+// the fail-closed fix. (The legacy bare-array and valid {agents} shapes remain
+// accepted — see REG-5/REG-6.)
+test("M12-25-REG-8: null/malformed injected inventory → registry_list fails CLOSED (isError, never observed-empty)", async () => {
+  for (const bad of [null, undefined, { noAgentsKey: true }, 42, "a-string"]) {
+    const fakeService = async () => bad;
+    const server = createWaoMcpServer({
+      registryPath: "/r.json", runDir: "/runs", getRegistryInventoryFn: fakeService,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "registry_list", arguments: {} });
+      assert.equal(res.isError, true,
+        `malformed injected inventory (${JSON.stringify(bad)}) must fail closed to the MCP error, not an observed-empty success`);
+      assert.equal(res.structuredContent, undefined,
+        "fail-closed error path carries no agents payload (no fabricated observed-empty registry)");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }
+});

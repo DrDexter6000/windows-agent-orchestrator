@@ -59,6 +59,40 @@ const DEFAULT_RUNNER_PATH = join(
 
 const DEFAULT_POLL_INTERVAL = 1000;
 
+// M12-25 (Outcome 2): the providerSessionRouting closed set — the ROUTING
+// REQUEST truth dispatchRun exposes, derived ONLY from the internal routing
+// turn it already selected. It states what routing dispatch REQUESTED, never
+// whether the provider accepted/resumed:
+//   not_used              — no provider-session routing was requested (ordinary
+//                           non-reuse dispatch, or a rejected dispatch).
+//   first_turn_requested  — dispatch requested the FIRST turn of a provider
+//                           session (a reusable expert's first turn, or a
+//                           continuable delivery lineage root).
+//   resume_requested      — dispatch requested RESUMING an existing provider
+//                           session (a reusable expert's follow-up turn).
+// The routing MODE (lead_workspace / run_lineage), the opaque session uuid,
+// Lead ids, workspace paths, argv, and provider payload are NEVER exposed. The
+// MCP wire schema derives its enum from this frozen array (single SSOT).
+export const PROVIDER_SESSION_ROUTING = Object.freeze([
+  "not_used",
+  "first_turn_requested",
+  "resume_requested",
+]);
+
+/**
+ * Derive the bounded providerSessionRouting value from the internal routing
+ * turn dispatchRun selected. Only the TURN matters (first → first_turn_requested,
+ * resume → resume_requested); the mode and opaque uuid are intentionally dropped.
+ * @param {{mode:string, opaqueUuid:string, turn:string}|null} routing
+ * @returns {"not_used"|"first_turn_requested"|"resume_requested"}
+ */
+function deriveProviderSessionRouting(routing) {
+  if (!routing) return "not_used";
+  if (routing.turn === "first") return "first_turn_requested";
+  if (routing.turn === "resume") return "resume_requested";
+  return "not_used";
+}
+
 /**
  * Generate a runId in the same format RunManager uses.
  * @returns {string}
@@ -418,6 +452,8 @@ export async function dispatchRun({
       state: pendingResult.state,
       transcriptPath,
       terminalState: pendingResult.state,
+      // M12-25: a rejected dispatch never requested a provider session.
+      providerSessionRouting: "not_used",
     };
   }
 
@@ -455,5 +491,9 @@ export async function dispatchRun({
     agentId,
     state: "pending",
     transcriptPath,
+    // M12-25: ROUTING REQUEST truth, derived only from the routing turn selected
+    // above. Describes what dispatch requested, never provider success. Exposes
+    // only the closed-set value — never the mode, opaque uuid, Lead id, or workspace.
+    providerSessionRouting: deriveProviderSessionRouting(sessionReuseRouting),
   };
 }

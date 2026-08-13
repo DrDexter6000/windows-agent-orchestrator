@@ -27,7 +27,12 @@
 //     or persist anything.
 //   - Composes existing application services (getRegistryInventory, listRuns).
 
-import { getRegistryInventory, buildProviderReadiness } from "./registryInventory.js";
+import {
+  getRegistryInventory,
+  buildProviderReadiness,
+  projectRegistryIssues,
+  normalizeInventoryResult,
+} from "./registryInventory.js";
 
 /**
  * @typedef {Object} PreflightWorkspace
@@ -211,9 +216,30 @@ export async function aggregateLeadPreflight({
   // --- Section 2: worker credential availability (independent) ---
   // unknown → null (NOT []), so "could not read" is distinct from "zero workers".
   let workers = null;
+  // M12-25: bounded safe per-entry issues from the partial inventory projection.
+  // Empty when the inventory was observed-clean (or the resolver returned the
+  // legacy bare-array shape). Non-empty → checkStatus.workers="warning" and
+  // complete=false, but the VALID workers are still returned (one malformed entry
+  // never hides the healthy ones). Stays [] when the section is unknown.
+  let registryIssues = [];
+  let registryIssuesTruncated = false;
   try {
     const invFn = getRegistryInventoryFn ?? getRegistryInventory;
-    const agents = await invFn({ registryPath, runDir, userEnvReader });
+    const invResult = await invFn({ registryPath, runDir, userEnvReader });
+    // M12-25B: normalize through the SINGLE shared shape. Accepts the legacy
+    // bare array AND the partial {agents, issues, issuesTruncated} projection;
+    // THROWS on null/malformed → caught below → checkStatus.workers="unknown"
+    // (never observed-empty: a read failure must stay distinct from zero agents).
+    const norm = normalizeInventoryResult(invResult);
+    const agents = norm.agents;
+    // M12-25: the shared SSOT projector bounds + truncates + sanitizes the
+    // issues (closed-set code, canonical agentId-or-null, no injected field).
+    // An injected resolver cannot smuggle dynamic text, and >cap input with
+    // issuesTruncated:false still reports truncation. Same logic as the partial
+    // projector and the MCP registry_list handler — one projection, not three.
+    const projected = projectRegistryIssues(norm.issues, norm.issuesTruncated);
+    registryIssues = projected.issues;
+    registryIssuesTruncated = projected.issuesTruncated;
     workers = agents.slice(0, WORKERS_CAP).map((a) => ({
       id: a.id,
       backend: a.backend,
@@ -230,6 +256,17 @@ export async function aggregateLeadPreflight({
     checkStatus.workers = "observed";
     if (agents.length > WORKERS_CAP) {
       warnings.push(`worker inventory truncated to ${WORKERS_CAP} (registry has ${agents.length}) — use registry_list for the full list`);
+    }
+    // M12-25: partial inventory — valid workers are returned, but the workers
+    // section is a WARNING (→ complete=false) when any entry was omitted. This
+    // keeps "registry had a bad entry" distinct from an observed-clean list and
+    // distinct from an unreadable registry (which is unknown, never faked []).
+    if (registryIssues.length > 0) {
+      checkStatus.workers = "warning";
+      warnings.push(
+        `worker inventory has ${registryIssues.length} malformed/unsupported entr${registryIssues.length === 1 ? "y" : "ies"} omitted; ` +
+        `${workers.length} valid worker(s) returned — use registry_list for the bounded per-entry issue list`,
+      );
     }
     const conditional = workers.filter((w) => w.certification === "conditional");
     const missing = workers.filter((w) => w.credentialAvailability === "missing");
@@ -323,6 +360,10 @@ export async function aggregateLeadPreflight({
     workspace,
     workspaceSelection,
     workers,
+    // M12-25: bounded safe per-entry issues from the partial inventory (empty when
+    // observed-clean or unknown). Non-empty ⇒ checkStatus.workers="warning".
+    registryIssues,
+    registryIssuesTruncated,
     activeRuns,
     activeRunCount,
     activeRunsTruncated,

@@ -971,6 +971,9 @@ test("M11-11C MCP-3: run_dispatch output never leaks leadSession/opaqueUuid/work
     const OPAQUE = deriveOpaqueUuid({ leadSession: "x", workspace: dir, agentId: "researcher" });
     const fakeDispatch = async (input) => ({
       accepted: true, runId: "run_mcp3", agentId: "researcher", state: "pending",
+      // M12-25: providerSessionRouting is required truth (no MCP fallback); the
+      // reusable researcher's first turn requests a provider session.
+      providerSessionRouting: "first_turn_requested",
       // Internal leakage bait — none of this may surface:
       transcriptPath: "/secret/run_mcp3.jsonl",
       leadSession: input.leadSession,
@@ -986,12 +989,13 @@ test("M11-11C MCP-3: run_dispatch output never leaks leadSession/opaqueUuid/work
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
 
       // Current exact safe key set: the four original scalars plus the additive
-      // bounded workspaceProof (M12-6 FR-03). Strict — the dispatcher's bait
+      // bounded workspaceProof (M12-6 FR-03) and the additive providerSessionRouting
+      // (M12-25). Strict — the dispatcher's bait
       // (transcriptPath/leadSession/opaqueUuid/workspace/argv) must never surface.
       assert.deepEqual(
         Object.keys(parsed).sort(),
-        ["accepted", "agentId", "runId", "state", "workspaceProof"],
-        "only the safe keys: four scalars + additive workspaceProof",
+        ["accepted", "agentId", "providerSessionRouting", "runId", "state", "workspaceProof"],
+        "only the safe keys: four scalars + additive workspaceProof + additive providerSessionRouting",
       );
       assert.equal(parsed.accepted, true);
       assert.equal(parsed.runId, "run_mcp3");

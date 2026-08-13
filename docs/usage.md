@@ -552,11 +552,15 @@ OpenCode（`opencode-ai` npm 包，不是已废弃的 `opencode`）作为 MCP Le
         "entitlementStatus": "unknown",
         "liveCheckStatus": "not_checked",
         "credentialAvailability": "available" } }
-  ]
+  ],
+  "issues": [],
+  "issuesTruncated": false
 }
 ```
 
-字段语义与 CLI `registry list --format json` 的数组元素一致（MCP 仅多一层 `agents` 包装）。`registry_list` 是只读操作，调用前后 runDir 不会有新增 transcript/run 文件。
+`agents` 元素语义与 CLI `registry list --format json` 的数组元素一致（MCP 仅多一层 `agents` 包装）。`registry_list` 是只读操作，调用前后 runDir 不会有新增 transcript/run 文件。
+
+**M12-25 bounded partial inventory（Outcome 1）**：MCP `registry_list`（与 `lead_preflight`）走一条**独立的部分投影**路径——registry 源可读但某条目无法 normalize/project 时，**有效 worker 照常返回**，另附有界安全的逐条 `issues` 而非整表失败。`issues` 元素形状固定为 `{ "code": "invalid_id" | "invalid_configuration", "agentId": "<canonical id>" | null }`：`code` 是闭集（`invalid_id`=id 非 canonical；`invalid_configuration`=canonical id 但 backend/cwd/model/provider/sessionReuse/waitTimeout/systemPrompt 校验失败），`agentId` 仅当 id 为 canonical 时投影、否则 `null`（**绝不**回显原始 id）。**绝不**携带原始 error 文本、配置、路径或凭据值；条目数上限 32（`REGISTRY_ISSUES_CAP`），超限设 `issuesTruncated:true`（真实 malformed 数无界）。零有效 worker **但有 issues** ≠ 观察干净的空 registry（`issues` 非空）。这与严格的 registry 维护路径（CLI `registry validate` / `registry list` 仍遇首条坏条目即抛错）是**分开**的投影：WAO 不据此自动停止派发、不自动换 worker、不把坏条目标记为 healthy。整表源不可读或非法 JSON 是**另一类**失败——`registry_list` 直接返回固定 error（`lead_preflight` 则 `checkStatus.workers:"unknown"`、`workers:null`），绝不伪造成部分结果。registry 源每次 MCP 操作**只读/解析一次**；`lead_preflight` 复用同一快照结果，绝不回退二次读取。
 
 **M11-7 凭据可用性**：`certification` 是历史可靠性认证结果，不等于"此刻可启动"。`credentialAvailability`（`available` / `missing` / `not_required`）只反映 worker **registry 显式声明为必需**的 credential（`provider.apiKeyEnv` / legacy `--api-key-env`）是否在当前环境可用——不声称 runtime 整体健康。优先 `process.env`，回退 Windows Current-User 环境，两处都缺失则为 `missing`；未声明必需凭据的 worker 为 `not_required`。**可选继承变量**（如 `OPENAI_BASE_URL`、`CODEX_HOME`、`KIMI_MODEL_NAME`）会被继承但不参与 missing gate——不会因缺少可选配置阻止派发。`missingCredentialEnvNames` 列出缺失的必需 env 变量**名**（绝不包含值）。`run_dispatch` 在 transcript 写入和 fork 前用同一 readiness 检查拒绝 `missing` 的 worker（零 transcript、零 fork），返回固定可行动错误。WAO 不保存/轮换凭据，不批量导入用户环境，只读取 registry 明确声明的精确变量名；设置或轮换凭据后**无需重启 Host**（每次评估重新观察当前状态）。
 
@@ -619,10 +623,12 @@ M9-7A 起支持可选 `delivery` 块，用于派发后续可由 `run_delivery`/`
 - **输出**（成功或拒绝同形，MCP `content` + `structuredContent`）：
 
 ```json
-{ "runId": "run_...", "agentId": "coder_low", "accepted": true, "state": "pending" }
+{ "runId": "run_...", "agentId": "coder_low", "accepted": true, "state": "pending", "providerSessionRouting": "not_used" }
 ```
 
-只返回 `runId`/`agentId`/`accepted`/`state`（M11-8B：`agentId` 是 transcript envelope 盖戳的 canonical worker 身份）。**身份绑定（M11-8B final）**：返回的 `agentId` 必须精确等于请求的 `agentId`——这是控制面对派发的身份绑定，不允许"合法但属于另一个 worker"的 id、missing/unknown/非法值；mismatch 一律折叠为固定 `run_dispatch failed`（`isError:true`、无 `structuredContent`、不泄漏返回值）。`run_dispatch` 永不返回 `"unknown"` 哨兵（那是 read 类工具的降级值）。不返回绝对路径、PID、prompt、argv 或内部错误。service 失败时返回固定安全文案 `run_dispatch failed`，不拼接原始 exception message、stderr、路径或凭据。
+只返回 `runId`/`agentId`/`accepted`/`state`/`providerSessionRouting`（M11-8B：`agentId` 是 transcript envelope 盖戳的 canonical worker 身份）。**身份绑定（M11-8B final）**：返回的 `agentId` 必须精确等于请求的 `agentId`——这是控制面对派发的身份绑定，不允许"合法但属于另一个 worker"的 id、missing/unknown/非法值；mismatch 一律折叠为固定 `run_dispatch failed`（`isError:true`、无 `structuredContent`、不泄漏返回值）。`run_dispatch` 永不返回 `"unknown"` 哨兵（那是 read 类工具的降级值）。不返回绝对路径、PID、prompt、argv 或内部错误。service 失败时返回固定安全文案 `run_dispatch failed`，不拼接原始 exception message、stderr、路径或凭据。
+
+**M12-25 provider session routing truth（Outcome 2）**：`providerSessionRouting` 是闭集 `"not_used" | "first_turn_requested" | "resume_requested"`，描述**本次派发的路由请求**真相，**不是** provider 会话成功/建立的证明。派生仅来自 `dispatchRun` 内部已选定的路由回合（`routing.turn`）：普通一次性派发（含普通 delivery 的 `lead_workspace` 复用，该复用是**有意不使用** provider session）→ `not_used`；reusable expert 首轮 / continuable delivery 根首轮 → `first_turn_requested`；reusable expert resume / continuable 续接 → `resume_requested`。`accepted:false` 早返回恒为 `not_used`。**绝不**暴露 routing mode、opaque session uuid、Lead id、workspace path、argv 或 provider payload——这些是 server-owned 内部细节。该字段只如实说"请求了什么路由"，provider 是否真正 resume 成功仍由后续 `run_status`/`run_await_result` 的传输与终态证据决定；WAO 不据此自动决定路由、不自动重试、不自动 stop。
 
 返回时 transcript 已可读且为 `pending`；关闭 MCP host 后，detached runner 独立驱动 worker 到终态（token 闸门/超时/兜底 abort 都生效），写入共享 transcript。Lead 用 MCP `run_status` 轮询状态。
 
@@ -785,6 +791,8 @@ annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:true, o
 {
   "workspace": { "bound": true, "source": "lead_session", "gitHead": "abc...", "dirty": false, "unboundReason": null },
   "workers": [ { "id": "...", "backend": "...", "model": "...", "certification": "certified", "credentialAvailability": "available", "providerReadiness": { "configurationStatus": "configured", "authenticationStatus": "unknown", "entitlementStatus": "unknown", "liveCheckStatus": "not_checked", "credentialAvailability": "available" } } ],
+  "registryIssues": [],
+  "registryIssuesTruncated": false,
   "activeRuns": [ { "runId": "...", "agentId": "...", "state": "running", "terminal": false, "updatedAt": "..." } ],
   "activeRunCount": 1,
   "activeRunsTruncated": false,
@@ -797,6 +805,8 @@ annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:true, o
 ```
 
 不返回 `PASS`/`FAIL`；check-level 状态为 `observed`/`warning`/`unknown`。`manualChecks` 指向原始 MCP 工具，允许 Lead 独立复核（与聚合结论不同时，Lead 可依据直接证据继续并记录 friction）。Active run、conditional worker、dirty workspace 只是事实，不自动禁止派发。
+
+**M12-25 registry partial truth**：`registryIssues`/`registryIssuesTruncated` 复用与 `registry_list` 同一闭集 issue 形状与同一快照（见上文 §`registry_list` 的 M12-25 段）。`registryIssues` 非空时 `checkStatus.workers` 升为 `"warning"`（从而使 `complete:false`）并追加一条计数 warning，但**有效 worker 照常返回**——一条坏条目绝不隐藏其余 healthy worker；Lead 可据 `registry_list` 查看有界逐条 issue。registry 整源不可读时 `workers` 为 `null`、`checkStatus.workers:"unknown"`、`registryIssues:[]`（unknown 绝不伪造为"零坏条目"）。
 
 **M12-19 recovery truth**：未绑定时 `workspace.unboundReason` 与 `workspace_status` 同一闭集（`lead_session_git_proof_failed` / `server_config_git_proof_failed` / `no_workspace_authority`，已绑定恒为 `null`）——让 Lead 在单次 preflight 内直接看到"哪个 authority 的证明失败"，绝不返回路径或动态错误。
 

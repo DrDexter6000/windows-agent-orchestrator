@@ -29,12 +29,17 @@ import { z } from "zod";
 
 import {
   getRegistryInventory,
+  getRegistryInventoryWithIssues,
+  projectRegistryIssues,
+  normalizeInventoryResult,
+  REGISTRY_ISSUE_CODES,
+  REGISTRY_ISSUES_CAP,
   CONFIGURATION_STATUSES,
   AUTHENTICATION_STATUSES,
   ENTITLEMENT_STATUSES,
   LIVE_CHECK_STATUSES,
 } from "../application/registryInventory.js";
-import { dispatchRun, ReuseBusyError } from "../application/runDispatch.js";
+import { dispatchRun, ReuseBusyError, PROVIDER_SESSION_ROUTING } from "../application/runDispatch.js";
 // M12-7: Lead-authorized correction continuation. The service spawns a NEW child
 // run/transcript that resumes the parent's provider-native conversation IN the
 // parent's retained worktree. The MCP boundary resolves the workspace + Lead
@@ -341,9 +346,23 @@ const AGENT_ENTRY = z.object({
   providerReadiness: PROVIDER_READINESS,
 });
 
+// M12-25 (Outcome 1): bounded safe per-entry issue for the PARTIAL inventory.
+// A readable registry with one malformed/unsupported entry returns the VALID
+// agents PLUS these issues instead of aborting the whole list. The shape is
+// closed and safe: code is the SSOT enum (no dynamic error text); agentId is
+// projected only when canonical (null otherwise — a malicious/sensitive raw id
+// is never echoed). No raw error text / config / path / credential value.
+const REGISTRY_ISSUE = z.object({
+  code: z.enum(REGISTRY_ISSUE_CODES),
+  agentId: z.string().nullable(),
+}).strict();
+
 const REGISTRY_LIST_OUTPUT = z.object({
   agents: z.array(AGENT_ENTRY),
-});
+  // M12-25: bounded per-entry issues (closed code set; canonical id only).
+  issues: z.array(REGISTRY_ISSUE).max(REGISTRY_ISSUES_CAP),
+  issuesTruncated: z.boolean(),
+}).strict();
 
 // Read-only annotations tell MCP hosts this tool is safe to cache/retry and
 // does not mutate the world.
@@ -509,16 +528,20 @@ const WORKSPACE_PROOF = z.object({
   expectedWorkspaceRootMatch: z.boolean().nullable(),
 }).strict();
 
-// run_dispatch output: runId + agentId + accepted + state + additive workspaceProof.
-// No paths, PID, prompt, argv. M11-8B final closeout: strict root; agentId is
-// REAL-only (the binding from the control plane — never the sentinel, never
-// another worker's id).
+// run_dispatch output: runId + agentId + accepted + state + additive workspaceProof
+// + additive providerSessionRouting. No paths, PID, prompt, argv, opaque session
+// id, Lead id, or provider payload. M11-8B final closeout: strict root; agentId
+// is REAL-only (the binding from the control plane — never the sentinel, never
+// another worker's id). M12-25: providerSessionRouting is the ROUTING REQUEST
+// truth dispatchRun selected (not provider success); closed set derived from the
+// runDispatch SSOT so a malicious/injected value can never pass or leak.
 const RUN_DISPATCH_OUTPUT = z.object({
   runId: z.string(),
   agentId: REAL_AGENT_ID_SCHEMA,
   accepted: z.boolean(),
   state: z.string(),
   workspaceProof: WORKSPACE_PROOF,
+  providerSessionRouting: z.enum(PROVIDER_SESSION_ROUTING),
 }).strict();
 
 // Dispatch spawns a worker that executes commands, modifies files, and may
@@ -1912,6 +1935,12 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
     // M12-6 FR-02: same strict truth object as registry_list (shared SSOT enums).
     providerReadiness: PROVIDER_READINESS,
   }).strict()).max(WORKERS_CAP).nullable(),
+  // M12-25: bounded safe per-entry issues from the partial inventory projection.
+  // Non-empty ⇒ checkStatus.workers="warning" (→ complete=false), but the VALID
+  // workers above are still returned. Empty when observed-clean or unknown.
+  // Same closed-set shape as registry_list (single SSOT for codes/cap).
+  registryIssues: z.array(REGISTRY_ISSUE).max(REGISTRY_ISSUES_CAP),
+  registryIssuesTruncated: z.boolean(),
   activeRuns: z.array(z.object({
     runId: z.string().max(128),
     agentId: z.string().max(128),
@@ -2676,7 +2705,13 @@ export function createWaoMcpServer({
   // current binding, registry, heartbeat and filters against them per query.
   const summaryCache = runSummaryCache ?? createRunSummaryCache();
   const cachedRunFactsReader = (filePath) => summaryCache.read(filePath);
-  const service = getRegistryInventoryFn ?? getRegistryInventory;
+  // M12-25: the default inventory service is the PARTIAL projection — it returns
+  // valid agents + bounded safe per-entry issues, so one malformed entry never
+  // hides the healthy workers. (An injected getRegistryInventoryFn may return
+  // either the legacy bare array or the {agents, issues, issuesTruncated} shape;
+  // both registry_list and lead_preflight normalize accordingly.) The strict
+  // getRegistryInventory is still exported for CLI `registry list`/`validate`.
+  const service = getRegistryInventoryFn ?? getRegistryInventoryWithIssues;
   // M11-7: the Windows user-env reader for credential readiness. Defaults to
   // the real reader (PowerShell HKCU\Environment); tests inject a fake.
   const resolveUserEnv = userEnvReader ?? readWindowsUserEnv;
@@ -2870,9 +2905,9 @@ export function createWaoMcpServer({
       annotations: REGISTRY_LIST_ANNOTATIONS,
     },
     async () => {
-      let agents;
+      let invResult;
       try {
-        agents = await service({ registryPath, runDir, userEnvReader: resolveUserEnv });
+        invResult = await service({ registryPath, runDir, userEnvReader: resolveUserEnv });
       } catch {
         // Redaction contract: fixed safe text only. Never surface err.message,
         // stack, paths, env, or any dynamic detail to the model.
@@ -2881,7 +2916,37 @@ export function createWaoMcpServer({
           content: [{ type: "text", text: SERVICE_ERROR_TEXT }],
         };
       }
-      const payload = { agents };
+      // M12-25B: normalize through the SINGLE shared shape. Accepts the legacy
+      // bare-array AND the partial {agents, issues, issuesTruncated} shapes;
+      // THROWS on null/malformed → fail CLOSED to the fixed MCP error (never an
+      // observed-empty success payload that would fake a read failure as clean).
+      let norm;
+      try {
+        norm = normalizeInventoryResult(invResult);
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: SERVICE_ERROR_TEXT }],
+        };
+      }
+      // M12-25: the shared SSOT projector bounds + truncates + sanitizes the
+      // issues BEFORE the schema parse — the same logic as the partial projector
+      // and the lead_preflight aggregator. A malicious/injected issue can never
+      // carry dynamic text, an out-of-set code, a non-canonical id, or exceed the
+      // cap; >cap input with issuesTruncated:false still reports truncation.
+      const { issues, issuesTruncated } = projectRegistryIssues(norm.issues, norm.issuesTruncated);
+      // Validate AND return the parsed safe object — strict schemas strip any
+      // internal-only / unknown fields so the model never sees fields that
+      // bypassed the output contract.
+      let payload;
+      try {
+        payload = REGISTRY_LIST_OUTPUT.parse({ agents: norm.agents, issues, issuesTruncated });
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: SERVICE_ERROR_TEXT }],
+        };
+      }
       return {
         content: [{ type: "text", text: JSON.stringify(payload) }],
         structuredContent: payload,
@@ -3016,16 +3081,26 @@ export function createWaoMcpServer({
       let inventorySnapshot = null;
       let inventoryFailed = false;
       try {
-        inventorySnapshot = await service({ registryPath, runDir, userEnvReader: resolveUserEnv });
+        const rawSnapshot = await service({ registryPath, runDir, userEnvReader: resolveUserEnv });
+        // M12-25B: normalize through the SINGLE shared shape. Accepts the legacy
+        // bare-array AND the partial {agents, issues, issuesTruncated} shapes;
+        // THROWS on null/malformed → inventoryFailed (the aggregator then reports
+        // workers=unknown, NEVER observed-empty). Idempotent, so the replayed
+        // normalized snapshot is accepted as-is by the aggregator's normalize.
+        inventorySnapshot = normalizeInventoryResult(rawSnapshot);
       } catch {
         inventoryFailed = true;
       }
-      const knownAgentIds = Array.isArray(inventorySnapshot)
-        ? inventorySnapshot.map((a) => a.id)
-        : [];
-      // Replay the single outcome: success → return the snapshot; failure → throw
-      // (so the aggregator marks workers=unknown). Never undefined (which would
-      // trigger a fallback re-read).
+      // M12-25: knownAgentIds derive from the VALID agents only (malformed
+      // entries are not known agents). On failure knownAgentIds is [] (degraded
+      // validation — run agentIds show as 'unknown'), which is NOT a workers
+      // "observed" claim. The inventoryResolver replays the SAME normalized
+      // snapshot — including its issues — so the aggregator threads them through
+      // without a second read.
+      const knownAgentIds = inventoryFailed ? [] : inventorySnapshot.agents.map((a) => a.id);
+      // Replay the single outcome: success → return the normalized snapshot;
+      // failure → throw (so the aggregator marks workers=unknown). Never
+      // undefined (which would trigger a fallback re-read).
       const inventoryResolver = inventoryFailed
         ? async () => { throw new Error("registry snapshot failed"); }
         : async () => inventorySnapshot;
@@ -3054,6 +3129,9 @@ export function createWaoMcpServer({
           workspace: null,
           workspaceSelection: null,
           workers: null,
+          // M12-25: no partial-inventory issues derivable on aggregate failure.
+          registryIssues: [],
+          registryIssuesTruncated: false,
           activeRuns: null,
           activeRunCount: null,
           activeRunsTruncated: false,
@@ -3323,6 +3401,15 @@ export function createWaoMcpServer({
           accepted: result.accepted,
           state: result.state,
           workspaceProof,
+          // M12-25: forward the routing REQUEST truth only (required truth, not a
+          // compatibility default). dispatchRun returns an explicit closed-set
+          // value on every accepted/rejected path; an injected/malformed
+          // dispatcher that omits it makes the enum fail here → the surrounding
+          // catch returns the fixed safe run_dispatch error (never fabricates
+          // not_used). An out-of-set value fails the same way; the routing mode /
+          // opaque uuid / Lead id / workspace the dispatcher might also return are
+          // NEVER forwarded (the handler selects exactly these keys).
+          providerSessionRouting: result.providerSessionRouting,
         });
         return {
           content: [{ type: "text", text: JSON.stringify(parsed) }],
@@ -4069,13 +4156,20 @@ export function createWaoMcpServer({
           };
         }
 
-        // Get known agent IDs from registry for agentId validation
+        // Get known agent IDs from registry for agentId validation.
         let knownAgentIds = [];
         try {
           const inventory = await service({ registryPath, runDir });
-          knownAgentIds = (Array.isArray(inventory) ? inventory : []).map((a) => a.id);
+          // M12-25B finding 1: normalize through the SAME shared snapshot shape
+          // used by lead_preflight / registry_list. The default service returns
+          // the partial {agents, issues, issuesTruncated} OBJECT; the old
+          // Array.isArray(...) check treated it as non-array → knownAgentIds=[]
+          // and erased EVERY run's agentId to 'unknown' even for a valid
+          // registry. Malformed → throws → caught → knownAgentIds stays []
+          // (degraded: run agentIds 'unknown'), the intended unavailable behavior.
+          knownAgentIds = normalizeInventoryResult(inventory).agents.map((a) => a.id);
         } catch {
-          // Registry unavailable — all agentIds will be "unknown"
+          // Registry unavailable or malformed — all agentIds will be "unknown"
         }
 
         const activeOnly = input?.activeOnly ?? false;
