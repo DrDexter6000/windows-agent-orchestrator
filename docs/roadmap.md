@@ -290,9 +290,11 @@ WAO 新增独立 `DeepSeekHarnessBackend`，通过用户提供的 DSH SDK stdio 
 
 正式认证使用仓库权威入口 `npm run reliability -- --agent coder_low --profile strict --wait-timeout 600000`：`DeepSeekHarnessBackend` / `deepseek-v4-flash` 完成真实模型、assistant 文本、非零 usage、两条命令证据、文件写入事件、物理文件 materialization 与严格 sentinel 全链，结果为 `status:"certified"` / `recommendedUse:"strict-dispatch"`；随后 MCP `registry_list` 与 CLI registry 投影均精确返回该 backend/model/effort 与 `certified`。认证汇总此前会把同一 agent id 的历史 backend/model 混入当前摘要，导致当前 DSH 身份无法获得认证；修复提交 `0251e856216059ef931dd9f036ddbad833710ded` 保留全部历史 case，但只聚合最新 observed backend+providerID+model identity 的状态、能力和 case，且保留同 identity 多 case 聚合。该结论只认证当前本机 `coder_low` 组合，不把 DSH backend 整体提升为 GA，也不修改 tracked 默认 worker 模板。
 
-### M12-26 `run_activity` cursor 结构化恢复（2026-08-14，本地候选）
+### M12-26 `run_activity` cursor 结构化恢复（2026-08-14，已发布并通过 Fresh Host 验收）
 
 观察工具现在把 stale、跨 run/view、snapshot changed、out-of-range 与安全的 malformed cursor 归为 typed application signal，并经真实 MCP 返回有界 `isError:true` + `structuredContent:{status:"cursor_rejected",choices:[...]}`；只给静态事实和两条恢复选择，不回显 raw cursor、子类型、路径或动态错误，也不自动读取第一页、重试、停止或决策。跨 workspace、坏 transcript envelope/snapshot/service output、输出校验和意外内部错误仍是固定 `run_activity failed` 且无 `structuredContent`。第一次 DSH 实现 run `run_20260814043501113t2dlxo` 因 `file_written_physical_unresolved` 被隔离门拒绝且无 delivery；Lead 未绕过控制面抢救。独立 `coder_hq` run `run_20260814044506804kqn2iv` 的 delivery `cacc6b894ce3f41b8e09e31d60f3b55bf55082bf` 经五文件、全部 review 页审查，exact verification passed，并由 Lead accepted 后集成；失败候选未进入主线。
+
+发布后的 Codex Fresh Host 加载 `main@1ceeb8d7fe4c0685ea198c8999a8045378943a44` 与 22-tool MCP 合同；一次 `lead_preflight` 证明 workspace 精确绑定该 SHA、registry 无 issue、active runs 0，且 `coder_low` 正确投影为 `deepseek-harness` / `deepseek-v4-flash` / `certified`。无模型交叉-run 探针先从 `run_20260814044506804kqn2iv` 获取合法 cursor，再将其用于 `run_20260814035423280owrilx`：MCP 固定返回 `isError:true` / `run_activity failed`，同时只给 `status:"cursor_rejected"` 与 `request_page_1_without_cursor` / `use_afterSeq_from_known_sequence` 两项静态选择；按第一项无 cursor 重读立即成功。该验收没有自动重试、停止或控制面写入，也没有调用模型或修改项目文件。
 
 ### 第三方 onboarding helper 发布与 Fresh Host 验收（2026-08-08）
 
