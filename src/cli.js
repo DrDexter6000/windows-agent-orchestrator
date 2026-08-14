@@ -321,20 +321,20 @@ function printHelp() {
 
 Commands:
   registry list --registry config/agents.json
-  registry check [--registry config/agents.json]
-  registry validate [--registry FILE]
+  registry check [--registry config/agents.json] [--format json]
+  registry validate [--registry FILE] [--format json]
   spawn <agentId> [agentId2 ...] --prompt "..." [--cwd DIR] [--registry FILE] [--run-dir DIR] [--wait] [--background] [--poll-interval MS] [--wait-timeout MS] [--tag key=value] [--isolate] [--scorecard-rules-file FILE]
   run <agentId> --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate] [--require-certified] [--background] [--scorecard-rules-file FILE] [--delivery-spec-file FILE]
   status <runId> [--run-dir DIR] [--format json]
   tail <runId> [--limit N] [--follow] [--run-dir DIR]
-  collect <runId> [--limit N] [--cursor TOKEN] [--mode full|compact] [--format json] [--run-dir DIR]
+  collect <runId> [--limit N] [--cursor TOKEN] [--mode full|compact] [--final] [--format json] [--run-dir DIR]
   stop <runId> [--run-dir DIR]
   retry <runId> [--wait] [--run-dir DIR]
   resume <runId> [--wait] [--run-dir DIR]
-  runs list [--run-dir DIR] [--agent AGENT_ID] [--latest N]
-  runs summary [--run-dir DIR]
+  runs list [--run-dir DIR] [--agent AGENT_ID] [--latest N] [--format json]
+  runs summary [--run-dir DIR] [--format json]
   runs prune --older-than <duration> [--run-dir DIR]
-  runs grep <pattern> [--run-dir DIR]
+  runs grep <pattern> [--run-dir DIR] [--format json]
   runs metrics <runId> [--run-dir DIR] [--format json]
   runs metrics --summary [--run-dir DIR] [--format json]
   runs scorecard <runId> [--run-dir DIR] [--format json]
@@ -372,7 +372,7 @@ Project state (.wao/):
   wao state read [--format text|json]
   wao state snapshot --workflow-id ID [--cwd DIR]
   wao decision add --title T [--body B | --body-file F] [--context C]
-  wao decision list
+  wao decision list [--format json]
   wao decision show <id>
   wao declare --task T --reason <code> [--note N]  # Lead 自做声明（reason: too-coupled|too-small|high-constitutional-risk|verification-cheaper|needs-global-context）
   wao declare                                       # 列出已有声明 + 理由分布
@@ -380,7 +380,7 @@ Project state (.wao/):
   wao stage                                            # 列出已声明阶段 + 缺口（pipeline 自省）
   wao ask <agentId> "<一句话任务>" [--mode write] [--cwd DIR]  # 快捷派工（只读默认注入边界；--mode write 不注入）
   wao handoff write --from R --to R --summary S [--artifacts a,b]
-  wao handoff read <role>  # latest incoming handoff addressed to role
+  wao handoff read <role> [--format json]  # latest incoming handoff addressed to role
   wao doctor [--cwd DIR] [--format json]
   wao onboarding [--agent <id>] [--apply] [--endorse-worker <id>] [--json]  # third-party: generate one minimal private registry from the tracked template (+ host-neutral MCP snippet)
 `);

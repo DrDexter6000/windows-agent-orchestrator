@@ -1282,6 +1282,16 @@ test("help: 列出所有 main() 真实路由的命令族（防 help 与代码漂
   assert.match(out, /mcp bind/, "help 必须列出 mcp bind（M10 P0-1 workspace activation）");
   assert.match(out, /mcp status/, "help 必须列出 mcp status");
   assert.match(out, /mcp unbind/, "help 必须列出 mcp unbind");
+  // TD-86（D2 A1）：七命令 --format json 能力入 help（新增断言，防 help 与实现漂移）。
+  assert.match(out, /registry check [^\n]*--format json/, "help 必须标注 registry check --format json（TD-86）");
+  assert.match(out, /registry validate [^\n]*--format json/, "help 必须标注 registry validate --format json（TD-86）");
+  assert.match(out, /runs list [^\n]*--format json/, "help 必须标注 runs list --format json（TD-86）");
+  assert.match(out, /runs summary [^\n]*--format json/, "help 必须标注 runs summary --format json（TD-86）");
+  assert.match(out, /runs grep <pattern> [^\n]*--format json/, "help 必须标注 runs grep --format json（TD-86）");
+  assert.match(out, /wao decision list \[--format json\]/, "help 必须标注 wao decision list --format json（TD-86）");
+  assert.match(out, /wao handoff read <role> \[--format json\]/, "help 必须标注 wao handoff read --format json（TD-86）");
+  // TD-112（D2 A4）：collect --final（最终 assistant 文本一屏出口）入 help。
+  assert.match(out, /collect <runId> [^\n]*--final/, "help 必须列出 collect --final（TD-112）");
 });
 
 test("TD-82: wao declare 写入声明 + wao declare（裸）列出汇总（端到端）", () => {

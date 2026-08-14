@@ -87,6 +87,11 @@ async function waoHandoffCommand(args, config) {
     if (!role) throw new Error("wao handoff read requires <role>");
     const body = await readHandoff(waoDir, role);
     if (!body) { console.log(JSON.stringify({ found: false }, null, 2)); return; }
+    // TD-86（D2 A1）：--format json 输出 {found:true, role, body}（found:false 分支既有 JSON 不变）。
+    if (options.format === "json") {
+      console.log(JSON.stringify({ found: true, role, body }, null, 2));
+      return;
+    }
     console.log(body);
     return;
   }
@@ -113,6 +118,12 @@ async function waoDecisionCommand(args, config) {
   }
   if (sub === "list") {
     const list = await listDecisions(waoDir);
+    // TD-86（D2 A1）：--format json 包装 {decisions: string[]}——map 索引行原样，
+    // 不发明 id/title 解析。
+    if (options.format === "json") {
+      console.log(JSON.stringify({ decisions: list }, null, 2));
+      return;
+    }
     for (const line of list) console.log(line);
     return;
   }

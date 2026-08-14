@@ -459,7 +459,26 @@ npm run cli -- spawn coder_low --prompt "..." | ConvertFrom-Json
 
 # run 的 JSON 输出含 messages + metrics
 npm run cli -- run coder_low --prompt "..." --format json | ConvertFrom-Json
+
+# 查询族：registry / runs / wao 的只读子命令（TD-86 起同样支持 --format json）
+npm run cli -- registry validate --registry config/agents.json --format json
+npm run cli -- registry check --registry config/agents.json --format json
+npm run cli -- runs list --format json
+npm run cli -- runs summary --format json
+npm run cli -- runs grep "error" --format json
+npm run cli -- wao decision list --format json
+npm run cli -- wao handoff read lead --format json
 ```
+
+TD-86 起上述 7 个查询子命令的 JSON 输出形状（字段全部来自既有计算结果）：
+
+- `registry validate --format json` → `{checked, valid, agents:[{id, ok, issues[], warnings[]}]}`；JSON 模式维持 exit code 契约（有错误条目 → exit 1，文本模式的 ⚠ warning 进入 `warnings[]`，不阻塞）。
+- `registry check --format json` → `{allOk, agents:[{id, status:"ok"|"fail"|"skip", serveUrl?, error?}]}`；fail 会照旧 exit 1。
+- `runs list --format json` → 直接序列化共享 `listRuns` 服务结果（`{runs:[{runId, agentId, state, terminal, updatedAt, ...}], matchedCount}`），零新计算。
+- `runs summary --format json` → `{total, byState, latest}`（无事件时间戳时 `latest:null`）。
+- `runs grep <pattern> --format json` → `{pattern, matched, matches:[{runId, type, ts}]}`——与文本路径一致，**每个 run 只记录首个命中事件**（不是全量命中清单）。
+- `wao decision list --format json` → `{decisions: string[]}`（map.md 索引行原样包装，不做 id/title 解析）。
+- `wao handoff read <role> --format json` → 找到时 `{found:true, role, body}`；未找到时维持既有 `{found:false}`。
 
 LLM 编排器（未来的 M5 DAG 或外部脚本）只需要：
 1. `spawn` 启动 run，拿 runId
@@ -954,6 +973,14 @@ annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:false, 
 `compactStatus` 为闭集三态：`available`（≥1 条 assistant 文本，且最后一条 ≤4000 字符 → `messages` 恰好一条完整原样文本，`truncated:false`）；`empty`（无 assistant 文本 → `messages:[]`）；`too_large`（最后一条 >4000 字符 → `messages:[]`，**不**给部分文本、**不**给 cursor）。三态均为 `truncated:false`、`nextCursor:null`；`assistantMessageCount` = 完整快照中 assistant 文本条数（注意它与 `evidenceCounts.message`——所有 message-shape 条目含 user——不同）。每个 compact **成功**严格追加**一个** `messages.collected`；任何 input/投影/schema/service 失败（含 `compact+cursor`、非法 `mode`、serve sentinel ≥10001）追加**零**个（投影模式 defer append，projection + output validation 全成功后才提交）。compact 不是摘要、不是 final-answer 决策，也不替代 full 续读。
 
 **CLI compact 对等**：`wao collect <runId> --mode compact` 进入与 MCP 相同的 compact 投影（`--mode compact --format json` 等价；`--mode` 单独即触发投影模式）。`--mode full` 与现有 `--format json` 机器投影兼容。strict parser：`--mode` 缺值、非法值（非 `full`/`compact`）、`--mode compact --cursor`、未知 flag、重复 flag 均在读取 transcript 前拒绝；默认 raw `wao collect <runId>` 保持不变。
+
+**CLI `--final`（最终答复一屏出口，TD-112）**：`npm run cli -- collect <runId> --final` 复用与 MCP compact 完全相同的投影/脱敏/消毒路径（同一 `projectCollectResult`，无第二解析器），把**最后一条 assistant 文本**按四态渲染到 stdout，适合脚本/流水线直接取最终答复：
+
+- `available`（最后一条 assistant 文本 ≤4000 字符）→ stdout 恰为**消毒后**的最终 assistant 文本（secret redaction + C0/C1/DEL 清洗之后，不承诺逐字节等于原文），exit 0；
+- `empty`（无 assistant 文本）→ 固定标记 `[final: no assistant message]`，exit 0；
+- `too_large`（最后一条 >4000 字符）→ 固定指引 `final message exceeds bounded projection; use collect --format json for the full event stream`（不给部分文本、不给 cursor），exit 0。
+
+`--final` 是布尔 flag（不接受值），与 `--cursor` 互斥（沿用 compact 的既有互斥拒绝，非零退出）；`--final` 与 `--format json`/`--mode` 同用时由 `--final` 的四态渲染接管输出。成功调用与 collect 一致追加恰好一条 `messages.collected` 审计事件（`--final` 不豁免——collect 本就非只读）；任何输入/投影失败零追加。
 
 ### MCP `run_diagnose`（安全确定性诊断，M9-5B）
 

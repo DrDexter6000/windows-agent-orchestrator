@@ -52,23 +52,40 @@ async function registryCheckCommand(args, config) {
   const registry = await readRegistry(resolve(options.registry ?? config.registry));
   const agents = registry.listAgents();
   if (agents.length === 0) {
+    // TD-86（D2 A1）：JSON 模式输出结构化空结果（allOk 与 text 模式 exit 0 语义一致）。
+    if (options.format === "json") {
+      console.log(JSON.stringify({ allOk: true, agents: [] }, null, 2));
+      return;
+    }
     console.log("No agents in registry.");
     return;
   }
+  // TD-86（D2 A1）：--format json 输出 {allOk, agents:[{id,status,serveUrl?,error?}]}。
+  // 字段全部来自既有计算结果（healthCheck 返回 + agent 配置），exit code 契约不变。
+  const asJson = options.format === "json";
   let allOk = true;
+  const results = [];
   for (const agent of agents) {
     if (agent.backend === "opencode-serve") {
       const backend = new OpenCodeServeBackend({ timeout: 5000, retries: 0 });
       const result = await backend.healthCheck(agent.serveUrl);
       if (result.ok) {
-        console.log(`${agent.id}\tok\t${agent.serveUrl}`);
+        results.push({ id: agent.id, status: "ok", serveUrl: agent.serveUrl });
+        if (!asJson) console.log(`${agent.id}\tok\t${agent.serveUrl}`);
       } else {
-        console.log(`${agent.id}\tFAIL\t${agent.serveUrl}\t${result.error ?? `HTTP ${result.status}`}`);
+        const error = result.error ?? `HTTP ${result.status}`;
+        results.push({ id: agent.id, status: "fail", serveUrl: agent.serveUrl, error });
+        if (!asJson) console.log(`${agent.id}\tFAIL\t${agent.serveUrl}\t${error}`);
         allOk = false;
       }
     } else {
-      console.log(`${agent.id}\tSKIP\tunknown backend: ${agent.backend}`);
+      const error = `unknown backend: ${agent.backend}`;
+      results.push({ id: agent.id, status: "skip", error });
+      if (!asJson) console.log(`${agent.id}\tSKIP\t${error}`);
     }
+  }
+  if (asJson) {
+    console.log(JSON.stringify({ allOk, agents: results }, null, 2));
   }
   if (!allOk) {
     process.exitCode = 1;
@@ -86,6 +103,10 @@ async function registryCheckCommand(args, config) {
  */
 async function registryValidateCommand(args, config) {
   const options = parseOptions(args);
+  // TD-86（D2 A1）：--format json 输出 {checked, valid, agents:[{id,ok,issues[],warnings[]}]}。
+  // 逐行 console.log 的既有计算结果（issues / kimi warning / 角色合同失败）原样入对象，
+  // text 路径字节不变；JSON 模式维持 exit code 契约（invalid → exit 1）。
+  const asJson = options.format === "json";
   const registryPath = resolve(options.registry ?? config.registry);
   const raw = await readFile(registryPath, "utf8");
 
@@ -93,7 +114,11 @@ async function registryValidateCommand(args, config) {
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    console.log(`✖ JSON parse error: ${e.message}`);
+    if (asJson) {
+      console.log(JSON.stringify({ checked: 0, valid: false, agents: [], issues: [`JSON parse error: ${e.message}`] }, null, 2));
+    } else {
+      console.log(`✖ JSON parse error: ${e.message}`);
+    }
     process.exitCode = 1;
     return;
   }
@@ -101,13 +126,18 @@ async function registryValidateCommand(args, config) {
   const agents = parsed.agents ?? {};
   const ids = Object.keys(agents);
   if (ids.length === 0) {
-    console.log("⚠  No agents in registry.");
+    if (asJson) {
+      console.log(JSON.stringify({ checked: 0, valid: true, agents: [] }, null, 2));
+    } else {
+      console.log("⚠  No agents in registry.");
+    }
     return;
   }
 
   const KNOWN_BACKENDS = ["opencode-serve", "claude-code", "codex", "kimi-code", "deepseek-harness"];
   let allOk = true;
   let checked = 0;
+  const agentResults = [];
 
   for (const id of ids) {
     const agent = agents[id];
@@ -192,11 +222,12 @@ async function registryValidateCommand(args, config) {
     checked += 1;
     if (issues.length === 0) {
       const model = agent.model ? `${agent.model.id}` : (agent.backend === "claude-code" ? "claude" : "default");
-      console.log(`✔ ${id}\t${agent.backend}\t${model}`);
       // TD-87（kimi tokenBudget 静默无效陷阱）：kimi stream-json 无 usage 字段，
       // 配 tokenBudget 不报错但不生效。warn 提示用户别误以为有保护（dogfood round 2 发现）。
+      // TD-86：warning 文本（不含 `  ⚠ ${id}: ` 前缀，id 已是独立字段）进 JSON 的 warnings[]。
+      const warnings = [];
       if (agent.backend === "kimi-code" && typeof agent.tokenBudget === "number") {
-        console.log(`  ⚠ ${id}: kimi-code 配了 tokenBudget 但不生效（stream-json 无 usage 字段）—— kimi 靠自带 max_steps/timeout 兜底，不靠 WAO tokenBudget`);
+        warnings.push("kimi-code 配了 tokenBudget 但不生效（stream-json 无 usage 字段）—— kimi 靠自带 max_steps/timeout 兜底，不靠 WAO tokenBudget");
       }
       // M11-5（TD-89 修复）：所有三个 process backend（claude-code/codex/kimi-code）
       // 现在都消费 systemPrompt。registry validate 用共享加载器（roleContract.js）
@@ -210,18 +241,39 @@ async function registryValidateCommand(args, config) {
           // target-project directory. Pass the registry-declared path as-is.
           loadRoleContract(agent.systemPrompt);
         } catch (e) {
-          console.log(`✖ ${id}\t角色合同无效: ${e.message}`);
+          const issue = `角色合同无效: ${e.message}`;
+          if (asJson) {
+            agentResults.push({ id, ok: false, issues: [issue], warnings });
+          } else {
+            console.log(`✖ ${id}\t${issue}`);
+          }
           allOk = false;
           continue;
         }
       }
+      if (asJson) {
+        agentResults.push({ id, ok: true, issues: [], warnings });
+      } else {
+        console.log(`✔ ${id}\t${agent.backend}\t${model}`);
+        for (const w of warnings) {
+          console.log(`  ⚠ ${id}: ${w}`);
+        }
+      }
     } else {
-      console.log(`✖ ${id}\t${issues.join("; ")}`);
+      if (asJson) {
+        agentResults.push({ id, ok: false, issues, warnings: [] });
+      } else {
+        console.log(`✖ ${id}\t${issues.join("; ")}`);
+      }
       allOk = false;
     }
   }
 
-  console.log(`\n${checked} agent(s) checked, ${allOk ? "all valid" : "has errors"}`);
+  if (asJson) {
+    console.log(JSON.stringify({ checked, valid: allOk, agents: agentResults }, null, 2));
+  } else {
+    console.log(`\n${checked} agent(s) checked, ${allOk ? "all valid" : "has errors"}`);
+  }
   if (!allOk) process.exitCode = 1;
 }
 

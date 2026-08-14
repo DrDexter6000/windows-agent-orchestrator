@@ -368,6 +368,13 @@ async function runsListCommand(args, config) {
     result.runs.sort((a, b) => a.runId.localeCompare(b.runId));
   }
 
+  // TD-86（D2 A1）：--format json 直接序列化 listRuns 结果（含上面的 CLI 既有排序），
+  // 零新计算；空结果也输出 {runs:[], matchedCount:0} 而非 "No runs found." 文本。
+  if (options.format === "json") {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
   if (result.runs.length === 0) {
     const jsonlFiles = await loadRunOnlyFiles(runDir);
     if (jsonlFiles.length === 0) {
@@ -388,6 +395,11 @@ async function runsSummaryCommand(args, config) {
   const runDir = resolve(options.runDir ?? config.runDir);
   const jsonlFiles = await loadRunOnlyFiles(runDir);
   if (jsonlFiles.length === 0) {
+    // TD-86（D2 A1）：空目录在 JSON 模式输出结构化零结果，text 路径不变。
+    if (options.format === "json") {
+      console.log(JSON.stringify({ total: 0, byState: {}, latest: null }, null, 2));
+      return;
+    }
     console.log("No runs found.");
     return;
   }
@@ -401,6 +413,11 @@ async function runsSummaryCommand(args, config) {
     if (last?.ts && (!latestTs || last.ts > latestTs)) {
       latestTs = last.ts;
     }
+  }
+  // TD-86（D2 A1）：--format json 输出 {total, byState, latest}（latest 无事件 ts 时为 null）。
+  if (options.format === "json") {
+    console.log(JSON.stringify({ total: jsonlFiles.length, byState: counts, latest: latestTs }, null, 2));
+    return;
   }
   console.log(`Total runs: ${jsonlFiles.length}`);
   for (const [state, count] of Object.entries(counts).sort()) {
@@ -461,21 +478,36 @@ async function runsGrepCommand(args, config) {
   const runDir = resolve(options.runDir ?? config.runDir);
   const jsonlFiles = await loadRunFiles(runDir);
   if (jsonlFiles.length === 0) {
+    // TD-86（D2 A1）：空目录在 JSON 模式输出结构化零结果，text 路径不变。
+    if (options.format === "json") {
+      console.log(JSON.stringify({ pattern, matched: 0, matches: [] }, null, 2));
+      return;
+    }
     console.log("No runs found.");
     return;
   }
   const re = new RegExp(pattern, "i");
   let matches = 0;
+  // TD-86（D2 A1）：每 run 只记首个命中（与 text 路径的 break 语义一致——schema 不暗示全量）。
+  const matchRows = [];
   for (const file of jsonlFiles) {
     const runId = file.replace(/\.jsonl$/, "");
     const events = await readTranscript(join(runDir, file));
     for (const event of events) {
       if (re.test(JSON.stringify(event))) {
-        console.log(`${runId}\t${event.type}\t${event.ts ?? ""}`);
+        matchRows.push({ runId, type: event.type, ts: event.ts ?? null });
         matches += 1;
         break;
       }
     }
+  }
+  // TD-86（D2 A1）：--format json 输出 {pattern, matched, matches}。
+  if (options.format === "json") {
+    console.log(JSON.stringify({ pattern, matched: matches, matches: matchRows }, null, 2));
+    return;
+  }
+  for (const m of matchRows) {
+    console.log(`${m.runId}\t${m.type}\t${m.ts ?? ""}`);
   }
   console.log(`Matched ${matches} run(s)`);
 }

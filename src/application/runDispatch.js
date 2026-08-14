@@ -50,6 +50,19 @@ export class ReuseBusyError extends Error {
   }
 }
 
+// TD-110 (D2 A3): thrown when a sessionReuse:"lead_workspace" agent is
+// dispatched WITHOUT a bound workspace (cwd). The message is the pre-existing
+// closed-set text (byte-identical to the old bare Error) — the typed class is
+// a pure addition so the CLI background dispatch catch can recognize it by
+// error.name and append ONE static guidance line naming the --cwd flag.
+// No payload is carried: never echoes cwd paths, Lead ids, or provider data.
+export class SessionReuseWorkspaceRequiredError extends Error {
+  constructor() {
+    super("dispatchRun: bound workspace (cwd) is required for a sessionReuse agent");
+    this.name = "SessionReuseWorkspaceRequiredError";
+  }
+}
+
 // Default path to the detached runner. Resolved relative to this module so the
 // service stays independent of the caller's cwd (CLI vs MCP vs test).
 const DEFAULT_RUNNER_PATH = join(
@@ -288,7 +301,7 @@ export async function dispatchRun({
       throw new Error("dispatchRun: leadSession is required for a sessionReuse agent (server-owned Lead session identity)");
     }
     if (typeof cwd !== "string" || cwd.length === 0) {
-      throw new Error("dispatchRun: bound workspace (cwd) is required for a sessionReuse agent");
+      throw new SessionReuseWorkspaceRequiredError();
     }
     const reuseDecision = await resolveReuseTurn({
       runDir: resolvedRunDir,

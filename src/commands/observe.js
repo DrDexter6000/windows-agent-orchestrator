@@ -122,13 +122,21 @@ export async function tailCommand(args, config) {
 // M11-4 CTO rework (Fix E): --limit is NOT in this set. The projection owns
 // pagination; a user-supplied limit would silently conflict. Legacy raw CLI
 // mode still honors --limit.
+// TD-112 (D2 A4): "final" is a BOOLEAN flag (never takes a value — it must NOT
+// enter the knownValueFlags walk below, or it would swallow the next token).
 const COLLECT_PROJECTION_KNOWN_FLAGS = new Set([
-  "cursor", "format", "mode", "runDir", "cwd",
+  "cursor", "format", "mode", "runDir", "cwd", "final",
 ]);
 
 // base64url, no padding, ≤192 chars — same alphabet as the MCP cursor field.
 const COLLECT_CURSOR_RE = /^[A-Za-z0-9_-]+$/;
 const COLLECT_CURSOR_MAX = 192;
+
+// TD-112 (D2 A4): fixed markers for collect --final's bounded states. Static
+// text only — never interpolates run/worker content.
+const COLLECT_FINAL_EMPTY_MARKER = "[final: no assistant message]";
+const COLLECT_FINAL_TOO_LARGE_MARKER =
+  "final message exceeds bounded projection; use collect --format json for the full event stream";
 
 export async function collectCommand(args, config) {
   const [runId, ...tail] = args;
@@ -158,9 +166,12 @@ export async function collectCommand(args, config) {
   // keeps its existing raw-ops output byte-compatible.
   // M12-2A: --mode (full|compact) also engages projection; compact delegates
   // to the same shared projection as MCP.
+  // TD-112 (D2 A4): --final (boolean) also engages projection mode and reuses
+  // the compact branch — it renders its own four-state text output below.
   const hasCursor = typeof options.cursor === "string" && options.cursor.length > 0;
   const hasMode = options.mode !== undefined;
-  const isProjectionMode = hasCursor || options.format === "json" || hasMode;
+  const hasFinal = options.final !== undefined;
+  const isProjectionMode = hasCursor || options.format === "json" || hasMode || hasFinal;
 
   if (!isProjectionMode) {
     // Default raw-ops surface (unchanged since M9-4A). Prints the raw service
@@ -251,6 +262,11 @@ export async function collectCommand(args, config) {
   if (options.mode === "compact" && hasCursor) {
     throw new Error("collect projection mode: --mode compact does not accept --cursor");
   }
+  // TD-112 (D2 A4): --final reuses the compact projection (its own bounded
+  // view), so it follows the SAME mutual-exclusion discipline as compact.
+  if (hasFinal && hasCursor) {
+    throw new Error("collect projection mode: --final does not accept --cursor");
+  }
 
   // M11-4 CTO rework (Fix E): --limit is REJECTED in projection mode. The
   // projection layer owns pagination (8/4000/12000 caps); a user-supplied
@@ -265,12 +281,27 @@ export async function collectCommand(args, config) {
   // until projection + output validation succeed. This covers page 1 too
   // (cursor-less), so any projection/schema failure produces ZERO appends.
   // M12-2A: thread --mode into the shared projection (compact branch).
-  const mode = options.mode === "compact" ? "compact" : "full";
+  // TD-112 (D2 A4): --final implies the compact projection (same redaction +
+  // C0/C1/DEL sanitization + ≤4000-char bound, no pagination) and renders its
+  // own four-state text output instead of the projection JSON. It is NOT
+  // exempt from the audit append — collect is non-read-only, --final keeps
+  // exactly one messages.collected per successful call.
+  const mode = hasFinal || options.mode === "compact" ? "compact" : "full";
   const raw = await collectRunMessages({ runId, runDir, cursor, deferAppend: true });
   const payload = projectCollectResult(raw, { runId, cursor, mode });
   // Projection succeeded → safe to commit the audit.
   if (typeof raw.commitAppend === "function") {
     await raw.commitAppend();
+  }
+  if (hasFinal) {
+    if (payload.compactStatus === "available") {
+      console.log(payload.messages[0].text);
+    } else if (payload.compactStatus === "empty") {
+      console.log(COLLECT_FINAL_EMPTY_MARKER);
+    } else {
+      console.log(COLLECT_FINAL_TOO_LARGE_MARKER);
+    }
+    return;
   }
   console.log(JSON.stringify(payload, null, 2));
 }

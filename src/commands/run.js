@@ -138,31 +138,46 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
   }
   // TD-98 阶段 2e-3 路径修正：本模块在 src/commands/，backgroundRunner.js 在 src/。
   const runnerPath = join(dirname(fileURLToPath(import.meta.url)), "..", "backgroundRunner.js");
-  const result = await dispatchRun({
-    agentId,
-    prompt: options.prompt ?? "",
-    registryPath: resolve(options.registry ?? config.registry),
-    runDir: resolve(options.runDir ?? config.runDir),
-    runId: options.runId,
-    cwd: options.cwd,
-    waitTimeout: options.waitTimeout ? Number(options.waitTimeout) : undefined,
-    // M10-pre closeout: thread server-owned global config.waitTimeout to the runner.
-    globalWaitTimeout: config.waitTimeout,
-    pollInterval: options.pollInterval ?? config.pollInterval ?? 1000,
-    scorecardRules: options.scorecardRules,
-    scorecardMode: options.scorecardMode,
-    // M9-2A (§70)：background 路径不再静默忽略 requireCertified——与 foreground 一致透传。
-    requireCertified: Boolean(options.requireCertified),
-    // M9-7A: forward validated delivery request for background delivery runs.
-    delivery,
-    runnerPath,
-    // M11-11C: CLI dispatch is a one-shot process — there is no stable Lead
-    // session across CLI invocations, so reusable experts always start a fresh
-    // provider conversation here (a one-shot leadSession yields a unique reuse
-    // key with no prior entry ⇒ first turn). The MCP server is the only caller
-    // that supplies a stable Lead session for actual reuse.
-    leadSession: randomUUID(),
-  });
+  let result;
+  try {
+    result = await dispatchRun({
+      agentId,
+      prompt: options.prompt ?? "",
+      registryPath: resolve(options.registry ?? config.registry),
+      runDir: resolve(options.runDir ?? config.runDir),
+      runId: options.runId,
+      cwd: options.cwd,
+      waitTimeout: options.waitTimeout ? Number(options.waitTimeout) : undefined,
+      // M10-pre closeout: thread server-owned global config.waitTimeout to the runner.
+      globalWaitTimeout: config.waitTimeout,
+      pollInterval: options.pollInterval ?? config.pollInterval ?? 1000,
+      scorecardRules: options.scorecardRules,
+      scorecardMode: options.scorecardMode,
+      // M9-2A (§70)：background 路径不再静默忽略 requireCertified——与 foreground 一致透传。
+      requireCertified: Boolean(options.requireCertified),
+      // M9-7A: forward validated delivery request for background delivery runs.
+      delivery,
+      runnerPath,
+      // M11-11C: CLI dispatch is a one-shot process — there is no stable Lead
+      // session across CLI invocations, so reusable experts always start a fresh
+      // provider conversation here (a one-shot leadSession yields a unique reuse
+      // key with no prior entry ⇒ first turn). The MCP server is the only caller
+      // that supplies a stable Lead session for actual reuse.
+      leadSession: randomUUID(),
+    });
+  } catch (error) {
+    // TD-110 (D2 A3)：sessionReuse 拒绝加 flag 指引。按 error.name 识别 shared
+    // service 的 typed error（前景：前台路径不解析 sessionReuse，只有 background
+    // 派发经 dispatchRun 可达）。打印原闭集 message（不重写）+ 一行静态指引——
+    // 指引是固定安全文本，不拼接任何动态内容。其他错误原样上抛（顶层 catch 不变）。
+    if (error && error.name === "SessionReuseWorkspaceRequiredError") {
+      console.error(error.message);
+      console.error("pass --cwd <git-root> for sessionReuse agents");
+      process.exitCode = 1;
+      return;
+    }
+    throw error;
+  }
   if (!result.accepted) {
     console.log(JSON.stringify({
       runId: result.runId,
