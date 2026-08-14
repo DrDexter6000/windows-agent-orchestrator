@@ -30,7 +30,7 @@ WAO 进程式 backend（claude-code/codex/kimi-code/deepseek-harness）的"进�
 winget install CoreyButler.NVMforWindows
 nvm install 22        # 装项目声明的 v22
 nvm use 22
-cd D:\projects\windows-agent-orchestrator-poc   # nvm 会读 .nvmrc 自动切
+cd D:\projects\windows-agent-orchestrator   # nvm 会读 .nvmrc 自动切
 node --version        # 应 v22.x
 
 # 方式 B：fnm（winget 装）
@@ -38,7 +38,7 @@ winget install Schniz.fnm
 # 给 PowerShell 加 fnm env（加到 $PROFILE）：fnm env --use-on-cd | Out-String | Invoke-Expression
 fnm install 22
 fnm use 22
-cd D:\projects\windows-agent-orchestrator-poc   # 配 --use-on-cd 会按 .nvmrc 自动切
+cd D:\projects\windows-agent-orchestrator   # 配 --use-on-cd 会按 .nvmrc 自动切
 
 # 方式 C：不用管理器——直装 v22 LTS 覆盖
 # 去 https://nodejs.org 下 v22 .msi 装即可（覆盖现有 node）
@@ -63,8 +63,8 @@ claude-code 经 wrapper 调非 Claude provider（GLM/DeepSeek）时，wrapper �
 ### 安装本工具
 
 ```powershell
-git clone <repo> D:\projects\windows-agent-orchestrator-poc
-cd D:\projects\windows-agent-orchestrator-poc
+git clone <repo> D:\projects\windows-agent-orchestrator
+cd D:\projects\windows-agent-orchestrator
 # WAO 含 MCP SDK/zod 依赖，clone 后必须安装：
 npm ci
 ```
@@ -72,7 +72,7 @@ npm ci
 **一次性开发安装（M12-8F）：** 在 WAO 开发仓库内执行一次 `npm link`，即可在任何目录使用全局 `wao` 命令（它总是执行当前链接的这份 checkout）：
 
 ```powershell
-cd D:\projects\windows-agent-orchestrator-poc
+cd D:\projects\windows-agent-orchestrator
 npm link
 ```
 
@@ -863,13 +863,13 @@ MCP workspace binding 来源优先级：`lead_session`（`workspace_select`）> 
 
 ```powershell
 # bind: 在目标项目中生成 WAO managed block
-& "D:\projects\windows-agent-orchestrator-poc\scripts\wao-cli.cmd" mcp bind --host codex --cwd "D:\path\to\repo"
+& "D:\projects\windows-agent-orchestrator\scripts\wao-cli.cmd" mcp bind --host codex --cwd "D:\path\to\repo"
 
 # status: 查询绑定状态
-& "D:\projects\windows-agent-orchestrator-poc\scripts\wao-cli.cmd" mcp status --host codex --cwd "D:\path\to\repo"
+& "D:\projects\windows-agent-orchestrator\scripts\wao-cli.cmd" mcp status --host codex --cwd "D:\path\to\repo"
 
 # unbind: 移除 WAO managed block（保留用户其它配置）
-& "D:\projects\windows-agent-orchestrator-poc\scripts\wao-cli.cmd" mcp unbind --host codex --cwd "D:\path\to\repo"
+& "D:\projects\windows-agent-orchestrator\scripts\wao-cli.cmd" mcp unbind --host codex --cwd "D:\path\to\repo"
 ```
 
 或在 WAO repo 内：`npm run cli -- mcp bind --host codex --cwd <git-root>`。

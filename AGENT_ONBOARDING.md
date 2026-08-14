@@ -41,7 +41,7 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 - **Node.js >= 22**（WAO 是 Node ESM，依赖 `@modelcontextprotocol/sdk` + `zod`，用 `npm install` 安装）
 - **worker CLI 在 PATH**：至少一个你想调度的 runtime（claude / codex / kimi）——**一个 runtime 就够**，不需要全部装齐
 - **认证任选其一**：官方 Claude OAuth（`claude login`）、provider key（`DEEPSEEK_API_KEY` / `ZHIPU_API_KEY`）、`codex login`、或 Kimi Code 登录态——选你有的那一种即可，见 §4c 选择表
-- **WAO 项目目录**：owner 会告诉你 WAO 装在哪（通常是 `D:/projects/windows-agent-orchestrator-poc`）。**这个目录是 WAO 的源码 + 配置所在，不是被开发项目。**
+- **WAO 项目目录**：owner 会告诉你 WAO 装在哪（通常是 `D:/projects/windows-agent-orchestrator`）。**这个目录是 WAO 的源码 + 配置所在，不是被开发项目。**
 - **Claude OAuth trap 已隔离**：provider-wrapped claude-code worker（researcher/coder_hq/coder_low）会用 WAO wrapper 设置独立 `CLAUDE_CONFIG_DIR`，避免读取用户 `~/.claude` 里的 `claudeAiOauth` 凭证并覆盖 provider key；auditor 不走 wrapper，仍使用官方 Claude OAuth。
 
 ---
@@ -236,6 +236,68 @@ lead_preflight  →  run_dispatch（只读、no-delivery canary）  →  run_awa
 **host-neutral MCP 片段**：`wao onboarding` 会打印一段通用 `mcpServers.wao` stdio 片段（入口是 Node v22 shim `scripts/wao-node.cjs`，绝对路径正斜杠规范化、带空格也能用）。完整的 host 配置示例以 `docs/usage.md` §MCP stdio 为权威——本文不复制。
 
 **`wao onboarding` 结果携带 bounded acceptance projection**：`wao onboarding` 的 JSON 与人类可读输出都附一段 bounded **acceptance projection**——**advisory**、**host-neutral**，列出三个 MCP 步骤（`lead_preflight` → `run_dispatch` → `run_await_result`，canary 只读、no-delivery）、PASS 判据（clean terminal + completed + 非空 assistant 文本，`run_dispatch` accepted ≠ PASS）、以及四个 closed recovery 分支：`host-not-invoked`（Host 在调用前被证取消，不是一次 WAO run）、`transport-unknown`（结果缺失/传输丢失是 unknown、非证明 worker 未启动——任何重试前必先查 `runs_list` / point-in-time 事实：unknown ⇒ no blind redispatch，无自动重试、不盲目重新派发）、`workspace/preflight`（workspace 绑定或 preflight 问题阻断派发就绪）、`provider/runtime`（provider/runtime 失败是 post-run 分支，只在 runId 绑定的 WAO run 存在后诊断）。它只给事实不给处方、不点名 Host、不带绝对路径/凭证/prompt/argv/PID/session，也不触发任何自动重试或 mutation。本节是这段投影的权威说明；命令输出只是它的载体，不复制 `docs/usage.md` 全量配置。
+
+---
+
+## 10. 贡献者路径（给 WAO 本身写代码）
+
+> §1–§9 服务的是**用 WAO 干活的 agent/用户**；本节服务另一个读者：**想给 WAO 仓库本身贡献代码的第二开发者**。只是使用 WAO 不需要读本节；要改 WAO，请先读完本节。
+
+### 10.1 仓库地图
+
+src/ 按 `docs/02-architecture.md` §1 的四层组织（层边界与依赖方向的唯一权威在那里，这里只做导航）：
+
+| 层 | 位置 | 一句话 |
+|---|---|---|
+| L4 接口层 | `src/mcp/`、`src/commands/`、`src/application/`、`src/hostAdapters/` | MCP（主入口）与 CLI（fallback）委托**同一批** application services——业务规则只写一次 |
+| L3 编排层 | `src/workflow/` | 声明式 DAG 引擎 + 可插拔节点 |
+| L2 控制平面 | src 根（`runManager.js`、`isolation.js`、`registry.js`、daemon 系列） | 状态机、调度、worktree 隔离、恢复 |
+| L1 运行时抽象 | `src/backends/`、`transcript.js` | Backend 接口的各 runtime 实现 + transcript 读写 |
+
+test/ 按领域分目录——这是新贡献者最大的导航入口，改哪块就先看对应目录的既有测试：
+
+| 目录 | 覆盖 |
+|---|---|
+| `delivery/` | 交付投影、验证、审查 |
+| `run-lifecycle/` | run 生命周期、续谱、sessionReuse |
+| `mcp-surface/` | 22-tool 冻结工具面与 MCP wire 契约 |
+| `transcript/` | 事件解析、summary、collect 投影 |
+| `registry-roles/` | registry schema、角色矩阵 |
+| `backends/` | 各 backend 适配 |
+| `isolation-infra/` | worktree 隔离、canonical runner、**docs-consistency 文档漂移守卫** |
+| `workflow/` | DAG 引擎 |
+| `parsers/` | backend 输出解析 |
+
+**`test/manifest.json` 是测试登记处**：canonical runner 按 manifest 把全部测试分波执行（pure/git/worktree/process/lock/timeout/mcp），新测试文件必须**同批**登记进对应组——missing/unknown/stale 条目会在执行前被 validate 直接拒绝。`fixtures/` 放共享测试夹具。
+
+### 10.2 本地验证闭环
+
+- `npm test`：canonical 分波全量跑，约 5 分钟、mock 子进程、零外部依赖、不消耗 token。它是**每个交付的验收门**——改完全绿才算完。
+- 改 **delivery / 解析 / 分类**逻辑时，绿测试**不够**：必须对照真实 transcript 冒烟后再宣告完成（`AGENTS.md` 的铁律）。
+
+### 10.3 读文档的顺序
+
+1. `AGENTS.md` —— 仓库工作纪律入口（不变量、命令、代码约定、边界）
+2. `docs/ssot.md` —— 文档五分类：每类信息的唯一权威源在哪、写新文档前的强制检查
+3. `docs/02-architecture.md` —— 接口契约、状态机、事件 schema
+4. `docs/tech-debt.md` —— 技术债唯一登记表
+5. `docs/milestone-discipline.md` —— 发版与真实 runtime 验收门槛
+
+### 10.4 开发工作方式
+
+- **TD 登记**：发现债不顺手修——先在 `docs/tech-debt.md` 登记（现象 / 根因 / 偿还触发条件），触发条件到了再偿还。新债不登记，比旧债不偿还更伤仓库。
+- **文档漂移守卫**：`test/isolation-infra/docs-consistency.test.js` 把文档一致性钉成机器断言。改任何文档前先跑它，改完再跑一遍。
+- **双面纪律**：同一状态变更操作，MCP 工具与 CLI 命令必须委托**同一 application service**、产生相同的 transcript 事实；禁止 MCP 通过 shell 调 CLI 解析文本。
+
+### 10.5 首次贡献建议路径
+
+从修一个 open TD 的小尾巴起步（open 清单见 `docs/tech-debt.md`，例如 TD-114：`runs wait` 窗口到期 exit 0 缺子进程级断言）：
+
+1. 读 TD 条目，按 §10.1 找到对应测试目录与源码
+2. `npm test` 跑通基线，确认起点全绿
+3. 写测试 + 改实现（新测试文件记得登记进 `test/manifest.json` 对应组）
+4. 再跑 `npm test`，全绿
+5. 提 PR，正文写清 TD 编号与验证证据
 
 ---
 

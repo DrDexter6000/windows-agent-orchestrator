@@ -1,9 +1,9 @@
 {
-  "name": "windows-agent-orchestrator-poc",
+  "name": "windows-agent-orchestrator",
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Windows-native minimal orchestrator PoC for agent runtimes.",
+  "description": "Windows-native, headless, runtime-agnostic orchestrator for local agent runtimes.",
   "license": "Apache-2.0",
   "author": "DrDexter6000",
   "repository": {

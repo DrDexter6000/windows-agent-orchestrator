@@ -64,6 +64,7 @@ ADR 风格：一条决策一个文件，定下后归档，只追加"修订"不�
 
 | 文件 | 内容 |
 |------|------|
+| `AGENT_ONBOARDING.md` | 安装与上手指南 + 贡献者路径 |
 | `docs/usage.md` | 部署、命令、transcript 事件表（唯一权威） |
 | `docs/smoke-guide.md` | smoke 测试操作 |
 | `docs/troubleshooting.md` | 诊断手册（provider/cwd/runs/completion/进程/backend） |

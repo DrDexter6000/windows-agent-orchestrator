@@ -83,8 +83,8 @@ Runtime/model dispatch certification lives in `runs/reliability-summary.json`
 ## Quick start
 
 ```powershell
-git clone https://github.com/DrDexter6000/windows-agent-orchestrator.git D:\projects\windows-agent-orchestrator-poc
-cd D:\projects\windows-agent-orchestrator-poc
+git clone https://github.com/DrDexter6000/windows-agent-orchestrator.git D:\projects\windows-agent-orchestrator
+cd D:\projects\windows-agent-orchestrator
 npm ci            # install from the tracked package-lock (npm install works as a fallback)
 npm link          # optional, once per machine: exposes the top-level `wao` command (e.g. `wao dashboard`)
 
