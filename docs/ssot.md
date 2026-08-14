@@ -121,7 +121,7 @@ ADR 风格：一条决策一个文件，定下后归档，只追加"修订"不�
 
 ## 4. 当前守卫
 
-SSOT 规则用 `test/docs-consistency.test.js` 固化。守卫重点不是"文档质量打分"，而是防止已知漂移重新出现：
+SSOT 规则用 `test/isolation-infra/docs-consistency.test.js` 固化。守卫重点不是"文档质量打分"，而是防止已知漂移重新出现：
 
 - 旧 worker 名不得出现在面向 lead/user 的入口文档。
 - 状态机完整状态列表只在 `docs/02-architecture.md` 维护。

@@ -17,7 +17,7 @@
 
 gate 必须是**可执行验证**，不能是主观判断：
 
-- ✅ 好："`node --test test/transcript.test.js` 全绿，且含 seq 单调递增的断言"
+- ✅ 好："`node --test test/transcript/transcript.test.js` 全绿，且含 seq 单调递增的断言"
 - ❌ 坏："transcript 扩展完成"
 
 gate 类型按 task 性质选：
