@@ -153,7 +153,7 @@ serve 后台进程不一定。
 
 ### 3.1 worker 默认 cwd 是 WAO 仓，不是目标仓
 
-- **症状**：worker 在 `D:/projects/windows-agent-orchestrator-poc` 干活，而不是你要它改的目标仓库
+- **症状**：worker 在 `D:/projects/windows-agent-orchestrator` 干活，而不是你要它改的目标仓库
 - **根因**：registry 的 `cwd` 默认填的是 WAO 仓路径。每个 worker 的 cwd 应指向它要操作的目标仓
 - **修复**：
   - 派发时显式 `--cwd "D:/path/to/target-repo"`

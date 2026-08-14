@@ -10,29 +10,29 @@
 **部署模型（重要，避免装错位置）**：WAO 是"装一次，开发多个项目"的工具。两件不同的事：
 - WAO skill 装在**你的 runtime skill 目录**（一次性，不装在被开发项目里）
 - `.wao/` 建在**被开发的目标项目里**（每个项目一次，记该项目的开发状态）
-- WAO 源码在 `D:/projects/windows-agent-orchestrator-poc`（这是工具仓，不是被开发项目）
+- WAO 源码在 `D:/projects/windows-agent-orchestrator`（这是工具仓，不是被开发项目）
 
 请按以下步骤完成 onboarding：
 
-1. **读 onboarding 文档**：读 `D:/projects/windows-agent-orchestrator-poc/AGENT_ONBOARDING.md`。特别注意 §2 部署模型（skill 装哪 vs .wao/ 建哪）和 §安全铁律。这些来自真实事故（烧过上亿 token），不可违反。
+1. **读 onboarding 文档**：读 `D:/projects/windows-agent-orchestrator/AGENT_ONBOARDING.md`。特别注意 §2 部署模型（skill 装哪 vs .wao/ 建哪）和 §安全铁律。这些来自真实事故（烧过上亿 token），不可违反。
 
-2. **读安全背景**：读 `D:/projects/windows-agent-orchestrator-poc/references/safety-incidents.md`。了解 06-17 和 06-18 两次 quota 事故的根因。
+2. **读安全背景**：读 `D:/projects/windows-agent-orchestrator/references/safety-incidents.md`。了解 06-17 和 06-18 两次 quota 事故的根因。
 
-3. **读技能定义 + 角色矩阵**：读 `D:/projects/windows-agent-orchestrator-poc/SKILL.md` 和 `D:/projects/windows-agent-orchestrator-poc/docs/team-roles.md`。前者是命令参考，后者是标准团队角色（Researcher/Coder/Tester/Auditor 的职责边界）。
+3. **读技能定义 + 角色矩阵**：读 `D:/projects/windows-agent-orchestrator/SKILL.md` 和 `D:/projects/windows-agent-orchestrator/docs/team-roles.md`。前者是命令参考，后者是标准团队角色（Researcher/Coder/Tester/Auditor 的职责边界）。
 
-4. **环境自检**：运行 `node D:/projects/windows-agent-orchestrator-poc/src/cli.js wao doctor`。报告结果给用户。如果有 FAIL 项，不要开始派发任务，先和用户确认。
+4. **环境自检**：运行 `node D:/projects/windows-agent-orchestrator/src/cli.js wao doctor`。报告结果给用户。如果有 FAIL 项，不要开始派发任务，先和用户确认。
 
 5. **明确你要开发的目标项目**：问用户"要开发哪个项目"。在该项目目录初始化 `.wao/`：
    ```
-   node D:/projects/windows-agent-orchestrator-poc/src/cli.js wao init --cwd <目标项目>
+   node D:/projects/windows-agent-orchestrator/src/cli.js wao init --cwd <目标项目>
    ```
    **不要在 WAO 工具仓自己建 .wao/ 来开发**（WAO 仓已有自己的 .wao/ 记录工具自身的开发）。
 
 6. **最小任务验证**（doctor HEALTHY 后）：用一个进程式 worker 在目标项目跑最小任务：
    ```
-   node D:/projects/windows-agent-orchestrator-poc/src/cli.js run coder_low --prompt "Read package.json and report the package name. One sentence." --registry D:/projects/windows-agent-orchestrator-poc/config/agents.json --cwd <目标项目> --format json
+   node D:/projects/windows-agent-orchestrator/src/cli.js run coder_low --prompt "Read package.json and report the package name. One sentence." --registry D:/projects/windows-agent-orchestrator/config/agents.json --cwd <目标项目> --format json
    ```
-   注意 `--cwd <目标项目>` 让 worker 在目标项目干活（不是 WAO 仓）。报告结果。失败则读 `D:/projects/windows-agent-orchestrator-poc/docs/troubleshooting.md`。
+   注意 `--cwd <目标项目>` 让 worker 在目标项目干活（不是 WAO 仓）。报告结果。失败则读 `D:/projects/windows-agent-orchestrator/docs/troubleshooting.md`。
 
 7. **完成后汇报**：告诉用户 onboarding 完成，环境状态，目标项目已就绪，你准备好接收开发任务了。
 
