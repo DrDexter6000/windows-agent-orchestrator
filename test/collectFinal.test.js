@@ -28,8 +28,11 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const FINAL_EMPTY_MARKER = "[final: no assistant message]";
+// D1-D3 收口（Bug#3 尾巴）：旧文案 "use collect --format json" 对带着 --final
+// 照抄的用户仍是死路（--final 接管输出，永远拿不到 JSON）。新文案指明去掉
+// --final 的完整命令形状（<runId> 是占位描述，绝不插值真实 runId）。
 const FINAL_TOO_LARGE_MARKER =
-  "final message exceeds bounded projection; use collect --format json for the full event stream";
+  "final message exceeds bounded projection; re-run without --final: collect <runId> --format json";
 
 function makeTempDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -116,7 +119,7 @@ test("TD-112: collect --final（too_large，最后一条 assistant >4000 字符�
     const r = runCollectFinal(dir, "run_final_big");
     assert.equal(r.status, 0, "too_large 是有界投影的正常结果，exit 0");
     assert.equal(r.stdout.trim(), FINAL_TOO_LARGE_MARKER,
-      "固定指引标记：不给部分文本、不给 cursor，指引用 collect --format json 读全量");
+      "固定指引标记：不给部分文本、不给 cursor，指引去掉 --final 重跑拿 JSON 全量");
   } finally {
     cleanupDir(dir);
   }

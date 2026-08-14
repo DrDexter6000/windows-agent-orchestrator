@@ -247,7 +247,9 @@ npm run cli -- runs wait <runId> --format json       # 完整服务结果 + sema
 默认 `--format text`（runs 家族惯例），`--format json` 输出完整服务结果并附
 `semanticNotes`（与 MCP 同一 selector）。观察窗口到期（`terminal:false`）是正常
 结果——正常打印、exit 0，不代表 worker 停止或失败；等待期间 Ctrl-C 会打印中断
-时刻的快照后以非零退出。`--wait-ms` 越界或非整数由服务边界原样报错（exit 1）。
+时刻的快照后以非零退出。`--wait-ms` 越界或非整数由服务边界原样报错（exit 1）；
+非数字值（如 `--wait-ms abc`）在 CLI 层即以固定文案 `--wait-ms must be a number` 拒绝
+（不回显原值，service 不被调用）。
 `runs` 的未知子命令（如 `runs waitx`）会 fail-closed 报错并列出全部合法子命令；
 裸 `runs` 仍保持列出 run 列表。
 
@@ -472,7 +474,7 @@ npm run cli -- wao handoff read lead --format json
 
 TD-86 起上述 7 个查询子命令的 JSON 输出形状（字段全部来自既有计算结果）：
 
-- `registry validate --format json` → `{checked, valid, agents:[{id, ok, issues[], warnings[]}]}`；JSON 模式维持 exit code 契约（有错误条目 → exit 1，文本模式的 ⚠ warning 进入 `warnings[]`，不阻塞）。
+- `registry validate --format json` → `{checked, valid, agents:[{id, ok, issues[], warnings[]}]}`；JSON 模式维持 exit code 契约（有错误条目 → exit 1，文本模式的 ⚠ warning 进入 `warnings[]`，不阻塞）。registry 源 JSON 解析失败时输出 `{checked:0, valid:false, agents:[], issues:[...]}`——顶层 `issues` 数组保留原始解析错误 message，exit 1。文本模式：角色合同失败的 agent 只输出一行 `✖ <id>`（不先打 ✔ 成功行再打 ✖ 自相矛盾两行）。
 - `registry check --format json` → `{allOk, agents:[{id, status:"ok"|"fail"|"skip", serveUrl?, error?}]}`；fail 会照旧 exit 1。
 - `runs list --format json` → 直接序列化共享 `listRuns` 服务结果（`{runs:[{runId, agentId, state, terminal, updatedAt, ...}], matchedCount}`），零新计算。
 - `runs summary --format json` → `{total, byState, latest}`（无事件时间戳时 `latest:null`）。
@@ -981,7 +983,7 @@ annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:false, 
 
 - `available`（最后一条 assistant 文本 ≤4000 字符）→ stdout 恰为**消毒后**的最终 assistant 文本（secret redaction + C0/C1/DEL 清洗之后，不承诺逐字节等于原文），exit 0；
 - `empty`（无 assistant 文本）→ 固定标记 `[final: no assistant message]`，exit 0；
-- `too_large`（最后一条 >4000 字符）→ 固定指引 `final message exceeds bounded projection; use collect --format json for the full event stream`（不给部分文本、不给 cursor），exit 0。
+- `too_large`（最后一条 >4000 字符）→ 固定指引 `final message exceeds bounded projection; re-run without --final: collect <runId> --format json`（不给部分文本、不给 cursor；`<runId>` 是占位描述，不插值真实 runId——指引明确要求去掉 `--final` 重跑才能拿到 JSON 全量），exit 0。
 
 `--final` 是布尔 flag（不接受值），与 `--cursor` 互斥（沿用 compact 的既有互斥拒绝，非零退出）；`--final` 与 `--format json`/`--mode` 同用时由 `--final` 的四态渲染接管输出。成功调用与 collect 一致追加恰好一条 `messages.collected` 审计事件（`--final` 不豁免——collect 本就非只读）；任何输入/投影失败零追加。
 

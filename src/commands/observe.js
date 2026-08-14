@@ -134,9 +134,13 @@ const COLLECT_CURSOR_MAX = 192;
 
 // TD-112 (D2 A4): fixed markers for collect --final's bounded states. Static
 // text only — never interpolates run/worker content.
+// D1-D3 收口（Bug#3 尾巴）: the too_large marker must name the runnable
+// escape hatch — WITHOUT --final. The old "use collect --format json" advice
+// was a dead end for a user who copied it verbatim: with --final still on the
+// command line, the four-state rendering takes over and JSON is never printed.
 const COLLECT_FINAL_EMPTY_MARKER = "[final: no assistant message]";
 const COLLECT_FINAL_TOO_LARGE_MARKER =
-  "final message exceeds bounded projection; use collect --format json for the full event stream";
+  "final message exceeds bounded projection; re-run without --final: collect <runId> --format json";
 
 export async function collectCommand(args, config) {
   const [runId, ...tail] = args;

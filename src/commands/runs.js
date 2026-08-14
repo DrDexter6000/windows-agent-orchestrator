@@ -148,7 +148,10 @@ const RUNS_WAIT_KNOWN_FLAGS = new Set(["--wait-ms", "--format", "--run-dir"]);
  * The CLI owns only:
  *   - strict argv parsing (flag-aware positional walk)
  *   - --wait-ms Number() coercion — the SERVICE stays the boundary validator,
- *     so its exact error text reaches the user unmodified
+ *     so its exact error text reaches the user unmodified. The ONE exception
+ *     (D1-D3 closeout, Bug-2): a non-numeric value (NaN after coercion) is
+ *     rejected at the CLI with the fixed "--wait-ms must be a number" — NaN
+ *     would reach the service as "got: null", hiding the real problem.
  *   - text/JSON rendering (JSON = full service result + semanticNotes via the
  *     SAME selector + facts shape as the MCP run_wait handler)
  *   - SIGINT: print the last known point-in-time snapshot, exit non-zero
@@ -194,8 +197,16 @@ async function runsWaitCommand(args, config, deps = {}) {
 
   // CLI only coerces; the service is the shared business boundary and throws
   // its own exact error for out-of-range / non-integer values (not reworded).
+  // D1-D3 终审收口（Bug-2）: a NON-NUMERIC value (Number() → NaN) is rejected
+  // HERE with a fixed safe message — passing NaN through would make the service
+  // report "got: null" (JSON.stringify(NaN)), losing the fact that the user's
+  // input was not a number at all. Out-of-range / non-integer numbers still go
+  // to the service so its exact boundary text reaches the user unmodified.
   let waitMs = RUN_WAIT_DEFAULT_MS;
-  if (flags.waitMs !== undefined) waitMs = Number(flags.waitMs);
+  if (flags.waitMs !== undefined) {
+    waitMs = Number(flags.waitMs);
+    if (Number.isNaN(waitMs)) throw new Error("--wait-ms must be a number");
+  }
 
   const service = deps.runWaitFn ?? runWait;
 

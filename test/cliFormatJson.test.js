@@ -107,6 +107,43 @@ test("TD-86: registry validate --format json 输出 {checked,valid,agents}，维
   }
 });
 
+// =====================================================================
+// D1-D3 终审收口（Bug#1 裁决落地）: registry validate text 模式——角色合同
+// 失败路径只打一行 ✖（不再先打 ✔ 再打 ✖ 的自相矛盾两行）。
+//
+// 这是守卫（Lead 裁决接受新行为并钉住），非 RED：断言今天即绿；用 mutation
+// 思路写——若回退到旧行为（先 ✔ 后 ✖），"无 ✔ 行 + 恰好一行 ✖" 必红。
+// =====================================================================
+
+test("D1-D3 守卫: registry validate text——角色合同失败的 agent 恰好一行 ✖（无 ✔ 行），汇总行与 exit 1 不变", async () => {
+  const dir = makeTempDir("wao-fmt-validate-role-");
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        // codex（进程式 backend）+ 指向不存在文件的 systemPrompt → 角色合同失败路径
+        bad_role: { backend: "codex", cwd: dir, systemPrompt: join(dir, "nonexistent-role.md") },
+      },
+    }), "utf8");
+
+    const r = await runCli(["registry", "validate", "--registry", registryPath]);
+    // 既有契约不变：invalid → exit 1；汇总行照常。
+    assert.equal(r.status, 1, "角色合同失败 → exit 1 契约不变");
+    assert.match(r.stdout, /1 agent\(s\) checked, has errors/, "汇总行不变");
+    // 裁决钉住的新行为：该 agent 在 stdout 上恰好一行 ✖，且没有任何 ✔ 行
+    // （旧行为先打 `✔ <id>...` 再打 `✖ <id>`，同一 agent 自相矛盾两行）。
+    assert.equal((r.stdout.match(/✔/g) ?? []).length, 0,
+      "角色合同失败的 agent 不得出现 ✔ 行（新行为：不先打成功行）");
+    const crossLines = r.stdout.split(/\r?\n/).filter((l) => l.includes("✖"));
+    assert.equal(crossLines.length, 1,
+      `该 agent 恰好输出一行 ✖，实际 ${crossLines.length} 行：${JSON.stringify(crossLines)}`);
+    assert.match(crossLines[0], /^✖ bad_role\t角色合同无效: /,
+      "✖ 行形状：✖ <id>\\t角色合同无效: <原因>");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 test("TD-86: registry check --format json 输出 {allOk,agents:[{id,status}]}（ok/fail/skip，不依赖真实网络）", async () => {
   const dir = makeTempDir("wao-fmt-check-");
   // 只监听 127.0.0.1 的回环 HTTP 服务（"ok" 分支），不触真实网络。
