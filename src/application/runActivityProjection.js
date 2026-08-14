@@ -62,6 +62,27 @@ import { RUNTIME_ACTIVITY_STATUSES } from "../runEvent.js";
 // while a fresh page-1 call may observe them.
 import { projectScopeObservation } from "./runScopeObservation.js";
 
+// ===== M12-19: structured cursor-rejection signal =====
+//
+// When a syntactically-valid cursor is stale / cross-run / cross-view /
+// snapshot-changed / out-of-range (or malformed as a token), the projector
+// throws THIS typed application-layer signal — NEVER a generic Error, and the
+// MCP layer classifies it by TYPE (instanceof), never by matching error
+// strings. The internal message is descriptive (for tests/diagnostics) but is
+// NEVER surfaced across the MCP boundary: the handler folds every
+// CursorRejectedError into the SAME bounded recovery payload (cursor_rejected +
+// static choices), so the mismatch subtype, the raw cursor, and any dynamic
+// detail never leak. Every NON-cursor failure (bad snapshot, invalid envelope,
+// invalid pageSize/order/afterSeq/categories, output validation, unexpected
+// internal error) stays a generic Error so the MCP layer can contain it as the
+// fixed generic error with NO structuredContent.
+export class CursorRejectedError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "CursorRejectedError";
+  }
+}
+
 // ===== Closed-set activity categories (drives BOTH the service and the MCP
 // input schema — single source, no drift). =====
 
@@ -158,6 +179,41 @@ const CURSOR_MAX_CHARS = ACTIVITY_CURSOR_MAX_CHARS;
 const DIGEST_BYTES = 16; // 128-bit digests — enough binding, compact token
 const DIGEST_B64_LEN = 22; // ceil(16/3)*4 without padding → 22 base64url chars
 
+// ===== M12-19: bounded cursor-rejection recovery SSOT =====
+//
+// The SINGLE source for the structured recovery payload a rejected cursor
+// returns. Closed-set fact + static choices only — WAO presents facts and
+// choices, it NEVER auto-retries, NEVER auto-restarts pagination, and NEVER
+// decides for the caller. The status is a small closed set (today one member,
+// cursor_rejected); the choices are the EXACT two static recovery paths. The
+// MCP output schema (server.js) is built from these exported constants so the
+// wire enum cannot drift from what buildCursorRecovery emits.
+export const ACTIVITY_CURSOR_RECOVERY_STATUSES = Object.freeze(["cursor_rejected"]);
+export const ACTIVITY_CURSOR_RECOVERY_CHOICES = Object.freeze([
+  // Re-request the first page WITHOUT a cursor — starts a fresh cursor chain.
+  "request_page_1_without_cursor",
+  // Re-enter via afterSeq sourced from a KNOWN wait/activity sequence
+  // (e.g. a numeric cursor from run_wait / run_await_result).
+  "use_afterSeq_from_known_sequence",
+]);
+
+/**
+ * Build the bounded structured recovery payload for a rejected cursor.
+ * Carries ONLY the closed-set fact + the static choices — never the raw cursor,
+ * never the mismatch subtype, never a run/workspace path, never dynamic error
+ * text, and never an auto-fallback page-1 result. The caller must explicitly
+ * re-request. Pure + side-effect free; the MCP layer parses the result through
+ * a strict emitted-shape parser built from the SAME exported constants.
+ *
+ * @returns {{status: string, choices: string[]}}
+ */
+export function buildCursorRecovery() {
+  return {
+    status: ACTIVITY_CURSOR_RECOVERY_STATUSES[0],
+    choices: [...ACTIVITY_CURSOR_RECOVERY_CHOICES],
+  };
+}
+
 const BASE64URL_RE = /^[A-Za-z0-9_-]+$/;
 
 function base64url(buf) {
@@ -166,7 +222,7 @@ function base64url(buf) {
 
 function base64urlDecode(str) {
   if (typeof str !== "string" || str.length === 0 || !BASE64URL_RE.test(str)) {
-    throw new Error("invalid cursor: not base64url");
+    throw new CursorRejectedError("invalid cursor: not base64url");
   }
   const b64 = str.replace(/-/g, "+").replace(/_/g, "/");
   const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
@@ -273,32 +329,36 @@ export function encodeActivityCursor(payload) {
  * projectRunActivity which has the live runId + snapshot + view.
  */
 export function decodeActivityCursor(token) {
-  if (typeof token !== "string") throw new Error("invalid cursor: not a string");
-  if (token.length === 0 || token.length > CURSOR_MAX_CHARS) throw new Error("invalid cursor length");
-  if (!BASE64URL_RE.test(token)) throw new Error("invalid cursor: not base64url");
+  if (typeof token !== "string") throw new CursorRejectedError("invalid cursor: not a string");
+  if (token.length === 0 || token.length > CURSOR_MAX_CHARS) throw new CursorRejectedError("invalid cursor length");
+  if (!BASE64URL_RE.test(token)) throw new CursorRejectedError("invalid cursor: not base64url");
   let parsed;
   try {
     parsed = JSON.parse(base64urlDecode(token).toString("utf8"));
-  } catch {
-    throw new Error("invalid cursor: not decodable JSON");
+  } catch (e) {
+    // base64urlDecode already throws CursorRejectedError for charset failures;
+    // a JSON parse failure on otherwise-base64url bytes is also a malformed
+    // cursor token → the same safe rejection signal.
+    if (e instanceof CursorRejectedError) throw e;
+    throw new CursorRejectedError("invalid cursor: not decodable JSON");
   }
-  if (!parsed || typeof parsed !== "object") throw new Error("invalid cursor: not an object");
+  if (!parsed || typeof parsed !== "object") throw new CursorRejectedError("invalid cursor: not an object");
   const { v, r, s, n, f, p } = parsed;
-  if (v !== CURSOR_VERSION) throw new Error("unsupported cursor version");
-  if (typeof r !== "string" || r.length !== DIGEST_B64_LEN) throw new Error("invalid cursor runId digest");
-  if (typeof s !== "string" || s.length !== DIGEST_B64_LEN) throw new Error("invalid cursor snapshot digest");
-  if (typeof f !== "string" || f.length !== DIGEST_B64_LEN) throw new Error("invalid cursor view digest");
-  if (!Number.isInteger(n) || n < 0 || n > 1_000_000) throw new Error("invalid cursor eventCount");
-  if (!Number.isInteger(p) || p < 0 || p > 1_000_000) throw new Error("invalid cursor position");
+  if (v !== CURSOR_VERSION) throw new CursorRejectedError("unsupported cursor version");
+  if (typeof r !== "string" || r.length !== DIGEST_B64_LEN) throw new CursorRejectedError("invalid cursor runId digest");
+  if (typeof s !== "string" || s.length !== DIGEST_B64_LEN) throw new CursorRejectedError("invalid cursor snapshot digest");
+  if (typeof f !== "string" || f.length !== DIGEST_B64_LEN) throw new CursorRejectedError("invalid cursor view digest");
+  if (!Number.isInteger(n) || n < 0 || n > 1_000_000) throw new CursorRejectedError("invalid cursor eventCount");
+  if (!Number.isInteger(p) || p < 0 || p > 1_000_000) throw new CursorRejectedError("invalid cursor position");
   const allowed = new Set(["v", "r", "s", "n", "f", "p"]);
   for (const k of Object.keys(parsed)) {
-    if (!allowed.has(k)) throw new Error("invalid cursor: unknown key");
+    if (!allowed.has(k)) throw new CursorRejectedError("invalid cursor: unknown key");
   }
   // Canonical-form enforcement: re-encode the parsed payload and require it
   // equals the input token. Rejects any non-canonical encoding (reordered keys,
   // whitespace, etc.) — defense against tampered/foreign tokens.
   const recanonical = encodeActivityCursor({ v, r, s, n, f, p });
-  if (recanonical !== token) throw new Error("invalid cursor: noncanonical");
+  if (recanonical !== token) throw new CursorRejectedError("invalid cursor: noncanonical");
   return { v, r, s, n, f, p };
 }
 
@@ -570,22 +630,25 @@ export function projectRunActivity(rawSnapshot, {
   let frozenDigest = liveDigest;
 
   if (cursorObj) {
-    // Binding 1: runId (compare digest, never raw runId).
-    if (cursorObj.r !== sha256Base64url(runId)) throw new Error("cursor runId mismatch");
-    // Binding 2: raw-event snapshot prefix (append-only safe, mutation/shrink fail closed).
+    // Binding 1: runId (compare digest, never raw runId). M12-19: a mismatch is
+    // a cross-run cursor → typed CursorRejectedError (structured recovery).
+    if (cursorObj.r !== sha256Base64url(runId)) throw new CursorRejectedError("cursor runId mismatch");
+    // Binding 2: raw-event snapshot prefix (append-only safe, mutation/shrink
+    // fail closed). M12-19: a stale/snapshot-changed cursor → CursorRejectedError.
     if (liveCount === cursorObj.n) {
-      if (cursorObj.s !== liveDigest) throw new Error("cursor snapshot mismatch");
+      if (cursorObj.s !== liveDigest) throw new CursorRejectedError("cursor snapshot mismatch");
     } else if (liveCount > cursorObj.n) {
       const prefix = events.slice(0, cursorObj.n);
       const prefixDigest = computeRawEventDigest(prefix);
-      if (cursorObj.s !== prefixDigest) throw new Error("cursor snapshot prefix mismatch");
+      if (cursorObj.s !== prefixDigest) throw new CursorRejectedError("cursor snapshot prefix mismatch");
       frozenEvents = prefix;
       frozenDigest = cursorObj.s;
     } else {
-      throw new Error("cursor snapshot shrunk");
+      throw new CursorRejectedError("cursor snapshot shrunk");
     }
     // Binding 3: view (category filter + afterSeq). Different view → fail closed.
-    if (cursorObj.f !== viewDigest) throw new Error("cursor view/filter mismatch");
+    // M12-19: a cross-view cursor → CursorRejectedError.
+    if (cursorObj.f !== viewDigest) throw new CursorRejectedError("cursor view/filter mismatch");
   }
 
   // Build the ordered filtered safe-entry list from the FROZEN snapshot so
@@ -618,7 +681,8 @@ export function projectRunActivity(rawSnapshot, {
   let start = 0;
   if (cursorObj) {
     start = cursorObj.p;
-    if (start > total) throw new Error("cursor position out of range");
+    // M12-19: an out-of-range continuation position → CursorRejectedError.
+    if (start > total) throw new CursorRejectedError("cursor position out of range");
   }
   const end = Math.min(start + size, total);
   const pageEntries = orderedEntries.slice(start, end);

@@ -175,6 +175,14 @@ import {
   ACTIVITY_PATH_CAP,
   ACTIVITY_TS_CAP,
   ACTIVITY_CURSOR_MAX_CHARS,
+  // M12-19: typed cursor-rejection signal + bounded recovery SSOT. The handler
+  // classifies a rejected cursor by TYPE (instanceof CursorRejectedError) — never
+  // by matching error strings — and folds it into the closed-set recovery payload
+  // built from the SAME exported constants as the wire schema (no drift).
+  CursorRejectedError,
+  buildCursorRecovery,
+  ACTIVITY_CURSOR_RECOVERY_STATUSES,
+  ACTIVITY_CURSOR_RECOVERY_CHOICES,
 } from "../application/runActivityProjection.js";
 import { readRunActivity } from "../application/runActivity.js";
 // M12-14: advisory scope observation. The additive scopeObservation output
@@ -2442,6 +2450,21 @@ const RUN_ACTIVITY_OUTPUT = z.object({
   availableDrilldowns: AVAILABLE_DRILLDOWNS,
 }).strict();
 
+// M12-19: structured cursor-recovery emitted shape. A rejected cursor is NOT a
+// page result — it carries ONLY the closed-set recovery fact + the static
+// choices (built from the SAME exported constants via buildCursorRecovery). This
+// is the STRICT emitted-shape parser the handler parses the recovery payload
+// through before returning it. It rides on isError:true so the SDK SKIPS
+// output-schema validation (the declared outputSchema is the SUCCESS shape and
+// cannot be a top-level union — the MCP SDK drops a z.union outputSchema in
+// tools/list and would reject the recovery structuredContent). The recovery
+// itself is bounded/closed-set/strict, so it is safe to emit outside the success
+// schema: it reveals no raw cursor, no mismatch subtype, no path, no dynamic text.
+const RUN_ACTIVITY_RECOVERY = z.object({
+  status: z.enum([...ACTIVITY_CURSOR_RECOVERY_STATUSES]),
+  choices: z.array(z.enum([...ACTIVITY_CURSOR_RECOVERY_CHOICES])),
+}).strict();
+
 const RUN_ACTIVITY_ANNOTATIONS = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -2456,9 +2479,9 @@ const RUN_ACTIVITY_DESCRIPTION =
   "redacted; no semantic summary or progress estimate. Advisory scopeObservation: whether " +
   "confirmed file_written events remain within delivery.allowedPaths — facts only, never a " +
   "stop/retry/repackage decision. Paginated via an opaque cursor; a rejected cursor " +
-  "(malformed, cross-run, or cross-view) fails closed to a fixed generic error — recover by " +
-  "re-requesting page 1 without a cursor (fresh chain) or by using afterSeq from a known " +
-  "wait/activity sequence; pageSize defaults to " +
+  "(stale, cross-run, cross-view, or out-of-range) returns a cursor_rejected recovery — " +
+  "no auto-retry: re-request page 1 without a cursor or use afterSeq. Other failures stay the " +
+  "fixed generic error. pageSize defaults to " +
   LEAD_PAGE_DEFAULT + ". Idempotent; workspace-bound.";
 
 // ===== Lead Playbook Catalog (M11-2B) constants =====
@@ -4529,7 +4552,29 @@ export function createWaoMcpServer({
           content: [{ type: "text", text: JSON.stringify(parsed) }],
           structuredContent: parsed,
         };
-      } catch {
+      } catch (e) {
+        // M12-19: a rejected cursor (stale / cross-run / cross-view / snapshot-
+        // changed / out-of-range / malformed token) is classified by TYPE
+        // (instanceof CursorRejectedError) — never by matching error strings —
+        // and folded into the BOUNDED structured recovery: cursor_rejected + the
+        // static choices. isError:true so the SDK SKIPS success-output-schema
+        // validation (the declared outputSchema is the success shape; the SDK
+        // drops a top-level union outputSchema) and passes the recovery
+        // structuredContent through unchanged. The payload is the SSOT constants
+        // only (validated by the strict recovery parser), so it reveals no raw
+        // cursor, no mismatch subtype, no path, and no dynamic error text. WAO
+        // presents facts + choices only — it never auto-retries or auto-restarts
+        // pagination (the recovery carries no page-1 result). Every other
+        // failure (workspace, envelope, malformed service result, output
+        // validation, unexpected internal error) falls through to the fixed
+        // generic error with NO structuredContent.
+        if (e instanceof CursorRejectedError) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: RUN_ACTIVITY_ERROR_TEXT }],
+            structuredContent: RUN_ACTIVITY_RECOVERY.parse(buildCursorRecovery()),
+          };
+        }
         return {
           isError: true,
           content: [{ type: "text", text: RUN_ACTIVITY_ERROR_TEXT }],

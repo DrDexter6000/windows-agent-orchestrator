@@ -23,6 +23,11 @@ import {
   OWNER_TEXT_EXCERPT_CAP,
   OTHER_EVENT_LABEL,
   computeEventSnapshotDigestForTest,
+  // M12-19: typed cursor-rejection signal + bounded recovery SSOT.
+  CursorRejectedError,
+  buildCursorRecovery,
+  ACTIVITY_CURSOR_RECOVERY_STATUSES,
+  ACTIVITY_CURSOR_RECOVERY_CHOICES,
 } from "../src/application/runActivityProjection.js";
 
 // ===== Helpers =====
@@ -959,4 +964,141 @@ test("M12-14 historical / non-delivery snapshot stays readable: scopeObservation
   assert.equal(r.scopeObservation.observedFileCount, 0);
   assert.deepEqual(r.scopeObservation.outsidePaths, []);
   assert.equal(r.entries.length, 2, "activity entries still project normally");
+});
+
+// =====================================================================
+// M12-19: structured cursor-recovery SIGNAL (TDD RED→GREEN).
+//
+// A syntactically-valid cursor that is stale / cross-run / cross-view /
+// snapshot-changed / out-of-range is rejected via a TYPED application-layer
+// signal (CursorRejectedError) — classified by TYPE, never by matching error
+// strings, and never a generic Error. Non-cursor failures (bad snapshot,
+// envelope mismatch, invalid pageSize/order/afterSeq/categories) stay generic
+// Error so the MCP layer can contain them as the fixed generic error with no
+// structuredContent. The bounded recovery payload is a small closed set
+// (cursor_rejected) + static choices, built from one SSOT.
+// =====================================================================
+
+test("M12-19 proj: cross-run cursor rejects via the typed CursorRejectedError (not string-matched)", () => {
+  resetSeq();
+  // Cursor ISSUED for RUN_ID over RUN_ID's events.
+  const eventsA = [];
+  for (let i = 0; i < 15; i += 1) eventsA.push(msgEvent("assistant", `m${i}`));
+  const page1 = projectRunActivity(snap(eventsA), { runId: RUN_ID, audience: "lead", pageSize: 5 });
+  assert.ok(page1.nextCursor);
+  // A DIFFERENT run's events (bound to run_OTHER) replayed with RUN_ID's cursor.
+  // The envelope check passes (events belong to run_OTHER); the cursor's runId
+  // digest (sha256(RUN_ID)) ≠ sha256(run_OTHER) → typed CursorRejectedError.
+  resetSeq();
+  const eventsB = [];
+  for (let i = 0; i < 15; i += 1) eventsB.push(msgEvent("assistant", `b${i}`, { runId: "run_OTHER" }));
+  assert.throws(
+    () => projectRunActivity(snap(eventsB), { runId: "run_OTHER", cursor: page1.nextCursor, pageSize: 5 }),
+    (e) => e instanceof CursorRejectedError,
+    "cross-run cursor must throw the typed signal (not a generic Error)",
+  );
+});
+
+test("M12-19 proj: cross-view / snapshot-changed / shrunk / out-of-range cursors all reject via CursorRejectedError", () => {
+  resetSeq();
+  const events = [];
+  for (let i = 0; i < 15; i += 1) events.push(msgEvent("assistant", `m${i}`));
+  for (let i = 0; i < 5; i += 1) events.push(cmdEvent(0));
+  // cross-view: page 1 filtered to messages, continue with a different filter.
+  const msgPage = project(events, { categories: ["message"], pageSize: 5 });
+  assert.ok(msgPage.nextCursor);
+  assert.throws(
+    () => project(events, { categories: ["command"], cursor: msgPage.nextCursor, pageSize: 5 }),
+    (e) => e instanceof CursorRejectedError,
+    "cross-view cursor typed signal",
+  );
+  // snapshot-changed: mutate one event in the frozen prefix (same length → digest mismatch).
+  const page1 = project(events, { pageSize: 5 });
+  const mutated = events.map((e, i) => (i === 2 ? { ...e, parts: [{ type: "text", text: "TAMPERED" }] } : e));
+  assert.throws(
+    () => project(mutated, { cursor: page1.nextCursor, pageSize: 5 }),
+    (e) => e instanceof CursorRejectedError,
+    "snapshot-changed (stale) cursor typed signal",
+  );
+  // shrunk: fewer events than the frozen prefix length.
+  const shrunk = events.slice(0, 8);
+  assert.throws(
+    () => project(shrunk, { cursor: page1.nextCursor, pageSize: 5 }),
+    (e) => e instanceof CursorRejectedError,
+    "shrunk cursor typed signal",
+  );
+  // out-of-range position: forge a cursor whose p exceeds the filtered total.
+  const dec = decodeActivityCursor(page1.nextCursor);
+  const outOfRange = encodeActivityCursor({ ...dec, p: 999 });
+  assert.throws(
+    () => project(events, { cursor: outOfRange, pageSize: 5 }),
+    (e) => e instanceof CursorRejectedError,
+    "out-of-range cursor typed signal",
+  );
+});
+
+test("M12-19 proj: malformed-syntax cursors reject via CursorRejectedError (safe; no containment weakening)", () => {
+  resetSeq();
+  const events = [msgEvent("assistant", "x")];
+  for (const c of ["not-base64url!!!", b64urlRaw("not json{")]) {
+    assert.throws(
+      () => project(events, { cursor: c }),
+      (e) => e instanceof CursorRejectedError,
+      `malformed-syntax cursor must throw the typed signal: ${c.slice(0, 12)}`,
+    );
+  }
+});
+
+test("M12-19 proj: NON-cursor failures throw generic Error, NOT CursorRejectedError (containment)", () => {
+  resetSeq();
+  const events = [msgEvent("assistant", "a"), msgEvent("assistant", "b")];
+  // invalid snapshot shape (malformed snapshot) stays generic.
+  assert.throws(
+    () => projectRunActivity(null, { runId: RUN_ID }),
+    (e) => !(e instanceof CursorRejectedError) && e instanceof Error,
+    "bad snapshot stays generic Error",
+  );
+  // caller-arg validation failures stay generic (not cursor rejection).
+  assert.throws(
+    () => project(events, { pageSize: 0 }),
+    (e) => !(e instanceof CursorRejectedError) && e instanceof Error,
+    "invalid pageSize stays generic Error",
+  );
+  assert.throws(
+    () => project(events, { order: "sideways" }),
+    (e) => !(e instanceof CursorRejectedError) && e instanceof Error,
+    "invalid order stays generic Error",
+  );
+  assert.throws(
+    () => project(events, { afterSeq: -1 }),
+    (e) => !(e instanceof CursorRejectedError) && e instanceof Error,
+    "invalid afterSeq stays generic Error",
+  );
+  assert.throws(
+    () => project(events, { categories: ["bogus"] }),
+    (e) => !(e instanceof CursorRejectedError) && e instanceof Error,
+    "invalid category stays generic Error",
+  );
+  // invalid transcript envelope (runId mismatch) stays generic — it is NOT a
+  // cursor rejection and must be containable as the fixed generic error.
+  const mismatch = [msgEvent("assistant", "a", { runId: "run_OTHER" })];
+  assert.throws(
+    () => project(mismatch, { runId: RUN_ID }),
+    (e) => !(e instanceof CursorRejectedError) && e instanceof Error,
+    "envelope runId mismatch stays generic Error",
+  );
+});
+
+test("M12-19 proj: buildCursorRecovery is a bounded closed-set payload (status + static choices)", () => {
+  const r = buildCursorRecovery();
+  assert.deepEqual([...ACTIVITY_CURSOR_RECOVERY_STATUSES], ["cursor_rejected"], "single closed-set recovery fact");
+  assert.equal(r.status, "cursor_rejected");
+  assert.ok(Array.isArray(r.choices), "choices is a bounded array");
+  assert.deepEqual(r.choices, [...ACTIVITY_CURSOR_RECOVERY_CHOICES], "choices match the SSOT closed set");
+  // the two contract-named recovery choices are present.
+  assert.ok(ACTIVITY_CURSOR_RECOVERY_CHOICES.includes("request_page_1_without_cursor"));
+  assert.ok(ACTIVITY_CURSOR_RECOVERY_CHOICES.some((c) => c.startsWith("use_afterSeq")));
+  // the recovery payload carries NOTHING but the closed-set fact + choices — no
+  // cursor, no subtype, no path, no dynamic text.
+  assert.deepEqual(Object.keys(r).sort(), ["choices", "status"]);
 });

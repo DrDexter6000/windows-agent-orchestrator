@@ -33,6 +33,10 @@ import {
   ACTIVITY_PATH_CAP,
   ACTIVITY_TS_CAP,
   ACTIVITY_CURSOR_MAX_CHARS,
+  encodeActivityCursor,
+  decodeActivityCursor,
+  ACTIVITY_CURSOR_RECOVERY_STATUSES,
+  ACTIVITY_CURSOR_RECOVERY_CHOICES,
 } from "../src/application/runActivityProjection.js";
 import {
   SCOPE_OBSERVATION_STATUSES,
@@ -436,9 +440,11 @@ test("MAA-11: secret in assistant text redacted across MCP", async () => {
 });
 
 // =====================================================================
-// #6 Cursor continuity: cross-run / cross-filter cursor rejected → fixed error.
+// #6 Cursor continuity: a cross-run cursor is rejected. M12-19: the rejection
+// now returns a BOUNDED structured recovery (cursor_rejected + static choices)
+// instead of only the generic error — facts+choices only, never an auto-retry.
 // =====================================================================
-test("MAA-12: a cursor bound to a different run is rejected (fixed error)", async () => {
+test("MAA-12: a cursor bound to a different run → cursor_rejected recovery (structuredContent), fixed text", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-maa12-"));
   const runDir = mkdtempSync(join(tmpdir(), "wao-maa12-rd-"));
   try {
@@ -452,11 +458,19 @@ test("MAA-12: a cursor bound to a different run is rejected (fixed error)", asyn
       const pageA = await client.callTool({ name: "run_activity", arguments: { runId: "run_A", pageSize: 10 } });
       const cursorA = pageA.structuredContent.nextCursor;
       assert.ok(cursorA, "page A has a cursor");
-      // reuse run_A's cursor against run_B → must fail closed.
+      // reuse run_A's cursor against run_B → bounded recovery, not a generic error.
       const res = await client.callTool({ name: "run_activity", arguments: { runId: "run_B", cursor: cursorA } });
       const dumped = JSON.stringify(res);
-      assert.ok(dumped.includes("run_activity failed"), "cross-run cursor rejected with fixed text");
-      assert.ok(!res.structuredContent, "no partial structuredContent");
+      assert.ok(dumped.includes("run_activity failed"), "fixed safe text still present");
+      const sc = res.structuredContent;
+      assert.ok(sc, "recovery carries structuredContent (not only the generic error)");
+      assert.equal(sc.status, "cursor_rejected", "closed-set recovery fact");
+      assert.deepEqual(sc.choices, [...ACTIVITY_CURSOR_RECOVERY_CHOICES], "static recovery choices");
+      // the raw cursor token is NEVER echoed back.
+      assert.ok(!dumped.includes(cursorA), "raw cursor never leaks");
+      // the recovery payload reveals NO mismatch subtype, run/workspace path, or
+      // dynamic error text — only the closed-set fact + choices.
+      assert.deepEqual(Object.keys(sc).sort(), ["choices", "status"], "no extra/subtype fields");
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
 });
@@ -840,10 +854,13 @@ test("MAA-21: historical non-delivery transcript stays readable as unknown via M
 
 // ===== M12-19: recovery-truth description contract =====
 
-// MAA-22: run_activity's description states the cursor-rejection recovery path:
-// a rejected cursor fails closed to a FIXED generic error; recover by re-requesting
-// page 1 (fresh cursor chain) or by using afterSeq from a known wait/activity sequence.
-test("MAA-22: description tells cursor-rejection recovery (fixed generic error; page-1 or afterSeq)", async () => {
+// MAA-22: run_activity's description states the cursor-rejection recovery path
+// truthfully: a rejected cursor (stale, cross-run, cross-view, or out-of-range)
+// returns a bounded cursor_rejected recovery with static choices (page 1 without
+// a cursor / afterSeq), no auto-retry; all other failures stay the fixed generic
+// error. Wording is held under the frozen tool-surface byte ceiling, so only the
+// contract-proving substrings are asserted here.
+test("MAA-22: description tells cursor_rejected recovery (facts+choices; page-1 or afterSeq; no auto)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-maa22-"));
   try {
     makeGitRepo(dir);
@@ -854,12 +871,196 @@ test("MAA-22: description tells cursor-rejection recovery (fixed generic error; 
       const t = tools.find((x) => x.name === "run_activity");
       assert.ok(t, "run_activity present");
       const desc = t.description ?? "";
-      assert.match(desc, /fixed generic error/, "rejected cursor = fixed generic error");
-      assert.match(desc, /malformed, cross-run, or cross-view/, "rejection categories stated");
-      assert.match(desc, /page 1/, "recover by re-requesting page 1");
-      assert.match(desc, /fresh chain/, "page 1 starts a fresh cursor chain");
+      assert.match(desc, /cursor_rejected/, "named closed-set recovery fact");
+      assert.match(desc, /stale, cross-run, cross-view, or out-of-range/, "rejection categories stated");
+      assert.match(desc, /page 1 without a cursor/, "recover by re-requesting page 1 without a cursor");
       assert.match(desc, /afterSeq/, "afterSeq recovery alternative named");
-      assert.match(desc, /known wait\/activity sequence/, "afterSeq sourced from a known wait/activity sequence");
+      assert.match(desc, /no auto-retry/, "no automatic retry/restart of pagination");
+      assert.match(desc, /fixed generic error/, "other failures stay the fixed generic error");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// =====================================================================
+// M12-19: structured cursor-recovery over the REAL MCP surface.
+//
+// A syntactically-valid cursor that is stale / cross-run / cross-view /
+// snapshot-changed / out-of-range returns a BOUNDED structured recovery
+// (cursor_rejected + static choices), NOT only the generic error. WAO presents
+// facts+choices only: it NEVER auto-retries, NEVER auto-restarts pagination,
+// NEVER reveals the raw cursor / mismatch subtype / run-or-workspace path /
+// dynamic error text. Cross-workspace, envelope, malformed-service, output-
+// validation, and unexpected-internal failures STAY the fixed generic error
+// with NO structuredContent (containment regressions below).
+// =====================================================================
+
+// Shared assertion: a real run_activity response is the bounded recovery shape.
+function assertCursorRecovery(res, { rawCursor }) {
+  const dumped = JSON.stringify(res);
+  assert.ok(dumped.includes("run_activity failed"), "fixed safe text still present");
+  const sc = res.structuredContent;
+  assert.ok(sc, "recovery carries structuredContent (not only the generic error)");
+  assert.equal(sc.status, "cursor_rejected", "closed-set recovery fact");
+  assert.deepEqual(sc.choices, [...ACTIVITY_CURSOR_RECOVERY_CHOICES], "static recovery choices");
+  assert.deepEqual([...ACTIVITY_CURSOR_RECOVERY_STATUSES], ["cursor_rejected"], "single closed-set fact");
+  // No raw cursor / subtype / path / dynamic-error leakage: the payload is ONLY
+  // the closed-set fact + the static choices array.
+  assert.deepEqual(Object.keys(sc).sort(), ["choices", "status"], "no subtype/path/error fields");
+  if (rawCursor) assert.ok(!dumped.includes(rawCursor), "raw cursor token never echoed");
+  // No auto-fallback: the recovery NEVER embeds a page-1 result, a fresh cursor,
+  // or any activity facts — the Lead must explicitly re-request.
+  for (const absent of ["entries", "counts", "total", "nextCursor", "runId", "agentId", "pageSize", "truncated"]) {
+    assert.ok(!(absent in sc), `recovery never auto-falls back to a ${absent} result`);
+  }
+}
+
+test("MAA-REC-crossview: a cross-view cursor → cursor_rejected recovery (no leak, no auto-fallback)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-maa-rec-xv-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-maa-rec-xv-rd-"));
+  try {
+    makeGitRepo(dir);
+    // 12 messages + 4 commands → both filters are multi-page at pageSize 5.
+    const msgs = Array.from({ length: 12 }, (_, i) => `m${i}`);
+    seedTranscript(runDir, "run_xv", { workspaceCwd: dir, messages: msgs, extraEvents: [
+      ...Array.from({ length: 4 }, (_, i) => jl({
+        type: "run.event", kind: "command", exitCode: 0, runId: "run_xv", agentId: "coder_low",
+        ts: `2026-08-02T00:00:${20 + i}.000Z`,
+      })),
+    ], terminal: false });
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      // page 1 with the message filter → a view-bound cursor.
+      const pageMsg = await client.callTool({ name: "run_activity", arguments: { runId: "run_xv", categories: ["message"], pageSize: 5 } });
+      const cursor = pageMsg.structuredContent.nextCursor;
+      assert.ok(cursor, "message-filter page 1 has a cursor");
+      // continue with a DIFFERENT filter → cross-view recovery.
+      const res = await client.callTool({ name: "run_activity", arguments: { runId: "run_xv", categories: ["command"], cursor, pageSize: 5 } });
+      assertCursorRecovery(res, { rawCursor: cursor });
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});
+
+test("MAA-REC-snapshot: a cursor whose snapshot changed in place → cursor_rejected recovery", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-maa-rec-snap-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-maa-rec-snap-rd-"));
+  try {
+    makeGitRepo(dir);
+    const msgs = Array.from({ length: 25 }, (_, i) => `m${i}`);
+    seedTranscript(runDir, "run_snap", { workspaceCwd: dir, messages: msgs, terminal: false });
+    const tp = join(runDir, "run_snap.jsonl");
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const page1 = await client.callTool({ name: "run_activity", arguments: { runId: "run_snap", pageSize: 10 } });
+      const cursor = page1.structuredContent.nextCursor;
+      assert.ok(cursor, "page 1 has a cursor");
+      // Mutate one frozen-prefix event IN PLACE (same length → digest mismatch).
+      const before = readFileSync(tp, "utf8");
+      const tampered = before.replace('"m2"', '"TAMPERED_TEXT"');
+      writeFileSync(tp, tampered, "utf8");
+      const res = await client.callTool({ name: "run_activity", arguments: { runId: "run_snap", cursor, pageSize: 10 } });
+      assertCursorRecovery(res, { rawCursor: cursor });
+      assert.ok(!JSON.stringify(res).includes("TAMPERED_TEXT"), "mutated transcript text never leaks");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});
+
+test("MAA-REC-outofrange: a cursor whose position exceeds the total → cursor_rejected recovery", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-maa-rec-oor-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-maa-rec-oor-rd-"));
+  try {
+    makeGitRepo(dir);
+    seedTranscript(runDir, "run_oor", { workspaceCwd: dir, messages: ["a", "b", "c", "d", "e"], terminal: false });
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const page1 = await client.callTool({ name: "run_activity", arguments: { runId: "run_oor", pageSize: 3 } });
+      const cursor = page1.structuredContent.nextCursor;
+      assert.ok(cursor, "page 1 has a cursor");
+      // Forge a position-out-of-range continuation cursor (p well past the total).
+      const dec = decodeActivityCursor(cursor);
+      const forged = encodeActivityCursor({ ...dec, p: 999 });
+      const res = await client.callTool({ name: "run_activity", arguments: { runId: "run_oor", cursor: forged, pageSize: 3 } });
+      assertCursorRecovery(res, { rawCursor: forged });
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});
+
+test("MAA-REC-malformed: a base64url-valid but undecodable cursor → cursor_rejected recovery (safe containment)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-maa-rec-mf-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-maa-rec-mf-rd-"));
+  try {
+    makeGitRepo(dir);
+    seedTranscript(runDir, "run_mf", { workspaceCwd: dir, messages: ["a"], terminal: false });
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      // A token that PASSES the input base64url regex but is malformed when
+      // decoded (not valid JSON). It reaches the handler and must collapse to the
+      // SAME safe cursor_rejected recovery — no zod/SDK decode error leaks, and
+      // it does not weaken cross-workspace/error containment (covered separately).
+      const malformed = Buffer.from("not json{", "utf8").toString("base64")
+        .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      const res = await client.callTool({ name: "run_activity", arguments: { runId: "run_mf", cursor: malformed } });
+      assertCursorRecovery(res, { rawCursor: malformed });
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes("invalid") && !dumped.includes("base64") && !dumped.includes("Received"),
+        "no zod/decode internal error text leaks");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});
+
+test("MAA-REC-no-autorestart: after a rejected cursor, a fresh page-1 call still works (WAO never auto-restarted)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-maa-rec-nr-"));
+  const runDir = mkdtempSync(join(tmpdir(), "wao-maa-rec-nr-rd-"));
+  try {
+    makeGitRepo(dir);
+    seedTranscript(runDir, "run_nr", { workspaceCwd: dir, messages: ["a", "b", "c", "d", "e"], terminal: false });
+    const server = createWaoMcpServer({ registryPath: "/r.json", runDir, workspaceRoot: dir });
+    const client = await buildClient(server);
+    try {
+      const page1 = await client.callTool({ name: "run_activity", arguments: { runId: "run_nr", pageSize: 3 } });
+      const cursor = page1.structuredContent.nextCursor;
+      // cross-run reuse against a nonexistent run id → recovery (not a generic error).
+      const res = await client.callTool({ name: "run_activity", arguments: { runId: "run_nr", cursor: encodeActivityCursor({ ...decodeActivityCursor(cursor), r: "0".repeat(22) }) } });
+      assertCursorRecovery(res, {});
+      // The rejection did NOT auto-restart pagination: the recovery carries no
+      // entries. A subsequent EXPLICIT page-1 call (no cursor) still returns data.
+      const fresh = await client.callTool({ name: "run_activity", arguments: { runId: "run_nr", pageSize: 3 } });
+      assert.equal(fresh.isError, undefined, "explicit page-1 call still succeeds");
+      assert.ok(Array.isArray(fresh.structuredContent?.entries) && fresh.structuredContent.entries.length > 0,
+        "page 1 is still readable after a rejected cursor (no auto-mutation of state)");
+    } finally { await client.close(); await server.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(runDir, { recursive: true, force: true }); }
+});
+
+// =====================================================================
+// M12-19 containment regressions: the cursor-recovery path must NOT weaken the
+// existing fail-closed contract for NON-cursor failures. Cross-workspace,
+// malformed service result, invalid transcript envelope, and unexpected internal
+// errors MUST stay the fixed generic error with NO structuredContent.
+// (MAA-08 cross-workspace / MAA-09 malformed service result / MAA-14 envelope
+//  mismatch already lock the first three; MAA-REC-unexpected locks the catch-all.)
+// =====================================================================
+test("MAA-REC-unexpected: an unexpected internal error stays the fixed generic error with no structuredContent", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-maa-rec-ue-"));
+  try {
+    makeGitRepo(dir);
+    // The injected service throws an error carrying dynamic internal detail.
+    // The handler catch-all must fold it to the fixed text and reveal nothing,
+    // and it must NOT be misclassified as a cursor rejection (no structuredContent).
+    const server = createWaoMcpServer({
+      registryPath: "/r.json", runDir: dir, workspaceRoot: dir,
+      readRunActivityFn: async () => { throw new Error("internal SECRET_PATH detail boom"); },
+    });
+    const client = await buildClient(server);
+    try {
+      const res = await client.callTool({ name: "run_activity", arguments: { runId: "run_x", cursor: "AAAAAAAAAAAA" } });
+      const dumped = JSON.stringify(res);
+      assert.ok(dumped.includes("run_activity failed"), "fixed safe text");
+      assert.ok(!res.structuredContent, "unexpected error has NO structuredContent (not a cursor rejection)");
+      assert.ok(!dumped.includes("SECRET_PATH") && !dumped.includes("boom"), "dynamic internal detail never leaks");
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
