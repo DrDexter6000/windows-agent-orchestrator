@@ -98,6 +98,7 @@
       "runsDelivery.test.js",
       "runsDeliveryReverifyCli.test.js",
       "runsDeliveryReviewCli.test.js",
+      "runsWait.test.js",
       "scorecard.test.js",
       "stopSideEffect.test.js",
       "timeoutPolicy.test.js",

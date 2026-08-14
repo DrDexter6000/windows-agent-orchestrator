@@ -327,7 +327,7 @@ Commands:
   run <agentId> --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate] [--require-certified] [--background] [--scorecard-rules-file FILE] [--delivery-spec-file FILE]
   status <runId> [--run-dir DIR] [--format json]
   tail <runId> [--limit N] [--follow] [--run-dir DIR]
-  collect <runId> [--limit N] [--run-dir DIR]
+  collect <runId> [--limit N] [--cursor TOKEN] [--mode full|compact] [--format json] [--run-dir DIR]
   stop <runId> [--run-dir DIR]
   retry <runId> [--wait] [--run-dir DIR]
   resume <runId> [--wait] [--run-dir DIR]
@@ -345,6 +345,7 @@ Commands:
   runs delivery <runId> [--run-dir DIR] [--format json]
   runs delivery <runId> --accept --reason-file FILE [--run-dir DIR] [--format json]
   runs delivery <runId> --reject --reason-file FILE [--run-dir DIR] [--format json]
+  runs wait <runId> [--wait-ms N] [--format json|text] [--run-dir DIR]   # 阻塞等待终态或观察窗口到期（默认 text；窗口到期 exit 0）
   workflow run <name|file.mjs> [--input TEXT] [--registry FILE] [--isolate] [--wait-timeout MS] [--run-dir DIR] [--vars key=value...]
   workflow list                  # 列出可用模板（workflows/templates/）
   playbook list [--format json]              # 列出内置 Lead playbook 摘要（只读）

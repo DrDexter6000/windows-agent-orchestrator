@@ -236,7 +236,20 @@ npm run cli -- spawn researcher --prompt "分析 auth 模块并列出风险文�
 npm run cli -- status <runId>
 npm run cli -- tail <runId>          # 看最后几个事件
 npm run cli -- tail <runId> --follow # 实时跟踪
+
+# 阻塞等待 run 到终态（或观察窗口到期）
+npm run cli -- runs wait <runId>                     # 默认窗口 270000 ms，text 摘要
+npm run cli -- runs wait <runId> --wait-ms 600000    # 窗口 180000..600000 ms
+npm run cli -- runs wait <runId> --format json       # 完整服务结果 + semanticNotes
 ```
+
+`runs wait` 与 MCP `run_wait` 工具共用同一等待服务（只读长轮询，不写 transcript）：
+默认 `--format text`（runs 家族惯例），`--format json` 输出完整服务结果并附
+`semanticNotes`（与 MCP 同一 selector）。观察窗口到期（`terminal:false`）是正常
+结果——正常打印、exit 0，不代表 worker 停止或失败；等待期间 Ctrl-C 会打印中断
+时刻的快照后以非零退出。`--wait-ms` 越界或非整数由服务边界原样报错（exit 1）。
+`runs` 的未知子命令（如 `runs waitx`）会 fail-closed 报错并列出全部合法子命令；
+裸 `runs` 仍保持列出 run 列表。
 
 ### 场景 3：并行跑多个 agent
 

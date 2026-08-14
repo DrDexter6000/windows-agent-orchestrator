@@ -1262,6 +1262,7 @@ test("help: 列出所有 main() 真实路由的命令族（防 help 与代码漂
   // runs 族（M8-2/3 新增，曾漏）
   assert.match(out, /runs dashboard/, "help 必须列出 runs dashboard（main() 路由）");
   assert.match(out, /runs diagnose/, "help 必须列出 runs diagnose（main() 路由）");
+  assert.match(out, /runs wait/, "help 必须列出 runs wait（TD-109 runs wait 命令）");
   assert.doesNotMatch(out, /runs forecast/, "已移除的 forecast 不得继续出现在 help");
   // wao 族（整族曾缺席）
   assert.match(out, /wao init/, "help 必须列出 wao init");

@@ -3,7 +3,7 @@
 // TD-98 阶段 2b：runs command family 从 cli.js 拆出（行为不变，纯搬迁）。
 //
 // 命令族：runs list / summary / prune / grep / metrics / scorecard /
-//         dashboard / diagnose
+//         dashboard / diagnose / delivery / wait
 //
 // 依赖：
 //   - 外部模块：../transcript.js（readTranscript/findState）、../metrics.js
@@ -11,6 +11,8 @@
 //     （diagnoseFailure）、../waoDir.js
 //     （getWaoDir）、../waoDeclare.js（summarizeDeclares）、../waoStage.js
 //     （summarizeStages）
+//   - 共享 service：../application/runWait.js（runs wait 与 MCP run_wait 同一
+//     等待服务）、../application/runSemanticsNotes.js（semanticNotes 同一 selector）
 //   - 共享工具：./shared.js（parseOptions/resolveTargetCwd，纯函数）
 //   - node built-in：fs/promises（readdir/unlink）、fs（existsSync）、path（join/resolve）
 //
@@ -20,7 +22,7 @@ import { readdir, unlink, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import { readTranscript, findState, REVERIFY_FAILURE_CODES } from "../transcript.js";
+import { readTranscript, findState, TERMINAL_STATES, REVERIFY_FAILURE_CODES } from "../transcript.js";
 import { aggregateRunMetrics, aggregateSummary, formatDuration } from "../metrics.js";
 import { diagnoseFailure } from "../diagnosis.js";
 // M9-5A: diagnosis delegated to shared application service.
@@ -52,6 +54,11 @@ import { getWaoDir } from "../waoDir.js";
 import { summarizeDeclares } from "../waoDeclare.js";
 import { summarizeStages } from "../waoStage.js";
 import { parseOptions, resolveTargetCwd } from "./shared.js";
+// TD-109: `runs wait` delegates to the SAME liveness-aware wait service the
+// MCP run_wait tool uses, and attaches notes via the SAME semanticNotes
+// selector — no copied algorithm, no copied catalog.
+import { runWait, RUN_WAIT_DEFAULT_MS } from "../application/runWait.js";
+import { selectSemanticNotes } from "../application/runSemanticsNotes.js";
 // M12-8D: `runs dashboard --web` reuses the ownerDashboardServer boundary (which
 // reuses the SINGLE application SSOTs — no second parser/classifier/redactor).
 // Shared workspace authority (proveWorkspace) + registry IDs (readRegistry).
@@ -59,8 +66,20 @@ import { createOwnerDashboardServer } from "../ownerDashboardServer.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
 import { readRegistry } from "../registry.js";
 
-async function runsCommand(args, config) {
+// TD-109: the full legal subcommand set of `runs`. `list` was previously only
+// reachable through the silent fallthrough; it is now an explicit branch so the
+// fail-closed unknown-subcommand error below cannot swallow it.
+const RUNS_SUBCOMMANDS = [
+  "list", "summary", "prune", "grep", "metrics", "scorecard",
+  "dashboard", "diagnose", "delivery", "wait",
+];
+
+async function runsCommand(args, config, deps) {
   const [sub, ...tail] = args;
+  if (sub === "list") {
+    await runsListCommand(args, config);
+    return;
+  }
   if (sub === "summary") {
     await runsSummaryCommand(tail, config);
     return;
@@ -93,10 +112,143 @@ async function runsCommand(args, config) {
     await runsDeliveryCommand(tail, config);
     return;
   }
+  if (sub === "wait") {
+    await runsWaitCommand(tail, config, deps);
+    return;
+  }
   if (sub === "forecast") {
     throw new Error("runs forecast has been removed; use observed run facts instead of token estimates");
   }
-  await runsListCommand(args, config);
+  // Bare `runs` — no subcommand (undefined / empty token / flags-only) — keeps
+  // the legacy list fallthrough byte-for-byte (TD-109 backward compat).
+  if (sub === undefined || sub === "" || sub.startsWith("--")) {
+    await runsListCommand(args, config);
+    return;
+  }
+  // TD-109 fail-closed: an unknown non-empty subcommand used to silently fall
+  // through to the run list and exit 0. It now throws a fixed error naming
+  // every legal subcommand so a typo (e.g. `runs waitx`) cannot masquerade as
+  // a successful command.
+  throw new Error(
+    `unknown runs subcommand: ${sub} (valid subcommands: ${RUNS_SUBCOMMANDS.join(", ")})`,
+  );
+}
+
+// TD-109: strict flag set for `runs wait`. Unknown flags are rejected so a
+// typo'd flag cannot silently produce wrong output (same discipline as
+// runs delivery review / reverify).
+const RUNS_WAIT_KNOWN_FLAGS = new Set(["--wait-ms", "--format", "--run-dir"]);
+
+/**
+ * TD-109: `runs wait <runId> [--wait-ms N] [--format json|text] [--run-dir DIR]`
+ *
+ * Read-only bounded long-poll. Delegates to the SAME runWait application
+ * service the MCP run_wait tool uses — the CLI never re-implements the
+ * wait/liveness/observation algorithm and never copies boundary constants.
+ * The CLI owns only:
+ *   - strict argv parsing (flag-aware positional walk)
+ *   - --wait-ms Number() coercion — the SERVICE stays the boundary validator,
+ *     so its exact error text reaches the user unmodified
+ *   - text/JSON rendering (JSON = full service result + semanticNotes via the
+ *     SAME selector + facts shape as the MCP run_wait handler)
+ *   - SIGINT: print the last known point-in-time snapshot, exit non-zero
+ *
+ * No authorizedWorkspaceRoot is passed (CLI is human/ops — it does not bind a
+ * workspace; same convention as runs list / stop).
+ *
+ * Window expiry (terminal:false) is a NORMAL outcome: print, exit 0.
+ *
+ * @param {string[]} args — everything after `runs wait`
+ * @param {object} config
+ * @param {object} [deps] — { runWaitFn } service injection for testing
+ */
+async function runsWaitCommand(args, config, deps = {}) {
+  const seenFlags = new Set();
+  const flags = {};
+  const positionals = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i];
+    if (a.startsWith("--")) {
+      if (!RUNS_WAIT_KNOWN_FLAGS.has(a)) throw new Error(`unknown flag for runs wait: ${a}`);
+      if (seenFlags.has(a)) throw new Error(`${a} specified multiple times`);
+      seenFlags.add(a);
+      const v = args[i + 1];
+      if (v === undefined || v.startsWith("--")) throw new Error(`${a} requires a value`);
+      if (v.trim().length === 0) throw new Error(`${a} must be non-empty`);
+      const key = a.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      flags[key] = v;
+      i += 1;
+    } else {
+      positionals.push(a);
+    }
+  }
+  if (positionals.length !== 1) {
+    throw new Error("runs wait requires exactly one <runId>");
+  }
+  const runId = positionals[0];
+  if (flags.format !== undefined && flags.format !== "json" && flags.format !== "text") {
+    throw new Error("--format only supports json|text");
+  }
+  const asJson = flags.format === "json";
+  const runDir = resolve(flags.runDir ?? config.runDir);
+
+  // CLI only coerces; the service is the shared business boundary and throws
+  // its own exact error for out-of-range / non-integer values (not reworded).
+  let waitMs = RUN_WAIT_DEFAULT_MS;
+  if (flags.waitMs !== undefined) waitMs = Number(flags.waitMs);
+
+  const service = deps.runWaitFn ?? runWait;
+
+  // SIGINT (Ctrl-C during the blocking window): print the last known
+  // point-in-time observation, then exit non-zero (tail --follow precedent,
+  // observe.js). The snapshot reuses the SAME readTranscript/findState SSOT
+  // the service polls with — no second parser; a read failure degrades to
+  // state "unknown" rather than crashing the interrupt path.
+  const transcriptPath = join(runDir, `${runId}.jsonl`);
+  const onSigint = () => {
+    void (async () => {
+      let state = "unknown";
+      let terminal = false;
+      try {
+        const events = await readTranscript(transcriptPath);
+        state = findState(events);
+        terminal = TERMINAL_STATES.includes(state);
+      } catch { /* keep the fail-soft unknown snapshot */ }
+      if (asJson) {
+        console.log(JSON.stringify({ runId, state, terminal, interrupted: true }, null, 2));
+      } else {
+        console.log(`Run: ${runId} (${state})`);
+        console.log(`Terminal: ${terminal ? "yes" : "no"}`);
+        console.log("(interrupted before the observation window completed)");
+      }
+      process.exit(1);
+    })();
+  };
+  process.on("SIGINT", onSigint);
+  let result;
+  try {
+    result = await service({ runId, runDir, waitMs });
+  } finally {
+    process.off("SIGINT", onSigint);
+  }
+
+  if (asJson) {
+    // Same selector and facts shape as the MCP run_wait handler — no copied
+    // catalog, no adapted semantics.
+    const semanticNotes = selectSemanticNotes("run_wait", {
+      observationOutcome: result.observationOutcome,
+      outcome: result.observation?.outcome,
+      terminal: result.terminal,
+      terminationSource: result.termination?.source ?? null,
+    });
+    console.log(JSON.stringify({ ...result, semanticNotes }, null, 2));
+    return;
+  }
+  console.log(`Run: ${result.runId} (${result.state})`);
+  console.log(`Terminal: ${result.terminal ? "yes" : "no"}`);
+  console.log(`Waited: ${result.observation?.waitedMs ?? 0} ms (window ${result.observation?.windowMs ?? waitMs} ms)`);
+  console.log(`Liveness: ${result.liveness}`);
+  console.log(`Observation: ${result.observationOutcome}${result.observation ? ` (${result.observation.outcome})` : ""}`);
 }
 
 async function loadRunFiles(runDir) {
