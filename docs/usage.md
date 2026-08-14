@@ -576,7 +576,8 @@ OpenCode（`opencode-ai` npm 包，不是已废弃的 `opencode`）作为 MCP Le
 {
   "agents": [
     { "id": "coder_low", "backend": "claude-code", "model": "deepseek-v4-flash",
-      "certification": "certified", "cwd": "/repo",
+      "certification": "certified", "certificationReasonCode": null, "certificationLastHealthyAt": "2026-08-10T06:20:00.000Z",
+      "cwd": "/repo",
       "credentialAvailability": "available", "missingCredentialEnvNames": [],
       "providerReadiness": {
         "configurationStatus": "configured",
@@ -591,6 +592,8 @@ OpenCode（`opencode-ai` npm 包，不是已废弃的 `opencode`）作为 MCP Le
 ```
 
 `agents` 元素语义与 CLI `registry list --format json` 的数组元素一致（MCP 仅多一层 `agents` 包装）。`registry_list` 是只读操作，调用前后 runDir 不会有新增 transcript/run 文件。
+
+**TD-111 certification advisory context**：每个 agent 额外携带两个 advisory 字段——`certificationReasonCode`（闭集机器码，解释"为什么不是 certified"：`case_blocked`（外部 blocker：provider/credential/quota，或显式 blocked）/ `core_checks_failed` / `strict_evidence_failed` / `operational_or_observability_failed` / `missing_certification_checks`，分支优先级与 reliability 认定一致，blocked 优先于 core 失败）与 `certificationLastHealthyAt`（该 worker 最近一次全绿 case 的 bounded ISO-8601 UTC 时间戳，认证新鲜度）。两字段在 `certified`、无 summary 记录、identity（backend/modelId）变更后认证不可继承、以及旧格式 summary（缺字段）时均为 `null`——**不伪造**。闭集唯一权威在 `src/application/certificationReasons.js`（MCP schema enum 从它派生，无第二份清单）；worker 级 `reasonCode` 取"决定最终（最差）status 的 case"的码，`lastHealthyRunAt` 聚合 active identity 各 case 的最近全绿时间（旧 identity 的全绿不计入）。两字段只含闭集码/日期——blockerReason 原文、路径、命令、stderr 绝不进任何 wire 输出（磁盘 summary 里的自由文本 `reason` 是另一层契约，保持不变）。
 
 **M12-25 bounded partial inventory（Outcome 1）**：MCP `registry_list`（与 `lead_preflight`）走一条**独立的部分投影**路径——registry 源可读但某条目无法 normalize/project 时，**有效 worker 照常返回**，另附有界安全的逐条 `issues` 而非整表失败。`issues` 元素形状固定为 `{ "code": "invalid_id" | "invalid_configuration", "agentId": "<canonical id>" | null }`：`code` 是闭集（`invalid_id`=id 非 canonical；`invalid_configuration`=canonical id 但 backend/cwd/model/provider/sessionReuse/waitTimeout/systemPrompt 校验失败），`agentId` 仅当 id 为 canonical 时投影、否则 `null`（**绝不**回显原始 id）。**绝不**携带原始 error 文本、配置、路径或凭据值；条目数上限 32（`REGISTRY_ISSUES_CAP`），超限设 `issuesTruncated:true`（真实 malformed 数无界）。零有效 worker **但有 issues** ≠ 观察干净的空 registry（`issues` 非空）。这与严格的 registry 维护路径（CLI `registry validate` / `registry list` 仍遇首条坏条目即抛错）是**分开**的投影：WAO 不据此自动停止派发、不自动换 worker、不把坏条目标记为 healthy。整表源不可读或非法 JSON 是**另一类**失败——`registry_list` 直接返回固定 error（`lead_preflight` 则 `checkStatus.workers:"unknown"`、`workers:null`），绝不伪造成部分结果。registry 源每次 MCP 操作**只读/解析一次**；`lead_preflight` 复用同一快照结果，绝不回退二次读取。
 
@@ -822,7 +825,7 @@ annotations：`readOnlyHint:false, destructiveHint:false, idempotentHint:true, o
 ```json
 {
   "workspace": { "bound": true, "source": "lead_session", "gitHead": "abc...", "dirty": false, "unboundReason": null },
-  "workers": [ { "id": "...", "backend": "...", "model": "...", "certification": "certified", "credentialAvailability": "available", "providerReadiness": { "configurationStatus": "configured", "authenticationStatus": "unknown", "entitlementStatus": "unknown", "liveCheckStatus": "not_checked", "credentialAvailability": "available" } } ],
+  "workers": [ { "id": "...", "backend": "...", "model": "...", "certification": "certified", "certificationReasonCode": null, "certificationLastHealthyAt": "...", "credentialAvailability": "available", "providerReadiness": { "configurationStatus": "configured", "authenticationStatus": "unknown", "entitlementStatus": "unknown", "liveCheckStatus": "not_checked", "credentialAvailability": "available" } } ],
   "registryIssues": [],
   "registryIssuesTruncated": false,
   "activeRuns": [ { "runId": "...", "agentId": "...", "state": "running", "terminal": false, "updatedAt": "..." } ],

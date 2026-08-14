@@ -1,3 +1,7 @@
+// TD-111: certification advisory context 闭集 SSOT（reasonCode 与自由文本 reason
+// 并列；blockerReason 原文绝不进码）。certifyCase/summarizeWorkers 经它映射。
+import { reasonCodeFor } from "../../src/application/certificationReasons.js";
+
 export const CERTIFICATION_STATUSES = [
   "certified",
   "conditional",
@@ -59,10 +63,15 @@ export function certifyCase(caseResult = {}) {
     reason = "all required checks passed";
   }
 
+  // TD-111: 闭集机器码（经 SSOT 映射，与上面 if-else 同优先级）。certified → null。
+  // 与自由文本 reason 并列新增；reason 原文一个字节不动（磁盘契约）。
+  const reasonCode = reasonCodeFor({ status, failedChecks, blockerReason, missingCategories });
+
   return {
     status,
     recommendedUse: caseResult.recommendedUse ?? RECOMMENDED_USE[status],
     reason,
+    reasonCode,
     failedChecks: failedChecks.map(({ name, category, detail, capability }) => ({
       name,
       category,
@@ -135,6 +144,11 @@ function summarizeWorkers(cases) {
     for (const c of agentCases) {
       if (!matchesActiveIdentity(c, active)) continue;
       const status = worseStatus(summary?.status, c.certification.status);
+      // TD-111: worker 的 reasonCode 取"决定最终（最差）status 的那个 case"的码。
+      // 分支语境（如 blocked 优先于 core 失败）只在 case 级成立，聚合层不可用
+      // 合并后的 failedChecks 重建；平级 status 冲突时保留先观察到的 case 的码（确定性）。
+      const adoptsWorse =
+        summary === null || STATUS_SEVERITY[c.certification.status] > STATUS_SEVERITY[summary.status];
       summary = {
         agentId,
         backend: active.backend,
@@ -142,6 +156,9 @@ function summarizeWorkers(cases) {
         modelId: active.modelId,
         status,
         recommendedUse: RECOMMENDED_USE[status],
+        reasonCode: adoptsWorse ? workerReasonCode(c.certification) : summary.reasonCode,
+        // TD-111: 该 worker（active identity 的 case）最近一次全绿的时间；从未全绿 → null。
+        lastHealthyRunAt: latestTimestamp(summary?.lastHealthyRunAt ?? null, c.lastHealthyRunAt ?? null),
         capabilities: mergeCapabilities(
           summary?.capabilities ?? {},
           c.certification.capabilities ?? {},
@@ -152,6 +169,23 @@ function summarizeWorkers(cases) {
     if (summary) workers[agentId] = summary;
   }
   return workers;
+}
+
+// case 级 certification → 闭集码。新数据用 certifyCase 产出的 reasonCode（权威）；
+// legacy 磁盘 case（预置 certification、无 reasonCode）经 SSOT 尽力重 derive——
+// blocked 分支在 SSOT 中优先，故 blocked+core 失败的旧数据仍映射正确；
+// 无法安全归类（如旧 conditional-missing 无 failedChecks 可辨）→ null，不伪造。
+function workerReasonCode(cert) {
+  if (!cert) return null;
+  if (cert.reasonCode !== undefined) return cert.reasonCode ?? null;
+  return reasonCodeFor({ status: cert.status, failedChecks: cert.failedChecks ?? [] });
+}
+
+// 两个 ISO-8601 UTC 时间戳取较新者（同格式 ISO 字符串字典序即时间序）；均无 → null。
+function latestTimestamp(left, right) {
+  if (left == null) return right ?? null;
+  if (right == null) return left;
+  return right > left ? right : left;
 }
 
 // case 声明 identity 当且仅当至少一个 identity 字段非 null/undefined/空串。

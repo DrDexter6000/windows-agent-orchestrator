@@ -552,7 +552,12 @@ const RED_23_WIRE = 75492;
 // which crosses the historical 75492 23-tool baseline (the "leaner than 23 tools"
 // narrative no longer holds — see M12-10-H). The regression guard is this frozen
 // ceiling, re-frozen at the exact measured 75967.
-const FROZEN_22_WIRE_CEILING = 75967;
+// TD-111 adds the certification advisory context fields (certificationReasonCode
+// enum derived from the CERTIFICATION_REASON_CODES SSOT + nullable
+// certificationLastHealthyAt) to AGENT_ENTRY and the lead_preflight workers
+// entries. The surface remains 22 tools; the additive output schemas add 617
+// bytes (75967 → 76584). Ceiling re-frozen at the exact measured 76584.
+const FROZEN_22_WIRE_CEILING = 76584;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -662,8 +667,15 @@ test("M12-10-H: deterministic 22-tool wire at or below the frozen ceiling", asyn
 // providerSessionRouting enum. Those additive schemas are part of the stripped
 // payload, so the SHA changed truthfully; no description text changed. M12-10-H
 // re-freezes the wire ceiling; this hash remains the losslessness proof.
+// Re-measured for TD-111: the registry_list AGENT_ENTRY and lead_preflight
+// workers output schemas gained the certification advisory context fields
+// (certificationReasonCode — an enum derived from the CERTIFICATION_REASON_CODES
+// SSOT — and the nullable certificationLastHealthyAt string). Those additive
+// schemas are part of the stripped payload, so the SHA changed truthfully; no
+// description text changed. M12-10-H re-freezes the wire ceiling; this hash
+// remains the losslessness proof.
 const DESC_STRIPPED_CONTRACT_SHA =
-  "a0b9a119c5341b7d1905a76e689badea277b1f761086c8465bdd8d32c1b66e22";
+  "73bea15f73b2366060ddac81320caf0132ea20bfeeb57fd1be617394de82b5fc";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

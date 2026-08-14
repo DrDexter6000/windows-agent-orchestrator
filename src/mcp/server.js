@@ -39,6 +39,10 @@ import {
   ENTITLEMENT_STATUSES,
   LIVE_CHECK_STATUSES,
 } from "../application/registryInventory.js";
+// TD-111: certification advisory context closed set — the AGENT_ENTRY /
+// lead_preflight worker enums derive from this ONE SSOT constant (same wiring
+// pattern as READ_FAILURE_REASONS); no second hand-maintained list can drift.
+import { CERTIFICATION_REASON_CODES } from "../application/certificationReasons.js";
 import { dispatchRun, ReuseBusyError, PROVIDER_SESSION_ROUTING } from "../application/runDispatch.js";
 // M12-7: Lead-authorized correction continuation. The service spawns a NEW child
 // run/transcript that resumes the parent's provider-native conversation IN the
@@ -344,6 +348,17 @@ const AGENT_ENTRY = z.object({
   // M11-9: reasoning effort from structured field; null when absent (runtime default).
   reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).nullable(),
   certification: z.string().nullable(),
+  // TD-111: closed-set machine code for WHY the worker is not certified (SSOT
+  // CERTIFICATION_REASON_CODES; blocked > core > strict > ops/obs > missing
+  // branch precedence). null when certified / no summary / legacy summary
+  // without the field — never fabricated, never free text. The enum derives
+  // from the SSOT import (no second list). .default(null): an injected/legacy
+  // service entry without the field collapses to null (same accept-legacy
+  // philosophy as normalizeInventoryResult) instead of failing the whole tool.
+  certificationReasonCode: z.enum([...CERTIFICATION_REASON_CODES]).nullable().default(null),
+  // TD-111: bounded ISO-8601 UTC timestamp of the worker's most recent
+  // all-green case (certification freshness). null when never green / legacy.
+  certificationLastHealthyAt: z.string().nullable().default(null),
   cwd: z.string(),
   // M11-11C: configured expert-session-reuse mode, nullable. Projects which
   // experts retain a provider-native conversation across turns for the current
@@ -1939,6 +1954,11 @@ const LEAD_PREFLIGHT_OUTPUT = z.object({
     model: z.string().max(128),
     reasoningEffort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]).nullable(),
     certification: z.string().nullable(),
+    // TD-111: certification advisory context — same closed set + freshness date
+    // as registry_list (the aggregator always emits both, defaulting missing
+    // inventory fields to null for legacy service-shaped inputs).
+    certificationReasonCode: z.enum([...CERTIFICATION_REASON_CODES]).nullable(),
+    certificationLastHealthyAt: z.string().nullable(),
     credentialAvailability: z.enum(["available", "missing", "not_required"]),
     // M12-6 FR-02: same strict truth object as registry_list (shared SSOT enums).
     providerReadiness: PROVIDER_READINESS,

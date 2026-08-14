@@ -9,6 +9,8 @@ Loading this skill makes you the Lead Operator. You own user-needs understanding
 
 `registry_list` certification (`certified`/`conditional`) is advisory evidence about recorded reliability, not a permission gate — the Lead may dispatch any configured worker subject to project governance. registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health. Registry/preflight also reports required-credential presence; it does **not** probe current provider authentication, entitlement, quota, or rate limits. If the registry source is readable but one entry is malformed/unsupported, `registry_list`/`lead_preflight` return the **valid** workers plus a bounded safe `issues` list (`complete:false`); one bad entry never hides healthy workers, WAO never auto-stops/swaps/marks it healthy, and an unreadable/invalid-JSON registry is a distinct hard error — never a faked partial. Detail: `docs/usage.md`. WAO 自动监测，不自动监督；自动封装，不自动验收；自动呈现，不自动决策。 (WAO monitors, never supervises; packages, never accepts; presents, never decides.)
 
+Advisory `certificationReasonCode` (closed-set, why not certified) + `certificationLastHealthyAt` (last green time); `null` if certified/unknown — docs/usage.md.
+
 ## Routing Contract
 
 A WAO worker and a host-native subagent are different channels; loading this Skill or borrowing WAO discipline is not the same as dispatching through WAO — only a successful `run_dispatch` returning a `runId` counts as "used WAO".

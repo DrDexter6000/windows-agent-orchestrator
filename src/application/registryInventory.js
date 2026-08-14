@@ -21,6 +21,10 @@ import { join } from "node:path";
 import { readRegistry, normalizeAgent } from "../registry.js";
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
+// TD-111: certification advisory context 闭集 SSOT——投影层用它做 fail-closed 校验：
+// summary 里的越界码/非 ISO 日期绝不透出（否则 MCP outputSchema 的 enum parse 会把
+// 整个 registry_list 打成 error）。MCP schema 的 enum 也从同一常量派生（无第二份清单）。
+import { CERTIFICATION_REASON_CODES } from "./certificationReasons.js";
 
 // ===== M12-6 FR-02: provider readiness truth SSOT =====
 //
@@ -116,6 +120,9 @@ async function buildCertMap(runDir, customReadFile) {
         status: w.status ?? "-",
         backend: w.backend,
         modelId: w.modelId,
+        // TD-111: 旧 summary（缺字段）→ undefined → 投影层归一为 null，不伪造。
+        reasonCode: w.reasonCode ?? null,
+        lastHealthyRunAt: w.lastHealthyRunAt ?? null,
       };
     }
     return certMap;
@@ -328,6 +335,9 @@ export async function getRegistryInventoryWithIssues({
  * an all-valid registry).
  */
 function projectInventoryEntry(agent, certMap, readiness) {
+  // TD-111: certification 与两新 advisory 字段共用同一 identity 匹配规则
+  // （backend/modelId 不一致 → 认证不可继承，新字段同样不继承）。
+  const certRecord = matchedCertRecord(agent, certMap[agent.id]);
   return {
     id: agent.id,
     backend: agent.backend,
@@ -335,7 +345,11 @@ function projectInventoryEntry(agent, certMap, readiness) {
     // M11-9: reasoningEffort from structured field. null when absent (runtime
     // default) — never fabricated, never reverse-parsed from args.
     reasoningEffort: agent.reasoning?.effort ?? null,
-    certification: certificationFor(agent, certMap[agent.id]),
+    certification: certRecord ? certRecord.status : null,
+    // TD-111: certification advisory context（并列新增；certificationFor 返回类型不变）。
+    // 闭集外的码 / 非 bounded ISO 形状的日期 fail-closed 为 null，绝不透出。
+    certificationReasonCode: boundedReasonCode(certRecord?.reasonCode),
+    certificationLastHealthyAt: boundedIsoOrNull(certRecord?.lastHealthyRunAt),
     cwd: agent.cwd,
     // M11-11C: project the configured reuse mode so the Lead sees which
     // experts retain a provider-native conversation across turns. Nullable —
@@ -348,10 +362,26 @@ function projectInventoryEntry(agent, certMap, readiness) {
   };
 }
 
-function certificationFor(agent, record) {
+// TD-111: 单一 identity 匹配规则——summary 记录的 backend/modelId 与 registry 当前
+// identity 不一致 → 认证不可继承（原 certificationFor 语义，certification 输出 =
+// matched ? matched.status : null，行为不变；两新 advisory 字段共用同一规则）。
+function matchedCertRecord(agent, record) {
   if (!record) return null;
   if (record.backend !== undefined && record.backend !== agent.backend) return null;
   const modelId = agent.model?.id ?? null;
   if (record.modelId !== undefined && record.modelId !== modelId) return null;
-  return record.status;
+  return record;
+}
+
+// TD-111: 闭集校验——summary 是磁盘数据，可能陈旧/被改；越界码 fail-closed 为 null
+// （透出会使 MCP enum parse 把整个工具打成 error）。
+function boundedReasonCode(code) {
+  return CERTIFICATION_REASON_CODES.includes(code) ? code : null;
+}
+
+// TD-111: bounded ISO-8601 UTC 日期字符串（new Date().toISOString() 形状，允许 0-3
+// 位毫秒；长度上限防御）。非字符串/不匹配 → null，绝不透出任意文本。
+const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+function boundedIsoOrNull(value) {
+  return typeof value === "string" && value.length <= 32 && ISO_UTC_RE.test(value) ? value : null;
 }

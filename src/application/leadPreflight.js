@@ -50,6 +50,13 @@ import {
  * @property {string} backend
  * @property {string} model
  * @property {string|null} certification
+ * @property {string|null} certificationReasonCode
+ *   TD-111: closed-set machine code for why the worker is not certified (SSOT
+ *   CERTIFICATION_REASON_CODES); null when certified / no summary / legacy
+ *   summary without the field — never fabricated, never free text.
+ * @property {string|null} certificationLastHealthyAt
+ *   TD-111: bounded ISO-8601 UTC timestamp of the worker's most recent
+ *   all-green case (freshness); null when never green / legacy data.
  * @property {("available"|"missing"|"not_required")} credentialAvailability
  */
 /**
@@ -246,6 +253,10 @@ export async function aggregateLeadPreflight({
       model: a.model,
       reasoningEffort: a.reasoningEffort ?? null,
       certification: a.certification,
+      // TD-111: certification advisory context（inventory 服务已闭集/bounded 校验；
+      // ?? null 兜底 service-shaped 注入缺字段的 legacy 形状，同 reasoningEffort 惯例）。
+      certificationReasonCode: a.certificationReasonCode ?? null,
+      certificationLastHealthyAt: a.certificationLastHealthyAt ?? null,
       credentialAvailability: a.credentialAvailability,
       // M12-6 FR-02: strict provider readiness truth. The inventory service
       // provides it; the fallback keeps this aggregator truthful even when a

@@ -510,6 +510,9 @@ for (const tc of MATRIX) {
   if (!pass) allPass = false;
   caseResult.checks = checks;
   caseResult.pass = pass;
+  // TD-111: case 全绿 → 本次运行的 ISO 时间；非全绿 → null（新鲜度由 summarizeWorkers
+  // 聚合成 per-worker lastHealthyRunAt；merge 时 fresh 覆盖同 caseId，重认证失败会刷新旧时间）。
+  caseResult.lastHealthyRunAt = pass ? new Date().toISOString() : null;
   caseResult.certification = certifyCase(caseResult);
   results.push(caseResult);
 
@@ -587,6 +590,8 @@ results.push({
     error: silentResult?.error,
   }),
   pass: silentPass,
+  // TD-111: suite-level case 同样记录全绿时间（无 agentId，不进 worker 聚合，仅保 case 级一致）。
+  lastHealthyRunAt: silentPass ? new Date().toISOString() : null,
   failed: silentResult?.failed,
   elapsedMs: silentElapsed,
   error: serveReachable ? silentResult?.error : `skipped (opencode-serve not reachable at ${SERVE_URL})`,

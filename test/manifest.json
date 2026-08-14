@@ -5,6 +5,7 @@
       "alerts.test.js",
       "applicationRegistryInventory.test.js",
       "canonicalRunner.test.js",
+      "certificationReasons.test.js",
       "claudeCodeProvider.test.js",
       "claudeProviderWrapper.test.js",
       "cliFormatJson.test.js",
