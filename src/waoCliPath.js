@@ -9,7 +9,10 @@
 // worker 调 `$WAO_CLI wao handoff write ...` 直接可用，不用猜 node 版本。
 // 非 Windows 回退裸 cli.js（无 v24 guard 问题）。
 //
-// 三处注入点（cli.js / backgroundRunner.js / daemon.js）都引用本 helper，避免漂移。
+// 当前真实调用点（避免漂移，新增时同步本注释）：
+//   - src/backends/factory.js（共享工厂内部解析：未显式注入 waoCliPath 时兜底）
+//   - src/backgroundRunner.js / src/daemon.js（启动时算好，显式注入工厂）
+//   - src/mcp/server.js（resolveBackendFor，M12-7 续跑资格检查的刻意 fail-soft 构造点）
 
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";

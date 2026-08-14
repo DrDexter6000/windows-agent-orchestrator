@@ -16,11 +16,7 @@
 // 进程内核心函数 runBackground 可单测；CLI 入口 runMain 解析 argv 后调它。
 
 import { RunManager } from "./runManager.js";
-import { OpenCodeServeBackend } from "./backends/opencodeServe.js";
-import { ClaudeCodeBackend } from "./backends/claudeCode.js";
-import { CodexBackend } from "./backends/codex.js";
-import { KimiCodeBackend } from "./backends/kimiCode.js";
-import { DeepSeekHarnessBackend } from "./backends/deepSeekHarness.js";
+import { backendFor } from "./backends/factory.js";
 import { getWaoCliPath } from "./waoCliPath.js";
 import { readRegistry } from "./registry.js";
 import { normalizeAgent } from "./registry.js";
@@ -64,17 +60,9 @@ function makeObjectRegistry(registryObj) {
   });
 }
 
-// 与 cli.js 的 backendFor 同款构造（runner 独立进程，不复用 cli.js 避免循环依赖）。
-function backendFor(agent, { fetchImpl, waoCliPath } = {}) {
-  if (agent.backend === "opencode-serve") {
-    return new OpenCodeServeBackend(fetchImpl ? { fetchImpl } : {});
-  }
-  if (agent.backend === "claude-code") return new ClaudeCodeBackend({ waoCliPath });
-  if (agent.backend === "codex") return new CodexBackend({ waoCliPath });
-  if (agent.backend === "kimi-code") return new KimiCodeBackend({ waoCliPath });
-  if (agent.backend === "deepseek-harness") return new DeepSeekHarnessBackend();
-  throw new Error(`Unsupported backend: ${agent.backend}`);
-}
+// backend 构造收敛于共享工厂 src/backends/factory.js（daemon / runner / shared 共用）。
+// 不复用 cli.js 的真实约束：cli.js 顶层无条件执行 main() 且拉入整棵命令树，不可被
+// import；本模块是被 CLI 按路径 fork 的 detached 独立进程入口，从工厂 import 构造器。
 
 /**
  * 进程内核心：驱动一个 run 到终态。可单测，也可被 detached 进程入口调用。

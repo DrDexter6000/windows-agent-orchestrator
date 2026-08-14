@@ -14,12 +14,7 @@ import { resolve, join } from "node:path";
 
 import { readRegistry } from "../registry.js";
 import { RunManager } from "../runManager.js";
-import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
-import { ClaudeCodeBackend } from "../backends/claudeCode.js";
-import { CodexBackend } from "../backends/codex.js";
-import { KimiCodeBackend } from "../backends/kimiCode.js";
-import { DeepSeekHarnessBackend } from "../backends/deepSeekHarness.js";
-import { getWaoCliPath } from "../waoCliPath.js";
+import { backendFor as sharedBackendFor } from "../backends/factory.js";
 import { readTranscript, findLastEventSeq, JsonlTranscript } from "../transcript.js";
 // M9-0: displayModel SSOT lives in application/registryInventory.js;
 // this re-export preserves the existing shared.js/cli.js public contract.
@@ -91,29 +86,17 @@ export function resolveIsolateFlag(options) {
 /**
  * 按 agent.backend 选对应后端实例。
  *
+ * 薄委托到共享工厂 src/backends/factory.js；不传注入参数时由工厂内部解析
+ * waoCliPath（每次调用一次 getWaoCliPath()，与改造前行为一致）。
+ *
  * WAO CLI 路径（注入 worker env，让 worker 能调 wao 命令记录状态）
  * TD-90: Windows 上指向 scripts/wao-cli.cmd（v22 shim），避免 worker shell 默认 v24 触发 guard。
  *
  * TD-98 阶段 2c：从 cli.js 移到 shared.js（cli.js + workflow.js 共用）。
+ * 导出名与签名 backendFor(agent) 保持不变（test 直接从此 import）。
  */
 export function backendFor(agent) {
-  const waoCliPath = getWaoCliPath();
-  if (agent.backend === "opencode-serve") {
-    return new OpenCodeServeBackend();
-  }
-  if (agent.backend === "claude-code") {
-    return new ClaudeCodeBackend({ waoCliPath });
-  }
-  if (agent.backend === "codex") {
-    return new CodexBackend({ waoCliPath });
-  }
-  if (agent.backend === "kimi-code") {
-    return new KimiCodeBackend({ waoCliPath });
-  }
-  if (agent.backend === "deepseek-harness") {
-    return new DeepSeekHarnessBackend();
-  }
-  throw new Error(`Unsupported backend: ${agent.backend}`);
+  return sharedBackendFor(agent);
 }
 
 /**

@@ -44,11 +44,7 @@ function countWorktrees(worktreeDir) {
     return 0;
   }
 }
-import { OpenCodeServeBackend } from "./backends/opencodeServe.js";
-import { ClaudeCodeBackend } from "./backends/claudeCode.js";
-import { CodexBackend } from "./backends/codex.js";
-import { KimiCodeBackend } from "./backends/kimiCode.js";
-import { DeepSeekHarnessBackend } from "./backends/deepSeekHarness.js";
+import { backendFor } from "./backends/factory.js";
 import { getWaoCliPath } from "./waoCliPath.js";
 
 // handshake 文件名。放 runDir/（与 transcript 同目录）——不能放 .wao/，
@@ -263,17 +259,6 @@ function makeObjectRegistry(registryObj) {
       return normalizeAgent(id, { ...agents[id], ...defined });
     },
   });
-}
-
-function backendFor(agent, { fetchImpl, waoCliPath } = {}) {
-  if (agent.backend === "opencode-serve") {
-    return new OpenCodeServeBackend(fetchImpl ? { fetchImpl } : {});
-  }
-  if (agent.backend === "claude-code") return new ClaudeCodeBackend({ waoCliPath });
-  if (agent.backend === "codex") return new CodexBackend({ waoCliPath });
-  if (agent.backend === "kimi-code") return new KimiCodeBackend({ waoCliPath });
-  if (agent.backend === "deepseek-harness") return new DeepSeekHarnessBackend();
-  throw new Error(`Unsupported backend: ${agent.backend}`);
 }
 
 // ============================================================
