@@ -296,6 +296,16 @@ WAO 新增独立 `DeepSeekHarnessBackend`，通过用户提供的 DSH SDK stdio 
 
 发布后的 Codex Fresh Host 加载 `main@1ceeb8d7fe4c0685ea198c8999a8045378943a44` 与 22-tool MCP 合同；一次 `lead_preflight` 证明 workspace 精确绑定该 SHA、registry 无 issue、active runs 0，且 `coder_low` 正确投影为 `deepseek-harness` / `deepseek-v4-flash` / `certified`。无模型交叉-run 探针先从 `run_20260814044506804kqn2iv` 获取合法 cursor，再将其用于 `run_20260814035423280owrilx`：MCP 固定返回 `isError:true` / `run_activity failed`，同时只给 `status:"cursor_rejected"` 与 `request_page_1_without_cursor` / `use_afterSeq_from_known_sequence` 两项静态选择；按第一项无 cursor 重读立即成功。该验收没有自动重试、停止或控制面写入，也没有调用模型或修改项目文件。
 
+### Post-M12 candidate：MCP Host-visible 上下文测量与渐进披露审计（计划已冻结，未实施）
+
+下一轮只做**无损测量与候选实验**，不以当前全量 `tools/list` wire 直接代替 Lead 的真实上下文成本：分别记录 Codex、Claude Code、Kimi Code Host 的完整 wire、实际 Host-visible 投影与各自 tokenizer token，并独立统计累计响应成本（`text`、`structuredContent`、`semanticNotes` 与 drilldown）。当前基线为 22 tools / 75,965 wire bytes；o200k 估算 18,372 tokens，其中 output schemas 约占 69.5%，但一次 Codex Host 探针实际只向模型投影 `{name,description,inputSchema}`，约 20,798 bytes / 5,030 tokens，因此该差异必须形成 Host-neutral 矩阵，不能由单一 Host 外推。
+
+候选实验只比较：现状、三句式紧凑 description、把少用语义说明移至 response/resource，以及仅在证明无损时减少派生枚举重复；验收要求 22 个工具始终可调用、完整 input schema 与关键 Lead 决策字段不丢、Fresh Host 能在不预读文档时正确首派并可依 response 自助恢复。禁止 lite/full profile、动态工具隐藏、通用 meta-tool、跨工具 `$defs`/`$ref`，也不先删 output schema 或放宽枚举。先建立 `hostVisibleBudget`、`descriptionBudget`、`wireBudget` 三类预算，再由 Owner 决定是否实施任何瘦身。
+
+### 本机 `coder_hq` GLM-5.3 operation acceptance（2026-08-14）
+
+智谱当天的官方模型索引与 Coding Plan 切换指南已给出 `GLM-5.3`，其中 Claude Code 的 1M 精确模型标识为 `glm-5.3[1m]`、压缩窗口为 1,000,000、effort 默认 `max`；通用模型 API 仍标记为即将上线，故本次只迁移 gitignored 私有 registry 的 Coding Plan lane，不修改 tracked 第三方模板。MCP 只读 canary run `run_202608140845525601e9qhm` 经 `run_dispatch -> run_await_result` 在 21.5 秒内返回唯一 `GLM53_WAO_OK`，0 command/tool/file write。随后权威 strict reliability case `run_202608140846339891i304h`（scorecard `run_20260814084648977yaseue`）通过 assistant、非零 usage、命令/文件证据、物理 materialization、隔离 worktree 与 workflow run-dir 全链；CLI/MCP registry 最终精确投影 `claude-code / glm-5.3[1m] / max / certified`，推荐 `strict-dispatch`。该认证只适用于当前本机 backend/provider/model 身份，不把 GLM-5.3 或 claude-code backend 泛化为所有机器上的认证事实。
+
 ### 第三方 onboarding helper 发布与 Fresh Host 验收（2026-08-08）
 
 第三方 onboarding helper 已以普通 fast-forward 发布到 `main@4c06496146827f2d0dd993fde3d0ba372ae28d8d`。从公开 GitHub URL 创建的全新 clone 精确落在该 SHA；锁定依赖安装成功，默认 preview 与选定 worker preview 均为零写入，`--apply` 生成仅含 `coder_low` 的有效私有 registry，生产 `registry validate` 通过，显式 `--endorse-worker coder_low` 只写既有 `manualOverride:"cleared"` Owner 信号且不伪造认证状态。一次性 headless Codex Fresh Host 仅通过进程级 host-neutral MCP 配置连接该 clone，正式执行 `lead_preflight -> run_dispatch`（只读、no delivery）`-> run_await_result`；真实 run `run_20260808195141854w5bypg` 终态为 `completed`，返回唯一非空 assistant 文本 `CANARY_OK` / `project: windows-agent-orchestrator-poc`，无失败诊断，fresh clone HEAD/branch/tracked status 前后不变。首次无交互 Host 尝试在 `run_dispatch` 前因 Host approval 取消而结束，无 runId、无遗留 run；修正 Host 调用环境后在同一发布候选上完成上述唯一 worker canary。Verdict：`PASS_THIRD_PARTY_ONBOARDING_FRESH_HOST`。
