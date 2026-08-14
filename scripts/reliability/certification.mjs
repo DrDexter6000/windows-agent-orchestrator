@@ -119,25 +119,77 @@ export function mergeCaseResults(priorCases = [], freshCases = []) {
 
 function summarizeWorkers(cases) {
   const workers = {};
+  const byAgent = new Map();
   for (const c of cases) {
     if (!c.agentId) continue;
-    const existing = workers[c.agentId];
-    const status = worseStatus(existing?.status, c.certification.status);
-    workers[c.agentId] = {
-      agentId: c.agentId,
-      backend: existing?.backend ?? c.backend ?? null,
-      providerID: existing?.providerID ?? c.providerID ?? null,
-      modelId: existing?.modelId ?? c.modelId ?? null,
-      status,
-      recommendedUse: RECOMMENDED_USE[status],
-      capabilities: mergeCapabilities(
-        existing?.capabilities ?? {},
-        c.certification.capabilities ?? {},
-      ),
-      cases: [...(existing?.cases ?? []), c.caseId],
-    };
+    if (!byAgent.has(c.agentId)) byAgent.set(c.agentId, []);
+    byAgent.get(c.agentId).push(c);
+  }
+  for (const [agentId, agentCases] of byAgent) {
+    // active identity = 该 agent 最近一次观察到的 backend+providerID+modelId。
+    // 只把 active identity 的 case 聚合进 worker summary；历史旧 identity 的 case
+    // 不进入 status/capabilities/cases 聚合（避免旧 claude-code 掩盖新 deepseek-harness），
+    // 但仍保留在 summarizeCertification 的 summary.cases（可审计历史）。
+    const active = findActiveIdentity(agentCases);
+    let summary = null;
+    for (const c of agentCases) {
+      if (!matchesActiveIdentity(c, active)) continue;
+      const status = worseStatus(summary?.status, c.certification.status);
+      summary = {
+        agentId,
+        backend: active.backend,
+        providerID: active.providerID,
+        modelId: active.modelId,
+        status,
+        recommendedUse: RECOMMENDED_USE[status],
+        capabilities: mergeCapabilities(
+          summary?.capabilities ?? {},
+          c.certification.capabilities ?? {},
+        ),
+        cases: [...(summary?.cases ?? []), c.caseId],
+      };
+    }
+    if (summary) workers[agentId] = summary;
   }
   return workers;
+}
+
+// case 声明 identity 当且仅当至少一个 identity 字段非 null/undefined/空串。
+// active identity 取最后一个声明过 identity 的 case 所声明的字段。
+// 从未声明 identity 的 agent（旧数据）→ active 全 null，全部 case 聚合（legacy 行为）。
+function findActiveIdentity(agentCases) {
+  let active = { backend: null, providerID: null, modelId: null };
+  for (const c of agentCases) {
+    const declared = declaredIdentity(c);
+    if (declared.backend !== null || declared.providerID !== null || declared.modelId !== null) {
+      active = declared;
+    }
+  }
+  return active;
+}
+
+// case 属于 active identity 当且仅当：其声明过的每个 identity 字段与 active 对应字段一致。
+// 未声明任何 identity 字段的 case（如历史聚合 fixture）继承 active identity，保持同 identity 聚合。
+function matchesActiveIdentity(c, active) {
+  const declared = declaredIdentity(c);
+  if (declared.backend === null && declared.providerID === null && declared.modelId === null) {
+    return true;
+  }
+  return (declared.backend === null || declared.backend === active.backend) &&
+         (declared.providerID === null || declared.providerID === active.providerID) &&
+         (declared.modelId === null || declared.modelId === active.modelId);
+}
+
+function declaredIdentity(c) {
+  return {
+    backend: normalizeIdentityField(c.backend),
+    providerID: normalizeIdentityField(c.providerID),
+    modelId: normalizeIdentityField(c.modelId),
+  };
+}
+
+function normalizeIdentityField(value) {
+  return value === null || value === undefined || value === "" ? null : value;
 }
 
 function normalizeChecks(checks = []) {

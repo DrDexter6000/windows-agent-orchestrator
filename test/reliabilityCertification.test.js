@@ -239,6 +239,104 @@ test("summarizeCertification: counts 反映 per-agent 最终状态（非 per-cas
   assert.equal(summary.counts.certified, 0);
 });
 
+// --- summarizeWorkers: identity 迁移语义（backend+model 绑定不被旧 identity 掩盖） ---
+// 缺陷：summarizeWorkers 按 agentId 聚合全部历史 case 并保留"首个"case 的 backend/model，
+// 导致后来认证的 deepseek-harness case 被旧 claude-code identity 掩盖。
+// 修复语义：agent 的 active identity = 最近一次观察到的 backend+providerID+modelId；
+// 只聚合 active identity 的 case（status/capabilities/cases），历史 case 保留在 summary.cases。
+
+test("summarizeWorkers: 最近观察的 backend+model identity 为 active；旧 identity 失败 case 不拖低状态", () => {
+  const summary = summarizeCertification([
+    // 历史：claude-code 身份，core 失败 → rejected（旧 identity，最早观察）
+    {
+      caseId: "coder_low claude legacy",
+      agentId: "coder_low",
+      backend: "claude-code",
+      providerID: "anthropic",
+      modelId: "sonnet-4.5",
+      checks: [check("completed", false, "core")],
+    },
+    // 当前：deepseek-harness 身份，全过 → certified（最近观察）
+    {
+      caseId: "coder_low deepseek-harness",
+      agentId: "coder_low",
+      backend: "deepseek-harness",
+      providerID: "deepseek",
+      modelId: "deepseek-v4-flash",
+      checks: [
+        check("completed", true, "core", { capability: "complete" }),
+        check("commandsPassed", true, "strict", { capability: "commandEvidence" }),
+        check("isolation", true, "operational", { capability: "isolation" }),
+        check("metricsNonZero", true, "observability", { capability: "metrics" }),
+      ],
+    },
+  ]);
+
+  const w = summary.workers.coder_low;
+  assert.equal(w.backend, "deepseek-harness", "active identity 的 backend 应为最近观察的 deepseek-harness");
+  assert.equal(w.providerID, "deepseek");
+  assert.equal(w.modelId, "deepseek-v4-flash");
+  assert.equal(w.status, "certified", "旧 claude-code rejected 不得拖低 active identity 状态");
+  assert.equal(w.capabilities.isolation, true);
+  assert.deepEqual(w.cases, ["coder_low deepseek-harness"], "只聚合 active identity 的 case");
+  // counts/allCertified 按 active identity 最终状态计
+  assert.equal(summary.counts.certified, 1);
+  assert.equal(summary.counts.rejected, 0);
+  assert.equal(summary.allCertified, true);
+  // 历史 case 不丢：仍在 summary.cases
+  assert.equal(summary.cases.length, 2, "旧 identity 的历史 case 保留在 summary.cases");
+});
+
+test("summarizeWorkers: 相同 identity 的多 case 聚合进 active summary；旧 identity 历史 case 不进入", () => {
+  const summary = summarizeCertification([
+    // 最早：claude-code 身份（历史，不该进入 deepseek-harness active 聚合）
+    {
+      caseId: "coder_low claude",
+      agentId: "coder_low",
+      backend: "claude-code",
+      providerID: "anthropic",
+      modelId: "sonnet-4.5",
+      checks: [check("completed", true, "core", { capability: "complete" })],
+    },
+    // 最近观察的 identity 组：deepseek-harness 两个同 identity case，应整体聚合
+    {
+      caseId: "coder_low dh isolate",
+      agentId: "coder_low",
+      backend: "deepseek-harness",
+      providerID: "deepseek",
+      modelId: "deepseek-v4-flash",
+      checks: [
+        check("completed", true, "core", { capability: "complete" }),
+        check("isolation", false, "operational", { capability: "isolation" }),
+      ],
+    },
+    {
+      caseId: "coder_low dh strict",
+      agentId: "coder_low",
+      backend: "deepseek-harness",
+      providerID: "deepseek",
+      modelId: "deepseek-v4-flash",
+      checks: [
+        check("completed", true, "core", { capability: "complete" }),
+        check("commandsPassed", true, "strict", { capability: "commandEvidence" }),
+        check("metricsNonZero", true, "observability", { capability: "metrics" }),
+      ],
+    },
+  ]);
+
+  const w = summary.workers.coder_low;
+  assert.equal(w.backend, "deepseek-harness", "active identity 取最近观察，而非首个 claude-code");
+  assert.equal(w.providerID, "deepseek");
+  assert.equal(w.modelId, "deepseek-v4-flash");
+  // 同 identity 多 case 聚合：worseStatus(certified, conditional) = conditional，capabilities 合并
+  assert.equal(w.status, "conditional");
+  assert.equal(w.capabilities.isolation, false, "来自同 identity 第一个 case");
+  assert.equal(w.capabilities.commandEvidence, true, "来自同 identity 第二个 case");
+  assert.deepEqual(w.cases, ["coder_low dh isolate", "coder_low dh strict"], "claude 历史 case 不进入 active cases");
+  // 历史不丢
+  assert.deepEqual(summary.cases.map((c) => c.caseId).sort(), ["coder_low claude", "coder_low dh isolate", "coder_low dh strict"]);
+});
+
 // --- mergeCaseResults: 增量合并，解决单跑覆盖 summary 的数据完整性缺口 ---
 // 背景：summarizeCertification 只基于本次 case 构建 summary，不读磁盘旧值。
 // 后果：单跑 --agent X 会覆盖掉其他 worker 的认证结果。
