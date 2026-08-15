@@ -1941,11 +1941,16 @@ test("M12-6 FR-07 docs: usage 的 run_delivery_decide 区分 expected policy rej
 
 test("M12-6 FR-07 docs: architecture 记录 reverify 共享 service 与当前 tool 事实", () => {
   const arch = read("docs/02-architecture.md");
-  // Shared application service fact (M12-6) — no full usage contract copy.
+  // Shared application service fact — no full usage contract copy.
   assert.ok(/runDeliveryReverify\.js/.test(arch),
     "architecture 必须记录 runDeliveryReverify.js 共享 application service");
-  assert.ok(/M12-6/.test(arch),
-    "architecture 必须把 reverify service 绑定到 M12-6");
+  // 2026-08-15 TD-120 conversion (P4 §7 契约/叙事分离): the guard used to
+  // require a literal "M12-6" somewhere in architecture.md (a number
+  // fingerprint — §7 was one of its suppliers; the strip removes the last
+  // M12-6 tags from the module tree). Assert the CONTRACT instead: reverify
+  // is the shared service both the CLI and MCP delegate to.
+  assert.ok(/runDeliveryReverify\.js[^|\n]*与 MCP 共用/.test(arch),
+    "architecture states runDeliveryReverify.js is the single shared reverify service (CLI+MCP)");
   // Current tool fact on the server.js comment line (exact count is pinned by
   // the M12-8A guard — here only the full list must include the tool).
   assert.ok(/run_delivery_reverify/.test(arch),

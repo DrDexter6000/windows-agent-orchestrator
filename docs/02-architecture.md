@@ -1079,58 +1079,64 @@ async function aggregateMetrics(runDir): Promise<SummaryMetrics>
 
 ## 7. 目录结构与模块边界
 
+> 本节目录树注释只承载**契约**（闭集、委托关系、安全边界），不承载实现史；实现演进与里程碑见 `docs/roadmap.md`，在册债务见 `docs/tech-debt.md`，架构决策记录见 `.wao/decisions/`。
+
 ```
 src/
 ├── cli.js                    # L4：CLI 入口与路由（现有）
 ├── registry.js               # L1：registry 加载（现有）
 ├── transcript.js             # L1：JSONL transcript（现有，扩展事件类型）
 ├── runManager.js             # L2：RunManager + 状态机
-├── isolation.js              # L2：worktree（进程隔离=Node 内置 Job Object v22 + taskkill，见 ADR 0013；端口表见 portAllocator.js）
-├── delivery.js               # L2：Coder Delivery Contract v1（TD-103 Phase 2：isolated delivery inspect/package，不 import CLI/RunManager）
-├── portAllocator.js          # L2：端口分配表（已实现但未接入，TD-23）
+├── isolation.js              # L2：worktree（进程隔离=Node 内置 Job Object v22 + taskkill，决策记录见 .wao/decisions/；端口表见 portAllocator.js）
+├── delivery.js               # L2：Coder Delivery Contract v1（isolated delivery inspect/package，不 import CLI/RunManager）
+├── portAllocator.js          # L2：端口分配表（已实现但未接入——在册 tech-debt，见 docs/tech-debt.md）
 ├── metrics.js                # 横切：metrics 聚合
 ├── runEvent.js               # L1：RunEvent 类型（message/done/metrics + 证据 command/file_written/tool_use/tool_result）
 ├── scorecard.js              # 横切：证据链门控
-├── diagnosis.js              # 横切：故障诊断（M8-3+C，给证据不给处方；类别 provider_auth/config_conflict/timeout/scorecard_fail/budget/crash/aborted_manual/unknown；M12-6 FR-02 增 PROVIDER_DIAGNOSIS_CODES 闭集 code——provider_auth 专属、entitlement 拒绝（subscription access disabled/org policy denied/API key missing）不再漏归 no_effect，code 永不回显原文；M12-21 completed-empty 真相：进程 exit 0 是传输完成，不等于 worker 产出了可用结果——completed run 若仅有 transport 活动（runtime init/thinking/zero-usage metrics）而无 assistant 文本/命令活动/文件写入/工具调用，归 no_effect + 内核码 completed_empty（NO_EFFECT_DIAGNOSIS_CODES）；MCP run_diagnose/run_await_result M12-21 校正后线路 code 与内核真相统一——MCP run_diagnose/run_await_result 的 code 闭集改为单一通用 SSOT `DIAGNOSIS_CODES`（= `PROVIDER_DIAGNOSIS_CODES` ∪ `NO_EFFECT_DIAGNOSIS_CODES`，completed_empty 不并入 provider 集），经 `isValidDiagnosisCode(category, code)` 配对校验投影：provider_auth 携带 provider 码、no_effect 携带 completed_empty、其余类别恒为 null；failed no_effect 仍 null，正常 completed 仍 none/null；有效 tool-only/command-only/file-written run 仍判 none）
-│                              # M12-24 扩展当前真相：`DIAGNOSIS_CODES` 现由 provider-auth、provider-capacity、no-effect 三组冻结码派生；只有 failed 终态的持久 `run.error` 可归 `provider_capacity`（`rate_limited` / `quota_exhausted`），非终态 runtime rate-limit 活动不升级为失败；WAO 不据此自动重试或换 worker。
+├── diagnosis.js              # 横切：故障诊断（给证据不给处方）；类别闭集 provider_auth/config_conflict/timeout/scorecard_fail/budget/crash/aborted_manual/unknown
+│                              # code 闭集单一通用 SSOT：`DIAGNOSIS_CODES` = `PROVIDER_DIAGNOSIS_CODES` ∪ `NO_EFFECT_DIAGNOSIS_CODES`（completed_empty 不并入 provider 集），由 provider-auth、provider-capacity、no-effect 三组冻结码派生；MCP run_diagnose/run_await_result 与内核真相共用同一 code 闭集，无第二份列表
+│                              # provider_auth 专属：entitlement 拒绝（subscription access disabled/org policy denied/API key missing）不再漏归 no_effect，code 永不回显原文
+│                              # provider_capacity：只有 failed 终态的持久 `run.error` 可归 `provider_capacity`（`rate_limited` / `quota_exhausted`），非终态 runtime rate-limit 活动不升级为失败；WAO 不据此自动重试或换 worker
+│                              # completed-empty 真相：进程 exit 0 是传输完成，不等于 worker 产出了可用结果——completed run 若仅有 transport 活动（runtime init/thinking/zero-usage metrics）而无 assistant 文本/命令活动/文件写入/工具调用，归 no_effect + 内核码 completed_empty（NO_EFFECT_DIAGNOSIS_CODES）
+│                              # 投影规则：经 `isValidDiagnosisCode(category, code)` 配对校验投影——provider_auth 携带 provider 码、no_effect 携带 completed_empty、其余类别恒为 null；failed no_effect 仍 null，正常 completed 仍 none/null；有效 tool-only/command-only/file-written run 仍判 none
 ├── smoke.js                  # L4：真实 CLI smoke 入口（npm run smoke）
-├── mcp/                      # L4：MCP adapter（M9-1，agent-facing primary）
+├── mcp/                      # L4：MCP adapter（agent-facing primary）
 │   ├── server.js             #   MCP server factory + 22 tools（lead_preflight/registry_list/workspace_status/workspace_select/run_dispatch/run_dispatch_contract_check/run_continue/run_correct/run_status/run_wait/run_await_result/run_collect/run_activity/run_diagnose/run_delivery/run_delivery_review/run_delivery_review_bundle/run_delivery_reverify/run_delivery_decide/run_delivery_repackage/run_stop/runs_list；playbook catalog 为 wao://playbooks resources 非 tools）
-│   ├── toolSurface.js        #   M12-10 冻结工具面 SSOT：22 个 always-registered tools 的 frozen 数组（原 23 减去两个原 playbook 工具、M12-16 增 run_correct，已迁至 MCP resources）+ 唯一性/计数不变量；server.js 构造期 deepEqual 自检，无 Host/runtime 分支、无 profile
+│   ├── toolSurface.js        #   冻结工具面 SSOT：22 个 always-registered tools 的 frozen 数组（playbook 目录不在工具面——已迁至 MCP resources）+ 唯一性/计数不变量；server.js 构造期 deepEqual 自检，无 Host/runtime 分支、无 profile
 │   └── stdio.js              #   stdio production entrypoint（StdioServerTransport，npm run mcp，--workspace-root；残留旧 profile 参数视为未知 flag 忽略）
-├── application/              # L3：shared application services（M9 use-case 层）
-│   ├── registryInventory.js  #   registry inventory SSOT（M9-0，CLI + MCP 共用；M12-6 FR-02 增 providerReadiness 严格真相投影——CONFIGURATION_STATUSES/AUTHENTICATION_STATUSES/ENTITLEMENT_STATUSES/LIVE_CHECK_STATUSES 闭集常量，MCP 枚举直接派生，无第二份列表；M12-25 增独立部分投影 getRegistryInventoryWithIssues + REGISTRY_ISSUE_CODES/REGISTRY_ISSUES_CAP 闭集——registry 可读但单条坏条目时返回有效 worker + 有界安全 issues 而非整表失败，严格路径不变）
-│   ├── runDispatch.js        #   background dispatch service（M9-2A，CLI + MCP 共用；M12-7 增 continuable 选项——delivery-only 续谱根，建立 run_lineage turn:first provider 会话；M12-9：MCP adapter 派发前经共享 executionProfiles resolver 解析可选 executionProfileId（profile/inline 互斥），把解析后的 verification 折入 effective delivery 传入；runDispatch.js 自身不解析 profile；M12-25 增 providerSessionRouting 闭集输出——仅由内部已选 routing.turn 派生的路由请求真相，非 provider 成功证明，不暴露 mode/opaque uuid）
-│   ├── runDispatchContract.js #   advisory pre-dispatch contract check service（M12-9，MCP）：MCP adapter 在 run_dispatch 与本工具间共享输入 schema（service 自身不导入 Zod），service 复用同一 application 校验（共享 resolver + prepareDeliveryRequest），返回闭集 workspace/registry/contract 视图 + 有界 issue 码；contractValid 只反映 delivery/profile 机械合同（不预评 expectedGitHead/expectedDirty/expectedWorkspaceRoot、continuable/backend/session 资格或凭据），非门禁（sections 独立 observed/unknown、advisory 恒 true）、零副作用、run_dispatch 不可依赖它
-│   ├── executionProfiles.js   #   frozen trusted execution-profile catalog + 共享 delivery 验证解析器（M12-9）：node-npm-test-v1 / node-npm-ci-test-v1 / python-pytest-v1 仅提供 verificationSetup/verificationCommands；profile 与 inline verification 互斥，未知/冲突由共享 resolver 稳定拒绝
-│   ├── runContinue.js        #   Lead 授权修正续跑 service（M12-7，由 MCP adapter 直接委托）：对终态 continuable delivery 续 ONE 修正回合，复用父 run 的 retained worktree + 续 provider 会话（turn:resume，同一 opaque uuid）；closed-set 资格/身份/配置/worktree 检查先于 mutation，spawn 前失败事务回滚；从不推断 correction/scope/retry/accept
-│   ├── runStatus.js          #   read-only run status service（M9-3A，CLI + MCP 共用）
-│   ├── runCollect.js         #   run collection service（M9-4A，CLI + MCP 共用）
-│   ├── runDiagnosis.js       #   read-only run diagnosis service（M9-5A，CLI + MCP 共用）
-│   ├── runDelivery.js        #   delivery query + decision service（M9-6A，CLI + MCP 共用）
-│   ├── runStop.js            #   runaway worker stop service（M10 P0-2，CLI + MCP 共用，workspace-bound）
-│   ├── runList.js            #   workspace-bound run list service（M10 P0-3；M12-5 查询内复用 ownership proof）
-│   ├── runWorkspaceOwnership.js # run workspace ownership判定（M10 P0-3；M12-5 query-scoped proof cache；M12-14 前台收口：background 权威 = 恰好一条绑定的 `run.background_submitted` 事件 + 其 `cwd` 字段——**不是** payload 的 `background:true` 布尔；foreground = 无 background_submitted 且恰好一条绑定 `run.started` 且 cwd 有效；envelope runId 精确绑定，legacy 无 runId 容错仅在没有任何 ownership 事件携带 runId 时启用；`proveWorkspace` realpath + Windows 平台大小写折叠）
-│   ├── runWait.js            #   long-poll 终态/活性等待 service（M10-pre3，MCP 共用，只读）
-│   ├── runAwaitResult.js     #   read-only composite：bounded wait + observation + terminal compact（M12-3，snapshot-only，advisory；M12-6 FR-08 readFailureReason 闭集；M12-9 终态+快照干净时投影有界闭集 outcome——diagnosis+delivery 安全事实，无 commit/path/diff/命令/推荐，复用同一 snapshot、零额外读）
-│   ├── ownerLiveness.js      #   run liveness 投影 SSOT（M10-pre3，terminal/progress/process_only/silent，runWait/runAwaitResult 共用）
-│   ├── workspaceBinding.js   #   host-authorized workspace proof SSOT（M10-pre2，MCP 共用）
-│   ├── sessionWorkspace.js   #   Lead session workspace selection kernel（M11-6，无状态，委托 proveWorkspace）
-│   ├── sessionReuse.js       #   expert session reuse SSOT（M11-11C，provider 中立：opaque uuid 派生 + turn 决策 first/resume/busy + per-key 文件锁；M12-7 增 run_lineage routing——续谱作用域 = Lead session + workspace + agent + rootRunId，复用同一 opaque provider id；run_lineage 是 routing-only，不是 agent 可声明策略）
-│   ├── leadPreflight.js      #   advisory single-call preflight aggregator（M11-8A，组合 registryInventory+listRuns，advisory 非 gate；M12-25 增 registryIssues/registryIssuesTruncated——复用 registry_list 同一闭集 issue 形状与同一单读快照，非空时 checkStatus.workers=warning→complete:false 但有效 worker 照常返回）
-│   ├── mcpWorkspaceActivation.js # project-scoped workspace activation（M10 P0-1，CLI 用，委托 hostAdapters）
-│   ├── timeoutPolicy.js      #   wait timeout precedence SSOT（M10-pre，CLI + MCP 共用）
-│   ├── processStopVerify.js  #   bounded process exit verification（M10-pre）
-│   ├── runDeliveryReview.js  #   exact delivery proof + bounded/redacted diff review（M11-3，CLI + MCP 共用）
-│   ├── playbookCatalog.js    #   read-only Lead Playbook Catalog SSOT（M11-2A，loader + MCP/CLI 共用；validatePlaybookSummaryList/validatePlaybookV1）
-│   └── runSemanticsNotes.js  #   pure provider-neutral semanticNotes SSOT（M12-12，冻结静态目录 + 纯 selector；四 tool 成功结果的 1..4 条 self-describing notes）
-├── hostAdapters/             # L4：host-specific config adapters（M10 P0-1 reframe）
+├── application/              # L3：shared application services（use-case 层）
+│   ├── registryInventory.js  #   registry inventory SSOT（CLI + MCP 共用；providerReadiness 严格真相投影——CONFIGURATION_STATUSES/AUTHENTICATION_STATUSES/ENTITLEMENT_STATUSES/LIVE_CHECK_STATUSES 闭集常量，MCP 枚举直接派生，无第二份列表；独立部分投影 getRegistryInventoryWithIssues + REGISTRY_ISSUE_CODES/REGISTRY_ISSUES_CAP 闭集——registry 可读但单条坏条目时返回有效 worker + 有界安全 issues 而非整表失败，严格路径不变）
+│   ├── runDispatch.js        #   background dispatch service（CLI + MCP 共用；continuable 选项——delivery-only 续谱根，建立 run_lineage turn:first provider 会话；MCP adapter 派发前经共享 executionProfiles resolver 解析可选 executionProfileId（profile/inline 互斥），把解析后的 verification 折入 effective delivery 传入；runDispatch.js 自身不解析 profile；providerSessionRouting 闭集输出——仅由内部已选 routing.turn 派生的路由请求真相，非 provider 成功证明，不暴露 mode/opaque uuid）
+│   ├── runDispatchContract.js #   advisory pre-dispatch contract check service（MCP）：MCP adapter 在 run_dispatch 与本工具间共享输入 schema（service 自身不导入 Zod），service 复用同一 application 校验（共享 resolver + prepareDeliveryRequest），返回闭集 workspace/registry/contract 视图 + 有界 issue 码；contractValid 只反映 delivery/profile 机械合同（不预评 expectedGitHead/expectedDirty/expectedWorkspaceRoot、continuable/backend/session 资格或凭据），非门禁（sections 独立 observed/unknown、advisory 恒 true）、零副作用、run_dispatch 不可依赖它
+│   ├── executionProfiles.js   #   frozen trusted execution-profile catalog + 共享 delivery 验证解析器：node-npm-test-v1 / node-npm-ci-test-v1 / python-pytest-v1 仅提供 verificationSetup/verificationCommands；profile 与 inline verification 互斥，未知/冲突由共享 resolver 稳定拒绝
+│   ├── runContinue.js        #   Lead 授权修正续跑 service（由 MCP adapter 直接委托）：对终态 continuable delivery 续 ONE 修正回合，复用父 run 的 retained worktree + 续 provider 会话（turn:resume，同一 opaque uuid）；closed-set 资格/身份/配置/worktree 检查先于 mutation，spawn 前失败事务回滚；从不推断 correction/scope/retry/accept
+│   ├── runStatus.js          #   read-only run status service（CLI + MCP 共用）
+│   ├── runCollect.js         #   run collection service（CLI + MCP 共用）
+│   ├── runDiagnosis.js       #   read-only run diagnosis service（CLI + MCP 共用）
+│   ├── runDelivery.js        #   delivery query + decision service（CLI + MCP 共用）
+│   ├── runStop.js            #   runaway worker stop service（CLI + MCP 共用，workspace-bound）
+│   ├── runList.js            #   workspace-bound run list service（查询内复用 ownership proof）
+│   ├── runWorkspaceOwnership.js # run workspace ownership判定（query-scoped proof cache；前台收口：background 权威 = 恰好一条绑定的 `run.background_submitted` 事件 + 其 `cwd` 字段——**不是** payload 的 `background:true` 布尔；foreground = 无 background_submitted 且恰好一条绑定 `run.started` 且 cwd 有效；envelope runId 精确绑定，legacy 无 runId 容错仅在没有任何 ownership 事件携带 runId 时启用；`proveWorkspace` realpath + Windows 平台大小写折叠）
+│   ├── runWait.js            #   long-poll 终态/活性等待 service（MCP 共用，只读）
+│   ├── runAwaitResult.js     #   read-only composite：bounded wait + observation + terminal compact（snapshot-only，advisory；readFailureReason 闭集；终态+快照干净时投影有界闭集 outcome——diagnosis+delivery 安全事实，无 commit/path/diff/命令/推荐，复用同一 snapshot、零额外读）
+│   ├── ownerLiveness.js      #   run liveness 投影 SSOT（terminal/progress/process_only/silent，runWait/runAwaitResult 共用）
+│   ├── workspaceBinding.js   #   host-authorized workspace proof SSOT（MCP 共用）
+│   ├── sessionWorkspace.js   #   Lead session workspace selection kernel（无状态，委托 proveWorkspace）
+│   ├── sessionReuse.js       #   expert session reuse SSOT（provider 中立：opaque uuid 派生 + turn 决策 first/resume/busy + per-key 文件锁；run_lineage routing——续谱作用域 = Lead session + workspace + agent + rootRunId，复用同一 opaque provider id；run_lineage 是 routing-only，不是 agent 可声明策略）
+│   ├── leadPreflight.js      #   advisory single-call preflight aggregator（组合 registryInventory+listRuns，advisory 非 gate；registryIssues/registryIssuesTruncated——复用 registry_list 同一闭集 issue 形状与同一单读快照，非空时 checkStatus.workers=warning→complete:false 但有效 worker 照常返回）
+│   ├── mcpWorkspaceActivation.js # project-scoped workspace activation（CLI 用，委托 hostAdapters）
+│   ├── timeoutPolicy.js      #   wait timeout precedence SSOT（CLI + MCP 共用）
+│   ├── processStopVerify.js  #   bounded process exit verification
+│   ├── runDeliveryReview.js  #   exact delivery proof + bounded/redacted diff review（CLI + MCP 共用）
+│   ├── playbookCatalog.js    #   read-only Lead Playbook Catalog SSOT（loader + MCP/CLI 共用；validatePlaybookSummaryList/validatePlaybookV1）
+│   └── runSemanticsNotes.js  #   pure provider-neutral semanticNotes SSOT（冻结静态目录 + 纯 selector；四 tool 成功结果的 1..4 条 self-describing notes）
+├── hostAdapters/             # L4：host-specific config adapters
 │   └── codexMcpConfig.js     #   Codex CLI MCP server CRUD（add/get/remove/list，不写 TOML）
-│   └── processStopVerify.js  #   bounded process exit verification（M10-pre）
+│   └── processStopVerify.js  #   bounded process exit verification
 ├── backends/
 │   ├── opencodeServe.js      # L1：HTTP 类 backend
 │   ├── processBackend.js     # L1：进程式 backend 基类
-│   ├── claudeCode.js         # L1：claude-code 后端（M12-14：`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` 注入【每一个】supervised 子进程 env——native OAuth / provider wrapper / start / resume 会话复用；backend 安全值压过 agent.env 反设，含 Windows 大小写不敏感的变体；阻止/抑制 provider auto-memory 写入；仅 claude-code 接收该变量，其它 backend 不注入）
+│   ├── claudeCode.js         # L1：claude-code 后端（`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` 注入【每一个】supervised 子进程 env——native OAuth / provider wrapper / start / resume 会话复用；backend 安全值压过 agent.env 反设，含 Windows 大小写不敏感的变体；阻止/抑制 provider auto-memory 写入；仅 claude-code 接收该变量，其它 backend 不注入）
 │   ├── codex.js              # L1：codex 后端
 │   ├── deepSeekHarness.js    # L1：实验性 DSH stdio JSON-RPC 后端
 │   └── parsers/
@@ -1151,10 +1157,10 @@ test/
 ```
 
 > **未实现的模块**（spec 曾设想，roadmap 无对应 milestone，勿当作既有文件）：
-> - `scheduler.js`（限并发调度器，**未实现**）—— 见 §4.4，登记 TD-5。
+> - `scheduler.js`（限并发调度器，**未实现**）—— 见 §4.4；在册 tech-debt（docs/tech-debt.md）。
 > - `workflow/dag.js`（**未实现**，DAG 能力已拆进 schema.js + engine.js，无独立 dag.js）。
 
-**Lead Playbook Catalog ≠ WorkflowEngine（M11-2 概念分离）**：
+**Lead Playbook Catalog ≠ WorkflowEngine（概念分离）**：
 
 WAO 有两套**不同用途**的编排辅助，必须区分，不得混淆：
 
@@ -1163,7 +1169,7 @@ WAO 有两套**不同用途**的编排辅助，必须区分，不得混淆：
 | Lead Playbook Catalog | `playbooks/lead/*.json` + `application/playbookCatalog.js` + MCP resources `wao://playbooks`/`wao://playbooks/{id}`（只读 resources/CLI） | 否 | 可选的 Lead 决策脚手架：evidence gate、adaptation point。Lead 保留/跳过/修改条件步骤；catalog 不派发、不推进 phase、不验收。 |
 | WorkflowEngine | `src/workflow/engine.js` + `workflows/templates/*.mjs` | 是 | 确定性 CLI DAG 执行（分层 + 并行 + 失败传播），硬编码 agent/prompt。 |
 
-Catalog 是只读数据 + application service（`validatePlaybookSummaryList`/`validatePlaybookV1` 作为 loader 与 MCP/CLI adapter 共用的 SSOT），**不是**第二个 executor；不存在 `playbook_run`/`playbook_start`/`playbook_next`/`playbook_recommend`。现有 `workflow run/list` 仍是专家级 CLI 特性，不是 M11-2 的基础。
+Catalog 是只读数据 + application service（`validatePlaybookSummaryList`/`validatePlaybookV1` 作为 loader 与 MCP/CLI adapter 共用的 SSOT），**不是**第二个 executor；不存在 `playbook_run`/`playbook_start`/`playbook_next`/`playbook_recommend`。现有 `workflow run/list` 仍是专家级 CLI 特性，不是 Playbook Catalog 的基础。
 
 **模块边界规则**：
 - backend 特定逻辑**只在** `src/backends/` 下
