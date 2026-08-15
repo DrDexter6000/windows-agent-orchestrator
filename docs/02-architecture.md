@@ -50,7 +50,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 - **application**（Lead use-case 服务层）：`src/application/**` 中不在 shared 成员清单内者。
 - **core**（生命周期与真值）：`src/transcript.js`、`src/runManager.js`、`src/delivery.js`、`src/registry.js` 及 `src/` 顶层其余非 adapter 非 shared 文件（diagnosis/isolation/scorecard/alerts/metrics/frictionLog 等）+ `src/workflow/**`。
 - **backends**：`src/backends/**`（runtime 适配与 parsers）。
-- **shared**（共享内核/叶子工具，被所有层消费、零上向依赖）：`src/application/roleContract.js`、`src/application/credentialReadiness.js`、`src/application/ownerLiveness.js`、`src/application/timeoutPolicy.js`、`src/application/processStopVerify.js`、`src/envPolicy.js`、`src/runEvent.js`、`src/secretRedaction.js`、`src/canonicalAgentId.js`、`src/waoCliPath.js` + `src/hostAdapters/**`（出站宿主集成叶子，如 codexMcpConfig 委托 Codex CLI 管理 MCP 配置；其"adapter"指出站集成，非 adapters 桶的入站外部面）。
+- **shared**（共享内核/叶子工具，被所有层消费、零上向依赖）：`src/application/roleContract.js`、`src/application/credentialReadiness.js`、`src/application/ownerLiveness.js`、`src/application/timeoutPolicy.js`、`src/application/processStopVerify.js`、`src/cliHelp.js`（CLI help 单一常量源，供 adapter 与生成器消费）、`src/envPolicy.js`、`src/runEvent.js`、`src/secretRedaction.js`、`src/canonicalAgentId.js`、`src/waoCliPath.js` + `src/hostAdapters/**`（出站宿主集成叶子，如 codexMcpConfig 委托 Codex CLI 管理 MCP 配置；其"adapter"指出站集成，非 adapters 桶的入站外部面）。
 - `src/owner-dashboard/**` 是浏览器静态资产，不参与 Node import 图。
 
 **方向规则（闭集，机器强制）**：**禁上向；任意下向（含跳层）与同层合法**。adapter 越过 application 直取 core/backends/shared 是声明合法的现状（呈现/入口层直连，application 不是收口点）。上行例外白名单**恰 2 条**（冻结精确集合、双向 deepEqual、变更须同步本图）：`registry.js` → `application/sessionReuse.js`、`runManager.js` → `application/sessionReuse.js`——sessionReuse 消费 `transcript.js`（是服务不是叶子，不能下沉 shared），其模块头注释明载这两个 core 消费者合同。未登记的新顶层文件或新子目录一律 fail-closed（不自动归 core）。

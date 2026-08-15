@@ -67,6 +67,7 @@ const SHARED_MEMBERS = Object.freeze(new Set([
   "src/application/ownerLiveness.js",
   "src/application/timeoutPolicy.js",
   "src/application/processStopVerify.js",
+  "src/cliHelp.js",
   "src/envPolicy.js",
   "src/runEvent.js",
   "src/secretRedaction.js",
