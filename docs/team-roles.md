@@ -36,10 +36,10 @@ WAO 是"装一次，开发多个项目"的工具：
 | 维度 | 内容 |
 |---|---|
 | **身份** | 调研/分析专家。只读分析，不改产品代码 |
-| **Work Scope** | 读代码库、技术选型、可行性分析、输出 brief/affectedFiles 清单 |
+| **Work Scope** | 读代码库、技术选型、可行性分析、输出 brief/affectedFiles 清单；边界清晰的简单任务（仍限只读分析边界） |
 | **边界** | 不改产品代码；不跑测试（只读）；不做实现决策（决策归 Lead+Auditor） |
 | **backend** | claude-code wrapper（进程式，弃 opencode——06-18 事故风险） |
-| **model** | deepseek-v4-pro（1M context，适合深度调研） |
+| **model** | deepseek-v4-flash（1M context，适合深度调研；2026-08-15 Owner 裁定与实际配置对齐——此前本行与认证矩阵误记 v4-pro） |
 | **effort** | max（深度分析） |
 | **配置要点** | model/reasoning/context 从结构化 provider policy 单一编译，不手拼 CLI flags |
 | **会话复用** | `sessionReuse=lead_workspace`（M11-11C）：同一 MCP Lead server 实例在同一 workspace 内多次询问 Researcher 时，复用 provider 原生会话保留上下文/cache，每次仍是独立 run/transcript。Host/MCP 重启后开新会话；仅非 delivery；详见 `02-architecture.md §4.10` |
@@ -49,10 +49,10 @@ WAO 是"装一次，开发多个项目"的工具：
 | 维度 | 内容 |
 |---|---|
 | **身份** | 高耦合与长程连贯实现通道 |
-| **Work Scope** | 跨模块高耦合实现、歧义较高且需要持续统筹的编码任务、难以经济拆分的长程实现，以及按 brief 写/改代码、跑 lint/build、修 bug |
+| **Work Scope** | 跨模块高耦合实现、歧义较高且需要持续统筹的编码任务、难以经济拆分的长程实现，以及按 brief 写/改代码、跑 lint/build、修 bug；按 Lead 指派兼职方案顾问与交付物评审（只读意见，不做验收决定） |
 | **边界** | 不做架构决策（归 Lead+Auditor）；不验收自己（归 Auditor） |
-| **backend** | claude-code wrapper（进程式，已 probe） |
-| **model** | glm-5.2（1M context，编码能力强） |
+| **backend** | claude-code wrapper（进程式，已 probe；2026-08-15 Owner 裁定维持——ZCode CLI 迁移构想见 TD-116） |
+| **model** | glm-5.3[1m]（1M context，编码能力强；2026-08-15 对齐实际配置，此前本行误记 glm-5.2；该组合 2026-08-14 已认证 certified。下方 probe 表为 2026-06-24 历史快照） |
 | **effort** | max |
 
 ### Coder-Low（码农-低成本快速）
@@ -60,7 +60,7 @@ WAO 是"装一次，开发多个项目"的工具：
 | 维度 | 内容 |
 |---|---|
 | **身份** | 低成本高吞吐的通用第二实现通道；`Low` 不表示低能力 |
-| **Work Scope** | 默认承担边界明确的实现包、TDD、修 bug、重构、兼容性、脚本、文档/配置与窄修正；适合独立并行包 |
+| **Work Scope** | 默认承担边界明确的实现包、TDD、修 bug、重构、兼容性、脚本、文档/配置与窄修正；适合独立并行包；按 Lead 指派兼职方案顾问与交付物评审（只读意见，不做验收决定） |
 | **边界** | 不替 Lead 作架构、范围、拆包或转派决策；不自行扩域；不验收自己。不得仅因文件数、prompt 长度、耗时或规模自行拒绝，是否拆分/转派由 Lead 决定 |
 | **backend** | claude-code wrapper（进程式） |
 | **model** | deepseek-v4-flash（1M context） |
@@ -85,6 +85,7 @@ WAO 是"装一次，开发多个项目"的工具：
 | **身份** | 执行层验证 + 运行监控 |
 | **Work Scope（原）** | 跑测试、验证 exitCode、检查产出文件存在、报缺陷 |
 | **Work Scope（扩展-轮询）** | 轮询各 worker 运行状态（`runs status`/`runs list`）、检测超时/失控、向 Lead 汇报异常。降低 Lead 的 token 开销 |
+| **Work Scope（扩展-多模态+简单任务，2026-08-15）** | 多模态识别（读取并分析图像输入；codex 图像输入能力由 Owner 人工验证）；边界清晰的简单任务 |
 | **边界** | 不修 bug（归 Coder）；不做语义判断（只看证据）；不审编排方案（归 Auditor） |
 | **backend** | codex（进程式，command_execution exitCode 最准） |
 | **effort** | medium（测试是确定性任务，不需高推理） |
@@ -106,7 +107,7 @@ WAO 是"装一次，开发多个项目"的工具：
 
 1. **Lead 拥有路由权**：worker 可以报告合同矛盾、缺少授权或能力风险，但不得自行决定拆包、缩减合同或转派。认证、provider 状态、成本和既往表现都是 Lead 的决策事实，不是自动门禁。
 2. **按任务性质选通道**：主要判断语义耦合度、需求歧义、长程上下文连续性、验收边界、是否可独立并行、多模态需求、provider 可用性与成本；不按 `Low`/`HQ` 名称、prompt 长度、文件数量或预计耗时机械路由。
-3. **默认 bounded coding lane**：边界明确、可验证、可独立交付的实现包默认优先 `coder_low`；包较大但合同清楚并不构成自动转派理由。
+3. **默认实现通道偏好（Owner 劝诫，2026-08-15）**：无明确耦合、成本或并行理由时，多数实现任务优先派发 `coder_hq`（质量优先）。`coder_low` 仍是低成本高吞吐与并行容量通道——预算敏感、可独立并行的批量小包优先走 `coder_low`。此为建议性偏好（advisory），不是控制面规则；Lead 仍按语义耦合与项目实际裁量，不机械路由。
 4. **高耦合 lane**：跨模块语义强耦合、歧义较高、需要一次长程保持整体设计，或拆包会显著损失上下文时优先 `coder_hq`。
 5. **多模态与高质量替补**：视觉、前端、创意和多模态任务优先 `coder_mm`；也可在 `coder_hq` 不可用或任务明显受益于 K3 能力时作为高质量替补。
 6. **拆包条件**：只有工作确实可独立验收、并行能降低等待或单包合同难以清晰表达时才拆；最终是否拆分或转派由 Lead 决定。

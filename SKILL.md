@@ -30,12 +30,12 @@ Before expanding work, stop at the first true line: (1) It does not block the cu
 3. Tiny, tightly coupled, or Lead-context-heavy work: the Lead may do it directly.
 4. Add a Tester when independent execution evidence is useful. The canonical `agentId` `auditor` is one Chief-Advisor/Auditor expert: advisory mode before execution or audit mode after delivery, only for high risk, semantic uncertainty, or low Lead confidence.
 
-Choose via `docs/team-roles.md` + the registry; the Lead owns the verdict. Route by **semantic coupling** (ambiguity, long-horizon coherence, acceptance clarity, independent parallelism, modality, provider health/cost) — do not route mechanically by `Low`/`HQ`/name. `coder_low` 是默认 bounded implementation lane；高耦合或需要长程连贯上下文的工作优先 `coder_hq`；多模态/视觉/创意用 `coder_mm`. File count, prompt length, and elapsed time are not automatic routing or reassignment triggers; a worker reports concrete blockers and 拆分与转派由 Lead 决定.
+Choose via `docs/team-roles.md` + the registry; the Lead owns the verdict. Route by **semantic coupling** (ambiguity, long-horizon coherence, parallelism, modality, cost) — do not route mechanically by `Low`/`HQ`/name. `coder_low` 是 bounded implementation lane；高耦合或需要长程连贯上下文的工作优先 `coder_hq`；多模态/视觉/创意用 `coder_mm`. Owner 劝诫：多数实现任务优先 `coder_hq`（2026-08-15，advisory）. File count, prompt length, and elapsed time are not automatic routing or reassignment triggers; a worker reports concrete blockers and 拆分与转派由 Lead 决定.
 
 ## Workflow Size
 - Simple read-only or tiny Lead task: do it directly.
 - One bounded worker task: dispatch, supervise, accept, report.
-- Two or more independent workers, cross-session work, or an explicitly audited engagement: use the six-stage pipeline. `wao stage` records progress and `wao declare` records a Lead self-work deviation — run bare `wao stage` or `wao declare` to inspect stages/reason codes (no ceremony for trivial tasks).
+- Two or more independent workers, cross-session work, or an explicitly audited engagement: use the six-stage pipeline. `wao stage` records progress and `wao declare` records a Lead self-work deviation — run bare `wao stage` or `wao declare` to inspect stages/reason codes.
 
 ## Worker Contract
 

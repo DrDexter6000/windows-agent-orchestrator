@@ -1186,8 +1186,10 @@ test("M12 worker routing: SKILL keeps semantic routing and Lead authority", () =
     "SKILL must not use package surface size as an automatic reassignment rule");
   assert.ok(/拆分.*转派.*Lead|Lead.*(?:拆分|转派).*决定/i.test(skill),
     "Lead must own package split and reassignment decisions");
-  assert.ok(/coder_low.*默认|默认.*coder_low/i.test(skill),
-    "SKILL must identify coder_low as the default bounded implementation lane");
+  assert.ok(/coder_low.*bounded implementation lane/i.test(skill),
+    "SKILL must identify coder_low as the bounded implementation lane");
+  assert.ok(/Owner 劝诫.*优先 `coder_hq`|多数实现任务优先 `coder_hq`/i.test(skill),
+    "SKILL must carry the Owner advisory (2026-08-15) preferring coder_hq for most implementation tasks");
   assert.ok(/coder_hq.*高耦合|高耦合.*coder_hq|coder_hq.*长程连贯/i.test(skill),
     "SKILL must reserve coder_hq for highly coupled or long-horizon work");
 });
@@ -2188,8 +2190,8 @@ test("onboarding closeout: agents.example.json 移除 managed-flag 向后兼容�
   // coder_hq certification label: max, not high.
   const parsed = JSON.parse(read("config/agents.example.json"));
   const hqCert = parsed.certification.matrix.find((m) => m.agentId === "coder_hq");
-  assert.equal(hqCert?.label, "GLM-5.2 max via claude-code wrapper",
-    "agents.example.json 的 coder_hq 认证 label 必须为 max（不是 high）");
+  assert.equal(hqCert?.label, "GLM-5.3[1m] max via claude-code wrapper",
+    "agents.example.json 的 coder_hq 认证 label 必须为 max（不是 high），且与实际配置 glm-5.3[1m] 对齐（2026-08-15 漂移修正）");
   // File labeled a complete example prunable to one worker.
   const raw = read("config/agents.example.json");
   assert.ok(/完整示例|complete example/.test(raw),

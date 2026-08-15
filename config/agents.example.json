@@ -7,7 +7,7 @@
   "agents": {
     "researcher": {
       "_comment": "[Researcher] 调研/分析专家。只读分析不改产品代码。对齐 team-roles.md Researcher。",
-      "_comment_backend": "claude-code wrapper（进程式，弃 opencode——06-18 事故风险）。DeepSeek-v4-pro 1M context。",
+      "_comment_backend": "claude-code wrapper（进程式，弃 opencode——06-18 事故风险）。DeepSeek-v4-flash 1M context。",
       "_comment_effort": "reasoning.effort=max，由 provider wrapper 统一编译。",
       "_comment_task": "适合任务: 代码库调研/技术选型/可行性分析/文档生成/brief 输出",
       "backend": "claude-code",
@@ -28,7 +28,7 @@
         "PYTHONNOUSERSITE": "1"
       },
       "model": {
-        "id": "deepseek-v4-pro",
+        "id": "deepseek-v4-flash",
         "contextWindow": 1000000
       },
       "reasoning": {
@@ -37,7 +37,7 @@
     },
     "coder_hq": {
       "_comment": "[Coder-HQ] 核心实现者。高质量/长程编码任务。对齐 team-roles.md Coder-HQ。",
-      "_comment_backend": "claude-code wrapper（进程式，已 probe）。GLM-5.2 1M context 编码能力强。",
+      "_comment_backend": "claude-code wrapper（进程式，已 probe）。GLM-5.3[1m] 1M context 编码能力强。",
       "_comment_effort": "effort=max，由 provider wrapper 统一编译。",
       "_comment_task": "适合任务: 写/改代码/重构/修 bug/按 brief 实现",
       "backend": "claude-code",
@@ -52,7 +52,7 @@
         "--dangerously-skip-permissions"
       ],
       "model": {
-        "id": "glm-5.2",
+        "id": "glm-5.3[1m]",
         "contextWindow": 1000000
       },
       "reasoning": {
@@ -146,10 +146,10 @@
     "matrix": [
       {
         "agentId": "researcher",
-        "label": "DeepSeek-v4-pro max via claude-code wrapper",
+        "label": "DeepSeek-v4-flash max via claude-code wrapper",
         "profile": "strict",
         "providerID": "deepseek",
-        "modelId": "deepseek-v4-pro",
+        "modelId": "deepseek-v4-flash",
         "drills": [
           "sentinel",
           "scorecard",
@@ -158,10 +158,10 @@
       },
       {
         "agentId": "coder_hq",
-        "label": "GLM-5.2 max via claude-code wrapper",
+        "label": "GLM-5.3[1m] max via claude-code wrapper",
         "profile": "strict",
         "providerID": "zhipuai-coding-plan",
-        "modelId": "glm-5.2",
+        "modelId": "glm-5.3[1m]",
         "drills": [
           "sentinel",
           "scorecard",
