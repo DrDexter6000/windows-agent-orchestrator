@@ -2275,6 +2275,8 @@ test("A-1: 普通 agentId 不带 prompt 仍走原拒绝路径（消息无 did-yo
   await assert.rejects(
     () => runCommand(["coder_low"], {}),
     (e) => {
+      // 验收 P1（coder_hq）：钉住原错误头——loadPrompt 文案被改时本反例也红。
+      assert.ok(e.message.startsWith("Provide --prompt or --prompt-file"));
       assert.doesNotMatch(e.message, /did you mean/);
       return true;
     },
