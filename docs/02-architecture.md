@@ -1132,7 +1132,6 @@ src/
 │   └── runSemanticsNotes.js  #   pure provider-neutral semanticNotes SSOT（冻结静态目录 + 纯 selector；四 tool 成功结果的 1..4 条 self-describing notes）
 ├── hostAdapters/             # L4：host-specific config adapters
 │   └── codexMcpConfig.js     #   Codex CLI MCP server CRUD（add/get/remove/list，不写 TOML）
-│   └── processStopVerify.js  #   bounded process exit verification
 ├── backends/
 │   ├── opencodeServe.js      # L1：HTTP 类 backend
 │   ├── processBackend.js     # L1：进程式 backend 基类

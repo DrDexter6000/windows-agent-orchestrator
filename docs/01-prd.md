@@ -175,7 +175,7 @@ Niuma 验证了"图编排 + 结构化 handoff + scorecard"的正确性，但它�
 | 事件订阅（通用化 tail --follow） | [M] |
 | shared application services（MCP 与 CLI 共用，禁止 shell-out） | [M9] |
 
-> L4 架构依赖方向、当前 MCP tool inventory 与 application-service 清单见 `docs/02-architecture.md` §1 分层总览与 §7 目录结构；tool schema 见 `docs/usage.md`。
+> L4 架构依赖方向、当前 MCP tool inventory 与 application-service 清单见 `docs/02-architecture.md` §1 分层总览与 §7 目录结构；tool schema 见 `docs/surface/mcp-tools.md`（生成层）。
 
 ### 横切
 
