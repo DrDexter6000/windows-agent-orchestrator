@@ -1481,8 +1481,13 @@ test("M11-4-DOC-03: architecture.md lists runCollectProjection.js shared ownersh
   const arch = read("docs/02-architecture.md");
   assert.ok(/runCollectProjection\.js/.test(arch),
     "architecture lists runCollectProjection.js as a shared application service");
-  assert.ok(/runCollectProjection\.js.*M11-4|M11-4.*runCollectProjection\.js/.test(arch),
-    "architecture ties runCollectProjection.js to M11-4");
+  // 2026-08-15 TD-120 conversion: the guard used to require a literal "M11-4"
+  // tag next to the service name — a number fingerprint inside contract text
+  // (the P4 contract/narrative separation strips milestone tags from the L4
+  // section). Assert the CONTRACT instead: shared projection, CLI continuation
+  // and MCP delegate to the same algorithm (no second projection).
+  assert.ok(/runCollectProjection\.js[^。\n]*共享安全投影[^。\n]*无第二算法/.test(arch),
+    "architecture states runCollectProjection.js is the single shared projection (CLI+MCP, no second algorithm)");
 });
 
 test("M11-4-DOC-04: roadmap records M11-4 fresh Lead dogfood completed", () => {

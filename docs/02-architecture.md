@@ -71,7 +71,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
   - `runAwaitResult.js` — 只读 advisory composite：bounded wait + truthful observation + terminal compact，snapshot-only 无 serve fetch，复用 `runWait` 的 `summarizeLiveness` + `runCollect` 的 `reconstructItemsFromEvents` + `runCollectProjection` 的 compact SSOT，零 audit append；必填可空闭集 `readFailureReason`——`READ_FAILURE_REASONS` 单一 SSOT，MCP schema enum 由它构建，read_failure 时给出 transcript_parse_failed/legacy_event_shape/snapshot_unavailable 机器码，observed 为 null，绝不泄漏错误原文。
   - `ownerLiveness.js` — run liveness 投影 SSOT：terminal/progress/process_only/silent，`runWait`/`runAwaitResult` 共用。
   - `runDeliveryReview.js` — exact delivery commit proof + bounded/redacted diff projection，CLI/MCP 共用。
-  - `runCollectProjection.js` — run_collect 的共享安全投影 + cursor codec + 分页，CLI 续读与 MCP 委托同一投影，无第二算法（M11-4）。
+  - `runCollectProjection.js` — run_collect 的共享安全投影 + cursor codec + 分页，CLI 续读与 MCP 委托同一投影，无第二算法。
   - `sessionWorkspace.js` — Lead 会话级工作区选择纯验证内核，委托 `workspaceBinding.js` 的 `proveWorkspace` SSOT；无状态——per-MCP-server 会话状态由 server 闭包持有，application 层不存全局/持久状态。
   - `runDrilldowns.js` — 有界 Lead 渐进式披露元数据 SSOT：静态闭集 catalog（tool/view/detail/purpose/reveals/cost/readOnly 七键）+ 纯事实选择规则 + 硬上限 `DRILLDOWN_MAX_ENTRIES`/`DRILLDOWN_SERIALIZED_MAX_BYTES`/`DRILLDOWN_FIELD_MAX_LEN`；`run_await_result`/`run_status`/`run_diagnose`/`run_collect`/`run_delivery`/`run_activity` 六个观察工具的输出携带（schema REQUIRED）`availableDrilldowns`，MCP schema 枚举与上限由同一模块导出派生，无第二份列表；只披露不调用、不决策、不广告 mutation/control 工具，`readOnly` 按工具如实（run_collect 三条为 false，余为 true），字段永不含 transcript/provider/仓库文本。
 
