@@ -290,6 +290,8 @@ npm run cli -- run coder_low --prompt "..." --isolate
 npm run cli -- run coder_low --prompt "..." --isolate --delivery-spec-file delivery-spec.json --format json
 ```
 
+> 已知坑（friction 2026-08-15 #3）：spec 文件内容是**内层 delivery 对象本身**——`{"mode":"git_commit_v1","allowedPaths":[...],"verificationCommands":[...]}`，**不带** `{"delivery": ...}` 外层包装（那层包装是 MCP `run_dispatch` 工具参数的形状，见 §四）。CLI 把文件内容直接交给 `prepareDeliveryRequest` SSOT 解析，带外层包装会因缺顶层 `mode` 被拒绝。
+
 Delivery 模式在 worktree 隔离中运行 worker，完成后打包一个 atomic delivery commit，
 然后运行验证命令。`--format json` 返回完整 DeliveryRef 和 `verificationFailed` /
 `verificationUnavailable` 标志。schema 语义见 `docs/02-architecture.md` §4.6-4.8。
@@ -401,6 +403,7 @@ npm run cli -- daemon stop
 
 ## 三、transcript 格式
 
+> 本区为**手写参考**（不可从代码推导——当前无事件 SSOT；未来 transcript.js 若出现事件 SSOT 可转生成层，届时登记 tech-debt）。内容为契约，修改需过 docs-consistency。
 > 本表是 transcript 事件类型的**完整权威定义**（spec 契约见 `docs/02-architecture.md` §3.2）。
 > 其它文档（SKILL.md 等）引用事件时指向此处，不维护并行清单（SSOT）。
 
@@ -471,6 +474,8 @@ npm run cli -- runs grep "error" --format json
 npm run cli -- wao decision list --format json
 npm run cli -- wao handoff read lead --format json
 ```
+
+> 本区为**手写参考**（不可从代码推导——形状散在各命令实现中，无单一输出形状 SSOT；未来若出现输出形状 SSOT 可转生成层，届时登记 tech-debt）。内容为契约，修改需过 docs-consistency。
 
 TD-86 起上述 7 个查询子命令的 JSON 输出形状（字段全部来自既有计算结果）：
 
@@ -1099,6 +1104,8 @@ wao://semantics/{id}       → { note: { id, meaning, doesNotMean } }           
 ---
 
 ## 五、常见问题
+
+> 故障排查的深度内容见 `docs/troubleshooting.md`（按症状快速索引 + provider/CLI 与 shell/工作目录/runs 故障域，本文不搬运）；本节只保留高频一句话问答。
 
 ### claude 报 `stream-json requires --verbose`
 已内置处理（buildArgs 自动加 `--verbose`）。
