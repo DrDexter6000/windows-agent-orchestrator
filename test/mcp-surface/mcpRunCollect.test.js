@@ -380,6 +380,147 @@ test("M9-4B-09: empty collect result → messages=[] itemCount=0", async () => {
 });
 
 // ---------------------------------------------------------------------
+// TD-119 (2026-08-15): long-message chunked delivery semantics.
+// Page-level `truncated` is withheld-only (always paired with nextCursor);
+// a long message fully delivered as in-page chunk entries is NOT
+// page-truncated. Entry-level `truncated:true` merely marks a slice.
+// ---------------------------------------------------------------------
+
+test("TD-119: long message delivered losslessly as in-page chunk entries; truncated=false + nextCursor=null when nothing is withheld", async () => {
+  // 9615 chars fits the 12000-char page budget → one page, chunked entries.
+  const full = "y".repeat(9615);
+  const server = createWaoMcpServer({
+    registryPath: "/server/r.json", runDir: "/server/runs",
+    collectRunMessagesFn: async () => ({ data: [{ kind: "message", role: "assistant", parts: [{ type: "text", text: full }] }], reconstructed: true, backend: "process" }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    assert.ok(parsed.messages.length >= 2, "long message spans multiple chunk entries");
+    assert.equal(parsed.messages.map((m) => m.text).join(""), full,
+      "concatenated chunk entries reproduce the full message");
+    assert.equal(parsed.truncated, false, "page truncated=false — nothing withheld (TD-119 semantics)");
+    assert.equal(parsed.nextCursor, null, "no continuation needed");
+    for (const m of parsed.messages.slice(0, -1)) {
+      assert.equal(m.truncated, true, "non-final slices carry entry-level truncated=true");
+    }
+    assert.equal(parsed.messages[parsed.messages.length - 1].truncated, false,
+      "final slice completes the message (entry-level truncated=false)");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("TD-119: page truncated=true implies withheld content and a nextCursor; full text recovers across pages", async () => {
+  // 15000 chars exceeds the 12000-char page budget → first page withholds the tail.
+  const full = "z".repeat(15000);
+  const server = createWaoMcpServer({
+    registryPath: "/server/r.json", runDir: "/server/runs",
+    collectRunMessagesFn: async () => ({ data: [{ kind: "message", role: "assistant", parts: [{ type: "text", text: full }] }], reconstructed: true, backend: "process" }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    let joined = "";
+    let cursor;
+    let pages = 0;
+    do {
+      const args = { runId: "run_x" };
+      if (cursor) args.cursor = cursor;
+      const res = await client.callTool({ name: "run_collect", arguments: args });
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      joined += parsed.messages.map((m) => m.text).join("");
+      if (parsed.nextCursor) {
+        assert.equal(parsed.truncated, true, "truncated=true exactly when nextCursor is present");
+      } else {
+        assert.equal(parsed.truncated, false, "truncated=false on the terminal page");
+      }
+      cursor = parsed.nextCursor;
+      pages += 1;
+    } while (cursor && pages < 10);
+    assert.equal(joined, full, "full text recovered by concatenating all pages");
+    assert.ok(pages >= 2, "message spanned multiple pages");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("TD-119: budget-edge anchors — exactly 4000 and exactly 12000 chars complete in one page", async () => {
+  // Panel audit 2026-08-15: the exact-cap boundaries are the contract
+  // flip points and were previously untested.
+  for (const [len, expectedEntries] of [[4000, 1], [12000, 3]]) {
+    const full = "e".repeat(len);
+    const server = createWaoMcpServer({
+      registryPath: "/server/r.json", runDir: "/server/runs",
+      collectRunMessagesFn: async () => ({ data: [{ kind: "message", role: "assistant", parts: [{ type: "text", text: full }] }], reconstructed: true, backend: "process" }),
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal(parsed.messages.length, expectedEntries, `exactly-${len} spans ${expectedEntries} entries`);
+      assert.equal(parsed.messages.map((m) => m.text).join(""), full, `exactly-${len} delivered in full`);
+      assert.equal(parsed.truncated, false, `exactly-${len}: page truncated=false (nothing withheld)`);
+      assert.equal(parsed.nextCursor, null, `exactly-${len}: nextCursor null`);
+      assert.equal(parsed.messages[parsed.messages.length - 1].truncated, false,
+        `exactly-${len}: final entry completes the message`);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }
+});
+
+test("TD-119: multi-message page — entry truncated:false marks the message boundary", async () => {
+  // Panel audit 2026-08-15: naive whole-page concatenation glues distinct
+  // messages together; the recoverable boundary rule is "an entry with
+  // truncated:false ends a message".
+  const msg1 = "m".repeat(9615);
+  const msg2 = "n".repeat(2000);
+  const server = createWaoMcpServer({
+    registryPath: "/server/r.json", runDir: "/server/runs",
+    collectRunMessagesFn: async () => ({
+      data: [
+        { kind: "message", role: "assistant", parts: [{ type: "text", text: msg1 }] },
+        { kind: "message", role: "assistant", parts: [{ type: "text", text: msg2 }] },
+      ],
+      reconstructed: true,
+      backend: "process",
+    }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_x" } });
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    assert.equal(parsed.truncated, false, "both messages fit the page budget");
+    assert.equal(parsed.nextCursor, null, "no continuation");
+    // Reconstruct message boundaries: accumulate entries, cut at each
+    // truncated:false entry (which completes a message).
+    const reconstructed = [];
+    let acc = "";
+    for (const entry of parsed.messages) {
+      acc += entry.text;
+      if (entry.truncated === false) {
+        reconstructed.push(acc);
+        acc = "";
+      }
+    }
+    assert.equal(acc, "", "no dangling partial message (every message completed)");
+    assert.deepEqual(reconstructed, [msg1, msg2],
+      "boundary-rule reconstruction reproduces the two original messages");
+    // Naive whole-page concatenation is byte-equal to msg1+msg2 but carries NO
+    // boundary information — the truncated:false cut points are the only way
+    // to recover where msg1 ends (this is the contract the --final marker and
+    // usage.md now document).
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+// ---------------------------------------------------------------------
 // M9-4B-10: CLI and MCP call same service — messages.collected parity (in-memory).
 // ---------------------------------------------------------------------
 

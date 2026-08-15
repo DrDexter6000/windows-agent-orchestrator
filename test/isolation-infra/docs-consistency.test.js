@@ -14,6 +14,9 @@ import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+// TD-120 (2026-08-15): relationship guards derive counts from the code SSOT
+// instead of hardcoding drifting literals.
+import { TOOLS } from "../../src/mcp/toolSurface.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..", "..");
@@ -939,14 +942,20 @@ test("M11-0A: usage.md 说明 --pure 用途、新进程重启边界、command �
   assert.ok(/command.*必须是数组|command 必须是数组|数组/.test(usage), "usage.md 必须说明 command 必须是数组");
 });
 
-test("M12-8A/M12-9/M12-10/M12-16: usage.md MCP 段反映当前 22 tools", () => {
+test("M12-8A/M12-9/M12-10/M12-16: usage.md MCP 段工具数与 toolSurface SSOT 一致（TD-120 关系型守卫）", () => {
   const usage = read("docs/usage.md");
+  const n = TOOLS.length;
   // 精确禁止"只有 7 个工具"的陈旧文案。
   assert.ok(!/(?<!\d)7 个工具/.test(usage), "usage.md MCP 段不得再声称只有 7 个工具");
-  // M12-10: playbook catalog moved to resources → 23 - 2 = 21; M12-16 added run_correct → 22.
-  assert.ok(/22 个工具/.test(usage), "usage.md MCP 段必须反映 22 个工具（M12-10 playbook 转 resources；M12-16 加 run_correct）");
-  // The stale 23-tool claim must be gone.
-  assert.ok(!/23 个工具/.test(usage), "usage.md 不得再声称 23 个工具");
+  // TD-120: derived from the code SSOT — M12-10 playbook 转 resources，M12-16 加 run_correct。
+  // (?<!\d) guards against e.g. "122 个工具" matching the n=22 probe.
+  assert.ok(new RegExp(`(?<!\\d)${n} 个工具`).test(usage),
+    `usage.md MCP 段必须反映 toolSurface TOOLS.length=${n} 个工具`);
+  // Stale-claim check also derives from the SSOT (n+1 = the most likely NEXT
+  // value after a legitimate surface change). A hardcoded literal here would
+  // deadlock the guard the next time a tool is added (panel audit 2026-08-15).
+  assert.ok(!new RegExp(`(?<!\\d)${n + 1} 个工具`).test(usage),
+    `usage.md 不得声称 ${n + 1} 个工具（相对 SSOT 的陈旧/超前计数）`);
 });
 
 // ============================================================
@@ -1213,18 +1222,24 @@ test("M12 coder_low example uses current DeepSeek V4 Flash policy", () => {
   assert.equal(low?.model?.contextWindow, 1000000);
 });
 
-test("M12-8A/M12-9/M12-10/M12-16: SKILL/architecture 当前工具事实为 22 tools", () => {
+test("M12-8A/M12-9/M12-10/M12-16: SKILL/architecture 工具数与 toolSurface SSOT 一致（TD-120 关系型守卫）", () => {
+  // TD-120 (2026-08-15): the count is DERIVED from the code SSOT (toolSurface.js
+  // TOOLS, load-time self-checked) instead of a hardcoded literal — a legitimate
+  // surface change now points the guard at the stale DOC, not at the test.
   const skill = read("SKILL.md");
   const arch = read("docs/02-architecture.md");
-  assert.ok(/22 MCP tools|22 tools/i.test(skill),
-    "SKILL.md Minimal MCP Loop 当前工具数为 22（M12-10 playbook 转 resources：23 - 2；M12-16 加 run_correct）");
-  // The stale 23-tool claim must be gone from SKILL.
-  assert.ok(!/23 MCP tools|23 tools/i.test(skill),
-    "SKILL.md 不得再声称 23 tools（playbook catalog 已转为 resources）");
+  const n = TOOLS.length;
+  // (?<!\d) guards against e.g. "122 tools" matching the n=22 probe; the
+  // stale-claim negative also derives (n+1) so adding a tool never deadlocks
+  // the guard (panel audit 2026-08-15).
+  assert.ok(new RegExp(`(?<!\\d)${n} MCP tools|(?<!\\d)${n} tools`, "i").test(skill),
+    `SKILL.md Minimal MCP Loop 当前工具数必须与 toolSurface TOOLS.length=${n} 一致（M12-10 playbook 转 resources；M12-16 加 run_correct）`);
+  assert.ok(!new RegExp(`(?<!\\d)${n + 1} MCP tools|(?<!\\d)${n + 1} tools`, "i").test(skill),
+    `SKILL.md 不得声称 ${n + 1} tools（相对 SSOT 的陈旧/超前计数）`);
   // 精确匹配 "server.js ... N tools" 的当前状态注释行。
   const serverLine = arch.split("\n").find((l) => /server\.js.*tools/.test(l)) || "";
-  assert.ok(/22 tools/.test(serverLine),
-    "architecture server.js 注释当前工具数为 22");
+  assert.ok(new RegExp(`(?<!\\d)${n} tools`).test(serverLine),
+    `architecture server.js 注释工具数必须与 toolSurface TOOLS.length=${n} 一致`);
 });
 
 test("M12-9 docs: executionProfileId is a TOP-LEVEL run_dispatch input; inline verification is delivery.verificationCommands etc.; contract check is schema-not-Zod and contractValid is mechanical-only", () => {
@@ -1906,11 +1921,11 @@ test("M12-6 FR-07 docs: architecture 记录 reverify 共享 service 与当前 to
 // that truth across the live docs and the SKILL entrypoint size cap.
 // ============================================================
 
-test("M12-10: SKILL.md stays a slim entrypoint (≤ 15000 bytes)", () => {
+test("M12-10: SKILL.md stays a slim entrypoint (≤ 17000 bytes; Owner raised the cap 2026-08-15)", () => {
   const skill = read("SKILL.md");
   const bytes = Buffer.byteLength(skill, "utf8");
-  assert.ok(bytes <= 15000,
-    `SKILL.md must stay a slim entrypoint ≤ 15000 bytes (got ${bytes}); move detail to authority docs`);
+  assert.ok(bytes <= 17000,
+    `SKILL.md must stay a slim entrypoint ≤ 17000 bytes (got ${bytes}); move detail to authority docs`);
 });
 
 test("M12-10: live docs carry NO tool-profile / restart-to-recover wording", () => {
@@ -2187,11 +2202,22 @@ test("onboarding closeout: agents.example.json 移除 managed-flag 向后兼容�
     assert.ok(!/prependArgs[^。\n]*向后兼容|手拼 prependArgs[^。\n]*兼容/.test(read(rel)),
       `${rel} 不得再声称手拼 managed model/effort flags（args/prependArgs）向后兼容（provider 一等字段编译）`);
   }
-  // coder_hq certification label: max, not high.
+  // TD-120 (2026-08-15) relationship guard: every matrix entry resolves an
+  // effective modelId (entry.modelId ?? the agent's declared model.id — closes
+  // the "delete modelId to skip the guard" escape) and its label must carry it
+  // — internal self-consistency, not a value fingerprint. (The old
+  // exact-string assert froze "GLM-5.2" and blocked the legitimate
+  // 2026-08-15 drift fix.)
   const parsed = JSON.parse(read("config/agents.example.json"));
+  for (const entry of parsed.certification?.matrix ?? []) {
+    const effectiveModelId = entry.modelId ?? parsed.agents?.[entry.agentId]?.model?.id;
+    if (!effectiveModelId) continue;
+    assert.ok(typeof entry.label === "string" && entry.label.toLowerCase().includes(effectiveModelId.toLowerCase()),
+      `agents.example.json 认证 label 必须包含生效 modelId（${entry.agentId}: ${effectiveModelId}，大小写不敏感）— doc 内部自洽（TD-120）`);
+  }
   const hqCert = parsed.certification.matrix.find((m) => m.agentId === "coder_hq");
-  assert.equal(hqCert?.label, "GLM-5.3[1m] max via claude-code wrapper",
-    "agents.example.json 的 coder_hq 认证 label 必须为 max（不是 high），且与实际配置 glm-5.3[1m] 对齐（2026-08-15 漂移修正）");
+  assert.ok(hqCert && /max/.test(hqCert.label) && !/high/.test(hqCert.label),
+    "agents.example.json 的 coder_hq 认证 label 必须为 max（不是 high）");
   // File labeled a complete example prunable to one worker.
   const raw = read("config/agents.example.json");
   assert.ok(/完整示例|complete example/.test(raw),
@@ -2207,6 +2233,44 @@ test("onboarding closeout: agents.example.json 移除 managed-flag 向后兼容�
     "裁剪作用域必须指向 gitignored 的私人 agents.json 副本，而非模板本身");
   assert.ok(!/本文件[^。]{0,40}(?:按可用认证|删减|编辑|修改)/.test(raw),
     "入库模板不得声称按认证删减/编辑它本身（删减只发生在私人副本）");
+});
+
+test("TD-120 关系型守卫: team-roles.md 各角色 model 行与 agents.example.json 声明一致（doc↔doc，分节定位）", () => {
+  // Panel audit 2026-08-15: the earlier whole-file containment check was blind
+  // to researcher↔coder_low model-row swaps (both deepseek-v4-flash) — a
+  // corrupted coder_low row still passed via researcher's row. This version
+  // scopes each assertion to the role's OWN "### <Title>" section, and the
+  // agent list is data-driven from the template (covers coder_mm; tester has
+  // no declared model → nothing to cross-check).
+  const parsed = JSON.parse(read("config/agents.example.json"));
+  const roles = read("docs/team-roles.md");
+  const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const sectionTitles = {
+    researcher: "Researcher",
+    coder_hq: "Coder-HQ",
+    coder_low: "Coder-Low",
+    coder_mm: "Coder-MM",
+  };
+  const sections = new Map();
+  for (const part of roles.split(/^### /m).slice(1)) {
+    const title = part.slice(0, part.indexOf("\n")).trim();
+    sections.set(title, part);
+  }
+  for (const [id, titlePrefix] of Object.entries(sectionTitles)) {
+    const modelId = parsed.agents?.[id]?.model?.id;
+    if (!modelId) continue;
+    const section = [...sections.entries()].find(([t]) => t.startsWith(titlePrefix))?.[1];
+    assert.ok(section, `team-roles.md 必须存在 ### ${titlePrefix} 角色节`);
+    const modelRow = new RegExp(`\\|\\s*\\*\\*model\\*\\*\\s*\\|[^\\n]*${escapeRe(modelId)}`);
+    assert.ok(modelRow.test(section),
+      `team-roles.md ${titlePrefix} 节的 model 行必须包含模板声明的 ${modelId}（doc↔doc 分节一致，TD-120）`);
+  }
+});
+
+test("TD-119: usage.md 不得再含旧页级 truncated 语义表述（已废弃契约句）", () => {
+  const usage = read("docs/usage.md");
+  assert.ok(!/超限设 `truncated:true`/.test(usage),
+    "usage.md 不得再含'超限设 `truncated:true`'旧语义句（TD-119 已改为 withheld-only 页级语义 + entry 级切片标记）");
 });
 
 // ============================================================

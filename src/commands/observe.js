@@ -136,11 +136,14 @@ const COLLECT_CURSOR_MAX = 192;
 // text only — never interpolates run/worker content.
 // D1-D3 收口（Bug#3 尾巴）: the too_large marker must name the runnable
 // escape hatch — WITHOUT --final. The old "use collect --format json" advice
-// was a dead end for a user who copied it verbatim: with --final still on the
-// command line, the four-state rendering takes over and JSON is never printed.
+// was a dead end for a user who copied it verbatim: with --final still on
+// the command line, the four-state rendering takes over and JSON is never printed.
+// TD-119 (2026-08-15, panel rework): the marker names the chunk semantics AND
+// the message-boundary rule — naive whole-page concatenation would glue two
+// distinct messages together (an entry with truncated:false ends a message).
 const COLLECT_FINAL_EMPTY_MARKER = "[final: no assistant message]";
 const COLLECT_FINAL_TOO_LARGE_MARKER =
-  "final message exceeds bounded projection; re-run without --final: collect <runId> --format json";
+  "final message exceeds bounded projection; re-run without --final: collect <runId> --format json (slices of one message concatenate - an entry with truncated:false ends a message; follow nextCursor across pages)";
 
 export async function collectCommand(args, config) {
   const [runId, ...tail] = args;

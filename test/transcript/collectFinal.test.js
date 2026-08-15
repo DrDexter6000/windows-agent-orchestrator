@@ -32,7 +32,7 @@ const FINAL_EMPTY_MARKER = "[final: no assistant message]";
 // 照抄的用户仍是死路（--final 接管输出，永远拿不到 JSON）。新文案指明去掉
 // --final 的完整命令形状（<runId> 是占位描述，绝不插值真实 runId）。
 const FINAL_TOO_LARGE_MARKER =
-  "final message exceeds bounded projection; re-run without --final: collect <runId> --format json";
+  "final message exceeds bounded projection; re-run without --final: collect <runId> --format json (slices of one message concatenate - an entry with truncated:false ends a message; follow nextCursor across pages)";
 
 function makeTempDir(prefix) {
   return mkdtempSync(join(tmpdir(), prefix));

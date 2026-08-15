@@ -13,6 +13,7 @@
 //     so a secret spanning a page boundary is already [REDACTED] before slice);
 //   - C0/C1/DEL control sanitization (LF/TAB preserved);
 //   - per-page caps: ≤8 messages, ≤4000 chars/message, ≤12000 chars/page;
+//     long messages are delivered losslessly as in-page chunk entries (TD-119);
 //   - evidenceCounts tally over the FULL snapshot (unchanged semantic);
 //   - opaque base64url cursor codec + trust-boundary validation;
 //   - snapshot stability: frozen-prefix replay protection (append-only safe,
@@ -270,12 +271,15 @@ function extractAssistantTexts(rawResult, redactor) {
 // hasMore }.
 //
 // `hasMore` is true iff there is any unread text (either we stopped mid-message
-// or there are more messages after endMsgIdx).
+// or there are more messages after endMsgIdx). A single long message may be
+// delivered as multiple ≤4000-char chunk entries WITHIN one page — lossless:
+// concatenating the entries reproduces the full message. TD-119 (2026-08-15):
+// `pageTruncated` is withheld-only (=== hasMore, always paired with a
+// nextCursor); entry-level `truncated:true` merely marks a slice.
 
 function paginate(redactedTexts, startMsgIdx, startOffset) {
   const messages = [];
   let totalChars = 0;
-  let pageTruncated = false;
   let msgIdx = startMsgIdx;
   let offset = startOffset;
 
@@ -297,7 +301,6 @@ function paginate(redactedTexts, startMsgIdx, startOffset) {
     // Total-page cap (12000 chars across all messages on this page).
     const budgetLeft = COLLECT_MAX_TOTAL_CHARS - totalChars;
     if (budgetLeft <= 0) {
-      pageTruncated = true;
       break;
     }
     let take = perSlice;
@@ -315,7 +318,6 @@ function paginate(redactedTexts, startMsgIdx, startOffset) {
 
     messages.push({ role: "assistant", text, truncated: perTruncated || totalHit });
     totalChars += text.length;
-    if (perTruncated || totalHit) pageTruncated = true;
 
     offset += text.length;
     if (offset >= full.length) {
@@ -325,21 +327,20 @@ function paginate(redactedTexts, startMsgIdx, startOffset) {
     if (totalHit) break; // budget exhausted; next page continues here or later
   }
 
-  // If the loop exited at the 8-message cap while there are still messages
-  // to read, this page cut something → truncated (legacy semantic).
-  if (messages.length >= COLLECT_MAX_MESSAGES && msgIdx < redactedTexts.length) {
-    pageTruncated = true;
-  }
-
   const consumedAllMessages = msgIdx >= redactedTexts.length;
   const atMessageBoundary = offset === 0;
   const hasMore = !consumedAllMessages || !atMessageBoundary;
 
-  // If we stopped because of the message-count cap or page-truncate, the
-  // resume position is (msgIdx, offset). If we naturally finished, no resume.
+  // TD-119 (2026-08-15): pageTruncated is withheld-only — true exactly when
+  // there is unread text (mid-message or later messages), which always pairs
+  // with a nextCursor. A long message fully delivered as in-page chunk
+  // entries is NOT page-truncated; only entry-level `truncated` marks slices.
+  // The old flag conflated slicing with withholding and emitted
+  // self-contradictory truncated:true + nextCursor:null pages that consumers
+  // reasonably read as unrecoverable data loss.
   return {
     messages,
-    pageTruncated,
+    pageTruncated: hasMore,
     endMsgIdx: hasMore ? msgIdx : redactedTexts.length,
     endOffset: hasMore ? offset : 0,
     hasMore,

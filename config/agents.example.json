@@ -171,7 +171,7 @@
       },
       {
         "agentId": "coder_low",
-        "label": "DeepSeek V4 Flash max via claude-code wrapper",
+        "label": "DeepSeek-v4-flash max / 1M via claude-code wrapper（轻活）",
         "profile": "strict",
         "providerID": "deepseek",
         "modelId": "deepseek-v4-flash",
@@ -182,7 +182,7 @@
       },
       {
         "agentId": "coder_mm",
-        "label": "Kimi K3 via kimi-code CLI",
+        "label": "kimi-code/k3 max via kimi-code CLI（多模态）",
         "profile": "strict",
         "drills": [
           "sentinel",
