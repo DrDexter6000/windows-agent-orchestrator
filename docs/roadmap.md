@@ -103,6 +103,11 @@ claude-code / codex 的流式输出格式是实测未知。若格式不结构化
 **缓解**：先用 Node 的 `child_process` + 进程树 kill 做退路，Job Object 作为增强。
 spec §4.3 的 cleanup 钩子是确定性的，即使没有 Job Object 也能保证基本清理。
 
+## 治理触发条件（2026-08-15 三席评审裁定）
+
+- **第 23 个 MCP 工具**：冻结面扩容（22 → 23）获 Owner 批准前，先做 per-tool 模块化（`src/mcp/tools/<tool>.js` 导出 `{name, schema, handler}`，薄 `server.js` 组装），并保留既有构造期注册序列自检。**注册顺序必须由 `toolSurface.js` 的 `TOOLS` 数组驱动遍历，不得由模块 import 顺序隐式决定**——否则 per-tool 文件的 import 排列成为新的不成文契约，冲击 tools/list 字节稳定断言；拆分 PR 必须先过 surface-lock 字节稳定测试再动结构。先例：21→22 扩面（`run_correct`，M12-16）已发生且幸存，本条只锁结构前提，不改变冻结面承诺。
+- **Windows-native 定位（结束中间态）**：Windows-native 是**差异化定位**（企业 Windows 开发机是被主流 agent 工具忽视的市场），不是待偿还的移植债；**不排期 POSIX lane**，TD-13 的"需要时加 platform 分支"按此定位解读。重看触发：出现明确外部 POSIX 需求或第二位需要 POSIX 的贡献者，且 Windows 侧差异化体验（owner-dashboard 级）已固化。改判需 Owner 明示并修订本节。
+
 ## 进度跟踪
 
 > **TD-103 Coder Delivery current state (2026-07-13)**: Phase 3C complete and repaid. Real supervised coder dogfood PASS (runId `run_td103_3c_dogfood_20260713`, worker coder_low / claude-code / glm-5-turbo, terminal=completed, verification=passed, acceptance=accepted). 本地凭据暴露边界与 supervised delivery 发布条件由 `docs/tech-debt.md` TD-104 + decision 0015/0016 所有；roadmap 只放指针，不复制 broker/multi-tenant 发布条件。

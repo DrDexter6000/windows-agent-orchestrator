@@ -8,7 +8,7 @@ WAO is a Windows-native control plane for supervised worker dispatch through loc
 2. Workers receive a bounded task and role contract, not Lead orchestration context. The control plane owns dispatch, state, delivery, and handoff records.
 3. Runtime-specific behavior stays behind a Backend and parser. Shared orchestration code does not branch on runtime.
 4. The control plane stays deterministic. Semantic decomposition, failure response, and final acceptance belong to the Lead.
-5. Production runtime remains free of third-party dependencies. Adding one requires explicit Owner approval.
+5. Production runtime carries exactly two Owner-approved third-party dependencies (`@modelcontextprotocol/sdk` and `zod`, both confined to `src/mcp/**`); adding any further requires explicit Owner approval. Keep `devDependencies` empty — introducing any dev toolchain (TypeScript, linters, AST parsers) likewise requires explicit Owner approval.
 6. WAO itself does not automatically perform semantic task decomposition; the Lead decides whether and how to split work.
 
 ## Read Before Changes
