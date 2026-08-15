@@ -1238,8 +1238,44 @@ test("M12-8A/M12-9/M12-10/M12-16: SKILL/architecture 工具数与 toolSurface SS
     `SKILL.md 不得声称 ${n + 1} tools（相对 SSOT 的陈旧/超前计数）`);
   // 精确匹配 "server.js ... N tools" 的当前状态注释行。
   const serverLine = arch.split("\n").find((l) => /server\.js.*tools/.test(l)) || "";
-  assert.ok(new RegExp(`(?<!\\d)${n} tools`).test(serverLine),
+  assert.ok(new RegExp(`${n} tools`).test(serverLine),
     `architecture server.js 注释工具数必须与 toolSurface TOOLS.length=${n} 一致`);
+});
+
+test("L4 依赖方向：docs 分类学与 layering.test.js 冻结集合一致（TD-120 关系型守卫，doc↔test）", () => {
+  // 会审返工（2026-08-15，coder_low/auditor 双席点名）：五桶清单与白名单在
+  // docs 与 layering.test.js 是两份手工拷贝——本守卫把 test 冻结集合当代码
+  // SSOT 读取，断言 docs L4 节与其一致；单边漂移（只改一边）即红。
+  const arch = read("docs/02-architecture.md");
+  const start = arch.indexOf("**L4 依赖方向**");
+  const end = arch.indexOf("**依赖方向**");
+  assert.ok(start !== -1 && end > start, "02-architecture.md 必须有 L4 依赖方向节");
+  const l4 = arch.slice(start, end);
+  const layering = read("test/isolation-infra/layering.test.js");
+
+  // 白名单 from/to 对（strip 前导 src/ 后应作为子串出现在 L4 节）
+  const wlBlock = layering.slice(layering.indexOf("const WHITELIST"), layering.indexOf("const WHITELIST_HARD_CAP"));
+  const froms = [...wlBlock.matchAll(/from: "(src\/[^"]+)"/g)].map((m) => m[1]);
+  const tos = [...wlBlock.matchAll(/to: "(src\/[^"]+)"/g)].map((m) => m[1]);
+  assert.ok(froms.length >= 1 && froms.length === tos.length, "WHITELIST 解析（from/to 配对）");
+  for (const p of [...froms, ...tos]) {
+    assert.ok(l4.includes(p.slice(4)), `L4 节必须包含白名单路径 ${p}`);
+  }
+  assert.ok(l4.includes(`恰 ${froms.length} 条`), `L4 节白名单计数（恰 ${froms.length} 条）必须与冻结集合一致`);
+
+  // shared 成员（basename 级）必须逐个出现在 L4 节。集合以 `]));` 收尾——
+  // 用它闭合切片（搜 `]);` 会失配并吞进后续 CORE_TOP 等清单）。
+  const smStart = layering.indexOf("const SHARED_MEMBERS");
+  const smBlock = layering.slice(smStart, layering.indexOf("]));", smStart));
+  const shared = [...smBlock.matchAll(/"(src\/[^"]+)"/g)].map((m) => m[1].split("/").pop());
+  assert.ok(shared.length >= 10, `SHARED_MEMBERS 解析（got ${shared.length}）`);
+  for (const s of shared) {
+    assert.ok(l4.includes(s), `L4 节必须列出 shared 成员 ${s}`);
+  }
+
+  // 机器守卫指针与 hostAdapters 裁定在案
+  assert.ok(l4.includes("test/isolation-infra/layering.test.js"), "L4 节必须指向机器守卫");
+  assert.ok(l4.includes("src/hostAdapters/"), "L4 节必须记录 hostAdapters 归桶裁定");
 });
 
 test("M12-9 docs: executionProfileId is a TOP-LEVEL run_dispatch input; inline verification is delivery.verificationCommands etc.; contract check is schema-not-Zod and contractValid is mechanical-only", () => {

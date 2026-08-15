@@ -174,7 +174,13 @@ test("M9-6A-09: no console + dependency guard", async () => {
     const appDir = join(process.cwd(), "src", "application");
     const forbidden = /(?:from\s+['"](?:\.\.\/commands\/|.*commands\/|\.\.\/mcp\/|.*mcp\/|@modelcontextprotocol|zod))/;
     for (const f of (await readdir(appDir)).filter((f) => f.endsWith(".js"))) {
-      for (const line of (await readFile(join(appDir, f), "utf8")).split("\n").filter((l) => l.trim().startsWith("import"))) {
+      // 2026-08-15: check EVERY line, not just `import`-prefixed ones — a
+      // multi-line import carries its `from '<spec>'` clause on the closing
+      // line (real shape: src/ownerDashboardServer.js). The old line filter
+      // would miss an upward multi-line import. Full direction matrix with
+      // comment stripping lives in test/isolation-infra/layering.test.js;
+      // this guard stays as the application-layer no-uphill spot check.
+      for (const line of (await readFile(join(appDir, f), "utf8")).split("\n")) {
         assert.ok(!forbidden.test(line), `${f}: ${line.trim()}`);
       }
     }

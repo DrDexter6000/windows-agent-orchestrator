@@ -24,6 +24,11 @@
 //   4. 注释剥离是有限状态机而非完整 parser：正则字面量内含引号等极端形态
 //      可能扰动状态（当前 src 树无 `= /...含引号.../ ` 形态；本守卫的真实树
 //      deepEqual 断言会对该类扰动自诊断——任何幻影边都会撞上冻结精确集合）。
+//      会审返工（2026-08-15，auditor 对抗实证）：自诊断只覆盖**幻影（多出）
+//      方向**；还存在**吞边方向**——如 `/\/*` 形态的正则字面量会开启幻影块
+//      注释、吞掉其后真实边（静默假阴性；吞掉已冻结边会红，吞掉新违例边则
+//      静默放过）。当前树两类命中均为零（V8 解析器 oracle 与本 FSM 集合
+//      全等已证）；以"当前树零命中 + 本披露"为界。
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -41,9 +46,9 @@ const REPO_ROOT = resolve(import.meta.dirname, "../..");
 // | asset（排除扫描） | src/owner-dashboard/**（浏览器静态资产，不在 Node import 图）|
 // | adapters(0)      | src/mcp/**、src/commands/** + ADAPTER_TOP            |
 // | application(1)   | src/application/** 中不在 SHARED_MEMBERS 内者        |
-// | core(2)          | src/** 其余（含 src/workflow/**），顶层见 CORE_TOP   |
+// | core(2)          | src/** 其余（CORE_TOP 顶层 + CORE_DIRS 子目录）       |
 // | backends(3)      | src/backends/**                                     |
-// | shared(4)        | SHARED_MEMBERS 精确集合                              |
+// | shared(4)        | SHARED_MEMBERS 精确集合 + src/hostAdapters/**        |
 //
 // src 顶层文件没有目录前缀可依，因此三张顶层清单（adapters/shared/core）都是
 // 显式冻结集合：新顶层文件不出现在任何清单 → classifyPath 返回 null →
@@ -110,6 +115,12 @@ const CORE_TOP = Object.freeze(new Set([
 ]));
 
 const ADAPTER_DIRS = Object.freeze(["src/mcp/", "src/commands/"]);
+
+// core(2) 的 src 子目录成员（显式冻结）。会审返工（2026-08-15，coder_low 反例）：
+// 取消"未识别子目录自动归 core"——新子目录静默归 core 可双向放过违例（更深
+// 语义目录 import core 变 2→2 合法、更浅语义目录被 application import 变
+// 1→2 合法）。未登记的新顶层文件或新子目录一律 fail-closed。
+const CORE_DIRS = Object.freeze(["src/workflow/"]);
 
 // 上向边白名单（恰 2 条——冻结精确集合）。改动本清单必须先改 docs SSOT。
 // 两条都是 core 顶层消费 application/sessionReuse.js：sessionReuse 消费
@@ -239,13 +250,18 @@ function classifyPath(rel) {
   if (!rel.startsWith("src/")) return null;
   if (rel.startsWith(ASSET_PREFIX)) return "asset";
   if (SHARED_MEMBERS.has(rel)) return "shared";
+  // Lead 裁定（2026-08-15）：src/hostAdapters/** 归 shared——出站宿主集成叶子
+  // （codexMcpConfig 零相对依赖、头注释自陈不 import 任何层、唯一消费者
+  // mcpWorkspaceActivation）。其名 "adapter" 指出站集成 Codex CLI，与 L4
+  // "adapters"（入站外部面/入口）桶是两个概念。
+  if (rel.startsWith("src/hostAdapters/")) return "shared";
   if (rel.startsWith("src/backends/")) return "backends";
   if (ADAPTER_DIRS.some((p) => rel.startsWith(p))) return "adapters";
   if (ADAPTER_TOP.has(rel)) return "adapters";
   if (rel.startsWith("src/application/")) return "application";
   if (CORE_TOP.has(rel)) return "core";
-  if (rel.split("/").length > 2) return "core"; // workflow/、hostAdapters/ 及未来 src 子目录
-  return null; // src 顶层文件不在任何冻结清单 → fail-closed
+  if (CORE_DIRS.some((p) => rel.startsWith(p))) return "core";
+  return null; // 未登记的顶层文件或子目录 → fail-closed
 }
 
 function byFromTo(a, b) {
@@ -492,6 +508,22 @@ test("突变 f：合成 src 顶层不在任何清单的文件 → fail-closed �
     assert.equal(v.length, 1);
     assert.equal(v[0].code, "unclassified-source", "fail-closed：方向合法也不能放过未登记桶");
     assert.equal(v[0].from, "src/unlistedNewModule.js");
+  } finally {
+    cleanupTree(root);
+  }
+});
+
+test("突变 f2：合成 src 新子目录（未登记 CORE_DIRS）→ fail-closed 红", async () => {
+  // 会审返工（2026-08-15）：auto-core 取消后，未登记子目录与顶层文件同规则。
+  const root = buildTree("mut-f2", {
+    "src/newIntegration/thing.js": `import { readTranscript } from "../transcript.js";\nexport { readTranscript };\n`,
+  });
+  try {
+    const scan = await scanTree(root);
+    assert.equal(classifyPath("src/newIntegration/thing.js"), null, "未登记子目录分类为 null");
+    const v = checkEdges(scan.edges);
+    assert.equal(v.length, 1);
+    assert.equal(v[0].code, "unclassified-source", "新子目录即使边方向合法也 fail-closed");
   } finally {
     cleanupTree(root);
   }
