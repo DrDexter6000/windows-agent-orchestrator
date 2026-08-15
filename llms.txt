@@ -1,0 +1,27 @@
+# WAO (Windows Agent Orchestrator)
+
+> Windows-native control plane for supervised worker dispatch through local agent runtimes: MCP-first (22 frozen tools), transcript SSOT, deterministic control plane — semantic decisions belong to the Lead agent. This file is a pure index (llms.txt convention); content lives in the linked authorities.
+
+## Start Here
+
+- [AGENTS.md](AGENTS.md): repository contract — invariants, boundaries, commands. Read first before changes.
+- [SKILL.md](SKILL.md): Lead-agent-facing usage manual (dispatch/acceptance loop). Only when operating WAO.
+- [AGENT_ONBOARDING.md](AGENT_ONBOARDING.md): single new-user setup path (install, one worker, MCP host, first canary).
+
+## Reference (generated — do not hand-edit)
+
+- [docs/surface/mcp-tools.md](docs/surface/mcp-tools.md): the 22 MCP tools, parameters and shapes. Generated from tools/list by `npm run gen:surface`.
+- [docs/surface/cli.md](docs/surface/cli.md): CLI command surface. Generated from the CLI help SSOT.
+
+## Contracts & Architecture
+
+- [docs/02-architecture.md](docs/02-architecture.md): layers, dependency direction matrix (machine-guarded), event contracts, module boundaries.
+- [docs/ssot.md](docs/ssot.md): documentation ownership map — which file owns which fact.
+- [docs/team-roles.md](docs/team-roles.md): worker roles, routing advisory, review conventions (ADR 0019).
+
+## Operations
+
+- [docs/usage.md](docs/usage.md): deployment, operational recipes, behavioral contracts (pagination/delivery/closed sets), handwritten reference zones (transcript event table).
+- [docs/troubleshooting.md](docs/troubleshooting.md): failure diagnosis.
+- [docs/roadmap.md](docs/roadmap.md): milestones, progress, governance triggers.
+- [docs/tech-debt.md](docs/tech-debt.md): registered tech debt with revisit triggers.

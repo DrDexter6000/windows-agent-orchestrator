@@ -16,6 +16,7 @@ WAO is a Windows-native control plane for supervised worker dispatch through loc
 - Architecture and event contracts: `docs/02-architecture.md`
 - Roadmap and current progress: `docs/roadmap.md`
 - Documentation ownership: `docs/ssot.md`
+- Generated tool/CLI reference: `docs/surface/` (regenerate with `npm run gen:surface` after surface/help changes; never hand-edit)
 - Milestone and real-runtime gates: `docs/milestone-discipline.md`
 - Operations and failures: `docs/usage.md`, `docs/troubleshooting.md`
 - Lead orchestration usage: `SKILL.md` (only when operating WAO)

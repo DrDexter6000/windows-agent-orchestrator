@@ -65,7 +65,9 @@ ADR 风格：一条决策一个文件，定下后归档，只追加"修订"不�
 | 文件 | 内容 |
 |------|------|
 | `AGENT_ONBOARDING.md` | 安装与上手指南 + 贡献者路径 |
-| `docs/usage.md` | 部署、命令、transcript 事件表（唯一权威） |
+| `docs/usage.md` | 部署、操作食谱与行为合同（分页/delivery/闭集）、手写参考区（transcript 事件表唯一权威；TD-86 JSON 形状）；命令/参数参考已拆至生成层 |
+| `docs/surface/mcp-tools.md` `docs/surface/cli.md` | **生成参考层**（MCP 工具与 CLI 命令的参数/形状）：权威源是代码（tools/list 与 CLI help SSOT），由 `npm run gen:surface` 再生成；禁止手改，字节稳定由 `docsSurface.test.js` 守卫；改 MCP 面/CLI help 后须再生成并提交 |
+| `llms.txt` | 仓库根索引（llms.txt 惯例）：只放链接与一句话定位，不承载内容 |
 | `docs/smoke-guide.md` | smoke 测试操作 |
 | `docs/troubleshooting.md` | 诊断手册（provider/cwd/runs/completion/进程/backend） |
 | `docs/milestone-discipline.md` | 发版/审计纪律（how-to 性质） |

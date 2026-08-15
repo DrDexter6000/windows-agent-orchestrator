@@ -131,6 +131,7 @@ Node 22–24 required (`node --version`; `engines.node` is `>=22 <25`).
 | **Start from zero — install, one worker, validate, MCP host, first canary** | [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md) — the single new-user setup path |
 | **Use the orchestrator as an agent / from a script** (22 MCP tools, commands, workflows, config) | [`SKILL.md`](SKILL.md) — the agent-facing usage manual + tool table |
 | **Deploy / configure / operate it as a human** | [`docs/usage.md`](docs/usage.md) — full deployment + usage guide |
+| **Look up a tool parameter or CLI flag** | [`docs/surface/`](docs/surface/) — generated reference (regen: `npm run gen:surface`); repo index: [`llms.txt`](llms.txt) |
 | **Run real smoke tests** (claude/codex/opencode) | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
 | **Understand the architecture** (layers, interfaces, state machine) | [`docs/02-architecture.md`](docs/02-architecture.md) |
 | **See requirements / non-goals / acceptance** | [`docs/01-prd.md`](docs/01-prd.md) |
