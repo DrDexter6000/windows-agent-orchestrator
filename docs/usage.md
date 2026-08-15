@@ -139,7 +139,7 @@ Copy-Item config/agents.example.json config/agents.json
         "baseUrl": "https://api.deepseek.com/anthropic",
         "apiKeyEnv": "DEEPSEEK_API_KEY"
       },
-      "model": { "id": "deepseek-v4-flash", "contextWindow": 1000000 },
+      "model": { "id": "deepseek-v4-pro", "contextWindow": 1000000 },
       "reasoning": { "effort": "max" },
       "cwd": "D:/projects/my-app",
       "args": ["--dangerously-skip-permissions"]
@@ -577,7 +577,7 @@ OpenCode（`opencode-ai` npm 包，不是已废弃的 `opencode`）作为 MCP Le
 ```json
 {
   "agents": [
-    { "id": "coder_low", "backend": "claude-code", "model": "deepseek-v4-flash",
+    { "id": "coder_low", "backend": "claude-code", "model": "deepseek-v4-pro",
       "certification": "certified", "certificationReasonCode": null, "certificationLastHealthyAt": "2026-08-10T06:20:00.000Z",
       "cwd": "/repo",
       "credentialAvailability": "available", "missingCredentialEnvNames": [],

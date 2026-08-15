@@ -61,7 +61,7 @@
     },
     "coder_low": {
       "_comment": "[Coder-Low] 低成本高吞吐的通用第二实现通道；Low 不表示低能力。对齐 team-roles.md Coder-Low。",
-      "_comment_backend": "claude-code wrapper（进程式）。DeepSeek-v4-flash，1M context，effort=max。",
+      "_comment_backend": "claude-code wrapper（进程式）。DeepSeek-v4-pro，1M context，effort=max（2026-08-15 Owner 裁定由 flash 升级）。",
       "_comment_task": "默认适合: 边界明确的实现包/TDD/修 bug/重构/兼容性/脚本/文档配置/窄修正；是否拆分或转派由 Lead 决定",
       "backend": "claude-code",
       "provider": {
@@ -75,7 +75,7 @@
         "--dangerously-skip-permissions"
       ],
       "model": {
-        "id": "deepseek-v4-flash",
+        "id": "deepseek-v4-pro",
         "contextWindow": 1000000
       },
       "reasoning": {
@@ -171,10 +171,10 @@
       },
       {
         "agentId": "coder_low",
-        "label": "DeepSeek-v4-flash max / 1M via claude-code wrapper（轻活）",
+        "label": "DeepSeek-v4-pro max / 1M via claude-code wrapper（轻活，2026-08-15 Owner 裁定由 flash 升级）",
         "profile": "strict",
         "providerID": "deepseek",
-        "modelId": "deepseek-v4-flash",
+        "modelId": "deepseek-v4-pro",
         "drills": [
           "sentinel",
           "scorecard"

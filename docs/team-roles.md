@@ -63,7 +63,7 @@ WAO 是"装一次，开发多个项目"的工具：
 | **Work Scope** | 默认承担边界明确的实现包、TDD、修 bug、重构、兼容性、脚本、文档/配置与窄修正；适合独立并行包；按 Lead 指派兼职方案顾问与交付物评审（只读意见，不做验收决定） |
 | **边界** | 不替 Lead 作架构、范围、拆包或转派决策；不自行扩域；不验收自己。不得仅因文件数、prompt 长度、耗时或规模自行拒绝，是否拆分/转派由 Lead 决定 |
 | **backend** | claude-code wrapper（进程式） |
-| **model** | deepseek-v4-flash（1M context） |
+| **model** | deepseek-v4-pro（1M context；2026-08-15 Owner 裁定由 v4-flash 升级提质） |
 | **effort** | max |
 
 ### Coder-MM（多模态创意与高质量工程）

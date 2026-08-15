@@ -1214,10 +1214,10 @@ test("M12 role naming: stable auditor id represents one advisory/audit expert", 
   }
 });
 
-test("M12 coder_low example uses current DeepSeek V4 Flash policy", () => {
+test("M12 coder_low example uses current DeepSeek V4 Pro policy (2026-08-15 Owner upgrade from flash)", () => {
   const parsed = JSON.parse(read("config/agents.example.json"));
   const low = parsed.agents?.coder_low;
-  assert.equal(low?.model?.id, "deepseek-v4-flash");
+  assert.equal(low?.model?.id, "deepseek-v4-pro");
   assert.equal(low?.reasoning?.effort, "max");
   assert.equal(low?.model?.contextWindow, 1000000);
 });
@@ -2175,7 +2175,7 @@ test("onboarding closeout: 陈旧 claims 已纠正（零依赖 / 禁 npm link / 
     "wao init 必须标注为可选且不是 MCP workspace 绑定 / run_dispatch 的前提");
 });
 
-test("onboarding closeout: usage.md claude-code registry 示例为当前结构化 schema + DeepSeek V4 Flash policy", () => {
+test("onboarding closeout: usage.md claude-code registry 示例为当前结构化 schema + DeepSeek V4 Pro policy", () => {
   const usage = read("docs/usage.md");
   const start = usage.indexOf("// ── claude-code");
   const end = usage.indexOf("// ── codex");
@@ -2192,8 +2192,11 @@ test("onboarding closeout: usage.md claude-code registry 示例为当前结构�
   // Stale inlined shape gone; current coder_low policy.
   assert.ok(!/glm-5-turbo/.test(ex),
     "usage claude-code 示例不得再出现旧 provider.model=glm-5-turbo 内联形状");
-  assert.ok(/deepseek-v4-flash/.test(ex) && /DEEPSEEK_API_KEY/.test(ex),
-    "usage claude-code 示例必须是当前 coder_low DeepSeek V4 Flash policy");
+  // 2026-08-15: coder_low upgraded to v4-pro (Owner decision). Scoped to the
+  // coder_low sub-block — the old whole-slice flash check kept passing via the
+  // (still-flash) dsh experimental example and guarded nothing.
+  assert.ok(/"coder_low"[\s\S]{0,600}deepseek-v4-pro/.test(ex) && /DEEPSEEK_API_KEY/.test(ex),
+    "usage claude-code 示例必须是当前 coder_low DeepSeek V4 Pro policy");
 });
 
 test("onboarding closeout: agents.example.json 移除 managed-flag 向后兼容声明、coder_hq 标为 max、标注可裁剪示例", () => {
