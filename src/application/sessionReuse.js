@@ -8,13 +8,18 @@
 // cache, while creating a NEW WAO run/transcript for independent supervision.
 //
 // This module owns the provider-NEUTRAL reuse contract — no runtime-name
-// branching lives here. It is consumed by:
+// branching lives here. Layering bucket: this module is core(2) via the
+// CORE_MEMBERS member exception in test/isolation-infra/layering.test.js
+// (TD-122) — it consumes ../transcript.js (core) and is a service, not a
+// leaf. Its 5 static consumers are all legal edges (zero upward violations):
 //   - registry.js            (closed-set validation of `sessionReuse` policy)
+//   - runManager.js          (capability gate + pass routing to backend.spawn)
+//   - runContinue.js         (lineage turn resolution + rollback claim release)
 //   - runDispatch.js         (resolve a reuse turn, thread routing to argv,
 //                             busy-check before transcript/fork)
 //   - backgroundRunner.js    (parse the threaded routing)
-//   - runManager.js          (capability gate + pass routing to backend.spawn)
-//   - claudeCode.js          (translate routing to --session-id / --resume)
+// claudeCode.js consumes the routing envelope indirectly via backend.spawn
+// args (translate to --session-id / --resume) — not an import edge.
 //
 // Architectural contract:
 //   - Does not import src/commands/*, src/mcp/*, the MCP SDK, or zod.

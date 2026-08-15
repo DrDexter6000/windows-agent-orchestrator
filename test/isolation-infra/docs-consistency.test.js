@@ -1263,7 +1263,7 @@ test("L4 依赖方向：docs 分类学与 layering.test.js 冻结集合一致（
   const wlBlock = layering.slice(layering.indexOf("const WHITELIST"), layering.indexOf("const WHITELIST_HARD_CAP"));
   const froms = [...wlBlock.matchAll(/from: "(src\/[^"]+)"/g)].map((m) => m[1]);
   const tos = [...wlBlock.matchAll(/to: "(src\/[^"]+)"/g)].map((m) => m[1]);
-  assert.ok(froms.length >= 1 && froms.length === tos.length, "WHITELIST 解析（from/to 配对）");
+  assert.ok(froms.length === tos.length, "WHITELIST 解析（from/to 配对；白名单可空）");
   for (const p of [...froms, ...tos]) {
     assert.ok(l4.includes(p.slice(4)), `L4 节必须包含白名单路径 ${p}`);
   }
@@ -1278,6 +1278,17 @@ test("L4 依赖方向：docs 分类学与 layering.test.js 冻结集合一致（
   for (const s of shared) {
     assert.ok(l4.includes(s), `L4 节必须列出 shared 成员 ${s}`);
   }
+
+  // core 例外成员（TD-122 归零裁定）：白名单归零后上方 from/to 检查为空转
+  // （froms/tos 皆空），关系锚点转移到本 CORE_MEMBERS 断言（评审裁定的负载转移）。
+  // 切片与 SHARED_MEMBERS 同形：`const CORE_MEMBERS` → 其后第一个 `]));` 收尾。
+  const cmStart = layering.indexOf("const CORE_MEMBERS");
+  assert.ok(cmStart !== -1, "layering.test.js 必须有 CORE_MEMBERS 清单（TD-122）");
+  const cmBlock = layering.slice(cmStart, layering.indexOf("]));", cmStart));
+  const coreMembers = [...cmBlock.matchAll(/"(src\/[^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(coreMembers, ["src/application/sessionReuse.js"],
+    "CORE_MEMBERS 非空且恰含 src/application/sessionReuse.js（TD-122 归零裁定的唯一成员）");
+  assert.ok(l4.includes("sessionReuse.js"), "L4 节必须在案 core 例外成员 sessionReuse.js（TD-122）");
 
   // 机器守卫指针与 hostAdapters 裁定在案
   assert.ok(l4.includes("test/isolation-infra/layering.test.js"), "L4 节必须指向机器守卫");

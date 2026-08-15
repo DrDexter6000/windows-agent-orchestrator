@@ -47,13 +47,13 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 ```
 
 - **adapters**（所有外部面/入口）：`src/mcp/**`、`src/commands/**`、`src/cli.js`、`src/ownerDashboardServer.js`（第三个网络面：loopback HTTP 观察边界）、`src/daemon.js`、`src/daemonSupervisor.js`、`src/backgroundRunner.js`。
-- **application**（Lead use-case 服务层）：`src/application/**` 中不在 shared 成员清单内者。
+- **application**（Lead use-case 服务层）：`src/application/**` 中不在 shared/core 成员例外清单内者。
 - **core**（生命周期与真值）：`src/transcript.js`、`src/runManager.js`、`src/delivery.js`、`src/registry.js` 及 `src/` 顶层其余非 adapter 非 shared 文件（diagnosis/isolation/scorecard/alerts/metrics/frictionLog 等）+ `src/workflow/**`。
 - **backends**：`src/backends/**`（runtime 适配与 parsers）。
 - **shared**（共享内核/叶子工具，被所有层消费、零上向依赖）：`src/application/roleContract.js`、`src/application/credentialReadiness.js`、`src/application/ownerLiveness.js`、`src/application/timeoutPolicy.js`、`src/application/processStopVerify.js`、`src/cliHelp.js`（CLI help 单一常量源，供 adapter 与生成器消费）、`src/envPolicy.js`、`src/runEvent.js`、`src/secretRedaction.js`、`src/canonicalAgentId.js`、`src/waoCliPath.js` + `src/hostAdapters/**`（出站宿主集成叶子，如 codexMcpConfig 委托 Codex CLI 管理 MCP 配置；其"adapter"指出站集成，非 adapters 桶的入站外部面）。
 - `src/owner-dashboard/**` 是浏览器静态资产，不参与 Node import 图。
 
-**方向规则（闭集，机器强制）**：**禁上向；任意下向（含跳层）与同层合法**。adapter 越过 application 直取 core/backends/shared 是声明合法的现状（呈现/入口层直连，application 不是收口点）。上行例外白名单**恰 2 条**（冻结精确集合、双向 deepEqual、变更须同步本图）：`registry.js` → `application/sessionReuse.js`、`runManager.js` → `application/sessionReuse.js`——sessionReuse 消费 `transcript.js`（是服务不是叶子，不能下沉 shared），其模块头注释明载这两个 core 消费者合同。未登记的新顶层文件或新子目录一律 fail-closed（不自动归 core）。
+**方向规则（闭集，机器强制）**：**禁上向；任意下向（含跳层）与同层合法**。adapter 越过 application 直取 core/backends/shared 是声明合法的现状（呈现/入口层直连，application 不是收口点）。上向例外白名单现为空（**恰 0 条**，TD-122 归零）：`application/sessionReuse.js` 经 CORE_MEMBERS 精确例外归 core 桶——它消费 `transcript.js`（core），是服务而非叶子，不能下沉 shared；registry/runManager 同层消费、runContinue/runDispatch/backgroundRunner 下向消费，零新增违例。机制保留（冻结精确集合、双向 deepEqual、上限 12、变更须同步本图）。未登记的新顶层文件或新子目录一律 fail-closed（不自动归 core）。
 
 - MCP Adapter 和 CLI Adapter 只做 transport/input/output adaptation。
 - Application Services 层是最小 Lead 闭环的 use-case 层。**已提取的共享 services**：
@@ -77,7 +77,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 
   CLI `runs delivery` / `runs diagnose` / `collect` / `status` 均委托共享 service。非 use-case orchestration 仍在 `src/commands/*.js` 中。
 - 业务规则只写一次，在 application services 层。**禁止 MCP Server 通过 shell 调 CLI 并解析文本输出。** MCP adapter 直接 import 并调用 application service。
-- RunManager / transcript / delivery / Backend / workflow 不依赖 MCP——MCP 是 L4 adapter，不是 L1-L3 dependency。`src/mcp/**` 是唯一允许 import `@modelcontextprotocol/sdk` 与 `zod` 的位置（由边界测试守卫）。`src/application/**` 不得 import `src/commands/*`、`src/mcp/*`、MCP SDK 或 zod。分层方向矩阵（禁上向 + 2 条 sessionReuse 白名单）由 `test/isolation-infra/layering.test.js` 机器强制（2026-08-15 起）。
+- RunManager / transcript / delivery / Backend / workflow 不依赖 MCP——MCP 是 L4 adapter，不是 L1-L3 dependency。`src/mcp/**` 是唯一允许 import `@modelcontextprotocol/sdk` 与 `zod` 的位置（由边界测试守卫）。`src/application/**` 不得 import `src/commands/*`、`src/mcp/*`、MCP SDK 或 zod。分层方向矩阵（禁上向，上向例外白名单为空——TD-122 归零）由 `test/isolation-infra/layering.test.js` 机器强制（2026-08-15 起）。
 - MCP 工具面（当前 inventory；完整 22-tool 冻结清单见下方冻结工具面条目与 §7）：
 
   | 工具 | 性质 | 委托与契约要点 |
@@ -111,7 +111,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 
 > 历史演进叙事见 docs/changelog-2026-08-14.md（过程冻结档）
 
-**依赖方向**：上层依赖下层，下层不知道上层（机器强制：`test/isolation-infra/layering.test.js`；同层与跳层下向合法，上行仅白名单 2 条）。横切层只读 transcript + 发事件，不参与调度决策。
+**依赖方向**：上层依赖下层，下层不知道上层（机器强制：`test/isolation-infra/layering.test.js`；同层与跳层下向合法，上向例外白名单为空）。横切层只读 transcript + 发事件，不参与调度决策。
 
 **Worker 输入不变量**：
 - Lead 的 `SKILL.md`、roadmap、跨 worker 上下文和编排职责**不得注入 worker**。
@@ -1122,7 +1122,7 @@ src/
 │   ├── ownerLiveness.js      #   run liveness 投影 SSOT（terminal/progress/process_only/silent，runWait/runAwaitResult 共用）
 │   ├── workspaceBinding.js   #   host-authorized workspace proof SSOT（MCP 共用）
 │   ├── sessionWorkspace.js   #   Lead session workspace selection kernel（无状态，委托 proveWorkspace）
-│   ├── sessionReuse.js       #   expert session reuse SSOT（provider 中立：opaque uuid 派生 + turn 决策 first/resume/busy + per-key 文件锁；run_lineage routing——续谱作用域 = Lead session + workspace + agent + rootRunId，复用同一 opaque provider id；run_lineage 是 routing-only，不是 agent 可声明策略）
+│   ├── sessionReuse.js       #   expert session reuse SSOT（provider 中立：opaque uuid 派生 + turn 决策 first/resume/busy + per-key 文件锁；run_lineage routing——续谱作用域 = Lead session + workspace + agent + rootRunId，复用同一 opaque provider id；run_lineage 是 routing-only，不是 agent 可声明策略）（CORE_MEMBERS 例外：归 core 桶，TD-122）
 │   ├── leadPreflight.js      #   advisory single-call preflight aggregator（组合 registryInventory+listRuns，advisory 非 gate；registryIssues/registryIssuesTruncated——复用 registry_list 同一闭集 issue 形状与同一单读快照，非空时 checkStatus.workers=warning→complete:false 但有效 worker 照常返回）
 │   ├── mcpWorkspaceActivation.js # project-scoped workspace activation（CLI 用，委托 hostAdapters）
 │   ├── timeoutPolicy.js      #   wait timeout precedence SSOT（CLI + MCP 共用）

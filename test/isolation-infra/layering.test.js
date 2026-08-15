@@ -5,7 +5,8 @@
 // SSOT：docs/02-architecture.md「L4 依赖方向」节（五桶分类学 + 方向规则 + 白名单）。
 // 本文件把该契约冻结为机器守卫：递归扫描 src/** 的全部静态相对 import/export-from
 // 边与字符串字面量相对动态 import() 边，要求每条边 depth(目标) >= depth(源)；
-// 同层与任意下向（含跳层）合法，上向即违例（白名单披露的恰 2 条除外）。
+// 同层与任意下向（含跳层）合法，上向即违例（上向例外白名单为空——TD-122 归零；
+// 未来合法上向例外须先改 docs SSOT 再回填 WHITELIST）。
 //
 // 范式：扩展 test/mcp-surface/mcpRegistry.test.js M9-1-10 的既有成熟范式——
 // walkJs 递归收集、非锚定 `from\s+['"]` 正则、`.replace(/\\/g, "/")` Windows 路径
@@ -45,8 +46,8 @@ const REPO_ROOT = resolve(import.meta.dirname, "../..");
 // |------------------|-----------------------------------------------------|
 // | asset（排除扫描） | src/owner-dashboard/**（浏览器静态资产，不在 Node import 图）|
 // | adapters(0)      | src/mcp/**、src/commands/** + ADAPTER_TOP            |
-// | application(1)   | src/application/** 中不在 SHARED_MEMBERS 内者        |
-// | core(2)          | src/** 其余（CORE_TOP 顶层 + CORE_DIRS 子目录）       |
+// | application(1)   | src/application/** 中不在 SHARED_MEMBERS/CORE_MEMBERS 例外清单内者 |
+// | core(2)          | src/** 其余（CORE_TOP 顶层 + CORE_DIRS 子目录 + CORE_MEMBERS 例外） |
 // | backends(3)      | src/backends/**                                     |
 // | shared(4)        | SHARED_MEMBERS 精确集合 + src/hostAdapters/**        |
 //
@@ -73,6 +74,14 @@ const SHARED_MEMBERS = Object.freeze(new Set([
   "src/secretRedaction.js",
   "src/canonicalAgentId.js",
   "src/waoCliPath.js",
+]));
+
+// core(2) 的 application 内精确成员例外（TD-122 归零裁定）：sessionReuse 消费
+// ../transcript.js（core），是服务而非叶子，不能下沉 shared；其 5 个静态消费者
+// （registry/runManager 同层、runContinue/runDispatch/backgroundRunner 下向）全部合法。
+// 声明收尾用 `]));`（与 SHARED_MEMBERS 切片解析惯用法同形）。
+const CORE_MEMBERS = Object.freeze(new Set([
+  "src/application/sessionReuse.js",
 ]));
 
 // adapters(0) 的 src 顶层成员。
@@ -123,22 +132,10 @@ const ADAPTER_DIRS = Object.freeze(["src/mcp/", "src/commands/"]);
 // 1→2 合法）。未登记的新顶层文件或新子目录一律 fail-closed。
 const CORE_DIRS = Object.freeze(["src/workflow/"]);
 
-// 上向边白名单（恰 2 条——冻结精确集合）。改动本清单必须先改 docs SSOT。
-// 两条都是 core 顶层消费 application/sessionReuse.js：sessionReuse 消费
-// ../transcript.js（core），是服务而非叶子；其文件头注释明载 core 消费者
-// 合同（registry.js 闭集校验 / runManager.js 能力门与路由穿线）。
-const WHITELIST = Object.freeze([
-  {
-    from: "src/registry.js",
-    to: "src/application/sessionReuse.js",
-    reason: "registry.js 用 sessionReuse 的闭集校验（isValidSessionReuseMode）；sessionReuse 是消费 transcript.js 的服务而非叶子，其头注释明载 core 消费者合同。",
-  },
-  {
-    from: "src/runManager.js",
-    to: "src/application/sessionReuse.js",
-    reason: "runManager.js 经 validateSessionReuseRouting 做 capability gate 并把路由穿线给 backend.spawn；同一 sessionReuse core 消费者合同。",
-  },
-]);
+// 上向边白名单现为空（TD-122 归零：sessionReuse 经 CORE_MEMBERS 归 core，
+// upward 2→0）；机制保留——未来合法上向例外须先改 docs SSOT 再回填本清单
+// （冻结精确集合、双向 deepEqual、上限 12）。
+const WHITELIST = Object.freeze([]);
 
 const WHITELIST_HARD_CAP = 12;
 
@@ -245,7 +242,9 @@ function extractEdges(text, relPath) {
 /**
  * 五桶分类。返回桶名或 null（= 不在任何清单 → fail-closed）。
  * 优先级：asset → shared（精确集合，先于 application 前缀）→ backends →
- * adapters（前缀+顶层集合）→ application → core（顶层集合+其余子目录）→ null。
+ * adapters（前缀+顶层集合）→ application（前缀内先 CORE_MEMBERS 归 core、
+ * 再 SHARED_MEMBERS 归 shared、余归 application）→ core（顶层集合+其余
+ * 子目录）→ null。
  */
 function classifyPath(rel) {
   if (!rel.startsWith("src/")) return null;
@@ -259,7 +258,9 @@ function classifyPath(rel) {
   if (rel.startsWith("src/backends/")) return "backends";
   if (ADAPTER_DIRS.some((p) => rel.startsWith(p))) return "adapters";
   if (ADAPTER_TOP.has(rel)) return "adapters";
-  if (rel.startsWith("src/application/")) return "application";
+  if (rel.startsWith("src/application/")) {
+    return CORE_MEMBERS.has(rel) ? "core" : SHARED_MEMBERS.has(rel) ? "shared" : "application";
+  }
   if (CORE_TOP.has(rel)) return "core";
   if (CORE_DIRS.some((p) => rel.startsWith(p))) return "core";
   return null; // 未登记的顶层文件或子目录 → fail-closed
@@ -382,8 +383,8 @@ const REAL = await scanTree(REPO_ROOT);
 
 // ===== 冻结清单自检 =====
 
-test("冻结白名单形状：恰 2 条、reason 非空、上限 12", () => {
-  assert.equal(WHITELIST.length, 2, "白名单是恰 2 条的冻结精确集合（docs SSOT）");
+test("冻结白名单形状：恰 0 条、reason 非空（机制保留）、上限 12", () => {
+  assert.equal(WHITELIST.length, 0, "白名单是恰 0 条的冻结精确集合（docs SSOT；TD-122 归零）");
   assert.ok(WHITELIST.length <= WHITELIST_HARD_CAP, `白名单硬上限 ${WHITELIST_HARD_CAP}`);
   for (const w of WHITELIST) {
     assert.equal(typeof w.reason, "string");
@@ -393,20 +394,34 @@ test("冻结白名单形状：恰 2 条、reason 非空、上限 12", () => {
   }
 });
 
-test("冻结清单互斥：三张顶层清单两两不相交，shared 成员不与顶层清单重叠", () => {
-  for (const set of [ADAPTER_TOP, CORE_TOP, SHARED_MEMBERS]) {
+test("冻结清单互斥：顶层清单与 CORE_MEMBERS 两两不相交，shared 成员不与顶层清单重叠", () => {
+  for (const set of [ADAPTER_TOP, CORE_TOP, SHARED_MEMBERS, CORE_MEMBERS]) {
     for (const rel of set) assert.ok(classifyPath(rel) !== null, `清单成员可分类：${rel}`);
   }
   const overlap = (a, b) => [...a].filter((x) => b.has(x));
   assert.deepEqual(overlap(ADAPTER_TOP, CORE_TOP), [], "adapters 顶层 ∩ core 顶层 = ∅");
   assert.deepEqual(overlap(ADAPTER_TOP, SHARED_MEMBERS), [], "adapters 顶层 ∩ shared = ∅");
   assert.deepEqual(overlap(CORE_TOP, SHARED_MEMBERS), [], "core 顶层 ∩ shared = ∅");
+  assert.deepEqual(overlap(CORE_MEMBERS, SHARED_MEMBERS), [], "CORE_MEMBERS ∩ shared = ∅");
+  assert.deepEqual(overlap(CORE_MEMBERS, ADAPTER_TOP), [], "CORE_MEMBERS ∩ adapters 顶层 = ∅");
+  assert.deepEqual(overlap(CORE_MEMBERS, CORE_TOP), [], "CORE_MEMBERS ∩ core 顶层 = ∅");
+  assert.equal(classifyPath("src/application/sessionReuse.js"), "core", "CORE_MEMBERS 成员可分类且归 core（TD-122）");
   // shared 中 application 内的成员必须先于 application 前缀命中（分类优先级生效）。
   for (const rel of SHARED_MEMBERS) {
     if (rel.startsWith("src/application/")) {
       assert.equal(classifyPath(rel), "shared", `application 内 shared 成员归 shared 桶：${rel}`);
     }
   }
+});
+
+// TD-122 有牙性两档之纯函数档：移除 classifyPath 的 CORE_MEMBERS 分支后，
+// sessionReuse 回 application 桶，本测试红（分类断言 + registry→sessionReuse
+// 变 upward）。真实树档见下方真实树守卫的结构因果注释。
+test("有牙（纯函数）：CORE_MEMBERS 使 sessionReuse 归 core，合成 registry→sessionReuse 边零违例", () => {
+  assert.equal(classifyPath("src/application/sessionReuse.js"), "core",
+    "CORE_MEMBERS 精确例外生效：sessionReuse 归 core 而非 application（TD-122）");
+  const edges = [{ from: "src/registry.js", to: "src/application/sessionReuse.js" }];
+  assert.deepEqual(checkEdges(edges), [], "core 顶层 → CORE_MEMBERS 成员：同层合法，零违例");
 });
 
 // ===== 突变/阴性测试（合成树 + 纯函数，不碰真实树）=====
@@ -577,13 +592,16 @@ test("突变 i（纯函数）：注释内的 from 伪装边不进入列表", () 
 
 // ===== 真实树守卫 =====
 
-test("真实树：上向边集与 2 条冻结白名单排序后 deepEqual 全等", () => {
+test("真实树：上向边集为空（TD-122 归零，与空白名单排序后 deepEqual 全等）", () => {
   const all = checkEdges(REAL.edges);
   const upward = all.filter((v) => v.code === "upward").map((v) => ({ from: v.from, to: v.to })).sort(byFromTo);
   const frozen = WHITELIST.map((w) => ({ from: w.from, to: w.to })).sort(byFromTo);
   assert.deepEqual(upward, frozen, "上向边集与白名单双向全等（变少也红）");
+  assert.deepEqual(upward, [], "真实树上向边恰 0 条（TD-122 归零；变多也红）");
   assert.equal(upward.length, WHITELIST.length);
-  assert.equal(upward.length, 2, "真实树当前恰 2 条上向边（= 白名单冻结精确集合）");
+  assert.equal(upward.length, 0, "真实树当前恰 0 条上向边（= 冻结白名单；变少也红语义不变）");
+  // 结构因果（TD-122 有牙性）：若移除 classifyPath 的 CORE_MEMBERS 分支，
+  // sessionReuse 回 application，真实树 upward 恰为 registry/runManager 两条 ≠ []，本断言红。
 });
 
 test("真实树：fail-closed 生效——每个扫描文件都归桶，无 unclassified/asset 违例", () => {
