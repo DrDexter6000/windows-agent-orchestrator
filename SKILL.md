@@ -16,7 +16,7 @@ Advisory `certificationReasonCode` (closed-set, why not certified) + `certificat
 A WAO worker and a host-native subagent are different channels; loading this Skill or borrowing WAO discipline is not the same as dispatching through WAO — only a successful `run_dispatch` returning a `runId` counts as "used WAO".
 
 1. An explicit "use WAO" / "dispatch an external worker" request must not be silently replaced by a native subagent (not an equivalent substitute), and never impersonate a WAO worker.
-2. The WAO preflight binds to the WAO route: `lead_preflight({ workspaceRoot?: <current Git top-level> })` selects the workspace and reports credential availability + active runs. Advisory only — not a gate; never auto-stop on a warning/partial/unknown. A native-subagent route needs no WAO preflight.
+2. The WAO preflight binds to the WAO route: `lead_preflight({ workspaceRoot?: <current Git top-level> })` selects the workspace and reports credential availability + active runs. Advisory only — not a gate; never auto-stop on a warning/partial/unknown.
 3. State any conflict between a higher-priority host rule and the WAO route before dispatching. Native subagents may do Lead-side local assistance but produce no WAO transcript/delivery. WAO is optional; with no route specified the Lead keeps the choice.
 
 ## Mainline
@@ -28,9 +28,9 @@ Before expanding work, stop at the first true line: (1) It does not block the cu
 1. A narrow implementation with a clear acceptance oracle: dispatch one coder first.
 2. Truly independent tasks: dispatch workers in parallel.
 3. Tiny, tightly coupled, or Lead-context-heavy work: the Lead may do it directly.
-4. Add a Tester when independent execution evidence is useful. The canonical `agentId` `auditor` is one Chief-Advisor/Auditor expert: advisory mode before execution or audit mode after delivery, only for high risk, semantic uncertainty, or low Lead confidence.
+4. Add a Tester when independent execution evidence is useful. The canonical `agentId` `auditor` is one Chief-Advisor/Auditor expert: advisory mode before execution or audit mode after delivery.
 
-Choose via `docs/team-roles.md` + the registry; the Lead owns the verdict. Route by **semantic coupling** (ambiguity, long-horizon coherence, parallelism, modality, cost) — do not route mechanically by `Low`/`HQ`/name. `coder_low` 是 bounded implementation lane；高耦合或需要长程连贯上下文的工作优先 `coder_hq`；多模态/视觉/创意用 `coder_mm`. Owner 劝诫：多数实现任务优先 `coder_hq`（2026-08-15，advisory）. File count, prompt length, and elapsed time are not automatic routing or reassignment triggers; a worker reports concrete blockers and 拆分与转派由 Lead 决定.
+Choose via `docs/team-roles.md` + the registry; the Lead owns the verdict. Route by **semantic coupling** (ambiguity, long-horizon coherence, parallelism, modality, cost) — do not route mechanically by `Low`/`HQ`/name. `coder_low` 是 bounded implementation lane；高耦合或需要长程连贯上下文的工作优先 `coder_hq`；多模态/视觉/创意用 `coder_mm`. Owner 劝诫（advisory）：多数实现任务优先 `coder_hq`. File count, prompt length, and elapsed time are not automatic routing or reassignment triggers; a worker reports concrete blockers and 拆分与转派由 Lead 决定.
 
 ## Workflow Size
 - Simple read-only or tiny Lead task: do it directly.
@@ -74,7 +74,7 @@ On failure, the Lead decides the response from delivery truth + supplementary di
 
 ## Advisor / Auditor Discipline
 
-Lead 先自审方案和结果。`auditor` 是 Chief-Advisor/Auditor（前置建议/红队，后置复核），仅在语义仍不确定时窄调一次，无新证据不重复。不可用、超时或无 verdict 时可换 `coder_mm`，不阻断 dispatch；仅项目权威明令必审时停为 governance block，不得称 WAO control-plane failure。意见不替代 Lead 裁决；Advisor/Auditor remain conditional.
+Lead 先自审方案和结果。`auditor` 是 Chief-Advisor/Auditor（前置建议，后置复核），仅在语义仍不确定时窄调一次，无新证据不重复。不可用、超时或无 verdict 时可换 `coder_mm`，不阻断 dispatch；仅项目权威明令必审时停为 governance block，不得称 WAO control-plane failure。意见不替代 Lead 裁决；Advisor/Auditor remain conditional. 三方会审惯例（劝诫，ADR 0019）：方案/验收可由 Lead + coder_hq/low 取一（避同族）+ auditor/mm 取一会审。
 
 ## Scorecard
 

@@ -20,3 +20,4 @@
 0016 | Supervised Phase 3C may resume; broker remains an unsupervised release boundary
 0017 | MCP-first control surface: MCP Server is agent-facing primary, CLI is fallback, shared application services
 0018 | WAO mechanical containment — no auto supervision (docs-only product-contract reset; partial supersedes 0010 product direction, retains 0017)
+0019 | 方案与验收三方会审惯例（advisory 劝诫级，非门禁；Lead + coder_hq/low 取一避同族 + auditor/mm 取一；Owner 2026-08-15 裁定并细化）
