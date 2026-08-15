@@ -16,7 +16,11 @@
 // In-process tests inject deps.runWaitFn (stopCommand(args, config, deps)
 // precedent) wrapping the real service with a fake clock so the 180s+ window
 // expires in milliseconds. One subprocess test proves exit code + stderr for
-// the invalid --wait-ms path. SIGINT 用 process.emit("SIGINT") 进程内驱动
+// the invalid --wait-ms path. TD-114 closeout (B)：B-1 进程内断言窗口到期
+// （json + text）不改 process.exitCode；B-2 子进程断言终态路径 exit 0 +
+// "Terminal: yes"（终态与到期共享同一 return/print 代码路径）。字面 3 分钟
+// 真实窗口被 RUN_WAIT_MIN_MS=180000 确定性排除（假时钟无法跨进程注入；
+// 套件纪律禁真实长等待）。SIGINT 用 process.emit("SIGINT") 进程内驱动
 // （无需真实信号）：挂起的 runWaitFn 模拟阻塞窗口，emit 后断言快照打印 +
 // process.exit(1) + finally 注销。
 //
@@ -543,6 +547,98 @@ test("D1-D3-SIGINT: text 模式中断 → Run/Terminal/固定中断说明三行�
         assert.equal(lines[2], "(interrupted before the observation window completed)");
       },
     );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
+// TD-114 closeout (B): window-expiry exit code assertions.
+//
+// 进程级"窗口到期 exit 0"被 RUN_WAIT_MIN_MS=180000（src/application/runWait.js）
+// 确定性排除：3 分钟真实等待违反套件纪律，假时钟无法跨进程注入。TD-114 原文
+// 授权进程内替代——B-1（进程内退出码未设置）+ B-2（进程级终态 exit 0，与到期
+// 路径共享同一 return/print 代码路径）组合覆盖。
+// =====================================================================
+
+test("TD-114-B1-json: 窗口到期结果打印且 process.exitCode 不变（进程内）", async () => {
+  const dir = makeRunDir();
+  const prev = process.exitCode;
+  try {
+    await writeJsonl(dir, "run_active", runningEvents());
+    const out = await captureLog(() => runsCommand(
+      ["wait", "run_active", "--wait-ms", "180001", "--format", "json", "--run-dir", dir],
+      { runDir: dir },
+      {
+        runWaitFn: (input) => runWait({
+          ...input,
+          sleepFn: () => Promise.resolve(),
+          nowFn: fakeClock(),
+        }),
+      },
+    ));
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.terminal, false, "窗口到期必须报 terminal:false");
+    assert.equal(parsed.returnedEarly, false, "窗口到期必须报 returnedEarly:false");
+    assert.equal(parsed.observation.outcome, "window_expired", "observation.outcome 必须是 window_expired");
+    assert.ok(
+      SERVICE_OBSERVATION_OUTCOMES.includes(parsed.observationOutcome),
+      `observationOutcome must be in ${SERVICE_OBSERVATION_OUTCOMES.join("|")}, got: ${parsed.observationOutcome}`,
+    );
+    assert.equal(process.exitCode, prev, "窗口到期（正常结果）不得设置非零退出码");
+  } finally {
+    process.exitCode = prev;
+    cleanupDir(dir);
+  }
+});
+
+test("TD-114-B1-text: 窗口到期打印五行结构且 process.exitCode 不变（进程内）", async () => {
+  const dir = makeRunDir();
+  const prev = process.exitCode;
+  try {
+    await writeJsonl(dir, "run_active", runningEvents());
+    const out = await captureLog(() => runsCommand(
+      ["wait", "run_active", "--wait-ms", "180001", "--run-dir", dir],
+      { runDir: dir },
+      {
+        runWaitFn: (input) => runWait({
+          ...input,
+          sleepFn: () => Promise.resolve(),
+          nowFn: fakeClock(),
+        }),
+      },
+    ));
+    const lines = out.split("\n").filter((l) => l.length > 0);
+    assert.equal(lines.length, 5, `text 输出恰好五行，实际 ${lines.length} 行: ${JSON.stringify(lines)}`);
+    assert.match(lines[0], /^Run: run_active \(running\)$/, "第 1 行：Run: <runId> (<state>)");
+    assert.equal(lines[1], "Terminal: no", "第 2 行：Terminal: no（窗口到期）");
+    assert.match(lines[2], /^Waited: \d+ ms \(window \d+ ms\)$/, "第 3 行：Waited: <ms> ms (window <ms> ms)");
+    assert.match(lines[3], /^Liveness: \S+$/, "第 4 行：Liveness: <非空标签>");
+    assert.match(lines[4], /^Observation: \S+( \(\S+\))?$/, "第 5 行：Observation: <outcome>[ (<observation.outcome>)]");
+    assert.equal(process.exitCode, prev, "窗口到期（正常结果）不得设置非零退出码");
+  } finally {
+    process.exitCode = prev;
+    cleanupDir(dir);
+  }
+});
+
+test("TD-114-B2: 子进程终态路径 exit 0 且 stdout 含 'Terminal: yes'", () => {
+  const dir = makeRunDir();
+  try {
+    writeFileSync(join(dir, "run_term.jsonl"),
+      terminalEvents().map((e) => JSON.stringify({ runId: "run_term", agentId: "coder_low", ...e })).join("\n") + "\n", "utf8");
+    const r = spawnSync(
+      process.execPath,
+      ["src/cli.js", "runs", "wait", "run_term", "--run-dir", dir],
+      {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        timeout: 30000,
+        env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" },
+      },
+    );
+    assert.equal(r.status, 0, `终态 run 必须 exit 0（stderr=${r.stderr}）`);
+    assert.match(r.stdout, /Terminal: yes/, "stdout 必须打印终态事实");
   } finally {
     cleanupDir(dir);
   }

@@ -11,6 +11,7 @@
 //
 // 依赖：
 //   - 共享工具：./shared.js（parseOptions/loadPrompt/newRunManager/resolveIsolateFlag）
+//   - CLI help：../cliHelp.js（COMMAND_NAMES 顶层命令名闭集 / RUN_USAGE_TEXT 用法页）
 //   - 外部模块：../transcript.js（JsonlTranscript/readTranscript）、../cliRunSummary.js
 //     （renderRunSummary）
 //   - 动态 import（runAndWait catch 块）：../diagnosis.js、../transcript.js
@@ -31,6 +32,7 @@ import { readTranscript } from "../transcript.js";
 import { renderRunSummary } from "../cliRunSummary.js";
 import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag } from "./shared.js";
 import { prepareDeliveryRequest } from "../delivery.js";
+import { COMMAND_NAMES, RUN_USAGE_TEXT } from "../cliHelp.js";
 // M9-2A: background dispatch delegated to shared application service.
 import { dispatchRun } from "../application/runDispatch.js";
 
@@ -85,7 +87,22 @@ async function loadDeliverySpec(options) {
     throw new Error(`--delivery-spec-file must contain valid JSON: ${options.deliverySpecFile}`);
   }
   // Validate through SSOT — throws DeliveryError on schema violations.
-  const validated = prepareDeliveryRequest(parsed);
+  // A-3（friction 2026-08-15 #3）：带 {"delivery": ...} 外层包装的 spec 会在 SSOT
+  // 处因缺顶层 mode 被拒——catch-and-annotate：只在既有拒绝上追加 INNER 提示，
+  // 不接受任何新输入，SSOT 仍是拒绝权威。
+  let validated;
+  try {
+    validated = prepareDeliveryRequest(parsed);
+  } catch (error) {
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        && typeof parsed.delivery === "object" && parsed.delivery !== null) {
+      throw new Error(
+        `${error.message}\n` +
+        `(hint: --delivery-spec-file expects the INNER delivery object {"mode": "git_commit_v1", ...} — remove the outer {"delivery": ...} wrapper)`,
+      );
+    }
+    throw error;
+  }
   return {
     mode: validated.mode,
     allowedPaths: validated.allowedPaths,
@@ -263,11 +280,26 @@ export async function spawnCommand(args, config) {
 }
 
 export async function runCommand(args, config) {
+  // A-2（friction 2026-08-15 #2）：run --help 打印用法页。--help 必须是 run 之后
+  // 的第一个参数（run <agentId> --help 会被 parseOptions 当布尔 flag 吞掉，
+  // 用法页只在这一位短路）。
+  if (args[0] === "--help" || args[0] === "-h") {
+    console.log(RUN_USAGE_TEXT);
+    return;
+  }
   const [agentId, ...tail] = args;
   if (!agentId) {
     throw new Error("run requires <agentId>");
   }
   const options = parseOptions(tail);
+  // A-1（friction 2026-08-15 #1）：agentId 位置误填了顶层命令名（如 `run status ...`）
+  // → did-you-mean 提示。纯检查、零副作用，先于超时校验/文件读取/manager 构造。
+  if (COMMAND_NAMES.includes(agentId) && !options.prompt && !options.promptFile) {
+    throw new Error(
+      `Provide --prompt or --prompt-file\n` +
+      `(hint: "${agentId}" is a top-level WAO command, not an agentId — did you mean \`${agentId} ...\` without the \`run\` prefix? Full list: \`npm run cli -- help\`)`,
+    );
+  }
   // M10-pre closeout-3: validate ALL timeout values at the CLI boundary BEFORE any
   // side effects (loadDeliverySpec, manager.start, dispatchRun). This is the single
   // gate for the foreground path — RunManager.resolveWaitTimeout does not range-check.

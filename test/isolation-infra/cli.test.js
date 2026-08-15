@@ -13,6 +13,8 @@ import { join, resolve } from "node:path";
 import { parseOptions, loadPrompt, runAndWait, buildDashboard, runsDashboardCommand, runCommand, statusCommand, collectCommand, resolveTargetCwd } from "../../src/cli.js";
 import { readTranscript, findState } from "../../src/transcript.js";
 import { rmrfRetry, sleepSync } from "../_rmrfHelper.mjs";
+// Round2-AB（friction 2026-08-15 #1/#2/#3）：COMMAND_NAMES 关系守卫 + run --help 用法页。
+import { COMMAND_NAMES, HELP_TEXT } from "../../src/cliHelp.js";
 
 /** 捕获 console.log 输出（用于测命令渲染）。返回拼接的字符串。 */
 async function captureLog(fn) {
@@ -2246,6 +2248,95 @@ test("run --format text: 带 scorecard 卡片（与 json 对等，TD-53 对照�
       await runCommand(["claude_worker", "--prompt", "hi", "--run-dir", dir], config);
     });
     assert.match(out, /scorecard/, "text 格式必须渲染 scorecard 卡片");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Round2-AB：CLI friction #1/#2/#3 处置（friction-log 2026-08-15）
+//
+// #1 `run status <runId>` 类笔误：agentId 位置误填顶层命令名 → did-you-mean。
+// #2 `run --help` 无用法输出 → RUN_USAGE_TEXT 用法页（--help 须为 run 后第一个参数）。
+// #3 delivery spec 带 {"delivery": ...} 外层包装报错难懂 → catch-and-annotate INNER 提示。
+// ---------------------------------------------------------------------------
+
+test("A-1: run <顶层命令名> 不带 prompt → did-you-mean 提示（friction #1）", async () => {
+  await assert.rejects(
+    () => runCommand(["status", "run_x"], {}),
+    (e) =>
+      e.message.startsWith("Provide --prompt or --prompt-file") &&
+      e.message.includes("did you mean") &&
+      e.message.includes("status"),
+  );
+});
+
+test("A-1: 普通 agentId 不带 prompt 仍走原拒绝路径（消息无 did-you-mean）", async () => {
+  await assert.rejects(
+    () => runCommand(["coder_low"], {}),
+    (e) => {
+      assert.doesNotMatch(e.message, /did you mean/);
+      return true;
+    },
+  );
+});
+
+test("A-1/TD-120: COMMAND_NAMES 每个成员在 HELP_TEXT 有行锚定条目（防子串误报）", () => {
+  // 行锚定 ^  + name(\s|$)：HELP_TEXT 每行以两个空格开头。防 "runs 含 run"
+  // 子串误报——裸 includes 会让 "runs" 行满足 "run"。
+  for (const name of COMMAND_NAMES) {
+    assert.ok(
+      new RegExp("^  " + name + "(\\s|$)", "m").test(HELP_TEXT),
+      `HELP_TEXT must contain a line starting with two spaces + "${name}"`,
+    );
+  }
+});
+
+test("A-2: run --help 进程内打印用法页（不抛，含 --delivery-spec-file 与 INNER）", async () => {
+  const out = await captureLog(() => runCommand(["--help"], {}));
+  assert.match(out, /--delivery-spec-file/, "用法页必须列出 --delivery-spec-file flag");
+  assert.match(out, /INNER/, "用法页必须说明 spec 文件内容是 INNER delivery 对象");
+});
+
+test("A-2: run --help 子进程 exit 0 且 stdout 含用法（execSync 非零退出即 throw）", () => {
+  const out = runCliOnPathNode("run --help");
+  assert.match(out, /--delivery-spec-file/, "run --help 必须打印 --delivery-spec-file flag");
+});
+
+test("A-3: delivery spec 带 {\"delivery\":...} 外层包装 → SSOT 拒绝 + INNER delivery object 提示", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-dspec-wrap-"));
+  try {
+    const f = join(dir, "spec.json");
+    writeFileSync(f, JSON.stringify({
+      delivery: { mode: "git_commit_v1", allowedPaths: ["x"], verificationCommands: ["true"] },
+    }), "utf8");
+    // 该路径在 loadDeliverySpec（registry/newRunManager 副作用之前）抛——纯检查。
+    await assert.rejects(
+      () => runCommand(["coder_low", "--delivery-spec-file", f, "--isolate"], {}),
+      (e) => {
+        assert.match(e.message, /delivery\.mode must be "git_commit_v1"/, "SSOT 错误原样保留");
+        assert.match(e.message, /INNER delivery object/, "外层包装形状必须追加 INNER 提示");
+        return true;
+      },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("A-3: delivery spec 无外层包装的其它形状 → 仅 SSOT 错误（无 INNER 提示，证明 hint 条件触发）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-dspec-plain-"));
+  try {
+    const f = join(dir, "spec.json");
+    writeFileSync(f, JSON.stringify({ foo: 1 }), "utf8");
+    await assert.rejects(
+      () => runCommand(["coder_low", "--delivery-spec-file", f, "--isolate"], {}),
+      (e) => {
+        assert.match(e.message, /delivery\.mode must be "git_commit_v1"/, "同一 SSOT 拒绝");
+        assert.doesNotMatch(e.message, /INNER/, "非包装形状不得追加 INNER 提示");
+        return true;
+      },
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

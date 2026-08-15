@@ -77,3 +77,41 @@ Project state (.wao/):
   wao doctor [--cwd DIR] [--format json]
   wao onboarding [--agent <id>] [--apply] [--endorse-worker <id>] [--json]  # third-party: generate one minimal private registry from the tracked template (+ host-neutral MCP snippet)
 `;
+
+// A-1（friction 2026-08-15 #1）：run <agentId> 的 agentId 位置误填顶层命令名时
+// （如 `run status ...`）做 did-you-mean 提示。恰 17 名；不含 help（HELP_TEXT
+// 无 help 命令行且字节冻结——评审裁定 (a)）。
+export const COMMAND_NAMES = Object.freeze([
+  "registry", "spawn", "retry", "resume", "run", "status", "tail", "collect",
+  "stop", "runs", "dashboard", "workflow", "worktree", "wao", "daemon", "mcp", "playbook",
+]);
+
+// A-2（friction 2026-08-15 #2）：`run --help` 用法页。顶层 HELP_TEXT 字节冻结
+// （docsSurface 生成层把 docs/surface/cli.md 与 generate() 输出做字节对比），
+// run 的详细用法放在这里由 `run --help` 打印（--help 必须是 run 之后的第一个参数）。
+export const RUN_USAGE_TEXT = `run <agentId> --prompt "..." [options]
+
+Run one agent to completion and print a summary (default text format).
+
+Flags:
+  --prompt TEXT                  the task prompt (required unless --prompt-file is given)
+  --prompt-file FILE             read the task prompt from FILE (multi-line safe)
+  --cwd DIR                      target project directory
+  --registry FILE                agent registry file (default config/agents.json)
+  --run-dir DIR                  transcript directory (default runs/)
+  --poll-interval MS             status poll interval in ms
+  --wait-timeout MS              bounded wait timeout in ms (1000-600000)
+  --format json|text             output format (default text)
+  --isolate                      run in an isolated worktree
+  --require-certified            dispatch only certified workers
+  --background                   fork a detached runner and return immediately
+  --scorecard-rules-file FILE    load scorecard rules from FILE (JSON)
+  --scorecard-rules JSON         inline scorecard rules (JSON string)
+  --tag key=value                tag the run
+  --delivery-spec-file FILE      delivery mode spec (requires --isolate)
+
+Notes:
+  - The file given to --delivery-spec-file must contain the INNER delivery object
+    itself ({"mode":"git_commit_v1",...}), WITHOUT an outer {"delivery": ...} wrapper.
+  - --help must be the FIRST argument after run: npm run cli -- run --help
+`;

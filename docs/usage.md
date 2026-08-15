@@ -292,6 +292,8 @@ npm run cli -- run coder_low --prompt "..." --isolate --delivery-spec-file deliv
 
 > 已知坑（friction 2026-08-15 #3）：spec 文件内容是**内层 delivery 对象本身**——`{"mode":"git_commit_v1","allowedPaths":[...],"verificationCommands":[...]}`，**不带** `{"delivery": ...}` 外层包装（那层包装是 MCP `run_dispatch` 工具参数的形状，见 §四）。CLI 把文件内容直接交给 `prepareDeliveryRequest` SSOT 解析，带外层包装会因缺顶层 `mode` 被拒绝。
 
+CLI 的 run 用法可用 `npm run cli -- run --help` 查看。
+
 Delivery 模式在 worktree 隔离中运行 worker，完成后打包一个 atomic delivery commit，
 然后运行验证命令。`--format json` 返回完整 DeliveryRef 和 `verificationFailed` /
 `verificationUnavailable` 标志。schema 语义见 `docs/02-architecture.md` §4.6-4.8。
