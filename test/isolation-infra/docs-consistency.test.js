@@ -942,20 +942,26 @@ test("M11-0A: usage.md 说明 --pure 用途、新进程重启边界、command �
   assert.ok(/command.*必须是数组|command 必须是数组|数组/.test(usage), "usage.md 必须说明 command 必须是数组");
 });
 
-test("M12-8A/M12-9/M12-10/M12-16: usage.md MCP 段工具数与 toolSurface SSOT 一致（TD-120 关系型守卫）", () => {
+test("M12-8A/M12-9/M12-10/M12-16: 工具计数由生成层承载且与 toolSurface SSOT 一致；usage 不再手抄计数（TD-120 关系型守卫）", () => {
   const usage = read("docs/usage.md");
+  const surface = read("docs/surface/mcp-tools.md");
   const n = TOOLS.length;
-  // 精确禁止"只有 7 个工具"的陈旧文案。
+  // P4-乙 Phase 2A (2026-08-15): usage.md §四 migrated its shape/count hand-copies
+  // to the generated reference layer, so the derived-count probe reads
+  // docs/surface/mcp-tools.md (its header line carries "N tools"); usage.md must
+  // NOT re-introduce a hand-copied count phrase (that is how the pre-migration
+  // drift happened). TD-120 form preserved: count derived from TOOLS.length,
+  // (?<!\d) guards against e.g. "122 tools" matching the n=22 probe, and the
+  // stale-claim negative derives n+1 (the most likely NEXT value after a
+  // legitimate surface change) so adding a tool never deadlocks the guard.
+  assert.ok(new RegExp(`(?<!\\d)${n} tools`).test(surface),
+    `docs/surface/mcp-tools.md 生成头必须反映 toolSurface TOOLS.length=${n} tools`);
+  assert.ok(!new RegExp(`(?<!\\d)${n + 1} tools`).test(surface),
+    `docs/surface/mcp-tools.md 不得声称 ${n + 1} tools（相对 SSOT 的陈旧/超前计数）`);
+  assert.ok(!/(?<!\d)\d+ 个工具/.test(usage),
+    "usage.md 不得手抄 MCP 工具计数（计数由生成层 docs/surface/mcp-tools.md 派生承载）");
+  // 精确禁止"只有 7 个工具"的陈旧文案回潮。
   assert.ok(!/(?<!\d)7 个工具/.test(usage), "usage.md MCP 段不得再声称只有 7 个工具");
-  // TD-120: derived from the code SSOT — M12-10 playbook 转 resources，M12-16 加 run_correct。
-  // (?<!\d) guards against e.g. "122 个工具" matching the n=22 probe.
-  assert.ok(new RegExp(`(?<!\\d)${n} 个工具`).test(usage),
-    `usage.md MCP 段必须反映 toolSurface TOOLS.length=${n} 个工具`);
-  // Stale-claim check also derives from the SSOT (n+1 = the most likely NEXT
-  // value after a legitimate surface change). A hardcoded literal here would
-  // deadlock the guard the next time a tool is added (panel audit 2026-08-15).
-  assert.ok(!new RegExp(`(?<!\\d)${n + 1} 个工具`).test(usage),
-    `usage.md 不得声称 ${n + 1} 个工具（相对 SSOT 的陈旧/超前计数）`);
 });
 
 // ============================================================
@@ -1447,14 +1453,23 @@ test("M11-2-DOGFOOD: fresh Codex CLI Lead dogfood marked complete with anchor, r
 // M11 mainline and M10 closeout guards — not repeated here.
 // ============================================================
 
-test("M11-4-DOC-01: usage.md documents run_collect cursor input + nextCursor + zero-append-on-invalid", () => {
+test("M11-4-DOC-01: run_collect cursor/nextCursor 字段由生成层承载，usage 保留续读语义与零追加合同", () => {
   const usage = read("docs/usage.md");
-  // Input accepts optional opaque cursor.
+  const surface = read("docs/surface/mcp-tools.md");
+  // P4-乙 Phase 2A (2026-08-15): usage.md §四 dropped the run_collect shape
+  // hand-copy; the cursor input + nextCursor output FIELD names now live in the
+  // generated reference layer (whose byte stability is pinned by docsSurface-1).
+  // Scope to the run_collect section so a match elsewhere in the file cannot
+  // satisfy the guard.
+  const collectSection = surface.slice(
+    surface.indexOf("## run_collect"), surface.indexOf("## run_diagnose"));
   assert.ok(/run_collect/.test(usage), "usage covers run_collect");
-  assert.ok(/"cursor"/.test(usage) && /opaque continuation token/i.test(usage),
-    "usage documents the optional opaque cursor input");
-  // Output carries nextCursor (null or token).
-  assert.ok(/"nextCursor"/.test(usage), "usage documents nextCursor output field");
+  assert.ok(/\| cursor \|/.test(collectSection),
+    "docs/surface/mcp-tools.md run_collect Input documents the optional cursor field");
+  assert.ok(/\| nextCursor \|/.test(collectSection),
+    "docs/surface/mcp-tools.md run_collect Output documents the nextCursor field");
+  assert.ok(/opaque continuation token/i.test(usage),
+    "usage documents the cursor as an opaque continuation token");
   // Continuation semantics: page-by-page until null, exact-once, frozen snapshot.
   assert.ok(/续读|continuation/i.test(usage), "usage documents continuation flow");
   assert.ok(/无漏项.*无重复|no loss.*no dup/i.test(usage) || /完整.*按序.*无漏项.*无重复/.test(usage),
@@ -1895,18 +1910,29 @@ test("M12-6 FR-07 docs: SKILL 把 reverify 放在 run_delivery 与 decide 之间
     "SKILL 必须说明 reverify 结果不自动决定");
 });
 
-test("M12-6 FR-07 docs: usage 记录 reverify 的 MCP/CLI 输入输出、eligible failure、幂等与原\/有效 verification", () => {
+test("M12-6 FR-07 docs: reverify 字段形状由生成层承载，usage 记录 CLI 入口、eligible failure、幂等与原\/有效 verification", () => {
   const usage = read("docs/usage.md");
   // (1) Both surfaces documented: the MCP tool and the CLI fallback.
   assert.ok(/run_delivery_reverify/.test(usage), "usage 必须记录 MCP run_delivery_reverify");
   assert.ok(/runs delivery reverify/.test(usage), "usage 必须记录 CLI runs delivery reverify");
   assert.ok(/--setup-commands-file/.test(usage) && /--timeout-ms/.test(usage) && /--reason/.test(usage),
     "usage 必须记录 CLI 的 --reason / --setup-commands-file / --timeout-ms");
-  // (2) Input/output: closed-set reason enum + setupCommands/timeoutMs + safe fields.
-  assert.ok(/"reason"/.test(usage) && /"setupCommands"/.test(usage) && /"timeoutMs"/.test(usage),
-    "usage 必须记录 MCP 输入字段 reason/setupCommands/timeoutMs");
-  assert.ok(/"state"/.test(usage) && /"verificationStatus"/.test(usage) && /"failureCode"/.test(usage),
-    "usage 必须记录安全输出字段 state/verificationStatus/failureCode");
+  // (2) Input/output FIELD NAMES: P4-乙 Phase 2A moved the reverify shape
+  // hand-copy out of usage.md — the MCP input (reason/setupCommands/timeoutMs)
+  // and safe-output (state/verificationStatus/failureCode) field lists are
+  // asserted on the generated reference layer, scoped to the run_delivery_
+  // reverify section (byte stability itself is pinned by docsSurface-1).
+  // usage keeps the bounds + closed-set eligible/inheritance semantics below.
+  const surface = read("docs/surface/mcp-tools.md");
+  const reverifySection = surface.slice(surface.indexOf("## run_delivery_reverify"));
+  for (const field of ["reason", "setupCommands", "timeoutMs"]) {
+    assert.ok(reverifySection.includes(`| ${field} |`),
+      `docs/surface/mcp-tools.md reverify Input 必须承载字段 ${field}`);
+  }
+  for (const field of ["state", "verificationStatus", "failureCode"]) {
+    assert.ok(reverifySection.includes(`| ${field} |`),
+      `docs/surface/mcp-tools.md reverify Output 必须承载字段 ${field}`);
+  }
   // (3) Eligible failure: the ORIGINAL verification failed with an
   // environment/tooling-invalid code (never content-integrity codes).
   assert.ok(/original.*verification.*failed|原.*verification.*failed|original.*失败/i.test(usage)
