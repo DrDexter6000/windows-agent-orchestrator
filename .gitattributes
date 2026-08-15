@@ -1,0 +1,11 @@
+# .gitattributes (repo root)
+#
+# Generated agent-facing surface docs are byte-compared against generator output
+# (test/isolation-infra/docsSurface.test.js) and scripts/gen-surface.mjs joins
+# with "\n" only — so these paths MUST check out with LF on every platform,
+# otherwise a CRLF checkout fails the guard spuriously.
+# Precedent: .dev/homerail/.gitattributes (per-path eol pinning).
+#
+# llms.txt is reserved for Phase 3 (same generated-doc discipline).
+docs/surface/*.md text eol=lf
+llms.txt text eol=lf

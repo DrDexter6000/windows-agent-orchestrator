@@ -13,6 +13,7 @@
       "transcript/collectFinal.test.js",
       "isolation-infra/daemonHealth.test.js",
       "isolation-infra/daemonSupervisor.test.js",
+      "isolation-infra/docsSurface.test.js",
       "delivery/deliveryReview.test.js",
       "backends/deepSeekHarness.test.js",
       "transcript/diagnosis.test.js",

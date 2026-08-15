@@ -30,6 +30,7 @@ For aggregation, parsing, or classification changes, green unit tests are not en
 - `npm run cli -- <command>` - WAO CLI
 - `npm run smoke` - real runtime smoke; consumes tokens
 - `npm run reliability` - runtime/model certification; consumes tokens
+- `npm run gen:surface` - regenerate docs/surface/* after MCP surface or CLI help changes; commit the output (tool-surface wire-cap tests may need refreeze)
 
 ## Code
 

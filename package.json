@@ -17,6 +17,7 @@
     "cli": "node scripts/wao-node.cjs src/cli.js",
     "mcp": "node scripts/wao-node.cjs src/mcp/stdio.js",
     "smoke": "node scripts/wao-node.cjs src/smoke.js",
+    "gen:surface": "node scripts/wao-node.cjs scripts/gen-surface.mjs",
     "reliability": "node scripts/wao-node.cjs scripts/run-reliability.mjs",
     "long-run": "node scripts/wao-node.cjs scripts/long-run-probe.mjs"
   },
