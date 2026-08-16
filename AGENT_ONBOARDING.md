@@ -101,7 +101,7 @@ WAO 的 `SKILL.md` 符合 anthropic skill-creator 规范。各 runtime 的 skill
 - **`config/agents.example.json`（入库的模板）**：与 `docs/team-roles.md` 规范角色**一一对应**，保持六个角色 worker（researcher / coder_hq / coder_low / coder_mm / tester / auditor + opencode fallback）全量——它是上游样例，不需要编辑它本身。
 - **`config/agents.json`（你的私人副本，gitignored 不入库）**：复制后**可以删到只剩你实际能认证的 worker**。
 
-> **自动化（可选）**：`npm run cli -- wao onboarding --agent <你保留的 worker id> --apply` 从入库模板自动生成只含一个 worker 的 `config/agents.json`（零手编、带该 worker 的认证矩阵、并打印 host-neutral MCP 片段）。下面的手动复制+裁剪是同一结果的等价做法。正式验收链见本文档 §9。
+> **自动化（可选）**：`npm run cli -- wao onboarding --agent <你保留的 worker id> --apply` 从入库模板自动生成只含一个 worker 的 `config/agents.json`（零手编、带该 worker 的认证矩阵、并打印 host-neutral MCP 片段）。不带 `--agent` 裸跑 `npm run cli -- wao onboarding` 会按你当前环境打印角色矩阵与适配推荐（探测 PATH 里的 CLI 与已设置的 key；advisory 输出，不会自动选择或写配置）——先看推荐，再决定 `--agent <id>`。下面的手动复制+裁剪是同一结果的等价做法。正式验收链见本文档 §9。
 > 注意次序：自动化路径要求 `config/agents.json` 尚不存在——若你已按下面手动 `Copy-Item` 过，`--apply` 会拒绝覆盖（安全设计），删掉该副本后重跑即可。
 
 ```powershell

@@ -10,10 +10,12 @@
 // host-neutral MCP stdio snippet for wiring the worker into an MCP host.
 //
 // This module is THIN: it parses args, wires the real (injectable) filesystem,
-// calls the pure service (src/application/onboarding.js), and prints ONE bounded
-// structured result as JSON (--json) or human text. All policy/safety logic lives
-// in the service; this layer adds none. It does not import the MCP SDK, child
-// processes, or the registry/backend run path.
+// wires the production environment probe (R6-C), calls the pure service
+// (src/application/onboarding.js), and prints ONE bounded structured result as
+// JSON (--json) or human text. All policy/safety logic lives in the service;
+// this layer adds none. It does not import the MCP SDK or the registry/backend
+// run path; the R6-C probe uses a lazy child-process import (the doctor whichCli
+// pattern plus a per-probe timeout) and the credentialReadiness SSOT.
 
 import { readFile, writeFile, rename, unlink, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -22,6 +24,46 @@ import { fileURLToPath } from "node:url";
 
 import { parseOptions } from "./shared.js";
 import { runOnboarding, HOST_EXAMPLES_AUTHORITY } from "../application/onboarding.js";
+// R6-C: key probing reuses the credential-readiness SSOT (process env → Windows
+// User scope) — no second registry read or env-name policy here.
+import { resolveCredentialEnv } from "../application/credentialReadiness.js";
+
+// ── R6-C: production environment probe ───────────────────────────────────────
+// One probeEnv per command invocation, passed to the pure recommendation engine.
+// Bounded: ≤4 CLI probes (one per distinct required CLI) + ≤N key probes (one
+// per distinct declared env name); the engine memoizes per unique name. Every
+// probe carries a timeout / graceful failure path and can never block output.
+//
+// CLI probing reuses the doctor whichCli pattern (`where`/`which`) PLUS a
+// per-probe timeout that doctor's version lacks: a timeout/kill/spawn failure
+// degrades to "unknown" (displayed truthfully), while a checked non-zero exit
+// ("not on PATH") is a definite false.
+// Key probing reuses resolveCredentialEnv: its internal Windows User-scope read
+// is already 5s-bounded; a reader failure falls back to "missing" by that
+// module's contract and never throws.
+
+const CLI_PROBE_TIMEOUT_MS = 5000; // per CLI probe (matches credentialReadiness 5s)
+
+async function probeCliOnPath(name) {
+  const { execSync } = await import("node:child_process");
+  try {
+    execSync(process.platform === "win32" ? `where ${name}` : `which ${name}`, {
+      stdio: "ignore",
+      windowsHide: true,
+      timeout: CLI_PROBE_TIMEOUT_MS,
+    });
+    return true;
+  } catch (err) {
+    // `where`/`which` ran and answered "not found" (non-zero exit) → definite
+    // missing. Timeout/kill/spawn failure → cannot evaluate → "unknown".
+    return typeof err?.status === "number" ? false : "unknown";
+  }
+}
+
+async function probeKeyEnvSource(name) {
+  const r = await resolveCredentialEnv(name);
+  return r.source; // "process_env" | "user_env" | "missing"
+}
 
 // The trusted WAO installation root = where THIS command lives, three levels up
 // (src/commands/onboarding.js → repo root). Independent of the caller cwd, matching
@@ -68,6 +110,8 @@ export async function onboardingCommand(args, config) {
     targetRegistryPath,
     reliabilitySummaryPath,
     fs: { readFile, writeFile, rename, existsSync, unlink, mkdir },
+    // R6-C: production environment probe (injected; the service stays pure).
+    probeEnv: { hasCli: probeCliOnPath, hasKeyEnv: probeKeyEnvSource },
   });
 
   if (json) {
@@ -100,6 +144,20 @@ export function renderHuman(r) {
     lines.push("");
     lines.push("Re-run with: wao onboarding --agent <id>            # preview");
     lines.push("            wao onboarding --agent <id> --apply      # write config/agents.json");
+
+    // R6-C: role matrix + current-environment fit (advisory). Rows are derived
+    // from the template rows and the injected probe; the engine already sorted
+    // them ready-first. The tail line hands the choice back to the user.
+    const rows = Array.isArray(r.recommendations?.rows) ? r.recommendations.rows : [];
+    if (rows.length > 0) {
+      lines.push("");
+      lines.push(`角色矩阵与当前环境适配（${r.recommendations.advisory}）:`);
+      for (const row of rows) {
+        lines.push(`  ${String(row.id ?? "?").padEnd(24)} ${String(row.model ?? "?").padEnd(20)} ${recommendationAuthLabel(row).padEnd(36)} 适合: ${recommendationDutyDisplay(row.duty)}  [${recommendationReadyLabel(row)}]`);
+      }
+      lines.push("");
+      lines.push("按你有的认证选一行重跑 --agent <id> --apply；没有的 key 对应行可忽略。");
+    }
   } else if (r.selected) {
     const written = [];
     if (r.writes.registry) written.push("config/agents.json");
@@ -154,4 +212,35 @@ export function renderHuman(r) {
   }
 
   return `${lines.join("\n")}\n`;
+}
+
+// ── R6-C human rendering helpers ─────────────────────────────────────────────
+// Derived from the engine rows (single source). No second hand-written role
+// table: labels are shape-derived (key env name / CLI login state) and the only
+// per-worker auth text comes from the template's _comment_auth (carried as
+// row.authNote).
+
+/** 认证方式 column: declared key env name, or CLI login state (+ template note). */
+function recommendationAuthLabel(row) {
+  if (row.requiresKeyEnv) return `认证: key ${row.requiresKeyEnv}`;
+  if (row.authNote) return `认证: CLI 登录态：${row.authNote}`;
+  return "认证: CLI 登录态";
+}
+
+/** duty display: _comment_task rows start with "适合任务: "/"默认适合: " — strip for display. */
+function recommendationDutyDisplay(duty) {
+  if (typeof duty !== "string" || duty.length === 0) return "?";
+  return duty.replace(/^(适合任务|默认适合)\s*[:：]\s*/, "");
+}
+
+/** readyState → human bracket label (ready / missing / login / probe-failed). */
+function recommendationReadyLabel(row) {
+  switch (row.readyState) {
+    case "ready": return "ready";
+    case "login_based": return "CLI 登录态";
+    case "missing_cli": return `缺 ${row.requiresCli} CLI`;
+    case "missing_key": return `缺 ${row.requiresKeyEnv}`;
+    case "missing_both": return `缺 ${row.requiresCli} CLI + 缺 ${row.requiresKeyEnv}`;
+    default: return "探测失败，结果未知";
+  }
 }

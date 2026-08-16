@@ -24,6 +24,12 @@
 // Safety: it never inspects credential VALUES (only the apiKeyEnv NAME from the
 // template), never fabricates certification status (certified/conditional/etc.),
 // and never echoes untrusted/malicious input in fixed safe error messages.
+//
+// R6-C: advisory role-matrix recommendations (buildRecommendations) are derived
+//   purely from the tracked template rows; environment probing is INJECTED
+//   (probeEnv) so this module stays pure — it performs no env reads, no PATH
+//   lookups, and no subprocess work of its own. Probing never selects or writes
+//   anything: the recommendation is advisory and the user keeps the choice.
 
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -103,6 +109,177 @@ export function buildCandidateList(template) {
     });
   }
   return out;
+}
+
+// ── Role-matrix recommendations (R6-C) ───────────────────────────────────────
+//
+// Advisory recommendations for a bare `wao onboarding` (no --agent): one row per
+// template worker, derived PURELY from the tracked template rows (backend,
+// provider.apiKeyEnv, model.id, _comment_task/_comment_auth) plus the INJECTED
+// environment probe. There is no second hand-written role table and no
+// auto-selection/auto-write — the choice stays with the user, matching the
+// existing "mutation requires explicit selection" contract.
+//
+// Probe contract (injected; this module stays pure — no env reads, no PATH
+// lookups, no subprocess work of its own):
+//   - probeEnv.hasCli(name) → true | false | "unknown". false = checked and
+//     absent; "unknown" = probe failure/timeout (reported truthfully, never
+//     mislabeled as missing).
+//   - probeEnv.hasKeyEnv(name) → "process_env" | "user_env" | "missing" |
+//     "unknown" (null is accepted as "missing").
+//   - A THROWING probe method degrades that dimension to "unknown" — the
+//     engine never throws on probe failure.
+//   - Probes are memoized per unique name within one build call, so an
+//     onboarding invocation is bounded at ≤4 CLI probes + ≤N key probes by
+//     construction.
+//
+// readyState domain:
+//   ready         CLI present + key present (process_env or user_env)
+//   missing_cli   key present + CLI absent
+//   missing_key   CLI present + key absent
+//   missing_both  CLI absent + key absent
+//   login_based   worker declares no provider key (official OAuth / CLI login
+//                 state — auditor/tester/kimi style): only the CLI is probed;
+//                 the login state itself cannot be verified remotely
+//   unknown       a probe failed, or the backend maps to no CLI (cannot verify)
+
+/** backend → CLI 探测映射（与 doctor 的 scoped 探测表同源形状）。 */
+export const BACKEND_CLI = {
+  "claude-code": "claude",
+  codex: "codex",
+  "kimi-code": "kimi",
+  "opencode-serve": "opencode",
+};
+
+/** 顶部 advisory 句（JSON + 人类输出共用）：矩阵按当前环境探测结果给出，最终选择权在用户。 */
+export const RECOMMENDATIONS_ADVISORY =
+  "推荐按你当前环境探测结果给出，最终选择权在你（不自动选择、不写配置）";
+
+const DUTY_MAX = 60;      // _comment_task 截断上限（≈60 字符）
+const AUTH_NOTE_MAX = 60; // _comment_auth 截断上限
+
+const READY_RANK = {
+  ready: 0,
+  login_based: 1,
+  missing_cli: 2,
+  missing_key: 3,
+  missing_both: 4,
+  unknown: 5,
+};
+
+/** Truncate a template comment line to the given cap; non-strings/empty → null. */
+function truncateNote(value, max) {
+  if (typeof value !== "string" || value.length === 0) return null;
+  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+}
+
+/** Normalize a hasCli probe result to true | false | "unknown". */
+function normalizeCli(v) {
+  if (v === true) return true;
+  if (v === false) return false;
+  return "unknown";
+}
+
+/** Normalize a hasKeyEnv probe result to "process_env" | "user_env" | "missing" | "unknown". */
+function normalizeKey(v) {
+  if (v === "process_env" || v === "user_env") return v;
+  if (v === "missing" || v === null || v === undefined) return "missing";
+  return "unknown";
+}
+
+/**
+ * Compute one row's readyState from the injected probes.
+ * @param {object} input
+ * @param {string|null} input.requiresCli
+ * @param {string|null} input.requiresKeyEnv
+ * @param {(name: string) => Promise<true|false|"unknown">} input.probeCli
+ * @param {(name: string) => Promise<"process_env"|"user_env"|"missing"|"unknown">} input.probeKey
+ * @returns {Promise<"ready"|"missing_cli"|"missing_key"|"missing_both"|"login_based"|"unknown">}
+ */
+async function computeReadyState({ requiresCli, requiresKeyEnv, probeCli, probeKey }) {
+  if (!requiresCli) return "unknown"; // backend maps to no CLI: cannot verify
+  if (!requiresKeyEnv) {
+    // 无 key 依赖项（官方 OAuth / CLI 登录态类）：仅探 CLI。
+    const cli = normalizeCli(await probeCli(requiresCli));
+    if (cli === true) return "login_based";
+    return cli === false ? "missing_cli" : "unknown";
+  }
+  const cli = normalizeCli(await probeCli(requiresCli));
+  const key = normalizeKey(await probeKey(requiresKeyEnv));
+  if (cli === "unknown" || key === "unknown") return "unknown";
+  const cliOk = cli === true;
+  const keyOk = key !== "missing";
+  if (cliOk && keyOk) return "ready";
+  if (!cliOk && keyOk) return "missing_cli";
+  if (cliOk && !keyOk) return "missing_key";
+  return "missing_both";
+}
+
+/**
+ * Build the advisory role-matrix recommendations for the bounded candidate list.
+ * Rows are sorted ready-first (login_based next; stable sort keeps the template
+ * order inside each rank). Probe results are memoized per unique name within the
+ * call (cost bound); probe failures degrade to "unknown" and never throw.
+ *
+ * @param {{id: string, backend: string|null, model: string|null}[]} candidates
+ * @param {{agents?: Record<string, any>}} template — parsed config/agents.example.json
+ * @param {{hasCli: (name: string) => Promise<true|false|"unknown">, hasKeyEnv: (name: string) => Promise<"process_env"|"user_env"|"missing"|"unknown">}} [probeEnv]
+ *   injected environment probe. Omitted ⇒ every probe reads as "unknown" (no
+ *   probing of any kind — the module stays pure).
+ * @returns {Promise<{advisory: string, rows: {
+ *   id: string, backend: string|null, model: string|null,
+ *   requiresCli: string|null, requiresKeyEnv: string|null,
+ *   duty: string|null, authNote: string|null,
+ *   readyState: "ready"|"missing_cli"|"missing_key"|"missing_both"|"login_based"|"unknown"
+ * }[]>}>
+ */
+export async function buildRecommendations(candidates, template, probeEnv) {
+  const agents = isPlainObject(template?.agents) ? template.agents : {};
+  const list = Array.isArray(candidates) ? candidates : [];
+  // Per-call memo of probe results (one probe per unique name) — bounds the
+  // onboarding invocation at ≤4 CLI probes + ≤N key probes by construction.
+  const cliMemo = new Map();
+  const keyMemo = new Map();
+  const probeOnce = async (memo, name, call) => {
+    if (!memo.has(name)) {
+      let value = "unknown";
+      try {
+        value = probeEnv ? await call() : "unknown";
+      } catch {
+        value = "unknown"; // probe failure degrades to unknown; never throws
+      }
+      memo.set(name, value);
+    }
+    return memo.get(name);
+  };
+  const probeCli = (name) => probeOnce(cliMemo, name, () => probeEnv.hasCli(name));
+  const probeKey = (name) => probeOnce(keyMemo, name, () => probeEnv.hasKeyEnv(name));
+
+  const rows = [];
+  for (const c of list.slice(0, MAX_CANDIDATES)) {
+    const agent = isPlainObject(agents[c.id]) ? agents[c.id] : {};
+    const requiresCli = BACKEND_CLI[c.backend] ?? null;
+    const apiKeyEnv = agent.provider?.apiKeyEnv;
+    const requiresKeyEnv = typeof apiKeyEnv === "string" && apiKeyEnv.length > 0 ? apiKeyEnv : null;
+    rows.push({
+      id: c.id,
+      backend: c.backend ?? null,
+      model: c.model ?? null,
+      requiresCli,
+      requiresKeyEnv,
+      duty: truncateNote(agent._comment_task, DUTY_MAX),
+      authNote: truncateNote(agent._comment_auth, AUTH_NOTE_MAX),
+      readyState: await computeReadyState({ requiresCli, requiresKeyEnv, probeCli, probeKey }),
+    });
+  }
+  // ready 在前（login_based 次之）；稳定排序保持模板顺序。
+  rows.sort((a, b) => READY_RANK[a.readyState] - READY_RANK[b.readyState]);
+  return { advisory: RECOMMENDATIONS_ADVISORY, rows };
+}
+
+/** Empty recommendations (template unreadable / no candidates — zero probes). */
+export function emptyRecommendations() {
+  return { advisory: RECOMMENDATIONS_ADVISORY, rows: [] };
 }
 
 /**
@@ -352,6 +529,9 @@ function applyEndorsement(existingSummary, agentId) {
  * @param {string} input.exampleRegistryPath — tracked template path (read)
  * @param {string} input.targetRegistryPath — config/agents.json path (apply write)
  * @param {string} input.reliabilitySummaryPath — runs/reliability-summary.json path
+ * @param {{hasCli: Function, hasKeyEnv: Function}} [input.probeEnv] — injected
+ *   environment probe for the advisory recommendations (see buildRecommendations);
+ *   omitted ⇒ every probe reads as "unknown" (no probing of any kind).
  * @param {{readFile: Function, writeFile: Function, rename: Function, existsSync: Function, unlink: Function, mkdir: Function}} input.fs
  *   injectable filesystem (default bindings are wired by the command layer).
  *   `mkdir` is recursive-parent creation used only by the atomic write.
@@ -365,10 +545,17 @@ export async function runOnboarding({
   exampleRegistryPath,
   targetRegistryPath,
   reliabilitySummaryPath,
+  probeEnv,
   fs,
 } = {}) {
   const _fs = fs;
   const snippet = buildMcpSnippet({ installRoot });
+
+  // R6-C: the recommendations matrix starts EMPTY (zero probes). It is filled
+  // once the template parses; every outcome from the first return on carries the
+  // same object through `finalize` — including refused/error — like acceptance.
+  let recommendations = emptyRecommendations();
+  const finalize = (partial) => baseResult({ ...partial, recommendations });
 
   // Read + parse the tracked template first. The candidate list (shown even in a
   // bare preview) is derived from it, and every selection is validated against it.
@@ -376,7 +563,7 @@ export async function runOnboarding({
   try {
     template = JSON.parse(await _fs.readFile(exampleRegistryPath, "utf8"));
   } catch {
-    return baseResult({
+    return finalize({
       outcome: "error",
       selected: false,
       needsSelection: false,
@@ -390,13 +577,18 @@ export async function runOnboarding({
   }
   const candidates = buildCandidateList(template);
 
+  // R6-C: advisory role matrix + environment fit, derived from the template rows
+  // + the INJECTED probe. Bounded (≤4 CLI probes + ≤N key probes, memoized per
+  // unique name); probe failures degrade to "unknown" and never throw.
+  recommendations = await buildRecommendations(candidates, template, probeEnv);
+
   // Endorsement contract: requires an EXPLICIT, MATCHING selection. Checked before
   // the needs-selection branch so a bare --endorse-worker never reaches selection,
   // and before any write so a mismatch never mutates the summary.
   const wantEndorse = endorseWorker !== undefined;
   if (wantEndorse) {
     if (!agentId) {
-      return baseResult({
+      return finalize({
         outcome: "refused",
         selected: false,
         needsSelection: false,
@@ -409,7 +601,7 @@ export async function runOnboarding({
       });
     }
     if (endorseWorker !== agentId) {
-      return baseResult({
+      return finalize({
         outcome: "refused",
         selected: false,
         needsSelection: false,
@@ -425,7 +617,7 @@ export async function runOnboarding({
 
   // No selection ⇒ bounded preview, needs-selection, zero writes (candidates shown).
   if (!agentId) {
-    return baseResult({
+    return finalize({
       outcome: "needs-selection",
       selected: false,
       needsSelection: true,
@@ -452,7 +644,7 @@ export async function runOnboarding({
     const reason = err instanceof OnboardingError
       ? err.message
       : "registry normalization rejected the built entry";
-    return baseResult({
+    return finalize({
       outcome: "refused",
       selected: false,
       needsSelection: false,
@@ -467,7 +659,7 @@ export async function runOnboarding({
 
   // Preview (no apply, no endorse) ⇒ zero writes.
   if (!apply && !wantEndorse) {
-    return baseResult({
+    return finalize({
       outcome: "previewed",
       selected: true,
       needsSelection: false,
@@ -486,7 +678,7 @@ export async function runOnboarding({
   // --apply: refuse any existing final registry byte-for-byte (no overwrite).
   if (apply) {
     if (_fs.existsSync(targetRegistryPath)) {
-      return baseResult({
+      return finalize({
         outcome: "refused",
         selected: true,
         needsSelection: false,
@@ -505,7 +697,7 @@ export async function runOnboarding({
       // Fixed safe projection: the raw write/rename error (paths, OS code,
       // credential-bearing paths) never crosses the boundary. atomicWriteJson
       // already removed the temp file; the final registry was never created.
-      return baseResult({
+      return finalize({
         outcome: "error",
         selected: true,
         needsSelection: false,
@@ -531,7 +723,7 @@ export async function runOnboarding({
       try {
         existingSummary = JSON.parse(await _fs.readFile(reliabilitySummaryPath, "utf8"));
       } catch {
-        return baseResult({
+        return finalize({
           outcome: "error",
           selected: true,
           needsSelection: false,
@@ -544,7 +736,7 @@ export async function runOnboarding({
         });
       }
       if (!isPlainObject(existingSummary)) {
-        return baseResult({
+        return finalize({
           outcome: "error",
           selected: true,
           needsSelection: false,
@@ -565,7 +757,7 @@ export async function runOnboarding({
       // Fixed safe projection: the raw write/rename error never crosses the
       // boundary. atomicWriteJson already removed the temp; an existing summary
       // (if any) was never touched.
-      return baseResult({
+      return finalize({
         outcome: "error",
         selected: true,
         needsSelection: false,
@@ -579,7 +771,7 @@ export async function runOnboarding({
     }
   }
 
-  return baseResult({
+  return finalize({
     outcome: "applied",
     selected: true,
     needsSelection: false,
@@ -611,6 +803,10 @@ function baseResult(partial) {
     // Carried by EVERY outcome — including refused/error — so a Fresh Lead always
     // sees the acceptance chain, PASS facts, and closed recovery branches.
     acceptance: buildAcceptance(),
+    // R6-C: advisory role-matrix recommendations (single source shared by --json
+    // and human output, like acceptance). Defaults to the empty matrix so a call
+    // site can never drop the field.
+    recommendations: partial.recommendations ?? emptyRecommendations(),
     certification: partial.certification,
     writes: partial.writes,
     reason: partial.reason ?? null,

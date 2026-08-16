@@ -32,6 +32,10 @@ import {
   buildMinimalRegistry,
   buildMcpSnippet,
   buildAcceptance,
+  buildRecommendations,
+  emptyRecommendations,
+  BACKEND_CLI,
+  RECOMMENDATIONS_ADVISORY,
   runOnboarding,
   MAX_CANDIDATES,
 } from "../../src/application/onboarding.js";
@@ -54,6 +58,7 @@ const TEMPLATE = {
     coder_low: {
       _comment: "[Coder-Low] role comment",
       _comment_backend: "backend comment",
+      _comment_task: "默认适合: 边界明确的实现包/TDD/修 bug/重构/兼容性/脚本/文档配置/窄修正；是否拆分或转派由 Lead 决定",
       backend: "claude-code",
       provider: {
         protocol: "anthropic-compatible",
@@ -68,6 +73,7 @@ const TEMPLATE = {
     },
     coder_mm: {
       _comment: "[Coder-MM] role comment",
+      _comment_task: "适合任务: 图像/视频内容理解、前端设计与实现、视觉/美术审核",
       backend: "kimi-code",
       cwd: "D:/projects/your-project",
       systemPrompt: "config/roles/coder_mm.md",
@@ -75,6 +81,8 @@ const TEMPLATE = {
     },
     auditor: {
       _comment: "[Auditor] role comment",
+      _comment_auth: "官方 Claude OAuth（claude login），不走 wrapper",
+      _comment_task: "适合任务: 前置方案审计/后置独立复核/PASS-FAIL 判定",
       backend: "claude-code",
       cwd: "D:/projects/your-project",
       systemPrompt: "config/roles/auditor.md",
@@ -169,9 +177,10 @@ function makeMemFs(initial = {}) {
   };
 }
 
-// Bound the service with the in-memory template + injectable fs.
+// Bound the service with the in-memory template + injectable fs (+ optional
+// injected probeEnv for the R6-C recommendation tests — never a real probe).
 function memRun({
-  agentId, apply, endorseWorker, installRoot = "D:/wao",
+  agentId, apply, endorseWorker, installRoot = "D:/wao", probeEnv,
   initial = {}, reliabilitySummaryPath = "D:/wao/runs/reliability-summary.json",
 } = {}) {
   const fs = makeMemFs({
@@ -186,6 +195,7 @@ function memRun({
       exampleRegistryPath: "D:/wao/config/agents.example.json",
       targetRegistryPath: "D:/wao/config/agents.json",
       reliabilitySummaryPath,
+      probeEnv,
       fs,
     }),
   };
@@ -1066,4 +1076,308 @@ test("R5-D: hostExamples carried by every outcome incl. refused, and rendered in
   assert.ok(text.includes("claude mcp add wao --scope user --"), "claude one-liner rendered");
   assert.ok(/\[experimental\]/.test(text), "codex example carries the experimental tag");
   rmSync(dir, { recursive: true, force: true });
+});
+
+// ── 18. R6-C: role matrix + environment-adapted recommendations ─────────────
+//
+// Advisory recommendations for a bare `wao onboarding` (no --agent), derived
+// PURELY from the tracked template rows (backend / provider.apiKeyEnv / model.id
+// / _comment_task / _comment_auth) plus an INJECTED environment probe. Design
+// iron law: no second hand-written role table, no auto-selection, no config
+// write — the recommendation is advisory and the user keeps the choice.
+// Probing is injectable everywhere; nothing here touches the real environment.
+
+test("R6-C: buildRecommendations derives rows from template rows (backend→CLI, apiKeyEnv, duty truncation, authNote)", async () => {
+  const custom = {
+    agents: {
+      w_key: {
+        backend: "claude-code",
+        provider: { protocol: "anthropic-compatible", baseUrl: "https://x", apiKeyEnv: "ZHIPU_API_KEY" },
+        model: { id: "glm-5.3[1m]" },
+        _comment_task: `适合任务: ${"写".repeat(80)}`,
+        _comment_auth: "官方 Claude OAuth（claude login），不走 wrapper",
+      },
+      w_login: {
+        backend: "codex",
+        model: { id: "gpt-x" },
+        _comment_task: "适合任务: 跑测试",
+      },
+    },
+  };
+  const candidates = buildCandidateList(custom);
+  const probeEnv = {
+    hasCli: async () => true,
+    hasKeyEnv: async (n) => (n === "ZHIPU_API_KEY" ? "user_env" : "missing"),
+  };
+  const rec = await buildRecommendations(candidates, custom, probeEnv);
+  assert.equal(rec.advisory, RECOMMENDATIONS_ADVISORY);
+  const byId = Object.fromEntries(rec.rows.map((r) => [r.id, r]));
+  // Row generation correctness from template rows.
+  assert.equal(byId.w_key.requiresCli, "claude", "backend→CLI mapping");
+  assert.equal(byId.w_key.requiresKeyEnv, "ZHIPU_API_KEY", "provider.apiKeyEnv carried");
+  assert.equal(byId.w_key.model, "glm-5.3[1m]");
+  assert.ok(byId.w_key.duty.startsWith("适合任务: "), "_comment_task carried verbatim");
+  assert.ok(byId.w_key.duty.length <= 60, "_comment_task truncated to ~60 chars");
+  assert.ok(byId.w_key.duty.endsWith("…"), "truncation is marked with an ellipsis");
+  assert.equal(byId.w_key.authNote, "官方 Claude OAuth（claude login），不走 wrapper");
+  assert.equal(byId.w_key.readyState, "ready", "user_env key counts as present (bridged at dispatch)");
+  // No provider → no key requirement; login-state family.
+  assert.equal(byId.w_login.requiresCli, "codex");
+  assert.equal(byId.w_login.requiresKeyEnv, null, "no provider.apiKeyEnv ⇒ null");
+  assert.equal(byId.w_login.authNote, null, "no _comment_auth ⇒ null (no hand-written fallback)");
+  assert.equal(byId.w_login.readyState, "login_based");
+});
+
+test("R6-C: backend→CLI mapping covers all four backends", () => {
+  assert.deepEqual(BACKEND_CLI, {
+    "claude-code": "claude",
+    codex: "codex",
+    "kimi-code": "kimi",
+    "opencode-serve": "opencode",
+  });
+});
+
+test("R6-C: readyState four quadrants for key workers (injected probeEnv)", async () => {
+  const custom = {
+    agents: { w: { backend: "claude-code", provider: { apiKeyEnv: "K" }, model: { id: "m" } } },
+  };
+  const candidates = [{ id: "w", backend: "claude-code", model: "m" }];
+  const run = (cli, key) => buildRecommendations(candidates, custom, {
+    hasCli: async () => cli, hasKeyEnv: async () => key,
+  });
+  assert.equal((await run(true, "process_env")).rows[0].readyState, "ready");
+  assert.equal((await run(true, "user_env")).rows[0].readyState, "ready");
+  assert.equal((await run(true, "missing")).rows[0].readyState, "missing_key");
+  assert.equal((await run(false, "process_env")).rows[0].readyState, "missing_cli");
+  assert.equal((await run(false, "missing")).rows[0].readyState, "missing_both");
+  assert.equal((await run(false, null)).rows[0].readyState, "missing_both", "null key probe result = missing");
+});
+
+test("R6-C: no-key workers probe the CLI only (login_based / missing_cli)", async () => {
+  const custom = { agents: { t: { backend: "codex", model: { id: "m" } } } };
+  const candidates = [{ id: "t", backend: "codex", model: "m" }];
+  let keyProbes = 0;
+  const rec = await buildRecommendations(candidates, custom, {
+    hasCli: async () => true,
+    hasKeyEnv: async () => { keyProbes += 1; return "missing"; },
+  });
+  assert.equal(rec.rows[0].readyState, "login_based");
+  assert.equal(keyProbes, 0, "no key probe for a worker without provider.apiKeyEnv");
+  const missing = await buildRecommendations(candidates, custom, {
+    hasCli: async () => false, hasKeyEnv: async () => "missing",
+  });
+  assert.equal(missing.rows[0].readyState, "missing_cli");
+});
+
+test("R6-C: probe exceptions degrade to unknown and never throw", async () => {
+  const custom = {
+    agents: {
+      a: { backend: "claude-code", provider: { apiKeyEnv: "K" }, model: { id: "m" } },
+      b: { backend: "codex", model: { id: "m" } },
+    },
+  };
+  const candidates = [
+    { id: "a", backend: "claude-code", model: "m" },
+    { id: "b", backend: "codex", model: "m" },
+  ];
+  // Throwing CLI probe → every row (even the login-state row) degrades to unknown.
+  const cliThrows = await buildRecommendations(candidates, custom, {
+    hasCli: async () => { throw new Error("probe boom"); },
+    hasKeyEnv: async () => "process_env",
+  });
+  for (const row of cliThrows.rows) assert.equal(row.readyState, "unknown");
+  // Throwing key probe → the key row degrades; the login row still resolves.
+  const keyThrows = await buildRecommendations(candidates, custom, {
+    hasCli: async () => true,
+    hasKeyEnv: async () => { throw new Error("probe boom"); },
+  });
+  assert.equal(keyThrows.rows.find((r) => r.id === "a").readyState, "unknown");
+  assert.equal(keyThrows.rows.find((r) => r.id === "b").readyState, "login_based");
+  // Timeout-style "unknown" returns degrade the same way (no throw, truthful).
+  const timeouts = await buildRecommendations(candidates, custom, {
+    hasCli: async () => "unknown", hasKeyEnv: async () => "unknown",
+  });
+  for (const row of timeouts.rows) assert.equal(row.readyState, "unknown");
+});
+
+test("R6-C: rows are sorted ready-first (stable within rank)", async () => {
+  const custom = {
+    agents: {
+      r: { backend: "claude-code", provider: { apiKeyEnv: "K1" }, model: { id: "m" } },
+      m1: { backend: "codex", model: { id: "m" } },
+      m2: { backend: "claude-code", provider: { apiKeyEnv: "K2" }, model: { id: "m" } },
+      l: { backend: "kimi-code", model: { id: "m" } },
+      u: { backend: "opencode-serve", model: { id: "m" } },
+    },
+  };
+  const candidates = [
+    { id: "m2", backend: "claude-code", model: "m" },   // missing_key
+    { id: "l", backend: "kimi-code", model: "m" },      // login_based
+    { id: "r", backend: "claude-code", model: "m" },    // ready
+    { id: "m1", backend: "codex", model: "m" },         // missing_cli
+    { id: "u", backend: "opencode-serve", model: "m" }, // probe timeout → unknown
+  ];
+  const rec = await buildRecommendations(candidates, custom, {
+    hasCli: async (n) => {
+      if (n === "opencode") throw new Error("timeout");
+      return n === "claude" || n === "kimi"; // codex missing
+    },
+    hasKeyEnv: async (n) => (n === "K1" ? "process_env" : "missing"),
+  });
+  assert.deepEqual(rec.rows.map((r) => r.id), ["r", "l", "m1", "m2", "u"],
+    "ready → login_based → missing_* → unknown");
+});
+
+test("R6-C: an unmapped backend row degrades to unknown (cannot verify)", async () => {
+  const custom = { agents: { x: { backend: "some-future-backend", model: { id: "m" } } } };
+  const rec = await buildRecommendations(
+    [{ id: "x", backend: "some-future-backend", model: "m" }], custom,
+    { hasCli: async () => true, hasKeyEnv: async () => "missing" },
+  );
+  assert.equal(rec.rows[0].requiresCli, null);
+  assert.equal(rec.rows[0].readyState, "unknown");
+});
+
+test("R6-C: one probe per unique CLI/key name (≤4 CLI probes + ≤N key probes per invocation)", async () => {
+  const custom = {
+    agents: {
+      r1: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "m" } },
+      r2: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "m" } },
+      r3: { backend: "kimi-code", model: { id: "m" } },
+    },
+  };
+  const candidates = [
+    { id: "r1", backend: "claude-code", model: "m" },
+    { id: "r2", backend: "claude-code", model: "m" },
+    { id: "r3", backend: "kimi-code", model: "m" },
+  ];
+  const calls = { cli: [], key: [] };
+  await buildRecommendations(candidates, custom, {
+    hasCli: async (n) => { calls.cli.push(n); return true; },
+    hasKeyEnv: async (n) => { calls.key.push(n); return "missing"; },
+  });
+  assert.deepEqual(calls.cli, ["claude", "kimi"], "deduped per unique CLI name");
+  assert.deepEqual(calls.key, ["DEEPSEEK_API_KEY"], "deduped per unique key name");
+  assert.ok(calls.cli.length <= 4, "hard bound: at most 4 CLI probes");
+});
+
+test("R6-C: without probeEnv every row is unknown and nothing is probed", async () => {
+  const { result } = await memRun({});
+  const r = await result;
+  assert.equal(r.recommendations.advisory, RECOMMENDATIONS_ADVISORY);
+  assert.equal(r.recommendations.rows.length, 3);
+  assert.ok(r.recommendations.rows.every((row) => row.readyState === "unknown"),
+    "no probeEnv ⇒ no probing of any kind ⇒ unknown, never a fabricated ready");
+});
+
+test("R6-C: emptyRecommendations carries the advisory with zero rows", () => {
+  const e = emptyRecommendations();
+  assert.equal(e.advisory, RECOMMENDATIONS_ADVISORY);
+  assert.deepEqual(e.rows, []);
+});
+
+test("R6-C: human needs-selection output renders the matrix block + advisory sentences", async () => {
+  const allPresent = await (await memRun({
+    probeEnv: {
+      hasCli: async () => true,
+      hasKeyEnv: async (n) => (n === "DEEPSEEK_API_KEY" ? "process_env" : "missing"),
+    },
+  })).result;
+  const text = renderHuman(allPresent);
+  assert.ok(text.includes("角色矩阵与当前环境适配"), "matrix block header");
+  assert.ok(text.includes(RECOMMENDATIONS_ADVISORY), "advisory sentence shared with JSON");
+  assert.ok(text.includes("按你有的认证选一行重跑 --agent <id> --apply；没有的 key 对应行可忽略。"),
+    "tail advisory line hands the choice back to the user");
+  // coder_low is ready (claude CLI + DEEPSEEK_API_KEY), sorted first.
+  assert.ok(text.includes("[ready]"), "ready bracket rendered");
+  assert.ok(text.includes("[CLI 登录态]"), "login-state rows rendered");
+  assert.ok(text.indexOf("[ready]") < text.indexOf("[CLI 登录态]"), "ready rows sorted before login rows");
+  assert.ok(text.includes("认证: key DEEPSEEK_API_KEY"), "key env name shown as the auth method");
+  // duty comes from _comment_task (display strips the redundant prefix).
+  assert.ok(text.includes("适合: 边界明确的实现包/TDD"), "duty rendered from the template row");
+  assert.ok(text.includes("官方 Claude OAuth（claude login）"), "authNote from _comment_auth rendered");
+  // The existing candidate list / re-run hints are untouched.
+  assert.ok(text.includes("Candidates from the tracked template:"));
+  assert.ok(text.includes("Re-run with: wao onboarding --agent <id>"));
+
+  // Missing-probe scenario: human brackets name what is missing.
+  const nothing = await (await memRun({
+    probeEnv: { hasCli: async () => false, hasKeyEnv: async () => "missing" },
+  })).result;
+  const textMissing = renderHuman(nothing);
+  assert.ok(textMissing.includes("缺 claude CLI"), "missing_cli label");
+  assert.ok(textMissing.includes("缺 DEEPSEEK_API_KEY"), "missing_key label");
+  assert.ok(textMissing.includes("缺 kimi CLI"), "kimi missing_cli label");
+  assert.ok(textMissing.includes("缺 claude CLI + 缺 DEEPSEEK_API_KEY"), "missing_both label");
+  assert.ok(!textMissing.includes("[ready]"), "nothing is ready in this scenario");
+});
+
+test("R6-C: recommendations are additive; every pre-existing result key is preserved", async () => {
+  const probeEnv = { hasCli: async () => true, hasKeyEnv: async () => "missing" };
+  for (const m of [{}, { agentId: "coder_low" }, { agentId: "coder_low", apply: true }, { agentId: "ghost" }]) {
+    const { result } = await memRun({ ...m, probeEnv });
+    const r = await result;
+    const json = JSON.parse(JSON.stringify(r));
+    // Every pre-existing bounded key is still present (additive, no breakage).
+    for (const key of ["mode", "outcome", "selected", "needsSelection", "candidates",
+      "registry", "mcpSnippet", "hostExamples", "acceptance", "certification", "writes", "reason"]) {
+      assert.ok(key in json, `mode ${JSON.stringify(m)} must keep ${key}`);
+    }
+    assert.ok(json.recommendations && typeof json.recommendations.advisory === "string",
+      `mode ${JSON.stringify(m)} must carry recommendations.advisory`);
+    assert.ok(Array.isArray(json.recommendations.rows),
+      `mode ${JSON.stringify(m)} must carry recommendations.rows`);
+    // Rows carry the bounded spec shape and the closed readyState domain.
+    for (const row of json.recommendations.rows) {
+      for (const k of ["id", "backend", "model", "requiresCli", "requiresKeyEnv", "duty", "readyState"]) {
+        assert.ok(k in row, `row must carry ${k}`);
+      }
+      assert.ok(["ready", "missing_cli", "missing_key", "missing_both", "login_based", "unknown"].includes(row.readyState),
+        "readyState must stay inside the closed domain");
+    }
+  }
+  // The unreadable-template error outcome carries the empty matrix (zero probes).
+  const fs = makeMemFs({});
+  const err = await runOnboarding({
+    installRoot: "D:/wao",
+    exampleRegistryPath: "D:/wao/config/agents.example.json",
+    targetRegistryPath: "D:/wao/config/agents.json",
+    reliabilitySummaryPath: "D:/wao/runs/reliability-summary.json",
+    fs,
+    probeEnv,
+  });
+  assert.equal(err.outcome, "error");
+  assert.deepEqual(err.recommendations.rows, []);
+  assert.equal(err.recommendations.advisory, RECOMMENDATIONS_ADVISORY);
+});
+
+test("R6-C: recommendations over the REAL tracked template derive all seven rows from template data", async () => {
+  const raw = readFileSync(join("config", "agents.example.json"), "utf8");
+  const template = JSON.parse(raw);
+  const candidates = buildCandidateList(template);
+  assert.equal(candidates.length, 7, "real template has the seven workers");
+  const rec = await buildRecommendations(candidates, template, {
+    hasCli: async () => true,
+    hasKeyEnv: async (n) => (n === "ZHIPU_API_KEY" ? "process_env" : "missing"),
+  });
+  assert.equal(rec.rows.length, 7);
+  const byId = Object.fromEntries(rec.rows.map((r) => [r.id, r]));
+  assert.equal(byId.coder_hq.requiresKeyEnv, "ZHIPU_API_KEY");
+  assert.equal(byId.researcher.requiresKeyEnv, "DEEPSEEK_API_KEY");
+  assert.equal(byId.coder_low.requiresKeyEnv, "DEEPSEEK_API_KEY");
+  assert.equal(byId.coder_mm.requiresKeyEnv, null, "kimi uses CLI login state");
+  assert.equal(byId.coder_mm.requiresCli, "kimi");
+  assert.equal(byId.tester.requiresKeyEnv, null, "tester uses codex login");
+  assert.equal(byId.tester.requiresCli, "codex");
+  assert.equal(byId.auditor.requiresKeyEnv, null, "auditor uses official OAuth");
+  assert.equal(byId.coder_opencode_fallback.requiresKeyEnv, null);
+  assert.equal(byId.coder_opencode_fallback.requiresCli, "opencode");
+  assert.equal(byId.coder_hq.readyState, "ready");
+  assert.equal(byId.researcher.readyState, "missing_key", "DeepSeek key missing in the fake probe");
+  // duty/authNote all come from template rows (no hand-written role table).
+  assert.ok(byId.researcher.duty.startsWith("适合任务: "));
+  assert.ok(byId.auditor.duty.startsWith("适合任务: "));
+  assert.ok(byId.auditor.authNote.includes("claude login"), "authNote from _comment_auth");
+  // The serialized recommendation never carries a credential VALUE.
+  assert.ok(!/sk-[A-Za-z0-9]{6,}/.test(JSON.stringify(rec)));
 });
