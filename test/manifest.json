@@ -31,6 +31,8 @@
       "run-lifecycle/m11-11c-sessionReuse.test.js",
       "run-lifecycle/m11-11d-friction.test.js",
       "run-lifecycle/deliveryCwdRequirement.test.js",
+      "run-lifecycle/dispatchCwdExistence.test.js",
+      "run-lifecycle/runManagerCwdExistence.test.js",
       "delivery/m11-12b-verificationSummary.test.js",
       "delivery/m11-8c-gate.test.js",
       "registry-roles/m11-9-packageA.test.js",

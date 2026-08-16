@@ -1431,7 +1431,7 @@ test("TD-88: wao ask 缺 agentId 或任务时 fail-fast（快捷派工参数校�
   assert.match(r2.stderr, /requires 一句话任务/, "stderr 提示需要一句话任务");
 });
 
-test("TD-88: workflow list 列出模板 + workflow run 按名字解析", () => {
+test("TD-88: workflow list 列出模板 + workflow run 按名字解析（R7-AB：临时 run-dir，占位 cwd 派发前拒绝）", () => {
   // workflow list 应列出 analyze-implement 和 parallel-research 两个模板
   const r = spawnSync(process.execPath, ["src/cli.js", "workflow", "list"],
     { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
@@ -1440,16 +1440,69 @@ test("TD-88: workflow list 列出模板 + workflow run 按名字解析", () => {
   assert.match(r.stdout, /parallel-research/, "list 应列出 parallel-research 模板");
   assert.match(r.stdout, /workflow run <名字>/, "list 提示按名字调用用法");
 
-  // 按名字调用应解析到 templates/ 目录（不传 --vars 让它报"占位符未解析"或正常加载）
-  // 这里只验证名字解析不报"文件不存在"——加载成功即说明解析对了
-  const r2 = spawnSync(process.execPath, [
-    "src/cli.js", "workflow", "run", "parallel-research",
-    "--vars", "topicA=testA", "--vars", "topicB=testB",
-    "--registry", "config/agents.example.json", // 用 example 避免依赖真实 agents.json
-  ], { cwd: process.cwd(), encoding: "utf8", timeout: 15000 });
-  // 不验证 workflow 执行结果（需要真实 backend），只验证没报"找不到文件"
-  assert.doesNotMatch(r2.stderr || "", /MODULE_NOT_FOUND|Cannot find module.*parallel-research/,
-    "按名字调用应解析到模板文件，不报模块未找到");
+  // R7-AB 测试卫生：workflow run 的 agent 节点此前不带 --run-dir，会真实派发
+  // 2 路 researcher（example registry 的占位 cwd D:/projects/your-project），
+  // 失败 transcript 直接泄漏进仓库真实 runs/。现在显式指向临时 run-dir——
+  // 本测试对仓库 runs/ 的写入结构性归零（任何机器、任何 env 下均成立）。
+  const dir = mkdtempSync(join(tmpdir(), "wao-td88-wf-"));
+  try {
+    const wfRunDir = join(dir, "wf-runs");
+    const bgRunDir = join(dir, "bg-runs");
+
+    // 按名字调用应解析到 templates/ 目录。不验证 workflow 执行结果（节点失败
+    // 是 per-node catch，引擎照常收尾输出汇总），只验证名字解析不报"找不到文件"
+    // ——原意图（验证名字解析不报 MODULE_NOT_FOUND）保持不变。
+    const r2 = spawnSync(process.execPath, [
+      "src/cli.js", "workflow", "run", "parallel-research",
+      "--vars", "topicA=testA", "--vars", "topicB=testB",
+      "--registry", "config/agents.example.json", // 用 example 避免依赖真实 agents.json
+      "--run-dir", wfRunDir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 15000 });
+    assert.doesNotMatch(r2.stderr || "", /MODULE_NOT_FOUND|Cannot find module.*parallel-research/,
+      "按名字调用应解析到模板文件，不报模块未找到");
+    assert.equal(r2.status, 0, `workflow 引擎应跑完并输出节点汇总，stderr=${r2.stderr}`);
+    assert.match(r2.stdout, /"workflowRunId": "wf_/, "输出 workflow 级 runId");
+
+    // R7-AB 层二（workflow 节点通道）：example registry 的占位 cwd（本机不存在）
+    // 在 RunManager.start 被 typed 拒绝——agent 节点 completed:false 且无 runId
+    // （run 从未 start），临时 run-dir 只含 workflow 级 transcript、零 run
+    // transcript（typed 文案断言钉在引擎 nodeResults 层：
+    // run-lifecycle/runManagerCwdExistence.test.js RCE-8）。
+    const summary = JSON.parse(r2.stdout);
+    assert.equal(summary.completed, false, "节点失败 → workflow 整体 completed:false");
+    for (const nodeId of ["research_a", "research_b"]) {
+      assert.ok(summary.nodes[nodeId], `${nodeId} 节点出现在汇总里`);
+      assert.equal(summary.nodes[nodeId].completed, false, `${nodeId} 因占位 cwd 被拒`);
+      assert.equal(summary.nodes[nodeId].runId, undefined, `${nodeId} 无 runId——run 在 start 前置校验被拒，从未创建`);
+    }
+    const wfJsonl = existsSync(wfRunDir) ? readdirSync(wfRunDir).filter((f) => f.endsWith(".jsonl")) : [];
+    assert.equal(wfJsonl.length, 1, "run-dir 只含 workflow 级 transcript");
+    assert.match(wfJsonl[0], /^wf_/, "唯一 transcript 是 workflow 级（wf_ 前缀）");
+
+    // R7-AB 层一（同一缺陷的后台派发面）：example registry 的占位 cwd（本机不存在）
+    // 在派发服务层被 typed 拒绝。这里用【后台派发通道】端到端钉死该契约：
+    // exit 非零 + stderr 含 dispatch_cwd_not_found 与解析后的占位路径 +
+    // run-dir 零 run transcript（早于任何 transcript 写入、零 fork）。
+    const bg = spawnSync(process.execPath, [
+      "src/cli.js", "run", "researcher",
+      "--prompt", "x",
+      "--background",
+      "--registry", "config/agents.example.json",
+      "--run-dir", bgRunDir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 15000 });
+    assert.notEqual(bg.status, 0, "占位 cwd 的后台派发必须 exit 非零");
+    assert.match(bg.stderr, /dispatch_cwd_not_found/, "stderr 含闭集 reason code");
+    assert.match(bg.stderr, /dispatch working directory does not exist/, "stderr 含 typed 拒绝文案");
+    assert.ok(bg.stderr.includes(resolve("D:/projects/your-project")),
+      `stderr 含解析后的占位路径，实际：${bg.stderr}`);
+    assert.doesNotMatch(bg.stderr, /node\.exe ENOENT/, "不再出现归咎可执行文件的误导性 spawn ENOENT");
+    const leaked = existsSync(bgRunDir)
+      ? readdirSync(bgRunDir).filter((f) => f.endsWith(".jsonl"))
+      : [];
+    assert.equal(leaked.length, 0, "被拒派发零 transcript（run-dir 甚至未创建）");
+  } finally {
+    rmrfRetry(dir);
+  }
 });
 
 test("run --background: malformed --scorecard-rules fail-fast，不返回 ghost runId", () => {

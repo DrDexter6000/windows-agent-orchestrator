@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
 import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatest, projectCorrections } from "./transcript.js";
@@ -46,6 +46,111 @@ function installSigintHandler() {
 }
 
 const MAX_PENDING_DELIVERY_WRITE_INTENTS = 256;
+
+// R7-AB: SSOT for the working-directory existence early-refusal shared by the
+// two dispatch/execution authorities — RunManager.start (foreground family:
+// `run` without --background, workflow agent nodes, daemon `start`) and
+// dispatchRun (background family: `run --background` / `spawn` / MCP
+// run_dispatch / daemon-dispatched). One class definition; runDispatch.js
+// imports it DOWNWARD (application→core, same direction as its existing
+// ../transcript.js / ../delivery.js imports) and re-exports it so its
+// established typed-error import surface stays stable. A dedicated
+// src/application/ home is impossible under the frozen L4 layering SSOT
+// (test/isolation-infra/layering.test.js: core→application is an upward edge
+// and the upward whitelist is exactly empty) — hosting here follows the
+// existing typed-error precedent (ReadOnlyWorktreeRequiredError below).
+//
+// Defect this closes (2026-08-16, 22 researcher spawn_error runs in runs/):
+// Node spawn's classic trap — when the cwd option points at a missing
+// directory, the ENOENT is blamed on the EXECUTABLE ("spawn <node.exe>
+// ENOENT"). Dispatches without an explicit --cwd inherited the example
+// registry's placeholder cwd ("D:/projects/your-project",
+// config/agents.example.json) and failed only at spawn time, with a
+// misleading error, after the transcript was already written.
+//
+// Deliberate deviation from the closed-set no-payload errors: the message
+// CARRIES the resolved absolute path and its source. cwd is the Lead's/
+// registry's own input, already recorded durably in the transcript
+// (run.background_submitted.cwd / run.started.cwd) — never a credential or
+// provider payload. The MCP boundary still never echoes it: the run_dispatch
+// handler collapses every unrecognized typed error to its fixed dispatch
+// error text, so the dynamic message reaches only CLI/local surfaces (stderr),
+// where the path is exactly what the operator needs.
+export class DispatchCwdNotFoundError extends Error {
+  constructor(resolvedPath, source) {
+    const fromFlag = source === "flag";
+    super(
+      `dispatch working directory does not exist: ${resolvedPath} `
+      + `(from ${fromFlag ? "the --cwd flag" : "the agent registry entry cwd"}) `
+      + "— Node spawn would misreport this as ENOENT on the executable; "
+      + `${fromFlag
+        ? "point --cwd at an existing directory (or create it first)"
+        : "fix the registry entry's cwd (or pass --cwd) to point at an existing directory"}. `
+      + "Refused before any side effect (dispatch_cwd_not_found).",
+    );
+    this.name = "DispatchCwdNotFoundError";
+    this.reasonCode = "dispatch_cwd_not_found";
+    this.resolvedPath = resolvedPath;
+    this.cwdSource = fromFlag ? "flag" : "registry";
+  }
+}
+
+/**
+ * R7-AB: a spawn cwd must be an EXISTING directory. statSync covers both bad
+ * faces in one probe: a missing path (throws, → false) and a path that exists
+ * but is a plain FILE (isDirectory() === false — spawn would fail on it the
+ * same way). Equivalent to existsSync + statSync().isDirectory() without the
+ * TOCTOU window between the two calls.
+ * @param {string} p
+ * @returns {boolean}
+ */
+function isExistingDirectory(p) {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve the PREDICTED working directory the worker spawn will run in: the
+ * explicit cwd argument when it is a non-empty string, else the registry
+ * entry's agent.cwd (registry normalization requires that field non-empty, so
+ * a null return is defensive only). Resolved via path.resolve — the same
+ * semantics Node spawn applies to a relative cwd (resolved against the
+ * dispatching process's cwd).
+ * @param {object} input
+ * @param {string|undefined} input.explicitCwd — the caller-supplied cwd option
+ * @param {string|undefined} input.agentCwd — the registry entry's cwd
+ * @returns {{path:string, source:"flag"|"registry"}|null}
+ */
+function resolvePredictedDispatchCwd({ explicitCwd, agentCwd }) {
+  if (typeof explicitCwd === "string" && explicitCwd.length > 0) {
+    return { path: resolve(explicitCwd), source: "flag" };
+  }
+  if (typeof agentCwd === "string" && agentCwd.length > 0) {
+    return { path: resolve(agentCwd), source: "registry" };
+  }
+  return null;
+}
+
+/**
+ * R7-AB shared early-refusal: throw the typed DispatchCwdNotFoundError when
+ * the predicted working directory is not an existing directory (missing, or
+ * exists but is a file). Callers invoke this BEFORE any side effect — for
+ * dispatchRun: before the credential preflight, any sessionReuse/lineage slot
+ * claim, any transcript write, and the fork; for RunManager.start: before the
+ * credential check, runDir/transcript creation, worktree creation, and spawn.
+ * @param {object} input — same shape as resolvePredictedDispatchCwd
+ * @returns {void}
+ */
+export function assertExistingDispatchCwd(input) {
+  const predicted = resolvePredictedDispatchCwd(input);
+  if (predicted === null) return;
+  if (!isExistingDirectory(predicted.path)) {
+    throw new DispatchCwdNotFoundError(predicted.path, predicted.source);
+  }
+}
 
 // Round 4 Bundle B: thrown when a readOnly run's FORCED worktree isolation
 // cannot be established (worktree creation failed). Read-only runs refuse the
@@ -434,6 +539,43 @@ export class RunManager {
           `Switch to a backend that declares supportsSessionReuse, or remove sessionReuse from this agent.`,
         );
       }
+    }
+
+    // R7-AB (layer 2): working-directory existence early-refusal, shared SSOT
+    // with dispatchRun (defined in THIS module — DispatchCwdNotFoundError +
+    // assertExistingDispatchCwd above; runDispatch imports them downward).
+    // Covers the FOREGROUND family that never goes through dispatchRun: `run`
+    // without --background (commands/run.js → start), workflow agent nodes
+    // (workflow/handlers.js → start), and daemon `start` (daemon.js → start).
+    //
+    // Mechanism note: the runner's --cwd reaches start as the cwd option;
+    // getAgent(agentId, { cwd }) above merges it over the registry entry, so
+    // agent.cwd here IS the predicted spawn cwd (explicit non-empty cwd when
+    // given, else the registry entry's). The explicit option is still passed
+    // separately for the error's source label (--cwd flag vs registry entry).
+    //
+    // Capability-scoped, provider-neutral: keyed on the SAME declared
+    // capability the M12-14 preflightInvocation gate below uses — a backend
+    // that implements preflightInvocation composes a LOCAL OS invocation and
+    // spawns with cwd: agent.cwd (processBackend.js spawn / deepSeekHarness),
+    // so a missing directory hits Node's classic ENOENT-blames-the-executable
+    // trap there. OpenCodeServe (an HTTP backend with no preflightInvocation)
+    // threads agent.cwd to the serve API as a REMOTE directory hint — no local
+    // spawn, no local ENOENT trap — and is unaffected, exactly as it is by the
+    // invocation-budget preflight.
+    //
+    // Position: BEFORE the credential check, mirroring layer 1's ordering —
+    // the refusal stays deterministic across environments (machine env cannot
+    // mask it) — and BEFORE runDir/transcript creation, worktree creation
+    // (the checked path is the worktree SOURCE directory; the worktree itself
+    // is WAO-created and always exists), and spawn: zero side effects.
+    //
+    // TOCTOU boundary (honest): this runs at start preflight. A directory
+    // deleted between this check and backend.spawn still fails at spawn time;
+    // the residual window is unchanged, but its failure face is now the typed
+    // diagnosable one instead of the misleading executable-ENOENT.
+    if (typeof backend.preflightInvocation === "function") {
+      assertExistingDispatchCwd({ explicitCwd: cwd, agentCwd: agent.cwd });
     }
 
     // M11-7 (CTO closeout): credential availability check BEFORE transcript

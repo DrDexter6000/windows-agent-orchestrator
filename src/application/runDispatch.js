@@ -26,6 +26,20 @@ import { readRegistry } from "../registry.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { inheritedEnvNames } from "../envPolicy.js";
 import { resolveReuseTurn, resolveLineageFirstTurn } from "./sessionReuse.js";
+import { assertExistingDispatchCwd } from "../runManager.js";
+
+// R7-AB: the working-directory existence early-refusal SSOT (the typed
+// DispatchCwdNotFoundError + the shared assert) lives in src/runManager.js —
+// the core-layer spawn authority — so RunManager.start throws the SAME typed
+// error with ONE class definition across both authorities. This module
+// imports it DOWNWARD (application→core, the same direction as its existing
+// ../transcript.js / ../delivery.js / ../registry.js imports); a dedicated
+// src/application/ home is impossible under the frozen L4 layering SSOT
+// (core→application is an upward edge and the upward whitelist is exactly
+// empty). Re-exported here to keep this module's established typed-error
+// import surface stable (callers and tests import the dispatch typed errors
+// from runDispatch.js).
+export { DispatchCwdNotFoundError } from "../runManager.js";
 
 // M11-7: thrown when a worker's REQUIRED credential is missing at dispatch time.
 // Carries the missing env NAMES (never values). Callers (MCP) collapse to a
@@ -176,6 +190,9 @@ function generateRunId() {
  *   (run.background_submitted.cwd). The CLI boundary refuses a delivery dispatch
  *   without it up front (typed DeliveryCwdRequiredError, commands/run.js argv
  *   gate); the MCP boundary always supplies the host-proven workspace root.
+ *   R7-AB: the PREDICTED cwd (this argument when non-empty, else the registry
+ *   entry's agent.cwd) must resolve to an existing directory — otherwise the
+ *   dispatch is refused with DispatchCwdNotFoundError before any side effect.
  * @param {number} [input.waitTimeout] — explicit override (range-validated 1000..600000)
  * @param {number} [input.globalWaitTimeout] — server-owned global config.waitTimeout (trusted)
  * @param {number} [input.pollInterval]
@@ -335,6 +352,23 @@ export async function dispatchRun({
   let finalCredentials = resolvedCredentials ?? {};
   const registry = await readRegistry(resolvedRegistry);
   const agent = registry.getAgent(agentId);
+
+  // R7-AB (layer 1): working-directory existence early-refusal, shared SSOT
+  // with RunManager.start (../runManager.js — same typed error, same
+  // prediction semantics). The PREDICTED cwd is the directory the worker spawn
+  // will run in: the explicit cwd argument when it is a non-empty string, else
+  // the registry entry's agent.cwd (registry normalization requires that field
+  // non-empty, so the skip branch inside the assert is defensive only). A
+  // missing directory — or a path that exists but is a file — refuses with the
+  // typed DispatchCwdNotFoundError BEFORE the credential preflight, any
+  // sessionReuse/lineage slot claim, any transcript write, and the fork: a
+  // nonexistent cwd used to surface only at runner spawn time as a misleading
+  // "spawn <node.exe> ENOENT" spawn_error (Node blames the cwd option on the
+  // executable), after the transcript was already written. Sitting between the
+  // registry resolution and the credential preflight keeps the refusal
+  // deterministic across environments (machine env cannot mask it).
+  assertExistingDispatchCwd({ explicitCwd: cwd, agentCwd: agent.cwd });
+
   if (!skipCredentialCheck) {
     const resolver = createEnvResolver(userEnvReader);
     const readiness = await assessWorkerReadiness({

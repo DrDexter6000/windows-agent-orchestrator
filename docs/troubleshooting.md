@@ -20,6 +20,7 @@
 | opencode TUI 能用但 WAO 不能 | [§1.2](#12-serve-进程缺-provider-key-401) 或 [§1.3](#13-kimi-白名单静默拒绝) |
 | 多行 prompt 被截断（只传第一行） | [§2 CLI 与 shell](#2-cli-与-shell) |
 | worker 在错误的仓库目录干活 | [§3 工作目录](#3-工作目录cwd) |
+| 终态 spawn_error：报 node.exe ENOENT 但 node.exe 存在 | [§3.2 cwd 目录不存在](#32-run-终态-spawn_error报错说-nodeexe-enoent-但-nodeexe-明明存在) |
 | runs 状态池有大量 running 噪音 | [§4 运行数据运维](#4-运行数据运维) |
 | run 完成了但 metrics 全 0 | [§5 证据完整性](#5-证据完整性) |
 | worker 完成判定不可靠（过早 completed 或该完成没完成） | [§6 完成判定](#6-完成判定) |
@@ -181,6 +182,13 @@ serve 后台进程不一定。
   - 派发时显式 `--cwd "D:/path/to/target-repo"`
   - 或在 agents.json 里把每个 worker 的 cwd 改成目标仓
   - worktree 隔离时（`--isolate`），cwd 是 worktree 路径，自动正确
+
+### 3.2 run 终态 spawn_error，报错说 node.exe ENOENT 但 node.exe 明明存在
+
+- **症状**：派发/执行终态 `spawn_error`，`run.error` 写着 `spawn C:\...\node.exe ENOENT`，但该 node.exe 实际存在（2026-08-16 一批 22 条 researcher 派发即此形状）
+- **判读**：**报错归咎 node.exe 但 node.exe 存在时，真因几乎总是 cwd 目录不存在**（Node spawn 的经典陷阱：`cwd` 选项指向不存在的目录时，ENOENT 会归咎到可执行文件名上）。工作目录来自显式 `--cwd`，否则来自 registry 条目的 `cwd`（example 模板里的 `D:/projects/your-project` 是文档占位路径，本机不存在）
+- **现状**：已双层早拒绝——后台派发通道（`run --background` / `spawn` / MCP `run_dispatch`）在派发服务层（dispatchRun），前台执行通道（`run` 前台 / workflow agent 节点 / daemon `start`，进程式 backend）在 RunManager.start。预测 cwd 解析（`path.resolve`）后不是已存在目录（存在但是文件同样算）时，在任何 transcript 写入/worktree 创建/fork/spawn 之前抛 typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，message 含解析后的绝对路径与来源标注）。**旧 transcript 见此判读**
+- **修复**：`--cwd` 指向已存在的目标目录，或把 agents.json / agents.example.json 里的占位 `cwd` 改成真实项目路径（派发/执行会显式拒绝并指路，不会再走到 spawn 期）
 
 ---
 

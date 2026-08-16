@@ -253,6 +253,15 @@ npm run cli -- runs wait <runId> --format json       # 完整服务结果 + sema
 `runs` 的未知子命令（如 `runs waitx`）会 fail-closed 报错并列出全部合法子命令；
 裸 `runs` 仍保持列出 run 列表。
 
+工作目录（显式 `--cwd`，缺省时 registry 条目的 `cwd`）**必须是已存在的目录**。
+不存在（或是文件）时派发/执行在任何副作用之前被拒绝——typed error
+`DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，message 含解析后的
+绝对路径与来源标注；零 transcript、零 fork、零 worktree）。覆盖全部通道：后台派发
+（`run --background` / `spawn` / MCP `run_dispatch`，在派发服务层早拒绝）与前台执行
+（`run` 前台、workflow agent 节点、daemon `start`，在 RunManager.start 早拒绝——
+进程式 backend；HTTP serve backend 的 cwd 是远端目录提示，不做本机存在性判定）。
+判读与旧 transcript 的排障见 `docs/troubleshooting.md §3.2`。
+
 ### 场景 3：并行跑多个 agent
 
 ```powershell

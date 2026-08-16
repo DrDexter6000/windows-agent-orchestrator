@@ -96,7 +96,7 @@ Run one agent to completion and print a summary (default text format).
 Flags:
   --prompt TEXT                  the task prompt (required unless --prompt-file is given)
   --prompt-file FILE             read the task prompt from FILE (multi-line safe)
-  --cwd DIR                      target project directory (required for --background delivery runs)
+  --cwd DIR                      target project directory (required for --background delivery runs) — must be an existing directory; a missing or non-directory path is refused at dispatch before any side effect
   --registry FILE                agent registry file (default config/agents.json)
   --run-dir DIR                  transcript directory (default runs/)
   --poll-interval MS             status poll interval in ms

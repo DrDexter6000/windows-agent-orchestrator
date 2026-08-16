@@ -37,7 +37,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -159,6 +159,12 @@ test("DC-3: delivery + explicit --cwd → dispatchRun accepts; background_submit
     const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
     const runDir = join(dir, "runs");
     const targetProject = join(dir, "target-project"); // the explicit --cwd value
+    // R7-AB: the predicted dispatch cwd must be an EXISTING directory — the
+    // dispatch-time existence check (dispatchCwdExistence.test.js) rejects a
+    // never-created path before any side effect. Create the target so this test
+    // keeps proving what it was written for: the ACCEPTED delivery path and the
+    // ownership record built from the explicit --cwd.
+    mkdirSync(targetProject, { recursive: true });
     const result = await dispatchRun({
       agentId: "coder_low",
       prompt: "deliver",
