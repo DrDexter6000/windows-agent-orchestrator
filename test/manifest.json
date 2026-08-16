@@ -3,12 +3,14 @@
   "groups": {
     "pure": [
       "isolation-infra/alerts.test.js",
+      "isolation-infra/stateChangeReasons.test.js",
       "registry-roles/applicationRegistryInventory.test.js",
       "isolation-infra/canonicalRunner.test.js",
       "registry-roles/certificationReasons.test.js",
       "backends/claudeCodeProvider.test.js",
       "backends/claudeProviderWrapper.test.js",
       "isolation-infra/cliFormatJson.test.js",
+      "run-lifecycle/runReadOnlyObservation.test.js",
       "transcript/cliRunSummary.test.js",
       "transcript/collectFinal.test.js",
       "isolation-infra/daemonHealth.test.js",
@@ -193,7 +195,8 @@
       "delivery/mcpRunDeliveryReview.test.js",
       "delivery/mcpRunDeliveryReviewBundle.test.js",
       "run-lifecycle/m12-19-processRecovery.test.js",
-      "delivery/runDelivery.test.js"
+      "delivery/runDelivery.test.js",
+      "run-lifecycle/readOnlyDispatch.test.js"
     ],
     "process": [
       "isolation-infra/backgroundRunner.test.js",
