@@ -22,7 +22,7 @@ import { ClaudeCodeBackend } from "./backends/claudeCode.js";
 import { CodexBackend } from "./backends/codex.js";
 import { OpenCodeServeBackend } from "./backends/opencodeServe.js";
 import { DeepSeekHarnessBackend } from "./backends/deepSeekHarness.js";
-import { readTranscript } from "./transcript.js";
+import { readTranscript, STATE_CHANGE_REASON } from "./transcript.js";
 
 const SMOKE_PROMPT = "Reply with exactly: smoke ok";
 
@@ -271,7 +271,7 @@ async function smokeScorecard(cwd, runDir) {
     console.log(`  lastTransition: ${lastChange?.from}→${lastChange?.to}(${lastChange?.reason})`);
 
     const ok = !waitResult.completed && run.state === "failed"
-      && scEvent?.passed === false && lastChange?.reason === "scorecard_failed";
+      && scEvent?.passed === false && lastChange?.reason === STATE_CHANGE_REASON.scorecard_failed;
     console.log(`  ${ok ? "✅ PASS" : "❌ FAIL"}  场景 2`);
     if (!ok) allOk = false;
   } catch (error) {

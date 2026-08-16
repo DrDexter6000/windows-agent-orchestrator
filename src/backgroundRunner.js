@@ -20,7 +20,7 @@ import { backendFor } from "./backends/factory.js";
 import { getWaoCliPath } from "./waoCliPath.js";
 import { readRegistry } from "./registry.js";
 import { normalizeAgent } from "./registry.js";
-import { JsonlTranscript, findLastEventSeq, findState, readTranscript, TERMINAL_STATES } from "./transcript.js";
+import { JsonlTranscript, findLastEventSeq, findState, readTranscript, TERMINAL_STATES, STATE_CHANGE_REASON } from "./transcript.js";
 import { checkNodeVersion } from "./nodeVersionGuard.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
@@ -212,7 +212,7 @@ async function writeStartupFailureTranscript({ runDir, runId, agentId, prompt, e
   if (!events.some((event) => event.type === "run.state_change")) {
     // TD-99：pending 初始化走 transitionState（first-terminal-wins 仲裁）。
     // 若 rejected（runId 复用了旧终态 transcript），立即返回，不追加 startup error。
-    const pendingResult = await transcript.transitionState(null, "pending", "created");
+    const pendingResult = await transcript.transitionState(null, "pending", STATE_CHANGE_REASON.created);
     if (!pendingResult.accepted) return;
   }
   if (prompt && !events.some((event) => event.type === "prompt.sent")) {
@@ -223,7 +223,7 @@ async function writeStartupFailureTranscript({ runDir, runId, agentId, prompt, e
   }
   await transcript.append("run.error", { phase: "start", error: error.message ?? String(error) });
   // TD-99：failed 终态走 transitionState——若已被外部 abort（竞态），此处 rejected，不覆盖。
-  await transcript.transitionState("pending", "failed", "startup_error");
+  await transcript.transitionState("pending", "failed", STATE_CHANGE_REASON.startup_error);
 }
 
 /**
@@ -267,7 +267,7 @@ export async function runMain(argv = process.argv.slice(2)) {
           });
           if (!TERMINAL_STATES.includes(findState(events))) {
             await t.append("run.error", { phase: "delivery_parse", error: "malformed delivery JSON in runner argv" });
-            await t.transitionState("pending", "failed", "delivery_parse_error");
+            await t.transitionState("pending", "failed", STATE_CHANGE_REASON.delivery_parse_error);
           }
         } catch { /* best effort — don't mask the original error */ }
       }
@@ -308,7 +308,7 @@ export async function runMain(argv = process.argv.slice(2)) {
           });
           if (!TERMINAL_STATES.includes(findState(events))) {
             await t.append("run.error", { phase: "reuse_worktree_parse", error: "malformed reuse-worktree JSON in runner argv" });
-            await t.transitionState("pending", "failed", "reuse_worktree_parse_error");
+            await t.transitionState("pending", "failed", STATE_CHANGE_REASON.reuse_worktree_parse_error);
           }
         } catch { /* best effort — don't mask the original error */ }
       }

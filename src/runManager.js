@@ -2,7 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
-import { JsonlTranscript, TERMINAL_STATES, readTranscript, findState, findLatest, projectCorrections } from "./transcript.js";
+import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatest, projectCorrections } from "./transcript.js";
 import { createWorktree, removeWorktree } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
@@ -32,7 +32,7 @@ import { ISOLATION_VIOLATION_REASONS } from "./diagnosis.js";
 const activeManagers = new Set();
 let sigintHandlerInstalled = false;
 
-export async function gracefulShutdown(reason = "SIGINT") {
+export async function gracefulShutdown(reason = STATE_CHANGE_REASON.SIGINT) {
   await Promise.allSettled([...activeManagers].map((m) => m.abortAll(reason)));
 }
 
@@ -40,7 +40,7 @@ function installSigintHandler() {
   if (sigintHandlerInstalled) return;
   sigintHandlerInstalled = true;
   process.on("SIGINT", async () => {
-    await gracefulShutdown("SIGINT");
+    await gracefulShutdown(STATE_CHANGE_REASON.SIGINT);
     process.exit(130);
   });
 }
@@ -613,7 +613,7 @@ export class RunManager {
         },
       } : {}),
     });
-    const pendingResult = await this._transition(transcript, null, "pending", "created");
+    const pendingResult = await this._transition(transcript, null, "pending", STATE_CHANGE_REASON.created);
     // TD-99：若 pending rejected（runId 已有终态——如同 runId 复用旧终态 transcript），
     // 不得 spawn backend，立即报已有终态。
     if (!pendingResult.accepted) {
@@ -654,7 +654,7 @@ export class RunManager {
       }
       if (reasons.length > 0) {
         await transcript.append("run.error", { phase: "certification-gate", agentId, reasons });
-        await this._transition(transcript, "pending", "failed", "certification_gate");
+        await this._transition(transcript, "pending", "failed", STATE_CHANGE_REASON.certification_gate);
         if (cleanupFn) await safeCleanup(cleanupFn, transcript);
         throw new Error(
           `Refused dispatch: worker "${agentId}" did not pass core certification — ${reasons.join("; ")}. `
@@ -673,7 +673,7 @@ export class RunManager {
         phase: "fire-and-forget-guard",
         backend: agent.backend,
       });
-      await this._transition(transcript, "pending", "failed", "fire_forget_guard");
+      await this._transition(transcript, "pending", "failed", STATE_CHANGE_REASON.fire_forget_guard);
       if (cleanupFn) await safeCleanup(cleanupFn, transcript);
       throw new Error(
         `Refused fire-and-forget spawn: backend "${agent.backend}" holds sessions outside the WAO process `
@@ -710,7 +710,7 @@ export class RunManager {
       });
     } catch (error) {
       await transcript.append("run.error", { phase: "spawn", error: error.message });
-      await this._transition(transcript, "pending", "failed", "spawn_error");
+      await this._transition(transcript, "pending", "failed", STATE_CHANGE_REASON.spawn_error);
       if (cleanupFn) await safeCleanup(cleanupFn, transcript);
       throw error;
     }
@@ -727,7 +727,7 @@ export class RunManager {
       prompt,
     });
     await transcript.append("run.submitted", {});
-    const submittedResult = await this._transition(transcript, "pending", "submitted", "spawned");
+    const submittedResult = await this._transition(transcript, "pending", "submitted", STATE_CHANGE_REASON.spawned);
     // TD-99：若 submitted rejected（spawn 期间外部写了终态，如 stop/abort），best-effort
     // abort 新 handle、执行 cleanup、不注册 activeRuns、抛明确错误。
     if (!submittedResult.accepted) {
@@ -966,7 +966,7 @@ export class RunManager {
         newSessionId: newResult.backendSessionId,
         reason: "replay",
       });
-      await this._transition(transcript, state, "submitted", "replay_respawned");
+      await this._transition(transcript, state, "submitted", STATE_CHANGE_REASON.replay_respawned);
       const run = new Run({
         runId,
         agentId: transcript.context.agentId,
@@ -1027,7 +1027,7 @@ export class RunManager {
     return run;
   }
 
-  async abort(runId, reason = "user") {
+  async abort(runId, reason = STATE_CHANGE_REASON.user) {
     const run = this.activeRuns.get(runId);
     if (!run) return false;
     this.activeRuns.delete(runId);
@@ -1396,7 +1396,7 @@ export class Run {
         }
         if (ev.kind === "message") {
           // 首个 message → 转 running
-          await markRunningOnce("first_message");
+          await markRunningOnce(STATE_CHANGE_REASON.first_message);
           messages.push({ info: { role: ev.role }, parts: ev.parts });
           // N4 修复：message 事件落 transcript（run.event, kind=message）。
           // 原 bug：只 push 内存数组不落盘 → transcript（source of truth）重建不出
@@ -1405,7 +1405,7 @@ export class Run {
           const { kind, ...msgRest } = ev;
           await this.transcript.append("run.event", { kind, ...msgRest });
         } else if (ev.kind === "metrics") {
-          await markRunningOnce("first_event");
+          await markRunningOnce(STATE_CHANGE_REASON.first_event);
           metrics = ev;
           await this.transcript.append("run.metrics", { tokens: ev.tokens, ...(ev.costUsd !== undefined ? { costUsd: ev.costUsd } : {}) });
           // 预算闸门检查：累计 effective tokens，超限即标记并打断循环。
@@ -1441,7 +1441,7 @@ export class Run {
           }
           break;
         } else if (ev.kind === "thinking" || ev.kind === "runtime_activity") {
-          await markRunningOnce("first_event");
+          await markRunningOnce(STATE_CHANGE_REASON.first_event);
           // Provider activity is a payload-free supervision fact. Persist it
           // for run_wait/run_activity/dashboard visibility, but do not count it
           // as delivery evidence or expose the provider's raw stream payload.
@@ -1460,7 +1460,7 @@ export class Run {
             isolationViolationReason = writeViolationReason;
             break;
           }
-          await markRunningOnce("first_event");
+          await markRunningOnce(STATE_CHANGE_REASON.first_event);
           // 证据链事件（M6-2）：落盘到 transcript run.event，收集供 scorecard 核验。
           // 不触发状态转移（和 metrics 一样是旁路信息）。
           const { kind, ...rest } = ev;
@@ -1496,7 +1496,7 @@ export class Run {
     // terminal fact is exactly one aborted — not timed_out, not fabricated.
     // This wins over the stream-ended and timed_out branches below.
     if (externalAborted && !TERMINAL_STATES.includes(this.state) && !this._aborted) {
-      await this._abortInternal("external_signal");
+      await this._abortInternal(STATE_CHANGE_REASON.external_signal);
     }
 
     if (this._aborted) {
@@ -1518,7 +1518,7 @@ export class Run {
       const isolationReasonPayload = ISOLATION_VIOLATION_REASONS.includes(isolationViolationReason)
         ? { reason: isolationViolationReason }
         : {};
-      const tResult = await this._transition(this.state, "failed", "workdir_escape", {
+      const tResult = await this._transition(this.state, "failed", STATE_CHANGE_REASON.workdir_escape, {
         factEvents: [
           {
             type: "run.isolation_violation",
@@ -1553,7 +1553,7 @@ export class Run {
         `token budget exceeded: used ${budgetUsed}×${tokenBudgetMultiplier} > ${tokenBudget}`,
         { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
       ).catch(() => { /* 告警失败不影响终态 */ });
-      const tResult = await this._transition(this.state, "failed", "budget_exceeded");
+      const tResult = await this._transition(this.state, "failed", STATE_CHANGE_REASON.budget_exceeded);
       await this._runCleanup();
       // TD-99：若输给先到的终态（如外部 abort），返回与现有终态一致的结果。
       if (!tResult.accepted) return _loserResult(tResult.state, { messages, evidence, metrics, budgetExceeded: true });
@@ -1561,7 +1561,7 @@ export class Run {
     }
 
     if (timedOut) {
-      const tResult = await this._transition(this.state, "timed_out", "timeout", {
+      const tResult = await this._transition(this.state, "timed_out", STATE_CHANGE_REASON.timeout, {
         factEvents: [{
           type: "run.timed_out",
           payload: { backendSessionId: this.result.backendSessionId },
@@ -1603,7 +1603,7 @@ export class Run {
             await this.transcript.append("scorecard.warn", { detail, checks: scResult.checks });
           } else {
             await this.transcript.append("run.error", { phase: "scorecard", detail });
-            const tResult = await this._transition(this.state, "failed", "scorecard_failed");
+            const tResult = await this._transition(this.state, "failed", STATE_CHANGE_REASON.scorecard_failed);
             await this._runCleanup();
             if (!tResult.accepted) return _loserResult(tResult.state, { messages, evidence, metrics, scorecard: scResult });
             return _loserResult("failed", { messages, evidence, metrics, scorecard: scResult });
@@ -1629,7 +1629,7 @@ export class Run {
           // transition rejected), run.completed as factEvent (only on accepted).
           // This eliminates the orphan-delivery-commit window: no matter what happens to
           // the transition, the delivery fact is in the same atomic batch.
-          const tResult = await this._transition(this.state, "completed", "done", {
+          const tResult = await this._transition(this.state, "completed", STATE_CHANGE_REASON.done, {
             attemptEvents: [
               { type: "run.delivery_created", payload: { delivery: deliveryResult.ref } },
             ],
@@ -1663,7 +1663,7 @@ export class Run {
           // run.error as factEvent (only on accepted).
           const errCode = deliveryResult.error.code;
           const errMsg = deliveryResult.error.message;
-          const tResult = await this._transition(this.state, "failed", "delivery_failed", {
+          const tResult = await this._transition(this.state, "failed", STATE_CHANGE_REASON.delivery_failed, {
             attemptEvents: [
               { type: "run.delivery_failed", payload: { deliveryCode: errCode, message: errMsg } },
             ],
@@ -1688,7 +1688,7 @@ export class Run {
       }
 
       // Non-delivery completed path (existing behavior, unchanged)
-      const tResult = await this._transition(this.state, "completed", "done", {
+      const tResult = await this._transition(this.state, "completed", STATE_CHANGE_REASON.done, {
         factEvents: [{
           type: "run.completed",
           payload: {
@@ -1716,7 +1716,7 @@ export class Run {
         });
       }
       await this.transcript.append("run.error", { phase: "wait", error: doneError ?? "unknown" });
-      const tResult = await this._transition(this.state, "failed", "backend_error");
+      const tResult = await this._transition(this.state, "failed", STATE_CHANGE_REASON.backend_error);
       await this._runCleanup();
       // TD-99：failed claim 若输给先到的 aborted/completed/timed_out，不再 throw failed；
       // 返回与现有终态一致的结构化结果（loser 不改终态）。
@@ -1738,7 +1738,7 @@ export class Run {
     //     Reuses the existing failed terminal arbitration (no second terminal).
     if (!timedOut && doneReason === null) {
       await this.transcript.append("run.error", { phase: "wait", error: "backend stream ended without done" });
-      const endedResult = await this._transition(this.state, "failed", "backend_stream_ended");
+      const endedResult = await this._transition(this.state, "failed", STATE_CHANGE_REASON.backend_stream_ended);
       await this._runCleanup();
       if (!endedResult.accepted) return _loserResult(endedResult.state, { messages, evidence, metrics });
       throw new Error("backend stream ended without done");
@@ -1762,7 +1762,7 @@ export class Run {
       phase: "wait",
       error: "backend stream ended with unknown done reason",
     });
-    const unknownResult = await this._transition(this.state, "failed", "backend_unknown_reason");
+    const unknownResult = await this._transition(this.state, "failed", STATE_CHANGE_REASON.backend_unknown_reason);
     await this._runCleanup();
     if (!unknownResult.accepted) {
       return _loserResult(unknownResult.state, { messages, evidence, metrics });
@@ -1770,7 +1770,7 @@ export class Run {
     throw new Error("backend stream ended with unknown done reason");
   }
 
-  async abort(reason = "user") {
+  async abort(reason = STATE_CHANGE_REASON.user) {
     this._removeFromManager();
     await this._abortInternal(reason);
   }

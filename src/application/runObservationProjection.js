@@ -41,7 +41,7 @@
 // create a cycle. runAwaitResult re-exports READ_FAILURE_REASONS from here for
 // back-compat (its existing consumers and the MCP schema import unchanged).
 
-import { TERMINAL_STATES } from "../transcript.js";
+import { TERMINAL_STATES, STATE_CHANGE_REASON } from "../transcript.js";
 import { diagnoseFailure } from "../diagnosis.js";
 
 /**
@@ -124,14 +124,17 @@ export const READ_FAILURE_REASONS = Object.freeze([
 // Map a failed terminal's state_change reason to a source. Used ONLY as a
 // fallback when diagnoseFailure returns no rich signal (unknown/none). These
 // are the closed-set transition reasons runManager writes on the failed path.
-const FAILED_REASON_TO_SOURCE = {
-  backend_error: "backend",
-  backend_stream_ended: "backend",
-  backend_unknown_reason: "unknown",
-  budget_exceeded: "control_plane",
-  scorecard_failed: "control_plane",
-  workdir_escape: "control_plane",
-  delivery_failed: "control_plane",
+// Round 4 Bundle A: keys are computed from the STATE_CHANGE_REASONS SSOT
+// (never retyped literals) and the map is exported so the guard test can
+// assert every key ∈ STATE_CHANGE_REASONS.
+export const FAILED_REASON_TO_SOURCE = {
+  [STATE_CHANGE_REASON.backend_error]: "backend",
+  [STATE_CHANGE_REASON.backend_stream_ended]: "backend",
+  [STATE_CHANGE_REASON.backend_unknown_reason]: "unknown",
+  [STATE_CHANGE_REASON.budget_exceeded]: "control_plane",
+  [STATE_CHANGE_REASON.scorecard_failed]: "control_plane",
+  [STATE_CHANGE_REASON.workdir_escape]: "control_plane",
+  [STATE_CHANGE_REASON.delivery_failed]: "control_plane",
 };
 
 // Keep only events bound to the requested run (cross-run defense). The

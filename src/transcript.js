@@ -30,6 +30,68 @@ export const RUN_STATES = [
 
 export const TERMINAL_STATES = ["completed", "failed", "aborted", "timed_out"];
 
+// Round 4 Bundle A（2026-08-16，Owner 批准的冻结契约——TD-120 豁免款）：
+// `run.state_change` 事件 `reason` 字段的**写入侧冻结闭集** SSOT。
+//
+// 诊断（diagnosis.js）、恢复分类（classifyRecoveryCandidate）、失败来源投影
+// （runObservationProjection.js）逐字消费这些字符串——拼写漂移会让诊断**静默**
+// 失真。此前值散落在生产者代码里、没有单一权威清单；本数组是穷尽清点后的
+// 唯一权威（成员变更 = 契约变更，须同步守卫 test/isolation-infra/
+// stateChangeReasons.test.js 的 deepEqual 清单）。
+//
+// 边界（与 REVERIFY_REASONS / CORRECTION_REJECTION_REASONS 同款治理，但语义不同）：
+//   - 冻结约束作用于**写入侧生产者**：生产者一律引用 STATE_CHANGE_REASON 成员，
+//     不再自带字面量。读侧不校验——历史 transcript 的遗产值（如 start/init）与
+//     测试合成值合法存续，不入集。
+//   - 同名但属其它事件 payload 的字面量不入集：`replay`（run.rerun payload）、
+//     `first_terminal_wins`（run.state_change_rejected payload）、run.aborted 的
+//     payload.reason（与同批 state_change reason 同值，经转移调用点枚举）。
+//   - 非终态转移（→pending/submitted/running）与终态转移（→completed/failed/
+//     aborted/timed_out）共用本闭集：诊断按 to + reason 组合消费。
+export const STATE_CHANGE_REASONS = Object.freeze([
+  // ── 非终态生命周期 ──
+  "created", // RunManager.start / backgroundRunner 启动兜底：初始 pending
+  "background_spawned", // runDispatch / runContinue：后台派发初始 pending
+  "spawned", // RunManager.start：backend spawn 成功 → submitted
+  "replay_respawned", // RunManager.resume：进程类 backend 重放 respawn → submitted
+  "first_event", // Run.waitForCompletion markRunningOnce：首个非 message 事件 → running
+  "first_message", // Run.waitForCompletion markRunningOnce：首个 message → running
+  // ── 终态 completed ──
+  "done", // Run.waitForCompletion：backend 报 completed（含 delivery 打包成功路径）
+  // ── 终态 timed_out ──
+  "timeout", // Run.waitForCompletion：wall-clock deadline timer 触发（唯一 timed_out 来源）
+  // ── 终态 aborted（abort 家族；同值随 run.aborted payload.reason 一并落盘）──
+  "stop_requested", // runStop processStop/opencodeStop：Lead stop 命令 claim aborted
+  "external_signal", // Run.waitForCompletion：外部 AbortSignal 打断等待
+  "user", // RunManager.abort / Run.abort 的默认 reason
+  "SIGINT", // gracefulShutdown 默认 reason（进程级 SIGINT handler）
+  "daemon_stop", // daemon stop()：daemon 关闭时 abortAll
+  "ipc_stop", // daemon handleRequest(stop)：IPC stop 命令 abort
+  // ── 终态 failed ──
+  "spawn_error", // RunManager.start：backend.spawn 抛错
+  "startup_error", // backgroundRunner 启动兜底：runner 启动失败
+  "delivery_parse_error", // backgroundRunner runMain：--delivery-json 解析失败 fail-closed
+  "reuse_worktree_parse_error", // backgroundRunner runMain：--reuse-worktree-json 解析失败 fail-closed
+  "certification_gate", // RunManager.start：认证新鲜度门拒绝派发
+  "fire_forget_guard", // RunManager.start：fire-and-forget 孤儿 session 护栏拒绝
+  "workdir_escape", // Run.waitForCompletion：写越界（isolation violation）
+  "budget_exceeded", // Run.waitForCompletion：token 预算硬闸
+  "scorecard_failed", // Run.waitForCompletion：scorecard 证据门未过
+  "delivery_failed", // Run.waitForCompletion：delivery 打包失败
+  "backend_error", // Run.waitForCompletion：backend 报 failed
+  "backend_stream_ended", // Run.waitForCompletion：事件流无 done 结束
+  "backend_unknown_reason", // Run.waitForCompletion：未知非空 done reason fail-closed
+  "process_missing", // runDeliveryRepackage：Lead 授权孤儿进程结算（见 PROCESS_MISSING_RECOVERY_REASON）
+]);
+
+// 写入侧成员引用视图：生产者/消费者一律经 `STATE_CHANGE_REASON.<member>` 引用
+// 成员（值 === 成员名），使词汇表只存在于上方数组一处。注意：对不存在成员的
+// 属性访问得到 undefined——这正是守卫测试钉死成员清单（deepEqual）要暴露给
+// 评审的漂移面；从数组移除成员而不更新全部引用会被守卫与关系断言一并打红。
+export const STATE_CHANGE_REASON = Object.freeze(
+  Object.fromEntries(STATE_CHANGE_REASONS.map((reason) => [reason, reason])),
+);
+
 // M12-1S2: the closed set of final delivery verification outcome event types.
 // Shared by validateDeliveryFacts, tryAppendRepackageVerification, and the
 // repackage idempotency scans so there is one outcome-type set in this module.
@@ -206,7 +268,13 @@ export const RECOVERY_CANDIDATE_KINDS = Object.freeze([
   "backend_failed",
   "process_missing",
 ]);
-const BACKEND_RECOVERY_REASONS = new Set(["backend_error", "backend_stream_ended"]);
+// Round 4 Bundle A: members are referenced from the STATE_CHANGE_REASONS SSOT
+// (never retyped literals) and exported so the guard test can assert the
+// subset relation BACKEND_RECOVERY_REASONS ⊆ STATE_CHANGE_REASONS.
+export const BACKEND_RECOVERY_REASONS = new Set([
+  STATE_CHANGE_REASON.backend_error,
+  STATE_CHANGE_REASON.backend_stream_ended,
+]);
 
 // M12-19: the closed-set terminal reason + safe confirmation fact type that mark
 // a Lead-authorized, zero-model settlement of an orphaned process-backed run
@@ -214,7 +282,9 @@ const BACKEND_RECOVERY_REASONS = new Set(["backend_error", "backend_stream_ended
 // to classifyRecoveryCandidate, the durable authority on the reason) so the
 // application liveness SSOT (processRecovery.js) and run_delivery_repackage can
 // import them without a circular dependency.
-export const PROCESS_MISSING_RECOVERY_REASON = "process_missing";
+// Round 4 Bundle A: the value derives from the STATE_CHANGE_REASONS SSOT
+// (guarded as a member), never a second literal.
+export const PROCESS_MISSING_RECOVERY_REASON = STATE_CHANGE_REASON.process_missing;
 export const PROCESS_MISSING_CONFIRMED_TYPE = "run.process_missing_confirmed";
 const BACKEND_RECOVERY_CONFLICT_TYPES = new Set([
   "run.isolation_violation",

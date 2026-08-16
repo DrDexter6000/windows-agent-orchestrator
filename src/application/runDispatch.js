@@ -19,7 +19,7 @@ import { spawn } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { JsonlTranscript } from "../transcript.js";
+import { JsonlTranscript, STATE_CHANGE_REASON } from "../transcript.js";
 import { isValidRunId, prepareDeliveryRequest } from "../delivery.js";
 import { resolveWaitTimeout, validateBoundedWaitTimeout } from "./timeoutPolicy.js";
 import { readRegistry } from "../registry.js";
@@ -456,7 +456,7 @@ export async function dispatchRun({
   // pending via transitionState — first-terminal-wins arbitration. If the
   // runId was reused against an already-terminal transcript, this is rejected
   // and we must NOT fork the detached runner.
-  const pendingResult = await transcript.transitionState(null, "pending", "background_spawned");
+  const pendingResult = await transcript.transitionState(null, "pending", STATE_CHANGE_REASON.background_spawned);
   if (!pendingResult.accepted) {
     return {
       accepted: false,

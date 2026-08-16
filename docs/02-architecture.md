@@ -362,7 +362,7 @@ interface TranscriptEvent {
 | `session.created` | backend.spawn 返回 sessionId | ✅ 现有 |
 | `prompt.sent` | prompt 投递 | ✅ 现有 |
 | `run.submitted` | 投递完成，进入等待 | ✅ 现有 |
-| **`run.state_change`** | 状态机每次转移 | `[S]` 新增 |
+| **`run.state_change`** | 状态机每次转移。`reason` ∈ `STATE_CHANGE_REASONS`（**冻结闭集**，SSOT = `src/transcript.js`，守卫 `test/isolation-infra/stateChangeReasons.test.js`；写入侧生产者一律引用 SSOT 成员，读侧容忍历史值；对照归档见 `docs/research/16-terminal-reason-taxonomy-comparison.md`） | `[S]` 新增 |
 | **`run.event`** | 从 RunEvent 流透传一条（message/tool_use/command/...） | `[S]` 新增 |
 | `run.completed` | 正常完成 | ✅ 现有 |
 | `run.timed_out` | 超时 | ✅ 现有 |

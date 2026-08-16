@@ -39,6 +39,7 @@ import {
   findLatest,
   extractCanonicalAgentId,
   TERMINAL_STATES,
+  STATE_CHANGE_REASON,
 } from "../transcript.js";
 import {
   isValidRunId,
@@ -561,7 +562,7 @@ export async function continueRun({
       rootRunId,
     });
 
-    const pendingResult = await transcript.transitionState(null, "pending", "background_spawned");
+    const pendingResult = await transcript.transitionState(null, "pending", STATE_CHANGE_REASON.background_spawned);
     if (!pendingResult.accepted) {
       throw new Error("continuation child runId collision");
     }

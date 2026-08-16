@@ -29,6 +29,8 @@
 | [12-p0-realtask-dogfood-2026-06-25.md](./12-p0-realtask-dogfood-2026-06-25.md) | M7/P0 真任务 dogfood（WAO 编排自己补 handoff.test.js）的 friction 清单 | 实测记录 |
 | [13-p3-daemon-ipc-spikes-2026-06-25.md](./13-p3-daemon-ipc-spikes-2026-06-25.md) | M7/P3 两个 open question 实测：Windows detached 存活 + IPC 选型（管道 vs HTTP） | 实测记录 |
 | [14-p3-daemon-dogfood-2026-06-25.md](./14-p3-daemon-dogfood-2026-06-25.md) | P3-T1 daemon 落地后 lead-agent 视角 e2e dogfood（D-F1..D-F4），含 handshake 位置决策输入 | 实测记录 |
+| [15-cross-runtime-dogfood-comparison-2026-07-07.md](./15-cross-runtime-dogfood-comparison-2026-07-07.md) | 跨 runtime dogfood 对比（GLM-5.2 vs GPT-5.5 codex xhigh）：模型差异对 WAO 引导力的启示 | 实测记录 |
+| [16-terminal-reason-taxonomy-comparison.md](./16-terminal-reason-taxonomy-comparison.md) | Symphony（OpenAI 开源 Codex 编排器）五终态分类 ↔ WAO 两层终态模型逐项对照；Stalled 终态与自动重试的裁定记录（不引入） | 外部参考（归档） |
 
 **推荐顺序**：
 01（生态定位）→ 02（RunMaestro 负例）→ 04（Niuma 正例）→ 03（架构推演）→ 05（收敛后的决策）→ 06（onboarding 设计）。
@@ -57,6 +59,7 @@
 
 ## 最后更新
 
+- 2026-08-16 终态原因分类对照归档（16）：Symphony 五终态 ↔ WAO 两层终态模型逐项映射；裁定不引入 Stalled 终态与自动重试（ADR 0018 + AGENTS.md 不变量 #4）。同轮补登 15 的索引行。
 - 2026-06-25 P3 daemon/IPC spike（13）：Windows detached+unref 后台存活实测成立（T0a 收敛）；IPC 命名管道 vs 本地 HTTP 实测均可用，推荐命名管道，待 owner 拍板（T0b）。
 - 2026-06-25 P0 真任务 dogfood（12）+ Lead e2e 审计（11）：friction 清单归档，决策 0010/0011 输入。
 - 2026-06-17 dispatch readiness 评测：历史 NO-GO 记录，已被 2026-06-18 runtime certification 取代。

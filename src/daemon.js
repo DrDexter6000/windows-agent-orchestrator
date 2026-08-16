@@ -22,7 +22,7 @@ import { join } from "node:path";
 import { createServer, createConnection as netCreateConnection } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname } from "node:path";
-import { readTranscript, findState, TERMINAL_STATES } from "./transcript.js";
+import { readTranscript, findState, TERMINAL_STATES, STATE_CHANGE_REASON } from "./transcript.js";
 import { RunManager } from "./runManager.js";
 import { readRegistry, normalizeAgent } from "./registry.js";
 import { ownerFilePath, checkOwnerLiveness, DEFAULT_OWNER_LIVENESS_THRESHOLD_MS } from "./application/ownerLiveness.js";
@@ -454,7 +454,7 @@ export async function startDaemon(opts = {}) {
     // 否则被弃的 async iterator 会在后台继续轮询（06-18 孤儿换皮）。
     for (const c of runControllers.values()) c.abort();
     runControllers.clear();
-    await manager.abortAll("daemon_stop");
+    await manager.abortAll(STATE_CHANGE_REASON.daemon_stop);
     // server.close 带 2s 超时兜底（Windows 命名管道 close 偶发不 resolve）。
     await new Promise((r) => {
       const t = setTimeout(() => { server.close(); r(); }, 2000);
@@ -537,7 +537,7 @@ export async function handleRequest(req, manager, ctx = {}) {
     // 先 abort controller（打断 waitForCompletion 事件轮询），再 abort session。
     ctx.runControllers?.get(runId)?.abort();
     ctx.runControllers?.delete(runId);
-    const stopped = await manager.abort(runId, "ipc_stop");
+    const stopped = await manager.abort(runId, STATE_CHANGE_REASON.ipc_stop);
     return { ok: true, stopped, runId };
   }
   if (cmd === "shutdown") {

@@ -29,7 +29,7 @@
 //
 // 只读：本函数不接收也不返回可变状态，不改 transcript。
 
-import { findState, TERMINAL_STATES } from "./transcript.js";
+import { findState, TERMINAL_STATES, STATE_CHANGE_REASON } from "./transcript.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
 
 /**
@@ -520,7 +520,7 @@ function diagnoseFailureInner(events, expectedRunId) {
 
   // 3) budget：超 token 预算硬闸。
   const budgetChange = evs.find(
-    (e) => e.type === "run.state_change" && e.reason === "budget_exceeded",
+    (e) => e.type === "run.state_change" && e.reason === STATE_CHANGE_REASON.budget_exceeded,
   );
   if (budgetChange) {
     evidence.push({ eventType: "run.state_change", fact: "token 预算超限，触发硬闸转 failed" });

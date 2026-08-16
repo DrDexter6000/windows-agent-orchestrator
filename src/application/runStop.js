@@ -26,7 +26,7 @@
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { JsonlTranscript, readTranscript, findState, findLatest } from "../transcript.js";
+import { JsonlTranscript, readTranscript, findState, findLatest, STATE_CHANGE_REASON } from "../transcript.js";
 import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { executeStopWithVerification } from "../backends/opencodeStopVerify.js";
 import { raiseAlert } from "../alerts.js";
@@ -194,7 +194,7 @@ async function processStop({ transcript, session, fromState, runId, pid, deps, s
   const alert = deps.alert ?? (async (level, msg, opts) => raiseAlert(level, msg, opts));
 
   // Claim terminal state (first-terminal-wins)
-  const termResult = await transcript.transitionState(fromState, "aborted", "stop_requested", {
+  const termResult = await transcript.transitionState(fromState, "aborted", STATE_CHANGE_REASON.stop_requested, {
     attemptEvents: stopRequestedAttempt ? [stopRequestedAttempt] : [],
     factEvents: [{
       type: "run.aborted",
@@ -303,7 +303,7 @@ async function opencodeStop({ transcript, session, fromState, runId, config, dep
     fetchImpl: deps.fetchImpl ?? globalThis.fetch,
   });
 
-  const termResult = await transcript.transitionState(fromState, "aborted", "stop_requested", {
+  const termResult = await transcript.transitionState(fromState, "aborted", STATE_CHANGE_REASON.stop_requested, {
     attemptEvents: stopRequestedAttempt ? [stopRequestedAttempt] : [],
     factEvents: [{
       type: "run.aborted",
