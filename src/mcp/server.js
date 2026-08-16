@@ -76,6 +76,7 @@ import { KimiCodeBackend } from "../backends/kimiCode.js";
 import { DeepSeekHarnessBackend } from "../backends/deepSeekHarness.js";
 import { getWaoCliPath } from "../waoCliPath.js";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import { getRunStatus } from "../application/runStatus.js";
 import { EXECUTION_STAGES } from "../application/runStageProjection.js";
 import { collectRunMessages } from "../application/runCollect.js";
@@ -306,8 +307,11 @@ const READ_AGENT_ID_SCHEMA = z.union([
 ]);
 
 // Stable server identity advertised at initialize.
+// R6-C3（席位 B）：version 不再手写（曾钉 "0.0.1"，与已发布 v0.1.0 不一致）——
+// 从 package.json 动态读取（单一来源），发版自动同步。serverInfo 在 initialize
+// 响应里，不在 m12-10 冻结的工具 wire 面（tools/list 逐字节 SSOT）内。
 const SERVER_NAME = "wao-mcp";
-const SERVER_VERSION = "0.0.1";
+const SERVER_VERSION = createRequire(import.meta.url)("../../package.json").version;
 
 /**
  * Defensive field check for run_status payload normalization: a field counts as

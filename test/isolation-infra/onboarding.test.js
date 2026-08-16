@@ -1128,12 +1128,16 @@ test("R6-C: buildRecommendations derives rows from template rows (backend→CLI,
   assert.equal(byId.w_login.readyState, "login_based");
 });
 
-test("R6-C: backend→CLI mapping covers all four backends", () => {
+// R6-C3（P2-4）：映射收敛到 src/application/backendCliMap.js 单一来源（本模块
+// re-export），并补上此前两份重复表都漏掉的活 backend deepseek-harness——
+// JSON-RPC 适配器无独立 CLI 可探，显式 null。
+test("R6-C: backend→CLI mapping covers all live backends (null = no standalone CLI)", () => {
   assert.deepEqual(BACKEND_CLI, {
     "claude-code": "claude",
     codex: "codex",
     "kimi-code": "kimi",
     "opencode-serve": "opencode",
+    "deepseek-harness": null,
   });
 });
 
@@ -1295,7 +1299,10 @@ test("R6-C: human needs-selection output renders the matrix block + advisory sen
   assert.ok(text.includes("认证: key DEEPSEEK_API_KEY"), "key env name shown as the auth method");
   // duty comes from _comment_task (display strips the redundant prefix).
   assert.ok(text.includes("适合: 边界明确的实现包/TDD"), "duty rendered from the template row");
-  assert.ok(text.includes("官方 Claude OAuth（claude login）"), "authNote from _comment_auth rendered");
+  // R6-C3（P2-3）：authNote 行改形状断言——结构化基座在前、模板注释只进括号补充
+  // （替换旧的纯子串断言，钉住新拼接形状）。
+  assert.match(text, /认证: claude CLI 登录态（官方 Claude OAuth（claude login）/,
+    "authNote 行 = 结构化基座（模板注释），按括号形状断言");
   // The existing candidate list / re-run hints are untouched.
   assert.ok(text.includes("Candidates from the tracked template:"));
   assert.ok(text.includes("Re-run with: wao onboarding --agent <id>"));
@@ -1383,18 +1390,21 @@ test("R6-C: recommendations over the REAL tracked template derive all seven rows
 });
 
 // R6-C2（Owner 反馈）：矩阵行必须列出 backend 列；登录态行的认证标签必须写明
-// 具体哪个 CLI；尾部注明 coder 互为会审备选且选位权在 Lead（ADR 0019）。
-test("R6-C2: 矩阵渲染含 backend 列、登录态行写明具体 CLI、coder 替补提示在尾", async () => {
+// 具体哪个 CLI；尾部注明 coder 会审替补且选位权在 Lead（ADR 0019）。
+// R6-C3（P1-1）：替补句从矩阵行派生——fixture 必须真的含 coder_* 行，断言枚举
+// 的是实际存在的 id（此前 fixture 零 coder_* 却断言句子在场，把错误行为钉死）。
+test("R6-C2: 矩阵渲染含 backend 列、登录态行写明具体 CLI、coder 替补提示从行派生", async () => {
   const { runOnboarding } = await import("../../src/application/onboarding.js");
   const { renderHuman } = await import("../../src/commands/onboarding.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-onb-matrix2-"));
   const root = join(dir, "wao");
   mkdirSync(join(root, "config"), { recursive: true });
-  // 极简模板：一个 key 型 + 一个登录型（codex）worker。
+  // 极简模板：一个 key 型 + 一个登录型（codex）+ 一个 coder 通道（claude-code + ZHIPU key）。
   writeFileSync(join(root, "config", "agents.example.json"), JSON.stringify({
     agents: {
       w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, _comment_task: "适合任务: 编码" },
       tester: { backend: "codex", _comment_task: "适合任务: 跑测试", _comment_auth: "codex login" },
+      coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, _comment_task: "适合任务: 写代码" },
     },
   }));
   const fsMod = await import("node:fs/promises");
@@ -1408,15 +1418,113 @@ test("R6-C2: 矩阵渲染含 backend 列、登录态行写明具体 CLI、coder 
       existsSync, unlink: fsMod.unlink, mkdir: (p2) => fsMod.mkdir(p2, { recursive: true }) },
   });
   const text = renderHuman(r);
-  assert.equal(r.recommendations.rows.length, 2, "模板可读时矩阵必须有两行（fs 注入缺失会正确降级为空——本测试必须注入）");
-  // backend 列可见（每行第二列）。
+  assert.equal(r.recommendations.rows.length, 3, "模板可读时矩阵必须有三行（fs 注入缺失会正确降级为空——本测试必须注入）");
+  // backend 列可见（第一行布局：id 之后）。
   assert.match(text, /w_key\s+claude-code\s+/, "backend 列必须出现在 id 之后");
   assert.match(text, /tester\s+codex\s+/, "codex worker 的 backend 列可见");
-  // 登录态行写明具体 CLI。
+  // 登录态行写明具体 CLI（第二行布局）。
   assert.match(text, /认证: codex CLI 登录态/, "登录态行的认证标签必须写明具体 CLI 名");
   assert.match(text, /认证: key ZHIPU_API_KEY/, "key 型行标签不变");
-  // 替补提示 + 选位权在 Lead。
-  assert.match(text, /互为方案\/交付物会审的备选席位/, "coder 替补提示必须在场");
-  assert.match(text, /ADR 0019 自行选位/, "选位权归属 Lead（ADR 0019）必须注明");
+  // 替补句从矩阵行派生：枚举实际存在的 coder 通道（此处恰为 coder_hq），
+  // 两席措辞对齐 ADR 0019（实现席 + 对抗席），选位权在 Lead。
+  assert.ok(text.includes("本矩阵中的 coder 通道（coder_hq）互为实现席备选"),
+    "替补句必须枚举矩阵中实际存在的 coder 通道 id");
+  assert.ok(text.includes("对抗席默认 auditor、可换 coder_mm"),
+    "两席结构（对抗席默认 auditor）必须按 ADR 0019 措辞");
+  assert.ok(text.includes("ADR 0019"), "两席规则与选位权必须指向 ADR 0019");
+  assert.ok(!text.includes("互为方案/交付物会审的备选席位"),
+    "旧的三者互为措辞必须移除（与 ADR 0019 两席结构不符）");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// R6-C3（P1-1）负向：矩阵零 coder_* 行时替补句整句不打印——labels are
+// shape-derived，不打印模板里不存在的 worker。
+test("R6-C3: 矩阵无任何 coder_* 行时替补句不打印（shape-derived）", async () => {
+  const { runOnboarding } = await import("../../src/application/onboarding.js");
+  const { renderHuman } = await import("../../src/commands/onboarding.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-onb-matrix3-"));
+  const root = join(dir, "wao");
+  mkdirSync(join(root, "config"), { recursive: true });
+  writeFileSync(join(root, "config", "agents.example.json"), JSON.stringify({
+    agents: {
+      w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, _comment_task: "适合任务: 编码" },
+      tester: { backend: "codex", _comment_task: "适合任务: 跑测试" },
+    },
+  }));
+  const fsMod = await import("node:fs/promises");
+  const r = await runOnboarding({
+    installRoot: root,
+    exampleRegistryPath: join(root, "config", "agents.example.json"),
+    targetRegistryPath: join(root, "config", "agents.json"),
+    reliabilitySummaryPath: join(root, "runs", "reliability-summary.json"),
+    probeEnv: { hasKeyEnv: async () => "process_env", hasCli: async () => true },
+    fs: { readFile: fsMod.readFile, writeFile: fsMod.writeFile, rename: fsMod.rename,
+      existsSync, unlink: fsMod.unlink, mkdir: (p2) => fsMod.mkdir(p2, { recursive: true }) },
+  });
+  const text = renderHuman(r);
+  assert.equal(r.recommendations.rows.length, 2, "矩阵本身照常渲染（前置条件）");
+  assert.ok(text.includes("角色矩阵与当前环境适配"), "矩阵块在场（前置条件：负向不是因矩阵缺失而通过）");
+  assert.ok(!text.includes("互为实现席备选"), "零 coder_* 行 ⇒ 替补句整句不打印");
+  assert.ok(!text.includes("coder 通道"), "不得提及矩阵中不存在的 coder 通道");
+  assert.ok(!text.includes("coder_hq") && !text.includes("coder_low") && !text.includes("coder_mm"),
+    "不得打印模板里没有的 worker id");
+  // 尾行选位提示仍在（与替补句是两句话）。
+  assert.ok(text.includes("按你有的认证选一行重跑 --agent <id> --apply"), "选位提示行不受影响");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// R6-C3（P1-2 + 席位 B + P2-2 + P2-3）：两行布局 + 表头按显示宽对齐；认证标签
+// 四分支（key / opencode serve 注入 / CLI 登录态 / —）；带 authNote 行的标签是
+// "结构化基座（模板注释）" 括号形状；opencode-serve 行状态括号不再误标 CLI 登录态。
+test("R6-C3: 两行布局+表头、认证标签四分支、authNote 括号形状、opencode 状态括号", async () => {
+  const { runOnboarding } = await import("../../src/application/onboarding.js");
+  const { renderHuman } = await import("../../src/commands/onboarding.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-onb-matrix4-"));
+  const root = join(dir, "wao");
+  mkdirSync(join(root, "config"), { recursive: true });
+  writeFileSync(join(root, "config", "agents.example.json"), JSON.stringify({
+    agents: {
+      w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, _comment_task: "适合任务: 编码", model: { id: "glm-5.3[1m]" } },
+      w_login: { backend: "codex", _comment_task: "适合任务: 跑测试", _comment_auth: "codex login", model: { id: "gpt-x" } },
+      w_serve: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", model: { id: "glm-5.2" } },
+      w_none: { backend: "some-future-backend", model: { id: "m" } },
+    },
+  }));
+  const fsMod = await import("node:fs/promises");
+  const r = await runOnboarding({
+    installRoot: root,
+    exampleRegistryPath: join(root, "config", "agents.example.json"),
+    targetRegistryPath: join(root, "config", "agents.json"),
+    reliabilitySummaryPath: join(root, "runs", "reliability-summary.json"),
+    probeEnv: { hasKeyEnv: async () => "process_env", hasCli: async () => true },
+    fs: { readFile: fsMod.readFile, writeFile: fsMod.writeFile, rename: fsMod.rename,
+      existsSync, unlink: fsMod.unlink, mkdir: (p2) => fsMod.mkdir(p2, { recursive: true }) },
+  });
+  const text = renderHuman(r);
+  assert.equal(r.recommendations.rows.length, 4);
+  // 表头行：列宽与数据行一致（id 22 / backend 15 / model 19 显示格 + 1 分隔空格）。
+  assert.match(text, /^ {2}id {21}backend {9}model {15}状态$/m,
+    "表头行按显示宽与数据行同列宽");
+  // 第一行布局：id/backend/model 后跟状态括号。
+  assert.match(text, /^ {2}w_key\s+claude-code\s+glm-5\.3\[1m\]\s+\[/m,
+    "第一行 = id/backend/model/状态");
+  // 第二行布局：认证标签与 适合 前缀。
+  assert.match(text, /^ {4}认证: .+ · 适合: /m, "第二行 = 认证/适合");
+  // 认证标签四分支：
+  assert.match(text, /认证: key ZHIPU_API_KEY/, "key 分支");
+  assert.match(text, /认证: codex CLI 登录态（codex login）/, "CLI 登录态分支 + authNote 括号拼接");
+  // 注：第二行整段按显示宽截到 60——完整标签 "…先起 scripts/serve.ps1）" 的尾部
+  // 会被截断，但语义修复面（注入 ≠ 无需 provider key）必须可见。
+  assert.match(text, /认证: opencode serve 注入（仍需 provider key/,
+    "opencode-serve 分支：注入 ≠ 无需 key（docs/usage.md §Provider key）");
+  assert.match(text, /认证: —/, "无 CLI 映射且无 key 分支");
+  // authNote 行的精确前缀形状（钉住新拼接形状）。
+  assert.match(text, /认证: codex CLI 登录态（/, "结构化基座在前，authNote 只进括号补充");
+  // opencode-serve 状态括号：不再误标 [CLI 登录态]；readyState 引擎值不因此变。
+  assert.match(text, /w_serve\s+opencode-serve\s+glm-5\.2\s+\[serve 探测未覆盖\]/,
+    "opencode-serve 行状态括号为 [serve 探测未覆盖]");
+  const serveRow = r.recommendations.rows.find((row) => row.id === "w_serve");
+  assert.equal(serveRow.readyState, "login_based",
+    "引擎 readyState 不因显示改动词而变（CLI 在 PATH 且无 key ⇒ login_based）");
   rmSync(dir, { recursive: true, force: true });
 });

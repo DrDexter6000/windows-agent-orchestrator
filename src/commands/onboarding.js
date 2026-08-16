@@ -23,7 +23,9 @@ import { resolve, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parseOptions } from "./shared.js";
-import { runOnboarding, HOST_EXAMPLES_AUTHORITY } from "../application/onboarding.js";
+// R6-C3（P1-2）：displayWidth（东亚宽字符计 2）与引擎共用同一份实现——渲染层
+// 不再持第二份宽度表（分层方向 commands → application 合法）。
+import { runOnboarding, HOST_EXAMPLES_AUTHORITY, displayWidth } from "../application/onboarding.js";
 // R6-C: key probing reuses the credential-readiness SSOT (process env → Windows
 // User scope) — no second registry read or env-name policy here.
 import { resolveCredentialEnv } from "../application/credentialReadiness.js";
@@ -148,15 +150,30 @@ export function renderHuman(r) {
     // R6-C: role matrix + current-environment fit (advisory). Rows are derived
     // from the template rows and the injected probe; the engine already sorted
     // them ready-first. The tail line hands the choice back to the user.
+    //
+    // R6-C3（P1-2 + 席位 B）：表头 + 每个 worker 两行，全部列宽按显示宽（东亚宽
+    // 字符计 2）计算——padEnd 按码元计宽曾把中文认证列后面的整列右移几十格。
+    // 第一行 id/backend/model/状态 ≤ ~70 显示格；第二行 认证/适合 ≤ ~125 显示格
+    // （认证标签整段截到 60、duty 截到 50），120 列终端不再折行错位。
     const rows = Array.isArray(r.recommendations?.rows) ? r.recommendations.rows : [];
     if (rows.length > 0) {
       lines.push("");
       lines.push(`角色矩阵与当前环境适配（${r.recommendations.advisory}）:`);
+      lines.push(`  ${padEndDisplay("id", 22)} ${padEndDisplay("backend", 15)} ${padEndDisplay("model", 19)} 状态`);
       for (const row of rows) {
-        lines.push(`  ${String(row.id ?? "?").padEnd(24)} ${String(row.backend ?? "?").padEnd(15)} ${String(row.model ?? "?").padEnd(19)} ${recommendationAuthLabel(row).padEnd(46)} 适合: ${recommendationDutyDisplay(row.duty)}  [${recommendationReadyLabel(row)}]`);
+        lines.push(`  ${padEndDisplay(row.id ?? "?", 22)} ${padEndDisplay(row.backend ?? "?", 15)} ${padEndDisplay(row.model ?? "?", 19)} [${recommendationReadyLabel(row)}]`);
+        lines.push(`    ${truncateDisplay(recommendationAuthLabel(row), 60)} · 适合: ${truncateDisplay(recommendationDutyDisplay(row.duty), 50)}`);
+      }
+      // R6-C3（P1-1）：替补句从矩阵行派生——只枚举模板里实际存在的 coder_* 通道，
+      // 零 coder 行时整句不打印（labels are shape-derived，不打印不存在的 worker）。
+      // 两席措辞对齐 ADR 0019 §3：实现席（coder 取一、避同族）+ 对抗席（默认
+      // auditor、可换 coder_mm）——不是三者"互为"。本矩阵不替 Lead 选择。
+      const coderRows = rows.filter((row) => /^coder_/.test(String(row.id ?? "")));
+      if (coderRows.length > 0) {
+        lines.push("");
+        lines.push(`本矩阵中的 coder 通道（${coderRows.map((row) => row.id).join("、")}）互为实现席备选（选一避同族）；对抗席默认 auditor、可换 coder_mm——两席规则与选位权见 ADR 0019，由 Lead 自行决定，本矩阵不替 Lead 选择。`);
       }
       lines.push("");
-      lines.push("coder_hq / coder_low / coder_mm 互为方案/交付物会审的备选席位——由 Lead 按 ADR 0019 自行选位（避同族）；本矩阵只陈述环境适配事实，不替 Lead 选择。");
       lines.push("按你有的认证选一行重跑 --agent <id> --apply；没有的 key 对应行可忽略。");
     }
   } else if (r.selected) {
@@ -221,15 +238,44 @@ export function renderHuman(r) {
 // per-worker auth text comes from the template's _comment_auth (carried as
 // row.authNote).
 
+/** 按显示宽右补空格到 width（超宽原样返回，不截断）。 */
+function padEndDisplay(str, width) {
+  const s = String(str ?? "");
+  const w = displayWidth(s);
+  return w >= width ? s : s + " ".repeat(width - w);
+}
+
+/** 按显示宽截断：超过 width 时截到 width-1 并以 marker（默认 …）收尾。 */
+function truncateDisplay(str, width, marker = "…") {
+  const s = String(str ?? "");
+  if (displayWidth(s) <= width) return s;
+  const budget = width - displayWidth(marker);
+  let out = "";
+  let w = 0;
+  for (const ch of s) {
+    const cw = displayWidth(ch);
+    if (w + cw > budget) break;
+    out += ch;
+    w += cw;
+  }
+  return out + marker;
+}
+
 /** 认证方式 column: declared key env name, or CLI login state (+ template note). */
 function recommendationAuthLabel(row) {
   // R6-C2: 结构化认证标签——登录态行必须写明"具体哪个 CLI"（Owner 反馈），
   // authNote 只作补充（模板 _comment_auth），不再替代结构化基座。
   if (row.requiresKeyEnv) return `认证: key ${row.requiresKeyEnv}`;
   let base;
-  if (row.backend === "opencode-serve") base = "认证: opencode serve 注入";
-  else if (row.requiresCli) base = `认证: ${row.requiresCli} CLI 登录态`;
-  else base = "认证: —";
+  // R6-C3（P2-2）："注入"单独出现会被读成无需 key——补明仍需 provider key 且要
+  // 先起 serve（scripts/serve.ps1 注入；docs/usage.md §Provider key 是权威）。
+  if (row.backend === "opencode-serve") {
+    base = "认证: opencode serve 注入（仍需 provider key，先起 scripts/serve.ps1）";
+  } else if (row.requiresCli) {
+    base = `认证: ${row.requiresCli} CLI 登录态`;
+  } else {
+    base = "认证: —";
+  }
   if (row.authNote) return `${base}（${row.authNote}）`;
   return base;
 }
@@ -242,6 +288,10 @@ function recommendationDutyDisplay(duty) {
 
 /** readyState → human bracket label (ready / missing / login / probe-failed). */
 function recommendationReadyLabel(row) {
+  // R6-C3（P2-2）：opencode-serve 的可用性取决于 serve 进程是否可达，PATH 上有
+  // opencode CLI ≠ serve 已注入 key——不再误标 [CLI 登录态]。仅改显示，
+  // 引擎 readyState 值不变。
+  if (row.backend === "opencode-serve") return "serve 探测未覆盖";
   switch (row.readyState) {
     case "ready": return "ready";
     case "login_based": return "CLI 登录态";

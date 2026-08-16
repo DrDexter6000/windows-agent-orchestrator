@@ -34,6 +34,9 @@ import { parseOptions, resolveTargetCwd } from "./shared.js";
 // 名单、注入式 reader、5s 超时）——本文件不写第二份注册表读取。
 // requiredCredentialNames 是"worker 声明了哪些必需 key env 名"的 SSOT（envPolicy.js）。
 import { resolveCredentialEnv, requiredCredentialNames } from "../application/credentialReadiness.js";
+// R6-C3（P2-4）：backend→CLI 探测映射收敛到 backendCliMap.js 单一权威表——本文件
+// 原持有的本地表与 application/onboarding.js 逐字重复且都漏了 deepseek-harness。
+import { BACKEND_CLI } from "../application/backendCliMap.js";
 
 // TD-95 #11 --strict：JS parse smoke（防注释崩溃漏到运行时，复盘 #3 教训）。
 // 对 src/*.js 跑 node --check。doctor --strict 时调用。
@@ -89,13 +92,9 @@ async function whichCli(name) {
   }
 }
 
-// backend → CLI 探测映射（scoped 检查的权威表）。无法映射的 backend 由调用方 WARN（不静默）。
-const BACKEND_CLI = {
-  "claude-code": "claude",
-  codex: "codex",
-  "kimi-code": "kimi",
-  "opencode-serve": "opencode",
-};
+// backend → CLI 探测映射：单一权威表在 ../application/backendCliMap.js（R6-C3 收敛，
+// 含无独立 CLI 的 "deepseek-harness": null）。无法映射（null 或未列出）的 backend
+// 由调用方 WARN（不静默）。
 
 // 各 CLI 的官方安装方式（run: 修复提示用，只打印永不执行）。
 const CLI_INSTALL_HINT = {

@@ -34,6 +34,9 @@
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizeAgent } from "../registry.js";
+// R6-C3（P2-4）：backend→CLI 探测映射收敛到 backendCliMap.js 单一来源——doctor
+// 的 scoped 检查与本模块的推荐矩阵共用同一份表（此前两处逐字重复且各自漂移）。
+import { BACKEND_CLI } from "./backendCliMap.js";
 
 /**
  * Fixed safe error for the onboarding service. The `message` is always a fixed
@@ -143,20 +146,51 @@ export function buildCandidateList(template) {
 //                 the login state itself cannot be verified remotely
 //   unknown       a probe failed, or the backend maps to no CLI (cannot verify)
 
-/** backend → CLI 探测映射（与 doctor 的 scoped 探测表同源形状）。 */
-export const BACKEND_CLI = {
-  "claude-code": "claude",
-  codex: "codex",
-  "kimi-code": "kimi",
-  "opencode-serve": "opencode",
-};
+// backend → CLI 探测映射的唯一权威表见 ./backendCliMap.js（doctor 的 scoped
+// 检查与本模块共用同一份；含无独立 CLI 的 deepseek-harness=null）。re-export
+// 供既有导入点（测试钉映射形状）继续从本模块取。
+export { BACKEND_CLI };
 
 /** 顶部 advisory 句（JSON + 人类输出共用）：矩阵按当前环境探测结果给出，最终选择权在用户。 */
 export const RECOMMENDATIONS_ADVISORY =
   "推荐按你当前环境探测结果给出，最终选择权在你（不自动选择、不写配置）";
 
-const DUTY_MAX = 60;      // _comment_task 截断上限（≈60 字符）
-const AUTH_NOTE_MAX = 60; // _comment_auth 截断上限
+const DUTY_MAX = 60;      // _comment_task 截断上限（≈60 显示格）
+const AUTH_NOTE_MAX = 60; // _comment_auth 截断上限（≈60 显示格）
+
+// R6-C3（P1-2）：东亚宽字符码点区间表（Hangul Jamo / CJK 部首·符号·表意·
+// 假名·注音 / 谚文 / CJK 兼容 / 全角形式等常用区；0x2E80-0xA4CF 已含 CJK
+// Unified 表意与全角标点）。用码点区间而非源码内嵌字面字符——纯 ASCII 源码，
+// 不可见/未赋码位不会混进源文件。
+const WIDE_CHAR_RANGES = [
+  [0x1100, 0x115f], // Hangul Jamo（合成基）
+  [0x2e80, 0xa4cf], // CJK 部首/符号/表意（含 U+4E00-U+9FFF）/注音/假名补偿
+  [0xac00, 0xd7a3], // 谚文音节
+  [0xf900, 0xfaff], // CJK 兼容表意
+  [0xfe30, 0xfe4f], // CJK 兼容形式
+  [0xff00, 0xff60], // 全角形式（含全角标点（），：等）
+  [0xffe0, 0xffe6], // 全角符号（￠￦ 等）
+];
+
+/** 该码点是否东亚宽字符（显示占 2 格）。 */
+function isWideChar(ch) {
+  const cp = ch.codePointAt(0);
+  return WIDE_CHAR_RANGES.some(([lo, hi]) => cp >= lo && cp <= hi);
+}
+
+/**
+ * Terminal display width of a string: East Asian wide chars count 2, all others
+ * count 1（wcwidth 近似，零依赖；不做字素分解）。纯字符串工具，无 env/IO。
+ * 导出供命令层渲染共用（分层方向 commands → application 合法），避免第二份
+ * 宽度表漂移。
+ * @param {unknown} value
+ * @returns {number}
+ */
+export function displayWidth(value) {
+  let w = 0;
+  for (const ch of String(value ?? "")) w += isWideChar(ch) ? 2 : 1;
+  return w;
+}
 
 const READY_RANK = {
   ready: 0,
@@ -167,10 +201,24 @@ const READY_RANK = {
   unknown: 5,
 };
 
-/** Truncate a template comment line to the given cap; non-strings/empty → null. */
+/**
+ * Truncate a template comment line so its TERMINAL DISPLAY width is ≤ max
+ * (East Asian wide chars count 2 — R6-C3/P1-2；此前按码元数截断，中文注释 60
+ * 码元 ≈ 120 显示格，是矩阵列错位的根因)。non-strings/empty → null。JSON 字段
+ * 语义不变：仍是一条有界的模板注释字符串。
+ */
 function truncateNote(value, max) {
   if (typeof value !== "string" || value.length === 0) return null;
-  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+  if (displayWidth(value) <= max) return value;
+  let out = "";
+  let w = 0;
+  for (const ch of value) {
+    const cw = isWideChar(ch) ? 2 : 1;
+    if (w + cw > max - 1) break; // 留 1 显示格给省略号
+    out += ch;
+    w += cw;
+  }
+  return `${out}…`;
 }
 
 /** Normalize a hasCli probe result to true | false | "unknown". */

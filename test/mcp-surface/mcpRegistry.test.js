@@ -15,7 +15,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
@@ -29,6 +29,9 @@ import { isValidCanonicalAgentId } from "../../src/canonicalAgentId.js";
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
 const SHIM = join(REPO_ROOT, "scripts", "wao-node.cjs");
 const STDIO_ENTRY = join(REPO_ROOT, "src", "mcp", "stdio.js");
+// R6-C3（席位 B）：serverInfo.version 现从 package.json 动态读取；断言读同一份
+// package.json 自同步——发版后实现与测试一起跟随，不再钉死手写版本号。
+const PKG_VERSION = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")).version;
 
 function makeRegistry(dir, agents) {
   const registryPath = join(dir, "agents.json");
@@ -92,7 +95,7 @@ test("M9-1-01: MCP initialize succeeds, server identity stable", async () => {
       const serverInfo = client.getServerVersion();
       assert.ok(serverInfo, "server version available after initialize");
       assert.equal(serverInfo.name, "wao-mcp", "server name stable");
-      assert.equal(serverInfo.version, "0.0.1", "server version stable");
+      assert.equal(serverInfo.version, PKG_VERSION, "server version tracks package.json");
       const caps = client.getServerCapabilities();
       assert.ok(caps?.tools, "server advertises tools capability");
     } finally {
@@ -860,7 +863,6 @@ test("M9-1-C6: output schema declared; structuredContent matches schema and text
 
 // ===== Utility =====
 
-import { readFileSync } from "node:fs";
 function readFileSyncCompat(p) {
   return readFileSync(p, "utf8");
 }
