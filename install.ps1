@@ -51,14 +51,22 @@ function Write-WaoInfo { param([string]$Msg) Write-Host "    $Msg" }
 function Write-WaoWarn { param([string]$Msg) Write-Host "[warn] $Msg" -ForegroundColor Yellow }
 
 # 运行外部命令并收集输出；非零退出码视为致命（AllowFail 除外）。-WhatIf 下只打印。
+# F-5-13：node/git 等子进程输出 UTF-8 无 BOM，PS 5.1 默认按系统代码页（如 GBK）解码
+# 会导致中文乱码——捕获期间临时把控制台解码切到 UTF-8，finally 恢复（不留会话副作用）。
 function Invoke-WaoExternal {
     param([string]$Exe, [string[]]$ArgList, [string]$Activity, [switch]$AllowFail)
     if ($WhatIfPreference) {
         Write-WaoInfo "[WhatIf] 跳过: $Activity -> $($ArgList -join ' ')"
         return @{ ExitCode = 0; Output = '' }
     }
-    $output = (& $Exe @ArgList 2>&1) | Out-String
-    $code = $LASTEXITCODE
+    $previousEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+        $output = (& $Exe @ArgList 2>&1) | Out-String
+        $code = $LASTEXITCODE
+    } finally {
+        [Console]::OutputEncoding = $previousEncoding
+    }
     if ($code -ne 0 -and -not $AllowFail) {
         WaoFail "$Activity 失败（exit $code）：`n$($output.Trim())"
     }
@@ -332,9 +340,12 @@ function Invoke-WaoDoctorAdvisory {
         return
     }
     Write-WaoStep '安装自检：wao doctor（advisory——只打印输出，FAIL 项不阻塞安装）'
+    $previousEncoding = [Console]::OutputEncoding
     try {
         Push-Location -LiteralPath $Path
         # 目标项目用 WAO 仓自身（AGENT_ONBOARDING §4d：新机器无其它项目时可临时用本仓）。
+        # F-5-13：与 Invoke-WaoExternal 同款 UTF-8 解码（PS 5.1 默认按系统代码页解码会乱码）。
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
         $output = (& $NpmCmd run cli --silent -- wao doctor --cwd $Path 2>&1) | Out-String
         Write-Host ($output.TrimEnd())
         # 要求 9：故意不检查 $LASTEXITCODE——doctor 是建议性报告，不是安装门禁。
@@ -343,6 +354,7 @@ function Invoke-WaoDoctorAdvisory {
         Write-WaoWarn "wao doctor 未运行成功（不影响安装结果）：$($_.Exception.Message)"
     }
     finally {
+        [Console]::OutputEncoding = $previousEncoding
         Pop-Location
     }
 }

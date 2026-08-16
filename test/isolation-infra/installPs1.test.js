@@ -127,3 +127,17 @@ test("源级不变量：无语句位 exit / TLS12 存在 / 不执行 npm link / 
     "不得出现 PATH/注册表/环境变量写入（要求 8：不改 PATH）"
   );
 });
+
+// F-5-13 守卫：外部命令输出捕获必须 UTF-8 解码 + finally 恢复控制台编码，
+// 否则 PS 5.1 按系统代码页（GBK）解码 node 子进程的 UTF-8 输出会乱码。
+test("F-5-13: Invoke-WaoExternal 捕获期间切 UTF-8 解码并在 finally 恢复（无会话副作用）", () => {
+  assert.ok(existsSync(PS1));
+  const src = readFileSync(PS1, "utf8");
+  assert.match(src, /\[Console\]::OutputEncoding = New-Object System\.Text\.UTF8Encoding\(\$false\)/,
+    "捕获前应把控制台解码切到 UTF-8（无 BOM UTF-8 子进程输出的正确解码）");
+  assert.match(src, /finally\s*\{\s*\r?\n\s*\[Console\]::OutputEncoding = \$previousEncoding/,
+    "finally 块应恢复原控制台编码（不留会话副作用）");
+  const fn = src.slice(src.indexOf("function Invoke-WaoExternal"), src.indexOf("function", src.indexOf("function Invoke-WaoExternal") + 10));
+  assert.ok(fn.includes("$previousEncoding = [Console]::OutputEncoding"),
+    "进入捕获前保存原编码");
+});
