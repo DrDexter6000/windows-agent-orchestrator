@@ -153,9 +153,10 @@ export function renderHuman(r) {
       lines.push("");
       lines.push(`角色矩阵与当前环境适配（${r.recommendations.advisory}）:`);
       for (const row of rows) {
-        lines.push(`  ${String(row.id ?? "?").padEnd(24)} ${String(row.model ?? "?").padEnd(20)} ${recommendationAuthLabel(row).padEnd(36)} 适合: ${recommendationDutyDisplay(row.duty)}  [${recommendationReadyLabel(row)}]`);
+        lines.push(`  ${String(row.id ?? "?").padEnd(24)} ${String(row.backend ?? "?").padEnd(15)} ${String(row.model ?? "?").padEnd(19)} ${recommendationAuthLabel(row).padEnd(46)} 适合: ${recommendationDutyDisplay(row.duty)}  [${recommendationReadyLabel(row)}]`);
       }
       lines.push("");
+      lines.push("coder_hq / coder_low / coder_mm 互为方案/交付物会审的备选席位——由 Lead 按 ADR 0019 自行选位（避同族）；本矩阵只陈述环境适配事实，不替 Lead 选择。");
       lines.push("按你有的认证选一行重跑 --agent <id> --apply；没有的 key 对应行可忽略。");
     }
   } else if (r.selected) {
@@ -222,9 +223,15 @@ export function renderHuman(r) {
 
 /** 认证方式 column: declared key env name, or CLI login state (+ template note). */
 function recommendationAuthLabel(row) {
+  // R6-C2: 结构化认证标签——登录态行必须写明"具体哪个 CLI"（Owner 反馈），
+  // authNote 只作补充（模板 _comment_auth），不再替代结构化基座。
   if (row.requiresKeyEnv) return `认证: key ${row.requiresKeyEnv}`;
-  if (row.authNote) return `认证: CLI 登录态：${row.authNote}`;
-  return "认证: CLI 登录态";
+  let base;
+  if (row.backend === "opencode-serve") base = "认证: opencode serve 注入";
+  else if (row.requiresCli) base = `认证: ${row.requiresCli} CLI 登录态`;
+  else base = "认证: —";
+  if (row.authNote) return `${base}（${row.authNote}）`;
+  return base;
 }
 
 /** duty display: _comment_task rows start with "适合任务: "/"默认适合: " — strip for display. */

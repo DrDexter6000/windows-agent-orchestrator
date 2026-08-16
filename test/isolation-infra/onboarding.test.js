@@ -1381,3 +1381,42 @@ test("R6-C: recommendations over the REAL tracked template derive all seven rows
   // The serialized recommendation never carries a credential VALUE.
   assert.ok(!/sk-[A-Za-z0-9]{6,}/.test(JSON.stringify(rec)));
 });
+
+// R6-C2（Owner 反馈）：矩阵行必须列出 backend 列；登录态行的认证标签必须写明
+// 具体哪个 CLI；尾部注明 coder 互为会审备选且选位权在 Lead（ADR 0019）。
+test("R6-C2: 矩阵渲染含 backend 列、登录态行写明具体 CLI、coder 替补提示在尾", async () => {
+  const { runOnboarding } = await import("../../src/application/onboarding.js");
+  const { renderHuman } = await import("../../src/commands/onboarding.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-onb-matrix2-"));
+  const root = join(dir, "wao");
+  mkdirSync(join(root, "config"), { recursive: true });
+  // 极简模板：一个 key 型 + 一个登录型（codex）worker。
+  writeFileSync(join(root, "config", "agents.example.json"), JSON.stringify({
+    agents: {
+      w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, _comment_task: "适合任务: 编码" },
+      tester: { backend: "codex", _comment_task: "适合任务: 跑测试", _comment_auth: "codex login" },
+    },
+  }));
+  const fsMod = await import("node:fs/promises");
+  const r = await runOnboarding({
+    installRoot: root,
+    exampleRegistryPath: join(root, "config", "agents.example.json"),
+    targetRegistryPath: join(root, "config", "agents.json"),
+    reliabilitySummaryPath: join(root, "runs", "reliability-summary.json"),
+    probeEnv: { hasKeyEnv: async () => "process_env", hasCli: async () => true },
+    fs: { readFile: fsMod.readFile, writeFile: fsMod.writeFile, rename: fsMod.rename,
+      existsSync, unlink: fsMod.unlink, mkdir: (p2) => fsMod.mkdir(p2, { recursive: true }) },
+  });
+  const text = renderHuman(r);
+  assert.equal(r.recommendations.rows.length, 2, "模板可读时矩阵必须有两行（fs 注入缺失会正确降级为空——本测试必须注入）");
+  // backend 列可见（每行第二列）。
+  assert.match(text, /w_key\s+claude-code\s+/, "backend 列必须出现在 id 之后");
+  assert.match(text, /tester\s+codex\s+/, "codex worker 的 backend 列可见");
+  // 登录态行写明具体 CLI。
+  assert.match(text, /认证: codex CLI 登录态/, "登录态行的认证标签必须写明具体 CLI 名");
+  assert.match(text, /认证: key ZHIPU_API_KEY/, "key 型行标签不变");
+  // 替补提示 + 选位权在 Lead。
+  assert.match(text, /互为方案\/交付物会审的备选席位/, "coder 替补提示必须在场");
+  assert.match(text, /ADR 0019 自行选位/, "选位权归属 Lead（ADR 0019）必须注明");
+  rmSync(dir, { recursive: true, force: true });
+});
