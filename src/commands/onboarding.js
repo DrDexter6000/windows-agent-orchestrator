@@ -21,7 +21,7 @@ import { resolve, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parseOptions } from "./shared.js";
-import { runOnboarding } from "../application/onboarding.js";
+import { runOnboarding, HOST_EXAMPLES_AUTHORITY } from "../application/onboarding.js";
 
 // The trusted WAO installation root = where THIS command lives, three levels up
 // (src/commands/onboarding.js → repo root). Independent of the caller cwd, matching
@@ -141,6 +141,17 @@ export function renderHuman(r) {
   lines.push("```json");
   lines.push(JSON.stringify(r.mcpSnippet, null, 2));
   lines.push("```");
+
+  // R5-D: per-host one-line registration EXAMPLES — conveniences derived from
+  // the snippet above; the snippet + docs/usage.md §MCP stdio stay authoritative.
+  if (Array.isArray(r.hostExamples) && r.hostExamples.length > 0) {
+    lines.push("");
+    lines.push(`One-line registration examples (${HOST_EXAMPLES_AUTHORITY}):`);
+    for (const ex of r.hostExamples) {
+      const tag = ex.stability === "stable" ? "" : `   [${ex.stability}]`;
+      lines.push(`  ${ex.command}${tag}`);
+    }
+  }
 
   return `${lines.join("\n")}\n`;
 }

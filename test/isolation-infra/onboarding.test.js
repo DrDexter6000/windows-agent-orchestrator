@@ -1008,3 +1008,62 @@ test("acceptance adds no new writes and does not disturb preview/apply/endorseme
   assert.equal(applied.writes.endorsement, false);
   assert.ok(applied.acceptance);
 });
+
+// ── 17. R5-D: per-host one-line registration examples ────────────────────────
+// Derived PURELY from mcpSnippet (single shape source), bounded (2 hosts),
+// stability-tagged (codex = experimental), and carried by every outcome —
+// including refused — exactly like mcpSnippet/acceptance.
+test("R5-D: buildHostExamples derives one-liners from the snippet with stable/experimental tags", async () => {
+  const { buildHostExamples, HOST_EXAMPLES_AUTHORITY } = await import("../../src/application/onboarding.js");
+  const snippet = buildMcpSnippet({ installRoot: "D:/my projects/wao" });
+  const examples = buildHostExamples(snippet);
+  assert.equal(examples.length, 2, "exactly two host examples (bounded)");
+  const [claude, codex] = examples;
+  assert.equal(claude.host, "claude-code");
+  assert.equal(claude.stability, "stable");
+  assert.match(claude.command, /^claude mcp add wao --scope user -- node /,
+    "claude one-liner uses the --scope user shape (not --user)");
+  assert.match(claude.command, /"D:\/my projects\/wao\/scripts\/wao-node\.cjs"/,
+    "paths containing spaces are quoted");
+  assert.equal(codex.host, "codex");
+  assert.equal(codex.stability, "experimental",
+    "codex mcp family is experimental — stability travels with the example");
+  assert.match(codex.command, /^codex mcp add wao -- node /);
+  assert.ok(HOST_EXAMPLES_AUTHORITY.includes("docs/usage.md"),
+    "authority pointer names docs/usage.md as the shape authority");
+  assert.deepEqual(buildHostExamples(undefined), [], "garbage input never throws, yields empty list");
+});
+
+test("R5-D: hostExamples carried by every outcome incl. refused, and rendered in human output", async () => {
+  const { HOST_EXAMPLES_AUTHORITY } = await import("../../src/application/onboarding.js");
+  const mem = await memRun({ agentId: "coder_low" });
+  const r = await mem.result;
+  assert.ok(Array.isArray(r.hostExamples) && r.hostExamples.length === 2,
+    "structured result carries hostExamples (bounded 2)");
+  // Refused outcome carries them too (same baseResult merge point).
+  const dir = mkdtempSync(join(tmpdir(), "wao-onb-refused-"));
+  const root = join(dir, "wao");
+  mkdirSync(join(root, "config"), { recursive: true });
+  writeFileSync(join(root, "config", "agents.example.json"), readFileSync(join("config", "agents.example.json")));
+  writeFileSync(join(root, "config", "agents.json"), "{}");
+  const refused = await runOnboarding({
+    agentId: "coder_low", apply: true, installRoot: root,
+    exampleRegistryPath: join(root, "config", "agents.example.json"),
+    targetRegistryPath: join(root, "config", "agents.json"),
+    reliabilitySummaryPath: join(root, "runs", "reliability-summary.json"),
+    fs: { readFile: (p, e) => import("node:fs/promises").then((m) => m.readFile(p, e)),
+      writeFile: (p, d) => import("node:fs/promises").then((m) => m.writeFile(p, d)),
+      rename: (a, b) => import("node:fs/promises").then((m) => m.rename(a, b)),
+      existsSync, unlink: (p) => import("node:fs/promises").then((m) => m.unlink(p)),
+      mkdir: (p) => import("node:fs/promises").then((m) => m.mkdir(p, { recursive: true })) },
+  });
+  assert.equal(refused.outcome, "refused");
+  assert.equal(refused.hostExamples.length, 2, "refused outcome still carries hostExamples");
+  // Human rendering shows the one-liners + authority sentence.
+  const text = renderHuman(r);
+  assert.ok(text.includes("One-line registration examples"), "human output renders the examples block");
+  assert.ok(text.includes(HOST_EXAMPLES_AUTHORITY), "human output carries the authority sentence");
+  assert.ok(text.includes("claude mcp add wao --scope user --"), "claude one-liner rendered");
+  assert.ok(/\[experimental\]/.test(text), "codex example carries the experimental tag");
+  rmSync(dir, { recursive: true, force: true });
+});

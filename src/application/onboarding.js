@@ -177,6 +177,39 @@ export function buildMcpSnippet({ installRoot }) {
 }
 
 /**
+ * Authority note carried with every host example (R5-D). The one-liners are
+ * conveniences; this sentence states where the truth lives.
+ */
+export const HOST_EXAMPLES_AUTHORITY =
+  "示例命令的 host flag 随 host 版本演进；权威形状 = docs/usage.md §MCP stdio，上方 host-neutral 片段永远是兜底";
+
+function quoteIfSpaced(s) {
+  return /\s/.test(s) ? `"${s}"` : s;
+}
+
+/**
+ * Bounded per-host one-line registration EXAMPLES (R5-D), derived purely from
+ * the host-neutral mcpSnippet — one derivation, no second shape source. Pure
+ * string mapping: no fs, no env, no host introspection. Codex's mcp command
+ * family is [experimental]; stability travels with the example so consumers
+ * can weight it honestly.
+ *
+ * @param {object} snippet — the buildMcpSnippet result
+ * @returns {Array<{host: string, stability: string, command: string}>}
+ */
+export function buildHostExamples(snippet) {
+  const entry = snippet?.mcpServers?.wao;
+  if (!entry || typeof entry.command !== "string" || !Array.isArray(entry.args)) {
+    return [];
+  }
+  const argv = [entry.command, ...entry.args].map(quoteIfSpaced).join(" ");
+  return [
+    { host: "claude-code", stability: "stable", command: `claude mcp add wao --scope user -- ${argv}` },
+    { host: "codex", stability: "experimental", command: `codex mcp add wao -- ${argv}` },
+  ];
+}
+
+/**
  * Build the bounded Host-neutral acceptance projection. Pure, deterministic,
  * advisory guidance shared by --json and human output. It names exactly the
  * three MCP steps, the PASS facts, and the four closed recovery branches so a
@@ -569,6 +602,11 @@ function baseResult(partial) {
     candidates: partial.candidates,
     registry: partial.registry,
     mcpSnippet: partial.mcpSnippet,
+    // R5-D: bounded per-host one-line registration EXAMPLES, derived purely
+    // from mcpSnippet (single source). Examples, not authority — host flags
+    // drift with host versions; the host-neutral snippet above and
+    // docs/usage.md §MCP stdio remain the authority and the fallback.
+    hostExamples: buildHostExamples(partial.mcpSnippet),
     // Bounded Host-neutral advisory acceptance projection (see buildAcceptance).
     // Carried by EVERY outcome — including refused/error — so a Fresh Lead always
     // sees the acceptance chain, PASS facts, and closed recovery branches.
