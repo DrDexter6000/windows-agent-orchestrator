@@ -1061,6 +1061,25 @@ const RUN_COLLECT_DESCRIPTION =
   "mode=compact returns the last assistant text verbatim (<=4000 chars) plus full evidence " +
   "counts; no cursor, no semantic summary.";
 
+// TD-121: page-level truncation must exactly mirror cursor presence (TD-119
+// withheld-only semantics: truncated === hasMore, and hasMore <=> nextCursor).
+// Checked at the MCP boundary so a regression BELOW the projection layer
+// collapses to the fixed error instead of leaking an inconsistent page.
+// Strict boolean comparison on purpose: a wrong-typed value is a violation
+// (fail-closed), and entry-level messages[].truncated (slice marker) is
+// intentionally NOT consulted. Pure; exported for direct unit teeth.
+export function collectPageConsistencyViolation(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return true;
+  const { truncated, nextCursor } = payload;
+  if (typeof truncated !== "boolean") return true;
+  if (nextCursor !== null && typeof nextCursor !== "string") return true;
+  // An empty string is a wrong-VALUED cursor (COLLECT_CURSOR_RE is "+"), so it
+  // is a violation in BOTH pairings: counting "" as present would pass
+  // truncated:true + "", counting it as absent would pass truncated:false + "".
+  if (nextCursor === "") return true;
+  return truncated !== (nextCursor != null);
+}
+
 // ===== run_diagnose safe projection constants =====
 
 const DIAGNOSE_ERROR_TEXT = "run_diagnose failed";
@@ -2564,6 +2583,7 @@ const SEMANTICS_DETAIL_ERROR_TEXT = "semantics detail failed";
  * @param {Function} [input.dispatchRunFn] — injectable dispatcher for testing
  * @param {Function} [input.getRunStatusFn] — injectable status service for testing
  * @param {Function} [input.collectRunMessagesFn] — injectable collect service for testing
+ * @param {Function} [input.projectCollectResultFn] — injectable collect projection for testing (TD-121 boundary seam)
  * @param {Function} [input.getRunDiagnosisFn] — injectable diagnosis service for testing
  * @param {Function} [input.getRunDeliveryFn] — injectable delivery query service for testing
  * @param {Function} [input.getRunDeliveryReadinessFn] — injectable readiness-wait service for testing (M11-10)
@@ -2695,6 +2715,11 @@ export function createWaoMcpServer({
   dispatchRunFn,
   getRunStatusFn,
   collectRunMessagesFn,
+  // TD-121: injectable collect projection (test seam, same pattern as M12-19
+  // resolveWorkspaceBindingFn). Defaults to the module-direct projectCollectResult;
+  // lets causal tests inject an inconsistent page at the handler boundary to
+  // prove the boundary consistency check fails closed.
+  projectCollectResultFn,
   getRunDiagnosisFn,
   getRunDeliveryFn,
   getRunDeliveryReadinessFn,
@@ -3840,7 +3865,15 @@ export function createWaoMcpServer({
           runId, runDir, limit: COLLECT_LIMIT, cursor,
           deferAppend: true,
         });
-        const payload = projectCollectResult(raw, { runId, cursor, mode });
+        const payload = (projectCollectResultFn ?? projectCollectResult)(raw, { runId, cursor, mode });
+        // TD-121: fail closed on a page whose page-level truncated/nextCursor
+        // pair is inconsistent (see collectPageConsistencyViolation). This runs
+        // BEFORE agentId projection, drilldown selection, the schema parse, and
+        // the deferred audit commit — a violating page appends nothing and
+        // collapses to the fixed safe text via the catch below.
+        if (collectPageConsistencyViolation(payload)) {
+          throw new Error("collect page consistency violation");
+        }
         // M11-8B closeout: project agentId through the SSOT and return the
         // PARSED safe object. The strict schema is the trust boundary.
         payload.agentId = safeProjectAgentId(payload.agentId);

@@ -13,7 +13,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { createWaoMcpServer } from "../../src/mcp/server.js";
+import { createWaoMcpServer, collectPageConsistencyViolation } from "../../src/mcp/server.js";
 
 // ===== Helpers =====
 
@@ -846,5 +846,166 @@ test("M11-4-B3-05: exact secret redacted across pages (redaction before paginati
     if (prev === undefined) delete process.env.WAO_M114_TEST_SECRET;
     else process.env.WAO_M114_TEST_SECRET = prev;
     cleanupDir(dir);
+  }
+});
+
+// ===== TD-121 (2026-08-16): page-level truncated <=> nextCursor at the MCP boundary =====
+//
+// TD-119 already pins the invariant INSIDE the projection layer (page truncated
+// is withheld-only: truncated === hasMore, hasMore <=> nextCursor). But the
+// output schema only single-field-validates, so a regression BELOW the
+// projection layer would leak an inconsistent page to the wire. TD-121 adds a
+// boundary check: an inconsistent page collapses to the fixed
+// `run_collect failed` with ZERO audit append (the check runs before the
+// deferred commitAppend).
+
+// ---------------------------------------------------------------------
+// TD-121-01: pure function — the four (truncated, nextCursor) pairings.
+// ---------------------------------------------------------------------
+test("TD-121: collectPageConsistencyViolation flags exactly the inconsistent pairings", () => {
+  // Inconsistent in BOTH directions => violation (true).
+  assert.equal(collectPageConsistencyViolation({ truncated: true, nextCursor: null }), true,
+    "truncated:true + nextCursor:null claims withheld content but offers no continuation");
+  assert.equal(collectPageConsistencyViolation({ truncated: false, nextCursor: "x" }), true,
+    "truncated:false + nextCursor:string claims a terminal page but offers a continuation");
+
+  // Consistent in BOTH directions => no violation (false).
+  assert.equal(collectPageConsistencyViolation({ truncated: false, nextCursor: null }), false,
+    "truncated:false + nextCursor:null is the consistent terminal page");
+  assert.equal(collectPageConsistencyViolation({ truncated: true, nextCursor: "abc" }), false,
+    "truncated:true + nextCursor:string is the consistent truncated page");
+});
+
+// ---------------------------------------------------------------------
+// TD-121-02: pure function — wrong-typed values fail closed; entry-level
+// messages[].truncated (slice marker) is intentionally NOT consulted;
+// non-objects and missing fields are violations.
+// ---------------------------------------------------------------------
+test("TD-121: collectPageConsistencyViolation fail-closed on wrong types, non-objects, missing fields", () => {
+  // Wrong-typed truncated is a violation, whatever the cursor.
+  for (const truncated of ["false", 0, 1]) {
+    assert.equal(collectPageConsistencyViolation({ truncated, nextCursor: null }), true,
+      `wrong-typed truncated (${typeof truncated}: ${JSON.stringify(truncated)}) fails closed`);
+  }
+  // Wrong-typed nextCursor is a violation.
+  assert.equal(collectPageConsistencyViolation({ truncated: false, nextCursor: 7 }), true,
+    "numeric nextCursor fails closed");
+
+  // Empty-string cursor: "" is not null, so truncated:false + "" would be
+  // inconsistent; and truncated:true + "" must ALSO fail closed ("" is a
+  // wrong-VALUED cursor, never a legal continuation token).
+  assert.equal(collectPageConsistencyViolation({ truncated: false, nextCursor: "" }), true,
+    "empty-string cursor with truncated:false fails closed");
+  assert.equal(collectPageConsistencyViolation({ truncated: true, nextCursor: "" }), true,
+    "empty-string cursor with truncated:true fails closed too");
+
+  // Entry-level messages[].truncated is a slice marker, NOT page semantics —
+  // it must not influence the page-level verdict.
+  assert.equal(
+    collectPageConsistencyViolation({ truncated: false, nextCursor: null, messages: [{ truncated: true }] }),
+    false,
+    "entry-level truncated:true does not turn a consistent page into a violation",
+  );
+
+  // Non-objects and missing fields are violations.
+  for (const bad of [null, undefined, "x", 42, [], [{ truncated: false }]]) {
+    assert.equal(collectPageConsistencyViolation(bad), true,
+      `non-object payload (${JSON.stringify(bad ?? null)}) is a violation`);
+  }
+  assert.equal(collectPageConsistencyViolation({}), true, "missing both fields is a violation");
+  assert.equal(collectPageConsistencyViolation({ truncated: false }), true, "missing nextCursor is a violation");
+  assert.equal(collectPageConsistencyViolation({ nextCursor: null }), true, "missing truncated is a violation");
+});
+
+// ---------------------------------------------------------------------
+// TD-121-03/04: boundary causal tests. raw is a MINIMAL legal collect-service
+// result (the same shape the real service returns: data / reconstructed /
+// backend / agentId + commitAppend), and projectCollectResultFn is injected
+// through the M12-19-style seam so the returned page is fully controlled.
+//
+// False-green guard: every injected page is a COMPLETE legal RUN_COLLECT_OUTPUT
+// body — only the (truncated, nextCursor) pair varies. So a failure can only
+// come from the consistency check, never from a parse error on a malformed
+// fixture; the consistent counter-example (TD-121-04) runs the exact same
+// fixture shape and succeeds, which is the mutual proof.
+// ---------------------------------------------------------------------
+
+// A minimal legal service result with a counting commitAppend spy.
+function td121Raw(commitCalls) {
+  return {
+    data: [{ kind: "message", role: "assistant", parts: [{ type: "text", text: "td-121 page body" }] }],
+    reconstructed: true,
+    backend: "process",
+    agentId: "w",
+    commitAppend: async () => { commitCalls.push(true); },
+  };
+}
+
+// A complete legal page body whose ONLY varying pair is (truncated, nextCursor).
+function td121Page(truncated, nextCursor) {
+  return {
+    runId: "run_td121",
+    agentId: "w",
+    backend: "process",
+    reconstructed: true,
+    itemCount: 1,
+    messages: [{ role: "assistant", text: "td-121 page body", truncated: false }],
+    evidenceCounts: { message: 1, command: 0, toolUse: 0, toolResult: 0, fileWritten: 0, other: 0 },
+    truncated,
+    nextCursor,
+  };
+}
+
+test("TD-121: inconsistent projection fails closed at the boundary with zero audit append", async () => {
+  // Direction A: truncated:true + nextCursor:null. Direction B: truncated:false
+  // + a legal-shaped cursor (base64url alphabet, <=192 chars) — without the
+  // boundary check, B would parse and commit, so this is the causal pair.
+  for (const [truncated, nextCursor] of [[true, null], [false, "td121Y3Vyc29y"]]) {
+    const commitCalls = [];
+    const server = createWaoMcpServer({
+      registryPath: "/server/r.json",
+      runDir: "/server/runs",
+      collectRunMessagesFn: async () => td121Raw(commitCalls),
+      projectCollectResultFn: () => td121Page(truncated, nextCursor),
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_td121" } });
+      assert.equal(res.isError, true, `(${truncated}, ${JSON.stringify(nextCursor)}): flagged as error`);
+      const text = res.content.find((b) => b.type === "text").text;
+      assert.equal(text, "run_collect failed", "fixed safe text, no violation detail leaks");
+      assert.ok(!res.structuredContent, "no structuredContent on the collapsed error");
+      assert.equal(commitCalls.length, 0, "commitAppend never called — the check fires before the audit commit");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }
+});
+
+test("TD-121: consistent projection through the same seam succeeds and commits the audit", async () => {
+  // Counter-example: identical seam, identical raw, identical fixture shape —
+  // only the (truncated, nextCursor) pair is consistent. Proves the check is
+  // not over-eager and that zero-append happens ONLY on a violating page.
+  const commitCalls = [];
+  const server = createWaoMcpServer({
+    registryPath: "/server/r.json",
+    runDir: "/server/runs",
+    collectRunMessagesFn: async () => td121Raw(commitCalls),
+    projectCollectResultFn: () => td121Page(false, null),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_td121" } });
+    assert.notEqual(res.isError, true, "consistent page is not an error");
+    const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+    assert.equal(parsed.runId, "run_td121", "parsed page returned");
+    assert.equal(parsed.truncated, false, "page truncated:false");
+    assert.equal(parsed.nextCursor, null, "page nextCursor:null");
+    assert.ok(Array.isArray(parsed.availableDrilldowns), "drilldown metadata still computed after the check");
+    assert.ok(commitCalls.length >= 1, "audit append committed exactly when the page is consistent");
+  } finally {
+    await client.close();
+    await server.close();
   }
 });
