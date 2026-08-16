@@ -70,6 +70,6 @@ Project state (.wao/):
   wao ask <agentId> "<一句话任务>" [--mode write] [--cwd DIR]  # 快捷派工（只读默认注入边界；--mode write 不注入）
   wao handoff write --from R --to R --summary S [--artifacts a,b]
   wao handoff read <role> [--format json]  # latest incoming handoff addressed to role
-  wao doctor [--cwd DIR] [--format json]
+  wao doctor [--cwd DIR] [--format json] [--warn-as-error]
   wao onboarding [--agent <id>] [--apply] [--endorse-worker <id>] [--json]  # third-party: generate one minimal private registry from the tracked template (+ host-neutral MCP snippet)
 ```

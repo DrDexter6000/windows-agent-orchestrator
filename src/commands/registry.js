@@ -42,6 +42,8 @@ async function registryCommand(args, config) {
     console.log(JSON.stringify(agents, null, 2));
     return;
   }
+  // R5-B：人类输出加表头行（保持 tab 分隔；--format json 不变）。
+  console.log("id\tbackend\tmodel\tcertification\tcwd");
   for (const agent of agents) {
     console.log(`${agent.id}\t${agent.backend}\t${agent.model}\t${agent.certification ?? "-"}\t${agent.cwd}`);
   }

@@ -329,9 +329,17 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 ### 7.6 wao doctor 体检
 
 - **何时跑**：部署前、出问题时第一件事、定期
-- **命令**：`npm run cli -- wao doctor`
-- **检查项**：Node 版本 / 4 个 CLI 在 PATH / 3 个 provider key / agents.json 完整性（opencode worker 有 tokenBudget）/ .wao/ init
-- **判读**：HEALTHY 才能派发。任何 FAIL 都是风险，修了再派
+- **命令**：`npm run cli -- wao doctor [--registry config/agents.json] [--cwd <目标项目>] [--format json]`；CI 想把 WARN 也卡成非零退出可加 `--warn-as-error`（只改退出码，不改报告内容）
+- **检查项**（scoped——只按 registry 里保留的 worker 收窄，不再 4 CLI / 3 key 全查）：
+  - Node 版本（>=22）
+  - 保留 worker 需要的 CLI 在 PATH（没有 worker 需要的 CLI 显示 INFO 跳过，不判 FAIL）
+  - 保留 worker 声明的 provider key（进程 env 或 Windows User 作用域；kimi-code 走 CLI 登录态，不查 API key）
+  - agents.json 完整性（opencode worker 必须配 tokenBudget——06-18 事故防线）
+  - 目标项目的 `.wao/` 是否 init（未 init / fresh clone 缺槽位是 WARN，结构混乱才是 FAIL）
+- **判读**（advisory，非门禁——doctor 不自动阻断任何派发，verdict 行自带"（advisory，非门禁）"标注）：
+  - `HEALTHY`：无 FAIL 无 WARN，可直接继续
+  - `DEGRADED（N warn）`：仅 WARN（如 User 作用域 key 未继承、.wao 未 init），可直接继续
+  - `BROKEN（N fail[, M warn]）`：有 FAIL——按每条 FAIL 的 `run:` 提示处理（装 CLI / `setx` 配 key / `wao init`），处理后由你（Lead/owner）裁定是否继续
 
 ### 7.7 worker 输出/证据为空但 run "completed"（证据链断链，高危）
 

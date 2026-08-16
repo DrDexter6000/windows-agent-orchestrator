@@ -1096,7 +1096,8 @@ test("registry list 合并认证状态列（summary 存在时显示 cert 状态�
 
     const out = runCliOnPathNode(`registry list --registry ${registryPath} --run-dir ${runDir}`);
     const lines = out.trim().split(/\r?\n/);
-    assert.equal(lines.length, 2, "应列出 2 个 agent");
+    assert.equal(lines.length, 3, "应输出表头 + 2 个 agent 行");
+    assert.equal(lines[0], "id\tbackend\tmodel\tcertification\tcwd", "首行应为表头（tab 分隔）");
     const hqLine = lines.find((l) => l.startsWith("coder_hq"));
     assert.ok(hqLine, "应有 coder_hq 行");
     assert.match(hqLine, /certified/, "coder_hq 应显示 certified");
@@ -1566,6 +1567,8 @@ test("wao doctor: auditor-only claude-code OAuth 不触发 provider worker WARN"
 // invocation_method 本身，不应耦合本机密钥/配置。注入 dummy key + 指向 tracked
 // synthetic registry（test/fixtures/agents.six.json），把 verdict 隔离到被测检查项。
 // 不改产品语义——doctor 仍是 preflight 体检；只是测试不再要求真实密钥/本机配置。
+// R5-B scoped 后防护意图不变：dummy key 让 scoped key 检查在进程 env 命中，
+// 不触发 Windows User 作用域读取（慢且耦合本机注册表）。
 const DOCTOR_REGISTRY = "test/fixtures/agents.six.json";
 function doctorSpawnEnv() {
   return {
@@ -1598,9 +1601,11 @@ test("wao doctor: never-inited 目录的 wao_init 不应让 preflight FAIL（fre
     // 未初始化 = WARN，不计入 failed → exit 0（preflight 不因"还没 init"判失败）
     assert.equal(waoInit.pass, true, "未初始化的 wao_init 不应 FAIL（fresh-agent preflight 第一步语义）");
     assert.equal(waoInit.level, "warn");
+    assert.match(waoInit.detail, /npm run cli -- wao init --cwd/, "WARN 应附 run: 修复提示");
     assert.equal(result.status, 0, "never-inited 目录 doctor 应 exit 0（未 init 是正常初态，非不健康）");
-    assert.match(parsed.verdict, /WARN|HEALTHY/);
-    assert.ok(!/ISSUE/.test(parsed.verdict), "未 init 不应让 verdict 出现 ISSUE");
+    assert.match(parsed.verdict, /DEGRADED|HEALTHY/);
+    assert.ok(!/ISSUE|BROKEN/.test(parsed.verdict), "未 init 不应让 verdict 出现 ISSUE/BROKEN");
+    assert.match(parsed.verdict, /（advisory，非门禁）/, "verdict 行应带非门禁标注");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1722,6 +1727,224 @@ test("TD-72 延伸: doctor 报告 invocation_method（info 级，告知 WAO 故�
     assert.match(inv.detail, /不进 PATH|不是安装缺失/, "应明示不进 PATH 是设计非缺失");
     // info 项不影响 verdict（HEALTHY 不因它变 ISSUE）
     assert.equal(result.status, 0, "info 项不应让 doctor exit 非零");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R5-B: doctor scoped——registry 无 worker 时 CLI/key 全部 INFO 跳过（HEALTHY + JSON 加性字段）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-doctor-empty-reg-"));
+  try {
+    // 建一个完整 .wao/（6 槽位）使 wao_init 为 OK——verdict 可确定断言 HEALTHY。
+    mkdirSync(join(dir, ".wao"), { recursive: true });
+    writeFileSync(join(dir, ".wao", "project.md"), "", "utf8");
+    for (const slot of ["state", "decisions", "pipeline", "handoff", "runs"]) {
+      mkdirSync(join(dir, ".wao", slot), { recursive: true });
+    }
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: {} }), "utf8");
+
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "doctor",
+      "--registry", registryPath,
+      "--cwd", dir,
+      "--format", "json",
+    ], { cwd: process.cwd(), encoding: "utf8", env: process.env, timeout: 10000 });
+
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.schemaVersion, 1, "JSON 顶层应有 schemaVersion=1");
+    assert.equal(parsed.advisory, true, "JSON 顶层应有 advisory=true");
+    assert.equal(parsed.verdict, "HEALTHY（advisory，非门禁）", "无 FAIL 无 WARN → HEALTHY + 非门禁标注");
+    assert.equal(result.status, 0);
+    for (const cli of ["claude", "codex", "kimi", "opencode"]) {
+      const c = parsed.checks.find((x) => x.name === `cli_${cli}`);
+      assert.ok(c, `应有 cli_${cli} 检查项`);
+      assert.equal(c.status, "info", `无 worker 需要 ${cli} → INFO 跳过`);
+      assert.equal(c.pass, true, `cli_${cli} 跳过不判 FAIL`);
+      assert.match(c.detail, /未配置（跳过）/);
+    }
+    const keys = parsed.checks.find((x) => x.name === "keys");
+    assert.ok(keys && keys.status === "info", "无 provider worker → key 检查 INFO 跳过");
+    // 加性字段：status/severity 每个 check 都有；name/pass/detail/level 兼容保留。
+    for (const c of parsed.checks) {
+      assert.ok(["ok", "warn", "info", "fail"].includes(c.status), `${c.name} 应有合法 status`);
+      assert.equal(c.severity, c.status, `${c.name} 的 severity 应与 status 一致`);
+      assert.ok("pass" in c && "detail" in c, `${c.name} 保留兼容字段`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R5-B: doctor 无法映射的 backend 给 WARN 不静默；--warn-as-error 使任一 WARN exit 1", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-doctor-unmapped-"));
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: { mystery: { backend: "future-backend-xyz", cwd: dir } },
+    }), "utf8");
+
+    const base = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "doctor",
+      "--registry", registryPath,
+      "--cwd", dir,
+      "--format", "json",
+    ], { cwd: process.cwd(), encoding: "utf8", env: process.env, timeout: 10000 });
+    const parsed = JSON.parse(base.stdout);
+    const map = parsed.checks.find((c) => c.name === "backend_map_mystery");
+    assert.ok(map, "无法映射的 backend 应有 WARN 检查项（不静默）");
+    assert.equal(map.pass, true, "映射 WARN 不判 FAIL");
+    assert.equal(map.status, "warn");
+    assert.equal(map.level, "warn");
+    assert.match(map.detail, /future-backend-xyz/);
+    assert.ok(map.fix, "WARN 项应带 fix 指引");
+    assert.match(parsed.verdict, /^DEGRADED（\d+ warn）/, "仅 WARN → DEGRADED（N warn）");
+    assert.ok(parsed.verdict.endsWith("（advisory，非门禁）"), "verdict 行尾应带非门禁标注");
+    assert.equal(base.status, 0, "仅 WARN 时 exit 0");
+
+    const asError = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "doctor",
+      "--registry", registryPath,
+      "--cwd", dir,
+      "--format", "json",
+      "--warn-as-error",
+    ], { cwd: process.cwd(), encoding: "utf8", env: process.env, timeout: 10000 });
+    const parsed2 = JSON.parse(asError.stdout);
+    assert.match(parsed2.verdict, /（--warn-as-error）/, "verdict 应标注 --warn-as-error");
+    assert.equal(asError.status, 1, "--warn-as-error 时任一 WARN → exit 1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R5-B: doctor scoped key——只查保留 worker 声明的 env 名；缺失给 FAIL + setx 修复提示", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-doctor-scoped-key-"));
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        coder_low: {
+          backend: "claude-code",
+          provider: { baseUrl: "https://example.invalid/anthropic", apiKeyEnv: "WAO_TEST_NO_SUCH_KEY_R5B" },
+          cwd: dir,
+        },
+      },
+    }), "utf8");
+
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "doctor",
+      "--registry", registryPath,
+      "--cwd", dir,
+      "--format", "json",
+    ], { cwd: process.cwd(), encoding: "utf8", env: process.env, timeout: 30000 });
+    const parsed = JSON.parse(result.stdout);
+    const key = parsed.checks.find((c) => c.name === "key_WAO_TEST_NO_SUCH_KEY_R5B");
+    assert.ok(key, "应只查 worker 声明的 env 名");
+    assert.equal(key.pass, false);
+    assert.equal(key.status, "fail");
+    assert.match(key.fix, /setx WAO_TEST_NO_SUCH_KEY_R5B/, "key 缺失 fix 应给 setx（User 作用域）提示");
+    assert.match(key.detail, /run: setx/, "FAIL 行应附 run: 修复提示");
+    // scoped：未声明的 key 不得被检查（不写死三连）
+    assert.ok(!parsed.checks.some((c) => c.name === "key_ZHIPU_API_KEY" || c.name === "key_DEEPSEEK_API_KEY"),
+      "未声明的 provider key 不得被检查（scoped 收窄）");
+    assert.equal(result.status, 1, "有 FAIL → exit 1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R5-B: doctor kimi 特例——kimi-code 靠 CLI 登录态，不查任何 kimi API key", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-doctor-kimi-key-"));
+  try {
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        coder_mm: { backend: "kimi-code", cwd: dir },
+        coder_hq: {
+          backend: "claude-code",
+          provider: { baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "KIMI_API_KEY" },
+          cwd: dir,
+        },
+      },
+    }), "utf8");
+
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "doctor",
+      "--registry", registryPath,
+      "--cwd", dir,
+      "--format", "json",
+    ], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: { ...process.env, KIMI_API_KEY: "fake-kimi-key" },
+      timeout: 10000,
+    });
+    const parsed = JSON.parse(result.stdout);
+    const kimiKey = parsed.checks.find((c) => c.name === "key_KIMI_API_KEY");
+    assert.ok(kimiKey, "保留 kimi worker 时应有 key_KIMI_API_KEY 说明项");
+    assert.equal(kimiKey.pass, true);
+    assert.equal(kimiKey.status, "info");
+    assert.equal(kimiKey.level, "info", "kimi 特例是 INFO 不是 FAIL/WARN");
+    assert.match(kimiKey.detail, /kimi-code 使用 CLI 登录态，不查 API key/);
+    // 即使另一个 worker 声明了 KIMI_API_KEY，kimi worker 在场也不查该 key——
+    // key_* 检查项只应有这一条 INFO（coder_mm 无声明、coder_hq 的 KIMI_API_KEY 被特例跳过）
+    const keyChecks = parsed.checks.filter((c) => c.name.startsWith("key_"));
+    assert.equal(keyChecks.length, 1, "kimi 特例下不应再对 KIMI_API_KEY 做存在性检查");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R5-B: doctor registry 缺位回退——CLI/key INFO + onboarding 提示，不退回全量 FAIL", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-doctor-no-registry-"));
+  try {
+    const missingPath = join(dir, "does-not-exist", "agents.json");
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "doctor",
+      "--registry", missingPath,
+      "--cwd", dir,
+      "--format", "json",
+    ], { cwd: process.cwd(), encoding: "utf8", env: process.env, timeout: 10000 });
+    const parsed = JSON.parse(result.stdout);
+    const reg = parsed.checks.find((c) => c.name === "registry");
+    assert.ok(reg, "缺位回退应有 registry INFO 项");
+    assert.equal(reg.status, "info");
+    assert.match(reg.detail, /onboarding --agent <id> --apply/);
+    for (const cli of ["claude", "codex", "kimi", "opencode"]) {
+      const c = parsed.checks.find((x) => x.name === `cli_${cli}`);
+      assert.ok(c && c.status === "info", "registry 缺失时 CLI 检查全部 INFO");
+    }
+    const keys = parsed.checks.find((x) => x.name === "keys");
+    assert.ok(keys && keys.status === "info", "registry 缺失时 key 检查 INFO 跳过");
+    assert.ok(parsed.checks.some((x) => x.name === "node_version"), "node_version 检查保留");
+    assert.ok(parsed.checks.some((x) => x.name === "invocation_method"), "invocation_method 检查保留");
+    assert.equal(result.status, 0, "registry 缺位 + 无 FAIL → exit 0（wao_init 未 init 是 WARN 非 FAIL）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R5-B: doctor fresh clone 缺槽位无多余 → wao_init WARN（不 FAIL）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-doctor-freshclone-"));
+  try {
+    // fresh clone 实际命中态：.wao/ 只含 git 跟踪的 decisions/
+    mkdirSync(join(dir, ".wao", "decisions"), { recursive: true });
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "doctor",
+      "--registry", join(dir, "nope.json"),
+      "--cwd", dir,
+      "--format", "json",
+    ], { cwd: process.cwd(), encoding: "utf8", env: process.env, timeout: 10000 });
+    const parsed = JSON.parse(result.stdout);
+    const waoInit = parsed.checks.find((c) => c.name === "wao_init");
+    assert.ok(waoInit);
+    assert.equal(waoInit.pass, true, "缺槽位无多余不判 FAIL");
+    assert.equal(waoInit.status, "warn");
+    assert.match(waoInit.detail, /缺少槽位 \[/);
+    assert.match(waoInit.detail, /fresh clone 的正常初态/);
+    assert.match(waoInit.detail, /npm run cli -- wao init --cwd/);
+    assert.ok(waoInit.fix, "WARN 项应带 fix 提示");
+    assert.equal(result.status, 0, "fresh clone 缺槽位 exit 0");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
