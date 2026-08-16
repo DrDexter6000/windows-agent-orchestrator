@@ -30,6 +30,28 @@
 | run completed 但 messages 空 / 无 assistant text | [§7.7 证据链断链](#77-worker-输出证据为空但-run-completed证据链断链高危) |
 | 认证判 draft-only/rejected 但模型应该会 | [§7.8 认证误判](#78-认证判-draft-onlyrejected-但模型其实会认证误判) |
 | 改了 example 配置但 worker 行为没变 | [§7.9 agents.json 真相源](#79-agentsjson-vs-agentsexamplejson-混淆配置真相源) |
+| `run_delivery` 返回失败面 / 不知道下一步用哪个交付工具 | [§delivery 失败模式 → 正确工具（闭集查表）](#delivery-失败模式--正确工具闭集查表) |
+
+## delivery 失败模式 → 正确工具（闭集查表）
+
+> 行为合同权威在 `docs/usage.md`（`run_delivery`、候选面 candidateInventory、`run_delivery_reverify` 各节）；本表是"现象→动作"runbook，表中枚举值由 docs-consistency 关系型守卫与 SSOT 同步。
+>
+> **跨切规则：任何 readiness 结果只要带 `candidateInventory`/`candidateKind`，先走候选路径（读 inventory → Lead 裁定 → `run_delivery_repackage` 结算），不按 readiness 标签直接人工核或重读。**
+
+| 观察到的失败形状 | 正确动作 |
+|---|---|
+| readiness `not_requested`（`deliveryAvailable:false` + `deliveryRequested:false`） | 正常（非 delivery run），无需动作 |
+| readiness `waiting_for_packaging`（非终态请求中） | 带 `waitMs` 重读（`run_delivery` / `runs delivery --wait-ms`）；不要 stop |
+| readiness `waiting_for_verification` | 带 `waitMs` 重读；验证是控制面异步事实 |
+| readiness `isolation_failed`（`isolationFailure.code` 为 `workdir_escape`） | **无任何 salvage 面**：不 repackage/reverify/review/decide/stop——重新派发 |
+| readiness `packaging_failed` 且 `deliveryFailure.code` 为 `disallowed_path`（candidateKind `disallowed_scope`，带 candidateInventory） | 读 candidateInventory，Lead 裁定后 `run_delivery_repackage` |
+| readiness `packaging_failed` 且 code 非 `disallowed_path`（其余包装失败码） | 无候选面：读 `deliveryFailure.code` + `run_diagnose`（只给事实），重新派发或人工核 |
+| readiness `ambiguous` 且 candidateKind `backend_failed`（带 candidateInventory） | 候选路径：Lead 裁定后 `run_delivery_repackage` |
+| readiness `ambiguous` 无 candidateInventory | fail-closed 折叠：人工核 transcript |
+| 非终态 + candidateKind `process_missing`（readiness `waiting_for_packaging`，孤进程已证死） | `run_delivery_repackage`（first-terminal-wins 结算 orphan）——绝不等于语义 accept |
+| reviewable + verification failed + reverify 原因 ∈ {`tooling_invalid`/`environment_contaminated`/`dependency_setup_missing`} 且原始失败码 ∈ 资格闭集 {`command_failed`/`command_timeout`/`execution_error`/`setup_failed`/`setup_timeout`/`setup_environment_error`} | `run_delivery_reverify` 一次（同 commit、原始断言不可改、只能追加 setup）；`artifact_mutated`/`artifact_mismatch` 不具资格 |
+| reviewable | 逐页 `run_delivery_review`（fileIndex 至 cursor 尽头）→ `run_delivery_decide` |
+| Host 传输中断/取消 | **什么都不做**：point-in-time 重读；绝不推断 run 已停 |
 
 ---
 

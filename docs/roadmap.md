@@ -105,8 +105,8 @@ spec §4.3 的 cleanup 钩子是确定性的，即使没有 Job Object 也能保
 
 ## 治理触发条件（2026-08-15 三席评审裁定）
 
-- **第 23 个 MCP 工具**：冻结面扩容（22 → 23）获 Owner 批准前，先做 per-tool 模块化（`src/mcp/tools/<tool>.js` 导出 `{name, schema, handler}`，薄 `server.js` 组装），并保留既有构造期注册序列自检。**注册顺序必须由 `toolSurface.js` 的 `TOOLS` 数组驱动遍历，不得由模块 import 顺序隐式决定**——否则 per-tool 文件的 import 排列成为新的不成文契约，冲击 tools/list 字节稳定断言；拆分 PR 必须先过 surface-lock 字节稳定测试再动结构。先例：21→22 扩面（`run_correct`，M12-16）已发生且幸存，本条只锁结构前提，不改变冻结面承诺。
-- **Windows-native 定位（结束中间态）**：Windows-native 是**差异化定位**（企业 Windows 开发机是被主流 agent 工具忽视的市场），不是待偿还的移植债；**不排期 POSIX lane**，TD-13 的"需要时加 platform 分支"按此定位解读。重看触发：出现明确外部 POSIX 需求或第二位需要 POSIX 的贡献者，且 Windows 侧差异化体验（owner-dashboard 级）已固化。改判需 Owner 明示并修订本节。
+- **第 23 个 MCP 工具**：冻结面扩容（22 → 23）获 Owner 批准前，先做 per-tool 模块化（`src/mcp/tools/<tool>.js` 导出 `{name, schema, handler}`，薄 `server.js` 组装），并保留既有构造期注册序列自检。**注册顺序必须由 `toolSurface.js` 的 `TOOLS` 数组驱动遍历，不得由模块 import 顺序隐式决定**——否则 per-tool 文件的 import 排列成为新的不成文契约，冲击 tools/list 字节稳定断言；拆分 PR 必须先过 surface-lock 字节稳定测试再动结构。先例：21→22 扩面（`run_correct`，M12-16）已发生且幸存，本条只锁结构前提，不改变冻结面承诺。工具面字节稳定性分层与减面两级程序见 ADR 0021（2026-08-16）。
+- **Windows-native 定位（结束中间态）**：Windows-native 是**差异化定位**（生态观察：主流 agent 工具长期忽视 Windows 原生开发机——非当前目标市场承诺；企业/团队部署是带前置条件的潜在第二阶段，见 PRD §2 与 TD-104），不是待偿还的移植债；**不排期 POSIX lane**，TD-13 的"需要时加 platform 分支"按此定位解读。重看触发：出现明确外部 POSIX 需求或第二位需要 POSIX 的贡献者，且 Windows 侧差异化体验（owner-dashboard 级）已固化。改判需 Owner 明示并修订本节。
 
 ## 进度跟踪
 

@@ -507,7 +507,7 @@ WAO 是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude De
 
 #### 冻结工具面（always-registered tools，M12-10 progressive-disclosure correction + M12-16 run_correct）
 
-WAO 的 MCP 工具**全部始终注册**：无 profile、无启动 flag、无 restart-to-recover——每个操作工具对连接的整个生命周期都可独立调用。这是一个**静态呈现层**：它**不是**权限层、**不是**路由层、**不按** host/runtime 名分支（Claude/Codex/Kimi/OpenCode 一视同仁，无任何 `if host==…`），也不依赖 `tools/list_changed` 或运行期动态注册。每个工具的 `name`/`description`/`inputSchema`/`outputSchema`/`annotations` 固定且逐字节稳定。参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。
+WAO 的 MCP 工具**全部始终注册**：无 profile、无启动 flag、无 restart-to-recover——每个操作工具对连接的整个生命周期都可独立调用。这是一个**静态呈现层**：它**不是**权限层、**不是**路由层、**不按** host/runtime 名分支（Claude/Codex/Kimi/OpenCode 一视同仁，无任何 `if host==…`），也不依赖 `tools/list_changed` 或运行期动态注册。工具面的字节稳定性**分层**（ADR 0021）：`name` 与注册顺序逐字节冻结；`inputSchema`/`outputSchema`/`annotations` 由 description 剥离 SHA-256 冻结契约哈希锁定（仅限 additive 变更 + 显式重冻结记录）；`description` 可修订——受冻结字节天花板约束、每次修订附 Lead 复核记录。演进 additive-first，减面两级程序见 `.wao/decisions/0021`。参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。
 
 原 playbook 工具已**整体移出工具面**（M12-10），built-in playbook catalog 改为按需读取的 MCP resources（`wao://playbooks`，见下文）；M12-16 增 `run_correct`（queued in-flight correction）。全部工具（含 `workspace_select`、`run_dispatch_contract_check`、`run_wait`、`run_correct`）不再被任何子集隐藏，因此一个永不重启的 Host 保留全部操作能力。所有 `DRILLDOWN_TOOLS` 闭集成员（`run_status`/`run_activity`/`run_collect`/`run_delivery`/`run_delivery_review`/`run_diagnose`）均在冻结工具面内，故 `availableDrilldowns` 渐进式披露提示永远只广告可安全调用的观察工具；它只披露、不自动调用、不决策、不广告 mutation/control 工具。
 

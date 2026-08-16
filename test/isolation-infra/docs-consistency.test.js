@@ -2526,3 +2526,103 @@ test("onboarding docs: docs/usage.md points at the existing authority AGENT_ONBO
   assert.ok(/AGENT_ONBOARDING\.md/.test(usage),
     "docs/usage.md must point at AGENT_ONBOARDING.md (the existing onboarding authority), not a new doc");
 });
+
+// ============================================================
+// ADR 0021 (2026-08-16): MCP 工具面字节稳定性分层。
+// 旧活契约句（五字段"固定且逐字节稳定"）与 M12-16 起的代码事实 regime 漂移，
+// 已改为分层表述。守卫一（反回归，TD-119 模式）：旧句不得在 usage/architecture
+// 复现 + 新分层句正向锚。守卫二（关系型，TD-120 模式）：troubleshooting 新增的
+// delivery 失败模式 runbook 表与代码闭集 SSOT 双向对账——成员值一律 import，
+// 不硬编码（除显式注释的冻结 allowlist）。
+// ============================================================
+
+test("ADR 0021: 冻结工具面五字段句已改分层表述（usage + architecture 反回归 + 正向锚）", () => {
+  for (const rel of ["docs/usage.md", "docs/02-architecture.md"]) {
+    const text = read(rel);
+    // 反回归：旧五字段"固定且逐字节稳定"活契约句不得复现（TD-119 模式）。
+    assert.ok(
+      !text.includes("`outputSchema`/`annotations` 固定且逐字节稳定"),
+      `${rel} 不得再含旧五字段"固定且逐字节稳定"活契约句（ADR 0021 已改为分层表述）`
+    );
+    // 正向锚：分层表述与减面指针必须在场。
+    assert.ok(
+      text.includes("字节稳定性**分层**（ADR 0021）"),
+      `${rel} 缺正向锚"字节稳定性**分层**（ADR 0021）"`
+    );
+    assert.ok(
+      text.includes("减面两级程序见"),
+      `${rel} 缺正向锚"减面两级程序见"`
+    );
+  }
+});
+
+// 冻结 allowlist：runbook 切片内反引号包裹且含下划线、但不属于四个 import 闭集的
+// token。按 A-5 规格"以实际用到的为准增删"，逐成员理由如下：
+//   - run_delivery / run_delivery_review / run_delivery_decide /
+//     run_delivery_repackage / run_delivery_reverify / run_diagnose：
+//     MCP 工具名（toolSurface.js TOOLS SSOT 成员，非枚举闭集值）。
+//   - disallowed_path：PACKAGING_FAILURE_CODES 成员（deliveryFailureCodes.js）。
+//   - command_failed / command_timeout / execution_error / setup_failed /
+//     setup_timeout / setup_environment_error：ELIGIBLE_REVERIFY_FAILURE_CODES
+//     （runDeliveryReverify.js）——reverify 资格闭集，与 REVERIFY_REASONS 分属
+//     两个 SSOT，本守卫只 import 后者，故前者成员落在 allowlist。
+//   - artifact_mutated / artifact_mismatch：内容完整性失败码，表中以"不具资格"
+//     否定式出现（REVERIFY_FAILURE_CODES / deliveryFailureCodes.js）。
+// 规格草稿列过但按实际切片删去的（含注释）：deliveryAvailable /
+// deliveryRequested / deliveryFailure / candidateInventory / candidateKind /
+// waitMs / fileIndex / nextCursor / `runs delivery --wait-ms` 均不含下划线，
+// 反向过滤器永不命中；delivery_failed 未出现在切片中。
+export const TS_RUNBOOK_ALLOWLIST = Object.freeze([
+  "run_delivery",
+  "run_delivery_review",
+  "run_delivery_decide",
+  "run_delivery_repackage",
+  "run_delivery_reverify",
+  "run_diagnose",
+  "disallowed_path",
+  "command_failed",
+  "command_timeout",
+  "execution_error",
+  "setup_failed",
+  "setup_timeout",
+  "setup_environment_error",
+  "artifact_mutated",
+  "artifact_mismatch",
+]);
+
+test("ADR 0021 关系型守卫: troubleshooting delivery runbook 闭集值与代码 SSOT 一致（前向覆盖 + 反向对账）", async () => {
+  const { DELIVERY_READINESS_STATES, SAFE_ISOLATION_VIOLATION_CODES } =
+    await import("../../src/application/runDelivery.js");
+  const { RECOVERY_CANDIDATE_KINDS, REVERIFY_REASONS } =
+    await import("../../src/transcript.js");
+  const ts = read("docs/troubleshooting.md");
+  const heading = "## delivery 失败模式 → 正确工具（闭集查表）";
+  const start = ts.indexOf(heading);
+  assert.ok(start !== -1, "docs/troubleshooting.md 缺 delivery 失败模式 runbook 节");
+  // 切片 = 标题行至下一个 ## 标题行之前。
+  const rest = ts.slice(start + heading.length);
+  const next = rest.indexOf("\n## ");
+  const slice = next === -1 ? rest : rest.slice(0, next);
+
+  const closedSets = [
+    ...DELIVERY_READINESS_STATES,
+    ...SAFE_ISOLATION_VIOLATION_CODES,
+    ...RECOVERY_CANDIDATE_KINDS,
+    ...REVERIFY_REASONS,
+  ];
+  // 前向：四个闭集的每个成员都在切片中出现（doc 覆盖 SSOT 全集）。
+  for (const member of closedSets) {
+    assert.ok(slice.includes(member),
+      `troubleshooting runbook 缺闭集成员 ${member}（应覆盖代码 SSOT 全集）`);
+  }
+  // 反向：切片内所有反引号包裹且含下划线的 token ∈ 四闭集并集 ∪ 冻结 allowlist。
+  const allowed = new Set([...closedSets, ...TS_RUNBOOK_ALLOWLIST]);
+  const tokens = [...slice.matchAll(/`([^`\n]+)`/g)]
+    .map((m) => m[1])
+    .filter((t) => t.includes("_"));
+  assert.ok(tokens.length > 0, "runbook 切片反引号 token 提取异常（空集）");
+  for (const token of tokens) {
+    assert.ok(allowed.has(token),
+      `troubleshooting runbook 出现未对账 token \`${token}\`（不在四闭集 ∪ 冻结 allowlist）`);
+  }
+});

@@ -72,6 +72,8 @@ Niuma 验证了"图编排 + 结构化 handoff + scorecard"的正确性，但它�
 | **次要** | 想要可脚本化/CI 驱动的 agent 编排、且排斥重 GUI 的 power user；任意 MCP-capable Agent Runtime 可作为 Lead host 接入 WAO |
 | **非目标** | 企业团队、云用户、GUI-first 用户、需要细粒度多人协作的场景 |
 
+> 企业/团队部署是**带明确前置条件的潜在第二阶段**（前置条件：credential broker / 强隔离，见 `docs/tech-debt.md` TD-104），当前不是目标用户；Windows-native 定位表述见 `docs/roadmap.md` 治理触发条件节（与本文共同构成契约层口径）。
+
 ## 3. 目标（成功长什么样）
 
 1. **替代 RunMaestro 的角色**：可靠协调多个 agent runtime 完成真实开发工作，且不重蹈 RunMaestro 崩溃的覆辙。

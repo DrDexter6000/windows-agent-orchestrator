@@ -674,6 +674,7 @@ test("M12-10-H: deterministic 22-tool wire at or below the frozen ceiling", asyn
 // schemas are part of the stripped payload, so the SHA changed truthfully; no
 // description text changed. M12-10-H re-freezes the wire ceiling; this hash
 // remains the losslessness proof.
+// ADR 0021 (2026-08-16) writes this de facto regime down as policy; this test remains the enforcement.
 const DESC_STRIPPED_CONTRACT_SHA =
   "73bea15f73b2366060ddac81320caf0132ea20bfeeb57fd1be617394de82b5fc";
 
