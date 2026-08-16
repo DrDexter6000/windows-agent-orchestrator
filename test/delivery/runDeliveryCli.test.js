@@ -347,10 +347,11 @@ test("3C1-05: background delivery produces delivery_created + verification + ter
     }), "utf8");
 
     // Dispatch via CLI subprocess — the detached runner runs independently.
+    // R6-A: delivery runs require an explicit --cwd (F-5-12 early refusal).
     const cliOut = execSync(
       `node src/cli.js run fake_worker --prompt "write a file" ` +
       `--delivery-spec-file ${specPath} --background --isolate ` +
-      `--registry ${registryPath} --run-dir ${runDir}`,
+      `--cwd ${repo} --registry ${registryPath} --run-dir ${runDir}`,
       { cwd: process.cwd(), encoding: "utf8", timeout: 15000,
         env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" } },
     );
