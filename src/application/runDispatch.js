@@ -80,6 +80,33 @@ export class SessionReuseWorkspaceRequiredError extends Error {
   }
 }
 
+// Round 6 Bundle R6-A (F-5-12): thrown when a CLI delivery dispatch carries a
+// delivery block but NO explicit --cwd. dispatchRun builds the background
+// delivery ownership record (run.background_submitted.cwd, appended below from
+// this exact input) — the authority `runs delivery review` verifies against.
+// Without it the run is only rejected at REVIEW time ("malformed ownership:
+// run.background_submitted.cwd is missing or empty"), after the worker has
+// already burned the whole execution chain. The CLI boundary
+// (commands/run.js) refuses with this typed error at the argv layer, BEFORE
+// any side effect (zero transcript, zero fork, zero worktree). Same closed-set
+// form as the typed errors above: stable error.name for scriptable capture,
+// fixed actionable text, no dynamic payload. The service-level contract is
+// deliberately unchanged — the MCP boundary always threads the host-proven
+// workspace root as cwd (this error is unreachable there), and direct service
+// callers keep the pinned delivery-without-cwd behavior (runDispatch.test.js
+// M9-7A / M12-6-FR05 / M12-25-ROUT-5).
+export class DeliveryCwdRequiredError extends Error {
+  constructor() {
+    super(
+      "delivery run requires an explicit --cwd <target project> "
+      + "— the delivery ownership record (run.background_submitted.cwd) is built from it; "
+      + "refusing before any side effect (re-run with --cwd <target project>)",
+    );
+    this.name = "DeliveryCwdRequiredError";
+    this.reasonCode = "delivery_cwd_required";
+  }
+}
+
 // Default path to the detached runner. Resolved relative to this module so the
 // service stays independent of the caller's cwd (CLI vs MCP vs test).
 const DEFAULT_RUNNER_PATH = join(
@@ -144,7 +171,11 @@ function generateRunId() {
  * @param {string} input.registryPath — path to agents.json
  * @param {string} input.runDir — path to runs/ directory
  * @param {string} [input.runId] — optional custom runId (validated)
- * @param {string} [input.cwd] — optional worker cwd
+ * @param {string} [input.cwd] — optional worker cwd. REQUIRED in practice for a
+ *   delivery dispatch: it is the sole source of the background ownership record
+ *   (run.background_submitted.cwd). The CLI boundary refuses a delivery dispatch
+ *   without it up front (typed DeliveryCwdRequiredError, commands/run.js argv
+ *   gate); the MCP boundary always supplies the host-proven workspace root.
  * @param {number} [input.waitTimeout] — explicit override (range-validated 1000..600000)
  * @param {number} [input.globalWaitTimeout] — server-owned global config.waitTimeout (trusted)
  * @param {number} [input.pollInterval]

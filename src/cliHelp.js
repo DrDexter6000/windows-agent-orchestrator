@@ -96,7 +96,7 @@ Run one agent to completion and print a summary (default text format).
 Flags:
   --prompt TEXT                  the task prompt (required unless --prompt-file is given)
   --prompt-file FILE             read the task prompt from FILE (multi-line safe)
-  --cwd DIR                      target project directory
+  --cwd DIR                      target project directory (required for --background delivery runs)
   --registry FILE                agent registry file (default config/agents.json)
   --run-dir DIR                  transcript directory (default runs/)
   --poll-interval MS             status poll interval in ms
@@ -108,12 +108,15 @@ Flags:
   --scorecard-rules-file FILE    load scorecard rules from FILE (JSON)
   --scorecard-rules JSON         inline scorecard rules (JSON string)
   --tag key=value                tag the run
-  --delivery-spec-file FILE      delivery mode spec (requires --isolate)
+  --delivery-spec-file FILE      delivery mode spec (requires --isolate; a --background delivery run also requires --cwd)
   --read-only                    declare a read-only run (advisory observation; forces --isolate; mutually exclusive with --delivery-spec-file and --no-isolate)
 
 Notes:
   - The file given to --delivery-spec-file must contain the INNER delivery object
     itself ({"mode":"git_commit_v1",...}), WITHOUT an outer {"delivery": ...} wrapper.
+  - A --background delivery run additionally requires an explicit --cwd: the
+    delivery ownership record (run.background_submitted.cwd) is built from it,
+    and the dispatch is refused before any side effect when it is missing.
   - --read-only declares advisory observation, never a gate: WAO observes
     tool-reported file writes (run_activity readOnlyObservation) but never
     auto-stops or fails the run on observed writes; final judgment is the Lead's.

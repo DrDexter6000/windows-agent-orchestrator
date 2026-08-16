@@ -34,7 +34,9 @@ import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag, resolveRea
 import { prepareDeliveryRequest } from "../delivery.js";
 import { COMMAND_NAMES, RUN_USAGE_TEXT } from "../cliHelp.js";
 // M9-2A: background dispatch delegated to shared application service.
-import { dispatchRun } from "../application/runDispatch.js";
+// Round 6 Bundle R6-A (F-5-12): DeliveryCwdRequiredError is the typed refusal
+// for a --background delivery dispatch without an explicit --cwd.
+import { dispatchRun, DeliveryCwdRequiredError } from "../application/runDispatch.js";
 
 function parseAgentList(args) {
   const agents = [];
@@ -322,6 +324,22 @@ export async function runCommand(args, config) {
   }
   if (config?.waitTimeout !== undefined && config?.waitTimeout !== null) {
     validateBoundedWaitTimeout(config.waitTimeout);
+  }
+  // Round 6 Bundle R6-A (F-5-12): a BACKGROUND delivery dispatch requires an
+  // explicit --cwd. dispatchRun builds the delivery ownership record
+  // (run.background_submitted.cwd) from this exact flag; without it the run is
+  // only rejected at `runs delivery review` time ("malformed ownership"), AFTER
+  // the detached worker has burned the whole execution chain. Refuse at the argv
+  // boundary instead: this is a pure flag-presence check placed with the other
+  // pre-side-effect validations — before loadDeliverySpec reads the spec, before
+  // loadPrompt, and long before transcript creation / worktree / fork (zero side
+  // effects, typed closed-set error). Foreground delivery runs are intentionally
+  // NOT gated here: their ownership authority is run.started.cwd (a complete fact
+  // recorded from the resolved agent cwd), so this late-failure face does not
+  // exist there. The MCP run_dispatch path is unaffected by construction — its
+  // cwd is the host-proven workspace binding, never a CLI flag.
+  if (options.background && options.deliverySpecFile && !options.cwd) {
+    throw new DeliveryCwdRequiredError();
   }
   // TD-103 Phase 3C-1: load and validate delivery spec before any side effects.
   const delivery = await loadDeliverySpec(options);
