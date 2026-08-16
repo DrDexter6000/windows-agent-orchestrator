@@ -107,8 +107,8 @@ test("B1: run_dispatch_contract_check is registered, read-only/idempotent, share
     assert.deepEqual(rdKeys, ccKeys, "shared input schema keys");
     assert.deepEqual(
       rdKeys,
-      ["agentId", "continuable", "correctable", "delivery", "executionProfileId", "expectedDirty", "expectedGitHead", "expectedWorkspaceRoot", "prompt"],
-      "input schema is the full run_dispatch surface (incl. M12-16 correctable)",
+      ["agentId", "continuable", "correctable", "delivery", "executionProfileId", "expectedDirty", "expectedGitHead", "expectedWorkspaceRoot", "prompt", "readOnly"],
+      "input schema is the full run_dispatch surface (incl. M12-16 correctable + Round 4 readOnly)",
     );
     assert.equal(rd.inputSchema.additionalProperties, false, "run_dispatch strict");
     assert.equal(cc.inputSchema.additionalProperties, false, "contract_check strict");
