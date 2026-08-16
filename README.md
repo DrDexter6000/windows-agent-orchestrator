@@ -89,6 +89,11 @@ npm ci            # install from the tracked package-lock (npm install works as 
 npm link          # optional, once per machine: exposes the top-level `wao` command (e.g. `wao dashboard`)
 
 # 1. Configure the agent registry — start with ONE worker
+#    Automated path (recommended): generates a single-worker config/agents.json
+#    from the tracked template and prints an MCP snippet:
+#      npm run cli -- wao onboarding --agent <id> --apply
+#    (run it BEFORE any manual copy — it refuses to overwrite an existing
+#    config/agents.json). Manual equivalent below:
 Copy-Item config/agents.example.json config/agents.json
 #    agents.example.json is the TRACKED template, aligned one-to-one with the
 #    canonical team roles — leave it untouched. Your copied agents.json is
@@ -122,7 +127,12 @@ npm run cli -- run <agentId> --prompt "Read package.json and summarize what WAO 
 Full step-by-step instructions for steps 1–4, including per-runtime auth,
 live in [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md).
 
-Node 22–24 required (`node --version`; `engines.node` is `>=22 <25`).
+Node **v22 only** (`node --version`; `engines.node` is `>=22 <23`). v24 is now the
+Active LTS but is rejected by WAO's version guard — a libuv Windows Job Object
+regression in v24 kills long-lived spawned child processes. All WAO npm scripts
+route through the v22 shim (`scripts/wao-node.cjs`), so a default-v24 machine
+works as long as Node 22 is installed at the conventional path (or `WAO_NODE`
+is set); see AGENT_ONBOARDING.md §3.
 
 ## Documentation map (single source of truth)
 

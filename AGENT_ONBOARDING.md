@@ -39,6 +39,7 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 在安装前，确认环境满足（不满足的项先跑 §4d 的 doctor 报告给 owner——doctor 是建议性报告，不是使用门禁）：
 
 - **Node.js >= 22**（WAO 是 Node ESM，依赖 `@modelcontextprotocol/sdk` + `zod`，用 `npm install` 安装）
+- **git**：WAO 以 git clone 分发，且 worktree 隔离/交付封装都依赖 git（缺失时装 WAO 的第一步 clone 就会失败；可用 `winget install Git.Git` 或官网安装器补装）
 - **worker CLI 在 PATH**：至少一个你想调度的 runtime（claude / codex / kimi）——**一个 runtime 就够**，不需要全部装齐
 - **认证任选其一**：官方 Claude OAuth（`claude login`）、provider key（`DEEPSEEK_API_KEY` / `ZHIPU_API_KEY`）、`codex login`、或 Kimi Code 登录态——选你有的那一种即可，见 §4c 选择表
 - **WAO 项目目录**：owner 会告诉你 WAO 装在哪（通常是 `D:/projects/windows-agent-orchestrator`）。**这个目录是 WAO 的源码 + 配置所在，不是被开发项目。**
@@ -55,6 +56,8 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 > 下面命令里的 `<WAO目录>` 指 WAO 仓的根路径，`<目标项目>` 指你要开发的项目根。
 >
 > 第一次必读：**`SKILL.md`**（命令参考、workflow、安全铁律）和 **`references/safety-incidents.md`**（铁律背后的真实事故）。不读懂不要派发任务。
+>
+> 机器消费提示：脚本/agent 解析 WAO 输出时用 `npm run cli --silent -- <command>`——不带 `--silent` 时 npm 会把脚本 banner 打进 stdout，污染 `--format json` 的解析。
 
 ### 4a. 装 WAO 本体（一次性）
 
@@ -66,6 +69,8 @@ npm link           # 可选，每台机器一次：暴露顶层 `wao` 命令（�
 ```
 
 `npm link` 的作用范围：只提供**顶层** `wao` 命令（`wao dashboard` 这类单个词命令）；**嵌套命令族**（如 `npm run cli -- wao doctor`、`npm run cli -- registry list`）仍用 `npm run cli --` 调——npm link 不是它们的全局拼写替代。不 link 时全部命令都用 `npm run cli -- <command>`。
+
+预期内的安装期告警（不是装坏了）：`npm ci` 尾部可能显示 `N vulnerabilities`——经查全部来自 `@modelcontextprotocol/sdk` 的传递依赖（hono/fast-uri/ip-address 等 HTTP 库），WAO 以 stdio server 运行、不暴露这些库的网络面，处置属依赖纪律另议，不阻塞上手。若你的默认 node 是 v23/v24，`npm ci` 还会先给一条 `EBADENGINE` 警告（engines 已收紧为仅 v22；npm 默认只警告不阻断）——随后所有 WAO 命令经 `npm run` 走 v22 shim，不受影响。
 
 ### 4b. 装 WAO skill 到 runtime 目录（一次性）
 
@@ -86,6 +91,7 @@ WAO 的 `SKILL.md` 符合 anthropic skill-creator 规范。各 runtime 的 skill
 - **`config/agents.json`（你的私人副本，gitignored 不入库）**：复制后**可以删到只剩你实际能认证的 worker**。
 
 > **自动化（可选）**：`npm run cli -- wao onboarding --agent <你保留的 worker id> --apply` 从入库模板自动生成只含一个 worker 的 `config/agents.json`（零手编、带该 worker 的认证矩阵、并打印 host-neutral MCP 片段）。下面的手动复制+裁剪是同一结果的等价做法。正式验收链见本文档 §9。
+> 注意次序：自动化路径要求 `config/agents.json` 尚不存在——若你已按下面手动 `Copy-Item` 过，`--apply` 会拒绝覆盖（安全设计），删掉该副本后重跑即可。
 
 ```powershell
 Copy-Item config/agents.example.json config/agents.json
@@ -119,7 +125,7 @@ Registry command split: registry list = inventory + certification status; regist
 
 **doctor 是建议性（advisory）自检报告，不是使用门禁**：它检查 Node 版本、各 CLI 在 PATH、provider key、agents.json 配置（opencode worker 有没有配 tokenBudget——06-18 事故防线）、目标项目的 `.wao/` 是否初始化。FAIL 项是潜在风险，报告给 owner 由 owner 裁决是否修复后再用，不自动阻断。
 
-**（可选）`.wao init` 项目规划记录**：`npm run cli -- wao init --cwd <目标项目>` 会在目标项目根建 `.wao/`（project/state/decisions/handoff/runs 5 槽位），用于记录项目的计划/状态/决策/交接——它不是 MCP workspace 绑定或 `run_dispatch` 的前提，没有 `.wao/` 照样能派发任务；需要项目级记录时再补。
+**（可选）`.wao init` 项目规划记录**：`npm run cli -- wao init --cwd <目标项目>` 会在目标项目根建 `.wao/`（project/state/decisions/pipeline/handoff/runs 6 槽位），用于记录项目的计划/状态/决策/交接——它不是 MCP workspace 绑定或 `run_dispatch` 的前提，没有 `.wao/` 照样能派发任务；需要项目级记录时再补。两点补充：TD-91 起 `pipeline/` 是第 6 槽位；fresh clone 自带的 `.wao/` 只含 git 跟踪的 `decisions/`，把 WAO 仓自身当目标项目用时先跑一次 `wao init` 补齐其余槽位。
 
 ### 4e. 连接 MCP Host（主控通道，Decision 0017）
 
@@ -141,7 +147,7 @@ npm run mcp -- --registry config/agents.json --run-dir runs
 npm run cli -- run <agentId> --prompt "Read package.json and report the package name. One sentence." --cwd <目标项目> --registry <WAO目录>/config/agents.json --format json
 ```
 
-进程式 worker 进程死即会话死，适合最小验证。如果这个跑通返回 `completed: true` + assistant 文本，说明 WAO 调度链路通了。`--cwd <目标项目>` 指定被开发项目，`--registry <WAO目录>/config/agents.json` 指定 WAO worker registry；首次上手不要省略这两个参数。
+进程式 worker 进程死即会话死，适合最小验证。如果这个跑通返回 `completed: true` + assistant 文本，说明 WAO 调度链路通了。`--cwd <目标项目>` 指定被开发项目，`--registry <WAO目录>/config/agents.json` 指定 WAO worker registry；首次上手不要省略这两个参数。新机器上还没有别的项目时，可以暂时用 WAO 仓自身作 `<目标项目>`（上面的只读 canary 对它无副作用）。
 
 ---
 

@@ -2,11 +2,11 @@
  * .wao/ 目录管理（S3-1，阶段 3）。
  *
  * 定位：项目状态外化的物理基础。每个被 WAO 管理的项目有一个 .wao/ 目录，
- * 结构锁死为 5 个槽位（project/state/decisions/handoff/runs）。
+ * 结构锁死为 6 个槽位（project/state/decisions/pipeline/handoff/runs，TD-91 起 pipeline 为第 6 槽）。
  * agent 不直接建文件，通过 wao 命令读写，本模块提供底层目录操作。
  *
  * 三条铁律的物理保障：
- *   1. 只有 5 个顶层槽位（validateWaoDir 负向断言多余文件）
+ *   1. 只有 6 个顶层槽位（validateWaoDir 负向断言多余文件）
  *   2. map.md 只放索引（waoDecisions/waoState 的写入命令保证）
  *   3. .wao/ 进 .gitignore（过程性，不进版本控制）
  */
@@ -33,7 +33,7 @@ export function getWaoDir(cwd, override) {
 
 /**
  * 初始化 .wao/ 骨架。幂等：重复 init 不破坏已有内容。
- * 创建 5 槽位 + 各 map.md 空文件 + project.md 骨架 + 追加 .wao/ 到 .gitignore。
+ * 创建 6 槽位 + 各 map.md 空文件 + project.md 骨架 + 追加 .wao/ 到 .gitignore。
  */
 export async function initWaoDir(cwd, override) {
   const waoDir = getWaoDir(cwd, override);

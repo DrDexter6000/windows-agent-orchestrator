@@ -462,7 +462,7 @@ export async function runOnboarding({
         mcpSnippet: snippet,
         certification: certificationGuidance(agentId, false),
         writes: { registry: false, endorsement: false },
-        reason: "a private config/agents.json already exists — onboarding never overwrites an existing registry",
+        reason: "a private config/agents.json already exists — onboarding never overwrites an existing registry; delete the copy and re-run --apply to get the generated single-worker version",
       });
     }
     try {
