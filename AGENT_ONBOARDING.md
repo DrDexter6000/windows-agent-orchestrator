@@ -61,6 +61,17 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 
 ### 4a. 装 WAO 本体（一次性）
 
+**一条命令（可选，等价自动执行下列步骤）**：`install.ps1` 是下面手动步骤的机械执行薄壳（不是第二套流程）——默认装到 `%USERPROFILE%\wao`、克隆最新 stable tag、只检测不安装 Node v22/git、不改 PATH、不执行 npm link：
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/DrDexter6000/windows-agent-orchestrator/main/install.ps1 | iex"
+# 带参数形态（装到别处 / 钉 ref / 卸载）：
+powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Dest D:\wao -Ref main
+powershell -NoProfile -File install.ps1 -Uninstall   # runs/ .wao/ agents.json 先备份再删仓；-Purge 跳过备份
+```
+
+手动等价步骤：
+
 ```powershell
 git clone https://github.com/DrDexter6000/windows-agent-orchestrator.git <WAO目录>
 cd <WAO目录>

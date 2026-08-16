@@ -83,6 +83,9 @@ Runtime/model dispatch certification lives in `runs/reliability-summary.json`
 ## Quick start
 
 ```powershell
+# One-command install (thin wrapper over the steps below; defaults to %USERPROFILE%\wao):
+#   powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/DrDexter6000/windows-agent-orchestrator/main/install.ps1 | iex"
+# Manual equivalent:
 git clone https://github.com/DrDexter6000/windows-agent-orchestrator.git D:\projects\windows-agent-orchestrator
 cd D:\projects\windows-agent-orchestrator
 npm ci            # install from the tracked package-lock (npm install works as a fallback)
