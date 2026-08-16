@@ -159,19 +159,22 @@ export function renderHuman(r) {
     if (rows.length > 0) {
       lines.push("");
       lines.push(`角色矩阵与当前环境适配（${r.recommendations.advisory}）:`);
-      lines.push(`  ${padEndDisplay("id", 22)} ${padEndDisplay("backend", 15)} ${padEndDisplay("model", 19)} 状态`);
+      lines.push(`  ${padEndDisplay("id", 24)} ${padEndDisplay("backend", 15)} ${padEndDisplay("model", 19)} 状态`);
       for (const row of rows) {
-        lines.push(`  ${padEndDisplay(row.id ?? "?", 22)} ${padEndDisplay(row.backend ?? "?", 15)} ${padEndDisplay(row.model ?? "?", 19)} [${recommendationReadyLabel(row)}]`);
-        lines.push(`    ${truncateDisplay(recommendationAuthLabel(row), 60)} · 适合: ${truncateDisplay(recommendationDutyDisplay(row.duty), 50)}`);
+        lines.push(`  ${padEndDisplay(row.id ?? "?", 24)} ${padEndDisplay(row.backend ?? "?", 15)} ${padEndDisplay(row.model ?? "?", 19)} [${recommendationReadyLabel(row)}]`);
+        lines.push(`    ${truncateDisplay(recommendationAuthLabel(row), 56)} · 适合: ${truncateDisplay(recommendationDutyDisplay(row.duty), 50)}`);
       }
-      // R6-C3（P1-1）：替补句从矩阵行派生——只枚举模板里实际存在的 coder_* 通道，
-      // 零 coder 行时整句不打印（labels are shape-derived，不打印不存在的 worker）。
-      // 两席措辞对齐 ADR 0019 §3：实现席（coder 取一、避同族）+ 对抗席（默认
-      // auditor、可换 coder_mm）——不是三者"互为"。本矩阵不替 Lead 选择。
+      // R6-C3（P1-1）+ 复核 R1：替补句从矩阵行派生——只枚举模板里实际存在的 coder_*
+      // 通道，零 coder 行时整句不打印（labels are shape-derived）。措辞不定性到
+      // "实现席"（ADR 0019 的实现席是 hq/low 取一、对抗席默认 auditor 可换
+      // coder_mm——派生集合里的 coder_mm/fallback 不该被定性为实现席备选），
+      // 只说"可作会审备选"并把两席规则交给 ADR 0019。拆两行控制显示宽 ≤120。
+      // 本矩阵不替 Lead 选择。
       const coderRows = rows.filter((row) => /^coder_/.test(String(row.id ?? "")));
       if (coderRows.length > 0) {
         lines.push("");
-        lines.push(`本矩阵中的 coder 通道（${coderRows.map((row) => row.id).join("、")}）互为实现席备选（选一避同族）；对抗席默认 auditor、可换 coder_mm——两席规则与选位权见 ADR 0019，由 Lead 自行决定，本矩阵不替 Lead 选择。`);
+        lines.push(`会审备选：本矩阵中的 coder 通道（${coderRows.map((row) => row.id).join("、")}）均可入席；`);
+        lines.push("两席分配（实现席避同族取一；对抗席默认 auditor、可换 coder_mm）与选位权见 ADR 0019，由 Lead 自行决定。");
       }
       lines.push("");
       lines.push("按你有的认证选一行重跑 --agent <id> --apply；没有的 key 对应行可忽略。");

@@ -1301,8 +1301,8 @@ test("R6-C: human needs-selection output renders the matrix block + advisory sen
   assert.ok(text.includes("适合: 边界明确的实现包/TDD"), "duty rendered from the template row");
   // R6-C3（P2-3）：authNote 行改形状断言——结构化基座在前、模板注释只进括号补充
   // （替换旧的纯子串断言，钉住新拼接形状）。
-  assert.match(text, /认证: claude CLI 登录态（官方 Claude OAuth（claude login）/,
-    "authNote 行 = 结构化基座（模板注释），按括号形状断言");
+  assert.match(text, /认证: claude CLI 登录态（官方/,
+    "authNote 行 = 结构化基座在前 + 模板注释进括号（复核 R3 56 格截断预算下的稳定形状）");
   // The existing candidate list / re-run hints are untouched.
   assert.ok(text.includes("Candidates from the tracked template:"));
   assert.ok(text.includes("Re-run with: wao onboarding --agent <id>"));
@@ -1427,8 +1427,9 @@ test("R6-C2: 矩阵渲染含 backend 列、登录态行写明具体 CLI、coder 
   assert.match(text, /认证: key ZHIPU_API_KEY/, "key 型行标签不变");
   // 替补句从矩阵行派生：枚举实际存在的 coder 通道（此处恰为 coder_hq），
   // 两席措辞对齐 ADR 0019（实现席 + 对抗席），选位权在 Lead。
-  assert.ok(text.includes("本矩阵中的 coder 通道（coder_hq）互为实现席备选"),
-    "替补句必须枚举矩阵中实际存在的 coder 通道 id");
+  assert.ok(text.includes("本矩阵中的 coder 通道（coder_hq）均可入席"),
+    "替补句必须枚举矩阵中实际存在的 coder 通道 id（复核 R1 措辞：不定性实现席）");
+  assert.ok(text.includes("对抗席默认 auditor、可换 coder_mm"), "两席结构措辞在第二行");
   assert.ok(text.includes("对抗席默认 auditor、可换 coder_mm"),
     "两席结构（对抗席默认 auditor）必须按 ADR 0019 措辞");
   assert.ok(text.includes("ADR 0019"), "两席规则与选位权必须指向 ADR 0019");
@@ -1464,7 +1465,7 @@ test("R6-C3: 矩阵无任何 coder_* 行时替补句不打印（shape-derived）
   const text = renderHuman(r);
   assert.equal(r.recommendations.rows.length, 2, "矩阵本身照常渲染（前置条件）");
   assert.ok(text.includes("角色矩阵与当前环境适配"), "矩阵块在场（前置条件：负向不是因矩阵缺失而通过）");
-  assert.ok(!text.includes("互为实现席备选"), "零 coder_* 行 ⇒ 替补句整句不打印");
+  assert.ok(!text.includes("会审备选") && !text.includes("coder 通道"), "零 coder_* 行 ⇒ 替补句整句不打印");
   assert.ok(!text.includes("coder 通道"), "不得提及矩阵中不存在的 coder 通道");
   assert.ok(!text.includes("coder_hq") && !text.includes("coder_low") && !text.includes("coder_mm"),
     "不得打印模板里没有的 worker id");
@@ -1503,8 +1504,8 @@ test("R6-C3: 两行布局+表头、认证标签四分支、authNote 括号形状
   const text = renderHuman(r);
   assert.equal(r.recommendations.rows.length, 4);
   // 表头行：列宽与数据行一致（id 22 / backend 15 / model 19 显示格 + 1 分隔空格）。
-  assert.match(text, /^ {2}id {21}backend {9}model {15}状态$/m,
-    "表头行按显示宽与数据行同列宽");
+  assert.match(text, /^ {2}id {23}backend {9}model {15}状态$/m,
+    "表头行按显示宽与数据行同列宽（复核 R2：id 列 24 容纳 coder_opencode_fallback）");
   // 第一行布局：id/backend/model 后跟状态括号。
   assert.match(text, /^ {2}w_key\s+claude-code\s+glm-5\.3\[1m\]\s+\[/m,
     "第一行 = id/backend/model/状态");
@@ -1526,5 +1527,55 @@ test("R6-C3: 两行布局+表头、认证标签四分支、authNote 括号形状
   const serveRow = r.recommendations.rows.find((row) => row.id === "w_serve");
   assert.equal(serveRow.readyState, "login_based",
     "引擎 readyState 不因显示改动词而变（CLI 在 PATH 且无 key ⇒ login_based）");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// 复核 R4（auditor 窄复核残留）：P1-2 的显示宽修复此前没有任何测试钉住——
+// 把 displayWidth 换回 .length 全套件仍会绿。本组断言堵死该空档：
+// (a) displayWidth 单元语义（东亚宽字符计 2）；(b) 渲染矩阵行显示宽 ≤120 上界。
+test("复核 R4: displayWidth 语义 + 矩阵渲染行显示宽上界（回归钉）", async () => {
+  const { displayWidth, runOnboarding } = await import("../../src/application/onboarding.js");
+  const { renderHuman } = await import("../../src/commands/onboarding.js");
+  // (a) 单元语义：ASCII 计 1，CJK 计 2（混合）。
+  assert.equal(displayWidth("abcd"), 4, "ASCII 每字符 1 格");
+  assert.equal(displayWidth("中文"), 4, "CJK 每字符 2 格");
+  assert.equal(displayWidth("认证: key ZHIPU_API_KEY"), displayWidth("认证: ") + 17,
+    "混合串 = 各段显示宽之和（key ZHIPU_API_KEY = 17 格）");
+  // (b) 渲染上界：用含长中文 authNote/duty 的 fixture 渲染，矩阵块每行 ≤120 显示格。
+  const dir = mkdtempSync(join(tmpdir(), "wao-onb-width-"));
+  const root = join(dir, "wao");
+  mkdirSync(join(root, "config"), { recursive: true });
+  const longAuth = "很长的认证说明".repeat(12); // 48 CJK = 96 显示格，必触发截断
+  const longDuty = "适合任务: " + "中文职责描述".repeat(15);
+  writeFileSync(join(root, "config", "agents.example.json"), JSON.stringify({
+    agents: {
+      coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" },
+        _comment_task: longDuty, _comment_auth: longAuth },
+      tester: { backend: "codex", _comment_task: longDuty, _comment_auth: longAuth },
+    },
+  }));
+  const fsMod = await import("node:fs/promises");
+  const r = await runOnboarding({
+    installRoot: root,
+    exampleRegistryPath: join(root, "config", "agents.example.json"),
+    targetRegistryPath: join(root, "config", "agents.json"),
+    reliabilitySummaryPath: join(root, "runs", "reliability-summary.json"),
+    probeEnv: { hasKeyEnv: async () => "process_env", hasCli: async () => true },
+    fs: { readFile: fsMod.readFile, writeFile: fsMod.writeFile, rename: fsMod.rename,
+      existsSync, unlink: fsMod.unlink, mkdir: (p2) => fsMod.mkdir(p2, { recursive: true }) },
+  });
+  const text = renderHuman(r);
+  const inMatrix = [];
+  let seen = false;
+  for (const line of text.split("\n")) {
+    if (line.includes("角色矩阵")) seen = true;
+    else if (seen && line.includes("按你有的认证")) break;
+    else if (seen && line.trim().length > 0) inMatrix.push(line);
+  }
+  assert.ok(inMatrix.length >= 4, "矩阵块应至少 4 行（表头+两 worker 各两行）");
+  for (const line of inMatrix) {
+    assert.ok(displayWidth(line) <= 120,
+      `矩阵行显示宽超 120（${displayWidth(line)}）: ${line.slice(0, 40)}…`);
+  }
   rmSync(dir, { recursive: true, force: true });
 });
