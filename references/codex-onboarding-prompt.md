@@ -20,7 +20,7 @@
 
 3. **读技能定义 + 角色矩阵**：读 `D:/projects/windows-agent-orchestrator/SKILL.md` 和 `D:/projects/windows-agent-orchestrator/docs/team-roles.md`。前者是命令参考，后者是标准团队角色（Researcher/Coder/Tester/Auditor 的职责边界）。
 
-4. **环境自检**：运行 `node D:/projects/windows-agent-orchestrator/src/cli.js wao doctor`。报告结果给用户。如果有 FAIL 项，不要开始派发任务，先和用户确认。
+4. **环境自检**：在 `D:/projects/windows-agent-orchestrator` 目录运行 `npm run cli -- wao doctor`（不要用裸 node 直调 src/cli.js——会被 v22 version guard 拒）。报告结果给用户。doctor 是 advisory：FAIL 项是风险事实，展示给用户并由用户裁定是否先修复再派发，不是硬性停机门。
 
 5. **明确你要开发的目标项目**：问用户"要开发哪个项目"。在该项目目录初始化 `.wao/`：
    ```

@@ -82,5 +82,17 @@ export function checkNodeVersion(version, opts = {}) {
     };
   }
 
+  // R5 审计 P1-1：v22 之外、不在放行清单的一切 major 一律拒绝。此前只有 23/24 在
+  // 阻断表里，v25+ 会静默放行——wao-node.cjs 第三腿（PATH 探测）让它变成活路径。
+  // WAO 只认证 v22（engines ">=22 <23"、install.ps1 major -eq 22、.nvmrc=22）；
+  // 未来新 major 必须显式认证后加入放行，绝不默认通过（fail-fast）。
+  if (major !== 22 && !allowedFixed.includes(verStr)) {
+    return {
+      ok: false,
+      blocked: true,
+      reason: `Node ${verStr} 未被 WAO 认证：WAO 只认证 Node v22（engines ">=22 <23"，见 .nvmrc）。新 Node major 需显式认证后才放行。`,
+    };
+  }
+
   return { ok: true };
 }

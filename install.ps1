@@ -213,7 +213,7 @@ function Resolve-WaoRef {
             $tags += $Matches[1]
         }
     }
-    $stable = @($tags | Where-Object { $_ -match '^v?\d+(\.\d+){0,3}$' } | Sort-Object { [version]($_ -replace '^v', '') })
+    $stable = @($tags | Where-Object { $_ -match '^v?\d+\.\d+(\.\d+){0,2}$' } | Sort-Object { [version]($_ -replace '^v', '') })
     if ($stable.Count -gt 0) {
         $top = $stable[$stable.Count - 1]
         Write-WaoInfo "最新 stable tag：$top（仓库无 stable tag 时会回退 main）"
@@ -258,8 +258,7 @@ function Invoke-WaoCloneOrUpdate {
         'absent' {
             # 全新 clone：完整 clone（不用 --depth 1）；Ref 为 tag 时 --branch <tag>。
             Write-WaoStep "git clone（--branch $ResolvedRef，全量 clone）"
-            $r = Invoke-WaoExternal -Exe git -ArgList @('clone', '--branch', $ResolvedRef, $WaoRepoUrl, $Path) -Activity 'git clone'
-            if ($r.ExitCode -ne 0) { WaoFail "clone 失败（exit $($r.ExitCode)）：`n$($r.Output.Trim())" }
+            Invoke-WaoExternal -Exe git -ArgList @('clone', '--branch', $ResolvedRef, $WaoRepoUrl, $Path) -Activity 'git clone' | Out-Null
             return
         }
         'clean' {
@@ -270,8 +269,7 @@ function Invoke-WaoCloneOrUpdate {
                 Write-WaoInfo '当前是 detached HEAD（tag 检出）——跳过 pull。'
                 return
             }
-            $r = Invoke-WaoExternal -Exe git -ArgList @('-C', $Path, 'pull', '--ff-only') -Activity 'git pull --ff-only'
-            if ($r.ExitCode -ne 0) { WaoFail "git pull --ff-only 失败（本地与远端分叉？）：`n$($r.Output.Trim())" }
+            Invoke-WaoExternal -Exe git -ArgList @('-C', $Path, 'pull', '--ff-only') -Activity 'git pull --ff-only' | Out-Null
             return
         }
         'dirty' {

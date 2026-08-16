@@ -61,7 +61,7 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 
 ### 4a. 装 WAO 本体（一次性）
 
-**一条命令（可选，等价自动执行下列步骤）**：`install.ps1` 是下面手动步骤的机械执行薄壳（不是第二套流程）——默认装到 `%USERPROFILE%\wao`、克隆最新 stable tag、只检测不安装 Node v22/git、不改 PATH、不执行 npm link：
+**一条命令（可选，等价自动执行下列步骤）**：`install.ps1` 是下面手动步骤的机械执行薄壳（不是第二套流程）——默认装到 `%USERPROFILE%\wao`、克隆最新 stable tag（仓库尚无 `vX.Y.Z` tag 时自动回退 `main` 并明示）、只检测不安装 Node v22/git、不改 PATH、不执行 npm link：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/DrDexter6000/windows-agent-orchestrator/main/install.ps1 | iex"
@@ -146,6 +146,7 @@ Registry command split: registry list = inventory + certification status; regist
 npm run mcp -- --registry config/agents.json --run-dir runs
 ```
 
+- 已装 host 的话，`wao onboarding` 的输出同时给出按 host 的一行注册示例（如 `claude mcp add wao --scope user -- node <wao-node.cjs> <stdio.js> --registry ... --run-dir ...`；codex 标注 experimental）——示例的 flag 随 host 版本演进，权威形状 = `docs/usage.md` §MCP stdio，host-neutral 片段永远是兜底。
 - **CLI `--cwd` 只控制 workspace 观察/过滤**（哪些路径算改动、canary 在哪个项目里跑）。
 - **MCP 派发的 workspace 来自 host 授权的绑定**：`--workspace-root` / `roots/list` / `workspace_select` 协商出 host 批准的目录，与 CLI `--cwd` 是两回事，别混。
 - 完整的 host 配置示例见 `docs/usage.md` §MCP stdio。

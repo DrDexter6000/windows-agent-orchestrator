@@ -76,3 +76,21 @@ test("坏版本字符串 → ok:false（不抛错）", () => {
     assert.ok(r.reason, "坏输入也应有 reason");
   }
 });
+
+// R5 审计 P1-1：v22 是唯一认证 major——v25+（未来 major）不得静默放行。
+// 此前 BLOCKED_MAJORS 只列 23/24，v25/v26/v30 会通过；wao-node.cjs 第三腿（PATH 探测）
+// 把这个缺口变成活路径，与 engines ">=22 <23" / install.ps1 major -eq 22 冲突。
+test("R5 P1-1: v25+ 未认证 major 一律拒绝（允许清单语义，非阻断表语义）", () => {
+  for (const v of ["v25.0.0", "v26.13.1", "v30.0.0"]) {
+    const r = checkNodeVersion(v);
+    assert.equal(r.ok, false, `${v} 未认证 major 应被拒绝`);
+    assert.ok(/只认证 Node v22|未被 WAO 认证/.test(r.reason), `${v} reason 应说明只认证 v22`);
+  }
+  // v22 仍全放行（小版本无关）。
+  for (const v of ["v22.0.0", "v22.23.1", "v22.99.99"]) {
+    assert.equal(checkNodeVersion(v).ok, true, `${v} 应放行`);
+  }
+  // 放行清单机制对未认证 major 同样生效（显式认证后才放行）。
+  const r = checkNodeVersion("v26.1.0", { allowedFixed: ["v26.1.0"] });
+  assert.equal(r.ok, true, "显式加入放行清单的版本应放行");
+});

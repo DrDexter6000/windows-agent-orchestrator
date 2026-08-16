@@ -58,7 +58,7 @@ cd D:\projects\windows-agent-orchestrator   # 配 --use-on-cd 会按 .nvmrc 自�
 
 #### Provider key（claude-code wrapper / opencode serve 需要）
 
-claude-code 经 wrapper 调非 Claude provider（GLM/DeepSeek）时，wrapper 读 env 里的 key；opencode serve 也需 provider key。所需 env：`ZHIPU_API_KEY` / `DEEPSEEK_API_KEY` / `KIMI_API_KEY`（按你用的 provider 配）。**详细的 key 验证 / 注入 / 401 排错见 `docs/troubleshooting.md §1.2`**（用 `scripts/serve.ps1` 启动 serve 会从 User registry 读 key 注入）。`npm run cli -- wao doctor` 会查 key 是否在 env。
+claude-code 经 wrapper 调非 Claude provider（GLM/DeepSeek）时，wrapper 读 env 里的 key；opencode serve 也需 provider key。所需 env：`ZHIPU_API_KEY` / `DEEPSEEK_API_KEY` / `KIMI_API_KEY`（按你用的 provider 配）。**详细的 key 验证 / 注入 / 401 排错见 `docs/troubleshooting.md §1.2`**（用 `scripts/serve.ps1` 启动 serve 会从 User registry 读 key 注入）。`npm run cli -- wao doctor` 按 registry 保留 worker 声明的 env 名查 key（scoped）：进程 env 命中为 OK；仅在 Windows User 作用域命中给 WARN（新开终端可用）；都没有才 FAIL（附 setx 修复提示）。
 
 ### 安装本工具
 

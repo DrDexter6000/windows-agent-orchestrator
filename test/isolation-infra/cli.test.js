@@ -1880,16 +1880,13 @@ test("R5-B: doctor kimi 特例——kimi-code 靠 CLI 登录态，不查任何 k
       timeout: 10000,
     });
     const parsed = JSON.parse(result.stdout);
-    const kimiKey = parsed.checks.find((c) => c.name === "key_KIMI_API_KEY");
-    assert.ok(kimiKey, "保留 kimi worker 时应有 key_KIMI_API_KEY 说明项");
-    assert.equal(kimiKey.pass, true);
-    assert.equal(kimiKey.status, "info");
-    assert.equal(kimiKey.level, "info", "kimi 特例是 INFO 不是 FAIL/WARN");
-    assert.match(kimiKey.detail, /kimi-code 使用 CLI 登录态，不查 API key/);
-    // 即使另一个 worker 声明了 KIMI_API_KEY，kimi worker 在场也不查该 key——
-    // key_* 检查项只应有这一条 INFO（coder_mm 无声明、coder_hq 的 KIMI_API_KEY 被特例跳过）
-    const keyChecks = parsed.checks.filter((c) => c.name.startsWith("key_"));
-    assert.equal(keyChecks.length, 1, "kimi 特例下不应再对 KIMI_API_KEY 做存在性检查");
+    const kimiChecks = parsed.checks.filter((c) => c.name === "key_KIMI_API_KEY");
+    // R5 审计 P1-2：kimi 登录态特例只作用于 kimi-code worker 自身（envPolicy 零声明）；
+    // claude-code wrapper 声明的 KIMI_API_KEY 是该 worker 真正需要的 env，必须照常检查
+    // （进程 env 已注入 fake-kimi-key → OK）。有真实检查在场时不再叠同名 INFO 说明项。
+    assert.equal(kimiChecks.length, 1, "wrapper 声明的 KIMI_API_KEY 恰一条真实检查（无同名 INFO 叠加）");
+    assert.equal(kimiChecks[0].pass, true);
+    assert.equal(kimiChecks[0].status, "ok", "fake-kimi-key 已注入进程 env → 存在性检查 OK（未被特例吞掉）");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -2566,6 +2563,30 @@ test("A-3: delivery spec 无外层包装的其它形状 → 仅 SSOT 错误（�
         return true;
       },
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// R5 审计 P0-1：agents.json 存在但解析失败 ≠ 正常初态——必须 WARN（→ DEGRADED，
+// exit 0），不得与健康态同列 INFO 让 verdict 说 HEALTHY（假绿灯）。同时钉住
+// registry_loads 在 missing/parse-ok/parse-fail 三条路径恒在场（P2-1 形状稳定）。
+test("R5 P0-1: registry 解析失败 → WARN（DEGRADED）而非 INFO（HEALTHY 假绿灯）；registry_loads 恒在场", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-doctor-parse-fail-"));
+  try {
+    const brokenPath = join(dir, "agents-broken.json");
+    writeFileSync(brokenPath, "{ not valid json !!", "utf8");
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "doctor", "--registry", brokenPath, "--cwd", dir, "--format", "json",
+    ], { cwd: process.cwd(), encoding: "utf8", env: process.env, timeout: 10000 });
+    const parsed = JSON.parse(result.stdout);
+    const loads = parsed.checks.find((c) => c.name === "registry_loads");
+    assert.ok(loads, "parse 失败路径 registry_loads 必须在场");
+    assert.equal(loads.status, "warn", "解析失败是'坏了'，至少 WARN");
+    assert.match(loads.fix, /registry validate/, "WARN 应带 registry validate 修复提示");
+    assert.match(parsed.verdict, /^DEGRADED（\d+ warn）/, "parse 失败 → DEGRADED 而非 HEALTHY（本目录无 .wao/，wao_init 未初始化同计 WARN）");
+    assert.ok(!/HEALTHY（advisory/.test(parsed.verdict), "不得假绿灯");
+    assert.equal(result.status, 0, "WARN 不致 exit 1（advisory）");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

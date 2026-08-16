@@ -154,11 +154,15 @@ export async function waoDoctorCommand(args, config) {
       registryAgents = reg.agents ?? {};
       registryOk = true;
     } catch (error) {
+      // R5 审计 P0-1：文件存在但解析失败 ≠ onboarding 前的正常初态——那是"坏了"，
+      // 不得与健康态同列 INFO 让 verdict 说 HEALTHY（假绿灯）。至少 WARN（→ DEGRADED）。
+      // registry_loads 恒在场（P2-1：所有路径都有该检查项，消费者形状稳定）。
       pushCheck(checks, {
-        name: "registry",
+        name: "registry_loads",
         pass: true,
-        level: "info",
-        detail: `agents.json 解析失败——${error.message}；先跑 npm run cli -- registry validate 定位（CLI/key 检查跳过）`,
+        level: "warn",
+        detail: `agents.json 存在但解析失败——${error.message}（CLI/key 检查跳过）`,
+        fix: "npm run cli -- registry validate --registry config/agents.json 定位后修复",
       });
     }
   } else {
@@ -167,6 +171,13 @@ export async function waoDoctorCommand(args, config) {
       pass: true,
       level: "info",
       detail: "config/agents.json 不存在——先跑 npm run cli -- wao onboarding --agent <id> --apply",
+    });
+    // P2-1：missing 路径同样保持 registry_loads 在场（INFO），形状与 parse-ok 路径一致。
+    pushCheck(checks, {
+      name: "registry_loads",
+      pass: true,
+      level: "info",
+      detail: "agents.json 不存在（onboarding 前正常初态）",
     });
   }
 
@@ -226,7 +237,9 @@ export async function waoDoctorCommand(args, config) {
       detail: "registry 无需要 provider key 的 worker（key 检查全部跳过）",
     });
   } else {
-    if (hasKimiWorker) {
+    if (hasKimiWorker && !keyNames.has("KIMI_API_KEY")) {
+      // 说明项仅在"没有任何 worker 声明 KIMI_API_KEY"时出现——若 claude-code wrapper
+      // 声明了它（真实需要），下方存在性检查在场，说明项冗余且会同名重复。
       pushCheck(checks, {
         name: "key_KIMI_API_KEY",
         pass: true,
@@ -235,7 +248,9 @@ export async function waoDoctorCommand(args, config) {
       });
     }
     for (const name of [...keyNames].sort()) {
-      if (hasKimiWorker && name === "KIMI_API_KEY") continue; // kimi 特例：任何 kimi key 都不查
+      // R5 审计 P1-2：不做 kimi 跨 worker 抑制——kimi-code worker 经 envPolicy 本就
+      // 声明零 key（登录态认证）；而 claude-code wrapper + Kimi 端点的 worker 声明的
+      // KIMI_API_KEY 是它真正需要的 env，必须照常检查（registry 级布尔会吞掉它）。
       const r = await resolveCredentialEnv(name);
       if (r.source === "process_env") {
         pushCheck(checks, { name: `key_${name}`, pass: true, detail: "已设置" });

@@ -2637,3 +2637,22 @@ test("ADR 0021 关系型守卫: troubleshooting delivery runbook 闭集值与代
       `troubleshooting runbook 出现未对账 token \`${token}\`（不在四闭集 ∪ 冻结 allowlist）`);
   }
 });
+
+test("R5 onboarding surface anchors: install.ps1 thin-wrapper path + hostExamples authority + tiered doctor verdict", () => {
+  const ob = read("AGENT_ONBOARDING.md");
+  // R5-A：install.ps1 一条命令路径必须以"薄壳/等价自动执行"定位登记（不发明第二套流程）。
+  assert.ok(/install\.ps1/.test(ob) && /机械执行薄壳|等价自动执行/.test(ob),
+    "onboarding 必须登记 install.ps1 一条命令路径并钉住薄壳定位（不是第二套流程）");
+  assert.ok(/无 `vX\.Y\.Z` tag 时自动回退 `main`/.test(ob),
+    "install.ps1 的 tag 解析必须文档化'无 tag 回退 main'的诚实行为");
+  // R5-B：分级 verdict 与 advisory 定位并存。
+  assert.ok(/HEALTHY/.test(ob) && /DEGRADED/.test(ob) && /BROKEN/.test(ob),
+    "onboarding 必须文档化三级 verdict（HEALTHY/DEGRADED/BROKEN）");
+  // R5-D：host 一行注册示例的权威指向（示例不是权威，片段+usage.md 才是）。
+  assert.ok(/claude mcp add wao --scope user/.test(ob),
+    "onboarding 的 MCP 一行注册示例必须用 --scope user 形状（R5 会审纠正项）");
+  // 代码侧同形状钉死（buildHostExamples 是输出唯一来源，示例形状改动必须两处同步）。
+  const onb = read("src/application/onboarding.js");
+  assert.ok(/claude mcp add wao --scope user --/.test(onb) && /codex mcp add wao --/.test(onb),
+    "buildHostExamples 的一行注册示例形状（claude --scope user / codex）不得漂移");
+});
