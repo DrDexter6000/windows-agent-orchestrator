@@ -203,6 +203,7 @@
       "isolation-infra/cli.test.js",
       "isolation-infra/daemon.test.js",
       "isolation-infra/gitLocalExcludeCloseout.test.js",
+      "isolation-infra/installPs1.test.js",
       "run-lifecycle/m10pre3cDaemonSignalTruth.test.js",
       "run-lifecycle/m10preCloseout2.test.js",
       "delivery/m11-10-readiness.test.js",
@@ -210,7 +211,8 @@
       "isolation-infra/parseSmoke.test.js",
       "transcript/runCollectServeCapRed.test.js",
       "transcript/runCollectStdioSmoke.test.js",
-      "run-lifecycle/runStopSmoke.test.js"
+      "run-lifecycle/runStopSmoke.test.js",
+      "isolation-infra/waoNodeShim.test.js"
     ],
     "lock": [
       "isolation-infra/portAllocator.test.js",
