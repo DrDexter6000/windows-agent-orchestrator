@@ -199,6 +199,17 @@ import {
   SCOPE_OBSERVATION_OUTSIDE_PATHS_CAP,
   SCOPE_OBSERVATION_PATH_CAP,
 } from "../application/runScopeObservation.js";
+// Round 4 Bundle B: advisory read-only observation. The additive (optional)
+// readOnlyObservation output field is declared from the ONE application SSOT
+// (closed status set, source literal, writtenPaths array cap, per-path cap)
+// so the MCP schema and the projector can never drift — same pattern as the
+// scopeObservation constants above.
+import {
+  READ_ONLY_OBSERVATION_STATUSES,
+  READ_ONLY_OBSERVATION_SOURCE,
+  READ_ONLY_WRITTEN_PATHS_CAP,
+  READ_ONLY_OBSERVATION_PATH_CAP,
+} from "../application/runReadOnlyObservation.js";
 // M12-8B: bounded Lead progressive-disclosure metadata. The closed-set catalog,
 // selection rules, and hard bounds (entry count + serialized-size cap) live in
 // the ONE shared application module; the schema constants below are built from
@@ -432,6 +443,17 @@ const DISPATCH_INVALID_VERIFICATION_PATH_TEXT =
   "absolute path literal, which is not workspace-portable. Re-issue the delivery with portable verification commands " +
   "(workspace-relative paths, URLs, or flags — no absolute paths).";
 
+// Round 4 Bundle B: fixed, actionable error when a dispatch declares BOTH
+// readOnly and a delivery block. A read-only run is advisory observation,
+// never a delivery — the combination is contradictory. The literal closed-set
+// reason code read_only_delivery_conflict lets a Lead (and the tests)
+// recognize this category distinctly; the guidance is fixed. Never echoes the
+// delivery block, prompt, paths, or any operational detail.
+const DISPATCH_READ_ONLY_DELIVERY_CONFLICT_TEXT =
+  "run_dispatch refused: read_only_delivery_conflict. A read-only run is an advisory " +
+  "observation declaration, never a delivery — remove the delivery block, or drop " +
+  "readOnly to dispatch the delivery.";
+
 // M12-6 (FR-03): fixed, actionable error when a supplied workspace/head
 // expectation mismatches the freshly-proven binding at dispatch time. The ONLY
 // dynamic content is a closed-set category label (gitHead | dirty | workspaceRoot)
@@ -525,6 +547,17 @@ const RUN_DISPATCH_INPUT = z.object({
   // supportsInFlightCorrection; the dispatcher refuses before any side effect if
   // the selected backend cannot. Default false = byte-compatible ordinary run.
   correctable: z.boolean().optional(),
+  // Round 4 Bundle B: optional Lead read-only DECLARATION (advisory
+  // observation, never a gate). true forces persistent worktree isolation
+  // (a worktree-creation failure refuses the dispatch fail-closed), persists
+  // exactly one run.read_only_declared durable fact, and makes run_activity
+  // attach the advisory readOnlyObservation (tool-reported file_written
+  // evidence — observed writes never stop or fail the run; final judgment
+  // stays with the Lead). Mutually exclusive with the delivery block (the
+  // handler refuses the combination with a fixed text + closed-set reason
+  // code — NOT a top-level .refine(), which breaks tools/list JSON-schema
+  // serialization per M9-2B-01). Default absent/false = byte-compatible.
+  readOnly: z.boolean().optional(),
   // M12-9 Package B: optional Lead-selected execution profile id. When set, the
   // delivery's verification (setup + assertion commands) comes from the frozen
   // trusted catalog (src/application/executionProfiles.js) instead of the inline
@@ -2467,6 +2500,24 @@ const RUN_ACTIVITY_SCOPE_OBSERVATION = z.object({
   outsidePathsTruncated: z.boolean(),
 }).strict();
 
+// Round 4 Bundle B: advisory read-only observation — the OPTIONAL additive
+// top-level field the projector derives ONLY when the frozen snapshot prefix
+// contains a bound run.read_only_declared fact (a run that never declared
+// read-only keeps the field absent, byte-compatible). Bounds are the SSOT
+// constants from runReadOnlyObservation.js (statuses, source, writtenPaths
+// array cap, per-path cap) — no hand-maintained second copy. Advisory only:
+// observed writes never stop/fail the run; final judgment stays with the Lead.
+const RUN_ACTIVITY_READ_ONLY_OBSERVATION = z.object({
+  status: z.enum([...READ_ONLY_OBSERVATION_STATUSES]),
+  source: z.literal(READ_ONLY_OBSERVATION_SOURCE),
+  complete: z.boolean(),
+  observedFileCount: z.number().int().nonnegative(),
+  writtenPaths: z.array(z.string().max(READ_ONLY_OBSERVATION_PATH_CAP))
+    .max(READ_ONLY_WRITTEN_PATHS_CAP),
+  writtenPathCount: z.number().int().nonnegative(),
+  writtenPathsTruncated: z.boolean(),
+}).strict();
+
 const RUN_ACTIVITY_OUTPUT = z.object({
   runId: z.string(),
   agentId: READ_AGENT_ID_SCHEMA,
@@ -2475,6 +2526,10 @@ const RUN_ACTIVITY_OUTPUT = z.object({
   state: z.string().max(ACTIVITY_LABEL_CAP),
   terminal: z.boolean(),
   scopeObservation: RUN_ACTIVITY_SCOPE_OBSERVATION,
+  // Round 4 Bundle B: present ONLY on runs that declared read-only at dispatch
+  // (the projector mounts it from the frozen prefix's run.read_only_declared
+  // fact); absent for every ordinary run.
+  readOnlyObservation: RUN_ACTIVITY_READ_ONLY_OBSERVATION.optional(),
   counts: RUN_ACTIVITY_COUNTS,
   total: z.number().int().nonnegative(),
   // At most LEAD_PAGE_HARD_CAP entries per page — the projector's page cap.
@@ -3234,7 +3289,7 @@ export function createWaoMcpServer({
       outputSchema: RUN_DISPATCH_OUTPUT,
       annotations: RUN_DISPATCH_ANNOTATIONS,
     },
-    async ({ agentId, prompt, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable, correctable, executionProfileId }) => {
+    async ({ agentId, prompt, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable, correctable, executionProfileId, readOnly }) => {
       // M11-8B final: validate the requested agentId at the VERY TOP, before
       // workspace resolution or any dispatcher call. An invalid or reserved
       // ("unknown") id collapses to the fixed dispatch error immediately — the
@@ -3245,6 +3300,19 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: DISPATCH_ERROR_TEXT }],
+        };
+      }
+      // Round 4 Bundle B: readOnly × delivery is a contradictory declaration.
+      // Handler-layer mutual exclusion (M9-2B-01: NOT a top-level schema
+      // .refine() — that breaks tools/list JSON-schema serialization). The
+      // fixed text carries the closed-set reason code read_only_delivery_conflict;
+      // the dispatcher is never called (zero transcript, zero fork), and the
+      // shared service re-refuses the same combination defensively
+      // (ReadOnlyDeliveryConflictError, folded to this same text below).
+      if (readOnly === true && delivery) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: DISPATCH_READ_ONLY_DELIVERY_CONFLICT_TEXT }],
         };
       }
       // M10-pre2: re-resolve and prove workspace BEFORE any dispatch.
@@ -3394,6 +3462,11 @@ export function createWaoMcpServer({
           // before any side effect; a non-capable backend refuses (zero transcript,
           // zero fork) and collapses to the fixed dispatch error below.
           ...(correctable ? { correctable: true } : {}),
+          // Round 4 Bundle B: Lead read-only declaration, threaded verbatim
+          // (default absent/false = ordinary dispatch, byte-compatible). The
+          // service pushes --isolate --read-only to the runner so
+          // RunManager.start forces isolation + persists the declaration.
+          ...(readOnly ? { readOnly: true } : {}),
           // M12-6 (P1-A): server-proven frozen HEAD threaded internally (never
           // model-supplied). RunManager.start revalidates/pins it.
           frozenGitHead: workspaceFrozenHead,
@@ -3416,6 +3489,15 @@ export function createWaoMcpServer({
           return {
             isError: true,
             content: [{ type: "text", text: DISPATCH_CREDENTIAL_MISSING_TEXT }],
+          };
+        }
+        // Round 4 Bundle B: readOnly × delivery refused by the shared service
+        // (defense-in-depth — the handler already refused it up front). Same
+        // fixed text + closed-set reason code as the handler-layer rejection.
+        if (e && e.name === "ReadOnlyDeliveryConflictError") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DISPATCH_READ_ONLY_DELIVERY_CONFLICT_TEXT }],
           };
         }
         // M11-11C: reusable-expert busy — fixed actionable text. The active

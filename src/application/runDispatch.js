@@ -50,6 +50,23 @@ export class ReuseBusyError extends Error {
   }
 }
 
+// Round 4 Bundle B: thrown when a dispatch declares BOTH readOnly and a
+// delivery block. A read-only run is advisory observation, never a delivery —
+// the combination is contradictory and refused before ANY side effect (zero
+// transcript, zero fork). Mirrors the CredentialMissingError form: a typed
+// class the MCP adapter recognizes by error.name and collapses to a fixed
+// actionable text carrying the closed-set reason code. No dynamic payload.
+export class ReadOnlyDeliveryConflictError extends Error {
+  constructor() {
+    super(
+      "dispatchRun: readOnly is mutually exclusive with a delivery block "
+      + "(read_only_delivery_conflict) — a read-only run is advisory observation, never a delivery",
+    );
+    this.name = "ReadOnlyDeliveryConflictError";
+    this.reasonCode = "read_only_delivery_conflict";
+  }
+}
+
 // TD-110 (D2 A3): thrown when a sessionReuse:"lead_workspace" agent is
 // dispatched WITHOUT a bound workspace (cwd). The message is the pre-existing
 // closed-set text (byte-identical to the old bare Error) — the typed class is
@@ -188,6 +205,14 @@ export async function dispatchRun({
   // M11-7: skip the credential preflight (e.g. when the caller already did it
   // and is passing resolvedCredentials). Default false = always check.
   skipCredentialCheck = false,
+  // Round 4 Bundle B: Lead read-only DECLARATION (advisory observation, never
+  // a gate). readOnly is mutually exclusive with a delivery block (typed
+  // ReadOnlyDeliveryConflictError before any side effect) and compatible with
+  // correctable / sessionReuse (a correction is a Lead-ordered instruction —
+  // declaration and observation coexist). Threaded to the detached runner as
+  // --isolate --read-only so RunManager.start forces isolation and writes the
+  // exactly-once run.read_only_declared fact. Default false = byte-compatible.
+  readOnly = false,
 }) {
   if (!agentId || typeof agentId !== "string") {
     throw new Error("dispatchRun: agentId is required");
@@ -200,6 +225,15 @@ export async function dispatchRun({
   }
   if (!runDir || typeof runDir !== "string") {
     throw new Error("dispatchRun: runDir is required");
+  }
+
+  // Round 4 Bundle B: readOnly × delivery is a contradictory declaration —
+  // refuse it FIRST, before any validation side effect, transcript write, or
+  // fork (zero orphaned pending transcript). readOnly × continuable needs no
+  // new code: continuable is delivery-only, so the existing gate below
+  // ("continuable is delivery-only") naturally refuses that combination.
+  if (readOnly && delivery) {
+    throw new ReadOnlyDeliveryConflictError();
   }
 
   // M10-pre closeout: validate explicit waitTimeout BEFORE any transcript write or fork.
@@ -407,6 +441,16 @@ export async function dispatchRun({
   if (publicDelivery) {
     runnerArgs.push("--isolate");
     runnerArgs.push("--delivery-json", JSON.stringify(publicDelivery));
+  }
+  // Round 4 Bundle B: a read-only declaration forces isolation on the runner
+  // path too (this closes the gap above — the --isolate push used to be
+  // delivery-only, so a non-delivery readOnly dispatch would have reached the
+  // runner unisolated) and threads the declaration as --read-only so
+  // RunManager.start persists the exactly-once declaration fact. Mutually
+  // exclusive with delivery (refused above) — the two blocks never coexist.
+  if (readOnly) {
+    runnerArgs.push("--isolate");
+    runnerArgs.push("--read-only");
   }
   // M12-6 (P1-A): thread the server-proven frozen HEAD to the detached runner so
   // RunManager.start can revalidate/pin the base. Server-side argv only (never

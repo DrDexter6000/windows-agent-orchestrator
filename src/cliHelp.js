@@ -17,7 +17,7 @@ Commands:
   registry check [--registry config/agents.json] [--format json]
   registry validate [--registry FILE] [--format json]
   spawn <agentId> [agentId2 ...] --prompt "..." [--cwd DIR] [--registry FILE] [--run-dir DIR] [--wait] [--background] [--poll-interval MS] [--wait-timeout MS] [--tag key=value] [--isolate] [--scorecard-rules-file FILE]
-  run <agentId> --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate] [--require-certified] [--background] [--scorecard-rules-file FILE] [--delivery-spec-file FILE]
+  run <agentId> --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate] [--require-certified] [--background] [--scorecard-rules-file FILE] [--delivery-spec-file FILE] [--read-only]
   status <runId> [--run-dir DIR] [--format json]
   tail <runId> [--limit N] [--follow] [--run-dir DIR]
   collect <runId> [--limit N] [--cursor TOKEN] [--mode full|compact] [--final] [--format json] [--run-dir DIR]
@@ -109,9 +109,13 @@ Flags:
   --scorecard-rules JSON         inline scorecard rules (JSON string)
   --tag key=value                tag the run
   --delivery-spec-file FILE      delivery mode spec (requires --isolate)
+  --read-only                    declare a read-only run (advisory observation; forces --isolate; mutually exclusive with --delivery-spec-file and --no-isolate)
 
 Notes:
   - The file given to --delivery-spec-file must contain the INNER delivery object
     itself ({"mode":"git_commit_v1",...}), WITHOUT an outer {"delivery": ...} wrapper.
+  - --read-only declares advisory observation, never a gate: WAO observes
+    tool-reported file writes (run_activity readOnlyObservation) but never
+    auto-stops or fails the run on observed writes; final judgment is the Lead's.
   - --help must be the FIRST argument after run: npm run cli -- run --help
 `;

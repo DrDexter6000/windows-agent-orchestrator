@@ -155,6 +155,11 @@ export async function runBackground(opts = {}) {
       // child with a piped stdin + stream-json input and drains the correction
       // queue in waitForCompletion. Absent for ordinary dispatch.
       ...(opts.correctable ? { correctable: true } : {}),
+      // Round 4 Bundle B: thread the read-only declaration so RunManager.start
+      // forces isolation, fails closed when the worktree cannot be created, and
+      // persists the exactly-once run.read_only_declared fact. Absent for
+      // ordinary dispatch (byte-compatible).
+      ...(opts.readOnly ? { readOnly: true } : {}),
     });
   } catch (error) {
     await writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error });
@@ -354,6 +359,11 @@ export async function runMain(argv = process.argv.slice(2)) {
     // runner tells RunManager.start to spawn a correctable child + drain the
     // correction queue. Absent for ordinary dispatch (byte-compatible).
     correctable: argv.includes("--correctable"),
+    // Round 4 Bundle B: read-only declaration (boolean flag threaded from
+    // dispatchRun --isolate --read-only). The runner tells RunManager.start to
+    // force isolation + persist the declaration fact. Absent for ordinary
+    // dispatch (byte-compatible).
+    readOnly: argv.includes("--read-only"),
   });
   // detached runner 把最终结果写 stdout 一行 JSON（供调试/日志；CLI 已返回，不依赖此）
   process.stdout.write(JSON.stringify(result) + "\n");

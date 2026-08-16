@@ -287,3 +287,74 @@ test("M12-6 P1-A: runBackground threads frozenGitHead; stale HEAD fails the run 
     await rm(runDir, { recursive: true, force: true });
   }
 });
+
+// Round 4 Bundle B: the detached runner threads --read-only →
+// RunManager.start({readOnly:true}) — the declaration's single write point for
+// the background path. End-to-end over a REAL git worktree with an injected
+// backend whose worker writes files anyway: this pins BOTH the evidence
+// channel (confirmed file_written facts DO enter a non-delivery isolated
+// run's transcript — a fact previously only read from the code) and the
+// Owner's no-hard-gate constraint (observed writes never stop/fail the run;
+// it reaches its natural completed state, and the observation stays advisory).
+test("R4: runBackground readOnly → isolated run + exactly-one declaration; writes reach the transcript and the run still completes naturally", async () => {
+  const repo = await mkdtemp(path.join(os.tmpdir(), "wao-bg-ro-repo-"));
+  const runDir = await mkdtemp(path.join(os.tmpdir(), "wao-bg-ro-runs-"));
+  try {
+    execSync("git init -b main", { cwd: repo, stdio: "ignore" });
+    execSync('git config user.email "t@t"', { cwd: repo, stdio: "ignore" });
+    execSync('git config user.name "t"', { cwd: repo, stdio: "ignore" });
+    await writeFile(path.join(repo, "README.md"), "# t\n");
+    execSync("git add .", { cwd: repo, stdio: "ignore" });
+    execSync("git commit -m init", { cwd: repo, stdio: "ignore" });
+
+    let spawnedCwd = null;
+    const fakeBackend = {
+      async spawn(agent) {
+        spawnedCwd = agent.cwd;
+        return {
+          backend: "claude-code",
+          backendSessionId: "s_ro",
+          messageId: "m_ro",
+          admittedSeq: 1,
+          async *events() {
+            // The worker writes INSIDE the isolated worktree, then completes.
+            yield { kind: "file_written", path: `${agent.cwd}/src/a.js`, tool: "Write", toolCallId: "tc1" };
+            yield { kind: "done", reason: "completed" };
+          },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+    };
+
+    const result = await runBackground({
+      agentId: "bg_ro",
+      prompt: "survey only",
+      registry: { agents: { bg_ro: { backend: "claude-code", cwd: repo } } },
+      runDir,
+      readOnly: true,
+      backendFor: () => fakeBackend,
+      waitTimeout: 3000,
+      pollInterval: 10,
+    });
+
+    assert.equal(result.completed, true, "run completes naturally despite the observed write (no hard gate)");
+    assert.equal(result.failed, false);
+
+    const events = await readTranscript(path.join(runDir, `${result.runId}.jsonl`));
+    const started = events.find((e) => e.type === "run.started");
+    assert.ok(started?.worktreePath, "readOnly run started inside a real isolated worktree");
+    assert.equal(spawnedCwd, started.worktreePath, "worker cwd is the worktree");
+    const declarations = events.filter((e) => e.type === "run.read_only_declared");
+    assert.equal(declarations.length, 1, "exactly one declaration fact via the runner path");
+    // The evidence channel is ALIVE for non-delivery isolated runs: the
+    // confirmed file_written fact is durable transcript evidence.
+    const writes = events.filter((e) => e.type === "run.event" && e.kind === "file_written");
+    assert.equal(writes.length, 1, "file_written entered the transcript");
+    assert.equal(writes[0].path, `${started.worktreePath}/src/a.js`);
+    assert.equal(findState(events), "completed", "natural terminal state preserved");
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+    await rm(runDir, { recursive: true, force: true });
+  }
+});

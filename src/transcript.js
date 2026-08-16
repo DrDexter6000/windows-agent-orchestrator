@@ -675,6 +675,55 @@ export class JsonlTranscript {
   }
 
   /**
+   * Round 4 Bundle B: append the `run.read_only_declared` durable fact —
+   * EXACTLY ONCE per run.
+   *
+   * A read-only run is a DECLARATION (advisory observation, never a gate):
+   * the control plane records that the Lead dispatched this run read-only so
+   * the observation projector (runReadOnlyObservation.js) can bind its
+   * authority to it. The payload is empty and bounded by construction — the
+   * envelope (ts/seq/runId/agentId/type) IS the fact; no prompt, path, argv,
+   * credential, or provider payload is carried.
+   *
+   * Idempotent under the same cross-process append lock as every other CAS
+   * primitive: if a bound declaration already exists, this is a no-op — a
+   * retrying caller (or a raced foreground/runner path) can never write a
+   * duplicate declaration that would turn the projection ambiguous.
+   *
+   * @returns {Promise<{recorded: boolean}>}
+   */
+  async appendReadOnlyDeclared() {
+    await mkdir(dirname(this.filePath), { recursive: true });
+    const releaseLock = await acquireAppendLock(this.filePath);
+    try {
+      let events = [];
+      try {
+        events = await readTranscript(this.filePath);
+      } catch {
+        events = [];
+      }
+      const already = events.some((e) => e && typeof e === "object"
+        && e.type === "run.read_only_declared" && e.runId === this.context.runId);
+      if (already) return { recorded: false };
+      // In-lock direct write (same CAS discipline as tryClaimCorrection) — the
+      // public append() re-acquires this lock, so it must NOT be called here.
+      const seq = Math.max(this.seq, findLastEventSeq(events)) + 1;
+      const event = {
+        ts: new Date().toISOString(),
+        seq,
+        runId: this.context.runId,
+        agentId: this.context.agentId,
+        type: "run.read_only_declared",
+      };
+      await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
+      this.seq = seq;
+      return { recorded: true };
+    } finally {
+      await releaseLock();
+    }
+  }
+
+  /**
    * TD-99：跨进程原子终态仲裁。
    *
    * 在已有 append lock 内一次完成：读事件 → 检查既有终态 → 分配 seq → 批量 append。

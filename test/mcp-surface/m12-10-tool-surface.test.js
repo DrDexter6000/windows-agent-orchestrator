@@ -557,7 +557,16 @@ const RED_23_WIRE = 75492;
 // certificationLastHealthyAt) to AGENT_ENTRY and the lead_preflight workers
 // entries. The surface remains 22 tools; the additive output schemas add 617
 // bytes (75967 → 76584). Ceiling re-frozen at the exact measured 76584.
-const FROZEN_22_WIRE_CEILING = 76584;
+// Round 4 Bundle B (read-only runs — advisory observation, no hard gate) adds
+// TWO sanctioned additive schema members and NO tools: run_dispatch's
+// RUN_DISPATCH_INPUT gains the optional `readOnly` boolean declaration, and
+// run_activity's RUN_ACTIVITY_OUTPUT gains the OPTIONAL `readOnlyObservation`
+// object (closed status enum + source literal + counts + the bounded
+// writtenPaths array, all derived from the runReadOnlyObservation.js SSOT
+// constants). No description bytes changed (FROZEN_22_DESC_CEILING unchanged);
+// the wire grew +671 bytes (schema-only, 76584 → 77255). Ceiling re-frozen at
+// the exact measured 77255.
+const FROZEN_22_WIRE_CEILING = 77255;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -675,8 +684,18 @@ test("M12-10-H: deterministic 22-tool wire at or below the frozen ceiling", asyn
 // description text changed. M12-10-H re-freezes the wire ceiling; this hash
 // remains the losslessness proof.
 // ADR 0021 (2026-08-16) writes this de facto regime down as policy; this test remains the enforcement.
+// Re-measured for Round 4 Bundle B (read-only runs): run_dispatch's
+// RUN_DISPATCH_INPUT gained the optional `readOnly` boolean (the Lead's
+// read-only declaration) and run_activity's RUN_ACTIVITY_OUTPUT gained the
+// OPTIONAL `readOnlyObservation` object (closed status enum derived from the
+// READ_ONLY_OBSERVATION_STATUSES SSOT, source literal, counts, and the
+// bounded writtenPaths array derived from the READ_ONLY_*_CAP SSOT constants).
+// Both additive members are part of the stripped payload, so the SHA changed
+// truthfully; no description text is in the stripped payload and none changed
+// (M12-16-B still passes — FROZEN_22_DESC_CEILING unchanged). M12-10-H
+// re-freezes the wire ceiling; this hash remains the losslessness proof.
 const DESC_STRIPPED_CONTRACT_SHA =
-  "73bea15f73b2366060ddac81320caf0132ea20bfeeb57fd1be617394de82b5fc";
+  "82c7961bd6a4e1e87008328c86d87ae6c0ec4763278bebb4ba4f39f8e0449ff6";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

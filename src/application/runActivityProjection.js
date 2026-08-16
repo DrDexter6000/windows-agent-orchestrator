@@ -61,6 +61,11 @@ import { RUNTIME_ACTIVITY_STATUSES } from "../runEvent.js";
 // activity page/cursor, so a continuation cursor never sees later appends
 // while a fresh page-1 call may observe them.
 import { projectScopeObservation } from "./runScopeObservation.js";
+// Round 4 Bundle B: advisory read-only observation. The pure projector derives
+// the OPTIONAL readOnlyObservation fact from the SAME frozenEvents prefix —
+// mounted ONLY when the prefix carries a bound run.read_only_declared fact
+// (input-side discrimination), so an undeclared run keeps the field absent.
+import { projectReadOnlyObservation } from "./runReadOnlyObservation.js";
 
 // ===== M12-19: structured cursor-rejection signal =====
 //
@@ -437,6 +442,10 @@ const SKIP_TYPES = new Set([
   "session.created",
   "session.ended",
   "run.completed",
+  // Round 4 Bundle B: the read-only declaration is control-plane bookkeeping
+  // (the envelope IS the fact) — not worker activity. It mounts the advisory
+  // readOnlyObservation instead of a timeline entry.
+  "run.read_only_declared",
 ]);
 
 /**
@@ -555,6 +564,8 @@ function buildEntry(event, category, redactor, textCap) {
  * @param {object} [opts.env] — env for the secret redactor (default process.env)
  * @returns {object} safe payload: runId, agentId, backend, state, terminal,
  *                   scopeObservation (M12-14 advisory, from the frozen prefix),
+ *                   readOnlyObservation (Round 4 advisory, OPTIONAL — only when
+ *                   the frozen prefix declared read-only),
  *                   counts, total, entries, pageSize, truncated, nextCursor
  */
 export function projectRunActivity(rawSnapshot, {
@@ -710,6 +721,23 @@ export function projectRunActivity(rawSnapshot, {
     env,
   });
 
+  // Round 4 Bundle B: advisory read-only observation — mounted ONLY when the
+  // frozen prefix carries a bound run.read_only_declared fact (input-side
+  // discrimination: an undeclared run keeps the field absent, so every
+  // ordinary run's payload stays byte-compatible). Same frozenEvents prefix
+  // as the page/cursor above; pure, fail-closed, never throws, never gates.
+  const declaredReadOnly = frozenEvents.some(
+    (e) => e !== null && typeof e === "object" && !Array.isArray(e)
+      && e.type === "run.read_only_declared" && e.runId === runId,
+  );
+  const readOnlyObservation = declaredReadOnly
+    ? projectReadOnlyObservation(frozenEvents, {
+      runId,
+      terminal: Boolean(rawSnapshot.terminal),
+      env,
+    })
+    : undefined;
+
   return {
     runId,
     agentId: safeProjectAgentId(rawSnapshot.agentId),
@@ -719,6 +747,7 @@ export function projectRunActivity(rawSnapshot, {
     state: safeDynamicText(rawSnapshot.state ?? "unknown", redactor, ACTIVITY_LABEL_CAP),
     terminal: Boolean(rawSnapshot.terminal),
     scopeObservation,
+    ...(readOnlyObservation !== undefined ? { readOnlyObservation } : {}),
     counts,
     total,
     entries: pageEntries,

@@ -2298,11 +2298,15 @@ test("A-2: run --help 进程内打印用法页（不抛，含 --delivery-spec-fi
   const out = await captureLog(() => runCommand(["--help"], {}));
   assert.match(out, /--delivery-spec-file/, "用法页必须列出 --delivery-spec-file flag");
   assert.match(out, /INNER/, "用法页必须说明 spec 文件内容是 INNER delivery 对象");
+  // Round 4 Bundle B 联动：--read-only 旗标必须进用法页（且带 honest 语义说明）。
+  assert.match(out, /--read-only/, "用法页必须列出 --read-only flag");
+  assert.match(out, /never a gate/, "用法页必须说明 --read-only 是 advisory 观察非门");
 });
 
 test("A-2: run --help 子进程 exit 0 且 stdout 含用法（execSync 非零退出即 throw）", () => {
   const out = runCliOnPathNode("run --help");
   assert.match(out, /--delivery-spec-file/, "run --help 必须打印 --delivery-spec-file flag");
+  assert.match(out, /--read-only/, "run --help 必须打印 --read-only flag");
 });
 
 test("A-3: delivery spec 带 {\"delivery\":...} 外层包装 → SSOT 拒绝 + INNER delivery object 提示", async () => {

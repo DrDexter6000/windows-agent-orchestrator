@@ -252,6 +252,17 @@ test("transcript 事件表单一权威：usage.md 必须是完整权威，SKILL.
   );
 });
 
+test("R4 只读 run：usage.md 事件表必须含 run.read_only_declared 正向锚（完整权威的一部分）", () => {
+  // Round 4 Bundle B：run.read_only_declared 是只读声明的 durable 事实类型，
+  // usage.md §三 是 transcript 事件的完整权威——新事件必须进该表（正向锚，
+  // 防止声明事件只在代码/生成层存在而权威表漂移）。
+  const usage = read("docs/usage.md");
+  assert.ok(
+    usage.includes("run.read_only_declared"),
+    "usage.md transcript 事件表缺 run.read_only_declared（R4 只读声明事件应是完整权威的一部分）",
+  );
+});
+
 test("SKILL.md 必须在正文最前显式声明 lead 角色与职责链", () => {
   // 没有角色定义，coding agent 装了技能也会退回单体模式（不编排/不派发/不验收）。
   // 身份声明必须紧跟 frontmatter（agent 加载技能后读到的第一段）。

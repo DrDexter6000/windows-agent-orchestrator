@@ -47,6 +47,25 @@ function installSigintHandler() {
 
 const MAX_PENDING_DELIVERY_WRITE_INTENTS = 256;
 
+// Round 4 Bundle B: thrown when a readOnly run's FORCED worktree isolation
+// cannot be established (worktree creation failed). Read-only runs refuse the
+// legacy degrade-to-source-cwd fallback (runManager.js :524-534) exactly like
+// delivery runs (:525-531 precedent): the declaration promises forced
+// isolation, and a fallback would silently void both the isolation and the
+// observation authority. Fixed closed-set message — no path, argv, or
+// operational detail is echoed. Carries the closed-set reason code
+// `read_only_worktree_required` for callers/tests.
+export class ReadOnlyWorktreeRequiredError extends Error {
+  constructor() {
+    super(
+      "readOnly mode requires an isolated worktree, but worktree creation failed "
+      + "(read_only_worktree_required); refusing the source-checkout fallback",
+    );
+    this.name = "ReadOnlyWorktreeRequiredError";
+    this.reasonCode = "read_only_worktree_required";
+  }
+}
+
 function isConfirmableToolCallId(value) {
   return typeof value === "string"
     && value.trim().length > 0
@@ -236,6 +255,17 @@ export class RunManager {
     // waitForCompletion. Requires the backend to declare
     // supportsInFlightCorrection (gated below). Default false = byte-compatible.
     correctable = false,
+    // Round 4 Bundle B: Lead read-only DECLARATION (advisory observation, never
+    // a gate). readOnly forces persistent worktree isolation (overriding the
+    // isolate flag — the CLI rejects the contradictory --no-isolate up front),
+    // fails closed when the worktree cannot be created (no source-cwd fallback,
+    // typed ReadOnlyWorktreeRequiredError, zero transcript side effects), and
+    // persists exactly one `run.read_only_declared` durable fact whose presence
+    // is the observation projector's authority input. Non-delivery only
+    // (defense-in-depth — the dispatch boundaries already refuse the combo).
+    // Observed out-of-bounds writes NEVER stop/fail the run: the run reaches
+    // its natural terminal state and the observation is pure presentation.
+    readOnly = false,
     } = options;
 
     const registryPath = resolve(registry ?? this.config.registry);
@@ -299,7 +329,26 @@ export class RunManager {
     // before consulting an external runtime capability. These checks are pure and
     // must retain precedence over network availability/version errors while still
     // happening before every run side effect.
-    const isolationConfig = resolveIsolation(isolate, agent.isolation, this.config.defaultIsolation);
+    // Round 4 Bundle B: a read-only run is a non-delivery declaration — refuse
+    // the contradictory combination at the spawn authority too (the MCP handler
+    // and CLI runCommand already refuse it; this is the same defense-in-depth
+    // discipline the correctable gate applies). Zero transcript, zero worktree,
+    // zero spawn.
+    if (readOnly && delivery) {
+      throw new Error(
+        "RunManager.start: readOnly is mutually exclusive with delivery "
+        + "(read_only_delivery_conflict) — a read-only run is advisory observation, never a delivery",
+      );
+    }
+    // Round 4 Bundle B: readOnly FORCES persistent worktree isolation — the
+    // declaration overrides the caller's isolate flag (the CLI rejects the
+    // contradictory --no-isolate declaration up front; programmatic callers
+    // get the forced-isolation semantics documented on the option).
+    const isolationConfig = resolveIsolation(
+      readOnly ? true : isolate,
+      agent.isolation,
+      this.config.defaultIsolation,
+    );
     let deliveryPrepared = null;
     if (delivery) {
       deliveryPrepared = prepareDeliveryRequest(delivery);
@@ -529,6 +578,16 @@ export class RunManager {
             `Delivery mode requires an isolated worktree, but worktree creation failed: ${error.message}`,
           );
         }
+        if (readOnly) {
+          // Round 4 Bundle B: a read-only run plugs the degrade below exactly
+          // like delivery above. The declaration promises forced isolation; a
+          // source-checkout fallback would silently void both the isolation
+          // and the observation authority (worktreePath). Fail-closed typed
+          // error at the dispatch preflight — run.started / the declaration /
+          // the pending transition have NOT been written yet, so this is a
+          // zero-side-effect refusal.
+          throw new ReadOnlyWorktreeRequiredError();
+        }
         await transcript.append("run.isolation_failed", { error: error.message });
         // 降级：用原 cwd 继续
       }
@@ -613,6 +672,15 @@ export class RunManager {
         },
       } : {}),
     });
+    // Round 4 Bundle B: the read-only DECLARATION durable fact — written at
+    // start, exactly once (the append is an idempotent CAS, so the foreground
+    // and runner paths share ONE single write point). Empty bounded payload:
+    // the envelope IS the fact. Its presence in a snapshot is what mounts the
+    // advisory readOnlyObservation in the activity projection; it never gates
+    // anything.
+    if (readOnly) {
+      await transcript.appendReadOnlyDeclared();
+    }
     const pendingResult = await this._transition(transcript, null, "pending", STATE_CHANGE_REASON.created);
     // TD-99：若 pending rejected（runId 已有终态——如同 runId 复用旧终态 transcript），
     // 不得 spawn backend，立即报已有终态。

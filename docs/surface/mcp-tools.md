@@ -115,6 +115,7 @@ Input:
 | expectedWorkspaceRoot | string | no |  |
 | continuable | boolean | no |  |
 | correctable | boolean | no |  |
+| readOnly | boolean | no |  |
 | executionProfileId | string | no |  |
 
 Output:
@@ -146,6 +147,7 @@ Input:
 | expectedWorkspaceRoot | string | no |  |
 | continuable | boolean | no |  |
 | correctable | boolean | no |  |
+| readOnly | boolean | no |  |
 | executionProfileId | string | no |  |
 
 Output:
@@ -512,6 +514,7 @@ Output:
 | state | string | yes |  |
 | terminal | boolean | yes |  |
 | scopeObservation | object | yes |  |
+| readOnlyObservation | object | no |  |
 | counts | object | yes |  |
 | total | integer | yes |  |
 | entries | array<object> | yes |  |

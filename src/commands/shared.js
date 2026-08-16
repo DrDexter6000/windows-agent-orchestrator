@@ -84,6 +84,18 @@ export function resolveIsolateFlag(options) {
 }
 
 /**
+ * 解析 --read-only 布尔旗标（Round 4 Bundle B，镜像 resolveIsolateFlag 模式）。
+ *
+ * 只读是 Lead 的声明（advisory 观察非门）：声明后强制 worktree 隔离、恰一次
+ * run.read_only_declared durable 事实、run_activity 附 readOnlyObservation。
+ * 与 --delivery-spec-file 互斥（runCommand 拒绝）；与 --no-isolate 矛盾
+ * （runCommand 拒绝——声明只读却显式要求不隔离是矛盾声明）。
+ */
+export function resolveReadOnlyFlag(options) {
+  return options.readOnly === true;
+}
+
+/**
  * 按 agent.backend 选对应后端实例。
  *
  * 薄委托到共享工厂 src/backends/factory.js；不传注入参数时由工厂内部解析

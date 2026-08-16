@@ -30,7 +30,7 @@ import { fileURLToPath } from "node:url";
 
 import { readTranscript } from "../transcript.js";
 import { renderRunSummary } from "../cliRunSummary.js";
-import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag } from "./shared.js";
+import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag, resolveReadOnlyFlag } from "./shared.js";
 import { prepareDeliveryRequest } from "../delivery.js";
 import { COMMAND_NAMES, RUN_USAGE_TEXT } from "../cliHelp.js";
 // M9-2A: background dispatch delegated to shared application service.
@@ -172,6 +172,11 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
       scorecardMode: options.scorecardMode,
       // M9-2A (§70)：background 路径不再静默忽略 requireCertified——与 foreground 一致透传。
       requireCertified: Boolean(options.requireCertified),
+      // Round 4 Bundle B: thread the read-only declaration (validated against
+      // --delivery-spec-file up in runCommand) to the shared dispatch service —
+      // the runner receives --isolate --read-only and RunManager.start persists
+      // the exactly-once declaration fact.
+      readOnly: resolveReadOnlyFlag(options),
       // M9-7A: forward validated delivery request for background delivery runs.
       delivery,
       runnerPath,
@@ -324,6 +329,26 @@ export async function runCommand(args, config) {
   if (delivery && !resolveIsolateFlag(options)) {
     throw new Error("delivery mode requires --isolate (persistent worktree isolation)");
   }
+  // Round 4 Bundle B: --read-only is a Lead DECLARATION (advisory observation,
+  // never a gate). Both rejections run before any side effect (manager.start /
+  // dispatchRun / transcript write):
+  //   - × --delivery-spec-file: a read-only run is observation, never a
+  //     delivery — the combination is contradictory.
+  //   - × --no-isolate: read-only forces isolation; explicitly demanding no
+  //     isolation contradicts the declaration.
+  const readOnly = resolveReadOnlyFlag(options);
+  if (readOnly && delivery) {
+    throw new Error(
+      "--read-only is mutually exclusive with --delivery-spec-file "
+      + "(read_only_delivery_conflict: a read-only run is advisory observation, never a delivery)",
+    );
+  }
+  if (readOnly && resolveIsolateFlag(options) === false) {
+    throw new Error(
+      "--read-only requires isolation; --no-isolate contradicts a read-only declaration "
+      + "(remove --no-isolate, or drop --read-only)",
+    );
+  }
   // M9-7A: background delivery is now supported — the delivery request is
   // forwarded through the shared dispatchRun service to the detached runner.
   // P2（M7）：--background = detached runner 托管。CLI 预生成 runId、fork runner、立即返回。
@@ -351,6 +376,11 @@ export async function runCommand(args, config) {
     ...(options.scorecardRules ? { scorecard: { rules: parseScorecardRules(options.scorecardRules, options.scorecardRulesSource) } } : {}),
     // TD-103 Phase 3C-1: pass validated delivery request to RunManager.
     ...(delivery ? { delivery } : {}),
+    // Round 4 Bundle B: the read-only declaration (already validated against
+    // --delivery-spec-file / --no-isolate above). RunManager.start forces
+    // isolation, fails closed without a worktree, and persists the
+    // exactly-once run.read_only_declared fact.
+    ...(readOnly ? { readOnly: true } : {}),
   });
   const format = options.format ?? "text";
   const waitResult = await runAndWait(run, options);
