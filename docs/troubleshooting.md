@@ -178,7 +178,7 @@ serve 后台进程不一定。
 
 - **症状**：worker 在 `D:/projects/windows-agent-orchestrator`（或你敲命令时所在的任何目录）干活，而不是你要它改的目标仓库
 - **根因**：registry 的 `cwd` 默认是 `.`（R8-1 起模板统一值）。`.` 解析为**发起派发的进程的当前工作目录**（CLI 通道=你敲命令时所在目录；MCP 通道=MCP 服务进程的 cwd，由 host 决定）——从 WAO 仓根跑 CLI 就是 WAO 仓。每个 worker 的 cwd 应指向它要操作的目标仓
-- **R8-1 trade-off（须知）**：去占位化把"忘传 `--cwd`"从 typed 早拒绝换成了**静默落在派发进程 cwd**——旧占位路径 `D:/projects/your-project` 不存在 → 早拒绝；`.` 恒存在 → 不拒。边界：**delivery 派发不受影响**（CLI 边界强制 `--cwd`，缺失直接 `DeliveryCwdRequiredError` 早拒绝）；**MCP 通道安全**（host 绑定 workspace root 为 cwd）；**resume 安全**；受影响的是 CLI 前台/后台/workflow 快起路径——这些路径的用法一律**显式带 `--cwd`**，且 `wao doctor` 对 cwd 为 `.` 的 worker 会出一条 INFO 落点提示（不计 DEGRADED，advisory）
+- **R8-1 trade-off（须知）**：去占位化把"忘传 `--cwd`"从 typed 早拒绝换成了**静默落在派发进程 cwd**——旧占位路径 `D:/projects/your-project` 不存在 → 早拒绝；`.` 恒存在 → 不拒。边界：**后台 delivery 不受影响**（CLI 边界对 `--background` + delivery 强制 `--cwd`，缺失直接 `DeliveryCwdRequiredError` 早拒绝）；**前台 delivery 不设此门**——其 worktree 源仓来自 registry cwd，`.` 时会从操作者当前 shell 所在仓切 worktree，仍须显式 `--cwd` 指向目标仓；**MCP 通道安全**（host 绑定 workspace root 为 cwd）；**resume 安全**；受影响的是 CLI 前台/后台/workflow 快起路径——这些路径的用法一律**显式带 `--cwd`**，且 `wao doctor` 对 cwd 为 `.` 的 worker 会出一条 INFO 落点提示（不计 DEGRADED，advisory）
 - **修复**：
   - 派发时显式 `--cwd "D:/path/to/target-repo"`
   - 或在 agents.json 里把每个 worker 的 cwd 改成目标仓（必须已存在，否则见 §3.2 的 typed 早拒绝）
@@ -326,7 +326,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 
 - **症状**：worker 在 WAO 工具仓或错误项目干活，不在目标项目
 - **根因**：派发时没带 `--cwd <目标项目>`，worker 用了 agents.json 的默认 cwd `.`——它解析为**发起派发的进程的当前工作目录**（R8-1 起模板统一值；CLI 通道=你敲命令时所在目录，MCP 通道=MCP 服务进程的 cwd，由 host 决定），不是目标项目（详见 §3.1 的 trade-off）
-- **修复**：要在目标项目干活就派发时带 `--cwd <目标项目>`（快起路径的最佳实践）；或把 agents.json 里该 worker 的 `cwd` 固定为目标项目路径（必须已存在，见 §3.2）。delivery 派发不受影响——CLI 边界对 delivery 强制 `--cwd`，缺失直接早拒绝
+- **修复**：要在目标项目干活就派发时带 `--cwd <目标项目>`（快起路径的最佳实践）；或把 agents.json 里该 worker 的 `cwd` 固定为目标项目路径（必须已存在，见 §3.2）。后台 delivery 不受影响——CLI 边界对 `--background` + delivery 强制 `--cwd`，缺失直接早拒绝；前台 delivery 不设此门，同样要显式带 `--cwd`（worktree 源仓来自 registry cwd）
 
 ### 7.5 agents.json 配置漂移
 
