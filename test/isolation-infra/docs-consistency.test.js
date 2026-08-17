@@ -2910,6 +2910,7 @@ test("R11-2 0024: AGENT_ONBOARDING.md 双源说明 + usage.md 配置节追加（
   const usage = read("docs/usage.md");
   assert.ok(usage.includes("双源展示（决策 0024）"), "docs/usage.md 配置节必须追加双源说明");
   assert.ok(usage.includes("`--apply` 仅适用模板候选行"), "docs/usage.md 必须含 --apply 适用范围句");
+});
 
 // =====================================================================
 // R11-1（Owner 2026-08-17）：per-dispatch reasoning effort 覆盖（--reasoning /
