@@ -11,10 +11,12 @@ where claude   # 应输出 C:\Users\<you>\.local\bin\claude.exe
 where codex    # 应输出 npm 全局路径
 ```
 
-复制本地 registry（按你的实际路径改 cwd）：
+复制本地 registry（cwd 可选固定到目标项目）：
 ```powershell
 Copy-Item config/agents.example.json config/agents.json
-# 编辑 config/agents.json，把 cwd 改成你的项目目录
+# 可选：把 config/agents.json 里各 worker 的 cwd 固定成你的目标项目路径（必须已存在）。
+# 模板默认 "." = 派发时落在你敲命令所在的目录（见 docs/troubleshooting.md §3.1）——
+# smoke 时建议直接在命令里显式带 --cwd <目标项目>
 ```
 
 ## Claude Code smoke

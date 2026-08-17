@@ -2016,13 +2016,14 @@ test("R5-B: doctor fresh clone 缺槽位无多余 → wao_init WARN（不 FAIL�
   }
 });
 
-// ── R8-2: doctor registry cwd 存在性 WARN ────────────────────────────────────
+// ── R8-2: doctor registry cwd 存在性 WARN（R8-C C-7/C-8/C-10 同步）───────────
 // 环境类检查的地盘是 doctor（SKILL 契约：registry validate = static schema，
 // 存在性是机器状态不进 validate）。判定语义与 R7 assertExistingDispatchCwd
 // 完全一致（同一 runManager SSOT 探针：path.resolve 后 statSync 目录判定）；
 // 能力收窄与 R7 两层派发门对称（本地进程式 backend 查，HTTP serve 豁免）。
-// 健康面不产生条目（budget_* 同款惯例）。
-test("R8-2: doctor registry cwd——坏 cwd 给 WARN（DEGRADED，exit 0）+ fix；\".\" 与 HTTP backend 不误报", () => {
+// R8-C C-8 起健康面唯一条目：cwd === "." 的 worker 出 INFO（静默落点提示，
+// 不计 DEGRADED）；其余健康面零条目（budget_* 同款惯例）。
+test("R8-2: doctor registry cwd——坏 cwd 给 WARN（DEGRADED，exit 0）+ run: 子句；\".\" 给 INFO 不给 WARN；HTTP backend 零条目", () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-doctor-cwd-"));
   try {
     const badCwd = join(dir, "no-such-project");
@@ -2031,8 +2032,9 @@ test("R8-2: doctor registry cwd——坏 cwd 给 WARN（DEGRADED，exit 0）+ fi
       agents: {
         // 本地进程式 backend + 不存在的 cwd → 应 WARN（R8-2 主面）
         researcher: { backend: "claude-code", cwd: badCwd },
-        // "." 解析为 doctor CLI 所在目录，恒存在 → 不得产生 cwd_* 条目（R8-1 后
-        // 模板值即 "."，误报会打爆开箱即跑的模板）
+        // "." 解析为发起派发的进程的 cwd（CLI 通道=敲命令时所在目录；MCP 通道
+        // =MCP 服务进程的 cwd，由 host 决定），恒存在 → 不 WARN；R8-C C-8 起
+        // 出一条 INFO 静默落点提示（R8-1 后模板值即 "."）
         coder_low: { backend: "claude-code", cwd: "." },
         // HTTP serve backend：cwd 是远端目录提示，与派发层能力豁免对称
         // （CE-13/RCE-6 钉死的不拒面）→ doctor 不得更严，不产生条目
@@ -2062,17 +2064,86 @@ test("R8-2: doctor registry cwd——坏 cwd 给 WARN（DEGRADED，exit 0）+ fi
     assert.ok(warn.detail.includes(resolve(badCwd)),
       `detail 应携带解析后的绝对路径（${resolve(badCwd)}）`);
     assert.match(warn.detail, /dispatch_cwd_not_found/, "detail 应指向派发期 typed 早拒绝的 reason code");
+    assert.match(warn.detail, /run: /, "R8-C C-10：WARN detail 应带 run: 修复子句（backend_map_* 同款惯例）");
     assert.ok(warn.fix, "WARN 项应带 fix 提示");
     assert.match(warn.fix, /--cwd/, "fix 应给 --cwd 替代路径");
     assert.match(warn.fix, /cwd 指向已存在目录/, "fix 应给修 registry cwd 的指引");
 
-    // 误报面："." 与 HTTP serve backend 均不得产生 cwd_* 条目（健康面零条目惯例）
+    // "." worker：INFO 静默落点提示（R8-C C-8）——不 WARN、不计 DEGRADED
+    const dotInfo = parsed.checks.find((c) => c.name === "cwd_coder_low");
+    assert.ok(dotInfo, "cwd 为 \".\" 的本地进程式 worker 应有 cwd_coder_low INFO 项（C-8）");
+    assert.equal(dotInfo.status, "info");
+    assert.equal(dotInfo.level, "info");
+    assert.equal(dotInfo.pass, true, "INFO 不判 FAIL");
+    assert.equal(dotInfo.severity, "info", "severity 与 status 一致（INFO）");
+    assert.match(dotInfo.detail, /发起派发的进程的 cwd/, "INFO 应说明 \".\" 的解析语义（C-7 统一文案）");
+    assert.match(dotInfo.fix, /--cwd/, "INFO fix 应给 --cwd 用法（C-8）");
+
+    // 条目面收口：坏 cwd → 1 WARN；"." → 1 INFO；HTTP serve → 零条目
     const cwdItems = parsed.checks.filter((c) => c.name.startsWith("cwd_"));
-    assert.deepEqual(cwdItems.map((c) => c.name), ["cwd_researcher"],
-      "仅坏 cwd 的本地进程式 worker 出条目；\".\"（恒存在）与 opencode-serve（远端提示）零条目");
+    assert.deepEqual(
+      cwdItems.map((c) => `${c.name}:${c.status}`).sort(),
+      ["cwd_coder_low:info", "cwd_researcher:warn"],
+      "仅本地进程式 worker 出条目：bad cwd=WARN、\".\"=INFO；opencode-serve（远端提示）零条目",
+    );
+    assert.ok(!parsed.checks.some((c) => c.name === "cwd_ghost_serve"),
+      "HTTP serve backend 不得出 cwd_* 条目（CE-13/RCE-6 不拒面对称）");
 
     assert.match(parsed.verdict, /^DEGRADED（\d+ warn）/, "WARN → DEGRADED");
-    assert.equal(result.status, 0, "仅 WARN → exit 0（advisory 非门禁）");
+    assert.equal(result.status, 0, "仅 WARN + INFO → exit 0（advisory 非门禁，INFO 不计 DEGRADED）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R8-C C-8/C-10: doctor cwd 检查——sessionReuse worker 的 INFO/WARN 措辞区分实际拒因（WQ 状态面）", () => {
+  // WQ-02 状态枚举：本测试钉 doctor cwd_* 检查在 sessionReuse worker 上的两个
+  // 信号面。正常面（cwd 存在）= INFO 静默落点提示；缺失面（cwd 不存在）= WARN，
+  // 且措辞不得统一声称 dispatch_cwd_not_found——后台族不带 --cwd 时
+  // runDispatch.js:374-381 的 hoisted 检查先抛 SessionReuseWorkspaceRequiredError。
+  const dir = mkdtempSync(join(tmpdir(), "wao-doctor-cwd-reuse-"));
+  try {
+    const badCwd = join(dir, "no-such-project");
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        // sessionReuse worker + cwd "."（模板常态）→ INFO，措辞区分后台族拒因
+        researcher: { backend: "claude-code", cwd: ".", sessionReuse: "lead_workspace" },
+        // sessionReuse worker + 坏 cwd → WARN，措辞区分（先 sessionReuse 拒绝）
+        auditor: { backend: "claude-code", cwd: badCwd, sessionReuse: "lead_workspace" },
+      },
+    }), "utf8");
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "doctor",
+      "--registry", registryPath,
+      "--cwd", dir,
+      "--format", "json",
+    ], { cwd: process.cwd(), encoding: "utf8", env: process.env, timeout: 10000 });
+    const parsed = JSON.parse(result.stdout);
+
+    // 状态 1（正常面）：cwd "." 的 sessionReuse worker → INFO + 拒因预告
+    const info = parsed.checks.find((c) => c.name === "cwd_researcher");
+    assert.ok(info, "sessionReuse + \".\" 应有 INFO 项");
+    assert.equal(info.status, "info");
+    assert.match(info.detail, /SessionReuseWorkspaceRequiredError/,
+      "sessionReuse worker 的 INFO 应预告后台族不带 --cwd 的实际先发拒绝（不是 cwd 不存在）");
+    assert.match(info.detail, /发起派发的进程的 cwd/,
+      "同时保留 \".\" 的解析语义（前台 run 不解析 sessionReuse 的落点）");
+
+    // 状态 2（缺失面）：坏 cwd 的 sessionReuse worker → WARN + 措辞区分
+    const warn = parsed.checks.find((c) => c.name === "cwd_auditor");
+    assert.ok(warn, "sessionReuse + 坏 cwd 应有 WARN 项");
+    assert.equal(warn.status, "warn");
+    assert.match(warn.detail, /SessionReuseWorkspaceRequiredError/,
+      "C-10：sessionReuse worker 的 WARN 不得统一声称 dispatch_cwd_not_found——后台族不带 --cwd 先报 workspace-required");
+    assert.match(warn.detail, /dispatch_cwd_not_found/,
+      "带 --cwd 的路径仍指向 dispatch_cwd_not_found（两种拒因都在措辞里）");
+    assert.match(warn.detail, /run: /, "WARN detail 带 run: 子句");
+
+    // 非适用状态声明：cwd_* 检查无 loading/missing 态（registry 缺位由聚合
+    // "cwd" INFO 承担，见 R8-2 registry 缺位测试）；unparseable 由 registry_loads
+    // WARN 承担、cwd_* 逐 worker 面整体跳过——不在此重复覆盖。
+    assert.equal(result.status, 0, "1 WARN + 1 INFO → exit 0");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -2105,7 +2176,11 @@ test("R8-2: --warn-as-error 在仅 cwd 存在性 WARN 时 exit 1（分级语义�
   const dir = mkdtempSync(join(tmpdir(), "wao-doctor-cwd-wae-"));
   try {
     // 隔离出"恰一条 WARN"：完整 .wao/（wao_init OK）+ 单个 codex worker
-    // （无 provider → keys INFO；codex CLI 在 PATH → cli_codex OK）+ 坏 cwd。
+    // （无 provider → keys INFO）+ 坏 cwd。
+    // R8-C C-11：不再断言精确 verdict 等值（"DEGRADED（1 warn）…"）——它与
+    // "codex 在 PATH"强耦合（无 codex 的机器上 cli_codex 变 FAIL → BROKEN，
+    // 测试在别的检出上误红）。改为结构性断言：checks 里恰有一条 status==="warn"
+    // 且 name 为 cwd_tester，与 cli_* 的 PATH 探测结果解耦。
     mkdirSync(join(dir, ".wao"), { recursive: true });
     writeFileSync(join(dir, ".wao", "project.md"), "", "utf8");
     for (const slot of ["state", "decisions", "pipeline", "handoff", "runs"]) {
@@ -2123,10 +2198,16 @@ test("R8-2: --warn-as-error 在仅 cwd 存在性 WARN 时 exit 1（分级语义�
       "--format", "json",
     ], { cwd: process.cwd(), encoding: "utf8", env: doctorSpawnEnv(), timeout: 10000 });
     const parsedBase = JSON.parse(base.stdout);
-    assert.equal(parsedBase.verdict, "DEGRADED（1 warn）（advisory，非门禁）",
-      `恰一条 WARN（cwd_tester）；实际 verdict: ${parsedBase.verdict}`);
-    assert.ok(parsedBase.checks.some((c) => c.name === "cwd_tester" && c.status === "warn"));
-    assert.equal(base.status, 0, "仅 WARN → exit 0");
+    const warnChecks = parsedBase.checks.filter((c) => c.status === "warn");
+    assert.deepEqual(warnChecks.map((c) => c.name), ["cwd_tester"],
+      `恰一条 WARN 且为 cwd_tester（与 cli_* 的 PATH 探测解耦）；实际 warn: [${warnChecks.map((c) => c.name).join(", ")}]`);
+    assert.ok(!parsedBase.checks.some((c) => c.name === "cwd_tester" && c.status !== "warn"),
+      "cwd_tester 不得同时出现第二种状态");
+    // exit 0 断言仅在零 FAIL 时成立（cli_codex 依赖本机 PATH；有 FAIL 时 exit 1
+    // 与 --warn-as-error 无关，不为它制造 PATH 耦合）。
+    if (!parsedBase.checks.some((c) => c.status === "fail")) {
+      assert.equal(base.status, 0, "仅 WARN（零 FAIL）→ exit 0");
+    }
 
     const asError = spawnSync(process.execPath, [
       "src/cli.js", "wao", "doctor",

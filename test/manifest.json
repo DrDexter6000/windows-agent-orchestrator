@@ -112,6 +112,7 @@
       "delivery/runsDeliveryReviewCli.test.js",
       "run-lifecycle/runsWait.test.js",
       "isolation-infra/scorecard.test.js",
+      "isolation-infra/staticRunsGuard.test.js",
       "run-lifecycle/stopSideEffect.test.js",
       "run-lifecycle/timeoutPolicy.test.js",
       "transcript/transcript.test.js",

@@ -87,7 +87,7 @@ npm link
 Copy-Item config/agents.example.json config/agents.json
 ```
 
-编辑 `config/agents.json`，按需增删 agent。`cwd` 模板默认是 `.`（R8-1：解析为派发时 CLI 所在目录，恒存在，开箱即跑）——要固定目标项目就改成真实路径（必须已存在），或保持 `.` 由派发时 `--cwd` 覆盖。
+编辑 `config/agents.json`，按需增删 agent。`cwd` 模板默认是 `.`（R8-1：解析为发起派发的进程的当前工作目录——CLI 通道=你敲命令时所在目录；MCP 通道=MCP 服务进程的 cwd，由 host 决定；恒存在，开箱即跑）——要固定目标项目就改成真实路径（必须已存在），或保持 `.` 由派发时 `--cwd` 覆盖（`wao doctor` 对 cwd 为 `.` 的 worker 会出一条 INFO 落点提示，不计 DEGRADED）。
 
 > 第三方从全新 clone 只配一个 worker：`npm run cli -- wao onboarding --agent <agentId> --apply` 自动从入库模板生成单 worker registry + host-neutral MCP 片段（零手编）。正式验收链见 `AGENT_ONBOARDING.md` §9。
 

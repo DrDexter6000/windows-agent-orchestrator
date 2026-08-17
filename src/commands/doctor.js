@@ -10,6 +10,9 @@
 // schema`（纯静态），本检查不进 validate。判定本体复用 runManager SSOT 的
 // probePredictedDispatchCwd（与 assertExistingDispatchCwd 同一 path.resolve +
 // statSync 目录判定路径，本文件不写第三份判定逻辑）。
+// Round 8 R8-C（C-8/C-10）：cwd === "." 的 worker 出 INFO（R8-1 去占位化的
+// 静默落点提示——不计 DEGRADED）；WARN detail 补 run: 子句并对 sessionReuse
+// worker 区分实际先发的拒因（SessionReuseWorkspaceRequiredError）。
 //
 // 命令族：wao doctor [--strict] [--warn-as-error] [--format json] [--registry FILE] [--cwd DIR]
 //
@@ -125,13 +128,15 @@ const KNOWN_CLIS = ["claude", "codex", "kimi", "opencode"];
 /**
  * 构造一条 doctor 检查项。既有字段（name/pass/detail/level）兼容保留；
  * 加性字段：status（ok|warn|info|fail，fail 仅当 pass=false）、severity（与 status 同值，
- * 排序含义 fail>warn>info>ok）、fix（FAIL/WARN 项的修复命令或指引）。
+ * 排序含义 fail>warn>info>ok）、fix（FAIL/WARN/INFO 项的修复命令或指引——R8-C C-8
+ * 起 INFO 也允许带 fix：cwd "." 的静默落点提示需要 --cwd 指引，但 INFO 不计入
+ * verdict/退出码，advisory 定位不变；ok 项仍不带 fix）。
  */
 function pushCheck(checks, { name, pass = true, level, detail, fix }) {
   const status = pass === false ? "fail" : (level ?? "ok");
   const check = { name, pass, level, status, severity: status, detail };
-  if (status === "fail" || status === "warn") {
-    if (fix) check.fix = fix;
+  if ((status === "fail" || status === "warn" || status === "info") && fix) {
+    check.fix = fix;
   }
   checks.push(check);
 }
@@ -325,15 +330,20 @@ export async function waoDoctorCommand(args, config) {
         });
       }
     }
-    // R8-2：registry cwd 存在性 WARN（advisory，非门禁）。逐个已配置 worker：
-    // 判定复用 runManager SSOT 探针（path.resolve 后 statSync 目录判定，语义与
-    // 派发期 assertExistingDispatchCwd 完全一致——含"存在但是文件"同判不存在）。
-    // 能力收窄与 R7 两层派发门对称：只查会以该 cwd 本地 spawn 的 backend（经
-    // 共享工厂解析后声明 preflightInvocation 能力）；HTTP serve backend
-    // （opencode-serve 形状，cwd 是远端目录提示）豁免——对它 WARN 会是与派发
-    // 语义相悖的假预警（CE-13/RCE-6 钉死的不拒面上 doctor 不得更严）。"." 经
-    // path.resolve 解析为 CLI 所在目录，恒存在，不误报。健康面不产生条目
-    // （budget_* 同款惯例：只在有问题时出现，避免 N 条 OK 噪音）。
+    // R8-2 + R8-C（C-7/C-8/C-10）：registry cwd 检查（advisory，非门禁）。逐个已
+    // 配置 worker：判定复用 runManager SSOT 探针（path.resolve 后 statSync 目录
+    // 判定，语义与派发期 assertExistingDispatchCwd 完全一致——含"存在但是文件"
+    // 同判不存在）。能力收窄与 R7 两层派发门对称：只查会以该 cwd 本地 spawn 的
+    // backend（经共享工厂解析后声明 preflightInvocation 能力）；HTTP serve
+    // backend（opencode-serve 形状，cwd 是远端目录提示）豁免——对它 WARN 会是
+    // 与派发语义相悖的假预警（CE-13/RCE-6 钉死的不拒面上 doctor 不得更严）。
+    // "." 经 path.resolve 解析为**发起派发的进程的 cwd**（SSOT 见 runManager.js
+    // resolvePredictedDispatchCwd：CLI 通道=你敲命令时所在目录；MCP 通道=MCP
+    // 服务进程的 cwd，由 host 决定），任何进程 cwd 都存在 ⇒ 不进 WARN 面；R8-C
+    // C-8 起对 cwd === "." 的 worker 出一条 INFO（不计 DEGRADED，R5-B advisory
+    // 语义）：R8-1 去占位化把"忘传 --cwd"从 typed 早拒绝换成静默落在派发进程
+    // cwd，doctor 对这个静默面给显式信号。除此之外健康面不产生条目（budget_*
+    // 同款惯例：只在有信号时出现，避免 N 条 OK 噪音）。
     for (const [id, agent] of agents) {
       let localSpawnBackend = false;
       try {
@@ -347,12 +357,37 @@ export async function waoDoctorCommand(args, config) {
       const probed = probePredictedDispatchCwd({ explicitCwd: undefined, agentCwd: agent?.cwd });
       // probed === null（cwd 非字符串/缺失）：registry 规范化会拒绝该条目，
       // dispatchCwdExistence CE-11/CE-15 钉的边界——doctor 原样读 JSON，防御跳过。
-      if (probed === null || probed.exists) continue;
+      if (probed === null) continue;
+      if (probed.exists) {
+        // C-8：唯一健康面条目——cwd "." 的静默落点提示（INFO 不计入 verdict）。
+        if (agent?.cwd === ".") {
+          const reuseWorker = agent?.sessionReuse === "lead_workspace";
+          pushCheck(checks, {
+            name: `cwd_${id}`,
+            pass: true,
+            level: "info",
+            detail: reuseWorker
+              ? `worker ${id} 的 registry cwd 是 "."（sessionReuse worker）：后台族（spawn/run --background/MCP run_dispatch）派发要求绑定 workspace——CLI 后台不带 --cwd 会 typed 早拒绝（SessionReuseWorkspaceRequiredError）；前台 run 不解析 sessionReuse，"." 落在发起派发的进程的 cwd`
+              : `worker ${id} 的 registry cwd 是 "."：不带 --cwd 派发时将落在发起派发的进程的 cwd（CLI 通道=你敲命令时所在目录；MCP 通道=MCP 服务进程的 cwd，由 host 决定）`,
+            fix: `要在目标项目干活就派发时带 --cwd <目标项目>，或把 ${registryPath} 里该 worker 的 cwd 固定为已存在目录`,
+          });
+        }
+        continue;
+      }
+      // WARN 面：预测 cwd 不存在（含"存在但是文件"）。detail 附 run: 子句
+      // （backend_map_* 同款惯例）。C-10：sessionReuse worker 的拒因措辞区分——
+      // 后台族不带 --cwd 时 cwd 实参为空，runDispatch.js 的 hoisted 检查先抛
+      // SessionReuseWorkspaceRequiredError（绑定 workspace 要求），早于 cwd 存在
+      // 性断言——detail 不得统一声称 dispatch_cwd_not_found。
+      const reuseWorker = agent?.sessionReuse === "lead_workspace";
+      const refusal = reuseWorker
+        ? "不带 --cwd 的后台派发会先被 sessionReuse 拒绝（SessionReuseWorkspaceRequiredError，要求绑定 workspace）；带 --cwd 时则按 dispatch_cwd_not_found 早拒绝"
+        : "不带 --cwd 派发该 worker 会被 typed 早拒绝 dispatch_cwd_not_found";
       pushCheck(checks, {
         name: `cwd_${id}`,
         pass: true,
         level: "warn",
-        detail: `worker ${id} 的 registry cwd 不存在: ${probed.path}（不带 --cwd 派发该 worker 会被 typed 早拒绝 dispatch_cwd_not_found；Node spawn 的经典陷阱是把 cwd 缺失误报成 executable ENOENT）`,
+        detail: `worker ${id} 的 registry cwd 不存在: ${probed.path}（${refusal}；Node spawn 的经典陷阱是把 cwd 缺失误报成 executable ENOENT）；run: 编辑 ${registryPath} 的 cwd 指向已存在目录，或派发时显式传 --cwd`,
         fix: `编辑 ${registryPath} 的 cwd 指向已存在目录，或派发时显式传 --cwd`,
       });
     }

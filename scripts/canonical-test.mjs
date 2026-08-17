@@ -36,19 +36,57 @@
 //     most ONE isolation recheck (a single process per failed file — diagnostic,
 //     bounded) that only APPENDS a classification
 //     (stable_fail / isolation_pass / environment_invalid) — never a pass.
-//   - R8-3 runs/ snapshot guard (Owner-approved 2026-08-17): before the first
-//     wave the runner snapshots the REPO_ROOT/runs/*.jsonl filename set (a
-//     missing directory is the empty set); after every wave (and after the
-//     isolation phase) it diffs. Any NEW file is recorded with the wave/phase
+//   - R8-3 runs/ hygiene, TWO layers (R8-C two-layer split, Owner-approved
+//     2026-08-17). The invariant "tests must NEVER use the repo's real runs/
+//     as their run-dir/cwd — every test owns a tmpdir run-dir" is a STATIC
+//     property of the test sources, so the PRIMARY layer is a static scan:
+//     test/isolation-infra/staticRunsGuard.test.js scans test/** sources for
+//     constructions that point a run-dir/cwd at the repo-relative runs/
+//     (repo-root-derived joins, bare relative runDir/cwd="runs", bare
+//     --run-dir/--cwd "runs") under an explicit narrow whitelist.
+//     The DYNAMIC snapshot guard below is the FALLBACK SECOND layer — the last
+//     net for shapes the static scan cannot see (a test resolving runs/ through
+//     indirection the scanner does not model). Before the first wave the runner
+//     snapshots the ENTIRE REPO_ROOT/runs directory entry set — dot entries,
+//     every suffix, subdirectory names, and one level of subdirectory contents
+//     (a missing directory is the empty set); after every wave (and after the
+//     isolation phase) it diffs. Any NEW entry is recorded with the wave/phase
 //     that first saw it; if any addition exists at the end the runner prints an
-//     explicit red light (files + owning wave + "tests must not write the real
+//     explicit red light (entries + owning wave + "tests must not write the real
 //     runs/ — use a tmpdir run-dir") and exits NON-ZERO even when every test
 //     passed. The guard itself only ever readdir's runs/ — it never writes it.
-//     Known boundary (deliberate, F-7-2 lesson): two CONCURRENT `npm test` runs
-//     can trip each other's guards — concurrent full-suite runs already destroy
-//     each other (worktrees, ports, singleton arbiters), so a red light there
-//     is a feature, not a false positive. The real-MCP canary (`npm run smoke`)
-//     does not go through this runner and is unaffected.
+//     Known boundaries (deliberate, all fail-visible only for what a sweep can
+//     observe):
+//       1. Time window (F-7-2 lesson): the guard observes only what exists AT
+//          a sweep. A write fully absorbed WITHIN one wave (created and deleted
+//          before the next sweep) is invisible; a grandchild that flushes a
+//          transcript AFTER the final isolation sweep lands unobserved. The
+//          guarantee is "survived across a sweep boundary ⇒ recorded", never
+//          "every write leaves a trace".
+//       2. Recursion depth: exactly ONE level of subdirectory contents is
+//          snapshotted. A new file at depth ≥2 under a pre-existing
+//          subdirectory escapes; every known writer (transcripts, .owner-*,
+//          daemon*.json, .session-reuse/*, .lineage-reuse/*, workflow
+//          subdirectories) is flat at depth 0/1, and a NEW subdirectory at any
+//          observed level is itself an entry.
+//       3. Concurrent NON-suite writers: while `npm test` runs in the MAIN
+//          repo, any non-suite writer (an active daemon appending
+//          daemon-health.json, an MCP dispatch, a manual `wao run`) adds a
+//          top-level entry that trips the SAME red light with text that
+//          wrongly blames "tests". The delivery worktree pipeline is immune
+//          (a worktree has no runs/ ⇒ empty baseline). Heartbeat-gating the
+//          red light (fresh `.owner-*` ⇒ external writer) was evaluated and
+//          REJECTED: it covers only background-runner transcripts — daemon/
+//          handshake/health files and foreground dispatches carry no owner
+//          heartbeat, and a test writing both a transcript and a fixture
+//          `.owner-*` would be misclassified as external, breaching exactly
+//          the invariant the guard exists to enforce. A visible red that
+//          needs human triage beats a leaky heuristic.
+//       4. Two CONCURRENT `npm test` runs can trip each other's guards —
+//          concurrent full-suite runs already destroy each other (worktrees,
+//          ports, singleton arbiters), so a red light there is a feature, not
+//          a false positive. The real-MCP canary (`npm run smoke`) does not go
+//          through this runner and is unaffected.
 //   - Writes a bounded test-results.json that keeps every failure attributable to
 //     BOTH its resource category AND its execution wave: each file records
 //     resourceCategory + executionWave; each wave records timing/counts/exit.
@@ -228,32 +266,57 @@ export function mapReportToFiles(report, expectedRels) {
   return { reportValid: true, reportError: null, perFile };
 }
 
-// ── R8-3: runs/ snapshot guard (pure logic, unit-tested in canonicalRunner.test.js) ──
+// ── R8-3 layer 2: runs/ snapshot guard (pure logic, unit-tested in canonicalRunner.test.js) ──
 //
-// Suite-level hygiene guard: tests must NEVER write into the repo's REAL runs/
-// transcript directory — every test owns its transcripts via a tmpdir run-dir.
-// The guard snapshots the runs/*.jsonl filename set before the suite starts and
-// diffs after each wave; additions are attributed to the wave (or the isolation
-// phase) that first observed them. All decision logic below is PURE over an
-// injectable listDir (the meta-tests never touch a real runs/); the only real
-// adapter is realListRunsDir, and NOTHING here ever writes runs/.
+// Suite-level hygiene FALLBACK (the primary layer is the static scan in
+// test/isolation-infra/staticRunsGuard.test.js — see the header contract):
+// tests must NEVER write into the repo's REAL runs/ transcript directory —
+// every test owns its transcripts via a tmpdir run-dir. The guard snapshots
+// the ENTIRE runs/ directory ENTRY SET before the suite starts (dot entries,
+// every suffix, subdirectory names, plus ONE level of subdirectory contents —
+// R8-C C-1: the old *.jsonl-top-level-only set let real writer shapes escape:
+// `.owner-*` heartbeats, daemon.json/daemon-health.json/daemon-supervisor.json,
+// `.session-reuse/`+`.lineage-reuse/` slots, workflow transcript subdirectories)
+// and diffs after each wave; additions are attributed to the wave (or the
+// isolation phase) that first observed them. All decision logic below is PURE
+// over an injectable listDir (the meta-tests never touch a real runs/); the
+// only real adapter is realListRunsDir, and NOTHING here ever writes runs/.
 
 /**
- * Snapshot a runs directory listing into the guarded set: only *.jsonl
- * filenames, deduplicated and sorted. `listDir()` returns an array of
- * directory entry names, or null when the directory does not exist (the
- * normal pre-first-run state — treated as the EMPTY set, not an error).
- * @param {() => string[]|null} listDir
+ * Snapshot a runs directory listing into the guarded set: EVERY top-level
+ * entry (dot entries, every suffix, subdirectory names) plus the entries of
+ * each top-level subdirectory prefixed `<sub>/` (exactly ONE level of
+ * recursion — see header boundary 2). Deduplicated and sorted. `listDir(sub)`
+ * returns an array of entry descriptors — plain strings (never recursed) or
+ * `{name, isDirectory}` objects — or null when that directory does not exist
+ * (the normal pre-first-run state — treated as the EMPTY set, not an error;
+ * a vanished subdirectory is likewise just "no entries", i.e. a deletion,
+ * which the guard does not police).
+ * @param {(sub?: string) => (string[]|{name:string,isDirectory:boolean}[]|null)} listDir
  * @returns {string[]}
  */
 export function takeRunsSnapshot(listDir) {
-  const entries = listDir();
+  const entries = listDir("");
   if (!entries) return [];
-  return [...new Set(entries)].filter((n) => n.endsWith(".jsonl")).sort();
+  const out = new Set();
+  for (const entry of entries) {
+    if (typeof entry === "string") { out.add(entry); continue; }
+    if (!entry || typeof entry.name !== "string") continue;
+    out.add(entry.name);
+    if (entry.isDirectory) {
+      const sub = listDir(entry.name);
+      if (!sub) continue; // vanished between listings ⇒ no entries (a deletion — not policed)
+      for (const child of sub) {
+        const childName = typeof child === "string" ? child : child?.name;
+        if (typeof childName === "string") out.add(`${entry.name}/${childName}`);
+      }
+    }
+  }
+  return [...out].sort();
 }
 
 /**
- * Pure diff: filenames present in `current` but absent from `baseline`,
+ * Pure diff: entry names present in `current` but absent from `baseline`,
  * sorted. Deletions are NOT reported (the guard polices writes, not prunes).
  * @param {string[]} baseline
  * @param {string[]} current
@@ -267,11 +330,11 @@ export function addedRunsFiles(baseline, current) {
 /**
  * Stateful accumulator over the two pure functions above. `recordPhase(label)`
  * re-lists the directory and attributes every not-yet-recorded addition to
- * `label` (a wave name, or the "isolation" phase after the waves). A file is
+ * `label` (a wave name, or the "isolation" phase after the waves). An entry is
  * attributed exactly once — to the phase that FIRST saw it — even if it is
  * still present in later listings. `additions()` returns the cumulative
- * {file, phase} list, sorted by filename.
- * @param {{listDir: () => string[]|null}} input
+ * {file, phase} list, sorted by entry name.
+ * @param {{listDir: (sub?: string) => (string[]|{name:string,isDirectory:boolean}[]|null)}} input
  */
 export function createRunsDirGuard({ listDir }) {
   const baseline = takeRunsSnapshot(listDir);
@@ -291,19 +354,46 @@ export function createRunsDirGuard({ listDir }) {
   return { baseline, recordPhase, additions };
 }
 
-// Real adapter: list REPO_ROOT/runs. ENOENT ("not found") is the normal
-// no-runs-yet state and maps to null (empty set). Any other read failure
-// (EACCES/EPERM/EBUSY/...) is rethrown so the guard fails OBSERVABLY (red,
-// non-zero) instead of silently under-reporting what tests wrote.
+// Real adapter: list REPO_ROOT/runs (one level deep). ENOENT ("not found") is
+// the normal no-runs-yet state and maps to null (empty set) — for the top
+// level AND for a subdirectory that vanished between the two listings. Any
+// other read failure (EACCES/EPERM/EBUSY/ENOTDIR — runs existing as a FILE —
+// ...) is rethrown so the guard fails OBSERVABLY (red, non-zero) instead of
+// silently under-reporting what tests wrote.
+//
+// Cost (Windows): `readdirSync(path, {withFileTypes:true})` derives entry
+// kinds from the directory enumeration itself (FindFirstFile/FindNextFile —
+// no per-entry stat), so the guarded surface costs ONE readdir per sweep for
+// the top level (the ~thousands-of-entries listing that already existed) plus
+// ONE readdir per top-level subdirectory actually present (today:
+// .session-reuse/ + .lineage-reuse/ — two extra enumerations per sweep).
 export function realListRunsDir(runsDir) {
-  return () => {
+  const list = (dir) => {
     try {
-      return readdirSync(runsDir);
+      return readdirSync(dir, { withFileTypes: true }).map((d) => ({ name: d.name, isDirectory: d.isDirectory() }));
     } catch (err) {
       if (err && err.code === "ENOENT") return null;
       throw err;
     }
   };
+  return (sub = "") => list(sub ? join(runsDir, sub) : runsDir);
+}
+
+// ── R8-C C-5: post-verdict exit decision (pure, unit-tested) ──────────────────
+// main()'s two guard red-light branches had zero automated coverage ("verdict=
+// pass cannot be pressed green" was human-evidence-only). The decision is
+// extracted here so the precedence is pinned by unit tests:
+//   report_write_failed  — the bounded report could not be written/round-tripped
+//   guard_error          — the guard could not OBSERVE runs/ (fails closed)
+//   runs_additions       — entries appeared in the REAL runs/ during the suite
+//                          (non-green EVEN WHEN every test passed)
+//   verdict              — the plain first-round verdict decides the exit code
+// The three red kinds always yield exitCode 1; only `verdict` may yield 0.
+export function finalRunnerOutcome({ verdict, runsAdditions, runsGuardError, reportWritten = true }) {
+  if (!reportWritten) return { kind: "report_write_failed", exitCode: 1 };
+  if (runsGuardError) return { kind: "guard_error", exitCode: 1 };
+  if (runsAdditions.length > 0) return { kind: "runs_additions", exitCode: 1 };
+  return { kind: "verdict", exitCode: verdict === "pass" ? 0 : 1 };
 }
 
 // ── Discovery: every test/**/*.test.js, test-relative, forward-slashed ───────
@@ -571,10 +661,23 @@ async function main() {
   }).filter((spec) => spec.files.length > 0);
 
   const t0 = Date.now();
-  // 4b) R8-3 runs/ snapshot guard: baseline BEFORE the first wave. recordPhase
-  //     failures (non-ENOENT read errors) fail the guard CLOSED — logged as a
-  //     guard error and folded into the non-zero exit, never swallowed.
-  const runsGuard = createRunsDirGuard({ listDir: realListRunsDir(join(repoRoot, "runs")) });
+  // 4b) R8-3 layer-2 runs/ snapshot guard: baseline BEFORE the first wave.
+  //     R8-C C-4: the baseline construction itself is fail-closed — a runs/
+  //     that cannot be snapshotted (EACCES/EPERM, or runs existing as a FILE
+  //     ⇒ ENOTDIR from readdirSync) must NOT escape as an uncaught throw that
+  //     leaves the PREVIOUS run's possibly-green test-results.json on disk for
+  //     a later consumer to misread. Route it through the same
+  //     invalid-environment path as manifest drift: zero tests run, the stale
+  //     report is overwritten by a minimal environment_invalid one, exit 1.
+  let runsGuard = null;
+  try {
+    runsGuard = createRunsDirGuard({ listDir: realListRunsDir(join(repoRoot, "runs")) });
+  } catch (err) {
+    return failInvalidEnvironment(reportPath, `cannot snapshot runs/ guard baseline (${join(repoRoot, "runs")}): ${err && err.message ? err.message : String(err)}`);
+  }
+  //     recordPhase failures (non-ENOENT read errors DURING the suite) fail
+  //     the guard CLOSED — logged as a guard error and folded into the
+  //     non-zero exit by finalRunnerOutcome, never swallowed.
   let runsGuardError = null;
   const guardRecord = (phase) => {
     if (runsGuardError) return [];
@@ -598,7 +701,7 @@ async function main() {
       console.error(`[canonical] wave=${w.name} done exit=${w.exitCode} pass=${w.passed} failed=${wf} ${w.durationMs}ms${w.groupError ? " WAVE_ERROR=" + w.groupError : ""}`);
       const fresh = guardRecord(w.name);
       if (fresh.length > 0) {
-        console.error(`[canonical] runs-guard wave=${w.name} NEW runs/ files: ${fresh.map((f) => f.file).join(", ")}`);
+        console.error(`[canonical] runs-guard wave=${w.name} NEW runs/ entries: ${fresh.map((f) => f.file).join(", ")}`);
       }
     },
   });
@@ -611,7 +714,7 @@ async function main() {
   // leak during a diagnostic rerun is caught and attributed to this phase.
   const isoFresh = guardRecord("isolation");
   if (isoFresh.length > 0) {
-    console.error(`[canonical] runs-guard phase=isolation NEW runs/ files: ${isoFresh.map((f) => f.file).join(", ")}`);
+    console.error(`[canonical] runs-guard phase=isolation NEW runs/ entries: ${isoFresh.map((f) => f.file).join(", ")}`);
   }
 
   const report = {
@@ -625,54 +728,63 @@ async function main() {
     isolation: outcome.isolation,
     finalVerdict: outcome.finalVerdict,
     suiteError: outcome.suiteError,
-    // R8-3: additive field — every run transcript that appeared in the REAL
-    // runs/ during the suite, with the wave/phase that first saw it. Empty on
-    // a clean run; non-empty ALWAYS pairs with a non-zero exit below.
+    // R8-3: additive field — every entry that appeared in the REAL runs/
+    // during the suite (any name/shape — transcripts, dot entries, state
+    // files, subdirectory slots), with the wave/phase that first saw it.
+    // Empty on a clean run; non-empty ALWAYS pairs with a non-zero exit below.
     runsDirGuard: { additions: runsGuard.additions(), error: runsGuardError },
     totalDurationMs: totalMs,
   };
 
-  // 5) Write bounded aggregate report. Write/parse failure ⇒ non-zero.
+  // 5) Write bounded aggregate report. Write/parse failure ⇒ non-zero via
+  //    finalRunnerOutcome (report_write_failed). The stale-report-on-disk risk
+  //    is bounded: this run exits red either way.
+  let reportWritten = true;
   try { writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n", "utf8"); }
   catch (err) {
+    reportWritten = false;
     console.error(`[canonical] FATAL: cannot write report ${reportPath}: ${err.message}`);
-    process.exitCode = 1;
-    return;
   }
-  try { JSON.parse(readFileSync(reportPath, "utf8")); }
-  catch (err) {
-    console.error(`[canonical] FATAL: report failed to round-trip parse: ${err.message}`);
-    process.exitCode = 1;
-    return;
+  if (reportWritten) {
+    try { JSON.parse(readFileSync(reportPath, "utf8")); }
+    catch (err) {
+      reportWritten = false;
+      console.error(`[canonical] FATAL: report failed to round-trip parse: ${err.message}`);
+    }
   }
 
   const { passed, failed, missing, crashed } = outcome.firstRound;
   const runsAdditions = runsGuard.additions();
+  // R8-C C-5: the exit decision is the pinned pure function — precedence
+  // report_write_failed > guard_error > runs_additions > verdict.
+  const final = finalRunnerOutcome({ verdict: outcome.finalVerdict, runsAdditions, runsGuardError, reportWritten });
   console.error(`[canonical] verdict=${outcome.finalVerdict} discovered=${discovered.length} executed=${report.executedCount} passed=${passed} failed=${failed} missing=${missing} crashed=${crashed} isolation=${outcome.isolation.length} waves=${outcome.waves.length} runsGuard=${runsAdditions.length === 0 && !runsGuardError ? "clean" : `RED(+${runsAdditions.length})`} total=${totalMs}ms ⇒ ${reportPath}`);
 
-  // R8-3 red light: tests writing the REAL runs/ is a suite-hygiene violation
-  // that must not survive a green test verdict. Non-zero exit, explicit listing
-  // (file + owning wave/phase), one-line remedy. A guard READ error also fails
-  // closed (observable, never silently under-reported).
-  if (runsGuardError) {
+  // R8-3 red lights: tests writing the REAL runs/ is a suite-hygiene violation
+  // that must not survive a green test verdict (non-zero exit even when every
+  // test passed), and a guard READ error fails closed (observable, never
+  // silently under-reported). Boundary note (header 3): while the suite runs
+  // in the MAIN repo, a NON-suite writer (daemon/MCP dispatch/manual wao run)
+  // trips this same light with text that blames "tests" — the delivery
+  // worktree pipeline (no runs/ ⇒ empty baseline) is immune.
+  if (final.kind === "guard_error") {
     console.error(`[canonical] RED runs-guard: cannot list runs/ (${runsGuardError}) — failing closed rather than under-reporting`);
-    process.exitCode = 1;
-    return;
   }
-  if (runsAdditions.length > 0) {
-    console.error(`[canonical] RED runs-guard: ${runsAdditions.length} new file(s) written to the REAL runs/ directory during the suite:`);
+  if (final.kind === "runs_additions") {
+    console.error(`[canonical] RED runs-guard: ${runsAdditions.length} new entr${runsAdditions.length === 1 ? "y" : "ies"} in the REAL runs/ directory during the suite:`);
     for (const a of runsAdditions) {
       console.error(`  - runs/${a.file} (first seen: ${a.phase})`);
     }
     console.error("  测试不得向真实 runs/ 写入——测试必须用 tmpdir 作为自己的 run-dir/工作目录（写死仓库 runs/ 即违规）。");
-    process.exitCode = 1;
-    return;
   }
-  process.exitCode = outcome.finalVerdict === "pass" ? 0 : 1;
+  process.exitCode = final.exitCode;
 }
 
-// Invalid environment (manifest drift / unreadable / unparseable / bad wave plan):
-// no tests run, write a minimal report, exit non-zero.
+// Invalid environment (manifest drift / unreadable / unparseable / bad wave
+// plan / unsnapshot-able runs/ guard baseline): no tests run, OVERWRITE any
+// stale report on disk with a minimal environment_invalid one (so a leftover
+// green test-results.json can never be misread as this run's result), exit
+// non-zero.
 function failInvalidEnvironment(reportPath, message) {
   console.error(`[canonical] INVALID ENVIRONMENT (no tests run): ${message}`);
   const report = {

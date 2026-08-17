@@ -1,5 +1,5 @@
 {
-  "_comment": "TD-107 tracked synthetic six-worker registry. Replaces the canonical test path's dependency on the gitignored, machine-local config/agents.json (which does not exist in a clean checkout and is reserved for operation acceptance). Modeled on config/agents.example.json (the schema-valid SSOT exemplar) so it passes readRegistry normalization + each backend's validateAgentPolicy. Secret-free: provider.apiKeyEnv is an env-var NAME, never a credential value. Exactly the six primary workers — the opencode-serve fallback is intentionally omitted (it is not a certified worker and is out of scope for the canonical capability/readiness contract).",
+  "_comment": "TD-107 tracked synthetic six-worker registry. Replaces the canonical test path's dependency on the gitignored, machine-local config/agents.json (which does not exist in a clean checkout and is reserved for operation acceptance). Modeled on config/agents.example.json (the schema-valid SSOT exemplar) so it passes readRegistry normalization + each backend's validateAgentPolicy. Secret-free: provider.apiKeyEnv is an env-var NAME, never a credential value. Exactly the six primary workers — the opencode-serve fallback is intentionally omitted (it is not a certified worker and is out of scope for the canonical capability/readiness contract). R8-C C-11: every cwd is '.' (aligned with the R8-1 template value) — a placeholder absolute path like D:/projects/your-project made doctor's cwd_* face machine-state-coupled (the path exists on some machines and not others, flipping WARN counts and verdicts between checkouts); '.' resolves against the dispatching process cwd on every machine, so DOCTOR_REGISTRY consumers observe the same deterministic check set everywhere.",
   "agents": {
     "researcher": {
       "backend": "claude-code",
@@ -8,7 +8,7 @@
         "baseUrl": "https://api.deepseek.com/anthropic",
         "apiKeyEnv": "DEEPSEEK_API_KEY"
       },
-      "cwd": "D:/projects/your-project",
+      "cwd": ".",
       "systemPrompt": "config/roles/researcher.md",
       "sessionReuse": "lead_workspace",
       "args": ["--dangerously-skip-permissions"],
@@ -26,7 +26,7 @@
         "baseUrl": "https://open.bigmodel.cn/api/anthropic",
         "apiKeyEnv": "ZHIPU_API_KEY"
       },
-      "cwd": "D:/projects/your-project",
+      "cwd": ".",
       "systemPrompt": "config/roles/coder_hq.md",
       "args": ["--dangerously-skip-permissions"],
       "model": { "id": "glm-5.2", "contextWindow": 1000000 },
@@ -39,7 +39,7 @@
         "baseUrl": "https://api.deepseek.com/anthropic",
         "apiKeyEnv": "DEEPSEEK_API_KEY"
       },
-      "cwd": "D:/projects/your-project",
+      "cwd": ".",
       "systemPrompt": "config/roles/coder_low.md",
       "args": ["--dangerously-skip-permissions"],
       "model": { "id": "deepseek-v4-flash", "contextWindow": 1000000 },
@@ -47,18 +47,18 @@
     },
     "coder_mm": {
       "backend": "kimi-code",
-      "cwd": "D:/projects/your-project",
+      "cwd": ".",
       "systemPrompt": "config/roles/coder_mm.md",
       "model": { "id": "kimi-code/k3" }
     },
     "tester": {
       "backend": "codex",
-      "cwd": "D:/projects/your-project",
+      "cwd": ".",
       "systemPrompt": "config/roles/tester.md"
     },
     "auditor": {
       "backend": "claude-code",
-      "cwd": "D:/projects/your-project",
+      "cwd": ".",
       "systemPrompt": "config/roles/auditor.md",
       "sessionReuse": "lead_workspace",
       "args": ["--dangerously-skip-permissions"],

@@ -14,7 +14,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -22,7 +23,8 @@ import {
   validateManifest, classifyIsolation, MANIFEST_GROUPS,
   runWave, runCanonical, mapReportToFiles, suiteRelToManifest,
   WAVE_PLAN, validateWavePlan,
-  takeRunsSnapshot, addedRunsFiles, createRunsDirGuard,
+  takeRunsSnapshot, addedRunsFiles, createRunsDirGuard, realListRunsDir,
+  finalRunnerOutcome,
 } from "../../scripts/canonical-test.mjs";
 
 function manifestFixture() {
@@ -453,9 +455,14 @@ test("causal: the mcp wave is a serial, exclusive wave that never pools with git
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// R8-3: runs/ snapshot guard — pure logic over an injectable listDir. These
-// meta-tests never touch a real runs/ directory, and the guard itself has NO
-// write path at all (structural: it only consumes the injected listing).
+// R8-3 layer 2: runs/ snapshot guard — pure logic over an injectable listDir.
+// These meta-tests never touch the REPO's real runs/ directory (the adapter
+// test below uses a tmpdir), and the guard itself has NO write path at all
+// (structural: it only consumes the injected listing).
+// R8-C C-1: the guarded set is the ENTIRE directory entry set (dot entries,
+// every suffix, subdirectory names + ONE level of subdirectory contents) —
+// the old *.jsonl-top-level-only set let real writer shapes escape
+// (.owner-* heartbeats, daemon*.json, .session-reuse/ slots, non-jsonl files).
 // ────────────────────────────────────────────────────────────────────────────
 
 test("takeRunsSnapshot: missing directory (listDir → null) is the EMPTY set, not an error", () => {
@@ -463,9 +470,37 @@ test("takeRunsSnapshot: missing directory (listDir → null) is the EMPTY set, n
   assert.deepEqual(takeRunsSnapshot(() => []), [], "空目录 = 空集");
 });
 
-test("takeRunsSnapshot: keeps only *.jsonl, deduplicates, sorts", () => {
-  const snap = takeRunsSnapshot(() => ["b.jsonl", "notes.txt", "a.jsonl", "b.jsonl", "c.json", "sub"]);
-  assert.deepEqual(snap, ["a.jsonl", "b.jsonl"], "仅 *.jsonl 入集；去重 + 排序（判定稳定，与目录顺序无关）");
+test("takeRunsSnapshot: EVERY entry is guarded — dot entries, non-.jsonl suffixes, dedup + sort", () => {
+  const snap = takeRunsSnapshot(() => ["b.jsonl", "notes.txt", "a.jsonl", "b.jsonl", "c.json", ".owner-run_x", "daemon.json"]);
+  assert.deepEqual(snap,
+    [".owner-run_x", "a.jsonl", "b.jsonl", "c.json", "daemon.json", "notes.txt"],
+    "R8-C C-1：dot 条目、非 .jsonl 后缀全部入集（旧 *.jsonl 过滤曾放走 .owner-*/daemon*.json）；去重 + 排序");
+});
+
+test("takeRunsSnapshot: subdirectory names AND one level of their contents are guarded (sub/ prefix)", () => {
+  const top = [
+    { name: "run_a.jsonl", isDirectory: false },
+    { name: ".session-reuse", isDirectory: true },
+    { name: "wf_1", isDirectory: true },
+  ];
+  const subdirs = new Map([
+    [".session-reuse", [{ name: "lead.json", isDirectory: false }]],
+    ["wf_1", [{ name: "run_b.jsonl", isDirectory: false }, { name: "nested", isDirectory: true }]],
+  ]);
+  const snap = takeRunsSnapshot((sub) => (sub ? (subdirs.get(sub) ?? null) : top));
+  assert.deepEqual(snap, [
+    ".session-reuse",
+    ".session-reuse/lead.json",
+    "run_a.jsonl",
+    "wf_1",
+    "wf_1/nested",
+    "wf_1/run_b.jsonl",
+  ], "子目录名本身 + 一层内容（sub/ 前缀）入集；深度恰一层（wf_1/nested 的内容不展开）");
+});
+
+test("takeRunsSnapshot: a vanished subdirectory (listDir(sub) → null) is just no entries — not an error", () => {
+  const snap = takeRunsSnapshot((sub) => (sub === "" ? [{ name: "gone", isDirectory: true }] : null));
+  assert.deepEqual(snap, ["gone"], "子目录在两次列举之间消失 = 删除（守卫不管清理），只剩目录名本身");
 });
 
 test("addedRunsFiles: pure diff — additions only, deletions not reported", () => {
@@ -476,6 +511,36 @@ test("addedRunsFiles: pure diff — additions only, deletions not reported", () 
     ["run_c.jsonl"],
     "仅新增面；删除（run_a 消失）不报——守卫管写入不管清理",
   );
+});
+
+test("runs guard: real writer shapes all count as additions (dot entry, state file, subdirectory slot)", () => {
+  let listing = null; // runs/ does not exist yet
+  const guard = createRunsDirGuard({ listDir: () => listing });
+  assert.deepEqual(guard.recordPhase("pure"), [], "wave pure：无新增");
+  listing = [".owner-run_1", "daemon.json", ".session-reuse", "run_x.jsonl"];
+  const fresh = guard.recordPhase("process");
+  assert.deepEqual(fresh.map((f) => f.file), [".owner-run_1", ".session-reuse", "daemon.json", "run_x.jsonl"],
+    "R8-C C-1 回归：旧 *.jsonl 过滤下 .owner-*/daemon.json/.session-reuse 全部逃逸（runsGuard=clean + exit 0）——现在全部留痕");
+});
+
+test("runs guard: a new file INSIDE a pre-existing subdirectory counts (sub/child)", () => {
+  let top = [{ name: ".session-reuse", isDirectory: true }];
+  let sessionReuseEntries = [{ name: "lead.json", isDirectory: false }];
+  let lineageReuseEntries = null;
+  const guard = createRunsDirGuard({
+    listDir: (sub) => (sub === "" ? top : sub === ".session-reuse" ? sessionReuseEntries : lineageReuseEntries),
+  });
+  assert.deepEqual(guard.recordPhase("pure"), [], "基线含 .session-reuse/lead.json：无新增");
+  sessionReuseEntries = [{ name: "lead.json", isDirectory: false }, { name: "lead2.json", isDirectory: false }];
+  assert.deepEqual(guard.recordPhase("mcp"), [{ file: ".session-reuse/lead2.json", phase: "mcp" }],
+    "既有子目录内新增文件 = 新增（sub/ 前缀）");
+  top = [{ name: ".session-reuse", isDirectory: true }, { name: ".lineage-reuse", isDirectory: true }];
+  sessionReuseEntries = [{ name: "lead.json", isDirectory: false }];
+  lineageReuseEntries = [{ name: "lineage.json", isDirectory: false }];
+  assert.deepEqual(guard.recordPhase("lock"), [
+    { file: ".lineage-reuse", phase: "lock" },
+    { file: ".lineage-reuse/lineage.json", phase: "lock" },
+  ], "新子目录槽位本身即新增，其一层内容同 sweep 一并留痕（.session-reuse 删除 lead2 不报——守卫不管清理）");
 });
 
 test("runs guard: clean suite (empty dir throughout) → zero additions", () => {
@@ -504,7 +569,7 @@ test("runs guard: addition is attributed to the wave that FIRST saw it (exactly 
   ], "累计清单按文件名排序，phase 归属正确");
 });
 
-test("runs guard: a file added and later DELETED still counts (the write happened)", () => {
+test("runs guard: a file observed once and later DELETED still counts (survived a sweep boundary)", () => {
   let listing = null;
   const guard = createRunsDirGuard({ listDir: () => listing });
   listing = ["leak.jsonl"];
@@ -512,7 +577,20 @@ test("runs guard: a file added and later DELETED still counts (the write happene
   listing = null; // deleted before the next sweep — the write still happened
   guard.recordPhase("isolation");
   assert.deepEqual(guard.additions(), [{ file: "leak.jsonl", phase: "mcp" }],
-    "写入过即留痕（删除不能洗白）");
+    "跨 sweep 边界存活过即留痕（观察期内删除不能洗白）；对拍面见下一条——同 wave 内写完即删不可见");
+});
+
+test("runs guard: KNOWN boundary — a write created AND deleted WITHIN one sweep window is invisible", () => {
+  // 诚实化边界（R8-C C-2）：守卫只在 sweep 时刻观察目录。同 wave 内"写完即删"
+  // （下一次列举前完整吸收）不产生任何观察记录——保证是"跨 sweep 边界存活过 ⇒
+  // 留痕"，不是"每次写入都留痕"。静态主层（staticRunsGuard）管源码形状，不受此窗影响。
+  let listing = null;
+  const guard = createRunsDirGuard({ listDir: () => listing });
+  // wave pure 内部：某测试写了 leak.jsonl 又删掉——两次列举之间目录回到原状
+  guard.recordPhase("pure");
+  listing = null;
+  guard.recordPhase("lock");
+  assert.deepEqual(guard.additions(), [], "同 sweep 窗内写完即删 = 零观察记录（时间窗边界，见 canonical-test.mjs 头注释 boundary 1）");
 });
 
 test("runs guard: guard interacts with the filesystem ONLY through the injected listDir (no write path)", () => {
@@ -523,4 +601,75 @@ test("runs guard: guard interacts with the filesystem ONLY through the injected 
   guard.additions();
   assert.equal(reads, 3, "每次 recordPhase 恰一次列目录（构造基线 1 次 + 两阶段各 1 次）；additions() 不再读");
   assert.deepEqual(guard.additions(), []);
+});
+
+test("realListRunsDir + takeRunsSnapshot: real readdir surface on a tmpdir — dot entries, non-jsonl, subdirs (one level)", () => {
+  // R8-C C-1 端到端回归（真 readdir 路径，tmpdir——绝不触碰仓库真实 runs/）：
+  // 审计沙箱实证的 5 类真实写入形状全部必须入集。
+  const dir = mkdtempSync(join(tmpdir(), "wao-runs-guard-surface-"));
+  try {
+    writeFileSync(join(dir, "run_a.jsonl"), "", "utf8");
+    writeFileSync(join(dir, ".owner-run_a"), "", "utf8");
+    writeFileSync(join(dir, "daemon.json"), "{}", "utf8");
+    writeFileSync(join(dir, "daemon-health.json"), "{}", "utf8");
+    writeFileSync(join(dir, "daemon-supervisor.json"), "{}", "utf8");
+    mkdirSync(join(dir, ".session-reuse"));
+    writeFileSync(join(dir, ".session-reuse", "lead.json"), "{}", "utf8");
+    mkdirSync(join(dir, "wf_1"));
+    writeFileSync(join(dir, "wf_1", "run_b.jsonl"), "", "utf8");
+    const listDir = realListRunsDir(dir);
+    const snap = takeRunsSnapshot(listDir);
+    assert.ok(snap.includes(".owner-run_a"), ".owner-* 心跳文件入集");
+    assert.ok(snap.includes("daemon.json") && snap.includes("daemon-health.json") && snap.includes("daemon-supervisor.json"),
+      "daemon 握手/健康/监督文件（非 .jsonl 后缀）入集");
+    assert.ok(snap.includes(".session-reuse") && snap.includes(".session-reuse/lead.json"),
+      ".session-reuse/ 槽位目录名 + 一层内容入集");
+    assert.ok(snap.includes("wf_1/run_b.jsonl"), "子目录 transcript 入集");
+    // 逃逸面修复的判别断言：旧实现（仅顶层 *.jsonl）会得到恰好 1 条 —— 现在必须更多。
+    assert.ok(snap.length >= 9, `全集大小 ${snap.length} ≥ 9（旧 *.jsonl 顶层过滤只剩 1）`);
+    // 缺失目录 = null（空基线），不是错误
+    assert.equal(realListRunsDir(join(dir, "no-such-runs"))(""), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// R8-C C-5: finalRunnerOutcome — the post-verdict exit decision, extracted
+// from main() so the red-light branches have automated coverage (previously
+// "verdict=pass cannot be pressed green" had human evidence only).
+// ────────────────────────────────────────────────────────────────────────────
+
+test("finalRunnerOutcome: verdict=pass + runs additions NON-EMPTY ⇒ red (a green test verdict cannot press the exit green)", () => {
+  const r = finalRunnerOutcome({ verdict: "pass", runsAdditions: [{ file: "leak.jsonl", phase: "filesystem" }], runsGuardError: null });
+  assert.deepEqual(r, { kind: "runs_additions", exitCode: 1 });
+});
+
+test("finalRunnerOutcome: verdict=failed + zero additions ⇒ exit 1 via the VERDICT path, not the guard", () => {
+  const r = finalRunnerOutcome({ verdict: "fail", runsAdditions: [], runsGuardError: null });
+  assert.deepEqual(r, { kind: "verdict", exitCode: 1 }, "零新增时退出码只由 first-round verdict 决定");
+});
+
+test("finalRunnerOutcome: clean pass ⇒ exit 0", () => {
+  assert.deepEqual(
+    finalRunnerOutcome({ verdict: "pass", runsAdditions: [], runsGuardError: null }),
+    { kind: "verdict", exitCode: 0 },
+  );
+});
+
+test("finalRunnerOutcome: a guard READ error fails closed ⇒ red even with a pass verdict and zero additions", () => {
+  const r = finalRunnerOutcome({ verdict: "pass", runsAdditions: [], runsGuardError: "EPERM" });
+  assert.deepEqual(r, { kind: "guard_error", exitCode: 1 }, "无法观察 runs/ = 红（宁可误红不可漏报）");
+});
+
+test("finalRunnerOutcome: report write failure ⇒ red regardless of everything else", () => {
+  assert.deepEqual(
+    finalRunnerOutcome({ verdict: "pass", runsAdditions: [], runsGuardError: null, reportWritten: false }),
+    { kind: "report_write_failed", exitCode: 1 },
+  );
+  assert.deepEqual(
+    finalRunnerOutcome({ verdict: "fail", runsAdditions: [{ file: "x.jsonl", phase: "mcp" }], runsGuardError: "EACCES", reportWritten: false }),
+    { kind: "report_write_failed", exitCode: 1 },
+    "precedence: report_write_failed > guard_error > runs_additions > verdict",
+  );
 });
