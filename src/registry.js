@@ -5,7 +5,12 @@ import { isValidSessionReuseMode } from "./application/sessionReuse.js";
 // M11-9: canonical model/reasoning/provider policy.
 // Closed-set effort enum — the complete set of reasoning effort values WAO
 // recognizes. Backends translate only these; anything else is malformed.
-const REASONING_EFFORTS = Object.freeze([
+// R11-1: EXPORTED so the per-dispatch reasoning override SSOT
+// (runManager.js isValid/assertValidReasoningOverride, re-exported downward
+// through runDispatch.js for the CLI/MCP boundaries — the MODEL_OVERRIDE
+// hosting precedent) validates against THIS array with zero drift; the MCP
+// z.enum wire schema serializes the same six members from the same source.
+export const REASONING_EFFORTS = Object.freeze([
   "minimal", "low", "medium", "high", "xhigh", "max",
 ]);
 

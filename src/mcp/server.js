@@ -43,7 +43,7 @@ import {
 // lead_preflight worker enums derive from this ONE SSOT constant (same wiring
 // pattern as READ_FAILURE_REASONS); no second hand-maintained list can drift.
 import { CERTIFICATION_REASON_CODES } from "../application/certificationReasons.js";
-import { dispatchRun, ReuseBusyError, PROVIDER_SESSION_ROUTING, MODEL_OVERRIDE_MAX, MODEL_OVERRIDE_WIRE_PATTERN } from "../application/runDispatch.js";
+import { dispatchRun, ReuseBusyError, PROVIDER_SESSION_ROUTING, MODEL_OVERRIDE_MAX, MODEL_OVERRIDE_WIRE_PATTERN, REASONING_EFFORTS } from "../application/runDispatch.js";
 // M12-7: Lead-authorized correction continuation. The service spawns a NEW child
 // run/transcript that resumes the parent's provider-native conversation IN the
 // parent's retained worktree. The MCP boundary resolves the workspace + Lead
@@ -471,6 +471,18 @@ const DISPATCH_MODEL_OVERRIDE_CONFLICT_TEXT =
   "lineage) — a conversation resumed across turns must run one model. Drop model, or " +
   "dispatch a non-reusable agent.";
 
+// R11-1: fixed, actionable error when a per-dispatch reasoning effort
+// override is combined with a provider-session reuse dispatch (typed
+// ReasoningOverrideConflictError from the shared service — either shape).
+// Same closed-set discipline as the model conflict text above: literal
+// reason code reasoning_override_reuse_conflict + fixed guidance; never
+// echoes the effort value, agent id, or workspace.
+const DISPATCH_REASONING_OVERRIDE_CONFLICT_TEXT =
+  "run_dispatch refused: reasoning_override_reuse_conflict. A per-dispatch reasoning " +
+  "effort override cannot be combined with provider-session reuse (a reusable expert " +
+  "or a continuable lineage) — a conversation resumed across turns must run one " +
+  "reasoning effort. Drop reasoning, or dispatch a non-reusable agent.";
+
 // R7-C (C-4): fixed, actionable error when the dispatch's predicted working
 // directory does not exist (typed DispatchCwdNotFoundError from the R7-AB
 // layer-1 assert). This is the configuration mistake the R7-AB commit itself
@@ -613,6 +625,21 @@ const RUN_DISPATCH_INPUT = z.object({
   // over MCP by construction. run_dispatch_contract_check shares this schema
   // and intentionally IGNORES the field (it advises on the delivery contract).
   model: z.string().min(1).max(MODEL_OVERRIDE_MAX).regex(new RegExp(MODEL_OVERRIDE_WIRE_PATTERN)).optional(),
+  // R11-1 (Owner 2026-08-17): optional per-dispatch reasoning effort override
+  // — the MCP counterpart of the CLI --reasoning flag (composable with
+  // `model`; the Owner scenario "gpt-5.6-sol + xhigh"). One dispatch only;
+  // never persisted to the registry; replaces only the registry reasoning's
+  // `.effort` (siblings survive — the service synthesizes, never swaps). The
+  // enum is the SAME closed set the core validator uses (REASONING_EFFORTS,
+  // registry.js → runManager.js → runDispatch.js re-export), serialized as a
+  // zod enum — closed-set on the wire, stricter than a regex. run_dispatch_
+  // contract_check shares this schema and intentionally IGNORES the field (it
+  // advises on the delivery contract — the same note as `model` above).
+  // Mutually exclusive with provider-session reuse (refused by the service
+  // with the typed ReasoningOverrideConflictError collapsed to its fixed text
+  // below); requireCertified is server-owned false here, so the
+  // certified-conflict door is unreachable over MCP by construction.
+  reasoning: z.enum([...REASONING_EFFORTS]).optional(),
 }).strict();
 
 // M12-6 (FR-03): bounded safe workspace proof returned on a successful dispatch.
@@ -3335,7 +3362,7 @@ export function createWaoMcpServer({
       outputSchema: RUN_DISPATCH_OUTPUT,
       annotations: RUN_DISPATCH_ANNOTATIONS,
     },
-    async ({ agentId, prompt, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable, correctable, executionProfileId, readOnly, model }) => {
+    async ({ agentId, prompt, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable, correctable, executionProfileId, readOnly, model, reasoning }) => {
       // M11-8B final: validate the requested agentId at the VERY TOP, before
       // workspace resolution or any dispatcher call. An invalid or reserved
       // ("unknown") id collapses to the fixed dispatch error immediately — the
@@ -3520,6 +3547,14 @@ export function createWaoMcpServer({
           // pushes --model to the detached runner so RunManager.start
           // synthesizes model.id over the registry policy.
           ...(model !== undefined ? { modelOverride: model } : {}),
+          // R11-1: per-dispatch reasoning effort override, threaded verbatim
+          // (default absent = ordinary dispatch, byte-compatible). The wire
+          // schema already enforced the closed set; the service re-refuses the
+          // reuse shapes (typed ReasoningOverrideConflictError → fixed text
+          // below) and pushes --reasoning to the detached runner so
+          // RunManager.start synthesizes reasoning.effort over the registry
+          // policy.
+          ...(reasoning !== undefined ? { reasoningOverride: reasoning } : {}),
           // M12-6 (P1-A): server-proven frozen HEAD threaded internally (never
           // model-supplied). RunManager.start revalidates/pins it.
           frozenGitHead: workspaceFrozenHead,
@@ -3561,6 +3596,15 @@ export function createWaoMcpServer({
           return {
             isError: true,
             content: [{ type: "text", text: DISPATCH_MODEL_OVERRIDE_CONFLICT_TEXT }],
+          };
+        }
+        // R11-1: reasoning effort override × provider-session reuse refused by
+        // the shared service (same registry-side knowledge boundary as the
+        // model conflict above — this collapse branch IS the model-facing face).
+        if (e && e.name === "ReasoningOverrideConflictError") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DISPATCH_REASONING_OVERRIDE_CONFLICT_TEXT }],
           };
         }
         // M11-11C: reusable-expert busy — fixed actionable text. The active

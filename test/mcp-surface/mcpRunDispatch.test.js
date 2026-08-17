@@ -106,8 +106,8 @@ test("M9-2B-01: tools/list has registry_list + run_dispatch with strict schema a
       // optional correctable in-flight-correction opt-in.
       const inputKeys = Object.keys(rd.inputSchema.properties ?? {}).sort();
       assert.deepEqual(inputKeys,
-        ["agentId", "continuable", "correctable", "delivery", "executionProfileId", "expectedDirty", "expectedGitHead", "expectedWorkspaceRoot", "model", "prompt", "readOnly"],
-        "input schema has agentId + prompt + optional delivery + optional expectations + optional continuable + optional correctable + optional executionProfileId + optional readOnly (Round 4 advisory declaration)",
+        ["agentId", "continuable", "correctable", "delivery", "executionProfileId", "expectedDirty", "expectedGitHead", "expectedWorkspaceRoot", "model", "prompt", "readOnly", "reasoning"],
+        "input schema has agentId + prompt + optional delivery + optional expectations + optional continuable + optional correctable + optional executionProfileId + optional readOnly (Round 4 advisory declaration) + optional model/reasoning per-dispatch overrides (R10-A/R11-1)",
       );
       assert.equal(rd.inputSchema.additionalProperties, false, "input is strict");
       // Annotations: not read-only, destructive (worker may modify files/run commands),

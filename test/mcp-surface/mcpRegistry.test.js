@@ -1222,8 +1222,8 @@ test("R10-A-MCP-1: run_dispatch input gains the additive `model` member; tool co
       // addition — every previously documented member must still be here).
       assert.deepEqual(
         Object.keys(props).sort(),
-        ["agentId", "continuable", "correctable", "delivery", "executionProfileId", "expectedDirty", "expectedGitHead", "expectedWorkspaceRoot", "model", "prompt", "readOnly"],
-        "run_dispatch input: the 10 prior members + model (additive only)",
+        ["agentId", "continuable", "correctable", "delivery", "executionProfileId", "expectedDirty", "expectedGitHead", "expectedWorkspaceRoot", "model", "prompt", "readOnly", "reasoning"],
+        "run_dispatch input: the 10 prior members + model + reasoning (additive only)",
       );
       assert.equal(rd.inputSchema.additionalProperties, false, "input stays strict");
       assert.equal((rd.inputSchema.required ?? []).includes("model"), false, "model is optional");
@@ -1359,6 +1359,190 @@ test("R10-A-MCP-4: typed reuse conflict from the service collapses to the fixed 
       assert.match(text, /model_override_reuse_conflict/, "closed-set reason code surfaced");
       assert.match(text, /must run one model/, "states the semantic why");
       assert.match(text, /Drop model/, "fixed actionable guidance");
+      assert.doesNotMatch(text, /run_dispatch failed/, "NOT collapsed to the opaque generic dispatch text");
+      assert.doesNotMatch(text, /lead_workspace/, "the internal reuse shape is not leaked");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
+// R11-1 (Owner 2026-08-17): run_dispatch additive `reasoning` param — the
+// MCP counterpart of the CLI --reasoning flag (single dispatch, never
+// persisted, replaces only the registry reasoning's `.effort`; composable
+// with `model`). Pins: the additive wire shape (closed-set zod enum on the
+// wire, prior properties unchanged), the passthrough to the dispatcher, the
+// closed-set rejection, the reuse-conflict collapse text, and the fact that
+// reasoning never leaks into the OUTPUT shape.
+// =====================================================================
+
+test("R11-1-MCP-1: run_dispatch input gains the additive `reasoning` enum member; tool count/names and prior properties unchanged", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r111-mcp1-"));
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const server = createWaoMcpServer({ registryPath, runDir: dir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const tools = (await client.listTools()).tools;
+      // The frozen 22-tool surface is byte-stable on names/order (the m12-10
+      // SSOT); re-assert from the toolSurface SSOT that adding a property
+      // changed NEITHER the count NOR the set.
+      const { TOOLS } = await import("../../src/mcp/toolSurface.js");
+      assert.deepEqual(tools.map((t) => t.name), TOOLS, "names/order still exactly the frozen 22-tool SSOT");
+      const rd = tools.find((t) => t.name === "run_dispatch");
+      const props = rd.inputSchema.properties ?? {};
+      // The canonical property list = the prior closed set PLUS reasoning
+      // (pure addition — every previously documented member must still be here).
+      assert.deepEqual(
+        Object.keys(props).sort(),
+        ["agentId", "continuable", "correctable", "delivery", "executionProfileId", "expectedDirty", "expectedGitHead", "expectedWorkspaceRoot", "model", "prompt", "readOnly", "reasoning"],
+        "run_dispatch input: the 11 prior members + reasoning (additive only)",
+      );
+      assert.equal(rd.inputSchema.additionalProperties, false, "input stays strict");
+      assert.equal((rd.inputSchema.required ?? []).includes("reasoning"), false, "reasoning is optional");
+      // The closed set serializes as a zod enum — exactly the six SSOT members
+      // (registry.js REASONING_EFFORTS via the runDispatch re-export channel).
+      const reasoning = props.reasoning;
+      assert.deepEqual(
+        [...reasoning.enum].sort(),
+        ["high", "low", "max", "medium", "minimal", "xhigh"],
+        "the wire enum IS the closed REASONING_EFFORTS set",
+      );
+      assert.equal("pattern" in reasoning, false, "an enum, not a regex — closed-set on the wire");
+      // run_dispatch_contract_check SHARES the schema (M12-9 SSOT) and
+      // intentionally accepts-and-ignores reasoning (it advises on the
+      // delivery contract).
+      const cc = tools.find((t) => t.name === "run_dispatch_contract_check");
+      assert.ok("reasoning" in (cc.inputSchema.properties ?? {}), "contract_check shares the additive member");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("R11-1-MCP-2: `reasoning` threads to the dispatcher as reasoningOverride; composable with model; absent → no key", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r111-mcp2-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const captured = [];
+    const fakeDispatcher = async (input) => {
+      captured.push(input);
+      return {
+        accepted: true, runId: "run_r111_mcp2", agentId: "coder_low", state: "pending",
+        transcriptPath: "/x.jsonl", providerSessionRouting: "not_used",
+      };
+    };
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatcher,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: { agentId: "coder_low", prompt: "do it", model: "gpt-5.6-sol-xhigh", reasoning: "xhigh" },
+      });
+      assert.equal(res.isError, undefined, "accepted dispatch");
+      assert.equal(captured.length, 1);
+      assert.equal(captured[0].modelOverride, "gpt-5.6-sol-xhigh", "wire model → service modelOverride");
+      assert.equal(captured[0].reasoningOverride, "xhigh", "wire reasoning → service reasoningOverride (composable)");
+      // The effective reasoning never reaches the MCP OUTPUT (the handler
+      // selects its exact keys) — the output stays the frozen closed shape.
+      const out = res.structuredContent ?? {};
+      assert.deepEqual(
+        Object.keys(out).sort(),
+        ["accepted", "agentId", "providerSessionRouting", "runId", "state", "workspaceProof"],
+        "output schema unchanged — reasoning is input-only on the wire",
+      );
+      // Absent reasoning = byte-compatible dispatcher input (no key at all).
+      await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "again" } });
+      assert.equal(captured.length, 2);
+      assert.equal("reasoningOverride" in captured[1], false, "ordinary dispatch threads no reasoningOverride");
+      assert.equal("modelOverride" in captured[1], false, "ordinary dispatch threads no modelOverride either");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("R11-1-MCP-3: values outside the closed set are rejected at the wire (zod enum); dispatcher never called", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r111-mcp3-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    let callCount = 0;
+    const fakeDispatcher = async () => {
+      callCount += 1;
+      return {
+        accepted: true, runId: "run_r111_mcp3", agentId: "coder_low", state: "pending",
+        transcriptPath: "/x.jsonl", providerSessionRouting: "not_used",
+      };
+    };
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatcher,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      for (const bad of ["ultra", "HIGH", "", "--next-flag", 42, { effort: "high" }, ["high"]]) {
+        let rejected = false;
+        try {
+          const res = await client.callTool({
+            name: "run_dispatch",
+            arguments: { agentId: "coder_low", prompt: "y", reasoning: bad },
+          });
+          // If a result came back it must be an explicit error — never success.
+          assert.equal(res.isError, true, `wire rejects reasoning=${JSON.stringify(bad)}`);
+          rejected = true;
+        } catch {
+          rejected = true; // protocol-level rejection is a valid rejection
+        }
+        assert.ok(rejected, `reasoning=${JSON.stringify(bad)} rejected`);
+      }
+      assert.equal(callCount, 0, "dispatcher never called for a bad reasoning value");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("R11-1-MCP-4: typed reuse conflict from the service collapses to the fixed reasoning_override_reuse_conflict text", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r111-mcp4-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const fakeDispatcher = async () => {
+      const err = new Error("dispatchRun: reasoningOverride is mutually exclusive with provider-session reuse (lead_workspace)");
+      err.name = "ReasoningOverrideConflictError";
+      err.reasonCode = "reasoning_override_reuse_conflict";
+      throw err;
+    };
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatcher,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: { agentId: "coder_low", prompt: "y", reasoning: "high" },
+      });
+      assert.equal(res.isError, true, "error flagged");
+      const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+      assert.match(text, /reasoning_override_reuse_conflict/, "closed-set reason code surfaced");
+      assert.match(text, /must run one\s+reasoning effort/, "states the semantic why");
+      assert.match(text, /Drop reasoning/, "fixed actionable guidance");
       assert.doesNotMatch(text, /run_dispatch failed/, "NOT collapsed to the opaque generic dispatch text");
       assert.doesNotMatch(text, /lead_workspace/, "the internal reuse shape is not leaked");
     } finally {

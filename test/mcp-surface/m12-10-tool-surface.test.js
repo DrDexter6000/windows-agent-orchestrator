@@ -572,7 +572,13 @@ const RED_23_WIRE = 75492;
 // (FROZEN_22_DESC_CEILING unchanged); the wire grew +200 bytes (77255 → 77455,
 // the serialized property rides both schemas). Ceiling re-frozen at the exact
 // measured 77455.
-const FROZEN_22_WIRE_CEILING = 77455;
+// R11-1 additive reasoning param: the same shared RUN_DISPATCH_INPUT gains the
+// optional `reasoning` closed-set enum (per-dispatch reasoning effort override
+// — the six REASONING_EFFORTS members serialized as a zod enum, riding both
+// schemas). No description bytes changed (FROZEN_22_DESC_CEILING unchanged,
+// measured desc total 11174); the wire grew +170 bytes (77455 → 77625).
+// Ceiling re-frozen at the exact measured 77625.
+const FROZEN_22_WIRE_CEILING = 77625;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -703,8 +709,12 @@ test("M12-10-H: deterministic 22-tool wire at or below the frozen ceiling", asyn
 // R10-A additive model param: the optional `model` string (per-dispatch
 // model-id override) joined the shared RUN_DISPATCH_INPUT stripped payload for
 // run_dispatch + run_dispatch_contract_check; SHA re-frozen truthfully.
+// R11-1 additive reasoning param: the optional `reasoning` closed-set enum
+// (per-dispatch reasoning effort override — the six REASONING_EFFORTS members
+// as a zod enum) joined the same shared RUN_DISPATCH_INPUT stripped payload
+// for both tools; SHA re-frozen truthfully.
 const DESC_STRIPPED_CONTRACT_SHA =
-  "79420f12768bf7796fcea5dd35c9ac4a83614bfd8086d2e6b930d0caba14d533";
+  "9a6061e167e4ed352c254eb79893a84d9a8344bb7a6c345f6ee45b180b402ad1";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

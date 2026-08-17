@@ -39,7 +39,9 @@ import { COMMAND_NAMES, RUN_USAGE_TEXT } from "../cliHelp.js";
 // R10-A: assertValidModelOverride is the core SSOT shape gate for the
 // per-dispatch --model override (hosted in runManager.js with the synthesis
 // site; re-exported by runDispatch per the typed-error precedent).
-import { dispatchRun, DeliveryCwdRequiredError, assertValidModelOverride } from "../application/runDispatch.js";
+// R11-1: assertValidReasoningOverride is the same SSOT discipline for the
+// per-dispatch --reasoning effort override (closed REASONING_EFFORTS set).
+import { dispatchRun, DeliveryCwdRequiredError, assertValidModelOverride, assertValidReasoningOverride } from "../application/runDispatch.js";
 
 function parseAgentList(args) {
   const agents = [];
@@ -187,6 +189,10 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
       // R10-A: per-dispatch model override (already shape-gated + certified-
       // exclusive up in runCommand). undefined when absent = byte-compatible.
       modelOverride: options.model,
+      // R11-1: per-dispatch reasoning effort override (already closed-set-gated
+      // + certified-exclusive up in runCommand). undefined when absent =
+      // byte-compatible.
+      reasoningOverride: options.reasoning,
       runnerPath,
       // M11-11C: CLI dispatch is a one-shot process — there is no stable Lead
       // session across CLI invocations, so reusable experts always start a fresh
@@ -230,6 +236,10 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
     // later when the provider rejects it. Present only when --model was given
     // (ordinary dispatches stay byte-identical).
     ...(result.effectiveModel ? { model: result.effectiveModel } : {}),
+    // R11-1: echo the EFFECTIVE reasoning policy ({...(registry reasoning),
+    // effort: override}) under the same advisory discipline. Present only
+    // when --reasoning was given (ordinary dispatches stay byte-identical).
+    ...(result.effectiveReasoning ? { reasoning: result.effectiveReasoning } : {}),
     note: "detached runner owns lifecycle (token gate / abort / state). Poll with `status`/`tail`.",
   }, null, 2));
 }
@@ -251,6 +261,18 @@ export async function spawnCommand(args, config) {
       "--model is only supported on `run`, not `spawn` "
       + "(per-dispatch model override is a single-dispatch surface; put a persistent model "
       + "change in the agent's registry model policy instead)",
+    );
+  }
+  // R11-1: --reasoning is a `run`-only surface, exactly like --model above —
+  // spawnCommand's single-agent background path reuses spawnBackgroundRunner,
+  // which WOULD thread the override, so the boundary must keep the exclusion
+  // honest. Workflow agent nodes and daemon dispatches are excluded for the
+  // same reason: a declarative surface's reasoning belongs in the declaration.
+  if (options.reasoning !== undefined) {
+    throw new Error(
+      "--reasoning is only supported on `run`, not `spawn` "
+      + "(per-dispatch reasoning effort override is a single-dispatch surface; put a persistent "
+      + "reasoning change in the agent's registry reasoning policy instead)",
     );
   }
   const manager = newRunManager(config);
@@ -386,6 +408,25 @@ export async function runCommand(args, config) {
       );
     }
   }
+  // R11-1: per-dispatch reasoning effort override (--reasoning <effort>) —
+  // boundary closed-set gate + the hard mutual exclusion with
+  // --require-certified, both BEFORE any side effect, mirroring the --model
+  // block above. ANY override in play refuses the certified combination (the
+  // reasoning block fires when the reasoning flag is present, naming
+  // --reasoning in the text — the combined-policy refusal names the flag
+  // actually at fault). Value-insensitive by design, same rationale.
+  if (options.reasoning !== undefined) {
+    assertValidReasoningOverride(options.reasoning);
+    if (options.requireCertified) {
+      throw new Error(
+        "--reasoning is mutually exclusive with --require-certified "
+        + "(reasoning_override_certified_conflict): the certification matrix is recorded per "
+        + "provider+model under the registry's reasoning policy, so a one-off effort override "
+        + "changes the execution envelope the certified combination was measured under — "
+        + "drop one of the two flags",
+      );
+    }
+  }
   // TD-103 Phase 3C-1: load and validate delivery spec before any side effects.
   const delivery = await loadDeliverySpec(options);
   // Delivery requires --isolate; reject before spawn.
@@ -448,16 +489,28 @@ export async function runCommand(args, config) {
     // above). RunManager.start synthesizes it over the registry model policy
     // (siblings preserved) and persists the explicit modelOverride fact.
     ...(options.model !== undefined ? { modelOverride: options.model } : {}),
+    // R11-1: per-dispatch reasoning effort override (closed-set-gated +
+    // certified-exclusive above). RunManager.start synthesizes it over the
+    // registry reasoning policy (siblings preserved) and persists the explicit
+    // reasoningOverride fact. Composable with --model (the Owner scenario
+    // "gpt-5.6-sol + xhigh").
+    ...(options.reasoning !== undefined ? { reasoningOverride: options.reasoning } : {}),
   });
-  // R10-A: echo the EFFECTIVE model (the synthesized agent's model — the
-  // override id plus preserved siblings) at dispatch success, BEFORE the
-  // wait: a mistyped model id is visible immediately instead of only when
-  // the provider rejects it turns later. Text format only — the JSON format
-  // carries the same fact as a structured field on the result instead, so its
-  // output stays machine-parseable.
+  // R10-A/R11-1: echo the EFFECTIVE policies (the synthesized agent's model /
+  // reasoning — the override value plus preserved siblings) at dispatch
+  // success, BEFORE the wait: a mistyped id or an unsupported effort is
+  // visible immediately instead of only when the provider rejects it turns
+  // later. The echo is ADVISORY: it shows what WAO threaded, not that the
+  // provider accepts the values (R10-C wording discipline). Text format only
+  // — the JSON format carries the same facts as structured fields on the
+  // result instead, so its output stays machine-parseable. A model-only
+  // override keeps the historical single-line form byte-identical.
   const format = options.format ?? "text";
-  if (options.model !== undefined && format !== "json") {
-    console.log(`effective model: ${JSON.stringify(run.agent.model)}`);
+  if ((options.model !== undefined || options.reasoning !== undefined) && format !== "json") {
+    const parts = [];
+    if (options.model !== undefined) parts.push(`model: ${JSON.stringify(run.agent.model)}`);
+    if (options.reasoning !== undefined) parts.push(`reasoning: ${JSON.stringify(run.agent.reasoning)}`);
+    console.log(`effective ${parts.join(", ")}`);
   }
   const waitResult = await runAndWait(run, options);
   // P4 决策A：scorecard 从 transcript 的 scorecard.checked 事件取（runManager 无论通过/失败都落盘）。
@@ -470,6 +523,11 @@ export async function runCommand(args, config) {
   // transcript's run.started recorded.
   if (options.model !== undefined && format === "json") {
     waitResult.model = run.agent.model;
+  }
+  // R11-1: structured effective-reasoning field for --format json (same
+  // discipline as the model field above).
+  if (options.reasoning !== undefined && format === "json") {
+    waitResult.reasoning = run.agent.reasoning;
   }
   if (format === "json") {
     console.log(JSON.stringify(waitResult, null, 2));

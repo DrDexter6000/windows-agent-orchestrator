@@ -2910,4 +2910,63 @@ test("R11-2 0024: AGENT_ONBOARDING.md 双源说明 + usage.md 配置节追加（
   const usage = read("docs/usage.md");
   assert.ok(usage.includes("双源展示（决策 0024）"), "docs/usage.md 配置节必须追加双源说明");
   assert.ok(usage.includes("`--apply` 仅适用模板候选行"), "docs/usage.md 必须含 --apply 适用范围句");
+
+// =====================================================================
+// R11-1（Owner 2026-08-17）：per-dispatch reasoning effort 覆盖（--reasoning /
+// run_dispatch `reasoning`）。docs 锚：闭集值域（与 registry.js 运行时常量绑定，
+// 零漂移）、双互斥闭集码、contract_check 忽略注记、MCP 参数、CLI 用法页、
+// 生成层表面。
+// =====================================================================
+
+test("R11-1: usage.md 记录 --reasoning 用法——闭集值域与 runtime SSOT 同源（零漂移）", async () => {
+  const usage = read("docs/usage.md");
+  const { REASONING_EFFORTS } = await import("../../src/registry.js");
+  // 每一个 SSOT 成员都必须出现在闭集文档表述里（成员级绑定，而非一次
+  // 性字符串快照——集合扩展时本测试红，提示补文档）。
+  const setLine = usage.match(/minimal\s*\/\s*low\s*\/\s*medium\s*\/\s*high\s*\/\s*xhigh\s*\/\s*max/);
+  assert.ok(setLine, "usage.md 必须以斜杠分隔形式记录六值闭集");
+  for (const member of REASONING_EFFORTS) {
+    assert.ok(usage.includes(member), `usage.md 闭集表述缺成员 ${member}`);
+  }
+  assert.match(usage, /只替换.*\.effort|replaces? only.*\.effort/i,
+    "必须说明只替换 reasoning.effort");
+  assert.match(usage, /REASONING_EFFORTS/, "必须指出闭集 SSOT 的家（registry.js）");
+});
+
+test("R11-1: usage.md 记录 --reasoning 两道硬互斥与组合策略拒绝指对旗标", () => {
+  const usage = read("docs/usage.md");
+  assert.match(usage, /reasoning_override_certified_conflict/,
+    "必须记录 × --require-certified 互斥（闭集码）");
+  assert.match(usage, /reasoning_override_reuse_conflict/,
+    "必须记录 × provider-session 复用互斥（闭集码，typed ReasoningOverrideConflictError）");
+  // 组合策略（--model + --reasoning）拒绝指对旗标：model 冲突确定性先拒。
+  assert.match(usage, /组合策略拒绝指对旗标/, "必须说明组合覆盖拒绝时指对旗标的确定性顺序");
+  // resume 重建链。
+  assert.match(usage, /reasoningOverride/, "必须记录 run.started.reasoningOverride 事实与 resume 重建");
+});
+
+test("R11-1: usage.md MCP run_dispatch 节记录可选 reasoning 参数、闭集枚举 wire 化与 contract_check 忽略注记", () => {
+  const usage = read("docs/usage.md");
+  const mcpSection = usage.slice(usage.indexOf("### MCP `run_dispatch`"));
+  const bounded = mcpSection.slice(0, mcpSection.indexOf("###", 1) === -1 ? mcpSection.length : mcpSection.indexOf("###", 1));
+  assert.ok(bounded.includes("`reasoning`"), "run_dispatch 节必须记录可选 reasoning 参数");
+  assert.match(bounded, /reasoning_override_reuse_conflict/, "必须记录 MCP 侧 reuse 冲突固定文案");
+  assert.match(bounded, /忽略 `reasoning`/, "必须记录 contract_check 共享 schema 但忽略 reasoning 的注记");
+  assert.match(bounded, /zod enum|闭集枚举/, "必须说明 wire 侧直接序列化闭集枚举（比正则更严）");
+});
+
+test("R11-1: RUN_USAGE_TEXT 用法页与生成层同步携带 --reasoning（CLI 面）", async () => {
+  const { RUN_USAGE_TEXT } = await import("../../src/cliHelp.js");
+  assert.match(RUN_USAGE_TEXT, /--reasoning EFFORT/, "用法页 flag 行");
+  assert.match(RUN_USAGE_TEXT, /minimal\/low\/medium\/high\/xhigh\/max/, "闭集值域说明");
+  assert.match(RUN_USAGE_TEXT, /mutually exclusive with\s+--require-certified/, "认证互斥");
+  assert.match(RUN_USAGE_TEXT, /provider-session reuse agents/, "复用互斥");
+  assert.match(RUN_USAGE_TEXT, /only on run \(not spawn\/workflow\/daemon\)/, "仅 run 面（spawn/workflow/daemon 不支持）");
+  assert.match(RUN_USAGE_TEXT, /effective reasoning/, "回显失败模式说明（advisory）");
+  // 生成层：mcp-tools.md 的 run_dispatch input 表必须含 reasoning 行（生成
+  // 物，与 wire 同源——这里只锚存在性，字节由 docsSurface 守卫）。
+  const surface = read("docs/surface/mcp-tools.md");
+  const rdSection = surface.slice(surface.indexOf("## run_dispatch"));
+  const rdInput = rdSection.slice(0, rdSection.indexOf("## ", 1) === -1 ? rdSection.length : rdSection.indexOf("## ", 1));
+  assert.match(rdInput, /\| reasoning \| string \| no \| enum: minimal/, "run_dispatch input 表含 reasoning 行（闭集枚举）");
 });

@@ -26,7 +26,7 @@ import { readRegistry } from "../registry.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { inheritedEnvNames } from "../envPolicy.js";
 import { resolveReuseTurn, resolveLineageFirstTurn } from "./sessionReuse.js";
-import { assertExistingDispatchCwd, assertValidModelOverride } from "../runManager.js";
+import { assertExistingDispatchCwd, assertValidModelOverride, assertValidReasoningOverride } from "../runManager.js";
 // R7-C (C-2): application→backends is a legal DOWNWARD edge under the frozen
 // L4 layering SSOT (backends sits deeper than application). Used only to read
 // the declared preflightInvocation capability for the cwd gate below — the
@@ -52,6 +52,13 @@ export { DispatchCwdNotFoundError } from "../runManager.js";
 // The MCP boundary imports the wire pattern from HERE, never from core
 // directly, mirroring the DispatchCwdNotFoundError precedent.
 export { isValidModelOverride, assertValidModelOverride, MODEL_OVERRIDE_MAX, MODEL_OVERRIDE_WIRE_PATTERN } from "../runManager.js";
+// R11-1: re-export the per-dispatch reasoning effort override SSOT (closed-set
+// validators + the REASONING_EFFORTS enum the wire schema serializes) through
+// the same downward re-export channel — core (runManager.js, with the
+// synthesis site / registry.js, the enum home) holds the SSOT, application
+// re-exports, CLI/MCP import from HERE so the boundaries cannot drift from the
+// core validator (the MODEL_OVERRIDE hosting precedent).
+export { isValidReasoningOverride, assertValidReasoningOverride, REASONING_EFFORTS } from "../runManager.js";
 
 // M11-7: thrown when a worker's REQUIRED credential is missing at dispatch time.
 // Carries the missing env NAMES (never values). Callers (MCP) collapse to a
@@ -113,6 +120,30 @@ export class ModelOverrideConflictError extends Error {
     );
     this.name = "ModelOverrideConflictError";
     this.reasonCode = "model_override_reuse_conflict";
+    this.reuseShape = shape;
+  }
+}
+
+// R11-1: thrown when a per-dispatch reasoning effort override is combined with
+// a provider-session reuse dispatch — EITHER shape (a reusable expert or a
+// continuable delivery lineage root). Same contract as the model override
+// above: two turns of one provider-native conversation must run one reasoning
+// effort; a turn-scoped override would silently split the conversation across
+// effort levels. Mirrors the ModelOverrideConflictError form (stable
+// error.name + closed-set reasonCode `reasoning_override_reuse_conflict` +
+// fixed actionable text, no dynamic payload); the MCP adapter recognizes it by
+// error.name and collapses it to its own fixed text. Thrown BEFORE any
+// transcript write, routing-slot claim, or fork.
+export class ReasoningOverrideConflictError extends Error {
+  constructor(reuseShape) {
+    const shape = reuseShape === "run_lineage" ? "run_lineage" : "lead_workspace";
+    super(
+      "dispatchRun: reasoningOverride is mutually exclusive with provider-session reuse "
+      + `(${shape}) — a provider conversation resumed across turns must run one `
+      + "reasoning effort. Drop the reasoning override, or dispatch a non-reusable agent.",
+    );
+    this.name = "ReasoningOverrideConflictError";
+    this.reasonCode = "reasoning_override_reuse_conflict";
     this.reuseShape = shape;
   }
 }
@@ -311,6 +342,18 @@ export async function dispatchRun({
   // "--"-prefix rule is what keeps parseSimpleFlags from splitting the pair.
   // Absent = byte-compatible dispatch (argv unchanged).
   modelOverride = null,
+  // R11-1: per-dispatch reasoning effort override (--reasoning <effort> on the
+  // CLI, `reasoning` on MCP run_dispatch) — ONE dispatch only, never persisted
+  // to the registry. Validated against the core SSOT (assertValidReasoning-
+  // Override — the closed REASONING_EFFORTS set) BEFORE any transcript write
+  // or fork; mutually exclusive with EITHER provider-session reuse shape (typed
+  // ReasoningOverrideConflictError below); composable with modelOverride.
+  // Threaded to the detached runner as --reasoning <effort> (the --model pair
+  // precedent), restored by backgroundRunner's parseSimpleFlags, and applied by
+  // RunManager.start's synthesis ({...(agent.reasoning ?? {}), effort} —
+  // sibling fields preserved). Absent = byte-compatible dispatch (argv
+  // unchanged).
+  reasoningOverride = null,
 }) {
   if (!agentId || typeof agentId !== "string") {
     throw new Error("dispatchRun: agentId is required");
@@ -341,6 +384,15 @@ export async function dispatchRun({
   // fixed text never echoes the supplied value.
   if (modelOverride !== null && modelOverride !== undefined) {
     assertValidModelOverride(modelOverride);
+  }
+
+  // R11-1: shape-validate a supplied reasoning effort override BEFORE any
+  // transcript write or fork (the same service-level re-check discipline as
+  // the model override above). A value outside the closed set must fail-closed
+  // with zero transcripts and zero forks; the fixed text never echoes the
+  // supplied value.
+  if (reasoningOverride !== null && reasoningOverride !== undefined) {
+    assertValidReasoningOverride(reasoningOverride);
   }
 
   // M10-pre closeout: validate explicit waitTimeout BEFORE any transcript write or fork.
@@ -430,8 +482,17 @@ export async function dispatchRun({
   // runManager.js resume — so turn N+1 could not even honor the override).
   // Refused HERE — before the routing-slot claims, transcript writes, and the
   // fork — with the typed ModelOverrideConflictError (zero side effects).
-  if (modelOverride !== null && modelOverride !== undefined && (reuseEligible || continuable)) {
-    throw new ModelOverrideConflictError(reuseEligible ? "lead_workspace" : "run_lineage");
+  // R11-1: the SAME refusal now fires for ANY override in play — a reasoning
+  // effort override must not split a resumed conversation across effort levels
+  // either (typed ReasoningOverrideConflictError). When BOTH overrides are
+  // supplied the model conflict fires first (deterministic; both are refused).
+  const hasOverride = (modelOverride !== null && modelOverride !== undefined)
+    || (reasoningOverride !== null && reasoningOverride !== undefined);
+  if (hasOverride && (reuseEligible || continuable)) {
+    if (modelOverride !== null && modelOverride !== undefined) {
+      throw new ModelOverrideConflictError(reuseEligible ? "lead_workspace" : "run_lineage");
+    }
+    throw new ReasoningOverrideConflictError(reuseEligible ? "lead_workspace" : "run_lineage");
   }
   if (reuseEligible) {
     if (typeof leadSession !== "string" || leadSession.length === 0) {
@@ -619,6 +680,13 @@ export async function dispatchRun({
   if (modelOverride !== null && modelOverride !== undefined) {
     runnerArgs.push("--model", modelOverride);
   }
+  // R11-1: thread the per-dispatch reasoning effort override to the detached
+  // runner (the --model pair precedent). Included in the argv-length guard
+  // below by construction. A closed-set member can never start with "--", so
+  // parseSimpleFlags restores the pair exactly.
+  if (reasoningOverride !== null && reasoningOverride !== undefined) {
+    runnerArgs.push("--reasoning", reasoningOverride);
+  }
   if (scorecardRules) runnerArgs.push("--scorecard-rules", scorecardRules);
   if (scorecardMode) runnerArgs.push("--scorecard-mode", scorecardMode);
   if (requireCertified) runnerArgs.push("--require-certified");
@@ -741,6 +809,15 @@ export async function dispatchRun({
     // field never reaches the MCP wire.
     ...(modelOverride !== null && modelOverride !== undefined
       ? { effectiveModel: { ...(agent.model ?? {}), id: modelOverride } }
+      : {}),
+    // R11-1: the EFFECTIVE reasoning policy this dispatch will run — the
+    // registry reasoning with ONLY `.effort` replaced by the override
+    // (siblings preserved, mirroring RunManager.start's synthesis over the
+    // same registry read). Advisory echo symmetric to effectiveModel; present
+    // ONLY when an override was supplied; the MCP handler selects its own
+    // exact output keys, so this field never reaches the MCP wire.
+    ...(reasoningOverride !== null && reasoningOverride !== undefined
+      ? { effectiveReasoning: { ...(agent.reasoning ?? {}), effort: reasoningOverride } }
       : {}),
     // M12-25: ROUTING REQUEST truth, derived only from the routing turn selected
     // above. Describes what dispatch requested, never provider success. Exposes

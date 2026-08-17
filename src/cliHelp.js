@@ -17,7 +17,7 @@ Commands:
   registry check [--registry config/agents.json] [--format json]
   registry validate [--registry FILE] [--format json]
   spawn <agentId> [agentId2 ...] --prompt "..." [--cwd DIR] [--registry FILE] [--run-dir DIR] [--wait] [--background] [--poll-interval MS] [--wait-timeout MS] [--tag key=value] [--isolate] [--scorecard-rules-file FILE]
-  run <agentId> --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate] [--require-certified] [--background] [--scorecard-rules-file FILE] [--delivery-spec-file FILE] [--read-only] [--model ID]
+  run <agentId> --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate] [--require-certified] [--background] [--scorecard-rules-file FILE] [--delivery-spec-file FILE] [--read-only] [--model ID] [--reasoning EFFORT]
   status <runId> [--run-dir DIR] [--format json]
   tail <runId> [--limit N] [--follow] [--run-dir DIR]
   collect <runId> [--limit N] [--cursor TOKEN] [--mode full|compact] [--final] [--format json] [--run-dir DIR]
@@ -111,6 +111,7 @@ Flags:
   --delivery-spec-file FILE      delivery mode spec (requires --isolate; a --background delivery run also requires --cwd)
   --read-only                    declare a read-only run (advisory observation; forces --isolate; mutually exclusive with --delivery-spec-file and --no-isolate)
   --model ID                     per-dispatch model override (one dispatch only, never written to the registry; replaces only the registry model's id — contextWindow/providerID/variant are preserved)
+  --reasoning EFFORT             per-dispatch reasoning effort override (one dispatch only, never written to the registry; replaces only the registry reasoning's effort — minimal/low/medium/high/xhigh/max; composable with --model)
 
 Notes:
   - The file given to --delivery-spec-file must contain the INNER delivery object
@@ -132,5 +133,19 @@ Notes:
     dispatch output is advisory: it shows what WAO threaded, not that the
     provider accepts the id. --model exists only on run (not spawn/workflow/
     daemon); a persistent model change belongs in the registry model policy.
+  - --reasoning VALUE must be one of the closed effort set
+    minimal/low/medium/high/xhigh/max; anything else is refused with a fixed
+    text (never echoing the value). It may be combined with --model (the
+    per-dispatch "model + effort" pairing). It is mutually exclusive with
+    --require-certified (any override voids the certified-combination claim)
+    and with provider-session reuse agents (a resumed conversation must run
+    one reasoning effort); when combined with --model against a reuse agent,
+    the refusal names the override actually at fault. A backend that cannot
+    express the effort (opencode-serve) or only a conditional subset
+    (kimi-code K3-only, deepseek-harness high|max) refuses the dispatch
+    through its existing policy gate with a hint naming --reasoning. The
+    echoed "effective reasoning" is advisory in the same sense as the model
+    echo. --reasoning exists only on run (not spawn/workflow/daemon); a
+    persistent reasoning change belongs in the registry reasoning policy.
   - --help must be the FIRST argument after run: npm run cli -- run --help
 `;

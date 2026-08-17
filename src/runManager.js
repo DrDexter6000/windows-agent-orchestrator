@@ -17,6 +17,14 @@ import { inheritedEnvNames } from "./envPolicy.js";
 import { validateSessionReuseRouting } from "./application/sessionReuse.js";
 import { WRITE_INTENT_CORRELATION_STATUS, DONE_MARKERS } from "./runEvent.js";
 import { ISOLATION_VIOLATION_REASONS } from "./diagnosis.js";
+// R11-1: the closed effort set SSOT lives in the registry (its historical
+// home since M11-9); the per-dispatch override validators below are hosted
+// HERE, with the synthesis site, mirroring the MODEL_OVERRIDE precedent.
+// Re-exported so the downward channel (runDispatch.js) hands the CLI/MCP
+// boundaries ONE import surface for the whole override SSOT — same hosting
+// discipline as MODEL_OVERRIDE_MAX/_WIRE_PATTERN below.
+import { REASONING_EFFORTS } from "./registry.js";
+export { REASONING_EFFORTS };
 
 /**
  * RunManager 持有活跃 run 的生命周期。
@@ -222,6 +230,44 @@ export function assertValidModelOverride(value) {
   }
 }
 
+// R11-1: per-dispatch reasoning effort override (--reasoning <effort> on the
+// CLI, `reasoning` on MCP run_dispatch) — the SHAPE SSOT every boundary
+// validates through. Unlike a model id, an effort is a CLOSED SET (the M11-9
+// REASONING_EFFORTS enum, exported by registry.js), so the contract is exact
+// membership — no length/charset rules needed, and a non-member value is
+// malformed regardless of shape. Hosting follows the MODEL_OVERRIDE precedent
+// (with the synthesis site below); runDispatch.js imports this downward and
+// re-exports it so the application service / CLI / MCP boundaries validate the
+// same set with zero drift. The MCP wire schema serializes the enum from the
+// same exported array (z.enum — closed-set on the wire, stricter than a regex).
+const REASONING_OVERRIDE_INVALID_TEXT =
+  "--reasoning must be one of the supported reasoning effort values "
+  + "(minimal/low/medium/high/xhigh/max)";
+
+/**
+ * R11-1: closed-set membership check for a per-dispatch reasoning effort
+ * override. Case-sensitive by design (the enum is lowercase; anything else is
+ * malformed, never "normalized" into a member).
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function isValidReasoningOverride(value) {
+  return typeof value === "string" && REASONING_EFFORTS.includes(value);
+}
+
+/**
+ * R11-1: fail-fast form of isValidReasoningOverride — fixed safe text, never
+ * echoes the supplied value (a malformed effort could itself be an injection
+ * payload).
+ * @param {unknown} value
+ * @returns {void}
+ */
+export function assertValidReasoningOverride(value) {
+  if (!isValidReasoningOverride(value)) {
+    throw new Error("RunManager: invalid reasoning override — " + REASONING_OVERRIDE_INVALID_TEXT);
+  }
+}
+
 // Round 4 Bundle B: thrown when a readOnly run's FORCED worktree isolation
 // cannot be established (worktree creation failed). Read-only runs refuse the
 // legacy degrade-to-source-cwd fallback (runManager.js :524-534) exactly like
@@ -262,14 +308,32 @@ async function validateRoleContractTransport(backend, agent, roleContract) {
 // the override whenever it is in play. The verdict itself is untouched: same
 // throw, same backend decision, only the message gains the hint (fixed text —
 // never echoes the supplied model id).
+//
+// R11-1: the wrapper now takes BOTH per-dispatch overrides
+// ({modelOverride, reasoningOverride}) and names exactly the flag(s) in play —
+// three fixed shapes (model-only / reasoning-only / both). When BOTH are
+// active, one combined sentence names both flags; a backend that refuses the
+// synthesized policy under either override must point the operator at the
+// right flag(s), never at a phantom registry complaint. Values are never
+// echoed (same :263-264 discipline as R10-C C-3).
 const MODEL_OVERRIDE_POLICY_HINT =
   "（当前派发带 --model 覆盖；该 backend 的 model 声明形状与覆盖不兼容）";
-function validateAgentPolicyWithOverrideHint(backend, agent, modelOverride) {
+const REASONING_OVERRIDE_POLICY_HINT =
+  "（当前派发带 --reasoning 覆盖；该 backend 的 reasoning 声明形状与覆盖不兼容）";
+const BOTH_OVERRIDES_POLICY_HINT =
+  "（当前派发带 --model/--reasoning 覆盖；该 backend 的 model/reasoning 声明形状与覆盖不兼容）";
+function validateAgentPolicyWithOverrideHint(backend, agent, { modelOverride, reasoningOverride } = {}) {
+  const modelActive = modelOverride !== null && modelOverride !== undefined;
+  const reasoningActive = reasoningOverride !== null && reasoningOverride !== undefined;
   try {
     backend.validateAgentPolicy(agent);
   } catch (error) {
-    if (modelOverride !== null && modelOverride !== undefined) {
+    if (modelActive && reasoningActive) {
+      error.message += BOTH_OVERRIDES_POLICY_HINT;
+    } else if (modelActive) {
       error.message += MODEL_OVERRIDE_POLICY_HINT;
+    } else if (reasoningActive) {
+      error.message += REASONING_OVERRIDE_POLICY_HINT;
     }
     throw error;
   }
@@ -482,17 +546,38 @@ export class RunManager {
     // or hand-resumed run keeps the model it was dispatched with — see the
     // synthesis in resume().
     modelOverride = null,
+    // R11-1: per-dispatch reasoning effort override (--reasoning <effort> /
+    // run_dispatch `reasoning`) — symmetric to modelOverride: ONE dispatch
+    // only, never persisted to the registry. When present, the agent's
+    // reasoning policy is synthesized as
+    //   reasoning: { ...(agent.reasoning ?? {}), effort: reasoningOverride }
+    // (same getAgent shallow-merge caveat — never a getAgent override). The
+    // value is gated by the CLOSED-SET SSOT (isValidReasoningOverride above,
+    // REASONING_EFFORTS from registry.js). No capability boolean exists by
+    // design: inexpressible policies (opencode-serve) and conditional subsets
+    // (kimi K3-only, deepseek-harness high|max) refuse naturally through the
+    // existing per-backend validateAgentPolicy gate over the synthesized
+    // object. Mutually exclusive with requireCertified and sessionReuse by the
+    // same reasoning as modelOverride (any override present voids the claim);
+    // composable WITH modelOverride (the Owner scenario "gpt-5.6-sol +
+    // xhigh"). resume rebuilds this run's own run.started.reasoningOverride
+    // fact (R11-1 resume chain) exactly like R10-C C-1 does for the model.
+    reasoningOverride = null,
     } = options;
 
-    // R10-A mutual exclusions (flag presence, value-insensitive — a value-aware
-    // "compatible override" pass would let a dispatch claim a certified
-    // provider+model combination it never proved). Both checks sit BEFORE the
-    // registry read: zero transcript, zero worktree, zero spawn. start is the
-    // authoritative single point — it covers the foreground family (run /
-    // workflow agent nodes / daemon start) AND the background family (the
-    // detached runner's --model/--require-certified both land here); the CLI
-    // re-refuses earlier for the operator's face, and dispatchRun re-refuses
-    // the reuse shape before the fork (ModelOverrideConflictError).
+    // R10-A/R11-1 mutual exclusions (flag presence, value-insensitive — a
+    // value-aware "compatible override" pass would let a dispatch claim a
+    // certified provider+model combination it never proved). ANY override in
+    // play refuses the combination: the certified-conflict / reuse-conflict
+    // doors below fire for the model override, then again for the reasoning
+    // override (the message names the flag(s) actually in play). Both checks
+    // sit BEFORE the registry read: zero transcript, zero worktree, zero
+    // spawn. start is the authoritative single point — it covers the
+    // foreground family (run / workflow agent nodes / daemon start) AND the
+    // background family (the detached runner's --model/--reasoning/
+    // --require-certified all land here); the CLI re-refuses earlier for the
+    // operator's face, and dispatchRun re-refuses the reuse shape before the
+    // fork (ModelOverrideConflictError / ReasoningOverrideConflictError).
     if (modelOverride !== null && modelOverride !== undefined) {
       assertValidModelOverride(modelOverride);
       if (requireCertified) {
@@ -511,6 +596,25 @@ export class RunManager {
         );
       }
     }
+    if (reasoningOverride !== null && reasoningOverride !== undefined) {
+      assertValidReasoningOverride(reasoningOverride);
+      if (requireCertified) {
+        throw new Error(
+          "RunManager.start: reasoningOverride is mutually exclusive with requireCertified "
+          + "(reasoning_override_certified_conflict) — the certification matrix is recorded per "
+          + "provider+model under the registry's reasoning policy, so a one-off effort override "
+          + "changes the execution envelope the certified combination was measured under. "
+          + "Drop the reasoning override, or drop requireCertified.",
+        );
+      }
+      if (sessionReuse) {
+        throw new Error(
+          "RunManager.start: reasoningOverride is mutually exclusive with sessionReuse "
+          + "(reasoning_override_reuse_conflict) — a provider conversation resumed across turns "
+          + "must run one reasoning effort. Drop the reasoning override, or dispatch a non-reusable agent.",
+        );
+      }
+    }
 
     const registryPath = resolve(registry ?? this.config.registry);
     const loaded = await this.readRegistry(registryPath);
@@ -522,6 +626,17 @@ export class RunManager {
     // For a registry entry without any model this synthesizes a bare {id}.
     if (modelOverride !== null && modelOverride !== undefined) {
       agent = { ...agent, model: { ...(agent.model ?? {}), id: modelOverride } };
+    }
+    // R11-1: synthesize the reasoning effort override (see the option comment
+    // above) — the same post-getAgent, pre-validation slot as the model
+    // synthesis. The synthesized object flows through validateAgentPolicy
+    // below unchanged: zero NEW validation surface; a backend that cannot
+    // express the effort (opencode-serve) or only a conditional subset
+    // (kimi-code K3-only, deepseek-harness high|max) refuses exactly as it
+    // would for the same registry-declared shape. For a registry entry without
+    // any reasoning this synthesizes a bare {effort}.
+    if (reasoningOverride !== null && reasoningOverride !== undefined) {
+      agent = { ...agent, reasoning: { ...(agent.reasoning ?? {}), effort: reasoningOverride } };
     }
 
     // M11-5 Package A2: obtain the backend ONCE, up front, so the role-contract
@@ -667,9 +782,10 @@ export class RunManager {
       if (typeof backend.validateAgentPolicy !== "function") {
         throw new Error("backend does not implement validateAgentPolicy — cannot confirm it can express the configured policy");
       }
-      // R10-C C-3: hint-appending wrapper (see its definition) — start covers
-      // the foreground family AND the detached background runner's --model.
-      validateAgentPolicyWithOverrideHint(backend, agent, modelOverride);
+      // R10-C C-3 / R11-1: hint-appending wrapper (see its definition) — start
+      // covers the foreground family AND the detached background runner's
+      // --model/--reasoning.
+      validateAgentPolicyWithOverrideHint(backend, agent, { modelOverride, reasoningOverride });
     }
 
     // M11-11C: provider-NEUTRAL session-reuse capability gate (contract 7).
@@ -934,6 +1050,12 @@ export class RunManager {
       ...(worktreeInfo ? { worktreePath: worktreeInfo.path, worktreeBranch: worktreeInfo.branch } : {}),
       serveUrl: agent.serveUrl,
       model: agent.model,
+      // R11-1: the STATIC reasoning policy, recorded unconditionally like
+      // `model` above (an audit gap fix — run.started never carried the
+      // registry's reasoning before; when the agent has no reasoning the
+      // undefined value is dropped by JSON serialization, so ordinary
+      // dispatches stay byte-compatible).
+      reasoning: agent.reasoning,
       // R10-A: the EXPLICIT override fact — the Lead's own input, never a
       // secret. `model` above already reflects the synthesized policy (the
       // synthesis precedes this append); modelOverride lets an auditor tell
@@ -941,6 +1063,13 @@ export class RunManager {
       // Absent for ordinary dispatches (byte-compatible run.started payload).
       ...(modelOverride !== null && modelOverride !== undefined
         ? { modelOverride }
+        : {}),
+      // R11-1: the explicit reasoning-override fact, symmetric to modelOverride
+      // (and symmetric to `reasoning` above: the synthesized policy rides the
+      // unconditional key, this field marks that THIS dispatch overrode it).
+      // Absent for ordinary dispatches (byte-compatible run.started payload).
+      ...(reasoningOverride !== null && reasoningOverride !== undefined
+        ? { reasoningOverride }
         : {}),
       scorecardConfigured: Boolean(scorecardRules),
       ...(tagsPayload ? { tags: tagsPayload } : {}),
@@ -1214,6 +1343,20 @@ export class RunManager {
       if (!isValidModelOverride(resumeModelOverride)) return null;
       agent = { ...agent, model: { ...(agent.model ?? {}), id: resumeModelOverride } };
     }
+    // R11-1: rebuild the per-dispatch reasoning effort override from the SAME
+    // run.started authority (the R10-C C-1 precedent, one fact later). Without
+    // this, a daemon-resumed run dispatched with --reasoning would silently
+    // run the back half on the registry effort with no override fact anywhere
+    // in the transcript — the exact R10-C C-1 accident class. Same synthesis
+    // and shape gate as start: present-and-in-the-closed-set → only `.effort`
+    // is replaced; present-but-INVALID (a corrupt/tampered persisted fact) →
+    // fail closed: return null, zero re-spawns. Absent → the registry
+    // reasoning, byte-compatible with the old face.
+    const resumeReasoningOverride = runStarted.reasoningOverride;
+    if (resumeReasoningOverride !== null && resumeReasoningOverride !== undefined) {
+      if (!isValidReasoningOverride(resumeReasoningOverride)) return null;
+      agent = { ...agent, reasoning: { ...(agent.reasoning ?? {}), effort: resumeReasoningOverride } };
+    }
 
     // M11-5 Package A2：获取 backend 一次，前置到角色合同决策前——决策由
     // backend 能力（supportsRoleContract）驱动，不认识 runtime 名称。该 backend
@@ -1225,12 +1368,17 @@ export class RunManager {
     // structured policy is present. R10-C: the rebuilt override (C-1) rides the
     // same hint-appending wrapper as start, so a daemon-resumed run whose
     // inherited model cannot be expressed gets the --model-naming sentence too.
+    // R11-1: the rebuilt reasoning override rides the same wrapper with its own
+    // shape (a resumed --reasoning dispatch gets the --reasoning-naming one).
     const resumeHasPolicy = agent.model || agent.reasoning || agent.provider;
     if (resumeHasPolicy) {
       if (typeof backend.validateAgentPolicy !== "function") {
         throw new Error("backend does not implement validateAgentPolicy — cannot confirm it can express the configured policy");
       }
-      validateAgentPolicyWithOverrideHint(backend, agent, resumeModelOverride);
+      validateAgentPolicyWithOverrideHint(backend, agent, {
+        modelOverride: resumeModelOverride,
+        reasoningOverride: resumeReasoningOverride,
+      });
     }
 
     // M11-5（TD-89 修复）：resume 也必须重新经过同一角色合同加载器，不得静默

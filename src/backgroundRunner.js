@@ -80,6 +80,9 @@ function makeObjectRegistry(registryObj) {
  * @param {object} [opts.scorecardRules]
  * @param {string} [opts.modelOverride] — R10-A per-dispatch model id (--model);
  *   RunManager.start synthesizes it over the registry model policy
+ * @param {string} [opts.reasoningOverride] — R11-1 per-dispatch reasoning
+ *   effort (--reasoning); RunManager.start synthesizes it over the registry
+ *   reasoning policy (only `.effort` replaced)
  * @returns {Promise<{runId, completed, failed, timedOut, error}>}
  */
 export async function runBackground(opts = {}) {
@@ -170,6 +173,16 @@ export async function runBackground(opts = {}) {
       // "--"-prefixed value, so parseSimpleFlags restores the pair exactly.
       ...(opts.modelOverride !== undefined && opts.modelOverride !== null
         ? { modelOverride: opts.modelOverride }
+        : {}),
+      // R11-1: thread the per-dispatch reasoning effort override (--reasoning
+      // <effort> from dispatchRun's argv) so RunManager.start synthesizes
+      // reasoning.effort over the registry policy (siblings preserved) and
+      // persists the explicit reasoningOverride fact on run.started. Absent
+      // for ordinary dispatch (byte-compatible). The closed-set gate
+      // (runManager.js SSOT) forbids a "--"-prefixed value by membership, so
+      // parseSimpleFlags restores the pair exactly.
+      ...(opts.reasoningOverride !== undefined && opts.reasoningOverride !== null
+        ? { reasoningOverride: opts.reasoningOverride }
         : {}),
     });
   } catch (error) {
@@ -380,6 +393,10 @@ export async function runMain(argv = process.argv.slice(2)) {
     // — the ordinary dispatch stays byte-compatible. RunManager.start owns the
     // shape re-check (SSOT) and the synthesis.
     modelOverride: opts.model,
+    // R11-1: per-dispatch reasoning effort override (value flag threaded from
+    // dispatchRun --reasoning <effort>). Same parseSimpleFlags semantics;
+    // RunManager.start owns the closed-set re-check (SSOT) and the synthesis.
+    reasoningOverride: opts.reasoning,
   });
   // detached runner 把最终结果写 stdout 一行 JSON（供调试/日志；CLI 已返回，不依赖此）
   process.stdout.write(JSON.stringify(result) + "\n");

@@ -60,6 +60,16 @@
 //      refuses resume fail-closed (MO-9c). R10-C C-3: a policy refusal under
 //      an active override names --model on both the start and resume faces
 //      (MO-10).
+//   12. R11-1 reasoning effort override — the per-dispatch --reasoning /
+//      run_dispatch `reasoning` mirror of the model override chain: argv pair
+//      + effectiveReasoning echo (RO-1), byte-compat without the flag (RO-2),
+//      closed-set gate (RO-3), reuse/lineage typed conflict — including the
+//      model+reasoning double-override shape (RO-4/RO-5/RO-5b), the
+//      runner→start synthesis with BOTH run.started facts (RO-6), the static
+//      reasoning audit-gap fix + byte-compat (RO-6b), start-level refusals
+//      (RO-7), natural per-backend policy refusals with the right hint
+//      (RO-8), the resume rebuild chain (RO-9/RO-9b/RO-9c), and the hint's
+//      three shapes (RO-10).
 //
 // Pure group: temp fixtures under os.tmpdir(), fakeSpawn injection, zero git,
 // zero real dispatch, zero provider token. The only real subprocess is the CLI
@@ -76,7 +86,13 @@ import { fileURLToPath } from "node:url";
 import { readTranscript } from "../../src/transcript.js";
 import { RunManager } from "../../src/runManager.js";
 import { runBackground } from "../../src/backgroundRunner.js";
-import { dispatchRun, DispatchCwdNotFoundError, SessionReuseWorkspaceRequiredError, ModelOverrideConflictError } from "../../src/application/runDispatch.js";
+import { dispatchRun, DispatchCwdNotFoundError, SessionReuseWorkspaceRequiredError, ModelOverrideConflictError, ReasoningOverrideConflictError } from "../../src/application/runDispatch.js";
+// R11-1: REAL backend instances for the natural policy-refusal group (RO-8) —
+// opencode-serve cannot express reasoning.effort at all, deepseek-harness
+// limits it to high|max, kimi-code gates it on the K3 model id.
+import { OpenCodeServeBackend } from "../../src/backends/opencodeServe.js";
+import { DeepSeekHarnessBackend } from "../../src/backends/deepSeekHarness.js";
+import { KimiCodeBackend } from "../../src/backends/kimiCode.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -1187,6 +1203,688 @@ test("MO-10: a policy refusal under an active override names --model (start + re
     );
     assert.deepEqual(listTranscripts(runDir), [`${runId}.jsonl`],
       "only the hand-seeded fixture transcript exists (the refused starts wrote none)");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
+// 12. R11-1 — per-dispatch reasoning effort override (--reasoning / run_dispatch `reasoning`)
+//
+// Owner decision 2026-08-17 (consultation with coder_mm): the symmetric
+// single-dispatch override for reasoning.effort. Design invariants pinned
+// here (mirroring the MO-* group where the mechanics are shared):
+//   - the value is a CLOSED SET (registry.js REASONING_EFFORTS —
+//     minimal/low/medium/high/xhigh/max), not a shape contract;
+//   - the override replaces ONLY reasoning.effort; sibling fields survive;
+//   - NO capability boolean: inexpressible (opencode-serve) and conditional
+//     (kimi K3-only, dsh high|max) policies refuse via the existing
+//     per-backend validateAgentPolicy gate over the synthesized object;
+//   - the same two hard mutual exclusions as the model override (certified /
+//     provider-session reuse), with "ANY override present" semantics and a
+//     message naming the flag actually at fault;
+//   - composable with --model (the Owner "gpt-5.6-sol + xhigh" scenario).
+// =====================================================================
+
+const REASONING_OVERRIDE_INVALID_RE = /--reasoning must be one of the supported reasoning effort values/;
+const REASONING_HINT = "（当前派发带 --reasoning 覆盖；该 backend 的 reasoning 声明形状与覆盖不兼容）";
+
+test("RO-1: dispatchRun reasoningOverride → runner argv carries the --reasoning pair; effectiveReasoning echo preserves siblings", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro1-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, {
+      coder_low: {
+        backend: "claude-code", cwd: dir,
+        model: { id: "glm-5.3", contextWindow: 1000000 },
+        reasoning: { effort: "medium" },
+      },
+    });
+    const runDir = join(dir, "runs");
+    const result = await dispatchRun({
+      agentId: "coder_low",
+      prompt: "x",
+      registryPath,
+      runDir,
+      reasoningOverride: "xhigh",
+      spawnFn: fakeSpawn,
+      userEnvReader: NO_ENV_READER,
+    });
+    assert.equal(result.accepted, true);
+    assert.equal(calls.length, 1, "detached runner forked exactly once");
+    const reasoningIdx = calls[0].args.indexOf("--reasoning");
+    assert.ok(reasoningIdx >= 0, "runner argv carries --reasoning");
+    assert.equal(calls[0].args[reasoningIdx + 1], "xhigh", "threaded verbatim");
+    assert.equal(calls[0].args.includes("--model"), false, "no --model when only --reasoning was supplied");
+    // Effective reasoning echo: effort replaced. The registry reasoning object
+    // here carries only effort today, but the echo is the synthesized policy —
+    // a whole-object swap would still be visible via this shape.
+    assert.deepEqual(result.effectiveReasoning, { effort: "xhigh" });
+    assert.equal("effectiveModel" in result, false, "no effectiveModel without a model override");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-2: dispatchRun WITHOUT reasoningOverride stays byte-compatible (no --reasoning argv, no effectiveReasoning)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro2-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, {
+      coder_low: { backend: "claude-code", cwd: dir, reasoning: { effort: "medium" } },
+    });
+    const result = await dispatchRun({
+      agentId: "coder_low",
+      prompt: "x",
+      registryPath,
+      runDir: join(dir, "runs"),
+      spawnFn: fakeSpawn,
+      userEnvReader: NO_ENV_READER,
+    });
+    assert.equal(result.accepted, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].args.includes("--reasoning"), false, "no --reasoning in the ordinary dispatch argv");
+    assert.equal("effectiveReasoning" in result, false, "no effectiveReasoning field on the ordinary dispatch result");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-3: dispatchRun re-checks the closed-set gate — non-member values refuse fixed-text, zero transcript, zero fork", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro3-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const runDir = join(dir, "runs");
+    // "ultra" is outside the set; "HIGH" is case-sensitive-failed (no
+    // normalization); "" / true / object are malformed shapes; "--next-flag"
+    // proves membership also excludes the flag-splitter shape.
+    for (const bad of ["ultra", "HIGH", "", "--next-flag", true, { effort: "high" }]) {
+      await assert.rejects(
+        () => dispatchRun({
+          agentId: "coder_low",
+          prompt: "x",
+          registryPath,
+          runDir,
+          reasoningOverride: bad,
+          spawnFn: fakeSpawn,
+          userEnvReader: NO_ENV_READER,
+        }),
+        (e) => {
+          assert.match(e.message, REASONING_OVERRIDE_INVALID_RE, `fixed safe text for ${JSON.stringify(bad)}`);
+          assert.match(e.message, /minimal\/low\/medium\/high\/xhigh\/max/, "the closed set is named");
+          assert.doesNotMatch(e.message, /ultra|HIGH|next-flag/, "never echoes the supplied value");
+          return true;
+        },
+      );
+    }
+    assert.deepEqual(listTranscripts(runDir), [], "zero transcripts across all refusals");
+    assert.equal(calls.length, 0, "zero forks");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-4: lead_workspace reuse agent × reasoningOverride → typed ReasoningOverrideConflictError BEFORE any slot/transcript/fork", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro4-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, {
+      researcher: { backend: "claude-code", cwd: dir, sessionReuse: "lead_workspace" },
+    });
+    const runDir = join(dir, "runs");
+    await assert.rejects(
+      () => dispatchRun({
+        agentId: "researcher",
+        prompt: "q",
+        registryPath,
+        runDir,
+        cwd: dir,
+        leadSession: "lead-RO4",
+        reasoningOverride: "high",
+        spawnFn: fakeSpawn,
+        userEnvReader: NO_ENV_READER,
+      }),
+      (e) => {
+        assert.ok(e instanceof ReasoningOverrideConflictError, "the typed conflict error owns this face");
+        assert.equal(e.name, "ReasoningOverrideConflictError");
+        assert.equal(e.reasonCode, "reasoning_override_reuse_conflict", "closed-set reason code");
+        assert.equal(e.reuseShape, "lead_workspace", "carries the reuse shape");
+        assert.match(e.message, /mutually exclusive with provider-session reuse/);
+        assert.match(e.message, /one\s+reasoning effort/, "states the one-effort-per-conversation contract");
+        return true;
+      },
+    );
+    assert.equal(existsSync(join(runDir, ".session-reuse")), false, "no reuse routing slot claimed");
+    assert.deepEqual(listTranscripts(runDir), [], "zero transcripts");
+    assert.equal(calls.length, 0, "zero forks");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-5: continuable delivery root × reasoningOverride → typed conflict (run_lineage), zero transcript, zero fork", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro5-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const runDir = join(dir, "runs");
+    await assert.rejects(
+      () => dispatchRun({
+        agentId: "coder_low",
+        prompt: "q",
+        registryPath,
+        runDir,
+        cwd: dir,
+        leadSession: "lead-RO5",
+        continuable: true,
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
+        reasoningOverride: "high",
+        spawnFn: fakeSpawn,
+        userEnvReader: NO_ENV_READER,
+        // capability seam: only the supportsSessionReuse boolean is read
+        // before the refusal fires
+        backendFor: () => ({ supportsSessionReuse: true }),
+      }),
+      (e) => {
+        assert.equal(e.name, "ReasoningOverrideConflictError");
+        assert.equal(e.reasonCode, "reasoning_override_reuse_conflict");
+        assert.equal(e.reuseShape, "run_lineage", "the lineage shape is named");
+        return true;
+      },
+    );
+    assert.equal(existsSync(join(runDir, ".session-reuse")), false, "no lineage slot claimed");
+    assert.deepEqual(listTranscripts(runDir), [], "zero transcripts");
+    assert.equal(calls.length, 0, "zero forks");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-5b: model+reasoning double override × reuse → still refused (model conflict fires deterministically), zero side effects", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro5b-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, {
+      researcher: { backend: "claude-code", cwd: dir, sessionReuse: "lead_workspace" },
+    });
+    const runDir = join(dir, "runs");
+    await assert.rejects(
+      () => dispatchRun({
+        agentId: "researcher",
+        prompt: "q",
+        registryPath,
+        runDir,
+        cwd: dir,
+        leadSession: "lead-RO5b",
+        modelOverride: "gpt-5.6-sol-xhigh",
+        reasoningOverride: "xhigh",
+        spawnFn: fakeSpawn,
+        userEnvReader: NO_ENV_READER,
+      }),
+      (e) => {
+        // Both overrides are refused; the model conflict owns the face
+        // deterministically (documented in runDispatch.js).
+        assert.ok(
+          e.name === "ModelOverrideConflictError" || e.name === "ReasoningOverrideConflictError",
+          "a typed override/reuse conflict owns the face",
+        );
+        assert.match(e.reasonCode, /_override_reuse_conflict/);
+        return true;
+      },
+    );
+    assert.equal(existsSync(join(runDir, ".session-reuse")), false, "no reuse routing slot claimed");
+    assert.deepEqual(listTranscripts(runDir), [], "zero transcripts");
+    assert.equal(calls.length, 0, "zero forks");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-6: runBackground threads reasoningOverride (+modelOverride) → start synthesizes BOTH; run.started carries the dual facts", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro6-"));
+  const runDir = join(dir, "runs");
+  try {
+    const spawnedPolicies = [];
+    const fakeBackend = {
+      validateAgentPolicy(agent) {
+        // The synthesized policy MUST reach the ordinary validation surface —
+        // a no-reasoning registry entry synthesizes a bare {effort}, which
+        // flips hasStructuredPolicy true. Receiving it here proves the
+        // synthesis happened BEFORE validateAgentPolicy.
+        assert.ok(agent.reasoning && typeof agent.reasoning.effort === "string",
+          "synthesized reasoning present at policy validation");
+      },
+      async spawn(agent) {
+        spawnedPolicies.push({ model: agent.model, reasoning: agent.reasoning });
+        return {
+          backend: "claude-code",
+          backendSessionId: "s_ro6",
+          messageId: "m_ro6",
+          admittedSeq: 1,
+          async *events() {
+            yield { kind: "done", reason: "completed" };
+          },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+    };
+    const result = await runBackground({
+      agentId: "ro_worker",
+      prompt: "x",
+      registry: {
+        agents: {
+          ro_worker: {
+            backend: "claude-code", cwd: dir,
+            model: { id: "glm-5.3", contextWindow: 1000000 },
+            reasoning: { effort: "medium" },
+          },
+        },
+      },
+      runDir,
+      modelOverride: "gpt-5.6-sol-xhigh",
+      reasoningOverride: "xhigh",
+      backendFor: () => fakeBackend,
+      waitTimeout: 3000,
+      pollInterval: 10,
+    });
+    assert.equal(result.completed, true, `run completes (error: ${result.error})`);
+    // 双覆盖形状：model.id 与 reasoning.effort 都被替换，兄弟字段保留。
+    assert.deepEqual(spawnedPolicies, [{
+      model: { id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 },
+      reasoning: { effort: "xhigh" },
+    }], "the spawn authority received both synthesized policies — only .id/.effort replaced");
+    const events = await readTranscript(join(runDir, `${result.runId}.jsonl`));
+    const started = events.find((e) => e.type === "run.started");
+    assert.deepEqual(started.model, { id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 },
+      "run.started.model reflects the synthesized model policy");
+    assert.deepEqual(started.reasoning, { effort: "xhigh" },
+      "run.started.reasoning reflects the synthesized reasoning policy");
+    assert.equal(started.modelOverride, "gpt-5.6-sol-xhigh",
+      "run.started carries the EXPLICIT model override fact");
+    assert.equal(started.reasoningOverride, "xhigh",
+      "run.started carries the EXPLICIT reasoning override fact");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-6b: runBackground WITHOUT reasoningOverride — static reasoning now recorded; override facts absent (byte-shape)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro6b-"));
+  const runDir = join(dir, "runs");
+  try {
+    const spawnedReasonings = [];
+    const fakeBackend = {
+      validateAgentPolicy() {},
+      async spawn(agent) {
+        spawnedReasonings.push(agent.reasoning);
+        return {
+          backend: "claude-code",
+          backendSessionId: "s_ro6b",
+          messageId: "m_ro6b",
+          admittedSeq: 1,
+          async *events() {
+            yield { kind: "done", reason: "completed" };
+          },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+    };
+    const runWith = async (entry) => runBackground({
+      agentId: "ro_worker",
+      prompt: "x",
+      registry: { agents: { ro_worker: entry } },
+      runDir,
+      backendFor: () => fakeBackend,
+      waitTimeout: 3000,
+      pollInterval: 10,
+    });
+
+    // (a) registry WITH a static reasoning: the audit-gap fix — run.started
+    // now records the static policy unconditionally (previously reasoning was
+    // never persisted), and NO override fact appears.
+    const withStatic = await runWith({
+      backend: "claude-code", cwd: dir, reasoning: { effort: "medium" },
+    });
+    assert.equal(withStatic.completed, true, `run completes (error: ${withStatic.error})`);
+    let events = await readTranscript(join(runDir, `${withStatic.runId}.jsonl`));
+    let started = events.find((e) => e.type === "run.started");
+    assert.deepEqual(started.reasoning, { effort: "medium" },
+      "static registry reasoning is now a run.started fact (audit-gap fix)");
+    assert.equal("reasoningOverride" in started, false, "no override fact without --reasoning");
+    assert.deepEqual(spawnedReasonings.at(-1), { effort: "medium" }, "registry reasoning passes through unchanged");
+
+    // (b) registry WITHOUT any reasoning: JSON serialization drops the
+    // undefined key — the ordinary run.started payload stays byte-shaped.
+    const withoutStatic = await runWith({ backend: "claude-code", cwd: dir });
+    assert.equal(withoutStatic.completed, true, `run completes (error: ${withoutStatic.error})`);
+    events = await readTranscript(join(runDir, `${withoutStatic.runId}.jsonl`));
+    started = events.find((e) => e.type === "run.started");
+    assert.equal("reasoning" in started, false, "no reasoning key when the agent declares none (byte-compatible)");
+    assert.equal("reasoningOverride" in started, false, "no override fact");
+    assert.equal(spawnedReasonings.at(-1), undefined, "nothing synthesized without the flag");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-7: RunManager.start authoritative refusals — certified conflict, reuse conflict, and the closed-set gate, all zero-side-effect", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro7-"));
+  try {
+    const runDir = join(dir, "runs");
+    const manager = new RunManager({
+      config: { registry: "x", runDir, pollInterval: 10, waitTimeout: 3000 },
+      readRegistry: async () => ({
+        getAgent: (id) => ({ id, backend: "claude-code", cwd: dir, reasoning: { effort: "medium" } }),
+        listAgents: () => [],
+      }),
+      transcriptDir: runDir,
+      backendFor: () => ({ validateAgentPolicy() {} }),
+    });
+    await assert.rejects(
+      () => manager.start("a", { prompt: "p", reasoningOverride: "xhigh", requireCertified: true }),
+      (e) => {
+        assert.match(e.message, /reasoning_override_certified_conflict/, "closed-set certified-conflict code");
+        assert.match(e.message, /certification matrix is recorded per provider\+model/, "states the why");
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => manager.start("a", {
+        prompt: "p",
+        reasoningOverride: "xhigh",
+        sessionReuse: { mode: "lead_workspace", opaqueUuid: "u", turn: "first" },
+      }),
+      (e) => {
+        assert.match(e.message, /reasoning_override_reuse_conflict/, "closed-set reuse-conflict code");
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => manager.start("a", { prompt: "p", reasoningOverride: "ultra" }),
+      REASONING_OVERRIDE_INVALID_RE,
+    );
+    // 任一覆盖在场即拒：--model 在场 + --reasoning 在场 + requireCertified —
+    // reasoning 分支同样拒（model 分支先拒亦可；此处单 model 不在场证 reasoning 分支独立承责）。
+    await assert.rejects(
+      () => manager.start("a", { prompt: "p", reasoningOverride: "low", requireCertified: true }),
+      /reasoning_override_certified_conflict/,
+    );
+    assert.deepEqual(listTranscripts(runDir), [], "all refusals precede every side effect (zero transcripts)");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-8: natural per-backend policy refusals — opencode-serve, deepseek-harness minimal, kimi non-K3 (hint names --reasoning)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro8-"));
+  try {
+    const runDir = join(dir, "runs");
+    const makeManager = (entry, backend) => new RunManager({
+      config: { registry: "x", runDir, pollInterval: 10, waitTimeout: 3000 },
+      readRegistry: async () => ({ getAgent: (id) => ({ id, ...entry }), listAgents: () => [] }),
+      transcriptDir: runDir,
+      backendFor: () => backend,
+    });
+
+    // (1) opencode-serve × --reasoning: validateAgentPolicy refuses
+    // reasoning.effort unconditionally (opencodeServe.js) — NO capability
+    // boolean needed; the hint names the --reasoning flag.
+    await assert.rejects(
+      () => makeManager(
+        {
+          backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", cwd: dir,
+          model: { providerID: "zhipuai-coding-plan", id: "glm-5.2" },
+        },
+        new OpenCodeServeBackend(),
+      ).start("a", { prompt: "p", reasoningOverride: "high" }),
+      (e) => {
+        assert.equal(e.message, "opencode-serve backend cannot express reasoning.effort" + REASONING_HINT,
+          "fail-closed verdict + the --reasoning-naming hint");
+        return true;
+      },
+    );
+
+    // (2) deepseek-harness × minimal: the policy limits effort to high|max
+    // (deepSeekHarness.js) — a conditional subset refuses naturally.
+    await assert.rejects(
+      () => makeManager(
+        {
+          backend: "deepseek-harness", cwd: dir,
+          model: { id: "deepseek-v4-pro" },
+          dshConfigPath: "dsh.json", credentialEnv: "DSH_TOKEN",
+        },
+        new DeepSeekHarnessBackend(),
+      ).start("a", { prompt: "p", reasoningOverride: "minimal" }),
+      (e) => {
+        assert.equal(e.message, "deepseek-harness reasoning.effort must be high or max when present" + REASONING_HINT,
+          "subset policy refuses with the --reasoning hint");
+        return true;
+      },
+    );
+
+    // (3) kimi-code × non-K3 model + effort: the K3×{low,high,max} pairing
+    // gate (kimiCode.js) refuses an effort on a non-K3 model id.
+    await assert.rejects(
+      () => makeManager(
+        { backend: "kimi-code", cwd: dir, model: { id: "kimi-code/k2" } },
+        new KimiCodeBackend({ waoCliPath: "/x/wao-cli.cmd" }),
+      ).start("a", { prompt: "p", reasoningOverride: "high" }),
+      (e) => {
+        assert.equal(
+          e.message,
+          "kimi-code backend does not support the configured reasoning.effort for this model" + REASONING_HINT,
+          "conditional model×effort pairing refuses with the --reasoning hint",
+        );
+        return true;
+      },
+    );
+    assert.deepEqual(listTranscripts(runDir), [], "zero transcripts — every refusal precedes all side effects");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-9: resume rebuilds run.started.reasoningOverride — daemon takeover keeps the dispatched effort across run.rerun", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro9-"));
+  const runDir = join(dir, "runs");
+  try {
+    mkdirSync(runDir, { recursive: true });
+    const spawnedReasonings = [];
+    const policyReasonings = [];
+    const fakeBackend = {
+      validateAgentPolicy(agent) { policyReasonings.push(agent.reasoning); },
+      async spawn(agent) {
+        spawnedReasonings.push(agent.reasoning);
+        return {
+          backend: "claude-code",
+          backendSessionId: "s-ro9-new",
+          messageId: "m_ro9",
+          admittedSeq: 1,
+          async *events() { yield { kind: "done", reason: "completed" }; },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+    };
+    const manager = new RunManager({
+      config: { registry: "x", runDir, pollInterval: 10, waitTimeout: 3000 },
+      readRegistry: async () => ({
+        // The registry effort differs from the dispatched override — without
+        // the rebuild this is what the re-spawn would silently fall back to.
+        getAgent: (id) => ({ id, backend: "claude-code", cwd: dir, reasoning: { effort: "medium" } }),
+        listAgents: () => [],
+      }),
+      transcriptDir: runDir,
+      backendFor: () => fakeBackend,
+    });
+    const runId = "run_ro9_resume";
+    seedResumableTranscript(runDir, runId, {
+      reasoning: { effort: "xhigh" },
+      reasoningOverride: "xhigh",
+    });
+    const run = await manager.resume(runId);
+    assert.ok(run, "the takeover run is resumable");
+    assert.deepEqual(policyReasonings.at(-1), { effort: "xhigh" },
+      "validateAgentPolicy sees the rebuilt (synthesized) policy, not the registry effort");
+    assert.deepEqual(spawnedReasonings, [{ effort: "xhigh" }],
+      "the run.rerun re-spawn keeps the dispatched effort — no silent registry fallback");
+    assert.equal(run.agent.reasoning.effort, "xhigh", "the returned Run handle carries the override");
+    const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+    assert.ok(events.some((e) => e.type === "run.rerun"), "the replay branch actually re-spawned");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-9b: resume WITHOUT a persisted reasoningOverride stays byte-compatible (registry reasoning, no synthesis)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro9b-"));
+  const runDir = join(dir, "runs");
+  try {
+    mkdirSync(runDir, { recursive: true });
+    const spawnedReasonings = [];
+    const fakeBackend = {
+      validateAgentPolicy() {},
+      async spawn(agent) {
+        spawnedReasonings.push(agent.reasoning);
+        return {
+          backend: "claude-code",
+          backendSessionId: "s-ro9b",
+          messageId: "m_ro9b",
+          admittedSeq: 1,
+          async *events() { yield { kind: "done", reason: "completed" }; },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+    };
+    const manager = new RunManager({
+      config: { registry: "x", runDir, pollInterval: 10, waitTimeout: 3000 },
+      readRegistry: async () => ({
+        getAgent: (id) => ({ id, backend: "claude-code", cwd: dir, reasoning: { effort: "medium" } }),
+        listAgents: () => [],
+      }),
+      transcriptDir: runDir,
+      backendFor: () => fakeBackend,
+    });
+    const runId = "run_ro9b_resume";
+    // An ordinary run.started: synthesized-at-start reasoning shape, no override fact.
+    seedResumableTranscript(runDir, runId, { reasoning: { effort: "medium" } });
+    const run = await manager.resume(runId);
+    assert.ok(run, "resumable as before");
+    assert.deepEqual(spawnedReasonings, [{ effort: "medium" }],
+      "no persisted override → the registry reasoning exactly as before (regression)");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-9c: a persisted reasoningOverride outside the closed set → resume refuses (null), zero spawns, transcript unchanged", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro9c-"));
+  const runDir = join(dir, "runs");
+  try {
+    mkdirSync(runDir, { recursive: true });
+    let spawns = 0;
+    const fakeBackend = {
+      validateAgentPolicy() {},
+      async spawn() {
+        spawns += 1;
+        throw new Error("unreachable");
+      },
+    };
+    const manager = new RunManager({
+      config: { registry: "x", runDir, pollInterval: 10, waitTimeout: 3000 },
+      readRegistry: async () => ({
+        getAgent: (id) => ({ id, backend: "claude-code", cwd: dir, reasoning: { effort: "medium" } }),
+        listAgents: () => [],
+      }),
+      transcriptDir: runDir,
+      backendFor: () => fakeBackend,
+    });
+    for (const bad of ["ultra", "HIGH", "", true, { effort: "high" }, "--next-flag"]) {
+      const runId = `run_ro9c_${spawns}_${String(typeof bad)}`;
+      const lines = seedResumableTranscript(runDir, runId, { reasoning: { effort: "x" }, reasoningOverride: bad });
+      const run = await manager.resume(runId);
+      assert.equal(run, null, `corrupt persisted value ${JSON.stringify(bad)} → resume refuses`);
+      assert.equal(spawns, 0, "zero re-spawns");
+      const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+      assert.equal(events.length, lines.length, "no events appended by the refused resume");
+      assert.equal(events.some((e) => e.type === "run.rerun"), false, "no run.rerun fact");
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("RO-10: the policy hint has three exact shapes — model-only / reasoning-only / both", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ro10-"));
+  const runDir = join(dir, "runs");
+  const MODEL_HINT = "（当前派发带 --model 覆盖；该 backend 的 model 声明形状与覆盖不兼容）";
+  const BOTH_HINT = "（当前派发带 --model/--reasoning 覆盖；该 backend 的 model/reasoning 声明形状与覆盖不兼容）";
+  try {
+    // One backend refusal text; the wrapper appends exactly one of the three
+    // fixed hint sentences depending on which override(s) are in play.
+    const rejectingBackend = {
+      validateAgentPolicy(agent) {
+        if (agent?.model?.contextWindow !== undefined || agent?.reasoning?.effort !== undefined) {
+          throw new Error("test backend cannot express this policy shape");
+        }
+      },
+      async spawn() { throw new Error("unreachable — validation refuses first"); },
+    };
+    const makeManager = () => new RunManager({
+      config: { registry: "x", runDir, pollInterval: 10, waitTimeout: 3000 },
+      readRegistry: async () => ({
+        getAgent: (id) => ({
+          id, backend: "claude-code", cwd: dir,
+          model: { id: "glm-5.3", contextWindow: 1000000 },
+          reasoning: { effort: "medium" },
+        }),
+        listAgents: () => [],
+      }),
+      transcriptDir: runDir,
+      backendFor: () => rejectingBackend,
+    });
+
+    // (1) model-only → the historical R10-C C-3 sentence, byte-identical.
+    await assert.rejects(
+      () => makeManager().start("a", { prompt: "p", modelOverride: "gpt-5.6-sol-xhigh" }),
+      (e) => {
+        assert.equal(e.message, "test backend cannot express this policy shape" + MODEL_HINT,
+          "model-only keeps the R10-C hint byte-identical (regression)");
+        return true;
+      },
+    );
+    // (2) reasoning-only → the --reasoning sentence.
+    await assert.rejects(
+      () => makeManager().start("a", { prompt: "p", reasoningOverride: "xhigh" }),
+      (e) => {
+        assert.equal(e.message, "test backend cannot express this policy shape" + REASONING_HINT,
+          "reasoning-only names --reasoning");
+        return true;
+      },
+    );
+    // (3) both → the combined sentence naming both flags.
+    await assert.rejects(
+      () => makeManager().start("a", { prompt: "p", modelOverride: "gpt-5.6-sol-xhigh", reasoningOverride: "xhigh" }),
+      (e) => {
+        assert.equal(e.message, "test backend cannot express this policy shape" + BOTH_HINT,
+          "both overrides → one combined sentence naming both flags");
+        return true;
+      },
+    );
+    // (4) no override → byte-identical backend message, no hint.
+    await assert.rejects(
+      () => makeManager().start("a", { prompt: "p" }),
+      (e) => {
+        assert.equal(e.message, "test backend cannot express this policy shape");
+        assert.doesNotMatch(e.message, /--model|--reasoning/, "no hint without an active override");
+        return true;
+      },
+    );
+    assert.deepEqual(listTranscripts(runDir), [], "the refused starts wrote zero transcripts");
   } finally {
     cleanupDir(dir);
   }

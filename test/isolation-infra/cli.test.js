@@ -3568,3 +3568,254 @@ test("R10-A-CLI-8: run --background --model 全链 — CLI JSON 回显 + runner�
     rmrfRetry(dir);
   }
 });
+
+// ---------------------------------------------------------------------------
+// R11-1（Owner 2026-08-17）：per-dispatch reasoning effort 覆盖（--reasoning
+// <effort>）。与 --model 同机制的单次生效覆盖；闭集（minimal/low/medium/
+// high/xhigh/max）；可与 --model 同用（"gpt-5.6-sol + xhigh" 场景）；两道硬
+// 互斥（requireCertified / provider-session reuse）与 model 同语义；无能力
+// 布尔——不可表达（opencode-serve）与条件子集（kimi K3 / dsh high|max）走
+// 既有 per-backend policy 门自然拒绝。
+// ---------------------------------------------------------------------------
+
+// R11-1 前台共用夹具：registry 声明 model + reasoning，注入 backend 捕获合成
+// 策略（与 makeModelOverrideFixture 同构，多一个静态 reasoning）。
+function makeReasoningOverrideFixture(dir) {
+  const spawnedPolicies = [];
+  const fakeBackend = {
+    validateAgentPolicy(agent) {
+      assert.ok(agent.reasoning && typeof agent.reasoning.effort === "string",
+        "synthesized reasoning reaches the ordinary policy validation surface");
+    },
+    async spawn(agent) {
+      spawnedPolicies.push({ model: agent.model, reasoning: agent.reasoning });
+      return {
+        backend: "claude-code",
+        backendSessionId: "s_r11a",
+        messageId: "m_r11a",
+        admittedSeq: 1,
+        async *events() {
+          yield { kind: "assistant", role: "assistant", parts: [{ type: "text", text: "done" }] };
+          yield { kind: "done", reason: "completed" };
+        },
+        abort: async () => {},
+        isAlive: () => false,
+      };
+    },
+  };
+  const readRegistry = async () => ({
+    getAgent(id, overrides = {}) {
+      return {
+        id, backend: "claude-code", cwd: dir,
+        model: { id: "glm-5.3", contextWindow: 1000000 },
+        reasoning: { effort: "medium" },
+        ...overrides,
+      };
+    },
+    listAgents() { return []; },
+  });
+  const config = {
+    registry: "x", runDir: dir, pollInterval: 10, waitTimeout: 5000,
+    timeout: 5000, retries: 0, backendFor: () => fakeBackend, readRegistry,
+  };
+  return { config, spawnedPolicies };
+}
+
+test("R11-1-CLI-1: run --model + --reasoning 前台 → 双覆盖合成 + run.started 双事实 + 合并回显行", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r111-fg-"));
+  try {
+    const { config, spawnedPolicies } = makeReasoningOverrideFixture(dir);
+    const out = await captureLog(async () => {
+      await runCommand([
+        "claude_worker", "--prompt", "hi", "--run-dir", dir,
+        "--model", "gpt-5.6-sol-xhigh", "--reasoning", "xhigh",
+      ], config);
+    });
+    // start 收到（并传给 spawn 的）双合成策略：id 与 effort 都被替换。
+    assert.deepEqual(spawnedPolicies, [{
+      model: { id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 },
+      reasoning: { effort: "xhigh" },
+    }], "dual override: only .id/.effort replaced, siblings preserved");
+    // 合并回显行（advisory）：一次 effective 行同时携带 model 与 reasoning。
+    assert.match(out,
+      /effective model: \{"id":"gpt-5\.6-sol-xhigh","contextWindow":1000000\}, reasoning: \{"effort":"xhigh"\}/,
+      "text format echoes BOTH effective policies on one merged line");
+    // transcript 事实：run.started 的四个字段（双静态 + 双显式覆盖）。
+    const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+    assert.equal(files.length, 1, "one run transcript");
+    const events = await readTranscript(join(dir, files[0]));
+    const started = events.find((e) => e.type === "run.started");
+    assert.deepEqual(started.model, { id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 });
+    assert.deepEqual(started.reasoning, { effort: "xhigh" },
+      "run.started.reasoning reflects the synthesized policy");
+    assert.equal(started.modelOverride, "gpt-5.6-sol-xhigh");
+    assert.equal(started.reasoningOverride, "xhigh",
+      "run.started carries the explicit reasoning override fact");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R11-1-CLI-2: run --reasoning --format json → 结构化 reasoning 字段（无散行，输出保持可解析）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r111-fg-json-"));
+  try {
+    const { config } = makeReasoningOverrideFixture(dir);
+    const out = await captureLog(async () => {
+      await runCommand([
+        "claude_worker", "--prompt", "hi", "--run-dir", dir, "--format", "json", "--reasoning", "high",
+      ], config);
+    });
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.completed, true, "mock run 应 completed");
+    assert.deepEqual(parsed.reasoning, { effort: "high" },
+      "json format carries the structured effective reasoning");
+    assert.doesNotMatch(out, /^effective /m, "json 分支不打印散行（保持机器可解析）");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R11-1-CLI-3: 无 --reasoning 的前台 run 字节不变（无回显行、run.started 无 reasoningOverride；静态 reasoning 照落）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r111-fg-none-"));
+  try {
+    const { config } = makeReasoningOverrideFixture(dir);
+    const out = await captureLog(async () => {
+      await runCommand(["claude_worker", "--prompt", "hi", "--run-dir", dir], config);
+    });
+    assert.doesNotMatch(out, /effective /, "无覆盖时无回显行");
+    const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+    const events = await readTranscript(join(dir, files[0]));
+    const started = events.find((e) => e.type === "run.started");
+    assert.equal("reasoningOverride" in started, false, "run.started 不携带覆盖事实（保持原形状）");
+    assert.deepEqual(started.reasoning, { effort: "medium" },
+      "静态 registry reasoning 现在照实落盘（审计缺口修复），无覆盖不合成");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R11-1-CLI-4: --reasoning 闭集门（集外值/大小写/裸旗标/-- 前缀）→ 固定文案 fail-fast", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r111-gate-"));
+  try {
+    const { config } = makeReasoningOverrideFixture(dir);
+    const badArgvs = [
+      ["--reasoning", "ultra"],           // 集外
+      ["--reasoning", "HIGH"],            // 大小写敏感（不归一化）
+      ["--reasoning"],                    // 裸 flag → parseOptions 给 true
+      ["--reasoning", "--next-flag"],     // 值位被下一个 flag 占据
+      ["--reasoning", ""],                // 空串
+    ];
+    for (const extra of badArgvs) {
+      await assert.rejects(
+        () => runCommand(["claude_worker", "--prompt", "hi", "--run-dir", dir, ...extra], config),
+        (e) => {
+          assert.match(e.message, /--reasoning must be one of the supported reasoning effort values/,
+            `固定文案（${extra.join(" ")}）`);
+          assert.match(e.message, /minimal\/low\/medium\/high\/xhigh\/max/, "文案列出闭集");
+          assert.doesNotMatch(e.message, /ultra|HIGH|next-flag/, "不回显原值");
+          return true;
+        },
+      );
+    }
+    assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".jsonl")), [], "零 transcript（全部在副作用前拒绝）");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R11-1-CLI-5: --reasoning × --require-certified → 互斥 fail-fast（闭集码文案指对旗标）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r111-cert-"));
+  try {
+    const { config } = makeReasoningOverrideFixture(dir);
+    await assert.rejects(
+      () => runCommand([
+        "claude_worker", "--prompt", "hi", "--run-dir", dir,
+        "--reasoning", "high", "--require-certified",
+      ], config),
+      (e) => {
+        assert.match(e.message, /reasoning_override_certified_conflict/, "闭集理由码");
+        assert.match(e.message, /--reasoning is mutually exclusive with --require-certified/, "文案指对 --reasoning 旗标");
+        assert.match(e.message, /drop one of the two flags/i, "修复指引");
+        return true;
+      },
+    );
+    assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".jsonl")), [], "零 transcript");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R11-1-CLI-6: spawn --reasoning → 明确拒绝（--reasoning 是 run 专属表面）", async () => {
+  await assert.rejects(
+    () => spawnCommand(["researcher", "--prompt", "hi", "--reasoning", "high"], {}),
+    (e) => {
+      assert.match(e.message, /--reasoning is only supported on `run`, not `spawn`/);
+      assert.match(e.message, /registry reasoning policy/, "指引持久化 effort 应改注册表");
+      return true;
+    },
+  );
+});
+
+test("R11-1-CLI-7: run --help 用法页含 --reasoning（闭集 + 互斥 + 仅 run 面）", async () => {
+  const out = await captureLog(() => runCommand(["--help"], {}));
+  assert.match(out, /--reasoning EFFORT/, "flag 行存在");
+  assert.match(out, /minimal\/low\/medium\/high\/xhigh\/max/, "闭集说明");
+  assert.match(out, /mutually exclusive with\s+--require-certified/, "认证互斥说明");
+  assert.match(out, /provider-session reuse agents/, "复用互斥说明");
+  assert.match(out, /only on run \(not spawn\/workflow\/daemon\)/, "仅 run 面，spawn/workflow/daemon 不支持");
+  assert.match(out, /effective reasoning/, "回显说明（advisory）");
+});
+
+test("R11-1-CLI-8: run --background --reasoning 全链 — CLI JSON 回显 + runner→start 合成落 transcript", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r111-bg-"));
+  try {
+    // 不存在的 binary：detached runner 真实 fork（既有 TD-54/WF-6 模式），
+    // 但 worker 在 spawn 即失败——零 provider、零 token。
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        bg_ro: {
+          backend: "claude-code",
+          binary: "nonexistent-binary-r111",
+          cwd: dir,
+          reasoning: { effort: "medium" },
+        },
+      },
+    }), "utf8");
+    const runDir = join(dir, "runs");
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "run", "bg_ro",
+      "--prompt", "x",
+      "--background",
+      "--reasoning", "xhigh",
+      "--registry", registryPath,
+      "--run-dir", runDir,
+      "--wait-timeout", "2000",
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 20000 });
+
+    assert.equal(result.status, 0, `background dispatch 应立即返回 JSON: ${result.stderr}`);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.background, true);
+    assert.deepEqual(parsed.reasoning, { effort: "xhigh" },
+      "后台 JSON 回显 effective reasoning（dispatch 时刻可见）");
+
+    // 等 runner 把 run 推到终态（binary 不存在 → spawn_error → failed）。
+    const transcriptPath = join(runDir, `${parsed.runId}.jsonl`);
+    let events = [];
+    for (let i = 0; i < 50; i += 1) {
+      if (existsSync(transcriptPath)) {
+        events = await readTranscript(transcriptPath);
+        if (["failed", "completed", "timed_out"].includes(findState(events))) break;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(events.length > 0, "runner 必须写 transcript");
+    assert.equal(findState(events), "failed", "不存在 binary 应快速 failed");
+    const started = events.find((e) => e.type === "run.started");
+    assert.deepEqual(started.reasoning, { effort: "xhigh" },
+      "CLI→dispatchRun --reasoning argv→backgroundRunner 解析→RunManager.start 合成，全链落地");
+    assert.equal(started.reasoningOverride, "xhigh", "run.started 携带显式 override 事实");
+  } finally {
+    rmrfRetry(dir);
+  }
+});

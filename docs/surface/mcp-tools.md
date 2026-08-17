@@ -118,6 +118,7 @@ Input:
 | readOnly | boolean | no |  |
 | executionProfileId | string | no |  |
 | model | string | no |  |
+| reasoning | string | no | enum: minimal \| low \| medium \| high \| xhigh \| max |
 
 Output:
 
@@ -151,6 +152,7 @@ Input:
 | readOnly | boolean | no |  |
 | executionProfileId | string | no |  |
 | model | string | no |  |
+| reasoning | string | no | enum: minimal \| low \| medium \| high \| xhigh \| max |
 
 Output:
 
