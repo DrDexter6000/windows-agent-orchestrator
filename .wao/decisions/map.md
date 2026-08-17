@@ -24,3 +24,4 @@
 0020 | TD-119 批次会审分歧仲裁：采纳 auditor FAIL
 0021 | MCP 工具面字节稳定性分层（追认 M12-16 regime：name/顺序+schema/annotations 哈希冻结、description 天花板下可修订；减面两级；2026-08-16 外部审计触发）
 0022 | onboarding 角色矩阵展示契约（Owner 两轮反馈定稿）
+0023 | 三席会审产品化

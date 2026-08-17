@@ -37,6 +37,10 @@ import { normalizeAgent } from "../registry.js";
 // R6-C3（P2-4）：backend→CLI 探测映射收敛到 backendCliMap.js 单一来源——doctor
 // 的 scoped 检查与本模块的推荐矩阵共用同一份表（此前两处逐字重复且各自漂移）。
 import { BACKEND_CLI } from "./backendCliMap.js";
+// R9（决策 0023）：三席会审就绪分级（panelReadiness 单一实现）——本模块算
+// 模板面的 rows，分级推导与六态映射都在 panelReadiness（doctor 共用，禁止
+// 两处各算）。computeReadyState 探测归一后委托 deriveReadyState（单一实现）。
+import { assessPanelReadiness, deriveReadyState } from "./panelReadiness.js";
 
 /**
  * Fixed safe error for the onboarding service. The `message` is always a fixed
@@ -246,21 +250,15 @@ function normalizeKey(v) {
  */
 async function computeReadyState({ requiresCli, requiresKeyEnv, probeCli, probeKey }) {
   if (!requiresCli) return "unknown"; // backend maps to no CLI: cannot verify
+  // 六态映射的单一实现在 panelReadiness.deriveReadyState（R9：doctor 共用）；
+  // 这里只做探测 + 归一，不重复映射逻辑。
+  const cli = normalizeCli(await probeCli(requiresCli));
   if (!requiresKeyEnv) {
     // 无 key 依赖项（官方 OAuth / CLI 登录态类）：仅探 CLI。
-    const cli = normalizeCli(await probeCli(requiresCli));
-    if (cli === true) return "login_based";
-    return cli === false ? "missing_cli" : "unknown";
+    return deriveReadyState({ requiresCli, requiresKeyEnv, cli });
   }
-  const cli = normalizeCli(await probeCli(requiresCli));
   const key = normalizeKey(await probeKey(requiresKeyEnv));
-  if (cli === "unknown" || key === "unknown") return "unknown";
-  const cliOk = cli === true;
-  const keyOk = key !== "missing";
-  if (cliOk && keyOk) return "ready";
-  if (!cliOk && keyOk) return "missing_cli";
-  if (cliOk && !keyOk) return "missing_key";
-  return "missing_both";
+  return deriveReadyState({ requiresCli, requiresKeyEnv, cli, key });
 }
 
 /**
@@ -833,6 +831,23 @@ export async function runOnboarding({
 }
 
 // Assemble the bounded result object (single source for --json + human output).
+/**
+ * R9（决策 0023）：把 panelReadiness 分级投影成有界的加性结果字段（与人类
+ * 输出同源）。族系经 modelFamily 推断，是展示标签不是契约。
+ */
+function projectPanelReadiness(recommendations) {
+  const rows = Array.isArray(recommendations?.rows) ? recommendations.rows : [];
+  const a = assessPanelReadiness(rows);
+  return {
+    tier: a.tier,
+    available: a.available.map((e) => ({ id: e.id, family: e.family })),
+    seats: a.seats ? a.seats.map((e) => ({ id: e.id, family: e.family })) : null,
+    loginUnverified: a.loginUnverified,
+    sameFamily: a.sameFamily,
+    singleWorkerVacuous: a.singleWorkerVacuous,
+  };
+}
+
 function baseResult(partial) {
   return {
     mode: partial.outcome === "needs-selection" || partial.outcome === "previewed" ? "preview" : "apply",
@@ -855,6 +870,10 @@ function baseResult(partial) {
     // and human output, like acceptance). Defaults to the empty matrix so a call
     // site can never drop the field.
     recommendations: partial.recommendations ?? emptyRecommendations(),
+    // R9（决策 0023）：三席会审就绪分级（模板面，advisory 加性字段）。从
+    // recommendations.rows 单次推导（panelReadiness 单一实现）；模板不可读
+    // （rows 空）时 tier 如实为 "none"，人类输出整块不打印。
+    panelReadiness: projectPanelReadiness(partial.recommendations ?? emptyRecommendations()),
     certification: partial.certification,
     writes: partial.writes,
     reason: partial.reason ?? null,

@@ -510,6 +510,24 @@ LLM 编排器（未来的 M5 DAG 或外部脚本）只需要：
 3. `collect <runId>` 或读 transcript 拿产出
 4. `runs metrics <runId>` 拿成本
 
+### 三席会审记录：`wao stage` panel 字段（决策 0023，advisory 非门禁）
+
+方案（stage 2）与交付物验收（stage 4）可登记会审 panel 记录——三席会审（Lead 主审 + 两名副审）是推荐标准，配不齐则以两席为次之推荐；强烈推荐但非强制，跳过需登记显式理由：
+
+```powershell
+# 登记自报副审席位（registry 存在性校验；自报、未验证——评审旁证走 --artifacts 的 runs/<runId>.jsonl）
+npm run cli -- wao stage 2 --task "方案定稿" --panel-seats coder_hq,auditor --artifacts docs/plan.md
+# 登记跳过理由（闭集码；与 --panel-seats 互斥，非法码 fail-fast）
+npm run cli -- wao stage 4 --task "交付验收" --panel-skip-reason low_risk_small_task
+# 裸跑查看 panel 分布 + skip 理由分布（pipeline 自省）
+npm run cli -- wao stage --cwd <目标项目>
+```
+
+- 跳过理由闭集（SSOT：`src/waoStage.js` 的 `PANEL_SKIP_REASONS`）：`no_reviewer_available` / `low_risk_small_task` / `time_critical` / `owner_direct`。细节差异（如 provider 临时不可用）进 `--note`，不扩闭集。
+- 其余 stage（1/3/5/6）带 panel 参数 fail-fast（"panel 字段只在方案（2）/交付物验收（4）登记"——不写成"会审仅发生在两节点"，同一 stage 允许多条记录，返工/窄复核照常再登记）。
+- stage 2/4 落盘成功且无 panel 字段时输出 JSON 加性字段 `panelAdvisory`（未记录会审提示；exit 0 不变——非门禁）；stage 4 成功输出固定复述红线："评审意见是证据不是验收；`run_delivery_decide` 只由 Lead 调用"。panel 记录写进 STAGE 正文 frontmatter 与 `pipeline/map.md` 索引行第 5 列（无 panel 的旧行照常解析）。
+- 会审就绪提示的两张面（数据源不同，勿混）：`wao onboarding` 的分级块是**模板面**——从入库模板行 + 当前环境探测推导（onboarding 不读你的 agents.json，它可能还没生成）；`wao doctor` 的 `panel_readiness` 检查是**已配置面**——从你的 `config/agents.json` + doctor 既有探测推导，仅当可用副审 ≤1 时打印 INFO（三席齐备静默；registry 缺位沿既有"未配置（跳过）"INFO 模式；不计 DEGRADED）。分级三档：三席（≥2 名可用副审，推荐标准）/ 两席（恰 1 名，次之推荐，补齐第二副审可升级）/ 无可用副审（跳过提示）；`login_based`/`unknown` 不计入可用但如实展示"登录态未验证"；跨族系（推断族系标签，展示专用非契约）是更强推荐。
+
 ### MCP stdio 接口（agent-facing primary，M9）
 
 WAO 是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude Desktop、Codex、OpenCode、其它 agent runtime）可通过 stdio 把 WAO 当作 MCP server 调用。工具计数、参数与形状不在本文维护：参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。常用 Lead 闭环为 inventory → workspace_status/select → dispatch → await result → delivery review bundle → acceptance，另有原子 status/wait/collect/activity/diagnose、delivery query/review/reverify、stop/list recovery、Lead 授权修正续跑 run_continue。built-in playbook catalog **不在工具面**——它是按需读取的 MCP resources（`wao://playbooks`，见下文）。`run_await_result` 是 advisory 只读便捷工具：一次调用等待终态（waitMs 0..270000，默认 270000；0 为 point-in-time）后返回安全 compact 终态结果 + 真实 run/liveness 观测，snapshot-only 零 audit，绝不 stop/decide/repackage；非终态时 Lead 可按任意合法 waitMs 再调，所有原子工具（run_wait/run_collect/run_status…）始终可用。`waitMs` 约束工具主动 sleep/poll 的总等待预算，而不是给每个内部阶段各分配一份预算；本地 transcript 文件读取与同步 snapshot 投影不能在 JavaScript 执行中途抢占，极端存储停顿可能让实际墙钟略超预算，工具不把这种环境延迟谎报成 worker 失败。`observationOutcome` 区分干净读取（observed）与 transcript 读失败（read_failure）；读失败时必带闭集机器码 `readFailureReason`（`transcript_parse_failed`=读取/JSON 解析异常、`legacy_event_shape`=历史非可用条目/快照形状不兼容、`snapshot_unavailable`=其他安全非解析类失败；observed 为 null），供 Lead 机器化决策——字段只含闭集码，绝不泄漏错误 message/path/command/credential，unexpected 内部异常仍保持固定 opaque 错误（M12-6 FR-08）。每个 tool 直接调用共享 application service，不 shell-out CLI。当前工具清单权威表见 `SKILL.md` 与 `docs/02-architecture.md`。

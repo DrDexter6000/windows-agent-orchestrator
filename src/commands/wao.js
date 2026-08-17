@@ -25,7 +25,7 @@ import { initWaoDir, getWaoDir } from "../waoDir.js";
 import { writeStateSnapshot, readCurrentState } from "../waoState.js";
 import { addDecision, listDecisions, readDecision } from "../waoDecisions.js";
 import { addDeclare, listDeclares, summarizeDeclares, REASON_CODES } from "../waoDeclare.js";
-import { addStage, summarizeStages, STAGE_NUMBERS } from "../waoStage.js";
+import { addStage, summarizeStages, STAGE_NUMBERS, PANEL_SKIP_REASONS, PANEL_STAGES } from "../waoStage.js";
 import { writeHandoff, readHandoff } from "../waoHandoff.js";
 import { parseOptions, resolveTargetCwd } from "./shared.js";
 import { waoDoctorCommand } from "./doctor.js";
@@ -173,10 +173,18 @@ async function waoDeclareCommand(args, config) {
  * 强制力 = 曝光（可见），不是拦截。Lead 仍全权可跳过任意阶段，但跳过会在 dashboard 留缺口。
  * stage 必须是枚举值（STAGE_NUMBERS = 1..6），防跳号或自造阶段逃避门控。
  *
+ * R9（决策 0023，三席会审产品化）：stage 2（方案）/4（交付物验收）可携带
+ * --panel-seats <id[,id]>（自报副审席位，registry 存在性校验）或
+ * --panel-skip-reason <code>（跳过理由闭集码），两者互斥。其余阶段带 panel
+ * 参数 fail-fast。Advisory 非门禁：无 panel 字段照常落盘（exit 0），输出
+ * 加性 panelAdvisory 提示；stage 4 成功输出固定复述红线句。
+ *
  * 用法：
  *   wao stage 1 --task "起草 auth 契约" --artifacts docs/01-prd.md
  *   wao stage 3 --task "派发实现" --artifacts runs/run_xxx.jsonl,runs/run_yyy.jsonl
- *   wao stage              # 裸跑：列出已声明阶段 + 缺口（自省视图）
+ *   wao stage 2 --task "方案定稿" --panel-seats coder_hq,auditor --artifacts docs/plan.md
+ *   wao stage 4 --task "验收" --panel-skip-reason low_risk_small_task
+ *   wao stage              # 裸跑：列出已声明阶段 + 缺口 + panel/skip 分布（自省视图）
  */
 async function waoStageCommand(args, config) {
   // 阶段号是位置参数（纯数字），不能用"第一个非 -- 开头"——那会误匹配 --cwd <path> 的路径值。
@@ -191,12 +199,14 @@ async function waoStageCommand(args, config) {
     if (!options.task) {
       throw new Error(`wao stage requires --task <描述>。阶段 ${stageArg} 的产物描述是可见性的核心。`);
     }
+    // R9：panel 参数解析 + fail-fast 校验（互斥 / 两节点限定 / 闭集 / registry 存在性）。
+    const panel = await parsePanelOptions(stage, options, config);
     const rawArtifacts = options.artifacts
       ? options.artifacts.split(",").map((s) => s.trim()).filter(Boolean)
       : undefined;
     // TD-95 #7：run 路径 artifact 解析为绝对路径（跨项目时可解析）。
     // transcript 物理在 WAO repo 的 runDir，不在 --cwd 目标项目。裸 runs/run_xxx.jsonl
-    // 从目标项目不可解析——解析为绝对路径让审计者能找到。
+    // 从目标项目不可解析——解析为绝对路径让审计者能找到。panel 的评审旁证同走此路径。
     const waoRunDir = resolve(options.runDir ?? config.runDir);
     const artifacts = rawArtifacts?.map((a) => resolveArtifactPath(a, waoRunDir));
     const path = await addStage(waoDir, {
@@ -204,20 +214,106 @@ async function waoStageCommand(args, config) {
       task: options.task,
       artifacts,
       note: options.note,
+      panel,
     });
-    console.log(JSON.stringify({ staged: true, stage, path }, null, 2));
+    // 纯 JSON 输出契约：新增提示只作加性字段（panelAdvisory / acceptanceRedLine /
+    // panel），exit 0 不变——非门禁。
+    const out = { staged: true, stage, path };
+    if (panel) {
+      out.panel = panel.seats
+        ? { seats: panel.seats, note: "自报、未验证（评审旁证走 --artifacts 的 runs/<runId>.jsonl）" }
+        : { skipReason: panel.skipReason };
+    } else if (PANEL_STAGES.includes(stage)) {
+      out.panelAdvisory =
+        "未记录会审——三席会审是推荐标准（决策 0023）；有意跳过请用 --panel-skip-reason 登记理由";
+    }
+    if (stage === 4) {
+      out.acceptanceRedLine = "评审意见是证据不是验收；run_delivery_decide 只由 Lead 调用";
+    }
+    console.log(JSON.stringify(out, null, 2));
     return;
   }
   // 无阶段号 → 默认列出已声明阶段 + 缺口（裸 "wao stage" = pipeline 自省视图）。
   const summary = await summarizeStages(waoDir);
   const progress = STAGE_NUMBERS.map((n) => `[${n}]${summary.declared.has(n) ? "✓" : "—"}`).join(" ");
   // 注意：declared 是 Set，JSON.stringify(Set) → {}。转数组输出，便于人读 + pipeline 解析。
+  // R9：panel 分布（席位记录数 + skip 理由分布，仿 declare byReason）为加性字段。
   console.log(JSON.stringify({
     declared: [...summary.declared].sort((a, b) => a - b),
     count: summary.count,
     stages: summary.stages,
     progress,
+    panel: summary.panel,
   }, null, 2));
+}
+
+/**
+ * R9：解析并校验 --panel-seats / --panel-skip-reason。
+ * 两 flag 互斥；只在 stage 2/4 接受；skip 码必须在 PANEL_SKIP_REASONS 闭集；
+ * seats 逐个对 registry（--registry ?? config.registry）做存在性校验——席位是
+ * 自报记录，但必须是已配置 worker（输出文案标注"自报、未验证"）。
+ * @returns {Promise<{seats: string[]}|{skipReason: string}|undefined>}
+ */
+async function parsePanelOptions(stage, options, config) {
+  const seatsRaw = typeof options.panelSeats === "string" ? options.panelSeats : undefined;
+  const skipRaw = typeof options.panelSkipReason === "string" ? options.panelSkipReason : undefined;
+  if (!seatsRaw && !skipRaw) return undefined;
+  if (seatsRaw && skipRaw) {
+    throw new Error("--panel-seats 与 --panel-skip-reason 互斥——登记了会审席位就不是跳过（决策 0023）。");
+  }
+  if (!PANEL_STAGES.includes(stage)) {
+    throw new Error(
+      `panel 字段只在方案（2）/交付物验收（4）登记，got stage ${stage}。` +
+      `（决策 0023 两节点限定；同一阶段允许多条记录，返工/窄复核照常再登记。）`
+    );
+  }
+  if (skipRaw) {
+    if (!PANEL_SKIP_REASONS.includes(skipRaw)) {
+      throw new Error(
+        `--panel-skip-reason 必须是闭集值之一 [${PANEL_SKIP_REASONS.join(", ")}]，got "${skipRaw}"。` +
+        `理由码用枚举防"登记"退化成自由文本；细节差异（如 provider 临时不可用）进 --note。`
+      );
+    }
+    return { skipReason: skipRaw };
+  }
+  const seats = seatsRaw.split(",").map((s) => s.trim()).filter(Boolean);
+  if (seats.length === 0) {
+    throw new Error("--panel-seats 需要至少一个 worker id（逗号分隔，如 --panel-seats coder_hq,auditor）。");
+  }
+  await assertSeatsInRegistry(seats, options, config);
+  return { seats };
+}
+
+/** seats 的 registry 存在性校验（读 --registry ?? config.registry；缺位/坏档/未知 id 都 fail-fast）。 */
+async function assertSeatsInRegistry(seats, options, config) {
+  const registryPath = resolve(options.registry ?? config.registry);
+  let raw;
+  try {
+    raw = await readFile(registryPath, "utf8");
+  } catch {
+    throw new Error(
+      `--panel-seats 需要 registry 存在性校验，但读取失败: ${registryPath}。` +
+      `先跑 npm run cli -- wao onboarding --agent <id> --apply 生成，或用 --registry 指向有效 registry。`
+    );
+  }
+  let agents;
+  try {
+    agents = JSON.parse(raw)?.agents;
+  } catch {
+    throw new Error(
+      `--panel-seats 的 registry 解析失败（${registryPath}）——先用 registry validate 定位修复。`
+    );
+  }
+  if (!agents || typeof agents !== "object" || Array.isArray(agents)) {
+    throw new Error(`--panel-seats 的 registry 缺少可用 agents 表（${registryPath}）。`);
+  }
+  const unknown = seats.filter((s) => !Object.prototype.hasOwnProperty.call(agents, s));
+  if (unknown.length > 0) {
+    throw new Error(
+      `--panel-seats 引用了 registry 里不存在的 worker: ${unknown.join(", ")}（registry: ${registryPath}）。` +
+      `席位是自报记录，但必须是已配置的 worker id。`
+    );
+  }
 }
 
 async function waoStateCommand(args, config) {

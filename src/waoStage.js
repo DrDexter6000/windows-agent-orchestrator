@@ -20,6 +20,10 @@
  *
  * STAGE_NUMBERS 是阶段编号的权威枚举（SSOT），SKILL.md 和 docs-consistency 守卫指向它。
  * 改这个数组 = 同步改 SKILL 文档 + 守卫测试。
+ *
+ * R9（决策 0023，三席会审产品化）：stage 2/4 可携带 panel 记录（--panel-seats
+ * 自报副审 / --panel-skip-reason 跳过理由闭集码）。Advisory 非门禁：无 panel
+ * 照常落盘，命令层输出 panelAdvisory 提示；PANEL_SKIP_REASONS 是理由码 SSOT。
  */
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -47,13 +51,41 @@ export const STAGE_DESC = {
 const STAGE_PREFIX = "STAGE-";
 
 /**
- * 新增一条阶段声明。原子地建正文 + 更新 map 索引。
- * @param {string} waoDir
- * @param {{stage: number, task: string, artifacts?: string[], note?: string}} data
- * @returns {Promise<string>} 正文文件路径
- * @throws {Error} stage 不在 STAGE_NUMBERS 枚举内，或 task 为空
+ * 三席会审跳过理由码的权威闭集（SSOT，R9/决策 0023）。SKILL/docs/cliHelp 的
+ * 表述与 docs-consistency 守卫都 import 本数组对账，不复制值指纹（TD-120）。
+ * 细节差异（如 provider 临时不可用）进 --note，不扩闭集。
  */
-export async function addStage(waoDir, { stage, task, artifacts, note }) {
+export const PANEL_SKIP_REASONS = Object.freeze([
+  "no_reviewer_available", // 环境里配不齐副审（onboarding/doctor 的 panel 提示可佐证）
+  "low_risk_small_task",   // 小任务/低风险（0023 允许的显式豁免）
+  "time_critical",         // 时延敏感，会审成本不可接受
+  "owner_direct",          // Owner 明示跳过
+]);
+
+/**
+ * 可登记 panel 字段的阶段闭集：方案（2）与交付物验收（4）——0023 的两节点限定。
+ * 措辞注意：panel 字段只在这两个阶段登记 ≠ 会审只能发生一次/不可多轮；
+ * 同一 stage 允许多条 panel 记录（返工/窄复核的真实形状）。
+ */
+export const PANEL_STAGES = Object.freeze([2, 4]);
+
+/**
+ * 新增一条阶段声明。原子地建正文 + 更新 map 索引。
+ *
+ * R9（决策 0023）：stage 2/4 可携带 panel 记录（会审席位自报或跳过理由）——
+ * 强烈推荐但非门禁：无 panel 字段照常落盘（命令层给 panelAdvisory 提示）。
+ * 同一 stage 多次声明即多条记录（无唯一性校验）。
+ *
+ * @param {string} waoDir
+ * @param {{stage: number, task: string, artifacts?: string[], note?: string,
+ *          panel?: {seats?: string[], skipReason?: string}}} data
+ *   panel.seats：两名副审的自报席位（命令层已做 registry 存在性校验）；
+ *   panel.skipReason：跳过理由，必须在 PANEL_SKIP_REASONS 闭集内。两者互斥。
+ * @returns {Promise<string>} 正文文件路径
+ * @throws {Error} stage 不在 STAGE_NUMBERS 枚举内、task 为空、panel 带非法
+ *   形状（闭集外 skip 码 / 非 2|4 阶段 / seats 与 skipReason 同给）
+ */
+export async function addStage(waoDir, { stage, task, artifacts, note, panel }) {
   if (!STAGE_NUMBERS.includes(stage)) {
     throw new Error(
       `stage 必须是 [${STAGE_NUMBERS.join(", ")}] 之一，got "${stage}"。` +
@@ -63,6 +95,7 @@ export async function addStage(waoDir, { stage, task, artifacts, note }) {
   if (!task || !task.trim()) {
     throw new Error("stage --task 不能为空——声明要让 pipeline 进度可见，task 是可见性的核心。");
   }
+  assertPanelShape(stage, panel);
 
   const pipelineDir = join(waoDir, "pipeline");
   const ts = new Date().toISOString().replace(/[-:.]/g, "").slice(0, 15); // YYYYMMDDTHHMM
@@ -77,6 +110,8 @@ export async function addStage(waoDir, { stage, task, artifacts, note }) {
     `type: stage`,
     `stage: ${stage}`,
     `task: ${JSON.stringify(task)}`,
+    panel?.seats ? `panel_seats: ${JSON.stringify(panel.seats)}` : "",
+    panel?.skipReason ? `panel_skip_reason: ${panel.skipReason}` : "",
     `date: ${new Date().toISOString().slice(0, 10)}`,
     `---`,
     ``,
@@ -88,21 +123,78 @@ export async function addStage(waoDir, { stage, task, artifacts, note }) {
       ? `## Artifacts（产物路径指针，传引用不传内容）\n${artifactList.map((a) => `- ${a}`).join("\n")}`
       : `_（本阶段无外部产物文件——派发/验收阶段的证据在 runs/<runId>.jsonl）_`,
     ``,
+    panel?.seats
+      ? `## Panel（三席会审记录，决策 0023）\n副审席位（自报、未验证）: ${panel.seats.join(" + ")}。` +
+        `评审旁证（transcript 路径）走上方 Artifacts；席位记录是证据不是验收。`
+      : "",
+    panel?.skipReason
+      ? `## Panel（会审跳过登记，决策 0023）\nskip 理由码: \`${panel.skipReason}\`（闭集值）。`
+      : "",
     note ? `## Note\n${note}\n` : "",
   ].filter((l) => l !== "").join("\n");
   await writeFile(filePath, (content.endsWith("\n") ? content : content + "\n"), "utf8");
 
-  // map 索引行（pipeline/map.md，与 ADR/DECL 索引行视觉区分：STAGE 前缀 + 阶段号）
+  // map 索引行（pipeline/map.md，与 ADR/DECL 索引行视觉区分：STAGE 前缀 + 阶段号）。
+  // panel 摘要为加性第 5 列；无 panel 的旧行照常 4 列解析（向后兼容）。
   const artifactsSummary = artifactList.length > 0 ? artifactList[0].slice(0, 40) : "(无产物)";
+  const panelSummary = panel?.seats
+    ? ` | panel=seats:${panel.seats.join("+")}`
+    : panel?.skipReason ? ` | panel=skip:${panel.skipReason}` : "";
   await appendMapIndex(join(pipelineDir, "map.md"),
-    `STAGE | ${stage} | ${task.slice(0, 50)} | ${artifactsSummary}`);
+    `STAGE | ${stage} | ${task.slice(0, 50)} | ${artifactsSummary}${panelSummary}`);
 
   return filePath;
 }
 
+/** panel 形状校验（两节点限定优先 + 闭集 + 互斥；addStage 服务层契约）。 */
+function assertPanelShape(stage, panel) {
+  if (!panel) return;
+  const hasSeats = Array.isArray(panel.seats) && panel.seats.length > 0;
+  const hasSkip = typeof panel.skipReason === "string" && panel.skipReason.length > 0;
+  // 两节点限定先于其余校验——错阶段带 panel 时文案必须是本句（R9 契约）。
+  if ((hasSeats || hasSkip) && !PANEL_STAGES.includes(stage)) {
+    throw new Error(
+      `panel 字段只在方案（2）/交付物验收（4）登记，got stage ${stage}。` +
+      `（0023 两节点限定；同一阶段允许多条记录，返工/窄复核照常再登记。）`
+    );
+  }
+  if (hasSeats && hasSkip) {
+    throw new Error("--panel-seats 与 --panel-skip-reason 互斥——登记了会审席位就不是跳过。");
+  }
+  if (!hasSeats && !hasSkip) {
+    throw new Error('panel 形状非法：需要 {seats:[...]} 或 {skipReason:"..."} 之一。');
+  }
+  if (hasSkip && !PANEL_SKIP_REASONS.includes(panel.skipReason)) {
+    throw new Error(
+      `--panel-skip-reason 必须是闭集值之一 [${PANEL_SKIP_REASONS.join(", ")}]，got "${panel.skipReason}"。` +
+      `理由码用枚举防"登记"退化成自由文本；细节差异（如 provider 临时不可用）进 --note。`
+    );
+  }
+  if (hasSeats) {
+    for (const seat of panel.seats) {
+      if (typeof seat !== "string" || !seat.trim()) {
+        throw new Error("--panel-seats 的每个席位必须是 registry 里的 worker id（非空字符串）。");
+      }
+    }
+  }
+}
+
+/** map 索引行第 5 列 panel 摘要 → 结构化对象（旧行无该列 → null）。 */
+function parsePanelSummary(text) {
+  const s = String(text ?? "").trim();
+  if (s.startsWith("panel=seats:")) {
+    return { seats: s.slice("panel=seats:".length).split("+").map((x) => x.trim()).filter(Boolean) };
+  }
+  if (s.startsWith("panel=skip:")) {
+    return { skipReason: s.slice("panel=skip:".length).trim() };
+  }
+  return null;
+}
+
 /**
  * 列出所有阶段声明（从 pipeline/map.md 读 STAGE 行）。
- * @returns {Promise<Array<{stage: number, task: string, artifact: string}>>}
+ * @returns {Promise<Array<{stage: number, task: string, artifact: string,
+ *   panel: {seats: string[]}|{skipReason: string}|null}>>}
  */
 export async function listStages(waoDir) {
   const mapPath = join(waoDir, "pipeline", "map.md");
@@ -115,19 +207,38 @@ export async function listStages(waoDir) {
       stage: Number(parts[1]) || 0,
       task: parts[2] ?? "",
       artifact: parts[3] ?? "",
+      panel: parsePanelSummary(parts[4]),
     };
   });
 }
 
 /**
  * 统计阶段声明（供 dashboard 聚合——让 pipeline 进度可见）。
- * 返回每个阶段是否已声明 + 已声明阶段数。
- * @returns {Promise<{declared: Set<number>, stages: Array<{stage, task, artifact}>, count: number}>}
+ * 返回每个阶段是否已声明 + 已声明阶段数 + panel 分布（R9：席位记录数与
+ * skip 理由分布，仿 declare 的 byReason）。
+ * @returns {Promise<{declared: Set<number>, stages: Array<object>, count: number,
+ *   panel: {records: number, seatsRecords: number, bySkipReason: Object<string, number>}}>}
  */
 export async function summarizeStages(waoDir) {
   const stages = await listStages(waoDir);
   const declared = new Set(stages.map((s) => s.stage));
-  return { declared, stages, count: stages.length };
+  const seatsRecords = stages.filter((s) => s.panel?.seats).length;
+  const bySkipReason = {};
+  for (const s of stages) {
+    if (s.panel?.skipReason) {
+      bySkipReason[s.panel.skipReason] = (bySkipReason[s.panel.skipReason] ?? 0) + 1;
+    }
+  }
+  return {
+    declared,
+    stages,
+    count: stages.length,
+    panel: {
+      records: stages.filter((s) => s.panel).length,
+      seatsRecords,
+      bySkipReason,
+    },
+  };
 }
 
 function slugify(text) {

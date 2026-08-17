@@ -2664,3 +2664,110 @@ test("R5 onboarding surface anchors: install.ps1 thin-wrapper path + hostExample
   assert.ok(/claude mcp add wao --scope user --/.test(onb) && /codex mcp add wao --/.test(onb),
     "buildHostExamples 的一行注册示例形状（claude --scope user / codex）不得漂移");
 });
+
+// ============================================================
+// R9 / ADR 0023（2026-08-17）：三席会审产品化的关系型守卫。
+// 纪律（TD-120）：skip 码一律 import waoStage SSOT 做前向+反向对账，禁值指纹；
+// SKILL/team-roles/AGENT_ONBOARDING 的新表述锚 + 决策 0023 的 supersedes 与
+// 四码对账。失败 → 修文档（不是修测试）。
+// ============================================================
+
+// usage.md panel 节反问对账的冻结 allowlist：反引号包裹且含下划线、但不属于
+// PANEL_SKIP_REASONS 闭集的 token。逐成员理由：
+//   - PANEL_SKIP_REASONS：SSOT 数组名（usage 指向它，不复制成员语义）。
+//   - run_delivery_decide：MCP 工具名（红线句复述，toolSurface SSOT 成员）。
+//   - panelAdvisory：wao stage 成功输出的加性 JSON 字段名。
+//   - panel_readiness：doctor 条件 INFO 检查名。
+//   - login_based：readyState 六态闭集成员（application/onboarding.js 引擎域）。
+export const USAGE_PANEL_ALLOWLIST = Object.freeze([
+  "PANEL_SKIP_REASONS",
+  "run_delivery_decide",
+  "panelAdvisory",
+  "panel_readiness",
+  "login_based",
+]);
+
+test("ADR 0023 关系型守卫: usage.md panel 节 skip 码与 waoStage SSOT 一致（前向覆盖 + 反向对账）", async () => {
+  const { PANEL_SKIP_REASONS } = await import("../../src/waoStage.js");
+  const usage = read("docs/usage.md");
+  const heading = "### 三席会审记录：`wao stage` panel 字段（决策 0023，advisory 非门禁）";
+  const start = usage.indexOf(heading);
+  assert.ok(start !== -1, "docs/usage.md 缺 wao stage panel 节（ADR 0023）");
+  const rest = usage.slice(start + heading.length);
+  const next = rest.indexOf("\n### ");
+  const slice = next === -1 ? rest : rest.slice(0, next);
+  // 前向：闭集每个成员都在节内（doc 覆盖 SSOT 全集）。
+  for (const code of PANEL_SKIP_REASONS) {
+    assert.ok(slice.includes(code),
+      `usage.md panel 节缺闭集成员 ${code}（应覆盖 waoStage SSOT 全集）`);
+  }
+  // 反向：节内所有反引号包裹且含下划线的 token ∈ 闭集 ∪ 冻结 allowlist。
+  const allowed = new Set([...PANEL_SKIP_REASONS, ...USAGE_PANEL_ALLOWLIST]);
+  const tokens = [...slice.matchAll(/`([^`\n]+)`/g)]
+    .map((m) => m[1])
+    .filter((t) => t.includes("_"));
+  assert.ok(tokens.length > 0, "panel 节反引号 token 提取异常（空集）");
+  for (const token of tokens) {
+    assert.ok(allowed.has(token),
+      `usage.md panel 节出现未对账 token \`${token}\`（不在 PANEL_SKIP_REASONS ∪ 冻结 allowlist）`);
+  }
+});
+
+test("ADR 0023: 决策 0023 在场 + 四码/两阶段/supersedes 与代码 SSOT 对账", async () => {
+  const { PANEL_SKIP_REASONS, PANEL_STAGES } = await import("../../src/waoStage.js");
+  // map.md 索引 + 正文文件都在场（CLI 生成的 SSOT 形状）。
+  assert.ok(read(".wao/decisions/map.md").includes("0023 | 三席会审产品化"),
+    "decisions/map.md 缺 0023 索引行");
+  const decision = read(".wao/decisions/0023-三席会审产品化.md");
+  // 头部显式 supersede 0019 的三条（默认不审 / 豁免无需留痕 / 不新增守卫）。
+  assert.ok(/supersedes 0019/.test(decision), "0023 必须显式声明 supersedes 0019");
+  for (const superseded of ["默认不审", "豁免无需留痕", "不为本惯例新增守卫"]) {
+    assert.ok(decision.includes(superseded),
+      `0023 的 supersede 清单必须点名 0019 的"${superseded}"条款`);
+  }
+  // 保留条款引用（0019 §3 席位回避 + 证据不是验收红线）。
+  assert.ok(decision.includes("0019 §3"), "0023 必须引用保留的 0019 §3 席位回避");
+  assert.ok(/证据不是验收/.test(decision) && decision.includes("run_delivery_decide"),
+    "0023 必须复述证据不是验收红线");
+  // 关系型（TD-120）：四码从 waoStage SSOT import 对账，不硬编码。
+  for (const code of PANEL_SKIP_REASONS) {
+    assert.ok(decision.includes(code), `0023 缺 skip 闭集成员 ${code}（与 SSOT 对账）`);
+  }
+  for (const n of PANEL_STAGES) {
+    assert.ok(decision.includes(`stage ${n}`), `0023 必须点名 stage ${n}（两节点限定）`);
+  }
+});
+
+test("ADR 0023: SKILL.md 三席标准表述锚（推荐标准/两节点/skip 登记/跨族系/红线）", () => {
+  const skill = read("SKILL.md");
+  assert.ok(skill.includes("三席会审是推荐标准（决策 0023"),
+    "SKILL.md 必须把三席会审表述为推荐标准并指向 0023");
+  assert.ok(skill.includes("`wao stage 2`") && skill.includes("`wao stage 4`"),
+    "SKILL.md 必须点名方案（stage 2）与验收（stage 4）两节点");
+  assert.ok(skill.includes("--panel-skip-reason"), "SKILL.md 必须指向 skip 登记 flag");
+  assert.ok(skill.includes("跨族系大模型会审是更强推荐"), "SKILL.md 必须携带跨族系推荐");
+  assert.ok(skill.includes("0019 §3"), "SKILL.md 必须引用保留的 0019 §3 席位回避");
+  assert.ok(skill.includes("panel 记录是证据不是验收，`run_delivery_decide` 只由 Lead 调用"),
+    "SKILL.md panel 记录必须复述证据不是验收红线");
+  // 反回归：0019 旧姿态句（被 0023 supersede）不得复现。
+  assert.ok(!skill.includes("仅在语义仍不确定时窄调一次"),
+    "SKILL.md 不得保留 0019 的'默认不审'时代窄调句（0023 已 supersede）");
+});
+
+test("ADR 0023: team-roles.md 第 7 条与 onboarding 副审配置建议对齐 0023 表述", () => {
+  const roles = read("docs/team-roles.md");
+  const item7 = roles.split("\n").find((l) => l.startsWith("7. **")) ?? "";
+  assert.ok(item7.includes("三席会审是推荐标准（决策 0023"), "team-roles 第 7 条必须是三席推荐标准表述");
+  assert.ok(item7.includes("--panel-skip-reason"), "team-roles 第 7 条必须指向 skip 登记");
+  assert.ok(item7.includes("`run_delivery_decide` 只由 Lead 调用"), "team-roles 第 7 条必须复述红线");
+  assert.ok(item7.includes("0019 §3 席位回避保留"), "team-roles 第 7 条必须引用保留的席位回避");
+  // 反回归：0019 时代的"默认姿态不变"句不得复现（0023 已 supersede §2）。
+  assert.ok(!roles.includes("默认姿态不变"), "team-roles 不得保留'默认姿态不变'旧姿态句");
+  // AGENT_ONBOARDING.md 的副审配置建议（两席最佳 = auditor 专职 + coder 系替补）。
+  const ob = read("AGENT_ONBOARDING.md");
+  assert.ok(/对抗席专职/.test(ob) && /coder 系/.test(ob),
+    "onboarding 副审建议必须给出 auditor 专职 + coder 系替补的最佳组合");
+  assert.ok(/不同大模型族系|不同族系/.test(ob), "onboarding 副审建议必须含跨族系建议");
+  assert.ok(ob.includes("决策 0023"), "onboarding 副审建议必须指向决策 0023");
+  assert.ok(ob.includes("--panel-skip-reason"), "onboarding 副审建议必须提及 skip 登记出口");
+});

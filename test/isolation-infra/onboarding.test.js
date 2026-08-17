@@ -1390,10 +1390,10 @@ test("R6-C: recommendations over the REAL tracked template derive all seven rows
 });
 
 // R6-C2（Owner 反馈）：矩阵行必须列出 backend 列；登录态行的认证标签必须写明
-// 具体哪个 CLI；尾部注明 coder 会审替补且选位权在 Lead（ADR 0019）。
-// R6-C3（P1-1）：替补句从矩阵行派生——fixture 必须真的含 coder_* 行，断言枚举
-// 的是实际存在的 id（此前 fixture 零 coder_* 却断言句子在场，把错误行为钉死）。
-test("R6-C2: 矩阵渲染含 backend 列、登录态行写明具体 CLI、coder 替补提示从行派生", async () => {
+// 具体哪个 CLI。
+// R9（决策 0023）：既有"会审备选"句已升级为分级块——三席可用（推荐标准）+
+// 建议席位组合（含推断族系）+ 席位惯例句（候选 id 从模板行派生，0019 §3 保留）。
+test("R6-C2/R9: 矩阵渲染含 backend 列、登录态行写明具体 CLI、分级块三席 + 席位惯例从行派生", async () => {
   const { runOnboarding } = await import("../../src/application/onboarding.js");
   const { renderHuman } = await import("../../src/commands/onboarding.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-onb-matrix2-"));
@@ -1402,7 +1402,7 @@ test("R6-C2: 矩阵渲染含 backend 列、登录态行写明具体 CLI、coder 
   // 极简模板：一个 key 型 + 一个登录型（codex）+ 一个 coder 通道（claude-code + ZHIPU key）。
   writeFileSync(join(root, "config", "agents.example.json"), JSON.stringify({
     agents: {
-      w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, _comment_task: "适合任务: 编码" },
+      w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, _comment_task: "适合任务: 编码", model: { id: "glm-5.3[1m]" } },
       tester: { backend: "codex", _comment_task: "适合任务: 跑测试", _comment_auth: "codex login" },
       coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, _comment_task: "适合任务: 写代码" },
     },
@@ -1425,22 +1425,28 @@ test("R6-C2: 矩阵渲染含 backend 列、登录态行写明具体 CLI、coder 
   // 登录态行写明具体 CLI（第二行布局）。
   assert.match(text, /认证: codex CLI 登录态/, "登录态行的认证标签必须写明具体 CLI 名");
   assert.match(text, /认证: key ZHIPU_API_KEY/, "key 型行标签不变");
-  // 替补句从矩阵行派生：枚举实际存在的 coder 通道（此处恰为 coder_hq），
-  // 两席措辞对齐 ADR 0019（实现席 + 对抗席），选位权在 Lead。
-  assert.ok(text.includes("本矩阵中的 coder 通道（coder_hq）均可入席"),
-    "替补句必须枚举矩阵中实际存在的 coder 通道 id（复核 R1 措辞：不定性实现席）");
-  assert.ok(text.includes("对抗席默认 auditor、可换 coder_mm"), "两席结构措辞在第二行");
-  assert.ok(text.includes("对抗席默认 auditor、可换 coder_mm"),
-    "两席结构（对抗席默认 auditor）必须按 ADR 0019 措辞");
-  assert.ok(text.includes("ADR 0019"), "两席规则与选位权必须指向 ADR 0019");
-  assert.ok(!text.includes("互为方案/交付物会审的备选席位"),
-    "旧的三者互为措辞必须移除（与 ADR 0019 两席结构不符）");
+  // R9 分级块：三个 key/登录可用行中 w_key 与 tester 均 ready → 三席（推荐标准）。
+  assert.ok(text.includes("会审就绪（模板面"), "分级块头部标注模板面数据源");
+  assert.ok(text.includes("三席可用——推荐标准（Lead 主审 + 两名副审）"), "三席分级与推荐标准措辞");
+  assert.ok(text.includes("决策 0023"), "分级块指向决策 0023");
+  assert.ok(/建议席位组合[^\n]*w_key（GLM） ?\+ ?coder_hq（Claude）/.test(text),
+    "建议席位组合枚举可用副审并带推断族系标签（tester 是 login_based 不入可用）");
+  assert.ok(text.includes("登录态未验证（如实展示，不计入可用）"), "非可用行如实展示");
+  // 席位惯例句从矩阵行派生：枚举实际存在的 coder 通道（此处恰为 coder_hq），
+  // 对抗席候选同样从行派生（此处无 auditor/coder_mm 行 → 不点名）。
+  assert.ok(text.includes("实现席从 coder 通道取（避同族/避被审产出作者）"),
+    "席位惯例句保留 0019 §3 回避语义");
+  assert.ok(/在场候选（从上表模板行派生）: 实现席 coder_hq/.test(text),
+    "在场候选枚举矩阵中实际存在的 coder 通道 id");
+  assert.ok(!text.includes("对抗席"), "不在模板中的对抗席 worker 不点名（shape-derived）");
+  assert.ok(text.includes("0019 §3"), "席位回避规则指向 0019 §3（0023 保留条款）");
   rmSync(dir, { recursive: true, force: true });
 });
 
-// R6-C3（P1-1）负向：矩阵零 coder_* 行时替补句整句不打印——labels are
-// shape-derived，不打印模板里不存在的 worker。
-test("R6-C3: 矩阵无任何 coder_* 行时替补句不打印（shape-derived）", async () => {
+// R6-C3（P1-1）负向 + R9：矩阵零 coder_* 行时席位惯例句整句不打印——labels are
+// shape-derived，不打印模板里不存在的 worker。分级块本身照常打印（它按全部行
+// 推导，与 coder 通道枚举是两件事）。
+test("R6-C3/R9: 矩阵无任何 coder_* 行时席位惯例句不打印（shape-derived），分级块照常", async () => {
   const { runOnboarding } = await import("../../src/application/onboarding.js");
   const { renderHuman } = await import("../../src/commands/onboarding.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-onb-matrix3-"));
@@ -1448,7 +1454,7 @@ test("R6-C3: 矩阵无任何 coder_* 行时替补句不打印（shape-derived）
   mkdirSync(join(root, "config"), { recursive: true });
   writeFileSync(join(root, "config", "agents.example.json"), JSON.stringify({
     agents: {
-      w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, _comment_task: "适合任务: 编码" },
+      w_key: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, _comment_task: "适合任务: 编码", model: { id: "glm-5.3[1m]" } },
       tester: { backend: "codex", _comment_task: "适合任务: 跑测试" },
     },
   }));
@@ -1465,11 +1471,13 @@ test("R6-C3: 矩阵无任何 coder_* 行时替补句不打印（shape-derived）
   const text = renderHuman(r);
   assert.equal(r.recommendations.rows.length, 2, "矩阵本身照常渲染（前置条件）");
   assert.ok(text.includes("角色矩阵与当前环境适配"), "矩阵块在场（前置条件：负向不是因矩阵缺失而通过）");
-  assert.ok(!text.includes("会审备选") && !text.includes("coder 通道"), "零 coder_* 行 ⇒ 替补句整句不打印");
-  assert.ok(!text.includes("coder 通道"), "不得提及矩阵中不存在的 coder 通道");
+  assert.ok(!text.includes("会审备选") && !text.includes("coder 通道"), "零 coder_* 行 ⇒ 席位惯例句整句不打印");
   assert.ok(!text.includes("coder_hq") && !text.includes("coder_low") && !text.includes("coder_mm"),
     "不得打印模板里没有的 worker id");
-  // 尾行选位提示仍在（与替补句是两句话）。
+  // R9：分级块照常（两行均 ready → 三席），且不点名缺席的对抗席候选。
+  assert.ok(text.includes("会审就绪（模板面"), "分级块不受 coder 通道缺失影响");
+  assert.ok(!text.includes("对抗席候选"), "无 auditor/coder_mm 行时对抗席候选不点名");
+  // 尾行选位提示仍在（与席位惯例句是两句话）。
   assert.ok(text.includes("按你有的认证选一行重跑 --agent <id> --apply"), "选位提示行不受影响");
   rmSync(dir, { recursive: true, force: true });
 });
@@ -1578,4 +1586,230 @@ test("复核 R4: displayWidth 语义 + 矩阵渲染行显示宽上界（回归�
       `矩阵行显示宽超 120（${displayWidth(line)}）: ${line.slice(0, 40)}…`);
   }
   rmSync(dir, { recursive: true, force: true });
+});
+
+// ── 18b. R9（决策 0023）：三席会审就绪分级块（模板面）+ panelReadiness 加性字段 ──
+//
+// Owner 需求 1（两出口都给建议）/ 需求 2（分级三档 + 六态 + 单 worker 注脚 +
+// 同族提示）的行为断言。输入注入式 probeEnv（绝无真实探测/真实派发）。
+
+function tmpTemplate(agents, name = "wao-onb-panel-") {
+  const root = join(mkdtempSync(join(tmpdir(), name)), "wao");
+  mkdirSync(join(root, "config"), { recursive: true });
+  writeFileSync(join(root, "config", "agents.example.json"), JSON.stringify({ agents }));
+  return root;
+}
+
+async function runWithTemplate(root, probeEnv, extra = {}) {
+  const { runOnboarding } = await import("../../src/application/onboarding.js");
+  const fsMod = await import("node:fs/promises");
+  return runOnboarding({
+    installRoot: root,
+    exampleRegistryPath: join(root, "config", "agents.example.json"),
+    targetRegistryPath: join(root, "config", "agents.json"),
+    reliabilitySummaryPath: join(root, "runs", "reliability-summary.json"),
+    probeEnv,
+    fs: { readFile: fsMod.readFile, writeFile: fsMod.writeFile, rename: fsMod.rename,
+      existsSync, unlink: fsMod.unlink, mkdir: (p) => fsMod.mkdir(p, { recursive: true }) },
+    ...extra,
+  });
+}
+
+test("R9 需求 1: no-args 与 selected/--apply 两出口都打印分级块（注入式 registry/env）", async () => {
+  const { renderHuman } = await import("../../src/commands/onboarding.js");
+  const probeAll = { hasCli: async () => true, hasKeyEnv: async () => "process_env" };
+  // 规范形状的两 coder 通道（normalizeAgent 可接受的完整字段；registry 存在性
+  // 与 apply 写路径走真实 tmp 文件，绝无真实派发）。
+  const root = tmpTemplate({
+    coder_hq: {
+      backend: "claude-code",
+      provider: { protocol: "anthropic-compatible", baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" },
+      cwd: ".", systemPrompt: "config/roles/coder_hq.md",
+      model: { id: "glm-5.3[1m]", contextWindow: 1000000 }, reasoning: { effort: "max" },
+    },
+    coder_low: {
+      backend: "claude-code",
+      provider: { protocol: "anthropic-compatible", baseUrl: "https://api.deepseek.com/anthropic", apiKeyEnv: "DEEPSEEK_API_KEY" },
+      cwd: ".", systemPrompt: "config/roles/coder_low.md",
+      model: { id: "deepseek-v4-pro", contextWindow: 1000000 }, reasoning: { effort: "max" },
+    },
+  });
+  try {
+    const r1 = await runWithTemplate(root, probeAll);
+    assert.equal(r1.outcome, "needs-selection");
+    assert.ok(renderHuman(r1).includes("会审就绪（模板面"), "no-args 出口打印分级块");
+    // 出口二：selected + --apply（写真实 tmp 文件后仍打印）。
+    const r2 = await runWithTemplate(root, probeAll, { agentId: "coder_hq", apply: true });
+    assert.equal(r2.outcome, "applied");
+    assert.ok(renderHuman(r2).includes("会审就绪（模板面"), "selected/--apply 出口打印分级块");
+    assert.ok(!renderHuman(r2).includes("按你有的认证"), "selected 分支不带 no-args 的选位尾行（两出口形状不同）");
+  } finally {
+    rmSync(join(root, ".."), { recursive: true, force: true });
+  }
+});
+
+test("R9 需求 2: 两席（次之推荐）+ 单 worker 注脚——文案明说作者回避使两席建议空转", async () => {
+  const { renderHuman } = await import("../../src/commands/onboarding.js");
+  const root = tmpTemplate({
+    w_glm: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+    w_ds: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" } },
+  });
+  try {
+    // 恰一名可用（w_glm ready；w_ds 缺 key）。
+    const r = await runWithTemplate(root, {
+      hasCli: async () => true,
+      hasKeyEnv: async (n) => (n === "ZHIPU_API_KEY" ? "process_env" : "missing"),
+    });
+    assert.equal(r.panelReadiness.tier, "two_seat");
+    const text = renderHuman(r);
+    assert.ok(text.includes("两席可用——次之推荐（Lead 主审 + 一名副审）"), "两席分级措辞");
+    assert.ok(/可用副审: w_glm（GLM）——补齐第二个副审（建议不同族系）可升级三席/.test(text),
+      "补齐第二副审升级句在场");
+    assert.ok(!text.includes("单 worker"), "多 worker 时单 worker 注脚不出现");
+  } finally {
+    rmSync(join(root, ".."), { recursive: true, force: true });
+  }
+  // 单 worker：唯一 worker 即被审产出作者（0019 §3 回避），两席建议事实空转。
+  const solo = tmpTemplate({
+    w_solo: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+  }, "wao-onb-solo-");
+  try {
+    const r = await runWithTemplate(solo, { hasCli: async () => true, hasKeyEnv: async () => "process_env" });
+    assert.equal(r.panelReadiness.tier, "two_seat");
+    const text = renderHuman(r);
+    assert.ok(text.includes("两席可用——次之推荐"), "单可用副审仍按两席分级（前置条件）");
+    assert.ok(text.includes("它通常即被审产出的作者（0019 §3 作者回避）——两席建议事实空转"),
+      "单 worker 注脚必须明说空转");
+  } finally {
+    rmSync(join(solo, ".."), { recursive: true, force: true });
+  }
+});
+
+test("R9 需求 2/4: 无可用副审 → 跳过提示（--panel-skip-reason 登记句在场）", async () => {
+  const { renderHuman } = await import("../../src/commands/onboarding.js");
+  const root = tmpTemplate({
+    w_glm: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+    w_ds: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" } },
+  });
+  try {
+    const r = await runWithTemplate(root, { hasCli: async () => false, hasKeyEnv: async () => "missing" });
+    assert.equal(r.panelReadiness.tier, "none");
+    const text = renderHuman(r);
+    assert.ok(text.includes("当前无可用副审"), "none 分级措辞");
+    assert.ok(text.includes("--panel-skip-reason"), "跳过需登记理由的提示在场");
+    assert.ok(text.includes("强烈推荐但非强制"), "非强制定位明示");
+  } finally {
+    rmSync(join(root, ".."), { recursive: true, force: true });
+  }
+});
+
+test("R9 需求 5: 同族提示——≥2 可用但推断族系单一 → 跨族系是更强推荐一行", async () => {
+  const { renderHuman } = await import("../../src/commands/onboarding.js");
+  const root = tmpTemplate({
+    w_glm1: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+    w_glm2: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" } },
+  });
+  try {
+    const r = await runWithTemplate(root, { hasCli: async () => true, hasKeyEnv: async () => "process_env" });
+    assert.equal(r.panelReadiness.tier, "three_seat");
+    assert.equal(r.panelReadiness.sameFamily, true);
+    const text = renderHuman(r);
+    assert.ok(text.includes("跨族系提示"), "同族提示行在场");
+    assert.ok(text.includes("跨族系是更强推荐"), "跨族系推荐措辞");
+    assert.ok(text.includes("未知族系不参与判定"), "未知族系不参与判定的括注随提示行在场");
+  } finally {
+    rmSync(join(root, ".."), { recursive: true, force: true });
+  }
+});
+
+test("R9: login_based 副审（如 auditor）如实展示为登录态未验证，不当已验证讲", async () => {
+  const { renderHuman } = await import("../../src/commands/onboarding.js");
+  const root = tmpTemplate({
+    w_glm: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+    auditor: { backend: "claude-code", model: { id: "claude-opus-5" }, _comment_auth: "官方 Claude OAuth" },
+  });
+  try {
+    // claude CLI 在 PATH、无 key 声明 → auditor = login_based（登录态无法远程验证）。
+    const r = await runWithTemplate(root, { hasCli: async () => true, hasKeyEnv: async () => "process_env" });
+    const audRow = r.recommendations.rows.find((row) => row.id === "auditor");
+    assert.equal(audRow.readyState, "login_based", "auditor 引擎值是 login_based（前置条件）");
+    assert.deepEqual(r.panelReadiness.loginUnverified, ["auditor"]);
+    assert.equal(r.panelReadiness.tier, "two_seat", "login_based 不计入可用 ⇒ 只有一名副审");
+    const text = renderHuman(r);
+    assert.match(text, /登录态未验证（如实展示，不计入可用）: auditor/,
+      "登录态未验证句如实展示且点名");
+    assert.ok(!/auditor[^\n]{0,12}可用/.test(text.replace(/登录态未验证（如实展示，不计入可用）: auditor/, "")),
+      "不得把 auditor 的登录态当已验证讲");
+  } finally {
+    rmSync(join(root, ".."), { recursive: true, force: true });
+  }
+});
+
+test("R9: panelReadiness 是加性字段——既有键全保留、JSON 可序列化；模板不可读时人类块不打印", async () => {
+  const { renderHuman } = await import("../../src/commands/onboarding.js");
+  const root = tmpTemplate({
+    w_glm: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+    w_ds: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" } },
+  });
+  try {
+    const r = await runWithTemplate(root, { hasCli: async () => true, hasKeyEnv: async () => "process_env" });
+    const json = JSON.parse(JSON.stringify(r));
+    for (const key of ["mode", "outcome", "selected", "needsSelection", "candidates",
+      "registry", "mcpSnippet", "hostExamples", "acceptance", "recommendations",
+      "certification", "writes", "reason"]) {
+      assert.ok(key in json, `加性字段不得挤掉既有键：${key}`);
+    }
+    assert.ok(json.panelReadiness && ["three_seat", "two_seat", "none"].includes(json.panelReadiness.tier));
+    assert.ok(Array.isArray(json.panelReadiness.available));
+    assert.equal(json.panelReadiness.seats.length, 2, "三席时建议组合恰两名");
+    for (const e of [...json.panelReadiness.available, ...json.panelReadiness.seats]) {
+      assert.ok(typeof e.id === "string" && typeof e.family === "string");
+    }
+    assert.ok(!/sk-[A-Za-z0-9]{6,}/.test(JSON.stringify(json.panelReadiness)), "不携带凭证值");
+  } finally {
+    rmSync(join(root, ".."), { recursive: true, force: true });
+  }
+  // 模板不可读（error 路径）：recommendations 空 → 人类输出整块不打印。
+  const fs = makeMemFs({}); // 空内存 fs：模板读取必然 ENOENT
+  const err = await runOnboarding({
+    installRoot: "D:/wao",
+    exampleRegistryPath: "D:/wao/config/agents.example.json",
+    targetRegistryPath: "D:/wao/config/agents.json",
+    reliabilitySummaryPath: "D:/wao/runs/reliability-summary.json",
+    fs,
+  });
+  assert.equal(err.outcome, "error");
+  assert.deepEqual(err.recommendations.rows, []);
+  assert.equal(err.panelReadiness.tier, "none", "空 rows 的加性字段如实为 none");
+  assert.ok(!renderHuman(err).includes("会审就绪"), "模板不可读 error 路径整块不打印");
+});
+
+test("R9: 分级块每行显示宽 ≤120（与矩阵块同纪律）", async () => {
+  const { displayWidth } = await import("../../src/application/onboarding.js");
+  const { renderHuman } = await import("../../src/commands/onboarding.js");
+  const root = tmpTemplate({
+    coder_opencode_fallback: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", model: { id: "glm-5.2" }, tokenBudget: 5000000 },
+    auditor: { backend: "claude-code", model: { id: "claude-opus-5" } },
+    w_glm: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+    w_ds: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" } },
+    coder_mm: { backend: "kimi-code", model: { id: "kimi-code/k3" } },
+  });
+  try {
+    const r = await runWithTemplate(root, { hasCli: async () => true, hasKeyEnv: async () => "process_env" });
+    const text = renderHuman(r);
+    const inPanel = [];
+    let seen = false;
+    for (const line of text.split("\n")) {
+      if (line.includes("会审就绪")) seen = true;
+      else if (seen && (line.includes("Acceptance recipe") || line.includes("Host-neutral") || line.includes("按你有的认证"))) break;
+      else if (seen && line.trim().length > 0) inPanel.push(line);
+    }
+    assert.ok(inPanel.length >= 2, "分级块至少两行（前置条件）");
+    for (const line of inPanel) {
+      assert.ok(displayWidth(line) <= 120,
+        `分级块行显示宽超 120（${displayWidth(line)}）: ${line.slice(0, 40)}…`);
+    }
+  } finally {
+    rmSync(join(root, ".."), { recursive: true, force: true });
+  }
 });

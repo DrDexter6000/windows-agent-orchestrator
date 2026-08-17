@@ -29,6 +29,8 @@ import { runOnboarding, HOST_EXAMPLES_AUTHORITY, displayWidth } from "../applica
 // R6-C: key probing reuses the credential-readiness SSOT (process env → Windows
 // User scope) — no second registry read or env-name policy here.
 import { resolveCredentialEnv } from "../application/credentialReadiness.js";
+// R9（决策 0023）：会审就绪分级块的族系展示标签（推断，非契约）。
+import { familyLabel } from "../application/modelFamily.js";
 
 // ── R6-C: production environment probe ───────────────────────────────────────
 // One probeEnv per command invocation, passed to the pure recommendation engine.
@@ -164,18 +166,10 @@ export function renderHuman(r) {
         lines.push(`  ${padEndDisplay(row.id ?? "?", 24)} ${padEndDisplay(row.backend ?? "?", 15)} ${padEndDisplay(row.model ?? "?", 19)} [${recommendationReadyLabel(row)}]`);
         lines.push(`    ${truncateDisplay(recommendationAuthLabel(row), 56)} · 适合: ${truncateDisplay(recommendationDutyDisplay(row.duty), 50)}`);
       }
-      // R6-C3（P1-1）+ 复核 R1：替补句从矩阵行派生——只枚举模板里实际存在的 coder_*
-      // 通道，零 coder 行时整句不打印（labels are shape-derived）。措辞不定性到
-      // "实现席"（ADR 0019 的实现席是 hq/low 取一、对抗席默认 auditor 可换
-      // coder_mm——派生集合里的 coder_mm/fallback 不该被定性为实现席备选），
-      // 只说"可作会审备选"并把两席规则交给 ADR 0019。拆两行控制显示宽 ≤120。
-      // 本矩阵不替 Lead 选择。
-      const coderRows = rows.filter((row) => /^coder_/.test(String(row.id ?? "")));
-      if (coderRows.length > 0) {
-        lines.push("");
-        lines.push(`会审备选：本矩阵中的 coder 通道（${coderRows.map((row) => row.id).join("、")}）均可入席；`);
-        lines.push("两席分配（实现席避同族取一；对抗席默认 auditor、可换 coder_mm）与选位权见 ADR 0019，由 Lead 自行决定。");
-      }
+      // R9（决策 0023）：既有"会审备选"句升级为分级块（三席/两席/无 + 同族 +
+      // 单 worker 注脚 + 登录态未验证），标签仍从模板行生、不动矩阵列宽。
+      lines.push("");
+      lines.push(...panelReadinessLines(r));
       lines.push("");
       lines.push("按你有的认证选一行重跑 --agent <id> --apply；没有的 key 对应行可忽略。");
     }
@@ -191,6 +185,13 @@ export function renderHuman(r) {
         ? " (endorsed: manualOverride:cleared written)"
         : " (--endorse-worker <id> writes the manual clearance instead)";
       lines.push(`Strict certification path: \`${r.certification.strictCommand}\`${endorseTxt}`);
+    }
+    // R9（决策 0023）：selected/--apply 分支同样打印分级块（与 --json 同源的
+    // result.panelReadiness；模板不可读时整块不打印）。
+    const panelLines = panelReadinessLines(r);
+    if (panelLines.length > 0) {
+      lines.push("");
+      lines.push(...panelLines);
     }
   }
 
@@ -233,6 +234,53 @@ export function renderHuman(r) {
   }
 
   return `${lines.join("\n")}\n`;
+}
+
+// ── R9 三席会审就绪分级块（决策 0023）────────────────────────────────────────
+// 从 result.panelReadiness（与 --json 同一对象派生，application 层单一推导）
+// 渲染；数据源 = 入库模板行 + 环境探测（模板面——onboarding 不读用户 registry，
+// 它还没生成）。advisory：只提示不替 Lead 选位；每行显示宽 ≤120（displayWidth
+// 纪律与矩阵块一致）。模板不可读（recommendations 空）时整块不打印。
+function panelReadinessLines(r) {
+  const rows = Array.isArray(r.recommendations?.rows) ? r.recommendations.rows : [];
+  if (rows.length === 0 || !r.panelReadiness) return [];
+  const p = r.panelReadiness;
+  const seat = (e) => `${e.id}（${familyLabel(e.family)}）`;
+  const lines = [];
+  if (p.tier === "three_seat") {
+    lines.push("会审就绪（模板面·按当前环境探测，决策 0023）: 三席可用——推荐标准（Lead 主审 + 两名副审）");
+    lines.push(`  建议席位组合（展示建议，选位权在 Lead）: ${seat(p.seats[0])} + ${seat(p.seats[1])}`);
+    if (p.sameFamily) {
+      lines.push("  跨族系提示：可用副审的已知族系不足两族——跨族系是更强推荐（未知族系不参与判定）");
+    }
+  } else if (p.tier === "two_seat") {
+    lines.push("会审就绪（模板面·按当前环境探测，决策 0023）: 两席可用——次之推荐（Lead 主审 + 一名副审）");
+    lines.push(`  可用副审: ${p.available.map(seat).join("、")}——补齐第二个副审（建议不同族系）可升级三席`);
+    if (p.singleWorkerVacuous) {
+      lines.push("  注：模板仅一名 worker，它通常即被审产出的作者（0019 §3 作者回避）——两席建议事实空转");
+    }
+  } else {
+    lines.push("会审就绪（模板面·按当前环境探测，决策 0023）: 当前无可用副审");
+    lines.push("  有意跳过会审时，在 wao stage 2/4 用 --panel-skip-reason 登记显式理由（强烈推荐但非强制）");
+  }
+  if (p.loginUnverified.length > 0) {
+    lines.push(`  登录态未验证（如实展示，不计入可用）: ${p.loginUnverified.join("、")}`);
+  }
+  // 席位惯例句（0019 §3 保留）：候选 id 全部从模板行派生（不在模板的 worker
+  // 不点名），零候选时整句不打印（shape-derived，0022 契约 (6)）。拆两行控制
+  // 显示宽 ≤120（全量模板 4 条 coder 通道也不折行）。
+  const coderIds = rows.filter((row) => /^coder_/.test(String(row.id ?? ""))).map((row) => row.id);
+  const adversarialIds = rows
+    .filter((row) => row.id === "auditor" || row.id === "coder_mm")
+    .map((row) => row.id);
+  if (coderIds.length > 0 || adversarialIds.length > 0) {
+    lines.push("  席位惯例（0019 §3 保留）: 实现席从 coder 通道取（避同族/避被审产出作者）；组合与选位权由 Lead 决定");
+    const parts = [];
+    if (coderIds.length > 0) parts.push(`实现席 ${coderIds.join("、")}`);
+    if (adversarialIds.length > 0) parts.push(`对抗席 ${adversarialIds.join("、")}`);
+    lines.push(`  在场候选（从上表模板行派生）: ${parts.join("；")}`);
+  }
+  return lines;
 }
 
 // ── R6-C human rendering helpers ─────────────────────────────────────────────

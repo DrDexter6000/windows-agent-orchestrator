@@ -13,6 +13,8 @@
 // Round 8 R8-C（C-8/C-10）：cwd === "." 的 worker 出 INFO（R8-1 去占位化的
 // 静默落点提示——不计 DEGRADED）；WARN detail 补 run: 子句并对 sessionReuse
 // worker 区分实际先发的拒因（SessionReuseWorkspaceRequiredError）。
+// R9（决策 0023）：新增条件 INFO panel_readiness（已配置面的三席会审就绪，
+// 三席齐备静默；registry 缺位沿 U1 INFO 跳过模式）——advisory，不计 DEGRADED。
 //
 // 命令族：wao doctor [--strict] [--warn-as-error] [--format json] [--registry FILE] [--cwd DIR]
 //
@@ -55,6 +57,12 @@ import { resolveCredentialEnv, requiredCredentialNames } from "../application/cr
 // R6-C3（P2-4）：backend→CLI 探测映射收敛到 backendCliMap.js 单一权威表——本文件
 // 原持有的本地表与 application/onboarding.js 逐字重复且都漏了 deepseek-harness。
 import { BACKEND_CLI } from "../application/backendCliMap.js";
+// R9（决策 0023）：三席会审就绪分级（已配置面）。分级推导与六态映射的单一实现
+// 在 application/panelReadiness.js（onboarding 的模板面共用同一份）——本文件只
+// 包装输入行（registry agents + 本命令既有的 CLI/key 探测事实），禁止在此重算分级。
+import { assessPanelReadiness, deriveReadyState } from "../application/panelReadiness.js";
+// R9：doctor INFO 文案与 waoStage 的 skip 码闭集对账（同一 SSOT import，禁值指纹）。
+import { PANEL_SKIP_REASONS } from "../waoStage.js";
 
 // TD-95 #11 --strict：JS parse smoke（防注释崩溃漏到运行时，复盘 #3 教训）。
 // 对 src/*.js 跑 node --check。doctor --strict 时调用。
@@ -206,6 +214,9 @@ export async function waoDoctorCommand(args, config) {
   const unmappableBackends = [];
   let hasKimiWorker = false;
   let providerWorkerCount = 0;
+  // R9：CLI/key 探测事实的收集面（panel_readiness 输入；见步骤 4/5 的填充点）。
+  const cliFound = new Map();
+  const keySource = new Map();
   if (registryOk) {
     for (const [id, agent] of Object.entries(registryAgents)) {
       const backend = agent?.backend;
@@ -224,6 +235,7 @@ export async function waoDoctorCommand(args, config) {
   }
 
   // 4. 各 CLI 在 PATH（scoped：只在保留 worker 需要时探测；否则 INFO 跳过）。
+  // R9：探测结果同时记进 cliFound（步骤 3 声明；panel_readiness 的输入事实，不二次探测）。
   for (const cli of KNOWN_CLIS) {
     if (!registryOk || !neededClis.has(cli)) {
       pushCheck(checks, {
@@ -235,6 +247,7 @@ export async function waoDoctorCommand(args, config) {
       continue;
     }
     const found = await whichCli(cli);
+    cliFound.set(cli, found);
     pushCheck(checks, {
       name: `cli_${cli}`,
       pass: found,
@@ -252,6 +265,9 @@ export async function waoDoctorCommand(args, config) {
     // 全 INFO 跳过（R5-B U1 模式）——parse-fail 面已由 registry_loads WARN 承担，
     // 不新增 FAIL 面。
     pushCheck(checks, { name: "cwd", pass: true, level: "info", detail: "未配置（跳过）" });
+    // R9：panel_readiness 沿同一 U1 INFO 跳过模式（registry 缺位/parse-fail 都
+    // 不计算分级，形状与 cli_*/keys/cwd 一致）。
+    pushCheck(checks, { name: "panel_readiness", pass: true, level: "info", detail: "未配置（跳过）" });
   } else if (providerWorkerCount === 0 && !hasKimiWorker) {
     pushCheck(checks, {
       name: "keys",
@@ -275,6 +291,7 @@ export async function waoDoctorCommand(args, config) {
       // 声明零 key（登录态认证）；而 claude-code wrapper + Kimi 端点的 worker 声明的
       // KIMI_API_KEY 是它真正需要的 env，必须照常检查（registry 级布尔会吞掉它）。
       const r = await resolveCredentialEnv(name);
+      keySource.set(name, r.source); // R9：panel_readiness 输入事实（不二次解析）
       if (r.source === "process_env") {
         pushCheck(checks, { name: `key_${name}`, pass: true, detail: "已设置" });
       } else if (r.source === "user_env") {
@@ -389,6 +406,59 @@ export async function waoDoctorCommand(args, config) {
         level: "warn",
         detail: `worker ${id} 的 registry cwd 不存在: ${probed.path}（${refusal}；Node spawn 的经典陷阱是把 cwd 缺失误报成 executable ENOENT）；run: 编辑 ${registryPath} 的 cwd 指向已存在目录，或派发时显式传 --cwd`,
         fix: `编辑 ${registryPath} 的 cwd 指向已存在目录，或派发时显式传 --cwd`,
+      });
+    }
+    // R9（决策 0023，三席会审就绪·已配置面）：输入 = 本命令既有的 registry
+    // 读取 + CLI/key 探测事实（不新增探测）；分级推导在 application/
+    // panelReadiness.js（单一实现，onboarding 模板面共用）。仅当可用副审 ≤1
+    // 时打印 INFO（三席齐备静默）；INFO 不计 DEGRADED/退出码——advisory。
+    const panelRows = Object.entries(registryAgents).map(([id, agent]) => {
+      const requiresCli = BACKEND_CLI[agent?.backend] ?? null;
+      const names = requiredCredentialNames(agent);
+      let key;
+      if (names.length > 0) {
+        const sources = names.map((n) => keySource.get(n));
+        key = sources.every((s) => s === "process_env") ? "process_env"
+          : sources.includes("missing") ? "missing"
+          : sources.every((s) => s === "process_env" || s === "user_env") ? "user_env"
+          : "unknown";
+      }
+      return {
+        id,
+        backend: agent?.backend ?? null,
+        model: agent?.model?.id ?? null,
+        readyState: deriveReadyState({
+          requiresCli,
+          requiresKeyEnv: names.length > 0 ? names[0] : null,
+          cli: requiresCli ? cliFound.get(requiresCli) : undefined,
+          key,
+        }),
+      };
+    });
+    const panel = assessPanelReadiness(panelRows);
+    if (panel.tier !== "three_seat") {
+      const seatList = panel.available.map((e) => e.id).join("、");
+      let detail;
+      if (panel.tier === "two_seat") {
+        detail = `已配置面：会审副审仅 1 名可用（${seatList}）——三席会审（决策 0023）为推荐标准，`
+          + `可先两席（Lead 主审 + 一副审，次之推荐），补齐第二副审（建议不同族系）可升级三席；`
+          + `跳过则在 wao stage 2/4 用 --panel-skip-reason 登记`;
+      } else {
+        detail = "已配置面：会审副审 0 名可用——三席/两席会审暂不可配（决策 0023：强烈推荐但非强制）；"
+          + `有意跳过在 wao stage 2/4 用 --panel-skip-reason 登记（闭集码：${PANEL_SKIP_REASONS.join(" | ")}）`;
+      }
+      if (panel.singleWorkerVacuous) {
+        detail += "；注：registry 仅一名 worker，它通常即被审产出作者（0019 §3 作者回避），两席建议事实空转";
+      }
+      if (panel.loginUnverified.length > 0) {
+        detail += `；登录态未验证（不计入可用）：${panel.loginUnverified.join("、")}`;
+      }
+      pushCheck(checks, {
+        name: "panel_readiness",
+        pass: true,
+        level: "info",
+        detail,
+        fix: "按认证增配另一族系的可用 worker（npm run cli -- wao onboarding --agent <id> --apply）可补齐三席；或维持现状并用 --panel-skip-reason 登记（advisory，非门禁）",
       });
     }
     pushCheck(checks, { name: "registry_loads", pass: true, detail: `${agents.length} agents` });

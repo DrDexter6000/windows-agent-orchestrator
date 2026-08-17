@@ -74,7 +74,7 @@ On failure, the Lead decides the response from delivery truth + supplementary di
 
 ## Advisor / Auditor Discipline
 
-Lead 先自审方案和结果。`auditor` 是 Chief-Advisor/Auditor（前置建议，后置复核），仅在语义仍不确定时窄调一次，无新证据不重复。不可用、超时或无 verdict 时可换 `coder_mm`，不阻断 dispatch；仅项目权威明令必审时停为 governance block，不得称 WAO control-plane failure。意见不替代 Lead 裁决；Advisor/Auditor remain conditional. 三方会审惯例（劝诫，ADR 0019）：方案/验收可由 Lead + coder_hq/low 取一（避同族）+ auditor/mm 取一会审。
+Lead 先自审方案和结果。`auditor` 是 Chief-Advisor/Auditor（前置建议，后置复核）。不可用、超时或无 verdict 时可换 `coder_mm`，不阻断 dispatch；仅项目权威明令必审时停为 governance block，不得称 WAO control-plane failure。意见不替代 Lead 裁决。三席会审是推荐标准（决策 0023，advisory 非门禁）：方案（`wao stage 2`）与交付物验收（`wao stage 4`）强烈建议 Lead 主审 + 两名副审；配不齐两副审则以 Lead + 一副审两席为次之推荐。席位避同族、避被审产出作者（0019 §3 席位回避保留），跨族系大模型会审是更强推荐；跳过需 `--panel-skip-reason` 登记显式理由（闭集码见 `wao stage` 用法）。panel 记录是证据不是验收，`run_delivery_decide` 只由 Lead 调用；Advisor/Auditor remain conditional.
 
 ## Scorecard
 

@@ -1417,6 +1417,188 @@ test("TD-95 #7: stage artifact 含 run 路径时存为绝对路径（跨项目�
   }
 });
 
+// ── R9（决策 0023）：wao stage panel 字段（三席会审产品化，advisory 非门禁）──
+//
+// 需求 3（2/4 接受、1/3/5/6 拒绝、同 stage 多条记录）与需求 4（无 panel →
+// panelAdvisory + stdout 纯 JSON + exit 0；非法 skip 码/互斥 fail-fast）的
+// 端到端行为断言。registry 用临时目录 fixture（绝无真实派发）。
+
+/** R9 fixture：临时项目目录 + .wao/ init + 双 worker registry（coder_hq/auditor）。 */
+function makePanelFixture(name) {
+  const dir = mkdtempSync(join(tmpdir(), name));
+  spawnSync(process.execPath, ["src/cli.js", "wao", "init", "--cwd", dir],
+    { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+  const registry = join(dir, "agents.json");
+  writeFileSync(registry, JSON.stringify({
+    agents: {
+      coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, cwd: "." },
+      auditor: { backend: "claude-code", cwd: "." },
+    },
+  }), "utf8");
+  return { dir, registry };
+}
+
+test("R9 需求 3: stage 2/4 接受 --panel-seats（registry 校验 + 自报标注 + map/自省留痕），1/3/5/6 拒绝", () => {
+  const { dir, registry } = makePanelFixture("wao-stage-panel-acc-");
+  try {
+    // stage 2 接受 seats：输出纯 JSON，panel.seats 在场且标注自报未验证。
+    const r2 = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "stage", "2",
+      "--task", "方案定稿",
+      "--panel-seats", "coder_hq,auditor",
+      "--registry", registry,
+      "--cwd", dir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    assert.equal(r2.status, 0, `stage 2 带 panel-seats 应成功，stderr=${r2.stderr}`);
+    const out2 = JSON.parse(r2.stdout);
+    assert.deepEqual(out2.panel.seats, ["coder_hq", "auditor"]);
+    assert.match(out2.panel.note, /自报、未验证/);
+    assert.match(out2.panel.note, /--artifacts/);
+    // stage 4 接受 skip：skipReason 在场 + 红线句复述。
+    const r4 = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "stage", "4",
+      "--task", "交付验收",
+      "--panel-skip-reason", "low_risk_small_task",
+      "--registry", registry,
+      "--cwd", dir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    assert.equal(r4.status, 0, `stage 4 带 skip 应成功，stderr=${r4.stderr}`);
+    const out4 = JSON.parse(r4.stdout);
+    assert.equal(out4.panel.skipReason, "low_risk_small_task");
+    assert.match(out4.acceptanceRedLine, /评审意见是证据不是验收；run_delivery_decide 只由 Lead 调用/);
+    // 1/3/5/6 带 panel 参数 → fail-fast，文案必须是两节点限定句。
+    for (const n of [1, 3, 5, 6]) {
+      const bad = spawnSync(process.execPath, [
+        "src/cli.js", "wao", "stage", String(n),
+        "--task", "x",
+        "--panel-seats", "coder_hq",
+        "--registry", registry,
+        "--cwd", dir,
+      ], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+      assert.notEqual(bad.status, 0, `stage ${n} 带 panel 参数必须 fail-fast`);
+      assert.match(bad.stderr, /panel 字段只在方案（2）\/交付物验收（4）登记/,
+        `stage ${n} 拒绝文案必须是两节点限定句（不是"会审仅发生在两节点"）`);
+    }
+    // map 索引行第 5 列 panel 摘要 + 裸 wao stage 可检索。
+    const map = readFileSync(join(dir, ".wao", "pipeline", "map.md"), "utf8");
+    assert.match(map, /STAGE \| 2 \| [^|]+\| [^|]+\| panel=seats:coder_hq\+auditor/);
+    assert.match(map, /panel=skip:low_risk_small_task/);
+    const bare = spawnSync(process.execPath, ["src/cli.js", "wao", "stage", "--cwd", dir],
+      { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    assert.equal(bare.status, 0);
+    const summary = JSON.parse(bare.stdout);
+    assert.equal(summary.panel.records, 2);
+    assert.equal(summary.panel.seatsRecords, 1);
+    assert.deepEqual(summary.panel.bySkipReason, { low_risk_small_task: 1 });
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R9 需求 4: 无 panel 的 stage 2/4 → panelAdvisory + stdout 仍可 JSON.parse + exit 0（非门禁钉死）", () => {
+  const { dir } = makePanelFixture("wao-stage-panel-nudge-");
+  try {
+    for (const n of [2, 4]) {
+      const r = spawnSync(process.execPath, [
+        "src/cli.js", "wao", "stage", String(n),
+        "--task", `t${n}`,
+        "--cwd", dir,
+      ], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+      assert.equal(r.status, 0, `stage ${n} 无 panel 必须照常成功（advisory 非门禁），stderr=${r.stderr}`);
+      const out = JSON.parse(r.stdout); // stdout 是纯 JSON——任何提示只能走加性字段
+      assert.match(out.panelAdvisory, /未记录会审——三席会审是推荐标准（决策 0023）/);
+      assert.match(out.panelAdvisory, /--panel-skip-reason/);
+      assert.ok(!("panel" in out), "无 panel 字段时输出 panel 对象不在场");
+    }
+    // stage 1/3/5/6 无 panel：不给 nudge（两节点限定）。
+    const r3 = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "stage", "3", "--task", "t3", "--cwd", dir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    assert.equal(r3.status, 0);
+    assert.ok(!JSON.parse(r3.stdout).panelAdvisory, "stage 3 无 panel 不给 nudge");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R9 需求 3/4: 非法 skip 码、seats/skip 互斥、registry 外 seats 都 fail-fast；同 stage 两条记录都留痕", () => {
+  const { dir, registry } = makePanelFixture("wao-stage-panel-reject-");
+  const run = (args) => spawnSync(process.execPath,
+    ["src/cli.js", "wao", "stage", ...args, "--registry", registry, "--cwd", dir],
+    { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+  try {
+    // 非法 skip 码（闭集外）→ fail-fast，stderr 列出合法闭集。
+    const badSkip = run(["2", "--task", "x", "--panel-skip-reason", "因为我想"]);
+    assert.notEqual(badSkip.status, 0, "非法 skip 码必须 fail-fast");
+    assert.match(badSkip.stderr, /--panel-skip-reason 必须是闭集值之一/);
+    assert.match(badSkip.stderr, /no_reviewer_available/);
+    // seats 与 skip 同给 → 互斥 fail-fast。
+    const both = run(["2", "--task", "x", "--panel-seats", "coder_hq", "--panel-skip-reason", "time_critical"]);
+    assert.notEqual(both.status, 0, "seats/skip 互斥必须 fail-fast");
+    assert.match(both.stderr, /互斥/);
+    // registry 里不存在的 worker → fail-fast（自报也要是已配置 worker）。
+    const ghost = run(["2", "--task", "x", "--panel-seats", "ghost_worker"]);
+    assert.notEqual(ghost.status, 0, "registry 外 seats 必须 fail-fast");
+    assert.match(ghost.stderr, /registry 里不存在的 worker: ghost_worker/);
+    // 同一 stage 两条 panel 记录（返工/窄复核的真实形状）都留痕且可检索。
+    assert.equal(run(["2", "--task", "首轮方案", "--panel-seats", "coder_hq,auditor"]).status, 0);
+    assert.equal(run(["2", "--task", "返工窄复核", "--panel-skip-reason", "owner_direct"]).status, 0);
+    const bare = spawnSync(process.execPath, ["src/cli.js", "wao", "stage", "--cwd", dir],
+      { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    const summary = JSON.parse(bare.stdout);
+    const stage2Panels = summary.stages.filter((s) => s.stage === 2).map((s) => s.panel);
+    assert.equal(stage2Panels.length, 2, "同 stage 两条 panel 记录都在（无唯一性校验）");
+    assert.ok(stage2Panels.some((p) => p?.seats && p.seats.join(",") === "coder_hq,auditor"));
+    assert.ok(stage2Panels.some((p) => p?.skipReason === "owner_direct"));
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R9 兼容: 无 panel 第 5 列的旧 STAGE 索引行照常解析（July pilot 形状）", () => {
+  const { dir } = makePanelFixture("wao-stage-panel-compat-");
+  try {
+    // 手工构造新旧两种行并存（主仓 .wao/pipeline/map.md 的 July pilot 旧行在
+    // worktree 内不存在——这里用临时目录构造等价形状）。
+    const mapPath = join(dir, ".wao", "pipeline", "map.md");
+    writeFileSync(mapPath, [
+      "# Pipeline Map",
+      "",
+      "STAGE | 1 | 旧形状四列：无 panel | docs/01-prd.md",
+      `STAGE | 2 | 新形状：有 panel | docs/plan.md | panel=seats:coder_hq+auditor`,
+      "",
+    ].join("\n"), "utf8");
+    const bare = spawnSync(process.execPath, ["src/cli.js", "wao", "stage", "--cwd", dir],
+      { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    assert.equal(bare.status, 0, `旧行混合必须照常解析，stderr=${bare.stderr}`);
+    const summary = JSON.parse(bare.stdout);
+    assert.equal(summary.count, 2);
+    const old = summary.stages.find((s) => s.stage === 1);
+    assert.equal(old.panel, null, "旧行（无第 5 列）panel 解析为 null");
+    assert.equal(old.artifact, "docs/01-prd.md", "旧行既有列不受影响");
+    const neu = summary.stages.find((s) => s.stage === 2);
+    assert.deepEqual(neu.panel.seats, ["coder_hq", "auditor"], "新行第 5 列照常解析");
+    assert.equal(summary.panel.records, 1, "旧行不计入 panel 记录");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R9 回归: wao onboarding refused/error 分支 exitCode 行为不受分级块影响（拒绝仍 exit 1，preview 仍 exit 0）", () => {
+  // 拒绝路径：--agent ghost（模板里不存在的 id）→ outcome refused → exit 1。
+  // 零写（refused 在任何写之前返回）；读真实入库模板（只读）。
+  const refused = spawnSync(process.execPath,
+    ["src/cli.js", "wao", "onboarding", "--agent", "ghost_worker"],
+    { cwd: process.cwd(), encoding: "utf8", timeout: 60000 });
+  assert.equal(refused.status, 1, "refused outcome 必须 exit 1（脚本/CI 门控语义不变）");
+  // preview 路径：模板真实存在的 tester（零写）→ exit 0，且 selected 分支打印分级块。
+  const preview = spawnSync(process.execPath,
+    ["src/cli.js", "wao", "onboarding", "--agent", "tester"],
+    { cwd: process.cwd(), encoding: "utf8", timeout: 60000 });
+  assert.equal(preview.status, 0, `preview outcome 必须 exit 0，stderr=${preview.stderr}`);
+  assert.ok(preview.stdout.includes("会审就绪（模板面"), "selected/preview 分支打印分级块（R9 需求 1）");
+});
+
 test("TD-88: wao ask 缺 agentId 或任务时 fail-fast（快捷派工参数校验）", () => {
   // 缺 agentId
   const r1 = spawnSync(process.execPath, ["src/cli.js", "wao", "ask"],

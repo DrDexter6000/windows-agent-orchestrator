@@ -69,8 +69,8 @@ Project state (.wao/):
   wao decision show <id>
   wao declare --task T --reason <code> [--note N]  # Lead 自做声明（reason: too-coupled|too-small|high-constitutional-risk|verification-cheaper|needs-global-context）
   wao declare                                       # 列出已有声明 + 理由分布
-  wao stage <n> --task T [--artifacts a,b] [--note N]  # Lead 阶段声明（n: 1=spec 2=plan 3=派发 4=验收 5=汇总 6=总结）
-  wao stage                                            # 列出已声明阶段 + 缺口（pipeline 自省）
+  wao stage <n> --task T [--artifacts a,b] [--note N] [--panel-seats id[,id] | --panel-skip-reason <code>]  # Lead 阶段声明（n: 1=spec 2=plan 3=派发 4=验收 5=汇总 6=总结；panel 字段只在 2/4 登记：seats=自报副审、skip=跳过理由闭集码）
+  wao stage                                            # 列出已声明阶段 + 缺口 + panel/skip 分布（pipeline 自省）
   wao ask <agentId> "<一句话任务>" [--mode write] [--cwd DIR]  # 快捷派工（只读默认注入边界；--mode write 不注入）
   wao handoff write --from R --to R --summary S [--artifacts a,b]
   wao handoff read <role> [--format json]  # latest incoming handoff addressed to role
