@@ -526,7 +526,7 @@ npm run cli -- wao stage --cwd <目标项目>
 - 跳过理由闭集（SSOT：`src/waoStage.js` 的 `PANEL_SKIP_REASONS`）：`no_reviewer_available` / `low_risk_small_task` / `time_critical` / `owner_direct`。细节差异（如 provider 临时不可用）进 `--note`，不扩闭集。
 - 其余 stage（1/3/5/6）带 panel 参数 fail-fast（"panel 字段只在方案（2）/交付物验收（4）登记"——不写成"会审仅发生在两节点"，同一 stage 允许多条记录，返工/窄复核照常再登记）。
 - stage 2/4 落盘成功且无 panel 字段时输出 JSON 加性字段 `panelAdvisory`（未记录会审提示；exit 0 不变——非门禁）；stage 4 成功输出固定复述红线："评审意见是证据不是验收；`run_delivery_decide` 只由 Lead 调用"。panel 记录写进 STAGE 正文 frontmatter 与 `pipeline/map.md` 索引行第 5 列（无 panel 的旧行照常解析）。
-- 会审就绪提示的两张面（数据源不同，勿混）：`wao onboarding` 的分级块是**模板面**——从入库模板行 + 当前环境探测推导（onboarding 不读你的 agents.json，它可能还没生成）；`wao doctor` 的 `panel_readiness` 检查是**已配置面**——从你的 `config/agents.json` + doctor 既有探测推导，仅当可用副审 ≤1 时打印 INFO（三席齐备静默；registry 缺位沿既有"未配置（跳过）"INFO 模式；不计 DEGRADED）。分级三档：三席（≥2 名可用副审，推荐标准）/ 两席（恰 1 名，次之推荐，补齐第二副审可升级）/ 无可用副审（跳过提示）；`login_based`/`unknown` 不计入可用但如实展示"登录态未验证"；跨族系（推断族系标签，展示专用非契约）是更强推荐。
+- 会审就绪提示的两张面（数据源不同，勿混）：`wao onboarding` 的分级块是**模板面**——从入库模板行 + 当前环境探测推导（onboarding 不读你的 agents.json，它可能还没生成）；`wao doctor` 的 `panel_readiness` 检查是**已配置面**——从你的 `config/agents.json` + doctor 既有探测推导，仅当可用席位候选 ≤1 或零对抗席时打印 INFO（三席齐备且含对抗席才静默；registry 缺位沿既有"未配置（跳过）"INFO 模式；不计 DEGRADED、不改退出码）。分级只统计**席位候选**（对抗席 = auditor 专职 / coder_mm 替补；实现席 = coder 系通道；researcher/tester 等调研/工具角色不进席位计数与建议）：三席（≥2 名可用席位候选，推荐标准）/ 两席（恰 1 名，次之推荐，补齐第二副审可升级）/ 无可用席位候选（跳过提示）；≥2 席位候选但 0 对抗席时仍判三席（物理可配）但必附"无对抗席候选（auditor/coder_mm）——建议补配"提示行，doctor 不静默；`login_based`/`unknown` 不计入可用但如实展示（登录态型展示"登录态未验证"，serve 注入型展示"注入式认证（serve 探测不覆盖）"，探测未知展示"探测未知"）；跨族系（推断族系标签，展示专用非契约）是更强推荐。
 
 ### MCP stdio 接口（agent-facing primary，M9）
 

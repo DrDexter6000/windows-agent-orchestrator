@@ -2736,6 +2736,13 @@ test("ADR 0023: 决策 0023 在场 + 四码/两阶段/supersedes 与代码 SSOT 
   for (const n of PANEL_STAGES) {
     assert.ok(decision.includes(`stage ${n}`), `0023 必须点名 stage ${n}（两节点限定）`);
   }
+  // R9-C C-4：双向对账——0023 声明 supersedes 0019 ⟺ 0019 头部声明 superseded-by
+  // 0023（反向指针是导航事实；历史决策正文不改写，status: accepted 保留）。
+  const d0019 = read(".wao/decisions/0019-advisory-panel-review-convention.md");
+  assert.ok(/^superseded-by: 0023（部分条款：§2\/§4\/Non-goals）$/m.test(d0019),
+    "0019 头部必须有 superseded-by: 0023 反向指针（与 0023 的 supersedes 声明双向对账）");
+  assert.ok(/^status: accepted$/m.test(d0019),
+    "0019 的 status: accepted 保留（supersede 指针不改写历史决策状态）");
 });
 
 test("ADR 0023: SKILL.md 三席标准表述锚（推荐标准/两节点/skip 登记/跨族系/红线）", () => {
@@ -2763,6 +2770,13 @@ test("ADR 0023: team-roles.md 第 7 条与 onboarding 副审配置建议对齐 0
   assert.ok(item7.includes("0019 §3 席位回避保留"), "team-roles 第 7 条必须引用保留的席位回避");
   // 反回归：0019 时代的"默认姿态不变"句不得复现（0023 已 supersede §2）。
   assert.ok(!roles.includes("默认姿态不变"), "team-roles 不得保留'默认姿态不变'旧姿态句");
+  // R9-C C-2：标准开发流流程图旧姿态句不得复现——方案/验收两行都必须是 0023
+  // 默认推荐召集 + skip 登记姿态，不是 0019 的"高风险信号才召集"按需姿态。
+  assert.ok(!roles.includes("劝诫：三方会审"), "team-roles 不得保留'劝诫：三方会审'旧姿态句");
+  assert.ok(!roles.includes("有明确高风险未决问题时，派 auditor"),
+    "方案会审行不得保留'高风险信号才召集'旧姿态（0023 默认推荐）");
+  assert.ok(!roles.includes("高风险或 Lead 低信心时，派 auditor"),
+    "验收会审行不得保留'高风险/低信心才召集'旧姿态（0023 默认推荐）");
   // AGENT_ONBOARDING.md 的副审配置建议（两席最佳 = auditor 专职 + coder 系替补）。
   const ob = read("AGENT_ONBOARDING.md");
   assert.ok(/对抗席专职/.test(ob) && /coder 系/.test(ob),

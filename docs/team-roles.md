@@ -119,10 +119,10 @@ WAO 是"装一次，开发多个项目"的工具：
 Lead 收到需求
   → 必要时派 Researcher 调研（输出 brief + affectedFiles）
   → Lead 出执行方案
-  → 有明确高风险未决问题时，派 auditor（或轮换 coder_mm）走 advisory 模式提供挑战与建议（劝诫：三方会审 = Lead + coder_hq/low 取一避同族 + auditor/mm 取一，ADR 0019）
+  → 方案定稿后默认推荐召集副审会审（advisory 模式；决策 0023：三席 = Lead 主审 + 实现席 coder_hq/low 取一避同族 + 对抗席 auditor/mm 取一；跳过需 --panel-skip-reason 登记理由，wao stage 2 留痕）
   → Lead 独立裁定方案并选择 Coder-HQ/Low/MM
   → 必要时派 Tester 提供独立执行证据
-  → 高风险或 Lead 低信心时，派 auditor（或轮换 coder_mm）走 audit 模式独立复核（劝诫：三方会审组合同上；auditor 同会话连审两阶段的独立性侵蚀见 ADR 0019）
+  → 交付物验收前默认推荐召集副审会审（audit 模式；决策 0023：组合同上；跳过需 --panel-skip-reason 登记理由，wao stage 4 留痕；auditor 同会话连审两阶段的独立性侵蚀见 ADR 0019 §3）
   → Lead 整合，汇报 owner
 ```
 

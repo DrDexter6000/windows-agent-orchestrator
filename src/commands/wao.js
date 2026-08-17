@@ -221,7 +221,7 @@ async function waoStageCommand(args, config) {
     const out = { staged: true, stage, path };
     if (panel) {
       out.panel = panel.seats
-        ? { seats: panel.seats, note: "自报、未验证（评审旁证走 --artifacts 的 runs/<runId>.jsonl）" }
+        ? { seats: panel.seats, note: "自报、未验证（registry 存在性已校验；不校验 ready 态/族系；评审旁证走 --artifacts 的 runs/<runId>.jsonl）" }
         : { skipReason: panel.skipReason };
     } else if (PANEL_STAGES.includes(stage)) {
       out.panelAdvisory =

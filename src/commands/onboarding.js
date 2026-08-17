@@ -31,6 +31,8 @@ import { runOnboarding, HOST_EXAMPLES_AUTHORITY, displayWidth } from "../applica
 import { resolveCredentialEnv } from "../application/credentialReadiness.js";
 // R9（决策 0023）：会审就绪分级块的族系展示标签（推断，非契约）。
 import { familyLabel } from "../application/modelFamily.js";
+// R9-C C-1：席位角色分类复用 panelReadiness 的单一实现（渲染层不写第二份）。
+import { seatRoleOf } from "../application/panelReadiness.js";
 
 // ── R6-C: production environment probe ───────────────────────────────────────
 // One probeEnv per command invocation, passed to the pure recommendation engine.
@@ -245,12 +247,16 @@ function panelReadinessLines(r) {
   const rows = Array.isArray(r.recommendations?.rows) ? r.recommendations.rows : [];
   if (rows.length === 0 || !r.panelReadiness) return [];
   const p = r.panelReadiness;
-  const seat = (e) => `${e.id}（${familyLabel(e.family)}）`;
+  // C-9：族系标签带"推断"字样——推断族系非契约，用户面不把标签讲成事实。
+  const seat = (e) => `${e.id}（推断族系：${familyLabel(e.family)}）`;
   const lines = [];
   if (p.tier === "three_seat") {
     lines.push("会审就绪（模板面·按当前环境探测，决策 0023）: 三席可用——推荐标准（Lead 主审 + 两名副审）");
     lines.push(`  建议席位组合（展示建议，选位权在 Lead）: ${seat(p.seats[0])} + ${seat(p.seats[1])}`);
-    if (p.sameFamily) {
+    if (p.missingAdversarial) {
+      lines.push("  无对抗席候选（auditor/coder_mm）——两席分配语义要求对抗视角，建议补配");
+    }
+    if (p.insufficientFamilyDiversity) {
       lines.push("  跨族系提示：可用副审的已知族系不足两族——跨族系是更强推荐（未知族系不参与判定）");
     }
   } else if (p.tier === "two_seat") {
@@ -260,19 +266,28 @@ function panelReadinessLines(r) {
       lines.push("  注：模板仅一名 worker，它通常即被审产出的作者（0019 §3 作者回避）——两席建议事实空转");
     }
   } else {
-    lines.push("会审就绪（模板面·按当前环境探测，决策 0023）: 当前无可用副审");
+    lines.push("会审就绪（模板面·按当前环境探测，决策 0023）: 当前无可用席位候选（对抗席/实现席）");
     lines.push("  有意跳过会审时，在 wao stage 2/4 用 --panel-skip-reason 登记显式理由（强烈推荐但非强制）");
   }
-  if (p.loginUnverified.length > 0) {
+  if (p.loginUnverified?.length > 0) {
     lines.push(`  登录态未验证（如实展示，不计入可用）: ${p.loginUnverified.join("、")}`);
+  }
+  // C-5：serve 注入型（opencode-serve）不是登录态型认证——单独措辞归类，
+  // 不进"登录态未验证"行（引擎 readyState 原值不动，只改展示归类）。
+  if (p.injectedAuth?.length > 0) {
+    lines.push(`  注入式认证（serve 探测不覆盖，不计入可用）: ${p.injectedAuth.join("、")}`);
+  }
+  // C-12：探测未知如实展示一行（docblock 承诺的"如实展示"在此兑现）。
+  if (p.probeUnknown?.length > 0) {
+    lines.push(`  探测未知（如实展示，不计入可用）: ${p.probeUnknown.join("、")}`);
   }
   // 席位惯例句（0019 §3 保留）：候选 id 全部从模板行派生（不在模板的 worker
   // 不点名），零候选时整句不打印（shape-derived，0022 契约 (6)）。拆两行控制
   // 显示宽 ≤120（全量模板 4 条 coder 通道也不折行）。
-  const coderIds = rows.filter((row) => /^coder_/.test(String(row.id ?? ""))).map((row) => row.id);
-  const adversarialIds = rows
-    .filter((row) => row.id === "auditor" || row.id === "coder_mm")
-    .map((row) => row.id);
+  // 分类规则复用 panelReadiness.seatRoleOf（单一语义；coder_mm 归对抗席，
+  // 不再重复列进实现席——渲染层不写第二份分类）。
+  const coderIds = rows.filter((row) => seatRoleOf(row.id) === "implementation").map((row) => row.id);
+  const adversarialIds = rows.filter((row) => seatRoleOf(row.id) === "adversarial").map((row) => row.id);
   if (coderIds.length > 0 || adversarialIds.length > 0) {
     lines.push("  席位惯例（0019 §3 保留）: 实现席从 coder 通道取（避同族/避被审产出作者）；组合与选位权由 Lead 决定");
     const parts = [];

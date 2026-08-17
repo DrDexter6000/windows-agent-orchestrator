@@ -133,7 +133,8 @@ const MAP_HEADER = {
   pipeline: `# Pipeline Map
 
 <!-- 索引：STAGE/DECL 运行时声明。一行一条，不放正文。gitignore（每轮临时）。 -->
-<!-- 格式：STAGE | <n> | <task> | <artifact>  或  DECL | <task> | <reason> -->
+<!-- 格式：STAGE | <n> | <task> | <artifact> [| panel=seats:<ids> 或 panel=skip:<code>]  或  DECL | <task> | <reason> -->
+<!-- panel 第 5 列（决策 0023，R9 加性）：三席会审席位/跳过理由摘要；无 panel 的旧行 4 列照常解析。 -->
 `,
   handoff: `# Handoff Map
 

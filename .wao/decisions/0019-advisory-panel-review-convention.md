@@ -1,6 +1,7 @@
 # 0019: 方案与验收三方会审惯例（advisory，非门禁）
 
 status: accepted
+superseded-by: 0023（部分条款：§2/§4/Non-goals）
 date: 2026-08-15
 retains: 0018（WAO 机械围栏定位不变——本惯例是 Lead 纪律，不是控制面行为）
 指向: `docs/team-roles.md`（角色与协作权威）、`SKILL.md`（Lead 纪律注入面）

@@ -832,8 +832,10 @@ export async function runOnboarding({
 
 // Assemble the bounded result object (single source for --json + human output).
 /**
- * R9（决策 0023）：把 panelReadiness 分级投影成有界的加性结果字段（与人类
- * 输出同源）。族系经 modelFamily 推断，是展示标签不是契约。
+ * R9（决策 0023；R9-C C-1/C-5/C-6）：把 panelReadiness 分级投影成有界的加性
+ * 结果字段（与人类输出同源）。族系经 modelFamily 推断，是展示标签不是契约。
+ * available/seats 只含席位候选（对抗席 auditor/coder_mm + 实现席 coder 系）；
+ * sameFamily 已更名 insufficientFamilyDiversity（R9-C C-6，零消费者改名）。
  */
 function projectPanelReadiness(recommendations) {
   const rows = Array.isArray(recommendations?.rows) ? recommendations.rows : [];
@@ -843,7 +845,10 @@ function projectPanelReadiness(recommendations) {
     available: a.available.map((e) => ({ id: e.id, family: e.family })),
     seats: a.seats ? a.seats.map((e) => ({ id: e.id, family: e.family })) : null,
     loginUnverified: a.loginUnverified,
-    sameFamily: a.sameFamily,
+    injectedAuth: a.injectedAuth,
+    probeUnknown: a.probeUnknown,
+    missingAdversarial: a.missingAdversarial,
+    insufficientFamilyDiversity: a.insufficientFamilyDiversity,
     singleWorkerVacuous: a.singleWorkerVacuous,
   };
 }

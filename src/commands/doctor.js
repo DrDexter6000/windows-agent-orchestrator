@@ -15,6 +15,9 @@
 // worker 区分实际先发的拒因（SessionReuseWorkspaceRequiredError）。
 // R9（决策 0023）：新增条件 INFO panel_readiness（已配置面的三席会审就绪，
 // 三席齐备静默；registry 缺位沿 U1 INFO 跳过模式）——advisory，不计 DEGRADED。
+// R9-C C-1 返工：分级只统计席位候选（对抗席 auditor/coder_mm + 实现席 coder 系；
+// researcher 等非席位角色不进计数）；静默条件收窄为 three_seat 且含对抗席——
+// ≥2 席位候选但 0 对抗席时仍打印补配提示（消除假全清）。
 //
 // 命令族：wao doctor [--strict] [--warn-as-error] [--format json] [--registry FILE] [--cwd DIR]
 //
@@ -410,8 +413,9 @@ export async function waoDoctorCommand(args, config) {
     }
     // R9（决策 0023，三席会审就绪·已配置面）：输入 = 本命令既有的 registry
     // 读取 + CLI/key 探测事实（不新增探测）；分级推导在 application/
-    // panelReadiness.js（单一实现，onboarding 模板面共用）。仅当可用副审 ≤1
-    // 时打印 INFO（三席齐备静默）；INFO 不计 DEGRADED/退出码——advisory。
+    // panelReadiness.js（单一实现，onboarding 模板面共用）。仅当可用席位候选
+    // ≤1 或零对抗席时打印 INFO（三席齐备且含对抗席才静默）；INFO 不计
+    // DEGRADED/退出码——advisory。
     const panelRows = Object.entries(registryAgents).map(([id, agent]) => {
       const requiresCli = BACKEND_CLI[agent?.backend] ?? null;
       const names = requiredCredentialNames(agent);
@@ -436,29 +440,51 @@ export async function waoDoctorCommand(args, config) {
       };
     });
     const panel = assessPanelReadiness(panelRows);
-    if (panel.tier !== "three_seat") {
+    // R9-C C-1.4：静默条件收窄为 three_seat 且含对抗席——≥2 席位候选但 0 对抗席
+    // 时仍打印（附补配提示行），消除"零对抗席 registry 假全清"（auditor 实跑病灶）。
+    if (panel.tier !== "three_seat" || panel.missingAdversarial) {
       const seatList = panel.available.map((e) => e.id).join("、");
       let detail;
-      if (panel.tier === "two_seat") {
+      let fix;
+      if (panel.tier === "three_seat") {
+        detail = `已配置面：会审席位候选 ≥2（${seatList}）——物理上可配三席，但无对抗席候选（auditor/coder_mm），`
+          + `两席分配语义要求对抗视角（0019/0023），建议补配；跳过则在 wao stage 2/4 用 --panel-skip-reason 登记`;
+        fix = "增配对抗席通道 auditor（或替补 coder_mm）（npm run cli -- wao onboarding --agent <id> --apply）；或维持现状并用 --panel-skip-reason 登记（advisory，非门禁）";
+      } else if (panel.tier === "two_seat" && panel.singleWorkerVacuous) {
+        // C-16：单 worker 场景以空转事实为主句直给（先建议后撤回的话术废除）。
+        detail = `已配置面：registry 仅一名 worker（${seatList}），它通常即被审产出作者（0019 §3 作者回避）`
+          + `——两席/三席建议事实空转，要会审先增配第二名 worker；`
+          + `跳过则在 wao stage 2/4 用 --panel-skip-reason 登记`;
+        fix = "增配第二名不同族系 worker（npm run cli -- wao onboarding --agent <id> --apply）后两席/三席建议才不空转；或用 --panel-skip-reason 登记（advisory，非门禁）";
+      } else if (panel.tier === "two_seat") {
         detail = `已配置面：会审副审仅 1 名可用（${seatList}）——三席会审（决策 0023）为推荐标准，`
           + `可先两席（Lead 主审 + 一副审，次之推荐），补齐第二副审（建议不同族系）可升级三席；`
           + `跳过则在 wao stage 2/4 用 --panel-skip-reason 登记`;
+        fix = "按认证增配另一族系的可用 worker（npm run cli -- wao onboarding --agent <id> --apply）可补齐三席"
+          + "——补配不同族系的第二副审可同时升级跨族系多样性；"
+          + "或维持现状并用 --panel-skip-reason 登记（advisory，非门禁）";
       } else {
         detail = "已配置面：会审副审 0 名可用——三席/两席会审暂不可配（决策 0023：强烈推荐但非强制）；"
           + `有意跳过在 wao stage 2/4 用 --panel-skip-reason 登记（闭集码：${PANEL_SKIP_REASONS.join(" | ")}）`;
-      }
-      if (panel.singleWorkerVacuous) {
-        detail += "；注：registry 仅一名 worker，它通常即被审产出作者（0019 §3 作者回避），两席建议事实空转";
+        fix = "按认证增配可用 worker（npm run cli -- wao onboarding --agent <id> --apply）可补齐会审席位；或维持现状并用 --panel-skip-reason 登记（advisory，非门禁）";
       }
       if (panel.loginUnverified.length > 0) {
         detail += `；登录态未验证（不计入可用）：${panel.loginUnverified.join("、")}`;
+      }
+      // C-5：serve 注入型不是登录态型认证——单独归类措辞，不进"登录态未验证"。
+      if (panel.injectedAuth.length > 0) {
+        detail += `；注入式认证（serve 探测不覆盖，不计入可用）：${panel.injectedAuth.join("、")}`;
+      }
+      // C-12：探测未知如实展示（docblock 承诺兑现）。
+      if (panel.probeUnknown.length > 0) {
+        detail += `；探测未知（不计入可用）：${panel.probeUnknown.join("、")}`;
       }
       pushCheck(checks, {
         name: "panel_readiness",
         pass: true,
         level: "info",
         detail,
-        fix: "按认证增配另一族系的可用 worker（npm run cli -- wao onboarding --agent <id> --apply）可补齐三席；或维持现状并用 --panel-skip-reason 登记（advisory，非门禁）",
+        fix,
       });
     }
     pushCheck(checks, { name: "registry_loads", pass: true, detail: `${agents.length} agents` });

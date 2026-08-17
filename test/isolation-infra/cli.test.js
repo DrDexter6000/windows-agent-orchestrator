@@ -1584,6 +1584,75 @@ test("R9 兼容: 无 panel 第 5 列的旧 STAGE 索引行照常解析（July pi
   }
 });
 
+test("R9-C C-8: stage 4 STAGE 正文固定写入红线句（panel 与无 panel 两种；stdout 之外的持久化）", () => {
+  const { dir, registry } = makePanelFixture("wao-stage-redline-");
+  try {
+    const RED_LINE = "评审意见是证据不是验收；run_delivery_decide 只由 Lead 调用";
+    // 带 panel（skip 形态）的 stage 4：正文必须含红线句。
+    const withPanel = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "stage", "4",
+      "--task", "交付验收",
+      "--panel-skip-reason", "low_risk_small_task",
+      "--registry", registry, "--cwd", dir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    assert.equal(withPanel.status, 0, `stage 4 skip 应成功，stderr=${withPanel.stderr}`);
+    const body1 = readFileSync(JSON.parse(withPanel.stdout).path, "utf8");
+    assert.ok(body1.includes(RED_LINE), "带 panel 的 stage 4 正文必须落盘红线句");
+    // 无 panel 的 stage 4：正文同样必须含（panelAdvisory 路径）。
+    const noPanel = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "stage", "4", "--task", "交付验收补登", "--cwd", dir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    assert.equal(noPanel.status, 0, `无 panel stage 4 应成功，stderr=${noPanel.stderr}`);
+    const body2 = readFileSync(JSON.parse(noPanel.stdout).path, "utf8");
+    assert.ok(body2.includes(RED_LINE), "无 panel 的 stage 4 正文必须落盘红线句");
+    // 反向钉：stage 2（方案节点）正文不写验收红线句——红线只在验收节点落盘。
+    const plan = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "stage", "2", "--task", "方案定稿", "--cwd", dir,
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+    assert.equal(plan.status, 0);
+    const body3 = readFileSync(JSON.parse(plan.stdout).path, "utf8");
+    assert.ok(!body3.includes(RED_LINE), "stage 2 正文不含验收红线句（两节点限定）");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R9-C C-13: --panel-seats 的 registry 存在性校验四路径 fail-fast（读失败/解析失败/缺 agents 表/未知 id）", () => {
+  const { dir } = makePanelFixture("wao-stage-seats-validate-");
+  const run = (registryPath) => spawnSync(process.execPath,
+    ["src/cli.js", "wao", "stage", "2", "--task", "x", "--panel-seats", "coder_hq",
+      "--registry", registryPath, "--cwd", dir],
+    { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+  try {
+    // 路径 1：registry 文件不存在（读取失败）。
+    const readFail = run(join(dir, "nope", "agents.json"));
+    assert.notEqual(readFail.status, 0, "registry 读失败必须 fail-fast");
+    assert.match(readFail.stderr, /读取失败/, "读失败文案指明先跑 onboarding 或 --registry 指向有效 registry");
+    // 路径 2：文件在但 JSON 解析失败。
+    const badJson = join(dir, "bad.json");
+    writeFileSync(badJson, "{ not json", "utf8");
+    const parseFail = run(badJson);
+    assert.notEqual(parseFail.status, 0, "解析失败必须 fail-fast");
+    assert.match(parseFail.stderr, /解析失败/, "解析失败文案指向 registry validate");
+    // 路径 3：JSON 合法但缺可用 agents 表。
+    const noAgents = join(dir, "no-agents.json");
+    writeFileSync(noAgents, JSON.stringify({ foo: 1 }), "utf8");
+    const agentsFail = run(noAgents);
+    assert.notEqual(agentsFail.status, 0, "缺 agents 表必须 fail-fast");
+    assert.match(agentsFail.stderr, /缺少可用 agents 表/);
+    // 路径 4：agents 表在场但 seats 引用未知 id（此前唯一有覆盖的路径——回归钉）。
+    const unknown = join(dir, "unknown.json");
+    writeFileSync(unknown, JSON.stringify({
+      agents: { coder_low: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, cwd: "." } },
+    }), "utf8");
+    const ghost = run(unknown);
+    assert.notEqual(ghost.status, 0, "未知 id 必须 fail-fast");
+    assert.match(ghost.stderr, /registry 里不存在的 worker: coder_hq/);
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
 test("R9 回归: wao onboarding refused/error 分支 exitCode 行为不受分级块影响（拒绝仍 exit 1，preview 仍 exit 0）", () => {
   // 拒绝路径：--agent ghost（模板里不存在的 id）→ outcome refused → exit 1。
   // 零写（refused 在任何写之前返回）；读真实入库模板（只读）。
@@ -2167,6 +2236,169 @@ test("R5-B: doctor registry 缺位回退——CLI/key INFO + onboarding 提示�
     assert.ok(parsed.checks.some((x) => x.name === "node_version"), "node_version 检查保留");
     assert.ok(parsed.checks.some((x) => x.name === "invocation_method"), "invocation_method 检查保留");
     assert.equal(result.status, 0, "registry 缺位 + 无 FAIL → exit 0（wao_init 未 init 是 WARN 非 FAIL）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── R9-C C-3: doctor panel_readiness 行为面（决策 0023；advisory 非门禁）─────────
+// C-1.4 静默条件收窄为 three_seat 且含对抗席；其余形态打印 INFO 且不计 DEGRADED、
+// 不改退出码（0023 红线）。fixture 目录先 wao init 把 verdict 隔离到被测面
+// （wao_init WARN 不混入断言）；HOME/USERPROFILE 指向空目录隔离本机 OAuth 凭据
+// （claude_oauth_provider_workers WARN 面）；dummy key 沿 TD-107 doctorSpawnEnv。
+// CLI 探测沿既有套件假设（claude/kimi CLI 在 PATH——与本文件其它 doctor 测试一致）。
+function makeDoctorPanelFixture(name, agents) {
+  const dir = mkdtempSync(join(tmpdir(), name));
+  spawnSync(process.execPath, ["src/cli.js", "wao", "init", "--cwd", dir],
+    { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+  const registryPath = join(dir, "agents.json");
+  writeFileSync(registryPath, JSON.stringify({ agents }, null, 2), "utf8");
+  return { dir, registryPath };
+}
+
+function doctorPanelRun(dir, registryPath) {
+  return spawnSync(process.execPath, ["src/cli.js", "wao", "doctor",
+    "--registry", registryPath, "--cwd", dir, "--format", "json"],
+    { cwd: process.cwd(), encoding: "utf8",
+      env: { ...doctorSpawnEnv(), HOME: dir, USERPROFILE: dir }, timeout: 20000 });
+}
+
+test("R9-C C-3: doctor 三席齐备且含对抗席 → panel_readiness 静默（无条目）", () => {
+  const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-silent-", {
+    coder_hq: { backend: "claude-code", provider: { baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
+    coder_mm: { backend: "claude-code", provider: { baseUrl: "https://api.moonshot.cn/anthropic", apiKeyEnv: "KIMI_API_KEY" }, model: { id: "kimi-k3" }, cwd: "." },
+  });
+  try {
+    const r = doctorPanelRun(dir, registryPath);
+    const parsed = JSON.parse(r.stdout);
+    assert.ok(!parsed.checks.some((c) => c.name === "panel_readiness"),
+      "≥2 可用席位候选且含对抗席（coder_mm）→ 静默全清（无 panel_readiness 条目）");
+    assert.equal(parsed.verdict, "HEALTHY（advisory，非门禁）", "静默面 verdict 不被 panel 检查污染");
+    assert.equal(r.status, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R9-C C-3: doctor 两席 → panel_readiness INFO 打印、不计 DEGRADED、exit 0（advisory 红线）", () => {
+  const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-two-", {
+    coder_hq: { backend: "claude-code", provider: { baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
+    auditor: { backend: "claude-code", model: { id: "claude-opus-5" }, cwd: "." },
+  });
+  try {
+    const r = doctorPanelRun(dir, registryPath);
+    const parsed = JSON.parse(r.stdout);
+    const panel = parsed.checks.find((c) => c.name === "panel_readiness");
+    assert.ok(panel, "恰 1 名可用席位候选 → 必须打印 panel_readiness");
+    assert.equal(panel.status, "info", "INFO 级");
+    assert.equal(panel.pass, true, "advisory 不产生 FAIL");
+    assert.match(panel.detail, /仅 1 名可用（coder_hq）/, "可用副审只点名席位候选");
+    assert.match(panel.detail, /登录态未验证（不计入可用）：auditor/, "login_based 席位如实展示");
+    assert.match(panel.fix, /补配不同族系的第二副审可同时升级跨族系多样性/, "C-16：fix 提示含多样性升级");
+    assert.equal(parsed.verdict, "HEALTHY（advisory，非门禁）",
+      "panel_readiness INFO 不计 DEGRADED（0023 advisory 红线）");
+    assert.equal(r.status, 0, "INFO 不改退出码");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R9-C C-3: doctor 零可用席位候选 → INFO 跳过提示 + 如实展示行（登录态/探测未知）", () => {
+  const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-none-", {
+    auditor: { backend: "claude-code", model: { id: "claude-opus-5" }, cwd: "." },
+    coder_mm: { backend: "kimi-code", model: { id: "kimi-code/k3" }, cwd: "." },
+    coder_dsh: { backend: "deepseek-harness", model: { id: "deepseek-v4-pro" }, cwd: "." },
+  });
+  try {
+    const r = doctorPanelRun(dir, registryPath);
+    const parsed = JSON.parse(r.stdout);
+    const panel = parsed.checks.find((c) => c.name === "panel_readiness");
+    assert.ok(panel, "0 可用席位候选 → 必须打印（跳过登记提示）");
+    assert.equal(panel.status, "info");
+    assert.match(panel.detail, /0 名可用/, "none 分级措辞");
+    assert.match(panel.detail, /no_reviewer_available/, "闭集码列在提示内");
+    assert.match(panel.detail, /登录态未验证（不计入可用）：auditor、coder_mm/,
+      "login_based 席位如实展示（auditor+coder_mm）");
+    assert.match(panel.detail, /探测未知（不计入可用）：coder_dsh/,
+      "C-12：探测未知行如实展示（deepseek-harness 无 CLI 映射 → unknown）");
+    // deepseek-harness 触发 backend_map WARN → verdict DEGRADED，但无 FAIL：
+    // WARN/INFO 都不改 advisory 退出码。
+    assert.equal(r.status, 0, "WARN/INFO 面不改退出码（无 FAIL）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R9-C C-1.4（auditor 实跑病灶）: 零对抗席 three_seat → doctor 不静默，附补配提示", () => {
+  const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-noadv-", {
+    coder_hq: { backend: "claude-code", provider: { baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
+    coder_low: { backend: "claude-code", provider: { baseUrl: "https://api.deepseek.com/anthropic", apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-flash" }, cwd: "." },
+  });
+  try {
+    const r = doctorPanelRun(dir, registryPath);
+    const parsed = JSON.parse(r.stdout);
+    const panel = parsed.checks.find((c) => c.name === "panel_readiness");
+    assert.ok(panel, "≥2 席位候选但 0 对抗席 → 必须打印（消除假全清——实跑病灶）");
+    assert.equal(panel.status, "info");
+    assert.match(panel.detail, /物理上可配三席，但无对抗席候选（auditor\/coder_mm）/,
+      "C-1 裁定文案：无对抗席候选提示行");
+    assert.match(panel.detail, /两席分配语义要求对抗视角/, "0019/0023 分配语义引用");
+    assert.match(panel.detail, /coder_hq、coder_low/, "席位候选点名");
+    assert.equal(r.status, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R9-C C-1（auditor 实跑病灶）: researcher+coder_hq registry → 两席打印，researcher 不进可用席位", () => {
+  const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-researcher-", {
+    researcher: { backend: "claude-code", provider: { baseUrl: "https://api.deepseek.com/anthropic", apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" }, cwd: "." },
+    coder_hq: { backend: "claude-code", provider: { baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
+  });
+  try {
+    const r = doctorPanelRun(dir, registryPath);
+    const parsed = JSON.parse(r.stdout);
+    const panel = parsed.checks.find((c) => c.name === "panel_readiness");
+    assert.ok(panel, "researcher（ready 但非席位）只剩 1 名席位候选 → 两席必须打印（旧代码此处假全清）");
+    assert.match(panel.detail, /仅 1 名可用（coder_hq）/, "可用席位只点名 coder_hq");
+    assert.ok(!panel.detail.includes("researcher"), "非席位角色不进可用副审叙事");
+    assert.equal(r.status, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R9-C C-16: 单 worker registry → 空转事实为主句直给（先建议后撤回的话术废除）", () => {
+  const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-solo-", {
+    coder_hq: { backend: "claude-code", provider: { baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
+  });
+  try {
+    const r = doctorPanelRun(dir, registryPath);
+    const parsed = JSON.parse(r.stdout);
+    const panel = parsed.checks.find((c) => c.name === "panel_readiness");
+    assert.ok(panel);
+    assert.match(panel.detail, /registry 仅一名 worker（coder_hq）/, "空转事实为主句");
+    assert.match(panel.detail, /两席\/三席建议事实空转/, "空转明说");
+    assert.ok(!panel.detail.includes("可先两席"), "不再先给两席建议再撤回");
+    assert.equal(r.status, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R9-C C-3: registry 缺位 → panel_readiness 沿 U1 INFO 跳过模式", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-doctor-panel-noreg-"));
+  try {
+    const r = spawnSync(process.execPath, ["src/cli.js", "wao", "doctor",
+      "--registry", join(dir, "nope.json"), "--cwd", dir, "--format", "json"],
+      { cwd: process.cwd(), encoding: "utf8",
+        env: { ...doctorSpawnEnv(), HOME: dir, USERPROFILE: dir }, timeout: 20000 });
+    const parsed = JSON.parse(r.stdout);
+    const panel = parsed.checks.find((c) => c.name === "panel_readiness");
+    assert.ok(panel, "registry 缺位时 panel_readiness 检查项恒在场（形状稳定）");
+    assert.equal(panel.status, "info");
+    assert.match(panel.detail, /未配置（跳过）/, "沿 cli_*/keys/cwd 的 U1 INFO 跳过模式");
+    assert.equal(r.status, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

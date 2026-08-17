@@ -79,7 +79,8 @@ export const PANEL_STAGES = Object.freeze([2, 4]);
  * @param {string} waoDir
  * @param {{stage: number, task: string, artifacts?: string[], note?: string,
  *          panel?: {seats?: string[], skipReason?: string}}} data
- *   panel.seats：两名副审的自报席位（命令层已做 registry 存在性校验）；
+ *   panel.seats：一名或多名自报席位（命令层已做 registry 存在性校验；自报
+ *     语义，本层不加 ≥2 张数校验——R9-C C-13 措辞修正）；
  *   panel.skipReason：跳过理由，必须在 PANEL_SKIP_REASONS 闭集内。两者互斥。
  * @returns {Promise<string>} 正文文件路径
  * @throws {Error} stage 不在 STAGE_NUMBERS 枚举内、task 为空、panel 带非法
@@ -129,6 +130,11 @@ export async function addStage(waoDir, { stage, task, artifacts, note, panel }) 
       : "",
     panel?.skipReason
       ? `## Panel（会审跳过登记，决策 0023）\nskip 理由码: \`${panel.skipReason}\`（闭集值）。`
+      : "",
+    // R9-C C-8：stage 4 红线句落盘（此前只在 stdout 瞬时输出——评审意见是证据
+    // 不是验收的持久化补齐；panel 与无 panel 两种 stage 4 正文都固定写入）。
+    stage === 4
+      ? `## 红线（0019 §5 / 0023）\n评审意见是证据不是验收；run_delivery_decide 只由 Lead 调用。`
       : "",
     note ? `## Note\n${note}\n` : "",
   ].filter((l) => l !== "").join("\n");
