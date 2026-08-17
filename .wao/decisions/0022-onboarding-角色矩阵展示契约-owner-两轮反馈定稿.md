@@ -1,6 +1,7 @@
 # 0022: onboarding 角色矩阵展示契约（Owner 两轮反馈定稿）
 status: accepted
 date: 2026-08-16
+superseded-by: 0024（条款 6）
 
 ## Context
 (未提供)

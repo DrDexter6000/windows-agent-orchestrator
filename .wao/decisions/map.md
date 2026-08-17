@@ -25,3 +25,4 @@
 0021 | MCP 工具面字节稳定性分层（追认 M12-16 regime：name/顺序+schema/annotations 哈希冻结、description 天花板下可修订；减面两级；2026-08-16 外部审计触发）
 0022 | onboarding 角色矩阵展示契约（Owner 两轮反馈定稿）
 0023 | 三席会审产品化
+0024 | onboarding 矩阵双源展示契约（已配置行 + 模板候选，0022(6) 部分取代）

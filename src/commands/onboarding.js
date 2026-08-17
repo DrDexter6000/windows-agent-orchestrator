@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 import { parseOptions } from "./shared.js";
 // R6-C3（P1-2）：displayWidth（东亚宽字符计 2）与引擎共用同一份实现——渲染层
 // 不再持第二份宽度表（分层方向 commands → application 合法）。
-import { runOnboarding, HOST_EXAMPLES_AUTHORITY, displayWidth } from "../application/onboarding.js";
+import { runOnboarding, HOST_EXAMPLES_AUTHORITY, displayWidth, MAX_CANDIDATES } from "../application/onboarding.js";
 // R6-C: key probing reuses the credential-readiness SSOT (process env → Windows
 // User scope) — no second registry read or env-name policy here.
 import { resolveCredentialEnv } from "../application/credentialReadiness.js";
@@ -163,21 +163,69 @@ export function renderHuman(r) {
     // 字符计 2）计算——padEnd 按码元计宽曾把中文认证列后面的整列右移几十格。
     // 第一行 id/backend/model/状态 ≤ ~70 显示格；第二行 认证/适合 ≤ ~125 显示格
     // （认证标签整段截到 60、duty 截到 50），120 列终端不再折行错位。
+    //
+    // R11-2（决策 0024）：双源矩阵——私有 registry 在场且可读时，矩阵 =
+    // 已配置行（真实状态，私有 registry 顺序稳定，不打来源标）+ 模板未配置候选
+    // （ready-first，行尾 ·模板候选）。混合判定来自 recommendations 携带的
+    // configuredCount 事实（不按行内容推导：0 有效行的 registry 仍是已配置面）。
+    // 表头混合句、行尾标、drift 明细与截断尾注全是同一 recommendations 对象的
+    // 投影（渲染层不写第二事实源）。
     const rows = Array.isArray(r.recommendations?.rows) ? r.recommendations.rows : [];
     if (rows.length > 0) {
+      const mixed = typeof r.recommendations?.configuredCount === "number";
       lines.push("");
       lines.push(`角色矩阵与当前环境适配（${r.recommendations.advisory}）:`);
+      if (mixed) {
+        // 0024(1)：表头一句交代混合（N = 私有有效行总数，M = 模板未配置候选总数）。
+        lines.push(`  矩阵 = 你的 config/agents.json（${r.recommendations.configuredCount} 名）+ 模板未配置候选（${r.recommendations.templateCandidateCount} 名）`);
+      }
       lines.push(`  ${padEndDisplay("id", 24)} ${padEndDisplay("backend", 15)} ${padEndDisplay("model", 19)} 状态`);
       for (const row of rows) {
-        lines.push(`  ${padEndDisplay(row.id ?? "?", 24)} ${padEndDisplay(row.backend ?? "?", 15)} ${padEndDisplay(row.model ?? "?", 19)} [${recommendationReadyLabel(row)}]`);
-        lines.push(`    ${truncateDisplay(recommendationAuthLabel(row), 56)} · 适合: ${truncateDisplay(recommendationDutyDisplay(row.duty), 50)}`);
+        // 行 1 尾紧凑旗标（source 字段的投影）：模板候选 ·模板候选；drift 行 ·drift。
+        const mark = !mixed ? "" : row.source === "configured"
+          ? (row.drift ? " ·drift" : "")
+          : " ·模板候选";
+        lines.push(`  ${padEndDisplay(row.id ?? "?", 24)} ${padEndDisplay(row.backend ?? "?", 15)} ${padEndDisplay(row.model ?? "?", 19)} [${recommendationReadyLabel(row)}]${mark}`);
+        if (mixed && row.source === "configured") {
+          // 0024(5)：私有行"适合:"段仅在私有条目真带 _comment_task 时显示——
+          // 缺席 = 整段省略，不打 "?"（缺席不是坏值）；systemPrompt 指针不进展示面。
+          lines.push(`    ${truncateDisplay(recommendationAuthLabel(row), 56)}${row.duty ? ` · 适合: ${truncateDisplay(recommendationDutyDisplay(row.duty), 50)}` : ""}`);
+        } else {
+          lines.push(`    ${truncateDisplay(recommendationAuthLabel(row), 56)} · 适合: ${truncateDisplay(recommendationDutyDisplay(row.duty), 50)}`);
+        }
+      }
+      if (mixed) {
+        // 0024(4)：drift 有界明细（≤3 条 + "另有 K 条"尾注）——值全从行字段投影。
+        const drifts = rows.filter((row) => row.drift);
+        for (const row of drifts.slice(0, 3)) {
+          lines.push(`  drift: ${row.id} 私有 model=${row.model ?? "?"}/backend=${row.backend ?? "?"} ≠ 模板 ${row.drift.templateModel ?? "?"}/${row.drift.templateBackend ?? "?"}`);
+        }
+        if (drifts.length > 3) {
+          lines.push(`  另有 ${drifts.length - 3} 条 drift 明细未显示`);
+        }
+        // 0024(6)：截断尾注——私有超帽 / 私有独占上限（模板显 0 + 指向模板文件）/
+        // 模板溢出。帽不可被"私有全显"架空。
+        if (r.recommendations.privateOmitted > 0) {
+          lines.push(`  私有 registry 另有 ${r.recommendations.privateOmitted} 名有效 worker 超出 ${MAX_CANDIDATES} 行显示上限`);
+        }
+        if (r.recommendations.templateOmitted > 0) {
+          const templateShownCount = rows.filter((row) => row.source === "template").length;
+          if (templateShownCount === 0) {
+            lines.push(`  模板候选未显示（私有行已占满 ${MAX_CANDIDATES} 行上限）——完整模板见 config/agents.example.json`);
+          } else {
+            lines.push(`  另有 ${r.recommendations.templateOmitted} 名模板候选未显示`);
+          }
+        }
       }
       // R9（决策 0023）：既有"会审备选"句升级为分级块（三席/两席/无 + 同族 +
       // 单 worker 注脚 + 登录态未验证），标签仍从模板行生、不动矩阵列宽。
       lines.push("");
       lines.push(...panelReadinessLines(r));
       lines.push("");
-      lines.push("按你有的认证选一行重跑 --agent <id> --apply；没有的 key 对应行可忽略。");
+      // 0024(2)：表尾句扩词——防误选语义全部由这一句承担（不做逐行双标，列宽纪律）。
+      lines.push(mixed
+        ? "按你有的认证选一行重跑 --agent <id> --apply（--apply 仅适用模板候选行）；没有的 key 对应行可忽略。"
+        : "按你有的认证选一行重跑 --agent <id> --apply；没有的 key 对应行可忽略。");
     }
   } else if (r.selected) {
     const written = [];

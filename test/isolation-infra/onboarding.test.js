@@ -38,6 +38,7 @@ import {
   RECOMMENDATIONS_ADVISORY,
   runOnboarding,
   MAX_CANDIDATES,
+  displayWidth,
 } from "../../src/application/onboarding.js";
 
 // The human renderer lives in the (thin) command layer; importing it does NOT
@@ -182,6 +183,7 @@ function makeMemFs(initial = {}) {
 function memRun({
   agentId, apply, endorseWorker, installRoot = "D:/wao", probeEnv,
   initial = {}, reliabilitySummaryPath = "D:/wao/runs/reliability-summary.json",
+  privateRegistryPath,
 } = {}) {
   const fs = makeMemFs({
     "D:/wao/config/agents.example.json": JSON.stringify(TEMPLATE),
@@ -195,6 +197,7 @@ function memRun({
       exampleRegistryPath: "D:/wao/config/agents.example.json",
       targetRegistryPath: "D:/wao/config/agents.json",
       reliabilitySummaryPath,
+      privateRegistryPath,
       probeEnv,
       fs,
     }),
@@ -2143,4 +2146,345 @@ test("R10-B B-2: doctor/onboarding 已配置面数字对账——同一 registry
   } finally {
     rmSync(join(root, ".."), { recursive: true, force: true });
   }
+});
+
+// ── R11-2（决策 0024）：onboarding 矩阵双源展示契约 ─────────────────────────
+// 双源矩阵：私有 registry 可读时，矩阵 = 已配置行（真实状态、私有 registry
+// 顺序、不打来源标）+ 模板未配置候选（ready-first、行尾 ·模板候选）；同 id 的
+// backend/model.id 漂移挂 ·drift 旗标 + 表后有界明细（≤3 条）；私有独有行省略
+// "适合:" 段（缺席不是坏值，不打 "?"）；截断上界私有先占 MAX_CANDIDATES 帽
+// （私有独占时模板显 0 + 尾注指向模板文件）。混合判定来自 recommendations 的
+// configuredCount 事实（number = 混合），不按行内容推导——0 有效行的 registry
+// 仍是已配置面。所有断言走 renderHuman 与 --json 同源的 result 对象。
+// WQ-02 状态矩阵：纯模板面（字节回归）/ 已配置全有效 / invalid>0 的 N 口径 /
+// 不可读回退 / 同 id drift（含 legacy 形状）/ 私有 ≥ 帽 / 模板溢出 / 双源皆空 /
+// 组合同屏（行宽+排序）/ N=0 措辞 / drift 明细 ≤3 上界。
+
+const PROBE_ALL_READY = { hasCli: async () => true, hasKeyEnv: async () => "process_env" };
+const PROBE_TEMPLATE_FACE = {
+  hasCli: async () => true,
+  hasKeyEnv: async (n) => (n === "DEEPSEEK_API_KEY" ? "process_env" : "missing"),
+};
+
+// 私有条目工厂：合法最小形状（backend + provider + cwd + model），seatRole 可选。
+function privEntry(backend = "claude-code", modelId = "deepseek-v4-flash", apiKeyEnv = "DEEPSEEK_API_KEY", extra = {}) {
+  return {
+    backend,
+    provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv },
+    cwd: ".",
+    model: { id: modelId },
+    ...extra,
+  };
+}
+
+// 模板面字节回归黄金串（与双源改造前的模板面输出逐字一致——私有缺席时既有
+// 展示面不变）。探测：claude CLI 在、DEEPSEEK key 在、其余 key 缺。块界 =
+// 角色矩阵头到表尾句前；renderHuman 的块尾部空白用 trimEnd 归一。
+const GOLDEN_TEMPLATE_MATRIX = `角色矩阵与当前环境适配（推荐按你当前环境探测结果给出，最终选择权在你（不自动选择、不写配置））:
+  id                       backend         model               状态
+  coder_low                claude-code     deepseek-v4-flash   [ready]
+    认证: key DEEPSEEK_API_KEY · 适合: 边界明确的实现包/TDD/修 bug/重构/兼容性/脚本/文档…
+  coder_mm                 kimi-code       kimi-code/k3        [CLI 登录态]
+    认证: kimi CLI 登录态 · 适合: 图像/视频内容理解、前端设计与实现、视觉/美术审核
+  auditor                  claude-code     claude-opus-5       [CLI 登录态]
+    认证: claude CLI 登录态（官方 Claude OAuth（claude logi… · 适合: 前置方案审计/后置独立复核/PASS-FAIL 判定
+`;
+const GOLDEN_TEMPLATE_BLOCK = `${GOLDEN_TEMPLATE_MATRIX}
+会审就绪（模板面·按当前环境探测，决策 0023）: 两席可用——次之推荐（Lead 主审 + 一名副审）
+  可用副审: coder_low（推断族系：DeepSeek）——补齐第二个副审（建议不同族系）可升级三席
+  登录态未验证（如实展示，不计入可用）: coder_mm、auditor
+  席位惯例（0019 §3 保留）: 实现席从 coder 通道取（避同族/避被审产出作者）；组合与选位权由 Lead 决定
+  在场候选（从上表模板行派生）: 实现席 coder_low；对抗席 coder_mm、auditor`;
+
+// 不可读回退面只比矩阵部分前缀（分级块尾部多一条 sourceUnreadable 标注行）。
+function matrixBlock(text) {
+  const start = text.indexOf("角色矩阵与当前环境适配");
+  const end = text.indexOf("按你有的认证");
+  assert.ok(start !== -1 && end > start, "矩阵块锚缺失（角色矩阵头/表尾句）");
+  return text.slice(start, end).trimEnd();
+}
+
+test("R11-2 0024 纯模板面：私有缺席 = 现状模板面逐字不变（字节回归）+ source 全 template + 尾句不扩词", async () => {
+  const { result } = await memRun({ probeEnv: PROBE_TEMPLATE_FACE });
+  const r = await result;
+  assert.equal(r.outcome, "needs-selection");
+  assert.equal(r.recommendations.configuredCount, null, "模板面无双源事实（number 判定混合，null = 纯模板面）");
+  assert.equal(r.recommendations.templateCandidateCount, null);
+  assert.ok(r.recommendations.rows.every((row) => row.source === "template"), "JSON 面 source 两态之 template");
+  assert.ok(r.recommendations.rows.every((row) => row.drift === undefined), "纯模板面无 drift");
+  const text = renderHuman(r);
+  assert.equal(matrixBlock(text), GOLDEN_TEMPLATE_BLOCK, "私有缺席时矩阵块逐字不变");
+  assert.ok(!text.includes("·模板候选"), "纯模板面不打来源标");
+  assert.ok(!text.includes("drift: "), "纯模板面无 drift 明细");
+  assert.ok(!text.includes("仅适用模板候选行"), "纯模板面尾句不扩词（既有 R6-C 尾句钉测仍绿）");
+});
+
+test("R11-2 0024 已配置面全有效：表头混合句 N/M + registry 顺序在前 + 模板组 ready-first + 行尾标同源投影 + 尾句扩词", async () => {
+  const priv = {
+    agents: {
+      // 同 id coder_low 与模板 backend/model 一致 → 不判 drift；registry 顺序 = 展示顺序。
+      coder_hq: privEntry("claude-code", "glm-5.3[1m]", "ZHIPU_API_KEY", { seatRole: "implementation" }),
+      coder_low: privEntry("claude-code", "deepseek-v4-flash", "DEEPSEEK_API_KEY", { seatRole: "implementation" }),
+    },
+  };
+  const { result } = await memRun({
+    probeEnv: PROBE_ALL_READY,
+    privateRegistryPath: "D:/wao/config/agents.json",
+    initial: { "D:/wao/config/agents.json": JSON.stringify(priv) },
+  });
+  const r = await result;
+  assert.equal(r.outcome, "needs-selection");
+  assert.equal(r.recommendations.configuredCount, 2, "N = 私有有效行总数");
+  assert.equal(r.recommendations.templateCandidateCount, 2, "M = 模板行数 − 同 id 数（coder_low 减掉）");
+  assert.equal(r.recommendations.privateOmitted, 0);
+  assert.equal(r.recommendations.templateOmitted, 0);
+  assert.deepEqual(
+    r.recommendations.rows.map((x) => [x.id, x.source]),
+    [["coder_hq", "configured"], ["coder_low", "configured"], ["coder_mm", "template"], ["auditor", "template"]],
+    "已配置行（registry 顺序）在前，模板候选组（ready-first 既有排序）在后");
+  assert.ok(r.recommendations.rows.every((row) => row.drift === undefined), "同值同 id 不判 drift");
+  const text = renderHuman(r);
+  assert.ok(text.includes("矩阵 = 你的 config/agents.json（2 名）+ 模板未配置候选（2 名）"), "表头一句交代混合");
+  const lines = text.split("\n");
+  const lowLine = lines.find((l) => l.startsWith("  coder_low "));
+  assert.ok(!lowLine.includes("·模板候选"), "已配置行不打来源标");
+  assert.ok(!lowLine.includes("·drift"), "无 drift 行不挂旗标");
+  const mmLine = lines.find((l) => l.startsWith("  coder_mm "));
+  assert.ok(mmLine.endsWith("·模板候选"), "模板候选行行 1 尾紧凑标");
+  // 同源断言：人读面尾标数量 == JSON 面 source==="template" 行数（投影，不写第二事实源）。
+  const tplCount = r.recommendations.rows.filter((x) => x.source === "template").length;
+  assert.equal([...text.matchAll(/·模板候选/g)].length, tplCount, "行尾标是 source 字段的投影（同源）");
+  assert.ok(text.includes("重跑 --agent <id> --apply（--apply 仅适用模板候选行）；没有的 key 对应行可忽略。"), "表尾句扩词");
+  assert.ok(!text.includes("drift: "), "无 drift 明细");
+  assert.equal(r.panelFace, "configured");
+  assert.deepEqual(r.panelReadiness.available.map((e) => e.id), ["coder_hq", "coder_low"], "已配置面分级块同屏");
+});
+
+test("R11-2 0024 高风险组合同屏：invalid>0 的 N 口径 = 有效行 + drift 旗标/明细 + 私有独有行省略适合段 + C-2 提示共存 + 行宽 ≤120", async () => {
+  const priv = {
+    agents: {
+      coder_low: privEntry("claude-code", "deepseek-v4-pro", "DEEPSEEK_API_KEY"), // 同 id、model 漂移
+      my_extra: { backend: "kimi-code", cwd: ".", model: { id: "kimi-code/k3" } }, // 私有独有（无 _comment_task）
+      bad_seat: privEntry("claude-code", "deepseek-v4-flash", "ZHIPU_API_KEY", { seatRole: "bogus" }), // 无效 → 剔除
+    },
+  };
+  const { result } = await memRun({
+    probeEnv: PROBE_ALL_READY,
+    privateRegistryPath: "D:/wao/config/agents.json",
+    initial: { "D:/wao/config/agents.json": JSON.stringify(priv) },
+  });
+  const r = await result;
+  assert.equal(r.recommendations.configuredCount, 2, "N 口径 = 有效行（bad_seat 剔除后）");
+  assert.equal(r.recommendations.templateCandidateCount, 2);
+  assert.equal(r.panelInvalidEntryCount, 1);
+  assert.deepEqual(
+    r.recommendations.rows.map((x) => x.id),
+    ["coder_low", "my_extra", "coder_mm", "auditor"],
+    "registry 顺序 + 模板组 ready-first 排序同屏不互相污染");
+  const text = renderHuman(r);
+  assert.ok(text.includes("矩阵 = 你的 config/agents.json（2 名）+ 模板未配置候选（2 名）"));
+  const lines = text.split("\n");
+  const lowLine = lines.find((l) => l.startsWith("  coder_low "));
+  assert.ok(lowLine.includes("·drift"), "drift 行行 1 尾旗标");
+  assert.ok(!lowLine.includes("·模板候选"), "已配置行（含 drift 行）不打模板候选标");
+  const extraIdx = lines.findIndex((l) => l.startsWith("  my_extra "));
+  assert.ok(extraIdx !== -1);
+  assert.ok(!lines[extraIdx].includes("·模板候选"), "私有独有行不打模板候选标");
+  assert.ok(lines[extraIdx + 1].includes("认证: kimi CLI 登录态"), "私有独有行认证照常");
+  assert.ok(!lines[extraIdx + 1].includes("适合:"), "私有独有行'适合:'段整段省略（缺席不是坏值）");
+  assert.ok(!lines[extraIdx + 1].includes("?"), "私有独有行不打 ?");
+  assert.ok(text.includes(
+    "drift: coder_low 私有 model=deepseek-v4-pro/backend=claude-code ≠ 模板 deepseek-v4-flash/claude-code"),
+    "drift 有界明细形状固定");
+  // 三类注记共存：C-2 提示行 + 指针行 + 分级块（R10-B/R10-C 与矩阵改造同屏）。
+  assert.ok(text.includes("私有 registry 有 1 条无效条目已剔除"));
+  assert.ok(text.includes("已配置 3 名 worker（真实状态以它为准）"));
+  assert.ok(!text.includes("bad_seat"), "不指名被剔除条目");
+  assert.ok(!text.includes("config/roles"), "systemPrompt 指针不进展示面");
+  // 列宽纪律：矩阵块内所有行 ≤120 显示格（东亚宽字符计 2）。
+  const window = matrixBlock(text);
+  for (const line of window.split("\n")) {
+    assert.ok(displayWidth(line) <= 120, `矩阵块行宽超 120: ${line}`);
+  }
+});
+
+test("R11-2 0024 私有 0 有效行：表头 N=0 措辞如实 + 全模板候选打标 + 混合面不因行内容退化", async () => {
+  const priv = { agents: { bad_seat: privEntry("claude-code", "deepseek-v4-flash", "ZHIPU_API_KEY", { seatRole: "bogus" }) } };
+  const { result } = await memRun({
+    probeEnv: PROBE_ALL_READY,
+    privateRegistryPath: "D:/wao/config/agents.json",
+    initial: { "D:/wao/config/agents.json": JSON.stringify(priv) },
+  });
+  const r = await result;
+  assert.equal(r.recommendations.configuredCount, 0, "N = 0（全无效）");
+  assert.equal(r.recommendations.templateCandidateCount, 3, "模板 3 行全成候选（bad_seat 不同 id 不抵消）");
+  assert.ok(r.recommendations.rows.every((row) => row.source === "template"));
+  const text = renderHuman(r);
+  assert.ok(text.includes("矩阵 = 你的 config/agents.json（0 名）+ 模板未配置候选（3 名）"), "N=0 措辞如实（判定不靠行内容）");
+  assert.equal([...text.matchAll(/·模板候选/g)].length, 3, "全部模板候选行打标");
+  assert.ok(text.includes("私有 registry 有 1 条无效条目已剔除"), "C-2 提示在场");
+});
+
+test("R11-2 0024 私有不可读回退模板面：矩阵逐字不变 + sourceUnreadable 标注 + 不打标不扩词", async () => {
+  const { result } = await memRun({
+    probeEnv: PROBE_TEMPLATE_FACE,
+    privateRegistryPath: "D:/wao/config/agents.json",
+    initial: { "D:/wao/config/agents.json": "{ not valid json" },
+  });
+  const r = await result;
+  assert.equal(r.outcome, "needs-selection");
+  assert.equal(r.panelFace, "template");
+  assert.equal(r.panelSourceUnreadable, true);
+  assert.equal(r.recommendations.configuredCount, null, "不可读降级面无双源事实");
+  const text = renderHuman(r);
+  assert.ok(text.startsWith(GOLDEN_TEMPLATE_MATRIX, text.indexOf("角色矩阵与当前环境适配")),
+    "不可读降级后矩阵部分与模板面逐字一致");
+  assert.ok(text.includes("私有 registry 读取失败"), "sourceUnreadable 标注行在场");
+  assert.ok(!text.includes("·模板候选"), "降级面不打来源标");
+  assert.ok(!text.includes("仅适用模板候选行"), "降级面尾句不扩词");
+});
+
+test("R11-2 0024 drift 闭集仅 backend + model.id：opencode legacy 形状（providerID/contextWindow/variant）差异不误判", async () => {
+  // 模板侧 legacy 形状：providerID/variant/contextWindow 全不同但 id 相同。
+  const customTpl = {
+    agents: {
+      keep: {
+        backend: "claude-code",
+        provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "K_API_KEY" },
+        cwd: ".",
+        model: { providerID: "deepseek", id: "deepseek-v4-pro", variant: "legacy-a", contextWindow: 1000000 },
+      },
+      swp: { backend: "kimi-code", cwd: ".", model: { providerID: "kimi", id: "kimi-code/k3" } },
+    },
+  };
+  const priv = {
+    agents: {
+      keep: {
+        backend: "claude-code",
+        provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "K_API_KEY" },
+        cwd: ".",
+        model: { providerID: "deepseek", id: "deepseek-v4-pro", contextWindow: 500000 },
+      },
+      swp: {
+        backend: "claude-code",
+        provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "K_API_KEY" },
+        cwd: ".",
+        model: { id: "deepseek-v4-pro" },
+      },
+    },
+  };
+  const { result } = await memRun({
+    probeEnv: PROBE_ALL_READY,
+    privateRegistryPath: "D:/wao/config/agents.json",
+    initial: {
+      "D:/wao/config/agents.example.json": JSON.stringify(customTpl),
+      "D:/wao/config/agents.json": JSON.stringify(priv),
+    },
+  });
+  const r = await result;
+  const keep = r.recommendations.rows.find((x) => x.id === "keep");
+  const swp = r.recommendations.rows.find((x) => x.id === "swp");
+  assert.equal(keep.drift, undefined, "providerID/contextWindow/variant 形状差异 ≠ drift");
+  assert.ok(swp.drift, "backend 差异 = drift");
+  assert.equal(swp.drift.templateBackend, "kimi-code");
+  assert.equal(swp.drift.templateModel, "kimi-code/k3");
+});
+
+test("R11-2 0024 私有 ≥ 帽：私有先占 64、模板显 0 + 尾注指向模板文件 + 溢出事实在场", async () => {
+  const agents = {};
+  for (let i = 0; i < 70; i += 1) {
+    agents[`w_${String(i).padStart(2, "0")}`] = privEntry("claude-code", `m-${i}`, "K_API_KEY");
+  }
+  const { result } = await memRun({
+    probeEnv: PROBE_ALL_READY,
+    privateRegistryPath: "D:/wao/config/agents.json",
+    initial: { "D:/wao/config/agents.json": JSON.stringify({ agents }) },
+  });
+  const r = await result;
+  assert.equal(r.recommendations.configuredCount, 70, "N = 真实有效行数（不受显示帽）");
+  assert.equal(r.recommendations.privateOmitted, 6);
+  assert.equal(r.recommendations.templateCandidateCount, 3);
+  assert.equal(r.recommendations.templateOmitted, 3);
+  assert.equal(r.recommendations.rows.length, MAX_CANDIDATES, "总行数 = 64 硬帽");
+  assert.ok(r.recommendations.rows.every((x) => x.source === "configured"), "私有先占帽，模板显 0");
+  const text = renderHuman(r);
+  assert.ok(text.includes("矩阵 = 你的 config/agents.json（70 名）+ 模板未配置候选（3 名）"));
+  assert.ok(text.includes("私有 registry 另有 6 名有效 worker 超出 64 行显示上限"));
+  assert.ok(text.includes("模板候选未显示（私有行已占满 64 行上限）——完整模板见 config/agents.example.json"));
+});
+
+test("R11-2 0024 模板溢出：私有 2 + 模板候选 64 → 模板补到 62 + '另有 K 名'尾注", async () => {
+  const tplAgents = {
+    a1: { backend: "claude-code", cwd: ".", model: { id: "m" } },
+    a2: { backend: "claude-code", cwd: ".", model: { id: "m" } },
+  };
+  for (let i = 0; i < 64; i += 1) {
+    tplAgents[`t_${String(i).padStart(2, "0")}`] = { backend: "codex", cwd: ".", model: { id: "m" } };
+  }
+  const priv = {
+    agents: {
+      a1: privEntry("claude-code", "m", "K_API_KEY"),
+      a2: privEntry("claude-code", "m", "K_API_KEY"),
+    },
+  };
+  const { result } = await memRun({
+    probeEnv: PROBE_ALL_READY,
+    privateRegistryPath: "D:/wao/config/agents.json",
+    initial: {
+      "D:/wao/config/agents.example.json": JSON.stringify({ agents: tplAgents }),
+      "D:/wao/config/agents.json": JSON.stringify(priv),
+    },
+  });
+  const r = await result;
+  assert.equal(r.recommendations.configuredCount, 2);
+  assert.equal(r.recommendations.templateCandidateCount, 64, "模板候选 = 66 行 − 2 同 id");
+  assert.equal(r.recommendations.templateOmitted, 2);
+  assert.equal(r.recommendations.rows.length, MAX_CANDIDATES);
+  assert.equal(r.recommendations.rows.filter((x) => x.source === "template").length, 62, "模板补到 64 − 私有已显");
+  const text = renderHuman(r);
+  assert.ok(text.includes("另有 2 名模板候选未显示"), "模板溢出尾注");
+  assert.ok(!text.includes("完整模板见"), "非私有独占形态不指向模板文件");
+});
+
+test("R11-2 0024 双源皆空：0 行不渲染矩阵块、事实字段如实、主流程不崩", async () => {
+  const { result } = await memRun({
+    privateRegistryPath: "D:/wao/config/agents.json",
+    initial: {
+      "D:/wao/config/agents.example.json": JSON.stringify({ agents: {} }),
+      "D:/wao/config/agents.json": JSON.stringify({ agents: {} }),
+    },
+  });
+  const r = await result;
+  assert.equal(r.outcome, "needs-selection");
+  assert.equal(r.recommendations.configuredCount, 0);
+  assert.equal(r.recommendations.templateCandidateCount, 0);
+  assert.deepEqual(r.recommendations.rows, []);
+  assert.equal(r.panelReadiness.rowCount, 0);
+  const text = renderHuman(r);
+  assert.ok(!text.includes("角色矩阵"), "零行不渲染矩阵块");
+});
+
+test("R11-2 0024 drift 明细 ≤3 上界：5 条 drift → 3 条明细 + '另有 2 条'尾注", async () => {
+  const tplAgents = {};
+  const privAgents = {};
+  for (let i = 1; i <= 5; i += 1) {
+    tplAgents[`d${i}`] = { backend: "claude-code", cwd: ".", model: { id: "t-m" } };
+    privAgents[`d${i}`] = privEntry("claude-code", "p-m", "K_API_KEY");
+  }
+  const { result } = await memRun({
+    probeEnv: PROBE_ALL_READY,
+    privateRegistryPath: "D:/wao/config/agents.json",
+    initial: {
+      "D:/wao/config/agents.example.json": JSON.stringify({ agents: tplAgents }),
+      "D:/wao/config/agents.json": JSON.stringify({ agents: privAgents }),
+    },
+  });
+  const r = await result;
+  assert.equal(r.recommendations.configuredCount, 5);
+  assert.equal(r.recommendations.templateCandidateCount, 0, "全同 id，模板无候选");
+  assert.ok(r.recommendations.rows.every((row) => row.drift), "五行全 drift");
+  const text = renderHuman(r);
+  const detailLines = text.split("\n").filter((l) => l.startsWith("  drift: "));
+  assert.equal(detailLines.length, 3, "drift 明细 ≤3 上界");
+  assert.ok(text.includes("另有 2 条 drift 明细未显示"), "超出部分有界尾注");
 });

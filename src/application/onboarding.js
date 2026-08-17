@@ -272,20 +272,29 @@ async function computeReadyState({ requiresCli, requiresKeyEnv, probeCli, probeK
  * @param {{hasCli: (name: string) => Promise<true|false|"unknown">, hasKeyEnv: (name: string) => Promise<"process_env"|"user_env"|"missing"|"unknown">}} [probeEnv]
  *   injected environment probe. Omitted ⇒ every probe reads as "unknown" (no
  *   probing of any kind — the module stays pure).
+ * @param {{sortReadyFirst?: boolean, source?: "template"|"configured"}} [opts]
+ *   R11-2（决策 0024）：sortReadyFirst 默认 true（模板候选组/模板面的既有
+ *   ready-first 排序）；已配置面行要求私有 registry 顺序稳定 → 传 false。
+ *   source 默认 "template"——每行携带结构化来源字段（renderHuman 与 --json
+ *   同源单对象，展示尾标只是它的投影）。
  * @returns {Promise<{advisory: string, rows: {
  *   id: string, backend: string|null, model: string|null,
  *   requiresCli: string|null, requiresKeyEnv: string|null,
  *   duty: string|null, authNote: string|null,
  *   readyState: "ready"|"missing_cli"|"missing_key"|"missing_both"|"login_based"|"unknown",
- *   seatRole: "adversarial"|"implementation"|"non_seat"|undefined
+ *   seatRole: "adversarial"|"implementation"|"non_seat"|undefined,
+ *   source: "template"|"configured"
  * }[]>}>
  *   seatRole（R10-B）：模板/registry 条目上的显式席位声明；absent → undefined
  *   （panelReadiness.seatRoleOf 回退命名惯例）。非字符串一律不带上（闭集外的
  *   声明由 normalizeAgent 拒绝，探测行不复制坏值）。
  */
-export async function buildRecommendations(candidates, template, probeEnv) {
+export async function buildRecommendations(candidates, template, probeEnv, opts = {}) {
   const agents = isPlainObject(template?.agents) ? template.agents : {};
   const list = Array.isArray(candidates) ? candidates : [];
+  // R11-2（决策 0024）：行级来源 + 排序开关（已配置面 = registry 顺序稳定）。
+  const sortReadyFirst = opts.sortReadyFirst !== false;
+  const source = opts.source === "configured" ? "configured" : "template";
   // Per-call memo of probe results (one probe per unique name) — bounds the
   // onboarding invocation at ≤4 CLI probes + ≤N key probes by construction.
   const cliMemo = new Map();
@@ -323,16 +332,30 @@ export async function buildRecommendations(candidates, template, probeEnv) {
       // R10-B：显式席位声明（两个行生产方都带 declared——doctor 同形）。
       // 非字符串一律 undefined（坏值由 normalizeAgent 拒绝，探测行不复制）。
       seatRole: typeof agent.seatRole === "string" ? agent.seatRole : undefined,
+      // R11-2（决策 0024）：结构化来源字段（两态闭集）——JSON 消费者拿得到双源事实。
+      source,
     });
   }
-  // ready 在前（login_based 次之）；稳定排序保持模板顺序。
-  rows.sort((a, b) => READY_RANK[a.readyState] - READY_RANK[b.readyState]);
+  // ready 在前（login_based 次之）；稳定排序保持模板顺序。已配置面行（0024：
+  // 私有 registry 顺序稳定）由 sortReadyFirst: false 跳过重排。
+  if (sortReadyFirst) {
+    rows.sort((a, b) => READY_RANK[a.readyState] - READY_RANK[b.readyState]);
+  }
   return { advisory: RECOMMENDATIONS_ADVISORY, rows };
 }
 
-/** Empty recommendations (template unreadable / no candidates — zero probes). */
+/** Empty recommendations (template unreadable / no candidates — zero probes).
+ *  R11-2（决策 0024）：双源事实字段两面对齐（模板面/空面 null/0）——JSON 消费者
+ *  拿到的形状恒定，展示层据 configuredCount 是否 number 判定混合矩阵。 */
 export function emptyRecommendations() {
-  return { advisory: RECOMMENDATIONS_ADVISORY, rows: [] };
+  return {
+    advisory: RECOMMENDATIONS_ADVISORY,
+    rows: [],
+    configuredCount: null,
+    templateCandidateCount: null,
+    templateOmitted: 0,
+    privateOmitted: 0,
+  };
 }
 
 /**
@@ -614,7 +637,10 @@ async function loadPrivateRegistry(privateRegistryPath, fs) {
  * private face claiming truth.
  * @param {object} registry — parsed private registry JSON
  * @param {{hasCli: Function, hasKeyEnv: Function}} [probeEnv]
- * @returns {Promise<{rows: object[], count: number, invalidCount: number}>}
+ * @returns {Promise<{rows: object[], count: number, validCount: number, invalidCount: number}>}
+ *   count = 私有 registry 的原始 worker 数（计数不枚举，不受帽）；validCount =
+ *   过 normalizeAgent 的有效行总数（R11-2 矩阵头句的 N 口径，同样不受帽——
+ *   rows 经 buildCandidateList 枚举有帽，二者可不同）。
  */
 async function buildConfiguredFace(registry, probeEnv) {
   const agents = isPlainObject(registry?.agents) ? registry.agents : {};
@@ -629,8 +655,94 @@ async function buildConfiguredFace(registry, probeEnv) {
     }
   }
   const validRegistry = { ...registry, agents: valid };
-  const { rows } = await buildRecommendations(buildCandidateList(validRegistry), validRegistry, probeEnv);
-  return { rows, count: Object.keys(agents).length, invalidCount };
+  // R11-2（决策 0024）：已配置面行按私有 registry 顺序稳定展示（矩阵"已配置行
+  // 在前、私有顺序稳定"契约）——不做 ready-first 重排；就绪块分级对行序不敏感。
+  const { rows } = await buildRecommendations(
+    buildCandidateList(validRegistry), validRegistry, probeEnv,
+    { sortReadyFirst: false, source: "configured" },
+  );
+  return { rows, count: Object.keys(agents).length, validCount: Object.keys(valid).length, invalidCount };
+}
+
+/**
+ * R11-2（决策 0024）：模板面 recommendations（私有 registry absent/unreadable
+ * 时的既有形状 + 双源事实字段统一 null/0）——JSON 消费者两面对齐，展示层据
+ * configuredCount 是否 number 判定混合矩阵（不按行内容推导：0 有效行的
+ * registry 仍是已配置面）。
+ */
+async function buildTemplateFaceRecommendations(candidates, template, probeEnv) {
+  const rec = await buildRecommendations(candidates, template, probeEnv);
+  return {
+    ...rec,
+    configuredCount: null,
+    templateCandidateCount: null,
+    templateOmitted: 0,
+    privateOmitted: 0,
+  };
+}
+
+/**
+ * R11-2（决策 0024）：双源矩阵组装。私有 registry 在场且可读时，矩阵 =
+ * 已配置有效行（私有 registry 顺序稳定、私有胜显示）在前 + 模板未配置候选
+ * （id 不在私有 registry 的模板行；组内沿用 ready-first 既有排序）在后。
+ * 行携带 source（"configured"|"template"）；与模板同 id 的已配置行做 drift
+ * 比对（闭集仅 backend + model.id——两侧读 .model?.id，opencode legacy 形状的
+ * providerID/variant/contextWindow 不比：形状差异 ≠ drift）。总行数 ≤
+ * MAX_CANDIDATES（私有先占帽），溢出事实进有界字段（configuredCount/
+ * templateCandidateCount/templateOmitted/privateOmitted），展示层只投影。
+ *
+ * 纯展示零行为：不改 --apply/--endorse-worker 的拒绝/写入语义，不动 registry
+ * 校验权威（normalizeAgent），不新增门禁。
+ *
+ * @param {object} input
+ * @param {object} input.template — parsed config/agents.example.json
+ * @param {object} input.privateRegistry — parsed private registry JSON
+ * @param {object} input.cfg — buildConfiguredFace 结果（复用，不重复探测）
+ * @param {{hasCli: Function, hasKeyEnv: Function}} [input.probeEnv]
+ * @returns {Promise<{advisory: string, rows: object[], configuredCount: number,
+ *   templateCandidateCount: number, templateOmitted: number, privateOmitted: number}>}
+ */
+async function buildDualSourceMatrix({ template, privateRegistry, cfg, probeEnv }) {
+  const tplAgents = isPlainObject(template?.agents) ? template.agents : {};
+  const privAgents = isPlainObject(privateRegistry?.agents) ? privateRegistry.agents : {};
+  // 模板未配置候选 = 模板行 − 私有同 id 行（同 id 含无效条目——已配置不重复列；
+  // 无效条目的修复出口是 C-2 提示行，模板行不顶替入场）。
+  const unconfiguredAgents = {};
+  for (const [id, agent] of Object.entries(tplAgents)) {
+    if (!Object.prototype.hasOwnProperty.call(privAgents, id)) unconfiguredAgents[id] = agent;
+  }
+  const templateCandidates = buildCandidateList({ ...template, agents: unconfiguredAgents });
+  // 模板候选组：ready-first 既有排序 + source "template"（buildRecommendations 默认）。
+  const tplRec = await buildRecommendations(templateCandidates, template, probeEnv);
+  const configuredShown = cfg.rows.slice(0, MAX_CANDIDATES); // 行生产已 ≤ MAX，双保险
+  const slots = MAX_CANDIDATES - configuredShown.length;
+  const templateShown = tplRec.rows.slice(0, slots);
+  const rows = [];
+  for (const row of configuredShown) {
+    const out = { ...row }; // 已带 source "configured"（buildConfiguredFace 行生产）
+    const tpl = tplAgents[row.id];
+    if (tpl !== undefined) {
+      // 0024(4)：drift 闭集仅 backend + model.id（形状差异 ≠ drift）。
+      const templateBackend = isPlainObject(tpl) ? tpl.backend ?? null : null;
+      const templateModel = isPlainObject(tpl) ? tpl.model?.id ?? null : null;
+      if ((out.backend ?? null) !== templateBackend || (out.model ?? null) !== templateModel) {
+        out.drift = { templateBackend, templateModel };
+      }
+    }
+    rows.push(out);
+  }
+  for (const row of templateShown) rows.push(row);
+  return {
+    advisory: RECOMMENDATIONS_ADVISORY,
+    rows,
+    // 有界双源事实（表头句/尾注只是它们的投影）：
+    configuredCount: cfg.validCount,                       // 私有有效行总数（含超帽未显）
+    // M 有界于 MAX_CANDIDATES（buildCandidateList 枚举硬帽——模板入库行 >64 的
+    // 防御形状下尾注如实报"另有 K 名"而不虚构总数；仓内模板 ≤7 行不受影响）。
+    templateCandidateCount: tplRec.rows.length,            // 模板未配置候选总数（含超帽未显）
+    templateOmitted: tplRec.rows.length - templateShown.length,
+    privateOmitted: cfg.validCount - configuredShown.length,
+  };
 }
 
 /**
@@ -708,24 +820,24 @@ export async function runOnboarding({
   }
   const candidates = buildCandidateList(template);
 
-  // R6-C: advisory role matrix + environment fit, derived from the template rows
-  // + the INJECTED probe. Bounded (≤4 CLI probes + ≤N key probes, memoized per
-  // unique name); probe failures degrade to "unknown" and never throw.
-  recommendations = await buildRecommendations(candidates, template, probeEnv);
-
   // R10-B: 私有 registry 面加载（只读、注入 fs；永不 throw）。present+readable
-  // → 后续所有分支的 readiness 块输入行切到已配置面（同一 engine、同一探测
-  // 实现；R10-C C-2：每条 entry 先过共享校验权威 normalizeAgent，无效条目剔除
-  // 并计数，绝不以"真实状态以它为准"的口径渲染被拒条目）；absent → 模板面
-  // （既有行为不变）；unreadable → 模板面 + 标注来源不可读（不阻塞主流程）。
+  // → readiness 块输入行切到已配置面（同一 engine、同一探测实现；R10-C C-2：
+  // 每条 entry 先过共享校验权威 normalizeAgent，无效条目剔除并计数，绝不以
+  // "真实状态以它为准"的口径渲染被拒条目）且矩阵切双源（R11-2 决策 0024）；
+  // absent → 模板面（既有行为不变）；unreadable → 模板面 + 标注来源不可读
+  // （不阻塞主流程）。加载在行生产之前：readable 时不再生产模板全量行（双源
+  // 矩阵自带模板候选组），总探测界不变（≤8 CLI + ≤2N key，仍是常数界）。
   const privateLoad = await loadPrivateRegistry(privateRegistryPath, _fs);
   if (privateLoad.status === "readable") {
     const cfg = await buildConfiguredFace(privateLoad.registry, probeEnv);
     panelState = { face: "configured", rows: cfg.rows, configuredCount: cfg.count, invalidCount: cfg.invalidCount, sourceUnreadable: false };
-  } else if (privateLoad.status === "unreadable") {
-    panelState = { face: "template", rows: recommendations.rows, configuredCount: null, invalidCount: 0, sourceUnreadable: true };
+    recommendations = await buildDualSourceMatrix({ template, privateRegistry: privateLoad.registry, cfg, probeEnv });
   } else {
-    panelState = { face: "template", rows: recommendations.rows, configuredCount: null, invalidCount: 0, sourceUnreadable: false };
+    // R6-C: advisory role matrix + environment fit, derived from the template rows
+    // + the INJECTED probe. Bounded (≤4 CLI probes + ≤N key probes, memoized per
+    // unique name); probe failures degrade to "unknown" and never throw.
+    recommendations = await buildTemplateFaceRecommendations(candidates, template, probeEnv);
+    panelState = { face: "template", rows: recommendations.rows, configuredCount: null, invalidCount: 0, sourceUnreadable: privateLoad.status === "unreadable" };
   }
 
   // Endorsement contract: requires an EXPLICIT, MATCHING selection. Checked before

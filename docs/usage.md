@@ -90,6 +90,7 @@ Copy-Item config/agents.example.json config/agents.json
 编辑 `config/agents.json`，按需增删 agent。`cwd` 模板默认是 `.`（R8-1：解析为发起派发的进程的当前工作目录——CLI 通道=你敲命令时所在目录；MCP 通道=MCP 服务进程的 cwd，由 host 决定；恒存在，开箱即跑）——要固定目标项目就改成真实路径（必须已存在），或保持 `.` 由派发时 `--cwd` 覆盖（`wao doctor` 对 cwd 为 `.` 的 worker 会出一条 INFO 落点提示，不计 DEGRADED）。
 
 > 第三方从全新 clone 只配一个 worker：`npm run cli -- wao onboarding --agent <agentId> --apply` 自动从入库模板生成单 worker registry + host-neutral MCP 片段（零手编）。正式验收链见 `AGENT_ONBOARDING.md` §9。
+> 已生成 `config/agents.json` 后裸跑 `npm run cli -- wao onboarding`，角色矩阵按双源展示（决策 0024）：已配置行（真实状态、私有 registry 顺序）在前，模板未配置候选（行尾 `·模板候选`）在后；同 id 但 backend/model 漂移的行挂 `·drift` 并在表后列有界明细；`--apply` 仅适用模板候选行。还没生成（或不可读）时是纯模板面，输出不变。
 
 当前派发策略：
 - 真实编码/文件修改/命令执行优先用 certified Claude Code worker（如 `coder_hq` / `coder_low`）。

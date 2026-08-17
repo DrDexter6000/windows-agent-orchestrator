@@ -2862,3 +2862,52 @@ test("R10-A: RUN_USAGE_TEXT 用法页与生成层同步携带 --model（CLI 面�
   const rdInput = rdSection.slice(0, rdSection.indexOf("## ", 1) === -1 ? rdSection.length : rdSection.indexOf("## ", 1));
   assert.match(rdInput, /\| model \| string \| no \|/, "run_dispatch input 表含 model 行（可选）");
 });
+
+// ── R11-2（决策 0024）：onboarding 矩阵双源展示契约——决策链 + 文档锚 ─────────
+// 0024 部分取代 0022(6)（模板行生 → 输入行生 + 来源标记）；0022 头部反向指针
+// （superseded-by，0019:4 先例——导航事实：历史正文不改写、status 保留）。
+// 关系型锚（TD-120）：帽值从代码 SSOT（onboarding.js MAX_CANDIDATES）import
+// 对账，不硬编码漂移数字；契约成员（尾标/drift/尾句扩词）是展示层既有字面量。
+
+test("R11-2 0024: 决策 0024 在场（status accepted）+ map.md 索引行 + 显式 supersedes 0022 条款 (6)", () => {
+  assert.ok(read(".wao/decisions/map.md").includes("0024 | onboarding 矩阵双源展示契约"),
+    "decisions/map.md 缺 0024 索引行");
+  const decision = read(".wao/decisions/0024-onboarding-矩阵双源展示契约.md");
+  assert.ok(/^status: accepted$/m.test(decision), "0024 状态必须是 accepted");
+  assert.ok(decision.includes("supersedes 0022 的条款 (6)"), "0024 必须显式声明 supersedes 0022 条款 (6)");
+  assert.ok(decision.includes("标签从输入行生"), "0024 必须点名被取代条款的新语义");
+  assert.ok(decision.includes("禁止硬编码角色名的精神不变"), "0024 必须保留 0022(6) 精神");
+  for (const member of ["·模板候选", "·drift", "--apply 仅适用模板候选行", "config/agents.example.json"]) {
+    assert.ok(decision.includes(member), `0024 缺契约成员 ${member}`);
+  }
+});
+
+test("R11-2 0024: 0022 头部 superseded-by 反向指针 + status 保留 + 正文条款 (6) 原文不动（0019:4 先例）", () => {
+  const d0022 = read(".wao/decisions/0022-onboarding-角色矩阵展示契约-owner-两轮反馈定稿.md");
+  assert.ok(/^superseded-by: 0024（条款 6）$/m.test(d0022),
+    "0022 头部必须有 superseded-by: 0024（条款 6）反向指针");
+  assert.ok(/^status: accepted$/m.test(d0022),
+    "0022 的 status: accepted 保留（supersede 指针不改写历史决策状态）");
+  assert.ok(d0022.includes("(6) 所有标签从入库模板行生"),
+    "0022 正文条款 (6) 原文保留（历史正文不改写，导航事实只在头部）");
+});
+
+test("R11-2 0024: 矩阵帽与代码 SSOT 对账（TD-120 关系型，不硬编码漂移数字）", async () => {
+  const { MAX_CANDIDATES: cap } = await import("../../src/application/onboarding.js");
+  const decision = read(".wao/decisions/0024-onboarding-矩阵双源展示契约.md");
+  assert.ok(decision.includes(`MAX_CANDIDATES（${cap}）`),
+    `0024 的帽值必须与代码 SSOT MAX_CANDIDATES（${cap}）对账`);
+  for (const field of ["configuredCount", "templateCandidateCount", "templateOmitted", "privateOmitted"]) {
+    assert.ok(decision.includes(field), `0024 缺有界事实字段 ${field}`);
+  }
+});
+
+test("R11-2 0024: AGENT_ONBOARDING.md 双源说明 + usage.md 配置节追加（--apply 适用句两处锚）", () => {
+  const ob = read("AGENT_ONBOARDING.md");
+  assert.ok(ob.includes("矩阵双源"), "AGENT_ONBOARDING.md 必须含矩阵双源说明（决策 0024）");
+  assert.ok(ob.includes("`·模板候选`"), "AGENT_ONBOARDING.md 必须点名模板候选尾标");
+  assert.ok(ob.includes("`--apply` 仅适用模板候选行"), "AGENT_ONBOARDING.md 必须含 --apply 适用范围句");
+  const usage = read("docs/usage.md");
+  assert.ok(usage.includes("双源展示（决策 0024）"), "docs/usage.md 配置节必须追加双源说明");
+  assert.ok(usage.includes("`--apply` 仅适用模板候选行"), "docs/usage.md 必须含 --apply 适用范围句");
+});
