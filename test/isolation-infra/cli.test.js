@@ -1666,7 +1666,11 @@ test("R9 回归: wao onboarding refused/error 分支 exitCode 行为不受分级
     ["src/cli.js", "wao", "onboarding", "--agent", "tester"],
     { cwd: process.cwd(), encoding: "utf8", timeout: 60000 });
   assert.equal(preview.status, 0, `preview outcome 必须 exit 0，stderr=${preview.stderr}`);
-  assert.ok(preview.stdout.includes("会审就绪（模板面"), "selected/preview 分支打印分级块（R9 需求 1）");
+  // R10 集成修正：分级块的数据面（模板面/已配置面）取决于本机是否存在私有
+  // config/agents.json——fresh worktree/CI 无（模板面）、已配置机器有（已配置
+  // 面）。本测试只断言跨机稳定事实（selected 分支打印分级块本身），不钉面
+  // （R7-C C-6 的机器状态解耦纪律同款）。
+  assert.match(preview.stdout, /会审就绪（(模板面|已配置面)/, "selected/preview 分支打印分级块（R9 需求 1）");
 });
 
 test("TD-88: wao ask 缺 agentId 或任务时 fail-fast（快捷派工参数校验）", () => {

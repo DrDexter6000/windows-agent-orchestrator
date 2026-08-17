@@ -566,7 +566,13 @@ const RED_23_WIRE = 75492;
 // constants). No description bytes changed (FROZEN_22_DESC_CEILING unchanged);
 // the wire grew +671 bytes (schema-only, 76584 → 77255). Ceiling re-frozen at
 // the exact measured 77255.
-const FROZEN_22_WIRE_CEILING = 77255;
+// R10-A additive model param: run_dispatch + run_dispatch_contract_check's
+// shared RUN_DISPATCH_INPUT gains the optional `model` string (per-dispatch
+// model-id override, wire-validated). No description bytes changed
+// (FROZEN_22_DESC_CEILING unchanged); the wire grew +200 bytes (77255 → 77455,
+// the serialized property rides both schemas). Ceiling re-frozen at the exact
+// measured 77455.
+const FROZEN_22_WIRE_CEILING = 77455;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -694,8 +700,11 @@ test("M12-10-H: deterministic 22-tool wire at or below the frozen ceiling", asyn
 // truthfully; no description text is in the stripped payload and none changed
 // (M12-16-B still passes — FROZEN_22_DESC_CEILING unchanged). M12-10-H
 // re-freezes the wire ceiling; this hash remains the losslessness proof.
+// R10-A additive model param: the optional `model` string (per-dispatch
+// model-id override) joined the shared RUN_DISPATCH_INPUT stripped payload for
+// run_dispatch + run_dispatch_contract_check; SHA re-frozen truthfully.
 const DESC_STRIPPED_CONTRACT_SHA =
-  "82c7961bd6a4e1e87008328c86d87ae6c0ec4763278bebb4ba4f39f8e0449ff6";
+  "79420f12768bf7796fcea5dd35c9ac4a83614bfd8086d2e6b930d0caba14d533";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;
