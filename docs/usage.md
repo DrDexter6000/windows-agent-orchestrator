@@ -175,6 +175,14 @@ Copy-Item config/agents.example.json config/agents.json
 }
 ```
 
+`seatRole`（R10-B）是三席会审（决策 0023）的显式席位声明，闭集为
+`"adversarial"`（对抗席）/ `"implementation"`（实现席）/ `"non_seat"`（非席位）——registry
+schema、就绪分级引擎与展示层共用同一词表（`registry validate` 对闭集外或非字符串值固定拒绝，
+错误信息不回显坏值）。**省略该字段合法**：席位角色回退命名惯例（`auditor`/`coder_mm` = 对抗席、
+`coder_` 前缀 = 实现席、其余非席位），老 registry 零迁移。新配置建议显式声明——惯例对
+`coder_opencode_fallback` 这类"名字像实现席、实为 fallback 非席位"的 worker 会误分类，
+显式 `"non_seat"` 才能把它从席位候选剔除。
+
 `deepseek-harness` 配置只负责 detect/invoke/report：WAO 要求 `binary` 指向一个可启动的
 DSH SDK JSON-RPC runtime，`dshConfigPath` 可读，`credentialEnv` 只写环境变量名；凭据值仍由
 现有 Windows user-env bridge 注入子进程。DSH composition 应关闭内部 subagent、workflow、
@@ -526,7 +534,7 @@ npm run cli -- wao stage --cwd <目标项目>
 - 跳过理由闭集（SSOT：`src/waoStage.js` 的 `PANEL_SKIP_REASONS`）：`no_reviewer_available` / `low_risk_small_task` / `time_critical` / `owner_direct`。细节差异（如 provider 临时不可用）进 `--note`，不扩闭集。
 - 其余 stage（1/3/5/6）带 panel 参数 fail-fast（"panel 字段只在方案（2）/交付物验收（4）登记"——不写成"会审仅发生在两节点"，同一 stage 允许多条记录，返工/窄复核照常再登记）。
 - stage 2/4 落盘成功且无 panel 字段时输出 JSON 加性字段 `panelAdvisory`（未记录会审提示；exit 0 不变——非门禁）；stage 4 成功输出固定复述红线："评审意见是证据不是验收；`run_delivery_decide` 只由 Lead 调用"。panel 记录写进 STAGE 正文 frontmatter 与 `pipeline/map.md` 索引行第 5 列（无 panel 的旧行照常解析）。
-- 会审就绪提示的两张面（数据源不同，勿混）：`wao onboarding` 的分级块是**模板面**——从入库模板行 + 当前环境探测推导（onboarding 不读你的 agents.json，它可能还没生成）；`wao doctor` 的 `panel_readiness` 检查是**已配置面**——从你的 `config/agents.json` + doctor 既有探测推导，仅当可用席位候选 ≤1 或零对抗席时打印 INFO（三席齐备且含对抗席才静默；registry 缺位沿既有"未配置（跳过）"INFO 模式；不计 DEGRADED、不改退出码）。分级只统计**席位候选**（对抗席 = auditor 专职 / coder_mm 替补；实现席 = coder 系通道；researcher/tester 等调研/工具角色不进席位计数与建议）：三席（≥2 名可用席位候选，推荐标准）/ 两席（恰 1 名，次之推荐，补齐第二副审可升级）/ 无可用席位候选（跳过提示）；≥2 席位候选但 0 对抗席时仍判三席（物理可配）但必附"无对抗席候选（auditor/coder_mm）——建议补配"提示行，doctor 不静默；`login_based`/`unknown` 不计入可用但如实展示（登录态型展示"登录态未验证"，serve 注入型展示"注入式认证（serve 探测不覆盖）"，探测未知展示"探测未知"）；跨族系（推断族系标签，展示专用非契约）是更强推荐。
+- 会审就绪提示的两张面（数据源不同，勿混）：`wao onboarding` 的分级块**按面切换**（R10-B）——私有 `config/agents.json` 不存在时是**模板面**（从入库模板行 + 当前环境探测推导）；存在且可读（或刚被 `--apply` 写入）时切到**已配置面**（从该 registry 的行 + 同一探测实现推导；标题标注"已配置面"，附"已配置 N 名 worker（真实状态以它为准）——完整体检见 `wao doctor`"指针行；私有 registry 存在但读取失败则降级模板面并标注来源不可读，不阻塞主流程）；`wao doctor` 的 `panel_readiness` 检查恒为**已配置面**——从你的 `config/agents.json` + doctor 既有探测推导，仅当可用席位候选 ≤1 或零对抗席时打印 INFO（三席齐备且含对抗席才静默；registry 缺位沿既有"未配置（跳过）"INFO 模式；不计 DEGRADED、不改退出码）。分级只统计**席位候选**（对抗席 = auditor 专职 / coder_mm 替补；实现席 = coder 系通道；researcher/tester 等调研/工具角色不进席位计数与建议）：三席（≥2 名可用席位候选，推荐标准）/ 两席（恰 1 名，次之推荐，补齐第二副审可升级）/ 无可用席位候选（跳过提示）；≥2 席位候选但 0 对抗席时仍判三席（物理可配）但必附"无对抗席候选（auditor/coder_mm）——建议补配"提示行，doctor 不静默；`login_based`/`unknown` 不计入可用但如实展示（登录态型展示"登录态未验证"，serve 注入型展示"注入式认证（serve 探测不覆盖）"，探测未知展示"探测未知"）；跨族系（推断族系标签，展示专用非契约）是更强推荐。席位角色的判定顺序：显式 `seatRole` 声明优先，省略回退命名惯例（见上文 registry 配置详解）。
 
 ### MCP stdio 接口（agent-facing primary，M9）
 

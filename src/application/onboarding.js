@@ -14,9 +14,9 @@
 //     from src/commands/*, src/mcp/*, or the MCP SDK.
 //   - Filesystem effects are INJECTABLE + ATOMIC. The only files this service
 //     ever reads/writes are: the tracked template (read), the gitignored
-//     config/agents.json (--apply), and runs/reliability-summary.json
-//     (--endorse-worker). It never touches .wao/, global Host config, runs/*.jsonl
-//     transcripts, or any runtime.
+//     config/agents.json (--apply write; R10-B 另有只读的已配置面加载), and
+//     runs/reliability-summary.json (--endorse-worker). It never touches .wao/,
+//     global Host config, runs/*.jsonl transcripts, or any runtime.
 //   - It REUSES the existing registry normalization/validation authority
 //     (registry.js normalizeAgent) — there is no second validator. It reuses the
 //     install-root path concept (installRoot.js) — there is no second resolver.
@@ -40,7 +40,7 @@ import { BACKEND_CLI } from "./backendCliMap.js";
 // R9（决策 0023）：三席会审就绪分级（panelReadiness 单一实现）——本模块算
 // 模板面的 rows，分级推导与六态映射都在 panelReadiness（doctor 共用，禁止
 // 两处各算）。computeReadyState 探测归一后委托 deriveReadyState（单一实现）。
-import { assessPanelReadiness, deriveReadyState } from "./panelReadiness.js";
+import { assessPanelReadiness, deriveReadyState, seatRoleOf } from "./panelReadiness.js";
 
 /**
  * Fixed safe error for the onboarding service. The `message` is always a fixed
@@ -276,8 +276,12 @@ async function computeReadyState({ requiresCli, requiresKeyEnv, probeCli, probeK
  *   id: string, backend: string|null, model: string|null,
  *   requiresCli: string|null, requiresKeyEnv: string|null,
  *   duty: string|null, authNote: string|null,
- *   readyState: "ready"|"missing_cli"|"missing_key"|"missing_both"|"login_based"|"unknown"
+ *   readyState: "ready"|"missing_cli"|"missing_key"|"missing_both"|"login_based"|"unknown",
+ *   seatRole: "adversarial"|"implementation"|"non_seat"|undefined
  * }[]>}>
+ *   seatRole（R10-B）：模板/registry 条目上的显式席位声明；absent → undefined
+ *   （panelReadiness.seatRoleOf 回退命名惯例）。非字符串一律不带上（闭集外的
+ *   声明由 normalizeAgent 拒绝，探测行不复制坏值）。
  */
 export async function buildRecommendations(candidates, template, probeEnv) {
   const agents = isPlainObject(template?.agents) ? template.agents : {};
@@ -316,6 +320,9 @@ export async function buildRecommendations(candidates, template, probeEnv) {
       duty: truncateNote(agent._comment_task, DUTY_MAX),
       authNote: truncateNote(agent._comment_auth, AUTH_NOTE_MAX),
       readyState: await computeReadyState({ requiresCli, requiresKeyEnv, probeCli, probeKey }),
+      // R10-B：显式席位声明（两个行生产方都带 declared——doctor 同形）。
+      // 非字符串一律 undefined（坏值由 normalizeAgent 拒绝，探测行不复制）。
+      seatRole: typeof agent.seatRole === "string" ? agent.seatRole : undefined,
     });
   }
   // ready 在前（login_based 次之）；稳定排序保持模板顺序。
@@ -564,6 +571,48 @@ function applyEndorsement(existingSummary, agentId) {
 // ── Main service ─────────────────────────────────────────────────────────────
 
 /**
+ * R10-B: load the private registry face (READ-ONLY, injected fs). Result is a
+ * closed three-state: "absent" (no path given / file absent) | "readable"
+ * (parsed plain object) | "unreadable" (present but parse failure / not an
+ * object). NEVER throws — the onboarding main flow must not fail because the
+ * private face cannot be read; the caller degrades to the template face and
+ * annotates the source as unreadable.
+ * @param {unknown} privateRegistryPath
+ * @param {{existsSync: Function, readFile: Function}} fs
+ * @returns {Promise<{status: "absent"|"readable"|"unreadable", registry?: object}>}
+ */
+async function loadPrivateRegistry(privateRegistryPath, fs) {
+  if (typeof privateRegistryPath !== "string" || privateRegistryPath.length === 0) {
+    return { status: "absent" };
+  }
+  if (!fs.existsSync(privateRegistryPath)) return { status: "absent" };
+  try {
+    const parsed = JSON.parse(await fs.readFile(privateRegistryPath, "utf8"));
+    if (!isPlainObject(parsed)) return { status: "unreadable" };
+    return { status: "readable", registry: parsed };
+  } catch {
+    return { status: "unreadable" };
+  }
+}
+
+/**
+ * R10-B: build the configured-face panel rows from a parsed private registry —
+ * the SAME pipeline as the template face (buildCandidateList + the existing
+ * buildRecommendations probe implementation; no second probe code). Row key
+ * probes come from each entry's provider.apiKeyEnv name, CLI probes from its
+ * backend, exactly like the template face. `count` is the true number of worker
+ * entries (unbounded by MAX_CANDIDATES — it is a count, not an enumeration).
+ * @param {object} registry — parsed private registry JSON
+ * @param {{hasCli: Function, hasKeyEnv: Function}} [probeEnv]
+ * @returns {Promise<{rows: object[], count: number}>}
+ */
+async function buildConfiguredFace(registry, probeEnv) {
+  const agents = isPlainObject(registry?.agents) ? registry.agents : {};
+  const { rows } = await buildRecommendations(buildCandidateList(registry), registry, probeEnv);
+  return { rows, count: Object.keys(agents).length };
+}
+
+/**
  * Run the onboarding action and return ONE bounded structured result (the single
  * source for both --json and human output).
  *
@@ -574,6 +623,10 @@ function applyEndorsement(existingSummary, agentId) {
  * @param {string} [input.installRoot] — trusted WAO install root (snippet paths)
  * @param {string} input.exampleRegistryPath — tracked template path (read)
  * @param {string} input.targetRegistryPath — config/agents.json path (apply write)
+ * @param {string} [input.privateRegistryPath] — R10-B：private registry path
+ *   (READ-ONLY configured-face load, same shape as exampleRegistryPath; command
+ *   layer wires it to targetRegistryPath). Absent/unreadable → readiness block
+ *   stays on the template face (unreadable additionally annotates the source).
  * @param {string} input.reliabilitySummaryPath — runs/reliability-summary.json path
  * @param {{hasCli: Function, hasKeyEnv: Function}} [input.probeEnv] — injected
  *   environment probe for the advisory recommendations (see buildRecommendations);
@@ -591,6 +644,7 @@ export async function runOnboarding({
   exampleRegistryPath,
   targetRegistryPath,
   reliabilitySummaryPath,
+  privateRegistryPath,
   probeEnv,
   fs,
 } = {}) {
@@ -601,7 +655,16 @@ export async function runOnboarding({
   // once the template parses; every outcome from the first return on carries the
   // same object through `finalize` — including refused/error — like acceptance.
   let recommendations = emptyRecommendations();
-  const finalize = (partial) => baseResult({ ...partial, recommendations });
+  // R10-B: 面板状态（face/rows/configuredCount/sourceUnreadable）——readiness 块
+  // 与 --json 的 panelReadiness/panelFace 加性字段同源（finalize 单点投影）。
+  // 默认模板面 + 空行（模板不可读的早期返回也走它：整块不打印，行为不变）。
+  let panelState = {
+    face: "template",
+    rows: [],
+    configuredCount: null,
+    sourceUnreadable: false,
+  };
+  const finalize = (partial) => baseResult({ ...partial, recommendations, panelState });
 
   // Read + parse the tracked template first. The candidate list (shown even in a
   // bare preview) is derived from it, and every selection is validated against it.
@@ -627,6 +690,20 @@ export async function runOnboarding({
   // + the INJECTED probe. Bounded (≤4 CLI probes + ≤N key probes, memoized per
   // unique name); probe failures degrade to "unknown" and never throw.
   recommendations = await buildRecommendations(candidates, template, probeEnv);
+
+  // R10-B: 私有 registry 面加载（只读、注入 fs；永不 throw）。present+readable
+  // → 后续所有分支的 readiness 块输入行切到已配置面（同一 engine、同一探测
+  // 实现）；absent → 模板面（既有行为不变）；unreadable → 模板面 + 标注来源
+  // 不可读（不阻塞主流程）。
+  const privateLoad = await loadPrivateRegistry(privateRegistryPath, _fs);
+  if (privateLoad.status === "readable") {
+    const cfg = await buildConfiguredFace(privateLoad.registry, probeEnv);
+    panelState = { face: "configured", rows: cfg.rows, configuredCount: cfg.count, sourceUnreadable: false };
+  } else if (privateLoad.status === "unreadable") {
+    panelState = { face: "template", rows: recommendations.rows, configuredCount: null, sourceUnreadable: true };
+  } else {
+    panelState = { face: "template", rows: recommendations.rows, configuredCount: null, sourceUnreadable: false };
+  }
 
   // Endorsement contract: requires an EXPLICIT, MATCHING selection. Checked before
   // the needs-selection branch so a bare --endorse-worker never reaches selection,
@@ -755,6 +832,12 @@ export async function runOnboarding({
         reason: "could not write the private registry",
       });
     }
+    // R10-B 谎言修复：写入成功后磁盘上的私有 registry 即本次生成的单 worker
+    // registry——后续任何结果（applied 或 endorse 阶段失败）的 readiness 块都以
+    // 它为已配置面（不再显示 7 人模板的"三席可用"）。用内存中的 registry 等价
+    // 于重读磁盘（内容逐字节一致），避免第二次读窗口。
+    const cfg = await buildConfiguredFace(registry, probeEnv);
+    panelState = { face: "configured", rows: cfg.rows, configuredCount: cfg.count, sourceUnreadable: false };
   }
 
   // --endorse-worker: amend the reliability summary, preserving everything else.
@@ -836,10 +919,15 @@ export async function runOnboarding({
  * 结果字段（与人类输出同源）。族系经 modelFamily 推断，是展示标签不是契约。
  * available/seats 只含席位候选（对抗席 auditor/coder_mm + 实现席 coder 系）；
  * sameFamily 已更名 insufficientFamilyDiversity（R9-C C-6，零消费者改名）。
+ *
+ * R10-B：入参从 recommendations 改为 rows 数组（模板面/已配置面共用同一条
+ * 投影——单一来源）。加性字段：rowCount（渲染层行数守卫）、adversarialIds /
+ * implementationIds（席位惯例句候选清单，含 declared 席位角色，分类复用
+ * seatRoleOf 单一实现；未就绪候选也在列——句义是"在场候选"不是"可用"）。
  */
-function projectPanelReadiness(recommendations) {
-  const rows = Array.isArray(recommendations?.rows) ? recommendations.rows : [];
-  const a = assessPanelReadiness(rows);
+function projectPanelReadiness(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const a = assessPanelReadiness(list);
   return {
     tier: a.tier,
     available: a.available.map((e) => ({ id: e.id, family: e.family })),
@@ -850,6 +938,13 @@ function projectPanelReadiness(recommendations) {
     missingAdversarial: a.missingAdversarial,
     insufficientFamilyDiversity: a.insufficientFamilyDiversity,
     singleWorkerVacuous: a.singleWorkerVacuous,
+    rowCount: list.length,
+    adversarialIds: list
+      .filter((row) => seatRoleOf(row?.id, row?.seatRole) === "adversarial")
+      .map((row) => row.id),
+    implementationIds: list
+      .filter((row) => seatRoleOf(row?.id, row?.seatRole) === "implementation")
+      .map((row) => row.id),
   };
 }
 
@@ -875,10 +970,17 @@ function baseResult(partial) {
     // and human output, like acceptance). Defaults to the empty matrix so a call
     // site can never drop the field.
     recommendations: partial.recommendations ?? emptyRecommendations(),
-    // R9（决策 0023）：三席会审就绪分级（模板面，advisory 加性字段）。从
-    // recommendations.rows 单次推导（panelReadiness 单一实现）；模板不可读
-    // （rows 空）时 tier 如实为 "none"，人类输出整块不打印。
-    panelReadiness: projectPanelReadiness(partial.recommendations ?? emptyRecommendations()),
+    // R9（决策 0023）：三席会审就绪分级（advisory 加性字段）。从 panelState.rows
+    // 单次推导（panelReadiness 单一实现）——模板面/已配置面（R10-B）共用同一条
+    // 投影；rows 空时 tier 如实为 "none"，人类输出整块不打印。
+    panelReadiness: projectPanelReadiness(partial.panelState?.rows ?? partial.recommendations?.rows ?? []),
+    // R10-B：readiness 块的面元数据（与人类输出同源的加性字段，单点投影）——
+    // panelFace: 输入行来源（"template" 模板面 / "configured" 已配置面）；
+    // panelConfiguredCount: 已配置面时私有 registry 的 worker 数（模板面 null）；
+    // panelSourceUnreadable: 私有 registry 存在但不可读 → 降级模板面并标注。
+    panelFace: partial.panelState?.face ?? "template",
+    panelConfiguredCount: partial.panelState?.configuredCount ?? null,
+    panelSourceUnreadable: partial.panelState?.sourceUnreadable ?? false,
     certification: partial.certification,
     writes: partial.writes,
     reason: partial.reason ?? null,

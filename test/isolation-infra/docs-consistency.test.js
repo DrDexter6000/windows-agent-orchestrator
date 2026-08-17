@@ -544,6 +544,26 @@ test("agents.example.json 角色对齐 team-roles.md（决策 0005 SSOT）", () 
   }
 });
 
+test("agents.example.json 七个条目显式声明 seatRole（R10-B 闭集；schema/引擎/展示同一词表）", () => {
+  // R10-B B-1：模板全员显式声明席位角色。省略虽合法（回退命名惯例），但模板是
+  // 新配置的样板——coder_opencode_fallback 按 /^coder_/ 惯例会被误归实现席，
+  // 其显式 non_seat 修正依赖此字段在场（移除即红，item 3/4 红测）。
+  const parsed = JSON.parse(read("config/agents.example.json"));
+  const EXPECTED = {
+    auditor: "adversarial", coder_mm: "adversarial",
+    coder_hq: "implementation", coder_low: "implementation",
+    researcher: "non_seat", tester: "non_seat", coder_opencode_fallback: "non_seat",
+  };
+  const CLOSED = ["adversarial", "implementation", "non_seat"];
+  assert.equal(Object.keys(parsed.agents).length, 7, "模板恰七个 worker（前置条件：全员显式）");
+  for (const [id, role] of Object.entries(EXPECTED)) {
+    assert.equal(parsed.agents?.[id]?.seatRole, role, `模板 ${id}.seatRole 必须显式 = ${role}`);
+  }
+  for (const [id, w] of Object.entries(parsed.agents)) {
+    assert.ok(CLOSED.includes(w?.seatRole), `${id}.seatRole 必须落在闭集内（schema/引擎/展示同一词表）`);
+  }
+});
+
 test("SSOT 分类标准存在：docs/ssot.md 是文档体系的权威类别定义", () => {
   // docs/ssot.md 定义五大类别（契约/决策/运维/过程/调研）+ 三条铁律。
   // 它是"写新文档前必读"的入口，缺失等于文档体系无分类约束。

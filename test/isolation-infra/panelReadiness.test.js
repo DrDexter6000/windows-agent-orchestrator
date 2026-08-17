@@ -22,6 +22,9 @@ import {
   PANEL_STAGES,
 } from "../../src/application/panelReadiness.js";
 import { PANEL_SKIP_REASONS, PANEL_STAGES as WAO_STAGE_PANEL_STAGES } from "../../src/waoStage.js";
+// R10-B: SEAT_ROLES 的权威家在 registry.js（core）——panelReadiness.js 下向 import；
+// normalizeAgent 是 registry 的单一校验器，seatRole 校验在它那里落地。
+import { SEAT_ROLES, normalizeAgent } from "../../src/registry.js";
 
 function row(id, familyHints, readyState) {
   return { id, backend: familyHints.backend ?? null, model: familyHints.model ?? null, readyState };
@@ -238,4 +241,63 @@ test("R9 守卫: PANEL_STAGES 与 waoStage SSOT 一致（C-14：panelReadiness �
   for (const code of PANEL_SKIP_REASONS) {
     assert.match(code, /^[a-z_]+$/, `skip 码形状（snake_case）：${code}`);
   }
+});
+
+// ── 18e. R10-B B-1：seatRole 显式席位声明（决策 0023 席位词汇表单一化）───────
+
+test("R10-B B-1: SEAT_ROLES 闭集恰三值；seatRoleOf declared 优先于命名惯例", () => {
+  assert.deepEqual(SEAT_ROLES, ["adversarial", "implementation", "non_seat"],
+    "闭集恰三值（schema/引擎/展示同一词表——registry.js 是唯一家）");
+  // declared 在闭集内 → 优先（覆盖 id 命名惯例，包括会被 /^coder_/ 误分的 worker）。
+  assert.equal(seatRoleOf("my_reviewer", "adversarial"), "adversarial",
+    "自定义 id + declared 对抗席 → 对抗席");
+  assert.equal(seatRoleOf("coder_opencode_fallback", "non_seat"), "non_seat",
+    "declared 覆盖 /^coder_/ 前缀惯例（该 worker 实为非席位）");
+  assert.equal(seatRoleOf("auditor", "implementation"), "implementation",
+    "declared 覆盖 auditor 惯例");
+  // absent → 回退命名惯例（老 registry 零迁移；既有行为钉不动，见本文件开头既有钉）。
+  assert.equal(seatRoleOf("my_reviewer"), "non_seat", "自定义 id 未声明 → 非席位");
+  assert.equal(seatRoleOf("coder_hq"), "implementation", "coder_ 前缀惯例照旧");
+  // declared 非字符串/闭集外 → 视为未声明（引擎按契约再守一道；坏值不生效也不抛）。
+  assert.equal(seatRoleOf("my_reviewer", "hero"), "non_seat", "闭集外 declared 视为未声明");
+  assert.equal(seatRoleOf("my_reviewer", 42), "non_seat", "非字符串 declared 视为未声明");
+});
+
+test("R10-B B-1: normalizeAgent 校验 seatRole——3 合法值通过；absent 合法；present 非字符串/闭集外固定安全拒绝", () => {
+  const base = { backend: "claude-code", cwd: "." };
+  for (const role of SEAT_ROLES) {
+    const r = normalizeAgent("w_legal", { ...base, seatRole: role });
+    assert.equal(r.seatRole, role, `闭集值 ${role} 合法且原样携带`);
+  }
+  // absent 合法（own-property 纪律，同 systemPrompt）：回退发生在引擎层（seatRoleOf）。
+  const absent = normalizeAgent("w_absent", base);
+  assert.ok(!Object.prototype.hasOwnProperty.call(absent, "seatRole"),
+    "absent 合法——不得注入默认值（回退发生在引擎层）");
+  // present 非字符串 / 闭集外 / own property 但 undefined → 拒绝（fixed-safe，不回显坏值）。
+  for (const bad of [42, true, null, undefined, ["adversarial"], { role: "x" }, "hero", "", "ADVERSARIAL"]) {
+    assert.throws(() => normalizeAgent("w_bad", { ...base, seatRole: bad }),
+      /seatRole must be one of the supported seat roles/,
+      `坏值 ${JSON.stringify(bad)} 必须被固定安全拒绝`);
+  }
+});
+
+test("R10-B B-1: 引擎按 declared 计数席位——my_reviewer+adversarial 进对抗席候选；未声明同 id 不进", () => {
+  const declaredAdv = assessPanelReadiness([
+    { ...row("my_reviewer", { model: "deepseek-v4-pro" }, "ready"), seatRole: "adversarial" },
+    { ...row("coder_hq", { model: "glm-5.3[1m]" }, "ready"), seatRole: "implementation" },
+  ]);
+  assert.equal(declaredAdv.tier, "three_seat", "declared 对抗席 + 实现席 → 三席");
+  assert.deepEqual(declaredAdv.available.map((e) => e.id), ["my_reviewer", "coder_hq"],
+    "declared 席位都计入可用");
+  assert.equal(declaredAdv.missingAdversarial, false, "declared 对抗席满足对抗视角");
+  assert.deepEqual(declaredAdv.seats.map((e) => e.id), ["my_reviewer", "coder_hq"],
+    "建议组合含 declared 对抗席（对抗席优先）");
+  // 同 id 未声明 → 回退非席位：只剩 coder_hq → 两席，且不进席位建议。
+  const undeclared = assessPanelReadiness([
+    row("my_reviewer", { model: "deepseek-v4-pro" }, "ready"),
+    row("coder_hq", { model: "glm-5.3[1m]" }, "ready"),
+  ]);
+  assert.equal(undeclared.tier, "two_seat", "未声明的自定义 id 回退非席位（既有行为）");
+  assert.deepEqual(undeclared.available.map((e) => e.id), ["coder_hq"]);
+  assert.equal(undeclared.seats, null);
 });

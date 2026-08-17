@@ -63,6 +63,8 @@ import { BACKEND_CLI } from "../application/backendCliMap.js";
 // R9（决策 0023）：三席会审就绪分级（已配置面）。分级推导与六态映射的单一实现
 // 在 application/panelReadiness.js（onboarding 的模板面共用同一份）——本文件只
 // 包装输入行（registry agents + 本命令既有的 CLI/key 探测事实），禁止在此重算分级。
+// R10-B：输入行带显式 seatRole 声明（与 onboarding 行生产方同形），declared
+// 优先于命名惯例（seatRoleOf 单一分类）。
 import { assessPanelReadiness, deriveReadyState } from "../application/panelReadiness.js";
 // R9：doctor INFO 文案与 waoStage 的 skip 码闭集对账（同一 SSOT import，禁值指纹）。
 import { PANEL_SKIP_REASONS } from "../waoStage.js";
@@ -437,6 +439,10 @@ export async function waoDoctorCommand(args, config) {
           cli: requiresCli ? cliFound.get(requiresCli) : undefined,
           key,
         }),
+        // R10-B：显式席位声明（与 onboarding 行生产方同形）。非字符串一律
+        // undefined（坏值由 normalizeAgent 拒绝，探测行不复制）；absent 回退
+        // 命名惯例（panelReadiness.seatRoleOf 单一分类）。
+        seatRole: typeof agent?.seatRole === "string" ? agent.seatRole : undefined,
       };
     });
     const panel = assessPanelReadiness(panelRows);

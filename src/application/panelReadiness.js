@@ -8,7 +8,10 @@
 // 分级（测试钉住）。输出是纯展示建议（advisory）：不门禁任何派发/验收，
 // 不自动派发副审，选位权在 Lead（席位回避规则见 0019 §3，0023 保留）。
 //
-// 输入行形状（两个面对齐）：{ id, backend, model, readyState }。
+// 输入行形状（两个面对齐）：{ id, backend, model, readyState, seatRole? }。
+// seatRole 是可选的显式席位声明（R10-B）：present 时优先于命名惯例；absent
+// 回退命名惯例（老 registry 零迁移）。值域与 registry.SEAT_ROLES 同闭集
+// （registry 校验先行，此处按契约再守一道：非闭集 declared 视为未声明）。
 // readyState 六态闭集与 application/onboarding.js 的引擎值同域；本模块的
 // deriveReadyState 是六态映射的单一实现（onboarding 的 computeReadyState
 // 探测归一后委托到这里，doctor 用自己的探测事实构造后也委托到这里）。
@@ -18,6 +21,8 @@
 //   adversarial（对抗席候选）   auditor（专职）+ coder_mm（轮换替补）
 //   implementation（实现席候选）coder 系通道（coder_ 前缀；coder_mm 归对抗席）
 //   其余（researcher/tester 等调研/工具角色）非席位角色——不进席位计数与建议。
+// R10-B：显式 seatRole 声明优先于命名惯例——例如 coder_opencode_fallback 按
+// 惯例归实现席，但显式 "non_seat" 时从席位候选剔除（模板已显式声明）。
 //
 // 分级语义（0023，按可用席位候选计数）：
 //   three_seat  ≥2 名可用席位候选（readyState=ready）。含对抗席时静默全清；
@@ -33,6 +38,9 @@
 // 不参与多样性判定）。
 
 import { modelFamilyOf, UNKNOWN_FAMILY } from "./modelFamily.js";
+// R10-B：SEAT_ROLES 的家在 registry.js（core，L4 分层下向 import 合法——
+// 反向上向边违例已由 layering 守卫钉住）；panelReadiness 不持值副本。
+import { SEAT_ROLES } from "../registry.js";
 
 // R9-C C-14：PANEL_STAGES 的单一 SSOT 在 waoStage.js——此处 re-export 保住
 // 既有消费面引用（本模块不再持值副本）；对账测试继续双向钉住。
@@ -41,10 +49,14 @@ export { PANEL_STAGES } from "../waoStage.js";
 /**
  * 席位角色分类（0019/0023 两席分配语义的单一实现，渲染层复用不另写一份）。
  * 对抗席判定先于 coder_ 前缀——coder_mm 是对抗席替补，不是实现席。
+ * R10-B：显式 declared 在闭集内时优先（registry.normalizeAgent 已校验，
+ * 此处按契约再守一道：非字符串/闭集外一律视为未声明）；absent 回退命名惯例。
  * @param {unknown} id
+ * @param {unknown} [declared] 显式 seatRole 声明（闭集外视为未声明）
  * @returns {"adversarial"|"implementation"|"non_seat"}
  */
-export function seatRoleOf(id) {
+export function seatRoleOf(id, declared) {
+  if (typeof declared === "string" && SEAT_ROLES.includes(declared)) return declared;
   const s = String(id ?? "");
   if (s === "auditor" || s === "coder_mm") return "adversarial";
   if (/^coder_/.test(s)) return "implementation";
@@ -114,7 +126,8 @@ export function assessPanelReadiness(rows) {
     id: String(row?.id ?? "?"),
     family: modelFamilyOf({ modelId: row?.model, backend: row?.backend }),
     readyState: typeof row?.readyState === "string" ? row.readyState : "unknown",
-    role: seatRoleOf(row?.id),
+    // R10-B：显式 seatRole 声明优先（两个行生产方都会带上 declared 字段）。
+    role: seatRoleOf(row?.id, row?.seatRole),
     serveInjected: row?.backend === "opencode-serve",
   }));
   // R9-C C-1：席位计数与建议只在席位角色上做；非席位角色不进任何席位面。

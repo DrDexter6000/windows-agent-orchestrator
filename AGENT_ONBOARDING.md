@@ -120,7 +120,7 @@ Copy-Item config/agents.example.json config/agents.json
 
 删到只剩一个 worker 也完全可用。每个保留的 worker 里的 `cwd` 可留模板值（模板自 R8-1 起统一为 `.`——解析为发起派发的进程的当前工作目录：CLI 通道=你敲命令时所在目录；MCP 通道=MCP 服务进程的 cwd，由 host 决定；任何机器恒存在），派发时覆盖；若你改成了自己的路径，注意对本地进程式 backend，派发时 cwd 不存在会被 typed 早拒绝（`wao doctor` 也会预先 WARN；cwd 为 `.` 的 worker doctor 会出一条 INFO 落点提示，不计 DEGRADED）——见 `docs/troubleshooting.md §3.1/§3.2`。
 
-> **副审（会审席位）配置建议（决策 0023，advisory）**：三席会审（你作为 Lead 主审 + 两名副审）是推荐标准——最佳配置是 `auditor`（对抗席专职）+ 一名 coder 系通道（实现席替补，如 `coder_hq`/`coder_low`）；只有一名副审时以两席（主审 + 一副审）为次之推荐，零副审时可跳过（在 `wao stage 2/4` 用 `--panel-skip-reason` 登记理由）。强烈推荐两名副审来自不同大模型族系（跨族系会审是更强推荐）。你有多种认证时按此优先级裁剪：先保 `auditor` + 一个 coder 通道，再保族系差异。`wao onboarding` 的分级块（模板面）与 `wao doctor` 的 `panel_readiness` INFO（已配置面）会按当前环境给出就绪提示；单 worker（它即被审产出作者）时两席建议事实空转——如实跳过即可。
+> **副审（会审席位）配置建议（决策 0023，advisory）**：三席会审（你作为 Lead 主审 + 两名副审）是推荐标准——最佳配置是 `auditor`（对抗席专职）+ 一名 coder 系通道（实现席替补，如 `coder_hq`/`coder_low`）；只有一名副审时以两席（主审 + 一副审）为次之推荐，零副审时可跳过（在 `wao stage 2/4` 用 `--panel-skip-reason` 登记理由）。强烈推荐两名副审来自不同大模型族系（跨族系会审是更强推荐）。你有多种认证时按此优先级裁剪：先保 `auditor` + 一个 coder 通道，再保族系差异。`wao onboarding` 的分级块与 `wao doctor` 的 `panel_readiness` INFO 会按当前环境给出就绪提示——onboarding 的块在你已生成 `config/agents.json` 后自动切到**已配置面**（以你的 registry 真实行为准），还没生成时是**模板面**；单 worker（它即被审产出作者）时两席建议事实空转——如实跳过即可。
 
 ### 4d. 自检 registry 与环境（必做）
 

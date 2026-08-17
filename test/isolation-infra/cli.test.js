@@ -2404,6 +2404,39 @@ test("R9-C C-3: registry 缺位 → panel_readiness 沿 U1 INFO 跳过模式", (
   }
 });
 
+test("R10-B B-1: doctor declared seatRole 优先——my_reviewer 显式对抗席使三席静默；未声明同 id 回退非席位", () => {
+  // 显式对抗席 + 实现席：三席齐备且含对抗席 → 静默。若 declared 被忽略，
+  // my_reviewer 回退非席位 → 只剩 coder_hq → 两席必打印（红测语义）。
+  const { dir, registryPath } = makeDoctorPanelFixture("wao-doctor-panel-declared-", {
+    my_reviewer: { backend: "claude-code", provider: { baseUrl: "https://api.deepseek.com/anthropic", apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" }, cwd: ".", seatRole: "adversarial" },
+    coder_hq: { backend: "claude-code", provider: { baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: ".", seatRole: "implementation" },
+  });
+  try {
+    const r = doctorPanelRun(dir, registryPath);
+    const parsed = JSON.parse(r.stdout);
+    assert.ok(!parsed.checks.some((c) => c.name === "panel_readiness"),
+      "declared 对抗席计入 → 三席齐备且含对抗席 → 静默（无 panel_readiness 条目）");
+    assert.equal(r.status, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  // 未声明的同 id → 回退非席位：只剩 coder_hq → 两席打印（既有 fallback 行为）。
+  const undecl = makeDoctorPanelFixture("wao-doctor-panel-undeclared-", {
+    my_reviewer: { backend: "claude-code", provider: { baseUrl: "https://api.deepseek.com/anthropic", apiKeyEnv: "DEEPSEEK_API_KEY" }, model: { id: "deepseek-v4-pro" }, cwd: "." },
+    coder_hq: { backend: "claude-code", provider: { baseUrl: "https://open.bigmodel.cn/api/anthropic", apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.2" }, cwd: "." },
+  });
+  try {
+    const r = doctorPanelRun(undecl.dir, undecl.registryPath);
+    const parsed = JSON.parse(r.stdout);
+    const panel = parsed.checks.find((c) => c.name === "panel_readiness");
+    assert.ok(panel, "未声明 my_reviewer 回退非席位 → 只剩 1 名席位候选 → 打印");
+    assert.match(panel.detail, /仅 1 名可用（coder_hq）/, "可用席位只点名 coder_hq（my_reviewer 不进）");
+    assert.equal(r.status, 0);
+  } finally {
+    rmSync(undecl.dir, { recursive: true, force: true });
+  }
+});
+
 test("R5-B: doctor fresh clone 缺槽位无多余 → wao_init WARN（不 FAIL）", () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-doctor-freshclone-"));
   try {

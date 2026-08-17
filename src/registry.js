@@ -9,6 +9,14 @@ const REASONING_EFFORTS = Object.freeze([
   "minimal", "low", "medium", "high", "xhigh", "max",
 ]);
 
+// R10-B: seat role closed set (decision 0023 seat vocabulary — registry schema、
+// panelReadiness 引擎、展示层共用一个词汇表)。SEAT_ROLES 的家在 registry.js
+// (core)：panelReadiness.js（application）下向 import 它合法；反过来
+// registry→application 是上向边，触犯 L4 分层（TD-122 白名单已归零）。
+export const SEAT_ROLES = Object.freeze([
+  "adversarial", "implementation", "non_seat",
+]);
+
 // Flags that are MANAGED by the structured model/reasoning/provider fields.
 // If ANY of these appear in args/prependArgs, the configuration is using the
 // old hand-crafted form. M11-9 CTO closeout: there is NO transparent legacy
@@ -220,6 +228,19 @@ export function normalizeAgent(id, agent) {
   if (agent.sessionReuse !== undefined && agent.sessionReuse !== null) {
     if (!isValidSessionReuseMode(agent.sessionReuse)) {
       throw new Error(`Agent ${id}: sessionReuse must be one of the supported modes (got an unsupported value)`);
+    }
+  }
+  // R10-B: seatRole uses OWN-PROPERTY semantics like systemPrompt.
+  //   - property ABSENT → legitimate：席位角色回退既有命名惯例
+  //     （panelReadiness.seatRoleOf 的 adversarial/implementation/non_seat 分类，
+  //     老 registry 零迁移）。
+  //   - own property present, value non-string / outside the SEAT_ROLES closed
+  //     set → REJECT（显式声明必须落在闭集内；非席位用 "non_seat" 显式声明）。
+  // The error is a FIXED SAFE SHAPE: it never echoes the supplied value
+  // （坏值本身可能敏感或带注入载荷）。
+  if (Object.prototype.hasOwnProperty.call(agent, "seatRole")) {
+    if (typeof agent.seatRole !== "string" || !SEAT_ROLES.includes(agent.seatRole)) {
+      throw new Error(`Agent ${id}: seatRole must be one of the supported seat roles (adversarial/implementation/non_seat)`);
     }
   }
   // M11-9: canonical model/reasoning/provider policy validation + legacy normalization.

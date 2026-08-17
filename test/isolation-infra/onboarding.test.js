@@ -1647,8 +1647,20 @@ test("R9 需求 1: no-args 与 selected/--apply 两出口都打印分级块（�
     // 出口二：selected + --apply（写真实 tmp 文件后仍打印）。
     const r2 = await runWithTemplate(root, probeAll, { agentId: "coder_hq", apply: true });
     assert.equal(r2.outcome, "applied");
-    assert.ok(renderHuman(r2).includes("会审就绪（模板面"), "selected/--apply 出口打印分级块");
-    assert.ok(!renderHuman(r2).includes("按你有的认证"), "selected 分支不带 no-args 的选位尾行（两出口形状不同）");
+    // R10-B 谎言修复：--apply 写入后磁盘上的私有 registry 即本次生成的单 worker
+    // registry——分级块切到已配置面，不再显示模板多 worker 矩阵的"三席可用"。
+    const text2 = renderHuman(r2);
+    assert.equal(r2.panelFace, "configured", "--apply 成功后分级块数据面 = 已配置面");
+    assert.equal(r2.panelConfiguredCount, 1, "生成的 registry 恰 1 名 worker");
+    assert.ok(text2.includes("会审就绪（已配置面"), "selected/--apply 出口打印分级块（已配置面）");
+    assert.ok(text2.includes("两席可用——次之推荐"), "单 worker 已配置面 → 两席（不是模板三席）");
+    assert.ok(!text2.includes("三席可用"), "不得显示模板面多 worker 矩阵的'三席可用'（谎言修复核心）");
+    assert.ok(text2.includes("registry 仅一名 worker"), "单 worker 注脚面感知（registry 措辞而非模板措辞）");
+    assert.ok(!text2.includes("模板仅一名 worker"), "已配置面不得出现模板措辞注脚");
+    assert.ok(text2.includes("已配置 1 名 worker（真实状态以它为准）——完整体检见 `wao doctor`"),
+      "指针行在场（1 名 worker 计数 + 完整体检指向 doctor）");
+    assert.ok(text2.includes("在场候选（从已配置 registry 派生）"), "惯例句来源标签切到已配置面");
+    assert.ok(!text2.includes("按你有的认证"), "selected 分支不带 no-args 的选位尾行（两出口形状不同）");
   } finally {
     rmSync(join(root, ".."), { recursive: true, force: true });
   }
@@ -1892,6 +1904,182 @@ test("R9-C C-12: 探测未知如实展示一行（docblock 承诺的展示面兑
     const text = renderHuman(r);
     assert.ok(text.includes("探测未知（如实展示，不计入可用）: coder_hq、auditor"),
       "探测未知行如实展示且点名");
+  } finally {
+    rmSync(join(root, ".."), { recursive: true, force: true });
+  }
+});
+
+// ── 18e. R10-B：seatRole 显式席位 + readiness 块双面切换 ──────────────────────
+//
+// B-1：模板行/私有 registry 行都携带 declared seatRole，引擎按 declared 优先计数；
+// B-2：runOnboarding(privateRegistryPath) 让 readiness 块在"模板面/已配置面"之间
+// 切换（同一 panelReadiness 引擎、同一探测实现——只是输入行换了）。全部探测仍是
+// 注入式 probeEnv，绝无真实探测/真实派发。
+
+test("R10-B B-1: 模板面 declared 优先——my_reviewer+adversarial 计入对抗席（未声明同 id 回退非席位）", async () => {
+  const probeAll = { hasCli: async () => true, hasKeyEnv: async () => "process_env" };
+  const root = tmpTemplate({
+    my_reviewer: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "deepseek-v4-pro" }, seatRole: "adversarial" },
+    coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
+  }, "wao-onb-decl-");
+  try {
+    const r = await runWithTemplate(root, probeAll);
+    assert.equal(r.panelReadiness.tier, "three_seat", "declared 对抗席 + 实现席 → 三席（模板面）");
+    assert.deepEqual(r.panelReadiness.available.map((e) => e.id), ["my_reviewer", "coder_hq"],
+      "declared 席位都计入可用");
+    assert.equal(r.panelReadiness.missingAdversarial, false, "declared 对抗席满足对抗视角");
+  } finally {
+    rmSync(join(root, ".."), { recursive: true, force: true });
+  }
+  // 同 id 未声明 → 回退非席位：只剩 coder_hq → 两席。
+  const undeclRoot = tmpTemplate({
+    my_reviewer: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "deepseek-v4-pro" } },
+    coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+  }, "wao-onb-undecl-");
+  try {
+    const r = await runWithTemplate(undeclRoot, probeAll);
+    assert.equal(r.panelReadiness.tier, "two_seat", "未声明的自定义 id 回退非席位（既有行为）");
+    assert.deepEqual(r.panelReadiness.available.map((e) => e.id), ["coder_hq"]);
+  } finally {
+    rmSync(join(undeclRoot, ".."), { recursive: true, force: true });
+  }
+});
+
+test("R10-B B-1: 已配置面 declared 优先——私有 registry 的 my_reviewer+adversarial 计入对抗席", async () => {
+  const root = tmpTemplate({ ghost_tpl: { backend: "codex" } }, "wao-onb-cfgdecl-");
+  writeFileSync(join(root, "config", "agents.json"), JSON.stringify({
+    agents: {
+      my_reviewer: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-pro" }, seatRole: "adversarial" },
+      coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
+    },
+  }));
+  try {
+    const r = await runWithTemplate(root, { hasCli: async () => true, hasKeyEnv: async () => "process_env" },
+      { privateRegistryPath: join(root, "config", "agents.json") });
+    assert.equal(r.panelFace, "configured");
+    assert.equal(r.panelReadiness.tier, "three_seat", "declared 对抗席 + 实现席 → 三席（已配置面）");
+    assert.deepEqual(r.panelReadiness.available.map((e) => e.id), ["my_reviewer", "coder_hq"],
+      "已配置面输入行来自私有 registry（模板行 ghost_tpl 不进场）");
+    assert.equal(r.panelReadiness.missingAdversarial, false);
+  } finally {
+    rmSync(join(root, ".."), { recursive: true, force: true });
+  }
+});
+
+test("R10-B B-2: readiness 块双面切换——absent 模板面；present+readable 已配置面 + 指针行；corrupt 降级 + 标注不报错", async () => {
+  const { renderHuman } = await import("../../src/commands/onboarding.js");
+  const probeAll = { hasCli: async () => true, hasKeyEnv: async () => "process_env" };
+  const root = tmpTemplate({
+    ghost_tpl: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+  }, "wao-onb-faces-");
+  const priv = {
+    agents: {
+      coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
+      coder_mm: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "kimi-code/k3" }, seatRole: "adversarial" },
+    },
+  };
+  const privPath = join(root, "config", "agents.json");
+  try {
+    // (1) private absent（不传路径）→ 既有模板面；无指针行。
+    const rAbsent = await runWithTemplate(root, probeAll);
+    assert.equal(rAbsent.panelFace, "template", "私有 registry absent → 模板面（既有行为）");
+    assert.equal(rAbsent.panelConfiguredCount, null);
+    const tAbsent = renderHuman(rAbsent);
+    assert.ok(tAbsent.includes("会审就绪（模板面"), "absent 时标题为模板面");
+    assert.ok(!tAbsent.includes("真实状态以它为准"), "模板面无指针行");
+    // (2) present+readable → 输入行切到私有 registry 行 + 标题/惯例句标签/指针行全切。
+    writeFileSync(privPath, JSON.stringify(priv));
+    const rCfg = await runWithTemplate(root, probeAll, { privateRegistryPath: privPath });
+    assert.equal(rCfg.panelFace, "configured");
+    assert.equal(rCfg.panelConfiguredCount, 2, "已配置 2 名 worker（真实 Object.keys 计数）");
+    assert.equal(rCfg.panelReadiness.tier, "three_seat");
+    assert.deepEqual(rCfg.panelReadiness.available.map((e) => e.id), ["coder_hq", "coder_mm"],
+      "输入行来自私有 registry（模板的 ghost_tpl 不进可用）");
+    const tCfg = renderHuman(rCfg);
+    assert.ok(tCfg.includes("会审就绪（已配置面·按当前环境探测，决策 0023）"), "已配置面标题");
+    assert.ok(tCfg.includes("已配置 2 名 worker（真实状态以它为准）——完整体检见 `wao doctor`"),
+      "指针行在场（计数 = 私有 registry worker 数）");
+    assert.ok(tCfg.includes("在场候选（从已配置 registry 派生）"), "惯例句来源标签切到已配置面");
+    // (3) corrupt（不可解析 JSON）→ 降级模板面 + 来源不可读标注；主流程不报错。
+    writeFileSync(privPath, "{ not valid json");
+    const rBad = await runWithTemplate(root, probeAll, { privateRegistryPath: privPath });
+    assert.equal(rBad.panelFace, "template", "损坏 → 降级模板面");
+    assert.equal(rBad.panelSourceUnreadable, true, "标注来源不可读");
+    assert.equal(rBad.outcome, "needs-selection", "读取失败不得让主流程报错");
+    const tBad = renderHuman(rBad);
+    assert.ok(tBad.includes("会审就绪（模板面"), "降级后仍按模板面渲染");
+    assert.ok(tBad.includes("私有 registry 读取失败"), "不可读标注行在场");
+    assert.ok(!tBad.includes("真实状态以它为准"), "降级面无指针行");
+  } finally {
+    rmSync(join(root, ".."), { recursive: true, force: true });
+  }
+});
+
+test("R10-B B-1: coder_opencode_fallback 显式 non_seat → 不再是实现席候选（移除模板字段即红）", async () => {
+  // 用真实入库模板：/^coder_/ 前缀惯例会把 coder_opencode_fallback 误归实现席，
+  // 显式 seatRole: non_seat 修正之——删除模板里该字段本断言即红（item 3 红测）。
+  const raw = readFileSync(join("config", "agents.example.json"), "utf8");
+  const { result } = await memRun({
+    initial: { "D:/wao/config/agents.example.json": raw },
+    probeEnv: { hasCli: async () => true, hasKeyEnv: async () => "missing" },
+  });
+  const r = await result;
+  assert.equal(r.outcome, "needs-selection");
+  assert.deepEqual(r.panelReadiness.implementationIds.slice().sort(), ["coder_hq", "coder_low"],
+    "实现席清单恰为模板显式声明的两通道——coder_opencode_fallback 被显式 non_seat 剔除");
+  assert.deepEqual(r.panelReadiness.adversarialIds.slice().sort(), ["auditor", "coder_mm"],
+    "对抗席清单 = 模板显式声明的 auditor + coder_mm");
+});
+
+test("R10-B B-1: --apply 生成物逐字携带 seatRole（buildMinimalRegistry 注释剥离不动业务字段）", () => {
+  const template = JSON.parse(readFileSync(join("config", "agents.example.json"), "utf8"));
+  const fb = buildMinimalRegistry({ template, agentId: "coder_opencode_fallback" });
+  assert.equal(fb.agents.coder_opencode_fallback.seatRole, "non_seat",
+    "生成物携带显式 seatRole（逐字拷贝模板条目）");
+  const hq = buildMinimalRegistry({ template, agentId: "coder_hq" });
+  assert.equal(hq.agents.coder_hq.seatRole, "implementation");
+});
+
+test("R10-B B-2: doctor/onboarding 已配置面数字对账——同一 registry 同一探测事实 → 同一分级", async () => {
+  const { deriveReadyState, assessPanelReadiness, seatRoleOf } = await import("../../src/application/panelReadiness.js");
+  const registry = {
+    agents: {
+      coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
+      coder_low: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-pro" }, seatRole: "implementation" },
+      researcher: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-flash" }, seatRole: "non_seat" },
+    },
+  };
+  const probeFacts = { hasCli: async () => true, hasKeyEnv: async (n) => (n === "ZHIPU_API_KEY" ? "process_env" : "missing") };
+  // doctor 形状的行生产：同一 readyState 映射（deriveReadyState = 两生产方共用的
+  // 单一实现）+ 同一探测事实。doctor 与 onboarding 都是同一引擎的输入包装。
+  const doctorRows = Object.entries(registry.agents).map(([id, agent]) => ({
+    id,
+    backend: agent.backend,
+    model: agent.model?.id ?? null,
+    seatRole: typeof agent.seatRole === "string" ? agent.seatRole : undefined,
+    readyState: deriveReadyState({
+      requiresCli: BACKEND_CLI[agent.backend] ?? null,
+      requiresKeyEnv: agent.provider?.apiKeyEnv ?? null,
+      cli: true,
+      key: agent.provider?.apiKeyEnv ? (agent.provider.apiKeyEnv === "ZHIPU_API_KEY" ? "process_env" : "missing") : undefined,
+    }),
+  }));
+  const doctorAssessed = assessPanelReadiness(doctorRows);
+  const root = tmpTemplate({ ghost_tpl: { backend: "codex" } }, "wao-onb-reconcile-");
+  writeFileSync(join(root, "config", "agents.json"), JSON.stringify(registry));
+  try {
+    const r = await runWithTemplate(root, probeFacts, { privateRegistryPath: join(root, "config", "agents.json") });
+    assert.equal(r.panelFace, "configured");
+    assert.equal(r.panelReadiness.tier, doctorAssessed.tier, "同输入同引擎 → 同分级");
+    assert.deepEqual(r.panelReadiness.available.map((e) => e.id), doctorAssessed.available.map((e) => e.id),
+      "可用席位 id 列表对账");
+    assert.equal(r.panelReadiness.missingAdversarial, doctorAssessed.missingAdversarial);
+    assert.equal(r.panelReadiness.insufficientFamilyDiversity, doctorAssessed.insufficientFamilyDiversity);
+    assert.equal(r.panelReadiness.singleWorkerVacuous, doctorAssessed.singleWorkerVacuous);
+    assert.deepEqual(
+      r.panelReadiness.implementationIds,
+      doctorRows.filter((row) => seatRoleOf(row.id, row.seatRole) === "implementation").map((row) => row.id),
+      "实现席候选清单与 doctor 行同源对账（两生产方同一 seatRoleOf）");
   } finally {
     rmSync(join(root, ".."), { recursive: true, force: true });
   }

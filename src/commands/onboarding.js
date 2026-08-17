@@ -31,14 +31,15 @@ import { runOnboarding, HOST_EXAMPLES_AUTHORITY, displayWidth } from "../applica
 import { resolveCredentialEnv } from "../application/credentialReadiness.js";
 // R9（决策 0023）：会审就绪分级块的族系展示标签（推断，非契约）。
 import { familyLabel } from "../application/modelFamily.js";
-// R9-C C-1：席位角色分类复用 panelReadiness 的单一实现（渲染层不写第二份）。
-import { seatRoleOf } from "../application/panelReadiness.js";
 
 // ── R6-C: production environment probe ───────────────────────────────────────
 // One probeEnv per command invocation, passed to the pure recommendation engine.
-// Bounded: ≤4 CLI probes (one per distinct required CLI) + ≤N key probes (one
-// per distinct declared env name); the engine memoizes per unique name. Every
-// probe carries a timeout / graceful failure path and can never block output.
+// Bounded per buildRecommendations call: ≤4 CLI probes (one per distinct
+// required CLI) + ≤N key probes (one per distinct declared env name); the
+// engine memoizes per unique name. R10-B 会为已配置面（私有 registry 存在且
+// 可读 / --apply 写入后）加一次同形调用——总界 ≤8 CLI + ≤2N key 探针，仍是
+// 常数界。Every probe carries a timeout / graceful failure path and can never
+// block output.
 //
 // CLI probing reuses the doctor whichCli pattern (`where`/`which`) PLUS a
 // per-probe timeout that doctor's version lacks: a timeout/kill/spawn failure
@@ -115,6 +116,9 @@ export async function onboardingCommand(args, config) {
     exampleRegistryPath,
     targetRegistryPath,
     reliabilitySummaryPath,
+    // R10-B：readiness 块的已配置面输入（只读）——与 --apply 的目标同一路径：
+    // 私有 registry 已存在且可读时，会审就绪块按它的真实行探测展示。
+    privateRegistryPath: targetRegistryPath,
     fs: { readFile, writeFile, rename, existsSync, unlink, mkdir },
     // R6-C: production environment probe (injected; the service stays pure).
     probeEnv: { hasCli: probeCliOnPath, hasKeyEnv: probeKeyEnvSource },
@@ -189,7 +193,8 @@ export function renderHuman(r) {
       lines.push(`Strict certification path: \`${r.certification.strictCommand}\`${endorseTxt}`);
     }
     // R9（决策 0023）：selected/--apply 分支同样打印分级块（与 --json 同源的
-    // result.panelReadiness；模板不可读时整块不打印）。
+    // result.panelReadiness；R10-B 起面标签与输入行按 panelFace 切换，--apply
+    // 写入后即已配置面）。输入行空（rowCount 0）时整块不打印。
     const panelLines = panelReadinessLines(r);
     if (panelLines.length > 0) {
       lines.push("");
@@ -239,19 +244,21 @@ export function renderHuman(r) {
 }
 
 // ── R9 三席会审就绪分级块（决策 0023）────────────────────────────────────────
-// 从 result.panelReadiness（与 --json 同一对象派生，application 层单一推导）
-// 渲染；数据源 = 入库模板行 + 环境探测（模板面——onboarding 不读用户 registry，
-// 它还没生成）。advisory：只提示不替 Lead 选位；每行显示宽 ≤120（displayWidth
-// 纪律与矩阵块一致）。模板不可读（recommendations 空）时整块不打印。
+// 从 result.panelReadiness / panelFace（与 --json 同一对象派生，application 层
+// 单一推导）渲染。数据源按面（R10-B）：模板面 = 入库模板行 + 环境探测；已配置面
+// = 私有 config/agents.json 的行 + 同一探测实现（私有 registry 存在且可读 /
+// --apply 写入后）。advisory：只提示不替 Lead 选位；每行显示宽 ≤120
+// （displayWidth 纪律与矩阵块一致）。输入行空（rowCount 0）时整块不打印。
 function panelReadinessLines(r) {
-  const rows = Array.isArray(r.recommendations?.rows) ? r.recommendations.rows : [];
-  if (rows.length === 0 || !r.panelReadiness) return [];
   const p = r.panelReadiness;
+  if (!p || !p.rowCount) return [];
+  // R10-B：面标签（已配置面/模板面）——两个面的引擎与探测实现同一份。
+  const faceLabel = r.panelFace === "configured" ? "已配置面" : "模板面";
   // C-9：族系标签带"推断"字样——推断族系非契约，用户面不把标签讲成事实。
   const seat = (e) => `${e.id}（推断族系：${familyLabel(e.family)}）`;
   const lines = [];
   if (p.tier === "three_seat") {
-    lines.push("会审就绪（模板面·按当前环境探测，决策 0023）: 三席可用——推荐标准（Lead 主审 + 两名副审）");
+    lines.push(`会审就绪（${faceLabel}·按当前环境探测，决策 0023）: 三席可用——推荐标准（Lead 主审 + 两名副审）`);
     lines.push(`  建议席位组合（展示建议，选位权在 Lead）: ${seat(p.seats[0])} + ${seat(p.seats[1])}`);
     if (p.missingAdversarial) {
       lines.push("  无对抗席候选（auditor/coder_mm）——两席分配语义要求对抗视角，建议补配");
@@ -260,13 +267,16 @@ function panelReadinessLines(r) {
       lines.push("  跨族系提示：可用副审的已知族系不足两族——跨族系是更强推荐（未知族系不参与判定）");
     }
   } else if (p.tier === "two_seat") {
-    lines.push("会审就绪（模板面·按当前环境探测，决策 0023）: 两席可用——次之推荐（Lead 主审 + 一名副审）");
+    lines.push(`会审就绪（${faceLabel}·按当前环境探测，决策 0023）: 两席可用——次之推荐（Lead 主审 + 一名副审）`);
     lines.push(`  可用副审: ${p.available.map(seat).join("、")}——补齐第二个副审（建议不同族系）可升级三席`);
     if (p.singleWorkerVacuous) {
-      lines.push("  注：模板仅一名 worker，它通常即被审产出的作者（0019 §3 作者回避）——两席建议事实空转");
+      // R10-B：单 worker 注脚面感知——已配置面讲"registry 仅一名 worker"，
+      // 模板面维持既有措辞。
+      const subject = r.panelFace === "configured" ? "registry 仅一名 worker" : "模板仅一名 worker";
+      lines.push(`  注：${subject}，它通常即被审产出的作者（0019 §3 作者回避）——两席建议事实空转`);
     }
   } else {
-    lines.push("会审就绪（模板面·按当前环境探测，决策 0023）: 当前无可用席位候选（对抗席/实现席）");
+    lines.push(`会审就绪（${faceLabel}·按当前环境探测，决策 0023）: 当前无可用席位候选（对抗席/实现席）`);
     lines.push("  有意跳过会审时，在 wao stage 2/4 用 --panel-skip-reason 登记显式理由（强烈推荐但非强制）");
   }
   if (p.loginUnverified?.length > 0) {
@@ -281,19 +291,26 @@ function panelReadinessLines(r) {
   if (p.probeUnknown?.length > 0) {
     lines.push(`  探测未知（如实展示，不计入可用）: ${p.probeUnknown.join("、")}`);
   }
-  // 席位惯例句（0019 §3 保留）：候选 id 全部从模板行派生（不在模板的 worker
+  // 席位惯例句（0019 §3 保留）：候选 id 全部从输入面行派生（不在面的 worker
   // 不点名），零候选时整句不打印（shape-derived，0022 契约 (6)）。拆两行控制
-  // 显示宽 ≤120（全量模板 4 条 coder 通道也不折行）。
-  // 分类规则复用 panelReadiness.seatRoleOf（单一语义；coder_mm 归对抗席，
-  // 不再重复列进实现席——渲染层不写第二份分类）。
-  const coderIds = rows.filter((row) => seatRoleOf(row.id) === "implementation").map((row) => row.id);
-  const adversarialIds = rows.filter((row) => seatRoleOf(row.id) === "adversarial").map((row) => row.id);
-  if (coderIds.length > 0 || adversarialIds.length > 0) {
+  // 显示宽 ≤120。分类复用 panelReadiness.seatRoleOf 的单一语义（declared
+  // seatRole 优先——R10-B），清单由 application 层投影（p.implementationIds /
+  // p.adversarialIds）——渲染层不写第二份分类。
+  if (p.implementationIds.length > 0 || p.adversarialIds.length > 0) {
     lines.push("  席位惯例（0019 §3 保留）: 实现席从 coder 通道取（避同族/避被审产出作者）；组合与选位权由 Lead 决定");
     const parts = [];
-    if (coderIds.length > 0) parts.push(`实现席 ${coderIds.join("、")}`);
-    if (adversarialIds.length > 0) parts.push(`对抗席 ${adversarialIds.join("、")}`);
-    lines.push(`  在场候选（从上表模板行派生）: ${parts.join("；")}`);
+    if (p.implementationIds.length > 0) parts.push(`实现席 ${p.implementationIds.join("、")}`);
+    if (p.adversarialIds.length > 0) parts.push(`对抗席 ${p.adversarialIds.join("、")}`);
+    const sourceLabel = r.panelFace === "configured" ? "从已配置 registry 派生" : "从上表模板行派生";
+    lines.push(`  在场候选（${sourceLabel}）: ${parts.join("；")}`);
+  }
+  // R10-B：私有 registry 存在但不可读 → 降级模板面 + 来源标注（不阻塞主流程）。
+  if (r.panelSourceUnreadable) {
+    lines.push("  注：私有 registry 读取失败——本块按模板面展示（已配置 worker 的真实状态请见 wao doctor）");
+  }
+  // R10-B：已配置面指针行——"真实状态以它为准"，完整体检指向 wao doctor。
+  if (r.panelFace === "configured" && r.panelConfiguredCount !== null) {
+    lines.push(`  已配置 ${r.panelConfiguredCount} 名 worker（真实状态以它为准）——完整体检见 \`wao doctor\``);
   }
   return lines;
 }
