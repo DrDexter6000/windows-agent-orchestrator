@@ -254,6 +254,27 @@ async function validateRoleContractTransport(backend, agent, roleContract) {
   }
 }
 
+// R10-C C-3: when a per-dispatch model override is active and the backend
+// refuses the (synthesized) policy, the operator sees a registry-shape error
+// for a dispatch they made with --model — the two facts never connect in the
+// message (opencode-serve's model-shape text, kimi-code's effort/model pairing
+// both read as pure registry complaints). Append ONE bounded sentence naming
+// the override whenever it is in play. The verdict itself is untouched: same
+// throw, same backend decision, only the message gains the hint (fixed text —
+// never echoes the supplied model id).
+const MODEL_OVERRIDE_POLICY_HINT =
+  "（当前派发带 --model 覆盖；该 backend 的 model 声明形状与覆盖不兼容）";
+function validateAgentPolicyWithOverrideHint(backend, agent, modelOverride) {
+  try {
+    backend.validateAgentPolicy(agent);
+  } catch (error) {
+    if (modelOverride !== null && modelOverride !== undefined) {
+      error.message += MODEL_OVERRIDE_POLICY_HINT;
+    }
+    throw error;
+  }
+}
+
 function isPathInside(base, target) {
   const rel = relative(base, target);
   return rel === ""
@@ -455,8 +476,11 @@ export class RunManager {
     // voids the certified combination) and with sessionReuse (a resumed
     // provider conversation must run one model across turns); both refusals
     // run at the very top of start, before the registry read, with zero side
-    // effects. resume() deliberately never accepts it (resume re-reads the
-    // registry; a resumed conversation must keep its registry model).
+    // effects. resume() never accepts a CALLER-SUPPLIED override (the model
+    // choice was made once, at dispatch); instead it REBUILDS this run's own
+    // persisted run.started.modelOverride fact (R10-C C-1) so a daemon-resumed
+    // or hand-resumed run keeps the model it was dispatched with — see the
+    // synthesis in resume().
     modelOverride = null,
     } = options;
 
@@ -643,7 +667,9 @@ export class RunManager {
       if (typeof backend.validateAgentPolicy !== "function") {
         throw new Error("backend does not implement validateAgentPolicy — cannot confirm it can express the configured policy");
       }
-      backend.validateAgentPolicy(agent);
+      // R10-C C-3: hint-appending wrapper (see its definition) — start covers
+      // the foreground family AND the detached background runner's --model.
+      validateAgentPolicyWithOverrideHint(backend, agent, modelOverride);
     }
 
     // M11-11C: provider-NEUTRAL session-reuse capability gate (contract 7).
@@ -1170,7 +1196,24 @@ export class RunManager {
     // NOT the source repo (runStarted.cwd is the source repo). Non-delivery runs
     // keep using runStarted.cwd as before.
     const resumeCwd = deliveryContext ? deliveryContext.worktreePath : runStarted.cwd;
-    const agent = loaded.getAgent(transcript.context.agentId, { cwd: resumeCwd });
+    let agent = loaded.getAgent(transcript.context.agentId, { cwd: resumeCwd });
+    // R10-C C-1: rebuild the per-dispatch model override from run.started — the
+    // SAME authoritative source the delivery context above is rebuilt from.
+    // run.started.modelOverride is the durable fact that THIS dispatch carried
+    // --model; resume re-reading the registry alone would run the back half of
+    // the run on the registry model with no model-switch fact anywhere in the
+    // transcript (the daemon --resume-on-start takeover path: dispatch with
+    // --model → runner dies → daemon resumes → silent model switch). Same
+    // synthesis and shape gate as start: present-and-valid → only .id is
+    // replaced (every sibling field survives); present-but-INVALID (a corrupt
+    // or tampered persisted fact) → fail closed: return null exactly like a
+    // malformed delivery context — never spawn a model the transcript does not
+    // license. Absent → the registry model, byte-compatible with the old face.
+    const resumeModelOverride = runStarted.modelOverride;
+    if (resumeModelOverride !== null && resumeModelOverride !== undefined) {
+      if (!isValidModelOverride(resumeModelOverride)) return null;
+      agent = { ...agent, model: { ...(agent.model ?? {}), id: resumeModelOverride } };
+    }
 
     // M11-5 Package A2：获取 backend 一次，前置到角色合同决策前——决策由
     // backend 能力（supportsRoleContract）驱动，不认识 runtime 名称。该 backend
@@ -1179,13 +1222,15 @@ export class RunManager {
 
     // M11-9 CTO closeout: validate backend policy BEFORE any transcript append
     // or spawn on the resume path (same as start). FAIL-CLOSED only when a
-    // structured policy is present.
+    // structured policy is present. R10-C: the rebuilt override (C-1) rides the
+    // same hint-appending wrapper as start, so a daemon-resumed run whose
+    // inherited model cannot be expressed gets the --model-naming sentence too.
     const resumeHasPolicy = agent.model || agent.reasoning || agent.provider;
     if (resumeHasPolicy) {
       if (typeof backend.validateAgentPolicy !== "function") {
         throw new Error("backend does not implement validateAgentPolicy — cannot confirm it can express the configured policy");
       }
-      backend.validateAgentPolicy(agent);
+      validateAgentPolicyWithOverrideHint(backend, agent, resumeModelOverride);
     }
 
     // M11-5（TD-89 修复）：resume 也必须重新经过同一角色合同加载器，不得静默

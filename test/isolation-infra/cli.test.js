@@ -3509,6 +3509,10 @@ test("R10-A-CLI-7: run --help 用法页含 --model（形状门 + 两道互斥 + 
   assert.match(out, /mutually exclusive with --require-certified/, "认证互斥说明");
   assert.match(out, /mutually exclusive with.*provider-session reuse|provider-session reuse/, "复用互斥说明");
   assert.match(out, /effective model/, "回显说明（打错模型名的失败模式）");
+  // R10-C（auditor 没问-1，并入 C-3 批）：回显措辞降级为 advisory——不得写成
+  // 校验承诺（回显展示 WAO 下发了什么，不证明 provider 接受该 id）。
+  assert.match(out, /shows what WAO threaded/, "回显措辞为 advisory（非校验承诺）");
+  assert.doesNotMatch(out, /check the echoed/, "旧的祈使句措辞已移除");
 });
 
 test("R10-A-CLI-8: run --background --model 全链 — CLI JSON 回显 + runner→start 合成落 transcript", async () => {

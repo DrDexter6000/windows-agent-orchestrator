@@ -53,7 +53,13 @@
 //      (MO-2), SSOT shape gate (MO-3), reuse/lineage typed conflict with zero
 //      side effects (MO-4/MO-5), the runner→start synthesis chain (MO-6),
 //      start-level authoritative refusals (MO-7), sibling-field preservation
-//      incl. opencode-serve and no-model shapes (MO-8).
+//      incl. opencode-serve and no-model shapes (MO-8). R10-C C-1: resume
+//      rebuilds the persisted run.started.modelOverride fact — daemon
+//      takeover keeps the dispatched model across run.rerun (MO-9),
+//      byte-compatible without the fact (MO-9b), corrupt persisted value
+//      refuses resume fail-closed (MO-9c). R10-C C-3: a policy refusal under
+//      an active override names --model on both the start and resume faces
+//      (MO-10).
 //
 // Pure group: temp fixtures under os.tmpdir(), fakeSpawn injection, zero git,
 // zero real dispatch, zero provider token. The only real subprocess is the CLI
@@ -957,6 +963,230 @@ test("MO-8: sibling preservation — opencode-serve {providerID,id,variant} and 
     // tester shape (registry entry without any model): synthesizes a bare {id}.
     await makeManager({ backend: "claude-code", cwd: dir }).start("a", { prompt: "p", modelOverride: "probe-model" });
     assert.deepEqual(spawnedModels.at(-1), { id: "probe-model" }, "no-model entry synthesizes {id: override}");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// R10-C C-1: resume() rebuilds the per-dispatch override from the SAME
+// authoritative source it rebuilds the delivery context from — run.started.
+// Defect this closes: `--model X` background dispatch → runner dies → daemon
+// --resume-on-start takeover → the back half silently ran the REGISTRY model
+// with no model-switch fact anywhere in the transcript (runManager.js resume
+// rebuilt the agent from the registry only), defeating modelOverride's audit
+// purpose (telling "the registry was changed" apart from "one dispatch
+// overrode it"). Pure group: hand-seeded transcript fixtures + fake backend,
+// zero git, zero real dispatch, zero provider token.
+
+/** Seed a resumable (submitted, non-terminal) transcript for the replay branch. */
+function seedResumableTranscript(runDir, runId, startedExtra) {
+  const lines = [
+    { seq: 1, runId, agentId: "coder_low", type: "run.started", backend: "claude-code", cwd: runDir, ...startedExtra },
+    { seq: 2, runId, agentId: "coder_low", type: "prompt.sent", prompt: "x" },
+    { seq: 3, runId, agentId: "coder_low", type: "run.state_change", from: null, to: "pending", reason: "created" },
+    { seq: 4, runId, agentId: "coder_low", type: "run.state_change", from: "pending", to: "submitted", reason: "spawned" },
+    { seq: 5, runId, agentId: "coder_low", type: "session.created", backend: "claude-code", backendSessionId: "s-mo-old" },
+  ];
+  writeFileSync(join(runDir, `${runId}.jsonl`), lines.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf8");
+  return lines;
+}
+
+test("MO-9: resume rebuilds run.started.modelOverride — daemon takeover keeps the dispatched model across run.rerun", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mo9-"));
+  const runDir = join(dir, "runs");
+  try {
+    mkdirSync(runDir, { recursive: true });
+    const spawnedModels = [];
+    const policyModels = [];
+    const fakeBackend = {
+      validateAgentPolicy(agent) { policyModels.push(agent.model); },
+      async spawn(agent) {
+        spawnedModels.push(agent.model);
+        return {
+          backend: "claude-code",
+          backendSessionId: "s-mo9-new",
+          messageId: "m_mo9",
+          admittedSeq: 1,
+          async *events() { yield { kind: "done", reason: "completed" }; },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+    };
+    const manager = new RunManager({
+      config: { registry: "x", runDir, pollInterval: 10, waitTimeout: 3000 },
+      readRegistry: async () => ({
+        // The registry model differs from the dispatched override — without
+        // the rebuild this is what the re-spawn would silently fall back to.
+        getAgent: (id) => ({ id, backend: "claude-code", cwd: dir, model: { id: "glm-5.3", contextWindow: 1000000 } }),
+        listAgents: () => [],
+      }),
+      transcriptDir: runDir,
+      backendFor: () => fakeBackend,
+    });
+    const runId = "run_mo9_resume";
+    seedResumableTranscript(runDir, runId, {
+      model: { id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 },
+      modelOverride: "gpt-5.6-sol-xhigh",
+    });
+    const run = await manager.resume(runId);
+    assert.ok(run, "the takeover run is resumable");
+    // The rebuild flows through policy validation AND the replay re-spawn:
+    // id = the dispatched override, contextWindow sibling preserved.
+    assert.deepEqual(policyModels.at(-1), { id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 },
+      "validateAgentPolicy sees the rebuilt (synthesized) policy, not the registry model");
+    assert.deepEqual(spawnedModels, [{ id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 }],
+      "the run.rerun re-spawn keeps the dispatched model — no silent registry fallback");
+    assert.equal(run.agent.model.id, "gpt-5.6-sol-xhigh", "the returned Run handle carries the override");
+    const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+    assert.ok(events.some((e) => e.type === "run.rerun"), "the replay branch actually re-spawned");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("MO-9b: resume WITHOUT a persisted modelOverride stays byte-compatible (registry model, no synthesis)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mo9b-"));
+  const runDir = join(dir, "runs");
+  try {
+    mkdirSync(runDir, { recursive: true });
+    const spawnedModels = [];
+    const fakeBackend = {
+      validateAgentPolicy() {},
+      async spawn(agent) {
+        spawnedModels.push(agent.model);
+        return {
+          backend: "claude-code",
+          backendSessionId: "s-mo9b",
+          messageId: "m_mo9b",
+          admittedSeq: 1,
+          async *events() { yield { kind: "done", reason: "completed" }; },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+    };
+    const manager = new RunManager({
+      config: { registry: "x", runDir, pollInterval: 10, waitTimeout: 3000 },
+      readRegistry: async () => ({
+        getAgent: (id) => ({ id, backend: "claude-code", cwd: dir, model: { id: "glm-5.3", contextWindow: 1000000 } }),
+        listAgents: () => [],
+      }),
+      transcriptDir: runDir,
+      backendFor: () => fakeBackend,
+    });
+    const runId = "run_mo9b_resume";
+    // An ordinary run.started: synthesized-at-start model shape, no override fact.
+    seedResumableTranscript(runDir, runId, { model: { id: "glm-5.3", contextWindow: 1000000 } });
+    const run = await manager.resume(runId);
+    assert.ok(run, "resumable as before");
+    assert.deepEqual(spawnedModels, [{ id: "glm-5.3", contextWindow: 1000000 }],
+      "no persisted override → the registry model exactly as before (regression)");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("MO-9c: a persisted modelOverride failing the SSOT shape gate → resume refuses (null), zero spawns, transcript unchanged", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mo9c-"));
+  const runDir = join(dir, "runs");
+  try {
+    mkdirSync(runDir, { recursive: true });
+    let spawns = 0;
+    const fakeBackend = {
+      validateAgentPolicy() {},
+      async spawn() {
+        spawns += 1;
+        throw new Error("unreachable");
+      },
+    };
+    const manager = new RunManager({
+      config: { registry: "x", runDir, pollInterval: 10, waitTimeout: 3000 },
+      readRegistry: async () => ({
+        getAgent: (id) => ({ id, backend: "claude-code", cwd: dir, model: { id: "glm-5.3" } }),
+        listAgents: () => [],
+      }),
+      transcriptDir: runDir,
+      backendFor: () => fakeBackend,
+    });
+    for (const bad of ["--next-flag", "has space", "", true, { id: "x" }]) {
+      const runId = `run_mo9c_${spawns}_${String(typeof bad)}`;
+      const lines = seedResumableTranscript(runDir, runId, { model: { id: "x" }, modelOverride: bad });
+      const run = await manager.resume(runId);
+      assert.equal(run, null, `corrupt persisted value ${JSON.stringify(bad)} → resume refuses`);
+      assert.equal(spawns, 0, "zero re-spawns");
+      const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+      assert.equal(events.length, lines.length, "no events appended by the refused resume");
+      assert.equal(events.some((e) => e.type === "run.rerun"), false, "no run.rerun fact");
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("MO-10: a policy refusal under an active override names --model (start + resumed rebuild); without it the message is unchanged", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mo10-"));
+  const runDir = join(dir, "runs");
+  const HINT = "（当前派发带 --model 覆盖；该 backend 的 model 声明形状与覆盖不兼容）";
+  try {
+    // A backend that refuses the contextWindow shape — the auditor's face:
+    // the operator typed --model and got a registry-shape error that never
+    // mentioned the override (opencodeServe.js model-shape / kimiCode.js
+    // effort-pairing refusals read the same way).
+    const rejectingBackend = {
+      validateAgentPolicy(agent) {
+        if (agent?.model?.contextWindow !== undefined) {
+          throw new Error("test backend cannot express model.contextWindow");
+        }
+      },
+      async spawn() { throw new Error("unreachable — validation refuses first"); },
+    };
+    const makeManager = () => new RunManager({
+      config: { registry: "x", runDir, pollInterval: 10, waitTimeout: 3000 },
+      readRegistry: async () => ({
+        getAgent: (id) => ({ id, backend: "claude-code", cwd: dir, model: { id: "glm-5.3", contextWindow: 1000000 } }),
+        listAgents: () => [],
+      }),
+      transcriptDir: runDir,
+      backendFor: () => rejectingBackend,
+    });
+
+    // (1) start WITH the override → the same backend verdict + the bounded hint.
+    await assert.rejects(
+      () => makeManager().start("a", { prompt: "p", modelOverride: "gpt-5.6-sol-xhigh" }),
+      (e) => {
+        assert.equal(e.message, "test backend cannot express model.contextWindow" + HINT,
+          "verdict untouched, hint appended");
+        return true;
+      },
+    );
+    // (2) start WITHOUT the override → byte-identical backend message.
+    await assert.rejects(
+      () => makeManager().start("a", { prompt: "p" }),
+      (e) => {
+        assert.equal(e.message, "test backend cannot express model.contextWindow");
+        assert.doesNotMatch(e.message, /--model/, "no hint without an active override");
+        return true;
+      },
+    );
+    // (3) resume face: the REBUILT override rides the same hint (daemon
+    // takeover of a --model dispatch must not regress to the bare message).
+    mkdirSync(runDir, { recursive: true });
+    const runId = "run_mo10_resume";
+    seedResumableTranscript(runDir, runId, {
+      model: { id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 },
+      modelOverride: "gpt-5.6-sol-xhigh",
+    });
+    await assert.rejects(
+      () => makeManager().resume(runId),
+      (e) => {
+        assert.equal(e.message, "test backend cannot express model.contextWindow" + HINT,
+          "the resumed rebuild gets the same --model-naming hint");
+        return true;
+      },
+    );
+    assert.deepEqual(listTranscripts(runDir), [`${runId}.jsonl`],
+      "only the hand-seeded fixture transcript exists (the refused starts wrote none)");
   } finally {
     cleanupDir(dir);
   }

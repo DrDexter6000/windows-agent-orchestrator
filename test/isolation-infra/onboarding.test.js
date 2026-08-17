@@ -1947,10 +1947,12 @@ test("R10-B B-1: 模板面 declared 优先——my_reviewer+adversarial 计入�
 
 test("R10-B B-1: 已配置面 declared 优先——私有 registry 的 my_reviewer+adversarial 计入对抗席", async () => {
   const root = tmpTemplate({ ghost_tpl: { backend: "codex" } }, "wao-onb-cfgdecl-");
+  // R10-C C-2 起已配置面逐条过 normalizeAgent——fixture 用完整 provider 形状
+  // （protocol/baseUrl/apiKeyEnv 三字段齐全），与真实可派发 registry 一致。
   writeFileSync(join(root, "config", "agents.json"), JSON.stringify({
     agents: {
-      my_reviewer: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-pro" }, seatRole: "adversarial" },
-      coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
+      my_reviewer: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-pro" }, seatRole: "adversarial" },
+      coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
     },
   }));
   try {
@@ -1974,8 +1976,9 @@ test("R10-B B-2: readiness 块双面切换——absent 模板面；present+reada
   }, "wao-onb-faces-");
   const priv = {
     agents: {
-      coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
-      coder_mm: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "kimi-code/k3" }, seatRole: "adversarial" },
+      // R10-C C-2 起已配置面逐条过 normalizeAgent——完整 provider 形状。
+      coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
+      coder_mm: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "kimi-code/k3" }, seatRole: "adversarial" },
     },
   };
   const privPath = join(root, "config", "agents.json");
@@ -2015,6 +2018,62 @@ test("R10-B B-2: readiness 块双面切换——absent 模板面；present+reada
   }
 });
 
+test("R10-C C-2: 已配置面第四态 readable-but-invalid——无效条目被 normalizeAgent 剔除 + 有界提示 + 不指名", async () => {
+  const { renderHuman } = await import("../../src/commands/onboarding.js");
+  const probeAll = { hasCli: async () => true, hasKeyEnv: async () => "process_env" };
+  const root = tmpTemplate({
+    ghost_tpl: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, model: { id: "glm-5.3[1m]" } },
+  }, "wao-onb-invalid-");
+  const privPath = join(root, "config", "agents.json");
+  try {
+    // (1) 混合：2 条合法 + 1 条 seatRole 闭集外（auditor 的注入形状——
+    // validate/getAgent 双拒，修复前却被渲染成席位候选并声称真实状态以它为准）。
+    writeFileSync(privPath, JSON.stringify({
+      agents: {
+        coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
+        auditor: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "claude-opus-5" }, seatRole: "adversarial" },
+        bad_seat: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-pro" }, seatRole: "bogus" },
+      },
+    }));
+    const r = await runWithTemplate(root, probeAll, { privateRegistryPath: privPath });
+    assert.equal(r.panelFace, "configured", "可读 → 仍是已配置面（第四态不降级）");
+    assert.equal(r.panelConfiguredCount, 3, "计数仍是私有 registry 的真实 worker 数");
+    assert.equal(r.panelInvalidEntryCount, 1, "无效条目计数 = 1（seatRole 闭集外）");
+    assert.equal(r.panelReadiness.rowCount, 2, "行渲染只含过 normalizeAgent 的条目");
+    assert.deepEqual(r.panelReadiness.available.map((e) => e.id), ["coder_hq", "auditor"],
+      "被拒条目不进席位候选（不再以真实状态口径渲染坏数据）");
+    const text = renderHuman(r);
+    assert.ok(text.includes("私有 registry 有 1 条无效条目已剔除——run: npm run cli -- registry validate"),
+      "有界提示行在场并指向共享校验权威");
+    assert.ok(!text.includes("bad_seat"), "提示不指名被剔除条目（fail-safe）");
+
+    // (2) 全无效：不得被"零行整块不打印"吞掉——提示行仍必须在场。
+    writeFileSync(privPath, JSON.stringify({
+      agents: { bad_seat: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", seatRole: "bogus" } },
+    }));
+    const rAll = await runWithTemplate(root, probeAll, { privateRegistryPath: privPath });
+    assert.equal(rAll.panelFace, "configured");
+    assert.equal(rAll.panelInvalidEntryCount, 1);
+    assert.equal(rAll.panelReadiness.rowCount, 0, "唯一条目被剔除 → 零行");
+    const tAll = renderHuman(rAll);
+    assert.ok(tAll.includes("私有 registry 有 1 条无效条目已剔除"), "全无效时提示行仍打印");
+    assert.ok(tAll.includes("会审就绪（已配置面"), "标题行在场（tier=none 如实展示）");
+
+    // (3) 回归：干净 registry → invalidCount 恒 0，无提示行（字节兼容）。
+    writeFileSync(privPath, JSON.stringify({
+      agents: {
+        coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
+      },
+    }));
+    const rClean = await runWithTemplate(root, probeAll, { privateRegistryPath: privPath });
+    assert.equal(rClean.panelInvalidEntryCount, 0);
+    assert.equal(rClean.panelReadiness.rowCount, 1);
+    assert.ok(!renderHuman(rClean).includes("无效条目已剔除"), "干净 registry 无剔除提示");
+  } finally {
+    rmSync(join(root, ".."), { recursive: true, force: true });
+  }
+});
+
 test("R10-B B-1: coder_opencode_fallback 显式 non_seat → 不再是实现席候选（移除模板字段即红）", async () => {
   // 用真实入库模板：/^coder_/ 前缀惯例会把 coder_opencode_fallback 误归实现席，
   // 显式 seatRole: non_seat 修正之——删除模板里该字段本断言即红（item 3 红测）。
@@ -2044,9 +2103,10 @@ test("R10-B B-2: doctor/onboarding 已配置面数字对账——同一 registry
   const { deriveReadyState, assessPanelReadiness, seatRoleOf } = await import("../../src/application/panelReadiness.js");
   const registry = {
     agents: {
-      coder_hq: { backend: "claude-code", provider: { apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
-      coder_low: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-pro" }, seatRole: "implementation" },
-      researcher: { backend: "claude-code", provider: { apiKeyEnv: "DEEPSEEK_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-flash" }, seatRole: "non_seat" },
+      // R10-C C-2 起已配置面逐条过 normalizeAgent——完整 provider 形状。
+      coder_hq: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "ZHIPU_API_KEY" }, cwd: ".", model: { id: "glm-5.3[1m]" }, seatRole: "implementation" },
+      coder_low: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "DEEPSEEK_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-pro" }, seatRole: "implementation" },
+      researcher: { backend: "claude-code", provider: { protocol: "anthropic-compatible", baseUrl: "https://synthetic.example.com", apiKeyEnv: "DEEPSEEK_API_KEY" }, cwd: ".", model: { id: "deepseek-v4-flash" }, seatRole: "non_seat" },
     },
   };
   const probeFacts = { hasCli: async () => true, hasKeyEnv: async (n) => (n === "ZHIPU_API_KEY" ? "process_env" : "missing") };

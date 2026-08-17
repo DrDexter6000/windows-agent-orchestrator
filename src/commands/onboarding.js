@@ -248,10 +248,14 @@ export function renderHuman(r) {
 // 单一推导）渲染。数据源按面（R10-B）：模板面 = 入库模板行 + 环境探测；已配置面
 // = 私有 config/agents.json 的行 + 同一探测实现（私有 registry 存在且可读 /
 // --apply 写入后）。advisory：只提示不替 Lead 选位；每行显示宽 ≤120
-// （displayWidth 纪律与矩阵块一致）。输入行空（rowCount 0）时整块不打印。
+// （displayWidth 纪律与矩阵块一致）。输入行空（rowCount 0）时整块不打印
+// （R10-C C-2 例外：已配置面存在被剔除的无效条目时仍打印，让提示行在场）。
 function panelReadinessLines(r) {
   const p = r.panelReadiness;
-  if (!p || !p.rowCount) return [];
+  // R10-C C-2：已配置面存在被剔除的无效条目时，即使有效行为 0 也渲染本块——
+  // 否则"rows 空整块不打印"会把全无效 registry 静默成无信号（提示行必须在场）。
+  const droppedEntries = r.panelFace === "configured" && Number(r.panelInvalidEntryCount) > 0;
+  if (!p || (!p.rowCount && !droppedEntries)) return [];
   // R10-B：面标签（已配置面/模板面）——两个面的引擎与探测实现同一份。
   const faceLabel = r.panelFace === "configured" ? "已配置面" : "模板面";
   // C-9：族系标签带"推断"字样——推断族系非契约，用户面不把标签讲成事实。
@@ -311,6 +315,11 @@ function panelReadinessLines(r) {
   // R10-B：已配置面指针行——"真实状态以它为准"，完整体检指向 wao doctor。
   if (r.panelFace === "configured" && r.panelConfiguredCount !== null) {
     lines.push(`  已配置 ${r.panelConfiguredCount} 名 worker（真实状态以它为准）——完整体检见 \`wao doctor\``);
+  }
+  // R10-C C-2：无效条目剔除的有界提示——只给条数，不指名条目（坏值本身可能
+  // 敏感/带注入载荷），修复出口指向共享校验权威面（registry validate）。
+  if (droppedEntries) {
+    lines.push(`  注：私有 registry 有 ${r.panelInvalidEntryCount} 条无效条目已剔除——run: npm run cli -- registry validate`);
   }
   return lines;
 }

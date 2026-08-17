@@ -128,8 +128,9 @@ Notes:
     recorded per provider+model, so any override voids the certified
     combination) and with provider-session reuse agents (a resumed
     conversation must run one model). A mistyped model id is only reported by
-    the provider when the worker starts — check the echoed "effective model"
-    in the dispatch output. --model exists only on run (not spawn/workflow/
+    the provider when the worker starts — the echoed "effective model" in the
+    dispatch output is advisory: it shows what WAO threaded, not that the
+    provider accepts the id. --model exists only on run (not spawn/workflow/
     daemon); a persistent model change belongs in the registry model policy.
   - --help must be the FIRST argument after run: npm run cli -- run --help
 `;

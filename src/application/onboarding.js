@@ -602,14 +602,35 @@ async function loadPrivateRegistry(privateRegistryPath, fs) {
  * probes come from each entry's provider.apiKeyEnv name, CLI probes from its
  * backend, exactly like the template face. `count` is the true number of worker
  * entries (unbounded by MAX_CANDIDATES — it is a count, not an enumeration).
+ *
+ * R10-C C-2: every entry must first pass the shared validation authority
+ * (registry.normalizeAgent — the same validator `registry validate` and
+ * getAgent apply) before it may become a row. An entry both strict faces
+ * reject is never rendered as a seat candidate under the configured face's
+ * "真实状态以它为准" claim. Dropped entries are counted in `invalidCount`;
+ * the note derived from it names NO entry (a bad value could itself be an
+ * injection payload) and points at `registry validate` — fail-safe. The
+ * template face is unchanged: the tracked template is repo-owned, not a
+ * private face claiming truth.
  * @param {object} registry — parsed private registry JSON
  * @param {{hasCli: Function, hasKeyEnv: Function}} [probeEnv]
- * @returns {Promise<{rows: object[], count: number}>}
+ * @returns {Promise<{rows: object[], count: number, invalidCount: number}>}
  */
 async function buildConfiguredFace(registry, probeEnv) {
   const agents = isPlainObject(registry?.agents) ? registry.agents : {};
-  const { rows } = await buildRecommendations(buildCandidateList(registry), registry, probeEnv);
-  return { rows, count: Object.keys(agents).length };
+  let invalidCount = 0;
+  const valid = {};
+  for (const [id, agent] of Object.entries(agents)) {
+    try {
+      normalizeAgent(id, agent);
+      valid[id] = agent;
+    } catch {
+      invalidCount += 1;
+    }
+  }
+  const validRegistry = { ...registry, agents: valid };
+  const { rows } = await buildRecommendations(buildCandidateList(validRegistry), validRegistry, probeEnv);
+  return { rows, count: Object.keys(agents).length, invalidCount };
 }
 
 /**
@@ -662,6 +683,7 @@ export async function runOnboarding({
     face: "template",
     rows: [],
     configuredCount: null,
+    invalidCount: 0,
     sourceUnreadable: false,
   };
   const finalize = (partial) => baseResult({ ...partial, recommendations, panelState });
@@ -693,16 +715,17 @@ export async function runOnboarding({
 
   // R10-B: 私有 registry 面加载（只读、注入 fs；永不 throw）。present+readable
   // → 后续所有分支的 readiness 块输入行切到已配置面（同一 engine、同一探测
-  // 实现）；absent → 模板面（既有行为不变）；unreadable → 模板面 + 标注来源
-  // 不可读（不阻塞主流程）。
+  // 实现；R10-C C-2：每条 entry 先过共享校验权威 normalizeAgent，无效条目剔除
+  // 并计数，绝不以"真实状态以它为准"的口径渲染被拒条目）；absent → 模板面
+  // （既有行为不变）；unreadable → 模板面 + 标注来源不可读（不阻塞主流程）。
   const privateLoad = await loadPrivateRegistry(privateRegistryPath, _fs);
   if (privateLoad.status === "readable") {
     const cfg = await buildConfiguredFace(privateLoad.registry, probeEnv);
-    panelState = { face: "configured", rows: cfg.rows, configuredCount: cfg.count, sourceUnreadable: false };
+    panelState = { face: "configured", rows: cfg.rows, configuredCount: cfg.count, invalidCount: cfg.invalidCount, sourceUnreadable: false };
   } else if (privateLoad.status === "unreadable") {
-    panelState = { face: "template", rows: recommendations.rows, configuredCount: null, sourceUnreadable: true };
+    panelState = { face: "template", rows: recommendations.rows, configuredCount: null, invalidCount: 0, sourceUnreadable: true };
   } else {
-    panelState = { face: "template", rows: recommendations.rows, configuredCount: null, sourceUnreadable: false };
+    panelState = { face: "template", rows: recommendations.rows, configuredCount: null, invalidCount: 0, sourceUnreadable: false };
   }
 
   // Endorsement contract: requires an EXPLICIT, MATCHING selection. Checked before
@@ -837,7 +860,10 @@ export async function runOnboarding({
     // 它为已配置面（不再显示 7 人模板的"三席可用"）。用内存中的 registry 等价
     // 于重读磁盘（内容逐字节一致），避免第二次读窗口。
     const cfg = await buildConfiguredFace(registry, probeEnv);
-    panelState = { face: "configured", rows: cfg.rows, configuredCount: cfg.count, sourceUnreadable: false };
+    // invalidCount is structurally 0 here: the built entry already passed
+    // normalizeAgent above (the shared authority), so the fresh configured
+    // face never carries a dropped-entry note.
+    panelState = { face: "configured", rows: cfg.rows, configuredCount: cfg.count, invalidCount: cfg.invalidCount, sourceUnreadable: false };
   }
 
   // --endorse-worker: amend the reliability summary, preserving everything else.
@@ -978,8 +1004,11 @@ function baseResult(partial) {
     // panelFace: 输入行来源（"template" 模板面 / "configured" 已配置面）；
     // panelConfiguredCount: 已配置面时私有 registry 的 worker 数（模板面 null）；
     // panelSourceUnreadable: 私有 registry 存在但不可读 → 降级模板面并标注。
+    // R10-C C-2：panelInvalidEntryCount = 已配置面被 normalizeAgent 剔除的条目数
+    // （模板面恒 0；行渲染只含通过共享校验权威的条目）。
     panelFace: partial.panelState?.face ?? "template",
     panelConfiguredCount: partial.panelState?.configuredCount ?? null,
+    panelInvalidEntryCount: partial.panelState?.invalidCount ?? 0,
     panelSourceUnreadable: partial.panelState?.sourceUnreadable ?? false,
     certification: partial.certification,
     writes: partial.writes,
