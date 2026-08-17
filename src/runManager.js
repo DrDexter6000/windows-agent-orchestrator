@@ -174,6 +174,54 @@ export function assertExistingDispatchCwd(input) {
   throw new DispatchCwdNotFoundError(probed.path, probed.source);
 }
 
+// R10-A: per-dispatch model override (--model <modelId> on the CLI, `model` on
+// MCP run_dispatch) — the SHAPE SSOT every boundary validates through. A model
+// id is deliberately NOT the canonicalAgentId alphabet (real ids are
+// heterogeneous across providers: "glm-5.3", "gpt-5.6-sol-xhigh",
+// "zhipuai/glm-5.2"), so the contract is the minimal structural set the
+// transports require: a non-empty bounded string that does not START with "--"
+// and contains no whitespace/control characters. The "--" rule is load-bearing
+// for the background path exactly as canonicalAgentId discipline is for ids:
+// backgroundRunner's parseSimpleFlags treats any "--"-prefixed argv token as
+// the next FLAG, so a "--foo" value would silently split the pair and misparse
+// the rest of the runner argv. Hosting here (with the synthesis site below)
+// follows the DispatchCwdNotFoundError precedent: runDispatch.js imports this
+// downward and re-exports it so the application service keeps one SSOT, and the
+// CLI/MCP boundaries validate the same contract with zero drift. The exported
+// WIRE pattern lets the MCP zod schema serialize the identical regex into
+// tools/list (same re-use pattern as canonicalAgentId's exported pattern).
+export const MODEL_OVERRIDE_MAX = 128;
+export const MODEL_OVERRIDE_WIRE_PATTERN = "^(?!--)[^\\s\\x00-\\x1f\\x7f]+$";
+const MODEL_OVERRIDE_INVALID_TEXT =
+  "--model must be a non-empty string of at most " + MODEL_OVERRIDE_MAX + " characters, "
+  + "must not start with \"--\", and must contain no whitespace or control characters "
+  + "(the background runner treats a \"--\"-prefixed value as the next flag)";
+
+/**
+ * R10-A: closed-set structural check for a per-dispatch model override id.
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function isValidModelOverride(value) {
+  if (typeof value !== "string") return false;
+  if (value.length === 0 || value.length > MODEL_OVERRIDE_MAX) return false;
+  if (value.startsWith("--")) return false;
+  if (/[\s\x00-\x1f\x7f]/.test(value)) return false;
+  return true;
+}
+
+/**
+ * R10-A: fail-fast form of isValidModelOverride — fixed safe text, never echoes
+ * the supplied value (a malformed id could itself be an injection payload).
+ * @param {unknown} value
+ * @returns {void}
+ */
+export function assertValidModelOverride(value) {
+  if (!isValidModelOverride(value)) {
+    throw new Error("RunManager: invalid model override — " + MODEL_OVERRIDE_INVALID_TEXT);
+  }
+}
+
 // Round 4 Bundle B: thrown when a readOnly run's FORCED worktree isolation
 // cannot be established (worktree creation failed). Read-only runs refuse the
 // legacy degrade-to-source-cwd fallback (runManager.js :524-534) exactly like
@@ -393,11 +441,64 @@ export class RunManager {
     // Observed out-of-bounds writes NEVER stop/fail the run: the run reaches
     // its natural terminal state and the observation is pure presentation.
     readOnly = false,
+    // R10-A: per-dispatch model override (--model <modelId> / run_dispatch
+    // `model`) — ONE dispatch only, never persisted to the registry. When
+    // present, the agent's model policy is synthesized as
+    //   model: { ...(agent.model ?? {}), id: modelOverride }
+    // AFTER registry resolution and BEFORE validateAgentPolicy / the
+    // run.started append below — only `.id` is replaced; every sibling field
+    // (canonical contextWindow, opencode-serve providerID/variant) survives.
+    // Deliberately NOT a getAgent override: registry.getAgent shallow-merges
+    // top-level keys, so passing model there would replace the whole object
+    // and silently drop the siblings. Mutually exclusive with requireCertified
+    // (the certification matrix is recorded per provider+model — an override
+    // voids the certified combination) and with sessionReuse (a resumed
+    // provider conversation must run one model across turns); both refusals
+    // run at the very top of start, before the registry read, with zero side
+    // effects. resume() deliberately never accepts it (resume re-reads the
+    // registry; a resumed conversation must keep its registry model).
+    modelOverride = null,
     } = options;
+
+    // R10-A mutual exclusions (flag presence, value-insensitive — a value-aware
+    // "compatible override" pass would let a dispatch claim a certified
+    // provider+model combination it never proved). Both checks sit BEFORE the
+    // registry read: zero transcript, zero worktree, zero spawn. start is the
+    // authoritative single point — it covers the foreground family (run /
+    // workflow agent nodes / daemon start) AND the background family (the
+    // detached runner's --model/--require-certified both land here); the CLI
+    // re-refuses earlier for the operator's face, and dispatchRun re-refuses
+    // the reuse shape before the fork (ModelOverrideConflictError).
+    if (modelOverride !== null && modelOverride !== undefined) {
+      assertValidModelOverride(modelOverride);
+      if (requireCertified) {
+        throw new Error(
+          "RunManager.start: modelOverride is mutually exclusive with requireCertified "
+          + "(model_override_certified_conflict) — the certification matrix is recorded per "
+          + "provider+model, so a one-off override invalidates the certified combination. "
+          + "Drop the model override, or drop requireCertified.",
+        );
+      }
+      if (sessionReuse) {
+        throw new Error(
+          "RunManager.start: modelOverride is mutually exclusive with sessionReuse "
+          + "(model_override_reuse_conflict) — a provider conversation resumed across turns "
+          + "must run one model. Drop the model override, or dispatch a non-reusable agent.",
+        );
+      }
+    }
 
     const registryPath = resolve(registry ?? this.config.registry);
     const loaded = await this.readRegistry(registryPath);
-    const agent = loaded.getAgent(agentId, { cwd });
+    let agent = loaded.getAgent(agentId, { cwd });
+    // R10-A: synthesize the override (see the option comment above). The
+    // synthesized object flows through validateAgentPolicy below unchanged —
+    // zero NEW validation surface; a backend that cannot express the resulting
+    // policy refuses exactly as it would for the same registry-declared shape.
+    // For a registry entry without any model this synthesizes a bare {id}.
+    if (modelOverride !== null && modelOverride !== undefined) {
+      agent = { ...agent, model: { ...(agent.model ?? {}), id: modelOverride } };
+    }
 
     // M11-5 Package A2: obtain the backend ONCE, up front, so the role-contract
     // decision can read its CAPABILITY (supportsRoleContract) instead of branching
@@ -807,6 +908,14 @@ export class RunManager {
       ...(worktreeInfo ? { worktreePath: worktreeInfo.path, worktreeBranch: worktreeInfo.branch } : {}),
       serveUrl: agent.serveUrl,
       model: agent.model,
+      // R10-A: the EXPLICIT override fact — the Lead's own input, never a
+      // secret. `model` above already reflects the synthesized policy (the
+      // synthesis precedes this append); modelOverride lets an auditor tell
+      // "the registry was changed" apart from "one dispatch overrode it".
+      // Absent for ordinary dispatches (byte-compatible run.started payload).
+      ...(modelOverride !== null && modelOverride !== undefined
+        ? { modelOverride }
+        : {}),
       scorecardConfigured: Boolean(scorecardRules),
       ...(tagsPayload ? { tags: tagsPayload } : {}),
       ...(deliveryContext ? {

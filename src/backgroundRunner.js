@@ -78,6 +78,8 @@ function makeObjectRegistry(registryObj) {
  * @param {number} [opts.globalWaitTimeout] - server-owned global config.waitTimeout
  * @param {number} [opts.pollInterval]
  * @param {object} [opts.scorecardRules]
+ * @param {string} [opts.modelOverride] — R10-A per-dispatch model id (--model);
+ *   RunManager.start synthesizes it over the registry model policy
  * @returns {Promise<{runId, completed, failed, timedOut, error}>}
  */
 export async function runBackground(opts = {}) {
@@ -160,6 +162,15 @@ export async function runBackground(opts = {}) {
       // persists the exactly-once run.read_only_declared fact. Absent for
       // ordinary dispatch (byte-compatible).
       ...(opts.readOnly ? { readOnly: true } : {}),
+      // R10-A: thread the per-dispatch model override (--model <id> from
+      // dispatchRun's argv) so RunManager.start synthesizes model.id over the
+      // registry policy (siblings preserved) and persists the explicit
+      // modelOverride fact on run.started. Absent for ordinary dispatch
+      // (byte-compatible). The SSOT shape gate (runManager.js) forbids a
+      // "--"-prefixed value, so parseSimpleFlags restores the pair exactly.
+      ...(opts.modelOverride !== undefined && opts.modelOverride !== null
+        ? { modelOverride: opts.modelOverride }
+        : {}),
     });
   } catch (error) {
     await writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error });
@@ -364,6 +375,11 @@ export async function runMain(argv = process.argv.slice(2)) {
     // force isolation + persist the declaration fact. Absent for ordinary
     // dispatch (byte-compatible).
     readOnly: argv.includes("--read-only"),
+    // R10-A: per-dispatch model override (value flag threaded from dispatchRun
+    // --model <id>). parseSimpleFlags yields undefined when the pair is absent
+    // — the ordinary dispatch stays byte-compatible. RunManager.start owns the
+    // shape re-check (SSOT) and the synthesis.
+    modelOverride: opts.model,
   });
   // detached runner 把最终结果写 stdout 一行 JSON（供调试/日志；CLI 已返回，不依赖此）
   process.stdout.write(JSON.stringify(result) + "\n");

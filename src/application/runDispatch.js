@@ -26,7 +26,7 @@ import { readRegistry } from "../registry.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { inheritedEnvNames } from "../envPolicy.js";
 import { resolveReuseTurn, resolveLineageFirstTurn } from "./sessionReuse.js";
-import { assertExistingDispatchCwd } from "../runManager.js";
+import { assertExistingDispatchCwd, assertValidModelOverride } from "../runManager.js";
 // R7-C (C-2): application→backends is a legal DOWNWARD edge under the frozen
 // L4 layering SSOT (backends sits deeper than application). Used only to read
 // the declared preflightInvocation capability for the cwd gate below — the
@@ -46,6 +46,12 @@ import { backendFor as defaultBackendFor } from "../backends/factory.js";
 // here to keep this module's established typed-error import surface stable
 // (callers and tests import the dispatch typed errors from runDispatch.js).
 export { DispatchCwdNotFoundError } from "../runManager.js";
+// R10-A: re-export the per-dispatch model override SSOT (shape constants +
+// validator) from its core home (runManager.js — the synthesis site), keeping
+// this module's established "typed-error/SSOT import surface stable" pattern.
+// The MCP boundary imports the wire pattern from HERE, never from core
+// directly, mirroring the DispatchCwdNotFoundError precedent.
+export { isValidModelOverride, assertValidModelOverride, MODEL_OVERRIDE_MAX, MODEL_OVERRIDE_WIRE_PATTERN } from "../runManager.js";
 
 // M11-7: thrown when a worker's REQUIRED credential is missing at dispatch time.
 // Carries the missing env NAMES (never values). Callers (MCP) collapse to a
@@ -84,6 +90,30 @@ export class ReadOnlyDeliveryConflictError extends Error {
     );
     this.name = "ReadOnlyDeliveryConflictError";
     this.reasonCode = "read_only_delivery_conflict";
+  }
+}
+
+// R10-A: thrown when a per-dispatch model override is combined with a
+// provider-session reuse dispatch — EITHER shape: a reusable expert
+// (sessionReuse:"lead_workspace") or a continuable delivery lineage root.
+// Two turns of one provider-native conversation must run one model; a
+// turn-scoped override would silently split the conversation across models
+// and break the provider session contract. Mirrors the typed-error form of
+// this module (stable error.name + closed-set reasonCode + fixed actionable
+// text, no dynamic payload); the MCP adapter recognizes it by error.name and
+// collapses it to its own fixed text. Thrown BEFORE any transcript write,
+// routing-slot claim, or fork.
+export class ModelOverrideConflictError extends Error {
+  constructor(reuseShape) {
+    const shape = reuseShape === "run_lineage" ? "run_lineage" : "lead_workspace";
+    super(
+      "dispatchRun: modelOverride is mutually exclusive with provider-session reuse "
+      + `(${shape}) — a provider conversation resumed across turns must run one model. `
+      + "Drop the model override, or dispatch a non-reusable agent.",
+    );
+    this.name = "ModelOverrideConflictError";
+    this.reasonCode = "model_override_reuse_conflict";
+    this.reuseShape = shape;
   }
 }
 
@@ -270,6 +300,17 @@ export async function dispatchRun({
   // --isolate --read-only so RunManager.start forces isolation and writes the
   // exactly-once run.read_only_declared fact. Default false = byte-compatible.
   readOnly = false,
+  // R10-A: per-dispatch model override (--model <modelId> on the CLI, `model`
+  // on MCP run_dispatch) — ONE dispatch only, never persisted to the registry.
+  // Validated against the core SSOT (assertValidModelOverride) BEFORE any
+  // transcript write or fork; mutually exclusive with EITHER provider-session
+  // reuse shape (typed ModelOverrideConflictError below). Threaded to the
+  // detached runner as --model <id> (the --cwd precedent), restored by
+  // backgroundRunner's parseSimpleFlags, and applied by RunManager.start's
+  // synthesis (siblings preserved — see runManager.js). The shape gate's
+  // "--"-prefix rule is what keeps parseSimpleFlags from splitting the pair.
+  // Absent = byte-compatible dispatch (argv unchanged).
+  modelOverride = null,
 }) {
   if (!agentId || typeof agentId !== "string") {
     throw new Error("dispatchRun: agentId is required");
@@ -291,6 +332,15 @@ export async function dispatchRun({
   // ("continuable is delivery-only") naturally refuses that combination.
   if (readOnly && delivery) {
     throw new ReadOnlyDeliveryConflictError();
+  }
+
+  // R10-A: shape-validate a supplied model override BEFORE any transcript
+  // write or fork (the CLI/MCP boundaries validate the same SSOT contract —
+  // this is the service-level re-check for direct programmatic callers). A
+  // malformed id must fail-closed with zero transcripts and zero forks; the
+  // fixed text never echoes the supplied value.
+  if (modelOverride !== null && modelOverride !== undefined) {
+    assertValidModelOverride(modelOverride);
   }
 
   // M10-pre closeout: validate explicit waitTimeout BEFORE any transcript write or fork.
@@ -372,6 +422,17 @@ export async function dispatchRun({
   // is unchanged. The checks inside the reuse block below remain as
   // defense-in-depth.
   const reuseEligible = agent.sessionReuse === "lead_workspace" && !publicDelivery;
+  // R10-A: a per-dispatch model override can never ride a provider-session
+  // reuse dispatch — EITHER shape. lead_workspace: a resumed expert
+  // conversation spans turns that must run one model. run_lineage (continuable
+  // delivery root): the same contract for the lineage conversation (and
+  // run_continue later re-reads the registry without any override —
+  // runManager.js resume — so turn N+1 could not even honor the override).
+  // Refused HERE — before the routing-slot claims, transcript writes, and the
+  // fork — with the typed ModelOverrideConflictError (zero side effects).
+  if (modelOverride !== null && modelOverride !== undefined && (reuseEligible || continuable)) {
+    throw new ModelOverrideConflictError(reuseEligible ? "lead_workspace" : "run_lineage");
+  }
   if (reuseEligible) {
     if (typeof leadSession !== "string" || leadSession.length === 0) {
       throw new Error("dispatchRun: leadSession is required for a sessionReuse agent (server-owned Lead session identity)");
@@ -552,6 +613,12 @@ export async function dispatchRun({
     runnerArgs.push("--global-wait-timeout", String(globalWaitTimeout));
   }
   if (cwd) runnerArgs.push("--cwd", cwd);
+  // R10-A: thread the per-dispatch model override to the detached runner (the
+  // --cwd pair precedent). Included in the argv-length guard below by
+  // construction (the reduce covers the whole runnerArgs array).
+  if (modelOverride !== null && modelOverride !== undefined) {
+    runnerArgs.push("--model", modelOverride);
+  }
   if (scorecardRules) runnerArgs.push("--scorecard-rules", scorecardRules);
   if (scorecardMode) runnerArgs.push("--scorecard-mode", scorecardMode);
   if (requireCertified) runnerArgs.push("--require-certified");
@@ -665,6 +732,16 @@ export async function dispatchRun({
     agentId,
     state: "pending",
     transcriptPath,
+    // R10-A: the EFFECTIVE model this dispatch will run — the registry model
+    // with ONLY `.id` replaced by the override (siblings preserved, mirroring
+    // RunManager.start's synthesis over the same registry read). Advisory
+    // echo so a mistyped model id is visible at dispatch time, before the
+    // provider rejects it turns later. Present ONLY when an override was
+    // supplied; the MCP handler selects its own exact output keys, so this
+    // field never reaches the MCP wire.
+    ...(modelOverride !== null && modelOverride !== undefined
+      ? { effectiveModel: { ...(agent.model ?? {}), id: modelOverride } }
+      : {}),
     // M12-25: ROUTING REQUEST truth, derived only from the routing turn selected
     // above. Describes what dispatch requested, never provider success. Exposes
     // only the closed-set value — never the mode, opaque uuid, Lead id, or workspace.

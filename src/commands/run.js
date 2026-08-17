@@ -36,7 +36,10 @@ import { COMMAND_NAMES, RUN_USAGE_TEXT } from "../cliHelp.js";
 // M9-2A: background dispatch delegated to shared application service.
 // Round 6 Bundle R6-A (F-5-12): DeliveryCwdRequiredError is the typed refusal
 // for a --background delivery dispatch without an explicit --cwd.
-import { dispatchRun, DeliveryCwdRequiredError } from "../application/runDispatch.js";
+// R10-A: assertValidModelOverride is the core SSOT shape gate for the
+// per-dispatch --model override (hosted in runManager.js with the synthesis
+// site; re-exported by runDispatch per the typed-error precedent).
+import { dispatchRun, DeliveryCwdRequiredError, assertValidModelOverride } from "../application/runDispatch.js";
 
 function parseAgentList(args) {
   const agents = [];
@@ -181,6 +184,9 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
       readOnly: resolveReadOnlyFlag(options),
       // M9-7A: forward validated delivery request for background delivery runs.
       delivery,
+      // R10-A: per-dispatch model override (already shape-gated + certified-
+      // exclusive up in runCommand). undefined when absent = byte-compatible.
+      modelOverride: options.model,
       runnerPath,
       // M11-11C: CLI dispatch is a one-shot process — there is no stable Lead
       // session across CLI invocations, so reusable experts always start a fresh
@@ -219,6 +225,11 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
     agentId: result.agentId,
     transcript: result.transcriptPath,
     background: true,
+    // R10-A: echo the EFFECTIVE model ({...(registry model), id: override} —
+    // siblings included) so a mistyped model id is visible NOW, not turns
+    // later when the provider rejects it. Present only when --model was given
+    // (ordinary dispatches stay byte-identical).
+    ...(result.effectiveModel ? { model: result.effectiveModel } : {}),
     note: "detached runner owns lifecycle (token gate / abort / state). Poll with `status`/`tail`.",
   }, null, 2));
 }
@@ -227,6 +238,20 @@ export async function spawnCommand(args, config) {
   const { agents, options } = parseAgentList(args);
   if (options.deliverySpecFile) {
     throw new Error("delivery mode is only supported on `run`, not `spawn`");
+  }
+  // R10-A: --model is a `run`-only surface. Fail-fast refusal rather than a
+  // silent ignore: spawnCommand's single-agent background path reuses
+  // spawnBackgroundRunner, which WOULD thread the override — an explicit
+  // boundary keeps the exclusion honest (multi-seat uniform-model semantics
+  // are ambiguous, and the Owner scenario is a single dispatch). Workflow
+  // agent nodes and daemon dispatches are excluded for the same reason: a
+  // declarative surface's model belongs in the declaration itself.
+  if (options.model !== undefined) {
+    throw new Error(
+      "--model is only supported on `run`, not `spawn` "
+      + "(per-dispatch model override is a single-dispatch surface; put a persistent model "
+      + "change in the agent's registry model policy instead)",
+    );
   }
   const manager = newRunManager(config);
   // P2（M7）：单 agent spawn 不带 --wait = 后台托管（detached runner）。
@@ -341,6 +366,26 @@ export async function runCommand(args, config) {
   if (options.background && options.deliverySpecFile && !options.cwd) {
     throw new DeliveryCwdRequiredError();
   }
+  // R10-A: per-dispatch model override (--model <modelId>) — single-dispatch,
+  // never persisted to the registry. Boundary shape gate + the hard mutual
+  // exclusion with --require-certified, both BEFORE any side effect
+  // (loadDeliverySpec, loadPrompt, manager.start, dispatchRun). The
+  // authoritative start-level refusal (runManager.js) is the same semantics;
+  // this early face gives the operator the flag-level fix guidance without
+  // leaving a transcript behind. Value-insensitive by design: the
+  // certification matrix is recorded per provider+model, so ANY override —
+  // even one matching the registry id — voids the certified combination claim.
+  if (options.model !== undefined) {
+    assertValidModelOverride(options.model);
+    if (options.requireCertified) {
+      throw new Error(
+        "--model is mutually exclusive with --require-certified "
+        + "(model_override_certified_conflict): the certification matrix is recorded per "
+        + "provider+model, so a one-off override invalidates the certified combination — "
+        + "drop one of the two flags",
+      );
+    }
+  }
   // TD-103 Phase 3C-1: load and validate delivery spec before any side effects.
   const delivery = await loadDeliverySpec(options);
   // Delivery requires --isolate; reject before spawn.
@@ -399,14 +444,33 @@ export async function runCommand(args, config) {
     // isolation, fails closed without a worktree, and persists the
     // exactly-once run.read_only_declared fact.
     ...(readOnly ? { readOnly: true } : {}),
+    // R10-A: per-dispatch model override (shape-gated + certified-exclusive
+    // above). RunManager.start synthesizes it over the registry model policy
+    // (siblings preserved) and persists the explicit modelOverride fact.
+    ...(options.model !== undefined ? { modelOverride: options.model } : {}),
   });
+  // R10-A: echo the EFFECTIVE model (the synthesized agent's model — the
+  // override id plus preserved siblings) at dispatch success, BEFORE the
+  // wait: a mistyped model id is visible immediately instead of only when
+  // the provider rejects it turns later. Text format only — the JSON format
+  // carries the same fact as a structured field on the result instead, so its
+  // output stays machine-parseable.
   const format = options.format ?? "text";
+  if (options.model !== undefined && format !== "json") {
+    console.log(`effective model: ${JSON.stringify(run.agent.model)}`);
+  }
   const waitResult = await runAndWait(run, options);
   // P4 决策A：scorecard 从 transcript 的 scorecard.checked 事件取（runManager 无论通过/失败都落盘）。
   // TD-53 修复：注入前置于格式分支之前——原 json 分支 early-return 在注入之前，丢字段。
   // 现 json 与 text 两路都带 scorecard（renderRunSummary 读 waitResult.scorecard，行为不变）。
   const scorecard = await loadScorecardFromTranscript(run.transcript.filePath);
   if (scorecard) waitResult.scorecard = scorecard;
+  // R10-A: structured effective-model field for --format json (the text format
+  // got the standalone echo line above). Same synthesized object the
+  // transcript's run.started recorded.
+  if (options.model !== undefined && format === "json") {
+    waitResult.model = run.agent.model;
+  }
   if (format === "json") {
     console.log(JSON.stringify(waitResult, null, 2));
     return;

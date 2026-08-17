@@ -43,7 +43,7 @@ import {
 // lead_preflight worker enums derive from this ONE SSOT constant (same wiring
 // pattern as READ_FAILURE_REASONS); no second hand-maintained list can drift.
 import { CERTIFICATION_REASON_CODES } from "../application/certificationReasons.js";
-import { dispatchRun, ReuseBusyError, PROVIDER_SESSION_ROUTING } from "../application/runDispatch.js";
+import { dispatchRun, ReuseBusyError, PROVIDER_SESSION_ROUTING, MODEL_OVERRIDE_MAX, MODEL_OVERRIDE_WIRE_PATTERN } from "../application/runDispatch.js";
 // M12-7: Lead-authorized correction continuation. The service spawns a NEW child
 // run/transcript that resumes the parent's provider-native conversation IN the
 // parent's retained worktree. The MCP boundary resolves the workspace + Lead
@@ -458,6 +458,19 @@ const DISPATCH_READ_ONLY_DELIVERY_CONFLICT_TEXT =
   "observation declaration, never a delivery — remove the delivery block, or drop " +
   "readOnly to dispatch the delivery.";
 
+// R10-A: fixed, actionable error when a per-dispatch model override is
+// combined with a provider-session reuse dispatch (typed
+// ModelOverrideConflictError from the shared service — either shape: a
+// reusable expert or a continuable lineage root). Two turns of one
+// provider-native conversation must run one model; a turn-scoped override
+// would break the provider session contract. Closed-set reason code + fixed
+// guidance; never echoes the model id, agent id, or workspace.
+const DISPATCH_MODEL_OVERRIDE_CONFLICT_TEXT =
+  "run_dispatch refused: model_override_reuse_conflict. A per-dispatch model override " +
+  "cannot be combined with provider-session reuse (a reusable expert or a continuable " +
+  "lineage) — a conversation resumed across turns must run one model. Drop model, or " +
+  "dispatch a non-reusable agent.";
+
 // R7-C (C-4): fixed, actionable error when the dispatch's predicted working
 // directory does not exist (typed DispatchCwdNotFoundError from the R7-AB
 // layer-1 assert). This is the configuration mistake the R7-AB commit itself
@@ -584,6 +597,22 @@ const RUN_DISPATCH_INPUT = z.object({
   // the shared resolver; this field is a bounded free-form string so an unknown
   // id reaches run_dispatch_contract_check as advisory code profile_unknown.
   executionProfileId: z.string().trim().min(1).max(64).optional(),
+  // R10-A (Owner 2026-08-17): optional per-dispatch model override — the MCP
+  // counterpart of the CLI --model flag ("use codex-driven gpt-5.6-sol-xhigh
+  // for THIS review dispatch"). One dispatch only; never persisted to the
+  // registry; replaces only the registry model's `.id` (contextWindow /
+  // providerID / variant survive — the service synthesizes, never swaps). The
+  // pattern + max are the SAME SSOT constants the core validator uses
+  // (runManager.js, re-exported through runDispatch.js), so the wire contract
+  // and the service re-check cannot drift. A regex — not a .refine() — so the
+  // constraint serializes into the tools/list JSON schema (M9-2B-01).
+  // Mutually exclusive with provider-session reuse (reusable experts and
+  // continuable lineages — refused by the service with the typed
+  // ModelOverrideConflictError collapsed to its fixed text below); requireCertified
+  // is server-owned false here, so the certified-conflict door is unreachable
+  // over MCP by construction. run_dispatch_contract_check shares this schema
+  // and intentionally IGNORES the field (it advises on the delivery contract).
+  model: z.string().min(1).max(MODEL_OVERRIDE_MAX).regex(new RegExp(MODEL_OVERRIDE_WIRE_PATTERN)).optional(),
 }).strict();
 
 // M12-6 (FR-03): bounded safe workspace proof returned on a successful dispatch.
@@ -3306,7 +3335,7 @@ export function createWaoMcpServer({
       outputSchema: RUN_DISPATCH_OUTPUT,
       annotations: RUN_DISPATCH_ANNOTATIONS,
     },
-    async ({ agentId, prompt, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable, correctable, executionProfileId, readOnly }) => {
+    async ({ agentId, prompt, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable, correctable, executionProfileId, readOnly, model }) => {
       // M11-8B final: validate the requested agentId at the VERY TOP, before
       // workspace resolution or any dispatcher call. An invalid or reserved
       // ("unknown") id collapses to the fixed dispatch error immediately — the
@@ -3484,6 +3513,13 @@ export function createWaoMcpServer({
           // service pushes --isolate --read-only to the runner so
           // RunManager.start forces isolation + persists the declaration.
           ...(readOnly ? { readOnly: true } : {}),
+          // R10-A: per-dispatch model override, threaded verbatim (default
+          // absent = ordinary dispatch, byte-compatible). The wire schema
+          // already enforced the SSOT shape; the service re-refuses the reuse
+          // shapes (typed ModelOverrideConflictError → fixed text below) and
+          // pushes --model to the detached runner so RunManager.start
+          // synthesizes model.id over the registry policy.
+          ...(model !== undefined ? { modelOverride: model } : {}),
           // M12-6 (P1-A): server-proven frozen HEAD threaded internally (never
           // model-supplied). RunManager.start revalidates/pins it.
           frozenGitHead: workspaceFrozenHead,
@@ -3515,6 +3551,16 @@ export function createWaoMcpServer({
           return {
             isError: true,
             content: [{ type: "text", text: DISPATCH_READ_ONLY_DELIVERY_CONFLICT_TEXT }],
+          };
+        }
+        // R10-A: model override × provider-session reuse refused by the shared
+        // service (the registry-side reuse policy is only knowable there). The
+        // handler cannot pre-refuse it — the registry is not read at this
+        // boundary — so this collapse branch IS the model-facing face.
+        if (e && e.name === "ModelOverrideConflictError") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DISPATCH_MODEL_OVERRIDE_CONFLICT_TEXT }],
           };
         }
         // M11-11C: reusable-expert busy — fixed actionable text. The active

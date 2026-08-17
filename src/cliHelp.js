@@ -17,7 +17,7 @@ Commands:
   registry check [--registry config/agents.json] [--format json]
   registry validate [--registry FILE] [--format json]
   spawn <agentId> [agentId2 ...] --prompt "..." [--cwd DIR] [--registry FILE] [--run-dir DIR] [--wait] [--background] [--poll-interval MS] [--wait-timeout MS] [--tag key=value] [--isolate] [--scorecard-rules-file FILE]
-  run <agentId> --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate] [--require-certified] [--background] [--scorecard-rules-file FILE] [--delivery-spec-file FILE] [--read-only]
+  run <agentId> --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate] [--require-certified] [--background] [--scorecard-rules-file FILE] [--delivery-spec-file FILE] [--read-only] [--model ID]
   status <runId> [--run-dir DIR] [--format json]
   tail <runId> [--limit N] [--follow] [--run-dir DIR]
   collect <runId> [--limit N] [--cursor TOKEN] [--mode full|compact] [--final] [--format json] [--run-dir DIR]
@@ -110,6 +110,7 @@ Flags:
   --tag key=value                tag the run
   --delivery-spec-file FILE      delivery mode spec (requires --isolate; a --background delivery run also requires --cwd)
   --read-only                    declare a read-only run (advisory observation; forces --isolate; mutually exclusive with --delivery-spec-file and --no-isolate)
+  --model ID                     per-dispatch model override (one dispatch only, never written to the registry; replaces only the registry model's id — contextWindow/providerID/variant are preserved)
 
 Notes:
   - The file given to --delivery-spec-file must contain the INNER delivery object
@@ -120,5 +121,15 @@ Notes:
   - --read-only declares advisory observation, never a gate: WAO observes
     tool-reported file writes (run_activity readOnlyObservation) but never
     auto-stops or fails the run on observed writes; final judgment is the Lead's.
+  - --model VALUE must be a non-empty string of at most 128 characters, not
+    starting with "--", with no whitespace or control characters (the
+    background runner's flag parser would split a "--"-prefixed value). It is
+    mutually exclusive with --require-certified (the certification matrix is
+    recorded per provider+model, so any override voids the certified
+    combination) and with provider-session reuse agents (a resumed
+    conversation must run one model). A mistyped model id is only reported by
+    the provider when the worker starts — check the echoed "effective model"
+    in the dispatch output. --model exists only on run (not spawn/workflow/
+    daemon); a persistent model change belongs in the registry model policy.
   - --help must be the FIRST argument after run: npm run cli -- run --help
 `;

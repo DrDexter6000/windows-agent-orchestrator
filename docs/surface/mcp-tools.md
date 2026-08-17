@@ -117,6 +117,7 @@ Input:
 | correctable | boolean | no |  |
 | readOnly | boolean | no |  |
 | executionProfileId | string | no |  |
+| model | string | no |  |
 
 Output:
 
@@ -149,6 +150,7 @@ Input:
 | correctable | boolean | no |  |
 | readOnly | boolean | no |  |
 | executionProfileId | string | no |  |
+| model | string | no |  |
 
 Output:
 

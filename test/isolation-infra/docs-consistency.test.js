@@ -2805,3 +2805,60 @@ test("ADR 0023: team-roles.md 第 7 条与 onboarding 副审配置建议对齐 0
   assert.ok(ob.includes("决策 0023"), "onboarding 副审建议必须指向决策 0023");
   assert.ok(ob.includes("--panel-skip-reason"), "onboarding 副审建议必须提及 skip 登记出口");
 });
+
+// ---------------------------------------------------------------------------
+// R10-A（Owner 2026-08-17）：per-dispatch 模型覆盖（--model / run_dispatch
+// `model`）的文档权威锚。usage.md 是人读权威、docs/surface/mcp-tools.md 是
+// 生成层、src/cliHelp.js RUN_USAGE_TEXT 是 CLI 用法页——三处必须同步携带
+// （缺一处即"代码有、文档漂"，正是本文件存在的意义）。
+// ---------------------------------------------------------------------------
+
+test("R10-A: usage.md 记录 --model 用法、合成语义与两道硬互斥（人读权威）", () => {
+  const usage = read("docs/usage.md");
+  // 用法与合成语义：单次生效、不落注册表、只替换 .id、兄弟字段保留。
+  assert.ok(usage.includes("--model"), "usage.md 必须记录 --model");
+  assert.match(usage, /只替换.*\.id|replaces? only.*\.id|仅替换.*id/i,
+    "必须说明只替换 model.id（contextWindow/providerID/variant 保留）");
+  assert.match(usage, /单次生效|一次性|单次派发|one dispatch/i, "必须说明单次生效不落配置");
+  // 两道硬互斥。
+  assert.match(usage, /--model[\s\S]{0,200}--require-certified|model_override_certified_conflict/,
+    "必须记录 × --require-certified 互斥（认证矩阵按 provider+model 记）");
+  assert.match(usage, /model_override_reuse_conflict/,
+    "必须记录 × provider-session 复用互斥（闭集码）");
+  // 失败模式：打错模型名在 provider 期才报错 → 回显 effective model。
+  assert.match(usage, /effective model/, "必须记录 effective model 回显");
+  // 排除边界。
+  assert.match(usage, /spawn[\s\S]{0,120}(不支持|不携带|没有|排除|不在)|--model[\s\S]{0,160}spawn/,
+    "必须记录 spawn/workflow/daemon 排除边界");
+});
+
+test("R10-A: usage.md 事件表 run.started 行携带 modelOverride 字段（完整权威）", () => {
+  const usage = read("docs/usage.md");
+  const row = usage.split(/\r?\n/).find((l) => l.startsWith("| `run.started`"));
+  assert.ok(row, "run.started 行存在");
+  assert.ok(row.includes("modelOverride"),
+    "run.started 行必须提到 modelOverride 字段（一次性覆盖 vs 改注册表可审计区分）");
+});
+
+test("R10-A: usage.md MCP run_dispatch 节记录可选 model 参数与 reuse 互斥的固定文案", () => {
+  const usage = read("docs/usage.md");
+  const mcpSection = usage.slice(usage.indexOf("### MCP `run_dispatch`"));
+  const bounded = mcpSection.slice(0, mcpSection.indexOf("###", 1) === -1 ? mcpSection.length : mcpSection.indexOf("###", 1));
+  assert.ok(bounded.includes("`model`"), "run_dispatch 节必须记录可选 model 参数");
+  assert.match(bounded, /model_override_reuse_conflict/, "必须记录 MCP 侧 reuse 冲突固定文案");
+  assert.match(bounded, /certif/, "必须说明与认证组合声明的关系（requireCertified 是 server-owned false）");
+});
+
+test("R10-A: RUN_USAGE_TEXT 用法页与生成层同步携带 --model（CLI 面）", async () => {
+  const { RUN_USAGE_TEXT } = await import("../../src/cliHelp.js");
+  assert.match(RUN_USAGE_TEXT, /--model ID/, "用法页 flag 行");
+  assert.match(RUN_USAGE_TEXT, /mutually exclusive with --require-certified/, "认证互斥");
+  assert.match(RUN_USAGE_TEXT, /provider-session reuse/, "复用互斥");
+  assert.match(RUN_USAGE_TEXT, /effective model/, "回显失败模式说明");
+  // 生成层：mcp-tools.md 的 run_dispatch input 表必须含 model 行（生成物，
+  // 与 wire 同源——这里只锚存在性，字节由 docsSurface 守卫）。
+  const surface = read("docs/surface/mcp-tools.md");
+  const rdSection = surface.slice(surface.indexOf("## run_dispatch"));
+  const rdInput = rdSection.slice(0, rdSection.indexOf("## ", 1) === -1 ? rdSection.length : rdSection.indexOf("## ", 1));
+  assert.match(rdInput, /\| model \| string \| no \|/, "run_dispatch input 表含 model 行（可选）");
+});

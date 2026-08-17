@@ -234,6 +234,29 @@ npm run cli -- run coder_low --prompt "总结这个项目的 README"
 npm run cli -- run coder_low --prompt "..." --format json
 ```
 
+### 场景 1b：单次派发换模型（--model，R10-A）
+
+"这一次任务的会审选用 codex CLI 驱动的 gpt-5.6-sol-xhigh" 这类**单次生效、不落配置**的模型覆盖：
+
+```powershell
+# 前台：立即回显 effective model，然后照常等待并打印摘要
+npm run cli -- run coder_low --prompt "..." --model gpt-5.6-sol-xhigh
+
+# 后台：JSON 里带 model 字段（派发时刻即见，不必等 provider）
+npm run cli -- run coder_low --prompt "..." --background --model gpt-5.6-sol-xhigh
+```
+
+语义要点：
+
+- **只替换 `model.id`**：注册表里 model 是嵌套对象（canonical `{id, contextWindow?}`；opencode-serve 是 `{providerID, id, variant}`）。覆盖只改 `.id`，兄弟字段（contextWindow / providerID / variant）全部保留；注册表没有 model 的 worker 会合成出 `{id}`。合成发生在 `validateAgentPolicy` 与 `run.started` 落盘之前——策略校验照常跑合成后的对象，`run.started` 的 `model` 字段即合成后策略，并**另加显式 `modelOverride` 字段**（审计可区分"改注册表"与"一次性覆盖"）。
+- **回显 effective model**：前台 text 格式在派发成功时打印一行 `effective model: {...}`；`--format json` 把同一对象作为结果里的 `model` 字段；后台 JSON 输出带 `model` 字段。**失败模式**：WAO 不校验模型 id 是否真实存在——打错的模型名要到 provider 期（worker 启动后）才报错，回显就是让你在派发时刻立刻看见打错了什么。
+- **两道硬互斥（fail-fast，零副作用）**：
+  1. `--model` × `--require-certified`（闭集码 `model_override_certified_conflict`）：无条件互斥——认证矩阵按 provider+model 组合记录，任何覆盖（即使值与注册表一致）都使"已认证组合"声明失效。CLI 在 argv 边界早拒；`RunManager.start` 顶部作权威拒绝（前台/后台/workflow/daemon 全通道同一语义）。
+  2. `--model` × provider-session 复用派发（闭集码 `model_override_reuse_conflict`，typed `ModelOverrideConflictError`）：reusable expert（`sessionReuse: "lead_workspace"`）与 continuable delivery 谱系根两形状都拒——跨回合续用的 provider 会话必须跑同一个模型（resume 重新读注册表、不带覆盖，两回合模型不一致会破坏 provider 会话契约）。dispatchRun 在路由槽/transcript/fork 之前拒绝。
+- **正交放行**：`--model` × `--read-only` 可同用（金丝雀换模型试跑是合理用法）；`--model` × `--delivery-spec-file`（及 MCP `delivery` 块）放行，但注意**该 run 的认证组合声明失效**——reliability 认证按注册表的 provider+model 组合记录，覆盖后的组合未经认证；override 事实已由 `run.started.modelOverride` 入 transcript 供审计。
+- **形状门**（对齐 canonicalAgentId 纪律）：非空 string、长度 ≤128、不以 `--` 开头、不含空白/控制字符。`--` 前缀规则是承重的——后台 runner 的 `parseSimpleFlags` 会把 `--` 开头的值当下一个 flag，值对会静默断裂。违规以固定文案 fail-fast（不回显原值）。MCP `run_dispatch` 的 `model` 参数走同一 SSOT（wire schema 正则与核心校验器同源）。
+- **排除边界**：`--model` 只存在于 `run`（含 `--background`）。`spawn` 显式拒绝（多席统一模型语义混浊，Owner 场景是单派发）；workflow agent 节点与 daemon 派发不解析该 flag——声明式表面的模型应写进声明本身（注册表 model 策略）。持久换模型 = 改注册表，不是加 flag。
+
 ### 场景 2：后台跑（fire-and-forget）
 
 ```powershell
@@ -435,7 +458,7 @@ npm run cli -- daemon stop
 
 | 事件 | 含义 | 阶段 |
 |------|------|------|
-| `run.started` | run 创建（含 backend/cwd/model/worktreePath） | M0 |
+| `run.started` | run 创建（含 backend/cwd/model/worktreePath；R10-A 起：带 `--model`/`model` 覆盖的派发另含显式 `modelOverride` 字段，`model` 为合成后策略——只替换 `.id`，兄弟字段保留） | M0 |
 | `run.state_change` | 状态转移（from/to/reason） | M0 |
 | `session.created` | backend session 建立 | M0 |
 | `prompt.sent` | prompt 投递（含完整 prompt 文本） | M0 |
@@ -674,6 +697,8 @@ M9-7A 起支持可选 `delivery` 块（嵌套形状以 wire 为权威），用�
 **M12-7 continuable 续谱根（delivery-only 可选）**：`run_dispatch` 顶层可带 `"continuable": true`（与 `delivery` 同级，不在 delivery 块内），把这次 delivery 标记为一条**可续谱系（continuable lineage）的根**。dispatch 会以 `run_lineage` / `turn:first` 建立一个 provider-native 会话（opaque uuid 由 server-owned Lead session + canonical workspace + canonical agentId + 该 run 的 rootRunId 派生），保留 retained worktree。这样日后 Lead 若审阅该终态 delivery、发现窄缺陷，可用 `run_continue` 对其续 ONE 修正回合——复用同一 retained worktree、以 `turn:resume` 续同一 provider 会话（同一 opaque uuid）。`continuable` 默认 `false`，省略时与普通 delivery dispatch 字节兼容；`continuable:true` 必须配 `delivery`（service 强制 delivery-only，否则 fail-closed）。WAO 从不在 dispatch 时推断或触发任何续跑/修正——是否续跑完全由 Lead 事后显式调用 `run_continue` 决定。
 
 **R4 只读声明（可选，`readOnly`）**：`run_dispatch` 顶层可带 `"readOnly": true`（CLI 等价 `run --read-only`），把这次 run 声明为**只读**。声明链路是"声明 → 强制隔离 → 观察"：`readOnly` 强制 persistent worktree 隔离（worktree 创建失败时 fail-closed 拒绝派发——typed `read_only_worktree_required`，**不走**普通 run 的降级原 cwd 路径），start 时恰一次写入 `run.read_only_declared` durable 事实（见 §三事件表），之后 `run_activity` 在快照含该声明时附带 advisory `readOnlyObservation`（见 `run_activity` 节）。`readOnly` 与 `delivery` 块互斥（固定拒绝文案携带闭集理由码 `read_only_delivery_conflict`；CLI 侧 `--read-only` × `--delivery-spec-file` 同样拒绝）；与 `correctable` 可共存（correction 是 Lead 显式指令，声明与观察并存）；`readOnly` × `continuable` 被既有 delivery-only 门自然拒绝。**诚实上限（三句）**：① 观察基于 worker 工具上报的 `file_written` 证据（`no_writes_observed` 的含义是"未观察到写"，**不是**"没写"），不是全知监控；② 强制隔离与越界侦测是**侦测机制**，不是 OS 沙箱——隔离降低误写面，但不能物理阻止越界写；③ 观察是 **advisory 非门**——观察到越界写不会自动停止、不会失败、不改写 run 的自然终态，终审归 Lead。另注意与 `wao ask` 的 prompt 级只读边界（快捷派工默认注入的只读提示词）区分：那是**不可验证、无持久事实**的 prompt 约定；控制面 `readOnly` 声明则有 durable 事实事件 + 基于上报证据的观察投影。
+
+**R10-A 单次模型覆盖（可选，`model`）**：`run_dispatch` 顶层可带 `model`（`"model": "<modelId>"`，CLI 等价 `run --model`，完整语义见 §二场景 1b）——单次生效、不落注册表、只替换注册表 model 的 `.id`（contextWindow/providerID/variant 保留），wire schema 与核心校验器同源（非空、≤128、不以 `--` 开头、无空白/控制字符）。互斥与放行：× provider-session 复用（reusable expert / continuable 谱系根）以固定文案拒绝（闭集码 `model_override_reuse_conflict`——"A per-dispatch model override cannot be combined with provider-session reuse … must run one model"）；认证互斥（closed-set `model_override_certified_conflict`）在 MCP 侧不可达——`requireCertified` 恒为 server-owned `false`，认证矩阵（provider+model 组合的 certified 记录）只在 CLI 显式 `--require-certified` 时被求值；× `delivery` 块放行，但**该 run 的认证组合声明失效**（认证按注册表 provider+model 组合记录，覆盖后的组合未经认证）——override 事实由 `run.started.modelOverride` 入 transcript 供审计。派发成功不回显 effective model（MCP 输出 schema 冻结为闭集字段）；打错的模型名要到 provider 期才报错，需即时确认时读 transcript 的 `run.started.model`。
 
 **verification 环境合同（M12-6 FR-05/FR-06）**：Lead 可选声明 `verificationSetupCommands: string[]`——在 assertion 命令（`verificationCommands`）之前顺序执行的"环境准备命令"（如 `npm ci` 安装依赖、生成构建产物）。setup 与 assertion 分开验证、持久化与投影：setup 失败投影为闭集 `setup_failed` / `setup_timeout` / `setup_environment_error`，**绝不**伪装成 assertion 的 `command_failed`，不泄漏命令体/路径/stderr。每条 setup 与每条 assertion 之后都重做 exact delivery commit / 受跟踪工件证明，任何 tracked artifact 或 lockfile 漂移 = `artifact_mutated`（setup 漂移时 assertion 不执行）。exact-artifact verifier 运行在**独立的 per-attempt 临时环境**：每次 setup / assertion 命令各创建唯一 temp 目录并注入 `TMP` / `TEMP` / `TMPDIR`，两个 attempt 不复用、不复用 worker temp，仅持久化安全布尔事实（不含绝对路径）。**依赖不继承**：selected / worker worktree 的 `node_modules` 等 ignored / untracked 依赖**不会**自动出现在 exact verifier 环境——需要 Lead 声明 `verificationSetupCommands` 来准备。
 

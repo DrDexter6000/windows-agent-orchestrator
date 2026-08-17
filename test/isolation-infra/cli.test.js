@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseOptions, loadPrompt, runAndWait, buildDashboard, runsDashboardCommand, runCommand, statusCommand, collectCommand, resolveTargetCwd } from "../../src/cli.js";
 import { readTranscript, findState } from "../../src/transcript.js";
+import { spawnCommand } from "../../src/commands/run.js";
 import { rmrfRetry, sleepSync } from "../_rmrfHelper.mjs";
 // Round2-AB（friction 2026-08-15 #1/#2/#3）：COMMAND_NAMES 关系守卫 + run --help 用法页。
 import { COMMAND_NAMES, HELP_TEXT } from "../../src/cliHelp.js";
@@ -3313,5 +3314,249 @@ test("R5 P0-1: registry 解析失败 → WARN（DEGRADED）而非 INFO（HEALTHY
     assert.equal(result.status, 0, "WARN 不致 exit 1（advisory）");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// R10-A（Owner 2026-08-17）：per-dispatch 模型覆盖（--model <modelId>）。
+// 单次生效、不落注册表；只替换 registry model 的 .id（contextWindow 等
+// 兄弟字段保留）。前台/后台两条路径都必须生效；两道硬互斥 fail-fast；
+// 形状门对齐 canonicalAgentId 纪律（"--" 前缀会打断 runner 的 flag 解析）。
+// ---------------------------------------------------------------------------
+
+// R10-A 前台共用夹具：注入 backend（捕获 spawn 收到的合成 model）+ 原生 readRegistry。
+function makeModelOverrideFixture(dir) {
+  const spawnedModels = [];
+  const fakeBackend = {
+    validateAgentPolicy(agent) {
+      assert.ok(agent.model && typeof agent.model.id === "string",
+        "synthesized model reaches the ordinary policy validation surface");
+    },
+    async spawn(agent) {
+      spawnedModels.push(agent.model);
+      return {
+        backend: "claude-code",
+        backendSessionId: "s_r10a",
+        messageId: "m_r10a",
+        admittedSeq: 1,
+        async *events() {
+          yield { kind: "assistant", role: "assistant", parts: [{ type: "text", text: "done" }] };
+          yield { kind: "done", reason: "completed" };
+        },
+        abort: async () => {},
+        isAlive: () => false,
+      };
+    },
+  };
+  const readRegistry = async () => ({
+    getAgent(id, overrides = {}) {
+      return { id, backend: "claude-code", cwd: dir, model: { id: "glm-5.3", contextWindow: 1000000 }, ...overrides };
+    },
+    listAgents() { return []; },
+  });
+  const config = {
+    registry: "x", runDir: dir, pollInterval: 10, waitTimeout: 5000,
+    timeout: 5000, retries: 0, backendFor: () => fakeBackend, readRegistry,
+  };
+  return { config, spawnedModels };
+}
+
+test("R10-A-CLI-1: run --model 前台 → start 收到合成 model（contextWindow 保留）+ run.started 含 modelOverride + 回显 effective model", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r10a-fg-"));
+  try {
+    const { config, spawnedModels } = makeModelOverrideFixture(dir);
+    const out = await captureLog(async () => {
+      await runCommand([
+        "claude_worker", "--prompt", "hi", "--run-dir", dir, "--model", "gpt-5.6-sol-xhigh",
+      ], config);
+    });
+    // start 收到的（并传给 spawn 的）model：id 被替换、contextWindow 保留——
+    // GLM [1m] 形状丢窗口在这里必须红。
+    assert.deepEqual(spawnedModels, [{ id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 }],
+      "synthesized policy: only .id replaced, siblings preserved");
+    // 派发成功输出回显 effective model（打错的模型名立刻可见）。
+    assert.match(out, /effective model: \{"id":"gpt-5\.6-sol-xhigh","contextWindow":1000000\}/,
+      "text format echoes the effective model at dispatch success");
+    // transcript 事实：run.started.model = 合成后策略 + 显式 modelOverride 字段。
+    const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+    assert.equal(files.length, 1, "one run transcript");
+    const events = await readTranscript(join(dir, files[0]));
+    const started = events.find((e) => e.type === "run.started");
+    assert.deepEqual(started.model, { id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 },
+      "run.started.model reflects the synthesized policy");
+    assert.equal(started.modelOverride, "gpt-5.6-sol-xhigh",
+      "run.started carries the explicit override fact (one-off vs registry change)");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R10-A-CLI-2: run --model --format json → 结构化 model 字段（无散行，输出保持可解析）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r10a-fg-json-"));
+  try {
+    const { config } = makeModelOverrideFixture(dir);
+    const out = await captureLog(async () => {
+      await runCommand([
+        "claude_worker", "--prompt", "hi", "--run-dir", dir, "--format", "json", "--model", "gpt-5.6-sol-xhigh",
+      ], config);
+    });
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.completed, true, "mock run 应 completed");
+    assert.deepEqual(parsed.model, { id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 },
+      "json format carries the structured effective model");
+    assert.doesNotMatch(out, /^effective model:/m, "json 分支不打印散行（保持机器可解析）");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R10-A-CLI-3: 无 --model 的前台 run 字节不变（无回显行、无 model 字段、run.started 无 modelOverride）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r10a-fg-none-"));
+  try {
+    const { config } = makeModelOverrideFixture(dir);
+    const out = await captureLog(async () => {
+      await runCommand(["claude_worker", "--prompt", "hi", "--run-dir", dir], config);
+    });
+    assert.doesNotMatch(out, /effective model/, "无覆盖时无回显行");
+    const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+    const events = await readTranscript(join(dir, files[0]));
+    const started = events.find((e) => e.type === "run.started");
+    assert.equal("modelOverride" in started, false, "run.started payload 保持原形状");
+    assert.deepEqual(started.model, { id: "glm-5.3", contextWindow: 1000000 }, "registry 原策略原样落盘");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R10-A-CLI-4: --model 形状门（空/布尔/-- 前缀/空白/超长）→ 固定文案 fail-fast", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r10a-gate-"));
+  try {
+    const { config } = makeModelOverrideFixture(dir);
+    const badArgvs = [
+      ["--model"],                       // 裸 flag → parseOptions 给 true
+      ["--model", "--cwd"],              // 值位被下一个 flag 占据 → true
+      ["--model", "--next-flag"],        // 同上（runner 会解析断裂的形状）
+      ["--model", "has space"],          // 空白
+      ["--model", "x".repeat(129)],      // 超长
+    ];
+    for (const extra of badArgvs) {
+      await assert.rejects(
+        () => runCommand(["claude_worker", "--prompt", "hi", "--run-dir", dir, ...extra], config),
+        (e) => {
+          assert.match(e.message, /--model must be a non-empty string of at most 128 characters/,
+            `固定文案（${extra.join(" ")}）`);
+          assert.match(e.message, /must not start with "--"/, "文案说明 -- 前缀规则");
+          assert.doesNotMatch(e.message, /next-flag/, "不回显原值");
+          return true;
+        },
+      );
+    }
+    assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".jsonl")), [], "零 transcript（全部在副作用前拒绝）");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R10-A-CLI-5: --model × --require-certified → 无条件互斥 fail-fast（闭集码文案）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r10a-cert-"));
+  try {
+    const { config } = makeModelOverrideFixture(dir);
+    await assert.rejects(
+      () => runCommand([
+        "claude_worker", "--prompt", "hi", "--run-dir", dir,
+        "--model", "glm-5.3", "--require-certified",
+      ], config),
+      (e) => {
+        assert.match(e.message, /model_override_certified_conflict/, "闭集理由码");
+        assert.match(e.message, /certification matrix is recorded per provider\+model/, "说明互斥理由");
+        assert.match(e.message, /drop one of the two flags/i, "修复指引");
+        return true;
+      },
+    );
+    // 值感知放行被明确排除：即使 override 与 registry id 完全一致也拒（flag 存在即拒）。
+    await assert.rejects(
+      () => runCommand([
+        "claude_worker", "--prompt", "hi", "--run-dir", dir,
+        "--model", "glm-5.3", "--require-certified",
+      ], config),
+      /model_override_certified_conflict/,
+    );
+    assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".jsonl")), [], "零 transcript");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R10-A-CLI-6: spawn --model → 明确拒绝（--model 是 run 专属表面）", async () => {
+  await assert.rejects(
+    () => spawnCommand(["researcher", "--prompt", "hi", "--model", "glm-5.3"], {}),
+    (e) => {
+      assert.match(e.message, /--model is only supported on `run`, not `spawn`/);
+      assert.match(e.message, /registry model policy/, "指引持久化模型应改注册表");
+      return true;
+    },
+  );
+});
+
+test("R10-A-CLI-7: run --help 用法页含 --model（形状门 + 两道互斥 + 失败模式）", async () => {
+  const out = await captureLog(() => runCommand(["--help"], {}));
+  assert.match(out, /--model ID/, "flag 行存在");
+  assert.match(out, /not\s+starting with "--"/, "形状门说明");
+  assert.match(out, /mutually exclusive with --require-certified/, "认证互斥说明");
+  assert.match(out, /mutually exclusive with.*provider-session reuse|provider-session reuse/, "复用互斥说明");
+  assert.match(out, /effective model/, "回显说明（打错模型名的失败模式）");
+});
+
+test("R10-A-CLI-8: run --background --model 全链 — CLI JSON 回显 + runner→start 合成落 transcript", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r10a-bg-"));
+  try {
+    // 不存在的 binary：detached runner 真实 fork（既有 TD-54/WF-6 模式），
+    // 但 worker 在 spawn 即失败——零 provider、零 token。
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        bg_mo: {
+          backend: "claude-code",
+          binary: "nonexistent-binary-r10a",
+          cwd: dir,
+          model: { id: "base-model" },
+        },
+      },
+    }), "utf8");
+    const runDir = join(dir, "runs");
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "run", "bg_mo",
+      "--prompt", "x",
+      "--background",
+      "--model", "gpt-5.6-sol-xhigh",
+      "--registry", registryPath,
+      "--run-dir", runDir,
+      "--wait-timeout", "2000",
+    ], { cwd: process.cwd(), encoding: "utf8", timeout: 20000 });
+
+    assert.equal(result.status, 0, `background dispatch 应立即返回 JSON: ${result.stderr}`);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.background, true);
+    assert.deepEqual(parsed.model, { id: "gpt-5.6-sol-xhigh" },
+      "后台 JSON 回显 effective model（dispatch 时刻可见）");
+
+    // 等 runner 把 run 推到终态（binary 不存在 → spawn_error → failed）。
+    const transcriptPath = join(runDir, `${parsed.runId}.jsonl`);
+    let events = [];
+    for (let i = 0; i < 50; i += 1) {
+      if (existsSync(transcriptPath)) {
+        events = await readTranscript(transcriptPath);
+        if (["failed", "completed", "timed_out"].includes(findState(events))) break;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(events.length > 0, "runner 必须写 transcript");
+    assert.equal(findState(events), "failed", "不存在 binary 应快速 failed");
+    const started = events.find((e) => e.type === "run.started");
+    assert.deepEqual(started.model, { id: "gpt-5.6-sol-xhigh" },
+      "CLI→dispatchRun --model argv→backgroundRunner 解析→RunManager.start 合成，全链落地");
+    assert.equal(started.modelOverride, "gpt-5.6-sol-xhigh", "run.started 携带显式 override 事实");
+  } finally {
+    rmrfRetry(dir);
   }
 });

@@ -47,6 +47,13 @@
 //      the runDispatch export IS the shared SSOT class (CE-12).
 //   7. Usage page         — RUN_USAGE_TEXT documents the existence requirement
 //      on the --cwd line (CE-9).
+//   11. R10-A model override — per-dispatch --model threading + refusals at
+//      the dispatch service / detached runner / RunManager.start authorities:
+//      argv pair + effectiveModel echo (MO-1), byte-compat without the flag
+//      (MO-2), SSOT shape gate (MO-3), reuse/lineage typed conflict with zero
+//      side effects (MO-4/MO-5), the runner→start synthesis chain (MO-6),
+//      start-level authoritative refusals (MO-7), sibling-field preservation
+//      incl. opencode-serve and no-model shapes (MO-8).
 //
 // Pure group: temp fixtures under os.tmpdir(), fakeSpawn injection, zero git,
 // zero real dispatch, zero provider token. The only real subprocess is the CLI
@@ -60,7 +67,10 @@ import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { dispatchRun, DispatchCwdNotFoundError, SessionReuseWorkspaceRequiredError } from "../../src/application/runDispatch.js";
+import { readTranscript } from "../../src/transcript.js";
+import { RunManager } from "../../src/runManager.js";
+import { runBackground } from "../../src/backgroundRunner.js";
+import { dispatchRun, DispatchCwdNotFoundError, SessionReuseWorkspaceRequiredError, ModelOverrideConflictError } from "../../src/application/runDispatch.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -583,6 +593,370 @@ test("CE-14: sessionReuse agent + NO explicit cwd + nonexistent registry cwd →
     assert.equal(existsSync(join(runDir, ".session-reuse")), false, "no sessionReuse routing slot claimed (hoist precedes resolveReuseTurn)");
     assert.deepEqual(listTranscripts(runDir), [], "zero transcripts");
     assert.equal(calls.length, 0, "zero forks");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
+// 11. R10-A — per-dispatch model override (--model / run_dispatch `model`)
+//
+// Owner decision 2026-08-17: a single-dispatch, never-persisted model id
+// override. Design invariants pinned here:
+//   - the override replaces ONLY model.id; siblings (contextWindow /
+//     providerID / variant) survive the synthesis (coder_low breakpoint E);
+//   - the background chain threads it CLI → dispatchRun --model argv →
+//     backgroundRunner parseSimpleFlags → RunManager.start synthesis;
+//   - two hard mutual exclusions refuse fail-fast with ZERO side effects:
+//     × requireCertified (cert matrix is per provider+model) and × either
+//     provider-session reuse shape (one conversation, one model);
+//   - the shape SSOT (runManager.js) is enforced at every boundary because
+//     a "--"-prefixed value would split parseSimpleFlags' flag pair.
+// =====================================================================
+
+const MODEL_OVERRIDE_INVALID_RE = /--model must be a non-empty string of at most 128 characters/;
+
+test("MO-1: dispatchRun modelOverride → runner argv carries the --model pair; effectiveModel echo preserves siblings", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mo1-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, {
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5.3", contextWindow: 1000000 } },
+    });
+    const runDir = join(dir, "runs");
+    const result = await dispatchRun({
+      agentId: "coder_low",
+      prompt: "x",
+      registryPath,
+      runDir,
+      modelOverride: "gpt-5.6-sol-xhigh",
+      spawnFn: fakeSpawn,
+      userEnvReader: NO_ENV_READER,
+    });
+    assert.equal(result.accepted, true);
+    assert.equal(calls.length, 1, "detached runner forked exactly once");
+    const modelIdx = calls[0].args.indexOf("--model");
+    assert.ok(modelIdx >= 0, "runner argv carries --model");
+    assert.equal(calls[0].args[modelIdx + 1], "gpt-5.6-sol-xhigh", "threaded verbatim");
+    // Effective model echo: id replaced, contextWindow (the GLM [1m] shape)
+    // PRESERVED — a shallow getAgent-style swap would drop it and go red here.
+    assert.deepEqual(result.effectiveModel, { id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 });
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("MO-2: dispatchRun WITHOUT modelOverride stays byte-compatible (no --model argv, no effectiveModel)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mo2-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, {
+      coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5.3" } },
+    });
+    const result = await dispatchRun({
+      agentId: "coder_low",
+      prompt: "x",
+      registryPath,
+      runDir: join(dir, "runs"),
+      spawnFn: fakeSpawn,
+      userEnvReader: NO_ENV_READER,
+    });
+    assert.equal(result.accepted, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].args.includes("--model"), false, "no --model in the ordinary dispatch argv");
+    assert.equal("effectiveModel" in result, false, "no effectiveModel field on the ordinary dispatch result");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("MO-3: dispatchRun re-checks the SSOT shape gate — bad ids refuse fixed-text, zero transcript, zero fork", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mo3-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const runDir = join(dir, "runs");
+    for (const bad of ["--next-flag", "has space", "", "x".repeat(129), true, { id: "x" }]) {
+      await assert.rejects(
+        () => dispatchRun({
+          agentId: "coder_low",
+          prompt: "x",
+          registryPath,
+          runDir,
+          modelOverride: bad,
+          spawnFn: fakeSpawn,
+          userEnvReader: NO_ENV_READER,
+        }),
+        (e) => {
+          assert.match(e.message, MODEL_OVERRIDE_INVALID_RE, `fixed safe text for ${JSON.stringify(bad)}`);
+          assert.doesNotMatch(e.message, /next-flag/, "never echoes the supplied value");
+          return true;
+        },
+      );
+    }
+    assert.deepEqual(listTranscripts(runDir), [], "zero transcripts across all refusals");
+    assert.equal(calls.length, 0, "zero forks");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("MO-4: lead_workspace reuse agent × modelOverride → typed ModelOverrideConflictError BEFORE any slot/transcript/fork", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mo4-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, {
+      researcher: { backend: "claude-code", cwd: dir, sessionReuse: "lead_workspace" },
+    });
+    const runDir = join(dir, "runs");
+    await assert.rejects(
+      () => dispatchRun({
+        agentId: "researcher",
+        prompt: "q",
+        registryPath,
+        runDir,
+        cwd: dir,
+        leadSession: "lead-MO4",
+        modelOverride: "glm-5.3",
+        spawnFn: fakeSpawn,
+        userEnvReader: NO_ENV_READER,
+      }),
+      (e) => {
+        assert.ok(e instanceof ModelOverrideConflictError, "the typed conflict error owns this face");
+        assert.equal(e.name, "ModelOverrideConflictError");
+        assert.equal(e.reasonCode, "model_override_reuse_conflict", "closed-set reason code");
+        assert.equal(e.reuseShape, "lead_workspace", "carries the reuse shape");
+        assert.match(e.message, /mutually exclusive with provider-session reuse/);
+        return true;
+      },
+    );
+    assert.equal(existsSync(join(runDir, ".session-reuse")), false, "no reuse routing slot claimed");
+    assert.deepEqual(listTranscripts(runDir), [], "zero transcripts");
+    assert.equal(calls.length, 0, "zero forks");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("MO-5: continuable delivery root × modelOverride → typed conflict (run_lineage), zero transcript, zero fork", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mo5-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const runDir = join(dir, "runs");
+    await assert.rejects(
+      () => dispatchRun({
+        agentId: "coder_low",
+        prompt: "q",
+        registryPath,
+        runDir,
+        cwd: dir,
+        leadSession: "lead-MO5",
+        continuable: true,
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["npm test"] },
+        modelOverride: "glm-5.3",
+        spawnFn: fakeSpawn,
+        userEnvReader: NO_ENV_READER,
+        // capability seam: only the supportsSessionReuse boolean is read
+        // before the refusal fires
+        backendFor: () => ({ supportsSessionReuse: true }),
+      }),
+      (e) => {
+        assert.equal(e.name, "ModelOverrideConflictError");
+        assert.equal(e.reuseShape, "run_lineage", "the lineage shape is named");
+        return true;
+      },
+    );
+    assert.equal(existsSync(join(runDir, ".session-reuse")), false, "no lineage slot claimed");
+    assert.deepEqual(listTranscripts(runDir), [], "zero transcripts");
+    assert.equal(calls.length, 0, "zero forks");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("MO-6: runBackground threads modelOverride → RunManager.start synthesis; run.started carries model + modelOverride", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mo6-"));
+  const runDir = join(dir, "runs");
+  try {
+    const spawnedModels = [];
+    const fakeBackend = {
+      validateAgentPolicy(agent) {
+        // The synthesized policy MUST reach the ordinary validation surface —
+        // a no-model registry entry synthesizes a bare {id}, which flips
+        // hasStructuredPolicy true. Receiving it here proves the synthesis
+        // happened BEFORE validateAgentPolicy.
+        assert.ok(agent.model && typeof agent.model.id === "string", "synthesized model present at policy validation");
+      },
+      async spawn(agent) {
+        spawnedModels.push(agent.model);
+        return {
+          backend: "claude-code",
+          backendSessionId: "s_mo6",
+          messageId: "m_mo6",
+          admittedSeq: 1,
+          async *events() {
+            yield { kind: "done", reason: "completed" };
+          },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+    };
+    const result = await runBackground({
+      agentId: "mo_worker",
+      prompt: "x",
+      registry: { agents: { mo_worker: { backend: "claude-code", cwd: dir, model: { id: "glm-5.3", contextWindow: 1000000 } } } },
+      runDir,
+      modelOverride: "gpt-5.6-sol-xhigh",
+      backendFor: () => fakeBackend,
+      waitTimeout: 3000,
+      pollInterval: 10,
+    });
+    assert.equal(result.completed, true, `run completes (error: ${result.error})`);
+    assert.deepEqual(spawnedModels, [{ id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 }],
+      "the spawn authority received the synthesized policy — id replaced, contextWindow preserved");
+    const events = await readTranscript(join(runDir, `${result.runId}.jsonl`));
+    const started = events.find((e) => e.type === "run.started");
+    assert.deepEqual(started.model, { id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 },
+      "run.started.model reflects the synthesized policy (append after synthesis)");
+    assert.equal(started.modelOverride, "gpt-5.6-sol-xhigh",
+      "run.started carries the EXPLICIT override fact (auditable one-off vs registry change)");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("MO-6b: runBackground WITHOUT modelOverride stays byte-compatible (run.started has no modelOverride field)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mo6b-"));
+  const runDir = join(dir, "runs");
+  try {
+    const fakeBackend = {
+      // the registry entry declares a model policy, so the (fake) backend must
+      // declare the ordinary validation capability — pre-existing semantics,
+      // unchanged by R10-A (no synthesis happens without the override).
+      validateAgentPolicy() {},
+      async spawn(agent) {
+        return {
+          backend: "claude-code",
+          backendSessionId: "s_mo6b",
+          messageId: "m_mo6b",
+          admittedSeq: 1,
+          async *events() {
+            yield { kind: "done", reason: "completed" };
+          },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+    };
+    const result = await runBackground({
+      agentId: "mo_worker",
+      prompt: "x",
+      registry: { agents: { mo_worker: { backend: "claude-code", cwd: dir, model: { id: "glm-5.3" } } } },
+      runDir,
+      backendFor: () => fakeBackend,
+      waitTimeout: 3000,
+      pollInterval: 10,
+    });
+    assert.equal(result.completed, true, `run completes (error: ${result.error})`);
+    const events = await readTranscript(join(runDir, `${result.runId}.jsonl`));
+    const started = events.find((e) => e.type === "run.started");
+    assert.equal("modelOverride" in started, false, "ordinary dispatches keep the run.started payload byte-shape");
+    assert.deepEqual(started.model, { id: "glm-5.3" });
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("MO-7: RunManager.start authoritative refusals — certified conflict, reuse conflict, and the shape gate, all zero-side-effect", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mo7-"));
+  try {
+    const runDir = join(dir, "runs");
+    const manager = new RunManager({
+      config: { registry: "x", runDir, pollInterval: 10, waitTimeout: 3000 },
+      readRegistry: async () => ({
+        getAgent: (id) => ({ id, backend: "claude-code", cwd: dir, model: { id: "base-id" } }),
+        listAgents: () => [],
+      }),
+      transcriptDir: runDir,
+      backendFor: () => ({ validateAgentPolicy() {} }),
+    });
+    await assert.rejects(
+      () => manager.start("a", { prompt: "p", modelOverride: "x-id", requireCertified: true }),
+      (e) => {
+        assert.match(e.message, /model_override_certified_conflict/, "closed-set certified-conflict code");
+        assert.match(e.message, /certification matrix is recorded per provider\+model/, "states the why");
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => manager.start("a", {
+        prompt: "p",
+        modelOverride: "x-id",
+        sessionReuse: { mode: "lead_workspace", opaqueUuid: "u", turn: "first" },
+      }),
+      (e) => {
+        assert.match(e.message, /model_override_reuse_conflict/, "closed-set reuse-conflict code");
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => manager.start("a", { prompt: "p", modelOverride: "--bad" }),
+      MODEL_OVERRIDE_INVALID_RE,
+    );
+    assert.deepEqual(listTranscripts(runDir), [], "all three refusals precede every side effect (zero transcripts)");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("MO-8: sibling preservation — opencode-serve {providerID,id,variant} and the no-model tester shape", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mo8-"));
+  try {
+    const runDir = join(dir, "runs");
+    const spawnedModels = [];
+    const fakeBackend = {
+      validateAgentPolicy() {},
+      async spawn(agent) {
+        spawnedModels.push(agent.model);
+        return {
+          backend: "claude-code",
+          backendSessionId: "s_mo8",
+          messageId: "m_mo8",
+          admittedSeq: 1,
+          async *events() {
+            yield { kind: "done", reason: "completed" };
+          },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+    };
+    const makeManager = (agentEntry) => new RunManager({
+      config: { registry: "x", runDir, pollInterval: 10, waitTimeout: 3000 },
+      readRegistry: async () => ({ getAgent: (id) => ({ id, ...agentEntry }), listAgents: () => [] }),
+      transcriptDir: runDir,
+      backendFor: () => fakeBackend,
+    });
+
+    // opencode-serve legacy model shape: providerID + variant survive the
+    // id replacement (a whole-object swap would silently drop them).
+    await makeManager({
+      backend: "opencode-serve",
+      serveUrl: "http://127.0.0.1:4297",
+      cwd: dir,
+      model: { providerID: "zhipuai-coding-plan", id: "glm-5.2", variant: "stable" },
+    }).start("a", { prompt: "p", modelOverride: "glm-5.3" });
+    assert.deepEqual(
+      spawnedModels.at(-1),
+      { providerID: "zhipuai-coding-plan", id: "glm-5.3", variant: "stable" },
+      "opencode-serve shape: only .id replaced, providerID/variant preserved",
+    );
+
+    // tester shape (registry entry without any model): synthesizes a bare {id}.
+    await makeManager({ backend: "claude-code", cwd: dir }).start("a", { prompt: "p", modelOverride: "probe-model" });
+    assert.deepEqual(spawnedModels.at(-1), { id: "probe-model" }, "no-model entry synthesizes {id: override}");
   } finally {
     cleanupDir(dir);
   }
