@@ -87,7 +87,7 @@ npm link
 Copy-Item config/agents.example.json config/agents.json
 ```
 
-编辑 `config/agents.json`，把 `cwd` 改成你的项目目录，按需增删 agent。
+编辑 `config/agents.json`，按需增删 agent。`cwd` 模板默认是 `.`（R8-1：解析为派发时 CLI 所在目录，恒存在，开箱即跑）——要固定目标项目就改成真实路径（必须已存在），或保持 `.` 由派发时 `--cwd` 覆盖。
 
 > 第三方从全新 clone 只配一个 worker：`npm run cli -- wao onboarding --agent <agentId> --apply` 自动从入库模板生成单 worker registry + host-neutral MCP 片段（零手编）。正式验收链见 `AGENT_ONBOARDING.md` §9。
 

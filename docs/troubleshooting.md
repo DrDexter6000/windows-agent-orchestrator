@@ -177,7 +177,7 @@ serve 后台进程不一定。
 ### 3.1 worker 默认 cwd 是 WAO 仓，不是目标仓
 
 - **症状**：worker 在 `D:/projects/windows-agent-orchestrator` 干活，而不是你要它改的目标仓库
-- **根因**：registry 的 `cwd` 默认填的是 WAO 仓路径。每个 worker 的 cwd 应指向它要操作的目标仓
+- **根因**：registry 的 `cwd` 默认是 `.`（R8-1 起模板统一值，解析为派发时 CLI 所在目录——从 WAO 仓根跑就是 WAO 仓）。每个 worker 的 cwd 应指向它要操作的目标仓
 - **修复**：
   - 派发时显式 `--cwd "D:/path/to/target-repo"`
   - 或在 agents.json 里把每个 worker 的 cwd 改成目标仓
@@ -186,9 +186,9 @@ serve 后台进程不一定。
 ### 3.2 run 终态 spawn_error，报错说 node.exe ENOENT 但 node.exe 明明存在
 
 - **症状**：派发/执行终态 `spawn_error`，`run.error` 写着 `spawn C:\...\node.exe ENOENT`，但该 node.exe 实际存在（2026-08-16 一批 22 条 researcher 派发即此形状）
-- **判读**：**报错归咎 node.exe 但 node.exe 存在时，真因几乎总是 cwd 目录不存在**（Node spawn 的经典陷阱：`cwd` 选项指向不存在的目录时，ENOENT 会归咎到可执行文件名上）。工作目录来自显式 `--cwd`，否则来自 registry 条目的 `cwd`（example 模板里的 `D:/projects/your-project` 是文档占位路径，本机不存在）
+- **判读**：**报错归咎 node.exe 但 node.exe 存在时，真因几乎总是 cwd 目录不存在**（Node spawn 的经典陷阱：`cwd` 选项指向不存在的目录时，ENOENT 会归咎到可执行文件名上）。工作目录来自显式 `--cwd`，否则来自 registry 条目的 `cwd`。（历史：2026-08-16 事故的批量来源是 example 模板的占位路径 `D:/projects/your-project`——该占位已由 R8-1 上游消除，模板 cwd 统一为 `.`，恒存在；本节判读价值保留给**自配 cwd 打错/目录后被删**的情形。）
 - **现状**：已双层早拒绝。**承重层是前台执行通道**（`run` 前台 / workflow agent 节点 / daemon `start` / `retry` → RunManager.start；`resume` 的进程重放分支 → RunManager.resume 同款防护）——2026-08-16 的 22 条事故 transcript 全部 run.started 先行（无 background_submitted）且带 wf_*.jsonl 兄弟，即 workflow 通道，走的正是此层；**后台派发通道**（`run --background` / `spawn` / MCP `run_dispatch`）在派发服务层（dispatchRun）是同款 typed 早拒绝的预防面。两层均按 backend 能力划分（`preflightInvocation`）：本地进程式 backend 两层都查，HTTP serve backend（cwd 是远端目录提示）两层一致豁免。预测 cwd 解析（`path.resolve`）后不是已存在目录（存在但是文件同样算）时，在任何 transcript 写入/worktree 创建/fork/spawn 之前抛 typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，message 含解析后的绝对路径与来源标注）。**旧 transcript 见此判读**
-- **修复**：`--cwd` 指向已存在的目标目录，或把 agents.json / agents.example.json 里的占位 `cwd` 改成真实项目路径（派发/执行会显式拒绝并指路，不会再走到 spawn 期）
+- **修复**：`--cwd` 指向已存在的目标目录，或把 agents.json 里该 worker 的 `cwd` 改成真实项目路径（派发/执行会显式拒绝并指路，不会再走到 spawn 期）。`wao doctor` 对 registry 里不存在的本地进程式 worker cwd 会预先给 WARN（R8-2）
 
 ---
 
@@ -343,6 +343,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
   - 保留 worker 需要的 CLI 在 PATH（没有 worker 需要的 CLI 显示 INFO 跳过，不判 FAIL）
   - 保留 worker 声明的 provider key（进程 env 或 Windows User 作用域；kimi-code 走 CLI 登录态，不查 API key）
   - agents.json 完整性（opencode worker 必须配 tokenBudget——06-18 事故防线）
+  - 保留 worker 的 registry `cwd` 存在性（R8-2：本地进程式 backend 逐 worker 检查 `path.resolve` 后是否为已存在目录；不存在给 WARN + fix 提示。`.` 解析为 CLI 所在目录恒存在、不误报；HTTP serve backend（opencode-serve）的 cwd 是远端目录提示，与派发层能力豁免对称，不检查。环境类检查落 doctor 而非 `registry validate`——后者是纯静态 schema）
   - 目标项目的 `.wao/` 是否 init（未 init / fresh clone 缺槽位是 WARN，结构混乱才是 FAIL）
 - **判读**（advisory，非门禁——doctor 不自动阻断任何派发，verdict 行自带"（advisory，非门禁）"标注）：
   - `HEALTHY`：无 FAIL 无 WARN，可直接继续

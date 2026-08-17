@@ -22,6 +22,7 @@ import {
   validateManifest, classifyIsolation, MANIFEST_GROUPS,
   runWave, runCanonical, mapReportToFiles, suiteRelToManifest,
   WAVE_PLAN, validateWavePlan,
+  takeRunsSnapshot, addedRunsFiles, createRunsDirGuard,
 } from "../../scripts/canonical-test.mjs";
 
 function manifestFixture() {
@@ -449,4 +450,77 @@ test("causal: the mcp wave is a serial, exclusive wave that never pools with git
   const owners = WAVE_PLAN.filter((w) => w.categories.includes("mcp"));
   assert.equal(owners.length, 1, "exactly one wave owns mcp");
   assert.equal(owners[0].name, "mcp", "the mcp category's owning wave is named 'mcp'");
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// R8-3: runs/ snapshot guard — pure logic over an injectable listDir. These
+// meta-tests never touch a real runs/ directory, and the guard itself has NO
+// write path at all (structural: it only consumes the injected listing).
+// ────────────────────────────────────────────────────────────────────────────
+
+test("takeRunsSnapshot: missing directory (listDir → null) is the EMPTY set, not an error", () => {
+  assert.deepEqual(takeRunsSnapshot(() => null), [], "runs/ 不存在 = 空集（正常初态）");
+  assert.deepEqual(takeRunsSnapshot(() => []), [], "空目录 = 空集");
+});
+
+test("takeRunsSnapshot: keeps only *.jsonl, deduplicates, sorts", () => {
+  const snap = takeRunsSnapshot(() => ["b.jsonl", "notes.txt", "a.jsonl", "b.jsonl", "c.json", "sub"]);
+  assert.deepEqual(snap, ["a.jsonl", "b.jsonl"], "仅 *.jsonl 入集；去重 + 排序（判定稳定，与目录顺序无关）");
+});
+
+test("addedRunsFiles: pure diff — additions only, deletions not reported", () => {
+  assert.deepEqual(addedRunsFiles([], ["run_a.jsonl"]), ["run_a.jsonl"], "空基线：全部为新增");
+  assert.deepEqual(addedRunsFiles(["run_a.jsonl"], ["run_a.jsonl"]), [], "无变化 → 零新增");
+  assert.deepEqual(
+    addedRunsFiles(["run_a.jsonl", "run_b.jsonl"], ["run_b.jsonl", "run_c.jsonl"]),
+    ["run_c.jsonl"],
+    "仅新增面；删除（run_a 消失）不报——守卫管写入不管清理",
+  );
+});
+
+test("runs guard: clean suite (empty dir throughout) → zero additions", () => {
+  const guard = createRunsDirGuard({ listDir: () => null });
+  assert.deepEqual(guard.baseline, []);
+  assert.deepEqual(guard.recordPhase("pure"), []);
+  assert.deepEqual(guard.recordPhase("filesystem"), []);
+  assert.deepEqual(guard.additions(), [], "全程空目录 → 无红灯素材");
+});
+
+test("runs guard: addition is attributed to the wave that FIRST saw it (exactly once)", () => {
+  let listing = null; // runs/ does not exist yet
+  const guard = createRunsDirGuard({ listDir: () => listing });
+  assert.deepEqual(guard.recordPhase("pure"), [], "wave pure：无新增");
+
+  listing = ["run_x.jsonl"]; // a test in the filesystem wave leaked a transcript
+  assert.deepEqual(guard.recordPhase("filesystem"), [{ file: "run_x.jsonl", phase: "filesystem" }],
+    "新增归属首次观察到的 wave");
+
+  listing = ["run_x.jsonl", "run_y.jsonl"]; // later wave adds another, first still present
+  assert.deepEqual(guard.recordPhase("process"), [{ file: "run_y.jsonl", phase: "process" }],
+    "已记录文件不重复归属；新文件归属当前 wave");
+  assert.deepEqual(guard.additions(), [
+    { file: "run_x.jsonl", phase: "filesystem" },
+    { file: "run_y.jsonl", phase: "process" },
+  ], "累计清单按文件名排序，phase 归属正确");
+});
+
+test("runs guard: a file added and later DELETED still counts (the write happened)", () => {
+  let listing = null;
+  const guard = createRunsDirGuard({ listDir: () => listing });
+  listing = ["leak.jsonl"];
+  guard.recordPhase("mcp");
+  listing = null; // deleted before the next sweep — the write still happened
+  guard.recordPhase("isolation");
+  assert.deepEqual(guard.additions(), [{ file: "leak.jsonl", phase: "mcp" }],
+    "写入过即留痕（删除不能洗白）");
+});
+
+test("runs guard: guard interacts with the filesystem ONLY through the injected listDir (no write path)", () => {
+  let reads = 0;
+  const guard = createRunsDirGuard({ listDir: () => { reads += 1; return null; } });
+  guard.recordPhase("pure");
+  guard.recordPhase("lock");
+  guard.additions();
+  assert.equal(reads, 3, "每次 recordPhase 恰一次列目录（构造基线 1 次 + 两阶段各 1 次）；additions() 不再读");
+  assert.deepEqual(guard.additions(), []);
 });

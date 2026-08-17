@@ -69,7 +69,8 @@ const MAX_PENDING_DELIVERY_WRITE_INTENTS = 256;
 // directory, the ENOENT is blamed on the EXECUTABLE ("spawn <node.exe>
 // ENOENT"). Dispatches without an explicit --cwd inherited the example
 // registry's placeholder cwd ("D:/projects/your-project",
-// config/agents.example.json) and failed only at spawn time, with a
+// config/agents.example.json — placeholder since removed upstream by R8-1,
+// which set every template cwd to ".") and failed only at spawn time, with a
 // misleading error, after the transcript was already written.
 //
 // Deliberate deviation from the closed-set no-payload errors: the message
@@ -139,6 +140,25 @@ function resolvePredictedDispatchCwd({ explicitCwd, agentCwd }) {
 }
 
 /**
+ * R8-2: non-throwing advisory probe over the SAME prediction + existence
+ * judgment assertExistingDispatchCwd refuses on. Doctor (src/commands/
+ * doctor.js) imports this for its per-worker registry-cwd WARN so the
+ * existence judgment stays single-source (assert itself routes through this
+ * probe — one judgment path, no third copy of the resolve+statSync
+ * semantics). Returns null when no predicted cwd can be formed (defensive —
+ * registry normalization requires agent.cwd non-empty), else
+ * { path, source, exists } with path/source mirroring the typed error's
+ * payload fields.
+ * @param {object} input — same shape as resolvePredictedDispatchCwd
+ * @returns {{path:string, source:"flag"|"registry", exists:boolean}|null}
+ */
+export function probePredictedDispatchCwd(input) {
+  const predicted = resolvePredictedDispatchCwd(input);
+  if (predicted === null) return null;
+  return { path: predicted.path, source: predicted.source, exists: isExistingDirectory(predicted.path) };
+}
+
+/**
  * R7-AB shared early-refusal: throw the typed DispatchCwdNotFoundError when
  * the predicted working directory is not an existing directory (missing, or
  * exists but is a file). Callers invoke this BEFORE any side effect — for
@@ -149,11 +169,9 @@ function resolvePredictedDispatchCwd({ explicitCwd, agentCwd }) {
  * @returns {void}
  */
 export function assertExistingDispatchCwd(input) {
-  const predicted = resolvePredictedDispatchCwd(input);
-  if (predicted === null) return;
-  if (!isExistingDirectory(predicted.path)) {
-    throw new DispatchCwdNotFoundError(predicted.path, predicted.source);
-  }
+  const probed = probePredictedDispatchCwd(input);
+  if (probed === null || probed.exists) return;
+  throw new DispatchCwdNotFoundError(probed.path, probed.source);
 }
 
 // Round 4 Bundle B: thrown when a readOnly run's FORCED worktree isolation

@@ -534,6 +534,14 @@ test("agents.example.json 角色对齐 team-roles.md（决策 0005 SSOT）", () 
     assert.ok(/fallback|FALLBACK/.test(JSON.stringify(w)),
       `opencode worker ${id} 必须在 _comment 标注 fallback（决策 0005，不得无声混入）`);
   }
+  // R8-1 去占位化：shipped 模板全部 cwd 必须是 "."（与私有 config/agents.json 惯例
+  // 一致，本机恒存在，开箱即跑）。历史占位 "D:/projects/your-project" 曾是 2026-08-16
+  // 22 条 researcher spawn_error 事故的批量来源（派发不带 --cwd 时继承占位路径）。
+  // 占位回潮 = 模板重新不可开箱即跑，本守卫直接红。
+  for (const [id, w] of Object.entries(parsed.agents)) {
+    assert.equal(w?.cwd, ".",
+      `agents.example.json 的 ${id}.cwd 必须是 "."（R8-1 去占位化；不得回填文档占位路径）`);
+  }
 });
 
 test("SSOT 分类标准存在：docs/ssot.md 是文档体系的权威类别定义", () => {

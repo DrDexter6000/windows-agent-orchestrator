@@ -1,7 +1,7 @@
 {
   "_comment": "Worker agent registry（角色驱动，对齐 team-roles.md + 决策 0005）。权威源是 docs/team-roles.md；本文件是它的配置落地。每个 worker 按【角色】命名，主控按能力派任务。Lead runtime（装 WAO skill 的那个）不进 registry——它是调用方。",
   "_comment_ssot": "⚠ 修改本文件前先读 docs/team-roles.md（角色权威）+ .wao/decisions/0005（定稿决策）。本文件的 worker 必须与 team-roles.md 一一对应，不得自行新增/改名。opencode 已降为 fallback（见 coder_opencode_fallback）。",
-  "_comment_example": "⚠ 本文件是入库的模板（完整示例）：与 docs/team-roles.md 规范角色一一对应，保持六个角色 worker + opencode fallback 全量矩阵供参考。裁剪发生在你的私人副本上——把本文件复制为 config/agents.json（gitignored，不入库）后，在 agents.json 里按可用认证删减，甚至可删到只剩一个 worker；agents.json 只保留实际要用的条目即可。",
+  "_comment_example": "⚠ 本文件是入库的模板（完整示例）：与 docs/team-roles.md 规范角色一一对应，保持六个角色 worker + opencode fallback 全量矩阵供参考。裁剪发生在你的私人副本上——把本文件复制为 config/agents.json（gitignored，不入库）后，在 agents.json 里按可用认证删减，甚至可删到只剩一个 worker；agents.json 只保留实际要用的条目即可。cwd 统一为 \".\"（R8-1 去占位化）：解析为派发时 CLI 所在目录、本机恒存在，开箱即跑；要固定目标项目就在私人副本里改成真实路径（必须已存在，见 docs/troubleshooting.md §3.2），或派发时显式 --cwd 覆盖。",
   "_comment_safe": "安全：默认全进程式 backend（进程死即会话死，无 opencode stop 虚假成功风险，见 06-18 事故）。opencode 仅在需要 token 闸门精确控成本时用，且必须配 tokenBudget。",
   "_comment_provider": "P4 决策B（决策 0010 融合项 #3）：claude-code worker 用 provider 一等字段（protocol/baseUrl/apiKeyEnv），model/reasoning 与 provider 同级，backend 从它推导 wrapper 参数 + claude CLI flags，单一真相源防漂移（opus-4.8 bug 温床）。不再手拼 prependArgs/args 里的 model/effort——M11-9 起手拼 managed flags（--model/--default-model/--effort/--context-window）在 args/prependArgs 中是固定迁移错误（registry.js 拒绝，无透明提取），必须用结构化一等字段；provider 不得携带 model/effort/contextWindow（旧形状被拒）。args 仅留真正 ad-hoc 的 CLI flag（如 --dangerously-skip-permissions）。",
   "agents": {
@@ -16,7 +16,7 @@
         "baseUrl": "https://api.deepseek.com/anthropic",
         "apiKeyEnv": "DEEPSEEK_API_KEY"
       },
-      "cwd": "D:/projects/your-project",
+      "cwd": ".",
       "systemPrompt": "config/roles/researcher.md",
       "sessionReuse": "lead_workspace",
       "args": [
@@ -46,7 +46,7 @@
         "baseUrl": "https://open.bigmodel.cn/api/anthropic",
         "apiKeyEnv": "ZHIPU_API_KEY"
       },
-      "cwd": "D:/projects/your-project",
+      "cwd": ".",
       "systemPrompt": "config/roles/coder_hq.md",
       "args": [
         "--dangerously-skip-permissions"
@@ -69,7 +69,7 @@
         "baseUrl": "https://api.deepseek.com/anthropic",
         "apiKeyEnv": "DEEPSEEK_API_KEY"
       },
-      "cwd": "D:/projects/your-project",
+      "cwd": ".",
       "systemPrompt": "config/roles/coder_low.md",
       "args": [
         "--dangerously-skip-permissions"
@@ -89,7 +89,7 @@
       "_comment_limit": "kimi stream-json 不含 usage/token；Kimi Code/K3 自主管理上下文，WAO 不配置 backend 无法表达的 contextWindow override。token 价格较高，不作为常规低风险编码的默认通道。",
       "_comment_task": "适合任务: 图像/视频内容理解、前端设计与实现、视觉/美术审核、策略策划、文案写作、图像相关编码；也可作为 Coder-HQ 的高质量工程替补",
       "backend": "kimi-code",
-      "cwd": "D:/projects/your-project",
+      "cwd": ".",
       "systemPrompt": "config/roles/coder_mm.md",
       "model": {
         "id": "kimi-code/k3"
@@ -102,7 +102,7 @@
       "_comment_note": "codex 作为 Lead（主控）时不进 registry——这里是把它当 worker 用。",
       "_comment_task": "适合任务: 跑测试/验证 exitCode/检查产出文件/轮询运行状态",
       "backend": "codex",
-      "cwd": "D:/projects/your-project",
+      "cwd": ".",
       "systemPrompt": "config/roles/tester.md"
     },
     "auditor": {
@@ -111,7 +111,7 @@
       "_comment_auth": "owner 亲自验证 claude login 通过（2026-06-24）。用官方 Claude 不走 wrapper。",
       "_comment_task": "适合任务: 前置方案审计/后置独立复核/PASS-FAIL 判定",
       "backend": "claude-code",
-      "cwd": "D:/projects/your-project",
+      "cwd": ".",
       "systemPrompt": "config/roles/auditor.md",
       "sessionReuse": "lead_workspace",
       "args": [
@@ -131,7 +131,7 @@
       "backend": "opencode-serve",
       "serveUrl": "http://127.0.0.1:4297",
       "agent": "build",
-      "cwd": "D:/projects/your-project",
+      "cwd": ".",
       "model": {
         "providerID": "zhipuai-coding-plan",
         "id": "glm-5.2"

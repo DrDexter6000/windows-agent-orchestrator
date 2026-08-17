@@ -36,6 +36,19 @@
 //     most ONE isolation recheck (a single process per failed file — diagnostic,
 //     bounded) that only APPENDS a classification
 //     (stable_fail / isolation_pass / environment_invalid) — never a pass.
+//   - R8-3 runs/ snapshot guard (Owner-approved 2026-08-17): before the first
+//     wave the runner snapshots the REPO_ROOT/runs/*.jsonl filename set (a
+//     missing directory is the empty set); after every wave (and after the
+//     isolation phase) it diffs. Any NEW file is recorded with the wave/phase
+//     that first saw it; if any addition exists at the end the runner prints an
+//     explicit red light (files + owning wave + "tests must not write the real
+//     runs/ — use a tmpdir run-dir") and exits NON-ZERO even when every test
+//     passed. The guard itself only ever readdir's runs/ — it never writes it.
+//     Known boundary (deliberate, F-7-2 lesson): two CONCURRENT `npm test` runs
+//     can trip each other's guards — concurrent full-suite runs already destroy
+//     each other (worktrees, ports, singleton arbiters), so a red light there
+//     is a feature, not a false positive. The real-MCP canary (`npm run smoke`)
+//     does not go through this runner and is unaffected.
 //   - Writes a bounded test-results.json that keeps every failure attributable to
 //     BOTH its resource category AND its execution wave: each file records
 //     resourceCategory + executionWave; each wave records timing/counts/exit.
@@ -213,6 +226,84 @@ export function mapReportToFiles(report, expectedRels) {
     if (cur === "missing" || fileStatus === "fail") perFile.set(rel, fileStatus); // fail wins; never downgrade
   }
   return { reportValid: true, reportError: null, perFile };
+}
+
+// ── R8-3: runs/ snapshot guard (pure logic, unit-tested in canonicalRunner.test.js) ──
+//
+// Suite-level hygiene guard: tests must NEVER write into the repo's REAL runs/
+// transcript directory — every test owns its transcripts via a tmpdir run-dir.
+// The guard snapshots the runs/*.jsonl filename set before the suite starts and
+// diffs after each wave; additions are attributed to the wave (or the isolation
+// phase) that first observed them. All decision logic below is PURE over an
+// injectable listDir (the meta-tests never touch a real runs/); the only real
+// adapter is realListRunsDir, and NOTHING here ever writes runs/.
+
+/**
+ * Snapshot a runs directory listing into the guarded set: only *.jsonl
+ * filenames, deduplicated and sorted. `listDir()` returns an array of
+ * directory entry names, or null when the directory does not exist (the
+ * normal pre-first-run state — treated as the EMPTY set, not an error).
+ * @param {() => string[]|null} listDir
+ * @returns {string[]}
+ */
+export function takeRunsSnapshot(listDir) {
+  const entries = listDir();
+  if (!entries) return [];
+  return [...new Set(entries)].filter((n) => n.endsWith(".jsonl")).sort();
+}
+
+/**
+ * Pure diff: filenames present in `current` but absent from `baseline`,
+ * sorted. Deletions are NOT reported (the guard polices writes, not prunes).
+ * @param {string[]} baseline
+ * @param {string[]} current
+ * @returns {string[]}
+ */
+export function addedRunsFiles(baseline, current) {
+  const base = new Set(baseline);
+  return current.filter((n) => !base.has(n)).sort();
+}
+
+/**
+ * Stateful accumulator over the two pure functions above. `recordPhase(label)`
+ * re-lists the directory and attributes every not-yet-recorded addition to
+ * `label` (a wave name, or the "isolation" phase after the waves). A file is
+ * attributed exactly once — to the phase that FIRST saw it — even if it is
+ * still present in later listings. `additions()` returns the cumulative
+ * {file, phase} list, sorted by filename.
+ * @param {{listDir: () => string[]|null}} input
+ */
+export function createRunsDirGuard({ listDir }) {
+  const baseline = takeRunsSnapshot(listDir);
+  const recorded = new Map(); // file -> phase label
+  const recordPhase = (phase) => {
+    const fresh = [];
+    for (const file of addedRunsFiles(baseline, takeRunsSnapshot(listDir))) {
+      if (recorded.has(file)) continue;
+      recorded.set(file, phase);
+      fresh.push({ file, phase });
+    }
+    return fresh;
+  };
+  const additions = () => [...recorded.entries()]
+    .map(([file, phase]) => ({ file, phase }))
+    .sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+  return { baseline, recordPhase, additions };
+}
+
+// Real adapter: list REPO_ROOT/runs. ENOENT ("not found") is the normal
+// no-runs-yet state and maps to null (empty set). Any other read failure
+// (EACCES/EPERM/EBUSY/...) is rethrown so the guard fails OBSERVABLY (red,
+// non-zero) instead of silently under-reporting what tests wrote.
+export function realListRunsDir(runsDir) {
+  return () => {
+    try {
+      return readdirSync(runsDir);
+    } catch (err) {
+      if (err && err.code === "ENOENT") return null;
+      throw err;
+    }
+  };
 }
 
 // ── Discovery: every test/**/*.test.js, test-relative, forward-slashed ───────
@@ -480,6 +571,20 @@ async function main() {
   }).filter((spec) => spec.files.length > 0);
 
   const t0 = Date.now();
+  // 4b) R8-3 runs/ snapshot guard: baseline BEFORE the first wave. recordPhase
+  //     failures (non-ENOENT read errors) fail the guard CLOSED — logged as a
+  //     guard error and folded into the non-zero exit, never swallowed.
+  const runsGuard = createRunsDirGuard({ listDir: realListRunsDir(join(repoRoot, "runs")) });
+  let runsGuardError = null;
+  const guardRecord = (phase) => {
+    if (runsGuardError) return [];
+    try {
+      return runsGuard.recordPhase(phase);
+    } catch (err) {
+      runsGuardError = err && err.message ? err.message : String(err);
+      return [];
+    }
+  };
   const outcome = await runCanonical({
     waveSpecs,
     reporterArg,
@@ -491,12 +596,22 @@ async function main() {
     onWaveEnd: (w) => {
       const wf = w.failed + w.crashed + w.missing;
       console.error(`[canonical] wave=${w.name} done exit=${w.exitCode} pass=${w.passed} failed=${wf} ${w.durationMs}ms${w.groupError ? " WAVE_ERROR=" + w.groupError : ""}`);
+      const fresh = guardRecord(w.name);
+      if (fresh.length > 0) {
+        console.error(`[canonical] runs-guard wave=${w.name} NEW runs/ files: ${fresh.map((f) => f.file).join(", ")}`);
+      }
     },
   });
   const totalMs = Date.now() - t0;
 
   for (const iso of outcome.isolation) {
     console.error(`[canonical] isolation ${iso.path} [${iso.resourceCategory}/${iso.executionWave}] firstRound=${iso.firstRoundStatus} alone=${iso.isolationStatus} ⇒ ${iso.classification}`);
+  }
+  // Isolation rechecks spawn children OUTSIDE any wave — sweep them too so a
+  // leak during a diagnostic rerun is caught and attributed to this phase.
+  const isoFresh = guardRecord("isolation");
+  if (isoFresh.length > 0) {
+    console.error(`[canonical] runs-guard phase=isolation NEW runs/ files: ${isoFresh.map((f) => f.file).join(", ")}`);
   }
 
   const report = {
@@ -510,6 +625,10 @@ async function main() {
     isolation: outcome.isolation,
     finalVerdict: outcome.finalVerdict,
     suiteError: outcome.suiteError,
+    // R8-3: additive field — every run transcript that appeared in the REAL
+    // runs/ during the suite, with the wave/phase that first saw it. Empty on
+    // a clean run; non-empty ALWAYS pairs with a non-zero exit below.
+    runsDirGuard: { additions: runsGuard.additions(), error: runsGuardError },
     totalDurationMs: totalMs,
   };
 
@@ -528,7 +647,27 @@ async function main() {
   }
 
   const { passed, failed, missing, crashed } = outcome.firstRound;
-  console.error(`[canonical] verdict=${outcome.finalVerdict} discovered=${discovered.length} executed=${report.executedCount} passed=${passed} failed=${failed} missing=${missing} crashed=${crashed} isolation=${outcome.isolation.length} waves=${outcome.waves.length} total=${totalMs}ms ⇒ ${reportPath}`);
+  const runsAdditions = runsGuard.additions();
+  console.error(`[canonical] verdict=${outcome.finalVerdict} discovered=${discovered.length} executed=${report.executedCount} passed=${passed} failed=${failed} missing=${missing} crashed=${crashed} isolation=${outcome.isolation.length} waves=${outcome.waves.length} runsGuard=${runsAdditions.length === 0 && !runsGuardError ? "clean" : `RED(+${runsAdditions.length})`} total=${totalMs}ms ⇒ ${reportPath}`);
+
+  // R8-3 red light: tests writing the REAL runs/ is a suite-hygiene violation
+  // that must not survive a green test verdict. Non-zero exit, explicit listing
+  // (file + owning wave/phase), one-line remedy. A guard READ error also fails
+  // closed (observable, never silently under-reported).
+  if (runsGuardError) {
+    console.error(`[canonical] RED runs-guard: cannot list runs/ (${runsGuardError}) — failing closed rather than under-reporting`);
+    process.exitCode = 1;
+    return;
+  }
+  if (runsAdditions.length > 0) {
+    console.error(`[canonical] RED runs-guard: ${runsAdditions.length} new file(s) written to the REAL runs/ directory during the suite:`);
+    for (const a of runsAdditions) {
+      console.error(`  - runs/${a.file} (first seen: ${a.phase})`);
+    }
+    console.error("  测试不得向真实 runs/ 写入——测试必须用 tmpdir 作为自己的 run-dir/工作目录（写死仓库 runs/ 即违规）。");
+    process.exitCode = 1;
+    return;
+  }
   process.exitCode = outcome.finalVerdict === "pass" ? 0 : 1;
 }
 

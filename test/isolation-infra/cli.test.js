@@ -2016,6 +2016,133 @@ test("R5-B: doctor fresh clone 缺槽位无多余 → wao_init WARN（不 FAIL�
   }
 });
 
+// ── R8-2: doctor registry cwd 存在性 WARN ────────────────────────────────────
+// 环境类检查的地盘是 doctor（SKILL 契约：registry validate = static schema，
+// 存在性是机器状态不进 validate）。判定语义与 R7 assertExistingDispatchCwd
+// 完全一致（同一 runManager SSOT 探针：path.resolve 后 statSync 目录判定）；
+// 能力收窄与 R7 两层派发门对称（本地进程式 backend 查，HTTP serve 豁免）。
+// 健康面不产生条目（budget_* 同款惯例）。
+test("R8-2: doctor registry cwd——坏 cwd 给 WARN（DEGRADED，exit 0）+ fix；\".\" 与 HTTP backend 不误报", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-doctor-cwd-"));
+  try {
+    const badCwd = join(dir, "no-such-project");
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        // 本地进程式 backend + 不存在的 cwd → 应 WARN（R8-2 主面）
+        researcher: { backend: "claude-code", cwd: badCwd },
+        // "." 解析为 doctor CLI 所在目录，恒存在 → 不得产生 cwd_* 条目（R8-1 后
+        // 模板值即 "."，误报会打爆开箱即跑的模板）
+        coder_low: { backend: "claude-code", cwd: "." },
+        // HTTP serve backend：cwd 是远端目录提示，与派发层能力豁免对称
+        // （CE-13/RCE-6 钉死的不拒面）→ doctor 不得更严，不产生条目
+        ghost_serve: {
+          backend: "opencode-serve",
+          serveUrl: "http://127.0.0.1:4297",
+          cwd: badCwd,
+          tokenBudget: 5000000,
+        },
+      },
+    }), "utf8");
+
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "doctor",
+      "--registry", registryPath,
+      "--cwd", dir,
+      "--format", "json",
+    ], { cwd: process.cwd(), encoding: "utf8", env: process.env, timeout: 10000 });
+    const parsed = JSON.parse(result.stdout);
+
+    const warn = parsed.checks.find((c) => c.name === "cwd_researcher");
+    assert.ok(warn, "坏 cwd 的本地进程式 worker 应有 cwd_researcher 检查项");
+    assert.equal(warn.pass, true, "cwd WARN 不判 FAIL（advisory）");
+    assert.equal(warn.status, "warn");
+    assert.equal(warn.level, "warn");
+    assert.equal(warn.severity, "warn", "R5-B 加性契约：severity 与 status 一致");
+    assert.ok(warn.detail.includes(resolve(badCwd)),
+      `detail 应携带解析后的绝对路径（${resolve(badCwd)}）`);
+    assert.match(warn.detail, /dispatch_cwd_not_found/, "detail 应指向派发期 typed 早拒绝的 reason code");
+    assert.ok(warn.fix, "WARN 项应带 fix 提示");
+    assert.match(warn.fix, /--cwd/, "fix 应给 --cwd 替代路径");
+    assert.match(warn.fix, /cwd 指向已存在目录/, "fix 应给修 registry cwd 的指引");
+
+    // 误报面："." 与 HTTP serve backend 均不得产生 cwd_* 条目（健康面零条目惯例）
+    const cwdItems = parsed.checks.filter((c) => c.name.startsWith("cwd_"));
+    assert.deepEqual(cwdItems.map((c) => c.name), ["cwd_researcher"],
+      "仅坏 cwd 的本地进程式 worker 出条目；\".\"（恒存在）与 opencode-serve（远端提示）零条目");
+
+    assert.match(parsed.verdict, /^DEGRADED（\d+ warn）/, "WARN → DEGRADED");
+    assert.equal(result.status, 0, "仅 WARN → exit 0（advisory 非门禁）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R8-2: doctor registry 缺位 → cwd 检查 INFO 跳过（沿用 R5-B U1 全 INFO 模式，不新增 FAIL 面）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-doctor-cwd-noreg-"));
+  try {
+    const result = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "doctor",
+      "--registry", join(dir, "does-not-exist", "agents.json"),
+      "--cwd", dir,
+      "--format", "json",
+    ], { cwd: process.cwd(), encoding: "utf8", env: process.env, timeout: 10000 });
+    const parsed = JSON.parse(result.stdout);
+    const cwdInfo = parsed.checks.find((c) => c.name === "cwd");
+    assert.ok(cwdInfo, "registry 缺位应有聚合 cwd INFO 项（与 keys 同款）");
+    assert.equal(cwdInfo.status, "info");
+    assert.equal(cwdInfo.pass, true, "INFO 跳过不判 FAIL");
+    assert.match(cwdInfo.detail, /未配置（跳过）/);
+    assert.deepEqual(parsed.checks.filter((c) => c.name.startsWith("cwd_")), [],
+      "无 registry → 不逐 worker 出 cwd_* 条目");
+    assert.equal(result.status, 0, "缺位回退 exit 0（wao_init WARN 不计 FAIL）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R8-2: --warn-as-error 在仅 cwd 存在性 WARN 时 exit 1（分级语义回归）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-doctor-cwd-wae-"));
+  try {
+    // 隔离出"恰一条 WARN"：完整 .wao/（wao_init OK）+ 单个 codex worker
+    // （无 provider → keys INFO；codex CLI 在 PATH → cli_codex OK）+ 坏 cwd。
+    mkdirSync(join(dir, ".wao"), { recursive: true });
+    writeFileSync(join(dir, ".wao", "project.md"), "", "utf8");
+    for (const slot of ["state", "decisions", "pipeline", "handoff", "runs"]) {
+      mkdirSync(join(dir, ".wao", slot), { recursive: true });
+    }
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: { tester: { backend: "codex", cwd: join(dir, "no-such-project") } },
+    }), "utf8");
+
+    const base = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "doctor",
+      "--registry", registryPath,
+      "--cwd", dir,
+      "--format", "json",
+    ], { cwd: process.cwd(), encoding: "utf8", env: doctorSpawnEnv(), timeout: 10000 });
+    const parsedBase = JSON.parse(base.stdout);
+    assert.equal(parsedBase.verdict, "DEGRADED（1 warn）（advisory，非门禁）",
+      `恰一条 WARN（cwd_tester）；实际 verdict: ${parsedBase.verdict}`);
+    assert.ok(parsedBase.checks.some((c) => c.name === "cwd_tester" && c.status === "warn"));
+    assert.equal(base.status, 0, "仅 WARN → exit 0");
+
+    const asError = spawnSync(process.execPath, [
+      "src/cli.js", "wao", "doctor",
+      "--registry", registryPath,
+      "--cwd", dir,
+      "--format", "json",
+      "--warn-as-error",
+    ], { cwd: process.cwd(), encoding: "utf8", env: doctorSpawnEnv(), timeout: 10000 });
+    const parsedWae = JSON.parse(asError.stdout);
+    assert.match(parsedWae.verdict, /（--warn-as-error）/, "verdict 应标注 --warn-as-error");
+    assert.equal(asError.status, 1, "--warn-as-error 时仅此项 WARN → exit 1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("TD-75: status 输出心跳字段 lastActivityTs + secondsSinceActivity（有 run.event 的 run）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-hb-"));
   try {

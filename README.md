@@ -124,7 +124,10 @@ npm run mcp -- --registry config/agents.json --run-dir runs
 # 4. First read-only canary via the CLI fallback (one retained worker)
 #    Replace <agentId> with one worker id from `registry list` in step 2 — the
 #    canary works for ANY retained process worker (claude-code / codex / kimi-code):
-npm run cli -- run <agentId> --prompt "Read package.json and summarize what WAO does" --cwd D:/projects/your-project --registry config/agents.json --format json
+npm run cli -- run <agentId> --prompt "Read package.json and summarize what WAO does" --cwd <目标项目> --registry config/agents.json --format json
+#    <目标项目> must be an existing directory on this machine — a brand-new
+#    machine can temporarily use the WAO repo itself (the read-only canary has
+#    no side effects on it); see AGENT_ONBOARDING.md §4f.
 ```
 
 Full step-by-step instructions for steps 1–4, including per-runtime auth,

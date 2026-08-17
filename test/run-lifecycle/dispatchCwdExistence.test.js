@@ -94,7 +94,9 @@ function listTranscripts(runDir) {
 const NO_ENV_READER = async () => ({});
 
 // The placeholder cwd shape from the reproduced defect (config/agents.example.json
-// researcher entry). Never created on disk in these fixtures.
+// researcher entry, pre-R8-1). The shipped template has since been de-placeholdered
+// (cwd "." everywhere); these self-built fixtures keep the historical shape purely
+// as a deterministic never-exists-on-disk path. Never created on disk here.
 const PLACEHOLDER_CWD = "D:/projects/your-project";
 
 // =====================================================================

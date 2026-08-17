@@ -5,6 +5,11 @@
 // 分级 verdict（HEALTHY/DEGRADED/BROKEN）、每条 FAIL/WARN 附 run: 修复提示（只打印
 // 永不执行）、JSON 加性强化（schemaVersion/advisory/status/severity/fix）、
 // --warn-as-error（CI opt-in，独立于 --strict）。
+// Round 8 R8-2：新增 registry cwd 存在性 WARN（advisory）。存在性是机器状态
+// （环境类检查），地盘在 doctor——SKILL 契约明载 `registry validate = static
+// schema`（纯静态），本检查不进 validate。判定本体复用 runManager SSOT 的
+// probePredictedDispatchCwd（与 assertExistingDispatchCwd 同一 path.resolve +
+// statSync 目录判定路径，本文件不写第三份判定逻辑）。
 //
 // 命令族：wao doctor [--strict] [--warn-as-error] [--format json] [--registry FILE] [--cwd DIR]
 //
@@ -16,6 +21,11 @@
 //   - 共享工具：./shared.js（parseOptions/resolveTargetCwd）
 //   - 凭据读取（M11-7 复用，禁止第二份注册表读取）：../application/credentialReadiness.js
 //     （resolveCredentialEnv——process.env → Windows User 作用域回退 + requiredCredentialNames）
+//   - cwd 存在性判定（R8-2 复用 R7-AB SSOT）：../runManager.js
+//     （probePredictedDispatchCwd——assertExistingDispatchCwd 的非抛出探针形态）
+//   - backend 能力解析（R8-2 与 R7 派发门同一能力键）：../backends/factory.js
+//     （backendFor——构造无副作用，仅读 preflightInvocation 能力标记；
+//     commands→backends 下向边，precedent：./shared.js 同款 import）
 //   - node built-in：fs（existsSync/readdirSync/statSync）、fs/promises（readFile）、
 //     path（resolve/join/dirname）、url（fileURLToPath）、child_process（spawnSync/execSync）
 //
@@ -30,6 +40,11 @@ import { spawnSync } from "node:child_process";
 
 import { validateWaoDir } from "../waoDir.js";
 import { parseOptions, resolveTargetCwd } from "./shared.js";
+// R8-2：cwd 存在性判定复用 R7-AB 的 runManager SSOT（adapters→core 下向边）。
+import { probePredictedDispatchCwd } from "../runManager.js";
+// R8-2：与 R7 两层派发门同一能力键收窄——backendFor 构造无副作用
+// （runDispatch.js 同款用法），仅探测 preflightInvocation 能力标记。
+import { backendFor } from "../backends/factory.js";
 // M11-7：Windows User 作用域 env 读取复用 credentialReadiness（HKCU\Environment 精确
 // 名单、注入式 reader、5s 超时）——本文件不写第二份注册表读取。
 // requiredCredentialNames 是"worker 声明了哪些必需 key env 名"的 SSOT（envPolicy.js）。
@@ -228,6 +243,10 @@ export async function waoDoctorCommand(args, config) {
   //    命中 → WARN（新开终端可用）；仍无 → FAIL。kimi-code 靠 CLI 登录态，不查任何 kimi key。
   if (!registryOk) {
     pushCheck(checks, { name: "keys", pass: true, level: "info", detail: "未配置（跳过）" });
+    // R8-2：registry 缺位（--apply 前）或解析失败时，cwd 检查与 CLI/key 同款
+    // 全 INFO 跳过（R5-B U1 模式）——parse-fail 面已由 registry_loads WARN 承担，
+    // 不新增 FAIL 面。
+    pushCheck(checks, { name: "cwd", pass: true, level: "info", detail: "未配置（跳过）" });
   } else if (providerWorkerCount === 0 && !hasKimiWorker) {
     pushCheck(checks, {
       name: "keys",
@@ -305,6 +324,37 @@ export async function waoDoctorCommand(args, config) {
           fix: `在 config/agents.json 给 ${id} 补 tokenBudget 数字字段`,
         });
       }
+    }
+    // R8-2：registry cwd 存在性 WARN（advisory，非门禁）。逐个已配置 worker：
+    // 判定复用 runManager SSOT 探针（path.resolve 后 statSync 目录判定，语义与
+    // 派发期 assertExistingDispatchCwd 完全一致——含"存在但是文件"同判不存在）。
+    // 能力收窄与 R7 两层派发门对称：只查会以该 cwd 本地 spawn 的 backend（经
+    // 共享工厂解析后声明 preflightInvocation 能力）；HTTP serve backend
+    // （opencode-serve 形状，cwd 是远端目录提示）豁免——对它 WARN 会是与派发
+    // 语义相悖的假预警（CE-13/RCE-6 钉死的不拒面上 doctor 不得更严）。"." 经
+    // path.resolve 解析为 CLI 所在目录，恒存在，不误报。健康面不产生条目
+    // （budget_* 同款惯例：只在有问题时出现，避免 N 条 OK 噪音）。
+    for (const [id, agent] of agents) {
+      let localSpawnBackend = false;
+      try {
+        // 未知/无法构造的 backend 抛错 → 跳过（该 worker 已由 backend_map_<id>
+        // WARN 覆盖"CLI/key 检查无法覆盖"，此处同样不假装覆盖）。
+        localSpawnBackend = typeof backendFor(agent)?.preflightInvocation === "function";
+      } catch {
+        localSpawnBackend = false;
+      }
+      if (!localSpawnBackend) continue;
+      const probed = probePredictedDispatchCwd({ explicitCwd: undefined, agentCwd: agent?.cwd });
+      // probed === null（cwd 非字符串/缺失）：registry 规范化会拒绝该条目，
+      // dispatchCwdExistence CE-11/CE-15 钉的边界——doctor 原样读 JSON，防御跳过。
+      if (probed === null || probed.exists) continue;
+      pushCheck(checks, {
+        name: `cwd_${id}`,
+        pass: true,
+        level: "warn",
+        detail: `worker ${id} 的 registry cwd 不存在: ${probed.path}（不带 --cwd 派发该 worker 会被 typed 早拒绝 dispatch_cwd_not_found；Node spawn 的经典陷阱是把 cwd 缺失误报成 executable ENOENT）`,
+        fix: `编辑 ${registryPath} 的 cwd 指向已存在目录，或派发时显式传 --cwd`,
+      });
     }
     pushCheck(checks, { name: "registry_loads", pass: true, detail: `${agents.length} agents` });
   }
