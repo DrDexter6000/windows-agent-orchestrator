@@ -458,6 +458,19 @@ const DISPATCH_READ_ONLY_DELIVERY_CONFLICT_TEXT =
   "observation declaration, never a delivery — remove the delivery block, or drop " +
   "readOnly to dispatch the delivery.";
 
+// R7-C (C-4): fixed, actionable error when the dispatch's predicted working
+// directory does not exist (typed DispatchCwdNotFoundError from the R7-AB
+// layer-1 assert). This is the configuration mistake the R7-AB commit itself
+// targets, so the Lead's primary dispatch surface must not collapse it to the
+// opaque generic dispatch text. Same closed-set discipline as the four
+// precedents above: the literal reason code dispatch_cwd_not_found lets a
+// Lead (and the tests) recognize the category; the guidance is fixed. NEVER
+// echoes the offending absolute path — the resolved path reaches CLI/local
+// stderr only (the typed error's message carries it there), not the MCP wire.
+const DISPATCH_CWD_NOT_FOUND_TEXT =
+  "run_dispatch refused: dispatch_cwd_not_found. The dispatch working directory does not " +
+  "exist; pass an existing --cwd or fix the registry entry cwd (dispatch_cwd_not_found).";
+
 // M12-6 (FR-03): fixed, actionable error when a supplied workspace/head
 // expectation mismatches the freshly-proven binding at dispatch time. The ONLY
 // dynamic content is a closed-set category label (gitHead | dirty | workspaceRoot)
@@ -3520,6 +3533,17 @@ export function createWaoMcpServer({
           return {
             isError: true,
             content: [{ type: "text", text: DISPATCH_INVALID_VERIFICATION_PATH_TEXT }],
+          };
+        }
+        // R7-C (C-4): the R7-AB layer-1 cwd existence refusal — the exact
+        // configuration mistake this commit targets — gets its own closed-set
+        // text instead of the opaque generic dispatch text. The typed error's
+        // MESSAGE carries the resolved path for CLI/local stderr; it is
+        // deliberately dropped here (fixed text only, no path on the wire).
+        if (e && e.name === "DispatchCwdNotFoundError") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DISPATCH_CWD_NOT_FOUND_TEXT }],
           };
         }
         return {

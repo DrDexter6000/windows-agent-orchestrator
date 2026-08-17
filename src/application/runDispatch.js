@@ -27,18 +27,24 @@ import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.
 import { inheritedEnvNames } from "../envPolicy.js";
 import { resolveReuseTurn, resolveLineageFirstTurn } from "./sessionReuse.js";
 import { assertExistingDispatchCwd } from "../runManager.js";
+// R7-C (C-2): application→backends is a legal DOWNWARD edge under the frozen
+// L4 layering SSOT (backends sits deeper than application). Used only to read
+// the declared preflightInvocation capability for the cwd gate below — the
+// same SSOT factory every dispatch-adjacent construction point shares.
+import { backendFor as defaultBackendFor } from "../backends/factory.js";
 
 // R7-AB: the working-directory existence early-refusal SSOT (the typed
 // DispatchCwdNotFoundError + the shared assert) lives in src/runManager.js —
 // the core-layer spawn authority — so RunManager.start throws the SAME typed
 // error with ONE class definition across both authorities. This module
 // imports it DOWNWARD (application→core, the same direction as its existing
-// ../transcript.js / ../delivery.js / ../registry.js imports); a dedicated
-// src/application/ home is impossible under the frozen L4 layering SSOT
-// (core→application is an upward edge and the upward whitelist is exactly
-// empty). Re-exported here to keep this module's established typed-error
-// import surface stable (callers and tests import the dispatch typed errors
-// from runDispatch.js).
+// ../transcript.js / ../delivery.js / ../registry.js imports); a sibling
+// src/application/ home is not importable from core under the frozen L4
+// layering SSOT (core→application is an upward edge and the upward whitelist
+// is exactly empty — a NEW CORE_TOP module would be legal, but hosting with
+// the spawn authority follows the existing typed-error precedent). Re-exported
+// here to keep this module's established typed-error import surface stable
+// (callers and tests import the dispatch typed errors from runDispatch.js).
 export { DispatchCwdNotFoundError } from "../runManager.js";
 
 // M11-7: thrown when a worker's REQUIRED credential is missing at dispatch time.
@@ -192,7 +198,10 @@ function generateRunId() {
  *   gate); the MCP boundary always supplies the host-proven workspace root.
  *   R7-AB: the PREDICTED cwd (this argument when non-empty, else the registry
  *   entry's agent.cwd) must resolve to an existing directory — otherwise the
- *   dispatch is refused with DispatchCwdNotFoundError before any side effect.
+ *   dispatch is refused with DispatchCwdNotFoundError before any side effect
+ *   (R7-C C-2: capability-gated on the selected backend's preflightInvocation
+ *   — HTTP backends, whose cwd is a remote directory hint, are exempt,
+ *   mirroring RunManager.start).
  * @param {number} [input.waitTimeout] — explicit override (range-validated 1000..600000)
  * @param {number} [input.globalWaitTimeout] — server-owned global config.waitTimeout (trusted)
  * @param {number} [input.pollInterval]
@@ -353,6 +362,25 @@ export async function dispatchRun({
   const registry = await readRegistry(resolvedRegistry);
   const agent = registry.getAgent(agentId);
 
+  // R7-C (C-3, hoisted precedence): the TD-110 (D2 A3) typed refusal for a
+  // sessionReuse agent dispatched WITHOUT a bound workspace must keep its
+  // documented contract in the corner where the registry entry's cwd is ALSO
+  // bad — pre-R7-AB that typed error (with the CLI's --cwd guidance) owned the
+  // face; the R7-AB existence assert below took it over. Same relative order
+  // as the reuse block (leadSession first, then cwd) is preserved, and BOTH
+  // sit before resolveReuseTurn, so the zero-routing-slot discipline (CE-6)
+  // is unchanged. The checks inside the reuse block below remain as
+  // defense-in-depth.
+  const reuseEligible = agent.sessionReuse === "lead_workspace" && !publicDelivery;
+  if (reuseEligible) {
+    if (typeof leadSession !== "string" || leadSession.length === 0) {
+      throw new Error("dispatchRun: leadSession is required for a sessionReuse agent (server-owned Lead session identity)");
+    }
+    if (typeof cwd !== "string" || cwd.length === 0) {
+      throw new SessionReuseWorkspaceRequiredError();
+    }
+  }
+
   // R7-AB (layer 1): working-directory existence early-refusal, shared SSOT
   // with RunManager.start (../runManager.js — same typed error, same
   // prediction semantics). The PREDICTED cwd is the directory the worker spawn
@@ -367,7 +395,26 @@ export async function dispatchRun({
   // executable), after the transcript was already written. Sitting between the
   // registry resolution and the credential preflight keeps the refusal
   // deterministic across environments (machine env cannot mask it).
-  assertExistingDispatchCwd({ explicitCwd: cwd, agentCwd: agent.cwd });
+  //
+  // R7-C (C-2): capability-gated, mirroring layer 2 (runManager.js) — the SAME
+  // declared capability the M12-14 invocation-budget preflight keys on. A
+  // backend implementing preflightInvocation composes a LOCAL OS invocation
+  // and spawns with cwd: agent.cwd (the ENOENT-blames-the-executable trap); an
+  // HTTP backend (opencode-serve shape, no preflightInvocation) threads cwd to
+  // the serve API as a REMOTE directory hint — no local spawn, no local
+  // ENOENT trap — and is exempt, exactly as docs/usage.md promises and as
+  // layer 2 already exempts it (symmetric semantics: local-spawn backends are
+  // checked at BOTH layers, HTTP backends at NEITHER). The backend instance is
+  // resolved through the caller-injected backendFor when present (the
+  // continuable/correctable precedent) and the shared factory otherwise —
+  // construction is side-effect-free, and agent.backend has already passed
+  // registry normalization, so the factory cannot throw here.
+  const cwdGateBackend = typeof backendFor === "function"
+    ? backendFor(agent)
+    : defaultBackendFor(agent);
+  if (typeof cwdGateBackend?.preflightInvocation === "function") {
+    assertExistingDispatchCwd({ explicitCwd: cwd, agentCwd: agent.cwd });
+  }
 
   if (!skipCredentialCheck) {
     const resolver = createEnvResolver(userEnvReader);
@@ -393,8 +440,13 @@ export async function dispatchRun({
   // output or the bounded audit event. The routing slot is claimed under a
   // per-key file lock so two concurrent dispatches for the same identity
   // cannot both fork (the second observes the first as busy).
+  //
+  // R7-C (C-3): reuseEligible and its two refusals (leadSession / cwd-empty)
+  // are computed/hoisted ABOVE the cwd existence assert — see the hoisted
+  // block near the registry resolution. The two checks repeated inside this
+  // block are defense-in-depth (unreachable via this path; they keep the
+  // block self-contained if the hoist is ever restructured).
   let sessionReuseRouting = null;
-  const reuseEligible = agent.sessionReuse === "lead_workspace" && !publicDelivery;
   if (reuseEligible) {
     if (typeof leadSession !== "string" || leadSession.length === 0) {
       throw new Error("dispatchRun: leadSession is required for a sessionReuse agent (server-owned Lead session identity)");

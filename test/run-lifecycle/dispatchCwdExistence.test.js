@@ -33,6 +33,12 @@
 //      Error still owns the no-explicit-cwd sessionReuse face (CE-10); a registry
 //      agent without any cwd is rejected by the registry SSOT, not by the
 //      existence check (CE-11).
+//   3b. Capability symmetry (R7-C C-2) — an HTTP-shape backend (opencode-serve,
+//      no preflightInvocation) is exempt at layer 1 exactly as at layer 2: a
+//      bad registry cwd does NOT refuse the dispatch (CE-13).
+//   4b. Priority in the corner (R7-C C-3) — a sessionReuse agent with NO
+//      explicit cwd AND a bad registry cwd refuses with the TD-110 typed
+//      SessionReuseWorkspaceRequiredError, not the existence error (CE-14).
 //   5. CLI end-to-end     — `run --background` with a bad-cwd registry fixture
 //      exits non-zero, prints the typed message + resolved path on stderr, and
 //      leaves the run-dir empty (CE-7).
@@ -354,10 +360,13 @@ test("CE-9: the run usage page documents the --cwd existence requirement", async
     /--cwd DIR\s+target project directory \(required for --background delivery runs\) — must be an existing directory/,
     "--cwd line carries the existence requirement",
   );
+  // R7-C (C-9): "refused at dispatch" alone misdescribes the foreground family
+  // (run/workflow/daemon start never go through the dispatch service — they
+  // are refused at START). The precise shared phrasing is dispatch/start.
   assert.match(
     RUN_USAGE_TEXT,
-    /a missing or non-directory path is refused at dispatch before any side effect/,
-    "the refusal semantics are spelled out",
+    /a missing or non-directory path is refused at dispatch\/start before any side effect/,
+    "the refusal semantics are spelled out (dispatch for background, start for foreground/resume)",
   );
 });
 
@@ -429,6 +438,51 @@ test("CE-11: an agent registry entry without any cwd is rejected by the registry
 });
 
 // =====================================================================
+// 10b. Registry SSOT fail-closed (R7-C C-8) — a non-string cwd is rejected,
+//      never silently skipped by the existence check
+// =====================================================================
+
+test("CE-15: non-string cwd ({} / 42) in a registry entry → normalizeAgent rejects; the dispatch never reaches the existence check", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ce15-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    // Pre-C-8 a truthy non-string cwd ({} / 42 / true) passed the registry's
+    // truthiness check AND silently skipped the R7-AB existence assert
+    // (resolvePredictedDispatchCwd only recognizes strings) — a malformed
+    // entry dodged both defenses. The registry SSOT now fail-closes it, the
+    // same surface `registry validate` reads (listAgents → normalizeAgent).
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: {} } });
+    await assert.rejects(
+      () => dispatchRun({
+        agentId: "coder_low",
+        prompt: "x",
+        registryPath,
+        runDir: join(dir, "runs"),
+        spawnFn: fakeSpawn,
+        userEnvReader: NO_ENV_READER,
+      }),
+      (e) => {
+        assert.notEqual(e.name, "DispatchCwdNotFoundError", "not the existence check");
+        assert.match(e.message, /cwd must be a non-empty string/, "the registry SSOT owns the non-string-cwd refusal");
+        return true;
+      },
+    );
+    assert.equal(calls.length, 0, "zero forks");
+    // The same SSOT face `registry validate` walks (listAgents normalizes
+    // every entry) — the refusal is visible there too, not only at dispatch.
+    const { readRegistry } = await import("../../src/registry.js");
+    const registry = await readRegistry(registryPath);
+    assert.throws(
+      () => registry.listAgents(),
+      /cwd must be a non-empty string/,
+      "listAgents (the validate surface) rejects the non-string cwd",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
 // 8. SSOT identity — one class definition, two export surfaces
 // =====================================================================
 
@@ -440,4 +494,94 @@ test("CE-12: DispatchCwdNotFoundError exported from runDispatch.js IS the shared
   // runManagerCwdExistence.test.js.
   const err = new DispatchCwdNotFoundError(join(tmpdir(), "wao-ce12-no-such-dir"), "registry");
   assert.ok(err instanceof fromSsot, "instances satisfy the SSOT class identity");
+});
+
+// =====================================================================
+// 9. Capability symmetry (R7-C C-2) — HTTP backends exempt at layer 1 too
+// =====================================================================
+
+test("CE-13: opencode-serve agent (no preflightInvocation) + nonexistent registry cwd → NOT refused, forks exactly as before", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ce13-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    // Symmetry pin: layer 2 (RunManager.start, runManager.js) keys the cwd
+    // gate on the declared preflightInvocation capability — an HTTP backend
+    // (opencode-serve) threads cwd to the serve API as a REMOTE directory
+    // hint, never spawns a local process with that cwd, and is exempt. Layer
+    // 1 must not be stricter than layer 2 (the C-2 asymmetry): dispatching
+    // the example registry's coder_opencode_fallback shape with a registry
+    // cwd that does not exist locally must dispatch exactly as pre-R7 — the
+    // detached runner forks; whether the REMOTE directory exists is the serve
+    // side's business, not a local spawn failure.
+    const registryPath = makeRegistry(dir, {
+      coder_opencode_fallback: {
+        backend: "opencode-serve",
+        cwd: PLACEHOLDER_CWD,
+        serveUrl: "http://127.0.0.1:4297",
+        model: { providerID: "zhipuai-coding-plan", id: "glm-5.2" },
+      },
+    });
+    const runDir = join(dir, "runs");
+    const result = await dispatchRun({
+      agentId: "coder_opencode_fallback",
+      prompt: "x",
+      registryPath,
+      runDir,
+      spawnFn: fakeSpawn,
+      userEnvReader: NO_ENV_READER,
+    });
+    assert.equal(result.accepted, true, "the HTTP-shape dispatch is NOT refused by the local cwd gate");
+    assert.equal(calls.length, 1, "the detached runner forked exactly once");
+    assert.equal(calls[0].args.includes("--cwd"), false, "no explicit --cwd was supplied to thread");
+    const transcripts = listTranscripts(runDir);
+    assert.equal(transcripts.length, 1, "the dispatch transcript was written as usual");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
+// 10. Priority in the corner (R7-C C-3) — TD-110 typed error keeps its face
+// =====================================================================
+
+test("CE-14: sessionReuse agent + NO explicit cwd + nonexistent registry cwd → SessionReuseWorkspaceRequiredError (NOT the existence error), zero transcript, zero slot", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-ce14-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    // The corner R7-AB broke: pre-R7 the TD-110 (D2 A3) typed refusal owned
+    // the no-explicit-cwd sessionReuse face regardless of the registry cwd's
+    // existence; R7-AB's layer-1 assert fired first when the registry cwd was
+    // also bad, losing the documented contract (CLI --cwd guidance). C-3
+    // hoists the typed throw ABOVE the existence assert — same face as CE-10,
+    // now pinned in the bad-registry-cwd corner too.
+    const registryPath = makeRegistry(dir, {
+      researcher: { backend: "claude-code", cwd: PLACEHOLDER_CWD, sessionReuse: "lead_workspace" },
+    });
+    const runDir = join(dir, "runs");
+    await assert.rejects(
+      () => dispatchRun({
+        agentId: "researcher",
+        prompt: "q",
+        registryPath,
+        runDir,
+        leadSession: "lead-CE14",
+        // no cwd — the SessionReuseWorkspaceRequiredError face
+        spawnFn: fakeSpawn,
+        userEnvReader: NO_ENV_READER,
+      }),
+      (e) => {
+        assert.ok(e instanceof SessionReuseWorkspaceRequiredError,
+          "the TD-110 typed refusal owns the corner, not the existence check");
+        assert.equal(e.name, "SessionReuseWorkspaceRequiredError");
+        assert.notEqual(e.name, "DispatchCwdNotFoundError");
+        assert.match(e.message, /bound workspace \(cwd\) is required for a sessionReuse agent/);
+        return true;
+      },
+    );
+    assert.equal(existsSync(join(runDir, ".session-reuse")), false, "no sessionReuse routing slot claimed (hoist precedes resolveReuseTurn)");
+    assert.deepEqual(listTranscripts(runDir), [], "zero transcripts");
+    assert.equal(calls.length, 0, "zero forks");
+  } finally {
+    cleanupDir(dir);
+  }
 });

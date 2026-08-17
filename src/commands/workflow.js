@@ -151,7 +151,7 @@ async function workflowRunCommand(args, config) {
 /**
  * TD-102 最终收尾：从 execute() 结果构造 CLI node summary。
  * 纯函数，可独立测试。遍历 effectiveDef 的全部节点：
- * - 有 nodeResult: {completed, runId}
+ * - 有 nodeResult: {completed, runId, error?}（error 仅失败节点携带，R7-C C-1）
  * - skipped（失败传播/router 未选）: {completed:false, skipped:true}
  * - 其它未执行（如 timeout 截断）: {completed:false, skipped:false, notExecuted:true}
  * 输出键覆盖 effectiveDef 的全部节点且顺序稳定（按定义顺序）。
@@ -167,7 +167,13 @@ export function buildWorkflowNodeSummary(effectiveDef, result) {
     const id = node.id;
     const nr = result.nodeResults?.[id];
     if (nr) {
-      nodes[id] = { completed: nr.completed, runId: nr.runId };
+      // R7-C（C-1）：失败节点的 typed 文案随汇总透出（成功节点形状不变——无
+      // error 键，与既有 {completed, runId} 钉测字节兼容）。
+      nodes[id] = {
+        completed: nr.completed,
+        runId: nr.runId,
+        ...(nr.error ? { error: nr.error } : {}),
+      };
     } else if (skippedSet.has(id)) {
       nodes[id] = { completed: false, skipped: true };
     } else {

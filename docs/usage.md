@@ -256,11 +256,16 @@ npm run cli -- runs wait <runId> --format json       # 完整服务结果 + sema
 工作目录（显式 `--cwd`，缺省时 registry 条目的 `cwd`）**必须是已存在的目录**。
 不存在（或是文件）时派发/执行在任何副作用之前被拒绝——typed error
 `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，message 含解析后的
-绝对路径与来源标注；零 transcript、零 fork、零 worktree）。覆盖全部通道：后台派发
-（`run --background` / `spawn` / MCP `run_dispatch`，在派发服务层早拒绝）与前台执行
-（`run` 前台、workflow agent 节点、daemon `start`，在 RunManager.start 早拒绝——
-进程式 backend；HTTP serve backend 的 cwd 是远端目录提示，不做本机存在性判定）。
-判读与旧 transcript 的排障见 `docs/troubleshooting.md §3.2`。
+绝对路径与来源标注；零 transcript、零 fork、零 worktree）。检查按 backend 能力划分
+（与 M12-14 invocation 预检同一 capability 键 `preflightInvocation`）：本地进程式
+backend（claude-code / codex / kimi-code / deepseek-harness）在两层都查，HTTP serve
+backend（opencode-serve，cwd 是远端目录提示）两层一致豁免。**承重层是前台执行通道**
+（`run` 前台、workflow agent 节点、daemon `start`、`retry` → RunManager.start，以及
+`resume` 的进程重放分支 → RunManager.resume）——2026-08-16 的 22 条 researcher
+spawn_error 事故全部走 workflow 通道，即此层；**后台派发通道**（`run --background` /
+`spawn` / MCP `run_dispatch` → dispatchRun 派发服务层）是同款 typed 早拒绝的预防面
+（transcript 写入与 fork 之前）。判读与旧 transcript 的排障见
+`docs/troubleshooting.md §3.2`。
 
 ### 场景 3：并行跑多个 agent
 

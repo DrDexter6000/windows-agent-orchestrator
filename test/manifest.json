@@ -3,6 +3,7 @@
   "groups": {
     "pure": [
       "isolation-infra/alerts.test.js",
+      "isolation-infra/backendCapabilityMatrix.test.js",
       "isolation-infra/stateChangeReasons.test.js",
       "registry-roles/applicationRegistryInventory.test.js",
       "isolation-infra/canonicalRunner.test.js",

@@ -123,6 +123,12 @@ export class WorkflowEngine {
             nodeId,
             runId: result.runId,
             completed: result.completed,
+            // R7-C（C-1）：typed 拒绝文案（如 dispatch_cwd_not_found，含解析后路径）
+            // 随 node.completed 落盘到 wf_*.jsonl——否则诊断信息只活在引擎内存
+            // nodeResults 里，生产面零出口（CLI 汇总只投 {completed, runId} 时 wf
+            // transcript 是唯一持久出口）。payload 与 run.started.cwd 同数据类
+            // （控制面自持的路径输入），无泄密面。
+            ...(result.error ? { error: result.error } : {}),
             ...(result.routes ? { routes: result.routes } : {}),
           });
 

@@ -1114,3 +1114,70 @@ test("M12-25-REG-8: null/malformed injected inventory → registry_list fails CL
     }
   }
 });
+
+// =====================================================================
+// R7-C (C-4): run_dispatch collapses DispatchCwdNotFoundError to its OWN
+// closed-set text (not the opaque generic dispatch failure).
+// =====================================================================
+// The R7-AB layer-1 cwd existence refusal is the exact configuration mistake
+// that commit targets, and MCP is the Lead's primary dispatch surface — the
+// generic "run_dispatch failed" carried zero actionable signal for it. Same
+// closed-set discipline as CredentialMissing / ReadOnlyDeliveryConflict /
+// ReuseBusy / invalid_verification_path: the literal reason code
+// dispatch_cwd_not_found lets a Lead recognize the category, the guidance is
+// fixed, and the resolved absolute path (which the typed error's message
+// carries for CLI/local stderr) NEVER reaches the MCP wire.
+test("R7-C-4: run_dispatch + DispatchCwdNotFoundError → closed-set dispatch_cwd_not_found text, no path leak", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r7c4-"));
+  try {
+    // run_dispatch proves the workspace binding before calling the dispatcher —
+    // a minimal git repo satisfies it (same harness shape as mcpRunDispatch).
+    execSync("git init", { cwd: dir, stdio: "pipe" });
+    execSync("git config user.email test@test.com", { cwd: dir, stdio: "pipe" });
+    execSync("git config user.name Test", { cwd: dir, stdio: "pipe" });
+    writeFileSync(join(dir, "README.md"), "# test\n", "utf8");
+    execSync("git add README.md", { cwd: dir, stdio: "pipe" });
+    execSync("git commit -m init", { cwd: dir, stdio: "pipe" });
+
+    const LEAK_PATH = "D:\\definitely\\no\\such\\cwd";
+    let dispatchCalls = 0;
+    const fakeDispatcher = async () => {
+      dispatchCalls += 1;
+      // The SSOT typed error carries the resolved path in its message (for
+      // CLI/local stderr). Recognized here by error.name — exactly the
+      // mechanism the catch branch keys on.
+      const err = new Error(
+        `dispatch working directory does not exist: ${LEAK_PATH} (from the agent registry entry cwd)`,
+      );
+      err.name = "DispatchCwdNotFoundError";
+      err.reasonCode = "dispatch_cwd_not_found";
+      throw err;
+    };
+
+    const server = createWaoMcpServer({
+      registryPath: "/server/registry.json",
+      runDir: "/server/runs",
+      workspaceRoot: dir,
+      dispatchRunFn: fakeDispatcher,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_dispatch", arguments: { agentId: "coder_low", prompt: "x" } });
+      assert.equal(dispatchCalls, 1, "dispatcher reached (workspace bound), then refused typed");
+      assert.equal(res.isError, true, "error flagged");
+      const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+      assert.match(text, /dispatch_cwd_not_found/, "closed-set reason code surfaced");
+      assert.match(text, /does not exist/, "the fact is stated");
+      assert.match(text, /registry entry cwd/, "fix guidance names the registry lever");
+      assert.doesNotMatch(text, /run_dispatch failed/, "NOT the opaque generic dispatch text");
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes(LEAK_PATH), "the resolved path never reaches the MCP wire");
+      assert.ok(!dumped.includes(LEAK_PATH.replace(/\\/g, "\\\\")), "no escaped-path variant either");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});

@@ -118,7 +118,7 @@ Copy-Item config/agents.example.json config/agents.json
 | codex | tester | `codex login` |
 | Kimi Code | coder_mm | Kimi Code 登录态（无需 API key） |
 
-删到只剩一个 worker 也完全可用。每个保留的 worker 里的 `cwd` 可留模板值，派发时覆盖。
+删到只剩一个 worker 也完全可用。每个保留的 worker 里的 `cwd` 可留模板值，派发时覆盖（注意：对本地进程式 backend，派发时 cwd 不存在会被 typed 早拒绝——见 `docs/troubleshooting.md §3.2`）。
 
 ### 4d. 自检 registry 与环境（必做）
 

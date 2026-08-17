@@ -1444,10 +1444,23 @@ test("TD-88: workflow list 列出模板 + workflow run 按名字解析（R7-AB�
   // 2 路 researcher（example registry 的占位 cwd D:/projects/your-project），
   // 失败 transcript 直接泄漏进仓库真实 runs/。现在显式指向临时 run-dir——
   // 本测试对仓库 runs/ 的写入结构性归零（任何机器、任何 env 下均成立）。
+  //
+  // R7-C（C-6）与机器状态解耦：不再依赖 D:/projects/your-project 在本机不
+  // 存在（该路径存在的机器上本测试会硬失败且真实派发）。改用 fixture
+  // registry——形状来源 config/agents.example.json 的 researcher 条目
+  // （claude-code 进程式 backend），cwd 指向本测试 tmpdir 下的随机必缺路径，
+  // 任何机器上确定性不存在。
   const dir = mkdtempSync(join(tmpdir(), "wao-td88-wf-"));
   try {
     const wfRunDir = join(dir, "wf-runs");
     const bgRunDir = join(dir, "bg-runs");
+    const badCwd = join(dir, `no-such-project-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const fixtureRegistry = join(dir, "agents.td88-fixture.json");
+    writeFileSync(fixtureRegistry, JSON.stringify({
+      agents: {
+        researcher: { backend: "claude-code", cwd: badCwd },
+      },
+    }), "utf8");
 
     // 按名字调用应解析到 templates/ 目录。不验证 workflow 执行结果（节点失败
     // 是 per-node catch，引擎照常收尾输出汇总），只验证名字解析不报"找不到文件"
@@ -1455,7 +1468,7 @@ test("TD-88: workflow list 列出模板 + workflow run 按名字解析（R7-AB�
     const r2 = spawnSync(process.execPath, [
       "src/cli.js", "workflow", "run", "parallel-research",
       "--vars", "topicA=testA", "--vars", "topicB=testB",
-      "--registry", "config/agents.example.json", // 用 example 避免依赖真实 agents.json
+      "--registry", fixtureRegistry, // fixture（example 形状，cwd 必缺）——不依赖 example 占位路径在本机不存在
       "--run-dir", wfRunDir,
     ], { cwd: process.cwd(), encoding: "utf8", timeout: 15000 });
     assert.doesNotMatch(r2.stderr || "", /MODULE_NOT_FOUND|Cannot find module.*parallel-research/,
@@ -1463,38 +1476,41 @@ test("TD-88: workflow list 列出模板 + workflow run 按名字解析（R7-AB�
     assert.equal(r2.status, 0, `workflow 引擎应跑完并输出节点汇总，stderr=${r2.stderr}`);
     assert.match(r2.stdout, /"workflowRunId": "wf_/, "输出 workflow 级 runId");
 
-    // R7-AB 层二（workflow 节点通道）：example registry 的占位 cwd（本机不存在）
-    // 在 RunManager.start 被 typed 拒绝——agent 节点 completed:false 且无 runId
+    // R7-AB 层二（workflow 节点通道，事故通道）：fixture 的必缺 cwd 在
+    // RunManager.start 被 typed 拒绝——agent 节点 completed:false 且无 runId
     // （run 从未 start），临时 run-dir 只含 workflow 级 transcript、零 run
-    // transcript（typed 文案断言钉在引擎 nodeResults 层：
-    // run-lifecycle/runManagerCwdExistence.test.js RCE-8）。
+    // transcript。typed 文案断言钉在持久层（wf_*.jsonl 的
+    // workflow.node.completed.error，R7-C C-1）：
+    // run-lifecycle/runManagerCwdExistence.test.js RCE-8。
     const summary = JSON.parse(r2.stdout);
     assert.equal(summary.completed, false, "节点失败 → workflow 整体 completed:false");
     for (const nodeId of ["research_a", "research_b"]) {
       assert.ok(summary.nodes[nodeId], `${nodeId} 节点出现在汇总里`);
-      assert.equal(summary.nodes[nodeId].completed, false, `${nodeId} 因占位 cwd 被拒`);
+      assert.equal(summary.nodes[nodeId].completed, false, `${nodeId} 因必缺 cwd 被拒`);
       assert.equal(summary.nodes[nodeId].runId, undefined, `${nodeId} 无 runId——run 在 start 前置校验被拒，从未创建`);
+      assert.match(summary.nodes[nodeId].error, /dispatch_cwd_not_found/,
+        `${nodeId} 汇总透出闭集 reason code（R7-C C-1 CLI 投影）`);
     }
     const wfJsonl = existsSync(wfRunDir) ? readdirSync(wfRunDir).filter((f) => f.endsWith(".jsonl")) : [];
     assert.equal(wfJsonl.length, 1, "run-dir 只含 workflow 级 transcript");
     assert.match(wfJsonl[0], /^wf_/, "唯一 transcript 是 workflow 级（wf_ 前缀）");
 
-    // R7-AB 层一（同一缺陷的后台派发面）：example registry 的占位 cwd（本机不存在）
-    // 在派发服务层被 typed 拒绝。这里用【后台派发通道】端到端钉死该契约：
-    // exit 非零 + stderr 含 dispatch_cwd_not_found 与解析后的占位路径 +
+    // R7-AB 层一（同一缺陷的后台派发面，预防性）：fixture 的必缺 cwd 在派发
+    // 服务层被 typed 拒绝。这里用【后台派发通道】端到端钉死该契约：
+    // exit 非零 + stderr 含 dispatch_cwd_not_found 与解析后的必缺路径 +
     // run-dir 零 run transcript（早于任何 transcript 写入、零 fork）。
     const bg = spawnSync(process.execPath, [
       "src/cli.js", "run", "researcher",
       "--prompt", "x",
       "--background",
-      "--registry", "config/agents.example.json",
+      "--registry", fixtureRegistry,
       "--run-dir", bgRunDir,
     ], { cwd: process.cwd(), encoding: "utf8", timeout: 15000 });
-    assert.notEqual(bg.status, 0, "占位 cwd 的后台派发必须 exit 非零");
+    assert.notEqual(bg.status, 0, "必缺 cwd 的后台派发必须 exit 非零");
     assert.match(bg.stderr, /dispatch_cwd_not_found/, "stderr 含闭集 reason code");
     assert.match(bg.stderr, /dispatch working directory does not exist/, "stderr 含 typed 拒绝文案");
-    assert.ok(bg.stderr.includes(resolve("D:/projects/your-project")),
-      `stderr 含解析后的占位路径，实际：${bg.stderr}`);
+    assert.ok(bg.stderr.includes(resolve(badCwd)),
+      `stderr 含解析后的必缺路径，实际：${bg.stderr}`);
     assert.doesNotMatch(bg.stderr, /node\.exe ENOENT/, "不再出现归咎可执行文件的误导性 spawn ENOENT");
     const leaked = existsSync(bgRunDir)
       ? readdirSync(bgRunDir).filter((f) => f.endsWith(".jsonl"))

@@ -49,16 +49,20 @@ const MAX_PENDING_DELIVERY_WRITE_INTENTS = 256;
 
 // R7-AB: SSOT for the working-directory existence early-refusal shared by the
 // two dispatch/execution authorities — RunManager.start (foreground family:
-// `run` without --background, workflow agent nodes, daemon `start`) and
-// dispatchRun (background family: `run --background` / `spawn` / MCP
-// run_dispatch / daemon-dispatched). One class definition; runDispatch.js
-// imports it DOWNWARD (application→core, same direction as its existing
-// ../transcript.js / ../delivery.js imports) and re-exports it so its
-// established typed-error import surface stays stable. A dedicated
-// src/application/ home is impossible under the frozen L4 layering SSOT
-// (test/isolation-infra/layering.test.js: core→application is an upward edge
-// and the upward whitelist is exactly empty) — hosting here follows the
-// existing typed-error precedent (ReadOnlyWorktreeRequiredError below).
+// `run` without --background, workflow agent nodes, daemon `start`, `retry`)
+// plus RunManager.resume's replay re-spawn branch (R7-C C-5), and dispatchRun
+// (background family: `run --background` / `spawn` / MCP run_dispatch). One
+// class definition; runDispatch.js imports it DOWNWARD (application→core,
+// same direction as its existing ../transcript.js / ../delivery.js imports)
+// and re-exports it so its established typed-error import surface stays
+// stable. Hosting here is a precedent-conformance choice, not the only legal
+// home — the frozen L4 layering SSOT (test/isolation-infra/layering.test.js)
+// forbids core→application upward edges (the whitelist is exactly empty), so
+// a sibling src/application/ module is not importable from core, but a NEW
+// CORE_TOP module would be legal; this file follows the existing typed-error
+// precedent (ReadOnlyWorktreeRequiredError below) rather than widening the
+// top-level registry. (daemon `start` goes through manager.start — daemon.js
+// has no dispatchRun import — so daemon belongs to the start family above.)
 //
 // Defect this closes (2026-08-16, 22 researcher spawn_error runs in runs/):
 // Node spawn's classic trap — when the cwd option points at a missing
@@ -1151,6 +1155,19 @@ export class RunManager {
       const promptEvent = findLatest(events, "prompt.sent");
       if (!promptEvent?.prompt) return null;
       const originalSessionId = session.backendSessionId;
+      // R7-C (C-5): same capability-gated cwd existence assert as start (layer
+      // 2) — the replay re-spawn is a LOCAL OS spawn with cwd: agent.cwd
+      // (non-delivery runs: the run.started.cwd merged via getAgent; delivery
+      // runs: the worktree path, which proveLinkedWorktree above already
+      // proved exists). Without this, a non-delivery run whose cwd was deleted
+      // between start and resume re-spawned into the misleading
+      // executable-ENOENT face the R7-AB fix closed at start. Runs BEFORE any
+      // append/spawn (transcript bytes unchanged on refusal); HTTP-shape
+      // backends (no preflightInvocation) attach, never re-spawn locally, and
+      // are unaffected.
+      if (typeof backend.preflightInvocation === "function") {
+        assertExistingDispatchCwd({ explicitCwd: undefined, agentCwd: agent.cwd });
+      }
       // M12-14 Package 1: preflight the re-spawn BEFORE any append/spawn, mirroring
       // start. The persisted prompt + re-composed roleContract (carrying the
       // delivery contract + scope block) feed the SAME compileInvocation budget

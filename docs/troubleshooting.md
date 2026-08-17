@@ -187,7 +187,7 @@ serve 后台进程不一定。
 
 - **症状**：派发/执行终态 `spawn_error`，`run.error` 写着 `spawn C:\...\node.exe ENOENT`，但该 node.exe 实际存在（2026-08-16 一批 22 条 researcher 派发即此形状）
 - **判读**：**报错归咎 node.exe 但 node.exe 存在时，真因几乎总是 cwd 目录不存在**（Node spawn 的经典陷阱：`cwd` 选项指向不存在的目录时，ENOENT 会归咎到可执行文件名上）。工作目录来自显式 `--cwd`，否则来自 registry 条目的 `cwd`（example 模板里的 `D:/projects/your-project` 是文档占位路径，本机不存在）
-- **现状**：已双层早拒绝——后台派发通道（`run --background` / `spawn` / MCP `run_dispatch`）在派发服务层（dispatchRun），前台执行通道（`run` 前台 / workflow agent 节点 / daemon `start`，进程式 backend）在 RunManager.start。预测 cwd 解析（`path.resolve`）后不是已存在目录（存在但是文件同样算）时，在任何 transcript 写入/worktree 创建/fork/spawn 之前抛 typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，message 含解析后的绝对路径与来源标注）。**旧 transcript 见此判读**
+- **现状**：已双层早拒绝。**承重层是前台执行通道**（`run` 前台 / workflow agent 节点 / daemon `start` / `retry` → RunManager.start；`resume` 的进程重放分支 → RunManager.resume 同款防护）——2026-08-16 的 22 条事故 transcript 全部 run.started 先行（无 background_submitted）且带 wf_*.jsonl 兄弟，即 workflow 通道，走的正是此层；**后台派发通道**（`run --background` / `spawn` / MCP `run_dispatch`）在派发服务层（dispatchRun）是同款 typed 早拒绝的预防面。两层均按 backend 能力划分（`preflightInvocation`）：本地进程式 backend 两层都查，HTTP serve backend（cwd 是远端目录提示）两层一致豁免。预测 cwd 解析（`path.resolve`）后不是已存在目录（存在但是文件同样算）时，在任何 transcript 写入/worktree 创建/fork/spawn 之前抛 typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，message 含解析后的绝对路径与来源标注）。**旧 transcript 见此判读**
 - **修复**：`--cwd` 指向已存在的目标目录，或把 agents.json / agents.example.json 里的占位 `cwd` 改成真实项目路径（派发/执行会显式拒绝并指路，不会再走到 spawn 期）
 
 ---

@@ -157,6 +157,14 @@ export function normalizeAgent(id, agent) {
   if (!agent.cwd) {
     throw new Error(`Agent ${id} is missing cwd`);
   }
+  // R7-C (C-8): a non-string truthy cwd (e.g. {} / 42 / true) used to pass
+  // this truthiness check and silently skip the R7-AB cwd-existence early
+  // refusal downstream (runManager.js resolvePredictedDispatchCwd only
+  // recognizes strings) — fail closed at the registry SSOT instead, exactly
+  // like `registry validate` surfaces every other malformed entry.
+  if (typeof agent.cwd !== "string") {
+    throw new Error(`Agent ${id}: cwd must be a non-empty string`);
+  }
   if (agent.backend === "opencode-serve") {
     if (!agent.serveUrl) {
       throw new Error(`Agent ${id} is missing serveUrl`);
