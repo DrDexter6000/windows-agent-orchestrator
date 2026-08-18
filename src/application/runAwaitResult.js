@@ -68,7 +68,7 @@
 
 import { join, resolve } from "node:path";
 
-import { readTranscript, findState, TERMINAL_STATES, findLastEventSeq, extractCanonicalAgentId } from "../transcript.js";
+import { readTranscript, findState, findLatestBound, TERMINAL_STATES, findLastEventSeq, extractCanonicalAgentId } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { summarizeLiveness } from "./runWait.js";
@@ -266,8 +266,10 @@ function projectIsolationFailureReason(events, runId, terminalState) {
 function collectCompactFromSnapshot(events, runId, agentId, env, projectFn) {
   try {
     const items = reconstructItemsFromEvents(events);
-    const session = [...events].reverse().find((event) =>
-      event?.type === "session.created" && event.runId === runId);
+    // R18 (TD-128 W2)：手搓绑定反查（reverse + find）换 findLatestBound SSOT——
+    // 行为恒等（同一「末条 runId 绑定 session.created」语义），纪律统一到
+    // transcript.js 绑定读取器的单一定义处。
+    const session = findLatestBound(events, "session.created", runId);
     const backend = typeof session?.backend === "string" && session.backend.length > 0
       ? session.backend
       : "unknown";
@@ -519,7 +521,17 @@ export async function runAwaitResult(input) {
   let cursor;
   let agentId;
   try {
-    state = findState(events);
+    // R18 (TD-128 W2)：await 的状态投影绑定到请求 runId（R15 范式——
+    // `findState(events.filter(bound))`，runDelivery.js:364 / sessionReuse.js
+    // R15 同款）：findState 的 state_change 末条胜出语义下，外 run 伪 terminal
+    // 尾条不再把 await 翻成终态（或反向阻断终态观察）。
+    // legacy 行为选择（观测面 = 降级不设门）：全无信封的 pre-envelope
+    // transcript 过滤为零事件 → findState([]) = "pending"——状态不可归属时
+    // 永不投影为终态（与 R15 的"不可归属按在飞"同族），不 throw、不转
+    // read_failure，等待窗照常耗尽后如实返回 not_terminal（TD-129b：本安装
+    // 面 pre-envelope transcript ≈0，实际影响≈0）。cursor/agentId 维持各自
+    // 既有 SSOT（findLastEventSeq / extractCanonicalAgentId，不在本轮锚点）。
+    state = findState(events.filter((e) => e && e.runId === runId));
     cursor = findLastEventSeq(events) ?? 0;
     agentId = extractCanonicalAgentId(events, runId);
   } catch {
@@ -670,7 +682,10 @@ export async function runAwaitResult(input) {
     let pollState;
     let pollCursor;
     try {
-      pollState = findState(currentEvents);
+      // R18 (TD-128 W2)：等待循环内每次 poll 快照的状态投影同款绑定过滤
+      // （与初始读 :522 同一 runId、同一 R15 范式）——外 run 伪 terminal 尾条
+      // 不再把窗口内的 poll 翻成 terminal-during-wait 提前返回。
+      pollState = findState(currentEvents.filter((e) => e && e.runId === runId));
       pollCursor = findLastEventSeq(currentEvents) ?? currentCursor;
     } catch {
       // Residual poll derive failure on an otherwise-usable snapshot — the

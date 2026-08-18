@@ -22,7 +22,10 @@ import { ClaudeCodeBackend } from "./backends/claudeCode.js";
 import { CodexBackend } from "./backends/codex.js";
 import { OpenCodeServeBackend } from "./backends/opencodeServe.js";
 import { DeepSeekHarnessBackend } from "./backends/deepSeekHarness.js";
-import { readTranscript, STATE_CHANGE_REASON } from "./transcript.js";
+import { readTranscript, findFirstBound, STATE_CHANGE_REASON } from "./transcript.js";
+// R18 (TD-128 W1)：scorecard 报表事实读取的绑定作用域——metrics.js 单一定义处
+// （src 同层边，与既有 transcript.js import 同族）。
+import { boundReportScope } from "./metrics.js";
 
 const SMOKE_PROMPT = "Reply with exactly: smoke ok";
 
@@ -222,7 +225,13 @@ async function smokeScorecard(cwd, runDir) {
     const waitResult = await run.waitForCompletion({ waitTimeout: 180000 });
 
     const events = await readTranscript(run.transcript.filePath);
-    const scEvent = events.find((e) => e.type === "scorecard.checked");
+    // R18 (TD-128 W1)：scorecard 事实读取绑定到本 run 信封（boundReportScope 单一
+    // 定义处；首条纪律与修复前 events.find 一致）——外 run/伪造尾条不再供给
+    // smoke PASS/FAIL 判定所读的 scEvent.passed。
+    const scope = boundReportScope(events, run.runId);
+    const scEvent = scope
+      ? findFirstBound(scope, "scorecard.checked", run.runId)
+      : events.find((e) => e.type === "scorecard.checked");
     const runEvents = events.filter((e) => e.type === "run.event");
 
     console.log(`  runId:        ${run.runId}`);
@@ -256,7 +265,12 @@ async function smokeScorecard(cwd, runDir) {
     const waitResult = await run.waitForCompletion({ waitTimeout: 180000 });
 
     const events = await readTranscript(run.transcript.filePath);
-    const scEvent = events.find((e) => e.type === "scorecard.checked");
+    // R18 (TD-128 W1)：同场景 1——scorecard 事实读取绑定到本 run 信封（外 run/
+    // 伪造尾条不再供给 smoke PASS/FAIL 判定所读的 scEvent.passed）。
+    const scope = boundReportScope(events, run.runId);
+    const scEvent = scope
+      ? findFirstBound(scope, "scorecard.checked", run.runId)
+      : events.find((e) => e.type === "scorecard.checked");
     const lastChange = events.filter((e) => e.type === "run.state_change").at(-1);
 
     console.log(`  runId:        ${run.runId}`);

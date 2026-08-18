@@ -22,8 +22,12 @@ import { readdir, unlink, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-import { readTranscript, findState, TERMINAL_STATES, REVERIFY_FAILURE_CODES } from "../transcript.js";
-import { aggregateRunMetrics, aggregateSummary, formatDuration } from "../metrics.js";
+import { readTranscript, findState, findFirstBound, TERMINAL_STATES, REVERIFY_FAILURE_CODES } from "../transcript.js";
+import { aggregateRunMetrics, aggregateSummary, formatDuration, boundReportScope } from "../metrics.js";
+// R18 (TD-128c 同类)：runs metrics/scorecard 的 runId join 前校验复用 delivery.js
+// isValidRunId SSOT（与 commands/shared.js loadRun 同款接线；delivery.js 是底层
+// 模块——commands → core 下向边，无环）。
+import { isValidRunId } from "../delivery.js";
 import { diagnoseFailure } from "../diagnosis.js";
 // M9-5A: diagnosis delegated to shared application service.
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
@@ -560,9 +564,19 @@ async function runsMetricsCommand(args, config) {
   if (!runId) {
     throw new Error("runs metrics requires <runId> (or --summary for aggregate)");
   }
+  // R18 (TD-128 W1)：runId 在 join 前过 isValidRunId（shared.js loadRun 同款接线）。
+  // 锚点复核结论：runsMetricsCommand/runsScorecardCommand 均不经 loadRun（该
+  // helper 服务 status/tail/collect/stop/retry），两命令此前直接 join+read，
+  // 校验缺失——路径拼接面（../、绝对路径、分隔符）与 TD-128c 同类。fixed-safe
+  // 文案不回显输入。
+  if (!isValidRunId(runId)) {
+    throw new Error("runId is malformed (expected a run id: letters, digits, underscore, hyphen)");
+  }
   const filePath = join(runDir, `${runId}.jsonl`);
   const events = await readTranscript(filePath);
-  const m = aggregateRunMetrics(events);
+  // R18 (TD-128 W1)：聚合事实读取绑定到本 run 信封（boundReportScope 单一定
+  // 义处）——外 run/伪造尾条不再污染 state/tokens/cost/duration。
+  const m = aggregateRunMetrics(events, runId);
   if (options.format === "json") {
     console.log(JSON.stringify({ runId, ...m }, null, 2));
     return;
@@ -588,11 +602,26 @@ async function runsScorecardCommand(args, config) {
   if (!runId) {
     throw new Error("runs scorecard requires <runId>");
   }
+  // R18 (TD-128 W1)：runId join 前过 isValidRunId（与上方 runs metrics 同款接线，
+  // loadRun 同款 fixed-safe 文案）。
+  if (!isValidRunId(runId)) {
+    throw new Error("runId is malformed (expected a run id: letters, digits, underscore, hyphen)");
+  }
   const filePath = join(runDir, `${runId}.jsonl`);
   const events = await readTranscript(filePath);
-  const scEvent = events.find((e) => e.type === "scorecard.checked");
+  // R18 (TD-128 W1)：scorecard 事实读取经 boundReportScope 收窄到本 run 信封
+  // （首条纪律——与修复前 events.find 的首条序语义一致）：本 run 无自身
+  // scorecard.checked 时，外 run 尾条不再伪造出一份 scorecard 报告；reason 推
+  // 断的 run.started 读取同款绑定。全无信封 legacy transcript 保持既有读法
+  // （boundReportScope 单一定义处的降级选择）。
+  const scope = boundReportScope(events, runId);
+  const scEvent = scope
+    ? findFirstBound(scope, "scorecard.checked", runId)
+    : events.find((e) => e.type === "scorecard.checked");
   if (!scEvent) {
-    const started = events.find((e) => e.type === "run.started");
+    const started = scope
+      ? findFirstBound(scope, "run.started", runId)
+      : events.find((e) => e.type === "run.started");
     const reason = started?.scorecardConfigured ? "failed_before_scorecard" : "no_rules";
     if (options.format === "json") {
       console.log(JSON.stringify({ runId, scorecard: null, reason }, null, 2));

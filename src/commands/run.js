@@ -28,8 +28,11 @@ import { randomUUID } from "node:crypto";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { readTranscript } from "../transcript.js";
+import { readTranscript, findFirstBound } from "../transcript.js";
 import { renderRunSummary } from "../cliRunSummary.js";
+// R18 (TD-128 W1)：scorecard 报表事实读取的绑定作用域——metrics.js 单一定义处
+// （boundReportScope；commands → core 下向边，与 runs.js 既有 metrics import 同款）。
+import { boundReportScope } from "../metrics.js";
 import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag, resolveReadOnlyFlag } from "./shared.js";
 import { prepareDeliveryRequest } from "../delivery.js";
 import { COMMAND_NAMES, RUN_USAGE_TEXT } from "../cliHelp.js";
@@ -143,10 +146,18 @@ function parseScorecardRules(raw, source = "--scorecard-rules") {
 
 // P4 决策A：从 transcript 取已落盘的 scorecard.checked 事件（runManager 无论通过/失败
 // 都 append）。无 scorecard（run 没配规则）→ null，renderRunSummary 不输出 scorecard 段。
-async function loadScorecardFromTranscript(transcriptPath) {
+// R18 (TD-128 W1)：scorecard 事实读取绑定到本 run 信封（boundReportScope 单一定
+// 义处；首条纪律与修复前 events.find 的首条序语义一致）——本 run 无自身
+// scorecard.checked 时，外 run/伪造尾条不再供给 run 汇总的 scorecard 段。
+// R18 起导出（导出仅为探针位：test/run-lifecycle/boundReadSweep.test.js 直测
+// 篡改形状；调用面仍只有本文件的 runCommand）。
+export async function loadScorecardFromTranscript(transcriptPath, runId = null) {
   try {
     const events = await readTranscript(transcriptPath);
-    const sc = events.find((e) => e.type === "scorecard.checked");
+    const scope = boundReportScope(events, runId);
+    const sc = scope
+      ? findFirstBound(scope, "scorecard.checked", runId)
+      : events.find((e) => e.type === "scorecard.checked");
     return sc ? { passed: sc.passed, checks: sc.checks } : null;
   } catch {
     return null; // transcript 读失败不阻断 header 渲染
@@ -516,7 +527,11 @@ export async function runCommand(args, config) {
   // P4 决策A：scorecard 从 transcript 的 scorecard.checked 事件取（runManager 无论通过/失败都落盘）。
   // TD-53 修复：注入前置于格式分支之前——原 json 分支 early-return 在注入之前，丢字段。
   // 现 json 与 text 两路都带 scorecard（renderRunSummary 读 waitResult.scorecard，行为不变）。
-  const scorecard = await loadScorecardFromTranscript(run.transcript.filePath);
+  // R18：runId 取 transcript 句柄自身的 context.runId（本 run 权威 id）。
+  const scorecard = await loadScorecardFromTranscript(
+    run.transcript.filePath,
+    run.transcript.context.runId,
+  );
   if (scorecard) waitResult.scorecard = scorecard;
   // R10-A: structured effective-model field for --format json (the text format
   // got the standalone echo line above). Same synthesized object the

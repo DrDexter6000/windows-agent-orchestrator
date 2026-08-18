@@ -159,7 +159,13 @@ export async function stopRun(input) {
     throw new Error(`Run ${runId} has no session metadata (no session.created event)`);
   }
 
-  const fromState = findState(events);
+  // R18 (TD-128 W3)：fromState 投影绑定到请求 runId（R15 范式——
+  // `findState(events.filter(bound))`）。fromState 落进 transitionState 写出的
+  // run.state_change.from 字段（审计事实）：外 run 尾条不再供给该审计值。
+  // legacy 无信封 transcript 到达不了这里——上方 session 查找（findLatestBound）
+  // 已按 "no session metadata" 拒绝（R13-C），故本处无需 legacy 分支（空绑定集
+  // → findState([]) = "pending" 的保守默认仅在理论形状可达）。
+  const fromState = findState(events.filter((e) => e && e.runId === runId));
   const stopRequestedAttempt = {
     type: "run.stop_requested",
     payload: {

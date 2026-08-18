@@ -418,7 +418,7 @@ npm run cli -- resume <runId> --wait
 retry 的 per-dispatch 覆盖继承（R12，与 resume 重建链对称）：
 
 - **任务文本取法（R13-C / TD-127）**：retry 派发的任务文本取**本 run 最后一条 `prompt.sent` 记录（纯 runId 绑定）**——尾部追加的跨 runId 伪造记录不采信（信封绑定纪律，读取器 SSOT 在 `transcript.js` 的 `findLatestBound`/`findFirstBound`）；合法双写形状（TD-54：spawn 前首写 + spawn 后补写）仍取最后一条。诚实边界（R13-C 统一口径）：绑定只杀跨 run 注入与错读——同 runId 的伪造追加（无论是否带 `messageId`）仍会被采信；该攻击面等同于持有 `runs/` 写权限，读取端无解，真边界在写入端完整性。R13 曾加"优先取带 `messageId` 的末条"收窄，R13-C 移除：claude-code/codex/kimi-code 均为 ProcessBackend 家族，其合法双写落盘**均无** `messageId`（spawn 结果的 `undefined` 经 JSON 序列化丢键），该收窄对此家族是死代码。
-- **行为变更（R13 / R13-C 文案如实化）**：信封时代之前的 legacy transcript（事件无 `runId` 字段）经绑定读取器找不到本 run 的 `prompt.sent` → retry **硬拒绝**（文案如实覆盖两情形："no runId-bound prompt.sent found in this transcript — pre-envelope legacy formats are not retryable through the bound reader; re-dispatch explicitly with `run`"）；`resume` 对无信封 legacy transcript 同样拒绝（return null，与 resume 既有拒绝语义一致）。
+- **行为变更（R13 / R13-C 文案如实化）**：信封时代之前的 legacy transcript（事件无 `runId` 字段）经绑定读取器找不到本 run 的 `prompt.sent` → retry **硬拒绝**（文案如实覆盖两情形："no runId-bound prompt.sent found in this transcript — pre-envelope legacy formats are not retryable through the bound reader; re-dispatch explicitly with `run`"）；`resume` 对无信封 legacy transcript 同样拒绝（return null，与 resume 既有拒绝语义一致）。R18（TD-128 W3）起 resume 的**终态门**同款 runId 绑定——尾部追加的外 run/伪造 `run.state_change` 不再把 terminal run 的拒绝翻成接续、也不再误拒合法续接；legacy 拒绝语义（null）不变。
 - **继承范围（诚实口径，R12-C）**：retry 重新派发**任务文本与 per-dispatch 覆盖**；delivery 声明 / 只读声明 / 隔离形状**不**继承（R12 前既有行为不变）——需要完整形状时用 `run` 显式重发。
 - 源 run 的 `run.started.modelOverride` / `run.started.reasoningOverride` 事实会被**原样继承**到新派发——权威是**首条绑定该 runId 的 `run.started`**（transcript 信封绑定纪律，与 resume 的首条取法同族；尾部追加的伪造 `run.started` 即使形状合法也不采信）。值仍过 `run` 既有的形状门/闭集门与合成入口——新 run 的 `run.started` 落同样的覆盖事实。源 run 无覆盖且未显式给 flag → 零覆盖（与旧输出逐字节一致）。
 - **旧格式宽容（R12-C）**：源 transcript 缺 `run.started`（R10 前旧格式）→ retry 按**零覆盖**放行，不拒绝——与 resume 的拒绝语义不同但各自正确（resume 要接续同一会话，找不到事实只能拒绝；retry 是全新派发，零覆盖即注册表策略）。
@@ -446,6 +446,8 @@ duration: 5.1s
 tokens:   input=5518 output=7 reasoning=3761
 cost:     $0.0576
 ```
+
+**R18 报表读绑定（TD-128 W1，2026-08-18）**：`runs metrics <runId>` 与 `runs scorecard <runId>` 的事实读取（state/tokens/cost/duration/scorecard 与 reason）是 **runId 绑定** 的（单一定义处 `src/metrics.js` 的 `boundReportScope`）——尾部追加的外 run/伪造行不再污染报表值；两命令的 `runId` 在拼接 transcript 路径前过 `isValidRunId`（delivery.js SSOT，与 `loadRun` 同款拒绝文案，不回显输入）。全无信封的 legacy transcript（pre-envelope）保持既有读法照常出报表——合法路径与既有输出零变化。`run` 前台命令汇总的 scorecard 段与 `npm run smoke` 的 scorecard 判定同款绑定。
 
 ### 场景 7：管理历史 run
 
@@ -1136,6 +1138,8 @@ CLI fallback：`npm run cli -- runs list [--agent ID] [--latest N]`。
 - **显式 `0` 或正整数**：调用者有意统计 `seq > afterSeq` 的全部进展（含历史），用于续读。把上次返回的 `cursor` 当 `afterSeq` 传回即可增量续读。
 
 `waitMs` 是 Lead 的单次观察窗口（区间、默认值与 `waitMs:0` 有意无效的约束见生成层描述）；point-in-time 读取使用 `run_await_result({waitMs:0})` 或 `run_status`。窗口到期只返回 liveness，**不表示 worker 失败，也不会中止 worker**。
+
+**R18 状态投影读绑定（TD-128 W2，2026-08-18；仅 `run_await_result`）**：await 的状态投影（初始读与等待循环内每次 poll）是 **runId 绑定** 的（`findState` 只看本 run 信封事件）——尾部追加的外 run/伪造 `run.state_change` 不再把 await 翻成终态、也不再阻断终态观察。**行为变更（仅 legacy 形状）**：全无信封的 pre-envelope transcript（事件无 `runId` 字段）状态投影降级为 `pending`——不可归属状态永不投影为终态（不 throw、不转 read_failure，等待窗如实耗尽后如实返回非终态；本机实测存量 pre-envelope transcript 为 0，实际影响≈0）。`run_wait` 的状态投影不在本轮锚点（未变）。
 
 - **返回时机**：服务在两种情况下返回——(1) run 到达终态（completed/failed/aborted/timed_out），此时 `returnedEarly:true`；(2) `waitMs` 到期仍未终态，此时 `returnedEarly:false` 并附带 liveness 摘要让 Lead 决定下一步。**普通新事件不会触发提前返回**——只有终态会；窗口内的新进展通过到期的 liveness=`progress` 体现。
 - 若返回 `terminal:true`，该终态事实已足够，Lead 直接进入 `run_collect`；除恢复、独立复核或没有 wait 结果外，不需要再调用一次 `run_status`。

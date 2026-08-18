@@ -1270,7 +1270,17 @@ export class RunManager {
     transcript.context.agentId = events[0]?.agentId ?? "unknown";
     transcript.seq = events.at(-1)?.seq ?? 0;
 
-    const state = findState(events);
+    // R18 (TD-128 W3)：resume 的终态门改绑定过滤（R15 范式——
+    // `findState(events.filter(bound))`，runDelivery.js:364 / sessionReuse.js
+    // R15 同款）。注册危害：外 run 伪 running 尾条可把 terminal run 的 resume
+    // 拒绝翻成接续（findState 末条胜出）；反向的伪 terminal 尾条误拒合法续接。
+    // 绑定后状态只由本 run 自身事件计算。
+    // legacy 衔接（R15"不可归属按 busy/拒绝"语义）：全无信封的 pre-envelope
+    // transcript 过滤为零事件 → findState([]) = "pending" → 过终态门后由下方
+    // R13-C 绑定 session/run.started 读取落入既有 return null 拒绝——与修复前
+    // 在终态门拒绝（null）同一外部结果（legacy resume 本就自 R13-C 起拒绝，
+    // 见 resumeBoundRead.test.js R13C-RESUME-5），仅拒绝门位置不同。
+    const state = findState(events.filter((e) => e && e.runId === runId));
     if (TERMINAL_STATES.includes(state)) {
       return null;
     }
