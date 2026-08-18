@@ -2010,8 +2010,11 @@ export function findLatest(events, type) {
  *     first-append discipline as resume).
  *   - stop: LAST-bound (session.created / run.started) — the kill lane
  *     targets the run's LATEST session (pre-binding latest-wins order kept).
- *   - collect: UNBOUND findLatest (runCollect.js) — deliberately unchanged
- *     (Owner decision, R13); the one remaining unbound lifecycle read.
+ *   - collect (runCollect.js, R16): session.created LAST-bound + run.started
+ *     FIRST-bound — the serve redirect faces (serveUrl/sessionId, directory)
+ *     must come from the run's own facts; legacy pre-envelope transcripts fall
+ *     into the existing "no session metadata" refusal (Owner decision, R16:
+ *     no legacy compatibility).
  *   - activity: LAST-bound session.created (latest session wins, report
  *     face).
  *   - reuse routing (sessionReuse.js, R14): LAST-bound session.created
@@ -2025,7 +2028,8 @@ export function findLatest(events, type) {
  * bound match — undefined. There is NO blanket lenient handling: each lane
  * declares its own explicit behavior (R14) — retry HARD-REFUSES with fixed
  * text; resume returns null (its existing refusal); stop falls into its
- * "no session metadata" refusal; correction and continuation are already
+ * "no session metadata" refusal; collect likewise refuses via that same
+ * "no session metadata" face (R16); correction and continuation are already
  * refused upstream by the extractCanonicalAgentId identity gate
  * (unknown_run / parent_not_found); activity already throws upstream at
  * assertEventsBoundToRunId; reuse routing DEGRADES to a fresh first turn
