@@ -19,6 +19,16 @@
 //   W1d runActivity.js —— backend 事实改 findLatestBound。assertEventsBoundToRunId
 //       上游已 throw，交换行为恒等；钉末条语义 + 上游 fail-closed 不变量。
 //   W2  commands/shared.js loadRun —— join 前 isValidRunId（delivery.js SSOT）。
+//   R15（2026-08-18，TD-128 findState 族；R14 验收会审 coder_mm 对抗席 P1）：
+//       sessionReuse.js 三处 findState 前任状态投影改绑定过滤
+//       （resolveReuseTurn / resolveLineageFirstTurn /
+//       resolveLineageContinuationTurn——各自绑定到槽位前任 entry.runId，
+//       runDelivery.js:364 同款范式）。findState 末条胜出语义下 append-only
+//       外 run run.state_change 尾条修复前可现实翻转 busy/resume/first 路由
+//       （P4：在飞前任 + 伪 completed 尾 → resume = 同一 provider 会话被并发
+//       驱动，违反该文件自身 Contract 6）。探针 P4/P5/P6/P6b + 全无信封前任
+//       语义钉（不可归属 = 在飞 busy）。合法路径回归 = 既有 m11-11c/m12-7
+//       套件全绿（正常 transcript 每行带 runId 信封 → 过滤器恒等）。
 //
 // 诚实边界（对齐 transcript.js 绑定读取器口径）：绑定只杀跨 run 注入/错读；
 // 同 runId 追加伪造 = runs/ 写权限攻击面，读侧无解。本文件全部探针只验跨 run/
@@ -32,7 +42,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { JsonlTranscript } from "../../src/transcript.js";
-import { resolveReuseTurn } from "../../src/application/sessionReuse.js";
+import { resolveReuseTurn, resolveLineageFirstTurn, resolveLineageContinuationTurn } from "../../src/application/sessionReuse.js";
 import { correctRun } from "../../src/application/runCorrection.js";
 import { continueRun } from "../../src/application/runContinue.js";
 import { readRunActivity } from "../../src/application/runActivity.js";
@@ -367,5 +377,187 @@ test("R14-LR-1: loadRun 拒绝穿越/注入形状的 runId（fixed-safe 文案�
         return true;
       },
     );
+  } finally { cleanupDir(dir); }
+});
+
+// =====================================================================
+// R15 sessionReuse findState 族 —— LIVE 修复探针（coder_mm 对抗席 P4/P5/P6/P6b）
+//
+// 三处前任状态投影此前是无绑定 findState(events)：findLatestIndex 是数组序
+// 末条胜出（transcript.js），append-only 外 run run.state_change 尾条直接赢
+// 得门判。每个探针的"修复前"行为都经末条胜出语义可推（与 W1a 的 R14 探针
+// 同一诚实口径：不虚构不可达路径）。
+// =====================================================================
+
+test("R15-SR-P4: 篡改探针 — 在飞前任（绑定 session.created + 非终态）+ 外 run 尾条 completed 不再翻转 reuse 路由（busy 保持）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r15-p4-"));
+  try {
+    // 第一次调用为前任认领复用槽位（同 m11-11c TURN 系列结构）。
+    await resolveReuseTurn({
+      runDir: dir, runId: "run_prior_p4", leadSession: "lead-P4",
+      workspace: "D:/proj", agentId: "researcher",
+    });
+    // 前任在飞：绑定 session.created + 非终态（submitted）。
+    const t = new JsonlTranscript(join(dir, "run_prior_p4.jsonl"), { runId: "run_prior_p4", agentId: "researcher" });
+    await t.transitionState(null, "pending", "seed");
+    await t.append("session.created", { backend: "process", backendSessionId: "proc_p4" });
+    await t.transitionState("pending", "submitted", "spawned");
+    // 尾部外 run 伪造 completed。修复前 findState 末条胜出 → 读成 terminal →
+    // 前任自身有绑定 session.created → resume：同一 provider 会话被并发驱动
+    // （Contract 6 现实违反——coder_mm 探针 P4，非理论）。
+    appendForeignLine(t.filePath, {
+      type: "run.state_change", runId: "run_evil", agentId: "researcher",
+      to: "completed", from: "submitted", reason: "evil",
+    });
+
+    const decision = await resolveReuseTurn({
+      runDir: dir, runId: "run_new_p4", leadSession: "lead-P4",
+      workspace: "D:/proj", agentId: "researcher",
+    });
+    assert.equal(decision.kind, "busy",
+      "绑定过滤后状态只由前任自身事件计算 → 非终态保持 busy（外 run 尾条不采信，不再翻成 resume）");
+    assert.equal(decision.activeRunId, "run_prior_p4");
+  } finally { cleanupDir(dir); }
+});
+
+test("R15-SR-P5: 反向探针 — 终态前任（绑定 session.created + completed）+ 外 run 尾条伪 running 不再阻断派发（resume 恢复）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r15-p5-"));
+  try {
+    await resolveReuseTurn({
+      runDir: dir, runId: "run_prior_p5", leadSession: "lead-P5",
+      workspace: "D:/proj", agentId: "researcher",
+    });
+    // 前任合法可续接：绑定 session.created + 终态 completed。
+    const t = new JsonlTranscript(join(dir, "run_prior_p5.jsonl"), { runId: "run_prior_p5", agentId: "researcher" });
+    await t.transitionState(null, "pending", "seed");
+    await t.append("session.created", { backend: "process", backendSessionId: "proc_p5" });
+    await t.transitionState("pending", "completed", "done");
+    // 尾部外 run 伪 running。修复前末条胜出 → 非终态 → busy：合法 resume 被
+    // 阻断（派发 DoS 面——coder_mm 探针 P5）。
+    appendForeignLine(t.filePath, {
+      type: "run.state_change", runId: "run_evil", agentId: "researcher",
+      to: "running", from: "completed", reason: "evil",
+    });
+
+    const decision = await resolveReuseTurn({
+      runDir: dir, runId: "run_new_p5", leadSession: "lead-P5",
+      workspace: "D:/proj", agentId: "researcher",
+    });
+    assert.equal(decision.kind, "resume",
+      "绑定过滤后取前任自身 completed → 正常 resume（伪 running 尾条不采信，不再误拒）");
+    assert.equal(decision.routing.turn, "resume");
+  } finally { cleanupDir(dir); }
+});
+
+test("R15-SR-LEGACY: 全无信封前任 transcript（零绑定事件）→ 状态不可归属按在飞处理（busy），不再降级 first（R15 语义选择钉）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r15-legacy-"));
+  try {
+    await resolveReuseTurn({
+      runDir: dir, runId: "run_prior_leg", leadSession: "lead-LEG",
+      workspace: "D:/proj", agentId: "researcher",
+    });
+    // pre-envelope legacy 形状：所有行均无 runId 字段（含终态 state_change 与
+    // session.created）。R14 时无绑定 findState 读到 completed → terminal →
+    // findLatestBound 无匹配 → 降级 first；R15 绑定后过滤为零事件 →
+    // findState([]) = "pending" → busy（不可归属 = 在飞，永不并发驱动——
+    // 与 R14-SR-3 的区别：SR-3 前任有绑定状态行、仅 session.created 无信封，
+    // 仍走降级 first 不变）。
+    const lines = [
+      { type: "run.state_change", to: "pending", from: null, reason: "seed", agentId: "researcher", ts: "2026-08-18T00:00:00.000Z", seq: 1 },
+      { type: "session.created", backend: "process", backendSessionId: "proc_leg", agentId: "researcher", ts: "2026-08-18T00:00:00.100Z", seq: 2 },
+      { type: "run.state_change", to: "completed", from: "pending", reason: "done", agentId: "researcher", ts: "2026-08-18T00:00:00.200Z", seq: 3 },
+    ];
+    writeFileSync(join(dir, "run_prior_leg.jsonl"), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+
+    const decision = await resolveReuseTurn({
+      runDir: dir, runId: "run_new_leg", leadSession: "lead-LEG",
+      workspace: "D:/proj", agentId: "researcher",
+    });
+    assert.equal(decision.kind, "busy",
+      "全无信封前任 → 零绑定事件 → 状态不可归属 → 按在飞 busy（R14 时此处降级 first；TD-129b：本安装面 pre-envelope 前任 ≈0，实际影响≈0）");
+  } finally { cleanupDir(dir); }
+});
+
+test("R15-LIN-P6: lineage 续接 busy 门 — 在飞 owner + 外 run 尾条 completed 不再翻成 resume；终态 owner + 伪 running 尾条不再误拒", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r15-p6-"));
+  try {
+    // (a) 篡改方向：在飞 owner + 外 run 伪 completed 尾条 → 必须保持 busy。
+    await resolveLineageFirstTurn({
+      runDir: dir, runId: "run_root_p6a", leadSession: "lead-P6a",
+      workspace: "D:/proj", agentId: "coder_hq", rootRunId: "run_root_p6a",
+    });
+    const ta = new JsonlTranscript(join(dir, "run_root_p6a.jsonl"), { runId: "run_root_p6a", agentId: "coder_hq" });
+    await ta.append("run.started", { backend: "claude-code" });
+    await ta.transitionState(null, "pending", "created");
+    await ta.append("session.created", { backend: "claude-code", backendSessionId: "abc" });
+    await ta.transitionState("pending", "submitted", "spawned");
+    // 修复前末条胜出 → 读成 terminal → 槽位被 child 收回 + resume：lineage
+    // provider 会话在 owner 仍在飞时被并发驱动（Contract 6——探针 P6）。
+    appendForeignLine(ta.filePath, {
+      type: "run.state_change", runId: "run_evil", agentId: "coder_hq",
+      to: "completed", from: "submitted", reason: "evil",
+    });
+    const contA = await resolveLineageContinuationTurn({
+      runDir: dir, runId: "run_child_p6a", parentRunId: "run_root_p6a", rootRunId: "run_root_p6a",
+      leadSession: "lead-P6a", workspace: "D:/proj", agentId: "coder_hq",
+    });
+    assert.equal(contA.kind, "busy",
+      "绑定过滤后 owner 仍非终态 → busy（外 run completed 尾条不再把 lineage 续接门翻成 resume）");
+    assert.equal(contA.activeRunId, "run_root_p6a");
+
+    // (b) 反向：终态 owner + 外 run 伪 running 尾条 → 正常续接（不再被伪尾条阻断）。
+    await resolveLineageFirstTurn({
+      runDir: dir, runId: "run_root_p6r", leadSession: "lead-P6r",
+      workspace: "D:/proj", agentId: "coder_hq", rootRunId: "run_root_p6r",
+    });
+    const tb = new JsonlTranscript(join(dir, "run_root_p6r.jsonl"), { runId: "run_root_p6r", agentId: "coder_hq" });
+    await tb.append("run.started", { backend: "claude-code" });
+    await tb.transitionState(null, "pending", "created");
+    await tb.append("session.created", { backend: "claude-code", backendSessionId: "abc" });
+    await tb.transitionState("pending", "completed", "done");
+    appendForeignLine(tb.filePath, {
+      type: "run.state_change", runId: "run_evil", agentId: "coder_hq",
+      to: "running", from: "completed", reason: "evil",
+    });
+    const contB = await resolveLineageContinuationTurn({
+      runDir: dir, runId: "run_child_p6r", parentRunId: "run_root_p6r", rootRunId: "run_root_p6r",
+      leadSession: "lead-P6r", workspace: "D:/proj", agentId: "coder_hq",
+    });
+    assert.equal(contB.kind, "resume",
+      "绑定过滤后 owner 终态 → 正常续接（伪 running 尾条不采信，不再误拒合法 continuation）");
+    assert.equal(contB.routing.turn, "resume");
+  } finally { cleanupDir(dir); }
+});
+
+test("R15-LIN-P6b: first 认领门 — 非终态 prior owner + 外 run 尾条 completed 不再翻成 first 认领（busy 保持）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r15-p6b-"));
+  try {
+    // 用另一个 runId 先占住 lineage 槽位（resolveLineageFirstTurn 的
+    // prior-owner 路径：新鲜根正常不可能有前任，对立复用/对抗形状可达——
+    // 函数文档注释明示该路径）。
+    await resolveLineageFirstTurn({
+      runDir: dir, runId: "run_squatter", leadSession: "lead-P6b",
+      workspace: "D:/proj", agentId: "coder_hq", rootRunId: "run_root_p6b",
+    });
+    const t = new JsonlTranscript(join(dir, "run_squatter.jsonl"), { runId: "run_squatter", agentId: "coder_hq" });
+    await t.append("run.started", { backend: "claude-code" });
+    await t.transitionState(null, "pending", "created");
+    await t.append("session.created", { backend: "claude-code", backendSessionId: "abc" });
+    await t.transitionState("pending", "submitted", "spawned");
+    // 外 run 伪 completed 尾条：修复前末条胜出 → 读成终态 → 槽位被 first
+    // 认领，真实在飞的 squatter 与新 first 并发驱动同一 lineage 会话
+    // （Contract 6——探针 P6b）。
+    appendForeignLine(t.filePath, {
+      type: "run.state_change", runId: "run_evil", agentId: "coder_hq",
+      to: "completed", from: "submitted", reason: "evil",
+    });
+
+    const claim = await resolveLineageFirstTurn({
+      runDir: dir, runId: "run_root_p6b", leadSession: "lead-P6b",
+      workspace: "D:/proj", agentId: "coder_hq", rootRunId: "run_root_p6b",
+    });
+    assert.equal(claim.kind, "busy",
+      "绑定过滤后 prior owner 仍非终态 → busy（外 run 尾条不再把 first 认领门翻成认领）");
+    assert.equal(claim.activeRunId, "run_squatter");
   } finally { cleanupDir(dir); }
 });

@@ -25,7 +25,8 @@
 //   - Does not import src/commands/*, src/mcp/*, the MCP SDK, or zod.
 //   - Depends on node:crypto, node:fs/promises, node:path, ../transcript.js
 //     (readTranscript/findState/findLatestBound — the transcript SSOT; R14 the
-//     session.created read is runId-BOUND to the prior run), and
+//     session.created read is runId-BOUND to the prior run, R15 likewise the
+//     three findState prior-state projections), and
 //     ../canonicalAgentId.js. The transcript is the source of truth for the
 //     authoritative state of a prior matching run.
 //
@@ -338,7 +339,23 @@ export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, 
       }
 
       if (exists && events.length > 0) {
-        const state = findState(events);
+        // R15 (TD-128 findState family): the prior-state projection is BOUND to
+        // the prior run — the same filter discipline as runDelivery.js's
+        // findState(events.filter(...)). findState is last-wins over the raw
+        // array, so an append-only foreign/envelope-less tail line used to WIN
+        // this gate (coder_mm adversarial probe): an in-flight prior (bound
+        // session.created + running) plus a foreign run.state_change{to:
+        // "completed"} tail flipped busy → resume — the same provider session
+        // driven concurrently, a live Contract 6 violation; a forged running
+        // tail over a terminal prior blocked dispatch instead. The state is now
+        // computed ONLY from the prior run's own events; foreign lines are
+        // invisible, not fatal — the gate degrades instead of failing the
+        // routing closed. A FULLY pre-envelope prior transcript (zero bound
+        // events) now projects "pending" → busy here: a prior whose state
+        // cannot be attributed is treated as in-flight and never concurrently
+        // driven (envelope-era transcripts always carry bound state_changes;
+        // pre-envelope priors measure ≈0 on this install, TD-129b).
+        const state = findState(events.filter((e) => e && e.runId === entry.runId));
         if (state && !TERMINAL_STATES.includes(state)) {
           // Contract 6: never concurrently drive the same provider session.
           return { kind: "busy", activeRunId: entry.runId };
@@ -353,18 +370,23 @@ export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, 
         // run), so unlike the runCorrection/runContinue lanes the binding is a
         // LIVE behavior change, not just discipline consistency.
         //
-        // Legacy choice (explicit, R14): a pre-envelope prior transcript
-        // (events without a runId field) yields no bound match and DEGRADES to
-        // the existing "terminal without session.created" branch — the slot is
-        // claimed as a fresh FIRST turn, never a refusal. Rationale: the
-        // safety-critical direction is never RESUMING a session that cannot be
-        // attributed to the prior run; a fresh first turn resumes nothing
-        // untrusted (the opaque uuid is derived from the identity triple, not
-        // from the transcript). Pre-envelope prior transcripts measure ≈0 on
-        // this install (TD-129b), so the practical cost of the lost resume is
-        // nil. This is a degrade, not fail-closed, because the dispatch
-        // decision it feeds is turn selection — blocking the Lead's dispatch
-        // over unattributable history would be disproportionate.
+        // Legacy choice (explicit, R14; scope narrowed by R15): a prior whose
+        // bound events project terminal but that has NO bound session.created —
+        // crashed pre-conversation, or a session.created line that is itself
+        // foreign/envelope-less (R14-SR-1/SR-3 probes) — DEGRADES to the
+        // existing "terminal without session.created" branch: the slot is
+        // claimed as a fresh FIRST turn, never a refusal. (A FULLY pre-envelope
+        // prior transcript also landed here as first before R15; R15's bound
+        // state gate above now stops it earlier as busy — see the R15 note.)
+        // Rationale: the safety-critical direction is never RESUMING a session
+        // that cannot be attributed to the prior run; a fresh first turn
+        // resumes nothing untrusted (the opaque uuid is derived from the
+        // identity triple, not from the transcript). Pre-envelope prior
+        // transcripts measure ≈0 on this install (TD-129b), so the practical
+        // cost of the lost resume is nil. This is a degrade, not fail-closed,
+        // because the dispatch decision it feeds is turn selection — blocking
+        // the Lead's dispatch over unattributable history would be
+        // disproportionate.
         if (findLatestBound(events, "session.created", entry.runId)) {
           await store.writeEntry(keyHash, { runId, updatedAt: clock });
           return { kind: "resume", routing: { ...routing, turn: "resume" } };
@@ -511,7 +533,18 @@ export async function resolveLineageFirstTurn({ runDir, runId, leadSession, work
       let exists = true;
       try { events = await readTranscript(priorPath); } catch { exists = false; events = []; }
       if (exists && events.length > 0) {
-        const state = findState(events);
+        // R15 (TD-128 findState family): BOUND to the prior slot owner
+        // (entry.runId — the transcript read is that run's file), the same
+        // filter discipline as resolveReuseTurn above. findState is last-wins
+        // over the raw array, so a foreign run.state_change tail used to flip
+        // this first-claim gate (coder_mm probe P6b): a non-terminal prior
+        // owner plus a foreign completed tail read terminal → the lineage slot
+        // was claimed first while the real owner was still in flight (two
+        // drivers on one provider session, Contract 6); a forged running tail
+        // over a terminal owner blocked the claim instead. State now comes
+        // ONLY from the prior owner's own events; a fully pre-envelope owner
+        // transcript projects "pending" → busy (unattributable = in-flight).
+        const state = findState(events.filter((e) => e && e.runId === entry.runId));
         if (state && !TERMINAL_STATES.includes(state)) {
           return { kind: "busy", activeRunId: entry.runId };
         }
@@ -567,7 +600,19 @@ export async function resolveLineageContinuationTurn({ runDir, runId, parentRunI
       let exists = true;
       try { events = await readTranscript(priorPath); } catch { exists = false; events = []; }
       if (exists && events.length > 0) {
-        const state = findState(events);
+        // R15 (TD-128 findState family): BOUND to the prior slot owner
+        // (entry.runId — the parent or a prior continuation that claimed the
+        // lineage key), the same filter discipline as resolveReuseTurn above.
+        // findState is last-wins over the raw array, so a foreign
+        // run.state_change tail used to flip this continuation busy gate
+        // (coder_mm probe P6): an in-flight prior owner plus a foreign
+        // completed tail read terminal → the lineage provider session was
+        // reclaimed and resumed while the owner was still running (Contract
+        // 6); a forged running tail over a terminal owner refused the
+        // continuation instead. State now comes ONLY from the prior owner's
+        // own events; a fully pre-envelope owner transcript projects "pending"
+        // → busy (unattributable = in-flight).
+        const state = findState(events.filter((e) => e && e.runId === entry.runId));
         if (state && !TERMINAL_STATES.includes(state)) {
           // Non-terminal owner: a concurrent continuation or an in-flight
           // sibling. Refuse before any worktree mutation or spawn.
