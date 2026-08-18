@@ -2971,3 +2971,52 @@ test("R11-1: RUN_USAGE_TEXT 用法页与生成层同步携带 --reasoning（CLI 
   const rdInput = rdSection.slice(0, rdSection.indexOf("## ", 1) === -1 ? rdSection.length : rdSection.indexOf("## ", 1));
   assert.match(rdInput, /\| reasoning \| string \| no \| enum: minimal/, "run_dispatch input 表含 reasoning 行（闭集枚举）");
 });
+
+// ---------------------------------------------------------------------------
+// R12（Owner 2026-08-18）：retry 继承 per-dispatch 覆盖。文档锚：usage.md 场景 5
+// retry 节（继承语义 + 替换 flag + 坏值拒绝 + 无覆盖重试指 run）与 HELP_TEXT
+// retry 命令行（[--model ID] [--reasoning EFFORT]，生成层 docs/surface/cli.md
+// 同步）——代码有、文档漂正是本文件存在的意义。
+// ---------------------------------------------------------------------------
+
+test("R12: usage.md retry 节记录覆盖继承语义 + 替换 flag + 坏值 fail-closed + 无覆盖重试指 run（人读权威）", () => {
+  const usage = read("docs/usage.md");
+  const start = usage.indexOf("### 场景 5：重试 / 恢复");
+  const end = usage.indexOf("### 场景 6");
+  assert.ok(start !== -1 && end > start, "usage.md 必须有场景 5（重试/恢复）节");
+  const section = usage.slice(start, end);
+  // 继承语义：源 run.started 覆盖事实原样继承（与 resume 重建链对称）。
+  assert.ok(/run\.started\.modelOverride/.test(section) && /run\.started\.reasoningOverride/.test(section),
+    "retry 节必须点名继承来源（run.started 双覆盖事实）");
+  assert.match(section, /同形重试|原样继承/, "必须表述继承语义");
+  assert.match(section, /与 resume|resume 重建链/, "必须锚与 resume 的对称性");
+  // 替换 flag：显式给出替换继承值；校验与 run 同源（闭集）。
+  assert.match(section, /--model <id>/, "必须记录 --model 替换 flag");
+  assert.match(section, /--reasoning <effort>/, "必须记录 --reasoning 替换 flag");
+  assert.match(section, /显式替换/, "必须表述替换语义（flag 优先于继承值）");
+  assert.match(section, /minimal\/low\/medium\/high\/xhigh\/max/, "必须记录 effort 闭集（与 run 同源）");
+  // 坏持久化值：fail-closed 拒绝，固定文案 + 闭集码，不静默忽略/降级。
+  assert.match(section, /fail-closed|fail closed/, "必须记录坏值 fail-closed");
+  assert.match(section, /retry_inherit_model_invalid/, "必须记录 model 坏值闭集码");
+  assert.match(section, /retry_inherit_reasoning_invalid/, "必须记录 reasoning 坏值闭集码");
+  assert.match(section, /绝不静默|never silently/i, "必须声明不静默忽略/降级");
+  // 可见性回显：inheritedOverrides（advisory 措辞纪律）。
+  assert.match(section, /inheritedOverrides/, "必须记录 inheritedOverrides 回显字段");
+  assert.match(section, /不证明 provider 接受/, "回显必须保持 advisory 措辞（对齐 effective model 纪律）");
+  // 无覆盖重试的出口：直接 run 重发。
+  assert.match(section, /无覆盖.*重试[\s\S]{0,80}直接\s*`?run`?|直接\s*`?run`?[\s\S]{0,80}重发/,
+    "必须给出'想无覆盖重试请直接 run 重发'指引");
+  // 字节回归承诺：无覆盖时字段缺席。
+  assert.match(section, /字段缺席|逐字节一致/, "必须记录无覆盖时的字节回归承诺");
+});
+
+test("R12: HELP_TEXT retry 命令行与生成层同步携带替换 flag（CLI 面）", async () => {
+  const { HELP_TEXT } = await import("../../src/cliHelp.js");
+  assert.match(HELP_TEXT, /^  retry <runId> \[--wait\] \[--run-dir DIR\] \[--model ID\] \[--reasoning EFFORT\]$/m,
+    "HELP_TEXT retry 行必须携带 [--model ID] [--reasoning EFFORT]");
+  // 生成层同步（docs/surface/cli.md 由 gen:surface 从 HELP_TEXT 再生，字节由
+  // docsSurface 守卫——这里锚 retry 行的 flag 在场，防"源改了忘再生成"）。
+  const cliSurface = read("docs/surface/cli.md");
+  assert.match(cliSurface, /retry <runId> \[--wait\] \[--run-dir DIR\] \[--model ID\] \[--reasoning EFFORT\]/,
+    "docs/surface/cli.md 的 retry 行必须与 HELP_TEXT 同步（再生成交付）");
+});

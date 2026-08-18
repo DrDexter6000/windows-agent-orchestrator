@@ -22,7 +22,7 @@ Commands:
   tail <runId> [--limit N] [--follow] [--run-dir DIR]
   collect <runId> [--limit N] [--cursor TOKEN] [--mode full|compact] [--final] [--format json] [--run-dir DIR]
   stop <runId> [--run-dir DIR]
-  retry <runId> [--wait] [--run-dir DIR]
+  retry <runId> [--wait] [--run-dir DIR] [--model ID] [--reasoning EFFORT]
   resume <runId> [--wait] [--run-dir DIR]
   runs list [--run-dir DIR] [--agent AGENT_ID] [--latest N] [--format json]
   runs summary [--run-dir DIR] [--format json]

@@ -406,11 +406,23 @@ Lead 验收通过 transcript-backed 原子 first-decision-wins 写入 `run.deliv
 # 重试：用原 run 的 prompt 重新跑一个新 run
 npm run cli -- retry <runId> --wait
 
+# 重试时替换源 run 的 per-dispatch 覆盖（显式 flag 优先于继承值）
+npm run cli -- retry <runId> --model <id> --reasoning <effort>
+
 # 恢复：接续一个未完成的 run
 #   opencode-serve：attach 到已有 session
 #   claude/codex：重放原 prompt（进程式无法 attach，只能重放）
 npm run cli -- resume <runId> --wait
 ```
+
+retry 的 per-dispatch 覆盖继承（R12，"同形重试"语义，与 resume 重建链对称）：
+
+- 源 run 的 `run.started.modelOverride` / `run.started.reasoningOverride` 事实会被**原样继承**到新派发（值仍过 `run` 既有的形状门/闭集门与合成入口——新 run 的 `run.started` 落同样的覆盖事实）。源 run 无覆盖且未显式给 flag → 零覆盖（与旧输出逐字节一致）。
+- `--model <id>` / `--reasoning <effort>` **显式替换**对应继承值（校验与 `run` 同源：模型 id 形状门 + effort 六值闭集 `minimal/low/medium/high/xhigh/max`）；不给 flag 则用继承值。
+- **坏持久化值 fail-closed 拒绝**：源 transcript 的覆盖值损坏（非字符串/空/`--` 前缀/含空白/超长、或 effort 集外）时 retry 直接拒绝（固定文案指向源 run，`retry_inherit_model_invalid` / `retry_inherit_reasoning_invalid`，零新 transcript）——绝不静默忽略、绝不静默降级回注册表模型。显式替换 flag **不豁免**坏值拒绝（坏 transcript 事实一律拒绝；flag 形状门先于该检查，两者文案不同）。
+- 成功输出在确有继承/替换时携带 advisory 字段 `inheritedOverrides`（`model`/`reasoning` 各带 `value` + `source: "inherited"|"replaced"`；与 effective model 回显同一措辞纪律——展示 WAO 下发了什么，不证明 provider 接受该值）。无覆盖时该字段缺席。
+- 想做**无覆盖**重试（回到注册表策略）：不要用 retry——直接 `run` 用原 prompt 重发即可。
+- 互斥自然继承：retry 无 `--require-certified`/reuse 入口；若源 agent 的注册表配置在两次派发之间被改成 session-reuse 形状，start 的既有互斥门会拒绝该 retry（这是正确行为）。
 
 ### 场景 6：查看指标
 

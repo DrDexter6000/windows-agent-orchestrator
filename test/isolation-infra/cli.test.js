@@ -13,6 +13,9 @@ import { join, resolve } from "node:path";
 import { parseOptions, loadPrompt, runAndWait, buildDashboard, runsDashboardCommand, runCommand, statusCommand, collectCommand, resolveTargetCwd } from "../../src/cli.js";
 import { readTranscript, findState } from "../../src/transcript.js";
 import { spawnCommand } from "../../src/commands/run.js";
+// R12: retry 的 per-dispatch 覆盖继承（同形重试）——直接 import 命令实现（lifecycle
+// 不是 public export 面，无 re-export 需求；与 spawnCommand 同一 import 纪律）。
+import { retryCommand } from "../../src/commands/lifecycle.js";
 import { rmrfRetry, sleepSync } from "../_rmrfHelper.mjs";
 // Round2-AB（friction 2026-08-15 #1/#2/#3）：COMMAND_NAMES 关系守卫 + run --help 用法页。
 import { COMMAND_NAMES, HELP_TEXT } from "../../src/cliHelp.js";
@@ -3815,6 +3818,319 @@ test("R11-1-CLI-8: run --background --reasoning 全链 — CLI JSON 回显 + run
     assert.deepEqual(started.reasoning, { effort: "xhigh" },
       "CLI→dispatchRun --reasoning argv→backgroundRunner 解析→RunManager.start 合成，全链落地");
     assert.equal(started.reasoningOverride, "xhigh", "run.started 携带显式 override 事实");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// R12（Owner 2026-08-18）：retry 继承 per-dispatch 覆盖（"同形重试"，与 resume
+// 重建链对称）。三道护栏：可见性回显（inheritedOverrides）、显式替换 flag
+// （--model/--reasoning，与 run 同源 CLI 形状校验）、同一套校验门 + 坏持久化值
+// fail-closed（固定文案指向源 run，零新 transcript）。源 run 无覆盖且未给 flag
+// → 零覆盖，输出与旧 face 逐字节兼容。
+// 夹具：注入 backend（捕获 spawn 收到的合成 policy）+ 原生形状 readRegistry；
+// 源 transcript 手工落盘（readTranscript 只做逐行 JSON.parse，形状与真实
+// run.started/prompt.sent 事实同构）。零 provider、零 token、零真实派发。
+// ---------------------------------------------------------------------------
+
+// R12 共用夹具：fake backend 捕获 spawn 的合成 policy；registry agent 带齐
+// model+reasoning 静态策略（含兄弟字段，验证"只替换 .id/.effort"）。
+function makeRetryInheritFixture(dir) {
+  const spawned = [];
+  const fakeBackend = {
+    validateAgentPolicy(agent) {
+      assert.ok(agent.model && typeof agent.model.id === "string",
+        "synthesized model reaches the ordinary policy validation surface");
+    },
+    async spawn(agent) {
+      spawned.push({ model: agent.model, reasoning: agent.reasoning });
+      return {
+        backend: "claude-code",
+        backendSessionId: "s_r12",
+        messageId: "m_r12",
+        admittedSeq: 1,
+        async *events() {
+          yield { kind: "assistant", role: "assistant", parts: [{ type: "text", text: "done" }] };
+          yield { kind: "done", reason: "completed" };
+        },
+        abort: async () => {},
+        isAlive: () => false,
+      };
+    },
+  };
+  const readRegistry = async () => ({
+    getAgent(id, overrides = {}) {
+      return {
+        id, backend: "claude-code", cwd: dir,
+        model: { id: "glm-5.3", contextWindow: 1000000 },
+        reasoning: { effort: "medium" },
+        ...overrides,
+      };
+    },
+    listAgents() { return []; },
+  });
+  const config = {
+    registry: "x", runDir: dir, pollInterval: 10, waitTimeout: 5000,
+    timeout: 5000, retries: 0, backendFor: () => fakeBackend, readRegistry,
+  };
+  return { config, spawned };
+}
+
+/**
+ * 解析 retry 输出的单个 pretty-printed JSON 对象。
+ * 本文件 import 了 src/cli.js——其自执行 main() 的异步 printHelp() 可能落进
+ * 首个执行测试的捕获窗口（既有套件级怪癖，对不做整体 JSON.parse 的测试无害）。
+ * retryCommand 恰打印一个 JSON 对象且 HELP_TEXT 不含花括号，故从首个 "{" 切到
+ * 末个 "}" 即可确定性还原（容忍前后污染）。
+ */
+function parseRetryJson(out) {
+  const start = out.indexOf("{");
+  const end = out.lastIndexOf("}");
+  assert.ok(start !== -1 && end > start, `retry JSON 输出应在捕获中（got: ${out.slice(0, 80)}…）`);
+  return JSON.parse(out.slice(start, end + 1));
+}
+
+/** 落盘一个源 run transcript（run.started [+ 覆盖事实] + prompt.sent）。 */
+function writeRetrySource(dir, runId, { modelOverride, reasoningOverride } = {}) {
+  const started = {
+    seq: 1, ts: "2026-08-18T00:00:00.000Z", type: "run.started", agentId: "claude_worker",
+    backend: "claude-code", cwd: dir,
+    model: { id: "glm-5.3", contextWindow: 1000000 },
+    reasoning: { effort: "medium" },
+    ...(modelOverride !== undefined ? { modelOverride } : {}),
+    ...(reasoningOverride !== undefined ? { reasoningOverride } : {}),
+  };
+  const prompt = {
+    seq: 2, ts: "2026-08-18T00:00:00.100Z", type: "prompt.sent",
+    agentId: "claude_worker", prompt: "original task prompt",
+  };
+  writeFileSync(join(dir, `${runId}.jsonl`), `${JSON.stringify(started)}\n${JSON.stringify(prompt)}\n`, "utf8");
+}
+
+test("R12-CLI-1: 双覆盖继承全链 — start 收到同值合成（兄弟字段保留）+ 新 run.started 落双事实 + 回显 inherited", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r12-inherit-"));
+  try {
+    writeRetrySource(dir, "run_src", { modelOverride: "gpt-5.6-sol-xhigh", reasoningOverride: "xhigh" });
+    const { config, spawned } = makeRetryInheritFixture(dir);
+    const out = await captureLog(async () => {
+      await retryCommand(["run_src", "--run-dir", dir], config);
+    });
+    const parsed = parseRetryJson(out);
+    // start 收到同值（传给 spawn 的合成 policy：只替换 .id/.effort，兄弟字段保留）。
+    assert.deepEqual(spawned, [{
+      model: { id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 },
+      reasoning: { effort: "xhigh" },
+    }], "inherited overrides reach start's synthesis: only .id/.effort replaced");
+    // 新 run.started 落同样的覆盖事实（start 只在收到 option 时才写该字段）。
+    const events = await readTranscript(parsed.transcript);
+    const started = events.find((e) => e.type === "run.started");
+    assert.equal(started.modelOverride, "gpt-5.6-sol-xhigh", "新 run.started.modelOverride = 继承值");
+    assert.equal(started.reasoningOverride, "xhigh", "新 run.started.reasoningOverride = 继承值");
+    assert.deepEqual(started.model, { id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 });
+    assert.deepEqual(started.reasoning, { effort: "xhigh" });
+    // 可见性回显：advisory，值 + closed-set source 标记。
+    assert.deepEqual(parsed.inheritedOverrides, {
+      model: { value: "gpt-5.6-sol-xhigh", source: "inherited" },
+      reasoning: { value: "xhigh", source: "inherited" },
+    }, "继承时输出 inheritedOverrides（source: inherited）");
+    assert.equal(parsed.originalRunId, "run_src");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R12-CLI-2: 显式替换 — --model/--reasoning 各自替换继承值，未替换者继续继承；纯替换标记 replaced", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r12-replace-"));
+  try {
+    // 源：model 覆盖 + reasoning 覆盖各一；另备一个无覆盖源。
+    writeRetrySource(dir, "run_m", { modelOverride: "gpt-5.6-sol-xhigh", reasoningOverride: "medium" });
+    writeRetrySource(dir, "run_none");
+    const { config, spawned } = makeRetryInheritFixture(dir);
+
+    // (a) --model 替换：model 换新值、reasoning 保持继承。
+    let out = await captureLog(() => retryCommand(["run_m", "--run-dir", dir, "--model", "glm-4.7"], config));
+    let parsed = parseRetryJson(out);
+    let events = await readTranscript(parsed.transcript);
+    let started = events.find((e) => e.type === "run.started");
+    assert.equal(started.modelOverride, "glm-4.7", "--model 替换继承的 model");
+    assert.equal(started.reasoningOverride, "medium", "未给 --reasoning → 继续继承");
+    assert.deepEqual(parsed.inheritedOverrides, {
+      model: { value: "glm-4.7", source: "replaced" },
+      reasoning: { value: "medium", source: "inherited" },
+    }, "替换者 source: replaced，未替换者 source: inherited");
+
+    // (b) --reasoning 替换：reasoning 换新值、model 保持继承。
+    out = await captureLog(() => retryCommand(["run_m", "--run-dir", dir, "--reasoning", "max"], config));
+    parsed = parseRetryJson(out);
+    events = await readTranscript(parsed.transcript);
+    started = events.find((e) => e.type === "run.started");
+    assert.equal(started.modelOverride, "gpt-5.6-sol-xhigh", "未给 --model → 继续继承");
+    assert.equal(started.reasoningOverride, "max", "--reasoning 替换继承的 effort");
+    assert.deepEqual(parsed.inheritedOverrides, {
+      model: { value: "gpt-5.6-sol-xhigh", source: "inherited" },
+      reasoning: { value: "max", source: "replaced" },
+    });
+
+    // (c) 双替换：两个都标 replaced，替换值回显。
+    out = await captureLog(() => retryCommand(["run_m", "--run-dir", dir, "--model", "glm-4.7", "--reasoning", "low"], config));
+    parsed = parseRetryJson(out);
+    events = await readTranscript(parsed.transcript);
+    started = events.find((e) => e.type === "run.started");
+    assert.equal(started.modelOverride, "glm-4.7");
+    assert.equal(started.reasoningOverride, "low");
+    assert.deepEqual(parsed.inheritedOverrides, {
+      model: { value: "glm-4.7", source: "replaced" },
+      reasoning: { value: "low", source: "replaced" },
+    }, "双替换各自标记 replaced");
+
+    // (d) 纯替换：源无覆盖 + 显式 flag → 回显 replaced（不是 inherited）。
+    out = await captureLog(() => retryCommand(["run_none", "--run-dir", dir, "--model", "glm-4.7"], config));
+    parsed = parseRetryJson(out);
+    events = await readTranscript(parsed.transcript);
+    started = events.find((e) => e.type === "run.started");
+    assert.equal(started.modelOverride, "glm-4.7", "纯替换也在新 run.started 落覆盖事实");
+    assert.deepEqual(parsed.inheritedOverrides, {
+      model: { value: "glm-4.7", source: "replaced" },
+    }, "源无覆盖 + 显式 flag → source: replaced");
+    // 四次 retry 都真实 spawn 了合成 policy（最终态对账）。
+    assert.equal(spawned.length, 4, "四次 retry 各 spawn 一次");
+    assert.equal(spawned[3].model.id, "glm-4.7");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R12-CLI-3: 无覆盖 retry 输出逐字节兼容 — 无 inheritedOverrides 字段、新 run.started 无覆盖事实、spawn 用注册表原策略", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r12-none-"));
+  try {
+    writeRetrySource(dir, "run_plain");
+    const { config, spawned } = makeRetryInheritFixture(dir);
+    const out = await captureLog(() => retryCommand(["run_plain", "--run-dir", dir], config));
+    const parsed = parseRetryJson(out);
+    // 旧 face 的键集 = originalRunId/newRunId/transcript + run.result（backend 句柄
+    // 四字段）。inheritedOverrides 缺席是字节回归的强钉（键集级而非子串级）。
+    assert.deepEqual(
+      Object.keys(parsed).sort(),
+      ["admittedSeq", "backend", "backendSessionId", "messageId", "newRunId", "originalRunId", "transcript"],
+      "无覆盖 retry 输出键集与旧 face 完全一致（无 inheritedOverrides）",
+    );
+    assert.ok(!out.includes("inheritedOverrides"), "输出字符串不含 inheritedOverrides");
+    const events = await readTranscript(parsed.transcript);
+    const started = events.find((e) => e.type === "run.started");
+    assert.equal("modelOverride" in started, false, "新 run.started 无 modelOverride（payload 形状不变）");
+    assert.equal("reasoningOverride" in started, false, "新 run.started 无 reasoningOverride");
+    assert.deepEqual(started.model, { id: "glm-5.3", contextWindow: 1000000 }, "注册表原策略原样落盘");
+    assert.deepEqual(spawned[0].model, { id: "glm-5.3", contextWindow: 1000000 }, "零合成：spawn 用注册表策略");
+    assert.deepEqual(spawned[0].reasoning, { effort: "medium" });
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R12-CLI-4: 坏持久化值 fail-closed — 五种坏 model 形 + 坏 reasoning 形全拒绝（固定文案指向源 run，零新 transcript）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r12-bad-"));
+  try {
+    // R10-A-CLI-4 的五种坏形（对持久化事实的镜像）：布尔（裸 flag 形）、空串、
+    // "--" 前缀、含空白、超长。
+    const badModels = [
+      ["run_bad_bool", true],
+      ["run_bad_empty", ""],
+      ["run_bad_dash", "--next-flag"],
+      ["run_bad_space", "has space"],
+      ["run_bad_long", "x".repeat(129)],
+    ];
+    for (const [runId, value] of badModels) {
+      writeRetrySource(dir, runId, { modelOverride: value });
+    }
+    // reasoning 坏形：集外 / 大小写 / 布尔 / 空串 / "--" 前缀。
+    const badReasonings = [
+      ["run_bad_r_ultra", "ultra"],
+      ["run_bad_r_case", "HIGH"],
+      ["run_bad_r_bool", true],
+      ["run_bad_r_empty", ""],
+      ["run_bad_r_dash", "--next"],
+    ];
+    for (const [runId, value] of badReasonings) {
+      writeRetrySource(dir, runId, { reasoningOverride: value });
+    }
+    const seededCount = badModels.length + badReasonings.length;
+    const { config } = makeRetryInheritFixture(dir);
+
+    for (const [runId] of badModels) {
+      await assert.rejects(
+        () => retryCommand([runId, "--run-dir", dir], config),
+        (e) => {
+          assert.match(e.message, new RegExp(`Run ${runId}: retry refuses to inherit`),
+            `固定文案指向源 run（${runId}）`);
+          assert.match(e.message, /retry_inherit_model_invalid/, "闭集理由码");
+          assert.match(e.message, /never\s+silently falls back/, "不静默降级声明");
+          assert.match(e.message, /`run --model <id>`/, "修复指引：显式 run 重发");
+          return true;
+        },
+      );
+    }
+    for (const [runId] of badReasonings) {
+      await assert.rejects(
+        () => retryCommand([runId, "--run-dir", dir], config),
+        (e) => {
+          assert.match(e.message, new RegExp(`Run ${runId}: retry refuses to inherit`));
+          assert.match(e.message, /retry_inherit_reasoning_invalid/, "闭集理由码");
+          assert.match(e.message, /`run --reasoning <effort>`/, "修复指引：显式 run 重发");
+          return true;
+        },
+      );
+    }
+    // 全部在 manager.start 之前拒绝：runDir 里只有落盘的源 transcript，零新 transcript。
+    const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+    assert.equal(files.length, seededCount, "零新 transcript（fail-closed 先于 start）");
+    // 显式替换 flag 不豁免坏值拒绝：坏 transcript 事实一律拒绝（要换策略请直接 run）。
+    await assert.rejects(
+      () => retryCommand(["run_bad_space", "--run-dir", dir, "--model", "glm-4.7"], config),
+      /retry_inherit_model_invalid/,
+      "corrupt persisted value + valid --model flag → 仍 fail-closed（integrity 优先于替换）",
+    );
+    assert.equal(readdirSync(dir).filter((f) => f.endsWith(".jsonl")).length, seededCount,
+      "替换 flag 不豁免坏值：仍零新 transcript");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R12-CLI-5: CLI 形状门复用 — retry 面的 --model/--reasoning 坏值以 run 同源固定文案拒绝，零新 transcript", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r12-gate-"));
+  try {
+    writeRetrySource(dir, "run_src", { modelOverride: "gpt-5.6-sol-xhigh", reasoningOverride: "xhigh" });
+    const { config } = makeRetryInheritFixture(dir);
+    const badArgvs = [
+      ["--model"],                        // 裸 flag → parseOptions 给 true
+      ["--model", "--run-dir2"],          // 值位被下一个 flag 占据 → true
+      ["--model", "has space"],           // 空白
+      ["--model", "x".repeat(129)],       // 超长
+      ["--reasoning", "ultra"],           // 集外
+      ["--reasoning", "HIGH"],            // 大小写敏感（不归一化）
+      ["--reasoning"],                    // 裸 flag → true
+      ["--reasoning", ""],                // 空串
+    ];
+    for (const extra of badArgvs) {
+      await assert.rejects(
+        () => retryCommand(["run_src", "--run-dir", dir, ...extra], config),
+        (e) => {
+          if (extra[0] === "--model") {
+            assert.match(e.message, /--model must be a non-empty string of at most 128 characters/,
+              `--model 同源固定文案（${extra.join(" ")}）`);
+            assert.doesNotMatch(e.message, /run_src.*refuses to inherit/, "形状门先于继承检查（不误报坏持久化值）");
+          } else {
+            assert.match(e.message, /--reasoning must be one of the supported reasoning effort values/,
+              `--reasoning 同源固定文案（${extra.join(" ")}）`);
+          }
+          return true;
+        },
+      );
+    }
+    // 全部在副作用前拒绝：只有源 transcript，零新 transcript、零 spawn。
+    const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+    assert.deepEqual(files, ["run_src.jsonl"], "零新 transcript（gate 先于 loadRun/start）");
   } finally {
     rmrfRetry(dir);
   }
