@@ -257,7 +257,7 @@ npm run cli -- run coder_low --prompt "..." --background --model gpt-5.6-sol-xhi
   2. `--model` × provider-session 复用派发（闭集码 `model_override_reuse_conflict`，typed `ModelOverrideConflictError`）：reusable expert（`sessionReuse: "lead_workspace"`）与 continuable delivery 谱系根两形状都拒——跨回合续用的 provider 会话必须跑同一个模型（resume 侧只从 `run.started` 重建该 run 自己的覆盖事实、不接受调用方新传覆盖，R10-C C-1；派发时再换模型会破坏 provider 会话契约）。dispatchRun 在路由槽/transcript/fork 之前拒绝。
 - **正交放行**：`--model` × `--read-only` 可同用（金丝雀换模型试跑是合理用法）；`--model` × `--delivery-spec-file`（及 MCP `delivery` 块）放行，但注意**该 run 的认证组合声明失效**——reliability 认证按注册表的 provider+model 组合记录，覆盖后的组合未经认证；override 事实已由 `run.started.modelOverride` 入 transcript 供审计。
 - **形状门**（对齐 canonicalAgentId 纪律）：非空 string、长度 ≤128、不以 `--` 开头、不含空白/控制字符。`--` 前缀规则是承重的——后台 runner 的 `parseSimpleFlags` 会把 `--` 开头的值当下一个 flag，值对会静默断裂。违规以固定文案 fail-fast（不回显原值）。MCP `run_dispatch` 的 `model` 参数走同一 SSOT（wire schema 正则与核心校验器同源）。
-- **排除边界**：`--model` 只存在于 `run`（含 `--background`）。`spawn` 显式拒绝（多席统一模型语义混浊，Owner 场景是单派发）；workflow agent 节点与 daemon 派发不解析该 flag——声明式表面的模型应写进声明本身（注册表 model 策略）。持久换模型 = 改注册表，不是加 flag。
+- **排除边界**：`--model` 只存在于 `run`（含 `--background`）与 `retry`（retry 上为替换继承值，见场景 5）。`spawn` 显式拒绝（多席统一模型语义混浊，Owner 场景是单派发）；workflow agent 节点与 daemon 派发不解析该 flag——声明式表面的模型应写进声明本身（注册表 model 策略）。持久换模型 = 改注册表，不是加 flag。
 
 ### 场景 1c：单次派发换推理力度（--reasoning，R11-1）
 
@@ -285,7 +285,7 @@ npm run cli -- run coder_low --prompt "..." --background --reasoning xhigh
   1. `--reasoning` × `--require-certified`（闭集码 `reasoning_override_certified_conflict`）：无条件互斥——覆盖改变认证组合被测量时的执行包络，任何覆盖都使"已认证组合"声明失效。CLI 在 argv 边界早拒；`RunManager.start` 顶部作权威拒绝。
   2. `--reasoning` × provider-session 复用派发（闭集码 `reasoning_override_reuse_conflict`，typed `ReasoningOverrideConflictError`）：reusable expert 与 continuable delivery 谱系根两形状都拒——跨回合续用的 provider 会话必须跑同一推理力度。dispatchRun 在路由槽/transcript/fork 之前拒绝。**组合策略拒绝指对旗标**：`--model` 与 `--reasoning` 同用时撞复用，model 冲突先拒（确定性顺序，runDispatch.js 注明）；policy 门拒绝的提示句按在场覆盖组三种形状（仅 model / 仅 reasoning / 双覆盖）指对旗标。
 - **正交放行**：`--reasoning` × `--read-only` / × `--delivery-spec-file`（及 MCP `delivery` 块）可同用（同 `--model` 的认证组合声明失效注意事项）。
-- **排除边界**：`--reasoning` 只存在于 `run`（含 `--background`）。`spawn` 显式拒绝；workflow agent 节点与 daemon 派发不解析该 flag——声明式表面的推理力度应写进声明本身（注册表 reasoning 策略）。持久换力度 = 改注册表，不是加 flag。
+- **排除边界**：`--reasoning` 只存在于 `run`（含 `--background`）与 `retry`（retry 上为替换继承值，见场景 5）。`spawn` 显式拒绝；workflow agent 节点与 daemon 派发不解析该 flag——声明式表面的推理力度应写进声明本身（注册表 reasoning 策略）。持久换力度 = 改注册表，不是加 flag。
 
 ### 场景 2：后台跑（fire-and-forget）
 
@@ -415,14 +415,16 @@ npm run cli -- retry <runId> --model <id> --reasoning <effort>
 npm run cli -- resume <runId> --wait
 ```
 
-retry 的 per-dispatch 覆盖继承（R12，"同形重试"语义，与 resume 重建链对称）：
+retry 的 per-dispatch 覆盖继承（R12，与 resume 重建链对称）：
 
-- 源 run 的 `run.started.modelOverride` / `run.started.reasoningOverride` 事实会被**原样继承**到新派发（值仍过 `run` 既有的形状门/闭集门与合成入口——新 run 的 `run.started` 落同样的覆盖事实）。源 run 无覆盖且未显式给 flag → 零覆盖（与旧输出逐字节一致）。
+- **继承范围（诚实口径，R12-C）**：retry 重新派发**任务文本与 per-dispatch 覆盖**；delivery 声明 / 只读声明 / 隔离形状**不**继承（R12 前既有行为不变）——需要完整形状时用 `run` 显式重发。
+- 源 run 的 `run.started.modelOverride` / `run.started.reasoningOverride` 事实会被**原样继承**到新派发——权威是**首条绑定该 runId 的 `run.started`**（transcript 信封绑定纪律，与 resume 的首条取法同族；尾部追加的伪造 `run.started` 即使形状合法也不采信）。值仍过 `run` 既有的形状门/闭集门与合成入口——新 run 的 `run.started` 落同样的覆盖事实。源 run 无覆盖且未显式给 flag → 零覆盖（与旧输出逐字节一致）。
+- **旧格式宽容（R12-C）**：源 transcript 缺 `run.started`（R10 前旧格式）→ retry 按**零覆盖**放行，不拒绝——与 resume 的拒绝语义不同但各自正确（resume 要接续同一会话，找不到事实只能拒绝；retry 是全新派发，零覆盖即注册表策略）。
 - `--model <id>` / `--reasoning <effort>` **显式替换**对应继承值（校验与 `run` 同源：模型 id 形状门 + effort 六值闭集 `minimal/low/medium/high/xhigh/max`）；不给 flag 则用继承值。
 - **坏持久化值 fail-closed 拒绝**：源 transcript 的覆盖值损坏（非字符串/空/`--` 前缀/含空白/超长、或 effort 集外）时 retry 直接拒绝（固定文案指向源 run，`retry_inherit_model_invalid` / `retry_inherit_reasoning_invalid`，零新 transcript）——绝不静默忽略、绝不静默降级回注册表模型。显式替换 flag **不豁免**坏值拒绝（坏 transcript 事实一律拒绝；flag 形状门先于该检查，两者文案不同）。
 - 成功输出在确有继承/替换时携带 advisory 字段 `inheritedOverrides`（`model`/`reasoning` 各带 `value` + `source: "inherited"|"replaced"`；与 effective model 回显同一措辞纪律——展示 WAO 下发了什么，不证明 provider 接受该值）。无覆盖时该字段缺席。
 - 想做**无覆盖**重试（回到注册表策略）：不要用 retry——直接 `run` 用原 prompt 重发即可。
-- 互斥自然继承：retry 无 `--require-certified`/reuse 入口；若源 agent 的注册表配置在两次派发之间被改成 session-reuse 形状，start 的既有互斥门会拒绝该 retry（这是正确行为）。
+- **reuse 形状（诚实口径，R12-C）**：retry 走前台入口，**不解析 sessionReuse 路由**（只有后台派发通道解析）；reuse 形状 agent 的 retry 会以**全新 provider session** 派发（与前台 `run` 同族）——不撞 reuse 互斥门，也不复用旧会话。retry 无 `--require-certified` 入口。
 
 ### 场景 6：查看指标
 

@@ -3020,3 +3020,58 @@ test("R12: HELP_TEXT retry 命令行与生成层同步携带替换 flag（CLI �
   assert.match(cliSurface, /retry <runId> \[--wait\] \[--run-dir DIR\] \[--model ID\] \[--reasoning EFFORT\]/,
     "docs/surface/cli.md 的 retry 行必须与 HELP_TEXT 同步（再生成交付）");
 });
+
+// ---------------------------------------------------------------------------
+// R12-C（2026-08-18，R12 验收会审窄返工）——retry 覆盖继承的诚实化锚。
+// C-4：两条排除边界句必须如实含 retry（R12 起 retry 面接受 --model/--reasoning，
+//   为替换继承值）——防 R12 前"只存在于 run"旧独占句回潮。
+// C-2：被实测证伪的"互斥自然继承"声称（reuse 形状 agent 的 retry 会被 start
+//   拒——实际 start 的 reuse 互斥只在调用方传入 sessionReuse 时触发）不得复现；
+//   真话 = retry 走前台入口不解析 sessionReuse 路由、以全新 provider session 派发。
+// C-3："同形重试"措辞已收窄——retry 只继承任务文本与 per-dispatch 覆盖，
+//   delivery/只读/隔离形状不继承。
+// C-5：旧格式（缺 run.started）宽容路径必须文档化（零覆盖放行，与 resume 的
+//   拒绝语义不同但各自正确）。
+// ---------------------------------------------------------------------------
+
+test("R12-C C-4: usage.md 排除边界句如实含 retry（--model/--reasoning 于 retry 为替换继承值）", () => {
+  const usage = read("docs/usage.md");
+  for (const flag of ["--model", "--reasoning"]) {
+    const sentence = `\`${flag}\` 只存在于 \`run\`（含 \`--background\`）与 \`retry\`（retry 上为替换继承值`;
+    assert.ok(usage.includes(sentence),
+      `docs/usage.md 的 ${flag} 排除边界句必须如实含 retry："${sentence}…"`);
+  }
+  // 反回归：R12 前的独占句式不得复现。
+  assert.ok(!usage.includes("只存在于 `run`（含 `--background`）。"),
+    "docs/usage.md 不得回退为'--model/--reasoning 只存在于 run'的旧独占边界句（R12 起 retry 面也接受）");
+});
+
+test("R12-C C-1/C-2/C-3/C-5: usage.md retry 节诚实化锚（继承权威 + 范围收窄 + reuse 真话 + 旧格式宽容）", () => {
+  const usage = read("docs/usage.md");
+  const start = usage.indexOf("### 场景 5：重试 / 恢复");
+  const end = usage.indexOf("### 场景 6");
+  assert.ok(start !== -1 && end > start, "usage.md 必须有场景 5（重试/恢复）节");
+  const section = usage.slice(start, end);
+  // C-1：继承权威 = 首条绑定该 runId 的 run.started（尾部伪造不采信）。
+  assert.ok(section.includes("首条绑定该 runId 的 `run.started`"),
+    "C-1：必须声明继承权威为首条 runId 绑定的 run.started（篡改探针的文档面）");
+  // C-3：继承范围收窄 + 完整形状的 run 重发出口；"同形重试"措辞不得复现。
+  assert.ok(section.includes("任务文本与 per-dispatch 覆盖"),
+    "C-3：必须声明 retry 只重新派发任务文本与 per-dispatch 覆盖");
+  assert.ok(section.includes("需要完整形状时用 `run` 显式重发"),
+    "C-3：必须给出完整形状的 run 显式重发出口");
+  assert.ok(!section.includes("同形重试"),
+    "C-3：'同形重试'措辞不得复现（误导：delivery/只读/隔离形状并不继承）");
+  // C-2：reuse 真话；被证伪的拒绝声称不得复现。
+  assert.ok(section.includes("不解析 sessionReuse 路由"),
+    "C-2：必须声明 retry 走前台入口、不解析 sessionReuse 路由");
+  assert.ok(section.includes("全新 provider session"),
+    "C-2：必须声明 reuse 形状 agent 的 retry 以全新 provider session 派发");
+  assert.ok(!/互斥自然继承|互斥门会拒绝该 retry/.test(section),
+    "C-2：被证伪的'start 会拒绝 reuse 形状 retry'声称不得复现（start 的 reuse 互斥只在调用方传入 sessionReuse 时触发）");
+  // C-5：旧格式宽容路径。
+  assert.ok(section.includes("旧格式宽容"),
+    "C-5：必须文档化缺 run.started（R10 前）的旧格式宽容路径");
+  assert.ok(/按\*\*零覆盖\*\*放行/.test(section),
+    "C-5：必须声明旧格式按零覆盖放行（与 resume 的拒绝语义不同但各自正确）");
+});

@@ -46,14 +46,23 @@ export async function retryCommand(args, config) {
   if (!promptEvent?.prompt) {
     throw new Error(`Run ${runId} has no stored prompt (runs before v0.0.2 may not store prompts)`);
   }
-  // R12 ("同形重试", Owner 2026-08-18): retry INHERITS the source run's
-  // per-dispatch overrides from its run.started facts (the same durable
-  // authority resume rebuilds from, R10-C C-1 / R11-1) — a retry re-dispatches
-  // the SAME shape, symmetric with resume's "keep the dispatched model" rule.
+  // R12 (Owner 2026-08-18; hardened R12-C C-1): retry INHERITS the source
+  // run's per-dispatch overrides from its run.started fact — the FIRST
+  // run.started bound to this runId (the envelope-binding discipline this repo
+  // already applies to run.started authority, e.g. transcript.js /
+  // runDelivery.js / runScopeObservation.js) and the same first-match lookup
+  // resume uses. A tail-appended forged run.started — even one with a
+  // shape-legal modelOverride/reasoningOverride — is never picked up.
+  // Scope honesty (R12-C C-3): retry re-dispatches the task text and the
+  // per-dispatch overrides ONLY. delivery/readOnly/isolation shape are NOT
+  // inherited (pre-R12 behavior) — a full-shape re-send is `run`'s job.
   // Explicit --model/--reasoning REPLACE the corresponding inherited value;
   // absent flags keep it; source-without-override + no flags = zero overrides
-  // (byte-compatible with the pre-R12 face).
-  const runStarted = findLatest(events, "run.started");
+  // (byte-compatible with the pre-R12 face). A source transcript with NO
+  // runId-bound run.started (pre-R10 old format) leniently retries with zero
+  // overrides (`?.` chain) — resume instead refuses; each is correct for its
+  // own lane (R12-C C-5).
+  const runStarted = events.find((e) => e.type === "run.started" && e.runId === runId);
   const inheritedModel = runStarted?.modelOverride;
   const inheritedReasoning = runStarted?.reasoningOverride;
   // Fail-closed on a bad PERSISTED value (corrupt/tampered transcript): retry
@@ -88,12 +97,17 @@ export async function retryCommand(args, config) {
     cwd: options.cwd,
     isolate: resolveIsolateFlag(options),
     // R12: inherited (or flag-replaced) overrides ride start's EXISTING gates —
-    // the closed-set/shape assert, the requireCertified/sessionReuse mutexes
-    // (retry has neither flag, so those doors stay closed by construction; a
-    // source agent reconfigured into a reuse shape between dispatches is
-    // refused HERE by start, which is the correct authority), and the
+    // the closed-set/shape assert, the requireCertified mutex (retry has no
+    // such flag, so that door stays closed by construction), and the
     // synthesis that persists the explicit run.started override facts on the
     // NEW run. Absent when neither source nor flag supplied one.
+    // Reuse truth (R12-C C-2): retry is a FOREGROUND start call — it does not
+    // resolve sessionReuse routing (only the background dispatch lane does),
+    // so start's sessionReuse mutex (runManager.js: it fires only when the
+    // CALLER supplies sessionReuse) cannot fire here. A source agent
+    // reconfigured into a reuse shape between dispatches still retries,
+    // dispatched with a FRESH provider session (same family as a foreground
+    // `run`) — the correct semantics for a re-dispatch, not a refusal.
     ...(modelOverride !== null && modelOverride !== undefined ? { modelOverride } : {}),
     ...(reasoningOverride !== null && reasoningOverride !== undefined ? { reasoningOverride } : {}),
   });

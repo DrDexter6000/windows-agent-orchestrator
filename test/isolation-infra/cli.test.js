@@ -3891,10 +3891,14 @@ function parseRetryJson(out) {
   return JSON.parse(out.slice(start, end + 1));
 }
 
-/** 落盘一个源 run transcript（run.started [+ 覆盖事实] + prompt.sent）。 */
-function writeRetrySource(dir, runId, { modelOverride, reasoningOverride } = {}) {
+/** 落盘一个源 run transcript（run.started [+ 覆盖事实] + prompt.sent）。
+ * R12-C C-1：事件信封带 runId——与真实 JsonlTranscript.append 同构（它给每条
+ * 事件盖 runId 戳；readTranscript 只逐行 JSON.parse，不补信封）。omitStarted
+ * 落盘"缺 run.started"的旧格式（R10 前）；extraEvents 追加在尾部（篡改探针：
+ * 伪造 run.started 追加进同一 transcript 文件）。 */
+function writeRetrySource(dir, runId, { modelOverride, reasoningOverride, omitStarted = false, extraEvents = [] } = {}) {
   const started = {
-    seq: 1, ts: "2026-08-18T00:00:00.000Z", type: "run.started", agentId: "claude_worker",
+    seq: 1, ts: "2026-08-18T00:00:00.000Z", type: "run.started", runId, agentId: "claude_worker",
     backend: "claude-code", cwd: dir,
     model: { id: "glm-5.3", contextWindow: 1000000 },
     reasoning: { effort: "medium" },
@@ -3902,10 +3906,11 @@ function writeRetrySource(dir, runId, { modelOverride, reasoningOverride } = {})
     ...(reasoningOverride !== undefined ? { reasoningOverride } : {}),
   };
   const prompt = {
-    seq: 2, ts: "2026-08-18T00:00:00.100Z", type: "prompt.sent",
-    agentId: "claude_worker", prompt: "original task prompt",
+    seq: 2, ts: "2026-08-18T00:00:00.100Z", type: "prompt.sent", runId, agentId: "claude_worker",
+    prompt: "original task prompt",
   };
-  writeFileSync(join(dir, `${runId}.jsonl`), `${JSON.stringify(started)}\n${JSON.stringify(prompt)}\n`, "utf8");
+  const events = [...(omitStarted ? [] : [started]), prompt, ...extraEvents];
+  writeFileSync(join(dir, `${runId}.jsonl`), `${events.map((e) => JSON.stringify(e)).join("\n")}\n`, "utf8");
 }
 
 test("R12-CLI-1: 双覆盖继承全链 — start 收到同值合成（兄弟字段保留）+ 新 run.started 落双事实 + 回显 inherited", async () => {
@@ -4131,6 +4136,96 @@ test("R12-CLI-5: CLI 形状门复用 — retry 面的 --model/--reasoning 坏值
     // 全部在副作用前拒绝：只有源 transcript，零新 transcript、零 spawn。
     const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
     assert.deepEqual(files, ["run_src.jsonl"], "零新 transcript（gate 先于 loadRun/start）");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// R12-C（2026-08-18，R12 验收会审窄返工）：
+// C-1 篡改探针：run.started 取法 = 首条 + runId 绑定。修复前 findLatest 取
+//   尾条——append-only transcript 上尾部追加的伪造 run.started（形状合法的
+//   modelOverride/reasoningOverride）会被采信并洗白进新 run 的一等事实。
+// C-5 旧格式宽容：源 transcript 缺 run.started（R10 前）→ 零覆盖放行（?. 链），
+//   与 resume 的拒绝语义不同但各自正确。
+// ---------------------------------------------------------------------------
+
+test("R12-CLI-6: 篡改探针 — 尾部伪造 run.started（同 runId + 形状合法覆盖）不被采信，retry 用真实首条（零覆盖）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r12-tamper-"));
+  try {
+    // 真实首条 run.started：无覆盖。尾部追加伪造：同 runId、双覆盖、形状全部合法
+    // （修复前 findLatest 恰好采信这条——探针钉住"首条 + 绑定"两个维度一起修）。
+    const forged = {
+      seq: 3, ts: "2026-08-18T00:00:00.200Z", type: "run.started", runId: "run_real",
+      agentId: "claude_worker", backend: "claude-code", cwd: dir,
+      model: { id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 },
+      reasoning: { effort: "xhigh" },
+      modelOverride: "gpt-5.6-sol-xhigh", reasoningOverride: "xhigh",
+    };
+    writeRetrySource(dir, "run_real", { extraEvents: [forged] });
+    const { config, spawned } = makeRetryInheritFixture(dir);
+    const out = await captureLog(() => retryCommand(["run_real", "--run-dir", dir], config));
+    const parsed = parseRetryJson(out);
+    // 采信真实首条（零覆盖）：无回显、新 run.started 无覆盖事实、spawn 用注册表策略。
+    assert.ok(!out.includes("inheritedOverrides"), "伪造尾部覆盖不得进回显");
+    const events = await readTranscript(parsed.transcript);
+    const started = events.find((e) => e.type === "run.started");
+    assert.equal("modelOverride" in started, false, "伪造 modelOverride 不得洗白进新 run.started 一等事实");
+    assert.equal("reasoningOverride" in started, false, "伪造 reasoningOverride 不得洗白进新 run.started");
+    assert.deepEqual(spawned[0].model, { id: "glm-5.3", contextWindow: 1000000 }, "spawn 用注册表原策略（零覆盖）");
+    assert.deepEqual(spawned[0].reasoning, { effort: "medium" });
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R12-CLI-7: runId 绑定纪律 — 跨 run 的 run.started（不同 runId、带覆盖）对 retry 不可见", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r12-bind-"));
+  try {
+    // 载体 run_bound 的 transcript 里只有一条 FOREIGN runId 的 run.started（带形状
+    // 合法覆盖）——绑定纪律下它不是本 run 的事实，retry 按零覆盖处理（宽容路径）。
+    const foreign = {
+      seq: 3, ts: "2026-08-18T00:00:00.000Z", type: "run.started", runId: "run_other",
+      agentId: "claude_worker", backend: "claude-code", cwd: dir,
+      model: { id: "gpt-5.6-sol-xhigh", contextWindow: 1000000 },
+      reasoning: { effort: "xhigh" },
+      modelOverride: "gpt-5.6-sol-xhigh", reasoningOverride: "xhigh",
+    };
+    writeRetrySource(dir, "run_bound", { omitStarted: true, extraEvents: [foreign] });
+    const { config, spawned } = makeRetryInheritFixture(dir);
+    const out = await captureLog(() => retryCommand(["run_bound", "--run-dir", dir], config));
+    const parsed = parseRetryJson(out);
+    assert.ok(!out.includes("inheritedOverrides"), "跨 run 覆盖不得进回显");
+    const events = await readTranscript(parsed.transcript);
+    const started = events.find((e) => e.type === "run.started");
+    assert.equal("modelOverride" in started, false, "跨 run 的覆盖事实不得落进新 run.started");
+    assert.equal("reasoningOverride" in started, false);
+    assert.deepEqual(spawned[0].model, { id: "glm-5.3", contextWindow: 1000000 }, "spawn 用注册表原策略（零覆盖）");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R12-CLI-8: 旧格式宽容 — 源 transcript 缺 run.started（R10 前）→ retry 按零覆盖放行", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r12-legacy-"));
+  try {
+    writeRetrySource(dir, "run_old", { omitStarted: true });
+    const { config, spawned } = makeRetryInheritFixture(dir);
+    const out = await captureLog(() => retryCommand(["run_old", "--run-dir", dir], config));
+    const parsed = parseRetryJson(out);
+    // 零覆盖放行（?. 链）：不拒绝、无 inheritedOverrides、输出键集与旧 face 一致。
+    assert.ok(!out.includes("inheritedOverrides"));
+    assert.deepEqual(
+      Object.keys(parsed).sort(),
+      ["admittedSeq", "backend", "backendSessionId", "messageId", "newRunId", "originalRunId", "transcript"],
+      "旧格式零覆盖 retry 输出键集与旧 face 完全一致",
+    );
+    const events = await readTranscript(parsed.transcript);
+    const started = events.find((e) => e.type === "run.started");
+    assert.equal("modelOverride" in started, false);
+    assert.equal("reasoningOverride" in started, false);
+    assert.deepEqual(spawned[0].model, { id: "glm-5.3", contextWindow: 1000000 }, "注册表原策略原样落盘");
+    assert.deepEqual(spawned[0].reasoning, { effort: "medium" });
   } finally {
     rmrfRetry(dir);
   }
