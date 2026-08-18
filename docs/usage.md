@@ -758,6 +758,8 @@ M9-7A 起支持可选 `delivery` 块（嵌套形状以 wire 为权威），用�
 
 **行为变更（R14 / TD-128a，reuse 路由）**：reuse 路由对前任 run 的 `session.created` 存在性检查（决定 busy/resume/first 分派）自 R14 起为 **runId 绑定读取**（绑定到前任 runId）——尾部追加的外 run 伪造 `session.created` 不再能把一个 crashed-pre-conversation 的前任 run 翻转成 resumable。由此，**前任 run 的 transcript 为信封前 legacy 格式（事件无 `runId` 字段）时，reuse 路由从 resume 降级为 first**（走既有"terminal 无 session.created"分支，认领槽位开新回合）——不复用无法归属到前任 run 的会话；本机 pre-envelope transcript 存量为 0（TD-129b 实测），实际影响 ≈0。
 
+**行为变更（R15，reuse/lineage 路由的 findState）**：reuse 与 lineage 路由对前任 run 终态的判定（`findState`）自 R15 起同样为 **runId 绑定过滤**（状态只由前任自身事件计算）——尾部追加的外 run 伪造 `run.state_change` 不再能把在飞前任翻成 resume（并发驱动同一 provider 会话，Contract 6）或把终态前任伪造成在飞而阻断派发。全无信封的前任 transcript（零绑定事件）按 **busy** 处理（不可归属 = 永不并发驱动；实测存量 ≈0）。
+
 返回时 transcript 已可读且为 `pending`；关闭 MCP host 后，detached runner 独立驱动 worker 到终态（token 闸门/超时/兜底 abort 都生效），写入共享 transcript。Lead 用 MCP `run_status` 轮询状态。
 
 ### MCP `run_continue`（Lead 授权修正续跑，M12-7）
