@@ -7,18 +7,52 @@
 // resume：attach 到已有 session（opencode HTTP 类，进程已死则重 spawn）。
 //
 // 依赖：
-//   - 外部模块：../transcript.js（findLatest——retry 取 prompt.sent 事件）
+//   - 外部模块：../transcript.js（findLatestBound/findFirstBound——R13 起 retry
+//     的 prompt.sent/run.started 读取走带 runId 绑定的共享读取器）
 //   - 共享工具：./shared.js（parseOptions/loadRun/newRunManager/resolveIsolateFlag）
 //   - 核心门：../runManager.js（R12 覆盖形状/闭集校验 SSOT——与 run/resume 同源）
 //
 // retry/resume 不是 public export（无 test 直接 import，无 re-export 需求）。
 
-import { findLatest } from "../transcript.js";
+import { findLatestBound, findFirstBound } from "../transcript.js";
 import { parseOptions, loadRun, newRunManager, resolveIsolateFlag } from "./shared.js";
 // R12: the per-dispatch override shape SSOT (hosted in runManager.js with the
 // synthesis site). Same import discipline as run.js's validators — one source
 // for the CLI/MCP/start faces, zero drift. Adapters(0)→core(2) is downward.
 import { assertValidModelOverride, assertValidReasoningOverride, isValidModelOverride, isValidReasoningOverride } from "../runManager.js";
+
+/**
+ * R13 (TD-127): retry's task-text read — the LAST prompt.sent BOUND to this
+ * runId, with the legal TD-54 double-write shape preserved (runManager.start
+ * appends a bare {prompt} BEFORE spawn and the authoritative {messageId,
+ * admittedSeq, prompt} AFTER: the second event is the one resume/retry need).
+ *
+ * Security posture, honestly scoped:
+ *   - runId binding kills cross-run injection (a tail-appended prompt.sent
+ *     carrying a FOREIGN runId is never picked) and cross-run misreads.
+ *   - Binding CANNOT stop a forged SAME-runId tail append — that line is
+ *     shape-identical to a legal append and the attacker already has runs/
+ *     write power. The messageId preference below is a lane narrowing on top
+ *     (legal writer's last event always carries messageId; a forged tail
+ *     WITHOUT one no longer wins), a speed-bump against naive forgeries —
+ *     not a boundary. A shape-complete same-runId forgery still lands; that
+ *     residual is the same write-capability attack surface R12-C accepted
+ *     for run.started.
+ *   - Behavior on every LEGAL shape is byte-identical to the pre-R13
+ *     findLatest: single {prompt} → it; legal double → the second (has
+ *     messageId); spawn-failed runs (second write never happened) → the
+ *     only/first event via the bound fallback.
+ */
+function findRetryPromptEvent(events, runId) {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type === "prompt.sent" && event.runId === runId
+      && event.messageId !== undefined && event.messageId !== null) {
+      return event;
+    }
+  }
+  return findLatestBound(events, "prompt.sent", runId);
+}
 
 export async function retryCommand(args, config) {
   const [runId, ...tail] = args;
@@ -42,7 +76,11 @@ export async function retryCommand(args, config) {
   if (!agentId) {
     throw new Error(`Run ${runId} has no agentId`);
   }
-  const promptEvent = findLatest(events, "prompt.sent");
+  // R13 (TD-127): the task text is read through the runId-BOUND reader (see
+  // findRetryPromptEvent above) — a tail-appended forged prompt.sent with a
+  // foreign runId (or one without messageId from a lazy forger) is never the
+  // re-dispatched prompt.
+  const promptEvent = findRetryPromptEvent(events, runId);
   if (!promptEvent?.prompt) {
     throw new Error(`Run ${runId} has no stored prompt (runs before v0.0.2 may not store prompts)`);
   }
@@ -51,7 +89,9 @@ export async function retryCommand(args, config) {
   // run.started bound to this runId (the envelope-binding discipline this repo
   // already applies to run.started authority, e.g. transcript.js /
   // runDelivery.js / runScopeObservation.js) and the same first-match lookup
-  // resume uses. A tail-appended forged run.started — even one with a
+  // resume uses. R13: the read goes through the shared findFirstBound reader
+  // (behavior-equivalent swap — the discipline now has a single definition in
+  // transcript.js). A tail-appended forged run.started — even one with a
   // shape-legal modelOverride/reasoningOverride — is never picked up.
   // Scope honesty (R12-C C-3): retry re-dispatches the task text and the
   // per-dispatch overrides ONLY. delivery/readOnly/isolation shape are NOT
@@ -62,7 +102,7 @@ export async function retryCommand(args, config) {
   // runId-bound run.started (pre-R10 old format) leniently retries with zero
   // overrides (`?.` chain) — resume instead refuses; each is correct for its
   // own lane (R12-C C-5).
-  const runStarted = events.find((e) => e.type === "run.started" && e.runId === runId);
+  const runStarted = findFirstBound(events, "run.started", runId);
   const inheritedModel = runStarted?.modelOverride;
   const inheritedReasoning = runStarted?.reasoningOverride;
   // Fail-closed on a bad PERSISTED value (corrupt/tampered transcript): retry

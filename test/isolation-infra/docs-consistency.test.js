@@ -2962,7 +2962,9 @@ test("R11-1: RUN_USAGE_TEXT 用法页与生成层同步携带 --reasoning（CLI 
   assert.match(RUN_USAGE_TEXT, /minimal\/low\/medium\/high\/xhigh\/max/, "闭集值域说明");
   assert.match(RUN_USAGE_TEXT, /mutually exclusive with\s+--require-certified/, "认证互斥");
   assert.match(RUN_USAGE_TEXT, /provider-session reuse agents/, "复用互斥");
-  assert.match(RUN_USAGE_TEXT, /only on run \(not spawn\/workflow\/daemon\)/, "仅 run 面（spawn/workflow/daemon 不支持）");
+  assert.match(RUN_USAGE_TEXT, /only on run and retry \(not\s+spawn\/workflow\/daemon\)/, "仅 run 与 retry 面（TD-126：retry 自 R12 起接受两 flag；spawn/workflow/daemon 不支持）");
+  // 旧句反回归：R12 前的过时措辞（漏掉 retry）不得回潮（TD-126）。
+  assert.doesNotMatch(RUN_USAGE_TEXT, /only on run \(not\s+spawn\/workflow\/daemon\)/, "TD-126 旧句不得回潮");
   assert.match(RUN_USAGE_TEXT, /effective reasoning/, "回显失败模式说明（advisory）");
   // 生成层：mcp-tools.md 的 run_dispatch input 表必须含 reasoning 行（生成
   // 物，与 wire 同源——这里只锚存在性，字节由 docsSurface 守卫）。
@@ -2970,6 +2972,21 @@ test("R11-1: RUN_USAGE_TEXT 用法页与生成层同步携带 --reasoning（CLI 
   const rdSection = surface.slice(surface.indexOf("## run_dispatch"));
   const rdInput = rdSection.slice(0, rdSection.indexOf("## ", 1) === -1 ? rdSection.length : rdSection.indexOf("## ", 1));
   assert.match(rdInput, /\| reasoning \| string \| no \| enum: minimal/, "run_dispatch input 表含 reasoning 行（闭集枚举）");
+});
+
+// ---------------------------------------------------------------------------
+// R13（Owner 2026-08-18）：TD-127 retry 任务文本取法绑定。文档锚：usage.md
+// 场景 5 retry 节补记"任务文本按 runId 绑定取本 run 最后一条 prompt 记录"。
+// ---------------------------------------------------------------------------
+
+test("R13: usage.md retry 节记录任务文本的 runId 绑定取法（TD-127 修复的人读锚）", () => {
+  const usage = read("docs/usage.md");
+  const start = usage.indexOf("### 场景 5：重试 / 恢复");
+  const end = usage.indexOf("### 场景 6");
+  assert.ok(start !== -1 && end > start, "usage.md 必须有场景 5（重试/恢复）节");
+  const section = usage.slice(start, end);
+  assert.match(section, /prompt\.sent[\s\S]{0,160}runId 绑定|runId 绑定[\s\S]{0,160}prompt\.sent/,
+    "retry 节必须记录任务文本按 runId 绑定取本 run 最后一条 prompt 记录");
 });
 
 // ---------------------------------------------------------------------------

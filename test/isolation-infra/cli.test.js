@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readdirSync,
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseOptions, loadPrompt, runAndWait, buildDashboard, runsDashboardCommand, runCommand, statusCommand, collectCommand, resolveTargetCwd } from "../../src/cli.js";
-import { readTranscript, findState } from "../../src/transcript.js";
+import { readTranscript, findState, findLatestBound, findFirstBound } from "../../src/transcript.js";
 import { spawnCommand } from "../../src/commands/run.js";
 // R12: retry 的 per-dispatch 覆盖继承（同形重试）——直接 import 命令实现（lifecycle
 // 不是 public export 面，无 re-export 需求；与 spawnCommand 同一 import 纪律）。
@@ -3765,7 +3765,9 @@ test("R11-1-CLI-7: run --help 用法页含 --reasoning（闭集 + 互斥 + 仅 r
   assert.match(out, /minimal\/low\/medium\/high\/xhigh\/max/, "闭集说明");
   assert.match(out, /mutually exclusive with\s+--require-certified/, "认证互斥说明");
   assert.match(out, /provider-session reuse agents/, "复用互斥说明");
-  assert.match(out, /only on run \(not spawn\/workflow\/daemon\)/, "仅 run 面，spawn/workflow/daemon 不支持");
+  assert.match(out, /only on run and retry \(not\s+spawn\/workflow\/daemon\)/, "仅 run 与 retry 面（TD-126：retry 自 R12 起接受两 flag）");
+  // 旧句反回归：R12 前的过时措辞（漏掉 retry）不得回潮。
+  assert.doesNotMatch(out, /only on run \(not\s+spawn\/workflow\/daemon\)/, "TD-126 旧句不得回潮");
   assert.match(out, /effective reasoning/, "回显说明（advisory）");
 });
 
@@ -4226,6 +4228,166 @@ test("R12-CLI-8: 旧格式宽容 — 源 transcript 缺 run.started（R10 前）
     assert.equal("reasoningOverride" in started, false);
     assert.deepEqual(spawned[0].model, { id: "glm-5.3", contextWindow: 1000000 }, "注册表原策略原样落盘");
     assert.deepEqual(spawned[0].reasoning, { effort: "medium" });
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// R13（2026-08-18，TD-127）：retry 任务文本取法绑定修复。
+// 修复前 lifecycle.js 用无绑定 findLatest(events, "prompt.sent")——尾部追加的
+// 伪造 prompt.sent（同 runId 或跨 runId）会被原样重新派发（auditor 探针实证）。
+// 修复：共享绑定读取器（transcript.js findLatestBound/findFirstBound，单一定义）
+// + retry 面的 messageId 优先收窄（合法 TD-54 双写形状里第二条才带 messageId）。
+// 诚实边界：绑定挡跨 run 注入/错读；同 runId 且形状完整的伪造仍会被采信——
+// 该攻击者已持有 runs/ 写权限（与 R12-C run.started 侧信道同级）。
+// 观察手段：retry 派发的 prompt 即新 run transcript 落盘的 prompt.sent.prompt
+// （start 在 spawn 前把它原样写入新 run——TD-54 形状，两值恒等）。
+// ---------------------------------------------------------------------------
+
+/** 读 retry 派发进新 run 的任务文本（新 run transcript 的 prompt.sent 记录）。 */
+async function readRedispatchedPrompt(newTranscriptPath) {
+  const events = await readTranscript(newTranscriptPath);
+  const prompts = events.filter((e) => e.type === "prompt.sent").map((e) => e.prompt);
+  assert.ok(prompts.length >= 1, "新 run 应落盘 prompt.sent");
+  // TD-54 双写：两条 prompt 值恒等；取首条即派发文本。
+  for (const p of prompts) assert.equal(p, prompts[0], "同一 retry 的双 prompt.sent 值恒等");
+  return prompts[0];
+}
+
+test("R13-CLI-1: 共享绑定读取器单测 — findLatestBound/findFirstBound（空/无匹配/多条/绑定过滤/首尾分叉）", () => {
+  const mine = (seq, extra = {}) => ({ seq, type: "prompt.sent", runId: "run_a", ...extra });
+  const foreign = (seq, extra = {}) => ({ seq, type: "prompt.sent", runId: "run_other", ...extra });
+  // 空 / 无匹配 → undefined。
+  assert.equal(findLatestBound([], "prompt.sent", "run_a"), undefined, "空序列 → undefined");
+  assert.equal(findFirstBound([], "prompt.sent", "run_a"), undefined, "空序列 → undefined");
+  assert.equal(findLatestBound([foreign(1)], "prompt.sent", "run_a"), undefined, "仅跨 run 事件 → 绑定过滤后无匹配");
+  assert.equal(findFirstBound([foreign(1)], "prompt.sent", "run_a"), undefined, "仅跨 run 事件 → 绑定过滤后无匹配");
+  assert.equal(findLatestBound([mine(1)], "no.such", "run_a"), undefined, "类型不匹配 → undefined");
+  // 多条取末条 / 取首条（末条=合法 TD-54 第二写；首条=R12-C run.started 纪律）。
+  const e1 = mine(1, { prompt: "first" });
+  const e2 = mine(2, { prompt: "second" });
+  const e3 = foreign(3, { prompt: "forged-tail" });
+  assert.equal(findLatestBound([e1, e2, e3], "prompt.sent", "run_a"), e2, "多条本 run 取末条，尾部跨 run 伪造不采信");
+  assert.equal(findFirstBound([e1, e2, e3], "prompt.sent", "run_a"), e1, "多条本 run 取首条");
+  // 首尾分叉：伪造在本 run 事件之前时两读取器仍各按各的序取。
+  assert.equal(findLatestBound([e3, e1, e2], "prompt.sent", "run_a"), e2);
+  assert.equal(findFirstBound([e3, e1, e2], "prompt.sent", "run_a"), e1);
+  // 旧格式（事件无 runId 字段）→ 严格绑定下不匹配（调用方 ?. 链宽容处理）。
+  assert.equal(findLatestBound([{ seq: 1, type: "prompt.sent", prompt: "legacy" }], "prompt.sent", "run_a"), undefined,
+    "无 runId 信封的旧格式事件不匹配绑定读取");
+});
+
+test("R13-CLI-2: 篡改探针（跨 runId）— 尾部伪造 prompt.sent 不被派发，回退真实本 run 记录", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r13-xrun-"));
+  try {
+    // 真实：单条本 run prompt（无 messageId——spawn 前首写形状）。尾部追加跨 runId
+    // 伪造（修复前 findLatest 恰好采信这条并派发其文本）。
+    writeRetrySource(dir, "run_real", {
+      extraEvents: [{
+        seq: 3, ts: "2026-08-18T00:00:00.200Z", type: "prompt.sent", runId: "run_other",
+        agentId: "claude_worker", prompt: "FORGED cross-run task text", messageId: "m_forged",
+      }],
+    });
+    const { config } = makeRetryInheritFixture(dir);
+    const out = await captureLog(() => retryCommand(["run_real", "--run-dir", dir], config));
+    const parsed = parseRetryJson(out);
+    const dispatched = await readRedispatchedPrompt(parsed.transcript);
+    assert.equal(dispatched, "original task prompt", "跨 runId 尾部伪造不采信——派发真实本 run 记录");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R13-CLI-3: 篡改探针（同 runId）— 无 messageId 尾部伪造被收窄挡下；形状完整伪造仍采信（诚实边界钉当前行为）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r13-srun-"));
+  try {
+    // (a) 合法双写 + 尾部无 messageId 的同 runId 伪造：messageId 优先收窄 →
+    //     取合法第二写（带 messageId），伪造文本不派发。
+    writeRetrySource(dir, "run_naive", {
+      extraEvents: [
+        { seq: 3, ts: "2026-08-18T00:00:00.150Z", type: "prompt.sent", runId: "run_naive",
+          agentId: "claude_worker", messageId: "m_legal", admittedSeq: 5, prompt: "legal second write" },
+        { seq: 4, ts: "2026-08-18T00:00:00.200Z", type: "prompt.sent", runId: "run_naive",
+          agentId: "claude_worker", prompt: "FORGED naive same-run tail" },
+      ],
+    });
+    const { config } = makeRetryInheritFixture(dir);
+    let out = await captureLog(() => retryCommand(["run_naive", "--run-dir", dir], config));
+    let dispatched = await readRedispatchedPrompt(parseRetryJson(out).transcript);
+    assert.equal(dispatched, "legal second write", "同 runId 无 messageId 伪造被收窄挡下——取合法带 messageId 的最后一条");
+
+    // (b) 诚实边界：同 runId 且带 messageId 的形状完整伪造仍被采信——绑定与
+    //     收窄都无法区分"合法追加"与"持有 runs/ 写权限者的形状完整伪造"
+    //     （与 R12-C 对 run.started 的边界结论同级）。此处钉住当前行为；
+    //     更强的收窄需要写入端完整性（如哈希链），不在 R13 范围。
+    writeRetrySource(dir, "run_shape", {
+      extraEvents: [{
+        seq: 3, ts: "2026-08-18T00:00:00.200Z", type: "prompt.sent", runId: "run_shape",
+        agentId: "claude_worker", messageId: "m_forged", admittedSeq: 6,
+        prompt: "FORGED shape-complete same-run tail",
+      }],
+    });
+    out = await captureLog(() => retryCommand(["run_shape", "--run-dir", dir], config));
+    dispatched = await readRedispatchedPrompt(parseRetryJson(out).transcript);
+    assert.equal(dispatched, "FORGED shape-complete same-run tail",
+      "诚实边界（钉当前行为）：同 runId + 形状完整的伪造仍被采信——防御上限是写权限边界，非读取端绑定");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R13-CLI-4: 合法双条回归 — TD-54 双 prompt.sent（第二条带 messageId）→ retry 取第二条（现行为不变）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r13-dbl-"));
+  try {
+    // runManager.start 的合法形状：spawn 前首写 {prompt}，spawn 后补写
+    // {messageId, admittedSeq, prompt}（runManager.js:1191/1220）。两条文本用
+    // 不同值以分辨取法——断言"取最后一条本 run 记录"语义在绑定后原样保留。
+    writeRetrySource(dir, "run_dbl", {
+      extraEvents: [{
+        seq: 3, ts: "2026-08-18T00:00:00.150Z", type: "prompt.sent", runId: "run_dbl",
+        agentId: "claude_worker", messageId: "m_real", admittedSeq: 5, prompt: "second-write prompt",
+      }],
+    });
+    const { config, spawned } = makeRetryInheritFixture(dir);
+    const out = await captureLog(() => retryCommand(["run_dbl", "--run-dir", dir], config));
+    const parsed = parseRetryJson(out);
+    const dispatched = await readRedispatchedPrompt(parsed.transcript);
+    assert.equal(dispatched, "second-write prompt", "合法双条取第二写（带 messageId）——TD-54 语义不变");
+    assert.equal(spawned.length, 1, "正常 retry 全链 spawn 一次");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("R13-CLI-5: 全部 prompt.sent 均跨 run（无本 run 绑定记录）→ retry 拒绝（fail-closed，零新 transcript）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r13-none-"));
+  try {
+    // 载体 run 只有 run.started + 一条 FOREIGN runId 的 prompt.sent——绑定纪律下
+    // 本 run 无任务文本可派发。修复前无绑定 findLatest 会派发外 run 的文本；
+    // 修复后走既有 "no stored prompt" 拒绝面（与 pre-v0.0.2 无 prompt 记录同面）。
+    const started = {
+      seq: 1, ts: "2026-08-18T00:00:00.000Z", type: "run.started", runId: "run_none",
+      agentId: "claude_worker", backend: "claude-code", cwd: dir,
+      model: { id: "glm-5.3", contextWindow: 1000000 }, reasoning: { effort: "medium" },
+    };
+    const foreignPrompt = {
+      seq: 2, ts: "2026-08-18T00:00:00.100Z", type: "prompt.sent", runId: "run_other",
+      agentId: "claude_worker", prompt: "FOREIGN-ONLY task text", messageId: "m_foreign",
+    };
+    writeFileSync(join(dir, "run_none.jsonl"),
+      `${[started, foreignPrompt].map((e) => JSON.stringify(e)).join("\n")}\n`, "utf8");
+    const { config } = makeRetryInheritFixture(dir);
+    await assert.rejects(
+      () => retryCommand(["run_none", "--run-dir", dir], config),
+      (e) => {
+        assert.match(e.message, /Run run_none has no stored prompt/, "走既有无 prompt 拒绝文案");
+        return true;
+      },
+    );
+    // 拒绝发生在 manager.start 之前：零新 transcript、零 spawn。
+    assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".jsonl")), ["run_none.jsonl"],
+      "fail-closed 先于 start——零新 transcript");
   } finally {
     rmrfRetry(dir);
   }

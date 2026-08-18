@@ -131,8 +131,9 @@ Notes:
     conversation must run one model). A mistyped model id is only reported by
     the provider when the worker starts — the echoed "effective model" in the
     dispatch output is advisory: it shows what WAO threaded, not that the
-    provider accepts the id. --model exists only on run (not spawn/workflow/
-    daemon); a persistent model change belongs in the registry model policy.
+    provider accepts the id. --model exists only on run and retry (not
+    spawn/workflow/daemon); a persistent model change belongs in the registry
+    model policy.
   - --reasoning VALUE must be one of the closed effort set
     minimal/low/medium/high/xhigh/max; anything else is refused with a fixed
     text (never echoing the value). It may be combined with --model (the
@@ -145,7 +146,8 @@ Notes:
     (kimi-code K3-only, deepseek-harness high|max) refuses the dispatch
     through its existing policy gate with a hint naming --reasoning. The
     echoed "effective reasoning" is advisory in the same sense as the model
-    echo. --reasoning exists only on run (not spawn/workflow/daemon); a
-    persistent reasoning change belongs in the registry reasoning policy.
+    echo. --reasoning exists only on run and retry (not
+    spawn/workflow/daemon); a persistent reasoning change belongs in the
+    registry reasoning policy.
   - --help must be the FIRST argument after run: npm run cli -- run --help
 `;

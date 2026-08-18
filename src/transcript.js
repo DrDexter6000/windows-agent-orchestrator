@@ -1970,6 +1970,53 @@ export function findLatest(events, type) {
 }
 
 /**
+ * R13 (TD-127): runId-BOUND event readers — the single shared definition of
+ * "read an event of `type` that belongs to THIS run".
+ *
+ * Why bound readers exist alongside findLatest: an append-only transcript
+ * file can carry events whose envelope runId does not match the file's run
+ * (tail-appended forgeries, cross-run concatenation). An unbound findLatest
+ * trusts the LAST such line regardless of ownership — the TD-127 side channel
+ * (a forged tail prompt.sent got re-dispatched by retry). Binding to the
+ * caller-requested runId kills cross-run injection and cross-run misreads;
+ * it cannot distinguish a FORGED same-runId append from a legal one (that
+ * attacker already has runs/ write power) — callers whose lane has a legal
+ * multi-write shape apply their own lane narrowing on top (see
+ * commands/lifecycle.js retry: last bound event WITH a messageId).
+ *
+ * Order semantics mirror the two established bound disciplines:
+ *   - findLatestBound: LAST bound match. Required where the legal writer
+ *     appends the authoritative fact LAST (TD-54 double prompt.sent — the
+ *     second event carries messageId/admittedSeq).
+ *   - findFirstBound: FIRST bound match. Required where the authoritative
+ *     fact is the FIRST append and tail appends must never win (R12-C
+ *     run.started: retry inherits overrides from the first bound fact).
+ * Same lifecycle/shape as findLatest: pure function, no I/O, undefined when
+ * no bound match exists (legacy pre-envelope transcripts have no runId field
+ * on events — a bound read over them yields undefined, which callers already
+ * handle via their lenient `?.` chains).
+ */
+export function findLatestBound(events, type, runId) {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type === type && event.runId === runId) {
+      return event;
+    }
+  }
+  return undefined;
+}
+
+export function findFirstBound(events, type, runId) {
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index];
+    if (event?.type === type && event.runId === runId) {
+      return event;
+    }
+  }
+  return undefined;
+}
+
+/**
  * 从事件序列推算当前 RunState。
  * 优先取最后一条 run.state_change 的 to；
  * 若无 state_change（旧 transcript），用旧逻辑——最后事件 type 兜底推断，
