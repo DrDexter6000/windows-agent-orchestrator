@@ -663,6 +663,40 @@ test("M11-12B-P7: full run_delivery output for a failed delivery has the exact e
     `wire field set mismatch; got ${Object.keys(parsed).sort()}`);
 });
 
+// R17 / TD-130 W1: persisted verification results now carry bounded
+// stdoutTail/stderrTail diagnostic strings on FAILED commands (transcript +
+// DeliveryRef persistence layer only — see verificationTailCapture.test.js).
+// This guard pins that the MCP wire boundary does NOT widen with them: the
+// summary keeps projecting exactly the eight safe scalar fields and never
+// echoes tail content, even when the failed result carries juicy output.
+test("R17: summary ignores result tail fields — exact eight keys, zero tail content on the wire", () => {
+  const TAIL_SENTINEL = "R17-TAIL-CONTENT-SENTINEL";
+  const ref = failedRef({
+    verification: failedVerification({
+      results: [
+        { index: 0, command: "npm test", exitCode: 0, signal: null, timedOut: false, durationMs: 100, stdoutBytes: 50, stderrBytes: 0 },
+        {
+          index: 1, command: "npm run build", exitCode: 2, signal: null, timedOut: false, durationMs: 50,
+          stdoutBytes: 10, stderrBytes: 200,
+          stdoutTail: `${TAIL_SENTINEL}-out`,
+          stderrTail: `…[truncated 42 bytes]\n${TAIL_SENTINEL}-err`,
+        },
+      ],
+    }),
+  });
+  const s = projectVerificationFailureSummary(ref, "failed", "command_failed");
+  // Exactly the eight keys — the tails are not a ninth.
+  assert.deepEqual(Object.keys(s).sort(), EXACT_SUMMARY_KEYS.slice().sort());
+  // The per-command scalars still project from the failed result.
+  assert.equal(s.exitCode, 2);
+  assert.equal(s.stderrBytes, 200);
+  // Zero tail content crosses the boundary.
+  const dumped = JSON.stringify(s);
+  assert.ok(!dumped.includes(TAIL_SENTINEL), "tail content must not leak into the summary");
+  assert.ok(!dumped.includes("stdoutTail") && !dumped.includes("stderrTail"), "tail field names must not appear");
+  assert.ok(!dumped.includes("truncated"), "truncation markers must not appear");
+});
+
 // M12-6 (FR-05/FR-06): setup-phase failure must project the SETUP command/result
 // arrays — NOT the assertion arrays. Contract #2 requires setup and assertion to
 // be separately verified, persisted, AND projected. A setup failure leaves the

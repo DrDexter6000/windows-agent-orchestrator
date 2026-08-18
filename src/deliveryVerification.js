@@ -32,13 +32,38 @@ import { assertCommittedDeliveryRef, DeliveryError } from "./delivery.js";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 
+// TD-130 (R17) W1: per-side diagnostic tail cap, in BYTES of raw subprocess
+// output. Bounded memory (the accumulators never hold more than this) AND a
+// bounded persisted footprint — a delivery_verification_* event carries at
+// most one non-empty tail pair (verification is fail-fast: every command
+// before the failing one exited 0, and green output is byte-counted only).
+// The truncation marker (`…[truncated N bytes]`, N = dropped byte count) sits
+// ON TOP of this cap, not inside it.
+const TAIL_MAX_BYTES = 8192;
+
 // ===== Public API: runVerificationCommand =====
 
 /**
  * Run a single verification command asynchronously.
  *
  * Uses `spawn(command, {shell:true})` — the one intentional shell boundary.
- * stdout/stderr are piped and drained (byte-counted only, not stored).
+ * stdout/stderr are piped and drained; byte counts are always kept, and on a
+ * NON-SUCCESS outcome (non-zero exit, timeout, or launch error) a bounded
+ * tail of each stream is retained for failure diagnosis (TD-130: five
+ * harness-side `npm test` exit-1 events left only a stderr byte count — the
+ * content needed to diagnose them was dropped). Green output stays
+ * byte-counted only: passing commands contribute no output body to any
+ * persisted result, keeping delivery events small and the long-standing
+ * "success results carry no output body" contract (3B-07/3B-25) intact.
+ *
+ * Content class & bound of the tails: subprocess test output (repo-generated
+ * content), capped at TAIL_MAX_BYTES per side plus a short truncation marker.
+ * They ride the existing credential discipline for free — every transcript
+ * persistence path (append / tryAppendReverifyOutcome /
+ * tryAppendRepackageVerification) runs the whole delivery payload through the
+ * exact-secret redactor (secretRedaction.js), which rewrites any literal
+ * secret value inside the tails. No keyword filtering is applied (it would
+ * mangle TAP output); the MCP run_delivery boundary stays content-free.
  *
  * The subprocess runs with `opts.env` (a full environment) so the caller can
  * inject a unique per-attempt TMP/TEMP/TMPDIR. When omitted, process.env is
@@ -48,7 +73,7 @@ const DEFAULT_TIMEOUT_MS = 300_000;
  * @param {string} cwd — worktree path (exact delivery commit worktree)
  * @param {{timeoutMs?: number, env?: object}|number} [opts] — options, or a
  *   legacy positive-integer timeout (back-compat for direct numeric callers)
- * @returns {Promise<{command, exitCode, signal, timedOut, durationMs, stdoutBytes, stderrBytes, launchError?}>}
+ * @returns {Promise<{command, exitCode, signal, timedOut, durationMs, stdoutBytes, stderrBytes, stdoutTail, stderrTail, launchError?}>}
  */
 export async function runVerificationCommand(command, cwd, opts = DEFAULT_TIMEOUT_MS) {
   // Back-compat: a bare number is the legacy timeout form.
@@ -58,6 +83,11 @@ export async function runVerificationCommand(command, cwd, opts = DEFAULT_TIMEOU
     const startTime = Date.now();
     let stdoutBytes = 0;
     let stderrBytes = 0;
+    // TD-130 (R17): rolling last-TAIL_MAX_BYTES-bytes window per stream.
+    // Memory is bounded regardless of output volume; the exact dropped count
+    // is derivable at the end (total bytes minus retained bytes).
+    let stdoutTailBuf = Buffer.alloc(0);
+    let stderrTailBuf = Buffer.alloc(0);
     let timedOut = false;
     let resolved = false;
 
@@ -76,15 +106,20 @@ export async function runVerificationCommand(command, cwd, opts = DEFAULT_TIMEOU
 
     child.stdout?.on("data", (chunk) => {
       stdoutBytes += chunk.length;
+      stdoutTailBuf = _appendTail(stdoutTailBuf, chunk);
     });
     child.stderr?.on("data", (chunk) => {
       stderrBytes += chunk.length;
+      stderrTailBuf = _appendTail(stderrTailBuf, chunk);
     });
 
     child.on("close", (code, signal) => {
       if (resolved) return;
       resolved = true;
       clearTimeout(timer);
+      // Tails are a FAILURE-diagnostic: only a non-success outcome carries
+      // output content. Success keeps the byte-count-only contract.
+      const failed = timedOut || code !== 0;
       resolve({
         command,
         exitCode: timedOut ? null : code,
@@ -93,6 +128,8 @@ export async function runVerificationCommand(command, cwd, opts = DEFAULT_TIMEOU
         durationMs: Date.now() - startTime,
         stdoutBytes,
         stderrBytes,
+        stdoutTail: failed ? _tailString(stdoutTailBuf, stdoutBytes) : "",
+        stderrTail: failed ? _tailString(stderrTailBuf, stderrBytes) : "",
       });
     });
 
@@ -108,10 +145,40 @@ export async function runVerificationCommand(command, cwd, opts = DEFAULT_TIMEOU
         durationMs: Date.now() - startTime,
         stdoutBytes,
         stderrBytes,
+        stdoutTail: _tailString(stdoutTailBuf, stdoutBytes),
+        stderrTail: _tailString(stderrTailBuf, stderrBytes),
         launchError: true,
       });
     });
   });
+}
+
+// ===== TD-130 (R17) W1: bounded output-tail helpers =====
+
+/**
+ * Append a chunk to the rolling tail window, keeping at most TAIL_MAX_BYTES.
+ * Pure buffer arithmetic — no decoding until the final _tailString call.
+ */
+function _appendTail(tail, chunk) {
+  if (!chunk || chunk.length === 0) return tail;
+  const merged = tail.length === 0 ? chunk : Buffer.concat([tail, chunk]);
+  if (merged.length <= TAIL_MAX_BYTES) return merged;
+  return merged.subarray(merged.length - TAIL_MAX_BYTES);
+}
+
+/**
+ * Render the retained window as a diagnostic string. When output was dropped,
+ * prefix an explicit marker with the exact dropped byte count so the reader
+ * can see the truncation and its size. The cap slices at a byte boundary, so
+ * a multi-byte UTF-8 sequence split at the head edge may decode to a
+ * replacement character — acceptable for a diagnostic tail (the marker makes
+ * the head edge visible).
+ */
+function _tailString(tail, totalBytes) {
+  if (tail.length === 0) return "";
+  const dropped = Math.max(0, totalBytes - tail.length);
+  const body = tail.toString("utf8");
+  return dropped > 0 ? `…[truncated ${dropped} bytes]\n${body}` : body;
 }
 
 // ===== Process tree kill (Windows) =====
@@ -179,11 +246,20 @@ async function _cleanupAttemptEnv(attempt) {
 }
 
 /**
- * Record a single command outcome. Carries ONLY safe, byte-counted facts — no
- * stdout/stderr body, no extra command echo beyond the Lead-authored command
- * string itself (contract: no command/path/stderr leakage).
+ * Record a single command outcome. Carries the Lead-authored command string
+ * itself, safe byte-counted facts, and — TD-130 (R17) — additive bounded
+ * `stdoutTail`/`stderrTail` strings for FAILURE diagnosis only. Content class:
+ * subprocess test output (repo-generated), ≤ TAIL_MAX_BYTES per side plus a
+ * short truncation marker, riding the existing repo-wide no-credential
+ * discipline (every transcript persistence path exact-secret-redacts the whole
+ * delivery payload). The recorder ENFORCES the green-no-tail contract
+ * structurally: a success-shaped result (exit 0, no timeout, no launch error)
+ * records empty tails even if a custom runner reported content, and a runner
+ * that returns no tail fields at all (legacy injected fakes) normalizes to ""
+ * so every recorded result has the same shape.
  */
 function _recordResult(index, command, result) {
+  const green = result.exitCode === 0 && !result.timedOut && !result.launchError;
   return {
     index,
     command,
@@ -193,6 +269,8 @@ function _recordResult(index, command, result) {
     durationMs: result.durationMs,
     stdoutBytes: result.stdoutBytes,
     stderrBytes: result.stderrBytes,
+    stdoutTail: green || typeof result.stdoutTail !== "string" ? "" : result.stdoutTail,
+    stderrTail: green || typeof result.stderrTail !== "string" ? "" : result.stderrTail,
   };
 }
 
