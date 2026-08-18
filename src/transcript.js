@@ -1980,9 +1980,11 @@ export function findLatest(events, type) {
  * (a forged tail prompt.sent got re-dispatched by retry). Binding to the
  * caller-requested runId kills cross-run injection and cross-run misreads;
  * it cannot distinguish a FORGED same-runId append from a legal one (that
- * attacker already has runs/ write power) — callers whose lane has a legal
- * multi-write shape apply their own lane narrowing on top (see
- * commands/lifecycle.js retry: last bound event WITH a messageId).
+ * attacker already has runs/ write power) — a same-runId append forgery is
+ * a write-capability attack surface the READ side cannot solve (R13-C: the
+ * messageId lane-narrowing attempt was removed — dead code for the
+ * ProcessBackend family, whose legal writes land bare); the real boundary
+ * is write-end integrity.
  *
  * Order semantics mirror the two established bound disciplines:
  *   - findLatestBound: LAST bound match. Required where the legal writer

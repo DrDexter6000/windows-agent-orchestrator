@@ -22,35 +22,38 @@ import { parseOptions, loadRun, newRunManager, resolveIsolateFlag } from "./shar
 import { assertValidModelOverride, assertValidReasoningOverride, isValidModelOverride, isValidReasoningOverride } from "../runManager.js";
 
 /**
- * R13 (TD-127): retry's task-text read — the LAST prompt.sent BOUND to this
- * runId, with the legal TD-54 double-write shape preserved (runManager.start
- * appends a bare {prompt} BEFORE spawn and the authoritative {messageId,
- * admittedSeq, prompt} AFTER: the second event is the one resume/retry need).
+ * R13-C (TD-127 rework): retry's task-text read — the LAST prompt.sent BOUND
+ * to this runId, in PURE binding semantics. The legal TD-54 double-write
+ * shape is preserved order-wise (runManager.start appends a bare {prompt}
+ * BEFORE spawn and a second write AFTER; both carry the same .prompt, so
+ * last-bound == the authoritative second write).
  *
  * Security posture, honestly scoped:
  *   - runId binding kills cross-run injection (a tail-appended prompt.sent
  *     carrying a FOREIGN runId is never picked) and cross-run misreads.
- *   - Binding CANNOT stop a forged SAME-runId tail append — that line is
+ *   - Binding CANNOT stop a forged SAME-runId tail append — on disk it is
  *     shape-identical to a legal append and the attacker already has runs/
- *     write power. The messageId preference below is a lane narrowing on top
- *     (legal writer's last event always carries messageId; a forged tail
- *     WITHOUT one no longer wins), a speed-bump against naive forgeries —
- *     not a boundary. A shape-complete same-runId forgery still lands; that
- *     residual is the same write-capability attack surface R12-C accepted
- *     for run.started.
- *   - Behavior on every LEGAL shape is byte-identical to the pre-R13
- *     findLatest: single {prompt} → it; legal double → the second (has
- *     messageId); spawn-failed runs (second write never happened) → the
- *     only/first event via the bound fallback.
+ *     write power. R13 tried a "prefer the last event WITH a messageId"
+ *     narrowing on top; R13-C REMOVED it: for the ProcessBackend family
+ *     (claudeCode.js / kimiCode.js / codex.js all extend ProcessBackend)
+ *     the spawn result carries messageId: undefined, which transcript
+ *     serialization drops — BOTH legal writes land bare, so the narrowing
+ *     was dead code for that family (a bare forged tail beat it via the
+ *     fallback). A same-runId append forgery — bare or shape-complete —
+ *     is a runs/-write-capability attack surface the READ side cannot
+ *     solve; the real boundary is write-end integrity.
+ *   - Behavior on envelope-era LEGAL shapes is byte-identical to the
+ *     pre-R13 findLatest: single {prompt} → it; legal double → the second
+ *     (last bound). Pre-envelope LEGACY transcripts (events with no runId
+ *     field) yield no bound match → retry refuses (see the error below);
+ *     the byte-identity claim is envelope-era only.
+ *   - runStageProjection.js:53-58 deliberately keeps envelope-less legacy
+ *     events IN scope; retry deliberately does NOT: that projection is a
+ *     read-only display lane, while retry RE-DISPATCHES text — an
+ *     envelope-less line staying in scope here would mean dispatching
+ *     text the binding discipline cannot attribute to this run.
  */
 function findRetryPromptEvent(events, runId) {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    if (event?.type === "prompt.sent" && event.runId === runId
-      && event.messageId !== undefined && event.messageId !== null) {
-      return event;
-    }
-  }
   return findLatestBound(events, "prompt.sent", runId);
 }
 
@@ -76,13 +79,23 @@ export async function retryCommand(args, config) {
   if (!agentId) {
     throw new Error(`Run ${runId} has no agentId`);
   }
-  // R13 (TD-127): the task text is read through the runId-BOUND reader (see
-  // findRetryPromptEvent above) — a tail-appended forged prompt.sent with a
-  // foreign runId (or one without messageId from a lazy forger) is never the
-  // re-dispatched prompt.
+  // R13-C (TD-127 rework): the task text is read through the runId-BOUND
+  // reader (findRetryPromptEvent above) — a tail-appended forged prompt.sent
+  // with a FOREIGN runId is never the re-dispatched prompt. A same-runId
+  // forged append still lands (runs/ write power) — that residual is
+  // write-end territory, not solvable at this read site; see the honest
+  // scoping above.
   const promptEvent = findRetryPromptEvent(events, runId);
   if (!promptEvent?.prompt) {
-    throw new Error(`Run ${runId} has no stored prompt (runs before v0.0.2 may not store prompts)`);
+    // R13-C honesty fix: this refusal fires for TWO shapes — a transcript
+    // with no prompt.sent at all, and a pre-envelope legacy transcript whose
+    // prompt.sent lines carry no runId (invisible to the bound reader). The
+    // old "runs before v0.0.2 may not store prompts" text claimed only the
+    // first; the wording below covers both and names the escape hatch.
+    throw new Error(
+      `Run ${runId}: no runId-bound prompt.sent found in this transcript — pre-envelope legacy `
+      + "formats are not retryable through the bound reader; re-dispatch explicitly with `run`",
+    );
   }
   // R12 (Owner 2026-08-18; hardened R12-C C-1): retry INHERITS the source
   // run's per-dispatch overrides from its run.started fact — the FIRST

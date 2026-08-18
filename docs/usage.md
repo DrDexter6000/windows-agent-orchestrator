@@ -417,7 +417,8 @@ npm run cli -- resume <runId> --wait
 
 retry 的 per-dispatch 覆盖继承（R12，与 resume 重建链对称）：
 
-- **任务文本取法（R13 / TD-127）**：retry 派发的任务文本取**本 run 最后一条 `prompt.sent` 记录（runId 绑定）**——尾部追加的跨 runId 伪造记录不采信（信封绑定纪律，读取器 SSOT 在 `transcript.js` 的 `findLatestBound`/`findFirstBound`）；合法双写形状（TD-54：spawn 前首写 + spawn 后带 `messageId` 补写）仍取最后一条。诚实边界：同 runId 且形状完整的伪造追加仍会被采信——该攻击面等同于持有 `runs/` 写权限，读取端绑定无法区分（更强的收窄需要写入端完整性机制，未在本轮范围）。
+- **任务文本取法（R13-C / TD-127）**：retry 派发的任务文本取**本 run 最后一条 `prompt.sent` 记录（纯 runId 绑定）**——尾部追加的跨 runId 伪造记录不采信（信封绑定纪律，读取器 SSOT 在 `transcript.js` 的 `findLatestBound`/`findFirstBound`）；合法双写形状（TD-54：spawn 前首写 + spawn 后补写）仍取最后一条。诚实边界（R13-C 统一口径）：绑定只杀跨 run 注入与错读——同 runId 的伪造追加（无论是否带 `messageId`）仍会被采信；该攻击面等同于持有 `runs/` 写权限，读取端无解，真边界在写入端完整性。R13 曾加"优先取带 `messageId` 的末条"收窄，R13-C 移除：claude-code/codex/kimi-code 均为 ProcessBackend 家族，其合法双写落盘**均无** `messageId`（spawn 结果的 `undefined` 经 JSON 序列化丢键），该收窄对此家族是死代码。
+- **行为变更（R13 / R13-C 文案如实化）**：信封时代之前的 legacy transcript（事件无 `runId` 字段）经绑定读取器找不到本 run 的 `prompt.sent` → retry **硬拒绝**（文案如实覆盖两情形："no runId-bound prompt.sent found in this transcript — pre-envelope legacy formats are not retryable through the bound reader; re-dispatch explicitly with `run`"）；`resume` 对无信封 legacy transcript 同样拒绝（return null，与 resume 既有拒绝语义一致）。
 - **继承范围（诚实口径，R12-C）**：retry 重新派发**任务文本与 per-dispatch 覆盖**；delivery 声明 / 只读声明 / 隔离形状**不**继承（R12 前既有行为不变）——需要完整形状时用 `run` 显式重发。
 - 源 run 的 `run.started.modelOverride` / `run.started.reasoningOverride` 事实会被**原样继承**到新派发——权威是**首条绑定该 runId 的 `run.started`**（transcript 信封绑定纪律，与 resume 的首条取法同族；尾部追加的伪造 `run.started` 即使形状合法也不采信）。值仍过 `run` 既有的形状门/闭集门与合成入口——新 run 的 `run.started` 落同样的覆盖事实。源 run 无覆盖且未显式给 flag → 零覆盖（与旧输出逐字节一致）。
 - **旧格式宽容（R12-C）**：源 transcript 缺 `run.started`（R10 前旧格式）→ retry 按**零覆盖**放行，不拒绝——与 resume 的拒绝语义不同但各自正确（resume 要接续同一会话，找不到事实只能拒绝；retry 是全新派发，零覆盖即注册表策略）。

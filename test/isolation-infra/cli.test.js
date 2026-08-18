@@ -3838,6 +3838,12 @@ test("R11-1-CLI-8: run --background --reasoning 全链 — CLI JSON 回显 + run
 
 // R12 共用夹具：fake backend 捕获 spawn 的合成 policy；registry agent 带齐
 // model+reasoning 静态策略（含兄弟字段，验证"只替换 .id/.effort"）。
+// R13-C 诚实修正：自称 claude-code 的假 backend 不得返回 messageId/admittedSeq——
+// 真实 claudeCode/kimiCode/codex 都 extends ProcessBackend，其 spawn 结果带
+// messageId: undefined（processBackend.js:340），transcript.append 的
+// JSON.stringify 丢 undefined 键 → 该家族的合法 TD-54 双写【两条都无
+// messageId】。旧夹具返回 messageId 掩盖了"messageId 优先收窄对该家族是死
+// 代码"的空档（auditor 探针 D）。
 function makeRetryInheritFixture(dir) {
   const spawned = [];
   const fakeBackend = {
@@ -3850,8 +3856,6 @@ function makeRetryInheritFixture(dir) {
       return {
         backend: "claude-code",
         backendSessionId: "s_r12",
-        messageId: "m_r12",
-        admittedSeq: 1,
         async *events() {
           yield { kind: "assistant", role: "assistant", parts: [{ type: "text", text: "done" }] };
           yield { kind: "done", reason: "completed" };
@@ -4015,11 +4019,13 @@ test("R12-CLI-3: 无覆盖 retry 输出逐字节兼容 — 无 inheritedOverride
     const { config, spawned } = makeRetryInheritFixture(dir);
     const out = await captureLog(() => retryCommand(["run_plain", "--run-dir", dir], config));
     const parsed = parseRetryJson(out);
-    // 旧 face 的键集 = originalRunId/newRunId/transcript + run.result（backend 句柄
-    // 四字段）。inheritedOverrides 缺席是字节回归的强钉（键集级而非子串级）。
+    // 旧 face 的键集 = originalRunId/newRunId/transcript + run.result（backend
+    // 句柄序列化字段）。R13-C 夹具诚实化后此处即 ProcessBackend 家族真实键集
+    // （messageId/admittedSeq 为 undefined，JSON 序列化丢键）。inheritedOverrides
+    // 缺席是字节回归的强钉（键集级而非子串级）。
     assert.deepEqual(
       Object.keys(parsed).sort(),
-      ["admittedSeq", "backend", "backendSessionId", "messageId", "newRunId", "originalRunId", "transcript"],
+      ["backend", "backendSessionId", "newRunId", "originalRunId", "transcript"],
       "无覆盖 retry 输出键集与旧 face 完全一致（无 inheritedOverrides）",
     );
     assert.ok(!out.includes("inheritedOverrides"), "输出字符串不含 inheritedOverrides");
@@ -4215,11 +4221,12 @@ test("R12-CLI-8: 旧格式宽容 — 源 transcript 缺 run.started（R10 前）
     const { config, spawned } = makeRetryInheritFixture(dir);
     const out = await captureLog(() => retryCommand(["run_old", "--run-dir", dir], config));
     const parsed = parseRetryJson(out);
-    // 零覆盖放行（?. 链）：不拒绝、无 inheritedOverrides、输出键集与旧 face 一致。
+    // 零覆盖放行（?. 链）：不拒绝、无 inheritedOverrides、输出键集与旧 face 一致
+    // （R13-C 夹具诚实化后为 ProcessBackend 家族真实键集）。
     assert.ok(!out.includes("inheritedOverrides"));
     assert.deepEqual(
       Object.keys(parsed).sort(),
-      ["admittedSeq", "backend", "backendSessionId", "messageId", "newRunId", "originalRunId", "transcript"],
+      ["backend", "backendSessionId", "newRunId", "originalRunId", "transcript"],
       "旧格式零覆盖 retry 输出键集与旧 face 完全一致",
     );
     const events = await readTranscript(parsed.transcript);
@@ -4235,12 +4242,17 @@ test("R12-CLI-8: 旧格式宽容 — 源 transcript 缺 run.started（R10 前）
 
 // ---------------------------------------------------------------------------
 // R13（2026-08-18，TD-127）：retry 任务文本取法绑定修复。
-// 修复前 lifecycle.js 用无绑定 findLatest(events, "prompt.sent")——尾部追加的
-// 伪造 prompt.sent（同 runId 或跨 runId）会被原样重新派发（auditor 探针实证）。
-// 修复：共享绑定读取器（transcript.js findLatestBound/findFirstBound，单一定义）
-// + retry 面的 messageId 优先收窄（合法 TD-54 双写形状里第二条才带 messageId）。
-// 诚实边界：绑定挡跨 run 注入/错读；同 runId 且形状完整的伪造仍会被采信——
-// 该攻击者已持有 runs/ 写权限（与 R12-C run.started 侧信道同级）。
+// R13-C（同日验收会审返工，auditor P1-1）：删除 R13 的 messageId 优先收窄，
+// 回归纯 findLatestBound。复核依据：claudeCode.js:35 / kimiCode.js:24 /
+// codex.js:13 全部 extends ProcessBackend，其 spawn 结果 messageId === undefined
+// （processBackend.js:340），transcript.append 的 JSON.stringify 丢 undefined 键
+// （transcript.js:670）→ 该家族合法 TD-54 双写【两条都无 messageId】——
+// "同 runId 无 messageId 伪造被收窄挡下"的宣称对该家族完全不成立（探针 D：
+// 裸伪造经 fallback 照样被派发）。旧夹具自称 claude-code 却返回 messageId，
+// 恰好掩盖了这个空档（已在 R13-C 修正）。
+// 诚实边界（R13-C 统一口径）：绑定杀跨 run 注入与错读；同 runId 追加伪造
+// （无论是否带 messageId）属有 runs/ 写权限攻击面，读侧无解，真边界在写入端
+// 完整性。D 形状测试钉住当前行为，防悄悄变化。
 // 观察手段：retry 派发的 prompt 即新 run transcript 落盘的 prompt.sent.prompt
 // （start 在 spawn 前把它原样写入新 run——TD-54 形状，两值恒等）。
 // ---------------------------------------------------------------------------
@@ -4299,50 +4311,72 @@ test("R13-CLI-2: 篡改探针（跨 runId）— 尾部伪造 prompt.sent 不被�
   }
 });
 
-test("R13-CLI-3: 篡改探针（同 runId）— 无 messageId 尾部伪造被收窄挡下；形状完整伪造仍采信（诚实边界钉当前行为）", async () => {
+test("R13-CLI-3: D 形状探针 — ProcessBackend 盘上真实形状（合法双写均无 messageId）+ 同 runId 裸伪造尾条仍被派发（钉当前已知边界）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-r13-srun-"));
   try {
-    // (a) 合法双写 + 尾部无 messageId 的同 runId 伪造：messageId 优先收窄 →
-    //     取合法第二写（带 messageId），伪造文本不派发。
-    writeRetrySource(dir, "run_naive", {
+    // (0) 盘上形状钉：经真实 manager.start（诚实夹具，spawn 不返回 messageId）
+    //     产生的新 run transcript 里，合法 TD-54 双写两条均无 messageId/
+    //     admittedSeq 键（undefined 被 JSON 序列化丢弃）。这是 D 形状的事实
+    //     基础——若后端家族开始真实返回 messageId，本断言变红，提示重新
+    //     评估本文件全部 D 形状结论。
+    writeRetrySource(dir, "run_shape0");
+    const { config } = makeRetryInheritFixture(dir);
+    let out = await captureLog(() => retryCommand(["run_shape0", "--run-dir", dir], config));
+    let parsed = parseRetryJson(out);
+    const newEvents = await readTranscript(parsed.transcript);
+    const newPrompts = newEvents.filter((e) => e.type === "prompt.sent");
+    assert.equal(newPrompts.length, 2, "合法 TD-54 双写（spawn 前首写 + spawn 后补写）");
+    for (const e of newPrompts) {
+      assert.equal("messageId" in e, false, "ProcessBackend 家族合法写落盘不带 messageId 键");
+      assert.equal("admittedSeq" in e, false, "ProcessBackend 家族合法写落盘不带 admittedSeq 键");
+    }
+
+    // (a) D 形状篡改探针（钉当前行为）：源 run 用 ProcessBackend 家族的真实
+    //     盘上形状——合法双写（两条均裸）+ 尾部同 runId 裸伪造（无 messageId）。
+    //     纯 findLatestBound 取末条绑定事件 = 伪造条 → 仍被派发。这是【已知
+    //     边界】而非防御宣称：同 runId 追加伪造 = 持有 runs/ 写权限攻击面，
+    //     读侧无解（真边界在写入端完整性）。钉住它防两件事：行为悄悄变化、
+    //     或"收窄能挡裸伪造"的虚假宣称回潮（R13 的 messageId 收窄在该形状
+    //     下就是死代码——合法事件同样无 messageId，优先循环永远落空）。
+    writeRetrySource(dir, "run_dshape", {
       extraEvents: [
-        { seq: 3, ts: "2026-08-18T00:00:00.150Z", type: "prompt.sent", runId: "run_naive",
-          agentId: "claude_worker", messageId: "m_legal", admittedSeq: 5, prompt: "legal second write" },
-        { seq: 4, ts: "2026-08-18T00:00:00.200Z", type: "prompt.sent", runId: "run_naive",
-          agentId: "claude_worker", prompt: "FORGED naive same-run tail" },
+        { seq: 3, ts: "2026-08-18T00:00:00.150Z", type: "prompt.sent", runId: "run_dshape",
+          agentId: "claude_worker", prompt: "original task prompt" },
+        { seq: 4, ts: "2026-08-18T00:00:00.200Z", type: "prompt.sent", runId: "run_dshape",
+          agentId: "claude_worker", prompt: "FORGED bare same-run tail" },
       ],
     });
-    const { config } = makeRetryInheritFixture(dir);
-    let out = await captureLog(() => retryCommand(["run_naive", "--run-dir", dir], config));
-    let dispatched = await readRedispatchedPrompt(parseRetryJson(out).transcript);
-    assert.equal(dispatched, "legal second write", "同 runId 无 messageId 伪造被收窄挡下——取合法带 messageId 的最后一条");
+    out = await captureLog(() => retryCommand(["run_dshape", "--run-dir", dir], config));
+    parsed = parseRetryJson(out);
+    let dispatched = await readRedispatchedPrompt(parsed.transcript);
+    assert.equal(dispatched, "FORGED bare same-run tail",
+      "钉当前已知边界：同 runId 裸伪造尾条仍被派发（末条绑定事件；读侧无解，真边界在写入端）");
 
-    // (b) 诚实边界：同 runId 且带 messageId 的形状完整伪造仍被采信——绑定与
-    //     收窄都无法区分"合法追加"与"持有 runs/ 写权限者的形状完整伪造"
-    //     （与 R12-C 对 run.started 的边界结论同级）。此处钉住当前行为；
-    //     更强的收窄需要写入端完整性（如哈希链），不在 R13 范围。
-    writeRetrySource(dir, "run_shape", {
+    // (b) 对照：形状完整（带 messageId）的同 runId 伪造同样被派发——messageId
+    //     有无不改变结局，佐证"收窄已删、绑定语义唯一"。
+    writeRetrySource(dir, "run_shape1", {
       extraEvents: [{
-        seq: 3, ts: "2026-08-18T00:00:00.200Z", type: "prompt.sent", runId: "run_shape",
+        seq: 3, ts: "2026-08-18T00:00:00.200Z", type: "prompt.sent", runId: "run_shape1",
         agentId: "claude_worker", messageId: "m_forged", admittedSeq: 6,
         prompt: "FORGED shape-complete same-run tail",
       }],
     });
-    out = await captureLog(() => retryCommand(["run_shape", "--run-dir", dir], config));
+    out = await captureLog(() => retryCommand(["run_shape1", "--run-dir", dir], config));
     dispatched = await readRedispatchedPrompt(parseRetryJson(out).transcript);
     assert.equal(dispatched, "FORGED shape-complete same-run tail",
-      "诚实边界（钉当前行为）：同 runId + 形状完整的伪造仍被采信——防御上限是写权限边界，非读取端绑定");
+      "同 runId 形状完整伪造同样被派发——与 (a) 同一边界，messageId 有无不改变结局");
   } finally {
     rmrfRetry(dir);
   }
 });
 
-test("R13-CLI-4: 合法双条回归 — TD-54 双 prompt.sent（第二条带 messageId）→ retry 取第二条（现行为不变）", async () => {
+test("R13-CLI-4: 合法双条回归 — TD-54 双 prompt.sent（HTTP 家族形状：第二写带 messageId）→ retry 仍取最后一条绑定记录", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-r13-dbl-"));
   try {
-    // runManager.start 的合法形状：spawn 前首写 {prompt}，spawn 后补写
-    // {messageId, admittedSeq, prompt}（runManager.js:1191/1220）。两条文本用
-    // 不同值以分辨取法——断言"取最后一条本 run 记录"语义在绑定后原样保留。
+    // runManager.start 的合法形状（HTTP 家族，如 opencode-serve）：spawn 前首写
+    // {prompt}，spawn 后补写 {messageId, admittedSeq, prompt}（runManager.js
+    // 双写位）。两条文本用不同值以分辨取法——断言"取最后一条本 run 绑定记录"
+    // 语义在纯绑定（R13-C 删收窄后）原样保留。
     writeRetrySource(dir, "run_dbl", {
       extraEvents: [{
         seq: 3, ts: "2026-08-18T00:00:00.150Z", type: "prompt.sent", runId: "run_dbl",
@@ -4365,7 +4399,8 @@ test("R13-CLI-5: 全部 prompt.sent 均跨 run（无本 run 绑定记录）→ r
   try {
     // 载体 run 只有 run.started + 一条 FOREIGN runId 的 prompt.sent——绑定纪律下
     // 本 run 无任务文本可派发。修复前无绑定 findLatest 会派发外 run 的文本；
-    // 修复后走既有 "no stored prompt" 拒绝面（与 pre-v0.0.2 无 prompt 记录同面）。
+    // 修复后走 "no runId-bound prompt.sent" 拒绝面（R13-C 起文案如实覆盖两情形：
+    // 无 prompt 记录 / pre-envelope legacy 不可经绑定读取器重试，并给 `run` 逃生口）。
     const started = {
       seq: 1, ts: "2026-08-18T00:00:00.000Z", type: "run.started", runId: "run_none",
       agentId: "claude_worker", backend: "claude-code", cwd: dir,
@@ -4381,7 +4416,9 @@ test("R13-CLI-5: 全部 prompt.sent 均跨 run（无本 run 绑定记录）→ r
     await assert.rejects(
       () => retryCommand(["run_none", "--run-dir", dir], config),
       (e) => {
-        assert.match(e.message, /Run run_none has no stored prompt/, "走既有无 prompt 拒绝文案");
+        assert.match(e.message, /Run run_none: no runId-bound prompt\.sent found in this transcript/,
+          "R13-C 如实文案：无绑定 prompt 记录 + legacy 不可经绑定读取器重试 + `run` 逃生口");
+        assert.match(e.message, /re-dispatch explicitly with `run`/, "文案包含逃生口指引");
         return true;
       },
     );

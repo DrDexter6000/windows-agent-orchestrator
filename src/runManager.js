@@ -2,7 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
-import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatest, projectCorrections } from "./transcript.js";
+import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatestBound, findFirstBound, projectCorrections } from "./transcript.js";
 import { createWorktree, removeWorktree } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
 import { raiseAlert } from "./alerts.js";
@@ -1186,8 +1186,9 @@ export class RunManager {
     // 靠 backgroundRunner 的 writeStartupFailureTranscript 兜底，但那时 failed 已落盘，
     // 测试（及任何轮询 transcript 的消费者）可能在 failed 之后、prompt.sent 之前快照，
     // 拿不到 prompt。修复：spawn 前先写 prompt.sent {prompt}（不含 messageId，spawn 前还没有），
-    // spawn 成功后再写第二条含 messageId/admittedSeq 的 prompt.sent；resume/retry 用 findLatest
-    // 取最后一条（含 messageId），保证 opencode-serve resume 拿得到 messageId。
+    // spawn 成功后再写第二条含 messageId/admittedSeq 的 prompt.sent（ProcessBackend 家族该值
+    // 为 undefined，序列化丢键——第二写与首写同样裸落盘）；resume/retry 自 R13-C 起用
+    // findLatestBound 取最后一条绑定记录，保证 opencode-serve resume 拿得到 messageId。
     await transcript.append("prompt.sent", { prompt });
 
     let result;
@@ -1274,8 +1275,18 @@ export class RunManager {
       return null;
     }
 
-    const session = events.find((e) => e.type === "session.created");
-    const runStarted = events.find((e) => e.type === "run.started");
+    // R13-C (TD-127 family sweep, auditor P2-1): resume's session/run.started
+    // reads are BOUND to this runId and keep their FIRST-match order — the
+    // established resume discipline (the authoritative facts are the FIRST
+    // appends; a tail append must never hijack attach/replay). The old unbound
+    // events.find trusted ANY line of the right type: auditor probe showed a
+    // tail-appended foreign prompt/session driving resume (a cross-runId
+    // forged prompt.sent got re-spawned verbatim by the replay branch).
+    // Legacy no-envelope transcripts (events without runId) no longer match →
+    // resume returns null here — the lane's existing refusal shape
+    // (Lead-accepted R13-C; same semantics as R12-C C-5).
+    const session = findFirstBound(events, "session.created", runId);
+    const runStarted = findFirstBound(events, "run.started", runId);
     if (!session?.backendSessionId || !runStarted) {
       return null;
     }
@@ -1472,7 +1483,9 @@ export class RunManager {
     // otherwise resumable backend into a missing streamEvents method.
     if (backend.replayByRespawn === true || typeof backend.streamEvents !== "function") {
       // TD-54：prompt.sent 可能写两条，取最后一条（两条都有 .prompt，无差别）。
-      const promptEvent = findLatest(events, "prompt.sent");
+      // R13-C：读取带 runId 绑定——尾部追加的外 run 伪造 prompt.sent 不得被
+      // 原样重放进新进程（auditor 探针实证修复前会被 RESPAWN）。
+      const promptEvent = findLatestBound(events, "prompt.sent", runId);
       if (!promptEvent?.prompt) return null;
       const originalSessionId = session.backendSessionId;
       // R7-C (C-5): same capability-gated cwd existence assert as start (layer
@@ -1541,13 +1554,16 @@ export class RunManager {
     const sessionId = session.backendSessionId;
     // TD-103 audit: delivery runs use worktree cwd for streamEvents polling.
     const cwd = resumeCwd;
+    // TD-54 修复：prompt.sent 现在可能写两条（spawn 前 {prompt} + spawn 后 {messageId,...}），
+    // resume 取最后一条才有 messageId（opencode-serve resume 流需要）。
+    // R13-C：读取带 runId 绑定——外 run 尾条不得供给 attach 的
+    // messageId/admittedSeq。
+    const boundPromptEvent = findLatestBound(events, "prompt.sent", runId);
     const handle = {
       backend: session.backend,
       backendSessionId: sessionId,
-      // TD-54 修复：prompt.sent 现在可能写两条（spawn 前 {prompt} + spawn 后 {messageId,...}），
-      // resume 取最后一条才有 messageId（opencode-serve resume 流需要）。
-      messageId: findLatest(events, "prompt.sent")?.messageId,
-      admittedSeq: findLatest(events, "prompt.sent")?.admittedSeq,
+      messageId: boundPromptEvent?.messageId,
+      admittedSeq: boundPromptEvent?.admittedSeq,
       events: (signal, opts) => backend.streamEvents(serveUrl, sessionId, { cwd, signal, interval: opts?.pollInterval }),
       abort: async () => backend.abort(serveUrl, sessionId),
     };

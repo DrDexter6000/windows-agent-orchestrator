@@ -26,7 +26,7 @@
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { JsonlTranscript, readTranscript, findState, findLatest, STATE_CHANGE_REASON } from "../transcript.js";
+import { JsonlTranscript, readTranscript, findState, findLatestBound, STATE_CHANGE_REASON } from "../transcript.js";
 import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { executeStopWithVerification } from "../backends/opencodeStopVerify.js";
 import { raiseAlert } from "../alerts.js";
@@ -142,7 +142,19 @@ export async function stopRun(input) {
   }
 
   // ── Session lookup ────────────────────────────────────────────────────────
-  const session = findLatest(events, "session.created");
+  // R13-C (TD-127 family sweep, auditor P1-2): the kill lane's session lookup
+  // is BOUND to the requested runId. An unbound findLatest let a tail-appended
+  // FOREIGN-run session.created win the kill: its backendSessionId became
+  // proc_<pid> and stop killed THAT pid (auditor probe: real proc_1111 +
+  // forged proc_2222 tail → KILLED 2222) — a destructive side effect escaping
+  // the WAO trust domain onto an arbitrary local process. LAST-bound keeps the
+  // lane's established order semantics (latest session wins, same as before
+  // and as runCollect.js:184); binding only removes foreign lines. Same-family
+  // sweep in this file: the run.started agentId read below is bound the same
+  // way. Legacy no-envelope transcripts (events without a runId field) now
+  // fall into the existing "no session metadata" refusal right below — the
+  // same error face a transcript with no session.created at all gets.
+  const session = findLatestBound(events, "session.created", runId);
   if (!session?.backendSessionId) {
     throw new Error(`Run ${runId} has no session metadata (no session.created event)`);
   }
@@ -160,7 +172,9 @@ export async function stopRun(input) {
   // Re-open transcript for writing
   const transcript = new JsonlTranscript(transcriptPath, {
     runId,
-    agentId: findLatest(events, "run.started")?.agentId ?? "unknown",
+    // R13-C: bound read (same sweep as the session lookup above) — a foreign
+    // tail run.started never supplies the writer context's agentId.
+    agentId: findLatestBound(events, "run.started", runId)?.agentId ?? "unknown",
   });
 
   // ── Process path ──────────────────────────────────────────────────────────
