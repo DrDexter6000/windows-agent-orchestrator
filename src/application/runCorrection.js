@@ -36,7 +36,7 @@ import {
   JsonlTranscript,
   readTranscript,
   findState,
-  findLatest,
+  findFirstBound,
   extractCanonicalAgentId,
   TERMINAL_STATES,
   projectCorrections,
@@ -146,7 +146,19 @@ export async function correctRun({
   // 4. The run must have been dispatched correctable (run.background_submitted.
   //    correctable === true). This is a STABLE fact (set at dispatch, before the
   //    runner forks) so reading it outside the append lock is TOCTOU-safe.
-  const submitted = findLatest(events, "run.background_submitted");
+  //    R14 (TD-128b): the read goes through the shared findFirstBound reader —
+  //    FIRST bound match, the first-append-authority discipline this repo
+  //    already applies to dispatch-time facts (run.started, R12-C). A
+  //    tail-appended run.background_submitted is never the correctable
+  //    authority. Anchor honesty (R14 re-verification): step 2's
+  //    extractCanonicalAgentId(events, runId) already fail-closes ANY foreign
+  //    or envelope-less line as unknown_run BEFORE this gate, so the swap is
+  //    provably behavior-identical today (every reachable event carries
+  //    runId === runId) — it is defense-in-depth for a future relaxation of
+  //    the identity gate, not a live fix. Legacy no-envelope transcripts are
+  //    likewise already refused (unknown_run at step 2) — no legacy behavior
+  //    change to declare for this lane.
+  const submitted = findFirstBound(events, "run.background_submitted", runId);
   if (!submitted || submitted.correctable !== true) return reject("not_correctable");
 
   // 5. Existing correctionId → return its durable status (no re-append). This is

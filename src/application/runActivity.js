@@ -20,7 +20,7 @@
 //
 // Architectural contract:
 //   - Does NOT import src/commands/*, src/mcp/*, MCP SDK, or zod.
-//   - Reuses readTranscript, findState, findLatest, TERMINAL_STATES,
+//   - Reuses readTranscript, findState, findLatestBound, TERMINAL_STATES,
 //     extractCanonicalAgentId, assertEventsBoundToRunId SSOTs from transcript.js;
 //     isValidRunId SSOT from delivery.js; verifyRunWorkspaceOwnership SSOT from
 //     runWorkspaceOwnership.js.
@@ -30,7 +30,7 @@ import { join } from "node:path";
 import {
   readTranscript,
   findState,
-  findLatest,
+  findLatestBound,
   TERMINAL_STATES,
   extractCanonicalAgentId,
   assertEventsBoundToRunId,
@@ -70,7 +70,16 @@ export async function readRunActivity({ runId, runDir, authorizedWorkspaceRoot, 
   }
 
   const agentId = extractCanonicalAgentId(events, runId);
-  const backend = findLatest(events, "session.created")?.backend ?? "unknown";
+  // R14 (TD-129d): the backend fact is read through the shared findLatestBound
+  // reader — LAST bound session.created ("latest session wins", the same order
+  // semantics the stop lane's bound session lookup keeps). Anchor honesty: the
+  // assertEventsBoundToRunId call above ALREADY fail-closes any missing/
+  // mismatched envelope (throws before this line), so every reachable event is
+  // bound and the swap is provably behavior-identical — discipline consistency
+  // with the bound-reader family, and a no-op legacy note: pre-envelope
+  // transcripts never reach this line (they throw upstream), so this lane has
+  // NO legacy degrade/fail-closed choice to declare.
+  const backend = findLatestBound(events, "session.created", runId)?.backend ?? "unknown";
   const state = findState(events);
   const terminal = TERMINAL_STATES.includes(state);
 

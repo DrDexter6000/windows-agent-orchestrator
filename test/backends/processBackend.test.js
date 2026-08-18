@@ -976,3 +976,47 @@ test("M12-21: runEventIsUsableEffect — five effect kinds + non-blank assistant
   assert.equal(runEventIsUsableEffect(undefined), false);
   assert.equal(runEventIsUsableEffect({ kind: "no_such_kind" }), false);
 });
+
+// ── R14（2026-08-18，TD-129a）：ProcessBackend 家族 messageId 真实契约哨兵 ──
+//
+// 背景（R13-C 的夹具空档）：cli.test.js 的 D 形状测试只钉【夹具链】的盘上形状
+// （诚实夹具不返回 messageId → transcript 落盘无键）——若真实 processBackend.js
+// 开始返回 messageId，夹具不变、该断言不红，"后端家族开始写 messageId"无任何
+// 测试会察觉。本哨兵直接断言【后端真实产物】：ProcessBackend.spawn 返回体
+// messageId/admittedSeq === undefined（processBackend.js 显式写死）。红 = 家族
+// 开始真实返回 messageId（HTTP 家族 opencode-serve/deepseek-harness 的形状），
+// 提示重新评估 R13-C 的全部 D 形状结论（cli.test.js R13-CLI-3 注释指向此处）。
+//
+// 断言取值不取键：spawn 返回体上键【存在】且值为 undefined（显式
+// `messageId: undefined`），传输有意义的是序列化产物——JSON.stringify 丢
+// undefined 值键，故 transcript 落盘无 messageId/admittedSeq 键，一并钉住。
+test("R14-W3: 真实契约哨兵 — ProcessBackend 家族 spawn 结果 messageId/admittedSeq === undefined（后端开始真实返回 messageId 时本断言变红）", async () => {
+  // (1) base ProcessBackend + 真实子进程（NODE 跑 mock 脚本）——真实后端产物。
+  const backend = makeBackend(ClaudeStreamParser, () => ["-e", mockScript(CLAUDE_LINES)]);
+  const handle = await backend.spawn(makeAgent(), { prompt: "test" });
+  assert.equal(handle.messageId, undefined, "base ProcessBackend spawn 结果 messageId === undefined");
+  assert.equal(handle.admittedSeq, undefined, "base ProcessBackend spawn 结果 admittedSeq === undefined");
+  // 传输真相：序列化产物不含这两个键（undefined 被 JSON.stringify 丢弃）——
+  // 这就是"该家族合法 TD-54 双写落盘均裸"的机制根源。
+  assert.equal(JSON.stringify(handle).includes("messageId"), false, "序列化产物不含 messageId 键");
+  assert.equal(JSON.stringify(handle).includes("admittedSeq"), false, "序列化产物不含 admittedSeq 键");
+  // drain 真实子进程，不留孤儿。
+  for await (const _ev of handle.events(new AbortController().signal)) { /* drain */ }
+
+  // (2) 家族成员（claude-code / kimi-code / codex 均 extends ProcessBackend，
+  //     其 spawn 返回体由 ProcessBackend.spawn 统一构造）。注入捕获型假 child
+  //     只替换进程层——被测的返回体形状仍是真实 backend 代码的产物。
+  const family = [
+    ["claude-code", ClaudeCodeBackend],
+    ["kimi-code", KimiCodeBackend],
+    ["codex", CodexBackend],
+  ];
+  for (const [name, Klass] of family) {
+    const cap = makeCapturingChild();
+    const familyBackend = new Klass({ spawnFn: () => cap.child });
+    const familyHandle = await familyBackend.spawn(makeAgent({ backend: name }), { prompt: "t" });
+    assert.equal(familyHandle.messageId, undefined, `${name} spawn 结果 messageId === undefined`);
+    assert.equal(familyHandle.admittedSeq, undefined, `${name} spawn 结果 admittedSeq === undefined`);
+    assert.equal(JSON.stringify(familyHandle).includes("messageId"), false, `${name} 序列化产物不含 messageId 键`);
+  }
+});

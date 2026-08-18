@@ -4316,9 +4316,14 @@ test("R13-CLI-3: D 形状探针 — ProcessBackend 盘上真实形状（合法�
   try {
     // (0) 盘上形状钉：经真实 manager.start（诚实夹具，spawn 不返回 messageId）
     //     产生的新 run transcript 里，合法 TD-54 双写两条均无 messageId/
-    //     admittedSeq 键（undefined 被 JSON 序列化丢弃）。这是 D 形状的事实
-    //     基础——若后端家族开始真实返回 messageId，本断言变红，提示重新
-    //     评估本文件全部 D 形状结论。
+    //     admittedSeq 键（undefined 被 JSON 序列化丢弃）。
+    //     R14（TD-129a）诚实化：本断言钉的是【夹具链】形状——夹具是本文件
+    //     手写的假 backend，真实 processBackend.js 改动不影响它，所以"后端
+    //     家族开始真实返回 messageId"时这里【不会】变红。真实契约哨兵在
+    //     test/backends/processBackend.test.js 的 R14-W3（直接断言真实
+    //     ProcessBackend 家族 spawn 结果 messageId/admittedSeq === undefined，
+    //     后端开始写 messageId 时那条变红）——重新评估本文件 D 形状结论
+    //     的触发器在那里，不在本断言。
     writeRetrySource(dir, "run_shape0");
     const { config } = makeRetryInheritFixture(dir);
     let out = await captureLog(() => retryCommand(["run_shape0", "--run-dir", dir], config));

@@ -92,6 +92,7 @@
       "registry-roles/roleContractPackageC.test.js",
       "registry-roles/roleContracts.test.js",
       "run-lifecycle/resumeBoundRead.test.js",
+      "run-lifecycle/boundReadSweep.test.js",
       "transcript/runActivityProjection.test.js",
       "transcript/runCollect.test.js",
       "transcript/runCollectCompact.test.js",

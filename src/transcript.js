@@ -1989,14 +1989,48 @@ export function findLatest(events, type) {
  * Order semantics mirror the two established bound disciplines:
  *   - findLatestBound: LAST bound match. Required where the legal writer
  *     appends the authoritative fact LAST (TD-54 double prompt.sent — the
- *     second event carries messageId/admittedSeq).
+ *     second event carries messageId/admittedSeq on the HTTP family ONLY,
+ *     opencode-serve / deepseek-harness; the ProcessBackend family's legal
+ *     double write lands BARE on both legs — its spawn result carries
+ *     messageId/admittedSeq === undefined and JSON serialization drops the
+ *     keys, pinned by the R14-W3 real contract sentinel in
+ *     test/backends/processBackend.test.js).
  *   - findFirstBound: FIRST bound match. Required where the authoritative
  *     fact is the FIRST append and tail appends must never win (R12-C
  *     run.started: retry inherits overrides from the first bound fact).
- * Same lifecycle/shape as findLatest: pure function, no I/O, undefined when
- * no bound match exists (legacy pre-envelope transcripts have no runId field
- * on events — a bound read over them yields undefined, which callers already
- * handle via their lenient `?.` chains).
+ *
+ * Lane read semantics (R14 single definition point — first-vs-last is a
+ * per-lane decision, so seeing them diverge across lanes is by design, not a
+ * bug; each lane reads where ITS legal writer puts the authority):
+ *   - resume: FIRST-bound (session.created / run.started) — it rebuilds the
+ *     authoritative dispatch facts of the same conversation; the first
+ *     append is the authority, later appends must not rewrite it.
+ *   - retry: task text LAST-bound prompt.sent (the TD-54 double write ends
+ *     with the authoritative leg), overrides FIRST-bound run.started (same
+ *     first-append discipline as resume).
+ *   - stop: LAST-bound (session.created / run.started) — the kill lane
+ *     targets the run's LATEST session (pre-binding latest-wins order kept).
+ *   - collect: UNBOUND findLatest (runCollect.js) — deliberately unchanged
+ *     (Owner decision, R13); the one remaining unbound lifecycle read.
+ *   - activity: LAST-bound session.created (latest session wins, report
+ *     face).
+ *   - reuse routing (sessionReuse.js, R14): LAST-bound session.created
+ *     bound to the PRIOR run (existence check feeding the busy/resume/first
+ *     decision). correction (runCorrection.js, R14): FIRST-bound
+ *     run.background_submitted (dispatch-time stable fact — the run.started
+ *     first-append discipline). continuation (runContinue.js, R14):
+ *     LAST-bound run.session_reuse.
+ *
+ * Legacy pre-envelope transcripts (events with no runId field) yield no
+ * bound match — undefined. There is NO blanket lenient handling: each lane
+ * declares its own explicit behavior (R14) — retry HARD-REFUSES with fixed
+ * text; resume returns null (its existing refusal); stop falls into its
+ * "no session metadata" refusal; correction and continuation are already
+ * refused upstream by the extractCanonicalAgentId identity gate
+ * (unknown_run / parent_not_found); activity already throws upstream at
+ * assertEventsBoundToRunId; reuse routing DEGRADES to a fresh first turn
+ * (never resumes a session it cannot attribute to the prior run). No lane
+ * silently reads a legacy event as though it were bound.
  */
 export function findLatestBound(events, type, runId) {
   for (let index = events.length - 1; index >= 0; index -= 1) {

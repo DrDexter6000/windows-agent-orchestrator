@@ -16,6 +16,11 @@ import { readRegistry } from "../registry.js";
 import { RunManager } from "../runManager.js";
 import { backendFor as sharedBackendFor } from "../backends/factory.js";
 import { readTranscript, findLastEventSeq, JsonlTranscript } from "../transcript.js";
+// R14 (TD-128c): loadRun input validation reuses the delivery.js isValidRunId
+// SSOT (the same validator runManager/isolation already share). Import
+// direction: delivery.js is a bottom-level module (node:child_process +
+// node:path only) — it cannot import commands/*, so this edge is acyclic.
+import { isValidRunId } from "../delivery.js";
 // M9-0: displayModel SSOT lives in application/registryInventory.js;
 // this re-export preserves the existing shared.js/cli.js public contract.
 import { displayModel } from "../application/registryInventory.js";
@@ -137,6 +142,15 @@ export function newRunManager(config) {
 export async function loadRun(runId, options, config) {
   if (!runId) {
     throw new Error("runId is required");
+  }
+  // R14 (TD-128c): validate BEFORE the runDir path join. `runId` reaches this
+  // join straight from CLI/MCP args (status/tail/retry/...); a traversal shape
+  // (`../x`, `a/b`, absolute path) would escape runDir before the transcript
+  // read. Same class as runStop's FIX-A, same SSOT validator (delivery.js
+  // isValidRunId — conservative allowlist, rejects separators/metacharacters/
+  // leading dot-dash). Fixed safe text: never echoes the supplied value.
+  if (!isValidRunId(runId)) {
+    throw new Error("runId is malformed (expected a run id: letters, digits, underscore, hyphen)");
   }
   const runDir = resolve(options.runDir ?? config.runDir);
   const filePath = join(runDir, `${runId}.jsonl`);

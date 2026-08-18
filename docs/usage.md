@@ -756,6 +756,8 @@ M9-7A 起支持可选 `delivery` 块（嵌套形状以 wire 为权威），用�
 
 **M12-25 provider session routing truth（Outcome 2）**：`providerSessionRouting` 是闭集 `"not_used" | "first_turn_requested" | "resume_requested"`，描述**本次派发的路由请求**真相，**不是** provider 会话成功/建立的证明。派生仅来自 `dispatchRun` 内部已选定的路由回合（`routing.turn`）：普通一次性派发（含普通 delivery 的 `lead_workspace` 复用，该复用是**有意不使用** provider session）→ `not_used`；reusable expert 首轮 / continuable delivery 根首轮 → `first_turn_requested`；reusable expert resume / continuable 续接 → `resume_requested`。`accepted:false` 早返回恒为 `not_used`。**绝不**暴露 routing mode、opaque session uuid、Lead id、workspace path、argv 或 provider payload——这些是 server-owned 内部细节。该字段只如实说"请求了什么路由"，provider 是否真正 resume 成功仍由后续 `run_status`/`run_await_result` 的传输与终态证据决定；WAO 不据此自动决定路由、不自动重试、不自动 stop。
 
+**行为变更（R14 / TD-128a，reuse 路由）**：reuse 路由对前任 run 的 `session.created` 存在性检查（决定 busy/resume/first 分派）自 R14 起为 **runId 绑定读取**（绑定到前任 runId）——尾部追加的外 run 伪造 `session.created` 不再能把一个 crashed-pre-conversation 的前任 run 翻转成 resumable。由此，**前任 run 的 transcript 为信封前 legacy 格式（事件无 `runId` 字段）时，reuse 路由从 resume 降级为 first**（走既有"terminal 无 session.created"分支，认领槽位开新回合）——不复用无法归属到前任 run 的会话；本机 pre-envelope transcript 存量为 0（TD-129b 实测），实际影响 ≈0。
+
 返回时 transcript 已可读且为 `pending`；关闭 MCP host 后，detached runner 独立驱动 worker 到终态（token 闸门/超时/兜底 abort 都生效），写入共享 transcript。Lead 用 MCP `run_status` 轮询状态。
 
 ### MCP `run_continue`（Lead 授权修正续跑，M12-7）
@@ -1096,6 +1098,8 @@ npm run cli -- runs delivery reverify <runId> --reason tooling_invalid [--setup-
 `terminalAccepted`（first-terminal-wins 仲裁是否认领 `aborted`）、`terminalState`（终态）、`sideEffectAttempted`（是否执行了 taskkill/abort 等破坏性副作用——rejected loser 为 false）、`stopVerified`（进程式 worker 已退出，或 OpenCode session 已由 status + token/message 稳定性确认静默）。OpenCode 观察面不可读时返回 unverified，不能把网络/endpoint 失败当作已停止；观察到 session 仍 active 时也只报告并告警，WAO 不自动执行会杀死其他 session 的全局 `taskkill /IM opencode.exe`。**绝不返回**：PID、进程路径、session id、argv、command、绝对路径、prompt、环境变量或异常 message/stack。失败返回固定安全文案 `run_stop failed`。
 
 **安全契约**：workspace-bound——run 必须属于当前 host-authorized workspace，否则拒绝。不返回 PID/path/session 等可被用于跨 workspace 探测的标识。stop verification 以后置 PID 存活检查为准，不假验证（ESRCH=已退出，EPERM/未知=保守 alive）。
+
+**行为变更（R13-C / TD-127，补录）**：stop 杀进程 lane 的会话查找（`session.created`）与 agentId 读取（`run.started`）自 R13-C 起为 **runId 绑定读取**（末条绑定——尾部追加的外 run 伪造 `session.created` 不再能夺走 kill 目标进程）。由此，**信封时代之前的 legacy transcript（事件无 `runId` 字段）的 stop 从"去杀"变"拒绝"**——绑定读取无匹配，落入既有 `no session metadata`（无 `session.created`）拒绝面。本机 pre-envelope transcript 存量为 0（TD-129b 实测），实际影响 ≈0。
 
 CLI fallback：`npm run cli -- stop <runId>`。
 

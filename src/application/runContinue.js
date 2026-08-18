@@ -36,7 +36,7 @@ import {
   JsonlTranscript,
   readTranscript,
   findState,
-  findLatest,
+  findLatestBound,
   extractCanonicalAgentId,
   TERMINAL_STATES,
   STATE_CHANGE_REASON,
@@ -344,7 +344,19 @@ export async function continueRun({
   // 5. Parent must be a continuable lineage run (run.session_reuse run_lineage).
   //    A plain delivery (no lineage event) is legacy and NOT continuable — WAO
   //    never infers a continuation where the Lead did not opt in.
-  const lineageEvent = findLatest(parentEvents, "run.session_reuse");
+  //    R14 (TD-129d): the read goes through the shared findLatestBound reader —
+  //    the last run.session_reuse BOUND to this parent, matching the inline
+  //    runId filtering this function already applies at its sibling reads
+  //    (delivery_accepted / session.created / run.started / delivery_created).
+  //    Anchor honesty (R14 re-verification): step 3's
+  //    extractCanonicalAgentId(parentEvents, parentRunId) already fail-closes
+  //    ANY foreign or envelope-less line as parent_not_found BEFORE this gate,
+  //    so the swap is provably behavior-identical today (every reachable event
+  //    carries runId === parentRunId) — it is function-internal discipline
+  //    consistency plus defense-in-depth for a future relaxation of the
+  //    identity gate, not a live fix. The runId clause below is therefore
+  //    tautological after the bound read; kept as belt-and-braces.
+  const lineageEvent = findLatestBound(parentEvents, "run.session_reuse", parentRunId);
   if (!lineageEvent
     || lineageEvent.runId !== parentRunId
     || lineageEvent.mode !== "run_lineage"
