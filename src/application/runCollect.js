@@ -12,14 +12,14 @@
 // Architectural contract:
 //   - No argv parsing, no console.log, no process.exit.
 //   - Does not import src/commands/*, src/mcp/*, MCP SDK, or zod.
-//   - Depends on transcript.js (readTranscript/findLatest/JsonlTranscript) and
-//     delivery.js (isValidRunId).
+//   - Depends on transcript.js (readTranscript/findLatestBound/findFirstBound/
+//     JsonlTranscript) and delivery.js (isValidRunId).
 //   - collect is NOT read-only and NOT idempotent: each successful call appends
 //     one messages.collected audit event. This is the existing CLI contract.
 
 import { join } from "node:path";
 
-import { readTranscript, findLatest, JsonlTranscript, findLastEventSeq, extractCanonicalAgentId } from "../transcript.js";
+import { readTranscript, findLatestBound, findFirstBound, JsonlTranscript, findLastEventSeq, extractCanonicalAgentId } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
 
 const DEFAULT_LIMIT = 50;
@@ -181,7 +181,24 @@ export async function collectRunMessages({
   const agentId = extractCanonicalAgentId(events, runId);
 
   // Session capability determines process vs serve path.
-  const session = findLatest(events, "session.created");
+  //
+  // R16 (TD-127/TD-128; Owner 2026-08-18 拍板不兼容信封前老数据——本机实测存量
+  // pre-envelope transcript 为 0): the session lookup is BOUND to the requested
+  // runId and keeps its LAST-match order — collect reads the run's LATEST
+  // session identity (serveUrl/backendSessionId steer the whole serve fetch),
+  // the same latest-session-wins order the pre-R16 unbound findLatest had on
+  // all-bound data and the same lane discipline as stop (runStop.js) and
+  // activity (runActivity.js). Binding only removes lines whose envelope runId
+  // is not THIS run: a tail-appended foreign-run session.created can no longer
+  // redirect the serve fetch to an attacker serveUrl/sessionId (the largest
+  // redirect surface in this lane) nor swap the process backendSessionId.
+  // Degradation (existing path, verified — no new branch): a transcript with
+  // no runId-bound session.created — including pre-envelope legacy lines that
+  // carry no runId field — falls into the existing "no session metadata"
+  // refusal below, the SAME error face a transcript with no session.created at
+  // all gets and the same treatment stop gives this shape (R13-C). Fail-closed:
+  // no serve fetch, no append, no fabricated parameters.
+  const session = findLatestBound(events, "session.created", runId);
   if (!session?.backendSessionId) {
     throw new Error(`Run ${runId} has no session metadata (no session.created event)`);
   }
@@ -239,7 +256,23 @@ export async function collectRunMessages({
   // Serve-backed: fetch messages via backend capability.
   // Projection mode: request cap+1 (sentinel) so we can detect a run that
   // exceeds the safe serve snapshot capacity. Legacy mode: tail (limit).
-  const runStarted = findLatest(events, "run.started");
+  //
+  // R16 (TD-127/TD-128): run.started is a dispatch-time stable fact — the
+  // FIRST runId-bound append is the authority (the R12-C/R14-C first-append
+  // discipline: retry commands/lifecycle.js, resume runManager.js, correction
+  // runCorrection.js). Deliberate choice, not ambiguity: a legal run
+  // transcript carries at most ONE run.started (RunManager.start appends it
+  // once; backgroundRunner's fallback stub is written only when none exists,
+  // on the startup-failure path, and carries no cwd), so first-vs-last is
+  // identical on every legal shape — they diverge ONLY on a tail-appended
+  // second run.started, where FIRST-bound means a forged tail cwd can never
+  // redirect the serve fetch's directory parameter. Degradation (existing
+  // path, verified — no new branch): a transcript with no runId-bound
+  // run.started (including pre-envelope legacy lines) keeps the existing `?.`
+  // chain — cwd stays undefined and the backend omits the directory param
+  // entirely (opencodeServe.js `if (cwd)`), i.e. the serve-side default, never
+  // a fabricated directory (the R12-C C-5 lenient zero-override shape).
+  const runStarted = findFirstBound(events, "run.started", runId);
   const _fetch = fetchServeMessagesFn ?? defaultServeFetch();
   const serveLimit = isProjectionMode ? SERVE_PROJECTION_SENTINEL : effectiveLimit;
   const messages = await _fetch(session.serveUrl, session.backendSessionId, {

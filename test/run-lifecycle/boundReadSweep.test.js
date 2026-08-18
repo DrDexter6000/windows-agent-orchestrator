@@ -3,6 +3,15 @@
 // R14（2026-08-18，TD-128/129）：读绑定清扫包 —— R13/R13-C 修掉 retry/resume/stop
 // 三 lane 后剩余同类无绑定读取的收尾探针与回归。
 //
+// R16（2026-08-18，TD-127/TD-128 收口）：runCollect lane（R13 起 Owner 级"不改"
+// 的最后一处无绑定生命周期读取）—— Owner 2026-08-18 拍板不兼容信封前老数据
+// （本机实测存量 0）后放行。:184 session.created → findLatestBound（末条序，
+// serveUrl/sessionId 整体重定向面）；:242 run.started → findFirstBound（首条
+// 纪律，serve fetch 的 directory 参数重定向面）。漏网清点：文件内 findLatest
+// 恰好这两处、无 events.find；相邻非同类面（reconstructItemsFromEvents 的
+// run.event 无绑定 filter 是 M12-3 SSOT、defaultAppendFn 的 events[0] 取首行）
+// 不在本轮 class 内，见交付报告。
+//
 // 覆盖面（与 src 改动一一对应）：
 //   W1a sessionReuse.js —— resolveReuseTurn 的前任 run session.created 存在性
 //       检查改 findLatestBound（绑定到前任 runId）。【唯一 LIVE 修复】：该函数
@@ -42,6 +51,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { JsonlTranscript } from "../../src/transcript.js";
+import { collectRunMessages } from "../../src/application/runCollect.js";
 import { resolveReuseTurn, resolveLineageFirstTurn, resolveLineageContinuationTurn } from "../../src/application/sessionReuse.js";
 import { correctRun } from "../../src/application/runCorrection.js";
 import { continueRun } from "../../src/application/runContinue.js";
@@ -559,5 +569,172 @@ test("R15-LIN-P6b: first 认领门 — 非终态 prior owner + 外 run 尾条 co
     assert.equal(claim.kind, "busy",
       "绑定过滤后 prior owner 仍非终态 → busy（外 run 尾条不再把 first 认领门翻成认领）");
     assert.equal(claim.activeRunId, "run_squatter");
+  } finally { cleanupDir(dir); }
+});
+
+// =====================================================================
+// R16 runCollect lane —— LIVE 修复探针（TD-127/TD-128 收口）
+//
+// 两处无绑定读取（原 :184 findLatest(session.created) / 原 :242
+// findLatest(run.started)）是 append-only transcript 上的跨 run 注入面：
+// 尾条外 run 伪造行直接赢得 serve 取回的目标地址（serveUrl/sessionId——
+// 整体重定向面）或 directory 参数（cwd——目录重定向面）。本 lane 与
+// correction/continuation/activity 不同：collectRunMessages 无上游身份门
+// （extractCanonicalAgentId 只降级 agentId 为 "unknown"，不拒绝），伪造行
+// 修复前真实可达两条重定向面——非分层一致性交换。
+// 语义选择（二选一已明示）：:184 末条绑定（latest-session-wins，与 stop/
+// activity 同序，全绑定输入上与修复前 findLatest 恒等）；:242 首条绑定
+// （run.started 是派发时稳定事实——R12-C/R14-C 首条纪律；合法 transcript 至多
+// 一条 run.started，首/末只在伪造尾条上分叉，首条=尾条伪造永不生效）。
+// =====================================================================
+
+test("R16-CO-1: 篡改探针 — 外 run 尾条 session.created 不再重定向 serve 取回（serveUrl/sessionId 整体重定向面）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r16-co1-"));
+  let fetchCalls = 0;
+  try {
+    const runId = "run_co_1";
+    // 本 run 合法事实：进程型会话（无 serveUrl）+ 一条证据事件。
+    const lines = [
+      { type: "run.submitted", runId, agentId: "researcher", ts: "2026-08-18T00:00:00.000Z", seq: 1 },
+      { type: "session.created", backend: "process", backendSessionId: "proc_co1", runId, agentId: "researcher", ts: "2026-08-18T00:00:00.100Z", seq: 2 },
+      { type: "run.started", backend: "claude-code", cwd: "D:/legal", runId, agentId: "researcher", ts: "2026-08-18T00:00:00.200Z", seq: 3 },
+      { type: "run.event", kind: "command", command: "rg TODO", exitCode: 0, runId, agentId: "researcher", ts: "2026-08-18T00:00:00.300Z", seq: 4 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    // 修复前 findLatest 采信尾条 → serve 路径 → fetch 打到伪造 serveUrl/sessionId。
+    appendForeignLine(join(dir, `${runId}.jsonl`), {
+      type: "session.created", runId: "run_evil", agentId: "researcher",
+      backend: "opencode-serve", serveUrl: "http://127.0.0.1:6666", backendSessionId: "sess_evil",
+    });
+
+    const result = await collectRunMessages({
+      runId, runDir: dir,
+      fetchServeMessagesFn: async () => { fetchCalls += 1; return { data: [] }; },
+      appendCollectedFn: async () => {},
+    });
+    assert.equal(fetchCalls, 0,
+      "外 run 尾条 session.created 对绑定读取器不可见 → 本 run 进程路径，serve fetch 零调用（serveUrl/sessionId 重定向面关闭）");
+    assert.equal(result.backend, "process", "本 run 自身绑定会话事实胜出（process）");
+    assert.equal(result.reconstructed, true);
+    assert.equal(result.data.length, 1, "本 run 证据事件照常重建");
+  } finally { cleanupDir(dir); }
+});
+
+test("R16-CO-2: 篡改探针 — 外 run 尾条 run.started.cwd 不再重定向 serve directory 参数（首条绑定纪律）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r16-co2-"));
+  let captured = null;
+  try {
+    const runId = "run_co_2";
+    const lines = [
+      { type: "run.submitted", runId, agentId: "researcher", ts: "2026-08-18T00:00:00.000Z", seq: 1 },
+      { type: "session.created", backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", backendSessionId: "sess_co2", runId, agentId: "researcher", ts: "2026-08-18T00:00:00.100Z", seq: 2 },
+      { type: "run.started", backend: "opencode-serve", cwd: "D:/legal", runId, agentId: "researcher", ts: "2026-08-18T00:00:00.200Z", seq: 3 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    // 修复前 findLatest 取末条 run.started（无视信封）→ 伪造 D:/evil 赢得 directory。
+    appendForeignLine(join(dir, `${runId}.jsonl`), {
+      type: "run.started", runId: "run_evil", agentId: "researcher",
+      backend: "opencode-serve", cwd: "D:/evil",
+    });
+
+    await collectRunMessages({
+      runId, runDir: dir,
+      fetchServeMessagesFn: async (serveUrl, sessionId, opts) => {
+        captured = { serveUrl, sessionId, opts };
+        return { data: [] };
+      },
+      appendCollectedFn: async () => {},
+    });
+    assert.equal(captured.opts.cwd, "D:/legal",
+      "run.started 取首条 runId 绑定事实（派发时稳定事实）——外 run 尾条 cwd 不再重定向 directory 参数");
+    assert.equal(captured.serveUrl, "http://127.0.0.1:4297", "serveUrl 仍来自本 run 绑定 session.created");
+    assert.equal(captured.sessionId, "sess_co2", "sessionId 仍来自本 run 绑定 session.created");
+  } finally { cleanupDir(dir); }
+});
+
+test("R16-CO-3: 序语义钉 — 多条【绑定】session.created 取末条（全绑定输入上与修复前 findLatest 恒等）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r16-co3-"));
+  let captured = null;
+  try {
+    const runId = "run_co_3";
+    const lines = [
+      { type: "run.submitted", runId, agentId: "researcher", ts: "2026-08-18T00:00:00.000Z", seq: 1 },
+      { type: "session.created", backend: "process", backendSessionId: "proc_first", runId, agentId: "researcher", ts: "2026-08-18T00:00:00.100Z", seq: 2 },
+      { type: "session.created", backend: "opencode-serve", serveUrl: "http://127.0.0.1:4397", backendSessionId: "sess_last", runId, agentId: "researcher", ts: "2026-08-18T00:00:00.200Z", seq: 3 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+
+    await collectRunMessages({
+      runId, runDir: dir,
+      fetchServeMessagesFn: async (serveUrl, sessionId, opts) => {
+        captured = { serveUrl, sessionId, opts };
+        return { data: [] };
+      },
+      appendCollectedFn: async () => {},
+    });
+    assert.equal(captured.sessionId, "sess_last",
+      "末条绑定 session.created 胜出（latest-session-wins——绑定交换保留既有末条序语义，与 stop/activity 同序；正常 transcript 每行绑定 → 行为不变）");
+    assert.equal(captured.serveUrl, "http://127.0.0.1:4397");
+  } finally { cleanupDir(dir); }
+});
+
+test("R16-CO-4: legacy 降级 — 无信封（pre-envelope）session.created 不可见 → 既有『无会话元数据』拒绝，零 fetch 零 append", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r16-co4-"));
+  let fetchCalls = 0;
+  let appendCalls = 0;
+  try {
+    const runId = "run_co_4";
+    // pre-envelope legacy 形状：全部行无 runId 字段（含 serve 形 session.created——
+    // 修复前无绑定 findLatest 采信它并发起 serve fetch；R16 起不可见）。
+    const lines = [
+      { type: "run.submitted", agentId: "researcher", ts: "2026-08-18T00:00:00.000Z", seq: 1 },
+      { type: "session.created", backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", backendSessionId: "sess_legacy", agentId: "researcher", ts: "2026-08-18T00:00:00.100Z", seq: 2 },
+      { type: "run.started", backend: "opencode-serve", cwd: "D:/legacy", agentId: "researcher", ts: "2026-08-18T00:00:00.200Z", seq: 3 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+
+    await assert.rejects(
+      () => collectRunMessages({
+        runId, runDir: dir,
+        fetchServeMessagesFn: async () => { fetchCalls += 1; return { data: [] }; },
+        appendCollectedFn: async () => { appendCalls += 1; },
+      }),
+      /has no session metadata/,
+      "旧格式 transcript 的取回降级为无会话元数据拒绝——Owner 2026-08-18 拍板不兼容（与 stop 面同错误、同处置）",
+    );
+    assert.equal(fetchCalls, 0, "不伪造参数发 serve fetch（fail-closed 于 fetch 之前）");
+    assert.equal(appendCalls, 0, "零 append");
+  } finally { cleanupDir(dir); }
+});
+
+test("R16-CO-5: legacy 降级 — 绑定 serve 会话 + 无信封 run.started → 既有 ?. 降级（cwd undefined，不伪造 directory）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r16-co5-"));
+  let captured = null;
+  try {
+    const runId = "run_co_5";
+    const lines = [
+      { type: "run.submitted", runId, agentId: "researcher", ts: "2026-08-18T00:00:00.000Z", seq: 1 },
+      { type: "session.created", backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", backendSessionId: "sess_co5", runId, agentId: "researcher", ts: "2026-08-18T00:00:00.100Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    // run.started 行存在但无 runId 字段（pre-envelope）——绑定读取器不可见。
+    // 修复前 findLatest 采信其 cwd；R16 起 ?. 链给出 undefined，后端省略
+    // directory 参数（opencodeServe.js `if (cwd)`）→ serve 侧默认目录。
+    appendFileSync(join(dir, `${runId}.jsonl`), `${JSON.stringify({
+      type: "run.started", backend: "opencode-serve", cwd: "D:/legacy",
+      agentId: "researcher", ts: "2026-08-18T00:00:00.200Z", seq: 3,
+    })}\n`, "utf8");
+
+    await collectRunMessages({
+      runId, runDir: dir,
+      fetchServeMessagesFn: async (serveUrl, sessionId, opts) => {
+        captured = { serveUrl, sessionId, opts };
+        return { data: [] };
+      },
+      appendCollectedFn: async () => {},
+    });
+    assert.equal(captured.sessionId, "sess_co5", "绑定会话事实照常取回（合法 serve 路径不受 legacy run.started 行影响）");
+    assert.equal(captured.opts.cwd, undefined,
+      "无可信 run.started → cwd undefined → directory 参数省略（serve 默认目录；绝不采用不可归属的 D:/legacy，也不伪造新值）");
   } finally { cleanupDir(dir); }
 });

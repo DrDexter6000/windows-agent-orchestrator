@@ -2823,14 +2823,18 @@ test("TD-75: status 终态 failed run 也输出心跳（Lead 据此判死前是�
 // 让 Lead 验收只能读原始 transcript。修复后 collect 重建所有 run.event kind。
 //
 // session.created 带 backendSessionId=proc_<pid> 且无 serveUrl → 走进程分支。
+// R16 夹具诚实化（TD-128 夹具纪律）：session.created/run.started/终态行补 runId
+// 信封（对齐 writeM11_4CliTranscript 与 M9-4A-12 形状——runCollect 的会话查找自
+// R16 起是 runId 绑定读取，无信封行不可见会误触发"无会话元数据"拒绝）；首行
+// run.submitted 保持无 runId 的既有 TD-77 形状（与 M9-4A-12 同款首行宽容）。
 function writeProcRunTranscript(dir, runId, runEventLines) {
   writeFileSync(join(dir, `${runId}.jsonl`),
     JSON.stringify({ type: "run.submitted", agentId: "researcher", ts: "2026-06-28T20:33:52.000Z" }) + "\n" +
-    JSON.stringify({ type: "session.created", backend: "process", backendSessionId: "proc_4242" }) + "\n" +
-    JSON.stringify({ type: "run.started", backend: "claude-code", ts: "2026-06-28T20:33:53.000Z" }) + "\n" +
+    JSON.stringify({ type: "session.created", backend: "process", backendSessionId: "proc_4242", runId, agentId: "researcher" }) + "\n" +
+    JSON.stringify({ type: "run.started", backend: "claude-code", ts: "2026-06-28T20:33:53.000Z", runId, agentId: "researcher" }) + "\n" +
     runEventLines +
-    JSON.stringify({ type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-06-28T20:35:00.000Z" }) + "\n" +
-    JSON.stringify({ type: "run.state_change", to: "failed", reason: "backend_error", ts: "2026-06-28T20:35:00.000Z" }) + "\n");
+    JSON.stringify({ type: "run.error", phase: "wait", error: "process exited with code 1", ts: "2026-06-28T20:35:00.000Z", runId, agentId: "researcher" }) + "\n" +
+    JSON.stringify({ type: "run.state_change", to: "failed", reason: "backend_error", ts: "2026-06-28T20:35:00.000Z", runId, agentId: "researcher" }) + "\n");
 }
 
 test("TD-77A: 失败 run 无最终 message 但有证据事件 → collect 重建非空（含各 kind）", async () => {
@@ -2839,10 +2843,10 @@ test("TD-77A: 失败 run 无最终 message 但有证据事件 → collect 重建
     // 模拟 codex e2e run_20260628203352049lf1n0l：崩前有 tool_use/tool_result/
     // file_written，但无最终 assistant message → 旧 collect 返回 data:[]。
     writeProcRunTranscript(dir, "run_collect_fail",
-      JSON.stringify({ type: "run.event", kind: "command", command: "rg TODO", exitCode: 0, ts: "2026-06-28T20:34:05.000Z" }) + "\n" +
-      JSON.stringify({ type: "run.event", kind: "tool_use", tool: "Read", input: { file_path: "src/app.py" }, ts: "2026-06-28T20:34:10.000Z" }) + "\n" +
-      JSON.stringify({ type: "run.event", kind: "tool_result", tool: "Read", output: "def main():...", isError: false, ts: "2026-06-28T20:34:11.000Z" }) + "\n" +
-      JSON.stringify({ type: "run.event", kind: "file_written", path: "D:/proj/report.md", ts: "2026-06-28T20:34:30.000Z" }) + "\n");
+      JSON.stringify({ type: "run.event", kind: "command", command: "rg TODO", exitCode: 0, ts: "2026-06-28T20:34:05.000Z", runId: "run_collect_fail", agentId: "researcher" }) + "\n" +
+      JSON.stringify({ type: "run.event", kind: "tool_use", tool: "Read", input: { file_path: "src/app.py" }, ts: "2026-06-28T20:34:10.000Z", runId: "run_collect_fail", agentId: "researcher" }) + "\n" +
+      JSON.stringify({ type: "run.event", kind: "tool_result", tool: "Read", output: "def main():...", isError: false, ts: "2026-06-28T20:34:11.000Z", runId: "run_collect_fail", agentId: "researcher" }) + "\n" +
+      JSON.stringify({ type: "run.event", kind: "file_written", path: "D:/proj/report.md", ts: "2026-06-28T20:34:30.000Z", runId: "run_collect_fail", agentId: "researcher" }) + "\n");
     const out = await captureLog(async () => {
       await collectCommand(["run_collect_fail", "--run-dir", dir], { runDir: dir });
     });
@@ -2870,7 +2874,7 @@ test("TD-77A 回归: 纯 message 成功 run → collect 仍重建 message（不�
   const dir = mkdtempSync(join(tmpdir(), "wao-collect-msg-"));
   try {
     writeProcRunTranscript(dir, "run_collect_msg",
-      JSON.stringify({ type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "done" }], ts: "2026-06-28T20:34:20.000Z" }) + "\n");
+      JSON.stringify({ type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "done" }], ts: "2026-06-28T20:34:20.000Z", runId: "run_collect_msg", agentId: "researcher" }) + "\n");
     const out = await captureLog(async () => {
       await collectCommand(["run_collect_msg", "--run-dir", dir], { runDir: dir });
     });
