@@ -518,6 +518,23 @@ test("agents.example.json 角色对齐 team-roles.md（决策 0005 SSOT）", () 
     assert.notEqual(w.backend, "opencode-serve",
       `${id} 不得用 opencode-serve（决策 0005：主 worker 进程式，opencode 降级 fallback）`);
   }
+  // 决策 0025（lane 架构）关系型守卫：模板条目必须能映射到规范角色（<角色> 或
+  // <角色>_<后缀>）；备用 lane（id ≠ 角色名）必须显式声明 seatRole。关系源是
+  // .wao/decisions/0025 + team-roles.md "Lane：角色多通道" 节，不硬编码可漂移值。
+  // coder_opencode_fallback 为 pre-0025 命名特例（ADR 0025 追认不改名）。
+  const KNOWN_ROLES = [...ROLE_WORKERS, "auditor"];
+  const LEGACY_LANE_IDS = new Set(["coder_opencode_fallback"]);
+  for (const id of Object.keys(parsed.agents ?? {})) {
+    if (LEGACY_LANE_IDS.has(id)) continue;
+    const base = KNOWN_ROLES.find((r) => id === r)
+      ?? KNOWN_ROLES.find((r) => id.startsWith(r + "_"));
+    assert.ok(base,
+      `agents.example.json 条目 ${id} 无法映射到规范角色（决策 0025 lane 命名：<角色> 或 <角色>_<后缀>）`);
+    if (id !== base) {
+      assert.ok(typeof parsed.agents[id].seatRole === "string",
+        `备用 lane ${id} 必须显式声明 seatRole（决策 0025：防后缀命名被席位惯例误判）`);
+    }
+  }
   // coder_mm 必须是 kimi-code 且不带 --yolo
   const mm = parsed.agents?.coder_mm;
   assert.equal(mm.backend, "kimi-code", "coder_mm 必须是 kimi-code（多模态，进程式）");
@@ -2255,8 +2272,8 @@ test("onboarding closeout: AGENT_ONBOARDING.md 自包含单 worker 安装路径�
     "4f 首次只读 canary 必须用 <agentId> 占位（从 registry list 挑），不得硬编码具体 worker");
   assert.ok(/claude-code \/ codex \/ kimi-code/.test(canary),
     "canary 的进程式 worker 必须并列 claude-code / codex / kimi-code");
-  assert.ok(/入库/.test(ob) && /一一对应/.test(ob) && /gitignored/.test(ob),
-    "onboarding 必须区分入库模板（与 team-roles 一一对应）与 gitignored 私人 agents.json 副本");
+  assert.ok(/入库/.test(ob) && /lane 映射/.test(ob) && /每角色 ≥1/.test(ob) && /gitignored/.test(ob),
+    "onboarding 必须区分入库模板（与 team-roles 按 lane 映射，每角色 ≥1 条目，决策 0025）与 gitignored 私人 agents.json 副本");
 });
 
 test("onboarding closeout: 陈旧 claims 已纠正（零依赖 / 禁 npm link / doctor HEALTHY 硬门 / CLI --cwd vs MCP workspace）", () => {

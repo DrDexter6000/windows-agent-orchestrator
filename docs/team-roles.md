@@ -1,8 +1,8 @@
 # WAO 标准团队角色矩阵
 
-> 状态：✅ 定稿（2026-06-24，决策 0005）。这是 agents.json 配置的角色驱动依据。
+> 状态：✅ 定稿（2026-06-24，决策 0005；lane 多通道条款 2026-08-19，决策 0025）。这是 agents.json 配置的角色驱动依据。
 > 设计原则：先定 vibe coding 开发流程必要的角色职责，再给每个角色绑技术配置。
-> 上游：`AGENT_ONBOARDING.md`（部署模型）、`SKILL.md`（安全铁律）、`.wao/decisions/0005`（定稿决策）。
+> 上游：`AGENT_ONBOARDING.md`（部署模型）、`SKILL.md`（安全铁律）、`.wao/decisions/0005`（定稿决策）、`.wao/decisions/0025`（lane 架构）。
 
 ## 部署模型（前提）
 
@@ -18,6 +18,16 @@ WAO 是"装一次，开发多个项目"的工具：
 3. Lead 负责编排+验收，worker 只做 bounded 任务
 4. Chief-Advisor / Auditor 是 Lead Agent 的平级合作伙伴；canonical `agentId` 保持 `auditor`，同一专家按需承担前置建议与后置审计
 5. 默认进程式 backend（安全），opencode 仅在需要 token 闸门精确控成本时用
+
+## Lane：角色多通道（决策 0025）
+
+**lane = 角色在 registry 中的一个具体实现通道**（固定 backend × provider × model × effort 组合）。本节各角色行的 backend/model 描述**主 lane**；lane 通道的实际组合以 registry 为准。
+
+1. 每角色 ≥1 lane：主 lane 用角色名原 id（如 `coder_hq`），备用 lane 用 `<roleId>_<后缀>`（后缀语义自明，如 `_dsh`）。
+2. **新旧 harness 用独立 agentId 并存，禁止原位换**（认证历史隔离可回退；provider 会话复用键按 canonical agentId 派生、不含 harness——原位换会把 A 通道会话续到 B 通道 harness）。"换 harness 驱动同一模型" = Owner 建新 lane 条目 + 认证，之后 Lead 派发时在既有条目间点名切换。
+3. **组合权 = Owner，选择权 = Lead**：Owner 的组合动作是写 registry + 付认证费；registry 里存在的条目即一条已付认证费的 lane（纪律：未付认证费的组合不进 registry）。这是集合边界与纪律，不是 MCP 门禁（ADR 0018 的"认证非 permission gate"不变）。
+4. lane 备用条目（id ≠ 角色名原 id）**必须显式声明 `seatRole`**——防后缀命名被 `/^coder_/` 惯例误判席位、稀释三席会审候选统计（决策 0023）。
+5. 新 lane 的认证走 delta 子集（sentinel + scorecard + 越界写对抗断言）→ `conditional`（`certificationScope:"delta"` 标注），全量重跑升 `certified`——见决策 0025 §5 与批次 3。
 
 ## 角色清单
 
