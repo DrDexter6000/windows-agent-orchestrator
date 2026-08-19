@@ -46,7 +46,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execSync, spawnSync } from "node:child_process";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -60,7 +60,9 @@ import { loadRun } from "../../src/commands/shared.js";
 // R20（TD-128 末簇收口）：M1-M4 / M6-:2080 / M7 / L3 / L4 探针的被测面。
 import { getRunStatus } from "../../src/application/runStatus.js";
 import { listRuns, extractRunFacts } from "../../src/application/runList.js";
-import { buildDashboard } from "../../src/commands/runs.js";
+// R20-C（终审返工）：runsCommand（SIGINT 快照探针）/ runsDashboardCommand
+// （--latest 排序键探针）为被测面。
+import { buildDashboard, runsCommand, runsDashboardCommand } from "../../src/commands/runs.js";
 import { getRunDiagnosis } from "../../src/application/runDiagnosis.js";
 import { diagnoseFailure } from "../../src/diagnosis.js";
 import { scanResumableRuns, scanAllRuns, handleRequest } from "../../src/daemon.js";
@@ -69,7 +71,8 @@ import { runBackground, runMain } from "../../src/backgroundRunner.js";
 import { loadScorecardFromTranscript } from "../../src/commands/run.js";
 import { runAwaitResult } from "../../src/application/runAwaitResult.js";
 // R19（TD-128 廉价尾巴清扫）：runWait 状态投影绑定探针。
-import { runWait } from "../../src/application/runWait.js";
+// R20-C（TD-128 终审返工）：summarizeLiveness 进度计数绑定探针。
+import { runWait, summarizeLiveness } from "../../src/application/runWait.js";
 import { stopRun } from "../../src/application/runStop.js";
 import { RunManager } from "../../src/runManager.js";
 
@@ -2067,6 +2070,301 @@ test("R20-BR-2: 合法回归 + runMain 解析失败车道同款绑定 — 无尾
   } finally {
     if (prevGuard === undefined) delete process.env.WAO_SKIP_VERSION_GUARD;
     else process.env.WAO_SKIP_VERSION_GUARD = prevGuard;
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
+// R20-C 终审返工（TD-128；2026-08-19，R20 双席终审 coder_mm + auditor 会聚）
+//
+//   C-1 runs prune（双席会聚 P2，本包最重）：cutoff 删除决策的年龄读取
+//       （events.at(-1).ts）绑定到【文件名 stem 即权威 runId】的信封绑定事件
+//       （boundReportScope，与 runs summary R20 改法同款）。注册危害：外 run
+//       旧 ts 尾条直接驱动 unlink——证据灭失面，重于全部观测面。
+//   C-2 runs wait SIGINT 快照：中断路径 findState(events) 绑定到请求 runId
+//       （service R19 已绑定而快照漏绑——"同一 SSOT"注释一度失真，本轮补齐
+//       重新为真）。
+//   C-3 runWait countProgressAfterSeq：进度计数经 boundReportScope 收窄——
+//       外 run 高 seq 活动行不再伪造 "progress"（经 summarizeLiveness 上
+//       run_wait / run_await_result 的 wire；activityEventCount 是 Lead stop
+//       决策喂料的机器消费字段）。
+//   C-4 runs dashboard --latest：排序键 = 各 run 自身【绑定】事件的末条 ts——
+//       外 run 远期尾条不再顶掉行序。
+//
+// 探针诚实口径（同本文件既有各节）：只验跨 run/无信封形状；同 runId 追加
+// 伪造 = runs/ 写权限攻击面，读侧无解。legacy 选择（boundReportScope 自身
+// 规则）：全无信封文件保持历史读法（PR-2/DB-1 legacy 腿钉住）；任一事件带
+// 信封即严格绑定，混信封下不可归属 = 零可见（L4 同向）。
+// =====================================================================
+
+// ----- C-1：runs prune cutoff 删除决策（CLI） -----
+
+test("R20C-PR-1: 篡改探针 — 外 run 旧 ts 尾条不再把在役 run 驱动进 prune 删除（修复前直接 unlink）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20c-pr1-"));
+  try {
+    const keepId = "run_r20c_keep";
+    const recentTs = new Date().toISOString();
+    const lines = [
+      { type: "run.started", runId: keepId, agentId: "coder_low", ts: recentTs, seq: 1 },
+      { type: "run.state_change", runId: keepId, agentId: "coder_low", from: "pending", to: "running", reason: "first_event", ts: recentTs, seq: 2 },
+    ];
+    writeFileSync(join(dir, `${keepId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    // 外 run 旧 ts 尾条（ts 相对墙钟取旧——不依赖固定日期）：修复前
+    // events.at(-1).ts 供给 cutoff 判龄 → 远老于 cutoff → 该在役 run 被 unlink。
+    const oldTs = new Date(Date.now() - 8 * 86_400_000).toISOString();
+    appendFileSync(join(dir, `${keepId}.jsonl`), `${JSON.stringify({
+      type: "run.completed", runId: "run_evil", agentId: "coder_low", ts: oldTs, seq: 99,
+    })}\n`, "utf8");
+
+    const r = runCli(["runs", "prune", "--older-than", "1h"], dir);
+    assert.equal(r.status, 0, `CLI 成功（stderr: ${r.stderr}）`);
+    assert.ok(r.stdout.includes("Pruned 0, kept 1"),
+      `在役 run 不被外 run 旧 ts 尾条翻成可修剪（修复前 Pruned 1 → unlink；实际输出：${r.stdout}）`);
+    assert.ok(existsSync(join(dir, `${keepId}.jsonl`)),
+      "证据未灭失——文件仍在（修复前被 unlink）");
+  } finally { cleanupDir(dir); }
+});
+
+test("R20C-PR-2: 合法 + legacy 回归 — 自身旧 ts 的 run 照删；全无信封 legacy 文件保持历史判龄", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20c-pr2-"));
+  try {
+    const oldTs = new Date(Date.now() - 8 * 86_400_000).toISOString();
+    const recentTs = new Date().toISOString();
+    // (a) 全绑定旧 run（自身末条 ts 老）→ 照删（合法 prune 零变化）。
+    writeFileSync(join(dir, "run_r20c_old.jsonl"), `${[
+      { type: "run.started", runId: "run_r20c_old", agentId: "coder_low", ts: oldTs, seq: 1 },
+      { type: "run.completed", runId: "run_r20c_old", agentId: "coder_low", ts: oldTs, seq: 2 },
+    ].map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    // (b) 全绑定新 run → 保留。
+    writeFileSync(join(dir, "run_r20c_recent.jsonl"), `${[
+      { type: "run.started", runId: "run_r20c_recent", agentId: "coder_low", ts: recentTs, seq: 1 },
+    ].map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    // (c) pre-envelope legacy 旧文件（全部行无 runId）→ 历史读法照删（prune 扫
+    //     全部 .jsonl，是最可能碰到 legacy 文件的清理面——降级不设门）。
+    writeFileSync(join(dir, "run_r20c_legacy_old.jsonl"), `${[
+      { type: "run.started", ts: oldTs, seq: 1 },
+      { type: "messages.collected", ts: oldTs, seq: 2 },
+    ].map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    // (d) pre-envelope legacy 新文件 → 保留。
+    writeFileSync(join(dir, "run_r20c_legacy_recent.jsonl"), `${JSON.stringify({
+      type: "run.started", ts: recentTs, seq: 1,
+    })}\n`, "utf8");
+
+    const r = runCli(["runs", "prune", "--older-than", "7d"], dir);
+    assert.equal(r.status, 0);
+    assert.ok(r.stdout.includes("Pruned 2, kept 2"), `旧 run（绑定 + legacy）照删、新 run 照留（实际输出：${r.stdout}）`);
+    assert.ok(!existsSync(join(dir, "run_r20c_old.jsonl")), "自身旧 ts 的绑定 run 被 prune（合法路径）");
+    assert.ok(!existsSync(join(dir, "run_r20c_legacy_old.jsonl")), "legacy 无信封旧文件保持历史判龄照删");
+    assert.ok(existsSync(join(dir, "run_r20c_recent.jsonl")));
+    assert.ok(existsSync(join(dir, "run_r20c_legacy_recent.jsonl")));
+  } finally { cleanupDir(dir); }
+});
+
+// ----- C-2：runs wait SIGINT 中断快照（进程内 process.emit 探针，runsWait.test.js D1-D3 同款模式） -----
+
+test("R20C-SIG-1: 篡改探针 — SIGINT 中断快照的状态投影绑定 runId（外 run 伪终态尾条不再翻快照）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20c-sig1-"));
+  const runId = "run_r20c_sig1";
+  try {
+    const lines = [
+      { type: "run.submitted", runId, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId, agentId: "coder_low", from: "pending", to: "running", reason: "first_event", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+    ];
+    // 外 run 伪终态尾条（state_change 末条胜出形状）：修复前快照 findState 无
+    // 绑定 → completed/terminal:true。
+    const tailed = [...lines, {
+      type: "run.state_change", runId: "run_evil", agentId: "coder_low",
+      from: "running", to: "completed", reason: "evil", ts: "2026-08-19T00:00:02.000Z", seq: 99,
+    }];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${tailed.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+
+    const out = [];
+    const origLog = console.log;
+    const origExit = process.exit;
+    let exitArg = "NOT_CALLED";
+    let releaseGate;
+    const gate = new Promise((_resolve, reject) => { releaseGate = reject; });
+    // 本文件更早的测试（R18-RES/R20-EXT 的 makeManager）经 RunManager 安装了
+    // 进程级 SIGINT 单例 handler（runManager.js installSigintHandler：await
+    // gracefulShutdown 后 process.exit(130)——异步晚到会在探针 teardown 之后
+    // 真杀测试进程）。快照并暂时摘除全部既有 listener，探针的 emit 只触达
+    // runs wait 自己注册的 handler；finally 先让 runsCommand 注销自己的
+    // handler，再原样恢复快照（单例安装标志不受影响，不双装）。
+    const savedSigintListeners = process.listeners("SIGINT");
+    process.removeAllListeners("SIGINT");
+    let waitPromise;
+    try {
+      console.log = (...a) => { out.push(a.map(String).join("\t")); };
+      process.exit = (code) => { exitArg = code; };
+      waitPromise = runsCommand(["wait", runId, "--format", "json"], { runDir: dir }, {
+        // service 挂起模拟"阻塞窗口中 Ctrl-C"；此刻 SIGINT handler 已注册。
+        runWaitFn: () => { process.emit("SIGINT"); return gate; },
+      });
+      const deadline = Date.now() + 5000;
+      while (exitArg === "NOT_CALLED" && Date.now() < deadline) {
+        await new Promise((r) => setImmediate(r));
+      }
+      assert.notEqual(exitArg, "NOT_CALLED", "handler 必须 process.exit(1)");
+      assert.equal(exitArg, 1);
+      const snap = JSON.parse(out.join("\n"));
+      assert.equal(snap.state, "running",
+        "中断快照状态只由本 run 绑定事件计算（修复前外 run completed 尾条末条胜出 → completed）");
+      assert.equal(snap.terminal, false, "外 run 伪终态尾条不再把中断快照翻成终态（修复前 terminal:true）");
+      assert.equal(snap.interrupted, true);
+    } finally {
+      console.log = origLog;
+      process.exit = origExit;
+      releaseGate(new Error("r20c-sig1-teardown"));
+      if (waitPromise) await waitPromise.catch(() => {});
+      process.removeAllListeners("SIGINT");
+      for (const listener of savedSigintListeners) process.on("SIGINT", listener);
+    }
+  } finally { cleanupDir(dir); }
+});
+
+// ----- C-3：liveness 进度计数绑定（内核直调 + run_wait / run_await_result 两条 wire） -----
+
+test("R20C-LIV-1: 篡改探针 + 合法/legacy 回归 — summarizeLiveness 进度计数绑定 runId（外 run 高 seq 活动行不伪造 progress）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20c-liv1-"));
+  try {
+    const runId = "run_r20c_liv1";
+    const own = (over = {}) => ({
+      type: "run.event", kind: "tool_use", tool: "Read", runId, agentId: "coder_low",
+      ts: "2026-08-19T00:00:00.000Z", ...over,
+    });
+    // (a) 篡改：baseline 3 之外只有外 run 高 seq 活动行（修复前 seq 99 > 3 计入
+    //     → progress；绑定后不可见 → 零进展 + 无 owner 心跳 → silent）。
+    const tampered = summarizeLiveness({
+      events: [
+        own({ seq: 1 }), own({ seq: 2 }), own({ seq: 3 }),
+        { type: "run.event", kind: "command", command: "evil", runId: "run_evil", agentId: "coder_low", ts: "2026-08-19T00:00:01.000Z", seq: 99 },
+      ],
+      runDir: dir, runId, activityBaseline: 3, now: Date.now(),
+    });
+    assert.equal(tampered.liveness, "silent",
+      "外 run 高 seq 活动行不计数 → silent（修复前 progress——伪进展喂给 Lead 的 stop 决策）");
+    assert.equal(tampered.activityEventCount, 0, "计数为 0（修复前 1）");
+    assert.equal(tampered.lastActivityKind, null, "末活动标签不由外 run 行供给（修复前 \"command\"）");
+
+    // (b) 合法回归：本 run 自身高 seq 活动照常计数（全绑定输入恒等）。
+    const legal = summarizeLiveness({
+      events: [
+        own({ seq: 1 }), own({ seq: 2 }), own({ seq: 3 }),
+        own({ seq: 5, kind: "command", command: "npm test", exitCode: 0 }),
+      ],
+      runDir: dir, runId, activityBaseline: 3, now: Date.now(),
+    });
+    assert.equal(legal.liveness, "progress");
+    assert.equal(legal.activityEventCount, 1);
+    assert.equal(legal.lastActivityKind, "command");
+
+    // (c) legacy 语义钉：全无信封快照保持历史无绑定计数（runWait.test.js
+    //     WAIT-RUNTIME-1 既有契约——观测面降级不设门，任一信封才严格绑定）。
+    const legacy = summarizeLiveness({
+      events: [{ type: "run.event", kind: "runtime_activity", status: "provider_retry", seq: 2 }],
+      runDir: dir, runId, activityBaseline: 0, now: Date.now(),
+    });
+    assert.equal(legacy.liveness, "progress", "全无信封 → 无法绑定 → 历史读法照常计数");
+    assert.equal(legacy.activityEventCount, 1);
+  } finally { cleanupDir(dir); }
+});
+
+test("R20C-LIV-2: 篡改探针 — run_wait 窗口到期的 liveness 投影绑定（poll 快照内的外 run 高 seq 活动行不再伪造 progress）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20c-liv2-"));
+  try {
+    const runId = "run_r20c_liv2";
+    const cleanRunning = [
+      { type: "run.submitted", runId, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.started", runId, agentId: "coder_low", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+      { type: "run.state_change", runId, agentId: "coder_low", from: "pending", to: "running", reason: "first_event", ts: "2026-08-19T00:00:03.000Z", seq: 3 },
+    ];
+    // 首读基线 seq 3；poll 尾条外 run 活动行 seq 99（修复前 > 3 计入 → progress）。
+    const tailed = [...cleanRunning, {
+      type: "run.event", kind: "command", command: "evil", runId: "run_evil", agentId: "coder_low",
+      ts: "2026-08-19T00:00:04.000Z", seq: 99,
+    }];
+    let readCalls = 0;
+    const out = await runWait({
+      runId, runDir: dir, waitMs: 180000,
+      ...fakeWaitClock(),
+      readTranscriptFn: async () => { readCalls += 1; return readCalls === 1 ? cleanRunning : tailed; },
+    });
+    assert.ok(readCalls >= 2, "至少一次 poll 读到带外 run 活动尾条的快照");
+    assert.equal(out.observationOutcome, "observed");
+    assert.equal(out.terminal, false);
+    assert.equal(out.liveness, "silent",
+      "外 run 高 seq 活动行不计数 → silent（修复前 progress——窗口被伪进展掩盖）");
+    assert.equal(out.activityEventCount, 0, "wire 的 activityEventCount = 0（修复前 1）");
+    assert.equal(out.lastActivityKind, null);
+  } finally { cleanupDir(dir); }
+});
+
+test("R20C-LIV-3: 篡改探针 — run_await_result 共享同一 liveness SSOT（point-in-time afterSeq:0 的外 run 高 seq 活动行不伪造 progress）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20c-liv3-"));
+  try {
+    const runId = "run_r20c_liv3";
+    // 本 run 自身事件均不在 PROGRESS_EVENT_TYPES（run.submitted/run.started）——
+    // 唯一可计数行是外 run 高 seq 活动尾条（修复前计入 → progress）。
+    const tailed = [
+      { type: "run.submitted", runId, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.started", runId, agentId: "coder_low", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+      { type: "run.event", kind: "tool_use", tool: "Edit", runId: "run_evil", agentId: "coder_low", ts: "2026-08-19T00:00:02.000Z", seq: 99 },
+    ];
+    const out = await runAwaitResult({
+      runId, runDir: dir, waitMs: 0, afterSeq: 0,
+      readTranscriptFn: async () => tailed,
+    });
+    assert.equal(out.observationOutcome, "observed");
+    assert.equal(out.terminal, false);
+    assert.equal(out.liveness, "silent",
+      "await 与 wait 共享 summarizeLiveness SSOT——外 run 活动行同款不可见（修复前 progress）");
+    assert.equal(out.activityEventCount, 0, "wire 的 activityEventCount = 0（修复前 1）");
+    assert.equal(out.lastActivityKind, null);
+  } finally { cleanupDir(dir); }
+});
+
+// ----- C-4：runs dashboard --latest 排序键（进程内 renderOnce） -----
+
+test("R20C-DB-1: 篡改探针 + 合法/legacy 回归 — --latest 排序键 = 各 run 自身绑定事件末条 ts（外 run 远期尾条不再顶序）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20c-db1-"));
+  const out = [];
+  const origLog = console.log;
+  console.log = (...a) => { out.push(a.map(String).join("\t")); };
+  try {
+    const aId = "run_r20c_db_a";
+    const bId = "run_r20c_db_b";
+    // A：自身末条 ts 00:10 + 外 run 远期尾条 20:00（修复前 events.at(-1).ts
+    //     供给排序键 → A 被顶到最前，顶掉真实最近者）。
+    writeFileSync(join(dir, `${aId}.jsonl`), `${[
+      { type: "run.started", runId: aId, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId: aId, agentId: "coder_low", from: "running", to: "completed", reason: "done", ts: "2026-08-19T00:00:10.000Z", seq: 2 },
+      { type: "run.completed", runId: "run_evil", agentId: "coder_low", ts: "2026-08-19T00:20:00.000Z", seq: 99 },
+    ].map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    // B：真实最近者（自身末条 ts 00:20）。
+    writeFileSync(join(dir, `${bId}.jsonl`), `${[
+      { type: "run.started", runId: bId, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId: bId, agentId: "coder_low", from: "running", to: "completed", reason: "done", ts: "2026-08-19T00:00:20.000Z", seq: 2 },
+    ].map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    // legacy：全无信封，末事件 ts 00:05（历史读法按末事件 ts 参与排序）。
+    writeFileSync(join(dir, "run_r20c_db_leg.jsonl"), `${[
+      { type: "run.submitted", agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.completed", agentId: "coder_low", ts: "2026-08-19T00:00:05.000Z", seq: 2 },
+    ].map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+
+    await runsDashboardCommand(["--latest", "1", "--format", "json", "--run-dir", dir], { runDir: dir });
+    const dash1 = JSON.parse(out.join("\n"));
+    assert.equal(dash1.summary.total, 1);
+    assert.equal(dash1.rows[0].runId, bId,
+      "--latest 1 取真实最近者 B（修复前 A 的外 run 远期尾条 20:00 顶到最前）");
+
+    // 合法 + legacy 回归：零干扰排序 = B(00:20) > A(00:10) > legacy(00:05)。
+    out.length = 0;
+    await runsDashboardCommand(["--latest", "2", "--format", "json", "--run-dir", dir], { runDir: dir });
+    const dash2 = JSON.parse(out.join("\n"));
+    assert.deepEqual(dash2.rows.map((r) => r.runId), [bId, aId],
+      "按自身绑定末条 ts 降序；legacy 无信封文件按末事件 ts 参与排序（历史读法保持，排序在后）");
+  } finally {
+    console.log = origLog;
     cleanupDir(dir);
   }
 });

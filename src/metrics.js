@@ -15,12 +15,17 @@ import { findState, findLatest, findLatestBound, findFirstBound } from "./transc
  *     legacy transcript】（pre-envelope，事件一律无 runId 字段）。null 时调用方
  *     保持历史无绑定读法。
  *
- * legacy 行为选择（观测面 = 降级不设门，对齐各 lane 既有哲学）：全无信封的
- * legacy transcript 不拒绝、不出空报表——保持既有读法照常出报表
+ * legacy 行为选择（真实判据 = 该面有无既有 pre-envelope 契约钉住，而非
+ * "观测面一律降级不设门"——R20-C 勘误，auditor P3-1）：全无信封的 legacy
+ * transcript 不拒绝、不出空报表——保持既有读法照常出报表
  * （test/isolation-infra/cli.test.js 的 pre-envelope 三态 JSON 契约钉住该行
- * 为）。任一事件带信封（含伪造尾行）即严格绑定：外 run/无信封行不可见，宁
- * 可让报表可见地缺事实（pending/无 tokens），也不静默采信不可归属的值。绑
- * 定只杀跨 run 注入/错读；同 runId 伪造追加 = runs/ 写权限攻击面，读侧无解
+ * 为；本函数服务的报表/观测面恰属此类）。任一事件带信封（含伪造尾行）即
+ * 严格绑定：外 run/无信封行不可见，宁可让报表可见地缺事实（pending/无
+ * tokens），也不静默采信不可归属的值。对照面：同为纯观测的 runDelivery
+ * terminalState（R20 M5）无 pre-envelope 契约钉住旧读法，故取严格档——
+ * 不可归属直接降 pending、无 legacy 回退；两档分野由"既有契约是否钉住"
+ * 决定，不由"是否观测面"决定（M5 纯观测却严格档即为反例）。绑定只杀跨
+ * run 注入/错读；同 runId 伪造追加 = runs/ 写权限攻击面，读侧无解
  * （transcript.js 绑定读取器同口径）。
  *
  * @param {Array} events transcript 事件序列

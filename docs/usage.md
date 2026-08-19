@@ -458,6 +458,8 @@ npm run cli -- runs grep "error"            # 搜索 transcript
 npm run cli -- runs prune --older-than 7d   # 清理 7 天前的 run
 ```
 
+**R20-C prune 判龄绑定（TD-128，2026-08-19）**：`runs prune --older-than` 的删除决策自 R20-C 起**只由本 run 自身信封绑定事件**（文件名 stem 即权威 runId）的末条 `ts` 喂龄——尾部追加的外 run/伪造**旧 ts** 行不再把在役 run 翻成可修剪（unlink 前被阻断）；全无信封的 legacy transcript（pre-envelope）保持既有判龄照常参与清理。合法路径与既有输出零变化。
+
 ### 场景 8：daemon + 自愈（无人值守 / 长跑）
 
 daemon 是常驻派发点（detached，CLI 退出不杀它），让 worker run 脱离单次 CLI 调用存活。supervisor
@@ -1143,7 +1145,7 @@ CLI fallback：`npm run cli -- runs list [--agent ID] [--latest N]`。
 
 `waitMs` 是 Lead 的单次观察窗口（区间、默认值与 `waitMs:0` 有意无效的约束见生成层描述）；point-in-time 读取使用 `run_await_result({waitMs:0})` 或 `run_status`。窗口到期只返回 liveness，**不表示 worker 失败，也不会中止 worker**。
 
-**R18 状态投影读绑定（TD-128 W2，2026-08-18；仅 `run_await_result`）**：await 的状态投影（初始读与等待循环内每次 poll）是 **runId 绑定** 的（`findState` 只看本 run 信封事件）——尾部追加的外 run/伪造 `run.state_change` 不再把 await 翻成终态、也不再阻断终态观察。**行为变更（仅 legacy 形状）**：全无信封的 pre-envelope transcript（事件无 `runId` 字段）状态投影降级为 `pending`——不可归属状态永不投影为终态（不 throw、不转 read_failure，等待窗如实耗尽后如实返回非终态；本机实测存量 pre-envelope transcript 为 0，实际影响≈0）。`run_wait` 的状态投影已于 R19（TD-128，2026-08-18）同款绑定（初始读与等待循环每次 poll 同一 runId 过滤，legacy 全无信封同样降级 `pending`）——合法路径零变化。
+**R18 状态投影读绑定（TD-128 W2，2026-08-18；仅 `run_await_result`）**：await 的状态投影（初始读与等待循环内每次 poll）是 **runId 绑定** 的（`findState` 只看本 run 信封事件）——尾部追加的外 run/伪造 `run.state_change` 不再把 await 翻成终态、也不再阻断终态观察。**行为变更（仅 legacy 形状）**：全无信封的 pre-envelope transcript（事件无 `runId` 字段）状态投影降级为 `pending`——不可归属状态永不投影为终态（不 throw、不转 read_failure，等待窗如实耗尽后如实返回非终态；本机实测存量 pre-envelope transcript 为 0，实际影响≈0）。`run_wait` 的状态投影已于 R19（TD-128，2026-08-18）同款绑定（初始读与等待循环每次 poll 同一 runId 过滤，legacy 全无信封同样降级 `pending`）——合法路径零变化。**R20-C liveness 计数与 CLI 中断快照绑定（TD-128，2026-08-19）**：`run_wait` / `run_await_result` 的 liveness 进度计数（`activityEventCount`/`lastActivityKind`）自 R20-C 起只统计本 run 自身信封绑定事件——等待窗口内外 run 高 seq 活动行不再伪造 `progress`（全无信封 legacy 快照保持历史计数）。CLI `runs wait` 等待期间 Ctrl-C 打印的中断快照同款绑定（与 service 同一 runId 过滤）：外 run 伪终态尾条不再把中断快照翻成终态；legacy 全无信封降级 `pending`。
 
 - **返回时机**：服务在两种情况下返回——(1) run 到达终态（completed/failed/aborted/timed_out），此时 `returnedEarly:true`；(2) `waitMs` 到期仍未终态，此时 `returnedEarly:false` 并附带 liveness 摘要让 Lead 决定下一步。**普通新事件不会触发提前返回**——只有终态会；窗口内的新进展通过到期的 liveness=`progress` 体现。
 - 若返回 `terminal:true`，该终态事实已足够，Lead 直接进入 `run_collect`；除恢复、独立复核或没有 wait 结果外，不需要再调用一次 `run_status`。

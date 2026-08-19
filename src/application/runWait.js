@@ -21,6 +21,10 @@ import { readFileSync, existsSync } from "node:fs";
 
 import { readTranscript, findState, TERMINAL_STATES, findLastEventSeq, extractCanonicalAgentId } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
+// R20-C（TD-128）：liveness 进度计数的绑定作用域复用 metrics.js 的
+// boundReportScope 单一定义处（runList.js 同款 application → metrics 接线，
+// 无环）——不新写第二套"何时绑定"规则。
+import { boundReportScope } from "../metrics.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { checkOwnerLiveness } from "./ownerLiveness.js";
 // M12-11: the pure backend-neutral observation/termination projector (SSOT).
@@ -133,11 +137,20 @@ function activityKind(event) {
 
 /**
  * Count progress events after a given seq.
+ *
+ * R20-C（TD-128，双席终审 C-3）：计数作用域经 boundReportScope 收窄到请求
+ * runId 的信封绑定事件——外 run 高 seq 活动行不再伪造 "progress"（经
+ * summarizeLiveness 上 run_wait / run_await_result 的 wire，activityEventCount
+ * / lastActivityKind 是 Lead stop 决策喂料的机器消费字段）。legacy 全无信封
+ * 快照保持历史读法照常计数（runWait.test.js WAIT-RUNTIME-1 等既有契约）；
+ * 任一事件带信封即严格绑定，裸行不可见（L4 混合信封语义同向）。runId 缺省
+ * （防御形状——现有两个调用方均必传）保持历史无绑定读法。
  */
-function countProgressAfterSeq(events, afterSeq) {
+function countProgressAfterSeq(events, afterSeq, runId) {
+  const scope = runId === undefined ? events : (boundReportScope(events, runId) ?? events);
   let count = 0;
   let lastKind = null;
-  for (const e of events) {
+  for (const e of scope) {
     if (typeof e.seq === "number" && e.seq > afterSeq) {
       const kind = activityKind(e);
       if (kind) {
@@ -161,12 +174,15 @@ function countProgressAfterSeq(events, afterSeq) {
 // @param {object} opts
 // @param {Array<object>} opts.events — the final transcript event snapshot (CLEAN read)
 // @param {string} opts.runDir — resolved runs/ directory (for the owner heartbeat file)
-// @param {string} opts.runId
+// @param {string} opts.runId — progress counting is scoped to this runId's bound
+//   events (R20-C: foreign high-seq activity rows cannot forge "progress";
+//   envelope-less legacy snapshots keep the historical unbound counting)
 // @param {number} opts.activityBaseline — seq; only events with seq > baseline count
 // @param {number} opts.now — current timestamp (ms), for heartbeat freshness
 // @returns {{liveness: string, activityEventCount: number, lastActivityKind: string|null, ownerHeartbeat: string}}
 export function summarizeLiveness({ events, runDir, runId, activityBaseline, now }) {
-  const progress = countProgressAfterSeq(events, activityBaseline);
+  // R20-C：runId 透传给计数内核（绑定语义见 countProgressAfterSeq 注释）。
+  const progress = countProgressAfterSeq(events, activityBaseline, runId);
   const ownerLiveness = checkOwnerLiveness(runDir, runId, now);
   let liveness;
   if (progress.count > 0) {

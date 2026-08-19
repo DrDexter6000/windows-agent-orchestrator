@@ -217,8 +217,11 @@ async function runsWaitCommand(args, config, deps = {}) {
   // SIGINT (Ctrl-C during the blocking window): print the last known
   // point-in-time observation, then exit non-zero (tail --follow precedent,
   // observe.js). The snapshot reuses the SAME readTranscript/findState SSOT
-  // the service polls with — no second parser; a read failure degrades to
-  // state "unknown" rather than crashing the interrupt path.
+  // AND the same runId-bound filter the service polls with (R19 bound the
+  // service's state projection; R20-C closed the gap where this snapshot was
+  // still unbound — the "same SSOT" claim above is true again) — no second
+  // parser; a read failure degrades to state "unknown" rather than crashing
+  // the interrupt path.
   const transcriptPath = join(runDir, `${runId}.jsonl`);
   const onSigint = () => {
     void (async () => {
@@ -226,7 +229,11 @@ async function runsWaitCommand(args, config, deps = {}) {
       let terminal = false;
       try {
         const events = await readTranscript(transcriptPath);
-        state = findState(events);
+        // R20-C（TD-128 W2 同族）：中断快照的状态投影绑定到请求 runId（与
+        // service R19 初始读/poll 同一过滤形状）——外 run 伪终态尾条不再把
+        // 中断快照翻成终态。legacy 全无信封 → findState([])="pending"（与
+        // service 同一降级，不可归属永不投影为终态）。
+        state = findState(events.filter((e) => e && e.runId === runId));
         terminal = TERMINAL_STATES.includes(state);
       } catch { /* keep the fail-soft unknown snapshot */ }
       if (asJson) {
@@ -483,7 +490,17 @@ async function runsPruneCommand(args, config) {
   let kept = 0;
   for (const file of jsonlFiles) {
     const events = await readTranscript(join(runDir, file));
-    const last = events.at(-1);
+    // R20-C（TD-128，双席终审会聚 P2）：cutoff 删除决策的年龄读取绑定到
+    // 【文件名 stem 即权威 runId】的信封绑定事件（与上方 runs summary 的
+    // boundReportScope 收窄同款）——只有本 run 自身事件喂年龄：外 run 旧 ts
+    // 尾条不再把在役 run 翻成可修剪（unlink 是证据灭失面，重于观测面）。
+    // legacy 全无信封文件保持历史读法照常按末事件 ts 判龄（grep/prune 扫全部
+    // .jsonl，是最可能碰到 legacy 文件的清理面）。零绑定事件（整份只有外 run
+    // 信封行）→ 无可归属年龄 → 沿既有"末事件无 ts 按最老处理"（ts 0）——与
+    // 修复前无 ts 事件文件的行为一致。
+    const pruneRunId = file.replace(/\.jsonl$/, "");
+    const scope = boundReportScope(events, pruneRunId) ?? events;
+    const last = scope.at(-1);
     const ts = last?.ts ? new Date(last.ts).getTime() : 0;
     if (ts < cutoff) {
       await unlink(join(runDir, file));
@@ -740,8 +757,19 @@ export async function runsDashboardCommand(args, config, injections = {}) {
     );
     if (agentFilter) runs = runs.filter((r) => r.events[0]?.agentId === agentFilter);
     if (latestN && latestN > 0) {
-      runs.sort((a, b) => (b.events.at(-1)?.ts ?? "").localeCompare(a.events.at(-1)?.ts ?? ""));
-      runs = runs.slice(0, latestN);
+      // R20-C（TD-128 M3 残余，双席终审清点）：--latest 排序键 = 各 run 自身
+      // 【绑定】事件的末条 ts（文件名 stem 即权威 runId，与上方 buildDashboard/
+      // summary 的 boundReportScope 收窄同款）——外 run 远期尾条不再顶掉行序。
+      // legacy 全无信封文件保持历史末事件 ts 排序；零绑定事件 → "" 排尾（无
+      // 可归属年龄，不顶序）。
+      runs = runs
+        .map((r) => {
+          const scope = boundReportScope(r.events, r.runId) ?? r.events;
+          return { r, ts: scope.at(-1)?.ts ?? "" };
+        })
+        .sort((a, b) => b.ts.localeCompare(a.ts))
+        .slice(0, latestN)
+        .map((x) => x.r);
     }
     // TD-82：读 .wao/pipeline/ 下的 Lead 自做声明，注入 dashboard（曝光机制）。
     // .wao/ 未 init 时静默跳过（count:0），不阻塞 dashboard。
