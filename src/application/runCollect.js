@@ -21,6 +21,8 @@ import { join } from "node:path";
 
 import { readTranscript, findLatestBound, findFirstBound, JsonlTranscript, findLastEventSeq, extractCanonicalAgentId } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
+// R21（TD-128 W2 升格修复）：重建输入的绑定作用域——metrics.js 单一定义处。
+import { boundReportScope } from "../metrics.js";
 
 const DEFAULT_LIMIT = 50;
 
@@ -231,7 +233,14 @@ export async function collectRunMessages({
   if (!session.serveUrl) {
     // Process-backed: reconstruct run.event entries from transcript.
     // M12-3: reuse the shared reconstructItemsFromEvents SSOT (one algorithm).
-    const reconstructedAll = reconstructItemsFromEvents(events);
+    // R21（TD-128 W2 升格修复，原 W4"明确不做"经双席咨询改判）：重建输入经
+    // boundReportScope 收窄到本 run 信封事件——外 run 尾条 run.event 不再被
+    // 重建进 collect 输出（messages/evidenceCounts 是 Lead 决策的机器消费
+    // 字段）。调用侧绑定，SSOT reconstructItemsFromEvents 本体不动。
+    // 无 legacy 腿：到达此处必先过上方 findLatestBound session 门（已拒全无
+    // 信封形状），session.created 行本身即带本 runId 信封 → boundReportScope
+    // 在此恒非 null；?? [] 仅为函数全形状的防御，不为 legacy 回退。
+    const reconstructedAll = reconstructItemsFromEvents(boundReportScope(events, runId) ?? []);
     const reconstructed = isProjectionMode
       ? reconstructedAll                     // full snapshot — pagination handles bounds
       : reconstructedAll.slice(-effectiveLimit);  // legacy raw CLI tail behavior

@@ -31,6 +31,9 @@ import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { executeStopWithVerification } from "../backends/opencodeStopVerify.js";
 import { raiseAlert } from "../alerts.js";
 import { isValidRunId } from "../delivery.js";
+// R21（TD-128 W3）：已拒路径回显 terminalState 的绑定作用域——metrics.js
+// 单一定义处（runList.js 同款 import 族）。
+import { boundReportScope } from "../metrics.js";
 import { findRunWorkspaceOwnership, verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 // M12-19: the conservative process-alive probe now lives in ownerLiveness (the
 // liveness SSOT), shared with the process_missing recovery proof. Imported here
@@ -134,7 +137,13 @@ export async function stopRun(input) {
         authorized: false,
         authorizationError: err.message,
         terminalAccepted: false,
-        terminalState: findState(events) ?? "unknown",
+        // R21（TD-128 W3）：已拒路径回显的 terminalState 绑定到请求 runId——
+        // 外 run 尾条终态不再供给该回显（同文件 fromState（原 :168）已绑的纪律
+        // 补齐）。与该处 plain filter 不同，此处取 boundReportScope（?? events
+        // legacy 回退）：授权检查先于 session 查找，全无信封的 pre-envelope
+        // transcript 可达本路径（ownership 的 legacy 容忍可先失败）——保持历史
+        // 回显；任一事件带信封即严格绑定（合法全绑定路径恒等）。
+        terminalState: findState(boundReportScope(events, runId) ?? events) ?? "unknown",
         sideEffectAttempted: false,
         stopVerified: null,
       };

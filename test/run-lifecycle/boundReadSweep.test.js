@@ -60,6 +60,9 @@ import { loadRun } from "../../src/commands/shared.js";
 // R20（TD-128 末簇收口）：M1-M4 / M6-:2080 / M7 / L3 / L4 探针的被测面。
 import { getRunStatus } from "../../src/application/runStatus.js";
 import { listRuns, extractRunFacts } from "../../src/application/runList.js";
+// R21（TD-128 W1）：readSummaryFn 缓存分支探针的被测面（真实 createRunSummaryCache
+// + 真实 stat/读盘——与 server.js:2903 / ownerDashboardServer.js:495 同一接线形状）。
+import { createRunSummaryCache } from "../../src/application/runSummaryCache.js";
 // R20-C（终审返工）：runsCommand（SIGINT 快照探针）/ runsDashboardCommand
 // （--latest 排序键探针）为被测面。
 import { buildDashboard, runsCommand, runsDashboardCommand } from "../../src/commands/runs.js";
@@ -1677,8 +1680,8 @@ test("R20-LST-2: 合法回归 + 兼容形状钉 — 全绑定行照常 completed
     assert.equal(runs[0].state, "completed");
     assert.equal(runs[0].terminal, true);
 
-    // (b) 兼容形状：extractRunFacts(events)（无 runId——runSummaryCache 的
-    //     extractFactsFn 调用形状）对全绑定输入保持同值。
+    // (b) 兼容形状：extractRunFacts(events)（无 runId——既有直接调用的兼容
+    //     形状；R21 起缓存路径已传 stem，见 R21-CACHE-1）对全绑定输入保持同值。
     const factsNoId = extractRunFacts(bound);
     const factsWithId = extractRunFacts(bound, runId);
     assert.equal(factsNoId.state, "completed");
@@ -2367,4 +2370,279 @@ test("R20C-DB-1: 篡改探针 + 合法/legacy 回归 — --latest 排序键 = �
     console.log = origLog;
     cleanupDir(dir);
   }
+});
+
+// =====================================================================
+// R21 读绑定收官补丁（TD-128；2026-08-19，coder_mm + auditor 双席咨询定稿，
+// Owner 已批准）
+//
+//   W1 runSummaryCache stem 透传 —— read() 以缓存 key 的文件名 stem 调
+//       extractFactsFn(events, stem)，R20-M2 的行 state/terminal 绑定自此在
+//       主消费面（MCP runs_list / lead_preflight / Owner 看板——三面全走
+//       readSummaryFn 缓存分支）生效。修复前缓存路径 extractFactsFn(events)
+//       无 runId → boundReportScope(events, null) = null → 历史无绑定读法；
+//       R20-M2 只保护了 CLI 直读分支。现有探针（R20-LST-1/2）全打直读分支
+//       ——缓存分支此前零探针，正是该洞活到今天的原因（本节补上）。
+//   W2 runCollect/await 事件重建 filter 调用侧绑定 —— collect（:234）与
+//       await compact（collectCompactFromSnapshot）的重建输入经
+//       boundReportScope 收窄到本 run 信封事件；SSOT
+//       reconstructItemsFromEvents 本体不动。collect 侧无 legacy 腿（上游
+//       session 门已拒全无信封形状）；await 侧语义选择 = R19 runWait 同款
+//       （全无信封 → 绑定后重建为空——不可归属内容宁空不采信；该形状经
+//       terminality 绑定门后理论不可达，空腿为纵深防御）。
+//   W3 三处一行 —— smoke.js:87-88（stateChain/run.started 绑定本 smoke run，
+//       喂 report() PASS/判定的假绿方向）、runStop.js:137（授权失败回显
+//       terminalState 绑定，boundReportScope 语义——授权检查先于 session
+//       门，pre-envelope legacy 可达该路径，保持历史回显）、runList.js:112
+//       （updatedAt = 末绑定事件 ts——排序/historyRange 键与 R20-C 已绑的
+//       --latest 排序键同形状、内部自洽）。
+//
+// 探针诚实口径（同本文件既有各节）：只验跨 run/无信封形状；篡改尾条用
+// 【外 run 信封的 legacy 终态 fact】（run.completed）——findState 的 legacy
+// 推断路径使尾部伪终态在修复前无绑定读下真实可达，且不武装 L2 登记不修
+// 的写侧 CAS（_detectExistingTerminal 只认 state_change）。
+// =====================================================================
+
+// ----- W1：runSummaryCache stem 透传（readSummaryFn 缓存分支） -----
+
+test("R21-CACHE-1: 篡改探针（readSummaryFn 缓存分支）— 外 run 终态尾条不再翻转 runs_list 缓存行 state/terminal", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r21-cache1-"));
+  try {
+    const runId = "run_r21_cache1";
+    const lines = [
+      { type: "run.started", runId, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId, agentId: "coder_low", from: "pending", to: "running", reason: "first_event", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+    ];
+    const filePath = join(dir, `${runId}.jsonl`);
+    writeFileSync(filePath, `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    appendForeignLine(filePath, {
+      type: "run.completed", runId: "run_evil", agentId: "coder_low",
+    });
+
+    // 真实 createRunSummaryCache（真实 stat + 真实读盘），readSummaryFn 接线
+    // 与 server.js:2903（runs_list/lead_preflight）/ ownerDashboardServer.js:495
+    // （Owner 看板）同形——被测面就是那条缓存路径。
+    const cache = createRunSummaryCache();
+    const readSummaryFn = (fp) => cache.read(fp);
+    const { runs } = await listRuns({ runDir: dir, knownAgentIds: [], validateAgentIds: false, readSummaryFn });
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].state, "running",
+      "缓存分支的行状态只由本 run 绑定事件计算（修复前 stem 未透传 → extractFactsFn(events) 无绑定 → 外 run completed 尾条经 findState legacy 推断翻转行状态）");
+    assert.equal(runs[0].terminal, false);
+  } finally { cleanupDir(dir); }
+});
+
+test("R21-CACHE-2: 合法回归 — 全绑定行经缓存 miss+hit 两次照常 completed/terminal（缓存负载即绑定后 facts）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r21-cache2-"));
+  try {
+    const runId = "run_r21_cache2";
+    const lines = [
+      { type: "run.started", runId, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId, agentId: "coder_low", from: "running", to: "completed", reason: "done", ts: "2026-08-19T00:00:02.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+
+    const cache = createRunSummaryCache();
+    const readSummaryFn = (fp) => cache.read(fp);
+    const input = { runDir: dir, knownAgentIds: [], validateAgentIds: false, readSummaryFn };
+    const first = await listRuns(input);
+    assert.equal(first.runs[0].state, "completed");
+    assert.equal(first.runs[0].terminal, true);
+    assert.equal(first.runs[0].updatedAt, "2026-08-19T00:00:02.000Z");
+    assert.equal(cache.stats.misses, 1, "首次读取为缓存 miss（冷读真实解析）");
+
+    // 第二次查询：stat 未变 → 缓存命中，直接回放缓存负载——该负载是 stem
+    // 透传后派生的 facts，与直读分支同语义（命中路径不重新派生）。
+    const second = await listRuns(input);
+    assert.deepEqual(second.runs, first.runs, "缓存命中路径与冷读路径输出恒等");
+    assert.equal(cache.stats.hits, 1, "第二次读取命中缓存");
+  } finally { cleanupDir(dir); }
+});
+
+// ----- W2：事件重建 filter 调用侧绑定（collect + await compact） -----
+
+test("R21-CO-6: 篡改探针 — 外 run 尾条 run.event 不再被重建进 collect 输出（messages/evidenceCounts 机器消费面）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r21-co6-"));
+  try {
+    const runId = "run_r21_co6";
+    const t = new JsonlTranscript(join(dir, `${runId}.jsonl`), { runId, agentId: "coder_low" });
+    await t.append("session.created", { backend: "process", backendSessionId: "proc_421" });
+    await t.append("run.event", { kind: "message", role: "assistant", parts: [{ type: "text", text: "own final answer" }] });
+    appendForeignLine(t.filePath, {
+      type: "run.event", runId: "run_evil", agentId: "coder_low",
+      kind: "message", role: "assistant", parts: [{ type: "text", text: "EVIL FOREIGN TAIL" }],
+    });
+
+    // 投影模式（deferAppend）——零 audit append，只验重建快照。
+    const r = await collectRunMessages({ runId, runDir: dir, deferAppend: true });
+    assert.equal(r.backend, "process");
+    assert.equal(r.reconstructed, true);
+    assert.equal(r.data.length, 1, "重建条目只含本 run 绑定 run.event（修复前外 run 尾条被重建进 collect 输出呈给 Lead）");
+    assert.equal(r.data[0].parts[0].text, "own final answer");
+  } finally { cleanupDir(dir); }
+});
+
+test("R21-AW-6: 篡改探针 — 终态快照的 compact 重建只含本 run 绑定条目（外 run 尾条 run.event 不混入 result）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r21-aw6-"));
+  try {
+    const runId = "run_r21_aw6";
+    const lines = [
+      { type: "session.created", runId, agentId: "coder_low", backend: "process", backendSessionId: "proc_422", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.event", runId, agentId: "coder_low", kind: "message", role: "assistant", parts: [{ type: "text", text: "own compact text" }], ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+      { type: "run.state_change", runId, agentId: "coder_low", from: "running", to: "completed", reason: "done", ts: "2026-08-19T00:00:02.000Z", seq: 3 },
+    ];
+    const filePath = join(dir, `${runId}.jsonl`);
+    writeFileSync(filePath, `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    appendForeignLine(filePath, {
+      type: "run.event", runId: "run_evil", agentId: "coder_low",
+      kind: "message", role: "assistant", parts: [{ type: "text", text: "EVIL FOREIGN TAIL" }], ts: "2026-08-19T00:00:03.000Z",
+    });
+
+    const r = await runAwaitResult({ runId, runDir: dir, waitMs: 0 });
+    assert.equal(r.terminal, true, "终态由本 run 绑定 state_change 投影（R18 既有绑定）");
+    assert.equal(r.result.status, "available");
+    assert.deepEqual(r.result.messages, [{ role: "assistant", text: "own compact text", truncated: false }],
+      "compact 只收本 run 绑定条目（修复前外 run 尾条 message 是末条 assistant 文本——compact 恰取末条，外 run 内容直接成为呈给 Lead 的结论）");
+  } finally { cleanupDir(dir); }
+});
+
+// ----- W3：runList updatedAt（排序 / historyRange 键） -----
+
+test("R21-LST-3: 篡改探针 — runs list 行 updatedAt/排序只由本 run 绑定事件末条 ts 供给（外 run 远期尾条不再拉动）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r21-lst3-"));
+  try {
+    const aId = "run_r21_lst3a";
+    const bId = "run_r21_lst3b";
+    // A：自身末条 ts 00:10 + 外 run 远期尾条 20:00（修复前 events[last].ts
+    //     供给 updatedAt 与排序键 → A 被顶到最前、updatedAt 虚高）。
+    const aLines = [
+      { type: "run.started", runId: aId, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId: aId, agentId: "coder_low", from: "running", to: "completed", reason: "done", ts: "2026-08-19T00:00:10.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${aId}.jsonl`), `${aLines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    appendForeignLine(join(dir, `${aId}.jsonl`), {
+      type: "run.completed", runId: "run_evil", agentId: "coder_low", ts: "2026-08-19T00:20:00.000Z",
+    });
+    // B：真实最近者（自身末条 ts 00:15）。
+    const bLines = [
+      { type: "run.started", runId: bId, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId: bId, agentId: "coder_low", from: "running", to: "completed", reason: "done", ts: "2026-08-19T00:00:15.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${bId}.jsonl`), `${bLines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+
+    const { runs } = await listRuns({ runDir: dir, knownAgentIds: [], validateAgentIds: false });
+    assert.equal(runs.length, 2);
+    assert.equal(runs[0].runId, bId, "排序按各 run 绑定末条 ts 降序（00:15 > 00:10；修复前 A 被 evil 20:00 顶到最前）");
+    const rowA = runs.find((r) => r.runId === aId);
+    assert.equal(rowA.updatedAt, "2026-08-19T00:00:10.000Z",
+      "updatedAt = 末【绑定】事件 ts（修复前被外 run 远期尾条拉到 20:00——与 R20-C 已修的 --latest 排序键同形状）");
+  } finally { cleanupDir(dir); }
+});
+
+test("R21-LST-4: 合法 + legacy 回归 — 全绑定行 updatedAt 与全量派生同值；全无信封 legacy 文件保持历史末事件 ts", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r21-lst4-"));
+  try {
+    // (a) 全绑定：绑定派生与缺省 runId（历史读法）在合法输入上恒等。
+    const runId = "run_r21_lst4a";
+    const bound = [
+      { type: "run.started", runId, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId, agentId: "coder_low", from: "running", to: "completed", reason: "done", ts: "2026-08-19T00:00:10.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${bound.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    assert.equal(extractRunFacts(bound, runId).updatedAt, extractRunFacts(bound).updatedAt,
+      "全绑定输入上绑定派生与全量派生同值（合法路径恒等）");
+
+    // (b) legacy：全无信封（事件无 runId 字段）→ boundReportScope null →
+    //     scope 回退全量事件，updatedAt 保持历史末事件 ts 读法。
+    const legacyId = "run_r21_lst4b";
+    const legacy = [
+      { type: "run.submitted", agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.completed", agentId: "coder_low", ts: "2026-08-19T00:00:05.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${legacyId}.jsonl`), `${legacy.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+
+    const { runs } = await listRuns({ runDir: dir, knownAgentIds: [], validateAgentIds: false });
+    const rowLegacy = runs.find((r) => r.runId === legacyId);
+    assert.equal(rowLegacy.updatedAt, "2026-08-19T00:00:05.000Z",
+      "全无信封 legacy 文件保持历史末事件 ts（不因绑定收窄丢事实）");
+  } finally { cleanupDir(dir); }
+});
+
+// ----- W3：runStop 授权失败回显 terminalState -----
+
+test("R21-STOP-2: 篡改探针 + 合法/legacy 回归 — 授权失败回显的 terminalState 绑定请求 runId（外 run 终态尾条不再供给回显）", async () => {
+  const repoA = mkdtempSync(join(tmpdir(), "wao-r21-stop2a-"));
+  const repoB = mkdtempSync(join(tmpdir(), "wao-r21-stop2b-"));
+  const dir = mkdtempSync(join(tmpdir(), "wao-r21-stop2-"));
+  try {
+    makeGitRepo(repoA); // 授权 workspace（authorizedWorkspaceRoot）
+    makeGitRepo(repoB); // run 实际 workspace（跨项目 → 授权失败）
+
+    // (a) 篡改：绑定 ownership（repoB）+ 绑定 running + 外 run completed 尾条。
+    const runId = "run_r21_stop2";
+    const lines = [
+      { type: "run.background_submitted", runId, agentId: "coder_low", cwd: repoB, background: true, ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId, agentId: "coder_low", from: "pending", to: "running", reason: "go", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+    ];
+    const filePath = join(dir, `${runId}.jsonl`);
+    writeFileSync(filePath, `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    appendForeignLine(filePath, {
+      type: "run.completed", runId: "run_evil", agentId: "coder_low",
+    });
+
+    const res = await stopRun({ runId, runDir: dir, authorizedWorkspaceRoot: repoA });
+    assert.equal(res.authorized, false, "跨 workspace ownership → 授权失败（零副作用路径）");
+    assert.equal(res.terminalState, "running",
+      "回显 terminalState 只由本 run 绑定事件计算（修复前 findState(events) 无绑定 → 外 run completed 尾条经 legacy 推断 → 回显 completed）");
+
+    // (b) 合法回归：同夹具去掉外 run 尾条 → 回显不变（绑定恒等）。
+    const runIdClean = "run_r21_stop2c";
+    const cleanLines = [
+      { type: "run.background_submitted", runId: runIdClean, agentId: "coder_low", cwd: repoB, background: true, ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId: runIdClean, agentId: "coder_low", from: "pending", to: "running", reason: "go", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${runIdClean}.jsonl`), `${cleanLines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    const resClean = await stopRun({ runId: runIdClean, runDir: dir, authorizedWorkspaceRoot: repoA });
+    assert.equal(resClean.authorized, false);
+    assert.equal(resClean.terminalState, "running");
+
+    // (c) legacy 语义钉：全无信封（pre-envelope）→ boundReportScope null →
+    //     回退全量事件保持历史回显（授权检查先于 session 门，该形状可达
+    //     本路径——与 :168 fromState 的 plain filter 分叉即在此）。
+    const legacyId = "run_r21_stop2l";
+    const legacyLines = [
+      { type: "run.background_submitted", agentId: "coder_low", cwd: repoB, background: true, ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", agentId: "coder_low", from: "pending", to: "running", reason: "go", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${legacyId}.jsonl`), `${legacyLines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    const resLegacy = await stopRun({ runId: legacyId, runDir: dir, authorizedWorkspaceRoot: repoA });
+    assert.equal(resLegacy.authorized, false);
+    assert.equal(resLegacy.terminalState, "running",
+      "全无信封 legacy transcript 的回显保持历史读法（boundReportScope 的 legacy 回退腿）");
+  } finally {
+    cleanupDir(repoA);
+    cleanupDir(repoB);
+    cleanupDir(dir);
+  }
+});
+
+// ----- W3：smoke.js stateChain / run.started（源级纪律钉） -----
+
+test("R21-SM-3: 源级纪律钉 — smokeOne 的 stateChain/run.started 读取经 runId 绑定（report PASS/FAIL 判定的供给面）", () => {
+  const src = readFileSync(resolve(import.meta.dirname, "../../src/smoke.js"), "utf8");
+  // 钉绑定过滤形状：stateChain = runId 绑定过滤后的 state_change.to 序列。
+  // 变异回裸 filter → 零匹配 → 红（R18-SM-1 / R19-SM-2 同款源级守卫先例——
+  // smoke.js 顶层即执行 main()，无注入 seam，源级纪律钉是唯一可测面）。
+  const boundChain = src.match(
+    /events\.filter\(\(e\) => e\.type === "run\.state_change" && e\.runId === run\.runId\)\.map\(\(e\) => e\.to\)/g,
+  ) ?? [];
+  assert.equal(boundChain.length, 1, "stateChain 只取本 smoke run 信封的 state_change（假绿方向：外 run completed 尾条曾可凑出 PASS 判定的 includes）");
+  const bareChain = src.match(/events\.filter\(\(e\) => e\.type === "run\.state_change"\)\.map/g) ?? [];
+  assert.equal(bareChain.length, 0, "不得回退为无绑定 state_change 直读");
+  // run.started（worktreePath 展示）= findFirstBound 首条纪律（与修复前
+  // events.find 首条序在全绑定输入上恒等）。
+  const boundStarted = src.match(/findFirstBound\(events, "run\.started", run\.runId\)/g) ?? [];
+  assert.equal(boundStarted.length, 1, "run.started 读取经 findFirstBound 绑定");
+  const bareStarted = src.match(/events\.find\(\(e\) => e\.type === "run\.started"\)/g) ?? [];
+  assert.equal(bareStarted.length, 0, "不得回退为无绑定 events.find(run.started)");
 });

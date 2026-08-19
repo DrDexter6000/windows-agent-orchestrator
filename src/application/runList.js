@@ -87,10 +87,11 @@ function scanOwnerLeaseCandidates(runDir) {
  * 翻转 runs list 每行的 state/terminal（及由其派生的 activity 分类）。legacy
  * 行为选择 = boundReportScope 自身规则：全无信封的 pre-envelope transcript
  * 保持历史读法；任一事件带信封即严格绑定，混信封下不可归属降级 pending。
- * runId 缺省（runSummaryCache 的 extractFactsFn 兼容形状 / 既有直接调用）时
- * 保持历史无绑定读法——缓存路径的绑定需其调用方传入 stem（本轮授权面外，
- * 见 TD-128 登记）。agentId/updatedAt/ownershipEvents 不在本轮锚点，维持全量
- * 事件派生。
+ * runId 缺省（既有直接调用的兼容形状）时保持历史无绑定读法——R21（TD-128
+ * W1）起 runSummaryCache 的 read() 以缓存 key 的文件名 stem 调用本函数，
+ * MCP runs_list / lead_preflight / Owner 看板三条缓存路径与直读分支同语义。
+ * R21 (TD-128 W3)：updatedAt 同 scope 绑定派生（末【绑定】事件 ts）。
+ * agentId/ownershipEvents 维持全量事件派生（events[0] 类按 TD-128 类级登记）。
  *
  * Returns null when the transcript yields no run (empty / non-array events).
  *
@@ -108,8 +109,13 @@ export function extractRunFacts(events, runId = null) {
   // agentId raw, pre-validation — the registry mapping is re-applied per query
   // (finalizeSummary) so cached facts stay registry-independent.
   const rawAgentId = events[0]?.agentId;
-  // updatedAt: last event's ts, validated as ISO timestamp
-  const lastTs = events[events.length - 1]?.ts ?? null;
+  // R21 (TD-128 W3)：updatedAt = 末【绑定】事件 ts（与 R20-C 已绑的 --latest
+  // 排序键同形状、内部自洽）——外 run 远期尾条不再拉动 runs_list 行的
+  // updatedAt 及由其派生的排序 / historyRange 窗。runId 缺省或全无信封时
+  // scope === events（历史读法恒等）；合法全绑定 transcript 上绑定派生与
+  // 全量派生同值（探针钉）。零绑定事件（整份只有外 run 信封行）→ null
+  // （宁可缺事实，不入 history 窗）。ts 仍是校验过的 ISO 时间戳。
+  const lastTs = scope[scope.length - 1]?.ts ?? null;
   let updatedAt = null;
   if (lastTs && typeof lastTs === "string") {
     const parsed = new Date(lastTs);

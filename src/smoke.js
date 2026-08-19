@@ -84,8 +84,14 @@ async function smokeOne(backendType, cwd, runDir) {
   const waitResult = await run.waitForCompletion({ waitTimeout: 120000 });
 
   const events = await readTranscript(run.transcript.filePath);
-  const stateChanges = events.filter((e) => e.type === "run.state_change").map((e) => e.to);
-  const started = events.find((e) => e.type === "run.started");
+  // R21（TD-128 W3，smoke.js:87-88 收官）：stateChain 与 run.started 读取绑定到
+  // 本 smoke run 信封——外 run/伪造尾条不再供给 report() PASS/FAIL 判定所读的
+  // stateChain（假绿方向：外 run completed 尾条曾可凑出 includes("completed")）
+  // 与 worktreePath 展示。state_change 用同款 runId 过滤（场景 2（原 :277）的 R19
+  // 范式）；run.started 用 findFirstBound（R12-C 首写纪律，与修复前 events.find
+  // 的首条序在全绑定输入上恒等）。
+  const stateChanges = events.filter((e) => e.type === "run.state_change" && e.runId === run.runId).map((e) => e.to);
+  const started = findFirstBound(events, "run.started", run.runId);
   const messages = waitResult.messages ?? [];
   const assistantText = messages
     .filter((m) => m.info?.role === "assistant")

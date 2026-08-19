@@ -34,7 +34,7 @@
 //     full sequential rescan over a larger inventory would evict every
 //     retained tail entry before it is reached and re-parse everything.
 
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { stat } from "node:fs/promises";
 
 import { readTranscript } from "../transcript.js";
@@ -70,7 +70,10 @@ function snapshotKey(statResult) {
  * @param {Function} [input.statFn=stat] — file metadata reader; injectable for
  *   tests (default is node:fs/promises stat).
  * @param {Function} [input.extractFactsFn=extractRunFacts] — facts derivation
- *   (runList.js SSOT); injectable for tests.
+ *   (runList.js SSOT); injectable for tests. Called as
+ *   extractFactsFn(events, stem) where stem is the cache key's filename stem
+ *   (R21): the authoritative runId for boundReportScope — same semantics as
+ *   the listRuns direct-read branch.
  * @returns {{
  *   read(filePath): Promise<object|null>,
  *   size: number,
@@ -131,7 +134,14 @@ export function createRunSummaryCache({
     } catch {
       postKey = null;
     }
-    const facts = extractFactsFn(events);
+    // R21（TD-128 W1，R20-M2 残余闭合）：以缓存 key（resolve 后路径）的文件名
+    // stem 为权威 runId 传给 extractRunFacts —— 与 listRuns 直读分支（runList.js
+    // 传文件名 stem）同一语义，缓存路径与直读路径的 state/terminal 投影从此同源。
+    // 修复前 extractFactsFn(events) 无 runId → boundReportScope(events, null)
+    // 返回 null → 历史无绑定读法（外 run 终态尾条可翻转 MCP runs_list /
+    // lead_preflight / Owner 看板缓存行——三面全部经本缓存）。stem 是调用方
+    // join(resolvedRunDir, `${runId}.jsonl`) 的原样回取，非新事实。
+    const facts = extractFactsFn(events, basename(key, ".jsonl"));
     if (preKey !== null && postKey === preKey) {
       entries.set(key, { meta: preKey, facts });
       if (entries.size > cap) evictHead();

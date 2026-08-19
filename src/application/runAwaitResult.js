@@ -70,6 +70,9 @@ import { join, resolve } from "node:path";
 
 import { readTranscript, findState, findLatestBound, TERMINAL_STATES, findLastEventSeq, extractCanonicalAgentId } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
+// R21（TD-128 W2 升格修复）：compact 重建输入的绑定作用域——metrics.js 单一
+// 定义处。
+import { boundReportScope } from "../metrics.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { summarizeLiveness } from "./runWait.js";
 import { reconstructItemsFromEvents } from "./runCollect.js";
@@ -265,7 +268,17 @@ function projectIsolationFailureReason(events, runId, terminalState) {
  */
 function collectCompactFromSnapshot(events, runId, agentId, env, projectFn) {
   try {
-    const items = reconstructItemsFromEvents(events);
+    // R21（TD-128 W2 升格修复，原 W4"明确不做"经双席咨询改判）：compact 重建
+    // 输入经 boundReportScope 收窄到本 run 信封事件——外 run 尾条 run.event 不
+    // 再混入 compact 结果（messages/evidenceCounts 是 Lead 决策的机器消费字段）。
+    // 调用侧绑定，SSOT reconstructItemsFromEvents 本体不动。
+    // legacy 语义选择（R19 runWait 同款——观测面降级不设门）：全无信封
+    // transcript → boundReportScope 返回 null → 绑定后重建为空（降级为
+    // observed zeros，宁空不采信不可归属内容）。依据：本函数仅由 terminal
+    // 快照路径调用，而 terminality 自 R18 起由绑定过滤后的 findState 投影
+    // （初始读/每次 poll）——全无信封形状在到达前已降级 pending，不可达本
+    // 函数；空腿是纵深防御而非可达路径。
+    const items = reconstructItemsFromEvents(boundReportScope(events, runId) ?? []);
     // R18 (TD-128 W2)：手搓绑定反查（reverse + find）换 findLatestBound SSOT——
     // 行为恒等（同一「末条 runId 绑定 session.created」语义），纪律统一到
     // transcript.js 绑定读取器的单一定义处。
