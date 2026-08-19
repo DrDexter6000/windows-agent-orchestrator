@@ -20,6 +20,7 @@ import { readdirSync, existsSync } from "node:fs";
 
 import { readTranscript, findState, RUN_STATES, TERMINAL_STATES } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
+import { boundReportScope } from "../metrics.js";
 import { createRunWorkspaceVerifier } from "./runWorkspaceOwnership.js";
 import { checkOwnerLiveness, DEFAULT_OWNER_LIVENESS_THRESHOLD_MS } from "./ownerLiveness.js";
 
@@ -80,14 +81,27 @@ function scanOwnerLeaseCandidates(runDir) {
  * re-applying CURRENT workspace authorization on every query). The facts are
  * derived from the full exact parse — never a selective parser.
  *
+ * R20 (TD-128 M2，每行 state/terminal 绑定)：提供了权威 runId（listRuns 的
+ * 【文件名 stem】）时，state/terminal 经 metrics.js 的 boundReportScope 单一
+ * 定义处收窄到该 runId 的信封绑定事件——尾部追加的外 run 伪终态尾条不再
+ * 翻转 runs list 每行的 state/terminal（及由其派生的 activity 分类）。legacy
+ * 行为选择 = boundReportScope 自身规则：全无信封的 pre-envelope transcript
+ * 保持历史读法；任一事件带信封即严格绑定，混信封下不可归属降级 pending。
+ * runId 缺省（runSummaryCache 的 extractFactsFn 兼容形状 / 既有直接调用）时
+ * 保持历史无绑定读法——缓存路径的绑定需其调用方传入 stem（本轮授权面外，
+ * 见 TD-128 登记）。agentId/updatedAt/ownershipEvents 不在本轮锚点，维持全量
+ * 事件派生。
+ *
  * Returns null when the transcript yields no run (empty / non-array events).
  *
  * @param {object[]} events
+ * @param {string|null} [runId] 权威 runId（文件名 stem）；缺省保持历史读法
  * @returns {{agentId, state, terminal, updatedAt, ownershipEvents}|null}
  */
-export function extractRunFacts(events) {
+export function extractRunFacts(events, runId = null) {
   if (!Array.isArray(events) || events.length === 0) return null;
-  const state = findState(events);
+  const scope = boundReportScope(events, runId) ?? events;
+  const state = findState(scope);
   // Map unknown states to "unknown" (don't leak arbitrary strings)
   const safeState = RUN_STATES.includes(state) ? state : "unknown";
   const terminal = TERMINAL_STATES.includes(safeState);
@@ -288,7 +302,7 @@ export async function listRuns(input) {
         // Malformed/unreadable transcript — skip silently (fail-closed per file)
         continue;
       }
-      facts = extractRunFacts(events);
+      facts = extractRunFacts(events, runId);
       // An empty transcript preserves the exact pre-M12-18 flow: ownership and
       // activity are still evaluated, and the run is dropped at completion.
       if (!facts) facts = EMPTY_TRANSCRIPT_FACTS;

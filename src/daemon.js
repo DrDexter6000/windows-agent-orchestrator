@@ -101,7 +101,14 @@ export function scanResumableRuns(runDir, now = Date.now(), thresholdMs = DEFAUL
     try {
       const raw = readFileSync(join(runDir, file), "utf8");
       const events = raw.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-      const state = findState(events);
+      // R20 (TD-128 M7)：终态判定绑定到【文件名 stem runId】（R15 范式）——
+      // 外 run 伪终态尾条不再永久压制 resume 候选（孤儿恢复效应：真实在飞 +
+      // 伪终态 + owner 死的 run，绑定前被本门永久压制，绑定后诚实放行给
+      // ②owner 心跳关；usage.md 行为变更条已列）。绑定不改变关卡序：仍是
+      // ①findState 终态跳过 → ②isRunOwned 心跳跳过。不可归属（全无信封
+      // legacy）→ pending 非终态（≈0 存量；即便进入候选，manager.resume 的
+      // R13-C/R18-W3 绑定门仍会拒绝无信封会话，fail-safe）。
+      const state = findState(events.filter((e) => e && e.runId === runId));
       if (TERMINAL_STATES.includes(state)) continue;
       // D-F3：有活 owner 的 run 不 resume（防双所有者劫持）。
       // ownership 心跳判活，不依赖 run 输出节奏（RunMaestro 教训：长任务沉默不等于死）。
@@ -144,9 +151,15 @@ export function scanAllRuns(runDir, now = Date.now(), thresholdMs = DEFAULT_LIVE
     try {
       const raw = readFileSync(join(runDir, file), "utf8");
       const events = raw.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-      const state = findState(events);
+      // R20 (TD-128 M7，会审补扫漏网)：统一视图的 state 与 agentId 读取同款
+      // 绑定到 stem runId——外 run 伪终态尾条不再把在飞 run 从统一视图抹掉
+      // （孤儿可见、可恢复），外 run 行不再供给 agentId。绑定不改变关卡序
+      // （①终态跳过 → ②owner 心跳分类）；不可归属 → pending 非终态 +
+      // agentId "unknown"（既有宽容降级）。
+      const bound = events.filter((e) => e && e.runId === runId);
+      const state = findState(bound);
       if (TERMINAL_STATES.includes(state)) continue; // 终态跳过
-      const agentId = events.find((e) => e.agentId)?.agentId ?? "unknown";
+      const agentId = bound.find((e) => e.agentId)?.agentId ?? "unknown";
       let owner;
       if (daemonOwnedSet.has(runId)) {
         owner = "daemon";
@@ -503,7 +516,9 @@ export async function handleRequest(req, manager, ctx = {}) {
     if (existsSync(filePath)) {
       const raw = readFileSync(filePath, "utf8");
       const events = raw.split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
-      return { ok: true, runId, state: findState(events), live: false };
+      // R20 (TD-128 M7)：IPC status 兜底读取绑定到【请求 runId】——外 run
+      // 伪终态尾条不再经 daemon status 翻转状态投影；不可归属 → pending。
+      return { ok: true, runId, state: findState(events.filter((e) => e && e.runId === runId)), live: false };
     }
     return { ok: false, error: `unknown runId: ${runId}` };
   }

@@ -247,7 +247,12 @@ async function writeStartupFailureTranscript({ runDir, runId, agentId, prompt, e
   if (prompt && !events.some((event) => event.type === "prompt.sent")) {
     await transcript.append("prompt.sent", { prompt });
   }
-  if (TERMINAL_STATES.includes(findState(events))) {
+  // R20 (TD-128 L3)：启动失败落盘前的终态检查绑定到本 run runId——append-only
+  // 尾部的外 run 伪终态尾条不再压制启动失败的 run.error/failed 落盘（修复前
+  // findState 末条胜出 → 提前 return，启动失败被静默吞掉）。不可归属（全无
+  // 信封 legacy）→ pending 非终态 → 失败照常落盘（fail-closed 方向：宁可落盘
+  // 失败事实，不静默吞掉）。
+  if (TERMINAL_STATES.includes(findState(events.filter((event) => event && event.runId === runId)))) {
     return;
   }
   await transcript.append("run.error", { phase: "start", error: error.message ?? String(error) });
@@ -294,7 +299,9 @@ export async function runMain(argv = process.argv.slice(2)) {
             runId, agentId: agentId ?? "unknown",
             initialSeq: findLastEventSeq(events),
           });
-          if (!TERMINAL_STATES.includes(findState(events))) {
+          // R20 (TD-128 L3)：delivery-json 解析失败落盘前的终态检查绑定到本
+          // run runId——外 run 伪终态尾条不再压制 run.error/failed 落盘。
+          if (!TERMINAL_STATES.includes(findState(events.filter((e) => e && e.runId === runId)))) {
             await t.append("run.error", { phase: "delivery_parse", error: "malformed delivery JSON in runner argv" });
             await t.transitionState("pending", "failed", STATE_CHANGE_REASON.delivery_parse_error);
           }
@@ -335,7 +342,9 @@ export async function runMain(argv = process.argv.slice(2)) {
             runId, agentId: agentId ?? "unknown",
             initialSeq: findLastEventSeq(events),
           });
-          if (!TERMINAL_STATES.includes(findState(events))) {
+          // R20 (TD-128 L3)：reuse-worktree 解析失败落盘前的终态检查同款绑定
+          // （外 run 伪终态尾条不再压制 run.error/failed 落盘）。
+          if (!TERMINAL_STATES.includes(findState(events.filter((e) => e && e.runId === runId)))) {
             await t.append("run.error", { phase: "reuse_worktree_parse", error: "malformed reuse-worktree JSON in runner argv" });
             await t.transitionState("pending", "failed", STATE_CHANGE_REASON.reuse_worktree_parse_error);
           }

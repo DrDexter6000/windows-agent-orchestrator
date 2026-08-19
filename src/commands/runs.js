@@ -300,14 +300,20 @@ async function loadRunOnlyFiles(runDir) {
 export function buildDashboard(runs, selfDeclared = null, stageProgress = null) {
   const rows = runs.map(({ runId, events }) => {
     const agentId = events[0]?.agentId ?? "(unknown)";
-    const state = findState(events);
-    const metricsEv = events.find((e) => e.type === "run.metrics");
+    // R20 (TD-128 M3)：dashboard 行的 state/tokens/cost/evidence 读取经
+    // boundReportScope 收窄到行 runId 的信封绑定事件——外 run 伪终态/伪
+    // metrics/伪 scorecard 尾条不再标红或污染仪表盘行（flagged 由绑定后的
+    // state 派生，同受保护）。legacy 全无信封 transcript 保持历史读法
+    // （cli.test.js M8-2 系列既有契约）。agentId/ageMs 不在本轮锚点。
+    const scope = boundReportScope(events, runId) ?? events;
+    const state = findState(scope);
+    const metricsEv = scope.find((e) => e.type === "run.metrics");
     const tokens = metricsEv?.tokens ?? {};
     const costUsd = typeof metricsEv?.costUsd === "number" ? metricsEv.costUsd : undefined;
 
     // 证据：scorecard.checked.passed === true → 有证据；否则看 warn 事件判定。
-    const scChecked = events.find((e) => e.type === "scorecard.checked");
-    const hasWarn = events.some((e) => e.type === "scorecard.warn");
+    const scChecked = scope.find((e) => e.type === "scorecard.checked");
+    const hasWarn = scope.some((e) => e.type === "scorecard.warn");
     const evidence = scChecked ? (scChecked.passed ? "✓" : (hasWarn ? "⚠" : "✗")) : "-";
 
     // age：从首个事件 ts 到最后一个事件 ts 的时长（ms）；无 ts → undefined。
@@ -422,9 +428,15 @@ async function runsSummaryCommand(args, config) {
   let latestTs = null;
   for (const file of jsonlFiles) {
     const events = await readTranscript(join(runDir, file));
-    const state = findState(events);
+    // R20 (TD-128 M3)：byState/latest 的每文件读取经 boundReportScope 收窄到
+    // 【文件名 stem 即权威 runId】的信封绑定事件（与 runs metrics --summary
+    // R19 同款）——外 run 伪终态/远期 ts 尾条不再污染 summary 计数与 latest。
+    // legacy 全无信封文件保持历史读法照常计入（runs.test.js 既有契约）。
+    const runId = file.replace(/\.jsonl$/, "");
+    const scope = boundReportScope(events, runId) ?? events;
+    const state = findState(scope);
     counts[state] = (counts[state] ?? 0) + 1;
-    const last = events.at(-1);
+    const last = scope.at(-1);
     if (last?.ts && (!latestTs || last.ts > latestTs)) {
       latestTs = last.ts;
     }
@@ -541,12 +553,14 @@ async function runsMetricsCommand(args, config) {
     const allEvents = await Promise.all(
       jsonlFiles.map((f) => readTranscript(join(runDir, f))),
     );
-    // R19 (TD-128 W2，会审补登)：调用方逐文件读取，【文件名 stem 即权威
-    // runId】（与 runsGrep 的 runId 推导同款）——逐文件传入绑定读者
-    // （aggregateSummary → aggregateRunMetrics → boundReportScope 单一定义处，
-    // R18 导出复用不新写）。单文件内的外 run/伪造尾条不再污染 --summary 聚合；
-    // 全无信封的 legacy 文件经 boundReportScope 规则保持历史读法（合法路径零
-    // 变化）。修正旧注释"无权威 runId"的不实措辞（会审指出）。
+    // R19 (TD-128 W1 报表污染类，会审补登；L1 勘误：原注释误标 W2——按 TD-128
+    // 登记表真实编号，--summary 逐文件聚合属 R18 W1 报表污染类同族)：调用方逐
+    // 文件读取，【文件名 stem 即权威 runId】（与 runsGrep 的 runId 推导同款）
+    // ——逐文件传入绑定读者（aggregateSummary → aggregateRunMetrics →
+    // boundReportScope 单一定义处，R18 导出复用不新写）。单文件内的外 run/
+    // 伪造尾条不再污染 --summary 聚合；全无信封的 legacy 文件经 boundReportScope
+    // 规则保持历史读法（合法路径零变化）。修正旧注释"无权威 runId"的不实措辞
+    // （会审指出）。
     const s = aggregateSummary(allEvents, jsonlFiles.map((f) => f.replace(/\.jsonl$/, "")));
     if (options.format === "json") {
       console.log(JSON.stringify(s, null, 2));

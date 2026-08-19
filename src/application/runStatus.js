@@ -11,8 +11,9 @@
 //   - Read-only: never writes transcript, owner files, or any persistent state.
 //   - No argv parsing, no console.log, no process.exit.
 //   - Does not import src/commands/*, src/mcp/*, MCP SDK, or zod.
-//   - Depends on transcript.js (readTranscript/findState/TERMINAL_STATES) and
-//     delivery.js (isValidRunId).
+//   - Depends on transcript.js (readTranscript/findState/TERMINAL_STATES),
+//     delivery.js (isValidRunId), and metrics.js (boundReportScope — the R18/R20
+//     observation-report binding SSOT, reused so the "何时绑定" rule lives once).
 //   - M12-17: executionStage via projectExecutionStage (pure closed-set
 //     projection over the SAME read-only snapshot; never writes, never probes
 //     liveness, never makes a semantic judgment).
@@ -21,6 +22,7 @@ import { join } from "node:path";
 
 import { readTranscript, findState, TERMINAL_STATES, extractCanonicalAgentId } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
+import { boundReportScope } from "../metrics.js";
 import { projectExecutionStage } from "./runStageProjection.js";
 
 // ===== Activity description (migrated from observe.js, TD-75 semantics) =====
@@ -134,7 +136,17 @@ export async function getRunStatus({
   // The service must NOT create the file.
   const events = await _readTranscript(filePath);
 
-  const state = findState(events);
+  // R20 (TD-128 M1，末簇观测投影)：state/terminal/last/lastActivity 补齐本函数
+  // 既有绑定纪律（agentId/executionStage 自 M11-8B/M12-17 起已绑定）。经
+  // metrics.js 的 boundReportScope 单一定义处收窄到请求 runId 的信封绑定事件
+  // ——findState 的 state_change 末条胜出语义下，尾部追加的外 run 伪终态/
+  // 伪活动行不再翻转 state/terminal、不再供给 last/lastActivity。legacy 行为
+  // 选择（boundReportScope 自身规则，对齐 TD-75 既有 JSON 契约）：全无信封的
+  // pre-envelope transcript 保持历史读法（cli.test.js TD-75 系列钉住）；任一
+  // 事件带信封（含伪造尾行）即严格绑定——外 run/无信封行不可见，混信封下
+  // 状态不可归属时降级 pending（findState([])），不 throw。
+  const scope = boundReportScope(events, runId) ?? events;
+  const state = findState(scope);
   const terminal = TERMINAL_STATES.includes(state);
 
   // M11-8B closeout: canonical agentId from the transcript envelope (the same
@@ -143,11 +155,12 @@ export async function getRunStatus({
   // id all degrade to "unknown" (no throw, no gate). Never inferred from worker text.
   const agentId = extractCanonicalAgentId(events, runId);
 
-  // Last event overall (any type).
-  const last = events.at(-1) ?? null;
+  // Last event overall (any type) — R20 起取绑定作用域内末条。
+  const last = scope.at(-1) ?? null;
 
   // Last run.event (activity heartbeat) — reverse search, TD-75 semantics.
-  const lastActivity = [...events].reverse().find((e) => e.type === "run.event") ?? null;
+  // R20：同在绑定作用域内反查（外 run/无信封 run.event 不再供给心跳）。
+  const lastActivity = [...scope].reverse().find((e) => e.type === "run.event") ?? null;
   const lastActivityTs = lastActivity?.ts ?? null;
   const secondsSinceActivity = lastActivityTs
     ? Math.round((_now() - new Date(lastActivityTs).getTime()) / 1000)

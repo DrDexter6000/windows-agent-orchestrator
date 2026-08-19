@@ -30,6 +30,7 @@
 // 只读：本函数不接收也不返回可变状态，不改 transcript。
 
 import { findState, TERMINAL_STATES, STATE_CHANGE_REASON } from "./transcript.js";
+import { boundReportScope } from "./metrics.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
 
 /**
@@ -304,11 +305,27 @@ function kernelDiagnosisCode(category, code) {
 }
 
 function diagnoseFailureInner(events, expectedRunId) {
-  const evs = Array.isArray(events) ? events : [];
+  const raw = Array.isArray(events) ? events : [];
+  const hasValidExpectedRunId = typeof expectedRunId === "string" && expectedRunId.length > 0;
+  // R20 (TD-128 M4)：提供了合法 expectedRunId 时，全部失败分类事实（state/
+  // stop·aborted·timeout·budget·scorecard·evidence_audit·run.event 活动，以及
+  // auth/config/capacity/crash 的 run.error 匹配）只从该 runId 的信封绑定事件
+  // 读取——尾部追加的外 run 伪终态/伪 401/伪 scorecard 行不再抢分类或翻转
+  // 状态。既有绑定事实（isolation_violation/delivery_failed/completed_marker/
+  // findTerminalProviderError）的逐事件 runId 检查在过滤后恒等保留（fail-closed
+  // 门语义不变）。legacy 行为选择（锚点复核既有语义后取 boundReportScope 语义，
+  // metrics.js 单一定义处）：全无信封的 pre-envelope transcript 保持历史分类
+  // 读法（frictionLog TD-92 契约钉住——debug 模式对无信封失败 transcript 仍要
+  // 分类写档）；任一事件带信封即严格绑定，零绑定事件（信封存在但全不可归属）
+  // → 复用既有空输入降级 { category:"unknown" }，不 throw（诊断只给证据，宁
+  // 缺勿错归）。expectedRunId 缺省/无效：保持历史无绑定读法（既有调用方契约
+  // 不变）。
+  const evs = hasValidExpectedRunId
+    ? (boundReportScope(raw, expectedRunId) ?? raw)
+    : raw;
   // 空输入：无法判断发生了什么 → unknown。
   if (evs.length === 0) return { category: "unknown", evidence: [] };
   const state = findState(evs);
-  const hasValidExpectedRunId = typeof expectedRunId === "string" && expectedRunId.length > 0;
 
   // M12-13: consume an isolation violation ONLY when it carries the safe
   // structured code "workdir_escape" (string, top-level durable fact — the

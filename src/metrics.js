@@ -74,7 +74,8 @@ export function aggregateRunMetrics(events, runId = null) {
 /**
  * 跨 run 聚合（M4-4）。
  *
- * R19（TD-128 W2）：--summary 调用方逐文件读取时【文件名 stem 即权威 runId】，
+ * R19（TD-128 W1 报表污染类；L1 勘误：原注释误标 W2——按 TD-128 登记表真实
+ * 编号，--summary 逐文件聚合属 R18 W1 报表污染类同族）：--summary 调用方逐文件读取时【文件名 stem 即权威 runId】，
  * 经 runIds 逐 run 传入绑定读者（boundReportScope 单一定义处复用，不新写）——
  * 单文件内的外 run/伪造尾条不再污染聚合。runIds 缺省（历史调用方/测试）时逐
  * run 无绑定（历史读法）；提供了 stem 时交由 boundReportScope 自身规则：全无

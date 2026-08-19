@@ -277,7 +277,8 @@ export async function runWait(input) {
     verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
   }
 
-  // R19 (TD-128 W1，会审补登)：run_wait 的状态投影绑定到请求 runId（R15 范式
+  // R19 (TD-128 W2 状态投影类，会审补登；L1 勘误：原注释误标 W1——按 TD-128
+  // 登记表真实编号，run_wait 属 runAwaitResult W2 状态投影类同族)：run_wait 的状态投影绑定到请求 runId（R15 范式
   // `findState(events.filter(bound))`——runDelivery.js / sessionReuse.js R15、
   // runAwaitResult R18 同款）：findState 的 state_change 末条胜出语义下，外 run
   // 伪 terminal 尾条不再把 run_wait 翻成终态（或反向阻断终态观察）。
@@ -379,7 +380,7 @@ export async function runWait(input) {
       verifyRunWorkspaceOwnership(currentEvents, authorizedWorkspaceRoot, runId);
     }
 
-    // R19 (TD-128 W1)：等待循环内每次 poll 快照的状态投影同款绑定过滤（与初始
+    // R19 (TD-128 W2 状态投影类；L1 勘误同上)：等待循环内每次 poll 快照的状态投影同款绑定过滤（与初始
     // 读同一 runId、同一 R15 范式）——外 run 伪 terminal 尾条不再把窗口内的 poll
     // 翻成 terminal-during-wait 提前返回（legacy 全无信封同款降级 pending）。
     currentState = findState(currentEvents.filter((e) => e && e.runId === runId));

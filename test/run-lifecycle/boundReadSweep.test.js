@@ -50,13 +50,21 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFile
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { JsonlTranscript, readTranscript } from "../../src/transcript.js";
+import { JsonlTranscript, readTranscript, findState } from "../../src/transcript.js";
 import { collectRunMessages } from "../../src/application/runCollect.js";
 import { resolveReuseTurn, resolveLineageFirstTurn, resolveLineageContinuationTurn } from "../../src/application/sessionReuse.js";
 import { correctRun } from "../../src/application/runCorrection.js";
 import { continueRun } from "../../src/application/runContinue.js";
 import { readRunActivity } from "../../src/application/runActivity.js";
 import { loadRun } from "../../src/commands/shared.js";
+// R20（TD-128 末簇收口）：M1-M4 / M6-:2080 / M7 / L3 / L4 探针的被测面。
+import { getRunStatus } from "../../src/application/runStatus.js";
+import { listRuns, extractRunFacts } from "../../src/application/runList.js";
+import { buildDashboard } from "../../src/commands/runs.js";
+import { getRunDiagnosis } from "../../src/application/runDiagnosis.js";
+import { diagnoseFailure } from "../../src/diagnosis.js";
+import { scanResumableRuns, scanAllRuns, handleRequest } from "../../src/daemon.js";
+import { runBackground, runMain } from "../../src/backgroundRunner.js";
 // R18（TD-128 W1/W2/W3 观测面卫生包）：被测面 + CLI 探针用的 runCommand 导出。
 import { loadScorecardFromTranscript } from "../../src/commands/run.js";
 import { runAwaitResult } from "../../src/application/runAwaitResult.js";
@@ -1504,4 +1512,561 @@ test("R19-SM-2: 源级纪律钉 — smoke 场景 2 PASS/FAIL 判定的末条 sta
   // 不会误伤）。
   const bare = src.match(/events\.filter\(\(e\) => e\.type === "run\.state_change"\)\.at\(-1\)/g) ?? [];
   assert.equal(bare.length, 0, "不得回退为无绑定 .at(-1) 直取末条 state_change");
+});
+
+// =====================================================================
+// R20 读绑定家族末簇收口（TD-128；2026-08-19，Owner 批准 + coder_mm 语义裁定）
+//
+//   M1 runStatus.js:137/:147/:150 —— state/terminal/last/lastActivity 经
+//       metrics.js boundReportScope 收窄（同函数 agentId/executionStage 既有
+//       绑定纪律的补齐）。legacy 选择（DEViation 声明）：纯 R15 过滤会破坏
+//       cli.test.js TD-75 系列钉住的 pre-envelope JSON 契约（无信封 bare 行的
+//       状态推断/心跳），故该面取 R18 W1 报表类 SSOT（boundReportScope）语义
+//       ——全无信封保持历史读法，任一事件带信封即严格绑定，混信封下不可归属
+//       降级 pending。M2 runList / M3 runs summary·dashboard 同款同理。
+//   M4 runDiagnosis.js:63-64 + diagnosis.js —— 诊断 state/terminal 与全部
+//       失败分类事实绑定到请求 runId（evs 顶层收窄；锚点清单外同函数同族
+//       读取一并覆盖）。legacy 行为选择（锚点复核既有语义后与 M1-M3 同取
+//       boundReportScope 语义）：全无信封保持历史分类（frictionLog TD-92
+//       契约钉住——debug 模式对无信封失败 transcript 仍要分类写档）；任一
+//       信封即严格绑定，零绑定事件 → 既有空输入降级 {category:"unknown"} +
+//       state "pending"，不 throw。
+//   M6 :2080 —— waitForCompletion 流后外部终态采纳绑定（交付侧 :2192 的
+//       交付丢失向量探针在 test/delivery/runDeliveryReadBinding.test.js）。
+//   M7 daemon.js:104/:147/:149/:506 —— scanResumableRuns/scanAllRuns/
+//       IPC status 兜底绑定到 stem/请求 runId（关卡序 ①findState ②owner
+//       心跳不变；孤儿恢复效应）。
+//   L3 backgroundRunner.js:250/:297/:338 —— 启动/解析失败落盘前的终态检查
+//       绑定（伪终态尾条不再压制 run.error/failed 落盘）。
+//   L4 混合信封语义钉 —— 部分行带信封 + 部分裸行 → 只从绑定子集投影
+//       （与 R18 boundReportScope 语义一致的方向性钉）。
+//
+// 探针诚实口径（同本文件既有各节）：只验跨 run/无信封形状；同 runId 追加
+// 伪造 = runs/ 写权限攻击面，读侧无解。篡改尾条优先用【外 run 信封的 legacy
+// 终态 fact】（run.completed/run.aborted/run.error）——findState 的 legacy
+// 推断路径使尾部伪终态在修复前的无绑定读下真实可达，且不同时武装 L2 登记
+// 不修的写侧 CAS（_detectExistingTerminal 只认 state_change；TD-128 L2）。
+// =====================================================================
+
+// ----- M1：runStatus state/terminal/last/lastActivity -----
+
+test("R20-ST-1: 篡改探针 — 外 run 伪终态/伪活动尾条不再翻转 run_status 的 state/terminal/last/lastActivity", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20-st1-"));
+  try {
+    const runId = "run_r20_st1";
+    const lines = [
+      { type: "run.submitted", runId, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.started", runId, agentId: "coder_low", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+      { type: "run.state_change", runId, agentId: "coder_low", from: "pending", to: "running", reason: "first_event", ts: "2026-08-19T00:00:03.000Z", seq: 3 },
+      { type: "run.event", kind: "command", command: "rg TODO", runId, agentId: "coder_low", ts: "2026-08-19T00:00:04.000Z", seq: 4 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    // 外 run 尾条两连：伪 completed 终态 + 伪活动行（修复前分别赢得 findState
+    // 末条语义与 last/lastActivity 反查）。
+    appendForeignLine(join(dir, `${runId}.jsonl`), {
+      type: "run.completed", runId: "run_evil", agentId: "coder_low",
+    });
+    appendForeignLine(join(dir, `${runId}.jsonl`), {
+      type: "run.event", kind: "message", role: "assistant", parts: [], runId: "run_evil", agentId: "coder_low",
+    });
+
+    const s = await getRunStatus({ runId, runDir: dir, nowFn: () => Date.parse("2026-08-19T00:01:00.000Z") });
+    assert.equal(s.state, "running", "state 只由本 run 绑定事件计算（修复前外 run completed 尾条 → completed）");
+    assert.equal(s.terminal, false, "外 run 伪终态尾条不再翻成终态");
+    assert.equal(s.lastEventType, "run.event", "last 取绑定作用域内末条（本 run 的 command run.event）");
+    assert.equal(s.lastEventTs, "2026-08-19T00:00:04.000Z", "last 的事实行/时间戳不再由外 run 尾条供给");
+    assert.equal(s.lastActivityKind, "跑命令", "lastActivity 反查只看绑定 run.event（修复前外 run 伪 message 尾条胜出）");
+    assert.match(s.lastActivitySummary, /rg TODO/, "活动摘要来自本 run 自身命令");
+  } finally { cleanupDir(dir); }
+});
+
+test("R20-ST-2: 合法 + legacy 回归 — 全绑定输入恒等；全无信封 legacy transcript 保持历史推断（TD-75 契约）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20-st2-"));
+  try {
+    // (a) 全绑定终态：输出与修复前逐字节一致（过滤器恒等）。
+    const runId = "run_r20_st2a";
+    const bound = [
+      { type: "run.submitted", runId, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.event", kind: "command", command: "ls", runId, agentId: "coder_low", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+      { type: "run.state_change", runId, agentId: "coder_low", from: "running", to: "failed", reason: "backend_error", ts: "2026-08-19T00:00:02.000Z", seq: 3 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${bound.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    const a = await getRunStatus({ runId, runDir: dir, nowFn: () => Date.parse("2026-08-19T00:01:00.000Z") });
+    assert.equal(a.state, "failed");
+    assert.equal(a.terminal, true);
+    assert.equal(a.lastActivityTs, "2026-08-19T00:00:01.000Z", "绑定 run.event 照常供给心跳");
+
+    // (b) 全无信封 legacy（TD-75 形状）：boundReportScope 无法绑定 → 历史读法
+    //     照常推断状态与心跳（cli.test.js TD-75 系列钉住的契约，M1 的 DEViation
+    //     理由——观测面不因绑定破坏 legacy JSON 契约）。
+    const legacyId = "run_r20_st2b";
+    const legacy = [
+      { type: "run.submitted", agentId: "coder_hq", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.event", kind: "command", command: "ls", agentId: "coder_hq", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+      { type: "run.error", phase: "wait", error: "process exited with code 1", agentId: "coder_hq", ts: "2026-08-19T00:00:02.000Z", seq: 3 },
+      { type: "run.state_change", to: "failed", reason: "backend_error", agentId: "coder_hq", ts: "2026-08-19T00:00:02.000Z", seq: 4 },
+    ];
+    writeFileSync(join(dir, `${legacyId}.jsonl`), `${legacy.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    const b = await getRunStatus({ runId: legacyId, runDir: dir, nowFn: () => Date.parse("2026-08-19T00:01:00.000Z") });
+    assert.equal(b.state, "failed", "legacy 无信封 → 历史推断保持（修复前后一致）");
+    assert.equal(b.terminal, true);
+    assert.equal(b.lastActivityKind, "跑命令", "legacy bare run.event 照常供给心跳（TD-75）");
+  } finally { cleanupDir(dir); }
+});
+
+// ----- L4：混合信封语义钉（部分行带信封 + 部分裸行 → 只从绑定子集投影） -----
+
+test("R20-L4-1: 方向性钉 — 混合信封 transcript 只从绑定子集投影（裸行在任一信封存在时不可见）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20-l4-"));
+  try {
+    const runId = "run_r20_l4";
+    // 混合形状：一条绑定 state_change + 一条裸（无信封）run.submitted + 一条
+    // 裸 run.event 活动。任一信封存在 → 严格绑定：裸行不可见（与 R18
+    // boundReportScope 语义一致——宁可可见地缺事实，不采信不可归属的行）。
+    const lines = [
+      { type: "run.submitted", agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId, agentId: "coder_low", from: "pending", to: "running", reason: "first_event", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+      { type: "run.event", kind: "command", command: "bare-invisible", agentId: "coder_low", ts: "2026-08-19T00:00:02.000Z", seq: 3 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+
+    const s = await getRunStatus({ runId, runDir: dir, nowFn: () => Date.parse("2026-08-19T00:01:00.000Z") });
+    assert.equal(s.state, "running", "状态来自绑定子集");
+    assert.equal(s.lastActivityTs, null, "裸 run.event 不可见 → 无心跳（不采信不可归属的活动行）");
+    assert.equal(s.lastActivityKind, null);
+    assert.equal(s.lastEventType, "run.state_change", "last 只取绑定子集内末条（裸 run.submitted 在前亦不可见）");
+  } finally { cleanupDir(dir); }
+});
+
+// ----- M2：runList 每行 state/terminal（stem 权威） -----
+
+test("R20-LST-1: 篡改探针 — runs list 每行 state/terminal 只由本 run 绑定事件计算（stem 即权威 runId）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20-lst1-"));
+  try {
+    const runId = "run_r20_lst1";
+    const lines = [
+      { type: "run.started", runId, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId, agentId: "coder_low", from: "pending", to: "running", reason: "first_event", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    appendForeignLine(join(dir, `${runId}.jsonl`), {
+      type: "run.completed", runId: "run_evil", agentId: "coder_low",
+    });
+
+    const { runs } = await listRuns({ runDir: dir, knownAgentIds: [], validateAgentIds: false });
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].state, "running", "行状态只由本 run 绑定事件计算（修复前外 run completed 尾条 → completed/terminal）");
+    assert.equal(runs[0].terminal, false);
+  } finally { cleanupDir(dir); }
+});
+
+test("R20-LST-2: 合法回归 + 兼容形状钉 — 全绑定行照常 completed/terminal；extractRunFacts 缺省 runId 保持历史读法（runSummaryCache 兼容）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20-lst2-"));
+  try {
+    // (a) 全绑定终态行照常（过滤器恒等）。
+    const runId = "run_r20_lst2a";
+    const bound = [
+      { type: "run.started", runId, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId, agentId: "coder_low", from: "running", to: "completed", reason: "done", ts: "2026-08-19T00:00:02.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${bound.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    const { runs } = await listRuns({ runDir: dir, knownAgentIds: [], validateAgentIds: false });
+    assert.equal(runs[0].state, "completed");
+    assert.equal(runs[0].terminal, true);
+
+    // (b) 兼容形状：extractRunFacts(events)（无 runId——runSummaryCache 的
+    //     extractFactsFn 调用形状）对全绑定输入保持同值。
+    const factsNoId = extractRunFacts(bound);
+    const factsWithId = extractRunFacts(bound, runId);
+    assert.equal(factsNoId.state, "completed");
+    assert.equal(factsWithId.state, "completed", "提供了 stem 时全绑定输入上两者恒等");
+
+    // (c) 降级方向钉：信封存在但零绑定（整份只有外 run 信封行）→ 不可归属
+    //     降级 pending（宁可见地缺事实）。
+    const factsForeign = extractRunFacts([
+      { type: "run.started", runId: "run_evil", agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.completed", runId: "run_evil", agentId: "coder_low", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+    ], runId);
+    assert.equal(factsForeign.state, "pending", "零绑定事件 → findState([]) = pending");
+    assert.equal(factsForeign.terminal, false);
+  } finally { cleanupDir(dir); }
+});
+
+// ----- M3：runs summary byState/latest（stem 逐文件绑定） -----
+
+test("R20-SUM-1: 篡改探针 — runs summary 的 byState/latest 不再被外 run 尾条污染", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20-sum1-"));
+  try {
+    const runId = "run_r20_sum1";
+    const lines = [
+      { type: "run.started", runId, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId, agentId: "coder_low", from: "running", to: "completed", reason: "done", ts: "2026-08-19T00:00:10.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    // 外 run 尾条两连：伪 failed 终态 + 远期 ts（修复前分别赢得 findState 末条
+    // 胜出与 latest 末事件 ts 比较）。
+    appendForeignLine(join(dir, `${runId}.jsonl`), {
+      type: "run.error", phase: "wait", error: "x", runId: "run_evil", agentId: "coder_low",
+    });
+    appendForeignLine(join(dir, `${runId}.jsonl`), {
+      type: "run.completed", runId: "run_evil", agentId: "coder_low",
+      ts: "2026-08-19T00:20:00.000Z",
+    });
+
+    const r = runCli(["runs", "summary", "--format", "json"], dir);
+    assert.equal(r.status, 0, `CLI 成功（stderr: ${r.stderr}）`);
+    const s = JSON.parse(r.stdout);
+    assert.deepEqual(s.byState, { completed: 1 }, "byState 只由本 run 绑定事件计算（修复前外 run 伪 failed 尾条 → failed 计数）");
+    assert.equal(s.latest, "2026-08-19T00:00:10.000Z", "latest 取最后【绑定】事件 ts（修复前被外 run 远期 ts 拉走）");
+  } finally { cleanupDir(dir); }
+});
+
+test("R20-SUM-2: 合法 + legacy 回归 — 全绑定照常；全无信封 legacy 文件保持历史推断计入", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20-sum2-"));
+  try {
+    // (a) 全绑定 completed。
+    const boundId = "run_r20_sum2a";
+    const boundLines = [
+      { type: "run.started", runId: boundId, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId: boundId, agentId: "coder_low", from: "running", to: "completed", reason: "done", ts: "2026-08-19T00:00:10.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${boundId}.jsonl`), `${boundLines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    // (b) pre-envelope legacy：全部行无 runId（runs.test.js 既有契约——legacy
+    //     state_change 推断照常计入聚合）。
+    const legacyId = "run_r20_sum2b";
+    const legacyLines = [
+      { type: "run.started", backend: "claude-code", agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", from: "running", to: "running", reason: "first_event", agentId: "coder_low", ts: "2026-08-19T00:00:05.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${legacyId}.jsonl`), `${legacyLines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+
+    const r = runCli(["runs", "summary", "--format", "json"], dir);
+    assert.equal(r.status, 0);
+    const s = JSON.parse(r.stdout);
+    assert.equal(s.total, 2);
+    assert.deepEqual(s.byState, { completed: 1, running: 1 }, "全绑定文件照常聚合；legacy 无信封文件保持历史读法照常计入");
+  } finally { cleanupDir(dir); }
+});
+
+// ----- M3：buildDashboard 行（state/tokens/cost/evidence/flagged） -----
+
+test("R20-DB-1: 篡改探针 + 合法/legacy 回归 — dashboard 行只从本 run 绑定事实投影", () => {
+  const ownStarted = { type: "run.started", runId: "run_r20_db", agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 };
+  const ownCompleted = { type: "run.state_change", runId: "run_r20_db", agentId: "coder_low", from: "running", to: "completed", reason: "done", ts: "2026-08-19T00:00:10.000Z", seq: 2 };
+
+  // (a) 篡改：外 run 尾条三连——伪 failed 终态 state_change（findState 末条胜出）、
+  //     伪 run.metrics（本 run 无 metrics → 无绑定读法下外 run 行首中）、伪
+  //     scorecard（evidence 投影首中）。buildDashboard 是纯只读聚合——外 run
+  //     state_change 形状在此无写侧 CAS 干扰（L2 只在写入车道）。
+  const tampered = [
+    ownStarted, ownCompleted,
+    { type: "run.state_change", runId: "run_evil", agentId: "coder_low", from: "completed", to: "failed", reason: "evil", ts: "2026-08-19T00:00:20.000Z", seq: 90 },
+    { type: "run.metrics", runId: "run_evil", agentId: "coder_low", tokens: { input: 99999 }, costUsd: 99, ts: "2026-08-19T00:00:21.000Z", seq: 91 },
+    { type: "scorecard.checked", runId: "run_evil", agentId: "coder_low", passed: false, checks: [{ name: "forge", passed: false }], ts: "2026-08-19T00:00:22.000Z", seq: 92 },
+  ];
+  const dashT = buildDashboard([{ runId: "run_r20_db", events: tampered }]);
+  assert.equal(dashT.rows[0].state, "completed", "行状态只由本 run 绑定事件计算（修复前外 run 伪 failed state_change 末条胜出）");
+  assert.equal(dashT.rows[0].flagged, false, "不再被外 run 伪 failed 标红");
+  assert.deepEqual(dashT.rows[0].tokens, {}, "本 run 无绑定 metrics → tokens 空（修复前采信外 run 99999）");
+  assert.equal(dashT.rows[0].costUsd, undefined, "cost 不采信外 run 伪值（修复前 99）");
+  assert.equal(dashT.rows[0].evidence, "-", "外 run 伪 scorecard 不再供给证据投影");
+  assert.deepEqual(dashT.summary.byState, { completed: 1 });
+
+  // (b) 合法回归：本 run 绑定 scorecard.warn 照常标红（M8-1/M8-2 联动不变）。
+  const legalWarn = [
+    ownStarted, ownCompleted,
+    { type: "scorecard.checked", runId: "run_r20_db", agentId: "coder_low", passed: false, checks: [], ts: "2026-08-19T00:00:11.000Z", seq: 3 },
+    { type: "scorecard.warn", runId: "run_r20_db", agentId: "coder_low", detail: "no evidence", ts: "2026-08-19T00:00:12.000Z", seq: 4 },
+  ];
+  const dashW = buildDashboard([{ runId: "run_r20_db", events: legalWarn }]);
+  assert.equal(dashW.rows[0].flagged, true, "本 run 自身 warn 事实照常标红（合法路径零变化）");
+
+  // (c) legacy 回归：全无信封（cli.test.js M8-2 系列形状）保持历史推断。
+  const dashL = buildDashboard([{ runId: "run_r20_db_legacy", events: [
+    { type: "run.submitted", agentId: "a", ts: "2026-06-26T10:00:00.000Z" },
+    { type: "run.state_change", to: "completed", ts: "2026-06-26T10:02:00.000Z" },
+  ] }]);
+  assert.equal(dashL.rows[0].state, "completed", "legacy 无信封 → 历史读法保持");
+});
+
+// ----- M4：runDiagnosis + diagnoseFailure -----
+
+test("R20-DIAG-1: 篡改探针 — 外 run 尾条不再抢诊断分类/翻转终态（分类事实全量绑定）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20-diag1-"));
+  try {
+    // (a) 本 run 诚实 crash（exit 1）+ 外 run 伪 401 run.error 尾条：修复前
+    //     authError 的 events.find 首中采信外 run 行 → provider_auth（错误归因）。
+    const runId = "run_r20_diag1a";
+    const lines = [
+      { type: "run.started", runId, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.error", phase: "wait", error: "process exited with code 1", runId, agentId: "coder_low", ts: "2026-08-19T00:00:02.000Z", seq: 2 },
+      { type: "run.state_change", runId, agentId: "coder_low", from: "running", to: "failed", reason: "backend_error", ts: "2026-08-19T00:00:03.000Z", seq: 3 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    appendForeignLine(join(dir, `${runId}.jsonl`), {
+      type: "run.error", phase: "wait", error: "401 Unauthorized", runId: "run_evil", agentId: "coder_low",
+    });
+    const a = await getRunDiagnosis({ runId, runDir: dir });
+    assert.equal(a.state, "failed");
+    assert.equal(a.category, "crash", "分类只读本 run 绑定事实（修复前外 run 伪 401 尾条抢归 provider_auth）");
+
+    // (b) 本 run 诚实 failed + 外 run 伪 completed 尾条：修复前 state 被读成
+    //     completed → completed 短路 {category:"none"}（失败被掩盖）。
+    const runId2 = "run_r20_diag1b";
+    const lines2 = [
+      { type: "run.started", runId: runId2, agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId: runId2, agentId: "coder_low", from: "running", to: "failed", reason: "backend_error", ts: "2026-08-19T00:00:03.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${runId2}.jsonl`), `${lines2.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    appendForeignLine(join(dir, `${runId2}.jsonl`), {
+      type: "run.completed", runId: "run_evil", agentId: "coder_low",
+    });
+    const b = await getRunDiagnosis({ runId: runId2, runDir: dir });
+    assert.equal(b.state, "failed", "诊断 state 只由本 run 绑定事件计算（修复前 completed）");
+    assert.equal(b.terminal, true);
+    assert.equal(b.category, "unknown", "本 run 自身 failed 无更多信号 → 既有 unknown（修复前 completed 短路 none）");
+
+    // (c) 内核直调同款：diagnoseFailure(events, runId) 的 evs 顶层过滤。
+    const kernel = diagnoseFailure([
+      ...lines2,
+      { type: "run.completed", runId: "run_evil", agentId: "coder_low", ts: "2026-08-19T00:00:09.000Z", seq: 99 },
+    ], runId2);
+    assert.equal(kernel.category, "unknown", "内核分类同款绑定（无 second copy）");
+  } finally { cleanupDir(dir); }
+});
+
+test("R20-DIAG-2: 合法回归 + legacy 降级钉 — 全绑定分类照常；不可归属降级 unknown/pending 不 throw", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20-diag2-"));
+  try {
+    // (a) 合法回归：全绑定 401 → provider_auth（M12-6 FR-02 契约零变化）。
+    const runId = "run_r20_diag2a";
+    const lines = [
+      { type: "run.state_change", runId, agentId: "coder_low", to: "failed", reason: "x", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.error", phase: "wait", error: "Error: 401 Unauthorized", runId, agentId: "coder_low", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    const a = await getRunDiagnosis({ runId, runDir: dir });
+    assert.equal(a.category, "provider_auth");
+    assert.equal(a.code, "unauthorized", "closed-set code 照常投影");
+
+    // (b) legacy 语义钉（锚点复核既有语义后的选择）：全无信封 transcript 保持
+    //     历史推断分类（frictionLog TD-92 契约钉住——debug 模式对无信封失败
+    //     transcript 仍要分类写档；boundReportScope 语义）。
+    const legacyId = "run_r20_diag2b";
+    const legacy = [
+      { type: "run.started", backend: "claude-code", agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.error", phase: "wait", error: "process exited with code 1", agentId: "coder_low", ts: "2026-08-19T00:00:02.000Z", seq: 2 },
+      { type: "run.state_change", to: "failed", reason: "backend_error", agentId: "coder_low", ts: "2026-08-19T00:00:03.000Z", seq: 3 },
+    ];
+    writeFileSync(join(dir, `${legacyId}.jsonl`), `${legacy.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    const b = await getRunDiagnosis({ runId: legacyId, runDir: dir });
+    assert.equal(b.state, "failed", "全无信封 legacy → 历史推断保持（frictionLog TD-92 契约）");
+    assert.equal(b.terminal, true);
+    assert.equal(b.category, "crash", "legacy 分类读法保持（与 frictionLog 同一内核调用）");
+
+    // (b2) 降级方向钉：信封存在但零绑定（整份只有外 run 信封行）→ state
+    //      pending + category unknown（不可归属永不投影终态/编造分类，不 throw）。
+    const foreignOnlyId = "run_r20_diag2c";
+    const foreignOnly = [
+      { type: "run.started", runId: "run_evil", agentId: "coder_low", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.error", phase: "wait", error: "401 Unauthorized", runId: "run_evil", agentId: "coder_low", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+      { type: "run.state_change", runId: "run_evil", agentId: "coder_low", from: "running", to: "failed", reason: "backend_error", ts: "2026-08-19T00:00:02.000Z", seq: 3 },
+    ];
+    writeFileSync(join(dir, `${foreignOnlyId}.jsonl`), `${foreignOnly.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    const c = await getRunDiagnosis({ runId: foreignOnlyId, runDir: dir });
+    assert.equal(c.state, "pending", "零绑定事件 → pending（观测面降级不设门）");
+    assert.equal(c.terminal, false);
+    assert.equal(c.category, "unknown", "零绑定事件 → 既有 unknown 降级（不 throw、不编造分类）");
+
+    // (c) 内核兼容形状：diagnoseFailure(events)（无 expectedRunId）保持历史
+    //     无绑定读法（既有调用方契约不变——同 (b) 输入仍按 legacy 推断分类）。
+    const kernelNoId = diagnoseFailure(legacy);
+    assert.equal(kernelNoId.category, "crash", "缺省 expectedRunId → 历史读法（M9-5A-01 等既有契约）");
+  } finally { cleanupDir(dir); }
+});
+
+// ----- M6（:2080 面）：waitForCompletion 流后外部终态采纳 -----
+//（交付丢失向量 :2192 的探针在 test/delivery/runDeliveryReadBinding.test.js——
+// 该 lane 需要 delivery 上下文与打包器注入。此处钉非交付的采纳面：done-only
+// replay backend 不写 running state_change，start 后追加的外 run legacy 终态
+// fact 在修复前的无绑定 findState 下真实可达。）
+
+test("R20-EXT-1: 篡改探针 — 流后外部终态采纳绑定本 run：外 run 伪 aborted 尾条不再被采纳为外部终态", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20-ext1-"));
+  try {
+    const { backend } = makeReplayBackend();
+    const manager = makeManager(dir, backend);
+    const runId = "run_r20_ext1";
+    const run = await manager.start("proc_agent", { prompt: "original prompt", runId });
+    // 外 run 伪终态 fact 尾条（本 run 自身最后一条 state_change 之后）：修复前
+    // :2080 的无绑定 findState 经 legacy 反查读到 aborted → 采纳 → loser aborted
+    // （backend 的 done(completed) 诚实完成被伪尾条劫持）。
+    appendForeignLine(join(dir, `${runId}.jsonl`), {
+      type: "run.aborted", runId: "run_evil", agentId: "test-agent",
+    });
+    const result = await run.waitForCompletion({ waitTimeout: 2000, pollInterval: 10 });
+    assert.equal(result.completed, true, "本 run 自身完成路径照常（修复前采纳外 run aborted → completed:false/aborted:true）");
+    const events = await readTranscript(join(dir, `${runId}.jsonl`));
+    assert.equal(findState(events), "completed", "落盘终态 = 本 run 自身 completed");
+  } finally { cleanupDir(dir); }
+});
+
+// ----- M7：daemon 扫描与 IPC status 兜底 -----
+
+test("R20-DM-1: 篡改探针 + 合法回归 — scanResumableRuns 终态判定绑定 stem（孤儿恢复：伪终态尾条不再永久压制 resume 候选）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20-dm1-"));
+  try {
+    // 篡改：在飞 run（绑定 running）+ 外 run completed 尾条。修复前 findState
+    // 读成 completed → 永久跳过（孤儿被伪终态压制，daemon 重启永不接管）；
+    // 绑定后按本 run 自身非终态放行给 owner 心跳关。
+    const runId = "run_r20_dm1";
+    const lines = [
+      { type: "run.created", runId, agentId: "test_agent", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId, agentId: "test_agent", from: "submitted", to: "running", reason: "first_event", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    appendForeignLine(join(dir, `${runId}.jsonl`), {
+      type: "run.completed", runId: "run_evil", agentId: "test_agent",
+    });
+    const resumable = scanResumableRuns(dir, 10_000, 60_000);
+    assert.ok(resumable.includes(runId), "绑定后本 run 自身非终态 → resume 候选照常放行（修复前外 run completed 尾条 → 永久压制）");
+
+    // 合法回归：本 run 自身终态 → 照常跳过（关卡序 ①不变）。
+    const doneId = "run_r20_dm1_done";
+    const doneLines = [
+      { type: "run.created", runId: doneId, agentId: "test_agent", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId: doneId, agentId: "test_agent", from: "running", to: "completed", reason: "done", ts: "2026-08-19T00:00:02.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${doneId}.jsonl`), `${doneLines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    const resumable2 = scanResumableRuns(dir, 10_000, 60_000);
+    assert.ok(!resumable2.includes(doneId), "本 run 自身终态 → 照常跳过（不复活已完成的 run）");
+    assert.ok(resumable2.includes(runId));
+  } finally { cleanupDir(dir); }
+});
+
+test("R20-DM-2: 篡改探针 + 合法回归 — scanAllRuns 行 state/agentId 与 IPC status 兜底绑定（统一视图/请求 runId）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20-dm2-"));
+  try {
+    // 篡改：本 run 在飞（绑定行不带 agentId——JsonlTranscript 会带，此处钉
+    // 绑定读取器不采信外 run 行的 agentId）+ 外 run completed 尾条 + 外 run
+    // agentId 行。修复前 state 读成 completed → 行从统一视图消失；agentId 取
+    // 全量首中（外 run 行可供给）。
+    const runId = "run_r20_dm2";
+    const lines = [
+      { type: "run.created", runId, ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId, from: "submitted", to: "running", reason: "first_event", ts: "2026-08-19T00:00:01.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    appendForeignLine(join(dir, `${runId}.jsonl`), {
+      type: "run.completed", runId: "run_evil", agentId: "evil_agent",
+    });
+
+    const runs = scanAllRuns(dir, 10_000, 60_000, new Set());
+    assert.equal(runs.length, 1, "在飞 run 不被外 run 伪终态尾条从统一视图抹掉");
+    assert.equal(runs[0].state, "running", "行 state 只由本 run 绑定事件计算");
+    assert.equal(runs[0].agentId, "unknown", "外 run 行不供给 agentId（本 run 绑定行无 agentId → 既有 unknown 降级）");
+    assert.equal(runs[0].owner, "orphan", "owner 分类照常（关卡序 ②不变——无 owner 文件 → orphan）");
+
+    // IPC status 兜底（run 不在 daemon 内存）：state 绑定请求 runId。
+    const fakeManager = { activeRuns: new Map(), list: () => [] };
+    const res = await handleRequest({ cmd: "status", runId }, fakeManager, { runDir: dir });
+    assert.equal(res.ok, true);
+    assert.equal(res.state, "running", "IPC status 兜底读绑定请求 runId（修复前外 run completed 尾条 → completed）");
+    assert.equal(res.live, false);
+
+    // 合法回归：本 run 自身终态 → 统一视图照常跳过。
+    const doneId = "run_r20_dm2_done";
+    const doneLines = [
+      { type: "run.created", runId: doneId, agentId: "test_agent", ts: "2026-08-19T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId: doneId, agentId: "test_agent", from: "running", to: "aborted", reason: "user", ts: "2026-08-19T00:00:02.000Z", seq: 2 },
+    ];
+    writeFileSync(join(dir, `${doneId}.jsonl`), `${doneLines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    const runs2 = scanAllRuns(dir, 10_000, 60_000, new Set());
+    assert.equal(runs2.length, 1, "本 run 自身终态照常跳过");
+    assert.equal(runs2[0].runId, runId);
+  } finally { cleanupDir(dir); }
+});
+
+// ----- L3：backgroundRunner 启动/解析失败落盘（:250/:297/:338） -----
+
+test("R20-BR-1: 篡改探针 — 启动失败落盘不被外 run 伪终态尾条压制（run.error + failed 照常写入）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20-br1-"));
+  try {
+    const runId = "run_r20_br1";
+    // CLI 派发形状的既有 transcript（绑定 background_submitted + pending）。
+    const t = new JsonlTranscript(join(dir, `${runId}.jsonl`), { runId, agentId: "coder_hq" });
+    await t.append("run.background_submitted", { background: true, cwd: dir });
+    await t.transitionState(null, "pending", "background_spawned");
+    // 外 run 伪终态尾条（fact 形状——修复前 findState legacy 反查读到 completed
+    // → :250 提前 return，启动失败被静默吞掉；fact 不武装 L2 写侧 CAS）。
+    appendForeignLine(t.filePath, {
+      type: "run.completed", runId: "run_evil", agentId: "coder_hq",
+    });
+
+    const result = await runBackground({
+      agentId: "missing_agent", prompt: "x",
+      registry: { agents: {} }, runDir: dir, runId,
+      waitTimeout: 1000, pollInterval: 10,
+    });
+    assert.equal(result.failed, true, "启动失败结果如实 failed");
+    const events = await readTranscript(t.filePath);
+    assert.ok(events.some((e) => e.type === "run.error" && e.phase === "start"),
+      "run.error 照常落盘（修复前伪终态尾条压制 → 静默吞掉启动失败）");
+    assert.equal(findState(events), "failed", "本 run 自身 failed 终态照常落盘");
+  } finally { cleanupDir(dir); }
+});
+
+test("R20-BR-2: 合法回归 + runMain 解析失败车道同款绑定 — 无尾条照常落盘；伪终态尾条不再压制 delivery/reuse-worktree 解析失败", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r20-br2-"));
+  const prevGuard = process.env.WAO_SKIP_VERSION_GUARD;
+  process.env.WAO_SKIP_VERSION_GUARD = "1";
+  try {
+    // (a) runMain 的 delivery-json 解析失败车道（:297）：外 run 伪终态尾条下
+    //     run.error(delivery_parse) + failed 照常落盘。
+    const runId = "run_r20_br2a";
+    const t = new JsonlTranscript(join(dir, `${runId}.jsonl`), { runId, agentId: "coder_hq" });
+    await t.append("run.background_submitted", { background: true, cwd: dir });
+    await t.transitionState(null, "pending", "background_spawned");
+    appendForeignLine(t.filePath, { type: "run.completed", runId: "run_evil", agentId: "coder_hq" });
+    await runMain([
+      "coder_hq", "--prompt", "x", "--run-dir", dir, "--run-id", runId,
+      "--delivery-json", "{not-json",
+    ]);
+    const eventsA = await readTranscript(t.filePath);
+    assert.ok(eventsA.some((e) => e.type === "run.error" && e.phase === "delivery_parse"),
+      "解析失败 run.error 照常落盘（修复前伪终态尾条 → 跳过落盘）");
+    assert.equal(findState(eventsA), "failed");
+
+    // (b) reuse-worktree 解析失败车道（:338）同款 + 对照（无尾条照常）。
+    const runId2 = "run_r20_br2b";
+    const t2 = new JsonlTranscript(join(dir, `${runId2}.jsonl`), { runId: runId2, agentId: "coder_hq" });
+    await t2.append("run.background_submitted", { background: true, cwd: dir });
+    await t2.transitionState(null, "pending", "background_spawned");
+    appendForeignLine(t2.filePath, { type: "run.aborted", runId: "run_evil", agentId: "coder_hq" });
+    await runMain([
+      "coder_hq", "--prompt", "x", "--run-dir", dir, "--run-id", runId2,
+      "--reuse-worktree-json", "{bad",
+    ]);
+    const eventsB = await readTranscript(t2.filePath);
+    assert.ok(eventsB.some((e) => e.type === "run.error" && e.phase === "reuse_worktree_parse"),
+      "reuse-worktree 解析失败 run.error 照常落盘");
+    assert.equal(findState(eventsB), "failed");
+
+    const runId3 = "run_r20_br2c";
+    const t3 = new JsonlTranscript(join(dir, `${runId3}.jsonl`), { runId: runId3, agentId: "coder_hq" });
+    await t3.append("run.background_submitted", { background: true, cwd: dir });
+    await t3.transitionState(null, "pending", "background_spawned");
+    await runMain([
+      "coder_hq", "--prompt", "x", "--run-dir", dir, "--run-id", runId3,
+      "--delivery-json", "{not-json",
+    ]);
+    const eventsC = await readTranscript(t3.filePath);
+    assert.ok(eventsC.some((e) => e.type === "run.error" && e.phase === "delivery_parse"),
+      "合法回归：无尾条时解析失败照常落盘（既有行为零变化）");
+    assert.equal(findState(eventsC), "failed");
+  } finally {
+    if (prevGuard === undefined) delete process.env.WAO_SKIP_VERSION_GUARD;
+    else process.env.WAO_SKIP_VERSION_GUARD = prevGuard;
+    cleanupDir(dir);
+  }
 });

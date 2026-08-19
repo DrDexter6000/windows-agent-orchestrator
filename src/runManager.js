@@ -2361,7 +2361,17 @@ export class Run {
   async _externalTerminalState() {
     try {
       const events = await readTranscript(this.transcript.filePath);
-      const state = findState(events);
+      // R20 (TD-128 M6，交付丢失向量)：外部终态采纳绑定到本 run runId
+      // （this.transcript.context.runId——合法写入车道 stop/abort/backgroundRunner
+      // 均经 JsonlTranscript 落盘、每行带 runId 信封，绑定对合法写入透明）。
+      // 语义 = 不可归属（外 run 信封 / 无信封裸行 / 零绑定事件）→ 不采纳
+      // （null），落回本 run 自身的终态化路径（done(failed)→failed、
+      // done(completed)→交付打包等），fail-closed 方向（R18 W3 resume 终态门
+      // 注释先例）。修复前 :2192 的无绑定采纳是交付丢失向量：append-only 尾部
+      // 的外 run 伪终态行曾使 preTerminal 采纳 → 跳过 _finalizeDelivery → run
+      // 以 completed-ish 收场而交付物从未打包；:2080 的流后采纳同受绑定保护
+      // （外 run 伪 aborted 不再被采纳为外部终态）。
+      const state = findState(events.filter((e) => e && e.runId === this.transcript.context.runId));
       return TERMINAL_STATES.includes(state) ? state : null;
     } catch {
       return null;

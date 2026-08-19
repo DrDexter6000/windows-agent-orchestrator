@@ -839,7 +839,17 @@ export async function getRunDelivery({
   const filePath = join(runDir, `${runId}.jsonl`);
   const events = await _readTranscript(filePath);
 
-  const terminalState = findState(events);
+  // R20 (TD-128 M5)：point-in-time 查询的 terminalState 绑定到请求 runId
+  // （R15 范式，projectDeliveryReadiness :364 同款——文件内最后一处无绑定
+  // findState）。语义 = 不可归属（全无信封 legacy / 零绑定事件）→ "pending"
+  // 非终态路径，绝不凭不可归属事件投影终态。同受保护的面（比原登记更宽）：
+  // ① gatherDeliveryView :588 的 isolation 投影门（TERMINAL_STATES.includes
+  // (terminalState)）——外 run 伪终态不再武装隔离结算；② 候选"恢复出现"效应
+  // 两个方向——绑定前外 run completed 尾条曾把真实 failed run 读成 completed、
+  // 压制 backend_failed 候选分支（:863 的 failed 门），外 run failed 尾条曾为
+  // 非 failed run 凭空打开该门；process_missing 非终态门（:883-884）同受保护
+  // ——候选投影自 R20 起只由本 run 自身事件门控（usage.md 行为变更条已列）。
+  const terminalState = findState(events.filter((e) => e && e.runId === runId));
   const view = gatherDeliveryView(events, runId, terminalState);
   // M11-10 closeout: a durable conflict (cross-run injection / malformed bound
   // event) must fail closed for the point-in-time query too — never echo a raw
@@ -1077,7 +1087,11 @@ export async function getRunDeliveryReadiness({
   if (authorizedWorkspaceRoot !== undefined) {
     verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
   }
-  let terminalState = findState(events);
+  // R20 (TD-128 M5)：readiness 握手的初始读 terminalState 同款绑定（与上方
+  // point-in-time 查询、projectDeliveryReadiness :364 同一 runId、同一 R15
+  // 范式）——外 run 伪终态尾条不再驱动初始 terminalState/候选门；不可归属 →
+  // "pending" 非终态路径。
+  let terminalState = findState(events.filter((e) => e && e.runId === runId));
   let readiness = projectDeliveryReadiness(events, runId);
   // Candidate-inventory authority/reader, threaded into every readiness
   // result build and consumed only by an eligible recovery candidate.
@@ -1144,7 +1158,10 @@ export async function getRunDeliveryReadiness({
     if (authorizedWorkspaceRoot !== undefined) {
       verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
     }
-    terminalState = findState(events);
+    // R20 (TD-128 M5)：等待循环内每次 poll 快照的 terminalState 同款绑定过滤
+    // （与初始读同一 runId、同一 R15 范式）——poll 内外 run 伪终态尾条不再
+    // 翻转 terminal-during-wait 提前返回的终态事实/候选门。
+    terminalState = findState(events.filter((e) => e && e.runId === runId));
     readiness = projectDeliveryReadiness(events, runId);
     if (!WAITING_READINESS_STATES.has(readiness)) {
       return _buildReadinessResult(runId, events, terminalState, readiness, true, inventoryOpts);
