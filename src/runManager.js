@@ -268,6 +268,32 @@ export function assertValidReasoningOverride(value) {
   }
 }
 
+// TD-131: certification identity-match SSOT — the ONE rule deciding whether a
+// reliability-summary worker record still belongs to the CURRENT registry
+// agent (backend/modelId compare whenever the record declares the field —
+// undefined = legacy record, dimension skipped; TD-131 adds providerID as a
+// compared dimension, but ONLY when BOTH sides declare it, so claude-code-
+// shaped agents without model.providerID stay guarded by backend+modelId).
+// Agent-side identity is null-normalized (`agent.model?.id ?? null` — never
+// undefined-vs-null false mismatches). No agent-registry schema field added.
+//
+// Hosting: HERE (core), imported DOWNWARD by src/application/registryInventory.js
+// (the display path's former private copy, same direction discipline as the
+// R10-A/R11-1 override validators runDispatch.js consumes) — the P1-1 gate
+// below and the inventory projection must share ONE judgment, not two. A
+// separate src/application module would be an application-bucket file and
+// core→application is an upward edge (frozen empty whitelist, TD-122), so the
+// R7-AB hosting precedent applies: core hosts, application imports down.
+export function matchedCertRecord(agent, record) {
+  if (!record) return null;
+  if (record.backend !== undefined && record.backend !== agent.backend) return null;
+  const modelId = agent.model?.id ?? null;
+  if (record.modelId !== undefined && record.modelId !== modelId) return null;
+  const providerID = agent.model?.providerID ?? null;
+  if (providerID !== null && record.providerID !== undefined && record.providerID !== providerID) return null;
+  return record;
+}
+
 // Round 4 Bundle B: thrown when a readOnly run's FORCED worktree isolation
 // cannot be established (worktree creation failed). Read-only runs refuse the
 // legacy degrade-to-source-cwd fallback (runManager.js :524-534) exactly like
@@ -483,8 +509,10 @@ export class RunManager {
       // 仅 CLI spawnCommand 在不带 --wait 时显式传 true，触发 P0-1 护栏。
       fireAndForget = false,
       // P1-1 认证新鲜度强制门（opt-in，06-18 事故教训"调度安全不能建立在模型行为假设上"）。
-      // 启用时：目标 worker 必须在 runDir/reliability-summary.json 里且 status=certified、
-      // generatedAt 在 certFreshnessDays 内，否则拒绝派发。默认关（向后兼容 + 不破坏测试）。
+      // 启用时：目标 worker 必须在 runDir/reliability-summary.json 里、记录身份与当前
+      // registry 配置一致（TD-131）、status=certified/conditional、且该 worker 自己的
+      // lastHealthyRunAt 在 certFreshnessDays 内（TD-132 per-worker 新鲜度，缺失即拒），
+      // 否则拒绝派发。默认关（向后兼容 + 不破坏测试）。
       requireCertified = false,
       certFreshnessDays = 30,
       // TD-103 Phase 3A：delivery mode。absent = 普通运行（无 delivery Git 调用/事件）。
@@ -1127,7 +1155,16 @@ export class RunManager {
     //   certified = core+strict+ops 全过；conditional = core 全过、strict/ops 部分。
     //   strict（command/file）是能力画像不是安全闸；core（completion/answer/sentinel）才是安全底线。
     //   draft-only（core 部分过）/rejected（core 失败）= 拒绝。
-    // 例外：w.manualOverride === "cleared" 时强制放行（owner 手动背书，绕过 status——如 rate-limit 误判）。
+    // 身份（TD-131）：记录的 backend/modelId（providerID 双侧声明时同比对）必须与当前
+    //   registry 该 agent 的配置一致（matchedCertRecord SSOT，与显示层投影共用）——
+    //   改配置换 backend/model 后不重跑 reliability，旧组合的认证不得放行。不匹配 →
+    //   按未认证拒绝，固定文案（不回显 summary/registry 值——磁盘数据可能被改）。
+    // 新鲜度（TD-132）：按 per-worker 的 lastHealthyRunAt 判（scripts/reliability/
+    //   certification.mjs 写入）。缺失/null/不可解析 → fail-closed 拒绝。旧判据读整份
+    //   summary 的 generatedAt——重考任一 worker 即刷新全本台账，其余 worker 的陈旧
+    //   认证被"洗白"；且 generatedAt 缺失/不可解析时旧逻辑竟放行。
+    // 例外：w.manualOverride === "cleared" 时强制放行（owner 手动背书，绕过
+    //   status/身份/新鲜度——人判断优先；TD-131/132 前后语义不变）。
     // opt-in 默认关：不破坏现有测试/使用；CI 或监督派发场景显式启用。
     const DISPATCHABLE = new Set(["certified", "conditional"]);
     if (requireCertified) {
@@ -1139,13 +1176,20 @@ export class RunManager {
       if (!summary) reasons.push("reliability-summary.json 不存在");
       else if (!w) reasons.push(`worker "${agentId}" 未在 reliability-summary 中`);
       else if (w.manualOverride === "cleared") {
-        // owner 手动背书，放行（不检查 status / 新鲜度——人判断优先）
+        // owner 手动背书，放行（不检查 status / 身份 / 新鲜度——人判断优先）
+      } else if (!matchedCertRecord(agent, w)) {
+        reasons.push("认证身份不匹配（summary 记录与当前 registry 配置的 backend/modelId/providerID 不一致，认证不可继承，需按当前配置重新认证）");
       } else if (!DISPATCHABLE.has(w.status)) {
         reasons.push(`status=${w.status}（需 core 全过：certified/conditional，或 manualOverride=cleared）`);
       } else {
-        const ageDays = (Date.now() - new Date(summary.generatedAt).getTime()) / 86_400_000;
-        if (Number.isFinite(ageDays) && ageDays > certFreshnessDays) {
-          reasons.push(`认证已过期（generatedAt=${summary.generatedAt}, ${Math.round(ageDays)}天 > ${certFreshnessDays}天）`);
+        const healthyAtMs = typeof w.lastHealthyRunAt === "string" ? new Date(w.lastHealthyRunAt).getTime() : Number.NaN;
+        if (!Number.isFinite(healthyAtMs)) {
+          reasons.push("无新鲜认证（该 worker 的 lastHealthyRunAt 缺失或不可解析，按未认证处理——请重跑 reliability 认证）");
+        } else {
+          const ageDays = (Date.now() - healthyAtMs) / 86_400_000;
+          if (ageDays > certFreshnessDays) {
+            reasons.push(`认证已过期（lastHealthyRunAt 距今 ${Math.round(ageDays)}天 > ${certFreshnessDays}天）`);
+          }
         }
       }
       if (reasons.length > 0) {

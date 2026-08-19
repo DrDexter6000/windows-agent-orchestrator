@@ -969,7 +969,7 @@ test("P1-1: 启用 requireCertified 时，派发未认证 worker 被拒绝（认
       counts: { certified: 1, conditional: 0, draftOnly: 0, blocked: 0, rejected: 0 },
       allCertified: true,
       workers: {
-        certified_worker: { agentId: "certified_worker", backend: "claude-code", providerID: "deepseek", modelId: "deepseek-v4-flash", status: "certified", recommendedUse: "strict-dispatch", capabilities: {}, cases: [] },
+        certified_worker: { agentId: "certified_worker", backend: "claude-code", providerID: "deepseek", modelId: "deepseek-v4-flash", status: "certified", recommendedUse: "strict-dispatch", lastHealthyRunAt: new Date().toISOString(), capabilities: {}, cases: [] },
       },
     }), "utf8");
 
@@ -1018,8 +1018,9 @@ test("P1-1 阈值：core 全过即放行（conditional 放行，draft-only/rejec
       version: 1, generatedAt: new Date().toISOString(),
       counts: { certified: 1, conditional: 1, draftOnly: 1, blocked: 0, rejected: 1 },
       workers: {
-        cert_w:   { agentId: "cert_w", status: "certified", recommendedUse: "strict-dispatch", capabilities: {}, cases: [] },
-        cond_w:   { agentId: "cond_w", status: "conditional", recommendedUse: "supervised-dispatch", capabilities: {}, cases: [] },
+        // TD-132: 门的新鲜度按 per-worker lastHealthyRunAt 判——放行的两条记录带新鲜时间戳。
+        cert_w:   { agentId: "cert_w", status: "certified", recommendedUse: "strict-dispatch", lastHealthyRunAt: new Date().toISOString(), capabilities: {}, cases: [] },
+        cond_w:   { agentId: "cond_w", status: "conditional", recommendedUse: "supervised-dispatch", lastHealthyRunAt: new Date().toISOString(), capabilities: {}, cases: [] },
         draft_w:  { agentId: "draft_w", status: "draft-only", recommendedUse: "draft-only", capabilities: {}, cases: [] },
         reject_w: { agentId: "reject_w", status: "rejected", recommendedUse: "do-not-dispatch", capabilities: {}, cases: [] },
       },

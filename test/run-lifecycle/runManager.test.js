@@ -2082,7 +2082,8 @@ test("P1-1: requireCertified + status=rejected → 拒绝", async () => {
 test("P1-1: requireCertified + status=certified 且新鲜 → 放行", async () => {
   const dir = await makeTempDir();
   try {
-    await writeReliabilitySummary(dir, { test_agent: { agentId: "test_agent", status: "certified" } });
+    // TD-132: 新鲜度按 per-worker lastHealthyRunAt 判（不再读全局 generatedAt）。
+    await writeReliabilitySummary(dir, { test_agent: { agentId: "test_agent", status: "certified", lastHealthyRunAt: new Date().toISOString() } });
     const fetchImpl = createMockFetch();
     const manager = createManager(dir, fetchImpl);
     const run = await manager.start("test_agent", { prompt: "hello", requireCertified: true });
@@ -2095,7 +2096,7 @@ test("P1-1: requireCertified + status=certified 且新鲜 → 放行", async () 
 test("P1-1: requireCertified + status=conditional → 放行（core 全过即放行阈值）", async () => {
   const dir = await makeTempDir();
   try {
-    await writeReliabilitySummary(dir, { test_agent: { agentId: "test_agent", status: "conditional" } });
+    await writeReliabilitySummary(dir, { test_agent: { agentId: "test_agent", status: "conditional", lastHealthyRunAt: new Date().toISOString() } });
     const fetchImpl = createMockFetch();
     const manager = createManager(dir, fetchImpl);
     const run = await manager.start("test_agent", { prompt: "hello", requireCertified: true });
@@ -2123,9 +2124,10 @@ test("P1-1: requireCertified + manualOverride=cleared → 放行（即便 status
 test("P1-1: requireCertified + 认证过期 → 拒绝", async () => {
   const dir = await makeTempDir();
   try {
-    // generatedAt = 40 天前（certFreshnessDays 默认 30）
-    const stale = new Date(Date.now() - 40 * 86_400_000).toISOString();
-    await writeReliabilitySummary(dir, { test_agent: { agentId: "test_agent", status: "certified" } }, stale);
+    // TD-132: 新鲜度按 per-worker lastHealthyRunAt 判——全局 generatedAt 保持新鲜
+    // （默认值=现在），该 worker 自己的 lastHealthyRunAt = 40 天前（certFreshnessDays 默认 30）。
+    const staleHealthy = new Date(Date.now() - 40 * 86_400_000).toISOString();
+    await writeReliabilitySummary(dir, { test_agent: { agentId: "test_agent", status: "certified", lastHealthyRunAt: staleHealthy } });
     const fetchImpl = createMockFetch();
     const manager = createManager(dir, fetchImpl);
     await assert.rejects(

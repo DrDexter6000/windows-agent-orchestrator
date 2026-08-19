@@ -134,7 +134,7 @@
     "coder_opencode_fallback": {
       "_comment": "[FALLBACK] opencode-serve worker。⚠ 默认不用——opencode 是 fallback 选项（决策 0005）。仅在需要 token 闸门精确控成本时用。",
       "_comment_risk": "opencode session 存活在 WAO 进程之外，有 stop 虚假成功风险（06-18 事故，TD-37/39）。fire-and-forget 路径已被护栏拒绝（TD-39）。用此 worker 必须 --wait。tokenBudget 是硬门（registry validate 强制）。",
-      "_comment_gating": "本 worker 的派发会触发 P1-1 认证新鲜度校验（若 summary 过期或缺认证则拒绝）。",
+      "_comment_gating": "P1-1 认证门是 opt-in：仅 CLI 显式 --require-certified 时触发（身份比对 + per-worker 新鲜度校验，身份不匹配/过期/缺认证则拒绝）；MCP 路径 requireCertified 恒为 server-owned false（ADR 0018：认证是 advisory 不是门禁），不触发本门。",
       "backend": "opencode-serve",
       "seatRole": "non_seat",
       "serveUrl": "http://127.0.0.1:4297",

@@ -25,6 +25,11 @@ import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.
 // summary 里的越界码/非 ISO 日期绝不透出（否则 MCP outputSchema 的 enum parse 会把
 // 整个 registry_list 打成 error）。MCP schema 的 enum 也从同一常量派生（无第二份清单）。
 import { CERTIFICATION_REASON_CODES } from "./certificationReasons.js";
+// TD-131: 认证身份匹配 SSOT 从 core 下向复用（../runManager.js 的
+// matchedCertRecord——与 runDispatch.js 消费 R10-A/R11-1 覆盖校验器同一
+// application→core 下向纪律）。显示层投影与 P1-1 派发门共用同一判定，
+// 不存在第二套 identity 匹配规则。
+import { matchedCertRecord } from "../runManager.js";
 
 // ===== M12-6 FR-02: provider readiness truth SSOT =====
 //
@@ -120,6 +125,9 @@ async function buildCertMap(runDir, customReadFile) {
         status: w.status ?? "-",
         backend: w.backend,
         modelId: w.modelId,
+        // TD-131: providerID 透传（此前在此被丢弃——投影层想做该维度比对也拿不到）。
+        // 匹配规则见 matchedCertRecord：仅记录与 agent 双侧声明时才比对。
+        providerID: w.providerID,
         // TD-111: 旧 summary（缺字段）→ undefined → 投影层归一为 null，不伪造。
         reasonCode: w.reasonCode ?? null,
         lastHealthyRunAt: w.lastHealthyRunAt ?? null,
@@ -362,16 +370,11 @@ function projectInventoryEntry(agent, certMap, readiness) {
   };
 }
 
-// TD-111: 单一 identity 匹配规则——summary 记录的 backend/modelId 与 registry 当前
-// identity 不一致 → 认证不可继承（原 certificationFor 语义，certification 输出 =
-// matched ? matched.status : null，行为不变；两新 advisory 字段共用同一规则）。
-function matchedCertRecord(agent, record) {
-  if (!record) return null;
-  if (record.backend !== undefined && record.backend !== agent.backend) return null;
-  const modelId = agent.model?.id ?? null;
-  if (record.modelId !== undefined && record.modelId !== modelId) return null;
-  return record;
-}
+// TD-111 → TD-131: 单一 identity 匹配规则（matchedCertRecord，TD-131 起自
+// ../runManager.js 下向复用，与 P1-1 派发门共用）——summary 记录的 backend/modelId
+// （providerID 双侧声明时同比对）与 registry 当前 identity 不一致 → 认证不可继承
+// （原 certificationFor 语义，certification 输出 = matched ? matched.status : null，
+// 行为不变；两新 advisory 字段共用同一规则）。本模块不再持有私有副本。
 
 // TD-111: 闭集校验——summary 是磁盘数据，可能陈旧/被改；越界码 fail-closed 为 null
 // （透出会使 MCP enum parse 把整个工具打成 error）。
