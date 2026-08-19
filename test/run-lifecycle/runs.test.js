@@ -62,6 +62,8 @@ test("runs list --agent 过滤：只列出该 agent 的 run", async () => {
     await writeJsonl(dir, "run_aaa", [{ type: "run.started" }]); // agentId=test (默认)
     // 手写带不同 agentId 的 transcript
     const { writeFile } = await import("node:fs/promises");
+    // R21 夹具修正：信封 runId 与文件名 stem 对齐（生产不变量：文件名即 runId；
+    // stem 权威绑定下失配文件按不可归属降级——旧夹具的 run_aaa/run_bbb/run_ccc 违反该不变量）
     await writeFile(join(dir, "run_bbb.jsonl"),
       JSON.stringify({ runId: "run_bbb", agentId: "researcher", type: "run.started" }) + "\n", "utf8");
     await writeFile(join(dir, "run_ccc.jsonl"),
@@ -83,11 +85,11 @@ test("runs list --latest N 只列出最近 N 个 run（按时间倒序）", asyn
     const { writeFile } = await import("node:fs/promises");
     const ts = (n) => `2026-06-2${n}T00:00:00.000Z`;
     await writeFile(join(dir, "run_20260621100000_aaa.jsonl"),
-      JSON.stringify({ runId: "run_aaa", agentId: "t", type: "run.started", ts: ts(1) }) + "\n", "utf8");
+      JSON.stringify({ runId: "run_20260621100000_aaa", agentId: "t", type: "run.started", ts: ts(1) }) + "\n", "utf8");
     await writeFile(join(dir, "run_20260622100000_bbb.jsonl"),
-      JSON.stringify({ runId: "run_bbb", agentId: "t", type: "run.started", ts: ts(2) }) + "\n", "utf8");
+      JSON.stringify({ runId: "run_20260622100000_bbb", agentId: "t", type: "run.started", ts: ts(2) }) + "\n", "utf8");
     await writeFile(join(dir, "run_20260623100000_ccc.jsonl"),
-      JSON.stringify({ runId: "run_ccc", agentId: "t", type: "run.started", ts: ts(3) }) + "\n", "utf8");
+      JSON.stringify({ runId: "run_20260623100000_ccc", agentId: "t", type: "run.started", ts: ts(3) }) + "\n", "utf8");
 
     const output = cli(["runs", "list", "--latest", "2"], dir);
     const lines = output.split(/\r?\n/);
