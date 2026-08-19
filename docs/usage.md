@@ -447,7 +447,7 @@ tokens:   input=5518 output=7 reasoning=3761
 cost:     $0.0576
 ```
 
-**R18 报表读绑定（TD-128 W1，2026-08-18）**：`runs metrics <runId>` 与 `runs scorecard <runId>` 的事实读取（state/tokens/cost/duration/scorecard 与 reason）是 **runId 绑定** 的（单一定义处 `src/metrics.js` 的 `boundReportScope`）——尾部追加的外 run/伪造行不再污染报表值；两命令的 `runId` 在拼接 transcript 路径前过 `isValidRunId`（delivery.js SSOT，与 `loadRun` 同款拒绝文案，不回显输入）。全无信封的 legacy transcript（pre-envelope）保持既有读法照常出报表——合法路径与既有输出零变化。`run` 前台命令汇总的 scorecard 段与 `npm run smoke` 的 scorecard 判定同款绑定。
+**R18 报表读绑定（TD-128 W1，2026-08-18）**：`runs metrics <runId>` 与 `runs scorecard <runId>` 的事实读取（state/tokens/cost/duration/scorecard 与 reason）是 **runId 绑定** 的（单一定义处 `src/metrics.js` 的 `boundReportScope`）——尾部追加的外 run/伪造行不再污染报表值；两命令的 `runId` 在拼接 transcript 路径前过 `isValidRunId`（delivery.js SSOT，与 `loadRun` 同款拒绝文案，不回显输入）。全无信封的 legacy transcript（pre-envelope）保持既有读法照常出报表——合法路径与既有输出零变化。`run` 前台命令汇总的 scorecard 段与 `npm run smoke` 的 scorecard 判定同款绑定。`runs metrics --summary` 的逐文件聚合自 R19（TD-128，2026-08-18）起同款绑定（文件名 stem 即权威 runId，逐文件传入绑定读者）——合法路径与既有输出零变化。
 
 ### 场景 7：管理历史 run
 
@@ -1139,7 +1139,7 @@ CLI fallback：`npm run cli -- runs list [--agent ID] [--latest N]`。
 
 `waitMs` 是 Lead 的单次观察窗口（区间、默认值与 `waitMs:0` 有意无效的约束见生成层描述）；point-in-time 读取使用 `run_await_result({waitMs:0})` 或 `run_status`。窗口到期只返回 liveness，**不表示 worker 失败，也不会中止 worker**。
 
-**R18 状态投影读绑定（TD-128 W2，2026-08-18；仅 `run_await_result`）**：await 的状态投影（初始读与等待循环内每次 poll）是 **runId 绑定** 的（`findState` 只看本 run 信封事件）——尾部追加的外 run/伪造 `run.state_change` 不再把 await 翻成终态、也不再阻断终态观察。**行为变更（仅 legacy 形状）**：全无信封的 pre-envelope transcript（事件无 `runId` 字段）状态投影降级为 `pending`——不可归属状态永不投影为终态（不 throw、不转 read_failure，等待窗如实耗尽后如实返回非终态；本机实测存量 pre-envelope transcript 为 0，实际影响≈0）。`run_wait` 的状态投影不在本轮锚点（未变）。
+**R18 状态投影读绑定（TD-128 W2，2026-08-18；仅 `run_await_result`）**：await 的状态投影（初始读与等待循环内每次 poll）是 **runId 绑定** 的（`findState` 只看本 run 信封事件）——尾部追加的外 run/伪造 `run.state_change` 不再把 await 翻成终态、也不再阻断终态观察。**行为变更（仅 legacy 形状）**：全无信封的 pre-envelope transcript（事件无 `runId` 字段）状态投影降级为 `pending`——不可归属状态永不投影为终态（不 throw、不转 read_failure，等待窗如实耗尽后如实返回非终态；本机实测存量 pre-envelope transcript 为 0，实际影响≈0）。`run_wait` 的状态投影已于 R19（TD-128，2026-08-18）同款绑定（初始读与等待循环每次 poll 同一 runId 过滤，legacy 全无信封同样降级 `pending`）——合法路径零变化。
 
 - **返回时机**：服务在两种情况下返回——(1) run 到达终态（completed/failed/aborted/timed_out），此时 `returnedEarly:true`；(2) `waitMs` 到期仍未终态，此时 `returnedEarly:false` 并附带 liveness 摘要让 Lead 决定下一步。**普通新事件不会触发提前返回**——只有终态会；窗口内的新进展通过到期的 liveness=`progress` 体现。
 - 若返回 `terminal:true`，该终态事实已足够，Lead 直接进入 `run_collect`；除恢复、独立复核或没有 wait 结果外，不需要再调用一次 `run_status`。

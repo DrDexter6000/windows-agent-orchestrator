@@ -277,7 +277,16 @@ export async function runWait(input) {
     verifyRunWorkspaceOwnership(events, authorizedWorkspaceRoot, runId);
   }
 
-  const state = findState(events);
+  // R19 (TD-128 W1，会审补登)：run_wait 的状态投影绑定到请求 runId（R15 范式
+  // `findState(events.filter(bound))`——runDelivery.js / sessionReuse.js R15、
+  // runAwaitResult R18 同款）：findState 的 state_change 末条胜出语义下，外 run
+  // 伪 terminal 尾条不再把 run_wait 翻成终态（或反向阻断终态观察）。
+  // legacy 行为选择（观测面 = 降级不设门，对齐 runAwaitResult）：全无信封的
+  // pre-envelope transcript 过滤为零事件 → findState([]) = "pending"——状态不可
+  // 归属时永不投影为终态，不 throw、不转 read_failure，等待窗如实耗尽后如实
+  // 返回非终态。cursor/agentId 维持各自既有 SSOT（findLastEventSeq /
+  // extractCanonicalAgentId，不在本轮锚点）。
+  const state = findState(events.filter((e) => e && e.runId === runId));
   const terminal = TERMINAL_STATES.includes(state);
   const cursor = findLastEventSeq(events) ?? 0;
 
@@ -370,7 +379,10 @@ export async function runWait(input) {
       verifyRunWorkspaceOwnership(currentEvents, authorizedWorkspaceRoot, runId);
     }
 
-    currentState = findState(currentEvents);
+    // R19 (TD-128 W1)：等待循环内每次 poll 快照的状态投影同款绑定过滤（与初始
+    // 读同一 runId、同一 R15 范式）——外 run 伪 terminal 尾条不再把窗口内的 poll
+    // 翻成 terminal-during-wait 提前返回（legacy 全无信封同款降级 pending）。
+    currentState = findState(currentEvents.filter((e) => e && e.runId === runId));
     currentCursor = findLastEventSeq(currentEvents) ?? currentCursor;
 
     if (TERMINAL_STATES.includes(currentState)) {

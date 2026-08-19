@@ -541,7 +541,13 @@ async function runsMetricsCommand(args, config) {
     const allEvents = await Promise.all(
       jsonlFiles.map((f) => readTranscript(join(runDir, f))),
     );
-    const s = aggregateSummary(allEvents);
+    // R19 (TD-128 W2，会审补登)：调用方逐文件读取，【文件名 stem 即权威
+    // runId】（与 runsGrep 的 runId 推导同款）——逐文件传入绑定读者
+    // （aggregateSummary → aggregateRunMetrics → boundReportScope 单一定义处，
+    // R18 导出复用不新写）。单文件内的外 run/伪造尾条不再污染 --summary 聚合；
+    // 全无信封的 legacy 文件经 boundReportScope 规则保持历史读法（合法路径零
+    // 变化）。修正旧注释"无权威 runId"的不实措辞（会审指出）。
+    const s = aggregateSummary(allEvents, jsonlFiles.map((f) => f.replace(/\.jsonl$/, "")));
     if (options.format === "json") {
       console.log(JSON.stringify(s, null, 2));
       return;

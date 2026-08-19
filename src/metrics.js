@@ -10,9 +10,10 @@ import { findState, findLatest, findLatestBound, findFirstBound } from "./transc
  *
  * 返回值：
  *   - 绑定数组：提供了 runId 且 transcript 存在信封（任一事件带 runId 字段）。
- *   - null：无法绑定——未提供 runId（aggregateSummary 的逐 run 事件数组没有
- *     权威 runId），或【全无信封的 legacy transcript】（pre-envelope，事件一
- *     律无 runId 字段）。null 时调用方保持历史无绑定读法。
+ *   - null：无法绑定——未提供 runId（R19 起 aggregateSummary 的 --summary 调用
+ *     方逐文件传入文件名 stem 作为权威 runId，其余调用方缺省），或【全无信封的
+ *     legacy transcript】（pre-envelope，事件一律无 runId 字段）。null 时调用方
+ *     保持历史无绑定读法。
  *
  * legacy 行为选择（观测面 = 降级不设门，对齐各 lane 既有哲学）：全无信封的
  * legacy transcript 不拒绝、不出空报表——保持既有读法照常出报表
@@ -42,8 +43,7 @@ export function boundReportScope(events, runId) {
  * 全绑定合法 transcript 上过滤器恒等 → 行为零变化。
  *
  * @param {Array} events transcript 事件序列
- * @param {string|null} [runId] 权威 runId；缺省（aggregateSummary 内部逐 run
- *   数组）保持历史无绑定读法
+ * @param {string|null} [runId] 权威 runId；缺省保持历史无绑定读法
  * @returns {{state, tokens, costUsd?, durationMs}}
  */
 export function aggregateRunMetrics(events, runId = null) {
@@ -74,20 +74,31 @@ export function aggregateRunMetrics(events, runId = null) {
 /**
  * 跨 run 聚合（M4-4）。
  *
+ * R19（TD-128 W2）：--summary 调用方逐文件读取时【文件名 stem 即权威 runId】，
+ * 经 runIds 逐 run 传入绑定读者（boundReportScope 单一定义处复用，不新写）——
+ * 单文件内的外 run/伪造尾条不再污染聚合。runIds 缺省（历史调用方/测试）时逐
+ * run 无绑定（历史读法）；提供了 stem 时交由 boundReportScope 自身规则：全无
+ * 信封的 legacy transcript 保持历史无绑定读法，任一事件带信封即严格绑定（外
+ * run/无信封行不可见——宁可可见地缺事实）。全绑定合法 transcript 上过滤器恒
+ * 等 → 行为零变化。
+ *
  * @param {Array<Array>} runs 多个 run 的事件序列数组
+ * @param {string[]|null} [runIds] 与 runs 等长的权威 runId 数组（文件名 stem）；
+ *   缺省逐 run 无绑定（历史读法）
  * @returns {{totalRuns, byState, successRate, totalTokens, avgDurationMs}}
  */
-export function aggregateSummary(runs) {
+export function aggregateSummary(runs, runIds = null) {
   if (runs.length === 0) {
     return { totalRuns: 0, byState: {}, successRate: 0, totalTokens: {}, avgDurationMs: 0 };
   }
+  const bound = Array.isArray(runIds) && runIds.length === runs.length;
   const byState = {};
   let successCount = 0;
   const totalTokens = {};
   let totalDuration = 0;
 
-  for (const events of runs) {
-    const m = aggregateRunMetrics(events);
+  for (let i = 0; i < runs.length; i += 1) {
+    const m = aggregateRunMetrics(runs[i], bound ? runIds[i] : null);
     byState[m.state] = (byState[m.state] ?? 0) + 1;
     if (m.state === "completed") successCount += 1;
     totalDuration += m.durationMs;

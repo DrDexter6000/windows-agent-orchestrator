@@ -271,7 +271,10 @@ async function smokeScorecard(cwd, runDir) {
     const scEvent = scope
       ? findFirstBound(scope, "scorecard.checked", run.runId)
       : events.find((e) => e.type === "scorecard.checked");
-    const lastChange = events.filter((e) => e.type === "run.state_change").at(-1);
+    // R19 (TD-128 W3，会审补登)：场景 2 PASS/FAIL 判定所读的末条 state_change
+    // 绑定到本 smoke run 信封（与上文 scorecard 读取同一 run.runId）——外 run/
+    // 伪造尾条不再供给 lastChange.reason / from→to 展示。
+    const lastChange = events.filter((e) => e.type === "run.state_change" && e.runId === run.runId).at(-1);
 
     console.log(`  runId:        ${run.runId}`);
     console.log(`  state:        ${run.state}`);
