@@ -16,6 +16,11 @@ export class CodexBackend extends ProcessBackend {
   // branch. codex injects via -c developer_instructions (append, not replace).
   supportsRoleContract = true;
 
+  // ADR-0025 批次 2（TD-87）：codex --json 的 turn.completed 帧携带 usage
+  // （CodexStreamParser 产出 metrics token 事实）——tokenBudget 闸门对该
+  // backend 有效。registry validate 静态读取本声明做 tokenBudget 交叉校验。
+  reportsTokenUsage = true;
+
   /**
    * M11-9 capability: Codex can express model (--model) and reasoning
    * (-c model_reasoning_effort). It cannot express contextWindow (no CLI flag)

@@ -125,6 +125,15 @@ export class ProcessBackend {
   // Shared orchestration reads this boolean — never the runtime name.
   supportsInFlightCorrection = false;
 
+  // ADR-0025 批次 2（TD-87）：usage/token 上报保真维度的闭集声明（仿
+  // supportsSessionReuse / supportsInFlightCorrection 模式）。true = 该 backend
+  // 的事件流携带 metrics token 事实——RunManager 的 tokenBudget 硬闸门只在
+  // ev.tokens 存在时累计预算（runManager.js），无 token 事实 = 闸门静默无效。
+  // FAIL-CLOSED 默认 false：子类未显式 opt-in 时"未声明"绝不读成"支持"
+  // （02-architecture 既有约定；kimi stream-json 无 usage 字段即此形状，TD-87）。
+  // 消费者：registry validate 静态交叉校验 tokenBudget 配置 × 本声明（不 spawn）。
+  reportsTokenUsage = false;
+
   /**
    * M11-9: provider-neutral backend policy validation. Called by RunManager
    * BEFORE any transcript append, runDir creation, worktree, or spawn.

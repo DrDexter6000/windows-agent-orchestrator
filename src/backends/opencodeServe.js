@@ -27,6 +27,11 @@ export class OpenCodeServeBackend {
   // the process backends; the task remains a separate user text part.
   supportsRoleContract = true;
 
+  // ADR-0025 批次 2（TD-87）：session.tokens 周期轮询（METRICS_POLL_EVERY）
+  // 产出 metrics token 事实——tokenBudget 闸门对该 backend 有效（C3/06-18
+  // 事故防线要求 opencode worker 必配 tokenBudget 的喂料基础）。
+  reportsTokenUsage = true;
+
   /**
    * The `system` transport is runtime-versioned. Prove it before RunManager
    * creates a transcript or worktree; a static capability flag alone is not

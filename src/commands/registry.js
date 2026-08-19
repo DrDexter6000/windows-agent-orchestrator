@@ -12,6 +12,7 @@ import { join, resolve } from "node:path";
 
 import { readRegistry, normalizeAgent } from "../registry.js";
 import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
+import { backendCapabilitySnapshot } from "../backends/factory.js";
 import { isSecretEnvName } from "../secretRedaction.js";
 // TD-98 阶段 2a：parseOptions 从 cli.js 抽到 ./shared.js，消除 ESM 循环 import。
 import { parseOptions } from "./shared.js";
@@ -92,6 +93,43 @@ async function registryCheckCommand(args, config) {
   if (!allOk) {
     process.exitCode = 1;
   }
+}
+
+/**
+ * ADR-0025 批次 2（TD-87/TD-117）：registry 配置 × backend 类闭集能力声明的
+ * 静态交叉校验。输入 capabilities 为 backendCapabilitySnapshot 的产物（或测试
+ * 注入的伪造形状）；null（未知 backend）时零 warning——"unknown backend" 是
+ * hard issue，由 validate 主循环另行报告。
+ *
+ * 两条都是 ⚠ warning（不 block）：validate 是提示层，tokenBudget 的运行时闸门
+ * 与 sessionReuse 的 spawn 前 fail-closed 门（runManager.js）语义保留不动。
+ * 纯函数（不构造 backend、不 spawn）——加载路径在调用方，每个 agent 构造一次
+ * backend 实例、两条校验共用同一快照。
+ *
+ * @param {object} agent — registry 原始条目（只读 backend/tokenBudget/sessionReuse）
+ * @param {{reportsTokenUsage:boolean, supportsSessionReuse:boolean}|null} capabilities
+ * @returns {string[]} warnings（空数组 = 无交叉不符）
+ */
+export function capabilityCrossCheckWarnings(agent, capabilities) {
+  const warnings = [];
+  if (!capabilities) return warnings;
+  // TD-87（kimi tokenBudget 静默无效陷阱，泛化）：backend 类声明不上报
+  // usage/token（reportsTokenUsage 非 true）× 配了 tokenBudget → 闸门收不到
+  // token 事实，配置静默无效。沿用既有 warning 输出模式（不 block）。
+  if (typeof agent?.tokenBudget === "number" && capabilities.reportsTokenUsage !== true) {
+    warnings.push(
+      `${agent.backend} 配了 tokenBudget 但不生效——该 backend 类能力声明未上报 usage/token（reportsTokenUsage 非 true，WAO 预算闸门收不到 token 事实；TD-87：kimi-code stream-json 无 usage 字段即此形状）。成本兜底靠 backend 自带控制 + WAO waitTimeout，不靠 WAO tokenBudget`,
+    );
+  }
+  // TD-117（dsh sessionReuse 提前提示）：sessionReuse 配置 × backend 类未声明
+  // supportsSessionReuse（未声明按 false 读，fail-closed）→ 派发会在 spawn 前
+  // 被运行时硬门拒绝。这里只把失败提前到 validate 静态阶段，不改运行时行为。
+  if (agent?.sessionReuse != null && capabilities.supportsSessionReuse !== true) {
+    warnings.push(
+      `${agent.backend} 配了 sessionReuse 但该 backend 类未声明 supportsSessionReuse（未声明按 false 读）——派发会在 spawn 前被运行时 fail-closed 门拒绝（TD-117 形状）；换声明支持的 backend 或移除 sessionReuse 配置`,
+    );
+  }
+  return warnings;
 }
 
 /**
@@ -224,13 +262,12 @@ async function registryValidateCommand(args, config) {
     checked += 1;
     if (issues.length === 0) {
       const model = agent.model ? `${agent.model.id}` : (agent.backend === "claude-code" ? "claude" : "default");
-      // TD-87（kimi tokenBudget 静默无效陷阱）：kimi stream-json 无 usage 字段，
-      // 配 tokenBudget 不报错但不生效。warn 提示用户别误以为有保护（dogfood round 2 发现）。
+      // TD-87（kimi tokenBudget 静默无效陷阱）+ TD-117（dsh sessionReuse 前置提示），
+      // ADR-0025 批次 2 起泛化：不再硬编码 backend 名分支，改读 backend 类闭集能力
+      // 声明交叉校验。backendCapabilitySnapshot 构造 backend 实例本身零副作用（不
+      // spawn、不联网），validate 保持纯静态。
       // TD-86：warning 文本（不含 `  ⚠ ${id}: ` 前缀，id 已是独立字段）进 JSON 的 warnings[]。
-      const warnings = [];
-      if (agent.backend === "kimi-code" && typeof agent.tokenBudget === "number") {
-        warnings.push("kimi-code 配了 tokenBudget 但不生效（stream-json 无 usage 字段）—— kimi 靠自带 max_steps/timeout 兜底，不靠 WAO tokenBudget");
-      }
+      const warnings = capabilityCrossCheckWarnings(agent, backendCapabilitySnapshot(agent));
       // M11-5（TD-89 修复）：所有三个 process backend（claude-code/codex/kimi-code）
       // 现在都消费 systemPrompt。registry validate 用共享加载器（roleContract.js）
       // 验证角色文件——缺失/目录/空/超限/非法 UTF-8/NUL 都 fail closed（不再是

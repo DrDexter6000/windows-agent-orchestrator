@@ -192,6 +192,21 @@ approval UI、background job 和 TUI，把模型、PowerShell/编辑工具与 JS
 correction，且本仓模板不把它设为默认 worker；通过 `npm run reliability` 取得与当前
 backend+model 精确绑定的认证前，registry 会诚实显示 `certification:null`。
 
+`registry validate` 的能力交叉 `⚠` warning（ADR-0025 批次 2，均不阻塞派发、不影响 exit code）：
+validate 加载 backend **代码类**的闭集能力声明做纯静态交叉校验（只读类声明，不为校验启动任何
+进程或网络请求）。配置 × 声明不符时两条提示：
+
+- `tokenBudget` 配置 × 该 backend 类未声明 usage/token 上报（`reportsTokenUsage` 非 true，
+  未声明按 false 读）→ `⚠` "配了 tokenBudget 但不生效"（TD-87：kimi-code stream-json 无
+  usage 字段即此形状——WAO 预算闸门收不到 token 事实，成本兜底靠 backend 自带控制 +
+  `waitTimeout`）。
+- `sessionReuse` 配置 × backend 类未声明 `supportsSessionReuse`（未声明同样按 false 读，
+  fail-closed）→ `⚠` 提示该派发会在 spawn 前被运行时硬门拒绝（TD-117 形状）；换声明支持的
+  backend 或移除该配置。
+
+两条都是提示层：tokenBudget 的运行时闸门与 sessionReuse 的 spawn 前 fail-closed 门
+（`src/runManager.js`）语义不变——validate 只把不符提前到静态阶段并让它可见，不替代运行时拒绝。
+
 ### 验证安装
 
 ```powershell

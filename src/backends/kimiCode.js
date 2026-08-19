@@ -28,6 +28,12 @@ export class KimiCodeBackend extends ProcessBackend {
   // (prompt-level guidance, not system-level isolation).
   supportsRoleContract = true;
 
+  // ADR-0025 批次 2（TD-87）：kimi stream-json 无 usage/token 字段（见上方类注释
+  // "已知局限"）——显式声明 false（与 ProcessBackend 基类默认一致，此处显式化
+  // 自文档）：tokenBudget 闸门收不到 token 事实，配 tokenBudget 不生效。
+  // registry validate 据此对 tokenBudget 配置输出 ⚠（不阻塞）。
+  reportsTokenUsage = false;
+
   /**
    * Kimi Code 0.29.1 exposes KIMI_MODEL_THINKING_EFFORT as a process-scoped
    * override for the Kimi provider. K3 accepts low/high/max. WAO compiles the

@@ -57,6 +57,11 @@ export class ClaudeCodeBackend extends ProcessBackend {
   // executed the turn.
   supportsInFlightCorrection = true;
 
+  // ADR-0025 批次 2（TD-87）：claude stream-json 的 result 帧携带 usage
+  // （ClaudeStreamParser 产出 metrics token 事实）——tokenBudget 闸门对该
+  // backend 有效。registry validate 静态读取本声明做 tokenBudget 交叉校验。
+  reportsTokenUsage = true;
+
   /**
    * M11-9 capability: declare exactly what this backend can express.
    *

@@ -77,6 +77,10 @@ export class DeepSeekHarnessBackend {
   supportsInFlightCorrection = false;
   replayByRespawn = true;
 
+  // ADR-0025 批次 2（TD-87）：assistant/message 帧携带 usage（projectDshEvent
+  // 投影为 metrics token 事实）——tokenBudget 闸门对该 backend 有效。
+  reportsTokenUsage = true;
+
   constructor({ spawnFn = spawn } = {}) {
     this._spawnFn = spawnFn;
   }

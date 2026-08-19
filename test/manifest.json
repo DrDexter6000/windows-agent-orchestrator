@@ -84,6 +84,7 @@
       "backends/processBackend.test.js",
       "run-lifecycle/processStopVerify.test.js",
       "registry-roles/registry.test.js",
+      "registry-roles/backendCapabilityValidate.test.js",
       "isolation-infra/reporter.test.js",
       "isolation-infra/rmrfRetry.test.js",
       "registry-roles/roleContract.test.js",
