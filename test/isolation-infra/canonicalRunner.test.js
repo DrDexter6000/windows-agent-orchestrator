@@ -16,7 +16,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, sep } from "node:path";
+import { join, relative, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -25,6 +25,7 @@ import {
   WAVE_PLAN, validateWavePlan,
   takeRunsSnapshot, addedRunsFiles, createRunsDirGuard, realListRunsDir,
   finalRunnerOutcome,
+  createInflightMarker, realInflightAdapter, inflightMarkerPath, INFLIGHT_MARKER_FILENAME,
 } from "../../scripts/canonical-test.mjs";
 
 function manifestFixture() {
@@ -672,4 +673,157 @@ test("finalRunnerOutcome: report write failure ⇒ red regardless of everything 
     { kind: "report_write_failed", exitCode: 1 },
     "precedence: report_write_failed > guard_error > runs_additions > verdict",
   );
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// R22 W1: advisory inflight marker — pure decision core over an injectable fs
+// adapter (finalRunnerOutcome idiom). The marker is machine-global under
+// os.tmpdir(), deliberately NOT inside any repo (never entangled with
+// runs-guard/gitignore). It is advisory ONLY: a second concurrent full suite
+// prints one WARNING and keeps running — never blocks, never waits, no budget.
+// These meta-tests inject a fake fs; the real-adapter test below uses a
+// mkdtemp tmpdir and never touches the machine's real marker. Nothing here
+// executes main(): importing canonical-test.mjs never runs the marker logic
+// (invokedDirectly guard).
+// ────────────────────────────────────────────────────────────────────────────
+
+// In-memory marker fs: content === null means "absent". createMarker enforces
+// O_EXCL semantics ("wx") like the real adapter; deleteMarker throws ENOENT on
+// an absent file.
+function fakeInflightFs(initial) {
+  let content = initial === undefined ? null : initial;
+  const ops = { creates: [], deletes: 0 };
+  const e = (code) => { const err = new Error(code); err.code = code; return err; };
+  return {
+    ops,
+    set: (t) => { content = t; },
+    readMarker: () => content,
+    createMarker: (text) => { if (content !== null) throw e("EEXIST"); content = text; ops.creates.push(text); },
+    deleteMarker: () => { if (content === null) throw e("ENOENT"); content = null; ops.deletes += 1; },
+  };
+}
+function markerOver(fsx, extras = {}) {
+  return createInflightMarker({
+    readMarker: fsx.readMarker, createMarker: fsx.createMarker, deleteMarker: fsx.deleteMarker,
+    warn: extras.warn, pid: extras.pid, now: extras.now,
+  });
+}
+
+test("inflight marker: no existing marker → begin creates {pid, startedAt}, end deletes it", () => {
+  const fsx = fakeInflightFs();
+  const warnings = [];
+  const m = markerOver(fsx, { warn: (l) => warnings.push(l), pid: 4242, now: () => "2026-08-20T00:00:00.000Z" });
+  assert.equal(m.begin(), "created", "无标记 ⇒ O_EXCL 创建并持有删除权");
+  assert.equal(warnings.length, 0, "干净启动零输出");
+  assert.equal(fsx.ops.creates.length, 1);
+  assert.deepEqual(JSON.parse(fsx.ops.creates[0]), { pid: 4242, startedAt: "2026-08-20T00:00:00.000Z" },
+    "标记内容 = {pid, startedAt}");
+  assert.equal(m.end(), true);
+  assert.equal(fsx.ops.deletes, 1, "自己创建的标记在退出路径被删除");
+});
+
+test("inflight marker: existing marker → exactly one WARNING line; no create; foreign marker NOT deleted", () => {
+  const fsx = fakeInflightFs(JSON.stringify({ pid: 111, startedAt: "2026-08-19T23:00:00.000Z" }) + "\n");
+  const warnings = [];
+  const m = markerOver(fsx, { warn: (l) => warnings.push(l) });
+  assert.equal(m.begin(), "observed");
+  assert.equal(warnings.length, 1, "恰一行 WARNING（advisory，不阻塞不等待）");
+  assert.ok(warnings[0].includes("[canonical] WARNING: another full suite started at 2026-08-19T23:00:00.000Z (pid 111) — results may be affected by resource contention"),
+    "WARNING 文案带对方 startedAt/pid 与资源争用提示");
+  assert.equal(fsx.ops.creates.length, 0, "标记已存在 ⇒ 不覆盖（非锁，不抢）");
+  assert.equal(m.end(), false, "别人的标记不归本次删除——对方退出时自删，第三套件仍要能看到");
+  assert.equal(fsx.ops.deletes, 0);
+});
+
+test("inflight marker: a crashed-run orphan marker warns the same way (stale JSON verbatim; torn write → unknown)", () => {
+  // 崩溃残留（孤儿）与在跑套件在标记层面不可区分——printed ts/pid 让人眼可判 staleness；
+  // 唯一后果就是下次打 WARNING，不产生新失败面。
+  const stale = fakeInflightFs(JSON.stringify({ pid: 7, startedAt: "2026-08-01T00:00:00.000Z" }));
+  const staleWarnings = [];
+  markerOver(stale, { warn: (l) => staleWarnings.push(l) }).begin();
+  assert.equal(staleWarnings.length, 1);
+  assert.ok(staleWarnings[0].includes("started at 2026-08-01T00:00:00.000Z (pid 7)"), "孤儿标记照打 WARNING，ts/pid 原样可见");
+
+  for (const torn of ["", "{not json"]) {
+    const fsx = fakeInflightFs(torn);
+    const warnings = [];
+    assert.equal(markerOver(fsx, { warn: (l) => warnings.push(l) }).begin(), "observed");
+    assert.equal(warnings.length, 1, `torn content ${JSON.stringify(torn)} 仍告警`);
+    assert.ok(warnings[0].includes("started at unknown") && warnings[0].includes("(pid unknown)"),
+      "不可解析内容降级为 unknown 占位，不 crash");
+  }
+});
+
+test("inflight marker: end() delete failure is silent (no crash) and end acts at most once", () => {
+  const fsx = fakeInflightFs();
+  fsx.deleteMarker = () => { throw new Error("EPERM"); };
+  const m = markerOver(fsx, {});
+  assert.equal(m.begin(), "created");
+  assert.doesNotThrow(() => m.end(), "删除失败必须静默——最坏情形只是孤儿标记（下次仅 WARNING）");
+  assert.equal(m.end(), false, "end 至多作用一次：失败后不再重试不再抛");
+});
+
+test("inflight marker: an unreadable marker (fs error) degrades to absent — the suite is never blocked", () => {
+  const fsx = fakeInflightFs();
+  fsx.readMarker = () => { throw new Error("EACCES"); };
+  const m = markerOver(fsx, {});
+  assert.equal(m.begin(), "created", "读失败 ≈ 无标记（advisory 纪律：绝不阻断套件）");
+});
+
+test("inflight marker: losing the O_EXCL create race → re-read warns about the winner (no double claim)", () => {
+  // 两套件几乎同时启动：我们的 read 看到 null，但 create 窗口里对方先claim——
+  // create 抛 EEXIST，re-read 发现 winner ⇒ 照常 WARNING（这正是标记要捕捉的场景）。
+  const winnerText = JSON.stringify({ pid: 999, startedAt: "2026-08-20T01:00:00.000Z" }) + "\n";
+  const fsx = fakeInflightFs();
+  fsx.createMarker = (text) => { fsx.set(winnerText); const err = new Error("EEXIST"); err.code = "EEXIST"; throw err; };
+  const warnings = [];
+  const m = markerOver(fsx, { warn: (l) => warnings.push(l), pid: 1 });
+  assert.equal(m.begin(), "observed", "race 输家按观察者处理");
+  assert.equal(warnings.length, 1);
+  assert.ok(warnings[0].includes("(pid 999)"));
+  assert.equal(m.end(), false, "winner 持有标记，输家不删");
+});
+
+test("inflight marker: create failure with no marker behind it → 'unavailable' (suite runs unmarked)", () => {
+  const fsx = fakeInflightFs();
+  fsx.createMarker = () => { throw new Error("EPERM"); };
+  const warnings = [];
+  const m = markerOver(fsx, { warn: (l) => warnings.push(l) });
+  assert.equal(m.begin(), "unavailable", "tmpdir 不可写 ⇒ 无标记继续跑，绝不是失败");
+  assert.equal(warnings.length, 0);
+  assert.equal(m.end(), false);
+});
+
+test("inflight marker: real adapter surface on a tmpdir — read null → wx-create → read → owned delete", () => {
+  // 端到端回归（真 fs 路径，mkdtemp tmpdir——绝不触碰机器真实标记文件）。
+  const dir = mkdtempSync(join(tmpdir(), "wao-inflight-surface-"));
+  try {
+    const adapter = realInflightAdapter(join(dir, INFLIGHT_MARKER_FILENAME));
+    assert.equal(adapter.readMarker(), null, "缺失 = null（ENOENT 归一）");
+    const warnings = [];
+    const m = createInflightMarker({ ...adapter, warn: (l) => warnings.push(l), pid: 31337, now: () => "2026-08-20T02:00:00.000Z" });
+    assert.equal(m.begin(), "created");
+    assert.equal(warnings.length, 0);
+    assert.deepEqual(JSON.parse(adapter.readMarker()), { pid: 31337, startedAt: "2026-08-20T02:00:00.000Z" });
+    assert.equal(m.end(), true);
+    assert.equal(adapter.readMarker(), null, "自己创建的标记退出即删");
+
+    // 观察者路径也走真 fs：留下标记 → begin 告警 → end 不删。
+    const m2 = createInflightMarker({ ...adapter, warn: (l) => warnings.push(l) });
+    assert.equal(m2.begin(), "created"); // fresh dir state: previous marker was deleted
+    assert.equal(m2.end(), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("inflight marker: machine-global location is os.tmpdir(), NEVER inside a repo", () => {
+  const p = inflightMarkerPath();
+  assert.equal(p, join(tmpdir(), INFLIGHT_MARKER_FILENAME), "固定名 wao-canonical-test.inflight，机器全局");
+  // 必须仓外：仓内标记会被 runs-guard / gitignore 牵连（R22 W1 硬要求）。
+  const here = fileURLToPath(import.meta.url);
+  const repoRoot = join(here, "..", "..", "..");
+  const rel = relative(repoRoot, p);
+  const insideRepo = rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  assert.equal(insideRepo, false, `标记路径必须在仓外（实际 ${p}，repoRoot ${repoRoot}）`);
 });

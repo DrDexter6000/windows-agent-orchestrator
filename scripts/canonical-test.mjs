@@ -87,6 +87,12 @@
 //          ports, singleton arbiters), so a red light there is a feature, not
 //          a false positive. The real-MCP canary (`npm run smoke`) does not go
 //          through this runner and is unaffected.
+//   - R22 W1 advisory inflight marker: a machine-global marker under os.tmpdir()
+//     (NOT a lock, NOT inside any repo). A second concurrent full suite on this
+//     machine prints one WARNING (results may be contaminated by resource
+//     contention — remedy: sequential re-run); it never blocks, never waits,
+//     and eats no budget. Deleted on every exit path; a crashed run leaves an
+//     orphan whose only consequence is the same WARNING on later runs.
 //   - Writes a bounded test-results.json that keeps every failure attributable to
 //     BOTH its resource category AND its execution wave: each file records
 //     resourceCategory + executionWave; each wave records timing/counts/exit.
@@ -104,7 +110,7 @@ import { spawn } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve, dirname, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { availableParallelism, cpus } from "node:os";
+import { availableParallelism, cpus, tmpdir } from "node:os";
 
 // ── Resource categories: the closed set named in the TD-107 contract. ─────────
 // These seven are the MANIFEST categories used for ownership + drift detection.
@@ -396,6 +402,98 @@ export function finalRunnerOutcome({ verdict, runsAdditions, runsGuardError, rep
   return { kind: "verdict", exitCode: verdict === "pass" ? 0 : 1 };
 }
 
+// ── R22 W1: advisory inflight marker (machine-global, NOT a lock) ────────────
+// Two Lead sessions running the full suite on ONE machine shred each other
+// (TD-130 isolation_pass family; 2026-08-19 并行实证：单日 5 文件 × 8 轮，两轮
+// 走到 reject+前作集成，浪费验证预算). The marker is ADVISORY: it never blocks,
+// never waits, and eats no budget — a second concurrent suite simply prints one
+// WARNING line so the operator knows its results may be contaminated by
+// resource contention (remedy: sequential re-run; see docs/troubleshooting.md
+// §8 for the isolation_pass triage rule). It lives in os.tmpdir() — machine-
+// global but OUTSIDE any repo (AGENTS.md endorses os.tmpdir()), so it can never
+// be entangled with runs-guard/gitignore state. A crashed run leaves an orphan:
+// the only consequence is that later suites keep printing the WARNING (with the
+// stale pid/startedAt visible in the line) — no new failure surface. None of
+// this module executes when the meta-tests import the file: main() only runs
+// under the invokedDirectly guard at the bottom.
+export const INFLIGHT_MARKER_FILENAME = "wao-canonical-test.inflight";
+
+/**
+ * Pure decision core over injectable fs primitives (the meta-tests inject
+ * fakes; realInflightAdapter is the only code that touches the real tmpdir).
+ *   begin() → "created"     — no marker existed; this invocation O_EXCL-claimed
+ *                            it ({pid, startedAt}) and owns its deletion.
+ *            "observed"    — a marker exists (live suite, crash orphan, or torn
+ *                            write): exactly one WARNING is printed. The marker
+ *                            is NOT ours — a foreign marker must survive our
+ *                            exit (the running suite still needs it, and a
+ *                            third suite must still see the warning).
+ *            "unavailable" — the tmpdir could not be marked (unwritable).
+ *                            Advisory: the suite runs unmarked, never a failure.
+ *   end()   — deletes the marker ONLY when this invocation created it; acts at
+ *             most once; delete failures are silent (worst case = an orphan
+ *             that only ever causes a WARNING).
+ * @param {{readMarker: () => (string|null), createMarker: (text: string) => void, deleteMarker: () => void, warn?: (line: string) => void, pid?: number, now?: () => string}} input
+ */
+export function createInflightMarker({ readMarker, createMarker, deleteMarker, warn = (line) => console.error(line), pid = process.pid, now = () => new Date().toISOString() }) {
+  let owned = false;
+  const warnExisting = (text) => {
+    // Best-effort parse: an orphan from a crashed run — or a torn/empty write —
+    // still warns; the printed pid/startedAt just show what could be read.
+    let info = {};
+    try { info = JSON.parse(text) || {}; } catch { /* keep {} ⇒ "unknown" */ }
+    const theirPid = Number.isFinite(info.pid) ? info.pid : "unknown";
+    const theirTs = typeof info.startedAt === "string" && info.startedAt ? info.startedAt : "unknown";
+    warn(`[canonical] WARNING: another full suite started at ${theirTs} (pid ${theirPid}) — results may be affected by resource contention`);
+    return "observed";
+  };
+  const begin = () => {
+    let existing = null;
+    try { existing = readMarker(); } catch { existing = null; } // unreadable ≈ absent (advisory)
+    if (typeof existing === "string") return warnExisting(existing);
+    try {
+      createMarker(JSON.stringify({ pid, startedAt: now() }) + "\n");
+      owned = true;
+      return "created";
+    } catch {
+      // Lost the O_EXCL race (another suite claimed the marker between our read
+      // and our create) — or the tmpdir is unwritable. Re-read once: a marker
+      // that appeared means we raced a real suite; warn like any observer.
+      let raced = null;
+      try { raced = readMarker(); } catch { raced = null; }
+      if (typeof raced === "string") return warnExisting(raced);
+      return "unavailable";
+    }
+  };
+  const end = () => {
+    if (!owned) return false;
+    owned = false;
+    try { deleteMarker(); return true; } catch { return false; } // silent: worst case an orphan WARNING
+  };
+  return { begin, end };
+}
+
+// Real adapter: the machine-global marker under os.tmpdir() — deliberately NOT
+// under any repo checkout. ENOENT on read maps to null (the normal no-suite
+// state); any other error propagates to the pure core, whose advisory
+// discipline (catch-all, degrade — never block, never crash the suite) is the
+// OPPOSITE of the runs-guard's fail-closed: this feature must not add any new
+// failure surface. "wx" = O_EXCL: the create is an atomic claim.
+export function inflightMarkerPath() {
+  return join(tmpdir(), INFLIGHT_MARKER_FILENAME);
+}
+
+export function realInflightAdapter(markerPath = inflightMarkerPath()) {
+  return {
+    readMarker: () => {
+      try { return readFileSync(markerPath, "utf8"); }
+      catch (err) { if (err && err.code === "ENOENT") return null; throw err; }
+    },
+    createMarker: (text) => writeFileSync(markerPath, text, { flag: "wx" }),
+    deleteMarker: () => unlinkSync(markerPath),
+  };
+}
+
 // ── Discovery: every test/**/*.test.js, test-relative, forward-slashed ───────
 function discoverTestFiles(testDir) {
   const out = [];
@@ -615,17 +713,36 @@ export function realIsolator(nodeExe, repoRoot, env) {
   });
 }
 
-// ── main(): load manifest, validate manifest + wave plan, run, report. ───────
+// ── main(): advisory inflight marker, then load manifest, validate, run, report.
 async function main() {
   const here = dirname(fileURLToPath(import.meta.url));
   const repoRoot = resolve(here, "..");
   const testDir = join(repoRoot, "test");
   const manifestPath = join(testDir, "manifest.json");
   const reportPath = join(repoRoot, "test-results.json");
-  const reporterArg = "./test/reporter.mjs";
   const nodeExe = process.execPath;
 
   const childEnv = { ...process.env, WAO_SKIP_VERSION_GUARD: "1" };
+
+  // 0) R22 W1 advisory inflight marker (machine-global, NOT a lock): claim it
+  //    before anything runs — in particular before the runs-guard baseline
+  //    snapshot inside runSuite — so a concurrently-starting full suite sees
+  //    us; and if one is already mid-run, print one WARNING (advisory only:
+  //    never blocks, never waits, eats no budget). Deleted on EVERY exit path
+  //    (finally) when this invocation owns it.
+  const inflight = createInflightMarker(realInflightAdapter());
+  inflight.begin();
+  try {
+    await runSuite({ repoRoot, testDir, manifestPath, reportPath, nodeExe, childEnv });
+  } finally {
+    inflight.end();
+  }
+}
+
+// The suite proper (steps 1-5). Extracted from main() so the inflight marker's
+// finally covers every return path below without re-indenting the whole body.
+async function runSuite({ repoRoot, testDir, manifestPath, reportPath, nodeExe, childEnv }) {
+  const reporterArg = "./test/reporter.mjs";
 
   // 1) Load manifest (invalid JSON / missing file ⇒ invalid environment ⇒ non-zero).
   let manifestText;

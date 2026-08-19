@@ -32,6 +32,9 @@
 | 认证判 draft-only/rejected 但模型应该会 | [§7.8 认证误判](#78-认证判-draft-onlyrejected-但模型其实会认证误判) |
 | 改了 example 配置但 worker 行为没变 | [§7.9 agents.json 真相源](#79-agentsjson-vs-agentsexamplejson-混淆配置真相源) |
 | `run_delivery` 返回失败面 / 不知道下一步用哪个交付工具 | [§delivery 失败模式 → 正确工具（闭集查表）](#delivery-失败模式--正确工具闭集查表) |
+| `npm test` exit 1 但失败全为 isolation_pass（同机并发互踩） | [§8.1](#81-npm-test-exit-1-但失败全为-isolation_pass并发互踩非代码回归) |
+| `npm test` stderr 打 another full suite WARNING / 同机另一全量在跑 | [§8.1](#81-npm-test-exit-1-但失败全为-isolation_pass并发互踩非代码回归) |
+| 主仓根全量尾部 runs-guard RED（套件期间出现新 runs/ 条目） | [§8.2](#82-主仓根跑全量前确认无活跃-workerdaemonruns-guard-红灯td-134) |
 
 ## delivery 失败模式 → 正确工具（闭集查表）
 
@@ -402,7 +405,31 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 
 ---
 
-## 8. 新增条目（模板）
+## 8. 测试套件与验证环境（canonical runner）
+
+`npm test` 由 `scripts/canonical-test.mjs`（TD-107 canonical runner）分波执行全量。本章覆盖套件自身的**环境性失败判定**——特别是同机并行 Lead 会话互踩（TD-130 isolation_pass 家族）与主仓根 runs-guard 红灯（TD-134）。两者都表现为 "exit 1 + 顺序复跑绿"，但判定规则与处置不同。
+
+### 8.1 npm test exit 1 但失败全为 isolation_pass（并发互踩，非代码回归）
+
+- **症状**：全量 exit 1，stderrTail 中每一条失败分类行都是 `[canonical] isolation ... ⇒ isolation_pass`（首轮红、单文件隔离复跑绿）；无 `stable_fail`、无 `environment_invalid`、无其他形状的 fail。在 delivery verification / reverify 里表现为验证命令 `npm test` 失败（stderrTail 经 R17/W1 已携带 [canonical] 行全文，一次读取即可定位文件与分类）。
+- **2026-08-19 并发实证（TD-130）**：两会话并行时同机并发 `npm test` 互踩，放大该家族——单日 5 个文件 × 8 轮次（`mcpWorkspaceSmoke` / `runWait` / `processBackend` / `mcpBind` / `mcpRunDeliveryReverify`，跨文件跨波）；两轮撞车后只剩 reject+前作集成可走，浪费一整轮验证预算。机器空闲时顺序复跑恒绿（worker 自跑 + Lead 复跑双证）。
+- **判定规则（闭集）**：
+  - **条件**：`npm test` exit 1，且 stderrTail 中**全部**条目为 `isolation_pass` 分类行（无 `stable_fail`、无 `environment_invalid`、无其他 fail）。
+  - **判定**：`environment_contaminated`——资源争用假阳性，**非代码回归**。
+  - **行动**：**错峰后再 reverify**（等另一全量结束）。不走 reject——reverify 是单发机会，撞车后只剩 reject+前作集成，等于再浪费一轮验证预算。
+  - **反例**：tail 含**任何** `stable_fail` ⇒ 是真红，走正常 reverify/reject 路径，不得借本规则豁免。
+- **预防（R22 W1 advisory inflight 标记，2026-08-20 落地）**：runner 开跑前（runs-guard 基线快照之前）在 `os.tmpdir()/wao-canonical-test.inflight` 放**机器全局 advisory 标记（非锁）**，仓外路径（不与 runs-guard/gitignore 牵连）。同机另一全量在跑时，本套件 stderr 打一行 `[canonical] WARNING: another full suite started at <ts> (pid <n>) — results may be affected by resource contention`。**WARNING = 结果可能受资源争用污染，顺序复跑即可**——它永不阻塞、永不等待、不吃任何预算。崩溃残留的孤儿标记只导致下次同样打 WARNING（行内旧 pid/ts 可辨 staleness），不产生新失败面；标记在所有退出路径删除（仅删自己创建的那份）。
+
+### 8.2 主仓根跑全量前确认无活跃 worker/daemon（runs-guard 红灯，TD-134）
+
+- **症状**：主仓根 `npm test` 尾部 `[canonical] RED runs-guard: N new entries in the REAL runs/ ...`，exit 1——**即使全部测试通过**。
+- **根因**：runs-guard 对 `runs/` 做基线-现状差分但**不做进程归属**——套件运行期间任何非套件写入者（活跃 daemon 追加 daemon-health、另一会话的 MCP dispatch、手动 `wao run`）落地的新条目都触发同一红灯。真实归因是"另一会话的 dispatch"，不是"测试写入"，但红灯文案无法区分。
+- **前置确认（运维规程）**：**主仓根跑全量前确认无活跃 worker/daemon**（`runs dashboard` / 活跃 run 检查）。交付 worktree 管道天然免疫（worktree 无 `runs/` ⇒ 空基线）。
+- **状态**：运维规程登记（TD-134）；根修（进程归属或隔离 run-dir）待真实痛点再立项。
+
+---
+
+## 9. 新增条目（模板）
 
 发现新坑时，复制此模板追加到对应章节：
 
