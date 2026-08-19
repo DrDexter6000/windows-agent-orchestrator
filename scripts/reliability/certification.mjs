@@ -1,6 +1,8 @@
 // TD-111: certification advisory context 闭集 SSOT（reasonCode 与自由文本 reason
 // 并列；blockerReason 原文绝不进码）。certifyCase/summarizeWorkers 经它映射。
 import { reasonCodeFor } from "../../src/application/certificationReasons.js";
+// ADR-0025 §5（批次 3）：delta drill 子集 SSOT（scope 派生的比对基准，单一清单）。
+import { DELTA_DRILLS } from "./matrix.mjs";
 
 export const CERTIFICATION_STATUSES = [
   "certified",
@@ -27,6 +29,31 @@ const STATUS_SEVERITY = {
   blocked: 3,
   rejected: 4,
 };
+
+// ADR-0025 §5（批次 3）：certificationScope 派生——case 走 delta 规程 ⇔
+// profile 显式 "delta"，或（无 profile 的手写/legacy case）drill 覆盖未超出
+// delta 子集且含越界写对抗。scope 是磁盘 summary 的事实字段，只活在 summary +
+// 文档层：不动 CERTIFICATION_STATUSES 闭集、不进 CLI/MCP inventory 投影
+// （registryInventory.js 的 buildCertMap 按白名单字段取值，scope 不会被透出）。
+export function certificationScopeForCase(caseResult = {}) {
+  if (caseResult?.profile === "delta") return "delta";
+  const drills = Array.isArray(caseResult?.drills)
+    ? caseResult.drills.filter((d) => typeof d === "string")
+    : [];
+  if (
+    drills.length > 0
+    && drills.includes("adversarialEscape")
+    && drills.every((d) => DELTA_DRILLS.includes(d))
+  ) {
+    return "delta";
+  }
+  return "full";
+}
+
+// worker 级聚合取保守值：任一 active-identity case 是 delta → delta（弱声明胜）。
+function mergeCertificationScope(left, right) {
+  return left === "delta" || right === "delta" ? "delta" : "full";
+}
 
 export function certifyCase(caseResult = {}) {
   const checks = normalizeChecks(caseResult.checks);
@@ -58,6 +85,15 @@ export function certifyCase(caseResult = {}) {
   } else if (missingCategories.length > 0) {
     status = "conditional";
     reason = `missing certification checks: ${missingCategories.join(", ")}`;
+  } else if (certificationScopeForCase(caseResult) === "delta") {
+    // ADR-0025 §5（Owner 方案 A，2026-08-19）：delta 子集全过 ≠ 全量认证——
+    // status 落 conditional；升级唯一路径 = 全量重跑（mergeCaseResults 增量
+    // 覆盖同 caseId，requiredCategories/drills 换全量后重判）。
+    // reasonCode 诚实为 null：CERTIFICATION_REASON_CODES 闭集无 delta 码，且为
+    // 保 MCP 面零改动不加码——wire 上该形状投影为 certificationReasonCode:null
+    // （自由文本 reason 只在磁盘 summary，是另一层契约）。
+    status = "conditional";
+    reason = "delta certification scope passed: full rerun required to upgrade to certified";
   } else {
     status = "certified";
     reason = "all required checks passed";
@@ -156,6 +192,13 @@ function summarizeWorkers(cases) {
         modelId: active.modelId,
         status,
         recommendedUse: RECOMMENDED_USE[status],
+        // ADR-0025 §5：认证范围事实字段（"full"|"delta"），按 active-identity 各
+        // case 的 profile/drill 覆盖派生，混合取保守值（任一 delta → delta）。
+        // 只活在磁盘 summary + 文档层，不进 CLI/MCP inventory 投影。
+        certificationScope: mergeCertificationScope(
+          summary?.certificationScope,
+          certificationScopeForCase(c),
+        ),
         reasonCode: adoptsWorse ? workerReasonCode(c.certification) : summary.reasonCode,
         // TD-111: 该 worker（active identity 的 case）最近一次全绿的时间；从未全绿 → null。
         lastHealthyRunAt: latestTimestamp(summary?.lastHealthyRunAt ?? null, c.lastHealthyRunAt ?? null),

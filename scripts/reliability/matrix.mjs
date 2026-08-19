@@ -4,9 +4,20 @@ const LEGACY_MATRIX = [
   { agentId: "coder_multimodal", label: "Kimi first-stable", providerID: "kimi-for-coding", optional: true },
 ];
 
+// ADR-0025 §5（批次 3）：delta 认证子集的 drill 词汇 SSOT。
+// 新（harness × 模型）组合走 delta 认证：sentinel（core 能力）+ scorecard（strict 证据）
+// + adversarialEscape（越界写对抗——承担 isolation 语义，顾问一致要求 isolation 类
+// 不得省）。不含 workflowRunDir；通过 → conditional + certificationScope:"delta"。
+// DELTA_DRILLS 同时是 scripts/reliability/certification.mjs scope 派生的比对基准
+// （单一清单，无第二份）。
+export const DELTA_DRILLS = ["sentinel", "scorecard", "adversarialEscape"];
+
 export function defaultDrillsForProfile(profile = "basic") {
   if (profile === "strict" || profile === "certification") {
     return ["sentinel", "scorecard"];
+  }
+  if (profile === "delta") {
+    return [...DELTA_DRILLS];
   }
   return ["sentinel"];
 }
@@ -67,7 +78,14 @@ function requiredCategoriesForDrills(drills) {
   if (drills.includes("scorecard")) {
     categories.push("strict");
   }
-  if (drills.includes("isolation") || drills.includes("workflowRunDir") || drills.includes("stop")) {
+  // adversarialEscape 是 isolation 类检查（越界写拦截，ADR-0025 批次 3）：要求
+  // operational 类目——delta 子集不得把 isolation 语义降为可选。
+  if (
+    drills.includes("isolation")
+    || drills.includes("workflowRunDir")
+    || drills.includes("stop")
+    || drills.includes("adversarialEscape")
+  ) {
     categories.push("operational");
   }
   categories.push("observability");

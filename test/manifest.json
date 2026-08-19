@@ -233,6 +233,7 @@
     ],
     "timeout": [
       "registry-roles/reliabilityCertification.test.js",
+      "registry-roles/reliabilityDelta.test.js",
       "registry-roles/reliabilityMatrix.test.js"
     ],
     "mcp": [
