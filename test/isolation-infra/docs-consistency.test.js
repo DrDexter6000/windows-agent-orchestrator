@@ -29,12 +29,16 @@ function read(rel) {
 /** 切 markdown 表格行单元格（跳过行首管道，丢弃行尾管道产生的空尾件）。
  * R23-A（2026-08-20）：code span（`...`）内的管道不作分隔符——TD 行内容常含
  * "a|b" 形状字面量（如 TD-63 偿还列的 reason:"no_rules"|"failed_before_scorecard"），
- * 裸 split 会把单元格切残、把内容片段误当"偿还于"列。 */
+ * 裸 split 会把单元格切残、把内容片段误当"偿还于"列。
+ * R23-A 补全（auditor F1）：只弹**一次**尾空件（行尾管道的必然产物）——while 循环
+ * 会把"偿还于列真空"的空单元格连同尾件一起弹光，调用侧再取最后非空格就永远读到
+ * 内容列，守卫对它唯一要抓的形状失明（10/91 行漏红实测）。调用侧同步去掉
+ * `.filter(非空)`：空偿还列必须能被选中，才能被下方断言抓红。 */
 function splitRowCells(line) {
   const masked = line.replace(/`[^`]*`/g, (span) => span.replaceAll("|", "\u0000"));
   const pieces = masked.split("|");
   const cells = pieces.slice(1).map((p) => p.replaceAll("\u0000", "|"));
-  while (cells.length > 0 && cells[cells.length - 1].trim() === "") cells.pop();
+  if (cells.length > 0 && cells[cells.length - 1].trim() === "") cells.pop();
   return cells;
 }
 
@@ -729,6 +733,12 @@ test("tech-debt.md 已偿还 TD 每条必须填'偿还信息'（TD-81：偿还�
   // 命中：已偿还表的 TD 行。列分隔 = | TD-XX | 登记于 | 内容 | 偿还于 |
   const tdRow = /^\|\s*(TD-\d+)\s*\|/;
 
+  // F1 回归钉（R23-A 补全，auditor）：空"偿还于"列必须被取到——修复前的
+  // while-pop + filter 组合会把空单元格弹光/滤掉，守卫永远读到内容列（10/91 漏红）。
+  const f1Synthetic = "| TD-90004 | 2026-08-20 合成 | 某问题描述，2026 年修过 | |";
+  assert.equal(splitRowCells(f1Synthetic).at(-1).trim(), "",
+    "F1 回归：空'偿还于'列应被提取为空串（读到内容列 = 守卫失明）");
+
   const sectionLines = repaidSection.split("\n");
   const parsedRows = [];
   for (const line of sectionLines) {
@@ -744,7 +754,9 @@ test("tech-debt.md 已偿还 TD 每条必须填'偿还信息'（TD-81：偿还�
     `已偿还区解析 ${parsedRows.length} 行 ≠ 形状行数 ${shapeCount}——存在解析不到的 TD 行（列宽漂移），守卫部分空转`);
 
   for (const { id, line } of parsedRows) {
-    const cells = splitRowCells(line).filter((c) => c.trim() !== "");
+    // R23-A 补全（auditor F1）：不再 filter 空单元格——空"偿还于"列必须被取到，
+    // 由下方"非空"断言抓红（filter 后取最后非空格会读到内容列，10/91 行漏红）。
+    const cells = splitRowCells(line);
     assert.ok(cells.length > 0, `${id} 整行无内容单元格`);
     const repaidCol = cells[cells.length - 1].trim();
 
@@ -3187,23 +3199,28 @@ test("TD-81 结构守卫：开放区不得有'带完成标记且整行无残留�
   assert.equal(parsedCount, shapeCount,
     `开放区解析 ${parsedCount} 行 ≠ 形状行数 ${shapeCount}——存在解析不到的 TD 行（列宽漂移），守卫部分空转`);
 
-  for (const line of sectionLines) {
-    const id = violation(line);
-    if (id === null) continue;
-    assert.fail(
-      `${id} 开放区行带完成标记（${COMPLETION_MARKERS.find((w) => line.includes(w))}）` +
-      `但整行无残留子句（词族：${RESIDUAL_CLAUSES.join(" / ")}）。二选一：` +
-      `已全部落地 → 移入"## 已偿还"区；仍有残余 → 补显式残留子句（还剩什么/何时处理）。`
-    );
-  }
-
-  // 合成夹具双向钉（防词族或判定逻辑写反导致守卫空转复刻——TD-81 旧守卫的教训）：
+  // 合成夹具双向钉（防词族或判定逻辑写反导致守卫空转复刻——TD-81 旧守卫的教训）。
+  // R23-A 补全（auditor）：夹具放在真实行扫描**之前**——首红即抛的旧结构里，文件一红
+  // 夹具就永不执行，红的时候恰恰最需要它们证明守卫本身没写反。
   const syntheticClean = "| TD-90001 | 2026-08-20 合成正夹具 | 测试 | 主体已落地 | **残留**：收尾未做，留待下轮。 |";
   const syntheticDirty = "| TD-90002 | 2026-08-20 合成负夹具 | 测试 | 全部完成 | **🟢 已修复**：一步到位，别无他事。 |";
   const syntheticPlain = "| TD-90003 | 2026-08-20 合成无标记夹具 | 测试 | 问题描述 | 触发条件。 |";
   assert.equal(violation(syntheticClean), null, "正夹具（完成标记+残留词）不应判红");
   assert.equal(violation(syntheticDirty), "TD-90002", "负夹具（完成标记+无残留词）必须判红");
   assert.equal(violation(syntheticPlain), null, "无完成标记的普通开放行不受影响");
+
+  // R23-A 补全（auditor"没问但该问"）：聚合全部违规后一次断言——首红即抛只报一行，
+  // 11 行违规要 11 次 ~14.5 分钟的全量才能看全（TD-138 放大器的又一级）。
+  const violations = [];
+  for (const line of sectionLines) {
+    const id = violation(line);
+    if (id !== null) violations.push(`${id}（标记：${COMPLETION_MARKERS.find((w) => line.includes(w))}）`);
+  }
+  assert.equal(violations.length, 0,
+    `开放区 ${violations.length} 行带完成标记但整行无残留子句（词族：${RESIDUAL_CLAUSES.join(" / ")}）：\n` +
+    `  ${violations.join("\n  ")}\n` +
+    `逐行二选一：已全部落地 → 移入"## 已偿还"区（列映射：类别列以【】前缀并入内容列）；` +
+    `仍有残余 → 补显式残留子句（还剩什么/何时处理）。`);
 });
 
 test("TD 编号全文件唯一（防并行会话编号竞态合流出双号，R23-A）", () => {
@@ -3219,6 +3236,6 @@ test("P6 诚实锚点：SKILL.md 在场记录集成后全量终验与 verificati
   const skill = read("SKILL.md");
   assert.match(skill, /集成后的.*main.*全量.*终验/s,
     "SKILL.md ## Acceptance 必须在场：并行会话交错集成后，在集成后的 main 上跑一次全量 npm test 终验，绿了才可收口（mainline 行以此为前置）");
-  assert.match(skill, /verificationTimeoutMs ≥ 900000/,
-    "SKILL.md ## Dispatch 必须在场：verificationCommands 含全量套件（npm test）时显式声明 verificationTimeoutMs ≥ 900000（默认 300000 对约 11 分钟全量必 command_timeout）");
+  assert.match(skill, /verificationTimeoutMs ≥ 1200000/,
+    "SKILL.md ## Dispatch 必须在场：verificationCommands 含全量套件（npm test）时显式声明 verificationTimeoutMs ≥ 1200000（默认 300000 对约 14.5 分钟全量必 command_timeout；2026-08-20 实测 869s）");
 });
