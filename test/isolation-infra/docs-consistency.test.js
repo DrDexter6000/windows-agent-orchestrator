@@ -2107,6 +2107,10 @@ test("M12-6 FR-07 docs: architecture 记录 reverify 共享 service 与当前 to
 // ============================================================
 
 test("M12-10: SKILL.md stays a slim entrypoint (≤ 17000 bytes; Owner raised the cap 2026-08-15)", () => {
+  // Owner 政策（2026-08-20 定策，R23-B 收口）：新增运维/语义文本**默认落权威文档**
+  // （troubleshooting/usage 等，先例：round4 F-2 判读句落 §6.8 而非 SKILL）。
+  // 申请抬上限仅当两条件同时成立：①新增内容确含重要语义信息；②SKILL.md 已无
+  // 可无损压缩语义的空间——届时作为临时议题呈 Owner 批准，不得自行抬。
   const skill = read("SKILL.md");
   const bytes = Buffer.byteLength(skill, "utf8");
   assert.ok(bytes <= 17000,
