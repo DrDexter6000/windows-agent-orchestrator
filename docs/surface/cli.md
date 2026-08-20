@@ -22,7 +22,7 @@ Commands:
   resume <runId> [--wait] [--run-dir DIR]
   runs list [--run-dir DIR] [--agent AGENT_ID] [--latest N] [--format json]
   runs summary [--run-dir DIR] [--format json]
-  runs prune --older-than <duration> [--run-dir DIR]
+  runs prune --older-than <duration> [--archive] [--run-dir DIR]   # --archive 超龄 run 移动到 runs-archive/<yyyy-mm>/（原文件名，不删除；冲突不覆盖）
   runs grep <pattern> [--run-dir DIR] [--format json]
   runs metrics <runId> [--run-dir DIR] [--format json]
   runs metrics --summary [--run-dir DIR] [--format json]

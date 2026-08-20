@@ -14,13 +14,15 @@
 //   - 共享 service：../application/runWait.js（runs wait 与 MCP run_wait 同一
 //     等待服务）、../application/runSemanticsNotes.js（semanticNotes 同一 selector）
 //   - 共享工具：./shared.js（parseOptions/resolveTargetCwd，纯函数）
-//   - node built-in：fs/promises（readdir/unlink）、fs（existsSync）、path（join/resolve）
+//   - node built-in：fs/promises（readdir/unlink/mkdir/rename/stat）、fs
+//     （existsSync）、path（join/resolve/dirname）
 //
-// 本模块内部 helper：parseDuration（runs prune 专用）、loadRunFiles（runs 族专用）。
+// 本模块内部 helper：parseDuration（runs prune 专用）、loadRunFiles（runs 族
+// 专用）、archiveMonthFromTs/mtimeMonth（runs prune --archive 专用，R23-B1）。
 
-import { readdir, unlink, readFile } from "node:fs/promises";
+import { readdir, unlink, readFile, mkdir, rename, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, dirname } from "node:path";
 
 import { readTranscript, findState, findFirstBound, TERMINAL_STATES, REVERIFY_FAILURE_CODES } from "../transcript.js";
 import { aggregateRunMetrics, aggregateSummary, formatDuration, boundReportScope } from "../metrics.js";
@@ -474,6 +476,23 @@ function parseDuration(input) {
   return value * multipliers[unit];
 }
 
+// R23-B1（2026-08-20，Owner 已批 Option B）：runs prune --archive 的月份分层——
+// 返回判龄所用 ts 的 UTC 年月（yyyy-mm，toISOString 前缀，跨机确定性）。ts 无效
+// /为 0（含"末事件无 ts 按最老处理"的 ts 0 档）返回 null，调用方按文件 mtime
+// 月份兜底。
+function archiveMonthFromTs(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 7);
+}
+
+// R23-B1：文件 mtime 的 UTC 年月（判龄 ts 无效/为 0 时的月份兜底）。
+async function mtimeMonth(filePath) {
+  const st = await stat(filePath);
+  return new Date(st.mtimeMs).toISOString().slice(0, 7);
+}
+
 async function runsPruneCommand(args, config) {
   const options = parseOptions(args);
   if (!options.olderThan) {
@@ -481,12 +500,23 @@ async function runsPruneCommand(args, config) {
   }
   const cutoff = Date.now() - parseDuration(options.olderThan);
   const runDir = resolve(options.runDir ?? config.runDir);
+  // R23-B1：--archive 归档模式——判龄、扫描面、legacy 语义与删除路径完全一致
+  // （下方同一段 R20-C 判龄代码，本函数内分支，无第二份判龄分叉）；差别只在
+  // 超龄后的处置：移动到归档目录而非 unlink。不带 --archive 时本函数输出与
+  // 行为逐字节不变（既有三个 prune 测试钉住）。
+  // truthy 判定（非严格 === true）：parseOptions 对 `--archive 值` 形状会给
+  // options.archive 赋字符串值——若严格比对会静默落回删除路径（与用户意图相
+  // 反）。--archive 是布尔 flag，只要出现即归档（fail-safe 方向：宁可归档，
+  // 不可误删）。
+  const archiveMode = Boolean(options.archive);
   const jsonlFiles = await loadRunFiles(runDir);
   if (jsonlFiles.length === 0) {
     console.log("No runs found.");
     return;
   }
   let pruned = 0;
+  let archived = 0;
+  let skipped = 0;
   let kept = 0;
   for (const file of jsonlFiles) {
     const events = await readTranscript(join(runDir, file));
@@ -503,12 +533,35 @@ async function runsPruneCommand(args, config) {
     const last = scope.at(-1);
     const ts = last?.ts ? new Date(last.ts).getTime() : 0;
     if (ts < cutoff) {
-      await unlink(join(runDir, file));
-      console.log(`Pruned ${file}`);
-      pruned += 1;
+      if (!archiveMode) {
+        await unlink(join(runDir, file));
+        console.log(`Pruned ${file}`);
+        pruned += 1;
+      } else {
+        // R23-B1 归档：<dirname(runDir)>/runs-archive/<yyyy-mm>/<原文件名>。
+        // 文件名原样保留（法医锚：大量 TD/friction 以 runId 文件名为证据锚，
+        // 改名=锚灭失）。冲突 fail-safe：目标同名文件已存在 → 不移动、不覆盖，
+        // 输出一行冲突报告并计入 skipped——宁可不动，不可丢数据。
+        const month = archiveMonthFromTs(ts) ?? await mtimeMonth(join(runDir, file));
+        const targetDir = join(dirname(runDir), "runs-archive", month);
+        const target = join(targetDir, file);
+        if (existsSync(target)) {
+          console.log(`Skipped ${file} (conflict: runs-archive/${month}/${file} already exists)`);
+          skipped += 1;
+        } else {
+          await mkdir(targetDir, { recursive: true });
+          await rename(join(runDir, file), target);
+          console.log(`Archived ${file} -> runs-archive/${month}/${file}`);
+          archived += 1;
+        }
+      }
     } else {
       kept += 1;
     }
+  }
+  if (archiveMode) {
+    console.log(`Archived ${archived}, skipped ${skipped} (conflict), kept ${kept}`);
+    return;
   }
   console.log(`Pruned ${pruned}, kept ${kept}`);
 }

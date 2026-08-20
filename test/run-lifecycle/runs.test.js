@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -201,6 +201,146 @@ test("runs prune rejects invalid duration format", async () => {
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- R23-B1: runs prune --archive 归档模式（移动不删除） ---
+// 归档根 = dirname(runDir)/runs-archive——夹具造一个临时父目录把 runs/ 与
+// runs-archive/ 圈在同一棵临时树内，归档产物随 finally 一起清理（makeRunDir
+// 的裸 tmpdir 直下 runDir 会把归档根甩到系统 tmpdir 根上）。
+async function makeRunTree() {
+  const root = await mkdtemp(join(tmpdir(), "wao-runs-archive-"));
+  const runDir = join(root, "runs");
+  await mkdir(runDir, { recursive: true });
+  return { root, runDir, archiveRoot: join(root, "runs-archive") };
+}
+
+test("R23-B1: runs prune --archive 移动超龄 run 到 runs-archive/<yyyy-mm>/（原文件名）", async () => {
+  const { root, runDir, archiveRoot } = await makeRunTree();
+  try {
+    await writeJsonl(runDir, "run_old", [
+      { type: "run.started", ts: "2026-03-15T00:00:00.000Z" },
+      { type: "run.completed", ts: "2026-03-15T00:05:00.000Z" },
+    ]);
+    await writeJsonl(runDir, "run_recent", [
+      { type: "run.started", ts: new Date().toISOString() },
+    ]);
+
+    const output = cli(["runs", "prune", "--older-than", "90d", "--archive"], runDir);
+    const lines = output.split(/\r?\n/);
+    assert.ok(lines.some((l) => l === "Archived run_old.jsonl -> runs-archive/2026-03/run_old.jsonl"), "逐文件归档行");
+    assert.ok(lines.some((l) => l === "Archived 1, skipped 0 (conflict), kept 1"), "汇总行");
+    // 超龄文件从 runDir 消失、出现在归档目录且文件名不变
+    assert.ok(!existsSync(join(runDir, "run_old.jsonl")));
+    assert.ok(existsSync(join(archiveRoot, "2026-03", "run_old.jsonl")));
+    // 新龄文件留在原地、不进归档
+    assert.ok(existsSync(join(runDir, "run_recent.jsonl")));
+    assert.ok(!existsSync(join(archiveRoot, "2026-03", "run_recent.jsonl")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("R23-B1: runs prune --archive 按判龄 ts 月份分层：不同月份进不同子目录", async () => {
+  const { root, runDir, archiveRoot } = await makeRunTree();
+  try {
+    await writeJsonl(runDir, "run_march", [
+      { type: "run.started", ts: "2026-03-15T00:00:00.000Z" },
+    ]);
+    await writeJsonl(runDir, "run_jan", [
+      { type: "run.started", ts: "2026-01-10T00:00:00.000Z" },
+    ]);
+
+    const output = cli(["runs", "prune", "--older-than", "7d", "--archive"], runDir);
+    assert.ok(output.includes("Archived 2, skipped 0 (conflict), kept 0"));
+    assert.ok(!existsSync(join(runDir, "run_march.jsonl")));
+    assert.ok(!existsSync(join(runDir, "run_jan.jsonl")));
+    // 各自按判龄 ts 的月份进不同子目录，文件名不变
+    assert.ok(existsSync(join(archiveRoot, "2026-03", "run_march.jsonl")));
+    assert.ok(existsSync(join(archiveRoot, "2026-01", "run_jan.jsonl")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("R23-B1: runs prune --archive 判龄与 prune 同源：新龄 kept、超龄 archived、legacy 无信封照常参与", async () => {
+  const { root, runDir, archiveRoot } = await makeRunTree();
+  try {
+    const oldTs = new Date(Date.now() - 8 * 86_400_000).toISOString();
+    await writeJsonl(runDir, "run_recent", [
+      { type: "run.started", ts: new Date().toISOString() },
+    ]);
+    await writeJsonl(runDir, "run_old", [
+      { type: "run.started", ts: oldTs },
+    ]);
+    // legacy 无信封（事件不带 runId）——boundReportScope 返回 null → 按末事件
+    // ts 判龄（R20-C legacy 语义），照常参与归档
+    await writeFile(join(runDir, "run_legacy.jsonl"),
+      JSON.stringify({ type: "run.started", ts: oldTs }) + "\n", "utf8");
+
+    const output = cli(["runs", "prune", "--older-than", "7d", "--archive"], runDir);
+    assert.ok(output.includes("Archived 2, skipped 0 (conflict), kept 1"), "新龄 kept、两个超龄 archived");
+    assert.ok(existsSync(join(runDir, "run_recent.jsonl")), "新龄文件留在 runDir");
+    assert.ok(!existsSync(join(runDir, "run_old.jsonl")));
+    assert.ok(!existsSync(join(runDir, "run_legacy.jsonl")));
+    // 两个超龄（含 legacy）都进判龄 ts 当月的归档子目录
+    const month = new Date(Date.now() - 8 * 86_400_000).toISOString().slice(0, 7);
+    assert.ok(existsSync(join(archiveRoot, month, "run_old.jsonl")));
+    assert.ok(existsSync(join(archiveRoot, month, "run_legacy.jsonl")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("R23-B1: runs prune --archive 冲突 fail-safe：目标同名文件已存在 → 不移动不覆盖，计 skipped", async () => {
+  const { root, runDir, archiveRoot } = await makeRunTree();
+  try {
+    await writeJsonl(runDir, "run_conflict", [
+      { type: "run.started", ts: "2026-03-15T00:00:00.000Z" },
+    ]);
+    // 预置同名目标（marker 内容，验证不被覆盖）
+    await mkdir(join(archiveRoot, "2026-03"), { recursive: true });
+    const marker = JSON.stringify({ type: "run.started", ts: "2025-01-01T00:00:00.000Z", marker: "pre-existing" }) + "\n";
+    await writeFile(join(archiveRoot, "2026-03", "run_conflict.jsonl"), marker, "utf8");
+
+    const output = cli(["runs", "prune", "--older-than", "7d", "--archive"], runDir);
+    const lines = output.split(/\r?\n/);
+    assert.ok(
+      lines.some((l) => l === "Skipped run_conflict.jsonl (conflict: runs-archive/2026-03/run_conflict.jsonl already exists)"),
+      "冲突报告行",
+    );
+    assert.ok(lines.some((l) => l === "Archived 0, skipped 1 (conflict), kept 0"), "计入 skipped");
+    // 原文件留在原地；预置目标内容未被覆盖
+    assert.ok(existsSync(join(runDir, "run_conflict.jsonl")));
+    const target = await readFile(join(archiveRoot, "2026-03", "run_conflict.jsonl"), "utf8");
+    assert.equal(target, marker, "预置目标未被覆盖");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("R23-B1: runs prune --archive 不碰非 .jsonl 文件与子目录", async () => {
+  const { root, runDir, archiveRoot } = await makeRunTree();
+  try {
+    await writeJsonl(runDir, "run_old", [
+      { type: "run.started", ts: "2026-03-15T00:00:00.000Z" },
+    ]);
+    await writeFile(join(runDir, "notes.txt"), "not a transcript", "utf8");
+    await mkdir(join(runDir, "subdir"));
+    await writeJsonl(join(runDir, "subdir"), "run_nested", [
+      { type: "run.started", ts: "2026-03-15T00:00:00.000Z" },
+    ]);
+
+    const output = cli(["runs", "prune", "--older-than", "7d", "--archive"], runDir);
+    assert.ok(output.includes("Archived 1, skipped 0 (conflict), kept 0"), "只处置顶层超龄 jsonl");
+    // 非 jsonl 与子目录原样留在 runDir
+    assert.ok(existsSync(join(runDir, "notes.txt")));
+    assert.ok(existsSync(join(runDir, "subdir", "run_nested.jsonl")));
+    // 只有顶层超龄 jsonl 进归档
+    assert.ok(existsSync(join(archiveRoot, "2026-03", "run_old.jsonl")));
+    assert.ok(!existsSync(join(archiveRoot, "2026-03", "run_nested.jsonl")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
