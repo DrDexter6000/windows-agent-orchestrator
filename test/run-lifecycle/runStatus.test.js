@@ -192,6 +192,165 @@ test("M9-3A-05: fixed nowFn → secondsSinceActivity exact", async () => {
 });
 
 // ---------------------------------------------------------------------
+// TD-113（2026-08-20）: CLI status 写活动重复计数器。
+// 长文档/大文件写入期间分清"在推进"还是"卡死"：file_written 的
+// lastActivitySummary 带末尾同名写入计数。真实 transcript 中 file_written
+// 永不相邻（四个 parser 都在其前紧邻 push tool_result），所以计数在
+// file_written 子序列上做（交错不算断）；数据来源是调用点的绑定 scope
+// （外 run 尾条不灌进计数——R23-B 探针在 boundReadSweep.test.js）；时钟复用
+// getRunStatus 既有 _now（测试传固定 now）。
+// ---------------------------------------------------------------------
+
+test("TD-113-DEFAULT: describeActivity 不传第二参 → 输出与既有单事件形式逐字节一致（缺省行为钉）", () => {
+  assert.deepEqual(
+    describeActivity({ kind: "file_written", path: "D:/proj/docs/report.md" }),
+    { lastActivityKind: "在写文件", lastActivitySummary: "report.md" },
+    "file_written 缺省 = 仅 basename，无计数后缀（字节级一致）",
+  );
+  assert.deepEqual(
+    describeActivity({ kind: "command", command: "npm test" }),
+    { lastActivityKind: "跑命令", lastActivitySummary: "npm test" },
+    "非 file_written kind 不受签名演进影响",
+  );
+  assert.deepEqual(
+    describeActivity(null),
+    { lastActivityKind: null, lastActivitySummary: null },
+    "null 事件缺省路径不变",
+  );
+});
+
+test("TD-113-UNIT: 交错夹具 — file_written(A)→tool_result→file_written(A)→tool_result→file_written(A) → ×3（交错不算断）", () => {
+  const A = "D:/proj/docs/report.md";
+  const fw = (seq) => ({ kind: "file_written", path: A, seq });
+  const tr = (seq) => ({ kind: "tool_result", tool: "Write", seq });
+  // scope 形状对齐真实 parser：file_written 前紧邻 tool_result，中间还可
+  // 交错 message/thinking 等任何事件；末条 file_written 即被描述的 ev。
+  const priorEvents = [
+    { kind: "message", role: "assistant", seq: 1 },
+    fw(2), tr(3), fw(4), tr(5), fw(6),
+  ];
+  const ev = priorEvents[priorEvents.length - 1];
+  assert.deepEqual(
+    describeActivity(ev, { priorEvents, now: () => 0 }),
+    { lastActivityKind: "在写文件", lastActivitySummary: "写 report.md ×3（最近）" },
+    "file_written 子序列末段 3 条同 path → ×3",
+  );
+});
+
+test("TD-113-BOUNDARY: 不同 path 的 file_written 即断；全文比较（同 basename 不同目录不算同名续写）", () => {
+  const tr = (seq) => ({ kind: "tool_result", tool: "Write", seq });
+  // (a) A → B 收尾：B 的末段只有自己 → ×1。
+  assert.deepEqual(
+    describeActivity(
+      { kind: "file_written", path: "D:/proj/docs/b.txt" },
+      { priorEvents: [{ kind: "file_written", path: "D:/proj/src/a.txt" }, tr(2), { kind: "file_written", path: "D:/proj/docs/b.txt" }], now: () => 0 },
+    ),
+    { lastActivityKind: "在写文件", lastActivitySummary: "写 b.txt ×1（最近）" },
+    "不同 path 即断 → ×1",
+  );
+  // (b) A → A → B 收尾：B 仍 ×1（前面的 A/A 与 B 不同名，不续）。
+  assert.deepEqual(
+    describeActivity(
+      { kind: "file_written", path: "D:/proj/docs/b.txt" },
+      { priorEvents: [{ kind: "file_written", path: "D:/proj/src/a.txt" }, { kind: "file_written", path: "D:/proj/src/a.txt" }, { kind: "file_written", path: "D:/proj/docs/b.txt" }], now: () => 0 },
+    ),
+    { lastActivityKind: "在写文件", lastActivitySummary: "写 b.txt ×1（最近）" },
+  );
+  // (c) 同 basename、不同目录：path 全文不同 → 不算同名续写。
+  assert.deepEqual(
+    describeActivity(
+      { kind: "file_written", path: "D:/other/src/a.txt" },
+      { priorEvents: [{ kind: "file_written", path: "D:/proj/src/a.txt" }, { kind: "file_written", path: "D:/other/src/a.txt" }], now: () => 0 },
+    ),
+    { lastActivityKind: "在写文件", lastActivitySummary: "写 a.txt ×1（最近）" },
+    "计数按全文 path 比较（显示才用 basename）",
+  );
+});
+
+test("TD-113-1: getRunStatus 交错写序列 → lastActivitySummary = 写 report.md ×3（最近），kind/ts/age 照旧", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td113-1-"));
+  try {
+    const runDir = join(dir, "runs");
+    const runId = "run_td113_1";
+    const A = "D:/proj/docs/report.md";
+    writeTranscript(runDir, runId,
+      ev({ type: "run.submitted", ts: "2026-08-20T00:00:00.000Z", runId, agentId: "coder_hq", seq: 1 }) +
+      ev({ type: "run.state_change", to: "running", reason: "started", ts: "2026-08-20T00:00:01.000Z", runId, agentId: "coder_hq", seq: 2 }) +
+      ev({ type: "run.event", kind: "tool_use", tool: "Write", input: { file_path: A }, ts: "2026-08-20T00:00:02.000Z", runId, agentId: "coder_hq", seq: 3 }) +
+      ev({ type: "run.event", kind: "file_written", path: A, ts: "2026-08-20T00:00:03.000Z", runId, agentId: "coder_hq", seq: 4 }) +
+      ev({ type: "run.event", kind: "tool_result", tool: "Write", ts: "2026-08-20T00:00:04.000Z", runId, agentId: "coder_hq", seq: 5 }) +
+      ev({ type: "run.event", kind: "tool_use", tool: "Write", input: { file_path: A }, ts: "2026-08-20T00:00:05.000Z", runId, agentId: "coder_hq", seq: 6 }) +
+      ev({ type: "run.event", kind: "file_written", path: A, ts: "2026-08-20T00:00:06.000Z", runId, agentId: "coder_hq", seq: 7 }) +
+      ev({ type: "run.event", kind: "tool_result", tool: "Write", ts: "2026-08-20T00:00:07.000Z", runId, agentId: "coder_hq", seq: 8 }) +
+      ev({ type: "run.event", kind: "file_written", path: A, ts: "2026-08-20T00:00:08.000Z", runId, agentId: "coder_hq", seq: 9 }),
+    );
+    const fixedNow = () => new Date("2026-08-20T00:00:11.000Z").getTime();
+    const result = await getRunStatus({ runId, runDir, nowFn: fixedNow });
+    assert.equal(result.lastActivityKind, "在写文件", "kind 不变");
+    assert.equal(result.lastActivitySummary, "写 report.md ×3（最近）", "交错 3 次同名写入 → ×3");
+    assert.equal(result.lastActivityTs, "2026-08-20T00:00:08.000Z", "ts = 末条 run.event（第 3 次写入）");
+    assert.equal(result.secondsSinceActivity, 3, "固定时钟下 age 照旧（复用同一 _now）");
+    assert.equal(result.lastActivityEventKind, "file_written", "machine kind 不变");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-113-2: 单次写入 → ×1；换文件收尾 → 新文件 ×1；非写活动摘要不受计数影响（字节级）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td113-2-"));
+  try {
+    const runDir = join(dir, "runs");
+    // (a) 单次写入 + 一次换文件收尾：末条是新文件 → ×1。
+    const runIdA = "run_td113_2a";
+    writeTranscript(runDir, runIdA,
+      ev({ type: "run.submitted", ts: "2026-08-20T00:00:00.000Z", runId: runIdA, agentId: "coder_hq", seq: 1 }) +
+      ev({ type: "run.event", kind: "file_written", path: "D:/proj/src/a.txt", ts: "2026-08-20T00:00:01.000Z", runId: runIdA, agentId: "coder_hq", seq: 2 }) +
+      ev({ type: "run.event", kind: "tool_result", tool: "Write", ts: "2026-08-20T00:00:02.000Z", runId: runIdA, agentId: "coder_hq", seq: 3 }) +
+      ev({ type: "run.event", kind: "file_written", path: "D:/proj/docs/b.md", ts: "2026-08-20T00:00:03.000Z", runId: runIdA, agentId: "coder_hq", seq: 4 }),
+    );
+    const a = await getRunStatus({ runId: runIdA, runDir, nowFn: () => new Date("2026-08-20T00:00:10.000Z").getTime() });
+    assert.equal(a.lastActivitySummary, "写 b.md ×1（最近）", "不同 path 即断 → 新文件 ×1");
+
+    // (b) 末条活动是 command（scope 上下文照传）：摘要保持既有形式，不带计数。
+    const runIdB = "run_td113_2b";
+    writeTranscript(runDir, runIdB,
+      ev({ type: "run.submitted", ts: "2026-08-20T00:00:00.000Z", runId: runIdB, agentId: "coder_hq", seq: 1 }) +
+      ev({ type: "run.event", kind: "file_written", path: "D:/proj/src/a.txt", ts: "2026-08-20T00:00:01.000Z", runId: runIdB, agentId: "coder_hq", seq: 2 }) +
+      ev({ type: "run.event", kind: "command", command: "npm test", ts: "2026-08-20T00:00:02.000Z", runId: runIdB, agentId: "coder_hq", seq: 3 }),
+    );
+    const b = await getRunStatus({ runId: runIdB, runDir, nowFn: () => new Date("2026-08-20T00:00:10.000Z").getTime() });
+    assert.deepEqual(
+      { lastActivityKind: b.lastActivityKind, lastActivitySummary: b.lastActivitySummary },
+      { lastActivityKind: "跑命令", lastActivitySummary: "npm test" },
+      "非 file_written 末活动：计数上下文不改变既有摘要（字节级）",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-113-3: 回扫上界 200 条事件 — 250 条连续同名写入按 200 截断（×200）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td113-3-"));
+  try {
+    const runDir = join(dir, "runs");
+    const runId = "run_td113_3";
+    const A = "D:/proj/big/report.md";
+    // 250 条连续 file_written(A)（计数在子序列上做，连续形状与交错形状同值；
+    // 回扫上界按"检视的事件条数"计 → 第 201 条以前截断 → N=200）。
+    const writes = Array.from({ length: 250 }, (_, i) =>
+      ev({ type: "run.event", kind: "file_written", path: A, ts: `2026-08-20T00:00:${String(i % 60).padStart(2, "0")}.${String(i).padStart(3, "0")}Z`, runId, agentId: "coder_hq", seq: i + 2 }),
+    ).join("");
+    writeTranscript(runDir, runId,
+      ev({ type: "run.submitted", ts: "2026-08-20T00:00:00.000Z", runId, agentId: "coder_hq", seq: 1 }) + writes,
+    );
+    const result = await getRunStatus({ runId, runDir, nowFn: () => new Date("2026-08-20T00:01:00.000Z").getTime() });
+    assert.equal(result.lastActivitySummary, "写 report.md ×200（最近）", "超出回扫上界按 200 截断");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
 // M12-17-S1..S5: submitted-stage executionStage is ADDITIVE to getRunStatus —
 // same read-only snapshot, closed-set projection, deterministic age, no
 // payload echo.

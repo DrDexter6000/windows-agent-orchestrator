@@ -1644,6 +1644,41 @@ test("R20-L4-1: 方向性钉 — 混合信封 transcript 只从绑定子集投�
   } finally { cleanupDir(dir); }
 });
 
+// ----- R23-B（2026-08-20，TD-113）：runStatus 重复写计数的数据源 = 绑定 scope -----
+
+test("R23-B-1: 篡改探针 — 外 run 尾条 file_written 不灌进重复写计数（数据源=绑定 scope，非裸 events）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r23b-1-"));
+  try {
+    const runId = "run_r23b_1";
+    const A = "D:/proj/docs/report.md";
+    // 本 run：file_written(A) → tool_result → file_written(A) → tool_result →
+    // file_written(A)（真实 parser 形状——file_written 前紧邻 tool_result，
+    // 计数在 file_written 子序列上做，交错不算断 → ×3）。
+    const lines = [
+      { type: "run.submitted", runId, agentId: "coder_hq", ts: "2026-08-20T00:00:00.000Z", seq: 1 },
+      { type: "run.state_change", runId, agentId: "coder_hq", from: "pending", to: "running", reason: "started", ts: "2026-08-20T00:00:01.000Z", seq: 2 },
+      { type: "run.event", kind: "file_written", path: A, runId, agentId: "coder_hq", ts: "2026-08-20T00:00:02.000Z", seq: 3 },
+      { type: "run.event", kind: "tool_result", tool: "Write", runId, agentId: "coder_hq", ts: "2026-08-20T00:00:03.000Z", seq: 4 },
+      { type: "run.event", kind: "file_written", path: A, runId, agentId: "coder_hq", ts: "2026-08-20T00:00:04.000Z", seq: 5 },
+      { type: "run.event", kind: "tool_result", tool: "Write", runId, agentId: "coder_hq", ts: "2026-08-20T00:00:05.000Z", seq: 6 },
+      { type: "run.event", kind: "file_written", path: A, runId, agentId: "coder_hq", ts: "2026-08-20T00:00:06.000Z", seq: 7 },
+    ];
+    writeFileSync(join(dir, `${runId}.jsonl`), `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
+    // 外 run 伪造尾条：同 path 的 file_written（若计数读裸 events，该行既是
+    // lastActivity 供给者又把计数灌成 ×4）。
+    appendForeignLine(join(dir, `${runId}.jsonl`), {
+      type: "run.event", kind: "file_written", path: A, runId: "run_evil", agentId: "coder_hq",
+    });
+
+    const s = await getRunStatus({ runId, runDir: dir, nowFn: () => Date.parse("2026-08-20T00:00:10.000Z") });
+    assert.equal(s.lastActivityKind, "在写文件", "心跳仍来自本 run 末条绑定 run.event");
+    assert.equal(s.lastActivityTs, "2026-08-20T00:00:06.000Z", "ts = 本 run 第 3 次写入（外 run 尾条不供给）");
+    assert.equal(s.lastActivitySummary, "写 report.md ×3（最近）",
+      "计数数据源=调用点绑定 scope：外 run 同名尾条既不夺心跳也不把计数灌成 ×4（TD-113）");
+    assert.equal(s.secondsSinceActivity, 4, "固定时钟下 age 只看本 run 心跳");
+  } finally { cleanupDir(dir); }
+});
+
 // ----- M2：runList 每行 state/terminal（stem 权威） -----
 
 test("R20-LST-1: 篡改探针 — runs list 每行 state/terminal 只由本 run 绑定事件计算（stem 即权威 runId）", async () => {

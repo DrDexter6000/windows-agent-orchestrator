@@ -2776,6 +2776,31 @@ test("TD-75 补全: lastActivityKind 按事件 kind 映射成 Lead 可读活动�
   }
 });
 
+test("TD-113: status 重复同名写活动计数 — 交错不算断，lastActivitySummary = 写 out.txt ×3（最近）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-hb-repeat-"));
+  try {
+    // 真实 parser 形状：file_written 前紧邻 tool_result（transcript 中
+    // file_written 永不相邻），计数必须在 file_written 子序列上做。
+    writeFileSync(join(dir, "run_hbr.jsonl"),
+      JSON.stringify({ type: "run.submitted", agentId: "coder_hq", ts: "2026-06-28T18:40:00.000Z" }) + "\n" +
+      JSON.stringify({ type: "run.event", kind: "file_written", path: "D:/proj/out.txt", ts: "2026-06-28T18:40:01.000Z" }) + "\n" +
+      JSON.stringify({ type: "run.event", kind: "tool_result", tool: "Write", ts: "2026-06-28T18:40:02.000Z" }) + "\n" +
+      JSON.stringify({ type: "run.event", kind: "file_written", path: "D:/proj/out.txt", ts: "2026-06-28T18:40:03.000Z" }) + "\n" +
+      JSON.stringify({ type: "run.event", kind: "tool_result", tool: "Write", ts: "2026-06-28T18:40:04.000Z" }) + "\n" +
+      JSON.stringify({ type: "run.event", kind: "file_written", path: "D:/proj/out.txt", ts: "2026-06-28T18:40:05.000Z" }) + "\n");
+    const out = await captureLog(async () => {
+      await statusCommand(["run_hbr", "--run-dir", dir], { runDir: dir });
+    });
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.lastActivityKind, "在写文件");
+    assert.equal(parsed.lastActivitySummary, "写 out.txt ×3（最近）",
+      "末尾同名写入 ×3（长文档/大文件写入期间分清在推进还是卡死）");
+    assert.equal(parsed.lastActivityTs, "2026-06-28T18:40:05.000Z");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
 test("TD-75: status 无 run.event 时 lastActivityTs=null（纯启动失败）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-hb-empty-"));
   try {

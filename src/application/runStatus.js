@@ -50,13 +50,66 @@ function truncate(s, n) {
   return t.length > n ? t.slice(0, n) + "…" : t;
 }
 
+// TD-113（2026-08-20）: backward-scan ceiling for the repeat write counter,
+// counted in examined events (interleaved ones included). A same-path run
+// longer than the ceiling is truncated at 200 — enough to tell "在推进" from
+// "卡死" without scanning an unbounded transcript.
+const WRITE_REPEAT_SCAN_LIMIT = 200;
+
+/**
+ * TD-113: count the trailing run of same-path file_written events.
+ * Real transcripts never place file_written events adjacently (every parser
+ * pushes a tool_result immediately before file_written), so the count is taken
+ * on the file_written SUBSEQUENCE: walk `priorEvents` backwards, skip any
+ * interleaved event (tool_use/tool_result/message/thinking/...), stop at the
+ * first file_written with a DIFFERENT path. Path compare is full-path, not
+ * basename — two same-named files in different directories are different
+ * writes (only the display stays basename, as TD-75 always rendered).
+ * The scan examines at most WRITE_REPEAT_SCAN_LIMIT events (truncated there).
+ *
+ * Contract: `priorEvents` is the caller's bound scope and contains the event
+ * being described as its last file_written, so the loop always counts it.
+ * A mismatched caller shape degrades to "just this write" (N=1), never ×0.
+ *
+ * @param {Array} priorEvents 调用点传入的绑定作用域（含末条 file_written 自身）
+ * @param {string} path 末条 file_written 的 path（全文比较）
+ * @returns {number} N ≥ 1
+ */
+function countRecentSamePathWrites(priorEvents, path) {
+  let n = 0;
+  let scanned = 0;
+  for (let i = priorEvents.length - 1; i >= 0 && scanned < WRITE_REPEAT_SCAN_LIMIT; i -= 1) {
+    scanned += 1;
+    const e = priorEvents[i];
+    if (!e || e.kind !== "file_written") continue; // 跳过交错的任何事件
+    if (e.path !== path) break; // 不同 path 的 file_written 即断
+    n += 1;
+  }
+  return Math.max(n, 1);
+}
+
 /**
  * TD-75: Map a run.event to a Lead-readable activity kind + summary.
  * Human labels (Chinese) are the existing CLI contract — preserved exactly.
+ *
+ * TD-113: optional second argument carries the call-site scope context.
+ * `priorEvents` is the caller's bound scope array (the same array `ev` was
+ * found in — the counter's ONLY data source; the raw `events` read must never
+ * feed it, see R23-B in test/run-lifecycle/boundReadSweep.test.js). `now` is
+ * the caller's injectable clock — getRunStatus passes its single `_now`
+ * (the one secondsSinceActivity already uses); this function never defaults
+ * to a second Date.now. Without the argument the output is byte-identical to
+ * the legacy single-event form (TD-113-DEFAULT pins it); with it, a trailing
+ * file_written also reports the repeat count of same-path writes as
+ * `写 <file> ×N（最近）` (N ≥ 999 renders as `×~999`).
+ *
  * @param {object|null} ev
+ * @param {object} [ctx]
+ * @param {Array} [ctx.priorEvents] — 调用点绑定作用域（计数需要调用点传入 scope 上下文）
+ * @param {Function} [ctx.now] — 调用点既有可注入时钟（与 secondsSinceActivity 同源）
  * @returns {{lastActivityKind: string|null, lastActivitySummary: string|null}}
  */
-function describeActivity(ev) {
+function describeActivity(ev, { priorEvents, now } = {}) {
   if (!ev) return { lastActivityKind: null, lastActivitySummary: null };
   switch (ev.kind) {
     case "message":
@@ -69,8 +122,17 @@ function describeActivity(ev) {
       return { lastActivityKind: `用工具 ${ev.tool ?? "?"}`, lastActivitySummary: summarizeToolInput(ev.tool, ev.input) };
     case "tool_result":
       return { lastActivityKind: "收工具结果", lastActivitySummary: `${ev.tool ?? "?"} 返回${ev.isError ? "（错误）" : ""}` };
-    case "file_written":
-      return { lastActivityKind: "在写文件", lastActivitySummary: basenameSafe(ev.path ?? "") };
+    case "file_written": {
+      const name = basenameSafe(ev.path ?? "");
+      // TD-113: without scope context the summary stays the legacy
+      // byte-identical basename-only form; with it, append the repeat count.
+      if (!Array.isArray(priorEvents)) {
+        return { lastActivityKind: "在写文件", lastActivitySummary: name };
+      }
+      const n = countRecentSamePathWrites(priorEvents, ev.path);
+      const count = n >= 999 ? "×~999" : `×${n}`;
+      return { lastActivityKind: "在写文件", lastActivitySummary: `写 ${name} ${count}（最近）` };
+    }
     case "runtime_activity": {
       const summaries = {
         initialized: "provider 已初始化",
@@ -165,7 +227,13 @@ export async function getRunStatus({
   const secondsSinceActivity = lastActivityTs
     ? Math.round((_now() - new Date(lastActivityTs).getTime()) / 1000)
     : null;
-  const { lastActivityKind, lastActivitySummary } = describeActivity(lastActivity);
+  // TD-113: the repeat-write counter reads the SAME bound scope (`scope`, not
+  // the raw `events` array) and reuses the SAME injectable clock `_now` — no
+  // second clock, no unscoped counting (foreign-run tail lines stay out).
+  const { lastActivityKind, lastActivitySummary } = describeActivity(lastActivity, {
+    priorEvents: scope,
+    now: _now,
+  });
 
   // M12-17: submitted-stage execution semantics — pure closed-set projection
   // over the SAME read-only snapshot, bound to the requested runId. Same
@@ -199,5 +267,10 @@ export async function getRunStatus({
   };
 }
 
-// Exported for CLI adapter reuse (avoids a second copy of the algorithm).
+// Exported for test reuse only (the CLI adapter goes through getRunStatus;
+// no production caller imports these directly anymore). TD-113: the repeat
+// write counter needs the call site to pass scope context — `priorEvents`
+// (the bound scope the event was found in) and `now` (the caller's clock) —
+// via the optional second argument; without it the output stays the legacy
+// single-event form.
 export { describeActivity, describeLastEventMeaning };
