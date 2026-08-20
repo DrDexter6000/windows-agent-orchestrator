@@ -29,6 +29,7 @@ Before expanding work, stop at the first true line: (1) It does not block the cu
 2. Truly independent tasks: dispatch workers in parallel.
 3. Tiny, tightly coupled, or Lead-context-heavy work: the Lead may do it directly.
 4. Add a Tester when independent execution evidence is useful. The canonical `agentId` `auditor` is one Chief-Advisor/Auditor expert: advisory mode before execution or audit mode after delivery.
+5. Hard check: when `verificationCommands` contains the full suite (`npm test`), the dispatch must explicitly declare `verificationTimeoutMs ≥ 900000` — the shared default 300000 reliably hits `command_timeout` against the ~11-minute full suite (2026-08-20 measured; TD-138).
 
 Choose via `docs/team-roles.md` + the registry; the Lead owns the verdict. Route by **semantic coupling** (ambiguity, long-horizon coherence, acceptance clarity, independent parallelism, modality, provider health/cost) — do not route mechanically by `Low`/`HQ`/name. `coder_low` 是 bounded implementation lane；高耦合或需要长程连贯上下文的工作优先 `coder_hq`；多模态/视觉/创意用 `coder_mm`. Owner 劝诫（2026-08-15，advisory）：多数实现任务优先 `coder_hq`. File count, prompt length, and elapsed time are not automatic routing or reassignment triggers; a worker reports concrete blockers and 拆分与转派由 Lead 决定.
 
@@ -71,6 +72,8 @@ Worker self-report is evidence, not acceptance; `verification=passed` alone is n
 4. The Lead owns the final decision even when all deterministic gates pass.
 
 On failure, the Lead decides the response from delivery truth + supplementary diagnosis; do not auto-turn a failure into a new feature/remediation project.
+
+并行会话交错集成后（各会话验证的绿只是"冻结基线 + 自己改动"，git 零冲突不证明语义不冲突），必须在**集成后的 main** 上跑一次全量 `npm test` 终验，绿了才可收口——收口报告的 mainline 行以此为前置。措辞如实：这是规程强制，无机器面（TD-135/TD-138 登记同款边界）。
 
 ## Advisor / Auditor Discipline
 

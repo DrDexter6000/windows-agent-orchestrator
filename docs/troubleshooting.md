@@ -411,7 +411,8 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 
 ### 8.1 npm test exit 1 但失败全为 isolation_pass（并发互踩，非代码回归）
 
-- **症状**：全量 exit 1，stderrTail 中每一条失败分类行都是 `[canonical] isolation ... ⇒ isolation_pass`（首轮红、单文件隔离复跑绿）；无 `stable_fail`、无 `environment_invalid`、无其他形状的 fail。在 delivery verification / reverify 里表现为验证命令 `npm test` 失败（stderrTail 经 R17/W1 已携带 [canonical] 行全文，一次读取即可定位文件与分类）。
+- **症状**：全量 exit 1，stderrTail 中每一条失败分类行都是 `[canonical] isolation ... ⇒ isolation_pass`（首轮红、单文件隔离复跑绿）；无 `stable_fail`、无 `environment_invalid`、无其他形状的 fail。在 delivery verification / reverify 里表现为验证命令 `npm test` 失败。
+- **第一反应（三步，按序）**：① 读 `delivery_verification_*` 事件的 `stderrTail`——经 R17/W1 已携带 [canonical] 行全文，一次读取即得**文件名 + 波次 + 类别**；② 查 canonical 结构化报告的 isolation 分类行（`[canonical] isolation ... ⇒ isolation_pass` 形状，确认无 `stable_fail`/`environment_invalid` 混入）；③ 按本节判定规则处置——全为 `isolation_pass` ⇒ 错峰后再走**单次 reverify**，不走 reject。
 - **2026-08-19 并发实证（TD-130）**：两会话并行时同机并发 `npm test` 互踩，放大该家族——单日 5 个文件 × 8 轮次（`mcpWorkspaceSmoke` / `runWait` / `processBackend` / `mcpBind` / `mcpRunDeliveryReverify`，跨文件跨波）；两轮撞车后只剩 reject+前作集成可走，浪费一整轮验证预算。机器空闲时顺序复跑恒绿（worker 自跑 + Lead 复跑双证）。
 - **判定规则（闭集）**：
   - **条件**：`npm test` exit 1，且 stderrTail 中**全部**条目为 `isolation_pass` 分类行（无 `stable_fail`、无 `environment_invalid`、无其他 fail）。

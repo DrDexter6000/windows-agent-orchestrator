@@ -26,6 +26,18 @@ function read(rel) {
   return readFileSync(join(ROOT, rel), "utf8");
 }
 
+/** 切 markdown 表格行单元格（跳过行首管道，丢弃行尾管道产生的空尾件）。
+ * R23-A（2026-08-20）：code span（`...`）内的管道不作分隔符——TD 行内容常含
+ * "a|b" 形状字面量（如 TD-63 偿还列的 reason:"no_rules"|"failed_before_scorecard"），
+ * 裸 split 会把单元格切残、把内容片段误当"偿还于"列。 */
+function splitRowCells(line) {
+  const masked = line.replace(/`[^`]*`/g, (span) => span.replaceAll("|", "\u0000"));
+  const pieces = masked.split("|");
+  const cells = pieces.slice(1).map((p) => p.replaceAll("\u0000", "|"));
+  while (cells.length > 0 && cells[cells.length - 1].trim() === "") cells.pop();
+  return cells;
+}
+
 /** 收集所有 opencode-serve serveUrl 端口（形如 :4297）。 */
 function collectServePorts(text) {
   const out = [];
@@ -692,13 +704,22 @@ test("tech-debt.md 已偿还 TD 每条必须填'偿还信息'（TD-81：偿还�
   // 元发现（2026-07-02 核实 friction log 时挖出）：TD 表"已偿还"声明 vs 代码事实之间
   // 没有机器守卫。本仓是 snapshot（原始 commit 在私有仓库，无 hash 可溯），某条 TD 标 ✅
   // 但偿还信息空/残缺时，没有测试会红。本断言守住最低底线：凡是进了"## 已偿还"区的
-  // 条目，"偿还于"列（第4列）必须非空且含可识别的偿还标记（里程碑/日期/已落地语）。
+  // 条目，"偿还于"列必须非空且含可识别的偿还标记（里程碑/日期/已落地语）。
   //
   // 这是"偿还声明自身一致性"守卫，不是"代码事实"守卫——后者需对每条 TD 手写源文件映射，
   // 成本高且 TD 描述非结构化。本守卫只抓"误标已偿还但忘填偿还信息"类漂移，是有意收窄。
   // 真实代码回退漂移仍需人工核对（见 06-28 friction log 二次核实表的做法）。
   //
   // 偿还标记：里程碑(M\d)、日期(2026-)、或显式偿还语(当场修/修复/落地/已解/清零/偿还)。
+  //
+  // R23-A（2026-08-20）空转修复：原正则 /^\|(TD-\d+)\|/ 要求管道后无空格，而真实表
+  // 行是 "| TD-1 | ..."（带空格）——实测 78 行 0 命中，本守卫自 2026-07-02 落地起
+  // 从未真正执行过。两处修复：
+  //   (a) 行首改 /^\|\s*(TD-\d+)\s*\|/；
+  //   (b) "偿还于"列改取**行内最后一个非空单元格**——本区混列宽（4 格 / 5 格并存），
+  //       固定索引 m[4] 对 5 格行读到的是内容列。分格用 splitRowCells（code span 内
+  //       管道不算分隔符）。词表补 🟢/✅：取最后单元格后，TD-79 偿还列的完成语是
+  //       emoji 图标（"🟢 工具域"），如实扩表。
   const td = read("docs/tech-debt.md");
   const repaidStart = td.indexOf("## 已偿还");
   const repaidEnd = td.indexOf("\n---", repaidStart);
@@ -706,13 +727,26 @@ test("tech-debt.md 已偿还 TD 每条必须填'偿还信息'（TD-81：偿还�
   const repaidSection = td.slice(repaidStart, repaidEnd === -1 ? undefined : repaidEnd);
 
   // 命中：已偿还表的 TD 行。列分隔 = | TD-XX | 登记于 | 内容 | 偿还于 |
-  const tdRow = /^\|(TD-\d+)\|([^|]*)\|([^|]*)\|([^|]*)\|/;
+  const tdRow = /^\|\s*(TD-\d+)\s*\|/;
 
-  for (const line of repaidSection.split("\n")) {
+  const sectionLines = repaidSection.split("\n");
+  const parsedRows = [];
+  for (const line of sectionLines) {
     const m = line.match(tdRow);
-    if (!m) continue;
-    const id = m[1].trim();
-    const repaidCol = m[4].trim();
+    if (m) parsedRows.push({ id: m[1], line });
+  }
+
+  // 非空性断言（R23-A，防空转复刻）：解析命中数 > 0，且等于区内 "^| TD-" 形状行数。
+  const shapeCount = sectionLines.filter((l) => /^\| TD-/.test(l)).length;
+  assert.ok(parsedRows.length > 0,
+    "已偿还区解析到 0 条 TD 行——守卫空转（区块结构或行首正则又漂了）");
+  assert.equal(parsedRows.length, shapeCount,
+    `已偿还区解析 ${parsedRows.length} 行 ≠ 形状行数 ${shapeCount}——存在解析不到的 TD 行（列宽漂移），守卫部分空转`);
+
+  for (const { id, line } of parsedRows) {
+    const cells = splitRowCells(line).filter((c) => c.trim() !== "");
+    assert.ok(cells.length > 0, `${id} 整行无内容单元格`);
+    const repaidCol = cells[cells.length - 1].trim();
 
     // 偿还列不能为空或仅标点。
     assert.ok(
@@ -721,8 +755,8 @@ test("tech-debt.md 已偿还 TD 每条必须填'偿还信息'（TD-81：偿还�
     );
     // 偿还列必须含可识别的偿还标记。
     assert.ok(
-      /M\d|2026|当场修|修复|落地|已解|清零|偿还|已实现|修正|闭环/.test(repaidCol),
-      `${id} 的"偿还于"列缺少可识别的偿还标记（里程碑/日期/偿还语）：\n  "${repaidCol.slice(0, 60)}..."`
+      /M\d|2026|当场修|修复|落地|已解|清零|偿还|已实现|修正|闭环|🟢|✅/.test(repaidCol),
+      `${id} 的"偿还于"列缺少可识别的偿还标记（里程碑/日期/偿还语/完成图标）：\n  "${repaidCol.slice(0, 60)}..."`
     );
   }
 });
@@ -3108,4 +3142,83 @@ test("R12-C C-1/C-2/C-3/C-5: usage.md retry 节诚实化锚（继承权威 + 范
     "C-5：必须文档化缺 run.started（R10 前）的旧格式宽容路径");
   assert.ok(/按\*\*零覆盖\*\*放行/.test(section),
     "C-5：必须声明旧格式按零覆盖放行（与 resume 的拒绝语义不同但各自正确）");
+});
+
+// ---------------------------------------------------------------------------
+// R23-A（2026-08-20）登记簿库卫生轮次新增守卫：开放区结构不变量、TD 编号唯一、
+// SKILL P6 诚实锚点。
+// ---------------------------------------------------------------------------
+
+test("TD-81 结构守卫：开放区不得有'带完成标记且整行无残留子句'的行（R23-A）", () => {
+  // 不变量：开放（🟡）区的登记行，要么不带完成标记（还在欠着），要么带完成标记的
+  // 同时显式写明残余部分。R23-A 起因：11 行"🟢 已修复/已偿还"滞留开放区且行内无任
+  // 何残余表述——登记簿与代码事实漂移，靠人工逐行符号核对才发现。本守卫把该不变
+  // 量机器化，命中即红，二选一处置：已全部落地 → 销账移入"## 已偿还"区（列映射：
+  // 类别列以【】前缀并入内容列）；仍有残余 → 补一句显式残留子句（还剩什么/何时处理）。
+  //
+  // 扫描方式 = 整行子串扫描，不按列索引实现：开放区列宽混乱（5 格 / 4 格并存，
+  // TD-116 正文含裸管道成 15 格），按列读取必错。两词族都是闭集（下方字面量）。
+  const td = read("docs/tech-debt.md");
+  const openStart = td.indexOf("## 开放");
+  const openEnd = td.indexOf("## 设计性约束", openStart);
+  assert.ok(openStart !== -1 && openEnd !== -1,
+    "docs/tech-debt.md 缺少 '## 开放'/'## 设计性约束' 区块边界");
+  const openSection = td.slice(openStart, openEnd);
+
+  const COMPLETION_MARKERS = ["🟢", "✅", "已偿还", "已修复", "已解", "已落地"];
+  const RESIDUAL_CLAUSES = [
+    "残留", "残余", "未覆盖", "不覆盖", "未做", "仍开放", "保持开放", "留后", "留待",
+    "未完全", "明确不做", "维持登记", "登记维持", "留观察", "待真实", "待真需求",
+    "待触发", "根因未定位", "保持分开登记", "验证靠真实 dogfood", "验证靠 dogfood",
+  ];
+
+  const violation = (line) => {
+    const m = line.match(/^\|\s*(TD-\d+)\s*\|/);
+    if (!m) return null;
+    if (!COMPLETION_MARKERS.some((w) => line.includes(w))) return null;
+    return RESIDUAL_CLAUSES.some((w) => line.includes(w)) ? null : m[1];
+  };
+
+  const sectionLines = openSection.split("\n");
+  // 非空性断言（R23-A，防空转复刻）：解析行数 > 0 且等于区内 "^| TD-" 形状行数。
+  const parsedCount = sectionLines.filter((l) => /^\|\s*TD-\d+\s*\|/.test(l)).length;
+  const shapeCount = sectionLines.filter((l) => /^\| TD-/.test(l)).length;
+  assert.ok(parsedCount > 0, "开放区解析到 0 条 TD 行——守卫空转（区块结构变了？）");
+  assert.equal(parsedCount, shapeCount,
+    `开放区解析 ${parsedCount} 行 ≠ 形状行数 ${shapeCount}——存在解析不到的 TD 行（列宽漂移），守卫部分空转`);
+
+  for (const line of sectionLines) {
+    const id = violation(line);
+    if (id === null) continue;
+    assert.fail(
+      `${id} 开放区行带完成标记（${COMPLETION_MARKERS.find((w) => line.includes(w))}）` +
+      `但整行无残留子句（词族：${RESIDUAL_CLAUSES.join(" / ")}）。二选一：` +
+      `已全部落地 → 移入"## 已偿还"区；仍有残余 → 补显式残留子句（还剩什么/何时处理）。`
+    );
+  }
+
+  // 合成夹具双向钉（防词族或判定逻辑写反导致守卫空转复刻——TD-81 旧守卫的教训）：
+  const syntheticClean = "| TD-90001 | 2026-08-20 合成正夹具 | 测试 | 主体已落地 | **残留**：收尾未做，留待下轮。 |";
+  const syntheticDirty = "| TD-90002 | 2026-08-20 合成负夹具 | 测试 | 全部完成 | **🟢 已修复**：一步到位，别无他事。 |";
+  const syntheticPlain = "| TD-90003 | 2026-08-20 合成无标记夹具 | 测试 | 问题描述 | 触发条件。 |";
+  assert.equal(violation(syntheticClean), null, "正夹具（完成标记+残留词）不应判红");
+  assert.equal(violation(syntheticDirty), "TD-90002", "负夹具（完成标记+无残留词）必须判红");
+  assert.equal(violation(syntheticPlain), null, "无完成标记的普通开放行不受影响");
+});
+
+test("TD 编号全文件唯一（防并行会话编号竞态合流出双号，R23-A）", () => {
+  const ids = [...read("docs/tech-debt.md").matchAll(/^\|\s*(TD-\d+)\s*\|/gm)].map((m) => m[1]);
+  assert.ok(ids.length > 0, "解析到 0 条 TD 行——守卫空转");
+  assert.equal(new Set(ids).size, ids.length,
+    `TD 编号重复（并行会话编号竞态合流？）：${ids.filter((x, i) => ids.indexOf(x) !== i).join(", ")}`);
+});
+
+test("P6 诚实锚点：SKILL.md 在场记录集成后全量终验与 verificationTimeoutMs 下限（R23-A）", () => {
+  // 本测试守的是**文档在场**，不是行为——两句都是规程条款（Lead 手动执行），无机器
+  // 面强制；与 TD-138"强制力现状 = 文档，无机器面"同一诚实口径。文档被误删时这里红。
+  const skill = read("SKILL.md");
+  assert.match(skill, /集成后的.*main.*全量.*终验/s,
+    "SKILL.md ## Acceptance 必须在场：并行会话交错集成后，在集成后的 main 上跑一次全量 npm test 终验，绿了才可收口（mainline 行以此为前置）");
+  assert.match(skill, /verificationTimeoutMs ≥ 900000/,
+    "SKILL.md ## Dispatch 必须在场：verificationCommands 含全量套件（npm test）时显式声明 verificationTimeoutMs ≥ 900000（默认 300000 对约 11 分钟全量必 command_timeout）");
 });

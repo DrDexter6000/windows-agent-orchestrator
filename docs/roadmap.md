@@ -164,7 +164,7 @@ M12-8E 候选验证：TDD focused `38/38`，补齐 MCP 七工具合同后 focuse
 
 五笔 M12-11/12 已验收提交先以普通 fast-forward 发布到 `main@dc981ca3e4088ad2bbc1e00040d37ad61fa0f95f`；Fresh Host 文字关单与 `run_wait` 参数说明两笔 follow-up 随后发布，当前发布态为 `main@8a4f5335479cabdc77f046f86971a6b75ebed956`。最终重启后的 Host 暴露精确 **21 个 MCP tools**；单次 `lead_preflight` 在该 HEAD 上得到 `workspaceSelection:selected`，workspace/workers/activeRuns 三项 `observed`，active run 为 0、`complete:true`、warnings 为空；`run_wait` 工具说明直接声明合法 `waitMs` 为 `180000..600000`、省略时默认 `270000`、`waitMs:0` 非法，并指向 `run_await_result(waitMs:0)` / `run_status` 的 point-in-time 读法。此前真实 MCP `run_wait` 对终态 run `run_20260803191330702am48mx` 提前返回 `observation.outcome:terminal`、`termination.source:completion`，且内联 `observation.terminal` / `termination.completion`；`run_await_result(waitMs:0)` 同时返回 accepted/reviewable/passed handoff 与 `delivery.reviewable`；`run_delivery` 返回 `delivery.verification_passed`，明确 verification 不等于 Lead acceptance；`run_diagnose` 对 `run_202608031547124944ce9tq` 返回 `provider_auth` 与同名语义说明。资源列表含 `wao://semantics`，按需读取 `wao://semantics/delivery.verification_passed` 得到完整三字段 note。所有调用只读，未调用模型或 worker，active run 与 Git HEAD/status 未变化。前述 M12-11/12 “本地候选、尚未发布”段保留冻结候选历史证据，但其发布状态由本段取代。更广的跨 run 历史聚合没有已验证消费者痛点，已作为非阻塞候选移出完成定义。M12-11/12 Fresh Host verdict：`PASS_M12_11_12_FRESH_HOST_SELF_DESCRIBING_WAIT_RESULTS`；M12 closeout verdict：`PASS_M12_COMPLETE`。
 
-### M12-13 delivery per-command 执行预算与 isolation_failed readiness（2026-08-08，本地验收完成，发布待授权）
+### M12-13 delivery per-command 执行预算与 isolation_failed readiness（2026-08-08，本地验收完成，已发布）
 
 **A：`delivery.verificationTimeoutMs`（Lead 可选的 per-command 执行超时/预算）**——`prepareDeliveryRequest`（`src/delivery.js` SSOT）校验整数 ms，共享闭界 `VERIFICATION_TIMEOUT_MS_MIN=1000` / `VERIFICATION_TIMEOUT_MS_MAX=7200000`（默认 `300000` 仅在字段缺失时应用），MCP zod 边界与 service 常量同源。**这不是 `run_wait`/`run_await_result` 的观察窗口**——它约束 exact verifier 的逐条 setup/assertion 命令执行。语义：非法值（字符串/小数/越界）在任何副作用（transcript append、worktree 创建、spawn/attach、打包、验证）之前以 `invalid_verification` 拒绝；仅在显式声明时持久化（`run.started.delivery`、`delivery_created` ref、verification outcome ref 零漂移）；持久值权威并贯穿 start/resume（resume 重新经 SSOT 校验，持久值损坏 → resume 拒绝 null 零副作用）、profile 折叠（profile 只供命令，Lead 声明的预算保留）、MCP dispatch/continue 与 CLI 转发、`run_dispatch_contract_check` advisory 校验、`run_delivery_repackage` 原值重建与 verifier 调用、reverify 继承（省略 `timeoutMs` 继承 ref 持久预算，持久值损坏 fail-closed，显式值同样过共享闭界）；repackage 中字段缺失仍交给 verifier 默认值，字段存在但损坏则在 inventory/Git/transcript/verify 前拒绝；执行超时投影为闭集 `command_timeout`/`setup_timeout`，从不自动加宽/重试/stop/decision。
 
@@ -259,7 +259,7 @@ Owner Dashboard 增加选中 run 的 backend/stage/terminal/event count/scope/li
 
 2026-08-13 Fresh Host 在一次性 clean synthetic repo 上真实派发 continuable `coder_low` 父 run `run_20260813105343298gigmow`，父 delivery `d28fdd4ec482ed57a6a833c60d2a1ca33c3f4f29` 修改并验证 `a.txt/b.txt/c.txt` 后由 Lead 为 continuation canary 明确 rejected。第一次 child 仅授权 `d.txt`：`run_continue` 返回 `accepted=false` / `continuation_scope_incomplete`，精确列出 inherited 与 uncovered `a.txt/b.txt/c.txt`，调用前后 run inventory 均只有父 run（零 child run、零模型调用）。Lead 随后显式授权累计 `a/b/c/d`，child `run_20260813105504682pnmeb3` 在同一 continuation lineage/worktree 中保留父三文件、只新增 `d.txt`，最终 delivery `a8e19e86d7c292633a22aa4cbf32729ea18d4f8a` verification passed、4 文件逐项审查并 accepted；active runs 回到 0，一次性仓库清理完成。Verdict：`PASS_M12_22_FRESH_HOST_CUMULATIVE_SCOPE_CONTINUATION`。
 
-### M12-23 post-M12 runtime reliability truth（2026-08-13，本地候选，发布待授权）
+### M12-23 post-M12 runtime reliability truth（2026-08-13，本地候选，已发布）
 
 Auditor 真实 fresh/resume 对照均成功：fresh `run_20260813121845752xjmrki` 返回精确 canary 文本，resume `run_20260813121903407dgqn1a` 在同一 Lead/workspace expert session 中返回另一条精确文本；两者均有非空 assistant 结果，因此没有事实支持关闭 Auditor session reuse，也没有为本对照修改产品代码。
 
@@ -269,7 +269,7 @@ TD-71 的根 delivery `run_20260813123526210jd19dv` 虽通过 focused verificati
 
 TD-48 经当前规模实测关单：CLI diagnose 只读单个 transcript；CLI dashboard 对约 1887 runs / 180MB 的全量历史扫描仍低于 5s 触发条件，不为假设规模提前增加缓存。TD-106 按 Owner 裁定归档为 WAO 非目标：Tester context efficiency 属于 Codex 产品/runtime，不在本包实现或验证范围内。
 
-### M12-24 provider capacity consumer truth（2026-08-13，本地候选，发布待授权）
+### M12-24 provider capacity consumer truth（2026-08-13，本地候选，已发布）
 
 WAO 现在明确区分三层事实：控制面可调用、registry/`lead_preflight` 可观察的是静态配置与凭据存在性，真实 provider quota/rate limit 只有实际 run 的持久终态证据才能证明。`lead_preflight.complete=true` 只表示工作区、worker inventory 与 active runs 的观察完整，不表示 provider 当前一定可执行；结果与 manual drilldown 均自带该语义，避免 Lead 把 Auditor/`coder_mm` 的五小时额度耗尽误判成 WAO 工具失效，或把工具仍可调用误判成 worker 仍有额度。
 
