@@ -25,7 +25,7 @@ import { writeFileSync, mkdirSync, rmSync, existsSync, readFileSync } from "node
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawnSync } from "node:child_process";
-import { certifyCase, summarizeCertification, mergeCaseResults } from "./reliability/certification.mjs";
+import { certifyCase, summarizeCertification, mergeCaseResults, pruneStaleCases } from "./reliability/certification.mjs";
 import { buildCertificationMatrix } from "./reliability/matrix.mjs";
 import { adversarialEscapeChecks } from "./reliability/adversarialEscape.mjs";
 import { metricsNonZeroCheck } from "./reliability/metricsCheck.mjs";
@@ -694,7 +694,10 @@ try {
 } catch {
   priorCases = []; // 无旧 summary 或解析失败 = 全新认证
 }
-const mergedCases = mergeCaseResults(priorCases, results);
+// TD-87 清算（2026-08-20）：merge 前修剪已退出矩阵的僵尸 caseId——旧 label 的
+// 陈年 case 不再拖累 worker 级最差聚合。注意 scope：MATRIX 是（可能经 --agent
+// 过滤后的）当前矩阵行，pruneStaleCases 对不在矩阵 agentIds 里的 prior 不动。
+const mergedCases = mergeCaseResults(pruneStaleCases(priorCases, MATRIX), results);
 const summary = summarizeCertification(mergedCases);
 writeFileSync(summaryPath, JSON.stringify(summary, null, 2));
 console.log(`\nSummary written to ${summaryPath}`);

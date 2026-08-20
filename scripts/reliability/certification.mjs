@@ -162,6 +162,20 @@ export function mergeCaseResults(priorCases = [], freshCases = []) {
   return [...retained, ...freshCases];
 }
 
+// TD-87 清算（2026-08-20，Owner 批准）：修剪已退出认证矩阵的僵尸 caseId。
+// 背景：mergeCaseResults 以 caseId 为键只覆盖不清理——matrix 行的 label 改名后，
+// 旧 label 的 case（典型：kimi 旧标签的历史 conditional）永远滞留，worker 级
+// 最差聚合被陈年记录拖累（coder_mm 曾因此 4 case 里 3 个僵尸 conditional）。
+// 规则：currentRows 为当前矩阵行（{agentId, label}）——prior case 满足以下任一
+// 即保留：(a) caseId 仍在矩阵 labels 里；(b) 其 agentId 不在矩阵 agentIds 里
+// （未被当前矩阵覆盖的 agent——如 legacy/孤儿记录——scope 之外不动）。
+// 纯函数；与 mergeCaseResults 组合使用（调用方先 prune 再 merge）。
+export function pruneStaleCases(priorCases = [], currentRows = []) {
+  const labels = new Set(currentRows.map((r) => r?.label).filter(Boolean));
+  const agentIds = new Set(currentRows.map((r) => r?.agentId).filter(Boolean));
+  return priorCases.filter((c) => labels.has(c.caseId) || !agentIds.has(c.agentId));
+}
+
 function summarizeWorkers(cases) {
   const workers = {};
   const byAgent = new Map();

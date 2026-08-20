@@ -5,6 +5,7 @@ import {
   certifyCase,
   summarizeCertification,
   mergeCaseResults,
+  pruneStaleCases,
 } from "../../scripts/reliability/certification.mjs";
 
 function check(name, pass, category, extra = {}) {
@@ -408,4 +409,71 @@ test("mergeCaseResults: 空 fresh = 仅保留旧 case（幂等，不清空）", 
   const merged = mergeCaseResults(prior, []);
   assert.equal(merged.length, 1, "空 fresh 不应清空已有结果");
   assert.equal(merged[0].caseId, "old");
+});
+
+// --- pruneStaleCases: TD-87 清算（2026-08-20，Owner 批准）---
+// 背景：mergeCaseResults 以 caseId 为键只覆盖不清理——matrix 行 label 改名后，
+// 旧 label 的 case 永远滞留，worker 级最差聚合被陈年记录拖累（coder_mm 曾
+// 3 个僵尸 conditional 拖住 1 个现行 certified case）。
+// 证伪场景 T1/T2/T3 + 认证级 T4 + glue 结构钉 T5。变异自证：
+//   M1 去掉 labels 过滤（恒保留）→ T1/T4 红；M2 去掉 agentIds scope 守卫
+//   （只按 labels）→ T2 红；M3 glue 不接 prune → T5 红。复原后全绿。
+
+test("pruneStaleCases T1: 矩阵内 agent 的旧 label case 被修剪，现行 label 保留", () => {
+  const rows = [{ agentId: "coder_mm", label: "kimi-code/k3 max（多模态）" }];
+  const prior = [
+    { caseId: "Kimi K3 via Kimi Code CLI（多模态）", agentId: "coder_mm", checks: [check("completed", true, "core"), check("metricsNonZero", false, "observability")] },
+    { caseId: "kimi-code/k3 max（多模态）", agentId: "coder_mm", checks: [check("completed", true, "core"), check("metricsNonZero", true, "observability", { capability: "metrics" })] },
+  ];
+  const pruned = pruneStaleCases(prior, rows);
+  assert.equal(pruned.length, 1, "旧 label 僵尸 case 应被修剪");
+  assert.equal(pruned[0].caseId, "kimi-code/k3 max（多模态）");
+});
+
+test("pruneStaleCases T2: 矩阵外 agent 的 prior 不动（scope 守卫）", () => {
+  const rows = [{ agentId: "coder_mm", label: "kimi-code/k3 max（多模态）" }];
+  const prior = [
+    { caseId: "某些旧 legacy label", agentId: "legacy_probe_worker" },
+    { caseId: "auditor 旧标签", agentId: "auditor" },
+  ];
+  const pruned = pruneStaleCases(prior, rows);
+  assert.equal(pruned.length, 2, "不在矩阵 agentIds 里的 prior 不得被本规则触碰");
+});
+
+test("pruneStaleCases T3: 空矩阵 / 空 prior 恒等安全", () => {
+  assert.deepEqual(pruneStaleCases([], [{ agentId: "x", label: "l" }]), []);
+  assert.deepEqual(pruneStaleCases([{ caseId: "a", agentId: "x" }], []), [{ caseId: "a", agentId: "x" }]);
+});
+
+test("pruneStaleCases T4 认证级：清算后 worker 级聚合升 certified（复现 coder_mm 形状）", () => {
+  // 复刻 2026-08-20 实况：coder_mm 4 case——3 个旧 label 的 conditional 僵尸
+  // （旧 metricsNonZero 失败形状）+ 1 个现行 label 的全绿 case。修复前
+  // summarize 取最差 → conditional；prune 后 → certified。
+  const rows = [{ agentId: "coder_mm", label: "kimi-code/k3 max / 1M catalog via Kimi Code CLI（多模态）" }];
+  const greenChecks = [
+    check("completed", true, "core"), check("hasAssistantText", true, "core"),
+    check("sentinelA", true, "core"), check("sentinelB", true, "core"),
+    check("hasDoneEvent", true, "core"),
+    check("commandsPassed", true, "strict"), check("filesExist", true, "strict"), check("hasEvidence", true, "strict"),
+    check("workflowRunDir", true, "operational"),
+    check("metricsNonZero", true, "observability", { capability: "metrics" }),
+  ];
+  const prior = [
+    { caseId: "kimi-for-coding via kimi-code CLI（多模态）", agentId: "coder_mm", backend: "kimi-code", modelId: "kimi-code/k3", checks: greenChecks.map((c) => c.name === "metricsNonZero" ? check("metricsNonZero", false, "observability") : c) },
+    { caseId: "Kimi K3 via Kimi Code CLI（多模态）", agentId: "coder_mm", backend: "kimi-code", modelId: "kimi-code/k3", checks: greenChecks.map((c) => c.name === "metricsNonZero" ? check("metricsNonZero", false, "observability") : c) },
+    { caseId: "Kimi K3 max / 1M catalog via Kimi Code CLI（多模态）", agentId: "coder_mm", backend: "kimi-code", modelId: "kimi-code/k3", checks: greenChecks.map((c) => c.name === "metricsNonZero" ? check("metricsNonZero", false, "observability") : c) },
+    { caseId: "kimi-code/k3 max / 1M catalog via Kimi Code CLI（多模态）", agentId: "coder_mm", backend: "kimi-code", modelId: "kimi-code/k3", checks: greenChecks },
+  ];
+  const withoutPrune = summarizeCertification(mergeCaseResults(prior, []));
+  assert.equal(withoutPrune.workers.coder_mm.status, "conditional", "前置断言：不 prune 时复现实况（最差聚合）");
+  const withPrune = summarizeCertification(mergeCaseResults(pruneStaleCases(prior, rows), []));
+  assert.equal(withPrune.workers.coder_mm.status, "certified", "清算后现行 case 主导聚合");
+});
+
+test("pruneStaleCases T5 结构钉：run-reliability merge 调用点接线", () => {
+  const script = readFileSync(new URL("../../scripts/run-reliability.mjs", import.meta.url), "utf8");
+  assert.match(script, /import\s*\{[^}]*\bpruneStaleCases\b[^}]*\}\s*from\s*"\.\/reliability\/certification\.mjs"/s,
+    "run-reliability 必须导入 pruneStaleCases");
+  assert.match(script, /mergeCaseResults\(pruneStaleCases\(priorCases,\s*MATRIX\),\s*results\)/,
+    "merge 调用点必须先 prune 再 merge（僵尸 caseId 清算是 merge 前置步骤）");
 });
