@@ -231,7 +231,7 @@ test("TD-113-UNIT: 交错夹具 — file_written(A)→tool_result→file_written
   ];
   const ev = priorEvents[priorEvents.length - 1];
   assert.deepEqual(
-    describeActivity(ev, { priorEvents, now: () => 0 }),
+    describeActivity(ev, { priorEvents }),
     { lastActivityKind: "在写文件", lastActivitySummary: "写 report.md ×3（最近）" },
     "file_written 子序列末段 3 条同 path → ×3",
   );
@@ -243,7 +243,7 @@ test("TD-113-BOUNDARY: 不同 path 的 file_written 即断；全文比较（同 
   assert.deepEqual(
     describeActivity(
       { kind: "file_written", path: "D:/proj/docs/b.txt" },
-      { priorEvents: [{ kind: "file_written", path: "D:/proj/src/a.txt" }, tr(2), { kind: "file_written", path: "D:/proj/docs/b.txt" }], now: () => 0 },
+      { priorEvents: [{ kind: "file_written", path: "D:/proj/src/a.txt" }, tr(2), { kind: "file_written", path: "D:/proj/docs/b.txt" }] },
     ),
     { lastActivityKind: "在写文件", lastActivitySummary: "写 b.txt ×1（最近）" },
     "不同 path 即断 → ×1",
@@ -252,7 +252,7 @@ test("TD-113-BOUNDARY: 不同 path 的 file_written 即断；全文比较（同 
   assert.deepEqual(
     describeActivity(
       { kind: "file_written", path: "D:/proj/docs/b.txt" },
-      { priorEvents: [{ kind: "file_written", path: "D:/proj/src/a.txt" }, { kind: "file_written", path: "D:/proj/src/a.txt" }, { kind: "file_written", path: "D:/proj/docs/b.txt" }], now: () => 0 },
+      { priorEvents: [{ kind: "file_written", path: "D:/proj/src/a.txt" }, { kind: "file_written", path: "D:/proj/src/a.txt" }, { kind: "file_written", path: "D:/proj/docs/b.txt" }] },
     ),
     { lastActivityKind: "在写文件", lastActivitySummary: "写 b.txt ×1（最近）" },
   );
@@ -260,7 +260,7 @@ test("TD-113-BOUNDARY: 不同 path 的 file_written 即断；全文比较（同 
   assert.deepEqual(
     describeActivity(
       { kind: "file_written", path: "D:/other/src/a.txt" },
-      { priorEvents: [{ kind: "file_written", path: "D:/proj/src/a.txt" }, { kind: "file_written", path: "D:/other/src/a.txt" }], now: () => 0 },
+      { priorEvents: [{ kind: "file_written", path: "D:/proj/src/a.txt" }, { kind: "file_written", path: "D:/other/src/a.txt" }] },
     ),
     { lastActivityKind: "在写文件", lastActivitySummary: "写 a.txt ×1（最近）" },
     "计数按全文 path 比较（显示才用 basename）",
@@ -335,8 +335,9 @@ test("TD-113-3: 回扫上界 200 条事件 — 250 条连续同名写入按 200 
     const runDir = join(dir, "runs");
     const runId = "run_td113_3";
     const A = "D:/proj/big/report.md";
-    // 250 条连续 file_written(A)（计数在子序列上做，连续形状与交错形状同值；
-    // 回扫上界按"检视的事件条数"计 → 第 201 条以前截断 → N=200）。
+    // 250 条连续 file_written(A)。连续是合成极端形状（真实全量语料 6683 次写
+    // 中仅 17 对相邻）——真实交错形状的有效上限由 TD-113-3b 钉住；本测试钉
+    // 的是"检视 200 条事件"这个机械上界本身。
     const writes = Array.from({ length: 250 }, (_, i) =>
       ev({ type: "run.event", kind: "file_written", path: A, ts: `2026-08-20T00:00:${String(i % 60).padStart(2, "0")}.${String(i).padStart(3, "0")}Z`, runId, agentId: "coder_hq", seq: i + 2 }),
     ).join("");
@@ -345,6 +346,35 @@ test("TD-113-3: 回扫上界 200 条事件 — 250 条连续同名写入按 200 
     );
     const result = await getRunStatus({ runId, runDir, nowFn: () => new Date("2026-08-20T00:01:00.000Z").getTime() });
     assert.equal(result.lastActivitySummary, "写 report.md ×200（最近）", "超出回扫上界按 200 截断");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-113-3b: 真实交错形状的有效上限 — 3:1 交错远早于 200 次写饱和（auditor F2 补钉）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td113-3b-"));
+  try {
+    const runDir = join(dir, "runs");
+    const runId = "run_td113_3b";
+    const A = "D:/proj/big/report.md";
+    // 250 组 [file_written(A), tool_result, tool_use, message]（每次写隔 3 条
+    // 交错事件 = 每次写耗 4 条检视）：检视上界 200 ⇒ 有效计数上限 50，远低于
+    // 连续形状的 200——真实语料同 path 间距中位 7（≈有效 28）。钉住口径差。
+    let body = "";
+    for (let i = 0; i < 250; i += 1) {
+      body += ev({ type: "run.event", kind: "file_written", path: A, ts: `2026-08-20T00:00:${String(i % 60).padStart(2, "0")}.${String(i).padStart(3, "0")}Z`, runId, agentId: "coder_hq", seq: i * 4 + 2 });
+      body += ev({ type: "run.event", kind: "tool_result", tool: "Write", ts: `2026-08-20T00:01:${String(i % 60).padStart(2, "0")}.${String(i).padStart(3, "0")}Z`, runId, agentId: "coder_hq", seq: i * 4 + 3 });
+      body += ev({ type: "run.event", kind: "tool_use", tool: "Read", ts: `2026-08-20T00:02:${String(i % 60).padStart(2, "0")}.${String(i).padStart(3, "0")}Z`, runId, agentId: "coder_hq", seq: i * 4 + 4 });
+      body += ev({ type: "run.event", kind: "message", role: "assistant", ts: `2026-08-20T00:03:${String(i % 60).padStart(2, "0")}.${String(i).padStart(3, "0")}Z`, runId, agentId: "coder_hq", seq: i * 4 + 5 });
+    }
+    writeTranscript(runDir, runId,
+      ev({ type: "run.submitted", ts: "2026-08-20T00:00:00.000Z", runId, agentId: "coder_hq", seq: 1 }) + body
+      // 末条必须是 file_written（计数器只在末活动为写时触发；组内顺序故为
+      // fw→tr→tool_use→message，末尾补一条收束写）。
+      + ev({ type: "run.event", kind: "file_written", path: A, ts: "2026-08-20T00:05:00.000Z", runId, agentId: "coder_hq", seq: 250 * 4 + 2 }),
+    );
+    const result = await getRunStatus({ runId, runDir, nowFn: () => new Date("2026-08-20T00:10:00.000Z").getTime() });
+    assert.equal(result.lastActivitySummary, "写 report.md ×50（最近）", "3:1 交错下检视上界 200 ⇒ 有效计数 50（非连续形状的 200）");
   } finally {
     cleanupDir(dir);
   }

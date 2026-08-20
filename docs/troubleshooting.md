@@ -17,6 +17,7 @@
 | worker 卡 `submitted` 直到超时 | [§1 provider 故障](#1-provider-故障) |
 | worker 报 401 "身份验证失败" | [§1.2 serve 进程缺 key](#12-serve-进程缺-provider-key-401) |
 | worker 静默无响应（无 error 无 message） | [§1.3 Kimi 白名单](#13-kimi-白名单静默拒绝) |
+| 长文档/大文件写入期间摘要不变，分不清在推进还是卡死 | [§6.8 双维度判读](#68-长文档大文件写入期间摘要不变分不清在推进还是卡死td-113--round4-f-2-关单) |
 | opencode TUI 能用但 WAO 不能 | [§1.2](#12-serve-进程缺-provider-key-401) 或 [§1.3](#13-kimi-白名单静默拒绝) |
 | 多行 prompt 被截断（只传第一行） | [§2 CLI 与 shell](#2-cli-与-shell) |
 | worker 在错误的仓库目录干活 | [§3 工作目录](#3-工作目录cwd) |
@@ -298,6 +299,14 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **症状（已修）**：first-stable 的 CLI metrics `input:408`，但 serve session 实际 `input:29706`
 - **根因**：first-stable 旧从 `firstAssistantFinished.info.tokens`（首条 message 瞬时值）提取，不是累计值。DeepSeek 多轮工具调用真实消耗远大于首条
 - **修复**：first-stable 完成后从 session endpoint 取累计 metrics（abort 前取，值最准），回退 message.info.tokens
+
+### 6.8 长文档/大文件写入期间摘要不变，分不清"在推进"还是"卡死"（TD-113 + round4 F-2 关单）
+
+- **症状**：worker 长时间写同一文件时，状态摘要停留在同一文件名（round4 F-2 实证约 20 分钟）；长静默 CPU 段零新事件，无法区分"在算"与"断了"。
+- **判读（两个维度，配合用）**：
+  - **推进维度**：CLI `runs status` 的 `lastActivitySummary` 自 R23-B 起对重复同名写带计数——`写 report.md ×3（最近）`（file_written 子序列尾部同名计数；CLI 独有，MCP `run_status` 有意不返回该摘要）。
+  - **时间维度**：CLI `secondsSinceActivity` / MCP `run_status` 的 `lastActivity.secondsSince`（同一事实的两种字段名）——即"当前活动已持续 X 秒"，**不要等摘要变化**；静默超过阈值再结合 heartbeat 判停（判停永远 Lead 决定）。
+- **边界**：计数饱和（真实交错形状有效上限约 20-30 次写）不影响判读——×20 与 ×30 都是"在推进"；"卡死"判定归时间维度。
 
 ---
 
