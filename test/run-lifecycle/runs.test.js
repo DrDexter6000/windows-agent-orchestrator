@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -284,7 +284,7 @@ test("R23-B1: runs prune --archive 判龄与 prune 同源：新龄 kept、超龄
     assert.ok(!existsSync(join(runDir, "run_old.jsonl")));
     assert.ok(!existsSync(join(runDir, "run_legacy.jsonl")));
     // 两个超龄（含 legacy）都进判龄 ts 当月的归档子目录
-    const month = new Date(Date.now() - 8 * 86_400_000).toISOString().slice(0, 7);
+    const month = oldTs.slice(0, 7); // F10：直接取判龄 ts 的月份，消掉 CLI 执行时长内的月界微窗
     assert.ok(existsSync(join(archiveRoot, month, "run_old.jsonl")));
     assert.ok(existsSync(join(archiveRoot, month, "run_legacy.jsonl")));
   } finally {
@@ -339,6 +339,50 @@ test("R23-B1: runs prune --archive 不碰非 .jsonl 文件与子目录", async (
     // 只有顶层超龄 jsonl 进归档
     assert.ok(existsSync(join(archiveRoot, "2026-03", "run_old.jsonl")));
     assert.ok(!existsSync(join(archiveRoot, "2026-03", "run_nested.jsonl")));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("R23-B1: --archive 带值形状（--archive yes）仍走归档而非静默删除（auditor F3 钉）", async () => {
+  // parseOptions 对 `--archive 值` 会给 options.archive 赋字符串值——实现用
+  // Boolean(options.archive) 判定（宁可归档不可误删）。本测试钉住该 truthy
+  // 语义：改回 === true 会让字符串形状静默落回 unlink 永久删除路径。
+  const { root, runDir, archiveRoot } = await makeRunTree();
+  try {
+    await writeJsonl(runDir, "run_val", [
+      { type: "run.started", ts: "2026-03-15T00:00:00.000Z" },
+    ]);
+
+    const output = cli(["runs", "prune", "--older-than", "7d", "--archive", "yes"], runDir);
+    assert.ok(output.includes("Archived 1,"), "字符串形状仍归档（不是 Pruned）");
+    assert.ok(!output.includes("Pruned run_val"), "不得走删除路径");
+    assert.ok(!existsSync(join(runDir, "run_val.jsonl")), "源文件已移走");
+    assert.ok(existsSync(join(archiveRoot, "2026-03", "run_val.jsonl")), "目标在归档目录");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("R23-B1: 末事件无 ts（ts=0 按最老）→ 归档月份按文件 mtime 兜底（auditor F4 钉）", async () => {
+  // 可达形状：末条绑定事件缺 ts / 整份只有外 run 信封行 / 空事件——判龄 ts=0
+  // 按最老处理（与删除路径同语义），月份无 ts 可用 → 文件 mtime 月。
+  const { root, runDir, archiveRoot } = await makeRunTree();
+  try {
+    await writeJsonl(runDir, "run_nots", [
+      { type: "run.started" }, // 无 ts
+    ]);
+
+    const before = new Date().toISOString().slice(0, 7);
+    cli(["runs", "prune", "--older-than", "7d", "--archive"], runDir);
+    const after = new Date().toISOString().slice(0, 7);
+    assert.ok(!existsSync(join(runDir, "run_nots.jsonl")), "ts=0 按最老 → 已归档");
+    // 归档目录下应恰有一个月份子目录；夹具刚创建，mtime 月 = 当前月
+    // （若测试恰好跨月界运行，before/after 二者之一即该目录名——月界窗口
+    // 属可接受环境形状，其余断言不受影响）。
+    const months = (await readdir(archiveRoot)).filter((m) => m === before || m === after);
+    assert.equal(months.length, 1, "恰一个 mtime 兜底月份子目录");
+    assert.ok(existsSync(join(archiveRoot, months[0], "run_nots.jsonl")), "文件在 mtime 月份目录内");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

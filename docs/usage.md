@@ -520,7 +520,9 @@ npm run cli -- runs prune --older-than 90d --archive   # 归档 90 天前的 run
 
 **R20-C prune 判龄绑定（TD-128，2026-08-19）**：`runs prune --older-than` 的删除决策自 R20-C 起**只由本 run 自身信封绑定事件**（文件名 stem 即权威 runId）的末条 `ts` 喂龄——尾部追加的外 run/伪造**旧 ts** 行不再把在役 run 翻成可修剪（unlink 前被阻断）；全无信封的 legacy transcript（pre-envelope）保持既有判龄照常参与清理。合法路径与既有输出零变化。
 
-**R23-B1 `--archive` 归档模式（2026-08-20，Owner 已批 Option B）**：`runs prune --older-than <dur> --archive` 把超龄 transcript **移动**（而非删除）到与 runDir 同级的 `runs-archive/<yyyy-mm>/<原文件名>`——文件名原样保留（法医锚：大量 TD/friction 以 runId 文件名为证据锚，改名=锚灭失）；`<yyyy-mm>` 按该文件**判龄所用 ts**（R20-C 绑定判龄，与删除路径同一段代码）的月份分层，ts 无效/为 0 时按文件 mtime 月份兜底；目标同名文件已存在时**不移动、不覆盖**，输出冲突行并计入 skipped——宁可不动，不可丢数据。判龄、扫描面（仅 runDir 顶层 `.jsonl`）、legacy 语义与不带 `--archive` 完全一致。**消费者影响（Owner 知情接受的缩窗）**：归档后的 run 不再出现在 `runs list` / `runs metrics --summary` / `runs dashboard`；按 runId 直读（status/tail/collect 等）会 ENOENT；法医取证进 `runs-archive/` 按原文件名查。
+**R23-B1 `--archive` 归档模式（2026-08-20，Owner 已批 Option B）**：`runs prune --older-than <dur> --archive` 把超龄 transcript **移动**（而非删除）到与 runDir 同级的 `runs-archive/<yyyy-mm>/<原文件名>`——文件名原样保留（法医锚：大量 TD/friction 以 runId 文件名为证据锚，改名=锚灭失）；`<yyyy-mm>` 按该文件**判龄所用 ts**（R20-C 绑定判龄，与删除路径同一段代码）的月份分层，ts 无效/为 0 时按文件 mtime 月份兜底；目标同名文件已存在时**不移动、不覆盖**，输出冲突行并计入 skipped——宁可不动，不可丢数据。判龄、扫描面（仅 runDir 顶层 `.jsonl`）、legacy 语义与不带 `--archive` 完全一致。**消费者影响（Owner 知情接受的缩窗）**：归档后的 run 不再出现在 `runs list` / `runs metrics --summary` / `runs dashboard` / `runs grep`；按 runId 直读（status/tail/collect 等）会 ENOENT；法医取证进 `runs-archive/` 按原文件名查。
+
+**清扫 runbook（首次与例行）**：① 跑之前停 daemon 并确认无活跃 run（`runs list` 无非终态；被归档 run 若仍有进程在写，`appendFile` 会在 runs/ 原地重建单事件 stub，法医链断裂且下轮清扫抓不到）；② 清扫前后各数一次 `ls runs/*.jsonl | wc -l`，差值应与汇总行 `Archived` 数一致——**当前语料最老为 2026-06，90 天参数下首扫预期 `Archived 0` 是正常结果不是故障**（首次真正咬量在 9 月下旬六月文件期满时）；③ 关闭所有占用 runs/ 文件的编辑器/tail——归档循环无逐文件容错，Windows 上文件被占用会让 rename EPERM 中断整批（已输出的 `Archived` 行即恢复痕迹，续跑即可）；④ 逐条保留输出的 `Archived ... -> ...` 行（唯一的迁移审计轨迹）。**清扫面边界（Owner 知情）**：仅 runDir 顶层 `.jsonl`——子目录语料（`smoke/`、`verify/`、`driver-comparison-*/`、`wao-prod-drill-*/` 等）与顶层日志（ALERTS.log、*.log）、`.owner-run_*` 标记、`reliability-summary.json` 不在清扫面内。
 
 ### 场景 8：daemon + 自愈（无人值守 / 长跑）
 
