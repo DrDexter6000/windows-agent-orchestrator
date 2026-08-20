@@ -28,6 +28,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { certifyCase, summarizeCertification, mergeCaseResults } from "./reliability/certification.mjs";
 import { buildCertificationMatrix } from "./reliability/matrix.mjs";
 import { adversarialEscapeChecks } from "./reliability/adversarialEscape.mjs";
+import { metricsNonZeroCheck } from "./reliability/metricsCheck.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -532,10 +533,17 @@ for (const tc of MATRIX) {
     }
     checks.push(check("sentinelA", caseResult.sentinelA, "core", SENTINEL_A, { capability: "readFiles" }));
     checks.push(check("sentinelB", caseResult.sentinelB, "core", SENTINEL_B, { capability: "readFiles" }));
-    // metrics 非零（session endpoint 提取）—— Kimi 可能 0，标 optional
-    if (tc.providerID !== "kimi-for-coding") {
-      checks.push(check("metricsNonZero", (caseResult.metricsInput ?? 0) > 0, "observability", `input=${caseResult.metricsInput}`, { capability: "metrics" }));
-    }
+    // metrics 非零（session endpoint 提取）。TD-87 认证面症状解除（2026-08-20，
+    // Owner 批准）：检查自起按 backend 能力声明条件适用——判定源是 ADR-0025
+    // 批次 2 的 backendCapabilitySnapshot SSOT（scripts/reliability/metricsCheck.mjs
+    // 消费，无第二套判定；取代旧的 providerID 名字分支）。声明不上报 usage 的
+    // lane（如 kimi-code）按"通过 + detail 明示不适用"落账——测的是已声明的
+    // backend 静态属性，不是组合质量；声明上报的 lane 断言不变（parser 回归
+    // 金丝雀：流格式变化致 metrics 投影断裂时第一时间红）。
+    checks.push(metricsNonZeroCheck({
+      agent: registry.agents?.[tc.agentId],
+      metricsInput: caseResult.metricsInput,
+    }));
   }
 
   if (tc.drills.includes("scorecard")) {

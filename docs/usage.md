@@ -207,6 +207,17 @@ validate 加载 backend **代码类**的闭集能力声明做纯静态交叉校�
 两条都是提示层：tokenBudget 的运行时闸门与 sessionReuse 的 spawn 前 fail-closed 门
 （`src/runManager.js`）语义不变——validate 只把不符提前到静态阶段并让它可见，不替代运行时拒绝。
 
+**行为变更（2026-08-20，TD-87 认证面症状解除）——reliability 认证的 `metricsNonZero`
+检查自起按 backend 能力声明条件适用**：判定源与上述 `⚠` 交叉校验同源（ADR-0025
+批次 2 的 `backendCapabilitySnapshot`；纯内核 `scripts/reliability/metricsCheck.mjs`
+消费）。backend 类声明不上报 usage（`reportsTokenUsage` 非 true——kimi-code 即此
+形状）的 lane，此检查按"通过 + detail 明示 `not applicable`"落账：kimi 形状 lane 不再
+因此落 `conditional`（此前该形状的 observability 检查被整个省略 → 必需类目缺失 →
+每轮 conditional、`lastHealthyRunAt` 恒 null）。声明上报 usage 的 backend 断言**不变**
+——`input` token 非空照常断言（它对这类 lane 是 parser 回归金丝雀：流格式变化致
+metrics 投影断裂时第一时间红）。`CERTIFICATION_STATUSES` / required-categories 机制
+不变，无新增 "skipped" 状态值；能力缺口事实由批次 2 声明 + validate `⚠` 独立承载。
+
 ### 验证安装
 
 ```powershell
