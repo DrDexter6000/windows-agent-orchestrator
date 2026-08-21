@@ -19,7 +19,7 @@
 WAO 进程式 backend（claude-code/codex/kimi-code/deepseek-harness）的"进程死即会话死"隔离，依赖 **Node 自 v18+ 内置的 Windows Job Object**（父进程退出→OS 自动杀全部子进程树）。**Node v24 有 libuv Job Object 回归**（会误杀长进程），所以 WAO 在 cli / daemon / background-runner 入口**硬拒绝 v24**并指引切 v22。详见 TD-40 + `.wao/decisions/0013`。
 
 - v24 上启动会看到：`WAO 拒绝启动：Node v24.x 被拒绝：v24 has a libuv Windows Job Object regression ... 请用 v22`，exit 1。
-- `npm test` 同样走 v22 shim：入口为 `node scripts/wao-node.cjs scripts/canonical-test.mjs`，canonical runner 读 `test/manifest.json` 把每个 `.test.js` 恰好归入一个资源类别（pure/git/worktree/process/lock/timeout，用于归属与漂移检测），执行组织成串行波（wave）：同一波池化多个类别共享有界并发、长极重叠（filesystem 波池化 git+worktree，lock 波严格串行），并对首轮失败隔离复核一次（只追加 stable_fail/isolation_pass/environment_invalid 分类，绝不把复核通过洗成 PASS）。测试本身 mock 子进程、不依赖真实进程隔离；子进程注入 `WAO_SKIP_VERSION_GUARD=1` 绕过版本守卫。自 R23-F/A 起 `test-results.json` 的每个文件条目还携带 `durationMs`——该文件本波耗时的 advisory 计时元数据（透传结构化 reporter 累计的 suite 时长；报告缺失/损坏或文件 missing/crash 时为 `null`），只作观测、不参与 verdict。
+- `npm test` 同样走 v22 shim：入口为 `node scripts/wao-node.cjs scripts/canonical-test.mjs`，canonical runner 读 `test/manifest.json` 把每个 `.test.js` 恰好归入一个资源类别（pure/git/worktree/process/lock/timeout，用于归属与漂移检测），执行组织成串行波（wave）：同一波池化多个类别共享有界并发、长极重叠（filesystem 波池化 git+worktree，lock 波严格串行），并对首轮失败隔离复核一次（只追加 stable_fail/isolation_pass/environment_invalid 分类，绝不把复核通过洗成 PASS）。测试本身 mock 子进程、不依赖真实进程隔离；子进程注入 `WAO_SKIP_VERSION_GUARD=1` 绕过版本守卫。自 R23-F/A 起 `test-results.json` 的每个文件条目还携带 `durationMs`——该文件内各 test 耗时之和（不含模块 import/钩子间隙）的 advisory 计时元数据（透传结构化 reporter 累计的 suite 时长；报告缺失/损坏或文件 missing/crash 时为 `null`），只作观测、不参与 verdict。
 
 #### 如何装 / 切到 v22
 

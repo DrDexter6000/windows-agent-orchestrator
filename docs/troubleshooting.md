@@ -428,7 +428,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
   - **判定**：`environment_contaminated`——资源争用假阳性，**非代码回归**。
   - **行动**：**错峰后再 reverify**（等另一全量结束）。不走 reject——reverify 是单发机会，撞车后只剩 reject+前作集成，等于再浪费一轮验证预算。
   - **反例**：tail 含**任何** `stable_fail` ⇒ 是真红，走正常 reverify/reject 路径，不得借本规则豁免。
-- **预防（R22 W1 advisory inflight 标记，2026-08-20 落地）**：runner 开跑前（runs-guard 基线快照之前）在 `os.tmpdir()/wao-canonical-test.inflight` 放**机器全局 advisory 标记（非锁）**，仓外路径（不与 runs-guard/gitignore 牵连）。同机另一全量在跑时，本套件 stderr 打一行 `[canonical] WARNING: another full suite started at <ts> (pid <n>) — results may be affected by resource contention`。**WARNING = 结果可能受资源争用污染，顺序复跑即可**——它永不阻塞、永不等待、不吃任何预算。崩溃残留的孤儿标记只导致下次同样打 WARNING（行内旧 pid/ts 可辨 staleness），不产生新失败面；标记在所有退出路径删除（仅删自己创建的那份）。
+- **预防（R22 W1 advisory inflight 标记，2026-08-20 落地）**：runner 开跑前（runs-guard 基线快照之前）在 `os.tmpdir()/wao-canonical-test.inflight` 放**机器全局 advisory 标记（非锁）**，仓外路径（不与 runs-guard/gitignore 牵连）。同机另一全量在跑时，本套件 stderr 打一行 `[canonical] WARNING: another full suite started at <ts> (pid <n>) — results may be affected by resource contention`。**WARNING = 结果可能受资源争用污染，顺序复跑即可**——它永不阻塞、永不等待、不吃任何预算。崩溃残留的孤儿标记：pid 探活证死则降级为 NOTICE（R23-F/A），pid 活/不可判仍打 WARNING（行内旧 pid/ts 可辨 staleness），不产生新失败面；标记在所有退出路径删除（仅删自己创建的那份）。
 
 ### 8.2 主仓根跑全量前确认无活跃 worker/daemon（runs-guard 红灯，TD-134）
 

@@ -524,7 +524,7 @@ export function createInflightMarker({ readMarker, createMarker, deleteMarker, w
   const end = () => {
     if (!owned) return false;
     owned = false;
-    try { deleteMarker(); return true; } catch { return false; } // silent: worst case an orphan WARNING
+    try { deleteMarker(); return true; } catch { return false; } // silent: worst case an orphan (WARNING if pid alive/unknown, NOTICE if provably dead — R23-F/A)
   };
   return { begin, end };
 }
@@ -785,7 +785,7 @@ async function main() {
   // 0) R22 W1 advisory inflight marker (machine-global, NOT a lock): claim it
   //    before anything runs — in particular before the runs-guard baseline
   //    snapshot inside runSuite — so a concurrently-starting full suite sees
-  //    us; and if one is already mid-run, print one WARNING (advisory only:
+  //    us; and if one is already mid-run, print one WARNING-or-NOTICE (advisory only:
   //    never blocks, never waits, eats no budget). Deleted on EVERY exit path
   //    (finally) when this invocation owns it.
   const inflight = createInflightMarker(realInflightAdapter());
