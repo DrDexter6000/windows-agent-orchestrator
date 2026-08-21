@@ -10,7 +10,7 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { readRegistry, normalizeAgent } from "../registry.js";
+import { readRegistry, normalizeAgent, certMigrationAdvisories } from "../registry.js";
 import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { backendCapabilitySnapshot } from "../backends/factory.js";
 import { isSecretEnvName } from "../secretRedaction.js";
@@ -174,6 +174,20 @@ async function registryValidateCommand(args, config) {
     return;
   }
 
+  // R23-C §5: best-effort read of the certification ledger for the migration
+  // advisories below — a missing/corrupt file means no worker records, which
+  // means no advisories (no ledger to migrate; same fail-silent discipline as
+  // registryInventory's buildCertMap). Validate stays static CONFIG
+  // validation; the summary join only adds non-blocking visibility.
+  let summaryWorkers;
+  try {
+    summaryWorkers = JSON.parse(
+      await readFile(join(resolve(options.runDir ?? config.runDir), "reliability-summary.json"), "utf8"),
+    )?.workers;
+  } catch {
+    summaryWorkers = undefined;
+  }
+
   const KNOWN_BACKENDS = ["opencode-serve", "claude-code", "codex", "kimi-code", "deepseek-harness"];
   let allOk = true;
   let checked = 0;
@@ -268,6 +282,14 @@ async function registryValidateCommand(args, config) {
       // spawn、不联网），validate 保持纯静态。
       // TD-86：warning 文本（不含 `  ⚠ ${id}: ` 前缀，id 已是独立字段）进 JSON 的 warnings[]。
       const warnings = capabilityCrossCheckWarnings(agent, backendCapabilitySnapshot(agent));
+      // R23-C §5: half-migration visibility — a registered lane whose summary
+      // worker record predates the R23-C schema (missing providerKey /
+      // lastFullHealthyRunAt) gets NON-BLOCKING advisories. certMigrationAdvisories
+      // returns bare lines (NO id prefix — the render below / the JSON id field
+      // carries the id exactly once), never echoes record values (disk data may
+      // be tampered), and no record at all means no ledger → no advisory. This
+      // does not change validate's pass/fail semantics.
+      warnings.push(...certMigrationAdvisories(summaryWorkers?.[id]));
       // M11-5（TD-89 修复）：所有三个 process backend（claude-code/codex/kimi-code）
       // 现在都消费 systemPrompt。registry validate 用共享加载器（roleContract.js）
       // 验证角色文件——缺失/目录/空/超限/非法 UTF-8/NUL 都 fail closed（不再是

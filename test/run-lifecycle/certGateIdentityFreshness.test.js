@@ -36,6 +36,19 @@
 //      full 全绿刷新该字段。
 //   T9 certMigrationAdvisories（§5）：legacy 记录出 advisory，三态不误报。
 //
+// R23-C 集成吸收轮（2026-08-21，双席会审裁定 Ox 基线 + 吸收 coder_hq 上一轮
+// 交付）追加组——U 前缀避让基线 T5–T9 标签：
+//   U6d 门·端到端：同接入方不同写法（大小写/默认端口/尾斜杠）的记录指纹
+//      归一化等价 → 放行（不误拒）。
+//   U7 门新鲜度六态 e2e：全量新鲜/只有 delta 绿（null）/legacy 回退/回退源
+//      亦缺/过期/manualOverride cleared 例外。
+//   U9 certifyCase 证伪：delta 行显式 drills 超子集 + 全绿 → certified
+//      （不再被 delta 标签误降档；恰为子集仍 conditional）。
+//   U11 §4 续跑漂移 e2e（continueRun 真 worktree）：父 run.started.providerKey
+//      ≠ 当前 registry 指纹 → worker_configuration_changed；同指纹/legacy 父
+//      放行；父显式 null（原生直连）+ registry 现配 provider 块 → 必拒
+//      （auditor F2 正反钉：无条件键不让"原生直连→新接入方"最高危迁移漏网）。
+//
 // 夹具纪律：进程内 RunManager + 假 backend（门在 backend.spawn 之前拒绝/
 // 放行，不依赖真实 provider）；registry 走真实 readRegistry（normalizeAgent
 // 形状与生产一致）。带 provider 块的 agent 需在 userEnvReader 注入 apiKeyEnv
@@ -44,6 +57,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -52,7 +66,9 @@ import { readRegistry, certMigrationAdvisories } from "../../src/registry.js";
 import { getRegistryInventory } from "../../src/application/registryInventory.js";
 import { providerKeyFor } from "../../src/providerFingerprint.js";
 import { buildCertificationMatrix } from "../../scripts/reliability/matrix.mjs";
-import { certificationScopeForCase, summarizeCertification } from "../../scripts/reliability/certification.mjs";
+import { certificationScopeForCase, summarizeCertification, certifyCase } from "../../scripts/reliability/certification.mjs";
+import { continueRun } from "../../src/application/runContinue.js";
+import { JsonlTranscript } from "../../src/transcript.js";
 
 // ===== Helpers =====
 
@@ -759,4 +775,352 @@ test("T9 三态不误报：legacy 缺字段才出 advisory；显式 null = 已�
   // 从未认证（无 worker 记录）→ 无 ledger 可迁移，不报。
   assert.deepEqual(certMigrationAdvisories(undefined), []);
   assert.deepEqual(certMigrationAdvisories(null), []);
+});
+
+// =====================================================================
+// R23-C 集成吸收轮（2026-08-21）：coder_hq 上一轮交付（b3d6b3ca）的测试
+// 组移植 + auditor 补钉。U 前缀避让基线 T5–T9 标签；断言语义与原版一致，
+// 归一化期望从 JSON 元组改写为基线的 "<baseUrl>|<env>" 指纹形状。
+// =====================================================================
+
+// ===== U6d 门·端到端：归一化等价放行（同接入方不同写法同指纹）=====
+
+const U6D_PROVIDER = {
+  protocol: "anthropic-compatible",
+  baseUrl: "https://api.example.com/anthropic",
+  apiKeyEnv: "U6D_GATE_KEY",
+};
+
+test("U6d 门：同接入方不同写法的记录指纹（归一化等价）→ 放行", async () => {
+  const dir = makeDir();
+  try {
+    const registryPath = makeRegistry(dir, {
+      u6d_w: { backend: "claude-code", cwd: dir, model: { id: "glm-5.2" }, provider: U6D_PROVIDER },
+    });
+    const runDir = makeSummary(join(dir, "runs"), {
+      u6d_w: {
+        agentId: "u6d_w", backend: "claude-code", modelId: "glm-5.2",
+        // 认证时 baseUrl 写法不同（大小写 + 默认端口 + 尾斜杠）——归一化后同一接入方。
+        providerKey: providerKeyFor({ baseUrl: "HTTPS://API.Example.COM:443/anthropic/", apiKeyEnv: "U6D_GATE_KEY" }),
+        status: "certified", lastHealthyRunAt: NOW_ISO(),
+      },
+    });
+    const manager = makeGateManager({ registryPath, runDir, env: { U6D_GATE_KEY: "synthetic-not-a-secret" } });
+    const run = await manager.start("u6d_w", { prompt: "x", requireCertified: true });
+    assert.equal(run.state, "submitted", "归一化等价的写法差异不得误拒（同接入方 = 同指纹）");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ===== U7 门新鲜度六态 e2e（lastFullHealthyRunAt 状态矩阵）=====
+
+test("U7a 门：lastFullHealthyRunAt 新鲜（lastHealthyRunAt 缺失/陈旧）→ 放行", async () => {
+  const dir = makeDir();
+  try {
+    const registryPath = makeRegistry(dir, { u7_w: { backend: "claude-code", cwd: dir } });
+    const runDir = makeSummary(join(dir, "runs"), {
+      // 全量绿新鲜；lastHealthyRunAt 陈旧（含 delta 全绿史）不参与门判定。
+      u7_w: { agentId: "u7_w", status: "certified", lastFullHealthyRunAt: NOW_ISO(), lastHealthyRunAt: DAYS_AGO_ISO(40) },
+    });
+    const manager = makeGateManager({ registryPath, runDir });
+    const run = await manager.start("u7_w", { prompt: "x", requireCertified: true });
+    assert.equal(run.state, "submitted", "门只读 lastFullHealthyRunAt，不被陈旧旧判据拖回");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("U7b【证伪】门：lastFullHealthyRunAt=null（只有 delta 全绿）+ lastHealthyRunAt 新鲜 → 拒绝", async () => {
+  const dir = makeDir();
+  try {
+    const registryPath = makeRegistry(dir, { u7b_w: { backend: "claude-code", cwd: dir } });
+    const runDir = makeSummary(join(dir, "runs"), {
+      // delta 全绿刷新了 lastHealthyRunAt，但从未有全量绿——不得养门。
+      u7b_w: { agentId: "u7b_w", status: "conditional", lastFullHealthyRunAt: null, lastHealthyRunAt: NOW_ISO() },
+    });
+    const manager = makeGateManager({ registryPath, runDir });
+    await assert.rejects(
+      manager.start("u7b_w", { prompt: "x", requireCertified: true }),
+      (err) => {
+        assert.match(err.message, /无新鲜认证/, "delta 全绿不是全量新鲜度的事实来源");
+        assert.match(err.message, /lastFullHealthyRunAt/, "reason 点名实际读取的字段");
+        return true;
+      },
+      "delta 全绿不得刷新派发新鲜度（R23-C §2）",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("U7c 门：legacy summary 无 lastFullHealthyRunAt → 回退读 lastHealthyRunAt（新鲜 → 放行）", async () => {
+  const dir = makeDir();
+  try {
+    const registryPath = makeRegistry(dir, { u7c_w: { backend: "claude-code", cwd: dir } });
+    const runDir = makeSummary(join(dir, "runs"), {
+      u7c_w: { agentId: "u7c_w", status: "certified", lastHealthyRunAt: NOW_ISO() },
+    });
+    const manager = makeGateManager({ registryPath, runDir });
+    const run = await manager.start("u7c_w", { prompt: "x", requireCertified: true });
+    assert.equal(run.state, "submitted", "半迁移期：字段缺失回退既有 lastHealthyRunAt，存量记录不被新字段误杀");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("U7d 门：legacy 回退源亦缺（lastHealthyRunAt=null）→ fail-closed 拒绝", async () => {
+  const dir = makeDir();
+  try {
+    const registryPath = makeRegistry(dir, { u7d_w: { backend: "claude-code", cwd: dir } });
+    const runDir = makeSummary(join(dir, "runs"), {
+      // 旧格式记录：无 lastFullHealthyRunAt，且 lastHealthyRunAt 显式 null。
+      u7d_w: { agentId: "u7d_w", status: "certified", lastHealthyRunAt: null },
+    });
+    const manager = makeGateManager({ registryPath, runDir });
+    await assert.rejects(
+      manager.start("u7d_w", { prompt: "x", requireCertified: true }),
+      /无新鲜认证/,
+      "回退后仍无新鲜度事实 → 拒（fail-closed，不静默放行）",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("U7e 门：lastFullHealthyRunAt 过期 → 拒绝（回显天数，不回显磁盘时间戳原文）", async () => {
+  const dir = makeDir();
+  try {
+    const registryPath = makeRegistry(dir, { u7e_w: { backend: "claude-code", cwd: dir } });
+    const stale = DAYS_AGO_ISO(40);
+    const runDir = makeSummary(join(dir, "runs"), {
+      u7e_w: { agentId: "u7e_w", status: "certified", lastFullHealthyRunAt: stale, lastHealthyRunAt: NOW_ISO() },
+    });
+    const manager = makeGateManager({ registryPath, runDir });
+    await assert.rejects(
+      manager.start("u7e_w", { prompt: "x", requireCertified: true }),
+      (err) => {
+        assert.match(err.message, /认证已过期/, "全量绿陈旧 → 过期拒绝");
+        assert.match(err.message, /lastFullHealthyRunAt 距今 40天/, "回显天数与字段名");
+        assert.ok(!err.message.includes(stale), "不得回显磁盘时间戳原文（既有纪律）");
+        return true;
+      },
+      "delta 新鲜（lastHealthyRunAt=now）不得洗白全量绿的陈旧",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("U7f 门：manualOverride=cleared + lastFullHealthyRunAt=null → 照常放行（例外先于新鲜度）", async () => {
+  const dir = makeDir();
+  try {
+    const registryPath = makeRegistry(dir, { u7f_w: { backend: "claude-code", cwd: dir } });
+    const runDir = makeSummary(join(dir, "runs"), {
+      u7f_w: { agentId: "u7f_w", status: "rejected", manualOverride: "cleared", lastFullHealthyRunAt: null, lastHealthyRunAt: null },
+    });
+    const manager = makeGateManager({ registryPath, runDir });
+    const run = await manager.start("u7f_w", { prompt: "x", requireCertified: true });
+    assert.equal(run.state, "submitted", "Owner 背书旁路语义不变（先于身份/status/新鲜度）");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ===== U9 certifyCase 证伪：delta 标签不再误降档（TD-133(c)）=====
+
+function u9GreenChecks() {
+  return [
+    { name: "completed", pass: true, category: "core" },
+    { name: "commandsPassed", pass: true, category: "strict" },
+    { name: "isolation", pass: true, category: "operational" },
+    { name: "metricsNonZero", pass: true, category: "observability" },
+  ];
+}
+
+test("U9【证伪】certifyCase：delta 行显式 drills 超子集 + 全绿 → certified（不再误降档）", () => {
+  const result = certifyCase({
+    caseId: "delta-row-full-coverage",
+    profile: "delta",
+    drills: ["sentinel", "scorecard", "adversarialEscape", "stop"],
+    checks: u9GreenChecks(),
+  });
+  assert.equal(result.status, "certified", "实际覆盖是全量规程 → 不得按 delta 标签降档（TD-133(c) 误标根修）");
+  // 对照：恰为子集的 delta 行仍降档 conditional（既有 Owner 方案 A 不变）。
+  const subset = certifyCase({
+    caseId: "delta-row-subset",
+    profile: "delta",
+    drills: ["sentinel", "scorecard", "adversarialEscape"],
+    checks: u9GreenChecks(),
+  });
+  assert.equal(subset.status, "conditional", "真 delta 子集全过仍是 conditional（升级需全量重跑）");
+});
+
+// ===== U11 §4 续跑漂移 e2e（continueRun + 真 worktree）=====
+
+function t11Git(args, cwd) {
+  return String(execSync("git " + args, { cwd, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] })).trim();
+}
+
+function t11MakeRepo() {
+  const repo = mkdtempSync(join(tmpdir(), "wao-t11-repo-"));
+  t11Git("init -b main", repo);
+  t11Git("config user.email t@t.com", repo);
+  t11Git("config user.name T", repo);
+  writeFileSync(join(repo, "README.md"), "# base\n", "utf8");
+  t11Git("add -A", repo);
+  t11Git("commit -m base", repo);
+  return repo;
+}
+
+function t11BuildCommittedParent(repo, runId) {
+  const wt = join(repo, ".wao-worktrees", runId);
+  t11Git(`worktree add -b wao/${runId} "${wt}"`, repo);
+  const base = t11Git("rev-parse HEAD", repo);
+  writeFileSync(join(wt, "keep.txt"), "keep-changed\n", "utf8");
+  t11Git("add -A", wt);
+  t11Git('-c user.name="WAO Delivery" -c user.email="wao-delivery@local" commit -m "wao-delivery: ' + runId + '"', wt);
+  const deliveryCommit = t11Git("rev-parse HEAD", wt);
+  return { wt, base, deliveryCommit, branch: `wao/${runId}` };
+}
+
+async function t11SeedParent({ runDir, runId, repo, parent, providerKey }) {
+  const agentId = "t11_w";
+  mkdirSync(runDir, { recursive: true });
+  const t = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId });
+  await t.append("run.background_submitted", { background: true, cwd: repo, deliveryRequested: true });
+  await t.transitionState(null, "pending", "background_spawned");
+  await t.append("run.started", {
+    backend: "claude-code",
+    cwd: repo,
+    worktreePath: parent.wt,
+    worktreeBranch: parent.branch,
+    // R23-C §4 父侧 durable 事实：undefined = legacy 父（字段被 JSON 丢弃），
+    // null = 已观察无接入方，字符串 = 指纹。
+    providerKey,
+    delivery: {
+      mode: "git_commit_v1",
+      baseCommit: parent.base,
+      allowedPaths: ["src", "keep.txt"],
+      verificationCommands: ["node --test"],
+    },
+  });
+  await t.append("run.session_reuse", { mode: "run_lineage", turn: "first", rootRunId: runId });
+  await t.append("session.created", { backend: "claude-code", backendSessionId: "provider-session-1", serveUrl: null });
+  await t.append("run.delivery_created", {
+    deliveryCommit: parent.deliveryCommit,
+    delivery: {
+      schemaVersion: 1, kind: "git_commit", runId,
+      baseCommit: parent.base, deliveryCommit: parent.deliveryCommit,
+      branch: parent.branch, worktreePath: parent.wt, allowedPaths: ["src", "keep.txt"],
+      changedFiles: ["keep.txt"], verification: { commands: ["node --test"] },
+      acceptance: { status: "pending", reviewerType: "lead_agent" },
+      integration: { status: "pending", targetCommit: null },
+    },
+  });
+  await t.transitionState("pending", "completed", "done");
+  return agentId;
+}
+
+test("U11a【证伪】续跑漂移：run.started.providerKey ≠ 当前 registry provider 指纹 → worker_configuration_changed", async () => {
+  const repo = t11MakeRepo();
+  const runDir = mkdtempSync(join(tmpdir(), "wao-t11-drift-"));
+  try {
+    const parent = t11BuildCommittedParent(repo, "run_t11_drift");
+    await t11SeedParent({
+      runDir, runId: "run_t11_drift", repo, parent,
+      // 父 run 跑在 A 接入方上。
+      providerKey: providerKeyFor({ baseUrl: "https://lane-a.example.com/v1", apiKeyEnv: "T11_A_KEY" }),
+    });
+    // registry 现在指向 B 接入方——provider 会话不可继承。
+    const registryPath = makeRegistry(runDir, {
+      t11_w: {
+        backend: "claude-code", cwd: repo,
+        provider: { protocol: "anthropic-compatible", baseUrl: "https://lane-b.example.com/v1", apiKeyEnv: "T11_B_KEY" },
+      },
+    });
+    const r = await continueRun({
+      parentRunId: "run_t11_drift", prompt: "fix",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src", "keep.txt"], verificationCommands: ["node --test"] },
+      runDir, registryPath, authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }),
+    });
+    assert.equal(r.accepted, false);
+    assert.equal(r.rejectionReason, "worker_configuration_changed",
+      "换接入方（baseUrl/env 名）的续跑必须拒绝（provider 指纹纳入漂移比对）");
+    assert.equal(t11Git("symbolic-ref --short HEAD", parent.wt), parent.branch, "read-only 拒绝不动 worktree");
+  } finally {
+    try { rmSync(runDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { rmSync(repo, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+
+test("U11b 续跑：providerKey 匹配当前 registry → 放行；legacy 父 run（无字段）→ 维度跳过放行", async () => {
+  const repo = t11MakeRepo();
+  const runDir = mkdtempSync(join(tmpdir(), "wao-t11-ok-"));
+  const provider = { protocol: "anthropic-compatible", baseUrl: "https://lane-a.example.com/v1", apiKeyEnv: "T11_A_KEY" };
+  try {
+    const spawnCalls = [];
+    const fakeSpawn = (cmd, args, opts) => {
+      spawnCalls.push({ cmd, args, opts });
+      return { unref() {} };
+    };
+    const parent = t11BuildCommittedParent(repo, "run_t11_ok");
+    await t11SeedParent({ runDir, runId: "run_t11_ok", repo, parent, providerKey: providerKeyFor(provider) });
+    const registryPath = makeRegistry(runDir, { t11_w: { backend: "claude-code", cwd: repo, provider } });
+    const ok = await continueRun({
+      parentRunId: "run_t11_ok", prompt: "fix",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src", "keep.txt"], verificationCommands: ["node --test"] },
+      runDir, registryPath, authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }),
+      spawnFn: fakeSpawn, skipCredentialCheck: true,
+    });
+    assert.equal(ok.accepted, true, "同接入方续跑照常放行");
+    assert.equal(spawnCalls.length, 1);
+
+    // legacy 父 run：run.started 无 providerKey 字段（R23-C 之前的存量）。
+    const legacyParent = t11BuildCommittedParent(repo, "run_t11_legacy");
+    await t11SeedParent({ runDir, runId: "run_t11_legacy", repo, parent: legacyParent, providerKey: undefined });
+    const legacy = await continueRun({
+      parentRunId: "run_t11_legacy", prompt: "fix",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src", "keep.txt"], verificationCommands: ["node --test"] },
+      runDir, registryPath, authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }),
+      spawnFn: fakeSpawn, skipCredentialCheck: true,
+    });
+    assert.equal(legacy.accepted, true, "legacy 父 run 无 providerKey 事实 → 维度跳过（半迁移容忍）");
+  } finally {
+    try { rmSync(runDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { rmSync(repo, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+
+test("U11c【正反钉】续跑：父 providerKey=null（原生直连）+ registry 现配 provider 块 → 必拒（F2）", async () => {
+  const repo = t11MakeRepo();
+  const runDir = mkdtempSync(join(tmpdir(), "wao-t11-null-"));
+  try {
+    const parent = t11BuildCommittedParent(repo, "run_t11_null");
+    // 父跑时是原生直连（无 provider 块）——run.started.providerKey 是显式 null。
+    await t11SeedParent({ runDir, runId: "run_t11_null", repo, parent, providerKey: null });
+    // registry 现在给这条 lane 配了 provider 块——最高危迁移不得静默继承旧会话。
+    const registryPath = makeRegistry(runDir, {
+      t11_w: {
+        backend: "claude-code", cwd: repo,
+        provider: { protocol: "anthropic-compatible", baseUrl: "https://lane-a.example.com/v1", apiKeyEnv: "T11_A_KEY" },
+      },
+    });
+    const r = await continueRun({
+      parentRunId: "run_t11_null", prompt: "fix",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src", "keep.txt"], verificationCommands: ["node --test"] },
+      runDir, registryPath, authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: () => ({ supportsSessionReuse: true }),
+    });
+    assert.equal(r.accepted, false);
+    assert.equal(r.rejectionReason, "worker_configuration_changed",
+      "父显式 null（已观察无接入方）≠ 当前可派生指纹——无条件键封住 F2 的 fail-open 洞");
+    assert.equal(t11Git("symbolic-ref --short HEAD", parent.wt), parent.branch, "read-only 拒绝不动 worktree");
+  } finally {
+    try { rmSync(runDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { rmSync(repo, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
 });

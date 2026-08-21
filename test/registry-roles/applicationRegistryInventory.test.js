@@ -19,6 +19,8 @@ import {
   REGISTRY_ISSUES_CAP,
   REGISTRY_ISSUE_CODES,
 } from "../../src/application/registryInventory.js";
+// R23-C F6：buildCertMap 的 providerKey 透传钉（见文末测试）。
+import { providerKeyFor } from "../../src/providerFingerprint.js";
 
 // ===== Helpers =====
 
@@ -605,5 +607,64 @@ test("M12-25C-PROJ: every array element projected; malformed → invalid_configu
   assert.equal(overMalformed.issuesTruncated, true, "malformed elements counted toward truncation");
   for (const issue of overMalformed.issues) {
     assert.deepEqual(issue, { code: "invalid_configuration", agentId: null });
+  }
+});
+
+// =====================================================================
+// R23-C F6（2026-08-21，双席会审补钉）：buildCertMap 的 providerKey 透传钉。
+//
+// matchedCertRecord 已把 providerKey 纳入身份四元组，但投影层要参与该维比对
+// 就必须拿得到记录侧的值——TD-131 的 providerID 曾在 buildCertMap 被同一形状
+// 的坑丢掉（透传行缺失 → certMap 记录侧 undefined → matchedCertRecord 按
+// legacy 跳过该维 → 换接入方的旧认证照常投影继承，静默 fail-open）。本测试
+// 以 mutation 思路钉死：删掉 buildCertMap 的 `providerKey: w.providerKey`
+// 透传行，下面两个"不继承"断言必红（undefined 跳维 → 认证被继承）。
+// =====================================================================
+
+test("R23-C-F6: buildCertMap 透传 providerKey——换接入方/null 对有 provider 的 lane 不再继承认证", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r23c-f6-"));
+  try {
+    const PROVIDER = {
+      protocol: "anthropic-compatible",
+      baseUrl: "https://api.example.com/v1",
+      apiKeyEnv: "F6_GATE_KEY",
+    };
+    const registryPath = makeRegistry(dir, {
+      f6_w: { backend: "claude-code", cwd: dir, model: { id: "glm-5.2" }, provider: PROVIDER },
+    });
+    // backend/modelId 全匹配，唯独 providerKey 是另一接入方的指纹。
+    const runDir = makeSummary(dir, {
+      f6_w: {
+        status: "certified",
+        backend: "claude-code",
+        modelId: "glm-5.2",
+        providerKey: providerKeyFor({ baseUrl: "https://old-lane.example.com/v1", apiKeyEnv: "F6_OLD_KEY" }),
+      },
+    });
+    const [swapped] = await getRegistryInventory({ registryPath, runDir });
+    assert.equal(swapped.certification, null,
+      "记录是另一接入方（providerKey 不匹配）→ 认证不可继承（透传缺失时该断言必红）");
+
+    // 记录显式 null（认证时已观察无接入方）↔ agent 现配有 provider 块 → 不继承。
+    const nullRunDir = makeSummary(join(dir, "runs-null"), {
+      f6_w: { status: "certified", backend: "claude-code", modelId: "glm-5.2", providerKey: null },
+    });
+    const [observedNone] = await getRegistryInventory({ registryPath, runDir: nullRunDir });
+    assert.equal(observedNone.certification, null,
+      "null（已观察无接入方）≠ 可派生指纹 → 不继承（透传缺失时 null 被吞成 undefined 跳维，必红）");
+
+    // 正面对照：同接入方不同写法（归一化等价）→ 照常继承（值真实流过比对，不是两侧都缺省）。
+    const sameRunDir = makeSummary(join(dir, "runs-same"), {
+      f6_w: {
+        status: "certified",
+        backend: "claude-code",
+        modelId: "glm-5.2",
+        providerKey: providerKeyFor({ baseUrl: "HTTPS://API.Example.COM:443/v1/", apiKeyEnv: "F6_GATE_KEY" }),
+      },
+    });
+    const [same] = await getRegistryInventory({ registryPath, runDir: sameRunDir });
+    assert.equal(same.certification, "certified", "同接入方（归一化等价写法）→ 认证照常继承");
+  } finally {
+    cleanupDir(dir);
   }
 });

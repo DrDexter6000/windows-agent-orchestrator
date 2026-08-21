@@ -1101,13 +1101,18 @@ export class RunManager {
       // undefined value is dropped by JSON serialization, so ordinary
       // dispatches stay byte-compatible).
       reasoning: agent.reasoning,
-      // R23-C §4: the provider block (baseUrl + apiKeyEnv NAME — the env NAME
-      // is a registry fact, never the secret value), recorded unconditionally
-      // like `model`/`reasoning` above so run_continue's drift check can
-      // compare it. When the agent has no provider block the undefined value
-      // is dropped by JSON serialization (R11-1 precedent above), so ordinary
-      // provider-less dispatches stay byte-compatible.
-      provider: agent.provider,
+      // R23-C §4: the provider ATTACHMENT fingerprint (providerKeyFor —
+      // normalized baseUrl + apiKeyEnv NAME). The normalizer DROPS
+      // userinfo/query/fragment, so a baseUrl carrying embedded credentials
+      // can never reach the transcript the way persisting the raw provider
+      // block would. Unconditional key: a lane with no provider block
+      // serializes an EXPLICIT null ("observed, no provider attached") —
+      // deliberately NOT undefined-dropped like `model`/`reasoning` above, so
+      // run_continue's drift check can tell a legacy parent (field absent →
+      // dimension skipped) from an observed-bare parent (null — a provider
+      // wired after the parent ran must NOT be silently adopted). Same
+      // tri-state discipline as matchedCertRecord.
+      providerKey: providerKeyFor(agent.provider),
       // R10-A: the EXPLICIT override fact — the Lead's own input, never a
       // secret. `model` above already reflects the synthesized policy (the
       // synthesis precedes this append); modelOverride lets an auditor tell

@@ -63,6 +63,10 @@ import { validateProjectedPath } from "./deliveryReview.js";
 import { INVENTORY_PATHS_LIMIT } from "./candidateInventory.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 import { readRegistry } from "../registry.js";
+// R23-C §4: the provider-attachment fingerprint SSOT (src host — same
+// application→core downward direction as the registry import above; the cert
+// gate's matchedCertRecord compares records against the SAME derivation).
+import { providerKeyFor } from "../providerFingerprint.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { inheritedEnvNames } from "../envPolicy.js";
 import { CredentialMissingError } from "./runDispatch.js";
@@ -407,16 +411,21 @@ export async function continueRun({
   //    decides from the declared capability.
   const registry = await readRegistry(resolve(registryPath));
   const agent = registry.getAgent(agentId);
-  // R23-C §4: the provider block (baseUrl + apiKeyEnv NAME) joins the drift
-  // check — swapping the provider wiring mid-lineage must start a fresh run,
-  // not silently resume on the new endpoint. Legacy tolerance: parents started
-  // before run.started carried `provider` (undefined on the recorded event)
-  // skip this dimension — same record-side-undefined-skip discipline as
-  // matchedCertRecord. Shape-aligned JSON comparison, same as `model` below.
+  // R23-C §4: the provider attachment (baseUrl + apiKeyEnv NAME) joins the
+  // drift check — swapping the provider wiring mid-lineage must start a fresh
+  // run, not silently resume on the new endpoint. The parent-side durable
+  // fact is run.started.providerKey (the providerKeyFor fingerprint persisted
+  // since R23-C; userinfo/query/fragment are dropped by the normalizer, so
+  // credentials never enter the comparison). Legacy tolerance: parents started
+  // before the field existed (undefined on the recorded event) skip this
+  // dimension — same record-side-undefined-skip discipline as
+  // matchedCertRecord. An explicit null (observed, no provider attached)
+  // compares against the CURRENT derivation: it matches a still-bare lane but
+  // must NOT adopt a provider wired after the parent ran.
   if (started.backend !== agent.backend
     || JSON.stringify(started.model ?? null) !== JSON.stringify(agent.model ?? null)
-    || (started.provider !== undefined
-      && JSON.stringify(started.provider ?? null) !== JSON.stringify(agent.provider ?? null))) {
+    || (started.providerKey !== undefined
+      && started.providerKey !== providerKeyFor(agent.provider))) {
     return refuse("worker_configuration_changed");
   }
   const backend = typeof backendFor === "function" ? backendFor(agent) : null;
