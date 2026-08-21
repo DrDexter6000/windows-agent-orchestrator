@@ -87,12 +87,16 @@
 //          ports, singleton arbiters), so a red light there is a feature, not
 //          a false positive. The real-MCP canary (`npm run smoke`) does not go
 //          through this runner and is unaffected.
-//   - R22 W1 advisory inflight marker: a machine-global marker under os.tmpdir()
-//     (NOT a lock, NOT inside any repo). A second concurrent full suite on this
-//     machine prints one WARNING (results may be contaminated by resource
-//     contention — remedy: sequential re-run); it never blocks, never waits,
-//     and eats no budget. Deleted on every exit path; a crashed run leaves an
-//     orphan whose only consequence is the same WARNING on later runs.
+//   - R22 W1 advisory inflight marker: a machine-global marker OUTSIDE every
+//     repo checkout, located by src/machineGatePaths.js (%LOCALAPPDATA%\wao on
+//     win32, ~/.wao-machine fallback — NEVER derived from TMP/TEMP/TMPDIR; NOT
+//     a lock). A second concurrent full suite on this machine prints one
+//     WARNING (results may be contaminated by resource contention — remedy:
+//     sequential re-run), or a NOTICE downgrade when an existence probe
+//     (kill(pid, 0)) provably shows the marker's pid is dead — a stale orphan.
+//     It never blocks, never waits, and eats no budget. Deleted on every exit
+//     path; a crashed run leaves an orphan whose only consequence is that
+//     later runs print the same line.
 //   - Writes a bounded test-results.json that keeps every failure attributable to
 //     BOTH its resource category AND its execution wave: each file records
 //     resourceCategory + executionWave; each wave records timing/counts/exit.
@@ -110,7 +114,15 @@ import { spawn } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve, dirname, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { availableParallelism, cpus, tmpdir } from "node:os";
+import { availableParallelism, cpus } from "node:os";
+
+// R23-F/A (TD-130): machine-global gate paths SSOT (scripts→src downward import,
+// same direction as scripts/reliability/certification.mjs). The inflight marker's
+// LOCATION lives there now (%LOCALAPPDATA%\wao / ~/.wao-machine, never derived
+// from TMP/TEMP/TMPDIR — see that module's header for why); this module
+// re-exports the constant + resolver below so its pinned public surface stays
+// byte-stable for the meta-tests.
+import { INFLIGHT_MARKER_FILENAME, inflightMarkerPath } from "../src/machineGatePaths.js";
 
 // ── Resource categories: the closed set named in the TD-107 contract. ─────────
 // These seven are the MANIFEST categories used for ownership + drift detection.
@@ -246,18 +258,33 @@ export function suiteRelToManifest(name) {
 // NEVER defaults to pass.
 const SUITE_STATUS_TO_FILE = Object.freeze({ pass: "pass", fail: "fail" });
 
+// Advisory timing metadata (R23-F/A A3): a duration rides along with each file
+// verdict but NEVER influences it. Only a finite non-negative number counts as
+// measured; anything else maps to null — an honest "not measured", never a
+// fabricated 0.
+const nonNegativeMs = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+
 // Map a parsed reporter report to a rel→status map for the wave's expected files.
 //   pass    — a suite exists with status "pass"
 //   fail    — a suite exists with status "fail" (fail wins over pass)
 //   missing — expected file with NO suite (did not report — crash/filter quirk)
-// reportValid is false (and all files map to "crash") when the report itself is
+// Alongside `perFile` this returns `perFileDurationMs`: the winning suite
+// record's accumulated duration (test/reporter.mjs sums per-test durations into
+// suite.duration) surfaced as advisory timing metadata. pass/fail ⇒ finite
+// non-negative ms; missing/crash/invalid-duration ⇒ null. reportValid is false
+// (and all files map to "crash" + null durations) when the report itself is
 // missing/malformed/has an unrecognized suite status — that is a WAVE RUNNER
 // failure, not per-file.
 export function mapReportToFiles(report, expectedRels) {
-  const crashAll = (reportError) => ({ reportValid: false, reportError, perFile: new Map(expectedRels.map((r) => [r, "crash"])) });
+  const crashAll = (reportError) => ({
+    reportValid: false, reportError,
+    perFile: new Map(expectedRels.map((r) => [r, "crash"])),
+    perFileDurationMs: new Map(expectedRels.map((r) => [r, null])),
+  });
   if (!report || typeof report !== "object") return crashAll("report missing or not an object");
   if (!Array.isArray(report.suites)) return crashAll("report has no 'suites' array");
   const perFile = new Map(expectedRels.map((r) => [r, "missing"]));
+  const perFileDurationMs = new Map(expectedRels.map((r) => [r, null]));
   for (const suite of report.suites) {
     if (!suite || typeof suite.name !== "string") continue;
     // Accept ONLY the closed suite status set. Unknown / missing / non-string
@@ -267,9 +294,12 @@ export function mapReportToFiles(report, expectedRels) {
     const rel = suiteRelToManifest(suite.name);
     if (!perFile.has(rel)) continue;
     const cur = perFile.get(rel);
-    if (cur === "missing" || fileStatus === "fail") perFile.set(rel, fileStatus); // fail wins; never downgrade
+    if (cur === "missing" || fileStatus === "fail") {
+      perFile.set(rel, fileStatus); // fail wins; never downgrade
+      perFileDurationMs.set(rel, nonNegativeMs(suite.duration)); // winner's timing rides along; pass never overwrites a fail's
+    }
   }
-  return { reportValid: true, reportError: null, perFile };
+  return { reportValid: true, reportError: null, perFile, perFileDurationMs };
 }
 
 // ── R8-3 layer 2: runs/ snapshot guard (pure logic, unit-tested in canonicalRunner.test.js) ──
@@ -409,33 +439,44 @@ export function finalRunnerOutcome({ verdict, runsAdditions, runsGuardError, rep
 // never waits, and eats no budget — a second concurrent suite simply prints one
 // WARNING line so the operator knows its results may be contaminated by
 // resource contention (remedy: sequential re-run; see docs/troubleshooting.md
-// §8 for the isolation_pass triage rule). It lives in os.tmpdir() — machine-
-// global but OUTSIDE any repo (AGENTS.md endorses os.tmpdir()), so it can never
-// be entangled with runs-guard/gitignore state. A crashed run leaves an orphan:
-// the only consequence is that later suites keep printing the WARNING (with the
-// stale pid/startedAt visible in the line) — no new failure surface. None of
-// this module executes when the meta-tests import the file: main() only runs
-// under the invokedDirectly guard at the bottom.
-export const INFLIGHT_MARKER_FILENAME = "wao-canonical-test.inflight";
+// §8 for the isolation_pass triage rule). Its LOCATION lives in
+// src/machineGatePaths.js since R23-F/A (TD-130): %LOCALAPPDATA%\wao on win32
+// with ~/.wao-machine as fallback — machine-global, OUTSIDE any repo, and never
+// derived from TMP/TEMP/TMPDIR (the delivery harness injects a fresh per-attempt
+// temp dir into exactly those variables, which had structurally blinded the old
+// os.tmpdir() derivation; see that module's header). This module re-exports the
+// SSOT's constant + resolver so the pinned public surface stays byte-stable.
+// A crashed run leaves an orphan: since R23-F/A A2 an existence probe
+// (killProbe, default process.kill(pid, 0)) distinguishes PROVABLY dead owners —
+// those downgrade to a NOTICE (same pid/startedAt anchors, no WARNING) — while
+// anything unprovable keeps the WARNING verbatim (fail-safe: no proof of death,
+// no downgrade; no grace/reclaim semantics in either branch). None of this
+// module executes when the meta-tests import the file: main() only runs under
+// the invokedDirectly guard at the bottom.
+export { INFLIGHT_MARKER_FILENAME, inflightMarkerPath };
 
 /**
  * Pure decision core over injectable fs primitives (the meta-tests inject
- * fakes; realInflightAdapter is the only code that touches the real tmpdir).
+ * fakes; realInflightAdapter is the only code that touches the real machine
+ * state dir).
  *   begin() → "created"     — no marker existed; this invocation O_EXCL-claimed
  *                            it ({pid, startedAt}) and owns its deletion.
  *            "observed"    — a marker exists (live suite, crash orphan, or torn
- *                            write): exactly one WARNING is printed. The marker
- *                            is NOT ours — a foreign marker must survive our
- *                            exit (the running suite still needs it, and a
- *                            third suite must still see the warning).
- *            "unavailable" — the tmpdir could not be marked (unwritable).
- *                            Advisory: the suite runs unmarked, never a failure.
+ *                            write): exactly one line is printed — a WARNING
+ *                            for anything alive-or-unproven, or (R23-F/A A2)
+ *                            a NOTICE downgrade when killProbe PROVABLY shows
+ *                            the owner dead. The marker is NOT ours either way —
+ *                            a foreign marker must survive our exit (a running
+ *                            suite still needs it; no grace/reclaim semantics).
+ *            "unavailable" — the machine state dir could not be marked
+ *                            (unwritable). Advisory: the suite runs unmarked,
+ *                            never a failure.
  *   end()   — deletes the marker ONLY when this invocation created it; acts at
  *             most once; delete failures are silent (worst case = an orphan
- *             that only ever causes a WARNING).
- * @param {{readMarker: () => (string|null), createMarker: (text: string) => void, deleteMarker: () => void, warn?: (line: string) => void, pid?: number, now?: () => string}} input
+ *             that only ever causes the same line on later runs).
+ * @param {{readMarker: () => (string|null), createMarker: (text: string) => void, deleteMarker: () => void, warn?: (line: string) => void, killProbe?: (pid: number) => void, pid?: number, now?: () => string}} input
  */
-export function createInflightMarker({ readMarker, createMarker, deleteMarker, warn = (line) => console.error(line), pid = process.pid, now = () => new Date().toISOString() }) {
+export function createInflightMarker({ readMarker, createMarker, deleteMarker, warn = (line) => console.error(line), killProbe = (probePid) => process.kill(probePid, 0), pid = process.pid, now = () => new Date().toISOString() }) {
   let owned = false;
   const warnExisting = (text) => {
     // Best-effort parse: an orphan from a crashed run — or a torn/empty write —
@@ -444,6 +485,21 @@ export function createInflightMarker({ readMarker, createMarker, deleteMarker, w
     try { info = JSON.parse(text) || {}; } catch { /* keep {} ⇒ "unknown" */ }
     const theirPid = Number.isFinite(info.pid) ? info.pid : "unknown";
     const theirTs = typeof info.startedAt === "string" && info.startedAt ? info.startedAt : "unknown";
+    // R23-F/A A2: downgrade to NOTICE only on PROOF of death. The one accepted
+    // proof is killProbe(pid, 0) throwing EXACTLY code "ESRCH" ("no such
+    // process" — POSIX errno name; empirically the same code string on win32
+    // libuv, verified 2026-08-21 against a freshly-exited child pid). A normal
+    // return means alive; EPERM (exists but not ours) or any other error means
+    // not proven; an unparsable pid means nothing to prove. All of those keep
+    // the WARNING verbatim — fail-safe: no proof of death ⇒ no downgrade.
+    if (theirPid !== "unknown") {
+      let provablyDead = false;
+      try { killProbe(theirPid); } catch (err) { provablyDead = !!err && err.code === "ESRCH"; }
+      if (provablyDead) {
+        warn(`[canonical] NOTICE: stale inflight marker — its suite (pid ${theirPid}, started at ${theirTs}) is gone (kill(pid,0) → ESRCH); continuing (advisory: nothing was blocked or deleted)`);
+        return "observed";
+      }
+    }
     warn(`[canonical] WARNING: another full suite started at ${theirTs} (pid ${theirPid}) — results may be affected by resource contention`);
     return "observed";
   };
@@ -457,7 +513,7 @@ export function createInflightMarker({ readMarker, createMarker, deleteMarker, w
       return "created";
     } catch {
       // Lost the O_EXCL race (another suite claimed the marker between our read
-      // and our create) — or the tmpdir is unwritable. Re-read once: a marker
+      // and our create) — or the state dir is unwritable. Re-read once: a marker
       // that appeared means we raced a real suite; warn like any observer.
       let raced = null;
       try { raced = readMarker(); } catch { raced = null; }
@@ -473,16 +529,15 @@ export function createInflightMarker({ readMarker, createMarker, deleteMarker, w
   return { begin, end };
 }
 
-// Real adapter: the machine-global marker under os.tmpdir() — deliberately NOT
-// under any repo checkout. ENOENT on read maps to null (the normal no-suite
-// state); any other error propagates to the pure core, whose advisory
-// discipline (catch-all, degrade — never block, never crash the suite) is the
-// OPPOSITE of the runs-guard's fail-closed: this feature must not add any new
-// failure surface. "wx" = O_EXCL: the create is an atomic claim.
-export function inflightMarkerPath() {
-  return join(tmpdir(), INFLIGHT_MARKER_FILENAME);
-}
-
+// Real adapter: the machine-global marker under the WAO machine state dir
+// (%LOCALAPPDATA%\wao on win32, ~/.wao-machine fallback — the resolver is
+// re-exported verbatim from src/machineGatePaths.js since R23-F/A; deliberately
+// NOT under any repo checkout, NEVER derived from TMP/TEMP/TMPDIR). ENOENT on
+// read maps to null (the normal no-suite state); any other error propagates to
+// the pure core, whose advisory discipline (catch-all, degrade — never block,
+// never crash the suite) is the OPPOSITE of the runs-guard's fail-closed: this
+// feature must not add any new failure surface. "wx" = O_EXCL: the create is an
+// atomic claim.
 export function realInflightAdapter(markerPath = inflightMarkerPath()) {
   return {
     readMarker: () => {
@@ -536,7 +591,7 @@ export async function runWave({ name, files, concurrency, reporterArg, runChild,
     return {
       name, durationMs: Date.now() - start, exitCode: null,
       groupError: `delete report failed: ${err && err.message ? err.message : String(err)}`,
-      results: files.map((f) => ({ path: f.path, status: "crash", resourceCategory: f.resourceCategory, executionWave: name })),
+      results: files.map((f) => ({ path: f.path, status: "crash", resourceCategory: f.resourceCategory, executionWave: name, durationMs: null })),
     };
   }
 
@@ -554,13 +609,16 @@ export async function runWave({ name, files, concurrency, reporterArg, runChild,
     return {
       name, durationMs: Date.now() - start, exitCode: null,
       groupError: `spawn error: ${err && err.message ? err.message : String(err)}`,
-      results: files.map((f) => ({ path: f.path, status: "crash", resourceCategory: f.resourceCategory, executionWave: name })),
+      results: files.map((f) => ({ path: f.path, status: "crash", resourceCategory: f.resourceCategory, executionWave: name, durationMs: null })),
     };
   }
 
   const report = await readReport();
-  const { reportValid, reportError, perFile } = mapReportToFiles(report, expectedRels);
-  const results = files.map((f) => ({ path: f.path, status: perFile.get(f.path) || "missing", resourceCategory: f.resourceCategory, executionWave: name }));
+  const { reportValid, reportError, perFile, perFileDurationMs } = mapReportToFiles(report, expectedRels);
+  // durationMs rides along per file (R23-F/A A3): advisory timing metadata —
+  // pass/fail ⇒ finite non-negative ms, missing/crash ⇒ null. Never verdict-
+  // affecting.
+  const results = files.map((f) => ({ path: f.path, status: perFile.get(f.path) || "missing", resourceCategory: f.resourceCategory, executionWave: name, durationMs: perFileDurationMs.get(f.path) ?? null }));
 
   const hasNonPass = results.some((r) => r.status !== "pass");
   let groupError = null;
@@ -605,7 +663,7 @@ export async function runCanonical({ waveSpecs, reporterArg, runChild, readRepor
       missing: w.results.filter((r) => r.status === "missing").length,
       crashed: w.results.filter((r) => r.status === "crash").length,
       groupError: w.groupError,
-      files: w.results.map((r) => ({ path: r.path, status: r.status, resourceCategory: r.resourceCategory, executionWave: r.executionWave })),
+      files: w.results.map((r) => ({ path: r.path, status: r.status, resourceCategory: r.resourceCategory, executionWave: r.executionWave, durationMs: r.durationMs ?? null })),
     };
     wavesReport.push(wave);
     if (onWaveEnd) onWaveEnd(wave);

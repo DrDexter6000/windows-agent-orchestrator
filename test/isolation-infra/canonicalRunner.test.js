@@ -15,9 +15,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, relative, sep, isAbsolute } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, relative, sep, isAbsolute, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// R23-F/A A1：机器级闸路径 SSOT（src/machineGatePaths.js）。钉住 canonical-test.mjs
+// 导出的 inflightMarkerPath 必须与它逐字节同源——runner 侧不得再长出第二份路径推导。
+import { inflightMarkerPath as gateInflightMarkerPath } from "../../src/machineGatePaths.js";
 
 import {
   validateManifest, classifyIsolation, MANIFEST_GROUPS,
@@ -178,10 +182,17 @@ test("WAVE_PLAN: lock is strictly serial; the filesystem wave pools git+worktree
 // ────────────────────────────────────────────────────────────────────────────
 
 // Build a synthetic structured report shaped like test/reporter.mjs output:
-// { suites: [{ name: "test/<rel>", status, tests: [] }, ...] }.
-function makeReport(files, failSet) {
+// { suites: [{ name: "test/<rel>", status, duration, tests: [] }, ...] }.
+// `durations` is an optional rel→ms map (the reporter accumulates suite.duration
+// from per-test durations; R23-F/A A3 maps that onto durationMs).
+function makeReport(files, failSet, durations = {}) {
   return {
-    suites: files.map((rel) => ({ name: "test/" + rel, status: failSet.has(rel) ? "fail" : "pass", tests: [] })),
+    suites: files.map((rel) => ({
+      name: "test/" + rel,
+      status: failSet.has(rel) ? "fail" : "pass",
+      duration: durations[rel],
+      tests: [],
+    })),
   };
 }
 const noopDelete = async () => {};
@@ -194,20 +205,27 @@ test("suiteRelToManifest: strips the leading test/ prefix (handles subdirs)", ()
 
 test("mapReportToFiles: maps suites to rel files; fail status wins over pass", () => {
   const files = ["a.test.js", "b.test.js", "c.test.js"];
-  const { reportValid, perFile } = mapReportToFiles(makeReport(files, new Set(["b.test.js"])), files);
+  const { reportValid, perFile, perFileDurationMs } = mapReportToFiles(
+    makeReport(files, new Set(["b.test.js"]), { "a.test.js": 12, "b.test.js": 34, "c.test.js": 0 }), files);
   assert.equal(reportValid, true);
   assert.equal(perFile.get("a.test.js"), "pass");
   assert.equal(perFile.get("b.test.js"), "fail");
   assert.equal(perFile.get("c.test.js"), "pass");
+  // R23-F/A A3：reporter 的 suite 累计时长随判定透传（pass/fail ⇒ 非负数值原样）。
+  assert.equal(perFileDurationMs.get("a.test.js"), 12);
+  assert.equal(perFileDurationMs.get("b.test.js"), 34);
+  assert.equal(perFileDurationMs.get("c.test.js"), 0, "0ms 是合法非负值（不得折算成 null）");
 });
 
 test("mapReportToFiles: an expected file with no suite is 'missing' (non-pass)", () => {
-  const { perFile } = mapReportToFiles(
-    { suites: [{ name: "test/a.test.js", status: "pass", tests: [] }] },
+  const r = mapReportToFiles(
+    { suites: [{ name: "test/a.test.js", status: "pass", duration: 5, tests: [] }] },
     ["a.test.js", "ghost.test.js"],
   );
-  assert.equal(perFile.get("a.test.js"), "pass");
-  assert.equal(perFile.get("ghost.test.js"), "missing");
+  assert.equal(r.perFile.get("a.test.js"), "pass");
+  assert.equal(r.perFile.get("ghost.test.js"), "missing");
+  assert.equal(r.perFileDurationMs.get("a.test.js"), 5);
+  assert.equal(r.perFileDurationMs.get("ghost.test.js"), null, "missing 文件没有可信耗时 ⇒ durationMs=null");
 });
 
 test("mapReportToFiles: null / malformed report is invalid (wave runner failure)", () => {
@@ -216,6 +234,8 @@ test("mapReportToFiles: null / malformed report is invalid (wave runner failure)
   assert.equal(mapReportToFiles({ suites: "nope" }, ["a.test.js"]).reportValid, false);
   // invalid report ⇒ every file is a crash (never silently all-pass)
   assert.equal(mapReportToFiles(null, ["a.test.js"]).perFile.get("a.test.js"), "crash");
+  // A3：invalid report ⇒ 没有任何文件有可信耗时
+  assert.equal(mapReportToFiles(null, ["a.test.js"]).perFileDurationMs.get("a.test.js"), null);
 });
 
 test("mapReportToFiles: an UNKNOWN suite status makes the report invalid (never defaults to pass)", () => {
@@ -237,17 +257,87 @@ test("mapReportToFiles: a MISSING or NON-STRING suite status makes the report in
 test("mapReportToFiles: fail status still wins over pass for valid duplicate suite records", () => {
   const files = ["a.test.js"];
   const r1 = mapReportToFiles({ suites: [
-    { name: "test/a.test.js", status: "pass", tests: [] },
-    { name: "test/a.test.js", status: "fail", tests: [] },
+    { name: "test/a.test.js", status: "pass", duration: 5, tests: [] },
+    { name: "test/a.test.js", status: "fail", duration: 7, tests: [] },
   ] }, files);
   assert.equal(r1.reportValid, true);
   assert.equal(r1.perFile.get("a.test.js"), "fail", "pass-then-fail duplicate ⇒ fail wins");
+  assert.equal(r1.perFileDurationMs.get("a.test.js"), 7, "duration 跟随胜出的（fail）记录");
   const r2 = mapReportToFiles({ suites: [
-    { name: "test/a.test.js", status: "fail", tests: [] },
-    { name: "test/a.test.js", status: "pass", tests: [] },
+    { name: "test/a.test.js", status: "fail", duration: 7, tests: [] },
+    { name: "test/a.test.js", status: "pass", duration: 5, tests: [] },
   ] }, files);
   assert.equal(r2.reportValid, true);
   assert.equal(r2.perFile.get("a.test.js"), "fail", "fail-then-pass duplicate ⇒ fail still wins");
+  assert.equal(r2.perFileDurationMs.get("a.test.js"), 7, "pass 不得覆盖已判 fail 记录的 duration");
+});
+
+// ── R23-F/A A3: durationMs 透传（advisory 计时元数据；绝不参与 verdict）────────
+test("mapReportToFiles: durationMs normalization — missing/invalid suite.duration ⇒ null (never a fabricated 0)", () => {
+  const suites = [
+    { name: "test/a.test.js", status: "pass", tests: [] },                        // duration 缺失
+    { name: "test/b.test.js", status: "pass", duration: -3, tests: [] },          // 负数
+    { name: "test/c.test.js", status: "pass", duration: Number.NaN, tests: [] },  // NaN
+    { name: "test/d.test.js", status: "pass", duration: "12", tests: [] },        // 非数值类型
+  ];
+  const rels = ["a.test.js", "b.test.js", "c.test.js", "d.test.js"];
+  const { reportValid, perFileDurationMs } = mapReportToFiles({ suites }, rels);
+  assert.equal(reportValid, true, "duration 形状不影响 verdict 面（report 仍有效）");
+  for (const rel of rels) {
+    assert.equal(perFileDurationMs.get(rel), null, `${rel}: 非法 duration ⇒ null（诚实的"未测得"，不编造 0）`);
+  }
+});
+
+test("runWave: results carry durationMs from the winning suite record; crash paths (missing report / delete failure) are null", async () => {
+  const files = waveFiles(["a.test.js", "b.test.js"], "pure");
+  const runChild = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+  const readReport = async () => makeReport(["a.test.js", "b.test.js"], new Set(["b.test.js"]), { "a.test.js": 120, "b.test.js": 30 });
+  const w = await runWave({ name: "pure", files, concurrency: 2, reporterArg: "R", runChild, readReport, deleteReport: noopDelete });
+  assert.deepEqual(
+    w.results.map((r) => ({ path: r.path, status: r.status, durationMs: r.durationMs })),
+    [
+      { path: "a.test.js", status: "pass", durationMs: 120 },
+      { path: "b.test.js", status: "fail", durationMs: 30 },
+    ],
+    "每个 result 带 durationMs（pass/fail ⇒ 非负数值）",
+  );
+
+  const crashed = await runWave({ name: "pure", files, concurrency: 2, reporterArg: "R", runChild, readReport: async () => null, deleteReport: noopDelete });
+  assert.ok(crashed.results.every((r) => r.status === "crash" && r.durationMs === null), "报告缺失 ⇒ 全 crash ⇒ durationMs=null");
+
+  const blocked = await runWave({
+    name: "pure", files, concurrency: 2, reporterArg: "R",
+    runChild, readReport: async () => makeReport(["a.test.js"], new Set()),
+    deleteReport: async () => { throw new Error("EPERM delete blocked"); },
+  });
+  assert.ok(blocked.results.every((r) => r.status === "crash" && r.durationMs === null), "delete 失败（未读报告）⇒ crash + durationMs=null");
+});
+
+test("A3 pin: executionWaves[].files[].durationMs — pass/fail non-negative numeric, missing/crash null", async () => {
+  const specs = [
+    { name: "pure", concurrency: 2, categories: ["pure"], files: waveFiles(["ok.test.js"], "pure") },
+    { name: "process", concurrency: 1, categories: ["process"], files: waveFiles(["bad.test.js"], "process") },
+  ];
+  let call = 0;
+  const reports = [
+    makeReport(["ok.test.js"], new Set(), { "ok.test.js": 45 }),
+    makeReport(["bad.test.js"], new Set(["bad.test.js"]), { "bad.test.js": 0 }),
+  ];
+  const out = await runCanonical({
+    waveSpecs: specs, reporterArg: "R",
+    runChild: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    readReport: async () => reports[call++],
+    deleteReport: noopDelete,
+  });
+  assert.equal(out.waves.length, 2);
+  assert.deepEqual(
+    out.waves.flatMap((w) => w.files),
+    [
+      { path: "ok.test.js", status: "pass", resourceCategory: "pure", executionWave: "pure", durationMs: 45 },
+      { path: "bad.test.js", status: "fail", resourceCategory: "process", executionWave: "process", durationMs: 0 },
+    ],
+    "bounded 报告的 executionWaves[].files[] 形状：durationMs 是 pass/fail 文件的非负数值（0 合法）",
+  );
 });
 
 test("runWave: ONE child invocation per non-empty wave; empty waves skip it", async () => {
@@ -676,15 +766,21 @@ test("finalRunnerOutcome: report write failure ⇒ red regardless of everything 
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// R22 W1: advisory inflight marker — pure decision core over an injectable fs
-// adapter (finalRunnerOutcome idiom). The marker is machine-global under
-// os.tmpdir(), deliberately NOT inside any repo (never entangled with
-// runs-guard/gitignore). It is advisory ONLY: a second concurrent full suite
-// prints one WARNING and keeps running — never blocks, never waits, no budget.
-// These meta-tests inject a fake fs; the real-adapter test below uses a
-// mkdtemp tmpdir and never touches the machine's real marker. Nothing here
-// executes main(): importing canonical-test.mjs never runs the marker logic
-// (invokedDirectly guard).
+// R22 W1 + R23-F/A A2: advisory inflight marker — pure decision core over an
+// injectable fs adapter (finalRunnerOutcome idiom). The marker is machine-
+// global under %LOCALAPPDATA%\wao (fallback ~/.wao-machine, via the
+// src/machineGatePaths.js SSOT this file pins below) — deliberately NOT inside
+// any repo (never entangled with runs-guard/gitignore) and NEVER derived from
+// TMP/TEMP/TMPDIR. It is advisory ONLY: a second concurrent full suite prints
+// one line and keeps running — never blocks, never waits, no budget. Since A2
+// that line is severity-split by an injectable existence probe (killProbe,
+// default process.kill(pid, 0)): a PROVABLY dead owner (probe → ESRCH)
+// downgrades to a NOTICE; alive / EPERM / unprovable / unparsable-pid keep the
+// original WARNING verbatim (fail-safe: no proof of death ⇒ no downgrade).
+// These meta-tests inject a fake fs AND a fake probe, so they never touch a
+// real process or the machine's real marker; the real-adapter test below uses
+// a mkdtemp tmpdir. Nothing here executes main(): importing canonical-test.mjs
+// never runs the marker logic (invokedDirectly guard).
 // ────────────────────────────────────────────────────────────────────────────
 
 // In-memory marker fs: content === null means "absent". createMarker enforces
@@ -702,10 +798,14 @@ function fakeInflightFs(initial) {
     deleteMarker: () => { if (content === null) throw e("ENOENT"); content = null; ops.deletes += 1; },
   };
 }
+// A2 注入形状：存在性探针的"证死"错误。win32 libuv 实证（2026-08-21，对已退出
+// 子进程 pid 调 process.kill(pid, 0)）：`Error: kill ESRCH`，code 字符串恰为
+// "ESRCH"（POSIX errno 名；实现只认这个精确码——任何其它抛错一律不降级）。
+const esrhError = () => { const e = new Error("kill ESRCH"); e.code = "ESRCH"; return e; };
 function markerOver(fsx, extras = {}) {
   return createInflightMarker({
     readMarker: fsx.readMarker, createMarker: fsx.createMarker, deleteMarker: fsx.deleteMarker,
-    warn: extras.warn, pid: extras.pid, now: extras.now,
+    warn: extras.warn, killProbe: extras.killProbe, pid: extras.pid, now: extras.now,
   });
 }
 
@@ -725,7 +825,9 @@ test("inflight marker: no existing marker → begin creates {pid, startedAt}, en
 test("inflight marker: existing marker → exactly one WARNING line; no create; foreign marker NOT deleted", () => {
   const fsx = fakeInflightFs(JSON.stringify({ pid: 111, startedAt: "2026-08-19T23:00:00.000Z" }) + "\n");
   const warnings = [];
-  const m = markerOver(fsx, { warn: (l) => warnings.push(l) });
+  // A2：注入活体探针（返回即存活）——本测试钉的是"对方活着 ⇒ WARNING"分支，
+  // 与机器上 pid 111 真实死活无关（默认探针会让该断言依赖宿主进程表，不可确定）。
+  const m = markerOver(fsx, { warn: (l) => warnings.push(l), killProbe: () => {} });
   assert.equal(m.begin(), "observed");
   assert.equal(warnings.length, 1, "恰一行 WARNING（advisory，不阻塞不等待）");
   assert.ok(warnings[0].includes("[canonical] WARNING: another full suite started at 2026-08-19T23:00:00.000Z (pid 111) — results may be affected by resource contention"),
@@ -735,22 +837,80 @@ test("inflight marker: existing marker → exactly one WARNING line; no create; 
   assert.equal(fsx.ops.deletes, 0);
 });
 
-test("inflight marker: a crashed-run orphan marker warns the same way (stale JSON verbatim; torn write → unknown)", () => {
-  // 崩溃残留（孤儿）与在跑套件在标记层面不可区分——printed ts/pid 让人眼可判 staleness；
-  // 唯一后果就是下次打 WARNING，不产生新失败面。
+test("inflight marker: a stale orphan with a LIVE-looking pid keeps the WARNING; torn/unparseable content ALWAYS warns as WARNING", () => {
+  // A2 后语义更新：孤儿与在跑套件不再无条件不可区分——存在性探针证得死
+  // （kill(pid,0) → ESRCH）才降 NOTICE。本测试钉住降级的另一半：探针说活
+  // （注入活体 probe）时孤儿照旧 WARNING；损坏 JSON 即使探针会说死也维持
+  // WARNING（fail-safe：证不出死就不降级），printed ts/pid 落到 unknown 占位、
+  // 不 crash、无宽限/重建语义。
   const stale = fakeInflightFs(JSON.stringify({ pid: 7, startedAt: "2026-08-01T00:00:00.000Z" }));
   const staleWarnings = [];
-  markerOver(stale, { warn: (l) => staleWarnings.push(l) }).begin();
+  markerOver(stale, { warn: (l) => staleWarnings.push(l), killProbe: () => {} }).begin();
   assert.equal(staleWarnings.length, 1);
-  assert.ok(staleWarnings[0].includes("started at 2026-08-01T00:00:00.000Z (pid 7)"), "孤儿标记照打 WARNING，ts/pid 原样可见");
+  assert.ok(staleWarnings[0].includes("started at 2026-08-01T00:00:00.000Z (pid 7)"), "探针说活 ⇒ 孤儿标记照打 WARNING，ts/pid 原样可见");
 
   for (const torn of ["", "{not json"]) {
     const fsx = fakeInflightFs(torn);
     const warnings = [];
-    assert.equal(markerOver(fsx, { warn: (l) => warnings.push(l) }).begin(), "observed");
+    assert.equal(markerOver(fsx, { warn: (l) => warnings.push(l), killProbe: () => { throw esrhError(); } }).begin(), "observed");
     assert.equal(warnings.length, 1, `torn content ${JSON.stringify(torn)} 仍告警`);
     assert.ok(warnings[0].includes("started at unknown") && warnings[0].includes("(pid unknown)"),
       "不可解析内容降级为 unknown 占位，不 crash");
+  }
+});
+
+// ── R23-F/A A2：死 pid 降级 NOTICE（killProbe 注入；默认 process.kill(pid, 0)）──
+test("A2①: provably-dead marker pid (probe → ESRCH) ⇒ exactly one NOTICE carrying pid+startedAt, never the word WARNING", () => {
+  const fsx = fakeInflightFs(JSON.stringify({ pid: 7, startedAt: "2026-08-01T00:00:00.000Z" }) + "\n");
+  const lines = [];
+  const m = markerOver(fsx, {
+    warn: (l) => lines.push(l),
+    killProbe: () => { throw esrhError(); }, // 存在性探针证死（win32 实证 shape：code "ESRCH"）
+  });
+  assert.equal(m.begin(), "observed", "降级只改告警文案与严重度——观察者返回值/语义不变");
+  assert.equal(lines.length, 1, "恰一行输出");
+  assert.ok(!lines[0].includes("WARNING"), "NOTICE 行绝不含 WARNING 字样（两种严重度机器可区分）");
+  assert.ok(lines[0].includes("[canonical] NOTICE:"), "降级为 NOTICE 前缀");
+  assert.ok(lines[0].includes("(pid 7") && lines[0].includes("2026-08-01T00:00:00.000Z"),
+    "NOTICE 带 marker 内的 pid 与 startedAt（人眼判 staleness 的锚点保留）");
+  assert.equal(fsx.ops.creates.length, 0, "无宽限/重建语义：证死也不覆盖别人的标记");
+  assert.equal(m.end(), false, "无接管语义：证死也不删别人的标记（删除权仍归写入者自己）");
+});
+
+test("A2②: alive pid (probe returns normally) and EPERM (exists but not ours) both keep the original WARNING verbatim", () => {
+  const cases = [
+    ["alive", () => {}],
+    ["EPERM", () => { const e = new Error("kill EPERM"); e.code = "EPERM"; throw e; }],
+  ];
+  for (const [label, probe] of cases) {
+    const fsx = fakeInflightFs(JSON.stringify({ pid: 4242, startedAt: "2026-08-20T09:00:00.000Z" }) + "\n");
+    const warnings = [];
+    markerOver(fsx, { warn: (l) => warnings.push(l), killProbe: probe }).begin();
+    assert.equal(warnings.length, 1, `${label}: 恰一行`);
+    assert.ok(
+      warnings[0].startsWith("[canonical] WARNING: another full suite started at 2026-08-20T09:00:00.000Z (pid 4242) — results may be affected by resource contention"),
+      `${label}: WARNING 原文逐字不变（证不出死就不降级）`,
+    );
+    assert.ok(!warnings[0].includes("NOTICE"), `${label}: 不混入 NOTICE 字样`);
+  }
+});
+
+test("A2③: fail-safe — unparseable / pid-less marker content NEVER downgrades even though the injected probe says dead", () => {
+  const torn = [
+    "",                                  // 空写
+    "{not json",                         // 撕裂 JSON
+    "null",                              // 解析为 null（|| {} 兜底）
+    "{}",                                // 无 pid
+    '{"pid":"7"}',                       // pid 非数值
+    '{"startedAt":"2026-08-01T00:00:00.000Z"}', // 只有 ts、无 pid
+  ];
+  for (const content of torn) {
+    const fsx = fakeInflightFs(content);
+    const lines = [];
+    markerOver(fsx, { warn: (l) => lines.push(l), killProbe: () => { throw esrhError(); } }).begin();
+    assert.equal(lines.length, 1, `${JSON.stringify(content)}: 仍恰一行`);
+    assert.ok(lines[0].startsWith("[canonical] WARNING:") && !lines[0].includes("NOTICE"),
+      `${JSON.stringify(content)}: 证不出 pid 的死活 ⇒ 维持 WARNING，绝不降级`);
   }
 });
 
@@ -777,7 +937,8 @@ test("inflight marker: losing the O_EXCL create race → re-read warns about the
   const fsx = fakeInflightFs();
   fsx.createMarker = (text) => { fsx.set(winnerText); const err = new Error("EEXIST"); err.code = "EEXIST"; throw err; };
   const warnings = [];
-  const m = markerOver(fsx, { warn: (l) => warnings.push(l), pid: 1 });
+  // A2：注入活体探针——winner pid 999 在本测试里必须按"活着"处理（与宿主进程表解耦）。
+  const m = markerOver(fsx, { warn: (l) => warnings.push(l), pid: 1, killProbe: () => {} });
   assert.equal(m.begin(), "observed", "race 输家按观察者处理");
   assert.equal(warnings.length, 1);
   assert.ok(warnings[0].includes("(pid 999)"));
@@ -817,10 +978,25 @@ test("inflight marker: real adapter surface on a tmpdir — read null → wx-cre
   }
 });
 
-test("inflight marker: machine-global location is os.tmpdir(), NEVER inside a repo", () => {
+test("inflight marker: machine-global location derives from %LOCALAPPDATA%\\wao via the machineGatePaths SSOT — NEVER a repo, NEVER tmpdir", () => {
   const p = inflightMarkerPath();
-  assert.equal(p, join(tmpdir(), INFLIGHT_MARKER_FILENAME), "固定名 wao-canonical-test.inflight，机器全局");
-  // 必须仓外：仓内标记会被 runs-guard / gitignore 牵连（R22 W1 硬要求）。
+  // A1：runner 侧不再自有推导——必须与 src/machineGatePaths.js 逐字节同源（纯委托）。
+  assert.equal(p, gateInflightMarkerPath(), "canonical-test.mjs 的 inflightMarkerPath 是 machineGatePaths SSOT 的纯委托");
+  // A1 pinning：%LOCALAPPDATA%\wao 派生（win32）；LOCALAPPDATA 缺失回落 ~/.wao-machine。
+  const expectedDir = process.platform === "win32" && process.env.LOCALAPPDATA
+    ? join(process.env.LOCALAPPDATA, "wao")
+    : join(homedir(), ".wao-machine");
+  assert.equal(dirname(p), expectedDir, `标记目录须为机器级状态目录（实际 ${p}）`);
+  assert.equal(basename(p), INFLIGHT_MARKER_FILENAME, "固定名 wao-canonical-test.inflight，机器全局");
+  // env 免疫（本模块存在的理由）：绝不从 TMP/TEMP/TMPDIR 推导——delivery harness
+  // 注入 fresh per-attempt temp 的正是这三个变量。
+  for (const t of [process.env.TEMP, process.env.TMP, process.env.TMPDIR]) {
+    if (!t) continue;
+    const norm = t.replace(/[\\/]+$/, "").toLowerCase();
+    assert.ok(!p.toLowerCase().startsWith(norm + "\\") && !p.toLowerCase().startsWith(norm + "/") && p.toLowerCase() !== norm,
+      `路径不得落在注入的 TEMP/TMP/TMPDIR 下（${t}）——实际 ${p}`);
+  }
+  // 必须仓外：仓内标记会被 runs-guard / gitignore 牵连（R22 W1 硬要求，语义保留）。
   const here = fileURLToPath(import.meta.url);
   const repoRoot = join(here, "..", "..", "..");
   const rel = relative(repoRoot, p);
