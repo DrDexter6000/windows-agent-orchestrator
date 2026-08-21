@@ -30,6 +30,16 @@
 //     reason, and a freshness test fails when an entry's file no longer
 //     contains a matching line (dead whitelist entries must be pruned, not
 //     accumulated).
+//
+// R23-D (2026-08-21) — environment-blind-spot family. The guard additionally
+// pins: a "registry"/"validate" argv pair on a single line WITHOUT --run-dir on
+// that same line ⇒ the CLI child resolves config.runDir ("runs") against the
+// repo root and reads the REAL runs/reliability-summary.json ledger (present on
+// main, absent in delivery-verification worktrees — advisory output silently
+// diverges between the two). Scope this round: the validate family ONLY; the
+// wider bare-default family (registry list, execSync string-form spawns,
+// dashboard --cwd) is registered as a follow-up trigger in
+// docs/milestone-discipline.md §7 — deliberately NOT pinned here yet.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -45,6 +55,12 @@ const q = (s) => Q + s + Q;
 
 // ── Closed rule set ──────────────────────────────────────────────────────────
 // id → single-line regex. Double-quoted literals only (repo style).
+//
+// R23-D shapes are built via q()/string concat (same self-clean discipline as
+// the fixtures): this file's own source must never contain a raw matched line.
+const RUN_DIR_FLAG = "--run-dir";
+const VALIDATE_ARGV = q("registry") + ",\\s*" + q("validate");
+
 const RULES = [
   {
     id: "repo-root-join",
@@ -70,6 +86,14 @@ const RULES = [
     id: "flag-cwd",
     regex: /"--cwd",\s*"runs(?:\/[^"]*)?"/,
     why: "CLI child spawned with --cwd runs ⇒ the worker runs in the repo's real runs/",
+  },
+  {
+    // R23-D：validate 族环境盲区。argv 形状单行出现而同行无 --run-dir → 红。
+    // 同行带 --run-dir（d368e5f 隔离惯例）即合法——多行 argv 的 token 行也必须
+    // 把 flag 写在同一行（单行约定，机械可扫）。
+    id: "validate-no-run-dir",
+    regex: new RegExp("^(?!" + ".*" + RUN_DIR_FLAG + ").*" + VALIDATE_ARGV),
+    why: 'registry validate spawned WITHOUT a same-line --run-dir ⇒ the child resolves config.runDir ("runs") against the repo root and reads the REAL runs/reliability-summary.json ledger (R23-D blind spot: on main yes, in delivery-verification worktrees no). Fix: append "--run-dir", join(dir, "runs-none") on the SAME line as the validate tokens (d368e5f isolation convention)',
   },
 ];
 
@@ -208,6 +232,27 @@ test("scan: whitelist suppresses ONLY the exact file+line combo", () => {
   assert.equal(findings[1].whitelisted, false, "the SAME line in a different file still flags — the whitelist is file-scoped, not text-scoped");
 });
 
+// ── R23-D: validate-no-run-dir 规则（环境盲区族，本轮唯一新钉）──────────────
+
+test("scan R23-D: validate argv WITHOUT same-line --run-dir FIRES（单行裸 token 行同红）；同行带 --run-dir 不触发", () => {
+  const bareSingleLine = `const r = runCli([node, ${q("src/cli.js")}, ${q("registry")}, ${q("validate")}, ${q("--registry")}, regPath]);`;
+  const bareMultiLineTokenRow = `      ${q("registry")}, ${q("validate")},`;
+  const isolatedSameLine = `spawnSync(node, [${q("src/cli.js")}, ${q("registry")}, ${q("validate")}, ${q("--run-dir")}, join(dir, ${q("runs-none")})]);`;
+  const findings = scanTestSourcesForRepoRunsDir([
+    { file: "synthetic/r23d-bare.test.js", text: bareSingleLine },
+    { file: "synthetic/r23d-multiline.test.js", text: bareMultiLineTokenRow },
+    { file: "synthetic/r23d-isolated.test.js", text: isolatedSameLine },
+  ]);
+  assert.deepEqual(findings.map((f) => [f.file, f.rule]), [
+    ["synthetic/r23d-bare.test.js", "validate-no-run-dir"],
+    ["synthetic/r23d-multiline.test.js", "validate-no-run-dir"],
+  ], "裸 validate（含多行 argv 的裸 token 行）红；同行带 --run-dir 的隔离形状不触发（单行约定）");
+  // 红灯必须自带修法指引：finding 的 rule 可回查 RULES[].why（REAL TREE 断言
+  // 把 why 拼进失败消息，见下）。
+  assert.match(RULES.find((r) => r.id === "validate-no-run-dir").why, /--run-dir/,
+    "规则 why 必须给出修法指引（--run-dir 同行惯例）");
+});
+
 // ── Real-tree enforcement (the layer-1 gate) ─────────────────────────────────
 
 test("REAL TREE: zero unwhitelisted repo-relative runs/ run-dir/cwd constructions in test/**", () => {
@@ -215,8 +260,10 @@ test("REAL TREE: zero unwhitelisted repo-relative runs/ run-dir/cwd construction
   assert.ok(sources.length > 100, `scan surface looks wrong (found ${sources.length} sources)`);
   const findings = scanTestSourcesForRepoRunsDir(sources);
   const violations = findings.filter((f) => !f.whitelisted);
+  // R23-D：失败消息自带修法指引——file:line + 命中行 + 该规则的 why（修法）。
+  const ruleWhy = (id) => RULES.find((r) => r.id === id)?.why ?? "";
   assert.deepEqual(
-    violations.map((v) => `${v.file}:${v.line} [${v.rule}] ${v.text}`),
+    violations.map((v) => `${v.file}:${v.line} [${v.rule}] ${v.text} ⇒ 修法: ${ruleWhy(v.rule)}`),
     [],
     "test 源码不得构造指向仓库相对 runs/ 的 run-dir/cwd（静态主层；动态逃逸面归 canonical-test.mjs 快照守卫兜底）",
   );

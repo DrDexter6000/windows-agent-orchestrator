@@ -364,7 +364,10 @@ test("M8-2: runsDashboardCommand 渲染 text 输出（含 header + rows + summar
       JSON.stringify({ type: "scorecard.warn", detail: "no evidence", ts: "2026-06-26T10:05:00.000Z" }) + "\n");
 
     const out = await captureLog(async () => {
-      await runsDashboardCommand(["--run-dir", dir], { runDir: dir });
+            // R23-D 隔离：dashboard 的 selfDeclared/stageProgress 潜伏读
+      // resolveTargetCwd() 回退 process.cwd() → 主仓 .wao/pipeline/；
+      // 显式 --cwd 钉进 temp 目录（.wao 未 init → 静默 count:0）。
+      await runsDashboardCommand(["--run-dir", dir, "--cwd", dir], { runDir: dir });
     });
     assert.match(out, /RUN_ID/, "应有表头");
     assert.match(out, /run_a/, "应列 run_a");
@@ -386,7 +389,8 @@ test("M8-2: runsDashboardCommand --format json 输出机器可读结构", async 
     writeFileSync(join(dir, "run_x.jsonl"), JSON.stringify({ type: "run.submitted", agentId: "a", ts: "2026-06-26T10:00:00.000Z" }) + "\n" +
       JSON.stringify({ type: "run.state_change", to: "completed", ts: "2026-06-26T10:01:00.000Z" }) + "\n");
     const out = await captureLog(async () => {
-      await runsDashboardCommand(["--run-dir", dir, "--format", "json"], { runDir: dir });
+      // R23-D 隔离：同 text 用例——--cwd 钉进 temp，隔离 .wao/pipeline/ 潜伏读。
+      await runsDashboardCommand(["--run-dir", dir, "--cwd", dir, "--format", "json"], { runDir: dir });
     });
     const parsed = JSON.parse(out);
     assert.equal(parsed.summary.total, 1);
@@ -409,7 +413,10 @@ test("WF-9: runsDashboardCommand 长 runId 不得撑乱列对齐", async () => {
       JSON.stringify({ type: "run.state_change", to: "running", ts: "2026-06-26T10:01:00.000Z" }) + "\n");
 
     const out = await captureLog(async () => {
-      await runsDashboardCommand(["--run-dir", dir], { runDir: dir });
+            // R23-D 隔离：dashboard 的 selfDeclared/stageProgress 潜伏读
+      // resolveTargetCwd() 回退 process.cwd() → 主仓 .wao/pipeline/；
+      // 显式 --cwd 钉进 temp 目录（.wao 未 init → 静默 count:0）。
+      await runsDashboardCommand(["--run-dir", dir, "--cwd", dir], { runDir: dir });
     });
     const lines = out.split("\n");
     const header = lines.find((l) => l.startsWith("RUN_ID"));
@@ -433,7 +440,10 @@ test("M8-2: runsDashboardCommand 空目录输出 'No runs found.'（不崩）", 
   const dir = mkdtempSync(join(tmpdir(), "wao-dash-empty-"));
   try {
     const out = await captureLog(async () => {
-      await runsDashboardCommand(["--run-dir", dir], { runDir: dir });
+            // R23-D 隔离：dashboard 的 selfDeclared/stageProgress 潜伏读
+      // resolveTargetCwd() 回退 process.cwd() → 主仓 .wao/pipeline/；
+      // 显式 --cwd 钉进 temp 目录（.wao 未 init → 静默 count:0）。
+      await runsDashboardCommand(["--run-dir", dir, "--cwd", dir], { runDir: dir });
     });
     assert.match(out, /No runs found/);
   } finally {
@@ -457,7 +467,10 @@ test("registry validate: prependArgs 必须是数组", () => {
 
     const result = spawnSync(process.execPath, [
       "src/cli.js",
-      "registry", "validate",
+      // R23-D 隔离（存量裸调清扫）：advisory 读 reliability-summary.json，
+      // 裸调会回落到仓库相对 runs/ 默认值 → 主仓真实台账；--run-dir 必须与
+      // "validate" 同行（staticRunsGuard validate-no-run-dir 单行约定）。
+      "registry", "validate", "--run-dir", join(dir, "runs-none"),
       "--registry", registryPath,
     ], {
       cwd: process.cwd(),
@@ -488,7 +501,10 @@ test("TD-79: registry validate 拒绝非对象的 env 字段", () => {
 
     const result = spawnSync(process.execPath, [
       "src/cli.js",
-      "registry", "validate",
+      // R23-D 隔离（存量裸调清扫）：advisory 读 reliability-summary.json，
+      // 裸调会回落到仓库相对 runs/ 默认值 → 主仓真实台账；--run-dir 必须与
+      // "validate" 同行（staticRunsGuard validate-no-run-dir 单行约定）。
+      "registry", "validate", "--run-dir", join(dir, "runs-none"),
       "--registry", registryPath,
     ], {
       cwd: process.cwd(),
@@ -518,7 +534,10 @@ test("TD-79: registry validate 拒绝 env 值非字符串的 env 字段", () => 
 
     const result = spawnSync(process.execPath, [
       "src/cli.js",
-      "registry", "validate",
+      // R23-D 隔离（存量裸调清扫）：advisory 读 reliability-summary.json，
+      // 裸调会回落到仓库相对 runs/ 默认值 → 主仓真实台账；--run-dir 必须与
+      // "validate" 同行（staticRunsGuard validate-no-run-dir 单行约定）。
+      "registry", "validate", "--run-dir", join(dir, "runs-none"),
       "--registry", registryPath,
     ], {
       cwd: process.cwd(),
@@ -548,7 +567,10 @@ test("TD-104: registry validate rejects secret-like agent.env keys", () => {
 
     const result = spawnSync(process.execPath, [
       "src/cli.js",
-      "registry", "validate",
+      // R23-D 隔离（存量裸调清扫）：advisory 读 reliability-summary.json，
+      // 裸调会回落到仓库相对 runs/ 默认值 → 主仓真实台账；--run-dir 必须与
+      // "validate" 同行（staticRunsGuard validate-no-run-dir 单行约定）。
+      "registry", "validate", "--run-dir", join(dir, "runs-none"),
       "--registry", registryPath,
     ], {
       cwd: process.cwd(),
@@ -581,7 +603,10 @@ test("C3: registry validate 拒绝缺 tokenBudget 的 opencode worker（06-18 �
 
     const result = spawnSync(process.execPath, [
       "src/cli.js",
-      "registry", "validate",
+      // R23-D 隔离（存量裸调清扫）：advisory 读 reliability-summary.json，
+      // 裸调会回落到仓库相对 runs/ 默认值 → 主仓真实台账；--run-dir 必须与
+      // "validate" 同行（staticRunsGuard validate-no-run-dir 单行约定）。
+      "registry", "validate", "--run-dir", join(dir, "runs-none"),
       "--registry", registryPath,
     ], {
       cwd: process.cwd(),
@@ -614,7 +639,10 @@ test("C3: registry validate 接受配了 tokenBudget 的 opencode worker", () =>
 
     const result = spawnSync(process.execPath, [
       "src/cli.js",
-      "registry", "validate",
+      // R23-D 隔离（存量裸调清扫）：advisory 读 reliability-summary.json，
+      // 裸调会回落到仓库相对 runs/ 默认值 → 主仓真实台账；--run-dir 必须与
+      // "validate" 同行（staticRunsGuard validate-no-run-dir 单行约定）。
+      "registry", "validate", "--run-dir", join(dir, "runs-none"),
       "--registry", registryPath,
     ], {
       cwd: process.cwd(),
@@ -1188,7 +1216,7 @@ test("TD-87: registry validate 对 kimi-code 配 tokenBudget 给 ⚠ warning（�
       },
     }), "utf8");
 
-    const out = runCliOnPathNode(`registry validate --registry ${registryPath}`);
+    const out = runCliOnPathNode(`registry validate --registry ${registryPath} --run-dir ${join(dir, "runs-none")}`);
     // validate 通过（✔），但有 ⚠ warning 提示 tokenBudget 对 kimi 无效
     assert.match(out, /✔\s*coder_mm/, "kimi worker validate 通过");
     assert.match(out, /⚠.*kimi-code.*tokenBudget.*不生效/, "配了 tokenBudget 的 kimi worker 应有 ⚠ warning");
@@ -1215,7 +1243,7 @@ test("TD-89 (M11-5 resolved): registry validate accepts systemPrompt for all bac
       },
     }), "utf8");
 
-    const out = runCliOnPathNode(`registry validate --registry ${registryPath}`);
+    const out = runCliOnPathNode(`registry validate --registry ${registryPath} --run-dir ${join(dir, "runs-none")}`);
     // 三个都 pass（无 ✖，无旧 ⚠ "不消费 systemPrompt" warning）
     assert.match(out, /✔\s*coder_mm/, "kimi-code + systemPrompt passes");
     assert.match(out, /✔\s*tester/, "codex + systemPrompt passes");
@@ -1232,8 +1260,9 @@ test("TD-89 (M11-5 resolved): registry validate accepts systemPrompt for all bac
       },
     }), "utf8");
     // registry validate exits 1 when there are errors — use spawnSync to capture non-zero exit.
+    // R23-D 隔离：--run-dir 指向空目录（同上，裸调会读主仓真实台账）。
     const badResult = spawnSync(process.execPath,
-      ["src/cli.js", "registry", "validate", "--registry", badRegistryPath],
+      ["src/cli.js", "registry", "validate", "--run-dir", join(dir, "runs-none"), "--registry", badRegistryPath],
       { cwd: process.cwd(), encoding: "utf8" });
     assert.notEqual(badResult.status, 0, "registry validate exits non-zero on bad role");
     assert.match(badResult.stdout, /✖\s*bad_worker.*角色合同无效/, "missing role file → fail-closed");

@@ -128,7 +128,10 @@ test("D1-D3 守卫: registry validate text——角色合同失败的 agent 恰�
       },
     }), "utf8");
 
-    const r = await runCli(["registry", "validate", "--registry", registryPath]);
+    // R23-D 隔离（存量裸调清扫）：advisory 会读主仓真实台账（裸调回落到仓库相对
+    // runs/ 默认值）；同行带 --run-dir 是 staticRunsGuard validate-no-run-dir
+    // 规则的单行约定。
+    const r = await runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none")]);
     // 既有契约不变：invalid → exit 1；汇总行照常。
     assert.equal(r.status, 1, "角色合同失败 → exit 1 契约不变");
     assert.match(r.stdout, /1 agent\(s\) checked, has errors/, "汇总行不变");
@@ -338,6 +341,101 @@ test("TD-86 守卫: wao handoff read 默认 text 输出裸 markdown 正文（CLI
     const r = await runCli(["wao", "handoff", "read", "lead", "--cwd", dir]);
     assert.equal(r.status, 0);
     assert.equal(r.stdout, HANDOFF_BODY + "\n", "无 --format 时打印裸正文（console.log 语义）");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
+// R23-D（2026-08-21）：validate 迁移 advisory 的环境形状矩阵——JSON 腿。
+//
+// 盲区背景：validate 的 R23-C §5 advisory 接线读 <runDir>/reliability-summary.json
+// （gitignored 环境状态）——主仓有真实台账、worktree 交付验证没有，裸调测试
+// "全绿纯靠 fixture id 恰好不在真实台账"。本节把 advisory 的环境形状用合成台账
+// 钉死（台账一律写进 temp run-dir，d368e5f 隔离模式；同行 --run-dir 是
+// staticRunsGuard validate-no-run-dir 规则的单行约定）：
+//   - 无台账（空 run-dir）→ 零 advisory：既有 TD-86 用例（上方 runs-none +
+//     `assert.deepEqual(low.warnings, [])`）已覆盖，不重复造轮子；
+//   - legacy 台账 → 每在册 lane 恰两条 advisory，文案逐字 deepEqual；
+//   - corrupt 台账 → 零 advisory + exit 0（wiring 层 fail-silent，与
+//     registryInventory.buildCertMap 同纪律）；
+//   - 阴性对照：同台账一条 R23-C 后形状记录（providerKey + lastFullHealthyRunAt
+//     在册）→ 该 lane 零 advisory（证伪"有记录就报"）。
+// text 腿同矩阵在 test/registry-roles/backendCapabilityValidate.test.js（R23-D-ADV-1/2）。
+// =====================================================================
+
+/** certMigrationAdvisories 现行文案（取自 src/registry.js，逐字；顺序 = push 顺序）。 */
+const R23D_LEGACY_ADVISORIES = [
+  "认证记录缺少 providerKey（R23-C 第 4 身份维）——legacy 台账，该维度暂不参与比对；重跑 reliability 认证后自动补全",
+  "认证记录缺少 lastFullHealthyRunAt（R23-C 全量新鲜度判据）——派发门暂回落 lastHealthyRunAt；重跑全量认证后切换",
+];
+
+test("R23-D: registry validate --format json × legacy 台账——每 legacy lane 恰两条 advisory（逐字 deepEqual），R23-C 后形状 lane 零 advisory", async () => {
+  const dir = makeTempDir("wao-fmt-r23d-legacy-");
+  try {
+    const runDir = join(dir, "runs");
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, "reliability-summary.json"), JSON.stringify({
+      workers: {
+        // legacy 形状：R23-C 前台账——两条 lane 都缺 providerKey / lastFullHealthyRunAt。
+        lane_legacy_a: { lastHealthyRunAt: "2026-08-20T10:00:00.000Z", casesPassed: 3 },
+        lane_legacy_b: { lastHealthyRunAt: "2026-08-19T10:00:00.000Z" },
+        // 阴性对照：R23-C 后形状（两新字段在册）→ 不得报 advisory。
+        lane_migrated: {
+          lastHealthyRunAt: "2026-08-21T09:00:00.000Z",
+          providerKey: "sha256:bb22",
+          lastFullHealthyRunAt: "2026-08-21T09:00:00.000Z",
+        },
+      },
+    }), "utf8");
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        lane_legacy_a: { backend: "claude-code", cwd: dir },
+        lane_legacy_b: { backend: "claude-code", cwd: dir },
+        lane_migrated: { backend: "claude-code", cwd: dir },
+      },
+    }), "utf8");
+
+    const r = await runCli(["registry", "validate", "--registry", registryPath, "--run-dir", runDir, "--format", "json"]);
+    assert.equal(r.status, 0, "advisory 非阻塞：三条目全合法 → exit 0");
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.valid, true, "advisory 不影响 valid");
+    assert.equal(parsed.checked, 3);
+    const byId = Object.fromEntries(parsed.agents.map((a) => [a.id, a]));
+
+    // JSON warnings[] 无 id 前缀（id 是独立字段）——恰两条、逐字、顺序钉死。
+    assert.deepEqual(byId.lane_legacy_a.warnings, R23D_LEGACY_ADVISORIES,
+      "legacy lane 恰两条 advisory，文案逐字（防文案/条数静默漂移）");
+    assert.deepEqual(byId.lane_legacy_b.warnings, R23D_LEGACY_ADVISORIES,
+      "第二条 legacy lane 同形状（per-lane 独立取记录，不串 lane）");
+    // 阴性对照：证伪"有记录就报"——R23-C 后形状记录零 advisory。
+    assert.deepEqual(byId.lane_migrated.warnings, [],
+      "R23-C 后形状 lane（providerKey + lastFullHealthyRunAt 在册）零 advisory");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("R23-D: registry validate --format json × corrupt 台账——零 advisory + valid:true + exit 0（wiring 层 fail-silent 形状）", async () => {
+  const dir = makeTempDir("wao-fmt-r23d-corrupt-");
+  try {
+    const runDir = join(dir, "runs");
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, "reliability-summary.json"), "{not valid json!!", "utf8");
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        lane_x: { backend: "claude-code", cwd: dir },
+      },
+    }), "utf8");
+
+    const r = await runCli(["registry", "validate", "--registry", registryPath, "--run-dir", runDir, "--format", "json"]);
+    assert.equal(r.status, 0, "corrupt 台账不阻塞（fail-silent，与 buildCertMap 同纪律）");
+    const parsed = JSON.parse(r.stdout);
+    assert.equal(parsed.valid, true);
+    assert.equal(parsed.checked, 1);
+    assert.deepEqual(parsed.agents[0].warnings, [], "corrupt 台账 → 零 advisory（读失败按无台账处理）");
   } finally {
     cleanupDir(dir);
   }

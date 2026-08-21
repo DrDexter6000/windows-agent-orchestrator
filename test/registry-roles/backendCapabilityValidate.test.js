@@ -17,6 +17,9 @@
 //   CLI-1/2：端到端（真 CLI 子进程，text + --format json 两模式）——kimi
 //       tokenBudget ⚠ 语义零回归 + sessionReuse×false 新 ⚠ + claude-code
 //       （声明支持）零 ⚠ 正向对照。
+//   R23-D（2026-08-21）：迁移 advisory 的环境形状矩阵（text 腿）——legacy 台账
+//       恰两条 ⚠ 逐字钉 + corrupt 台账 fail-silent + R23-C 后形状阴性对照；
+//       合成台账一律写 temp run-dir（环境盲区闭合，JSON 腿在 cliFormatJson.test.js）。
 //   NOSPAWN：结构钉——validate 所在命令模块不 import node:child_process
 //       （加载路径不为校验 spawn 任何进程；纯静态读类声明）。
 //
@@ -26,7 +29,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -220,6 +223,103 @@ test("ADR25-B2-CLI-2: --format json——两条新 warning 语义进 warnings[]�
       "TD-117 warning 进 warnings[]");
     assert.ok(byId.tester.warnings.every((w) => !/tokenBudget/.test(w)),
       "codex 未配 tokenBudget → 不误报 tokenBudget warning");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// =====================================================================
+// R23-D（2026-08-21）：validate 迁移 advisory 的环境形状矩阵——text 腿。
+//
+// 盲区背景：validate 的 R23-C §5 advisory 接线读 <runDir>/reliability-summary.json
+// （gitignored 环境状态）——主仓有真实台账、worktree 交付验证没有，裸调测试
+// "全绿纯靠 fixture id 恰好不在真实台账"。本节把 advisory 的环境形状用合成台账
+// 钉死（台账一律写进 temp run-dir，d368e5f 隔离模式；同行 --run-dir 是
+// staticRunsGuard validate-no-run-dir 规则的单行约定）：
+//   - 无台账（空 run-dir）→ 零 advisory：既有 CLI-1/CLI-2 用例（runs-none）已覆盖；
+//   - legacy 台账 → 每在册 lane 恰两条 advisory，文案逐字 deepEqual；
+//   - corrupt 台账 → 零 advisory + exit 0（wiring 层 fail-silent，与
+//     registryInventory.buildCertMap 同纪律）；
+//   - 阴性对照：同台账一条 R23-C 后形状记录（providerKey + lastFullHealthyRunAt
+//     在册）→ 该 lane 零 advisory（证伪"有记录就报"）。
+// JSON 腿同矩阵在 test/isolation-infra/cliFormatJson.test.js（R23-D 节）。
+// 纯函数腿（tri-state 语义）宿主在 run-lifecycle/certGateIdentityFreshness.test.js T9 §5。
+// =====================================================================
+
+/** certMigrationAdvisories 现行文案（取自 src/registry.js，逐字；顺序 = push 顺序）。 */
+const R23D_LEGACY_ADVISORIES = [
+  "认证记录缺少 providerKey（R23-C 第 4 身份维）——legacy 台账，该维度暂不参与比对；重跑 reliability 认证后自动补全",
+  "认证记录缺少 lastFullHealthyRunAt（R23-C 全量新鲜度判据）——派发门暂回落 lastHealthyRunAt；重跑全量认证后切换",
+];
+
+/** 写合成 reliability-summary.json 到 temp run-dir（R23-D 合成台账夹具）。 */
+function writeReliabilitySummary(runDir, workers) {
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(runDir, "reliability-summary.json"), JSON.stringify({ workers }), "utf8");
+}
+
+test("R23-D-ADV-1: legacy 台账——每在册 lane 恰两条 ⚠（逐字 deepEqual），R23-C 后形状 lane 零 ⚠（阴性对照），exit 0", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r23d-legacy-"));
+  try {
+    writeReliabilitySummary(join(dir, "runs"), {
+      // legacy 形状：R23-C 前台账——两条 lane 都缺 providerKey / lastFullHealthyRunAt。
+      lane_legacy_a: { lastHealthyRunAt: "2026-08-20T10:00:00.000Z", casesPassed: 3 },
+      lane_legacy_b: { lastHealthyRunAt: "2026-08-19T10:00:00.000Z" },
+      // 阴性对照：R23-C 后形状（两新字段在册）→ 不得报 advisory。
+      lane_migrated: {
+        lastHealthyRunAt: "2026-08-21T09:00:00.000Z",
+        providerKey: "sha256:aa11",
+        lastFullHealthyRunAt: "2026-08-21T09:00:00.000Z",
+      },
+    });
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        lane_legacy_a: { backend: "claude-code", cwd: dir },
+        lane_legacy_b: { backend: "claude-code", cwd: dir },
+        lane_migrated: { backend: "claude-code", cwd: dir },
+      },
+    }), "utf8");
+
+    const r = runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs")]);
+    assert.equal(r.status, 0, "advisory 非阻塞：三条目全合法 → exit 0");
+    assert.match(r.stdout, /3 agent\(s\) checked, all valid/, "advisory 不改 pass/fail 语义");
+
+    // text 渲染形状：`  ⚠ <id>: <文案>`（registry.js 既有 warning 约定）——剥前缀后逐字比对。
+    const advisoriesOf = (id) => r.stdout.split(/\r?\n/)
+      .filter((l) => l.startsWith(`  ⚠ ${id}: `))
+      .map((l) => l.slice(`  ⚠ ${id}: `.length));
+    assert.deepEqual(advisoriesOf("lane_legacy_a"), R23D_LEGACY_ADVISORIES,
+      "legacy lane 恰两条 advisory，文案逐字（防文案/条数静默漂移）");
+    assert.deepEqual(advisoriesOf("lane_legacy_b"), R23D_LEGACY_ADVISORIES,
+      "第二条 legacy lane 同形状（per-lane 独立取记录，不串 lane）");
+    // 阴性对照：证伪"有记录就报"——R23-C 后形状记录零 advisory。
+    assert.deepEqual(advisoriesOf("lane_migrated"), [],
+      "R23-C 后形状 lane（providerKey + lastFullHealthyRunAt 在册）零 advisory");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R23-D-ADV-2: corrupt 台账（垃圾 JSON）——零 ⚠ + exit 0（wiring 层 fail-silent 形状）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-r23d-corrupt-"));
+  try {
+    const runDir = join(dir, "runs");
+    writeReliabilitySummary(runDir, {});
+    // 覆写成垃圾 JSON（writeReliabilitySummary 先建目录，这里只破坏内容）。
+    writeFileSync(join(runDir, "reliability-summary.json"), "{not valid json!!", "utf8");
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({
+      agents: {
+        lane_x: { backend: "claude-code", cwd: dir },
+      },
+    }), "utf8");
+
+    const r = runCli(["registry", "validate", "--registry", registryPath, "--run-dir", runDir]);
+    assert.equal(r.status, 0, "corrupt 台账不阻塞（fail-silent，与 buildCertMap 同纪律）");
+    assert.match(r.stdout, /✔\s*lane_x/, "agent 照常通过");
+    assert.equal((r.stdout.match(/⚠/g) ?? []).length, 0, "corrupt 台账 → 零 advisory");
+    assert.match(r.stdout, /1 agent\(s\) checked, all valid/, "汇总行不变");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

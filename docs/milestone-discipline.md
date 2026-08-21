@@ -73,6 +73,7 @@ milestone 标记 ✅ 前必须满足：
 - 先写测试（红）→ 确认失败原因正确（是"模块不存在"不是"别的错"）→ 再实现（绿）。
 - M2 parser 层 4 个 sub-task 全程红绿，零返工。
 - **规则：新模块必须红绿。重构（改现有代码）可用"旧测试全绿 + 新测试补充"替代。**
+- **环境状态读取面（runs/ 台账、.wao/pipeline 等 gitignored 状态）的测试另有专门纪律，见 §7（R23-D）。**
 
 ### 6.3 技术债审计要逐文件，不只全局 grep
 
@@ -107,3 +108,69 @@ milestone 标记 ✅ 前必须满足：
 - reliability 消耗真实 token，不进 CI；定位是"大改后/发布前必跑"，和 smoke 同级但更深。
 - **单 worker 重认证不覆盖全量**：`npm run reliability -- --agent X` 跑完会增量合并——读磁盘旧 summary 的 cases，本次结果覆盖同 caseId（重认证刷新），未重跑的 worker 保留。可安全单跑修复一个 worker 而不丢失其他 worker 的认证结果。
 - 单 worker 默认超时 300000ms（`--wait-timeout` 可覆盖）；strict profile 含 scorecard+isolation+workflow 多 drill，120s 在重 worker 上易卡边界。全量批跑时每个 worker 独立计超时（非全量总时长）。
+
+## 7. 交付验证环境盲区纪律（R23-D，2026-08-21）
+
+> 背景：交付验证在 git worktree 跑 `npm test`，而 gitignored 环境状态（runs/ 台账、
+> .wao/pipeline、真实 registry）在 worktree 不存在。读这些状态的生产代码对交付
+> 验证不可见——2026-08-21 实锤：`registry validate` 的迁移 advisory 读
+> `runs/reliability-summary.json`，worktree 验证全绿、main 集成终验两处 stable_fail。
+> 闭合手段 = **合成夹具双形状测试 + 读侧机械守卫 + 存量清扫**，三件缺一不可。
+
+### 7.1 双形状钉规则（与 §6.2 红绿纪律互指）
+
+- 读环境状态的代码路径，测试必须用**合成夹具把环境的两个形状都钉住**：
+  - **有状态形状**：temp 写入合成状态文件（如 temp run-dir 写 reliability-summary.json），
+    断言读到的行为；
+  - **无/坏状态形状**：空目录或垃圾内容，断言 fail-silent（零输出、不崩、exit 语义不变）；
+  - 有阴性对照时加第三腿（如 R23-C 后形状记录 → 零 advisory，证伪"有记录就报"）。
+- 夹具一律写 **temp 目录**（`mkdtemp` + `--run-dir`/`--cwd` 显式注入），禁止指向仓库
+  真实 runs/（静态守卫 staticRunsGuard.test.js 是主层，canonical-test.mjs 动态快照是兜底层）。
+- **规则：新增任何读 gitignored 环境状态的接线，必须同 PR 交付双形状测试；只测
+  "worktree 里看得到的那半边"（无状态形状）不算覆盖。**
+
+### 7.2 断言精确匹配（防退化牙）
+
+- 环境形状测试的断言必须**精确匹配**：`deepEqual` 逐字、恰 N 条——禁止裸 `match`
+  放过额外输出。advisory/warning 类文案逐字取生产代码现行字符串（如
+  `src/registry.js` certMigrationAdvisories），生产文案一改测试即红，文案漂移被
+  强制过人眼。
+- 自带防退化牙：谁把夹具改回默认路径（删掉 `--run-dir`/`--cwd`），测试在任何环境
+  （main/worktree/CI）都红——因为合成台账不再可见，精确断言立即失配。
+- **规则：环境读取面测试禁止"至少包含一条"式软断言。**
+
+### 7.3 环境读取面枚举表（2026-08-21 全量盘点，可补不可漏）
+
+| # | 面 | 读什么 | 测试现状 | 锚点 |
+|---|-----|--------|----------|------|
+| ① | `registry validate` 迁移 advisory | `<runDir>/reliability-summary.json` | **本轮修**：双形状矩阵钉（text+JSON：legacy/corrupt/阴性对照；无台账由既有 runs-none 用例覆盖）+ 10 处存量裸调加 `--run-dir` + staticRunsGuard `validate-no-run-dir` 机械规则 | `src/commands/registry.js:185`（接线）；`src/registry.js:288`（certMigrationAdvisories） |
+| ② | `registryInventory.buildCertMap` | `<runDir>/reliability-summary.json` | **已钉**（服务层缺失/损坏/存在三形状 + R23-C F6 providerKey 透传钉）——勿重复造轮子 | `src/application/registryInventory.js:116`；`test/registry-roles/applicationRegistryInventory.test.js` |
+| ③ | `onboarding --endorse-worker` 读台账 | `reliabilitySummaryPath = <config.runDir>/reliability-summary.json` | **已隔离**（服务层测试注入路径） | `src/commands/onboarding.js:108-109` |
+| ④ | 认证门 `--require-certified` 读 summary | `<runDir>/reliability-summary.json` | **已隔离**（cli.test.js 认证门用例全部注入 `--run-dir`） | `test/isolation-infra/cli.test.js`（`--require-certified` 用例） |
+| ⑤ | `runs dashboard` 读 `.wao/pipeline/` | `resolveTargetCwd` 回退 `process.cwd()` → `<cwd>/.wao/pipeline/`（DECL-/STAGE- 曝光注入） | **本轮隔离**（cli.test.js 四处 runsDashboardCommand 加 `--cwd <temp>`；boundReadSweep.test.js 两处同款裸 `--cwd` 登记为后续触发） | `src/commands/runs.js:831-842`；`src/commands/shared.js:77` |
+| ⑥ | daemon 读 `.wao-worktrees` | worktree 残留计数（健康信号，默认相对路径） | **低风险标注**（只读计数、非测试路径依赖；本轮不钉） | `src/daemon.js:40` |
+| ⑦ | `config/agents.json` 默认 registry | `config.registry` 默认 `config/agents.json` | **确认无测试裸用默认**（registry 用例全部显式 `--registry`） | `config/default.json`；`src/cli.js:69` |
+| ⑧ | **写面边界声明** | `frictionLog.js` 写 `<runDir>/../.dev/friction-log/` 及同类写面 | **本轮不测**（写污染风险，已否决 junction/复制真实 runs/ 方案）——表内明写一行防静默漏 | `src/frictionLog.js:34` |
+| ⑨ | **半 .wao 形状注记** | `.wao/decisions/` 被 git 跟踪；worktree 实际是"有 decisions、无 pipeline/state"的半形状 | 环境差异以此为准——worktree 并非无 `.wao`，`.wao` 读取面的环境差异按此解读 | `.gitignore`（`.wao/*` + `!.wao/decisions/` 例外） |
+
+- **规则：每轮触碰环境读取面的 milestone，先重跑四个盘点 grep（reliability-summary /
+  runDir 回落 / .wao 路径 / process.cwd()），枚举表可补不可漏；新面必须落行。**
+
+### 7.4 写面边界
+
+- 测试**只隔离读面，不测写面**：向真实环境写（friction-log、runs/ 台账）的路径
+  不做环境注入测试——写污染风险高于盲区收益。写面正确性由服务层纯函数测试 +
+  smoke 覆盖。若未来某写面出现与 ①同款的环境盲区实证（worktree 绿 / main 红），
+  先在枚举表登记，再按 7.1 双形状规则立项。
+
+### 7.5 机械守卫与后续触发
+
+- 读侧守卫落在 `test/isolation-infra/staticRunsGuard.test.js`（静态主层，零时间窗）：
+  单行出现 `"registry", "validate"` argv 形状而同行无 `--run-dir` → 红，失败消息带
+  文件：行与修法指引。**变异自证**纪律：新规则落地必须临时造一处违规证明规则红、
+  复原后绿（过程留报告）。
+- 本轮只钉 validate 一族。**后续触发登记**（出现下述任一情况时扩规则，不提前扩）：
+  runs/dashboard 族裸 `--cwd`（boundReadSweep.test.js 两处已知）、`registry list`
+  裸默认 run-dir、execSync 字符串形 spawn 的机械识别。
+- **规则：机械守卫规则必须配合成源单元测试（规则红/合法形状不触发）+ 变异自证，
+  白名单逐条带理由、失效即删。**
