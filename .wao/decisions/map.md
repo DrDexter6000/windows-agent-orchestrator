@@ -27,3 +27,4 @@
 0023 | 三席会审产品化
 0024 | onboarding 矩阵双源展示契约（已配置行 + 模板候选，0022(6) 部分取代）
 0025 | lane 架构与模型×harness 组合权（每角色 ≥1 lane、独立 agentId 并存、delta 认证方案 A）
+0026 | lane 认证身份维度补全（provider 指纹与全量新鲜度；fingerprint-only+lastFullHealthyRunAt+台账合并边界钉死；双执行席对比集成）
