@@ -255,3 +255,44 @@ export function normalizeAgent(id, agent) {
     ...agent,
   };
 }
+
+/**
+ * R23-C §5: half-migration visibility for certification records.
+ *
+ * A reliability-summary worker record written before R23-C lacks BOTH new
+ * fields:
+ *   - providerKey        (identity dimension #4 — normalized baseUrl +
+ *                        apiKeyEnv NAME fingerprint)
+ *   - lastFullHealthyRunAt (full-scope-only freshness basis; the dispatch
+ *                        gate falls back to lastHealthyRunAt while absent)
+ *
+ * This helper states that fact as NON-BLOCKING advisories (validate output —
+ * the registry entry itself is valid; only its certification ledger predates
+ * the schema). Tri-state discipline, same as matchedCertRecord consumes:
+ *   - field ABSENT (undefined)          → legacy record → advisory.
+ *   - field present as null             → observed fact (no derivable provider
+ *                                         / never full-scope green) → MIGRATED,
+ *                                         no advisory.
+ *   - field present as a string         → migrated → no advisory.
+ * No record at all (never certified) → no advisory — there is no ledger to
+ * migrate.
+ *
+ * Pure: takes the raw worker record object (or undefined), returns string[]
+ * WITHOUT the agent-id prefix — callers render as `⚠ ${id}: ${msg}`, matching
+ * the existing registry-validate warning convention. Never echoes record
+ * values (disk data may be tampered).
+ *
+ * @param {object|undefined} workerRecord — one entry of summary.workers
+ * @returns {string[]}
+ */
+export function certMigrationAdvisories(workerRecord) {
+  const advisories = [];
+  if (!workerRecord || typeof workerRecord !== "object") return advisories;
+  if (workerRecord.providerKey === undefined) {
+    advisories.push("认证记录缺少 providerKey（R23-C 第 4 身份维）——legacy 台账，该维度暂不参与比对；重跑 reliability 认证后自动补全");
+  }
+  if (workerRecord.lastFullHealthyRunAt === undefined) {
+    advisories.push("认证记录缺少 lastFullHealthyRunAt（R23-C 全量新鲜度判据）——派发门暂回落 lastHealthyRunAt；重跑全量认证后切换");
+  }
+  return advisories;
+}

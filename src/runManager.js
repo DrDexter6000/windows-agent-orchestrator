@@ -25,6 +25,12 @@ import { ISOLATION_VIOLATION_REASONS } from "./diagnosis.js";
 // discipline as MODEL_OVERRIDE_MAX/_WIRE_PATTERN below.
 import { REASONING_EFFORTS } from "./registry.js";
 export { REASONING_EFFORTS };
+// R23-C: the providerKey fingerprint normalizer (single implementation, src
+// host) — matchedCertRecord below compares the record-side providerKey against
+// the CURRENT agent.provider derivation, same judgment the reliability
+// writers (scripts/run-reliability.mjs agentInfo / matrix.normalizeCase) used
+// at certification time. Same src-relative import shape as the line above.
+import { providerKeyFor } from "./providerFingerprint.js";
 
 /**
  * RunManager 持有活跃 run 的生命周期。
@@ -277,6 +283,16 @@ export function assertValidReasoningOverride(value) {
 // Agent-side identity is null-normalized (`agent.model?.id ?? null` — never
 // undefined-vs-null false mismatches). No agent-registry schema field added.
 //
+// R23-C (ADR-0026 v2 方向, 2026-08-21): the compared set is now the identity
+// QUADRUPLE backend + modelId + providerID (unchanged) + providerKey — the
+// normalized-baseUrl + apiKeyEnv-NAME fingerprint from the single-host
+// normalizer src/providerFingerprint.js (env NAME, never the secret value).
+// Record-side tri-state: undefined = legacy record, dimension skipped;
+// explicit null = observed-no-provider — matches an agent with no derivable
+// provider block, mismatches an agent with one; a non-null record key must
+// byte-equal the agent-side derivation. Re-certification is the only path
+// across a provider-wiring change (same lesson as TD-131's backend/model).
+//
 // Hosting: HERE (core), imported DOWNWARD by src/application/registryInventory.js
 // (the display path's former private copy, same direction discipline as the
 // R10-A/R11-1 override validators runDispatch.js consumes) — the P1-1 gate
@@ -291,6 +307,7 @@ export function matchedCertRecord(agent, record) {
   if (record.modelId !== undefined && record.modelId !== modelId) return null;
   const providerID = agent.model?.providerID ?? null;
   if (providerID !== null && record.providerID !== undefined && record.providerID !== providerID) return null;
+  if (record.providerKey !== undefined && record.providerKey !== providerKeyFor(agent.provider)) return null;
   return record;
 }
 
@@ -1084,6 +1101,13 @@ export class RunManager {
       // undefined value is dropped by JSON serialization, so ordinary
       // dispatches stay byte-compatible).
       reasoning: agent.reasoning,
+      // R23-C §4: the provider block (baseUrl + apiKeyEnv NAME — the env NAME
+      // is a registry fact, never the secret value), recorded unconditionally
+      // like `model`/`reasoning` above so run_continue's drift check can
+      // compare it. When the agent has no provider block the undefined value
+      // is dropped by JSON serialization (R11-1 precedent above), so ordinary
+      // provider-less dispatches stay byte-compatible.
+      provider: agent.provider,
       // R10-A: the EXPLICIT override fact — the Lead's own input, never a
       // secret. `model` above already reflects the synthesized policy (the
       // synthesis precedes this append); modelOverride lets an auditor tell
@@ -1155,14 +1179,18 @@ export class RunManager {
     //   certified = core+strict+ops 全过；conditional = core 全过、strict/ops 部分。
     //   strict（command/file）是能力画像不是安全闸；core（completion/answer/sentinel）才是安全底线。
     //   draft-only（core 部分过）/rejected（core 失败）= 拒绝。
-    // 身份（TD-131）：记录的 backend/modelId（providerID 双侧声明时同比对）必须与当前
-    //   registry 该 agent 的配置一致（matchedCertRecord SSOT，与显示层投影共用）——
-    //   改配置换 backend/model 后不重跑 reliability，旧组合的认证不得放行。不匹配 →
-    //   按未认证拒绝，固定文案（不回显 summary/registry 值——磁盘数据可能被改）。
-    // 新鲜度（TD-132）：按 per-worker 的 lastHealthyRunAt 判（scripts/reliability/
-    //   certification.mjs 写入）。缺失/null/不可解析 → fail-closed 拒绝。旧判据读整份
-    //   summary 的 generatedAt——重考任一 worker 即刷新全本台账，其余 worker 的陈旧
-    //   认证被"洗白"；且 generatedAt 缺失/不可解析时旧逻辑竟放行。
+    // 身份（TD-131 → R23-C 四元组）：记录的 backend/modelId/providerKey
+    //   （providerID 双侧声明时同比对；providerKey 记录侧 undefined = legacy 跳过、
+    //   显式 null = 已观察无接入方）必须与当前 registry 该 agent 的配置一致
+    //   （matchedCertRecord SSOT，与显示层投影共用）——改配置换 backend/model/
+    //   接入方后不重跑 reliability，旧组合的认证不得放行。不匹配 → 按未认证拒绝，
+    //   固定文案（不回显 summary/registry 值——磁盘数据可能被改）。
+    // 新鲜度（TD-132 → R23-C §2）：按 per-worker 的 lastFullHealthyRunAt 判
+    //   （仅 full-scope 且全绿的 case 才刷新，scripts/reliability/certification.mjs
+    //   写入）；legacy 记录缺该字段 → 回落 lastHealthyRunAt。缺失/不可解析 →
+    //   fail-closed 拒绝。旧判据读整份 summary 的 generatedAt——重考任一 worker 即
+    //   刷新全本台账，其余 worker 的陈旧认证被"洗白"；且 generatedAt 缺失/不可解析
+    //   时旧逻辑竟放行。
     // 例外：w.manualOverride === "cleared" 时强制放行（owner 手动背书，绕过
     //   status/身份/新鲜度——人判断优先；TD-131/132 前后语义不变）。
     // opt-in 默认关：不破坏现有测试/使用；CI 或监督派发场景显式启用。
@@ -1178,17 +1206,25 @@ export class RunManager {
       else if (w.manualOverride === "cleared") {
         // owner 手动背书，放行（不检查 status / 身份 / 新鲜度——人判断优先）
       } else if (!matchedCertRecord(agent, w)) {
-        reasons.push("认证身份不匹配（summary 记录与当前 registry 配置的 backend/modelId/providerID 不一致，认证不可继承，需按当前配置重新认证）");
+        reasons.push("认证身份不匹配（summary 记录与当前 registry 配置的 backend/modelId/providerID/providerKey 不一致，认证不可继承，需按当前配置重新认证）");
       } else if (!DISPATCHABLE.has(w.status)) {
         reasons.push(`status=${w.status}（需 core 全过：certified/conditional，或 manualOverride=cleared）`);
       } else {
-        const healthyAtMs = typeof w.lastHealthyRunAt === "string" ? new Date(w.lastHealthyRunAt).getTime() : Number.NaN;
+        // R23-C §2：新鲜度读 lastFullHealthyRunAt（仅全量 scope 且全绿才刷新——
+        // delta 全绿不得洗白全量口径的派发新鲜度）。半迁移兼容：legacy summary
+        // 缺该字段（undefined）→ 回落旧判据 lastHealthyRunAt；显式 null（记录侧
+        // 无条件写：从未全量绿）→ fail-closed。文案锚点（无新鲜认证/认证已过期）
+        // 与既有断言保持一致；字段名如实标注实际读取的字段。过期 reason 只展示
+        // 天数，绝不回显磁盘时间戳原文。
+        const freshnessRaw = w.lastFullHealthyRunAt === undefined ? w.lastHealthyRunAt : w.lastFullHealthyRunAt;
+        const freshnessField = w.lastFullHealthyRunAt === undefined ? "lastHealthyRunAt" : "lastFullHealthyRunAt";
+        const healthyAtMs = typeof freshnessRaw === "string" ? new Date(freshnessRaw).getTime() : Number.NaN;
         if (!Number.isFinite(healthyAtMs)) {
-          reasons.push("无新鲜认证（该 worker 的 lastHealthyRunAt 缺失或不可解析，按未认证处理——请重跑 reliability 认证）");
+          reasons.push(`无新鲜认证（该 worker 的 ${freshnessField} 缺失或不可解析，按未认证处理——请重跑 reliability 认证）`);
         } else {
           const ageDays = (Date.now() - healthyAtMs) / 86_400_000;
           if (ageDays > certFreshnessDays) {
-            reasons.push(`认证已过期（lastHealthyRunAt 距今 ${Math.round(ageDays)}天 > ${certFreshnessDays}天）`);
+            reasons.push(`认证已过期（${freshnessField} 距今 ${Math.round(ageDays)}天 > ${certFreshnessDays}天）`);
           }
         }
       }

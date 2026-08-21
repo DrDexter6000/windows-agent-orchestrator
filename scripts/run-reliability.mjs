@@ -27,6 +27,8 @@ import { fileURLToPath } from "node:url";
 import { execFileSync, spawnSync } from "node:child_process";
 import { certifyCase, summarizeCertification, mergeCaseResults, pruneStaleCases } from "./reliability/certification.mjs";
 import { buildCertificationMatrix } from "./reliability/matrix.mjs";
+// R23-C：providerKey（认证身份第 4 维）归一化单一实现——src 宿主下向 import。
+import { providerKeyFor } from "../src/providerFingerprint.js";
 import { adversarialEscapeChecks } from "./reliability/adversarialEscape.mjs";
 import { metricsNonZeroCheck } from "./reliability/metricsCheck.mjs";
 
@@ -127,6 +129,9 @@ function agentInfo(agentId) {
     backend: agent.backend ?? null,
     providerID: agent.model?.providerID ?? null,
     modelId: agent.model?.id ?? null,
+    // R23-C：providerKey（规范化 baseUrl + apiKeyEnv 变量名指纹）——与
+    // matrix.normalizeCase 同一 SSOT 派生（src/providerFingerprint.js），无第二套归一化。
+    providerKey: providerKeyFor(agent.provider),
     completionMode: agent.completionMode ?? "snapshot-stable",
   };
 }
@@ -482,6 +487,9 @@ for (const tc of MATRIX) {
     backend: tc.backend ?? info.backend,
     providerID: tc.providerID ?? info.providerID,
     modelId: tc.modelId ?? info.modelId,
+    // R23-C：case 声明的认证身份含 providerKey（matrix 行从 registry 派生，与
+    // agentInfo 同源；null = 已观察无接入方，undefined 只留给 legacy 旧记录）。
+    providerKey: tc.providerKey ?? info.providerKey,
     completionMode: tc.completionMode ?? info.completionMode,
     requiredCategories: tc.requiredCategories,
     profile: tc.profile,

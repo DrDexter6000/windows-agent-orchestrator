@@ -128,6 +128,10 @@ async function buildCertMap(runDir, customReadFile) {
         // TD-131: providerID 透传（此前在此被丢弃——投影层想做该维度比对也拿不到）。
         // 匹配规则见 matchedCertRecord：仅记录与 agent 双侧声明时才比对。
         providerID: w.providerID,
+        // R23-C：providerKey 透传（TD-131 同款坑——投影层共用 matchedCertRecord 做
+        // 该维比对必须拿得到）。原样保真三态：undefined = legacy 记录（维度跳过），
+        // null = 已观察无接入方——绝不能在此归一成 null 抹掉 undefined/null 差异。
+        providerKey: w.providerKey,
         // TD-111: 旧 summary（缺字段）→ undefined → 投影层归一为 null，不伪造。
         reasonCode: w.reasonCode ?? null,
         lastHealthyRunAt: w.lastHealthyRunAt ?? null,

@@ -58,6 +58,10 @@ test("buildCertificationMatrix: reads top-level certification.matrix and enriche
     backend: "opencode-serve",
     providerID: "deepseek",
     modelId: "deepseek-v4-flash",
+    // R23-C：归一化 case 新增认证身份第 4 维 providerKey（无条件写）。researcher
+    // fixture 无 agent.provider 块 → 显式 null（已观察确认无接入方；契约详见
+    // test/run-lifecycle/certGateIdentityFreshness.test.js T6）。
+    providerKey: null,
     completionMode: "first-stable",
   });
   assert.equal(matrix[1].backend, "claude-code");

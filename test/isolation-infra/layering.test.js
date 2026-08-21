@@ -109,7 +109,10 @@ const CORE_TOP = Object.freeze(new Set([
   "src/isolation.js",
   "src/metrics.js",
   "src/nodeVersionGuard.js",
+  // R23-C 跟进登记（2026-08-21）：providerKey 归一化单一实现，唯一 src 消费方
+  // runManager.js（core 同层 2→2）；scripts 侧下向 import 不在本守卫扫描图内。
   "src/portAllocator.js",
+  "src/providerFingerprint.js",
   "src/registry.js",
   "src/runEvidenceAssessment.js",
   "src/runManager.js",

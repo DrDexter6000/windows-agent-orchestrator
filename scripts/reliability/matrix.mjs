@@ -1,3 +1,7 @@
+// R23-C：providerKey（认证身份第 4 维）归一化单一实现——src 宿主下向 import，
+// 与 run-reliability.mjs agentInfo / runManager.matchedCertRecord 同源零漂移。
+import { providerKeyFor } from "../../src/providerFingerprint.js";
+
 const LEGACY_MATRIX = [
   { agentId: "coder", label: "GLM snapshot-stable", providerID: "zhipuai-coding-plan" },
   { agentId: "researcher", label: "DeepSeek first-stable", providerID: "deepseek" },
@@ -54,6 +58,10 @@ function normalizeCase(tc, agent = {}, profileOverride) {
     backend: agent.backend ?? tc.backend ?? null,
     providerID: tc.providerID ?? agent.model?.providerID ?? null,
     modelId: tc.modelId ?? agent.model?.id ?? null,
+    // R23-C：providerKey 一律从 registry 的 agent.provider 派生，绝不读行值——
+    // providerID 硬编码行值导致该维度对现网全部 lane 空转的教训（TD-133 同族）。
+    // 无 provider 块 → null（已观察确认无接入方）。
+    providerKey: providerKeyFor(agent.provider),
     completionMode: tc.completionMode ?? agent.completionMode ?? "snapshot-stable",
   };
 }

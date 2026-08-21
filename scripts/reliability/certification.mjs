@@ -31,19 +31,23 @@ const STATUS_SEVERITY = {
 };
 
 // ADR-0025 §5（批次 3）：certificationScope 派生——case 走 delta 规程 ⇔
-// profile 显式 "delta"，或（无 profile 的手写/legacy case）drill 覆盖未超出
+// profile 显式 "delta" 且该 case 的 drills ⊆ DELTA_DRILLS 子集（TD-133(c) 根修，
+// R23-C：profile:"delta" 不再短路——显式 drills 超出子集的行按 full 记，与
+// docs/usage.md「delta 认证规程」的"按实际覆盖派生"措辞对齐；drills 缺失的
+// legacy 形状视为未超出），或（无 profile 的手写/legacy case）drill 覆盖未超出
 // delta 子集且含越界写对抗。scope 是磁盘 summary 的事实字段，只活在 summary +
 // 文档层：不动 CERTIFICATION_STATUSES 闭集、不进 CLI/MCP inventory 投影
 // （registryInventory.js 的 buildCertMap 按白名单字段取值，scope 不会被透出）。
 export function certificationScopeForCase(caseResult = {}) {
-  if (caseResult?.profile === "delta") return "delta";
   const drills = Array.isArray(caseResult?.drills)
     ? caseResult.drills.filter((d) => typeof d === "string")
     : [];
+  const withinDeltaSubset = drills.every((d) => DELTA_DRILLS.includes(d));
+  if (caseResult?.profile === "delta" && withinDeltaSubset) return "delta";
   if (
     drills.length > 0
     && drills.includes("adversarialEscape")
-    && drills.every((d) => DELTA_DRILLS.includes(d))
+    && withinDeltaSubset
   ) {
     return "delta";
   }
@@ -204,6 +208,11 @@ function summarizeWorkers(cases) {
         backend: active.backend,
         providerID: active.providerID,
         modelId: active.modelId,
+        // R23-C：认证身份第 4 维——active identity 的 providerKey（规范化 baseUrl +
+        // apiKeyEnv 变量名指纹，src/providerFingerprint.js 单一实现）。无条件写：
+        // null = 已观察、确认无接入方；undefined 仅 legacy active（从未有 case
+        // 声明该字段）——门侧 matchedCertRecord 对 undefined 跳过该维比对。
+        providerKey: active.providerKey,
         status,
         recommendedUse: RECOMMENDED_USE[status],
         // ADR-0025 §5：认证范围事实字段（"full"|"delta"），按 active-identity 各
@@ -216,6 +225,13 @@ function summarizeWorkers(cases) {
         reasonCode: adoptsWorse ? workerReasonCode(c.certification) : summary.reasonCode,
         // TD-111: 该 worker（active identity 的 case）最近一次全绿的时间；从未全绿 → null。
         lastHealthyRunAt: latestTimestamp(summary?.lastHealthyRunAt ?? null, c.lastHealthyRunAt ?? null),
+        // R23-C §2：仅 full-scope 且全绿的 case 刷新（scope 感知；delta 全绿不刷新——
+        // delta 通过是 conditional，不得洗白全量口径的派发新鲜度）。取各 active-identity
+        // case 的最大值。记录侧无条件写：null = 从未有全量绿（undefined 只留给 legacy）。
+        lastFullHealthyRunAt: latestTimestamp(
+          summary?.lastFullHealthyRunAt ?? null,
+          certificationScopeForCase(c) === "full" ? (c.lastHealthyRunAt ?? null) : null,
+        ),
         capabilities: mergeCapabilities(
           summary?.capabilities ?? {},
           c.certification.capabilities ?? {},
@@ -245,14 +261,21 @@ function latestTimestamp(left, right) {
   return right > left ? right : left;
 }
 
-// case 声明 identity 当且仅当至少一个 identity 字段非 null/undefined/空串。
+// case 声明 identity 当且仅当至少一个 identity 字段非 null/undefined/空串
+// （R23-C 起 providerKey 维：显式出现即算声明——含 null = 已观察无接入方）。
 // active identity 取最后一个声明过 identity 的 case 所声明的字段。
-// 从未声明 identity 的 agent（旧数据）→ active 全 null，全部 case 聚合（legacy 行为）。
+// 从未声明 identity 的 agent（旧数据）→ active 全 null + providerKey undefined，
+// 全部 case 聚合（legacy 行为）。
 function findActiveIdentity(agentCases) {
-  let active = { backend: null, providerID: null, modelId: null };
+  let active = { backend: null, providerID: null, modelId: null, providerKey: undefined };
   for (const c of agentCases) {
     const declared = declaredIdentity(c);
-    if (declared.backend !== null || declared.providerID !== null || declared.modelId !== null) {
+    if (
+      declared.backend !== null
+      || declared.providerID !== null
+      || declared.modelId !== null
+      || declared.providerKey !== undefined
+    ) {
       active = declared;
     }
   }
@@ -261,14 +284,21 @@ function findActiveIdentity(agentCases) {
 
 // case 属于 active identity 当且仅当：其声明过的每个 identity 字段与 active 对应字段一致。
 // 未声明任何 identity 字段的 case（如历史聚合 fixture）继承 active identity，保持同 identity 聚合。
+// providerKey 三态：undefined（legacy 未声明）跳过该维；null/字符串与 active 同值才算同一身份。
 function matchesActiveIdentity(c, active) {
   const declared = declaredIdentity(c);
-  if (declared.backend === null && declared.providerID === null && declared.modelId === null) {
+  if (
+    declared.backend === null
+    && declared.providerID === null
+    && declared.modelId === null
+    && declared.providerKey === undefined
+  ) {
     return true;
   }
   return (declared.backend === null || declared.backend === active.backend) &&
          (declared.providerID === null || declared.providerID === active.providerID) &&
-         (declared.modelId === null || declared.modelId === active.modelId);
+         (declared.modelId === null || declared.modelId === active.modelId) &&
+         (declared.providerKey === undefined || declared.providerKey === active.providerKey);
 }
 
 function declaredIdentity(c) {
@@ -276,11 +306,20 @@ function declaredIdentity(c) {
     backend: normalizeIdentityField(c.backend),
     providerID: normalizeIdentityField(c.providerID),
     modelId: normalizeIdentityField(c.modelId),
+    providerKey: normalizeProviderKeyField(c.providerKey),
   };
 }
 
 function normalizeIdentityField(value) {
   return value === null || value === undefined || value === "" ? null : value;
+}
+
+// R23-C：providerKey 保留三态——undefined（字段缺失，legacy case）原样保留 =
+// 未声明；null/"" → null（已观察、确认无接入方）；字符串原样。与三元组字段的
+// null 归一不同：这里 undefined ≠ null（门侧比对语义依赖该差异）。
+function normalizeProviderKeyField(value) {
+  if (value === undefined) return undefined;
+  return normalizeIdentityField(value);
 }
 
 function normalizeChecks(checks = []) {

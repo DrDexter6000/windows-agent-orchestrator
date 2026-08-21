@@ -92,7 +92,7 @@ export const CONTINUE_REJECTION_REASONS = Object.freeze([
   "no_provider_session", // parent never established a provider conversation to resume
   "workspace_mismatch", // parent ownership != authorized workspace
   "no_delivery", // parent run.started lacks canonical base + retained worktree
-  "worker_configuration_changed", // current backend/model differs from the parent session
+  "worker_configuration_changed", // current backend/model/provider differs from the parent session
   "unsupported_backend", // backend does not declare supportsSessionReuse
   "missing_worktree", // retained worktree path no longer exists on disk
   "worktree_drift", // retained worktree base/branch/detached state drifted
@@ -407,8 +407,16 @@ export async function continueRun({
   //    decides from the declared capability.
   const registry = await readRegistry(resolve(registryPath));
   const agent = registry.getAgent(agentId);
+  // R23-C §4: the provider block (baseUrl + apiKeyEnv NAME) joins the drift
+  // check — swapping the provider wiring mid-lineage must start a fresh run,
+  // not silently resume on the new endpoint. Legacy tolerance: parents started
+  // before run.started carried `provider` (undefined on the recorded event)
+  // skip this dimension — same record-side-undefined-skip discipline as
+  // matchedCertRecord. Shape-aligned JSON comparison, same as `model` below.
   if (started.backend !== agent.backend
-    || JSON.stringify(started.model ?? null) !== JSON.stringify(agent.model ?? null)) {
+    || JSON.stringify(started.model ?? null) !== JSON.stringify(agent.model ?? null)
+    || (started.provider !== undefined
+      && JSON.stringify(started.provider ?? null) !== JSON.stringify(agent.provider ?? null))) {
     return refuse("worker_configuration_changed");
   }
   const backend = typeof backendFor === "function" ? backendFor(agent) : null;
