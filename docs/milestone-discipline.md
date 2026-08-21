@@ -146,7 +146,7 @@ milestone 标记 ✅ 前必须满足：
 | ① | `registry validate` 迁移 advisory | `<runDir>/reliability-summary.json` | **本轮修**：双形状矩阵钉（text+JSON：legacy/corrupt/阴性对照；无台账由既有 runs-none 用例覆盖）+ 10 处存量裸调加 `--run-dir` + staticRunsGuard `validate-no-run-dir` 机械规则 | `src/commands/registry.js:185`（接线）；`src/registry.js:288`（certMigrationAdvisories） |
 | ② | `registryInventory.buildCertMap` | `<runDir>/reliability-summary.json` | **已钉**（服务层缺失/损坏/存在三形状 + R23-C F6 providerKey 透传钉）——勿重复造轮子 | `src/application/registryInventory.js:116`；`test/registry-roles/applicationRegistryInventory.test.js` |
 | ③ | `onboarding --endorse-worker` 读台账 | `reliabilitySummaryPath = <config.runDir>/reliability-summary.json` | **已隔离**（服务层测试注入路径） | `src/commands/onboarding.js:108-109` |
-| ④ | 认证门 `--require-certified` 读 summary | `<runDir>/reliability-summary.json` | **已隔离**（cli.test.js 认证门用例全部注入 `--run-dir`） | `test/isolation-infra/cli.test.js`（`--require-certified` 用例） |
+| ④ | 认证门 `--require-certified` 读 summary  生产锚点 `src/runManager.js:1182-1210`（auditor F1 补）| `<runDir>/reliability-summary.json` | **已隔离**（cli.test.js 认证门用例全部注入 `--run-dir`） | `test/isolation-infra/cli.test.js`（`--require-certified` 用例） |
 | ⑤ | `runs dashboard` 读 `.wao/pipeline/` | `resolveTargetCwd` 回退 `process.cwd()` → `<cwd>/.wao/pipeline/`（DECL-/STAGE- 曝光注入） | **本轮隔离**（cli.test.js 四处 runsDashboardCommand 加 `--cwd <temp>`；boundReadSweep.test.js 两处同款裸 `--cwd` 登记为后续触发） | `src/commands/runs.js:831-842`；`src/commands/shared.js:77` |
 | ⑥ | daemon 读 `.wao-worktrees` | worktree 残留计数（健康信号，默认相对路径） | **低风险标注**（只读计数、非测试路径依赖；本轮不钉） | `src/daemon.js:40` |
 | ⑦ | `config/agents.json` 默认 registry | `config.registry` 默认 `config/agents.json` | **确认无测试裸用默认**（registry 用例全部显式 `--registry`） | `config/default.json`；`src/cli.js:69` |
@@ -174,3 +174,5 @@ milestone 标记 ✅ 前必须满足：
   裸默认 run-dir、execSync 字符串形 spawn 的机械识别。
 - **规则：机械守卫规则必须配合成源单元测试（规则红/合法形状不触发）+ 变异自证，
   白名单逐条带理由、失效即删。**
+
+**R23-D Lead 补全（2026-08-21，stage 4 审计后）**：守卫规则族扩至字符串形（模板串内 registry validate/list 无 --run-dir 即红——auditor F2/coder_mm 没问但该问）；argv 形收紧为 --run-dir 须在 validate token 之后（F4）；dashboard 面（表 ⑤）现役实例已隔离（boundReadSweep 两处 --cwd），该面机械守卫为后续触发（单行 argv 规则不覆盖 --cwd 形状）。

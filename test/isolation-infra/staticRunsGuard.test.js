@@ -92,8 +92,20 @@ const RULES = [
     // 同行带 --run-dir（d368e5f 隔离惯例）即合法——多行 argv 的 token 行也必须
     // 把 flag 写在同一行（单行约定，机械可扫）。
     id: "validate-no-run-dir",
-    regex: new RegExp("^(?!" + ".*" + RUN_DIR_FLAG + ").*" + VALIDATE_ARGV),
+    // R23-D Lead 补全（auditor F4）：--run-dir 必须出现在 validate token 之后——
+    // 行内更早位置或无关字符串里的字面量不再免疫真实裸调。
+    regex: new RegExp(VALIDATE_ARGV + "(?!.*" + RUN_DIR_FLAG + ")"),
     why: 'registry validate spawned WITHOUT a same-line --run-dir ⇒ the child resolves config.runDir ("runs") against the repo root and reads the REAL runs/reliability-summary.json ledger (R23-D blind spot: on main yes, in delivery-verification worktrees no). Fix: append "--run-dir", join(dir, "runs-none") on the SAME line as the validate tokens (d368e5f isolation convention)',
+  },
+  {
+    // R23-D Lead 补全（auditor F2 + coder_mm"没问但该问"）：字符串形命令——模板串里
+    // 出现 registry validate/list 而串内无 --run-dir → 红。覆盖 runCliOnPathNode /
+    // execSync 模板串（本轮亲手清扫过的形状，此前守卫结构上看不见）。
+    id: "registry-cmd-string-no-run-dir",
+    // 命令形约束：registry validate/list 后必须紧跟 flag（--）或插值（${）——
+    // 排除注释/散文里的 `registry validate` 反引号引用（低误报契约）。
+    regex: /`(?=[^`\n]*\bregistry\s+(?:validate|list)\s+(?:--|\$\{))(?![^`\n]*--run-dir)[^`\n]*`/,
+    why: 'template-string registry validate/list WITHOUT --run-dir inside the same template ⇒ reads the REAL runs/ ledger (string form is invisible to the argv rule; R23-D auditor F2)',
   },
 ];
 
@@ -246,11 +258,31 @@ test("scan R23-D: validate argv WITHOUT same-line --run-dir FIRES（单行裸 to
   assert.deepEqual(findings.map((f) => [f.file, f.rule]), [
     ["synthetic/r23d-bare.test.js", "validate-no-run-dir"],
     ["synthetic/r23d-multiline.test.js", "validate-no-run-dir"],
-  ], "裸 validate（含多行 argv 的裸 token 行）红；同行带 --run-dir 的隔离形状不触发（单行约定）");
+  ], "同一行的裸 validate token 红及携带它的多行 argv 裸 token 行红（token 与 flag 必须同行——单行是约定不是不变量，真拆行由字符串形/评审兜）；同行带 --run-dir 的隔离形状不触发");
   // 红灯必须自带修法指引：finding 的 rule 可回查 RULES[].why（REAL TREE 断言
   // 把 why 拼进失败消息，见下）。
   assert.match(RULES.find((r) => r.id === "validate-no-run-dir").why, /--run-dir/,
     "规则 why 必须给出修法指引（--run-dir 同行惯例）");
+});
+
+test("scan R23-D 补全: 字符串形 registry validate/list 模板串无 --run-dir FIRES；串内带 --run-dir 不触发", () => {
+  // R23-D Lead 补全（auditor F2）：本轮亲手清扫过的 execSync/runCliOnPathNode 形状。
+  const bareStringValidate = "const out = runCliOnPathNode(`registry " + "validate --registry ${p}`);";
+  const bareStringList = "const out = execSync(`node src/cli.js registry " + "list --registry ${p} --format json`);";
+  const isolatedString = 'const out = runCliOnPathNode(`registry ' + 'validate --registry ${p} --run-dir ${join(dir, "runs-none")}`);';
+  const unrelatedTemplate = "const msg = `registry of things`;"; // 无 validate/list 命令形——不触发（低误报）
+  const findings = scanTestSourcesForRepoRunsDir([
+    { file: "synthetic/r23d-str-bare-validate.test.js", text: bareStringValidate },
+    { file: "synthetic/r23d-str-bare-list.test.js", text: bareStringList },
+    { file: "synthetic/r23d-str-isolated.test.js", text: isolatedString },
+    { file: "synthetic/r23d-str-unrelated.test.js", text: unrelatedTemplate },
+  ]);
+  assert.deepEqual(findings.map((f) => [f.file, f.rule]), [
+    ["synthetic/r23d-str-bare-validate.test.js", "registry-cmd-string-no-run-dir"],
+    ["synthetic/r23d-str-bare-list.test.js", "registry-cmd-string-no-run-dir"],
+  ], "字符串形裸命令红（validate 与 list 两族）；串内带 --run-dir 或非命令形模板不触发");
+  assert.match(RULES.find((r) => r.id === "registry-cmd-string-no-run-dir").why, /--run-dir/,
+    "字符串形规则 why 必须给出修法指引");
 });
 
 // ── Real-tree enforcement (the layer-1 gate) ─────────────────────────────────

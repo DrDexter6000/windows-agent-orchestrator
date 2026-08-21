@@ -2389,7 +2389,7 @@ test("R20C-DB-1: 篡改探针 + 合法/legacy 回归 — --latest 排序键 = �
       { type: "run.completed", agentId: "coder_low", ts: "2026-08-19T00:00:05.000Z", seq: 2 },
     ].map((l) => JSON.stringify(l)).join("\n")}\n`, "utf8");
 
-    await runsDashboardCommand(["--latest", "1", "--format", "json", "--run-dir", dir], { runDir: dir });
+    await runsDashboardCommand(["--latest", "1", "--format", "json", "--run-dir", dir, "--cwd", dir], { runDir: dir }); // R23-D Lead 补全：--cwd 隔离 .wao/pipeline 潜伏读（auditor F5）
     const dash1 = JSON.parse(out.join("\n"));
     assert.equal(dash1.summary.total, 1);
     assert.equal(dash1.rows[0].runId, bId,
@@ -2397,7 +2397,7 @@ test("R20C-DB-1: 篡改探针 + 合法/legacy 回归 — --latest 排序键 = �
 
     // 合法 + legacy 回归：零干扰排序 = B(00:20) > A(00:10) > legacy(00:05)。
     out.length = 0;
-    await runsDashboardCommand(["--latest", "2", "--format", "json", "--run-dir", dir], { runDir: dir });
+    await runsDashboardCommand(["--latest", "2", "--format", "json", "--run-dir", dir, "--cwd", dir], { runDir: dir });
     const dash2 = JSON.parse(out.join("\n"));
     assert.deepEqual(dash2.rows.map((r) => r.runId), [bId, aId],
       "按自身绑定末条 ts 降序；legacy 无信封文件按末事件 ts 参与排序（历史读法保持，排序在后）");

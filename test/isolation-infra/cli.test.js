@@ -364,7 +364,7 @@ test("M8-2: runsDashboardCommand 渲染 text 输出（含 header + rows + summar
       JSON.stringify({ type: "scorecard.warn", detail: "no evidence", ts: "2026-06-26T10:05:00.000Z" }) + "\n");
 
     const out = await captureLog(async () => {
-            // R23-D 隔离：dashboard 的 selfDeclared/stageProgress 潜伏读
+      // R23-D 隔离：dashboard 的 selfDeclared/stageProgress 潜伏读
       // resolveTargetCwd() 回退 process.cwd() → 主仓 .wao/pipeline/；
       // 显式 --cwd 钉进 temp 目录（.wao 未 init → 静默 count:0）。
       await runsDashboardCommand(["--run-dir", dir, "--cwd", dir], { runDir: dir });
@@ -413,7 +413,7 @@ test("WF-9: runsDashboardCommand 长 runId 不得撑乱列对齐", async () => {
       JSON.stringify({ type: "run.state_change", to: "running", ts: "2026-06-26T10:01:00.000Z" }) + "\n");
 
     const out = await captureLog(async () => {
-            // R23-D 隔离：dashboard 的 selfDeclared/stageProgress 潜伏读
+      // R23-D 隔离：dashboard 的 selfDeclared/stageProgress 潜伏读
       // resolveTargetCwd() 回退 process.cwd() → 主仓 .wao/pipeline/；
       // 显式 --cwd 钉进 temp 目录（.wao 未 init → 静默 count:0）。
       await runsDashboardCommand(["--run-dir", dir, "--cwd", dir], { runDir: dir });
@@ -440,7 +440,7 @@ test("M8-2: runsDashboardCommand 空目录输出 'No runs found.'（不崩）", 
   const dir = mkdtempSync(join(tmpdir(), "wao-dash-empty-"));
   try {
     const out = await captureLog(async () => {
-            // R23-D 隔离：dashboard 的 selfDeclared/stageProgress 潜伏读
+      // R23-D 隔离：dashboard 的 selfDeclared/stageProgress 潜伏读
       // resolveTargetCwd() 回退 process.cwd() → 主仓 .wao/pipeline/；
       // 显式 --cwd 钉进 temp 目录（.wao 未 init → 静默 count:0）。
       await runsDashboardCommand(["--run-dir", dir, "--cwd", dir], { runDir: dir });
@@ -1149,8 +1149,10 @@ test("registry list 无 summary 时不报错（cert 列显示 -）", () => {
       agents: { coder_hq: { backend: "claude-code", binary: "/x", cwd: dir, model: { id: "glm-5.2" } } },
     }), "utf8");
 
-    const out = runCliOnPathNode(`registry list --registry ${registryPath}`);
-    assert.match(out.trim(), /coder_hq\tclaude-code\tglm-5\.2.*-/, "无 summary 时 cert 列显示 -");
+    const out = runCliOnPathNode(`registry list --registry ${registryPath} --run-dir ${join(dir, "runs-none")}`);
+    // R23-D Lead 补全（auditor F6）：隔离 run-dir 使标题为真（此前在主仓读到真实
+    // 台账，cert 列实为 certified，靠 .*- 匹配 temp 目录连字符假绿）；断言收紧为精确列。
+    assert.match(out.trim(), /^coder_hq\tclaude-code\tglm-5\.2\t-\t/m, "无 summary 时 cert 列恰为 -（隔离 run-dir 下标题为真）");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1167,7 +1169,7 @@ test("WF-8: registry list 对 kimi/codex 默认模型显示非 '-'", () => {
       },
     }), "utf8");
 
-    const out = runCliOnPathNode(`registry list --registry ${registryPath}`);
+    const out = runCliOnPathNode(`registry list --registry ${registryPath} --run-dir ${join(dir, "runs-none")}`);
     const lines = out.trim().split(/\r?\n/);
     for (const id of ["coder_mm", "tester"]) {
       const line = lines.find((l) => l.startsWith(`${id}\t`));

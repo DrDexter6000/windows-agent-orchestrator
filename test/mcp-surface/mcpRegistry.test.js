@@ -576,7 +576,7 @@ test("M9-1-11: CLI registry list --format json contract unchanged", () => {
       coder_low: { backend: "claude-code", cwd: dir, model: { id: "glm-5-turbo" } },
     });
     const out = execSync(
-      `node src/cli.js registry list --registry ${registryPath} --format json`,
+      `node src/cli.js registry list --registry ${registryPath} --run-dir ${join(dir, "runs-none")} --format json`,
       { cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" } },
     );
     // CLI emits a bare array (M9-0 contract), NOT wrapped in {agents:[...]}.
