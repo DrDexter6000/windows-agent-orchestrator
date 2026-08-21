@@ -179,7 +179,8 @@ test("ADR25-B2-CLI-1: text 模式——kimi×tokenBudget ⚠（TD-87 零回归�
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: makeCrossCheckRegistry(dir) }), "utf8");
 
-    const r = runCli(["registry", "validate", "--registry", registryPath]);
+    // R23-C §5 隔离：同 cliFormatJson——空 run-dir 隔离真实台账。
+    const r = runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none")]);
     assert.equal(r.status, 0, "warning 不阻塞：三条目全部合法 → exit 0");
     // 三个 agent 都通过（✔）。
     assert.match(r.stdout, /✔\s*researcher/, "claude-code 通过");
@@ -203,7 +204,7 @@ test("ADR25-B2-CLI-2: --format json——两条新 warning 语义进 warnings[]�
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: makeCrossCheckRegistry(dir) }), "utf8");
 
-    const r = runCli(["registry", "validate", "--registry", registryPath, "--format", "json"]);
+    const r = runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none"), "--format", "json"]);
     assert.equal(r.status, 0);
     const parsed = JSON.parse(r.stdout);
     assert.equal(parsed.checked, 3);

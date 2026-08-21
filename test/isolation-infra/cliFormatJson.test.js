@@ -81,7 +81,9 @@ test("TD-86: registry validate --format json 输出 {checked,valid,agents}，维
       },
     }), "utf8");
 
-    const r = await runCli(["registry", "validate", "--registry", registryPath, "--format", "json"]);
+    // R23-C §5 隔离：advisory 会读本机真实 runs/reliability-summary.json（主仓有、
+    // worktree 无）——传空 run-dir 让 fixture 测试不依赖仓库台账状态。
+    const r = await runCli(["registry", "validate", "--registry", registryPath, "--run-dir", join(dir, "runs-none"), "--format", "json"]);
     assert.equal(r.status, 1, "JSON 模式维持 exit code 契约（invalid → exit 1）");
     const parsed = JSON.parse(r.stdout);
     assert.equal(parsed.checked, 3, "checked = 处理的 agent 数");
