@@ -10,8 +10,8 @@
 ## 0. 执行摘要
 
 1. **isolation_pass 家族（族 1）的直接机制确认为"同机双全量并发互踩"**：今日抓到一对完整碰撞实例——jgkf6c 直连全量（12:06:42–12:29:29Z）× ngym3n harness 验证全量（12:08:30–12:28:32Z）**重叠约 20 分钟**，前者慢 2.85×（1367s vs 同 worktree 复跑绿 477s）并产出 mcpWorkspaceSmoke isolation_pass，后者被拖过 1200s 验证墙强杀。
-2. **command_timeout 子族（族 2）确认为独立族**：今日 3 例全部是 harness lane、全部死在 filesystem 波内（tail 止于 `wave=filesystem start`，210–211 字节，零分类行）。pure 波同日摆幅 **33.7s→204.2s（6.1×）** 证明机器负载态剧烈漂移；filesystem 波长杆（实测绿态 488–707s、污染态 1123s）× 负载高峰 ⇒ 撞 1200s 墙是算术必然。
-3. **孤儿标记成因链全程闭合（本轮新证据）**：rqmoy worker 于 11:12:28Z 后台直连自跑全量（无人收割）→ pid 32764 于 11:12:30.251Z 写全局标记 → worker 回合结束、run 完成收割会话，后台任务树被硬杀（harness 任务输出文件留有 `[killed]` 字样）→ `end()` 未执行 → **孤儿标记恒亮 10 小时+**（11:12:30Z → 本轮 21:14 D0 清除），期间 dmyd 自跑、dsfi8 自跑、两席核验全部看到死 pid 的 WARNING。
+2. **command_timeout 子族（族 2）确认为独立族**：今日 3 例全部是 harness lane、全部死在 filesystem 波内（tail 止于 `wave=filesystem start`，210–211 字节，零分类行）。pure 波同日摆幅 **33.7s→204.2s（6.1×）** 证明机器负载态剧烈漂移；filesystem 波长杆（实测绿态 488–696s、污染态 1123s）× 负载高峰 ⇒ 撞 1200s 墙是算术必然。
+3. **孤儿标记成因链全程闭合（本轮新证据）**：rqmoy worker 于 11:12:28Z 后台直连自跑全量（无人收割）→ pid 32764 于 11:12:30.251Z 写全局标记 → worker 回合结束、run 完成收割会话，后台任务树被硬杀（harness 任务输出文件留有 `[killed]` 字样）→ `end()` 未执行 → **孤儿标记恒亮 9 小时+**（11:12:30Z → 本轮 21:14 D0 清除），期间 dmyd 自跑、dsfi8 自跑、两席核验全部看到死 pid 的 WARNING。
 4. **D 系列受控实验（D0→D1→D-TEMP→D3）预算内全部完成（实耗 ≈4 分钟/40 分钟），单文件形状均未复现家族失败**：错峰 ×5 全绿、私有 TEMP vs 默认 TEMP 全绿（默认 TEMP 反而中位慢 ~40%）、16 路满载 CPU 下全绿。复现需要波级 I/O 交织或双全量碰撞（D2 按计划砍除，未测）。
 5. **验收**：`npm test` 全量 exit 0，verdict=pass 227/227，runsGuard=clean，**无 WARNING**（D0 清孤儿后活体证明）。台账 12 行（底稿 6 + 今日 6）；identity_lost 计 7 个实例（底稿 2 + 今日 5）。
 
@@ -68,17 +68,18 @@
 | # | 文件/波次 | 墙钟起止(UTC) | 并发(重叠计算) | lane + tempPerAttempt | marker 三态 | 各波耗时(负载代理) | failureCode 族 | identity | 证据质量 |
 |---|-----------|---------------|----------------|------------------------|-------------|--------------------|----------------|----------|----------|
 | E1 | mcp-surface/mcpWorkspaceSmoke.test.js [git/filesystem]；verdict 226/227 | 12:06:42–12:29:29Z（total=1367083ms） | **2**（×E4 ngym3n 全量，重叠≈20min） | worker 自跑（r23c-absorb 会话 jgkf6c 在 rqmoy worktree 手跑），**直连，false** | **fired-on-orphan**（suite 起跑打 WARNING "started at 11:12:30.251Z (pid 32764)"，该 pid 已于 ~11:13:27 死亡——死 pid 警告） | pure 47.0s（正常）；总墙钟 1367s = 同 worktree 复跑绿 477s 的 **2.85×**（慢在被并发拖长的 filesystem 波+隔离复跑段） | command_failed→isolation_pass | **可复原**（isolation 行全文在案：`[canonical] isolation mcp-surface/mcpWorkspaceSmoke.test.js [git/filesystem] firstRound=fail alone=pass ⇒ isolation_pass`，jgkf6c seq214 + bg 任务输出 bxn1kmhd6.output 双源） | **高（今日唯一身份可复原例，两席认定的真锚）** |
-| E2 | dmyd worktree filesystem 波 **failed=2**（文件名不可知） | ~15:03–~15:26Z（fs 波 1122794ms） | **2**（×dsfi8 harness 验证 15:01:20–15:20:01，重叠≈17-19min；尾部另×dmyd 自己的验证 15:17 起） | worker 自跑（dmyd），**直连，false** | **fired-on-orphan**（起跑 WARNING 同 pid 32764 死 pid） | pure 58180ms 绿；**fs 波 1122794ms exit=1 pass=68 failed=2**（绿态参照 488005–696066ms，污染态 1.6–2.3×） | command_failed（推定 isolation_pass×2——直连套件无 tail 持久化，无法证实分类） | **identity_lost ×2 实例**（灭失原因：①转录只有两次增量部分读、无 verdict/isolation 行；②保留树 test-results.json 被 15:32Z dmyd PASS 验证覆盖） | 低（仅波级计数在案） |
+| E2 | dmyd worktree filesystem 波 **failed=2**（文件名不可知） | 14:52:48Z 起（dmyd seq415/416 实锚；fs 波 ≈14:55–15:14Z 完成于 15:15:48Z 前——seq444 实证）；原稿 ~15:03 起点与 fs=1122794ms 推算同 seq444 冲突，按审计 F3 修正 | **2**（×dsfi8 harness 验证 15:01:20–15:20:01，重叠≈17-19min；尾部另×dmyd 自己的验证 15:17 起） | worker 自跑（dmyd），**直连，false** | **fired-on-orphan**（起跑 WARNING 同 pid 32764 死 pid） | pure 58180ms 绿；**fs 波 1122794ms exit=1 pass=68 failed=2**（绿态参照 488005–696066ms，污染态 1.6–2.3×） | command_failed（推定 isolation_pass×2——直连套件无 tail 持久化，无法证实分类） | **identity_lost ×2 实例**（灭失原因：①转录只有两次增量部分读、无 verdict/isolation 行；②保留树 test-results.json 被 15:32Z dmyd PASS 验证覆盖） | 低（仅波级计数在案） |
 | E3 | rqmoy harness 验证 FAIL 225/2：`isolation-infra/layering.test.js [pure]` + `registry-roles/reliabilityMatrix.test.js [timeout]` 均 stable_fail | 11:13:32–11:23:27Z（total=594101ms） | 1（孤儿套件已于验证起波前 ~5s 被杀——波级重叠≈0，但机器刚经历强杀扰动且孤儿标记在场） | harness 验证，**true** | **not-fired-because-blind**（全局孤儿在场但私有 TEMP 结构性不可见） | pure 35965ms / fs 488005ms / mcp 20664ms / process 48136ms / lock 501ms / timeout 298ms | command_failed→stable_fail×2 | 文件级可复原（stderrTail 全文在案）；**环境贡献度灭失**（alone 复跑在同一窗口内进行，负载态不可回放）；后续跟进轮证实两文件确有真实缺陷（providerFingerprint.js 未进分层登记 / matrix.mjs 断言破坏）⇒ 家族归因：**非 isolation_pass 族，作为伴随事件独立入账** | 高（W1 tail 取证首次实战生效） |
 | E4 | ngym3n harness 验证 command_timeout | 12:08:30–12:28:32Z（durMs=1201893 = 1200s 墙 + 杀进程开销） | **2**（×E1，重叠≈20min） | harness 验证，**true** | **not-fired-because-blind** | pure **204238ms**（基线簇 47–59s 的 3.5×）；tail 止于 `wave=filesystem start` ⇒ 死在 fs 波内 | **command_timeout** | **identity_lost**（灭失原因：结构性——超时强杀发生在任何 isolation 分类行打印之前；stderrTail 仅 211B） | 高（事件本身铁证）/ 低（身份） |
 | E5 | ciijxe 验证 command_timeout | 17:48:21–18:08:23Z（1201809ms） | ≤1（无可证并发套件；xq9c48 会话 17:55–18:04 在场但未见跑测证据） | harness 验证，**true** | **not-fired-because-blind** | pure **57155ms**（正常）；死在 fs 波内 | **command_timeout** | **identity_lost**（同 E4，结构性） | 高/低 |
 | E6 | ciijxe reverify command_timeout | 18:09:16–18:29:19Z（1203544ms；18:30:13 重复持久化） | ≤1（同上） | harness 验证，**true** | **not-fired-because-blind** | pure **143588ms**（2.5×，且 E5 被杀后仅 53s 起跑——残余状态扰动嫌疑，不可证）；死在 fs 波内 | **command_timeout** | **identity_lost**（同 E4） | 高/低 |
 
-### A.3 计数声明
+### A.3 计数声明（**stage 4 双席审计后修订**）
 
-- **台账行数：12 行**（底稿 B1–B6 + 今日 E1–E6）。
-- **identity_lost 计数：7 个实例**（底稿 B2、B4 共 2 个；今日 E2×2、E4、E5、E6 共 5 个），分布于 6 行；另有 1 行部分灭失（E3 的环境贡献度不可回放——文件名与因果链已复原）。
-- 今日 isolation_pass 实例合计 **3 个**（E1×1 可复原 + E2×2 灭失）——与两席结论③一致："只有 1 例身份可复原（真锚 jgkf6c 非 dmyd；保留树报告全被绿跑覆盖）"。
+- **台账行数：13 行**（底稿 B1–B6 + 今日 E1–E7）。
+- **E7（审计 F5 补登）**：孤儿套件（rqmoy worker 后台自跑，pid 32764）的 tee log 实证 `wave=pure done exit=1 pass=132 failed=2 33723ms`——比 30 秒后同 worktree 的 harness 验证（E3：pure `failed=1`，且 isolation 行确认 pure 波只有 layering 一个 stable_fail）**多一个首轮流红、复跑未再现、文件名不可知**的失败——家族形状。identity_lost；灭失原因 = 后台任务被硬杀 + tee log 止于 fs 波 start + 无 verdict/isolation 行。**波次注意：E7 落在 pure 波、直连 lane——是"实例向 filesystem 波聚集"（C.2）的当日反例**，也是 F2（降 fs 波并发）收益主张的潜在反证。
+- identity_lost 计数按认识论状态分列（审计 F4）：**身份灭失（确有失败实例、文件名丢失）5 个**（B2、B4、E2×2、E7）＋**无身份可言（套件在任何分类行打印前被强杀，连"有没有文件红"都未确立）3 个**（E4、E5、E6）——原稿"计 7 个实例"的聚合口径会把族 1 出血高估 3 个。
+- 今日 isolation_pass 实例合计：**1 确证（E1，jgkf6c mcpWorkspaceSmoke）+ 2 推定（E2×2，无法证实分类）+ 1 灭失候选（E7）**；E3 经实证修正改列"伴随事件"（真缺陷：layering/reliabilityMatrix stable_fail，跟进轮 7 行修复坐实，非家族事件）。
 - runs-guard RED 族：今日 **0 例**（在案各跑 runsGuard=clean 全部核过）。
 
 ---
@@ -96,7 +97,7 @@
 | 态 | 判定规则 | 今日实例 |
 |----|----------|----------|
 | fired-on-live | WARNING 行内 pid 存活，或 startedAt 与真实并发会话起跑吻合 | **0 例**（今日所有 WARNING 都是死 pid） |
-| fired-on-orphan | WARNING 行内 pid 已死/时间戳陈旧——报警疲劳源 | E1（12:06 起跑打到 11:12:30Z 死 pid）、E2（15:03 同）、dsfi8 自跑（13:38 同）；孤儿寿命 11:12:30Z→21:14 清除，**>10 小时** |
+| fired-on-orphan | WARNING 行内 pid 已死/时间戳陈旧——报警疲劳源 | E1（12:06 起跑打到 11:12:30Z 死 pid）、E2（15:03 同）、dsfi8 自跑（13:38 同）；孤儿寿命 11:12:30Z→21:14 清除，**≈9 小时（11:12:30Z→20:14:01Z，快照 CreationTimeUtc 实测）** |
 | not-fired-because-blind | 该 lane 结构性看不到机器全局标记 | E3、E4、E5、E6（全部 harness lane，tempPerAttempt=true）——**今日 4/6 事件对标记系统不可见** |
 | （补）not-fired-clean | 跑时机器无标记在场，直连可见而未见——健康态 | 本轮 21:19 npm test（D0 清孤后，无 WARNING） |
 
@@ -127,7 +128,7 @@ worker 回合结束/run 完成 → 会话收割       rqmoy 生命周期事件 1
   ↓ 硬杀后台任务树
 end() 永不执行（finally 属于优雅退出路径）  harness 任务输出文件 b0co09x3h.output 内容 = "[killed]"
   ↓
-孤儿恒亮 >10h，跨 4 个后续直连套件误报     dmyd/jgkf6c/dsfi8 WARNING 行 + 两席 19:40 核验 + 本轮 21:14 D0 快照
+孤儿恒亮 ≈9h01m，跨 4 个后续直连套件误报     dmyd/jgkf6c/dsfi8 WARNING 行 + 两席 19:40 核验 + 本轮 21:14 D0 快照
 ```
 
 **"timeout 家族在主动降解标记系统"的精确化**（对计划 v2 成因链的修正补充）：
@@ -191,7 +192,7 @@ end() 永不执行（finally 属于优雅退出路径）  harness 任务输出�
 | 18:09:16 | **E6 ciijxe reverify** | **143588ms** | **2.5×（无可证并发——负载漂移不可归因样本）** |
 | 21:19:19 | 本轮验收 | 54207ms | 1×（清孤后干净机） |
 
-离散度 **33.7s→204.2s = 6.1×**；两个异常值一个可归因（E4×E1 真并发），一个不可归因（E6，起跑于 E5 强杀 53s 后——残余扰动/AV 重扫嫌疑，不可证）。**结论：这台机器的负载态在同日内剧烈漂移，且漂移量级足以把 filesystem 波长杆推出任何固定验证墙。** 这就是族 2 的算术基础：fs 波绿态 488–707s × 负载系数 2–3× ⇒ 1000–2100s，横跨 1200s 墙两侧。
+离散度 **33.7s→204.2s = 6.1×**；两个异常值一个可归因（E4×E1 真并发），一个不可归因（E6，起跑于 E5 强杀 53s 后——残余扰动/AV 重扫嫌疑，不可证）。**结论：这台机器的负载态在同日内剧烈漂移，且漂移量级足以把 filesystem 波长杆推出任何固定验证墙。** 这就是族 2 的算术基础：fs 波绿态 488–696s × 负载系数 2–3× ⇒ 1000–2100s，横跨 1200s 墙两侧。
 
 ---
 
@@ -224,7 +225,7 @@ mcpWorkspaceSmoke run 5: exit=0 dur=8392ms
 
 PS> foreach ($i in 1..5) { node --test test/backends/processBackend.test.js }
 processBackend run 1: exit=0 dur=5367ms
-processBaseline run 2-5: exit=0 dur=2954/3011/3220/3060ms
+processBackend run 2-5（笔误修正）: exit=0 dur=2954/3011/3220/3060ms
 --- orphan check: False
 ```
 
@@ -279,7 +280,7 @@ PS> loaders | Stop-Process -Force
 |---|------|------|------|
 | H1 | **同机双全量并发互踩是 isolation_pass 家族的直接机制** | 今日一对完整真并发碰撞（E1×E4 重叠 20min：E1 慢 2.85× 且产出家族形状红、E4 撞墙亡）+ 第二对（E2×dsfi8 验证重叠 17-19min，E2 fs 波 failed=2）+ 08-19 五文件×八轮并行实证（登记行）+ D3 负结果反证（纯 CPU 不够，需 I/O 全维争用） | **高**（机制+时间线闭环；缺 D2 形状直接复现） |
 | H2 | **command_timeout 独立子族 = filesystem 波长杆 × 负载漂移 × 1200s 墙** | 3/3 死在 fs 波内（tail 形状一致）；pure 波 6.1× 日内漂移证明负载系数存在；fs 波 488–1123s 实测区间 × 漂移系数横跨 1200s | **高**（算术闭环 + 3/3 形状吻合） |
-| H3 | **标记系统四机制失效**（per-attempt 盲区 / 孤儿 / 先完者删共享洞 / 绿跑不可判定） | 代码行号在案（B.2）；今日全程观察：WARNING 全为死 pid 误报、harness 4/6 事件不可见、孤儿寿命 >10h | **高**（这是"为什么一直看不见"，不是根因本身） |
+| H3 | **标记系统四机制失效**（per-attempt 盲区 / 孤儿 / 先完者删共享洞 / 绿跑不可判定） | 代码行号在案（B.2）；今日全程观察：WARNING 全为死 pid 误报、harness 4/6 事件不可见、孤儿寿命 ≈9h01m | **高**（这是"为什么一直看不见"，不是根因本身） |
 | H4 | TEMP 形状不对称放大直连 vs harness 差异（全局 TEMP 污染拖慢直连侧） | D-TEMP 方向性支持（default 慢 ~41%，混杂未消） | 中 |
 | H5 | AV / 磁盘 I/O 专项因素 | E6 型不可归因漂移 + D-TEMP 佐证 | 低（本轮未测，需专门预算） |
 | H6 | ~~单文件固有时序脆弱~~ | 底稿曾疑（sleep 断言面），D1/D3 十三次全绿不支持其为充分条件 | 低（必要非充分） |
@@ -291,27 +292,30 @@ PS> loaders | Stop-Process -Force
 | # | 候选 | 动作面 | 代价 | 收益 | 备注 |
 |---|------|--------|------|------|------|
 | F1 | marker pid 存活检测 | canonical-test.mjs `warnExisting`（:440-449）加探活（`process.kill(pid,0)`，Windows 对死 pid 抛 ESRCH 可判）；死 pid ⇒ 降级为 `[canonical] NOTICE: stale orphan marker (pid dead since …)` | 小（单函数+meta 测试）；风险低；pid 复用理论窗口存在 | 治报警疲劳：死 pid 不再伪装成并发警告，操作员不再需要人肉核 pid | 纯诊断增强，不改失败语义 |
-| F2 | filesystem 波降并发 16→8 | canonical-test.mjs:151 常量 | 全量 +~34s（@8=212s vs @16=178s 实测在案 ：139-143） | **唯一直接降压两个族的选项**（I/O 互踩面减半 + 长杆更短离墙更远） | 生产代码改动，本轮不动 |
+| F2 | filesystem 波降并发 16→8 | canonical-test.mjs:151 常量 | 全量 **≥+34s**（@8=212s vs @16=178s 实测在案 ：139-143；54 文件旧基准，今日 70 文件更高） | **[stage 4 修订]** 仅假设性降压族 1（互踩面减半）；族 2 被实测证据反向（全量更长离墙更近）；@8 系实测记录否决过的值 | 生产代码改动，本轮不动；若考虑须先补 70 文件受载实测 |
 | F3 | 抬 verificationTimeoutMs 1200s→1800s | Lead 参数（MAX=7,200,000，src/delivery.js:41，零代码） | 最坏多等 10min/验证；**稀释"当时有多慢"信号** | 只降族 2 频率，不降触发面 | **计划 v2 红线：本轮禁抬**（保证据） |
 | F4 | per-file duration 持久化 | canonical-test.mjs:563 映射处加透传 reporter 已采集的 suite.duration | 极小 | 下次家族事件自带"哪个文件慢"数据面，消灭 C.3 声明的观测缺口 | 观测补强，与 F1 同批顺手 |
 | F5 | worker 全量自跑纪律：同步等待/轮询到退出码 | 流程 + prompt 模板（jgkf6c 跟进轮已如此要求——实践已在收敛） | 零代码 | 斩断今日孤儿成因链的第一环（无人收割的后台自跑） | 编排层可选加"run 完成时有未收割 bg 任务⇒警告"，代价中 |
 
-### E.3 止血预授权提案（呈 Owner 拍板格式，单列）
+### E.3 止血预授权提案（呈 Owner 拍板格式，单列；**stage 4 双席审计后修订版**）
 
-> **触发条件（均已满足）**：① D 系列未复现家族失败（D1/D-TEMP/D3 十九跑全绿）；② 台账确认实例集中于 filesystem 波（底稿 4/6 具名 + 今日 E2 两例灭失）；③ 出血在继续——今日 6 事件已吃掉两轮验证预算（rqmoy 走 reject+修复轮、r23d 验证+reverify 双撞墙）。
+> **修订说明**：初版"选项一（波并发 16→8）推荐"经两席审计证伪——其族 2 收益主张与本仓实测调优记录（canonical-test.mjs:139-143）**方向相反**：@8=212s 慢于 @16=178s（降并发使全量更长、离 1200s 墙**更近**，族 2 被加剧而非降压）；且 @8 是该实测记录明确否决过的值（"@8 that failed the target"），+34s 系 54 文件时代的旧测量（今日波已 70 文件，实际更高）。初版同时主张"+34s"与"离墙更远"，二者不能并存。本节按审计意见重写，并新增两席"没问但该问"收敛出的**选项零**。
+>
+> **触发条件**：① D 系列未复现家族失败——**限定口径：v24 直跑形状下**未复现（D1/D-TEMP/D3 十九跑全绿；注意 v24 是本仓禁用运行时且禁用理由"杀长进程"与被测面重合，负结果外推有 lane 保真度边界）；② 台账确认实例向 filesystem 波聚集（底稿 4/6 具名 + 今日 E2 两例灭失——**E7 为 pure 波反例，见 A 节**）；③ 出血在继续——今日 7 事件已吃掉两轮验证预算（rqmoy 走 reject+修复轮、r23d 验证+reverify 双撞墙）。
 >
 > **候选择一先行，不等根因结案**：
-> - **选项一（推荐）：filesystem 波并发 16→8**。代价：全量 +~34s。收益：同时降压族 1（互踩面减半）与族 2（长杆缩短、离 1200s 墙更远）。风险：最低（常量级改动，实测数据在案）。
-> - 选项二：marker pid 存活检测。代价：小改动+测试。收益：终结死 pid 误报（报警疲劳）。局限：只治警报器，不降触发面。
-> - 选项三：verificationTimeoutMs 1200s→1800s。代价：零代码，但每次验证最多多等 10 分钟，且继续稀释慢信号。局限：只降族 2 频率。
+> - **选项零（Lead 推荐首选，审计"没问但该问"新增）：同机全量验证串行化闸**（机器级 verification 信号量/排队）。今日两对碰撞（E1×E4 相隔 1.8s 并行派发、E2×dsfi8）不是运气——是"并行派发 + 每 run 一次全量验证 + 单机"的算术后果。串行化让碰撞**结构性不可能**，不拉长任何单次跑（只排队：等 ~10 分钟 ≪ 撞墙重跑 20 分钟）。代价：控制面新机制（中等）；验证排队期间 delivery 处于 pending 更久。
+> - **选项二：marker pid 存活检测**（初版"选项二"，审计后升格：今日 WARNING 有效率 0/4、harness lane 4/6 事件结构性不可见——这个仪表不是"待增强"，是**正在误导判断**）。代价：小改动+测试。收益：死 pid 降级为 NOTICE，恢复直连口径判别力。
+> - **选项一（降为"待实测"候选）：filesystem 波并发 16→8**。拍板前必须知道三件事：(a) @8 曾实测未达交付窗口目标、16 是"舒适达标的最小值"（:139-143 实测记录，属 TD-107 实测纪律的一部分）；(b) +34s 是 54 文件旧测量、今日 70 文件更高；(c) 族 2 收益（受载时降并发或减少争用）是**未经测量的假设**，与空载证据方向相反。若 Owner 仍考虑：先补 70 文件下 @8/@16 受载实测。
+> - 选项三：verificationTimeoutMs 1200s→1800s。零代码但每次验证最多多等 10 分钟，且稀释"当时有多慢"的取证信号。仅作族 2 的显式补充。
 >
-> 一句话版：**建议选项一先行（可与选项二同批，互不冲突）；选项三仅在 Owner 接受"花时间换通过率"时作为族 2 的补充。**
+> 一句话版（修订）：**选项零+选项二同批先行（串行化断碰撞源、探活修仪表）；选项一降为待实测；选项三留给 Owner 显式选择。**
 
 ---
 
 ## F. 文档修正候选（发现登记，不改 docs/troubleshooting.md——归 Lead 处置）
 
-1. **§8.1 第一反应①"一次读取即得文件名 + 波次 + 类别"对 command_timeout 不成立**。经 R17/W1，stderrTail 确实携带 [canonical] 行全文——但那只在套件**活着走到分类打印**时成立；超时强杀（今日 3 例）发生在任何 isolation 分类行之前，tail 仅含 wave start 行（210–211 字节）。修正候选：该句限定适用于 `command_failed`（exit 1）形状；为 command_timeout 增补独立判定条目——"tail 止于某波 start 行且无 done ⇒ 死在该波内；以已完成波的耗时作负载证据；处置不是错峰 reverify（reverify 单发机会同样撞墙，今日 ciijxe 验证+reverify 双双 timeout 即证），而是降并发/抬墙/择时独占跑"。今日 E4-E6 正是靠"读测试源码超时常量 + 波级聚合"才完成定位的——§8.1 承诺的捷径在这条路上不存在。
+1. **[stage 4 修订——审计 F7：这是缺口不是错误陈述]** §8.1 的症状自述（troubleshooting.md:423）本就把辖区圈定在 exit 1 的 isolation_pass 形状，command_timeout（exit null）不在其自述辖区——原句对 `command_failed` 仍成立。**真正缺口：全文没有 command_timeout 条目，且快速索引入口表（:36-37）无 timeout 路由**——补入口行比改正文更对症。判据内容保留：超时强杀（今日 3 例）发生在任何 isolation 分类行之前，tail 仅含 wave start 行（210–211 字节）；独立条目应为"tail 止于某波 start 行且无 done ⇒ 死在该波内；以已完成波的耗时作负载证据；处置不是错峰 reverify（reverify 单发机会同样撞墙，今日 ciijxe 验证+reverify 双双 timeout 即证），而是降并发/抬墙/择时独占跑"。今日 E4-E6 正是靠"读测试源码超时常量 + 波级聚合"才完成定位的——§8.1 承诺的捷径在这条路上不存在。
 2. **§8.1 预防段措辞精化**："标记在所有退出路径删除"应补注"（**优雅**退出路径）——taskkill/会话收割/断电不删，孤儿恒亮直至手工清除"；并补一句直连/harness 视差："harness 验证 lane 因 per-attempt TEMP 私有化（deliveryVerification.js:224-231）对机器全局标记结构性不可见——WARNING 缺席不能证明无并发"。
 
 ---
@@ -344,3 +348,9 @@ exit=0 ended 21:30:33 wall=673s   [exited with code 0]
 ```
 
 （全量无 WARNING 行——D0 清孤后的干净机上直连全量的健康基线，同时是孤儿清除效果的活体证明。）
+
+---
+
+## G. stage 4 审计修订记录（2026-08-21，Lead 补全）
+
+两席审计（auditor run_20260821205214778c4k8zq / coder_mm run_20260821205216278e842zq，均 PASS with changes）逐字节复核：证据底座为真（孤儿链独立闭合、行号全中、E1×E4 重叠 20m02s 反推吻合、rqmoy 改列正确、D-TEMP 自我拆台记功）。修订项：E.3 重写（选项一收益与实测反号→降为待实测；新增选项零串行化闸=Lead 推荐首选；选项二升格）；F2 候选行同步；E2 时窗修正（14:52:48Z 实锚）；A.3 计数按认识论分列+E7 补登（pure 波反例）；孤儿寿命 9h01m；§8.1 改判缺口+入口表方向；707→696s；D 系列结论限定 v24 直跑形状（v24 系本仓禁用运行时，禁用理由与被测面重合——负结果外推边界）。
