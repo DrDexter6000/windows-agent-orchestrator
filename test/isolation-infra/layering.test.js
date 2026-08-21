@@ -107,6 +107,11 @@ const CORE_TOP = Object.freeze(new Set([
   "src/gitLocalExclude.js",
   "src/installRoot.js",
   "src/isolation.js",
+  // R23-F/A 登记（2026-08-21）：机器级闸路径 SSOT（inflight marker / Round B 验证
+  // 租约的目录基座，%LOCALAPPDATA%\wao 派生）。零相对出边（node:path/os/fs only）；
+  // 本轮 src 树内零消费者，scripts/canonical-test.mjs 下向 import 不在本守卫
+  // 扫描图内——与 providerFingerprint 登记同型。
+  "src/machineGatePaths.js",
   "src/metrics.js",
   "src/nodeVersionGuard.js",
   // R23-C 跟进登记（2026-08-21）：providerKey 归一化单一实现，唯一 src 消费方
