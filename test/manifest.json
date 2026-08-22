@@ -64,6 +64,7 @@
       "delivery/mcpRunDelivery.test.js",
       "delivery/mcpRunDeliveryRepackage.test.js",
       "mcp-surface/mcpRunDiagnose.test.js",
+      "isolation-infra/machineGatePaths.test.js",
       "isolation-infra/metrics.test.js",
       "isolation-infra/modelFamily.test.js",
       "isolation-infra/nodeVersionGuard.test.js",
