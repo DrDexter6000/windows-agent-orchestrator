@@ -407,15 +407,20 @@ export function createVerificationGate({
               safeEmit("[verification-gate] corrupt verification lease observed; starting grace window");
             } else if (now() - corruptSeenAt >= CORRUPT_GRACE_MS) {
               safeEmit(`[verification-gate] corrupt verification lease past grace window (${now() - corruptSeenAt}ms); reclaiming`);
-              if (fs.reclaimIfSame(raw)) {
-                corruptSeenAt = null;
-                continue; // 立即重试认领
+              if (fs.reclaimIfSame(raw)) { consecutiveReclaimFailures = 0; corruptSeenAt = null; continue; }
+              // [审计 N2] 同一 fail-open 上界覆盖三处回收分支。
+              consecutiveReclaimFailures += 1;
+              if (consecutiveReclaimFailures >= MAX_CONSECUTIVE_READ_FAILURES) {
+                safeEmit(`[verification-gate] WARNING fail-open: reclaim failed ${consecutiveReclaimFailures}× consecutively (corrupt); continuing WITHOUT serialization`);
+                return null;
               }
             }
           } else if (heartbeatAgeMs >= STALE_MS) {
             safeEmit(`[verification-gate] holder lease stale (holder=${renderHolderJson(record)}, heartbeatAgeMs=${heartbeatAgeMs} >= ${STALE_MS}); reclaiming`);
-            consecutiveReclaimFailures = 0;
-            if (fs.reclaimIfSame(raw)) continue;
+            if (fs.reclaimIfSame(raw)) {
+              consecutiveReclaimFailures = 0; // 成功回收复位（N1：复位必须在成功侧，否则上界不可达）
+              continue;
+            }
             // [R23-F/B 审计 F3] 回收失败（句柄占用/ACL 拒删——Windows 现实面）
             // 与读失败同权：连续超限即 fail-open（WARNING + 无闸继续），不允许
             // 1s 节律的永久 reclaim 循环刷屏 gate.log。
@@ -427,7 +432,12 @@ export function createVerificationGate({
           } else if (now() - record.startedAt >= MAX_HOLD_MS) {
             // "活着但挂死"：心跳新鲜也弃置（本轮主症状的对症裁决）。
             safeEmit(`[verification-gate] holder exceeded max-hold cap (holder=${renderHolderJson(record)}, heldForMs=${now() - record.startedAt} >= ${MAX_HOLD_MS}) despite fresh heartbeat; treating as abandoned and taking over`);
-            if (fs.reclaimIfSame(raw)) continue;
+            if (fs.reclaimIfSame(raw)) { consecutiveReclaimFailures = 0; continue; }
+            consecutiveReclaimFailures += 1;
+            if (consecutiveReclaimFailures >= MAX_CONSECUTIVE_READ_FAILURES) {
+              safeEmit(`[verification-gate] WARNING fail-open: reclaim failed ${consecutiveReclaimFailures}× consecutively (max-hold); continuing WITHOUT serialization`);
+              return null;
+            }
           } else {
             // 排队可见性：首见立即打，此后每 WAIT_LOG_INTERVAL_MS 一条。
             const t = now();
@@ -437,7 +447,8 @@ export function createVerificationGate({
             }
           }
         } else if (raw === null) {
-          corruptSeenAt = null; // 租约消失：下一拍直接重试认领
+          corruptSeenAt = null;
+          consecutiveReclaimFailures = 0; // [审计 N1] 租约消失 ⇒ 计数复位（成功侧/离开侧）
         }
 
         await waitSleep(POLL_INTERVAL_MS);

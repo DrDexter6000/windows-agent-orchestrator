@@ -239,7 +239,7 @@ function isSettled(promise) {
 let pidCounter = 0;
 
 /** 在同一假钟/同一租约文件上造一个闸（各自独立睡眠队列与 sink 行前缀）。 */
-function makeGate(dir, id, { identity = {}, lines, clock } = {}) {
+function makeGate(dir, id, { identity = {}, lines, clock, fsOps } = {}) {
   const ctl = makeSleepControl(clock);
   const gate = createVerificationGate({
     leasePath: join(dir, VERIFICATION_LEASE_FILENAME),
@@ -248,6 +248,7 @@ function makeGate(dir, id, { identity = {}, lines, clock } = {}) {
     sink: (line) => lines.push(`[${id}] ${line}`),
     identity: { owner: id, ...identity },
     pid: 10000 + (pidCounter += 1),
+    ...(fsOps ? { fsOps } : {}),
   });
   return { gate, ctl };
 }
@@ -286,6 +287,65 @@ async function tickUntilSettled(ctl, promise, maxTicks = 300) {
   }
   return isSettled(promise);
 }
+
+test("R23-F/B 审计 N1/N2: 回收失败连续 ≥5 ⇒ fail-open（三分支全覆盖，复位只在成功侧）", async () => {
+  // 审计探针复刻：stale 租约 + reclaimIfSame 恒 false ⇒ 第 5 拍 acquire 返回 null
+  // 且 sink 含 fail-open WARNING（修复前：计数在尝试前被复位，fail-open 永不可达）。
+  const dir = mkdtempSync(join(tmpdir(), "wao-n1-reclaim-"));
+  try {
+    const clock = makeClock();
+    const lines = [];
+    const fsOps = {
+      ensureParentDir() {},
+      readRaw: () => JSON.stringify({ schemaVersion: 1, token: "tok-holder", runId: "run_h", startedAt: clock.time - 200 * 60_000, heartbeatAt: clock.time - 10_000 }),
+      claim: () => { throw Object.assign(new Error("EEXIST"), { code: "EEXIST" }); },
+      reclaimIfSame: () => false, // 句柄占用/ACL 拒删——恒失败
+    };
+    const a = makeGate(dir, "waiter", { clock, lines, fsOps });
+    const acquirePromise = a.gate.acquire();
+    let settled = false;
+    for (let poll = 1; poll <= 12 && !settled; poll += 1) {
+      await a.ctl.tick(1); // +1s 轮询（假钟）
+      await new Promise((r) => setImmediate(r)); // 让渡事件环：acquire 的 await 链得以推进
+      settled = await isSettled(acquirePromise);
+    }
+    assert.ok(settled, "连续回收失败 ≥5 ⇒ fail-open（acquire 返回 null）");
+    const h = await acquirePromise;
+    assert.equal(h, null, "fail-open = 无闸继续");
+    assert.ok(lines.some((l) => /fail-open.*reclaim failed/i.test(l)), "sink 必须有 fail-open WARNING");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("R23-F/B 审计 N2: corrupt 分支回收失败同样有 fail-open 上界（同策略覆盖三分支之二）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-n2-corrupt-"));
+  try {
+    const clock = makeClock();
+    const lines = [];
+    const fsOps = {
+      ensureParentDir() {},
+      readRaw: () => "{not valid json!!", // corrupt：parseLeaseRecord ⇒ null
+      claim: () => { throw Object.assign(new Error("EEXIST"), { code: "EEXIST" }); },
+      reclaimIfSame: () => false, // 恒失败
+    };
+    const a = makeGate(dir, "waiter", { clock, lines, fsOps });
+    const acquirePromise = a.gate.acquire();
+    let settled = false;
+    // corrupt 宽限窗 15s：前 15s 睡眠等待，超窗后开始 reclaim（恒失败）→ 5 拍内 fail-open。
+    for (let poll = 1; poll <= 30 && !settled; poll += 1) {
+      await a.ctl.tick(1); // +1s
+      await new Promise((r) => setImmediate(r));
+      settled = await isSettled(acquirePromise);
+    }
+    assert.ok(settled, "corrupt 分支回收连续失败 ≥5 ⇒ fail-open");
+    const h = await acquirePromise;
+    assert.equal(h, null, "fail-open = 无闸继续");
+    assert.ok(lines.some((l) => /fail-open.*(corrupt)/i.test(l)), "sink 必须有 corrupt 分支的 fail-open WARNING");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("B1-13: 设计常量与 env 名钉死；gateDisabled 只认 off（trim/大小写不敏感）", async () => {
   // 规格 fixed 值：心跳 ~30s、陈旧 ~90s、硬上限 45min。
