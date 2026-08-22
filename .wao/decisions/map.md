@@ -28,3 +28,4 @@
 0024 | onboarding 矩阵双源展示契约（已配置行 + 模板候选，0022(6) 部分取代）
 0025 | lane 架构与模型×harness 组合权（每角色 ≥1 lane、独立 agentId 并存、delta 认证方案 A）
 0026 | lane 认证身份维度补全（provider 指纹与全量新鲜度；fingerprint-only+lastFullHealthyRunAt+台账合并边界钉死；双执行席对比集成）
+0027 | 第三方审计处置（Owner 四条裁定：治理称重不裁流程/Node v24 修复观察主路径/护栏体检够用就好；审计七条逐条裁定+TD-140..143）
