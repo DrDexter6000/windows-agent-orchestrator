@@ -999,14 +999,14 @@ test("B2-⑥c createCallerGate：kill switch off / HELD=1 ⇒ null（gateEngaged
 // ── R23-F/B Lead 补全（auditor F2）：三生产路径的 gate 透传钉 ──────────────
 // 审计实证：删掉三处 `...(gate ? { gate } : {})` 后全量依然绿（所有既有测试
 // 都注入 verifyDeliveryFn ⇒ gate 恒 null ⇒ spread 从未以非 null 执行）。以下
-// 三钉把"接线存在"从代码审阅升级为机器断言：删任一处透传，对应测试即红。
+// [审计 N3 措辞修正] 本组钉的是 createCallerGate 的判据面与 spread 恒等语义；三处
+// 透传行本身由代码审阅覆盖（不可机器钉——见 stage 4 审计记录）。
 
-test("R23-F/B-F2① runManager 生产路径：usesDefaultVerifier ⇒ gate 透传进 verifyOpts（删接线即红）", async () => {
+test("R23-F/B-F2① runManager 生产路径：usesDefaultVerifier ⇒ gate 透传进 verifyOpts（钉判据面与 spread 恒等）", async () => {
   // 用 m12-13 同款 RunManager 真实驱动形状：不注入 verifyDeliveryFn（=默认验
   // 证器），捕获 _verifyDeliveryResult 传给验证器的 opts，断言 gate 在场且带
   // acquire/release/lost 句柄面；再以注入 verifyDeliveryFn 的对照断言 gate 缺席。
   const { RunManager } = await import("../../src/runManager.js");
-  const { defaultVerifyDelivery } = await import("../../src/runManager.js").catch(() => ({})) ?? {};
   // RunManager 不导出 defaultVerifyDelivery——改用行为捕获：注入 spy 包裹默认
   // 验证器不可行（注入即 usesDefaultVerifier=false）。故此处直接断言 createCallerGate
   // 的双条件与 runManager 的调用形状（usesDefaultVerifier 判据行已在 diff 中），
@@ -1024,7 +1024,7 @@ test("R23-F/B-F2① runManager 生产路径：usesDefaultVerifier ⇒ gate 透�
   const verifyOpts = {};
   const spread = { ...verifyOpts, ...(gate ? { gate } : {}) };
   assert.equal(spread.gate, gate, "spread 透传恒等（非 null 时）");
-  assert.equal(typeof defaultVerifyDelivery, "undefined", "RunManager 不导出默认验证器（经 createCallerGate 间接钉）");
+  // [审计 N4] 反向钉已删：将来正当导出 defaultVerifyDelivery 不应无辜变红
 });
 
 test("R23-F/B-F2② Reverify/Repackage 生产路径：同款 createCallerGate 判据（usesDefaultVerifier+env）⇒ 闸在场", async () => {
