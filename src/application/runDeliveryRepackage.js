@@ -662,7 +662,7 @@ export async function runDeliveryRepackage({
   // the real lease; createCallerGate folds in kill switch + HELD anti-self-lock.
   const gate = createCallerGate({
     usesDefaultVerifier: verifyDeliveryFn === undefined,
-    identity: { owner: "runDeliveryRepackage", runId },
+    identity: { owner: "runDeliveryRepackage", sessionId: null, runId }, // leadSession 仅 MCP handler 层持有
   });
   const verifyResult = await _verify(
     authoritativeRef,

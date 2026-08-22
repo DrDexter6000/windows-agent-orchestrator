@@ -65,7 +65,10 @@ export const STALE_MS = 90_000;
 export const CORRUPT_GRACE_MS = 15_000;
 
 /** 单次持闸硬上限：startedAt 超过它即判弃置（即使心跳仍新鲜）。 */
-export const MAX_HOLD_MS = 45 * 60_000;
+// [审计 F4] 上限必须 ≥ 合法预算天花板 VERIFICATION_TIMEOUT_MS_MAX（120min/单命令，
+// 整序列最坏 = (N+M)×timeoutMs 可更大）——45min 会健康抢锁合法长验证。取 130min
+// （= 120min 天花板 + 10min 余量）；挂死持有者最多多占 40min 后被接管。
+export const MAX_HOLD_MS = 130 * 60_000;
 
 /** 等待者向 sink 重发等待日志的节律（含持有者身份）。 */
 export const WAIT_LOG_INTERVAL_MS = 30_000;
@@ -217,12 +220,18 @@ export function defaultLeaseFs(leasePath) {
   };
 }
 
-const defaultSleep = (ms) =>
+// 心跳用 unref：持有者主流程结束后不该被 ≤30s 的续约定时器钉住（R23-E 孤儿教训
+// 的反面——到点叫不醒就算了，下一拍再续）。
+const defaultHeartbeatSleep = (ms) =>
   new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
-    // 等待/心跳绝不把 CLI 进程钉在事件环上：到点叫不醒就算了（下轮再续）。
     if (typeof timer.unref === "function") timer.unref();
   });
+// R23-F/B 审计 F1：等待侧的 poll sleep **必须 ref**——直连通道（canonical main /
+// 短命 CLI）在争用等待期没有任何其他 referenced handle，unref 定时器会让事件环
+// 排空、进程以 exit 0 静默退出 → `npm test` 假绿（零测试执行），比 command_timeout
+// 假红严重一个量级。等待者本来就是想被钉住的进程。
+const defaultWaitSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function defaultSink(logPath) {
   return (line) => {
@@ -255,7 +264,11 @@ export function createVerificationGate({
   logPath,
   sink,
   now = () => Date.now(),
-  sleep = defaultSleep,
+  // [R23-F/B 审计 F1] 等待与心跳的睡眠分离：等待侧必须 ref（见 defaultWaitSleep 注释），
+  // 心跳侧保持 unref。`sleep` 仍可整体注入（测试假钟），注入时两处同用。
+  sleep,
+  waitSleep = sleep ?? defaultWaitSleep,
+  heartbeatSleep = sleep ?? defaultHeartbeatSleep,
   identity = {},
   pid = process.pid,
   fsOps,
@@ -291,7 +304,7 @@ export function createVerificationGate({
     heartbeatRunning = true;
     void (async () => {
       while (heartbeatRunning) {
-        await sleep(HEARTBEAT_INTERVAL_MS);
+        await heartbeatSleep(HEARTBEAT_INTERVAL_MS);
         if (!heartbeatRunning) return;
         try {
           const raw = fs.readRaw();
@@ -352,6 +365,7 @@ export function createVerificationGate({
       // tok- 前缀让日志/gate.log 里的所有权线索一眼可辨。
       const myToken = `tok-${randomBytes(16).toString("hex")}`;
       let corruptSeenAt = null;
+        let consecutiveReclaimFailures = 0; // [审计 F3] 回收失败连续计数（fail-open 上界）
       let consecutiveReadFailures = 0;
       let lastWaitLogAt = null;
       for (;;) {
@@ -400,7 +414,16 @@ export function createVerificationGate({
             }
           } else if (heartbeatAgeMs >= STALE_MS) {
             safeEmit(`[verification-gate] holder lease stale (holder=${renderHolderJson(record)}, heartbeatAgeMs=${heartbeatAgeMs} >= ${STALE_MS}); reclaiming`);
+            consecutiveReclaimFailures = 0;
             if (fs.reclaimIfSame(raw)) continue;
+            // [R23-F/B 审计 F3] 回收失败（句柄占用/ACL 拒删——Windows 现实面）
+            // 与读失败同权：连续超限即 fail-open（WARNING + 无闸继续），不允许
+            // 1s 节律的永久 reclaim 循环刷屏 gate.log。
+            consecutiveReclaimFailures += 1;
+            if (consecutiveReclaimFailures >= MAX_CONSECUTIVE_READ_FAILURES) {
+              safeEmit(`[verification-gate] WARNING fail-open: reclaim failed ${consecutiveReclaimFailures}× consecutively; continuing WITHOUT serialization`);
+              return null;
+            }
           } else if (now() - record.startedAt >= MAX_HOLD_MS) {
             // "活着但挂死"：心跳新鲜也弃置（本轮主症状的对症裁决）。
             safeEmit(`[verification-gate] holder exceeded max-hold cap (holder=${renderHolderJson(record)}, heldForMs=${now() - record.startedAt} >= ${MAX_HOLD_MS}) despite fresh heartbeat; treating as abandoned and taking over`);
@@ -417,7 +440,7 @@ export function createVerificationGate({
           corruptSeenAt = null; // 租约消失：下一拍直接重试认领
         }
 
-        await sleep(POLL_INTERVAL_MS);
+        await waitSleep(POLL_INTERVAL_MS);
       }
     } catch (err) {
       // 绝对 fail-open 兜底：闸内部的任何意外都不许变成调用方的失败。

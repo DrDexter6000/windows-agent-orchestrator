@@ -2574,7 +2574,8 @@ export class Run {
       // guard; null ⇒ byte-identical opts shape as before (zero drift).
       const gate = createCallerGate({
         usesDefaultVerifier: this._verifyDeliveryFn === defaultVerifyDelivery,
-        identity: { owner: "RunManager._verifyDeliveryResult", runId: this.runId, agentId: this.agentId },
+        // RunManager 无 lead session 概念（lineage 键属 runContinue 语义），诚实置空。
+        identity: { owner: "RunManager._verifyDeliveryResult", runId: this.runId, agentId: this.agentId, sessionId: null },
       });
       const result = await this._verifyDeliveryFn(deliveryRef, {
         ...verifyOpts,

@@ -291,7 +291,7 @@ test("B1-13: 设计常量与 env 名钉死；gateDisabled 只认 off（trim/大�
   // 规格 fixed 值：心跳 ~30s、陈旧 ~90s、硬上限 45min。
   assert.equal(HEARTBEAT_INTERVAL_MS, 30_000);
   assert.equal(STALE_MS, 90_000);
-  assert.equal(MAX_HOLD_MS, 45 * 60_000);
+  assert.equal(MAX_HOLD_MS, 130 * 60_000, "[审计 F4] 上限 ≥ 合法预算天花板 VERIFICATION_TIMEOUT_MS_MAX(120min)+余量——45min 会健康抢锁合法长验证");
   assert.ok(CORRUPT_GRACE_MS > 0 && CORRUPT_GRACE_MS <= STALE_MS);
   assert.ok(WAIT_LOG_INTERVAL_MS > 0 && WAIT_LOG_INTERVAL_MS <= HEARTBEAT_INTERVAL_MS * 2);
   assert.equal(VERIFICATION_GATE_HELD_ENV, "WAO_VERIFICATION_GATE_HELD");
@@ -547,7 +547,7 @@ test("B1-08: 租约路径不可写 ⇒ fail-open：WARNING 进 sink、acquire �
   }
 });
 
-test("B1-09: 心跳仍新鲜但 startedAt 超 45min 硬上限 ⇒ 判定弃置并接管（活着但挂死）", async () => {
+test("B1-09: 心跳仍新鲜但 startedAt 超绝对持有上限(130min) ⇒ 判定弃置并接管（活着但挂死）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-b1-09-"));
   try {
     const clock = makeClock();
@@ -566,10 +566,10 @@ test("B1-09: 心跳仍新鲜但 startedAt 超 45min 硬上限 ⇒ 判定弃置�
       await b.ctl.tick(3);
     }
     assert.equal(await isSettled(pB), false,
-      "1320s < 45min：心跳新鲜 + 未超上限 ⇒ 不得接管");
+      "22min < 130min 上限：心跳新鲜 + 未超上限 ⇒ 不得接管");
 
     let settled = false;
-    for (let round = 0; round < 120 && !settled; round += 1) {
+    for (let round = 0; round < 300 && !settled; round += 1) {
       await a.ctl.tick(1); // +30s 心跳
       await b.ctl.tick(3); // +3s 轮询
       settled = await isSettled(pB);

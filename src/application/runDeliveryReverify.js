@@ -378,7 +378,7 @@ export async function runDeliveryReverify({
     // keeps the opts shape byte-identical to before (zero drift).
     const gate = createCallerGate({
       usesDefaultVerifier: verifyDeliveryFn === undefined,
-      identity: { owner: "runDeliveryReverify", runId },
+      identity: { owner: "runDeliveryReverify", sessionId: null, runId }, // leadSession 仅 MCP handler 层持有，service 层无此入参
     });
     const verifyResult = await _verify(reverifyInput, {
       timeoutMs: effectiveTimeoutMs,
