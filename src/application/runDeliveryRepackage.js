@@ -62,7 +62,7 @@ import {
   VERIFICATION_TIMEOUT_MS_MIN,
   VERIFICATION_TIMEOUT_MS_MAX,
 } from "../delivery.js";
-import { verifyDelivery } from "../deliveryVerification.js";
+import { verifyDelivery, createCallerGate } from "../deliveryVerification.js";
 import {
   computeCandidateInventory,
   INVENTORY_PATHS_LIMIT,
@@ -656,15 +656,26 @@ export async function runDeliveryRepackage({
     };
   }
 
+  // R23-F/B Round B (TD-130): production repackage verification enters the
+  // machine gate — but ONLY on the default verifier. An injected
+  // verifyDeliveryFn (every existing test / internal reuse) never contends for
+  // the real lease; createCallerGate folds in kill switch + HELD anti-self-lock.
+  const gate = createCallerGate({
+    usesDefaultVerifier: verifyDeliveryFn === undefined,
+    identity: { owner: "runDeliveryRepackage", runId },
+  });
   const verifyResult = await _verify(
     authoritativeRef,
     // M12-13: supply the ORIGINAL declared per-command budget as the authoritative
     // timeout. Absent → no timeoutMs key (verifyDelivery applies its consumer
     // default), preserving zero drift. Idempotent existing-created paths remain
     // bound to authoritativeRef; only the budget opts differ by presence.
-    original.verificationTimeoutMs !== undefined
-      ? { timeoutMs: original.verificationTimeoutMs }
-      : {},
+    {
+      ...(original.verificationTimeoutMs !== undefined
+        ? { timeoutMs: original.verificationTimeoutMs }
+        : {}),
+      ...(gate ? { gate } : {}),
+    },
   );
   const verificationResult = await transcript.tryAppendRepackageVerification({
     delivery: verifyResult.delivery,

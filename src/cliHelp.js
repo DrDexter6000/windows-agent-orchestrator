@@ -39,6 +39,7 @@ Commands:
   runs delivery <runId> --accept --reason-file FILE [--run-dir DIR] [--format json]
   runs delivery <runId> --reject --reason-file FILE [--run-dir DIR] [--format json]
   runs wait <runId> [--wait-ms N] [--format json|text] [--run-dir DIR]   # 阻塞等待终态或观察窗口到期（默认 text；窗口到期 exit 0）
+  runs gate [--format json|text] [--release]   # 同机验证串行化闸：查 free/held/corrupt + kill switch（只读）；--release 人工破锁（破除失败 fail-closed）
   workflow run <name|file.mjs> [--input TEXT] [--registry FILE] [--isolate] [--wait-timeout MS] [--run-dir DIR] [--vars key=value...]
   workflow list                  # 列出可用模板（workflows/templates/）
   playbook list [--format json]              # 列出内置 Lead playbook 摘要（只读）

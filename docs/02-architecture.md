@@ -778,10 +778,22 @@ packageDelivery success → transitionState(completed)
   → run.state_change completed
   → _runCleanup() (session abort; persistent worktree 不删)
   → _verifyDeliveryResult(deliveryRef)
+     → [R23-F/B 同机验证闸] gate.acquire() 先于任何 spawn（排队不计入预算；
+        fail-open / kill switch / HELD 继承时无闸直通）— verifyDelivery 内部
+        try/finally 恰好 release 一次
      → verifyDelivery(deliveryRef)    // exact-artifact proof + commands
      → transcript.append(verification_passed|failed|unavailable)
   → return {completed:true, delivery:verifiedRef, verificationFailed?, verificationUnavailable?}
 ```
+
+**同机验证串行化闸**（`src/verificationGate.js`，R23-F/B TD-130）：机器级租约
+（`%LOCALAPPDATA%\wao\verification.lease`，经 `machineGatePaths.js` SSOT）把"任何经三条
+生产路径发起的交付验证"与"直连 canonical 全量"串行化——粒度 = 整个 verifyDelivery 命令
+序列 / 一次 canonical main()。三条生产路径经 `createCallerGate` 显式开启：只有依赖默认
+验证器的调用方入闸（注入 `verifyDeliveryFn` 的测试/内部复用零牵连），且 `gateEngaged()`
+收口 kill switch（`WAO_VERIFICATION_GATE=off`）与防自锁（HELD 继承环境不认领）。排队/
+等待/降级永不改变验证结果语义、永不计入任何执行预算；`runs gate` 是只读查询 + 文档在案
+的人工破锁出口。运维语义见 `docs/usage.md` 场景 4b；症状路由见 `docs/troubleshooting.md` §8.1。
 
 **Verification 的 proof 纪律**（`src/deliveryVerification.js`）：
 

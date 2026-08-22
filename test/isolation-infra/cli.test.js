@@ -4495,3 +4495,183 @@ test("R13-CLI-5: 全部 prompt.sent 均跨 run（无本 run 绑定记录）→ r
     rmrfRetry(dir);
   }
 });
+
+// ===== R23-F/B Round B (TD-130) B3: `runs gate` 出口（只读查询 + 玻璃破断）=====
+//
+// 闸是机器级的（%LOCALAPPDATA%\wao\verification.lease），用户需要一个不碰真实
+// 租约就能回答"现在谁持闸/空闲吗"的出口，以及一个文档在案的人工破锁通道。
+// 单测全部注入假 gate（deps.createGate）——绝不触碰真实机器租约文件。
+
+/** 假闸工厂：记录调用，status/breakLock 结果可注入。 */
+function fakeGateForCli({ status = { free: true }, breakLockResult = null } = {}) {
+  const calls = [];
+  return {
+    calls,
+    acquire: async () => null,
+    status: async () => { calls.push("status"); return status; },
+    breakLock: async () => { calls.push("breakLock"); return breakLockResult ?? { hadLock: false, released: false }; },
+  };
+}
+
+test("B3-① runs gate 查询·free：text 报告空闲；JSON 形状 {engaged, lease:{free}}", async () => {
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  const gate = fakeGateForCli({ status: { free: true } });
+
+  const text = await captureLog(() => runsCommand(["gate"], {}, { createGate: () => gate }));
+  assert.match(text, /[Ff]ree/, "text 输出必须报告 free");
+  assert.deepEqual(gate.calls, ["status"], "只读查询绝不触碰 breakLock");
+
+  const jsonRaw = await captureLog(() => runsCommand(["gate", "--format", "json"], {}, { createGate: () => gate }));
+  const parsed = JSON.parse(jsonRaw);
+  assert.equal(typeof parsed.engaged, "boolean", "JSON 必须暴露入闸判定状态");
+  assert.deepEqual(parsed.lease, { free: true });
+});
+
+test("B3-② runs gate 查询·held：text 含持有者身份；JSON holder 字段齐备", async () => {
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  const gate = fakeGateForCli({
+    status: {
+      free: false,
+      holder: {
+        owner: "RunManager._verifyDeliveryResult", runId: "run_abc", sessionId: null,
+        agentId: "coder_high", pid: 4242, startedAt: 1000, heartbeatAt: 2000, ageMs: 5000,
+      },
+    },
+  });
+
+  const text = await captureLog(() => runsCommand(["gate"], {}, { createGate: () => gate }));
+  assert.match(text, /held/i);
+  assert.match(text, /RunManager\._verifyDeliveryResult/);
+  assert.match(text, /run_abc/);
+
+  const parsed = JSON.parse(await captureLog(() =>
+    runsCommand(["gate", "--format", "json"], {}, { createGate: () => gate })));
+  assert.equal(parsed.lease.free, false);
+  assert.equal(parsed.lease.holder.owner, "RunManager._verifyDeliveryResult");
+  assert.equal(parsed.lease.holder.runId, "run_abc");
+  assert.equal(parsed.lease.holder.pid, 4242);
+  assert.equal(parsed.lease.holder.ageMs, 5000);
+});
+
+test("B3-③ runs gate 查询·corrupt：如实报告损坏现场（不粉饰成 free/held）", async () => {
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  const gate = fakeGateForCli({ status: { free: false, corrupt: true, holder: null } });
+  const text = await captureLog(() => runsCommand(["gate"], {}, { createGate: () => gate }));
+  assert.match(text, /corrupt/i, "损坏租约必须可见");
+  const parsed = JSON.parse(await captureLog(() =>
+    runsCommand(["gate", "--format", "json"], {}, { createGate: () => gate })));
+  assert.equal(parsed.lease.corrupt, true);
+  assert.equal(parsed.lease.holder, null);
+});
+
+test("B3-④ runs gate 暴露 kill switch 状态：WAO_VERIFICATION_GATE=off ⇒ engaged=false", async () => {
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  const { VERIFICATION_GATE_OFF_ENV } = await import("../../src/verificationGate.js");
+  const saved = process.env[VERIFICATION_GATE_OFF_ENV];
+  try {
+    process.env[VERIFICATION_GATE_OFF_ENV] = "off";
+    const parsed = JSON.parse(await captureLog(() =>
+      runsCommand(["gate", "--format", "json"], {}, { createGate: () => fakeGateForCli() })));
+    assert.equal(parsed.engaged, false, "停用开关必须对用户可见");
+    const text = await captureLog(() => runsCommand(["gate"], {}, { createGate: () => fakeGateForCli() }));
+    assert.match(text, /off|停用/i, "text 模式也要可见");
+  } finally {
+    if (saved === undefined) delete process.env[VERIFICATION_GATE_OFF_ENV];
+    else process.env[VERIFICATION_GATE_OFF_ENV] = saved;
+  }
+});
+
+test("B3-⑤ runs gate --release：有锁破除 + 无锁如实告知，两者都 exit 0 语义", async () => {
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  const broke = fakeGateForCli({ breakLockResult: { hadLock: true, released: true } });
+  const text = await captureLog(() => runsCommand(["gate", "--release"], {}, { createGate: () => broke }));
+  assert.deepEqual(broke.calls, ["breakLock"]);
+  assert.match(text, /[Rr]eleased|移除/);
+
+  const none = fakeGateForCli({ breakLockResult: { hadLock: false, released: false } });
+  const textNone = await captureLog(() => runsCommand(["gate", "--release"], {}, { createGate: () => none }));
+  assert.match(textNone, /no .*lease|nothing/i, "无锁时如实告知，不是错误");
+
+  const parsed = JSON.parse(await captureLog(() =>
+    runsCommand(["gate", "--release", "--format", "json"], {},
+      { createGate: () => fakeGateForCli({ breakLockResult: { hadLock: true, released: true } }) })));
+  assert.equal(parsed.release.hadLock, true);
+  assert.equal(parsed.release.released, true);
+});
+
+test("B3-⑥ runs gate --release 破锁失败 ⇒ fail-closed 非零退出（抛错）", async () => {
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  await assert.rejects(
+    () => runsCommand(["gate", "--release"], {},
+      { createGate: () => fakeGateForCli({ breakLockResult: { hadLock: true, released: false } }) }),
+    /failed|无法|remove/i,
+    "强制移除失败是真实故障，必须非零退出而不是谎报成功",
+  );
+});
+
+test("B3-⑦ runs gate 参数纪律：未知 flag 拒绝；positional 拒绝；--format 非法值拒绝", async () => {
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  await assert.rejects(() => runsCommand(["gate", "--bogus"], {}, { createGate: () => fakeGateForCli() }), /unknown flag/);
+  await assert.rejects(() => runsCommand(["gate", "extra"], {}, { createGate: () => fakeGateForCli() }), /takes no|unexpected|positional|argument/i);
+  await assert.rejects(() => runsCommand(["gate", "--format", "yaml"], {}, { createGate: () => fakeGateForCli() }), /json\|text/);
+});
+
+test("B3-⑧ RUNS_SUBCOMMANDS 收录 gate：unknown-subcommand 错误列出它；HELP_TEXT 含 runs gate 行", async () => {
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  await assert.rejects(
+    () => runsCommand(["gat"], {}, {}),
+    (e) => {
+      assert.match(e.message, /unknown runs subcommand: gat/);
+      assert.match(e.message, /\bgate\b/, "合法子命令清单必须包含 gate");
+      return true;
+    },
+  );
+  assert.match(HELP_TEXT, /^  runs gate .+$/m, "帮助页必须有 runs gate 行");
+});
+
+// ===== R23-F/B Round B (TD-130) F3: 默认 killProbe 的真子进程实证 =====
+//
+// R23-F/A 的 A2 单测全部注入 killProbe 假探针；这里用**真实子进程 + 默认探针**
+// （process.kill(pid, 0)，无任何注入）实证降级链路的最后一公里：一个刚退出的
+// 短命子进程的 pid，在真实进程表里确实探死 ⇒ 孤儿标记降级为 NOTICE（含 pid）。
+// Windows pid 可能被系统即时复用——每个"新鲜退出"的 pid 试一次，最多 3 个。
+
+test("F3 真子进程实证：默认 killProbe 对刚退出 pid 判 ESRCH ⇒ 孤儿标记降级 NOTICE", async () => {
+  const { createInflightMarker, realInflightAdapter, INFLIGHT_MARKER_FILENAME } =
+    await import("../../scripts/canonical-test.mjs");
+
+  let sawNoticed = null;
+  for (let attempt = 0; attempt < 3 && sawNoticed === null; attempt += 1) {
+    const child = spawn(process.execPath, ["-e", "process.exit(0)"], {
+      stdio: "ignore", windowsHide: true,
+    });
+    const pid = child.pid;
+    await new Promise((resolve) => child.on("close", resolve));
+
+    const dir = mkdtempSync(join(tmpdir(), "wao-f3-"));
+    try {
+      // 真实 adapter（显式 tmpdir 路径——绝不触碰机器真实标记文件）+ 真实默认探针。
+      const markerPath = join(dir, INFLIGHT_MARKER_FILENAME);
+      const adapter = realInflightAdapter(markerPath);
+      writeFileSync(markerPath, JSON.stringify({ pid, startedAt: "2026-08-22T00:00:00.000Z" }), "utf8");
+
+      const warnings = [];
+      const m = createInflightMarker({ ...adapter, warn: (l) => warnings.push(l) });
+      const outcome = m.begin();
+      const noticed = warnings.find((l) => l.includes("NOTICE") && l.includes(`pid ${pid}`) && l.includes("ESRCH"));
+      if (noticed) {
+        sawNoticed = { pid, outcome, line: noticed };
+      } else if (outcome !== "observed") {
+        throw new Error(`attempt ${attempt}: expected observed, got ${outcome}; warnings=${JSON.stringify(warnings)}`);
+      }
+      // 观察者语义不变：不删别人的标记。
+      assert.equal(m.end(), false, "观察者绝不删除他人标记");
+    } finally {
+      rmrfRetry(dir);
+    }
+  }
+  assert.ok(sawNoticed,
+    "3 个新鲜退出 pid 全部被复用（病理性环境）——降级链路未能实证，请在该环境复核 pid 复用率");
+  assert.equal(sawNoticed.outcome, "observed");
+  assert.match(sawNoticed.line, /stale inflight marker/);
+});

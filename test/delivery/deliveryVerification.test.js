@@ -7,6 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { packageDelivery } from "../../src/delivery.js";
 import { verifyDelivery, runVerificationCommand } from "../../src/deliveryVerification.js";
+import { VERIFICATION_GATE_HELD_ENV, VERIFICATION_GATE_OFF_ENV } from "../../src/verificationGate.js";
 
 // ===== Helpers =====
 
@@ -723,4 +724,274 @@ test("3B-C7: valid unavailable -> unavailable outcome, zero commands, proof pass
   } finally {
     await cleanupDir(repo);
   }
+});
+
+// ===== R23-F/B Round B (TD-130) B2: machine-level serialization gate seam =====
+//
+// verifyDelivery 函数体本身不进闸（33 处直调测试与单文件跑不得入闸）；闸经
+// `opts.gate` 注入缝显式开启（默认关）。契约：
+//   · acquire 先于第一条命令——排队等待不计入任何命令预算（per-command 计时器
+//     在 runVerificationCommand 内 spawn 时才武装；传入的 timeoutMs 原样透传）；
+//   · 持闸期间每个 attempt env 注入 WAO_VERIFICATION_GATE_HELD=1（子进程见即
+//     跳过——防自锁）；fail-open（acquire ⇒ null）不注入、无闸继续跑；
+//   · finally 释放：passed/failed/抛错路径都恰好 release 一次；
+//   · 零断言 + unavailableReason 的路径零命令 ⇒ 不触碰闸。
+// 这些测试只注入假 gate/runCommand，绝不触碰真实机器租约。
+
+/** 记录调用的假 runCommand（成功形状，可注入覆盖）。 */
+function recordingRunCommand(calls, overrides = {}) {
+  return async (command, cwd, opts) => {
+    calls.push({ kind: "cmd", command, opts });
+    return {
+      command, exitCode: 0, signal: null, timedOut: false,
+      durationMs: 1, stdoutBytes: 0, stderrBytes: 0, ...overrides,
+    };
+  };
+}
+
+/** 可手动放行的阻塞假 gate；记录调用序。 */
+function blockingFakeGate(calls) {
+  let releaseAcquire = null;
+  const acquired = new Promise((resolve) => { releaseAcquire = resolve; });
+  return {
+    releaseAcquire,
+    acquire: async () => {
+      calls.push("acquire:start");
+      await acquired;
+      calls.push("acquire:end");
+      return {
+        token: "tok-fake-b2",
+        lost: () => false,
+        release: async () => { calls.push("release"); return true; },
+      };
+    },
+  };
+}
+
+/** 立即到手的假 gate（只测 env 注入/释放纪律，不制造等待）。 */
+function okFakeGate(released) {
+  return {
+    acquire: async () => ({
+      token: "tok-fake-b2-ok",
+      lost: () => false,
+      release: async () => { if (released) released.push("release"); return true; },
+    }),
+  };
+}
+
+test("B2-① RED 顺序断言：acquire 先于首条命令且排队不计预算（timeoutMs 未被扣减）", async () => {
+  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-b2a-");
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = makeDeliveryRef(wtPath, baseCommit, {
+      verificationCommands: ["echo one", "echo two"],
+    });
+
+    const calls = [];
+    const capturedOpts = [];
+    const gate = blockingFakeGate(calls);
+    const runCommand = async (command, cwd, opts) => {
+      capturedOpts.push(opts);
+      return recordingRunCommand(calls)(command, cwd, opts);
+    };
+
+    const pending = verifyDelivery(ref, { timeoutMs: 12345, runCommand, gate });
+    // 闸阻塞期间：任何命令都不得启动（acquire 未决）。
+    await new Promise((r) => setTimeout(r, 25));
+    assert.deepEqual(calls, ["acquire:start"], "acquire 未决期间不得启动任何验证命令");
+
+    gate.releaseAcquire();
+    const result = await pending;
+    assert.equal(result.outcome, "passed");
+    assert.equal(calls[1], "acquire:end", "第二条事件是 acquire 完成");
+    assert.match(calls[2]?.kind === "cmd" ? calls[2].command : String(calls[2]), /echo one/,
+      "acquire 完成后第一件事才是首条验证命令");
+    assert.equal(calls[calls.length - 1], "release", "finally 必须释放闸（恰好最后一步）");
+    // 排队不计预算：传给每条命令的 timeoutMs 是原始声明值，未被等待时长扣减
+    // （计时器在 spawn 时才武装——结构上保证等待永不吃执行预算）。
+    assert.equal(capturedOpts.length, 2);
+    for (const o of capturedOpts) {
+      assert.equal(o.timeoutMs, 12345, "timeoutMs 必须原样透传（排队不扣减）");
+    }
+  } finally {
+    await cleanupDir(repo);
+  }
+});
+
+test("B2-② env 两跳·harness 父→子：持闸时每个 attempt env 注入 HELD=1；无闸时绝不注入", async () => {
+  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-b2b-");
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = makeDeliveryRef(wtPath, baseCommit, {
+      verificationCommands: ["echo a", "echo b"],
+    });
+
+    // 持闸：每条命令的 env 都必须带 WAO_VERIFICATION_GATE_HELD=1。
+    const heldCalls = [];
+    const released = [];
+    const heldResult = await verifyDelivery(ref, {
+      runCommand: recordingRunCommand(heldCalls),
+      gate: okFakeGate(released),
+    });
+    assert.equal(heldResult.outcome, "passed");
+    assert.equal(heldCalls.length, 2);
+    for (const c of heldCalls) {
+      assert.equal(c.opts.env?.[VERIFICATION_GATE_HELD_ENV], "1",
+        "持闸时子进程 env 必须注入 WAO_VERIFICATION_GATE_HELD=1（防自锁）");
+    }
+    assert.deepEqual(released, ["release"], "成功路径恰好释放一次");
+
+    // 无闸（默认关）：verifyDelivery 自己绝不注入 HELD——但环境里可能本就带着
+    // 继承值（如 canonical 父进程持闸时注入的 wave 子进程）；继承值原样透传是
+    // 正确行为（子进程确实有持闸祖先），剥离反而会诱发自锁。因此断言分两支：
+    // 环境无值 ⇒ env 必须无值；环境有值 ⇒ env 恰等于继承值。
+    const inherited = process.env[VERIFICATION_GATE_HELD_ENV];
+    const bareCalls = [];
+    const bareResult = await verifyDelivery(ref, { runCommand: recordingRunCommand(bareCalls) });
+    assert.equal(bareResult.outcome, "passed");
+    for (const c of bareCalls) {
+      if (inherited === undefined) {
+        assert.ok(!c.opts.env || c.opts.env[VERIFICATION_GATE_HELD_ENV] === undefined,
+          "默认（无 gate）且环境无标记时不得注入 HELD");
+      } else {
+        assert.equal(c.opts.env?.[VERIFICATION_GATE_HELD_ENV], inherited,
+          "无 gate 时只允许继承值原样透传，不得凭空新增/改写");
+      }
+    }
+  } finally {
+    await cleanupDir(repo);
+  }
+});
+
+test("B2-③ fail-open：acquire 返回 null ⇒ 无闸继续跑、env 不注入、release 不调用", async () => {
+  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-b2c-");
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = makeDeliveryRef(wtPath, baseCommit, { verificationCommands: ["echo ok"] });
+
+    const calls = [];
+    const released = [];
+    const failOpenGate = {
+      acquire: async () => { calls.push("acquire"); return null; },
+    };
+    const result = await verifyDelivery(ref, {
+      runCommand: async (...args) => {
+        const r = await recordingRunCommand(calls)(...args);
+        return r;
+      },
+      gate: failOpenGate,
+    });
+    assert.equal(result.outcome, "passed", "基础设施 fail-open 后验证照常完成");
+    assert.deepEqual(calls.filter((c) => c === "acquire"), ["acquire"]);
+    // 同 B2-② 无闸支：环境可能本就带着继承值（canonical 持闸父进程的 wave 子
+    // 进程）；fail-open 的契约是"不新增/不谎报"——继承值原样透传合法。
+    const inherited = process.env[VERIFICATION_GATE_HELD_ENV];
+    for (const c of calls) {
+      if (c?.kind === "cmd") {
+        if (inherited === undefined) {
+          assert.ok(!c.opts.env || c.opts.env[VERIFICATION_GATE_HELD_ENV] === undefined,
+            "fail-open（未真正持闸）且环境无标记时不得谎报 HELD");
+        } else {
+          assert.equal(c.opts.env?.[VERIFICATION_GATE_HELD_ENV], inherited,
+            "fail-open 只允许继承值原样透传，不得凭空新增");
+        }
+      }
+    }
+  } finally {
+    await cleanupDir(repo);
+  }
+});
+
+test("B2-④ 失败路径也释放且语义不变：首命令失败 ⇒ release 恰一次 + command_failed 原样", async () => {
+  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-b2d-");
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = makeDeliveryRef(wtPath, baseCommit, {
+      verificationCommands: ["exit 1", "echo never"],
+    });
+
+    const calls = [];
+    const gate = {
+      acquire: async () => ({
+        token: "tok-fake-b2d",
+        lost: () => false,
+        release: async () => { calls.push("release"); return true; },
+      }),
+    };
+    const result = await verifyDelivery(ref, {
+      runCommand: async (command, cwd, opts) => ({
+        command, exitCode: command === "exit 1" ? 1 : 0, signal: null,
+        timedOut: false, durationMs: 1, stdoutBytes: 0, stderrBytes: 0,
+      }),
+      gate,
+    });
+    assert.equal(result.outcome, "failed");
+    assert.equal(result.failureCode, "command_failed", "闸不得改变失败码语义（fail-open 方向红线）");
+    assert.equal(result.delivery.verification.results.length, 1, "失败后后续命令不再运行（原语义）");
+    assert.deepEqual(calls, ["release"], "失败返回路径也必须恰好释放一次");
+  } finally {
+    await cleanupDir(repo);
+  }
+});
+
+test("B2-⑤ 零断言 + unavailableReason 路径不入闸（gate.acquire 零调用）", async () => {
+  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-b2e-");
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = makeDeliveryRef(wtPath, baseCommit, {
+      verificationCommands: [],
+      verificationUnavailableReason: "no test suite",
+    });
+
+    let acquires = 0;
+    const gate = { acquire: async () => { acquires += 1; return null; } };
+    const result = await verifyDelivery(ref, {
+      runCommand: async () => { throw new Error("must not run"); },
+      gate,
+    });
+    assert.equal(result.outcome, "unavailable");
+    assert.equal(acquires, 0, "零命令序列没有可串行化的 spawn——不得触碰闸");
+  } finally {
+    await cleanupDir(repo);
+  }
+});
+
+// ── B2-⑥ 生产路径入闸判定（createCallerGate）──
+//
+// 三条生产路径的开启纪律收敛为一个导出工厂：只有"调用方依赖默认验证器"
+// （注入了 verifyDeliveryFn 的测试/内部复用一律不得入闸——否则 33 处注入式
+// 测试会在 npm test 期间真实争抢机器租约）且 gateEngaged() 时才创建闸对象。
+// 闸生命周期（acquire/release）仍由 verifyDelivery 内部的缝负责。
+
+test("B2-⑥a createCallerGate：默认验证器 + 干净 env ⇒ 返回真闸对象（acquire/status/breakLock 面）", async () => {
+  const { createCallerGate } = await import("../../src/deliveryVerification.js");
+  const gate = createCallerGate({
+    usesDefaultVerifier: true,
+    env: {},
+    identity: { owner: "RunManager._verifyDeliveryResult", runId: "run_x", agentId: "coder_high" },
+  });
+  // 只验对象面（acquire 前零 fs 触碰——绝不在这类单测里认领真实机器租约）。
+  // release 在 acquire 返回的 handle 上（B1 状态测试已钉），不在闸本体。
+  assert.ok(gate && typeof gate.acquire === "function");
+  assert.ok(typeof gate.status === "function");
+  assert.ok(typeof gate.breakLock === "function");
+});
+
+test("B2-⑥b createCallerGate：注入了自定义验证器的调用方绝不创建闸（测试面零牵连）", async () => {
+  const { createCallerGate } = await import("../../src/deliveryVerification.js");
+  const gate = createCallerGate({ usesDefaultVerifier: false, env: {}, identity: { owner: "x" } });
+  assert.equal(gate, null, "注入 verifyDeliveryFn 的调用方（全部测试 + 内部复用）不入闸");
+});
+
+test("B2-⑥c createCallerGate：kill switch off / HELD=1 ⇒ null（gateEngaged 收口）", async () => {
+  const { createCallerGate } = await import("../../src/deliveryVerification.js");
+  assert.equal(
+    createCallerGate({ usesDefaultVerifier: true, env: { [VERIFICATION_GATE_OFF_ENV]: "off" }, identity: {} }),
+    null,
+  );
+  assert.equal(
+    createCallerGate({ usesDefaultVerifier: true, env: { [VERIFICATION_GATE_HELD_ENV]: "1" }, identity: {} }),
+    null,
+    "子进程看到 HELD 标记不再认领（防自锁第二道防线）",
+  );
 });

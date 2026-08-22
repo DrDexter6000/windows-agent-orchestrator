@@ -59,6 +59,14 @@ import {
 import { getWaoDir } from "../waoDir.js";
 import { summarizeDeclares } from "../waoDeclare.js";
 import { summarizeStages } from "../waoStage.js";
+// R23-F/B Round B (TD-130): `runs gate` 出口——同机验证串行化闸的只读查询与
+// 人工破锁。commands → core 下向边（与 runs delivery → runDeliveryReverify 同向）。
+import {
+  VERIFICATION_GATE_OFF_ENV,
+  createVerificationGate,
+  gateEngaged,
+} from "../verificationGate.js";
+import { verificationLeasePath } from "../machineGatePaths.js";
 import { parseOptions, resolveTargetCwd } from "./shared.js";
 // TD-109: `runs wait` delegates to the SAME liveness-aware wait service the
 // MCP run_wait tool uses, and attaches notes via the SAME semanticNotes
@@ -77,7 +85,7 @@ import { readRegistry } from "../registry.js";
 // fail-closed unknown-subcommand error below cannot swallow it.
 const RUNS_SUBCOMMANDS = [
   "list", "summary", "prune", "grep", "metrics", "scorecard",
-  "dashboard", "diagnose", "delivery", "wait",
+  "dashboard", "diagnose", "delivery", "wait", "gate",
 ];
 
 async function runsCommand(args, config, deps) {
@@ -120,6 +128,10 @@ async function runsCommand(args, config, deps) {
   }
   if (sub === "wait") {
     await runsWaitCommand(tail, config, deps);
+    return;
+  }
+  if (sub === "gate") {
+    await runsGateCommand(tail, config, deps);
     return;
   }
   if (sub === "forecast") {
@@ -273,6 +285,105 @@ async function runsWaitCommand(args, config, deps = {}) {
   console.log(`Waited: ${result.observation?.waitedMs ?? 0} ms (window ${result.observation?.windowMs ?? waitMs} ms)`);
   console.log(`Liveness: ${result.liveness}`);
   console.log(`Observation: ${result.observationOutcome}${result.observation ? ` (${result.observation.outcome})` : ""}`);
+}
+
+// R23-F/B Round B (TD-130): strict flag set for `runs gate`（runs wait 同纪律：
+// 未知 flag 拒绝，typo 不能静默产生错误输出）。
+const RUNS_GATE_KNOWN_FLAGS = new Set(["--format", "--release"]);
+
+/**
+ * R23-F/B Round B (TD-130): `runs gate [--format json|text] [--release]`
+ *
+ * 同机验证串行化闸（verification lease）的运维出口：
+ *   - 默认只读查询：free / held（持有者身份齐备）/ corrupt 三态 + kill switch
+ *     是否激活。绝不认领、绝不释放——查询不改变闸状态。
+ *   - `--release`：人工玻璃破断（breakLock）。文档化的手动场景是"确认没有验证
+ *     在跑但租约残留"（如进程被强杀后 STALE_MS 内的等待窗口想立刻清掉）。
+ *     破除失败 fail-closed 非零退出；本就无锁是正常结果、如实告知。
+ *
+ * 闸本体是机器级的（verificationLeasePath()），与 --run-dir 无关。
+ *
+ * @param {string[]} args — everything after `runs gate`
+ * @param {object} config — unused here (machine-global scope); kept for signature parity
+ * @param {object} [deps] — { createGate } injection for testing
+ */
+async function runsGateCommand(args, config, deps = {}) {
+  const flags = {};
+  const positionals = [];
+  let release = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i];
+    if (a.startsWith("--")) {
+      if (!RUNS_GATE_KNOWN_FLAGS.has(a)) throw new Error(`unknown flag for runs gate: ${a}`);
+      if (a === "--release") {
+        if (release) throw new Error(`${a} specified multiple times`);
+        release = true;
+        continue;
+      }
+      if (flags[a] !== undefined) throw new Error(`${a} specified multiple times`);
+      const v = args[i + 1];
+      if (v === undefined || v.startsWith("--")) throw new Error(`${a} requires a value`);
+      if (v.trim().length === 0) throw new Error(`${a} must be non-empty`);
+      flags[a] = v;
+      i += 1;
+    } else {
+      positionals.push(a);
+    }
+  }
+  if (positionals.length > 0) {
+    throw new Error("runs gate takes no positional arguments");
+  }
+  if (flags["--format"] !== undefined && flags["--format"] !== "json" && flags["--format"] !== "text") {
+    throw new Error("--format only supports json|text");
+  }
+  const asJson = flags["--format"] === "json";
+
+  // 入闸判定对用户可见：engaged=false 说明本进程即使跑验证也不会排队
+  // （kill switch 关闭或处于 HELD 继承环境）。
+  const engaged = gateEngaged();
+  const createGate = deps.createGate
+    ?? (() => createVerificationGate({ identity: { owner: "cli/runs-gate" } }));
+  const gate = createGate();
+
+  if (release) {
+    const result = await gate.breakLock();
+    if (result.hadLock && !result.released) {
+      throw new Error(
+        `runs gate --release: failed to remove the verification lease at ${verificationLeasePath()} `
+        + "(file may be locked/permission-denied); resolve manually and retry",
+      );
+    }
+    if (asJson) {
+      console.log(JSON.stringify({ engaged, release: result }, null, 2));
+      return;
+    }
+    console.log(result.hadLock
+      ? "Verification lease released (manual break-lock)."
+      : "No verification lease present; nothing to release.");
+    console.log(engaged ? "kill switch: not active" : `kill switch: active (${VERIFICATION_GATE_OFF_ENV}=off)`);
+    return;
+  }
+
+  const lease = await gate.status();
+  if (asJson) {
+    console.log(JSON.stringify({ engaged, lease }, null, 2));
+    return;
+  }
+  if (lease.free) {
+    console.log("Verification gate: free (no lease)");
+  } else if (lease.corrupt) {
+    console.log(`Verification gate: LEASE CORRUPT (unparseable record at ${verificationLeasePath()})`);
+  } else {
+    console.log("Verification gate: held");
+    const h = lease.holder ?? {};
+    const who = ["owner", "runId", "sessionId", "agentId"]
+      .map((k) => (typeof h[k] === "string" && h[k].length > 0 ? h[k] : null))
+      .filter(Boolean)
+      .join(" / ");
+    console.log(`Holder: ${who || "(unidentified)"}`);
+    console.log(`Holder pid: ${h.pid ?? "unknown"} | startedAt: ${h.startedAt ?? "unknown"} | heartbeat age: ${h.ageMs ?? "?"} ms`);
+  }
+  console.log(engaged ? "kill switch: not active" : `kill switch: active (${VERIFICATION_GATE_OFF_ENV}=off)`);
 }
 
 async function loadRunFiles(runDir) {
@@ -1326,7 +1437,7 @@ async function runsDeliveryReverifyCommand(args, config, hostDeps = {}) {
   console.log(`Verification: ${result.verificationStatus}${result.failureCode ? ` (${result.failureCode})` : ""}`);
 }
 
-export { runsCommand, runsDeliveryCommand };
+export { runsCommand, runsDeliveryCommand, runsGateCommand };
 
 // ===== TD-103 Phase 3C-2: Lead acceptance record =====
 // M9-6A: _reconstructDelivery migrated to src/application/runDelivery.js

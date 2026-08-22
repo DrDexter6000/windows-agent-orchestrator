@@ -55,7 +55,7 @@ import {
   REVERIFY_TIMEOUT_MS_DEFAULT,
 } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
-import { verifyDelivery } from "../deliveryVerification.js";
+import { verifyDelivery, createCallerGate } from "../deliveryVerification.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
 
 export {
@@ -371,7 +371,19 @@ export async function runDeliveryReverify({
       },
     };
 
-    const verifyResult = await _verify(reverifyInput, { timeoutMs: effectiveTimeoutMs });
+    // R23-F/B Round B (TD-130): production reverify enters the machine gate —
+    // but ONLY on the default verifier. An injected verifyDeliveryFn (every
+    // existing test / internal reuse) never contends for the real lease;
+    // createCallerGate folds in kill switch + HELD anti-self-lock, and null
+    // keeps the opts shape byte-identical to before (zero drift).
+    const gate = createCallerGate({
+      usesDefaultVerifier: verifyDeliveryFn === undefined,
+      identity: { owner: "runDeliveryReverify", runId },
+    });
+    const verifyResult = await _verify(reverifyInput, {
+      timeoutMs: effectiveTimeoutMs,
+      ...(gate ? { gate } : {}),
+    });
     effectiveRef = verifyResult.delivery;
     effectiveOutcome = verifyResult.outcome;
     effectiveFailureCode = verifyResult.failureCode;

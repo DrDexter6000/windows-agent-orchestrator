@@ -22,6 +22,8 @@ import { fileURLToPath } from "node:url";
 // R23-F/A A1：机器级闸路径 SSOT（src/machineGatePaths.js）。钉住 canonical-test.mjs
 // 导出的 inflightMarkerPath 必须与它逐字节同源——runner 侧不得再长出第二份路径推导。
 import { inflightMarkerPath as gateInflightMarkerPath } from "../../src/machineGatePaths.js";
+// R23-F/B Round B：env 第二跳的变量名 SSOT。
+import { VERIFICATION_GATE_HELD_ENV } from "../../src/verificationGate.js";
 
 import {
   validateManifest, classifyIsolation, MANIFEST_GROUPS,
@@ -1002,4 +1004,138 @@ test("inflight marker: machine-global location derives from %LOCALAPPDATA%\\wao 
   const rel = relative(repoRoot, p);
   const insideRepo = rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
   assert.equal(insideRepo, false, `标记路径必须在仓外（实际 ${p}，repoRoot ${repoRoot}）`);
+});
+
+// ===== R23-F/B Round B (TD-130) B2⑥/⑦ + B5: canonical main() 的闸包裹 =====
+//
+// main() 的编排在 startCanonicalSuite 里可注入重放（createGate/createMarkerAdapter/
+// runSuiteFn 全部可换）。硬顺序：acquire → childEnv（此刻才注入 HELD——R22 的
+// :725-before-:733 快照顺序缺陷的闸版不许重演）→ marker.begin → suite →
+// marker.end → release。kill switch 关闭 ⇒ createGate 为 null ⇒ 完全跳过闸段，
+// marker 层原样保留（降级态告警层）。
+//
+// 新导出用动态 import：导出缺失只红新测试，不炸本文件其余 60+ 条已钉死的
+// 不变量（静态 import 会在链接期让整个文件失败）。
+
+test("B2-⑥ buildCanonicalChildEnv：基础注入 WAO_SKIP_VERSION_GUARD；held 才注入 HELD=1", async () => {
+  const { buildCanonicalChildEnv } = await import("../../scripts/canonical-test.mjs");
+
+  const bare = buildCanonicalChildEnv({ PATH: "keep" }, { gateHeld: false });
+  assert.equal(bare.WAO_SKIP_VERSION_GUARD, "1", "版本守卫豁免是既有行为（语义保留）");
+  assert.equal(bare.PATH, "keep", "其余 env 原样透传");
+  assert.equal(bare[VERIFICATION_GATE_HELD_ENV], undefined, "未持闸不得主动注入 HELD 标记");
+
+  const held = buildCanonicalChildEnv({ PATH: "keep" }, { gateHeld: true });
+  assert.equal(held[VERIFICATION_GATE_HELD_ENV], "1", "持闸时 wave 子进程必须看到 HELD=1（env 第二跳）");
+
+  // 祖先真持闸时继承进来的 HELD 值必须原样透传（剥离它会让子进程在祖先仍持
+  // 租约时去重新认领——自锁）。gateHeld:false 只表示"本进程不新增标记"。
+  const inherited = buildCanonicalChildEnv(
+    { [VERIFICATION_GATE_HELD_ENV]: "1" }, { gateHeld: false },
+  );
+  assert.equal(inherited[VERIFICATION_GATE_HELD_ENV], "1", "继承的标记不得被剥离");
+});
+
+test("B2-⑦ startCanonicalSuite 编排硬顺序：acquire→childEnv→marker.begin→suite→marker.end→release", async () => {
+  const { startCanonicalSuite } = await import("../../scripts/canonical-test.mjs");
+  const ops = [];
+  let seenSuiteArgs = null;
+  const fakeGate = {
+    acquire: async () => {
+      ops.push("gate:acquire");
+      return { token: "tok-canonical", lost: () => false, release: async () => { ops.push("gate:release"); return true; } };
+    },
+  };
+  const fakeInflight = {
+    begin: () => { ops.push("marker:begin"); return "created"; },
+    end: () => { ops.push("marker:end"); return true; },
+  };
+
+  await startCanonicalSuite({
+    repoRoot: ".", testDir: "test", manifestPath: "test/manifest.json",
+    reportPath: "test-results.json", nodeExe: process.execPath,
+    env: { BASE: "1" },
+    createGate: () => fakeGate,
+    createMarker: () => fakeInflight,
+    runSuiteFn: async (args) => { ops.push("suite"); seenSuiteArgs = args; },
+  });
+
+  assert.deepEqual(ops,
+    ["gate:acquire", "marker:begin", "suite", "marker:end", "gate:release"],
+    "硬顺序：先入闸再开跑；marker.end 先于 release（finally 纪律）");
+  // childEnv 在 acquire 之后构造的可观察证据：交给 suite 的 env 带 HELD=1
+  // （若先构 env 后 acquire，HELD 无从注入——顺序缺陷会在这里现形）。
+  assert.equal(seenSuiteArgs.childEnv[VERIFICATION_GATE_HELD_ENV], "1",
+    "suite 收到的 childEnv 必须已含 HELD=1（env 第二跳）");
+  assert.equal(seenSuiteArgs.childEnv.WAO_SKIP_VERSION_GUARD, "1");
+  assert.equal(seenSuiteArgs.childEnv.BASE, "1", "基础 env 原样透传");
+});
+
+test("B2-⑦b kill switch（createGate=null）⇒ 零闸段、marker 层原样、env 无 HELD", async () => {
+  const { startCanonicalSuite } = await import("../../scripts/canonical-test.mjs");
+  const ops = [];
+  let seenSuiteArgs = null;
+  await startCanonicalSuite({
+    repoRoot: ".", testDir: "test", manifestPath: "test/manifest.json",
+    reportPath: "test-results.json", nodeExe: process.execPath,
+    env: {},
+    createGate: null,
+    createMarker: () => ({
+      begin: () => { ops.push("marker:begin"); return "created"; },
+      end: () => { ops.push("marker:end"); return true; },
+    }),
+    runSuiteFn: async (args) => { ops.push("suite"); seenSuiteArgs = args; },
+  });
+  assert.deepEqual(ops, ["marker:begin", "suite", "marker:end"],
+    "停用开关下完全绕过闸（降级为 R22 marker 告警层）");
+  assert.equal(seenSuiteArgs.childEnv[VERIFICATION_GATE_HELD_ENV], undefined);
+});
+
+test("B2-⑦c suite 抛错 ⇒ marker.end 与 release 仍按序执行，错误向上传播", async () => {
+  const { startCanonicalSuite } = await import("../../scripts/canonical-test.mjs");
+  const ops = [];
+  const boom = new Error("suite exploded");
+  await assert.rejects(
+    startCanonicalSuite({
+      repoRoot: ".", testDir: "test", manifestPath: "test/manifest.json",
+      reportPath: "test-results.json", nodeExe: process.execPath,
+      env: {},
+      createGate: () => ({
+        acquire: async () => ({
+          token: "tok-x", lost: () => false,
+          release: async () => { ops.push("gate:release"); return true; },
+        }),
+      }),
+      createMarker: () => ({
+        begin: () => { ops.push("marker:begin"); return "created"; },
+        end: () => { ops.push("marker:end"); return true; },
+      }),
+      runSuiteFn: async () => { ops.push("suite"); throw boom; },
+    }),
+    (err) => err === boom,
+    "闸包裹不得吞掉 suite 错误（验证语义不被闸改变）",
+  );
+  assert.deepEqual(ops, ["marker:begin", "suite", "marker:end", "gate:release"],
+    "失败路径的 finally 纪律与成功路径一致");
+});
+
+test("B5 RED isolationDurationMs 透传：isolator 的 durationMs 进入 isolation 条目；缺失=null", async () => {
+  const files = waveFiles(["flake.test.js"], "worktree");
+  const runChild = async () => ({ exitCode: 1, stdout: "", stderr: "" });
+  const readReport = async () => makeReport(["flake.test.js"], new Set(["flake.test.js"]));
+  const out = await runCanonical({
+    waveSpecs: [{ name: "filesystem", concurrency: 8, categories: ["git", "worktree"], files }],
+    reporterArg: "R", runChild, readReport, deleteReport: noopDelete,
+    isolator: async () => ({ status: "fail", exitCode: 1, durationMs: 123, tail: "t" }),
+  });
+  assert.equal(out.isolation.length, 1);
+  assert.equal(out.isolation[0].isolationDurationMs, 123,
+    "realIsolator 已算出的 durationMs 必须进 bounded report（B5：:677-686 丢弃缺陷）");
+
+  const outNoDur = await runCanonical({
+    waveSpecs: [{ name: "filesystem", concurrency: 8, categories: ["git", "worktree"], files }],
+    reporterArg: "R", runChild, readReport, deleteReport: noopDelete,
+    isolator: async () => ({ status: "fail", exitCode: 1, tail: "t" }),
+  });
+  assert.equal(outNoDur.isolation[0].isolationDurationMs, null, "缺失时归一为 null（不编造 0）");
 });

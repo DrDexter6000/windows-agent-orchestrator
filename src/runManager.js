@@ -10,7 +10,7 @@ import { writeFrictionLog, frictionLogDirFromRunDir } from "./frictionLog.js";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
 import { createSecretRedactor } from "./secretRedaction.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError } from "./delivery.js";
-import { verifyDelivery as defaultVerifyDelivery } from "./deliveryVerification.js";
+import { verifyDelivery as defaultVerifyDelivery, createCallerGate } from "./deliveryVerification.js";
 import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecutionContract } from "./application/roleContract.js";
 import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./application/credentialReadiness.js";
 import { inheritedEnvNames } from "./envPolicy.js";
@@ -2566,7 +2566,20 @@ export class Run {
         && Object.prototype.hasOwnProperty.call(this.deliveryContext, "verificationTimeoutMs")
         ? { timeoutMs: this.deliveryContext.verificationTimeoutMs }
         : {};
-      const result = await this._verifyDeliveryFn(deliveryRef, verifyOpts);
+      // R23-F/B Round B (TD-130): production verification enters the machine
+      // serialization gate — but ONLY when this manager relies on the DEFAULT
+      // verifier. Injected verifyDeliveryFn (every existing test, internal
+      // reuse) must never contend for the real machine lease during npm test.
+      // createCallerGate also folds in the kill switch + anti-self-lock HELD
+      // guard; null ⇒ byte-identical opts shape as before (zero drift).
+      const gate = createCallerGate({
+        usesDefaultVerifier: this._verifyDeliveryFn === defaultVerifyDelivery,
+        identity: { owner: "RunManager._verifyDeliveryResult", runId: this.runId, agentId: this.agentId },
+      });
+      const result = await this._verifyDeliveryFn(deliveryRef, {
+        ...verifyOpts,
+        ...(gate ? { gate } : {}),
+      });
       this._pendingVerificationResult = result;
       return result;
     } catch (err) {

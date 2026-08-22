@@ -95,6 +95,22 @@ export function gateDisabled(env = process.env) {
   return String(env[VERIFICATION_GATE_OFF_ENV] ?? "").trim().toLowerCase() === "off";
 }
 
+/**
+ * 调用方入闸判定的单一谓词："本进程现在该不该去认领机器租约？"
+ *
+ *   engaged = kill switch 未关 且 本进程未持闸（HELD 为空）。
+ *
+ * 三条生产路径与 canonical main 在创建闸之前统一问它，避免各调用点长出第二份
+ * 判定逻辑；防自锁的第二道防线（第一道是注入方根本不创建闸）。
+ *
+ * @param {NodeJS.ProcessEnv} [env=process.env]
+ * @returns {boolean}
+ */
+export function gateEngaged(env = process.env) {
+  return !gateDisabled(env)
+    && String(env[VERIFICATION_GATE_HELD_ENV] ?? "").trim().length === 0;
+}
+
 function describeErr(err) {
   if (err && typeof err === "object" && err.code) return `${err.code}: ${err.message}`;
   return String((err && err.message) || err);

@@ -769,3 +769,54 @@ test("B1-14: status 三态（free/held/corrupt）与 breakLock 玻璃破断语�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// =====================================================================
+// B2-⓪：gateEngaged(env) —— 调用方入闸判定的单一谓词。
+//
+// 三条生产路径与 canonical main 在创建闸之前都要回答同一问题："本进程现在
+// 该不该去认领机器租约？"答案 = kill switch 未关 且 本进程未持闸（HELD 空）。
+// 收敛成一个导出谓词，避免三处调用点各自长出第二份判定逻辑。
+// 动态 import：导出缺失只红本节，不炸上面已钉死的 F2/B1 不变量。
+// =====================================================================
+
+test("B2-⓪a gateEngaged：默认开闸（两个 env 变量都未设置 ⇒ engaged）", async () => {
+  const { gateEngaged } = await import("../../src/verificationGate.js");
+  assert.equal(gateEngaged({}), true, "干净 env = 开闸");
+  assert.equal(gateEngaged({ WAO_VERIFICATION_GATE: "" }), true, "空值不算 off");
+  assert.equal(gateEngaged({ WAO_VERIFICATION_GATE: "on" }), true);
+  assert.equal(gateEngaged({ WAO_VERIFICATION_GATE: "0" }), true, "只有字面 off 才关闸");
+});
+
+test("B2-⓪b gateEngaged：kill switch 关闭 ⇒ 不入闸（大小写/空白容忍，与 gateDisabled 同律）", async () => {
+  const { gateEngaged } = await import("../../src/verificationGate.js");
+  assert.equal(gateEngaged({ WAO_VERIFICATION_GATE: "off" }), false);
+  assert.equal(gateEngaged({ WAO_VERIFICATION_GATE: " OFF " }), false, "trim+小写归一");
+  assert.equal(gateEngaged({ WAO_VERIFICATION_GATE: "Off" }), false);
+});
+
+test("B2-⓪c gateEngaged：本进程已持闸（HELD 非空）⇒ 不再认领（防自锁）", async () => {
+  const { gateEngaged } = await import("../../src/verificationGate.js");
+  assert.equal(gateEngaged({ [VERIFICATION_GATE_HELD_ENV]: "1" }), false,
+    "harness 父进程注入的标记必须让子路径跳过认领");
+  assert.equal(gateEngaged({ [VERIFICATION_GATE_HELD_ENV]: "anything" }), false,
+    "任何非空值都视为持闸（注入方只写 1，读取方从严）");
+  assert.equal(gateEngaged({ [VERIFICATION_GATE_HELD_ENV]: "" }), true,
+    "空串视同未设置（不因残留空变量误关闸）");
+});
+
+test("B2-⓪d gateEngaged：kill switch 与 HELD 同时存在 ⇒ 仍不入闸；显式 env 参数生效", async () => {
+  const { gateEngaged } = await import("../../src/verificationGate.js");
+  assert.equal(
+    gateEngaged({ WAO_VERIFICATION_GATE: "off", [VERIFICATION_GATE_HELD_ENV]: "1" }),
+    false,
+  );
+  // 只看显式传入的 env，绝不偷读 process.env（可测试性与纯函数纪律）。
+  const saved = process.env[VERIFICATION_GATE_HELD_ENV];
+  try {
+    process.env[VERIFICATION_GATE_HELD_ENV] = "1";
+    assert.equal(gateEngaged({}), true, "显式 env 为空时不得被 process.env 影响");
+  } finally {
+    if (saved === undefined) delete process.env[VERIFICATION_GATE_HELD_ENV];
+    else process.env[VERIFICATION_GATE_HELD_ENV] = saved;
+  }
+});

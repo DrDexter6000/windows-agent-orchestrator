@@ -124,6 +124,17 @@ import { availableParallelism, cpus } from "node:os";
 // byte-stable for the meta-tests.
 import { INFLIGHT_MARKER_FILENAME, inflightMarkerPath } from "../src/machineGatePaths.js";
 
+// R23-F/B Round B (TD-130): the machine-level verification lease gate. main()
+// wraps ONE canonical invocation (the same granularity as a verifyDelivery
+// command sequence) in acquire → suite → release; wave children see
+// WAO_VERIFICATION_GATE_HELD=1 via buildCanonicalChildEnv and skip claiming.
+// Kill switch (WAO_VERIFICATION_GATE=off) is judged here by gateDisabled().
+import {
+  VERIFICATION_GATE_HELD_ENV,
+  createVerificationGate,
+  gateEngaged,
+} from "../src/verificationGate.js";
+
 // ── Resource categories: the closed set named in the TD-107 contract. ─────────
 // These seven are the MANIFEST categories used for ownership + drift detection.
 // They are NOT the execution units — execution is organized into WAVES (below),
@@ -681,6 +692,10 @@ export async function runCanonical({ waveSpecs, reporterArg, runChild, readRepor
         firstRoundStatus: f.status,
         isolationStatus: iso.status,
         isolationExitCode: iso.exitCode ?? null,
+        // B5 (R23-F/A follow-up): realIsolator already measures durationMs —
+        // carry it into the bounded report instead of dropping it. Absent or
+        // non-finite normalizes to null (never fabricated 0).
+        isolationDurationMs: nonNegativeMs(iso.durationMs),
         classification: classifyIsolation(f.status, iso.status),
         isolationTail: iso.tail,
       });
@@ -771,7 +786,76 @@ export function realIsolator(nodeExe, repoRoot, env) {
   });
 }
 
-// ── main(): advisory inflight marker, then load manifest, validate, run, report.
+// ── main(): verification gate, then advisory inflight marker, then the suite.
+
+/**
+ * R23-F/B Round B: build the env handed to every wave child. Base behavior
+ * unchanged (WAO_SKIP_VERSION_GUARD=1); when this process holds the machine
+ * lease, add WAO_VERIFICATION_GATE_HELD=1 — env hop 2 (canonical parent → wave
+ * children), so a child that itself reaches full-suite verification skips
+ * claiming instead of deadlocking on its own ancestor's lease. Constructing
+ * this AFTER acquire is what makes the held flag expressible at all — building
+ * it before would freeze a pre-acquire snapshot (the same class of ordering
+ * defect R22 fixed for the marker).
+ *
+ * @param {NodeJS.ProcessEnv} baseEnv
+ * @param {{gateHeld: boolean}} opts
+ */
+export function buildCanonicalChildEnv(baseEnv, { gateHeld }) {
+  return {
+    ...baseEnv,
+    WAO_SKIP_VERSION_GUARD: "1",
+    ...(gateHeld ? { [VERIFICATION_GATE_HELD_ENV]: "1" } : {}),
+  };
+}
+
+/**
+ * R23-F/B Round B: ONE canonical invocation under the machine lease — the same
+ * granularity as a whole verifyDelivery command sequence. Hard order:
+ *
+ *   acquire → buildChildEnv → marker.begin → suite → marker.end → release
+ *
+ *   · The lease is acquired BEFORE any child can spawn; queueing happens before
+ *     any wave timer arms, so waiting never eats suite budget.
+ *   · The R22 advisory inflight marker stays as the degraded-state warning
+ *     layer (fail-open / kill switch / single-file runs): begin/end bracket the
+ *     suite exactly as before and are deleted on EVERY exit path.
+ *   · finally discipline: marker.end then release, on success AND failure; a
+ *     suite error propagates untouched (the gate never changes semantics).
+ *   · createGate === null (kill switch off / HELD set) ⇒ the gate segment is
+ *     skipped entirely; marker layer remains.
+ *
+ * All collaborators injectable for the meta-tests; defaults are production.
+ *
+ * @param {{repoRoot: string, testDir: string, manifestPath: string, reportPath: string,
+ *           nodeExe: string, env?: NodeJS.ProcessEnv,
+ *           createGate?: (() => object)|null,
+ *           createMarker?: () => {begin: Function, end: Function},
+ *           runSuiteFn?: (args: object) => Promise<void>}} args
+ */
+export async function startCanonicalSuite({
+  repoRoot, testDir, manifestPath, reportPath, nodeExe,
+  env = process.env,
+  createGate = null,
+  createMarker = () => createInflightMarker(realInflightAdapter()),
+  runSuiteFn = runSuite,
+}) {
+  const gate = typeof createGate === "function" ? createGate() : null;
+  const handle = gate ? await gate.acquire() : null;
+  try {
+    const childEnv = buildCanonicalChildEnv(env, { gateHeld: Boolean(handle) });
+    const inflight = createMarker();
+    inflight.begin();
+    try {
+      await runSuiteFn({ repoRoot, testDir, manifestPath, reportPath, nodeExe, childEnv });
+    } finally {
+      inflight.end();
+    }
+  } finally {
+    if (handle) await handle.release();
+  }
+}
+
 async function main() {
   const here = dirname(fileURLToPath(import.meta.url));
   const repoRoot = resolve(here, "..");
@@ -780,21 +864,19 @@ async function main() {
   const reportPath = join(repoRoot, "test-results.json");
   const nodeExe = process.execPath;
 
-  const childEnv = { ...process.env, WAO_SKIP_VERSION_GUARD: "1" };
+  // Gate engagement decided ONCE per invocation from the live process env:
+  // engaged unless kill-switched off or already held by an ancestor (HELD
+  // guard — anti-self-lock). Disabled ⇒ null ⇒ startCanonicalSuite skips the
+  // gate segment entirely (degrades to the R22 marker warning layer).
+  const createGate = gateEngaged(process.env)
+    ? () => createVerificationGate({ identity: { owner: "scripts/canonical-test.mjs" } })
+    : null;
 
-  // 0) R22 W1 advisory inflight marker (machine-global, NOT a lock): claim it
-  //    before anything runs — in particular before the runs-guard baseline
-  //    snapshot inside runSuite — so a concurrently-starting full suite sees
-  //    us; and if one is already mid-run, print one WARNING-or-NOTICE (advisory only:
-  //    never blocks, never waits, eats no budget). Deleted on EVERY exit path
-  //    (finally) when this invocation owns it.
-  const inflight = createInflightMarker(realInflightAdapter());
-  inflight.begin();
-  try {
-    await runSuite({ repoRoot, testDir, manifestPath, reportPath, nodeExe, childEnv });
-  } finally {
-    inflight.end();
-  }
+  await startCanonicalSuite({
+    repoRoot, testDir, manifestPath, reportPath, nodeExe,
+    env: process.env,
+    createGate,
+  });
 }
 
 // The suite proper (steps 1-5). Extracted from main() so the inflight marker's

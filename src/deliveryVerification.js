@@ -3,6 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertCommittedDeliveryRef, DeliveryError } from "./delivery.js";
+// R23-F/B Round B（TD-130）：同机验证串行化闸的 env 标记名 SSOT。verifyDelivery
+// 自身不进闸——只提供 opts.gate 缝与 HELD 注入；是否创建闸由调用方裁决
+// （createCallerGate）。
+import { VERIFICATION_GATE_HELD_ENV, createVerificationGate, gateEngaged } from "./verificationGate.js";
 
 /**
  * Delivery Verification Kernel (Phase 3B).
@@ -219,16 +223,20 @@ function _validateTimeout(timeoutMs) {
  * `isolated` is false so the persisted environment fact records the degradation
  * rather than lying. This never aborts a run on a transient temp-dir failure.
  *
+ * @param {boolean} [gateHeld=false] — 本进程持闸时，每个 attempt env 追加
+ *     WAO_VERIFICATION_GATE_HELD=1（env 第一跳：验证子进程见即跳过再认领）。
  * @returns {Promise<{env: object, tempDir: string|null, isolated: boolean}>}
  */
-async function _prepareAttemptEnv() {
+async function _prepareAttemptEnv(gateHeld = false) {
+  // 防自锁标记只在本进程真正持闸时注入；无闸/fail-open 绝不谎报。
+  const held = gateHeld ? { [VERIFICATION_GATE_HELD_ENV]: "1" } : {};
   try {
     const dir = await mkdtemp(join(tmpdir(), "wao-verify-"));
-    return { env: { ...process.env, TMP: dir, TEMP: dir, TMPDIR: dir }, tempDir: dir, isolated: true };
+    return { env: { ...process.env, TMP: dir, TEMP: dir, TMPDIR: dir, ...held }, tempDir: dir, isolated: true };
   } catch {
     const fallback = tmpdir();
     return {
-      env: { ...process.env, TMP: fallback, TEMP: fallback, TMPDIR: fallback },
+      env: { ...process.env, TMP: fallback, TEMP: fallback, TMPDIR: fallback, ...held },
       tempDir: null,
       isolated: false,
     };
@@ -296,7 +304,10 @@ function _envFacts(isolationFullyHeld) {
  * 6. Return updated DeliveryRef with verification status + results.
  *
  * @param {object} deliveryRef — committed DeliveryRef v1 (verification.status: "pending")
- * @param {{ timeoutMs?: number, runCommand?: Function }} [opts]
+ * @param {{ timeoutMs?: number, runCommand?: Function,
+ *           gate?: {acquire: Function}|null }} [opts] — gate 是 R23-F/B 的同机
+ *     串行化闸缝（默认关）：传入时 acquire 先于首条命令、finally 恰好释放一次、
+ *     持闸期间 attempt env 注入 WAO_VERIFICATION_GATE_HELD=1；fail-open 不改语义。
  * @returns {Promise<{ delivery: object, outcome: string, failureCode?: string }>}
  */
 export async function verifyDelivery(deliveryRef, opts = {}) {
@@ -348,77 +359,131 @@ export async function verifyDelivery(deliveryRef, opts = {}) {
   // Pre-execution exact proof
   assertCommittedDeliveryRef(deliveryRef);
 
-  // Per-attempt temp isolation is tracked across all commands (setup + assertion).
-  const isolation = { fullyHeld: true };
+  /**
+   * The whole command sequence (setup + assertion), parameterized by whether
+   * this process holds the machine lease. Extracted verbatim so the gate seam
+   * below can wrap it in acquire/try-finally-release WITHOUT touching the
+   * phase logic — every return path inside is covered by exactly one release.
+   *
+   * @param {boolean} gateHeld
+   */
+  const runPhases = async (gateHeld) => {
+    // Per-attempt temp isolation is tracked across all commands (setup + assertion).
+    const isolation = { fullyHeld: true };
 
-  // ===== SETUP PHASE (contract #3): sequential, before assertions =====
-  // Setup failure is a closed, actionable, safe set (setup_failed /
-  // setup_timeout / setup_environment_error) — NEVER disguised as assertion
-  // command_failed. Each setup step is followed by an exact delivery-commit /
-  // tracked-artifact proof; tracked-artifact or lockfile drift is
-  // artifact_mutated and assertions do NOT run.
-  const setupResults = [];
-  for (let i = 0; i < setupCommands.length; i++) {
-    const r = await _runOneCommand(
-      runCommand, setupCommands[i], deliveryRef.worktreePath, timeoutMs, deliveryRef, isolation, SETUP_CODES,
-    );
-    setupResults.push(_recordResult(i, setupCommands[i], r.result));
+    // ===== SETUP PHASE (contract #3): sequential, before assertions =====
+    // Setup failure is a closed, actionable, safe set (setup_failed /
+    // setup_timeout / setup_environment_error) — NEVER disguised as assertion
+    // command_failed. Each setup step is followed by an exact delivery-commit /
+    // tracked-artifact proof; tracked-artifact or lockfile drift is
+    // artifact_mutated and assertions do NOT run.
+    const setupResults = [];
+    for (let i = 0; i < setupCommands.length; i++) {
+      const r = await _runOneCommand(
+        runCommand, setupCommands[i], deliveryRef.worktreePath, timeoutMs, deliveryRef, isolation, SETUP_CODES, gateHeld,
+      );
+      setupResults.push(_recordResult(i, setupCommands[i], r.result));
 
-    if (r.outcome === "mutated") {
-      return _failDelivery(deliveryRef, {
-        setupCommands, commands, setupResults, results: [],
-        failureCode: "artifact_mutated", failedPhase: "setup", failedCommandIndex: i,
-        verifiedCommit: deliveryRef.deliveryCommit, timeoutMs, isolation,
-      });
+      if (r.outcome === "mutated") {
+        return _failDelivery(deliveryRef, {
+          setupCommands, commands, setupResults, results: [],
+          failureCode: "artifact_mutated", failedPhase: "setup", failedCommandIndex: i,
+          verifiedCommit: deliveryRef.deliveryCommit, timeoutMs, isolation,
+        });
+      }
+      if (r.outcome === "failed") {
+        return _failDelivery(deliveryRef, {
+          setupCommands, commands, setupResults, results: [],
+          failureCode: r.failureCode, failedPhase: "setup", failedCommandIndex: i,
+          verifiedCommit: deliveryRef.deliveryCommit, timeoutMs, isolation,
+        });
+      }
     }
-    if (r.outcome === "failed") {
-      return _failDelivery(deliveryRef, {
-        setupCommands, commands, setupResults, results: [],
-        failureCode: r.failureCode, failedPhase: "setup", failedCommandIndex: i,
-        verifiedCommit: deliveryRef.deliveryCommit, timeoutMs, isolation,
-      });
-    }
-  }
 
-  // ===== ASSERTION PHASE (existing authority; zero drift on codes) =====
-  const results = [];
-  for (let i = 0; i < commands.length; i++) {
-    const r = await _runOneCommand(
-      runCommand, commands[i], deliveryRef.worktreePath, timeoutMs, deliveryRef, isolation, ASSERT_CODES,
-    );
-    results.push(_recordResult(i, commands[i], r.result));
+    // ===== ASSERTION PHASE (existing authority; zero drift on codes) =====
+    const results = [];
+    for (let i = 0; i < commands.length; i++) {
+      const r = await _runOneCommand(
+        runCommand, commands[i], deliveryRef.worktreePath, timeoutMs, deliveryRef, isolation, ASSERT_CODES, gateHeld,
+      );
+      results.push(_recordResult(i, commands[i], r.result));
 
-    if (r.outcome === "mutated") {
-      return _failDelivery(deliveryRef, {
-        setupCommands, commands, setupResults, results,
-        failureCode: "artifact_mutated", failedPhase: "assertion", failedCommandIndex: i,
-        verifiedCommit: deliveryRef.deliveryCommit, timeoutMs, isolation,
-      });
+      if (r.outcome === "mutated") {
+        return _failDelivery(deliveryRef, {
+          setupCommands, commands, setupResults, results,
+          failureCode: "artifact_mutated", failedPhase: "assertion", failedCommandIndex: i,
+          verifiedCommit: deliveryRef.deliveryCommit, timeoutMs, isolation,
+        });
+      }
+      if (r.outcome === "failed") {
+        return _failDelivery(deliveryRef, {
+          setupCommands, commands, setupResults, results,
+          failureCode: r.failureCode, failedPhase: "assertion", failedCommandIndex: i,
+          verifiedCommit: deliveryRef.deliveryCommit, timeoutMs, isolation,
+        });
+      }
     }
-    if (r.outcome === "failed") {
-      return _failDelivery(deliveryRef, {
-        setupCommands, commands, setupResults, results,
-        failureCode: r.failureCode, failedPhase: "assertion", failedCommandIndex: i,
-        verifiedCommit: deliveryRef.deliveryCommit, timeoutMs, isolation,
-      });
-    }
-  }
 
-  // All commands passed + final proof still holds (checked after last command)
-  return {
-    delivery: _buildUpdatedRef(deliveryRef, {
-      status: "passed",
-      commands,
-      // setup contract is an append-only extension: persist ONLY when declared,
-      // so deliveries without setup stay byte-identical (zero drift).
-      ...(setupCommands.length > 0 ? { setupCommands, setupResults } : {}),
-      verifiedCommit: deliveryRef.deliveryCommit,
-      timeoutMs,
-      results,
-      environment: _envFacts(isolation.fullyHeld),
-    }),
-    outcome: "passed",
+    // All commands passed + final proof still holds (checked after last command)
+    return {
+      delivery: _buildUpdatedRef(deliveryRef, {
+        status: "passed",
+        commands,
+        // setup contract is an append-only extension: persist ONLY when declared,
+        // so deliveries without setup stay byte-identical (zero drift).
+        ...(setupCommands.length > 0 ? { setupCommands, setupResults } : {}),
+        verifiedCommit: deliveryRef.deliveryCommit,
+        timeoutMs,
+        results,
+        environment: _envFacts(isolation.fullyHeld),
+      }),
+      outcome: "passed",
+    };
   };
+
+  // ===== R23-F/B Round B (TD-130): machine-level serialization gate seam =====
+  //
+  // 默认关：opts.gate 缺席 ⇒ 行为与历史版本逐字节一致（33 处注入式测试与单文件
+  // 跑零漂移）。开启时（三条生产路径经 createCallerGate 显式传入）：
+  //   · acquire 先于第一条命令——排队等待发生在任何 spawn 之前，而 per-command
+  //     计时器在 spawn 时才武装，因此排队绝不消耗 verificationTimeoutMs；
+  //   · 持闸期间每个 attempt env 注入 WAO_VERIFICATION_GATE_HELD=1（子进程见即
+  //     跳过再认领——防自锁）；
+  //   · fail-open：acquire ⇒ null（基础设施故障，闸已向 sink 打 WARNING）时无闸
+  //     继续跑、不注入 HELD、不调用 release；
+  //   · try/finally：passed / failed / 抛错都恰好释放一次；闸的争用与降级永不
+  //     改变任何失败码语义（红线）。
+  const gate = opts.gate && typeof opts.gate.acquire === "function" ? opts.gate : null;
+  if (!gate) return runPhases(false);
+
+  const handle = await gate.acquire();
+  if (!handle) return runPhases(false); // fail-open（WARNING 已由闸写入 sink）
+  try {
+    return await runPhases(true);
+  } finally {
+    await handle.release();
+  }
+}
+
+/**
+ * R23-F/B Round B (TD-130)：生产路径入闸判定的单一工厂。
+ *
+ * 只有同时满足两个条件才创建闸对象：
+ *   1. 调用方依赖默认验证器（usesDefaultVerifier）——注入了自定义
+ *      verifyDeliveryFn 的调用方（全部既有测试、内部复用）一律不入闸，
+ *      否则 npm test 的并发验证会真实争抢机器租约；
+ *   2. gateEngaged(env)：kill switch 未关 且 本进程未持闸（防自锁）。
+ *
+ * 返回的闸对象交给 verifyDelivery 的 opts.gate 缝；acquire/release 生命周期
+ * 由缝负责，调用方无需管理。
+ *
+ * @param {{usesDefaultVerifier: boolean, identity?: object, env?: NodeJS.ProcessEnv}} args
+ * @returns {object|null} createVerificationGate 实例，或 null（不入闸）
+ */
+export function createCallerGate({ usesDefaultVerifier, identity = {}, env = process.env }) {
+  if (!usesDefaultVerifier) return null;
+  if (!gateEngaged(env)) return null;
+  return createVerificationGate({ identity });
 }
 
 // ===== M12-6 (FR-05/FR-06): per-command runner + phase failure codes =====
@@ -441,10 +506,11 @@ const ASSERT_CODES = { launch: "execution_error", timeout: "command_timeout", no
  * @param {object} deliveryRef — for the post-command exact proof
  * @param {{fullyHeld: boolean}} isolation — shared flag flipped false on degradation
  * @param {{launch:string,timeout:string,nonzero:string}} codes — phase failure codes
+ * @param {boolean} [gateHeld=false] — 持闸标记，透传给 attempt env 注入（env 第一跳）
  * @returns {Promise<{outcome:"ok"|"mutated"|"failed", failureCode?:string, result:object}>}
  */
-async function _runOneCommand(runCommand, command, cwd, timeoutMs, deliveryRef, isolation, codes) {
-  const attempt = await _prepareAttemptEnv();
+async function _runOneCommand(runCommand, command, cwd, timeoutMs, deliveryRef, isolation, codes, gateHeld = false) {
+  const attempt = await _prepareAttemptEnv(gateHeld);
   if (!attempt.isolated) isolation.fullyHeld = false;
   let result;
   try {

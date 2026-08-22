@@ -19,7 +19,7 @@
 WAO 进程式 backend（claude-code/codex/kimi-code/deepseek-harness）的"进程死即会话死"隔离，依赖 **Node 自 v18+ 内置的 Windows Job Object**（父进程退出→OS 自动杀全部子进程树）。**Node v24 有 libuv Job Object 回归**（会误杀长进程），所以 WAO 在 cli / daemon / background-runner 入口**硬拒绝 v24**并指引切 v22。详见 TD-40 + `.wao/decisions/0013`。
 
 - v24 上启动会看到：`WAO 拒绝启动：Node v24.x 被拒绝：v24 has a libuv Windows Job Object regression ... 请用 v22`，exit 1。
-- `npm test` 同样走 v22 shim：入口为 `node scripts/wao-node.cjs scripts/canonical-test.mjs`，canonical runner 读 `test/manifest.json` 把每个 `.test.js` 恰好归入一个资源类别（pure/git/worktree/process/lock/timeout，用于归属与漂移检测），执行组织成串行波（wave）：同一波池化多个类别共享有界并发、长极重叠（filesystem 波池化 git+worktree，lock 波严格串行），并对首轮失败隔离复核一次（只追加 stable_fail/isolation_pass/environment_invalid 分类，绝不把复核通过洗成 PASS）。测试本身 mock 子进程、不依赖真实进程隔离；子进程注入 `WAO_SKIP_VERSION_GUARD=1` 绕过版本守卫。自 R23-F/A 起 `test-results.json` 的每个文件条目还携带 `durationMs`——该文件内各 test 耗时之和（不含模块 import/钩子间隙）的 advisory 计时元数据（透传结构化 reporter 累计的 suite 时长；报告缺失/损坏或文件 missing/crash 时为 `null`），只作观测、不参与 verdict。
+- `npm test` 同样走 v22 shim：入口为 `node scripts/wao-node.cjs scripts/canonical-test.mjs`，canonical runner 读 `test/manifest.json` 把每个 `.test.js` 恰好归入一个资源类别（pure/git/worktree/process/lock/timeout，用于归属与漂移检测），执行组织成串行波（wave）：同一波池化多个类别共享有界并发、长极重叠（filesystem 波池化 git+worktree，lock 波严格串行），并对首轮失败隔离复核一次（只追加 stable_fail/isolation_pass/environment_invalid 分类，绝不把复核通过洗成 PASS）。测试本身 mock 子进程、不依赖真实进程隔离；子进程注入 `WAO_SKIP_VERSION_GUARD=1` 绕过版本守卫。自 R23-F/A 起 `test-results.json` 的每个文件条目还携带 `durationMs`——该文件内各 test 耗时之和（不含模块 import/钩子间隙）的 advisory 计时元数据（透传结构化 reporter 累计的 suite 时长；报告缺失/损坏或文件 missing/crash 时为 `null`），只作观测、不参与 verdict；隔离复核条目同样携带 `isolationDurationMs`（缺失归一 `null`）。自 R23-F/B 起一次 canonical 全量整体受同机验证串行化闸保护（闸语义见场景 4b；排队不计入测试预算，`WAO_VERIFICATION_GATE=off` 停用）。
 
 #### 如何装 / 切到 v22
 
@@ -433,6 +433,22 @@ CLI 的 run 用法可用 `npm run cli -- run --help` 查看。
 Delivery 模式在 worktree 隔离中运行 worker，完成后打包一个 atomic delivery commit，
 然后运行验证命令。`--format json` 返回完整 DeliveryRef 和 `verificationFailed` /
 `verificationUnavailable` 标志。schema 语义见 `docs/02-architecture.md` §4.6-4.8。
+
+**同机验证串行化闸（R23-F/B，TD-130）**：同一台机器上并发发起的"全量交付验证"会互相
+踩踏——多个验证命令序列同时在跑，彼此拖慢到 `command_timeout`，取证信号被稀释。自本轮
+起，任何经三条生产路径（run 交付验证、`run_delivery_reverify`、`run_delivery_repackage`）
+发起的交付验证，与直连 `npm test` 的 canonical 全量，共用一把机器级租约闸串行化：
+**粒度 = 整个 verifyDelivery 命令序列 / 一次 canonical main()**。后到者排队等待（每 ~30s
+向 `%LOCALAPPDATA%\wao\gate.log` 打一条含持有者身份的等待日志），排队绝不消耗
+`verificationTimeoutMs` 或测试预算；持有方心跳续期（~30s），心跳陈旧 ~90s 或单次持锁超
+45min 即允许接管；基础设施故障一律 fail-open——闸的争用/等待/降级永不改变任何验证结果
+语义、不新增失败码。`npm run cli -- runs gate` 只读查询当前持有者/free/corrupt 与 kill
+switch 状态；`--release` 是文档在案的人工破锁通道（仅限确认没有验证在跑而租约残留时）。
+`WAO_VERIFICATION_GATE=off` 整体停用（降级为 R22 inflight marker 告警层）。
+
+**行为变更（2026-08-22，R23-F/B）**：并发发起多个交付验证时，后到者会排队而不是并发
+踩踏——表现为墙钟总时长可能变长，但每个验证都在自己的完整预算内跑完；排队等待不计入
+任何预算；不产生新的交付失败码；需要临时回到旧的并发行为时设 `WAO_VERIFICATION_GATE=off`。
 
 WAO 会把 process cwd / `WAO_TARGET_CWD` 作为 delivery worker 的唯一授权 workspace。
 Claude Code 的 Write/Edit/MultiEdit 会先记录 `write_intent`；只有同一 `toolCallId` 的成功结果
