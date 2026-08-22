@@ -64,6 +64,7 @@ import { summarizeStages } from "../waoStage.js";
 import {
   VERIFICATION_GATE_OFF_ENV,
   createVerificationGate,
+  gateDisabled,
   gateEngaged,
 } from "../verificationGate.js";
 import { verificationLeasePath } from "../machineGatePaths.js";
@@ -360,7 +361,7 @@ async function runsGateCommand(args, config, deps = {}) {
     console.log(result.hadLock
       ? "Verification lease released (manual break-lock)."
       : "No verification lease present; nothing to release.");
-    const gateOff = (process.env[VERIFICATION_GATE_OFF_ENV] ?? "").trim().toLowerCase() === "off";
+    const gateOff = gateDisabled(process.env);
     console.log(engaged ? "gate: engaged" : gateOff ? `kill switch: active (${VERIFICATION_GATE_OFF_ENV}=off)` : "gate: disengaged (verification subprocess inherits HELD — this lane does not contend)");
     return;
   }
@@ -384,8 +385,8 @@ async function runsGateCommand(args, config, deps = {}) {
     console.log(`Holder: ${who || "(unidentified)"}`);
     console.log(`Holder pid: ${h.pid ?? "unknown"} | startedAt: ${h.startedAt ?? "unknown"} | heartbeat age: ${h.ageMs ?? "?"} ms`);
   }
-  const gateOff = (process.env[VERIFICATION_GATE_OFF_ENV] ?? "").trim().toLowerCase() === "off";
-    console.log(engaged ? "gate: engaged" : gateOff ? `kill switch: active (${VERIFICATION_GATE_OFF_ENV}=off)` : "gate: disengaged (verification subprocess inherits HELD — this lane does not contend)");
+  const gateOff = gateDisabled(process.env);
+  console.log(engaged ? "gate: engaged" : gateOff ? `kill switch: active (${VERIFICATION_GATE_OFF_ENV}=off)` : "gate: disengaged (verification subprocess inherits HELD — this lane does not contend)");
 }
 
 async function loadRunFiles(runDir) {

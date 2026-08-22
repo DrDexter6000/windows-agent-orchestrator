@@ -4581,6 +4581,31 @@ test("B3-④ runs gate 暴露 kill switch 状态：WAO_VERIFICATION_GATE=off ⇒
   }
 });
 
+test("B3-④b runs gate 暴露 HELD 继承状态：WAO_VERIFICATION_GATE_HELD=1 ⇒ engaged=false，text 报 disengaged 且不误报 kill switch", async () => {
+  // [复审-2 N5] 入闸判定经 gateEngaged/gateDisabled 单一谓词（runs.js 不再手写
+  // 第二份 off 判定）。HELD 继承是 disengaged 三分支中此前无钉的一条：kill switch
+  // 未关时绝不许误报 "kill switch: active"。
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  const { VERIFICATION_GATE_HELD_ENV, VERIFICATION_GATE_OFF_ENV } = await import("../../src/verificationGate.js");
+  const savedHeld = process.env[VERIFICATION_GATE_HELD_ENV];
+  const savedOff = process.env[VERIFICATION_GATE_OFF_ENV];
+  try {
+    process.env[VERIFICATION_GATE_HELD_ENV] = "1";
+    delete process.env[VERIFICATION_GATE_OFF_ENV];
+    const parsed = JSON.parse(await captureLog(() =>
+      runsCommand(["gate", "--format", "json"], {}, { createGate: () => fakeGateForCli() })));
+    assert.equal(parsed.engaged, false, "HELD 继承环境必须对用户可见为不入闸");
+    const text = await captureLog(() => runsCommand(["gate"], {}, { createGate: () => fakeGateForCli() }));
+    assert.match(text, /disengaged/, "text 必须报告 disengaged（HELD 继承语义）");
+    assert.doesNotMatch(text, /kill switch: active/, "kill switch 未关时不得误报 kill switch: active");
+  } finally {
+    if (savedHeld === undefined) delete process.env[VERIFICATION_GATE_HELD_ENV];
+    else process.env[VERIFICATION_GATE_HELD_ENV] = savedHeld;
+    if (savedOff === undefined) delete process.env[VERIFICATION_GATE_OFF_ENV];
+    else process.env[VERIFICATION_GATE_OFF_ENV] = savedOff;
+  }
+});
+
 test("B3-⑤ runs gate --release：有锁破除 + 无锁如实告知，两者都 exit 0 语义", async () => {
   const { runsCommand } = await import("../../src/commands/runs.js");
   const broke = fakeGateForCli({ breakLockResult: { hadLock: true, released: true } });

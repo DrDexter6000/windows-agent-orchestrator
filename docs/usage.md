@@ -441,7 +441,7 @@ Delivery 模式在 worktree 隔离中运行 worker，完成后打包一个 atomi
 **粒度 = 整个 verifyDelivery 命令序列 / 一次 canonical main()**。后到者排队等待（每 ~30s
 向 `%LOCALAPPDATA%\wao\gate.log` 打一条含持有者身份的等待日志），排队绝不消耗
 `verificationTimeoutMs` 或测试预算；持有方心跳续期（~30s），心跳陈旧 ~90s 或单次持锁超
-45min 即允许接管；基础设施故障一律 fail-open——闸的争用/等待/降级永不改变任何验证结果
+130min 即允许接管；基础设施故障一律 fail-open——闸的争用/等待/降级永不改变任何验证结果
 语义、不新增失败码。`npm run cli -- runs gate` 只读查询当前持有者/free/corrupt 与 kill
 switch 状态；`--release` 是文档在案的人工破锁通道（仅限确认没有验证在跑而租约残留时）。
 `WAO_VERIFICATION_GATE=off` 整体停用（降级为 R22 inflight marker 告警层）。

@@ -10,7 +10,7 @@
 // 设计红线（不可让步）：
 //   · 存活判定只用 heartbeatAt 年龄（陈旧 ~90s 回收），绝不做 PID 探活——
 //     PID 在 Windows 上可被复用，探活结论不可信；
-//   · "活着但挂死"是本轮主症状：startedAt 超过硬上限 45min 时，即使心跳仍
+//   · "活着但挂死"是本轮主症状：startedAt 超过硬上限 130min 时，即使心跳仍
 //     新鲜也判定弃置、允许接管；
 //   · 释放只认 token 匹配（gitLocalExclude 先例）：绝不删除新主人的锁；
 //   · 回收一律走"内容未变才删"的 CAS（reclaimIfSame）——并发认领竞态中胜出
@@ -365,7 +365,7 @@ export function createVerificationGate({
       // tok- 前缀让日志/gate.log 里的所有权线索一眼可辨。
       const myToken = `tok-${randomBytes(16).toString("hex")}`;
       let corruptSeenAt = null;
-        let consecutiveReclaimFailures = 0; // [审计 F3] 回收失败连续计数（fail-open 上界）
+      let consecutiveReclaimFailures = 0; // [审计 F3] 回收失败连续计数（fail-open 上界）
       let consecutiveReadFailures = 0;
       let lastWaitLogAt = null;
       for (;;) {
@@ -439,6 +439,10 @@ export function createVerificationGate({
               return null;
             }
           } else {
+            // 新鲜持有者（未陈旧、未超上限）＝离开回收失败态：计数复位。
+            // [审计 N1 续] 否则 stale/max-hold 期累计的计数会跨相位冻结——持有者
+            // 心跳恢复后，下次任何分支的首次回收失败即过早 fail-open。
+            consecutiveReclaimFailures = 0;
             // 排队可见性：首见立即打，此后每 WAIT_LOG_INTERVAL_MS 一条。
             const t = now();
             if (lastWaitLogAt === null || t - lastWaitLogAt >= WAIT_LOG_INTERVAL_MS) {

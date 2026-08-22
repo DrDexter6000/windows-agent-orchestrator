@@ -187,7 +187,7 @@ test("F2⑤b: 基座随 LOCALAPPDATA 覆写同步移动（两路径永远同进�
 //   · 释放只认 token 匹配（gitLocalExclude 先例）：token 不匹配 = no-op
 //   · 损坏文件有宽限窗（~15s），过后按损坏回收
 //   · 等待者每 ~30s 向 sink 打一条含持有者身份的等待日志
-//   · startedAt 超过硬上限 45min ⇒ 即使心跳仍新鲜也判定弃置、允许接管
+//   · startedAt 超过硬上限 130min ⇒ 即使心跳仍新鲜也判定弃置、允许接管
 //     （"活着但挂死"是本轮的主症状）
 //   · 并发原子认领：open(wx) O_EXCL + EEXIST→重读确认循环；回收一律走
 //     "内容未变才删" 的 CAS（绝不误删竞态中胜出的新主人租约）
@@ -288,9 +288,11 @@ async function tickUntilSettled(ctl, promise, maxTicks = 300) {
   return isSettled(promise);
 }
 
-test("R23-F/B 审计 N1/N2: 回收失败连续 ≥5 ⇒ fail-open（三分支全覆盖，复位只在成功侧）", async () => {
-  // 审计探针复刻：stale 租约 + reclaimIfSame 恒 false ⇒ 第 5 拍 acquire 返回 null
-  // 且 sink 含 fail-open WARNING（修复前：计数在尝试前被复位，fail-open 永不可达）。
+test("R23-F/B 审计 N1/N2: 回收失败连续 ≥5 ⇒ fail-open（max-hold 分支；三分支全覆盖，复位只在成功侧）", async () => {
+  // 审计探针复刻：max-hold 现场（heartbeat 新鲜但 startedAt 超 130min 上限）
+  // + reclaimIfSame 恒 false ⇒ 第 5 拍 acquire 返回 null 且 sink 含 fail-open
+  // WARNING（修复前：计数在尝试前被复位，fail-open 永不可达）。
+  // [复审-2 N1] fixture 是 max-hold 分支；真正的 stale 分支由下一条测试钉死。
   const dir = mkdtempSync(join(tmpdir(), "wao-n1-reclaim-"));
   try {
     const clock = makeClock();
@@ -347,8 +349,45 @@ test("R23-F/B 审计 N2: corrupt 分支回收失败同样有 fail-open 上界（
   }
 });
 
+test("R23-F/B 审计 N1-stale: stale 分支回收失败同样有 fail-open 上界（三分支之三）", async () => {
+  // [复审-2 N1] 变异实测钉死真分支：fixture 是 heartbeat 陈旧（恒 100s ≥ STALE_MS
+  // ⇒ 每拍走 stale 回收分支）而 startedAt 新鲜（5min < 130min，永不触发 max-hold）
+  // + reclaimIfSame 恒 false。把 stale 分支的复位挪回尝试前的历史 bug 形状下，
+  // 本测试必须红（上一条 max-hold fixture 测试在该变异下照绿——正是复审指出的盲区）。
+  const dir = mkdtempSync(join(tmpdir(), "wao-n1-stale-"));
+  try {
+    const clock = makeClock();
+    const lines = [];
+    const fsOps = {
+      ensureParentDir() {},
+      readRaw: () => JSON.stringify({ schemaVersion: 1, token: "tok-holder", runId: "run_h", startedAt: clock.time - 5 * 60_000, heartbeatAt: clock.time - 100_000 }),
+      claim: () => { throw Object.assign(new Error("EEXIST"), { code: "EEXIST" }); },
+      reclaimIfSame: () => false, // 句柄占用/ACL 拒删——恒失败
+    };
+    const a = makeGate(dir, "waiter", { clock, lines, fsOps });
+    const acquirePromise = a.gate.acquire();
+    let settled = false;
+    for (let poll = 1; poll <= 12 && !settled; poll += 1) {
+      await a.ctl.tick(1); // +1s 轮询（假钟）：readRaw 相对假钟取值 ⇒ heartbeatAge 恒 100s ≥ 90s
+      await new Promise((r) => setImmediate(r)); // 让渡事件环：acquire 的 await 链得以推进
+      settled = await isSettled(acquirePromise);
+    }
+    assert.ok(settled, "stale 分支连续回收失败 ≥5 ⇒ fail-open（acquire 返回 null）");
+    const h = await acquirePromise;
+    assert.equal(h, null, "fail-open = 无闸继续");
+    const warn = lines.find((l) => /fail-open.*reclaim failed/i.test(l));
+    assert.ok(warn, "sink 必须有 fail-open WARNING");
+    assert.ok(!warn.includes("(max-hold)") && !warn.includes("(corrupt)"),
+      `stale 分支的 WARNING 不带其他分支后缀（证明走的确实是 stale 分支）: ${warn}`);
+    assert.ok(lines.some((l) => l.includes("stale") && l.includes("reclaiming")),
+      `回收决策日志必须来自 stale 分支: ${JSON.stringify(lines)}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("B1-13: 设计常量与 env 名钉死；gateDisabled 只认 off（trim/大小写不敏感）", async () => {
-  // 规格 fixed 值：心跳 ~30s、陈旧 ~90s、硬上限 45min。
+  // 规格 fixed 值：心跳 ~30s、陈旧 ~90s、硬上限 130min。
   assert.equal(HEARTBEAT_INTERVAL_MS, 30_000);
   assert.equal(STALE_MS, 90_000);
   assert.equal(MAX_HOLD_MS, 130 * 60_000, "[审计 F4] 上限 ≥ 合法预算天花板 VERIFICATION_TIMEOUT_MS_MAX(120min)+余量——45min 会健康抢锁合法长验证");
@@ -634,7 +673,7 @@ test("B1-09: 心跳仍新鲜但 startedAt 超绝对持有上限(130min) ⇒ 判�
       await b.ctl.tick(3); // +3s 轮询
       settled = await isSettled(pB);
     }
-    assert.ok(settled, "超 45min 后即使心跳新鲜也必须放行接管");
+    assert.ok(settled, "超 130min 后即使心跳新鲜也必须放行接管");
     const hB = await pB;
     const record = JSON.parse(readLeaseRaw(join(dir, VERIFICATION_LEASE_FILENAME)));
     assert.equal(record.token, hB.token);
