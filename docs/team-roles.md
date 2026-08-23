@@ -52,7 +52,7 @@ WAO 是"装一次，开发多个项目"的工具：
 | **model** | deepseek-v4-flash（1M context，适合深度调研；2026-08-15 Owner 裁定与实际配置对齐——此前本行与认证矩阵误记 v4-pro） |
 | **effort** | max（深度分析） |
 | **配置要点** | model/reasoning/context 从结构化 provider policy 单一编译，不手拼 CLI flags |
-| **会话复用** | `sessionReuse=lead_workspace`（M11-11C）：同一 MCP Lead server 实例在同一 workspace 内多次询问 Researcher 时，复用 provider 原生会话保留上下文/cache，每次仍是独立 run/transcript。Host/MCP 重启后开新会话；仅非 delivery；详见 `02-architecture.md §4.10` |
+| **会话复用** | `sessionReuse=lead_workspace`（M11-11C）：同一 MCP Lead server 实例在同一 workspace 内多次询问 Researcher 时，复用 provider 原生会话保留上下文/cache，每次仍是独立 run/transcript。Host/MCP 重启后开新会话；仅非 delivery；详见 `02-architecture.md §4.10`。**CLI 直派注意（2026-08-23 life-index 会话实证）**：前台 `run` 派发 sessionReuse 型 agent 须显式 `--cwd` 指向 git 根，否则复用路由不命中、需补发 |
 
 ### Coder-HQ（码农-长程高质量）
 
@@ -111,7 +111,7 @@ WAO 是"装一次，开发多个项目"的工具：
 | **backend** | claude-code（官方 Claude，最强判断力） |
 | **model** | claude-opus-5 |
 | **effort** | xhigh（最关键的角色，给最强配置） |
-| **会话复用** | `sessionReuse=lead_workspace`（M11-11C）：同一 MCP Lead server 实例在同一 workspace 内多次询问 Auditor 时，复用 provider 原生会话保留上下文/cache，每次仍是独立 run/transcript。Host/MCP 重启后开新会话；仅非 delivery；详见 `02-architecture.md §4.10` |
+| **会话复用** | `sessionReuse=lead_workspace`（M11-11C）：同一 MCP Lead server 实例在同一 workspace 内多次询问 Auditor 时，复用 provider 原生会话保留上下文/cache，每次仍是独立 run/transcript。Host/MCP 重启后开新会话；仅非 delivery；详见 `02-architecture.md §4.10`。**CLI 直派注意（2026-08-23 life-index 会话实证）**：前台 `run` 派发 sessionReuse 型 agent 须显式 `--cwd` 指向 git 根，否则复用路由不命中、需补发 |
 
 ## Lead 派工策略
 
