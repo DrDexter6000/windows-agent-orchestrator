@@ -74,7 +74,7 @@ import { isValidRunId } from "../delivery.js";
 // 定义处。
 import { boundReportScope } from "../metrics.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
-import { summarizeLiveness } from "./runWait.js";
+import { summarizeLiveness, buildWaitWindowHint } from "./runWait.js";
 import { reconstructItemsFromEvents } from "./runCollect.js";
 import { projectCollectResult } from "./runCollectProjection.js";
 // M12-9 Package C: reuse the diagnosis + delivery SSOTs for the terminal
@@ -789,6 +789,9 @@ export async function runAwaitResult(input) {
     outcome: null,
     // M12-14: window expiry is non-terminal → no terminal settlement reason.
     isolationFailureReason: null,
+    // TD-137②：窗口到期（非终态）附带上限交叉提示；终态/读失败不带。MCP 适配层
+    // 以显式键集合构造 wire payload，该字段不进入合同形状。
+    waitWindowHint: buildWaitWindowHint(RUN_AWAIT_RESULT_MAX_MS),
     observation,
     termination,
   };

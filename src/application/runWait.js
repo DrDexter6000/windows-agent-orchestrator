@@ -37,6 +37,16 @@ export const RUN_WAIT_MIN_MS = 180000;
 export const RUN_WAIT_DEFAULT_MS = 270000;
 export const RUN_WAIT_MAX_MS = 600000;
 
+// TD-137②：三个观察窗上限的交叉提示（上限数值零变更）。同族三个等待命令的
+// 窗口各不相同（runs wait / delivery waitMs / await-result），窗口到期返回的
+// 非终态结果容易让调用方误读为"卡死"。到期返回统一附带一行 advisory 文案：
+// 本命令上限 + 同族两个命令的上限，指对正确的工具/窗口。MCP 适配层以显式键
+// 集合构造 wire payload 并经严格 schema 解析，该字段不会进入 MCP 合同形状。
+const WAIT_FAMILY_CAPS = "runs wait 600000 / delivery waitMs ≤300000 / await-result ≤270000";
+export function buildWaitWindowHint(ownCapMs) {
+  return `观察窗到期非终态；本命令上限 ${ownCapMs}ms；同族：${WAIT_FAMILY_CAPS}`;
+}
+
 // M12-11: re-export so src/mcp/server.js imports the closed set from ONE place.
 export { READ_FAILURE_REASONS };
 
@@ -467,6 +477,8 @@ export async function runWait(input) {
     activityEventCount: liv.activityEventCount,
     lastActivityKind: liv.lastActivityKind,
     ownerHeartbeat: liv.ownerHeartbeat,
+    // TD-137②：窗口到期（非终态）附带上限交叉提示；终态/提前返回不带。
+    waitWindowHint: buildWaitWindowHint(RUN_WAIT_MAX_MS),
     observation,
     termination,
   };

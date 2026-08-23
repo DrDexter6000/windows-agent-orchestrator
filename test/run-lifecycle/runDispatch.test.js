@@ -468,23 +468,24 @@ test("M9-7A-02: invalid delivery rejected before transcript/fork", async () => {
   const { fakeSpawn, calls } = makeFakeSpawn();
   try {
     const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    // M9-7A-02 夹具用仍非法的 "src//"（TD-137④ 后 "src/" 已合法化，不能再用作非法样本）。
     // Missing mode
     await assert.rejects(() => dispatchRun({
       agentId: "coder_low", prompt: "x", registryPath, runDir: join(dir, "runs"),
       spawnFn: fakeSpawn,
-      delivery: { allowedPaths: ["src/"], verificationCommands: ["npm test"] },
+      delivery: { allowedPaths: ["src//"], verificationCommands: ["npm test"] },
     }));
     // Both commands and reason
     await assert.rejects(() => dispatchRun({
       agentId: "coder_low", prompt: "x", registryPath, runDir: join(dir, "runs"),
       spawnFn: fakeSpawn,
-      delivery: { mode: "git_commit_v1", allowedPaths: ["src/"], verificationCommands: ["npm test"], verificationUnavailableReason: "no" },
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src//"], verificationCommands: ["npm test"], verificationUnavailableReason: "no" },
     }));
     // Neither commands nor reason
     await assert.rejects(() => dispatchRun({
       agentId: "coder_low", prompt: "x", registryPath, runDir: join(dir, "runs"),
       spawnFn: fakeSpawn,
-      delivery: { mode: "git_commit_v1", allowedPaths: ["src/"] },
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src//"] },
     }));
     assert.equal(calls.length, 0, "no spawn for invalid delivery");
   } finally { cleanupDir(dir); }

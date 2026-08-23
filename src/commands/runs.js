@@ -286,6 +286,11 @@ async function runsWaitCommand(args, config, deps = {}) {
   console.log(`Waited: ${result.observation?.waitedMs ?? 0} ms (window ${result.observation?.windowMs ?? waitMs} ms)`);
   console.log(`Liveness: ${result.liveness}`);
   console.log(`Observation: ${result.observationOutcome}${result.observation ? ` (${result.observation.outcome})` : ""}`);
+  // TD-137②：窗口到期（非终态）时服务附带同族上限交叉提示——追加一行，不
+  // 改动既有五行结构（runsWait.test.js 的行序锚点保持稳定）。
+  if (result.waitWindowHint) {
+    console.log(`Hint: ${result.waitWindowHint}`);
+  }
 }
 
 // R23-F/B Round B (TD-130): strict flag set for `runs gate`（runs wait 同纪律：
@@ -505,14 +510,11 @@ async function runsListCommand(args, config) {
     validateAgentIds: false, // CLI preserves raw agentId
   });
 
-  // When --latest is NOT set, restore original file-name ascending order.
-  // (The service sorts by updatedAt desc by default; CLI original kept
-  // file-name order without --latest.)
-  if (!latestN) {
-    result.runs.sort((a, b) => a.runId.localeCompare(b.runId));
-  }
+  // TD-137①：裸 `runs list` 不再恢复文件名升序——直接沿用 listRuns 的默认
+  // updatedAt desc（最新优先，null 最后、runId 升序决胜）。--latest N 的截取
+  // 语义不变；MCP runs_list 走同一服务投影，不受 CLI 本层影响。
 
-  // TD-86（D2 A1）：--format json 直接序列化 listRuns 结果（含上面的 CLI 既有排序），
+  // TD-86（D2 A1）：--format json 直接序列化 listRuns 结果（服务默认排序），
   // 零新计算；空结果也输出 {runs:[], matchedCount:0} 而非 "No runs found." 文本。
   if (options.format === "json") {
     console.log(JSON.stringify(result, null, 2));
@@ -1496,6 +1498,11 @@ function _printReadinessText(result) {
   console.log(
     `Readiness: ${result.readiness}${result.waitReturnedEarly ? " (settled)" : " (wait expired)"}`,
   );
+  // TD-137②：等待窗到期（waitReturnedEarly:false）时服务附带的同族上限交叉
+  // 提示——settled 路径服务不带该字段，此处自然不打印。
+  if (result.waitWindowHint) {
+    console.log(`Hint: ${result.waitWindowHint}`);
+  }
   if (result.deliveryAvailable) {
     console.log(`Delivery: ${result.deliveryRef?.deliveryCommit ?? "(none)"}`);
     console.log(`Verification: ${result.verification?.status ?? "(none)"}`);

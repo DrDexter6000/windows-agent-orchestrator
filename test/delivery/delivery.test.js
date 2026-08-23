@@ -1248,18 +1248,17 @@ test("2C-08: allowedPaths with empty segment must be rejected", async () => {
   }
 });
 
-test("2C-09: allowedPaths with trailing slash must be rejected", async () => {
+test("2C-09: allowedPaths with trailing slash is accepted and normalized (TD-137④)", async () => {
   const { repo, baseCommit } = await makeRepo();
   const wtPath = makeWorktree(repo);
   try {
     await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    assertDeliveryError(
-      () =>
-        inspectDelivery(
-          baseInput(wtPath, baseCommit, { allowedPaths: ["src/"] }),
-        ),
-      "invalid_allowed_paths",
+    // TD-137④：尾斜杠条目归一化放行（段边界前缀语义），不再拒绝；归一化形状
+    // 与仍非法形状（"src//"、"/"、"./" 等）的钉死在 test/isolation-infra/cli.test.js。
+    const ref = inspectDelivery(
+      baseInput(wtPath, baseCommit, { allowedPaths: ["src/"] }),
     );
+    assert.deepEqual(ref.changedFiles, ["src/a.js"], "目录契约下 src/a.js 如实在册");
   } finally {
     await cleanupRepo(repo);
   }

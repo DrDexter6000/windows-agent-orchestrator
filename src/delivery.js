@@ -155,6 +155,14 @@ function isValidAllowedPath(p) {
 
 /**
  * Normalize and validate allowedPaths array.
+ *
+ * TD-137④（round4 F-1）：接受目录条目——每个条目允许至多一个结尾的 "/"，验证前
+ * 归一化掉（"src/" 与 "src" 同义：段边界前缀，isPathAllowed 匹配 "src" 自身与
+ * "src/a.js"，不匹配 "src2/…"；精确文件条目语义不变）。放宽只在本写路径入口：
+ * isValidAllowedPath / isValidRepoRelativePath 及读侧投影校验器保持严格，持久化
+ * 契约始终是归一化后的无斜杠形状。其余非法形状（"src//"、根 "/"、"."、".."、
+ * 反斜杠、绝对/盘符路径）照旧拒绝，错误消息回显调用方原始输入。
+ *
  * @param {string[]} allowedPaths
  * @returns {string[]} normalized forward-slash paths
  */
@@ -165,16 +173,20 @@ function validateAllowedPaths(allowedPaths) {
       "allowedPaths must be a non-empty array",
     );
   }
-  for (const p of allowedPaths) {
-    if (!isValidAllowedPath(p)) {
+  // Strip ONE optional trailing slash before validation ("/" itself stays invalid).
+  const candidates = allowedPaths.map((p) =>
+    typeof p === "string" && p.length > 1 && p.endsWith("/") ? p.slice(0, -1) : p,
+  );
+  for (let i = 0; i < candidates.length; i += 1) {
+    if (!isValidAllowedPath(candidates[i])) {
       throw new DeliveryError(
         "invalid_allowed_paths",
-        `invalid allowedPath: ${JSON.stringify(p)}`,
+        `invalid allowedPath: ${JSON.stringify(allowedPaths[i])}`,
       );
     }
   }
   // Deduplicate + normalize to forward slash
-  const normalized = [...new Set(allowedPaths.map(toFwd))];
+  const normalized = [...new Set(candidates.map(toFwd))];
   return normalized.sort();
 }
 

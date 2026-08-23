@@ -592,7 +592,7 @@ test("TD-114-B1-json: 窗口到期结果打印且 process.exitCode 不变（进�
   }
 });
 
-test("TD-114-B1-text: 窗口到期打印五行结构且 process.exitCode 不变（进程内）", async () => {
+test("TD-114-B1-text: 窗口到期打印五行摘要结构 + Hint 行，process.exitCode 不变（进程内）", async () => {
   const dir = makeRunDir();
   const prev = process.exitCode;
   try {
@@ -609,12 +609,14 @@ test("TD-114-B1-text: 窗口到期打印五行结构且 process.exitCode 不变�
       },
     ));
     const lines = out.split("\n").filter((l) => l.length > 0);
-    assert.equal(lines.length, 5, `text 输出恰好五行，实际 ${lines.length} 行: ${JSON.stringify(lines)}`);
+    // TD-137②：五行摘要后追加一行同族上限交叉提示（Hint）——摘要结构不变。
+    assert.equal(lines.length, 6, `text 输出恰好六行（五行摘要 + Hint），实际 ${lines.length} 行: ${JSON.stringify(lines)}`);
     assert.match(lines[0], /^Run: run_active \(running\)$/, "第 1 行：Run: <runId> (<state>)");
     assert.equal(lines[1], "Terminal: no", "第 2 行：Terminal: no（窗口到期）");
     assert.match(lines[2], /^Waited: \d+ ms \(window \d+ ms\)$/, "第 3 行：Waited: <ms> ms (window <ms> ms)");
     assert.match(lines[3], /^Liveness: \S+$/, "第 4 行：Liveness: <非空标签>");
     assert.match(lines[4], /^Observation: \S+( \(\S+\))?$/, "第 5 行：Observation: <outcome>[ (<observation.outcome>)]");
+    assert.match(lines[5], /^Hint: 观察窗到期非终态；本命令上限 600000ms；同族：/, "第 6 行：Hint 同族上限交叉提示");
     assert.equal(process.exitCode, prev, "窗口到期（正常结果）不得设置非零退出码");
   } finally {
     process.exitCode = prev;

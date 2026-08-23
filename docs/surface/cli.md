@@ -73,4 +73,7 @@ Project state (.wao/):
   wao handoff read <role> [--format json]  # latest incoming handoff addressed to role
   wao doctor [--cwd DIR] [--format json] [--warn-as-error]
   wao onboarding [--agent <id>] [--apply] [--endorse-worker <id>] [--json]  # third-party: generate one minimal private registry from the tracked template (+ host-neutral MCP snippet)
+
+Notes:
+  - runId 内嵌时间戳为 UTC；本地时间需自行换算。
 ```

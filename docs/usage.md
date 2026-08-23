@@ -367,6 +367,8 @@ npm run cli -- runs wait <runId> --wait-ms 600000    # 窗口 180000..600000 ms
 npm run cli -- runs wait <runId> --format json       # 完整服务结果 + semanticNotes
 ```
 
+> 注（TD-137③）：runId 内嵌时间戳为 UTC；本地时间需自行换算。
+
 `runs wait` 与 MCP `run_wait` 工具共用同一等待服务（只读长轮询，不写 transcript）：
 默认 `--format text`（runs 家族惯例），`--format json` 输出完整服务结果并附
 `semanticNotes`（与 MCP 同一 selector）。观察窗口到期（`terminal:false`）是正常

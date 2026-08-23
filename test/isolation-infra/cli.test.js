@@ -4700,3 +4700,329 @@ test("F3 真子进程实证：默认 killProbe 对刚退出 pid 判 ESRCH ⇒ �
   assert.equal(sawNoticed.outcome, "observed");
   assert.match(sawNoticed.line, /stale inflight marker/);
 });
+
+// ===== TD-137 四件套批次（CLI friction 正式批次）=====
+//
+// ① 裸 `runs list` 默认最新优先（updatedAt desc；服务默认序直达用户，不再恢复
+//    文件名升序）。② 三个等待上限的交叉提示（数值零变更）：到期返回附一行
+//    advisory 文案，MCP 适配层显式键集合不透传，合同形状零变更。
+// ③ runId 内嵌时间戳为 UTC 的双通道文档补充。④ allowedPaths 接受目录条目
+//    （写路径入口归一化至多一个结尾斜杠；matcher 与 workdir_escape 零改动）。
+
+/**
+ * TD-137① 前置排水：本文件顶部 import 了 src/cli.js，其底部无条件
+ * `main(process.argv.slice(2))` 在测试进程里也会启动——runner 子进程的 argv
+ * 为空/help 形状时它会在若干个事件轮次后 printHelp()。若该续体恰好落在某个
+ * captureLog 窗口内，捕获输出就被 HELP_TEXT 污染（JSON.parse 炸）。
+ * 这里先让出事件轮次把它排干，再开任何捕获窗口。
+ */
+async function drainStrayCliMain() {
+  await new Promise((r) => setTimeout(r, 50));
+}
+
+/** TD-137① 夹具：写一个最小 run transcript（首事件带 agentId，末事件 ts 即 updatedAt）。 */
+function writeTd137ListFixture(runDir, runId, lastTs) {
+  const events = [
+    { seq: 1, ts: "2026-08-23T00:00:00.000Z", type: "run.started", runId, agentId: "coder_low", backend: "claude-code" },
+    { seq: 2, ts: lastTs, type: "run.state_change", runId, agentId: "coder_low", from: "running", to: "running", reason: "activity" },
+  ];
+  writeFileSync(join(runDir, `${runId}.jsonl`),
+    `${events.map((e) => JSON.stringify(e)).join("\n")}\n`, "utf8");
+}
+
+test("TD-137① 裸 runs list 默认最新优先：updatedAt 新的在前（text + json），不再文件名升序", async () => {
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-td137-list-"));
+  try {
+    await drainStrayCliMain();
+    // 判别性夹具：字典序更小的 run_aaa 反而更旧——旧行为升序会把它排第一。
+    writeTd137ListFixture(dir, "run_aaa", "2026-08-23T00:01:00.000Z");
+    writeTd137ListFixture(dir, "run_bbb", "2026-08-23T02:00:00.000Z");
+
+    const text = await captureLog(() => runsCommand(["list", "--run-dir", dir], {}));
+    const bIdx = text.indexOf("run_bbb");
+    const aIdx = text.indexOf("run_aaa");
+    assert.ok(bIdx !== -1 && aIdx !== -1, "两个 run 都要列出");
+    assert.ok(bIdx < aIdx, "裸 list 必须最新优先：run_bbb（新）在 run_aaa（旧）之前");
+
+    const parsed = JSON.parse(await captureLog(() =>
+      runsCommand(["list", "--run-dir", dir, "--format", "json"], {})));
+    assert.deepEqual(parsed.runs.map((r) => r.runId), ["run_bbb", "run_aaa"],
+      "JSON 模式同一排序（listRuns 服务 updatedAt desc 直达）");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("TD-137① --latest N 截取与 null-updatedAt 殿后语义不变", async () => {
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-td137-latest-"));
+  try {
+    await drainStrayCliMain();
+    writeTd137ListFixture(dir, "run_old", "2026-08-23T00:01:00.000Z");
+    writeTd137ListFixture(dir, "run_new", "2026-08-23T02:00:00.000Z");
+    // legacy 无信封事件（无 runId）→ updatedAt 由末事件 ts 兜底推导；夹具取
+    // 最旧值使其如实殿后（排序语义：updatedAt desc，无 null 特例参与本测）。
+    writeFileSync(join(dir, "run_legacy.jsonl"),
+      `${JSON.stringify({ seq: 1, ts: "2026-08-22T00:00:00.000Z", type: "run.started", agentId: "x" })}\n`,
+      "utf8");
+
+    const rawLatest = await captureLog(() =>
+      runsCommand(["list", "--run-dir", dir, "--latest", "1", "--format", "json"], {}));
+    assert.match(rawLatest, /^\s*\{/, `输出应为 JSON，got: ${rawLatest.slice(0, 160)}`);
+    const latest1 = JSON.parse(rawLatest);
+    assert.deepEqual(latest1.runs.map((r) => r.runId), ["run_new"], "--latest 1 只取最新一条");
+
+    const all = JSON.parse(await captureLog(() =>
+      runsCommand(["list", "--run-dir", dir, "--format", "json"], {})));
+    assert.deepEqual(all.runs.map((r) => r.runId), ["run_new", "run_old", "run_legacy"],
+      "全量：updatedAt desc、null 殿后（服务既有语义，CLI 不再翻转）");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("TD-137② buildWaitWindowHint 单一构造处：自带上限 + 同族三上限齐备", async () => {
+  const { buildWaitWindowHint, RUN_WAIT_MAX_MS } = await import("../../src/application/runWait.js");
+  const { DELIVERY_WAIT_MS_MAX } = await import("../../src/application/runDelivery.js");
+  const { RUN_AWAIT_RESULT_MAX_MS } = await import("../../src/application/runAwaitResult.js");
+  for (const cap of [RUN_WAIT_MAX_MS, DELIVERY_WAIT_MS_MAX, RUN_AWAIT_RESULT_MAX_MS]) {
+    const hint = buildWaitWindowHint(cap);
+    assert.match(hint, new RegExp(`本命令上限 ${cap}ms`), "必须如实标注本命令自己的上限");
+    assert.match(hint, /观察窗到期非终态/, "先讲清非终态事实（不是卡死/失败）");
+    assert.match(hint, /同族：runs wait 600000 \/ delivery waitMs ≤300000 \/ await-result ≤270000/,
+      "三个同族上限全部在场（数值零变更，只做交叉指路）");
+  }
+});
+
+/** TD-137② 夹具：非终态/终态最小 transcript（m12-11-wait-services 同款事件序列）。 */
+function writeTd137RunTranscript(runDir, runId, terminal) {
+  const a = "coder_low";
+  const events = [
+    { type: "run.submitted", agentId: a, ts: "2026-08-23T00:00:00.000Z", runId },
+    { type: "session.created", backend: "process", backendSessionId: "proc_td137", runId, agentId: a },
+    { type: "run.started", backend: "claude-code", ts: "2026-08-23T00:00:01.000Z", runId, agentId: a },
+    { type: "run.state_change", to: "pending", reason: "created", ts: "2026-08-23T00:00:02.000Z", runId, agentId: a },
+    { type: "run.state_change", to: "running", reason: "first_event", ts: "2026-08-23T00:00:03.000Z", runId, agentId: a },
+  ];
+  if (terminal) {
+    events.push(
+      { type: "run.completed", ts: "2026-08-23T00:10:00.000Z", runId, agentId: a },
+      { type: "run.state_change", to: "completed", reason: "done", ts: "2026-08-23T00:10:01.000Z", runId, agentId: a },
+    );
+  }
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(runDir, `${runId}.jsonl`),
+    `${events.map((e) => JSON.stringify(e)).join("\n")}\n`, "utf8");
+}
+
+test("TD-137② runWait 服务：窗口到期（非终态）带 waitWindowHint；终态提前返回不带", async () => {
+  const { runWait, RUN_WAIT_MAX_MS } = await import("../../src/application/runWait.js");
+  const runDir = mkdtempSync(join(tmpdir(), "wao-td137-rd-"));
+  try {
+    writeTd137RunTranscript(runDir, "run_td137w", false);
+    writeTd137RunTranscript(runDir, "run_td137done", true);
+    let t = 1000000;
+    const inject = { nowFn: () => t, pollIntervalMs: RUN_WAIT_MAX_MS, sleepFn: async (ms) => { t += ms; } };
+
+    const out = await runWait({ runId: "run_td137w", runDir, waitMs: RUN_WAIT_MAX_MS, ...inject });
+    assert.equal(out.terminal, false);
+    assert.equal(out.returnedEarly, false, "窗口耗尽路径（非提前返回）");
+    assert.match(out.waitWindowHint, /本命令上限 600000ms/, "runs wait 自身上限");
+    assert.match(out.waitWindowHint, /delivery waitMs ≤300000/, "同族：delivery 上限在场");
+    assert.match(out.waitWindowHint, /await-result ≤270000/, "同族：await-result 上限在场");
+
+    const term = await runWait({ runId: "run_td137done", runDir, waitMs: RUN_WAIT_MAX_MS, ...inject });
+    assert.equal(term.terminal, true);
+    assert.equal("waitWindowHint" in term, false, "终态结果不是观察窗到期，不带提示");
+  } finally {
+    rmrfRetry(runDir);
+  }
+});
+
+test("TD-137② getRunDeliveryReadiness 服务：deadline 到期（非终态）带提示；settled 立即返回不带", async () => {
+  const { getRunDeliveryReadiness, DELIVERY_WAIT_MS_MAX } = await import("../../src/application/runDelivery.js");
+  const runDir = mkdtempSync(join(tmpdir(), "wao-td137-dlv-rd-"));
+  try {
+    const runId = "run_td137d";
+    const ref = {
+      schemaVersion: 1, kind: "git_commit", runId,
+      baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
+      branch: `wao/${runId}`, worktreePath: "/fake/wt", changedFiles: ["src/a.js"],
+      verification: { status: "pending", commands: [], verifiedCommit: "d".repeat(40), results: [] },
+      acceptance: { status: "pending", reviewerType: "lead_agent" },
+      integration: { status: "pending", targetCommit: null },
+    };
+    let seq = 0;
+    const line = (p) => JSON.stringify({ ts: "2026-08-23T00:00:00.000Z", seq: (seq += 1), ...p });
+    // delivery 已请求但未打包 → 整个窗口保持 waiting_*，走 deadline 到期路径。
+    writeFileSync(join(runDir, `${runId}.jsonl`), [
+      line({ type: "run.started", runId, delivery: { mode: "git_commit_v1" }, worktreePath: "/fake/wt" }),
+      line({ type: "run.delivery_created", runId, delivery: ref }),
+    ].join("\n") + "\n", "utf8");
+    let clock = 1000000;
+    const r = await getRunDeliveryReadiness({
+      runId, runDir, waitMs: 1000,
+      nowFn: () => clock, sleepFn: async (ms) => { clock += ms; }, pollIntervalMs: 600,
+    });
+    assert.equal(r.waitReturnedEarly, false, "deadline 到期路径");
+    assert.match(r.waitWindowHint, new RegExp(`本命令上限 ${DELIVERY_WAIT_MS_MAX}ms`),
+      "delivery wait 自身上限");
+    assert.match(r.waitWindowHint, /runs wait 600000/, "同族：runs wait 上限在场");
+
+    // 对照：not_requested 立即返回（settled）→ 无提示字段。
+    const plainId = "run_td137plain";
+    writeFileSync(join(runDir, `${plainId}.jsonl`),
+      line({ type: "run.started", runId: plainId, backend: "claude-code" }) + "\n", "utf8");
+    clock = 2000000;
+    const settled = await getRunDeliveryReadiness({
+      runId: plainId, runDir, waitMs: 1000,
+      nowFn: () => clock, sleepFn: async (ms) => { clock += ms; }, pollIntervalMs: 600,
+    });
+    assert.equal(settled.readiness, "not_requested");
+    assert.equal(settled.waitReturnedEarly, true);
+    assert.equal("waitWindowHint" in settled, false, "settled 路径不是观察窗到期，不带提示");
+  } finally {
+    rmrfRetry(runDir);
+  }
+});
+
+test("TD-137② runAwaitResult 服务：窗口到期（非终态）带 waitWindowHint（自身上限 270000）", async () => {
+  const { runAwaitResult, RUN_AWAIT_RESULT_MAX_MS } = await import("../../src/application/runAwaitResult.js");
+  const runDir = mkdtempSync(join(tmpdir(), "wao-td137-ar-rd-"));
+  try {
+    writeTd137RunTranscript(runDir, "run_td137a", false);
+    let t = 1000000;
+    const inject = { nowFn: () => t, pollIntervalMs: RUN_AWAIT_RESULT_MAX_MS, sleepFn: async (ms) => { t += ms; } };
+    const out = await runAwaitResult({ runId: "run_td137a", runDir, waitMs: RUN_AWAIT_RESULT_MAX_MS, ...inject });
+    assert.equal(out.terminal, false);
+    assert.equal(out.observationOutcome, "observed");
+    assert.match(out.waitWindowHint, new RegExp(`本命令上限 ${RUN_AWAIT_RESULT_MAX_MS}ms`));
+    assert.match(out.waitWindowHint, /runs wait 600000/, "同族：runs wait 上限在场");
+    assert.match(out.waitWindowHint, /delivery waitMs ≤300000/, "同族：delivery 上限在场");
+  } finally {
+    rmrfRetry(runDir);
+  }
+});
+
+test("TD-137② runs wait CLI：text 在五行摘要后追加 Hint 行（原行结构不动）；json 透出 waitWindowHint", async () => {
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  const { buildWaitWindowHint, RUN_WAIT_MAX_MS } = await import("../../src/application/runWait.js");
+  const fakeService = async () => ({
+    runId: "run_hint", agentId: "coder_low", state: "running",
+    terminal: false, cursor: 5, returnedEarly: false,
+    observationOutcome: "observed", readFailureReason: null,
+    liveness: "active", activityEventCount: 1, lastActivityKind: "run.event",
+    ownerHeartbeat: "unknown",
+    observation: { waitedMs: 600000, windowMs: 600000, outcome: "window_expired" },
+    termination: null,
+    waitWindowHint: buildWaitWindowHint(RUN_WAIT_MAX_MS),
+  });
+  const out = await captureLog(() =>
+    runsCommand(["wait", "run_hint", "--wait-ms", "600000", "--run-dir", "."], {}, { runWaitFn: fakeService }));
+  const lines = out.split("\n");
+  const obsIdx = lines.findIndex((l) => l.startsWith("Observation:"));
+  assert.ok(obsIdx !== -1, "五行摘要结构保持（Observation 行在场）");
+  assert.equal(lines[1], "Terminal: no", "到期非终态事实照旧");
+  assert.match(lines[obsIdx + 1], /^Hint: 观察窗到期非终态；本命令上限 600000ms；同族：/,
+    "Hint 行紧随 Observation 之后（追加式，不位移既有行）");
+
+  const parsed = JSON.parse(await captureLog(() =>
+    runsCommand(["wait", "run_hint", "--wait-ms", "600000", "--format", "json", "--run-dir", "."],
+      {}, { runWaitFn: fakeService })));
+  assert.equal(typeof parsed.waitWindowHint, "string", "CLI json 是完整服务结果投影，字段透出");
+  assert.ok(Array.isArray(parsed.semanticNotes), "semanticNotes selector 照旧");
+});
+
+test("TD-137② runs delivery --wait-ms CLI：到期打印 Hint；settled 不打印", async () => {
+  const { runsDeliveryCommand } = await import("../../src/commands/runs.js");
+  const expired = async () => ({
+    runId: "run_dh", terminalState: "running", readiness: "waiting_for_packaging",
+    waitReturnedEarly: false, deliveryAvailable: false, deliveryRequested: true,
+    deliveryFailure: null, isolationFailure: null, verification: null,
+    effectiveVerification: null, reverify: null, acceptance: null,
+    waitWindowHint: `观察窗到期非终态；本命令上限 300000ms；同族：runs wait 600000 / delivery waitMs ≤300000 / await-result ≤270000`,
+  });
+  const out = await captureLog(() =>
+    runsDeliveryCommand(["run_dh", "--wait-ms", "1000", "--run-dir", "."], {}, { getRunDeliveryReadinessFn: expired }));
+  assert.match(out, /\(wait expired\)/);
+  assert.match(out, /^Hint: 观察窗到期非终态；本命令上限 300000ms；同族：/m, "到期输出附带同族上限提示");
+
+  const settled = async () => ({
+    runId: "run_dh2", terminalState: "completed", readiness: "reviewable",
+    waitReturnedEarly: true, deliveryAvailable: true,
+    deliveryRef: { deliveryCommit: "d".repeat(40) }, deliveryRequested: true,
+    deliveryFailure: null, isolationFailure: null,
+    verification: { status: "passed" }, effectiveVerification: null, reverify: null,
+    acceptance: { status: "pending" },
+  });
+  const outSettled = await captureLog(() =>
+    runsDeliveryCommand(["run_dh2", "--wait-ms", "1000", "--run-dir", "."], {}, { getRunDeliveryReadinessFn: settled }));
+  assert.match(outSettled, /\(settled\)/);
+  assert.doesNotMatch(outSettled, /^Hint: /m, "settled 不是观察窗到期，无 Hint 行");
+});
+
+test("TD-137④ 写路径接受目录条目：尾斜杠归一化、混合清单、精确文件不变、非法形状照拒且回显原始输入", async () => {
+  const { prepareDeliveryRequest, isPathAllowed } = await import("../../src/delivery.js");
+  const base = {
+    mode: "git_commit_v1", agentId: "coder_low", workspaceRoot: "D:/tmp/wt",
+    baseCommit: "0123456789abcdef0123456789abcdef01234567",
+    changedFiles: ["src/a.js"], verificationCommands: ["npm test"],
+  };
+  // 目录条目（含尾斜杠）到达段边界 matcher；持久化契约为归一化后的无斜杠形状。
+  const withDir = prepareDeliveryRequest({ ...base, allowedPaths: ["src/", "docs/guide.md"] });
+  assert.deepEqual(withDir.allowedPaths, ["docs/guide.md", "src"], "尾斜杠归一化 + 排序");
+  const dedup = prepareDeliveryRequest({ ...base, allowedPaths: ["src/", "src"] });
+  assert.deepEqual(dedup.allowedPaths, ["src"], "同义目录条目去重为一条");
+  const exactFile = prepareDeliveryRequest({ ...base, allowedPaths: ["docs/guide.md"] });
+  assert.deepEqual(exactFile.allowedPaths, ["docs/guide.md"], "精确文件条目语义不变");
+
+  // matcher 语义钉死（SSOT 未动）：段边界前缀，sibling 前缀不误吞。
+  assert.equal(isPathAllowed("src/a.js", ["src"]), true, "allow-inside-dir");
+  assert.equal(isPathAllowed("src/deep/b.js", ["src"]), true, "多级段仍在界内");
+  assert.equal(isPathAllowed("src2/a.js", ["src"]), false, "sibling-prefix 非匹配");
+  assert.equal(isPathAllowed("docs/guide.md", ["src"]), false, "界外文件非匹配");
+  assert.equal(isPathAllowed("src", ["src"]), true, "目录自身命中");
+
+  // 其余非法形状照旧拒绝，错误消息回显调用方原始输入（不是归一化后的值）。
+  for (const bad of ["src//", "/", "./", "../escape", "C:/abs"]) {
+    // 校验是同步 throw——必须用 assert.throws（rejects 不接同步抛出，
+    // TD-137 批次 Lead 收尾修正：worker 原用 rejects 导致异常穿透）。
+    assert.throws(
+      () => prepareDeliveryRequest({ ...base, allowedPaths: [bad] }),
+      (e) => {
+        assert.match(e.message, /invalid allowedPath/, `非法条目 ${JSON.stringify(bad)} 必须拒绝`);
+        assert.ok(e.message.includes(JSON.stringify(bad)), "错误回显原始输入");
+        return true;
+      },
+    );
+  }
+});
+
+test("TD-137④ candidateInventory 投影：目录契约下的界内/越界分类；读侧严格校验器仍拒绝尾斜杠", async () => {
+  const { computeCandidateInventory } = await import("../../src/application/candidateInventory.js");
+  const wt = "D:/tmp/fake-wt";
+  const baseCommit = "0123456789abcdef0123456789abcdef01234567";
+  const listFn = () => ["src/a.js", "src/deep/b.js", "src2/c.js", "README.md"];
+
+  const inv = computeCandidateInventory(wt, baseCommit, ["src"], listFn);
+  assert.ok(inv, "目录契约合法，inventory 非 null");
+  assert.deepEqual(inv.originalAllowedPaths, ["src"]);
+  assert.deepEqual(inv.actualChangedPaths, ["README.md", "src/a.js", "src/deep/b.js", "src2/c.js"]);
+  assert.deepEqual(inv.disallowedPaths, ["README.md", "src2/c.js"],
+    "sibling 前缀与界外文件如实列为越界候选（isPathAllowed SSOT 未动）");
+  assert.equal(inv.disallowedCount, 2);
+
+  // 读侧投影校验器保持严格：持久化契约永远归一化，尾斜杠形状到不了这里；
+  // 万一出现（脏数据）则 fail-closed 为 null，绝不部分真相。
+  assert.equal(computeCandidateInventory(wt, baseCommit, ["src/"], listFn), null,
+    "尾斜杠契约在读侧仍非法（写路径已归一化，此为防御性钉子）");
+});
+
+test("TD-137③ runId UTC 说明双通道在场：usage.md 正文 + HELP_TEXT（再生 cli.md 同步）", async () => {
+  const sentence = "runId 内嵌时间戳为 UTC；本地时间需自行换算";
+  const usage = readFileSync(resolve(import.meta.dirname, "../../docs/usage.md"), "utf8");
+  assert.ok(usage.includes(sentence), "usage.md 在 runId 首现附近补 UTC 说明");
+  const cliMd = readFileSync(resolve(import.meta.dirname, "../../docs/surface/cli.md"), "utf8");
+  assert.ok(cliMd.includes(sentence), "cli.md 由 gen:surface 从 HELP_TEXT 再生，同步携带");
+});

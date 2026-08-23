@@ -33,6 +33,9 @@ import { isValidRunId, isCanonicalCommitId } from "../delivery.js";
 import { PACKAGING_FAILURE_CODES, safeProjectPackagingCode } from "../deliveryFailureCodes.js";
 import { ISOLATION_VIOLATION_REASONS } from "../diagnosis.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
+// TD-137②：等待窗到期交叉提示的单一构造处（runWait 同族 SSOT；无环——
+// runWait 及其传递依赖不回读本模块）。
+import { buildWaitWindowHint } from "./runWait.js";
 import { proveWorkspace } from "./workspaceBinding.js";
 import { proveProcessMissing } from "./processRecovery.js";
 
@@ -1189,7 +1192,12 @@ export async function getRunDeliveryReadiness({
   // Deadline expired while still pending. Return the truthful fact — this is
   // NOT an error: pending is a valid, honest readiness outcome. The caller
   // (Lead) decides what to do; the service never auto-stop/retry/accept/reject.
-  return _buildReadinessResult(runId, events, terminalState, readiness, false, inventoryOpts);
+  // TD-137②：到期（waitReturnedEarly:false）附带同族上限交叉提示；提前返回
+  // （settled / read-failed ambiguous）不带。MCP 适配层以显式键集合构造 wire
+  // payload，该字段不进入合同形状。
+  const result = _buildReadinessResult(runId, events, terminalState, readiness, false, inventoryOpts);
+  result.waitWindowHint = buildWaitWindowHint(DELIVERY_WAIT_MS_MAX);
+  return result;
 }
 
 // ===== Service: decideRunDelivery (durable decision) =====
