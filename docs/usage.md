@@ -627,6 +627,16 @@ npm run cli -- daemon stop
 
 状态机完整定义见 `docs/02-architecture.md` §3.1；本文不复制状态列表。
 
+**交付类 run 的终态语义（TD-103/TD-150 批A）**：delivery 打包失败的 run 终态是 `failed`
+（reason=`delivery_failed`），不是 completed——因此"completed 计数为 0"≠ worker 什么都没干；
+反过来 completed 也不保证交付成功：打包成功即转 completed，验证在其后执行且不回改终态，
+成败要看结果里的 deliveryRef 与 verification 结果。区分"worker 是否产出过模型工作"看
+completionMarker：`run.completed` / `run.delivery_failed` / `run.error`(phase=delivery) 可携带
+`completionMarker: "completed_empty"`（闭集 DONE_MARKERS 成员）= worker 零产出。排查入口：
+MCP `run_diagnose` / `run_await_result`（CLI 对应 `runs diagnose` / `runs wait`，
+category=no_effect ↔ code=completed_empty）；交付类 + completed_empty 的失败出口
+（scorecard 门拦下或打包失败）还会向 `runs/ALERTS.log` 写 level=no_effect 告警（每 run 至多一次）。
+
 直接读 transcript：
 ```powershell
 npm run cli -- tail <runId> --limit 50

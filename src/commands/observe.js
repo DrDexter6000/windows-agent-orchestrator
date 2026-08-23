@@ -61,6 +61,18 @@ export async function statusCommand(args, config) {
     lastActivityKind: status.lastActivityKind,
     lastActivitySummary: status.lastActivitySummary,
   }, null, 2));
+  // TD-150 批B: scorecard 可见面的一行摘要（JSON 块之后）。无 scorecard.checked
+  // 的 run 不打印——既有纯 JSON 输出保持逐字节不变。判定标签是闭集三态：
+  // passed / warn（completed + scorecard 未过 = warn-gate 没拦）/ failed（门拦下
+  // 或非 completed 形态）；括号里只列检查 name，绝不回显 evidence/detail 文本。
+  const sc = status.scorecardSummary;
+  if (sc) {
+    const names = Array.isArray(sc.failedChecks) ? sc.failedChecks.join(", ") : "";
+    const verdict = sc.passed ? "passed"
+      : status.state === "completed" ? "warn"
+      : "failed";
+    console.log(`Scorecard: ${verdict}${names ? ` (${names})` : ""}`);
+  }
 }
 
 export async function tailCommand(args, config) {

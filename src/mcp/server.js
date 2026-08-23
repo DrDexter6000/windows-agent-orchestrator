@@ -1067,6 +1067,15 @@ const RUN_STATUS_OUTPUT = z.object({
     ts: z.string(),
     secondsSince: z.number().nullable(),
   }).nullable(),
+  // TD-150 批B: OPTIONAL scorecard visibility — the latest bound scorecard.checked
+  // projected to { passed, failedChecks }. failedChecks carries CHECK NAMES only
+  // (the projection reads c.name and nothing else), never evidence/detail free
+  // text. ABSENT (never null) when the run has no scorecard.checked event, so
+  // every pre-existing output shape stays byte-identical.
+  scorecardSummary: z.object({
+    passed: z.boolean(),
+    failedChecks: z.array(z.string()),
+  }).strict().optional(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
   // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
   // it; the run_delivery_review_bundle embeds the delivery BASE shape, which
@@ -3993,6 +4002,20 @@ export function createWaoMcpServer({
                   : null,
               }
             : { phase: "unknown", sinceTs: null, secondsSince: null };
+        // TD-150 批B: normalize the scorecard summary defensively — a malformed
+        // service value degrades to ABSENT (never null, never partial). The name
+        // list keeps only usable strings; evidence/detail free text can never
+        // ride along because no other field of the check is read.
+        const rawScorecard = status.scorecardSummary;
+        const scorecardSummary =
+          rawScorecard && typeof rawScorecard === "object" && !Array.isArray(rawScorecard)
+            ? {
+                passed: rawScorecard.passed === true,
+                failedChecks: Array.isArray(rawScorecard.failedChecks)
+                  ? rawScorecard.failedChecks.filter((n) => isStringField(n))
+                  : [],
+              }
+            : undefined;
         const payload = {
           runId: status.runId,
           // M11-8B closeout: project agentId through the SSOT (closed-set).
@@ -4003,12 +4026,16 @@ export function createWaoMcpServer({
           executionStage,
           lastEvent,
           lastActivity,
+          ...(scorecardSummary ? { scorecardSummary } : {}),
         };
         // M12-8B: bounded progressive-disclosure metadata — a pure function of
         // the already-projected machine facts (no extra reads, no semantics).
+        // TD-150 批B: the scorecard fact joins the fact matrix — a visible
+        // scorecard failure (warn-gate completed run) steers the drilldowns.
         payload.availableDrilldowns = selectDrilldowns("run_status", {
           state: payload.state,
           terminal: payload.terminal,
+          scorecardFailed: payload.scorecardSummary?.passed === false,
         });
         // M11-8B closeout: return the PARSED safe object. The strict output
         // schema is the trust boundary; a malformed service result (extra keys,

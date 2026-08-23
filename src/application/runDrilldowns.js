@@ -164,6 +164,14 @@ function selectForRunStatus(f) {
   if (f.state === "failed" || f.state === "aborted" || f.state === "timed_out") {
     return ["diagnose", "activity"];
   }
+  // TD-150 批B: a VISIBLE scorecard failure on a completed run (warn-gate — the
+  // run stayed completed) points at diagnose FIRST, so the Lead can turn the
+  // scorecardSummary.failedChecks names into the run's failure facts without
+  // leaving the status face. Failed/aborted/timed_out runs keep the branch
+  // above (diagnose already leads); every other shape is unchanged.
+  if (f.scorecardFailed === true) {
+    return ["diagnose", "activity", "collectCompact"];
+  }
   if (f.state === "completed") {
     return ["activity", "collectCompact"];
   }

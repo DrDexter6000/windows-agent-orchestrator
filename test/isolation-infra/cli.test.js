@@ -2874,6 +2874,111 @@ test("TD-75: status 终态 failed run 也输出心跳（Lead 据此判死前是�
   }
 });
 
+// ── TD-150 批B（T1 CLI 面）：status 的 Scorecard 一行摘要 ─────────────────
+// JSON 块之后恰一行：passed / warn（completed + scorecard 未过 = warn-gate 没
+// 拦）/ failed（门拦下）；括号只列检查 name。无 scorecard.checked 不打印——
+// 既有纯 JSON 输出逐字节不变（TD-75 系列的 JSON.parse(out) 即 absent 钉）。
+
+// 捕获解析辅助：cli.js import 时自执行的 main()（argv 为测试 runner 参数）会
+// 竞态地打印一次 HELP_TEXT（既有 TD-75 系列同受影响，见终报 blocker）。
+// statusCommand 的每次 console.log 是捕获数组的一个元素——JSON 块（多行
+// pretty-print，整体一个元素）与 Scorecard 行各自成元素，按首字符精确定位即可
+// 对该竞态免疫。
+async function captureElements(fn) {
+  const elements = [];
+  const orig = console.log;
+  console.log = (...a) => { elements.push(a.map(String).join(" ")); };
+  try {
+    await fn();
+  } finally {
+    console.log = orig;
+  }
+  return elements;
+}
+function cliJsonBlock(elements) {
+  const blocks = elements.filter((l) => l.startsWith("{"));
+  assert.equal(blocks.length, 1, "statusCommand 输出恰一个 JSON 块");
+  return JSON.parse(blocks[0]);
+}
+function cliScorecardLines(elements) {
+  return elements.filter((l) => l.startsWith("Scorecard:"));
+}
+
+test("TD150B-C1: status warn run —— JSON 后一行 Scorecard: warn (hasEvidence)，detail 不回显", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-sc-warn-"));
+  try {
+    writeFileSync(join(dir, "run_scw.jsonl"),
+      JSON.stringify({ type: "run.submitted", agentId: "coder_hq", ts: "2026-08-24T00:00:00.000Z" }) + "\n" +
+      JSON.stringify({ type: "run.state_change", to: "completed", ts: "2026-08-24T00:01:00.000Z" }) + "\n" +
+      JSON.stringify({
+        type: "scorecard.checked", passed: false, ts: "2026-08-24T00:01:00.500Z",
+        checks: [
+          { name: "hasDoneEvent", passed: true, evidence: "run.completed present" },
+          { name: "hasEvidence", passed: false, evidence: "0 evidence event(s) found", detail: "completed_empty: backend produced no model work" },
+        ],
+      }) + "\n");
+    const elements = await captureElements(async () => {
+      await statusCommand(["run_scw", "--run-dir", dir], { runDir: dir });
+    });
+    assert.deepEqual(cliScorecardLines(elements), ["Scorecard: warn (hasEvidence)"],
+      "恰一行摘要（warn-gate completed run 标 warn，括号只列检查名）");
+    assert.ok(!elements.some((l) => l.startsWith("Scorecard:") && l !== "Scorecard: warn (hasEvidence)"),
+      "摘要行只含检查名（evidence/detail 自由文本不进新增输出面）");
+    // JSON 块保持既有 TD-75 键形状（scorecardSummary 只走摘要行，不进 JSON 块）。
+    // 注：JSON 块内既有 `last` 字段原样回显末事件（TD-75 既有形状，warn run 的末事件
+    // 可以就是 scorecard.checked）——该既有面不属本批；非泄漏红线针对的是新增
+    // scorecardSummary 投影与 MCP 线格式（见 mcpRunStatus TD150B-M2 全响应钉）。
+    const parsed = cliJsonBlock(elements);
+    assert.equal(parsed.state, "completed");
+    assert.equal("scorecardSummary" in parsed, false, "JSON 块键集合不变（纯 additive 走独立行）");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("TD150B-C2: status 全过 scorecard → `Scorecard: passed`；门拦下的 failed run → failed + 检查名", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-sc-pass-"));
+  try {
+    writeFileSync(join(dir, "run_scp.jsonl"),
+      JSON.stringify({ type: "run.submitted", agentId: "coder_hq", ts: "2026-08-24T00:00:00.000Z" }) + "\n" +
+      JSON.stringify({ type: "run.state_change", to: "completed", ts: "2026-08-24T00:01:00.000Z" }) + "\n" +
+      JSON.stringify({
+        type: "scorecard.checked", passed: true, ts: "2026-08-24T00:01:00.500Z",
+        checks: [{ name: "hasDoneEvent", passed: true, evidence: "run.completed present" }],
+      }) + "\n");
+    const elementsP = await captureElements(async () => {
+      await statusCommand(["run_scp", "--run-dir", dir], { runDir: dir });
+    });
+    assert.deepEqual(cliScorecardLines(elementsP), ["Scorecard: passed"]);
+
+    writeFileSync(join(dir, "run_scf.jsonl"),
+      JSON.stringify({ type: "run.submitted", agentId: "coder_hq", ts: "2026-08-24T00:00:00.000Z" }) + "\n" +
+      JSON.stringify({
+        type: "scorecard.checked", passed: false, ts: "2026-08-24T00:01:00.500Z",
+        checks: [{ name: "acceptance", passed: false, evidence: "exit≠0: accept.js", detail: "exit 1: nope" }],
+      }) + "\n" +
+      JSON.stringify({ type: "run.state_change", to: "failed", reason: "scorecard_failed", ts: "2026-08-24T00:01:01.000Z" }) + "\n");
+    const elementsF = await captureElements(async () => {
+      await statusCommand(["run_scf", "--run-dir", dir], { runDir: dir });
+    });
+    assert.deepEqual(cliScorecardLines(elementsF), ["Scorecard: failed (acceptance)"],
+      "非 completed 形态的门拦下 = failed 标签");
+    const outF = elementsF.join("\n");
+    assert.ok(!outF.includes("nope") && !outF.includes("accept.js"), "detail/evidence 不回显");
+
+    // 无 scorecard.checked 的 run：无 Scorecard 行（既有纯 JSON 输出不变）。
+    writeFileSync(join(dir, "run_scn.jsonl"),
+      JSON.stringify({ type: "run.submitted", agentId: "coder_hq", ts: "2026-08-24T00:00:00.000Z" }) + "\n" +
+      JSON.stringify({ type: "run.state_change", to: "failed", reason: "backend_error", ts: "2026-08-24T00:01:02.000Z" }) + "\n");
+    const elementsN = await captureElements(async () => {
+      await statusCommand(["run_scn", "--run-dir", dir], { runDir: dir });
+    });
+    assert.deepEqual(cliScorecardLines(elementsN), [], "无 scorecard 事件 → 无摘要行");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
 // ── TD-77 子项 A（collect 重建非 message 证据）─────────────────────────────
 // 进程型 worker 崩溃时常无最终 message，但 transcript 里有 command/tool_use/
 // file_written 等证据事件。旧 collect 只重建 kind==="message" → data:[]，

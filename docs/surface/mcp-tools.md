@@ -245,6 +245,7 @@ Output:
 | executionStage | object | yes |  |
 | lastEvent | object\|null | yes |  |
 | lastActivity | object\|null | yes |  |
+| scorecardSummary | object | no |  |
 | availableDrilldowns | array<object> | yes |  |
 
 ## run_collect

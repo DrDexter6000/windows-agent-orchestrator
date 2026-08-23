@@ -587,6 +587,145 @@ test("M9-3A-09: src/application does not import commands/, mcp/, MCP SDK, or zod
   }
 });
 
+// ---------------------------------------------------------------------
+// TD-150 批B（T1）: scorecard 可见面 — 最近一条绑定 scorecard.checked 投影为
+// { passed, failedChecks }；无 scorecard 事件的 run 字段 absent 非 null；
+// failedChecks 只含检查 name，绝不透传 evidence/detail 自由文本。
+// ---------------------------------------------------------------------
+
+const SC_RUN = "run_sc_td150b";
+
+function scEvents(extra = []) {
+  return [
+    ev({ type: "run.submitted", ts: "2026-08-24T00:00:00.000Z", runId: SC_RUN, agentId: "w", seq: 1 }),
+    ev({ type: "run.state_change", to: "running", reason: "started", ts: "2026-08-24T00:00:01.000Z", runId: SC_RUN, agentId: "w", seq: 2 }),
+    ...extra,
+  ].join("");
+}
+
+test("TD150B-S1: scorecardSummary 投影最近一条 scorecard.checked（passed/failedChecks 形状）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td150b-s1-"));
+  try {
+    const runDir = join(dir, "runs");
+    // warn 形态：completed + scorecard 未过（hasEvidence 失败，带 evidence/detail）。
+    writeTranscript(runDir, SC_RUN, scEvents([
+      ev({
+        type: "scorecard.checked", passed: false, runId: SC_RUN, agentId: "w", seq: 3,
+        ts: "2026-08-24T00:00:02.000Z",
+        checks: [
+          { name: "hasDoneEvent", passed: true, evidence: "run.completed present" },
+          { name: "hasEvidence", passed: false, evidence: "0 evidence event(s) found", detail: "completed_empty: backend produced no model work" },
+        ],
+      }),
+      ev({ type: "scorecard.warn", detail: "hasEvidence: completed_empty", runId: SC_RUN, agentId: "w", seq: 4, ts: "2026-08-24T00:00:02.500Z" }),
+      ev({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-08-24T00:00:03.000Z", runId: SC_RUN, agentId: "w", seq: 5 }),
+    ]));
+    const result = await getRunStatus({ runId: SC_RUN, runDir });
+    assert.deepEqual(result.scorecardSummary, { passed: false, failedChecks: ["hasEvidence"] },
+      "投影 = 未过检查的 name 列表（不含 evidence/detail 自由文本）");
+    assert.deepEqual(Object.keys(result.scorecardSummary).sort(), ["failedChecks", "passed"],
+      "字段恰为 passed/failedChecks 两键");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD150B-S2: 无 scorecard.checked 的 run 字段 absent（非 null），既有输出形状不变", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td150b-s2-"));
+  try {
+    const runDir = join(dir, "runs");
+    writeTranscript(runDir, SAMPLE_RUN, sampleEvents());
+    const result = await getRunStatus({ runId: SAMPLE_RUN, runDir });
+    assert.equal("scorecardSummary" in result, false, "absent，不是 null 占位");
+    assert.equal(result.scorecardSummary, undefined);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD150B-S3: 多条 scorecard.checked 时末条胜出（correction/续跑多次门控取最近）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td150b-s3-"));
+  try {
+    const runDir = join(dir, "runs");
+    writeTranscript(runDir, SC_RUN, scEvents([
+      ev({
+        type: "scorecard.checked", passed: false, runId: SC_RUN, agentId: "w", seq: 3,
+        ts: "2026-08-24T00:00:02.000Z",
+        checks: [{ name: "hasAssistantText", passed: false, evidence: "no assistant text answer" }],
+      }),
+      ev({
+        type: "scorecard.checked", passed: true, runId: SC_RUN, agentId: "w", seq: 4,
+        ts: "2026-08-24T00:01:02.000Z",
+        checks: [
+          { name: "hasDoneEvent", passed: true, evidence: "run.completed present" },
+          { name: "hasAssistantText", passed: true, evidence: "assistant text answer present" },
+        ],
+      }),
+      ev({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-08-24T00:01:03.000Z", runId: SC_RUN, agentId: "w", seq: 5 }),
+    ]));
+    const result = await getRunStatus({ runId: SC_RUN, runDir });
+    assert.deepEqual(result.scorecardSummary, { passed: true, failedChecks: [] },
+      "最近一条（seq=4，passed:true）胜出，首条不夺值");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD150B-S4: 外 run 尾条伪造 scorecard.checked 不供给本字段（R20 绑定纪律）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td150b-s4-"));
+  try {
+    const runDir = join(dir, "runs");
+    writeTranscript(runDir, SAMPLE_RUN, sampleEvents() +
+      ev({
+        type: "scorecard.checked", passed: false, runId: "run_evil_td150b", agentId: "coder_low",
+        ts: "2026-08-24T00:09:09.000Z", seq: 99,
+        checks: [{ name: "forge", passed: false, evidence: "forged tail" }],
+      }));
+    const result = await getRunStatus({ runId: SAMPLE_RUN, runDir });
+    assert.equal("scorecardSummary" in result, false,
+      "信封 runId 不匹配的尾条不可见——宁可可见地缺事实");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// TD-150 批B（T1 非泄漏钉，服务层）：acceptance 失败的 run —— detail 含独特
+// stderr 字符串。getRunStatus 全部输出不得含该字符串：detail 只许出现检查名。
+// ---------------------------------------------------------------------
+
+test("TD150B-S5: 非泄漏钉 — acceptance 失败的 detail 独特 stderr 字符串不进 status 输出", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td150b-s5-"));
+  try {
+    const runDir = join(dir, "runs");
+    const UNIQUE_STDERR = "TD150B-LEAK-PROBE stderr_fingerprint_9f2c1 accept.sql line 77";
+    writeTranscript(runDir, SC_RUN, scEvents([
+      ev({
+        type: "scorecard.checked", passed: false, runId: SC_RUN, agentId: "w", seq: 3,
+        ts: "2026-08-24T00:00:02.000Z",
+        checks: [{
+          name: "acceptance",
+          passed: false,
+          evidence: "exit≠0: scripts/accept.js",
+          detail: `exit 1: ${UNIQUE_STDERR}`,
+        }],
+      }),
+      ev({ type: "run.error", phase: "scorecard", detail: `acceptance: exit 1: ${UNIQUE_STDERR}`, runId: SC_RUN, agentId: "w", seq: 4, ts: "2026-08-24T00:00:02.500Z" }),
+      ev({ type: "run.state_change", to: "failed", reason: "scorecard_failed", ts: "2026-08-24T00:00:03.000Z", runId: SC_RUN, agentId: "w", seq: 5 }),
+    ]));
+    const result = await getRunStatus({ runId: SC_RUN, runDir });
+    const dumped = JSON.stringify(result);
+    assert.ok(!dumped.includes("TD150B-LEAK-PROBE"), "独特 stderr 指纹绝不出现");
+    assert.ok(!dumped.includes(UNIQUE_STDERR), "detail 自由文本不透传");
+    assert.ok(!dumped.includes("exit≠0"), "evidence 文本不透传");
+    assert.ok(!dumped.includes("accept.js"), "脚本名（evidence 一部分）不透传");
+    assert.deepEqual(result.scorecardSummary, { passed: false, failedChecks: ["acceptance"] },
+      "只有检查名可见");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 // ===== Utility =====
 
 import { existsSync } from "node:fs";

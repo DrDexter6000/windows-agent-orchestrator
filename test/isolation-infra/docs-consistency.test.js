@@ -409,6 +409,52 @@ test("M12-10c: usage.md playbook resource fixed-error vocabulary is bound to ser
     "docs/usage.md must not document removed-tool error names (playbook_list/playbook_get failed)");
 });
 
+// TD-150 批B（T3）：usage.md「交付类 run 的终态语义」段落把闭集词汇写进手写文档
+// （completionMarker 值、no_effect↔completed_empty 配对、delivery_failed 终态原因、
+// ALERTS.log 路径）。这些是承载语义的枚举/路径，不是纯散文——按 M12-10c 先例钉回
+// 各 SSOT：从源码常量提取真值，断言文档记录的恰是它们；任一侧漂移即红。
+test("TD-150B-T3: usage.md 交付终态段落的闭集词汇绑定到 runtime SSOT（无漂移）", () => {
+  const usage = read("docs/usage.md");
+  // SSOT 1：DONE_MARKERS（src/runEvent.js）——completionMarker 的闭集。
+  const doneMarkersSrc = read("src/runEvent.js")
+    .match(/export const DONE_MARKERS = Object\.freeze\(\[([^\]]*)\]\)/)?.[1];
+  assert.ok(doneMarkersSrc, "src/runEvent.js must define DONE_MARKERS");
+  const doneMarkers = [...doneMarkersSrc.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(doneMarkers.length > 0, "DONE_MARKERS must be a non-empty closed set");
+  for (const marker of doneMarkers) {
+    assert.ok(usage.includes(`"${marker}"`),
+      `docs/usage.md 交付终态段落必须记录 completionMarker 闭集成员 "${marker}"`);
+  }
+  // SSOT 2：NO_EFFECT_DIAGNOSIS_CODES（src/diagnosis.js）——no_effect 类目的合法码，
+  // 且与 DONE_MARKERS 共享同一真值（category=no_effect ↔ code=<marker>）。
+  const noEffectCodesSrc = read("src/diagnosis.js")
+    .match(/export const NO_EFFECT_DIAGNOSIS_CODES = Object\.freeze\(\[([^\]]*)\]\)/)?.[1];
+  assert.ok(noEffectCodesSrc, "src/diagnosis.js must define NO_EFFECT_DIAGNOSIS_CODES");
+  const noEffectCodes = [...noEffectCodesSrc.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  for (const code of noEffectCodes) {
+    assert.ok(doneMarkers.includes(code),
+      `NO_EFFECT_DIAGNOSIS_CODES 成员 "${code}" 必须同时是 DONE_MARKERS 成员（配对纪律）`);
+    assert.ok(usage.includes(`code=${code}`),
+      `docs/usage.md 必须记录 no_effect ↔ code=${code} 配对`);
+  }
+  assert.ok(usage.includes("category=no_effect"),
+    "docs/usage.md 必须以 category=no_effect 表述诊断类目");
+  // SSOT 3：STATE_CHANGE_REASONS（src/transcript.js）——打包失败的终态原因名。
+  const reasonsSrc = read("src/transcript.js")
+    .match(/const STATE_CHANGE_REASONS = Object\.freeze\(\[([\s\S]*?)\]\);/)?.[1];
+  assert.ok(reasonsSrc, "src/transcript.js must define STATE_CHANGE_REASONS");
+  const reasons = [...reasonsSrc.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(reasons.includes("delivery_failed"),
+    "STATE_CHANGE_REASONS 必须含 delivery_failed（文档已钉该词，移除即双红）");
+  assert.ok(/reason=`delivery_failed`/.test(usage),
+    "docs/usage.md 打包失败段落必须写 reason=`delivery_failed`");
+  // SSOT 4：alerts.js 默认告警日志路径。
+  const alertLog = read("src/alerts.js").match(/const logPath = opts\.logPath \?\? "([^"]+)"/)?.[1];
+  assert.ok(alertLog, "src/alerts.js must define the default ALERTS log path");
+  assert.ok(usage.includes(`\`${alertLog}\``),
+    `docs/usage.md 必须按 runtime 默认值记录告警日志路径 \`${alertLog}\``);
+});
+
 test("活文档页首状态必须反映 M0-M10 当前能力（usage + architecture），不得停留在 M0-M9 或更早", () => {
   const usage = read("docs/usage.md");
   const usageHead = usage.slice(0, 1200);

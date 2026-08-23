@@ -518,6 +518,157 @@ test("M12-17-M2b: malformed executionStage values in service result normalize de
 });
 
 // ---------------------------------------------------------------------
+// TD-150 批B（T1 wire 面）: run_status 携带 scorecardSummary —— 最近一条绑定
+// scorecard.checked 的 { passed, failedChecks } 投影；无事件的 run 字段 absent；
+// 非泄漏钉：acceptance 失败的 detail 独特 stderr 字符串绝不进任何输出。
+// ---------------------------------------------------------------------
+
+test("TD150B-M1: warn run 的 scorecardSummary 上 wire，drilldowns 指向 diagnose", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td150b-m1-"));
+  try {
+    const runId = "run_warn_td150b";
+    const runDir = join(dir, "runs");
+    writeTranscript(runDir, runId,
+      ev({ type: "run.submitted", ts: "2026-08-24T00:00:00.000Z", runId, agentId: "w", seq: 1 }) +
+      ev({ type: "run.state_change", to: "running", reason: "started", ts: "2026-08-24T00:00:01.000Z", runId, agentId: "w", seq: 2 }) +
+      ev({
+        type: "scorecard.checked", passed: false, runId, agentId: "w", seq: 3,
+        ts: "2026-08-24T00:00:02.000Z",
+        checks: [
+          { name: "hasDoneEvent", passed: true, evidence: "run.completed present" },
+          { name: "hasEvidence", passed: false, evidence: "0 evidence event(s) found", detail: "completed_empty: backend produced no model work" },
+        ],
+      }) +
+      ev({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-08-24T00:00:03.000Z", runId, agentId: "w", seq: 4 }),
+    );
+
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_status", arguments: { runId } });
+      assert.equal(res.isError, undefined);
+      const parsed = res.structuredContent;
+      assert.deepEqual(parsed.scorecardSummary, { passed: false, failedChecks: ["hasEvidence"] },
+        "scorecardSummary = 未过检查的 name 列表");
+      // TD-150 批B: 可见的 scorecard 失败（warn-gate completed run）把 diagnose
+      // 排到 drilldowns 首位——Lead 不离开 status 面就能追失败事实。
+      assert.deepEqual(parsed.availableDrilldowns.map((e) => e.tool),
+        ["run_diagnose", "run_activity", "run_collect"]);
+      // evidence/detail 自由文本不上 wire。
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes("0 evidence event"), "evidence 文本不透传");
+      assert.ok(!dumped.includes("backend produced no model work"), "detail 文本不透传");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD150B-M2 非泄漏钉: acceptance 失败 detail 的独特 stderr 字符串不出现在 run_status 任何输出", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td150b-m2-"));
+  try {
+    const runId = "run_accept_td150b";
+    const runDir = join(dir, "runs");
+    const UNIQUE_STDERR = "TD150B-WIRE-LEAK-PROBE stderr_fingerprint_7a31b2 accept_query failed at line 77";
+    writeTranscript(runDir, runId,
+      ev({ type: "run.submitted", ts: "2026-08-24T00:00:00.000Z", runId, agentId: "w", seq: 1 }) +
+      ev({ type: "run.state_change", to: "running", reason: "started", ts: "2026-08-24T00:00:01.000Z", runId, agentId: "w", seq: 2 }) +
+      ev({
+        type: "scorecard.checked", passed: false, runId, agentId: "w", seq: 3,
+        ts: "2026-08-24T00:00:02.000Z",
+        checks: [{
+          name: "acceptance",
+          passed: false,
+          evidence: "exit≠0: scripts/accept.js",
+          detail: `exit 1: ${UNIQUE_STDERR}`,
+        }],
+      }) +
+      ev({ type: "run.error", phase: "scorecard", detail: `acceptance: exit 1: ${UNIQUE_STDERR}`, runId, agentId: "w", seq: 4, ts: "2026-08-24T00:00:02.500Z" }) +
+      ev({ type: "run.state_change", to: "failed", reason: "scorecard_failed", ts: "2026-08-24T00:00:03.000Z", runId, agentId: "w", seq: 5 }),
+    );
+
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_status", arguments: { runId } });
+      assert.equal(res.isError, undefined);
+      // 整个响应（content text + structuredContent + 元数据）逐一断言：
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes("TD150B-WIRE-LEAK-PROBE"), "独特 stderr 指纹绝不出现");
+      assert.ok(!dumped.includes(UNIQUE_STDERR), "detail 自由文本不透传");
+      assert.ok(!dumped.includes("exit≠0"), "evidence 文本不透传");
+      assert.ok(!dumped.includes("accept.js"), "脚本名（evidence 一部分）不透传");
+      const text = res.content.find((b) => b.type === "text").text;
+      assert.ok(!text.includes(UNIQUE_STDERR), "text 块不透传 detail");
+      assert.deepEqual(res.structuredContent.scorecardSummary, { passed: false, failedChecks: ["acceptance"] },
+        "只有检查名可见");
+      assert.equal(text, JSON.stringify(res.structuredContent), "content 与 structuredContent 语义一致");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD150B-M3: 无 scorecard 事件的 run —— scorecardSummary 字段 absent（键集合不变）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td150b-m3-"));
+  try {
+    const runId = "run_nosc_td150b";
+    const runDir = join(dir, "runs");
+    writeTranscript(runDir, runId, sensitiveFixture(runId));
+
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_status", arguments: { runId } });
+      const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
+      assert.equal("scorecardSummary" in parsed, false, "absent，不是 null 占位");
+      assert.deepEqual(Object.keys(parsed).sort(),
+        ["agentId", "availableDrilldowns", "executionStage", "lastActivity", "lastEvent", "runId", "state", "terminal"],
+        "既有输出键集合逐字节不变（纯 additive）");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD150B-M4: service 结果缺 scorecardSummary / 形状坏 —— 防御性归一化为 absent，不崩 strict schema", async () => {
+  const server = createWaoMcpServer({
+    registryPath: "/server/r.json",
+    runDir: "/server/runs",
+    getRunStatusFn: async (input) => ({
+      runId: input.runId, state: "completed", terminal: true,
+      last: null, lastActivityTs: null, secondsSinceActivity: null,
+      lastActivityKind: null, lastActivitySummary: null,
+      lastEventType: null, lastEventTs: null, lastActivityEventKind: null,
+      executionStage: { phase: "terminal", sinceTs: null, secondsSince: null },
+      scorecardSummary: { passed: "yes", failedChecks: "hasEvidence", evidence: "should-not-ride" },
+    }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_status", arguments: { runId: "run_x" } });
+    assert.equal(res.isError, undefined, "坏形状归一化，不崩 strict schema");
+    const parsed = res.structuredContent;
+    // passed 非 true → false；failedChecks 非数组 → []；多余键丢弃。
+    assert.deepEqual(parsed.scorecardSummary, { passed: false, failedChecks: [] });
+    const dumped = JSON.stringify(res);
+    assert.ok(!dumped.includes("should-not-ride"), "service 侧多余自由文本不上 wire");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+// ---------------------------------------------------------------------
 // M9-3B-07: real stdio dispatch -> run_status poll -> failed terminal.
 //           No model, no CLI. Proves the full MCP supervise loop.
 // ---------------------------------------------------------------------

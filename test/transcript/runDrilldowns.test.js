@@ -398,3 +398,31 @@ test("U-09b: M12-13 malformed/unknown/missing isolationFailureCode does NOT prom
     ["run_delivery_review", "run_activity"],
     "readiness authoritative when present, even with isolationFailureCode set");
 });
+
+test("TD150B-D1: run_status scorecardFailed 事实把 warn-gate completed run 导向 diagnose 优先的 drilldowns", () => {
+  // scorecard 未过但 state=completed（warn 门）→ diagnose 提到首位（≤4 条不变）。
+  assert.deepEqual(
+    selectDrilldowns("run_status", { state: "completed", terminal: true, scorecardFailed: true }).map((e) => e.tool),
+    ["run_diagnose", "run_activity", "run_collect"],
+    "warn-gate completed → diagnose-first");
+  // 失败态优先级不变：failed/aborted/timed_out 不因 scorecardFailed 改变既有列表。
+  for (const st of ["failed", "aborted", "timed_out"]) {
+    const withFact = selectDrilldowns("run_status", { state: st, terminal: true, scorecardFailed: true }).map((e) => e.tool);
+    const without = selectDrilldowns("run_status", { state: st, terminal: true }).map((e) => e.tool);
+    assert.deepEqual(withFact, without, `${st} 态 drilldowns 不受 scorecardFailed 影响`);
+  }
+  // 事实缺失/非严格 true 不触发（absent ≠ promoted）。
+  assert.deepEqual(
+    selectDrilldowns("run_status", { state: "completed", terminal: true }).map((e) => e.tool),
+    ["run_activity", "run_collect"]);
+  assert.deepEqual(
+    selectDrilldowns("run_status", { state: "completed", terminal: true, scorecardFailed: false }).map((e) => e.tool),
+    ["run_activity", "run_collect"], "false 不触发");
+  assert.deepEqual(
+    selectDrilldowns("run_status", { state: "completed", terminal: true, scorecardFailed: "yes" }).map((e) => e.tool),
+    ["run_activity", "run_collect"], "非布尔真值不触发（===true 纪律）");
+  // 每个条目仍是七键闭集形状（与 FACT_MATRIX 同一验证纪律）。
+  for (const e of selectDrilldowns("run_status", { state: "completed", terminal: true, scorecardFailed: true })) {
+    validateDrilldownEntry(e);
+  }
+});

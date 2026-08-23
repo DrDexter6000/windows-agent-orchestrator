@@ -162,6 +162,39 @@ function describeLastEventMeaning(type) {
   return null;
 }
 
+/**
+ * TD-150 批B: scorecard 可见面 — 把绑定作用域内最近一条 scorecard.checked 投影为
+ * { passed, failedChecks }。failedChecks 只含未过检查的 name（WAO 代码写入的检查
+ * 标签），绝不透传 evidence/detail 自由文本——run_status 的非泄漏红线由"只读
+ * name 字段"这一形状保证，不靠调用方自律。无 scorecard.checked 的 run 返回
+ * null（调用方据此让字段 absent——仓库惯例：缺事实 ≠ null 事实）。
+ *
+ * 绑定纪律：与 state/last/lastActivity 同一 R20 绑定作用域（boundReportScope 收窄），
+ * 外 run 尾条伪造的 scorecard.checked 不再供给本字段。取最近一条（reverse 线性扫）：
+ * correction/续跑等多次门控时末次结果胜出，与 findState 的末条语义一致。
+ *
+ * @param {Array} scopeEvents 绑定作用域事件数组
+ * @returns {{passed: boolean, failedChecks: string[]}|null}
+ */
+function projectScorecardSummary(scopeEvents) {
+  let checked = null;
+  for (let i = scopeEvents.length - 1; i >= 0; i -= 1) {
+    const e = scopeEvents[i];
+    if (e?.type === "scorecard.checked") {
+      checked = e;
+      break;
+    }
+  }
+  if (!checked) return null;
+  const failedChecks = Array.isArray(checked.checks)
+    ? checked.checks
+        .filter((c) => c && typeof c === "object" && c.passed !== true && typeof c.name === "string")
+        .map((c) => c.name)
+    : [];
+  // Fail-closed on a malformed/missing flag: only an explicit true reads as passed.
+  return { passed: checked.passed === true, failedChecks };
+}
+
 // ===== Service =====
 
 /**
@@ -243,6 +276,11 @@ export async function getRunStatus({
   // together. Purely additive; state/terminal/activity stay untouched.
   const stage = projectExecutionStage({ events }, { runId, nowFn: _now });
 
+  // TD-150 批B: scorecard 可见面 — same bound scope, purely additive. A run
+  // without any scorecard.checked event carries the field ABSENT (never null):
+  // conditional spread keeps every existing consumer's shape byte-identical.
+  const scorecardSummary = projectScorecardSummary(scope);
+
   return {
     runId,
     agentId,
@@ -266,6 +304,7 @@ export async function getRunStatus({
     // Lead stop. The stable meaning is only that the worker runtime is quiet.
     lastEventMeaning: describeLastEventMeaning(last?.type),
     lastActivityEventKind: lastActivity?.kind ?? null,
+    ...(scorecardSummary ? { scorecardSummary } : {}),
   };
 }
 
