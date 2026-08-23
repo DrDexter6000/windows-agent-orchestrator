@@ -1335,6 +1335,7 @@ export class RunManager {
       packageDeliveryFn: this.packageDeliveryFn,
       verifyDeliveryFn: this.verifyDeliveryFn,
       correctable,
+      readOnlyDeclared: readOnly,
     });
     this.activeRuns.set(finalRunId, run);
     this._ensureSigintHandler();
@@ -1850,6 +1851,7 @@ export class Run {
     packageDeliveryFn = defaultPackageDelivery,
     verifyDeliveryFn = defaultVerifyDelivery,
     correctable = false,
+    readOnlyDeclared = false,
   }) {
     this.runId = runId;
     this.agentId = agentId;
@@ -1877,6 +1879,12 @@ export class Run {
     this._sessionKilled = false;
     this.effectiveCwd = effectiveCwd ?? agent.cwd;
     this.scorecardRules = scorecardRules;
+    // TD-150 批A（T2）：--read-only 声明的活路径透传。声明此前只落 transcript
+    // （run.read_only_declared），scorecard 的合成事件序列里没有该事实 → TD-145
+    // 豁免在真实执行路径上永远不生效。resume 重建的 Run 不传此参（fail-closed）：
+    // resume 只为交付 run 恢复 scorecardRules，而 readOnly 与 delivery 在 start()
+    // 处互斥硬拒，故 resume 路径上 scorecard 整块跳过，豁免无从谈起。
+    this.readOnlyDeclared = readOnlyDeclared === true;
     // TD-103 Phase 3A: delivery context for packaging after completion.
     this.deliveryContext = deliveryContext;
     this._packageDeliveryFn = packageDeliveryFn;
@@ -1886,6 +1894,8 @@ export class Run {
     this.correctable = correctable === true;
     this._correctionsClosed = false;
     this._deliveryPackaged = false; // guard: package at most once
+    // TD-150 批A（T3）：no_effect 告警每 run 至多一次的防重标志（双失败出口共用）。
+    this._noEffectAlertRaised = false;
     // TD-103 Phase 3B concurrency final closeout: transcript-atomic verification.
     //
     // Concurrency state machine for _verifyDeliveryResult:
@@ -2240,7 +2250,13 @@ export class Run {
           ...evidence.map((e) => ({ type: "run.event", ...e })),
           // 附带 messages 供 requireAssistantText 检查（纵深防御：防 completed 但无 text 答案）
           ...messages.map((m) => ({ type: "run.message", role: m.info?.role, parts: m.parts })),
-          { type: "run.completed" },
+          // TD-150 批A（T2）：--read-only 声明的 run 在此注入合成事实，
+          // checkScorecard 的 TD-145 豁免判定才能在活路径上吃到。
+          ...(this.readOnlyDeclared ? [{ type: "run.read_only_declared" }] : []),
+          // TD-150 批A（T2）：闭集 marker 挂到合成 run.completed 上——
+          // hasEvidence 零证据失败的 detail 升级为区分性文案。签名与
+          // "checkScorecard 不读 transcript 文件"契约不变。
+          { type: "run.completed", ...(doneMarker ? { completionMarker: doneMarker } : {}) },
         ];
         const scResult = await checkScorecard({
           events: scorecardEvents,
@@ -2264,6 +2280,10 @@ export class Run {
             const tResult = await this._transition(this.state, "failed", STATE_CHANGE_REASON.scorecard_failed);
             await this._runCleanup();
             if (!tResult.accepted) return _loserResult(tResult.state, { messages, evidence, metrics, scorecard: scResult });
+            // TD-150 批A（T3）：交付类 + completed_empty + scorecard 门拦下 →
+            // no_effect 告警（fire-and-forget，防重；告警失败不影响终态）。
+            this._raiseNoEffectAlert(doneMarker,
+              "delivery run rejected by scorecard gate — backend produced no model work");
             return _loserResult("failed", { messages, evidence, metrics, scorecard: scResult });
           }
         }
@@ -2321,13 +2341,31 @@ export class Run {
           // run.error as factEvent (only on accepted).
           const errCode = deliveryResult.error.code;
           const errMsg = deliveryResult.error.message;
+          // TD-150 批A（T1）：doneMarker 存在时事件携带 completionMarker
+          // （absent 非 null，仓库惯例），且 delivery_failed 的 message 升级为
+          // 区分性文案——打包失败且 worker 未产生模型工作。PACKAGING_FAILURE_CODES
+          // 与诊断码闭集零变更；result.deliveryError 仍透传 sanitized 原文。
+          const failedMessage = doneMarker
+            ? `${errMsg} — packaging failed and the worker produced no model work`
+            : errMsg;
           const tResult = await this._transition(this.state, "failed", STATE_CHANGE_REASON.delivery_failed, {
             attemptEvents: [
-              { type: "run.delivery_failed", payload: { deliveryCode: errCode, message: errMsg } },
+              {
+                type: "run.delivery_failed",
+                payload: {
+                  deliveryCode: errCode,
+                  message: failedMessage,
+                  ...(doneMarker ? { completionMarker: doneMarker } : {}),
+                },
+              },
             ],
             factEvents: [{
               type: "run.error",
-              payload: { phase: "delivery", deliveryCode: errCode },
+              payload: {
+                phase: "delivery",
+                deliveryCode: errCode,
+                ...(doneMarker ? { completionMarker: doneMarker } : {}),
+              },
             }],
           });
           await this._runCleanup();
@@ -2338,6 +2376,9 @@ export class Run {
               deliveryError: { code: errCode, message: errMsg },
             });
           }
+          // TD-150 批A（T3）：交付类 + completed_empty + 打包失败 → no_effect 告警。
+          this._raiseNoEffectAlert(doneMarker,
+            `delivery packaging failed (${errCode}) and worker produced no model work`);
           return _loserResult("failed", {
             messages, evidence, metrics,
             deliveryError: { code: errCode, message: errMsg },
@@ -2461,6 +2502,25 @@ export class Run {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * TD-150 批A（T3）：交付类 run 的 completed_empty 失败出口告警（level=no_effect）。
+   * 触发条件（双席定稿）：交付类 run + doneMarker==="completed_empty" + 失败出口
+   * 终态 failed（scorecard 门拦或打包失败两种形态）。非交付 run 不警（咨询类已有
+   * await_result 同步投影）；无 marker 不警；每 run 至多一次（防重）。
+   * fire-and-forget：告警失败绝不影响终态（budget 先例、alerts.js 铁律）。
+   */
+  _raiseNoEffectAlert(marker, message) {
+    if (!this.deliveryContext
+      || marker !== "completed_empty"
+      || this._noEffectAlertRaised) {
+      return;
+    }
+    this._noEffectAlertRaised = true;
+    raiseAlert("no_effect", message,
+      { runId: this.runId, logPath: join(this.config.runDir, "ALERTS.log") },
+    ).catch(() => { /* 告警失败不影响终态 */ });
   }
 
   /**

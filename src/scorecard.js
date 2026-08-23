@@ -2,6 +2,7 @@ import { stat } from "node:fs/promises";
 import { resolve, isAbsolute } from "node:path";
 import { execFileSync } from "node:child_process";
 import { assessRunEvidence } from "./runEvidenceAssessment.js";
+import { DONE_MARKERS } from "./runEvent.js";
 
 /**
  * scorecard：证据链门控（M6-5，spec §6.1）。
@@ -73,6 +74,15 @@ export async function checkScorecard({ events, cwd, rules }) {
   if (rules?.requireEvidence) {
     const a = assessRunEvidence(events);
     const readOnlyExempt = !a.hasAnyEvidence && readOnlyDeclared;
+    // TD-150 批A：run.completed 携带闭集 marker（completed_empty）时，零证据失败
+    // 的 detail 升级为区分性文案——backend 自报完成但未产生模型工作。判定仍 false：
+    // marker 解释了为什么没有证据，但不把"没证据"变成"有证据"。
+    // 非 DONE_MARKERS 成员的值 fail-closed，维持原文案。
+    const completionMarker = (events ?? []).find(
+      (e) => e.type === "run.completed"
+        && typeof e.completionMarker === "string"
+        && DONE_MARKERS.includes(e.completionMarker),
+    )?.completionMarker;
     checks.push(readOnlyExempt ? {
       name: "hasEvidence",
       passed: true,
@@ -81,7 +91,11 @@ export async function checkScorecard({ events, cwd, rules }) {
       name: "hasEvidence",
       passed: a.hasAnyEvidence,
       evidence: `${a.evidenceEventCount} evidence event(s) found`,
-      ...(a.hasAnyEvidence ? {} : { detail: "no command/file_written/tool_use/tool_result events" }),
+      ...(a.hasAnyEvidence ? {} : {
+        detail: completionMarker
+          ? `${completionMarker}: backend produced no model work`
+          : "no command/file_written/tool_use/tool_result events",
+      }),
     });
   }
 

@@ -17,7 +17,7 @@ import { dirname } from "node:path";
 /**
  * 触发一条告警。
  *
- * @param {"budget"|"stop_unverified"|"leaked_session"} level 告警级别
+ * @param {"budget"|"stop_unverified"|"leaked_session"|"no_effect"} level 告警级别
  * @param {string} message 人读消息
  * @param {{runId?: string, logPath?: string, notify?: () => Promise<void>}} opts
  *   - logPath: ALERTS.log 路径（默认 runs/ALERTS.log）

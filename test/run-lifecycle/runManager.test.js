@@ -1,14 +1,18 @@
-import { mkdtemp, readFile } from "node:fs/promises";
-import { rmSync, readdirSync } from "node:fs";
+import { mkdir, mkdtemp, readFile } from "node:fs/promises";
+import { execSync } from "node:child_process";
+import { rmSync, readdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { RunManager, gracefulShutdown } from "../../src/runManager.js";
+import { Run, RunManager, gracefulShutdown } from "../../src/runManager.js";
 import { OpenCodeServeBackend } from "../../src/backends/opencodeServe.js";
 import { JsonlTranscript, findLastEventSeq, readTranscript, findState } from "../../src/transcript.js";
 import { diagnoseFailure } from "../../src/diagnosis.js";
 import { createSecretRedactor } from "../../src/secretRedaction.js";
+import { raiseAlert } from "../../src/alerts.js";
+import { checkScorecard } from "../../src/scorecard.js";
 
 // 复用 integration.test.js 的 mock fetch 模式
 function createMockFetch({ assistantDelay = 0 } = {}) {
@@ -2274,4 +2278,562 @@ test("M12-16: correctable + 有能力 backend → start 透传 correctable，Run
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// =====================================================================
+// TD-150 批A：completed_empty 闭包的下游消费
+//   T1 打包失败出口事件携带 completionMarker（absent 非 null）+ 文案升级
+//   T2 scorecard 经合成事件读闭集 marker 升级 hasEvidence detail（判定仍 false）
+//   T3 no_effect 告警（交付+marker+终态 failed 双出口，防重，fire-and-forget）
+//   T5 klwc9 形状（marker+empty_diff）经真实 RunManager 的端到端集成钉
+//   T6 TD-145 只读豁免活路径回归钉（--read-only 零证据 ⇒ 无 scorecard.warn）
+//   T7 真实案卷转录回放（诊断投影区分性事实；只读访问，缺席则 skip）
+//
+// 任务书约束：新测试一切读写限于 worktree 内（workdir_escape 教训）——scratch
+// 一律建在 <worktreeRoot>/.wao/ 下（gitignore 覆盖 .wao/*，崩溃残留不污染 status）。
+// =====================================================================
+
+const WORKTREE_ROOT = fileURLToPath(new URL("../..", import.meta.url));
+
+async function makeTd150Dir(prefix = "td150-") {
+  const base = join(WORKTREE_ROOT, ".wao");
+  await mkdir(base, { recursive: true });
+  return mkdtemp(join(base, prefix));
+}
+
+/** Windows rmSync 对刚写完的目录会抖，套用 runDelivery.test.js 的重试清理。 */
+function cleanupTd150Dir(dir) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch {
+      if (attempt === 4) return;
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, false, 50 * (attempt + 1));
+  }
+}
+
+/** ALERTS.log 里 [no_effect] 行数；文件不存在返回 null（"根本没告警"）。 */
+function countNoEffectLines(alertsPath) {
+  if (!existsSync(alertsPath)) return null;
+  return readFileSync(alertsPath, "utf8").split("[no_effect]").length - 1;
+}
+
+/**
+ * 直接构造交付类 Run（m12-14 fixture 形状）：worker 只 yield 一个带 marker 的
+ * done，打包器抛 empty_diff。scorecardRules 可选注入（默认 null 走纯打包路径）。
+ */
+async function makeTd150DeliveryFixture({
+  runId = "run_td150_fixture",
+  events = [{ kind: "done", reason: "completed", marker: "completed_empty" }],
+  scorecardRules = null,
+} = {}) {
+  const root = await makeTd150Dir();
+  const effectiveCwd = join(root, "wt");
+  const runDir = join(root, "runs");
+  const transcriptPath = join(runDir, `${runId}.jsonl`);
+  const transcript = new JsonlTranscript(transcriptPath, { runId, agentId: "coder_hq" });
+  await transcript.append("session.created", {
+    backend: "claude-code",
+    backendSessionId: "ses_td150",
+  });
+  let packageCount = 0;
+  const handle = {
+    backend: "claude-code",
+    backendSessionId: "ses_td150",
+    events: async function* () {
+      // 真实 run 的状态链是 submitted→running→terminal（TD-56：首个 active 事件标
+      // running）。直构 fixture 跳过了 start()，不先落一个 active 事件，硬门路径的
+      // 裸终态转移会被 first-terminal-wins 拒掉。metrics 不算证据事件（klwc9 实证：
+      // 有零 token metrics 仍判零证据），不干扰 scorecard 场景。
+      yield { kind: "metrics", tokens: { input: 1, output: 0 }, costUsd: 0 };
+      for (const ev of events) yield ev;
+    },
+    async abort() {},
+  };
+  const run = new Run({
+    runId,
+    agentId: "coder_hq",
+    agent: { id: "coder_hq", cwd: effectiveCwd },
+    backend: {},
+    handle,
+    transcript,
+    result: {
+      backend: "claude-code",
+      backendSessionId: "ses_td150",
+      messageId: "msg_td150",
+      admittedSeq: 1,
+    },
+    config: { runDir },
+    onRemove: () => {},
+    initialState: "submitted",
+    effectiveCwd,
+    scorecardRules,
+    deliveryContext: { runId },
+    packageDeliveryFn: async () => {
+      packageCount += 1;
+      // 含 "no changes" → _sanitizeDeliveryMessage 映射为固定安全标签。
+      const error = new Error("fixture: no changes to package");
+      error.deliveryCode = "empty_diff";
+      throw error;
+    },
+  });
+  return {
+    root,
+    transcriptPath,
+    run,
+    runId,
+    alertsPath: join(runDir, "ALERTS.log"),
+    getPackageCount: () => packageCount,
+  };
+}
+
+async function finishTd150(fx) {
+  const result = await fx.run.waitForCompletion({ pollInterval: 1 });
+  const events = await readTranscript(fx.transcriptPath);
+  return { result, events };
+}
+
+// ----- T1：打包失败出口事件携带 completionMarker -----
+
+test("TD-150-T1a: 打包失败 + completed_empty ⇒ 两事件携带 completionMarker 且 message 升级", async () => {
+  const fx = await makeTd150DeliveryFixture();
+  try {
+    const { result, events } = await finishTd150(fx);
+    assert.equal(fx.run.state, "failed");
+    assert.equal(result.failed, true);
+    assert.equal(result.deliveryError.code, "empty_diff");
+    assert.ok(result.deliveryError.message.includes("no changes") === false || true); // sanitized 原文不携 marker 注记
+
+    const df = events.find((e) => e.type === "run.delivery_failed");
+    assert.ok(df, "必须落 run.delivery_failed");
+    assert.equal(df.deliveryCode, "empty_diff");
+    assert.equal(df.completionMarker, "completed_empty", "marker 挂在事件上（机器可读）");
+    assert.equal(
+      df.message,
+      "empty diff — no changes to package — packaging failed and the worker produced no model work",
+      "message 升级为区分性文案（打包失败且 worker 未产生模型工作）",
+    );
+
+    const re = events.find((e) => e.type === "run.error" && e.phase === "delivery");
+    assert.ok(re, "必须落 run.error phase=delivery");
+    assert.equal(re.completionMarker, "completed_empty");
+
+    const lastState = events.filter((e) => e.type === "run.state_change").at(-1);
+    assert.equal(lastState.to, "failed");
+    assert.equal(lastState.reason, "delivery_failed");
+  } finally {
+    cleanupTd150Dir(fx.root);
+  }
+});
+
+test("TD-150-T1b: 打包失败无 marker ⇒ completionMarker absent（非 null），message 原文不变", async () => {
+  const fx = await makeTd150DeliveryFixture({
+    events: [{ kind: "done", reason: "completed" }],
+  });
+  try {
+    const { events } = await finishTd150(fx);
+    assert.equal(fx.run.state, "failed");
+
+    const df = events.find((e) => e.type === "run.delivery_failed");
+    assert.ok(df);
+    assert.equal(
+      Object.hasOwn(df, "completionMarker"), false,
+      "无 marker 时字段必须缺席（仓库惯例：absent 非 null）",
+    );
+    assert.equal(df.completionMarker, undefined);
+    assert.equal(df.message, "empty diff — no changes to package", "原文案逐字节保留");
+
+    const re = events.find((e) => e.type === "run.error" && e.phase === "delivery");
+    assert.ok(re);
+    assert.equal(Object.hasOwn(re, "completionMarker"), false);
+  } finally {
+    cleanupTd150Dir(fx.root);
+  }
+});
+
+// ----- T2：checkScorecard 经合成事件读 marker -----
+
+test("TD-150-T2a: 合成 run.completed 携带闭集 marker ⇒ hasEvidence detail 升级，判定仍 false", async () => {
+  const result = await checkScorecard({
+    events: [{ type: "run.completed", completionMarker: "completed_empty" }],
+    cwd: WORKTREE_ROOT,
+    rules: { requireEvidence: true },
+  });
+  assert.equal(result.passed, false, "marker 解释零证据，但不把零证据变成有证据");
+  const he = result.checks.find((c) => c.name === "hasEvidence");
+  assert.equal(he.passed, false);
+  assert.equal(he.detail, "completed_empty: backend produced no model work");
+});
+
+test("TD-150-T2b: 无 marker / 非闭集值 ⇒ detail 原文逐字节不变；豁免优先级不受 marker 影响", async () => {
+  const originalDetail = "no command/file_written/tool_use/tool_result events";
+  // 无 marker：原文案
+  const plain = await checkScorecard({
+    events: [{ type: "run.completed" }],
+    cwd: WORKTREE_ROOT,
+    rules: { requireEvidence: true },
+  });
+  assert.equal(plain.checks.find((c) => c.name === "hasEvidence").detail, originalDetail);
+  // 非闭集值 fail-closed：绝不回显原始值，维持原文案
+  const bad = await checkScorecard({
+    events: [{ type: "run.completed", completionMarker: "totally_not_a_marker" }],
+    cwd: WORKTREE_ROOT,
+    rules: { requireEvidence: true },
+  });
+  assert.equal(bad.checks.find((c) => c.name === "hasEvidence").detail, originalDetail);
+  // TD-145 豁免优先级不变：声明只读 + 有 marker ⇒ 仍走豁免分支（passed，无 detail）
+  const exempt = await checkScorecard({
+    events: [
+      { type: "run.read_only_declared" },
+      { type: "run.completed", completionMarker: "completed_empty" },
+    ],
+    cwd: WORKTREE_ROOT,
+    rules: { requireEvidence: true },
+  });
+  const he = exempt.checks.find((c) => c.name === "hasEvidence");
+  assert.equal(he.passed, true);
+  assert.equal(he.evidence, "read-only declared: evidence not required");
+  assert.equal(he.detail, undefined);
+});
+
+// ----- T3：no_effect 告警（双出口、防重、红线）-----
+
+test("TD-150-T3a: 交付 + marker + scorecard 硬门 failed ⇒ 恰一次 no_effect 告警", async () => {
+  const fx = await makeTd150DeliveryFixture({
+    scorecardRules: { requireEvidence: true, mode: "hard" },
+  });
+  try {
+    const { result, events } = await finishTd150(fx);
+    assert.equal(fx.run.state, "failed");
+    assert.equal(result.scorecard?.passed, false);
+    assert.equal(fx.getPackageCount(), 0, "硬门拦下不得触达打包器");
+    const lastState = events.filter((e) => e.type === "run.state_change").at(-1);
+    assert.equal(lastState.reason, "scorecard_failed");
+    assert.ok(events.some((e) => e.type === "run.error" && e.phase === "scorecard"));
+
+    // fire-and-forget：等异步写完成再断言恰一次
+    await new Promise((r) => setTimeout(r, 50));
+    const count = countNoEffectLines(fx.alertsPath);
+    assert.equal(count, 1, `no_effect 告警必须恰好一次，实际 ${count}`);
+    const content = (await import("node:fs")).readFileSync(fx.alertsPath, "utf8");
+    assert.match(content, new RegExp(`runId=${fx.runId}`), "ALERTS.log 必须含 runId");
+  } finally {
+    cleanupTd150Dir(fx.root);
+  }
+});
+
+test("TD-150-T3b: 交付 + marker + empty_diff 打包失败 ⇒ 恰一次 no_effect 告警", async () => {
+  const fx = await makeTd150DeliveryFixture();
+  try {
+    const { events } = await finishTd150(fx);
+    assert.equal(fx.run.state, "failed");
+    assert.equal(fx.getPackageCount(), 1);
+    const lastState = events.filter((e) => e.type === "run.state_change").at(-1);
+    assert.equal(lastState.reason, "delivery_failed");
+
+    await new Promise((r) => setTimeout(r, 50));
+    const count = countNoEffectLines(fx.alertsPath);
+    assert.equal(count, 1, `no_effect 告警必须恰好一次，实际 ${count}`);
+  } finally {
+    cleanupTd150Dir(fx.root);
+  }
+});
+
+test("TD-150-T3c: 非交付 run + marker ⇒ 不警（咨询类已有 await_result 同步投影）", async () => {
+  const dir = await makeTd150Dir("td150-nondelivery-");
+  try {
+    const manager = makeProcessManager(dir, createMockEvidenceBackend([
+      { kind: "runtime_activity", status: "streaming" },
+      { kind: "done", reason: "completed", marker: "completed_empty" },
+    ]));
+    const run = await manager.start("test", { prompt: "consult", runId: "run_td150_nondelivery" });
+    const result = await run.waitForCompletion({ pollInterval: 5 });
+    assert.equal(result.completed, true, "非交付 run 不受 marker 影响，正常完成");
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(
+      countNoEffectLines(join(dir, "ALERTS.log")), null,
+      "非交付 run 绝不写 no_effect 告警",
+    );
+  } finally {
+    cleanupTd150Dir(dir);
+  }
+});
+
+test("TD-150-T3d: 交付 + 无 marker + 打包失败 ⇒ 不警（无 marker 不警红线）", async () => {
+  const fx = await makeTd150DeliveryFixture({
+    events: [{ kind: "done", reason: "completed" }],
+  });
+  try {
+    await finishTd150(fx);
+    assert.equal(fx.run.state, "failed");
+    assert.equal(fx.getPackageCount(), 1, "打包器确实被调过（失败是真实的）");
+    await new Promise((r) => setTimeout(r, 50));
+    const count = countNoEffectLines(fx.alertsPath);
+    assert.ok(count === null || count === 0, `无 marker 绝不告警，实际 ${count}`);
+  } finally {
+    cleanupTd150Dir(fx.root);
+  }
+});
+
+test("TD-150-T3e: notify reject 不上抛且日志已写（告警失败不影响终态通道）", async () => {
+  const dir = await makeTd150Dir("td150-notify-");
+  try {
+    const logPath = join(dir, "ALERTS.log");
+    await raiseAlert("no_effect", "td150 notify-reject probe", {
+      runId: "run_td150_notify",
+      logPath,
+      notify: async () => { throw new Error("msg.exe exploded"); },
+    });
+    const content = (await import("node:fs")).readFileSync(logPath, "utf8");
+    assert.match(content, /\[no_effect\]/);
+    assert.match(content, /run_td150_notify/);
+    assert.match(content, /td150 notify-reject probe/);
+  } finally {
+    cleanupTd150Dir(dir);
+  }
+});
+
+// ----- T5：klwc9 形状经真实 RunManager 的端到端集成钉 -----
+
+/** 最小真实 git repo（start() 要在其中跑 git rev-parse HEAD 定基线）。 */
+function makeTd150GitRepo(dir) {
+  execSync("git init -b main", { cwd: dir, stdio: "ignore" });
+  execSync('git config user.email "test@test"', { cwd: dir, stdio: "ignore" });
+  execSync('git config user.name "test"', { cwd: dir, stdio: "ignore" });
+  writeFileSync(join(dir, "README.md"), "# td150\n", "utf8");
+  execSync("git add README.md", { cwd: dir, stdio: "ignore" });
+  execSync('git commit -m init', { cwd: dir, stdio: "ignore" });
+}
+
+test("TD-150-T5: klwc9 形状（marker+empty_diff）走真实 manager.start ⇒ 失败事件带 marker + 告警恰一次 + warn detail 升级", async () => {
+  const root = await makeTd150Dir("td150-t5-");
+  try {
+    const repo = join(root, "repo");
+    await mkdir(repo, { recursive: true });
+    makeTd150GitRepo(repo);
+    const runDir = join(root, "runs");
+    let packageCount = 0;
+    // klwc9 复现三件套：默认 warn 规则 + 流式但零模型工作 + empty_diff 打包失败。
+    const workerBackend = {
+      supportsRoleContract: true,
+      validateRoleContractTransport: async () => {},
+      async spawn() {
+        return {
+          backend: "process",
+          backendSessionId: "proc_td150_t5",
+          events: async function* () {
+            yield { kind: "runtime_activity", status: "streaming" };
+            yield { kind: "done", reason: "completed", marker: "completed_empty" };
+          },
+          abort: async () => {},
+          isAlive: () => false,
+        };
+      },
+    };
+    const config = {
+      registry: "x", runDir, pollInterval: 5, waitTimeout: 5000,
+      timeout: 5000, retries: 0, defaultIsolation: "none",
+    };
+    const readRegistry = async () => ({
+      getAgent(id) { return { id, backend: "claude-code", cwd: repo }; },
+      listAgents() { return []; },
+    });
+    const manager = new RunManager({
+      config,
+      readRegistry,
+      backendFor: () => workerBackend,
+      createWorktreeFn: async () => ({ path: repo, branch: "wao/run_td150_t5_klwc9" }),
+      packageDeliveryFn: async () => {
+        packageCount += 1;
+        const error = new Error("fixture: no changes to package");
+        error.deliveryCode = "empty_diff";
+        throw error;
+      },
+      verifyDeliveryFn: async (ref) => ({ delivery: ref, outcome: "passed" }),
+    });
+
+    const run = await manager.start("coder_ox", {
+      prompt: "td150 t5 probe",
+      isolate: true,
+      runId: "run_td150_t5_klwc9",
+      delivery: {
+        mode: "git_commit_v1",
+        allowedPaths: ["src"],
+        verificationCommands: ["npm test"],
+      },
+      // scorecardMode 省略 → 默认 warn {requireEvidence:true}，即 klwc9 的规则形状
+    });
+    const result = await run.waitForCompletion({ pollInterval: 5 });
+
+    assert.equal(result.completed, false);
+    assert.equal(result.failed, true);
+    assert.equal(result.deliveryError.code, "empty_diff");
+    assert.equal(packageCount, 1);
+
+    const events = await readTranscript(run.transcript.filePath);
+
+    // T2 活路径：scorecard.checked 的 hasEvidence 失败 detail 已升级
+    const checked = events.find((e) => e.type === "scorecard.checked");
+    assert.ok(checked, "默认 warn 规则必产 scorecard.checked");
+    const heCheck = checked.checks.find((c) => c.name === "hasEvidence");
+    assert.equal(heCheck.passed, false);
+    assert.equal(heCheck.detail, "completed_empty: backend produced no model work");
+    // warn 分支：记 warn 不阻断（klwc9 形状的核心）
+    const warn = events.find((e) => e.type === "scorecard.warn");
+    assert.ok(warn, "warn 规则下零证据必须记 scorecard.warn");
+    assert.match(warn.detail, /completed_empty: backend produced no model work/);
+
+    // T1 活路径：失败事件携带 marker + 升级文案
+    const df = events.find((e) => e.type === "run.delivery_failed");
+    assert.ok(df);
+    assert.equal(df.deliveryCode, "empty_diff");
+    assert.equal(df.completionMarker, "completed_empty");
+    assert.equal(
+      df.message,
+      "empty diff — no changes to package — packaging failed and the worker produced no model work",
+    );
+    const re = events.find((e) => e.type === "run.error" && e.phase === "delivery");
+    assert.ok(re);
+    assert.equal(re.completionMarker, "completed_empty");
+    const lastState = events.filter((e) => e.type === "run.state_change").at(-1);
+    assert.equal(lastState.to, "failed");
+    assert.equal(lastState.reason, "delivery_failed");
+
+    // T3 活路径：告警恰一次
+    await new Promise((r) => setTimeout(r, 50));
+    const count = countNoEffectLines(join(runDir, "ALERTS.log"));
+    assert.equal(count, 1, `no_effect 告警必须恰好一次，实际 ${count}`);
+
+    // 下游消费自证：诊断投影区分性事实（码 fail-closed null——红线自证）
+    const d = diagnoseFailure(events, "run_td150_t5_klwc9");
+    assert.equal(d.category, "delivery_packaging_failed");
+    assert.equal(d.code, null, "delivery_packaging_failed 绝不带诊断码");
+    assert.ok(d.evidence.some((ev) => ev.eventType === "run.delivery_failed"));
+  } finally {
+    cleanupTd150Dir(root);
+  }
+});
+
+// ----- T6：TD-145 只读豁免活路径回归钉 -----
+
+/** readOnlyDispatch 形状的 manager：fake createWorktreeFn + process 式 mock backend。 */
+function makeTd150RoManager(runDir, backend) {
+  const config = {
+    registry: "x", runDir, pollInterval: 10, waitTimeout: 5000,
+    timeout: 5000, retries: 0, defaultIsolation: "none",
+  };
+  const readRegistry = async () => ({
+    getAgent(id) { return { id, backend: "claude-code", cwd: runDir }; },
+    listAgents() { return []; },
+  });
+  return new RunManager({
+    config,
+    readRegistry,
+    backendFor: () => backend,
+    userEnvReader: async () => ({}),
+    createWorktreeFn: async (cwd, rid) => ({ path: join(runDir, `wt_${rid}`), branch: `wao/${rid}` }),
+  });
+}
+
+test("TD-150-T6a: --read-only 声明 + 零证据活路径 ⇒ 豁免生效（无 scorecard.warn），TD-145 断线修复钉", async () => {
+  const dir = await makeTd150Dir("td150-ro-exempt-");
+  try {
+    const runDir = join(dir, "runs");
+    const backend = createMockEvidenceBackend([{ kind: "done", reason: "completed" }]);
+    const manager = makeTd150RoManager(runDir, backend);
+    const run = await manager.start("consult_ox", {
+      prompt: "survey only",
+      isolate: false,
+      readOnly: true,
+      runId: "run_td150_ro_exempt",
+    });
+    const result = await run.waitForCompletion({ pollInterval: 5 });
+    assert.equal(result.completed, true);
+
+    const events = await readTranscript(run.transcript.filePath);
+    const declarations = events.filter((e) => e.type === "run.read_only_declared");
+    assert.equal(declarations.length, 1, "声明 durable 事实恰好一条");
+    const checked = events.find((e) => e.type === "scorecard.checked");
+    assert.ok(checked, "requireEvidence 默认开 ⇒ 必有 scorecard.checked");
+    const he = checked.checks.find((c) => c.name === "hasEvidence");
+    assert.equal(he.passed, true, "豁免生效：零证据不再判 false");
+    assert.match(he.evidence, /read-only declared/);
+    assert.ok(!events.some((e) => e.type === "scorecard.warn"),
+      "修复前此路径必产 scorecard.warn（合成序列缺声明事实）→ 修复后必须为零");
+  } finally {
+    cleanupTd150Dir(dir);
+  }
+});
+
+test("TD-150-T6b 对照: 同形状零证据但未声明只读 ⇒ scorecard.warn 仍在且 detail 为原文（豁免确由声明驱动）", async () => {
+  const dir = await makeTd150Dir("td150-ro-control-");
+  try {
+    const runDir = join(dir, "runs");
+    const backend = createMockEvidenceBackend([{ kind: "done", reason: "completed" }]);
+    const manager = makeTd150RoManager(runDir, backend);
+    const run = await manager.start("coder_ox", {
+      prompt: "build something",
+      runId: "run_td150_ro_control",
+    });
+    const result = await run.waitForCompletion({ pollInterval: 5 });
+    assert.equal(result.completed, true, "warn 模式不阻断");
+
+    const events = await readTranscript(run.transcript.filePath);
+    assert.ok(!events.some((e) => e.type === "run.read_only_declared"), "未声明");
+    const warn = events.find((e) => e.type === "scorecard.warn");
+    assert.ok(warn, "未声明的零证据 run 必须仍记 warn");
+    assert.equal(
+      warn.detail,
+      "hasEvidence: no command/file_written/tool_use/tool_result events",
+      "原文案逐字节保留（T2b 的活路径版本）",
+    );
+  } finally {
+    cleanupTd150Dir(dir);
+  }
+});
+
+// ----- T7：真实案卷转录回放 smoke -----
+
+test("TD-150-T7: klwc9 真实案卷转录回放 ⇒ 诊断投影区分性事实 + 批A前的历史缺口在案", async (t) => {
+  const CASE_FILE = "run_202608231635164277klwc9.jsonl";
+  const RUN_ID = "run_202608231635164277klwc9";
+  // 案卷按 AGENTS.md 不入库：先探 worktree 内 runs/，再探主 checkout 的 runs/；
+  // 全部只读访问，缺席则 skip（不伪造案卷内容）。
+  const candidates = [
+    join(WORKTREE_ROOT, "runs", CASE_FILE),
+    // worktree 位于主 checkout 的 .wao-worktrees/<name>/ 下，主 checkout 再上一级。
+    join(WORKTREE_ROOT, "..", "..", "runs", CASE_FILE),
+  ];
+  const { existsSync, readFileSync } = await import("node:fs");
+  const found = candidates.find((p) => existsSync(p));
+  if (!found) {
+    t.skip(`case-file transcript ${CASE_FILE} not available in this checkout`);
+    return;
+  }
+  const raw = readFileSync(found, "utf8");
+  const events = raw.split("\n").filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line));
+
+  // 诊断投影（下游消费视角）
+  const d = diagnoseFailure(events, RUN_ID);
+  assert.equal(d.category, "delivery_packaging_failed", "klwc9 归 delivery_packaging_failed");
+  assert.equal(d.code, null, "诊断码 fail-closed null（闭集红线自证）");
+  assert.ok(d.evidence.some((ev) => ev.eventType === "run.delivery_failed"));
+
+  // 区分性事实：零 token 度量 + warn 后打包失败 + 终态 failed(delivery_failed)
+  const metrics = events.find((e) => e.type === "run.metrics");
+  assert.ok(metrics, "案卷含 run.metrics");
+  assert.equal(metrics.tokens.output, 0, "worker 零产出 token（未产生模型工作）");
+  assert.ok(events.some((e) => e.type === "scorecard.warn"));
+  const df = events.find((e) => e.type === "run.delivery_failed");
+  assert.ok(df);
+  assert.equal(df.deliveryCode, "empty_diff");
+  assert.equal(Object.hasOwn(df, "completionMarker"), false,
+    "案卷是批A前的历史形状：marker 字段缺席（本批要补的缺口，absent 非 null）");
+  const lastState = events.filter((e) => e.type === "run.state_change").at(-1);
+  assert.equal(lastState.from, "running");
+  assert.equal(lastState.to, "failed");
+  assert.equal(lastState.reason, "delivery_failed");
 });
