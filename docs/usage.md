@@ -296,7 +296,7 @@ npm run cli -- run coder_low --prompt "总结这个项目的 README"
 npm run cli -- run coder_low --prompt "..." --format json
 ```
 
-> **前台 vs 后台生命周期（TD-148，2026-08-23 实证）**：前台 `run` 的 CLI 进程持有 worker 子进程（Windows Job Object 耦合）——`--wait-timeout` 到期会 abort 后端事件流并**终止子进程**，观察窗到期不是纯旁观；`resume` 不带 `--wait` 时父进程立即退出、子进程被 Job Object 连坐。因此**交付类长任务（含全量测试自验）一律 `--background --cwd <目标项目根>` 派发**：分离 runner 持有生命周期，与调用方/会话解耦；监督用独立 `runs wait <runId>` / `runs status` 轮询即可。
+> **前台 vs 后台生命周期（TD-148，2026-08-23 实证；同日审计升 P0 修正措辞）**：真正的杀手是 `--wait-timeout` 到期时的控制器 abort——它会**终止 worker 子进程**，且 `--background` 与它同用照样重蹈（后台不是护身符）。`resume` 不带 `--wait` 还有姊妹脸：父进程被 ref'd 子管道吊住静默挂起、或退出时子进程被 Job Object 连坐。**安全组合 = 后台分离派发不挂派发侧等待上限 + 监督走独立 `runs wait <runId>` / `runs status` 轮询**；需要限时监督时用监督命令自身的窗口（到期只结束观察、不碰 worker）。
 
 ### 场景 1b：单次派发换模型（--model，R10-A）
 
