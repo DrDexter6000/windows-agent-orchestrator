@@ -146,6 +146,24 @@ serve 后台进程不一定。
 - **已知局限：token 预算硬闸门（S1-1）对 kimi-code 无效**。kimi stream-json 不含 usage/token 字段，进程式 backend 无 session endpoint 可轮询。给 kimi agent 配 tokenBudget 不会报错但不生效。kimi 的成本控制靠：kimi 自带超时（15min）+ WAO `waitTimeout`。这是进程式 backend 的固有限制（claude-code/codex 同样无 session endpoint，但 claude-code 的 result 事件含 usage，kimi 不含）。
 - **完成判定**：kimi 无显式 done 事件，靠进程 exit（exit 0 → done(completed)，非 0 → done(failed)），由 ProcessBackend 兜底。注意 exit 0 仅表示传输完成，不等于 worker 产出了可用结果——见 §6.3 末尾的 completed-empty 说明。
 
+### 1.6 派发报 `credential missing: <ENV>`，但变量明明已 setx（TD-144）
+
+- **症状**：派发秒报 typed 错误 `credential missing: OPENROUTER_API_KEY`（registry 条目声明了 `provider.apiKeyEnv`）；但 PowerShell 查 User 作用域明明有值。
+- **根因**：进程 env 块是**启动时刻**的注册表快照——setx 只影响之后新启动的登录会话。在变量注册**之前**就已运行的宿主（ZCode / 终端 / serve）派生的一切子进程都拿不到它。registry preflight 的 required-credential 检查是 presence 声明级（advisory），不做 live-env 探测（已知边界）。
+- **验证**：
+  ```
+  # 双作用域查值（以 PowerShell 为准；Git Bash 下 reg query 的 /v 可能被
+  # MSYS 路径转换吃掉，造成"假缺失"误诊）
+  powershell -Command "[Environment]::GetEnvironmentVariable('OPENROUTER_API_KEY','User')"
+  powershell -Command "[Environment]::GetEnvironmentVariable('OPENROUTER_API_KEY','Machine')"
+  # 再看即将运行 WAO 的同一 shell 里子进程是否可见：
+  node -e "console.log(!!process.env.OPENROUTER_API_KEY)"
+  ```
+- **修复**（三选一）：
+  - 重启宿主应用/终端（拿新的 env 快照）；
+  - 进程内桥接：PowerShell 读 User 作用域值注入当前会话再派发（值不落盘、不回显、不进提示词；life-index 会话 2026-08-22 实证有效）；
+  - 把变量写进 shell profile（每次会话自动带出）。
+
 ---
 
 ## 2. CLI 与 shell

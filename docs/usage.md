@@ -296,6 +296,8 @@ npm run cli -- run coder_low --prompt "总结这个项目的 README"
 npm run cli -- run coder_low --prompt "..." --format json
 ```
 
+> **前台 vs 后台生命周期（TD-148，2026-08-23 实证）**：前台 `run` 的 CLI 进程持有 worker 子进程（Windows Job Object 耦合）——`--wait-timeout` 到期会 abort 后端事件流并**终止子进程**，观察窗到期不是纯旁观；`resume` 不带 `--wait` 时父进程立即退出、子进程被 Job Object 连坐。因此**交付类长任务（含全量测试自验）一律 `--background --cwd <目标项目根>` 派发**：分离 runner 持有生命周期，与调用方/会话解耦；监督用独立 `runs wait <runId>` / `runs status` 轮询即可。
+
 ### 场景 1b：单次派发换模型（--model，R10-A）
 
 "这一次任务的会审选用 codex CLI 驱动的 gpt-5.6-sol-xhigh" 这类**单次生效、不落配置**的模型覆盖：
