@@ -690,7 +690,7 @@ ignored 文件不出现不影响成功。只有全通过才返回 DeliveryRef。
 **Fail-closed**（inspection + packaging 均适用）：empty diff、dirty base（pre-staged changes）、
 disallowed path（不在 allowedPaths 或 path-segment boundary 越界）、non-Git path、primary checkout
 （非 linked worktree）、detached HEAD、wrong branch、base commit mismatch、ephemeral/non-persistent
-isolation、invalid runId（ref 注入/路径遍历）、invalid allowedPaths（含空 segment/尾分隔符/重复分隔符）、
+isolation、invalid runId（ref 注入/路径遍历）、invalid allowedPaths（含空 segment/重复分隔符/根 "/"、"."、".."、绝对路径；**单个尾分隔符自 TD-137④ 起归一化放行**——段边界前缀语义，见 isPathAllowed）、
 invalid baseCommit（`--` 开头 option 注入）、whitespace-only verification — 均拒绝，不静默改写。
 
 **生命周期**（Phase 3 实现，Phase 2 不发 transcript 事件）：

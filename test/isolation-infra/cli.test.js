@@ -4754,7 +4754,7 @@ test("TD-137① 裸 runs list 默认最新优先：updatedAt 新的在前（text
   }
 });
 
-test("TD-137① --latest N 截取与 null-updatedAt 殿后语义不变", async () => {
+test("TD-137① --latest N 截取与全量排序不变（updatedAt desc，无信封 run 由末事件 ts 兜底推导）", async () => {
   const { runsCommand } = await import("../../src/commands/runs.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-td137-latest-"));
   try {
@@ -4793,6 +4793,18 @@ test("TD-137② buildWaitWindowHint 单一构造处：自带上限 + 同族三�
     assert.match(hint, /同族：runs wait 600000 \/ delivery waitMs ≤300000 \/ await-result ≤270000/,
       "三个同族上限全部在场（数值零变更，只做交叉指路）");
   }
+});
+
+test("TD-137②-a: WAIT_FAMILY_CAPS 提示文案与三上限常量一致（防漂移钉：改常量不改文案必红）", async () => {
+  const { buildWaitWindowHint, RUN_WAIT_MAX_MS } = await import("../../src/application/runWait.js");
+  const { DELIVERY_WAIT_MS_MAX } = await import("../../src/application/runDelivery.js");
+  const { RUN_AWAIT_RESULT_MAX_MS } = await import("../../src/application/runAwaitResult.js");
+  const hint = buildWaitWindowHint(RUN_WAIT_MAX_MS);
+  // 审计指出：文案里是字面量数值，未插值常量——本钉保证任一常量调整而文案
+  // 未同步时必红（SSOT 数值防漂移）。
+  assert.match(hint, new RegExp(`runs wait ${RUN_WAIT_MAX_MS}`), "runs wait 上限须与导出常量一致");
+  assert.match(hint, new RegExp(`delivery waitMs ≤${DELIVERY_WAIT_MS_MAX}`), "delivery 上限须与导出常量一致");
+  assert.match(hint, new RegExp(`await-result ≤${RUN_AWAIT_RESULT_MAX_MS}`), "await-result 上限须与导出常量一致");
 });
 
 /** TD-137② 夹具：非终态/终态最小 transcript（m12-11-wait-services 同款事件序列）。 */
