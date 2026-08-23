@@ -43,6 +43,7 @@ export async function checkScorecard({ events, cwd, rules }) {
     .map((cmd) => withInferredCommandExitCode(cmd, toolResults));
   const files = evidenceEvents.filter((e) => e.kind === "file_written");
   const hasDone = (events ?? []).some((e) => e.type === "run.completed");
+  const readOnlyDeclared = (events ?? []).some((e) => e.type === "run.read_only_declared");
 
   const checks = [];
 
@@ -66,9 +67,17 @@ export async function checkScorecard({ events, cwd, rules }) {
 
   // 4. hasEvidence：requireEvidence 时检查至少一条证据
   // TD-97：复用统一证据评估（assessRunEvidence），不再自己数 evidenceEvents.length
+  // TD-145：--read-only 声明的纯文本咨询 run 必然零证据事件。transcript 带
+  // run.read_only_declared durable 事实且零证据时豁免（不判 false、无 detail）；
+  // 有证据时维持原有自然通过路径与计数文案，未声明时失败行为原样保留。
   if (rules?.requireEvidence) {
     const a = assessRunEvidence(events);
-    checks.push({
+    const readOnlyExempt = !a.hasAnyEvidence && readOnlyDeclared;
+    checks.push(readOnlyExempt ? {
+      name: "hasEvidence",
+      passed: true,
+      evidence: "read-only declared: evidence not required",
+    } : {
       name: "hasEvidence",
       passed: a.hasAnyEvidence,
       evidence: `${a.evidenceEventCount} evidence event(s) found`,

@@ -252,6 +252,48 @@ test("小尾巴2: requireEvidence + 只有 assistant message（无 command/file/
   assert.equal(evCheck.passed, false, "hasEvidence 应 false——message 不是 evidence");
 });
 
+// ---------------------------------------------------------------------------
+// TD-145：--read-only 声明的纯文本咨询 run 必然零证据事件，hasEvidence 不应一律
+// 判 false（系统性 scorecard.warn 噪声）。transcript 带 run.read_only_declared
+// durable fact 时零证据豁免。回归红线：未声明 + 零证据仍失败，已由上方
+// "M6-5: requireEvidence true + 无任何证据 → 失败" 钉死，不在此重复。
+// ---------------------------------------------------------------------------
+
+test("TD-145: --read-only 声明 + 零证据 → hasEvidence 豁免通过（说明性文案、无 detail）", async () => {
+  // transcript 落盘形状（transcript.js appendReadOnlyDeclared）：envelope 即事实，
+  // payload 为空——scorecard 只看 type 字段存在与否。
+  const events = [
+    { type: "run.read_only_declared" },
+    { type: "run.completed" },
+  ];
+  const result = await checkScorecard({
+    events, cwd: ".",
+    rules: { requireEvidence: true },
+  });
+  const evCheck = result.checks.find((c) => c.name === "hasEvidence");
+  assert.equal(evCheck.passed, true, "read-only 声明 + 零证据应豁免，不判 false");
+  assert.match(evCheck.evidence, /read-only declared/, "evidence 应含说明性豁免文案");
+  assert.equal(evCheck.detail, undefined, "豁免是自然通过路径，不应带 detail");
+  assert.equal(result.passed, true);
+});
+
+test("TD-145: --read-only 声明 + 有证据 → 走原有自然通过路径（计数文案不变）", async () => {
+  const events = [
+    { type: "run.read_only_declared" },
+    { type: "run.completed" },
+    ev("command", { command: "echo hi", exitCode: 0 }),
+  ];
+  const result = await checkScorecard({
+    events, cwd: ".",
+    rules: { requireEvidence: true },
+  });
+  const evCheck = result.checks.find((c) => c.name === "hasEvidence");
+  assert.equal(evCheck.passed, true);
+  assert.equal(evCheck.evidence, "1 evidence event(s) found", "有证据时保持原计数文案");
+  assert.equal(evCheck.detail, undefined);
+  assert.equal(result.passed, true);
+});
+
 test("M6-5: 每条 check 含 name/passed/evidence 三字段", async () => {
   const events = [
     { type: "run.completed" },
