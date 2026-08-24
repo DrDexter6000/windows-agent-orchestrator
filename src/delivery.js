@@ -878,7 +878,9 @@ function isAbsolutePathLiteralStart(token) {
 // must not turn the value into a flagged path. This stays a conservative lexical
 // scan — NOT a shell interpreter.
 const PATH_INTRODUCING_DELIMITERS = /[=<>;|]/;
-function tokenHasAbsolutePathLiteral(token) {
+// Exported for the TD-157 dispatch-contract referenced-path probe, which must
+// apply the SAME absolute-literal judgment as this module (zero drift).
+export function tokenHasAbsolutePathLiteral(token) {
   if (isAbsolutePathLiteralStart(token)) return true;
   if (typeof token !== "string" || token.length === 0) return false;
   // URL-like token: only its start matters (checked above); do not split.

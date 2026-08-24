@@ -21,6 +21,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { statSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   EXECUTION_PROFILES,
@@ -29,6 +32,7 @@ import {
   listExecutionProfileSummaries,
   resolveDeliveryVerification,
 } from "../../src/application/executionProfiles.js";
+import { extractReferencedRelativePaths } from "../../src/application/runDispatchContract.js";
 
 // ===== B2: frozen trusted catalog =====
 
@@ -248,4 +252,39 @@ test("B3: success verification object is a fresh copy — mutating it never touc
   // The frozen catalog is untouched.
   assert.deepEqual(getExecutionProfile("node-npm-ci-test-v1").verificationCommands, ["npm test"]);
   assert.deepEqual(getExecutionProfile("node-npm-ci-test-v1").verificationSetupCommands, ["npm ci"]);
+});
+
+// ===== TD-157: frozen-profile ↔ repo binding (docs-consistency style) =====
+//
+// The dispatch-contract advisory probe treats every relative-path literal in a
+// profile's folded commands as something that must exist under the TARGET
+// workspace. The same obligation holds for THIS repo's own frozen catalog at
+// authoring time: any repo-relative path a profile references must exist in-repo
+// when the catalog is committed — otherwise the profile is spec-rotted (moved /
+// renamed file) and every delivery using it would silently probe-miss. The test
+// reuses the SAME extractor the advisory probe uses; existence checks are
+// read-only stats INSIDE this checkout. (The current catalog references no path
+// literals, so this passes vacuously today — its value is guarding every future
+// profile edit.)
+test("TD-157-BINDING: every frozen-profile command references only repo-relative paths that exist in THIS repo", () => {
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  const referenced = new Set();
+  for (const id of EXECUTION_PROFILE_IDS) {
+    const p = getExecutionProfile(id);
+    for (const rel of extractReferencedRelativePaths([
+      ...p.verificationSetupCommands,
+      ...p.verificationCommands,
+    ])) {
+      referenced.add(rel);
+    }
+  }
+  for (const rel of referenced) {
+    let exists = false;
+    try {
+      exists = statSync(join(repoRoot, rel)) !== undefined;
+    } catch {
+      exists = false;
+    }
+    assert.ok(exists, `a frozen profile references "${rel}", which does not exist in this repo — spec rot`);
+  }
 });

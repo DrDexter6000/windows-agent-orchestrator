@@ -161,7 +161,7 @@ Output:
 | advisory | boolean | yes | const: true |
 | contractValid | boolean | yes |  |
 | sections | object | yes |  |
-| issueCodes | array<string> | yes | enum: profile_unknown \| profile_requires_delivery \| profile_inline_conflict \| delivery_invalid \| invalid_verification_path \| workspace_unbound \| registry_unreadable \| agent_not_found |
+| issueCodes | array<string> | yes | enum: profile_unknown \| profile_requires_delivery \| profile_inline_conflict \| delivery_invalid \| invalid_verification_path \| workspace_unbound \| registry_unreadable \| agent_not_found \| referenced_path_probe_miss |
 | observations | array<string> | yes |  |
 | profile | object\|null | yes |  |
 | availableProfiles | array<object> | no |  |

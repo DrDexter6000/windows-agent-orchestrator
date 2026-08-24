@@ -24,7 +24,11 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { runDispatchContractCheck, CONTRACT_CHECK_ISSUE_CODES } from "../../src/application/runDispatchContract.js";
+import {
+  runDispatchContractCheck,
+  CONTRACT_CHECK_ISSUE_CODES,
+  extractReferencedRelativePaths,
+} from "../../src/application/runDispatchContract.js";
 import { EXECUTION_PROFILE_IDS } from "../../src/application/executionProfiles.js";
 import { JsonlTranscript } from "../../src/transcript.js";
 import { readRegistry } from "../../src/registry.js";
@@ -118,7 +122,7 @@ test("B4: with no profile selected, bounded availableProfiles (id+counts+summary
 test("B4: issueCodes is a closed set (CONTRACT_CHECK_ISSUE_CODES)", () => {
   // Every code the service can emit must be a member of the frozen closed set.
   assert.ok(Array.isArray(CONTRACT_CHECK_ISSUE_CODES));
-  for (const c of ["profile_unknown", "profile_requires_delivery", "profile_inline_conflict", "delivery_invalid", "invalid_verification_path", "workspace_unbound", "registry_unreadable", "agent_not_found"]) {
+  for (const c of ["profile_unknown", "profile_requires_delivery", "profile_inline_conflict", "delivery_invalid", "invalid_verification_path", "workspace_unbound", "registry_unreadable", "agent_not_found", "referenced_path_probe_miss"]) {
     assert.ok(CONTRACT_CHECK_ISSUE_CODES.includes(c), `closed set must include ${c}`);
   }
 });
@@ -439,4 +443,317 @@ test("M12-13-CONTRACT-TIMEOUT-INVALID: an invalid contract-check verificationTim
       `invalid timeout ${JSON.stringify(bad)} classified by the shared validator as delivery_invalid`);
     assert.equal(r.advisory, true, "advisory semantics preserved even on an invalid contract");
   }
+});
+
+// ===== TD-157: referenced-path advisory probe (fail-open; never gates) =====
+//
+// The probe extracts relative-path-looking literals from the RESOLVED effective
+// verification assertion+setup commands (inline AND profile states) plus the
+// allowedPaths entries, stats them against the bound workspace root through an
+// INJECTED predicate (path semantics never touch the real fs here), and emits
+// ONE section-level advisory code on a definite miss. contractValid must NEVER
+// flip because of it — that is the whole point of TD-157: the probe reports,
+// it never gates.
+
+const PROBE_WS = { bound: true, source: "lead_session", root: "/ws" };
+
+// Injected fake-fs existence predicate. The service hands us ABSOLUTE joined
+// paths; normalize separators and read the relative tail after the "/ws/"
+// binding-root marker. `throwOn` simulates non-ENOENT fs errors (EACCES …) so
+// fail-open behavior is provable without touching a real filesystem.
+function fakeWorkspaceFs(existingRelPaths, throwOnRelPaths = []) {
+  const existing = new Set(existingRelPaths);
+  const throwOn = new Set(throwOnRelPaths);
+  return (absPath) => {
+    const norm = String(absPath).split("\\").join("/");
+    const at = norm.lastIndexOf("/ws/");
+    if (at < 0) return false;
+    const rel = norm.slice(at + 4);
+    if (throwOn.has(rel)) {
+      const e = new Error(`EACCES: permission denied, stat '${rel}'`);
+      e.code = "EACCES";
+      throw e;
+    }
+    return existing.has(rel);
+  };
+}
+
+test("TD-157-EXTRACT: flags are never collected; bare path-shaped values are", () => {
+  // "--input" and "-v" start with "-" → skipped entirely (even though --input
+  // carries a value); "app.js"/"data.json"/"tests/unit/a.spec.js" are bare
+  // tokens with a common suffix or "/" → collected.
+  assert.deepEqual(
+    extractReferencedRelativePaths(["node app.js --input data.json -v"]),
+    ["app.js", "data.json"],
+  );
+  assert.deepEqual(
+    extractReferencedRelativePaths(['npx vitest run "tests/unit/app.spec.js"']),
+    ["tests/unit/app.spec.js"],
+    "a quoted region is one literal and its relative path is collected",
+  );
+});
+
+test("TD-157-EXTRACT: absolute / drive / URL literals are never probed as relative candidates", () => {
+  assert.deepEqual(
+    extractReferencedRelativePaths([
+      "/usr/bin/node build.js",
+      "python C:\\tools\\run.py",
+      "curl https://api.example.com/v1/data.json",
+    ]),
+    ["build.js"],
+    "only the genuinely relative token survives",
+  );
+});
+
+test("TD-157-EXTRACT: multi-command extraction is deduplicated across setup + assertion order", () => {
+  assert.deepEqual(
+    extractReferencedRelativePaths([
+      "node src/a.js",
+      "npm run lint",
+      "bash scripts/setup.sh",
+      "node src/a.js",
+      "test src/b.json",
+    ]),
+    ["src/a.js", "scripts/setup.sh", "src/b.json"],
+    "repeats collapse to first occurrence; path-less words are ignored",
+  );
+});
+
+test("TD-157-EXTRACT: glob metacharacters and .. traversal segments are never probed", () => {
+  assert.deepEqual(
+    extractReferencedRelativePaths(["vitest run 'src/**/*.spec.js'"]),
+    [],
+    "a glob may legally match nothing as a literal",
+  );
+  assert.deepEqual(
+    extractReferencedRelativePaths(["node ../escape/x.js"]),
+    [],
+    ".. must never leave the workspace root",
+  );
+});
+
+test("TD-157-SVC-PASS: referenced paths that exist under the bound root emit NO issue code", async () => {
+  const r = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: {
+      mode: "git_commit_v1",
+      allowedPaths: ["src/**"],
+      verificationCommands: ["node scripts/gen.mjs", "bash scripts/setup.sh"],
+    },
+    workspaceBinding: PROBE_WS,
+    registryPath: null,
+    pathExistsFn: fakeWorkspaceFs(["scripts/gen.mjs", "scripts/setup.sh", "src"]),
+  });
+  assert.ok(!r.issueCodes.includes("referenced_path_probe_miss"), "existing refs stay silent");
+  assert.equal(r.contractValid, true);
+});
+
+test("TD-157-SVC-MISS: a missing referenced path emits the code AND contractValid stays true (fail-open pin)", async () => {
+  const r = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: {
+      mode: "git_commit_v1",
+      allowedPaths: ["src/**"],
+      verificationCommands: ["node tools/report/gen.mjs"],
+    },
+    workspaceBinding: PROBE_WS,
+    registryPath: null,
+    pathExistsFn: fakeWorkspaceFs(["src"]),
+  });
+  assert.ok(r.issueCodes.includes("referenced_path_probe_miss"), "missing ref is reported");
+  assert.equal(r.contractValid, true,
+    "the probe is section-level advisory — it must NEVER flip contractValid");
+  assert.equal(r.sections.contract, "observed");
+  assert.equal(r.advisory, true);
+  // Fixed observation text only — dynamic paths are never echoed.
+  const blob = JSON.stringify(r);
+  assert.ok(!blob.includes("tools/report/gen.mjs"), "no dynamic path in the result");
+  assert.ok(!blob.includes("/ws"), "no absolute root echo in the result");
+  assert.ok(
+    r.observations.some((o) => o === "one or more referenced relative paths were not found under the bound workspace (advisory probe; reported only)"),
+    "the fixed observation string accompanies the code",
+  );
+});
+
+test("TD-157-SVC-SETUP: verificationSetupCommands are probed exactly like assertion commands", async () => {
+  const clean = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: {
+      mode: "git_commit_v1",
+      allowedPaths: ["src/**"],
+      verificationSetupCommands: ["bash ops/bootstrap/seed.sh"],
+      verificationCommands: ["npm test"],
+    },
+    workspaceBinding: PROBE_WS,
+    registryPath: null,
+    pathExistsFn: fakeWorkspaceFs(["ops/bootstrap/seed.sh", "src"]),
+  });
+  assert.ok(!clean.issueCodes.includes("referenced_path_probe_miss"));
+
+  const missing = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: {
+      mode: "git_commit_v1",
+      allowedPaths: ["src/**"],
+      verificationSetupCommands: ["bash ops/bootstrap/seed.sh"],
+      verificationCommands: ["npm test"],
+    },
+    workspaceBinding: PROBE_WS,
+    registryPath: null,
+    pathExistsFn: fakeWorkspaceFs(["src"]),
+  });
+  assert.ok(missing.issueCodes.includes("referenced_path_probe_miss"),
+    "a missing SETUP-referenced path fires the probe too");
+  assert.equal(missing.contractValid, true, "still advisory-only for setup commands");
+});
+
+test("TD-157-SVC-PROFILE: profile-resolved commands reach the probe (not just inline literals)", async () => {
+  // The resolver is injected to return a PROFILE-source resolution whose folded
+  // commands reference a missing path — proving the probe consumes the RESOLVED
+  // effective commands, so inline and profile states are covered by one path.
+  const r = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: { mode: "git_commit_v1", allowedPaths: ["src/**"] },
+    executionProfileId: "custom-mechanical-v1",
+    resolveVerificationFn: () => ({
+      ok: true,
+      source: "profile",
+      profileId: "custom-mechanical-v1",
+      verification: {
+        commands: ["node audit/check.mjs"],
+        setupCommands: [],
+        unavailableReason: null,
+      },
+    }),
+    workspaceBinding: PROBE_WS,
+    registryPath: null,
+    pathExistsFn: fakeWorkspaceFs(["src"]),
+  });
+  assert.ok(r.issueCodes.includes("referenced_path_probe_miss"),
+    "profile-folded commands are probed");
+  assert.equal(r.contractValid, true);
+});
+
+test("TD-157-SVC-ALLOWEDPATH: entry + parent both missing is a strong typo signal; parent-exists / top-level misses stay silent", async () => {
+  const call = (allowedPaths, existing) => runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: {
+      mode: "git_commit_v1",
+      allowedPaths,
+      verificationCommands: ["npm test"],
+    },
+    workspaceBinding: PROBE_WS,
+    registryPath: null,
+    pathExistsFn: fakeWorkspaceFs(existing),
+  });
+
+  const typo = await call(["lib-typo/deep/**"], ["src"]);
+  assert.ok(typo.issueCodes.includes("referenced_path_probe_miss"),
+    "neither the entry base nor its parent exists → strong typo signal");
+
+  const parentExists = await call(["docs/new-guide.md"], ["docs"]);
+  assert.ok(!parentExists.issueCodes.includes("referenced_path_probe_miss"),
+    "parent directory exists → plausibly a NEW file being added, not a typo");
+
+  const topLevel = await call(["brand-new-top.md"], []);
+  assert.ok(!topLevel.issueCodes.includes("referenced_path_probe_miss"),
+    "a top-level entry's parent IS the bound root — a lone top-level miss never fires");
+});
+
+test("TD-157-SVC-DEDUPE: many simultaneous misses still emit the code exactly once", async () => {
+  const r = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: {
+      mode: "git_commit_v1",
+      allowedPaths: ["lib-typo/deep/**"],
+      verificationCommands: ["node gone/a.mjs"],
+      verificationSetupCommands: ["bash gone/b.sh"],
+    },
+    workspaceBinding: PROBE_WS,
+    registryPath: null,
+    pathExistsFn: fakeWorkspaceFs([]),
+  });
+  assert.equal(
+    r.issueCodes.filter((c) => c === "referenced_path_probe_miss").length,
+    1,
+    "one closed-set label per check, however many references missed",
+  );
+  assert.equal(r.contractValid, true);
+});
+
+test("TD-157-SVC-FILOPEN: fs errors are silently skipped — uncertainty never becomes a defect", async () => {
+  const throwing = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: {
+      mode: "git_commit_v1",
+      allowedPaths: ["src/**"],
+      verificationCommands: ["node gone/a.mjs"],
+    },
+    workspaceBinding: PROBE_WS,
+    registryPath: null,
+    pathExistsFn: fakeWorkspaceFs([], ["gone/a.mjs"]), // EACCES on the only candidate
+  });
+  assert.ok(!throwing.issueCodes.includes("referenced_path_probe_miss"),
+    "an fs error on a candidate is skipped, not mis-reported as a miss");
+  assert.equal(throwing.contractValid, true);
+
+  const granular = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: {
+      mode: "git_commit_v1",
+      allowedPaths: ["src/**"],
+      verificationCommands: ["node gone/a.mjs gone/b.mjs"],
+    },
+    workspaceBinding: PROBE_WS,
+    registryPath: null,
+    // One candidate throws, the other definitely misses — skip is PER-CHECK:
+    // the definite miss still surfaces while the erroring one stays silent.
+    pathExistsFn: fakeWorkspaceFs([], ["gone/a.mjs"]),
+  });
+  assert.ok(granular.issueCodes.includes("referenced_path_probe_miss"),
+    "per-check fail-open: other candidates are still probed after one errors");
+});
+
+test("TD-157-SVC-GATE: no probe without a usable contract or a bound root", async () => {
+  const unbound = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: {
+      mode: "git_commit_v1",
+      allowedPaths: ["gone/deep/**"],
+      verificationCommands: ["node gone/a.mjs"],
+    },
+    workspaceBinding: { bound: false },
+    registryPath: null,
+    pathExistsFn: fakeWorkspaceFs([]),
+  });
+  assert.ok(unbound.issueCodes.includes("workspace_unbound"));
+  assert.ok(!unbound.issueCodes.includes("referenced_path_probe_miss"),
+    "unbound workspace has nothing to check against — probe stays silent");
+
+  const conflict = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    delivery: {
+      mode: "git_commit_v1",
+      allowedPaths: ["gone/deep/**"],
+      verificationCommands: ["node gone/a.mjs"],
+    },
+    executionProfileId: "node-npm-test-v1",
+    workspaceBinding: PROBE_WS,
+    registryPath: null,
+    pathExistsFn: fakeWorkspaceFs([]),
+  });
+  assert.ok(conflict.issueCodes.includes("profile_inline_conflict"));
+  assert.ok(!conflict.issueCodes.includes("referenced_path_probe_miss"),
+    "when the resolver rejects the contract there are no resolved commands to probe");
 });
