@@ -591,7 +591,12 @@ const RED_23_WIRE = 75492;
 // output schema enum grows +29 bytes (77829 → 77858). desc unchanged
 // (FROZEN_22_DESC_CEILING untouched).
 // Ceiling re-frozen at the exact measured 77858.
-const FROZEN_22_WIRE_CEILING = 77858;
+// TD-159 adoption-protocol batch: VERIFICATION_FAILURE_SUMMARY gains the
+// OPTIONAL nullable boolean stderrTailInTranscript (advisory pointer — tails'
+// CONTENT never crosses; presence only). run_delivery output schema grows
+// +156 bytes (77858 → 78014). desc unchanged.
+// Ceiling re-frozen at the exact measured 78014.
+const FROZEN_22_WIRE_CEILING = 78014;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -733,7 +738,7 @@ test("M12-10-H: deterministic 22-tool wire at or below the frozen ceiling", asyn
 // FROZEN_22_DESC_CEILING unchanged). M12-10-H re-freezes the wire ceiling;
 // this hash remains the losslessness proof.
 const DESC_STRIPPED_CONTRACT_SHA =
-  "1dece78f6f1a11c77b495e14011777e4a4289411197cb23a5d32cd03bf25135e";
+  "034f80647245cb60f82c49f34925be0193e05031529389e6d7cdd0e6cced875c";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

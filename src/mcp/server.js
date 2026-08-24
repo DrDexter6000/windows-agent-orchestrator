@@ -1306,6 +1306,10 @@ const VERIFICATION_FAILURE_SUMMARY = z.object({
   timedOut: z.boolean().nullable(),
   stdoutBytes: z.number().int().nonnegative().nullable(),
   stderrBytes: z.number().int().nonnegative().nullable(),
+  // TD-159: advisory pointer — the FAILED command's result frame carried a
+  // non-empty stdoutTail/stderrTail, i.e. diagnostic detail EXISTS in the
+  // transcript (never the content itself). null when undeterminable.
+  stderrTailInTranscript: z.boolean().nullable(),
 }).strict();
 
 // M11-10: run_delivery gains an OPTIONAL bounded read-only wait. The waitMs
@@ -1609,6 +1613,11 @@ export function projectVerificationFailureSummary(ref, verificationStatus, proje
   let timedOut = null;
   let stdoutBytes = null;
   let stderrBytes = null;
+  // TD-159: advisory pointer — a non-empty stdoutTail/stderrTail on the FAILED
+  // command's result frame means diagnostic detail exists in the transcript.
+  // The projection carries only this closed boolean, never the tail content.
+  // Undeterminable (no index / no result object) → null.
+  let stderrTailInTranscript = null;
   if (failedCommandIndex !== null && Array.isArray(resultsList)) {
     const r = resultsList[failedCommandIndex];
     if (r && typeof r === "object" && Number.isInteger(r.index) && r.index === failedCommandIndex) {
@@ -1619,6 +1628,8 @@ export function projectVerificationFailureSummary(ref, verificationStatus, proje
       timedOut = r.timedOut === true || r.timedOut === false ? r.timedOut : null;
       stdoutBytes = Number.isInteger(r.stdoutBytes) && r.stdoutBytes >= 0 ? r.stdoutBytes : null;
       stderrBytes = Number.isInteger(r.stderrBytes) && r.stderrBytes >= 0 ? r.stderrBytes : null;
+      stderrTailInTranscript = (typeof r.stdoutTail === "string" && r.stdoutTail.length > 0)
+        || (typeof r.stderrTail === "string" && r.stderrTail.length > 0);
     }
   }
 
@@ -1631,6 +1642,7 @@ export function projectVerificationFailureSummary(ref, verificationStatus, proje
     timedOut,
     stdoutBytes,
     stderrBytes,
+    stderrTailInTranscript,
   };
 }
 

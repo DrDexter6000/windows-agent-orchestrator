@@ -10,7 +10,7 @@
 // The summary is a single nullable field `verificationFailureSummary` on the
 // standard run_delivery output, shared by the point-in-time query and the
 // waitMs readiness handshake. Non-null ONLY when verificationStatus === "failed".
-// Exact eight safe scalar fields:
+// Exact nine safe scalar fields (TD-159 added the advisory pointer):
 //   code, failedCommandIndex, declaredCommandCount, executedCommandCount,
 //   exitCode, timedOut, stdoutBytes, stderrBytes
 //
@@ -52,6 +52,9 @@ const EXACT_SUMMARY_KEYS = [
   "timedOut",
   "stdoutBytes",
   "stderrBytes",
+  // TD-159: advisory pointer（true=失败命令 result frame 带非空尾，细节在转录；
+  // 内容本身永不上线）。无索引/无 result 对象 → null。
+  "stderrTailInTranscript",
 ];
 
 /** A failed verification object shaped like verifyDelivery's real output. */
@@ -669,7 +672,7 @@ test("M11-12B-P7: full run_delivery output for a failed delivery has the exact e
 // This guard pins that the MCP wire boundary does NOT widen with them: the
 // summary keeps projecting exactly the eight safe scalar fields and never
 // echoes tail content, even when the failed result carries juicy output.
-test("R17: summary ignores result tail fields — exact eight keys, zero tail content on the wire", () => {
+test("R17+TD-159: tail CONTENT never on the wire; presence surfaces as advisory boolean (nine keys)", () => {
   const TAIL_SENTINEL = "R17-TAIL-CONTENT-SENTINEL";
   const ref = failedRef({
     verification: failedVerification({
@@ -685,15 +688,17 @@ test("R17: summary ignores result tail fields — exact eight keys, zero tail co
     }),
   });
   const s = projectVerificationFailureSummary(ref, "failed", "command_failed");
-  // Exactly the eight keys — the tails are not a ninth.
+  // TD-159 amended R17: exactly the NINE keys — tails are not content, but their
+  // PRESENCE is now surfaced as the advisory boolean stderrTailInTranscript.
   assert.deepEqual(Object.keys(s).sort(), EXACT_SUMMARY_KEYS.slice().sort());
+  assert.equal(s.stderrTailInTranscript, true, "tails present ⇒ advisory pointer true");
   // The per-command scalars still project from the failed result.
   assert.equal(s.exitCode, 2);
   assert.equal(s.stderrBytes, 200);
   // Zero tail content crosses the boundary.
   const dumped = JSON.stringify(s);
   assert.ok(!dumped.includes(TAIL_SENTINEL), "tail content must not leak into the summary");
-  assert.ok(!dumped.includes("stdoutTail") && !dumped.includes("stderrTail"), "tail field names must not appear");
+  assert.ok(!dumped.includes('"stdoutTail"') && !dumped.includes('"stderrTail"'), "tail field names must not appear as wire keys");
   assert.ok(!dumped.includes("truncated"), "truncation markers must not appear");
 });
 
@@ -739,4 +744,31 @@ test("M12-6: setup-phase failure projects setup counts + per-command facts, not 
   assert.equal(summary.stderrBytes, 200);
   // The exact eight-key shape is unchanged.
   assert.deepEqual([...Object.keys(summary)].sort(), [...EXACT_SUMMARY_KEYS].sort());
+});
+
+// ===== TD-159: stderrTailInTranscript advisory pointer =====
+
+test("TD-159: tails present ⇒ stderrTailInTranscript true; absent ⇒ false; no failed index ⇒ null", () => {
+  const base = {
+    commands: ["npm test", "npm run build"],
+    results: [
+      { index: 0, command: "npm test", exitCode: 0, signal: null, timedOut: false, durationMs: 10, stdoutBytes: 5, stderrBytes: 0 },
+      { index: 1, command: "npm run build", exitCode: 2, signal: null, timedOut: false, durationMs: 50, stdoutBytes: 10, stderrBytes: 200,
+        stdoutTail: "last 100 bytes of out", stderrTail: "…[truncated 42 bytes] of err" },
+    ],
+  };
+  const ref = failedRef({ verification: failedVerification({ results: base.results }) });
+  const withTails = projectVerificationFailureSummary(ref, "failed", "command_failed");
+  assert.equal(withTails.stderrTailInTranscript, true, "失败命令带非空尾 ⇒ advisory true");
+
+  const noTails = projectVerificationFailureSummary(failedRef({ verification: failedVerification({ failedCommandIndex: 0, results: [
+    { index: 0, command: "npm test", exitCode: 1, signal: null, timedOut: false, durationMs: 5, stdoutBytes: 3, stderrBytes: 1 },
+  ] }) }), "failed", "command_failed");
+  assert.equal(noTails.stderrTailInTranscript, false, "无尾 ⇒ false（不是 null）");
+
+  // 无 failedCommandIndex（不可判定）→ null。
+  const bad = JSON.parse(JSON.stringify(ref));
+  bad.verification.results[1].index = 99; // 与 failedCommandIndex=1 不匹配
+  const undet = projectVerificationFailureSummary(bad, "failed", "command_failed");
+  assert.equal(undet.stderrTailInTranscript, null, "不可判定 ⇒ null");
 });

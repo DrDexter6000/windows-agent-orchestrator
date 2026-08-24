@@ -1178,6 +1178,19 @@ npm run cli -- runs delivery review <runId> --file-index 0 [--cursor TOKEN] --fo
 
 Lead 仍须在 decision 前完整 review（`run_delivery_review` / `run_delivery_review_bundle`）并独立决定；reverify passed 不构成 acceptance，reverify failed 也不自动 reject。失败返回固定 `run_delivery_reverify failed`，无 partial structured output、路径或 secret 泄漏。
 
+> **⚠ 规格错误不适用 reverify（TD-159，2026-08-24）**：`command_failed` 虽在 eligible 闭集内，但 reverify 会**逐字节重跑原始断言**——若失败成因是任务书/规格本身写错（如引用了不存在的测试路径），重跑只会原样再红一次，且 reverify 是**一次性**的（最多一条 durable outcome）：错走这一步会静默烧掉唯一机器杠杆。派发前用 `run_dispatch_contract_check` 的 advisory 探针预检引用路径；验证失败时先归因——**规格错误走"验证失败采纳协议"，不要碰 reverify**。
+
+### 验证失败采纳协议（TD-159，2026-08-24）
+
+当控制面交付验证 failed 且归因为 **Lead 侧规格/环境错误**（而非工件缺陷）时的标准处置：
+
+1. **归因先行**：读 `runs delivery` 摘要与转录内 `delivery_verification_*` 事件的 `stdoutTail/stderrTail`（失败命令的诊断细节在此）；确认失败命令在正确路径/环境下同样失败，且工件本身无需修改。
+2. **commit trailer 交叉引用**：采纳集成时在 commit message 加 `WAO-Adopted-From: <runId>` 与 `WAO-Original-Delivery: <deliveryCommitSha>`。decide 的 reason 字段落盘会 trim+redact 且**不经 MCP 回读**（已知审计面限制）——可 grep 的 trailer 才是审计侧能复核的那半边。
+3. **独立审计强制**：采纳必须经独立审计席回审，证据规格写死：目标 repo 的 HEAD hash + `git branch --contains <sha>` + reflog；禁止 Lead 单方闭环（自证闭环已被实证抓过一次：TD-150 批B 首轮"已集成"声称被 reflog/grep 证伪）。
+4. **集成后全量终验**照 §8.2 错峰执行，绿后方可推送。
+
+`run_delivery` 投影在验证失败摘要中携带 `stderrTailInTranscript` 布尔提示位（true = 失败命令的 result frame 带非空 stdoutTail/stderrTail，诊断细节去转录里读；投影永不携带尾内容本身）。
+
 当 MCP transport 不可用时，WAO CLI adapter fallback 调用同一 application service 与安全输出投影，JSON 语义与 MCP 一致；它不是绕过安全投影的 raw 通道，也不提供 assertion-command override：
 
 ```bash
