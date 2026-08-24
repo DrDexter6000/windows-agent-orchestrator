@@ -2904,7 +2904,7 @@ function cliScorecardLines(elements) {
   return elements.filter((l) => l.startsWith("Scorecard:"));
 }
 
-test("TD150B-C1: status warn run —— JSON 后一行 Scorecard: warn (hasEvidence)，detail 不回显", async () => {
+test("TD150B-C1: status warn run —— scorecard 摘要折叠进 JSON（verdict=warn），detail 全输出面零回显", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-sc-warn-"));
   try {
     writeFileSync(join(dir, "run_scw.jsonl"),
@@ -2938,7 +2938,7 @@ test("TD150B-C1: status warn run —— JSON 后一行 Scorecard: warn (hasEvide
   }
 });
 
-test("TD150B-C2: status 全过 scorecard → `Scorecard: passed`；门拦下的 failed run → failed + 检查名", async () => {
+test("TD150B-C2: status 全过 scorecard → JSON.scorecard.verdict=passed；门拦下的 failed run → failed + 检查名", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-sc-pass-"));
   try {
     writeFileSync(join(dir, "run_scp.jsonl"),
