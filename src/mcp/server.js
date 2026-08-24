@@ -1291,7 +1291,7 @@ const DECISION_TYPE_ENUM = z.enum([...DELIVERY_DECISION_TYPES]);
 // `close` event, so this is the real causal domain (finding A).
 const VERIFICATION_MAX_EXIT_CODE = 0xffffffff;
 
-// M11-12B: strict 8-key verification-failure summary schema. Non-null ONLY when
+// M11-12B: strict 9-key verification-failure summary schema (TD-159 added stderrTailInTranscript). Non-null ONLY when
 // verificationStatus === "failed". Safe scalars only — never command text,
 // stdout/stderr content, signal, paths, env, credentials, or dynamic errors.
 // `code` reuses FAILURE_CODE_ENUM (the same safe closed set as
@@ -1437,7 +1437,7 @@ const RUN_DELIVERY_OUTPUT_BASE = z.object({
   verificationStatus: VERIFICATION_STATUS_ENUM.nullable(),
   verificationFailureCode: FAILURE_CODE_ENUM.nullable(),
   // M11-12B: nullable verification-failure summary. Non-null ONLY when
-  // verificationStatus === "failed". Strict 8-key object of safe scalars;
+  // verificationStatus === "failed". Strict 9-key object of safe scalars;
   // shared by the point-in-time query and the waitMs readiness handshake
   // (both build their payload via buildRunDeliveryPayload).
   verificationFailureSummary: VERIFICATION_FAILURE_SUMMARY.nullable(),
@@ -1555,18 +1555,18 @@ const RUN_DELIVERY_DESCRIPTION =
 /**
  * M11-12B: project a safe, factual verification-failure summary from the raw
  * DeliveryRef verification object. Returns null unless verificationStatus ===
- * "failed". Exact eight safe scalar fields; never command text, stdout/stderr
+ * "failed". Exact nine safe scalar fields (TD-159 added stderrTailInTranscript); never command text, stdout/stderr
  * content, signal, paths, env, credentials, or dynamic errors.
  *
  * Windows exit codes (finding A): preserve nonnegative 32-bit (0..0xffffffff),
  * including real Windows values like 9009 (command-not-found). Negative,
  * fractional, non-number, and > 0xffffffff are nulled — never clamped/masked.
  *
- * Result identity (finding B): the four per-command fields (exitCode/timedOut/
+ * Result identity (finding B): the five per-command fields (exitCode/timedOut/
  * stdoutBytes/stderrBytes) project ONLY from results[failedCommandIndex] when
  * it is a plain object whose `index` is an integer exactly equal to
  * failedCommandIndex. On mismatch/missing/malformed result, counts/index/code
- * stay safe but the four per-command fields are null.
+ * stay safe but the five per-command fields are null.
  *
  * `projectedFailureCode` is the SAME code computed for the top-level
  * verificationFailureCode (finding C) — already through the safe closed set —
@@ -1608,7 +1608,7 @@ export function projectVerificationFailureSummary(ref, verificationStatus, proje
 
   // Per-command result fields (finding B): require a plain result object whose
   // index is an integer exactly equal to failedCommandIndex. On any mismatch,
-  // keep counts/index/code safe; null the four per-command fields.
+  // keep counts/index/code safe; null the five per-command fields.
   let exitCode = null;
   let timedOut = null;
   let stdoutBytes = null;
