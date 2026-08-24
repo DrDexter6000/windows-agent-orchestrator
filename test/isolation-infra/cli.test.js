@@ -2920,17 +2920,19 @@ test("TD150B-C1: status warn run —— JSON 后一行 Scorecard: warn (hasEvide
     const elements = await captureElements(async () => {
       await statusCommand(["run_scw", "--run-dir", dir], { runDir: dir });
     });
-    assert.deepEqual(cliScorecardLines(elements), ["Scorecard: warn (hasEvidence)"],
-      "恰一行摘要（warn-gate completed run 标 warn，括号只列检查名）");
-    assert.ok(!elements.some((l) => l.startsWith("Scorecard:") && l !== "Scorecard: warn (hasEvidence)"),
-      "摘要行只含检查名（evidence/detail 自由文本不进新增输出面）");
-    // JSON 块保持既有 TD-75 键形状（scorecardSummary 只走摘要行，不进 JSON 块）。
-    // 注：JSON 块内既有 `last` 字段原样回显末事件（TD-75 既有形状，warn run 的末事件
-    // 可以就是 scorecard.checked）——该既有面不属本批；非泄漏红线针对的是新增
-    // scorecardSummary 投影与 MCP 线格式（见 mcpRunStatus TD150B-M2 全响应钉）。
+    // 审计修正后：摘要折叠进 JSON 对象；`last` 为 scorecard.checked 时投影为
+    // 闭集安全视图——evidence/detail 自由文本全输出面零回显。
+    const out = elements.join("\n");
+    assert.ok(!out.includes("completed_empty: backend produced no model work"),
+      "detail 自由文本零回显（含经 last 字段的旧通道）");
     const parsed = cliJsonBlock(elements);
-    assert.equal(parsed.state, "completed");
-    assert.equal("scorecardSummary" in parsed, false, "JSON 块键集合不变（纯 additive 走独立行）");
+    assert.deepEqual(parsed.scorecard,
+      { verdict: "warn", failedChecks: ["hasEvidence"] },
+      "摘要折叠进 JSON：warn-gate completed run 标 warn，括号只列检查名");
+    assert.deepEqual(parsed.last,
+      { type: "scorecard.checked", passed: false },
+      "last 为 scorecard.checked 时投影为闭集安全视图（不带 evidence/detail）");
+    assert.ok(!cliScorecardLines(elements).length, "不再有 JSON 块后的独立 Scorecard 行");
   } finally {
     rmrfRetry(dir);
   }
@@ -2949,7 +2951,9 @@ test("TD150B-C2: status 全过 scorecard → `Scorecard: passed`；门拦下的 
     const elementsP = await captureElements(async () => {
       await statusCommand(["run_scp", "--run-dir", dir], { runDir: dir });
     });
-    assert.deepEqual(cliScorecardLines(elementsP), ["Scorecard: passed"]);
+    const parsedP = cliJsonBlock(elementsP);
+    assert.deepEqual(parsedP.scorecard, { verdict: "passed", failedChecks: [] },
+      "全过 scorecard → passed 标签、空 failedChecks");
 
     writeFileSync(join(dir, "run_scf.jsonl"),
       JSON.stringify({ type: "run.submitted", agentId: "coder_hq", ts: "2026-08-24T00:00:00.000Z" }) + "\n" +
@@ -2961,7 +2965,8 @@ test("TD150B-C2: status 全过 scorecard → `Scorecard: passed`；门拦下的 
     const elementsF = await captureElements(async () => {
       await statusCommand(["run_scf", "--run-dir", dir], { runDir: dir });
     });
-    assert.deepEqual(cliScorecardLines(elementsF), ["Scorecard: failed (acceptance)"],
+    const parsedF = cliJsonBlock(elementsF);
+    assert.deepEqual(parsedF.scorecard, { verdict: "failed", failedChecks: ["acceptance"] },
       "非 completed 形态的门拦下 = failed 标签");
     const outF = elementsF.join("\n");
     assert.ok(!outF.includes("nope") && !outF.includes("accept.js"), "detail/evidence 不回显");
@@ -2973,7 +2978,9 @@ test("TD150B-C2: status 全过 scorecard → `Scorecard: passed`；门拦下的 
     const elementsN = await captureElements(async () => {
       await statusCommand(["run_scn", "--run-dir", dir], { runDir: dir });
     });
-    assert.deepEqual(cliScorecardLines(elementsN), [], "无 scorecard 事件 → 无摘要行");
+    const parsedN = cliJsonBlock(elementsN);
+    assert.equal("scorecard" in parsedN, false, "无 scorecard 事件 → JSON 字段 absent");
+    assert.ok(!cliScorecardLines(elementsN).length, "无摘要行");
   } finally {
     rmrfRetry(dir);
   }

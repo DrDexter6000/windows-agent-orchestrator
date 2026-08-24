@@ -48,6 +48,24 @@ export async function statusCommand(args, config) {
   // the existing TD-75 field subset (byte-compatible output); the service also
   // returns machine fields for MCP that the CLI does not print.
   const status = await getRunStatus({ runId, runDir });
+  // TD-150 批B + 审计修正：scorecard.checked 成为末事件时，裸 `last` 会把
+  // evidence/detail 自由文本一并回显（非泄漏形状被旧字段绕过）。CLI 显示层把该
+  // 形态投影为闭集安全视图；其余末事件原样保留。
+  const lastDisplay = status.last && status.last.type === "scorecard.checked"
+    ? {
+        type: "scorecard.checked",
+        passed: status.scorecardSummary ? status.scorecardSummary.passed === true : null,
+      }
+    : status.last;
+  const sc = status.scorecardSummary;
+  const scorecard = sc
+    ? {
+        verdict: sc.passed ? "passed"
+          : status.state === "completed" ? "warn"
+          : "failed",
+        failedChecks: Array.isArray(sc.failedChecks) ? sc.failedChecks : [],
+      }
+    : undefined;
   console.log(JSON.stringify({
     runId: status.runId,
     agentId: status.agentId,
@@ -55,24 +73,15 @@ export async function statusCommand(args, config) {
     // M12-17: submitted-stage execution semantics — printed via the service's
     // additive executionStage projection (never re-derived in the CLI).
     executionStage: status.executionStage,
-    last: status.last,
+    last: lastDisplay,
     lastActivityTs: status.lastActivityTs,
     secondsSinceActivity: status.secondsSinceActivity,
     lastActivityKind: status.lastActivityKind,
     lastActivitySummary: status.lastActivitySummary,
+    // TD-150 批B + 审计修正：摘要折叠进 JSON 对象（纯 JSON 可解析契约不破），
+    // 不再在 JSON 块后追加行。无 scorecard.checked 的 run 字段 absent。
+    ...(scorecard ? { scorecard } : {}),
   }, null, 2));
-  // TD-150 批B: scorecard 可见面的一行摘要（JSON 块之后）。无 scorecard.checked
-  // 的 run 不打印——既有纯 JSON 输出保持逐字节不变。判定标签是闭集三态：
-  // passed / warn（completed + scorecard 未过 = warn-gate 没拦）/ failed（门拦下
-  // 或非 completed 形态）；括号里只列检查 name，绝不回显 evidence/detail 文本。
-  const sc = status.scorecardSummary;
-  if (sc) {
-    const names = Array.isArray(sc.failedChecks) ? sc.failedChecks.join(", ") : "";
-    const verdict = sc.passed ? "passed"
-      : status.state === "completed" ? "warn"
-      : "failed";
-    console.log(`Scorecard: ${verdict}${names ? ` (${names})` : ""}`);
-  }
 }
 
 export async function tailCommand(args, config) {
