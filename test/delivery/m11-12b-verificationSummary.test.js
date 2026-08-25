@@ -26,7 +26,7 @@
 //      failureCode projects through the existing safe closed set; missing/
 //      invalid/unknown yields the same safe "unknown" in BOTH top-level
 //      verificationFailureCode AND summary.code. Non-failed states are null.
-//   D. Boundary shape: exact eight-key object; strict schema; wire-visible
+//   D. Boundary shape: exact nine-key object (TD-159 added stderrTailInTranscript); strict schema; wire-visible
 //      nullable field shared by point-in-time + waitMs.
 //
 // Preservation: point-in-time vs waitMs equivalence, malformed-data safety,
@@ -428,13 +428,13 @@ test("M11-12B-C4: non-failed states → summary null AND verificationFailureCode
 // D. Boundary shape (finding D): exact 8 keys + strict nullable schema
 // =====================================================================
 
-test("M11-12B-D1: summary projects EXACTLY the eight safe keys (no more, no less)", () => {
+test("M11-12B-D1: summary projects EXACTLY the nine safe keys (no more, no less)", () => {
   const s = projectVerificationFailureSummary(failedRef(), "failed", "command_failed");
   assert.deepEqual(Object.keys(s).sort(), EXACT_SUMMARY_KEYS.slice().sort(),
-    `summary must have exactly the eight keys; got ${Object.keys(s).sort()}`);
+    `summary must have exactly the nine keys; got ${Object.keys(s).sort()}`);
 });
 
-test("M11-12B-D1b: malformed verification object still yields exactly the eight keys, fails safe", () => {
+test("M11-12B-D1b: malformed verification object still yields exactly the nine keys, fails safe", () => {
   // ref present but verification missing entirely.
   const s1 = projectVerificationFailureSummary({ deliveryCommit: "d".repeat(40) }, "failed", "command_failed");
   assert.deepEqual(Object.keys(s1).sort(), EXACT_SUMMARY_KEYS.slice().sort());
@@ -449,7 +449,7 @@ test("M11-12B-D1b: malformed verification object still yields exactly the eight 
   assert.equal(s2.code, "command_failed");
 });
 
-test("M11-12B-D2: outputSchema declares verificationFailureSummary as a nullable strict 8-key object", async () => {
+test("M11-12B-D2: outputSchema declares verificationFailureSummary as a nullable strict 9-key object", async () => {
   const server = createWaoMcpServer({ registryPath: "/r.json", runDir: "/runs" });
   const client = await buildInMemoryClient(server);
   try {
@@ -463,10 +463,10 @@ test("M11-12B-D2: outputSchema declares verificationFailureSummary as a nullable
     const nullBranch = branches.find((b) => b.type === "null" || b.const === null);
     assert.ok(objBranch, "summary declares an object branch");
     assert.ok(nullBranch, "summary declares a null branch (nullable)");
-    // Strict: exactly the eight properties, additionalProperties false.
+    // Strict: exactly the nine properties, additionalProperties false.
     const propNames = Object.keys(objBranch.properties ?? {}).sort();
     assert.deepEqual(propNames, EXACT_SUMMARY_KEYS.slice().sort(),
-      `schema object branch must declare exactly the eight keys; got ${propNames}`);
+      `schema object branch must declare exactly the nine keys; got ${propNames}`);
     assert.equal(objBranch.additionalProperties, false, "summary schema must be strict (additionalProperties:false)");
   } finally {
     await client.close();
@@ -670,7 +670,7 @@ test("M11-12B-P7: full run_delivery output for a failed delivery has the exact e
 // stdoutTail/stderrTail diagnostic strings on FAILED commands (transcript +
 // DeliveryRef persistence layer only — see verificationTailCapture.test.js).
 // This guard pins that the MCP wire boundary does NOT widen with them: the
-// summary keeps projecting exactly the eight safe scalar fields and never
+// summary keeps projecting exactly the nine safe scalar fields and never
 // echoes tail content, even when the failed result carries juicy output.
 test("R17+TD-159: tail CONTENT never on the wire; presence surfaces as advisory boolean (nine keys)", () => {
   const TAIL_SENTINEL = "R17-TAIL-CONTENT-SENTINEL";
