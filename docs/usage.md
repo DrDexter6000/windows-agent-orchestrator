@@ -246,6 +246,24 @@ backend 换 model/provider → `--profile delta`；换 backend / 升主力 lane 
 在 WAO 源码 grep `zcode` 零命中后停滞；判断本身正确（src/ 无 zcode 后端是 Owner 刻意
 边界），裁定与重看触发器见 ADR-0028。
 
+### backend 能力对照表（TD-162）
+
+run 的 `--model` / `--reasoning` 与 registry 的 `model` / `reasoning` / `provider` 字段并非全 backend 通用——各 backend 能力不齐：配了代码不能表达的值会在派发前被该 backend 的 `validateAgentPolicy` 硬拒绝（fail-closed，不是静默忽略）；token usage 缺失则是"配了 `tokenBudget` 不生效"（见上文 registry validate 的 `⚠` 交叉校验）。
+
+> **值的权威源是 backend 代码类声明**（`src/backends/*.js` 的闭集能力成员 + `validateAgentPolicy` 行为），**本表只是投影，漂移以代码为准**——`test/isolation-infra/docs-consistency.test.js` 的 TD-162 关系型守卫把每格判定词与代码声明/行为对账，单边漂移即红。
+
+判定词：**支持**＝直接可用；**不支持**＝被 `validateAgentPolicy` 拒绝或能力不存在；**条件**＝仅满足所列条件时可用（条件写在格内）。
+
+| backend | model override（model.id / --model） | reasoning effort | model.contextWindow | provider 块 | sessionReuse | token usage 事实 | 角色合同注入 | 在途纠偏（run_correct） |
+|---|---|---|---|---|---|---|---|---|
+| claude-code | 支持（`--model`） | 支持（`--effort`） | 条件：仅 provider 路径（wrapper `--context-window`）；native OAuth 直连被拒 | 支持（wrapper `baseUrl` / `apiKeyEnv`） | 支持（`--session-id` / `--resume`） | 支持（result 帧 usage） | 支持（`--append-system-prompt`） | 支持（stdin stream-json 排队） |
+| codex | 支持（`--model`） | 支持（`-c model_reasoning_effort`） | 不支持 | 不支持（codex 自有登录） | 不支持 | 支持（turn.completed 帧 usage） | 支持（`-c developer_instructions` 追加） | 不支持 |
+| kimi-code | 支持（`--model`） | 条件：仅 `kimi-code/k3` 且 effort ∈ {low, high, max}（effort 编译为 KIMI_MODEL_THINKING_EFFORT env，agent.env 自设同名被拒） | 不支持 | 不支持（kimi 托管认证） | 不支持 | 不支持（stream-json 无 usage——tokenBudget 不生效，TD-87） | 支持（拼进同一条 prompt，非系统级通道） | 不支持 |
+| deepseek-harness | 支持（DSH_MODEL，缺省 deepseek-v4-flash） | 条件：effort ∈ {high, max}，可省略 | 支持（DSH_CONTEXT_WINDOW） | 不支持（组合由 `dshConfigPath` / `dshProvider` 表达） | 不支持 | 支持（assistant/message usage） | 支持（DSH_SYSTEM_PROMPT） | 不支持 |
+| opencode-serve | 条件：必须 OpenCode 形状 {providerID, id, variant}；canonical 裸 {id} 被拒 | 不支持 | 不支持 | 不支持（模型路由由 `model.providerID` 承担） | 不支持 | 支持（session.tokens 周期轮询） | 条件：serve healthy 且版本 ≥ 1.18.0（派发前运行时探测） | 不支持 |
+
+两点衔接：per-dispatch `--model` 只替换 `model.id`、兄弟字段保留——opencode-serve 的 agent 必须先带 `providerID`（裸 {id} 叠 `--model` 仍是裸形状，照样被拒）；`--reasoning` 的六值闭集（minimal/low/medium/high/xhigh/max）由 `registry.js` `REASONING_EFFORTS` 在 registry 层校验，backend 层再按上表条件格收窄（kimi K3 档位闭集、deepseek-harness high/max）。
+
 ### 验证安装
 
 ```powershell
