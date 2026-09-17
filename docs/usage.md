@@ -682,23 +682,29 @@ Get-Content runs\<runId>.jsonl | ForEach-Object { $_ | ConvertFrom-Json }
 
 本工具的设计目标之一是**可被任何调用方平等驱动**（bash 脚本、LLM 编排器、CI）。
 
-所有命令都支持 `--format json`，输出机器可读：
+**脚本化消费 JSON 的规程（TD-153a）**：一律用全局 `wao` 命令（天生免疫 npm 噪声）或 `npm run --silent cli --`。裸 `npm run cli --` 会让 npm 在 stdout 打 banner，污染 JSON 输出——只适合人读交互，不要进脚本/管道。
+
+`--format json` **不是全局开关**，支持面以命令为准（TD-153e 起如实陈述，本处不维护全量清单）：
+
+- **恒为 JSON、无需 flag**：`spawn`（含 runId + transcript 路径）；`status`（无 `--format` 分支——flag 是 no-op，被接受但不改变任何行为，输出恒 JSON）；裸 `collect <runId>`（raw ops JSON）。
+- **`--format json` 显式开启**：`run`（JSON 输出含 messages + metrics）；TD-86 起的查询族（registry validate / registry check / runs list / runs summary / runs grep / wao decision list / wao handoff read，形状见下）；runs 族多数子命令（wait / gate / metrics / scorecard / diagnose / dashboard / delivery）。
+- **已知例外**：`collect --final` 接受 `--format json` 但 stdout 恒为四态文本，不输出 JSON 信封（TD-153b 起该组合 stderr 警告一次）——机器可读请去掉 `--final` 用分页 `collect <runId> --format json`。
 
 ```powershell
 # spawn 返回 JSON（含 runId + transcript 路径）
-npm run cli -- spawn coder_low --prompt "..." | ConvertFrom-Json
+npm run --silent cli -- spawn coder_low --prompt "..." | ConvertFrom-Json
 
 # run 的 JSON 输出含 messages + metrics
-npm run cli -- run coder_low --prompt "..." --format json | ConvertFrom-Json
+npm run --silent cli -- run coder_low --prompt "..." --format json | ConvertFrom-Json
 
 # 查询族：registry / runs / wao 的只读子命令（TD-86 起同样支持 --format json）
-npm run cli -- registry validate --registry config/agents.json --format json
-npm run cli -- registry check --registry config/agents.json --format json
-npm run cli -- runs list --format json
-npm run cli -- runs summary --format json
-npm run cli -- runs grep "error" --format json
-npm run cli -- wao decision list --format json
-npm run cli -- wao handoff read lead --format json
+npm run --silent cli -- registry validate --registry config/agents.json --format json
+npm run --silent cli -- registry check --registry config/agents.json --format json
+npm run --silent cli -- runs list --format json
+npm run --silent cli -- runs summary --format json
+npm run --silent cli -- runs grep "error" --format json
+npm run --silent cli -- wao decision list --format json
+npm run --silent cli -- wao handoff read lead --format json
 ```
 
 > 本区为**手写参考**（不可从代码推导——形状散在各命令实现中，无单一输出形状 SSOT；未来若出现输出形状 SSOT 可转生成层，届时登记 tech-debt）。内容为契约，修改需过 docs-consistency。

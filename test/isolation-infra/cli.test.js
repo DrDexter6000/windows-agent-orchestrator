@@ -5150,3 +5150,166 @@ test("TD-137③ runId UTC 说明双通道在场：usage.md 正文 + HELP_TEXT（
   const cliMd = readFileSync(resolve(import.meta.dirname, "../../docs/surface/cli.md"), "utf8");
   assert.ok(cliMd.includes(sentence), "cli.md 由 gen:surface 从 HELP_TEXT 再生，同步携带");
 });
+
+// ===== TD-153 CLI 工效批（Run A）：(c) --active 透传 / (b) --final×json 警告 / (d2) grep-prune 时间戳稳定排序 =====
+//
+// 状态枚举（WQ-02）：
+//   (b) collect --final × --format json 的四类态：available/empty/too_large 三态共享同一条
+//       stderr 警告代码路径（警告在四态分支之前、投影成功之后），本批测 available 代表
+//       态 + 裸 --final 无警告回归 + 错误态（run 不存在：抛错、无 stdout、警告不抢在错误前）。
+//   (c) runs list --active 的三态夹具：terminal / 无心跳非终态（unresolved）/ 新鲜心跳非终态
+//       （active）——证明 --active 是"证明活跃"过滤而非"非终态"过滤；另测 --active false
+//       不静默收窄（parseOptions 值形状变字符串）。
+//   (d2) 纯函数全态：同毫秒并列、wf/run 时间交错、无时间戳殿后、纯 run_* 标准语料与旧
+//       字典序同序（回归不变式）；grep 集成一层验证 loadRunFiles wiring。
+
+/** TD-153(b)：同时捕获 console.log（stdout）与 console.error（stderr）。 */
+async function captureLogAndErr(fn) {
+  const out = [];
+  const err = [];
+  const origLog = console.log;
+  const origErr = console.error;
+  console.log = (...a) => { out.push(a.map(String).join(" ")); };
+  console.error = (...a) => { err.push(a.map(String).join(" ")); };
+  try {
+    await fn();
+  } finally {
+    console.log = origLog;
+    console.error = origErr;
+  }
+  return { out: out.join("\n"), err: err.join("\n") };
+}
+
+test("TD-153(b) collect --final × --format json：stdout 四态文本逐字节不变，stderr 恰一行警告指路分页投影", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td153-final-"));
+  try {
+    await drainStrayCliMain();
+    // available 态夹具（对齐 collectFinal.test.js 已绿形状：进程分支 + 最后一条 assistant）。
+    const runId = "run_td153final";
+    const line = (p) => JSON.stringify(p);
+    writeFileSync(join(dir, `${runId}.jsonl`), [
+      line({ type: "run.submitted", agentId: "researcher", ts: "2026-08-23T00:00:00.000Z" }),
+      line({ type: "session.created", backend: "process", backendSessionId: "proc_td153", runId, agentId: "researcher" }),
+      line({ type: "run.started", backend: "claude-code", ts: "2026-08-23T00:00:01.000Z", runId, agentId: "researcher" }),
+      line({ type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "最终答复文本" }], ts: "2026-08-23T00:00:05.000Z", runId, agentId: "researcher" }),
+      line({ type: "run.completed", ts: "2026-08-23T00:00:06.000Z", runId, agentId: "researcher" }),
+    ].join("\n") + "\n", "utf8");
+
+    // 组合态：警告在 stderr 恰一行；stdout 仍是四态文本（不是投影 JSON 信封）。
+    const combo = await captureLogAndErr(() =>
+      collectCommand([runId, "--run-dir", dir, "--final", "--format", "json"], { runDir: dir }));
+    assert.equal(combo.out, "最终答复文本", "stdout 与裸 --final 逐字节一致（警告只走 stderr）");
+    const errLines = combo.err.split("\n").filter((l) => l.length > 0);
+    assert.equal(errLines.length, 1, `stderr 恰一行（got: ${JSON.stringify(errLines)}）`);
+    assert.match(errLines[0], /--final .* --format json envelope/, "警告点名 --final 不输出 json 信封");
+    assert.match(errLines[0], /nextCursor/, "警告给出分页 collect 指引（机器可读出口）");
+
+    // 回归：裸 --final（不带 --format json）零 stderr、stdout 同文本。
+    const bare = await captureLogAndErr(() =>
+      collectCommand([runId, "--run-dir", dir, "--final"], { runDir: dir }));
+    assert.equal(bare.err, "", "裸 --final 不触发警告（只在组合时警告）");
+    assert.equal(bare.out, "最终答复文本", "裸 --final stdout 不变");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("TD-153(b) 错误态：--final × --format json 且 run 不存在 → 照旧抛错、无 stdout、警告不抢在错误前", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td153-finalerr-"));
+  try {
+    await drainStrayCliMain();
+    let threw = null;
+    const cap = await captureLogAndErr(() =>
+      collectCommand(["run_td153_missing", "--run-dir", dir, "--final", "--format", "json"], { runDir: dir })
+        .catch((e) => { threw = e; }));
+    assert.ok(threw, "run 不存在 → 投影读取失败照旧抛错（警告分支不吞错、不遮错误）");
+    assert.equal(cap.out, "", "错误态无 stdout");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("TD-153(c) runs list --active：仅透传服务层 activeOnly（心跳新鲜的活跃 run 才入选；terminal/unresolved 排除）", async () => {
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-td153-active-"));
+  try {
+    await drainStrayCliMain();
+    // 三态夹具（复用 writeTd137RunTranscript：终态/非终态最小信封 transcript）。
+    writeTd137RunTranscript(dir, "run_td153done", true);
+    writeTd137RunTranscript(dir, "run_td153unres", false);
+    writeTd137RunTranscript(dir, "run_td153act", false);
+    // 唯一"证明活跃"的 run：新鲜 owner 心跳租约（checkOwnerLiveness SSOT）。
+    writeFileSync(join(dir, ".owner-run_td153act"),
+      JSON.stringify({ pid: 4242, heartbeatAt: Date.now() }), "utf8");
+
+    const all = JSON.parse(await captureLog(() =>
+      runsCommand(["list", "--run-dir", dir, "--format", "json"], {})));
+    assert.equal(all.matchedCount, 3, "不带 --active：terminal/unresolved/active 三态都列出");
+
+    const act = JSON.parse(await captureLog(() =>
+      runsCommand(["list", "--run-dir", dir, "--active", "--format", "json"], {})));
+    assert.deepEqual(act.runs.map((r) => r.runId), ["run_td153act"],
+      "--active 只留心跳新鲜的活跃 run——terminal 与无心跳非终态（unresolved）都排除，不是'非终态'过滤");
+
+    // parseOptions 值形状：`--active false` → 字符串 "false"。静默收窄输出比静默忽略更
+    // 危险，故仅显式 true/"true" 生效——false 不启用过滤器。
+    const noNarrow = JSON.parse(await captureLog(() =>
+      runsCommand(["list", "--run-dir", dir, "--active", "false", "--format", "json"], {})));
+    assert.equal(noNarrow.matchedCount, 3, "--active false 不静默收窄输出");
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("TD-153(d2) sortRunFileNames 纯函数：时间戳升序、wf/run 时间交错、无时间戳殿后、同毫秒字典序决胜", async () => {
+  const { sortRunFileNames } = await import("../../src/commands/runs.js");
+
+  // 回归不变式：纯 run_* 标准语料（等宽 17 位时间戳）与旧字典序 .sort() 同序。
+  const runOnly = [
+    "run_20260917201628180gh6kx8.jsonl",
+    "run_20260102030400000aaaaaa.jsonl",
+    "run_20260102030400000bbbbbb.jsonl",
+    "run_20260917201628180abc999.jsonl",
+  ];
+  assert.deepEqual(sortRunFileNames(runOnly), [...runOnly].sort(),
+    "纯 run_* 标准语料：与旧字典序同序（旧序即创建序，零行为变化）");
+
+  // 混合语料：wf 与 run 按时间交错（旧序按形状前缀分组：run_* 全在前、wf_ 全在
+  // 后）；自定义 id（run_1dev，字典序 '1'<'2' 本排最前）殿后。
+  assert.deepEqual(sortRunFileNames([
+    "run_1dev.jsonl",
+    "run_20260917201628180gh6kx8.jsonl",
+    "wf_20260101000000000.jsonl",
+    "run_20260102030400000bbbbbb.jsonl",
+  ]), [
+    "wf_20260101000000000.jsonl",
+    "run_20260102030400000bbbbbb.jsonl",
+    "run_20260917201628180gh6kx8.jsonl",
+    "run_1dev.jsonl",
+  ], "时间戳升序交错 + 无时间戳前缀殿后（旧字典序会把 run_1dev 排最前、wf 排最后）");
+});
+
+test("TD-153(d2) runs grep 输出序：经 loadRunFiles 时间戳排序（自定义 id 殿后，不再字典序混排）", async () => {
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-td153-grep-"));
+  try {
+    await drainStrayCliMain();
+    const writeNeedle = (runId, ts) => writeFileSync(join(dir, `${runId}.jsonl`),
+      JSON.stringify({ seq: 1, ts, type: "run.started", runId, agentId: "coder_low", backend: "claude-code", prompt: "needle" }) + "\n", "utf8");
+    // 字典序旧序：run_1dev < run_2026*（'1'<'2'）→ 自定义 id 排最前；新序殿后。
+    writeNeedle("run_1dev", "2026-01-01T00:00:00.000Z");
+    writeNeedle("run_20260102030400000aaaaaa", "2026-01-02T00:00:00.000Z");
+    writeNeedle("run_20260917201628180gh6kx8", "2026-09-17T00:00:00.000Z");
+
+    const parsed = JSON.parse(await captureLog(() =>
+      runsCommand(["grep", "needle", "--run-dir", dir, "--format", "json"], {})));
+    assert.equal(parsed.matched, 3);
+    assert.deepEqual(parsed.matches.map((m) => m.runId), [
+      "run_20260102030400000aaaaaa",
+      "run_20260917201628180gh6kx8",
+      "run_1dev",
+    ], "grep 行序 = 时间戳升序 + 无时间戳 id 殿后（loadRunFiles 已接 sortRunFileNames）");
+  } finally {
+    rmrfRetry(dir);
+  }
+});

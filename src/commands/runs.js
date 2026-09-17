@@ -394,10 +394,48 @@ async function runsGateCommand(args, config, deps = {}) {
   console.log(engaged ? "gate: engaged" : gateOff ? `kill switch: active (${VERIFICATION_GATE_OFF_ENV}=off)` : "gate: disengaged (verification subprocess inherits HELD — this lane does not contend)");
 }
 
+// TD-153(d2): runId/wf id 的内嵌时间戳前缀（`run_`/`wf_` + 固定宽 17 位 UTC
+// 毫秒时间戳，generateRunId/workflow.js 同款 SSOT 格式）。
+const RUN_FILE_TS_RE = /^(?:run|wf)_(\d{17})/;
+
+/**
+ * TD-153(d2): 单个 runDir 文件名的时间戳排序键（无时间戳前缀 → null）。纯函数。
+ */
+export function runFileTimestampKey(name) {
+  const m = name.match(RUN_FILE_TS_RE);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * TD-153(d2): runs grep/prune 的输出序 SSOT。
+ *
+ * 评估结论：裸字典序 `.sort()` 对单一形状前缀的标准 id（等宽 17 位数字时间
+ * 戳）恰好等于创建序——但它把两类文件放错位：自定义 runId（派发可指定，仅
+ * 字母数字校验、无时间戳保证）落在与创建时间无关的字典序位置；run_* 与
+ * wf_* 按形状前缀分组而非按时间交错。修法（最小、无大重构）：按时间戳前缀数值升序
+ * （=创建序，run_* 与 wf_* 按时间交错）；无时间戳前缀的文件殿后、彼此保持字典
+ * 序；同毫秒并列回退字典序决胜。纯 run_* 标准语料下与旧 `.sort()` 同序
+ * （等宽数字串的数值比较 ≡ 字典序）；wf_* 混入时从"形状前缀分组"变为时间
+ * 交错、自定义 id 从任意字典序位变为殿后——正是要修的错位。
+ *
+ * 导出供测试做纯函数验证（零 fs 依赖）。list/summary/metrics/dashboard 不经
+ * 此序（各自按 updatedAt 等重排），消费面只有 grep/prune 的输出行序。
+ */
+export function sortRunFileNames(names) {
+  return [...names].sort((a, b) => {
+    const ta = runFileTimestampKey(a);
+    const tb = runFileTimestampKey(b);
+    if (ta !== null && tb !== null && ta !== tb) return ta - tb;
+    if (ta !== null && tb === null) return -1; // 有时间戳在前，无时间戳殿后
+    if (ta === null && tb !== null) return 1;
+    return a < b ? -1 : a > b ? 1 : 0; // 并列/双双无时间戳：字典序决胜（总序，跨平台确定）
+  });
+}
+
 async function loadRunFiles(runDir) {
   if (!existsSync(runDir)) return [];
   const files = await readdir(runDir);
-  return files.filter((f) => f.endsWith(".jsonl")).sort();
+  return sortRunFileNames(files.filter((f) => f.endsWith(".jsonl")));
 }
 
 /**
@@ -508,6 +546,15 @@ async function runsListCommand(args, config) {
     latest: latestN,
     knownAgentIds: [],
     validateAgentIds: false, // CLI preserves raw agentId
+    // TD-153(c): --active passthrough to the service-side activeOnly filter
+    // (proven-active ONLY: fresh owner heartbeat required; terminal/unknown/
+    // unresolved runs are excluded — it is not a "non-terminal" filter).
+    // parseOptions shapes: bare `--active` → true; `--active <value>` →
+    // string. Only an explicit true/"true" engages the filter — silently
+    // narrowing the listing is worse than silently ignoring a value, so
+    // "false"/other values do NOT engage it. --state/--since are
+    // deliberately out of scope for this batch (TD-153 ledger).
+    activeOnly: options.active === true || options.active === "true",
   });
 
   // TD-137①：裸 `runs list` 不再恢复文件名升序——直接沿用 listRuns 的默认

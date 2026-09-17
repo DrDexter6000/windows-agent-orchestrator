@@ -323,6 +323,19 @@ export async function collectCommand(args, config) {
     await raw.commitAppend();
   }
   if (hasFinal) {
+    // TD-153(b): --final × --format json is an ACCEPTED combination (json is
+    // the only legal format value) but --final renders its own four-state
+    // TEXT — the projection JSON envelope is intentionally never printed.
+    // That used to be a silent contract break for scripts; the combination
+    // now warns ONCE on stderr (stdout stays byte-identical) and points at
+    // the paged projection as the machine-readable path: drop --final,
+    // follow nextCursor across pages.
+    if (options.format === "json") {
+      console.error(
+        "[collect] warning: --final does not emit the --format json envelope — stdout stays the four-state text; "
+        + "for machine-readable output drop --final and page through collect <runId> --format json (follow nextCursor across pages)",
+      );
+    }
     if (payload.compactStatus === "available") {
       console.log(payload.messages[0].text);
     } else if (payload.compactStatus === "empty") {
