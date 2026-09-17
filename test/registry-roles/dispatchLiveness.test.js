@@ -82,7 +82,7 @@ test("TD-158: 保留 flag 出现于透传即拒（--wait-timeout 是 TD-148 杀 
 test("TD-158: 合法调用逐字段解析 + 透传原样保留 + registry/run-dir 提取", () => {
   const r = parseDispatchArgs([
     "--agent", "coder_hq", "--prompt-file", "task.md", "--cwd", "D:\\proj\\x",
-    "--", "--model", "gpt-5.6-sol", "--isolate", "--registry", "config/agents.json", "--run-dir", "runs",
+    "--", "--model", "gpt-5.6-sol", "--isolate", "--registry", "config/agents.json", "--run-dir", "D:/tmp/wao-dl-fixture/runs",
   ]);
   assert.equal(r.error, null);
   assert.equal(r.values.agent, "coder_hq");
@@ -91,8 +91,8 @@ test("TD-158: 合法调用逐字段解析 + 透传原样保留 + registry/run-di
   assert.equal(r.values.livenessWindowMs, DEFAULT_LIVENESS_WINDOW_MS);
   assert.equal(r.values.maxRounds, DEFAULT_MAX_ROUNDS);
   assert.equal(r.values.registry, "config/agents.json");
-  assert.equal(r.values.runDir, "runs");
-  assert.deepEqual(r.passthrough, ["--model", "gpt-5.6-sol", "--isolate", "--registry", "config/agents.json", "--run-dir", "runs"]);
+  assert.equal(r.values.runDir, "D:/tmp/wao-dl-fixture/runs");
+  assert.deepEqual(r.passthrough, ["--model", "gpt-5.6-sol", "--isolate", "--registry", "config/agents.json", "--run-dir", "D:/tmp/wao-dl-fixture/runs"]);
 });
 
 test("TD-158: USAGE 钉关键内容（TD-158 出处、观察窗默认、透传说明）", () => {
