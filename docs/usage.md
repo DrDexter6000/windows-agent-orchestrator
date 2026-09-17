@@ -218,6 +218,26 @@ validate 加载 backend **代码类**的闭集能力声明做纯静态交叉校�
 metrics 投影断裂时第一时间红）。`CERTIFICATION_STATUSES` / required-categories 机制
 不变，无新增 "skipped" 状态值；能力缺口事实由批次 2 声明 + validate `⚠` 独立承载。
 
+### 接入新模型 / 新运行时（lane 内操作 vs Owner 决策）
+
+**第一分叉（先判断要的是哪一面，TD-161）**：
+
+- **只换模型** = 改既有 backend 的 `provider`/`model` 字段——lane 内操作（组合权在 Owner：
+  写 registry + 付认证费，见 docs/team-roles.md §Lane）。
+- **明确要求另一 CLI/runtime 驱动** = 新 backend = Owner 决策（backend 闭集成员增补属
+  Owner 裁量；曾评估未纳入的 runtime 先例见 ADR-0028）。provider 替代方案是否可接受由
+  Owner 判断，**不得当成等价解**——provider lane 只解模型面（backend 不变），不构成
+  "指定 CLI 驱动 runtime" 需求的满足。
+
+**操作食谱（只换模型时）**：改 provider 块（`baseUrl`/`apiKeyEnv`）→ 设 env（Windows User
+环境变量）→ smoke 首跑 → 承重前 delta 认证。认证档位规则与刷新触发面见 ADR-0029：同
+backend 换 model/provider → `--profile delta`；换 backend / 升主力 lane → 全量重跑
+（delta 规程详见下文「delta 认证规程」节）。
+
+**案例一行**：2026-09 zcode 事件——life-index CTO agent 接指令切模型（"ZCode 后端驱动"），
+在 WAO 源码 grep `zcode` 零命中后停滞；判断本身正确（src/ 无 zcode 后端是 Owner 刻意
+边界），裁定与重看触发器见 ADR-0028。
+
 ### 验证安装
 
 ```powershell

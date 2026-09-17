@@ -24,7 +24,7 @@ WAO 是"装一次，开发多个项目"的工具：
 **lane = 角色在 registry 中的一个具体实现通道**（固定 backend × provider × model × effort 组合）。本节各角色行的 backend/model 描述**主 lane**；lane 通道的实际组合以 registry 为准。
 
 1. 每角色 ≥1 lane：主 lane 用角色名原 id（如 `coder_hq`），备用 lane 用 `<roleId>_<后缀>`（后缀语义自明，如 `_dsh`）。
-2. **新旧 harness 用独立 agentId 并存，禁止原位换**（认证历史隔离可回退；provider 会话复用键按 canonical agentId 派生、不含 harness——原位换会把 A 通道会话续到 B 通道 harness）。"换 harness 驱动同一模型" = Owner 建新 lane 条目 + 认证，之后 Lead 派发时在既有条目间点名切换。
+2. **新旧 harness 用独立 agentId 并存，禁止原位换**（认证历史隔离可回退；provider 会话复用键按 canonical agentId 派生、不含 harness——原位换会把 A 通道会话续到 B 通道 harness）。"换 harness 驱动同一模型" = Owner 建新 lane 条目 + 认证，之后 Lead 派发时在既有条目间点名切换。**模型面 vs runtime 面分叉**：接入新模型 = lane 内操作（改既有 backend 的 provider/model 字段）；接入新 runtime（另一 CLI/runtime 驱动）= 新 backend = Owner 裁定（先例 ADR-0028）。操作食谱见 docs/usage.md「接入新模型 / 新运行时」节。
 3. **组合权 = Owner，选择权 = Lead**：Owner 的组合动作是写 registry + 付认证费；registry 里存在的条目即一条已付认证费的 lane（纪律：未付认证费的组合不进 registry）。这是集合边界与纪律，不是 MCP 门禁（ADR 0018 的"认证非 permission gate"不变）。
 4. lane 备用条目（id ≠ 角色名原 id）**必须显式声明 `seatRole`**——防后缀命名被 `/^coder_/` 惯例误判席位、稀释三席会审候选统计（决策 0023）。
 5. 新 lane 的认证走 delta 子集（sentinel + scorecard + 越界写对抗断言）→ `conditional`（`certificationScope:"delta"` 标注），全量重跑升 `certified`——见决策 0025 §5 与批次 3。

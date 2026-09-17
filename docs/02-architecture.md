@@ -219,7 +219,7 @@ retry error、session/model id 和延迟数据不得进入 RunEvent。`cacheRead
 ```js
 interface AgentDef {
   id: string;
-  backend: "opencode-serve" | "claude-code" | "codex" | "kimi-code" | "deepseek-harness";
+  backend: "opencode-serve" | "claude-code" | "codex" | "kimi-code" | "deepseek-harness"; // 闭集：成员增补属 Owner 决策；曾评估未纳入的 runtime（如 ZCode）见 ADR-0028（.wao/decisions/0028）
   cwd: string;
   // backend 特定字段
   serveUrl?: string;               // opencode-serve 必填

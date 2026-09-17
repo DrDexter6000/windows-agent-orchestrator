@@ -29,4 +29,5 @@
 0025 | lane 架构与模型×harness 组合权（每角色 ≥1 lane、独立 agentId 并存、delta 认证方案 A）
 0026 | lane 认证身份维度补全（provider 指纹与全量新鲜度；fingerprint-only+lastFullHealthyRunAt+台账合并边界钉死；双执行席对比集成）
 0027 | 第三方审计处置（Owner 四条裁定：治理称重不裁流程/Node v24 修复观察主路径/护栏体检够用就好；审计七条逐条裁定+TD-140..143）
+0028 | zcode-as-backend 放弃迁移保持 claude-code（TD-116 裁定升格归档；重看触发器两腿未满足）
 0029 | 认证两段式入册与突发迁移（修订 0025：入册先行+smoke 地板+承重前 delta；死通道原位迁移；取消定期全量重刷）

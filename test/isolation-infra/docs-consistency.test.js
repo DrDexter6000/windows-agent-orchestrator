@@ -3291,3 +3291,48 @@ test("P6 诚实锚点：SKILL.md 在场记录集成后全量终验与 verificati
   assert.match(skill, /verificationTimeoutMs ≥ 1200000/,
     "SKILL.md ## Dispatch 必须在场：verificationCommands 含全量套件（npm test）时显式声明 verificationTimeoutMs ≥ 1200000（默认 300000 对约 14.5 分钟全量必 command_timeout；2026-08-20 实测 869s）");
 });
+
+// ---------------------------------------------------------------------------
+// TD-161（2026-09-17 文档批）：接入知识可发现性守卫（ADR-0028 升格批）。
+// 钉指针不钉内容：只断言各落点的指针/节标题**存在**，不断言措辞——内容演化不红，
+// 指针被删才红（TD-120 关系型守卫原则的最小应用）。
+// ---------------------------------------------------------------------------
+
+test("TD-161: ADR-0028 升格批指针存在性（0028 文件 + map 索引 + 四处文档指针）", () => {
+  // (1) ADR-0028 文件本体存在于精确路径。
+  assert.ok(
+    existsSync(join(ROOT, ".wao/decisions/0028-zcode-as-backend-放弃迁移保持claude-code.md")),
+    "ADR-0028 必须存在于 .wao/decisions/0028-zcode-as-backend-放弃迁移保持claude-code.md",
+  );
+  // (2) decisions map 索引行（数字序插在 0027 与 0029 之间）。
+  assert.ok(
+    /^0028 \| zcode-as-backend/m.test(read(".wao/decisions/map.md")),
+    "decisions/map.md 缺 0028 索引行",
+  );
+  // (3) 02-architecture AgentDef backend enum 行紧邻处含 ADR-0028 指针
+  //（闭集成员增补属 Owner 决策；曾评估未纳入的 runtime 先例）。
+  const archLines = read("docs/02-architecture.md").split("\n");
+  const enumIdx = archLines.findIndex((l) => /backend:\s*"opencode-serve"/.test(l));
+  assert.ok(enumIdx !== -1, "02-architecture.md 缺 AgentDef backend enum 行");
+  const enumWindow = archLines.slice(enumIdx, enumIdx + 3).join("\n");
+  assert.ok(/ADR-?0028/.test(enumWindow),
+    "02-architecture.md backend enum 行（紧邻处）缺 ADR-0028 指针");
+  // (4) usage.md 含「接入新模型」节标题（TD-161 接入食谱落点）。
+  assert.ok(
+    /^###+ .*接入新模型/m.test(read("docs/usage.md")),
+    "docs/usage.md 缺「接入新模型 / 新运行时」节标题（TD-161 接入食谱落点）",
+  );
+  // (5) team-roles.md §Lane 节含 ADR-0028 指针（模型面 vs runtime 面分叉定义）。
+  const roles = read("docs/team-roles.md");
+  const laneStart = roles.indexOf("## Lane");
+  const laneEnd = roles.indexOf("## 角色清单");
+  assert.ok(laneStart !== -1 && laneEnd > laneStart, "team-roles.md 缺 §Lane 节边界");
+  assert.ok(/ADR-?0028/.test(roles.slice(laneStart, laneEnd)),
+    "team-roles.md §Lane 节缺 ADR-0028 指针（接新模型=lane 内操作；接新 runtime=Owner 裁定）");
+  // (6) AGENT_ONBOARDING.md 含接入节指针（§4c 选择表后）。
+  const ob = read("AGENT_ONBOARDING.md");
+  assert.ok(
+    ob.includes("接入新模型 / 新运行时") && ob.includes("docs/usage.md"),
+    "AGENT_ONBOARDING.md 缺接入节指针（应指向 docs/usage.md「接入新模型 / 新运行时」节）",
+  );
+});
