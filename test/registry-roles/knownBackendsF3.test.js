@@ -51,6 +51,17 @@ test("TD-161 双打印消解: 纯坏 backend 时闭集恰好罗列一次", async
   assert.equal(occurrences, 1, `闭集应恰好罗列一次，实际 ${occurrences} 次（issues: ${JSON.stringify(issues)}）`);
 });
 
+test("TD-161 N1 回归钉: 坏值回显含 'has unknown backend' 的其他错误不得被去重吞掉", async () => {
+  // auditor N1 实证反例：waitTimeout 坏值恰为 "has unknown backend"——
+  // 错误原文回显该值，子串去重曾把真实错误吞成 valid:true 假通过。
+  const issues = await validateIssuesWith({
+    bad: { backend: "codex", cwd: "D:/proj", waitTimeout: "has unknown backend" },
+  });
+  const joined = issues.join("\n");
+  assert.ok(joined.includes("waitTimeout"), `waitTimeout 硬错误必须透传（issues: ${JSON.stringify(issues)}）`);
+  assert.ok(joined.length > 0, "issues 不得为空（否则为假通过）");
+});
+
 test("TD-161 F3 单元钉: unknownBackendGuidance 含五成员 + Owner decision + ADR-0028", () => {
   const g = unknownBackendGuidance("zcode");
   for (const b of ["opencode-serve", "claude-code", "codex", "kimi-code", "deepseek-harness"]) {

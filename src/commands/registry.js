@@ -275,10 +275,11 @@ async function registryValidateCommand(args, config) {
     try {
       normalizeAgent(id, agent);
     } catch (e) {
-      // TD-161 双打印消解：unknown-backend 的完整指路已由步骤 1 的 issue
-      // 携带（同一 SSOT 文案），追加会令闭集在同一输出出现两次，跳过；
-      // 其余硬错误照常透传。
-      if (!e.message.includes("has unknown backend")) {
+      // TD-161 双打印消解 + auditor N1 修复：精确等值比对（重建预期消息）
+      // ——不用子串匹配：错误原文会回显用户值（如 waitTimeout 坏值恰含
+      // "has unknown backend" 时子串去重会吞掉真实错误，实测假通过
+      // valid:true）。其余硬错误照常透传。
+      if (e.message !== `Agent ${id} has ${unknownBackendGuidance(agent.backend)}`) {
         issues.push(e.message);
       }
     }
