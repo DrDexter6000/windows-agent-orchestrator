@@ -10,7 +10,7 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { readRegistry, normalizeAgent, certMigrationAdvisories, KNOWN_BACKENDS } from "../registry.js";
+import { readRegistry, normalizeAgent, certMigrationAdvisories, KNOWN_BACKENDS, unknownBackendGuidance } from "../registry.js";
 import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { backendCapabilitySnapshot } from "../backends/factory.js";
 import { isSecretEnvName } from "../secretRedaction.js";
@@ -202,10 +202,11 @@ async function registryValidateCommand(args, config) {
     if (!agent.backend) {
       issues.push("missing backend");
     } else if (!KNOWN_BACKENDS.includes(agent.backend)) {
-      // TD-161 双打印消解：本地 issue 只报坏值单行、不罗列闭集——完整支持集
-      // + Owner 指路由第 6 步 normalizeAgent 的 catch 统一给出，闭集在同一
-      // validate 输出里只出现一次。
-      issues.push(`unknown backend "${agent.backend}"`);
+      // TD-161（auditor F3 修复）：issue 携带完整指路（与 normalizeAgent 的
+      // throw 同源 unknownBackendGuidance）——组合错误路径（坏 backend +
+      // 缺 cwd 等）下 normalizeAgent 先抛别的错，issue 若只报坏值会让支持集
+      // 提示彻底消失。纯坏 backend 时第 6 步 catch 会去重，闭集仍只出现一次。
+      issues.push(unknownBackendGuidance(agent.backend));
     }
 
     // 2. cwd 必填
@@ -274,7 +275,12 @@ async function registryValidateCommand(args, config) {
     try {
       normalizeAgent(id, agent);
     } catch (e) {
-      issues.push(e.message);
+      // TD-161 双打印消解：unknown-backend 的完整指路已由步骤 1 的 issue
+      // 携带（同一 SSOT 文案），追加会令闭集在同一输出出现两次，跳过；
+      // 其余硬错误照常透传。
+      if (!e.message.includes("has unknown backend")) {
+        issues.push(e.message);
+      }
     }
 
     checked += 1;

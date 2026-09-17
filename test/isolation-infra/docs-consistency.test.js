@@ -3329,10 +3329,12 @@ test("TD-161: ADR-0028 升格批指针存在性（0028 文件 + map 索引 + 四
   assert.ok(laneStart !== -1 && laneEnd > laneStart, "team-roles.md 缺 §Lane 节边界");
   assert.ok(/ADR-?0028/.test(roles.slice(laneStart, laneEnd)),
     "team-roles.md §Lane 节缺 ADR-0028 指针（接新模型=lane 内操作；接新 runtime=Owner 裁定）");
-  // (6) AGENT_ONBOARDING.md 含接入节指针（§4c 选择表后）。
+  // (6) AGENT_ONBOARDING.md 含接入节指针（§4c 选择表后）。F4 收紧：两个关键词必须
+  // 同行共现——分立 includes 时删掉指针行里的目标路径仍能靠别处出现的 docs/usage.md
+  // 假通过（auditor 变异验证实证）。
   const ob = read("AGENT_ONBOARDING.md");
   assert.ok(
-    ob.includes("接入新模型 / 新运行时") && ob.includes("docs/usage.md"),
-    "AGENT_ONBOARDING.md 缺接入节指针（应指向 docs/usage.md「接入新模型 / 新运行时」节）",
+    /^.*接入新模型.*docs\/usage\.md.*$/m.test(ob),
+    "AGENT_ONBOARDING.md 缺接入节指针行（同一行须同时含「接入新模型」与 docs/usage.md）",
   );
 });

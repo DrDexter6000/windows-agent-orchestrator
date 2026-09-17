@@ -29,9 +29,25 @@ export const SEAT_ROLES = Object.freeze([
 // the commands layer (registry validate) imports it downward (commands →
 // core is a legal edge; the old hand-copied literal there is deleted).
 // Adding/removing a member is an Owner decision — see ADR-0028.
+// 注（auditor 2026-09-17 复核收窄）：本 SSOT 只覆盖"成员校验"面（闭集名单
+// 出现的每一处都读它）；per-backend 专属字段校验分支、factory 构造器分发
+// 与能力映射各自承载不同语义，不在单点修改承诺内。
 export const KNOWN_BACKENDS = Object.freeze([
   "opencode-serve", "claude-code", "codex", "kimi-code", "deepseek-harness",
 ]);
+
+// TD-161（auditor F3 修复）：unknown-backend 指路文案的单一真相——
+// normalizeAgent 的 throw 与 commands 层 validate 的 issue 共用，保证组合
+// 错误路径（坏 backend + 其他硬错误，normalizeAgent 先抛别的错）下支持集
+// 提示仍完整且恰好出现一次。静态文案：只含支持集与指路，无用户数据。
+export function unknownBackendGuidance(backend) {
+  return (
+    `unknown backend: ${backend} (supported: ${KNOWN_BACKENDS.join("/")}). ` +
+    `To use a different model, configure the model/provider fields on an existing backend; ` +
+    `to add a new backend (a different CLI/runtime), that is an Owner decision — ` +
+    `see ADR-0028 (previously evaluated candidates, e.g. zcode) in .wao/decisions/.`
+  );
+}
 
 // Flags that are MANAGED by the structured model/reasoning/provider fields.
 // If ANY of these appear in args/prependArgs, the configuration is using the
@@ -197,13 +213,7 @@ export function normalizeAgent(id, agent) {
   // rejected backend candidates (e.g. zcode → ADR-0028) are Owner decisions;
   // pointer only, never reasons here
   if (!KNOWN_BACKENDS.includes(agent.backend)) {
-    throw new Error(
-      `Agent ${id} has unknown backend: ${agent.backend} ` +
-      `(supported: ${KNOWN_BACKENDS.join("/")}). ` +
-      `To use a different model, configure the model/provider fields on an existing backend; ` +
-      `to add a new backend (a different CLI/runtime), that is an Owner decision — ` +
-      `see ADR-0028 (previously evaluated candidates, e.g. zcode) in .wao/decisions/.`,
-    );
+    throw new Error(`Agent ${id} has ${unknownBackendGuidance(agent.backend)}`);
   }
   if (agent.backend === "opencode-serve") {
     if (!agent.serveUrl) {

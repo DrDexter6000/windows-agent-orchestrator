@@ -6,7 +6,7 @@ date: 2026-09-17
 
 > **归档补正，不是重新审议**（TD-161 处置文档批）：Owner 2026-08-15 的裁定与重看触发器
 > 此前登记在 docs/tech-debt.md TD-116 行内——Decision 类知识 mis-shelved（ssot.md §1.2
-> 应为 ADR）。本文件把它升格为 ADR；全部事实取自 TD-116 行，不添加新事实、不把 2026-08
+> 应为 ADR）。本文件把它升格为 ADR；事实来源为 TD-116 行（裁定与核实）、TD-161 行（2026-09-03 Owner 澄清）与 docs/02-architecture.md backend enum（五成员名单），不添加新事实、不把 2026-08
 > 的核实结果写成当前能力结论。该行自本 ADR 起退为冻结证据记录。
 
 - **构想**：zcode-as-backend——coder_hq 脱离 claude-code wrapper，改用 ZCode 桌面内置 CLI
