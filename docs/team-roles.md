@@ -108,10 +108,10 @@ WAO 是"装一次，开发多个项目"的工具：
 | **Work Scope（前置 advisory）** | 对 Lead 明确提出的未决问题做头脑风暴、红队挑战和方案审查，给可验证的替代方向，不替 Lead 拍板 |
 | **Work Scope（后置 audit）** | 独立复核 Coder 产出、查伪完成、质疑声明、给 PASS/FAIL，不把验收扩张成新方案 |
 | **边界** | 不改代码（归 Coder）；不和 Coder 同源（独立性）；不跑测试（归 Tester） |
-| **backend** | claude-code（官方 Claude，最强判断力） |
-| **model** | claude-opus-5 |
-| **effort** | xhigh（最关键的角色，给最强配置） |
-| **会话复用** | `sessionReuse=lead_workspace`（M11-11C）：同一 MCP Lead server 实例在同一 workspace 内多次询问 Auditor 时，复用 provider 原生会话保留上下文/cache，每次仍是独立 run/transcript。Host/MCP 重启后开新会话；仅非 delivery；详见 `02-architecture.md §4.10`。**CLI 直派注意（2026-08-23 life-index 会话实证）**：前台 `run` 派发 sessionReuse 型 agent 须显式 `--cwd` 指向 git 根，否则复用路由不命中、需补发 |
+| **backend** | codex（OpenAI Codex CLI；2026-09-17 起——claude 订阅已取消，官方 Claude 通道停用） |
+| **model** | gpt-6-astra |
+| **effort** | medium（2026-09-17 Owner 裁定；官方档位 low/medium/high/xhigh/max/ultra） |
+| **会话复用** | 无（2026-09-17 切 codex 起）。历史注记：claude-code 通道时期用 `sessionReuse=lead_workspace`（M11-11C，语义详见 `02-architecture.md §4.10`）；**CLI 直派 sessionReuse 型 agent 须显式 `--cwd` 指向 git 根**的注意事项对仍在用该机制的 agent（如 researcher）依然适用（2026-08-23 life-index 会话实证） |
 
 ## Lead 派工策略
 

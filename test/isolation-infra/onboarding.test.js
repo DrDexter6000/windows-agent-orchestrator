@@ -1387,7 +1387,8 @@ test("R6-C: recommendations over the REAL tracked template derive all seven rows
   // duty/authNote all come from template rows (no hand-written role table).
   assert.ok(byId.researcher.duty.startsWith("适合任务: "));
   assert.ok(byId.auditor.duty.startsWith("适合任务: "));
-  assert.ok(byId.auditor.authNote.includes("claude login"), "authNote from _comment_auth");
+  // 2026-09-17 auditor 切 codex/GPT-6-astra（claude 订阅取消）：认证注记标记词随模板更新。
+  assert.ok(byId.auditor.authNote.includes("codex 自有认证"), "authNote from _comment_auth");
   // The serialized recommendation never carries a credential VALUE.
   assert.ok(!/sk-[A-Za-z0-9]{6,}/.test(JSON.stringify(rec)));
 });

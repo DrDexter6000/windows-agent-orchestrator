@@ -64,8 +64,8 @@ test("R9: 真实入库模板七 worker 的族系事实（doc↔config 对账锚�
     coder_hq: "glm",
     coder_low: "deepseek",
     coder_mm: "kimi",
-    tester: "codex", // 无 model 块 → backend 兜底
-    auditor: "claude",
+    tester: "gpt", // 2026-09-03 起有 model 块（gpt-5.6-sol）→ model 族系优先
+    auditor: "gpt", // 2026-09-17 切 codex/GPT-6-astra（claude 订阅取消）
     coder_opencode_fallback: "glm",
   };
   for (const [id, family] of Object.entries(expect)) {

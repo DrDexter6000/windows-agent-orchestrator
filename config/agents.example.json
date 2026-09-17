@@ -102,34 +102,37 @@
     },
     "tester": {
       "_comment": "[Tester] 执行层验证 + 运行监控（轮询）。对齐 team-roles.md Tester。",
-      "_comment_backend": "codex（进程式，command_execution exitCode 最准，scorecard commandsPassed 门控最准）。",
-      "_comment_effort": "effort=medium（测试是确定性任务，不需高推理）。",
+      "_comment_backend": "codex（进程式，command_execution exitCode 最准，scorecard commandsPassed 门控最准）。GPT-5.6-sol（2026-09-03 Owner 裁定升级）。",
+      "_comment_effort": "effort=xhigh（2026-09-03 Owner 裁定由 medium 升级）。",
       "_comment_note": "codex 作为 Lead（主控）时不进 registry——这里是把它当 worker 用。",
       "_comment_task": "适合任务: 跑测试/验证 exitCode/检查产出文件/轮询运行状态",
       "backend": "codex",
       "seatRole": "non_seat",
       "cwd": ".",
-      "systemPrompt": "config/roles/tester.md"
-    },
-    "auditor": {
-      "_comment": "[Chief-Advisor / Auditor] 同一个 auditor agentId 的按需双模式专家：前置建议/红队挑战 + 后置独立审计。与 Coder 不同源。",
-      "_comment_backend": "claude-code（官方 Claude）。Claude Opus 5，effort=xhigh。",
-      "_comment_auth": "owner 亲自验证 claude login 通过（2026-06-24）。用官方 Claude 不走 wrapper。",
-      "_comment_task": "适合任务: 前置方案审计/后置独立复核/PASS-FAIL 判定",
-      "backend": "claude-code",
-      "seatRole": "adversarial",
-      "cwd": ".",
-      "systemPrompt": "config/roles/auditor.md",
-      "sessionReuse": "lead_workspace",
-      "args": [
-        "--dangerously-skip-permissions"
-      ],
+      "systemPrompt": "config/roles/tester.md",
       "model": {
-        "id": "claude-opus-5"
+        "id": "gpt-5.6-sol"
       },
       "reasoning": {
         "effort": "xhigh"
       }
+    },
+    "auditor": {
+      "_comment": "[Chief-Advisor / Auditor] 同一个 auditor agentId 的按需双模式专家：前置建议/红队挑战 + 后置独立审计。与 Coder 不同源。",
+      "_comment_backend": "codex（OpenAI Codex CLI）。GPT-6-astra，effort=medium（2026-09-17 Owner 裁定切换——claude 订阅已取消，官方 Claude 通道停用）。",
+      "_comment_auth": "codex 自有认证（~/.codex，与 tester 同源），无 OAuth 依赖。",
+      "_comment_task": "适合任务: 前置方案审计/后置独立复核/PASS-FAIL 判定",
+      "backend": "codex",
+      "seatRole": "adversarial",
+      "cwd": ".",
+      "systemPrompt": "config/roles/auditor.md",
+      "model": {
+        "id": "gpt-6-astra"
+      },
+      "reasoning": {
+        "effort": "medium"
+      },
+      "args": []
     },
     "coder_opencode_fallback": {
       "_comment": "[FALLBACK] opencode-serve worker。⚠ 默认不用——opencode 是 fallback 选项（决策 0005）。仅在需要 token 闸门精确控成本时用。",
@@ -199,8 +202,9 @@
       },
       {
         "agentId": "tester",
-        "label": "Codex tester worker",
+        "label": "GPT-5.6-sol xhigh via codex（测试+轮询）",
         "profile": "strict",
+        "modelId": "gpt-5.6-sol",
         "drills": [
           "sentinel",
           "scorecard"
