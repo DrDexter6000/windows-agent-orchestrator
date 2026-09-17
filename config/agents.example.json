@@ -8,15 +8,15 @@
   "agents": {
     "researcher": {
       "_comment": "[Researcher] 调研/分析专家。只读分析不改产品代码。对齐 team-roles.md Researcher。",
-      "_comment_backend": "claude-code wrapper（进程式，弃 opencode——06-18 事故风险）。DeepSeek-v4-flash 1M context。",
+      "_comment_backend": "claude-code wrapper（进程式，弃 opencode——06-18 事故风险）。GLM-5.3-Flash[1m] 1M context，原生多模态/视觉（2026-09-17 Owner 裁定由 DeepSeek 切智谱——DeepSeek 欠费停用）。",
       "_comment_effort": "reasoning.effort=max，由 provider wrapper 统一编译。",
       "_comment_task": "适合任务: 代码库调研/技术选型/可行性分析/文档生成/brief 输出",
       "backend": "claude-code",
       "seatRole": "non_seat",
       "provider": {
         "protocol": "anthropic-compatible",
-        "baseUrl": "https://api.deepseek.com/anthropic",
-        "apiKeyEnv": "DEEPSEEK_API_KEY"
+        "baseUrl": "https://open.bigmodel.cn/api/anthropic",
+        "apiKeyEnv": "ZHIPU_API_KEY"
       },
       "cwd": ".",
       "systemPrompt": "config/roles/researcher.md",
@@ -30,7 +30,7 @@
         "PYTHONNOUSERSITE": "1"
       },
       "model": {
-        "id": "deepseek-v4-flash",
+        "id": "glm-5.3-flash[1m]",
         "contextWindow": 1000000
       },
       "reasoning": {
@@ -64,14 +64,14 @@
     },
     "coder_low": {
       "_comment": "[Coder-Low] 低成本高吞吐的通用第二实现通道；Low 不表示低能力。对齐 team-roles.md Coder-Low。",
-      "_comment_backend": "claude-code wrapper（进程式）。DeepSeek-v4-pro，1M context，effort=max（2026-08-15 Owner 裁定由 flash 升级）。",
+      "_comment_backend": "claude-code wrapper（进程式）。GLM-5.3-Flash[1m]，1M context，effort=max，原生多模态/视觉（2026-09-17 Owner 裁定由 DeepSeek 切智谱——DeepSeek 欠费停用）。",
       "_comment_task": "默认适合: 边界明确的实现包/TDD/修 bug/重构/兼容性/脚本/文档配置/窄修正；是否拆分或转派由 Lead 决定",
       "backend": "claude-code",
       "seatRole": "implementation",
       "provider": {
         "protocol": "anthropic-compatible",
-        "baseUrl": "https://api.deepseek.com/anthropic",
-        "apiKeyEnv": "DEEPSEEK_API_KEY"
+        "baseUrl": "https://open.bigmodel.cn/api/anthropic",
+        "apiKeyEnv": "ZHIPU_API_KEY"
       },
       "cwd": ".",
       "systemPrompt": "config/roles/coder_low.md",
@@ -79,7 +79,7 @@
         "--dangerously-skip-permissions"
       ],
       "model": {
-        "id": "deepseek-v4-pro",
+        "id": "glm-5.3-flash[1m]",
         "contextWindow": 1000000
       },
       "reasoning": {
@@ -157,10 +157,10 @@
     "matrix": [
       {
         "agentId": "researcher",
-        "label": "DeepSeek-v4-flash max via claude-code wrapper",
+        "label": "GLM-5.3-Flash[1m] max via claude-code wrapper（2026-09-17 Owner 裁定由 DeepSeek 切智谱）",
         "profile": "strict",
-        "providerID": "deepseek",
-        "modelId": "deepseek-v4-flash",
+        "providerID": "zhipuai-coding-plan",
+        "modelId": "glm-5.3-flash[1m]",
         "drills": [
           "sentinel",
           "scorecard",
@@ -182,10 +182,10 @@
       },
       {
         "agentId": "coder_low",
-        "label": "DeepSeek-v4-pro max / 1M via claude-code wrapper（轻活，2026-08-15 Owner 裁定由 flash 升级）",
+        "label": "GLM-5.3-Flash[1m] max / 1M via claude-code wrapper（轻活，2026-09-17 Owner 裁定由 DeepSeek 切智谱）",
         "profile": "strict",
-        "providerID": "deepseek",
-        "modelId": "deepseek-v4-pro",
+        "providerID": "zhipuai-coding-plan",
+        "modelId": "glm-5.3-flash[1m]",
         "drills": [
           "sentinel",
           "scorecard"

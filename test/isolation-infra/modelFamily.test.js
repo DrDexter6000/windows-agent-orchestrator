@@ -60,9 +60,9 @@ test("R9: familyLabel 展示标签闭集；未知 token 一律未知族系", () 
 test("R9: 真实入库模板七 worker 的族系事实（doc↔config 对账锚）", () => {
   const parsed = JSON.parse(readFileSync(join(ROOT, "config", "agents.example.json"), "utf8"));
   const expect = {
-    researcher: "deepseek",
+    researcher: "glm", // 2026-09-17 由 DeepSeek 切智谱 glm-5.3-flash[1m]
     coder_hq: "glm",
-    coder_low: "deepseek",
+    coder_low: "glm", // 2026-09-17 由 DeepSeek 切智谱 glm-5.3-flash[1m]
     coder_mm: "kimi",
     tester: "gpt", // 2026-09-03 起有 model 块（gpt-5.6-sol）→ model 族系优先
     auditor: "gpt", // 2026-09-17 切 codex/GPT-6-astra（claude 订阅取消）

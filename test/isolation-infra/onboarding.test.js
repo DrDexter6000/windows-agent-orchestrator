@@ -1373,17 +1373,19 @@ test("R6-C: recommendations over the REAL tracked template derive all seven rows
   assert.equal(rec.rows.length, 7);
   const byId = Object.fromEntries(rec.rows.map((r) => [r.id, r]));
   assert.equal(byId.coder_hq.requiresKeyEnv, "ZHIPU_API_KEY");
-  assert.equal(byId.researcher.requiresKeyEnv, "DEEPSEEK_API_KEY");
-  assert.equal(byId.coder_low.requiresKeyEnv, "DEEPSEEK_API_KEY");
+  // 2026-09-17 Owner 裁定：researcher/coder_low 由 DeepSeek 切智谱 GLM-5.3-Flash[1m]。
+  assert.equal(byId.researcher.requiresKeyEnv, "ZHIPU_API_KEY");
+  assert.equal(byId.coder_low.requiresKeyEnv, "ZHIPU_API_KEY");
   assert.equal(byId.coder_mm.requiresKeyEnv, null, "kimi uses CLI login state");
   assert.equal(byId.coder_mm.requiresCli, "kimi");
   assert.equal(byId.tester.requiresKeyEnv, null, "tester uses codex login");
   assert.equal(byId.tester.requiresCli, "codex");
-  assert.equal(byId.auditor.requiresKeyEnv, null, "auditor uses official OAuth");
+  assert.equal(byId.auditor.requiresKeyEnv, null, "auditor uses codex login (2026-09-17 switch)");
+  assert.equal(byId.auditor.requiresCli, "codex");
   assert.equal(byId.coder_opencode_fallback.requiresKeyEnv, null);
   assert.equal(byId.coder_opencode_fallback.requiresCli, "opencode");
   assert.equal(byId.coder_hq.readyState, "ready");
-  assert.equal(byId.researcher.readyState, "missing_key", "DeepSeek key missing in the fake probe");
+  assert.equal(byId.researcher.readyState, "ready", "ZHIPU key present in the fake probe (process_env)");
   // duty/authNote all come from template rows (no hand-written role table).
   assert.ok(byId.researcher.duty.startsWith("适合任务: "));
   assert.ok(byId.auditor.duty.startsWith("适合任务: "));

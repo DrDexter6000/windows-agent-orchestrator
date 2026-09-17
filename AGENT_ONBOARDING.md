@@ -113,10 +113,10 @@ Copy-Item config/agents.example.json config/agents.json
 
 | 你有的 runtime/认证 | 保留的 worker | 认证方式 |
 |---|---|---|
-| claude-code + 官方 Claude OAuth | auditor | `claude login`（原生 OAuth，不走 provider wrapper） |
-| claude-code + DeepSeek key | researcher 或 coder_low | `DEEPSEEK_API_KEY`（Windows User 环境变量） |
-| claude-code + GLM key | coder_hq | `ZHIPU_API_KEY`（Windows User 环境变量） |
-| codex | tester | `codex login` |
+| claude-code + GLM key（当前标准 lane 配置） | researcher / coder_hq / coder_low | `ZHIPU_API_KEY`（Windows User 环境变量） |
+| claude-code + 官方 Claude OAuth（无 provider 直连） | 任一 claude-code worker | `claude login`（原生 OAuth，不走 provider wrapper） |
+| claude-code + DeepSeek key（可选替代 provider） | 任一 claude-code worker（改 provider 块） | `DEEPSEEK_API_KEY`（Windows User 环境变量） |
+| codex | tester / auditor | `codex login` |
 | Kimi Code | coder_mm | Kimi Code 登录态（无需 API key） |
 
 删到只剩一个 worker 也完全可用。每个保留的 worker 里的 `cwd` 可留模板值（模板自 R8-1 起统一为 `.`——解析为发起派发的进程的当前工作目录：CLI 通道=你敲命令时所在目录；MCP 通道=MCP 服务进程的 cwd，由 host 决定；任何机器恒存在），派发时覆盖；若你改成了自己的路径，注意对本地进程式 backend，派发时 cwd 不存在会被 typed 早拒绝（`wao doctor` 也会预先 WARN；cwd 为 `.` 的 worker doctor 会出一条 INFO 落点提示，不计 DEGRADED）——见 `docs/troubleshooting.md §3.1/§3.2`。

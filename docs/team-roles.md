@@ -49,7 +49,7 @@ WAO 是"装一次，开发多个项目"的工具：
 | **Work Scope** | 读代码库、技术选型、可行性分析、输出 brief/affectedFiles 清单；边界清晰的简单任务（仍限只读分析边界） |
 | **边界** | 不改产品代码；不跑测试（只读）；不做实现决策（决策归 Lead+Auditor） |
 | **backend** | claude-code wrapper（进程式，弃 opencode——06-18 事故风险） |
-| **model** | deepseek-v4-flash（1M context，适合深度调研；2026-08-15 Owner 裁定与实际配置对齐——此前本行与认证矩阵误记 v4-pro） |
+| **model** | glm-5.3-flash[1m]（1M context，原生多模态/视觉，适合深度调研；2026-09-17 Owner 裁定由 DeepSeek-v4-flash 切智谱——DeepSeek 欠费停用） |
 | **effort** | max（深度分析） |
 | **配置要点** | model/reasoning/context 从结构化 provider policy 单一编译，不手拼 CLI flags |
 | **会话复用** | `sessionReuse=lead_workspace`（M11-11C）：同一 MCP Lead server 实例在同一 workspace 内多次询问 Researcher 时，复用 provider 原生会话保留上下文/cache，每次仍是独立 run/transcript。Host/MCP 重启后开新会话；仅非 delivery；详见 `02-architecture.md §4.10`。**CLI 直派注意（2026-08-23 life-index 会话实证）**：前台 `run` 派发 sessionReuse 型 agent 须显式 `--cwd` 指向 git 根，否则复用路由不命中、需补发 |
@@ -73,7 +73,7 @@ WAO 是"装一次，开发多个项目"的工具：
 | **Work Scope** | 默认承担边界明确的实现包、TDD、修 bug、重构、兼容性、脚本、文档/配置与窄修正；适合独立并行包；按 Lead 指派兼职方案顾问与交付物评审（只读意见，不做验收决定） |
 | **边界** | 不替 Lead 作架构、范围、拆包或转派决策；不自行扩域；不验收自己。不得仅因文件数、prompt 长度、耗时或规模自行拒绝，是否拆分/转派由 Lead 决定 |
 | **backend** | claude-code wrapper（进程式） |
-| **model** | deepseek-v4-pro（1M context；2026-08-15 Owner 裁定由 v4-flash 升级提质） |
+| **model** | glm-5.3-flash[1m]（1M context，原生多模态/视觉；2026-09-17 Owner 裁定由 deepseek-v4-pro 切智谱——DeepSeek 欠费停用） |
 | **effort** | max |
 
 ### Coder-MM（多模态创意与高质量工程）
@@ -144,6 +144,7 @@ Worker 通过最终 assistant response 交付结果。编排层负责记录和�
 |---|---|---|
 | GLM-5.2 via claude-code wrapper | `open.bigmodel.cn/api/anthropic` + glm-5.2 | ✅ probe 通过 |
 | GLM-5.2 effort=high | `CLAUDE_CODE_EFFORT_LEVEL=high` | ✅ probe 通过 |
+| **GLM-5.3-Flash[1m] via wrapper（2026-09-17 切换实测）** | `open.bigmodel.cn/api/anthropic` + glm-5.3-flash[1m]，contextWindow 1000000，effort=max；researcher/coder_low 双席 WAO 端到端自检 run_20260917163004276j38li4 / run_20260917163114758gz2zfv completed | ✅ 通过（原生多模态/视觉能力由官方文档确认，图像链路未实测） |
 | DeepSeek-v4-flash via wrapper | `api.deepseek.com/anthropic` + deepseek-v4-flash | ✅ probe 通过 |
 | DeepSeek variant=max（model 后缀） | `deepseek-v4-flash:max` | ❌ 报错（只认 deepseek-v4-pro/flash） |
 | DeepSeek effort=max（env） | `CLAUDE_CODE_EFFORT_LEVEL=max` | ✅ probe 通过 |

@@ -1368,12 +1368,14 @@ test("M12 role naming: stable auditor id represents one advisory/audit expert", 
   }
 });
 
-test("M12 coder_low example uses current DeepSeek V4 Pro policy (2026-08-15 Owner upgrade from flash)", () => {
+test("M12 coder_low example uses current Zhipu GLM-5.3-Flash policy (2026-09-17 Owner switch from DeepSeek)", () => {
   const parsed = JSON.parse(read("config/agents.example.json"));
   const low = parsed.agents?.coder_low;
-  assert.equal(low?.model?.id, "deepseek-v4-pro");
+  assert.equal(low?.model?.id, "glm-5.3-flash[1m]");
   assert.equal(low?.reasoning?.effort, "max");
   assert.equal(low?.model?.contextWindow, 1000000);
+  assert.equal(low?.provider?.apiKeyEnv, "ZHIPU_API_KEY");
+  assert.ok(/bigmodel\.cn\/api\/anthropic/.test(low?.provider?.baseUrl ?? ""));
 });
 
 test("M12-8A/M12-9/M12-10/M12-16: SKILL/architecture 工具数与 toolSurface SSOT 一致（TD-120 关系型守卫）", () => {
@@ -2427,11 +2429,11 @@ test("onboarding closeout: usage.md claude-code registry 示例为当前结构�
   // Stale inlined shape gone; current coder_low policy.
   assert.ok(!/glm-5-turbo/.test(ex),
     "usage claude-code 示例不得再出现旧 provider.model=glm-5-turbo 内联形状");
-  // 2026-08-15: coder_low upgraded to v4-pro (Owner decision). Scoped to the
-  // coder_low sub-block — the old whole-slice flash check kept passing via the
-  // (still-flash) dsh experimental example and guarded nothing.
-  assert.ok(/"coder_low"[\s\S]{0,600}deepseek-v4-pro/.test(ex) && /DEEPSEEK_API_KEY/.test(ex),
-    "usage claude-code 示例必须是当前 coder_low DeepSeek V4 Pro policy");
+  // 2026-09-17: coder_low switched to Zhipu GLM-5.3-Flash[1m] (Owner decision;
+  // DeepSeek unpaid). Scoped to the coder_low sub-block — whole-slice checks
+  // keep passing via neighboring examples and guard nothing.
+  assert.ok(/"coder_low"[\s\S]{0,600}glm-5\.3-flash\[1m\]/.test(ex) && /ZHIPU_API_KEY/.test(ex),
+    "usage claude-code 示例必须是当前 coder_low 智谱 GLM-5.3-Flash[1m] policy");
 });
 
 test("onboarding closeout: agents.example.json 移除 managed-flag 向后兼容声明、coder_hq 标为 max、标注可裁剪示例", () => {

@@ -137,10 +137,10 @@ Copy-Item config/agents.example.json config/agents.json
       "backend": "claude-code",
       "provider": {
         "protocol": "anthropic-compatible",
-        "baseUrl": "https://api.deepseek.com/anthropic",
-        "apiKeyEnv": "DEEPSEEK_API_KEY"
+        "baseUrl": "https://open.bigmodel.cn/api/anthropic",
+        "apiKeyEnv": "ZHIPU_API_KEY"
       },
-      "model": { "id": "deepseek-v4-pro", "contextWindow": 1000000 },
+      "model": { "id": "glm-5.3-flash[1m]", "contextWindow": 1000000 },
       "reasoning": { "effort": "max" },
       "cwd": "D:/projects/my-app",
       "args": ["--dangerously-skip-permissions"]
