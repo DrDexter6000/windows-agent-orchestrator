@@ -10,7 +10,7 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { readRegistry, normalizeAgent, certMigrationAdvisories } from "../registry.js";
+import { readRegistry, normalizeAgent, certMigrationAdvisories, KNOWN_BACKENDS } from "../registry.js";
 import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { backendCapabilitySnapshot } from "../backends/factory.js";
 import { isSecretEnvName } from "../secretRedaction.js";
@@ -188,7 +188,8 @@ async function registryValidateCommand(args, config) {
     summaryWorkers = undefined;
   }
 
-  const KNOWN_BACKENDS = ["opencode-serve", "claude-code", "codex", "kimi-code", "deepseek-harness"];
+  // TD-161: 闭集 SSOT——本地 KNOWN_BACKENDS 字面量已删，改用顶部 import 自
+  // ../registry.js 的同名常量（加第六个 backend 只改 core 一处，不再两份手工拷贝）。
   let allOk = true;
   let checked = 0;
   const agentResults = [];
@@ -201,7 +202,10 @@ async function registryValidateCommand(args, config) {
     if (!agent.backend) {
       issues.push("missing backend");
     } else if (!KNOWN_BACKENDS.includes(agent.backend)) {
-      issues.push(`unknown backend "${agent.backend}" (known: ${KNOWN_BACKENDS.join("/")})`);
+      // TD-161 双打印消解：本地 issue 只报坏值单行、不罗列闭集——完整支持集
+      // + Owner 指路由第 6 步 normalizeAgent 的 catch 统一给出，闭集在同一
+      // validate 输出里只出现一次。
+      issues.push(`unknown backend "${agent.backend}"`);
     }
 
     // 2. cwd 必填

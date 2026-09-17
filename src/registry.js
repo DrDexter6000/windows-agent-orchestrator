@@ -22,6 +22,17 @@ export const SEAT_ROLES = Object.freeze([
   "adversarial", "implementation", "non_seat",
 ]);
 
+// TD-161: backend closed set SSOT — the complete list of runtimes WAO can
+// dispatch to. EXPORTED so every consumer validates against THIS array with
+// zero drift (same discipline as REASONING_EFFORTS/SEAT_ROLES above): the
+// unknown-backend gate in normalizeAgent below is the runtime authority, and
+// the commands layer (registry validate) imports it downward (commands →
+// core is a legal edge; the old hand-copied literal there is deleted).
+// Adding/removing a member is an Owner decision — see ADR-0028.
+export const KNOWN_BACKENDS = Object.freeze([
+  "opencode-serve", "claude-code", "codex", "kimi-code", "deepseek-harness",
+]);
+
 // Flags that are MANAGED by the structured model/reasoning/provider fields.
 // If ANY of these appear in args/prependArgs, the configuration is using the
 // old hand-crafted form. M11-9 CTO closeout: there is NO transparent legacy
@@ -178,6 +189,22 @@ export function normalizeAgent(id, agent) {
   if (typeof agent.cwd !== "string") {
     throw new Error(`Agent ${id}: cwd must be a non-empty string`);
   }
+  // TD-161: unknown-backend gate — closed-set membership via the
+  // KNOWN_BACKENDS SSOT above (replaces the else-arm throw that used to tail
+  // the per-backend chain; the field-validation branches below are unchanged
+  // and together cover every member). Fixed-safe: static supported set +
+  // static guidance; only the bad value itself is echoed (existing behavior).
+  // rejected backend candidates (e.g. zcode → ADR-0028) are Owner decisions;
+  // pointer only, never reasons here
+  if (!KNOWN_BACKENDS.includes(agent.backend)) {
+    throw new Error(
+      `Agent ${id} has unknown backend: ${agent.backend} ` +
+      `(supported: ${KNOWN_BACKENDS.join("/")}). ` +
+      `To use a different model, configure the model/provider fields on an existing backend; ` +
+      `to add a new backend (a different CLI/runtime), that is an Owner decision — ` +
+      `see ADR-0028 (previously evaluated candidates, e.g. zcode) in .wao/decisions/.`,
+    );
+  }
   if (agent.backend === "opencode-serve") {
     if (!agent.serveUrl) {
       throw new Error(`Agent ${id} is missing serveUrl`);
@@ -199,8 +226,6 @@ export function normalizeAgent(id, agent) {
       && (typeof agent.dshProvider !== "string" || agent.dshProvider.trim().length === 0)) {
       throw new Error(`Agent ${id}: dshProvider must be a non-blank string when present`);
     }
-  } else {
-    throw new Error(`Agent ${id} has unknown backend: ${agent.backend}`);
   }
   // M10-pre: validate agent.waitTimeout if present (production range).
   if (agent.waitTimeout !== undefined && agent.waitTimeout !== null) {
