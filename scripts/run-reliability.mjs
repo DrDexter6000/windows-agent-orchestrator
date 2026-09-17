@@ -42,14 +42,25 @@ const TMP_DIR = resolve(__dirname, "reliability-tmp");
 // 直接复用，避免 execFileSync("node") 落回 PATH 里的 v24 被 versionGuard 拒。
 const NODE_BIN = process.execPath;
 
-// --- 参数解析 ---
-const args = process.argv.slice(2);
-function getArg(name) {
-  const i = args.indexOf(`--${name}`);
-  return i >= 0 ? args[i + 1] : undefined;
+// --- 参数解析（2026-09-17 f1 修复：纯函数内核 + 未知 flag 拒绝 + 真 --help）---
+// 旧 getArg 纯查表：未知 flag 静默忽略——传 --help 查用法曾直接跑全量矩阵
+// 烧 token。现解析经 scripts/reliability/args.mjs 纯函数（dry 测试钉住），
+// help/错误路径在任何 registry 加载、派发、认证结果更新之前退出。
+import { parseReliabilityArgs, USAGE } from "./reliability/args.mjs";
+
+const _argResult = parseReliabilityArgs(process.argv.slice(2));
+if (_argResult.help) {
+  console.log(USAGE);
+  process.exit(0);
 }
+if (_argResult.error) {
+  console.error(`[reliability] ${_argResult.error}`);
+  console.error(USAGE);
+  process.exit(2);
+}
+const getArg = (name) => _argResult.values[name];
 const SERVE_URL = getArg("serve-url") || "http://127.0.0.1:4298";
-const REGISTRY = getArg("registry") || resolve(ROOT, "config", "agents.json");
+const REGISTRY = getArg("registry") || resolve(ROOT, "config/agents.json");
 const ONLY_AGENT = getArg("agent");
 // 默认 300000（5min/worker）：strict profile 含 scorecard+isolation+workflow 多 drill，
 // 120s 易在重 worker 上卡边界（codex/claude-code strict 单 worker 实测 30-60s，留余量）。

@@ -234,6 +234,14 @@ metrics 投影断裂时第一时间红）。`CERTIFICATION_STATUSES` / required-
 backend 换 model/provider → `--profile delta`；换 backend / 升主力 lane → 全量重跑
 （delta 规程详见下文「delta 认证规程」节）。
 
+**换模型同步面 checklist（2026-09-17 实证八处，防"靠记忆同步"）**：改一条 lane 的
+模型/provider 时逐项核对——① live `config/agents.json` 席位块；② 同文件认证矩阵行
+（providerID/modelId/label）；③ `config/agents.example.json` 席位块+矩阵行；④
+`docs/team-roles.md` 该角色 model 行（**历史 probe 实测表是冻结记录，不随当前模型改写**）；
+⑤ `docs/usage.md` 中的配置示例（如有）；⑥ `AGENT_ONBOARDING.md` 引用（如有）；⑦ 相关
+测试断言面（onboarding/modelFamily/docs-consistency 等——改漏会红，这是设计行为）；
+⑧ 若涉及新增测试文件，`test/manifest.json` 登记。
+
 **案例一行**：2026-09 zcode 事件——life-index CTO agent 接指令切模型（"ZCode 后端驱动"），
 在 WAO 源码 grep `zcode` 零命中后停滞；判断本身正确（src/ 无 zcode 后端是 Owner 刻意
 边界），裁定与重看触发器见 ADR-0028。
@@ -451,6 +459,10 @@ npm run cli -- run coder_low --prompt "..." --isolate --delivery-spec-file deliv
 ```
 
 > 已知坑（friction 2026-08-15 #3）：spec 文件内容是**内层 delivery 对象本身**——`{"mode":"git_commit_v1","allowedPaths":[...],"verificationCommands":[...]}`，**不带** `{"delivery": ...}` 外层包装（那层包装是 MCP `run_dispatch` 工具参数的形状，见 §四）。CLI 把文件内容直接交给 `prepareDeliveryRequest` SSOT 解析，带外层包装会因缺顶层 `mode` 被拒绝。
+
+> **任务书硬化规则（TD-160，2026-09-17 收口）**：任务书必须写明——任何写入或写入意图（含临时文件、探针、scratch）必须落在授权 worktree 内，首个越界即 `failed(workdir_escape)` 终态不可恢复；scratch 一律建 `<worktreeRoot>/.wao/` 下（已被忽略）。路径语义/越界行为的验证优先用注入 fake fs 的纯函数单测（`prepareDeliveryRequestFn` 注入先例）；**worktree 内必要的真实文件系统验证不受此限**（禁的是越界写与写入意图，不是 in-worktree fs 测试）。focused 验证命令引用的测试路径必须先实测存在。
+
+> **规格×测试清单耦合（TD-161 审计 F1 教训，2026-09-17）**：交付规格凡允许 worker **新增、移动或删除 `*.test.js` 文件**，必须同时把 `test/manifest.json` 纳入 `allowedPaths` 并在任务书要求同步登记——否则交付提交独立过 canonical 验证必失败（manifest 漂移 = INVALID ENVIRONMENT），只能 Lead 事后补登记。
 
 CLI 的 run 用法可用 `npm run cli -- run --help` 查看。
 
@@ -1208,8 +1220,11 @@ Lead 仍须在 decision 前完整 review（`run_delivery_review` / `run_delivery
 2. **commit trailer 交叉引用**：采纳集成时在 commit message 加 `WAO-Adopted-From: <runId>` 与 `WAO-Original-Delivery: <deliveryCommitSha>`。decide 的 reason 字段落盘会 trim+redact 且**不经 MCP 回读**（已知审计面限制）——可 grep 的 trailer 才是审计侧能复核的那半边。
 3. **独立审计强制**：采纳必须经独立审计席回审，证据规格写死：目标 repo 的 HEAD hash + `git branch --contains <sha>` + reflog；禁止 Lead 单方闭环（自证闭环已被实证抓过一次：TD-150 批B 首轮"已集成"声称被 reflog/grep 证伪）。
 4. **集成后全量终验**照 §8.2 错峰执行，绿后方可推送。
+5. **集成前工作区纪律（2026-09-17 实证）**：cherry-pick 交付提交前，Lead 工作区必须干净（未提交改动先提交）——交付提交与 Lead 本地改动触碰同一文件（如 `.wao/decisions/map.md`）时会冲突中止。
 
 `run_delivery` 投影在验证失败摘要中携带 `stderrTailInTranscript` 布尔提示位（true = 失败命令的 result frame 带非空 stdoutTail/stderrTail，诊断细节去转录里读；投影永不携带尾内容本身）。
+
+> **审计任务书纪律（2026-09-17，TD-159 半批教训成文）**：给审计席（auditor/复核席）的任务书**必须引用受审对象的可机读锚点，禁止转述交付内容**——最低四要素：受审 commit hash（或 runId）、比较基线（base commit）、受影响文件清单（或"git show 自行审阅"的指引）、测试证据所在提交。转述会让"计划内容"混入"实际内容"，审计者无法发现二者差异（实证：一次审计因任务书转述了未交付的内容而误判"半批零落地"）。
 
 当 MCP transport 不可用时，WAO CLI adapter fallback 调用同一 application service 与安全输出投影，JSON 语义与 MCP 一致；它不是绕过安全投影的 raw 通道，也不提供 assertion-command override：
 
