@@ -421,6 +421,16 @@ spawn_error 事故全部走 workflow 通道，即此层；**后台派发通道**
 （transcript 写入与 fork 之前）。判读与旧 transcript 的排障见
 `docs/troubleshooting.md §3.2`。
 
+### 场景 2b：上游空窗期的派发活性重试（TD-158，Lead 工具层脚本）
+
+上游间歇空窗期派发会秒败空跑（~30s 零产出）；`scripts/dispatch-with-liveness.mjs` 收编 Lead 手写的"派发→观察→查活性→退避重派"循环：
+
+```powershell
+node scripts/wao-node.cjs scripts/dispatch-with-liveness.mjs --agent coder_hq --prompt-file task.md --cwd D:\proj\x -- --model gpt-5.6-sol
+```
+
+重派谓词三条件同时满足才重派（缺一即如实退出非零）：① 前一轮已 terminal；② 带 `completed_empty`/零证据 marker（`DIAGNOSIS_CODES` 闭集语义，与 `runs diagnose` 同一投影）；③ `run.stop_verified` 证停或进程式 backend 无会话残留。不变量：**绝不中止/重试在飞 run**（派发走后台分离 + 独立观察窗，绝不挂会杀 worker 的 `--wait-timeout`——TD-148）；零产出 ≠ 没在工作（纯调研零写入合法，观察窗内活跃即继续等）。出处 TD-158；纯函数面钉于 `test/registry-roles/dispatchLiveness.test.js`。
+
 ### 场景 3：并行跑多个 agent
 
 ```powershell
