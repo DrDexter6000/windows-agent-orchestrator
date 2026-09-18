@@ -105,7 +105,7 @@ Copy-Item config/agents.example.json config/agents.json
   "registry": "config/agents.json",
   "runDir": "runs",              // transcript 存放目录
   "pollInterval": 5000,          // opencode 轮询间隔 ms
-  "waitTimeout": 300000,         // 默认等待超时 5 分钟
+  "waitTimeout": 300000,         // 派发侧等待窗 5 分钟（ADR-0030：到期=通知不杀——观察预算，非执行死线）
   "timeout": 30000,              // HTTP 请求超时
   "retries": 2,                  // HTTP 请求重试次数
   "defaultIsolation": "none",    // 默认不隔离（可选 "worktree"）
@@ -198,8 +198,8 @@ validate 加载 backend **代码类**的闭集能力声明做纯静态交叉校�
 
 - `tokenBudget` 配置 × 该 backend 类未声明 usage/token 上报（`reportsTokenUsage` 非 true，
   未声明按 false 读）→ `⚠` "配了 tokenBudget 但不生效"（TD-87：kimi-code stream-json 无
-  usage 字段即此形状——WAO 预算闸门收不到 token 事实，成本兜底靠 backend 自带控制 +
-  `waitTimeout`）。
+  usage 字段即此形状——WAO 预算闸门收不到 token 事实，成本兜底只剩 backend 自带控制；
+  ADR-0030 起 `waitTimeout` 到期只通知不终止，不再构成成本兜底）。
 - `sessionReuse` 配置 × backend 类未声明 `supportsSessionReuse`（未声明同样按 false 读，
   fail-closed）→ `⚠` 提示该派发会在 spawn 前被运行时硬门拒绝（TD-117 形状）；换声明支持的
   backend 或移除该配置。
@@ -342,7 +342,7 @@ npm run cli -- run coder_low --prompt "总结这个项目的 README"
 npm run cli -- run coder_low --prompt "..." --format json
 ```
 
-> **前台 vs 后台生命周期（TD-148，2026-08-23 实证；同日审计升 P0 修正措辞）**：真正的杀手是 `--wait-timeout` 到期时的控制器 abort——它会**终止 worker 子进程**，且 `--background` 与它同用照样重蹈（后台不是护身符）。`resume` 不带 `--wait` 还有姊妹脸：父进程被 ref'd 子管道吊住静默挂起、或退出时子进程被 Job Object 连坐。**安全组合 = 后台分离派发不挂派发侧等待上限 + 监督走独立 `runs wait <runId>` / `runs status` 轮询**；需要限时监督时用监督命令自身的窗口（到期只结束观察、不碰 worker）。
+> **前台 vs 后台生命周期（TD-148 → ADR-0030/TD-151 根修，2026-09-18）**：等待窗（`--wait-timeout` / agent / global 配置三源）到期 = **通知，不杀**——WAO 只落一条 `run.observation_deadline_reached` 观察事实（载荷有界：waitTimeoutMs + source），前台 CLI 同刻打印一行指引后**继续等到自然终态**；`--background` 的 detached runner 同样只记事实、继续监督到自然终态。终止 worker 只剩两个来源：Lead 显式 `stop`；既有硬安全线（tokenBudget 闸门、workdir_escape 隔离守卫）。有界观察用 `runs wait <runId>` 自身的窗口（到期只结束观察、exit 0）；要 worker 脱离派发进程存活用 `--background`。`resume` 不带 `--wait` 已改为 detached runner 托管续跑（不再挂起）；`resume --wait` 前台等待期间本进程退出会 Job Object 连坐杀 worker——这是进程隔离的设计行为（见上文 Node v22 节），要存活走后台托管。
 
 ### 场景 1b：单次派发换模型（--model，R10-A）
 
@@ -447,7 +447,7 @@ spawn_error 事故全部走 workflow 通道，即此层；**后台派发通道**
 node scripts/wao-node.cjs scripts/dispatch-with-liveness.mjs --agent coder_hq --prompt-file task.md --cwd D:\proj\x -- --model gpt-5.6-sol
 ```
 
-重派谓词三条件同时满足才重派；退出码如实：**真完成（completed 且非空跑）=0**，其余（失败/谓词不满足/轮次耗尽/派发失败）=1：① 前一轮已 terminal；② 带 `completed_empty`/零证据 marker（`DIAGNOSIS_CODES` 闭集语义，与 `runs diagnose` 同一投影）；③ 证停新鲜度前提（复核四审定谳）：终态后 settle 重读**成功**（`stopRereadOk`）是条件③两臂的共同前提——重读失败时旧快照的证停可能已被其后落盘的未证停事实压掉，两臂全关不重派。重读成功后：默认严格臂=`run.stop_verified`（类别是注册表事实而非本 run 进程已退出证据——processBackend 存在 done(failed)-while-alive 路径）；类别臂仅为显式 opt-in 启发式（`--allow-process-death-inference` 且无显式 `run.stop_unverified` 事实）。不变量：**绝不中止/重试在飞 run**（派发走后台分离 + 独立观察窗，绝不挂会杀 worker 的 `--wait-timeout`——TD-148）；零产出 ≠ 没在工作（纯调研零写入合法，观察窗内活跃即继续等）。出处 TD-158；纯函数面钉于 `test/registry-roles/dispatchLiveness.test.js`。
+重派谓词三条件同时满足才重派；退出码如实：**真完成（completed 且非空跑）=0**，其余（失败/谓词不满足/轮次耗尽/派发失败）=1：① 前一轮已 terminal；② 带 `completed_empty`/零证据 marker（`DIAGNOSIS_CODES` 闭集语义，与 `runs diagnose` 同一投影）；③ 证停新鲜度前提（复核四审定谳）：终态后 settle 重读**成功**（`stopRereadOk`）是条件③两臂的共同前提——重读失败时旧快照的证停可能已被其后落盘的未证停事实压掉，两臂全关不重派。重读成功后：默认严格臂=`run.stop_verified`（类别是注册表事实而非本 run 进程已退出证据——processBackend 存在 done(failed)-while-alive 路径）；类别臂仅为显式 opt-in 启发式（`--allow-process-death-inference` 且无显式 `run.stop_unverified` 事实）。不变量：**绝不中止/重试在飞 run**（派发走后台分离 + 独立观察窗，不挂 `--wait-timeout`——ADR-0030 起该窗到期只通知不杀，活性判定本来就归本脚本自己的谓词——TD-148）；零产出 ≠ 没在工作（纯调研零写入合法，观察窗内活跃即继续等）。出处 TD-158；纯函数面钉于 `test/registry-roles/dispatchLiveness.test.js`。
 
 ### 场景 3：并行跑多个 agent
 
@@ -553,8 +553,15 @@ npm run cli -- retry <runId> --model <id> --reasoning <effort>
 # 恢复：接续一个未完成的 run
 #   opencode-serve：attach 到已有 session
 #   claude/codex：重放原 prompt（进程式无法 attach，只能重放）
+#   不带 --wait = detached runner 托管续跑（CLI 立即返回，worker 存活）；
+#   --wait = 前台等待（本进程退出会 Job Object 连坐杀 worker——隔离机制设计行为）
 npm run cli -- resume <runId> --wait
 ```
+
+**resume 两种姿态（ADR-0030 实施批 / TD-148 姊妹脸根修，2026-09-18）**：
+
+- **不带 `--wait` = detached runner 托管**：CLI 以 detached+stdio-ignore+unref 形状 fork 一个 resume runner 立即返回（不再被 respawn 子进程的 ref'd 管道吊住静默挂起）。runner 拥有续跑 handle，驱动 waitForCompletion（token 闸门 / 等待窗到期通知 / 自然终态）并写 ownership 心跳（daemon `--resume-on-start` 判活不劫持）。监督走 `runs status` / `runs wait`。CLI 侧先做廉价的终态/权威事实预检（bound findState + 首条绑定 `session.created`/`run.started`），已终态或不可续接的 run 直接打印既有拒绝形状（`resumed:false`），零 fork；预检与 runner 内权威 resume 之间的竞态由 runner 兜底。
+- **带 `--wait` = 前台等待**：CLI 进程持有续跑 worker，等到自然终态；等待窗到期同 `run` 前台（通知不杀，见场景 1）。**本进程退出/被杀时 worker 被 Windows Job Object 连坐终止**——这是进程隔离机制的设计行为（见部署前置 Node v22 节 / `.wao/decisions/0013`），不是缺陷、不修代码；要存活就不要用前台姿态挂着不管，用上面的托管续跑或 `--background` 派发。
 
 retry 的 per-dispatch 覆盖继承（R12，与 resume 重建链对称）：
 
@@ -663,11 +670,12 @@ npm run cli -- daemon stop
 | `run.event` | RunEvent 透传（含 command、write_intent、file_written、tool_use、tool_result；write_intent 仅是未确认的 containment telemetry） | M6/M12 |
 | `scorecard.checked` | scorecard 门控结果（passed + checks），仅配了 rules 时写 | M6 |
 | `run.completed` | 正常完成 | M0 |
-| `run.timed_out` | 超时 | M0 |
+| `run.timed_out` | **legacy**：历史上等待超时产生；ADR-0030（TD-151）起到期=通知不杀，wait 路径不再写此事件。保留仅为读取 legacy 转录（findState/诊断兼容面） | M0 |
 | `run.aborted` | 被 abort | M0 |
 | `run.error` | 错误 | M0 |
 | `run.stop_requested` | 用户请求停止 | M0 |
 | `run.wait_policy` | M10-pre：实际生效的等待超时策略（waitTimeoutMs + source: explicit/agent/global/disabled）。M10-pre3 起默认 disabled（waitTimeoutMs:null） | M10-pre |
+| `run.observation_deadline_reached` | ADR-0030（TD-151）：等待窗到期观察事实——载荷恰 `{waitTimeoutMs, source}`（有界，不回显路径/环境）。到期不终止 worker（通知不杀）：前台 CLI 打印一行指引后继续等；后台 runner 继续监督到自然终态。每 run 至多一条 | ADR-0030 |
 | `run.stop_verified` | M10-pre：worker runtime 已确认静默；可能来自普通终态清理或显式 `run_stop`，不表示 Lead 一定调用过 stop | M10-pre |
 | `run.stop_unverified` | M10-pre：worker runtime 未能确认静默（outcome: alive/probe_error）；可能来自终态清理或显式 stop | M10-pre |
 | `messages.collected` | collect 命令拉取消息 | M0 |
@@ -936,7 +944,7 @@ M9-7A 起支持可选 `delivery` 块（嵌套形状以 wire 为权威），用�
 
 **行为变更（R15，reuse/lineage 路由的 findState）**：reuse 与 lineage 路由对前任 run 终态的判定（`findState`）自 R15 起同样为 **runId 绑定过滤**（状态只由前任自身事件计算）——尾部追加的外 run 伪造 `run.state_change` 不再能把在飞前任翻成 resume（并发驱动同一 provider 会话，Contract 6）或把终态前任伪造成在飞而阻断派发。全无信封的前任 transcript（零绑定事件）按 **busy** 处理（不可归属 = 永不并发驱动；实测存量 ≈0）。
 
-返回时 transcript 已可读且为 `pending`；关闭 MCP host 后，detached runner 独立驱动 worker 到终态（token 闸门/超时/兜底 abort 都生效），写入共享 transcript。Lead 用 MCP `run_status` 轮询状态。
+返回时 transcript 已可读且为 `pending`；关闭 MCP host 后，detached runner 独立驱动 worker 到自然终态（token 闸门/等待窗到期通知/兜底 abort 都生效——ADR-0030：到期不杀），写入共享 transcript。Lead 用 MCP `run_status` 轮询状态。
 
 ### MCP `run_continue`（Lead 授权修正续跑，M12-7）
 

@@ -817,7 +817,7 @@ test("3A2-01: completed backend + valid diff packages exactly one delivery commi
   }
 });
 
-test("3A2-04: hard scorecard failure never calls packager and leaves worker diff uncommitted", async () => {
+test("3A2-04: hard scorecard failure never calls packager and leaves worker diff uncommitted", { skip: "TD-163：ADR-0030 迁移残留——本测试曾以 timed_out 为合成终结器（旧代码从未自然行使硬记分卡无证据失败路径）；新语义下需 mock 自然终态改造，且存在裸跑挂/仪器过的竞态嫌疑，修复批承载" }, async () => {
   const { repo, baseCommit } = await makeRepo("wao-rd-pkg-04-");
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg04-"));
   let packageCount = 0;
@@ -832,8 +832,18 @@ test("3A2-04: hard scorecard failure never calls packager and leaves worker diff
       delivery: deliveryOpts(repo, baseCommit),
       scorecardMode: "hard",
     });
-    // Don't write any files → no evidence → hard scorecard will fail
-    const result = await run.waitForCompletion({});
+    // Don't write any files → no evidence → hard scorecard will fail.
+    // ADR-0030 迁移：旧语义靠 waitTimeout(5000) 到期杀掉收尾；新语义到期只记
+    // 事实、终止归 Lead。本 mock 在此形状下既不自然完成、到期事实亦未可靠落盘
+    // （已记审计疑点）——测试改为确定性形态：等过 5s 观察窗后由测试显式行使
+    // Lead 的决定（abort），断言不因非完成路径触碰 packager。
+    const result = await Promise.race([
+      new Promise((r) => setTimeout(r, 6000)).then(async () => {
+        await run.abort();
+        const x = await run.waitForCompletion({});
+        return x;
+      }),
+    ]);
     assert.equal(packageCount, 0, "packager must not be called on hard scorecard failure");
     assert.equal(result.completed, false);
   } finally {

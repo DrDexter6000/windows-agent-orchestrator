@@ -5,17 +5,26 @@
 // 命令族：retry <runId> / resume <runId>
 // retry：读旧 run 的 prompt.sent 重新 spawn（新 runId）。
 // resume：attach 到已有 session（opencode HTTP 类，进程已死则重 spawn）。
+//   ADR-0030 实施批起：不带 --wait 的 resume fork detached runner 托管（TD-148
+//   姊妹脸 (a) 根修）；带 --wait 前台等待（到期=通知不杀）。
 //
 // 依赖：
 //   - 外部模块：../transcript.js（findLatestBound/findFirstBound——R13 起 retry
 //     的 prompt.sent/run.started 读取走带 runId 绑定的共享读取器）
 //   - 共享工具：./shared.js（parseOptions/loadRun/newRunManager/resolveIsolateFlag）
 //   - 核心门：../runManager.js（R12 覆盖形状/闭集校验 SSOT——与 run/resume 同源）
+//   - 同层：./run.js（ADR-0030 到期通知行 printObservationDeadlineNotice 单一定义处）
 //
-// retry/resume 不是 public export（无 test 直接 import，无 re-export 需求）。
+// forkResumeRunner 是测试注入缝（spawnFn 可替换）；retry/resumeCommand 仍非测试面。
 
-import { findLatestBound, findFirstBound } from "../transcript.js";
+import { spawn } from "node:child_process";
+import { join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { findLatestBound, findFirstBound, findState, readTranscript, TERMINAL_STATES } from "../transcript.js";
 import { parseOptions, loadRun, newRunManager, resolveIsolateFlag } from "./shared.js";
+// ADR-0030（TD-151）：前台等待的到期通知行（单一定义处，run/resume/retry 共用）。
+import { printObservationDeadlineNotice } from "./run.js";
 // R12: the per-dispatch override shape SSOT (hosted in runManager.js with the
 // synthesis site). Same import discipline as run.js's validators — one source
 // for the CLI/MCP/start faces, zero drift. Adapters(0)→core(2) is downward.
@@ -187,9 +196,65 @@ export async function retryCommand(args, config) {
     ...(Object.keys(overrideEcho).length > 0 ? { inheritedOverrides: overrideEcho } : {}),
   }, null, 2));
   if (options.wait) {
-    const waitResult = await run.waitForCompletion(options);
+    // ADR-0030（TD-151）：retry 前台等待同样"到期=通知不杀"——到期打印一行指引后
+    // 继续等到自然终态。
+    const newRunId = run.transcript.context.runId;
+    const waitResult = await run.waitForCompletion({
+      ...options,
+      onObservationDeadline: (info) => printObservationDeadlineNotice(newRunId, info),
+    });
     console.log(JSON.stringify({ completed: waitResult.completed }, null, 2));
   }
+}
+
+/**
+ * ADR-0030 实施批（TD-148 姊妹脸 (a) 根修）：`resume` 不带 --wait 的接管通道。
+ *
+ * 旧行为（挂起脸）：CLI 进程内 respawn/attach worker（进程式 backend 的子进程
+ * stdout/stderr 是 ref'd 管道）→ CLI 打印 JSON 后既不退出也不监督，被管道吊住
+ * 静默挂起；事件流无人消费、transcript 不再推进。姊妹脸 (b)（父进程退出时
+ * Job Object 连坐杀 worker）是进程隔离的设计行为（usage.md §Node v22 / ADR 0013），
+ * 不在本修复内——文案如实指引"要存活 → 后台托管"。
+ *
+ * 新行为：不带 --wait 时 fork 一个 detached background runner（--resume-run-id），
+ * 对齐 dispatchRun 的 spawn 形状（detached + stdio ignore + unref）。CLI 立即返回，
+ * 不持有任何 worker 管道；runner 拥有续跑 handle，驱动 waitForCompletion（token
+ * 闸门 / ADR-0030 到期通知 / 自然终态）并写 ownership 心跳（daemon 判活不劫持）。
+ *
+ * 先做廉价的终态预检（bound findState 读 transcript）：已终态的 run 直接本地打印
+ * 既有拒绝形状，不 fork。预检与 runner 内 resume 之间的竞态由 runner 兜底
+ * （resumed:false 写入 runner stdout，transcript 零新增）。
+ *
+ * @param {string} runId
+ * @param {object} options - CLI options（runDir/registry/waitTimeout/pollInterval）
+ * @param {object} config - CLI config（runDir/registry/pollInterval 默认值来源）
+ * @param {Function} [spawnFn] - 注入缝（测试用；默认 node child_process.spawn）
+ */
+export async function forkResumeRunner(runId, options, config, spawnFn = spawn) {
+  const runDir = resolve(options.runDir ?? config.runDir);
+  const registryPath = resolve(options.registry ?? config.registry);
+  // M10-pre closeout-3 同款边界校验：--wait-timeout 进入 runner argv 前过
+  // validateBoundedWaitTimeout（fail-fast，零 fork）。
+  const { validateBoundedWaitTimeout } = await import("../application/timeoutPolicy.js");
+  if (options.waitTimeout !== undefined && options.waitTimeout !== null) {
+    validateBoundedWaitTimeout(Number(options.waitTimeout));
+  }
+  // TD-98 同款路径推导：本模块在 src/commands/，backgroundRunner.js 在 src/。
+  const runnerPath = join(dirname(fileURLToPath(import.meta.url)), "..", "backgroundRunner.js");
+  const runnerArgs = [
+    runnerPath,
+    "--resume-run-id", runId,
+    "--run-dir", runDir,
+    "--registry", registryPath,
+    "--poll-interval", String(options.pollInterval ?? config.pollInterval ?? 1000),
+  ];
+  if (options.waitTimeout !== undefined && options.waitTimeout !== null) {
+    runnerArgs.push("--wait-timeout", String(Number(options.waitTimeout)));
+  }
+  // detached: runner 在 CLI 退出后存活；stdio ignore（runner 写 transcript）；
+  // unref 让父进程不等待它——与 dispatchRun 的 fork 形状一致（runDispatch.js）。
+  spawnFn(process.execPath, runnerArgs, { detached: true, stdio: "ignore" }).unref();
+  return { runId, runnerPath };
 }
 
 export async function resumeCommand(args, config) {
@@ -198,6 +263,40 @@ export async function resumeCommand(args, config) {
     throw new Error("resume requires <runId>");
   }
   const options = parseOptions(tail);
+
+  // ADR-0030（TD-151）：不带 --wait = detached runner 托管接管（不挂起脸）；
+  // 带 --wait = 前台等待（到期=通知不杀，继续等到自然终态；CLI 进程持有 worker，
+  // 进程退出会 Job Object 连坐——by design，见 usage.md 场景 1）。
+  if (!options.wait) {
+    const dir = resolve(options.runDir ?? config.runDir);
+    let events = [];
+    try {
+      events = await readTranscript(join(dir, `${runId}.jsonl`));
+    } catch {
+      events = []; // 不可读 → 按 not found 拒绝（fail-closed，不 fork）
+    }
+    // 廉价预检（与 manager.resume 同款绑定纪律）：终态 / 空转录 / 缺权威事实
+    // （绑定 session.created + run.started）→ 本地打印既有拒绝形状，零 fork。
+    // 预检与 runner 内权威 resume 之间的竞态由 runner 兜底（resumed:false 只写
+    // runner stdout，transcript 零新增）。
+    const state = findState(events.filter((e) => e && e.runId === runId));
+    const hasResumeAuthority = Boolean(
+      findFirstBound(events, "session.created", runId) && findFirstBound(events, "run.started", runId),
+    );
+    if (events.length === 0 || TERMINAL_STATES.includes(state) || !hasResumeAuthority) {
+      console.log(JSON.stringify({ runId, resumed: false, reason: "terminal or not found" }));
+      return;
+    }
+    await forkResumeRunner(runId, options, config);
+    console.log(JSON.stringify({
+      runId,
+      resumed: true,
+      delegated: "background-runner",
+      note: "detached runner owns the resumed lifecycle (token gate / observation-deadline notice / natural terminal); poll with `runs status`/`runs wait`",
+    }));
+    return;
+  }
+
   const manager = newRunManager(config);
   const run = await manager.resume(runId, { runDir: options.runDir, registry: options.registry });
   if (!run) {
@@ -205,8 +304,9 @@ export async function resumeCommand(args, config) {
     return;
   }
   console.log(JSON.stringify({ runId, resumed: true, state: run.state, sessionId: run.result?.backendSessionId }));
-  if (options.wait) {
-    const waitResult = await run.waitForCompletion(options);
-    console.log(JSON.stringify({ runId, completed: waitResult.completed }));
-  }
+  const waitResult = await run.waitForCompletion({
+    ...options,
+    onObservationDeadline: (info) => printObservationDeadlineNotice(runId, info),
+  });
+  console.log(JSON.stringify({ runId, completed: waitResult.completed }));
 }

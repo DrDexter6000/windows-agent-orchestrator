@@ -8,12 +8,18 @@
 // 当前的"拒绝裸 spawn"护栏（runManager.js TD-39）只是"拒绝脚枪"，堵了无人值守。
 //
 // 本模块是正解：detached runner 进程**拥有** worker handle，驱动 waitForCompletion
-// （含 token 闸门 + 超时 + 兜底 abort），写共享 transcript（文件，跨进程）。
+// （含 token 闸门 + 观察到期通知 + 兜底 abort），写共享 transcript（文件，跨进程）。
 // CLI 用 --background flag fork 一个跑本模块的 detached 子进程，拿 runId 立即返回，
 // runner 独立活到 run 结束。process 死即会话死；opencode 类由 waitForCompletion 内的
 // 三层防线兜底。runtime-agnostic（不按 backend 名分支）。
 //
+// ADR-0030（TD-151）：等待窗到期在 runner 内同样 = 通知不杀——waitForCompletion 只落
+// run.observation_deadline_reached 事实，runner 继续监督到自然终态（TD-148 主害的钉）。
+//
 // 进程内核心函数 runBackground 可单测；CLI 入口 runMain 解析 argv 后调它。
+// resume 模式（--resume-run-id）：`resume` 不带 --wait 的接管通道——CLI fork 本 runner
+// 以 detached 形状持有续跑 worker（修复 TD-148 姊妹脸 (a)：CLI 进程被 ref'd 子管道
+// 吊住静默挂起），runner 驱动续跑到自然终态。
 
 import { RunManager } from "./runManager.js";
 import { backendFor } from "./backends/factory.js";
@@ -83,7 +89,10 @@ function makeObjectRegistry(registryObj) {
  * @param {string} [opts.reasoningOverride] — R11-1 per-dispatch reasoning
  *   effort (--reasoning); RunManager.start synthesizes it over the registry
  *   reasoning policy (only `.effort` replaced)
- * @returns {Promise<{runId, completed, failed, timedOut, error}>}
+ * @returns {Promise<{runId, completed, failed, timedOut, error, observationDeadlineReached}>}
+ *   ADR-0030（TD-151）：observationDeadlineReached=true 表示等待窗到期事实已落盘
+ *   （run.observation_deadline_reached）——到期不杀 worker，completed/failed 是
+ *   自然终态；timedOut 只对 legacy 终态转录为 true（新 run 恒 false）。
  */
 export async function runBackground(opts = {}) {
   const { agentId, prompt, runDir } = opts;
@@ -218,6 +227,91 @@ export async function runBackground(opts = {}) {
     failed: waitResult.failed ?? false,
     timedOut: waitResult.timedOut ?? false,
     error: waitResult.error,
+    // ADR-0030（TD-151）：到期事实的结构化可见性（后台不杀钉：到期后终态仍是
+    // 自然 completed/failed，不是 timed_out）。
+    observationDeadlineReached: run.observationDeadlineReached === true,
+  };
+}
+
+/**
+ * TD-148 姊妹脸 (a) 修复（ADR-0030 实施批）：`resume` 不带 --wait 的接管通道。
+ * 旧行为：CLI 进程内 respawn worker 子进程（ref'd stdout/stderr 管道）→ CLI 打印
+ * 后被管道吊住静默挂起，且无人消费事件流。新行为：CLI 以 detached+stdio-ignore+unref
+ * 形状 fork 本 runner（对齐 dispatchRun 的 spawn 形状），由 runner 持有续跑 handle、
+ * 驱动 waitForCompletion（token 闸门 / 观察到期通知 / 自然终态）并写 ownership 心跳。
+ * CLI 立即返回，不再持有任何 worker 管道。
+ *
+ * @param {object} opts
+ * @param {string} opts.runId - 要续接的 run
+ * @param {object|string} opts.registry - registry 对象或路径
+ * @param {string} opts.runDir
+ * @returns {Promise<{runId, resumed: boolean, reason?: string, completed, failed, timedOut, error?, observationDeadlineReached}>}
+ */
+export async function runResumeBackground(opts = {}) {
+  const { runId, runDir } = opts;
+  if (!runId) throw new Error("runResumeBackground: runId required");
+  if (!runDir) throw new Error("runResumeBackground: runDir required");
+
+  const waoCliPath = getWaoCliPath();
+  const registryResolver = typeof opts.registry === "object" && opts.registry !== null
+    ? makeObjectRegistry(opts.registry)
+    : readRegistry;
+  const registryPath = typeof opts.registry === "string" ? opts.registry : (opts.registry ? undefined : "config/agents.json");
+
+  const manager = new RunManager({
+    config: {
+      runDir,
+      registry: registryPath ?? (typeof opts.registry === "object" ? "." : undefined),
+      pollInterval: opts.pollInterval ?? 1000,
+      // ADR-0030：waitTimeout 到期在 resume 续跑里同样是观察通知，不是终止。
+      waitTimeout: opts.globalWaitTimeout ?? opts.waitTimeout,
+      timeout: 30000,
+      retries: 0,
+    },
+    readRegistry: registryResolver,
+    transcriptDir: runDir,
+    // M11-11C 同款注入缝：生产走共享工厂，测试可注入。
+    backendFor: opts.backendFor
+      ? (agent) => opts.backendFor(agent, { fetchImpl: opts.fetchImpl, waoCliPath })
+      : (agent) => backendFor(agent, { fetchImpl: opts.fetchImpl, waoCliPath }),
+  });
+
+  const run = await manager.resume(runId, {});
+  if (!run) {
+    return {
+      runId,
+      resumed: false,
+      reason: "terminal or not found",
+      completed: false,
+      failed: false,
+      timedOut: false,
+    };
+  }
+
+  // D-F3：与 runBackground 同款 ownership 心跳（daemon resume 判活用）。
+  writeOwnerHeartbeat(runDir, run.runId);
+  const heartbeatTimer = setInterval(() => writeOwnerHeartbeat(runDir, run.runId), OWNER_HEARTBEAT_INTERVAL_MS);
+  heartbeatTimer.unref?.();
+
+  let waitResult;
+  try {
+    waitResult = await run.waitForCompletion({
+      waitTimeout: opts.waitTimeout,
+      pollInterval: opts.pollInterval ?? 1000,
+    });
+  } finally {
+    clearInterval(heartbeatTimer);
+    clearOwner(runDir, run.runId);
+  }
+
+  return {
+    runId: run.runId,
+    resumed: true,
+    completed: waitResult.completed ?? false,
+    failed: waitResult.failed ?? false,
+    timedOut: waitResult.timedOut ?? false,
+    error: waitResult.error,
+    observationDeadlineReached: run.observationDeadlineReached === true,
   };
 }
 
@@ -261,8 +355,10 @@ async function writeStartupFailureTranscript({ runDir, runId, agentId, prompt, e
 }
 
 /**
- * CLI 入口：解析 argv 调 runBackground。供 detached 子进程调用。
- * argv 形如：node backgroundRunner.js <agentId> --prompt "..." --run-dir D --registry F [--wait-timeout N]
+ * CLI 入口：解析 argv 调 runBackground（或 resume 模式的 runResumeBackground）。
+ * 供 detached 子进程调用。argv 形如：
+ *   node backgroundRunner.js <agentId> --prompt "..." --run-dir D --registry F [--wait-timeout N]
+ *   node backgroundRunner.js --resume-run-id <runId> --run-dir D --registry F [--wait-timeout N]
  */
 export async function runMain(argv = process.argv.slice(2)) {
   // TD-40：detached runner 是直接 spawn worker 子进程的点，必须在 v24（回归）上拒绝——
@@ -278,6 +374,23 @@ export async function runMain(argv = process.argv.slice(2)) {
   const args = argv.filter((a) => !a.startsWith("--"));
   const opts = parseSimpleFlags(argv);
   const agentId = args[0];
+
+  // ADR-0030 实施批（TD-148 姊妹脸 (a)）：resume 接管模式。`resume <runId>` 不带
+  // --wait 时 CLI 以 detached 形状 fork 本入口（--resume-run-id <runId>），runner
+  // 持有续跑 handle 到自然终态。无需 delivery/reuse-worktree 解析（那是 start 派发
+  // 面的输入校验；resume 的形状权威在既有 transcript）。
+  if (opts["resume-run-id"]) {
+    const result = await runResumeBackground({
+      runId: opts["resume-run-id"],
+      registry: opts.registry,
+      runDir: opts["run-dir"],
+      waitTimeout: opts["wait-timeout"] !== undefined ? Number(opts["wait-timeout"]) : undefined,
+      globalWaitTimeout: opts["global-wait-timeout"] !== undefined ? Number(opts["global-wait-timeout"]) : undefined,
+      pollInterval: Number(opts["poll-interval"] ?? 1000),
+    });
+    process.stdout.write(JSON.stringify(result) + "\n");
+    return;
+  }
 
   // M9-7A closeout: parse delivery JSON before entering runBackground. If it
   // fails, fail-closed — write a safe run.error + transition to failed. Never

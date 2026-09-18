@@ -15,13 +15,13 @@ import { readTranscript, findState } from "../../src/transcript.js";
 // 写共享 transcript。CLI fork runner 后拿 runId 返回，runner 独立活到 run 结束。
 // 本测试验证进程内核心函数 runBackground：驱动完一个 run + 状态机推进 + transcript 完整。
 
-function makeMockFetch() {
+function makeMockFetch({ assistantDelayMs = 0 } = {}) {
   const sessions = new Map();
   return async (url, init = {}) => {
     const urlStr = String(url);
     if (init.method === "POST" && urlStr.endsWith("/api/session")) {
       const id = `ses_bg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      sessions.set(id, { messages: [] });
+      sessions.set(id, { messages: [], promptedAt: 0 });
       return { ok: true, status: 200, async json() { return { data: { id } }; }, async text() { return JSON.stringify({ data: { id } }); } };
     }
     if (init.method === "POST" && urlStr.includes("/prompt_async")) {
@@ -29,14 +29,27 @@ function makeMockFetch() {
       const body = JSON.parse(init.body);
       const session = sessions.get(sessionId);
       if (session) {
+        session.promptedAt = Date.now();
         session.messages.push({ info: { id: body.messageID, role: "user" }, parts: body.parts });
-        session.messages.push({ info: { id: "msg_reply", role: "assistant" }, parts: [{ type: "text", text: "bg done" }] });
+        if (assistantDelayMs === 0) {
+          // 零延迟：assistant 立即可见（原行为）。
+          session.messages.push({ info: { id: "msg_reply", role: "assistant" }, parts: [{ type: "text", text: "bg done" }] });
+        }
       }
       return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
     }
     if (init.method === "GET" && urlStr.includes("/message")) {
       const sessionId = new URL(urlStr).pathname.split("/")[2];
       const session = sessions.get(sessionId);
+      // TD-151：慢 worker——assistant 在 prompt 之后 assistantDelayms 才出现在消息流
+      // （延迟挂 /message 轮询，不挂 prompt_async——后者阻塞在 start，等不到 wait 窗）。
+      if (session && assistantDelayMs > 0 && (Date.now() - session.promptedAt) < assistantDelayMs) {
+        return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
+      }
+      if (session && assistantDelayMs > 0 && !session.assistantDelivered) {
+        session.assistantDelivered = true;
+        session.messages.push({ info: { id: "msg_reply", role: "assistant" }, parts: [{ type: "text", text: "bg done" }] });
+      }
       return { ok: true, status: 200, async json() { return session?.messages ?? []; }, async text() { return JSON.stringify(session?.messages ?? []); } };
     }
     if (init.method === "POST" && urlStr.includes("/abort")) {
@@ -73,40 +86,36 @@ test("P2 runBackground: 驱动 run 到 completed，状态机推进，transcript 
   }
 });
 
-test("P2 runBackground: worker 静默不响应时推进到终态（超时兜底），不卡 submitted", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "wao-bg-fail-"));
+// TD-151（ADR-0030）迁移：原断言"worker 永久静默 → 超时兜底 → 终态 failed/timed_out"。
+// 到期不再终止——"永久静默 + 无 silentTimeout"在新语义下是受监督的长跑（终止只剩
+// Lead stop / 硬安全线），永静默形状不再有终态可等。改为钉新语义（也是 TD-148 主害
+// 的 in-process 版）：等待窗先到、慢回复后到 → runner 活过 deadline 监督到自然终态。
+test("P2 runBackground（TD-151 迁移）: 小 waitTimeout + 慢 worker → 到期只记事实，监督到自然终态", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "wao-bg-slow-"));
   try {
-    // mock fetch：session 创建成功，但 /message 永远空（模拟 provider 静默）→ 走超时
-    const silentFetch = async (url, init = {}) => {
-      const urlStr = String(url);
-      if (init.method === "POST" && urlStr.endsWith("/api/session")) {
-        return { ok: true, status: 200, async json() { return { data: { id: "ses_silent" } }; }, async text() { return JSON.stringify({ data: { id: "ses_silent" } }); } };
-      }
-      if (init.method === "POST" && urlStr.includes("/prompt_async")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      if (init.method === "GET" && urlStr.includes("/message")) {
-        return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } }; // 永远空
-      }
-      if (init.method === "POST" && urlStr.includes("/abort")) {
-        return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      }
-      return { ok: false, status: 404, async text() { return "x"; } };
-    };
+    // 慢回复：assistant 在 deadline（waitTimeout 300）之后 500ms 才出现。
     const result = await runBackground({
-      agentId: "bg_fail",
+      agentId: "bg_slow",
       prompt: "x",
-      registry: { agents: { bg_fail: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4299", agent: "build", cwd: dir, model: { providerID: "p", id: "m" } } } },
+      registry: { agents: { bg_slow: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4299", agent: "build", cwd: dir, model: { providerID: "p", id: "m" }, completionMode: "first-stable" } } },
       runDir: dir,
-      fetchImpl: silentFetch,
-      waitTimeout: 1500,
+      fetchImpl: makeMockFetch({ assistantDelayMs: 500 }),
+      waitTimeout: 300,
       pollInterval: 20,
     });
     assert.ok(result.runId);
-    // 不应卡 submitted；静默 → 超时 → 终态
+    // 到期不杀：慢 worker 跨过 deadline 自然完成，终态不是 timed_out。
+    assert.equal(result.completed, true, `慢 worker 应自然 completed，实际 ${JSON.stringify(result)}`);
+    assert.equal(result.timedOut, false);
+    assert.equal(result.observationDeadlineReached, true, "到期事实应在结果可见");
     const events = await readTranscript(path.join(dir, `${result.runId}.jsonl`));
     const state = findState(events);
-    assert.ok(["failed", "timed_out"].includes(state), `静默应进终态 failed/timed_out，实际 ${state}（不能卡 submitted）`);
+    assert.equal(state, "completed", "runner 监督到自然终态（不卡 submitted、不伪造 timed_out）");
+    const deadlineFacts = events.filter((e) => e.type === "run.observation_deadline_reached");
+    assert.equal(deadlineFacts.length, 1, "到期事实恰一条");
+    assert.equal(deadlineFacts[0].waitTimeoutMs, 300);
+    assert.equal(events.some((e) => e.type === "run.timed_out"), false, "到期不得写 run.timed_out");
+    assert.equal(events.some((e) => e.type === "run.aborted"), false, "到期不得产生 abort 终态");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -358,3 +367,4 @@ test("R4: runBackground readOnly → isolated run + exactly-one declaration; wri
     await rm(runDir, { recursive: true, force: true });
   }
 });
+// test/backgroundRunner.test.js

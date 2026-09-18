@@ -114,6 +114,7 @@
       "transcript/runEvent.test.js",
       "run-lifecycle/runEvidenceAssessment.test.js",
       "run-lifecycle/runManager.test.js",
+      "run-lifecycle/runManagerDeadline.test.js",
       "run-lifecycle/runSessionReuseCwdGuidance.test.js",
       "run-lifecycle/runStageProjection.test.js",
       "run-lifecycle/runStatus.test.js",
@@ -218,7 +219,9 @@
     ],
     "process": [
       "isolation-infra/backgroundRunner.test.js",
+      "isolation-infra/backgroundRunnerDeadline.test.js",
       "isolation-infra/cli.test.js",
+      "isolation-infra/cliDeadline.test.js",
       "isolation-infra/daemon.test.js",
       "isolation-infra/gitLocalExcludeCloseout.test.js",
       "isolation-infra/installPs1.test.js",

@@ -251,7 +251,7 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
     // effort: override}) under the same advisory discipline. Present only
     // when --reasoning was given (ordinary dispatches stay byte-identical).
     ...(result.effectiveReasoning ? { reasoning: result.effectiveReasoning } : {}),
-    note: "detached runner owns lifecycle (token gate / abort / state). Poll with `status`/`tail`.",
+    note: "detached runner owns lifecycle (token gate / observation-deadline notice / natural terminal — expiry never stops the worker, ADR-0030). Poll with `status`/`tail`.",
   }, null, 2));
 }
 
@@ -566,17 +566,47 @@ export async function runCommand(args, config) {
 }
 
 /**
+ * ADR-0030（TD-151）：等待窗到期通知行——前台 CLI 在到期**时刻**打印（stderr，
+ * 不污染 --format json 的 stdout 管道），随后继续等到自然终态。指引两条出路：
+ * 有界观察走 `runs wait` 窗口（到期只结束观察、exit 0）；要 worker 脱离派发进程
+ * 存活用 --background。单行、固定安全文案 + runId/等待策略数值（不回显路径/环境）。
+ */
+export function printObservationDeadlineNotice(runId, { waitTimeoutMs, source } = {}) {
+  console.error(
+    `[${runId}] observation deadline reached (waitTimeout ${waitTimeoutMs}ms, source ${source})`
+    + " — worker NOT stopped, still waiting for natural terminal;"
+    + " bounded observation: `runs wait <runId>`; dispatcher-independent survival: --background",
+  );
+}
+
+/**
  * 包装 waitForCompletion：捕获 failed 抛错，转为结构化结果返回。
  * 让主控能看到 worker 失败的证据（runId/failed/error），决定是否接手，
  * 而不是 CLI 崩溃 exit 1 什么也不输出。
+ *
+ * ADR-0030（TD-151）：注入 onObservationDeadline 回调（调用方已提供则尊重不覆盖）
+ * ——到期即打印通知行（见 printObservationDeadlineNotice）；waitForCompletion 自身
+ * 只落 run.observation_deadline_reached 事实并继续监督。结果对象在到期时附
+ * observationDeadlineReached:true（结构化可见性；timedOut 仍只反映 legacy 终态）。
  *
  * TD-95 #6（复盘）：error 截断到 500 字符（后端 raw stderr 最多 4000 字符，噪声高）；
  * failed 时注入 diagnosis 字段（复用 diagnoseFailure，帮 Lead 快速分类不用读 raw error）。
  */
 export async function runAndWait(run, options) {
+  const runId = run.transcript.context.runId;
+  const waitOptions = {
+    ...options,
+    ...(options.onObservationDeadline ? {} : {
+      onObservationDeadline: (info) => printObservationDeadlineNotice(runId, info),
+    }),
+  };
   try {
-    const result = await run.waitForCompletion(options);
-    return { runId: run.transcript.context.runId, ...result };
+    const result = await run.waitForCompletion(waitOptions);
+    return {
+      runId,
+      ...result,
+      ...(run.observationDeadlineReached ? { observationDeadlineReached: true } : {}),
+    };
   } catch (error) {
     // waitForCompletion 在 done(failed) 时抛错。转为结构化失败结果，
     // 让调用方（主控/CLI）能看到失败原因，而非裸 crash。
@@ -610,6 +640,8 @@ export async function runAndWait(run, options) {
       error: truncatedError,
       transcript: run.transcript.filePath,
       ...(diagnosis ? { diagnosis } : {}),
+      // ADR-0030（TD-151）：failed 抛错路径同样携带到期事实（若到期先于失败）。
+      ...(run.observationDeadlineReached ? { observationDeadlineReached: true } : {}),
     };
   }
 }

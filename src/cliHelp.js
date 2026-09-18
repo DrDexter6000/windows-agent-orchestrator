@@ -23,7 +23,7 @@ Commands:
   collect <runId> [--limit N] [--cursor TOKEN] [--mode full|compact] [--final] [--format json] [--run-dir DIR]
   stop <runId> [--run-dir DIR]
   retry <runId> [--wait] [--run-dir DIR] [--model ID] [--reasoning EFFORT]
-  resume <runId> [--wait] [--run-dir DIR]
+  resume <runId> [--wait] [--run-dir DIR]   # 不带 --wait = detached runner 托管续跑（存活）；--wait = 前台等待（本进程退出时 Job Object 连坐杀 worker — by design，见 docs/usage.md 场景 1）
   runs list [--run-dir DIR] [--agent AGENT_ID] [--latest N] [--active] [--format json]
   runs summary [--run-dir DIR] [--format json]
   runs prune --older-than <duration> [--archive] [--run-dir DIR]   # --archive 超龄 run 移动到 runs-archive/<yyyy-mm>/（原文件名，不删除；冲突不覆盖）
@@ -104,7 +104,10 @@ Flags:
   --registry FILE                agent registry file (default config/agents.json)
   --run-dir DIR                  transcript directory (default runs/)
   --poll-interval MS             status poll interval in ms
-  --wait-timeout MS              bounded wait timeout in ms (1000-600000)
+  --wait-timeout MS              bounded observation deadline in ms (1000-600000); on expiry WAO records
+                                 run.observation_deadline_reached and keeps waiting for the natural terminal —
+                                 it NEVER stops the worker (ADR-0030). Bounded observation window:
+                                 runs wait <runId>; dispatcher-independent survival: --background
   --format json|text             output format (default text)
   --isolate                      run in an isolated worktree
   --require-certified            dispatch only certified workers

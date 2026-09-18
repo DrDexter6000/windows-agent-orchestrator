@@ -200,24 +200,56 @@ test("gracefulShutdown aborts all active managers' runs on SIGINT", async () => 
   }
 });
 
-test("timed_out transition when no assistant message appears", async () => {
+// TD-151（ADR-0030）迁移：原断言"无 assistant 消息 → waitTimeout 到 → timed_out"。
+// 到期语义已改为通知不杀——本测试改为钉新语义：assistant 在 deadline 之后才出现，
+// run 活过 deadline 并自然 completed，到期事实落盘（迁移理由见实施说明 TD-151-A）。
+test("deadline 到期后 assistant 才出现：通知不杀，自然 completed（TD-151 迁移）", async () => {
   const dir = await makeTempDir();
   try {
-    // mock fetch 不返回 assistant 消息（只 push user 消息）
+    // 慢 worker mock：assistant 在 prompt 后 150ms 才出现在 /message 流里
+    // （> waitTimeout 50——deadline 先到）。延迟挂 /message 轮询而非 prompt_async
+    // （后者阻塞在 start 内，等不到 wait 窗）。
+    const assistantDelayMs = 150;
+    const sessions = new Map();
     const fetchImpl = async (url, init = {}) => {
       const urlStr = String(url);
       if (init.method === "POST" && urlStr.endsWith("/api/session")) {
+        const id = `ses_slow_${Date.now()}`;
+        sessions.set(id, { messages: [], promptedAt: 0, assistantDelivered: false });
         return {
           ok: true, status: 200,
-          async json() { return { data: { id: "ses_timeout" } }; },
+          async json() { return { data: { id } }; },
           async text() { return "{}"; },
         };
       }
       if (init.method === "POST" && urlStr.includes("/prompt_async")) {
+        const sessionId = new URL(urlStr).pathname.split("/")[2];
+        const body = JSON.parse(init.body);
+        const session = sessions.get(sessionId);
+        if (session) {
+          session.promptedAt = Date.now();
+          session.messages.push({ info: { id: body.messageID, role: "user" }, parts: body.parts });
+        }
         return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
       }
       if (init.method === "GET" && urlStr.includes("/message")) {
-        return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
+        const sessionId = new URL(urlStr).pathname.split("/")[2];
+        const session = sessions.get(sessionId);
+        if (session && (Date.now() - session.promptedAt) < assistantDelayMs) {
+          return { ok: true, status: 200, async json() { return []; }, async text() { return "[]"; } };
+        }
+        if (session && !session.assistantDelivered) {
+          session.assistantDelivered = true;
+          session.messages.push({
+            info: { id: "msg_reply", role: "assistant" },
+            parts: [{ type: "text", text: "slow reply" }],
+          });
+        }
+        return {
+          ok: true, status: 200,
+          async json() { return session?.messages ?? []; },
+          async text() { return JSON.stringify(session?.messages ?? []); },
+        };
       }
       return { ok: false, status: 404, async text() { return ""; } };
     };
@@ -225,13 +257,19 @@ test("timed_out transition when no assistant message appears", async () => {
     const run = await manager.start("test_agent", { prompt: "hello" });
 
     const waitResult = await run.waitForCompletion({ waitTimeout: 50, pollInterval: 10 });
-    assert.equal(waitResult.completed, false);
-    assert.equal(run.state, "timed_out");
+    assert.equal(waitResult.completed, true, "到期后继续等，assistant 到来即自然 completed");
+    assert.equal(waitResult.timedOut, false);
+    assert.equal(run.state, "completed");
 
     const events = await readTranscript(run.transcript.filePath);
     const stateChanges = events.filter((e) => e.type === "run.state_change");
     const last = stateChanges.at(-1);
-    assert.equal(last.to, "timed_out");
+    assert.equal(last.to, "completed");
+    const deadlineFacts = events.filter((e) => e.type === "run.observation_deadline_reached");
+    assert.equal(deadlineFacts.length, 1, "到期事实恰一条");
+    assert.equal(deadlineFacts[0].waitTimeoutMs, 50);
+    assert.equal(events.some((e) => e.type === "run.timed_out"), false,
+      "到期不得产生 run.timed_out");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -516,9 +554,11 @@ test("abort updates state to aborted even when backend.abort fails", async () =>
   }
 });
 
-test("M1 核心切分: 超时由 RunManager 触发，不依赖 backend emit done", async () => {
+// TD-151（ADR-0030）迁移：原断言"永不完成 → waitTimeout 到 → timed_out（reason=timeout）"。
+// 到期不再终态化——改为钉：到期只落观察事实（RunManager 侧的职责切分保留），
+// 监督继续（非终态），由外部显式 stop 收尾（终止只剩 Lead stop / 硬安全线）。
+test("M1 核心切分（ADR-0030 迁移）: 到期由 RunManager 记事实；终止需显式 stop，不依赖 backend emit done", async () => {
   // mock 持续返回空（永不完成），且永不 emit done。
-  // 超时必须由 RunManager 的 AbortController 触发，而非 backend。
   const dir = await makeTempDir();
   try {
     const fetchImpl = async (url, init = {}) => {
@@ -542,18 +582,32 @@ test("M1 核心切分: 超时由 RunManager 触发，不依赖 backend emit done
     const manager = createManager(dir, fetchImpl);
     const run = await manager.start("test_agent", { prompt: "hello" });
 
-    // waitTimeout 很短，RunManager 内部 AbortController 应触发
-    const waitResult = await run.waitForCompletion({ waitTimeout: 50, pollInterval: 10 });
-    assert.equal(waitResult.completed, false);
-    assert.equal(waitResult.timedOut, true);
-    assert.equal(run.state, "timed_out");
+    // 外部显式 stop（Lead stop 是两个合法终止来源之一）。
+    const stopSignal = new AbortController();
+    const waitPromise = run.waitForCompletion({ waitTimeout: 50, pollInterval: 10, signal: stopSignal.signal });
+    // 等到期事实落盘（到期时刻 RunManager 侧的动作只有这一个）。
+    await new Promise((resolve) => {
+      const timer = setInterval(async () => {
+        try {
+          const evs = await readTranscript(run.transcript.filePath);
+          if (evs.some((e) => e.type === "run.observation_deadline_reached")) {
+            clearInterval(timer);
+            resolve();
+          }
+        } catch { /* 尚未建文件 */ }
+      }, 10);
+    });
+    const atDeadline = await readTranscript(run.transcript.filePath);
+    const stateAtDeadline = findState(atDeadline);
+    assert.ok(!["completed", "failed", "aborted", "timed_out"].includes(stateAtDeadline),
+      `到期时刻不得终态化（通知不杀），实际 ${stateAtDeadline}`);
+    assert.equal(atDeadline.some((e) => e.type === "run.timed_out"), false);
 
-    // transcript 应有 timed_out 状态转移，且没有 backend 发的 done
-    const events = await readTranscript(run.transcript.filePath);
-    const stateChanges = events.filter((e) => e.type === "run.state_change");
-    const last = stateChanges.at(-1);
-    assert.equal(last.to, "timed_out");
-    assert.equal(last.reason, "timeout");
+    // 显式 stop 后终态 aborted（终止来自 Lead，不来自时钟）。
+    stopSignal.abort();
+    const waitResult = await waitPromise;
+    assert.equal(waitResult.aborted, true);
+    assert.equal(run.state, "aborted");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1547,9 +1601,11 @@ test("M8-1: 默认 warn + 证据满足 → completed（无 warn 事件，与正�
 
 /**
  * 构造一个 mock backend，handle.abort 计数 + events 按 scenario 产出。
- * scenario: "completed" | "failed" | "hang"（hang = 永不 emit done，逼超时）
+ * scenario: "completed" | "failed" | "hang"（hang = 永不 emit done，直到 signal
+ * 被 abort）| "hang-then-complete"（TD-151：跨过等待窗 deadline 沉默 hangMs 后自然
+ * 完成——到期=通知不杀的构造形状）
  */
-function createSessionKillBackend(scenario) {
+function createSessionKillBackend(scenario, { hangMs = 120 } = {}) {
   let abortCalls = 0;
   const backend = {
     async spawn(agent, task) {
@@ -1568,10 +1624,14 @@ function createSessionKillBackend(scenario) {
           } else if (scenario === "failed") {
             yield { kind: "done", reason: "failed", error: "boom" };
           } else if (scenario === "hang") {
-            // 永不 emit done，直到 signal 被 abort（超时打断）
+            // 永不 emit done，直到 signal 被 abort（显式 stop / 外部打断）
             while (!signal?.aborted) {
               await new Promise((r) => setTimeout(r, interval));
             }
+          } else if (scenario === "hang-then-complete") {
+            // TD-151：沉默跨过 deadline（hangMs > waitTimeout），然后自然完成。
+            await new Promise((r) => setTimeout(r, hangMs));
+            yield { kind: "done", reason: "completed" };
           }
         },
         abort: async () => { abortCalls += 1; },
@@ -1631,10 +1691,15 @@ test("事故修复: run failed 后必须兜底 abort serve session", async () =>
   }
 });
 
-test("事故修复: run timed_out 后必须兜底 abort serve session（事故主因）", async () => {
+// TD-151（ADR-0030）迁移：原断言"hang → 超时 → timed_out 后兜底 abort serve session"。
+// 到期不再产生 timed_out——事故契约（任何终态的清理路径必须兜底 abort serve session，
+// 防 deepseek quota 黑洞）本身与终态种类无关，改为在"到期后自然 completed"形状上钉
+// （迁移理由见实施说明 TD-151-B）。
+test("事故修复（TD-151 迁移）: 到期后自然 completed 的清理路径必须兜底 abort serve session（防 deepseek 黑洞）", async () => {
   const dir = await makeTempDir();
   try {
-    const mock = createSessionKillBackend("hang");
+    // 沉默 120ms 跨过 deadline（80ms）后自然完成。
+    const mock = createSessionKillBackend("hang-then-complete", { hangMs: 120 });
     const config = {
       registry: "x", runDir: dir, pollInterval: 10, waitTimeout: 80,
       timeout: 5000, retries: 0, defaultIsolation: "none",
@@ -1646,10 +1711,14 @@ test("事故修复: run timed_out 后必须兜底 abort serve session（事故�
     const manager = new RunManager({ config, readRegistry, backendFor: () => mock.backend });
     const run = await manager.start("a", { prompt: "go" });
     const result = await run.waitForCompletion({ pollInterval: 5, waitTimeout: 80 });
-    assert.equal(result.timedOut, true);
-    assert.equal(run.state, "timed_out");
+    assert.equal(result.completed, true, "到期后应自然 completed（通知不杀）");
+    assert.equal(run.state, "completed");
+    const events = await readTranscript(run.transcript.filePath);
+    assert.ok(events.some((e) => e.type === "run.observation_deadline_reached"),
+      "到期事实应落盘");
+    assert.equal(events.some((e) => e.type === "run.timed_out"), false);
     assert.equal(mock.abortCalls(), 1,
-      "timed_out 后 handle.abort 必须被调一次（这正是事故主因：超时后未发送 serve abort）");
+      "终态清理路径必须兜底 abort 一次（事故主因：终态后未发送 serve abort）");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1779,17 +1848,34 @@ test("S1-1: agent 不配 tokenBudget → 闸门不启用，正常完成（向后
 
 test("S1-1: multiplier 生效 — 同样 token，multiplier=1 不触发，multiplier=100 触发", async () => {
   // stable 模式：固定 input=2000 output=10。multiplier=1 → effective=2010 < budget(5000) 不触发
+  // TD-151（ADR-0030）迁移：multiplier=1 分支原以 waitTimeout 到期收尾（timed_out）；
+  // 到期不再终态化，改为外部显式 stop 收尾，并顺带钉"预算闸门静默 ≠ 到期杀"。
   const dir1 = await makeTempDir();
   let run1;
   try {
     const mock1 = createBudgetBackend("stable", { stepTokens: 2000 });
     const manager1 = budgetManager(dir1, mock1, { tokenBudget: 5000, tokenBudgetMultiplier: 1 });
     run1 = await manager1.start("a", { prompt: "go" });
-    const r1 = await run1.waitForCompletion({ pollInterval: 5, waitTimeout: 60 });
-    // stable 不增长，waitTimeout 到了走 timed_out（没超 budget）
-    assert.equal(run1.state, "timed_out", "multiplier=1 时 effective 不超 budget，走超时");
+    const stopSignal = new AbortController();
+    const wait1 = run1.waitForCompletion({ pollInterval: 5, waitTimeout: 60, signal: stopSignal.signal });
+    // 等 waitTimeout(60) 到期事实落盘（stable 不增长 → 闸门不触发，监督继续）。
+    await new Promise((resolve) => {
+      const timer = setInterval(async () => {
+        try {
+          const evs = await readTranscript(run1.transcript.filePath);
+          if (evs.some((e) => e.type === "run.observation_deadline_reached")) {
+            clearInterval(timer);
+            resolve();
+          }
+        } catch { /* 尚未建文件 */ }
+      }, 10);
+    });
     const ev1 = await readTranscript(run1.transcript.filePath);
     assert.ok(!ev1.some((e) => e.type === "run.budget_exceeded"), "multiplier=1 不应触发闸门");
+    // 显式 stop 收尾：终态来自 Lead，不是时钟。
+    stopSignal.abort();
+    await wait1;
+    assert.equal(run1.state, "aborted", "multiplier=1 时闸门静默，终态由显式 stop 落（非时钟）");
   } finally {
     rmSync(dir1, { recursive: true, force: true });
   }
@@ -1809,7 +1895,11 @@ test("S1-1: multiplier 生效 — 同样 token，multiplier=1 不触发，multip
   }
 });
 
-test("TD-105: backend done(failed) caused by wait timer remains timed_out", async () => {
+// TD-151（ADR-0030）迁移：TD-105 原钉"定时器 abort 打断后 backend 报 failed 仍记
+// timed_out"——该因果前提（定时器 abort）已随 ADR-0030 废弃，不再可构造。存续的
+// 不变量是终态真相诚实：到期事实不改变 backend 自报终态的分类（done(failed) →
+// failed，不伪造 timed_out）。
+test("TD-105（ADR-0030 迁移）: 到期后 backend 自报 failed → 如实 failed（到期事实不污染终态真相）", async () => {
   const dir = await makeTempDir();
   try {
     const backend = {
@@ -1817,8 +1907,9 @@ test("TD-105: backend done(failed) caused by wait timer remains timed_out", asyn
         return {
           backend: "process",
           backendSessionId: "proc_timeout_race",
-          async *events(signal) {
-            await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+          async *events() {
+            // 跨过 deadline（20ms）后自报失败——不再依赖 signal.abort（定时器已不 abort）。
+            await new Promise((resolve) => setTimeout(resolve, 80));
             yield { kind: "done", reason: "failed", error: "process exited with code 1 after taskkill" };
           },
           async abort() {},
@@ -1828,14 +1919,17 @@ test("TD-105: backend done(failed) caused by wait timer remains timed_out", asyn
     };
     const manager = makeProcessManager(dir, backend);
     const run = await manager.start("test", { prompt: "go" });
-    const result = await run.waitForCompletion({ waitTimeout: 20 });
+    await assert.rejects(() => run.waitForCompletion({ waitTimeout: 20, pollInterval: 5 }), /process exited with code 1/);
 
-    assert.equal(result.timedOut, true);
-    assert.equal(result.failed, false);
-    assert.equal(run.state, "timed_out");
+    assert.equal(run.state, "failed", "backend 自报 failed 即 failed（不伪造 timed_out）");
     const events = await readTranscript(run.transcript.filePath);
-    assert.equal(events.some((event) => event.type === "run.error" && event.phase === "wait"), false);
-    assert.equal(events.filter((event) => event.type === "run.state_change" && event.to === "timed_out").length, 1);
+    assert.ok(events.some((event) => event.type === "run.observation_deadline_reached"),
+      "到期事实应先于终态落盘");
+    assert.equal(events.some((event) => event.type === "run.timed_out"), false,
+      "到期不得伪造 timed_out");
+    assert.equal(events.some((event) => event.type === "run.state_change" && event.to === "timed_out"), false);
+    const waitError = events.find((event) => event.type === "run.error" && event.phase === "wait");
+    assert.ok(waitError, "backend 失败应如实记 run.error(phase=wait)");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1970,9 +2064,11 @@ test("TD-5: 多 run 并发 wait 时交叉 abort 不互相干扰", async () => {
   }
 });
 
-test("TD-5: 同一 manager 内多 run 并发，一个超时另一个完成", async () => {
-  // 同一 manager 内并发两个 run，一个会超时（waitTimeout 小），另一个正常完成。
-  // 验证超时不串扰、activeRuns 正确移除。
+// TD-151（ADR-0030）迁移：slow 原以 waitTimeout=1 到期收尾（timed_out）；到期不再
+// 终态化——slow 的 assistant（50ms）跨过 deadline(1ms) 后自然 completed，恰是
+// "慢 worker 活过小等待窗"的并发版钉。验证到期不串扰、activeRuns 正确移除。
+test("TD-5: 同一 manager 内多 run 并发，一个小等待窗慢 run 另一个正常完成（TD-151 迁移）", async () => {
+  // 同一 manager 内并发两个 run：slow 的 waitTimeout(1ms) 远小于其 assistantDelay(50ms)。
   const dir = await makeTempDir();
   try {
     const fetchImpl = createMockFetch({ assistantDelay: 50 });
@@ -1981,15 +2077,23 @@ test("TD-5: 同一 manager 内多 run 并发，一个超时另一个完成", asy
     const runSlow = await manager.start("test_agent", { prompt: "slow", runId: "concurrent_slow" });
     assert.equal(manager.activeRuns.size, 2);
 
-    // fast 给充足时间完成；slow 给极短 timeout 触发超时
+    // fast 给充足时间完成；slow 给极短等待窗（到期只通知）
     const waitFast = runFast.waitForCompletion({ waitTimeout: 2000, pollInterval: 10 });
     const waitSlow = runSlow.waitForCompletion({ waitTimeout: 1, pollInterval: 5 });
     const [resFast, resSlow] = await Promise.all([waitFast, waitSlow]);
 
     assert.equal(resFast.completed, true, "fast 应正常完成");
-    assert.equal(resSlow.timedOut, true, "slow 应超时");
+    assert.equal(resSlow.completed, true, "slow 应活过 deadline 自然 completed（通知不杀）");
+    assert.equal(resSlow.timedOut, false);
     assert.equal(runFast.state, "completed");
-    assert.equal(runSlow.state, "timed_out");
+    assert.equal(runSlow.state, "completed");
+    // slow 的到期事实独立落盘，不串扰 fast。
+    const slowEvents = await readTranscript(runSlow.transcript.filePath);
+    assert.ok(slowEvents.some((e) => e.type === "run.observation_deadline_reached"),
+      "slow 的等待窗到期事实应落盘");
+    const fastEvents = await readTranscript(runFast.transcript.filePath);
+    assert.ok(!fastEvents.some((e) => e.type === "run.observation_deadline_reached"),
+      "fast 无到期事实（不串扰）");
     // 两个 run 都从 activeRuns 移除
     assert.equal(manager.activeRuns.size, 0);
   } finally {
@@ -2837,3 +2941,4 @@ test("TD-150-T7: klwc9 真实案卷转录回放 ⇒ 诊断投影区分性事实 
   assert.equal(lastState.to, "failed");
   assert.equal(lastState.reason, "delivery_failed");
 });
+// test/runManager.test.js

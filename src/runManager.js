@@ -34,7 +34,9 @@ import { providerKeyFor } from "./providerFingerprint.js";
 
 /**
  * RunManager 持有活跃 run 的生命周期。
- * 显式状态机：pending → submitted → running → {completed|failed|aborted|timed_out}
+ * 显式状态机：pending → submitted → running → {completed|failed|aborted}
+ * （timed_out 自 ADR-0030/TD-151 起不再由 wait 路径产生——等待窗到期=通知不杀；
+ * 该状态保留在 TERMINAL_STATES/findState/diagnosis 的 legacy 转录读取面。）
  *
  * M0 临时桥接：通过 backend.waitForCompletion 驱动状态转移（而非消费 events 流）。
  * M1 会把 waitForCompletion 替换为消费 AsyncIterable<RunEvent>。
@@ -1870,6 +1872,9 @@ export class Run {
     this.state = initialState;
     this._aborted = false;
     this._removed = false;
+    // ADR-0030（TD-151）：等待窗到期事实的内存镜像。到期只置 true（供 CLI/runner
+    // 结果投影），不改变终态语义——timed_out 不再由定时器产生，监督继续到自然终态。
+    this.observationDeadlineReached = false;
     this._cleanup = cleanup;
     this._cleaned = false;
     // 会话兜底 abort 标志（事故修复 2026-06-17）：HTTP 类 backend 的 serve session
@@ -1919,9 +1924,12 @@ export class Run {
   /**
    * 消费 handle.events 流驱动状态机（M1：events 驱动，替代 M0 桥接）。
    *
-   * 职责分工（M1 决策）：
+   * 职责分工（M1 决策；ADR-0030/TD-151 修订）：
    *   - done 事件由 backend emit（backend 知道何时完成）
-   *   - 超时由 RunManager 管（AbortController 打断 events 流）
+   *   - 等待窗到期由 RunManager 记观察事实（run.observation_deadline_reached）
+   *     并通知调用方（options.onObservationDeadline）——**通知不杀**：不 abort
+   *     事件流、不产生 timed_out，监督继续到自然终态。终止只剩 Lead 显式 stop
+   *     （外部 abort）与既有硬安全线（tokenBudget / workdir_escape）。
    */
   async waitForCompletion(options = {}) {
     // M10-pre3: unified timeout precedence via SSOT — default is now disabled.
@@ -1947,16 +1955,36 @@ export class Run {
       source: waitTimeoutSource,
     });
 
-    // M10-pre3: only create the total-duration timer when deadline is enabled.
-    // When disabled, the run has no time-based kill — workers run until they
-    // complete, fail, are externally aborted, or hit token/resource budget.
+    // M10-pre3: only create the observation-deadline timer when the deadline is
+    // enabled. When disabled, there is no time-based arm at all — workers run
+    // until they complete, fail, are externally aborted, or hit token/resource
+    // budget.
+    //
+    // ADR-0030（TD-151）：到期 = 通知，不杀。定时器降级为通知器——到期只置
+    // this.observationDeadlineReached、append 一条有界 advisory 事实
+    // run.observation_deadline_reached（载荷只有 waitTimeoutMs + source，不回显
+    // 路径/环境/提示词），并调用 options.onObservationDeadline（前台 CLI 打印
+    // 一行指引）。**不再 controller.abort()**：事件流继续被消费到自然终态。
+    // timed_out 不再由定时器产生（legacy timed_out 转录的读取兼容保留在
+    // TERMINAL_STATES / findState / diagnosis）。历史注记：此臂在 M0–M12 期间
+    // 曾以 controller.abort() 打断事件流并转 timed_out——TD-148 实证它在
+    // --background 下同样杀 worker，是 06-18 事故族的根，ADR-0030 裁定废弃。
     const controller = new AbortController();
-    let waitTimerExpired = false;
     let timer = null;
     if (deadlineEnabled) {
       timer = setTimeout(() => {
-        waitTimerExpired = true;
-        controller.abort();
+        this.observationDeadlineReached = true;
+        // 事实落盘失败不改变监督语义（advisory）：自然终态路径仍写各自事实。
+        // append 自带跨进程 append lock，与主循环的并发 append 安全交错。
+        void this.transcript.append("run.observation_deadline_reached", {
+          waitTimeoutMs: waitTimeout,
+          source: waitTimeoutSource,
+        }).catch(() => {});
+        if (typeof options.onObservationDeadline === "function") {
+          try {
+            options.onObservationDeadline({ waitTimeoutMs: waitTimeout, source: waitTimeoutSource });
+          } catch { /* 通知回调失败不影响监督 */ }
+        }
       }, waitTimeout);
     }
     // M10-pre3C: track an EXTERNAL abort separately from the deadline timer.
@@ -1990,7 +2018,6 @@ export class Run {
     // consume the durable truth even without a transport-activity event. Only a
     // DONE_MARKERS member is ever captured — raw/unknown values are dropped.
     let doneMarker = null;
-    let timedOut = false;
     let metrics = null;
     let budgetExceeded = false;
     let budgetUsed = 0;
@@ -2145,14 +2172,9 @@ export class Run {
           if (ev.kind !== "write_intent") evidence.push(ev);
         }
       }
-      // M10-pre3C: only the deadline timer may set timedOut. An external
-      // AbortSignal (Run.abort, daemon IPC stop, daemon shutdown, caller signal)
-      // is abort semantics and must NOT become timed_out. The externalAborted
-      // flag is routed to _abortInternal below so the run terminals honestly as
-      // aborted via the existing atomic terminal arbitration.
-      if (waitTimerExpired) {
-        timedOut = true;
-      }
+      // ADR-0030（TD-151）：等待窗到期不再产生 timed_out——到期事实已在定时器
+      // 回调里落盘（run.observation_deadline_reached），此处无需任何终态动作。
+      // 流结束的原因由下方 doneReason / externalAborted 分支如实分派。
     } finally {
       clearTimeout(timer);
     }
@@ -2161,8 +2183,8 @@ export class Run {
 
     // M10-pre3C: if an external signal aborted the wait (and no other path has
     // already terminalized this run), route it through _abortInternal so the
-    // terminal fact is exactly one aborted — not timed_out, not fabricated.
-    // This wins over the stream-ended and timed_out branches below.
+    // terminal fact is exactly one aborted — not fabricated.
+    // This wins over the stream-ended branches below.
     if (externalAborted && !TERMINAL_STATES.includes(this.state) && !this._aborted) {
       await this._abortInternal(STATE_CHANGE_REASON.external_signal);
     }
@@ -2228,16 +2250,11 @@ export class Run {
       return _loserResult("failed", { messages, evidence, metrics, budgetExceeded: true });
     }
 
-    if (timedOut) {
-      const tResult = await this._transition(this.state, "timed_out", STATE_CHANGE_REASON.timeout, {
-        factEvents: [{
-          type: "run.timed_out",
-          payload: { backendSessionId: this.result.backendSessionId },
-        }],
-      });
-      await this._runCleanup();
-      return _loserResult(tResult.state, { messages, evidence, metrics });
-    }
+    // ADR-0030（TD-151）：原 `if (timedOut)` 分支（定时器 → timed_out 终态 +
+    // run.timed_out 事实 + 兜底杀 session）随定时器 abort 臂一并废弃——到期不再
+    // 是终止语义。timed_out 仍保留在 TERMINAL_STATES / findState / diagnosis 的
+    // 读取面（legacy 转录兼容）；STATE_CHANGE_REASON.timeout 保留在冻结闭集
+    // （读侧容忍历史值），生产者不再使用。
 
     if (doneReason === "completed") {
       // scorecard 门控（M6-6，opt-in）：有 rules 才检查。
@@ -2429,13 +2446,12 @@ export class Run {
     // simply ended without emitting a done event. That is dishonest: timed_out
     // must mean a wall-clock deadline fired.
     //
-    // Now we distinguish:
-    //   - timedOut === true (waitTimerExpired, or stream ended because the
-    //     controller signal was aborted by a real deadline timer) → timed_out.
-    //   - timedOut === false AND doneReason === null (stream ended with no done,
-    //     no timer, no abort) → honest failed with reason "backend_stream_ended".
-    //     Reuses the existing failed terminal arbitration (no second terminal).
-    if (!timedOut && doneReason === null) {
+    // ADR-0030（TD-151）收紧：定时器不再 abort、不再产生 timed_out，此分支的
+    // 前提（timedOut === true）已不存在——流结束且无 done 一律是诚实的
+    // backend_stream_ended failed（复用既有 failed 终态仲裁，无第二终态）。
+    //   - doneReason === null（流结束无 done，无 abort）→ failed，reason
+    //     "backend_stream_ended"。
+    if (doneReason === null) {
       await this.transcript.append("run.error", { phase: "wait", error: "backend stream ended without done" });
       const endedResult = await this._transition(this.state, "failed", STATE_CHANGE_REASON.backend_stream_ended);
       await this._runCleanup();
@@ -2443,20 +2459,19 @@ export class Run {
       throw new Error("backend stream ended without done");
     }
     // M12-11 RED FLAG B: an unknown non-null done reason is a backend failure,
-    // NOT a timeout. Only waitTimerExpired may create run.timed_out (see the
-    // `if (timedOut)` branch above). The fallthrough previously ALWAYS wrote
-    // run.timed_out for any truthy doneReason that was neither "completed" nor
-    // "failed" — so a backend that emitted done("cancelled"/"stream_error"/…)
-    // with NO deadline timer was mislabeled as a WAO execution deadline, and a
-    // Lead could infer WAO stopped the worker when it did not.
+    // NOT a timeout. The fallthrough previously ALWAYS wrote run.timed_out for
+    // any truthy doneReason that was neither "completed" nor "failed" — so a
+    // backend that emitted done("cancelled"/"stream_error"/…) with NO deadline
+    // timer was mislabeled as a WAO execution deadline, and a Lead could infer
+    // WAO stopped the worker when it did not.
     //
     // It now fails closed: transition to failed with a safe closed-set reason
     // (backend_unknown_reason), record a safe run.error, and throw — exactly
     // like the done(failed) / backend_stream_ended paths. The raw backend
     // reason (doneReason) is NEVER echoed on the wire or in the transition
-    // reason; only the safe closed-set label is recorded. This is the ONLY way
-    // an unknown terminal reaches failed without a deadline, and it can never
-    // produce run.timed_out.
+    // reason; only the safe closed-set label is recorded. ADR-0030（TD-151）
+    // 起 wait 路径的任何分支都不再产生 run.timed_out（定时器已是纯通知器）；
+    // 该事件类型只存在于 legacy 转录读取。
     await this.transcript.append("run.error", {
       phase: "wait",
       error: "backend stream ended with unknown done reason",

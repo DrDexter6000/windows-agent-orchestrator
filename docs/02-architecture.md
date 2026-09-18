@@ -104,7 +104,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 - **Owner Dashboard active-first / history-on-demand**：Owner 观察面默认 Active——只列出当前有新鲜 owner 心跳、经证明 active 的 run。Active 的候选集是当前 `.owner-*` 租约文件——候选枚举只 `readdirSync` 一次 runDir 目录（成本随目录条目总数增长、包括历史 transcript，但仅一次目录读），随后只有当前租约候选者的 transcript 被打开/解析、做 per-run workspace 验证与 `ownerLiveness` 心跳检查（昂贵工作是 O(当前租约数)，无任何历史 transcript 被打开/解析/验证）；`listRuns` 仍是单一应用 SSOT，以 `scanScope`（`active` 枚举租约候选并只保留 proven-active、`history` 按 transcript 派生 `updatedAt` 做有界闭集范围过滤、缺省行为字节不变）+ `historyRange` 扩展，**不是**第二个分类器，并复用既有 `ownerLiveness` 心跳真相与 closed-set activity 分类。Active 响应固定标注 `scanScope=active` 且不携带 `unresolvedCount`（active/history scope 不做全库存 unresolved 分类，故恒缺失而非 0）。历史是显式有界按需：`1h/24h/7d` 预设或有界自定义 from/to（上限 7d），由 `ownerDashboardServer.js` HTTP 闭集严格校验；长驻看板服务进程复用元数据校验 summary 缓存做热读，**无第二个持久索引**。前端 runs 列表绑定 runs-mode epoch（类比 selection epoch），迟到的 Active/History 响应不得覆盖当前模式或更新的查询；run 从 active 集或有界历史窗口消失绝不构成终态迁移、不触发通知。MCP `lead_preflight`/`runs_list` 热路径、CLI 文本看板、transcript writer、delivery 语义与验收权威均不受影响。详细命令与合同见 `docs/usage.md`。
 - **冻结工具面**：WAO 暴露**恰好 22 个 always-registered MCP 工具**——无 profile、无 startup flag、无 restart-to-recover：每个操作工具对连接整个生命周期都可独立调用。这是**呈现层**——它**不是**权限层、**不是**路由层、**不是** Host/runtime-name 适配器：代码里**没有任何**按 Claude/Codex/Kimi/OpenCode 的分支，也不依赖 `tools/list_changed` 或运行期动态注册。工具面的字节稳定性**分层**（ADR 0021）：`name` 与注册顺序逐字节冻结；`inputSchema`/`outputSchema`/`annotations` 由 description 剥离 SHA-256 冻结契约哈希锁定（仅限 additive 变更 + 显式重冻结记录）；`description` 可修订——受冻结字节天花板约束、每次修订附 Lead 复核记录。演进 additive-first，减面两级程序见 `.wao/decisions/0021`。单一冻结来源在 `src/mcp/toolSurface.js`（22 个名字的 frozen 数组 + 唯一性/计数/无 playbook 工具的模块加载不变量；server.js 在构造期对实际注册序列做 deepEqual 自检，绑定 production 到该 SSOT，无 Host/runtime 分支）。built-in playbook catalog **整体不在工具面内**，由 MCP resources（`wao://playbooks` summary + `wao://playbooks/{id}` 详情，委托同一 `application/playbookCatalog.js` SSOT）承载。stdio argv parser 将残留的旧 profile 参数视为普通未知 flag 忽略——不解析值、不出现在输出、不改变 server 面、不失败启动；`--registry`/`--run-dir`/`--workspace-root` 解析逐字节不变。所有 `DRILLDOWN_TOOLS` 闭集成员（`run_status`/`run_activity`/`run_collect`/`run_delivery`/`run_delivery_review`/`run_diagnose`）均在 22 集合内，故 `availableDrilldowns` 渐进式披露提示永不广告一个不可调用的工具；它只披露、不自动调用、不决策、不广告 mutation/control 工具。没有任何能力被永久移除或弱化——一个永不重启的 Host 保留全部操作能力（真删除式减面须 Owner 明示并修订本句——ADR 0021 L2 程序）。
 - **Self-Describing Results**：恰好四个 standalone 成功结果——`run_wait`/`run_await_result`/`run_delivery`/`run_diagnose`——携带 REQUIRED `semanticNotes`（1..4 条），每条恰好三键 `{id, meaning, doesNotMean}`：`id` 是冻结的 namespaced 闭集值，`meaning` 是一句确定性事实，`doesNotMean` 是 0..2 条确定性非含义。无 `scope` 字段、无 per-entry `semanticsRef`，详情 URI 机械派生 `wao://semantics/{id}`。单一纯、provider-neutral 的 SSOT 在 `src/application/runSemanticsNotes.js`（冻结静态目录 + 纯 selector，不导入任何东西、无 runtime/backend-name 分支、无动态模型文本、永不回显 transcript/provider/path/prompt/command/session）。目录与 selector 的事实输入来自既有闭集（`OBSERVATION_OUTCOMES`/`TERMINATION_SOURCES`/`DIAGNOSIS_CATEGORIES`/delivery readiness·verification）；未知/缺失值退化到显式安全 fallback note（见下），不新增事实闭集。强制点在 application 层：1..4 条、每串有界、id 唯一、精确三键、目录成员、≤2048 字节 UTF-8 序列化上限（空数组 fail closed）；未知 source tool fail closed，未知/future/缺失事实值退化到显式安全闭集 fallback note（`observation.unknown`/`termination.unknown`/`diagnosis.unknown`），永不动态回显（未知/缺失 observation outcome 不再误归 `observation.point_in_time`）。selector 优先级确定：`observation.read_failure` 排除任何终止 note；终止 note 区分 completion/execution_deadline/manual/provider/backend/control_plane/unknown；delivery note 明确 verification passed **不是** Lead acceptance 且**永不建议** accept/reject/repackage，已请求但未 settle（`deliveryRequested:true`/`deliveryAvailable:false`/无 verification·failure）投影为 `delivery.waiting` 而非 `not_requested`；diagnosis note 只陈述事实、不给处方。只读 MCP resources：`wao://semantics`（summary：每个 id + meaning）与 `wao://playbooks` 同等；`wao://semantics/{id}` 为 ResourceTemplate 详情（**不**把每个 detail id 注册为独立静态 resource）。未知/畸形 id 返回固定安全文本且**不回显请求 id**。MCP adapter 在严格 output parse 前立即 attach notes；output schema 的 `id` 用**有界 shape**（冻结 namespace pattern + 长度，派生自同一 SSOT）而非完整 catalog enum——避免每个 outputSchema 重复序列化 33+ id 的 enum 撑大 tools/list wire；application validator（`ID_SET`）仍是 catalog 成员的唯一权威（每个 selector 只发 catalog id）。错误响应保持固定且无 structuredContent；`run_delivery_review_bundle` 嵌入的 nested delivery BASE **不含** semanticNotes。工具面恰好 22，既有 playbook resources 与工具描述不受影响（描述只说 semanticNotes 自解释当前事实 + 详情在 `wao://semantics/{id}`，不复制目录措辞）。
-- **三钟分离**：WAO 有三个互相独立的时钟，职责不重叠、互不覆盖：(1) **执行截止（execution deadline，默认禁用）**——worker run 上的 wall-clock 终止时钟，默认禁用，由 Lead 观察驱动（`run_wait`）；显式配置时生效。(2) **后端请求超时（backend request timeout，独立）**——单次后端调用（HTTP/进程 spawn/collect 拉取）的网络/IO 超时，与 run 生命周期正交，按 `config.timeout` 链生效。(3) **Lead 观察等待（`run_wait` 的 `waitMs`）**——Lead 侧 long-poll 阻塞上限（下限 180s），只决定 Lead 一次调用等多久，**不影响 worker 生命周期**。三者解耦：到时只返回当前 liveness 让 Lead 决策，不杀 worker。
+- **三钟分离**：WAO 有三个互相独立的时钟，职责不重叠、互不覆盖：(1) **派发侧等待窗（waitTimeout，默认禁用；ADR-0030 起为观察预算而非执行死线）**——Lead 一次调用愿意花多少注意力等待的上限；到期只写 `run.observation_deadline_reached` 观察事实并通知（前台 CLI 打印一行指引；`run_wait` 窗口到期 exit 0 即此形），**绝不终止 worker**——终止只剩 Lead 显式 stop 与既有硬安全线（tokenBudget/workdir_escape）。(2) **后端请求超时（backend request timeout，独立）**——单次后端调用（HTTP/进程 spawn/collect 拉取）的网络/IO 超时，与 run 生命周期正交，按 `config.timeout` 链生效。(3) **Lead 观察等待（`run_wait` 的 `waitMs`）**——Lead 侧 long-poll 阻塞上限（下限 180s），只决定 Lead 一次调用等多久，**不影响 worker 生命周期**。三者解耦：到时只返回当前 liveness/通知让 Lead 决策，不杀 worker。
 - **retained-candidate recovery**：既有 `run_delivery_repackage` 内核支持 `disallowed_scope` 与 `backend_failed` 两类闭集 provenance。后者只在绑定 delivery run 以 `backend_error|backend_stream_ended` 唯一失败、runtime 已 `run.stop_verified`、无冲突事实、worktree 仍在 exact base 且完整非空 inventory 可证明时投影。WAO 只机械保全并重封装候选；`allowedPaths` 和语义接受仍完全由 Lead 提供，系统不自动扩域、重试 worker、恢复 provider session 或作 decision。
 - Backend 仍只负责 worker runtime。
 - Skill 是 Lead 指导层（`SKILL.md`），不在运行时依赖图中保存状态。
@@ -366,7 +366,8 @@ interface TranscriptEvent {
 | **`run.state_change`** | 状态机每次转移。`reason` ∈ `STATE_CHANGE_REASONS`（**冻结闭集**，SSOT = `src/transcript.js`，守卫 `test/isolation-infra/stateChangeReasons.test.js`；写入侧生产者一律引用 SSOT 成员，读侧容忍历史值；对照归档见 `docs/research/16-terminal-reason-taxonomy-comparison.md`） | `[S]` 新增 |
 | **`run.event`** | 从 RunEvent 流透传一条（message/tool_use/command/...） | `[S]` 新增 |
 | `run.completed` | 正常完成 | ✅ 现有 |
-| `run.timed_out` | 超时 | ✅ 现有 |
+| `run.timed_out` | **legacy（ADR-0030 起生产者已废）**：历史上由 wait 定时器 abort 产生。ADR-0030（TD-151）起等待窗到期=通知不杀，wait 路径不再写此事件、不再转 timed_out；事件类型与状态保留仅为读取 legacy 转录（TERMINAL_STATES/findState/diagnosis 兼容面） | ✅ 现有 |
+| **`run.observation_deadline_reached`** | ADR-0030（TD-151）：等待窗（waitTimeout，explicit/agent/global 三源）到期时的有界 advisory 观察事实——载荷恰 `{waitTimeoutMs, source}`（不回显路径/环境/提示词）。到期**不**终止 worker、不产生 timed_out：监督继续到自然终态；终止只剩 Lead 显式 stop 与既有硬安全线（tokenBudget/workdir_escape）。每 run 至多一条（定时器只触发一次） | ADR-0030 |
 | `run.aborted` | 被 abort | ✅ 现有 |
 | `run.error` | 错误 | ✅ 现有 |
 | `run.stop_requested` | 用户请求停止 | ✅ 现有 |
@@ -440,12 +441,16 @@ type RunState =
   | "completed" | "failed" | "aborted" | "timed_out";
 ```
 
+> **ADR-0030（TD-151）**：`timed_out` 自等待窗到期语义改为"通知不杀"后不再是可达终态
+> （上图的 `timeout` 边已废弃——到期改写 `run.observation_deadline_reached` 观察事实）。
+> 状态值保留在类型与 `TERMINAL_STATES` 中仅为读取 legacy 转录（findState/诊断/投影不得回归）。
+
 **转移规则（代码判定，绝不依赖 LLM）**：
 - `pending→submitted`：`backend.spawn` 成功返回
 - `submitted→running`：收到首个 `message` 事件（C5 对齐，2026-06-24）。⚠️ 实现上只有 `message` 触发 running，`tool_use`/`command`/`file_written` 等证据事件只落 `run.event` 不触发状态转移——这样语义更清晰（"running"= 已开始生成文本回复，而非"调了工具"）。一个只调工具不给文本的 worker 会等到首条 message 才进 running，证据事件仍记录在 transcript 可追溯。
 - `running→completed`：收到 `done` 事件且 `reason==="completed"` **且 scorecard 通过**（`[M]` 起；`[S]` 无 scorecard，直接 completed）。**M8-1 起 scorecard 默认 warn**：无显式 rules 时默认 `requireEvidence:warn`，不通过仅记 `scorecard.warn` 不转 failed（仍 completed）；`--scorecard-mode hard` 升级硬闸、`off` 关闭。
-- `running→failed`：收到 `done` 且 `reason==="failed"`，或 scorecard 不通过（hard 模式）
-- `running→timed_out`：`waitTimeout` 到
+- `running→failed`：收到 `done` 且 `reason==="failed"`，或 scorecard 不通过（hard 模式），或硬安全线触发（`budget_exceeded`/`workdir_escape` 等）
+- ~~`running→timed_out`：`waitTimeout` 到~~ **ADR-0030（TD-151）废弃**：等待窗到期=通知不杀——只写 `run.observation_deadline_reached`（见 §3.2）并通知调用方（前台 CLI 打印一行指引），监督继续到自然终态。`timed_out` 不再是可达终态，但保留在 `TERMINAL_STATES`/`findState`/diagnosis 的读取面（legacy 转录兼容，读侧不得回归）
 - `running→aborted`：`abort()` 调用
 
 **每次转移写 `run.state_change` 事件**，含 `{ from, to, reason }`。
@@ -748,8 +753,8 @@ backend done:completed
 - Every non-throw terminal result carries consistent booleans: `completed`, `failed`, `aborted`, and `timedOut`; exactly one matches the terminal state.
 - 成功：`{completed:true, failed:false, aborted:false, timedOut:false, messages, evidence, metrics, delivery}` — `delivery` 是完整 DeliveryRef。
 - 打包失败：`{completed:false, failed:true, aborted:false, timedOut:false, messages, evidence, metrics, deliveryError:{code, message}}` — 结构化非抛出。
-- timeout/budget/abort/hard scorecard fail return the same structured terminal shape and do not call the packager. An accepted backend failure remains the exception path and throws after persisting `run.error` + terminal `failed`.
-- The RunManager wait timer owns timeout causality: if its abort causes a process to exit non-zero and emit `done(failed)`, the terminal/result remains `timed_out`, not `backend_error`.
+- budget/abort/hard scorecard fail return the same structured terminal shape and do not call the packager. An accepted backend failure remains the exception path and throws after persisting `run.error` + terminal `failed`.
+- **ADR-0030（TD-151）**：等待窗到期不是终态——定时器是纯通知器（写 `run.observation_deadline_reached` + 回调 `onObservationDeadline`），不 abort、不产生 `timed_out`；到期后终态仍是自然的 completed/failed（或外部 stop 的 aborted）。`timedOut:true` 只对 legacy timed_out 终态转录出现（loser 结果沿用现有终态，读取兼容不回归）。到期事实在 CLI/runner 结果上以 `observationDeadlineReached:true` 呈现（additive）。原"wait timer owns timeout causality"段（定时器 abort 致进程非零退出仍记 timed_out）随 abort 臂一并废弃。
 
 **事件排序**：
 - 成功：`scorecard.checked`（如有）→ `run.delivery_created` → `run.completed` → `run.state_change completed`（seq 连续）。
@@ -1200,7 +1205,7 @@ Catalog 是只读数据 + application service（`validatePlaybookSummaryList`/`v
   "registry": "config/agents.json",
   "runDir": "runs",
   "pollInterval": 5000,
-  "waitTimeout": 300000,
+  "waitTimeout": 300000,          // 派发侧等待窗（ADR-0030：到期=通知不杀——观察预算，非执行死线）
   "timeout": 30000,
   "retries": 2,
   // [S新增]
