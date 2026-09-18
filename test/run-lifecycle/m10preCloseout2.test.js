@@ -176,7 +176,7 @@ test("M10pre-C2-06: loadGlobalWaitTimeout reads WAO config regardless of host cw
 // Here we add a regression test: probe succeeds (quiet=true) but append throws →
 // the outcome must NOT be probe_error.
 
-test("M10pre-C2-07: stop_verified append failure is NOT misclassified as probe_error", { skip: "TD-163 同族：前提（超时→cleanup→证停→append 失败分类）随 ADR-0030 死亡——abort 路径幂等跳过证停；该分类面归 stop 命令路径，需 stop 侧等价测试（登记 TD-163 残余）" }, async () => {
+test("M10pre-C2-07（审计改写·自然完成路径）: stop_verified append failure is NOT misclassified as probe_error", async () => {
   const { RunManager } = await import("../../src/runManager.js");
   const { readTranscript } = await import("../../src/transcript.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-c2-07-"));
@@ -200,12 +200,10 @@ test("M10pre-C2-07: stop_verified append failure is NOT misclassified as probe_e
         return {
           backend: "process",
           backendSessionId: "proc_c2_07",
-          events: async function* (signal) {
-            // Hang until abort (timeout)
-            await new Promise((resolve) => {
-              if (signal?.aborted) { resolve(); return; }
-              signal?.addEventListener("abort", () => resolve(), { once: true });
-            });
+          events: async function* () {
+            // 审计改写：自然完成形态——证停 cleanup 在自然终态路径仍运行（本守卫的保护面）。
+            await new Promise((r) => setTimeout(r, 30));
+            yield { kind: "done", reason: "failed", error: "natural failure" };
           },
           abort: async () => {},
           // Process IS dead → probe returns quiet=true
@@ -227,8 +225,8 @@ test("M10pre-C2-07: stop_verified append failure is NOT misclassified as probe_e
       return originalAppend(type, payload);
     };
 
-    const result = await run.waitForCompletion({ waitTimeout: 50, pollInterval: 10 });
-    assert.equal(result.timedOut, true);
+    // backend 自主失败走抛出契约（TD-105）；抛出前 cleanup 已尝试证停写入。
+    await assert.rejects(() => run.waitForCompletion({ waitTimeout: 5000, pollInterval: 10 }), /natural failure/);
 
     // The probe SUCCEEDED (isAlive=false → quiet=true), so stop_verified was attempted.
     assert.ok(stopVerifiedAppendAttempts > 0, "stop_verified append was attempted");

@@ -1970,13 +1970,15 @@ export class Run {
     // 行审修正（Lead）：此处原有一行 this._removeFromManager() 系误置——
     // 等待不是所有权终结，每次 wait 都摘除会破坏 stop/abortAll/并发监督；
     // _abortInternal 已自行摘除，短路路径无需重复。
-    if (this._aborted) {
-      await this._runCleanup();
-      return _loserResult("aborted", { messages: [], evidence: [], metrics: null });
-    }
+    // 审计修正：终态检查先行——自然 completed 后 run.abort() 时仲裁保留 completed，
+    // _aborted 单看会误报 aborted；已落盘终态是更高权威。
     if (TERMINAL_STATES.includes(this.state)) {
       await this._runCleanup();
       return _loserResult(this.state, { messages: [], evidence: [], metrics: null });
+    }
+    if (this._aborted) {
+      await this._runCleanup();
+      return _loserResult("aborted", { messages: [], evidence: [], metrics: null });
     }
 
     // M10-pre3: only create the observation-deadline timer when the deadline is
@@ -1999,6 +2001,9 @@ export class Run {
     let timer = null;
     if (deadlineEnabled) {
       timer = setTimeout(() => {
+        // 审计修正：多等待者各建定时器——run 级标志幂等去重，保证事实恰一条
+        // （usage.md"每 run 至多一条"承诺）。
+        if (this.observationDeadlineReached) return;
         this.observationDeadlineReached = true;
         // 事实落盘失败不改变监督语义（advisory）：自然终态路径仍写各自事实。
         // append 自带跨进程 append lock，与主循环的并发 append 安全交错。

@@ -226,3 +226,72 @@ test("TD-151: 未配置等待窗（disabled）→ 无到期事实、无定时器
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// ===== 审计回归钉（TD-151 收口轮）=====
+
+test("审计 P1a: 入口短路顺序——自然 completed 后 run.abort()，再 wait 报 completed 不误报 aborted", async () => {
+  const { RunManager } = await import("../../src/runManager.js");
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "wao-p1a-"));
+  try {
+    const config = { registry: "x", runDir: dir, pollInterval: 5, timeout: 1000, retries: 0 };
+    const readRegistry = async () => ({ getAgent: (id) => ({ id, backend: "fake", cwd: dir }), listAgents: () => [] });
+    const backendFor = () => ({
+      async spawn() {
+        return {
+          backend: "fake", backendSessionId: "s1",
+          abort: async () => {},
+          events: async function* () { yield { kind: "done", reason: "completed" }; },
+        };
+      },
+    });
+    const manager = new RunManager({ config, readRegistry, transcriptDir: dir, backendFor });
+    const run = await manager.start("t", { prompt: "x" });
+    const r1 = await run.waitForCompletion({});
+    assert.equal(r1.completed, true);
+    // completed 已落盘后 Lead 误发 abort：仲裁保留 completed；新 wait 必须报 completed。
+    await run.abort("user");
+    const r2 = await run.waitForCompletion({});
+    assert.equal(r2.completed, true, "已落盘 completed 是更高权威——不得被 _aborted 标志误报为 aborted");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("审计 P2: 双等待者到期事实恰一条（run 级标志幂等去重）", async () => {
+  const { RunManager } = await import("../../src/runManager.js");
+  const { readTranscript } = await import("../../src/transcript.js");
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "wao-p2-"));
+  try {
+    const config = { registry: "x", runDir: dir, pollInterval: 5, timeout: 1000, retries: 0 };
+    const readRegistry = async () => ({ getAgent: (id) => ({ id, backend: "fake", cwd: dir }), listAgents: () => [] });
+    const backendFor = () => ({
+      async spawn() {
+        return {
+          backend: "fake", backendSessionId: "s2",
+          abort: async () => {},
+          events: async function* (signal) {
+            await new Promise((resolve) => {
+              if (signal?.aborted) { resolve(); return; }
+              signal?.addEventListener("abort", () => resolve(), { once: true });
+            });
+          },
+        };
+      },
+    });
+    const manager = new RunManager({ config, readRegistry, transcriptDir: dir, backendFor });
+    const run = await manager.start("t", { prompt: "x" });
+    const w1 = run.waitForCompletion({ waitTimeout: 60, pollInterval: 5 });
+    const w2 = run.waitForCompletion({ waitTimeout: 60, pollInterval: 5 }); // 第二个等待者
+    const both = Promise.allSettled([w1, w2]);
+    await new Promise((r) => setTimeout(r, 150)); // 两个定时器都到期
+    await run.abort("user");
+    await both;
+    const events = await readTranscript(run.transcript.filePath);
+    assert.equal(events.filter((e) => e.type === "run.observation_deadline_reached").length, 1,
+      "多等待者各自定时器，run 级标志去重——事实恰一条（usage.md 承诺）");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

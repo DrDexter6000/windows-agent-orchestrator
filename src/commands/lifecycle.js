@@ -281,7 +281,11 @@ export async function resumeCommand(args, config) {
     // runner stdout，transcript 零新增）。
     const state = findState(events.filter((e) => e && e.runId === runId));
     const hasResumeAuthority = Boolean(
-      findFirstBound(events, "session.created", runId) && findFirstBound(events, "run.started", runId),
+      findFirstBound(events, "session.created", runId)
+        && findFirstBound(events, "run.started", runId)
+        // 审计 P1（TD-151 收口轮）：进程重放必需 prompt——缺它时 fork 后 runner 的
+        // resume() 返回 null，失败只进被忽略的 stdout（父进程曾误报 resumed:true）。
+        && findFirstBound(events, "prompt.sent", runId),
     );
     if (events.length === 0 || TERMINAL_STATES.includes(state) || !hasResumeAuthority) {
       console.log(JSON.stringify({ runId, resumed: false, reason: "terminal or not found" }));
