@@ -403,7 +403,10 @@ const RUN_FILE_TS_RE = /^(?:run|wf)_(\d{17})/;
  */
 export function runFileTimestampKey(name) {
   const m = name.match(RUN_FILE_TS_RE);
-  return m ? Number(m[1]) : null;
+  // auditor F2：17 位毫秒时间戳超 Number.MAX_SAFE_INTEGER（≈9.007e15 < 2.026e16），
+  // Number 化丢低位精度——相邻毫秒会碰撞后落回字典序（wf_/run_ 形状前缀序错位）。
+  // 固定宽 17 位数字串的字典序 ≡ 数值序，直接返回字符串比较。
+  return m ? m[1] : null;
 }
 
 /**
@@ -425,7 +428,7 @@ export function sortRunFileNames(names) {
   return [...names].sort((a, b) => {
     const ta = runFileTimestampKey(a);
     const tb = runFileTimestampKey(b);
-    if (ta !== null && tb !== null && ta !== tb) return ta - tb;
+    if (ta !== null && tb !== null && ta !== tb) return ta < tb ? -1 : 1; // 等宽 17 位数字串比较（F2 修复）
     if (ta !== null && tb === null) return -1; // 有时间戳在前，无时间戳殿后
     if (ta === null && tb !== null) return 1;
     return a < b ? -1 : a > b ? 1 : 0; // 并列/双双无时间戳：字典序决胜（总序，跨平台确定）

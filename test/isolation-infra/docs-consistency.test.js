@@ -3373,6 +3373,9 @@ function td162CapabilityTable() {
   for (const line of tableLines.slice(1)) {
     if (/^\|[-\s|]+\|?$/.test(line.trim())) continue; // |---|---| 分隔行
     const cells = splitRowCells(line).map((c) => c.trim());
+    // auditor F5：Map.set 会覆盖同名行——重复表行必须直接红（否则守卫对重复行半盲）。
+    const rowKey = cells[0];
+    assert.ok(!rows.has(rowKey), `能力表出现重复行 ${rowKey}（后行会覆盖先行，守卫对重复行半盲）`);
     assert.equal(cells.length, header.length,
       `能力表数据行「${cells[0]}」列数（${cells.length}）与表头（${header.length}）不一致`);
     rows.set(cells[0], cells);
@@ -3504,10 +3507,19 @@ test("TD-162 关系型守卫: 能力表 policy 门列与 validateAgentPolicy 行
     }
     const reasoningCell = cells[td162Col(header, "reasoning effort")];
     if (expectations[1].verdict === "条件") {
-      for (const member of reasoningAccepted) {
-        assert.ok(mentions(reasoningCell, member),
-          `${backendKey} reasoning 条件格必须列出行为接受的档位成员 ${member}（探针派生闭集）`);
-      }
+      // auditor F5：单向 includes 抓漏写不抓多写——内存给档位集加一个实际被拒的
+      // medium 仍绿。改为精确集合比对：格内 "effort ∈ {…}" 集合 ≡ 探针接受集。
+      const setMatch = reasoningCell.match(/effort ∈ \{([^}]+)\}/);
+      assert.ok(setMatch, `${backendKey} reasoning 条件格缺 'effort ∈ {…}' 集合形态（条件必须可机读）`);
+      const docSet = new Set(setMatch[1].split(/[,，]\s*/).map((x) => x.trim()).filter(Boolean));
+      const probeSet = new Set(reasoningAccepted);
+      const extra = [...docSet].filter((x) => !probeSet.has(x));
+      const missing = [...probeSet].filter((x) => !docSet.has(x));
+      assert.deepEqual(
+        { extra, missing },
+        { extra: [], missing: [] },
+        `${backendKey} reasoning 条件格档位集合必须与探针精确一致（文档多写不被拒的档位=误导；少写=漏报）`,
+      );
       if (needsModelCompanion) {
         assert.ok(reasoningCell.includes(k3Model),
           `${backendKey} reasoning 条件格必须点名模型绑定 ${k3Model}（档位接受依赖该模型）`);

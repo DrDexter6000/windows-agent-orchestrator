@@ -447,7 +447,7 @@ spawn_error 事故全部走 workflow 通道，即此层；**后台派发通道**
 node scripts/wao-node.cjs scripts/dispatch-with-liveness.mjs --agent coder_hq --prompt-file task.md --cwd D:\proj\x -- --model gpt-5.6-sol
 ```
 
-重派谓词三条件同时满足才重派（缺一即如实退出非零）：① 前一轮已 terminal；② 带 `completed_empty`/零证据 marker（`DIAGNOSIS_CODES` 闭集语义，与 `runs diagnose` 同一投影）；③ `run.stop_verified` 证停或进程式 backend 无会话残留。不变量：**绝不中止/重试在飞 run**（派发走后台分离 + 独立观察窗，绝不挂会杀 worker 的 `--wait-timeout`——TD-148）；零产出 ≠ 没在工作（纯调研零写入合法，观察窗内活跃即继续等）。出处 TD-158；纯函数面钉于 `test/registry-roles/dispatchLiveness.test.js`。
+重派谓词三条件同时满足才重派；退出码如实：**真完成（completed 且非空跑）=0**，其余（失败/谓词不满足/轮次耗尽/派发失败）=1：① 前一轮已 terminal；② 带 `completed_empty`/零证据 marker（`DIAGNOSIS_CODES` 闭集语义，与 `runs diagnose` 同一投影）；③ `run.stop_verified` 证停，或进程式 backend 无会话残留**且无显式 `run.stop_unverified` 事实**（类别事实不证明本 run 进程已退出——auditor F3）。不变量：**绝不中止/重试在飞 run**（派发走后台分离 + 独立观察窗，绝不挂会杀 worker 的 `--wait-timeout`——TD-148）；零产出 ≠ 没在工作（纯调研零写入合法，观察窗内活跃即继续等）。出处 TD-158；纯函数面钉于 `test/registry-roles/dispatchLiveness.test.js`。
 
 ### 场景 3：并行跑多个 agent
 

@@ -261,3 +261,93 @@ test("TD-158 接地: 进程式 backend 闭集由 KNOWN_BACKENDS 派生（排除 
   assert.ok(!PROCESS_BACKEND_IDS.includes("opencode-serve"));
   for (const b of PROCESS_BACKEND_IDS) assert.ok(KNOWN_BACKENDS.includes(b));
 });
+
+// ===== auditor 批次2 复核回归钉（F3/F4）=====
+
+test("F3 回归: 显式 run.stop_unverified 压掉 backendNoSession 类别臂——不重派", async () => {
+  const { shouldRedispatch, deriveStopUnverified } = await import("../../scripts/dispatch-with-liveness.mjs");
+  // 反例即审计现场：failed + 零活动 + stop_unverified + 进程式 backend
+  const r = shouldRedispatch({
+    state: "failed",
+    diagnosisCode: null,
+    evidence: { activityEventCount: 0 },
+    stopVerified: false,
+    stopUnverified: true,
+    backendNoSession: true,
+  });
+  assert.equal(r.redispatch, false, "显式未证停事实必须阻断重派");
+  assert.equal(r.conditions.workerQuiet, false, "条件③：类别臂被 stopUnverified 压掉");
+  // 无显式未证停事实时类别臂恢复生效（进程式语义）
+  const ok = shouldRedispatch({
+    state: "failed",
+    evidence: { activityEventCount: 0 },
+    stopVerified: false,
+    stopUnverified: false,
+    backendNoSession: true,
+  });
+  assert.equal(ok.redispatch, true, "无未证停事实时进程式类别臂可用");
+  // deriveStopUnverified 投影
+  assert.equal(deriveStopUnverified([{ runId: "r1", type: "run.stop_unverified" }], "r1"), true);
+  assert.equal(deriveStopUnverified([{ runId: "r2", type: "run.stop_unverified" }], "r1"), false, "绑定作用域外不算");
+});
+
+test("F4 回归: supervisionLoop 轮次上限——空跑到底恰好派发 maxRounds 次", async () => {
+  const { supervisionLoop } = await import("../../scripts/dispatch-with-liveness.mjs");
+  let calls = 0;
+  const r = await supervisionLoop({
+    maxRounds: 3,
+    agent: "coder_hq",
+    dispatchRound: () => { calls += 1; return { ok: true, runId: `run_empty_${calls}` }; },
+    observeRound: async () => ({ state: "failed", diagnosisCode: null, evidence: { activityEventCount: 0 }, stopVerified: false, stopUnverified: false }),
+    backendNoSession: true,
+  });
+  assert.equal(calls, 3, "恰好派发 3 次");
+  assert.equal(r.outcome, "max_rounds_reached");
+  assert.equal(r.exitCode, 1);
+});
+
+test("F4 回归: 第二轮真完成 → 恰好两次派发、exitCode 0（completed 且非空跑）", async () => {
+  const { supervisionLoop } = await import("../../scripts/dispatch-with-liveness.mjs");
+  let calls = 0;
+  const r = await supervisionLoop({
+    maxRounds: 5,
+    agent: "coder_hq",
+    dispatchRound: () => { calls += 1; return { ok: true, runId: `run_${calls}` }; },
+    observeRound: async (runId) => runId === "run_1"
+      ? { state: "failed", evidence: { activityEventCount: 0 }, stopVerified: false, stopUnverified: false }
+      : { state: "completed", evidence: { activityEventCount: 4, assistantTextCount: 1 }, stopVerified: false, stopUnverified: false },
+    backendNoSession: true,
+  });
+  assert.equal(calls, 2);
+  assert.equal(r.outcome, "no_redispatch");
+  assert.equal(r.exitCode, 0, "completed 且非空跑 = 0（usage.md exit 语义）");
+});
+
+test("F4 回归: 谓词阻断路径——stop_unverified 单轮即停、exitCode 1", async () => {
+  const { supervisionLoop } = await import("../../scripts/dispatch-with-liveness.mjs");
+  let calls = 0;
+  const r = await supervisionLoop({
+    maxRounds: 5,
+    agent: "coder_hq",
+    dispatchRound: () => { calls += 1; return { ok: true, runId: "run_x" }; },
+    observeRound: async () => ({ state: "failed", evidence: { activityEventCount: 0 }, stopVerified: false, stopUnverified: true }),
+    backendNoSession: true,
+  });
+  assert.equal(calls, 1, "显式未证停阻断重派：不再有第二轮");
+  assert.equal(r.outcome, "no_redispatch");
+  assert.equal(r.exitCode, 1);
+});
+
+test("F4 回归: dispatch_failed 路径 exitCode 1 且保留 lastSummary=null", async () => {
+  const { supervisionLoop } = await import("../../scripts/dispatch-with-liveness.mjs");
+  const r = await supervisionLoop({
+    maxRounds: 3,
+    agent: "coder_hq",
+    dispatchRound: async () => ({ ok: false, error: "spawn failed" }),
+    observeRound: async () => { throw new Error("should not observe"); },
+    backendNoSession: true,
+  });
+  assert.equal(r.outcome, "dispatch_failed");
+  assert.equal(r.exitCode, 1);
+  assert.equal(r.lastSummary, null);
+});

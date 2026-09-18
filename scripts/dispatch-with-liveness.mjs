@@ -237,6 +237,19 @@ export function deriveStopVerified(events, runId) {
 }
 
 /**
+ * auditor F3：显式未证停事实单独投影——backend 类别（进程式）只证明
+ * “该类 backend 进程退出即无会话残留”这一语义，不证明“本 run 的进程已退出”。
+ * 存在 run.stop_unverified 时它必须压掉 backendNoSession 臂（fail-closed）。
+ */
+export function deriveStopUnverified(events, runId) {
+  const evs = Array.isArray(events) ? events : [];
+  const bound = typeof runId === "string" && runId.length > 0
+    ? evs.filter((e) => e && e.runId === runId)
+    : evs;
+  return bound.some((e) => e.type === "run.stop_unverified");
+}
+
+/**
  * 重派谓词（纯函数，TD-158 核心不变量）。三条件同时满足才允许重派：
  *   ① terminal       — state ∈ TERMINAL_STATES（永不重派在飞 run）
  *   ② emptyMarker    — diagnosisCode === "completed_empty"（M12-21 持久 marker，
@@ -271,9 +284,14 @@ export function shouldRedispatch(runSummary) {
     );
   }
 
-  const workerQuiet = s.stopVerified === true || s.backendNoSession === true;
+  // auditor F3：显式未证停事实（run.stop_unverified）必须阻断——backend 类别是
+  // 注册表层的类事实（“该类 backend 进程退出即无会话残留”），不是本 run 进程
+  // 已退出的证据；终态先于 cleanup 证停写入（runManager._verifyStopQuietIfCapable），
+  // 谓词可能抢在证停前跑。stopUnverified=true 时 backendNoSession 臖失效。
+  const explicitUnverified = s.stopUnverified === true;
+  const workerQuiet = s.stopVerified === true || (s.backendNoSession === true && !explicitUnverified);
   if (!workerQuiet) {
-    reasons.push("condition 3 failed: worker not proven quiet (no bound run.stop_verified, and backend is not process-style/no-session)");
+    reasons.push("condition 3 failed: worker not proven quiet (no bound run.stop_verified; backend not process-style/no-session, or explicit run.stop_unverified overrides the class arm)");
   }
 
   return {
@@ -440,6 +458,7 @@ function collectRunSummary(events, runId, backendNoSession) {
       assistantTextCount: evidence.assistantTextCount,
     },
     stopVerified: deriveStopVerified(events, runId),
+    stopUnverified: deriveStopUnverified(events, runId),
     backendNoSession,
   };
 }
@@ -453,6 +472,56 @@ async function resolveBackendNoSession(registryPath, agentId) {
   } catch {
     return false;
   }
+}
+
+/**
+ * auditor F4：监督主循环提取为可注入纯编排函数（不 process.exit、不真 I/O——
+ * 副作用全部经参数注入 dispatchRound/observeRound/sleepFn/logLine/collectSummary）。
+ * 返回 {outcome, lastSummary, exitCode}——exit 语义与 finish 契约一致：
+ * 真完成（completed 且非空跑）=0；失败/谓词不满足/轮次耗尽 =1。
+ */
+export async function supervisionLoop({
+  maxRounds,
+  agent,
+  dispatchRound,
+  observeRound,
+  backendNoSession,
+  collectSummary = null,
+  sleepFn = () => Promise.resolve(),
+  logLine = () => {},
+}) {
+  let lastSummary = null;
+  for (let round = 1; round <= maxRounds; round += 1) {
+    if (round > 1) {
+      const delay = backoffDelayMs(round - 1);
+      logLine(`backoff ${Math.round(delay / 1000)}s before round ${round}/${maxRounds}`);
+      await sleepFn(delay);
+    }
+    const dispatch = await dispatchRound(round);
+    if (!dispatch.ok) {
+      logLine(`round ${round}/${maxRounds}: ${dispatch.error}`);
+      return { outcome: "dispatch_failed", lastSummary, exitCode: 1 };
+    }
+    logLine(`round ${round}/${maxRounds}: dispatched ${dispatch.runId} (${agent}, background)`);
+    const events = await observeRound(dispatch.runId);
+    const summary = collectSummary
+      ? collectSummary(events, dispatch.runId)
+      : { backendNoSession, ...events };
+    lastSummary = summary;
+    const verdict = shouldRedispatch(summary);
+    logLine(
+      `round ${round}/${maxRounds}: ${summary.runId} state=${summary.state} ` +
+        `quiet=${summary.stopVerified ? "stop_verified" : (summary.backendNoSession && summary.stopUnverified !== true ? "process_no_session" : "no")} ` +
+        `→ ${verdict.redispatch ? "redispatch" : "stop"}`,
+    );
+    if (!verdict.redispatch) {
+      // 如实退出：真完成（completed 且非空跑）= 0；其余（失败/空跑但不满足谓词）= 1。
+      const completedWithWork = summary.state === "completed" && !verdict.conditions.emptyMarker;
+      return { outcome: "no_redispatch", lastSummary, exitCode: completedWithWork ? 0 : 1 };
+    }
+  }
+  logLine(`max rounds (${maxRounds}) reached — giving up honestly`);
+  return { outcome: "max_rounds_reached", lastSummary, exitCode: 1 };
 }
 
 async function main() {
@@ -486,45 +555,15 @@ async function main() {
     process.exit(130);
   });
 
-  let lastSummary = null;
-  for (let round = 1; round <= values.maxRounds; round += 1) {
-    if (round > 1) {
-      const delay = backoffDelayMs(round - 1);
-      log(`backoff ${Math.round(delay / 1000)}s before round ${round}/${values.maxRounds}`);
-      await sleep(delay);
-    }
-
-    const dispatch = dispatchOnce(values, passthrough);
-    if (!dispatch.ok) {
-      log(`round ${round}/${values.maxRounds}: ${dispatch.error}`);
-      finish("dispatch_failed", lastSummary, 1);
-      return;
-    }
-    log(`round ${round}/${values.maxRounds}: dispatched ${dispatch.runId} (${values.agent}, background)`);
-
-    const events = await observeUntilTerminal(dispatch.runId, runDir, values.livenessWindowMs);
-    const summary = collectRunSummary(events, dispatch.runId, backendNoSession);
-    lastSummary = summary;
-
-    const verdict = shouldRedispatch(summary);
-    log(
-      `round ${round}/${values.maxRounds}: ${summary.runId} state=${summary.state} ` +
-      `diagnosis=${summary.diagnosisCategory}${summary.diagnosisCode ? `/${summary.diagnosisCode}` : ""} ` +
-      `activity=${summary.evidence.activityEventCount} writes=${summary.evidence.fileWrittenCount} ` +
-      `quiet=${summary.stopVerified ? "stop_verified" : (summary.backendNoSession ? "process_no_session" : "no")} ` +
-      `→ ${verdict.redispatch ? "redispatch" : "stop"}`,
-    );
-
-    if (!verdict.redispatch) {
-      // 如实退出：真完成（completed 且非空跑）= 0；其余（失败/空跑但不满足谓词）= 1。
-      const completedWithWork = summary.state === "completed" && !verdict.conditions.emptyMarker;
-      finish("no_redispatch", summary, completedWithWork ? 0 : 1);
-      return;
-    }
-  }
-
-  log(`max rounds (${values.maxRounds}) reached — giving up honestly`);
-  finish("max_rounds_reached", lastSummary, 1);
+  const result = await supervisionLoop({
+    maxRounds: values.maxRounds,
+    agent: values.agent,
+    dispatchRound: () => dispatchOnce(values, passthrough),
+    observeRound: (runId) => observeUntilTerminal(runId, runDir, values.livenessWindowMs),
+    backendNoSession,
+    collectSummary: (events, runId) => collectRunSummary(events, runId, backendNoSession),
+  });
+  finish(result.outcome, result.lastSummary, result.exitCode);
 }
 
 function finish(outcome, lastRun, code) {

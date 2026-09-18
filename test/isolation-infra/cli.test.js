@@ -5287,6 +5287,16 @@ test("TD-153(d2) sortRunFileNames 纯函数：时间戳升序、wf/run 时间交
     "run_20260917201628180gh6kx8.jsonl",
     "run_1dev.jsonl",
   ], "时间戳升序交错 + 无时间戳前缀殿后（旧字典序会把 run_1dev 排最前、wf 排最后）");
+
+  // auditor F2 回归钉：相邻毫秒（...180 vs ...181）在旧 Number 化下丢精度碰撞、
+  // 落回字典序把较晚的 run_181 排在较旱的 wf_180 前。字符串比较修复后必须时间序。
+  assert.deepEqual(sortRunFileNames([
+    "run_20260917201628181aaaaaa.jsonl",
+    "wf_20260917201628180.jsonl",
+  ]), [
+    "wf_20260917201628180.jsonl",
+    "run_20260917201628181aaaaaa.jsonl",
+  ], "相邻毫秒不因 Number 精度丢失而错序（17 位 > MAX_SAFE_INTEGER）");
 });
 
 test("TD-153(d2) runs grep 输出序：经 loadRunFiles 时间戳排序（自定义 id 殿后，不再字典序混排）", async () => {
