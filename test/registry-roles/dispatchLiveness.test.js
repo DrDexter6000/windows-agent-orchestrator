@@ -172,10 +172,17 @@ test("TD-158 反例③：无证停且非进程式 backend（serve 会话可能�
   assert.match(v.reasons.join("; "), /condition 3 failed/);
 });
 
-test("TD-158 条件③两臂：进程式无会话残留可独立满足（run.stop_verified 缺席也不阻塞）", () => {
-  const v = shouldRedispatch({ ...EMPTY_RUN, stopVerified: false, backendNoSession: true });
-  assert.equal(v.redispatch, true);
-  assert.equal(v.conditions.workerQuiet, true);
+test("TD-158 条件③两臂：类别臂现为 opt-in 启发式（默认严格=只认 stop_verified；复核三轮）", () => {
+  // 默认：stop_verified 缺席 + 类别事实 → 不重派（类别不是证据）
+  const strict = shouldRedispatch({ ...EMPTY_RUN, stopVerified: false, backendNoSession: true });
+  assert.equal(strict.redispatch, false, "默认严格：类别臂不可独立满足");
+  // opt-in + settle 重读成功 → 启发式臂可用
+  const armed = shouldRedispatch({ ...EMPTY_RUN, stopVerified: false, backendNoSession: true, allowProcessDeathInference: true, stopRereadOk: true });
+  assert.equal(armed.redispatch, true);
+  assert.equal(armed.conditions.workerQuiet, true);
+  // opt-in 但重读失败（证停未知）→ 仍不可用（fail-closed）
+  const unreadable = shouldRedispatch({ ...EMPTY_RUN, stopVerified: false, backendNoSession: true, allowProcessDeathInference: true, stopRereadOk: false });
+  assert.equal(unreadable.redispatch, false, "重读失败=证停未知=不重派");
 });
 
 test("TD-158: 零证据臂兜底（无 marker 但 activityEventCount === 0 的秒败空跑也命中②）", () => {
@@ -277,15 +284,17 @@ test("F3 回归: 显式 run.stop_unverified 压掉 backendNoSession 类别臂—
   });
   assert.equal(r.redispatch, false, "显式未证停事实必须阻断重派");
   assert.equal(r.conditions.workerQuiet, false, "条件③：类别臂被 stopUnverified 压掉");
-  // 无显式未证停事实时类别臂恢复生效（进程式语义）
+  // 无显式未证停事实 + opt-in + 重读成功 → 启发式臂可用
   const ok = shouldRedispatch({
     state: "failed",
     evidence: { activityEventCount: 0 },
     stopVerified: false,
     stopUnverified: false,
     backendNoSession: true,
+    allowProcessDeathInference: true,
+    stopRereadOk: true,
   });
-  assert.equal(ok.redispatch, true, "无未证停事实时进程式类别臂可用");
+  assert.equal(ok.redispatch, true, "opt-in+重读成功时进程式类别臂可用");
   // deriveStopUnverified 投影
   assert.equal(deriveStopUnverified([{ runId: "r1", type: "run.stop_unverified" }], "r1"), true);
   assert.equal(deriveStopUnverified([{ runId: "r2", type: "run.stop_unverified" }], "r1"), false, "绑定作用域外不算");
@@ -298,7 +307,7 @@ test("F4 回归: supervisionLoop 轮次上限——空跑到底恰好派发 maxR
     maxRounds: 3,
     agent: "coder_hq",
     dispatchRound: () => { calls += 1; return { ok: true, runId: `run_empty_${calls}` }; },
-    observeRound: async () => ({ state: "failed", diagnosisCode: null, evidence: { activityEventCount: 0 }, stopVerified: false, stopUnverified: false }),
+    observeRound: async () => ({ events: { state: "failed", diagnosisCode: null, evidence: { activityEventCount: 0 }, stopVerified: false, stopUnverified: false, backendNoSession: true, allowProcessDeathInference: true }, rereadOk: true }),
     backendNoSession: true,
   });
   assert.equal(calls, 3, "恰好派发 3 次");
@@ -313,9 +322,9 @@ test("F4 回归: 第二轮真完成 → 恰好两次派发、exitCode 0（comple
     maxRounds: 5,
     agent: "coder_hq",
     dispatchRound: () => { calls += 1; return { ok: true, runId: `run_${calls}` }; },
-    observeRound: async (runId) => runId === "run_1"
-      ? { state: "failed", evidence: { activityEventCount: 0 }, stopVerified: false, stopUnverified: false }
-      : { state: "completed", evidence: { activityEventCount: 4, assistantTextCount: 1 }, stopVerified: false, stopUnverified: false },
+    observeRound: async (runId) => ({ events: runId === "run_1"
+      ? { state: "failed", evidence: { activityEventCount: 0 }, stopVerified: false, stopUnverified: false, backendNoSession: true, allowProcessDeathInference: true }
+      : { state: "completed", evidence: { activityEventCount: 4, assistantTextCount: 1 }, stopVerified: false, stopUnverified: false }, rereadOk: true }),
     backendNoSession: true,
   });
   assert.equal(calls, 2);
@@ -372,9 +381,10 @@ test("复核二轮 F4: 生产入口接线静态钉——sleepFn/logLine/observeW
   assert.ok(callSite.includes("observeWithSettle"), "observeRound 必须经 observeWithSettle（终态后 settle 重读关闭证停抢跑窗口）");
 });
 
-test("复核二轮 F3: 端到端谓词语义——settle 后仍未证停的进程式自然终态按类别语义放行（台账边界）", async () => {
+test("复核三轮 F3 定谳: settle 后仍无 stop 事实——默认严格不重派；显式 opt-in 才放行", async () => {
   const { shouldRedispatch } = await import("../../scripts/dispatch-with-liveness.mjs");
-  // settle 重读后无任何 stop 事实：进程式自然终态（backend done 即进程退出）→ 放行（TD-158 既有边界）
+  // settle 重读后无任何 stop 事实：默认严格（类别不是证据——processBackend 有
+  // done(failed)-while-alive 路径，"自然终态=进程退出"不成立为普遍命题）
   const r = shouldRedispatch({
     state: "failed",
     evidence: { activityEventCount: 0 },
@@ -382,7 +392,17 @@ test("复核二轮 F3: 端到端谓词语义——settle 后仍未证停的进�
     stopUnverified: false, // settle 后仍无 stop 事实
     backendNoSession: true,
   });
-  assert.equal(r.redispatch, true, "无任何 stop 事实的进程式自然终态：类别臂放行（TD-158 边界，非抢跑）");
+  assert.equal(r.redispatch, false, "默认严格：无 stop 事实的类别终态不重派（Lead 显式裁定才可）");
+  const opted = shouldRedispatch({
+    state: "failed",
+    evidence: { activityEventCount: 0 },
+    stopVerified: false,
+    stopUnverified: false,
+    backendNoSession: true,
+    allowProcessDeathInference: true,
+    stopRereadOk: true,
+  });
+  assert.equal(opted.redispatch, true, "显式 opt-in + 重读成功：启发式臂放行");
   // 对照：显式未证停事实必须仍然阻断
   const blocked = shouldRedispatch({
     state: "failed",

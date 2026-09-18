@@ -108,6 +108,10 @@ const KNOWN_VALUE_FLAGS = new Set([
   "--agent", "--prompt-file", "--cwd", "--liveness-window-ms", "--max-rounds",
 ]);
 
+// 复核三轮 F3 定谳：进程式类别臂降级为显式 opt-in 启发式（默认关——类别是
+// 注册表事实不是本 run 进程已退出证据；详见 shouldRedispatch 条件③）。
+const KNOWN_BOOLEAN_FLAGS = new Set(["--allow-process-death-inference"]);
+
 export const USAGE = `dispatch-with-liveness — TD-158 Lead 派发活性工具
 用法:
   node scripts/wao-node.cjs scripts/dispatch-with-liveness.mjs --agent <id> --prompt-file <path> --cwd <dir> [选项] [-- <run 透传 flags>]
@@ -117,6 +121,9 @@ export const USAGE = `dispatch-with-liveness — TD-158 Lead 派发活性工具
   --cwd <dir>                必填，worker 工作目录（必须已存在）
   --liveness-window-ms <n>   观察窗毫秒（默认 ${DEFAULT_LIVENESS_WINDOW_MS}，到期只结束本窗观察，不碰 worker）
   --max-rounds <n>           派发轮次上限（默认 ${DEFAULT_MAX_ROUNDS}）
+  --allow-process-death-inference  启发式臂（默认关）：进程式 backend 且 settle 重读成功且无显式
+                              未证停事实时，把类别当进程已退出证据。默认严格=只认
+                              run.stop_verified（复核三轮定谳：类别不是证据）
   --help / -h                本页
 透传: "--" 之后的参数原样转给 \`run\`（如 --model / --reasoning / --isolate / --registry / --run-dir）。
 保留（拒绝出现于透传）: ${RESERVED_PASSTHROUGH_FLAGS.join(" ")}——脚本自有派发形状，或属 TD-148 红线。
@@ -158,11 +165,15 @@ export function parseDispatchArgs(argv) {
     if (typeof a !== "string" || !a.startsWith("--")) {
       return bad(`unexpected positional argument: ${String(a)} (flags for \`run\` go after the -- separator)`);
     }
-    if (!KNOWN_VALUE_FLAGS.has(a)) {
+    if (!KNOWN_VALUE_FLAGS.has(a) && !KNOWN_BOOLEAN_FLAGS.has(a)) {
       return bad(`unknown option: ${a} (flags for \`run\` go after the -- separator)`);
     }
     if (seen.has(a)) return bad(`${a} specified multiple times`);
     seen.add(a);
+    if (KNOWN_BOOLEAN_FLAGS.has(a)) {
+      flags[a] = "true"; // 布尔开关不消费值
+      continue;
+    }
     const v = own[i + 1];
     if (v === undefined || v.startsWith("--")) return bad(`${a} requires a value`);
     if (String(v).trim().length === 0) return bad(`${a} must be non-empty`);
@@ -208,6 +219,7 @@ export function parseDispatchArgs(argv) {
       cwd: flags["--cwd"],
       livenessWindowMs,
       maxRounds,
+      allowProcessDeathInference: flags["--allow-process-death-inference"] === "true",
       registry: extractValueFlag(passthrough, "--registry"),
       runDir: extractValueFlag(passthrough, "--run-dir"),
     },
@@ -292,7 +304,12 @@ export function shouldRedispatch(runSummary) {
   // 已退出的证据；终态先于 cleanup 证停写入（runManager._verifyStopQuietIfCapable），
   // 谓词可能抢在证停前跑。stopUnverified=true 时 backendNoSession 臖失效。
   const explicitUnverified = s.stopUnverified === true;
-  const workerQuiet = s.stopVerified === true || (s.backendNoSession === true && !explicitUnverified);
+  // 复核三轮定谳：类别是注册表事实不是本 run 进程已退出证据（processBackend 有
+  // done(failed)-while-alive 路径；TD-158 原文第三条件=run_stop 证停）。默认严格=
+  // 只认 stop_verified；类别臂为显式 opt-in 启发式且须 settle 重读成功（fail-closed）。
+  const inferenceArmed = s.allowProcessDeathInference === true && s.stopRereadOk === true;
+  const workerQuiet = s.stopVerified === true
+    || (inferenceArmed && s.backendNoSession === true && !explicitUnverified);
   if (!workerQuiet) {
     reasons.push("condition 3 failed: worker not proven quiet (no bound run.stop_verified; backend not process-style/no-session, or explicit run.stop_unverified overrides the class arm)");
   }
@@ -405,12 +422,14 @@ export async function observeWithSettle(runId, runDir, windowMs, settleMs, sleep
     await sleepFn(settleMs);
     try {
       const settled = await readTranscript(join(runDir, `${runId}.jsonl`));
-      return settled;
+      return { events: settled, rereadOk: true };
     } catch {
-      return events; // 重读失败退回终态快照（fail-open：不因 settle 读失败卡死监督）
+      // 复核三轮：重读失败 = 证停事实未知 = 启发式臂不可用（fail-closed）。
+      // 终态快照仅用于报告；rereadOk=false 使条件③只剩 stop_verified 臂。
+      return { events, rereadOk: false };
     }
   }
-  return events;
+  return { events, rereadOk: false }; // settle=0 等价于未做证停重读：启发式臂关闭
 }
 
 async function observeUntilTerminal(runId, runDir, windowMs) {
@@ -464,7 +483,7 @@ async function observeUntilTerminal(runId, runDir, windowMs) {
 }
 
 /** 组装谓词输入：全部字段经 src SSOT 投影（diagnoseFailure / assessRunEvidence / deriveStopVerified）。 */
-function collectRunSummary(events, runId, backendNoSession) {
+function collectRunSummary(events, runId, backendNoSession, stopRereadOk = false, allowProcessDeathInference = false) {
   const scope = boundReportScope(events, runId) ?? events;
   const state = findState(scope);
   const diagnosis = diagnoseFailure(events, runId);
@@ -485,6 +504,8 @@ function collectRunSummary(events, runId, backendNoSession) {
     stopVerified: deriveStopVerified(events, runId),
     stopUnverified: deriveStopUnverified(events, runId),
     backendNoSession,
+    stopRereadOk,
+    allowProcessDeathInference,
   };
 }
 
@@ -528,10 +549,10 @@ export async function supervisionLoop({
       return { outcome: "dispatch_failed", lastSummary, exitCode: 1 };
     }
     logLine(`round ${round}/${maxRounds}: dispatched ${dispatch.runId} (${agent}, background)`);
-    const events = await observeRound(dispatch.runId);
+    const observed = await observeRound(dispatch.runId);
     const summary = collectSummary
-      ? collectSummary(events, dispatch.runId)
-      : { backendNoSession, ...events };
+      ? collectSummary(observed, dispatch.runId)
+      : { backendNoSession, ...observed.events, stopRereadOk: observed.rereadOk };
     lastSummary = summary;
     const verdict = shouldRedispatch(summary);
     logLine(
@@ -590,7 +611,8 @@ async function main() {
     observeRound: (runId) =>
       observeWithSettle(runId, runDir, values.livenessWindowMs, TERMINAL_SETTLE_MS, sleep),
     backendNoSession,
-    collectSummary: (events, runId) => collectRunSummary(events, runId, backendNoSession),
+    collectSummary: (observed, runId) =>
+      collectRunSummary(observed.events, runId, backendNoSession, observed.rereadOk, values.allowProcessDeathInference === true),
     sleepFn: sleep,
     logLine: log,
   });
