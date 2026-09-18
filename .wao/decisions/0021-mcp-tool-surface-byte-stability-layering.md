@@ -42,3 +42,9 @@ M12-16 起代码层已运行一套事实上的字节稳定性分层：
 ## 评审记录
 
 2026-08-16 计划双席均 CONDITIONS 后由 Lead 裁定并入：coder_mm（run_20260816001540792duokqa）P0-1/P1-1~5；coder_low（run_20260816001550852vhncp5）P0-1~3/P1-1~10（其中 readiness×candidateKind 配对由 Lead 亲读 runDelivery.js 证实后采纳）。两条显式拒绝见 Round 3 计划 §7。
+
+## 追加记录：2026-09-18 schema 收窄（TD-153 批B 两项，Owner 指令批准）
+
+- run_status 的 scorecardSummary.failedChecks：z.array(z.string()) → z.array(z.enum([...SCORECARD_CHECK_NAMES])).max(SCORECARD_CHECK_NAMES.length)（闭集 6 成员；非成员/超限崩为 fixed safe text，不截断）。
+- 依据：Owner 2026-09-18 指令（上限值按双席建议定档）+ 双席咨询 run_202609180757006603nxdsx / run_20260918075704956eh790g。
+- 手续执行：FROZEN_22_WIRE_CEILING 78014→78127 与 DESC_STRIPPED_CONTRACT_SHA 均重测重冻（m12-10 注释链 truthful 记录）；FROZEN_22_DESC_CEILING 未动（零 description 变更）。

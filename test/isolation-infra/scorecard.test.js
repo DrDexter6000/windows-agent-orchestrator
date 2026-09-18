@@ -666,15 +666,19 @@ test("TD-153 构造端不变式: 非成员/undefined/重复名 throw，合法集
 test("TD-153 防线②: 静态杂散扫描 — 两构造文件的 name 字面量全在两闭集内", () => {
   const scorecardSrc = readFileSync(resolve(import.meta.dirname, "../../src/scorecard.js"), "utf8");
   const runManagerSrc = readFileSync(resolve(import.meta.dirname, "../../src/runManager.js"), "utf8");
-  const literalRe = /name:\s*"([^"]*)"/g;
+  // 审计 F1 收严：覆盖三种引号形态+任意空白（单引号/模板字面量/宽松空格曾漏检）。
+  // 残余（诚实声明）：完全动态拼接的名字无静态形态可扫——那层归构造端不变式+
+  // 评审（双席咨询既定边界：三层之外不假装有第四层）。
+  const literalRe = /name\s*:\s*(["'`])([^"'`]*)\1/g;
   // scorecard.js：SSOT 化后应零裸字面量——六名一律经 CHECK_NAME.X 引用（笔误防线
   // 在引用+不变式，不在字面量）。出现任何 name:"..." 字面量即违背 SSOT 纪律。
-  const scLiterals = [...scorecardSrc.matchAll(literalRe)].map((m) => m[1]);
+  const scLiterals = [...scorecardSrc.matchAll(literalRe)].map((m) => m[2]).filter((s) => s.length > 0);
   assert.deepEqual(scLiterals, [], "scorecard.js 零裸 name 字面量（一律 CHECK_NAME.X 引用）");
   // runManager.js：evidence_audit 构造字面量必须 ∈ SCORECARD ∪ EVIDENCE_AUDIT
   // 两闭集之并——矩阵未覆盖路径的绕过新名在此当场红（无关 name 字段被扫到时，
   // 守卫迫使作者显式归类，这是设计而非误报）。
-  const rmLiterals = [...runManagerSrc.matchAll(literalRe)].map((m) => m[1]);
+  // 空串放行：name: "" 是对象默认占位形状（非发射检查名——发射端不变式对空串同样 throw）。
+  const rmLiterals = [...runManagerSrc.matchAll(literalRe)].map((m) => m[2]).filter((s) => s.length > 0);
   const legal = new Set([...SCORECARD_CHECK_NAMES, ...EVIDENCE_AUDIT_CHECK_NAMES]);
   assert.ok(rmLiterals.length >= EVIDENCE_AUDIT_CHECK_NAMES.length, "三处 evidence_audit 字面量在扫");
   for (const lit of rmLiterals) {
