@@ -277,7 +277,9 @@ export function deriveStopUnverified(events, runId) {
  *
  * @param {{state?: string, diagnosisCode?: string|null,
  *          evidence?: {activityEventCount?: number},
- *          stopVerified?: boolean, backendNoSession?: boolean}} runSummary
+ *          stopVerified?: boolean, stopUnverified?: boolean,
+ *          stopRereadOk?: boolean, backendNoSession?: boolean,
+ *          allowProcessDeathInference?: boolean}} runSummary
  * @returns {{redispatch: boolean, conditions: {terminal: boolean, emptyMarker: boolean, workerQuiet: boolean}, reasons: string[]}}
  */
 export function shouldRedispatch(runSummary) {

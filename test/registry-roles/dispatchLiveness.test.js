@@ -364,7 +364,7 @@ test("F4 回归: dispatch_failed 路径 exitCode 1 且保留 lastSummary=null", 
 
 // ===== 复核二轮回归钉（F3 抢跑窗口 / F4 漏接线）=====
 
-test("复核二轮 F3: observeWithSettle 终态后 settle 重读——抢跑窗口内落盘的 stop_unverified 进入谓词输入", async () => {
+test("复核二轮 F3（范围注记）: settle 常量在场钉——重读路径本身经谓词级 fail-closed 钉覆盖（四审两钉），本钉不声称执行真实重读", async () => {
   const m = await import("../../scripts/dispatch-with-liveness.mjs");
   // 用 monkey-patch 模块内私有 observe？不可——observeWithSettle 调 observeUntilTerminal（模块私有）。
   // 改钉两件事：(1) settle 常量存在且 >0；(2) 源码接线钉（下一条测试）。
