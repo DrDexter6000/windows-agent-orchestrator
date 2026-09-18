@@ -1033,7 +1033,7 @@ async function runSuite({ repoRoot, testDir, manifestPath, reportPath, nodeExe, 
       console.error(`  - runs/${a.file} (first seen: ${a.phase})`);
     }
     console.error("  测试不得向真实 runs/ 写入——测试必须用 tmpdir 作为自己的 run-dir/工作目录（写死仓库 runs/ 即违规）。");
-    console.error("  若本机同时有另一会话在用 WAO 派发（新转录即新增条目），可能是并发撞车而非测试写入：排水规程与 .owner- 前缀咨询性放行的分界见 docs/troubleshooting.md §8.2。");
+    console.error("  若本机同时有另一会话在用 WAO 派发（新转录即新增条目），可能是并发撞车而非测试写入：排水规程见 docs/troubleshooting.md §8.2；.owner- 前缀心跳类新增为咨询性放行（判定语义在本文件头注）。");
   }
   process.exitCode = final.exitCode;
 }

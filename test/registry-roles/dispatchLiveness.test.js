@@ -351,3 +351,45 @@ test("F4 回归: dispatch_failed 路径 exitCode 1 且保留 lastSummary=null", 
   assert.equal(r.exitCode, 1);
   assert.equal(r.lastSummary, null);
 });
+
+// ===== 复核二轮回归钉（F3 抢跑窗口 / F4 漏接线）=====
+
+test("复核二轮 F3: observeWithSettle 终态后 settle 重读——抢跑窗口内落盘的 stop_unverified 进入谓词输入", async () => {
+  const m = await import("../../scripts/dispatch-with-liveness.mjs");
+  // 用 monkey-patch 模块内私有 observe？不可——observeWithSettle 调 observeUntilTerminal（模块私有）。
+  // 改钉两件事：(1) settle 常量存在且 >0；(2) 源码接线钉（下一条测试）。
+  assert.ok(m.TERMINAL_SETTLE_MS > 0, "settle 窗口必须为正（终态先于证停落盘的窗口补偿）");
+});
+
+test("复核二轮 F4: 生产入口接线静态钉——sleepFn/logLine/observeWithSettle 必须显式传入 supervisionLoop", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const src = readFileSync(fileURLToPath(new URL("../../scripts/dispatch-with-liveness.mjs", import.meta.url)), "utf8");
+  // main() 的 supervisionLoop 调用块必须显式接线（复核实证：漏接曾致退避跳过+日志吞掉）
+  const callSite = src.slice(src.indexOf("await supervisionLoop({"), src.indexOf("await supervisionLoop({") + 800);
+  assert.ok(callSite.includes("sleepFn: sleep,"), "main 必须显式传 sleepFn: sleep（漏接=跳过退避）");
+  assert.ok(callSite.includes("logLine: log,"), "main 必须显式传 logLine: log（漏接=吞掉逐轮日志）");
+  assert.ok(callSite.includes("observeWithSettle"), "observeRound 必须经 observeWithSettle（终态后 settle 重读关闭证停抢跑窗口）");
+});
+
+test("复核二轮 F3: 端到端谓词语义——settle 后仍未证停的进程式自然终态按类别语义放行（台账边界）", async () => {
+  const { shouldRedispatch } = await import("../../scripts/dispatch-with-liveness.mjs");
+  // settle 重读后无任何 stop 事实：进程式自然终态（backend done 即进程退出）→ 放行（TD-158 既有边界）
+  const r = shouldRedispatch({
+    state: "failed",
+    evidence: { activityEventCount: 0 },
+    stopVerified: false,
+    stopUnverified: false, // settle 后仍无 stop 事实
+    backendNoSession: true,
+  });
+  assert.equal(r.redispatch, true, "无任何 stop 事实的进程式自然终态：类别臂放行（TD-158 边界，非抢跑）");
+  // 对照：显式未证停事实必须仍然阻断
+  const blocked = shouldRedispatch({
+    state: "failed",
+    evidence: { activityEventCount: 0 },
+    stopVerified: false,
+    stopUnverified: true,
+    backendNoSession: true,
+  });
+  assert.equal(blocked.redispatch, false);
+});

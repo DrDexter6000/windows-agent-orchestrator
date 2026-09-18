@@ -63,6 +63,9 @@ export const DEFAULT_MAX_ROUNDS = 6;
 export const BACKOFF_BASE_MS = 20_000;
 /** 观察轮询间隔（对齐 config/default.json pollInterval 5000）。 */
 export const POLL_INTERVAL_MS = 5_000;
+/** 终态后 settle 窗口（ms）：等 cleanup 证停事实落盘后重读（复核二轮 F3）。 */
+export const TERMINAL_SETTLE_MS = 3_000;
+
 /** 派发子进程自身的 spawn 上限（后台派发只 fork runner 即返回，120s 足够宽松）。 */
 export const DISPATCH_SPAWN_TIMEOUT_MS = 120_000;
 
@@ -388,6 +391,28 @@ function dispatchOnce(values, passthrough) {
  * summarizeLiveness SSOT 的活性摘要，随后开新窗——绝不 abort、绝不 stop。
  * 返回终态时刻的事件快照（供谓词组装）。
  */
+/**
+ * auditor 复核二轮 F3：终态 ≠ 已证停——runManager 先写终态再跑 cleanup
+ * （stop_verified/stop_unverified 在其后落盘）。本包装在 observeUntilTerminal
+ * 返回终态事件后，等 settle 窗口再重读一次转录：抢跑窗口内落盘的
+ * run.stop_unverified 由此进入谓词输入（进程式类别臂被压掉）。
+ * settle 后仍无任何 stop 事实：进程式 backend 的自然终态（backend done 即
+ * 进程退出）按类别语义放行——这是 TD-158 台账定义的既有边界。
+ */
+export async function observeWithSettle(runId, runDir, windowMs, settleMs, sleepFn = sleep) {
+  const events = await observeUntilTerminal(runId, runDir, windowMs);
+  if (settleMs > 0) {
+    await sleepFn(settleMs);
+    try {
+      const settled = await readTranscript(join(runDir, `${runId}.jsonl`));
+      return settled;
+    } catch {
+      return events; // 重读失败退回终态快照（fail-open：不因 settle 读失败卡死监督）
+    }
+  }
+  return events;
+}
+
 async function observeUntilTerminal(runId, runDir, windowMs) {
   const transcriptPath = join(runDir, `${runId}.jsonl`);
   let events = [];
@@ -559,9 +584,15 @@ async function main() {
     maxRounds: values.maxRounds,
     agent: values.agent,
     dispatchRound: () => dispatchOnce(values, passthrough),
-    observeRound: (runId) => observeUntilTerminal(runId, runDir, values.livenessWindowMs),
+    // auditor 复核二轮 F3/F4：终态先于 cleanup 证停事实写入（runManager 终态→cleanup
+    // 顺序），observeRound 在终态后经 settle 窗口重读转录再返回——关闭"证停前抢跑"
+    // 窗口；sleepFn/logLine 显式接线（漏接曾致生产路径跳过退避、吞掉逐轮日志）。
+    observeRound: (runId) =>
+      observeWithSettle(runId, runDir, values.livenessWindowMs, TERMINAL_SETTLE_MS, sleep),
     backendNoSession,
     collectSummary: (events, runId) => collectRunSummary(events, runId, backendNoSession),
+    sleepFn: sleep,
+    logLine: log,
   });
   finish(result.outcome, result.lastSummary, result.exitCode);
 }
