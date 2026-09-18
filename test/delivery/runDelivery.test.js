@@ -151,6 +151,23 @@ function deliveryOpts(repoDir, baseCommit, overrides = {}) {
 
 const norm = (p) => p.replace(/\\/g, "/");
 
+/**
+ * TD-163（ADR-0030 收口）迁移共用形状：轮询 transcript 直到指定事实落盘（有界）。
+ * 这是"等确定性事实"，不是睡眠掩蔽——到期事实（run.observation_deadline_reached）
+ * 由定时器回调必然写出，我们只是观察它，随后由测试显式行使 Lead 的终止决定。
+ */
+async function waitForTranscriptFact(filePath, type, { timeoutMs = 5000, intervalMs = 10 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const events = await readTranscript(filePath);
+      if (events.some((e) => e.type === type)) return events;
+    } catch { /* 文件尚不可读——继续轮询 */ }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(`timed out waiting for transcript fact "${type}" in ${filePath}`);
+}
+
 /** Commit a new file on the source repo, advancing HEAD (used for TOCTOU tests). */
 async function advanceHeadRepo(dir) {
   await writeFile(join(dir, "advanced.md"), "# advanced\n");
@@ -817,7 +834,13 @@ test("3A2-01: completed backend + valid diff packages exactly one delivery commi
   }
 });
 
-test("3A2-04: hard scorecard failure never calls packager and leaves worker diff uncommitted", { skip: "TD-163：ADR-0030 迁移残留——本测试曾以 timed_out 为合成终结器（旧代码从未自然行使硬记分卡无证据失败路径）；新语义下需 mock 自然终态改造，且存在裸跑挂/仪器过的竞态嫌疑，修复批承载" }, async () => {
+// TD-163（ADR-0030 收口）迁移：本测试曾以 timed_out 为合成终结器（旧代码下
+// waitTimeout(5000) 到期杀掉收尾，硬记分卡无证据失败路径从未被自然行使）。
+// 迁移后为 mock 自然终态：createMockFetch 立即回 assistant 文本 → done(completed)
+// → 硬记分卡（requireEvidence, hard）无证据 → 如实 failed。裸跑复跑均通过
+// （见 tech-debt.md TD-163 定谳：原"裸跑挂"实为同文件 3A2-06/3A2-08 的
+// timed_out 合成终结器残留把裸文件跑挂死，非本测试的竞态）。
+test("3A2-04: hard scorecard failure never calls packager and leaves worker diff uncommitted", async () => {
   const { repo, baseCommit } = await makeRepo("wao-rd-pkg-04-");
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg04-"));
   let packageCount = 0;
@@ -832,20 +855,18 @@ test("3A2-04: hard scorecard failure never calls packager and leaves worker diff
       delivery: deliveryOpts(repo, baseCommit),
       scorecardMode: "hard",
     });
-    // Don't write any files → no evidence → hard scorecard will fail.
-    // ADR-0030 迁移：旧语义靠 waitTimeout(5000) 到期杀掉收尾；新语义到期只记
-    // 事实、终止归 Lead。本 mock 在此形状下既不自然完成、到期事实亦未可靠落盘
-    // （已记审计疑点）——测试改为确定性形态：等过 5s 观察窗后由测试显式行使
-    // Lead 的决定（abort），断言不因非完成路径触碰 packager。
-    const result = await Promise.race([
-      new Promise((r) => setTimeout(r, 6000)).then(async () => {
-        await run.abort();
-        const x = await run.waitForCompletion({});
-        return x;
-      }),
-    ]);
+    // Don't write any files → no evidence → hard scorecard fails naturally.
+    const result = await run.waitForCompletion({});
     assert.equal(packageCount, 0, "packager must not be called on hard scorecard failure");
     assert.equal(result.completed, false);
+    assert.equal(result.failed, true, "hard scorecard failure must terminal as failed (natural path)");
+    assert.equal(run.state, "failed");
+
+    const events = await readTranscript(run.transcript.filePath);
+    const scorecardChecked = events.find((e) => e.type === "scorecard.checked");
+    assert.ok(scorecardChecked, "scorecard.checked must exist (natural hard-gate exercise)");
+    assert.equal(scorecardChecked.passed, false, "hard scorecard must fail without evidence");
+    assert.ok(!events.some((e) => e.type === "run.timed_out"), "no synthetic run.timed_out");
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);
@@ -1422,7 +1443,12 @@ test("3A2-03: warn-mode scorecard failure records warning and still packages", a
   }
 });
 
-test("3A2-06: timeout never calls packager", async () => {
+// TD-163（ADR-0030 收口）迁移：原形状依赖 timed_out 合成终结器（到期杀 →
+// result.timedOut===true）。新语义：到期=通知不杀——run.observation_deadline_reached
+// 落盘、监督继续；终止归 Lead。迁移后：等到期事实落盘，由测试显式行使 Lead 决定
+// （AbortSignal stop，M10-pre3C 外部中止臂），断言到期与 stop 都不触碰 packager，
+// 且全程无 timed_out。
+test("3A2-06: wait deadline expiry notifies (never kills) and never calls packager", async () => {
   const { repo, baseCommit } = await makeRepo("wao-rd-pkg-06-");
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-pkg06-"));
   let packageCount = 0;
@@ -1455,9 +1481,22 @@ test("3A2-06: timeout never calls packager", async () => {
       prompt: "hi", isolate: true, runId: "run_delivtest_p06",
       delivery: deliveryOpts(repo, baseCommit),
     });
-    const result = await run.waitForCompletion({ waitTimeout: 200, pollInterval: 10 });
-    assert.equal(packageCount, 0, "packager must not be called on timeout");
-    assert.equal(result.timedOut, true, "must be timed out");
+    const stop = new AbortController();
+    const waitPromise = run.waitForCompletion({ waitTimeout: 200, pollInterval: 10, signal: stop.signal });
+    // 到期事实必然落盘（通知器职责）——观察它，而非睡眠。
+    await waitForTranscriptFact(run.transcript.filePath, "run.observation_deadline_reached");
+    assert.equal(packageCount, 0, "packager must not be called at deadline expiry (notify, not kill)");
+    // Lead 的决定：显式 stop。终态来自 Lead，不来自时钟。
+    stop.abort();
+    const result = await waitPromise;
+    assert.equal(packageCount, 0, "packager must not be called on non-completion stop");
+    assert.equal(result.completed, false, "must not be completed");
+    assert.equal(result.aborted, true, "terminal comes from the Lead's stop (aborted)");
+    const events = await readTranscript(run.transcript.filePath);
+    assert.ok(!events.some((e) => e.type === "run.timed_out"),
+      "ADR-0030: deadline expiry must never fabricate run.timed_out");
+    assert.ok(!events.some((e) => e.type === "run.state_change" && e.to === "timed_out"),
+      "ADR-0030: no timed_out terminal state");
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);
@@ -3031,8 +3070,17 @@ test("3B2-10: wait timeout → verifierCount===0", async () => {
       prompt: "hi", isolate: true, runId: "run_3b2_test_10",
       delivery: deliveryOpts(repo, baseCommit),
     });
-    try { await run.waitForCompletion({ waitTimeout: 300, pollInterval: 10 }); } catch { /* expected timeout */ }
-    assert.equal(verifyCount, 0, "verifier must not be called on wait timeout");
+    // TD-163（ADR-0030 收口）迁移：原形状依赖到期杀（timeout 抛出/返回）。新语义：
+    // 到期=通知不杀，终止归 Lead——等到期事实落盘后由测试显式 stop（AbortSignal），
+    // 断言非完成终止不触碰 verifier。
+    const stop = new AbortController();
+    const waitPromise = run.waitForCompletion({ waitTimeout: 300, pollInterval: 10, signal: stop.signal });
+    await waitForTranscriptFact(run.transcript.filePath, "run.observation_deadline_reached");
+    assert.equal(verifyCount, 0, "verifier must not be called at deadline expiry");
+    stop.abort();
+    const result = await waitPromise;
+    assert.equal(result.aborted, true, "terminal comes from the Lead's stop");
+    assert.equal(verifyCount, 0, "verifier must not be called on non-completion stop");
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);

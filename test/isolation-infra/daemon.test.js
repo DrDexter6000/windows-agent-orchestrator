@@ -427,8 +427,14 @@ test("connectDaemon: 连不上（无 daemon）抛错", async () => {
 // in-process 起 daemon server（mock registry + mock fetch 注入，不烧 token）。
 
 // mock fetch：opencode-serve 回环，session 创建后 prompt_async 推一条 assistant 消息。
-function makeMockFetch() {
+// TD-163（ADR-0030 收口）：seed 允许预置"daemon 重启前已存在的 serve 端 session"——
+// opencode session 存活于 WAO 进程之外（sessionOutlivesProcess），重启后的 daemon
+// resume 应能看到该 session 的既有对话并自然收敛到终态。
+function makeMockFetch({ seed } = {}) {
   const sessions = new Map();
+  if (seed) {
+    for (const [id, session] of Object.entries(seed)) sessions.set(id, session);
+  }
   return async (url, init = {}) => {
     const urlStr = String(url);
     if (init.method === "POST" && urlStr.endsWith("/api/session")) {
@@ -631,7 +637,13 @@ test("优雅退出：stop 后 daemon.json 删除", async () => {
 // Increment 5 — 重启 resume-scan（daemon 启动时接管未完成 run）
 // ============================================================
 
-test("resume-scan: 启动时扫到未完成 run，daemon 接管并推进到终态", { skip: "TD-163：同 3A2-04——曾以 timed_out 为合成终结器；新语义需 mock 自然终态改造，修复批承载" }, async () => {
+// TD-163（ADR-0030 收口）迁移：原形状曾以 timed_out 为合成终结器——旧测试的
+// makeMockFetch 是全新内存 Map，transcript 里残留的 backendSessionId（s_x）在其
+// 中不存在 → /message 永远空 → 流永不结束 → 旧语义靠 waitTimeout(3000) 到期杀。
+// 新语义（到期=通知不杀）下如实的形态：预置 serve 端 session（seed）——opencode
+// session 本就存活于 daemon 进程之外，重启后的 daemon resume 附加到该 session，
+// 看到既有 assistant 回复 → 快照稳定 → 自然 done(completed)。终态=自然完成。
+test("resume-scan: 启动时扫到未完成 run，daemon 接管并推进到终态", async () => {
   const runDir = makeRunDir();
   const pipe = uniquePipe();
   try {
@@ -644,13 +656,23 @@ test("resume-scan: 启动时扫到未完成 run，daemon 接管并推进到终�
     const daemon = await startDaemon({
       runDir, pipe,
       registry: mockRegistry(runDir),
-      fetchImpl: makeMockFetch(),
+      // serve 端 session 在 daemon 重启中存活（sessionOutlivesProcess），对话已完整。
+      fetchImpl: makeMockFetch({
+        seed: {
+          s_x: {
+            messages: [
+              { info: { id: "msg_leftover_user", role: "user" }, parts: [{ type: "text", text: "x" }] },
+              { info: { id: "msg_leftover_reply", role: "assistant" }, parts: [{ type: "text", text: "ok" }] },
+            ],
+          },
+        },
+      }),
       resumeOnStart: true,
       waitTimeout: 3000,
       pollInterval: 20,
     });
     try {
-      // resume 后 daemon 应把 run_leftover 推进到终态（mock fetch 立即回 assistant）
+      // resume 后 daemon 应把 run_leftover 推进到自然终态（seed session 已有 assistant 回复）
       const deadline = Date.now() + 8000;
       let state = "running";
       while (Date.now() < deadline) {
@@ -662,8 +684,8 @@ test("resume-scan: 启动时扫到未完成 run，daemon 接管并推进到终�
           if (["completed", "failed", "aborted", "timed_out"].includes(state)) break;
         } catch { /* */ }
       }
-      assert.ok(["completed", "failed", "aborted", "timed_out"].includes(state),
-        `resume-scan 应把残留 run 推进到终态，实际=${state}`);
+      assert.equal(state, "completed",
+        `resume-scan 应把残留 run 推进到自然终态 completed，实际=${state}`);
     } finally {
       await daemon.stop();
     }

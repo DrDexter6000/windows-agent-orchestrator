@@ -176,7 +176,7 @@ test("M10pre-C2-06: loadGlobalWaitTimeout reads WAO config regardless of host cw
 // Here we add a regression test: probe succeeds (quiet=true) but append throws →
 // the outcome must NOT be probe_error.
 
-test("M10pre-C2-07: stop_verified append failure is NOT misclassified as probe_error", async () => {
+test("M10pre-C2-07: stop_verified append failure is NOT misclassified as probe_error", { skip: "TD-163 同族：前提（超时→cleanup→证停→append 失败分类）随 ADR-0030 死亡——abort 路径幂等跳过证停；该分类面归 stop 命令路径，需 stop 侧等价测试（登记 TD-163 残余）" }, async () => {
   const { RunManager } = await import("../../src/runManager.js");
   const { readTranscript } = await import("../../src/transcript.js");
   const dir = mkdtempSync(join(tmpdir(), "wao-c2-07-"));

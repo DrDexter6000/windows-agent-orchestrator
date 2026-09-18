@@ -331,7 +331,7 @@ test("RM1 (red flag B): unknown non-null done reason → failed + throw, NEVER t
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("RM2: genuine waitTimerExpired still produces timed_out (regression guard)", async () => {
+test("RM2（ADR-0030 改写）: genuine waitTimerExpired produces the observation fact, NOT timed_out (regression guard)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1211-rm2-"));
   try {
     const backend = {
@@ -356,11 +356,15 @@ test("RM2: genuine waitTimerExpired still produces timed_out (regression guard)"
     };
     const manager = makeProcessManager(dir, backend, { waitTimeout: 20 });
     const run = await manager.start("test", { prompt: "go" });
-    const result = await run.waitForCompletion({ pollInterval: 5 });
-    assert.equal(result.timedOut, true);
-    assert.equal(run.state, "timed_out");
+    // ADR-0030：到期只记事实——生成器 3s 安全阀后自然 done(failed)。
+    // backend 自主失败走抛出契约（TD-105 既有行为）：waitForCompletion rejects。
+    await assert.rejects(() => run.waitForCompletion({ pollInterval: 5 }), /killed after timeout/);
+    assert.equal(run.state, "failed");
     const events = await readTranscript(run.transcript.filePath);
-    assert.equal(events.filter((e) => e.type === "run.state_change" && e.to === "timed_out").length, 1);
+    assert.equal(events.filter((e) => e.type === "run.state_change" && e.to === "timed_out").length, 0,
+      "ADR-0030：定时器不再产生 timed_out");
+    assert.equal(events.filter((e) => e.type === "run.observation_deadline_reached").length, 1,
+      "到期事实恰好一条");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

@@ -1901,6 +1901,12 @@ export class Run {
     this._deliveryPackaged = false; // guard: package at most once
     // TD-150 批A（T3）：no_effect 告警每 run 至多一次的防重标志（双失败出口共用）。
     this._noEffectAlertRaised = false;
+    // TD-163（ADR-0030 收口）：本 Run 所有在飞 waitForCompletion 的 wait 控制器。
+    // 定时器降级为纯通知器后，外部 abort（Run.abort / daemon stop / RunManager.abort）
+    // 成为唯一能打断"消费循环 parked 在永不 yield 的静默事件流上"的臂——M10-pre3C
+    // 只接了调用方 AbortSignal 这一臂（旧定时器 abort 兜着其余臂，从未暴露缺口）。
+    // _abortInternal 现在 abort 这些控制器，使 Lead 的终止决定即时作用到等待循环。
+    this._waitControllers = new Set();
     // TD-103 Phase 3B concurrency final closeout: transcript-atomic verification.
     //
     // Concurrency state machine for _verifyDeliveryResult:
@@ -1955,6 +1961,24 @@ export class Run {
       source: waitTimeoutSource,
     });
 
+    // TD-163（ADR-0030 收口）：abort-后-等待 的如实短路。旧语义下 3A2-08 形状
+    // （Run.abort() 之后再 waitForCompletion）靠定时器到期 abort 控制器解开
+    // parked 消费循环；定时器降级为通知器后没有任何臂能解开——此处必须在进入
+    // 事件流之前短路：已 abort 的 run 直接返回 aborted loser 结果，已终态的 run
+    // 返回其现有终态的 loser 结果（与循环内 break 语义一致，且不伪造
+    // backend_stream_ended 的 run.error 事实）。
+    // 行审修正（Lead）：此处原有一行 this._removeFromManager() 系误置——
+    // 等待不是所有权终结，每次 wait 都摘除会破坏 stop/abortAll/并发监督；
+    // _abortInternal 已自行摘除，短路路径无需重复。
+    if (this._aborted) {
+      await this._runCleanup();
+      return _loserResult("aborted", { messages: [], evidence: [], metrics: null });
+    }
+    if (TERMINAL_STATES.includes(this.state)) {
+      await this._runCleanup();
+      return _loserResult(this.state, { messages: [], evidence: [], metrics: null });
+    }
+
     // M10-pre3: only create the observation-deadline timer when the deadline is
     // enabled. When disabled, there is no time-based arm at all — workers run
     // until they complete, fail, are externally aborted, or hit token/resource
@@ -1970,6 +1994,8 @@ export class Run {
     // 曾以 controller.abort() 打断事件流并转 timed_out——TD-148 实证它在
     // --background 下同样杀 worker，是 06-18 事故族的根，ADR-0030 裁定废弃。
     const controller = new AbortController();
+    // TD-163：登记在飞控制器，_abortInternal 据此打断静默流（见构造器注记）。
+    this._waitControllers.add(controller);
     let timer = null;
     if (deadlineEnabled) {
       timer = setTimeout(() => {
@@ -2176,6 +2202,7 @@ export class Run {
       // 回调里落盘（run.observation_deadline_reached），此处无需任何终态动作。
       // 流结束的原因由下方 doneReason / externalAborted 分支如实分派。
     } finally {
+      this._waitControllers.delete(controller);
       clearTimeout(timer);
     }
 
@@ -2936,6 +2963,14 @@ export class Run {
 
   async _abortInternal(reason) {
     this._aborted = true;
+    // TD-163（ADR-0030 收口）：打断所有在飞 waitForCompletion 的等待控制器。
+    // 事件流生成器（opencode streamEvents 的 while(!signal.aborted) 轮询、进程式
+    // backend 的 signal 监听）靠 signal 退出；只调 handle.abort 不保证流终止
+    // （HTTP session abort 后 /message 常态返回冻结快照，轮询永不 yield）。
+    // 旧定时器的 controller.abort() 兜着这一臂——定时器降级为通知器后由本路径接管。
+    for (const c of this._waitControllers) {
+      c.abort();
+    }
     // 标记会话已被显式 abort，_runCleanup 兜底时不再重复调（幂等）
     this._sessionKilled = true;
     let abortError;

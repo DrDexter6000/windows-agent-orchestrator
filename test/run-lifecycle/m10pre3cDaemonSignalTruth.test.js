@@ -288,11 +288,24 @@ test("PRE3C-08: real deadline timer → exactly one timed_out", async () => {
     });
     const manager = new RunManager({ config, readRegistry, transcriptDir: dir, backendFor });
     const run = await manager.start("a2", { prompt: "x" });
-    const result = await run.waitForCompletion({ waitTimeout: 60, pollInterval: 5 });
-    assert.equal(run.state, "timed_out");
+    // ADR-0030 迁移：到期=通知不杀——观察事实后行使 Lead 决定（abort）。
+    const waitP = run.waitForCompletion({ waitTimeout: 60, pollInterval: 5 });
+    const factP = new Promise((res) => {
+      const iv = setInterval(async () => {
+        try {
+          const ev = await readTranscript(run.transcript.filePath);
+          if (ev.some((e) => e.type === "run.observation_deadline_reached")) { clearInterval(iv); res(); }
+        } catch {}
+      }, 5);
+    });
+    await factP;
+    await run.abort("user");
+    await waitP;
+    assert.equal(run.state, "aborted", "ADR-0030：到期不再 timed_out");
     const events = await readTranscript(run.transcript.filePath);
     const timedOut = events.filter((e) => e.type === "run.timed_out");
-    assert.equal(timedOut.length, 1, "real deadline timer must produce exactly one run.timed_out");
+    assert.equal(timedOut.length, 0, "ADR-0030：定时器不产生 run.timed_out");
+    assert.equal(events.filter((e) => e.type === "run.observation_deadline_reached").length, 1, "到期事实恰好一条");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

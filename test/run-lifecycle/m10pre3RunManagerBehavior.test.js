@@ -139,14 +139,33 @@ test("BEHAVIOR-2: explicit deadline → exactly one run.timed_out + state timed_
       },
     });
     const run = await manager.start("a2", { prompt: "x" });
-    const result = await run.waitForCompletion({ waitTimeout: 60, pollInterval: 5 });
+    // ADR-0030 迁移：到期=通知不杀。生成器阻塞到 signal 被 abort——定时器不再
+    // abort，由测试行使 Lead 决定：观察到期事实后 run.abort()（新控制器打断臂
+    // 解开同一 waitForCompletion）。
+    const waitP = run.waitForCompletion({ waitTimeout: 60, pollInterval: 5 });
+    const factP = new Promise((resolveFact) => {
+      const iv = setInterval(async () => {
+        try {
+          const evs = await readTranscript(run.transcript.filePath);
+          if (evs.some((e) => e.type === "run.observation_deadline_reached")) {
+            clearInterval(iv);
+            resolveFact();
+          }
+        } catch { /* transcript 尚未创建 */ }
+      }, 5);
+    });
+    await factP;
+    await run.abort();
+    const result = await waitP;
 
     assert.equal(result.completed, false);
-    assert.equal(run.state, "timed_out");
+    assert.equal(run.state, "aborted", "ADR-0030：到期不再产生 timed_out，终态由 Lead 决定（此处 aborted）");
 
     const events = await readTranscript(run.transcript.filePath);
     const timedOutEvents = events.filter((e) => e.type === "run.timed_out");
-    assert.equal(timedOutEvents.length, 1, "must produce EXACTLY one run.timed_out");
+    assert.equal(timedOutEvents.length, 0, "ADR-0030：定时器不产生 run.timed_out");
+    const factEvents = events.filter((e) => e.type === "run.observation_deadline_reached");
+    assert.equal(factEvents.length, 1, "到期事实恰好一条");
 
     const policy = events.find((e) => e.type === "run.wait_policy");
     assert.equal(policy.waitTimeoutMs, 60);
@@ -246,7 +265,20 @@ test("BEHAVIOR-5: wait_policy durable shape — disabled vs explicit", async () 
       },
     });
     const r2 = await m2.start("a5b", { prompt: "x" });
-    await r2.waitForCompletion({ waitTimeout: 55, pollInterval: 5 });
+    // ADR-0030 迁移：到期只通知——等待挂起直到测试行使 Lead 决定（abort），
+    // wait_policy 断言不受影响（事实在 start 时即落盘）。
+    const w5 = r2.waitForCompletion({ waitTimeout: 55, pollInterval: 5 });
+    const f5 = new Promise((res) => {
+      const iv = setInterval(async () => {
+        try {
+          const ev = await readTranscript(r2.transcript.filePath);
+          if (ev.some((e) => e.type === "run.observation_deadline_reached")) { clearInterval(iv); res(); }
+        } catch {}
+      }, 5);
+    });
+    await f5;
+    await r2.abort("user");
+    await w5;
     const ev2 = await readTranscript(r2.transcript.filePath);
     const p2 = ev2.find((e) => e.type === "run.wait_policy");
     assert.deepEqual({ waitTimeoutMs: p2.waitTimeoutMs, source: p2.source },
