@@ -212,3 +212,31 @@ test("TD-151 resume 托管钉: 终态 run → resumed:false（拒绝形状，零
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// 终审回归钉：resume 失败事实必须落"本 run 转录"（绑定字段在场），不写工作目录裸文件
+test("终审钉: resume 拒绝的持久失败事实落本 run 转录且带绑定上下文（不写裸文件）", async () => {
+  const { runResumeBackground } = await import("../../src/backgroundRunner.js");
+  const { readTranscript } = await import("../../src/transcript.js");
+  const { mkdtempSync, rmSync, existsSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const cwd = process.cwd();
+  const runDir = mkdtempSync(join(tmpdir(), "wao-fin-"));
+  try {
+    // 转录有终态事实（bound）→ 权威 resume 拒绝 → 持久失败事实应落转录
+    const runId = "run_fin_probe";
+    const { JsonlTranscript } = await import("../../src/transcript.js");
+    const tr = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "x" });
+    await tr.append("run.state_change", { from: null, to: "completed", reason: "done" });
+    const r = await runResumeBackground({ runId, runDir, registry: { agents: {} } });
+    assert.equal(r.resumed, false);
+    const events = await readTranscript(join(runDir, `${runId}.jsonl`));
+    const err = events.find((e) => e.type === "run.error" && e.phase === "resume");
+    assert.ok(err, "持久失败事实必须落本 run 转录");
+    assert.equal(err.runId, runId, "绑定字段在场（写入经 JsonlTranscript 信封）");
+    assert.equal(existsSync(join(cwd, runId)), false, "不写工作目录裸文件（终审抓到的构造参数误用回归）");
+  } finally {
+    rmSync(join(cwd, "run_fin_probe"), { recursive: true, force: true });
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});

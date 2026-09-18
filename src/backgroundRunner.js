@@ -572,7 +572,9 @@ function parseSessionReuseJson(raw) {
 async function appendDurableResumeFailure(runId, runDir, reasonText) {
   try {
     const { JsonlTranscript } = await import("./transcript.js");
-    const t = new JsonlTranscript(runId, runDir);
+    // 终审修正：签名为 (filePath, context)——此前误传 (runId, runDir) 把事实写到
+    // 工作目录裸文件。规范形状对齐 runManager（join(runDir, runId.jsonl) + 绑定上下文）。
+    const t = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "resume-runner" });
     await t.append("run.error", { phase: "resume", error: reasonText });
   } catch (e) {
     process.stderr.write(`backgroundRunner: durable resume-failure fact unwritable: ${e.message}
