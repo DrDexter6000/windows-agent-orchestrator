@@ -249,6 +249,24 @@ serve 后台进程不一定。
 
 ---
 
+### 4.4 worker 中途死亡，worktree 半成品抢救（手工配方，Owner 2026-09-18 裁定 4C）
+
+worker 死于隔离守卫（workdir_escape）或供应商断流时，其 worktree 可能留有有价值 WIP。**先分两类**：
+
+- **delivery run**：走既有候选通道（`runs delivery` 读 candidateInventory/candidateKind：backend_failed / process_missing / disallowed_scope → Lead 裁定后重打包）。§快速索引表"workdir_escape 无 salvage 面"说的是**控制面工具**（不 repackage/review/decide）——手工抢救在控制面之外，两者不矛盾。
+- **非 delivery run**：用本手工配方（实证两次：scbs8j / qjg202 两次 workdir_escape 死亡均以此救回）：
+
+```bash
+# 1. 定位 worktree（.wao-worktrees/<runId>；或读 runs/<runId>.jsonl 里 delivery 事件的 worktreePath）
+# 2. 导出补丁（含 untracked：先 add -N 再 diff）
+git -C <worktreeRoot> add -A -N
+git -C <worktreeRoot> diff > "%TEMP%\\<runId>-wip.patch"
+# 3. Lead 评估补丁后按采纳协议处理（如合入：commit 带 WAO-Adopted-From: <runId> trailer——见 usage.md 验证失败采纳协议）
+# 4. 清理：npm run cli -- worktree remove --force <worktreeRoot>
+```
+
+边界：本配方是**人工采纳**，不自动接受任何 WIP；价值判断完全归 Lead。**归档/清理历史 runs 前的固定步骤 = 确认无可抢救 WIP**（与 TD-156 保留策略联动）。下次真实死亡时顺手核对既有通道覆盖面，缺口确凿再评估专用命令（runs salvage 立项与否）。
+
 ## 5. 证据完整性
 
 ### 5.1 metrics 提取（已修复）
