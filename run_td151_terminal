@@ -1,0 +1,3 @@
+{"phase":"resume","error":"resume refused (terminal/not found/authority missing)","ts":"2026-09-18T19:30:18.969Z","seq":1,"type":"run.error"}
+{"phase":"resume","error":"resume refused (terminal/not found/authority missing)","ts":"2026-09-18T19:34:20.130Z","seq":2,"type":"run.error"}
+{"phase":"resume","error":"resume refused (terminal/not found/authority missing)","ts":"2026-09-18T19:43:04.174Z","seq":3,"type":"run.error"}

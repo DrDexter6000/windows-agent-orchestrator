@@ -276,8 +276,19 @@ export async function runResumeBackground(opts = {}) {
       : (agent) => backendFor(agent, { fetchImpl: opts.fetchImpl, waoCliPath }),
   });
 
-  const run = await manager.resume(runId, {});
+  // 审计 P1 闭合（TD-151 复核二轮）：resume 失败的持久可见性——null 拒绝与
+  // 抛错两路都向本 run 转录追加 run.error（phase=resume，固定安全文案不回显
+  // 异常原文/路径），监督侧 runs status/tail/diagnose 可见，不再只进被忽略的
+  // runner std 流（父进程曾误报 resumed:true 后无从发现）。
+  let run;
+  try {
+    run = await manager.resume(runId, {});
+  } catch (e) {
+    await appendDurableResumeFailure(runId, runDir, "resume threw before handle attach");
+    throw e;
+  }
   if (!run) {
+    await appendDurableResumeFailure(runId, runDir, "resume refused (terminal/not found/authority missing)");
     return {
       runId,
       resumed: false,
@@ -549,6 +560,23 @@ function parseSessionReuseJson(raw) {
     return validateSessionReuseRouting(JSON.parse(raw));
   } catch {
     throw new Error("sessionReuse: invalid internal routing envelope");
+  }
+}
+
+
+/**
+ * 审计 P1（TD-151 复核二轮）：向 run 转录追加 resume 失败的持久事实。
+ * 固定安全文案（run.error 既有事件类型，phase=resume）；写失败不改变退出路径
+ * （best-effort：转录不可写时 stderr 仍留痕）。
+ */
+async function appendDurableResumeFailure(runId, runDir, reasonText) {
+  try {
+    const { JsonlTranscript } = await import("./transcript.js");
+    const t = new JsonlTranscript(runId, runDir);
+    await t.append("run.error", { phase: "resume", error: reasonText });
+  } catch (e) {
+    process.stderr.write(`backgroundRunner: durable resume-failure fact unwritable: ${e.message}
+`);
   }
 }
 

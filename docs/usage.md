@@ -560,7 +560,7 @@ npm run cli -- resume <runId> --wait
 
 **resume 两种姿态（ADR-0030 实施批 / TD-148 姊妹脸根修，2026-09-18）**：
 
-- **不带 `--wait` = detached runner 托管**：CLI 以 detached+stdio-ignore+unref 形状 fork 一个 resume runner 立即返回（不再被 respawn 子进程的 ref'd 管道吊住静默挂起）。runner 拥有续跑 handle，驱动 waitForCompletion（token 闸门 / 等待窗到期通知 / 自然终态）并写 ownership 心跳（daemon `--resume-on-start` 判活不劫持）。监督走 `runs status` / `runs wait`。CLI 侧先做廉价的终态/权威事实预检（bound findState + 首条绑定 `session.created`/`run.started`/`prompt.sent`——最后一项是进程重放所必需，缺失会在 fork 后被 runner 静默拒绝），已终态或不可续接的 run 直接打印既有拒绝形状（`resumed:false`），零 fork；预检与 runner 内权威 resume 之间的竞态由 runner 兜底。**fork 后失败的可见性边界（审计 P1）**：runner 内恢复失败不回传父进程（detached 语义）——三类主因已由预检拦截，其余异常落转录（run.error/failed 终态），监督侧用 `runs status` 复核，不要只信 `resumed:true`。
+- **不带 `--wait` = detached runner 托管**：CLI 以 detached+stdio-ignore+unref 形状 fork 一个 resume runner 立即返回（不再被 respawn 子进程的 ref'd 管道吊住静默挂起）。runner 拥有续跑 handle，驱动 waitForCompletion（token 闸门 / 等待窗到期通知 / 自然终态）并写 ownership 心跳（daemon `--resume-on-start` 判活不劫持）。监督走 `runs status` / `runs wait`。CLI 侧先做廉价的终态/权威事实预检（bound findState + 首条绑定 `session.created`/`run.started`/`prompt.sent`——最后一项是进程重放所必需，缺失会在 fork 后被 runner 静默拒绝），已终态或不可续接的 run 直接打印既有拒绝形状（`resumed:false`），零 fork；预检与 runner 内权威 resume 之间的竞态由 runner 兜底。**fork 后失败的可见性边界（审计 P1）**：runner 内恢复失败不回传父进程（detached 语义）——三类主因已由预检拦截，runner 会向本 run 转录追加持久失败事实（run.error，phase=resume——恢复抛错或被拒两路都落盘，固定安全文案），监督侧用 `runs status`/`runs tail` 复核，不要只信 `resumed:true`。
 - **带 `--wait` = 前台等待**：CLI 进程持有续跑 worker，等到自然终态；等待窗到期同 `run` 前台（通知不杀，见场景 1）。**本进程退出/被杀时 worker 被 Windows Job Object 连坐终止**——这是进程隔离机制的设计行为（见部署前置 Node v22 节 / `.wao/decisions/0013`），不是缺陷、不修代码；要存活就不要用前台姿态挂着不管，用上面的托管续跑或 `--background` 派发。
 
 retry 的 per-dispatch 覆盖继承（R12，与 resume 重建链对称）：

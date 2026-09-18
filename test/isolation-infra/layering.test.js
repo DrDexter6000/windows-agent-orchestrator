@@ -172,6 +172,7 @@ const DYNAMIC_DISCLOSED = Object.freeze([
   "src/runManager.js -> src/application/processStopVerify.js",
   "src/runManager.js -> src/application/timeoutPolicy.js",
   "src/commands/lifecycle.js -> src/application/timeoutPolicy.js",
+  "src/backgroundRunner.js -> src/transcript.js",
   "src/runManager.js -> src/backends/opencodeStopVerify.js",
 ]);
 
