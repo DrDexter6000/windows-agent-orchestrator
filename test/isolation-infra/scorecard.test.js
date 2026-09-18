@@ -1,10 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, writeFile, mkdir } from "node:fs/promises";
-import { rmSync } from "node:fs";
+import { rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { checkScorecard } from "../../src/scorecard.js";
+import { join, resolve } from "node:path";
+import {
+  checkScorecard,
+  CHECK_NAME,
+  SCORECARD_CHECK_NAMES,
+  assertScorecardCheckNames,
+} from "../../src/scorecard.js";
+// TD-153 防线②：runManager 的 evidence_audit 名闭集（构造文件之二）。
+import { EVIDENCE_AUDIT_CHECK_NAMES } from "../../src/runManager.js";
 
 /**
  * scorecard 读 transcript 事件数组（含 run.event 类型的证据事件）。
@@ -556,4 +563,121 @@ test("P4-T4: 无 requireAcceptance → 不输出 acceptance check（opt-in）", 
   const events = [{ type: "run.completed" }];
   const result = await checkScorecard({ events, cwd: ".", rules: {} });
   assert.equal(result.checks.find((c) => c.name === "acceptance"), undefined, "无规则 = 无 acceptance check");
+});
+
+// ============================================================
+// TD-153（2026-09-18 残余批）：检查名 SSOT + 三层漂移防线
+//
+// 定案：auditor run_202609180757006603nxdsx + coder_mm run_20260918075704956eh790g
+// 咨询收敛，Owner 2026-09-18 指令批准（含 wire schema 收窄）。
+//   防线① 跨 rules 矩阵 emitted names 并集 == SCORECARD_CHECK_NAMES（等值断言，
+//          子集断言漏死名——登记未发射的新名/改名只有等值能抓）。
+//   防线② 静态杂散扫描：scorecard.js / runManager.js 两构造文件的 name:"..."
+//          字面量全部 ∈ 两闭集（抓矩阵未覆盖路径的绕过字面量）。
+//   防线③ wire fail-closed 在 test/mcp-surface/mcpRunStatus.test.js（M4 兄弟用例）。
+// ============================================================
+
+test("TD-153 SSOT: CHECK_NAME 六成员冻结唯一，SCORECARD_CHECK_NAMES 为其值派生且冻结", () => {
+  assert.ok(Object.isFrozen(CHECK_NAME), "CHECK_NAME 冻结");
+  assert.ok(Object.isFrozen(SCORECARD_CHECK_NAMES), "SCORECARD_CHECK_NAMES 冻结");
+  const values = Object.values(CHECK_NAME);
+  assert.equal(new Set(values).size, values.length, "六名无重复");
+  // 派生关系逐值等（值序 = 键序，冻结形状锁定）。
+  assert.deepEqual([...SCORECARD_CHECK_NAMES], values, "派生数组 = CHECK_NAME 值序列");
+  // 名册钉死：六成员逐一具名（改名 = 此处红，先过 SSOT 再改消费方）。
+  assert.deepEqual(
+    [...values].sort(),
+    ["acceptance", "commandsPassed", "filesExist", "hasAssistantText", "hasDoneEvent", "hasEvidence"],
+    "六名闭集逐字钉死",
+  );
+});
+
+test("TD-153 防线①: 跨 rules 矩阵 emitted names 并集与 SCORECARD_CHECK_NAMES 等值", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wao-sc-td153-"));
+  try {
+    await writeFile(join(dir, "out.js"), "1");
+    await writeFile(join(dir, "accept.mjs"), "process.exit(0);\n");
+    const events = [
+      { type: "run.completed" },
+      ev("command", { command: "npm test", exitCode: 0 }),
+      ev("file_written", { path: "out.js" }),
+      { type: "run.message", role: "assistant", parts: [{ type: "text", text: "answer" }] },
+    ];
+    // 矩阵：空规则 / 单规则逐一 / 全开——覆盖每条 check 的发射路径。
+    const matrix = [
+      {},
+      { requireCommands: ["npm test"] },
+      { requireFiles: ["out.js"] },
+      { requireEvidence: true },
+      { requireAssistantText: true },
+      { requireAcceptance: "accept.mjs" },
+      {
+        requireCommands: ["npm test"],
+        requireFiles: ["out.js"],
+        requireEvidence: true,
+        requireAssistantText: true,
+        requireAcceptance: "accept.mjs",
+      },
+    ];
+    const union = new Set();
+    for (const rules of matrix) {
+      const r = await checkScorecard({ events, cwd: dir, rules });
+      for (const c of r.checks) union.add(c.name);
+    }
+    // 等值断言（非子集）：发射未登记 → 并集多出（构造端不变式其实已先行 throw）；
+    // 登记未发射（死名）/改名 → 并集缺旧名或多新名。并集与闭集必须逐字相等。
+    assert.deepEqual(
+      [...union].sort(),
+      [...SCORECARD_CHECK_NAMES].sort(),
+      "矩阵 emitted 并集 == 闭集（等值，死名/新名/改名全抓）",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-153 构造端不变式: 非成员/undefined/重复名 throw，合法集（含空集）通过", () => {
+  assert.doesNotThrow(() => assertScorecardCheckNames([]), "空集合法（无规则 run 只有零或多检查，空由调用形态决定）");
+  assert.doesNotThrow(() => assertScorecardCheckNames([
+    { name: CHECK_NAME.HAS_DONE_EVENT, passed: true },
+    { name: CHECK_NAME.HAS_EVIDENCE, passed: false },
+  ]), "互异成员集合法");
+  // CHECK_NAME.X 笔误 → undefined：构造端当场炸（而非经投影字符串过滤静默消失）。
+  assert.throws(
+    () => assertScorecardCheckNames([{ name: undefined, passed: true }]),
+    /not in closed set/,
+    "undefined name throw",
+  );
+  assert.throws(
+    () => assertScorecardCheckNames([{ name: "rogueCheck", passed: true }]),
+    /not in closed set/,
+    "非成员字符串 throw",
+  );
+  assert.throws(
+    () => assertScorecardCheckNames([
+      { name: CHECK_NAME.ACCEPTANCE, passed: true },
+      { name: CHECK_NAME.ACCEPTANCE, passed: false },
+    ]),
+    /duplicate/,
+    "重复成员 throw",
+  );
+});
+
+test("TD-153 防线②: 静态杂散扫描 — 两构造文件的 name 字面量全在两闭集内", () => {
+  const scorecardSrc = readFileSync(resolve(import.meta.dirname, "../../src/scorecard.js"), "utf8");
+  const runManagerSrc = readFileSync(resolve(import.meta.dirname, "../../src/runManager.js"), "utf8");
+  const literalRe = /name:\s*"([^"]*)"/g;
+  // scorecard.js：SSOT 化后应零裸字面量——六名一律经 CHECK_NAME.X 引用（笔误防线
+  // 在引用+不变式，不在字面量）。出现任何 name:"..." 字面量即违背 SSOT 纪律。
+  const scLiterals = [...scorecardSrc.matchAll(literalRe)].map((m) => m[1]);
+  assert.deepEqual(scLiterals, [], "scorecard.js 零裸 name 字面量（一律 CHECK_NAME.X 引用）");
+  // runManager.js：evidence_audit 构造字面量必须 ∈ SCORECARD ∪ EVIDENCE_AUDIT
+  // 两闭集之并——矩阵未覆盖路径的绕过新名在此当场红（无关 name 字段被扫到时，
+  // 守卫迫使作者显式归类，这是设计而非误报）。
+  const rmLiterals = [...runManagerSrc.matchAll(literalRe)].map((m) => m[1]);
+  const legal = new Set([...SCORECARD_CHECK_NAMES, ...EVIDENCE_AUDIT_CHECK_NAMES]);
+  assert.ok(rmLiterals.length >= EVIDENCE_AUDIT_CHECK_NAMES.length, "三处 evidence_audit 字面量在扫");
+  for (const lit of rmLiterals) {
+    assert.ok(legal.has(lit), `runManager.js name 字面量 "${lit}" ∈ 两闭集之并`);
+  }
 });

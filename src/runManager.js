@@ -3091,6 +3091,20 @@ async function _maybeWriteFrictionLog(run) {
 }
 
 /**
+ * TD-153：run.evidence_audit 检查名闭集（本模块构造端 SSOT，冻结；不进 MCP wire
+ * ——run_status 只投影 scorecard.checked）。与 scorecard.js 的
+ * SCORECARD_CHECK_NAMES 并列的第二个检查名闭集：静态守卫
+ * （test/isolation-infra/scorecard.test.js 防线②）扫描两个构造文件的
+ * name 字符串字面量并断言 ∈ 两闭集之并——用法侧字面量与常量任一侧漂移都当场红。
+ * 导出仅供该守卫测试对账，无生产消费方。
+ */
+export const EVIDENCE_AUDIT_CHECK_NAMES = Object.freeze([
+  "evidence_file_written",
+  "evidence_command_exit0",
+  "evidence_assistant_text",
+]);
+
+/**
  * TD-95 #5 / TD-97：backend done(failed) 时审计已累积的证据。
  *
  * TD-97：复用 assessRunEvidence（SSOT），不再自己判 file_written/command/assistant text。
@@ -3108,6 +3122,7 @@ function _auditEvidenceOnFailure(evidence, messages) {
   // TD-97：合并 evidence + messages 后调统一评估（assessRunEvidence 兼容三种形状）
   const all = [...(evidence ?? []), ...(messages ?? [])];
   const a = assessRunEvidence(all);
+  // TD-153：三名字面量必须 ∈ EVIDENCE_AUDIT_CHECK_NAMES（静态守卫双向绑定）。
   const checks = [
     { name: "evidence_file_written", passed: a.hasFileWritten },
     { name: "evidence_command_exit0", passed: a.hasCommandExit0 },

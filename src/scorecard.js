@@ -15,6 +15,12 @@ import { DONE_MARKERS } from "./runEvent.js";
  * 输入：transcript 事件数组（含 run.event 类型的证据事件）。
  * 不读 transcript 文件——调用方负责读（和 aggregateRunMetrics 一致）。
  *
+ * TD-153（2026-09-18）：检查名闭集 SSOT。六名曾以字面量散落本文件多处（TD-150 批B
+ * 审计追加项），新形态会静默泄入 run_status 的 failedChecks。现全仓唯一登记处 =
+ * CHECK_NAME；构造端一律经 CHECK_NAME.X 引用（笔误 → undefined → 构造端不变式当场
+ * throw，而非经投影字符串过滤静默消失）；投影端（application/runStatus.js）与 wire
+ * schema（mcp/server.js 的 z.enum）都从 SCORECARD_CHECK_NAMES 派生，三层不可能漂移。
+ *
  * @typedef {Object} ScorecardRules
  * @property {string[]} [requireCommands]  必须执行且 exitCode=0 的命令（包含匹配）
  * @property {string[]} [requireFiles]    必须写入且真实存在的文件（cwd 相对路径）
@@ -30,6 +36,42 @@ import { DONE_MARKERS } from "./runEvent.js";
  * @property {boolean} passed
  * @property {ScorecardCheck[]} checks
  */
+
+/**
+ * TD-153：scorecard 检查名"户口本"——全仓唯一登记处（冻结）。
+ * 新增/改名检查必须先落这里：登记未发射会被矩阵并集等值测试抓住（死名），
+ * 发射未登记会被构造端不变式当场 throw。
+ */
+export const CHECK_NAME = Object.freeze({
+  HAS_DONE_EVENT: "hasDoneEvent",
+  HAS_EVIDENCE: "hasEvidence",
+  HAS_ASSISTANT_TEXT: "hasAssistantText",
+  ACCEPTANCE: "acceptance",
+  COMMANDS_PASSED: "commandsPassed",
+  FILES_EXIST: "filesExist",
+});
+
+/** TD-153：派生闭集数组（冻结）。投影端校验与 MCP wire enum 均由此派生。 */
+export const SCORECARD_CHECK_NAMES = Object.freeze(Object.values(CHECK_NAME));
+
+/**
+ * TD-153 构造端不变式：每个 emitted check.name 必须 ∈ SCORECARD_CHECK_NAMES 且不重复。
+ * checkScorecard 唯一 return 前调用；导出仅供测试直接钉 throw 语义。
+ * @param {ScorecardCheck[]} checks
+ * @returns {void} 合法集无返回值；违例 throw
+ */
+export function assertScorecardCheckNames(checks) {
+  const seen = new Set();
+  for (const c of checks) {
+    if (!SCORECARD_CHECK_NAMES.includes(c?.name)) {
+      throw new Error(`scorecard: check name not in closed set: ${String(c?.name)}`);
+    }
+    if (seen.has(c.name)) {
+      throw new Error(`scorecard: duplicate check name: ${c.name}`);
+    }
+    seen.add(c.name);
+  }
+}
 
 /**
  * 执行 scorecard 检查。
@@ -50,7 +92,7 @@ export async function checkScorecard({ events, cwd, rules }) {
 
   // 1. hasDoneEvent：节点是否真跑完（transcript 有完整事件链到 done）
   checks.push({
-    name: "hasDoneEvent",
+    name: CHECK_NAME.HAS_DONE_EVENT,
     passed: hasDone,
     evidence: hasDone ? "run.completed present" : "run.completed missing",
     ...(hasDone ? {} : { detail: "no run.completed event in transcript" }),
@@ -84,11 +126,11 @@ export async function checkScorecard({ events, cwd, rules }) {
         && DONE_MARKERS.includes(e.completionMarker),
     )?.completionMarker;
     checks.push(readOnlyExempt ? {
-      name: "hasEvidence",
+      name: CHECK_NAME.HAS_EVIDENCE,
       passed: true,
       evidence: "read-only declared: evidence not required",
     } : {
-      name: "hasEvidence",
+      name: CHECK_NAME.HAS_EVIDENCE,
       passed: a.hasAnyEvidence,
       evidence: `${a.evidenceEventCount} evidence event(s) found`,
       ...(a.hasAnyEvidence ? {} : {
@@ -105,7 +147,7 @@ export async function checkScorecard({ events, cwd, rules }) {
   if (rules?.requireAssistantText) {
     const a = assessRunEvidence(events);
     checks.push({
-      name: "hasAssistantText",
+      name: CHECK_NAME.HAS_ASSISTANT_TEXT,
       passed: a.hasAssistantText,
       evidence: a.hasAssistantText ? "assistant text answer present" : "no assistant text answer",
       ...(a.hasAssistantText ? {} : { detail: "completed but no assistant text part — possible pseudo-completion" }),
@@ -121,6 +163,10 @@ export async function checkScorecard({ events, cwd, rules }) {
   }
 
   const passed = checks.every((c) => c.passed);
+  // TD-153 构造端不变式（唯一 return 前）：emitted name 必须 ∈ 闭集且不重复。
+  // CHECK_NAME.X 笔误 → undefined → 此处当场炸响，而不是经投影端字符串过滤
+  // 静默消失（"name:undefined 检查凭空蒸发"的暗道封死）。
+  assertScorecardCheckNames(checks);
   return { passed, checks };
 }
 
@@ -135,7 +181,7 @@ async function checkAcceptance(scriptPath, cwd) {
   try {
     // node 跑脚本：统一入口，跨平台稳（不需 .mjs 在 PATH 或 shebang）。
     execFileSync(process.execPath, [absPath], { cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, timeout: 60000 });
-    return { name: "acceptance", passed: true, evidence: `exit 0: ${scriptPath}` };
+    return { name: CHECK_NAME.ACCEPTANCE, passed: true, evidence: `exit 0: ${scriptPath}` };
   } catch (e) {
     // exit≠0、超时、脚本抛错都进 catch。
     const stderr = (e.stderr?.toString("utf8") ?? "").trim();
@@ -143,7 +189,7 @@ async function checkAcceptance(scriptPath, cwd) {
       : e.killed ? `timed out (60s)`
       : (e.message ?? "failed");
     const detail = stderr ? `${reason}: ${stderr}` : reason;
-    return { name: "acceptance", passed: false, evidence: `exit≠0: ${scriptPath}`, detail };
+    return { name: CHECK_NAME.ACCEPTANCE, passed: false, evidence: `exit≠0: ${scriptPath}`, detail };
   }
 }
 
@@ -177,7 +223,7 @@ function checkCommandsPassed(requireCommands, commands) {
   if (missing.length > 0) details.push(`not executed: ${missing.join(", ")}`);
   if (failed.length > 0) details.push(`failed (exitCode!=0): ${failed.join(", ")}`);
   return {
-    name: "commandsPassed",
+    name: CHECK_NAME.COMMANDS_PASSED,
     passed,
     evidence: `${commands.length} command(s) recorded`,
     ...(passed ? {} : { detail: details.join("; ") }),
@@ -227,7 +273,7 @@ async function checkFilesExist(requireFiles, fileEvents, cwd) {
   if (notOnDisk.length > 0) details.push(`written but missing on disk: ${notOnDisk.join(", ")}`);
   if (onDiskOnly.length > 0) details.push(`exists on disk, no file_written evidence: ${onDiskOnly.join(", ")}`);
   return {
-    name: "filesExist",
+    name: CHECK_NAME.FILES_EXIST,
     passed,
     evidence: `${fileEvents.length} file_written event(s) recorded`,
     ...(passed ? {} : { detail: details.join("; ") }),

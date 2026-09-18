@@ -79,6 +79,10 @@ import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { getRunStatus } from "../application/runStatus.js";
 import { EXECUTION_STAGES } from "../application/runStageProjection.js";
+// TD-153: the scorecard check-name closed set SSOT — the run_status wire enum
+// derives from the SAME frozen catalog the constructor invariant and the
+// projection-side validation use, so the three layers cannot drift.
+import { SCORECARD_CHECK_NAMES } from "../scorecard.js";
 import { collectRunMessages } from "../application/runCollect.js";
 import { getRunDiagnosis } from "../application/runDiagnosis.js";
 import {
@@ -1072,9 +1076,19 @@ const RUN_STATUS_OUTPUT = z.object({
   // (the projection reads c.name and nothing else), never evidence/detail free
   // text. ABSENT (never null) when the run has no scorecard.checked event, so
   // every pre-existing output shape stays byte-identical.
+  // TD-153 (2026-09-18, schema narrowing): failedChecks is the FULL closed-set
+  // enum + a ceiling derived from the catalog — same shape as issueCodes
+  // (CONTRACT_CHECK_ISSUE_CODES, ~:747). NOT a shape-only bounded string: n=6 is
+  // a small closed set, the repo norm for those is a full enum (semanticNotes is
+  // the documented catalog-scale exception). Every member is ≤16 chars
+  // ("hasAssistantText" is the longest), so enum membership bounds item length
+  // by construction — no separate per-item cap. A non-member name or an
+  // oversized list is rejected by the .parse() in the handler and collapses to
+  // STATUS_ERROR_TEXT — never truncated, never filtered-then-returned-as-
+  // "complete".
   scorecardSummary: z.object({
     passed: z.boolean(),
-    failedChecks: z.array(z.string()),
+    failedChecks: z.array(z.enum([...SCORECARD_CHECK_NAMES])).max(SCORECARD_CHECK_NAMES.length),
   }).strict().optional(),
   // M12-8B: REQUIRED bounded progressive-disclosure metadata (see
   // AVAILABLE_DRILLDOWNS). Only the six standalone observation outputs expose
@@ -4018,6 +4032,13 @@ export function createWaoMcpServer({
         // service value degrades to ABSENT (never null, never partial). The name
         // list keeps only usable strings; evidence/detail free text can never
         // ride along because no other field of the check is read.
+        // TD-153 (2026-09-18) semantic tightening: bad SHAPES (non-array
+        // failedChecks / non-string entries) still normalize per M4 above; a
+        // WELL-FORMED string that is NOT a closed-set member (and a list
+        // exceeding the catalog size) is NO LONGER silently passed through —
+        // the strict output schema's enum + derived max below reject the parse
+        // and the whole call collapses to STATUS_ERROR_TEXT. Drift defense
+        // (TD-161 lesion family): no filtering-then-"complete", no truncation.
         const rawScorecard = status.scorecardSummary;
         const scorecardSummary =
           rawScorecard && typeof rawScorecard === "object" && !Array.isArray(rawScorecard)

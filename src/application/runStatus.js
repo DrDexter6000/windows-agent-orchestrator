@@ -17,6 +17,9 @@
 //   - M12-17: executionStage via projectExecutionStage (pure closed-set
 //     projection over the SAME read-only snapshot; never writes, never probes
 //     liveness, never makes a semantic judgment).
+//   - TD-153: scorecard.js (SCORECARD_CHECK_NAMES — the check-name closed set
+//     for projectScorecardSummary's membership validation; a leaf cross-cutting
+//     module, no reverse dependency).
 
 import { join } from "node:path";
 
@@ -24,6 +27,10 @@ import { readTranscript, findState, TERMINAL_STATES, extractCanonicalAgentId } f
 import { isValidRunId } from "../delivery.js";
 import { boundReportScope } from "../metrics.js";
 import { projectExecutionStage } from "./runStageProjection.js";
+// TD-153: scorecard 检查名闭集 SSOT —— 投影端成员校验的唯一登记处（与构造端
+// 不变式、MCP wire enum 同源，三层不可能漂移）。scorecard.js 是横切层叶模块，
+// 无反向依赖，不破坏本模块的 application 分层契约。
+import { SCORECARD_CHECK_NAMES } from "../scorecard.js";
 
 // ===== Activity description (migrated from observe.js, TD-75 semantics) =====
 
@@ -173,8 +180,15 @@ function describeLastEventMeaning(type) {
  * 外 run 尾条伪造的 scorecard.checked 不再供给本字段。取最近一条（reverse 线性扫）：
  * correction/续跑等多次门控时末次结果胜出，与 findState 的末条语义一致。
  *
+ * TD-153（2026-09-18）语义收紧：坏形状（checks 非数组/条目非对象/name 非字符串）
+ * 仍按 M4 归一化丢弃；但**合法字符串且非闭集成员**的 name 从"静默透传"改为
+ * throw——防历史/腐坏/伪造 transcript 绕过 checkScorecard 构造端不变式。throw
+ * 沿 getRunStatus 冒出：MCP 面崩为 fixed safe text（run_status failed），CLI 面
+ * 显式报错。非成员名绝不静默透传，也不截断/过滤后伪装完整摘要。
+ *
  * @param {Array} scopeEvents 绑定作用域事件数组
  * @returns {{passed: boolean, failedChecks: string[]}|null}
+ * @throws {Error} 未过检查携带非闭集成员的合法字符串 name 时（TD-153 fail-closed）
  */
 function projectScorecardSummary(scopeEvents) {
   let checked = null;
@@ -191,6 +205,14 @@ function projectScorecardSummary(scopeEvents) {
         .filter((c) => c && typeof c === "object" && c.passed !== true && typeof c.name === "string")
         .map((c) => c.name)
     : [];
+  // TD-153 投影端闭集校验：成员逐一核对（≤ 闭集规模，常数开销）。数组级上界
+  // （重复成员可超编）不在此截断——留给 wire schema 的派生 .max 崩掉，双层
+  // fail-closed 且都不返回"被修剪过的完整摘要"。
+  for (const name of failedChecks) {
+    if (!SCORECARD_CHECK_NAMES.includes(name)) {
+      throw new Error(`scorecardSummary: check name outside closed set: ${name}`);
+    }
+  }
   // Fail-closed on a malformed/missing flag: only an explicit true reads as passed.
   return { passed: checked.passed === true, failedChecks };
 }

@@ -596,7 +596,19 @@ const RED_23_WIRE = 75492;
 // CONTENT never crosses; presence only). run_delivery output schema grows
 // +156 bytes (77858 → 78014). desc unchanged.
 // Ceiling re-frozen at the exact measured 78014.
-const FROZEN_22_WIRE_CEILING = 78014;
+// TD-153 residual batch (scorecard check-name SSOT + failedChecks bounded,
+// 2026-09-18): run_status's scorecardSummary.failedChecks narrowed from a
+// plain z.array(z.string()) to the FULL closed-set enum derived from the
+// scorecard.js SCORECARD_CHECK_NAMES SSOT plus the catalog-derived .max
+// ceiling (CONTRACT_CHECK_ISSUE_CODES-shape precedent, NOT shape-only) —
+// fail-closed: a non-member name or oversized list collapses the whole call
+// to the fixed safe text, never truncated/filtered-then-"complete".
+// Schema-only; no description bytes changed (FROZEN_22_DESC_CEILING
+// untouched). Sanctioned by the Owner 2026-09-18 directive on the two-seat
+// consult (auditor run_202609180757006603nxdsx + coder_mm
+// run_20260918075704956eh790g). The wire grew +113 bytes (78014 → 78127).
+// Ceiling re-frozen at the exact measured 78127.
+const FROZEN_22_WIRE_CEILING = 78127;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -737,8 +749,18 @@ test("M12-10-H: deterministic 22-tool wire at or below the frozen ceiling", asyn
 // truthfully; no description text changed (M12-16-B still passes —
 // FROZEN_22_DESC_CEILING unchanged). M12-10-H re-freezes the wire ceiling;
 // this hash remains the losslessness proof.
+// Re-measured for TD-153 (scorecard check-name SSOT, 2026-09-18): that same
+// scorecardSummary.failedChecks narrowed to the closed-set enum + catalog-
+// derived max (scorecard.js SCORECARD_CHECK_NAMES SSOT) — an output-schema
+// change is part of the stripped payload, so the SHA changed truthfully; no
+// description text is in the stripped payload and none changed (M12-16-B
+// still passes — FROZEN_22_DESC_CEILING unchanged). Sanctioned by the Owner
+// 2026-09-18 directive on the two-seat consult (auditor
+// run_202609180757006603nxdsx + coder_mm run_20260918075704956eh790g).
+// M12-10-H re-freezes the wire ceiling; this hash remains the losslessness
+// proof.
 const DESC_STRIPPED_CONTRACT_SHA =
-  "034f80647245cb60f82c49f34925be0193e05031529389e6d7cdd0e6cced875c";
+  "c6454f5d44975199afb785a7f142242f6b3caebac4e2023c632b7e12b145ff50";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

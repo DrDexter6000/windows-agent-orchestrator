@@ -17,6 +17,8 @@ import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
 
 import { createWaoMcpServer } from "../../src/mcp/server.js";
+// TD-153: 检查名闭集 SSOT —— wire fail-closed 兄弟用例的成员逐一透传数据源。
+import { SCORECARD_CHECK_NAMES } from "../../src/scorecard.js";
 
 // ===== Helpers =====
 
@@ -665,6 +667,157 @@ test("TD150B-M4: service 结果缺 scorecardSummary / 形状坏 —— 防御性
   } finally {
     await client.close();
     await server.close();
+  }
+});
+
+// ---------------------------------------------------------------------
+// TD-153（2026-09-18 残余批）M4 兄弟用例：failedChecks 语义收紧钉。
+//
+// 坏形状（非数组/非字符串条目）仍按 M4 归一化（上方用例钉住）；本组钉新语义：
+//   - 合法字符串但非闭集成员（真实 transcript 路径 = 投影端 throw；注入 service
+//     路径 = wire enum 拒绝）→ 整次 run_status 崩为 fixed safe text，非成员名
+//     绝不静默透传，也不截断/过滤后伪装完整摘要（TD-161 病灶同族漂移防线）。
+//   - 六成员逐一透传（投影 + wire 全链路）。
+//   - 7 个合法名（超目录派生上限 6）→ 崩（数组 .max 上界，不截断）。
+// ---------------------------------------------------------------------
+
+test("TD153-M4a: 合法字符串但非闭集成员（真实 transcript）→ run_status 崩为 fixed safe text，不透传", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td153-m4a-"));
+  try {
+    const runId = "run_rogue_td153";
+    const runDir = join(dir, "runs");
+    const ROGUE = "rogueCheck_td153";
+    writeTranscript(runDir, runId,
+      ev({ type: "run.submitted", ts: "2026-09-18T00:00:00.000Z", runId, agentId: "w", seq: 1 }) +
+      ev({ type: "run.state_change", to: "running", reason: "started", ts: "2026-09-18T00:00:01.000Z", runId, agentId: "w", seq: 2 }) +
+      ev({
+        type: "scorecard.checked", passed: false, runId, agentId: "w", seq: 3,
+        ts: "2026-09-18T00:00:02.000Z",
+        checks: [{ name: ROGUE, passed: false, evidence: "forged check name" }],
+      }) +
+      ev({ type: "run.state_change", to: "completed", reason: "done", ts: "2026-09-18T00:00:03.000Z", runId, agentId: "w", seq: 4 }),
+    );
+
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_status", arguments: { runId } });
+      assert.equal(res.isError, true, "非成员名 → 整次 run_status 崩（fail-closed）");
+      const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+      assert.ok(/run_status failed/.test(text), "fixed safe text");
+      const dumped = JSON.stringify(res);
+      assert.ok(!dumped.includes(ROGUE), "非成员名不进任何输出");
+      assert.ok(!dumped.includes("forged check name"), "evidence 自由文本不进任何输出");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD153-M4b: 注入 service 带非成员字符串（绕过投影）→ wire enum 拒绝，崩为 fixed safe text", async () => {
+  const ROGUE = "wireRogueCheck_td153";
+  const server = createWaoMcpServer({
+    registryPath: "/server/r.json",
+    runDir: "/server/runs",
+    getRunStatusFn: async (input) => ({
+      runId: input.runId, state: "completed", terminal: true,
+      last: null, lastActivityTs: null, secondsSinceActivity: null,
+      lastActivityKind: null, lastActivitySummary: null,
+      lastEventType: null, lastEventTs: null, lastActivityEventKind: null,
+      executionStage: { phase: "terminal", sinceTs: null, secondsSince: null },
+      // 合法字符串数组 + 非成员：形状全好，唯独成员身份坏——归一化保留它，
+      // strict schema 的 enum 拒绝 → fixed safe text（不截断、不过滤后放行）。
+      scorecardSummary: { passed: false, failedChecks: ["hasEvidence", ROGUE] },
+    }),
+  });
+  const client = await buildInMemoryClient(server);
+  try {
+    const res = await client.callTool({ name: "run_status", arguments: { runId: "run_x" } });
+    assert.equal(res.isError, true, "非成员名被 wire enum 拒绝");
+    const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+    assert.ok(/run_status failed/.test(text), "fixed safe text");
+    const dumped = JSON.stringify(res);
+    assert.ok(!dumped.includes(ROGUE), "非成员名不上 wire");
+    assert.ok(!dumped.includes("hasEvidence"), "同数组合法成员也一并 fail-closed（整次崩，非部分透传）");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("TD153-M4c: 六成员逐一经真实 transcript 透传（投影 + wire 全链路）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td153-m4c-"));
+  try {
+    const runDir = join(dir, "runs");
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      for (let i = 0; i < SCORECARD_CHECK_NAMES.length; i += 1) {
+        const member = SCORECARD_CHECK_NAMES[i];
+        const runId = `run_member_${i}_td153`;
+        writeTranscript(runDir, runId,
+          ev({ type: "run.submitted", ts: "2026-09-18T00:00:00.000Z", runId, agentId: "w", seq: 1 }) +
+          ev({ type: "run.state_change", to: "running", reason: "started", ts: "2026-09-18T00:00:01.000Z", runId, agentId: "w", seq: 2 }) +
+          ev({
+            type: "scorecard.checked", passed: false, runId, agentId: "w", seq: 3,
+            ts: "2026-09-18T00:00:02.000Z",
+            checks: [{ name: member, passed: false, evidence: "member passthrough probe" }],
+          }),
+        );
+        const res = await client.callTool({ name: "run_status", arguments: { runId } });
+        assert.equal(res.isError, undefined, `成员 ${member} 正常透传不崩`);
+        assert.deepEqual(
+          res.structuredContent.scorecardSummary,
+          { passed: false, failedChecks: [member] },
+          `成员 ${member} 逐字透传`,
+        );
+      }
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD153-M4d: 7 个合法名（超目录派生上限）→ 崩为 fixed safe text（不截断后伪装完整）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td153-m4d-"));
+  try {
+    const runId = "run_overcap_td153";
+    const runDir = join(dir, "runs");
+    // 6 成员 + 1 重复 = 7 条合法名：投影端闭集校验全通过（逐条都是成员），
+    // 数组规模 7 > 目录 6 → wire schema 派生 .max 拒绝 → fixed safe text。
+    // 若任何一层改为"截断到 6 再返回"，本测试红（截断=伪装完整，禁止）。
+    const overCapChecks = [...SCORECARD_CHECK_NAMES, SCORECARD_CHECK_NAMES[0]]
+      .map((name) => ({ name, passed: false, evidence: "over-cap probe" }));
+    writeTranscript(runDir, runId,
+      ev({ type: "run.submitted", ts: "2026-09-18T00:00:00.000Z", runId, agentId: "w", seq: 1 }) +
+      ev({ type: "run.state_change", to: "running", reason: "started", ts: "2026-09-18T00:00:01.000Z", runId, agentId: "w", seq: 2 }) +
+      ev({
+        type: "scorecard.checked", passed: false, runId, agentId: "w", seq: 3,
+        ts: "2026-09-18T00:00:02.000Z",
+        checks: overCapChecks,
+      }),
+    );
+
+    const server = createWaoMcpServer({ registryPath: makeRegistry(dir, { w: { backend: "claude-code", cwd: dir } }), runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({ name: "run_status", arguments: { runId } });
+      assert.equal(res.isError, true, "7 合法名超上限 → 崩（fail-closed，不截断）");
+      const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+      assert.ok(/run_status failed/.test(text), "fixed safe text");
+      assert.equal(JSON.stringify(res).includes("scorecardSummary"), false, "超限摘要整体不上面（无部分结果）");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
   }
 });
 
