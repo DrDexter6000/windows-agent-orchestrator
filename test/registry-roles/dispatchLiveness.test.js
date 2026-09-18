@@ -109,6 +109,7 @@ const EMPTY_RUN = {
   diagnosisCode: COMPLETED_EMPTY_MARKER,
   evidence: { activityEventCount: 0, evidenceEventCount: 0, fileWrittenCount: 0, commandExit0Count: 0, assistantTextCount: 0 },
   stopVerified: true,
+  stopRereadOk: true, // 复核四审：条件③两臂都要求重读新鲜（快照陈旧=证停未知）
   backendNoSession: false,
 };
 
@@ -339,7 +340,7 @@ test("F4 回归: 谓词阻断路径——stop_unverified 单轮即停、exitCode
     maxRounds: 5,
     agent: "coder_hq",
     dispatchRound: () => { calls += 1; return { ok: true, runId: "run_x" }; },
-    observeRound: async () => ({ state: "failed", evidence: { activityEventCount: 0 }, stopVerified: false, stopUnverified: true }),
+    observeRound: async () => ({ events: { state: "failed", evidence: { activityEventCount: 0 }, stopVerified: false, stopUnverified: true, backendNoSession: true, allowProcessDeathInference: true }, rereadOk: true }),
     backendNoSession: true,
   });
   assert.equal(calls, 1, "显式未证停阻断重派：不再有第二轮");
@@ -412,4 +413,34 @@ test("复核三轮 F3 定谳: settle 后仍无 stop 事实——默认严格不�
     backendNoSession: true,
   });
   assert.equal(blocked.redispatch, false);
+});
+
+// ===== 复核四审回归钉 =====
+
+test("复核四审: 旧快照已证停 + 重读失败 → 不重派（陈旧证停不可采信）", async () => {
+  const { shouldRedispatch } = await import("../../scripts/dispatch-with-liveness.mjs");
+  const r = shouldRedispatch({
+    state: "failed",
+    diagnosisCode: null,
+    evidence: { activityEventCount: 0 },
+    stopVerified: true,      // 旧终态快照里有证停……
+    stopRereadOk: false,     // ……但 settle 重读失败：快照之后可能已落盘 stop_unverified
+    stopUnverified: false,
+    backendNoSession: true,
+    allowProcessDeathInference: true,
+  });
+  assert.equal(r.redispatch, false, "重读失败=证停事实可能已变，两臂全关（fail-closed）");
+});
+
+test("复核四审: 重读成功 + 新鲜证停 → 重派照常（fail-closed 不误伤正常路径）", async () => {
+  const { shouldRedispatch } = await import("../../scripts/dispatch-with-liveness.mjs");
+  const r = shouldRedispatch({
+    state: "failed",
+    evidence: { activityEventCount: 0 },
+    stopVerified: true,
+    stopRereadOk: true,
+    stopUnverified: false,
+    backendNoSession: true,
+  });
+  assert.equal(r.redispatch, true, "新鲜证停（默认严格臂）照常放行");
 });

@@ -447,7 +447,7 @@ spawn_error 事故全部走 workflow 通道，即此层；**后台派发通道**
 node scripts/wao-node.cjs scripts/dispatch-with-liveness.mjs --agent coder_hq --prompt-file task.md --cwd D:\proj\x -- --model gpt-5.6-sol
 ```
 
-重派谓词三条件同时满足才重派；退出码如实：**真完成（completed 且非空跑）=0**，其余（失败/谓词不满足/轮次耗尽/派发失败）=1：① 前一轮已 terminal；② 带 `completed_empty`/零证据 marker（`DIAGNOSIS_CODES` 闭集语义，与 `runs diagnose` 同一投影）；③ `run.stop_verified` 证停（**默认严格**——复核三轮定谳：processBackend 存在 done(failed)-while-alive 路径，进程式类别是注册表事实而非本 run 进程已退出证据）。类别臂仅为显式 opt-in 启发式：`--allow-process-death-inference` 且终态后 settle 重读成功且无显式 `run.stop_unverified` 事实；重读失败=证停未知=不重派（fail-closed）。不变量：**绝不中止/重试在飞 run**（派发走后台分离 + 独立观察窗，绝不挂会杀 worker 的 `--wait-timeout`——TD-148）；零产出 ≠ 没在工作（纯调研零写入合法，观察窗内活跃即继续等）。出处 TD-158；纯函数面钉于 `test/registry-roles/dispatchLiveness.test.js`。
+重派谓词三条件同时满足才重派；退出码如实：**真完成（completed 且非空跑）=0**，其余（失败/谓词不满足/轮次耗尽/派发失败）=1：① 前一轮已 terminal；② 带 `completed_empty`/零证据 marker（`DIAGNOSIS_CODES` 闭集语义，与 `runs diagnose` 同一投影）；③ 证停新鲜度前提（复核四审定谳）：终态后 settle 重读**成功**（`stopRereadOk`）是条件③两臂的共同前提——重读失败时旧快照的证停可能已被其后落盘的未证停事实压掉，两臂全关不重派。重读成功后：默认严格臂=`run.stop_verified`（类别是注册表事实而非本 run 进程已退出证据——processBackend 存在 done(failed)-while-alive 路径）；类别臂仅为显式 opt-in 启发式（`--allow-process-death-inference` 且无显式 `run.stop_unverified` 事实）。不变量：**绝不中止/重试在飞 run**（派发走后台分离 + 独立观察窗，绝不挂会杀 worker 的 `--wait-timeout`——TD-148）；零产出 ≠ 没在工作（纯调研零写入合法，观察窗内活跃即继续等）。出处 TD-158；纯函数面钉于 `test/registry-roles/dispatchLiveness.test.js`。
 
 ### 场景 3：并行跑多个 agent
 

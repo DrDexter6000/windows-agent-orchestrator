@@ -307,9 +307,13 @@ export function shouldRedispatch(runSummary) {
   // 复核三轮定谳：类别是注册表事实不是本 run 进程已退出证据（processBackend 有
   // done(failed)-while-alive 路径；TD-158 原文第三条件=run_stop 证停）。默认严格=
   // 只认 stop_verified；类别臂为显式 opt-in 启发式且须 settle 重读成功（fail-closed）。
-  const inferenceArmed = s.allowProcessDeathInference === true && s.stopRereadOk === true;
-  const workerQuiet = s.stopVerified === true
-    || (inferenceArmed && s.backendNoSession === true && !explicitUnverified);
+  const inferenceArmed = s.allowProcessDeathInference === true;
+  // 复核四审：stop_verified 臂同样要求重读新鲜——重读失败时旧快照的证停可能已被
+  // 其后落盘的 stop_unverified 压掉（deriveStopVerified 自身语义），陈旧快照不可
+  // 采信。故条件③整体以 stopRereadOk===true 为前提，两臂全 fail-closed。
+  const workerQuiet = s.stopRereadOk === true
+    && (s.stopVerified === true
+      || (inferenceArmed && s.backendNoSession === true && !explicitUnverified));
   if (!workerQuiet) {
     reasons.push("condition 3 failed: worker not proven quiet (no bound run.stop_verified; backend not process-style/no-session, or explicit run.stop_unverified overrides the class arm)");
   }
@@ -409,12 +413,11 @@ function dispatchOnce(values, passthrough) {
  * 返回终态时刻的事件快照（供谓词组装）。
  */
 /**
- * auditor 复核二轮 F3：终态 ≠ 已证停——runManager 先写终态再跑 cleanup
- * （stop_verified/stop_unverified 在其后落盘）。本包装在 observeUntilTerminal
- * 返回终态事件后，等 settle 窗口再重读一次转录：抢跑窗口内落盘的
- * run.stop_unverified 由此进入谓词输入（进程式类别臂被压掉）。
- * settle 后仍无任何 stop 事实：进程式 backend 的自然终态（backend done 即
- * 进程退出）按类别语义放行——这是 TD-158 台账定义的既有边界。
+ * auditor 复核三轮/四审定谳：终态 ≠ 已证停——runManager 先写终态再跑 cleanup
+ * （stop 事实其后落盘）；"backend done 即进程退出"非普遍命题（processBackend
+ * 有 done(failed)-while-alive 路径）。本包装在终态后经 settle 窗口重读转录：
+ * 成功 → rereadOk=true（stop 事实新鲜，条件③两臂可用）；失败/未做 →
+ * rereadOk=false（证停事实可能已变，条件③整体 fail-closed，不重派）。
  */
 export async function observeWithSettle(runId, runDir, windowMs, settleMs, sleepFn = sleep) {
   const events = await observeUntilTerminal(runId, runDir, windowMs);
