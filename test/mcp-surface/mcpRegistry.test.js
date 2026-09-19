@@ -23,6 +23,8 @@ import { execSync } from "node:child_process";
 import { createWaoMcpServer } from "../../src/mcp/server.js";
 import { REGISTRY_ISSUES_CAP, REGISTRY_ISSUE_CODES } from "../../src/application/registryInventory.js";
 import { isValidCanonicalAgentId } from "../../src/canonicalAgentId.js";
+// TD-168: run_dispatch 输入键集合 SSOT（安全字段边界合同——缺键/多键都该红）。
+import { RUN_DISPATCH_INPUT_KEYS } from "../fixtures/mcpWireKeySets.js";
 
 // ===== Helpers =====
 
@@ -221,8 +223,9 @@ test("M9-1-04: tool input cannot override server registryPath/runDir", async () 
   try {
     // Malicious/intrusive arguments a model might try.
     let threw = false;
+    let rejectedResult = null;
     try {
-      await client.callTool({
+      const res = await client.callTool({
         name: "registry_list",
         arguments: {
           registryPath: "/attacker/registry.json",
@@ -231,8 +234,11 @@ test("M9-1-04: tool input cannot override server registryPath/runDir", async () 
           runDirOverride: "/attacker3/runs",
         },
       });
+      // Strict input validation rejects extra keys as an isError result
+      // (MCP -32602 unrecognized_keys) — a result, not a thrown error.
+      if (res && res.isError) rejectedResult = res;
     } catch {
-      // Strict input validation may reject extra keys as a protocol error.
+      // Or a transport/protocol error, depending on SDK plumbing.
       threw = true;
     }
     // Either way the startup paths must hold: if the service ran at all, it saw
@@ -242,7 +248,11 @@ test("M9-1-04: tool input cannot override server registryPath/runDir", async () 
       assert.equal(captured.runDir, "/startup/runs", "startup runDir held");
     } else {
       // Service never called — strict validation rejected the override attempt.
-      assert.ok(threw || true, "extra-arg call was rejected before service ran");
+      // TD-168（修弱不删）：原 `threw || true` 恒真；真实不变量 = 拒绝事实本身：
+      // callTool 要么抛错、要么回 isError 结果（实测 SDK 走后者：
+      // MCP -32602 unrecognized_keys），二者必居其一，且 service 未跑。
+      assert.ok(threw === true || rejectedResult !== null,
+        "extra-arg call was rejected before service ran");
     }
   } finally {
     await client.close();
@@ -1220,9 +1230,10 @@ test("R10-A-MCP-1: run_dispatch input gains the additive `model` member; tool co
       const props = rd.inputSchema.properties ?? {};
       // The canonical property list = the prior closed set PLUS model (pure
       // addition — every previously documented member must still be here).
+      // TD-168: 键集合改读共享 SSOT（原手抄数组逐键相同，断言语义不变）。
       assert.deepEqual(
         Object.keys(props).sort(),
-        ["agentId", "continuable", "correctable", "delivery", "executionProfileId", "expectedDirty", "expectedGitHead", "expectedWorkspaceRoot", "model", "prompt", "readOnly", "reasoning"],
+        RUN_DISPATCH_INPUT_KEYS,
         "run_dispatch input: the 10 prior members + model + reasoning (additive only)",
       );
       assert.equal(rd.inputSchema.additionalProperties, false, "input stays strict");
@@ -1397,9 +1408,10 @@ test("R11-1-MCP-1: run_dispatch input gains the additive `reasoning` enum member
       const props = rd.inputSchema.properties ?? {};
       // The canonical property list = the prior closed set PLUS reasoning
       // (pure addition — every previously documented member must still be here).
+      // TD-168: 键集合改读共享 SSOT（原手抄数组逐键相同，断言语义不变）。
       assert.deepEqual(
         Object.keys(props).sort(),
-        ["agentId", "continuable", "correctable", "delivery", "executionProfileId", "expectedDirty", "expectedGitHead", "expectedWorkspaceRoot", "model", "prompt", "readOnly", "reasoning"],
+        RUN_DISPATCH_INPUT_KEYS,
         "run_dispatch input: the 11 prior members + reasoning (additive only)",
       );
       assert.equal(rd.inputSchema.additionalProperties, false, "input stays strict");

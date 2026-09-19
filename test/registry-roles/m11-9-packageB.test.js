@@ -131,6 +131,8 @@ test("B10-kimi-no-reasoning: absent → no error, no effort", async () => {
   const backend = new KimiCodeBackend();
   const agent = { id: "coder_mm", backend: "kimi-code", cwd: "/x", model: { id: "kimi-code/k3" } };
   const args = backend.buildArgs(agent, { prompt: "task" });
-  assert.doesNotThrow(() => {}, "no reasoning → no throw");
+  // TD-168（修弱不删）：原 `doesNotThrow(() => {})` 空回调恒真。改为对真实调用的
+  // 断言（B9 同款）：钉 "absent → no error" 半边——validateAgentPolicy 真跑不抛。
+  assert.doesNotThrow(() => backend.validateAgentPolicy(agent), "no reasoning → no throw");
   assert.ok(!args.some((a) => typeof a === "string" && a.includes("effort")), "no effort flag");
 });

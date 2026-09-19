@@ -488,7 +488,7 @@ npm run cli -- run coder_low --prompt "..." --isolate --delivery-spec-file deliv
 
 > 已知坑（friction 2026-08-15 #3）：spec 文件内容是**内层 delivery 对象本身**——`{"mode":"git_commit_v1","allowedPaths":[...],"verificationCommands":[...]}`，**不带** `{"delivery": ...}` 外层包装（那层包装是 MCP `run_dispatch` 工具参数的形状，见 §四）。CLI 把文件内容直接交给 `prepareDeliveryRequest` SSOT 解析，带外层包装会因缺顶层 `mode` 被拒绝。
 
-> **任务书硬化规则（TD-160，2026-09-17 收口）**：任务书必须写明——任何写入或写入意图（含临时文件、探针、scratch）必须落在授权 worktree 内，首个越界即 `failed(workdir_escape)` 终态不可恢复；scratch 一律建 `<worktreeRoot>/.wao/` 下（已被忽略）。路径语义/越界行为的验证优先用注入 fake fs 的纯函数单测（`prepareDeliveryRequestFn` 注入先例）；**worktree 内必要的真实文件系统验证不受此限**（禁的是越界写与写入意图，不是 in-worktree fs 测试）。focused 验证命令引用的测试路径必须先实测存在。
+> **任务书硬化规则（TD-160，2026-09-17 收口）**：任务书必须写明——任何写入或写入意图（含临时文件、探针、scratch）必须落在授权 worktree 内，首个越界即 `failed(workdir_escape)` 终态不可恢复；scratch 一律建 `<worktreeRoot>/.wao/runs/` 下（已被忽略；waoLayout 白名单槽位，顶层只允许 6 固定条目）。路径语义/越界行为的验证优先用注入 fake fs 的纯函数单测（`prepareDeliveryRequestFn` 注入先例）；**worktree 内必要的真实文件系统验证不受此限**（禁的是越界写与写入意图，不是 in-worktree fs 测试）。focused 验证命令引用的测试路径必须先实测存在。
 
 > **规格×测试清单耦合（TD-161 审计 F1 教训，2026-09-17）**：交付规格凡允许 worker **新增、移动或删除 `*.test.js` 文件**，必须同时把 `test/manifest.json` 纳入 `allowedPaths` 并在任务书要求同步登记——否则交付提交独立过 canonical 验证必失败（manifest 漂移 = INVALID ENVIRONMENT），只能 Lead 事后补登记。
 

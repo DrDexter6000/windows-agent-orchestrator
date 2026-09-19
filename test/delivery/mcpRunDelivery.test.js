@@ -12,6 +12,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { createWaoMcpServer } from "../../src/mcp/server.js";
+// TD-168: run_delivery 输出键集合 SSOT（安全字段边界合同——缺键/多键都该红）。
+import { RUN_DELIVERY_OUTPUT_KEYS } from "../fixtures/mcpWireKeySets.js";
 
 function cleanupDir(dir) {
   try { rmSync(dir, { recursive: true, force: true }); } catch {}
@@ -452,14 +454,8 @@ test("M11-1A-01: run_delivery output field set is exactly the approved safe proj
     // M12-12: added semanticNotes (REQUIRED self-describing notes; see wao://semantics).
     // M12-13: added isolationFailure (nullable; only populated for an isolation-escaped
     // terminal run, else null — success variant stays null).
-    const expectedKeys = new Set([
-      "runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit",
-      "changedFileCount", "changedPaths", "changedPathsTruncated",
-      "verificationStatus", "originalVerificationStatus", "effectiveVerificationStatus", "reverify",
-      "verificationFailureCode", "verificationFailureSummary",
-      "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory", "candidateKind",
-      "availableDrilldowns", "semanticNotes", "isolationFailure",
-    ]);
+    // TD-168: 键集合改读共享 SSOT（原手抄数组逐键相同，断言语义不变）。
+    const expectedKeys = new Set(RUN_DELIVERY_OUTPUT_KEYS);
     assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys,
       `field set mismatch; got ${Object.keys(parsed).sort()}`);
     assert.equal(parsed.deliveryAvailable, true, "success variant");

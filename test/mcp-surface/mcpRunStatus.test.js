@@ -19,6 +19,8 @@ import { execSync } from "node:child_process";
 import { createWaoMcpServer } from "../../src/mcp/server.js";
 // TD-153: 检查名闭集 SSOT —— wire fail-closed 兄弟用例的成员逐一透传数据源。
 import { SCORECARD_CHECK_NAMES } from "../../src/scorecard.js";
+// TD-168: run_status 输出键集合 SSOT（安全字段边界合同——缺键/多键都该红）。
+import { RUN_STATUS_OUTPUT_KEYS } from "../fixtures/mcpWireKeySets.js";
 
 // ===== Helpers =====
 
@@ -172,7 +174,8 @@ test("M9-3B-03: run_status output is safe subset, no raw payload leak", async ()
       // Only these top-level keys (M11-8B added agentId; M12-8B added
       // availableDrilldowns — bounded progressive-disclosure metadata;
       // M12-17 added executionStage — submitted-stage closed-set projection).
-      assert.deepEqual(Object.keys(parsed).sort(), ["agentId", "availableDrilldowns", "executionStage", "lastActivity", "lastEvent", "runId", "state", "terminal"],
+      // TD-168: 键集合改读共享 SSOT（原手抄数组逐键相同，断言语义不变）。
+      assert.deepEqual(Object.keys(parsed).sort(), RUN_STATUS_OUTPUT_KEYS,
         "only runId/agentId/state/terminal/executionStage/lastEvent/lastActivity/availableDrilldowns");
       // M11-8B: the durable agentId from the envelope, not worker text.
       assert.equal(parsed.agentId, "w", "agentId is the durable envelope id");
@@ -630,8 +633,8 @@ test("TD150B-M3: 无 scorecard 事件的 run —— scorecardSummary 字段 abse
       const res = await client.callTool({ name: "run_status", arguments: { runId } });
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.equal("scorecardSummary" in parsed, false, "absent，不是 null 占位");
-      assert.deepEqual(Object.keys(parsed).sort(),
-        ["agentId", "availableDrilldowns", "executionStage", "lastActivity", "lastEvent", "runId", "state", "terminal"],
+      // TD-168: 键集合改读共享 SSOT（原手抄数组逐键相同，断言语义不变）。
+      assert.deepEqual(Object.keys(parsed).sort(), RUN_STATUS_OUTPUT_KEYS,
         "既有输出键集合逐字节不变（纯 additive）");
     } finally {
       await client.close();

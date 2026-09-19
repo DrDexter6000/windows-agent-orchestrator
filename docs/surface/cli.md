@@ -10,7 +10,7 @@ Windows Agent Orchestrator PoC
 
 Commands:
   registry list --registry config/agents.json
-  registry check [--registry config/agents.json] [--format json]
+  registry check [--registry config/agents.json] [--format json]   # live opencode-serve health only
   registry validate [--registry FILE] [--format json]
   spawn <agentId> [agentId2 ...] --prompt "..." [--cwd DIR] [--registry FILE] [--run-dir DIR] [--wait] [--background] [--poll-interval MS] [--wait-timeout MS] [--tag key=value] [--isolate] [--scorecard-rules-file FILE]
   run <agentId> --prompt "..." [--prompt-file FILE] [--cwd DIR] [--registry FILE] [--run-dir DIR] [--poll-interval MS] [--wait-timeout MS] [--format json|text] [--isolate] [--require-certified] [--background] [--scorecard-rules-file FILE] [--delivery-spec-file FILE] [--read-only] [--model ID] [--reasoning EFFORT]

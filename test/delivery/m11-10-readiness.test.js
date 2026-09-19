@@ -43,6 +43,8 @@ import {
   DELIVERY_WAIT_MS_MAX,
 } from "../../src/application/runDelivery.js";
 import { createWaoMcpServer } from "../../src/mcp/server.js";
+// TD-168: run_delivery 输出键集合 SSOT（安全字段边界合同——缺键/多键都该红）。
+import { RUN_DELIVERY_OUTPUT_KEYS } from "../fixtures/mcpWireKeySets.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { CompatibilityCallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -796,14 +798,9 @@ test("M11-10-MCP-02: output schema — readiness/waitReturnedEarly present iff w
     try {
       const res = await client2.callTool({ name: "run_delivery", arguments: { runId: "run_x" } });
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
-      const expectedKeys = new Set([
-        "runId", "deliveryAvailable", "deliveryRequested", "terminalState", "baseCommit", "deliveryCommit",
-        "changedFileCount", "changedPaths", "changedPathsTruncated",
-        "verificationStatus", "verificationFailureCode", "verificationFailureSummary",
-        "originalVerificationStatus", "effectiveVerificationStatus", "reverify",
-        "acceptanceStatus", "decisionType", "deliveryFailure", "candidateInventory", "candidateKind",
-        "availableDrilldowns", "semanticNotes", "isolationFailure",
-      ]);
+      // TD-168: 键集合改读共享 SSOT（原手抄数组逐键相同——两处字面顺序略异但
+      // 均以 Set 比较，集合成员一致；断言语义不变）。
+      const expectedKeys = new Set(RUN_DELIVERY_OUTPUT_KEYS);
       assert.deepEqual(new Set(Object.keys(parsed)), expectedKeys, "point-in-time field set (M11-12B adds nullable verificationFailureSummary; M12-1S1/M12-4A add nullable candidateInventory + candidateKind; M12-6 3B2a adds additive originalVerificationStatus/effectiveVerificationStatus/reverify; M12-8B adds availableDrilldowns; M12-12 adds semanticNotes; M12-13 adds nullable isolationFailure)");
       assert.equal("readiness" in parsed, false, "no readiness in point-in-time output");
       assert.equal("waitReturnedEarly" in parsed, false, "no waitReturnedEarly in point-in-time output");

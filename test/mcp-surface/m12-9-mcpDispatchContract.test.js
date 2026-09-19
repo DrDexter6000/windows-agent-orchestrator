@@ -25,6 +25,8 @@ import { execSync } from "node:child_process";
 import { createWaoMcpServer } from "../../src/mcp/server.js";
 import { CONTRACT_CHECK_ISSUE_CODES, CONTRACT_CHECK_SECTIONS } from "../../src/application/runDispatchContract.js";
 import { EXECUTION_PROFILE_IDS } from "../../src/application/executionProfiles.js";
+// TD-168: run_dispatch 输入键集合 SSOT（安全字段边界合同——缺键/多键都该红）。
+import { RUN_DISPATCH_INPUT_KEYS } from "../fixtures/mcpWireKeySets.js";
 
 // ===== Helpers (mirrors mcpRunDispatch.test.js) =====
 
@@ -105,9 +107,10 @@ test("B1: run_dispatch_contract_check is registered, read-only/idempotent, share
     const rdKeys = Object.keys(rd.inputSchema.properties ?? {}).sort();
     const ccKeys = Object.keys(cc.inputSchema.properties ?? {}).sort();
     assert.deepEqual(rdKeys, ccKeys, "shared input schema keys");
+    // TD-168: 键集合改读共享 SSOT（原手抄数组逐键相同，断言语义不变）。
     assert.deepEqual(
       rdKeys,
-      ["agentId", "continuable", "correctable", "delivery", "executionProfileId", "expectedDirty", "expectedGitHead", "expectedWorkspaceRoot", "model", "prompt", "readOnly", "reasoning"],
+      RUN_DISPATCH_INPUT_KEYS,
       "input schema is the full run_dispatch surface (incl. M12-16 correctable + Round 4 readOnly + R11-1 reasoning)",
     );
     assert.equal(rd.inputSchema.additionalProperties, false, "run_dispatch strict");

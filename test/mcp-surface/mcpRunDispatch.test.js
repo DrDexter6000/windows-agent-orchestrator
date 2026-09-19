@@ -25,6 +25,8 @@ import { execSync } from "node:child_process";
 import { createWaoMcpServer } from "../../src/mcp/server.js";
 import { dispatchRun as realDispatchRun } from "../../src/application/runDispatch.js";
 import { readTranscript, findState, findLatest } from "../../src/transcript.js";
+// TD-168: run_dispatch 输入键集合 SSOT（安全字段边界合同——缺键/多键都该红）。
+import { RUN_DISPATCH_INPUT_KEYS } from "../fixtures/mcpWireKeySets.js";
 
 // ===== Helpers =====
 
@@ -105,8 +107,9 @@ test("M9-2B-01: tools/list has registry_list + run_dispatch with strict schema a
       // lineage opt-in + the M12-9 optional executionProfileId + the M12-16
       // optional correctable in-flight-correction opt-in.
       const inputKeys = Object.keys(rd.inputSchema.properties ?? {}).sort();
+      // TD-168: 键集合改读共享 SSOT（原手抄数组逐键相同，断言语义不变）。
       assert.deepEqual(inputKeys,
-        ["agentId", "continuable", "correctable", "delivery", "executionProfileId", "expectedDirty", "expectedGitHead", "expectedWorkspaceRoot", "model", "prompt", "readOnly", "reasoning"],
+        RUN_DISPATCH_INPUT_KEYS,
         "input schema has agentId + prompt + optional delivery + optional expectations + optional continuable + optional correctable + optional executionProfileId + optional readOnly (Round 4 advisory declaration) + optional model/reasoning per-dispatch overrides (R10-A/R11-1)",
       );
       assert.equal(rd.inputSchema.additionalProperties, false, "input is strict");

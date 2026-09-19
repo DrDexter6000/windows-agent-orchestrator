@@ -2327,6 +2327,70 @@ test("TD-99: backend.spawn 返回前由第二个 writer claim aborted → submit
   }
 });
 
+// ── TD-167a：registry 读取 ENOENT 的报错指路（仅文案；不改解析语义） ──────────
+// 状态枚举（WQ-02）：正常读取（既有全套测试覆盖，不改）；ENOENT（下案钉指路文案 +
+// code 保留 + 零副作用）；非 ENOENT 错误（下案钉原样透传，不注入指路）。start()
+// 与 resume() 共用同一 _readRegistryWithGuidance 读取点，故注入级钉以 start 为代表。
+
+test("TD-167a: readRegistry 抛 ENOENT → start 拒绝并携带死 worktree 槽位指路文案（code 保留，零 transcript）", async () => {
+  const dir = await makeTempDir();
+  try {
+    const registryPath = join(dir, "config", "agents.json");
+    // 篡改注入：fake readRegistry 抛 node:fs 同款 ENOENT 形状（含 code）。
+    const readRegistry = async (p) => {
+      const err = new Error(`ENOENT: no such file or directory, open '${p}'`);
+      err.code = "ENOENT";
+      throw err;
+    };
+    const manager = new RunManager({
+      config: { registry: registryPath, runDir: dir, timeout: 5000, retries: 0 },
+      readRegistry,
+      transcriptDir: dir,
+      backendFor: () => ({}),
+    });
+    await assert.rejects(
+      manager.start("test_agent", { prompt: "hello" }),
+      (err) => {
+        assert.match(err.message, /registry not found at /, "回显 registry 路径（fixed-safe）");
+        assert.match(err.message, /worktree remove/, "指路含清理命令");
+        assert.match(err.message, /config\/agents\.json/, "指路说明 worktree 不带 gitignored config");
+        assert.equal(err.code, "ENOENT", "code 保留（下游按 code 分类的行为不变）");
+        return true;
+      },
+    );
+    // 零副作用：拒绝发生在 registry 读取点（transcript/spawn 之前）。
+    const jsonl = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+    assert.equal(jsonl.length, 0, "ENOENT 指路拒绝在 transcript 写入前 → 零 transcript 字节");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-167a: 非 ENOENT 错误原样透传——不注入指路文案", async () => {
+  const dir = await makeTempDir();
+  try {
+    const readRegistry = async () => {
+      throw new Error("registry read failed");
+    };
+    const manager = new RunManager({
+      config: { registry: "config/agents.json", runDir: dir, timeout: 5000, retries: 0 },
+      readRegistry,
+      transcriptDir: dir,
+      backendFor: () => ({}),
+    });
+    await assert.rejects(
+      manager.start("test_agent", { prompt: "hello" }),
+      (err) => {
+        assert.equal(err.message, "registry read failed", "原文案逐字保留");
+        assert.equal(err.message.includes("worktree remove"), false, "非 ENOENT 不注入指路");
+        return true;
+      },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ── M12-16：RunManager.start 的 correctable 能力门 + 透传 ──────────────────
 // correctable 是 Lead opt-in：只有声明 supportsInFlightCorrection 的 backend 才能接受。
 // 能力门在 backend 解析后、transcript/spawn 前执行（defense-in-depth，零副作用）。
@@ -2508,7 +2572,15 @@ test("TD-150-T1a: 打包失败 + completed_empty ⇒ 两事件携带 completionM
     assert.equal(fx.run.state, "failed");
     assert.equal(result.failed, true);
     assert.equal(result.deliveryError.code, "empty_diff");
-    assert.ok(result.deliveryError.message.includes("no changes") === false || true); // sanitized 原文不携 marker 注记
+    // TD-168（修弱不删）：原 `... || true` 恒真。本意 = result.deliveryError 透传
+    // sanitized 原文、不携带 T1 的事件级升级注记（runManager.js：升级只上
+    // run.delivery_failed 事件 message；安全标签自身含 "no changes"，不能按
+    // 子串排斥钉），故钉完整标签值。
+    assert.equal(
+      result.deliveryError.message,
+      "empty diff — no changes to package",
+      "sanitized 原文不携 marker 注记（升级只上事件 message）",
+    );
 
     const df = events.find((e) => e.type === "run.delivery_failed");
     assert.ok(df, "必须落 run.delivery_failed");

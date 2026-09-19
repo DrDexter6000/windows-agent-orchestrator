@@ -35,7 +35,7 @@ Route by semantic coupling (ambiguity, long-horizon coherence, acceptance clarit
 
 Workflow size ladder: simple read-only/tiny Lead task → do directly. One bounded worker task: dispatch, supervise, accept, report. Two or more independent workers, cross-session work, or an explicitly audited engagement → six-stage pipeline (run bare `wao stage` or `wao declare` to inspect stages/reason codes; `wao stage` records progress, `wao declare` records Lead self-work deviations).
 
-**Before any delivery dispatch**: read `docs/usage.md` 场景 4b（派发合同：spec 形状、`allowedPaths`、`verificationCommands`、known pitfalls）再派。任务书硬化（TD-160）：一切写入落在授权 worktree 内（越界即 `workdir_escape` 终态）；scratch 建 `<worktreeRoot>/.wao/` 下；规格允许新增 `*.test.js` 时必须同时允许 `test/manifest.json` 并要求登记。
+**Before any delivery dispatch**: read `docs/usage.md` 场景 4b（派发合同：spec 形状、`allowedPaths`、`verificationCommands`、known pitfalls）再派。任务书硬化（TD-160）：一切写入落在授权 worktree 内（越界即 `workdir_escape` 终态）；scratch 建 `<worktreeRoot>/.wao/runs/` 下；规格允许新增 `*.test.js` 时必须同时允许 `test/manifest.json` 并要求登记。
 
 ## Worker Contract
 

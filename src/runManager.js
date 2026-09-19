@@ -504,6 +504,34 @@ export class RunManager {
     installSigintHandler();
   }
 
+  /**
+   * TD-167a: registry 读取 ENOENT 的报错指路（仅文案，不改解析语义）。
+   *
+   * 已知运维成因：worker workdir_escape 死后遗留 .wao-worktrees/<runId>/ 死
+   * 槽位；重派同 agent 时 registry 相对路径按进程 cwd=worktree 解析（下方
+   * resolve(registry ?? this.config.registry)），而 worktree 不携带 gitignored
+   * 的 config/agents.json → 裸 ENOENT 让人无从下手。此处在 start()/resume()
+   * 两个读取点上补一句可操作指引。fixed-safe：只回显 registry 路径，无敏感值；
+   * 保留 err.code 供下游按 code 分类；非 ENOENT 错误原样透传。不做自动清槽。
+   */
+  async _readRegistryWithGuidance(registryPath) {
+    try {
+      return await this.readRegistry(registryPath);
+    } catch (err) {
+      if (err && err.code === "ENOENT") {
+        const guided = new Error(
+          `registry not found at ${registryPath} — if this is a leftover dead worktree slot, ` +
+          `remove it first (npm run cli -- worktree remove <worktreePath>) and re-dispatch; ` +
+          `worktrees do not carry the gitignored config/agents.json`,
+          { cause: err },
+        );
+        guided.code = "ENOENT";
+        throw guided;
+      }
+      throw err;
+    }
+  }
+
   async abortAll(reason) {
     if (this.activeRuns.size === 0) return;
     const runs = [...this.activeRuns.values()];
@@ -664,7 +692,7 @@ export class RunManager {
     }
 
     const registryPath = resolve(registry ?? this.config.registry);
-    const loaded = await this.readRegistry(registryPath);
+    const loaded = await this._readRegistryWithGuidance(registryPath);
     let agent = loaded.getAgent(agentId, { cwd });
     // R10-A: synthesize the override (see the option comment above). The
     // synthesized object flows through validateAgentPolicy below unchanged —
@@ -1390,7 +1418,7 @@ export class RunManager {
     }
 
     const registryPath = resolve(options.registry ?? this.config.registry);
-    const loaded = await this.readRegistry(registryPath);
+    const loaded = await this._readRegistryWithGuidance(registryPath);
 
     // TD-103 Phase 3A audit: reconstruct delivery context from run.started for resume.
     // Must validate BEFORE spawn/attach: use SSOT prepareDeliveryRequest + prove worktree state.
