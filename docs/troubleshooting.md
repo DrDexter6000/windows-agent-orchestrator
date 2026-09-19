@@ -484,8 +484,14 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
   - **R1 per-test 超时**（`--test-timeout`，主防线）：单个测试挂死（含同步死循环——Node 在文件级从父进程执行超时）按普通失败收杀；该文件记非 pass（超时测试不产生完成事件 ⇒ 报告中多为 `missing`），**同波其他文件不受影响**，波正常收尾。
   - **R2 波级兜底看门狗**（墙钟 900s）：到期 `taskkill /PID <该子进程自己的 pid> /T /F`（只杀自己的进程树，绝不全局杀 node.exe）+ `kill(pid,0)→ESRCH` 探针确认死透（500ms × 3 次）。该波**全部文件**记 `crash` + `crashReason: "watchdog_timeout"`，groupError 含波名/已耗时/标记/清理状态。
   - **R3 慢波告警**（300s NOTICE 行）：纯读提示，不杀进程、不影响 verdict。
-- **分诊**：读 `test-results.json`——`executionWaves[].watchdog`（fired/confirmed/elapsedMs/pid）与 `groupError` 指名波与耗时；该波 `files[]` 的 crash 条目即被连坐文件；`firstRound.failures[].crashReason` 与 isolation 条目的 `crashReason: "watchdog_timeout"`（分类 `stable_fail`——单独跑也挂死 = 真测试挂死，不是环境问题）指名肇事测试文件。
-- **`cleanup unconfirmed`（红灯 + 后续波未跑）**：兜底杀了但探针证不出死——疑似残留进程。先用报告里的 pid 确认真死（`tasklist /FI "PID eq <pid>"`，仍在则 `taskkill /PID <pid> /T /F`），清干净再重跑；此时 verdict 必为 fail，不许带残留继续。
+- **分诊**：读 `test-results.json`——`executionWaves[].watchdog`（fired/confirmed/elapsedMs/pid）与 `groupError` 指名波与耗时；该波 `files[]` 的 crash 条目即被连坐文件；`firstRound.failures[].crashReason` 与 isolation 条目的 `crashReason: "watchdog_timeout"`（分类 `stable_fail`——单独跑也挂死 = 真测试挂死，不是环境问题）指名肇事测试文件。R1 主防线腿（per-test 超时收杀）同样指名文件：挂死测试自身不产生完成事件，Node 以文件级失败事件（`details.error.message` = "test timed out after Nms"）收尾，reporter 把该文件 suite 记 `fail` + `fileFailure` 原因（2026-09-19 v22.23.1 实测；同文件已通过的兄弟条目保留可见），该文件照常进入隔离重跑资格。
+- **`cleanup unconfirmed`（红灯 + 套件提前停止，两条腿）**：兜底杀了但探针证不出死——疑似残留进程。stderr 文案与报告字段按中止来源区分：
+  - **波腿**（stderr：`later waves were NOT started`）：后续波未启动；残留 pid 在 `executionWaves[].watchdog.pid`。
+  - **隔离腿**（stderr：`isolation rerun stopped; no further reruns`）：首轮波其实已跑完，停的只是后续隔离重跑；残留 pid 在 `isolation[].watchdog.pid`（条目还带 fired/confirmed/elapsedMs/probes/limitMs 全字段）。
+
+  两条腿都先用报告里的 pid 确认真死（`tasklist /FI "PID eq <pid>"`，仍在则 `taskkill /PID <pid> /T /F`），清干净再重跑；此时 verdict 必为 fail，不许带残留继续。runner 自身在报告落盘、全部打印之后强制非零退出（未确认残留子进程的管道句柄会阻止自然退出）；该强跳过 marker/gate 的收尾 finally，效果等同一次崩溃——孤儿 inflight 标记下次运行降级 NOTICE（pid 证死）/ 验证租约按陈旧超时接管，均为已 documented 的可恢复态。
+- **主防线收尾后的孙进程残留（已知边界，非缺陷）**：R1 per-test 超时路径是"正常 close"收尾——正常 close 会撤掉看门狗、**不做树杀**。这是刻意语义：合法测试自己 spawn 的子进程不能被连坐处决；只有 R2 兜底路径才 `taskkill /T` 树杀。因此若被收杀的测试留下孤儿孙进程，它们可能残留到套件结束之后。症状：`npm test` 已退出（红或绿）但任务管理器/`tasklist` 仍有游离 node（或其它）进程，可能占端口、持锁文件或继续写文件。清理：该腿报告无 watchdog pid（看门狗未触发），按命令行特征定位——PowerShell `Get-CimInstance Win32_Process -Filter "name='node.exe'" | Select ProcessId,CommandLine` 找命令行含肇事测试文件路径（报告 `firstRound.failures[]` / `fileFailure` 指名的文件）的进程，`taskkill /PID <pid> /T /F` 收割；若同一波随后真触发了 R2 兜底，则直接用该波 `watchdog.pid` 树杀即可。
+- **kill 环节自身挂住**：看门狗对 `killTreeFn` 设 10s 期限竞速（`KILL_TREE_DEADLINE_MS`）——taskkill 异常不返回时到期放弃等待、照常进探针环节（stderr 出现 `killTree did not return within ...ms — proceeding to liveness probes`），探针决定死活，看门狗自己绝不做无限等待。
 - **后备：手工二分（看门狗指名之前的旧配方，仍适用于单文件复跑）**：拿到肇事文件后 `node scripts/wao-node.cjs --test test/<file>` 单发复跑确认仍挂；再在该文件内二分（注释后半部测试）定位具体挂死用例。
 
 ---

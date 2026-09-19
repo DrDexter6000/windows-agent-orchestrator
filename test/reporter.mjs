@@ -33,6 +33,13 @@ export default class TestReporter extends Transform {
           diff: this._formatDiff(cause),
         });
       }
+      // TD-165 F3: a file-level test:fail (name is the file path) is the only
+      // structured failure signal a timed-out test ever emits — the hung test
+      // itself never reports. Record it on the suite so the failure stays
+      // attributable to the FILE (never only a wave-level groupError).
+      if (this._isFileLevelName(event.data?.name, event.data?.file)) {
+        this._recordFileLevelFailure(event.data, err);
+      }
       return callback(null);
     }
 
@@ -40,11 +47,14 @@ export default class TestReporter extends Transform {
       const { name, file, details } = event.data;
       if (!file) return callback(null);
 
-      const normName = name.replace(/\\/g, "/");
-      const normFile = file.replace(/\\/g, "/");
-      const fileName = normFile.split("/").pop();
-      const relativeName = relative(this._cwd, file).replace(/\\/g, "/");
-      if (normName === normFile || normName === fileName || normName === relativeName) return callback(null);
+      if (this._isFileLevelName(name, file)) {
+        // TD-165 F3: a file-level completion that FAILED (e.g. node timed a
+        // test out — details.error carries the structured reason) must leave
+        // the suite non-pass WITH that reason. A file-level PASS stays
+        // filtered exactly as before (no entry, no summary count).
+        if (details?.passed === false) this._recordFileLevelFailure(event.data, details?.error);
+        return callback(null);
+      }
 
       const dedupKey = `${file}:${name}`;
       if (this._processed.has(dedupKey)) return callback(null);
@@ -94,6 +104,33 @@ export default class TestReporter extends Transform {
     writeFile(outPath, JSON.stringify(data, null, 2), "utf8")
       .then(() => callback())
       .catch((err) => callback(err));
+  }
+
+  _isFileLevelName(name, file) {
+    if (!name || !file) return false;
+    const normName = String(name).replace(/\\/g, "/");
+    const normFile = String(file).replace(/\\/g, "/");
+    const fileName = normFile.split("/").pop();
+    const relativeName = relative(this._cwd, file).replace(/\\/g, "/");
+    return normName === normFile || normName === fileName || normName === relativeName;
+  }
+
+  // TD-165 F3: mark the file's suite failed with the structured reason from a
+  // file-level failure event. Idempotent (fail is sticky, first reason wins);
+  // never adds a tests[] entry or summary count — those belong to real
+  // test:complete events only, so existing accounting is unchanged.
+  _recordFileLevelFailure(data, err) {
+    const file = data?.file;
+    if (!file || typeof file !== "string") return;
+    const suiteName = this._relPath(file);
+    if (!this._suites.has(file)) {
+      this._suites.set(file, { name: suiteName, status: "pass", duration: 0, tests: [] });
+    }
+    const suite = this._suites.get(file);
+    suite.status = "fail";
+    if (!suite.fileFailure && err) {
+      suite.fileFailure = { message: err.message ?? "", stack: err.stack ?? "" };
+    }
   }
 
   _extractError(event) {
