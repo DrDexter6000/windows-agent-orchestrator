@@ -126,6 +126,12 @@ export class ClaudeCodeBackend extends ProcessBackend {
         if (task.roleContract) {
           args.push("--append-system-prompt", task.roleContract);
         }
+        // 2026-09-19 Owner 裁定：所有 claude-code worker 会话强制纯净模式——
+        // --bare 跳过全局配置面（hooks/LSP/插件同步/自动记忆/后台预取/钥匙串/
+        // CLAUDE.md 自动发现），--strict-mcp-config 跳过一切配置来源的 MCP。
+        // 全局技能/插件/全局 CLAUDE.md 是 worker 的纯 token 税与工具选择干扰
+        // （skillUsage 实证：worker 期零使用）；角色合同经上方显式注入不受影响。
+        args.push("--bare", "--strict-mcp-config");
         // M11-9: model/reasoning from canonical structured fields (single source).
         // When a provider exists, resolveProviderArgs returns cliFlags with
         // --model/--effort derived from the same fields. When no provider

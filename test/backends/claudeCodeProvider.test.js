@@ -135,3 +135,45 @@ test("M12-14: provider wrapper 子进程 env 强制 CLAUDE_CODE_DISABLE_AUTO_MEM
   assert.deepEqual(cap.args.slice(sep + 1, sep + 5), ["-p", "do", "--output-format", "stream-json"], "-- 之后是 claude CLI argv");
   assert.ok(cap.args.includes("--model") && cap.args.includes("glm-5.2"), "CLI --model 仍从 canonical 字段推导");
 });
+
+test("2026-09-19 Owner 裁定：所有 claude-code worker 会话强制纯净模式（--bare + --strict-mcp-config，非可选项）", async () => {
+  const captures = [];
+  const spawnFn = (binary, args, opts) => {
+    captures.push({ binary, args: [...args], opts });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.pid = 8401;
+    child.exitCode = null;
+    child.signalCode = null;
+    setImmediate(() => {
+      child.emit("spawn");
+      setImmediate(() => { child.exitCode = 0; child.emit("close", 0); });
+    });
+    return child;
+  };
+  const agent = {
+    id: "coder",
+    backend: "claude-code",
+    cwd: process.cwd(),
+    model: { id: "glm-5.3", contextWindow: 1000000 },
+    provider: {
+      protocol: "anthropic-compatible",
+      baseUrl: "https://open.bigmodel.cn/api/anthropic",
+      apiKeyEnv: "ZHIPU_API_KEY",
+    },
+  };
+  const backend = new ClaudeCodeBackend({ spawnFn });
+  const handle = await backend.spawn(agent, { prompt: "do" });
+  for await (const _ev of handle.events(new AbortController().signal)) { /* drain */ }
+  const argv = captures[0].args;
+  const sep = argv.indexOf("--");
+  const cli = sep > 0 ? argv.slice(sep + 1) : argv;
+  assert.ok(cli.includes("--bare"),
+    "worker 会话必须带 --bare（跳过全局 CLAUDE.md/插件/自动记忆/hooks 等配置面）");
+  assert.ok(cli.includes("--strict-mcp-config"),
+    "worker 会话必须带 --strict-mcp-config（跳过一切配置来源的 MCP 服务器）");
+  // 两旗标各恰好一次，不被 agent.args 重复注入（重复旗标行为未定义）
+  assert.equal(cli.filter((a) => a === "--bare").length, 1, "--bare 恰好一次");
+  assert.equal(cli.filter((a) => a === "--strict-mcp-config").length, 1, "--strict-mcp-config 恰好一次");
+});

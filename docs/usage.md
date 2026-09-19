@@ -220,6 +220,8 @@ metrics 投影断裂时第一时间红）。`CERTIFICATION_STATUSES` / required-
 
 ### 接入新模型 / 新运行时（lane 内操作 vs Owner 决策）
 
+**claude-code 舞道纯净模式（2026-09-19 Owner 裁定）**：backend 对**所有** claude-code worker 会话强制 `--bare --strict-mcp-config`（src/backends/claudeCode.js buildArgs 硬编码，非 registry 可选项）——全局 CLAUDE.md/技能/插件/hooks/MCP 一律不进 worker 上下文（skillUsage 实证 worker 期零使用，属纯 token 税）；角色合同仍经 `--append-system-prompt` 显式注入不受影响；认证经包装层 ANTHROPIC_AUTH_TOKEN 在 bare 下实测可用（run_20260919225953408ygpttq 哨兵三无验证）。未来任何 claude-code 驱动 lane 均默认继承此配置。
+
 **第一分叉（先判断要的是哪一面，TD-161）**：
 
 - **只换模型** = 改既有 backend 的 `provider`/`model` 字段——lane 内操作（组合权在 Owner：

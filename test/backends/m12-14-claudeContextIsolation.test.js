@@ -197,7 +197,10 @@ test("M12-14: deliveryMode 下既有 runtimeEnv 条目不被新 flag 挤掉", as
   assert.equal(env.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS, "1", "deliveryMode 条目保留");
 });
 
-test("M12-14: env 变更不进 argv —— native 路径 argv 逐字节符合既有形态", async () => {
+test("M12-14: env 变更不进 argv —— native 路径 argv 逐字节符合既有形态（2026-09-19 Owner 裁定后追加纯净模式双旗标）", async () => {
+  // M12-14 原不变式"隔离纯 env 注入、argv 零变化"被 2026-09-19 Owner 裁定演进的
+  // 纯净模式取代：--bare + --strict-mcp-config 进 argv（claude-code 无对应 env 开关），
+  // env 侧隔离（auto-memory/git-instructions）保留不变。本钉更新为裁定后的精确形状。
   const { spawnFn, captures } = makeCapturingSpawn();
   const backend = new ClaudeCodeBackend({ spawnFn });
   await spawnAndCapture(backend, nativeAgent(), { prompt: "do" });
@@ -208,7 +211,9 @@ test("M12-14: env 变更不进 argv —— native 路径 argv 逐字节符合既
     "--include-partial-messages",
     "--exclude-dynamic-system-prompt-sections",
     "--no-session-persistence",
-  ], "隔离 flag 是纯 env 注入，argv 零变化");
+    "--bare",
+    "--strict-mcp-config",
+  ], "native 路径 argv：既有形态 + 纯净模式双旗标（Owner 2026-09-19）");
 });
 
 test("M12-14: 不泄漏敏感值 —— flag 是常量 '1'，凭据值只出现在其声明 env 名下", async () => {
