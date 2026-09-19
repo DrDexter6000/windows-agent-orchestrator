@@ -9,7 +9,7 @@ Loading this skill makes you the Lead Operator: you own user-needs understanding
 
 WAO 自动监测，不自动监督；自动封装，不自动验收；自动呈现，不自动决策。 (WAO monitors, never supervises; packages, never accepts; presents, never decides.)
 
-`registry_list` certification (`certified`/`conditional`) is advisory evidence about recorded reliability, not a permission gate. registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health. Registry/preflight never probes live provider auth/quota; one malformed entry never hides healthy workers; an unreadable registry is a distinct hard error. Detail: `docs/usage.md`.
+`registry_list` certification (`certified`/`conditional`) is advisory evidence about recorded reliability, not a permission gate. registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health. Registry/preflight does **not** probe current provider authentication, entitlement, quota, or rate limits; one malformed entry never hides healthy workers; an unreadable registry is a distinct hard error. Detail: `docs/usage.md`.
 
 ## Routing Contract
 
