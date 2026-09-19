@@ -1792,7 +1792,7 @@ test("M11-5-C-DOC-4: docs document truthful load timing (start pre-transcript; r
 test("M11-11D-DOC-01: terminal run_wait proceeds to collect without redundant status", () => {
   const usage = read("docs/usage.md");
   // TD-166（2026-09-19）守卫迁移：流程细节（终态后免冗余 status 调用）由
-  // usage.md 场景 4c 承载；SKILL Acceptance 保留 compact-first 骨架即可。
+  // usage.md 承载（下方断言钉住其存在）；SKILL Acceptance 保留 compact-first 骨架即可。
   assert.ok(/terminal:true.*run_collect.*不需要.*run_status/is.test(usage),
     "usage documents no redundant status call after terminal wait");
 });
@@ -1975,7 +1975,7 @@ test("M12-4A docs: backend recovery is model-free and preserves Lead scope/decis
   const arch = read("docs/02-architecture.md");
   const troubleshooting = read("docs/troubleshooting.md");
   // TD-166（2026-09-19）守卫迁移：candidateKind 闭集细节以 usage/arch/
-  // troubleshooting 承载（SKILL 路由化后经 usage 场景 4c 指针指路）。
+  // troubleshooting 承载（SKILL 路由化后经 usage.md §四 各工具小节指路）。
   for (const [name, text] of Object.entries({ usage, arch, troubleshooting })) {
     assert.ok(/backend_failed/.test(text), `${name} 必须记录 backend_failed candidate kind`);
   }
@@ -2189,6 +2189,17 @@ test("TD-166: SKILL.md 指针完整性——每个 docs//references/ 指针路�
   const usage = read("docs/usage.md");
   for (const anchor of ["场景 4b", "场景 4c", "§四"]) {
     assert.ok(usage.includes(anchor), `docs/usage.md 缺 SKILL.md 指针所引的锚点：${anchor}`);
+  }
+  // 3) 节级内容绑定（审计复核补强 2026-09-19）：SKILL 指针所指的小节必须真的
+  // 承载所指内容——全文关键词命中不证明"节存在且内容在节内"。reverify 指针所指
+  // 的 §四 run_delivery_reverify 小节必须携带资格闭集与环境原因闭集。
+  const reverifySection = usage.slice(
+    usage.indexOf("### MCP `run_delivery_reverify`"),
+    usage.indexOf("### MCP `run_delivery_decide`"),
+  );
+  assert.ok(reverifySection.length > 200, "§四 run_delivery_reverify 小节缺失或为空（SKILL reverify 指针死链）");
+  for (const content of ["tooling_invalid", "environment_contaminated", "dependency_setup_missing", "artifact_mutated"]) {
+    assert.ok(reverifySection.includes(content), `run_delivery_reverify 小节缺指针所引内容：${content}`);
   }
   const ts = read("docs/troubleshooting.md");
   assert.ok(ts.includes("8.2"), "docs/troubleshooting.md 缺 §8.2 锚点（SKILL 集成终验指针）");

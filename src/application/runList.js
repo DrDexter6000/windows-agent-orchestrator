@@ -282,7 +282,7 @@ export async function listRuns(input) {
     // two semantics).
     if (activeOnly) {
       throw new Error(
-        "--state cannot be combined with --active: --active keeps only runs with a fresh owner heartbeat (a liveness projection no state value expresses); use --state running alone for non-terminal runs",
+        "--state cannot be combined with --active: --active keeps only runs with a fresh owner heartbeat (a liveness projection no state value expresses); to list non-terminal runs filter each state value individually (--state running lists only the running state — pending/submitted are separate closed-set values)",
       );
     }
   }

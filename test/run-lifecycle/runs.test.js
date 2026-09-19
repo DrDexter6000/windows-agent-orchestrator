@@ -740,6 +740,49 @@ test("TD-153: listRuns stateFilter 非法值 fail-closed 报错列出闭集（�
   }
 });
 
+test("TD-153: stateFilter 全闭集逐值过滤（RUN_STATES 七值一一构造命中——审计复核补齐，不再只测三值）", async () => {
+  const dir = await makeRunDir();
+  try {
+    // 每个 RUN_STATES 成员构造一个投影恰好为该值的 run——统一经 state_change to=<v>
+    // （仅 run.started 无 state_change 的 run 按投影规则是 running 不是 pending）。
+    for (const v of RUN_STATES) {
+      await writeJsonl(dir, `run_${v}`, [
+        { type: "run.started", ts: td153Iso(TD153_NOW - TD153_DAY) },
+        { type: "run.state_change", from: "running", to: v, reason: "r", ts: td153Iso(TD153_NOW - TD153_DAY + 1000) },
+      ]);
+    }
+    for (const v of RUN_STATES) {
+      const out = await listRuns({ runDir: dir, stateFilter: v, knownAgentIds: [], validateAgentIds: false });
+      assert.deepEqual(out.runs.map((r) => r.runId), [`run_${v}`],
+        `--state ${v} 恰好命中唯一 ${v} run（全闭集逐值）`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-153: sinceMs 未来 ts 保留（时钟偏移形状，[now-since,∞) 无上界）与不可解析 ts 排除（Date.parse NaN ≠ null，两种无法定时都 fail-closed）", async () => {
+  const dir = await makeRunDir();
+  try {
+    // 未来 ts：事件时间在 now 之后（机器时钟偏移）——窗无上界，保留不罚
+    await writeJsonl(dir, "run_future", [
+      { type: "run.started", ts: td153Iso(TD153_NOW + TD153_DAY) },
+    ]);
+    // 不可解析 ts：updatedAt 非 null 但 Date.parse 为 NaN —— 与 null 同为"无法证明在窗内"，排除
+    await writeJsonl(dir, "run_badts", [
+      { type: "run.started", ts: "not-a-timestamp" },
+    ]);
+    const out = await listRuns({
+      runDir: dir, sinceMs: 7 * TD153_DAY, nowMs: TD153_NOW,
+      knownAgentIds: [], validateAgentIds: false,
+    });
+    assert.deepEqual(out.runs.map((r) => r.runId), ["run_future"],
+      "未来 ts 保留（无上界窗）；不可解析 ts 排除（NaN 与 null 同 fail-closed）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("TD-153: activeOnly × stateFilter 一切组合 fail-closed 拒绝（含 running——activeOnly 是心跳活性投影，非 state 子集）", async () => {
   const dir = await makeRunDir();
   try {
