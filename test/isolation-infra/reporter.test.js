@@ -85,7 +85,7 @@ test("reporter writes test-results.json with correct summary", async () => {
     assert.ok(failedTest);
     assert.ok(failedTest.error.diff.includes("- Expected:"));
     assert.ok(failedTest.error.diff.includes('"y"'));
-    assert.ok(failedTest.error.operator, "strictEqual");
+    assert.equal(failedTest.error.operator, "strictEqual");
     assert.ok(failedTest.error.stack.length > 0);
   });
 });
@@ -202,9 +202,6 @@ test("reporter _relPath normalizes backslashes", async () => {
 
   // Path within cwd always produces forward slashes regardless of platform
   const absPath = join(cwd, "test", "foo.test.js");
-  if (absPath.includes("\\")) {
-    assert.ok(true, "Windows: _relPath converts backslashes");
-  }
   const rel = reporter._relPath(absPath);
   assert.ok(!rel.includes("\\"), "no backslashes in output: " + rel);
   assert.ok(rel === "test/foo.test.js" || rel.endsWith("/test/foo.test.js"), "correct rel path: " + rel);

@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { createWaoMcpServer } from "../../src/mcp/server.js";
+import { TOOLS } from "../../src/mcp/toolSurface.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
@@ -476,9 +477,11 @@ test("MAA-12: a cursor bound to a different run → cursor_rejected recovery (st
 });
 
 // =====================================================================
-// Tool count guard: adding run_activity brings the total to 22.
+// Tool count guard: total tools equal the toolSurface TOOLS SSOT length
+// (TD-168: derived from the SSOT — the frozen 22 literals live only in
+// m12-10-tool-surface.test.js).
 // =====================================================================
-test("MAA-13: tool count is 22 (M12-10 moved playbook catalog to resources; M12-16 added run_correct)", async () => {
+test("MAA-13: tool count equals TOOLS.length (M12-10 moved playbook catalog to resources; M12-16 added run_correct)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-maa13-"));
   try {
     makeGitRepo(dir);
@@ -487,7 +490,7 @@ test("MAA-13: tool count is 22 (M12-10 moved playbook catalog to resources; M12-
     try {
       const tools = await client.listTools();
       assert.ok(tools.tools.find((x) => x.name === "run_activity"), "run_activity present");
-      assert.equal(tools.tools.length, 22, "exactly 22 tools (M12-10 moved playbook catalog to resources; M12-16 added run_correct)");
+      assert.equal(tools.tools.length, TOOLS.length, "tool count equals toolSurface TOOLS.length SSOT (M12-10 moved playbook catalog to resources; M12-16 added run_correct)");
     } finally { await client.close(); await server.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

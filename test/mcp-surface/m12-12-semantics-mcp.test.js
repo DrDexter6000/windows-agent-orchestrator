@@ -11,7 +11,7 @@
 // This slice carries:
 //   M-*   REAL MCP handlers (all four) attach semanticNotes before parse; the
 //         schema/catalog/resource parity; the review_bundle exclusion; the
-//         run_diagnose trust boundary; unchanged 22-tool surface.
+//         run_diagnose trust boundary; unchanged TOOLS.length tool surface.
 //   R-*   RESOURCES: wao://semantics summary + wao://semantics/{id} template;
 //         NO per-id static resources; summary/detail parity with the SSOT;
 //         unknown/malformed id → fixed safe text, never echoes the id.
@@ -34,6 +34,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { createWaoMcpServer } from "../../src/mcp/server.js";
+import { TOOLS } from "../../src/mcp/toolSurface.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
@@ -372,7 +373,7 @@ test("M-09: run_diagnose trust boundary — unknown/extra field collapses to fix
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("M-10: unchanged 22-tool surface; all four tools carry semanticNotes; no extra tools", async () => {
+test("M-10: unchanged TOOLS.length tool surface; all four tools carry semanticNotes; no extra tools", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1212-m10-"));
   try {
     makeGitRepo(dir);
@@ -380,9 +381,11 @@ test("M-10: unchanged 22-tool surface; all four tools carry semanticNotes; no ex
     const client = await buildClient(server);
     try {
       const tools = await client.listTools();
-      assert.equal(tools.tools.length, 22, "exactly 22 tools");
+      // TD-168: count derived from the toolSurface SSOT — frozen 22 literals
+      // live only in m12-10-tool-surface.test.js.
+      assert.equal(tools.tools.length, TOOLS.length, "tool count equals toolSurface TOOLS.length SSOT");
       const names = new Set(tools.tools.map((t) => t.name));
-      assert.equal(names.size, 22, "22 distinct tool names");
+      assert.equal(names.size, tools.tools.length, "tool names are distinct (count matches tool count)");
       for (const n of FOUR_TOOLS) assert.ok(names.has(n), `${n} present`);
       // No new tools named anything semantic-related.
       assert.ok(![...names].some((n) => /semantic/i.test(n)), "no semantic-named tool added");

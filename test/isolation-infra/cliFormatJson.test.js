@@ -215,7 +215,8 @@ test("TD-86: runs list --format json 直接序列化 listRuns 结果", async () 
     const parsed = JSON.parse(r.stdout);
     assert.ok(Array.isArray(parsed.runs), "runs 数组（listRuns 结果原样）");
     assert.equal(parsed.runs.length, 2);
-    assert.equal(parsed.runs[0].runId, "run_aaa", "CLI 既有文件名升序保持");
+    assert.equal(parsed.runs[0].runId, "run_aaa",
+      "无 ts 夹具，此处不涉排序 tie-break（排序真契约 updatedAt desc / 时间戳序由 test/isolation-infra/cli.test.js TD-137① + TD-153(d2) 钉承载）");
     assert.equal(parsed.runs[0].state, "completed", "代表字段 state");
     assert.equal(parsed.matchedCount, 2, "matchedCount 透传");
   } finally {

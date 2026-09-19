@@ -20,6 +20,12 @@ async function makeInitWao() {
   return dir;
 }
 
+test("TD-83: STAGE_NUMBERS 阶段号 SSOT 值钉（自 docs-consistency TD-83 代码值钉迁入）", () => {
+  // 代码值钉归代码测试文件（TD-168 清扫）：docs-consistency 侧只保留 SKILL
+  // 文面钉（提及 wao stage 入口 + 不复制阶段号）。
+  assert.deepEqual(STAGE_NUMBERS, [1, 2, 3, 4, 5, 6], "waoStage.js 阶段号 SSOT 漂移");
+});
+
 test("TD-83: addStage 建正文(STAGE- 前缀 + 结构化 frontmatter) + 更新 map", async () => {
   const dir = await makeInitWao();
   try {

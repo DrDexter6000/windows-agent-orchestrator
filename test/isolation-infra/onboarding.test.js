@@ -768,8 +768,12 @@ test("runOnboarding with a malformed (array) agents object is needs-selection wi
   assert.deepEqual([...fs.__files.keys()], ["D:/wao/config/agents.example.json"]);
 });
 
-// ── 15. endorsement creates ONLY the necessary parent dir (runs/) ──────────────
-test("mem fs rejects a write into a missing parent dir (proves the fake is faithful, not permissive)", async () => {
+// ── 15. 夹具自检（非行为测试）─────────────────────────────────────────────────
+// 本测只测 makeMemFs 夹具自身，无被测实现参与：验证 fake 保持真实 fs 的
+// ENOENT 语义（缺失父目录的写必须拒绝）。存在意义是让依赖该语义的行为测试
+// （下一测"endorsement creates the missing runs/ parent dir"）非空洞——若 fake
+// 变 permissive（写永远成功），那些测试的断言将失去区分度。
+test("fixture self-check (NOT a behavior test): mem fs keeps real-fs ENOENT semantics on missing parent dir, keeping dependent behavior tests non-vacuous", async () => {
   const fs = makeMemFs({ "D:/wao/config/agents.example.json": JSON.stringify(TEMPLATE) });
   // runs/ is not known: a raw writeFile into it must ENOENT like a real fs.
   await assert.rejects(

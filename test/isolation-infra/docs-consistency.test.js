@@ -715,9 +715,9 @@ test("M8 scorecard 默认 warn 语义固化（SKILL+architecture 不得回退为
     "02-architecture.md 必须反映 M8-1 scorecard 默认 warn 语义");
 });
 
-test("CLI 命令由 help 暴露，workflow 节点由 architecture 定义", () => {
-  const skill = read("SKILL.md");
-  assert.ok(/npm run cli -- help/.test(skill), "SKILL.md 必须指向动态 CLI help");
+test("workflow 节点由 architecture 定义（integrator，M8-5）", () => {
+  // （TD-168 清扫：原"SKILL.md 必须指向动态 CLI help"断言与下方 F1 守卫重复——
+  // F1 版更宽（正向 + 禁静态命令索引负向），较弱份已删。）
   const arch = read("docs/02-architecture.md");
   assert.ok(/integrator/i.test(arch), "02-architecture.md 节点处理器清单必须含 integrator（M8-5）");
 });
@@ -827,11 +827,11 @@ test("TD-82: SKILL.md 不复制 wao declare 理由码，改由裸命令查询", 
   assert.ok(REASON_CODES.every((code) => !skill.includes(`\`${code}\``)), "SKILL.md 不应复制理由码枚举");
 });
 
-test("TD-83: SKILL.md 不复制 pipeline 阶段号，改由裸命令查询", async () => {
-  const { STAGE_NUMBERS } = await import("../../src/waoStage.js");
+test("TD-83: SKILL.md 不复制 pipeline 阶段号，改由裸命令查询", () => {
+  // 代码值钉（STAGE_NUMBERS deepEqual）已迁 test/isolation-infra/waoStage.test.js
+  // （TD-168 清扫：代码值钉归代码测试文件）；此处保留 SKILL 文面钉。
   const skill = read("SKILL.md");
   assert.ok(skill.includes("wao stage"), "SKILL.md 未提及 wao stage 查询入口");
-  assert.deepEqual(STAGE_NUMBERS, [1, 2, 3, 4, 5, 6], "waoStage.js 阶段号 SSOT 漂移");
   assert.ok(!/阶段 [1-6]/.test(skill), "SKILL.md 不应复制阶段号枚举");
 });
 
@@ -867,18 +867,7 @@ test("M10-pre2: workspace_status tool documented in usage.md and SKILL.md", () =
   // M11-6: workspace_select documented + listed
   assert.ok(usage.includes("workspace_select"), "usage.md must document workspace_select tool (M11-6)");
   assert.ok(skill.includes("workspace_select"), "SKILL.md tool table must include workspace_select (M11-6)");
-  // SKILL.md must reflect the current MCP tool count. History: 10 (M10-pre2/P0-2)
-  // + runs_list (M10 P0-3) + run_wait (M10-pre3) = 11; + playbook_list/get (M11-2) = 13;
-  // + run_delivery_review (M11-3) = 14; + workspace_select (M11-6) = 15; + lead_preflight
-  // (M11-8A) = 16; + run_delivery_repackage (M12-1S2) = 17; + run_await_result
-  // (M12-3A) = 18; + run_delivery_review_bundle (M12-3B) = 19; + run_delivery_reverify
-  // (M12-6 Package 3B) = 20; + run_continue (M12-7) = 21; + run_activity (M12-8A) = 22;
-  // + run_dispatch_contract_check (M12-9) = 23.
-  // M12-10 progressive-disclosure correction: the playbook catalog moved OFF the
-  // tool surface to MCP resources, so the surface dropped playbook_list +
-  // playbook_get → 23 - 2 = 21 always-registered tools (no profile, no restart).
-  // M12-16 added run_correct (queued in-flight correction) → 21 + 1 = 22.
-  assert.ok(/22 MCP tools/.test(skill), "SKILL.md must reflect 22 MCP tools (M12-10 playbook-to-resources move; M12-16 added run_correct)");
+  // SKILL.md 当前工具数由下方 TD-120 派生守卫从 TOOLS.length 推导钉住（历史 10→22 详该守卫），此处不再钉字面量（TD-168 清扫）。
   assert.ok(skill.includes("run_delivery_reverify"), "SKILL.md tool table must include run_delivery_reverify");
   // team-roles.md must mention workspace binding (MCP-first)
   const roles = read("docs/team-roles.md");
@@ -1090,22 +1079,15 @@ test("M11-0A: usage.md 说明 --pure 用途、新进程重启边界、command �
   assert.ok(/command.*必须是数组|command 必须是数组|数组/.test(usage), "usage.md 必须说明 command 必须是数组");
 });
 
-test("M12-8A/M12-9/M12-10/M12-16: 工具计数由生成层承载且与 toolSurface SSOT 一致；usage 不再手抄计数（TD-120 关系型守卫）", () => {
+test("M12-8A/M12-9/M12-10/M12-16: usage 不再手抄 MCP 工具计数（TD-120 关系型守卫；生成层↔SSOT 一致由 docsSurface 承载）", () => {
   const usage = read("docs/usage.md");
-  const surface = read("docs/surface/mcp-tools.md");
-  const n = TOOLS.length;
+  // 生成层 docs/surface/mcp-tools.md 的内容（含头部 N tools 计数行）由
+  // docsSurface-1 字节钉（disk == generate()，gen-surface 从 live tools/list
+  // 派生头部计数）+ docsSurface-3 结构钉（headings == TOOLS）承载，此处不再
+  // 重复钉生成物内容（TD-168 清扫）。
   // P4-乙 Phase 2A (2026-08-15): usage.md §四 migrated its shape/count hand-copies
-  // to the generated reference layer, so the derived-count probe reads
-  // docs/surface/mcp-tools.md (its header line carries "N tools"); usage.md must
-  // NOT re-introduce a hand-copied count phrase (that is how the pre-migration
-  // drift happened). TD-120 form preserved: count derived from TOOLS.length,
-  // (?<!\d) guards against e.g. "122 tools" matching the n=22 probe, and the
-  // stale-claim negative derives n+1 (the most likely NEXT value after a
-  // legitimate surface change) so adding a tool never deadlocks the guard.
-  assert.ok(new RegExp(`(?<!\\d)${n} tools`).test(surface),
-    `docs/surface/mcp-tools.md 生成头必须反映 toolSurface TOOLS.length=${n} tools`);
-  assert.ok(!new RegExp(`(?<!\\d)${n + 1} tools`).test(surface),
-    `docs/surface/mcp-tools.md 不得声称 ${n + 1} tools（相对 SSOT 的陈旧/超前计数）`);
+  // to the generated reference layer; usage.md must NOT re-introduce a
+  // hand-copied count phrase (that is how the pre-migration drift happened).
   assert.ok(!/(?<!\d)\d+ 个工具/.test(usage),
     "usage.md 不得手抄 MCP 工具计数（计数由生成层 docs/surface/mcp-tools.md 派生承载）");
   // 精确禁止"只有 7 个工具"的陈旧文案回潮。
@@ -1151,20 +1133,9 @@ test("M11-1A-closeout: usage.md 不得把 OpenCode 'enabled' 声明为必填或�
 
 // ============================================================
 // M11-1B: certification clarity + worktree hygiene authority guards
+// （certification advisory 钉已并入下方 M12-0-05——TD-168 清扫，较弱份删除，
+//   中文备选并入 M12-0-05 正向断言；旧文案负向被 strict-dispatch 禁令包含。）
 // ============================================================
-
-test("M11-1B/M12-0: SKILL.md 把 certification 定位为 advisory evidence（非 permission hard gate）", () => {
-  const skill = read("SKILL.md");
-  // 旧文案 "latest certification says `certified` and `strict-dispatch`" 必须消失
-  assert.ok(!/certified.*and.*strict-dispatch|certification says .*certified.*and.*strict-dispatch/i.test(skill),
-    "SKILL.md 不得再要求 Lead 同时证明 certified 与 strict-dispatch 两个字段");
-  // M12-0 重置：certification 是 advisory evidence，不是 permission gate
-  assert.ok(/advisory evidence|advisory.*not.*(?:a )?gate|not a permission gate|不是 permission gate|advisory.*非.*门/i.test(skill),
-    "SKILL.md 必须把 certification 定位为 advisory evidence，非 permission gate");
-  // 硬门措辞必须消失（M12-0 重置取代 M11-1B 的 strict-dispatch 资格框架）
-  assert.ok(!/strict-dispatch|strict dispatch/i.test(skill),
-    "SKILL.md 不得再使用 strict-dispatch 硬门框架（M12-0 改为 advisory）");
-});
 
 test("M11-1B: usage.md 记录 .wao-worktrees/ 仓库本地 exclude hygiene 规则", () => {
   const usage = read("docs/usage.md");
@@ -1221,20 +1192,6 @@ test("M11-2C-02: SKILL 明确 run_dispatch 返回 runId 才算 WAO worker dispat
     "SKILL.md 必须把 run_dispatch runId 作为 WAO worker dispatch 的事实标准");
   assert.ok(/Skill.*不算|loading.*Skill.*not|borrow.*discipline.*not|不算.*通过 WAO/i.test(skill),
     "SKILL.md 必须说明仅加载 Skill / 借用纪律不算通过 WAO 派工");
-});
-
-test("M11-2C-03: SKILL 把 playbook catalog 呈现为 resources（非工具），且说明 optional/adaptable", () => {
-  const skill = read("SKILL.md");
-  // M12-10: the playbook catalog moved OFF the tool surface. SKILL must present
-  // it as MCP resources (wao://playbooks summary + wao://playbooks/{id} detail),
-  // NOT as playbook_list / playbook_get tools.
-  assert.ok(/wao:\/\/playbooks/.test(skill), "SKILL.md 把 playbook catalog 呈现为 wao://playbooks resources");
-  assert.ok(!/\bplaybook_list\b/.test(skill), "SKILL.md 不得再把 playbook_list 当作工具呈现");
-  assert.ok(!/\bplaybook_get\b/.test(skill), "SKILL.md 不得再把 playbook_get 当作工具呈现");
-  // 必须说明 optional + Lead 可保留/跳过/修改条件步骤。
-  assert.ok(/optional|可选/i.test(skill), "SKILL.md 说明 playbook 为 optional");
-  assert.ok(/skip|跳过|adaptable|可修改|保留/i.test(skill),
-    "SKILL.md 说明 Lead 可保留/跳过/修改 playbook 条件步骤");
 });
 
 test("M11-2C-04: 活文档不得声称存在 playbook_run/start/next/recommend", () => {
@@ -1619,21 +1576,14 @@ test("M11-2-DOGFOOD: fresh Codex CLI Lead dogfood marked complete with anchor, r
 // M11 mainline and M10 closeout guards — not repeated here.
 // ============================================================
 
-test("M11-4-DOC-01: run_collect cursor/nextCursor 字段由生成层承载，usage 保留续读语义与零追加合同", () => {
+test("M11-4-DOC-01: usage 保留 run_collect 续读语义与零追加合同（cursor/nextCursor 字段由生成层承载）", () => {
   const usage = read("docs/usage.md");
-  const surface = read("docs/surface/mcp-tools.md");
   // P4-乙 Phase 2A (2026-08-15): usage.md §四 dropped the run_collect shape
-  // hand-copy; the cursor input + nextCursor output FIELD names now live in the
-  // generated reference layer (whose byte stability is pinned by docsSurface-1).
-  // Scope to the run_collect section so a match elsewhere in the file cannot
-  // satisfy the guard.
-  const collectSection = surface.slice(
-    surface.indexOf("## run_collect"), surface.indexOf("## run_diagnose"));
+  // hand-copy; the cursor input + nextCursor output FIELD names live in the
+  // generated reference layer. 生成物内容钉（"| cursor |" / "| nextCursor |"
+  // 行存在性）与 docsSurface-1 字节钉重复，已删（TD-168 清扫）；此处只钉
+  // usage 侧续读语义。
   assert.ok(/run_collect/.test(usage), "usage covers run_collect");
-  assert.ok(/\| cursor \|/.test(collectSection),
-    "docs/surface/mcp-tools.md run_collect Input documents the optional cursor field");
-  assert.ok(/\| nextCursor \|/.test(collectSection),
-    "docs/surface/mcp-tools.md run_collect Output documents the nextCursor field");
   assert.ok(/opaque continuation token/i.test(usage),
     "usage documents the cursor as an opaque continuation token");
   // Continuation semantics: page-by-page until null, exact-once, frozen snapshot.
@@ -1913,7 +1863,9 @@ test("M12-0-04: architecture router=Lead-authored deterministic，gate=mechanica
 // workers whose certification is certified") must be gone from SKILL.
 test("M12-0-05: SKILL 把 certification 定位为 advisory evidence，删除 permission hard gate 措辞", () => {
   const skill = read("SKILL.md");
-  assert.ok(/advisory evidence|advisory.*not.*(?:a )?gate|not a permission gate|certification.*advisory/i.test(skill),
+  // 正向备选并自 M11-1B/M12-0 原重复钉（TD-168 清扫并入）；旧文案
+  // "certified ... and ... strict-dispatch" 负向被 strict-dispatch 禁令包含。
+  assert.ok(/advisory evidence|advisory.*not.*(?:a )?gate|not a permission gate|certification.*advisory|不是 permission gate|advisory.*非.*门/i.test(skill),
     "SKILL 必须把 certification 定位为 advisory evidence，非 permission gate");
   assert.ok(!/require a `?certified`? worker for real changes/i.test(skill),
     "SKILL 不得再硬性 require a certified worker for real changes");
@@ -2076,7 +2028,7 @@ test("M12-6 FR-07 docs: SKILL 把 reverify 放在 run_delivery 与 decide 之间
     "SKILL 必须说明 reverify 结果不自动决定");
 });
 
-test("M12-6 FR-07 docs: reverify 字段形状由生成层承载，usage 记录 CLI 入口、eligible failure、幂等与原\/有效 verification", () => {
+test("M12-6 FR-07 docs: usage 记录 reverify CLI 入口、eligible failure、幂等与原\/有效 verification（字段形状由生成层承载）", () => {
   const usage = read("docs/usage.md");
   // (1) Both surfaces documented: the MCP tool and the CLI fallback.
   assert.ok(/run_delivery_reverify/.test(usage), "usage 必须记录 MCP run_delivery_reverify");
@@ -2084,21 +2036,11 @@ test("M12-6 FR-07 docs: reverify 字段形状由生成层承载，usage 记录 C
   assert.ok(/--setup-commands-file/.test(usage) && /--timeout-ms/.test(usage) && /--reason/.test(usage),
     "usage 必须记录 CLI 的 --reason / --setup-commands-file / --timeout-ms");
   // (2) Input/output FIELD NAMES: P4-乙 Phase 2A moved the reverify shape
-  // hand-copy out of usage.md — the MCP input (reason/setupCommands/timeoutMs)
-  // and safe-output (state/verificationStatus/failureCode) field lists are
-  // asserted on the generated reference layer, scoped to the run_delivery_
-  // reverify section (byte stability itself is pinned by docsSurface-1).
-  // usage keeps the bounds + closed-set eligible/inheritance semantics below.
-  const surface = read("docs/surface/mcp-tools.md");
-  const reverifySection = surface.slice(surface.indexOf("## run_delivery_reverify"));
-  for (const field of ["reason", "setupCommands", "timeoutMs"]) {
-    assert.ok(reverifySection.includes(`| ${field} |`),
-      `docs/surface/mcp-tools.md reverify Input 必须承载字段 ${field}`);
-  }
-  for (const field of ["state", "verificationStatus", "failureCode"]) {
-    assert.ok(reverifySection.includes(`| ${field} |`),
-      `docs/surface/mcp-tools.md reverify Output 必须承载字段 ${field}`);
-  }
+  // hand-copy out of usage.md — the field lists (reason/setupCommands/timeoutMs;
+  // state/verificationStatus/failureCode) live in the generated reference layer.
+  // 生成物内容钉（字段行存在性）与 docsSurface-1 字节钉重复，已删（TD-168
+  // 清扫）；usage keeps the bounds + closed-set eligible/inheritance semantics
+  // below.
   // (3) Eligible failure: the ORIGINAL verification failed with an
   // environment/tooling-invalid code (never content-integrity codes).
   assert.ok(/original.*verification.*failed|原.*verification.*failed|original.*失败/i.test(usage)
@@ -2214,8 +2156,7 @@ test("M12-10: live docs carry NO tool-profile / restart-to-recover wording", () 
     ["docs/02-architecture.md", read("docs/02-architecture.md")],
     ["README.md", read("README.md")],
   ]) {
-    assert.ok(!/--tool-profile/.test(text), `${name}: no --tool-profile flag`);
-    assert.ok(!/tool-profile/i.test(text), `${name}: no tool-profile wording`);
+    assert.ok(!/tool-profile/i.test(text), `${name}: no tool-profile wording (--tool-profile flag included)`);
     assert.ok(!/toolProfile\b/.test(text), `${name}: no toolProfile identifier`);
     assert.ok(!/toolProfiles\.js/.test(text), `${name}: no reference to deleted toolProfiles.js`);
     // The closed profile pair (full/lead) and their counts must be gone.
@@ -2225,7 +2166,7 @@ test("M12-10: live docs carry NO tool-profile / restart-to-recover wording", () 
   }
 });
 
-test("M12-10: live docs present the playbook catalog as MCP resources", () => {
+test("M12-10: live docs present the playbook catalog as MCP resources（含原 M11-2C-03 的 SKILL 侧钉）", () => {
   for (const [name, text] of [
     ["SKILL.md", read("SKILL.md")],
     ["docs/usage.md", read("docs/usage.md")],
@@ -2237,15 +2178,22 @@ test("M12-10: live docs present the playbook catalog as MCP resources", () => {
     assert.ok(!/playbook_list tool|playbook_get tool/i.test(text),
       `${name}: no playbook_list/playbook_get tool wording`);
   }
+  // 合并自 M11-2C-03（原重复钉已删，TD-168 清扫）：SKILL 侧裸词禁令比上面的
+  // tool-wording 禁令更严；optional/adaptable 语义钉一并迁入。
+  const skill = read("SKILL.md");
+  assert.ok(!/\bplaybook_list\b/.test(skill), "SKILL.md 不得再把 playbook_list 当作工具呈现");
+  assert.ok(!/\bplaybook_get\b/.test(skill), "SKILL.md 不得再把 playbook_get 当作工具呈现");
+  assert.ok(/optional|可选/i.test(skill), "SKILL.md 说明 playbook 为 optional");
+  assert.ok(/skip|跳过|adaptable|可修改|保留/i.test(skill),
+    "SKILL.md 说明 Lead 可保留/跳过/修改 playbook 条件步骤");
 });
 
 test("M12-10: architecture records toolSurface.js as the frozen tool-surface SSOT", () => {
   const arch = read("docs/02-architecture.md");
   assert.ok(/toolSurface\.js/.test(arch),
     "architecture records src/mcp/toolSurface.js as the 21-tool SSOT");
-  // The deleted profile module must not be named as an SSOT.
-  assert.ok(!/toolProfiles\.js/.test(arch),
-    "architecture must not reference the deleted toolProfiles.js");
+  // （TD-168 清扫：toolProfiles.js 禁令由上方 M12-10 四文件循环守卫承载——
+  //   覆盖面含本文件且更宽，此处不再重复查 architecture 一遍。）
 });
 
 test("M12-10: the 22 always-registered tools are listed in architecture", () => {
@@ -2253,7 +2201,8 @@ test("M12-10: the 22 always-registered tools are listed in architecture", () => 
   // The server.js tool-list comment line must carry the 22-tool truth and must
   // NOT list the removed playbook tools.
   const serverLine = arch.split("\n").find((l) => /server\.js.*tools/.test(l)) || "";
-  assert.ok(/22 tools/.test(serverLine), "architecture server.js line says 22 tools");
+  // （计数本身由 TD-120 派生守卫钉住——同正则提取 serverLine 后断言
+  //   TOOLS.length；此处不再重复钉 "22 tools" 字面量。TD-168 清扫。）
   assert.ok(!/playbook_list/.test(serverLine), "architecture tool list omits playbook_list");
   assert.ok(!/playbook_get/.test(serverLine), "architecture tool list omits playbook_get");
   // workspace_select / run_dispatch_contract_check / run_wait (formerly hidden
@@ -3004,18 +2953,14 @@ test("R10-A: usage.md MCP run_dispatch 节记录可选 model 参数与 reuse 互
   assert.match(bounded, /certif/, "必须说明与认证组合声明的关系（requireCertified 是 server-owned false）");
 });
 
-test("R10-A: RUN_USAGE_TEXT 用法页与生成层同步携带 --model（CLI 面）", async () => {
+test("R10-A: RUN_USAGE_TEXT 用法页携带 --model（CLI 面；生成层字节由 docsSurface-1 守卫）", async () => {
   const { RUN_USAGE_TEXT } = await import("../../src/cliHelp.js");
   assert.match(RUN_USAGE_TEXT, /--model ID/, "用法页 flag 行");
   assert.match(RUN_USAGE_TEXT, /mutually exclusive with --require-certified/, "认证互斥");
   assert.match(RUN_USAGE_TEXT, /provider-session reuse/, "复用互斥");
   assert.match(RUN_USAGE_TEXT, /effective model/, "回显失败模式说明");
-  // 生成层：mcp-tools.md 的 run_dispatch input 表必须含 model 行（生成物，
-  // 与 wire 同源——这里只锚存在性，字节由 docsSurface 守卫）。
-  const surface = read("docs/surface/mcp-tools.md");
-  const rdSection = surface.slice(surface.indexOf("## run_dispatch"));
-  const rdInput = rdSection.slice(0, rdSection.indexOf("## ", 1) === -1 ? rdSection.length : rdSection.indexOf("## ", 1));
-  assert.match(rdInput, /\| model \| string \| no \|/, "run_dispatch input 表含 model 行（可选）");
+  // 生成层 run_dispatch input 表的 "| model | string | no |" 行内容钉与
+  // docsSurface-1 字节钉重复，已删（TD-168 清扫）。
 });
 
 // ── R11-2（决策 0024）：onboarding 矩阵双源展示契约——决策链 + 文档锚 ─────────
@@ -3111,7 +3056,7 @@ test("R11-1: usage.md MCP run_dispatch 节记录可选 reasoning 参数、闭集
   assert.match(bounded, /zod enum|闭集枚举/, "必须说明 wire 侧直接序列化闭集枚举（比正则更严）");
 });
 
-test("R11-1: RUN_USAGE_TEXT 用法页与生成层同步携带 --reasoning（CLI 面）", async () => {
+test("R11-1: RUN_USAGE_TEXT 用法页携带 --reasoning（CLI 面；生成层字节由 docsSurface-1 守卫）", async () => {
   const { RUN_USAGE_TEXT } = await import("../../src/cliHelp.js");
   assert.match(RUN_USAGE_TEXT, /--reasoning EFFORT/, "用法页 flag 行");
   assert.match(RUN_USAGE_TEXT, /minimal\/low\/medium\/high\/xhigh\/max/, "闭集值域说明");
@@ -3121,12 +3066,8 @@ test("R11-1: RUN_USAGE_TEXT 用法页与生成层同步携带 --reasoning（CLI 
   // 旧句反回归：R12 前的过时措辞（漏掉 retry）不得回潮（TD-126）。
   assert.doesNotMatch(RUN_USAGE_TEXT, /only on run \(not\s+spawn\/workflow\/daemon\)/, "TD-126 旧句不得回潮");
   assert.match(RUN_USAGE_TEXT, /effective reasoning/, "回显失败模式说明（advisory）");
-  // 生成层：mcp-tools.md 的 run_dispatch input 表必须含 reasoning 行（生成
-  // 物，与 wire 同源——这里只锚存在性，字节由 docsSurface 守卫）。
-  const surface = read("docs/surface/mcp-tools.md");
-  const rdSection = surface.slice(surface.indexOf("## run_dispatch"));
-  const rdInput = rdSection.slice(0, rdSection.indexOf("## ", 1) === -1 ? rdSection.length : rdSection.indexOf("## ", 1));
-  assert.match(rdInput, /\| reasoning \| string \| no \| enum: minimal/, "run_dispatch input 表含 reasoning 行（闭集枚举）");
+  // 生成层 run_dispatch input 表的 "| reasoning | string | no | enum: minimal"
+  // 行内容钉与 docsSurface-1 字节钉重复，已删（TD-168 清扫）。
 });
 
 // ---------------------------------------------------------------------------
@@ -3182,15 +3123,12 @@ test("R12: usage.md retry 节记录覆盖继承语义 + 替换 flag + 坏值 fai
   assert.match(section, /字段缺席|逐字节一致/, "必须记录无覆盖时的字节回归承诺");
 });
 
-test("R12: HELP_TEXT retry 命令行与生成层同步携带替换 flag（CLI 面）", async () => {
+test("R12: HELP_TEXT retry 命令行携带替换 flag（CLI 面；cli.md 字节由 docsSurface-1 守卫）", async () => {
   const { HELP_TEXT } = await import("../../src/cliHelp.js");
   assert.match(HELP_TEXT, /^  retry <runId> \[--wait\] \[--run-dir DIR\] \[--model ID\] \[--reasoning EFFORT\]$/m,
     "HELP_TEXT retry 行必须携带 [--model ID] [--reasoning EFFORT]");
-  // 生成层同步（docs/surface/cli.md 由 gen:surface 从 HELP_TEXT 再生，字节由
-  // docsSurface 守卫——这里锚 retry 行的 flag 在场，防"源改了忘再生成"）。
-  const cliSurface = read("docs/surface/cli.md");
-  assert.match(cliSurface, /retry <runId> \[--wait\] \[--run-dir DIR\] \[--model ID\] \[--reasoning EFFORT\]/,
-    "docs/surface/cli.md 的 retry 行必须与 HELP_TEXT 同步（再生成交付）");
+  // docs/surface/cli.md 的 retry 行同步钉与 docsSurface-1/4 字节钉（disk ==
+  // generate()，HELP_TEXT 逐字嵌入）重复，已删（TD-168 清扫）。
 });
 
 // ---------------------------------------------------------------------------
