@@ -11,13 +11,18 @@
 // The full orchestration (wave-serial execution, per-wave concurrency, child
 // spawn, bounded report) is exercised end-to-end by `npm test` itself; these unit
 // tests lock the decision logic that keeps the verdict truthful and attributable.
+//
+// TD-165 exception: the watchdog tests at the bottom of this file DO spawn real
+// short-lived `node --test` children — but only against mkdtemp tmpdir synthetic
+// test/ trees with 0.2-10s injected budgets (never the repo's own test/ tree,
+// never production defaults). Everything else stays child-free.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, sep, isAbsolute, dirname, basename } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // R23-F/A A1：机器级闸路径 SSOT（src/machineGatePaths.js）。钉住 canonical-test.mjs
 // 导出的 inflightMarkerPath 必须与它逐字节同源——runner 侧不得再长出第二份路径推导。
@@ -32,6 +37,9 @@ import {
   takeRunsSnapshot, addedRunsFiles, createRunsDirGuard, realListRunsDir,
   finalRunnerOutcome,
   createInflightMarker, realInflightAdapter, inflightMarkerPath, INFLIGHT_MARKER_FILENAME,
+  // TD-165：三层看门狗的常量与真实适配器（预算全部注入 1-10s 小值，绝不用生产默认值）。
+  TEST_TIMEOUT_MS, WAVE_WATCHDOG_MS, WAVE_ALARM_MS,
+  defaultKillTree, realRunChild, realIsolator, realReadReport, realDeleteReport,
 } from "../../scripts/canonical-test.mjs";
 
 function manifestFixture() {
@@ -1138,4 +1146,294 @@ test("B5 RED isolationDurationMs 透传：isolator 的 durationMs 进入 isolati
     isolator: async () => ({ status: "fail", exitCode: 1, tail: "t" }),
   });
   assert.equal(outNoDur.isolation[0].isolationDurationMs, null, "缺失时归一为 null（不编造 0）");
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// TD-165：canonical runner 挂死看门狗（三层）。
+//
+//   R1 per-test 超时直通 —— 每个 `node --test` 子进程 argv 带 --test-timeout
+//      （首轮波 + 隔离重跑两个适配器都要）；Node 在文件级从它自己的父进程
+//      执行超时，同步 while(true) 也拦得住（2026-09-19 v22.23.1 实测）。
+//   R2 波级兜底看门狗 —— 每个子进程墙钟 timer；到期 taskkill /PID <自己的
+//      pid> /T /F（绝不全局杀 node.exe），kill(pid,0)→ESRCH 探针确认死透
+//      （500ms × 最多 3 次）；确认 ⇒ 全文件 crash + crashReason
+//      "watchdog_timeout" + groupError（波名/耗时/标记/清理状态）；未确认 ⇒
+//      "cleanup unconfirmed"，不再启动后续波次，verdict=fail。
+//   R3 慢波告警 —— 纯读 NOTICE 行，不杀不影响 verdict。
+//
+// 预算注入纪律：真实子进程测试一律注入 0.2-10s 小值（supervisionLoop 注入
+// 先例），绝不用生产默认值。真实子进程全部跑在 mkdtemp tmpdir 的合成
+// test/ 树上（reporter 用 file:// 绝对 URL 指向仓库自带 test/reporter.mjs，
+// 报告落在 tmpdir/test-results.json）——绝不触碰仓库自己的 test/ 与
+// test-results.json，manifest/discovery 不受影响。
+// 记账事实（2026-09-19 实测钉死）：超时测试永不产生 test:complete，故
+// reporter 对该文件无 suite ⇒ runWave 映射为 "missing"（非 pass、有归因，
+// 区别于 crash=波级失能）；整波靠 exit code 与既有记账保红。
+// ────────────────────────────────────────────────────────────────────────────
+
+test("TD-165 budgets: 生产默认值钉死（600s per-test / 900s 波级兜底 / 300s 告警；兜底必须大于 per-test 上限）", () => {
+  assert.equal(TEST_TIMEOUT_MS, 600000, "R1：600s（实测最慢文件 133s / 波峰 207s 的 3-4.5 倍余量）");
+  assert.equal(WAVE_WATCHDOG_MS, 900000, "R2：900s（3× 实测波峰 207s 向上取整）");
+  assert.equal(WAVE_ALARM_MS, 300000, "R3：300s 信息告警");
+  assert.ok(WAVE_WATCHDOG_MS > TEST_TIMEOUT_MS, "兜底必须严格大于 per-test 上限 + 排队余量（先 R1 后 R2）");
+  assert.ok(WAVE_ALARM_MS < WAVE_WATCHDOG_MS, "告警先于兜底");
+  assert.ok(WAVE_ALARM_MS > 0 && TEST_TIMEOUT_MS > 0 && WAVE_WATCHDOG_MS > 0);
+});
+
+test("TD-165 R1 wiring: runWave 的 argv 默认带 --test-timeout=<生产常量>；注入值覆盖；波名随第二参透传（告警归因）", async () => {
+  let seenArgv = null;
+  let seenOpts = null;
+  const files = waveFiles(["a.test.js"], "pure");
+  const drive = async (testTimeoutMs, runChild) => runWave({
+    name: "pure", files, concurrency: 1, reporterArg: "R", runChild,
+    readReport: async () => makeReport(["a.test.js"], new Set()), deleteReport: noopDelete,
+    ...(testTimeoutMs !== undefined ? { testTimeoutMs } : {}),
+  });
+  await drive(undefined, async (argv, opts) => { seenArgv = argv; seenOpts = opts; return { exitCode: 0, stdout: "", stderr: "" }; });
+  assert.ok(seenArgv.includes(`--test-timeout=${TEST_TIMEOUT_MS}`), "缺省 ⇒ 生产常量直通（R1 主防线默认在场）");
+  assert.equal(seenOpts.waveName, "pure", "波名经第二参注入（R3 告警行 / R2 归因用）");
+  assert.ok(seenArgv.includes("--test") && seenArgv.includes("--test-concurrency=1"));
+
+  await drive(1234, async (argv) => { seenArgv = argv; return { exitCode: 0, stdout: "", stderr: "" }; });
+  assert.ok(seenArgv.includes("--test-timeout=1234") && !seenArgv.includes(`--test-timeout=${TEST_TIMEOUT_MS}`),
+    "注入小值必须精确覆盖（测试纪律：绝不用生产默认值）");
+});
+
+test("TD-165 R2（纯）: runChild 报 watchdog ⇒ 不读报告、全文件 crash+watchdog_timeout、groupError 四要素齐、abortSuite=false", async () => {
+  let readCalls = 0;
+  const w = await runWave({
+    name: "lock", files: waveFiles(["a.test.js", "b.test.js"], "lock"), concurrency: 1, reporterArg: "R",
+    runChild: async () => ({ exitCode: null, stdout: "", stderr: "", watchdog: { fired: true, confirmed: true, elapsedMs: 321, probes: 1, pid: 4242, limitMs: 5000 } }),
+    readReport: async () => { readCalls += 1; return null; },
+    deleteReport: noopDelete,
+  });
+  assert.equal(readCalls, 0, "watchdog 分支绝不读报告（spawn 前已删的旧报告不可信）");
+  assert.ok(w.results.every((r) => r.status === "crash" && r.crashReason === "watchdog_timeout"), "全文件 crash 且带 crashReason");
+  assert.ok(w.groupError.includes("'lock'"), "groupError 含波名");
+  assert.ok(w.groupError.includes("321ms"), "groupError 含已耗时 ms");
+  assert.ok(w.groupError.includes("watchdog backstop fired"), "groupError 含 watchdog 标记");
+  assert.ok(w.groupError.includes("cleanup confirmed"), "groupError 含清理已确认");
+  assert.equal(w.abortSuite, false, "确认死透 ⇒ 不中止套件（后续波照常）");
+  assert.equal(w.watchdog.confirmed, true);
+});
+
+test("TD-165 R2（纯）: cleanup 未确认 ⇒ abortSuite=true + groupError 写明 cleanup unconfirmed", async () => {
+  const w = await runWave({
+    name: "pure", files: waveFiles(["a.test.js"], "pure"), concurrency: 1, reporterArg: "R",
+    runChild: async () => ({ exitCode: null, stdout: "", stderr: "", watchdog: { fired: true, confirmed: false, elapsedMs: 999, probes: 3, pid: 7, limitMs: 500 } }),
+    readReport: async () => null, deleteReport: noopDelete,
+  });
+  assert.equal(w.abortSuite, true, "未确认死透 ⇒ 中止（不许带残留继续跑）");
+  assert.ok(w.groupError.includes("cleanup unconfirmed"), "groupError 写明 cleanup unconfirmed");
+  assert.ok(w.groupError.includes("'pure'") && w.groupError.includes("999ms") && w.groupError.includes("watchdog backstop fired"));
+  assert.ok(w.results.every((r) => r.status === "crash" && r.crashReason === "watchdog_timeout"));
+});
+
+test("TD-165 R5（纯）: 看门狗杀掉的隔离重跑 ⇒ stable_fail（真挂死）；无归因 crash 仍 environment_invalid（既有语义不动）", () => {
+  assert.equal(classifyIsolation("fail", "crash", "watchdog_timeout"), "stable_fail", "单独跑也挂死 = 真测试挂死");
+  assert.equal(classifyIsolation("crash", "crash", "watchdog_timeout"), "stable_fail");
+  assert.equal(classifyIsolation("fail", "crash", null), "environment_invalid", "无归因 crash 语义保持");
+  assert.equal(classifyIsolation("fail", "crash"), "environment_invalid", "两参调用形状（既有钉）保持");
+  assert.equal(classifyIsolation("fail", "crash", "spawn_enoent"), "environment_invalid", "只有 watchdog_timeout 是特例");
+  assert.equal(classifyIsolation("pass", "crash", "watchdog_timeout"), "not_rechecked", "首轮 pass 永不重查（既有钉）");
+});
+
+test("TD-165 R2.4（纯，隔离腿）: 隔离重跑遇未确认清理 ⇒ 该条目入列后不再 spawn 后续重跑", async () => {
+  const isoCalls = [];
+  const specs = [{ name: "pure", concurrency: 2, categories: ["pure"], files: waveFiles(["a.test.js", "b.test.js"], "pure") }];
+  const out = await runCanonical({
+    waveSpecs: specs, reporterArg: "R",
+    runChild: async () => ({ exitCode: 1, stdout: "", stderr: "" }),
+    readReport: async () => makeReport(["a.test.js", "b.test.js"], new Set(["a.test.js", "b.test.js"])),
+    deleteReport: noopDelete,
+    isolator: async ({ file }) => {
+      isoCalls.push(file);
+      // 第一个重跑被兜底收杀且清理未确认；第二个不得再 spawn。
+      if (isoCalls.length === 1) {
+        return { status: "crash", exitCode: null, crashReason: "watchdog_timeout", durationMs: 5, tail: "t",
+          watchdog: { fired: true, confirmed: false, elapsedMs: 5, probes: 3, pid: 11, limitMs: 10 } };
+      }
+      return { status: "fail", exitCode: 1, tail: "t" };
+    },
+  });
+  assert.deepEqual(isoCalls, ["a.test.js"], "未确认清理后不再启动后续隔离重跑（不许带残留继续跑）");
+  assert.equal(out.isolation.length, 1);
+  assert.equal(out.isolation[0].crashReason, "watchdog_timeout");
+  assert.equal(out.suiteAborted, true);
+  assert.equal(out.finalVerdict, "fail");
+});
+
+// ── TD-165 真实子进程夹具：合成 test/ 树（tmpdir）+ 仓库 reporter 的 file:// URL ──
+const synthRepoRoot = join(fileURLToPath(import.meta.url), "..", "..", "..");
+const SYNTH_REPORTER = pathToFileURL(join(synthRepoRoot, "test", "reporter.mjs")).href;
+const SYNTH_OK = 'import { test } from "node:test";\ntest("ok", () => {});\n';
+const SYNTH_HANG_ASYNC = [
+  'import { test } from "node:test";',
+  'test("hangs forever", () => new Promise(() => {}));',
+  "const iv = setInterval(() => {}, 50); // pending handle：文件活到超时收杀为止",
+  "",
+].join("\n");
+const SYNTH_HANG_SYNC = 'import { test } from "node:test";\ntest("sync infinite loop", () => { while (true) {} });\n';
+const synthSlowOk = (ms) => `import { test } from "node:test";\ntest("slow but legal", () => new Promise((r) => setTimeout(r, ${ms})));\n`;
+
+function synthWorkspace(prefix, files) {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  writeFileSync(join(root, "package.json"), '{"type":"module"}\n', "utf8");
+  mkdirSync(join(root, "test"), { recursive: true });
+  for (const [rel, source] of Object.entries(files)) writeFileSync(join(root, "test", rel), source, "utf8");
+  return root;
+}
+
+// 本文件自身跑在 `node --test` 之下，其 env 带 node 注入的 NODE_TEST_CONTEXT；
+// 原样传给合成孙进程会让 node 认为"在测试文件里递归 run()"——跳过执行所有
+// 文件、秒退且无报告（实测：exit 0 + "run() is being called recursively"）。
+// 剥离后再传。生产 runner 不经此路径（npm test 的 runner 进程不是 --test 子进程）。
+function synthChildEnv() {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  return env;
+}
+
+// 真适配器驱动一个合成波（cwd=tmpdir ⇒ reporter 报告写 tmpdir/test-results.json）。
+async function runSynthWave(root, { name = "pure", rels, category = "pure", concurrency = 2, testTimeoutMs, watch = {} }) {
+  return runWave({
+    name, files: waveFiles(rels, category), concurrency, reporterArg: SYNTH_REPORTER,
+    runChild: realRunChild(process.execPath, root, synthChildEnv(), { waveAlarmMs: 0, ...watch }),
+    readReport: realReadReport(join(root, "test-results.json")),
+    deleteReport: realDeleteReport(join(root, "test-results.json")),
+    testTimeoutMs,
+  });
+}
+
+test("TD-165 T1: 异步 never-resolve + 注入 1s per-test 超时 ⇒ 该文件非 pass、波正常收尾、同波其他文件不受影响", async () => {
+  const root = synthWorkspace("wao-td165-t1-", { "hang.test.js": SYNTH_HANG_ASYNC, "ok.test.js": SYNTH_OK });
+  try {
+    const w = await runSynthWave(root, { rels: ["hang.test.js", "ok.test.js"], testTimeoutMs: 1000, watch: { waveWatchdogMs: 10000 } });
+    const byPath = new Map(w.results.map((r) => [r.path, r]));
+    assert.equal(byPath.get("ok.test.js").status, "pass", "同波其他文件不受影响");
+    assert.notEqual(byPath.get("hang.test.js").status, "pass", "挂死文件必须非 pass");
+    assert.equal(byPath.get("hang.test.js").status, "missing",
+      "记账事实：超时测试永不发 test:complete ⇒ reporter 无 suite ⇒ missing（非 pass、有归因；区别于 crash=波级失能）——R1 主防线把它变成有界等待");
+    assert.equal(w.groupError, null, "per-test 超时是正常失败事件（非波级失能），波照常收尾");
+    assert.ok(!w.abortSuite && !w.watchdog);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("TD-165 T2: 同步 while(true) 死循环 + 注入 1s per-test 超时 ⇒ 父进程级收杀，同样有界收尾", async () => {
+  const root = synthWorkspace("wao-td165-t2-", { "loop.test.js": SYNTH_HANG_SYNC, "ok.test.js": SYNTH_OK });
+  try {
+    const w = await runSynthWave(root, { rels: ["loop.test.js", "ok.test.js"], testTimeoutMs: 1000, watch: { waveWatchdogMs: 10000 } });
+    const byPath = new Map(w.results.map((r) => [r.path, r]));
+    assert.equal(byPath.get("ok.test.js").status, "pass");
+    assert.equal(byPath.get("loop.test.js").status, "missing",
+      "事件循环阻塞拦不住父进程级超时（v22 实测）：文件被收杀、无 suite ⇒ missing 非 pass");
+    assert.equal(w.groupError, null);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("TD-165 T3: 竞态——恰在注入超时之下完成的测试正常通过，无误杀", async () => {
+  const root = synthWorkspace("wao-td165-t3-", { "slow.test.js": synthSlowOk(300) });
+  try {
+    const w = await runSynthWave(root, { rels: ["slow.test.js"], testTimeoutMs: 2500, watch: { waveWatchdogMs: 10000 } });
+    assert.equal(w.results[0].status, "pass", "300ms 慢而合法的测试在 2.5s 上限内 ⇒ pass（保守预算不误杀）");
+    assert.equal(w.groupError, null);
+    assert.ok(!w.watchdog, "兜底未触发");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("TD-165 T4: 波级兜底先于 per-test 超时触发（注入小 watchdogMs + 真实 taskkill）⇒ 全文件 crash + crashReason + groupError 四要素", async () => {
+  const root = synthWorkspace("wao-td165-t4-", { "hang.test.js": SYNTH_HANG_ASYNC, "ok.test.js": SYNTH_OK });
+  try {
+    const w = await runSynthWave(root, {
+      name: "filesystem", rels: ["hang.test.js", "ok.test.js"], category: "git",
+      testTimeoutMs: 8000, watch: { waveWatchdogMs: 600 }, // 兜底先于 R1
+    });
+    assert.ok(w.results.every((r) => r.status === "crash" && r.crashReason === "watchdog_timeout"),
+      "该波全部文件记 crash 且带 crashReason=watchdog_timeout（含早已完成的 ok.test.js——波级失能不偏袒）");
+    assert.ok(w.groupError.includes("'filesystem'") && w.groupError.includes("watchdog backstop fired"), "groupError 含波名 + watchdog 标记");
+    assert.ok(/ran \d+ms/.test(w.groupError), "groupError 含已耗时 ms");
+    assert.ok(w.groupError.includes("cleanup confirmed"), "真实 taskkill /T /F + 探针证死 ⇒ 清理已确认");
+    assert.ok(w.watchdog && w.watchdog.confirmed === true && w.watchdog.pid > 0 && w.watchdog.limitMs === 600);
+    assert.equal(w.abortSuite, false, "确认死透 ⇒ 不中止后续波");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("TD-165 T5: 清理未确认（killTreeFn 空操作 + probeAliveFn 恒活）⇒ 后续波不启动 + cleanup unconfirmed + verdict=fail + 隔离跳过", async () => {
+  const root = synthWorkspace("wao-td165-t5-", { "hang.test.js": synthSlowOk(5000) }); // 活过兜底窗口但终会自退
+  let isoCalls = 0;
+  let out = null;
+  try {
+    out = await runCanonical({
+      waveSpecs: [
+        { name: "pure", concurrency: 2, categories: ["pure"], files: waveFiles(["hang.test.js"], "pure") },
+        { name: "lock", concurrency: 1, categories: ["lock"], files: waveFiles(["never.test.js"], "lock") },
+      ],
+      reporterArg: SYNTH_REPORTER,
+      runChild: realRunChild(process.execPath, root, synthChildEnv(), {
+        waveWatchdogMs: 400, waveAlarmMs: 0,
+        killTreeFn: async () => {},   // 空操作：杀不掉
+        probeAliveFn: () => {},       // 恒活：探针证不出死
+        sleepFn: async () => {},      // 探针间隔即时（不等 500ms）
+      }),
+      readReport: realReadReport(join(root, "test-results.json")),
+      deleteReport: realDeleteReport(join(root, "test-results.json")),
+      isolator: async () => { isoCalls += 1; return { status: "fail", exitCode: 1, tail: "" }; },
+    });
+    assert.equal(out.waves.length, 1, "第二个波（lock）绝不启动——不许带残留继续跑");
+    assert.ok(out.waves[0].groupError.includes("cleanup unconfirmed"), "groupError 写明 cleanup unconfirmed");
+    assert.equal(out.suiteAborted, true);
+    assert.equal(out.suiteError, true);
+    assert.equal(out.finalVerdict, "fail");
+    assert.ok(out.waves[0].files.every((f) => f.status === "crash"));
+    assert.equal(isoCalls, 0, "中止后隔离重跑也一并跳过（不再 spawn 任何子进程）");
+    assert.ok(out.firstRound.failures.every((f) => f.crashReason === "watchdog_timeout"), "failures 条目带 crashReason 归因");
+  } finally {
+    // killTreeFn 被注入为空操作 ⇒ 残留是真的：用真实 taskkill 收尸，绝不泄漏。
+    const pid = out?.waves?.[0]?.watchdog?.pid;
+    if (pid) await defaultKillTree(pid);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("TD-165 T6: 隔离重跑再挂 ⇒ 兜底收杀重跑 + 分类不是 environment_invalid + 终判 fail", async () => {
+  const root = synthWorkspace("wao-td165-t6-", { "hang.test.js": SYNTH_HANG_ASYNC, "ok.test.js": SYNTH_OK });
+  try {
+    const out = await runCanonical({
+      waveSpecs: [{ name: "pure", concurrency: 2, categories: ["pure"], files: waveFiles(["hang.test.js", "ok.test.js"], "pure") }],
+      reporterArg: SYNTH_REPORTER,
+      testTimeoutMs: 1000, // 首轮：R1 收杀挂死文件（missing ⇒ 非 pass）
+      runChild: realRunChild(process.execPath, root, synthChildEnv(), { waveWatchdogMs: 10000, waveAlarmMs: 0 }),
+      readReport: realReadReport(join(root, "test-results.json")),
+      deleteReport: realDeleteReport(join(root, "test-results.json")),
+      // 重跑：testTimeout 放大到 8s，兜底 600ms 先杀 —— 单独跑也挂死。
+      isolator: realIsolator(process.execPath, root, synthChildEnv(), { testTimeoutMs: 8000, waveWatchdogMs: 600, waveAlarmMs: 0 }),
+    });
+    assert.equal(out.finalVerdict, "fail");
+    assert.equal(out.isolation.length, 1, "只有首轮非 pass 的 hang.test.js 进入重跑");
+    const iso = out.isolation[0];
+    assert.equal(iso.path, "hang.test.js");
+    assert.equal(iso.isolationStatus, "crash");
+    assert.equal(iso.crashReason, "watchdog_timeout", "重跑被兜底收杀的归因进报告");
+    assert.equal(iso.classification, "stable_fail", "该文件单独跑也挂死 = 真测试挂死（R5 新语义）");
+    assert.notEqual(iso.classification, "environment_invalid", "不得再归环境无效");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("TD-165 T7: 慢波告警（注入小 alarmMs）⇒ stderr 出现 NOTICE 行，verdict 不受影响", async () => {
+  const root = synthWorkspace("wao-td165-t7-", { "slow.test.js": synthSlowOk(700) });
+  const lines = [];
+  try {
+    const w = await runSynthWave(root, {
+      name: "mcp", rels: ["slow.test.js"], category: "mcp", concurrency: 1,
+      testTimeoutMs: 5000, watch: { waveWatchdogMs: 10000, waveAlarmMs: 200, logLine: (l) => lines.push(l) },
+    });
+    assert.ok(lines.length >= 1, "至少一条告警行（子进程墙钟 > alarmMs）");
+    for (const line of lines) {
+      assert.ok(/^\[canonical\] NOTICE: wave=mcp running for \d+s \(slow-wave alarm, informational\)$/.test(line),
+        `告警行形状（纯读、带波名与秒数）：${line}`);
+    }
+    assert.equal(w.results[0].status, "pass", "告警绝不影响结果（纯读）");
+    assert.equal(w.groupError, null);
+    assert.ok(!w.watchdog, "告警不是兜底：绝不杀进程");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

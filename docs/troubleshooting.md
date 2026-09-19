@@ -38,6 +38,7 @@
 | 交付验证报 `command_timeout` 但单独复跑很快（同机并发验证互踩拖慢） | [§8.1](#81-npm-test-exit-1-但失败全为-isolation_pass并发互踩非代码回归) |
 | 验证在排队等待 / 想查同机验证闸持有者或残留租约 | [§8.1](#81-npm-test-exit-1-但失败全为-isolation_pass并发互踩非代码回归)（`runs gate` 只读查询） |
 | 主仓根全量尾部 runs-guard RED（套件期间出现新 runs/ 条目） | [§8.2](#82-主仓根跑全量前确认无活跃-workerdaemonruns-guard-红灯td-134) |
+| `npm test` 某波长时间不动 / 尾部 `watchdog backstop fired` 或 crashReason=watchdog_timeout | [§8.3](#83-npm-test-波次挂死或长滞td-165-看门狗分诊) |
 
 ## delivery 失败模式 → 正确工具（闭集查表）
 
@@ -475,6 +476,17 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **根因**：runs-guard 对 `runs/` 做基线-现状差分但**不做进程归属**——套件运行期间任何非套件写入者（活跃 daemon 追加 daemon-health、另一会话的 MCP dispatch、手动 `wao run`）落地的新条目都触发同一红灯。真实归因是"另一会话的 dispatch"，不是"测试写入"，但红灯文案无法区分。
 - **前置确认（运维规程）**：**主仓根跑全量前确认无活跃 worker/daemon**（`runs dashboard` / 活跃 run 检查）。交付 worktree 管道天然免疫（worktree 无 `runs/` ⇒ 空基线）。
 - **状态**：运维规程登记（TD-134）；根修（进程归属或隔离 run-dir）待真实痛点再立项。
+
+### 8.3 `npm test` 波次挂死或长滞（TD-165 看门狗分诊）
+
+- **症状**：全量在某波长时间无进展；stderr 每 5 分钟一行 `[canonical] NOTICE: wave=<name> running for <N>s (slow-wave alarm, informational)`；或尾部出现 `watchdog backstop fired` / 文件 `crashReason: "watchdog_timeout"`。TD-165 之前一个挂死文件会让整个波次无限期停摆——现在三层看门狗已把无限等待变成有界等待并**指名肇事文件/波**。
+- **三层防线（预算：per-test 600s / 波级兜底 900s / 告警 300s）**：
+  - **R1 per-test 超时**（`--test-timeout`，主防线）：单个测试挂死（含同步死循环——Node 在文件级从父进程执行超时）按普通失败收杀；该文件记非 pass（超时测试不产生完成事件 ⇒ 报告中多为 `missing`），**同波其他文件不受影响**，波正常收尾。
+  - **R2 波级兜底看门狗**（墙钟 900s）：到期 `taskkill /PID <该子进程自己的 pid> /T /F`（只杀自己的进程树，绝不全局杀 node.exe）+ `kill(pid,0)→ESRCH` 探针确认死透（500ms × 3 次）。该波**全部文件**记 `crash` + `crashReason: "watchdog_timeout"`，groupError 含波名/已耗时/标记/清理状态。
+  - **R3 慢波告警**（300s NOTICE 行）：纯读提示，不杀进程、不影响 verdict。
+- **分诊**：读 `test-results.json`——`executionWaves[].watchdog`（fired/confirmed/elapsedMs/pid）与 `groupError` 指名波与耗时；该波 `files[]` 的 crash 条目即被连坐文件；`firstRound.failures[].crashReason` 与 isolation 条目的 `crashReason: "watchdog_timeout"`（分类 `stable_fail`——单独跑也挂死 = 真测试挂死，不是环境问题）指名肇事测试文件。
+- **`cleanup unconfirmed`（红灯 + 后续波未跑）**：兜底杀了但探针证不出死——疑似残留进程。先用报告里的 pid 确认真死（`tasklist /FI "PID eq <pid>"`，仍在则 `taskkill /PID <pid> /T /F`），清干净再重跑；此时 verdict 必为 fail，不许带残留继续。
+- **后备：手工二分（看门狗指名之前的旧配方，仍适用于单文件复跑）**：拿到肇事文件后 `node scripts/wao-node.cjs --test test/<file>` 单发复跑确认仍挂；再在该文件内二分（注释后半部测试）定位具体挂死用例。
 
 ---
 

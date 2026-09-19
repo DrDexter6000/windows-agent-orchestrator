@@ -22,14 +22,18 @@
 //                    category, unique wave names, integer concurrency >= 1
 //     Any drift is a HARD failure (non-zero, no tests run).
 //   - Runs WAVES SERIALLY; within a wave, exactly ONE Node child is spawned:
-//       node --test --test-concurrency=<wave limit> --test-reporter ./test/reporter.mjs <files...>
+//       node --test --test-concurrency=<wave limit> --test-timeout=<per-test cap>
+//                --test-reporter ./test/reporter.mjs <files...>
 //     Node runs that wave's files (in-process, default isolation) and the custom
 //     structured reporter (test/reporter.mjs) writes a structured test-results.json.
 //     After each child closes the runner reads+validates that JSON immediately and
 //     maps reporter suites to the manifest's expected files (NO human TAP/spec
 //     text, NO regex classification). The next wave then overwrites the
 //     intermediate report; the bounded aggregate is written at the end.
-//   - Runs EVERY wave to completion before summarizing (no early abort).
+//   - Runs EVERY wave to completion before summarizing (no early abort — the
+//     ONE deliberate exception is TD-165 R2.4: a watchdog kill whose cleanup
+//     could NOT be confirmed stops every later wave; suspected residue must
+//     never be carried forward into more spawns).
 //   - First-round verdict: any non-pass file (fail / missing suite / crash) OR a
 //     nonzero wave exit OR a missing/malformed wave report OR a spawn error ⇒
 //     non-green, and that can NEVER be washed green. Each non-pass file gets at
@@ -97,6 +101,28 @@
 //     It never blocks, never waits, and eats no budget. Deleted on every exit
 //     path; a crashed run leaves an orphan whose only consequence is that
 //     later runs print the same line.
+//   - TD-165 hang watchdogs, THREE layers (before this, a hung test file could
+//     stall a wave FOREVER: both child adapters only awaited `close`, and
+//     nothing anywhere owned a timer):
+//       R1 per-test timeout (main line of defense) — every `node --test` child
+//          argv (wave first-round AND per-file isolation recheck) carries
+//          --test-timeout=<TEST_TIMEOUT_MS>. Node enforces it at the FILE
+//          level from its OWN parent process, so even a synchronous
+//          `while (true)` body (child event loop blocked) is collected.
+//       R2 wave watchdog (backstop) — a wall-clock timer per spawned child; on
+//          expiry it kills EXACTLY that child's process tree
+//          (taskkill /PID <its own pid> /T /F — never a global node.exe hunt),
+//          confirms death via kill(pid, 0) → ESRCH probes (3 × 500ms), records
+//          the wave's files as crash with crashReason "watchdog_timeout" and a
+//          groupError naming the wave + elapsed ms. An UNCONFIRMED kill writes
+//          "cleanup unconfirmed", starts NO further waves, and forces
+//          verdict=fail. A watchdog-killed ISOLATION rerun classifies
+//          stable_fail (the file hangs ALONE = a true test hang), NOT
+//          environment_invalid.
+//       R3 slow-wave alarm (pure read) — one informational stderr NOTICE per
+//          elapsed alarm period; never kills, never touches the verdict.
+//     All budgets and kill/probe seams are injectable; the meta-tests inject
+//     small values (0.2-10s) and NEVER the production defaults.
 //   - Writes a bounded test-results.json that keeps every failure attributable to
 //     BOTH its resource category AND its execution wave: each file records
 //     resourceCategory + executionWave; each wave records timing/counts/exit.
@@ -206,6 +232,30 @@ export function validateWavePlan(wavePlan, categories) {
   return { ok: errors.length === 0, errors, categoryToWave };
 }
 
+// ── TD-165: hang-watchdog budgets (all three injectable; never hardcode) ─────
+// R1 per-test timeout, passed as --test-timeout on every `node --test` child
+// (wave first-round AND isolation recheck). Node enforces it per test at the
+// FILE level from its own parent process (verified 2026-09-19, Node v22.23.1:
+// a synchronous `while (true)` body is collected even with the child's event
+// loop blocked). Derivation: measured slowest single file
+// deliveryVerification.test.js = 133s (2026-09-19 test-results.json) and the
+// historical filesystem WAVE peak = 207s (54 files at concurrency 16); 600s is
+// ~3-4.5x headroom over both — a deliberately conservative start so a legal
+// slow test is never falsely killed. Tighten only from new measured evidence.
+export const TEST_TIMEOUT_MS = 600000;
+
+// R2 wave watchdog (wall-clock backstop per spawned child). Derivation: 3× the
+// measured wave peak (3 × 207s ≈ 621s) rounded up to 900s; strictly greater
+// than the per-test cap (600s) plus intra-wave queueing margin, so the
+// backstop fires only when R1 could not collect the hang itself.
+export const WAVE_WATCHDOG_MS = 900000;
+
+// R3 slow-wave alarm (informational only): 300s sits between a healthy wave's
+// expected completion (~4min worst measured) and the watchdog — early enough
+// to flag a stall in the operator's terminal, late enough to stay quiet on
+// every legal wave.
+export const WAVE_ALARM_MS = 300000;
+
 // ── Manifest validation (pure, tested in canonicalRunner.test.js) ────────────
 //
 // `discovered`: iterable of test-relative paths (forward-slashed, e.g.
@@ -243,10 +293,18 @@ export function validateManifest(manifest, discovered) {
 // ── Isolation classification (pure, tested in canonicalRunner.test.js) ───────
 // A first-round PASS is never rechecked. A non-pass first round gets ONE isolation
 // run; its outcome only labels the failure — it can NEVER produce PASS.
-export function classifyIsolation(firstRoundStatus, isolationStatus) {
+// TD-165 R5: an isolation rerun killed by the wave watchdog
+// (crashReason "watchdog_timeout") means the file hangs ALONE — a TRUE test
+// hang, not a broken environment — so it classifies stable_fail like any
+// honest re-failure. An UNATTRIBUTED crash keeps the original
+// environment_invalid semantics (spawn-level failure ⇒ suspect environment).
+export function classifyIsolation(firstRoundStatus, isolationStatus, isolationCrashReason = null) {
   if (firstRoundStatus === "pass") return "not_rechecked";
   if (isolationStatus === "pass") return "isolation_pass";
-  if (isolationStatus === "crash") return "environment_invalid";
+  if (isolationStatus === "crash") {
+    if (isolationCrashReason === "watchdog_timeout") return "stable_fail";
+    return "environment_invalid";
+  }
   return "stable_fail"; // isolationStatus === "fail"
 }
 
@@ -583,10 +641,17 @@ function discoverTestFiles(testDir) {
 // NEVER surface as zero failures (invariant 4): missing report → all crash;
 // nonzero exit with a clean report → groupError; missing suites → non-pass.
 //
+// TD-165 R1: the child argv carries --test-timeout (per-test cap, Node enforces
+// it at the file level from its own parent). TD-165 R2: when the runChild result
+// reports a fired watchdog, the wave is terminal — the (already-deleted) report
+// is NOT read; every file records crash with crashReason "watchdog_timeout" and
+// a groupError naming the wave + elapsed ms + cleanup status. abortSuite=true
+// (cleanup unconfirmed) tells runCanonical to start NO further waves.
+//
 // A wave pools files from one OR MORE resource categories; each file carries its
 // resourceCategory so failures stay attributable to category AND wave. `files` =
 // [{ path, resourceCategory }].
-export async function runWave({ name, files, concurrency, reporterArg, runChild, readReport, deleteReport }) {
+export async function runWave({ name, files, concurrency, reporterArg, runChild, readReport, deleteReport, testTimeoutMs = TEST_TIMEOUT_MS }) {
   const start = Date.now();
   if (files.length === 0) return { name, results: [], durationMs: 0, exitCode: 0, groupError: null };
 
@@ -609,18 +674,39 @@ export async function runWave({ name, files, concurrency, reporterArg, runChild,
   const argv = [
     "--test",
     `--test-concurrency=${concurrency}`,
+    `--test-timeout=${testTimeoutMs}`, // TD-165 R1: per-test cap, enforced by Node at the file level
     "--test-reporter", reporterArg,
     ...expectedRels.map((rel) => "test/" + rel),
   ];
 
   let child;
   try {
-    child = await runChild(argv, {});
+    // waveName rides the second argument so the adapter's alarm lines (R3) can
+    // name the wave; existing injected fakes ignore it.
+    child = await runChild(argv, { waveName: name });
   } catch (err) {
     return {
       name, durationMs: Date.now() - start, exitCode: null,
       groupError: `spawn error: ${err && err.message ? err.message : String(err)}`,
       results: files.map((f) => ({ path: f.path, status: "crash", resourceCategory: f.resourceCategory, executionWave: name, durationMs: null })),
+    };
+  }
+
+  // TD-165 R2: the wave-level watchdog killed the child — terminal for the
+  // whole wave. The report was deleted pre-spawn and cannot be trusted now, so
+  // the files are recorded crash with the watchdog attribution directly and
+  // the readReport/map path below is skipped entirely.
+  if (child.watchdog && child.watchdog.fired) {
+    const { confirmed, elapsedMs, probes, pid, limitMs } = child.watchdog;
+    const groupError = confirmed
+      ? `wave '${name}' ran ${elapsedMs}ms (wall-clock limit ${limitMs}ms) — watchdog backstop fired; killed child pid ${pid} via taskkill /PID ${pid} /T /F; cleanup confirmed (kill(pid,0) → ESRCH after ${probes} probe(s))`
+      : `wave '${name}' ran ${elapsedMs}ms (wall-clock limit ${limitMs}ms) — watchdog backstop fired; cleanup unconfirmed (pid ${pid} still alive after taskkill + ${probes} probe(s)); subsequent waves will NOT start`;
+    return {
+      name, durationMs: Date.now() - start, exitCode: child.exitCode ?? null, groupError,
+      results: files.map((f) => ({ path: f.path, status: "crash", crashReason: "watchdog_timeout", resourceCategory: f.resourceCategory, executionWave: name, durationMs: null })),
+      watchdog: child.watchdog,
+      childStderr: child.stderr, childStdout: child.stdout,
+      abortSuite: !confirmed,
     };
   }
 
@@ -653,13 +739,17 @@ export async function runWave({ name, files, concurrency, reporterArg, runChild,
 // ONLY from first-round results (isolation never washes green); any groupError
 // also forces non-green. Each wave spec carries its pooled categories so the
 // bounded report can attribute every file to category + wave.
-export async function runCanonical({ waveSpecs, reporterArg, runChild, readReport, deleteReport, isolator, onWaveStart, onWaveEnd }) {
+// TD-165 R2.4: the ONE no-early-abort exception — when a wave dies to the
+// watchdog and cleanup is UNCONFIRMED (possible residue), later waves are NOT
+// started and isolation reruns are skipped; the verdict is fail either way.
+export async function runCanonical({ waveSpecs, reporterArg, runChild, readReport, deleteReport, isolator, onWaveStart, onWaveEnd, testTimeoutMs = TEST_TIMEOUT_MS }) {
   const wavesReport = [];
   const firstRound = [];
   let suiteError = false;
+  let suiteAborted = false;
   for (const spec of waveSpecs) {
     if (onWaveStart) onWaveStart(spec);
-    const w = await runWave({ name: spec.name, files: spec.files, concurrency: spec.concurrency, reporterArg, runChild, readReport, deleteReport });
+    const w = await runWave({ name: spec.name, files: spec.files, concurrency: spec.concurrency, reporterArg, runChild, readReport, deleteReport, testTimeoutMs });
     if (w.groupError) suiteError = true;
     firstRound.push(...w.results);
     const wave = {
@@ -674,15 +764,23 @@ export async function runCanonical({ waveSpecs, reporterArg, runChild, readRepor
       missing: w.results.filter((r) => r.status === "missing").length,
       crashed: w.results.filter((r) => r.status === "crash").length,
       groupError: w.groupError,
+      // TD-165 R2: wave-level watchdog record (null when it never fired) —
+      // fired/confirmed/elapsedMs/probes/pid for triage; verdict-relevant parts
+      // already surface via groupError + per-file crashReason.
+      watchdog: w.watchdog ?? null,
       files: w.results.map((r) => ({ path: r.path, status: r.status, resourceCategory: r.resourceCategory, executionWave: r.executionWave, durationMs: r.durationMs ?? null })),
     };
     wavesReport.push(wave);
     if (onWaveEnd) onWaveEnd(wave);
+    if (w.abortSuite) {
+      suiteAborted = true;
+      break; // R2.4: residue suspected — no further wave may spawn
+    }
   }
 
   const failures = firstRound.filter((r) => r.status !== "pass");
   const isolation = [];
-  if (isolator) {
+  if (isolator && !suiteAborted) {
     for (const f of failures) {
       const iso = await isolator({ file: f.path });
       isolation.push({
@@ -692,13 +790,24 @@ export async function runCanonical({ waveSpecs, reporterArg, runChild, readRepor
         firstRoundStatus: f.status,
         isolationStatus: iso.status,
         isolationExitCode: iso.exitCode ?? null,
-        // B5 (R23-F/A follow-up): realIsolator already measures durationMs —
+        // TD-165 R5: a watchdog-killed rerun (crashReason watchdog_timeout)
+        // classifies stable_fail — see classifyIsolation.
+        crashReason: iso.crashReason ?? null,
+        // B5 (R23/F/A follow-up): realIsolator already measures durationMs —
         // carry it into the bounded report instead of dropping it. Absent or
         // non-finite normalizes to null (never fabricated 0).
         isolationDurationMs: nonNegativeMs(iso.durationMs),
-        classification: classifyIsolation(f.status, iso.status),
+        classification: classifyIsolation(f.status, iso.status, iso.crashReason ?? null),
         isolationTail: iso.tail,
       });
+      // R2.4, isolation leg: an UNCONFIRMED watchdog kill during a rerun is the
+      // same residue signal as in a wave — spawn no further isolation children.
+      // (The verdict is already fail — the first-round failure is why this
+      // rerun exists at all; isolation can never wash it green.)
+      if (iso.watchdog && iso.watchdog.fired && !iso.watchdog.confirmed) {
+        suiteAborted = true;
+        break;
+      }
     }
   }
 
@@ -713,11 +822,12 @@ export async function runCanonical({ waveSpecs, reporterArg, runChild, readRepor
     firstRound: {
       verdict: firstRoundVerdict,
       passed, failed, missing, crashed,
-      failures: failures.map((r) => ({ path: r.path, status: r.status })),
+      failures: failures.map((r) => ({ path: r.path, status: r.status, crashReason: r.crashReason ?? null })),
     },
     isolation,
     finalVerdict: firstRoundVerdict, // isolation never changes the verdict
     suiteError,
+    suiteAborted, // TD-165 R2.4: true ⇒ waves after the abort point did NOT run
   };
 }
 
@@ -725,10 +835,119 @@ export async function runCanonical({ waveSpecs, reporterArg, runChild, readRepor
 const CHILD_BUFFER_CAP = 32768;
 const TAIL_CHARS = 2000;
 
+// ── TD-165 R2/R3: wall-clock supervision for ONE spawned child ──────────────
+// Shared by both real adapters (the wave child and the isolation recheck).
+// Pure orchestration over injectable seams — the supervisionLoop idiom from
+// scripts/dispatch-with-liveness.mjs: killTreeFn / probeAliveFn / sleepFn /
+// logLine are all injectable so the meta-tests never touch a real taskkill or
+// a live pid. Two unref'd timers are armed per child:
+//   alarm (R3)    — an interval that only ever prints ONE informational stderr
+//                   line per elapsed period; never kills, never verdict-affects.
+//   watchdog (R2) — a timeout that fires ONCE, marks `fired` SYNCHRONOUSLY
+//                   (from that instant the child's own close/error events no
+//                   longer settle the adapter — the probe loop owns the
+//                   outcome), asks killTreeFn to kill exactly THIS child's pid
+//                   tree, then probes liveness up to probeAttempts times at
+//                   probeDelayMs intervals. A probe throwing EXACTLY
+//                   { code: "ESRCH" } is the only accepted proof of death —
+//                   same kill(pid, 0) win32-libuv evidence as
+//                   createInflightMarker's killProbe (EPERM or any other error
+//                   means alive; fail-safe). watchdogOutcome resolves to null
+//                   when nothing fired, or { fired, confirmed, elapsedMs,
+//                   probes, pid, limitMs } once the watchdog path completes.
+export function createChildSupervisor({
+  label,
+  waveWatchdogMs = WAVE_WATCHDOG_MS,
+  waveAlarmMs = WAVE_ALARM_MS,
+  killTreeFn = defaultKillTree,
+  probeAliveFn = defaultProbeAlive,
+  probeDelayMs = 500,
+  probeAttempts = 3,
+  sleepFn = (ms) => new Promise((r) => setTimeout(r, ms)),
+  logLine = (line) => console.error(line),
+  now = Date.now,
+}) {
+  const start = now();
+  let alarmTimer = null;
+  let watchdogTimer = null;
+  let fired = false;
+  let resolveOutcome;
+  const watchdogOutcome = new Promise((res) => { resolveOutcome = res; });
+  const arm = (child) => {
+    if (waveAlarmMs > 0) {
+      alarmTimer = setInterval(() => {
+        logLine(`[canonical] NOTICE: wave=${label} running for ${Math.round((now() - start) / 1000)}s (slow-wave alarm, informational)`);
+      }, waveAlarmMs);
+      alarmTimer.unref();
+    }
+    if (waveWatchdogMs > 0) {
+      watchdogTimer = setTimeout(() => {
+        fired = true; // synchronous: close/error on the child are moot from here
+        if (alarmTimer) { clearInterval(alarmTimer); alarmTimer = null; } // the child is dying — stop the slow alarm
+        const elapsedMs = now() - start;
+        (async () => {
+          try { await killTreeFn(child.pid); } catch { /* probes decide liveness below */ }
+          let confirmed = false;
+          let probes = 0;
+          for (let attempt = 0; attempt < probeAttempts && !confirmed; attempt += 1) {
+            if (attempt > 0) await sleepFn(probeDelayMs);
+            probes = attempt + 1;
+            try {
+              probeAliveFn(child.pid); // normal return ⇒ still alive
+            } catch (err) {
+              if (err && err.code === "ESRCH") confirmed = true;
+            }
+          }
+          resolveOutcome({ fired: true, confirmed, elapsedMs, probes, pid: child.pid, limitMs: waveWatchdogMs });
+        })();
+      }, waveWatchdogMs);
+      watchdogTimer.unref();
+    }
+  };
+  const dispose = () => {
+    if (alarmTimer) { clearInterval(alarmTimer); alarmTimer = null; }
+    if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+  };
+  return { arm, dispose, fired: () => fired, watchdogOutcome };
+}
+
+// Default R2 kill: taskkill /PID <pid> /T /F — kills EXACTLY this child's
+// process tree (a hung test may have spawned grandchildren that outlive it;
+// verified 2026-09-19: without /T they are orphaned). NEVER a global node.exe
+// hunt — `taskkill /IM node.exe` would kill the runner itself, sibling waves,
+// and every unrelated Node process on the machine. The pid is additionally
+// guarded against our own process.pid. Non-win32 degrades to SIGKILL on the
+// direct child only (the production surface is win32; the probe loop decides
+// "confirmed" either way, so the fallback cannot fake success).
+export function defaultKillTree(pid) {
+  return new Promise((resolve) => {
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) { resolve(false); return; }
+    if (process.platform !== "win32") {
+      try { process.kill(pid, "SIGKILL"); } catch { /* probe decides */ }
+      resolve(true);
+      return;
+    }
+    const tk = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    tk.on("error", () => resolve(false));
+    tk.on("close", () => resolve(true));
+  });
+}
+
+// Default R2 liveness probe: kill(pid, 0) — throws ESRCH iff the pid is gone
+// (win32 libuv emits the POSIX errno name; verified 2026-08-21 — see the
+// killProbe note in createInflightMarker for the same evidence).
+export function defaultProbeAlive(pid) {
+  process.kill(pid, 0);
+}
+
 // One `node --test` child per wave. Returns {exitCode, stdout, stderr}; rejects
-// on spawn error (caught by runWave → all files crash).
-export function realRunChild(nodeExe, repoRoot, env) {
-  return (argv, _opts) => new Promise((resolve, reject) => {
+// on spawn error (caught by runWave → all files crash). TD-165: every child is
+// supervised (R2 watchdog backstop + R3 slow alarm) — once the watchdog fires,
+// the child's own close/error events no longer settle this promise; the probe
+// loop resolves it with { watchdog } so runWave can attribute the kill. The
+// timers are unref'd so a normally-closed child never lingers.
+export function realRunChild(nodeExe, repoRoot, env, watchOpts = {}) {
+  return (argv, opts = {}) => new Promise((resolve, reject) => {
     const child = spawn(nodeExe, argv, {
       cwd: repoRoot, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
     });
@@ -738,8 +957,13 @@ export function realRunChild(nodeExe, repoRoot, env) {
     const onErr = (c) => { err += c; if (err.length > CHILD_BUFFER_CAP) err = err.slice(err.length - CHILD_BUFFER_CAP); };
     child.stdout.on("data", onOut);
     child.stderr.on("data", onErr);
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ exitCode: code, stdout: out, stderr: err }));
+    const supervisor = createChildSupervisor({ label: opts.waveName ?? "wave", ...watchOpts });
+    supervisor.arm(child);
+    child.on("error", (e) => { if (!supervisor.fired()) { supervisor.dispose(); reject(e); } });
+    child.on("close", (code) => { if (!supervisor.fired()) { supervisor.dispose(); resolve({ exitCode: code, stdout: out, stderr: err }); } });
+    supervisor.watchdogOutcome.then((wd) => {
+      if (wd) resolve({ exitCode: null, stdout: out, stderr: err, watchdog: wd });
+    });
   });
 }
 
@@ -769,20 +993,35 @@ export function realDeleteReport(reportPath) {
 
 // One isolated diagnostic child per first-pass failed file. Verdict by EXIT CODE
 // so a spawn crash (exit null) stays distinct from a clean failure — that feeds
-// classifyIsolation's environment_invalid branch.
-export function realIsolator(nodeExe, repoRoot, env) {
+// classifyIsolation's environment_invalid branch. TD-165: the argv carries the
+// per-test timeout (R1) and the child is supervised exactly like a wave child
+// (R2 backstop + R3 alarm); a watchdog kill resolves crash with crashReason
+// "watchdog_timeout" — classifyIsolation reads it as a TRUE test hang
+// (stable_fail), never environment_invalid.
+export function realIsolator(nodeExe, repoRoot, env, watchOpts = {}) {
+  const { testTimeoutMs = TEST_TIMEOUT_MS } = watchOpts;
   return ({ file }) => new Promise((resolve) => {
     const start = Date.now();
     let err = "";
-    const child = spawn(nodeExe, ["--test", "test/" + file], {
+    const child = spawn(nodeExe, ["--test", `--test-timeout=${testTimeoutMs}`, "test/" + file], {
       cwd: repoRoot, env, stdio: ["ignore", "ignore", "pipe"], windowsHide: true,
     });
     child.stderr.on("data", (c) => { err += c; if (err.length > CHILD_BUFFER_CAP) err = err.slice(err.length - CHILD_BUFFER_CAP); });
-    child.on("error", () => resolve({ status: "crash", exitCode: null, durationMs: Date.now() - start, tail: err.slice(-TAIL_CHARS) }));
-    child.on("close", (code) => resolve({
-      status: code === 0 ? "pass" : code === null ? "crash" : "fail",
-      exitCode: code, durationMs: Date.now() - start, tail: err.slice(-TAIL_CHARS),
-    }));
+    const supervisor = createChildSupervisor({ label: `isolation/${file}`, ...watchOpts });
+    supervisor.arm(child);
+    child.on("error", () => { if (!supervisor.fired()) { supervisor.dispose(); resolve({ status: "crash", exitCode: null, durationMs: Date.now() - start, tail: err.slice(-TAIL_CHARS) }); } });
+    child.on("close", (code) => {
+      if (!supervisor.fired()) {
+        supervisor.dispose();
+        resolve({
+          status: code === 0 ? "pass" : code === null ? "crash" : "fail",
+          exitCode: code, durationMs: Date.now() - start, tail: err.slice(-TAIL_CHARS),
+        });
+      }
+    });
+    supervisor.watchdogOutcome.then((wd) => {
+      if (wd) resolve({ status: "crash", exitCode: null, crashReason: "watchdog_timeout", durationMs: Date.now() - start, tail: err.slice(-TAIL_CHARS), watchdog: wd });
+    });
   });
 }
 
@@ -964,6 +1203,12 @@ async function runSuite({ repoRoot, testDir, manifestPath, reportPath, nodeExe, 
   });
   const totalMs = Date.now() - t0;
 
+  // TD-165 R2.4: unconfirmed watchdog cleanup — the suite stopped early on
+  // purpose; say so explicitly (the verdict is fail via the wave's groupError).
+  if (outcome.suiteAborted) {
+    console.error("[canonical] watchdog cleanup unconfirmed — later waves were NOT started (possible process residue; do not re-run until the stray pid is gone); verdict=fail");
+  }
+
   for (const iso of outcome.isolation) {
     console.error(`[canonical] isolation ${iso.path} [${iso.resourceCategory}/${iso.executionWave}] firstRound=${iso.firstRoundStatus} alone=${iso.isolationStatus} ⇒ ${iso.classification}`);
   }
@@ -985,6 +1230,9 @@ async function runSuite({ repoRoot, testDir, manifestPath, reportPath, nodeExe, 
     isolation: outcome.isolation,
     finalVerdict: outcome.finalVerdict,
     suiteError: outcome.suiteError,
+    // TD-165 R2.4: true ⇒ a watchdog kill with UNCONFIRMED cleanup stopped the
+    // suite; waves after the abort point did NOT run.
+    suiteAborted: outcome.suiteAborted,
     // R8-3: additive field — every entry that appeared in the REAL runs/
     // during the suite (any name/shape — transcripts, dot entries, state
     // files, subdirectory slots), with the wave/phase that first saw it.
