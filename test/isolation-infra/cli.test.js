@@ -5323,4 +5323,152 @@ test("TD-153(d2) runs grep 输出序：经 loadRunFiles 时间戳排序（自定
     rmrfRetry(dir);
   }
 });
+
+// ===== TD-153 残余实施批：runs list --state / --since =====
+//
+// 状态枚举（WQ-02）：
+//   - 参数校验态：非法 state 值（闭集报错）、裸 --state/--since（缺值）、
+//     --since 非法 duration、--active × --state 一切组合（含 running）
+//   - 过滤正常态：闭集投影命中、时间窗新鲜/超龄、组合叠加、JSON 结构化零结果
+//   - 判别态：--state running 保留 unresolved（无心跳非终态）——与 --active 的
+//     "证明活跃"语义相反
+//   - 形状稳定态：过滤序不影响 JSON 键集与行字段（与无过滤对照）
+//   不适用：loading/异步态（runsCommand 单次执行，无 UI 状态机）；
+//   unparseable transcript × 过滤 = service 层既有 skip-silently 路径
+//   （runs.test.js TD-153 系列已钉，CLI 层不重复）。
+
+/** TD-153 残余批夹具：带信封、终态 run.state_change 定 state、末条 ts 定 updatedAt。 */
+function writeTd153ListStateRun(runDir, runId, agentId, state, lastTs) {
+  const events = [
+    { seq: 1, ts: new Date(Date.parse(lastTs) - 60_000).toISOString(), type: "run.started", runId, agentId, backend: "claude-code" },
+    { seq: 2, ts: lastTs, type: "run.state_change", runId, agentId, from: "running", to: state, reason: "td153" },
+  ];
+  writeFileSync(join(runDir, `${runId}.jsonl`),
+    `${events.map((e) => JSON.stringify(e)).join("\n")}\n`, "utf8");
+}
+
+test("TD-153 runs list --state：闭集校验报错列全闭集；--active × --state 一切组合 fail-closed 拒绝（含 running）", async () => {
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  const { RUN_STATES } = await import("../../src/transcript.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-td153-state-"));
+  try {
+    await drainStrayCliMain();
+    // 非法值：报错文案列出闭集全部成员（与 RUN_STATES SSOT 零漂移）+ 示例
+    await assert.rejects(
+      runsCommand(["list", "--run-dir", dir, "--state", "succeeded", "--format", "json"], {}),
+      (err) => {
+        assert.ok(err.message.includes("--state"), "报错点名 --state");
+        for (const s of RUN_STATES) {
+          assert.ok(err.message.includes(s), `闭集成员 ${s} 必须在报错文案中`);
+        }
+        assert.ok(err.message.includes("(e.g. --state failed)"), "给出示例");
+        return true;
+      },
+    );
+    // --active × --state：running（子集形状）与 completed（矛盾形状）都拒绝
+    for (const v of ["running", "completed"]) {
+      await assert.rejects(
+        runsCommand(["list", "--run-dir", dir, "--active", "--state", v, "--format", "json"], {}),
+        /--state cannot be combined with --active/,
+        `--active × --state ${v} 必须拒绝`,
+      );
+    }
+    // 值形状（--active false 不启用）× --state 合法共存：false 不触发冲突拒绝
+    await assert.rejects(
+      runsCommand(["list", "--run-dir", dir, "--active", "false", "--state", "bogus", "--format", "json"], {}),
+      /--state must be one of/,
+      "--active false 未启用过滤器：报的是闭集校验（不是冲突）",
+    );
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("TD-153 runs list --since/--state 参数形状：duration 语法与 prune 同一解析器；裸 flag 缺值拒绝", async () => {
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-td153-shape-"));
+  try {
+    await drainStrayCliMain();
+    // duration 语法与 prune --older-than 同源（同一 parseDuration、同一报错）
+    await assert.rejects(
+      runsCommand(["list", "--run-dir", dir, "--since", "abc", "--format", "json"], {}),
+      /Invalid duration/,
+    );
+    await assert.rejects(
+      runsCommand(["list", "--run-dir", dir, "--since", "7x", "--format", "json"], {}),
+      /Invalid duration/,
+    );
+    // 裸 flag（parseOptions → true）与值位被下一 flag 占据的形状：缺值拒绝
+    await assert.rejects(
+      runsCommand(["list", "--run-dir", dir, "--state"], {}),
+      /--state requires a value/,
+    );
+    await assert.rejects(
+      runsCommand(["list", "--run-dir", dir, "--state", "--format", "json"], {}),
+      /--state requires a value/,
+    );
+    await assert.rejects(
+      runsCommand(["list", "--run-dir", dir, "--since"], {}),
+      /--since requires a duration value/,
+    );
+  } finally {
+    rmrfRetry(dir);
+  }
+});
+
+test("TD-153 runs list --state/--since 过滤与组合正交：行集叠加、JSON 形状稳定；--state running 保留 unresolved（非 --active 语义）", async () => {
+  const { runsCommand } = await import("../../src/commands/runs.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-td153-filter-"));
+  try {
+    await drainStrayCliMain();
+    // 夹具相对真实 now（与 prune 测试同款鲁棒性：测试任何日期运行都成立）
+    const now = Date.now();
+    const at = (msAgo) => new Date(now - msAgo).toISOString();
+    // 交叉语料：agent × state × 时间窗
+    writeTd153ListStateRun(dir, "run_done_recent", "coder_low", "completed", at(30 * 60_000));
+    writeTd153ListStateRun(dir, "run_fail_old", "coder_low", "failed", at(10 * 24 * 3_600_000));
+    writeTd153ListStateRun(dir, "run_fail_recent", "researcher", "failed", at(2 * 3_600_000));
+    // 非终态无心跳（unresolved）：--state running 应保留（--active 排除——(c) 测试已钉）
+    writeTd137RunTranscript(dir, "run_live_unres", false);
+
+    const base = JSON.parse(await captureLog(() =>
+      runsCommand(["list", "--run-dir", dir, "--format", "json"], {})));
+    assert.equal(base.matchedCount, 4, "无过滤：四类 run 全列");
+
+    // --state failed：failed 两行（updatedAt desc：recent 在前）
+    const failed = JSON.parse(await captureLog(() =>
+      runsCommand(["list", "--run-dir", dir, "--state", "failed", "--format", "json"], {})));
+    assert.deepEqual(failed.runs.map((r) => r.runId), ["run_fail_recent", "run_fail_old"],
+      "--state failed 只留 failed，最新在前");
+
+    // × --since 7d：old failed 出窗
+    const f7 = JSON.parse(await captureLog(() =>
+      runsCommand(["list", "--run-dir", dir, "--state", "failed", "--since", "7d", "--format", "json"], {})));
+    assert.deepEqual(f7.runs.map((r) => r.runId), ["run_fail_recent"], "--state × --since 叠加");
+    assert.equal(f7.matchedCount, 1);
+
+    // 再叠 --agent coder_low：窗内 failed 是 researcher → 结构化零结果
+    const none = JSON.parse(await captureLog(() =>
+      runsCommand(["list", "--run-dir", dir, "--state", "failed", "--since", "7d", "--agent", "coder_low", "--format", "json"], {})));
+    assert.equal(none.matchedCount, 0, "--agent 叠加后零命中仍是结构化 JSON（非文本 No runs found）");
+
+    // --state running：保留无心跳非终态（unresolved 行仍列出）——与 --active 判别
+    const running = JSON.parse(await captureLog(() =>
+      runsCommand(["list", "--run-dir", dir, "--state", "running", "--format", "json"], {})));
+    assert.deepEqual(running.runs.map((r) => r.runId), ["run_live_unres"]);
+    assert.equal(running.runs[0].activityStatus, "unresolved", "--state running 不是证明活跃过滤");
+
+    // --latest N 在过滤后截取（matchedCount = 过滤后、截取前）
+    const l1 = JSON.parse(await captureLog(() =>
+      runsCommand(["list", "--run-dir", dir, "--state", "failed", "--latest", "1", "--format", "json"], {})));
+    assert.deepEqual(l1.runs.map((r) => r.runId), ["run_fail_recent"]);
+    assert.equal(l1.matchedCount, 2, "matchedCount 计过滤后截取前");
+
+    // JSON 形状稳定：键集与行字段序与无过滤一致（过滤序不影响输出形状）
+    assert.deepEqual(Object.keys(f7), Object.keys(base));
+    assert.deepEqual(Object.keys(f7.runs[0]), Object.keys(base.runs[0]));
+  } finally {
+    rmrfRetry(dir);
+  }
+});
 // test/cli.test.js

@@ -6,6 +6,10 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
+// TD-153 残余批：--state / --since 过滤的 service 层纯测试直接调 listRuns；
+// RUN_STATES 从 transcript.js 导入做零漂移断言（闭集报错文案不得与 SSOT 漂移）。
+import { listRuns } from "../../src/application/runList.js";
+import { RUN_STATES } from "../../src/transcript.js";
 
 function makeRunDir() {
   return mkdtemp(join(tmpdir(), "wao-runs-"));
@@ -648,6 +652,249 @@ test("TD-102: direct status wf_* still works and reports failed for completed:fa
     const output = cli(["status", "wf_direct"], dir);
     // 直接 status 应仍可用，且报告 failed（不是 completed）
     assert.match(output, /failed/i, "direct status wf_* 应报 failed（completed:false）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ===== TD-153 残余实施批：runs list --state / --since（service 层纯测试） =====
+//
+// 状态枚举（WQ-02）：
+//   - 正常：各闭集状态命中 / 时间窗新鲜保留、超龄排除、下界含端
+//   - 缺失：runDir 不存在（校验先于扫描——非法输入照报错）、空目录（零结果）
+//   - 非法输入：stateFilter 非闭集值 / sinceMs 非有限非负 / activeOnly × stateFilter
+//   - 不可解析：malformed transcript 照旧静默跳过（LIST-05 同款，不因新 flag 改变）
+//   - unparseable 时间：updatedAt null（绑定事件无 ts）→ --since fail-closed 排除
+//   - legacy 回退：全无信封文件按末事件 ts 判窗（与 --latest 排序同语义档）
+//   - 篡改探针：外 run 伪造尾条不得翻转 --state/--since 过滤结果（绑定纪律）
+//   - 组合：--state × --since × --agent × --latest 任意叠加，输出形状不变
+//   不适用：loading/异步态——listRuns 是单次查询，无 UI 异步状态机。
+
+/** TD-153：固定时间基（注入 nowMs，全确定性）。 */
+const TD153_NOW = Date.parse("2026-09-19T12:00:00.000Z");
+const TD153_DAY = 86_400_000;
+const td153Iso = (ms) => new Date(ms).toISOString();
+
+test("TD-153: listRuns stateFilter 过滤闭集投影（failed/completed/running 各自命中；malformed 文件照旧静默跳过；unresolved 计数随过滤集）", async () => {
+  const dir = await makeRunDir();
+  try {
+    await writeJsonl(dir, "run_fail", [
+      { type: "run.started", ts: td153Iso(TD153_NOW - TD153_DAY) },
+      { type: "run.state_change", from: "running", to: "failed", reason: "r", ts: td153Iso(TD153_NOW - TD153_DAY + 1000) },
+    ]);
+    await writeJsonl(dir, "run_done", [
+      { type: "run.started", ts: td153Iso(TD153_NOW - TD153_DAY) },
+      { type: "run.state_change", from: "running", to: "completed", reason: "r", ts: td153Iso(TD153_NOW - TD153_DAY + 1000) },
+    ]);
+    // 非终态且无 .owner 心跳（unresolved）——--state running 应保留
+    await writeJsonl(dir, "run_live", [
+      { type: "run.started", ts: td153Iso(TD153_NOW - TD153_DAY) },
+      { type: "run.state_change", from: "pending", to: "running", reason: "r", ts: td153Iso(TD153_NOW - TD153_DAY + 1000) },
+    ]);
+    // malformed transcript：skip-silently 既有路径（新 flag 不改变）
+    await writeFile(join(dir, "run_broken.jsonl"), "NOT VALID JSON\n", "utf8");
+
+    const failed = await listRuns({ runDir: dir, stateFilter: "failed", knownAgentIds: [], validateAgentIds: false });
+    assert.deepEqual(failed.runs.map((r) => r.runId), ["run_fail"], "--state failed 只留 failed");
+    assert.equal(failed.runs[0].state, "failed");
+    assert.equal(failed.matchedCount, 1);
+
+    const done = await listRuns({ runDir: dir, stateFilter: "completed", knownAgentIds: [], validateAgentIds: false });
+    assert.deepEqual(done.runs.map((r) => r.runId), ["run_done"], "--state completed 只留 completed");
+
+    const live = await listRuns({ runDir: dir, stateFilter: "running", knownAgentIds: [], validateAgentIds: false });
+    assert.deepEqual(live.runs.map((r) => r.runId), ["run_live"], "--state running 保留无心跳非终态（不是 --active 语义）");
+    assert.equal(live.runs[0].activityStatus, "unresolved");
+    // unresolvedCount 随过滤集（--agent 先例：被过滤掉的 run 不参与健康计数）
+    assert.equal(live.unresolvedCount, 1, "入集的非终态无心跳 run 计入 unresolvedCount");
+    assert.equal(failed.unresolvedCount, 0, "terminal 过滤集无 unresolved 计数");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-153: listRuns stateFilter 非法值 fail-closed 报错列出闭集（与 RUN_STATES SSOT 零漂移；校验先于扫描）", async () => {
+  // runDir 不存在也要先报输入错——证明校验在任何扫描/读取之前
+  const missingDir = join(tmpdir(), "wao-td153-nonexistent-" + Date.now());
+  await assert.rejects(
+    () => listRuns({ runDir: missingDir, stateFilter: "succeeded", knownAgentIds: [] }),
+    (err) => {
+      assert.ok(err instanceof Error);
+      assert.ok(err.message.includes("--state"), "报错点名 --state");
+      for (const s of RUN_STATES) {
+        assert.ok(err.message.includes(s), `闭集成员 ${s} 必须在报错文案中（SSOT 零漂移）`);
+      }
+      assert.ok(err.message.includes("--state failed"), "给出示例");
+      return true;
+    },
+  );
+  // 空目录 + 非法 stateFilter：输入校验仍先行报错（不静默空结果）
+  const dir = await makeRunDir();
+  try {
+    await assert.rejects(
+      () => listRuns({ runDir: dir, stateFilter: 42, knownAgentIds: [] }),
+      /--state must be one of/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-153: activeOnly × stateFilter 一切组合 fail-closed 拒绝（含 running——activeOnly 是心跳活性投影，非 state 子集）", async () => {
+  const dir = await makeRunDir();
+  try {
+    for (const v of ["running", "pending", "completed", "failed"]) {
+      await assert.rejects(
+        () => listRuns({ runDir: dir, activeOnly: true, stateFilter: v, knownAgentIds: [] }),
+        /--state cannot be combined with --active/,
+        `--active × --state ${v} 必须拒绝`,
+      );
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-153: listRuns sinceMs 时间窗（新鲜保留/超龄排除/下界含端；updatedAt 无法定时 fail-closed 排除；缺 ts 无过滤时照常列出）", async () => {
+  const dir = await makeRunDir();
+  try {
+    await writeJsonl(dir, "run_recent", [
+      { type: "run.started", ts: td153Iso(TD153_NOW - 3_600_000) },
+    ]);
+    await writeJsonl(dir, "run_old", [
+      { type: "run.started", ts: td153Iso(TD153_NOW - 10 * TD153_DAY) },
+    ]);
+    // 恰在下界上（NOW - 7d）：含端保留（与 historyRange inclusive 语义一致）
+    await writeJsonl(dir, "run_edge", [
+      { type: "run.started", ts: td153Iso(TD153_NOW - 7 * TD153_DAY) },
+    ]);
+    // 绑定事件无 ts → updatedAt null：不能证明在窗内 → 排除
+    await writeJsonl(dir, "run_nots", [
+      { type: "run.started" },
+    ]);
+
+    const out = await listRuns({
+      runDir: dir, sinceMs: 7 * TD153_DAY, nowMs: TD153_NOW,
+      knownAgentIds: [], validateAgentIds: false,
+    });
+    assert.deepEqual(out.runs.map((r) => r.runId), ["run_recent", "run_edge"],
+      "窗内新鲜保留（updatedAt desc），恰在含端下界也保留；超龄与无 ts 排除");
+    assert.equal(out.matchedCount, 2);
+
+    // 对照：不带 --since 时 run_nots 照常列出（新 flag 不改变无过滤行为）
+    const all = await listRuns({ runDir: dir, nowMs: TD153_NOW, knownAgentIds: [], validateAgentIds: false });
+    assert.equal(all.runs.length, 4);
+
+    // 非法 sinceMs：非有限/负数 fail-closed
+    await assert.rejects(
+      () => listRuns({ runDir: dir, sinceMs: Number.NaN, nowMs: TD153_NOW, knownAgentIds: [] }),
+      /--since must be a non-negative/,
+    );
+    await assert.rejects(
+      () => listRuns({ runDir: dir, sinceMs: -1, nowMs: TD153_NOW, knownAgentIds: [] }),
+      /--since must be a non-negative/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-153: --since 对 legacy 全无信封文件保持历史读法（末事件 ts 判窗，与 --latest 排序同语义档）", async () => {
+  const dir = await makeRunDir();
+  try {
+    // legacy 无信封（事件不带 runId）——boundReportScope 无从绑定 → 历史读法
+    await writeFile(join(dir, "run_leg_old.jsonl"),
+      JSON.stringify({ type: "run.started", ts: td153Iso(TD153_NOW - 10 * TD153_DAY) }) + "\n", "utf8");
+    await writeFile(join(dir, "run_leg_new.jsonl"),
+      JSON.stringify({ type: "run.started", ts: td153Iso(TD153_NOW - 3_600_000) }) + "\n", "utf8");
+
+    const out = await listRuns({
+      runDir: dir, sinceMs: 7 * TD153_DAY, nowMs: TD153_NOW,
+      knownAgentIds: [], validateAgentIds: false,
+    });
+    assert.deepEqual(out.runs.map((r) => r.runId), ["run_leg_new"],
+      "legacy 按末事件 ts 判窗：新鲜保留、超龄排除（不因新 flag 改变 legacy 行为）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-153 篡改探针：外 run 伪造尾条不得翻转 --state/--since 过滤结果（R20-C C-4 绑定纪律同款）", async () => {
+  const dir = await makeRunDir();
+  try {
+    // run_victim：本 run 绑定事件止于 10 天前的 failed 终态；尾部追加外 run
+    // （run_other 信封）的新鲜 ts + run.state_change→running 伪造行。
+    await writeJsonl(dir, "run_victim", [
+      { type: "run.started", ts: td153Iso(TD153_NOW - 10 * TD153_DAY) },
+      { type: "run.state_change", from: "running", to: "failed", reason: "real", ts: td153Iso(TD153_NOW - 10 * TD153_DAY + 1000) },
+      { type: "run.state_change", from: "running", to: "running", reason: "forged", ts: td153Iso(TD153_NOW - 60_000), runId: "run_other" },
+    ]);
+
+    // (a) --state failed 仍命中：伪造 running 尾条不翻绑定 state
+    const st = await listRuns({ runDir: dir, stateFilter: "failed", knownAgentIds: [], validateAgentIds: false });
+    assert.deepEqual(st.runs.map((r) => r.runId), ["run_victim"]);
+
+    // (b) --state running 不命中
+    const stRun = await listRuns({ runDir: dir, stateFilter: "running", knownAgentIds: [], validateAgentIds: false });
+    assert.deepEqual(stRun.runs.map((r) => r.runId), []);
+
+    // (c) --since 1h（只覆盖伪造尾条 ts 的窗）不命中：updatedAt 仍是绑定末条 ts
+    const fc = await listRuns({
+      runDir: dir, sinceMs: 3_600_000, nowMs: TD153_NOW,
+      knownAgentIds: [], validateAgentIds: false,
+    });
+    assert.deepEqual(fc.runs.map((r) => r.runId), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-153: --state × --since × --agent × --latest 任意叠加（行集叠加、输出形状不变）", async () => {
+  const dir = await makeRunDir();
+  try {
+    // 交叉语料：agent × state × 时间窗（writeJsonl 默认 agentId "test"，可逐事件覆盖）
+    await writeJsonl(dir, "run_a", [
+      { type: "run.started", ts: td153Iso(TD153_NOW - 1_800_000) },
+      { type: "run.state_change", from: "running", to: "failed", reason: "r", ts: td153Iso(TD153_NOW - 1_700_000) },
+    ]);
+    await writeJsonl(dir, "run_b", [
+      { type: "run.started", ts: td153Iso(TD153_NOW - 10 * TD153_DAY) },
+      { type: "run.state_change", from: "running", to: "failed", reason: "r", ts: td153Iso(TD153_NOW - 10 * TD153_DAY + 1000) },
+    ]);
+    await writeJsonl(dir, "run_c", [
+      { type: "run.started", agentId: "researcher", ts: td153Iso(TD153_NOW - 7_200_000) },
+      { type: "run.state_change", agentId: "researcher", from: "running", to: "failed", reason: "r", ts: td153Iso(TD153_NOW - 7_100_000) },
+    ]);
+    await writeJsonl(dir, "run_d", [
+      { type: "run.started", ts: td153Iso(TD153_NOW - 3_600_000) },
+      { type: "run.state_change", from: "running", to: "completed", reason: "r", ts: td153Iso(TD153_NOW - 3_500_000) },
+    ]);
+
+    const base = await listRuns({ runDir: dir, nowMs: TD153_NOW, knownAgentIds: [], validateAgentIds: false });
+    assert.equal(base.runs.length, 4, "无过滤：交叉语料全列");
+
+    const combo = await listRuns({
+      runDir: dir, agentId: "test", stateFilter: "failed", sinceMs: 7 * TD153_DAY, latest: 5,
+      nowMs: TD153_NOW, knownAgentIds: [], validateAgentIds: false,
+    });
+    assert.deepEqual(combo.runs.map((r) => r.runId), ["run_a"],
+      "四过滤叠加：agent=test × failed × 7d 窗只剩 run_a");
+    assert.equal(combo.matchedCount, 1);
+
+    // --latest 在过滤后截取（matchedCount 是过滤后、截取前计数）
+    const one = await listRuns({
+      runDir: dir, stateFilter: "failed", sinceMs: 7 * TD153_DAY, latest: 1,
+      nowMs: TD153_NOW, knownAgentIds: [], validateAgentIds: false,
+    });
+    assert.deepEqual(one.runs.map((r) => r.runId), ["run_a"], "failed × 7d 窗为 [run_a, run_c]，--latest 1 取最新");
+    assert.equal(one.matchedCount, 2, "matchedCount 计过滤后截取前");
+
+    // 输出形状稳定：顶层键集与行字段序与无过滤结果一致（过滤序不影响形状）
+    assert.deepEqual(Object.keys(combo), Object.keys(base));
+    assert.deepEqual(
+      Object.keys(combo.runs[0]),
+      Object.keys(base.runs.find((r) => r.runId === "run_a")),
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

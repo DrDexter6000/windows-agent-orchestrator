@@ -169,6 +169,15 @@ function finalizeSummary(runId, facts, knownAgentIds, input) {
   return { runId, agentId, state: facts.state, terminal: facts.terminal, updatedAt: facts.updatedAt };
 }
 
+// TD-153: transcript-updated window key — the summary updatedAt (already the
+// bound-derived last-event ts, R21 TD-128 W3) as epoch ms; NaN when the run
+// cannot be placed in time. The ONE definition shared by the M12-20
+// historyRange window and the --since window (same key discipline — no second
+// time source; R20-C C-4 绑定纪律同款).
+function summaryWindowMs(facts) {
+  return facts.updatedAt != null ? Date.parse(facts.updatedAt) : NaN;
+}
+
 /**
  * List runs in a runDir, optionally filtered by workspace ownership.
  *
@@ -177,6 +186,11 @@ function finalizeSummary(runId, facts, knownAgentIds, input) {
  * @param {string} [input.agentId] — filter by agent (CLI)
  * @param {number} [input.latest] — take N most recent (CLI)
  * @param {boolean} [input.activeOnly] — only non-terminal runs
+ * @param {string} [input.stateFilter] — TD-153: keep only runs whose summary
+ *   state equals this value (closed set = transcript.js RUN_STATES; anything
+ *   else throws BEFORE any scan). Orthogonal to agentId/latest/sinceMs, but
+ *   CANNOT be combined with activeOnly (throws — activeOnly is the M12-15
+ *   proven-active liveness projection, which no state value expresses).
  * @param {string} [input.authorizedWorkspaceRoot] — MCP workspace binding
  * @param {string[]} [input.knownAgentIds] — for agentId validation (default [])
  * @param {number} [input.nowMs] — activity snapshot timestamp (default Date.now())
@@ -203,11 +217,19 @@ function finalizeSummary(runId, facts, knownAgentIds, input) {
  *   bounded inclusive [fromMs, toMs] window for scanScope:"history", keyed on
  *   the transcript-derived summary updatedAt (not filesystem mtime). Ignored
  *   unless scanScope === "history".
+ * @param {number} [input.sinceMs] — TD-153: keep only runs with activity in
+ *   the last sinceMs milliseconds (inclusive lower bound, measured from the
+ *   same single nowMs snapshot liveness uses). Keyed on the summary updatedAt
+ *   projection (the last BOUND event ts — the exact same key --latest sorting
+ *   and the M12-20 historyRange window use); legacy no-envelope transcripts
+ *   keep the historic last-event-ts reading; a run whose updatedAt cannot be
+ *   placed in time (null/unparseable) is excluded — fail-closed, same choice
+ *   as the history window.
  * @returns {Promise<{runs: Array, matchedCount: number, unresolvedCount?: number, scanScope?: string}>}
  *   - runs: array of {runId, agentId, state, terminal, updatedAt,
  *             activityStatus, activityBasis}
- *   - matchedCount: eligible runs AFTER the activeOnly / active-scope / history
- *     filter, BEFORE the limit
+ *   - matchedCount: eligible runs AFTER the activeOnly / active-scope /
+ *     history / state / since filters, BEFORE the limit
  *   - unresolvedCount: ONLY in the default scope (scanScope absent): the
  *     full-scan count of known non-terminal runs lacking a fresh owner
  *     heartbeat (pre-limit, independent of activeOnly). ABSENT for
@@ -222,6 +244,8 @@ export async function listRuns(input) {
     agentId,
     latest,
     activeOnly = false,
+    stateFilter,
+    sinceMs,
     authorizedWorkspaceRoot,
     knownAgentIds = [],
     nowMs,
@@ -240,6 +264,33 @@ export async function listRuns(input) {
     ? livenessThresholdMs
     : DEFAULT_OWNER_LIVENESS_THRESHOLD_MS;
   const _checkLiveness = checkLivenessFn ?? checkOwnerLiveness;
+
+  // TD-153: --state / --since input validation. Fail-closed BEFORE any scan,
+  // workspace proof, or transcript read, so an invalid filter always surfaces
+  // as an error — never as a silently narrowed (or silently unfiltered)
+  // listing. The error text is built from the RUN_STATES SSOT so the closed
+  // set in the message can never drift from the validator.
+  if (stateFilter !== undefined) {
+    if (typeof stateFilter !== "string" || !RUN_STATES.includes(stateFilter)) {
+      throw new Error(`--state must be one of: ${RUN_STATES.join(", ")} (e.g. --state failed)`);
+    }
+    // Reject EVERY --active × --state combination, the subset-shaped
+    // "--state running" included: activeOnly is NOT a state filter subset —
+    // it keeps only runs with a FRESH owner heartbeat (a liveness
+    // projection), which no state value expresses. Refusing the whole
+    // combination is the simplest honest contract (never silently one of the
+    // two semantics).
+    if (activeOnly) {
+      throw new Error(
+        "--state cannot be combined with --active: --active keeps only runs with a fresh owner heartbeat (a liveness projection no state value expresses); use --state running alone for non-terminal runs",
+      );
+    }
+  }
+  if (sinceMs !== undefined && (!Number.isFinite(sinceMs) || sinceMs < 0)) {
+    // Defense in depth — the CLI parses durations (parseDuration yields a
+    // non-negative finite ms) before calling; direct callers get the same gate.
+    throw new Error("--since must be a non-negative duration in milliseconds (e.g. 7d, 24h, 30m as parsed by the CLI)");
+  }
 
   const resolvedRunDir = resolve(runDir);
   let workspaceVerifier = null;
@@ -330,6 +381,28 @@ export async function listRuns(input) {
     // Agent filter (CLI path)
     if (agentId && facts.agentId !== agentId) continue;
 
+    // TD-153: --state filter on the BOUND-projected summary state (the same
+    // safeState projection every row already prints). Same pipeline position
+    // as the --agent filter: a filtered-out run never reaches the activity
+    // classification below, so terminal-state runs skip ownerLiveness
+    // entirely and unresolvedCount keeps the --agent precedent (it reflects
+    // the FILTERED set — full-inventory semantics stay with the default
+    // MCP scope, which passes no row filters).
+    if (stateFilter !== undefined && facts.state !== stateFilter) continue;
+
+    // TD-153: --since keeps runs with provable activity INSIDE the last
+    // sinceMs window (inclusive lower bound, from the same single nowMs
+    // snapshot liveness uses — the direction opposite to prune --older-than,
+    // which selects the over-age tail). Keyed on summaryWindowMs (the ONE
+    // transcript-updated window key shared with the M12-20 history filter):
+    // legacy no-envelope transcripts keep the historic last-event-ts reading;
+    // a run whose updatedAt cannot be placed in time is excluded (fail-closed
+    // — cannot be proven in-window).
+    if (sinceMs !== undefined) {
+      const ms = summaryWindowMs(facts);
+      if (!Number.isFinite(ms) || ms < now - sinceMs) continue;
+    }
+
     // M12-20 history: bounded INCLUSIVE range filter on the transcript-derived
     // summary updatedAt (NOT filesystem mtime). A run whose updatedAt cannot be
     // placed in time (null/unparseable) is excluded — it cannot be proven
@@ -339,7 +412,7 @@ export async function listRuns(input) {
       const range = historyRange && Number.isFinite(historyRange.fromMs) && Number.isFinite(historyRange.toMs)
         ? historyRange : null;
       if (!range) continue;
-      const ms = facts.updatedAt != null ? Date.parse(facts.updatedAt) : NaN;
+      const ms = summaryWindowMs(facts);
       if (!Number.isFinite(ms) || ms < range.fromMs || ms > range.toMs) continue;
     }
 

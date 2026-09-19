@@ -17,7 +17,8 @@
 //   - node built-in：fs/promises（readdir/unlink/mkdir/rename/stat）、fs
 //     （existsSync）、path（join/resolve/dirname）
 //
-// 本模块内部 helper：parseDuration（runs prune 专用）、loadRunFiles（runs 族
+// 本模块内部 helper：parseDuration（runs prune --older-than 与 runs list
+// --since 共用的唯一 duration 解析器，TD-153 提为导出）、loadRunFiles（runs 族
 // 专用）、archiveMonthFromTs/mtimeMonth（runs prune --archive 专用，R23-B1）。
 
 import { readdir, unlink, readFile, mkdir, rename, stat } from "node:fs/promises";
@@ -541,6 +542,25 @@ async function runsListCommand(args, config) {
 
   const latestN = options.latest ? Number(options.latest) : null;
 
+  // TD-153: --state <v> / --since <duration> map 1:1 onto listRuns service
+  // inputs (stateFilter / sinceMs). The SERVICE is the boundary validator for
+  // the state closed set and the --active × --state conflict, so its exact
+  // error text reaches the user unmodified (same convention as runs wait
+  // --wait-ms). The CLI owns only the parseOptions shapes the service cannot
+  // express: a value-less flag parses to literal `true` — reject it here
+  // rather than letting a bare flag silently list everything.
+  if (options.state === true) {
+    throw new Error("--state requires a value (e.g. --state failed)");
+  }
+  if (options.since === true) {
+    throw new Error("--since requires a duration value (e.g. 7d, 24h, 30m)");
+  }
+  // Same duration parser as prune --older-than (the ONE parser, promoted to a
+  // named export for exactly this reuse). The direction inversion is by
+  // construction: prune selects runs OLDER than the window, --since keeps
+  // runs FRESH within it.
+  const sinceMs = options.since !== undefined ? parseDuration(options.since) : undefined;
+
   // CLI is human/ops — no workspace authorization.
   // knownAgentIds = [] so raw agentId is preserved (CLI doesn't validate).
   const result = await listRuns({
@@ -555,9 +575,12 @@ async function runsListCommand(args, config) {
     // parseOptions shapes: bare `--active` → true; `--active <value>` →
     // string. Only an explicit true/"true" engages the filter — silently
     // narrowing the listing is worse than silently ignoring a value, so
-    // "false"/other values do NOT engage it. --state/--since are
-    // deliberately out of scope for this batch (TD-153 ledger).
+    // "false"/other values do NOT engage it.
     activeOnly: options.active === true || options.active === "true",
+    // TD-153: closed-set state filter + freshness window (service-validated;
+    // see above). Orthogonal to --agent/--latest and to each other.
+    stateFilter: options.state,
+    sinceMs,
   });
 
   // TD-137①：裸 `runs list` 不再恢复文件名升序——直接沿用 listRuns 的默认
@@ -630,8 +653,9 @@ async function runsSummaryCommand(args, config) {
   }
 }
 
-// runs prune 专用：把 "7d"/"24h"/"30m" 解析为毫秒。
-function parseDuration(input) {
+// runs prune --older-than 与 runs list --since 共用的唯一 duration 解析器
+// （TD-153 提为导出——不复制第二份解析器）：把 "7d"/"24h"/"30m" 解析为毫秒。
+export function parseDuration(input) {
   const match = input.match(/^(\d+)(d|h|m|s)$/);
   if (!match) {
     throw new Error(`Invalid duration: ${input}. Use <number><d|h|m|s> (e.g. 7d, 24h, 30m)`);
