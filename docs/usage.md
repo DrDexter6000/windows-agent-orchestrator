@@ -492,6 +492,19 @@ npm run cli -- run coder_low --prompt "..." --isolate --delivery-spec-file deliv
 
 > **规格×测试清单耦合（TD-161 审计 F1 教训，2026-09-17）**：交付规格凡允许 worker **新增、移动或删除 `*.test.js` 文件**，必须同时把 `test/manifest.json` 纳入 `allowedPaths` 并在任务书要求同步登记——否则交付提交独立过 canonical 验证必失败（manifest 漂移 = INVALID ENVIRONMENT），只能 Lead 事后补登记。
 
+#### 测试分层运行规则（T0-T3，2026-09-19 定策；coder_mm run_20260919145305517n9mcet / auditor run_20260919145308507fgvifu 双席咨询收敛）
+
+何时跑全量、何时跑 focused 的唯一权威。核心原则：**全量的次数按门禁价值分配，不按习惯分配**——每个交付批至少 1 次全量（T2）+ 每次集成 1 次全量（T3），其余场景一律 focused。
+
+| 层 | 场景 | 要求 |
+|---|---|---|
+| **T0** | 开发回路（改一处验一处） | `node scripts/wao-node.cjs --test --test-timeout=600000 test/<file>`——**必须显式带 `--test-timeout`**：裸 focused 命令不经过 canonical runner 的看门狗（TD-165），漏带等于把无界挂死引回来。注意这不等于完整的进程树兜底（canonical 的波级 /T 树杀只在 T2/T3 存在）。大批量 focused 不与 T2/T3 同机并行（资源争用即 TD-130 形状）。 |
+| **T1** | worker 交付前自检 | **focused，不跑全量**（"全量自检"是历史惯例，从未是成文规则）。范围按改动类型：局部 `src/**` = 新改测试 + 直接消费者的既有回归（任务书列具体文件与理由；注意资源类目 ≠ 影响范围——`src/transcript.js` 同时被 pure 与 filesystem 波测试消费）；`test/**` = 被改文件自身（共享夹具改动覆盖其消费者）；新增/移动/删除测试 = manifest 同步 + 不能只跑新文件；runner/reporter/shim/公共夹具 = 对应元测试 + 跨执行边界回归；文档/工具面 = 对应文档守卫 + `gen:surface` 一致性。**任务书把 worker 自检命令与 `delivery.verificationCommands` 分开写**（同一条 `npm test` 写两处 = 同批两次全量）。T1 汇报如实写"这些文件通过，其余未测"——漏检由同批 T2 全量兜底变红，缺陷不可能逃到 main。 |
+| **T2** | 控制面交付验证（delivery.verificationCommands） | **全量**（TD-138 Owner 裁定作用域=本层+T3；本层子集路线已被 Owner 拒绝，不因套件变快自动撤销）。全量入命令即声明 `verificationTimeoutMs ≥ 1200000`。**预登记豁免阀门**：纯文档/配置类交付可 inline 只跑 pure 波守卫文件（如 `node --test test/isolation-infra/docs-consistency.test.js`）或声明 `verificationUnavailableReason`——豁免走 inline 块（executionProfiles 冻结目录无子集 profile）。 |
+| **T3** | Lead 集成后 main 终验（并行会话交错后） | **全量**（git 零冲突不证明语义不冲突）。同一冻结最终候选的 T3 绿证据可同时用作里程碑收口证据（候选再变则不沿用）。跑前错峰规程见 `docs/troubleshooting.md` §8.2。 |
+
+配套边界三条：(a) 交付验证失败先读 stderrTail 走 §8.1 闭集判定再选动作（全 isolation_pass ⇒ environment_contaminated ⇒ 错峰+单发 reverify，不走 reject）——这是 TD-130 烧轮的止血阀；(b) 任何 `watchdog_timeout` 事件后、重跑前，先按 §8.3 收割孤儿孙进程（R1 主防线不树杀，残留会污染下一次全量成假抖动）；(c) `npm run test:report` 是裸 `node --test` 旁路，**不是** canonical 验收证据。巨型 delivery 测试文件拆分**不立项**（波长极绑定：runDelivery 203s≈波墙钟 204s，拆头文件不动波；全拆地板=波内总时长/并发≈136s，收益≈45-65s/次且夹具重付抵消）——登记为 TD-138 附件观察项，若 TD-138 重开触发器命中（空载实测 >20min）也只最小拆顶部 2-3 根长杆至地板即停。
+
 CLI 的 run 用法可用 `npm run cli -- run --help` 查看。
 
 Delivery 模式在 worktree 隔离中运行 worker，完成后打包一个 atomic delivery commit，
@@ -901,7 +914,7 @@ M9-7A 起支持可选 `delivery` 块（嵌套形状以 wire 为权威），用�
     "allowedPaths": ["src"],
     "verificationSetupCommands": ["npm ci"],
     "verificationCommands": ["npm test"],
-    "verificationTimeoutMs": 600000
+    "verificationTimeoutMs": 1200000
   }
 }
 ```

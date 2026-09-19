@@ -1454,15 +1454,20 @@ test("M12-9 docs: executionProfileId is a TOP-LEVEL run_dispatch input; inline v
     // never be documented — it does not exist in the run_dispatch input schema.
     assert.ok(!/verification\.executionProfileId/i.test(text),
       `${name} 不得记录不存在的 delivery.verification.executionProfileId 形状`);
+  }
+  // TD-166（2026-09-19）守卫迁移：SKILL.md 重构为路由+指针后，executionProfileId
+  // 顶层形状 / verificationCommands / contractValid 不预评清单属字段 schema 细节——
+  // 权威承载改为 usage.md + roadmap.md（SKILL 经指针指路，不再复制 schema 正文）。
+  for (const [name, text] of [["docs/usage.md", usage], ["docs/roadmap.md", roadmap]]) {
     // executionProfileId is a top-level run_dispatch input, sibling of delivery.
     assert.ok(/top-level|顶层|同级/i.test(text),
       `${name} 必须把 executionProfileId 记为顶层（与 delivery 同级）`);
     // Inline verification uses the real delivery-level field names.
     assert.ok(/verificationCommands/.test(text), `${name} 必须记录 delivery.verificationCommands`);
   }
-  // contractValid scope (SKILL + usage carry the full scope sentence): mechanical
+  // contractValid scope (usage carries the full scope sentence): mechanical
   // contract only; it must NOT pre-evaluate the run_dispatch expectations.
-  for (const [name, text] of [["SKILL.md", skill], ["docs/usage.md", usage]]) {
+  for (const [name, text] of [["docs/usage.md", usage]]) {
     assert.ok(/contractValid/.test(text), `${name} 必须记录 contractValid`);
     assert.ok(/expectedGitHead|expectedDirty|expectedWorkspaceRoot/.test(text),
       `${name} 必须列出 contractValid 不预评的 expectedGitHead/expectedDirty/expectedWorkspaceRoot`);
@@ -1785,10 +1790,9 @@ test("M11-5-C-DOC-4: docs document truthful load timing (start pre-transcript; r
 // ===== M11-11D: Lead friction closeout guards =====
 
 test("M11-11D-DOC-01: terminal run_wait proceeds to collect without redundant status", () => {
-  const skill = read("SKILL.md");
   const usage = read("docs/usage.md");
-  assert.ok(/run_wait.*terminal:true.*run_collect.*不.*run_status|terminal:true.*run_collect.*redundant.*run_status/is.test(skill),
-    "SKILL sends terminal run_wait directly to collect");
+  // TD-166（2026-09-19）守卫迁移：流程细节（终态后免冗余 status 调用）由
+  // usage.md 场景 4c 承载；SKILL Acceptance 保留 compact-first 骨架即可。
   assert.ok(/terminal:true.*run_collect.*不需要.*run_status/is.test(usage),
     "usage documents no redundant status call after terminal wait");
 });
@@ -1967,11 +1971,12 @@ test("M12 closeout: roadmap 标 M11/M12 ✅ 完成；已实现 slices 保留且�
 });
 
 test("M12-4A docs: backend recovery is model-free and preserves Lead scope/decision authority", () => {
-  const skill = read("SKILL.md");
   const usage = read("docs/usage.md");
   const arch = read("docs/02-architecture.md");
   const troubleshooting = read("docs/troubleshooting.md");
-  for (const [name, text] of Object.entries({ skill, usage, arch, troubleshooting })) {
+  // TD-166（2026-09-19）守卫迁移：candidateKind 闭集细节以 usage/arch/
+  // troubleshooting 承载（SKILL 路由化后经 usage 场景 4c 指针指路）。
+  for (const [name, text] of Object.entries({ usage, arch, troubleshooting })) {
     assert.ok(/backend_failed/.test(text), `${name} 必须记录 backend_failed candidate kind`);
   }
   assert.ok(/不调用 model|no model/i.test(usage), "usage 必须明确恢复不调用模型");
@@ -2154,15 +2159,39 @@ test("M12-6 FR-07 docs: architecture 记录 reverify 共享 service 与当前 to
 // that truth across the live docs and the SKILL entrypoint size cap.
 // ============================================================
 
-test("M12-10: SKILL.md stays a slim entrypoint (≤ 17000 bytes; Owner raised the cap 2026-08-15)", () => {
+test("M12-10: SKILL.md stays a slim entrypoint (≤ 12000 bytes; Owner reset the cap 2026-09-19 — TD-166 restructure to routing+pointers)", () => {
   // Owner 政策（2026-08-20 定策，R23-B 收口）：新增运维/语义文本**默认落权威文档**
   // （troubleshooting/usage 等，先例：round4 F-2 判读句落 §6.8 而非 SKILL）。
   // 申请抬上限仅当两条件同时成立：①新增内容确含重要语义信息；②SKILL.md 已无
   // 可无损压缩语义的空间——届时作为临时议题呈 Owner 批准，不得自行抬。
+  // 2026-09-19（TD-166）：SKILL.md 重构为"结构化路由+指针"（一句话内核+动作锚定
+  // 指针，渐进披露三级化），Owner 批准冻结值 17000→12000 单值替换（无多层并存）。
   const skill = read("SKILL.md");
   const bytes = Buffer.byteLength(skill, "utf8");
-  assert.ok(bytes <= 17000,
-    `SKILL.md must stay a slim entrypoint ≤ 17000 bytes (got ${bytes}); move detail to authority docs`);
+  assert.ok(bytes <= 12000,
+    `SKILL.md must stay a slim entrypoint ≤ 12000 bytes (got ${bytes}); move detail to authority docs`);
+});
+
+test("TD-166: SKILL.md 指针完整性——每个 docs//references/ 指针路径存在且关键锚点可命中（关系型守卫，非值指纹）", () => {
+  // TD-166（2026-09-19 激活）：SKILL.md 重构为路由+指针后，指针就是承重结构——
+  // 指向不存在的文件/锚点 = 决策时刻读不到纪律。守卫断言关系（路径存在 + 锚点词
+  // 在目标文件中出现），不断言字节数以外的内容值（TD-120 原则）。
+  const skill = read("SKILL.md");
+  // 1) 每个 `docs/...` / `references/...` 路径字面量必须真实存在。
+  const pathMentions = [...skill.matchAll(/`(docs\/[A-Za-z0-9_\/.-]+|references\/[A-Za-z0-9_\/.-]+)`/g)]
+    .map((m) => m[1]);
+  const uniquePaths = [...new Set(pathMentions)];
+  assert.ok(uniquePaths.length >= 6, `SKILL.md 指针面异常收缩（仅 ${uniquePaths.length} 条）——路由化结构可能被退回`);
+  for (const p of uniquePaths) {
+    assert.ok(existsSync(join(ROOT, p)), `SKILL.md 指针目标不存在：${p}`);
+  }
+  // 2) 带节标签的指针锚点必须能在目标文件中命中（防止节名漂移后指针变死链）。
+  const usage = read("docs/usage.md");
+  for (const anchor of ["场景 4b", "场景 4c", "§四"]) {
+    assert.ok(usage.includes(anchor), `docs/usage.md 缺 SKILL.md 指针所引的锚点：${anchor}`);
+  }
+  const ts = read("docs/troubleshooting.md");
+  assert.ok(ts.includes("8.2"), "docs/troubleshooting.md 缺 §8.2 锚点（SKILL 集成终验指针）");
 });
 
 test("M12-10: live docs carry NO tool-profile / restart-to-recover wording", () => {

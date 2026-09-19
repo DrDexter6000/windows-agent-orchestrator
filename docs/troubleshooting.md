@@ -455,7 +455,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 
 ## 8. 测试套件与验证环境（canonical runner）
 
-`npm test` 由 `scripts/canonical-test.mjs`（TD-107 canonical runner）分波执行全量。本章覆盖套件自身的**环境性失败判定**——特别是同机并行 Lead 会话互踩（TD-130 isolation_pass 家族）与主仓根 runs-guard 红灯（TD-134）。两者都表现为 "exit 1 + 顺序复跑绿"，但判定规则与处置不同。
+`npm test` 由 `scripts/canonical-test.mjs`（TD-107 canonical runner）分波执行全量。本章覆盖套件自身的**环境性失败判定**——特别是同机并行 Lead 会话互踩（TD-130 isolation_pass 家族）与主仓根 runs-guard 红灯（TD-134）。两者都表现为 "exit 1 + 顺序复跑绿"，但判定规则与处置不同。何时可 focused（须带 `--test-timeout`）、何时必须全量：见 `docs/usage.md` 场景 4b 测试分层运行规则（T0-T3，2026-09-19）。
 
 ### 8.1 npm test exit 1 但失败全为 isolation_pass（并发互踩，非代码回归）
 

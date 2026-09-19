@@ -295,7 +295,7 @@ test/ 按领域分目录——这是新贡献者最大的导航入口，改哪�
 
 ### 10.2 本地验证闭环
 
-- `npm test`：canonical 分波全量跑，约 15 分钟（2026-08-20 实测 869s ≈ 14.5 min）、mock 子进程、零外部依赖、不消耗 token。它是**每个交付的验收门**——改完全绿才算完。同机另一全量在跑时 stderr 会打 WARNING，结果可能受资源争用污染——顺序复跑即可（isolation_pass 判定规则见 `docs/troubleshooting.md` §8）。
+- `npm test`：canonical 分波全量跑，约 5.5 分钟（2026-09-19 实测 ≈ 330s；套件随演进持续变化，以当次实测为准）、mock 子进程、零外部依赖、不消耗 token。它是**每个交付的验收门**——改完全绿才算完。何时可 focused、何时必须全量，见 `docs/usage.md` 场景 4b 的**测试分层运行规则（T0-T3）**（开发回路/交付前自检用 focused——**focused 命令必须显式带 `--test-timeout=600000`**，裸命令不经过看门狗）。同机另一全量在跑时 stderr 会打 WARNING，结果可能受资源争用污染——顺序复跑即可（isolation_pass 判定规则见 `docs/troubleshooting.md` §8）。
 - 改 **delivery / 解析 / 分类**逻辑时，绿测试**不够**：必须对照真实 transcript 冒烟后再宣告完成（`AGENTS.md` 的铁律）。
 
 ### 10.3 读文档的顺序
@@ -317,9 +317,9 @@ test/ 按领域分目录——这是新贡献者最大的导航入口，改哪�
 从修一个 open TD 的小尾巴起步（open 清单见 `docs/tech-debt.md`，例如 TD-114：`runs wait` 窗口到期 exit 0 缺子进程级断言）：
 
 1. 读 TD 条目，按 §10.1 找到对应测试目录与源码
-2. `npm test` 跑通基线，确认起点全绿
+2. 按 `docs/usage.md` 场景 4b 测试分层规则跑 **T0 focused 基线**（目标测试文件 + 直接消费回归，带 `--test-timeout`），确认起点对要动的面全绿——不必先跑全量
 3. 写测试 + 改实现（新测试文件记得登记进 `test/manifest.json` 对应组）
-4. 再跑 `npm test`，全绿
+4. 再跑 `npm test` 全量，全绿
 5. 提 PR，正文写清 TD 编号与验证证据
 
 ---
