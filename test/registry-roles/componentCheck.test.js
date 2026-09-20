@@ -34,6 +34,7 @@ import {
   LLM_COMPONENT_DRILLS,
   backendCapabilityConsistencyChecks,
   backendEventIntegrityChecks,
+  backendStartupConfigChecks,
   componentResultFromChecks,
   createComponentDrills,
   executeComponentChecks,
@@ -510,6 +511,58 @@ test("分账【证伪】: 被测 checks 红 → result fail，夹具资格/夹�
   assert.equal(record.fixture.qualifiedBy, "owner-declared", "夹具仍记资格账——但那是夹具的账，不是被测的判定");
 });
 
+test("execute: backend drills 收到 configuredModelId=装配实际 model（被测自己的支持范围），绝无夹具身份", () => {
+  const { plan } = plannedBackendSubjectWithFixture();
+  // plannedBackendSubjectWithFixture：被测 = codex（anchor tester 的 gpt-5.6-sol），
+  // 夹具 llm = researcher 的 glm-5.3-flash[1m]。注入面必须传装配实际携带的
+  // model（被测自己的），不是夹具身份。
+  let captured = null;
+  const inputs = executeComponentChecks({
+    plan,
+    drills: {
+      runBackendComponentDrills: (args) => {
+        captured = args;
+        return { checks: [check_("backendNormalCompletion", true)], facts: {} };
+      },
+      runLlmComponentDrills: () => { throw new Error("not an llm subject"); },
+    },
+    codeRef: CODE_REF,
+    now: NOW,
+  });
+  assert.equal(inputs[0].result, "pass");
+  assert.equal(captured.agentId, plan.subjects[0].fixtureAgentId);
+  assert.equal(captured.configuredModelId, "gpt-5.6-sol", "判定基准 = 装配实际 model（被测 anchor 的）");
+  assert.ok(!("fixtureModelId" in captured), "夹具身份键不得出现在 drills 注入面");
+
+  // 被测 anchor 无 model 块（deepseek-acp 形状）→ configuredModelId=null（支持
+  // 范围不含模型选择——drills 走"注入须明确拒绝"分支，见 kernel 测试）。
+  const registry = syntheticRegistry();
+  registry.agents.coder_low_dsh = { backend: "deepseek-acp", cwd: ".", credentialEnv: "DEEPSEEK_API_KEY" };
+  registry.certification = { fixtures: { llm: [{ agentId: "researcher" }] } };
+  const plan2 = planComponentChecks({
+    registry,
+    subjectArg: "deepseek-acp",
+    codeRef: CODE_REF,
+    compositionSummary: null,
+    now: NOW,
+  });
+  let captured2 = null;
+  executeComponentChecks({
+    plan: plan2,
+    drills: {
+      runBackendComponentDrills: (args) => {
+        captured2 = args;
+        return { checks: [check_("backendNormalCompletion", true)], facts: {} };
+      },
+      runLlmComponentDrills: () => { throw new Error("not an llm subject"); },
+    },
+    codeRef: CODE_REF,
+    now: NOW,
+  });
+  assert.equal(captured2.configuredModelId, null, "无 model 装配 → null（支持范围分支的判别信号）");
+  assert.equal(captured2.capabilitySnapshot.reportsTokenUsage, true, "deepseek-acp 能力快照照常注入");
+});
+
 test("分账【证伪】: llm 被测 × backend 夹具方向同样分账（夹具 backend 不产生组件记录）", () => {
   const registry = syntheticRegistry();
   registry.certification = { fixtures: { backend: [{ agentId: "tester" }] } };
@@ -705,6 +758,33 @@ test("kernel: 能力声明 ⇔ 实测【双向】——声明与实测任一方�
   assert.equal(byName(backendCapabilityConsistencyChecks({ declared: { reportsTokenUsage: true, supportsSessionReuse: true }, metricsInput: 5, sessionAnchorPresent: false })).get("supportsSessionReuseConsistency").pass, false);
 });
 
+test("kernel: 配置传递按支持范围——装配带 model → 值必须送达；装配无 model → 注入必须明确拒绝（ADR-0032 §2）", () => {
+  const byName = (checks) => new Map(checks.map((c) => [c.name, c]));
+  // 支持范围含模型选择（装配携带 model 块）：送达 → 绿；未送达/静默丢弃 → 红。
+  assert.equal(byName(backendStartupConfigChecks({
+    configuredModelId: "glm-5.3[1m]", startedModelId: "glm-5.3[1m]",
+  })).get("backendStartupConfigPassed").pass, true);
+  const dropped = backendStartupConfigChecks({ configuredModelId: "glm-5.3[1m]", startedModelId: null });
+  assert.equal(dropped[0].pass, false, "下发的 model 块静默丢弃 → 红");
+  assert.match(dropped[0].detail, /must actually reach the backend/);
+
+  // 支持范围不含模型选择（装配无 model 块，如 deepseek-acp）：注入被明确拒绝
+  // → 绿（拒绝即正确结果，证据入账）；未拒绝/静默接受 → 红。
+  const rejected = backendStartupConfigChecks({
+    configuredModelId: null,
+    modelBlockRejected: true,
+    rejectionEvidence: "deepseek-acp cannot express a model block; the model comes from the shipped acp profile session configOptions",
+  });
+  assert.equal(rejected[0].pass, true, "明确拒绝 = 正确结果（不得要求值必须送达）");
+  assert.match(rejected[0].detail, /explicitly rejected/);
+  assert.match(rejected[0].detail, /cannot express a model block/);
+  const silent = backendStartupConfigChecks({ configuredModelId: null, modelBlockRejected: false });
+  assert.equal(silent[0].pass, false, "静默接受/忽略越界参数 → 红");
+  assert.match(silent[0].detail, /silently accepting\/ignoring an out-of-scope parameter is forbidden/);
+  const unknown = backendStartupConfigChecks({ configuredModelId: null });
+  assert.equal(unknown[0].pass, false, "探针未观察（null）→ 红，不得当绿");
+});
+
 test("kernel【证伪】: 显式失败探针——unexpectedly completed → 红；显式 CLI 拒绝 → 绿", () => {
   const completed = explicitFailureCheck({ name: "startupFailureExplicit", ok: true, result: { completed: true }, error: null, capability: "startupFailure" });
   assert.equal(completed[0].pass, false);
@@ -852,7 +932,7 @@ test("结构钉: 临时装配 registry 只含 _fixture_* 装配，不动主 regi
   assert.ok(!/writeFileSync\(\s*REGISTRY_PATH/.test(entry), "入口绝不写主 registry");
 });
 
-test("装配: 被测侧基底 + 夹具侧身份覆盖——身份来自实际配置克隆（行内无身份字面量）", () => {
+test("装配: backend 被测 = anchor 净化克隆——夹具 llm 身份绝不下发为被测配置", () => {
   const registry = syntheticRegistry();
   registry.certification = { fixtures: { llm: [{ agentId: "fallback" }] } };
   const plan = planComponentChecks({
@@ -864,14 +944,21 @@ test("装配: 被测侧基底 + 夹具侧身份覆盖——身份来自实际配
   });
   assert.equal(plan.subjects.length, 1);
   const assembly = plan.tempRegistry.agents[plan.subjects[0].fixtureAgentId];
-  // 基底 = 被测 backend（kimi-code）anchor 的 backend 侧字段；model/provider =
-  // 夹具 llm anchor（fallback，opencode-serve 形状）的实际配置。
+  // 基底 = 被测 backend（kimi-code）anchor 的净化克隆；model/provider 保持被测
+  // 自己的实际配置（那就是它的支持范围）——夹具 llm（fallback 的
+  // zhipuai/glm-5.2）不得以任何形态进入装配。
   assert.equal(assembly.backend, "kimi-code");
-  assert.equal(assembly.model.providerID, "zhipuai-coding-plan");
-  assert.equal(assembly.model.id, "glm-5.2");
+  assert.equal(assembly.model.id, "kimi-code/k3", "model = 被测 anchor 自己的配置");
+  assert.equal(assembly.provider, undefined, "夹具 llm 的 provider 不得注入被测装配");
+  assert.ok(!JSON.stringify(assembly).includes("glm-5.2"), "夹具 modelId 不得出现在被测装配");
+  assert.ok(!JSON.stringify(assembly).includes("zhipuai-coding-plan"), "夹具 providerID 不得出现在被测装配");
   assert.equal(assembly.systemPrompt, undefined, "角色合同剥离（与组件机械验证无关）");
   assert.equal(assembly.sessionReuse, undefined, "sessionReuse 由 capability 探针显式控制");
-  // 反向：验 llm → 基底 = 夹具 backend anchor，model = 被测 llm anchor。
+  // 夹具身份仍完整进台账资格账（record.fixture）——记账归记账，下发归下发。
+  assert.equal(plan.subjects[0].fixtureAccount.identity.modelId, "glm-5.2");
+
+  // 反向：验 llm → 基底 = 夹具 backend anchor，model = 被测 llm anchor（被测
+  // 身份正是要验证的下发对象——这与"夹具身份不下发"不冲突）。
   const registry2 = syntheticRegistry();
   registry2.certification = { fixtures: { backend: [{ agentId: "coder_mm" }] } };
   const plan2 = planComponentChecks({
@@ -884,6 +971,33 @@ test("装配: 被测侧基底 + 夹具侧身份覆盖——身份来自实际配
   const assembly2 = plan2.tempRegistry.agents[plan2.subjects[0].fixtureAgentId];
   assert.equal(assembly2.backend, "kimi-code", "基底 = 夹具 backend（coder_mm 的 kimi-code）");
   assert.equal(assembly2.model.id, "glm-5.2", "model = 被测 llm 的实际配置");
+});
+
+test("装配【证伪·回归钉】: 被测 anchor 无 model/provider（deepseek-acp 形状）→ 装配零夹具身份注入（2026-09-20 首跑 7 连红根因）", () => {
+  const registry = syntheticRegistry();
+  // deepseek-acp 形状：anchor 无 model/provider（model 来自 runtime 自带
+  // profile；validateAgentPolicy 对任何 model/provider 块 fail-closed 硬拒）。
+  registry.agents.coder_low_dsh = {
+    backend: "deepseek-acp",
+    cwd: ".",
+    credentialEnv: "DEEPSEEK_API_KEY",
+  };
+  registry.certification = { fixtures: { llm: [{ agentId: "fallback" }] } };
+  const plan = planComponentChecks({
+    registry,
+    subjectArg: "deepseek-acp",
+    codeRef: CODE_REF,
+    compositionSummary: null,
+    now: NOW,
+  });
+  assert.equal(plan.error, null);
+  assert.equal(plan.subjects.length, 1);
+  const assembly = plan.tempRegistry.agents[plan.subjects[0].fixtureAgentId];
+  assert.equal(assembly.backend, "deepseek-acp");
+  assert.equal(assembly.model, undefined, "装配绝不能携带 model 块（被测会 fail-closed 自拒——首跑根因）");
+  assert.equal(assembly.provider, undefined, "装配绝不能携带 provider 块");
+  assert.ok(!JSON.stringify(assembly).includes("glm-5.2"), "夹具 modelId 不得出现（含嵌套）");
+  assert.ok(!JSON.stringify(plan.tempRegistry).includes("gpt-5.6-sol"), "任何夹具身份不得进入临时 registry");
 });
 
 test("fixtureAccount: 夹具账带资格依据/合同摘要/配置摘要（recordComponentCheck 可直接消费）", () => {
