@@ -1,0 +1,321 @@
+{
+  "probe": "acp-config-option",
+  "purpose": "prove/disprove that ACP session configOptions (reasoning_effort, model) are SETTABLE via session/set_config_option — not merely exposed by session/new",
+  "dsh": "dsh",
+  "containmentPatch": "D:\\projects\\windows-agent-orchestrator-poc\\.wao-worktrees\\run_202609202108121366x508h\\scripts\\reliability\\dsh-acp\\wao-contain-safe.patch.yml",
+  "workspace": "D:\\projects\\windows-agent-orchestrator-poc\\.wao-worktrees\\run_202609202108121366x508h\\.wao\\runs\\acp-config-option-probe",
+  "promptSent": false,
+  "sessionId": "a3ec4095-e049-4403-aed5-0a982fe767a2",
+  "steps": {
+    "initialize": {
+      "protocolVersion": 1,
+      "agentInfo": {
+        "name": "deepseek-harness-acp",
+        "version": "0.0.1"
+      }
+    },
+    "sessionNew": {
+      "configOptions": [
+        {
+          "id": "model",
+          "name": "Model",
+          "category": "model",
+          "type": "select",
+          "currentValue": "[\"deepseek-official\",\"deepseek-v4-flash\"]",
+          "options": [
+            {
+              "group": "deepseek-official",
+              "name": "DeepSeek",
+              "options": [
+                {
+                  "value": "[\"deepseek-official\",\"deepseek-v4-flash\"]",
+                  "name": "deepseek-v4-flash"
+                },
+                {
+                  "value": "[\"deepseek-official\",\"deepseek-flash\"]",
+                  "name": "deepseek-flash"
+                },
+                {
+                  "value": "[\"deepseek-official\",\"deepseek-v4-pro\"]",
+                  "name": "DeepSeek-V4-Pro"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "reasoning_effort",
+          "name": "Reasoning effort",
+          "category": "thought_level",
+          "type": "select",
+          "currentValue": "high",
+          "options": [
+            {
+              "value": "off",
+              "name": "Off",
+              "description": "Use for simple tasks that do not need reasoning."
+            },
+            {
+              "value": "low",
+              "name": "Low",
+              "description": "Prefer for routine or latency-sensitive tasks."
+            },
+            {
+              "value": "high",
+              "name": "High",
+              "description": "The default balance for most tasks."
+            },
+            {
+              "value": "max",
+              "name": "Max",
+              "description": "Reserve for the hardest quality-first tasks."
+            }
+          ]
+        }
+      ]
+    },
+    "setEffort": {
+      "request": {
+        "method": "session/set_config_option",
+        "params": {
+          "sessionId": "a3ec4095-e049-4403-aed5-0a982fe767a2",
+          "configId": "reasoning_effort",
+          "value": "low"
+        }
+      },
+      "response": {
+        "configOptions": [
+          {
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": "[\"deepseek-official\",\"deepseek-v4-flash\"]",
+            "options": [
+              {
+                "group": "deepseek-official",
+                "name": "DeepSeek",
+                "options": [
+                  {
+                    "value": "[\"deepseek-official\",\"deepseek-v4-flash\"]",
+                    "name": "deepseek-v4-flash"
+                  },
+                  {
+                    "value": "[\"deepseek-official\",\"deepseek-flash\"]",
+                    "name": "deepseek-flash"
+                  },
+                  {
+                    "value": "[\"deepseek-official\",\"deepseek-v4-pro\"]",
+                    "name": "DeepSeek-V4-Pro"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "reasoning_effort",
+            "name": "Reasoning effort",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": "low",
+            "options": [
+              {
+                "value": "off",
+                "name": "Off",
+                "description": "Use for simple tasks that do not need reasoning."
+              },
+              {
+                "value": "low",
+                "name": "Low",
+                "description": "Prefer for routine or latency-sensitive tasks."
+              },
+              {
+                "value": "high",
+                "name": "High",
+                "description": "The default balance for most tasks."
+              },
+              {
+                "value": "max",
+                "name": "Max",
+                "description": "Reserve for the hardest quality-first tasks."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "setEffortNegativeControl": {
+      "request": {
+        "method": "session/set_config_option",
+        "params": {
+          "sessionId": "a3ec4095-e049-4403-aed5-0a982fe767a2",
+          "configId": "reasoning_effort",
+          "value": "medium"
+        }
+      },
+      "rejected": {
+        "code": -32602,
+        "message": "Invalid params: unknown reasoning effort for deepseek-official/deepseek-v4-flash: medium"
+      }
+    },
+    "setEffortAgain": {
+      "request": {
+        "method": "session/set_config_option",
+        "params": {
+          "sessionId": "a3ec4095-e049-4403-aed5-0a982fe767a2",
+          "configId": "reasoning_effort",
+          "value": "max"
+        }
+      },
+      "response": {
+        "configOptions": [
+          {
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": "[\"deepseek-official\",\"deepseek-v4-flash\"]",
+            "options": [
+              {
+                "group": "deepseek-official",
+                "name": "DeepSeek",
+                "options": [
+                  {
+                    "value": "[\"deepseek-official\",\"deepseek-v4-flash\"]",
+                    "name": "deepseek-v4-flash"
+                  },
+                  {
+                    "value": "[\"deepseek-official\",\"deepseek-flash\"]",
+                    "name": "deepseek-flash"
+                  },
+                  {
+                    "value": "[\"deepseek-official\",\"deepseek-v4-pro\"]",
+                    "name": "DeepSeek-V4-Pro"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "reasoning_effort",
+            "name": "Reasoning effort",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": "max",
+            "options": [
+              {
+                "value": "off",
+                "name": "Off",
+                "description": "Use for simple tasks that do not need reasoning."
+              },
+              {
+                "value": "low",
+                "name": "Low",
+                "description": "Prefer for routine or latency-sensitive tasks."
+              },
+              {
+                "value": "high",
+                "name": "High",
+                "description": "The default balance for most tasks."
+              },
+              {
+                "value": "max",
+                "name": "Max",
+                "description": "Reserve for the hardest quality-first tasks."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "setModel": {
+      "request": {
+        "method": "session/set_config_option",
+        "params": {
+          "sessionId": "a3ec4095-e049-4403-aed5-0a982fe767a2",
+          "configId": "model",
+          "value": "[\"deepseek-official\",\"deepseek-flash\"]"
+        }
+      },
+      "response": {
+        "configOptions": [
+          {
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": "[\"deepseek-official\",\"deepseek-flash\"]",
+            "options": [
+              {
+                "group": "deepseek-official",
+                "name": "DeepSeek",
+                "options": [
+                  {
+                    "value": "[\"deepseek-official\",\"deepseek-flash\"]",
+                    "name": "deepseek-flash"
+                  },
+                  {
+                    "value": "[\"deepseek-official\",\"deepseek-v4-pro\"]",
+                    "name": "DeepSeek-V4-Pro"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "reasoning_effort",
+            "name": "Reasoning effort",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": "high",
+            "options": [
+              {
+                "value": "off",
+                "name": "Off",
+                "description": "Use for simple tasks that do not need reasoning."
+              },
+              {
+                "value": "low",
+                "name": "Low",
+                "description": "Prefer for routine or latency-sensitive tasks."
+              },
+              {
+                "value": "high",
+                "name": "High",
+                "description": "The default balance for most tasks."
+              },
+              {
+                "value": "max",
+                "name": "Max",
+                "description": "Reserve for the hardest quality-first tasks."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "closed": true
+  },
+  "snapshot": {
+    "reasoning_effort": {
+      "currentValue": "high",
+      "advertised": [
+        "off",
+        "low",
+        "high",
+        "max"
+      ]
+    },
+    "model": {
+      "currentValue": "[\"deepseek-official\",\"deepseek-v4-flash\"]",
+      "advertised": [
+        "[\"deepseek-official\",\"deepseek-v4-flash\"]",
+        "[\"deepseek-official\",\"deepseek-flash\"]",
+        "[\"deepseek-official\",\"deepseek-v4-pro\"]"
+      ]
+    }
+  },
+  "probeEffortOverride": "low",
+  "sessionUpdateNotifications": [],
+  "stderrTail": []
+}

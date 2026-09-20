@@ -76,16 +76,32 @@ const ACP_RUNTIME_NAME = "deepseek-harness-acp";
 const ACP_PROTOCOL_VERSION = 1;
 const DEFAULT_BINARY = "dsh";
 
-// ACP 面 reasoning_effort wire 事实（F5：evidence/phase4-contained-safe.json 的
-// configOptions 暴露 off/low/high/max 四档）——但那只是"随会话暴露"，**不是**可设置
-// 通道的证据：argv/env/session 请求均无 effort 下发面，也无 set_config_option 类
-// wire 方法入证据（scripts/reliability/dsh-acp/evidence/）。校验放行却静默不下发
-// = 配置假绿，故 validateAgentPolicy 对任何非空 reasoning.effort 硬拒（与
-// provider/model 块同源处置）。
+// ACP 面 reasoning_effort wire 事实（两阶段演进）：
+//   F5（evidence/phase4-contained-safe.json）：configOptions 随 session/new **暴露**
+//     off/low/high/max 四档——只是暴露面。
+//   Phase 5（evidence/phase5-config-option-set.json / phase5-config-option-set-low.json，
+//     2026-09-20 真实 dsh 0.1.5-rc.2 实测）：`session/set_config_option`
+//     { sessionId, configId: "reasoning_effort", value } **可设置**——high→off、
+//     →low、→max 三次 set 的响应 configOptions currentValue 均确认生效；
+//     负对照 medium（WAO 闭集成员但 ACP 不广告）被 -32602
+//     "unknown reasoning effort" 拒绝。据此 validateAgentPolicy 从"一律硬拒"
+//     收窄为"只放行证据覆盖的可设置值"（SETTABLE_REASONING_EFFORTS），spawn 在
+//     session/new 后下发并对响应做 fail-closed 确认（未确认请求值即拒绝派发）。
+// 值域诚实性：WAO REASONING_EFFORTS（registry.js）= minimal/low/medium/high/xhigh/max，
+// ACP 广告 = off/low/high/max。两者不同且**无证据支持任何映射**（medium 被拒是直接
+// 反证）——只接受交集 low/high/max，其余固定文案拒绝，绝不发明映射。
+// 直接 set 证据覆盖 off/low/max；high 是 session/new 的缺省 currentValue（广告闭集
+// 成员，与 low/max 走同一 wire 通道），未单独 set 验证——如实声明。
 
 // 越界 tripwire deny-list（ADR-0031 §3.5）：检测，不是阻止——副作用可能已发生。
 // wire 上 title 即工具真名（F8），故直接按名字断言。
 export const DENIED_ORCHESTRATION_TOOLS = Object.freeze(["subagent", "subagent_fork", "spawn_teammate"]);
+
+// reasoning.effort 的**已验证可设置值域**（Phase 5 实测，evidence/phase5-*.json）：
+// WAO 六值闭集 ∩ ACP 广告四档（off/low/high/max）= low/high/max。off 不在 WAO
+// registry 闭集（registry 层已拒）；minimal/medium/xhigh 不被 ACP 广告（medium 有
+// -32602 负对照直接证据）。只放行交集——无证据支持映射，不发明映射。
+export const SETTABLE_REASONING_EFFORTS = Object.freeze(["low", "high", "max"]);
 
 // shell 类工具（与旧线 projectDshEvent 同集）：投影为 command 证据而非 tool_use。
 const SHELL_TOOL_NAMES = Object.freeze(["pwsh", "powershell", "bash", "shell"]);
@@ -306,12 +322,17 @@ export class DeepSeekAcpBackend {
     if (agent?.model) {
       throw new Error("deepseek-acp cannot express a model block; the model comes from the shipped acp profile session configOptions");
     }
-    // reasoning.effort 同源处置（Lead 2026-09-20 裁定选项 a）：ACP wire 上没有
-    // 可验证的下发通道——argv/env/session 请求均不携带 effort，evidence 里也无
-    // set_config_option 类方法。校验放行但静默不下发 = 用户配置假绿，硬拒。
+    // reasoning.effort（Phase 5 后语义）：session/set_config_option 已被实测证明
+    // 可设置（evidence/phase5-*.json）——只放行已验证可设置的值域交集
+    // （SETTABLE_REASONING_EFFORTS = low/high/max），其余固定文案拒绝（不回显
+    // 请求值——坏值可能带注入载荷）。空值（null/undefined）视同未配置，不拒。
     const effort = agent?.reasoning?.effort;
-    if (effort !== undefined && effort !== null) {
-      throw new Error("deepseek-acp cannot express reasoning.effort: no verified wire channel delivers it (argv/env/session requests carry no effort; configOptions are exposed, not settable from here) — refusing instead of silently ignoring");
+    if (effort !== undefined && effort !== null && !SETTABLE_REASONING_EFFORTS.includes(effort)) {
+      throw new Error(
+        "deepseek-acp reasoning.effort must be one of the ACP-wire-verified settable values ("
+        + SETTABLE_REASONING_EFFORTS.join(", ")
+        + ") — the ACP session advertises off/low/high/max and WAO's registry enum is minimal/low/medium/high/xhigh/max, so only the intersection is accepted; no value mapping is invented",
+      );
     }
   }
 
@@ -737,6 +758,40 @@ export class DeepSeekAcpBackend {
         throw new Error("deepseek-acp returned no sessionId");
       }
       acpSessionId = created.sessionId;
+      // reasoning.effort 下发（Phase 5 实证通道）：生效策略带非空 effort（registry
+      // 配置或 per-dispatch --reasoning 覆盖；validateAgentPolicy 已把它收窄到
+      // SETTABLE_REASONING_EFFORTS）时，在 session/new 之后、prompt 之前经
+      // session/set_config_option 下发。**fail-closed**：响应必须确认请求值
+      // （configOptions 里 reasoning_effort 的 currentValue === 请求值）——
+      // 请求失败 / 无 configOptions / 选项缺失 / 生效值不符 → 拒绝派发，
+      // 不静默回退、不静默继续（配置假绿 = 缺陷）。effort 值来自闭集
+      // {low,high,max}，进审计文案是安全的（非任意用户串）。
+      const effort = agent?.reasoning?.effort;
+      if (typeof effort === "string" && effort.length > 0) {
+        const setResult = await request("session/set_config_option", {
+          sessionId: acpSessionId,
+          configId: "reasoning_effort",
+          value: effort,
+        });
+        const confirmed = Array.isArray(setResult?.configOptions)
+          ? setResult.configOptions.find((option) => option?.id === "reasoning_effort")
+          : undefined;
+        if (confirmed?.currentValue !== effort) {
+          throw new Error(
+            "deepseek-acp session/set_config_option did not confirm the requested reasoning.effort (expected currentValue "
+            + effort + ", got " + (confirmed === undefined ? "no reasoning_effort option" : JSON.stringify(confirmed.currentValue))
+            + ") — refusing to dispatch instead of silently proceeding with a different effort",
+          );
+        }
+        // 会话内转录事实（既有事件类型：system message，同权限应答审计先例——
+        // system 消息不是 usable effect，不污染证据链）。
+        queue.push(redactor.redact(messageEvent("system", [{
+          type: "text",
+          text: "deepseek-acp reasoning effort set: requested=" + effort
+            + ", confirmed=" + confirmed.currentValue
+            + " via session/set_config_option (session config option id reasoning_effort)",
+        }])));
+      }
       // prompt 响应只在整轮结束到达：不等待响应即返回 handle（timeoutMs=0——
       // 生命周期由 WAO waitTimeout/abort 治理，不在传输层伪造死线）。
       const promptPromise = request("session/prompt", {

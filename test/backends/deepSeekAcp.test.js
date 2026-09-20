@@ -29,6 +29,7 @@ import {
   EXPECTED_CONTAINMENT_OVERLAY,
   parseContainmentOverlay,
   serializeRoleContractPatch,
+  SETTABLE_REASONING_EFFORTS,
 } from "../../src/backends/deepSeekAcp.js";
 import { compileInvocation } from "../../src/backends/processBackend.js";
 import { backendCapabilitySnapshot, backendFor } from "../../src/backends/factory.js";
@@ -79,8 +80,16 @@ function makeFakeChild() {
   return child;
 }
 
-/** fake ACP 对端：自动应答握手（initialize/session/new/close/cancel），记录全部帧。 */
-function fakeAcpPeer(child, { sessionId = "sess-acp-1", agentName = "deepseek-harness-acp" } = {}) {
+/** fake ACP 对端：自动应答握手（initialize/session/new/set_config_option/close/cancel），记录全部帧。 */
+function fakeAcpPeer(child, {
+  sessionId = "sess-acp-1",
+  agentName = "deepseek-harness-acp",
+  // session/set_config_option 的应答策略：缺省确认请求值（Phase 5 实测响应形状：
+  // { configOptions: [...] }，reasoning_effort.currentValue = 生效值）。
+  // 测试可注入 { confirmValue }（伪确认值）/ { omitOption }（响应不含该选项）/
+  // { error: { code, message } }（JSON-RPC 错误，如旧 runtime -32601）。
+  setConfigOptionMode = "confirm",
+} = {}) {
   const clientRequests = [];
   const serverRequestResponses = [];
   const send = (obj) => child.stdout.write(JSON.stringify(obj) + "\n");
@@ -104,6 +113,25 @@ function fakeAcpPeer(child, { sessionId = "sess-acp-1", agentName = "deepseek-ha
         });
       } else if (message.method === "session/new") {
         send({ jsonrpc: "2.0", id: message.id, result: { sessionId } });
+      } else if (message.method === "session/set_config_option") {
+        if (setConfigOptionMode.error) {
+          send({ jsonrpc: "2.0", id: message.id, error: setConfigOptionMode.error });
+          return;
+        }
+        const options = setConfigOptionMode.omitOption ? [] : [{
+          id: "reasoning_effort",
+          name: "Reasoning effort",
+          category: "thought_level",
+          type: "select",
+          currentValue: setConfigOptionMode.confirmValue ?? message.params?.value,
+          options: [
+            { value: "off", name: "Off" },
+            { value: "low", name: "Low" },
+            { value: "high", name: "High" },
+            { value: "max", name: "Max" },
+          ],
+        }];
+        send({ jsonrpc: "2.0", id: message.id, result: { configOptions: options } });
       } else if (message.method === "session/close") {
         send({ jsonrpc: "2.0", id: message.id, result: {} });
         child.end(0);
@@ -119,6 +147,7 @@ function fakeAcpPeer(child, { sessionId = "sess-acp-1", agentName = "deepseek-ha
     serverRequestResponses,
     sessionId,
     respond(id, result) { send({ jsonrpc: "2.0", id, result }); },
+    respondError(id, error) { send({ jsonrpc: "2.0", id, error }); },
     notify(update, sid = sessionId) {
       send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: sid, update } });
     },
@@ -174,15 +203,24 @@ async function runAcpScenario({ drive, task, agentOverrides = {}, containmentTex
 
 // ===== policy / containment / 资产钉 =====
 
-test("ACP policy: effort 硬拒（无可验证下发通道，绝不静默无效）；provider/model 被拒", () => {
+test("ACP policy: effort 只放行 wire 实证可设置交集 low/high/max（Phase 5）；其余固定文案拒；provider/model 被拒", () => {
   const backend = new DeepSeekAcpBackend();
-  // 审计阻塞项 5（Lead 裁定选项 a）：校验通过但静默不下发 = 配置假绿。
-  // ACP wire 无 effort 下发通道（argv/env/session 请求均不携带；evidence 无
-  // set_config_option 类方法）→ 任何非空 effort 一律硬拒，含 ACP 原生四档。
-  for (const effort of ["off", "low", "high", "max", "minimal", "medium", "xhigh"]) {
+  // Phase 5（evidence/phase5-config-option-set*.json，2026-09-20 真实 dsh 实测）：
+  // session/set_config_option 可设置 reasoning_effort（off/low/max 有直接
+  // set-确认证据，high 是 session/new 缺省 currentValue）。值域门 = WAO 六值
+  // 闭集 ∩ ACP 广告四档 = low/high/max；无证据支持映射，不发明映射。
+  for (const effort of SETTABLE_REASONING_EFFORTS) {
+    assert.doesNotThrow(
+      () => backend.validateAgentPolicy(agent({ reasoning: { effort } })),
+      effort,
+    );
+  }
+  // 域外值固定文案拒绝（含 WAO 闭集成员 minimal/medium/xhigh——ACP 不广告，
+  // medium 有 -32602 负对照直接证据；off 不在 WAO registry 闭集）。
+  for (const effort of ["off", "minimal", "medium", "xhigh", "ultra"]) {
     assert.throws(
       () => backend.validateAgentPolicy(agent({ reasoning: { effort } })),
-      /cannot express reasoning\.effort/,
+      /reasoning\.effort must be one of the ACP-wire-verified settable values \(low, high, max\)/,
       effort,
     );
   }
@@ -194,7 +232,8 @@ test("ACP policy: effort 硬拒（无可验证下发通道，绝不静默无效�
     })),
     /cannot express provider/,
   );
-  // model 块（id/contextWindow）无可验证设置通道 → fail-closed 拒绝，不静默忽略
+  // model 块（id/contextWindow）无可验证设置通道（model set 仅取证，未接线）
+  // → fail-closed 拒绝，不静默忽略
   assert.throws(
     () => backend.validateAgentPolicy(agent({ model: { id: "deepseek-v4-flash" } })),
     /cannot express a model block/,
@@ -204,6 +243,98 @@ test("ACP policy: effort 硬拒（无可验证下发通道，绝不静默无效�
     /cannot express a model block/,
   );
   assert.doesNotThrow(() => backend.validateAgentPolicy(agent()));
+});
+
+// ===== reasoning.effort 下发（Phase 5 实证通道 session/set_config_option）=====
+
+test("ACP effort 接线：session/new 后经 session/set_config_option 下发，响应确认 + system 转录事实", async () => {
+  const { events, peer } = await runAcpScenario({
+    agentOverrides: { reasoning: { effort: "low" } },
+    drive: ({ peer: p, promptRequest }) => {
+      p.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
+    },
+  });
+  // 外发请求形状（Phase 5 实测的 wire 方法与参数）——在 prompt 之前发出。
+  const setRequest = peer.clientRequests.find((m) => m.method === "session/set_config_option");
+  assert.ok(setRequest, "必须发出 session/set_config_option");
+  assert.deepEqual(setRequest.params, {
+    sessionId: peer.sessionId,
+    configId: "reasoning_effort",
+    value: "low",
+  });
+  const setIndex = peer.clientRequests.indexOf(setRequest);
+  const promptIndex = peer.clientRequests.findIndex((m) => m.method === "session/prompt");
+  assert.ok(setIndex >= 0 && promptIndex >= 0 && setIndex < promptIndex, "set 必须先于 prompt（选择按 admitted prompt 钉定）");
+  // 会话内转录事实：既有事件类型（system message，同权限应答审计先例；非 usable effect）。
+  const audit = events.find((e) => e.kind === "message" && e.role === "system");
+  assert.ok(audit, "effort 设置必须有 system 转录事实");
+  assert.match(audit.parts[0].text, /deepseek-acp reasoning effort set: requested=low, confirmed=low/);
+  assert.match(audit.parts[0].text, /session\/set_config_option/);
+  assert.equal(events.at(-1).reason, "completed");
+});
+
+test("ACP effort 接线：未配置 / null effort → 不发 set_config_option（缺省行为不变）", async () => {
+  for (const effortConfig of [undefined, { effort: null }]) {
+    const { peer } = await runAcpScenario({
+      agentOverrides: effortConfig === undefined ? {} : { reasoning: effortConfig },
+      drive: ({ peer: p, promptRequest }) => {
+        p.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
+      },
+    });
+    assert.ok(
+      !peer.clientRequests.some((m) => m.method === "session/set_config_option"),
+      JSON.stringify(effortConfig) + "：不得发出 set_config_option",
+    );
+  }
+});
+
+test("ACP effort 接线 fail-closed：响应未确认请求值 / 缺选项 / JSON-RPC 错误 → 拒绝派发且不发 prompt", async () => {
+  const cases = [
+    {
+      name: "currentValue 与请求不符（伪确认）",
+      mode: { confirmValue: "high" }, // 请求 low，运行时报 high
+      pattern: /did not confirm the requested reasoning\.effort \(expected currentValue low, got "high"\)/,
+    },
+    {
+      name: "响应 configOptions 不含 reasoning_effort 选项",
+      mode: { omitOption: true },
+      pattern: /did not confirm the requested reasoning\.effort \(expected currentValue low, got no reasoning_effort option\)/,
+    },
+    {
+      name: "JSON-RPC 错误（如旧 runtime 无此方法 -32601）",
+      mode: { error: { code: -32601, message: "method not found" } },
+      pattern: /JSON-RPC error -32601/,
+    },
+  ];
+  for (const c of cases) {
+    const dir = mkdtempSync(join(tmpdir(), "wao-acp-test-"));
+    try {
+      const containmentPath = join(dir, "wao-contain.patch.yml");
+      writeFileSync(containmentPath, REFERENCE_CONTAINMENT, "utf8");
+      const child = makeFakeChild();
+      const backend = new DeepSeekAcpBackend({
+        containmentPatchPath: containmentPath,
+        spawnFn: () => child,
+      });
+      const peer = fakeAcpPeer(child, { setConfigOptionMode: c.mode });
+      await assert.rejects(
+        backend.spawn(agent({ reasoning: { effort: "low" } }), { prompt: "x" }),
+        c.pattern,
+        c.name,
+      );
+      // fail-closed 时序：绝不发出 session/prompt（不消耗模型轮次）
+      assert.ok(
+        !peer.clientRequests.some((m) => m.method === "session/prompt"),
+        c.name + "：不得发出 session/prompt",
+      );
+      assert.ok(
+        peer.clientRequests.some((m) => m.method === "session/set_config_option"),
+        c.name + "：set 请求确实发出过（失败发生在确认阶段）",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
 });
 
 test("ACP containment: 声明集与仓库内参考覆盖层逐 id 一致（防单边漂移）", () => {
@@ -269,10 +400,12 @@ test("ACP registry/env 集成：闭集成员、credentialEnv 必填、凭据继�
     () => normalizeAgent("bad", agent({ reasoning: { effort: "off" } })),
     /reasoning\.effort/,
   );
-  // registry 可表达的档位也会被 backend validateAgentPolicy 硬拒（阻塞项 5）。
+  // registry 可表达且落在 wire 实证交集内的档位（high）通过 backend 门；
+  // registry 可表达但 ACP 不广告的档位（medium）被 backend 门拒绝。
+  assert.doesNotThrow(() => built.validateAgentPolicy(agent({ reasoning: { effort: "high" } })));
   assert.throws(
-    () => built.validateAgentPolicy(agent({ reasoning: { effort: "high" } })),
-    /cannot express reasoning\.effort/,
+    () => built.validateAgentPolicy(agent({ reasoning: { effort: "medium" } })),
+    /must be one of the ACP-wire-verified settable values/,
   );
 });
 

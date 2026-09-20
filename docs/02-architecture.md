@@ -380,10 +380,17 @@ durable prompt 重放到新 DSH 进程。配置和运维边界见 `docs/usage.md
   当前不具备跨 run 复用能力，声明 true 属"声明强于实现"）；`supportsInFlightCorrection=false`
   （F7：无在途消息改写——如实声明，run_correct 在派发层被拒）；
   `replayByRespawn=false`；`reportsTokenUsage=false`（ACP `usage` 实测可为 null，2026-09-20 按组件验证裁定）。`validateAgentPolicy`：provider
-  与 model 块拒绝（无可验证设置通道，不静默忽略）；reasoning effort **同样拒绝**——
-  wire 上 configOptions 虽暴露 `reasoning_effort` 四档 `off|low|high|max`（F5），但
-  argv/env/session 请求均无 effort 下发通道（evidence 亦无 set_config_option 类方法），
-  校验放行却静默不下发 = 配置假绿，故对任何非空 effort 硬拒。
+  与 model 块拒绝（无可验证设置通道，不静默忽略）；reasoning effort **条件放行**——
+  Phase 5 实测（2026-09-20，dsh 0.1.5-rc.2，
+  `scripts/reliability/dsh-acp/evidence/phase5-config-option-set*.json`）证明
+  `session/set_config_option { configId: "reasoning_effort", value }` 可设置：set 响应的
+  configOptions `currentValue` 确认生效值（off/low/max 有直接 set-确认证据；high 是
+  session/new 缺省 currentValue），域外值（如 medium）被 `-32602 "unknown reasoning
+  effort"` 拒绝。据此只放行 WAO 六值闭集 ∩ ACP 广告四档（off/low/high/max）=
+  **low/high/max**（无证据支持映射，不发明）；其余档位固定文案拒绝。派发时在
+  session/new 后、prompt 前下发，响应未确认请求值即 fail-closed 拒绝派发（不静默
+  回退、不静默继续），会话内留 system message 转录事实（既有事件类型，同权限应答
+  审计先例）。
 
 配置与运维边界（containment 安装步骤、认证路径）见 `docs/usage.md`；wire 证据与
 复现资产见 `scripts/reliability/dsh-acp/`（evidence/*.json）。
