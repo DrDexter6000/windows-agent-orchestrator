@@ -194,6 +194,8 @@
 
 ---
 
+
+| TD-169 | 2026-09-20 B-2 真实派发实证（run_202609201027165640owp8p 失败 → run_202609201039434177lz7zt 通过） | **两条"假绿"**：(a) 交付物单测**自证循环**——断言"文件内容 == 同一个序列化函数的输出"，只证明"按自己的格式写了"，不证明"消费方接受"；一个被 dsh `parsePatchList` 拒绝的顶层映射格式因此穿过 855 行单测 + 两轮独立审计 + T3 全量，直到真实派发才以 `phase=spawn transport closed` 暴露。(b) **认证空转**——`--agent coder_low_dsh` 无矩阵行 → 零 case → 无认证记录，套件仍报 `ALL PASS` 且 exit 0；`run-reliability.mjs` 初始化 `allPass=true` 且无目标用例数检查。 | **已部分偿还（2026-09-20）**：根因修复 + 单测改形状断言 + 新增序列化器形状钉（`5ed9957`，26/26）；诊断增强——`transport closed` 现携带 exit code/signal 与脱敏 stderr，JSON-RPC error 保留 message。**未偿还**：认证通道的"零 case 即显式失败"与 selected/executed/passed/failed/skipped 计数（阶段 2）；`strict` profile 的 drill 覆盖不足却可被归为 full（`defaultDrillsForProfile` vs `certificationScopeForCase`）。**纪律**：确定性单测全绿与认证退出码都不能替代"真实跑一次"；验收必须核对"实际执行了什么"。 |
 ## 设计性约束（⚪，非债）
 
 | # | 登记于 | 内容 | 备注 |

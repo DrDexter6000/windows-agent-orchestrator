@@ -662,7 +662,8 @@ export class DeepSeekAcpBackend {
         if (!waiter) return;
         pending.delete(frame.id);
         if (frame.error) {
-          waiter.reject(new Error("deepseek-acp JSON-RPC error " + (frame.error.code ?? "unknown")));
+          waiter.reject(new Error("deepseek-acp JSON-RPC error " + (frame.error.code ?? "unknown")
+            + (frame.error.message ? ": " + frame.error.message : "")));
         } else {
           waiter.resolve(frame.result);
         }
@@ -689,14 +690,22 @@ export class DeepSeekAcpBackend {
     child.stderr.on("data", (chunk) => {
       stderrTail = trimTail(redactor.redactString(stderrTail + chunk.toString("utf8")));
     });
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
+      // 诊断：握手期失败原先只报一句 "transport closed"，丢掉子进程的退出事实与 stderr——
+      // 真实派发失败 run_202609201027165640owp8p（phase=spawn）因此无法定位根因。
+      // 这里把退出码/signal 与脱敏后的 stderr 尾部一并带上（pending reject 与 done 事件都要带）。
+      const exitFact = "exit code: " + (code === null ? "null" : code)
+        + (signal ? ", signal: " + signal : "");
+      const stderrFact = stderrTail ? "; stderr: " + stderrTail : "";
       for (const waiter of pending.values()) {
-        waiter.reject(new Error("deepseek-acp transport closed"));
+        waiter.reject(new Error("deepseek-acp transport closed (" + exitFact + ")" + stderrFact));
       }
       pending.clear();
       if (!terminalQueued) {
-        const suffix = stderrTail ? "; stderr: " + stderrTail : "; exit code: " + code;
-        queue.push(doneEvent("failed", "deepseek-acp transport closed before completion" + suffix));
+        queue.push(doneEvent(
+          "failed",
+          "deepseek-acp transport closed before completion; " + exitFact + stderrFact,
+        ));
         terminalQueued = true;
       }
       queue.close();
