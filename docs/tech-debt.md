@@ -196,6 +196,13 @@
 
 
 | TD-169 | 2026-09-20 B-2 真实派发实证（run_202609201027165640owp8p 失败 → run_202609201039434177lz7zt 通过） | **两条"假绿"**：(a) 交付物单测**自证循环**——断言"文件内容 == 同一个序列化函数的输出"，只证明"按自己的格式写了"，不证明"消费方接受"；一个被 dsh `parsePatchList` 拒绝的顶层映射格式因此穿过 855 行单测 + 两轮独立审计 + T3 全量，直到真实派发才以 `phase=spawn transport closed` 暴露。(b) **认证空转**——`--agent coder_low_dsh` 无矩阵行 → 零 case → 无认证记录，套件仍报 `ALL PASS` 且 exit 0；`run-reliability.mjs` 初始化 `allPass=true` 且无目标用例数检查。 | **已部分偿还（2026-09-20）**：根因修复 + 单测改形状断言 + 新增序列化器形状钉（`5ed9957`，26/26）；诊断增强——`transport closed` 现携带 exit code/signal 与脱敏 stderr，JSON-RPC error 保留 message。**未偿还**：认证通道的"零 case 即显式失败"与 selected/executed/passed/failed/skipped 计数（阶段 2）；`strict` profile 的 drill 覆盖不足却可被归为 full（`defaultDrillsForProfile` vs `certificationScopeForCase`）。**纪律**：确定性单测全绿与认证退出码都不能替代"真实跑一次"；验收必须核对"实际执行了什么"。 |
+
+| TD-170 | 2026-09-20 双层认证落地期实证（两次交付验证失败 + 一次错误拒收） | **交付生命周期管理缺失导致环境漂移，进而污染验证结论。**
+事实：Lead 连续派发 6 次 `--isolate` 交付，每次留下**持久** worktree，累计 **284 个**；`git worktree list` 达 284 行。canonical 的 **filesystem 波（git + worktree 类目）从 ~390s 膨胀到 600s**，撞上交付验证 `verificationTimeoutMs` 30 分钟上限 → 交付 `timedOut` 且 filesystem 波 failed=5/7。
+**后果**：(a) 交付 `c120334` 与 `92ad98d` 两次验证失败，被误判为代码缺陷；(b) Lead 据此**错误拒收 `c120334`**（`run.delivery_rejected` 是 first-decision-wins、不可撤销）；(c) 在**未做静默复现**的情况下先判 `environment_contaminated`，随后又被静默复验推翻。
+**决定性证据**：清理 253 个陈旧 worktree（254→1）后，**同一份未改动的 main 代码** 全量由 `fail(17.4min, filesystem 600305ms failed=1)` 转为 `pass 239/239 isolation=0 runsGuard=clean (8.6min, filesystem 390175ms failed=0)`。
+**归因**：不是测试、不是被测代码，而是 **Lead 未做交付生命周期管理**（接受交付后未回收 worktree、连续派发前未检查数量）。 | **已部分偿还（2026-09-20）**：清理 253 个陈旧 worktree + `git worktree prune`，环境恢复。**未偿还（需落为常设纪律与机械护栏）**：① 交付接受后**必须**回收其 worktree（建议在 `run_delivery_decide` 接受路径或交付后置钩子中强制）；② 连续派发交付前**必须**检查 worktree 数量并设阈值告警；③ canonical filesystem 波的**时长基线**应可视化，漂移超阈值即告警（本次是 390s→600s，若早有基线告警，两次误判都可避免）；④ `runs/` 亦达 3107 条 / 294MB——`runs prune --older-than` 应按期执行。
+**纪律（与 TD-169 成对）**：**归因必须由复现检验，不能由旁证推断**；说出"环境性失败"之前必须先做一次**机器静默的单发复验**，否则不得拒收交付。 |
 ## 设计性约束（⚪，非债）
 
 | # | 登记于 | 内容 | 备注 |
