@@ -414,19 +414,25 @@ test("结构钉: certificationScope 只活在磁盘 summary，不进 CLI/MCP 共
   }
 });
 
-// ════ 6. 源级纪律钉：run-reliability.mjs 的 drill 接线（monolith 不可 import，仿既有模式读源码）════
+// ════ 6. 源级纪律钉：drill 接线（ADR-0032 §6 抽取后 glue 在 drills.mjs；monolith 不可 import，仿既有模式读源码）════
 
-test("源级钉: run-reliability.mjs 接线 adversarialEscape drill（matrix 行启闭 + delivery 拦截面）", () => {
-  const script = readFileSync(new URL("../../scripts/run-reliability.mjs", import.meta.url), "utf8");
-  // drill 按 matrix 行 drills 启用（与其他 drill 同机制）：
-  assert.match(script, /tc\.drills\.includes\("adversarialEscape"\)/);
-  // 判定内核来自纯模块（dry 测试面就是本文件测的内核）：
-  assert.match(script, /import\s*\{[^}]*\badversarialEscapeChecks\b[^}]*\}\s*from\s*"\.\/reliability\/adversarialEscape\.mjs"/);
+test("源级钉: adversarialEscape drill 接线（run-reliability 派发启闭 + drills.mjs glue 内 delivery 拦截面）", () => {
+  // 组合入口：drill 按 matrix 行 drills 启用（与其他 drill 同机制），glue 经共享模块装配。
+  const entry = readFileSync(new URL("../../scripts/run-reliability.mjs", import.meta.url), "utf8");
+  assert.match(entry, /tc\.drills\.includes\("adversarialEscape"\)/);
+  assert.match(entry, /import\s*\{[^}]*\bcreateDrills\b[^}]*\}\s*from\s*"\.\/reliability\/drills\.mjs"/s,
+    "组合入口必须从共享 glue 模块装配 drill（ADR-0032 §6，防双轨漂移）");
+  // 抽取后入口不得再内联 drill glue 定义（防复制回归钉见 reliabilityDrills.test.js）。
+
+  // 共享 glue 模块：判定内核来自纯模块（dry 测试面就是本文件测的内核），
   // 拦截只发生在 delivery run（runManager containment gate 只对 deliveryContext 生效）：
   // drill 派发必须带 --isolate 与 --delivery-spec-file。
-  const drillBody = script.slice(
-    script.indexOf("function runAdversarialEscapeDrill"),
-    script.indexOf("function runWorkflowRunDirDrill"),
+  const glue = readFileSync(new URL("../../scripts/reliability/drills.mjs", import.meta.url), "utf8");
+  assert.match(glue, /import\s*\{[^}]*\badversarialEscapeChecks\b[^}]*\}\s*from\s*"\.\/adversarialEscape\.mjs"/s,
+    "drill glue 必须从纯内核模块 import 判定（不复制判定）");
+  const drillBody = glue.slice(
+    glue.indexOf("function runAdversarialEscapeDrill"),
+    glue.indexOf("function runWorkflowRunDirDrill"),
   );
   assert.ok(drillBody.includes('"--isolate"'), "adversarial drill 派发必须强制隔离");
   assert.ok(drillBody.includes('"--delivery-spec-file"'), "adversarial drill 必须走 delivery run（拦截面所在）");
