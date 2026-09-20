@@ -1,17 +1,18 @@
 # 0031: DSH ACP 后端落地方案（B-2）
 
-status: proposed
+status: accepted
 date: 2026-09-19
 author: Lead（Owner 2026-09-19 授权：先审方案、后开工）
 review: 前置方案审查已过 —— auditor `run_20260919232557140mvw4ov` PASS_WITH_CHANGES；
         researcher `run_20260919232554555pjmuxi` PASS_WITH_CHANGES（两席无分歧）。
-        本版已折叠全部 findings，见 §5。待 Owner 裁定 accepted。
+        本版已折叠全部 findings，见 §5。
+        **Owner 2026-09-20 裁定：接受 `deepseek-acp` 成员资格**（见 §7）。
 rulings: Lead 临时裁定（2026-09-20，**待 Owner 追认**；依据两席专项咨询 auditor run_20260920073941517068b7w
          与 coder_mm run_20260920073938973bbp3l9，两席对下列两项意见一致）：
          (A) §3.6 关联面**正式延期**；`supportsSessionReuse` 取 **false**（翻转条件见 §3.6）。
-         (B) 闭集 5→6 保留为**候选注册**，删除一切"Owner 已授权"表述；成员资格待 Owner 裁定。
+         (B) 闭集 5→6 保留为**候选注册**，删除一切"Owner 已授权"表述。→ **已由 Owner 2026-09-20 裁定接受**，见 §7。
          (C) effort **硬拒**（见 §3.3）。
-         三项均属"有权调整范围者"的决定，Lead 不得自行生效；Owner 追认前不 push。
+         (B) 已由 Owner 裁定（§7）；(C) 属 Lead 职权、已生效；(A) 仍为**待 Owner 追认**的临时裁定，追认前不 push。
 
 ## Context
 
@@ -233,6 +234,54 @@ CLI 提供 `--patch <file>`（可重复，叠加于 profile 层之后），格�
 `scripts/reliability/dsh-acp/`：`acp-probe.mjs` / `acp-smoke.mjs` / `acp-tool-sample.mjs` /
 `wao-contain-safe.patch.yml` / `evidence/*.json` / `README.md`（含复现步骤与诚实边界声明）。
 零依赖、无凭据。
+
+## 7. 成员资格裁定（Owner，2026-09-20）
+
+### 7.1 裁定
+`deepseek-acp` **接受为 backend 闭集正式成员**（5→6）。闭集成员增补属 Owner 决策
+（`docs/02-architecture.md:223`），本条即该决策的记录。
+
+### 7.2 前因（怎么走到这一步）
+1. **旧线为什么停**：2026-08-15 `deepseek-harness`（WAO 自建 stdio JSON-RPC composition）因
+   `supportsSessionReuse=false` 暂停（TD-117）。Owner 当时的动因是"deepseek 模型在 dsh 中任务完成质量
+   更高、token 消耗更少"——**不是质量问题，是控制面契约缺口**。
+2. **2026-09-19 Owner 指令**：DeepSeek 已结清；**不改现有 provider/model**；先解决技术问题。
+3. **B-2 验证**：证明 dsh 0.1.5-rc.2 经 ACP 面可驱动 DeepSeek，且**跨进程 session/resume 可用**
+   （F1–F8；证据入库 `scripts/reliability/dsh-acp/`）。关键对照：旧 JSON-RPC 面**至今无 resume**，
+   故 TD-117 只在 ACP 面上成立。
+4. **实现与两轮审计**：首轮交付 `c213ea2` 被 **Lead 拒收**（auditor FAIL：Windows 启动链断裂、
+   toolCallId 可伪造 `file_written`、权限缺会话/终态约束等 6 项）；修正轮 `28e87e7` 经二轮两席审计
+   逐条核验第 1/2/3/5/6 项 FIXED、无回归；规格强于实现由 `200fec9` 闭合。
+5. **Owner 裁定**：2026-09-20 接受成员资格。
+
+### 7.3 注意事项（**接受成员资格 ≠ 现在可用**）
+接受成员资格只是"占名分"。下列约束在本 ADR 有效期内持续成立：
+
+1. **成员资格 ≠ 认证**。§4 认证（`npm run reliability`）**尚未执行**，`certification` 为空。
+   **认证通过前任何 lane 不得以 `deepseek-acp` 承重。**
+2. **操作员前置**：`~/.wao/runtimes/dsh-acp/wao-contain.patch.yml` 必须由操作员手工安装
+   （WAO 不生成、不升级、不修复外部 runtime）。**缺失或内容不匹配时任何派发 fail-closed。**
+   建议以 `scripts/reliability/dsh-acp/wao-contain-safe.patch.yml` 为准自行比对；
+   **当前无自动一致性校验**，且 dsh 升级若改插件 id，覆盖层会**静默失效**（关不存在的 id = 没关）。
+3. **`effort` 硬拒**：ACP 面 `configOptions` 只证明**暴露**四档、未证明可**设置**，
+   故 `validateAgentPolicy` 硬拒任何非空 `reasoning.effort`。
+   **现有 lane 普遍使用 `effort: max`，在本 backend 上会被拒**——这是已知功能缺口，不是配置错误。
+4. **§3.6 关联面仍为延期**（Lead 临时裁定，**待 Owner 追认**）：`supportsSessionReuse=false`；
+   配了会话复用的 lane（researcher 类）在本 backend 上**派发即拒**；未配复用的 lane 正常。
+5. **从未有一次真实 WAO 派发跑过这个 backend**：B-2 是探针直接驱动 `dsh --profile acp`；
+   交付的 855 行测试**全部是假进程/假传输**。win32 `.cmd` 路径有真实断言，但**未对真实 `dsh.cmd` 跑过**。
+6. **MCP 与 smoke 面未扩**：`src/mcp/server.js` 的 `resolveBackendFor` 与 `src/smoke.js` 未纳入
+   新 backend（二者是既有的刻意非工厂构造点）→ MCP `run_continue` 对其按"未知 backend" fail-soft 拒绝；
+   `npm run smoke` 不探测新线。
+7. **`reportsTokenUsage=true` 但真实 usage 可能为 null** → tokenBudget 闸门可能收不到输入，
+   只剩 ADR-0030 的观察预算。
+8. **首跑风险**：ACP 未列出的 update 类型按未知类型 fail-closed **整轮失败**（刻意保守）。
+
+### 7.4 回退面
+若本裁定日后被推翻，回退集中且可逆：`src/registry.js` 第六成员 + `src/backends/factory.js` 注册
++ `docs/02-architecture.md` 闭集与 §2.5b + `docs/usage.md` 两表 + 4 个钉测试
+（`knownBackendsSsot` / `backendCapabilityValidate` / `backendCapabilityMatrix` / `onboarding`）
++ `src/envPolicy.js` / `backendCliApplyMap` 系列各一条。纯增量，不动既有成员与 lane。
 
 ## Consequences
 （待裁定后补：`docs/02-architecture.md` backend 闭集条目与 §2.x 小节、`docs/usage.md` 配置表与能力表、
