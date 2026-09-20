@@ -87,6 +87,41 @@ const MATRIX = buildCertificationMatrix({
   profileOverride: PROFILE_OVERRIDE,
 });
 
+// 前置根修（ADR-0032 §7；TD-169(b)）：**零目标必须显式失败**，绝不空转后报 ALL PASS。
+// 旧行为：目标 lane 无矩阵行 → buildCertificationMatrix 的 .filter 静默丢弃 → 空循环 →
+// "=== ALL PASS ===" + exit 0（实证：coder_low_dsh 无 case 却"认证通过"，且无任何台账记录）。
+{
+  const declared = Array.isArray(registry?.certification?.matrix)
+    && registry.certification.matrix.length > 0
+    ? registry.certification.matrix
+    : null;
+  const dropped = declared
+    ? [...new Set(declared
+      .filter((tc) => !registry.agents?.[tc.agentId])
+      .map((tc) => tc.agentId))]
+    : [];
+  if (dropped.length > 0) {
+    // 警告而非失败：裁剪私人 registry（agents.example.json 明文支持的用法）不得被误伤。
+    console.warn(`[reliability] WARN: 矩阵行指向不在册 lane，已跳过: ${dropped.join(", ")}`);
+  }
+  if (MATRIX.length === 0) {
+    console.error(
+      `[reliability] ERROR: ${ONLY_AGENT ? `--agent ${ONLY_AGENT}` : "当前 registry"} 解析出 0 个认证 case——拒绝运行。`,
+    );
+    console.error(
+      "[reliability] 空转后报 ALL PASS 是假绿（见 TD-169）；本入口不做无目标的\"全绿\"。",
+    );
+    if (ONLY_AGENT && registry.agents?.[ONLY_AGENT]) {
+      console.error(
+        `[reliability] lane ${ONLY_AGENT} 在册但无 certification.matrix 行；请补一行，或改用组件层 component-check（ADR-0032）。`,
+      );
+    } else if (ONLY_AGENT) {
+      console.error(`[reliability] registry 中不存在 lane ${ONLY_AGENT}。`);
+    }
+    process.exit(2);
+  }
+}
+
 // --- 工具函数 ---
 function runCli(cmdArgs, options = {}) {
   // 用 spawnSync 而非 execFileSync：execFileSync 在 Windows 上退出时会清理整个进程树，
