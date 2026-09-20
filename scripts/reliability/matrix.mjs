@@ -43,6 +43,24 @@ export function buildCertificationMatrix({
     .map((tc) => normalizeCase(tc, agents[tc.agentId], profileOverride));
 }
 
+/**
+ * ADR-0032 §6 账实一致：台账身份一律从 agent 配置派生（runner 按 agentId 用 agent 配置派发）。
+ * 矩阵行若声明了不同的值，显式告警并仍以 agent 为准——绝不记账一个没有实际派发的身份。
+ * @param {string} field
+ * @param {string|null} agentValue
+ * @param {unknown} rowValue
+ * @returns {string|null}
+ */
+function agentIdentity(field, agentValue, rowValue) {
+  if (rowValue !== undefined && rowValue !== null && rowValue !== agentValue) {
+    console.warn(
+      `[reliability] WARN: 矩阵行 ${field}=${JSON.stringify(rowValue)} 与 agent 实际配置 `
+      + `${JSON.stringify(agentValue)} 不一致——以 agent 为准（台账不得记未派发的身份）。`,
+    );
+  }
+  return agentValue;
+}
+
 function normalizeCase(tc, agent = {}, profileOverride) {
   const profile = profileOverride ?? tc.profile ?? "basic";
   const drills = normalizeDrills(tc.drills, profile);
@@ -56,8 +74,11 @@ function normalizeCase(tc, agent = {}, profileOverride) {
     expectComplete: tc.expectComplete ?? true,
     expectText: tc.expectText ?? true,
     backend: agent.backend ?? tc.backend ?? null,
-    providerID: tc.providerID ?? agent.model?.providerID ?? null,
-    modelId: tc.modelId ?? agent.model?.id ?? null,
+    // 账实一致（ADR-0032 §6）：runner 按 agentId 用 **agent 配置** 派发，台账身份必须同源。
+    // 旧行为允许矩阵行覆盖 providerID/modelId → 存在"账上身份 ≠ 实际派发配置"的路径，
+    // 与 :providerKey 同族的教训（TD-133 / TD-169）。行值与 agent 不一致时以 agent 为准并告警。
+    providerID: agentIdentity("providerID", agent.model?.providerID ?? null, tc.providerID),
+    modelId: agentIdentity("modelId", agent.model?.id ?? null, tc.modelId),
     // R23-C：providerKey 一律从 registry 的 agent.provider 派生，绝不读行值——
     // providerID 硬编码行值导致该维度对现网全部 lane 空转的教训（TD-133 同族）。
     // 无 provider 块 → null（已观察确认无接入方）。

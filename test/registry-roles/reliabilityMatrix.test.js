@@ -65,8 +65,11 @@ test("buildCertificationMatrix: reads top-level certification.matrix and enriche
     completionMode: "first-stable",
   });
   assert.equal(matrix[1].backend, "claude-code");
-  assert.equal(matrix[1].providerID, "deepseek");
-  assert.equal(matrix[1].modelId, "deepseek-v4-flash");
+  // ADR-0032 §6 账实一致：coder_strict fixture **无 agent.model 块** →
+  // 归一化身份为 null，与 :providerKey 同款语义（无配置面 → 显式 null，绝不记一个
+  // 未实际派发的身份）。旧断言取矩阵行值 "deepseek"，正是"账上身份 ≠ 实际派发配置"的路径。
+  assert.equal(matrix[1].providerID, null);
+  assert.equal(matrix[1].modelId, null);
 });
 
 test("buildCertificationMatrix: explicit requiredCategories are merged with drill-implied categories", () => {
@@ -158,3 +161,31 @@ test("buildCertificationMatrix: isolation and workflowRunDir are operational che
 
   assert.deepEqual(matrix[0].requiredCategories, ["core", "strict", "operational", "observability"]);
 });
+
+// ===== ADR-0032 §6 账实一致 =====
+// runner 按 agentId 用 **agent 配置** 派发，因此台账身份必须同源。旧行为允许矩阵行覆盖
+// providerID/modelId，制造"账上身份 ≠ 实际派发配置"的路径（TD-169 同族；:providerKey 已有同款先例）。
+test("台账身份从 agent 派生：矩阵行不得覆盖 providerID / modelId", () => {
+  const [tc] = buildCertificationMatrix({
+    registry: {
+      agents: { lane_x: { backend: "codex", model: { providerID: "agent-provider", id: "agent-model" } } },
+      certification: { matrix: [{ agentId: "lane_x", providerID: "row-provider", modelId: "row-model" }] },
+    },
+    onlyAgent: "lane_x",
+  });
+  assert.equal(tc.providerID, "agent-provider", "providerID 必须取 agent 配置");
+  assert.equal(tc.modelId, "agent-model", "modelId 必须取 agent 配置");
+});
+
+test("矩阵行与 agent 一致时不改变结果", () => {
+  const [tc] = buildCertificationMatrix({
+    registry: {
+      agents: { lane_x: { backend: "codex", model: { providerID: "agent-provider", id: "agent-model" } } },
+      certification: { matrix: [{ agentId: "lane_x", providerID: "agent-provider", modelId: "agent-model" }] },
+    },
+    onlyAgent: "lane_x",
+  });
+  assert.equal(tc.providerID, "agent-provider");
+  assert.equal(tc.modelId, "agent-model");
+});
+
