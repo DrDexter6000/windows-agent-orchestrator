@@ -316,11 +316,13 @@ export class DeepSeekAcpBackend {
     if (agent?.provider) {
       throw new Error("deepseek-acp cannot express provider policy; the composition is fixed via --profile acp and operator-installed patches");
     }
-    // model 块（id / contextWindow）在本集成面无可验证的设置通道（F5 只证明
-    // configOptions 随会话**暴露**；模型取 shipped acp profile 的缺省）——
-    // fail-closed 拒绝，不静默忽略（repo 纪律：配了不能表达的值必须硬拒）。
+    // model 块（id / contextWindow）**本轮仍未接线**——理由与 F5 时代不同：Phase 5
+    // 已实测同一通道可设置 model（evidence/phase5-*.json 的 steps.setModel，currentValue
+    // 变更），所以理由不再是"无通道"，而是"未接线 + 值形状不同"：ACP 的 model value 是
+    // provider/model JSON 对，WAO 的 model.id 是裸 id，接线需要单独的值域/映射决策。
+    // 在此之前 fail-closed 拒绝，不静默忽略（repo 纪律：配了不能表达的值必须硬拒）。
     if (agent?.model) {
-      throw new Error("deepseek-acp cannot express a model block; the model comes from the shipped acp profile session configOptions");
+      throw new Error("deepseek-acp cannot express a model block: the ACP model config option is settable over the verified channel but WAO does not wire it yet (its value is a provider/model pair, not WAO's bare model.id); refusing instead of silently ignoring");
     }
     // reasoning.effort（Phase 5 后语义）：session/set_config_option 已被实测证明
     // 可设置（evidence/phase5-*.json）——只放行已验证可设置的值域交集

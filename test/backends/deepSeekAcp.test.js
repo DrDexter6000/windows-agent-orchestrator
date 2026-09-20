@@ -232,8 +232,8 @@ test("ACP policy: effort 只放行 wire 实证可设置交集 low/high/max（Pha
     })),
     /cannot express provider/,
   );
-  // model 块（id/contextWindow）无可验证设置通道（model set 仅取证，未接线）
-  // → fail-closed 拒绝，不静默忽略
+  // model 块（id/contextWindow）：Phase 5 已取证同一通道可 set，但 WAO **本轮未接线**
+  // （value 形状是 provider/model JSON 对，非裸 model.id）→ fail-closed 拒绝，不静默忽略
   assert.throws(
     () => backend.validateAgentPolicy(agent({ model: { id: "deepseek-v4-flash" } })),
     /cannot express a model block/,

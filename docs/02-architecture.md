@@ -380,7 +380,11 @@ durable prompt 重放到新 DSH 进程。配置和运维边界见 `docs/usage.md
   当前不具备跨 run 复用能力，声明 true 属"声明强于实现"）；`supportsInFlightCorrection=false`
   （F7：无在途消息改写——如实声明，run_correct 在派发层被拒）；
   `replayByRespawn=false`；`reportsTokenUsage=false`（ACP `usage` 实测可为 null，2026-09-20 按组件验证裁定）。`validateAgentPolicy`：provider
-  与 model 块拒绝（无可验证设置通道，不静默忽略）；reasoning effort **条件放行**——
+  块拒绝（组合面固定为 `--profile acp` + 操作员 patch）；model 块拒绝——理由**不是**"无通道"：
+  Phase 5 用同一探针已取证 `session/set_config_option { configId: "model" }` 被接受且
+  `currentValue` 变更，故模型**可设置**，只是 **WAO 本轮未接线**（ACP 的 model value 是
+  provider/model JSON 对，WAO 的 `model.id` 是裸 id，接线需要单独的值域/映射决策）；
+  reasoning effort **条件放行**——
   Phase 5 实测（2026-09-20，dsh 0.1.5-rc.2，
   `scripts/reliability/dsh-acp/evidence/phase5-config-option-set*.json`）证明
   `session/set_config_option { configId: "reasoning_effort", value }` 可设置：set 响应的

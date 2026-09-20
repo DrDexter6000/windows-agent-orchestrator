@@ -100,11 +100,15 @@ CLI 提供 `--patch <file>`（可重复，叠加于 profile 层之后），格�
 | `replayByRespawn` | false | 有真 resume，无需重放 |
 | `reportsTokenUsage` | true | `usage_update` + `PromptResponse.usage` |
 
-**policy 校验面（Lead 临时裁定，2026-09-20，待 Owner 追认）**：旧线 `validateAgentPolicy` 限 `{high, max}`
-（`src/backends/deepSeekHarness.js:95-99`）；ACP 面 `configOptions` 暴露四档 off/low/high/max（F5），
-但 **F5 只证明"暴露"、未证明可"设置"**——wire 下发通道未接线。
-故 `validateAgentPolicy` **硬拒任何非空 `reasoning.effort`**（与同文件对 provider/model 的处置同源：
-配了不能表达的值必须硬拒，不静默忽略），并在 `docs/usage.md` 能力表如实标注。
+**policy 校验面（folding：Lead 2026-09-20 初裁 → Phase 5 修订）**：旧线 `validateAgentPolicy` 限 `{high, max}`
+（`src/backends/deepSeekHarness.js:95-99`）；ACP 面 `configOptions` 暴露四档 off/low/high/max（F5）。
+初裁依据"**F5 只证明暴露、未证明可设置**"而**硬拒任何非空 `reasoning.effort`**（配了不能表达的值
+必须硬拒，不静默忽略）。该前提已被 **Phase 5 真实 runtime 实测推翻**（见 §7.3 注意事项 3）：
+`session/set_config_option` 可设置 reasoning_effort，域外值被 `-32602` 拒绝。
+现语义 = **条件放行 `low/high/max`**（WAO 六值闭集 ∩ ACP 广告四档；不发明映射），
+派发时下发且响应未确认即 fail-closed；`provider` 与 `model` 块仍拒绝——**model 的理由已改写**：
+不是"无通道"（同一探针已证可 set），而是"WAO 本轮未接线 + value 形状不同（provider/model 对
+vs 裸 `model.id`）"。
 
 ### 3.4 事件投影（ACP → RunEvent）——审查后补全
 
@@ -257,15 +261,23 @@ CLI 提供 `--patch <file>`（可重复，叠加于 profile 层之后），格�
 ### 7.3 注意事项（**接受成员资格 ≠ 现在可用**）
 接受成员资格只是"占名分"。下列约束在本 ADR 有效期内持续成立：
 
-1. **成员资格 ≠ 认证**。§4 认证（`npm run reliability`）**尚未执行**，`certification` 为空。
-   **认证通过前任何 lane 不得以 `deepseek-acp` 承重。**
+1. **成员资格 ≠ 完整认证（两层口径，ADR-0032）**。**组件层**已于 2026-09-20 完成并通过：
+   `backend:deepseek-acp@da12bfa…` 记入 `runs/component-checks.json`，17/17 ALL PASS → `conformant`。
+   但 §4 的**组合层**认证（`npm run reliability`）**尚未执行**，`certification` 为空。
+   **组合层认证通过前任何 lane 不得以 `deepseek-acp` 承重。**
 2. **操作员前置**：`~/.wao/runtimes/dsh-acp/wao-contain.patch.yml` 必须由操作员手工安装
    （WAO 不生成、不升级、不修复外部 runtime）。**缺失或内容不匹配时任何派发 fail-closed。**
    建议以 `scripts/reliability/dsh-acp/wao-contain-safe.patch.yml` 为准自行比对；
    **当前无自动一致性校验**，且 dsh 升级若改插件 id，覆盖层会**静默失效**（关不存在的 id = 没关）。
-3. **`effort` 硬拒**：ACP 面 `configOptions` 只证明**暴露**四档、未证明可**设置**，
-   故 `validateAgentPolicy` 硬拒任何非空 `reasoning.effort`。
-   **现有 lane 普遍使用 `effort: max`，在本 backend 上会被拒**——这是已知功能缺口，不是配置错误。
+3. ~~**`effort` 硬拒**~~ → **已由 Phase 5 收窄（2026-09-20）**：真实 dsh 0.1.5-rc.2 实测证明
+   `session/set_config_option { configId: "reasoning_effort", value }` **可设置**（set 响应
+   `currentValue` 确认生效；域外值 `medium` 被 `-32602 "unknown reasoning effort"` 拒绝）。
+   证据：`scripts/reliability/dsh-acp/evidence/phase5-config-option-set*.json` + 探针
+   `scripts/reliability/dsh-acp/acp-config-option.mjs`。据此 `validateAgentPolicy` 从"一律硬拒"
+   改为**只放行 WAO 六值闭集 ∩ ACP 广告四档 = `low/high/max`**（无证据支持映射，不发明），
+   派发时在 `session/new` 后下发、**响应未确认请求值即 fail-closed 拒绝派发**。
+   **遗留缺口**：现有 lane 普遍使用 `effort: max`——`max` 在交集内，可用；`medium`/`xhigh`/`minimal`
+   在本 backend 上仍会被拒（非配置错误，是值域事实）。
 4. **§3.6 关联面仍为延期**（**Owner 2026-09-20 追认**，会话复用单独立项）：`supportsSessionReuse=false`；
    配了会话复用的 lane（researcher 类）在本 backend 上**派发即拒**；未配复用的 lane 正常。
 5. **从未有一次真实 WAO 派发跑过这个 backend**：B-2 是探针直接驱动 `dsh --profile acp`；
@@ -273,8 +285,10 @@ CLI 提供 `--patch <file>`（可重复，叠加于 profile 层之后），格�
 6. **MCP 与 smoke 面未扩**：`src/mcp/server.js` 的 `resolveBackendFor` 与 `src/smoke.js` 未纳入
    新 backend（二者是既有的刻意非工厂构造点）→ MCP `run_continue` 对其按"未知 backend" fail-soft 拒绝；
    `npm run smoke` 不探测新线。
-7. **`reportsTokenUsage=true` 但真实 usage 可能为 null** → tokenBudget 闸门可能收不到输入，
-   只剩 ADR-0030 的观察预算。
+7. ~~**`reportsTokenUsage=true` 但真实 usage 可能为 null**~~ → **已按实测裁定为 `false`**
+   （2026-09-20，组件验证 `reportsTokenUsageConsistency` 抓到 `declared=true, input=null`；
+   声明口径：表示 WAO 今天能完成什么，不是上游协议具备什么）。因此本 backend 上 tokenBudget 闸门
+   收不到输入，只剩 ADR-0030 的观察预算——这是**如实声明**，不是缺陷。
 8. **首跑风险**：ACP 未列出的 update 类型按未知类型 fail-closed **整轮失败**（刻意保守）。
 
 ### 7.4 回退面
