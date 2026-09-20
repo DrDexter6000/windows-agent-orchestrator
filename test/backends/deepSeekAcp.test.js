@@ -694,7 +694,22 @@ test("ACP argv：--profile acp + containment --patch + 角色合同 --patch；�
       assert.ok(rolePatchValue.includes("wao-dsh-acp-") && rolePatchValue.endsWith("role.patch.yml"));
       assert.ok(existsSync(rolePatchValue), "角色合同 patch 在 spawn 时已落盘");
       const content = readFileSync(rolePatchValue, "utf8");
-      assert.equal(content, serializeRoleContractPatch(roleContract));
+      // 形状断言，**不再自证循环**：dsh 的 patch-list 合同要求顶层 YAML 数组
+      // （dsh-app-boot parsePatchList："must be a top-level YAML array of loader patch entries"）。
+      // 旧断言比较"文件内容 == 同一个序列化函数的输出"，只证明"按自己的格式写了"，
+      // 不证明"dsh 接受"——一个被 dsh 拒绝的顶层映射因此一路绿到真实派发才暴露
+      // （run_202609201027165640owp8p：phase=spawn transport closed）。
+      const firstMeaningful = content.split(/\r?\n/).find((line) => line.trim().length > 0) ?? "";
+      assert.ok(
+        firstMeaningful.startsWith("- "),
+        `顶层必须是 YAML 数组项；实际首行 ${JSON.stringify(firstMeaningful)}`,
+      );
+      assert.equal(firstMeaningful.trim(), "- id: system-prompt");
+      assert.ok(
+        /\n {2}config:\n {4}personaPrefix: /.test(content),
+        "必须是 id-targeted entry 的 config.personaPrefix 形状",
+      );
+      assert.ok(!/^system-prompt:/m.test(content), "不得再输出顶层映射（dsh 会拒绝）");
       assert.ok(content.includes(JSON.stringify(roleContract)), "标量经 JSON.stringify 结构化转义");
       patchDirOnSpawn = rolePatchValue;
       peer.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
@@ -714,6 +729,17 @@ test("ACP argv：--profile acp + containment --patch + 角色合同 --patch；�
   });
   const bareArgs = bare.spawnCalls[0].args;
   assert.equal(bareArgs.filter((a) => a === "--patch").length, 1);
+});
+
+// ===== 角色合同 patch 的 dsh patch-list 形状（真实派发失败根因回归钉）=====
+// run_202609201027165640owp8p：phase=spawn transport closed——dsh 拒绝非顶层数组的 patch 文件。
+test("serializeRoleContractPatch 输出 dsh patch-list 要求的顶层 YAML 数组", () => {
+  const out = serializeRoleContractPatch('role\nline2 with "quotes" and \\backslashes');
+  const firstMeaningful = out.split(/\r?\n/).find((line) => line.trim().length > 0) ?? "";
+  assert.ok(firstMeaningful.startsWith("- "), "顶层必须是数组项，而非映射");
+  assert.equal(firstMeaningful.trim(), "- id: system-prompt");
+  assert.ok(/\n {2}config:\n {4}personaPrefix: /.test(out), "id-targeted entry 的 config.personaPrefix 形状");
+  assert.ok(!/^system-prompt:/m.test(out), "顶层映射会被 dsh parsePatchList 拒绝");
 });
 
 // ===== Windows 启动链（阻塞项 1——上一轮"假绿"根因）=====

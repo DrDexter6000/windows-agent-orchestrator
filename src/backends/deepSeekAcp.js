@@ -201,7 +201,11 @@ export function parseContainmentOverlay(text) {
  * @returns {string}
  */
 export function serializeRoleContractPatch(roleContract) {
-  return "system-prompt:\n  personaPrefix: " + JSON.stringify(String(roleContract)) + "\n";
+  // dsh 的 patch-list 合同要求**顶层 YAML 数组**（dsh-app-boot parsePatchList：
+  // "must be a top-level YAML array of loader patch entries"）。早期实现输出的是
+  // 顶层映射，dsh 解析即抛错 → ACP 服务端退出 → spawn 阶段 transport closed。
+  return "- id: system-prompt\n  config:\n    personaPrefix: "
+    + JSON.stringify(String(roleContract)) + "\n";
 }
 
 /** 从 shell 工具结果文本提取退出码；无法提取时不伪造（返回 undefined）。 */
