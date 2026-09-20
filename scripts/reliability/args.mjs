@@ -49,6 +49,46 @@ function looksLikeFlag(value) {
  * @returns {{help:boolean, error:string|null, values:Record<string,string>}}
  */
 export function parseReliabilityArgs(argv) {
+  // 2026-09-20（ADR-0032 §6）：判定内核抽为 parseKnownValueArgs（与
+  // component-check 入口共享同一实现——两入口的参数纪律零复制零漂移）。
+  // 行为逐字不变：白名单/未知拒绝/缺值/重复/裸位置参数的判定与消息不变
+  // （test/registry-roles/reliabilityArgs.test.js 钉住）。
+  return parseKnownValueArgs(argv, KNOWN_VALUE_ARGS);
+}
+
+// ── component-check 入口参数解析（ADR-0032 §6 新入口；与 reliability 同款纪律：
+// 未知 flag / 缺值 / 重复 / 裸位置参数一律拒绝，调用方在零 token 前退出）──────
+
+// 已知参数白名单（值参数）。新增参数须同步 COMPONENT_CHECK_USAGE 文案与本表。
+const KNOWN_COMPONENT_CHECK_ARGS = Object.freeze([
+  "subject", // 必填：backend | llm | <backend-name> | <providerID>/<modelId> | <modelId>
+  "registry",
+  "composition-summary", // 组合层台账（夹具资格路径 1 的证据源）
+  "ledger",              // 组件台账输出（runs/component-checks.json）
+  "work-dir",            // 运行时临时区（临时装配 registry / drill cwd）
+  "wait-timeout",
+  "poll-interval",
+  "fixture-max-age-days", // 夹具组合认证新鲜期（默认 30，componentLedger SSOT）
+]);
+
+export const COMPONENT_CHECK_USAGE = `WAO Component Check（组件层验证：backend / llm 单独验证；消耗 token）
+
+用法: npm run component-check -- --subject <backend|llm|<kind>>
+                [--registry <file>] [--composition-summary <file>]
+                [--ledger <file>] [--work-dir <dir>]
+                [--wait-timeout <ms>] [--poll-interval <ms>]
+                [--fixture-max-age-days <n>]
+
+  --subject <target>  被测对象：backend（全部 backend）| llm（全部 llm）|
+                      <backend-name> | <providerID>/<modelId> | <modelId>
+  --registry <file>   注册表路径（默认 config/agents.json）
+  夹具资格（ADR-0032 §4）：新鲜组合认证记录（--composition-summary，默认
+  runs/reliability-summary.json）或 registry 的 certification.fixtures 声明块，
+  二者任一。夹具不可用 → 被测记 blocked（exit 1）。
+  零目标（解析出 0 个被测）→ exit 2，绝不空转报通过（ADR-0032 §7）。`;
+
+// 两入口共享的参数判定内核（2026-09-20 抽取自 parseReliabilityArgs，行为零变化）。
+function parseKnownValueArgs(argv, knownArgs) {
   const values = {};
   const seen = new Set();
   if (!Array.isArray(argv)) {
@@ -66,7 +106,7 @@ export function parseReliabilityArgs(argv) {
       return { help: false, error: `unexpected positional argument: ${token}`, values };
     }
     const name = token.slice(2);
-    if (!KNOWN_VALUE_ARGS.includes(name)) {
+    if (!knownArgs.includes(name)) {
       return { help: false, error: `unknown option: ${token} (see --help)`, values };
     }
     if (seen.has(name)) {
@@ -82,3 +122,19 @@ export function parseReliabilityArgs(argv) {
   }
   return { help: false, error: null, values };
 }
+
+/**
+ * 解析 component-check CLI 参数。纯函数（与 parseReliabilityArgs 同一纪律，
+ * 白名单内化为 parseKnownValueArgs 的单一实现——两入口共享判定内核，零复制）。
+ * @param {string[]} argv
+ * @returns {{help:boolean, error:string|null, values:Record<string,string>}}
+ */
+export function parseComponentCheckArgs(argv) {
+  const parsed = parseKnownValueArgs(argv, KNOWN_COMPONENT_CHECK_ARGS);
+  if (parsed.help || parsed.error) return parsed;
+  if (typeof parsed.values.subject !== "string" || parsed.values.subject.length === 0) {
+    return { help: false, error: "--subject is required (backend | llm | <backend-name> | <providerID>/<modelId> | <modelId>)", values: parsed.values };
+  }
+  return parsed;
+}
+

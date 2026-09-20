@@ -244,6 +244,7 @@
     ],
     "timeout": [
       "registry-roles/metricsNonZeroCapability.test.js",
+      "registry-roles/componentCheck.test.js",
       "registry-roles/reliabilityCertification.test.js",
       "registry-roles/reliabilityDelta.test.js",
       "registry-roles/reliabilityMatrix.test.js"
