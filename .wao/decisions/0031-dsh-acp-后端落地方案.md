@@ -6,6 +6,12 @@ author: Lead（Owner 2026-09-19 授权：先审方案、后开工）
 review: 前置方案审查已过 —— auditor `run_20260919232557140mvw4ov` PASS_WITH_CHANGES；
         researcher `run_20260919232554555pjmuxi` PASS_WITH_CHANGES（两席无分歧）。
         本版已折叠全部 findings，见 §5。待 Owner 裁定 accepted。
+rulings: Lead 临时裁定（2026-09-20，**待 Owner 追认**；依据两席专项咨询 auditor run_20260920073941517068b7w
+         与 coder_mm run_20260920073938973bbp3l9，两席对下列两项意见一致）：
+         (A) §3.6 关联面**正式延期**；`supportsSessionReuse` 取 **false**（翻转条件见 §3.6）。
+         (B) 闭集 5→6 保留为**候选注册**，删除一切"Owner 已授权"表述；成员资格待 Owner 裁定。
+         (C) effort **硬拒**（见 §3.3）。
+         三项均属"有权调整范围者"的决定，Lead 不得自行生效；Owner 追认前不 push。
 
 ## Context
 
@@ -88,14 +94,16 @@ CLI 提供 `--patch <file>`（可重复，叠加于 profile 层之后），格�
 | 能力 | 值 | 依据 |
 |---|---|---|
 | `supportsRoleContract` | true | personaPrefix 注入已验证 |
-| `supportsSessionReuse` | **true** | F4；且必须配套 §3.6 合同 |
+| `supportsSessionReuse` | **false** | **Lead 临时裁定（2026-09-20，待 Owner 追认）**：F4 只证明上游协议具备 resume；WAO 侧 §3.6 关联面未落地，声明 true 属"声明强于实现"。落地 §3.6 五项 + 认证含真实会话恢复 drill 后改回 true。依据两席专项咨询（auditor/coder_mm 一致） |
 | `supportsInFlightCorrection` | **false** | F7；能力表**如实标注"不支持"，不静默** |
 | `replayByRespawn` | false | 有真 resume，无需重放 |
 | `reportsTokenUsage` | true | `usage_update` + `PromptResponse.usage` |
 
-**policy 校验面重定义（审查新增）**：旧线 `validateAgentPolicy` 限 `{high, max}`
-（`src/backends/deepSeekHarness.js:95-99`），而 ACP 面为**四档 off/low/high/max**（F5）。
-新 backend 的 `validateAgentPolicy` 须按新闭集定义，并在 `docs/usage.md` 能力表同步。
+**policy 校验面（Lead 临时裁定，2026-09-20，待 Owner 追认）**：旧线 `validateAgentPolicy` 限 `{high, max}`
+（`src/backends/deepSeekHarness.js:95-99`）；ACP 面 `configOptions` 暴露四档 off/low/high/max（F5），
+但 **F5 只证明"暴露"、未证明可"设置"**——wire 下发通道未接线。
+故 `validateAgentPolicy` **硬拒任何非空 `reasoning.effort`**（与同文件对 provider/model 的处置同源：
+配了不能表达的值必须硬拒，不静默忽略），并在 `docs/usage.md` 能力表如实标注。
 
 ### 3.4 事件投影（ACP → RunEvent）——审查后补全
 
@@ -157,6 +165,24 @@ CLI 提供 `--patch <file>`（可重复，叠加于 profile 层之后），格�
    规定持久化、原子写入、并发互斥、身份绑定，以及**缺失/损坏时拒绝恢复**的行为。
 4. **不得**只把 `supportsSessionReuse` 改成 `true` 了事。
 5. worktree 级 resume 需上游确认 workspace 变更语义——README 未提供，**列为未决**。
+
+**Lead 临时裁定（2026-09-20，待 Owner 追认）：关联面正式延期。**
+
+- 本轮范围为：**独立新会话可用；跨 run 复用不可用**。`supportsSessionReuse` 取 **false**。
+- **翻转条件（全部满足才可改回 true）**：§3.6 五项（关联持久化 / 原子写 / 并发互斥 /
+  与 `{leadSession, workspace, agentId}` 三元组的身份绑定 / 缺失损坏时拒绝恢复）落地
+  + §4 认证含**真实会话恢复 drill** + 本 ADR 转 accepted。
+- **拒绝点清单与顺序不变量**：`deepSeekAcp.js` preflight 与 spawn 双拒绝点；
+  "拒绝先于 transcript / worktree / spawn"（`runManager.js:959-965`）为**测试钉住的不变量**。
+- **fail-closed 声明的适用域（重要边界）**：本 backend 的 fail-closed **只覆盖 resume 分支**。
+  路由层"降为 first"三条路径（`sessionReuse.js:237-239 / 390-396 / 397-405`）是
+  **M11-11C 既有 provider-中立合同**（`:381-389` 自述 "This is a degrade, not fail-closed"），
+  **对 claude-code 同样成立**，不在本 backend 的 fail-closed 声称范围内。
+- **interim 不变量**：§3.6 规则 1 照守（delivery worktree 一律 fresh session）；
+  无 containment 资产时任何派发 fail-closed。
+- **台账**：本延期登记为在册债务（TD），`docs/usage.md` 能力表与 §2.5b / §4.10 文案同步 interim 状态。
+- **反静默要求**：任何复用请求（含 `first` / `resume` / `continuable`）均**不得**退化为新会话；
+  不得自动修改现有 lane 配置、删除历史，或用新会话"修复"恢复失败。
 
 ### 3.7 与旧线关系
 新旧并存；旧 backend 与其 runtime **保留至新线认证通过**，之后由 Owner 决定去留。
