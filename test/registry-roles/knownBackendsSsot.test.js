@@ -5,7 +5,7 @@
 // 三根钉：
 //   1. 常量内容钉：KNOWN_BACKENDS 恰为六成员且冻结（成员增补只能经 Owner
 //      决定进入，且进入时本文件与文案钉会一起被审视——第六成员 deepseek-acp
-//      即按此流程于 ADR-0031 落地）。
+//      由 ADR-0031 提议加入，待 Owner 裁定 accepted）。
 //   2. 报错文案钉：unknown-backend 错误逐名列出闭集全部成员 + "Owner decision"
 //      + "ADR-0028"（分叉指路：换模型走既有 backend 的 model/provider 字段；
 //      新 backend 是 Owner 决定——不诱导把模型通道当 runtime 替代解）。
@@ -23,7 +23,7 @@ const COMMANDS_REGISTRY_URL = new URL("../../src/commands/registry.js", import.m
 test("TD-161: KNOWN_BACKENDS SSOT 恰为六成员且冻结", () => {
   assert.deepEqual(KNOWN_BACKENDS, [
     "opencode-serve", "claude-code", "codex", "kimi-code", "deepseek-harness",
-    // 第六成员（ADR-0031，2026-09-19 Owner 授权）：DSH ACP 集成面。
+    // 第六成员：DSH ACP 集成面——由 ADR-0031 提议，待 Owner 裁定 accepted。
     "deepseek-acp",
   ]);
   assert.ok(Object.isFrozen(KNOWN_BACKENDS), "闭集必须冻结（防运行期漂移）");

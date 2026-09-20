@@ -23,7 +23,6 @@ import readline from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 
 import {
-  ACP_REASONING_EFFORTS,
   DENIED_ORCHESTRATION_TOOLS,
   DeepSeekAcpBackend,
   DeepSeekAcpEventQueue,
@@ -31,6 +30,7 @@ import {
   parseContainmentOverlay,
   serializeRoleContractPatch,
 } from "../../src/backends/deepSeekAcp.js";
+import { compileInvocation } from "../../src/backends/processBackend.js";
 import { backendCapabilitySnapshot, backendFor } from "../../src/backends/factory.js";
 import { normalizeAgent } from "../../src/registry.js";
 import { inheritedEnvNames, requiredCredentialNames } from "../../src/envPolicy.js";
@@ -149,7 +149,7 @@ async function waitUntil(predicate, timeoutMs = 2000) {
  * wire 帧 → 收全事件。drive 结束后若 transport 仍开着且 prompt 已应答，
  * 终态路径会自行 session/close → child.end → 队列关闭。
  */
-async function runAcpScenario({ drive, task, agentOverrides = {}, containmentText = REFERENCE_CONTAINMENT, peerOptions = {} }) {
+async function runAcpScenario({ drive, task, agentOverrides = {}, containmentText = REFERENCE_CONTAINMENT, peerOptions = {}, platform }) {
   const dir = mkdtempSync(join(tmpdir(), "wao-acp-test-"));
   const containmentPath = join(dir, "wao-contain.patch.yml");
   writeFileSync(containmentPath, containmentText, "utf8");
@@ -157,6 +157,7 @@ async function runAcpScenario({ drive, task, agentOverrides = {}, containmentTex
   const spawnCalls = [];
   const backend = new DeepSeekAcpBackend({
     containmentPatchPath: containmentPath,
+    platform,
     spawnFn: (binary, args, opts) => {
       spawnCalls.push({ binary, args, opts });
       return child;
@@ -168,23 +169,25 @@ async function runAcpScenario({ drive, task, agentOverrides = {}, containmentTex
   await drive?.({ peer, child, handle, promptRequest, spawnCalls, containmentPath, dir });
   const events = await collect(handle);
   rmSync(dir, { recursive: true, force: true });
-  return { events, peer, child, handle, spawnCalls, backend };
+  return { events, peer, child, handle, spawnCalls, backend, containmentPath };
 }
 
 // ===== policy / containment / 资产钉 =====
 
-test("ACP policy: effort 四档闭集 off/low/high/max；provider 被拒", () => {
+test("ACP policy: effort 硬拒（无可验证下发通道，绝不静默无效）；provider/model 被拒", () => {
   const backend = new DeepSeekAcpBackend();
-  for (const effort of ACP_REASONING_EFFORTS) {
-    assert.doesNotThrow(() => backend.validateAgentPolicy(agent({ reasoning: { effort } })), effort);
-  }
-  for (const effort of ["minimal", "medium", "xhigh"]) {
+  // 审计阻塞项 5（Lead 裁定选项 a）：校验通过但静默不下发 = 配置假绿。
+  // ACP wire 无 effort 下发通道（argv/env/session 请求均不携带；evidence 无
+  // set_config_option 类方法）→ 任何非空 effort 一律硬拒，含 ACP 原生四档。
+  for (const effort of ["off", "low", "high", "max", "minimal", "medium", "xhigh"]) {
     assert.throws(
       () => backend.validateAgentPolicy(agent({ reasoning: { effort } })),
-      /reasoning\.effort/,
+      /cannot express reasoning\.effort/,
       effort,
     );
   }
+  // 空值（null/undefined）视同未配置——不拒。
+  assert.doesNotThrow(() => backend.validateAgentPolicy(agent({ reasoning: { effort: null } })));
   assert.throws(
     () => backend.validateAgentPolicy(agent({
       provider: { protocol: "anthropic-compatible", baseUrl: "https://example.invalid", apiKeyEnv: "OTHER_KEY" },
@@ -248,9 +251,11 @@ test("ACP registry/env 集成：闭集成员、credentialEnv 必填、凭据继�
   assert.ok(inheritedEnvNames(normalized).includes("DEEPSEEK_API_KEY"));
   const built = backendFor(normalized);
   assert.ok(built instanceof DeepSeekAcpBackend);
+  // Lead 2026-09-20 临时裁定（Owner 未决）：supportsSessionReuse=false——关联面
+  // （持久化/原子/互斥/身份绑定）未落地前声明 true 属"声明强于实现"。
   assert.deepEqual(backendCapabilitySnapshot(normalized), {
     reportsTokenUsage: true,
-    supportsSessionReuse: true,
+    supportsSessionReuse: false,
   });
   assert.equal(built.supportsInFlightCorrection, false, "在途纠偏如实声明不支持");
   assert.equal(built.supportsRoleContract, true);
@@ -259,10 +264,15 @@ test("ACP registry/env 集成：闭集成员、credentialEnv 必填、凭据继�
     () => normalizeAgent("bad", agent({ credentialEnv: undefined })),
     /credentialEnv/,
   );
-  // registry 层六值 effort 闭集暂不含 off——backend 四档声明与 registry 边界并存。
+  // registry 层六值 effort 闭集：off 在 registry 不可表达（既有边界）。
   assert.throws(
     () => normalizeAgent("bad", agent({ reasoning: { effort: "off" } })),
     /reasoning\.effort/,
+  );
+  // registry 可表达的档位也会被 backend validateAgentPolicy 硬拒（阻塞项 5）。
+  assert.throws(
+    () => built.validateAgentPolicy(agent({ reasoning: { effort: "high" } })),
+    /cannot express reasoning\.effort/,
   );
 });
 
@@ -355,6 +365,52 @@ test("ACP 投影边界：pending/in_progress 绝不算成功；重复终态取�
   // usage 为 null：无 metrics 事件（evidence phase4 里 PromptResponse.usage 实测可为 null）
   assert.equal(events.filter((e) => e.kind === "metrics").length, 0);
   assert.equal(events.at(-1).reason, "completed");
+});
+
+test("ACP 缺失/空 toolCallId：不发 write_intent、completed 绝不发 file_written（不可靠关联态）+ 留痕", async () => {
+  const { events, handle } = await runAcpScenario({
+    drive: ({ peer, promptRequest }) => {
+      // 旧缺陷形态：缺失/空 id 曾降级为字面量 "unknown" 并以 TRACKED 记录——
+      // 任意缺 id 的 completed 都能凭空领走 file_written（可伪造面，阻塞项 2）。
+      peer.notify({ sessionUpdate: "tool_call", title: "write", kind: "other", status: "in_progress", rawInput: { file_path: "forged.txt", content: "x" } });
+      peer.notify({ sessionUpdate: "tool_call", toolCallId: "", title: "write", kind: "other", rawInput: { file_path: "empty-id.txt" } });
+      peer.notify({ sessionUpdate: "tool_call_update", status: "completed", content: [{ type: "text", text: "written" }] });
+      peer.notify({ sessionUpdate: "tool_call_update", toolCallId: "", status: "completed" });
+      peer.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
+    },
+  });
+  // 阻塞项 2 钉：缺失/空 id 的 completed 绝不产出 file_written / write_intent
+  assert.ok(!events.some((e) => e.kind === "file_written"), "缺失/空 toolCallId 绝不发 file_written");
+  assert.ok(!events.some((e) => e.kind === "write_intent"), "缺失/空 toolCallId 绝不发 write_intent");
+  assert.ok(!events.some((e) => e.toolCallId === "unknown"), "绝不再出现字面量 unknown 关联键");
+  // 证据降级而非丢失：tool_use（无关联面）仍在；终态 update 无 id 不投影 tool_result
+  assert.equal(events.filter((e) => e.kind === "tool_use" && e.tool === "write").length, 2);
+  assert.equal(events.filter((e) => e.kind === "tool_result").length, 0);
+  const notes = handle.anomalies.map((a) => a.note).join("\n");
+  assert.match(notes, /tool_call without toolCallId; write correlation unreliable/);
+  assert.match(notes, /terminal tool_call_update without toolCallId ignored/);
+  assert.equal(events.at(-1).reason, "completed");
+});
+
+test("ACP 重复 toolCallId 的 tool_call：拒绝覆盖待确认路径（首个关联保持，绝不让后到路径领走 file_written）+ 留痕", async () => {
+  const { events, handle } = await runAcpScenario({
+    drive: ({ peer, promptRequest }) => {
+      peer.notify({ sessionUpdate: "tool_call", toolCallId: "call_dup", title: "write", kind: "other", rawInput: { file_path: "first.txt" } });
+      // 同 id 第二个 tool_call 携带不同路径：不得静默覆盖 first.txt 的待确认路径
+      peer.notify({ sessionUpdate: "tool_call", toolCallId: "call_dup", title: "write", kind: "other", rawInput: { file_path: "second.txt" } });
+      peer.notify({ sessionUpdate: "tool_call_update", toolCallId: "call_dup", status: "completed", content: [{ type: "text", text: "ok" }] });
+      peer.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
+    },
+  });
+  assert.ok(events.some((e) => e.kind === "write_intent" && e.path === "first.txt" && e.toolCallId === "call_dup" && e.correlationStatus === "tracked"));
+  assert.ok(!events.some((e) => e.kind === "write_intent" && e.path === "second.txt"), "重复 id 不得再立第二条 write_intent");
+  // 关联成功的是首个路径——second.txt 绝不 file_written（伪造面闭合）
+  assert.ok(events.some((e) => e.kind === "file_written" && e.path === "first.txt" && e.toolCallId === "call_dup"));
+  assert.ok(!events.some((e) => e.kind === "file_written" && e.path === "second.txt"));
+  const notes = handle.anomalies.map((a) => a.note).join("\n");
+  assert.match(notes, /duplicate tool_call toolCallId refused overwrite; first correlation kept \(toolCallId=call_dup/);
+  // 重复的 tool_call 仍投影 tool_use（wire 事实不丢）
+  assert.equal(events.filter((e) => e.kind === "tool_use" && e.tool === "write").length, 2);
 });
 
 test("ACP 未绑定 sessionId 的 session/update 一律丢弃（绝不投影为本 run 事实）", async () => {
@@ -471,6 +527,54 @@ test("ACP 权限应答三分支：allow 优先 / 仅 reject 或未知 kind → r
     assert.match(audit.parts[0].text, /deepseek-acp permission answered/);
     assert.equal(events.at(-1).reason, "completed");
   }
+});
+
+test("ACP 权限约束（阻塞项 3）：非本次绑定 sessionId / 终态已排队 → 绝不 allow，cancelled + 留痕", async () => {
+  // 分支 1：非本次绑定的 sessionId——哪怕选项全是 allow，也绝不授予。
+  const foreign = await runAcpScenario({
+    drive: async ({ peer: p, promptRequest }) => {
+      p.serverRequest(9101, "session/request_permission", {
+        sessionId: "sess-not-mine",
+        options: [{ kind: "allow_once", optionId: "a1" }],
+      });
+      await waitUntil(() => p.serverRequestResponses.some((m) => m.id === 9101));
+      p.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
+    },
+  });
+  const foreignAnswer = foreign.peer.serverRequestResponses.find((m) => m.id === 9101);
+  assert.ok(foreignAnswer, "必须应答（不静默丢弃）");
+  assert.deepEqual(foreignAnswer.result, { outcome: { outcome: "cancelled" } }, "非绑定 sessionId 绝不 allow");
+  const foreignAudit = foreign.events.find((e) => e.kind === "message" && e.role === "system");
+  assert.ok(foreignAudit, "拒绝性应答也进 transcript 审计");
+  assert.match(foreignAudit.parts[0].text, /"refused":"session_not_bound"/);
+  assert.match(
+    foreign.handle.anomalies.map((a) => a.note).join("\n"),
+    /session\/request_permission refused \(session_not_bound\); answered cancelled, never allow/,
+  );
+  assert.equal(foreign.events.at(-1).reason, "completed");
+
+  // 分支 2：终态已排队（tripwire 命中后）——正确 sessionId 也绝不 allow。
+  const queued = await runAcpScenario({
+    drive: async ({ peer: p }) => {
+      p.notify({ sessionUpdate: "tool_call", toolCallId: "call_t9", title: "subagent", kind: "other", rawInput: { prompt: "x" } });
+      // session/close 只在 queueTerminal 的 shutdown 路径发出——见到它即终态已排队。
+      await waitUntil(() => p.clientRequests.some((m) => m.method === "session/close"));
+      p.serverRequest(9102, "session/request_permission", {
+        sessionId: p.sessionId,
+        options: [{ kind: "allow_always", optionId: "a2" }],
+      });
+      await waitUntil(() => p.serverRequestResponses.some((m) => m.id === 9102));
+    },
+  });
+  const queuedAnswer = queued.peer.serverRequestResponses.find((m) => m.id === 9102);
+  assert.ok(queuedAnswer, "必须应答（不静默丢弃）");
+  assert.deepEqual(queuedAnswer.result, { outcome: { outcome: "cancelled" } }, "terminalQueued 后绝不 allow");
+  assert.match(
+    queued.handle.anomalies.map((a) => a.note).join("\n"),
+    /session\/request_permission refused \(terminal_queued\); answered cancelled, never allow/,
+  );
+  const queuedDone = queued.events.find((e) => e.kind === "done");
+  assert.equal(queuedDone.reason, "failed", "tripwire 终态不受权限应答影响");
 });
 
 test("ACP 权限：未知服务端请求方法 → -32601 错误应答（不吞掉）", async () => {
@@ -610,6 +714,78 @@ test("ACP argv：--profile acp + containment --patch + 角色合同 --patch；�
   });
   const bareArgs = bare.spawnCalls[0].args;
   assert.equal(bareArgs.filter((a) => a === "--patch").length, 1);
+});
+
+// ===== Windows 启动链（阻塞项 1——上一轮"假绿"根因）=====
+//
+// 旧缺陷：spawn 喂的是 `compiled.binary`（win32+.cmd 时 = ComSpec）**拼原始
+// dsh builtArgs**——实际执行 `cmd.exe --profile acp …`，永远起不来 dsh.cmd。
+// 只测假 .exe 探不到该路径（.exe 时 compile 产物恰好透传 builtArgs）。
+// 修正形态：附加参数在 compile **之前**进 builtArgs，spawn 用 compileInvocation
+// 产物（compiled.args，含 /d /s /c 包裹），与旧线 deepSeekHarness.js 同款。
+
+test("ACP Windows 启动链：win32 + .cmd → spawn 恰为 compileInvocation 产物（ComSpec /d /s /c <cmdLine>，verbatim）", async () => {
+  const scenario = await runAcpScenario({
+    agentOverrides: { binary: "D:/wao-test/dsh.cmd" },
+    platform: "win32",
+    drive: ({ peer, promptRequest }) => {
+      peer.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
+    },
+  });
+  const { spawnCalls, containmentPath } = scenario;
+  assert.equal(spawnCalls.length, 1);
+  // 附加参数在 compile 之前进入 builtArgs；期望值由 compileInvocation 独立重放——
+  // spawn 的 (binary, args) 必须与产物逐元素相等（阻塞项 1 的机器钉）。
+  const expected = compileInvocation({
+    binary: "D:/wao-test/dsh.cmd",
+    builtArgs: ["--profile", "acp", "--patch", containmentPath],
+    platform: "win32",
+  });
+  assert.equal(spawnCalls[0].binary, expected.binary);
+  assert.deepEqual(spawnCalls[0].args, expected.args);
+  assert.equal(spawnCalls[0].opts.windowsVerbatimArguments, expected.windowsVerbatimArguments);
+  // 结构钉：ComSpec + /d /s /c + verbatim cmdLine（含全部 dsh argv）
+  assert.equal(spawnCalls[0].binary, process.env.ComSpec || "cmd.exe");
+  assert.deepEqual(spawnCalls[0].args.slice(0, 3), ["/d", "/s", "/c"]);
+  const cmdLine = spawnCalls[0].args[3];
+  assert.equal(typeof cmdLine, "string");
+  assert.ok(cmdLine.startsWith("call "), "cmdLine 以 call <binary> 开头");
+  assert.ok(cmdLine.includes("dsh.cmd"), "cmdLine 包裹的是 dsh.cmd 本体");
+  assert.ok(cmdLine.includes("--profile") && cmdLine.includes("acp"));
+  assert.ok(cmdLine.includes("--patch") && cmdLine.includes("wao-contain.patch.yml"));
+  assert.equal(spawnCalls[0].opts.windowsVerbatimArguments, true);
+  // 死链形态回归钉：原始 dsh builtArgs 不得直接成为 spawn 的 args
+  assert.ok(!spawnCalls[0].args.includes("--profile"), "不得把 builtArgs 原样喂给 cmd.exe");
+  assert.equal(spawnCalls[0].args.length, 4, "spawn args 恰为 [/d,/s,/c,cmdLine]");
+  assert.equal(scenario.events.at(-1).reason, "completed");
+});
+
+test("ACP Windows 启动链（带角色合同）：真实 role patch 路径在 compile 之前进 builtArgs，产物逐元素相等", async () => {
+  const scenario = await runAcpScenario({
+    agentOverrides: { binary: "D:/wao-test/dsh.cmd" },
+    platform: "win32",
+    task: { prompt: "do", roleContract: "bounded role" },
+    drive: ({ peer, promptRequest, spawnCalls: calls, containmentPath }) => {
+      assert.equal(calls.length, 1);
+      assert.deepEqual(calls[0].args.slice(0, 3), ["/d", "/s", "/c"]);
+      // 从 verbatim cmdLine 里取回真实 role patch 路径（quoteCmdArg 恒包裹双引号，
+      // mkdtemp 路径不含引号），再用 compileInvocation 独立重放整条产物比对。
+      const rolePatch = calls[0].args[3].match(/"([^"]*role\.patch\.yml)"/)?.[1];
+      assert.ok(rolePatch, "cmdLine 必须包含角色合同 patch 路径");
+      assert.ok(existsSync(rolePatch), "角色合同 patch 在 spawn 时已落盘");
+      const expected = compileInvocation({
+        binary: "D:/wao-test/dsh.cmd",
+        builtArgs: ["--profile", "acp", "--patch", containmentPath, "--patch", rolePatch],
+        platform: "win32",
+      });
+      assert.equal(calls[0].binary, expected.binary);
+      assert.deepEqual(calls[0].args, expected.args);
+      assert.equal(calls[0].opts.windowsVerbatimArguments, expected.windowsVerbatimArguments);
+      assert.equal((calls[0].args[3].match(/--patch/g) ?? []).length, 2, "containment + 角色合同两条 --patch 都进了 cmdLine");
+      peer.respond(promptRequest().id, { stopReason: "end_turn", usage: null });
+    },
+  });
+  assert.equal(scenario.events.at(-1).reason, "completed");
 });
 
 test("ACP 孤儿清扫：陈旧的 wao-dsh-acp-* 目录被清；新鲜目录保留", async () => {

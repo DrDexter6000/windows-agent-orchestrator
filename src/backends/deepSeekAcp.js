@@ -15,22 +15,29 @@
 //     未知 sessionUpdate 类型 / 未知 tool_call_update status → 终态 failed，
 //     不投影、不吞掉；`pending`/`in_progress` 绝不当作工具成功。
 //   - 同一 toolCallId 的重复/乱序终态以首个为准，后续忽略并留痕（handle.anomalies）。
+//   - toolCallId 缺失/空 → 关联不可靠（docs/02-architecture.md §2.2 不可靠关联态）：
+//     绝不发 write_intent / file_written，anomalies 留痕；重复 toolCallId 的
+//     tool_call → 拒绝覆盖待确认路径（pendingWrites/pendingCommands 保持首个），留痕。
 //   - `usage_update` 是上下文占用观察，绝不折算成 metrics 的 input；终局用量唯一
 //     来源是 `session/prompt` 响应的 usage。
 //   - 二次校验 = 越界 tripwire（检测，非阻止）：wire 上 `tool_call.title` 即工具真名
 //     （ADR-0031 F8），出现 subagent / subagent_fork / spawn_teammate 即终态 failed。
-//   - `session/request_permission`（服务端→客户端请求）必须应答并留审计痕：
-//     allow_once/allow_always → 选中；仅 reject 类/未知 kind → 选中 reject（找不到
-//     reject 选项时 cancelled，绝不授予）；无可选项 → cancelled。应答以 system
-//     message 事件进 transcript（system 消息不是 usable effect，不污染证据链）。
+//   - `session/request_permission`（服务端→客户端请求）必须应答且受会话与终态约束：
+//     非本次绑定 sessionId、或终态已排队 → 绝不 allow，按 cancelled 应答并留痕；
+//     其余按 allow_once/allow_always → 选中；仅 reject 类/未知 kind → 选中 reject
+//     （找不到 reject 选项时 cancelled，绝不授予）；无可选项 → cancelled。应答以
+//     system message 事件进 transcript（system 消息不是 usable effect，不污染证据链）。
 //
-// 能力声明（ADR-0031 §3.3）：
+// 能力声明（ADR-0031 §3.3；supportsSessionReuse 按 Lead 2026-09-20 临时裁定改 false）：
 //   supportsRoleContract      = true   personaPrefix 注入已实测
-//   supportsSessionReuse      = true   ACP 有真 resume（F4）；resume 轮在本层
-//                                      fail-closed 拒绝，直到 §3.6 的
-//                                      opaqueUuid→ACP sessionId 关联面补齐
+//   supportsSessionReuse      = false  opaqueUuid→ACP sessionId 关联面（持久化/原子/
+//                                      互斥/身份绑定）未落地；落地后改回 true；
+//                                      Owner 裁定见 ADR-0031 §3.6。resume 轮一律
+//                                      refuse（preflight fail-closed）——当前不具备
+//                                      跨 run 复用能力，声明 true 属"声明强于实现"
 //   supportsInFlightCorrection= false  ACP 无在途消息改写（F7）——如实声明，不静默
-//   replayByRespawn           = false  有真 resume，无需重放（resume 由 §3.6 合同承接）
+//   replayByRespawn           = false  跨 run 上下文续接依赖 §3.6 关联面（未落地），
+//                                      本层不承担重放
 //   reportsTokenUsage         = true   usage_update + PromptResponse.usage
 //
 // 零新增生产依赖：只用 node: 内置模块（探针 scripts/reliability/dsh-acp 已证可行）。
@@ -68,10 +75,12 @@ const ACP_RUNTIME_NAME = "deepseek-harness-acp";
 const ACP_PROTOCOL_VERSION = 1;
 const DEFAULT_BINARY = "dsh";
 
-// ACP 面 reasoning_effort 四档闭集（F5：evidence/phase4-contained-safe.json 的
-// configOptions）。注意 registry 层 REASONING_EFFORTS 六值闭集暂不含 "off"——
-// "off" 在 registry 不可表达是既有 Owner 决策边界，本 backend 照四档声明。
-export const ACP_REASONING_EFFORTS = Object.freeze(["off", "low", "high", "max"]);
+// ACP 面 reasoning_effort wire 事实（F5：evidence/phase4-contained-safe.json 的
+// configOptions 暴露 off/low/high/max 四档）——但那只是"随会话暴露"，**不是**可设置
+// 通道的证据：argv/env/session 请求均无 effort 下发面，也无 set_config_option 类
+// wire 方法入证据（scripts/reliability/dsh-acp/evidence/）。校验放行却静默不下发
+// = 配置假绿，故 validateAgentPolicy 对任何非空 reasoning.effort 硬拒（与
+// provider/model 块同源处置）。
 
 // 越界 tripwire deny-list（ADR-0031 §3.5）：检测，不是阻止——副作用可能已发生。
 // wire 上 title 即工具真名（F8），故直接按名字断言。
@@ -254,16 +263,24 @@ function trimTail(value) {
  */
 export class DeepSeekAcpBackend {
   supportsRoleContract = true;
-  supportsSessionReuse = true;
+  // Lead 2026-09-20 临时裁定（Owner 未决）：false。opaqueUuid→ACP sessionId 关联面
+  // （持久化/原子/互斥/身份绑定）未落地；落地后改回 true；Owner 裁定见 ADR-0031 §3.6。
+  // resume 轮一律 refuse（preflightInvocation fail-closed），关联面零改动——
+  // 当前不具备跨 run 复用能力。配了 sessionReuse 的 lane 会在 registry validate
+  // 得 ⚠ 且派发前被 runManager 的能力门 fail-closed 拒绝——这是期望行为。
+  supportsSessionReuse = false;
   supportsInFlightCorrection = false;
   replayByRespawn = false;
   // ADR-0031 §3.3：usage_update + PromptResponse.usage → tokenBudget 闸门有效。
   // 注意终局 usage 缺失（evidence 里为 null）时本轮无 metrics 事实——如实缺省。
   reportsTokenUsage = true;
 
-  constructor({ spawnFn = spawn, containmentPatchPath } = {}) {
+  constructor({ spawnFn = spawn, containmentPatchPath, platform } = {}) {
     this._spawnFn = spawnFn;
     this._containmentPatchPathOverride = containmentPatchPath;
+    // platform 注入缝（测试用）：缺省 process.platform。compileInvocation 的
+    // win32 .cmd/.bat 包裹行为因此可在任意宿主上被确定性钉住。
+    this._platform = platform ?? process.platform;
   }
 
   _containmentPatchPath() {
@@ -281,9 +298,12 @@ export class DeepSeekAcpBackend {
     if (agent?.model) {
       throw new Error("deepseek-acp cannot express a model block; the model comes from the shipped acp profile session configOptions");
     }
+    // reasoning.effort 同源处置（Lead 2026-09-20 裁定选项 a）：ACP wire 上没有
+    // 可验证的下发通道——argv/env/session 请求均不携带 effort，evidence 里也无
+    // set_config_option 类方法。校验放行但静默不下发 = 用户配置假绿，硬拒。
     const effort = agent?.reasoning?.effort;
-    if (effort !== undefined && !ACP_REASONING_EFFORTS.includes(effort)) {
-      throw new Error("deepseek-acp reasoning.effort must be off, low, high, or max when present");
+    if (effort !== undefined && effort !== null) {
+      throw new Error("deepseek-acp cannot express reasoning.effort: no verified wire channel delivers it (argv/env/session requests carry no effort; configOptions are exposed, not settable from here) — refusing instead of silently ignoring");
     }
   }
 
@@ -324,7 +344,9 @@ export class DeepSeekAcpBackend {
   }
 
   async spawn(agent, task) {
-    const compiled = await this.preflightInvocation(agent, task);
+    // preflight：containment detect + resume fail-closed + argv 预算预检
+    // （representative role patch 路径，transcript/worktree 之前）。
+    await this.preflightInvocation(agent, task);
     const agentEnv = agent.env ?? {};
     const forbiddenAgentEnv = Object.keys(agentEnv).find(isSecretEnvName);
     if (forbiddenAgentEnv) {
@@ -356,7 +378,13 @@ export class DeepSeekAcpBackend {
       await writeFile(rolePatchPath, serializeRoleContractPatch(task.roleContract), "utf8");
     }
 
-    const child = this._spawnFn(compiled.binary, this._buildArgs(agent, rolePatchPath), {
+    // 附加参数（--profile acp / --patch …）必须在 compile 之前进入 builtArgs，
+    // spawn 使用 compileInvocation 的**产物**（compiled.args）——win32 + .cmd/.bat
+    // 时产物是 `ComSpec /d /s /c <cmdLine>`（verbatim）。绕过产物直接喂 builtArgs
+    // 会得到 `cmd.exe --profile acp …` 死链（审计阻塞项 1，上一轮假绿根因）；
+    // 对照旧线 deepSeekHarness.js 同款 `compiled.args` 纪律。
+    const compiled = await this._compileInvocation(agent, rolePatchPath);
+    const child = this._spawnFn(compiled.binary, compiled.args, {
       cwd: agent.cwd,
       env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],
@@ -466,7 +494,7 @@ export class DeepSeekAcpBackend {
       if (terminalQueued) return;
       const toolCallId = typeof update.toolCallId === "string" && update.toolCallId.length > 0
         ? update.toolCallId
-        : "unknown";
+        : null;
       const tool = typeof update.title === "string" && update.title.length > 0
         ? update.title
         : "unknown";
@@ -476,6 +504,23 @@ export class DeepSeekAcpBackend {
         return;
       }
       const input = parseRawInput(update.rawInput);
+      // 缺失/空 toolCallId → 关联不可靠（docs/02-architecture.md §2.2 不可靠关联态）：
+      // 绝不 write_intent / file_written（旧实现降级为字面量 "unknown" 再以 TRACKED
+      // 关联，是可伪造 file_written 的面——审计阻塞项 2）；证据降级为 tool_use，
+      // anomalies 留痕。不注册任何 pending 关联表。
+      if (toolCallId === null) {
+        recordAnomaly("tool_call without toolCallId; write correlation unreliable — no write_intent/file_written, tool_use evidence only (tool=" + bounded(tool) + ")");
+        queue.push(redactor.redact(toolUseEvent(tool, input)));
+        return;
+      }
+      // 重复 toolCallId → 拒绝覆盖待确认路径（toolCalls/pendingCommands/pendingWrites
+      // 均保持首个，绝不静默改写关联面——否则后到的 file_path 可借同一 id 伪造
+      // file_written）；留痕；证据仍投影 tool_use（wire 事实）。
+      if (toolCalls.has(toolCallId)) {
+        recordAnomaly("duplicate tool_call toolCallId refused overwrite; first correlation kept (toolCallId=" + toolCallId + ", tool=" + bounded(tool) + ")");
+        queue.push(redactor.redact(toolUseEvent(tool, input)));
+        return;
+      }
       toolCalls.set(toolCallId, { tool });
       const key = tool.toLowerCase();
       if (SHELL_TOOL_NAMES.includes(key) && typeof input.command === "string" && input.command.length > 0) {
@@ -498,11 +543,17 @@ export class DeepSeekAcpBackend {
       if (terminalQueued) return;
       const toolCallId = typeof update.toolCallId === "string" && update.toolCallId.length > 0
         ? update.toolCallId
-        : "unknown";
+        : null;
       const status = update?.status;
       if (status === "pending" || status === "in_progress") return; // 绝不当作成功
       if (status !== "completed" && status !== "failed") {
         queueTerminal(doneEvent("failed", "deepseek-acp tool_call_update carried an unknown status: " + bounded(status)));
+        return;
+      }
+      // 缺失/空 toolCallId：无法关联到任何 tool_call —— 绝不投影 tool_result /
+      // file_written（不可靠关联态，审计阻塞项 2），留痕。
+      if (toolCallId === null) {
+        recordAnomaly("terminal tool_call_update without toolCallId ignored; no tool_result/file_written projected (status=" + status + ")");
         return;
       }
       // 重复/乱序终态：首个到达的终态为准，后续同 toolCallId 终态忽略并留痕。
@@ -534,7 +585,9 @@ export class DeepSeekAcpBackend {
       queue.push(...events.map((event) => redactor.redact(event)));
     };
 
-    // session/request_permission 应答（ADR-0031 §3.5）：必须应答且留审计痕。
+    // session/request_permission 应答（ADR-0031 §3.5 + 审计阻塞项 3）：
+    // 必须应答且留审计痕，且受**会话与终态**约束——非本次绑定 sessionId、或终态
+    // 已排队 → 绝不 allow，按 cancelled 应答（拒绝处理）并留痕。
     const answerPermissionRequest = (params) => {
       const options = Array.isArray(params?.options) ? params.options : [];
       const allow = options.find((option) => option?.kind === "allow_once" || option?.kind === "allow_always");
@@ -550,7 +603,7 @@ export class DeepSeekAcpBackend {
       return { outcome: { outcome: "cancelled" } };
     };
 
-    const auditPermissionAnswer = (params, decision) => {
+    const auditPermissionAnswer = (params, decision, refusal) => {
       const options = Array.isArray(params?.options) ? params.options : [];
       const summary = {
         request: "session/request_permission",
@@ -559,6 +612,7 @@ export class DeepSeekAcpBackend {
           ? decision.outcome.optionId
           : decision.outcome.outcome,
       };
+      if (refusal) summary.refused = refusal;
       const text = ("deepseek-acp permission answered: " + JSON.stringify(summary)).slice(0, 500);
       // system 消息进 transcript 供审计，但不是 usable effect（runEventIsUsableEffect
       // 只认 assistant 文本），不污染证据链。
@@ -567,12 +621,24 @@ export class DeepSeekAcpBackend {
 
     const handleServerRequest = (frame) => {
       if (frame.method === "session/request_permission") {
-        const decision = answerPermissionRequest(frame.params);
+        const params = frame.params ?? {};
+        // 会话绑定 + 终态约束：未绑定（含 session/new 前到达）或终态已排队 →
+        // cancelled，绝不 allow（阻塞项 3：否则异 session / 死会话可借权限面越权）。
+        const sessionBound = acpSessionId !== null && params.sessionId === acpSessionId;
+        const refusal = !sessionBound
+          ? "session_not_bound"
+          : (terminalQueued ? "terminal_queued" : null);
+        const decision = refusal
+          ? { outcome: { outcome: "cancelled" } }
+          : answerPermissionRequest(params);
+        if (refusal) {
+          recordAnomaly("session/request_permission refused (" + refusal + "); answered cancelled, never allow");
+        }
         child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: decision }) + "\n", (error) => {
           if (!error) return;
           recordAnomaly("session/request_permission response write failed: " + bounded(error?.message));
         });
-        auditPermissionAnswer(frame.params, decision);
+        auditPermissionAnswer(params, decision, refusal);
         return;
       }
       child.stdin.write(JSON.stringify({
@@ -768,7 +834,7 @@ export class DeepSeekAcpBackend {
 
   async _compileInvocation(agent, rolePatchPath) {
     let binary = agent.binary ?? DEFAULT_BINARY;
-    if (!path.isAbsolute(binary) && path.dirname(binary) === "." && process.platform === "win32") {
+    if (!path.isAbsolute(binary) && path.dirname(binary) === "." && this._platform === "win32") {
       try {
         const output = execFileSync("where.exe", [binary], { encoding: "utf8", windowsHide: true });
         const paths = output.split(/\r?\n/).filter(Boolean);
@@ -783,7 +849,7 @@ export class DeepSeekAcpBackend {
     return compileInvocation({
       binary,
       builtArgs: this._buildArgs(agent, rolePatchPath),
-      platform: process.platform,
+      platform: this._platform,
     });
   }
 
