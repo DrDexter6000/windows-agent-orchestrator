@@ -32,7 +32,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { parseComponentCheckArgs, COMPONENT_CHECK_USAGE } from "./reliability/args.mjs";
+// 参数解析独立在 componentArgs.mjs（ADR-0032 §6 + 2026-09-20 拒收复盘：
+// reliability 共享的 args.mjs 保持拒收前版本逐字节不动——零共享面）。
+import { parseComponentCheckArgs, COMPONENT_CHECK_USAGE } from "./reliability/componentArgs.mjs";
 import {
   planComponentChecks,
   executeComponentChecks,

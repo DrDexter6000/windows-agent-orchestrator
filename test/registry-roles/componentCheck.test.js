@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import {
   parseComponentCheckArgs,
   COMPONENT_CHECK_USAGE,
-} from "../../scripts/reliability/args.mjs";
+} from "../../scripts/reliability/componentArgs.mjs";
 import {
   BACKEND_COMPONENT_DRILLS,
   LLM_COMPONENT_DRILLS,
@@ -339,11 +339,16 @@ function runEntry(args, { registryContent } = {}) {
     writeFileSync(registryPath, JSON.stringify(registryContent ?? syntheticRegistry()));
     const ledgerPath = join(dir, "ledger.json");
     const compositionPath = join(dir, "absent-summary.json");
+    // --work-dir 也钉进 tmpdir：不传时入口默认 <repoRoot>/.wao/runs/…，会往
+    // 真实仓库树（控制面的 runs 区）落 fixture-registry.json——测试不得写
+    // 真实仓库树（2026-09-20 拒收复盘实证的残留路径）。
+    const workDir = join(dir, "work");
     const r = spawnSync(process.execPath, [
       ENTRY,
       "--registry", registryPath,
       "--ledger", ledgerPath,
       "--composition-summary", compositionPath,
+      "--work-dir", workDir,
       ...args,
     ], { encoding: "utf8", timeout: 120000 });
     return { r, ledgerPath, dir };
@@ -766,6 +771,38 @@ test("args: parseComponentCheckArgs——合法/缺 subject/未知 flag/重复",
   assert.match(parseComponentCheckArgs(["--subject", "a", "--subject", "b"]).error, /duplicate/);
   assert.match(parseComponentCheckArgs(["--subject"]).error, /requires a value/);
   assert.ok(COMPONENT_CHECK_USAGE.includes("--subject"));
+});
+
+test("args 隔离钉: 参数解析宿主在 componentArgs.mjs，reliability 共享的 args.mjs 零 component 面（拒收复盘：共享入口不承载组件层新参数）", async () => {
+  const { parseReliabilityArgs } = await import("../../scripts/reliability/args.mjs");
+  const sharedSrc = readFileSync(join(REPO_ROOT, "scripts", "reliability", "args.mjs"), "utf8");
+  assert.doesNotMatch(sharedSrc, /parseComponentCheckArgs|COMPONENT_CHECK_USAGE|KNOWN_COMPONENT_CHECK_ARGS|component/i,
+    "args.mjs 是 reliability 入口的共享热路径，不得出现 component-check 面（需要新参数放 componentArgs.mjs）");
+  // 纪律零漂移钉（不共享代码 → 必须钉行为）：两解析器在同形输入下的判定与
+  // 错误消息逐字一致（未知/重复/缺值/裸位置参数/非数组；值键名各归各白名单，
+  // 故只钉 help/error 面）。
+  assert.equal(
+    parseComponentCheckArgs(["--subject", "b", "--nope"]).error,
+    parseReliabilityArgs(["--agent", "b", "--nope"]).error,
+  );
+  // 重复/缺值消息内嵌 flag 名——用两白名单共有的 --registry 保证同形同消息。
+  assert.equal(
+    parseComponentCheckArgs(["--registry", "a", "--registry", "b"]).error,
+    parseReliabilityArgs(["--registry", "a", "--registry", "b"]).error,
+  );
+  assert.equal(
+    parseComponentCheckArgs(["--registry"]).error,
+    parseReliabilityArgs(["--registry"]).error,
+  );
+  assert.equal(
+    parseComponentCheckArgs(["positional"]).error,
+    parseReliabilityArgs(["positional"]).error,
+  );
+  assert.equal(
+    parseComponentCheckArgs(null).error,
+    parseReliabilityArgs(null).error,
+  );
+  assert.deepEqual(parseComponentCheckArgs(["--help"]), parseReliabilityArgs(["--help"]));
 });
 
 test("结构钉: 组件层不得 import 组合层 certification.mjs（certifyCase/状态闭集的实际边界）", () => {
