@@ -19,6 +19,7 @@
       "isolation-infra/docsSurface.test.js",
       "delivery/deliveryReview.test.js",
       "backends/deepSeekHarness.test.js",
+      "backends/deepSeekAcp.test.js",
       "transcript/diagnosis.test.js",
       "isolation-infra/frictionLog.test.js",
       "backends/integration.test.js",

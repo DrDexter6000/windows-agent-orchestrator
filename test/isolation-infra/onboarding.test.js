@@ -1145,6 +1145,9 @@ test("R6-C: backend→CLI mapping covers all live backends (null = no standalone
     "kimi-code": "kimi",
     "opencode-serve": "opencode",
     "deepseek-harness": null,
+    // ADR-0031：ACP 线直接驱动上游 dsh CLI（CLI 在场 ≠ 就绪，还需操作员安装
+    // containment 覆盖层——见 docs/usage.md）。
+    "deepseek-acp": "dsh",
   });
 });
 

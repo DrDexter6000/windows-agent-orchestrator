@@ -23,6 +23,7 @@ import { ClaudeCodeBackend } from "./claudeCode.js";
 import { CodexBackend } from "./codex.js";
 import { KimiCodeBackend } from "./kimiCode.js";
 import { DeepSeekHarnessBackend } from "./deepSeekHarness.js";
+import { DeepSeekAcpBackend } from "./deepSeekAcp.js";
 import { getWaoCliPath } from "../waoCliPath.js";
 
 /**
@@ -43,6 +44,10 @@ export function backendFor(agent, { fetchImpl, waoCliPath } = {}) {
   if (agent.backend === "codex") return new CodexBackend({ waoCliPath: cliPath });
   if (agent.backend === "kimi-code") return new KimiCodeBackend({ waoCliPath: cliPath });
   if (agent.backend === "deepseek-harness") return new DeepSeekHarnessBackend();
+  // ADR-0031（B-2）：DSH ACP 集成面（dsh --profile acp）。构造零副作用——
+  // containment 资产 detect / resume fail-closed / argv 预算都在
+  // preflightInvocation（spawn 前、transcript 前）执行。
+  if (agent.backend === "deepseek-acp") return new DeepSeekAcpBackend();
   throw new Error(`Unsupported backend: ${agent.backend}`);
 }
 

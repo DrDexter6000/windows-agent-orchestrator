@@ -34,6 +34,11 @@ export const SEAT_ROLES = Object.freeze([
 // 与能力映射各自承载不同语义，不在单点修改承诺内。
 export const KNOWN_BACKENDS = Object.freeze([
   "opencode-serve", "claude-code", "codex", "kimi-code", "deepseek-harness",
+  // ADR-0031（B-2）：DSH ACP 集成面 backend（dsh --profile acp）。闭集 5→6
+  // 扩员由 ADR-0031 提议，待 Owner 裁定 accepted（Owner 未决——不声称已授权）。
+  // 新旧两线并存；旧 deepseek-harness 保留至新线认证通过后由 Owner 决定去留
+  // （ADR-0031 §3.7）。回退面集中：移除本成员 + factory/registry/docs 同步即可。
+  "deepseek-acp",
 ]);
 
 // TD-161（auditor F3 修复）：unknown-backend 指路文案的单一真相——
@@ -235,6 +240,12 @@ export function normalizeAgent(id, agent) {
     if (Object.prototype.hasOwnProperty.call(agent, "dshProvider")
       && (typeof agent.dshProvider !== "string" || agent.dshProvider.trim().length === 0)) {
       throw new Error(`Agent ${id}: dshProvider must be a non-blank string when present`);
+    }
+  } else if (agent.backend === "deepseek-acp") {
+    // ADR-0031：组合面固定为 `dsh --profile acp --patch <containment>`——
+    // dshConfigPath/dshProvider 属旧线字段，本线不用；binary 可选（缺省 dsh）。
+    if (typeof agent.credentialEnv !== "string" || agent.credentialEnv.trim().length === 0) {
+      throw new Error(`Agent ${id}: credentialEnv is required and must be a non-blank string`);
     }
   }
   // M10-pre: validate agent.waitTimeout if present (production range).

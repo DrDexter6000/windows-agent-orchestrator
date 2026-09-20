@@ -21,7 +21,7 @@
 //
 // Maintenance boundary: a backend type newly added to the factory MUST get a
 // case below (the hardcoded expected partitions enumerate the current factory
-// branches; `registry.js` normalizeAgent's known-backend set is the same five).
+// branches; `registry.js` normalizeAgent's known-backend set is the same six).
 //
 // Pure group: object construction + injectable seams only. The process-family
 // spawn is recorded through the established `_spawnFn` injection point and
@@ -32,6 +32,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -82,6 +83,16 @@ function factoryCases(dir) {
       },
     },
     {
+      key: "deepseek-acp",
+      agent: {
+        backend: "deepseek-acp",
+        cwd: "D:/matrix/dsh-acp",
+        // Absolute binary skips the where.exe probe; the spawn is stubbed anyway.
+        binary: "D:/matrix/tools/dsh-acp-stub.exe",
+        credentialEnv: "DSH_ACP_MATRIX_KEY",
+      },
+    },
+    {
       key: "opencode-serve",
       agent: {
         backend: "opencode-serve",
@@ -100,6 +111,16 @@ test("R7-C-7 matrix: preflightInvocation ⇔ LOCAL spawn with cwd: agent.cwd, ac
     // deepseek-harness's preflight proves dshConfigPath is readable — a real
     // tmp file (the fixture must satisfy the same SSOT contract production does).
     writeFileSync(join(dir, "dsh-config.json"), "{}", "utf8");
+    // deepseek-acp's preflight proves the operator-installed containment overlay
+    // matches the declared one — install the in-repo reference copy into the tmp
+    // fixture dir and point the backend at it (same SSOT contract production does;
+    // the real install path stays ~/.wao/runtimes/dsh-acp/, untouched by tests).
+    const containmentFixture = join(dir, "wao-contain.patch.yml");
+    writeFileSync(
+      containmentFixture,
+      readFileSync(join("scripts", "reliability", "dsh-acp", "wao-contain-safe.patch.yml"), "utf8"),
+      "utf8",
+    );
 
     const localSpawnKeys = [];
     const remoteHintKeys = [];
@@ -111,6 +132,7 @@ test("R7-C-7 matrix: preflightInvocation ⇔ LOCAL spawn with cwd: agent.cwd, ac
           return { ok: true, status: 200, json: async () => ({ data: { id: "sess-matrix" } }) };
         },
       });
+      if (agent.backend === "deepseek-acp") backend._containmentPatchPathOverride = containmentFixture;
       const hasPreflight = typeof backend.preflightInvocation === "function";
       if (hasPreflight) {
         const spawnCalls = [];
@@ -146,7 +168,7 @@ test("R7-C-7 matrix: preflightInvocation ⇔ LOCAL spawn with cwd: agent.cwd, ac
     // becoming a local spawner — moves a key between these lists and goes red.
     assert.deepEqual(
       [...localSpawnKeys].sort(),
-      ["claude-code", "codex", "deepseek-harness", "kimi-code"],
+      ["claude-code", "codex", "deepseek-acp", "deepseek-harness", "kimi-code"],
       "the local-spawn family is exactly the preflightInvocation-declaring family",
     );
     assert.deepEqual(
@@ -159,7 +181,7 @@ test("R7-C-7 matrix: preflightInvocation ⇔ LOCAL spawn with cwd: agent.cwd, ac
   }
 });
 
-test("R7-C-7 guard: the factory rejects an unknown backend (the matrix's five cases are the closed factory surface)", () => {
+test("R7-C-7 guard: the factory rejects an unknown backend (the matrix's six cases are the closed factory surface)", () => {
   assert.throws(
     () => backendFor({ backend: "bogus-runtime", cwd: "D:/matrix/bogus" }),
     /Unsupported backend/,

@@ -135,7 +135,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
 ### 2.1 Backend 接口（核心）
 
 所有 runtime（opencode-serve / claude-code / codex / kimi-code /
-deepseek-harness）实现同一接口。
+deepseek-harness / deepseek-acp）实现同一接口。
 上层只面对这个接口，永远不碰传输细节（HTTP / stdio）。
 
 ```js
@@ -219,7 +219,8 @@ retry error、session/model id 和延迟数据不得进入 RunEvent。`cacheRead
 ```js
 interface AgentDef {
   id: string;
-  backend: "opencode-serve" | "claude-code" | "codex" | "kimi-code" | "deepseek-harness"; // 闭集：成员增补属 Owner 决策；曾评估未纳入的 runtime（如 ZCode）见 ADR-0028（.wao/decisions/0028）
+  backend: "opencode-serve" | "claude-code" | "codex" | "kimi-code" | "deepseek-harness"
+         | "deepseek-acp"; // 闭集：成员增补属 Owner 决策；曾评估未纳入的 runtime（如 ZCode）见 ADR-0028（.wao/decisions/0028）；deepseek-acp 由 ADR-0031 提议加入（§2.5b），待 Owner 裁定 accepted
   cwd: string;
   // backend 特定字段
   serveUrl?: string;               // opencode-serve 必填
@@ -232,6 +233,11 @@ interface AgentDef {
   dshConfigPath?: string;          // 可读 Cordis config，DSH 必填
   credentialEnv?: string;          // 只声明 env 名，DSH 必填；值不进 registry
   dshProvider?: string;            // 缺省 deepseek-official
+  // deepseek-acp 的字段（ADR-0031）：组合面固定为 dsh --profile acp
+  // --patch <containment> --patch <role-contract>——dshConfigPath/dshProvider
+  // 属旧线字段，本线不用；binary 可选（缺省 dsh）；模型/effort 取 ACP 面
+  // session configOptions 的 profile 缺省（model 块与 reasoning.effort 在本线
+  // 均被 validateAgentPolicy 拒绝——WAO 侧无可验证设置/下发通道，不静默无效）
   // M11-11C：可选专家会话复用策略。当前封闭集为 "lead_workspace"——同一 MCP Lead
   // 会话在同一绑定 workspace 内再次询问同一配置的专家时，复用 provider 原生会话
   // （Claude Code 会话）以保留上下文/cache，但每次仍开一个全新 WAO run/transcript
@@ -265,6 +271,7 @@ function backendFor(agent: AgentDef): Backend {
     case "claude-code":    return new ProcessBackend({ ... });
     case "codex":          return new ProcessBackend({ ... });
     case "deepseek-harness": return new DeepSeekHarnessBackend({ ... });
+    case "deepseek-acp":   return new DeepSeekAcpBackend();
   }
 }
 ```
@@ -325,6 +332,61 @@ WAO transcript；对应 `idle` 才完成 run。transport 提前关闭、runtime 
 DSH 只拥有单次模型/tool loop；WAO 继续独占 worktree、transcript、stop、delivery、verification
 与 Lead decision。该 backend 当前不支持 provider session reuse 或运行中 correction；恢复只能把
 durable prompt 重放到新 DSH 进程。配置和运维边界见 `docs/usage.md`。
+
+#### 2.5b DeepSeekAcpBackend（DSH ACP 集成面，ADR-0031）
+
+`DeepSeekAcpBackend`（`src/backends/deepSeekAcp.js`）驱动上游 shipped 的
+`dsh --profile acp --patch <containment> --patch <role-contract>`，经 stdio 讲 ACP
+（JSON-RPC 2.0、换行分隔）。与旧线（§2.5a，WAO 自建 composition）**并存**：旧 backend
+与其 runtime 保留至新线认证通过，之后由 Owner 决定去留（ADR-0031 §3.7）。
+
+- **协议面**：`initialize` / `session/new` / `session/prompt` / `session/close`
+  （abort 路径加 `session/cancel`，真取消）。`session/prompt` 的响应只在整轮结束时
+  到达，spawn 在握手后即返回 handle；过程中事实经 `session/update` **通知**投影。
+  服务端→客户端请求 `session/request_permission` 必须应答，且受**会话与终态**约束：
+  非本次绑定 sessionId、或终态已排队 → cancelled（绝不 allow）并留痕；其余按——
+  选项含 `allow_once`/`allow_always` → 选中；仅 reject 类或未知 kind → 选中 reject
+  （无 reject 可选 → cancelled，绝不授予）；无可选项 → cancelled。每次应答以
+  system message 事件进 transcript 供审计（system 消息不是 usable effect）。
+- **containment（§3.2）**：操作员安装的 `~/.wao/runtimes/dsh-acp/wao-contain.patch.yml`
+  （内容依据 = 仓库内 `scripts/reliability/dsh-acp/wao-contain-safe.patch.yml`）在
+  preflight 与 spawn 双重校验；缺失或与声明不匹配 → 拒绝派发（fail-closed）。
+  WAO 只 detect / invoke / report，不生成、不升级、不持久修复。compose 层 `disabled`
+  是唯一真 containment；这不是 OS 级沙箱隔离。
+- **角色合同**：per-dispatch OS temp 独占目录（`wao-dsh-acp-*` 前缀）里的
+  `--patch` 覆盖 `system-prompt.personaPrefix`，结构化序列化（标量经 JSON 转义），
+  无凭据、不进 transcript；backend 实例 finally/stop 路径清理，启动时 best-effort
+  清扫陈旧孤儿目录（只删本前缀目录，绝不触碰 runtimes/ 与会话存储）。
+- **事件投影（§3.4）**：`agent_message_chunk` → assistant message；`agent_thought_chunk`
+  → thinking；`tool_call`（`title` 即工具真名）→ tool_use，文件写类另发 write_intent，
+  shell 类在终态发 command（退出码能提取才带，不伪造）；`tool_call_update` 终态 →
+  tool_result，write 类**关联成功**才发 file_written，`pending`/`in_progress` 绝不当作
+  成功；`toolCallId` 缺失/空 → 关联不可靠（§2.2 不可靠关联态）：不发 write_intent、
+  不发 file_written，证据降级为 tool_use 并留痕；重复 `toolCallId` 的 tool_call →
+  拒绝覆盖待确认路径（首个关联保持），留痕；同一 `toolCallId` 重复/乱序终态取首个、
+  后续忽略并留痕（handle.anomalies）；
+  `usage_update` 是上下文占用观察，绝不计入 metrics 的 input——终局用量唯一来源是
+  `session/prompt` 响应的 usage。未绑定 sessionId 的 update 丢弃；未知 sessionUpdate
+  类型 / 未知 status → fail-closed 终态 failed。
+- **终态映射**：`end_turn` → completed（无可用效应补 `completed_empty` 标记）；
+  `cancelled` / `refusal` / `max_tokens` / `max_turn_requests` → failed（闭集码）；
+  未知 stopReason 与断链（transport close 先于终态）→ failed，不投影为 completed。
+- **二次校验 = tripwire（检测非阻止）**：wire 上出现 `subagent` / `subagent_fork` /
+  `spawn_teammate` 工具调用即终态 failed——副作用可能已发生，这是检测不是阻止。
+- **能力声明（§3.3；supportsSessionReuse 按 Lead 2026-09-20 临时裁定改 false，Owner 未决）**：
+  `supportsRoleContract=true`；`supportsSessionReuse=false`——opaqueUuid→ACP sessionId
+  关联面（持久化/原子/互斥/身份绑定）未落地，落地后改回 true，Owner 裁定见 ADR-0031
+  §3.6（ACP 有真 resume，F4，但 resume 轮在本层一律 fail-closed 拒绝——关联面零改动，
+  当前不具备跨 run 复用能力，声明 true 属"声明强于实现"）；`supportsInFlightCorrection=false`
+  （F7：无在途消息改写——如实声明，run_correct 在派发层被拒）；
+  `replayByRespawn=false`；`reportsTokenUsage=true`。`validateAgentPolicy`：provider
+  与 model 块拒绝（无可验证设置通道，不静默忽略）；reasoning effort **同样拒绝**——
+  wire 上 configOptions 虽暴露 `reasoning_effort` 四档 `off|low|high|max`（F5），但
+  argv/env/session 请求均无 effort 下发通道（evidence 亦无 set_config_option 类方法），
+  校验放行却静默不下发 = 配置假绿，故对任何非空 effort 硬拒。
+
+配置与运维边界（containment 安装步骤、认证路径）见 `docs/usage.md`；wire 证据与
+复现资产见 `scripts/reliability/dsh-acp/`（evidence/*.json）。
 
 ### 2.6 现有 OpenCodeServeBackend 的迁移 `[S]`
 
@@ -887,6 +949,11 @@ CLI JSON 区分 `decisionAccepted:true`（winner）vs `decisionAccepted:false` +
 > server 实例在同一绑定 Git workspace 内再次询问同一**配置了 `sessionReuse: "lead_workspace"`**
 > 的专家（非 delivery），WAO 复用 provider 原生会话（Claude Code 会话）保留上下文/cache，
 > 同时**每次仍开全新 WAO run/transcript** 做独立监督。未配置该策略的 agent 保持现状行为。
+> ADR-0031 的 `deepseek-acp` 声明 `supportsSessionReuse=false`（Lead 2026-09-20 临时
+> 裁定，Owner 未决）：ACP 面有真 resume（F4），但 opaqueUuid→ACP sessionId 关联面
+> （ADR-0031 §3.6：持久化、原子写入、并发互斥、身份绑定、缺失/损坏拒绝恢复）未落地，
+> 落地后改回 true；当前其 resume 轮在 backend 层一律 fail-closed 拒绝——绝不静默开
+> 新 provider 会话，也绝不声明未兑现的复用能力。
 > 真实 canary 以 `run_20260726130105899fc4g0v` 首轮保存随机事实，再由独立 run
 > `run_20260726130112391y43ux7` 通过 resume 准确回忆；两个 runId 与 transcript 互不复用。
 
@@ -1157,6 +1224,7 @@ src/
 │   ├── claudeCode.js         # L1：claude-code 后端（`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` 注入【每一个】supervised 子进程 env——native OAuth / provider wrapper / start / resume 会话复用；backend 安全值压过 agent.env 反设，含 Windows 大小写不敏感的变体；阻止/抑制 provider auto-memory 写入；仅 claude-code 接收该变量，其它 backend 不注入）
 │   ├── codex.js              # L1：codex 后端
 │   ├── deepSeekHarness.js    # L1：实验性 DSH stdio JSON-RPC 后端
+│   ├── deepSeekAcp.js        # L1：DSH ACP 集成面后端（ADR-0031：dsh --profile acp + --patch containment/role-contract；§2.5b）
 │   └── parsers/
 │       ├── lineStream.js     # stdout 行流解析基类
 │       ├── claudeCode.js     # claude-code stream-json 解析

@@ -101,7 +101,7 @@ export function buildProviderReadiness(credentialAvailability) {
 export function displayModel(agent) {
   if (typeof agent.model === "string") return agent.model;
   return agent.model?.id
-    ?? (["claude-code", "codex", "kimi-code", "deepseek-harness"].includes(agent.backend) ? "(default)" : "-");
+    ?? (["claude-code", "codex", "kimi-code", "deepseek-harness", "deepseek-acp"].includes(agent.backend) ? "(default)" : "-");
 }
 
 // ===== Service implementation =====

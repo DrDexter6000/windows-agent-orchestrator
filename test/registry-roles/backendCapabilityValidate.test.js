@@ -133,12 +133,16 @@ test("ADR25-B2-FC: 未声明 reportsTokenUsage 的 backend 不得被读成支持
 // MATRIX: 五个工厂 backend 的能力快照 = 当前类声明（防单侧漂移）
 // =====================================================================
 
-test("ADR25-B2-MATRIX: backendCapabilitySnapshot 与五个 backend 类的当前声明一致", () => {
+test("ADR25-B2-MATRIX: backendCapabilitySnapshot 与全部工厂 backend 类的当前声明一致", () => {
   const expected = {
     "claude-code": { reportsTokenUsage: true, supportsSessionReuse: true },
     "codex": { reportsTokenUsage: true, supportsSessionReuse: false },
     "kimi-code": { reportsTokenUsage: false, supportsSessionReuse: false },
     "deepseek-harness": { reportsTokenUsage: true, supportsSessionReuse: false },
+    // ADR-0031：ACP 线 supportsSessionReuse=false（Lead 2026-09-20 临时裁定，Owner
+    // 未决）——opaqueUuid→ACP sessionId 关联面（持久化/原子/互斥/身份绑定）未落地，
+    // 落地后改回 true；resume 轮一律 fail-closed 拒绝（见 deepSeekAcp.js）。
+    "deepseek-acp": { reportsTokenUsage: true, supportsSessionReuse: false },
     "opencode-serve": { reportsTokenUsage: true, supportsSessionReuse: false },
   };
   for (const [backend, caps] of Object.entries(expected)) {
