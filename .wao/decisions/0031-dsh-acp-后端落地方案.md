@@ -281,7 +281,7 @@ CLI 提供 `--patch <file>`（可重复，叠加于 profile 层之后），格�
 若本裁定日后被推翻，回退集中且可逆：`src/registry.js` 第六成员 + `src/backends/factory.js` 注册
 + `docs/02-architecture.md` 闭集与 §2.5b + `docs/usage.md` 两表 + 4 个钉测试
 （`knownBackendsSsot` / `backendCapabilityValidate` / `backendCapabilityMatrix` / `onboarding`）
-+ `src/envPolicy.js` / `backendCliApplyMap` 系列各一条。纯增量，不动既有成员与 lane。
++ `src/envPolicy.js` / `src/application/backendCliMap.js` / `src/application/modelFamily.js` / `src/application/registryInventory.js` 各一条。纯增量，不动既有成员与 lane。
 
 ## Consequences
 （待裁定后补：`docs/02-architecture.md` backend 闭集条目与 §2.x 小节、`docs/usage.md` 配置表与能力表、
