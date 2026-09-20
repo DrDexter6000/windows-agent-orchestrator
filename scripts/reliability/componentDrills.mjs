@@ -15,9 +15,14 @@
 //     构造零副作用），本模块只消费、不第二套判定、不按 runtime 名字分支。
 //
 // 两层各测什么（ADR-0032 §2，专属断言不互换）：
-//   backend 组件（夹具 = 现成可用模型）：
+//   backend 组件（夹具 = 现成可用模型，身份只进 record.fixture 资格账——绝不
+//     下发为被测配置，见下方夹具机制）：
 //     - 启动与配置传递：不支持参数明确拒绝，不静默忽略（无效 sessionReuse 模式
-//       必须在 registry 装载层被拒；实际下发的 model 必须出现在 run.started.model）；
+//       必须在 registry 装载层被拒）；model 选择【按支持范围】判定——装配携带
+//       model 块时配置值必须实际出现在 run.started.model（不得静默丢弃）；装配
+//       不携带 model 块（该 backend 的支持范围不含模型选择，如 deepseek-acp——
+//       model 来自 runtime 自带 profile）时，注入 model 块必须被【明确拒绝】，
+//       拒绝即正确结果并记录拒绝证据（ADR-0032 §2 原文"按支持范围传入"）；
 //     - 事件与证据转换：缺字段/乱序/重复/断流不能制造成功证据（seq 单调、
 //       completed 主张必须有 run.completed 事实背书）；
 //     - 生命周期：正常完成 / 启动失败 / 中途错误 / 等待到期（ADR-0030 通知不杀）
@@ -43,8 +48,15 @@
 //     带新鲜全绿时间戳）【或】Owner 显式指定的参照装配（registry 的
 //     certification.fixtures 声明块——不硬编码）。二者任一，不要求"必须先有
 //     已认证 LLM"（否则启动循环）。
-//   - 夹具身份一律由【装配】从 registry 实际配置解析（anchor agent 克隆 +
-//     对侧身份覆盖），行内不另写身份字面量覆盖实际配置（ADR-0032 §6 账实一致）。
+//   - 夹具身份一律由【装配】从 registry 实际配置解析（anchor agent 克隆），
+//     行内不另写身份字面量覆盖实际配置（ADR-0032 §6 账实一致）。
+//   - ⚠ 夹具身份只用于【记账】（record.fixture 的资格账）与资格判定，绝不
+//     下发【配置】给被测（2026-09-20 首次真实运行根因：backend drills 把夹具
+//     llm 的 model 块塞进被测装配 → deepseek-acp 按 fail-closed 语义拒 model 块
+//     → 被测派发自拒 exit 1 → 7 条断言连红）。验 backend 的装配 = 被测 anchor
+//     的净化克隆（其自带 model/provider 就是该 backend 的支持范围）；对侧身份
+//     覆盖只发生在验 llm 方向（那时下发的是【被测 llm】的身份——被测就是要
+//     验证的下发对象，不是夹具）。
 //   - 夹具必须入账：记录显式分 subject 与 fixture 两字段（componentLedger.mjs
 //     recordComponentCheck 的形状）。
 //   - 临时装配用独立 registry（agentId 用 _fixture_backend_<name> /
@@ -364,6 +376,50 @@ export function backendCapabilityConsistencyChecks({
       "operational",
       `${reuseDetail}; sessionAnchorPresent=${sessionAnchorPresent}, sessionReuseRejected=${sessionReuseRejected}`,
       { capability: "supportsSessionReuse" },
+    ),
+  ];
+}
+
+/**
+ * backend 启动配置传递判定——按【支持范围】（ADR-0032 §2 原文："可执行文件、
+ * cwd、模型选择及角色合同按支持范围传入；不支持的参数明确拒绝，不能静默忽略"）：
+ *   - 装配携带 model 块（configuredModelId 非空——该 backend 的支持范围含模型
+ *     选择）：配置的 model.id 必须实际出现在 run.started.model（送达，不得静默
+ *     丢弃）；
+ *   - 装配不携带 model 块（支持范围不含模型选择，如 deepseek-acp——model 来自
+ *     runtime 自带 profile）：注入 model 块必须被【明确拒绝】——"明确拒绝"就是
+ *     正确结果，记录拒绝证据；不得要求值必须送达。
+ */
+export function backendStartupConfigChecks({
+  configuredModelId = null,
+  startedModelId = null,
+  modelBlockRejected = null,
+  rejectionEvidence = "",
+}) {
+  const configured = typeof configuredModelId === "string" && configuredModelId.length > 0;
+  if (configured) {
+    const delivered = startedModelId === configuredModelId;
+    return [
+      check(
+        "backendStartupConfigPassed",
+        delivered,
+        "core",
+        delivered
+          ? `run.started.model.id=${JSON.stringify(startedModelId)} matches the dispatched config (model selection is in this backend's support scope and the value actually reached it)`
+          : `run.started.model.id=${JSON.stringify(startedModelId)}, configured modelId=${JSON.stringify(configuredModelId)} — a dispatched model block must actually reach the backend, not be silently dropped`,
+        { capability: "startupConfigRejection" },
+      ),
+    ];
+  }
+  return [
+    check(
+      "backendStartupConfigPassed",
+      modelBlockRejected === true,
+      "core",
+      modelBlockRejected === true
+        ? `support scope carries no model block; an injected model block was explicitly rejected (correct fail-closed result, evidence recorded): ${String(rejectionEvidence).slice(0, 160)}`
+        : `no model block in the dispatched config and an injected model block was NOT explicitly rejected (modelBlockRejected=${JSON.stringify(modelBlockRejected)}) — silently accepting/ignoring an out-of-scope parameter is forbidden (ADR-0032 §2)`,
+      { capability: "startupConfigRejection" },
     ),
   ];
 }
@@ -697,11 +753,15 @@ function sanitizeAgentIdSuffix(value) {
 
 /**
  * 构造夹具装配 agent（纯函数）：
- *   - 验 backend → 基底 = 被测 backend 的 anchor（backend 侧字段：binary/env/
- *     dshConfigPath/serveUrl/tokenBudget...），model/provider 覆盖为夹具 llm 的
- *     anchor 实际配置（接入方连接信息同源）；
- *   - 验 llm → 基底 = 夹具 backend 的 anchor，model/provider 覆盖为被测 llm 的
- *     anchor 实际配置；
+ *   - 验 backend → 装配 = 被测 backend anchor 的净化克隆（backend 侧字段 +
+ *     它自己的 model/provider——那是该 backend 的支持范围，操作者在册的真实
+ *     可用装配）。【夹具 llm 的 model/provider 绝不下发】：夹具身份只进台账
+ *     record.fixture 与资格判定（ADR-0032 §6 账实一致；2026-09-20 首跑根因：
+ *     夹具 model 块塞进被测 → deepseek-acp 按既有 fail-closed 语义拒 model 块
+ *     → 被测派发自拒 exit 1 → 7 条断言连红）；
+ *   - 验 llm → 基底 = 夹具 backend 的 anchor（backend 侧字段），model/provider
+ *     覆盖为【被测 llm】的 anchor 实际配置——被测身份正是要验证的下发对象
+ *     （此处下发的是被测，不是夹具）；
  *   - agentId 按 ADR-0032 §6 约定：_fixture_llm_<id> / _fixture_backend_<name>。
  * 身份字段一律来自 registry 实际配置（克隆 + 覆盖），行内无身份字面量。
  */
@@ -711,21 +771,6 @@ export function assembleFixtureAgent({ subject, fixture, registry }) {
   const fixtureAnchor = agents[fixture.anchorAgentId];
   if (!subjectAnchor || !fixtureAnchor) {
     throw new Error(`assembleFixtureAgent: anchor agents missing (subject ${subject.anchorAgentId}, fixture ${fixture.anchorAgentId})`);
-  }
-  const base = subject.kind === "backend" ? subjectAnchor : fixtureAnchor;
-  const modelSource = subject.kind === "backend" ? fixtureAnchor : subjectAnchor;
-  const entry = cleanAgentEntry(base);
-  // model/provider 覆盖：对侧身份的实际配置（own-property 克隆；无 provider 块
-  // 则显式删除——基底自认证 CLI 的残留 provider 会造成账实漂移）。
-  if (modelSource.model && typeof modelSource.model === "object") {
-    entry.model = { ...modelSource.model };
-  } else {
-    delete entry.model;
-  }
-  if (modelSource.provider && typeof modelSource.provider === "object") {
-    entry.provider = { ...modelSource.provider };
-  } else {
-    delete entry.provider;
   }
   // agentId 按 ADR-0032 §6 命名空间约定（_fixture_llm_<id> / _fixture_backend_<name>）
   // + 被测侧判别后缀：一条装配 = 被测 × 夹具，多被测共享同一夹具时（如 --subject
@@ -739,6 +784,27 @@ export function assembleFixtureAgent({ subject, fixture, registry }) {
   const prefix = subject.kind === "backend" ? "_fixture_llm_" : "_fixture_backend_";
   const joiner = subject.kind === "backend" ? "_on_" : "_with_";
   const agentId = `${prefix}${sanitizeAgentIdSuffix(fixtureId)}${joiner}${sanitizeAgentIdSuffix(subjectId)}`;
+
+  if (subject.kind === "backend") {
+    // 被测 = backend：净化克隆被测 anchor，model/provider 原样保留（被测自己的
+    // 支持范围；anchor 无 model/provider 则装配同样没有）。零夹具身份注入。
+    return { agentId, entry: cleanAgentEntry(subjectAnchor) };
+  }
+
+  // 被测 = llm：基底 = 夹具 backend anchor；model/provider 覆盖为被测 llm 的
+  // 实际配置（own-property 克隆；无 provider 块则显式删除——基底自认证 CLI 的
+  // 残留 provider 会造成账实漂移）。
+  const entry = cleanAgentEntry(fixtureAnchor);
+  if (subjectAnchor.model && typeof subjectAnchor.model === "object") {
+    entry.model = { ...subjectAnchor.model };
+  } else {
+    delete entry.model;
+  }
+  if (subjectAnchor.provider && typeof subjectAnchor.provider === "object") {
+    entry.provider = { ...subjectAnchor.provider };
+  } else {
+    delete entry.provider;
+  }
   return { agentId, entry };
 }
 
@@ -820,9 +886,11 @@ export function planComponentChecks({
 
 /**
  * 执行计划并产出组件记录输入（recordComponentCheck 的输入形状）。
- * drills 注入面：{ runBackendComponentDrills({agentId, fixtureModelId,
+ * drills 注入面：{ runBackendComponentDrills({agentId, configuredModelId,
  * capabilitySnapshot}), runLlmComponentDrills({agentId}) }——生产实现来自
  * createComponentDrills()；测试注入桩即可全链路 dry 验证记账语义。
+ * configuredModelId = 装配实际携带的 model.id（被测自己的支持范围），不是夹具
+ * 身份（夹具只进 record.fixture——ADR-0032 §6 账实一致）。
  *
  * 分账硬保证（夹具绿不得被读成被测绿）：记录只按被测组件键落账；夹具绿
  * 只活在 record.fixture（资格账）。被测 checks 失败 → result "fail"，
@@ -869,7 +937,11 @@ export function executeComponentChecks({
       out = subject.kind === "backend"
         ? drills.runBackendComponentDrills({
           agentId: entry.fixtureAgentId,
-          fixtureModelId: entry.fixture.identity.modelId,
+          // 配置传递断言的判定基准 = 装配实际携带的 model（被测自己的支持范围）。
+          // 绝不传夹具身份——那会把"夹具绿"伪装成"配置送达"（ADR-0032 §6）。
+          configuredModelId: typeof entry.assemblyEntry?.model?.id === "string" && entry.assemblyEntry.model.id.length > 0
+            ? entry.assemblyEntry.model.id
+            : null,
           capabilitySnapshot: subject.capabilitySnapshot,
         })
         : drills.runLlmComponentDrills({ agentId: entry.fixtureAgentId });
@@ -985,11 +1057,28 @@ export function createComponentDrills(deps) {
     }
   };
 
+  // stop 命令的会话锚点前置：stopRun 找不到 session.created 元数据即拒。后台
+  // runner 异步推进——deepseek-acp 的 ACP 握手 ~2s 后才落 session.created，只等
+  // transcript 文件出现（waitForTranscript）就 stop 会踩 "no session metadata"
+  // 空窗（2026-09-20 首修重跑实证），把产品真实错误挡在竞态后面。有界等待
+  // 锚点；先到终态（模型自然结束）则不等——后续 check 如实红，不伪造。
+  const waitForSessionAnchor = (runDir, runId, timeoutMs = 30000, intervalMs = 500) => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const events = readRunEvents(runId, runDir);
+      if (events.some((e) => e?.type === "session.created")) return true;
+      if (["completed", "failed", "aborted", "timed_out"].includes(inferState(events))) return false;
+      if (Date.now() >= deadline) return false;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, intervalMs);
+    }
+  };
+
   /**
-   * backend 组件 drills（消耗真实 token；夹具 = 现成可用模型）。
+   * backend 组件 drills（消耗真实 token；夹具 = 现成可用模型，身份只进台账资格账
+   * ——本函数收到的 configuredModelId 是装配实际携带的 model，非夹具身份）。
    * @returns {{ checks: Array, facts: { runId, sessionBackendId, metricsInput } }}
    */
-  function runBackendComponentDrills({ agentId, fixtureModelId, capabilitySnapshot = null }) {
+  function runBackendComponentDrills({ agentId, configuredModelId = null, capabilitySnapshot = null }) {
     const checks = [];
     const facts = { runId: null, sessionBackendId: null, metricsInput: null };
 
@@ -1051,13 +1140,37 @@ export function createComponentDrills(deps) {
         `completed=${result?.completed === true}${r.ok ? "" : `, dispatch error=${JSON.stringify((r.error ?? "").slice(0, 160))}`}`,
         { capability: "lifecycle" },
       ));
-      checks.push(check(
-        "backendStartupConfigPassed",
-        started?.model?.id === fixtureModelId,
-        "core",
-        `run.started.model.id=${JSON.stringify(started?.model?.id)}, fixture modelId=${JSON.stringify(fixtureModelId)} (config must actually reach the backend, not be silently dropped)`,
-        { capability: "startupConfigRejection" },
-      ));
+      // 配置传递按【支持范围】判定（backendStartupConfigChecks）：
+      //   - 装配携带 model 块 → 配置值必须实际出现在 run.started.model；
+      //   - 装配无 model 块（该 backend 支持范围不含模型选择，如 deepseek-acp）
+      //     → 注入 model 块必须被【明确拒绝】（ADR-0032 §2"不支持的参数明确
+      //     拒绝，不能静默忽略"——拒绝即正确结果，证据入账）。注入的是合成
+      //     探针 id，绝非夹具身份；对拒绝型 backend 拒绝发生在 registry/
+      //     validate/preflight 层，零 token。
+      if (typeof configuredModelId === "string" && configuredModelId.length > 0) {
+        checks.push(...backendStartupConfigChecks({
+          configuredModelId,
+          startedModelId: started?.model?.id ?? null,
+        }));
+      } else {
+        const variantPath = writeVariantRegistry("component-registry-model-reject.json", agentId, (entry) => ({
+          ...entry, model: { id: "wao-component-check-model-support-probe" },
+        }));
+        const r = runCli([
+          "run", agentId, "--prompt", "test",
+          "--wait-timeout", waitTimeout, "--poll-interval", pollInterval,
+          "--registry", variantPath, "--cwd", tmpDir, "--format", "json",
+        ]);
+        const rejectionText = `${r.stderr ?? ""}${r.stdout ?? ""}`;
+        const rejected = r.ok === false && /model/i.test(rejectionText);
+        checks.push(...backendStartupConfigChecks({
+          configuredModelId: null,
+          modelBlockRejected: rejected,
+          rejectionEvidence: rejected
+            ? rejectionText
+            : `ok=${r.ok}, stderr=${JSON.stringify((r.stderr ?? "").slice(0, 160))}, stdout=${JSON.stringify((r.stdout ?? "").slice(0, 160))}`,
+        }));
+      }
       checks.push(check(
         "backendSessionEstablished",
         sessionAnchorPresent,
@@ -1153,11 +1266,15 @@ export function createComponentDrills(deps) {
     }
 
     // ── 生命周期：显式停止（spawn 托管 + stop → aborted，事实可审计）。
+    //    --cwd 与其余探针同款显式绝对 cwd（tmpDir）——绝不挂靠装配 cwd 的相对
+    //    形态：deepseek-acp 把 cwd 原样转发给 ACP session/new，相对路径（"."）
+    //    被 runtime 以 -32602 拒绝（首修后重跑实证的 src 层发现，如实上报，
+    //    本层不掩盖：start 失败路径由 startupFailureExplicit 独立断言）。
     {
       const runDir = backgroundRunDir("stop-runs");
       const spawnOut = runCli([
         "spawn", agentId, "--prompt", "Begin this task and wait quietly until stopped.",
-        "--registry", registry, "--run-dir", runDir,
+        "--registry", registry, "--run-dir", runDir, "--cwd", tmpDir,
       ], { cwd: root });
       const spawned = extractJson(spawnOut.stdout || "") ?? null;
       if (!spawned?.runId) {
@@ -1167,6 +1284,7 @@ export function createComponentDrills(deps) {
         checks.push(check("stopSeqMonotonic", false, "operational", detail, { capability: "lifecycle" }));
       } else {
         waitForTranscript(runDir, spawned.runId, 15000);
+        const sessionAnchorSeen = waitForSessionAnchor(runDir, spawned.runId);
         const stopOut = runCli([
           "stop", spawned.runId, "--run-dir", runDir, "--registry", registry,
         ], { cwd: root });
@@ -1176,7 +1294,9 @@ export function createComponentDrills(deps) {
           "stopAcknowledged",
           stopped?.stopped === true,
           "operational",
-          `stopped=${stopped?.stopped === true}`,
+          `stopped=${stopped?.stopped === true}`
+            + `${sessionAnchorSeen ? "" : "; no session.created anchor observed before stop"}`
+            + `${stopOut.ok ? "" : `, stopError=${JSON.stringify(String((stopOut.stderr ?? "").trim() || (stopOut.error ?? "")).slice(0, 160))}`}`,
           { capability: "lifecycle" },
         ));
         checks.push(check(
