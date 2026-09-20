@@ -8,6 +8,7 @@
       "registry-roles/applicationRegistryInventory.test.js",
       "isolation-infra/canonicalRunner.test.js",
       "registry-roles/certificationReasons.test.js",
+      "registry-roles/componentLedger.test.js",
       "backends/claudeCodeProvider.test.js",
       "backends/claudeProviderWrapper.test.js",
       "isolation-infra/cliFormatJson.test.js",
