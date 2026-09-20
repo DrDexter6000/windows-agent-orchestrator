@@ -254,7 +254,7 @@ test("ACP registry/env 集成：闭集成员、credentialEnv 必填、凭据继�
   // Lead 2026-09-20 临时裁定（Owner 未决）：supportsSessionReuse=false——关联面
   // （持久化/原子/互斥/身份绑定）未落地前声明 true 属"声明强于实现"。
   assert.deepEqual(backendCapabilitySnapshot(normalized), {
-    reportsTokenUsage: true,
+    reportsTokenUsage: false,
     supportsSessionReuse: false,
   });
   assert.equal(built.supportsInFlightCorrection, false, "在途纠偏如实声明不支持");

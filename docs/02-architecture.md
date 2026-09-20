@@ -379,7 +379,7 @@ durable prompt 重放到新 DSH 进程。配置和运维边界见 `docs/usage.md
   §3.6（ACP 有真 resume，F4，但 resume 轮在本层一律 fail-closed 拒绝——关联面零改动，
   当前不具备跨 run 复用能力，声明 true 属"声明强于实现"）；`supportsInFlightCorrection=false`
   （F7：无在途消息改写——如实声明，run_correct 在派发层被拒）；
-  `replayByRespawn=false`；`reportsTokenUsage=true`。`validateAgentPolicy`：provider
+  `replayByRespawn=false`；`reportsTokenUsage=false`（ACP `usage` 实测可为 null，2026-09-20 按组件验证裁定）。`validateAgentPolicy`：provider
   与 model 块拒绝（无可验证设置通道，不静默忽略）；reasoning effort **同样拒绝**——
   wire 上 configOptions 虽暴露 `reasoning_effort` 四档 `off|low|high|max`（F5），但
   argv/env/session 请求均无 effort 下发通道（evidence 亦无 set_config_option 类方法），

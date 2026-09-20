@@ -562,7 +562,7 @@ test("execute: backend drills 收到 configuredModelId=装配实际 model（被�
     now: NOW,
   });
   assert.equal(captured2.configuredModelId, null, "无 model 装配 → null（支持范围分支的判别信号）");
-  assert.equal(captured2.capabilitySnapshot.reportsTokenUsage, true, "deepseek-acp 能力快照照常注入");
+  assert.equal(captured2.capabilitySnapshot.reportsTokenUsage, false, "deepseek-acp 能力快照照常注入（声明已于 2026-09-20 按实测裁定为 false）");
 });
 
 test("分账【证伪】: llm 被测 × backend 夹具方向同样分账（夹具 backend 不产生组件记录）", () => {

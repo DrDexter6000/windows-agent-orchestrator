@@ -38,7 +38,8 @@
 //   supportsInFlightCorrection= false  ACP 无在途消息改写（F7）——如实声明，不静默
 //   replayByRespawn           = false  跨 run 上下文续接依赖 §3.6 关联面（未落地），
 //                                      本层不承担重放
-//   reportsTokenUsage         = true   usage_update + PromptResponse.usage
+//   reportsTokenUsage         = false  usage_update + PromptResponse.usage 存在但实测可为 null
+//                                      （组件验证抓到 declared=true/input=null）
 //
 // 零新增生产依赖：只用 node: 内置模块（探针 scripts/reliability/dsh-acp 已证可行）。
 
@@ -277,7 +278,10 @@ export class DeepSeekAcpBackend {
   replayByRespawn = false;
   // ADR-0031 §3.3：usage_update + PromptResponse.usage → tokenBudget 闸门有效。
   // 注意终局 usage 缺失（evidence 里为 null）时本轮无 metrics 事实——如实缺省。
-  reportsTokenUsage = true;
+  // Lead 裁定（2026-09-20）：ACP 面的 usage 实测为 null（组件验证 reportsTokenUsageConsistency:
+  // declared=true, input=null）→ 声明改为 false。与 supportsSessionReuse=false 同源纪律：
+  // 能力声明表示 WAO 今天能完成什么，不是上游协议具备什么。翻转条件 = 有可验证的 token 计量通道。
+  reportsTokenUsage = false;
 
   constructor({ spawnFn = spawn, containmentPatchPath, platform } = {}) {
     this._spawnFn = spawnFn;

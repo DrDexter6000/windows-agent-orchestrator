@@ -142,7 +142,7 @@ test("ADR25-B2-MATRIX: backendCapabilitySnapshot 与全部工厂 backend 类的�
     // ADR-0031：ACP 线 supportsSessionReuse=false（Lead 2026-09-20 临时裁定，Owner
     // 未决）——opaqueUuid→ACP sessionId 关联面（持久化/原子/互斥/身份绑定）未落地，
     // 落地后改回 true；resume 轮一律 fail-closed 拒绝（见 deepSeekAcp.js）。
-    "deepseek-acp": { reportsTokenUsage: true, supportsSessionReuse: false },
+    "deepseek-acp": { reportsTokenUsage: false, supportsSessionReuse: false },
     "opencode-serve": { reportsTokenUsage: true, supportsSessionReuse: false },
   };
   for (const [backend, caps] of Object.entries(expected)) {
