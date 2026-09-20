@@ -7,12 +7,12 @@ review: 前置方案审查已过 —— auditor `run_20260919232557140mvw4ov` PA
         researcher `run_20260919232554555pjmuxi` PASS_WITH_CHANGES（两席无分歧）。
         本版已折叠全部 findings，见 §5。
         **Owner 2026-09-20 裁定：接受 `deepseek-acp` 成员资格**（见 §7）。
-rulings: Lead 临时裁定（2026-09-20，**待 Owner 追认**；依据两席专项咨询 auditor run_20260920073941517068b7w
+rulings: 裁定记录（2026-09-20，**两项均已获 Owner 追认**；依据两席专项咨询 auditor run_20260920073941517068b7w
          与 coder_mm run_20260920073938973bbp3l9，两席对下列两项意见一致）：
          (A) §3.6 关联面**正式延期**；`supportsSessionReuse` 取 **false**（翻转条件见 §3.6）。
          (B) 闭集 5→6 保留为**候选注册**，删除一切"Owner 已授权"表述。→ **已由 Owner 2026-09-20 裁定接受**，见 §7。
          (C) effort **硬拒**（见 §3.3）。
-         (B) 已由 Owner 裁定（§7）；(C) 属 Lead 职权、已生效；(A) 仍为**待 Owner 追认**的临时裁定，追认前不 push。
+         (B) 已由 Owner 裁定（§7）；(C) 属 Lead 职权、已生效；(A) **已由 Owner 追认**（同意「会话复用单独立项」，即接受本轮关联面延期）。
 
 ## Context
 
@@ -167,7 +167,7 @@ CLI 提供 `--patch <file>`（可重复，叠加于 profile 层之后），格�
 4. **不得**只把 `supportsSessionReuse` 改成 `true` 了事。
 5. worktree 级 resume 需上游确认 workspace 变更语义——README 未提供，**列为未决**。
 
-**Lead 临时裁定（2026-09-20，待 Owner 追认）：关联面正式延期。**
+**裁定（Owner 2026-09-20 追认）：关联面正式延期，会话复用单独立项。**
 
 - 本轮范围为：**独立新会话可用；跨 run 复用不可用**。`supportsSessionReuse` 取 **false**。
 - **翻转条件（全部满足才可改回 true）**：§3.6 五项（关联持久化 / 原子写 / 并发互斥 /
@@ -266,7 +266,7 @@ CLI 提供 `--patch <file>`（可重复，叠加于 profile 层之后），格�
 3. **`effort` 硬拒**：ACP 面 `configOptions` 只证明**暴露**四档、未证明可**设置**，
    故 `validateAgentPolicy` 硬拒任何非空 `reasoning.effort`。
    **现有 lane 普遍使用 `effort: max`，在本 backend 上会被拒**——这是已知功能缺口，不是配置错误。
-4. **§3.6 关联面仍为延期**（Lead 临时裁定，**待 Owner 追认**）：`supportsSessionReuse=false`；
+4. **§3.6 关联面仍为延期**（**Owner 2026-09-20 追认**，会话复用单独立项）：`supportsSessionReuse=false`；
    配了会话复用的 lane（researcher 类）在本 backend 上**派发即拒**；未配复用的 lane 正常。
 5. **从未有一次真实 WAO 派发跑过这个 backend**：B-2 是探针直接驱动 `dsh --profile acp`；
    交付的 855 行测试**全部是假进程/假传输**。win32 `.cmd` 路径有真实断言，但**未对真实 `dsh.cmd` 跑过**。
