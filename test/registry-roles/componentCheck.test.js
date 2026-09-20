@@ -35,6 +35,8 @@ import {
   backendCapabilityConsistencyChecks,
   backendEventIntegrityChecks,
   backendStartupConfigChecks,
+  backendStopChecks,
+  backendStopFormOf,
   componentResultFromChecks,
   createComponentDrills,
   executeComponentChecks,
@@ -785,6 +787,110 @@ test("kernel: 配置传递按支持范围——装配带 model → 值必须送�
   assert.equal(unknown[0].pass, false, "探针未观察（null）→ 红，不得当绿");
 });
 
+test("kernel: stop 执行形态判定——装配携带 serveUrl → serve；无 serveUrl → process（缺 serveUrl 是进程形常态，绝非判负理由）", () => {
+  assert.equal(backendStopFormOf({ serveUrl: "http://127.0.0.1:4297", backend: "opencode-serve" }), "serve");
+  // 进程式 backend（claude-code/codex/kimi-code/deepseek-acp）装配无 serveUrl。
+  assert.equal(backendStopFormOf({ backend: "deepseek-acp", cwd: "." }), "process");
+  assert.equal(backendStopFormOf({ backend: "claude-code", model: { id: "glm-5.3[1m]" } }), "process");
+  // 空串/空白 serveUrl 不算 serve 证据；装配不可读（null）→ fail-closed 落 process
+  // （该车道必须真实停掉 run，绝不因证据缺失静默换道）。
+  assert.equal(backendStopFormOf({ serveUrl: "   " }), "process");
+  assert.equal(backendStopFormOf(null), "process");
+});
+
+test("kernel: stop serve 形——既有语义保持（`wao stop` serve abort 车道 stopped===true + aborted + seq 单调）", () => {
+  const byName = (checks) => new Map(checks.map((c) => [c.name, c]));
+  const events = [
+    { type: "run.started", agentId: "a", cwd: "c", seq: 1 },
+    { type: "session.created", backendSessionId: "ses_1", serveUrl: "http://s", seq: 2 },
+    { type: "run.aborted", seq: 3 },
+    { type: "run.state_change", to: "aborted", seq: 4 },
+  ];
+  const green = byName(backendStopChecks({ form: "serve", stopAccepted: true, events }));
+  assert.equal(green.get("stopAcknowledged").pass, true);
+  assert.equal(green.get("stopStateAborted").pass, true);
+  assert.equal(green.get("stopSeqMonotonic").pass, true);
+  // serve 车道报错（如 serve 不可达）→ 红且 detail 带错误事实。
+  const red = byName(backendStopChecks({ form: "serve", stopAccepted: false, events: [], errorDetail: "stopError=\"serve unreachable\"" }));
+  assert.equal(red.get("stopAcknowledged").pass, false);
+  assert.match(red.get("stopAcknowledged").detail, /stopped=false, stopError/);
+});
+
+test("kernel: stop process 形——owning-supervisor 车道全绿路径（车辆确认 + 途中 aborted fact + 宿主退出 + seq 单调）", () => {
+  const events = [
+    { type: "run.started", agentId: "a", cwd: "c", seq: 1 },
+    { type: "session.created", backend: "deepseek-acp", backendSessionId: "75c13e12-ce24-4409-b88e-59669cc70712", seq: 2 },
+    { type: "run.state_change", to: "running", seq: 3 },
+    { type: "run.aborted", seq: 4 },
+    { type: "run.state_change", to: "aborted", seq: 5 },
+  ];
+  const checks = backendStopChecks({ form: "process", stopAccepted: true, events, supervisorExited: true });
+  const byName = new Map(checks.map((c) => [c.name, c]));
+  assert.equal(byName.get("stopAcknowledged").pass, true);
+  assert.equal(byName.get("stopStateAborted").pass, true);
+  assert.equal(byName.get("stopSeqMonotonic").pass, true);
+  // 无跳过/不适用通道：三条全是 judged checks，全过即构成组件判定的绿。
+  for (const c of checks) assert.notEqual(c.informational, true, "stop 断言不得 informational 化（ADR-0032 §8）");
+  assert.equal(componentResultFromChecks(checks), "pass");
+});
+
+test("kernel【证伪】: stop process 形——自然完成/车辆未确认/宿主残留/seq 回退各自红（模型自己跑完 ≠ stop 生效）", () => {
+  const byName = (checks) => new Map(checks.map((c) => [c.name, c]));
+  const base = [
+    { type: "session.created", backend: "deepseek-acp", backendSessionId: "acp-sess", seq: 1 },
+    { type: "run.state_change", to: "running", seq: 2 },
+  ];
+  // (a) run 自然完成先到（run.completed 在、无 run.aborted）：first-terminal-wins 下
+  //     stop 输给自然终态不留 aborted fact——把 completed 读成 stop 生效是假绿。
+  const natural = byName(backendStopChecks({
+    form: "process",
+    stopAccepted: true,
+    events: [...base, { type: "run.completed", seq: 3 }, { type: "run.state_change", to: "completed", seq: 4 }],
+    supervisorExited: true,
+  }));
+  assert.equal(natural.get("stopAcknowledged").pass, false, "自然完成不得读成 stop 生效");
+  assert.match(natural.get("stopAcknowledged").detail, /natural completion is not a stop/);
+  assert.equal(natural.get("stopStateAborted").pass, false, "终态 completed ≠ aborted");
+  // (b) 停止车辆未确认（daemon 停机失败）→ 红，detail 带事实。
+  const vehicle = byName(backendStopChecks({
+    form: "process", stopAccepted: false, events: [...base, { type: "run.aborted", seq: 3 }, { type: "run.state_change", to: "aborted", seq: 4 }], supervisorExited: true,
+  }));
+  assert.equal(vehicle.get("stopAcknowledged").pass, false);
+  assert.match(vehicle.get("stopAcknowledged").detail, /stopVehicleAcknowledged=false/);
+  // (c) 宿主 supervisor 未退出（handshake 残留 = 进程终止所有者证据缺失）→ 红。
+  const linger = byName(backendStopChecks({
+    form: "process", stopAccepted: true, events: [...base, { type: "run.aborted", seq: 3 }, { type: "run.state_change", to: "aborted", seq: 4 }], supervisorExited: false,
+  }));
+  assert.equal(linger.get("stopAcknowledged").pass, false);
+  assert.match(linger.get("stopAcknowledged").detail, /supervisorExited=false/);
+  // (d) seq 回退 → stopSeqMonotonic 红（其余绿不掩盖）。
+  const regressed = byName(backendStopChecks({
+    form: "process",
+    stopAccepted: true,
+    events: [...base, { type: "run.aborted", seq: 5 }, { type: "run.state_change", to: "aborted", seq: 4 }],
+    supervisorExited: true,
+  }));
+  assert.equal(regressed.get("stopSeqMonotonic").pass, false);
+  assert.equal(regressed.get("stopAcknowledged").pass, true);
+  // (e) 派发即失败（零事件）：三条全红，detail 指明车道失败事实。
+  const dispatchFail = byName(backendStopChecks({
+    form: "process", stopAccepted: false, events: [], supervisorExited: null, errorDetail: "daemon lane dispatch failed (daemonAlive=false)",
+  }));
+  for (const name of ["stopAcknowledged", "stopStateAborted", "stopSeqMonotonic"]) {
+    assert.equal(dispatchFail.get(name).pass, false, `${name} 零事实不得绿`);
+  }
+});
+
+test("kernel【证伪】: stop 判定不受缺 serveUrl 干扰——进程形断言集不含任何 serveUrl 依赖（缺陷 4 钉）", () => {
+  // 2026-09-20 缺陷 4 实证形态：`wao stop` 对 ACP sessionId 报
+  // "session has no serveUrl (opencode path needs one)"。进程形判定内核的
+  // 输入面（form/stopAccepted/events/supervisorExited）不消费 serveUrl，
+  // 判定不得因缺 serveUrl 翻红——红的唯一来源是真实停止事实缺失。
+  const src = readFileSync(join(REPO_ROOT, "scripts", "reliability", "componentDrills.mjs"), "utf8");
+  const kernelSrc = src.slice(src.indexOf("export function backendStopChecks"), src.indexOf("export function explicitFailureCheck"));
+  assert.doesNotMatch(kernelSrc, /serveUrl/, "backendStopChecks 判定内核不得消费 serveUrl（缺 serveUrl 非判负理由）");
+});
+
 test("kernel【证伪】: 显式失败探针——unexpectedly completed → 红；显式 CLI 拒绝 → 绿", () => {
   const completed = explicitFailureCheck({ name: "startupFailureExplicit", ok: true, result: { completed: true }, error: null, capability: "startupFailure" });
   assert.equal(completed[0].pass, false);
@@ -838,6 +944,141 @@ test("createComponentDrills【证伪】: 缺环境依赖 fail fast（与 createD
   const partial = { nodeBin: "node", root: "r", tmpDir: "t", waitTimeout: "1", pollInterval: "1" };
   assert.throws(() => createComponentDrills(partial), /registry/);
 });
+
+// ── stop 分车道 glue 集成 dry（stub CLI：零 token 跑完整 runBackendComponentDrills，
+//    只断言 stop 探针的车道选择与判定；其余探针对 stub 输出自然红，不在断言面）──
+
+const STUB_CLI_SOURCE = [
+  "import { appendFileSync, readFileSync, rmSync, writeFileSync } from \"node:fs\";",
+  "import { join } from \"node:path\";",
+  "const args = process.argv.slice(2);",
+  "const say = (o) => process.stdout.write(JSON.stringify(o) + \"\\n\");",
+  "const opts = {};",
+  "for (let i = 0; i < args.length; i += 1) {",
+  "  if (args[i].startsWith(\"--\")) {",
+  "    const k = args[i].slice(2);",
+  "    const v = args[i + 1];",
+  "    if (v && !v.startsWith(\"--\")) { opts[k] = v; i += 1; }",
+  "  }",
+  "}",
+  "const runDir = opts[\"run-dir\"];",
+  "appendFileSync(process.env.STUB_LOG, args.join(\" \") + \"\\n\", \"utf8\");",
+  "const appendEvents = (runId, events) => {",
+  "  const file = join(runDir, runId + \".jsonl\");",
+  "  let seq = 0;",
+  "  try { for (const l of readFileSync(file, \"utf8\").trim().split(/\\r?\\n/).filter(Boolean)) { const e = JSON.parse(l); if (typeof e.seq === \"number\") seq = Math.max(seq, e.seq); } } catch {}",
+  "  appendFileSync(file, events.map((e) => JSON.stringify({ ...e, seq: (seq += 1), runId, ts: new Date().toISOString() })).join(\"\\n\") + \"\\n\", \"utf8\");",
+  "};",
+  "const cmd = args[0];",
+  "if (cmd === \"spawn\") {",
+  "  const runId = \"run_stub_serve\";",
+  "  writeFileSync(join(runDir, runId + \".jsonl\"), \"\", \"utf8\");",
+  "  appendEvents(runId, [",
+  "    { type: \"run.started\", agentId: \"a1\", cwd: runDir },",
+  "    { type: \"session.created\", backend: \"opencode-serve\", backendSessionId: \"ses_1\", serveUrl: \"http://127.0.0.1:4297\" },",
+  "    { type: \"run.state_change\", from: \"pending\", to: \"running\" },",
+  "  ]);",
+  "  say({ runId, background: true });",
+  "} else if (cmd === \"stop\") {",
+  "  appendEvents(args[1], [",
+  "    { type: \"run.aborted\" },",
+  "    { type: \"run.state_change\", from: \"running\", to: \"aborted\" },",
+  "  ]);",
+  "  say({ stopped: true });",
+  "} else if (cmd === \"daemon\" && args[1] === \"start\") {",
+  "  writeFileSync(join(runDir, \"daemon.json\"), JSON.stringify({ pid: 1, pipe: opts.pipe, heartbeatAt: Date.now() }), \"utf8\");",
+  "  say({ ok: true, started: true });",
+  "} else if (cmd === \"daemon\" && args[1] === \"run\") {",
+  "  const runId = \"run_stub_proc\";",
+  "  appendEvents(runId, [",
+  "    { type: \"run.started\", agentId: \"a1\", cwd: runDir },",
+  "    { type: \"session.created\", backend: \"deepseek-acp\", backendSessionId: \"acp-sess-1\" },",
+  "    { type: \"run.state_change\", from: \"pending\", to: \"running\" },",
+  "  ]);",
+  "  say({ ok: true, runId });",
+  "} else if (cmd === \"daemon\" && args[1] === \"stop\") {",
+  "  appendEvents(\"run_stub_proc\", [",
+  "    { type: \"run.aborted\" },",
+  "    { type: \"run.state_change\", from: \"running\", to: \"aborted\" },",
+  "  ]);",
+  "  if (!process.env.STUB_LINGER) rmSync(join(runDir, \"daemon.json\"), { force: true });",
+  "  say({ ok: true, stopped: true, pid: 1 });",
+  "} else {",
+  "  say({});",
+  "}",
+].join("\n");
+
+test("glue【集成 dry】: stop 按执行形态分车道——serve 走 spawn+`wao stop`，进程式走 daemon 车道（stub CLI，零 token）", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "wao-cc-stoplane-"));
+  const fakeRoot = join(tmp, "root");
+  mkdirSync(join(fakeRoot, "src"), { recursive: true });
+  writeFileSync(join(fakeRoot, "src", "cli.js"), STUB_CLI_SOURCE);
+  const argvLog = join(tmp, "argv.log");
+  const prevLog = process.env.STUB_LOG;
+  const prevLinger = process.env.STUB_LINGER;
+  process.env.STUB_LOG = argvLog;
+  delete process.env.STUB_LINGER;
+  try {
+    const runLane = (assembly) => {
+      rmSync(argvLog, { force: true });
+      const registryPath = join(tmp, `registry-${Math.random().toString(36).slice(2)}.json`);
+      writeFileSync(registryPath, JSON.stringify({ agents: { a1: assembly } }));
+      const drills = createComponentDrills({
+        nodeBin: "node", root: fakeRoot, tmpDir: tmp, waitTimeout: "1000", pollInterval: "50", registry: registryPath,
+      });
+      const out = drills.runBackendComponentDrills({
+        agentId: "a1",
+        configuredModelId: null,
+        // supportsSessionReuse=true 跳过需要 git 夹具的 fail-closed 探针（该探针
+        // 与 stop 车道无关，dry 集成不做真实 git init）。
+        capabilitySnapshot: { supportsSessionReuse: true, reportsTokenUsage: false },
+      });
+      return { checks: out.checks, argv: readFileSync(argvLog, "utf8") };
+    };
+
+    // serve 形（opencode-serve 装配）：spawn 托管 + `wao stop` serve abort 车道——
+    // 既有语义保持，三断言全绿，绝不触碰 daemon。
+    const serve = runLane({ backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", cwd: "." });
+    const serveBy = new Map(serve.checks.map((c) => [c.name, c]));
+    assert.match(serve.argv, /spawn a1 /, "serve 形经 spawn 托管派发");
+    assert.match(serve.argv, /stop run_stub_serve /, "serve 形经 `wao stop` serve abort 车道");
+    assert.doesNotMatch(serve.argv, /daemon/, "serve 形不进 daemon 车道");
+    assert.equal(serveBy.get("stopAcknowledged").pass, true);
+    assert.equal(serveBy.get("stopStateAborted").pass, true);
+    assert.equal(serveBy.get("stopSeqMonotonic").pass, true);
+
+    // 进程形（deepseek-acp 装配形态，无 serveUrl）：daemon 车道（start/run/stop，
+    // --pipe 每轮唯一），不再进 `wao stop` 的 "no serveUrl" 车道；三断言全绿。
+    const proc = runLane({ backend: "deepseek-acp", cwd: "." });
+    const procBy = new Map(proc.checks.map((c) => [c.name, c]));
+    assert.match(proc.argv, /daemon start /, "进程形起 owning-supervisor daemon");
+    assert.match(proc.argv, /--pipe \\\\\.\\pipe\\wao-cc-stop-/, "daemon 管道每轮唯一命名");
+    assert.match(proc.argv, /daemon run a1 /, "进程形 run 由 daemon 持有");
+    assert.match(proc.argv, /daemon stop /, "进程形经 daemon 优雅停机驱动 stop");
+    assert.doesNotMatch(proc.argv, / stop run_/, "进程形不再走 `wao stop`（缺 serveUrl 非判负理由）");
+    assert.equal(procBy.get("stopAcknowledged").pass, true);
+    assert.equal(procBy.get("stopStateAborted").pass, true);
+    assert.equal(procBy.get("stopSeqMonotonic").pass, true);
+    assert.match(procBy.get("stopAcknowledged").detail, /abortedFact=true/, "判定消费进程形事实（途中 aborted fact）");
+    // daemon 车道 registry 变体绝对化 cwd（daemon start IPC 无 --cwd 透传面）。
+    const variant = JSON.parse(readFileSync(join(tmp, "component-registry-stop-process.json"), "utf8"));
+    assert.equal(variant.agents.a1.cwd, tmp, "进程形 daemon 派发的 cwd 必须绝对化到探针 tmpDir");
+
+    // 宿主残留证伪：daemon 停机后 handshake 仍在（supervisor 未退出 = 进程终止
+    // 所有者证据缺失）→ stopAcknowledged 红，红点明确指向 supervisorExited。
+    process.env.STUB_LINGER = "1";
+    const linger = runLane({ backend: "deepseek-acp", cwd: "." });
+    const lingerBy = new Map(linger.checks.map((c) => [c.name, c]));
+    assert.equal(lingerBy.get("stopAcknowledged").pass, false, "宿主 supervisor 残留 → 红");
+    assert.match(lingerBy.get("stopAcknowledged").detail, /supervisorExited=false/);
+    assert.equal(lingerBy.get("stopStateAborted").pass, true, "aborted 事实本身在——红点只在宿主证据");
+  } finally {
+    if (prevLog === undefined) delete process.env.STUB_LOG; else process.env.STUB_LOG = prevLog;
+    if (prevLinger === undefined) delete process.env.STUB_LINGER; else process.env.STUB_LINGER = prevLinger;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 
 // ════ 7. 参数解析 + 结构钉 ════
 

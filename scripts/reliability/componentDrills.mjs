@@ -26,7 +26,8 @@
 //     - 事件与证据转换：缺字段/乱序/重复/断流不能制造成功证据（seq 单调、
 //       completed 主张必须有 run.completed 事实背书）；
 //     - 生命周期：正常完成 / 启动失败 / 中途错误 / 等待到期（ADR-0030 通知不杀）
-//       / 显式停止；
+//       / 显式停止（按执行形态分车道，见 backendStopChecks——serve 形走 `wao stop`
+//       serve abort；进程形走 owning-supervisor abort，绝不因缺 serveUrl 判负）；
 //     - 能力声明 ⇔ 实测一致性（本层最高价值断言）：声明 reportsTokenUsage ⇔
 //       input token 非空（双向）；声明 supportsSessionReuse ⇔ 实际 resume 行为
 //       （声明 false 须 fail-closed 拒绝；声明 true 须持久化 provider session 锚点
@@ -420,6 +421,86 @@ export function backendStartupConfigChecks({
         ? `support scope carries no model block; an injected model block was explicitly rejected (correct fail-closed result, evidence recorded): ${String(rejectionEvidence).slice(0, 160)}`
         : `no model block in the dispatched config and an injected model block was NOT explicitly rejected (modelBlockRejected=${JSON.stringify(modelBlockRejected)}) — silently accepting/ignoring an out-of-scope parameter is forbidden (ADR-0032 §2)`,
       { capability: "startupConfigRejection" },
+    ),
+  ];
+}
+
+/**
+ * 显式停止的执行形态判定（证据 = 装配实际配置，runtime-agnostic——不按 backend
+ * 名分支）：装配携带非空 serveUrl → "serve"（会话活在外部 serve 进程，stop 走
+ * serve abort 车道——`wao stop` 的 serveUrl+sessionId 路径）；否则 → "process"
+ * （会话即 WAO 派生的 worker 进程，进程死即会话死——registry 安全注记与
+ * opencodeServe 独有的 sessionOutlivesProcess=true 声明同源）。缺 serveUrl 正是
+ * 进程形的常态，绝不构成判负理由（2026-09-20 缺陷 4：stop drill 假设 opencode
+ * 路径，`wao stop` 对 ACP sessionId（非 proc_ 锚、无 serveUrl）报 "no serveUrl"，
+ * 进程形被整体误杀）。
+ */
+export function backendStopFormOf(assemblyEntry) {
+  return typeof assemblyEntry?.serveUrl === "string" && assemblyEntry.serveUrl.trim().length > 0
+    ? "serve"
+    : "process";
+}
+
+/**
+ * backend 显式停止判定——按执行形态（ADR-0032 §2 生命周期·显式停止；§8 纪律：
+ * 无跳过/不适用通道，三条全部是 judged checks，进程形同样被真实测到）。
+ *
+ *   - serve 形（既有语义保持）：stopAccepted = `wao stop`（serve abort 车道）回包
+ *     stopped===true；终态 aborted 与 seq 单调由后两条断言承担。
+ *   - process 形（进程终止车道）：stopAccepted = 停止车辆确认（owning-supervisor
+ *     优雅停机的 ok&&stopped）。仅车辆确认不算通过——stop 必须真的【途中】生效：
+ *       1. run.aborted fact 在且 run.completed fact 不在：first-terminal-wins 仲裁
+ *          下 aborted fact 只能由 stop 中途夺标产生；模型自然完成的 run 不留
+ *          aborted fact（stop 输给自然终态时如实红——绝不把"模型自己跑完"读成
+ *          "stop 生效"）。
+ *       2. supervisorExited===true：持有 worker 进程树的宿主 supervisor 完成停机
+ *          （daemon handshake 消失）。worker pid 不进 transcript（proc_ 锚仅
+ *          processBackend 家族发布；deepseek-acp 的 ACP sessionId 不携带 pid——
+ *          如实上报的产品面缺口），宿主停机是可审计的进程终止所有者证据：
+ *          abortAll → handle.abort（dsh: session/cancel + session/close + taskkill
+ *          /T /F worker 进程树；processBackend 家族: _kill 进程树）完成后宿主
+ *          才退出。
+ */
+export function backendStopChecks({
+  form,
+  stopAccepted = false,
+  events = [],
+  supervisorExited = null,
+  errorDetail = "",
+}) {
+  const serveForm = form === "serve";
+  const state = inferState(events);
+  const abortedFact = events.some((e) => e?.type === "run.aborted");
+  const completedFact = events.some((e) => e?.type === "run.completed");
+  const acknowledged = serveForm
+    ? stopAccepted === true
+    : stopAccepted === true && abortedFact && !completedFact && supervisorExited === true;
+  const suffix = errorDetail ? `, ${errorDetail}` : "";
+  return [
+    check(
+      "stopAcknowledged",
+      acknowledged,
+      "operational",
+      serveForm
+        ? `stopped=${stopAccepted === true}${suffix}`
+        : `stopVehicleAcknowledged=${stopAccepted === true}, abortedFact=${abortedFact}, completedFact=${completedFact} (a stop must win mid-flight; natural completion is not a stop), supervisorExited=${supervisorExited}${suffix}`,
+      { capability: "lifecycle" },
+    ),
+    check(
+      "stopStateAborted",
+      state === "aborted",
+      "operational",
+      `state=${state} (form=${serveForm ? "serve" : "process"})`,
+      { capability: "lifecycle" },
+    ),
+    check(
+      "stopSeqMonotonic",
+      events.length > 0 && hasMonotonicSeq(events),
+      "operational",
+      events.length > 0
+        ? "transcript seq monotonic across stop"
+        : "no transcript events observed — seq preservation is unproven, not green (fail-closed)",
+      { capability: "lifecycle" },
     ),
   ];
 }
@@ -1034,6 +1115,24 @@ export function createComponentDrills(deps) {
     return variantPath;
   };
 
+  // 装配读取（stop 执行形态判定证据 = 装配实际配置的 serveUrl，backendStopFormOf）。
+  const readAssemblyEntry = (agentId) => JSON.parse(readFileSync(registry, "utf8"))?.agents?.[agentId] ?? null;
+
+  // daemon 判活（handshake 心跳新鲜）——有界轮询。daemon start 是 fire-and-forget
+  // detached fork：CLI 回包时 daemon 进程可能尚未写 handshake，daemon run 会踩
+  // "daemon not running" 空窗——与 waitForSessionAnchor 同款竞态纪律。
+  const waitForDaemonAlive = (runDir, timeoutMs = 15000, intervalMs = 250, freshMs = 15000) => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      try {
+        const hs = JSON.parse(readFileSync(join(runDir, "daemon.json"), "utf8"));
+        if (typeof hs?.heartbeatAt === "number" && Date.now() - hs.heartbeatAt <= freshMs) return true;
+      } catch { /* handshake 尚未出现 */ }
+      if (Date.now() >= deadline) return false;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, intervalMs);
+    }
+  };
+
   // 后台族（--background / spawn/stop）显式 run-dir：detached runner 不自动建
   // runDir，须预创建（runStopDrill 同款纪律）；CLI 进程 cwd=root（detached
   // runner 继承 CLI cwd，registry/config 解析不能落在临时目录）。
@@ -1265,12 +1364,25 @@ export function createComponentDrills(deps) {
       ));
     }
 
-    // ── 生命周期：显式停止（spawn 托管 + stop → aborted，事实可审计）。
-    //    --cwd 与其余探针同款显式绝对 cwd（tmpDir）——绝不挂靠装配 cwd 的相对
-    //    形态：deepseek-acp 把 cwd 原样转发给 ACP session/new，相对路径（"."）
-    //    被 runtime 以 -32602 拒绝（首修后重跑实证的 src 层发现，如实上报，
-    //    本层不掩盖：start 失败路径由 startupFailureExplicit 独立断言）。
-    {
+    // ── 生命周期：显式停止——按执行形态分车道（backendStopChecks 判定内核）。
+    //    2026-09-20 缺陷 4：原实现把 serve 形当唯一形态（spawn + `wao stop` 的
+    //    serveUrl 车道），进程式 backend（无 serveUrl 是常态）被整体误杀——
+    //    deepseek-acp 的 ACP sessionId 既非 proc_ 锚也无 serveUrl，`wao stop`
+    //    恒报 "no serveUrl (opencode path needs one)"。
+    //      - serve 形：spawn 托管 + `wao stop`（serve abort 车道），既有语义保持。
+    //      - 进程形：owning-supervisor 车道真实驱动 stop——daemon 持有 run
+    //        （daemon run），优雅停机（daemon stop → abortAll → handle.abort →
+    //        worker 进程树终止 → run.aborted fact + aborted 终态）。对
+    //        claude-code/codex/kimi-code/deepseek-acp 统一适用（不按 backend 名
+    //        分支）；进程被终止 + 终态事实一致 + seq 单调由 backendStopChecks
+    //        按形态断言，无跳过/不适用通道（ADR-0032 §8）。
+    //    spawn 车道的 --cwd 与其余探针同款显式绝对 cwd（tmpDir）——绝不挂靠装配
+    //    cwd 的相对形态：deepseek-acp 把 cwd 原样转发给 ACP session/new，相对路径
+    //    （"."）被 runtime 以 -32602 拒绝（首修后重跑实证的 src 层发现，如实上报，
+    //    本层不掩盖：start 失败路径由 startupFailureExplicit 独立断言）。daemon
+    //    车道无 --cwd 透传面（daemon start IPC 不带 cwd），同等绝对化经变体
+    //    registry 落实（cwd: tmpDir）。
+    if (backendStopFormOf(readAssemblyEntry(agentId)) === "serve") {
       const runDir = backgroundRunDir("stop-runs");
       const spawnOut = runCli([
         "spawn", agentId, "--prompt", "Begin this task and wait quietly until stopped.",
@@ -1278,10 +1390,12 @@ export function createComponentDrills(deps) {
       ], { cwd: root });
       const spawned = extractJson(spawnOut.stdout || "") ?? null;
       if (!spawned?.runId) {
-        const detail = `spawn did not return a runId (ok=${spawnOut.ok}, stderr=${JSON.stringify((spawnOut.stderr ?? "").slice(0, 160))})`;
-        checks.push(check("stopAcknowledged", false, "operational", detail, { capability: "lifecycle" }));
-        checks.push(check("stopStateAborted", false, "operational", detail, { capability: "lifecycle" }));
-        checks.push(check("stopSeqMonotonic", false, "operational", detail, { capability: "lifecycle" }));
+        checks.push(...backendStopChecks({
+          form: "serve",
+          stopAccepted: false,
+          events: [],
+          errorDetail: `spawn did not return a runId (ok=${spawnOut.ok}, stderr=${JSON.stringify((spawnOut.stderr ?? "").slice(0, 160))})`,
+        }));
       } else {
         waitForTranscript(runDir, spawned.runId, 15000);
         const sessionAnchorSeen = waitForSessionAnchor(runDir, spawned.runId);
@@ -1290,29 +1404,67 @@ export function createComponentDrills(deps) {
         ], { cwd: root });
         const stopped = extractJson(stopOut.stdout || "") ?? null;
         const events = readRunEvents(spawned.runId, runDir);
-        checks.push(check(
-          "stopAcknowledged",
-          stopped?.stopped === true,
-          "operational",
-          `stopped=${stopped?.stopped === true}`
-            + `${sessionAnchorSeen ? "" : "; no session.created anchor observed before stop"}`
+        checks.push(...backendStopChecks({
+          form: "serve",
+          stopAccepted: stopped?.stopped === true,
+          events,
+          errorDetail: `${sessionAnchorSeen ? "" : "; no session.created anchor observed before stop"}`
             + `${stopOut.ok ? "" : `, stopError=${JSON.stringify(String((stopOut.stderr ?? "").trim() || (stopOut.error ?? "")).slice(0, 160))}`}`,
-          { capability: "lifecycle" },
-        ));
-        checks.push(check(
-          "stopStateAborted",
-          inferState(events) === "aborted",
-          "operational",
-          `state=${inferState(events)}`,
-          { capability: "lifecycle" },
-        ));
-        checks.push(check(
-          "stopSeqMonotonic",
-          hasMonotonicSeq(events),
-          "operational",
-          "transcript seq monotonic across stop",
-          { capability: "lifecycle" },
-        ));
+        }));
+      }
+    } else {
+      // 进程形：daemon 车道。pipe 每轮唯一（防机器级命名管道碰撞）；registry 变体
+      // 绝对化 cwd（daemon start IPC 无 --cwd 面）；finally 兜底停机——探针任何
+      // 失败路径都不得遗留活 daemon（长驻进程无 idle-exit）。
+      const runDir = backgroundRunDir("daemon-stop-runs");
+      const variantPath = writeVariantRegistry("component-registry-stop-process.json", agentId, (entry) => ({
+        ...entry, cwd: tmpDir,
+      }));
+      const pipe = `\\\\.\\pipe\\wao-cc-stop-${Date.now().toString(36)}`;
+      try {
+        runCli([
+          "daemon", "start", "--run-dir", runDir, "--registry", variantPath, "--pipe", pipe,
+        ], { cwd: root });
+        const daemonAlive = waitForDaemonAlive(runDir);
+        const runOut = daemonAlive
+          ? runCli([
+            "daemon", "run", agentId, "--prompt", "Begin this task and wait quietly until stopped.",
+            "--run-dir", runDir, "--pipe", pipe,
+          ], { cwd: root })
+          : null;
+        const spawned = extractJson(runOut?.stdout ?? "") ?? null;
+        if (!daemonAlive || !spawned?.runId) {
+          checks.push(...backendStopChecks({
+            form: "process",
+            stopAccepted: false,
+            events: [],
+            supervisorExited: !existsSync(join(runDir, "daemon.json")),
+            errorDetail: `daemon lane dispatch failed (daemonAlive=${daemonAlive}, ok=${runOut?.ok}, stderr=${JSON.stringify(String(runOut?.stderr ?? "").slice(0, 160))})`,
+          }));
+        } else {
+          waitForTranscript(runDir, spawned.runId, 15000);
+          const sessionAnchorSeen = waitForSessionAnchor(runDir, spawned.runId);
+          const stopOut = runCli([
+            "daemon", "stop", "--run-dir", runDir, "--pipe", pipe,
+          ], { cwd: root });
+          const stopResult = extractJson(stopOut.stdout || "") ?? null;
+          // 优雅停机先删 handshake 再 abortAll——CLI 回包时 aborted fact 可能尚未
+          // 落盘，有界等终态（自然终态先到 = stop 输了仲裁，check 如实红）。
+          const { events } = waitForTerminalState(runDir, spawned.runId);
+          checks.push(...backendStopChecks({
+            form: "process",
+            stopAccepted: stopResult?.ok === true && stopResult?.stopped === true,
+            events,
+            supervisorExited: !existsSync(join(runDir, "daemon.json")),
+            errorDetail: `${sessionAnchorSeen ? "" : "; no session.created anchor observed before stop"}`
+              + `${stopOut.ok ? "" : `, stopError=${JSON.stringify(String((stopOut.stderr ?? "").trim() || (stopOut.error ?? "")).slice(0, 160))}`}`,
+          }));
+        }
+      } finally {
+        // 探针提前失败的兜底：daemon 仍活（handshake 在）→ 停机，绝不遗留。
+        if (existsSync(join(runDir, "daemon.json"))) {
+          runCli(["daemon", "stop", "--run-dir", runDir, "--pipe", pipe], { cwd: root });
+        }
       }
     }
 
