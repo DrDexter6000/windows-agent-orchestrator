@@ -23,4 +23,7 @@ export const BACKEND_CLI = {
   // JSON-RPC 适配器 backend（src/backends/factory.js 的活分支）：进程由 harness
   // 自管，不依赖 PATH 上的独立 CLI，无物可探——显式置 null 而非缺省。
   "deepseek-harness": null,
+  // ADR-0031：ACP 线直接驱动上游 `dsh` CLI（--profile acp）——CLI 可探；
+  // 注意 CLI 在场 ≠ 就绪：还需操作员安装 containment 覆盖层（docs/usage.md）。
+  "deepseek-acp": "dsh",
 };

@@ -32,6 +32,9 @@ const INHERITED_ENV_NAMES = {
   codex: ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"],
   "kimi-code": ["KIMI_API_KEY", "KIMI_BASE_URL", "KIMI_MODEL_NAME"],
   "deepseek-harness": [],
+  // ADR-0031：ACP 线凭据面与旧线同形——只继承 registry 声明的 credentialEnv，
+  // 无额外可选 env。
+  "deepseek-acp": [],
   "opencode-serve": [],
 };
 
@@ -45,7 +48,7 @@ const INHERITED_ENV_NAMES = {
 export function requiredCredentialNames(agent) {
   if (!agent || typeof agent !== "object") return [];
   const names = [];
-  const configured = agent.backend === "deepseek-harness"
+  const configured = agent.backend === "deepseek-harness" || agent.backend === "deepseek-acp"
     ? agent.credentialEnv
     : agent.backend === "claude-code"
       ? agent.provider?.apiKeyEnv

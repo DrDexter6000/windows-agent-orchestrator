@@ -27,6 +27,7 @@ const BACKEND_FAMILY_FALLBACK = Object.freeze({
   "claude-code": "claude",
   "kimi-code": "kimi",
   "deepseek-harness": "deepseek",
+  "deepseek-acp": "deepseek",
   "codex": "codex",
 });
 

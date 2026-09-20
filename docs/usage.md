@@ -16,7 +16,7 @@
 
 #### Node 为什么必须 v22（不能 v24）
 
-WAO 进程式 backend（claude-code/codex/kimi-code/deepseek-harness）的"进程死即会话死"隔离，依赖 **Node 自 v18+ 内置的 Windows Job Object**（父进程退出→OS 自动杀全部子进程树）。**Node v24 有 libuv Job Object 回归**（会误杀长进程），所以 WAO 在 cli / daemon / background-runner 入口**硬拒绝 v24**并指引切 v22。详见 TD-40 + `.wao/decisions/0013`。
+WAO 进程式 backend（claude-code/codex/kimi-code/deepseek-harness/deepseek-acp）的"进程死即会话死"隔离，依赖 **Node 自 v18+ 内置的 Windows Job Object**（父进程退出→OS 自动杀全部子进程树）。**Node v24 有 libuv Job Object 回归**（会误杀长进程），所以 WAO 在 cli / daemon / background-runner 入口**硬拒绝 v24**并指引切 v22。详见 TD-40 + `.wao/decisions/0013`。
 
 - v24 上启动会看到：`WAO 拒绝启动：Node v24.x 被拒绝：v24 has a libuv Windows Job Object regression ... 请用 v22`，exit 1。
 - `npm test` 同样走 v22 shim：入口为 `node scripts/wao-node.cjs scripts/canonical-test.mjs`，canonical runner 读 `test/manifest.json` 把每个 `.test.js` 恰好归入一个资源类别（pure/git/worktree/process/lock/timeout/mcp，用于归属与漂移检测），执行组织成串行波（wave）：同一波池化多个类别共享有界并发、长极重叠（filesystem 波池化 git+worktree，lock 波严格串行），并对首轮失败隔离复核一次（只追加 stable_fail/isolation_pass/environment_invalid 分类，绝不把复核通过洗成 PASS）。测试本身 mock 子进程、不依赖真实进程隔离；子进程注入 `WAO_SKIP_VERSION_GUARD=1` 绕过版本守卫。自 R23-F/A 起 `test-results.json` 的每个文件条目还携带 `durationMs`——该文件内各 test 耗时之和（不含模块 import/钩子间隙）的 advisory 计时元数据（透传结构化 reporter 累计的 suite 时长；报告缺失/损坏或文件 missing/crash 时为 `null`），只作观测、不参与 verdict；隔离复核条目同样携带 `isolationDurationMs`（缺失归一 `null`）。自 R23-F/B 起一次 canonical 全量整体受同机验证串行化闸保护（闸语义见场景 4b；排队不计入测试预算，`WAO_VERIFICATION_GATE=off` 停用）。
@@ -53,6 +53,7 @@ cd D:\projects\windows-agent-orchestrator   # 配 --use-on-cd 会按 .nvmrc 自�
 | codex | `npm i -g @openai/codex` | 进程式 backend（需登录：`codex login`） |
 | kimi code | 见 [kimi-cli 官方](https://platform.moonshot.cn/) | 进程式 backend，多模态（需过 Kimi 白名单，无需登录命令） |
 | DeepSeek Harness | 见 [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) | **实验性** stdio JSON-RPC backend；需用户自行准备 dedicated `dsh-jsonrpc-agent` composition 与 `DEEPSEEK_API_KEY`，WAO 不安装或修复 runtime |
+| DeepSeek Harness（ACP 面） | `dsh` CLI ≥ 0.1.5-rc（见 [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)） | `deepseek-acp` backend（ADR-0031）：`dsh --profile acp` + 操作员安装的 containment 覆盖层 + `DEEPSEEK_API_KEY`；WAO 只 detect / invoke / report（安装步骤见下文「deepseek-acp」段） |
 
 **你不需要全装。** 装一个就能用。不同 agent 可以用不同 backend。
 
@@ -158,6 +159,17 @@ Copy-Item config/agents.example.json config/agents.json
       "cwd": "D:/projects/my-app"
     },
 
+    // ── deepseek-acp（ADR-0031；shipped ACP profile + 操作员安装的 containment）──
+    "coder_dsh_acp": {
+      "backend": "deepseek-acp",
+      "binary": "C:/path/to/dsh.cmd",        // 可选，缺省 PATH 上的 dsh
+      "credentialEnv": "DEEPSEEK_API_KEY",
+      "reasoning": { "effort": "high" },      // off/low/high/max（off 暂不可经 registry 表达）
+      "cwd": "D:/projects/my-app"
+      // 注意：不配 model/provider 块——ACP 面无可验证设置通道，配了会被
+      // validateAgentPolicy fail-closed 拒绝（模型取 profile 缺省）。
+    },
+
     // ── codex（进程式）──
     "tester": {
       "backend": "codex",
@@ -191,6 +203,21 @@ approval UI、background job 和 TUI，把模型、PowerShell/编辑工具与 JS
 装配进去。WAO 不生成、升级或持久修复该外部 runtime。该 backend 目前无 session reuse / in-flight
 correction，且本仓模板不把它设为默认 worker；通过 `npm run reliability` 取得与当前
 backend+model 精确绑定的认证前，registry 会诚实显示 `certification:null`。
+
+`deepseek-acp`（ADR-0031，与上条旧线并存）走上游 shipped 的 `dsh --profile acp`：
+WAO 以 `--patch <containment> --patch <role-contract>` 叠加两份覆盖层——containment
+资产**由操作员安装**到 `~/.wao/runtimes/dsh-acp/wao-contain.patch.yml`（内容与版本依据 =
+仓库内 `scripts/reliability/dsh-acp/wao-contain-safe.patch.yml`，直接复制即可），缺失或与声明
+不匹配时 backend 在派发前**拒绝**（fail-closed，不静默降级）；角色合同由 WAO 每次派发生成到
+OS temp 独占目录（无凭据、不进 transcript，用后清理）。WAO 只 detect / invoke / report，
+不生成、不升级、不持久修复该资产。能力边界（如实）：compose 层 `disabled` 是唯一真
+containment，**不是 OS 级沙箱隔离**；wire 上的 deny-list tripwire（subagent/subagent_fork/
+spawn_teammate）是**检测不是阻止**。该 backend 声明 `supportsSessionReuse=true`，但 resume
+轮在 backend 层 fail-closed 拒绝（opaqueUuid→ACP sessionId 关联面补齐前绝不静默开新会话）；
+**不支持在途纠偏**（`run_correct` 会被派发层拒绝，如实标注不静默）。终局 token 用量来自
+`session/prompt` 响应的 usage（实测可为 null——缺失即无 metrics 事实，`usage_update` 上下文
+占用绝不计入 input）。认证走独立 lane（新 agentId + delta 档起，ADR-0031 §4），经
+`npm run reliability -- --agent <lane>` 认证前 registry 诚实显示 `certification:null`。
 
 `registry validate` 的能力交叉 `⚠` warning（ADR-0025 批次 2，均不阻塞派发、不影响 exit code）：
 validate 加载 backend **代码类**的闭集能力声明做纯静态交叉校验（只读类声明，不为校验启动任何
@@ -262,9 +289,10 @@ run 的 `--model` / `--reasoning` 与 registry 的 `model` / `reasoning` / `prov
 | codex | 支持（`--model`） | 支持（`-c model_reasoning_effort`） | 不支持 | 不支持（codex 自有登录） | 不支持 | 支持（turn.completed 帧 usage） | 支持（`-c developer_instructions` 追加） | 不支持 |
 | kimi-code | 支持（`--model`） | 条件：仅 `kimi-code/k3` 且 effort ∈ {low, high, max}（effort 编译为 KIMI_MODEL_THINKING_EFFORT env，agent.env 自设同名被拒） | 不支持 | 不支持（kimi 托管认证） | 不支持 | 不支持（stream-json 无 usage——tokenBudget 不生效，TD-87） | 支持（拼进同一条 prompt，非系统级通道） | 不支持 |
 | deepseek-harness | 支持（DSH_MODEL，缺省 deepseek-v4-flash） | 条件：effort ∈ {high, max}，可省略 | 支持（DSH_CONTEXT_WINDOW） | 不支持（组合由 `dshConfigPath` / `dshProvider` 表达） | 不支持 | 支持（assistant/message usage） | 支持（DSH_SYSTEM_PROMPT） | 不支持 |
+| deepseek-acp | 不支持（模型由 shipped acp profile 的 session configOptions 承载，WAO 侧无可验证设置通道——配了即拒，模型取 profile 缺省） | 条件：effort ∈ {low, high, max}，可省略（backend 原生四档 off/low/high/max；off 暂不在 registry 六值闭集内） | 不支持（同 model 块——无可验证设置通道） | 不支持（组合面固定为 `--profile acp` + 操作员 patch） | 支持（声明原生会话复用；resume 轮在 backend 层 fail-closed 拒绝直至 ADR-0031 §3.6 关联面补齐，绝不静默开新会话） | 支持（PromptResponse.usage 终局；`usage_update` 上下文占用不计入；终局 usage 缺失即无 metrics 事实） | 支持（per-dispatch `--patch` personaPrefix，结构化序列化） | 不支持 |
 | opencode-serve | 条件：必须 OpenCode 形状 {providerID, id, variant}；canonical 裸 {id} 被拒 | 不支持 | 不支持 | 不支持（模型路由由 `model.providerID` 承担） | 不支持 | 支持（session.tokens 周期轮询） | 条件：serve healthy 且版本 ≥ 1.18.0（派发前运行时探测） | 不支持 |
 
-两点衔接：per-dispatch `--model` 只替换 `model.id`、兄弟字段保留——opencode-serve 的 agent 必须先带 `providerID`（裸 {id} 叠 `--model` 仍是裸形状，照样被拒）；`--reasoning` 的六值闭集（minimal/low/medium/high/xhigh/max）由 `registry.js` `REASONING_EFFORTS` 在 registry 层校验，backend 层再按上表条件格收窄（kimi K3 档位闭集、deepseek-harness high/max）。
+两点衔接：per-dispatch `--model` 只替换 `model.id`、兄弟字段保留——opencode-serve 的 agent 必须先带 `providerID`（裸 {id} 叠 `--model` 仍是裸形状，照样被拒）；`--reasoning` 的六值闭集（minimal/low/medium/high/xhigh/max）由 `registry.js` `REASONING_EFFORTS` 在 registry 层校验，backend 层再按上表条件格收窄（kimi K3 档位闭集、deepseek-harness high/max、deepseek-acp 四档 off/low/high/max 里与 registry 闭集相交的 low/high/max；`off` 要等 registry 六值闭集扩员后才能表达，属 Owner 决策）。
 
 ### 验证安装
 
@@ -432,7 +460,7 @@ npm run cli -- runs wait <runId> --format json       # 完整服务结果 + sema
 `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，message 含解析后的
 绝对路径与来源标注；零 transcript、零 fork、零 worktree）。检查按 backend 能力划分
 （与 M12-14 invocation 预检同一 capability 键 `preflightInvocation`）：本地进程式
-backend（claude-code / codex / kimi-code / deepseek-harness）在两层都查，HTTP serve
+backend（claude-code / codex / kimi-code / deepseek-harness / deepseek-acp）在两层都查，HTTP serve
 backend（opencode-serve，cwd 是远端目录提示）两层一致豁免。**承重层是前台执行通道**
 （`run` 前台、workflow agent 节点、daemon `start`、`retry` → RunManager.start，以及
 `resume` 的进程重放分支 → RunManager.resume）——2026-08-16 的 22 条 researcher

@@ -133,12 +133,15 @@ test("ADR25-B2-FC: 未声明 reportsTokenUsage 的 backend 不得被读成支持
 // MATRIX: 五个工厂 backend 的能力快照 = 当前类声明（防单侧漂移）
 // =====================================================================
 
-test("ADR25-B2-MATRIX: backendCapabilitySnapshot 与五个 backend 类的当前声明一致", () => {
+test("ADR25-B2-MATRIX: backendCapabilitySnapshot 与全部工厂 backend 类的当前声明一致", () => {
   const expected = {
     "claude-code": { reportsTokenUsage: true, supportsSessionReuse: true },
     "codex": { reportsTokenUsage: true, supportsSessionReuse: false },
     "kimi-code": { reportsTokenUsage: false, supportsSessionReuse: false },
     "deepseek-harness": { reportsTokenUsage: true, supportsSessionReuse: false },
+    // ADR-0031：ACP 线声明原生会话复用能力（resume 轮在 backend 层 fail-closed
+    // 拒绝直至 §3.6 关联面补齐——能力声明与拒绝语义并存，见 deepSeekAcp.js）。
+    "deepseek-acp": { reportsTokenUsage: true, supportsSessionReuse: true },
     "opencode-serve": { reportsTokenUsage: true, supportsSessionReuse: false },
   };
   for (const [backend, caps] of Object.entries(expected)) {
