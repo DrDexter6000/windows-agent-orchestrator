@@ -1,0 +1,44 @@
+# WAO containment overlay for the shipped 'acp' profile — B-2 验证（实测收敛版）。
+#
+# 实测结论（2026-09-19，dsh 0.1.5-rc.2）：
+#   - 关闭 **工具插件**（tool-*）安全；模型看不到该工具即达成 containment。
+#   - 关闭 **运行时服务** 会破坏 agent 组合，session/new 直接 -32603：
+#       subagent / subagent-spawn-in-process / subagent-fork-in-process
+#       workflow-worker-thread
+#       goal / goal-round-driver
+#     这三组必须保留挂载，只能关它们的 tool-* 门面。
+#   - jobs / skill / skill-filesystem 服务可以整条关闭（实测 OK）。
+#
+# 用法：dsh --profile acp --patch <此文件>
+
+# ── 编排面：只关工具门面（服务保留）──
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-ralph
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: tool-todo
+  disabled: true
+- id: plan-mode
+  disabled: true
+
+# ── 辅助面：工具 + 服务均可关 ──
+- id: tool-jobs
+  disabled: true
+- id: jobs
+  disabled: true
+- id: tool-skill
+  disabled: true
+- id: skill
+  disabled: true
+- id: skill-filesystem
+  disabled: true
+- id: tool-web
+  disabled: true

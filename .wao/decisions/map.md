@@ -32,4 +32,4 @@
 0028 | zcode-as-backend 放弃迁移保持 claude-code（TD-116 裁定升格归档；重看触发器两腿未满足）
 0029 | 认证两段式入册与突发迁移（修订 0025：入册先行+smoke 地板+承重前 delta；死通道原位迁移；取消定期全量重刷）
 0030 | 等待到期语义——通知不杀（Owner 方向裁定：语义决策归 Lead；TD-151 根修立项待排期、TD-154 档位降级）
-0031 | DSH ACP 后端落地方案（B-2） | 经 ACP over stdio 接入 dsh 驱动 DeepSeek；跨进程 session/resume 解 TD-117 卡点；status: proposed（待裁定）
+0031 | DSH ACP 后端落地方案（B-2） | 经 ACP over stdio 接入 dsh 驱动 DeepSeek；跨进程 session/resume 解 TD-117；双席审查 PASS_WITH_CHANGES 已折叠；status: proposed（待裁定）

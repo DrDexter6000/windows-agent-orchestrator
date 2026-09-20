@@ -1,0 +1,30 @@
+(node:37252) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+{
+  "mode": "new",
+  "dsh": "dsh",
+  "workspace": "D:\\projects\\windows-agent-orchestrator-poc\\.dev\\dsh-acp-probe\\ws",
+  "sessionId": null,
+  "steps": {
+    "initialize": {
+      "protocolVersion": 1,
+      "agentInfo": {
+        "name": "deepseek-harness-acp",
+        "version": "0.0.1"
+      },
+      "sessionCapabilities": {
+        "close": {},
+        "list": {},
+        "resume": {}
+      },
+      "promptCapabilities": {
+        "image": false,
+        "audio": false,
+        "embeddedContext": false
+      },
+      "authMethods": []
+    }
+  },
+  "error": "ACP error -32603: Internal error",
+  "stderrTail": []
+}

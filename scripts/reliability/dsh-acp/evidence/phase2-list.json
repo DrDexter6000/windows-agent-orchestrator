@@ -1,0 +1,37 @@
+{
+  "mode": "list",
+  "dsh": "dsh",
+  "workspace": "D:\\projects\\windows-agent-orchestrator-poc\\.dev\\dsh-acp-probe\\ws",
+  "sessionId": null,
+  "steps": {
+    "initialize": {
+      "protocolVersion": 1,
+      "agentInfo": {
+        "name": "deepseek-harness-acp",
+        "version": "0.0.1"
+      },
+      "sessionCapabilities": {
+        "close": {},
+        "list": {},
+        "resume": {}
+      },
+      "promptCapabilities": {
+        "image": false,
+        "audio": false,
+        "embeddedContext": false
+      },
+      "authMethods": []
+    },
+    "sessionList": {
+      "count": 1,
+      "sessions": [
+        {
+          "sessionId": "2c29f514-aba2-412e-9078-b326f8b30949",
+          "cwd": "D:\\projects\\windows-agent-orchestrator-poc\\.dev\\dsh-acp-probe\\ws"
+        }
+      ],
+      "nextCursor": null
+    }
+  },
+  "stderrTail": []
+}

@@ -1,0 +1,61 @@
+{
+  "mode": "resume",
+  "dsh": "dsh",
+  "workspace": "D:\\projects\\windows-agent-orchestrator-poc\\.dev\\dsh-acp-probe\\ws",
+  "sessionId": "2c29f514-aba2-412e-9078-b326f8b30949",
+  "steps": {
+    "initialize": {
+      "protocolVersion": 1,
+      "agentInfo": {
+        "name": "deepseek-harness-acp",
+        "version": "0.0.1"
+      },
+      "sessionCapabilities": {
+        "close": {},
+        "list": {},
+        "resume": {}
+      },
+      "promptCapabilities": {
+        "image": false,
+        "audio": false,
+        "embeddedContext": false
+      },
+      "authMethods": []
+    },
+    "resume": {
+      "configOptions": [
+        {
+          "id": "model",
+          "category": "model",
+          "currentValue": "[\"deepseek-official\",\"deepseek-v4-flash\"]",
+          "optionCount": 1
+        },
+        {
+          "id": "reasoning_effort",
+          "category": "thought_level",
+          "currentValue": "high",
+          "optionCount": 4
+        }
+      ]
+    },
+    "prompt": {
+      "stopReason": "end_turn",
+      "usage": null
+    }
+  },
+  "result": {
+    "text": "上一轮我写入 `proof.txt` 的内容是恰好一行：\n\nWAO_DSH_ACP_OK\n\n（写入时该行末尾带有一个换行符，使文件成为单独一行。）",
+    "thoughts": "",
+    "tools": [],
+    "config": [],
+    "usage": [
+      {
+        "sessionUpdate": "usage_update",
+        "used": 10587,
+        "size": 1000000
+      }
+    ]
+  },
+  "resumeRecalledSentinel": true,
+  "stderrTail": []
+}
