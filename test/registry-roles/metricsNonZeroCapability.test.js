@@ -33,30 +33,35 @@ import { readFileSync } from "node:fs";
 import { metricsNonZeroCheck } from "../../scripts/reliability/metricsCheck.mjs";
 import { certifyCase } from "../../scripts/reliability/certification.mjs";
 
-// ════ T1: 能力跳过——声明不上报 usage 的 lane 检查通过且明示不适用 ════
+// ════ T1: 能力跳过——声明不上报 usage 的 lane 检查记 N/A（带原因，不置绿）════
 
-test("TD87-CERT-T1: kimi 形状（真 SSOT 路径）+ input=null → 通过 + detail 含 not applicable", () => {
+test("TD87-CERT-T1: kimi 形状（真 SSOT 路径）+ input=null → not-applicable + 原因含声明值与 input 事实", () => {
   // 真 registry 条目形状（backendCapabilitySnapshot 只读 agent.backend，
   // 构造零副作用）——不注入快照，走的就是 run-reliability 生产路径。
+  // ADR-0032 §8（2026-09-21）：不适用不再记 pass:true + capability:"metrics"
+  //（伪装能力绿的坏模式）——如实记五态 N/A + 原因。
   const c = metricsNonZeroCheck({ agent: { backend: "kimi-code", cwd: "D:/x" }, metricsInput: null });
   assert.equal(c.name, "metricsNonZero");
-  assert.equal(c.pass, true, "声明不上报 usage → 检查跳过（通过落账）");
+  assert.equal(c.state, "not-applicable", "声明不上报 usage → 检查记 N/A");
+  assert.equal(c.pass, false, "N/A 绝不置绿（ADR-0032 §8）");
   assert.equal(c.category, "observability");
   assert.equal(c.capability, "metrics");
-  assert.match(c.detail, /not applicable: backend declares reportsTokenUsage=false \(TD-87 capability declaration\)/,
-    "detail 明示不适用 + 判定来源（TD-87 能力声明）");
-  assert.match(c.detail, /input=null/, "input 事实照常透明");
-  // 跳过≠可选检查：optional 未设置——满足 observability 必需类目（certifyCase
-  // 的 findMissingRequiredCategories 拒绝 optional 检查顶类目）。
-  assert.notEqual(c.optional, true, "跳过不得编码为 optional（否则重现类目缺失症状）");
+  assert.match(c.stateReason, /not applicable|reportsTokenUsage=false/);
+  assert.match(c.stateReason, /reportsTokenUsage=false \(TD-87 capability declaration\)/,
+    "stateReason 明示判定来源（TD-87 能力声明）");
+  assert.match(c.stateReason, /input=null/, "input 事实照常透明");
+  assert.match(c.detail, /not applicable: backend declares reportsTokenUsage=false/);
+  // N/A≠可选检查：optional 未设置——类目【覆盖】由 certifyCase 的状态感知逻辑
+  // 承载（pass|not-applicable 均覆盖），不经 optional 通道。
+  assert.notEqual(c.optional, true, "N/A 不得编码为 optional（类目覆盖语义独立承载）");
 
-  // 投影给出 0（而非 null）的同形状：同样跳过——判定源是声明，不是本 run 巧合。
+  // 投影给出 0（而非 null）的同形状：同样 N/A——判定源是声明，不是本 run 巧合。
   const zero = metricsNonZeroCheck({ agent: { backend: "kimi-code", cwd: "D:/x" }, metricsInput: 0 });
-  assert.equal(zero.pass, true);
+  assert.equal(zero.state, "not-applicable");
   assert.match(zero.detail, /not applicable/);
 });
 
-test("TD87-CERT-T1: 快照注入（非 kimi 名的伪造形状）→ 同样跳过（名字分支复活即红）", () => {
+test("TD87-CERT-T1: 快照注入（非 kimi 名的伪造形状）→ 同样 N/A（名字分支复活即红）", () => {
   // 伪造 backend 名 + 注入 reportsTokenUsage=false 快照：旧 providerID 名字
   // 分支（或任何按名字白名单的第二套判定）对这个形状不生效。
   const c = metricsNonZeroCheck({
@@ -64,19 +69,19 @@ test("TD87-CERT-T1: 快照注入（非 kimi 名的伪造形状）→ 同样跳�
     metricsInput: null,
     capabilitySnapshot: { reportsTokenUsage: false, supportsSessionReuse: false },
   });
-  assert.equal(c.pass, true, "快照注入声明 false → 跳过（判定不看名字）");
+  assert.equal(c.state, "not-applicable", "快照注入声明 false → N/A（判定不看名字）");
   assert.match(c.detail, /not applicable: backend declares reportsTokenUsage=false/);
 });
 
-test("TD87-CERT-T1: 未知 backend（snapshot=null）→ 严格 !== true 读为跳过（fail 方向钉住）", () => {
+test("TD87-CERT-T1: 未知 backend（snapshot=null）→ 严格 !== true 读为 N/A（fail 方向钉住）", () => {
   const c = metricsNonZeroCheck({ agent: { backend: "bogus-runtime" }, metricsInput: null });
-  assert.equal(c.pass, true, "null 快照的 reportsTokenUsage !== true → 同样跳过（任务裁定的 fail 方向）");
+  assert.equal(c.state, "not-applicable", "null 快照的 reportsTokenUsage !== true → 同样 N/A（任务裁定的 fail 方向）");
   assert.match(c.detail, /not applicable: backend declares reportsTokenUsage=unknown/);
 });
 
-// ════ T1B: 认证级症状解除——checks 恒含 metricsNonZero（pass）不再缺类目 ════
+// ════ T1B: 认证级症状解除——checks 恒含 metricsNonZero（N/A）不再缺类目 ════
 
-test("TD87-CERT-T1B: kernel 产出进 checks → kimi 形状 case 全绿时 certifyCase 为 certified（非 conditional）", () => {
+test("TD87-CERT-T1B: kernel 产出进 checks → kimi 形状 case 全绿时 certifyCase 为 certified（非 conditional），能力绿不再伪造", () => {
   const checks = [
     { name: "completed", pass: true, category: "core", capability: "complete" },
     { name: "hasAssistantText", pass: true, category: "core", capability: "assistantText" },
@@ -93,8 +98,10 @@ test("TD87-CERT-T1B: kernel 产出进 checks → kimi 形状 case 全绿时 cert
     checks,
   });
   assert.equal(result.status, "certified",
-    "observability 类目由跳过检查（pass + not applicable）满足——不再 missing → conditional");
-  assert.equal(result.capabilities.metrics, true);
+    "observability 类目由 N/A 检查覆盖（检查跑了、如实话不适用）——不再 missing → conditional");
+  // ADR-0032 §8 的核心修正：N/A 不贡献能力绿——capabilities.metrics 不再置 true
+  //（旧行为 pass:true + capability:"metrics" 是被点名的坏模式）。
+  assert.equal(result.capabilities.metrics, undefined, "N/A 不贡献能力绿（能力轴不被断言）");
 
   // 对照面（旧行为）：检查整个不落账 → observability 缺失 → conditional。
   // 这正是修复前的症状（lastHealthyRunAt 永远 null 的机制根源）。

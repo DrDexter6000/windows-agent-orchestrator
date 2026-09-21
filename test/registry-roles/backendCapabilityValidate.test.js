@@ -113,16 +113,32 @@ test("ADR25-B2-FC: 未声明 reportsTokenUsage 的 backend 不得被读成支持
   assert.equal(undeclared.reportsTokenUsage, false, "未声明字段的子类读 false（未声明 ≠ 支持）");
   assert.deepEqual(
     readBackendCapabilities(undeclared),
-    { reportsTokenUsage: false, supportsSessionReuse: false },
-    "快照读取对未声明子类 fail-closed",
+    {
+      supportsRoleContract: false,
+      supportsSessionReuse: false,
+      supportsInFlightCorrection: false,
+      // replayByRespawn 是 ProcessBackend 基类的显式声明（true：进程族 resume =
+      // 重放进新进程）——继承即真实声明，非"未声明读 false"。
+      replayByRespawn: true,
+      reportsTokenUsage: false,
+      reportsCommandExitCode: false,
+    },
+    "快照读取对未声明子类 fail-closed（声明闭集全量轴，ADR-0032 §2；基类显式成员除外）",
   );
 
   // truthy 非 true（"false" 字符串 / 1）→ 严格 === true 读为 false
   // （与 runManager 消费 supportsSessionReuse 的纪律同款）。
   assert.deepEqual(
     readBackendCapabilities({ reportsTokenUsage: 1, supportsSessionReuse: "false" }),
-    { reportsTokenUsage: false, supportsSessionReuse: false },
-    "truthy 非 true 一律读 false",
+    {
+      supportsRoleContract: false,
+      supportsSessionReuse: false,
+      supportsInFlightCorrection: false,
+      replayByRespawn: false,
+      reportsTokenUsage: false,
+      reportsCommandExitCode: false,
+    },
+    "truthy 非 true 一律读 false（闭集全量轴逐成员）",
   );
 
   // 未知 backend → snapshot null（能力面不猜，不伪造"支持"也不伪造"不支持"）。
@@ -134,16 +150,24 @@ test("ADR25-B2-FC: 未声明 reportsTokenUsage 的 backend 不得被读成支持
 // =====================================================================
 
 test("ADR25-B2-MATRIX: backendCapabilitySnapshot 与全部工厂 backend 类的当前声明一致", () => {
+  // ADR-0032 §2（2026-09-21）：快照扩到声明闭集全量六轴。逐成员事实源：
+  //   replayByRespawn —— ProcessBackend 基类 true（进程族 resume = 重放进新进程）；
+  //     opencode-serve（HTTP 附着）与 deepseek-acp（resume 走 session/resume）为 false。
+  //   supportsInFlightCorrection —— 仅 claude-code（stdin stream-json 在途排队）。
+  //   reportsCommandExitCode —— codex/opencode wire 原生数值；claude-code/kimi/
+  //     deepseek-harness 经 toolCallId↔tool_result 推断通道（scorecard 金丝雀绿）；
+  //     deepseek-acp false（evidence/phase7-exit-code-wire.json：tool_call_update
+  //     不填 rawOutput、退出码只在非零退出的自由文本标记里）。
   const expected = {
-    "claude-code": { reportsTokenUsage: true, supportsSessionReuse: true },
-    "codex": { reportsTokenUsage: true, supportsSessionReuse: false },
-    "kimi-code": { reportsTokenUsage: false, supportsSessionReuse: false },
-    "deepseek-harness": { reportsTokenUsage: true, supportsSessionReuse: false },
+    "claude-code": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: true, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: true },
+    "codex": { supportsRoleContract: true, supportsSessionReuse: false, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: true },
+    "kimi-code": { supportsRoleContract: true, supportsSessionReuse: false, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: false, reportsCommandExitCode: true },
+    "deepseek-harness": { supportsRoleContract: true, supportsSessionReuse: false, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: true },
     // ADR-0031 §3.6：ACP 线关联面（挂 transcript SSOT + resume 信封携带前任 runId +
     // 绑定读取器取回 + 缺失/损坏 fail-closed）已落地，真实跨进程恢复证据
     // （scripts/reliability/dsh-acp/evidence/phase6-*.json）通过 → 2026-09-21 翻 true。
-    "deepseek-acp": { reportsTokenUsage: false, supportsSessionReuse: true },
-    "opencode-serve": { reportsTokenUsage: true, supportsSessionReuse: false },
+    "deepseek-acp": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: false, reportsTokenUsage: false, reportsCommandExitCode: false },
+    "opencode-serve": { supportsRoleContract: true, supportsSessionReuse: false, supportsInFlightCorrection: false, replayByRespawn: false, reportsTokenUsage: true, reportsCommandExitCode: true },
   };
   for (const [backend, caps] of Object.entries(expected)) {
     assert.deepEqual(

@@ -409,12 +409,19 @@ test("ACP registry/env 集成：闭集成员、credentialEnv 必填、凭据继�
   const built = backendFor(normalized);
   assert.ok(built instanceof DeepSeekAcpBackend);
   // §3.6 关联面已落地（2026-09-21，真实恢复证据 phase6-*.json）→ 声明翻回 true。
+  // 声明闭集全量六轴（ADR-0032 §2，2026-09-21）：reportsCommandExitCode=false
+  //（evidence/phase7-exit-code-wire.json——tool_call_update 不填 rawOutput）。
   assert.deepEqual(backendCapabilitySnapshot(normalized), {
-    reportsTokenUsage: false,
+    supportsRoleContract: true,
     supportsSessionReuse: true,
+    supportsInFlightCorrection: false,
+    replayByRespawn: false,
+    reportsTokenUsage: false,
+    reportsCommandExitCode: false,
   });
   assert.equal(built.supportsInFlightCorrection, false, "在途纠偏如实声明不支持");
   assert.equal(built.supportsRoleContract, true);
+  assert.equal(built.reportsCommandExitCode, false, "命令退出码证据如实声明不可产出（E 核查 phase7）");
 
   assert.throws(
     () => normalizeAgent("bad", agent({ credentialEnv: undefined })),

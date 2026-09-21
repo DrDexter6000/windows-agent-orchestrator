@@ -91,6 +91,7 @@
       "registry-roles/knownBackendsF3.test.js",
       "registry-roles/reliabilityArgs.test.js",
       "registry-roles/reliabilityDrills.test.js",
+      "registry-roles/checkStates.test.js",
       "registry-roles/dispatchLiveness.test.js",
       "registry-roles/backendCapabilityValidate.test.js",
       "isolation-infra/reporter.test.js",
@@ -236,7 +237,8 @@
       "transcript/runCollectServeCapRed.test.js",
       "transcript/runCollectStdioSmoke.test.js",
       "run-lifecycle/runStopSmoke.test.js",
-      "isolation-infra/waoNodeShim.test.js"
+      "isolation-infra/waoNodeShim.test.js",
+      "registry-roles/runtimeIdentity.test.js"
     ],
     "lock": [
       "isolation-infra/portAllocator.test.js",

@@ -131,7 +131,7 @@ test("源级钉: drills.mjs 不复制入口环境常量，环境只经 createDri
 
 // ════ 4. 纯 glue 语义钉（抽取时行为零漂移的 dry 证明）════
 
-test("hasSentinel: 任意 message 的 JSON 序列化含 sentinel 即命中；缺失/无 messages 为 false", () => {
+test("hasSentinel: sentinel 必须由 assistant 回显承载（ADR-0032 §8 修复——搜所有 message 的旧坏模式已收严）", () => {
   const result = {
     messages: [
       { info: { role: "user" }, parts: [{ type: "text", text: "read the file" }] },
@@ -142,6 +142,21 @@ test("hasSentinel: 任意 message 的 JSON 序列化含 sentinel 即命中；缺
   assert.equal(hasSentinel(result, "ALPHA_X9"), false, "不在场的不命中");
   assert.equal(hasSentinel({ messages: [] }, "ALPHA_X1"), false);
   assert.equal(hasSentinel({}, "ALPHA_X1"), false, "无 messages → false（不抛）");
+  // 【证伪】只在非 assistant 消息里出现（tool_result 投影 / 用户消息回显）不算命中
+  //——读文件 ≠ 回显：回包里搜到不构成模型消费了该值的证据。
+  const toolResultOnly = {
+    messages: [
+      { info: { role: "user" }, parts: [{ type: "text", text: "read sent_a.txt whose content is ALPHA_X1" }] },
+      { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
+    ],
+  };
+  assert.equal(hasSentinel(toolResultOnly, "ALPHA_X1"), false, "sentinel 只在 user 消息/工具投影里 → 不命中");
+  const assistantNonText = {
+    messages: [
+      { info: { role: "assistant" }, parts: [{ type: "tool_use", name: "Read" }] },
+    ],
+  };
+  assert.equal(hasSentinel(assistantNonText, "ALPHA_X1"), false, "assistant 的非 text part 不承载回显");
 });
 
 test("inferState: 末条 state_change 胜出；legacy fact 事件按 aborted/completed/timed_out/failed 兜底", () => {
@@ -214,7 +229,32 @@ test("readRunEvents: 默认 runDir 从注入的 tmpDir 派生；显式 runDir �
   }
 });
 
-// ════ 6. child_process 导入纪律钉（TD-69 同款，随调用迁至 drills.mjs）════
+// ════ 6. ADR-0032 §8 五态批次源级钉（2026-09-21）════
+
+test("源级钉: runStrictScorecardDrill 文件证据 = 存在 + 内容承载 sentinel（不再只查存在）", () => {
+  const glue = readFileSync(new URL("../../scripts/reliability/drills.mjs", import.meta.url), "utf8");
+  assert.match(glue, /fileContentMatches/, "drill 返回内容比对事实");
+  assert.match(glue, /includes\(fileSentinel\)/, "内容判定 = sentinel 在场（includes）");
+});
+
+test("源级钉: run-reliability 无 completed 顶替 / 无 silentPass 顶绿；commandsPassed 按声明条件化", () => {
+  const entry = readFileSync(new URL("../../scripts/run-reliability.mjs", import.meta.url), "utf8");
+  // 坏模式 5：缺 scorecard 用 completed 顶替 → 现在必须是红（固定文案在场）。
+  assert.doesNotMatch(entry, /check\("commandsPassed", completed/, "completed 顶替形状必须消失");
+  assert.match(entry, /completed-substitution is forbidden/, "缺 scorecard 记红的固定文案在场");
+  // 交付项 4：commandsPassed 按 reportsCommandExitCode 声明条件化（N/A）。
+  assert.match(entry, /reportsCommandExitCode/, "条件化判定源（backendCapabilitySnapshot）在场");
+  assert.match(entry, /naCheck\(\s*"commandsPassed"/, "declared=false ⇒ commandsPassed 记 N/A");
+  // 坏模式 2：silentTimeout serve 不可达不再写通过。
+  assert.doesNotMatch(entry, /silentPass = true/, "skip 顶绿必须消失");
+  assert.match(entry, /naCheck\(\s*"silentTimeout"/, "serve 不可达记 N/A + 原因");
+  // 坏模式 4：fileMaterialized 消费内容比对事实。
+  assert.match(entry, /fileContentMatches/, "fileMaterialized 判定消费内容比对");
+  // 五态判定：case pass 状态感知（N/A 不算失败也不置绿）。
+  assert.match(entry, /checkStateOf/, "入口消费五态派生");
+});
+
+// ════ 7. child_process 导入纪律钉（TD-69 同款，随调用迁至 drills.mjs）════
 
 test("drills.mjs 调用 child_process API 时必须显式导入（TD-69 教训随 glue 迁移）", () => {
   const glue = readFileSync(new URL("../../scripts/reliability/drills.mjs", import.meta.url), "utf8");

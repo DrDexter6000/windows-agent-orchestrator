@@ -46,10 +46,17 @@ function check(name, pass, category, detail, extra = {}) {
   return { name, pass: Boolean(pass), category, detail, ...extra };
 }
 
+// ADR-0032 §8（2026-09-21 修复）：sentinel 必须由 assistant 回显承载——只搜
+// assistant 消息的 text part。旧实现对所有 message 的 JSON 序列化做子串搜索，
+// tool_result 输出或用户消息里出现 sentinel 也算命中（读文件≠回显——回包里搜到
+// 不构成模型消费了该值的证据）。与组件层 llmInstructionFloorChecks 的
+// sentinelExactEcho 同向收紧：echo 语义 = 回答文本承载。
 function hasSentinel(result, sentinel) {
   if (!result?.messages) return false;
   return result.messages.some((m) =>
-    JSON.stringify(m).includes(sentinel),
+    m?.info?.role === "assistant"
+    && (m.parts ?? []).some((p) =>
+      p?.type === "text" && typeof p.text === "string" && p.text.includes(sentinel))
   );
 }
 
@@ -168,13 +175,26 @@ export function createDrills(deps) {
     ]);
 
     const result = extractJson(stdout || "");
+    // ADR-0032 §8（2026-09-21 修复）：文件证据从"存在"升级为"存在 + 内容承载
+    // sentinel"——旧实现只查文件存在不查内容（空文件/错内容也绿）。内容判定用
+    // includes（模型可能补尾随换行），sentinel 在场即内容承载。
+    const filePath = join(tmpDir, fileName);
+    let fileContentMatches = null;
+    if (existsSync(filePath)) {
+      try {
+        fileContentMatches = readFileSync(filePath, "utf8").includes(fileSentinel);
+      } catch {
+        fileContentMatches = null; // 读取失败：内容事实不可观察，如实 null（判定面 fail-closed）
+      }
+    }
     return {
       ok,
       result,
       error: result?.error ?? (ok ? null : error),
       fileName,
       fileSentinel,
-      fileExists: existsSync(join(tmpDir, fileName)),
+      fileExists: existsSync(filePath),
+      fileContentMatches,
     };
   }
 

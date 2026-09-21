@@ -28,11 +28,13 @@
 //     - 生命周期：正常完成 / 启动失败 / 中途错误 / 等待到期（ADR-0030 通知不杀）
 //       / 显式停止（按执行形态分车道，见 backendStopChecks——serve 形走 `wao stop`
 //       serve abort；进程形走 owning-supervisor abort，绝不因缺 serveUrl 判负）；
-//     - 能力声明 ⇔ 实测一致性（本层最高价值断言）：声明 reportsTokenUsage ⇔
-//       input token 非空（双向）；声明 supportsSessionReuse ⇔ 实际 resume 行为
-//       （声明 false 须 fail-closed 拒绝；声明 true 须持久化 provider session 锚点
-//       ——resume 的事实前提，CLI 单发通道测不到 MCP 稳定 Lead 会话的二轮续接，
-//       该上限如实写进 check detail）。
+//     - 能力声明 ⇔ 实测一致性（本层最高价值断言；2026-09-21 扩到声明闭集全量六轴）：
+//       声明闭集各轴双向对账——declared=true 须正向实测证据（reportsTokenUsage ⇔
+//       input 非空双向；supportsSessionReuse 须真实跨 run 恢复证据【Phase 6 形状
+//       证据引用，绝不以 session 锚点顶替】；supportsRoleContract 须合同内 marker
+//       的模型回显；reportsCommandExitCode 须探针 run 的 scorecard commandsPassed）；
+//       declared=false 须配置面明确拒绝（sessionReuse/systemPrompt 的 spawn 前硬门
+//       探针）或按既定纪律记 N/A（exitCode 无证据通道 / 无配置面的轴 + 原因）。
 //   llm 组件（夹具 = 有可追溯成功证据的 backend）：
 //     - 指令遵循地板：读文件 + sentinel 精确回显——值必须由工具结果承载
 //       （tool_result 输出含 sentinel；命令式 backend 退而求 command 证据），
@@ -79,6 +81,8 @@ import {
   inferState,
   waitForTranscript,
 } from "./drills.mjs";
+// ADR-0032 §8：检查结果五态（两层共用的中立词汇模块——非组合层状态闭集）。
+import { checkStateOf, naCheck } from "./checkStates.mjs";
 // 组件层闭集与记录构造（ADR-0032 §1/§5）。绝不 import certification.mjs——
 // mergeCaseResults/pruneStaleCases 的复用已经封装在 componentLedger 内部。
 import {
@@ -222,8 +226,16 @@ export function llmInstructionFloorChecks({ result, events = [], sentinel, fileN
  * llm 工具使用真实证据（scorecard command/file/hasEvidence）——【禁止】
  * completed 顶替（ADR-0032 §8 点名组合层 scorecardChecksFromResult 的
  * fallback 坏模式）：result.scorecard.checks 缺失即红，绝不回退到 completed。
+ *
+ * 2026-09-21（ADR-0032 §8 批次）：
+ *   - commandsPassed 按 reportsCommandExitCode 声明条件化：declared=false ⇒
+ *     记 not-applicable + 原因（不置绿、不算失败——WAO 今天无法为该 harness
+ *     产出命令退出码证据）；declared=true/unknown ⇒ 照常判定（缺 scorecard 红）。
+ *   - fileMaterialized 从"存在"升级为"存在 + 内容承载 sentinel"（与组合层
+ *     runStrictScorecardDrill 修复同向；fileContentMatches=null 视为内容未观察
+ *     ——不放宽，红）。
  */
-export function llmScorecardEvidenceChecks({ result, fileExists = null }) {
+export function llmScorecardEvidenceChecks({ result, fileExists = null, fileContentMatches = null, declared = {} }) {
   const scorecardChecks = Array.isArray(result?.scorecard?.checks)
     ? result.scorecard.checks
     : null;
@@ -239,15 +251,26 @@ export function llmScorecardEvidenceChecks({ result, fileExists = null }) {
       { capability },
     );
   };
+  const commandsCheck = declared.reportsCommandExitCode === false
+    ? naCheck(
+      "commandsPassed",
+      "fixture backend declares reportsCommandExitCode=false — WAO cannot produce command exit-code evidence for this harness today (evidence: scripts/reliability/dsh-acp/evidence/phase7-exit-code-wire.json)",
+      "strict",
+      { capability: "commandEvidence" },
+    )
+    : evidenceCheck("commandsPassed", "commandEvidence");
+  const fileOk = fileExists === true && fileContentMatches === true;
   return [
-    evidenceCheck("commandsPassed", "commandEvidence"),
+    commandsCheck,
     evidenceCheck("filesExist", "fileEvidence"),
     evidenceCheck("hasEvidence", "toolEvidence"),
     check(
       "fileMaterialized",
-      fileExists === true,
+      fileOk,
       "strict",
-      fileExists === null ? "file existence not observed" : `fileExists=${fileExists}`,
+      fileOk
+        ? "file exists and its content carries the sentinel (existence alone is not file evidence, ADR-0032 §8)"
+        : `fileExists=${fileExists}, contentCarriesSentinel=${fileContentMatches} — existence without the sentinel content is not file evidence (ADR-0032 §8)`,
       { capability: "fileMaterialized" },
     ),
   ];
@@ -343,40 +366,153 @@ export function backendEventIntegrityChecks({ result, events = [] }) {
   ];
 }
 
+// supportsSessionReuse=true 的真恢复证据源（declared=true 判据的权威引用面）：
+// 键 = backend 名；值 = 该 backend 的真实跨 run 恢复 drill 产物。**只登记有
+// 真实派发证据的 backend**——未登记的 backend 判 declared=true 时如实红
+//（"声明支持但组件层无真恢复证据在案"），绝不回退用 session id 顶替
+//（ADR-0032 §2 判据升级，2026-09-21）。
+export const SESSION_REUSE_EVIDENCE_SOURCES = Object.freeze({
+  "deepseek-acp": Object.freeze({
+    path: "scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json",
+    drill: "scripts/reliability/dsh-acp/wao-reuse-drill.mjs",
+    note: "ADR-0031 §3.6 Phase 6 real-dispatch drill (2026-09-21, dsh 0.1.5-rc.2): same ACP session across two runs + three fail-closed negatives",
+  }),
+});
+
 /**
- * backend 能力声明 ⇔ 实测一致性（ADR-0032 §2 本层最高价值断言）。
- *   - reportsTokenUsage：【双向】——声明 true 而 input token 空 → 红；声明
- *     false 而 input token 非空 → 红（声明与实测不符，无论方向）。
- *   - supportsSessionReuse：声明 false 须 fail-closed 拒绝（sessionReuse 配置
- *     的派发被显式拒绝）；声明 true 须持久化 provider session 锚点
- *     （session.created.backendSessionId 非空——resume 的事实前提）。
+ * 校验 Phase 6 形状的真实跨 run 恢复证据（纯函数）：正向 = 两次真实派发命中
+ * 同一 provider session + resume 轮路由 + 上下文带回（marker 复述）+ resume
+ * transcript 事实；负向×3 = 关联面损坏/缺失各路一律拒绝（绝不静默新会话）。
+ * 任一断言不成立 → accepted:false + 原因（绝不因文件存在就算证据）。
+ */
+export function sessionReuseEvidenceFromPhase6File(json) {
+  const why = (reason) => ({ accepted: false, detail: `session-reuse evidence rejected: ${reason}` });
+  if (!json || typeof json !== "object") return why("evidence file is not an object");
+  const run1 = json?.steps?.run1;
+  const run2 = json?.steps?.run2;
+  if (!run1?.runId || !run2?.runId) return why("missing run1/run2 runIds (no real dispatch pair)");
+  const sid1 = run1?.backendSessionId;
+  const sid2 = run2?.backendSessionId;
+  if (typeof sid1 !== "string" || sid1.length === 0 || sid1 !== sid2) {
+    return why(`backendSessionId not identical across runs (${JSON.stringify(sid1)} vs ${JSON.stringify(sid2)})`);
+  }
+  if (run2?.runSessionReuseTurn !== "resume" || run2?.providerSessionRouting !== "resume_requested") {
+    return why("run2 was not routed as a resume turn");
+  }
+  const claims = json?.positive?.claims ?? {};
+  if (claims.contextCarried !== true || claims.resumeTranscriptFact !== true || claims.sameAcpSessionAcrossRuns !== true) {
+    return why("positive claims incomplete (contextCarried/resumeTranscriptFact/sameAcpSessionAcrossRuns)");
+  }
+  const negA = json?.negativeA;
+  const negB = json?.negativeB;
+  const negC = json?.negativeC;
+  if (negA?.pass !== true || negB?.pass !== true || negC?.pass !== true) {
+    return why("fail-closed negatives incomplete (tampered anchor / damaged routing / nonexistent session must all be refused)");
+  }
+  return {
+    accepted: true,
+    detail: `real cross-run resume evidence accepted: run1 ${run1.runId} → run2 ${run2.runId} on the same provider session ${sid1}, marker echoed back (contextCarried), resume transcript fact present, 3/3 fail-closed negatives refused (drill ${json?.drill ?? "unknown"}, dsh ${json?.dsh ?? "?"}, ${json?.date ?? "?"})`,
+  };
+}
+
+/**
+ * backend 能力声明 ⇔ 实测一致性——声明闭集【全量轴】逐轴双向对账
+ * （ADR-0032 §2 本层最高价值断言；2026-09-21 从双轴扩到闭集全量）。
+ *
+ * 逐轴判据（declared=true ⇒ 正向证据；declared=false ⇒ 配置面必须明确拒绝
+ * 或按该轴的既定纪律记 N/A——不发明新语义）：
+ *   - reportsTokenUsage：【双向实测】声明 true 而 input 空 → 红；声明 false 而
+ *     input 非空 → 红（既有纪律不变）。
+ *   - supportsSessionReuse：true ⇒ 真实跨 run 恢复证据（resumeEvidence.accepted
+ *     ——Phase 6 形状证据引用，绝不以 session 锚点顶替，2026-09-21 判据升级）；
+ *     false ⇒ sessionReuse 配置的派发被显式拒绝（fail-closed，既有探针）。
+ *   - supportsRoleContract：true ⇒ 角色合同真实送达（探针：systemPrompt 变体 +
+ *     合同内 marker 的模型回显——回显证明合同经声明通道到达模型）；false ⇒
+ *     systemPrompt 配置的派发被显式拒绝（spawn 前硬门）。
+ *   - reportsCommandExitCode：true ⇒ 命令退出码正向证据（探针 run 的 scorecard
+ *     commandsPassed——产品自身判定，含 toolCallId↔tool_result 推断通道）；
+ *     false ⇒ N/A + 原因（WAO 今天无法产出该证据——按声明条件化，不置绿不算
+ *     失败，ADR-0032 §8；只声明不放行）。
+ *   - supportsInFlightCorrection：N/A + 原因——该能力的执行面是 MCP
+ *     run_dispatch/run_correct（correctable 派发），组件层只驱动 CLI 单发通道，
+ *     无机械探针面（correctable×未声明的 spawn 前拒绝由组合层 run_correct
+ *     路径承担）。
+ *   - replayByRespawn：N/A + 原因——内部 resume 策略路由声明，无 registry/
+ *     dispatch 配置面（"配了该能力"不存在）；resume 机械面由 supportsSessionReuse
+ *     轴承担。
  */
 export function backendCapabilityConsistencyChecks({
   declared = {},
   metricsInput = null,
-  sessionAnchorPresent = null,
   sessionReuseRejected = null,
+  resumeEvidence = null,
+  roleContractEchoed = null,
+  systemPromptRejected = null,
+  commandExitCodeEvidence = null,
 }) {
-  const reports = declared.reportsTokenUsage === true;
-  const reuse = declared.supportsSessionReuse === true;
   const inputObserved = typeof metricsInput === "number" && metricsInput > 0;
-  const reuseDetail = reuse
-    ? "declared=true: provider session anchor (session.created.backendSessionId) is the resume precondition; turn-2 continuation needs the MCP stable Lead session, out of one-shot CLI reach — honestly out of scope here"
-    : "declared=false: a sessionReuse-configured dispatch must be explicitly rejected (fail-closed), never a silent fresh conversation";
+  const reuse = declared.supportsSessionReuse === true;
+  const roleContract = declared.supportsRoleContract === true;
+  const exitCode = declared.reportsCommandExitCode === true;
   return [
     check(
       "reportsTokenUsageConsistency",
-      reports === inputObserved,
+      (declared.reportsTokenUsage === true) === inputObserved,
       "observability",
       `declared=${declared.reportsTokenUsage}, input=${metricsInput ?? null} — declaration must match measurement in BOTH directions`,
       { capability: "reportsTokenUsage" },
     ),
     check(
       "supportsSessionReuseConsistency",
-      reuse ? sessionAnchorPresent === true : sessionReuseRejected === true,
+      reuse
+        ? resumeEvidence?.accepted === true
+        : sessionReuseRejected === true,
       "operational",
-      `${reuseDetail}; sessionAnchorPresent=${sessionAnchorPresent}, sessionReuseRejected=${sessionReuseRejected}`,
+      reuse
+        ? `declared=true: real cross-run resume evidence required (never a bare session id). ${resumeEvidence?.detail ?? "no real-resume evidence reference on file for this backend — run the Phase-6 style resume drill and register its evidence (SESSION_REUSE_EVIDENCE_SOURCES)"}`
+        : `declared=false: a sessionReuse-configured dispatch must be explicitly rejected (fail-closed), never a silent fresh conversation; sessionReuseRejected=${sessionReuseRejected}`,
       { capability: "supportsSessionReuse" },
+    ),
+    check(
+      "supportsRoleContractConsistency",
+      roleContract
+        ? roleContractEchoed === true
+        : systemPromptRejected === true,
+      "operational",
+      roleContract
+        ? `declared=true: the role contract must actually reach the model through the declared channel (probe: a systemPrompt variant carrying a unique marker; the model must echo it). roleContractEchoed=${roleContractEchoed}`
+        : `declared=false: a systemPrompt-configured dispatch must be explicitly rejected (runManager spawn-pre gate), never silently dropped. systemPromptRejected=${systemPromptRejected}`,
+      { capability: "supportsRoleContract" },
+    ),
+    check(
+      "reportsCommandExitCodeConsistency",
+      exitCode
+        ? commandExitCodeEvidence?.passed === true
+        : false,
+      "operational",
+      exitCode
+        ? `declared=true: command exit-code evidence must be producible (probe run scorecard commandsPassed — the product judgment incl. the toolCallId to tool_result inference channel). commandsPassed=${commandExitCodeEvidence?.passed ?? null}`
+        : "declared=false: WAO cannot produce command exit-code evidence for this harness today — commandsPassed-type checks are recorded not-applicable (not green, not a failure) per the declaration (ADR-0032 §8; evidence: scripts/reliability/dsh-acp/evidence/phase7-exit-code-wire.json)",
+      exitCode
+        ? { capability: "reportsCommandExitCode" }
+        : {
+          pass: false,
+          state: "not-applicable",
+          stateReason: "backend declares reportsCommandExitCode=false — WAO cannot produce command exit-code evidence for this harness today (ADR-0032 §8 honest declaration; evidence: scripts/reliability/dsh-acp/evidence/phase7-exit-code-wire.json)",
+          capability: "reportsCommandExitCode",
+        },
+    ),
+    naCheck(
+      "supportsInFlightCorrectionConsistency",
+      "in-flight correction is exercised only through the MCP run_dispatch/run_correct surface (correctable dispatch); the component layer drives the one-shot CLI channel and has no mechanical probe for this axis — the spawn-pre rejection for correctable on an undeclared backend lives on the composition-layer run_correct path",
+      "operational",
+      { capability: "supportsInFlightCorrection" },
+    ),
+    naCheck(
+      "replayByRespawnConsistency",
+      "replayByRespawn is an internal resume-strategy routing declaration with no registry/dispatch configuration surface (there is nothing to configure and expect rejection for); resume mechanics are exercised through the supportsSessionReuse axis",
+      "operational",
+      { capability: "replayByRespawn" },
     ),
   ];
 }
@@ -530,14 +666,21 @@ export function explicitFailureCheck({ name, ok, result, error, events = [], cap
 }
 
 /**
- * 组件结果判定：judged checks（informational 除外）全过 → pass，否则 fail。
+ * 组件结果判定（ADR-0032 §8 五态化，2026-09-21）：judged checks（informational
+ * 除外）里——
+ *   - 任一 check 状态 ∉ {pass, not-applicable}（即 fail/blocked/inconclusive）
+ *     → fail（真失败/真阻塞/证据不足都不得给组件盖 pass）；
+ *   - 全部 ∈ {pass, not-applicable} 且至少一条 pass → pass；
+ *   - 全 N/A（零正向证据）→ fail（N/A 不贡献绿：一个组件的判定不得建立在
+ *     零正向断言上，ADR-0032 §7/§8 精神）。
  * 这是组件层判定的唯一实现——绝不复用组合层的 case 盖章判定（ADR-0032 §4）。
- * judged 数为 0 → fail（一个组件的判定不得建立在零断言上，ADR-0032 §7 精神）。
  */
 export function componentResultFromChecks(checks = []) {
   const judged = checks.filter((c) => c.informational !== true);
   if (judged.length === 0) return "fail";
-  return judged.every((c) => c.pass === true) ? "pass" : "fail";
+  const states = judged.map(checkStateOf);
+  if (states.some((s) => s !== "pass" && s !== "not-applicable")) return "fail";
+  return states.includes("pass") ? "pass" : "fail";
 }
 
 // ── 身份解析（装配解析身份；行内不写身份字面量）──────────────────────────────
@@ -589,8 +732,12 @@ function llmIdentityMatches(identity, agent) {
  *     裸 modelId（须唯一）命中；
  *   - 无命中 / 歧义 → { error }（入口在创建临时文件、派发、更新台账之前 exit 2，
  *     ADR-0032 §7 零目标纪律）。
+ * runtimeFingerprints（2026-09-21 运行时身份入账）：backend 名 → 运行时指纹
+ * （入口一次 `<binary> --version` spawn 探测的产物）；backend 组件键升级为
+ * `backend:<name>@<codeRef>#<runtimeFingerprint>`（缺省不带 #——纯函数测试与
+ * legacy 键形兼容）。两个 unknown 指纹恒不相等（runtimeIdentity.mjs 保证）。
  */
-export function resolveSubjects({ registry, subjectArg, codeRef }) {
+export function resolveSubjects({ registry, subjectArg, codeRef, runtimeFingerprints = {} }) {
   if (typeof codeRef !== "string" || codeRef.length === 0) {
     return { subjects: [], error: "codeRef (WAO repo git HEAD at verification time) is required for backend component keys" };
   }
@@ -606,7 +753,14 @@ export function resolveSubjects({ registry, subjectArg, codeRef }) {
     return names.map((name) => ({
       kind: "backend",
       name,
-      key: componentKeyFor({ kind: "backend", name, codeRef }),
+      key: componentKeyFor({
+        kind: "backend",
+        name,
+        codeRef,
+        runtimeFingerprint: typeof runtimeFingerprints[name] === "string" && runtimeFingerprints[name].length > 0
+          ? runtimeFingerprints[name]
+          : undefined,
+      }),
       anchorAgentId: ids.find((id) => agents[id]?.backend === name),
       capabilitySnapshot: backendCapabilitySnapshot({ backend: name }) ?? null,
     }));
@@ -912,8 +1066,9 @@ export function planComponentChecks({
   compositionSummary = null,
   now = new Date().toISOString(),
   fixtureMaxAgeDays = DEFAULT_FIXTURE_MAX_AGE_DAYS,
+  runtimeFingerprints = {},
 }) {
-  const resolved = resolveSubjects({ registry, subjectArg, codeRef });
+  const resolved = resolveSubjects({ registry, subjectArg, codeRef, runtimeFingerprints });
   if (resolved.error) return { subjects: [], tempRegistry: { agents: {} }, error: resolved.error };
   const candidates = qualifiedFixtureCandidates({ registry, compositionSummary, now, fixtureMaxAgeDays });
   const tempAgents = {};
@@ -983,6 +1138,7 @@ export function executeComponentChecks({
   codeRef,
   now = new Date().toISOString(),
   environmentInfo = null,
+  runtimeIdentities = {},
 }) {
   if (!plan || !Array.isArray(plan.subjects)) {
     throw new Error("executeComponentChecks: plan must come from planComponentChecks");
@@ -993,7 +1149,17 @@ export function executeComponentChecks({
   return plan.subjects.map((entry) => {
     const { subject } = entry;
     const identityFields = subject.kind === "backend"
-      ? { kind: subject.kind, name: subject.name, codeRef, key: subject.key }
+      ? {
+        kind: subject.kind,
+        name: subject.name,
+        codeRef,
+        key: subject.key,
+        // 运行时身份入账（2026-09-21，ADR-0032 §5/§8 批次）：入口一次
+        // `<binary> --version` spawn 探测的产物（distribution/version/binaryPath/
+        // fingerprint）；探测不可知 → honest unknown（fingerprint 每次唯一——
+        // 两个 unknown 恒不当作同一运行时）。
+        runtimeIdentity: runtimeIdentities[subject.name] ?? null,
+      }
       : {
         kind: subject.kind,
         providerID: subject.providerID,
@@ -1468,12 +1634,89 @@ export function createComponentDrills(deps) {
       }
     }
 
-    // ── 能力声明 ⇔ 实测一致性（本层最高价值断言）。
+    // ── 能力声明 ⇔ 实测一致性（本层最高价值断言；声明闭集全量轴，2026-09-21）。
+    // supportsSessionReuse=true 的判据 = 真实跨 run 恢复证据（Phase 6 形状证据
+    // 引用——SESSION_REUSE_EVIDENCE_SOURCES 只登记有真实派发证据的 backend，
+    // 未登记即如实红，绝不以 session 锚点顶替）。
+    let resumeEvidence = null;
+    if (declared.supportsSessionReuse === true) {
+      const subjectName = readAssemblyEntry(agentId)?.backend ?? null;
+      const source = SESSION_REUSE_EVIDENCE_SOURCES[subjectName] ?? null;
+      if (source) {
+        try {
+          resumeEvidence = sessionReuseEvidenceFromPhase6File(
+            JSON.parse(readFileSync(join(root, source.path), "utf8")));
+        } catch (error) {
+          resumeEvidence = { accepted: false, detail: `session-reuse evidence unreadable/unparseable at ${source.path}: ${error?.message ?? error}` };
+        }
+      } else {
+        resumeEvidence = {
+          accepted: false,
+          detail: `no real-resume evidence reference registered for backend ${subjectName} (SESSION_REUSE_EVIDENCE_SOURCES has no entry) — declared=true requires positive cross-run resume evidence; run the Phase-6 style resume drill and register its evidence`,
+        };
+      }
+    }
+    // supportsRoleContract / reportsCommandExitCode 的正向证据探针：一次派发两组
+    // 证据（systemPrompt 变体携带合同内 marker——回显证明合同经声明通道到达模型；
+    // 同一 run 携带 scorecard requireCommands——产品自身 commandsPassed 即命令
+    // 退出码证据判定，含 toolCallId↔tool_result 推断通道）。
+    let roleContractEchoed = null;
+    let systemPromptRejected = null;
+    let commandExitCodeEvidence = null;
+    if (declared.supportsRoleContract === true || declared.reportsCommandExitCode === true) {
+      const marker = `ROLEPROBE_${Date.now().toString(36).toUpperCase()}_${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+      const roleFile = join(tmpDir, "component-role-probe.md");
+      writeFileSync(roleFile, [
+        "WAO component check role-contract probe.",
+        `Your role marker is: ${marker}`,
+        "When the operator asks you to state your role marker, reply with exactly that marker and nothing else.",
+        "",
+      ].join("\n"));
+      const probeRegistry = declared.supportsRoleContract === true
+        ? writeVariantRegistry("component-registry-role-probe.json", agentId, (entry) => ({
+          ...entry, systemPrompt: roleFile,
+        }))
+        : registry; // 无角色合同声明时不注入 systemPrompt（该配置面留给拒绝探针）
+      const r = runCli([
+        "run", agentId,
+        "--prompt", "Run this command: node --version. Then state your role marker exactly as defined in your role contract, and nothing else.",
+        "--wait-timeout", waitTimeout, "--poll-interval", pollInterval,
+        "--registry", probeRegistry,
+        "--cwd", tmpDir, "--format", "json",
+        "--scorecard-rules", JSON.stringify({ requireCommands: ["node --version"], requireEvidence: true }),
+      ]);
+      const result = extractJson(r.stdout || "") ?? null;
+      if (declared.supportsRoleContract === true) {
+        roleContractEchoed = (lastAssistantText(result) ?? "").includes(marker);
+      }
+      const scorecardCommands = Array.isArray(result?.scorecard?.checks)
+        ? result.scorecard.checks.find((c) => c.name === "commandsPassed")
+        : null;
+      commandExitCodeEvidence = scorecardCommands
+        ? { passed: scorecardCommands.passed === true, detail: scorecardCommands.detail ?? scorecardCommands.evidence ?? null }
+        : { passed: false, detail: "probe run produced no scorecard commandsPassed check" };
+    }
+    if (declared.supportsRoleContract !== true) {
+      // 声明不支持角色合同：systemPrompt 配置的派发必须被明确拒绝（spawn 前
+      // 硬门，runManager "Remove systemPrompt ... or switch to a backend that
+      // declares supportsRoleContract"），绝不静默丢弃。零 token（拒绝在派发前）。
+      const probeRoleFile = join(tmpDir, "component-role-probe.md");
+      writeFileSync(probeRoleFile, "WAO component check role-contract rejection probe.\n");
+      const variantPath = writeVariantRegistry("component-registry-role-reject.json", agentId, (entry) => ({
+        ...entry, systemPrompt: probeRoleFile,
+      }));
+      const r = runCli(["run", agentId, "--prompt", "test", "--registry", variantPath, "--format", "json"]);
+      const rejectionText = `${r.stderr ?? ""}${r.stdout ?? ""}`;
+      systemPromptRejected = r.ok === false && /systemPrompt|supportsRoleContract/i.test(rejectionText);
+    }
     checks.push(...backendCapabilityConsistencyChecks({
       declared,
       metricsInput: facts.metricsInput,
-      sessionAnchorPresent,
       sessionReuseRejected,
+      resumeEvidence,
+      roleContractEchoed,
+      systemPromptRejected,
+      commandExitCodeEvidence,
     }));
 
     return { checks, facts };
@@ -1508,11 +1751,17 @@ export function createComponentDrills(deps) {
 
     // ── 工具使用真实证据（scorecard command/file/hasEvidence，无 fallback）。
     //    复用共享 glue runStrictScorecardDrill（ADR-0032 §6 防双轨）。
+    //    commandsPassed 按【夹具 backend】的 reportsCommandExitCode 声明条件化
+    //    （被测 llm 跑在该 backend 上——退出码证据能力属 harness 面，2026-09-21）。
     {
       const drill = shared.runStrictScorecardDrill({ agentId });
+      const fixtureBackendName = readAssemblyEntry(agentId)?.backend ?? null;
+      const declared = backendCapabilitySnapshot({ backend: fixtureBackendName }) ?? {};
       checks.push(...llmScorecardEvidenceChecks({
         result: drill.result,
         fileExists: drill.fileExists,
+        fileContentMatches: drill.fileContentMatches ?? null,
+        declared,
       }));
     }
 

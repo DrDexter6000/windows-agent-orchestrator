@@ -32,6 +32,11 @@ export class OpenCodeServeBackend {
   // 事故防线要求 opencode worker 必配 tokenBudget 的喂料基础）。
   reportsTokenUsage = true;
 
+  // ADR-0032 §8 批次（2026-09-21）：命令退出码证据可产出——serve 部件携带
+  // state.exitCode / metadata.exitCode / part.exitCode（readExitCode 读取并投影
+  // commandEvent(command, exitCode)），数值退出码直接进 command 证据。
+  reportsCommandExitCode = true;
+
   /**
    * The `system` transport is runtime-versioned. Prove it before RunManager
    * creates a transcript or worktree; a static capability flag alone is not

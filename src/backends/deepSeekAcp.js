@@ -43,6 +43,8 @@
 //   replayByRespawn           = false  跨 run 上下文续接走 session/resume，本层不承担重放
 //   reportsTokenUsage         = false  usage_update + PromptResponse.usage 存在但实测可为 null
 //                                      （组件验证抓到 declared=true/input=null）
+//   reportsCommandExitCode    = false  tool_call_update 不填 rawOutput、退出码只在自由文本
+//                                      非零标记里（evidence/phase7-exit-code-wire.json）
 //
 // 零新增生产依赖：只用 node: 内置模块（探针 scripts/reliability/dsh-acp 已证可行）。
 
@@ -299,6 +301,18 @@ export class DeepSeekAcpBackend {
   // declared=true, input=null）→ 声明改为 false。与 supportsSessionReuse=false 同源纪律：
   // 能力声明表示 WAO 今天能完成什么，不是上游协议具备什么。翻转条件 = 有可验证的 token 计量通道。
   reportsTokenUsage = false;
+  // ADR-0032 §8 批次（2026-09-21）：WAO 今天无法经本 backend 产出命令退出码证据——
+  // 语义 = "WAO 能否产出证据"，非"上游协议有无该信息"。静态核查（零 token，
+  // evidence/phase7-exit-code-wire.json）：dsh-acp 0.1.5-rc.2 的 tool_call_update
+  // 只携带 {toolCallId, status, content}（不填协议自带的 rawOutput 自由字段）；
+  // 退出码只以自由文本标记 `[exit code: N]` 出现且仅在非零退出时（干净退出 0 无痕）；
+  // 本文件 handleToolCallUpdate 现只读 update.content 文本解析（extractExitCode），
+  // 且 tool_result 关联键是工具名而非 toolCallId（scorecard 的 0/1 推断通道也断）。
+  // 翻转条件 = 上游在 tool_call_update 提供可结构化解析的退出码字段（或 WAO 接线
+  // 该通道并有实测证据）。声明 false ⇒ strict/scorecard 的 commandsPassed 类检查
+  // 记 not-applicable + 原因（不置绿、不算失败）——是否允许缺该轴的 harness 拿
+  // conditional 属 Owner 决策，不在声明语义内。
+  reportsCommandExitCode = false;
 
   constructor({ spawnFn = spawn, containmentPatchPath, platform } = {}) {
     this._spawnFn = spawnFn;

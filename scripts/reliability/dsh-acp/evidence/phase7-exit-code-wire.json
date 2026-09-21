@@ -1,0 +1,49 @@
+{
+  "check": "ADR-0032 §8 batch E-check (2026-09-21): does the installed dsh ACP bridge put command exit codes into tool_call_update.rawOutput (or any other structurally parseable field)?",
+  "method": "static, zero-token, zero-model: read-only source inspection of the locally installed dsh packages; no dispatch, no credentials",
+  "environment": {
+    "dshLauncher": "C:\\Users\\17865\\AppData\\Roaming\\npm\\dsh.cmd (npm global @deepseek-ai/dsh)",
+    "dshVersion": "0.1.5-rc.2 (package.json name=@deepseek-ai/dsh)",
+    "acpBridgePackage": "@deepseek-ai/dsh-acp 0.1.5-rc.2 at C:\\Users\\17865\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\node_modules\\@deepseek-ai\\dsh-acp",
+    "acpSdkPackage": "@agentclientprotocol/sdk (nested under the dsh package)"
+  },
+  "searched": [
+    {
+      "target": "ACP bridge tool_call_update emission",
+      "files": ["node_modules/@deepseek-ai/dsh-acp/lib/index.js (1424 lines, the whole lib)"],
+      "strings": ["tool_call_update", "rawOutput", "exitCode", "exit_code", "exit code"]
+    },
+    {
+      "target": "protocol schema (does ToolCallUpdate even have rawOutput?)",
+      "files": ["node_modules/@agentclientprotocol/sdk/dist/schema/types.gen.d.ts", "node_modules/@agentclientprotocol/sdk/dist/schema/zod.gen.d.ts", "node_modules/@agentclientprotocol/sdk/dist/examples/agent.js"],
+      "strings": ["rawOutput"]
+    },
+    {
+      "target": "where exit codes are rendered into tool-result text",
+      "files": ["node_modules/@deepseek-ai/dsh-tool-pwsh/lib/index.js", "node_modules/@deepseek-ai/dsh-tool-bash/lib/index.js"],
+      "strings": ["exit code", "[exit code:", "exitCode"]
+    },
+    {
+      "target": "WAO-side consumption of tool_call_update",
+      "files": ["src/backends/deepSeekAcp.js (repo)"],
+      "strings": ["update.content", "extractExitCode", "commandEvent"]
+    }
+  ],
+  "findings": [
+    "VERIFIED-NEGATIVE (rawOutput): the ACP bridge's toolResultUpdate (dsh-acp lib/index.js) emits sessionUpdate \"tool_call_update\" with exactly { toolCallId, status, content } — it does NOT populate rawOutput, even though @agentclientprotocol/sdk's schema declares an optional rawOutput?: unknown field (types.gen.d.ts). Conclusion: the field exists in the protocol but this dsh version leaves it unset.",
+    "VERIFIED (text markers only): command exit codes reach the tool result only as free-form text. dsh-tool-pwsh/dsh-tool-bash renderPwshResult appends a marker line '[exit code: N]' ONLY for non-zero exits (a clean exit 0 produces no marker at all); the process outcome detail string 'exit code: N' goes to the jobs registry, not to the ACP wire.",
+    "VERIFIED (content conversion is lossy): the bridge converts tool-result content blocks via assistantBlockToAcp, which passes ONLY text and image block types; every other structured block type is dropped (returns undefined). No structured exit-code block survives onto tool_call_update.",
+    "VERIFIED (WAO-side): deepSeekAcp.js handleToolCallUpdate reads update.content and runs extractExitCode (a line-anchored regex matching lines of the form 'exit code: N' / 'exitcode=N'). Two independent breaks: (a) the rendered marker is '[exit code: N]' which starts with '[' so the line-anchored regex never matches; (b) contentText() only joins blocks of literal type 'text', while the bridge emits '{type:\"content\", content:{type:\"text\",...}}' wrappers, so even the text body is not extracted. Additionally the scorecard inference channel (withInferredCommandExitCode matching command.toolCallId against tool_result.tool) cannot fire: the bridge's toolResultEvent uses the tool NAME as the correlation key, not the toolCallId.",
+    "CONSISTENT with the real delta record: runs/reliability-summary.json deepseek_acp_deltadrill shows commandsPassed 'failed (exitCode!=0): node --version (exitCode=undefined)' — the command ran, no exit code was extractable."
+  ],
+  "conclusion": "CANNOT support command exit-code evidence today: tool_call_update.rawOutput is NOT populated by dsh-acp 0.1.5-rc.2, and no other structurally parseable exit-code field exists on that notification. Exit codes surface only as free-form '[exit code: N]' text markers for non-zero exits (exit 0 leaves no trace). This grounds the honest declaration reportsCommandExitCode=false on DeepSeekAcpBackend and the not-applicable treatment of commandsPassed-type checks (ADR-0032 §8).",
+  "flipConditions": [
+    "upstream populates tool_call_update.rawOutput (or another structured field) with the exit code, AND",
+    "WAO wires that field in deepSeekAcp.js with real-dispatch evidence (a phase-style probe) — declaration flips only with verified evidence, per the supportsSessionReuse/reportsTokenUsage precedent"
+  ],
+  "notCovered": [
+    "the client terminal API path (task brief notes ACP exit codes live only there) was not inspected in this check — no WAO code path consumes it today, and the bridge-side verdict above is already conclusive for the declaration",
+    "dsh versions other than 0.1.5-rc.2 (re-run this static check after any dsh upgrade; it is zero-token)"
+  ],
+  "date": "2026-09-21"
+}

@@ -29,6 +29,10 @@ import { buildCertificationMatrix } from "./reliability/matrix.mjs";
 // R23-C：providerKey（认证身份第 4 维）归一化单一实现——src 宿主下向 import。
 import { providerKeyFor } from "../src/providerFingerprint.js";
 import { metricsNonZeroCheck } from "./reliability/metricsCheck.mjs";
+// reportsCommandExitCode 条件化的判定源（backendCapabilitySnapshot SSOT）。
+import { backendCapabilitySnapshot } from "../src/backends/factory.js";
+// ADR-0032 §8：检查结果五态（N/A 构造 + 状态派生）。
+import { naCheck, checkStateOf } from "./reliability/checkStates.mjs";
 // ADR-0032 §6：drill glue（runCli + 各 drill + 纯助手）抽至 ./reliability/drills.mjs，
 // 组合入口（本文件）与将来的组件入口（component-check）共用——防双轨漂移。
 // 纯判定内核仍在 adversarialEscape.mjs / metricsCheck.mjs，drills.mjs 只 import 消费。
@@ -168,19 +172,45 @@ function agentInfo(agentId) {
   };
 }
 
-function scorecardChecksFromResult(result) {
-  if (result?.scorecard?.checks?.length) {
-    return result.scorecard.checks.map((c) =>
-      check(c.name, c.passed, strictCategoryForScorecardCheck(c.name), c.detail ?? c.evidence, {
-        capability: capabilityForScorecardCheck(c.name),
-      })
-    );
+// ADR-0032 §8（2026-09-21 修复）+ reportsCommandExitCode 诚实声明：
+//   - 缺 scorecard checks → 红（绝不用 completed 顶替证据检查——旧 fallback 是
+//     点名的坏模式：完成主张不是命令/文件/证据事实）。
+//   - declared reportsCommandExitCode === false 的 backend：commandsPassed 记
+//     not-applicable + 原因（不置绿、不算失败——WAO 今天无法为该 harness 产出
+//     命令退出码证据；证据见 scripts/reliability/dsh-acp/evidence/phase7-exit-code-wire.json）。
+//     其余 scorecard 检查照常判定。
+function scorecardChecksFromResult(result, { reportsCommandExitCode = null } = {}) {
+  const scorecardChecks = Array.isArray(result?.scorecard?.checks) && result.scorecard.checks.length > 0
+    ? result.scorecard.checks
+    : null;
+  const mapCheck = (c) =>
+    check(c.name, c.passed, strictCategoryForScorecardCheck(c.name), c.detail ?? c.evidence, {
+      capability: capabilityForScorecardCheck(c.name),
+    });
+  if (reportsCommandExitCode === false) {
+    const rest = scorecardChecks
+      ? scorecardChecks.filter((c) => c.name !== "commandsPassed").map(mapCheck)
+      : [
+        check("filesExist", false, "strict", "no scorecard checks in run result — completed-substitution is forbidden (ADR-0032 §8)", { capability: "fileEvidence" }),
+        check("hasEvidence", false, "strict", "no scorecard checks in run result — completed-substitution is forbidden (ADR-0032 §8)", { capability: "toolEvidence" }),
+      ];
+    return [
+      naCheck(
+        "commandsPassed",
+        "backend declares reportsCommandExitCode=false — WAO cannot produce command exit-code evidence for this harness today (ACP exit codes live only in the client terminal API; tool_call_update carries free-form text only — evidence: scripts/reliability/dsh-acp/evidence/phase7-exit-code-wire.json)",
+        "strict",
+        { capability: "commandEvidence" },
+      ),
+      ...rest,
+    ];
   }
-  const completed = result?.completed === true;
+  if (scorecardChecks) {
+    return scorecardChecks.map(mapCheck);
+  }
   return [
-    check("commandsPassed", completed, "strict", `completed=${completed}`, { capability: "commandEvidence" }),
-    check("filesExist", completed, "strict", `completed=${completed}`, { capability: "fileEvidence" }),
-    check("hasEvidence", completed, "strict", `completed=${completed}`, { capability: "toolEvidence" }),
+    check("commandsPassed", false, "strict", "no scorecard checks in run result — completed-substitution is forbidden (ADR-0032 §8)", { capability: "commandEvidence" }),
+    check("filesExist", false, "strict", "no scorecard checks in run result — completed-substitution is forbidden (ADR-0032 §8)", { capability: "fileEvidence" }),
+    check("hasEvidence", false, "strict", "no scorecard checks in run result — completed-substitution is forbidden (ADR-0032 §8)", { capability: "toolEvidence" }),
   ];
 }
 
@@ -307,8 +337,22 @@ for (const tc of MATRIX) {
     caseResult.scorecardRunId = drill.result?.runId ?? "unknown";
     caseResult.scorecardError = drill.error;
     caseResult.scorecardFile = drill.fileName;
-    checks.push(...scorecardChecksFromResult(drill.result));
-    checks.push(check("fileMaterialized", drill.fileExists, "strict", drill.fileName, { capability: "fileMaterialized" }));
+    // reportsCommandExitCode 条件化（ADR-0032 §8 + 诚实声明）：声明 false 的
+    // backend，commandsPassed 记 N/A——判定源是 backendCapabilitySnapshot SSOT。
+    const capabilitySnapshot = backendCapabilitySnapshot(registry.agents?.[tc.agentId]);
+    checks.push(...scorecardChecksFromResult(drill.result, {
+      reportsCommandExitCode: capabilitySnapshot?.reportsCommandExitCode ?? null,
+    }));
+    // ADR-0032 §8：文件证据 = 存在 + 内容承载 sentinel（旧实现只查存在）。
+    checks.push(check(
+      "fileMaterialized",
+      drill.fileExists === true && drill.fileContentMatches === true,
+      "strict",
+      drill.fileExists === true && drill.fileContentMatches === true
+        ? `${drill.fileName} exists and carries ${drill.fileSentinel}`
+        : `fileExists=${drill.fileExists}, contentCarriesSentinel=${drill.fileContentMatches} (${drill.fileName}) — existence alone is not file evidence (ADR-0032 §8)`,
+      { capability: "fileMaterialized" },
+    ));
   }
 
   if (tc.drills.includes("isolation")) {
@@ -337,8 +381,13 @@ for (const tc of MATRIX) {
 
   checks.push(...unsupportedDrillChecks(tc, handledDrills));
 
-  const pass = checks.every((c) => c.pass);
-  if (!pass) allPass = false;
+  // ADR-0032 §8 五态判定：
+  //   caseFailed = 存在 fail / blocked / inconclusive 检查（真失败/真阻塞——拉倒 allPass）。
+  //   pass（全绿时间戳基准）= 无上述状态 且 至少一条 pass（全 N/A 的 case 不得
+  //   记全绿——N/A 不贡献绿，只有 skip 的运行不得报 ALL PASS，ADR-0032 §7）。
+  const caseFailed = checks.some((c) => ["fail", "blocked", "inconclusive"].includes(checkStateOf(c)));
+  const pass = !caseFailed && checks.some((c) => checkStateOf(c) === "pass");
+  if (caseFailed) allPass = false;
   caseResult.checks = checks;
   caseResult.pass = pass;
   // TD-111: case 全绿 → 本次运行的 ISO 时间；非全绿 → null（新鲜度由 summarizeWorkers
@@ -347,10 +396,11 @@ for (const tc of MATRIX) {
   caseResult.certification = certifyCase(caseResult);
   results.push(caseResult);
 
-  const status = pass ? "PASS" : "FAIL";
+  const status = caseFailed ? "FAIL" : (pass ? "PASS" : "NO-POSITIVE-EVIDENCE");
   console.log(`  [${status}] ${tc.label} -> ${caseResult.certification.status} (${caseResult.certification.recommendedUse})`);
   for (const c of checks) {
-    console.log(`    ${c.pass ? "✔" : "✖"} ${c.name} [${c.category}]: ${c.detail}`);
+    const icon = checkStateOf(c) === "pass" ? "✔" : checkStateOf(c) === "not-applicable" ? "○" : "✖";
+    console.log(`    ${icon} ${c.name} [${c.category}]: ${c.detail}`);
   }
   if (caseResult.certification.reason) console.log(`    certification: ${caseResult.certification.reason}`);
   if (caseResult.error) console.log(`    error: ${caseResult.error}`);
@@ -361,7 +411,9 @@ for (const tc of MATRIX) {
 // silentTimeout 验证（用 bad-provider 配置）。
 // 注：此探针依赖 opencode-serve（已降级为 fallback，决策 0005）。主力 lane 全是进程式 backend，
 // silent-timeout 机制已在进程式 backend 实现（TD-43，2026-06-25）；此探针对 opencode-serve（fallback lane）仍有效。
-// 故 serve 不在时自动 skip，不污染 allPass/counts。
+// ADR-0032 §8（2026-09-21 修复）：serve 不可达时不再写"通过"（旧坏模式：silentPass=true
+// 顶绿）——检查如实记 not-applicable + 原因（fallback lane down）；不置绿、不算失败，
+// allPass/退出码只受真失败影响。
 console.log("[RUN] silentTimeout early-fail test...");
 let serveReachable = false;
 try {
@@ -371,12 +423,19 @@ try {
   serveReachable = false;
 }
 
-let silentPass = false;
+let silentState = "fail";
 let silentElapsed = 0;
 let silentResult = null;
+let silentCheck;
 if (!serveReachable) {
-  console.log(`  [SKIP] silentTimeout: opencode-serve not reachable at ${SERVE_URL} (fallback lane down; process-based silent-timeout covered by TD-43 unit tests)`);
-  silentPass = true; // 不计为失败：探针对当前架构无意义
+  console.log(`  [N/A] silentTimeout: opencode-serve not reachable at ${SERVE_URL} (fallback lane down; process-based silent-timeout covered by TD-43 unit tests)`);
+  silentState = "not-applicable";
+  silentCheck = naCheck(
+    "silentTimeout",
+    `opencode-serve not reachable at ${SERVE_URL} — the fallback-lane silent-timeout probe has no surface in this run (process-based silent-timeout is covered by TD-43 unit tests); recorded not-applicable, never as a pass (ADR-0032 §8)`,
+    "operational",
+    { capability: "silentTimeout" },
+  );
 } else {
   const badConfig = {
     agents: {
@@ -398,34 +457,34 @@ if (!serveReachable) {
   ]);
   silentElapsed = Date.now() - silentStart;
   silentResult = extractJson(silentOut || "");
-  silentPass = silentResult?.failed === true &&
+  const silentPass = silentResult?.failed === true &&
                /silent timeout/i.test(silentResult?.error ?? "") &&
                silentElapsed < 25000;
+  silentState = silentPass ? "pass" : "fail";
+  silentCheck = check("silentTimeout", silentPass, "operational", `failed=${silentResult?.failed}, elapsed=${silentElapsed}ms`, { capability: "silentTimeout" });
   console.log(`  [${silentPass ? "PASS" : "FAIL"}] silentTimeout: failed=${silentResult?.failed}, elapsed=${silentElapsed}ms`);
 }
-if (!silentPass) allPass = false;
+if (silentState === "fail") allPass = false;
+// suite case 的全绿基准：N/A 不置绿（pass=false → lastHealthyRunAt=null），但也不算失败。
+const silentCasePass = silentState === "pass";
 results.push({
   caseId: "silentTimeout",
   requiredCategories: ["operational"],
   recommendedUse: "suite-operational-check",
-  checks: [
-    check("silentTimeout", silentPass, "operational", serveReachable ? `failed=${silentResult?.failed}, elapsed=${silentElapsed}ms` : `skipped: opencode-serve not reachable at ${SERVE_URL}`, { capability: "silentTimeout" }),
-  ],
+  checks: [silentCheck],
   certification: certifyCase({
     caseId: "silentTimeout",
     requiredCategories: ["operational"],
     recommendedUse: "suite-operational-check",
-    checks: [
-      check("silentTimeout", silentPass, "operational", serveReachable ? `failed=${silentResult?.failed}, elapsed=${silentElapsed}ms` : `skipped: opencode-serve not reachable at ${SERVE_URL}`, { capability: "silentTimeout" }),
-    ],
+    checks: [silentCheck],
     error: silentResult?.error,
   }),
-  pass: silentPass,
+  pass: silentCasePass,
   // TD-111: suite-level case 同样记录全绿时间（无 agentId，不进 worker 聚合，仅保 case 级一致）。
-  lastHealthyRunAt: silentPass ? new Date().toISOString() : null,
+  lastHealthyRunAt: silentCasePass ? new Date().toISOString() : null,
   failed: silentResult?.failed,
   elapsedMs: silentElapsed,
-  error: serveReachable ? silentResult?.error : `skipped (opencode-serve not reachable at ${SERVE_URL})`,
+  error: serveReachable ? silentResult?.error : `not-applicable (opencode-serve not reachable at ${SERVE_URL})`,
 });
 
 // 清理（Windows 下可能有文件锁，try/catch 不阻断结果输出）

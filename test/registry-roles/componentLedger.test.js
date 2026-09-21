@@ -21,6 +21,7 @@ import {
   COMPONENT_LEDGER_VERSION,
   COMPONENT_RESULTS,
   annotateFixtureDecay,
+  annotateRuntimeDrift,
   assertNoCompositionLayerLeak,
   backendComponentKey,
   classifyComponent,
@@ -38,6 +39,7 @@ import {
   recordComponentCheck,
   serializeComponentLedger,
   summarizeComponentLedger,
+  validateComponentRecord,
   writeComponentLedgerFile,
 } from "../../scripts/reliability/componentLedger.mjs";
 
@@ -538,7 +540,7 @@ test("leak-pin: assertNoCompositionLayerLeak 对嵌套保留键显式抛错", ()
 
 test("leak-pin: writeComponentLedgerFile / serializeComponentLedger 拒写含组合层键的 payload", () => {
   const summary = summarizeComponentLedger([backendPassRecord()], { generatedAt: NOW });
-  const poisoned = { ...summary, workers: { researcher: { status: "certified" } } };
+  const poisoned = { ...summary, workers: { researcher: { state: "certified" } } };
   assert.throws(() => serializeComponentLedger(poisoned), /reserved key "workers"/);
   assert.throws(
     () => writeComponentLedgerFile(join(TMP, "poisoned", COMPONENT_LEDGER_FILENAME), poisoned),
@@ -577,4 +579,152 @@ test("leak-pin: 模块不得 import certification.mjs 的状态闭集（certifie
   for (const banned of ["CERTIFICATION_STATUSES", "certifyCase", "summarizeCertification", "RECOMMENDED_USE"]) {
     assert.ok(!names.includes(banned), `不得 import 组合层闭集符号 ${banned}`);
   }
+});
+
+// ════ 运行时身份入账 + 检查五态（ADR-0032 §5/§8 批次，2026-09-21）════
+
+test("keys【运行时身份】: backend 键升级 backend:<name>@<codeRef>#<fp>；指纹分隔符约束；legacy 无指纹键形兼容", () => {
+  assert.equal(
+    backendComponentKey({ name: "deepseek-acp", codeRef: "abc123", runtimeFingerprint: "v1-deadbeefdeadbeef" }),
+    "backend:deepseek-acp@abc123#v1-deadbeefdeadbeef",
+  );
+  assert.equal(
+    backendComponentKey({ name: "deepseek-acp", codeRef: "abc123" }),
+    "backend:deepseek-acp@abc123",
+    "缺省指纹 → legacy 键形（不带 #）",
+  );
+  assert.throws(() => backendComponentKey({ name: "x", codeRef: "y", runtimeFingerprint: "a#b" }), /must not contain "#"/);
+  assert.throws(() => backendComponentKey({ name: "x", codeRef: "y", runtimeFingerprint: "a@b" }), /must not contain "@"/);
+  assert.equal(componentKeyKind("backend:deepseek-acp@abc123#v1-deadbeefdeadbeef"), "backend", "带指纹键仍落 backend 命名空间");
+});
+
+test("record【运行时身份】: runtimeIdentity 入账 + subject.runtimeFingerprint 重派生维；llm 被测拒绝该字段", () => {
+  const record = recordComponentCheck({
+    kind: "backend",
+    name: "codex",
+    codeRef: "abc123",
+    runtimeIdentity: { distribution: "codex", version: "0.9.2", binaryPath: "C:/x/codex.exe", fingerprint: "v1-feedfacefeedface" },
+    result: "pass",
+    checks: [],
+    fixture: null,
+  });
+  assert.equal(record.key, "backend:codex@abc123#v1-feedfacefeedface");
+  assert.equal(record.subject.runtimeFingerprint, "v1-feedfacefeedface");
+  assert.deepEqual(record.runtimeIdentity, { distribution: "codex", version: "0.9.2", binaryPath: "C:/x/codex.exe", fingerprint: "v1-feedfacefeedface" });
+  assert.equal(validateComponentRecord(record), true, "磁盘校验：subject 指纹重派生键一致");
+  // honest unknown 形状：version/binaryPath 可 null，fingerprint 必填。
+  const unknown = recordComponentCheck({
+    kind: "backend",
+    name: "opencode-serve",
+    codeRef: "abc123",
+    runtimeIdentity: { distribution: "opencode-serve", version: null, binaryPath: null, fingerprint: "unknown-0011223344556677" },
+    result: "blocked",
+    blockedReason: "fixture-unavailable",
+  });
+  assert.equal(unknown.runtimeIdentity.version, null);
+  assert.throws(() => recordComponentCheck({
+    kind: "backend", name: "x", codeRef: "y",
+    runtimeIdentity: { distribution: "x", version: "1", fingerprint: "" },
+    result: "pass",
+  }), /fingerprint.*non-empty/, "空指纹拒绝（两个 unknown 不得合并）");
+  // llm 被测没有 harness 探测面 → 显式拒绝。
+  assert.throws(() => recordComponentCheck({
+    kind: "llm", providerID: "p", modelId: "m", providerKey: null,
+    runtimeIdentity: { distribution: "d", version: "1", fingerprint: "f" },
+    result: "pass",
+  }), /only valid for backend/);
+});
+
+test("record【检查五态】: status 进台账且三态必须带原因（缺原因/矛盾 pass 磁盘侧拒绝）", () => {
+  const base = { kind: "backend", name: "codex", codeRef: "abc123", result: "pass", fixture: null };
+  const withNa = recordComponentCheck({
+    ...base,
+    checks: [{ name: "commandsPassed", pass: false, state: "not-applicable", stateReason: "declared reportsCommandExitCode=false", detail: "d" }],
+  });
+  assert.equal(withNa.checks[0].state, "not-applicable");
+  assert.equal(withNa.checks[0].stateReason, "declared reportsCommandExitCode=false");
+  // 序列化 → 解析往返：五态字段不丢。
+  const parsed = parseComponentLedger(serializeComponentLedger(summarizeComponentLedger([withNa])));
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.ledger.records[0].checks[0].state, "not-applicable");
+  // 缺原因 → 拒绝。
+  assert.throws(() => recordComponentCheck({
+    ...base,
+    checks: [{ name: "x", pass: false, state: "not-applicable", detail: "d" }],
+  }), /requires a non-empty stateReason/);
+  // pass 与 status 矛盾 → 拒绝。
+  assert.throws(() => recordComponentCheck({
+    ...base,
+    checks: [{ name: "x", pass: true, state: "fail", detail: "d" }],
+  }), /contradicts state/);
+  // 越 closed set 的 status → 拒绝。
+  assert.throws(() => recordComponentCheck({
+    ...base,
+    checks: [{ name: "x", pass: true, state: "certified", detail: "d" }],
+  }), /outside the ADR-0032 §8 closed set/);
+  // legacy 布尔形状照常落账（无 status 字段）。
+  const legacy = recordComponentCheck({ ...base, checks: [{ name: "x", pass: true, detail: "d" }] });
+  assert.equal(legacy.checks[0].state, undefined);
+});
+
+test("annotateRuntimeDrift: 同 (name, codeRef) 异指纹的历史记录降 runtime-drifted advisory（不删、长度不变）", () => {
+  const prior = [
+    recordComponentCheck({ kind: "backend", name: "codex", codeRef: "abc123", runtimeIdentity: { distribution: "codex", version: "0.9.0", fingerprint: "v1-old0" }, result: "pass", checks: [{ name: "a", pass: true, detail: "d" }], fixture: null }),
+    recordComponentCheck({ kind: "backend", name: "codex", codeRef: "other", runtimeIdentity: { distribution: "codex", version: "0.9.0", fingerprint: "v1-old1" }, result: "pass", checks: [{ name: "a", pass: true, detail: "d" }], fixture: null }),
+    recordComponentCheck({ kind: "backend", name: "kimi-code", codeRef: "abc123", runtimeIdentity: { distribution: "kimi", version: "1", fingerprint: "v1-old2" }, result: "pass", checks: [{ name: "a", pass: true, detail: "d" }], fixture: null }),
+    recordComponentCheck({ kind: "llm", providerID: "p", modelId: "m", providerKey: null, result: "pass", checks: [{ name: "a", pass: true, detail: "d" }] }),
+  ];
+  const fresh = [recordComponentCheck({
+    kind: "backend", name: "codex", codeRef: "abc123",
+    runtimeIdentity: { distribution: "codex", version: "0.9.2", binaryPath: "C:/x/codex.exe", fingerprint: "v1-new0" },
+    result: "pass", checks: [{ name: "a", pass: true, detail: "d" }], fixture: null,
+  })];
+  const annotated = annotateRuntimeDrift(prior, { freshBackendRecords: fresh, at: "2026-09-21T00:00:00.000Z" });
+  assert.equal(annotated.length, prior.length, "不删（长度恒不变）");
+  assert.equal(annotated[0].advisory?.code, "runtime-drifted", "同 name+codeRef 异指纹 → 漂移 advisory");
+  assert.match(annotated[0].advisory.reason, /v1-old0/);
+  assert.match(annotated[0].advisory.reason, /v1-new0/);
+  assert.match(annotated[0].advisory.reason, /rerun recommended/);
+  assert.equal(annotated[0].advisory.at, "2026-09-21T00:00:00.000Z");
+  assert.equal(annotated[1].advisory, undefined, "同 name 异 codeRef（键滚动）不属运行时漂移");
+  assert.equal(annotated[2].advisory, undefined, "异 name 不受连坐");
+  assert.equal(annotated[3].advisory, undefined, "llm 记录不受 backend 漂移连坐");
+  // 同指纹 → 不标（正常刷新路径）。
+  const sameFp = annotateRuntimeDrift([prior[0]], {
+    freshBackendRecords: [recordComponentCheck({
+      kind: "backend", name: "codex", codeRef: "abc123",
+      runtimeIdentity: { distribution: "codex", version: "0.9.0", fingerprint: "v1-old0" },
+      result: "pass", checks: [], fixture: null,
+    })],
+  });
+  assert.equal(sameFp[0].advisory, undefined);
+  // legacy 无指纹记录 → 无法证明同运行时 → 如实标漂移。
+  const legacyPrior = [recordComponentCheck({ kind: "backend", name: "codex", codeRef: "abc123", result: "pass", checks: [], fixture: null })];
+  const legacyAnnotated = annotateRuntimeDrift(legacyPrior, { freshBackendRecords: fresh });
+  assert.equal(legacyAnnotated[0].advisory?.code, "runtime-drifted");
+  assert.match(legacyAnnotated[0].advisory.reason, /no fingerprint on record/);
+});
+
+test("six-states【运行时漂移】: runtime-drifted advisory 的记录消费为 stale（advisory 建议重跑，非红非绿）", () => {
+  const drifted = annotateRuntimeDrift(
+    [recordComponentCheck({ kind: "backend", name: "codex", codeRef: "abc123", runtimeIdentity: { distribution: "codex", version: "0.9.0", fingerprint: "v1-old0" }, result: "pass", checks: [{ name: "a", pass: true, detail: "d" }], fixture: null })],
+    { freshBackendRecords: [recordComponentCheck({ kind: "backend", name: "codex", codeRef: "abc123", runtimeIdentity: { distribution: "codex", version: "0.9.2", fingerprint: "v1-new0" }, result: "pass", checks: [], fixture: null })] },
+  )[0];
+  const summary = summarizeComponentLedger([drifted]);
+  const classification = classifyComponent({ state: "loaded", ledger: summary }, drifted.key, {});
+  assert.equal(classification.state, "stale", "运行时漂移复用 stale 态（六态闭集不变）");
+  assert.match(classification.reason, /runtime fingerprint drifted/);
+  assert.match(classification.reason, /never a certification gate/);
+});
+
+test("advisory 闭集: runtime-drifted 进闭集；越闭集码仍拒绝", () => {
+  const rec = recordComponentCheck({
+    kind: "backend", name: "x", codeRef: "y", result: "pass", checks: [], fixture: null,
+    advisory: { code: "runtime-drifted", reason: "r", at: "2026-09-21T00:00:00.000Z" },
+  });
+  assert.equal(rec.advisory.code, "runtime-drifted");
+  assert.throws(() => recordComponentCheck({
+    kind: "backend", name: "x", codeRef: "y", result: "pass", checks: [], fixture: null,
+    advisory: { code: "stale-runtime", reason: "r" },
+  }), /advisory.code closed set/);
 });

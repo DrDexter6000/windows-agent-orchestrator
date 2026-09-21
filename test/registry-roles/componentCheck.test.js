@@ -32,6 +32,7 @@ import {
 import {
   BACKEND_COMPONENT_DRILLS,
   LLM_COMPONENT_DRILLS,
+  SESSION_REUSE_EVIDENCE_SOURCES,
   backendCapabilityConsistencyChecks,
   backendEventIntegrityChecks,
   backendStartupConfigChecks,
@@ -49,6 +50,7 @@ import {
   planComponentChecks,
   qualifiedFixtureCandidates,
   resolveSubjects,
+  sessionReuseEvidenceFromPhase6File,
 } from "../../scripts/reliability/componentDrills.mjs";
 import {
   recordComponentCheck,
@@ -686,13 +688,55 @@ test("kernel: 命令式 backend 的 command 证据（exit 0 + 命令引用 senti
 });
 
 test("kernel【证伪】: scorecard 证据缺失 → 红，绝不用 completed 顶替（ADR-0032 §8）", () => {
-  const checks = llmScorecardEvidenceChecks({ result: { completed: true }, fileExists: true });
+  const checks = llmScorecardEvidenceChecks({ result: { completed: true }, fileExists: true, fileContentMatches: true });
   const byName = new Map(checks.map((c) => [c.name, c]));
   for (const name of ["commandsPassed", "filesExist", "hasEvidence"]) {
     assert.equal(byName.get(name).pass, false, `${name} 缺 scorecard 即红`);
     assert.match(byName.get(name).detail, /completed-substitution is forbidden/);
   }
   assert.equal(byName.get("fileMaterialized").pass, true);
+  // 内容证据收紧（2026-09-21）：文件存在但内容未承载 sentinel → 红（存在≠证据）。
+  const noContent = llmScorecardEvidenceChecks({ result: { completed: true }, fileExists: true, fileContentMatches: false });
+  const noContentByName = new Map(noContent.map((c) => [c.name, c]));
+  assert.equal(noContentByName.get("fileMaterialized").pass, false, "文件存在但内容缺 sentinel → 红");
+  assert.match(noContentByName.get("fileMaterialized").detail, /existence without the sentinel content/);
+  const contentUnobserved = llmScorecardEvidenceChecks({ result: { completed: true }, fileExists: true, fileContentMatches: null });
+  assert.equal(new Map(contentUnobserved.map((c) => [c.name, c])).get("fileMaterialized").pass, false, "内容未观察（null）不放宽 → 红");
+});
+
+test("kernel: commandsPassed 按 reportsCommandExitCode 声明条件化——declared=false 记 N/A（带原因，不置绿不算失败）", () => {
+  const checks = llmScorecardEvidenceChecks({
+    result: { completed: true, scorecard: { checks: [
+      { name: "commandsPassed", passed: false, detail: "failed (exitCode!=0): node --version (exitCode=undefined)" },
+      { name: "filesExist", passed: true, evidence: "1 file_written event(s) recorded" },
+      { name: "hasEvidence", passed: true, evidence: "7 evidence event(s) found" },
+    ] } },
+    fileExists: true,
+    fileContentMatches: true,
+    declared: { reportsCommandExitCode: false },
+  });
+  const byName = new Map(checks.map((c) => [c.name, c]));
+  const commands = byName.get("commandsPassed");
+  assert.equal(commands.state, "not-applicable");
+  assert.equal(commands.pass, false, "N/A 绝不置绿");
+  assert.match(commands.stateReason, /reportsCommandExitCode=false/);
+  assert.match(commands.stateReason, /phase7-exit-code-wire\.json/);
+  // 其余检查照常判定（声明只条件化 commandsPassed 一族）。
+  assert.equal(byName.get("filesExist").pass, true);
+  assert.equal(byName.get("hasEvidence").pass, true);
+  assert.equal(byName.get("fileMaterialized").pass, true);
+  // declared=true/unknown：照常判定（无 N/A 通道——退路即伪造）。
+  const judged = llmScorecardEvidenceChecks({
+    result: { completed: true, scorecard: { checks: [
+      { name: "commandsPassed", passed: false, detail: "exitCode=undefined" },
+    ] } },
+    fileExists: true,
+    fileContentMatches: true,
+    declared: { reportsCommandExitCode: true },
+  });
+  const judgedCommands = new Map(judged.map((c) => [c.name, c])).get("commandsPassed");
+  assert.equal(judgedCommands.pass, false, "declared=true 时 commandsPassed 照常判红");
+  assert.equal(judgedCommands.state, undefined);
 });
 
 test("kernel: scorecard checks 原样映射（passed=false 保持红）", () => {
@@ -755,9 +799,116 @@ test("kernel: 能力声明 ⇔ 实测【双向】——声明与实测任一方�
   assert.equal(byName(backendCapabilityConsistencyChecks({ declared: { reportsTokenUsage: false, supportsSessionReuse: false }, metricsInput: 12, sessionReuseRejected: true })).get("reportsTokenUsageConsistency").pass, false);
   // 声明 false + 无 input → 绿。
   assert.equal(byName(backendCapabilityConsistencyChecks({ declared: { reportsTokenUsage: false, supportsSessionReuse: false }, metricsInput: null, sessionReuseRejected: true })).get("reportsTokenUsageConsistency").pass, true);
-  // supportsSessionReuse：声明 false 须 fail-closed 拒绝；声明 true 须 session 锚点。
+  // supportsSessionReuse：声明 false 须 fail-closed 拒绝；声明 true 须真恢复证据。
   assert.equal(byName(backendCapabilityConsistencyChecks({ declared: { reportsTokenUsage: true, supportsSessionReuse: false }, metricsInput: 5, sessionReuseRejected: false })).get("supportsSessionReuseConsistency").pass, false);
   assert.equal(byName(backendCapabilityConsistencyChecks({ declared: { reportsTokenUsage: true, supportsSessionReuse: true }, metricsInput: 5, sessionAnchorPresent: false })).get("supportsSessionReuseConsistency").pass, false);
+});
+
+test("kernel【判据升级 2026-09-21】: supportsSessionReuse=true 只认真实跨 run 恢复证据——session 锚点不再顶替", () => {
+  const byName = (checks) => new Map(checks.map((c) => [c.name, c]));
+  const declared = { reportsTokenUsage: true, supportsSessionReuse: true, reportsCommandExitCode: true, supportsRoleContract: true };
+  // 旧判据形状（sessionAnchorPresent=true 但无真恢复证据）→ 红：只证明会话建立
+  // 不证明能恢复（ADR-0032 §2 判据升级）。
+  const anchorOnly = backendCapabilityConsistencyChecks({ declared, metricsInput: 5, sessionAnchorPresent: true });
+  assert.equal(byName(anchorOnly).get("supportsSessionReuseConsistency").pass, false, "session 锚点不再构成 declared=true 的判据");
+  assert.match(byName(anchorOnly).get("supportsSessionReuseConsistency").detail, /never a bare session id/);
+  // 真恢复证据（Phase 6 形状被接受）→ 绿。
+  const accepted = backendCapabilityConsistencyChecks({
+    declared, metricsInput: 5,
+    resumeEvidence: { accepted: true, detail: "real cross-run resume evidence accepted: run1 → run2 same session" },
+    roleContractEchoed: true,
+    commandExitCodeEvidence: { passed: true },
+  });
+  for (const name of ["supportsSessionReuseConsistency", "supportsRoleContractConsistency", "reportsCommandExitCodeConsistency", "reportsTokenUsageConsistency"]) {
+    assert.equal(byName(accepted).get(name).pass, true, `${name} 全证据 → 绿`);
+  }
+  // 证据被拒（accepted=false）→ 红，detail 带拒绝原因。
+  const rejected = backendCapabilityConsistencyChecks({
+    declared, metricsInput: 5,
+    resumeEvidence: { accepted: false, detail: "session-reuse evidence rejected: backendSessionId not identical across runs" },
+    roleContractEchoed: true,
+    commandExitCodeEvidence: { passed: true },
+  });
+  assert.equal(byName(rejected).get("supportsSessionReuseConsistency").pass, false);
+  assert.match(byName(rejected).get("supportsSessionReuseConsistency").detail, /rejected: backendSessionId not identical/);
+});
+
+test("kernel: 声明闭集全量轴——roleContract/exitCode 各双向 + 无探针面轴记 N/A（带原因）", () => {
+  const byName = (checks) => new Map(checks.map((c) => [c.name, c]));
+  const names = backendCapabilityConsistencyChecks({ declared: {} }).map((c) => c.name);
+  assert.deepEqual([...names].sort(), [
+    "replayByRespawnConsistency",
+    "reportsCommandExitCodeConsistency",
+    "reportsTokenUsageConsistency",
+    "supportsInFlightCorrectionConsistency",
+    "supportsRoleContractConsistency",
+    "supportsSessionReuseConsistency",
+  ], "六轴闭集（snapshot 全量成员各一检查）");
+
+  // supportsRoleContract：true 无回显 → 红；false 未拒绝 → 红；false 明确拒绝 → 绿。
+  const echo = byName(backendCapabilityConsistencyChecks({ declared: { supportsRoleContract: true }, roleContractEchoed: false }));
+  assert.equal(echo.get("supportsRoleContractConsistency").pass, false);
+  const silentDrop = byName(backendCapabilityConsistencyChecks({ declared: { supportsRoleContract: false }, systemPromptRejected: false }));
+  assert.equal(silentDrop.get("supportsRoleContractConsistency").pass, false, "声明不支持而 systemPrompt 配置被静默接受 → 红");
+  const rejected = byName(backendCapabilityConsistencyChecks({ declared: { supportsRoleContract: false }, systemPromptRejected: true }));
+  assert.equal(rejected.get("supportsRoleContractConsistency").pass, true, "明确拒绝 = 正确结果");
+  // 探针未观察（null）→ 红，不得当绿。
+  assert.equal(byName(backendCapabilityConsistencyChecks({ declared: { supportsRoleContract: true } })).get("supportsRoleContractConsistency").pass, false);
+
+  // reportsCommandExitCode：true 需 commandsPassed 正向证据；false 记 N/A（带原因，不置绿不算失败）。
+  const exitGreen = byName(backendCapabilityConsistencyChecks({ declared: { reportsCommandExitCode: true }, commandExitCodeEvidence: { passed: true } }));
+  assert.equal(exitGreen.get("reportsCommandExitCodeConsistency").pass, true);
+  const exitRed = byName(backendCapabilityConsistencyChecks({ declared: { reportsCommandExitCode: true }, commandExitCodeEvidence: { passed: false } }));
+  assert.equal(exitRed.get("reportsCommandExitCodeConsistency").pass, false);
+  const exitNa = byName(backendCapabilityConsistencyChecks({ declared: { reportsCommandExitCode: false } }));
+  const naCheck = exitNa.get("reportsCommandExitCodeConsistency");
+  assert.equal(naCheck.state, "not-applicable");
+  assert.equal(naCheck.pass, false, "N/A 绝不置绿");
+  assert.match(naCheck.stateReason, /reportsCommandExitCode=false/);
+
+  // supportsInFlightCorrection / replayByRespawn：无组件层机械探针面 → N/A + 原因
+  //（声明值不改变该判定——该两轴在本层无面可探，如实记录）。
+  for (const name of ["supportsInFlightCorrectionConsistency", "replayByRespawnConsistency"]) {
+    for (const declaredValue of [true, false]) {
+      const c = byName(backendCapabilityConsistencyChecks({ declared: { [name.replace("Consistency", "")]: declaredValue } })).get(name);
+      assert.equal(c.state, "not-applicable", `${name}（declared=${declaredValue}）无探针面 → N/A`);
+      assert.ok(c.stateReason.length > 20, `${name} 的 N/A 必须带原因`);
+      assert.equal(c.pass, false);
+    }
+  }
+});
+
+test("kernel: sessionReuseEvidenceFromPhase6File——真证据文件被接受，篡改/缺负对照被拒", () => {
+  // 仓库内真实证据文件（Phase 6 产物）必须被接受。
+  const real = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "reliability", "dsh-acp", "evidence", "phase6-session-reuse.json"), "utf8"));
+  const accepted = sessionReuseEvidenceFromPhase6File(real);
+  assert.equal(accepted.accepted, true, "仓库内 Phase 6 真证据被接受");
+  assert.match(accepted.detail, /same provider session 811d622a/);
+  assert.match(accepted.detail, /3\/3 fail-closed negatives refused/);
+  // 篡改 1：两次 run 的 backendSessionId 不同 → 拒。
+  const sidDrift = structuredClone(real);
+  sidDrift.steps.run2.backendSessionId = "00000000-1111-4222-8333-444444444444";
+  assert.equal(sessionReuseEvidenceFromPhase6File(sidDrift).accepted, false);
+  assert.match(sessionReuseEvidenceFromPhase6File(sidDrift).detail, /not identical across runs/);
+  // 篡改 2：run2 未走 resume 路由 → 拒（两次全新会话不是恢复）。
+  const freshTurn = structuredClone(real);
+  freshTurn.steps.run2.runSessionReuseTurn = "first";
+  assert.match(sessionReuseEvidenceFromPhase6File(freshTurn).detail, /not routed as a resume turn/);
+  // 篡改 3：负对照缺失 → 拒（无 fail-closed 证明的"恢复"不可信）。
+  const noNegatives = structuredClone(real);
+  delete noNegatives.negativeB;
+  assert.match(sessionReuseEvidenceFromPhase6File(noNegatives).detail, /fail-closed negatives incomplete/);
+  // 形状坏 → 拒。
+  assert.match(sessionReuseEvidenceFromPhase6File(null).detail, /not an object/);
+  assert.match(sessionReuseEvidenceFromPhase6File({ steps: {} }).detail, /missing run1\/run2 runIds/);
+});
+
+test("kernel: SESSION_REUSE_EVIDENCE_SOURCES 只登记真实派发证据路径（deepseek-acp → phase6）", () => {
+  assert.deepEqual(Object.keys(SESSION_REUSE_EVIDENCE_SOURCES), ["deepseek-acp"]);
+  const source = SESSION_REUSE_EVIDENCE_SOURCES["deepseek-acp"];
+  assert.equal(source.path, "scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json");
+  assert.ok(existsSync(join(REPO_ROOT, source.path)), "登记的证据路径必须真实存在");
+  assert.ok(existsSync(join(REPO_ROOT, source.drill)), "登记的 drill 路径必须真实存在");
 });
 
 test("kernel: 配置传递按支持范围——装配带 model → 值必须送达；装配无 model → 注入必须明确拒绝（ADR-0032 §2）", () => {
@@ -926,6 +1077,57 @@ test("kernel: componentResultFromChecks——judged 全过才 pass；information
   assert.equal(componentResultFromChecks([check_("a", true), check_("b", true), check_("i", false, { informational: true })]), "pass");
   assert.equal(componentResultFromChecks([check_("a", true), check_("b", false)]), "fail");
   assert.equal(componentResultFromChecks([]), "fail", "零断言不得 pass（ADR-0032 §7 精神）");
+});
+
+test("kernel【五态 2026-09-21】: N/A 不算失败也不置绿——judged pass + N/A → pass；全 N/A → fail；fail/blocked/inconclusive → fail", () => {
+  const na = { name: "commandsPassed", pass: false, state: "not-applicable", stateReason: "declared reportsCommandExitCode=false", category: "strict", detail: "d" };
+  // pass + N/A → pass（N/A 不拖垮正向证据）。
+  assert.equal(componentResultFromChecks([check_("a", true), na]), "pass");
+  // 全 N/A（零正向证据）→ fail：N/A 不贡献绿（ADR-0032 §8）。
+  assert.equal(componentResultFromChecks([na, { ...na, name: "na2" }]), "fail");
+  // fail / blocked / inconclusive 任一在场 → fail（真失败/真阻塞/证据不足都不是绿）。
+  for (const status of ["fail", "blocked", "inconclusive"]) {
+    const reasoned = { name: `x-${status}`, pass: false, status, stateReason: "r", category: "core", detail: "d" };
+    assert.equal(componentResultFromChecks([check_("a", true), reasoned]), "fail", `${status} 检查不得给组件盖 pass`);
+  }
+  // informational 的 N/A 不参与判定（同既有 informational 纪律）。
+  assert.equal(componentResultFromChecks([check_("a", true), { ...na, informational: true }]), "pass");
+});
+
+test("plan/execute【运行时身份 2026-09-21】: 指纹进组件键（backend:<name>@<codeRef>#<fp>），runtimeIdentity 入账，llm 侧无探测面", () => {
+  const registry = syntheticRegistry();
+  registry.certification = { fixtures: { llm: [{ agentId: "researcher" }] } };
+  const fp = "v1-abcdef0123456789";
+  const plan = planComponentChecks({
+    registry,
+    subjectArg: "codex",
+    codeRef: CODE_REF,
+    compositionSummary: null,
+    now: NOW,
+    runtimeFingerprints: { codex: fp },
+  });
+  assert.equal(plan.error, null);
+  assert.equal(plan.subjects[0].subject.key, `backend:codex@${CODE_REF}#${fp}`, "组件键升级为 #<runtimeFingerprint> 后缀");
+  const runtimeIdentity = { distribution: "codex", version: "0.5.0", binaryPath: "C:/x/codex.exe", fingerprint: fp };
+  const inputs = executeComponentChecks({
+    plan,
+    drills: {
+      runBackendComponentDrills: () => ({ checks: [check_("backendNormalCompletion", true)], facts: {} }),
+      runLlmComponentDrills: () => { throw new Error("not an llm subject"); },
+    },
+    codeRef: CODE_REF,
+    now: NOW,
+    runtimeIdentities: { codex: runtimeIdentity },
+  });
+  assert.equal(inputs[0].runtimeIdentity, runtimeIdentity, "运行时身份随被测入账");
+  const record = recordComponentCheck(inputs[0]);
+  assert.equal(record.key, `backend:codex@${CODE_REF}#${fp}`);
+  assert.equal(record.subject.runtimeFingerprint, fp, "subject 携带指纹（键重派生维）");
+  assert.equal(record.runtimeIdentity.version, "0.5.0");
+  assert.equal(record.runtimeIdentity.binaryPath, "C:/x/codex.exe");
+  // 无指纹（legacy/测试缺省）→ 键不带 # 后缀（向后兼容形状）。
+  const legacyPlan = planComponentChecks({ registry, subjectArg: "codex", codeRef: CODE_REF, compositionSummary: null, now: NOW });
+  assert.equal(legacyPlan.subjects[0].subject.key, `backend:codex@${CODE_REF}`, "缺省指纹 → legacy 键形（不带 #）");
 });
 
 test("drill 词汇: 两 kind 的 drills 闭集非空（零目标纪律的比对基准）", () => {

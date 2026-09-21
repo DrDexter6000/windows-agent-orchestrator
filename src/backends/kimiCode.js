@@ -34,6 +34,13 @@ export class KimiCodeBackend extends ProcessBackend {
   // registry validate 据此对 tokenBudget 配置输出 ⚠（不阻塞）。
   reportsTokenUsage = false;
 
+  // ADR-0032 §8 批次（2026-09-21）：命令退出码证据可产出——kimi stream-json 的
+  // command 事件本身不带数值退出码（parser 投影 commandEvent(command, undefined)），
+  // 但 tool_result 以 tool_call id 为关联键（parser toolResultEvent(id, ...)），
+  // scorecard 的 withInferredCommandExitCode 据此可靠推断 0/1（reliability 记录
+  // coder_mm commandEvidence 绿即此通道）。
+  reportsCommandExitCode = true;
+
   /**
    * Kimi Code 0.29.1 exposes KIMI_MODEL_THINKING_EFFORT as a process-scoped
    * override for the Kimi provider. K3 accepts low/high/max. WAO compiles the

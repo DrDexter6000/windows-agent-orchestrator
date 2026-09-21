@@ -12,7 +12,7 @@
 | `acp-tool-sample.mjs` | 工具名采样：抓 `tool_call` 的真实字段形状与工具名 |
 | `wao-reuse-drill.mjs` | §3.6 会话复用关联面真实 WAO 派发 drill（Phase 6，2026-09-21）：正向跨 run 恢复 + 三条负向 fail-closed；经 `dispatchRun` fork 真实 detached runner→RunManager→backend→dsh→模型 |
 | `wao-contain-safe.patch.yml` | 实测收敛的 containment 覆盖层（`--patch` 叠加到 shipped `acp` profile）|
-| `evidence/*.json` | 各阶段原始输出（F2–F6 的证据） |
+| `evidence/*.json` | 各阶段原始输出（F2–F7 的证据） |
 
 ## 复现
 
@@ -47,6 +47,17 @@ $env:PROBE_OUT = "scripts/reliability/dsh-acp/evidence/phase5-config-option-set-
 node scripts/reliability/dsh-acp/acp-config-option.mjs           # 首个目标钉 low
 Remove-Item Env:PROBE_EFFORT, Env:PROBE_OUT
 ```
+
+## Phase 7 结论（evidence/phase7-exit-code-wire.json，2026-09-21，dsh 0.1.5-rc.2）
+
+ADR-0032 §8 批次的 **E 核查**（静态、零 token、零模型）：已安装 dsh 的 ACP 桥接
+**不**把命令退出码放进 `tool_call_update.rawOutput`（协议 schema 有该可选字段，
+`dsh-acp` 的 `toolResultUpdate` 只发 `{toolCallId, status, content}`，不填）；也不
+存在其它可结构化解析的退出码字段——退出码只以自由文本标记 `[exit code: N]` 出现
+且仅非零退出有痕（干净退出 0 无痕），而内容转换只透传 text/image 块型。据此
+`deepSeekAcp.js` 如实声明 `reportsCommandExitCode = false`，strict/scorecard 的
+`commandsPassed` 类检查按声明记 not-applicable（不置绿、不算失败）。核查过的
+文件/字符串清单与翻转条件见 evidence 文件本身；dsh 升级后应重跑该静态核查。
 
 ## Phase 5 结论（evidence/phase5-config-option-set*.json，2026-09-20，dsh 0.1.5-rc.2）
 

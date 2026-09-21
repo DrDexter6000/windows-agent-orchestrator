@@ -35,6 +35,8 @@ import { dirname, join } from "node:path";
 // pruneStaleCases（TD-87 僵尸清理 + scope 守卫形状）。这两个函数不携带
 // certified/conditional 词汇——ADR-0032 §1 禁的是状态闭集，不是整个模块。
 import { mergeCaseResults, pruneStaleCases } from "./certification.mjs";
+// ADR-0032 §8：检查五态的形状校验（两层共用的中立词汇模块）。
+import { assertCheckStateShape } from "./checkStates.mjs";
 
 // ── 闭集与常量 ────────────────────────────────────────────────────────────────
 
@@ -104,12 +106,23 @@ function assertNoSeparator(value, label, chars) {
 }
 
 // backend → backend:<name>@<codeRef>（codeRef = 验证时 WAO repo 的 git HEAD）。
-export function backendComponentKey({ name, codeRef } = {}) {
+// 2026-09-21（运行时身份入账）：可选 runtimeFingerprint（入口一次
+// `<binary> --version` spawn 探测的指纹）→ 键升级为
+// `backend:<name>@<codeRef>#<runtimeFingerprint>`。缺省不带 #（legacy 键形与
+// 纯函数测试兼容——验证时的记录没有指纹就保持无指纹键）。指纹不得含 "@" 或
+// "#"（键可逆解析）；两个 unknown 指纹恒不相等（runtimeIdentity.mjs 的构造
+// 保证——绝不把两次探测失败当作同一运行时）。
+export function backendComponentKey({ name, codeRef, runtimeFingerprint } = {}) {
   assertNonEmptyString(name, "backend name");
   assertNoSeparator(name, "backend name", ["@"]);
   assertNonEmptyString(codeRef, "codeRef");
   assertNoSeparator(codeRef, "codeRef", ["@"]);
-  return `backend:${name}@${codeRef}`;
+  const hasFingerprint = runtimeFingerprint !== undefined && runtimeFingerprint !== null;
+  if (hasFingerprint) {
+    assertNonEmptyString(runtimeFingerprint, "runtimeFingerprint");
+    assertNoSeparator(runtimeFingerprint, "runtimeFingerprint", ["@", "#"]);
+  }
+  return `backend:${name}@${codeRef}${hasFingerprint ? `#${runtimeFingerprint}` : ""}`;
 }
 
 // llm → llm:<providerID>/<modelId>@<providerKey>。
@@ -135,7 +148,11 @@ export function llmComponentKey({ providerID, modelId, providerKey } = {}) {
 // 按 kind 派发构造（输入为扁平身份字段）。
 export function componentKeyFor(input = {}) {
   if (input.kind === "backend") {
-    return backendComponentKey({ name: input.name, codeRef: input.codeRef });
+    return backendComponentKey({
+      name: input.name,
+      codeRef: input.codeRef,
+      runtimeFingerprint: input.runtimeFingerprint,
+    });
   }
   if (input.kind === "llm") {
     return llmComponentKey({
@@ -193,16 +210,55 @@ export function assertNoCompositionLayerLeak(node, label = "component ledger pay
 
 // ── 记录构造 ─────────────────────────────────────────────────────────────────
 
+// ADR-0032 §8（2026-09-21）：检查记录承载五态（status ∈ CHECK_STATES 闭集，
+// legacy 布尔形状按 pass 派生）；not-applicable/blocked/inconclusive 必须带
+// 非空 statusReason（磁盘侧 fail-closed——缺原因即抛错，绝不静默落账）。
 function normalizeComponentChecks(checks) {
   if (checks === undefined || checks === null) return [];
   if (!Array.isArray(checks)) {
     throw new Error(`component checks must be an array, got ${JSON.stringify(checks)}`);
   }
-  return checks.map((check) => ({
-    name: String(check?.name),
-    pass: check?.pass === true,
-    detail: check?.detail ?? null,
-  }));
+  return checks.map((entry) => {
+    const normalized = {
+      name: String(entry?.name),
+      pass: entry?.pass === true,
+      detail: entry?.detail ?? null,
+    };
+    if (entry?.state !== undefined) {
+      normalized.state = entry.state;
+      if (entry.stateReason !== undefined) normalized.stateReason = entry.stateReason;
+      assertCheckStateShape(normalized, `component check "${normalized.name}"`);
+    }
+    return normalized;
+  });
+}
+
+// 运行时身份入账（2026-09-21）：backend 记录可选 runtimeIdentity——
+// distribution/version/binaryPath 可为 null（探测不可知——honest unknown），
+// fingerprint 必填且非空（两个 unknown 靠每次唯一的指纹区分，绝不当作同一
+// 运行时）。llm 被测没有 harness 探测面 → 显式拒绝（不静默忽略）。
+function normalizeRuntimeIdentity(runtimeIdentity, kind) {
+  if (runtimeIdentity === undefined || runtimeIdentity === null) return null;
+  if (kind !== "backend") {
+    throw new Error(`runtimeIdentity is only valid for backend component records (the harness probe surface), got kind ${JSON.stringify(kind)}`);
+  }
+  if (typeof runtimeIdentity !== "object" || Array.isArray(runtimeIdentity)) {
+    throw new Error(`runtimeIdentity must be an object {distribution, version, binaryPath, fingerprint}, got ${JSON.stringify(runtimeIdentity).slice(0, 120)}`);
+  }
+  assertNonEmptyString(runtimeIdentity.fingerprint, "runtimeIdentity.fingerprint");
+  assertNoSeparator(runtimeIdentity.fingerprint, "runtimeIdentity.fingerprint", ["@", "#"]);
+  return {
+    distribution: typeof runtimeIdentity.distribution === "string" && runtimeIdentity.distribution.length > 0
+      ? runtimeIdentity.distribution
+      : null,
+    version: typeof runtimeIdentity.version === "string" && runtimeIdentity.version.length > 0
+      ? runtimeIdentity.version
+      : null,
+    binaryPath: typeof runtimeIdentity.binaryPath === "string" && runtimeIdentity.binaryPath.length > 0
+      ? runtimeIdentity.binaryPath
+      : null,
+    fingerprint: runtimeIdentity.fingerprint,
+  };
 }
 
 // 夹具身份复合引用（ADR-0026 四元组的确定性编码）。JSON 数组编码单射无歧义
@@ -255,16 +311,23 @@ function normalizeFixtureRecord(fixture, subjectKind) {
   };
 }
 
+// advisory 码闭集：fixture-decayed（§5 消费六态之一）+ runtime-drifted
+//（2026-09-21 运行时身份入账：被测 harness 版本漂移 → 历史结论降 advisory
+//「建议重跑」，不删——advisory/stale 可见性，绝不进认证门）。
+const ADVISORY_CODES = Object.freeze(["fixture-decayed", "runtime-drifted"]);
+
 function normalizeAdvisory(advisory) {
   if (!advisory || typeof advisory !== "object") {
     throw new Error(`advisory must be an object { code, reason, at }, got ${JSON.stringify(advisory)}`);
   }
-  if (advisory.code !== "fixture-decayed") {
-    throw new Error(`advisory.code closed set is ["fixture-decayed"], got ${JSON.stringify(advisory.code)}`);
+  if (!ADVISORY_CODES.includes(advisory.code)) {
+    throw new Error(`advisory.code closed set is [${ADVISORY_CODES.join("|")}], got ${JSON.stringify(advisory.code)}`);
   }
   return {
     code: advisory.code,
-    reason: advisory.reason ?? "fixture qualification expired",
+    reason: advisory.reason ?? (advisory.code === "runtime-drifted"
+      ? "runtime identity changed since verification — rerun recommended (advisory only, never a gate)"
+      : "fixture qualification expired"),
     at: advisory.at ?? new Date().toISOString(),
   };
 }
@@ -287,7 +350,11 @@ export function recordComponentCheck(input = {}) {
       `component kind must be one of [backend|llm] (ADR-0032 kind namespaces), got ${JSON.stringify(kind)}`,
     );
   }
-  const key = componentKeyFor(input);
+  const runtimeIdentity = normalizeRuntimeIdentity(input.runtimeIdentity, kind);
+  const key = componentKeyFor({
+    ...input,
+    runtimeFingerprint: runtimeIdentity?.fingerprint,
+  });
   const result = input.result;
   if (!COMPONENT_RESULTS.includes(result)) {
     throw new Error(
@@ -305,7 +372,14 @@ export function recordComponentCheck(input = {}) {
     key,
     kind,
     subject: kind === "backend"
-      ? { kind, name: input.name, codeRef: input.codeRef }
+      ? {
+        kind,
+        name: input.name,
+        codeRef: input.codeRef,
+        // 键重派生维（validateComponentRecord 据此复核磁盘身份漂移）：
+        // 无指纹记录（legacy/探测缺省）不带该字段。
+        ...(runtimeIdentity ? { runtimeFingerprint: runtimeIdentity.fingerprint } : {}),
+      }
       : {
         kind,
         providerID: input.providerID,
@@ -323,6 +397,7 @@ export function recordComponentCheck(input = {}) {
     checks: normalizeComponentChecks(input.checks),
     fixture: normalizeFixtureRecord(input.fixture, kind),
   };
+  if (runtimeIdentity) record.runtimeIdentity = runtimeIdentity;
   if (input.advisory !== undefined) {
     record.advisory = normalizeAdvisory(input.advisory);
   }
@@ -355,7 +430,11 @@ export function validateComponentRecord(record, label = "component record") {
   assertParseableTimestamp(record.lastVerifiedAt, `${label}.lastVerifiedAt`);
   const subject = record.subject ?? {};
   const rederived = kind === "backend"
-    ? backendComponentKey({ name: subject.name, codeRef: subject.codeRef })
+    ? backendComponentKey({
+      name: subject.name,
+      codeRef: subject.codeRef,
+      runtimeFingerprint: subject.runtimeFingerprint,
+    })
     : llmComponentKey({
       providerID: subject.providerID,
       modelId: subject.modelId,
@@ -452,6 +531,44 @@ export function summarizeComponentLedger(records = [], options = {}) {
   };
   assertNoCompositionLayerLeak(summary, "component ledger summary");
   return summary;
+}
+
+// ── runtime-drifted：harness 版本漂移的历史记录降 advisory，不删 ─────────────
+
+// 把同一 (backend name, codeRef) 但运行时指纹不同的历史记录标注为
+// runtime-drifted advisory（2026-09-21 运行时身份入账）。匹配输入 = 本轮新刷
+// 的 backend 记录（freshBackendRecords）；prior 记录命中条件：kind=backend、
+// 同名、同 codeRef、subject.runtimeFingerprint !== 本轮指纹（含 legacy 无指纹
+// 记录——验证时未探测运行时身份 = 无法证明同一运行时，如实标漂移）。
+// 返回新数组：命中记录浅拷贝加 advisory，未命中原样引用——数组长度恒不变
+//（与 annotateFixtureDecay 同款"不删"硬语义；清理只能走键级僵尸路径）。
+export function annotateRuntimeDrift(records = [], { freshBackendRecords = [], at = new Date().toISOString() } = {}) {
+  const advisoryByRecord = new Map();
+  for (const fresh of freshBackendRecords) {
+    if (fresh?.kind !== "backend") continue;
+    const currentFingerprint = fresh?.runtimeIdentity?.fingerprint ?? null;
+    for (const prior of records) {
+      if (prior?.kind !== "backend") continue;
+      if (prior?.subject?.name !== fresh.subject?.name) continue;
+      if (prior?.subject?.codeRef !== fresh.subject?.codeRef) continue;
+      const priorFingerprint = prior?.subject?.runtimeFingerprint ?? null;
+      if (priorFingerprint === currentFingerprint) continue;
+      const priorKey = prior.caseId ?? prior.key;
+      const note = normalizeAdvisory({
+        code: "runtime-drifted",
+        reason: `runtime fingerprint drifted for backend ${fresh.subject?.name}: verified as ${priorFingerprint ?? "(no fingerprint on record)"} but the current probe reports ${currentFingerprint ?? "(none)"} — historical conclusion demoted to advisory, rerun recommended (advisory/stale visibility only, never a certification gate; legacy records without a fingerprint are unverifiable and honestly marked drifted)`,
+        at,
+      });
+      // 同一 prior 只保留最后一次标注（确定性：按 fresh 记录顺序）。
+      advisoryByRecord.set(priorKey, { prior, note });
+    }
+  }
+  if (advisoryByRecord.size === 0) return records.map((r) => r);
+  return records.map((record) => {
+    const hit = advisoryByRecord.get(record.caseId ?? record.key);
+    if (!hit || hit.prior !== record) return record;
+    return { ...record, advisory: hit.note };
+  });
 }
 
 // ── fixture-decayed：历史记录降 advisory，不删 ───────────────────────────────
@@ -636,6 +753,16 @@ export function classifyComponent(fileState, key, context = {}) {
     return {
       state: "fixture-decayed",
       reason: record.advisory.reason ?? "fixture qualification expired",
+      record,
+    };
+  }
+  // 运行时身份漂移（2026-09-21）：被测 harness 版本变了 → 复用 stale 态
+  //（advisory「建议重跑」——六态闭集不变，漂移是陈旧性的一维）。只做可见性，
+  // 绝不进认证门（组件层本就不进门禁，ADR-0032 Consequences）。
+  if (record.advisory?.code === "runtime-drifted") {
+    return {
+      state: "stale",
+      reason: record.advisory.reason ?? "runtime identity changed since verification — rerun recommended (advisory only, never a gate)",
       record,
     };
   }

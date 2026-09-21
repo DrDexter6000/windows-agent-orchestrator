@@ -52,7 +52,23 @@ export function backendFor(agent, { fetchImpl, waoCliPath } = {}) {
 }
 
 /**
- * ADR-0025 批次 2：backend 实例闭集能力声明的静态读取 SSOT（单一定义处）。
+ * backend 类声明的能力轴闭集（ADR-0032 §2 声明闭集全量——组件层
+ * backendCapabilityConsistencyChecks 的逐轴对账基准）。成员增补属 Owner 决策：
+ * 新成员必须同时落（a）各 backend 类的诚实声明、（b）本闭集、（c）组件层
+ * 双向对账判据、（d）docs/usage.md 认证节的能力轴分层骨架。
+ */
+export const BACKEND_CAPABILITY_AXES = Object.freeze([
+  "supportsRoleContract",
+  "supportsSessionReuse",
+  "supportsInFlightCorrection",
+  "replayByRespawn",
+  "reportsTokenUsage",
+  "reportsCommandExitCode",
+]);
+
+/**
+ * ADR-0025 批次 2（2026-09-21 扩到声明闭集全量，ADR-0032 §2）：backend 实例
+ * 闭集能力声明的静态读取 SSOT（单一定义处）。
  *
  * 严格 `=== true`：未声明（undefined）与 truthy 非 true（"false"/1/{}）一律读为
  * false——fail-closed，"未声明"绝不读成"支持"（与 runManager 消费
@@ -60,13 +76,13 @@ export function backendFor(agent, { fetchImpl, waoCliPath } = {}) {
  * registry validate 用这层读取做配置 × 能力交叉校验；不猜、不补默认 true。
  *
  * @param {object} backend — 任意 backend 实例（含测试注入的伪造形状）
- * @returns {{reportsTokenUsage: boolean, supportsSessionReuse: boolean}}
+ * @returns {Record<string, boolean>} 声明闭集全量成员 → 布尔（键集恒等于
+ *   BACKEND_CAPABILITY_AXES）
  */
 export function readBackendCapabilities(backend) {
-  return {
-    reportsTokenUsage: backend?.reportsTokenUsage === true,
-    supportsSessionReuse: backend?.supportsSessionReuse === true,
-  };
+  return Object.fromEntries(
+    BACKEND_CAPABILITY_AXES.map((axis) => [axis, backend?.[axis] === true]),
+  );
 }
 
 /**
@@ -79,7 +95,8 @@ export function readBackendCapabilities(backend) {
  *
  * @param {object} agent — 只读 agent.backend（registry 原始条目即可）
  * @param {object} [opts] — 透传 backendFor（fetchImpl / waoCliPath 注入）
- * @returns {{reportsTokenUsage: boolean, supportsSessionReuse: boolean}|null}
+ * @returns {Record<string, boolean>|null} 声明闭集全量快照（键集 =
+ *   BACKEND_CAPABILITY_AXES）；未知 backend → null
  */
 export function backendCapabilitySnapshot(agent, opts = {}) {
   try {

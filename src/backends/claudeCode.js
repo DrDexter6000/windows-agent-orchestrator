@@ -62,6 +62,14 @@ export class ClaudeCodeBackend extends ProcessBackend {
   // backend 有效。registry validate 静态读取本声明做 tokenBudget 交叉校验。
   reportsTokenUsage = true;
 
+  // ADR-0032 §8 批次（2026-09-21）：命令退出码证据可产出——claude stream-json 的
+  // command 事件本身不带数值退出码（parser 投影 commandEvent(command, undefined)），
+  // 但 tool_result 以 toolCallId 为关联键（parser toolResultEvent(toolCallId, ...)），
+  // scorecard 的 withInferredCommandExitCode 据此可靠推断 0/1（reliability 记录
+  // coder_hq commandEvidence 绿即此通道）。语义 = "WAO 今天能否产出命令退出码
+  // 证据"——含该可靠推断通道，非仅 wire 原生数值。
+  reportsCommandExitCode = true;
+
   /**
    * M11-9 capability: declare exactly what this backend can express.
    *

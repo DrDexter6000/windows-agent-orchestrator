@@ -3,6 +3,9 @@
 import { reasonCodeFor } from "../../src/application/certificationReasons.js";
 // ADR-0025 §5（批次 3）：delta drill 子集 SSOT（scope 派生的比对基准，单一清单）。
 import { DELTA_DRILLS } from "./matrix.mjs";
+// ADR-0032 §8：检查结果五态（checkStates 是两层共用的纯词汇模块，不是组件层
+// 专用——组合层消费的是"检查状态"这一中立概念，不 import 任何组件层代码）。
+import { checkStateOf } from "./checkStates.mjs";
 
 export const CERTIFICATION_STATUSES = [
   "certified",
@@ -61,13 +64,24 @@ function mergeCertificationScope(left, right) {
 
 export function certifyCase(caseResult = {}) {
   const checks = normalizeChecks(caseResult.checks);
-  const failedChecks = checks.filter((c) => c.pass === false && !c.optional);
+  // ADR-0032 §8 五态：fail 才是 judged negative——not-applicable / blocked /
+  // inconclusive 不进 failedChecks（N/A"不算失败"；blocked 走 case 级 blocked；
+  // inconclusive 不满足类目覆盖，经 missingCategories 降档）。
+  const failedChecks = checks.filter((c) => !c.optional && checkStateOf(c) === "fail");
   const capabilities = aggregateCapabilities(checks);
-  const blockerReason = caseResult.blockedReason ?? classifyExternalBlocker(caseResult.error);
+  // 检查级 blocked（外部阻塞——夹具/基础设施不可用）映射 case 级 blocked：
+  // 阻塞不是质量失败，是证据面不可用。
+  const blockedCheckReason = checks.find((c) => checkStateOf(c) === "blocked")?.stateReason ?? null;
+  const blockerReason = caseResult.blockedReason
+    ?? classifyExternalBlocker(caseResult.error)
+    ?? blockedCheckReason;
   const missingCategories = findMissingRequiredCategories(
     checks,
     caseResult.requiredCategories ?? DEFAULT_REQUIRED_CATEGORIES,
   );
+  // 零正向证据守卫（ADR-0032 §7/§8 精神）：一个 case 不得只靠 N/A/blocked/
+  // inconclusive 拿 certified——没有任何 pass 检查 = 没有可主张的正向证据。
+  const positiveCheckCount = checks.filter((c) => checkStateOf(c) === "pass").length;
 
   let status;
   let reason;
@@ -89,6 +103,9 @@ export function certifyCase(caseResult = {}) {
   } else if (missingCategories.length > 0) {
     status = "conditional";
     reason = `missing certification checks: ${missingCategories.join(", ")}`;
+  } else if (positiveCheckCount === 0) {
+    status = "conditional";
+    reason = "no positive check evidence — every check is not-applicable/blocked/inconclusive (ADR-0032 §8: N/A never contributes green)";
   } else if (certificationScopeForCase(caseResult) === "delta") {
     // ADR-0025 §5（Owner 方案 A，2026-08-19）：delta 子集全过 ≠ 全量认证——
     // status 落 conditional；升级唯一路径 = 全量重跑（mergeCaseResults 增量
@@ -344,10 +361,13 @@ function findMissingRequiredCategories(checks, requiredCategories) {
   return requiredCategories
     .filter((category) => CATEGORY_ORDER.includes(category))
     .filter((category) =>
+      // ADR-0032 §8：类目【覆盖】= 该类目存在 pass 检查，或存在带原因的
+      // not-applicable 检查（检查跑了、如实话不适用——TD-87 症状解除的承载点）。
+      // blocked / inconclusive 不覆盖类目（fail-closed：无法证明即视为缺）。
       !checks.some((check) =>
         check.category === category &&
-        check.pass === true &&
-        check.optional !== true
+        check.optional !== true &&
+        ["pass", "not-applicable"].includes(checkStateOf(check))
       )
     );
 }
@@ -356,6 +376,9 @@ function aggregateCapabilities(checks) {
   const capabilities = {};
   for (const check of checks) {
     if (!check.capability) continue;
+    // ADR-0032 §8：N/A / blocked / inconclusive 不贡献能力绿——跳过（该轴
+    // 不被断言，capabilities 映射里不出现，绝不置 true）。
+    if (checkStateOf(check) !== "pass" && checkStateOf(check) !== "fail") continue;
     const value = check.optional && check.pass === false ? "unknown" : check.pass;
     if (!(check.capability in capabilities)) {
       capabilities[check.capability] = value;

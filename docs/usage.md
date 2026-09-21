@@ -365,6 +365,93 @@ npm run reliability -- --profile delta   # delta 子集（新 lane 先行认证�
   自动限制机制。P1-1 门（显式 `--require-certified`）对 conditional 照常放行（core 全过即放行
   的既有阈值），身份比对与 per-worker 新鲜度判定同等适用。
 
+### 认证检查结果五态与能力轴分层（ADR-0032 §8，2026-09-21）
+
+**检查结果五态**：reliability / component-check 的检查（check）结果是闭集
+`pass / fail / not-applicable / blocked / inconclusive`（词汇模块
+`scripts/reliability/checkStates.mjs`，两层共用；检查级字段名是 `state`——绝不叫
+`status`，那是组合层保留词）。判定纪律：
+
+- **N/A 必须有原因**（`stateReason` 非空，缺原因在构造与磁盘两侧都被拒绝）；
+- **N/A 不置绿、不算失败、不贡献能力绿**——`certifyCase` 的 `capabilities` 聚合跳过
+  N/A 检查（该能力轴不被断言，summary 里不再出现 `metrics:true` 这类伪造绿）；N/A
+  满足必需类目的【覆盖】语义（检查跑了、如实话不适用——TD-87 的 kimi 症状解除由
+  此保留，lane 不再因此落 conditional）；全 N/A 的 case 触发零正向证据守卫（不得
+  certified）。组件层 `componentResultFromChecks` 同纪律：judged 检查全
+  {pass, N/A} 且至少一条 pass 才 pass。
+- **blocked**（检查级外部阻塞）映射 case 级 `blocked`；**inconclusive** 不覆盖类目
+  （fail-closed 降 conditional）。
+- 五态化修掉的既有坏模式（ADR-0032 §8 点名五处，全落在 2026-09-21 批次）：
+  `metricsNonZeroCheck` 不适用改记 N/A（原 `pass:true, capability:"metrics"`）；
+  `silentTimeout` 在 serve 不可达时记 N/A + 原因（原"skip 顶绿"）；`hasSentinel`
+  只认 **assistant 回显**（原对所有 message 做子串搜索——tool_result/用户消息里
+  搜到不算回显）；`runStrictScorecardDrill` 的文件证据升级为**存在 + 内容承载
+  sentinel**（原只查存在）；`scorecardChecksFromResult` 缺 scorecard 时**记红**
+  （原用 `completed` 顶替证据检查）。逐处改动对在册 worker 记录的影响评估见
+  `docs/research/2026-09-21-adr0032-five-state-impact.md`。
+
+**`reportsCommandExitCode` 诚实声明（只声明，不放行）**：backend 类新增第六个能力
+声明成员，语义 = **WAO 今天能否产出命令退出码证据**（含 scorecard 的
+toolCallId↔tool_result 0/1 推断通道，非仅 wire 原生数值）。当前声明：codex /
+opencode-serve（wire 原生数值）、claude-code / kimi-code / deepseek-harness（可靠
+推断通道）为 true；**deepseek-acp 为 false**——静态核查
+（`scripts/reliability/dsh-acp/evidence/phase7-exit-code-wire.json`，零 token）证明
+dsh-acp 0.1.5-rc.2 的 `tool_call_update` 不填协议自带的 `rawOutput`，退出码只以
+`[exit code: N]` 自由文本标记出现且仅非零退出有痕。声明 false ⇒ strict/scorecard 的
+`commandsPassed` 类检查记 **N/A + 原因**（不置绿、也不算失败）。**是否允许缺该轴的
+harness 拿 conditional 是 Owner 决策，不在声明语义内**——本批不做放行。
+
+**被测 harness 的运行时身份入账**：组件层认证入口（`npm run component-check`）对每个
+backend 被测恰一次 `<binary> --version` spawn（`scripts/reliability/runtimeIdentity.mjs`，
+零新依赖），把 `runtimeIdentity`（`distribution` / `version` / `binaryPath` /
+`fingerprint`）记进组件记录；组件键升级为 `backend:<name>@<codeRef>#<runtimeFingerprint>`。
+**只做 advisory/stale 可见性**：版本漂移 → 同 (name, codeRef) 的历史记录降
+`runtime-drifted` advisory「建议重跑」（不删）；不进认证门、不加 registry schema
+字段。**两个 unknown 不得当作同一运行时**——探测失败的指纹每次唯一
+（`unknown-<random>`），绝不互相合并/刷新。opencode-serve 是 HTTP 服务 backend：无本地
+harness 二进制可探 → honest unknown。
+
+**能力轴分层骨架**（组件层 / 组合层各测什么——全表按需扩充，本节只定层）：
+
+- **组件层轴**（`npm run component-check`，backend/llm 单独验证，零承重）：
+  1. **声明闭集双向一致性**——`readBackendCapabilities` 的六轴闭集
+     （`supportsRoleContract` / `supportsSessionReuse` / `supportsInFlightCorrection` /
+     `replayByRespawn` / `reportsTokenUsage` / `reportsCommandExitCode`）逐轴对账：
+     declared=true ⇒ 正向实测证据（sessionReuse 须真实跨 run 恢复证据——dsh 用
+     `scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json`，未登记证据的
+     backend 如实红；roleContract 须合同内 marker 的模型回显；exitCode 须探针 run 的
+     scorecard commandsPassed；tokenUsage 须 input 双向一致）；declared=false ⇒ 配置面
+     必须明确拒绝（systemPrompt / sessionReuse 的 spawn 前硬门探针）或按既定纪律记
+     N/A（exitCode / 无配置面的轴 + 原因）。
+  2. **生命周期 / 投影完整性**——启动与配置传递（不支持参数明确拒绝）、正常完成 /
+     启动失败 / 中途错误 / 等待到期 / 显式停止（按执行形态分车道）、事件与证据转换
+     （缺字段/乱序/重复/断流不制造成功证据）。零真实模型即可判定其中大部分探针
+     （拒绝类探针在派发前失败）。
+- **组合层轴**（`npm run reliability`，按席位 agentId 认证，承重）：交互闭环——
+  `complete`（完成诚实）/ `assistantText`（非伪完成）/ 证据族（`commandEvidence` /
+  `fileEvidence` / `toolEvidence` / `fileMaterialized` / `readFiles` / `metrics`）/
+  `adversarialEscape`（越界写拦截）等 case 级能力，产出 certified/conditional
+  台账（`runs/reliability-summary.json`）。
+- **配置表达力四子轴**（model / reasoning / contextWindow / provider）**不在本节
+  复制**——权威源是[backend 能力对照表（TD-162）](#backend-能力对照表td-162)，
+  由 `test/isolation-infra/docs-consistency.test.js` 的 TD-162 关系型守卫与代码对账；
+  此处复制会制造第二份会漂移的真相源。
+
+**认证更新的触发器与执行人**（ADR-0032 附则呼应；不改代码行为，只定规程）：
+
+- **更新频次 = 事件触发为主**：① 上游运行时版本变更（操作员升级 claude/codex/kimi/
+  dsh 等后——组件层入口的 runtimeIdentity 探测会把版本漂移显式标成 advisory）；②
+  WAO 适配代码变更（backend/parser 改动 = codeRef 滚动，旧组件键自然过期）。
+- **时间窗兜底**：沿用 `componentLedger.mjs` 的 `DEFAULT_MAX_AGE_DAYS=30` 作为**审阅
+  提醒**（超期记录消费为 stale advisory）——**不**做每月无差别全量重跑。
+- **派发报错是最后防线**：派发失败只记回归信号（组件层红 = 新鲜度分叉），**不**
+  自动耗 token 重考。
+- **执行人**：**操作员**负责安装/升级 runtime；**Lead** 界定影响面并调度重验（哪个
+  backend/组件受版本漂移影响、要不要跑 component-check / reliability）；**Owner**
+  决定新增组合、费用与承重用途。
+- **组件层不进派发门禁**（ADR-0032 Consequences：诊断/初筛语义）——组件结论是
+  advisory 证据，绝不是 permission gate。
+
 ---
 
 ## 二、日常使用

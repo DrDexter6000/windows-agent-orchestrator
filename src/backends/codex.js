@@ -21,6 +21,11 @@ export class CodexBackend extends ProcessBackend {
   // backend 有效。registry validate 静态读取本声明做 tokenBudget 交叉校验。
   reportsTokenUsage = true;
 
+  // ADR-0032 §8 批次（2026-09-21）：命令退出码证据可产出——codex --json 的
+  // item.completed (command_execution) 帧 wire 原生携带 exit_code（parser 投影
+  // commandEvent(command, item.exit_code)），数值退出码直接进 command 证据。
+  reportsCommandExitCode = true;
+
   /**
    * M11-9 capability: Codex can express model (--model) and reasoning
    * (-c model_reasoning_effort). It cannot express contextWindow (no CLI flag)
