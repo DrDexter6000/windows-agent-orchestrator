@@ -53,6 +53,7 @@ import {
   sessionReuseEvidenceFromPhase6File,
 } from "../../scripts/reliability/componentDrills.mjs";
 import {
+  mergeComponentCheckRunRecords,
   recordComponentCheck,
   summarizeComponentLedger,
 } from "../../scripts/reliability/componentLedger.mjs";
@@ -739,6 +740,27 @@ test("kernel: commandsPassed 按 reportsCommandExitCode 声明条件化——dec
   assert.equal(judgedCommands.state, undefined);
 });
 
+test("kernel F3: reportsCommandExitCode=false cannot erase a credible observed command failure", () => {
+  for (const detail of [
+    "failed (exitCode!=0): node --version (exitCode=7)",
+    "observed nonzero exit",
+  ]) {
+    const checks = llmScorecardEvidenceChecks({
+      result: { scorecard: { checks: [
+        { name: "commandsPassed", passed: false, detail },
+        { name: "filesExist", passed: true },
+        { name: "hasEvidence", passed: true },
+      ] } },
+      fileExists: true,
+      fileContentMatches: true,
+      declared: { reportsCommandExitCode: false },
+    });
+    const commands = checks.find((c) => c.name === "commandsPassed");
+    assert.equal(commands.pass, false);
+    assert.equal(commands.state, undefined, `credible failure must stay judged for detail ${JSON.stringify(detail)}`);
+  }
+});
+
 test("kernel: scorecard checks 原样映射（passed=false 保持红）", () => {
   const checks = llmScorecardEvidenceChecks({
     result: { completed: true, scorecard: { checks: [
@@ -901,6 +923,65 @@ test("kernel: sessionReuseEvidenceFromPhase6File——真证据文件被接受�
   // 形状坏 → 拒。
   assert.match(sessionReuseEvidenceFromPhase6File(null).detail, /not an object/);
   assert.match(sessionReuseEvidenceFromPhase6File({ steps: {} }).detail, /missing run1\/run2 runIds/);
+
+  const runtimeVersionDrift = structuredClone(real);
+  runtimeVersionDrift.dsh = "999.0.0-drifted";
+  assert.equal(sessionReuseEvidenceFromPhase6File(runtimeVersionDrift).accepted, false,
+    "evidence metadata that disagrees with its bound runtime identity must be rejected");
+
+  const currentRuntimeDrift = sessionReuseEvidenceFromPhase6File(real, {
+    expectedRuntimeIdentity: {
+      ...real.runtimeIdentity,
+      fingerprint: "v1-current-runtime-drifted",
+      verified: true,
+    },
+  });
+  assert.equal(currentRuntimeDrift.accepted, false, "old evidence must not endorse a newly fingerprinted runtime");
+  assert.match(currentRuntimeDrift.detail, /runtime fingerprint/i);
+});
+
+test("component ledger glue F9: stable refresh replaces prior, newly drifted history survives, zombie key is pruned", () => {
+  const makeBackendRecord = ({ name, codeRef, fingerprint, result = "pass" }) => recordComponentCheck({
+    kind: "backend",
+    name,
+    codeRef,
+    runtimeIdentity: {
+      distribution: name,
+      version: "1.0.0",
+      binaryPath: `C:/bin/${name}.exe`,
+      fingerprint,
+      verified: true,
+    },
+    result,
+    checks: [{ name: "probe", pass: result === "pass", detail: result }],
+    fixture: null,
+  });
+  const stablePrior = makeBackendRecord({ name: "claude-code", codeRef: CODE_REF, fingerprint: "v1-stable" });
+  const driftPrior = makeBackendRecord({ name: "codex", codeRef: CODE_REF, fingerprint: "v1-old" });
+  const zombie = makeBackendRecord({ name: "codex", codeRef: "OLDCODE", fingerprint: "v1-zombie" });
+  const stableFresh = makeBackendRecord({ name: "claude-code", codeRef: CODE_REF, fingerprint: "v1-stable", result: "fail" });
+  const driftFresh = makeBackendRecord({ name: "codex", codeRef: CODE_REF, fingerprint: "v1-new" });
+
+  const out = mergeComponentCheckRunRecords(
+    [stablePrior, driftPrior, zombie],
+    [stableFresh, driftFresh],
+    { at: NOW },
+  );
+
+  assert.equal(out.driftCount, 1);
+  assert.equal(out.records.filter((r) => r.key === stableFresh.key).length, 1, "stable same-key refresh must not duplicate");
+  assert.equal(out.records.find((r) => r.key === stableFresh.key).result, "fail", "fresh record must replace stable prior");
+  assert.equal(out.records.find((r) => r.key === driftPrior.key).advisory?.code, "runtime-drifted",
+    "only the newly annotated drift record is retained as history");
+  assert.equal(out.records.filter((r) => r.key === driftFresh.key).length, 1);
+  assert.equal(out.records.some((r) => r.key === zombie.key), false, "old codeRef zombie must be pruned");
+  assert.equal(out.records.length, 3, "one stable fresh + one drifted history + one drift fresh");
+
+  const entrySource = readFileSync(ENTRY, "utf8");
+  assert.match(entrySource, /mergeComponentCheckRunRecords\(priorRecords, freshRecords, \{ at: NOW \}\)/,
+    "the production entry must use the tested merge glue rather than rebuilding the old concatenation path");
+  assert.doesNotMatch(entrySource, /\[\.\.\.driftedAnnotated, \.\.\.freshRecords\]/,
+    "the duplicate-producing full-prior concatenation must not return");
 });
 
 test("kernel: SESSION_REUSE_EVIDENCE_SOURCES 只登记真实派发证据路径（deepseek-acp → phase6）", () => {
@@ -1086,9 +1167,9 @@ test("kernel【五态 2026-09-21】: N/A 不算失败也不置绿——judged pa
   // 全 N/A（零正向证据）→ fail：N/A 不贡献绿（ADR-0032 §8）。
   assert.equal(componentResultFromChecks([na, { ...na, name: "na2" }]), "fail");
   // fail / blocked / inconclusive 任一在场 → fail（真失败/真阻塞/证据不足都不是绿）。
-  for (const status of ["fail", "blocked", "inconclusive"]) {
-    const reasoned = { name: `x-${status}`, pass: false, status, stateReason: "r", category: "core", detail: "d" };
-    assert.equal(componentResultFromChecks([check_("a", true), reasoned]), "fail", `${status} 检查不得给组件盖 pass`);
+  for (const state of ["fail", "blocked", "inconclusive"]) {
+    const reasoned = { name: `x-${state}`, pass: false, state, stateReason: "r", category: "core", detail: "d" };
+    assert.equal(componentResultFromChecks([check_("a", true), reasoned]), "fail", `${state} 检查不得给组件盖 pass`);
   }
   // informational 的 N/A 不参与判定（同既有 informational 纪律）。
   assert.equal(componentResultFromChecks([check_("a", true), { ...na, informational: true }]), "pass");

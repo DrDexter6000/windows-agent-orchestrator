@@ -45,9 +45,7 @@ import {
 import {
   DEFAULT_FIXTURE_MAX_AGE_DAYS,
   componentLedgerPathFor,
-  annotateRuntimeDrift,
-  mergeComponentRecords,
-  pruneComponentRecords,
+  mergeComponentCheckRunRecords,
   readComponentLedgerFile,
   recordComponentCheck,
   summarizeComponentLedger,
@@ -55,6 +53,7 @@ import {
 } from "./reliability/componentLedger.mjs";
 // 运行时身份入账（2026-09-21）：被测 harness 的 --version 一次 spawn 探测。
 import { probeRuntimeIdentity } from "./reliability/runtimeIdentity.mjs";
+import { backendFor } from "../src/backends/factory.js";
 // ADR-0032 §8：检查五态（打印面按状态出图标，N/A 不再显示为红叉）。
 import { checkStateOf } from "./reliability/checkStates.mjs";
 
@@ -138,8 +137,8 @@ const NOW = new Date().toISOString();
 
 // 2b) 运行时身份探测（2026-09-21，ADR-0032 §5/§8 批次）：对解析范围内的每个
 //     backend 被测恰一次 `<binary> --version` spawn（零新依赖）。指纹进组件键
-//     （backend:<name>@<codeRef>#<fp>）；探测不可知 → honest unknown（指纹每次
-//     唯一，两个 unknown 不当作同一运行时）。只做 advisory/stale 可见性：
+//     （backend:<name>@<codeRef>#<fp>）；探测不可知 → verified:false + 按探测
+//     目标稳定的 unverified 指纹（不制造重复键，也不冒充身份已验证）。
 //     版本漂移的历史记录降 runtime-drifted advisory「建议重跑」，不删、不进
 //     认证门。llm 被测无 harness 探测面（身份是 provider/model 四元组）。
 const preResolved = resolveSubjects({ registry, subjectArg: SUBJECT, codeRef });
@@ -147,7 +146,17 @@ const backendSubjectNames = [...new Set(preResolved.subjects.filter((s) => s.kin
 const runtimeIdentities = {};
 for (const name of backendSubjectNames) {
   const anchor = registry.agents?.[preResolved.subjects.find((s) => s.name === name)?.anchorAgentId] ?? null;
-  runtimeIdentities[name] = probeRuntimeIdentity({ backendName: name, agent: anchor });
+  let resolvedInvocation = null;
+  try {
+    const backend = backendFor(anchor);
+    if (typeof backend?.resolveInvocationPrefix === "function") {
+      resolvedInvocation = await backend.resolveInvocationPrefix(anchor);
+    }
+  } catch {
+    // The probe below remains honest: its fallback target may fail and become
+    // verified:false. Component checking must not abort before recording that.
+  }
+  runtimeIdentities[name] = probeRuntimeIdentity({ backendName: name, agent: anchor, resolvedInvocation });
 }
 const runtimeFingerprints = Object.fromEntries(
   Object.entries(runtimeIdentities).map(([name, identity]) => [name, identity.fingerprint]),
@@ -197,6 +206,7 @@ const componentDrills = createComponentDrills({
   waitTimeout: WAIT_TIMEOUT,
   pollInterval: POLL_INTERVAL,
   registry: tempRegistryPath,
+  runtimeIdentities,
 });
 
 console.log("=== WAO Component Check ===");
@@ -209,7 +219,7 @@ console.log(`codeRef: ${codeRef}`);
 for (const [name, identity] of Object.entries(runtimeIdentities)) {
   const identityNote = identity.version
     ? `${identity.distribution} ${identity.version} (${identity.binaryPath})`
-    : `unknown — ${identity.reason ?? "probe did not yield a version"} (fingerprint ${identity.fingerprint}; two unknowns are never treated as the same runtime)`;
+    : `unverified — ${identity.reason ?? "probe did not yield a version"} (stable target fingerprint ${identity.fingerprint}; this does not verify the runtime identity)`;
   console.log(`runtime: ${name} → ${identityNote}`);
 }
 console.log("");
@@ -251,19 +261,14 @@ const freshRecords = recordInputs.map((input) => recordComponentCheck(input));
 // runtime-drifted advisory（不删，建议重跑）——先标注再并入，保证漂移记录在
 // 键级修剪后仍以 advisory 形态留存（annotateRuntimeDrift 与 fixture-decayed
 // 同款"不删"硬语义；legacy 无指纹记录无法证明同运行时，如实标漂移）。
-const driftedAnnotated = annotateRuntimeDrift(priorRecords, { freshBackendRecords: freshRecords, at: NOW });
-const driftCount = driftedAnnotated.filter((r, i) => r !== priorRecords[i]).length;
+const mergedRun = mergeComponentCheckRunRecords(priorRecords, freshRecords, { at: NOW });
+const driftCount = mergedRun.driftCount;
 if (driftCount > 0) {
   console.log(`runtime drift: ${driftCount} historical record(s) demoted to runtime-drifted advisory (rerun recommended — advisory only, never a gate)`);
 }
-// 修剪 scope：本轮管理的键 = 本次刷新的全部被测键（pruneComponentRecords 的
-// kind 守卫保证未覆盖 kind 的历史记录不动——单跑 backend 不连坐 llm 旧账）。
-const currentKeys = freshRecords.map((r) => r.key);
-const merged = mergeComponentRecords(
-  pruneComponentRecords(priorRecords, currentKeys),
-  [...driftedAnnotated, ...freshRecords],
-);
-const summary = summarizeComponentLedger(merged);
+// mergeComponentCheckRunRecords 只让【新标注】的漂移历史越过修剪；稳定同键
+// prior 由 fresh 覆盖，其它同 kind 僵尸键清除，未覆盖 kind 继续保留。
+const summary = summarizeComponentLedger(mergedRun.records);
 writeComponentLedgerFile(LEDGER_PATH, summary);
 
 // 7) 计数与退出码（§7：本轮 selected/executed/passed/failed/blocked 另列历史台账；

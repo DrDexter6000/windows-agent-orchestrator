@@ -5,7 +5,7 @@ import { reasonCodeFor } from "../../src/application/certificationReasons.js";
 import { DELTA_DRILLS } from "./matrix.mjs";
 // ADR-0032 §8：检查结果五态（checkStates 是两层共用的纯词汇模块，不是组件层
 // 专用——组合层消费的是"检查状态"这一中立概念，不 import 任何组件层代码）。
-import { checkStateOf } from "./checkStates.mjs";
+import { assertCheckStateShape, checkStateOf } from "./checkStates.mjs";
 
 export const CERTIFICATION_STATUSES = [
   "certified",
@@ -64,6 +64,7 @@ function mergeCertificationScope(left, right) {
 
 export function certifyCase(caseResult = {}) {
   const checks = normalizeChecks(caseResult.checks);
+  const requiredCategories = caseResult.requiredCategories ?? DEFAULT_REQUIRED_CATEGORIES;
   // ADR-0032 §8 五态：fail 才是 judged negative——not-applicable / blocked /
   // inconclusive 不进 failedChecks（N/A"不算失败"；blocked 走 case 级 blocked；
   // inconclusive 不满足类目覆盖，经 missingCategories 降档）。
@@ -77,11 +78,19 @@ export function certifyCase(caseResult = {}) {
     ?? blockedCheckReason;
   const missingCategories = findMissingRequiredCategories(
     checks,
-    caseResult.requiredCategories ?? DEFAULT_REQUIRED_CATEGORIES,
+    requiredCategories,
   );
   // 零正向证据守卫（ADR-0032 §7/§8 精神）：一个 case 不得只靠 N/A/blocked/
   // inconclusive 拿 certified——没有任何 pass 检查 = 没有可主张的正向证据。
   const positiveCheckCount = checks.filter((c) => checkStateOf(c) === "pass").length;
+  // A required strict N/A is not a quality failure, but it is also insufficient
+  // for a dispatchable qualification. Any future relaxation must be an explicit
+  // Owner decision, not an indirect consequence of a backend capability boolean.
+  const requiredStrictNotApplicable = requiredCategories.includes("strict")
+    && checks.some((c) =>
+      c.optional !== true
+      && c.category === "strict"
+      && checkStateOf(c) === "not-applicable");
 
   let status;
   let reason;
@@ -94,6 +103,9 @@ export function certifyCase(caseResult = {}) {
   } else if (hasFailedCategory(failedChecks, "strict")) {
     status = "draft-only";
     reason = "strict evidence checks failed";
+  } else if (requiredStrictNotApplicable) {
+    status = "draft-only";
+    reason = "required strict certification evidence is not applicable; explicit Owner qualification is required before dispatchable use";
   } else if (
     hasFailedCategory(failedChecks, "operational") ||
     hasFailedCategory(failedChecks, "observability")
@@ -141,6 +153,10 @@ export function certifyCase(caseResult = {}) {
 
 export function summarizeCertification(caseResults = [], options = {}) {
   const cases = caseResults.map((caseResult) => {
+    // Disk/prior cases may already carry a cached certification object. Shape
+    // validation still runs before trusting it; malformed five-state checks
+    // must not bypass fail-closed behavior through incremental merge.
+    normalizeChecks(caseResult.checks);
     const certification = caseResult.certification ?? certifyCase(caseResult);
     return { ...caseResult, certification };
   });
@@ -340,12 +356,15 @@ function normalizeProviderKeyField(value) {
 }
 
 function normalizeChecks(checks = []) {
-  return checks.map((check) => ({
-    ...check,
-    name: String(check.name),
-    pass: Boolean(check.pass),
-    category: normalizeCategory(check.category),
-  }));
+  return checks.map((check) => {
+    assertCheckStateShape(check, "certification check");
+    return {
+      ...check,
+      name: String(check.name),
+      pass: Boolean(check.pass),
+      category: normalizeCategory(check.category),
+    };
+  });
 }
 
 function normalizeCategory(category) {

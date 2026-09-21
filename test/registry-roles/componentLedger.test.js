@@ -603,30 +603,32 @@ test("record【运行时身份】: runtimeIdentity 入账 + subject.runtimeFinge
     kind: "backend",
     name: "codex",
     codeRef: "abc123",
-    runtimeIdentity: { distribution: "codex", version: "0.9.2", binaryPath: "C:/x/codex.exe", fingerprint: "v1-feedfacefeedface" },
+    runtimeIdentity: { distribution: "codex", version: "0.9.2", binaryPath: "C:/x/codex.exe", fingerprint: "v1-feedfacefeedface", verified: true },
     result: "pass",
     checks: [],
     fixture: null,
   });
   assert.equal(record.key, "backend:codex@abc123#v1-feedfacefeedface");
   assert.equal(record.subject.runtimeFingerprint, "v1-feedfacefeedface");
-  assert.deepEqual(record.runtimeIdentity, { distribution: "codex", version: "0.9.2", binaryPath: "C:/x/codex.exe", fingerprint: "v1-feedfacefeedface" });
+  assert.deepEqual(record.runtimeIdentity, { distribution: "codex", version: "0.9.2", binaryPath: "C:/x/codex.exe", fingerprint: "v1-feedfacefeedface", verified: true, reason: null });
   assert.equal(validateComponentRecord(record), true, "磁盘校验：subject 指纹重派生键一致");
-  // honest unknown 形状：version/binaryPath 可 null，fingerprint 必填。
+  // honest unverified 形状：version/binaryPath 可 null，稳定 fingerprint 必填，且明确 verified=false。
   const unknown = recordComponentCheck({
     kind: "backend",
     name: "opencode-serve",
     codeRef: "abc123",
-    runtimeIdentity: { distribution: "opencode-serve", version: null, binaryPath: null, fingerprint: "unknown-0011223344556677" },
+    runtimeIdentity: { distribution: "opencode-serve", version: null, binaryPath: null, fingerprint: "unverified-v1-0011223344556677", verified: false, reason: "HTTP service backend" },
     result: "blocked",
     blockedReason: "fixture-unavailable",
   });
   assert.equal(unknown.runtimeIdentity.version, null);
+  assert.equal(unknown.runtimeIdentity.verified, false);
+  assert.equal(unknown.runtimeIdentity.reason, "HTTP service backend");
   assert.throws(() => recordComponentCheck({
     kind: "backend", name: "x", codeRef: "y",
     runtimeIdentity: { distribution: "x", version: "1", fingerprint: "" },
     result: "pass",
-  }), /fingerprint.*non-empty/, "空指纹拒绝（两个 unknown 不得合并）");
+  }), /fingerprint.*non-empty/, "空指纹拒绝（未验证目标也必须有稳定可审计键）");
   // llm 被测没有 harness 探测面 → 显式拒绝。
   assert.throws(() => recordComponentCheck({
     kind: "llm", providerID: "p", modelId: "m", providerKey: null,
@@ -635,7 +637,7 @@ test("record【运行时身份】: runtimeIdentity 入账 + subject.runtimeFinge
   }), /only valid for backend/);
 });
 
-test("record【检查五态】: status 进台账且三态必须带原因（缺原因/矛盾 pass 磁盘侧拒绝）", () => {
+test("record【检查五态】: state 进台账且三态必须带原因（缺原因/矛盾 pass 磁盘侧拒绝）", () => {
   const base = { kind: "backend", name: "codex", codeRef: "abc123", result: "pass", fixture: null };
   const withNa = recordComponentCheck({
     ...base,
@@ -652,17 +654,17 @@ test("record【检查五态】: status 进台账且三态必须带原因（缺�
     ...base,
     checks: [{ name: "x", pass: false, state: "not-applicable", detail: "d" }],
   }), /requires a non-empty stateReason/);
-  // pass 与 status 矛盾 → 拒绝。
+  // pass 与 state 矛盾 → 拒绝。
   assert.throws(() => recordComponentCheck({
     ...base,
     checks: [{ name: "x", pass: true, state: "fail", detail: "d" }],
   }), /contradicts state/);
-  // 越 closed set 的 status → 拒绝。
+  // 越 closed set 的 state → 拒绝。
   assert.throws(() => recordComponentCheck({
     ...base,
     checks: [{ name: "x", pass: true, state: "certified", detail: "d" }],
   }), /outside the ADR-0032 §8 closed set/);
-  // legacy 布尔形状照常落账（无 status 字段）。
+  // legacy 布尔形状照常落账（无 state 字段）。
   const legacy = recordComponentCheck({ ...base, checks: [{ name: "x", pass: true, detail: "d" }] });
   assert.equal(legacy.checks[0].state, undefined);
 });

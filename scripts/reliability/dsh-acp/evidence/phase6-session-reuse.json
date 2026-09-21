@@ -3,6 +3,13 @@
   "date": "2026-09-21T00:02:37.959Z",
   "node": "v22.23.1",
   "dsh": "0.1.5-rc.2",
+  "runtimeIdentity": {
+    "distribution": "dsh",
+    "version": "0.1.5-rc.2",
+    "binaryPath": "C:\\Users\\17865\\AppData\\Roaming\\npm\\dsh.cmd",
+    "fingerprint": "v1-b0975a0de070141d",
+    "verified": true
+  },
   "agentId": "coder_low_dsh_reuse",
   "leadSession": "<fixed drill lead (simulates the MCP server's stable injection)>",
   "marker": "WAO_REUSE_P6_MUAHE77N_NG4F45",

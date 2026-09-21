@@ -254,8 +254,9 @@ serve 后台进程不一定。
 
 worker 死于隔离守卫（workdir_escape）或供应商断流时，其 worktree 可能留有有价值 WIP。**先分两类**：
 
-- **delivery run**：走既有候选通道（`runs delivery` 读 candidateInventory/candidateKind：backend_failed / process_missing / disallowed_scope → Lead 裁定后重打包）。§快速索引表"workdir_escape 无 salvage 面"说的是**控制面工具**（不 repackage/review/decide）——手工抢救在控制面之外，两者不矛盾。
-- **非 delivery run**：用本手工配方（实证两次：scbs8j / qjg202 两次 workdir_escape 死亡均以此救回）：
+- **delivery run，候选通道可用**：走既有候选通道（`runs delivery` 读 candidateInventory/candidateKind：backend_failed / process_missing / disallowed_scope → Lead 裁定后重打包）。
+- **delivery run，但 `candidateKind:null`**：只有同时满足以下前提才可用本手工配方：`run_delivery` 已确认没有可重打包的候选；retained worktree 仍存在且绑定该 run/workspace/base；Lead 逐文件核对 worktree 候选、允许路径与验证结果；采纳提交不得夹带候选以外内容，并记录 `WAO-Adopted-From` / `WAO-Original-Delivery: (none)` / `WAO-Adoption-Basis`。这是控制面外的人工恢复，不把 `null` 解释成已证明安全，也不冒充 `run_delivery_repackage`。
+- **非 delivery run**：同样可用本手工配方（实证两次：scbs8j / qjg202 两次 workdir_escape 死亡均以此救回）。§快速索引表"workdir_escape 无 salvage 面"说的是**控制面工具**（不 repackage/review/decide）——手工抢救在控制面之外，两者不矛盾。
 
 ```bash
 # 1. 定位 worktree（.wao-worktrees/<runId>；或读 runs/<runId>.jsonl 里 delivery 事件的 worktreePath）
@@ -431,7 +432,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 ### 7.10 backend 最后失败，但 retained worktree 里已有候选改动
 
 - **症状**：delivery run 因 `backend_error` 或 `backend_stream_ended` 终态失败，没有 DeliveryRef；但 worker 在隔离 worktree 已写入文件。
-- **先查事实**：调用 `run_delivery`。只有返回 `candidateKind:"backend_failed"` 且 `candidateInventory` 完整非空，才表示 WAO 已证明 runtime quiet、exact base、workspace ownership 和候选清单；null 不是“无成果”，而是需由 Lead 人工核实。
+- **先查事实**：调用 `run_delivery`。只有返回 `candidateKind:"backend_failed"` 且 `candidateInventory` 完整非空，才表示 WAO 已证明 runtime quiet、exact base、workspace ownership 和候选清单；`candidateKind:null` 不是“无成果”，也不是已证明可采纳。若 retained worktree 仍有候选，只能按 §4.4 的 delivery-run 前提走控制面外人工采纳，并逐项留下绑定、范围、验证和无夹带证据。
 - **恢复**：Lead 审查 inventory 后明确提供完整 `allowedPaths`，调用 `run_delivery_repackage`。它不调用模型、不恢复 provider session，只在原 worktree 机械重算范围、打包并运行原验证声明。
 - **裁决**：重封装后仍逐文件审查，并由 Lead 单独 accept/reject。WAO 不判断候选语义、不自动扩域、不自动重试；缺 `run.stop_verified`、HEAD 漂移、冲突事件、空/截断 inventory 均不提供该恢复路径。
 

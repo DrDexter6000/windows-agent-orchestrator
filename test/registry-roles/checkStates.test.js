@@ -6,8 +6,8 @@
 // 覆盖面：
 //   1. 闭集恰五值（冻结）；
 //   2. N/A/blocked/inconclusive 必须带非空原因（构造器当场抛错）；
-//   3. checkStateOf 派生：显式 status 优先；legacy 布尔 pass 派生；越闭集抛错；
-//   4. pass 与 status 的一致性校验（assertCheckStateShape fail-closed）；
+//   3. checkStateOf 派生：显式 state 优先；legacy 布尔 pass 派生；越闭集抛错；
+//   4. pass 与 state 的一致性校验（assertCheckStateShape fail-closed）；
 //   5. 组合层消费语义：certifyCase 对 N/A 的类目覆盖/能力跳过/零正向证据守卫、
 //      blocked 检查映射 case blocked、inconclusive 不覆盖类目；
 //   6. metricsNonZeroCheck 的 N/A 形状（TD-87 症状解除保留 + 能力绿不再伪造）。
@@ -47,7 +47,7 @@ test("constructors: N/A/blocked/inconclusive 原因必填（空/空白/非字符
   assert.equal(inconclusiveCheck("x", "r", "core").state, "inconclusive");
 });
 
-test("checkStateOf: 显式 status 优先；legacy 布尔派生；越闭集抛错（fail-closed）", () => {
+test("checkStateOf: 显式 state 优先；legacy 布尔派生；越闭集抛错（fail-closed）", () => {
   assert.equal(checkStateOf({ state: "not-applicable", pass: false }), "not-applicable");
   assert.equal(checkStateOf({ pass: true }), "pass");
   assert.equal(checkStateOf({ pass: false }), "fail");
@@ -56,7 +56,7 @@ test("checkStateOf: 显式 status 优先；legacy 布尔派生；越闭集抛错
   assert.throws(() => checkStateOf({ state: "certified", pass: true }), /outside the ADR-0032 §8 closed set/, "组合层状态词不是检查状态");
 });
 
-test("assertCheckStateShape: 三态缺原因抛错；pass 与 status 矛盾抛错；legacy 形状放行", () => {
+test("assertCheckStateShape: 三态缺原因抛错；pass 与 state 矛盾抛错；legacy 形状放行", () => {
   assert.throws(() => assertCheckStateShape({ name: "x", state: "not-applicable", pass: false }), /requires a non-empty stateReason/);
   assert.throws(() => assertCheckStateShape({ name: "x", state: "pass", pass: false }), /contradicts state/);
   assert.throws(() => assertCheckStateShape({ name: "x", state: "fail", pass: true }), /contradicts state/);

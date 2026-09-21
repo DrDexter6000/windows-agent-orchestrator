@@ -190,6 +190,18 @@ export class ProcessBackend {
    * buildArgs. spawn's own compileInvocation remains the authoritative check.
    */
   async _resolveAndBuildArgs(agent, task) {
+    const prefix = await this.resolveInvocationPrefix(agent);
+    const args = [...prefix.args, ...this.buildArgs(agent, task)];
+    return { binary: prefix.binary, args };
+  }
+
+  /**
+   * Resolve the exact executable + argv prefix shared by preflight and spawn.
+   * Runtime identity probes consume this method so custom binary, configured
+   * prependArgs, and backend-resolved wrapper entrypoints cannot drift from the
+   * artifact that a real run executes.
+   */
+  async resolveInvocationPrefix(agent) {
     // resolveBinary 可返回字符串或 { binary, prependArgs }
     // （后者用于绕过 .cmd 包装器，直接 node 跑 .js 入口）
     let binary = agent.binary;
@@ -204,7 +216,7 @@ export class ProcessBackend {
       }
     }
     const configuredPrependArgs = Array.isArray(agent.prependArgs) ? agent.prependArgs : [];
-    const args = [...prependArgs, ...configuredPrependArgs, ...this.buildArgs(agent, task)];
+    const args = [...prependArgs, ...configuredPrependArgs];
     return { binary, args };
   }
 

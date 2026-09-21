@@ -29,6 +29,7 @@ import {
   hasMonotonicSeq,
   createDrills,
 } from "../../scripts/reliability/drills.mjs";
+import { scorecardCommandFailureIsCredible } from "../../scripts/reliability/scorecardEvidence.mjs";
 
 // ════ 1. 独立 import + 导出齐全 ════
 
@@ -245,6 +246,8 @@ test("源级钉: run-reliability 无 completed 顶替 / 无 silentPass 顶绿；
   // 交付项 4：commandsPassed 按 reportsCommandExitCode 声明条件化（N/A）。
   assert.match(entry, /reportsCommandExitCode/, "条件化判定源（backendCapabilitySnapshot）在场");
   assert.match(entry, /naCheck\(\s*"commandsPassed"/, "declared=false ⇒ commandsPassed 记 N/A");
+  assert.match(entry, /scorecardCommandFailureIsCredible\(observedCommandsCheck\)/,
+    "declared=false 仍须保留 scorecard 已明确观察到的真实非零退出失败");
   // 坏模式 2：silentTimeout serve 不可达不再写通过。
   assert.doesNotMatch(entry, /silentPass = true/, "skip 顶绿必须消失");
   assert.match(entry, /naCheck\(\s*"silentTimeout"/, "serve 不可达记 N/A + 原因");
@@ -252,6 +255,19 @@ test("源级钉: run-reliability 无 completed 顶替 / 无 silentPass 顶绿；
   assert.match(entry, /fileContentMatches/, "fileMaterialized 判定消费内容比对");
   // 五态判定：case pass 状态感知（N/A 不算失败也不置绿）。
   assert.match(entry, /checkStateOf/, "入口消费五态派生");
+});
+
+test("F11: command capability declaration preserves credible fail and only N/A-maps unavailable evidence", () => {
+  assert.equal(scorecardCommandFailureIsCredible({
+    name: "commandsPassed", passed: false, detail: "failed (exitCode!=0): npm test (exitCode=7)",
+  }), true, "an observed numeric nonzero exit is a real failure");
+  assert.equal(scorecardCommandFailureIsCredible({
+    name: "commandsPassed", passed: false, exitCode: 3,
+  }), true, "a structured nonzero exit is a real failure");
+  assert.equal(scorecardCommandFailureIsCredible({
+    name: "commandsPassed", passed: false, detail: "failed (exitCode!=0): npm test (exitCode=undefined)",
+  }), false, "missing exit-code evidence remains unavailable rather than a quality failure");
+  assert.equal(scorecardCommandFailureIsCredible(null), false);
 });
 
 // ════ 7. child_process 导入纪律钉（TD-69 同款，随调用迁至 drills.mjs）════

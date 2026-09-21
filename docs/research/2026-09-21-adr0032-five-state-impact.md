@@ -66,14 +66,14 @@ scope: 评估对象 = 2026-09-21 时点外层主仓 `runs/reliability-summary.js
   未来任何"run 完成但 scorecard 检查缺失"的 lane 将红（strict → draft-only）——
   这是修掉假绿的预期效果。
 
-### C6 `commandsPassed` 按 `reportsCommandExitCode` 条件化（declared=false ⇒ N/A）——**唯一的放宽**
+### C6 `commandsPassed` 按 `reportsCommandExitCode` 条件化（证据不可取得时 N/A）
 
-- **deepseek_acp_deltadrill（deepseek-acp，draft-only）**：下次 delta 运行
-  `commandsPassed` 从红（exitCode=undefined）变为 **N/A** → strict 类目不再失败
-  → status **draft-only → conditional**（adversarialEscapeIntercepted 的 operational
-  红仍在）；`capabilities.commandEvidence` false → 消失。这是交付项 4 的明文要求
-  （"不置绿、也不算失败"）。**注意**：dsh 是否被允许以缺该轴的形态持有
-  conditional 是 Owner 决策——本批只如实记 N/A，不放行也不加码。
+- **deepseek_acp_deltadrill（deepseek-acp，draft-only）**：下次 delta 运行在
+  `exitCode=undefined` 这种证据不可取得形状下，`commandsPassed` 从红变为 **N/A**，
+  `capabilities.commandEvidence` false → 消失；N/A 不进入 `failedChecks`，因此不把
+  能力缺失伪造成质量失败。组合资格另有守卫：必需 strict 轴为 N/A 时仍保持
+  **draft-only**，不会由 backend 布尔声明间接升级到可派发集合。若 scorecard 已
+  明确观察到非零退出，则保留真实 fail，声明不得遮蔽。
 - 其余 backend 全部声明 true → 无变化。
 
 ### C7 certifyCase 零正向证据守卫 / C8 检查级 blocked 映射
@@ -88,13 +88,15 @@ scope: 评估对象 = 2026-09-21 时点外层主仓 `runs/reliability-summary.js
   判据 = Phase 6 真恢复证据（`scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json`
   在册且校验通过：同 session 跨两 run + resume 路由 + marker 复述 + 3/3 负对照
   拒绝）→ **该轴保持绿**。
-- **claude-code / codex / kimi-code（声明 true，无在册组件记录）**：下次
-  component-check 该轴将**红**（"declared=true 但无真恢复证据在案"）——直到为
-  该 backend 跑一次 Phase-6 形式的恢复 drill 并把证据登记进
-  `SESSION_REUSE_EVIDENCE_SOURCES`。这是有意的诚实收紧：声明支持就必须有正向
-  证据，session 锚点（只证明会话建立）不再顶替。
+- **claude-code（声明 true，无在册组件记录）**：下次 component-check 该轴将
+  **红**（"declared=true 但无真恢复证据在案"）——直到跑一次 Phase-6 形式的
+  恢复 drill 并把证据登记进 `SESSION_REUSE_EVIDENCE_SOURCES`。这是有意的诚实
+  收紧：声明支持就必须有正向证据，session 锚点（只证明会话建立）不再顶替。
+- **codex / kimi-code（声明 false）**：走“不支持时必须明确拒绝”的负向探针，
+  不会因缺真恢复证据进入上述红分支。
 - **deepseek-harness / opencode-serve（声明 false）**：fail-closed 拒绝探针方向
   不变，无影响。
+- 组件台账独立，`runManager` 不读取它，因此上述组件层收紧**不连带撤销现有组合认证**。
 
 ### C10 声明闭集扩到六轴（组件层新增 roleContract / exitCode 判定 + 两个 N/A 轴）
 
@@ -116,16 +118,19 @@ scope: 评估对象 = 2026-09-21 时点外层主仓 `runs/reliability-summary.js
   legacy 记录 `backend:deepseek-acp@da12bfa…`：其 codeRef ≠ 下次运行的 HEAD →
   按既有 codeRef-滚动语义被键级修剪（非本批新行为）；若在同 codeRef 上重跑，则
   该记录（无指纹，无法证明同运行时）降 **runtime-drifted advisory 并保留**。
-- **opencode-serve**：HTTP 服务无本地二进制 → 每次探测都是唯一 unknown 指纹 →
-  每次运行产生新键、旧键记录标漂移——已知的诚实噪声（两个 unknown 不得当作同一
-  运行时是硬纪律），消费侧按 advisory 读即可。
+- **opencode-serve**：HTTP 服务无本地二进制 → 身份明确记 `verified:false`，并按
+  backend 探测目标生成稳定 `unverified-v1-*` 指纹。同一未验证目标不再每次产生
+  新键；稳定键只用于消除重复噪声，绝不表示 serve 部署身份已经验证。
 
 ## 结论
 
-- **组合层**：9 条在册 worker 记录中，确定变形的是 coder_mm 与
-  deepseek_acp_deltadrill 的 `capabilities`（伪造绿消失 / dsh 放宽到 conditional）；
-  C3/C4 是需要下次运行确认的收紧面（预期常态绿，异常才红）；其余不动。
-- **组件层**：在册 deepseek-acp 记录在新判据下仍绿（Phase 6 证据在案）；
-  claude-code 等的真恢复证据缺口会如实红——补证据是后续工作，不是本批缺陷。
+- **组合层**：9 条在册 worker 记录中，coder_mm 的伪造 metrics 能力绿消失但认证
+  结论不变；deepseek_acp_deltadrill 的 commandEvidence 诚实缺席，同时因必需 strict
+  轴为 N/A 保持 `draft-only`，不自动放宽到 conditional。C3/C4 是需要下次运行确认
+  的收紧面（预期常态绿，异常才红）；其余不动。
+- **组件层**：在册 deepseek-acp 记录在新判据下仍绿（Phase 6 证据在案）；只有
+  同样声明 `supportsSessionReuse=true` 的 claude-code 会因真恢复证据缺口如实红。
+  codex / kimi-code 声明 false，继续走负向拒绝探针，不受该正向证据要求影响。
+  补 claude-code 证据是后续工作，不是本批缺陷。
 - 所有"变红/变形"方向都是 ADR-0032 §8 点名的坏模式修正；没有为保记录而保留
   任何假绿路径。

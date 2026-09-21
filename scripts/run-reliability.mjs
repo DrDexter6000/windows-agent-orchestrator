@@ -33,6 +33,7 @@ import { metricsNonZeroCheck } from "./reliability/metricsCheck.mjs";
 import { backendCapabilitySnapshot } from "../src/backends/factory.js";
 // ADR-0032 §8：检查结果五态（N/A 构造 + 状态派生）。
 import { naCheck, checkStateOf } from "./reliability/checkStates.mjs";
+import { scorecardCommandFailureIsCredible } from "./reliability/scorecardEvidence.mjs";
 // ADR-0032 §6：drill glue（runCli + 各 drill + 纯助手）抽至 ./reliability/drills.mjs，
 // 组合入口（本文件）与将来的组件入口（component-check）共用——防双轨漂移。
 // 纯判定内核仍在 adversarialEscape.mjs / metricsCheck.mjs，drills.mjs 只 import 消费。
@@ -188,6 +189,7 @@ function scorecardChecksFromResult(result, { reportsCommandExitCode = null } = {
       capability: capabilityForScorecardCheck(c.name),
     });
   if (reportsCommandExitCode === false) {
+    const observedCommandsCheck = scorecardChecks?.find((c) => c.name === "commandsPassed") ?? null;
     const rest = scorecardChecks
       ? scorecardChecks.filter((c) => c.name !== "commandsPassed").map(mapCheck)
       : [
@@ -195,12 +197,14 @@ function scorecardChecksFromResult(result, { reportsCommandExitCode = null } = {
         check("hasEvidence", false, "strict", "no scorecard checks in run result — completed-substitution is forbidden (ADR-0032 §8)", { capability: "toolEvidence" }),
       ];
     return [
-      naCheck(
-        "commandsPassed",
-        "backend declares reportsCommandExitCode=false — WAO cannot produce command exit-code evidence for this harness today (ACP exit codes live only in the client terminal API; tool_call_update carries free-form text only — evidence: scripts/reliability/dsh-acp/evidence/phase7-exit-code-wire.json)",
-        "strict",
-        { capability: "commandEvidence" },
-      ),
+      scorecardCommandFailureIsCredible(observedCommandsCheck)
+        ? mapCheck(observedCommandsCheck)
+        : naCheck(
+          "commandsPassed",
+          "backend declares reportsCommandExitCode=false — WAO cannot produce command exit-code evidence for this harness today (ACP exit codes live only in the client terminal API; tool_call_update carries free-form text only — evidence: scripts/reliability/dsh-acp/evidence/phase7-exit-code-wire.json)",
+          "strict",
+          { capability: "commandEvidence" },
+        ),
       ...rest,
     ];
   }

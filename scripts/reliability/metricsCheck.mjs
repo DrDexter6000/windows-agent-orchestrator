@@ -30,7 +30,7 @@ import { naCheck } from "./checkStates.mjs";
  * metricsNonZero 检查判定：backend 能力声明 × run metrics input → observability
  * check（与 run-reliability.mjs 的 check() 形状一致：
  * {name, pass, category, detail, capability}；不适用形状另带
- * status/statusReason——ADR-0032 §8 五态）。
+ * state/stateReason——ADR-0032 §8 五态）。
  *
  * @param {object} input
  * @param {object|null} [input.agent] — registry 原始条目（只读 agent.backend；
@@ -40,7 +40,7 @@ import { naCheck } from "./checkStates.mjs";
  * @param {object|null} [input.capabilitySnapshot] — 测试注入的能力快照形状；未注入
  *   时经 SSOT 从 agent 派生
  * @returns {{name: string, pass: boolean, category: string, detail: string, capability: string,
- *   status?: string, statusReason?: string}}
+ *   state?: string, stateReason?: string}}
  */
 export function metricsNonZeroCheck({ agent = null, metricsInput = null, capabilitySnapshot = null } = {}) {
   const snapshot = capabilitySnapshot ?? (agent !== null ? backendCapabilitySnapshot(agent) : null);

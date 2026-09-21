@@ -7,6 +7,7 @@ import {
   mergeCaseResults,
   pruneStaleCases,
 } from "../../scripts/reliability/certification.mjs";
+import { naCheck } from "../../scripts/reliability/checkStates.mjs";
 
 function check(name, pass, category, extra = {}) {
   return { name, pass, category, ...extra };
@@ -69,6 +70,69 @@ test("certifyCase: core passes but strict evidence fails -> draft-only", () => {
   assert.equal(result.status, "draft-only");
   assert.equal(result.recommendedUse, "draft-only");
   assert.equal(result.capabilities.commandEvidence, false);
+});
+
+test("certifyCase F1: required strict N/A stays draft-only without becoming a quality failure", () => {
+  const result = certifyCase({
+    caseId: "deepseek-acp delta",
+    checks: [
+      check("completed", true, "core", { capability: "complete" }),
+      naCheck(
+        "commandsPassed",
+        "backend declares reportsCommandExitCode=false",
+        "strict",
+        { capability: "commandEvidence" },
+      ),
+      check("isolation", true, "operational", { capability: "isolation" }),
+      check("metricsNonZero", true, "observability", { capability: "metrics" }),
+    ],
+  });
+
+  assert.equal(result.status, "draft-only");
+  assert.equal(result.recommendedUse, "draft-only");
+  assert.deepEqual(result.failedChecks, [], "N/A is an unavailable qualification axis, not a judged failure");
+  assert.equal(result.capabilities.commandEvidence, undefined, "N/A must not create a green or red capability claim");
+  assert.match(result.reason, /strict certification evidence is not applicable/i);
+});
+
+test("certifyCase F1: an all-N/A default case cannot enter the dispatchable set", () => {
+  const result = certifyCase({
+    caseId: "all-na",
+    checks: [
+      naCheck("core", "unavailable", "core"),
+      naCheck("strict", "unavailable", "strict"),
+      naCheck("operational", "unavailable", "operational"),
+      naCheck("observability", "unavailable", "observability"),
+    ],
+  });
+
+  assert.equal(result.status, "draft-only");
+  assert.equal(result.recommendedUse, "draft-only");
+});
+
+test("certifyCase F2: malformed explicit check state is rejected at the composition boundary", () => {
+  assert.throws(
+    () => certifyCase({
+      caseId: "malformed-na",
+      checks: [
+        check("core", true, "core"),
+        check("strict", true, "strict"),
+        check("operational", true, "operational"),
+        { name: "bad-na", pass: true, state: "not-applicable", category: "observability" },
+      ],
+    }),
+    /state "not-applicable" requires a non-empty stateReason|contradicts state/,
+  );
+
+  assert.throws(
+    () => summarizeCertification([{
+      caseId: "malformed-cached-case",
+      checks: [{ name: "bad-na", pass: true, state: "not-applicable", category: "strict" }],
+      certification: { status: "certified", recommendedUse: "strict-dispatch", capabilities: {}, failedChecks: [] },
+    }]),
+    /state "not-applicable" requires a non-empty stateReason|contradicts state/,
+    "a cached on-disk certification must not bypass five-state shape validation",
+  );
 });
 
 test("certifyCase: core-only sentinel pass is conditional, not strict certified", () => {

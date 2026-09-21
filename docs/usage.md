@@ -398,18 +398,20 @@ opencode-serve（wire 原生数值）、claude-code / kimi-code / deepseek-harne
 （`scripts/reliability/dsh-acp/evidence/phase7-exit-code-wire.json`，零 token）证明
 dsh-acp 0.1.5-rc.2 的 `tool_call_update` 不填协议自带的 `rawOutput`，退出码只以
 `[exit code: N]` 自由文本标记出现且仅非零退出有痕。声明 false ⇒ strict/scorecard 的
-`commandsPassed` 类检查记 **N/A + 原因**（不置绿、也不算失败）。**是否允许缺该轴的
-harness 拿 conditional 是 Owner 决策，不在声明语义内**——本批不做放行。
+`commandsPassed` 类检查在证据不可取得时记 **N/A + 原因**（不置绿、也不算失败）；
+若 scorecard 已明确观察到非零退出则保留真实 fail。必需 strict 轴为 N/A 的 case 保持
+`draft-only`，不能仅靠能力声明进入可派发集合；任何放宽都须 Owner 另行显式裁定。
 
 **被测 harness 的运行时身份入账**：组件层认证入口（`npm run component-check`）对每个
-backend 被测恰一次 `<binary> --version` spawn（`scripts/reliability/runtimeIdentity.mjs`，
-零新依赖），把 `runtimeIdentity`（`distribution` / `version` / `binaryPath` /
-`fingerprint`）记进组件记录；组件键升级为 `backend:<name>@<codeRef>#<runtimeFingerprint>`。
+backend 被测恰一次实际执行前缀的版本探测（`agent.binary` 优先，保留
+`agent.prependArgs`，再附 `--version`；`scripts/reliability/runtimeIdentity.mjs`，零新依赖），
+把 `runtimeIdentity`（`distribution` / `version` / `binaryPath` / `fingerprint` /
+`verified` / `reason`）记进组件记录；组件键升级为 `backend:<name>@<codeRef>#<runtimeFingerprint>`。
 **只做 advisory/stale 可见性**：版本漂移 → 同 (name, codeRef) 的历史记录降
 `runtime-drifted` advisory「建议重跑」（不删）；不进认证门、不加 registry schema
-字段。**两个 unknown 不得当作同一运行时**——探测失败的指纹每次唯一
-（`unknown-<random>`），绝不互相合并/刷新。opencode-serve 是 HTTP 服务 backend：无本地
-harness 二进制可探 → honest unknown。
+字段。探测失败或无本地二进制时明确 `verified:false`，指纹按探测目标稳定派生为
+`unverified-v1-*`：这只避免同一未验证目标每次制造新键，绝不表示运行时身份已验证。
+opencode-serve 是 HTTP 服务 backend，因此保持稳定的未验证身份。
 
 **能力轴分层骨架**（组件层 / 组合层各测什么——全表按需扩充，本节只定层）：
 

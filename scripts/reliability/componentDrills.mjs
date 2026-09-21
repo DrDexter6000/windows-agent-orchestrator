@@ -83,6 +83,7 @@ import {
 } from "./drills.mjs";
 // ADR-0032 §8：检查结果五态（两层共用的中立词汇模块——非组合层状态闭集）。
 import { checkStateOf, naCheck } from "./checkStates.mjs";
+import { scorecardCommandFailureIsCredible } from "./scorecardEvidence.mjs";
 // 组件层闭集与记录构造（ADR-0032 §1/§5）。绝不 import certification.mjs——
 // mergeCaseResults/pruneStaleCases 的复用已经封装在 componentLedger 内部。
 import {
@@ -251,7 +252,9 @@ export function llmScorecardEvidenceChecks({ result, fileExists = null, fileCont
       { capability },
     );
   };
+  const observedCommandsCheck = byName.get("commandsPassed");
   const commandsCheck = declared.reportsCommandExitCode === false
+    && !scorecardCommandFailureIsCredible(observedCommandsCheck)
     ? naCheck(
       "commandsPassed",
       "fixture backend declares reportsCommandExitCode=false — WAO cannot produce command exit-code evidence for this harness today (evidence: scripts/reliability/dsh-acp/evidence/phase7-exit-code-wire.json)",
@@ -385,12 +388,34 @@ export const SESSION_REUSE_EVIDENCE_SOURCES = Object.freeze({
  * transcript 事实；负向×3 = 关联面损坏/缺失各路一律拒绝（绝不静默新会话）。
  * 任一断言不成立 → accepted:false + 原因（绝不因文件存在就算证据）。
  */
-export function sessionReuseEvidenceFromPhase6File(json) {
+export function sessionReuseEvidenceFromPhase6File(json, { expectedRuntimeIdentity = null } = {}) {
   const why = (reason) => ({ accepted: false, detail: `session-reuse evidence rejected: ${reason}` });
   if (!json || typeof json !== "object") return why("evidence file is not an object");
   const run1 = json?.steps?.run1;
   const run2 = json?.steps?.run2;
   if (!run1?.runId || !run2?.runId) return why("missing run1/run2 runIds (no real dispatch pair)");
+  const boundRuntime = json.runtimeIdentity;
+  if (
+    !boundRuntime
+    || boundRuntime.verified !== true
+    || typeof boundRuntime.distribution !== "string"
+    || typeof boundRuntime.version !== "string"
+    || typeof boundRuntime.fingerprint !== "string"
+    || boundRuntime.fingerprint.length === 0
+  ) {
+    return why("missing verified runtime identity binding (distribution/version/fingerprint)");
+  }
+  if (typeof json.dsh === "string" && json.dsh !== boundRuntime.version) {
+    return why(`runtime version metadata mismatch (${JSON.stringify(json.dsh)} vs bound ${JSON.stringify(boundRuntime.version)})`);
+  }
+  if (expectedRuntimeIdentity !== null) {
+    if (expectedRuntimeIdentity?.verified !== true) {
+      return why("current runtime identity is unverified; historical resume evidence cannot endorse it");
+    }
+    if (expectedRuntimeIdentity.fingerprint !== boundRuntime.fingerprint) {
+      return why(`runtime fingerprint differs from the evidence binding (${boundRuntime.fingerprint} vs current ${expectedRuntimeIdentity.fingerprint})`);
+    }
+  }
   const sid1 = run1?.backendSessionId;
   const sid2 = run2?.backendSessionId;
   if (typeof sid1 !== "string" || sid1.length === 0 || sid1 !== sid2) {
@@ -735,7 +760,8 @@ function llmIdentityMatches(identity, agent) {
  * runtimeFingerprints（2026-09-21 运行时身份入账）：backend 名 → 运行时指纹
  * （入口一次 `<binary> --version` spawn 探测的产物）；backend 组件键升级为
  * `backend:<name>@<codeRef>#<runtimeFingerprint>`（缺省不带 #——纯函数测试与
- * legacy 键形兼容）。两个 unknown 指纹恒不相等（runtimeIdentity.mjs 保证）。
+ * legacy 键形兼容）。未验证身份使用按探测目标稳定的指纹，并由
+ * runtimeIdentity.verified=false 明确标识，避免噪声而不冒充已验证。
  */
 export function resolveSubjects({ registry, subjectArg, codeRef, runtimeFingerprints = {} }) {
   if (typeof codeRef !== "string" || codeRef.length === 0) {
@@ -1156,8 +1182,8 @@ export function executeComponentChecks({
         key: subject.key,
         // 运行时身份入账（2026-09-21，ADR-0032 §5/§8 批次）：入口一次
         // `<binary> --version` spawn 探测的产物（distribution/version/binaryPath/
-        // fingerprint）；探测不可知 → honest unknown（fingerprint 每次唯一——
-        // 两个 unknown 恒不当作同一运行时）。
+        // fingerprint/verified/reason）；探测不可知 → stable unverified identity
+        //（去除重复键噪声，但绝不把它解释成已验证运行时）。
         runtimeIdentity: runtimeIdentities[subject.name] ?? null,
       }
       : {
@@ -1248,6 +1274,7 @@ export function createComponentDrills(deps) {
     }
   }
   const { root, tmpDir, waitTimeout, pollInterval, registry } = deps;
+  const runtimeIdentities = deps.runtimeIdentities ?? {};
   const shared = createDrills(deps);
   const { runCli, readRunEvents, ensureTmpGitRepo } = shared;
 
@@ -1645,7 +1672,9 @@ export function createComponentDrills(deps) {
       if (source) {
         try {
           resumeEvidence = sessionReuseEvidenceFromPhase6File(
-            JSON.parse(readFileSync(join(root, source.path), "utf8")));
+            JSON.parse(readFileSync(join(root, source.path), "utf8")),
+            { expectedRuntimeIdentity: runtimeIdentities[subjectName] ?? null },
+          );
         } catch (error) {
           resumeEvidence = { accepted: false, detail: `session-reuse evidence unreadable/unparseable at ${source.path}: ${error?.message ?? error}` };
         }

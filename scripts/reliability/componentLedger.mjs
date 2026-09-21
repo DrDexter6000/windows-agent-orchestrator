@@ -110,8 +110,8 @@ function assertNoSeparator(value, label, chars) {
 // `<binary> --version` spawn 探测的指纹）→ 键升级为
 // `backend:<name>@<codeRef>#<runtimeFingerprint>`。缺省不带 #（legacy 键形与
 // 纯函数测试兼容——验证时的记录没有指纹就保持无指纹键）。指纹不得含 "@" 或
-// "#"（键可逆解析）；两个 unknown 指纹恒不相等（runtimeIdentity.mjs 的构造
-// 保证——绝不把两次探测失败当作同一运行时）。
+// "#"（键可逆解析）；未验证身份用稳定 unverified 指纹并另带 verified:false，
+// 该键只消除重复噪声，不把“同一探测目标”冒充成已验证运行时。
 export function backendComponentKey({ name, codeRef, runtimeFingerprint } = {}) {
   assertNonEmptyString(name, "backend name");
   assertNoSeparator(name, "backend name", ["@"]);
@@ -210,9 +210,9 @@ export function assertNoCompositionLayerLeak(node, label = "component ledger pay
 
 // ── 记录构造 ─────────────────────────────────────────────────────────────────
 
-// ADR-0032 §8（2026-09-21）：检查记录承载五态（status ∈ CHECK_STATES 闭集，
+// ADR-0032 §8（2026-09-21）：检查记录承载五态（state ∈ CHECK_STATES 闭集，
 // legacy 布尔形状按 pass 派生）；not-applicable/blocked/inconclusive 必须带
-// 非空 statusReason（磁盘侧 fail-closed——缺原因即抛错，绝不静默落账）。
+// 非空 stateReason（磁盘侧 fail-closed——缺原因即抛错，绝不静默落账）。
 function normalizeComponentChecks(checks) {
   if (checks === undefined || checks === null) return [];
   if (!Array.isArray(checks)) {
@@ -234,9 +234,9 @@ function normalizeComponentChecks(checks) {
 }
 
 // 运行时身份入账（2026-09-21）：backend 记录可选 runtimeIdentity——
-// distribution/version/binaryPath 可为 null（探测不可知——honest unknown），
-// fingerprint 必填且非空（两个 unknown 靠每次唯一的指纹区分，绝不当作同一
-// 运行时）。llm 被测没有 harness 探测面 → 显式拒绝（不静默忽略）。
+// distribution/version/binaryPath 可为 null（探测不可知），fingerprint 必填且
+// 非空；verified 明确说明身份是否已验证，reason 保留未验证原因。llm 被测没有
+// harness 探测面 → 显式拒绝（不静默忽略）。
 function normalizeRuntimeIdentity(runtimeIdentity, kind) {
   if (runtimeIdentity === undefined || runtimeIdentity === null) return null;
   if (kind !== "backend") {
@@ -247,6 +247,9 @@ function normalizeRuntimeIdentity(runtimeIdentity, kind) {
   }
   assertNonEmptyString(runtimeIdentity.fingerprint, "runtimeIdentity.fingerprint");
   assertNoSeparator(runtimeIdentity.fingerprint, "runtimeIdentity.fingerprint", ["@", "#"]);
+  const verified = typeof runtimeIdentity.verified === "boolean"
+    ? runtimeIdentity.verified
+    : typeof runtimeIdentity.version === "string" && runtimeIdentity.version.length > 0;
   return {
     distribution: typeof runtimeIdentity.distribution === "string" && runtimeIdentity.distribution.length > 0
       ? runtimeIdentity.distribution
@@ -258,6 +261,10 @@ function normalizeRuntimeIdentity(runtimeIdentity, kind) {
       ? runtimeIdentity.binaryPath
       : null,
     fingerprint: runtimeIdentity.fingerprint,
+    verified,
+    reason: typeof runtimeIdentity.reason === "string" && runtimeIdentity.reason.length > 0
+      ? runtimeIdentity.reason
+      : (verified ? null : "runtime identity was not verified"),
   };
 }
 
@@ -569,6 +576,20 @@ export function annotateRuntimeDrift(records = [], { freshBackendRecords = [], a
     if (!hit || hit.prior !== record) return record;
     return { ...record, advisory: hit.note };
   });
+}
+
+// run-component-check 的单一合并胶水：稳定同键 prior 由 fresh 覆盖；只有本轮
+// 新标注的 runtime-drifted 历史记录越过键级修剪并保留；同 kind 的其它僵尸键
+// 正常被 pruneComponentRecords 清除。返回 driftCount 供入口展示。
+export function mergeComponentCheckRunRecords(priorRecords = [], freshRecords = [], { at = new Date().toISOString() } = {}) {
+  const annotated = annotateRuntimeDrift(priorRecords, { freshBackendRecords: freshRecords, at });
+  const newlyDrifted = annotated.filter((record, index) => record !== priorRecords[index]);
+  const currentKeys = freshRecords.map((record) => record.key);
+  const retained = pruneComponentRecords(priorRecords, currentKeys);
+  return {
+    records: mergeComponentRecords(retained, [...newlyDrifted, ...freshRecords]),
+    driftCount: newlyDrifted.length,
+  };
 }
 
 // ── fixture-decayed：历史记录降 advisory，不删 ───────────────────────────────

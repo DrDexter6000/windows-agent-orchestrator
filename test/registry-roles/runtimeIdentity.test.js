@@ -7,7 +7,7 @@
 // 覆盖面：
 //   1. 探测形状：一次 spawn、argv 恰 ["--version"]、known → v1-<hash16> 指纹
 //      稳定（同输入同指纹——身份可比对）；
-//   2. 两个 unknown 恒不相等（探测失败/无描述符/HTTP 服务——绝不当作同一运行时）；
+//   2. unknown 明确 verified=false，且同一探测目标的未验证键稳定（不制造新键噪声）；
 //   3. opencode-serve（HTTP 服务 backend）→ honest unknown + 原因；
 //   4. 未知 backend 名 → unknown（无描述符，不猜）；
 //   5. HARNESS_VERSION_PROBES 是身份元数据表（六 backend 全覆盖或显式 null）；
@@ -44,6 +44,7 @@ test("probe: known 形状——恰一次 spawn、argv 恰 --version、指纹 v1-
   assert.equal(a.version, "0.1.5-rc.2");
   assert.equal(a.binaryPath, "C:/probe/dsh.exe");
   assert.match(a.fingerprint, /^v1-[0-9a-f]{16}$/);
+  assert.equal(a.verified, true);
   // 指纹稳定性：同 (distribution, version, binaryPath) → 同指纹（身份可比对）。
   const b = probeRuntimeIdentity({ backendName: "deepseek-acp", agent, spawnFn: fakeSpawn({ stdout: "0.1.5-rc.2\n" }) });
   assert.equal(a.fingerprint, b.fingerprint);
@@ -59,15 +60,16 @@ test("probe: known 形状——恰一次 spawn、argv 恰 --version、指纹 v1-
   assert.notEqual(a.fingerprint, d.fingerprint);
 });
 
-test("probe【证伪】: 探测失败/无输出/非零退出 → honest unknown；两个 unknown 恒不相等", () => {
+test("probe F6【证伪】: 探测失败/无输出/非零退出 → stable unverified identity", () => {
   const failing = probeRuntimeIdentity({ backendName: "codex", spawnFn: fakeSpawn({ status: 1, error: new Error("ENOENT") }) });
   assert.equal(failing.version, null);
-  assert.match(failing.fingerprint, /^unknown-/);
+  assert.equal(failing.verified, false);
+  assert.match(failing.fingerprint, /^unverified-v1-/);
   assert.match(failing.reason, /did not yield a version/);
   const empty = probeRuntimeIdentity({ backendName: "codex", spawnFn: fakeSpawn({ stdout: "\n  \n" }) });
   const failing2 = probeRuntimeIdentity({ backendName: "codex", spawnFn: fakeSpawn({ status: 1, error: new Error("ENOENT") }) });
-  assert.notEqual(failing.fingerprint, failing2.fingerprint, "两个 unknown 不得当作同一运行时");
-  assert.notEqual(failing.fingerprint, empty.fingerprint);
+  assert.equal(failing.fingerprint, failing2.fingerprint, "same unverified probe target must not create a new ledger key every run");
+  assert.equal(failing.fingerprint, empty.fingerprint, "failure wording must not churn the target identity key");
   // spawn 抛错（非零退出之外的异常）→ 同样 honest unknown。
   const throwing = probeRuntimeIdentity({
     backendName: "codex",
@@ -78,10 +80,13 @@ test("probe【证伪】: 探测失败/无输出/非零退出 → honest unknown�
 
 test("probe: opencode-serve（HTTP 服务 backend）→ honest unknown + 原因（无 --version 可探）", () => {
   const spawn = fakeSpawn({ stdout: "1.19.0\n" });
-  const id = probeRuntimeIdentity({ backendName: "opencode-serve", spawnFn: spawn });
+  const id = probeRuntimeIdentity({ backendName: "opencode-serve", spawnFn: spawn, randomFn: () => "a" });
+  const repeated = probeRuntimeIdentity({ backendName: "opencode-serve", spawnFn: spawn, randomFn: () => "b" });
   assert.equal(spawn.calls.length, 0, "无本地二进制——零 spawn");
   assert.equal(id.version, null);
-  assert.match(id.fingerprint, /^unknown-/);
+  assert.equal(id.verified, false);
+  assert.match(id.fingerprint, /^unverified-v1-/);
+  assert.equal(id.fingerprint, repeated.fingerprint, "legacy randomness injection must not churn an unverified runtime key");
   assert.match(id.reason, /HTTP service backend/);
 });
 
@@ -91,13 +96,41 @@ test("probe【证伪】: 未知 backend 名 → unknown（无描述符，不猜�
   assert.match(id.reason, /no harness probe descriptor/);
 });
 
-test("HARNESS_VERSION_PROBES: 六 backend 全覆盖（显式描述符或显式 null），dsh 家族读 agent.binary 覆盖", () => {
+test("HARNESS_VERSION_PROBES F5: 六 backend 全覆盖，所有 process backend honor agent.binary", () => {
   const knownBackends = ["claude-code", "codex", "kimi-code", "deepseek-acp", "deepseek-harness", "opencode-serve"];
   assert.deepEqual([...Object.keys(HARNESS_VERSION_PROBES)].sort(), [...knownBackends].sort());
   assert.equal(HARNESS_VERSION_PROBES["opencode-serve"], null, "HTTP 服务显式 null（不静默缺省）");
   assert.equal(HARNESS_VERSION_PROBES["deepseek-acp"].binary({}), "dsh");
   assert.equal(HARNESS_VERSION_PROBES["deepseek-acp"].binary({ binary: "C:/custom/dsh.exe" }), "C:/custom/dsh.exe");
-  assert.equal(HARNESS_VERSION_PROBES["claude-code"].binary({ binary: "ignored" }), "claude", "非 dsh 家族发行版名固定（agent.binary 不影响发行版身份）");
+  assert.equal(HARNESS_VERSION_PROBES["claude-code"].binary({ binary: "C:/custom/claude-wrapper.exe" }), "C:/custom/claude-wrapper.exe");
+  assert.equal(HARNESS_VERSION_PROBES.codex.binary({ binary: "C:/custom/codex-wrapper.exe" }), "C:/custom/codex-wrapper.exe");
+  assert.equal(HARNESS_VERSION_PROBES["kimi-code"].binary({ binary: "C:/custom/kimi-wrapper.exe" }), "C:/custom/kimi-wrapper.exe");
+});
+
+test("probe F5: configured prependArgs are part of the executed version invocation and fingerprint", () => {
+  const agent = { binary: "C:/custom/claude-wrapper.exe", prependArgs: ["custom-entry.js"] };
+  const spawn = fakeSpawn({ stdout: "2.3.4\n" });
+  const a = probeRuntimeIdentity({ backendName: "claude-code", agent, spawnFn: spawn });
+  assert.equal(spawn.calls[0].binary, agent.binary);
+  assert.deepEqual(spawn.calls[0].args, ["custom-entry.js", "--version"]);
+  assert.equal(a.binaryPath, agent.binary);
+  const b = probeRuntimeIdentity({
+    backendName: "claude-code",
+    agent: { ...agent, prependArgs: ["different-entry.js"] },
+    spawnFn: fakeSpawn({ stdout: "2.3.4\n" }),
+  });
+  assert.notEqual(a.fingerprint, b.fingerprint, "different executed artifacts behind the same binary must not share a fingerprint");
+
+  const resolvedSpawn = fakeSpawn({ stdout: "2.3.4\n" });
+  const resolved = probeRuntimeIdentity({
+    backendName: "claude-code",
+    agent: { binary: "C:/ignored/claude.exe", prependArgs: ["ignored.js"] },
+    resolvedInvocation: { binary: "C:/node/node.exe", args: ["resolved-wrapper.mjs", "--profile", "x"] },
+    spawnFn: resolvedSpawn,
+  });
+  assert.equal(resolvedSpawn.calls[0].binary, "C:/node/node.exe");
+  assert.deepEqual(resolvedSpawn.calls[0].args, ["resolved-wrapper.mjs", "--profile", "x", "--version"]);
+  assert.equal(resolved.binaryPath, "C:/node/node.exe");
 });
 
 test("probe: 版本解析——首个非空行；多行 banner 取首行；超长截断到 120", () => {
