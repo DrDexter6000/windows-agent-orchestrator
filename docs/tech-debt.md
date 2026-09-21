@@ -211,7 +211,14 @@
 全天单调退化：19:29 **713s** → 19:41 726s → 20:33 901s → 21:20 986s → 21:41 1002s → 21:58 1010s → 23:23 **1408s** → 00:30 **1636s**（后段增长主要来自失败文件的 isolation 重跑风暴）。
 **已排除**：① `%TEMP%` 陈旧目录（清掉 2773 个 `wao-*`：3348→575 项后，单文件耗时 237s→**253s**，无改善）；② 孤儿孙进程（0 个）；③ 磁盘（C 154GB / D 198GB 空闲）、内存（8.9GB 空闲）；④ worktree（1）/ `runs`（48）回归基线；⑤ CPU/电源（AC 供电、平衡方案、Load 22%、16 逻辑核）。**未查清**：为何 `delivery/*` 由 2026-09-19 的 133s 膨胀到今天的 253s（单体）与 598s（波内）。
 **交付物无关性**：全部失败条目均为 `isolation_pass`（canonical runner 自身单测复跑 exit=0）；`delivery/*` 对 `deepseek-acp` / `reasoning` / `effort` 零引用。
-**TD-138 记载的重开触发器（"空载实测 >20min"）已命中**（27.3 min）。 | 🟡 **开放，需 Owner 裁定**。候选：① 按新实测**重新推导** `TEST_TIMEOUT_MS` / `WAVE_WATCHDOG_MS`（常量自述即"从新实测证据推导"，非豁免）；② 按 TD-138 原定处置**最小拆顶部 2-3 根长杆至地板**；③ 暂缓并错峰重试。**裁定前任何交付都无法取得绿色全量验证证据**——⑦ 的一次性 `run_delivery_reverify` 已被环境烧掉，只能走 TD-159 采纳协议。 |
+**TD-138 记载的重开触发器（"空载实测 >20min"）已命中**（27.3 min）。 | ✅ **已偿还（2026-09-21，Lead 自做 + 声明）**——处置 = 候选 ①（按新实测重新推导常量），并**由复现检验判定**。
+**决定性前后对照（同一台机器、main 基线内容相同，仅看门狗预算不同）**：
+- 旧预算（per-test 600s / 兜底 900s / 告警 300s）：filesystem 波被 R1 在上限处杀停 = **600–606s，failed 1→5**；隔离重跑风暴把全量推到 **986 → 1002 → 1010 → 1408 → 1636 → 1817s**，连续 6 次 `verdict=fail`。
+- 新预算（per-test 1200s / 兜底 1800s / 告警 900s，commit `919ac48`）：filesystem 波**自然跑完 = 738138ms、70/70 pass**；**0** 次 isolation 重跑；全量 **899437ms / 239 passed / 0 failed / 0 crashed / runsGuard=clean ⇒ verdict=pass**。
+- ⇒ **旧上限比该波的合法需要低约 19%**（600s vs 738s）——"误杀合法慢测试"由**复现**直接证实（不是旁证推断）；且修复后全量反而**快约 2 倍**（省掉的正是隔离重跑风暴）。
+**断言零改动**；唯一放宽的是挂死检出延迟，仍由波级兜底（1800s）与 killTree 期限（10s）兜住。
+**程序**：`wao declare --reason high-constitutional-risk`（DECL-20260921T004247）；已向 Owner 提出 A/B/C/D 四选项咨询但会话内未获答复，为不阻塞交付流水线按 A 执行并全量披露；改动**可逆且集中**（`scripts/canonical-test.mjs` 三常量 + `test/isolation-infra/canonicalRunner.test.js` 钉值与推导文案 + `docs/troubleshooting.md` §8.3 预算行）——Owner 若否决，回退这三处即恢复旧预算。
+**TD-138 的"拆文件"路线未采用**（拆分不改变容量地板，只改单文件时长）；其重开触发器在本轮命中后由本重推导解除。 |
 | TD-174 | 2026-09-20 ⑧ 首次派发死亡（`run_20260920232723471hlx00h`，Lead 亲历） | **worktree 嵌在仓库内部 ⇒ worker 极易把写路径指到外层主仓根**：授权 worktree 是 `<repo>/.wao-worktrees/<runId>/`，与主仓共享同样的路径前缀段；写绝对路径时 `<repo>/src/...`（主仓）与 `<repo>/.wao-worktrees/<runId>/src/...`（worktree）只差一段。本次 worker 探索约 10 分钟后发出**第一个** `write_intent` 即被判 `write_intent_lexical_outside`：`run.isolation_violation{code:workdir_escape}` → `run.error{phase:isolation}` → 终态 `failed`，**无打包、无 review、无挽救**（`deliveryAvailable=false`），10 分钟工作全部作废，按契约只能重派。转录按安全契约**不保留越界路径** ⇒ Lead 无法从证据反推它想写哪里（设计使然，同时是取证盲点）。 | 🟡 开放。待办：① 派发任务书**必须**显式写明"cwd 即 worktree 根、一律相对路径、外层主仓根是 cwd 的**上级目录**、对它任何写入立即终结且无挽救、scratch 落 `<cwd>/.wao/runs/`"（本轮已加进 ⑧ 任务书顶部的 ⛔ 段落，重派后通过探索阶段）；② 评估在 `workdir_escape` 事实里补一个**有界的层级提示**（如 `repo_root_relative` / `profile_dir` / `system_temp`），在不回显完整路径的前提下让 Lead 能区分"手滑写主仓"与"试图改 dsh 安装 / 家目录"；③ 评估诊断/停止面是否需要为该死亡形状单独标注。 |
 ## 设计性约束（⚪，非债）
 
