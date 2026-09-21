@@ -25,7 +25,7 @@
 // 不改任何既有条目）。--registry-source <path> 可覆盖来源。
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -195,18 +195,27 @@ function rewritePrior(events, mutate) {
 rewritePrior(t2.events, (e) => (e?.type === "session.created" && e.runId === r2.runId
   ? { ...e, backendSessionId: "" }
   : e));
+// Audit finding A5 [中] (2026-09-21): the original form inferred "no transcript
+// was written" from the ABSENCE of a runId, so a dispatch that wrote a
+// transcript and *then* threw would still record a green field. Snapshot the
+// runs dir and compare — that is the actual claim.
+const jsonlBefore = new Set(readdirSync(runDir).filter((n) => n.endsWith(".jsonl")));
 let negA = { refused: false };
 try {
   await dispatch("should be refused", "negA_dispatch");
 } catch (error) {
   negA = { refused: true, message: error.message };
 }
-const negAId = evidence.steps.negA_dispatch?.runId;
+const addedTranscripts = readdirSync(runDir)
+  .filter((n) => n.endsWith(".jsonl") && !jsonlBefore.has(n));
 evidence.negativeA = {
   tamper: "prior transcript session.created.backendSessionId -> empty string",
   ...negA,
-  noTranscriptForRefusedDispatch: typeof negAId !== "string" || !existsSync(join(runDir, `${negAId}.jsonl`)),
-  pass: Boolean(negA.refused && /no addressable provider session id/.test(negA.message ?? "")),
+  addedTranscripts,
+  noTranscriptForRefusedDispatch: addedTranscripts.length === 0,
+  pass: Boolean(negA.refused
+    && /no addressable provider session id/.test(negA.message ?? "")
+    && addedTranscripts.length === 0),
 };
 rewritePrior(t2.events, (e) => e);
 if (!evidence.negativeA.pass) fail(`negative A failed: ${JSON.stringify(negA)}`);
@@ -242,11 +251,21 @@ if (!r5.accepted || r5.providerSessionRouting !== "resume_requested") {
 }
 const t5 = await waitForTerminal(r5.runId);
 const err5 = fact(t5.events, "run.error", r5.runId);
+// Audit finding A5 [中] (2026-09-21): the original predicate accepted ANY
+// non-empty error text, so a credential/launch failure would also have passed.
+// Require (a) the run failed at spawn with the upstream refusal shape AND
+// (b) NO session.created for this run — the latter is what actually proves
+// there was no silent fallback to session/new.
+const noSessionCreated = !t5.events.some((e) => e && e.runId === r5.runId && e.type === "session.created");
 evidence.negativeC = {
   tamper: `prior transcript session.created.backendSessionId -> well-formed nonexistent uuid (${fakeSid})`,
   state: t5.state,
   spawnError: err5?.error ?? null,
-  pass: t5.state === "failed" && typeof err5?.error === "string" && err5.error.length > 0,
+  noSessionCreatedForResumeAttempt: noSessionCreated,
+  pass: t5.state === "failed"
+    && typeof err5?.error === "string"
+    && /-32602|not resumable/.test(err5.error)
+    && noSessionCreated,
 };
 rewritePrior(t2.events, (e) => e);
 if (!evidence.negativeC.pass) fail(`negative C failed: ${JSON.stringify(evidence.negativeC)}`);

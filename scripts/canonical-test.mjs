@@ -261,10 +261,17 @@ export function validateWavePlan(wavePlan, categories) {
 //     i.e. the in-wave peak now EQUALS the old 600s cap, so legal slow tests in
 //     the wave tail were killed by R1 and reported as failures while every one
 //     of them was classified isolation_pass (they pass when run alone).
-//   - new value = ~2x the measured in-wave peak (~606s) and ~4.7x the measured
-//     alone peak (253s). Raising this makes the gate STRICTER in effect: a slow
-//     test must now actually finish and pass instead of being killed. The only
-//     thing loosened is hang-detection latency, and R2 still bounds that.
+//   - new value = ~2x the measured in-wave peak (606s; the passing run's own
+//     report shows deliveryVerification.test.js at 752724ms) and ~4.7x the
+//     measured alone peak (253s).
+//   - WHAT THIS DOES AND DOES NOT CHANGE (audit correction, 2026-09-21): it
+//     changes only the TIME BOUNDARY. Functional assertions, required file
+//     coverage, and the fail/missing/crash verdict rules are untouched, and a
+//     first-round failure is never washed green by an isolation re-run (see the
+//     isolation-pass handling below). So this is NOT "stricter verification" —
+//     it removes a boundary that sat below the suite's legitimate need. The cost
+//     is real and must be stated: hang-detection latency doubles, bounded as
+//     before by R2.
 //   - Re-derive again from fresh measurement whenever the wave composition or
 //     the machine changes; never tighten below the measured in-wave peak.
 export const TEST_TIMEOUT_MS = 1200000;

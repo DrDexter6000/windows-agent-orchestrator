@@ -47,7 +47,7 @@
 //     never enters argv.
 
 import { createHash } from "node:crypto";
-import { readFile, mkdir, writeFile, open, unlink } from "node:fs/promises";
+import { readFile, mkdir, writeFile, rename, open, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { TERMINAL_STATES, readTranscript, findState, findLatestBound } from "../transcript.js";
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
@@ -264,8 +264,22 @@ async function readRoutingEntryFile(filePath) {
   } catch {
     throw new Error(ROUTING_ENTRY_DAMAGED_TEXT);
   }
+  // §3.6 item 5 (audit finding A3 [高], 2026-09-21): a PRESENT-but-malformed
+  // entry is damage, never "a crashed prior run". The pre-audit reader accepted
+  // any non-empty runId string, and resolveReuseTurn coerced a bad updatedAt to
+  // 0 — so {"runId":"bad/id"} and {"runId":"run_missing","updatedAt":"broken"}
+  // both fell through to turn:first and silently started a FRESH provider
+  // conversation, contradicting the §3.6 refusal contract. Both shapes are now
+  // refused here (single SSOT; the injected test stores are unaffected).
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
-    || typeof parsed.runId !== "string" || parsed.runId.length === 0) {
+    || typeof parsed.runId !== "string" || parsed.runId.length === 0
+    || !RUN_ID_RE.test(parsed.runId) || /^[.-]/.test(parsed.runId)) {
+    throw new Error(ROUTING_ENTRY_DAMAGED_TEXT);
+  }
+  // updatedAt is part of the bounded routing fact ({runId, updatedAt}); every
+  // writer in this module writes a finite number, so a non-finite value is
+  // damage rather than an implied "very old".
+  if (!Number.isFinite(parsed.updatedAt)) {
     throw new Error(ROUTING_ENTRY_DAMAGED_TEXT);
   }
   return parsed;
@@ -291,9 +305,23 @@ function defaultReuseStore(runDir) {
     },
     async writeEntry(keyHash, entry) {
       await mkdir(dir, { recursive: true });
-      await writeFile(join(dir, `${keyHash}.json`), JSON.stringify(entry), "utf8");
+      await writeAtomicEntry(join(dir, `${keyHash}.json`), entry);
     },
   };
+}
+
+/**
+ * §3.6 item 2 — atomic routing-entry write (audit finding A3 [中], 2026-09-21).
+ * A plain whole-file writeFile is NOT atomic: an interrupted write could leave a
+ * truncated entry where a good one used to be. Write a sibling temp file and
+ * rename() over the target instead — rename replaces atomically on the same
+ * volume (Windows: MoveFileEx + MOVEFILE_REPLACE_EXISTING), so the target always
+ * holds either the previous complete entry or the new complete entry.
+ */
+async function writeAtomicEntry(target, entry) {
+  const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
+  await writeFile(tmp, JSON.stringify(entry), "utf8");
+  await rename(tmp, target);
 }
 
 /**
@@ -604,7 +632,7 @@ function defaultLineageStore(runDir) {
     },
     async writeEntry(keyHash, entry) {
       await mkdir(dir, { recursive: true });
-      await writeFile(join(dir, `${keyHash}.json`), JSON.stringify(entry), "utf8");
+      await writeAtomicEntry(join(dir, `${keyHash}.json`), entry);
     },
     async deleteEntry(keyHash) {
       await unlink(join(dir, `${keyHash}.json`)).catch((error) => {

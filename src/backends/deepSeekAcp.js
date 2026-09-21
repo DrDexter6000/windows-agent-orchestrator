@@ -334,7 +334,8 @@ export class DeepSeekAcpBackend {
       throw new Error(
         "deepseek-acp reasoning.effort must be one of the ACP-wire-verified settable values ("
         + SETTABLE_REASONING_EFFORTS.join(", ")
-        + ") — the ACP session advertises off/low/high/max and WAO's registry enum is minimal/low/medium/high/xhigh/max, so only the intersection is accepted; no value mapping is invented",
+        + "; low and max are set-confirmed by Phase 5, high is the advertised session/new default)"
+        + " — the ACP session advertises off/low/high/max and WAO's registry enum is minimal/low/medium/high/xhigh/max, so only the intersection is accepted; no value mapping is invented",
       );
     }
   }

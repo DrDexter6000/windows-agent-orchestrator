@@ -444,7 +444,22 @@ test("§3.6 TURN-7: routing entry present but DAMAGED (unparseable / malformed) 
   try {
     const keyHash = deriveReuseKeyHash({ leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher" });
     const entryPath = join(dir, ".session-reuse", `${keyHash}.json`);
-    for (const damaged of ["{ not json", "[]", '{"noRunId":true}', '{"runId":""}', '{"runId":42}']) {
+    // Audit finding A3 [高] (2026-09-21) reproductions: the last four shapes used
+    // to be ACCEPTED by the reader and then fall through to turn:first — i.e. a
+    // present-but-corrupt association silently started a FRESH provider
+    // conversation, contradicting the §3.6 refusal contract. They are now damage.
+    for (const damaged of [
+      "{ not json",
+      "[]",
+      '{"noRunId":true}',
+      '{"runId":""}',
+      '{"runId":42}',
+      '{"runId":"bad/id","updatedAt":1}',
+      '{"runId":".dotfirst","updatedAt":1}',
+      '{"runId":"-dashfirst","updatedAt":1}',
+      '{"runId":"run_missing","updatedAt":"broken"}',
+      '{"runId":"run_missing"}',
+    ]) {
       mkdirSync(join(dir, ".session-reuse"), { recursive: true });
       writeFileSync(entryPath, damaged, "utf8");
       await assert.rejects(

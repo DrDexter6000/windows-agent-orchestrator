@@ -482,8 +482,8 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **症状**：全量在某波长时间无进展；stderr 每 5 分钟一行 `[canonical] NOTICE: wave=<name> running for <N>s (slow-wave alarm, informational)`；或尾部出现 `watchdog backstop fired` / 文件 `crashReason: "watchdog_timeout"`。TD-165 之前一个挂死文件会让整个波次无限期停摆——现在三层看门狗已把无限等待变成有界等待并**指名肇事文件/波**。
 - **三层防线（预算：per-test 1200s / 波级兜底 1800s / 告警 900s；2026-09-21 按 TD-173 实测重推导）**：
   - **R1 per-test 超时**（`--test-timeout`，主防线）：单个测试挂死（含同步死循环——Node 在文件级从父进程执行超时）按普通失败收杀；该文件记非 pass（超时测试不产生完成事件 ⇒ 报告中多为 `missing`），**同波其他文件不受影响**，波正常收尾。
-  - **R2 波级兜底看门狗**（墙钟 900s）：到期 `taskkill /PID <该子进程自己的 pid> /T /F`（只杀自己的进程树，绝不全局杀 node.exe）+ `kill(pid,0)→ESRCH` 探针确认死透（500ms × 3 次）。该波**全部文件**记 `crash` + `crashReason: "watchdog_timeout"`，groupError 含波名/已耗时/标记/清理状态。
-  - **R3 慢波告警**（300s NOTICE 行）：纯读提示，不杀进程、不影响 verdict。
+  - **R2 波级兜底看门狗**（墙钟 1800s）：到期 `taskkill /PID <该子进程自己的 pid> /T /F`（只杀自己的进程树，绝不全局杀 node.exe）+ `kill(pid,0)→ESRCH` 探针确认死透（500ms × 3 次）。该波**全部文件**记 `crash` + `crashReason: "watchdog_timeout"`，groupError 含波名/已耗时/标记/清理状态。
+  - **R3 慢波告警**（900s NOTICE 行）：纯读提示，不杀进程、不影响 verdict。
 - **分诊**：读 `test-results.json`——`executionWaves[].watchdog`（fired/confirmed/elapsedMs/pid）与 `groupError` 指名波与耗时；该波 `files[]` 的 crash 条目即被连坐文件；`firstRound.failures[].crashReason` 与 isolation 条目的 `crashReason: "watchdog_timeout"`（分类 `stable_fail`——单独跑也挂死 = 真测试挂死，不是环境问题）指名肇事测试文件。R1 主防线腿（per-test 超时收杀）同样指名文件：挂死测试自身不产生完成事件，Node 以文件级失败事件（`details.error.message` = "test timed out after Nms"）收尾，reporter 把该文件 suite 记 `fail` + `fileFailure` 原因（2026-09-19 v22.23.1 实测；同文件已通过的兄弟条目保留可见），该文件照常进入隔离重跑资格。
 - **`cleanup unconfirmed`（红灯 + 套件提前停止，两条腿）**：兜底杀了但探针证不出死——疑似残留进程。stderr 文案与报告字段按中止来源区分：
   - **波腿**（stderr：`later waves were NOT started`）：后续波未启动；残留 pid 在 `executionWaves[].watchdog.pid`。
