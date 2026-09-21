@@ -494,6 +494,20 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **kill 环节自身挂住**：看门狗对 `killTreeFn` 设 10s 期限竞速（`KILL_TREE_DEADLINE_MS`）——taskkill 异常不返回时到期放弃等待、照常进探针环节（stderr 出现 `killTree did not return within ...ms — proceeding to liveness probes`），探针决定死活，看门狗自己绝不做无限等待。
 - **后备：手工二分（看门狗指名之前的旧配方，仍适用于单文件复跑）**：拿到肇事文件后 `node scripts/wao-node.cjs --test test/<file>` 单发复跑确认仍挂；再在该文件内二分（注释后半部测试）定位具体挂死用例。
 
+### 8.4 session reuse 关联面拒绝时的运维处置（ADR-0031 §3.6 / TD-175，2026-09-21）
+
+- **症状**：一次本应"复用上次会话"的派发被**拒**，固定文案属于以下四类之一（fetch 全文见 `src/application/sessionReuse.js` 的三个常量）：
+  1. `routing entry for this reuse identity is damaged (present but unparseable or malformed)` —— 关联槽位**存在但损坏**（坏 JSON、`runId` 形状非法、`updatedAt` 非有限/为负/在未来）。
+  2. `prior run has a bound session.created but no addressable provider session id` —— 前任 run 确实建过 provider 会话，但转录里记的 id 不可用。
+  3. `prior transcript for resume is missing or unparseable` —— 前任转录读不出来。
+  4. `no transcript-recovered prior provider session id reached the backend` —— runner 侧没拿到 id（shape 与 2 同源）。
+- **这是刻意的 fail-closed**：§3.6 要求"缺失/损坏时**拒绝**恢复，绝不静默新建会话"。看到拒绝**不要**把它当成故障去绕——静默新会话正是这条契约要防的（用户会以为上下文还在）。
+- **状态在哪**：`<runDir>/.session-reuse/<sha256(opaque uuid)>.json`（内容恒为有界事实 `{runId, updatedAt}`；**不含** provider session id——那份唯一真源是前任 run 转录的 `session.created.backendSessionId`）。lineage 复用面在 `<runDir>/.lineage-reuse/`，同构。
+- **operator 恢复（唯一受支持的动作）**：确认**没有**在飞的 run 之后，删除对应的那一个条目文件（`.session-reuse/<hash>.json` 或 `.lineage-reuse/<hash>.json`），下一次同身份派发会按"条目缺失"回到 `first`（既有 bootstrap 合同）。**不要**手工编辑条目内容去"修好"它——写入是原子 rename（tmp + rename），手编会绕过校验；也**不要**删整个目录（会一次丢掉全部身份的关联）。
+- **怎么定位是哪个 hash**：条目文件名即 `sha256(opaqueUuid)`，而 opaqueUuid 由 `(Lead 会话 + canonical workspace + agentId)`（lineage 再加 `rootRunId`）派生，**磁盘上不含**这些原值（安全设计）。因此无法从目录反查身份——按"最近一次被拒的派发时间"缩小范围（`updatedAt`），或直接删掉该时间窗内的条目。
+- **已知不可达（不是本节的处置对象）**：路由条目**被删除**（ENOENT）时按 M11-11C provider-中立合同回到 `first`，这是**降级不是拒绝**，不在 §3.6 的 fail-closed 声称范围内（ADR-0031 §3.6 范围注）。
+- **仍未闭合并已登记**（TD-175）：resume 失败会**永久孤儿化**该关联链（单槽指针被新 runId 覆盖后，下一转按"终态无 session.created ⇒ first"降级，Lead 只看到 `turn=first`、无显式断链信号）；本条 runbook 是当前唯一的人工出口。
+
 ---
 
 ## 9. 新增条目（模板）
