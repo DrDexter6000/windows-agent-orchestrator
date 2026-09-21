@@ -277,9 +277,10 @@ async function readRoutingEntryFile(filePath) {
     throw new Error(ROUTING_ENTRY_DAMAGED_TEXT);
   }
   // updatedAt is part of the bounded routing fact ({runId, updatedAt}); every
-  // writer in this module writes a finite number, so a non-finite value is
-  // damage rather than an implied "very old".
-  if (!Number.isFinite(parsed.updatedAt)) {
+  // writer in this module writes a finite NON-NEGATIVE epoch-ms number, so
+  // anything else is damage rather than an implied "very old" (re-check
+  // finding R1 [高], 2026-09-21: a negative value used to read as long-stale).
+  if (!Number.isFinite(parsed.updatedAt) || parsed.updatedAt < 0) {
     throw new Error(ROUTING_ENTRY_DAMAGED_TEXT);
   }
   return parsed;
@@ -502,8 +503,17 @@ export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, 
       } else {
         // Transcript missing. Recent entry → assume in-flight (busy); stale →
         // assume crashed (first), reusing the slot.
-        const age = clock - (Number(entry.updatedAt) || 0);
-        if (Number.isFinite(age) && age >= 0 && age < STALE_MS) {
+        //
+        // Re-check finding R1 [高] (2026-09-21): a NEGATIVE age (the entry's
+        // updatedAt is in the future) is not "an old crashed entry" — it is a
+        // nonsensical/clock-skewed/tampered timestamp. Falling through to
+        // turn:first there silently abandoned a possibly-live association, the
+        // same class of defect as the shapes fixed in TD-175. It is damage.
+        const age = clock - entry.updatedAt;
+        if (!Number.isFinite(age) || age < 0) {
+          throw new Error(ROUTING_ENTRY_DAMAGED_TEXT);
+        }
+        if (age < STALE_MS) {
           return { kind: "busy", activeRunId: entry.runId };
         }
         // stale + missing → first (fall through).

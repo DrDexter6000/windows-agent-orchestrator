@@ -459,6 +459,9 @@ test("§3.6 TURN-7: routing entry present but DAMAGED (unparseable / malformed) 
       '{"runId":"-dashfirst","updatedAt":1}',
       '{"runId":"run_missing","updatedAt":"broken"}',
       '{"runId":"run_missing"}',
+      // Re-check finding R1 [高] (2026-09-21): a NEGATIVE epoch used to read as
+      // "long stale" and silently start a fresh conversation.
+      '{"runId":"run_missing","updatedAt":-1}',
     ]) {
       mkdirSync(join(dir, ".session-reuse"), { recursive: true });
       writeFileSync(entryPath, damaged, "utf8");
@@ -471,6 +474,20 @@ test("§3.6 TURN-7: routing entry present but DAMAGED (unparseable / malformed) 
         `entry=${damaged} must refuse`,
       );
     }
+    // Re-check finding R1 [高] (2026-09-21): a FUTURE updatedAt yields a negative
+    // age in the transcript-missing branch — that is damage, not "an old crashed
+    // entry", and must refuse instead of falling through to turn:first.
+    mkdirSync(join(dir, ".session-reuse"), { recursive: true });
+    writeFileSync(entryPath, JSON.stringify({ runId: "run_missing", updatedAt: Date.now() + 60_000 }), "utf8");
+    await assert.rejects(
+      () => resolveReuseTurn({
+        runDir: dir, runId: "run_next_7b",
+        leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher",
+      }),
+      /routing entry.*damaged.*refusing instead of silently starting a fresh provider conversation/s,
+      "future updatedAt (negative age) must refuse",
+    );
+
     // 缺失（ENOENT）仍是 first——既有 bootstrap 合同不动（TURN-1 同款）。
     rmSync(join(dir, ".session-reuse"), { recursive: true, force: true });
     const decision = await resolveReuseTurn({

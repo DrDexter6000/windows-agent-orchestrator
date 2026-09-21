@@ -246,7 +246,7 @@ test("ACP policy: effort 只放行 wire 实证可设置交集 low/high/max（Pha
   for (const effort of ["off", "minimal", "medium", "xhigh", "ultra"]) {
     assert.throws(
       () => backend.validateAgentPolicy(agent({ reasoning: { effort } })),
-      /reasoning\.effort must be one of the ACP-wire-verified settable values \(low, high, max; low and max are set-confirmed by Phase 5, high is the advertised session\/new default\)/,
+      /reasoning\.effort must be one of the accepted intersection values \(low, high, max;/,
       effort,
     );
   }
@@ -430,7 +430,7 @@ test("ACP registry/env 集成：闭集成员、credentialEnv 必填、凭据继�
   assert.doesNotThrow(() => built.validateAgentPolicy(agent({ reasoning: { effort: "high" } })));
   assert.throws(
     () => built.validateAgentPolicy(agent({ reasoning: { effort: "medium" } })),
-    /must be one of the ACP-wire-verified settable values/,
+    /must be one of the accepted intersection values/,
   );
 });
 

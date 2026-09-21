@@ -332,9 +332,9 @@ export class DeepSeekAcpBackend {
     const effort = agent?.reasoning?.effort;
     if (effort !== undefined && effort !== null && !SETTABLE_REASONING_EFFORTS.includes(effort)) {
       throw new Error(
-        "deepseek-acp reasoning.effort must be one of the ACP-wire-verified settable values ("
+        "deepseek-acp reasoning.effort must be one of the accepted intersection values ("
         + SETTABLE_REASONING_EFFORTS.join(", ")
-        + "; low and max are set-confirmed by Phase 5, high is the advertised session/new default)"
+        + "; low/max are set-confirmed on the real ACP wire by Phase 5, high is the advertised session/new default and is enforced by the spawn-time response check)"
         + " — the ACP session advertises off/low/high/max and WAO's registry enum is minimal/low/medium/high/xhigh/max, so only the intersection is accepted; no value mapping is invented",
       );
     }

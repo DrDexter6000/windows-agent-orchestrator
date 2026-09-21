@@ -262,9 +262,14 @@ evidence.negativeC = {
   state: t5.state,
   spawnError: err5?.error ?? null,
   noSessionCreatedForResumeAttempt: noSessionCreated,
+  // Re-check finding R3 [中] (2026-09-21): the previous predicate was
+  // `/-32602|not resumable/`, which also matches an unrelated `-32602 unknown
+  // reasoning effort`. Require BOTH the code and the resume-specific message —
+  // a session-config error must not be able to satisfy the resume-refusal claim.
   pass: t5.state === "failed"
     && typeof err5?.error === "string"
-    && /-32602|not resumable/.test(err5.error)
+    && /-32602/.test(err5.error)
+    && /not resumable/.test(err5.error)
     && noSessionCreated,
 };
 rewritePrior(t2.events, (e) => e);
