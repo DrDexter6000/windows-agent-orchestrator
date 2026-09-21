@@ -34,3 +34,4 @@
 0030 | 等待到期语义——通知不杀（Owner 方向裁定：语义决策归 Lead；TD-151 根修立项待排期、TD-154 档位降级）
 0031 | DSH ACP 后端落地方案（B-2） | 经 ACP over stdio 接入 dsh 驱动 DeepSeek；跨进程 session/resume 解 TD-117；双席审查 PASS_WITH_CHANGES 已折叠；status: accepted
 0032 | 两层验证与认证（组件层 + 组合层） | llm=verified / backend=conformant / 组合=certified；证据复用而非绿灯传递；分台账、kind 命名空间身份键、lastVerifiedAt 隔离；status: proposed
+0033 | canonical 看门狗预算重推导的授权仲裁（auditor R5） | WAO 的宪法级变更控制手段是 declare（可见性+可审计），非 Owner 事前批准（src/waoDeclare.js:26-33 SSOT 枚举，守卫 docs-consistency）；auditor 引据的 Work Discipline 不在 config/roles/auditor.md（35 行全文零命中，:18/:25 反证最终决策归 Lead/owner）；先例 0020 采纳 FAIL 因其 findings 有实证、本批三个[高]已全数采纳；R5 记为 dissent 非缺陷；push 仍待 Owner 明示；status: accepted
