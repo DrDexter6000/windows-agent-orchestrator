@@ -709,6 +709,12 @@ export async function resolveLineageFirstTurn({ runDir, runId, leadSession, work
 
   return withKeyLock(store, keyHash, async () => {
     const entry = await store.readEntry(keyHash);
+    // Re-check-3 finding (coder_mm substitute, 2026-09-21) [高]: the same
+    // unconditional temporal validation as resolveReuseTurn — the lineage
+    // resolvers previously had NO future/negative check at all, so a tampered
+    // `.lineage-reuse` entry reclaimed the slot (lineage-first) or resumed a
+    // prior owner (lineage-continuation) with the slot overwritten.
+    if (entry) assertRoutingEntryUsable(entry, clock);
     if (entry && entry.runId && entry.runId !== runId) {
       // A prior owner exists for this lineage key. If non-terminal, refuse.
       const priorPath = join(runDir, `${entry.runId}.jsonl`);
@@ -732,8 +738,11 @@ export async function resolveLineageFirstTurn({ runDir, runId, leadSession, work
           return { kind: "busy", activeRunId: entry.runId };
         }
       } else {
-        const age = clock - (Number(entry.updatedAt) || 0);
-        if (Number.isFinite(age) && age >= 0 && age < STALE_MS) {
+        // No `|| 0` coercion: assertRoutingEntryUsable above already proved the
+        // timestamp is finite and not in the future, so a negative age cannot
+        // reach here (it would have thrown as damage).
+        const age = clock - entry.updatedAt;
+        if (age < STALE_MS) {
           return { kind: "busy", activeRunId: entry.runId };
         }
       }
@@ -777,6 +786,9 @@ export async function resolveLineageContinuationTurn({ runDir, runId, parentRunI
 
   return withKeyLock(store, keyHash, async () => {
     const entry = await store.readEntry(keyHash);
+    // Re-check-3 finding (coder_mm substitute, 2026-09-21) [高]: see the twin
+    // note in resolveLineageFirstTurn — unconditional temporal validation.
+    if (entry) assertRoutingEntryUsable(entry, clock);
     if (entry && entry.runId && entry.runId !== runId) {
       const priorPath = join(runDir, `${entry.runId}.jsonl`);
       let events = [];
@@ -803,8 +815,8 @@ export async function resolveLineageContinuationTurn({ runDir, runId, parentRunI
         }
         // Terminal owner (the parent reached terminal). Reclaim for the child.
       } else {
-        const age = clock - (Number(entry.updatedAt) || 0);
-        if (Number.isFinite(age) && age >= 0 && age < STALE_MS) {
+        const age = clock - entry.updatedAt;
+        if (age < STALE_MS) {
           return { kind: "busy", activeRunId: entry.runId };
         }
       }

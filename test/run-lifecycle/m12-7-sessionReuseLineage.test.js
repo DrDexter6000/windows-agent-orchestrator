@@ -197,6 +197,48 @@ test("M12-7-LIN-09: concurrent duplicate continuation of the same parent -> lose
   }
 });
 
+test("M12-7-LIN-10: 损坏的 lineage 条目时间戳（未来/负/非数）⇒ 拒绝，绝不回收或续接槽位（窄复核第 3 轮 [高]）", async () => {
+  const runDir = tmpRunDir();
+  try {
+    const key = deriveLineageReuseKeyHash({ leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT });
+    for (const badTs of [1000 + 60_000, -1, "broken", NaN]) {
+      // (a) first-turn: 条目指向别的 owner，转录缺失 —— 修复前会判 first 并覆写槽位
+      const s1 = memStore();
+      s1._entries.set(key, { runId: "run_owner", updatedAt: badTs });
+      await assert.rejects(
+        () => resolveLineageFirstTurn({
+          runDir, runId: ROOT, leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT, reuseStore: s1, now: 1000,
+        }),
+        /routing entry.*damaged/s,
+        `lineage first turn, updatedAt=${String(badTs)} must refuse`,
+      );
+      // (b) self-runId 变体：条目 owner 就是本次 runId —— 同样不得绕过
+      const s2 = memStore();
+      s2._entries.set(key, { runId: ROOT, updatedAt: badTs });
+      await assert.rejects(
+        () => resolveLineageFirstTurn({
+          runDir, runId: ROOT, leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT, reuseStore: s2, now: 1000,
+        }),
+        /routing entry.*damaged/s,
+        `lineage self-runId, updatedAt=${String(badTs)} must refuse`,
+      );
+      // (c) continuation: 修复前会对损坏条目判 resume 并覆写槽位
+      const s3 = memStore();
+      s3._entries.set(key, { runId: "run_owner", updatedAt: badTs });
+      await assert.rejects(
+        () => resolveLineageContinuationTurn({
+          runDir, runId: "run_child_1", parentRunId: "run_owner", rootRunId: ROOT,
+          leadSession: LEAD, workspace: WS, agentId: AGENT, reuseStore: s3, now: 1000,
+        }),
+        /routing entry.*damaged/s,
+        `lineage continuation, updatedAt=${String(badTs)} must refuse`,
+      );
+    }
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});
+
 // ---- helpers: write minimal transcripts that findState() treats as terminal / non-terminal ----
 
 async function seedTerminalTranscript(runDir, runId, agentId) {
