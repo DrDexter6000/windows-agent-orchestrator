@@ -42,6 +42,25 @@ function splitRowCells(line) {
   return cells;
 }
 
+function tier1Paths(actionId) {
+  const row = read("docs/ssot.md").split(/\r?\n/)
+    .find((line) => line.startsWith(`| \`${actionId}\` |`));
+  if (!row) return [];
+  return [...splitRowCells(row)[2].matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+}
+
+function eventTableNames(rel, heading, nextHeadingPrefix) {
+  const text = read(rel);
+  const start = text.indexOf(heading);
+  assert.notEqual(start, -1, `${rel} 缺小节 ${heading}`);
+  const rest = text.slice(start + heading.length);
+  const next = rest.indexOf(`\n${nextHeadingPrefix} `);
+  const section = next === -1 ? rest : rest.slice(0, next);
+  return section.split(/\r?\n/)
+    .map((line) => line.match(/^\|\s*(?:\*\*)?`([^`]+)`(?:\*\*)?\s*\|/)?.[1])
+    .filter(Boolean);
+}
+
 /** 收集所有 opencode-serve serveUrl 端口（形如 :4297）。 */
 function collectServePorts(text) {
   const out = [];
@@ -245,17 +264,20 @@ test("spec §7 目录结构不得把未实现的文件当作已存在列出", ()
   assertNotPresentedAsExisting("dag.js");
 });
 
-test("transcript 事件表单一权威：usage.md 必须是完整权威，SKILL.md 不得维护并行的事件清单", () => {
-  // SSOT：transcript 事件类型清单只允许一份完整定义。
-  // 权威 = docs/usage.md §三（人读完整表）+ docs/02-architecture.md §3.2（spec 契约）。
-  // SKILL.md 若也维护一份完整事件表，必然与 usage 漂移（已经漂移过）。
-  // 规则：SKILL.md 的 transcript 段必须指向 usage，不得自己列全量事件表。
+test("transcript 事件 spec 与人读投影行集相等，SKILL.md 不维护第三份清单", () => {
+  // 真值源 = architecture §3.2；usage §三只有在显式声明“投影自”且事件名
+  // 行集双向相等时，才是合法的第二份当前值陈述。
   const skill = read("SKILL.md");
   const usage = read("docs/usage.md");
-  // usage 必须含完整事件集（含 M3+M5+M6+M10-pre 新增的）。
-  for (const ev of ["run.event", "scorecard.checked", "run.rerun", "run.cleanup_done", "run.wait_policy", "run.stop_verified", "run.stop_unverified"]) {
-    assert.ok(usage.includes(ev), `usage.md transcript 表缺事件 ${ev}（应是完整权威）`);
-  }
+  const archEvents = eventTableNames("docs/02-architecture.md", "### 3.2 事件类型清单", "###");
+  const usageEvents = eventTableNames("docs/usage.md", "## 三、transcript 格式", "##");
+  assert.ok(/投影自 `docs\/02-architecture\.md` §3\.2/.test(usage),
+    "usage.md §三必须显式声明投影自 architecture §3.2");
+  assert.equal(new Set(archEvents).size, archEvents.length, "architecture §3.2 不得有重复事件行");
+  assert.equal(new Set(usageEvents).size, usageEvents.length, "usage.md §三不得有重复事件行");
+  assert.deepEqual([...usageEvents].sort(), [...archEvents].sort(),
+    "usage 人读投影与 architecture 事件 spec 的事件名行集必须双向相等");
+  assert.throws(() => assert.deepEqual([...usageEvents.slice(1)].sort(), [...archEvents].sort()));
   // SKILL 不得再维护并行全量表（不得同时列 run.rerun 与 run.event 等做"完整清单"）。
   // 允许 SKILL 提及个别事件名，但不得做成"事件表"。用一个代理信号：
   // SKILL 若含 usage 不指向，且同时出现 4+ 个 run.* 事件名 → 视为并行表。
@@ -268,14 +290,13 @@ test("transcript 事件表单一权威：usage.md 必须是完整权威，SKILL.
   );
 });
 
-test("R4 只读 run：usage.md 事件表必须含 run.read_only_declared 正向锚（完整权威的一部分）", () => {
+test("R4 只读 run：usage.md 事件投影必须含 run.read_only_declared 正向锚", () => {
   // Round 4 Bundle B：run.read_only_declared 是只读声明的 durable 事实类型，
-  // usage.md §三 是 transcript 事件的完整权威——新事件必须进该表（正向锚，
-  // 防止声明事件只在代码/生成层存在而权威表漂移）。
+  // usage.md §三 是 architecture 事件 spec 的受守卫人读投影。
   const usage = read("docs/usage.md");
   assert.ok(
     usage.includes("run.read_only_declared"),
-    "usage.md transcript 事件表缺 run.read_only_declared（R4 只读声明事件应是完整权威的一部分）",
+    "usage.md transcript 事件投影缺 run.read_only_declared",
   );
 });
 
@@ -306,11 +327,20 @@ test("troubleshooting.md 存在且 SKILL.md 指向它（运维诊断层）", () 
   assert.ok(/troubleshooting\.md/.test(skill), "SKILL.md 未指向 troubleshooting.md");
 });
 
-test("AGENTS.md 保持薄入口，不复制易漂移的文件清单", () => {
+test("tier-1 清单单源：ssot 表在场，AGENTS 只指针，M12 authority 从同表派生", () => {
   const a = read("AGENTS.md");
   assert.ok(!/## Project structure/.test(a), "AGENTS.md 不应维护 Project structure 副本");
-  assert.ok(a.includes("docs/02-architecture.md"), "AGENTS.md 缺 architecture 权威指针");
-  assert.ok(a.includes("docs/roadmap.md"), "AGENTS.md 缺 roadmap 权威指针");
+  const readSection = a.slice(a.indexOf("## Read Before Changes"), a.indexOf("## Commands"));
+  assert.match(readSection, /docs\/ssot\.md.*§0\.1/s, "AGENTS.md Read Before Changes 必须指向 ssot §0.1");
+  for (const copied of ["docs/02-architecture.md", "docs/roadmap.md", "docs/milestone-discipline.md", "docs/usage.md", "docs/troubleshooting.md"]) {
+    assert.ok(!readSection.includes(copied), `AGENTS.md 不得复制 tier-1 清单成员 ${copied}`);
+  }
+
+  for (const id of ["repo-change", "m12-containment", "contract-edit", "user-first-use", "user-config", "user-troubleshoot", "user-daily"])
+    assert.ok(tier1Paths(id).length > 0, `docs/ssot.md tier-1 表缺行动面 ${id}`);
+  for (const rel of tier1Paths("m12-containment"))
+    assert.ok(existsSync(join(ROOT, rel)), `m12-containment tier-1 路径不存在：${rel}`);
+  assert.deepEqual(M12_AUTHORITY_PATHS, tier1Paths("m12-containment"), "M12 authority 必须从 tier-1 表派生");
 });
 
 test("AGENTS.md 不得用旧的 claude_worker/codex_worker 角色名（已角色化）", () => {
@@ -567,8 +597,9 @@ test("历史 SSOT 审计和 M7 phase 文档必须归档，不得继续作为 doc
   assert.ok(/docs-ssot-audit\.md/.test(archiveReadme), "docs/archive/README.md 未列出 docs-ssot-audit.md");
 });
 
-test("agents.example.json 角色对齐 team-roles.md（决策 0005 SSOT）", () => {
-  // SSOT 铁律：team-roles.md 是角色权威源，agents.example.json 必须与之对齐。
+test("agents.example.json 角色条目的 backend/model/effort 完整且落在 runtime 闭集", async () => {
+  // team-roles.md 拥有职责；默认 lane 值由 tracked example config 拥有。
+  const { KNOWN_BACKENDS, REASONING_EFFORTS, normalizeAgent } = await import("../../src/registry.js"), { backendFor } = await import("../../src/backends/factory.js");
   // 决策 0005：默认进程式 backend，opencode 降为 fallback。主 worker 必须是进程式。
   const raw = read("config/agents.example.json");
   const parsed = JSON.parse(raw);
@@ -585,6 +616,17 @@ test("agents.example.json 角色对齐 team-roles.md（决策 0005 SSOT）", () 
   // .wao/decisions/0025 + team-roles.md "Lane：角色多通道" 节，不硬编码可漂移值。
   // coder_opencode_fallback 为 pre-0025 命名特例（ADR 0025 追认不改名）。
   const KNOWN_ROLES = [...ROLE_WORKERS, "auditor"];
+  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({}) });
+  for (const id of KNOWN_ROLES) {
+    const w = parsed.agents?.[id];
+    assert.ok(w && KNOWN_BACKENDS.includes(w.backend), `${id}.backend 必须落在 KNOWN_BACKENDS 闭集`);
+    assert.ok(typeof w.model?.id === "string" && w.model.id.trim(), `${id}.model.id 必须非空`);
+    assert.ok(REASONING_EFFORTS.includes(w.reasoning?.effort), `${id}.reasoning.effort 必须落在闭集`);
+    assert.doesNotThrow(() => normalizeAgent(id, w), `${id} 必须通过 registry 规范化闭集`);
+    const backend = backendFor(w, { fetchImpl });
+    assert.doesNotThrow(() => backend.validateAgentPolicy(w), `${id} model/effort 超出 backend policy`);
+  }
+  assert.throws(() => normalizeAgent("tester", { ...parsed.agents.tester, reasoning: { effort: "outside-closed-set" } }), /reasoning\.effort/);
   const LEGACY_LANE_IDS = new Set(["coder_opencode_fallback"]);
   for (const id of Object.keys(parsed.agents ?? {})) {
     if (LEGACY_LANE_IDS.has(id)) continue;
@@ -655,6 +697,16 @@ test("SSOT 分类标准存在：docs/ssot.md 是文档体系的权威类别定�
   for (const rule of ["一处定义，处处指针", "类别不可混放", "过程文档只追加"]) {
     assert.ok(ssot.includes(rule), `docs/ssot.md 缺少铁律：${rule}`);
   }
+});
+
+test("ssot.md 指向的 AGENTS.md §Read Before Changes 锚点存在（仅钉已发生断锚）", () => {
+  const ssot = read("docs/ssot.md");
+  const agents = read("AGENTS.md");
+  const reference = ssot.match(/`AGENTS\.md §([^`]+)`/);
+  assert.ok(reference, "docs/ssot.md 必须保留 AGENTS.md 执行入口指针");
+  assert.ok(agents.includes(`## ${reference[1]}`), `AGENTS.md §${reference[1]} 锚点不存在`);
+  assert.ok(!ssot.includes("AGENTS.md §文档纪律"), "不得恢复已发生过的断锚 AGENTS.md §文档纪律");
+  assert.ok(!/^#{1,6} 文档纪律$/m.test(agents));
 });
 
 test("AGENTS.md 必须在写新文档前指向 SSOT 分类标准", () => {
@@ -853,6 +905,19 @@ test("Prompt surfaces 保持薄入口与 Lead/worker 边界", () => {
   for (const role of ["researcher", "coder_hq", "coder_low", "coder_mm", "tester", "auditor"]) {
     const prompt = read(`config/roles/${role}.md`);
     assert.ok(!/roadmap|wao stage|wao declare/i.test(prompt), `${role} 不应收到 Lead roadmap/pipeline 规则`);
+  }
+});
+
+test("tier-1 四大文档保持在 2026-09-21 基线 +10% byte cap 内", () => {
+  const caps = {
+    "docs/02-architecture.md": 133845, // baseline 121677
+    "docs/roadmap.md": 119468,        // baseline 108607
+    "docs/usage.md": 259019,          // baseline 235471
+    "docs/troubleshooting.md": 65430, // baseline 59481
+  };
+  for (const [rel, cap] of Object.entries(caps)) {
+    const bytes = Buffer.byteLength(read(rel), "utf8");
+    assert.ok(bytes <= cap, `${rel} 超过冻结 byte cap ${cap}（实际 ${bytes}）；先指针化/删重复，不得续堆正文`);
   }
 });
 
@@ -1325,7 +1390,7 @@ test("M12 role naming: stable auditor id represents one advisory/audit expert", 
   }
 });
 
-test("M12 coder_low example uses current Zhipu GLM-5.3-Flash policy (2026-09-17 Owner switch from DeepSeek)", () => {
+test("M12 canonical role value pins: coder_low + tester + auditor Owner decisions", () => {
   const parsed = JSON.parse(read("config/agents.example.json"));
   const low = parsed.agents?.coder_low;
   assert.equal(low?.model?.id, "glm-5.3-flash[1m]");
@@ -1333,6 +1398,11 @@ test("M12 coder_low example uses current Zhipu GLM-5.3-Flash policy (2026-09-17 
   assert.equal(low?.model?.contextWindow, 1000000);
   assert.equal(low?.provider?.apiKeyEnv, "ZHIPU_API_KEY");
   assert.ok(/bigmodel\.cn\/api\/anthropic/.test(low?.provider?.baseUrl ?? ""));
+
+  assert.equal(parsed.agents?.tester?.model?.id, "gpt-5.6-sol");
+  assert.equal(parsed.agents?.tester?.reasoning?.effort, "xhigh");
+  assert.equal(parsed.agents?.auditor?.model?.id, "gpt-6-astra");
+  assert.equal(parsed.agents?.auditor?.reasoning?.effort, "medium");
 });
 
 test("M12-8A/M12-9/M12-10/M12-16: SKILL/architecture 工具数与 toolSurface SSOT 一致（TD-120 关系型守卫）", () => {
@@ -1788,22 +1858,17 @@ test("M11-12C-DOC-01: every delivery run queries delivery truth after terminal",
 // doc, not the test.
 // ============================================================
 
-const M12_AUTHORITY_DOCS = [
-  "docs/01-prd.md",
-  "docs/02-architecture.md",
-  "docs/roadmap.md",
-  "README.md",
-  "SKILL.md",
-];
-const M12_ADR = ".wao/decisions/0018-wao-mechanical-containment-no-auto-supervision.md";
+const M12_AUTHORITY_PATHS = tier1Paths("m12-containment");
+const M12_ADR = M12_AUTHORITY_PATHS.find((rel) => rel.startsWith(".wao/decisions/0018-"));
 const M12_CN = "WAO 自动监测，不自动监督；自动封装，不自动验收；自动呈现，不自动决策。";
 const M12_EN = "WAO monitors, never supervises; packages, never accepts; presents, never decides.";
 
 // M12-0-01: every authority doc + ADR-0018 carries the exact mechanical-containment
 // sentence in both Chinese and English. This is the single canonical statement of
 // the reset; paraphrases drift, so the exact strings are pinned.
-test("M12-0-01: 五份 authority docs + ADR-0018 携带精确机械 containment 句（中+英逐字）", () => {
-  for (const rel of [...M12_AUTHORITY_DOCS, M12_ADR]) {
+test("M12-0-01: tier-1 表声明的 authority paths 携带精确机械 containment 句（中+英逐字）", () => {
+  assert.equal(M12_AUTHORITY_PATHS.length, 6, "m12-containment 行应含五份 live authority docs + ADR-0018");
+  for (const rel of M12_AUTHORITY_PATHS) {
     const text = read(rel);
     assert.ok(text.includes(M12_CN), `${rel} 缺精确中文 containment 句`);
     assert.ok(text.includes(M12_EN), `${rel} 缺精确英文 containment 句`);
@@ -1815,7 +1880,7 @@ test("M12-0-01: 五份 authority docs + ADR-0018 携带精确机械 containment 
 // (Lead-owned). "不自动监督" (the exact sentence) is allowed; the alternatives
 // "自动监督过程" / "不做语义监督" must be gone.
 test("M12-0-02: authority docs + ADR 禁止旧监督替代表述（自动监督过程 / 不做语义监督）", () => {
-  for (const rel of [...M12_AUTHORITY_DOCS, M12_ADR]) {
+  for (const rel of M12_AUTHORITY_PATHS) {
     const text = read(rel);
     assert.ok(!/自动监督过程/.test(text), `${rel} 不得使用替代表述"自动监督过程"`);
     assert.ok(!/不做语义监督/.test(text), `${rel} 不得使用替代表述"不做语义监督"`);
@@ -2464,21 +2529,15 @@ test("onboarding closeout: agents.example.json 移除 managed-flag 向后兼容�
     "入库模板不得声称按认证删减/编辑它本身（删减只发生在私人副本）");
 });
 
-test("TD-120 关系型守卫: team-roles.md 各角色 model 行与 agents.example.json 声明一致（doc↔doc，分节定位）", () => {
-  // Panel audit 2026-08-15: the earlier whole-file containment check was blind
-  // to researcher↔coder_low model-row swaps (both deepseek-v4-flash) — a
-  // corrupted coder_low row still passed via researcher's row. This version
-  // scopes each assertion to the role's OWN "### <Title>" section, and the
-  // agent list is data-driven from the template (covers coder_mm; tester has
-  // no declared model → nothing to cross-check).
-  const parsed = JSON.parse(read("config/agents.example.json"));
+test("team-roles.md 角色职责只指向默认 lane 配置，不复制 backend/model/effort 当前值", () => {
   const roles = read("docs/team-roles.md");
-  const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const sectionTitles = {
     researcher: "Researcher",
     coder_hq: "Coder-HQ",
     coder_low: "Coder-Low",
     coder_mm: "Coder-MM",
+    tester: "Tester",
+    auditor: "Chief-Advisor / Auditor",
   };
   const sections = new Map();
   for (const part of roles.split(/^### /m).slice(1)) {
@@ -2486,13 +2545,12 @@ test("TD-120 关系型守卫: team-roles.md 各角色 model 行与 agents.exampl
     sections.set(title, part);
   }
   for (const [id, titlePrefix] of Object.entries(sectionTitles)) {
-    const modelId = parsed.agents?.[id]?.model?.id;
-    if (!modelId) continue;
     const section = [...sections.entries()].find(([t]) => t.startsWith(titlePrefix))?.[1];
     assert.ok(section, `team-roles.md 必须存在 ### ${titlePrefix} 角色节`);
-    const modelRow = new RegExp(`\\|\\s*\\*\\*model\\*\\*\\s*\\|[^\\n]*${escapeRe(modelId)}`);
-    assert.ok(modelRow.test(section),
-      `team-roles.md ${titlePrefix} 节的 model 行必须包含模板声明的 ${modelId}（doc↔doc 分节一致，TD-120）`);
+    assert.ok(section.includes("config/agents.example.json") && section.includes(`\`${id}\``), `${titlePrefix} 缺默认 lane 指针`);
+    assert.ok(/config\/agents\.json.*gitignored/.test(section), `${titlePrefix} 缺本机真值声明`);
+    assert.ok(!/^\| \*\*(?:backend|model|effort)\*\* \|/m.test(section), `${titlePrefix} 仍复制 lane 当前值`);
+    assert.match(section, /\| \*\*裁定注记\*\* \| 20\d{2}-\d{2}-\d{2} /, `${titlePrefix} 缺带日期裁定注记`);
   }
 });
 
@@ -2936,7 +2994,7 @@ test("R10-A: usage.md 记录 --model 用法、合成语义与两道硬互斥（�
     "必须记录 spawn/workflow/daemon 排除边界");
 });
 
-test("R10-A: usage.md 事件表 run.started 行携带 modelOverride 字段（完整权威）", () => {
+test("R10-A: usage.md 人读投影的 run.started 行携带 modelOverride 字段", () => {
   const usage = read("docs/usage.md");
   const row = usage.split(/\r?\n/).find((l) => l.startsWith("| `run.started`"));
   assert.ok(row, "run.started 行存在");

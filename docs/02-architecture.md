@@ -435,29 +435,38 @@ interface TranscriptEvent {
 
 | type | 何时写 | 阶段 |
 |------|--------|------|
-| `run.started` | run 创建 | ✅ 现有 |
-| `session.created` | backend.spawn 返回 sessionId | ✅ 现有 |
-| `prompt.sent` | prompt 投递 | ✅ 现有 |
-| `run.submitted` | 投递完成，进入等待 | ✅ 现有 |
-| **`run.state_change`** | 状态机每次转移。`reason` ∈ `STATE_CHANGE_REASONS`（**冻结闭集**，SSOT = `src/transcript.js`，守卫 `test/isolation-infra/stateChangeReasons.test.js`；写入侧生产者一律引用 SSOT 成员，读侧容忍历史值；对照归档见 `docs/research/16-terminal-reason-taxonomy-comparison.md`） | `[S]` 新增 |
-| **`run.event`** | 从 RunEvent 流透传一条（message/tool_use/command/...） | `[S]` 新增 |
-| `run.completed` | 正常完成 | ✅ 现有 |
-| `run.timed_out` | **legacy（ADR-0030 起生产者已废）**：历史上由 wait 定时器 abort 产生。ADR-0030（TD-151）起等待窗到期=通知不杀，wait 路径不再写此事件、不再转 timed_out；事件类型与状态保留仅为读取 legacy 转录（TERMINAL_STATES/findState/diagnosis 兼容面） | ✅ 现有 |
-| **`run.observation_deadline_reached`** | ADR-0030（TD-151）：等待窗（waitTimeout，explicit/agent/global 三源）到期时的有界 advisory 观察事实——载荷恰 `{waitTimeoutMs, source}`（不回显路径/环境/提示词）。到期**不**终止 worker、不产生 timed_out：监督继续到自然终态；终止只剩 Lead 显式 stop 与既有硬安全线（tokenBudget/workdir_escape）。每 run 至多一条（定时器只触发一次） | ADR-0030 |
-| `run.aborted` | 被 abort | ✅ 现有 |
-| `run.error` | 错误 | ✅ 现有 |
-| `run.stop_requested` | 用户请求停止 | ✅ 现有 |
-| **`run.state_change_rejected`** | TD-99：终态仲裁拒绝一次迟到转移（含 attemptedTo/attemptedReason/existingTerminal/reason="first_terminal_wins"） | `[S]` 新增 |
-| **`run.delivery_created`** | TD-103 Phase 3A：delivery 打包成功——`delivery` 含完整 DeliveryRef（deliveryCommit/baseCommit/branch/changedFiles/verification/acceptance/integration） | Phase 3A |
-| **`run.delivery_failed`** | TD-103 Phase 3A：delivery 打包失败——`deliveryCode`（empty_diff/disallowed_path/commit_integrity/delivery_error 等）+ `message`（脱敏摘要） | Phase 3A |
-| **`run.delivery_verification_passed`** | TD-103 Phase 3B：delivery 验证通过——`delivery.verification.status:"passed"`，含 verifiedCommit/results | Phase 3B |
-| **`run.delivery_verification_failed`** | TD-103 Phase 3B：delivery 验证失败——`delivery.verification.status:"failed"`，含 failureCode/command_failed/command_timeout/artifact_mutated/execution_error（M12-6 setup 阶段另含 setup_failed/setup_timeout/setup_environment_error，并带 failedPhase/setupResults） | Phase 3B |
-| **`run.delivery_verification_unavailable`** | TD-103 Phase 3B：无验证命令——`delivery.verification.status:"unavailable"`，含 unavailableReason | Phase 3B |
-| **`run.read_only_declared`** | R4：只读 run 声明——`RunManager.start` 恰一次写入（幂等 append API），空 payload（envelope 即事实）；存在即触发 `run_activity` 的 advisory `readOnlyObservation` 挂载 | R4 |
-| `messages.collected` | collect 命令 | ✅ 现有 |
-| **`scorecard.checked`** | scorecard 审计一次 | `[M]` |
-| **`workflow.*`** | DAG 节点级事件 | `[M]` |
-| **`run.message`** | scorecard requireAssistantText 检查用的 message 快照（role+parts，非落盘事件，仅传给 scorecard） | post-M6 |
+| `run.started` | run 创建；记录生效 backend/cwd/model/reasoning/providerKey 与显式 override | `[S]` M0 |
+| `run.state_change` | 状态机转移；`reason` ∈ `STATE_CHANGE_REASONS`（闭集 SSOT = `src/transcript.js`） | `[S]` M0 |
+| `run.state_change_rejected` | TD-99：first-terminal-wins 拒绝迟到转移 | `[S]` TD-99 |
+| `session.created` | backend 建立 provider session | `[S]` M0 |
+| `prompt.sent` | prompt 投递 | `[S]` M0 |
+| `run.submitted` | 投递完成，进入等待 | `[S]` M0 |
+| `run.metrics` | token、成本与耗时事实；不触发状态转移 | `[M]` M4 |
+| `run.event` | RunEvent 透传（message/command/tool/write telemetry 等） | `[M]` M6/M12 |
+| `scorecard.checked` | scorecard 检查结果 | `[M]` M6 |
+| `run.completed` | 正常完成 | `[S]` M0 |
+| `run.timed_out` | legacy only；ADR-0030 起等待窗到期不再生产此事件 | `[S]` M0 |
+| `run.aborted` | run 被 abort | `[S]` M0 |
+| `run.error` | run 错误 | `[S]` M0 |
+| `run.stop_requested` | 用户请求停止 | `[S]` M0 |
+| `run.wait_policy` | 生效的 waitTimeoutMs 及来源 | `[M]` M10-pre |
+| `run.observation_deadline_reached` | ADR-0030：等待窗到期的有界观察事实；不终止 worker，每 run 至多一条 | `[M]` ADR-0030 |
+| `run.stop_verified` | worker runtime 已确认静默；不表示 Lead 必然调用过 stop | `[M]` M10-pre |
+| `run.stop_unverified` | worker runtime 未确认静默 | `[M]` M10-pre |
+| `messages.collected` | collect 拉取消息 | `[S]` M0 |
+| `run.rerun` | 进程式 resume 重放 | `[S]` M3 |
+| `run.cleanup_done` | worktree 清理完成 | `[S]` M3 |
+| `run.delivery_created` | delivery 打包成功，携带 DeliveryRef | `[S]` Phase 3A |
+| `run.delivery_failed` | delivery 打包失败，携带 deliveryCode 与脱敏摘要 | `[S]` Phase 3A |
+| `run.delivery_verification_passed` | delivery 验证通过 | `[S]` Phase 3B |
+| `run.delivery_verification_failed` | delivery 验证失败，含 failureCode 与有界失败输出 | `[S]` Phase 3B |
+| `run.delivery_verification_unavailable` | 无验证命令，携带 unavailableReason | `[S]` Phase 3B |
+| `run.delivery_accepted` | Lead 接受 delivery | `[S]` Phase 3C-2 |
+| `run.delivery_rejected` | Lead 拒绝 delivery | `[S]` Phase 3C-2 |
+| `run.read_only_declared` | 只读 run 声明；空 payload，envelope 即事实 | `[M]` R4 |
+| `workflow.*` | DAG 节点事件，写入独立 `wf_*.jsonl` | `[M]` M5 |
+
+`run.message` 不是落盘事件类型；它只是传给 scorecard 的 message 快照，因此不进入本表。
 
 **关键 `[S]` 变更**：
 - `run.state_change` 让状态机**显式化**（替代当前靠"最后事件 type"推断）。

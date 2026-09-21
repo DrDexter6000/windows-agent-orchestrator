@@ -296,7 +296,7 @@ backend 换 model/provider → `--profile delta`；换 backend / 升主力 lane 
 
 run 的 `--model` / `--reasoning` 与 registry 的 `model` / `reasoning` / `provider` 字段并非全 backend 通用——各 backend 能力不齐：配了代码不能表达的值会在派发前被该 backend 的 `validateAgentPolicy` 硬拒绝（fail-closed，不是静默忽略）；token usage 缺失则是"配了 `tokenBudget` 不生效"（见上文 registry validate 的 `⚠` 交叉校验）。
 
-> **值的权威源是 backend 代码类声明**（`src/backends/*.js` 的闭集能力成员 + `validateAgentPolicy` 行为），**本表只是投影，漂移以代码为准**——`test/isolation-infra/docs-consistency.test.js` 的 TD-162 关系型守卫把每格判定词与代码声明/行为对账，单边漂移即红。
+> **值的权威源是 backend 代码类声明**；本表**投影自 `src/backends/*.js` 的闭集能力成员与 `validateAgentPolicy` 行为**，漂移以代码为准——`test/isolation-infra/docs-consistency.test.js` 的 TD-162 关系型守卫把每格判定词与代码声明/行为对账，单边漂移即红。
 
 判定词：**支持**＝直接可用；**不支持**＝被 `validateAgentPolicy` 拒绝或能力不存在；**条件**＝仅满足所列条件时可用（条件写在格内）。
 
@@ -802,9 +802,8 @@ npm run cli -- daemon stop
 
 ## 三、transcript 格式
 
-> 本区为**手写参考**（不可从代码推导——当前无事件 SSOT；未来 transcript.js 若出现事件 SSOT 可转生成层，届时登记 tech-debt）。内容为契约，修改需过 docs-consistency。
-> 本表是 transcript 事件类型的**完整权威定义**（spec 契约见 `docs/02-architecture.md` §3.2）。
-> 其它文档（SKILL.md 等）引用事件时指向此处，不维护并行清单（SSOT）。
+> 本表**投影自 `docs/02-architecture.md` §3.2**，是同一事件 spec 的人读运维视图；architecture 是真值源。
+> `test/isolation-infra/docs-consistency.test.js` 的事件行集关系守卫保证两表事件名集合相等。其它文档（SKILL.md 等）只指向本投影或 spec，不维护第三份清单。
 
 每个 run 的事件流存在 `runs/<runId>.jsonl`，每行一个 JSON 事件。完整事件类型：
 
@@ -812,6 +811,7 @@ npm run cli -- daemon stop
 |------|------|------|
 | `run.started` | run 创建（含 backend/cwd/model/worktreePath；R10-A 起：带 `--model`/`model` 覆盖的派发另含显式 `modelOverride` 字段，`model` 为合成后策略——只替换 `.id`，兄弟字段保留；R11-1 起：`reasoning` 无条件落盘（agent 无 reasoning 时 JSON 省略该键——顺带补上静态 reasoning 的审计缺口），带 `--reasoning`/`reasoning` 覆盖的派发另含显式 `reasoningOverride` 字段，`reasoning` 为合成后策略——只替换 `.effort`；R23-C 起：`providerKey` 无条件落盘——provider 接入方指纹（归一化 baseUrl + `apiKeyEnv` 变量名，userinfo/query/fragment 已被归一化丢弃，凭据不入 transcript），无 provider 块的 lane 为显式 `null`（= 已观察无接入方，与 legacy 父 run 的字段缺失区分），是 `run_continue` 续跑漂移比对的父侧 durable 事实） | M0 |
 | `run.state_change` | 状态转移（from/to/reason） | M0 |
+| `run.state_change_rejected` | TD-99：first-terminal-wins 拒绝迟到状态转移，记录 attemptedTo/attemptedReason/existingTerminal | TD-99 |
 | `session.created` | backend session 建立 | M0 |
 | `prompt.sent` | prompt 投递（含完整 prompt 文本） | M0 |
 | `run.submitted` | 投递完成，进入等待 | M0 |

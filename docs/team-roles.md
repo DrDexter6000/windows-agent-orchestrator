@@ -48,9 +48,8 @@ WAO 是"装一次，开发多个项目"的工具：
 | **身份** | 调研/分析专家。只读分析，不改产品代码 |
 | **Work Scope** | 读代码库、技术选型、可行性分析、输出 brief/affectedFiles 清单；边界清晰的简单任务（仍限只读分析边界） |
 | **边界** | 不改产品代码；不跑测试（只读）；不做实现决策（决策归 Lead+Auditor） |
-| **backend** | claude-code wrapper（进程式，弃 opencode——06-18 事故风险） |
-| **model** | glm-5.3-flash[1m]（1M context，原生多模态/视觉，适合深度调研；2026-09-17 Owner 裁定由 DeepSeek-v4-flash 切智谱） |
-| **effort** | max（深度分析） |
+| **默认 lane 配置** | 见 `config/agents.example.json` 的 `researcher` 条目；本机真值以 `config/agents.json`（gitignored）为准 |
+| **裁定注记** | 2026-09-17 Owner 裁定由 DeepSeek-v4-flash 切换到智谱 GLM-5.3-Flash[1m] |
 | **配置要点** | model/reasoning/context 从结构化 provider policy 单一编译，不手拼 CLI flags |
 | **会话复用** | `sessionReuse=lead_workspace`（M11-11C）：同一 MCP Lead server 实例在同一 workspace 内多次询问 Researcher 时，复用 provider 原生会话保留上下文/cache，每次仍是独立 run/transcript。Host/MCP 重启后开新会话；仅非 delivery；详见 `02-architecture.md §4.10`。**CLI 直派注意（2026-08-23 life-index 会话实证）**：前台 `run` 派发 sessionReuse 型 agent 须显式 `--cwd` 指向 git 根，否则复用路由不命中、需补发 |
 
@@ -61,9 +60,8 @@ WAO 是"装一次，开发多个项目"的工具：
 | **身份** | 高耦合与长程连贯实现通道 |
 | **Work Scope** | 跨模块高耦合实现、歧义较高且需要持续统筹的编码任务、难以经济拆分的长程实现，以及按 brief 写/改代码、跑 lint/build、修 bug；按 Lead 指派兼职方案顾问与交付物评审（只读意见，不做验收决定） |
 | **边界** | 不做架构决策（归 Lead+Auditor）；不验收自己（归 Auditor） |
-| **backend** | claude-code wrapper（进程式，已 probe；2026-08-15 Owner 裁定维持——ZCode CLI 迁移构想见 TD-116） |
-| **model** | glm-5.3[1m]（1M context，编码能力强；2026-08-15 对齐实际配置，此前本行误记 glm-5.2；该组合 2026-08-14 已认证 certified。下方 probe 表为 2026-06-24 历史快照） |
-| **effort** | max |
+| **默认 lane 配置** | 见 `config/agents.example.json` 的 `coder_hq` 条目；本机真值以 `config/agents.json`（gitignored）为准 |
+| **裁定注记** | 2026-08-15 Owner 裁定维持 claude-code wrapper，并把模板模型与已认证的 GLM-5.3[1m] 对齐 |
 
 ### Coder-Low（码农-低成本快速）
 
@@ -72,9 +70,8 @@ WAO 是"装一次，开发多个项目"的工具：
 | **身份** | 低成本高吞吐的通用第二实现通道；`Low` 不表示低能力 |
 | **Work Scope** | 默认承担边界明确的实现包、TDD、修 bug、重构、兼容性、脚本、文档/配置与窄修正；适合独立并行包；按 Lead 指派兼职方案顾问与交付物评审（只读意见，不做验收决定） |
 | **边界** | 不替 Lead 作架构、范围、拆包或转派决策；不自行扩域；不验收自己。不得仅因文件数、prompt 长度、耗时或规模自行拒绝，是否拆分/转派由 Lead 决定 |
-| **backend** | claude-code wrapper（进程式） |
-| **model** | glm-5.3-flash[1m]（1M context，原生多模态/视觉；2026-09-17 Owner 裁定由 deepseek-v4-pro 切智谱） |
-| **effort** | max |
+| **默认 lane 配置** | 见 `config/agents.example.json` 的 `coder_low` 条目；本机真值以 `config/agents.json`（gitignored）为准 |
+| **裁定注记** | 2026-09-17 Owner 裁定由 deepseek-v4-pro 切换到智谱 GLM-5.3-Flash[1m] |
 
 ### Coder-MM（多模态创意与高质量工程）
 
@@ -83,8 +80,8 @@ WAO 是"装一次，开发多个项目"的工具：
 | **身份** | 多模态、视觉创意与高质量工程通道 |
 | **Work Scope** | 图像/截图/视频内容理解；前端设计与实现；UI 截图还原；视觉/美术审核；带图文档与图像相关编码；产品、内容和体验策略方案起草；文案写作；高质量工程与代码实现；按 Lead 指派兼职方案顾问与交付物评审/会审对抗席（只读意见；不做验收决定，不评审自己的产出） |
 | **边界** | 不替 Lead 做最终产品/策略/架构决策；不验收自己的产出；常规低风险纯文本编码默认归 Coder-HQ/Low |
-| **backend** | kimi-code（进程式，官方过 Kimi 白名单） |
-| **model** | kimi-code/k3（原生最高 1M context；实际可用窗口取决于 Kimi Code 账户档位） |
+| **默认 lane 配置** | 见 `config/agents.example.json` 的 `coder_mm` 条目；本机真值以 `config/agents.json`（gitignored）为准 |
+| **裁定注记** | 2026-06-23 决策 0005 将 Coder-MM 定为 Kimi 多模态通道 |
 | **配置要点** | 不要加 `--yolo`（与 -p 互斥）；Kimi Code/K3 自主管理上下文，WAO 不配置 backend 无法表达的 `contextWindow` override |
 | **派工策略** | 多模态、视觉、前端、创意、策略或文案任务优先；工程与代码能力强，可在 Coder-HQ 不可用、并行容量不足，或任务明显受益于 K3 长上下文/多模态能力时作为高质量替补。token 价格较高，不作为常规低风险编码的默认通道 |
 
@@ -97,8 +94,8 @@ WAO 是"装一次，开发多个项目"的工具：
 | **Work Scope（扩展-轮询）** | 轮询各 worker 运行状态（`runs status`/`runs list`）、检测超时/失控、向 Lead 汇报异常。降低 Lead 的 token 开销 |
 | **Work Scope（扩展-多模态+简单任务，2026-08-15）** | 多模态识别（读取并分析图像输入；codex 图像输入能力由 Owner 人工验证）；边界清晰的简单任务 |
 | **边界** | 不修 bug（归 Coder）；不做语义判断（只看证据）；不审编排方案（归 Auditor） |
-| **backend** | codex（进程式，command_execution exitCode 最准） |
-| **effort** | medium（测试是确定性任务，不需高推理） |
+| **默认 lane 配置** | 见 `config/agents.example.json` 的 `tester` 条目；本机真值以 `config/agents.json`（gitignored）为准 |
+| **裁定注记** | 2026-09-03 Owner 裁定 tester effort 由 medium 升级为 xhigh |
 
 ### Chief-Advisor / Auditor（首席顾问与审计员）— 按需双模式
 
@@ -108,9 +105,8 @@ WAO 是"装一次，开发多个项目"的工具：
 | **Work Scope（前置 advisory）** | 对 Lead 明确提出的未决问题做头脑风暴、红队挑战和方案审查，给可验证的替代方向，不替 Lead 拍板 |
 | **Work Scope（后置 audit）** | 独立复核 Coder 产出、查伪完成、质疑声明、给 PASS/FAIL，不把验收扩张成新方案 |
 | **边界** | 不改代码（归 Coder）；不和 Coder 同源（独立性）；不跑测试（归 Tester） |
-| **backend** | codex（OpenAI Codex CLI；2026-09-17 起——claude 订阅已取消，官方 Claude 通道停用） |
-| **model** | gpt-6-astra |
-| **effort** | medium（2026-09-17 Owner 裁定；官方档位 low/medium/high/xhigh/max/ultra） |
+| **默认 lane 配置** | 见 `config/agents.example.json` 的 `auditor` 条目；本机真值以 `config/agents.json`（gitignored）为准 |
+| **裁定注记** | 2026-09-17 Owner 裁定由已停用的 Claude 通道切到 Codex / GPT-6-astra，effort=medium |
 | **会话复用** | 无（2026-09-17 切 codex 起）。历史注记：claude-code 通道时期用 `sessionReuse=lead_workspace`（M11-11C，语义详见 `02-architecture.md §4.10`）；**CLI 直派 sessionReuse 型 agent 须显式 `--cwd` 指向 git 根**的注意事项对仍在用该机制的 agent（如 researcher）依然适用（2026-08-23 life-index 会话实证） |
 
 ## Lead 派工策略

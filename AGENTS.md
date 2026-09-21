@@ -13,13 +13,9 @@ WAO is a Windows-native control plane for supervised worker dispatch through loc
 
 ## Read Before Changes
 
-- Architecture and event contracts: `docs/02-architecture.md`
-- Roadmap and current progress: `docs/roadmap.md`
-- Documentation ownership: `docs/ssot.md`
-- Generated tool/CLI reference: `docs/surface/` (regenerate with `npm run gen:surface` after surface/help changes; never hand-edit)
-- Milestone and real-runtime gates: `docs/milestone-discipline.md`
-- Operations and failures: `docs/usage.md`, `docs/troubleshooting.md`
-- Lead orchestration usage: `SKILL.md` (only when operating WAO)
+Use the action-matched tier-1 row in `docs/ssot.md` §0.1. That table is the only
+file list: read the union of rows your action matches, including each stated
+condition. `SKILL.md` remains conditional on actually operating WAO.
 
 Before adding or editing documentation, follow `docs/ssot.md`: update the existing authority by default and point to it instead of copying its content.
 

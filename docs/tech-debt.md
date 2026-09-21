@@ -254,3 +254,12 @@
 - TD-34 → `archive/docs-ssot-audit.md`（文档 SSOT 审计）
 - TD-37/38/39 → `incidents/2026-06-18-glm-quota-drain.md`（opencode 三层防线 + fire-and-forget 护栏）
 - TD-40 → `.wao/decisions/0013-进程隔离-JobObject-复用内置-vs-自定义.md`（复用内置 Job Object vs 自定义）
+
+---
+
+## 2026-09-21 追加开放项
+
+| # | 登记于 | 内容（简） | 触发条件 / 还债路径 |
+|---|---|---|---|
+| TD-177 | tier-1 SSOT 整改 | `docs/usage.md` 体量较大，但当前一致性守卫有大量 `docs/usage.md` 字面锚，直接拆分会制造大面积无语义测试改写。 | 🟡 延后拆分；前置条件是先把 `test/isolation-infra/docs-consistency.test.js` 内的 `docs/usage.md` 路径字面量收敛为顶部常量，再单独评估拆分。 |
+| TD-178 | tier-1 SSOT 整改机械初筛 | live 文档仍有 fresh clone 必断的指针：`AGENT_ONBOARDING.md` 指向运行时 `.wao/state/current.md`；本文件旧记录指向缺失的 `2026-08-15-collect-projection-long-message.md` 与 gitignored `.dev/friction-log/`、`.dev/c2c-pilot/PROTOCOL.md`。模板占位符不计入。 | 🟡 后续文档卫生包改为 durable 入库证据指针或明确的非链接历史路径；不新增泛化 prose/断链扫描门。 |

@@ -88,7 +88,7 @@
     },
     "coder_mm": {
       "_comment": "[Coder-MM] 多模态、视觉创意与高质量工程通道；可作为 Coder-HQ 的高价替补。对齐 team-roles.md Coder-MM。",
-      "_comment_backend": "kimi-code（进程式，官方过 Kimi 白名单，无需伪装 header）。K3 原生最高 1M context，实际可用窗口取决于 Kimi Code 账户档位。",
+      "_comment_backend": "kimi-code（进程式，官方过 Kimi 白名单，无需伪装 header）。K3 原生最高 1M context，effort=max，实际可用窗口取决于 Kimi Code 账户档位。",
       "_comment_yolo": "⚠ 不要加 --yolo：kimi -p 模式与 --yolo 互斥（CLI 报错）。-p 模式已默认无交互批准。",
       "_comment_limit": "kimi stream-json 不含 usage/token；Kimi Code/K3 自主管理上下文，WAO 不配置 backend 无法表达的 contextWindow override。token 价格较高，不作为常规低风险编码的默认通道。",
       "_comment_task": "适合任务: 图像/视频内容理解、前端设计与实现、视觉/美术审核、策略策划、文案写作、图像相关编码；也可作为 Coder-HQ 的高质量工程替补",
@@ -98,6 +98,9 @@
       "systemPrompt": "config/roles/coder_mm.md",
       "model": {
         "id": "kimi-code/k3"
+      },
+      "reasoning": {
+        "effort": "max"
       }
     },
     "tester": {

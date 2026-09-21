@@ -2,7 +2,7 @@
 
 > 状态：契约层。本文是 WAO 文档体系的**权威分类标准**。
 > 适用对象：所有人类协作者 + 所有 coding agent（含 Lead / worker / 审计 agent）。
-> 关联：`AGENTS.md §文档纪律` 是本文件的执行入口（写新文档前必读）。
+> 关联：`AGENTS.md §Read Before Changes` 是本文件的执行入口。
 
 ## 0. 为什么需要这份文件
 
@@ -11,9 +11,18 @@ WAO 曾在 2026-06-16 做过一次 SSOT 审计（`docs/archive/docs-ssot-audit.m
 1. **分类边界缺失** —— 没有规定"哪类信息只能放在哪类文件里"。结果是同一事实（如状态机定义）被全文复制到 5 个文件，任何一处改动其余 4 处就 stale。06-18 事故复盘头部至今仍写"未修复"而代码已修，就是这种结构的必然产物。
 2. **过程文档与契约文档混放** —— `research/` 草稿、`m0~m6-audit.md` 快照、`changelog` 与现行契约（PRD/spec/tech-debt）平级存在，读者（尤其 agent）分不清哪份是当前真相。
 
-本文件用两个机制收口：**类别归属（§1）** + **写新文档前的强制检查（AGENTS.md §文档纪律）**。
-
 ---
+### 0.1 tier-1 行动面阅读表——定义：某类行动者行动前不读就会产生错误行为的文档集合；它回答读时必要性，与回答写时归属的五类别正交
+
+| action id | 行动面 | 必读文件 / 入口 |
+|---|---|---|
+| `repo-change` | 开发 agent 修改代码或文档 | `docs/02-architecture.md`、`docs/roadmap.md`、`docs/ssot.md`、`docs/milestone-discipline.md`、`docs/usage.md`、`docs/troubleshooting.md`、`docs/surface/`、`SKILL.md`（后四项只在影响对应操作/surface/WAO 操作时读） |
+| `m12-containment` | 改 mechanical-containment 产品边界 | `docs/01-prd.md`、`docs/02-architecture.md`、`docs/roadmap.md`、`README.md`、`SKILL.md`、`.wao/decisions/0018-wao-mechanical-containment-no-auto-supervision.md` |
+| `contract-edit` | 写当前接口、模型、状态、角色、技术债或进度 | `docs/01-prd.md`、`docs/02-architecture.md`、`docs/team-roles.md`、`docs/tech-debt.md`、`docs/roadmap.md`、`AGENTS.md`、`SKILL.md` |
+| `user-first-use` | 第三方 / 用户 agent 首次接入 | `README.md`、`AGENT_ONBOARDING.md`、`llms.txt`、`mcp bind` 输出 |
+| `user-config` | 第三方 / 用户 agent 配置 | `AGENT_ONBOARDING.md`、`config/agents.example.json`、`wao doctor` 输出、`mcp bind` 输出 |
+| `user-troubleshoot` | 第三方 / 用户 agent 排障 | `docs/troubleshooting.md`、`wao doctor` 输出 |
+| `user-daily` | Lead / 用户 agent 日常使用 | `SKILL.md`、`docs/usage.md` |
 
 ## 1. 核心架构：五大类别
 
@@ -35,17 +44,7 @@ WAO 曾在 2026-06-16 做过一次 SSOT 审计（`docs/archive/docs-ssot-audit.m
 
 **唯一允许定义接口、数据模型、状态机、行为契约的地方。** 别处引用只能写"见 `02-architecture.md §X`"。
 
-| 文件 | 权威范围 |
-|------|---------|
-| `docs/01-prd.md` | 产品定位、目标用户、验收标准（PRD §8） |
-| `docs/02-architecture.md` | 技术架构、**状态机定义**、模块边界、事件 schema、接口契约 |
-| `docs/team-roles.md` | 角色矩阵（唯一权威） |
-| `docs/tech-debt.md` | 技术债唯一登记表 |
-| `docs/roadmap.md` | 里程碑进度唯一权威 |
-| `AGENTS.md` | 仓库工作纪律（agent 视角） |
-| `SKILL.md` | orchestrator 使用手册（worker/Lead 视角） |
-
-**铁律**：状态机的状态列表、transcript 事件类型表、backend 接口签名、角色定义 —— **全文只允许出现在本类别的一个文件里**。PRD 可以提"显式状态机"这个概念，但不许列出 `pending→submitted→running→终态` 全文（那是 architecture 的权威）。
+**铁律**：状态机、事件、backend 接口、角色等当前事实只在唯一真值源定义；只有符合 §2 投影例外的第二份当前值陈述合法。
 
 ### 1.2 决策 (Decision) —— 为什么这样定
 
@@ -65,7 +64,7 @@ ADR 风格：一条决策一个文件，定下后归档，只追加"修订"不�
 | 文件 | 内容 |
 |------|------|
 | `AGENT_ONBOARDING.md` | 安装与上手指南 + 贡献者路径 |
-| `docs/usage.md` | 部署、操作食谱与行为合同（分页/delivery/闭集）、手写参考区（transcript 事件表唯一权威；TD-86 JSON 形状）；命令/参数参考已拆至生成层 |
+| `docs/usage.md` | 部署、操作食谱与行为合同；§三是 architecture §3.2 事件 spec 的人读投影；命令/参数参考已拆至生成层 |
 | `docs/surface/mcp-tools.md` `docs/surface/cli.md` | **生成参考层**（MCP 工具与 CLI 命令的参数/形状）：权威源是代码（tools/list 与 CLI help SSOT），由 `npm run gen:surface` 再生成；禁止手改，字节稳定由 `docsSurface.test.js` 守卫；改 MCP 面/CLI help 后须再生成并提交 |
 | `llms.txt` | 仓库根索引（llms.txt 惯例）：只放链接与一句话定位，不承载内容 |
 | `docs/smoke-guide.md` | smoke 测试操作 |
@@ -104,7 +103,7 @@ ADR 风格：一条决策一个文件，定下后归档，只追加"修订"不�
 
 ## 2. 三条铁律
 
-1. **一处定义，处处指针**。同一事实（状态机、事件表、角色、端口约定）全文只在权威源出现一次。别处引用写"见 `<file> §<heading>`"，不复制正文。
+1. **一处定义，处处指针**。活文档承载第二份当前值的充要条件是显式写明“投影自 X”且有关系型守卫钉到同一真值源；命名投影只有 `backend-capabilities`（`src/backends/*.js` 闭集能力成员，TD-162 守卫）与 `transcript-events-human`（`docs/02-architecture.md` §3.2，事件行集守卫）。
 2. **类别不可混放**。根因分析进事故复盘（过程），现象+做法进 troubleshooting（运维），接口定义进 architecture（契约）。跨类别只指针不复制。
 3. **过程文档只追加**。事故复盘/mN-audit/research 定格后不改写事实；修复状态、被取代状态一律用指针，不回改正文叙述。
 
@@ -112,7 +111,7 @@ ADR 风格：一条决策一个文件，定下后归档，只追加"修订"不�
 
 ## 3. 写新文档前的强制流程
 
-> 这一条是 `AGENTS.md §文档纪律` 的展开。任何 agent（含人类）想新建 .md 文件时，**先回答三个问题**：
+> `AGENTS.md §Read Before Changes` 指向本流程。任何 agent（含人类）想新建 .md 文件时，**先回答三个问题**：
 
 1. **这个信息属于哪个类别？**（契约/决策/运维/过程/调研）—— 不确定就属于已有类别的补充，不该新建。
 2. **权威源是不是已经存在？** —— 95% 的情况答案是"已存在，应该改它而不是新建"。新建文件需要能说出"现有 5 类文件都装不下这个信息"的理由。
@@ -128,7 +127,7 @@ SSOT 规则用 `test/isolation-infra/docs-consistency.test.js` 固化。守卫�
 
 - 旧 worker 名不得出现在面向 lead/user 的入口文档。
 - 状态机完整状态列表只在 `docs/02-architecture.md` 维护。
-- transcript 事件表只在 `docs/usage.md` 维护，`SKILL.md` 只指针引用。
+- transcript 事件 spec 在 `docs/02-architecture.md` §3.2 维护，`docs/usage.md` §三是受行集守卫的人读投影。
 - 技术债编号必须能在 `docs/tech-debt.md` 查到。
 - 历史审计和 phase plan 必须在 `docs/archive/`，不能回到 docs 根目录充当活文档。
 
