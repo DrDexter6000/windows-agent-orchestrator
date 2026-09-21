@@ -311,6 +311,29 @@ function defaultReuseStore(runDir) {
   };
 }
 
+// A routing entry's updatedAt is written as Date.now() by this module. A value
+// that is further in the future than this tolerance cannot be explained by
+// same-machine clock reading order — it is damage (tampered/corrupt entry), not
+// "an old crashed entry".
+const ROUTING_ENTRY_FUTURE_TOLERANCE_MS = 1000;
+
+/**
+ * Validate a routing entry's bounded fact ({runId, updatedAt}) at DECISION time.
+ * The reader already rejects a malformed SHAPE; this rejects a nonsensical TIME
+ * (non-finite, negative, or in the future beyond tolerance). Called
+ * unconditionally so no branch — including the "this slot is already mine"
+ * branch — can bypass it. Throws the fixed damage text.
+ *
+ * @param {{runId:string, updatedAt:number}} entry
+ * @param {number} clock
+ */
+function assertRoutingEntryUsable(entry, clock) {
+  const ts = entry.updatedAt;
+  if (!Number.isFinite(ts) || ts < 0 || ts > clock + ROUTING_ENTRY_FUTURE_TOLERANCE_MS) {
+    throw new Error(ROUTING_ENTRY_DAMAGED_TEXT);
+  }
+}
+
 /**
  * §3.6 item 2 — atomic routing-entry write (audit finding A3 [中], 2026-09-21).
  * A plain whole-file writeFile is NOT atomic: an interrupted write could leave a
@@ -411,6 +434,14 @@ export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, 
 
   return withKeyLock(store, keyHash, async () => {
     const entry = await store.readEntry(keyHash);
+
+    // Re-check-2 finding R1' [高] (2026-09-21): the temporal validation used to
+    // live ONLY inside the `entry.runId !== runId` branch, so an entry whose
+    // runId equals the incoming runId skipped every check (including the
+    // future-timestamp refusal) and fell straight through to turn:first. Validate
+    // the entry UNCONDITIONALLY, once, right after the read — no branch can skip
+    // it, whether the store is the real one or an injected test double.
+    if (entry) assertRoutingEntryUsable(entry, clock);
 
     // A prior/other run claims this slot.
     if (entry && entry.runId && entry.runId !== runId) {

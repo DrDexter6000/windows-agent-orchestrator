@@ -488,6 +488,22 @@ test("§3.6 TURN-7: routing entry present but DAMAGED (unparseable / malformed) 
       "future updatedAt (negative age) must refuse",
     );
 
+    // Re-check-2 finding R1' [高] (2026-09-21): when the entry's runId EQUALS the
+    // incoming runId the "prior run claims this slot" branch is skipped — the
+    // temporal validation must still run, or this shape falls through to
+    // turn:first (fresh provider conversation) despite a tampered timestamp.
+    for (const badTs of [Date.now() + 60_000, -1, "broken"]) {
+      writeFileSync(entryPath, JSON.stringify({ runId: "run_self_7c", updatedAt: badTs }), "utf8");
+      await assert.rejects(
+        () => resolveReuseTurn({
+          runDir: dir, runId: "run_self_7c",
+          leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher",
+        }),
+        /routing entry.*damaged.*refusing instead of silently starting a fresh provider conversation/s,
+        `self-runId entry with updatedAt=${JSON.stringify(badTs)} must refuse`,
+      );
+    }
+
     // 缺失（ENOENT）仍是 first——既有 bootstrap 合同不动（TURN-1 同款）。
     rmSync(join(dir, ".session-reuse"), { recursive: true, force: true });
     const decision = await resolveReuseTurn({
