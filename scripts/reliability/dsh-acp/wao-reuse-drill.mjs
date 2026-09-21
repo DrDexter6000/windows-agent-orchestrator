@@ -24,7 +24,6 @@
 // coder_low_dsh_reuse：backend deepseek-acp + sessionReuse lead_workspace；
 // 不改任何既有条目）。--registry-source <path> 可覆盖来源。
 
-import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -34,6 +33,7 @@ const srcUrl = (rel) => pathToFileURL(join(ROOT, rel)).href;
 const { dispatchRun } = await import(srcUrl("src/application/runDispatch.js"));
 const { readTranscript, findState, TERMINAL_STATES } = await import(srcUrl("src/transcript.js"));
 const { deriveReuseKeyHash } = await import(srcUrl("src/application/sessionReuse.js"));
+const { probeRuntimeIdentity } = await import(srcUrl("scripts/reliability/runtimeIdentity.mjs"));
 
 const AGENT_ID = "coder_low_dsh_reuse";
 const LEAD = `phase6-drill-lead-${Date.now().toString(36)}`;
@@ -62,16 +62,19 @@ if (!lane || lane.sessionReuse !== "lead_workspace" || lane.backend !== "deepsee
 writeFileSync(drillRegistry, registryRaw, "utf8");
 rmSync(runDir, { recursive: true, force: true });
 mkdirSync(runDir, { recursive: true });
+const runtimeIdentity = probeRuntimeIdentity({ backendName: "deepseek-acp", agent: lane });
+if (runtimeIdentity.verified !== true) {
+  console.error(`dsh runtime identity could not be verified: ${runtimeIdentity.reason ?? "unknown reason"}`);
+  process.exit(2);
+}
 
 const evidencePath = join(ROOT, "scripts", "reliability", "dsh-acp", "evidence", "phase6-session-reuse.json");
 const evidence = {
   drill: "ADR-0031 §3.6 phase6 session-reuse association (real dispatch)",
   date: new Date().toISOString(),
   node: process.version,
-  dsh: String(spawnSync("dsh", ["--version"], {
-    encoding: "utf8",
-    shell: process.platform === "win32",
-  }).stdout ?? "").trim(),
+  dsh: runtimeIdentity.version,
+  runtimeIdentity,
   agentId: AGENT_ID,
   leadSession: "<fixed drill lead (simulates the MCP server's stable injection)>",
   marker: MARKER,
@@ -132,10 +135,8 @@ async function dispatch(prompt, label) {
 }
 
 // ── 正向 run 1：建立可辨识上下文事实 ──
-const r1 = await dispatch(
-  `Remember this marker string for later: ${MARKER}\nReply with exactly one line: MARKER_STORED`,
-  "run1",
-);
+const run1Prompt = `Remember this marker string for later: ${MARKER}\nReply with exactly one line: MARKER_STORED`;
+const r1 = await dispatch(run1Prompt, "run1");
 if (!r1.accepted) fail("run1 not accepted");
 if (r1.providerSessionRouting !== "first_turn_requested") fail(`run1 routing=${r1.providerSessionRouting}`);
 const t1 = await waitForTerminal(r1.runId);
@@ -146,16 +147,20 @@ evidence.steps.run1 = {
   backendSessionId: sid1,
   runSessionReuseTurn: fact(t1.events, "run.session_reuse", r1.runId)?.turn,
   assistantEcho: assistantText(t1.events).slice(0, 200),
+  evidenceRefs: {
+    sessionCreated: "run1-session-created",
+    sessionReuse: "run1-session-reuse",
+    assistant: "run1-assistant",
+    terminal: "run1-terminal",
+  },
 };
 if (t1.state !== "completed") fail(`run1 state=${t1.state}`);
 if (typeof sid1 !== "string" || sid1.length === 0) fail("run1 has no session.created.backendSessionId");
 if (evidence.steps.run1.runSessionReuseTurn !== "first") fail("run1 run.session_reuse.turn !== first");
 
 // ── 正向 run 2：同 lane 同身份再派发 → resume 且复述 marker ──
-const r2 = await dispatch(
-  "Reply with exactly the marker string you were asked to remember earlier, and nothing else.",
-  "run2",
-);
+const run2Prompt = "Reply with exactly the marker string you were asked to remember earlier, and nothing else.";
+const r2 = await dispatch(run2Prompt, "run2");
 if (!r2.accepted) fail("run2 not accepted");
 if (r2.providerSessionRouting !== "resume_requested") fail(`run2 routing=${r2.providerSessionRouting}`);
 const t2 = await waitForTerminal(r2.runId);
@@ -169,6 +174,13 @@ evidence.steps.run2 = {
   assistantEcho: echo2.slice(0, 200),
   resumeSystemFact: t2.events.some((e) => e?.type === "run.event" && e?.kind === "message" && e?.role === "system"
     && /session\/resume/.test(JSON.stringify(e.parts ?? []))),
+  evidenceRefs: {
+    sessionCreated: "run2-session-created",
+    sessionReuse: "run2-session-reuse",
+    resumeSystem: "run2-resume-system",
+    assistant: "run2-assistant",
+    terminal: "run2-terminal",
+  },
 };
 const positivePass = t2.state === "completed"
   && evidence.steps.run2.runSessionReuseTurn === "resume"
@@ -209,6 +221,7 @@ try {
 const addedTranscripts = readdirSync(runDir)
   .filter((n) => n.endsWith(".jsonl") && !jsonlBefore.has(n));
 evidence.negativeA = {
+  evidenceRef: "negativeA",
   tamper: "prior transcript session.created.backendSessionId -> empty string",
   ...negA,
   addedTranscripts,
@@ -232,6 +245,7 @@ try {
   negB = { refused: true, message: error.message };
 }
 evidence.negativeB = {
+  evidenceRef: "negativeB",
   tamper: "routing entry file -> unparseable bytes",
   ...negB,
   pass: Boolean(negB.refused && /routing entry.*damaged/.test(negB.message ?? "")),
@@ -258,6 +272,7 @@ const err5 = fact(t5.events, "run.error", r5.runId);
 // there was no silent fallback to session/new.
 const noSessionCreated = !t5.events.some((e) => e && e.runId === r5.runId && e.type === "session.created");
 evidence.negativeC = {
+  evidenceRef: "negativeC",
   tamper: `prior transcript session.created.backendSessionId -> well-formed nonexistent uuid (${fakeSid})`,
   state: t5.state,
   spawnError: err5?.error ?? null,
@@ -276,6 +291,65 @@ rewritePrior(t2.events, (e) => e);
 if (!evidence.negativeC.pass) fail(`negative C failed: ${JSON.stringify(evidence.negativeC)}`);
 
 // ── 收尾：写证据 ──
+// G5（2026-09-21）：worktree scratch 会被合法回收，证据文件必须自足。这里只
+// 内嵌判定所需的白名单事实，不复制 prompt 以外的模型文本、路径、环境或凭据。
+// provider session id 已是原文件既有证据字段；它是历史会话标识，不是 credential。
+evidence.embeddedEvidence = {
+  format: "phase6-session-reuse-self-contained-v1",
+  marker: MARKER,
+  positiveInputs: {
+    run1: { runId: r1.runId, providerSessionRouting: r1.providerSessionRouting, prompt: run1Prompt },
+    run2: { runId: r2.runId, providerSessionRouting: r2.providerSessionRouting, prompt: run2Prompt },
+  },
+  evidenceLines: [
+    { id: "run1-session-created", source: "run transcript excerpt", runId: r1.runId, type: "session.created", backendSessionId: sid1 },
+    { id: "run1-session-reuse", source: "run transcript excerpt", runId: r1.runId, type: "run.session_reuse", turn: evidence.steps.run1.runSessionReuseTurn },
+    { id: "run1-assistant", source: "run transcript excerpt", runId: r1.runId, type: "run.event", kind: "message", role: "assistant", text: evidence.steps.run1.assistantEcho },
+    { id: "run1-terminal", source: "run transcript excerpt", runId: r1.runId, type: "run.completed", state: t1.state },
+    { id: "run2-session-created", source: "run transcript excerpt", runId: r2.runId, type: "session.created", backendSessionId: sid2 },
+    { id: "run2-session-reuse", source: "run transcript excerpt", runId: r2.runId, type: "run.session_reuse", turn: evidence.steps.run2.runSessionReuseTurn },
+    { id: "run2-resume-system", source: "run transcript excerpt", runId: r2.runId, type: "run.event", kind: "message", role: "system", fact: evidence.steps.run2.resumeSystemFact ? "session/resume" : null },
+    { id: "run2-assistant", source: "run transcript excerpt", runId: r2.runId, type: "run.event", kind: "message", role: "assistant", text: evidence.steps.run2.assistantEcho },
+    { id: "run2-terminal", source: "run transcript excerpt", runId: r2.runId, type: "run.completed", state: t2.state },
+  ],
+  negativeControls: [
+    {
+      id: "negativeA",
+      input: { kind: "prior-transcript-session-id", runId: r2.runId, backendSessionId: "" },
+      refusal: {
+        kind: "dispatch_refused",
+        accepted: false,
+        refused: negA.refused,
+        message: negA.message ?? null,
+        noTranscriptCreated: addedTranscripts.length === 0,
+      },
+    },
+    {
+      id: "negativeB",
+      input: { kind: "routing-entry-bytes", rawBytes: "{damaged-not-json" },
+      refusal: {
+        kind: "dispatch_refused",
+        accepted: false,
+        refused: negB.refused,
+        message: negB.message ?? null,
+      },
+    },
+    {
+      id: "negativeC",
+      input: { kind: "prior-transcript-session-id", runId: r2.runId, backendSessionId: fakeSid },
+      refusal: {
+        kind: "resume_rejected",
+        runId: r5.runId,
+        dispatchAccepted: r5.accepted,
+        providerSessionRouting: r5.providerSessionRouting,
+        terminalState: t5.state,
+        errorCode: /-32602/.test(err5?.error ?? "") ? -32602 : null,
+        errorMessage: err5?.error ?? null,
+        sessionCreated: !noSessionCreated,
+      },
+    },
+  ],
+};
 evidence.pass = true;
 evidence.repro = [
   "node scripts/wao-node.cjs scripts/reliability/dsh-acp/wao-reuse-drill.mjs",

@@ -61,6 +61,36 @@ function eventTableNames(rel, heading, nextHeadingPrefix) {
     .filter(Boolean);
 }
 
+// architecture §3.2 / usage §三即使同时误删同一行，行集相等也抓不到。
+// 这七项是历史上已经要求的人读投影下限；关系守卫负责两表相等，本集合负责
+// “两边一起漂”也必须红。新增事件仍只在 architecture 权威表定义，不在这里扩写
+// 全量清单。
+const REQUIRED_TRANSCRIPT_EVENTS = Object.freeze([
+  "run.event",
+  "scorecard.checked",
+  "run.rerun",
+  "run.cleanup_done",
+  "run.wait_policy",
+  "run.stop_verified",
+  "run.stop_unverified",
+]);
+
+function assertRequiredTranscriptEvents(archEvents, usageEvents) {
+  for (const eventName of REQUIRED_TRANSCRIPT_EVENTS) {
+    assert.ok(archEvents.includes(eventName), `architecture §3.2 缺必含 transcript 事件 ${eventName}`);
+    assert.ok(usageEvents.includes(eventName), `usage.md §三缺必含 transcript 事件 ${eventName}`);
+  }
+}
+
+const EXPECTED_M12_AUTHORITY_PATHS = Object.freeze([
+  "docs/01-prd.md",
+  "docs/02-architecture.md",
+  "docs/roadmap.md",
+  "README.md",
+  "SKILL.md",
+  ".wao/decisions/0018-wao-mechanical-containment-no-auto-supervision.md",
+]);
+
 /** 收集所有 opencode-serve serveUrl 端口（形如 :4297）。 */
 function collectServePorts(text) {
   const out = [];
@@ -277,7 +307,20 @@ test("transcript 事件 spec 与人读投影行集相等，SKILL.md 不维护第
   assert.equal(new Set(usageEvents).size, usageEvents.length, "usage.md §三不得有重复事件行");
   assert.deepEqual([...usageEvents].sort(), [...archEvents].sort(),
     "usage 人读投影与 architecture 事件 spec 的事件名行集必须双向相等");
+  assertRequiredTranscriptEvents(archEvents, usageEvents);
   assert.throws(() => assert.deepEqual([...usageEvents.slice(1)].sort(), [...archEvents].sort()));
+  // G3 反例：两侧同时删除同一必含事件时，行集仍相等；下限守卫必须独立抓红。
+  for (const required of REQUIRED_TRANSCRIPT_EVENTS) {
+    const archWithout = archEvents.filter((name) => name !== required);
+    const usageWithout = usageEvents.filter((name) => name !== required);
+    assert.deepEqual([...usageWithout].sort(), [...archWithout].sort(),
+      `反例前提：双侧删除 ${required} 后两表仍相等`);
+    assert.throws(
+      () => assertRequiredTranscriptEvents(archWithout, usageWithout),
+      new RegExp(`缺必含 transcript 事件 ${required.replace(".", "\\.")}`),
+      `双侧同时删除必含事件 ${required} 必须红`,
+    );
+  }
   // SKILL 不得再维护并行全量表（不得同时列 run.rerun 与 run.event 等做"完整清单"）。
   // 允许 SKILL 提及个别事件名，但不得做成"事件表"。用一个代理信号：
   // SKILL 若含 usage 不指向，且同时出现 4+ 个 run.* 事件名 → 视为并行表。
@@ -340,7 +383,8 @@ test("tier-1 清单单源：ssot 表在场，AGENTS 只指针，M12 authority �
     assert.ok(tier1Paths(id).length > 0, `docs/ssot.md tier-1 表缺行动面 ${id}`);
   for (const rel of tier1Paths("m12-containment"))
     assert.ok(existsSync(join(ROOT, rel)), `m12-containment tier-1 路径不存在：${rel}`);
-  assert.deepEqual(M12_AUTHORITY_PATHS, tier1Paths("m12-containment"), "M12 authority 必须从 tier-1 表派生");
+  assert.deepEqual(M12_AUTHORITY_PATHS, EXPECTED_M12_AUTHORITY_PATHS,
+    "m12-containment tier-1 行必须精确保留五份 live authority + ADR-0018；删、增、换序都应红");
 });
 
 test("AGENTS.md 不得用旧的 claude_worker/codex_worker 角色名（已角色化）", () => {

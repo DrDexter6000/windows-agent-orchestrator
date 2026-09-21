@@ -24,7 +24,13 @@
       "state": "completed",
       "backendSessionId": "811d622a-d83b-42ce-9073-4f752b7f37be",
       "runSessionReuseTurn": "first",
-      "assistantEcho": "MARKER_STORED"
+      "assistantEcho": "MARKER_STORED",
+      "evidenceRefs": {
+        "sessionCreated": "run1-session-created",
+        "sessionReuse": "run1-session-reuse",
+        "assistant": "run1-assistant",
+        "terminal": "run1-terminal"
+      }
     },
     "run2": {
       "runId": "run_20260921000242726tngoo7",
@@ -34,7 +40,14 @@
       "backendSessionId": "811d622a-d83b-42ce-9073-4f752b7f37be",
       "runSessionReuseTurn": "resume",
       "assistantEcho": "WAO_REUSE_P6_MUAHE77N_NG4F45",
-      "resumeSystemFact": true
+      "resumeSystemFact": true,
+      "evidenceRefs": {
+        "sessionCreated": "run2-session-created",
+        "sessionReuse": "run2-session-reuse",
+        "resumeSystem": "run2-resume-system",
+        "assistant": "run2-assistant",
+        "terminal": "run2-terminal"
+      }
     },
     "negC_dispatch": {
       "runId": "run_20260921000247414hr4e77",
@@ -53,6 +66,7 @@
     }
   },
   "negativeA": {
+    "evidenceRef": "negativeA",
     "tamper": "prior transcript session.created.backendSessionId -> empty string",
     "refused": true,
     "message": "sessionReuse: prior run has a bound session.created but no addressable provider session id (backendSessionId missing/empty/non-string) — refusing resume instead of silently starting a fresh provider conversation",
@@ -60,16 +74,154 @@
     "pass": true
   },
   "negativeB": {
+    "evidenceRef": "negativeB",
     "tamper": "routing entry file -> unparseable bytes",
     "refused": true,
     "message": "sessionReuse: routing entry for this reuse identity is damaged (present but unparseable or malformed) — refusing instead of silently starting a fresh provider conversation",
     "pass": true
   },
   "negativeC": {
+    "evidenceRef": "negativeC",
     "tamper": "prior transcript session.created.backendSessionId -> well-formed nonexistent uuid (11111111-2222-4333-8444-555555555555)",
     "state": "failed",
     "spawnError": "deepseek-acp JSON-RPC error -32602: Invalid params: session is not resumable: 11111111-2222-4333-8444-555555555555",
+    "noSessionCreatedForResumeAttempt": true,
     "pass": true
+  },
+  "embeddedEvidence": {
+    "format": "phase6-session-reuse-self-contained-v1",
+    "marker": "WAO_REUSE_P6_MUAHE77N_NG4F45",
+    "positiveInputs": {
+      "run1": {
+        "runId": "run_20260921000238093tpb7e8",
+        "providerSessionRouting": "first_turn_requested",
+        "prompt": "Remember this marker string for later: WAO_REUSE_P6_MUAHE77N_NG4F45\nReply with exactly one line: MARKER_STORED"
+      },
+      "run2": {
+        "runId": "run_20260921000242726tngoo7",
+        "providerSessionRouting": "resume_requested",
+        "prompt": "Reply with exactly the marker string you were asked to remember earlier, and nothing else."
+      }
+    },
+    "evidenceLines": [
+      {
+        "id": "run1-session-created",
+        "source": "run transcript excerpt",
+        "runId": "run_20260921000238093tpb7e8",
+        "type": "session.created",
+        "backendSessionId": "811d622a-d83b-42ce-9073-4f752b7f37be"
+      },
+      {
+        "id": "run1-session-reuse",
+        "source": "run transcript excerpt",
+        "runId": "run_20260921000238093tpb7e8",
+        "type": "run.session_reuse",
+        "turn": "first"
+      },
+      {
+        "id": "run1-assistant",
+        "source": "run transcript excerpt",
+        "runId": "run_20260921000238093tpb7e8",
+        "type": "run.event",
+        "kind": "message",
+        "role": "assistant",
+        "text": "MARKER_STORED"
+      },
+      {
+        "id": "run1-terminal",
+        "source": "run transcript excerpt",
+        "runId": "run_20260921000238093tpb7e8",
+        "type": "run.completed",
+        "state": "completed"
+      },
+      {
+        "id": "run2-session-created",
+        "source": "run transcript excerpt",
+        "runId": "run_20260921000242726tngoo7",
+        "type": "session.created",
+        "backendSessionId": "811d622a-d83b-42ce-9073-4f752b7f37be"
+      },
+      {
+        "id": "run2-session-reuse",
+        "source": "run transcript excerpt",
+        "runId": "run_20260921000242726tngoo7",
+        "type": "run.session_reuse",
+        "turn": "resume"
+      },
+      {
+        "id": "run2-resume-system",
+        "source": "run transcript excerpt",
+        "runId": "run_20260921000242726tngoo7",
+        "type": "run.event",
+        "kind": "message",
+        "role": "system",
+        "fact": "session/resume"
+      },
+      {
+        "id": "run2-assistant",
+        "source": "run transcript excerpt",
+        "runId": "run_20260921000242726tngoo7",
+        "type": "run.event",
+        "kind": "message",
+        "role": "assistant",
+        "text": "WAO_REUSE_P6_MUAHE77N_NG4F45"
+      },
+      {
+        "id": "run2-terminal",
+        "source": "run transcript excerpt",
+        "runId": "run_20260921000242726tngoo7",
+        "type": "run.completed",
+        "state": "completed"
+      }
+    ],
+    "negativeControls": [
+      {
+        "id": "negativeA",
+        "input": {
+          "kind": "prior-transcript-session-id",
+          "runId": "run_20260921000242726tngoo7",
+          "backendSessionId": ""
+        },
+        "refusal": {
+          "kind": "dispatch_refused",
+          "accepted": false,
+          "refused": true,
+          "message": "sessionReuse: prior run has a bound session.created but no addressable provider session id (backendSessionId missing/empty/non-string) — refusing resume instead of silently starting a fresh provider conversation",
+          "noTranscriptCreated": true
+        }
+      },
+      {
+        "id": "negativeB",
+        "input": {
+          "kind": "routing-entry-bytes",
+          "rawBytes": "{damaged-not-json"
+        },
+        "refusal": {
+          "kind": "dispatch_refused",
+          "accepted": false,
+          "refused": true,
+          "message": "sessionReuse: routing entry for this reuse identity is damaged (present but unparseable or malformed) — refusing instead of silently starting a fresh provider conversation"
+        }
+      },
+      {
+        "id": "negativeC",
+        "input": {
+          "kind": "prior-transcript-session-id",
+          "runId": "run_20260921000242726tngoo7",
+          "backendSessionId": "11111111-2222-4333-8444-555555555555"
+        },
+        "refusal": {
+          "kind": "resume_rejected",
+          "runId": "run_20260921000247414hr4e77",
+          "dispatchAccepted": true,
+          "providerSessionRouting": "resume_requested",
+          "terminalState": "failed",
+          "errorCode": -32602,
+          "errorMessage": "deepseek-acp JSON-RPC error -32602: Invalid params: session is not resumable: 11111111-2222-4333-8444-555555555555",
+          "sessionCreated": false
+        }
+      }
+    ]
   },
   "pass": true,
   "repro": [

@@ -900,14 +900,69 @@ test("kernel: 声明闭集全量轴——roleContract/exitCode 各双向 + 无�
   }
 });
 
-test("kernel: sessionReuseEvidenceFromPhase6File——真证据文件被接受，篡改/缺负对照被拒", () => {
+test("kernel G1/G5: sessionReuseEvidenceFromPhase6File 交叉核原始素材，任一矛盾都不得 accepted", () => {
   // 仓库内真实证据文件（Phase 6 产物）必须被接受。
   const real = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "reliability", "dsh-acp", "evidence", "phase6-session-reuse.json"), "utf8"));
   const accepted = sessionReuseEvidenceFromPhase6File(real);
   assert.equal(accepted.accepted, true, "仓库内 Phase 6 真证据被接受");
   assert.match(accepted.detail, /same provider session 811d622a/);
   assert.match(accepted.detail, /3\/3 fail-closed negatives refused/);
-  // 篡改 1：两次 run 的 backendSessionId 不同 → 拒。
+
+  assert.equal(real.embeddedEvidence?.format, "phase6-session-reuse-self-contained-v1");
+  assert.ok(Array.isArray(real.embeddedEvidence?.evidenceLines), "正向关键 transcript 事实必须内嵌");
+  assert.equal(real.embeddedEvidence?.negativeControls?.length, 3, "三条负对照输入与拒绝形状必须内嵌");
+
+  // 篡改 1：两次 runId 改成同一个，claims 仍全 true → 拒。
+  const sameRun = structuredClone(real);
+  sameRun.steps.run2.runId = sameRun.steps.run1.runId;
+  assert.equal(sessionReuseEvidenceFromPhase6File(sameRun).accepted, false);
+  assert.match(sessionReuseEvidenceFromPhase6File(sameRun).detail, /distinct runIds|evidence line.*runId/i);
+
+  // 篡改 2：被引用证据行指向不存在的 id → 拒。
+  const missingLine = structuredClone(real);
+  missingLine.steps.run2.evidenceRefs.resumeSystem = "missing-evidence-line";
+  assert.equal(sessionReuseEvidenceFromPhase6File(missingLine).accepted, false);
+  assert.match(sessionReuseEvidenceFromPhase6File(missingLine).detail, /referenced evidence line/i);
+
+  // 篡改 3：恢复轮的 transcript resume 事实改错，claims 仍全 true → 拒。
+  const wrongResumeFact = structuredClone(real);
+  const resumeLine = wrongResumeFact.embeddedEvidence.evidenceLines
+    .find((line) => line.id === wrongResumeFact.steps.run2.evidenceRefs.resumeSystem);
+  resumeLine.fact = "session/new";
+  assert.equal(sessionReuseEvidenceFromPhase6File(wrongResumeFact).accepted, false);
+  assert.match(sessionReuseEvidenceFromPhase6File(wrongResumeFact).detail, /resume.*fact|resumeSystemFact/i);
+
+  // 篡改 4：第二次 marker 回显改错（auditor 原反例），claims 仍全 true → 拒。
+  const wrongEcho = structuredClone(real);
+  wrongEcho.steps.run2.assistantEcho = "WRONG_MARKER_ECHO";
+  assert.equal(sessionReuseEvidenceFromPhase6File(wrongEcho).accepted, false);
+  assert.match(sessionReuseEvidenceFromPhase6File(wrongEcho).detail, /assistant.*evidence line|marker echo/i);
+
+  // 篡改 5：会话 id 在原始行与摘要两处都清空，避免只靠交叉矛盾抓红 → 拒。
+  const emptySession = structuredClone(real);
+  emptySession.steps.run1.backendSessionId = "";
+  emptySession.steps.run2.backendSessionId = "";
+  for (const line of emptySession.embeddedEvidence.evidenceLines) {
+    if (line.type === "session.created") line.backendSessionId = "";
+  }
+  assert.equal(sessionReuseEvidenceFromPhase6File(emptySession).accepted, false);
+  assert.match(sessionReuseEvidenceFromPhase6File(emptySession).detail, /non-empty provider session id/i);
+
+  // 篡改 6：证据行自己的 runId 与引用它的步骤不一致 → 拒。
+  const wrongLineRun = structuredClone(real);
+  const createdLine = wrongLineRun.embeddedEvidence.evidenceLines
+    .find((line) => line.id === wrongLineRun.steps.run2.evidenceRefs.sessionCreated);
+  createdLine.runId = wrongLineRun.steps.run1.runId;
+  assert.equal(sessionReuseEvidenceFromPhase6File(wrongLineRun).accepted, false);
+  assert.match(sessionReuseEvidenceFromPhase6File(wrongLineRun).detail, /evidence line.*runId/i);
+
+  // 篡改 7：负对照原始拒绝形状与 pass 布尔矛盾 → 拒。
+  const badNegative = structuredClone(real);
+  badNegative.embeddedEvidence.negativeControls[0].refusal.refused = false;
+  assert.equal(sessionReuseEvidenceFromPhase6File(badNegative).accepted, false);
+  assert.match(sessionReuseEvidenceFromPhase6File(badNegative).detail, /negativeA.*raw refusal|negative control/i);
+
+  // 既有篡改：两次 run 的 backendSessionId 不同 → 拒。
   const sidDrift = structuredClone(real);
   sidDrift.steps.run2.backendSessionId = "00000000-1111-4222-8333-444444444444";
   assert.equal(sessionReuseEvidenceFromPhase6File(sidDrift).accepted, false);
@@ -938,6 +993,48 @@ test("kernel: sessionReuseEvidenceFromPhase6File——真证据文件被接受�
   });
   assert.equal(currentRuntimeDrift.accepted, false, "old evidence must not endorse a newly fingerprinted runtime");
   assert.match(currentRuntimeDrift.detail, /runtime fingerprint/i);
+});
+
+test("kernel G2: session reuse 证据不足是 inconclusive；只有自洽原始事实证实失败才是 fail", () => {
+  const real = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "reliability", "dsh-acp", "evidence", "phase6-session-reuse.json"), "utf8"));
+  const declared = { reportsTokenUsage: false, supportsSessionReuse: true };
+  const reuseCheck = (resumeEvidence) => backendCapabilityConsistencyChecks({
+    declared,
+    metricsInput: null,
+    resumeEvidence,
+  }).find((entry) => entry.name === "supportsSessionReuseConsistency");
+
+  const missing = reuseCheck(null);
+  assert.equal(missing.state, "inconclusive");
+  assert.ok(missing.stateReason.length > 0);
+
+  const unparseable = reuseCheck(sessionReuseEvidenceFromPhase6File("{not-json"));
+  assert.equal(unparseable.state, "inconclusive");
+  assert.match(unparseable.stateReason, /not an object/i);
+
+  const staleIdentity = reuseCheck(sessionReuseEvidenceFromPhase6File(real, {
+    expectedRuntimeIdentity: {
+      ...real.runtimeIdentity,
+      fingerprint: "v1-current-runtime-drifted",
+      verified: true,
+    },
+  }));
+  assert.equal(staleIdentity.state, "inconclusive");
+  assert.match(staleIdentity.stateReason, /runtime fingerprint/i);
+
+  // 同时改摘要、被引用原始行和派生 claims，得到“自洽但明确失败”的恢复结果：
+  // 这才是 fail，而不是证据文件缺失/坏 JSON/身份过期。
+  const provenFailure = structuredClone(real);
+  const markerLine = provenFailure.embeddedEvidence.evidenceLines
+    .find((line) => line.id === provenFailure.steps.run2.evidenceRefs.assistant);
+  markerLine.text = "A_DIFFERENT_NONEMPTY_MARKER";
+  provenFailure.steps.run2.assistantEcho = markerLine.text;
+  provenFailure.positive.claims.contextCarried = false;
+  provenFailure.positive.pass = false;
+  provenFailure.pass = false;
+  const failedEvidence = sessionReuseEvidenceFromPhase6File(provenFailure);
+  assert.equal(failedEvidence.state, "fail");
+  assert.equal(reuseCheck(failedEvidence).state, "fail");
 });
 
 test("component ledger glue F9: stable refresh replaces prior, newly drifted history survives, zombie key is pruned", () => {
@@ -990,6 +1087,11 @@ test("kernel: SESSION_REUSE_EVIDENCE_SOURCES 只登记真实派发证据路径�
   assert.equal(source.path, "scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json");
   assert.ok(existsSync(join(REPO_ROOT, source.path)), "登记的证据路径必须真实存在");
   assert.ok(existsSync(join(REPO_ROOT, source.drill)), "登记的 drill 路径必须真实存在");
+  const drillSource = readFileSync(join(REPO_ROOT, source.drill), "utf8");
+  assert.match(drillSource, /phase6-session-reuse-self-contained-v1/,
+    "真实 drill 重跑后仍必须生成自足证据，不能把文件覆盖回外部转录依赖形状");
+  assert.match(drillSource, /probeRuntimeIdentity/,
+    "真实 drill 必须把运行时身份写入证据，未来重跑不能丢失身份绑定");
 });
 
 test("kernel: 配置传递按支持范围——装配带 model → 值必须送达；装配无 model → 注入必须明确拒绝（ADR-0032 §2）", () => {

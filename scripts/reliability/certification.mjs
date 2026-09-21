@@ -91,6 +91,14 @@ export function certifyCase(caseResult = {}) {
       c.optional !== true
       && c.category === "strict"
       && checkStateOf(c) === "not-applicable");
+  // G2: inconclusive 不是已证实失败，但也不能绕过 F1 的 strict 承重边界升到
+  // conditional/supervised-dispatch。保留 requiredStrictNotApplicable 的既有行为，
+  // 对“关键 strict 证据不足”给出并列的 draft-only 分支。
+  const requiredStrictInconclusive = requiredCategories.includes("strict")
+    && checks.some((c) =>
+      c.optional !== true
+      && c.category === "strict"
+      && checkStateOf(c) === "inconclusive");
 
   let status;
   let reason;
@@ -106,6 +114,9 @@ export function certifyCase(caseResult = {}) {
   } else if (requiredStrictNotApplicable) {
     status = "draft-only";
     reason = "required strict certification evidence is not applicable; explicit Owner qualification is required before dispatchable use";
+  } else if (requiredStrictInconclusive) {
+    status = "draft-only";
+    reason = "required strict certification evidence is inconclusive; explicit Owner qualification is required before dispatchable use";
   } else if (
     hasFailedCategory(failedChecks, "operational") ||
     hasFailedCategory(failedChecks, "observability")

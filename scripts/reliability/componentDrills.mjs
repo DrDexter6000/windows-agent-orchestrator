@@ -82,7 +82,7 @@ import {
   waitForTranscript,
 } from "./drills.mjs";
 // ADR-0032 §8：检查结果五态（两层共用的中立词汇模块——非组合层状态闭集）。
-import { checkStateOf, naCheck } from "./checkStates.mjs";
+import { checkStateOf, inconclusiveCheck, naCheck } from "./checkStates.mjs";
 import { scorecardCommandFailureIsCredible } from "./scorecardEvidence.mjs";
 // 组件层闭集与记录构造（ADR-0032 §1/§5）。绝不 import certification.mjs——
 // mergeCaseResults/pruneStaleCases 的复用已经封装在 componentLedger 内部。
@@ -383,61 +383,274 @@ export const SESSION_REUSE_EVIDENCE_SOURCES = Object.freeze({
 });
 
 /**
- * 校验 Phase 6 形状的真实跨 run 恢复证据（纯函数）：正向 = 两次真实派发命中
- * 同一 provider session + resume 轮路由 + 上下文带回（marker 复述）+ resume
- * transcript 事实；负向×3 = 关联面损坏/缺失各路一律拒绝（绝不静默新会话）。
- * 任一断言不成立 → accepted:false + 原因（绝不因文件存在就算证据）。
+ * 校验 Phase 6 自足的真实跨 run 恢复证据（纯函数）：摘要与 claims 只作待核
+ * 字段，必须逐项对上内嵌的输入、被引用 transcript 事实行和三条负对照拒绝
+ * 形状，再从原始素材独立派生结论。材料缺失/矛盾/身份过期 → inconclusive；
+ * 自洽素材明确展示能力失败 → fail；全部正负向事实成立才 accepted:true。
  */
 export function sessionReuseEvidenceFromPhase6File(json, { expectedRuntimeIdentity = null } = {}) {
-  const why = (reason) => ({ accepted: false, detail: `session-reuse evidence rejected: ${reason}` });
-  if (!json || typeof json !== "object") return why("evidence file is not an object");
+  // 选 inconclusive 而不是 blocked：文件缺失、坏 JSON、身份过期或内部字段矛盾
+  // 都表示“现有材料不足以下能力结论”，并非夹具/基础设施阻塞了一次正在执行的
+  // 检查。只有一份结构自洽、可交叉核对的原始素材明确展示恢复失败时才记 fail。
+  const outcome = (state, reason) => ({
+    accepted: state === "pass",
+    state,
+    detail: `session-reuse evidence ${state === "pass" ? "accepted" : "rejected"}: ${reason}`,
+  });
+  const inconclusive = (reason) => outcome("inconclusive", reason);
+  const failed = (reason) => outcome("fail", reason);
+  if (!json || typeof json !== "object") return inconclusive("evidence file is not an object");
   const run1 = json?.steps?.run1;
   const run2 = json?.steps?.run2;
-  if (!run1?.runId || !run2?.runId) return why("missing run1/run2 runIds (no real dispatch pair)");
+  if (typeof run1?.runId !== "string" || run1.runId.length === 0
+    || typeof run2?.runId !== "string" || run2.runId.length === 0) {
+    return inconclusive("missing run1/run2 runIds (no real dispatch pair)");
+  }
+  if (run1.runId === run2.runId) {
+    return failed(`positive drill did not use two distinct runIds (${run1.runId})`);
+  }
   const boundRuntime = json.runtimeIdentity;
   if (
     !boundRuntime
     || boundRuntime.verified !== true
-    || typeof boundRuntime.distribution !== "string"
-    || typeof boundRuntime.version !== "string"
+    || typeof boundRuntime.distribution !== "string" || boundRuntime.distribution.trim().length === 0
+    || typeof boundRuntime.version !== "string" || boundRuntime.version.trim().length === 0
     || typeof boundRuntime.fingerprint !== "string"
     || boundRuntime.fingerprint.length === 0
   ) {
-    return why("missing verified runtime identity binding (distribution/version/fingerprint)");
+    return inconclusive("missing verified runtime identity binding (distribution/version/fingerprint)");
   }
   if (typeof json.dsh === "string" && json.dsh !== boundRuntime.version) {
-    return why(`runtime version metadata mismatch (${JSON.stringify(json.dsh)} vs bound ${JSON.stringify(boundRuntime.version)})`);
+    return inconclusive(`runtime version metadata mismatch (${JSON.stringify(json.dsh)} vs bound ${JSON.stringify(boundRuntime.version)})`);
   }
   if (expectedRuntimeIdentity !== null) {
     if (expectedRuntimeIdentity?.verified !== true) {
-      return why("current runtime identity is unverified; historical resume evidence cannot endorse it");
+      return inconclusive("current runtime identity is unverified; historical resume evidence cannot endorse it");
     }
     if (expectedRuntimeIdentity.fingerprint !== boundRuntime.fingerprint) {
-      return why(`runtime fingerprint differs from the evidence binding (${boundRuntime.fingerprint} vs current ${expectedRuntimeIdentity.fingerprint})`);
+      return inconclusive(`runtime fingerprint differs from the evidence binding (${boundRuntime.fingerprint} vs current ${expectedRuntimeIdentity.fingerprint})`);
     }
   }
-  const sid1 = run1?.backendSessionId;
-  const sid2 = run2?.backendSessionId;
-  if (typeof sid1 !== "string" || sid1.length === 0 || sid1 !== sid2) {
-    return why(`backendSessionId not identical across runs (${JSON.stringify(sid1)} vs ${JSON.stringify(sid2)})`);
+
+  const embedded = json.embeddedEvidence;
+  if (!embedded || embedded.format !== "phase6-session-reuse-self-contained-v1") {
+    return inconclusive("missing self-contained embedded evidence format phase6-session-reuse-self-contained-v1");
   }
-  if (run2?.runSessionReuseTurn !== "resume" || run2?.providerSessionRouting !== "resume_requested") {
-    return why("run2 was not routed as a resume turn");
+  if (typeof json.marker !== "string" || json.marker.length === 0
+    || embedded.marker !== json.marker) {
+    return inconclusive("marker plaintext is missing or contradicts the embedded evidence marker");
   }
-  const claims = json?.positive?.claims ?? {};
-  if (claims.contextCarried !== true || claims.resumeTranscriptFact !== true || claims.sameAcpSessionAcrossRuns !== true) {
-    return why("positive claims incomplete (contextCarried/resumeTranscriptFact/sameAcpSessionAcrossRuns)");
+  if (!Array.isArray(embedded.evidenceLines) || embedded.evidenceLines.length === 0) {
+    return inconclusive("self-contained evidenceLines are missing");
   }
-  const negA = json?.negativeA;
-  const negB = json?.negativeB;
-  const negC = json?.negativeC;
-  if (negA?.pass !== true || negB?.pass !== true || negC?.pass !== true) {
-    return why("fail-closed negatives incomplete (tampered anchor / damaged routing / nonexistent session must all be refused)");
+  const evidenceLines = new Map();
+  for (const line of embedded.evidenceLines) {
+    if (typeof line?.id !== "string" || line.id.length === 0) {
+      return inconclusive("an embedded evidence line has no non-empty id");
+    }
+    if (evidenceLines.has(line.id)) {
+      return inconclusive(`embedded evidence line id is duplicated: ${line.id}`);
+    }
+    evidenceLines.set(line.id, line);
   }
-  return {
-    accepted: true,
-    detail: `real cross-run resume evidence accepted: run1 ${run1.runId} → run2 ${run2.runId} on the same provider session ${sid1}, marker echoed back (contextCarried), resume transcript fact present, 3/3 fail-closed negatives refused (drill ${json?.drill ?? "unknown"}, dsh ${json?.dsh ?? "?"}, ${json?.date ?? "?"})`,
+
+  const inputs = embedded.positiveInputs;
+  if (!inputs?.run1 || !inputs?.run2
+    || inputs.run1.runId !== run1.runId || inputs.run2.runId !== run2.runId) {
+    return inconclusive("positive input runIds contradict the run summaries");
+  }
+  if (typeof inputs.run1.prompt !== "string" || !inputs.run1.prompt.includes(json.marker)
+    || typeof inputs.run2.prompt !== "string" || inputs.run2.prompt.length === 0) {
+    return inconclusive("embedded positive inputs do not carry the marker-setting and resume prompts");
+  }
+  if (inputs.run1.providerSessionRouting !== run1.providerSessionRouting
+    || inputs.run2.providerSessionRouting !== run2.providerSessionRouting) {
+    return inconclusive("embedded dispatch routing facts contradict the run summaries");
+  }
+
+  const referencedLine = (run, refName, expectedType) => {
+    const ref = run?.evidenceRefs?.[refName];
+    if (typeof ref !== "string" || ref.length === 0 || !evidenceLines.has(ref)) {
+      return { error: `referenced evidence line ${JSON.stringify(ref)} for ${run?.runId}.${refName} is missing` };
+    }
+    const line = evidenceLines.get(ref);
+    if (line.runId !== run.runId) {
+      return { error: `evidence line ${ref} runId ${JSON.stringify(line.runId)} contradicts ${JSON.stringify(run.runId)}` };
+    }
+    if (line.type !== expectedType) {
+      return { error: `evidence line ${ref} type ${JSON.stringify(line.type)} is not ${JSON.stringify(expectedType)}` };
+    }
+    return { line };
   };
+  const lineSpecs = [
+    ["run1.sessionCreated", run1, "sessionCreated", "session.created"],
+    ["run1.sessionReuse", run1, "sessionReuse", "run.session_reuse"],
+    ["run1.assistant", run1, "assistant", "run.event"],
+    ["run1.terminal", run1, "terminal", "run.completed"],
+    ["run2.sessionCreated", run2, "sessionCreated", "session.created"],
+    ["run2.sessionReuse", run2, "sessionReuse", "run.session_reuse"],
+    ["run2.resumeSystem", run2, "resumeSystem", "run.event"],
+    ["run2.assistant", run2, "assistant", "run.event"],
+    ["run2.terminal", run2, "terminal", "run.completed"],
+  ];
+  const lines = {};
+  for (const [key, run, refName, expectedType] of lineSpecs) {
+    const found = referencedLine(run, refName, expectedType);
+    if (found.error) return inconclusive(found.error);
+    lines[key] = found.line;
+  }
+  for (const key of ["run1.assistant", "run2.assistant"]) {
+    if (lines[key].kind !== "message" || lines[key].role !== "assistant") {
+      return inconclusive(`${key} evidence line is not an assistant message fact`);
+    }
+  }
+
+  const sid1 = lines["run1.sessionCreated"].backendSessionId;
+  const sid2 = lines["run2.sessionCreated"].backendSessionId;
+  const run1Turn = lines["run1.sessionReuse"].turn;
+  const run2Turn = lines["run2.sessionReuse"].turn;
+  const run1Echo = lines["run1.assistant"].text;
+  const run2Echo = lines["run2.assistant"].text;
+  const resumeFactObserved = lines["run2.resumeSystem"].kind === "message"
+    && lines["run2.resumeSystem"].role === "system"
+    && lines["run2.resumeSystem"].fact === "session/resume";
+  const summariesMatchLines = [
+    [run1.backendSessionId, sid1, "run1 backendSessionId"],
+    [run2.backendSessionId, sid2, "run2 backendSessionId"],
+    [run1.runSessionReuseTurn, run1Turn, "run1 reuse turn"],
+    [run2.runSessionReuseTurn, run2Turn, "run2 reuse turn"],
+    [run1.assistantEcho, run1Echo, "run1 assistant evidence line"],
+    [run2.assistantEcho, run2Echo, "run2 assistant evidence line / marker echo"],
+    [run1.state, lines["run1.terminal"].state, "run1 terminal state"],
+    [run2.state, lines["run2.terminal"].state, "run2 terminal state"],
+    [run2.resumeSystemFact, resumeFactObserved, "run2 resumeSystemFact / resume transcript fact"],
+  ];
+  for (const [summaryValue, lineValue, label] of summariesMatchLines) {
+    if (summaryValue !== lineValue) {
+      const sessionSuffix = label.includes("backendSessionId")
+        ? "; backendSessionId is not identical across runs and referenced records"
+        : "";
+      const resumeSuffix = label === "run2 reuse turn"
+        ? "; run2 was not routed as a resume turn"
+        : "";
+      return inconclusive(`${label} contradicts its referenced evidence line (${JSON.stringify(summaryValue)} vs ${JSON.stringify(lineValue)})${sessionSuffix}${resumeSuffix}`);
+    }
+  }
+
+  const positiveConditions = {
+    distinctRunIds: run1.runId !== run2.runId,
+    acceptedBoth: run1.accepted === true && run2.accepted === true,
+    sameNonEmptyProviderSession: typeof sid1 === "string" && sid1.length > 0 && sid1 === sid2,
+    firstTurnRouted: run1.providerSessionRouting === "first_turn_requested" && run1Turn === "first",
+    resumeTurnRouted: run2.providerSessionRouting === "resume_requested" && run2Turn === "resume",
+    markerAcknowledged: typeof run1Echo === "string" && run1Echo.length > 0,
+    contextCarried: typeof run2Echo === "string" && run2Echo.length > 0 && run2Echo === json.marker,
+    resumeTranscriptFact: resumeFactObserved,
+    terminalCompleted: run1.state === "completed" && run2.state === "completed",
+  };
+  const derivedClaims = {
+    sameAcpSessionAcrossRuns: positiveConditions.sameNonEmptyProviderSession,
+    resumeTurnRouted: positiveConditions.resumeTurnRouted,
+    contextCarried: positiveConditions.contextCarried,
+    resumeTranscriptFact: positiveConditions.resumeTranscriptFact,
+    terminalState: run2.state,
+  };
+  const claims = json?.positive?.claims;
+  if (claims?.sameAcpSessionAcrossRuns === true && !positiveConditions.sameNonEmptyProviderSession) {
+    return inconclusive("positive claims assert session continuity but raw evidence has no same non-empty provider session id");
+  }
+  if (!claims || Object.entries(derivedClaims).some(([key, value]) => claims[key] !== value)) {
+    return inconclusive("positive claims contradict values independently derived from referenced evidence lines");
+  }
+  const positivePass = Object.values(positiveConditions).every(Boolean);
+  if (json?.positive?.pass !== positivePass) {
+    return inconclusive(`positive.pass contradicts raw positive facts (declared=${json?.positive?.pass}, derived=${positivePass})`);
+  }
+
+  if (!Array.isArray(embedded.negativeControls) || embedded.negativeControls.length !== 3) {
+    return inconclusive("self-contained evidence must carry exactly three negative controls");
+  }
+  const controls = new Map();
+  for (const control of embedded.negativeControls) {
+    if (typeof control?.id !== "string" || control.id.length === 0 || controls.has(control.id)) {
+      return inconclusive("negative control ids must be non-empty and unique");
+    }
+    controls.set(control.id, control);
+  }
+  const topA = json.negativeA;
+  const topB = json.negativeB;
+  const topC = json.negativeC;
+  const controlA = controls.get(topA?.evidenceRef);
+  const controlB = controls.get(topB?.evidenceRef);
+  const controlC = controls.get(topC?.evidenceRef);
+  if (!controlA || !controlB || !controlC) {
+    return inconclusive("fail-closed negatives incomplete: negativeA/B/C must each reference an embedded negative control");
+  }
+
+  const rawNegativePasses = {
+    negativeA: controlA.input?.kind === "prior-transcript-session-id"
+      && controlA.input?.runId === run2.runId
+      && controlA.input?.backendSessionId === ""
+      && controlA.refusal?.kind === "dispatch_refused"
+      && controlA.refusal?.accepted === false
+      && controlA.refusal?.refused === true
+      && typeof controlA.refusal?.message === "string"
+      && /no addressable provider session id/.test(controlA.refusal.message)
+      && controlA.refusal?.noTranscriptCreated === true,
+    negativeB: controlB.input?.kind === "routing-entry-bytes"
+      && controlB.input?.rawBytes === "{damaged-not-json"
+      && controlB.refusal?.kind === "dispatch_refused"
+      && controlB.refusal?.accepted === false
+      && controlB.refusal?.refused === true
+      && typeof controlB.refusal?.message === "string"
+      && /routing entry.*damaged/.test(controlB.refusal.message),
+    negativeC: controlC.input?.kind === "prior-transcript-session-id"
+      && controlC.input?.runId === run2.runId
+      && typeof controlC.input?.backendSessionId === "string"
+      && controlC.input.backendSessionId.length > 0
+      && controlC.input.backendSessionId !== sid1
+      && controlC.refusal?.kind === "resume_rejected"
+      && controlC.refusal?.dispatchAccepted === true
+      && controlC.refusal?.providerSessionRouting === "resume_requested"
+      && controlC.refusal?.terminalState === "failed"
+      && controlC.refusal?.errorCode === -32602
+      && typeof controlC.refusal?.errorMessage === "string"
+      && /not resumable/.test(controlC.refusal.errorMessage)
+      && controlC.refusal?.sessionCreated === false,
+  };
+  const negativeSummariesMatch = topA?.refused === controlA.refusal?.refused
+    && topA?.message === controlA.refusal?.message
+    && topA?.noTranscriptForRefusedDispatch === controlA.refusal?.noTranscriptCreated
+    && topA?.pass === rawNegativePasses.negativeA
+    && topB?.refused === controlB.refusal?.refused
+    && topB?.message === controlB.refusal?.message
+    && topB?.pass === rawNegativePasses.negativeB
+    && json?.steps?.negC_dispatch?.runId === controlC.refusal?.runId
+    && json?.steps?.negC_dispatch?.accepted === controlC.refusal?.dispatchAccepted
+    && json?.steps?.negC_dispatch?.providerSessionRouting === controlC.refusal?.providerSessionRouting
+    && topC?.state === controlC.refusal?.terminalState
+    && topC?.spawnError === controlC.refusal?.errorMessage
+    && topC?.noSessionCreatedForResumeAttempt === !controlC.refusal?.sessionCreated
+    && topC?.pass === rawNegativePasses.negativeC;
+  if (!negativeSummariesMatch) {
+    return inconclusive("negativeA/B/C summaries contradict an embedded negative control raw refusal shape");
+  }
+  const negativePass = Object.values(rawNegativePasses).every(Boolean);
+  if (json.pass !== (positivePass && negativePass)) {
+    return inconclusive(`top-level pass contradicts independently derived evidence outcome (${json.pass} vs ${positivePass && negativePass})`);
+  }
+  if (!positivePass) {
+    const failedConditions = Object.entries(positiveConditions).filter(([, value]) => !value).map(([key]) => key);
+    return failed(`self-contained positive run facts prove the resume capability failed: ${failedConditions.join(", ")}`);
+  }
+  if (!negativePass) {
+    const failedControls = Object.entries(rawNegativePasses).filter(([, value]) => !value).map(([key]) => key);
+    return failed(`self-contained negative controls prove fail-closed behavior failed: ${failedControls.join(", ")}`);
+  }
+  return outcome(
+    "pass",
+    `real cross-run resume evidence accepted: run1 ${run1.runId} → run2 ${run2.runId} on the same provider session ${sid1}, marker echoed back from referenced raw evidence, resume transcript fact present, 3/3 fail-closed negatives refused (drill ${json?.drill ?? "unknown"}, dsh ${json?.dsh ?? "?"}, ${json?.date ?? "?"})`,
+  );
 }
 
 /**
@@ -479,6 +692,39 @@ export function backendCapabilityConsistencyChecks({
   const reuse = declared.supportsSessionReuse === true;
   const roleContract = declared.supportsRoleContract === true;
   const exitCode = declared.reportsCommandExitCode === true;
+  const resumeEvidenceReason = resumeEvidence?.detail
+    ?? "no real-resume evidence reference on file for this backend — run the Phase-6 style resume drill and register its evidence (SESSION_REUSE_EVIDENCE_SOURCES)";
+  const resumeEvidenceRequirement = `real cross-run resume evidence required (never a bare session id). ${resumeEvidenceReason}`;
+  const reuseCheck = reuse
+    ? resumeEvidence?.accepted === true
+      ? check(
+        "supportsSessionReuseConsistency",
+        true,
+        "operational",
+        `declared=true: ${resumeEvidenceRequirement}`,
+        { capability: "supportsSessionReuse", state: "pass" },
+      )
+      : resumeEvidence?.state === "fail"
+        ? check(
+          "supportsSessionReuseConsistency",
+          false,
+          "operational",
+          `declared=true: ${resumeEvidenceRequirement}`,
+          { capability: "supportsSessionReuse", state: "fail" },
+        )
+        : inconclusiveCheck(
+          "supportsSessionReuseConsistency",
+          resumeEvidenceRequirement,
+          "operational",
+          { capability: "supportsSessionReuse" },
+        )
+    : check(
+      "supportsSessionReuseConsistency",
+      sessionReuseRejected === true,
+      "operational",
+      `declared=false: a sessionReuse-configured dispatch must be explicitly rejected (fail-closed), never a silent fresh conversation; sessionReuseRejected=${sessionReuseRejected}`,
+      { capability: "supportsSessionReuse" },
+    );
   return [
     check(
       "reportsTokenUsageConsistency",
@@ -487,17 +733,7 @@ export function backendCapabilityConsistencyChecks({
       `declared=${declared.reportsTokenUsage}, input=${metricsInput ?? null} — declaration must match measurement in BOTH directions`,
       { capability: "reportsTokenUsage" },
     ),
-    check(
-      "supportsSessionReuseConsistency",
-      reuse
-        ? resumeEvidence?.accepted === true
-        : sessionReuseRejected === true,
-      "operational",
-      reuse
-        ? `declared=true: real cross-run resume evidence required (never a bare session id). ${resumeEvidence?.detail ?? "no real-resume evidence reference on file for this backend — run the Phase-6 style resume drill and register its evidence (SESSION_REUSE_EVIDENCE_SOURCES)"}`
-        : `declared=false: a sessionReuse-configured dispatch must be explicitly rejected (fail-closed), never a silent fresh conversation; sessionReuseRejected=${sessionReuseRejected}`,
-      { capability: "supportsSessionReuse" },
-    ),
+    reuseCheck,
     check(
       "supportsRoleContractConsistency",
       roleContract
@@ -1676,11 +1912,16 @@ export function createComponentDrills(deps) {
             { expectedRuntimeIdentity: runtimeIdentities[subjectName] ?? null },
           );
         } catch (error) {
-          resumeEvidence = { accepted: false, detail: `session-reuse evidence unreadable/unparseable at ${source.path}: ${error?.message ?? error}` };
+          resumeEvidence = {
+            accepted: false,
+            state: "inconclusive",
+            detail: `session-reuse evidence unreadable/unparseable at ${source.path}: ${error?.message ?? error}`,
+          };
         }
       } else {
         resumeEvidence = {
           accepted: false,
+          state: "inconclusive",
           detail: `no real-resume evidence reference registered for backend ${subjectName} (SESSION_REUSE_EVIDENCE_SOURCES has no entry) — declared=true requires positive cross-run resume evidence; run the Phase-6 style resume drill and register its evidence`,
         };
       }

@@ -7,7 +7,7 @@ import {
   mergeCaseResults,
   pruneStaleCases,
 } from "../../scripts/reliability/certification.mjs";
-import { naCheck } from "../../scripts/reliability/checkStates.mjs";
+import { inconclusiveCheck, naCheck } from "../../scripts/reliability/checkStates.mjs";
 
 function check(name, pass, category, extra = {}) {
   return { name, pass, category, ...extra };
@@ -93,6 +93,29 @@ test("certifyCase F1: required strict N/A stays draft-only without becoming a qu
   assert.deepEqual(result.failedChecks, [], "N/A is an unavailable qualification axis, not a judged failure");
   assert.equal(result.capabilities.commandEvidence, undefined, "N/A must not create a green or red capability claim");
   assert.match(result.reason, /strict certification evidence is not applicable/i);
+});
+
+test("certifyCase G2: required strict inconclusive stays draft-only and does not become a judged failure", () => {
+  const result = certifyCase({
+    caseId: "deepseek-acp evidence unavailable",
+    checks: [
+      check("completed", true, "core", { capability: "complete" }),
+      inconclusiveCheck(
+        "commandsPassed",
+        "the harness evidence is missing or unparseable, so command-exit capability is not established",
+        "strict",
+        { capability: "commandEvidence" },
+      ),
+      check("isolation", true, "operational", { capability: "isolation" }),
+      check("metricsNonZero", true, "observability", { capability: "metrics" }),
+    ],
+  });
+
+  assert.equal(result.status, "draft-only", "缺关键 strict 证据不得从 dsh 的 draft-only 语义升档");
+  assert.equal(result.recommendedUse, "draft-only");
+  assert.deepEqual(result.failedChecks, [], "inconclusive 是证据不足，不是已证实的能力失败");
+  assert.equal(result.capabilities.commandEvidence, undefined, "inconclusive 不得生成能力绿或红");
+  assert.match(result.reason, /strict certification evidence is inconclusive/i);
 });
 
 test("certifyCase F1: an all-N/A default case cannot enter the dispatchable set", () => {
