@@ -22,6 +22,11 @@ const KIMI_REASONING_EFFORT_ENV = "KIMI_MODEL_THINKING_EFFORT";
  * kimi 自带超时 + WAO waitTimeout。给 kimi agent 配 tokenBudget 不会报错但不生效。
  */
 export class KimiCodeBackend extends ProcessBackend {
+  // ADR-0031 §3.6 形状的 provider 会话复用（2026-09-21 落线）：会话 id 由 kimi 自产
+  // 并在轮末 meta 帧 `session.resume_hint` 广告（首轮由 runner 运行期补记，resume 轮
+  // 由 spawn 权威从转录取回后 in-process 送达）。上游实测（2026-09-21 直跑）：
+  // `kimi -r <session_id>` 跨 run 携带上下文；错 id → `Session ... not found` 退出 1。
+  supportsSessionReuse = true;
   // M11-5 Package A2: explicit role-contract capability declaration.
   // RunManager reads this boolean to decide role injection — no runtime-name
   // branch. kimi injects by concatenating role + task with a fixed delimiter
@@ -88,9 +93,25 @@ export class KimiCodeBackend extends ProcessBackend {
         const prompt = task.roleContract
           ? `${task.roleContract}${ROLE_TASK_SEPARATOR}${task.prompt}`
           : task.prompt;
+        // provider 会话复用（2026-09-21）：resume 轮以 `-r <session_id>` 续接前任 run
+        // 的会话；id 缺失/不可用在此**派发前**拒绝（双重拒绝点）。`-r` 是 kimi 自己
+        // 在 `session.resume_hint` 里广告的续接开关（另有 `-S/--session`、`-c/--continue`）。
+        const resumeArgs = [];
+        if (task.sessionReuse?.turn === "resume") {
+          const priorSessionId = task.priorProviderSessionId;
+          if (typeof priorSessionId !== "string" || priorSessionId.length === 0) {
+            throw new Error(
+              "kimi-code sessionReuse resume turn requires the prior provider session id "
+              + "(session.created.backendSessionId of the prior run) — refusing instead of "
+              + "silently starting a fresh kimi conversation",
+            );
+          }
+          resumeArgs.push("-r", priorSessionId);
+        }
         return [
           "-p", prompt,
           "--output-format", "stream-json",
+          ...resumeArgs,
           // M11-9: model from structured field (was previously in agent.args).
           ...(agent.model?.id ? ["--model", agent.model.id] : []),
           ...(Array.isArray(agent.args) ? agent.args : []),

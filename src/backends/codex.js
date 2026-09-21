@@ -11,6 +11,12 @@ import { inheritedEnvNames } from "../envPolicy.js";
  * codex.cmd 最终执行的就是：node <npm-global>/node_modules/@openai/codex/bin/codex.js %*
  */
 export class CodexBackend extends ProcessBackend {
+  // ADR-0031 §3.6 形状的 provider 会话复用（2026-09-21 落线）：codex 不接受控制面
+  // 自选的会话 id，WAO 续接的是**运行时自产**的 thread id——首轮由 wire 广告、
+  // runner 运行期补记，resume 轮由 spawn 权威从转录取回后 in-process 送达。
+  // 上游实测（2026-09-21 直跑）：`codex exec resume <thread_id>` 跨 run 携带上下文；
+  // 错 id → `no rollout found` 退出 1（fail-closed，无静默新会话）。
+  supportsSessionReuse = true;
   // M11-5 Package A2: explicit role-contract capability declaration.
   // RunManager reads this boolean to decide role injection — no runtime-name
   // branch. codex injects via -c developer_instructions (append, not replace).
@@ -45,11 +51,23 @@ export class CodexBackend extends ProcessBackend {
     super({
       parserClass: CodexStreamParser,
       buildArgs: (agent, task) => {
-        const args = [
-          "exec",
-          "--json",
-          "--skip-git-repo-check",
-        ];
+        // provider 会话复用（2026-09-21）：resume 轮以 `exec resume <thread_id>` 续接
+        // 前任 run 的会话。id 缺失/不可用在此**派发前**拒绝（双重拒绝点：spawn
+        // 权威已先拒一次）——绝不静默开一段全新对话。
+        const args = [];
+        if (task.sessionReuse?.turn === "resume") {
+          const priorSessionId = task.priorProviderSessionId;
+          if (typeof priorSessionId !== "string" || priorSessionId.length === 0) {
+            throw new Error(
+              "codex sessionReuse resume turn requires the prior provider thread id "
+              + "(session.created.backendSessionId of the prior run) — refusing instead of "
+              + "silently starting a fresh codex conversation",
+            );
+          }
+          args.push("exec", "resume", priorSessionId, "--json", "--skip-git-repo-check");
+        } else {
+          args.push("exec", "--json", "--skip-git-repo-check");
+        }
         // M11-9: model from canonical structured field.
         if (agent.model?.id) {
           args.push("--model", agent.model.id);

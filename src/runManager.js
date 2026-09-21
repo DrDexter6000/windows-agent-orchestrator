@@ -1392,6 +1392,9 @@ export class RunManager {
       verifyDeliveryFn: this.verifyDeliveryFn,
       correctable,
       readOnlyDeclared: readOnly,
+      // provider 会话复用（2026-09-21）：复用 run 需要把 wire 上观察到的运行时
+      // 会话 id 在终态前补记成绑定的 session.created（见 Run 内 late-bind 段）。
+      sessionReuse,
     });
     this.activeRuns.set(finalRunId, run);
     this._ensureSigintHandler();
@@ -1908,6 +1911,7 @@ export class Run {
     verifyDeliveryFn = defaultVerifyDelivery,
     correctable = false,
     readOnlyDeclared = false,
+    sessionReuse = null,
   }) {
     this.runId = runId;
     this.agentId = agentId;
@@ -1921,6 +1925,8 @@ export class Run {
         ? (value) => transcript.redact(value)
         : createSecretRedactor().redact);
     this.result = result;
+    // provider 会话复用路由（null = 非复用 run，字节兼容）。
+    this.sessionReuse = sessionReuse;
     this.config = config;
     this.onRemove = onRemove;
     this.state = initialState;
@@ -2263,6 +2269,27 @@ export class Run {
     } finally {
       this._waitControllers.delete(controller);
       clearTimeout(timer);
+    }
+
+    // provider 会话复用，运行时自产 id 的运行期补记（2026-09-21，ADR-0031 §3.6 形状）：
+    // codex / kimi 的会话 id 由**运行时**产生且只在流里出现，晚于 spawn 时刻那条
+    // session.created——而 §3.6 的续接关联读的正是绑定转录里的 session.created。
+    // 故在终态分派前把 wire 事实补记一条（读取侧取 LAST-bound，故后者胜出）。
+    // 三条边界：①只对复用 run 生效（非复用 run 保持恰好一条 session.created——
+    // process_missing 恢复精确解析 "proc_<pid>"）；②delivery run 一律不记（交付走
+    // fresh，且交付恢复同样要求唯一 proc_<pid>）；③未观察到 id 或已终态则不记
+    // （静默不写胜过写一个不可归因的 id：下次 resume 会 fail-closed 拒绝）。
+    if (this.sessionReuse && !this.deliveryContext && !TERMINAL_STATES.includes(this.state)
+      && typeof this.handle?.providerSessionId === "function") {
+      const providerSessionId = this.handle.providerSessionId();
+      if (typeof providerSessionId === "string" && providerSessionId.length > 0
+        && providerSessionId !== this.result?.backendSessionId) {
+        await this.transcript.append("session.created", {
+          backend: this.result?.backend,
+          backendSessionId: providerSessionId,
+          serveUrl: this.agent?.serveUrl,
+        });
+      }
     }
 
     this._removeFromManager();

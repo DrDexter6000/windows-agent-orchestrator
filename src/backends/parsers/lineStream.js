@@ -12,6 +12,15 @@
 export class LineStreamParser {
   constructor() {
     this.buffer = "";
+    // ADR-0031 §3.6 形状的 provider 会话复用（2026-09-21）：运行时**自己**的
+    // provider 会话 id，只在 wire 广告时才捕获。null = wire 没广告（绝不猜）。
+    // ProcessBackend 在流结束后读取，由 runner 运行期补记进 run 转录。
+    this.providerSessionId = null;
+  }
+
+  /** wire 上观察到的 provider 会话 id（运行时未广告时为 null）。 */
+  sessionId() {
+    return this.providerSessionId;
   }
 
   feed(chunk) {

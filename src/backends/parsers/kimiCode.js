@@ -37,6 +37,13 @@ import {
  */
 export class KimiStreamParser extends LineStreamParser {
   handleLine(obj) {
+    // provider 会话复用（2026-09-21）：kimi 在轮末的 meta 帧 `session.resume_hint`
+    // 广告自己的 session_id（连 `kimi -r <id>` 命令行都拼好了）。只捕获、不 emit。
+    if (obj.role === "meta" && obj.type === "session.resume_hint"
+      && typeof obj.session_id === "string" && obj.session_id.length > 0) {
+      this.providerSessionId = obj.session_id;
+      return [];
+    }
     if (obj.role === "assistant") {
       // 有 tool_calls → 证据事件（不 emit message；kimi 的 tool_call 行无 text content）
       if (Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0) {

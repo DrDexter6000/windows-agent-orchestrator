@@ -303,8 +303,8 @@ run 的 `--model` / `--reasoning` 与 registry 的 `model` / `reasoning` / `prov
 | backend | model override（model.id / --model） | reasoning effort | model.contextWindow | provider 块 | sessionReuse（WAO 接线） | token usage 事实 | 角色合同注入 | 在途纠偏（run_correct，WAO 接线） |
 |---|---|---|---|---|---|---|---|---|
 | claude-code | 支持（`--model`） | 支持（`--effort`） | 条件：仅 provider 路径（wrapper `--context-window`）；native OAuth 直连被拒 | 支持（wrapper `baseUrl` / `apiKeyEnv`） | 支持（`--session-id` / `--resume`） | 支持（result 帧 usage） | 支持（`--append-system-prompt`） | 支持（stdin stream-json 排队） |
-| codex | 支持（`--model`） | 支持（`-c model_reasoning_effort`） | 不支持 | 不支持（codex 自有登录） | 不支持 | 支持（turn.completed 帧 usage） | 支持（`-c developer_instructions` 追加） | 不支持 |
-| kimi-code | 支持（`--model`） | 条件：仅 `kimi-code/k3` 且 effort ∈ {low, high, max}（effort 编译为 KIMI_MODEL_THINKING_EFFORT env，agent.env 自设同名被拒） | 不支持 | 不支持（kimi 托管认证） | 不支持 | 不支持（stream-json 无 usage——tokenBudget 不生效，TD-87） | 支持（拼进同一条 prompt，非系统级通道） | 不支持 |
+| codex | 支持（`--model`） | 支持（`-c model_reasoning_effort`） | 不支持 | 不支持（codex 自有登录） | 支持（`codex exec resume <thread_id>`，2026-09-21 接线：id 由 codex 自产、runner 运行期补记入 `session.created`，resume 轮 id 缺失即派发前拒绝） | 支持（turn.completed 帧 usage） | 支持（`-c developer_instructions` 追加） | 不支持 |
+| kimi-code | 支持（`--model`） | 条件：仅 `kimi-code/k3` 且 effort ∈ {low, high, max}（effort 编译为 KIMI_MODEL_THINKING_EFFORT env，agent.env 自设同名被拒） | 不支持 | 不支持（kimi 托管认证） | 支持（`kimi -r <session_id>`，2026-09-21 接线：id 来自轮末 `session.resume_hint`、运行期补记；resume 轮 id 缺失即派发前拒绝） | 不支持（stream-json 无 usage——tokenBudget 不生效，TD-87） | 支持（拼进同一条 prompt，非系统级通道） | 不支持 |
 | deepseek-harness | 支持（DSH_MODEL，缺省 deepseek-v4-flash） | 条件：effort ∈ {high, max}，可省略 | 支持（DSH_CONTEXT_WINDOW） | 不支持（组合由 `dshConfigPath` / `dshProvider` 表达） | 不支持 | 支持（assistant/message usage） | 支持（DSH_SYSTEM_PROMPT） | 不支持 |
 | deepseek-acp | 不支持（模型经 shipped acp profile 的 session configOptions 承载；Phase 5 已证同一 `session/set_config_option` 通道可 set model，但 **WAO 本轮未接线**——ACP 的 value 形状是 provider/model JSON 对，非 WAO 裸 `model.id`，接线需单独值域决策；配了仍即拒，模型取 profile 缺省） | 条件：effort ∈ {low, high, max}（六值闭集 ∩ ACP 广告 off/low/high/max 的交集；经 session/set_config_option 下发，Phase 5 实测 set 响应确认生效、域外值 -32602 被拒；响应未确认即 fail-closed 拒绝派发；其余档位固定文案拒绝，不发明映射；resume 轮不发 set，改用 session/resume 响应 configOptions 只读核对，不符即拒） | 不支持（同 model 块——无可验证设置通道） | 不支持（组合面固定为 `--profile acp` + 操作员 patch） | 支持（ADR-0031 §3.6 关联面已落地：resume 信封只携带前任 WAO runId，ACP sessionId 由 spawn 权威按 runId 绑定读取器从前任何转录取回、in-process 送达（绝不进 argv）；关联缺失/损坏/上游拒绝一律 fail-closed 拒绝，绝不静默新会话；仅 stable-workspace lane 的非 delivery 派发，delivery 一律 fresh；真实跨 run 恢复证据 `scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json`） | 不支持（`PromptResponse.usage` 实测可为 null——组件验证 `reportsTokenUsageConsistency` 抓到 `declared=true, input=null`；2026-09-20 按实测裁定声明为 false） | 支持（per-dispatch `--patch` personaPrefix，结构化序列化） | 不支持 |
 | opencode-serve | 条件：必须 OpenCode 形状 {providerID, id, variant}；canonical 裸 {id} 被拒 | 不支持 | 不支持 | 不支持（模型路由由 `model.providerID` 承担） | 不支持 | 支持（session.tokens 周期轮询） | 条件：serve healthy 且版本 ≥ 1.18.0（派发前运行时探测） | 不支持 |
@@ -320,13 +320,13 @@ run 的 `--model` / `--reasoning` 与 registry 的 `model` / `reasoning` / `prov
 | backend | 上游会话续接原语 | 实测（as-of 当日） | 上游在途消息原语 | 实测 |
 |---|---|---|---|---|
 | claude-code | `--session-id` / `--resume` | 已接线（组合层认证在册） | stdin stream-json 排队 | 已接线（唯一 supportsInFlightCorrection=true） |
-| codex | `codex exec resume <thread_id>`（会话标识来自 `thread.started.thread_id`；另有 `codex fork`） | **正向跨 run 携带上下文**；错 id → `no rollout found` exit 1（2026-09-21 直跑，零 WAO 干预） | `codex queue`（给已有 session 排队消息） | 未测（是否能在活 turn 中生效未知） |
-| kimi-code | `kimi -r <session_id>`（stream 内 `session.resume_hint` 广告；另有 `-S/--session`、`-c/--continue`、`kimi fork`） | **正向跨 run 携带上下文**；错 id → `Session "…" not found` exit 1（2026-09-21 直跑） | 未测（无对应文案） | 未测 |
+| codex | `codex exec resume <thread_id>`（会话标识来自 `thread.started.thread_id`；另有 `codex fork`） | **已接线**（2026-09-21，`supportsSessionReuse=true`）；上游正向跨 run 携带上下文、错 id → `no rollout found` exit 1（直跑实测） | `codex queue`（给已有 session 排队消息） | 未测（是否能在活 turn 中生效未知） |
+| kimi-code | `kimi -r <session_id>`（stream 内 `session.resume_hint` 广告；另有 `-S/--session`、`-c/--continue`、`kimi fork`） | **已接线**（2026-09-21，`supportsSessionReuse=true`）；上游正向跨 run 携带上下文、错 id → `Session "…" not found` exit 1（直跑实测） | 未测（无对应文案） | 未测 |
 | deepseek-harness | 未测（旧 dsh 原生通道；WAO 侧声明 false） | — | 未测 | — |
 | deepseek-acp | ACP `session/resume` | 已接线（ADR-0031 §3.6 + phase6 真实恢复证据） | 上游无（ACP 无在途消息改写，F7 实测） | 上游无此能力 |
 | opencode-serve | 未测（serve 持有 session 概念；WAO 侧未接线） | — | 未测（HTTP 双向，理论可注入） | — |
 
-**读法**：①「未测」是**未测**，不是「没有」——期限就是用来逼这些格子在值得填的时候被填掉；②已实测可复用的 codex / kimi-code 仍记 `sessionReuse` 不支持，因为接线要的是 WAO 侧关联面（resume 信封只带前任 WAO runId、sessionId 由 WAO 从转录取回、关联缺失即 fail-closed 拒绝，形状见 ADR-0031 §3.6）加真实跨 run drill 证据，见 TD-184。
+**读法**：①「未测」是**未测**，不是「没有」——期限就是用来逼这些格子在值得填的时候被填掉；②**复用只在 MCP 通道可用**：CLI 后台通道刻意每次派发用一次性 leadSession（`src/commands/run.js` 注释：one-shot 进程没有稳定 Lead 会话），所以 CLI 派发的复用 agent 永远走首轮——真正的跨 run 复用只有 MCP（稳定 leadSession）能给；②已实测可复用的 codex / kimi-code 仍记 `sessionReuse` 不支持，因为接线要的是 WAO 侧关联面（resume 信封只带前任 WAO runId、sessionId 由 WAO 从转录取回、关联缺失即 fail-closed 拒绝，形状见 ADR-0031 §3.6）加真实跨 run drill 证据，见 TD-184。
 ### 验证安装
 
 ```powershell

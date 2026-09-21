@@ -22,6 +22,12 @@ const WRITE_KINDS = new Set(["add", "edit", "update", "create"]);
 
 export class CodexStreamParser extends LineStreamParser {
   handleLine(obj) {
+    // provider 会话复用（2026-09-21）：codex 在**第一帧**广告 thread id，resume 时
+    // 回显同一个 id。只捕获、不 emit——事件流保持逐字节不变。
+    if (obj.type === "thread.started" && typeof obj.thread_id === "string" && obj.thread_id.length > 0) {
+      this.providerSessionId = obj.thread_id;
+      return [];
+    }
     if (obj.type === "item.completed") {
       const item = obj.item;
       if (item?.type === "agent_message" && typeof item.text === "string") {

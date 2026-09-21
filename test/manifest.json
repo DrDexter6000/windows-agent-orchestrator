@@ -26,6 +26,7 @@
       "backends/integration.test.js",
       "isolation-infra/isolation-integration.test.js",
       "backends/kimiCode.test.js",
+      "backends/providerSessionReuse.test.js",
       "isolation-infra/layering.test.js",
       "run-lifecycle/m10pre3Deadline.test.js",
       "run-lifecycle/m10pre3RunManagerBehavior.test.js",

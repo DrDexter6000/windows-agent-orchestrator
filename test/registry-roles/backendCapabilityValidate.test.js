@@ -160,8 +160,8 @@ test("ADR25-B2-MATRIX: backendCapabilitySnapshot 与全部工厂 backend 类的�
   //     不填 rawOutput、退出码只在非零退出的自由文本标记里）。
   const expected = {
     "claude-code": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: true, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: true },
-    "codex": { supportsRoleContract: true, supportsSessionReuse: false, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: true },
-    "kimi-code": { supportsRoleContract: true, supportsSessionReuse: false, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: false, reportsCommandExitCode: true },
+    "codex": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: true },
+    "kimi-code": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: false, reportsCommandExitCode: true },
     "deepseek-harness": { supportsRoleContract: true, supportsSessionReuse: false, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: true },
     // ADR-0031 §3.6：ACP 线关联面（挂 transcript SSOT + resume 信封携带前任 runId +
     // 绑定读取器取回 + 缺失/损坏 fail-closed）已落地，真实跨进程恢复证据
@@ -195,16 +195,24 @@ function runCli(args) {
   });
 }
 
-/** 三 agent 夹具：正向对照（claude-code 全配）+ 两条交叉不符（kimi/codex）。 */
+/** 三 agent 夹具：正向对照（claude-code 全配）+ 两条交叉不符（kimi×tokenBudget / deepseek-harness×sessionReuse）。
+ *  2026-09-21：sessionReuse ⚠ 的承载 backend 由 codex 换成 deepseek-harness——codex/kimi 已接线
+ *  provider 会话复用（supportsSessionReuse=true），配 sessionReuse 不再是配置错误；⚠ 语义本身不变，
+ *  继续钉在仍未声明该能力的 backend 上。 */
 function makeCrossCheckRegistry(dir) {
   return {
     researcher: { backend: "claude-code", cwd: dir, tokenBudget: 100000, sessionReuse: "lead_workspace" },
     coder_mm: { backend: "kimi-code", cwd: dir, tokenBudget: 100000 },
-    tester: { backend: "codex", cwd: dir, sessionReuse: "lead_workspace" },
+    tester: {
+      backend: "deepseek-harness", cwd: dir, sessionReuse: "lead_workspace",
+      // deepseek-harness 的注册表必填面（validate 硬校验）：能力对照与 sessionReuse ⚠ 无关，
+      // 但缺字段会变成 hard error 抢走断言焦点。
+      dshConfigPath: join(dir, "dsh-config.json"), credentialEnv: "DSH_API_KEY",
+    },
   };
 }
 
-test("ADR25-B2-CLI-1: text 模式——kimi×tokenBudget ⚠（TD-87 零回归）、codex×sessionReuse 新 ⚠、claude-code 零 ⚠，全部 ✔ exit 0", () => {
+test("ADR25-B2-CLI-1: text 模式——kimi×tokenBudget ⚠（TD-87 零回归）、deepseek-harness×sessionReuse ⚠、claude-code 零 ⚠，全部 ✔ exit 0", () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-b2val-text-"));
   try {
     const registryPath = join(dir, "agents.json");
@@ -216,11 +224,11 @@ test("ADR25-B2-CLI-1: text 模式——kimi×tokenBudget ⚠（TD-87 零回归�
     // 三个 agent 都通过（✔）。
     assert.match(r.stdout, /✔\s*researcher/, "claude-code 通过");
     assert.match(r.stdout, /✔\s*coder_mm/, "kimi 通过（warning 不 block）");
-    assert.match(r.stdout, /✔\s*tester/, "codex 通过（warning 不 block）");
+    assert.match(r.stdout, /✔\s*tester/, "deepseek-harness 通过（warning 不 block）");
     // TD-87 既有语义零回归（现有 cli.test.js 断言形状复刻）。
     assert.match(r.stdout, /⚠.*coder_mm:.*kimi-code.*tokenBudget.*不生效/, "kimi×tokenBudget ⚠ 保持");
     // TD-117 新 warning。
-    assert.match(r.stdout, /⚠.*tester:.*codex.*sessionReuse.*supportsSessionReuse/, "codex×sessionReuse ⚠（TD-117 前置提示）");
+    assert.match(r.stdout, /⚠.*tester:.*deepseek-harness.*sessionReuse.*supportsSessionReuse/, "deepseek-harness×sessionReuse ⚠（TD-117 前置提示，2026-09-21 由 codex 换承载 backend）");
     // 正向对照：claude-code 声明两个能力都支持 → 无 ⚠ 行提及 researcher。
     assert.doesNotMatch(r.stdout, /⚠.*researcher/, "claude-code（声明支持）× 两配置 → 零 ⚠");
     assert.match(r.stdout, /3 agent\(s\) checked, all valid/, "汇总行不变");
@@ -246,11 +254,11 @@ test("ADR25-B2-CLI-2: --format json——两条新 warning 语义进 warnings[]�
     assert.equal(byId.coder_mm.ok, true, "kimi 仍 ok（TD-87 warning 不阻塞）");
     assert.ok(byId.coder_mm.warnings.some((w) => /kimi-code.*tokenBudget.*不生效/.test(w)),
       "TD-87 warning 进 warnings[]");
-    assert.equal(byId.tester.ok, true, "codex 仍 ok（TD-117 warning 不阻塞）");
-    assert.ok(byId.tester.warnings.some((w) => /codex.*sessionReuse.*supportsSessionReuse/.test(w)),
+    assert.equal(byId.tester.ok, true, "deepseek-harness 仍 ok（TD-117 warning 不阻塞）");
+    assert.ok(byId.tester.warnings.some((w) => /deepseek-harness.*sessionReuse.*supportsSessionReuse/.test(w)),
       "TD-117 warning 进 warnings[]");
     assert.ok(byId.tester.warnings.every((w) => !/tokenBudget/.test(w)),
-      "codex 未配 tokenBudget → 不误报 tokenBudget warning");
+      "tester 未配 tokenBudget → 不误报 tokenBudget warning");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

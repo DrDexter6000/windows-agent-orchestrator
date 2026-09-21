@@ -125,6 +125,11 @@ export class ProcessBackend {
   // Shared orchestration reads this boolean — never the runtime name.
   supportsInFlightCorrection = false;
 
+  // ADR-0031 §3.6 形状的 provider 会话复用（2026-09-21）：进程式后端的会话 id 由
+  // **运行时自产**（claude-code 那种控制面自选 `--session-id` 的路子不适用），故
+  // 默认 false；子类按 wire 事实 opt-in。strict === true 读取，未声明绝不读成支持。
+  supportsSessionReuse = false;
+
   // ADR-0025 批次 2（TD-87）：usage/token 上报保真维度的闭集声明（仿
   // supportsSessionReuse / supportsInFlightCorrection 模式）。true = 该 backend
   // 的事件流携带 metrics token 事实——RunManager 的 tokenBudget 硬闸门只在
@@ -358,6 +363,10 @@ export class ProcessBackend {
     return {
       backend: "process",
       backendSessionId: sessionId,
+      // provider 会话复用（2026-09-21）：运行时自产的会话 id 只在**流结束后**才是
+      // 终值，故暴露读取器而非 spawn 时刻的快照；runner 在终态前把它补记成绑定的
+      // session.created（§3.6 读取取 LAST-bound）。非复用 run 不暴露（字节兼容）。
+      ...(task.sessionReuse ? { providerSessionId: () => parser.sessionId() } : {}),
       messageId: undefined,
       admittedSeq: undefined,
       redact: (value) => redactor.redact(value),
