@@ -23,6 +23,8 @@ WAO 曾在 2026-06-16 做过一次 SSOT 审计（`docs/archive/docs-ssot-audit.m
 | `user-config` | 第三方 / 用户 agent 配置 | `AGENT_ONBOARDING.md`、`config/agents.example.json`、`wao doctor` 输出、`mcp bind` 输出 |
 | `user-troubleshoot` | 第三方 / 用户 agent 排障 | `docs/troubleshooting.md`、`wao doctor` 输出 |
 | `user-daily` | Lead / 用户 agent 日常使用 | `SKILL.md`、`docs/usage.md` |
+| `harness-certify` | 给某 harness / LLM 做组件层单独验证（backend conformant / llm verified） | `docs/usage.md`（认证检查结果五态与能力轴分层）、`.wao/decisions/0032-两层验证与认证.md`、`docs/tech-debt.md`（在册限制须随结论一并标注，如 TD-182） |
+| `seat-certify` | 给某席位装配做组合层认证（certified / conditional / draft-only） | `docs/usage.md`（delta 认证规程 + 五态节）、`.wao/decisions/0032-两层验证与认证.md`、`docs/team-roles.md`、`config/agents.example.json`、`docs/tech-debt.md` |
 
 ## 1. 核心架构：五大类别
 
