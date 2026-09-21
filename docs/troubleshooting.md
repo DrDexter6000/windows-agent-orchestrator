@@ -480,7 +480,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 ### 8.3 `npm test` 波次挂死或长滞（TD-165 看门狗分诊）
 
 - **症状**：全量在某波长时间无进展；stderr 每 5 分钟一行 `[canonical] NOTICE: wave=<name> running for <N>s (slow-wave alarm, informational)`；或尾部出现 `watchdog backstop fired` / 文件 `crashReason: "watchdog_timeout"`。TD-165 之前一个挂死文件会让整个波次无限期停摆——现在三层看门狗已把无限等待变成有界等待并**指名肇事文件/波**。
-- **三层防线（预算：per-test 600s / 波级兜底 900s / 告警 300s）**：
+- **三层防线（预算：per-test 1200s / 波级兜底 1800s / 告警 900s；2026-09-21 按 TD-173 实测重推导）**：
   - **R1 per-test 超时**（`--test-timeout`，主防线）：单个测试挂死（含同步死循环——Node 在文件级从父进程执行超时）按普通失败收杀；该文件记非 pass（超时测试不产生完成事件 ⇒ 报告中多为 `missing`），**同波其他文件不受影响**，波正常收尾。
   - **R2 波级兜底看门狗**（墙钟 900s）：到期 `taskkill /PID <该子进程自己的 pid> /T /F`（只杀自己的进程树，绝不全局杀 node.exe）+ `kill(pid,0)→ESRCH` 探针确认死透（500ms × 3 次）。该波**全部文件**记 `crash` + `crashReason: "watchdog_timeout"`，groupError 含波名/已耗时/标记/清理状态。
   - **R3 慢波告警**（300s NOTICE 行）：纯读提示，不杀进程、不影响 verdict。

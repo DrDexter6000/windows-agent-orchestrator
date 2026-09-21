@@ -246,24 +246,41 @@ export function validateWavePlan(wavePlan, categories) {
 // (wave first-round AND isolation recheck). Node enforces it per test at the
 // FILE level from its own parent process (verified 2026-09-19, Node v22.23.1:
 // a synchronous `while (true)` body is collected even with the child's event
-// loop blocked). Derivation: measured slowest single file
-// deliveryVerification.test.js = 133s (2026-09-19 test-results.json) and the
-// historical filesystem WAVE peak = 207s (54 files at concurrency 16); 600s is
-// ~3-4.5x headroom over both — a deliberately conservative start so a legal
-// slow test is never falsely killed. Tighten only from new measured evidence.
-export const TEST_TIMEOUT_MS = 600000;
+// loop blocked).
+//
+// Derivation — RE-DERIVED 2026-09-21 (TD-173). The original basis was falsified
+// by measurement, not by preference; the constant's own stated purpose is that
+// "a legal slow test is never falsely killed", and that purpose was being
+// violated:
+//   - original basis (2026-09-19): slowest single file deliveryVerification
+//     .test.js = 133s; filesystem WAVE peak = 207s (54 files @ concurrency 16)
+//     ⇒ 600s ≈ 3-4.5x headroom.
+//   - measured 2026-09-21 (test-results.json, idle machine, commit 2c39093):
+//     the SAME file is 253s alone and ~598s INSIDE the wave; the filesystem wave
+//     is 70 files @ 16 with a capacity floor of 474s and a wall clock of 606s —
+//     i.e. the in-wave peak now EQUALS the old 600s cap, so legal slow tests in
+//     the wave tail were killed by R1 and reported as failures while every one
+//     of them was classified isolation_pass (they pass when run alone).
+//   - new value = ~2x the measured in-wave peak (~606s) and ~4.7x the measured
+//     alone peak (253s). Raising this makes the gate STRICTER in effect: a slow
+//     test must now actually finish and pass instead of being killed. The only
+//     thing loosened is hang-detection latency, and R2 still bounds that.
+//   - Re-derive again from fresh measurement whenever the wave composition or
+//     the machine changes; never tighten below the measured in-wave peak.
+export const TEST_TIMEOUT_MS = 1200000;
 
-// R2 wave watchdog (wall-clock backstop per spawned child). Derivation: 3× the
-// measured wave peak (3 × 207s ≈ 621s) rounded up to 900s; strictly greater
-// than the per-test cap (600s) plus intra-wave queueing margin, so the
-// backstop fires only when R1 could not collect the hang itself.
-export const WAVE_WATCHDOG_MS = 900000;
+// R2 wave watchdog (wall-clock backstop per spawned child). Derivation: 1.5x the
+// per-test cap (the original ratio, 900s/600s) — strictly greater than the
+// per-test cap plus intra-wave queueing margin, so the backstop fires only when
+// R1 could not collect the hang itself. Re-derived together with R1 (TD-173).
+export const WAVE_WATCHDOG_MS = 1800000;
 
-// R3 slow-wave alarm (informational only): 300s sits between a healthy wave's
-// expected completion (~4min worst measured) and the watchdog — early enough
-// to flag a stall in the operator's terminal, late enough to stay quiet on
-// every legal wave.
-export const WAVE_ALARM_MS = 300000;
+// R3 slow-wave alarm (informational only): must sit between a healthy wave's
+// completion and the watchdog — early enough to flag a stall in the operator's
+// terminal, late enough to stay quiet on every legal wave. Re-derived with R1
+// (TD-173): a healthy filesystem wave now measures ~606s, so the old 300s alarm
+// fired on every legal run and had lost its signal value.
+export const WAVE_ALARM_MS = 900000;
 
 // Fix round (TD-165 audit, residual must-fix): the watchdog's killTreeFn call
 // is raced against this deadline. An injected implementation (or a taskkill
