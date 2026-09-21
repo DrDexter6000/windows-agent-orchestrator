@@ -298,9 +298,9 @@ run 的 `--model` / `--reasoning` 与 registry 的 `model` / `reasoning` / `prov
 
 > **值的权威源是 backend 代码类声明**；本表**投影自 `src/backends/*.js` 的闭集能力成员与 `validateAgentPolicy` 行为**，漂移以代码为准——`test/isolation-infra/docs-consistency.test.js` 的 TD-162 关系型守卫把每格判定词与代码声明/行为对账，单边漂移即红。
 
-判定词：**支持**＝直接可用；**不支持**＝被 `validateAgentPolicy` 拒绝或能力不存在；**条件**＝仅满足所列条件时可用（条件写在格内）。
+判定词（只管 **WAO 接线层**）：**支持**＝直接可用；**不支持**＝被 `validateAgentPolicy` 拒绝或 backend 类未声明——其成因有三种（上游无此能力 / 上游有原语但 WAO 未接线 / 配置形状不一致被拒），逐条事实见下节「上游 harness 原语对照（实测）」；**条件**＝仅满足所列条件时可用（条件写在格内）。
 
-| backend | model override（model.id / --model） | reasoning effort | model.contextWindow | provider 块 | sessionReuse | token usage 事实 | 角色合同注入 | 在途纠偏（run_correct） |
+| backend | model override（model.id / --model） | reasoning effort | model.contextWindow | provider 块 | sessionReuse（WAO 接线） | token usage 事实 | 角色合同注入 | 在途纠偏（run_correct，WAO 接线） |
 |---|---|---|---|---|---|---|---|---|
 | claude-code | 支持（`--model`） | 支持（`--effort`） | 条件：仅 provider 路径（wrapper `--context-window`）；native OAuth 直连被拒 | 支持（wrapper `baseUrl` / `apiKeyEnv`） | 支持（`--session-id` / `--resume`） | 支持（result 帧 usage） | 支持（`--append-system-prompt`） | 支持（stdin stream-json 排队） |
 | codex | 支持（`--model`） | 支持（`-c model_reasoning_effort`） | 不支持 | 不支持（codex 自有登录） | 不支持 | 支持（turn.completed 帧 usage） | 支持（`-c developer_instructions` 追加） | 不支持 |
@@ -311,6 +311,22 @@ run 的 `--model` / `--reasoning` 与 registry 的 `model` / `reasoning` / `prov
 
 两点衔接：per-dispatch `--model` 只替换 `model.id`、兄弟字段保留——opencode-serve 的 agent 必须先带 `providerID`（裸 {id} 叠 `--model` 仍是裸形状，照样被拒）；`--reasoning` 的六值闭集（minimal/low/medium/high/xhigh/max）由 `registry.js` `REASONING_EFFORTS` 在 registry 层校验，backend 层再按上表条件格收窄（kimi K3 档位闭集、deepseek-harness high/max；deepseek-acp 只放行 low/high/max——Phase 5 实测 `session/set_config_option` 可设置 ACP 广告的 off/low/high/max，与 WAO 六值闭集取交集，无证据支持映射故不发明）。
 
+### 上游 harness 原语对照（实测）
+
+上表判定词只管 **WAO 接线层**，所以「不支持」会掩盖三种截然不同的成因。本节把「上游到底有没有」的事实单独立表——2026-09-21 就是这么误读的：codex / kimi-code 的 headless 复用被读成「不存在」。
+
+> **基线日（as-of）：2026-09-21**；**刷新期限：90 天**（超期由 `test/isolation-infra/docs-consistency.test.js` 的 TD-184 守卫直接变红，不靠人记）。**事件触发优先**：同一 harness 升级、WAO 适配层改动、新 harness 入册，都必须当场刷新本节与基线日。
+
+| backend | 上游会话续接原语 | 实测（as-of 当日） | 上游在途消息原语 | 实测 |
+|---|---|---|---|---|
+| claude-code | `--session-id` / `--resume` | 已接线（组合层认证在册） | stdin stream-json 排队 | 已接线（唯一 supportsInFlightCorrection=true） |
+| codex | `codex exec resume <thread_id>`（会话标识来自 `thread.started.thread_id`；另有 `codex fork`） | **正向跨 run 携带上下文**；错 id → `no rollout found` exit 1（2026-09-21 直跑，零 WAO 干预） | `codex queue`（给已有 session 排队消息） | 未测（是否能在活 turn 中生效未知） |
+| kimi-code | `kimi -r <session_id>`（stream 内 `session.resume_hint` 广告；另有 `-S/--session`、`-c/--continue`、`kimi fork`） | **正向跨 run 携带上下文**；错 id → `Session "…" not found` exit 1（2026-09-21 直跑） | 未测（无对应文案） | 未测 |
+| deepseek-harness | 未测（旧 dsh 原生通道；WAO 侧声明 false） | — | 未测 | — |
+| deepseek-acp | ACP `session/resume` | 已接线（ADR-0031 §3.6 + phase6 真实恢复证据） | 上游无（ACP 无在途消息改写，F7 实测） | 上游无此能力 |
+| opencode-serve | 未测（serve 持有 session 概念；WAO 侧未接线） | — | 未测（HTTP 双向，理论可注入） | — |
+
+**读法**：①「未测」是**未测**，不是「没有」——期限就是用来逼这些格子在值得填的时候被填掉；②已实测可复用的 codex / kimi-code 仍记 `sessionReuse` 不支持，因为接线要的是 WAO 侧关联面（resume 信封只带前任 WAO runId、sessionId 由 WAO 从转录取回、关联缺失即 fail-closed 拒绝，形状见 ADR-0031 §3.6）加真实跨 run drill 证据，见 TD-184。
 ### 验证安装
 
 ```powershell

@@ -3618,6 +3618,47 @@ test("TD-162 关系型守卫: 能力表 policy 门列与 validateAgentPolicy 行
   }
 });
 
+
+// TD-184（2026-09-21）：上游 harness 原语对照表的刷新期限守卫。已发生的漂移实例：
+// 能力矩阵把 codex / kimi-code 的 sessionReuse 记「不支持」，读者据此合理地读成
+// 「headless 上游没有该能力」——实际两者都有 `codex exec resume` / `kimi -r`（当日
+// 直跑实测：正向跨 run 携带上下文、错 id fail-closed）。故上游事实单独立表，并加
+// 基线日 + 期限，由机器保证「到期必须复核」，不靠人记（Owner 当日两次提出该期限）。
+test("TD-184 守卫: 上游 harness 原语表覆盖闭集 + 基线日在刷新期限内", async () => {
+  const { KNOWN_BACKENDS } = await import("../../src/registry.js");
+  const usage = read("docs/usage.md");
+  const heading = "### 上游 harness 原语对照（实测）";
+  const start = usage.indexOf(heading);
+  assert.ok(start !== -1, "docs/usage.md 缺「上游 harness 原语对照（实测）」节");
+  const rest = usage.slice(start + heading.length);
+  const next = rest.indexOf("\n### ");
+  const section = next === -1 ? rest : rest.slice(0, next);
+  const tableLines = section.split("\n").filter((l) => l.startsWith("|"));
+  assert.ok(tableLines.length >= 3, "上游原语表解析异常（表行不足 3 行）");
+  const rows = new Map();
+  for (const line of tableLines.slice(1)) {
+    if (/^\|[-\s|]+\|?$/.test(line.trim())) continue;
+    const cells = splitRowCells(line).map((c) => c.trim());
+    assert.ok(!rows.has(cells[0]), "上游原语表出现重复行 " + cells[0]);
+    rows.set(cells[0], cells);
+  }
+  assert.deepEqual([...rows.keys()].sort(), [...KNOWN_BACKENDS].sort(),
+    "上游原语表行集必须与 registry.js KNOWN_BACKENDS 一致（新增 backend 必须同行补上游事实）");
+  for (const anchor of ["codex exec resume", "kimi -r"])
+    assert.ok(section.includes(anchor), "上游原语表缺已实测的上游原语 " + anchor);
+  const asOf = section.match(/基线日（as-of）：(\d{4}-\d{2}-\d{2})/);
+  assert.ok(asOf, "上游原语表必须写明基线日（as-of）");
+  const window = section.match(/刷新期限：(\d+) 天/);
+  assert.ok(window, "上游原语表必须写明刷新期限（天）");
+  const deadlineDays = Number(window[1]);
+  assert.ok(Number.isFinite(deadlineDays) && deadlineDays > 0, "刷新期限必须是正数天数");
+  const ageDays = (Date.now() - Date.parse(asOf[1] + "T00:00:00Z")) / 86400000;
+  assert.ok(ageDays >= 0, "上游原语表基线日在未来（写错日期）: " + asOf[1]);
+  assert.ok(ageDays <= deadlineDays,
+    "上游原语表基线日 " + asOf[1] + " 已超刷新期限 " + deadlineDays + " 天（实际 "
+    + Math.floor(ageDays) + " 天）——按节内规程复核各 backend 的上游原语与接线状态，复核完更新基线日");
+});
+
 // TD-162 顺带（任务第 3 项评估结论的落地）：onboarding 认证选择表 ↔ registry 模板
 // provider 声明此前无关系守卫（现有测试只做 onboarding 文内关键词在场检查，模板侧
 // env 名换掉不会红）。前向对账成本 ≤15 行：模板声明的每个凭据 env 名都必须在
