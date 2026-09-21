@@ -40,7 +40,11 @@
 //     uuid, in MCP output, or in the bounded routing audit event.
 //   - Only bounded routing facts are persisted: the routing index stores
 //     {runId, updatedAt} keyed by a sha256 of the opaque uuid; the transcript
-//     audit event stores only {mode, turn}.
+//     audit event stores only {mode, turn}. The RESUME routing envelope adds
+//     the prior WAO runId (internal identifier, never a credential) so the
+//     provider session id can be recovered from the transcript SSOT at runner
+//     time (resolvePriorProviderSessionId) — the provider session id itself
+//     never enters argv.
 
 import { createHash } from "node:crypto";
 import { readFile, mkdir, writeFile, open, unlink } from "node:fs/promises";
@@ -64,11 +68,11 @@ export const SESSION_REUSE_TURNS = Object.freeze(["first", "resume"]);
 
 /**
  * Closed set of modes permitted in the internal routing envelope
- * {mode, opaqueUuid, turn} that reaches a backend. This is the union of the
- * agent-declared policy (lead_workspace) and the lineage routing mode
- * (run_lineage) introduced by M12-7. Both compile to the same provider flags
- * (--session-id / --resume) via the capability gate; the mode only selects the
- * opaque-uuid keyspace.
+ * {mode, opaqueUuid, turn[, priorRunId]} that reaches a backend. This is the
+ * union of the agent-declared policy (lead_workspace) and the lineage routing
+ * mode (run_lineage) introduced by M12-7. Both compile to the same provider
+ * flags (--session-id / --resume) via the capability gate; the mode only
+ * selects the opaque-uuid keyspace.
  */
 export const SESSION_ROUTING_MODES = Object.freeze(["lead_workspace", "run_lineage"]);
 
@@ -92,27 +96,45 @@ export function isValidSessionReuseMode(value) {
  * Validate the internal routing envelope before it can reach a backend.
  * Requested reuse must never silently degrade into a fresh conversation.
  *
- * The envelope is the closed 3-key shape {mode, opaqueUuid, turn}; mode must be
- * a member of SESSION_ROUTING_MODES (lead_workspace policy OR run_lineage
- * continuation routing). Any extra/missing key, unknown mode, bad turn, or
- * non-uuid throws the fixed-shape error.
+ * The envelope is a closed, turn-conditional shape (ADR-0031 §3.6 association
+ * contract, R2):
+ *   - turn "first"  : exactly {mode, opaqueUuid, turn} — no prior exists.
+ *   - turn "resume" : exactly {mode, opaqueUuid, turn, priorRunId} — the PRIOR
+ *     WAO runId (internal identifier, not a credential; RUN_ID_RE-constrained)
+ *     whose transcript holds the provider session to resume. The provider
+ *     session id itself NEVER travels in the envelope/argv; it is recovered at
+ *     runner time from the transcript SSOT via resolvePriorProviderSessionId.
+ * mode must be a member of SESSION_ROUTING_MODES (lead_workspace policy OR
+ * run_lineage continuation routing). Any extra/missing key, unknown mode, bad
+ * turn, non-uuid, or a resume without a valid priorRunId throws the fixed-shape
+ * error.
  *
  * @param {unknown} value
- * @returns {{mode:string, turn:"first"|"resume", opaqueUuid:string}}
+ * @returns {{mode:string, turn:"first"|"resume", opaqueUuid:string, priorRunId?:string}}
  */
 export function validateSessionReuseRouting(value) {
   const keys = value && typeof value === "object" && !Array.isArray(value)
     ? Object.keys(value).sort()
     : [];
-  const valid = keys.length === 3
+  const baseValid = keys.length >= 3
     && keys[0] === "mode"
     && keys[1] === "opaqueUuid"
-    && keys[2] === "turn"
-    && SESSION_ROUTING_MODES.includes(value.mode)
-    && SESSION_REUSE_TURNS.includes(value.turn)
-    && typeof value.opaqueUuid === "string"
+    && SESSION_ROUTING_MODES.includes(value?.mode)
+    && SESSION_REUSE_TURNS.includes(value?.turn)
+    && typeof value?.opaqueUuid === "string"
     && OPAQUE_SESSION_UUID.test(value.opaqueUuid);
-  if (!valid) {
+  // §3.6: resume carries the prior WAO runId (the association handle); first
+  // forbids it. The shape stays closed per turn — never "any extra key".
+  const priorValid = value?.turn === "resume"
+    ? keys.length === 4
+      && keys[2] === "priorRunId"
+      && keys[3] === "turn"
+      && typeof value.priorRunId === "string"
+      && RUN_ID_RE.test(value.priorRunId)
+      && !/^[.-]/.test(value.priorRunId)
+    : keys.length === 3
+      && keys[2] === "turn";
+  if (!baseValid || !priorValid) {
     throw new Error("sessionReuse: invalid internal routing envelope");
   }
   return value;
@@ -214,6 +236,42 @@ export function deriveReuseKeyHash(input) {
 }
 
 /**
+ * ADR-0031 §3.6 (fail-closed association): a routing entry that EXISTS but
+ * cannot be parsed into the bounded {runId, updatedAt} shape is DAMAGED, not
+ * absent. Reading it as absent would silently route a fresh first turn — the
+ * exact silent-new-session behavior §3.6 forbids. Distinguish ENOENT (no entry
+ * ever written — the sanctioned "no prior routing entry ⇒ first" bootstrap of
+ * the M11-11C contract) from any other read/parse/shape failure (refuse).
+ */
+const ROUTING_ENTRY_DAMAGED_TEXT = "sessionReuse: routing entry for this reuse identity is damaged (present but unparseable or malformed) — refusing instead of silently starting a fresh provider conversation";
+
+// §3.6/R3: the prior run's transcript records that a provider session EXISTS
+// (a bound session.created), but the recorded id is not addressable. Refuse —
+// never a silent fresh conversation, never a resume against an unusable id.
+const PRIOR_SESSION_UNADDRESSABLE_TEXT = "sessionReuse: prior run has a bound session.created but no addressable provider session id (backendSessionId missing/empty/non-string) — refusing resume instead of silently starting a fresh provider conversation";
+
+async function readRoutingEntryFile(filePath) {
+  let raw;
+  try {
+    raw = await readFile(filePath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw new Error(ROUTING_ENTRY_DAMAGED_TEXT);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(ROUTING_ENTRY_DAMAGED_TEXT);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+    || typeof parsed.runId !== "string" || parsed.runId.length === 0) {
+    throw new Error(ROUTING_ENTRY_DAMAGED_TEXT);
+  }
+  return parsed;
+}
+
+/**
  * Default filesystem routing store: one JSON file per reuse key under
  * `<runDir>/.session-reuse/`. Each entry is a bounded routing fact:
  * `{ runId, updatedAt }`. The opaque uuid / Lead id / workspace are never
@@ -229,14 +287,7 @@ function defaultReuseStore(runDir) {
     dir,
     lockDir,
     async readEntry(keyHash) {
-      try {
-        const raw = await readFile(join(dir, `${keyHash}.json`), "utf8");
-        const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed.runId === "string") return parsed;
-        return null;
-      } catch {
-        return null;
-      }
+      return readRoutingEntryFile(join(dir, `${keyHash}.json`));
     },
     async writeEntry(keyHash, entry) {
       await mkdir(dir, { recursive: true });
@@ -294,8 +345,14 @@ async function withKeyLock(store, keyHash, fn) {
  *
  * Decision matrix (transcript is the source of truth):
  *   - no prior routing entry                                    ⇒ first
+ *   - routing entry PRESENT but damaged (unparseable/malformed) ⇒ REFUSE (§3.6)
  *   - prior run non-terminal (in-flight)                        ⇒ busy
- *   - prior run terminal + has session.created                  ⇒ resume
+ *   - prior run terminal + bound session.created with a
+ *     non-empty string backendSessionId                         ⇒ resume
+ *     (envelope carries priorRunId; the provider session id is
+ *     re-read from the prior transcript at runner time)
+ *   - prior run terminal + bound session.created whose
+ *     backendSessionId is missing/empty/non-string             ⇒ REFUSE (§3.6)
  *   - prior run terminal but NO session.created (crashed pre-   ⇒ first
  *     conversation; no provider session to resume)
  *   - prior transcript missing + entry recent                   ⇒ busy (in-flight)
@@ -314,7 +371,7 @@ async function withKeyLock(store, keyHash, fn) {
  * @param {string} input.agentId
  * @param {object} [input.reuseStore] — injectable for tests
  * @param {number} [input.now=Date.now()] — injectable clock for tests
- * @returns {Promise<{kind:"first"|"resume", routing:{mode, opaqueUuid, turn}} | {kind:"busy", activeRunId:string}>}
+ * @returns {Promise<{kind:"first", routing:{mode, opaqueUuid, turn:"first"}} | {kind:"resume", routing:{mode, opaqueUuid, turn:"resume", priorRunId:string}} | {kind:"busy", activeRunId:string}>}
  */
 export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, agentId, reuseStore, now }) {
   const store = reuseStore ?? defaultReuseStore(runDir);
@@ -370,10 +427,17 @@ export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, 
         // run), so unlike the runCorrection/runContinue lanes the binding is a
         // LIVE behavior change, not just discipline consistency.
         //
+        // §3.6 association (ADR-0031, R3): the bound session.created must carry
+        // an ADDRESSABLE provider session — a non-empty string backendSessionId.
+        // Present-but-unusable (missing/empty/non-string) means the association
+        // surface is damaged while a provider session was recorded to exist:
+        // fail-closed REFUSAL, never a silent fresh conversation and never a
+        // resume against an unattributable id.
+        //
         // Legacy choice (explicit, R14; scope narrowed by R15): a prior whose
-        // bound events project terminal but that has NO bound session.created —
-        // crashed pre-conversation, or a session.created line that is itself
-        // foreign/envelope-less (R14-SR-1/SR-3 probes) — DEGRADES to the
+        // bound events project terminal but that has NO bound session.created
+        // AT ALL — crashed pre-conversation, or a session.created line that is
+        // itself foreign/envelope-less (R14-SR-1/SR-3 probes) — DEGRADES to the
         // existing "terminal without session.created" branch: the slot is
         // claimed as a fresh FIRST turn, never a refusal. (A FULLY pre-envelope
         // prior transcript also landed here as first before R15; R15's bound
@@ -386,10 +450,23 @@ export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, 
         // cost of the lost resume is nil. This is a degrade, not fail-closed,
         // because the dispatch decision it feeds is turn selection — blocking
         // the Lead's dispatch over unattributable history would be
-        // disproportionate.
-        if (findLatestBound(events, "session.created", entry.runId)) {
+        // disproportionate. (An EXISTING-but-unusable session.created does NOT
+        // land here — that is the §3.6 refusal above, not this degrade.)
+        const priorSession = findLatestBound(events, "session.created", entry.runId);
+        if (priorSession) {
+          const priorBackendSessionId = priorSession.backendSessionId;
+          if (typeof priorBackendSessionId !== "string" || priorBackendSessionId.length === 0) {
+            throw new Error(PRIOR_SESSION_UNADDRESSABLE_TEXT);
+          }
           await store.writeEntry(keyHash, { runId, updatedAt: clock });
-          return { kind: "resume", routing: { ...routing, turn: "resume" } };
+          // §3.6/R2: the resume envelope carries the PRIOR WAO runId — the
+          // association handle. The provider session id itself is recovered at
+          // runner time from the prior transcript (resolvePriorProviderSessionId),
+          // never from the envelope/argv.
+          return {
+            kind: "resume",
+            routing: { ...routing, turn: "resume", priorRunId: entry.runId },
+          };
         }
         // Terminal without session.created — crashed before the backend
         // conversation started. No provider session exists to resume → fall
@@ -409,6 +486,48 @@ export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, 
     await store.writeEntry(keyHash, { runId, updatedAt: clock });
     return { kind: "first", routing: { ...routing, turn: "first" } };
   });
+}
+
+/**
+ * Recover the PRIOR run's provider session id from the transcript SSOT at
+ * runner time (ADR-0031 §3.6 association, R2). The resume envelope carries only
+ * the prior WAO runId; this bound reader turns that handle back into the
+ * addressable provider session id (session.created.backendSessionId, LAST-bound
+ * to the prior run — the same lane discipline resolveReuseTurn's decision read
+ * uses). Called by the spawn authority (RunManager.start) BEFORE transcript/
+ * worktree/spawn, and the resolved id crosses to the backend in the in-process
+ * task object — it never travels in argv.
+ *
+ * Fail-closed on EVERY failure mode (§3.6 item 5): prior transcript missing or
+ * unparseable, no session.created bound to the prior run, or a
+ * backendSessionId that is missing/empty/non-string — each refuses with a
+ * fixed text; none silently starts a fresh conversation. (Whether an upstream
+ * `session/resume` then rejects the recovered id is the backend's fail-closed
+ * lane — never fall back to session/new.)
+ *
+ * @param {object} input
+ * @param {string} input.runDir — transcript directory (spawn authority's runDir)
+ * @param {string} input.priorRunId — the resume envelope's prior WAO runId
+ * @returns {Promise<string>} the addressable provider session id
+ */
+export async function resolvePriorProviderSessionId({ runDir, priorRunId }) {
+  if (typeof runDir !== "string" || runDir.length === 0
+    || typeof priorRunId !== "string"
+    || !RUN_ID_RE.test(priorRunId) || /^[.-]/.test(priorRunId)) {
+    throw new Error(PRIOR_SESSION_UNADDRESSABLE_TEXT);
+  }
+  let events;
+  try {
+    events = await readTranscript(join(runDir, `${priorRunId}.jsonl`));
+  } catch {
+    throw new Error("sessionReuse: prior transcript for resume is missing or unparseable — refusing instead of silently starting a fresh provider conversation");
+  }
+  const created = findLatestBound(events, "session.created", priorRunId);
+  const sessionId = created?.backendSessionId;
+  if (typeof sessionId !== "string" || sessionId.length === 0) {
+    throw new Error(PRIOR_SESSION_UNADDRESSABLE_TEXT);
+  }
+  return sessionId;
 }
 
 // ===== M12-7: lineage-scoped provider session reuse =====
@@ -471,6 +590,8 @@ export function deriveLineageReuseKeyHash(input) {
  * `<runDir>/.lineage-reuse/`. Each entry is a bounded routing fact
  * `{ runId, updatedAt }`. The opaque uuid / Lead id / workspace / rootRunId are
  * never persisted here — they are recomputed deterministically each turn.
+ * Same §3.6 damage discipline as defaultReuseStore (ENOENT = absent; anything
+ * else = damaged = refuse).
  */
 function defaultLineageStore(runDir) {
   const dir = join(runDir, ".lineage-reuse");
@@ -479,14 +600,7 @@ function defaultLineageStore(runDir) {
     dir,
     lockDir,
     async readEntry(keyHash) {
-      try {
-        const raw = await readFile(join(dir, `${keyHash}.json`), "utf8");
-        const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed.runId === "string") return parsed;
-        return null;
-      } catch {
-        return null;
-      }
+      return readRoutingEntryFile(join(dir, `${keyHash}.json`));
     },
     async writeEntry(keyHash, entry) {
       await mkdir(dir, { recursive: true });
@@ -629,7 +743,18 @@ export async function resolveLineageContinuationTurn({ runDir, runId, parentRunI
     await store.writeEntry(keyHash, { runId, updatedAt: clock });
     return {
       kind: "resume",
-      routing: { ...routing, turn: "resume" },
+      // §3.6/R2: resume envelopes carry the prior WAO runId (the lineage slot's
+      // previous owner — the run whose transcript holds the provider session;
+      // parentRunId when the slot had no prior entry). claude-code compiles the
+      // opaque uuid only; a transcript-bound backend recovers the provider
+      // session id from this handle at runner time.
+      routing: {
+        ...routing,
+        turn: "resume",
+        priorRunId: (entry && typeof entry.runId === "string" && entry.runId.length > 0)
+          ? entry.runId
+          : parentRunId,
+      },
       // Internal rollback token. It never crosses the application/MCP boundary.
       claim: { keyHash, runId, parentRunId, previousEntry: entry ?? null },
     };

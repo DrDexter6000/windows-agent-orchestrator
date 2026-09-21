@@ -37,7 +37,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -172,13 +172,20 @@ test("M11-11C REG-4: SESSION_REUSE_MODES is the frozen closed set", () => {
   assert.equal(isValidSessionReuseMode(undefined), false);
 });
 
-test("M11-11C ROUTE-1: valid routing envelope passes unchanged", () => {
-  const routing = {
+test("M11-11C ROUTE-1: valid routing envelope passes unchanged (first 3-key / resume 4-key with priorRunId)", () => {
+  const first = {
+    mode: "lead_workspace",
+    turn: "first",
+    opaqueUuid: "12345678-1234-4abc-8def-1234567890ab",
+  };
+  assert.equal(validateSessionReuseRouting(first), first);
+  const resume = {
     mode: "lead_workspace",
     turn: "resume",
     opaqueUuid: "12345678-1234-4abc-8def-1234567890ab",
+    priorRunId: "run_prior_20260921",
   };
-  assert.equal(validateSessionReuseRouting(routing), routing);
+  assert.equal(validateSessionReuseRouting(resume), resume);
 });
 
 test("M11-11C ROUTE-2: malformed routing never degrades into a fresh conversation", () => {
@@ -192,6 +199,18 @@ test("M11-11C ROUTE-2: malformed routing never degrades into a fresh conversatio
       turn: "first",
       opaqueUuid: "12345678-1234-4abc-8def-1234567890ab",
       extra: true,
+    },
+    // §3.6/R2：resume 必须携带合法 priorRunId（缺失/非串/坏形状/带路径分隔符都拒）。
+    { mode: "lead_workspace", turn: "resume", opaqueUuid: "12345678-1234-4abc-8def-1234567890ab" },
+    { mode: "lead_workspace", turn: "resume", opaqueUuid: "12345678-1234-4abc-8def-1234567890ab", priorRunId: 42 },
+    { mode: "lead_workspace", turn: "resume", opaqueUuid: "12345678-1234-4abc-8def-1234567890ab", priorRunId: "../evil" },
+    { mode: "lead_workspace", turn: "resume", opaqueUuid: "12345678-1234-4abc-8def-1234567890ab", priorRunId: ".hidden" },
+    // first 轮禁止携带 priorRunId（无前任；形状不放宽成"任意额外键"）。
+    {
+      mode: "lead_workspace",
+      turn: "first",
+      opaqueUuid: "12345678-1234-4abc-8def-1234567890ab",
+      priorRunId: "run_prior_20260921",
     },
   ];
   for (const value of invalid) {
@@ -324,6 +343,8 @@ test("M11-11C TURN-2: prior terminal run WITH session.created ⇒ resume turn (s
     assert.equal(decision.routing.turn, "resume");
     const expectedUuid = deriveOpaqueUuid({ leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher" });
     assert.equal(decision.routing.opaqueUuid, expectedUuid, "resume reuses the same opaque uuid");
+    // §3.6/R2：resume 信封携带前任 WAO runId（provider session id 绝不进信封/argv）。
+    assert.equal(decision.routing.priorRunId, "run_first_2", "resume envelope carries the prior WAO runId");
     // Slot now points at the newest run.
     const entry = JSON.parse(readFileSync(join(dir, ".session-reuse", `${deriveReuseKeyHash({ leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher" })}.json`), "utf8"));
     assert.equal(entry.runId, "run_resume_2");
@@ -382,6 +403,123 @@ test("M11-11C TURN-5: independent triples never collide (cross-lead / cross-work
     for (const d of [dA, dB, dC, dD]) assert.equal(d.kind, "first");
     const uuids = [dA, dB, dC, dD].map((d) => d.routing.opaqueUuid);
     assert.equal(new Set(uuids).size, 4, "all four triples get distinct opaque uuids");
+  } finally { cleanupDir(dir); }
+});
+
+// ===== ADR-0031 §3.6 关联面（deepseek-acp 落地轮，2026-09-21）=====
+//
+// R3 矩阵的路由层两行（provider 中立，落在本 SSOT）：
+//   - 绑定 session.created 存在但 backendSessionId 缺失/空/非字符串 → fail-closed 拒绝
+//   - 路由条目损坏（存在但不可解析/形状坏）→ fail-closed 拒绝
+// 既有降级（terminal 无 session.created ⇒ first；条目缺失 ⇒ first）保持不动。
+
+test("§3.6 TURN-6: prior terminal + bound session.created with unusable backendSessionId ⇒ REFUSE (never silent fresh)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m11c-turn6-"));
+  try {
+    const { JsonlTranscript } = await import("../../src/transcript.js");
+    for (const bad of [undefined, "", null, 42, {}]) {
+      cleanupDir(join(dir, ".session-reuse"));
+      await resolveReuseTurn({
+        runDir: dir, runId: "run_prior_6",
+        leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher",
+      });
+      const t = new JsonlTranscript(join(dir, "run_prior_6.jsonl"), { runId: "run_prior_6", agentId: "researcher" });
+      await t.transitionState(null, "pending", "seed");
+      await t.append("session.created", { backend: "process", backendSessionId: bad });
+      await t.transitionState("pending", "completed", "seed_done");
+      await assert.rejects(
+        () => resolveReuseTurn({
+          runDir: dir, runId: "run_next_6",
+          leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher",
+        }),
+        /no addressable provider session id.*refusing resume instead of silently starting a fresh provider conversation/s,
+        `backendSessionId=${JSON.stringify(bad)} must refuse`,
+      );
+    }
+  } finally { cleanupDir(dir); }
+});
+
+test("§3.6 TURN-7: routing entry present but DAMAGED (unparseable / malformed) ⇒ REFUSE; ABSENT stays first (M11-11C bootstrap contract unchanged)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m11c-turn7-"));
+  try {
+    const keyHash = deriveReuseKeyHash({ leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher" });
+    const entryPath = join(dir, ".session-reuse", `${keyHash}.json`);
+    for (const damaged of ["{ not json", "[]", '{"noRunId":true}', '{"runId":""}', '{"runId":42}']) {
+      mkdirSync(join(dir, ".session-reuse"), { recursive: true });
+      writeFileSync(entryPath, damaged, "utf8");
+      await assert.rejects(
+        () => resolveReuseTurn({
+          runDir: dir, runId: "run_next_7",
+          leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher",
+        }),
+        /routing entry.*damaged.*refusing instead of silently starting a fresh provider conversation/s,
+        `entry=${damaged} must refuse`,
+      );
+    }
+    // 缺失（ENOENT）仍是 first——既有 bootstrap 合同不动（TURN-1 同款）。
+    rmSync(join(dir, ".session-reuse"), { recursive: true, force: true });
+    const decision = await resolveReuseTurn({
+      runDir: dir, runId: "run_fresh_7",
+      leadSession: "lead-A", workspace: "D:/proj", agentId: "researcher",
+    });
+    assert.equal(decision.kind, "first", "absent entry stays first (M11-11C contract)");
+  } finally { cleanupDir(dir); }
+});
+
+test("§3.6 RESOLVE-1: resolvePriorProviderSessionId 按 runId 绑定读取器取回；四种失败全拒（固定文案）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-m11c-resolve1-"));
+  const { resolvePriorProviderSessionId } = await import("../../src/application/sessionReuse.js");
+  try {
+    const { JsonlTranscript } = await import("../../src/transcript.js");
+    const runId = "run_prior_resolve";
+    const t = new JsonlTranscript(join(dir, `${runId}.jsonl`), { runId, agentId: "researcher" });
+    await t.transitionState(null, "pending", "seed");
+    await t.append("session.created", { backend: "deepseek-acp", backendSessionId: "acp-uuid-1" });
+    await t.transitionState("pending", "completed", "seed_done");
+    // 正向：取回绑定 id。
+    assert.equal(
+      await resolvePriorProviderSessionId({ runDir: dir, priorRunId: runId }),
+      "acp-uuid-1",
+    );
+    // 转录缺失 → 拒。
+    await assert.rejects(
+      () => resolvePriorProviderSessionId({ runDir: dir, priorRunId: "run_never_existed" }),
+      /prior transcript for resume is missing or unparseable.*refusing instead of silently starting a fresh provider conversation/s,
+    );
+    // 转录损坏（非法 JSON 行）→ 拒。
+    writeFileSync(join(dir, "run_corrupt.jsonl"), "{broken\n", "utf8");
+    await assert.rejects(
+      () => resolvePriorProviderSessionId({ runDir: dir, priorRunId: "run_corrupt" }),
+      /prior transcript for resume is missing or unparseable/s,
+    );
+    // 无绑定 session.created → 拒。
+    const t2 = new JsonlTranscript(join(dir, "run_nosession.jsonl"), { runId: "run_nosession", agentId: "researcher" });
+    await t2.transitionState(null, "pending", "seed");
+    await t2.transitionState("pending", "completed", "seed_done");
+    await assert.rejects(
+      () => resolvePriorProviderSessionId({ runDir: dir, priorRunId: "run_nosession" }),
+      /no addressable provider session id/s,
+    );
+    // 绑定 session.created 但 backendSessionId 空 → 拒（R3 行 2 的 runner 侧同款）。
+    const t3 = new JsonlTranscript(join(dir, "run_emptysid.jsonl"), { runId: "run_emptysid", agentId: "researcher" });
+    await t3.transitionState(null, "pending", "seed");
+    await t3.append("session.created", { backend: "deepseek-acp", backendSessionId: "" });
+    await t3.transitionState("pending", "completed", "seed_done");
+    await assert.rejects(
+      () => resolvePriorProviderSessionId({ runDir: dir, priorRunId: "run_emptysid" }),
+      /no addressable provider session id/s,
+    );
+    // 外 run 伪造 session.created 尾条（绑定别的 runId）不得被取回（绑定读取器纪律）。
+    const foreign = JSON.stringify({
+      type: "session.created", runId: "run_other", agentId: "x",
+      backend: "deepseek-acp", backendSessionId: "foreign-sid",
+    });
+    appendFileSync(join(dir, `${runId}.jsonl`), foreign + "\n");
+    assert.equal(
+      await resolvePriorProviderSessionId({ runDir: dir, priorRunId: runId }),
+      "acp-uuid-1",
+      "外 run 尾条不改变绑定读取结果",
+    );
   } finally { cleanupDir(dir); }
 });
 
@@ -695,7 +833,10 @@ test("M11-11C ARGV-2: resume turn → claude argv has --resume <uuid> exactly on
   try {
     const backend = new ClaudeCodeBackend({ spawnFn });
     const uuid = deriveOpaqueUuid({ leadSession: "lead-A", workspace: dir, agentId: "researcher" });
-    await backend.spawn(reusableClaudeAgent(dir), { prompt: "more", sessionReuse: { mode: "lead_workspace", opaqueUuid: uuid, turn: "resume" } });
+    await backend.spawn(reusableClaudeAgent(dir), {
+      prompt: "more",
+      sessionReuse: { mode: "lead_workspace", opaqueUuid: uuid, turn: "resume", priorRunId: "run_prior_argv2" },
+    });
     const args = captures[0].args;
     const resIdx = args.indexOf("--resume");
     assert.ok(resIdx >= 0, "--resume present on resume turn");
@@ -857,12 +998,19 @@ test("M11-11C CHAIN-2: resume routing through runBackground → claude --resume 
   const { spawnFn: capSpawn, captures } = makeCapturingSpawn();
   try {
     const uuid = deriveOpaqueUuid({ leadSession: "lead-A", workspace: bgDir, agentId: "researcher" });
+    // §3.6：runManager.start 在 resume 轮按 priorRunId 从转录取回 provider session id——
+    // 铺一份前任转录（claude-code 的 id 形如 proc_<pid>）。
+    const { JsonlTranscript } = await import("../../src/transcript.js");
+    const prior = new JsonlTranscript(join(bgDir, "run_prior_chain2.jsonl"), { runId: "run_prior_chain2", agentId: "researcher" });
+    await prior.transitionState(null, "pending", "seed");
+    await prior.append("session.created", { backend: "process", backendSessionId: "proc_1234" });
+    await prior.transitionState("pending", "completed", "seed_done");
     const result = await runBackground({
       agentId: "researcher",
       prompt: "follow up",
       registry: { agents: { researcher: reusableClaudeAgent(bgDir, { cwd: bgDir }) } },
       runDir: bgDir,
-      sessionReuse: { mode: "lead_workspace", opaqueUuid: uuid, turn: "resume" },
+      sessionReuse: { mode: "lead_workspace", opaqueUuid: uuid, turn: "resume", priorRunId: "run_prior_chain2" },
       backendFor: () => new ClaudeCodeBackend({ spawnFn: capSpawn }),
       waitTimeout: 5000,
       pollInterval: 10,

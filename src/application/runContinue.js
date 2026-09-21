@@ -515,6 +515,9 @@ export async function continueRun({
     // of UUID value because every valid routing UUID has a fixed length.
     opaqueUuid: "00000000-0000-4000-8000-000000000000",
     turn: "resume",
+    // §3.6/R2: resume envelopes carry the prior WAO runId (the direct parent —
+    // same fixed-length runId format, so the placeholder is size-stable too).
+    priorRunId: parentRunId,
   };
   const runnerArgs = [
     _runnerPath,

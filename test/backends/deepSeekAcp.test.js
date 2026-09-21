@@ -35,6 +35,8 @@ import { compileInvocation } from "../../src/backends/processBackend.js";
 import { backendCapabilitySnapshot, backendFor } from "../../src/backends/factory.js";
 import { normalizeAgent } from "../../src/registry.js";
 import { inheritedEnvNames, requiredCredentialNames } from "../../src/envPolicy.js";
+import { runBackground } from "../../src/backgroundRunner.js";
+import { JsonlTranscript } from "../../src/transcript.js";
 
 const REFERENCE_CONTAINMENT = readFileSync(
   new URL("../../scripts/reliability/dsh-acp/wao-contain-safe.patch.yml", import.meta.url),
@@ -84,6 +86,11 @@ function makeFakeChild() {
 function fakeAcpPeer(child, {
   sessionId = "sess-acp-1",
   agentName = "deepseek-harness-acp",
+  // session/resume 的应答策略（§3.6）：缺省成功（响应带 configOptions、无
+  // sessionId 回显——evidence/phase2-resume.json 形状）。可注入
+  // { error }（上游拒绝）/ { echoDifferentSessionId: true }（回显不同 id）/
+  // { effortValue }（configOptions 里 reasoning_effort.currentValue）。
+  resumeMode = null,
   // session/set_config_option 的应答策略：缺省确认请求值（Phase 5 实测响应形状：
   // { configOptions: [...] }，reasoning_effort.currentValue = 生效值）。
   // 测试可注入 { confirmValue }（伪确认值）/ { omitOption }（响应不含该选项）/
@@ -113,6 +120,25 @@ function fakeAcpPeer(child, {
         });
       } else if (message.method === "session/new") {
         send({ jsonrpc: "2.0", id: message.id, result: { sessionId } });
+      } else if (message.method === "session/resume") {
+        // §3.6 resume wire（evidence/phase2-resume.json 形状）：默认成功，响应带
+        // configOptions（无 sessionId 回显）。测试可注入 resumeMode 改错/换 id。
+        if (resumeMode?.error) {
+          send({ jsonrpc: "2.0", id: message.id, error: resumeMode.error });
+          return;
+        }
+        send({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: {
+            ...(resumeMode?.echoDifferentSessionId ? { sessionId: "sess-acp-OTHER" } : {}),
+            configOptions: [{
+              id: "reasoning_effort",
+              category: "thought_level",
+              currentValue: resumeMode?.effortValue ?? "high",
+            }],
+          },
+        });
       } else if (message.method === "session/set_config_option") {
         if (setConfigOptionMode.error) {
           send({ jsonrpc: "2.0", id: message.id, error: setConfigOptionMode.error });
@@ -382,11 +408,10 @@ test("ACP registry/env 集成：闭集成员、credentialEnv 必填、凭据继�
   assert.ok(inheritedEnvNames(normalized).includes("DEEPSEEK_API_KEY"));
   const built = backendFor(normalized);
   assert.ok(built instanceof DeepSeekAcpBackend);
-  // Lead 2026-09-20 临时裁定（Owner 未决）：supportsSessionReuse=false——关联面
-  // （持久化/原子/互斥/身份绑定）未落地前声明 true 属"声明强于实现"。
+  // §3.6 关联面已落地（2026-09-21，真实恢复证据 phase6-*.json）→ 声明翻回 true。
   assert.deepEqual(backendCapabilitySnapshot(normalized), {
     reportsTokenUsage: false,
-    supportsSessionReuse: false,
+    supportsSessionReuse: true,
   });
   assert.equal(built.supportsInFlightCorrection, false, "在途纠偏如实声明不支持");
   assert.equal(built.supportsRoleContract, true);
@@ -774,20 +799,36 @@ test("ACP runtime identity 不符 → spawn 拒绝（fail-closed）", async () =
   }
 });
 
-test("ACP sessionReuse：resume 轮 fail-closed 拒绝；first 轮照常新会话", async () => {
+test("ACP sessionReuse（§3.6）：resume 轮无关联 id 双拒绝；first 轮照常新会话", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-acp-test-"));
   try {
     const containmentPath = join(dir, "wao-contain.patch.yml");
     writeFileSync(containmentPath, REFERENCE_CONTAINMENT, "utf8");
     const backend = new DeepSeekAcpBackend({ containmentPatchPath: containmentPath });
+    // 双拒绝点 1（preflight）：resume 信封不带 transcript 取回的 provider session id
+    // → 固定文案拒绝（绝不静默新会话）。
     await assert.rejects(
       backend.preflightInvocation(agent(), {
         prompt: "x",
-        sessionReuse: { mode: "lead_workspace", turn: "resume", opaqueUuid: "0f1e2d3c-4b5a-6978-8976-a5b4c3d2e1f0" },
+        sessionReuse: { mode: "lead_workspace", turn: "resume", opaqueUuid: "0f1e2d3c-4b5a-4978-8976-a5b4c3d2e1f0", priorRunId: "run_prior_1" },
       }),
-      /cannot resume a provider session/,
+      /cannot resume the provider session.*§3\.6 association.*refusing instead of silently starting a fresh session/s,
     );
 
+    // 双拒绝点 2（spawn 权威防线）：同样拒绝。
+    const bareChild = makeFakeChild();
+    const bareBackend = new DeepSeekAcpBackend({ containmentPatchPath: containmentPath, spawnFn: () => bareChild });
+    fakeAcpPeer(bareChild);
+    await assert.rejects(
+      bareBackend.spawn(agent(), {
+        prompt: "x",
+        sessionReuse: { mode: "lead_workspace", turn: "resume", opaqueUuid: "0f1e2d3c-4b5a-4978-8976-a5b4c3d2e1f0", priorRunId: "run_prior_1" },
+      }),
+      /cannot resume the provider session.*§3\.6 association/s,
+    );
+    assert.ok(!bareChild.stdin.readableEnded, "未发任何会话请求即拒绝");
+
+    // first 轮照常 session/new（byte-compatible 既有行为）。
     const child = makeFakeChild();
     const spawnBackend = new DeepSeekAcpBackend({
       containmentPatchPath: containmentPath,
@@ -796,7 +837,7 @@ test("ACP sessionReuse：resume 轮 fail-closed 拒绝；first 轮照常新会�
     const peer = fakeAcpPeer(child);
     const handle = await spawnBackend.spawn(agent(), {
       prompt: "x",
-      sessionReuse: { mode: "lead_workspace", turn: "first", opaqueUuid: "0f1e2d3c-4b5a-6978-8976-a5b4c3d2e1f0" },
+      sessionReuse: { mode: "lead_workspace", turn: "first", opaqueUuid: "0f1e2d3c-4b5a-4978-8976-a5b4c3d2e1f0" },
     });
     assert.ok(peer.clientRequests.some((m) => m.method === "session/new"));
     assert.equal(handle.backendSessionId, peer.sessionId);
@@ -804,6 +845,221 @@ test("ACP sessionReuse：resume 轮 fail-closed 拒绝；first 轮照常新会�
     const events = [];
     for await (const event of handle.events(new AbortController().signal)) events.push(event);
     assert.equal(events.at(-1).reason, "completed");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ===== §3.6 关联面：resume 真正走 session/resume =====
+
+/**
+ * §3.6 resume 场景夹具（backend 层）：task.priorProviderSessionId 直接注入——
+ * 模拟 spawn 权威（runManager.start 经 resolvePriorProviderSessionId）已经从
+ * 前任转录取回的 provider session id（runManager 链路在下方链路测试单独钉）。
+ */
+async function runResumeScenario({ drive, agentOverrides = {}, peerOptions = {}, taskOverrides = {} }) {
+  const dir = mkdtempSync(join(tmpdir(), "wao-acp-resume-"));
+  const containmentPath = join(dir, "wao-contain.patch.yml");
+  writeFileSync(containmentPath, REFERENCE_CONTAINMENT, "utf8");
+  const priorRunId = "run_prior_20260921";
+  const priorSessionId = "75c13e12-ce24-4409-b88e-59669cc70712";
+  const child = makeFakeChild();
+  const spawnCalls = [];
+  const backend = new DeepSeekAcpBackend({
+    containmentPatchPath: containmentPath,
+    spawnFn: (binary, args, opts) => {
+      spawnCalls.push({ binary, args, opts });
+      return child;
+    },
+  });
+  const peer = fakeAcpPeer(child, peerOptions);
+  const handle = await backend.spawn(agent(agentOverrides), {
+    prompt: "follow up",
+    sessionReuse: { mode: "lead_workspace", turn: "resume", opaqueUuid: "0f1e2d3c-4b5a-4978-8976-a5b4c3d2e1f0", priorRunId },
+    priorProviderSessionId: priorSessionId,
+    ...taskOverrides,
+  });
+  const promptRequest = () => peer.clientRequests.find((m) => m.method === "session/prompt");
+  await drive?.({ peer, child, handle, promptRequest, spawnCalls, dir, priorRunId, priorSessionId });
+  const events = await collect(handle);
+  rmSync(dir, { recursive: true, force: true });
+  return { events, peer, child, handle, spawnCalls };
+}
+
+test("ACP §3.6 resume：session/resume 携带前任 provider session id + cwd；绝不 session/new；转录留 resume 事实；backendSessionId 即恢复的会话", async () => {
+  const { events, peer, handle } = await runResumeScenario({
+    drive: ({ peer: p, promptRequest }) => {
+      p.respond(promptRequest().id, { stopReason: "end_turn" });
+    },
+  });
+  const resumeRequest = peer.clientRequests.find((m) => m.method === "session/resume");
+  assert.ok(resumeRequest, "必须发出 session/resume");
+  assert.equal(resumeRequest.params.sessionId, "75c13e12-ce24-4409-b88e-59669cc70712");
+  assert.equal(typeof resumeRequest.params.cwd, "string");
+  assert.ok(resumeRequest.params.cwd.length > 0, "resume 必须 carry cwd（canonical workspace 校验上游做）");
+  assert.deepEqual(resumeRequest.params.mcpServers, []);
+  assert.ok(!peer.clientRequests.some((m) => m.method === "session/new"), "resume 轮绝不 session/new");
+  assert.equal(handle.backendSessionId, "75c13e12-ce24-4409-b88e-59669cc70712",
+    "resume 轮 handle.backendSessionId = 恢复的会话（下一轮关联面经 session.created 延续）");
+  const resumeFact = events.find((e) => e.kind === "message" && e.role === "system"
+    && e.parts.some((p) => /session\/resume/.test(p.text ?? "")));
+  assert.ok(resumeFact, "转录有 resume 事实（system message，非 usable effect）");
+  assert.equal(events.at(-1).reason, "completed");
+});
+
+test("ACP §3.6 resume：上游拒绝 → spawn 失败，绝不回退 session/new（R3）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-acp-resume-reject-"));
+  try {
+    const containmentPath = join(dir, "wao-contain.patch.yml");
+    writeFileSync(containmentPath, REFERENCE_CONTAINMENT, "utf8");
+    const child = makeFakeChild();
+    const backend = new DeepSeekAcpBackend({ containmentPatchPath: containmentPath, spawnFn: () => child });
+    const peer = fakeAcpPeer(child, { resumeMode: { error: { code: -32000, message: "session not found" } } });
+    await assert.rejects(
+      backend.spawn(agent(), {
+        prompt: "x",
+        sessionReuse: { mode: "lead_workspace", turn: "resume", opaqueUuid: "0f1e2d3c-4b5a-4978-8976-a5b4c3d2e1f0", priorRunId: "run_prior_1" },
+        priorProviderSessionId: "75c13e12-ce24-4409-b88e-59669cc70712",
+      }),
+      /session not found/,
+    );
+    // 拒绝后不得有任何 session/new（静默新会话 = 静默丢上下文）。
+    await waitUntil(() => child.exitCode !== null, 2000).catch(() => {});
+    assert.ok(!peer.clientRequests.some((m) => m.method === "session/new"), "上游 resume 拒绝后绝不 session/new");
+    assert.ok(!peer.clientRequests.some((m) => m.method === "session/prompt"), "拒绝后绝不 prompt");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ACP §3.6 resume：回显不同 sessionId → 拒绝（绝不采纳未关联会话）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-acp-resume-echo-"));
+  try {
+    const containmentPath = join(dir, "wao-contain.patch.yml");
+    writeFileSync(containmentPath, REFERENCE_CONTAINMENT, "utf8");
+    const child = makeFakeChild();
+    const backend = new DeepSeekAcpBackend({ containmentPatchPath: containmentPath, spawnFn: () => child });
+    const peer = fakeAcpPeer(child, { resumeMode: { echoDifferentSessionId: true } });
+    await assert.rejects(
+      backend.spawn(agent(), {
+        prompt: "x",
+        sessionReuse: { mode: "lead_workspace", turn: "resume", opaqueUuid: "0f1e2d3c-4b5a-4978-8976-a5b4c3d2e1f0", priorRunId: "run_prior_1" },
+        priorProviderSessionId: "75c13e12-ce24-4409-b88e-59669cc70712",
+      }),
+      /returned a different sessionId than requested/,
+    );
+    assert.ok(!peer.clientRequests.some((m) => m.method === "session/new"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ACP §3.6 resume：带 effort 配置 → 只读核对 resume configOptions；不符即拒（不发 set）", async () => {
+  const { events, peer } = await runResumeScenario({
+    agentOverrides: { reasoning: { effort: "low" } },
+    peerOptions: { resumeMode: { effortValue: "low" } },
+    drive: ({ peer: p, promptRequest }) => {
+      p.respond(promptRequest().id, { stopReason: "end_turn" });
+    },
+  });
+  assert.ok(!peer.clientRequests.some((m) => m.method === "session/set_config_option"),
+    "resume 轮不发 set（resumed 会话上的 set 无实证）");
+  assert.ok(events.some((e) => e.kind === "message" && e.role === "system"
+    && e.parts.some((p) => /reasoning effort verified on the resumed session/.test(p.text ?? ""))));
+
+  const dir = mkdtempSync(join(tmpdir(), "wao-acp-resume-effort-"));
+  try {
+    const containmentPath = join(dir, "wao-contain.patch.yml");
+    writeFileSync(containmentPath, REFERENCE_CONTAINMENT, "utf8");
+    const child = makeFakeChild();
+    const backend = new DeepSeekAcpBackend({ containmentPatchPath: containmentPath, spawnFn: () => child });
+    const peer = fakeAcpPeer(child, { resumeMode: { effortValue: "max" } });
+    await assert.rejects(
+      backend.spawn(agent({ reasoning: { effort: "low" } }), {
+        prompt: "x",
+        sessionReuse: { mode: "lead_workspace", turn: "resume", opaqueUuid: "0f1e2d3c-4b5a-4978-8976-a5b4c3d2e1f0", priorRunId: "run_prior_1" },
+        priorProviderSessionId: "75c13e12-ce24-4409-b88e-59669cc70712",
+      }),
+      /resumed session's reasoning_effort does not match the configured effort/,
+    );
+    assert.ok(!peer.clientRequests.some((m) => m.method === "session/new"));
+    assert.ok(!peer.clientRequests.some((m) => m.method === "session/prompt"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ACP §3.6 R4：无 sessionReuse 的派发（含 delivery）一律 session/new，绝不 session/resume", async () => {
+  const { peer } = await runAcpScenario({
+    task: { prompt: "deliver", deliveryMode: true },
+    drive: ({ peer: p, promptRequest }) => {
+      p.respond(promptRequest().id, { stopReason: "end_turn" });
+    },
+  });
+  assert.ok(peer.clientRequests.some((m) => m.method === "session/new"), "非复用派发走 session/new");
+  assert.ok(!peer.clientRequests.some((m) => m.method === "session/resume"), "非复用派发绝不 session/resume");
+});
+
+// ===== §3.6 链路：resume 信封 → runManager 从前任何转录取回 id → backend =====
+
+test("ACP §3.6 链路：runBackground(runManager.start) 按 priorRunId 绑定读取器取回 provider session id 并 in-process 送达 backend（不进 argv）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-acp-resume-chain-"));
+  try {
+    const containmentPath = join(dir, "wao-contain.patch.yml");
+    writeFileSync(containmentPath, REFERENCE_CONTAINMENT, "utf8");
+    const runDir = join(dir, "runs");
+    mkdirSync(runDir, { recursive: true });
+    const priorRunId = "run_prior_20260921a";
+    const priorSessionId = "75c13e12-ce24-4409-b88e-59669cc70712";
+    // 前任转录（扁平事件形状）：终态 + 绑定 priorRunId 的 session.created。
+    const prior = new JsonlTranscript(join(runDir, `${priorRunId}.jsonl`), { runId: priorRunId, agentId: "coder_low_dsh" });
+    await prior.transitionState(null, "pending", "seed");
+    await prior.append("session.created", { backend: "deepseek-acp", backendSessionId: priorSessionId });
+    await prior.transitionState("pending", "completed", "seed_done");
+
+    const child = makeFakeChild();
+    const spawnCalls = [];
+    const backend = new DeepSeekAcpBackend({
+      containmentPatchPath: containmentPath,
+      spawnFn: (binary, args, opts) => {
+        spawnCalls.push({ binary, args: [...args], opts });
+        return child;
+      },
+    });
+    const peer = fakeAcpPeer(child);
+    // 异步驱动：prompt 请求一出现即应答 end_turn（runBackground 在等终态）。
+    const driver = setInterval(() => {
+      const pr = peer.clientRequests.find((m) => m.method === "session/prompt");
+      if (pr) {
+        peer.respond(pr.id, { stopReason: "end_turn" });
+        clearInterval(driver);
+      }
+    }, 10);
+    const result = await runBackground({
+      agentId: "coder_low_dsh",
+      prompt: "follow up",
+      registry: { agents: { coder_low_dsh: agent({ cwd: dir }) } },
+      runDir,
+      sessionReuse: {
+        mode: "lead_workspace",
+        opaqueUuid: "0f1e2d3c-4b5a-4978-8976-a5b4c3d2e1f0",
+        turn: "resume",
+        priorRunId,
+      },
+      backendFor: () => backend,
+      waitTimeout: 8000,
+      pollInterval: 10,
+    });
+    clearInterval(driver);
+    assert.equal(result.completed, true, "runBackground 驱动 resume run 到 completed");
+    const resumeRequest = peer.clientRequests.find((m) => m.method === "session/resume");
+    assert.ok(resumeRequest, "backend 收到 in-process 取回的 id 并发出 session/resume");
+    assert.equal(resumeRequest.params.sessionId, priorSessionId, "resume 的 id = 前任转录绑定的 backendSessionId");
+    assert.ok(!peer.clientRequests.some((m) => m.method === "session/new"), "链路上绝不 session/new");
+    // provider session id 绝不进 argv（R2：argv 只见 runId）。
+    const argvText = JSON.stringify(spawnCalls[0].args);
+    assert.ok(!argvText.includes(priorSessionId), "provider session id 不出现在 dsh argv");
+    assert.ok(!argvText.includes(priorRunId), "priorRunId 也不进 dsh argv（只在 runner argv 的信封里）");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

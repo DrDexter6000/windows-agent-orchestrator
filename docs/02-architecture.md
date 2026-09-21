@@ -373,11 +373,14 @@ durable prompt 重放到新 DSH 进程。配置和运维边界见 `docs/usage.md
   未知 stopReason 与断链（transport close 先于终态）→ failed，不投影为 completed。
 - **二次校验 = tripwire（检测非阻止）**：wire 上出现 `subagent` / `subagent_fork` /
   `spawn_teammate` 工具调用即终态 failed——副作用可能已发生，这是检测不是阻止。
-- **能力声明（§3.3；supportsSessionReuse 按 Lead 2026-09-20 临时裁定改 false，Owner 未决）**：
-  `supportsRoleContract=true`；`supportsSessionReuse=false`——opaqueUuid→ACP sessionId
-  关联面（持久化/原子/互斥/身份绑定）未落地，落地后改回 true，Owner 裁定见 ADR-0031
-  §3.6（ACP 有真 resume，F4，但 resume 轮在本层一律 fail-closed 拒绝——关联面零改动，
-  当前不具备跨 run 复用能力，声明 true 属"声明强于实现"）；`supportsInFlightCorrection=false`
+- **能力声明（§3.3；supportsSessionReuse 已按 §3.6 关联面落地 + 真实恢复证据翻 true，2026-09-21）**：
+  `supportsRoleContract=true`；`supportsSessionReuse=true`——关联面五项（关联持久化 /
+  原子写入 / 并发互斥 / 与 `{leadSession, workspace, agentId}` 三元组的身份绑定 / 缺失损坏
+  时拒绝恢复）落地：关联挂 transcript SSOT（opaqueUuid→routing 条目 runId→前任何
+  `session.created.backendSessionId`），resume 信封只携带前任 WAO runId，ACP sessionId 由
+  spawn 权威按 runId 绑定读取器取回、in-process 送达（绝不进 argv）；真实跨 run 恢复证据
+  `scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json`（正负向，含上游拒绝
+  fail-closed）；`supportsInFlightCorrection=false`
   （F7：无在途消息改写——如实声明，run_correct 在派发层被拒）；
   `replayByRespawn=false`；`reportsTokenUsage=false`（ACP `usage` 实测可为 null，2026-09-20 按组件验证裁定）。`validateAgentPolicy`：provider
   块拒绝（组合面固定为 `--profile acp` + 操作员 patch）；model 块拒绝——理由**不是**"无通道"：
@@ -960,13 +963,15 @@ CLI JSON 区分 `decisionAccepted:true`（winner）vs `decisionAccepted:false` +
 > server 实例在同一绑定 Git workspace 内再次询问同一**配置了 `sessionReuse: "lead_workspace"`**
 > 的专家（非 delivery），WAO 复用 provider 原生会话（Claude Code 会话）保留上下文/cache，
 > 同时**每次仍开全新 WAO run/transcript** 做独立监督。未配置该策略的 agent 保持现状行为。
-> ADR-0031 的 `deepseek-acp` 声明 `supportsSessionReuse=false`（Lead 2026-09-20 临时
-> 裁定，Owner 未决）：ACP 面有真 resume（F4），但 opaqueUuid→ACP sessionId 关联面
-> （ADR-0031 §3.6：持久化、原子写入、并发互斥、身份绑定、缺失/损坏拒绝恢复）未落地，
-> 落地后改回 true；当前其 resume 轮在 backend 层一律 fail-closed 拒绝——绝不静默开
-> 新 provider 会话，也绝不声明未兑现的复用能力。
+> ADR-0031 的 `deepseek-acp` 自 2026-09-21 起声明 `supportsSessionReuse=true`：§3.6 关联面
+> 五项落地（关联挂 transcript SSOT；resume 信封携带前任 WAO runId，ACP sessionId 由 spawn
+> 权威按 runId 绑定读取器从前任何转录取回、in-process 送达，绝不进 argv；缺失/损坏/上游
+> 拒绝一律 fail-closed，绝不静默新会话），真实跨 run 恢复证据见
+> `scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json`。
 > 真实 canary 以 `run_20260726130105899fc4g0v` 首轮保存随机事实，再由独立 run
 > `run_20260726130112391y43ux7` 通过 resume 准确回忆；两个 runId 与 transcript 互不复用。
+> deepseek-acp 的对应真实证据：`run_20260921000238093tpb7e8`（first，写入 marker）→
+> `run_20260921000242726tngoo7`（resume，同一 ACP sessionId `811d622a-…`，复述 marker）。
 
 **复用身份（provider 中立）**：`MCP server instance identity + 规范化 bound workspace + canonical agentId`
 三者经 sha256 派生为一个**不透明的 UUID v4**（设 version/variant 位）。该 opaque uuid 是
@@ -981,10 +986,16 @@ run。被复用的对象只有 backend 原生会话本身。
 worktree/session。`reuseEligible = agent.sessionReuse === "lead_workspace" && !publicDelivery`。
 
 **SSOT**：`src/application/sessionReuse.js`（纯计算 + 有限路由事实落盘）。决策矩阵
-（`resolveReuseTurn`）：无历史→`first`；prior run 非 terminal→`busy`；prior terminal 且有
-`session.created`→`resume`；prior terminal 但无 `session.created`（崩溃）→`first`；prior
+（`resolveReuseTurn`）：无历史→`first`；路由条目**损坏**（存在但不可解析/形状坏）→**拒绝**
+（ADR-0031 §3.6：绝不静默 first）；prior run 非 terminal→`busy`；prior terminal 且有绑定
+`session.created`（backendSessionId 为非空字符串）→`resume`（信封携带前任 runId）；prior
+terminal 且绑定 `session.created` 但 backendSessionId 缺失/空/非字符串→**拒绝**（§3.6）；
+prior terminal 但无 `session.created`（崩溃）→`first`；prior
 transcript 缺失且新鲜（<5min）→`busy`；缺失且陈旧→`first`。`first`/`resume` 在 per-key 文件锁
-内 claim slot，关闭并发竞态——同一身份绝不并发驱动同一 provider 会话。
+内 claim slot，关闭并发竞态——同一身份绝不并发驱动同一 provider 会话。resume 信封
+`{mode, opaqueUuid, turn, priorRunId}` 只携带前任 **WAO runId**（内部标识，非凭据）；provider
+session id 由 spawn 权威经 `resolvePriorProviderSessionId`（runId 绑定读取器）从前任何
+转录取回、in-process 送达 backend——**绝不进 argv**（ADR-0031 §3.6/R2）。
 
 **能力驱动 fail-closed**：backend 若无法表达所配置的复用策略，detached runner 在 provider spawn 前失败
 （`backend.supportsSessionReuse !== true` 即抛错），绝不静默开新 provider 会话。初始 background transcript

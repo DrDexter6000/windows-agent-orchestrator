@@ -215,11 +215,15 @@ WAO 以 `--patch <containment> --patch <role-contract>` 叠加两份覆盖层—
 OS temp 独占目录（无凭据、不进 transcript，用后清理）。WAO 只 detect / invoke / report，
 不生成、不升级、不持久修复该资产。能力边界（如实）：compose 层 `disabled` 是唯一真
 containment，**不是 OS 级沙箱隔离**；wire 上的 deny-list tripwire（subagent/subagent_fork/
-spawn_teammate）是**检测不是阻止**。该 backend 声明 `supportsSessionReuse=false`（Lead
-2026-09-20 临时裁定，Owner 未决）：opaqueUuid→ACP sessionId 关联面（持久化/原子/互斥/身份
-绑定）未落地；落地后改回 true；Owner 裁定见 ADR-0031 §3.6——当前 resume 轮一律在 backend
-层 fail-closed 拒绝，配了 `sessionReuse` 的 lane 会在 registry validate 收到 ⚠ 且派发前被
-能力门拒绝（期望行为）。**不支持在途纠偏**（`run_correct` 会被派发层拒绝，如实标注不静默）。
+spawn_teammate）是**检测不是阻止**。该 backend 声明 `supportsSessionReuse=true`（2026-09-21
+按 ADR-0031 §3.6 关联面落地 + 真实跨 run 恢复证据翻转）：关联面挂 transcript SSOT——
+routing 条目记前任 WAO runId，resume 信封只携带该 runId（内部标识，非凭据），ACP sessionId
+由 spawn 权威（runManager）按 runId 绑定读取器从前任何转录取回、in-process 送达 backend
+（**绝不进 argv**）；关联缺失/损坏（路由条目损坏、前任 `session.created.backendSessionId`
+缺失/空/非字符串）与上游 `session/resume` 拒绝（会话已消失、canonical workspace 不符）一律
+**fail-closed 拒绝，绝不静默新建会话**；仅 stable-workspace lane 的非 delivery 派发开复用，
+delivery 派发一律 fresh session。证据与复现：`scripts/reliability/dsh-acp/evidence/
+phase6-session-reuse.json`（正负向）。**不支持在途纠偏**（`run_correct` 会被派发层拒绝，如实标注不静默）。
 **reasoning.effort 条件可配（仅 low/high/max）**：Phase 5 实测（2026-09-20，dsh 0.1.5-rc.2，
 `scripts/reliability/dsh-acp/evidence/phase5-config-option-set*.json`）证明 ACP 面的
 `session/set_config_option` 可设置 `reasoning_effort`（set 响应 currentValue 确认生效；域外值
@@ -302,7 +306,7 @@ run 的 `--model` / `--reasoning` 与 registry 的 `model` / `reasoning` / `prov
 | codex | 支持（`--model`） | 支持（`-c model_reasoning_effort`） | 不支持 | 不支持（codex 自有登录） | 不支持 | 支持（turn.completed 帧 usage） | 支持（`-c developer_instructions` 追加） | 不支持 |
 | kimi-code | 支持（`--model`） | 条件：仅 `kimi-code/k3` 且 effort ∈ {low, high, max}（effort 编译为 KIMI_MODEL_THINKING_EFFORT env，agent.env 自设同名被拒） | 不支持 | 不支持（kimi 托管认证） | 不支持 | 不支持（stream-json 无 usage——tokenBudget 不生效，TD-87） | 支持（拼进同一条 prompt，非系统级通道） | 不支持 |
 | deepseek-harness | 支持（DSH_MODEL，缺省 deepseek-v4-flash） | 条件：effort ∈ {high, max}，可省略 | 支持（DSH_CONTEXT_WINDOW） | 不支持（组合由 `dshConfigPath` / `dshProvider` 表达） | 不支持 | 支持（assistant/message usage） | 支持（DSH_SYSTEM_PROMPT） | 不支持 |
-| deepseek-acp | 不支持（模型经 shipped acp profile 的 session configOptions 承载；Phase 5 已证同一 `session/set_config_option` 通道可 set model，但 **WAO 本轮未接线**——ACP 的 value 形状是 provider/model JSON 对，非 WAO 裸 `model.id`，接线需单独值域决策；配了仍即拒，模型取 profile 缺省） | 条件：effort ∈ {low, high, max}（六值闭集 ∩ ACP 广告 off/low/high/max 的交集；经 session/set_config_option 下发，Phase 5 实测 set 响应确认生效、域外值 -32602 被拒；响应未确认即 fail-closed 拒绝派发；其余档位固定文案拒绝，不发明映射） | 不支持（同 model 块——无可验证设置通道） | 不支持（组合面固定为 `--profile acp` + 操作员 patch） | 不支持（opaqueUuid→ACP sessionId 关联面未落地，待 ADR-0031 §3.6；resume 轮一律 fail-closed 拒绝；落地后改回 true） | 不支持（`PromptResponse.usage` 实测可为 null——组件验证 `reportsTokenUsageConsistency` 抓到 `declared=true, input=null`；2026-09-20 按实测裁定声明为 false） | 支持（per-dispatch `--patch` personaPrefix，结构化序列化） | 不支持 |
+| deepseek-acp | 不支持（模型经 shipped acp profile 的 session configOptions 承载；Phase 5 已证同一 `session/set_config_option` 通道可 set model，但 **WAO 本轮未接线**——ACP 的 value 形状是 provider/model JSON 对，非 WAO 裸 `model.id`，接线需单独值域决策；配了仍即拒，模型取 profile 缺省） | 条件：effort ∈ {low, high, max}（六值闭集 ∩ ACP 广告 off/low/high/max 的交集；经 session/set_config_option 下发，Phase 5 实测 set 响应确认生效、域外值 -32602 被拒；响应未确认即 fail-closed 拒绝派发；其余档位固定文案拒绝，不发明映射；resume 轮不发 set，改用 session/resume 响应 configOptions 只读核对，不符即拒） | 不支持（同 model 块——无可验证设置通道） | 不支持（组合面固定为 `--profile acp` + 操作员 patch） | 支持（ADR-0031 §3.6 关联面已落地：resume 信封只携带前任 WAO runId，ACP sessionId 由 spawn 权威按 runId 绑定读取器从前任何转录取回、in-process 送达（绝不进 argv）；关联缺失/损坏/上游拒绝一律 fail-closed 拒绝，绝不静默新会话；仅 stable-workspace lane 的非 delivery 派发，delivery 一律 fresh；真实跨 run 恢复证据 `scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json`） | 不支持（`PromptResponse.usage` 实测可为 null——组件验证 `reportsTokenUsageConsistency` 抓到 `declared=true, input=null`；2026-09-20 按实测裁定声明为 false） | 支持（per-dispatch `--patch` personaPrefix，结构化序列化） | 不支持 |
 | opencode-serve | 条件：必须 OpenCode 形状 {providerID, id, variant}；canonical 裸 {id} 被拒 | 不支持 | 不支持 | 不支持（模型路由由 `model.providerID` 承担） | 不支持 | 支持（session.tokens 周期轮询） | 条件：serve healthy 且版本 ≥ 1.18.0（派发前运行时探测） | 不支持 |
 
 两点衔接：per-dispatch `--model` 只替换 `model.id`、兄弟字段保留——opencode-serve 的 agent 必须先带 `providerID`（裸 {id} 叠 `--model` 仍是裸形状，照样被拒）；`--reasoning` 的六值闭集（minimal/low/medium/high/xhigh/max）由 `registry.js` `REASONING_EFFORTS` 在 registry 层校验，backend 层再按上表条件格收窄（kimi K3 档位闭集、deepseek-harness high/max；deepseek-acp 只放行 low/high/max——Phase 5 实测 `session/set_config_option` 可设置 ACP 广告的 off/low/high/max，与 WAO 六值闭集取交集，无证据支持映射故不发明）。

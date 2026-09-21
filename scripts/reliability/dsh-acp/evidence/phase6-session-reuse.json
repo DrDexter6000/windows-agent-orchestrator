@@ -1,0 +1,73 @@
+{
+  "drill": "ADR-0031 §3.6 phase6 session-reuse association (real dispatch)",
+  "date": "2026-09-21T00:02:37.959Z",
+  "node": "v22.23.1",
+  "dsh": "0.1.5-rc.2",
+  "agentId": "coder_low_dsh_reuse",
+  "leadSession": "<fixed drill lead (simulates the MCP server's stable injection)>",
+  "marker": "WAO_REUSE_P6_MUAHE77N_NG4F45",
+  "entry": "dispatchRun (the shared background dispatch service used by CLI run --background and MCP run_dispatch); the detached runner / RunManager / deepSeekAcp / dsh / model chain is real",
+  "registrySource": "D:\\projects\\windows-agent-orchestrator-poc\\config\\agents.json",
+  "runDir": "D:\\projects\\windows-agent-orchestrator-poc\\.wao-worktrees\\run_20260920233815938h6b7q4\\.wao\\runs\\phase6-reuse-runs",
+  "steps": {
+    "run1": {
+      "runId": "run_20260921000238093tpb7e8",
+      "accepted": true,
+      "providerSessionRouting": "first_turn_requested",
+      "state": "completed",
+      "backendSessionId": "811d622a-d83b-42ce-9073-4f752b7f37be",
+      "runSessionReuseTurn": "first",
+      "assistantEcho": "MARKER_STORED"
+    },
+    "run2": {
+      "runId": "run_20260921000242726tngoo7",
+      "accepted": true,
+      "providerSessionRouting": "resume_requested",
+      "state": "completed",
+      "backendSessionId": "811d622a-d83b-42ce-9073-4f752b7f37be",
+      "runSessionReuseTurn": "resume",
+      "assistantEcho": "WAO_REUSE_P6_MUAHE77N_NG4F45",
+      "resumeSystemFact": true
+    },
+    "negC_dispatch": {
+      "runId": "run_20260921000247414hr4e77",
+      "accepted": true,
+      "providerSessionRouting": "resume_requested"
+    }
+  },
+  "positive": {
+    "pass": true,
+    "claims": {
+      "sameAcpSessionAcrossRuns": true,
+      "resumeTurnRouted": true,
+      "contextCarried": true,
+      "resumeTranscriptFact": true,
+      "terminalState": "completed"
+    }
+  },
+  "negativeA": {
+    "tamper": "prior transcript session.created.backendSessionId -> empty string",
+    "refused": true,
+    "message": "sessionReuse: prior run has a bound session.created but no addressable provider session id (backendSessionId missing/empty/non-string) — refusing resume instead of silently starting a fresh provider conversation",
+    "noTranscriptForRefusedDispatch": true,
+    "pass": true
+  },
+  "negativeB": {
+    "tamper": "routing entry file -> unparseable bytes",
+    "refused": true,
+    "message": "sessionReuse: routing entry for this reuse identity is damaged (present but unparseable or malformed) — refusing instead of silently starting a fresh provider conversation",
+    "pass": true
+  },
+  "negativeC": {
+    "tamper": "prior transcript session.created.backendSessionId -> well-formed nonexistent uuid (11111111-2222-4333-8444-555555555555)",
+    "state": "failed",
+    "spawnError": "deepseek-acp JSON-RPC error -32602: Invalid params: session is not resumable: 11111111-2222-4333-8444-555555555555",
+    "pass": true
+  },
+  "pass": true,
+  "repro": [
+    "node scripts/wao-node.cjs scripts/reliability/dsh-acp/wao-reuse-drill.mjs",
+    "consumes real tokens (run1+run2 are small model turns; negC fails before the model)",
+    "prereq: dsh on PATH; operator-installed ~/.wao/runtimes/dsh-acp/wao-contain.patch.yml; DEEPSEEK_API_KEY in Windows user env"
+  ]
+}

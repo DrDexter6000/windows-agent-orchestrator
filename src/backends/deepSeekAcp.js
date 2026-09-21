@@ -28,16 +28,19 @@
 //     （找不到 reject 选项时 cancelled，绝不授予）；无可选项 → cancelled。应答以
 //     system message 事件进 transcript（system 消息不是 usable effect，不污染证据链）。
 //
-// 能力声明（ADR-0031 §3.3；supportsSessionReuse 按 Lead 2026-09-20 临时裁定改 false）：
+// 能力声明（ADR-0031 §3.3；supportsSessionReuse 已按 §3.6 关联面落地 + 真实恢复
+// drill 证据翻转 true，2026-09-21）：
 //   supportsRoleContract      = true   personaPrefix 注入已实测
-//   supportsSessionReuse      = false  opaqueUuid→ACP sessionId 关联面（持久化/原子/
-//                                      互斥/身份绑定）未落地；落地后改回 true；
-//                                      Owner 裁定见 ADR-0031 §3.6。resume 轮一律
-//                                      refuse（preflight fail-closed）——当前不具备
-//                                      跨 run 复用能力，声明 true 属"声明强于实现"
+//   supportsSessionReuse      = true   §3.6 五项（关联持久化/原子/互斥/身份绑定/缺失
+//                                      损坏拒绝恢复）已落地：关联挂 transcript SSOT
+//                                      （opaqueUuid→路由条目 runId→前任何 run 的
+//                                      session.created.backendSessionId），resume 信封
+//                                      只携带前任 WAO runId，provider session id 由
+//                                      spawn 权威经绑定读取器取回、in-process 送达；
+//                                      真实跨进程恢复证据见
+//                                      scripts/reliability/dsh-acp/evidence/phase6-*.json
 //   supportsInFlightCorrection= false  ACP 无在途消息改写（F7）——如实声明，不静默
-//   replayByRespawn           = false  跨 run 上下文续接依赖 §3.6 关联面（未落地），
-//                                      本层不承担重放
+//   replayByRespawn           = false  跨 run 上下文续接走 session/resume，本层不承担重放
 //   reportsTokenUsage         = false  usage_update + PromptResponse.usage 存在但实测可为 null
 //                                      （组件验证抓到 declared=true/input=null）
 //
@@ -284,12 +287,10 @@ function trimTail(value) {
  */
 export class DeepSeekAcpBackend {
   supportsRoleContract = true;
-  // Lead 2026-09-20 临时裁定（Owner 未决）：false。opaqueUuid→ACP sessionId 关联面
-  // （持久化/原子/互斥/身份绑定）未落地；落地后改回 true；Owner 裁定见 ADR-0031 §3.6。
-  // resume 轮一律 refuse（preflightInvocation fail-closed），关联面零改动——
-  // 当前不具备跨 run 复用能力。配了 sessionReuse 的 lane 会在 registry validate
-  // 得 ⚠ 且派发前被 runManager 的能力门 fail-closed 拒绝——这是期望行为。
-  supportsSessionReuse = false;
+  // ADR-0031 §3.6 关联面已落地（2026-09-21，真实恢复证据 phase6-*.json）：true。
+  // resume 轮 = session/resume（绝不回退 session/new）；关联/寻址失败一律 fail-closed
+  // 拒绝（preflight 与 spawn 双拒绝点）。翻转条件与证据边界见 ADR-0031 §3.6/§7.3。
+  supportsSessionReuse = true;
   supportsInFlightCorrection = false;
   replayByRespawn = false;
   // ADR-0031 §3.3：usage_update + PromptResponse.usage → tokenBudget 闸门有效。
@@ -364,11 +365,16 @@ export class DeepSeekAcpBackend {
         + " disabled plugin ids per scripts/reliability/dsh-acp/wao-contain-safe.patch.yml)",
       );
     }
-    // resume 轮 fail-closed：opaqueUuid→ACP sessionId 关联面（ADR-0031 §3.6）未补齐，
-    // 拒绝恢复而不是静默开新会话（否则静默丢上下文）。
-    if (task?.sessionReuse?.turn === "resume") {
+    // resume 轮 fail-closed（ADR-0031 §3.6，双拒绝点之一）：关联面 = resume 信封携带
+    // 前任 WAO runId，spawn 权威（runManager.start）经 transcript SSOT 绑定读取器
+    // （sessionReuse.resolvePriorProviderSessionId）取回 provider session id，以
+    // in-process task 字段 priorProviderSessionId 送达本 backend（绝不进 argv——
+    // argv 只见 runId）。此处要求 resume 轮必须携带非空字符串 provider session id，
+    // 否则固定文案拒绝——绝不静默开新会话（否则静默丢上下文）。
+    if (task?.sessionReuse?.turn === "resume"
+      && (typeof task?.priorProviderSessionId !== "string" || task.priorProviderSessionId.length === 0)) {
       throw new Error(
-        "deepseek-acp cannot resume a provider session yet: the opaqueUuid→ACP sessionId association contract (ADR-0031 §3.6) is not plumbed; refusing instead of silently starting a fresh session",
+        "deepseek-acp cannot resume the provider session: no transcript-recovered prior provider session id reached the backend (ADR-0031 §3.6 association) — refusing instead of silently starting a fresh session",
       );
     }
     return this._compileInvocation(agent, this._representativeRolePatchPath(Boolean(task.roleContract)));
@@ -752,24 +758,82 @@ export class DeepSeekAcpBackend {
         throw new Error("deepseek-acp runtime identity mismatch");
       }
       queue.push(runtimeActivityEvent("initialized"));
-      const created = await request("session/new", {
-        cwd: agent.cwd,
-        mcpServers: [],
-      });
-      if (typeof created?.sessionId !== "string" || created.sessionId.length === 0) {
-        throw new Error("deepseek-acp returned no sessionId");
+      // §3.6 会话建立（两分支，绝不互为回退）：
+      //   - resume 轮：session/resume {sessionId, cwd, mcpServers: []}（wire 形状取自
+      //     evidence/phase2-resume.json）。上游拒绝（会话已消失、canonical workspace
+      //     不符等）→ request() reject → 整轮 spawn 失败——**绝不回退 session/new**
+      //     （R3：静默新会话 = 静默丢上下文）。provider session id 来自 spawn 权威的
+      //     transcript 绑定读取（task.priorProviderSessionId，绝不进 argv）；resume
+      //     响应在 evidence 中不回显 sessionId——若某版本回显且与请求不符，拒绝，
+      //     绝不采纳未关联会话。
+      //   - first 轮/普通派发：session/new（既有行为，byte-compatible）。
+      const resumeRouting = task?.sessionReuse?.turn === "resume" ? task.sessionReuse : null;
+      let resumedConfigOptions = null;
+      if (resumeRouting) {
+        const priorSessionId = task.priorProviderSessionId;
+        if (typeof priorSessionId !== "string" || priorSessionId.length === 0) {
+          throw new Error(
+            "deepseek-acp cannot resume the provider session: no transcript-recovered prior provider session id reached the backend (ADR-0031 §3.6 association) — refusing instead of silently starting a fresh session",
+          );
+        }
+        const resumed = await request("session/resume", {
+          sessionId: priorSessionId,
+          cwd: agent.cwd,
+          mcpServers: [],
+        });
+        if (typeof resumed?.sessionId === "string" && resumed.sessionId.length > 0
+          && resumed.sessionId !== priorSessionId) {
+          throw new Error(
+            "deepseek-acp session/resume returned a different sessionId than requested — refusing instead of adopting an unassociated session",
+          );
+        }
+        acpSessionId = priorSessionId;
+        resumedConfigOptions = Array.isArray(resumed?.configOptions) ? resumed.configOptions : null;
+        // 会话内转录事实（system message 不是 usable effect，不污染证据链）：
+        // 证明本轮走的是 resume 而非新会话。
+        queue.push(redactor.redact(messageEvent("system", [{
+          type: "text",
+          text: "deepseek-acp provider session resumed via session/resume (prior provider session recovered from the transcript SSOT through the resume routing; a resume turn never starts a fresh session)",
+        }])));
+      } else {
+        const created = await request("session/new", {
+          cwd: agent.cwd,
+          mcpServers: [],
+        });
+        if (typeof created?.sessionId !== "string" || created.sessionId.length === 0) {
+          throw new Error("deepseek-acp returned no sessionId");
+        }
+        acpSessionId = created.sessionId;
       }
-      acpSessionId = created.sessionId;
       // reasoning.effort 下发（Phase 5 实证通道）：生效策略带非空 effort（registry
       // 配置或 per-dispatch --reasoning 覆盖；validateAgentPolicy 已把它收窄到
-      // SETTABLE_REASONING_EFFORTS）时，在 session/new 之后、prompt 之前经
-      // session/set_config_option 下发。**fail-closed**：响应必须确认请求值
-      // （configOptions 里 reasoning_effort 的 currentValue === 请求值）——
-      // 请求失败 / 无 configOptions / 选项缺失 / 生效值不符 → 拒绝派发，
-      // 不静默回退、不静默继续（配置假绿 = 缺陷）。effort 值来自闭集
-      // {low,high,max}，进审计文案是安全的（非任意用户串）。
+      // SETTABLE_REASONING_EFFORTS）时，在会话建立之后、prompt 之前处理。
+      // **fail-closed**：生效值必须与配置一致——请求失败 / 无 configOptions /
+      // 选项缺失 / 生效值不符 → 拒绝派发，不静默回退、不静默继续（配置假绿 = 缺陷）。
+      // effort 值来自闭集 {low,high,max}，进审计文案是安全的（非任意用户串）。
+      // §3.6 resume 轮：**不发 set**（resumed 会话上的 set 无实证），改用 resume
+      // 响应的 configOptions（phase2-resume.json 实证形状）做只读一致性核对——
+      // 首轮已把 effort set 进该会话，且复用派发禁 override（dispatchRun
+      // ModelOverride/ReasoningOverrideConflictError），故配置跨轮稳定；不符即拒。
       const effort = agent?.reasoning?.effort;
-      if (typeof effort === "string" && effort.length > 0) {
+      if (typeof effort === "string" && effort.length > 0 && resumeRouting) {
+        const confirmed = resumedConfigOptions
+          ? resumedConfigOptions.find((option) => option?.id === "reasoning_effort")
+          : undefined;
+        if (confirmed?.currentValue !== effort) {
+          throw new Error(
+            "deepseek-acp resumed session's reasoning_effort does not match the configured effort (expected currentValue "
+            + effort + ", got " + (confirmed === undefined ? "no reasoning_effort option" : JSON.stringify(confirmed.currentValue))
+            + ") — refusing to dispatch instead of silently proceeding with a different effort",
+          );
+        }
+        queue.push(redactor.redact(messageEvent("system", [{
+          type: "text",
+          text: "deepseek-acp reasoning effort verified on the resumed session: currentValue="
+            + confirmed.currentValue
+            + " from session/resume configOptions (read-only check; matches the configured effort)",
+        }])));
+      } else if (typeof effort === "string" && effort.length > 0) {
         const setResult = await request("session/set_config_option", {
           sessionId: acpSessionId,
           configId: "reasoning_effort",

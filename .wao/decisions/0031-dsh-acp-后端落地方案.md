@@ -95,7 +95,7 @@ CLI 提供 `--patch <file>`（可重复，叠加于 profile 层之后），格�
 | 能力 | 值 | 依据 |
 |---|---|---|
 | `supportsRoleContract` | true | personaPrefix 注入已验证 |
-| `supportsSessionReuse` | **false** | **Lead 临时裁定（2026-09-20，待 Owner 追认）**：F4 只证明上游协议具备 resume；WAO 侧 §3.6 关联面未落地，声明 true 属"声明强于实现"。落地 §3.6 五项 + 认证含真实会话恢复 drill 后改回 true。依据两席专项咨询（auditor/coder_mm 一致） |
+| `supportsSessionReuse` | **true** | **2026-09-21 翻转（原 2026-09-20 临时裁定 false）**：§3.6 五项关联面已落地 + 真实跨 run 恢复 drill 通过（`scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json`，正负向含上游拒绝 fail-closed）。落地形状见 §3.6 Phase 6 段 |
 | `supportsInFlightCorrection` | **false** | F7；能力表**如实标注"不支持"，不静默** |
 | `replayByRespawn` | false | 有真 resume，无需重放 |
 | `reportsTokenUsage` | true | `usage_update` + `PromptResponse.usage` |
@@ -189,6 +189,47 @@ vs 裸 `model.id`）"。
 - **反静默要求**：任何复用请求（含 `first` / `resume` / `continuable`）均**不得**退化为新会话；
   不得自动修改现有 lane 配置、删除历史，或用新会话"修复"恢复失败。
 
+**Phase 6 落地（2026-09-21，翻转条件已满足 → `supportsSessionReuse=true`）**：
+
+- 五项的落点（不新造持久化面，挂 transcript SSOT）：
+  1. **关联持久化**：`opaqueUuid`（身份三元组派生）→ routing 条目 `{runId, updatedAt}`
+     （`.session-reuse/<sha256>.json`）→ 前任 run 转录的 `session.created.backendSessionId`
+     （ACP sessionId）。不新增第二存储；`.session-reuse/` 仍只存 WAO runId。
+  2. **原子写入**：transcript 侧由 JsonlTranscript 的 append 锁提供；routing 条目为
+     单文件整体重写（`writeFile`），损坏以"存在但不可解析"被下一条拒绝。
+  3. **并发互斥**：沿用 `resolveReuseTurn` 的 `withKeyLock` 读-决-写（M11-11C 既有）。
+  4. **身份绑定**：沿用三元组派生 opaqueUuid + runId 绑定读取器（`findLatestBound`）。
+  5. **缺失/损坏拒绝恢复**：路由条目损坏（存在但不可解析/形状坏）→ 派发拒绝（固定文案）；
+     绑定 `session.created` 存在但 `backendSessionId` 缺失/空/非字符串 → 派发拒绝；
+     上游 `session/resume` 拒绝 → run failed（`-32602 session is not resumable` 实测），
+     **绝不回退 `session/new`**。
+- **信封形状（R2）**：resume 轮 `{mode, opaqueUuid, turn, priorRunId}`（priorRunId = 前任
+  WAO runId，`RUN_ID_RE` 约束；first 轮禁止该键）。ACP sessionId **不进 argv**：由
+  `runManager.start` 经 `resolvePriorProviderSessionId`（sessionReuse.js，runId 绑定读取器）
+  从前任何转录取回，以 in-process task 字段 `priorProviderSessionId` 送达 backend。
+  分层注：绑定读取器 hosted 在 core（sessionReuse.js）——backends 不能 import transcript
+  SSOT（L4 上向违例），由 spawn 权威读取并线程给 backend；backend 侧双拒绝点
+  （preflight + spawn）要求非空字符串，否则固定文案拒绝。
+- **既有降级保留**（未改，依据上方 Owner 追认范围注）：terminal 无 `session.created` ⇒ first；
+  路由条目 ENOENT（从未存在）⇒ first；prior 转录缺失+陈旧 ⇒ first。**路由条目"损坏"
+  （存在但坏）不在降级之列——拒绝**（与"缺失"区分）。
+- **真实恢复 drill**：`scripts/reliability/dsh-acp/wao-reuse-drill.mjs` →
+  `evidence/phase6-session-reuse.json`。正向：run1（`first_turn_requested`，ACP session
+  `811d622a-…`，写入 marker）→ run2 同 lane 同身份（`resume_requested`，`run.session_reuse.
+  turn=resume`，**同一** ACP sessionId，复述 marker）。负向×3：backendSessionId 改空 →
+  派发拒绝；路由条目损坏 → 派发拒绝；指向不存在会话 → 上游 `-32602` → run failed 不回退。
+- **组件层一致性（R5(c) 实测）**：翻转后对 `backend:deepseek-acp@6743c59` 重跑
+  `npm run component-check -- --subject deepseek-acp`（fixture = composition-cert
+  codex/gpt-5.6-sol，只作资格账、零派发）：17/17 ALL PASS，其中
+  `supportsSessionReuseConsistency` ✔ `declared=true … sessionAnchorPresent=true`
+  （声明与实测对上）；`reportsTokenUsageConsistency` ✔ `declared=false, input=null`
+  （双方向纪律保持，R6 未弱化）。本次台账写入 worktree 的
+  `.wao/runs/component-checks.json`（scratch）；正式主仓台账随合入后的组件验证周期更新。
+- **边界（如实）**：drill 经 `dispatchRun`（CLI/MCP 共享派发服务）+ 固定 leadSession 模拟
+  MCP 稳定注入（CLI 一次性 leadSession 按设计恒 first，docs/02-architecture.md §4.10）；
+  detached runner→RunManager→backend→dsh→模型全真实。删除 routing 条目（而非损坏）回到
+  ENOENT ⇒ first——M11-11C provider-中立合同，见上。
+
 ### 3.7 与旧线关系
 新旧并存；旧 backend 与其 runtime **保留至新线认证通过**，之后由 Owner 决定去留。
 
@@ -278,8 +319,12 @@ vs 裸 `model.id`）"。
    派发时在 `session/new` 后下发、**响应未确认请求值即 fail-closed 拒绝派发**。
    **遗留缺口**：现有 lane 普遍使用 `effort: max`——`max` 在交集内，可用；`medium`/`xhigh`/`minimal`
    在本 backend 上仍会被拒（非配置错误，是值域事实）。
-4. **§3.6 关联面仍为延期**（**Owner 2026-09-20 追认**，会话复用单独立项）：`supportsSessionReuse=false`；
-   配了会话复用的 lane（researcher 类）在本 backend 上**派发即拒**；未配复用的 lane 正常。
+4. ~~**§3.6 关联面仍为延期**~~ → **已落地并翻转（2026-09-21，Phase 6）**：五项关联面落地
+   （挂 transcript SSOT；resume 信封携带前任 WAO runId，ACP sessionId 由 spawn 权经绑定
+   读取器取回、in-process 送达；缺失/损坏/上游拒绝 fail-closed），真实跨 run 恢复 drill
+   通过（`evidence/phase6-session-reuse.json`，run1/run2 同一 ACP sessionId、上下文复述、
+   三条负向全拒）→ `supportsSessionReuse=true`。细节见 §3.6 Phase 6 段。适用域照守：
+   仅 stable-workspace lane 非 delivery 派发；delivery 一律 fresh session。
 5. **从未有一次真实 WAO 派发跑过这个 backend**：B-2 是探针直接驱动 `dsh --profile acp`；
    交付的 855 行测试**全部是假进程/假传输**。win32 `.cmd` 路径有真实断言，但**未对真实 `dsh.cmd` 跑过**。
 6. **MCP 与 smoke 面未扩**：`src/mcp/server.js` 的 `resolveBackendFor` 与 `src/smoke.js` 未纳入

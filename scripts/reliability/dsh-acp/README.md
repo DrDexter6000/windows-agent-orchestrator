@@ -10,8 +10,9 @@
 | `acp-smoke.mjs` | containment 冒烟：`initialize → session/new → session/close`，**不调用模型**，用于二分定位可安全关闭的插件 |
 | `acp-config-option.mjs` | config-option 可设置性探针：单会话内 `set_config_option` 对 `reasoning_effort`/`model` 的 set-确认 + 负对照，**不发 prompt**（Phase 5，2026-09-20） |
 | `acp-tool-sample.mjs` | 工具名采样：抓 `tool_call` 的真实字段形状与工具名 |
+| `wao-reuse-drill.mjs` | §3.6 会话复用关联面真实 WAO 派发 drill（Phase 6，2026-09-21）：正向跨 run 恢复 + 三条负向 fail-closed；经 `dispatchRun` fork 真实 detached runner→RunManager→backend→dsh→模型 |
 | `wao-contain-safe.patch.yml` | 实测收敛的 containment 覆盖层（`--patch` 叠加到 shipped `acp` profile）|
-| `evidence/*.json` | 各阶段原始输出（F2–F5 的证据） |
+| `evidence/*.json` | 各阶段原始输出（F2–F6 的证据） |
 
 ## 复现
 
@@ -61,6 +62,35 @@ Remove-Item Env:PROBE_EFFORT, Env:PROBE_OUT
   无客观判据）；**没有**证明 `high` 单独 set 生效（它是 session/new 的缺省
   currentValue，与 off/low/max 走同一 wire 通道）；`model` 的 set 只有单值取证，
   不构成 WAO 侧接线依据。
+
+## Phase 6 结论（evidence/phase6-session-reuse.json，2026-09-21，dsh 0.1.5-rc.2，Node v22.23.1）
+
+ADR-0031 §3.6 关联面落地的**真实 WAO 派发**证据（非裸探针）：
+
+- **正向**：同 lane（`coder_low_dsh_reuse`）同身份两次派发——run1 `first_turn_requested`
+  （写入随机 marker，ACP session `811d622a-…`）→ run2 `resume_requested`
+  （`run.session_reuse.turn=resume`，`session.created.backendSessionId` 与 run1 **相同**，
+  assistant 复述 marker）——跨进程、跨 WAO run 的真实上下文恢复。
+- **负向×3**（全部拒绝，绝不静默新会话）：前任转录 `backendSessionId` 改空 → 派发拒绝
+  （固定文案）；routing 条目损坏 → 派发拒绝；关联指向不存在会话 → 上游
+  `-32602 "session is not resumable"` → run failed（不回退 `session/new`）。
+
+复现（消耗真实 token，保持最小；run1/run2 是两小轮，负向 C 在模型前失败）：
+
+```powershell
+node scripts/wao-node.cjs scripts/reliability/dsh-acp/wao-reuse-drill.mjs
+# 前置：dsh 在 PATH；~/.wao/runtimes/dsh-acp/wao-contain.patch.yml 已装；
+# DEEPSEEK_API_KEY 在 Windows 用户环境。registry 默认只读外层主仓 config/agents.json，
+# 复制到 <repo>/.wao/runs/drill-agents.json（--registry-source 可换来源）。
+```
+
+诚实边界：drill 经 `dispatchRun`（CLI `run --background` 与 MCP `run_dispatch` 共享的
+派发服务）+ **固定 leadSession** 模拟 MCP server 的稳定注入——CLI 每次派发一次性
+leadSession（设计如此），同身份复现只能这样进；MCP 注入面由
+`test/run-lifecycle/m11-11c-sessionReuse.test.js` MCP-1/MCP-2 单测钉住。run 产物在
+`<repo>/.wao/runs/phase6-reuse-runs/`。**删除** routing 条目（而非损坏）会回到"条目
+不存在 ⇒ first"的 M11-11C provider-中立合同（ADR-0031 §3.6 裁定范围注）——该路径
+未在本 drill 执行（会多烧一轮模型 token），属已知设计行为而非未测缺陷。
 
 ## 边界（诚实声明）
 

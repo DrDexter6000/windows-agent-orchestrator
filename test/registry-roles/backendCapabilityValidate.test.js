@@ -139,10 +139,10 @@ test("ADR25-B2-MATRIX: backendCapabilitySnapshot 与全部工厂 backend 类的�
     "codex": { reportsTokenUsage: true, supportsSessionReuse: false },
     "kimi-code": { reportsTokenUsage: false, supportsSessionReuse: false },
     "deepseek-harness": { reportsTokenUsage: true, supportsSessionReuse: false },
-    // ADR-0031：ACP 线 supportsSessionReuse=false（Lead 2026-09-20 临时裁定，Owner
-    // 未决）——opaqueUuid→ACP sessionId 关联面（持久化/原子/互斥/身份绑定）未落地，
-    // 落地后改回 true；resume 轮一律 fail-closed 拒绝（见 deepSeekAcp.js）。
-    "deepseek-acp": { reportsTokenUsage: false, supportsSessionReuse: false },
+    // ADR-0031 §3.6：ACP 线关联面（挂 transcript SSOT + resume 信封携带前任 runId +
+    // 绑定读取器取回 + 缺失/损坏 fail-closed）已落地，真实跨进程恢复证据
+    // （scripts/reliability/dsh-acp/evidence/phase6-*.json）通过 → 2026-09-21 翻 true。
+    "deepseek-acp": { reportsTokenUsage: false, supportsSessionReuse: true },
     "opencode-serve": { reportsTokenUsage: true, supportsSessionReuse: false },
   };
   for (const [backend, caps] of Object.entries(expected)) {

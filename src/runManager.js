@@ -14,7 +14,7 @@ import { verifyDelivery as defaultVerifyDelivery, createCallerGate } from "./del
 import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecutionContract } from "./application/roleContract.js";
 import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./application/credentialReadiness.js";
 import { inheritedEnvNames } from "./envPolicy.js";
-import { validateSessionReuseRouting } from "./application/sessionReuse.js";
+import { validateSessionReuseRouting, resolvePriorProviderSessionId } from "./application/sessionReuse.js";
 import { WRITE_INTENT_CORRELATION_STATUS, DONE_MARKERS } from "./runEvent.js";
 import { ISOLATION_VIOLATION_REASONS } from "./diagnosis.js";
 // R11-1: the closed effort set SSOT lives in the registry (its historical
@@ -566,9 +566,13 @@ export class RunManager {
       // present = mode 必须为 "git_commit_v1"，要求 persistent worktree 隔离，
       // worker 完成后控制面打包 delivery commit。
       delivery = null,
-      // M11-11C: opaque provider-session reuse routing {mode, opaqueUuid, turn},
-      // resolved by dispatchRun from the agent's sessionReuse policy. Absent for
-      // non-reusable runs. The capability check below gates it provider-neutrally.
+      // M11-11C: opaque provider-session reuse routing
+      // {mode, opaqueUuid, turn[, priorRunId]}, resolved by dispatchRun from
+      // the agent's sessionReuse policy. Absent for non-reusable runs. The
+      // capability check below gates it provider-neutrally. ADR-0031 §3.6/R2:
+      // a resume turn's priorRunId is the prior WAO run whose transcript holds
+      // the provider session; start() recovers the id (resolvePriorProvider-
+      // SessionId) and threads it to the backend in-process.
       sessionReuse = null,
       // M12-6 (P1-A): server-proven frozen HEAD threaded from the MCP boundary
       // (binding.gitHead). When present, start revalidates the source HEAD against
@@ -881,6 +885,26 @@ export class RunManager {
       }
     }
 
+    // ADR-0031 §3.6 (association contract, R2): for a RESUME turn, recover the
+    // prior run's provider session id from the transcript SSOT keyed by the
+    // envelope's priorRunId — BEFORE the credential check, transcript write,
+    // worktree, and spawn (the same zero-side-effect position the capability
+    // gate above holds). The id never travels in argv; it crosses to the
+    // backend in the in-process task object (priorProviderSessionId) and the
+    // backend re-refuses when it is absent/unusable (double refusal point).
+    // Fail-closed on every association failure mode (missing/unparseable prior
+    // transcript, no bound session.created, unusable backendSessionId) — never
+    // a silent fresh conversation. Layering note: the bound reader lives in
+    // sessionReuse.js (core) because backends cannot import the transcript SSOT
+    // (upward edge); the SPAWN AUTHORITY reads and threads it.
+    let priorProviderSessionId = null;
+    if (sessionReuse?.turn === "resume") {
+      priorProviderSessionId = await resolvePriorProviderSessionId({
+        runDir: resolve(runDir ?? this.config.runDir),
+        priorRunId: sessionReuse.priorRunId,
+      });
+    }
+
     // R7-AB (layer 2): working-directory existence early-refusal, shared SSOT
     // with dispatchRun (defined in THIS module — DispatchCwdNotFoundError +
     // assertExistingDispatchCwd above; runDispatch imports them downward).
@@ -960,7 +984,7 @@ export class RunManager {
       await backend.preflightInvocation(agent, {
         prompt,
         roleContract,
-        ...(sessionReuse ? { sessionReuse } : {}),
+        ...(sessionReuse ? { sessionReuse, priorProviderSessionId } : {}),
       });
     }
 
@@ -1314,7 +1338,9 @@ export class RunManager {
         resolvedCredentials,
         // M11-11C: opaque reuse routing → backend compiles --session-id/--resume.
         // Absent for non-reusable runs (backends ignore the field).
-        ...(sessionReuse ? { sessionReuse } : {}),
+        // §3.6/R2: resume turns additionally carry the transcript-recovered
+        // provider session id (in-process only — never argv); null on first turns.
+        ...(sessionReuse ? { sessionReuse, priorProviderSessionId } : {}),
         ...(deliveryContext ? { deliveryMode: true } : {}),
         // M12-16: correctable → backend spawns with a piped stdin + stream-json
         // input and attaches sendCorrection to the handle. Absent = byte-compatible.

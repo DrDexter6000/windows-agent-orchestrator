@@ -87,13 +87,20 @@ test("M12-7-LIN-03: lineage reuse key hash is sha256 of the opaque uuid (no uuid
 
 test("M12-7-LIN-04: validateSessionReuseRouting accepts run_lineage envelope (closed shape)", () => {
   const opaque = deriveLineageOpaqueUuid({ leadSession: LEAD, workspace: WS, agentId: AGENT, rootRunId: ROOT });
-  const ok = validateSessionReuseRouting({ mode: "run_lineage", opaqueUuid: opaque, turn: "resume" });
+  // §3.6/R2：resume 轮携带 priorRunId（前任 WAO runId）；first 轮禁止。
+  const ok = validateSessionReuseRouting({ mode: "run_lineage", opaqueUuid: opaque, turn: "resume", priorRunId: ROOT });
   assert.equal(ok.mode, "run_lineage");
   assert.equal(ok.turn, "resume");
+  assert.equal(ok.priorRunId, ROOT);
+  assert.ok(validateSessionReuseRouting({ mode: "run_lineage", opaqueUuid: opaque, turn: "first" }));
   // Still rejects malformed envelopes (fail closed -> never a silent fresh chat).
   assert.throws(() => validateSessionReuseRouting({ mode: "run_lineage", opaqueUuid: opaque }), /invalid internal routing envelope/);
   assert.throws(() => validateSessionReuseRouting({ mode: "bogus", opaqueUuid: opaque, turn: "first" }), /invalid internal routing envelope/);
   assert.throws(() => validateSessionReuseRouting({ mode: "run_lineage", opaqueUuid: "not-a-uuid", turn: "first" }), /invalid internal routing envelope/);
+  // resume 无 priorRunId → 拒（§3.6）。
+  assert.throws(() => validateSessionReuseRouting({ mode: "run_lineage", opaqueUuid: opaque, turn: "resume" }), /invalid internal routing envelope/);
+  // first 带 priorRunId → 拒（形状不放宽成"任意额外键"）。
+  assert.throws(() => validateSessionReuseRouting({ mode: "run_lineage", opaqueUuid: opaque, turn: "first", priorRunId: ROOT }), /invalid internal routing envelope/);
 });
 
 test("M12-7-LIN-05: lead_workspace policy set is unchanged (run_lineage is routing-only, not an agent policy)", () => {
@@ -136,6 +143,8 @@ test("M12-7-LIN-07: continuation resumes with the SAME opaque id as the first tu
     assert.equal(cont.kind, "resume");
     assert.equal(cont.routing.turn, "resume");
     assert.equal(cont.routing.opaqueUuid, first.routing.opaqueUuid, "continuation reuses the SAME opaque provider id");
+    // §3.6/R2：resume 信封携带前任 runId（lineage 槽位前一 owner = root）。
+    assert.equal(cont.routing.priorRunId, ROOT);
   } finally {
     rmSync(runDir, { recursive: true, force: true });
   }

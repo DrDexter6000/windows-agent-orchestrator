@@ -220,8 +220,9 @@ export const PROVIDER_SESSION_ROUTING = Object.freeze([
 /**
  * Derive the bounded providerSessionRouting value from the internal routing
  * turn dispatchRun selected. Only the TURN matters (first → first_turn_requested,
- * resume → resume_requested); the mode and opaque uuid are intentionally dropped.
- * @param {{mode:string, opaqueUuid:string, turn:string}|null} routing
+ * resume → resume_requested); the mode, opaque uuid, and priorRunId are
+ * intentionally dropped.
+ * @param {{mode:string, opaqueUuid:string, turn:string, priorRunId?:string}|null} routing
  * @returns {"not_used"|"first_turn_requested"|"resume_requested"}
  */
 function deriveProviderSessionRouting(routing) {
@@ -556,12 +557,17 @@ export async function dispatchRun({
   // always starts a fresh backend conversation). Resolve the reuse turn
   // (first/resume/busy) BEFORE the transcript write or fork. On busy, throw
   // ReuseBusyError (zero transcript, zero fork — contract 6). The opaque
-  // routing {mode, opaqueUuid, turn} is threaded to the detached runner via
-  // argv; the opaque uuid is the ONLY identifier handed to the provider
-  // (--session-id/--resume). Raw Lead id / workspace / agentId never enter MCP
-  // output or the bounded audit event. The routing slot is claimed under a
-  // per-key file lock so two concurrent dispatches for the same identity
-  // cannot both fork (the second observes the first as busy).
+  // routing {mode, opaqueUuid, turn[, priorRunId]} is threaded to the detached
+  // runner via argv; the opaque uuid is the ONLY identifier handed to the
+  // provider (--session-id/--resume). ADR-0031 §3.6/R2: the RESUME envelope
+  // additionally carries the prior WAO runId (internal identifier, never a
+  // credential) so the runner can recover the provider session id from the
+  // prior transcript SSOT — the provider session id itself never enters argv.
+  // Raw Lead id / workspace / agentId never enter MCP output or the bounded
+  // audit event. The routing slot is claimed under a per-key file lock so two
+  // concurrent dispatches for the same identity cannot both fork (the second
+  // observes the first as busy). §3.6 fail-closed: a damaged routing entry or
+  // an unaddressable prior session refuses here (zero transcript, zero fork).
   //
   // R7-C (C-3): reuseEligible and its two refusals (leadSession / cwd-empty)
   // are computed/hoisted ABOVE the cwd existence assert — see the hoisted
@@ -711,9 +717,11 @@ export async function dispatchRun({
     runnerArgs.push("--frozen-git-head", frozenGitHead);
   }
   // M11-11C: thread the resolved reuse routing to the detached runner. The
-  // payload is opaque ({mode, opaqueUuid, turn}) — it carries no raw Lead id,
-  // workspace path, or agentId. Detached-runner argv is server-side (never
-  // returned via MCP); the prompt already travels the same channel.
+  // payload is opaque ({mode, opaqueUuid, turn[, priorRunId]}) — it carries no
+  // raw Lead id, workspace path, agentId, or provider session id. The resume
+  // turn's priorRunId is a WAO runId (internal handle to the transcript SSOT).
+  // Detached-runner argv is server-side (never returned via MCP); the prompt
+  // already travels the same channel.
   if (sessionReuseRouting) {
     runnerArgs.push("--session-reuse-json", JSON.stringify(sessionReuseRouting));
   }
