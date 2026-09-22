@@ -106,7 +106,7 @@ WAO 是"装一次，开发多个项目"的工具：
 | **Work Scope（后置 audit）** | 独立复核 Coder 产出、查伪完成、质疑声明、给 PASS/FAIL，不把验收扩张成新方案 |
 | **边界** | 不改代码（归 Coder）；不和 Coder 同源（独立性）；不跑测试（归 Tester） |
 | **默认 lane 配置** | 见 `config/agents.example.json` 的 `auditor` 条目；本机真值以 `config/agents.json`（gitignored）为准 |
-| **裁定注记** | 2026-09-17 Owner 裁定由已停用的 Claude 通道切到 Codex / GPT-6-astra，effort=medium |
+| **裁定注记** | 2026-09-17 Owner 裁定由已停用的 Claude 通道切到 Codex / GPT-6-astra，effort=medium；**2026-09-22 Owner 裁定 effort medium → high**（本机 `config/agents.json` 已改并 `registry validate` 复核：9 agent 全 valid、零 ⚠） |
 | **会话复用** | 无（2026-09-17 切 codex 起）。历史注记：claude-code 通道时期用 `sessionReuse=lead_workspace`（M11-11C，语义详见 `02-architecture.md §4.10`）；**CLI 直派 sessionReuse 型 agent 须显式 `--cwd` 指向 git 根**的注意事项对仍在用该机制的 agent（如 researcher）依然适用（2026-08-23 life-index 会话实证） |
 
 ## Lead 派工策略

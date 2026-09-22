@@ -1452,7 +1452,7 @@ test("M12 canonical role value pins: coder_low + tester + auditor Owner decision
   assert.equal(parsed.agents?.tester?.model?.id, "gpt-5.6-sol");
   assert.equal(parsed.agents?.tester?.reasoning?.effort, "xhigh");
   assert.equal(parsed.agents?.auditor?.model?.id, "gpt-6-astra");
-  assert.equal(parsed.agents?.auditor?.reasoning?.effort, "medium");
+  assert.equal(parsed.agents?.auditor?.reasoning?.effort, "high");
 });
 
 test("M12-8A/M12-9/M12-10/M12-16: SKILL/architecture 工具数与 toolSurface SSOT 一致（TD-120 关系型守卫）", () => {

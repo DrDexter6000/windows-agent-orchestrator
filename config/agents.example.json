@@ -122,7 +122,7 @@
     },
     "auditor": {
       "_comment": "[Chief-Advisor / Auditor] 同一个 auditor agentId 的按需双模式专家：前置建议/红队挑战 + 后置独立审计。与 Coder 不同源。",
-      "_comment_backend": "codex（OpenAI Codex CLI）。GPT-6-astra，effort=medium（2026-09-17 Owner 裁定切换——claude 订阅已取消，官方 Claude 通道停用）。",
+      "_comment_backend": "codex（OpenAI Codex CLI）。GPT-6-astra，effort=high（2026-09-22 Owner 裁定由 medium 升级；通道本身于 2026-09-17 Owner 裁定切换——claude 订阅已取消，官方 Claude 通道停用）。",
       "_comment_auth": "codex 自有认证（~/.codex，与 tester 同源），无 OAuth 依赖。",
       "_comment_task": "适合任务: 前置方案审计/后置独立复核/PASS-FAIL 判定",
       "backend": "codex",
@@ -133,7 +133,7 @@
         "id": "gpt-6-astra"
       },
       "reasoning": {
-        "effort": "medium"
+        "effort": "high"
       },
       "args": []
     },
