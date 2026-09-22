@@ -269,6 +269,14 @@ function summarizeWorkers(cases) {
         reasonCode: adoptsWorse ? workerReasonCode(c.certification) : summary.reasonCode,
         // TD-111: 该 worker（active identity 的 case）最近一次全绿的时间；从未全绿 → null。
         lastHealthyRunAt: latestTimestamp(summary?.lastHealthyRunAt ?? null, c.lastHealthyRunAt ?? null),
+        // TD-186（2026-09-22）：worker 级执行画像——active identity 各 case 中最后一条
+        // 带 executionProfile 的记录原样入账（run-reliability 把 fresh case 追加在数组尾，
+        // 同 identity 重认证后天然取最新）。legacy 旧 case 无该字段 → 整体 undefined：
+        // 绝不补猜值（缺失即 unknown，由只读详情层如实判"无法判断"）。只进磁盘 summary，
+        // 不进 CLI/MCP 简表投影（buildCertMap 白名单不含它）。
+        executionProfile: c.executionProfile !== undefined
+          ? c.executionProfile
+          : summary?.executionProfile,
         // R23-C §2：仅 full-scope 且全绿的 case 刷新（scope 感知；delta 全绿不刷新——
         // delta 通过是 conditional，不得洗白全量口径的派发新鲜度）。取各 active-identity
         // case 的最大值。记录侧无条件写：null = 从未有全量绿（undefined 只留给 legacy）。

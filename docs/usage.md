@@ -441,13 +441,35 @@ opencode-serve 是 HTTP 服务 backend，因此保持稳定的未验证身份。
   `test/isolation-infra/docsSurface.test.js` / `docs-consistency.test.js` 守卫）；
   此处复制会制造第二份会漂移的真相源。
 
+**认证证据绑定执行画像 + 只读适用性三态（TD-186，2026-09-22）**：组合层认证
+（`npm run reliability`）新写入的 case 记录实际生效的执行画像——`modelId` /
+`providerID` / `providerKey` / `effort`（取自该 lane 的 registry 配置，与派发同源）、
+`runtime`（复用 `runtimeIdentity.mjs` 探测，探不到如实 `verified:false`）、`codeRef`
+（git HEAD 只读获取）、`capturedAt`、各 drill 的 `runId`（`drillRunIds`；drills.mjs
+不上抛内部 runId 的 drill 如实记 `null`）。旧记录不补猜值（缺画像即 unknown）。查询
+侧：`registry list --cert-evidence`（text 追加详情块 / `--format json` 附
+`certificationEvidence` 数组，与 `registry_list` 共用
+`src/application/registryInventory.js` 服务）按席位分列展示**声明 / 组件观测 / 组合
+结果 / 证据适用性 / 限制与来源**；台账来源状态（缺文件 / 不可解析 / 读取错误）分别
+可辨，不复用有损吞错的简表路径。**证据适用性是三态闭集
+`matched / mismatched / undeterminable`**：身份四元组（`matchedCertRecord` SSOT）或
+effort 与声明不一致 → `mismatched`；画像不明（legacy 记录无执行画像）或台账来源
+不可用/无记录 → `undeterminable`；**`undeterminable` 绝不算绿**，且该列**绝不**与
+组件/组合结果合并派生"总体可用=true"——只读展示，不改派发门（`--require-certified`
+语义不变；effort 纳入派发身份是 Owner 级决定）。
+
 **认证更新的触发器与执行人**（ADR-0032 附则呼应；不改代码行为，只定规程）：
 
 - **更新频次 = 事件触发为主**：① 上游运行时版本变更（操作员升级 claude/codex/kimi/
   dsh 等后——组件层入口的 runtimeIdentity 探测会把版本漂移显式标成 advisory）；②
-  WAO 适配代码变更（backend/parser 改动 = codeRef 滚动，旧组件键自然过期）。
+  WAO 适配代码变更（backend/parser 改动 = codeRef 滚动，旧组件键自然过期）；③
+  **席位有效配置变化（model / reasoning / provider）**：Lead 判断影响面 → 安排该席位
+  **定向重验**（重跑其认证 case），或**明确记录暂缓及使用限制**（何时补验、在此之前
+  该席位按什么范围降级使用）。配置变更后的旧证据不自动适用（TD-186：新证据记录
+  执行画像，只读适用性三态见上一段）。
 - **时间窗兜底**：沿用 `componentLedger.mjs` 的 `DEFAULT_MAX_AGE_DAYS=30` 作为**审阅
-  提醒**（超期记录消费为 stale advisory）——**不**做每月无差别全量重跑。
+  提醒**（超期记录消费为 stale advisory）——**不**做每月无差别全量重跑；30 天窗是
+  **组件记录的审阅提醒，不能替代配置变更后的影响判断**（记录未超期 ≠ 对新配置适用）。
 - **派发报错是最后防线**：派发失败只记回归信号（组件层红 = 新鲜度分叉），**不**
   自动耗 token 重考。
 - **执行人**：**操作员**负责安装/升级 runtime；**Lead** 界定影响面并调度重验（哪个

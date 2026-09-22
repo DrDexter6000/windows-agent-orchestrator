@@ -22,10 +22,14 @@
 //   npm run reliability -- --wait-timeout 300000  # 覆盖单 worker 超时（默认 300000）
 
 import { writeFileSync, mkdirSync, rmSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { certifyCase, summarizeCertification, mergeCaseResults, pruneStaleCases } from "./reliability/certification.mjs";
 import { buildCertificationMatrix } from "./reliability/matrix.mjs";
+// TD-186：认证证据绑定执行画像——运行时身份探测复用组件层既有探针（一次 spawn /
+// backend，零新指纹平台），探不到如实 verified:false，绝不猜。
+import { probeRuntimeIdentity } from "./reliability/runtimeIdentity.mjs";
 // R23-C：providerKey（认证身份第 4 维）归一化单一实现——src 宿主下向 import。
 import { providerKeyFor } from "../src/providerFingerprint.js";
 import { metricsNonZeroCheck } from "./reliability/metricsCheck.mjs";
@@ -169,8 +173,38 @@ function agentInfo(agentId) {
     // R23-C：providerKey（规范化 baseUrl + apiKeyEnv 变量名指纹）——与
     // matrix.normalizeCase 同一 SSOT 派生（src/providerFingerprint.js），无第二套归一化。
     providerKey: providerKeyFor(agent.provider),
+    // TD-186：执行画像第 4 值——effort 取自该 lane 实际生效的 agent 配置
+    // （registry.agents[agentId].reasoning.effort；null = 未配置，runtime 默认），
+    // 不从矩阵行/别处复制。旧记录不补猜（由 summarize 层留 undefined）。
+    effort: agent.reasoning?.effort ?? null,
     completionMode: agent.completionMode ?? "snapshot-stable",
   };
+}
+
+// --- TD-186：执行画像取证（只读，一次运行内每 backend 至多探一次）---
+// git HEAD 只读获取（rev-parse；探不到 → null = unknown，不猜）。
+const GIT_HEAD = (() => {
+  try {
+    const out = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: ROOT, encoding: "utf8", windowsHide: true,
+    });
+    const sha = out.trim();
+    return /^[0-9a-f]{7,40}$/i.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+})();
+
+const runtimeIdentityByBackend = new Map();
+function runtimeIdentityFor(agent) {
+  if (!agent?.backend) return null;
+  if (!runtimeIdentityByBackend.has(agent.backend)) {
+    runtimeIdentityByBackend.set(
+      agent.backend,
+      probeRuntimeIdentity({ backendName: agent.backend, agent }),
+    );
+  }
+  return runtimeIdentityByBackend.get(agent.backend);
 }
 
 // ADR-0032 §8（2026-09-21 修复）+ reportsCommandExitCode 诚实声明：
@@ -270,6 +304,20 @@ for (const tc of MATRIX) {
     // R23-C：case 声明的认证身份含 providerKey（matrix 行从 registry 派生，与
     // agentInfo 同源；null = 已观察无接入方，undefined 只留给 legacy 旧记录）。
     providerKey: tc.providerKey ?? info.providerKey,
+    // TD-186（2026-09-22）：证据绑定执行画像——值全部来自本次运行实际派发的
+    // agent 配置（agentInfo 读 registry.agents[agentId]，与派发同源；matrix
+    // normalizeCase 已保证行值不覆盖 agent 值）。drillRunIds 在各 drill 跑完后
+    // 回填（见 checks 汇总处）。旧 case 不补猜：merge 保留原样（无该字段）。
+    executionProfile: {
+      modelId: tc.modelId ?? info.modelId,
+      providerID: tc.providerID ?? info.providerID,
+      providerKey: tc.providerKey ?? info.providerKey,
+      effort: info.effort,
+      runtime: runtimeIdentityFor(registry.agents?.[tc.agentId]),
+      codeRef: GIT_HEAD,
+      capturedAt: new Date().toISOString(),
+      drillRunIds: {},
+    },
     completionMode: tc.completionMode ?? info.completionMode,
     requiredCategories: tc.requiredCategories,
     profile: tc.profile,
@@ -384,6 +432,20 @@ for (const tc of MATRIX) {
   }
 
   checks.push(...unsupportedDrillChecks(tc, handledDrills));
+
+  // TD-186：该 case 各 drill 的 runId——runner 直接可观察的 drill（sentinel/scorecard）
+  // 记实际 runId；drills.mjs 只回 checks、不上抛内部 runId 的 drill（isolation/
+  // adversarialEscape/workflowRunDir/stop）如实记 null（绝不用 "unknown" 之外的猜值）。
+  caseResult.executionProfile.drillRunIds = Object.fromEntries(
+    tc.drills.map((drill) => [
+      drill,
+      drill === "sentinel"
+        ? (caseResult.runId ?? null)
+        : drill === "scorecard"
+          ? (caseResult.scorecardRunId ?? null)
+          : null,
+    ]),
+  );
 
   // ADR-0032 §8 五态判定：
   //   caseFailed = 存在 fail / blocked / inconclusive 检查（真失败/真阻塞——拉倒 allPass）。

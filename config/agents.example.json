@@ -212,6 +212,17 @@
           "sentinel",
           "scorecard"
         ]
+      },
+      {
+        "agentId": "auditor",
+        "label": "GPT-6-astra high via codex（前置建议/红队挑战 + 独立审计）",
+        "profile": "strict",
+        "modelId": "gpt-6-astra",
+        "drills": [
+          "sentinel",
+          "scorecard"
+        ],
+        "_comment": "TD-186（2026-09-22）：label 必须随 effort 档位同步——label 是 runner 的 caseId，旧档位字样（medium）会让重取证的新证据仍被读成旧档已认证。effort=high（2026-09-22 Owner 裁定由 medium 升级，同日重取证）。旧 case 是历史，不删；本行只表达当前档位。"
       }
     ]
   }

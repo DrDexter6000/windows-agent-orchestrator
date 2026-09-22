@@ -564,3 +564,133 @@ test("pruneStaleCases T5 结构钉：run-reliability merge 调用点接线", () 
   assert.match(script, /mergeCaseResults\(pruneStaleCases\(priorCases,\s*MATRIX\),\s*results\)/,
     "merge 调用点必须先 prune 再 merge（僵尸 caseId 清算是 merge 前置步骤）");
 });
+
+// =====================================================================
+// TD-186（2026-09-22）：认证证据绑定执行画像。
+//
+// 背景（实证，不重论证）：auditor 席位 effort medium→high 重取证后，summary 里
+// status=certified、时间戳刷新，但记录不表达执行画像（effort=null）且 caseId 仍带
+// 旧档位字样。新 case 必须记录实际生效的执行画像（modelId/providerID/providerKey/
+// effort/runtime/codeRef/capturedAt/drillRunIds）；旧记录不补猜（缺失即 unknown）。
+// =====================================================================
+
+// 全绿 case 工厂（四类目覆盖 + 至少一条 pass——不靠 N/A 拿 certified）。
+function greenCase(overrides = {}) {
+  return {
+    caseId: "lane case",
+    agentId: "auditor",
+    backend: "codex",
+    providerID: null,
+    modelId: "gpt-6-astra",
+    providerKey: undefined,
+    checks: [
+      check("completed", true, "core", { capability: "complete" }),
+      check("commandsPassed", true, "strict", { capability: "commandEvidence" }),
+      check("adversarialEscape", true, "operational", { capability: "adversarialEscape" }),
+      check("metricsNonZero", true, "observability", { capability: "metrics" }),
+    ],
+    ...overrides,
+  };
+}
+
+const PROFILE_HIGH = {
+  modelId: "gpt-6-astra",
+  providerID: null,
+  providerKey: null,
+  effort: "high",
+  runtime: {
+    distribution: "codex",
+    version: "codex-cli 0.54.0",
+    binaryPath: "C:/tools/codex.cmd",
+    fingerprint: "v1-abc123def4567890",
+    verified: true,
+    reason: null,
+  },
+  codeRef: "92209bbdeadbeefdeadbeefdeadbeefdeadbeef",
+  capturedAt: "2026-09-22T15:05:15.876Z",
+  drillRunIds: { sentinel: "run_20260922T1", scorecard: "run_20260922T2", isolation: null },
+};
+
+test("TD-186 A: case 的 executionProfile 原样进入 summary.cases 与 worker 记录", () => {
+  const fresh = greenCase({ executionProfile: PROFILE_HIGH, lastHealthyRunAt: "2026-09-22T15:05:15.876Z" });
+  const summary = summarizeCertification([fresh]);
+  // case 级：磁盘 facts 保留执行画像（供审计与详情层读取）。
+  assert.deepEqual(summary.cases[0].executionProfile, PROFILE_HIGH);
+  // worker 级：active identity 的 case 带画像 → 原样入账（不重算、不裁剪）。
+  const w = summary.workers.auditor;
+  assert.equal(w.status, "certified");
+  assert.deepEqual(w.executionProfile, PROFILE_HIGH);
+  assert.equal(w.executionProfile.effort, "high", "effort=null 的旧病灶不再出现于新记录");
+});
+
+test("TD-186 A: legacy case 无 executionProfile → worker 记录整体缺失该字段（不补猜）", () => {
+  const legacy = greenCase({ caseId: "legacy case" });
+  const summary = summarizeCertification([legacy]);
+  assert.equal(summary.workers.auditor.status, "certified");
+  assert.equal(summary.workers.auditor.executionProfile, undefined,
+    "旧记录缺画像 = unknown（undefined），绝不由 summarize 层补猜");
+  // 画像不进既有 worker 字段（backend/modelId 等照旧）。
+  assert.equal(summary.workers.auditor.modelId, "gpt-6-astra");
+});
+
+test("TD-186 A: 同 identity 多 case → worker 取最后一条带画像的记录（重认证后天然最新）", () => {
+  const olderProfile = { ...PROFILE_HIGH, effort: "medium", capturedAt: "2026-09-17T10:00:00.000Z" };
+  const older = greenCase({
+    caseId: "older label",
+    executionProfile: olderProfile,
+    lastHealthyRunAt: "2026-09-17T10:00:00.000Z",
+  });
+  // 中间：同 identity 但无画像（模拟部分链路丢字段）——不得回填旧画像冒充最新。
+  const middle = greenCase({ caseId: "middle label" });
+  const latest = greenCase({
+    caseId: "latest label",
+    executionProfile: PROFILE_HIGH,
+    lastHealthyRunAt: "2026-09-22T15:05:15.876Z",
+  });
+  const summary = summarizeCertification([older, middle, latest]);
+  assert.equal(summary.workers.auditor.executionProfile.effort, "high",
+    "最后一条带画像的 active-identity case 胜出（重取证后 medium 历史不覆盖 high 新证据）");
+});
+
+test("TD-186 A 结构钉：run-reliability 采集执行画像的字段族接线", () => {
+  const script = readFileSync(new URL("../../scripts/run-reliability.mjs", import.meta.url), "utf8");
+  // 复用组件层既有探针（不新建指纹平台），一次 spawn / backend。
+  assert.match(script, /import\s*\{\s*probeRuntimeIdentity\s*\}\s*from\s*"\.\/reliability\/runtimeIdentity\.mjs"/,
+    "运行时身份必须复用 scripts/reliability/runtimeIdentity.mjs");
+  // git HEAD 只读获取 + 探不到如实 null（unknown），不猜。
+  assert.match(script, /\["rev-parse",\s*"HEAD"\]/, "codeRef 必须来自 git rev-parse HEAD（只读）");
+  // effort 取自 agent 配置（reasoning.effort），不是矩阵行文本。
+  assert.match(script, /effort:\s*agent\.reasoning\?\.effort\s*\?\?\s*null/,
+    "effort 必须来自该 lane 实际生效的 agent 配置");
+  // drillRunIds 回填（sentinel/scorecard 记实际 runId，其余如实 null）。
+  assert.match(script, /drillRunIds/, "case 必须带各 drill 的 runId 映射");
+});
+
+test("TD-186 钉②（不得合并成绿）：历史通过 + 本次失败——worker 状态反映本次失败，全绿时间戳只是历史", () => {
+  const history = greenCase({
+    caseId: "history label",
+    executionProfile: PROFILE_HIGH,
+    lastHealthyRunAt: "2026-09-22T15:05:15.876Z",
+  });
+  // 本次失败：同 identity、同画像、strict 失败 → draft-only。
+  const freshFail = {
+    ...greenCase({ executionProfile: PROFILE_HIGH }),
+    caseId: "fresh fail label",
+    checks: [
+      check("completed", true, "core", { capability: "complete" }),
+      check("commandsPassed", false, "strict", { capability: "commandEvidence" }),
+      check("adversarialEscape", true, "operational", { capability: "adversarialEscape" }),
+      check("metricsNonZero", true, "observability", { capability: "metrics" }),
+    ],
+    lastHealthyRunAt: null,
+  };
+  const summary = summarizeCertification([history, freshFail]);
+  const w = summary.workers.auditor;
+  assert.equal(w.status, "draft-only", "本次 strict 失败必须压过历史 certified（最差聚合）");
+  assert.equal(w.lastHealthyRunAt, "2026-09-22T15:05:15.876Z", "历史全绿时间保留为历史事实（不抹除）");
+  // 钉死"合并成绿"的路径：status 与 recommendedUse 都不得因历史全绿而回绿。
+  assert.equal(w.recommendedUse, "draft-only");
+  assert.equal(summary.allCertified, false);
+  // 执行画像仍如实携带（失败证据也表达画像——供适用性比较）。
+  assert.equal(w.executionProfile.effort, "high");
+});

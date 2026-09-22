@@ -17,8 +17,34 @@ import { isSecretEnvName } from "../secretRedaction.js";
 // TD-98 阶段 2a：parseOptions 从 cli.js 抽到 ./shared.js，消除 ESM 循环 import。
 import { parseOptions } from "./shared.js";
 // M9-0: registry list data logic delegated to shared application service.
-import { getRegistryInventory } from "../application/registryInventory.js";
+import { getRegistryInventory, getCertificationEvidenceInventory } from "../application/registryInventory.js";
 import { loadRoleContract } from "../application/roleContract.js";
+
+// TD-186（2026-09-22）：registry list --cert-evidence 的只读证据详情渲染。
+// 五列（声明 / 组件观测 / 组合结果 / 证据适用性 / 限制与来源）只陈述事实：
+// 适用性是三态闭集（匹配/不匹配/无法判断），"无法判断"绝不算绿；本渲染
+// 绝不派生"总体可用=true"之类的合并绿——适用性永远与组合结果并列呈现。
+// 简表（表头 + 行）字节不变：默认调用（不带 flag）输出与旧行为完全一致。
+function renderCertEvidence(rows) {
+  for (const row of rows) {
+    const d = row.declared ?? {};
+    const c = row.componentObserved ?? {};
+    const b = row.combined ?? {};
+    const rec = b.record ?? {};
+    const las = row.limitationsAndSources ?? {};
+    console.log(`cert-evidence ${row.id}`);
+    console.log(`  声明: backend=${d.backend ?? "-"} model=${d.modelId ?? "-"} provider=${d.providerID ?? "-"} providerKey=${d.providerKey ?? "null"} effort=${d.effort ?? "null"}`);
+    const compLine = (list) => list.length === 0
+      ? "-"
+      : list.map((r) => `${r.result ?? "?"}@${r.codeRef ?? "?"}${r.runtimeFingerprint ? `#${r.runtimeFingerprint}` : ""}${r.advisoryCode ? `(${r.advisoryCode})` : ""}`).join(", ");
+    console.log(`  组件观测: state=${c.state}${c.llmKeyDerivable === false ? " llm键不可派生(无providerID)" : ""} backend=[${compLine(c.backend ?? [])}] llm=[${compLine(c.llm ?? [])}]${c.truncated ? " (截断)" : ""}`);
+    console.log(`  组合结果: state=${b.state}${rec.status ? ` status=${rec.status}` : " 无记录"}${rec.executionProfile ? ` effort=${rec.executionProfile.effort ?? "null"} codeRef=${rec.executionProfile.codeRef ?? "?"} capturedAt=${rec.executionProfile.capturedAt ?? "?"}` : " 画像=未记录(legacy)"}${rec.lastFullHealthyRunAt ? ` lastFullHealthy=${rec.lastFullHealthyRunAt}` : ""}`);
+    console.log(`  证据适用性: ${row.applicability}`);
+    const sources = (las.sources ?? []).map((s) => `${s.file}(${s.state})`).join(" ");
+    const limits = (las.limitations ?? []).length > 0 ? (las.limitations ?? []).join(" | ") : "无";
+    console.log(`  限制与来源: ${limits} — 来源: ${sources}`);
+  }
+}
 
 async function registryCommand(args, config) {
   const [sub, ...tail] = args;
@@ -34,13 +60,16 @@ async function registryCommand(args, config) {
   // M9-0: data logic (registry read + summary join + model label) lives in
   // the shared application service. This command only handles I/O: option
   // parsing, path resolution, and text/JSON output formatting.
-  const agents = await getRegistryInventory({
-    registryPath: resolve(options.registry ?? config.registry),
-    runDir: resolve(options.runDir ?? config.runDir),
-  });
+  const registryPath = resolve(options.registry ?? config.registry);
+  const runDir = resolve(options.runDir ?? config.runDir);
+  const agents = await getRegistryInventory({ registryPath, runDir });
+  // TD-186: opt-in 只读证据详情（默认路径零改动——简表/JSON 契约保持不变）。
+  const certEvidence = options.certEvidence === true
+    ? await getCertificationEvidenceInventory({ registryPath, runDir })
+    : null;
   // F17: --format json 输出机器可读 JSON（dogfood round 4 实证：原接受参数但静默忽略）。
   if (options.format === "json") {
-    console.log(JSON.stringify(agents, null, 2));
+    console.log(JSON.stringify(certEvidence ? { agents, certificationEvidence: certEvidence } : agents, null, 2));
     return;
   }
   // R5-B：人类输出加表头行（保持 tab 分隔；--format json 不变）。
@@ -48,6 +77,7 @@ async function registryCommand(args, config) {
   for (const agent of agents) {
     console.log(`${agent.id}\t${agent.backend}\t${agent.model}\t${agent.certification ?? "-"}\t${agent.cwd}`);
   }
+  if (certEvidence) renderCertEvidence(certEvidence);
 }
 
 async function registryCheckCommand(args, config) {

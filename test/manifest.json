@@ -240,7 +240,8 @@
       "transcript/runCollectStdioSmoke.test.js",
       "run-lifecycle/runStopSmoke.test.js",
       "isolation-infra/waoNodeShim.test.js",
-      "registry-roles/runtimeIdentity.test.js"
+      "registry-roles/runtimeIdentity.test.js",
+      "registry-roles/certificationEvidenceInventory.test.js"
     ],
     "lock": [
       "isolation-infra/portAllocator.test.js",
