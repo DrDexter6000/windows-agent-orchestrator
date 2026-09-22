@@ -67,7 +67,7 @@ ADR 风格：一条决策一个文件，定下后归档，只追加"修订"不�
 |------|------|
 | `AGENT_ONBOARDING.md` | 安装与上手指南 + 贡献者路径 |
 | `docs/usage.md` | 部署、操作食谱与行为合同；§三是 architecture §3.2 事件 spec 的人读投影；命令/参数参考已拆至生成层 |
-| `docs/surface/mcp-tools.md` `docs/surface/cli.md` | **生成参考层**（MCP 工具与 CLI 命令的参数/形状）：权威源是代码（tools/list 与 CLI help SSOT），由 `npm run gen:surface` 再生成；禁止手改，字节稳定由 `docsSurface.test.js` 守卫；改 MCP 面/CLI help 后须再生成并提交 |
+| `docs/surface/mcp-tools.md` `docs/surface/cli.md` `docs/surface/certification.md` | **生成参考层**：`mcp-tools.md`/`cli.md`（MCP 工具与 CLI 命令的参数/形状）权威源是代码（tools/list 与 CLI help SSOT），由 `npm run gen:surface` 再生成；`certification.md`（backend 六轴能力与配置表达力四轴判定）权威源是 `src/backends/*.js` 类声明与 `validateAgentPolicy` 行为探针，由 `npm run gen:certification` 再生成。三者一律禁止手改，字节稳定由 `docsSurface.test.js` 守卫；改对应权威源后须再生成并提交 |
 | `llms.txt` | 仓库根索引（llms.txt 惯例）：只放链接与一句话定位，不承载内容 |
 | `docs/smoke-guide.md` | smoke 测试操作 |
 | `docs/troubleshooting.md` | 诊断手册（provider/cwd/runs/completion/进程/backend） |
