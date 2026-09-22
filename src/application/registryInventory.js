@@ -17,6 +17,7 @@
 // credential env NAMES are present — names only; it never surfaces values.)
 
 import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { readRegistry, normalizeAgent } from "../registry.js";
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
@@ -412,8 +413,22 @@ function boundedIsoOrNull(value) {
 //   - 来源状态保真：不复用有损的 buildCertMap（缺文件/坏 JSON/读取错误都被吞成
 //     空映射）——详情读取器把 missing / unparseable / read-error 分别可辨。
 //   - 派发门零改动：matchedCertRecord / --require-certified 语义一律不动
-//     （effort 纳入派发身份是 Owner 级决定）；本节的 identity 判定【复用】
-//     matchedCertRecord 作为 SSOT 裁决，display 维度明细仅辅助阅读。
+//     （effort 纳入派发身份是 Owner 级决定）。
+//
+// TD-186 复核收口（2026-09-22 第二包，独立复核 FAIL 两条）：
+//   - FAIL-A：本节的 identity 判定【不再复用】matchedCertRecord。复核实证了
+//     两条反例——(1) 记录身份全缺（{status:"certified",
+//     executionProfile:{effort:"high"}}）仍 matched；(2) executionProfile.modelId
+//     与记录顶层 modelId 矛盾仍 matched。根因是 matchedCertRecord 的"缺字段容忍"
+//     （undefined = legacy，维度跳过）是【派发门】的取舍（旧记录不误杀派发），
+//     被误用到了【取证】路径——"这份证据是否证明了当前画像"缺身份就是无法证明，
+//     必须 fail-closed。两套语义自此刻意并存：门禁宽容（matchedCertRecord 一字
+//     不动，简表 certification 列与 P1-1 门照旧），取证严格（本节四元组判据，
+//     见 assessCertEvidenceApplicability）。
+//   - FAIL-B：drillRunIds 的取证闭环。转录固定回查位置 = runDir 下的
+//     CERT_DRILL_TRANSCRIPTS_SUBDIR 子目录（写入侧 scripts/run-reliability.mjs
+//     经 scripts/reliability/drillEvidence.mjs 下向 import 本常量，无第二份名字）；
+//     只读详情层逐 id 核对可回查性，不可回查浮出为限制项（不改三态）。
 // =====================================================================
 
 // 证据适用性三态闭集（frozen；MCP/CLI 展示共用，无第二份清单）。
@@ -424,6 +439,13 @@ export const CERT_LEDGER_SOURCE_STATES = Object.freeze(["ok", "missing", "unpars
 
 // 组件层台账文件名（ADR-0032 §5：与 reliability-summary.json 分文件共证据）。
 const COMPONENT_LEDGER_FILENAME = "component-checks.json";
+// TD-186 复核 FAIL-B：drill 转录的固定回查位置（相对 runDir 的子目录名，SSOT）。
+// 写入侧（scripts/run-reliability.mjs 把 sentinel/scorecard 转录写在
+// <runs>/reliability/<runId>.jsonl）与只读详情层（本模块逐 id 核对）共用这一份
+// 名字——scripts 侧下向 import，无第二份定义。runs 归档清扫（runs prune/archive）
+// 只处理 runDir 顶层 *.jsonl，子目录语料不在清扫面内（smoke/、verify/ 同款先例），
+// 由写入侧按引用集自行清理（pruneUnreferencedDrillTranscripts）。
+export const CERT_DRILL_TRANSCRIPTS_SUBDIR = "reliability";
 // 组件观测投影上限（防御病态台账；超出截断并在 state 注明）。
 const COMPONENT_OBSERVATION_CAP = 8;
 // 组件层结果闭集（ADR-0032 §1；磁盘数据可能被改，闭集外 → null 不透出）。
@@ -567,35 +589,72 @@ function projectWorkerEvidenceRecord(record) {
 }
 
 /**
- * identity 不匹配的展示用维度明细。裁决 SSOT 是 matchedCertRecord（本函数只在
- * SSOT 已判 null 后用于指路；若 SSOT 判 null 而此处找不到维度，明细留空——
- * 绝不反向影响裁决）。
+ * TD-186 复核 FAIL-A 收口：画像身份字段的完整性判据（fail-closed）。
+ * 四元组 modelId / providerID / providerKey / effort：
+ *   - modelId / effort 必须是非空字符串；
+ *   - providerID / providerKey 的合法形状 = 非空字符串，或 null（= 已观察、确认
+ *     无接入方——null 是【完整】的声明，不是缺失）。
+ * 缺失（undefined）/ 其它类型 / 空串都判不完整——"身份全缺仍 matched"的复核
+ * 反例由这里关死：缺身份 = 无法证明，绝不能 matched。
  * @private
  */
-function identityMismatchDetail(agent, record) {
+function invalidProfileIdentityFields(profile) {
+  const isNonEmptyString = (v) => typeof v === "string" && v.length > 0;
+  const invalid = [];
+  if (!isNonEmptyString(profile.modelId)) invalid.push("modelId");
+  if (!isNonEmptyString(profile.effort)) invalid.push("effort");
+  if (profile.providerID !== null && !isNonEmptyString(profile.providerID)) invalid.push("providerID");
+  if (profile.providerKey !== null && !isNonEmptyString(profile.providerKey)) invalid.push("providerKey");
+  return invalid;
+}
+
+/**
+ * TD-186 复核 FAIL-A 收口：记录顶层身份与 executionProfile 身份的内部矛盾维度。
+ * 顶层字段 undefined（legacy 未声明）不参与；一旦在场（含 null），与画像侧对应
+ * 字段不同即矛盾——同一记录两处声明打架，任何一侧都不能被采信为"已验证"。
+ * @private
+ */
+function profileContradictionFields(record, profile) {
   const dims = [];
-  if (record.backend !== undefined && record.backend !== agent.backend) dims.push("backend");
-  const modelId = agent.model?.id ?? null;
-  if (record.modelId !== undefined && record.modelId !== modelId) dims.push("modelId");
-  const providerID = agent.model?.providerID ?? null;
-  if (providerID !== null && record.providerID !== undefined && record.providerID !== providerID) dims.push("providerID");
-  if (record.providerKey !== undefined && record.providerKey !== providerKeyFor(agent.provider)) dims.push("providerKey");
+  if (record.modelId !== undefined && record.modelId !== profile.modelId) dims.push("modelId");
+  if (record.providerID !== undefined && record.providerID !== profile.providerID) dims.push("providerID");
+  if (record.providerKey !== undefined && record.providerKey !== profile.providerKey) dims.push("providerKey");
   return dims;
 }
 
 /**
- * 证据适用性三态判定（纯函数）。
+ * TD-186 复核 FAIL-A 收口：executionProfile 四元组与当前席位有效配置的逐字段
+ * 比对（不含 backend——backend 只活在记录顶层，由调用方单独比对；不含 effort——
+ * effort 有专属限制项措辞）。provider 两字段逐字段相等才相等：一侧 null 一侧
+ * 非 null ⇒ 不等（mismatched）；两侧同 null（无接入方）⇒ 相等。
+ * @private
+ */
+function profileConfigMismatchFields(agent, profile) {
+  const dims = [];
+  if ((agent.model?.id ?? null) !== profile.modelId) dims.push("modelId");
+  if ((agent.model?.providerID ?? null) !== profile.providerID) dims.push("providerID");
+  if (providerKeyFor(agent.provider) !== profile.providerKey) dims.push("providerKey");
+  return dims;
+}
+
+/**
+ * 证据适用性三态判定（纯函数；TD-186 复核 FAIL-A 起 fail-closed，不再调用
+ * matchedCertRecord——见本节头注释的两套语义并存说明）。
  *
  * 判据（优先级从高到低）：
  *   - 台账来源状态非 ok（missing/unparseable/read-error）→ undeterminable
  *     （来源不可用绝不折叠成"无证据即匹配"）；
  *   - 该席位无 worker 记录 → undeterminable（缺证据 ≠ 匹配）；
- *   - matchedCertRecord（SSOT，与派发门同一规则）判 null → mismatched
- *     （backend/modelId/providerID/providerKey 任一声明不一致）；
- *   - 记录无 executionProfile（legacy）或缺 effort → undeterminable
- *     （旧画像不明时不得宣称当前已验证——TD-186 触发句）；
- *   - 记录 effort ≠ 声明 effort（含 null≠字符串）→ mismatched；
- *   - 其余 → matched。
+ *   - 记录无 executionProfile（legacy）→ undeterminable（旧画像不明时不得宣称
+ *     当前已验证——TD-186 触发句）；
+ *   - executionProfile 身份四元组不完整（modelId/effort 非非空字符串；
+ *     providerID/providerKey 非「非空字符串或 null」）→ undeterminable
+ *     （复核反例①：身份全缺绝不能 matched）；
+ *   - 记录顶层身份与画像身份矛盾（modelId/providerID/providerKey 任一字段
+ *     在场且不同）→ mismatched（复核反例②：内部矛盾不得判 matched）；
+ *   - 四元组与当前声明不一致（含顶层 backend 声明不一致、provider 一侧 null
+ *     一侧非 null、effort 不同）→ mismatched；
+ *   - 四元组全等 → matched。
  *
  * 附加限制项（不改三态，只进 limitations）：30 天审阅窗提醒（组合记录时间戳
  * 超期/缺失）、组件台账来源状态、组件 blocked/advisory 观测。
@@ -618,23 +677,46 @@ export function assessCertEvidenceApplicability({
     limitations.push("no-worker-record: 组合层台账无该席位记录（缺证据 ≠ 匹配）");
     return { applicability: "undeterminable", limitations };
   }
-  if (matchedCertRecord(agent, workerRecord) === null) {
-    const dims = identityMismatchDetail(agent, workerRecord);
-    limitations.push(`identity-mismatch:${dims.length > 0 ? dims.join("+") : "unspecified"}（认证身份不可继承，matchedCertRecord SSOT）`);
-    return { applicability: "mismatched", limitations };
-  }
   const profile = workerRecord.executionProfile;
-  if (!profile || typeof profile !== "object") {
+  if (!profile || typeof profile !== "object" || Array.isArray(profile)) {
     limitations.push("execution-profile-not-recorded: legacy 证据不表达执行画像（effort 未知），不得当当前画像已验证");
     return { applicability: "undeterminable", limitations };
   }
-  if (profile.effort === undefined) {
-    limitations.push("execution-profile-effort-missing: 记录缺 effort 字段");
+  // 复核反例①收口：四元组完整性 fail-closed——任一字段缺失/非字符串/空 ⇒
+  // undeterminable（绝不能 matched）。
+  const invalidFields = invalidProfileIdentityFields(profile);
+  if (invalidFields.length > 0) {
+    limitations.push(
+      `execution-profile-incomplete:${invalidFields.join("+")}（画像身份四元组不完整：modelId/effort 须非空字符串，providerID/providerKey 须非空字符串或 null=无接入方；缺身份 = 无法证明，绝不能 matched）`,
+    );
     return { applicability: "undeterminable", limitations };
+  }
+  // 复核反例②收口：顶层身份与画像身份矛盾 ⇒ mismatched（内部矛盾不得判 matched）。
+  const contradictionFields = profileContradictionFields(workerRecord, profile);
+  if (contradictionFields.length > 0) {
+    limitations.push(
+      `identity-contradiction:${contradictionFields.join("+")}（executionProfile 与记录顶层身份矛盾——同一记录两处声明打架，不得判 matched）`,
+    );
+    return { applicability: "mismatched", limitations };
+  }
+  // 四元组（+ 顶层 backend）与当前席位有效配置比对：任一字段不同 ⇒ mismatched。
+  const mismatchDims = [];
+  if (workerRecord.backend !== undefined && workerRecord.backend !== agent.backend) {
+    mismatchDims.push("backend");
+  }
+  mismatchDims.push(...profileConfigMismatchFields(agent, profile));
+  if (mismatchDims.length > 0) {
+    limitations.push(
+      `identity-mismatch:${mismatchDims.join("+")}（认证身份不可继承：fail-closed 四元组比对，任一字段不同即 mismatched）`,
+    );
   }
   const declaredEffort = agent.reasoning?.effort ?? null;
   if (profile.effort !== declaredEffort) {
-    limitations.push(`effort-mismatch: declared=${declaredEffort ?? "null"} evidence=${profile.effort ?? "null"}（席位 reasoning 已变，旧证据对新画像不适用——定向重验或记录暂缓）`);
+    limitations.push(
+      `effort-mismatch: declared=${declaredEffort ?? "null"} evidence=${profile.effort}（席位 reasoning 已变，旧证据对新画像不适用——定向重验或记录暂缓）`,
+    );
+  }
+  if (mismatchDims.length > 0 || profile.effort !== declaredEffort) {
     return { applicability: "mismatched", limitations };
   }
   // 身份与 effort 均匹配 → matched。仍并列非门控限制项（matched ≠ 可用）：
@@ -665,6 +747,41 @@ export function assessCertEvidenceApplicability({
   return { applicability: "matched", limitations };
 }
 
+// drillRunIds 值的合法形状（runManager 默认 runId：run_ + 时间戳 + base36 随机；
+// 自定义 runId 也受同一字符集约束）。形状外的值（含占位 "unknown"）不进路径
+// 拼接（磁盘数据可能被改——不做存在性探测的遍历原语），直接判不可回查。
+const DRILL_RUN_ID_SHAPE_RE = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * TD-186 复核 FAIL-B：drillRunIds 逐 id 回查性核对（只读观测，不改三态——
+ * 不可回查浮出为限制项）。id 的转录按约定位于
+ * `<runDir>/<CERT_DRILL_TRANSCRIPTS_SUBDIR>/<runId>.jsonl`（写入侧
+ * scripts/run-reliability.mjs 落账 + 写盘守卫 + 引用集清理）。
+ * 状态枚举（WQ-02）：
+ *   - 无 runDir / 记录无画像 / 无 drillRunIds / 某 drill 的 id 为 null → 无限制项
+ *     （null = 如实"未记录 id"，设计内状态，不是缺陷）；
+ *   - id 非字符串/空/形状外（含 "unknown" 占位）或转录文件不在场 → 该 drill 计入
+ *     drill-evidence-unresolvable 限制项（取证链断裂的可见面）。
+ * @private
+ */
+function drillEvidenceLimitations(runDir, workerRecord, existsFn) {
+  if (!runDir) return [];
+  const ids = workerRecord?.executionProfile?.drillRunIds;
+  if (!ids || typeof ids !== "object" || Array.isArray(ids)) return [];
+  const unresolvable = [];
+  for (const [drill, runId] of Object.entries(ids)) {
+    if (runId === null || runId === undefined) continue;
+    const resolvable = typeof runId === "string" && DRILL_RUN_ID_SHAPE_RE.test(runId)
+      && existsFn(join(runDir, CERT_DRILL_TRANSCRIPTS_SUBDIR, `${runId}.jsonl`));
+    if (!resolvable) unresolvable.push(drill);
+  }
+  if (unresolvable.length === 0) return [];
+  const shown = unresolvable.slice(0, 8).join("+");
+  return [
+    `drill-evidence-unresolvable:${shown}${unresolvable.length > 8 ? "+…" : ""}（drillRunIds 记录了 id 但转录不在 runs/${CERT_DRILL_TRANSCRIPTS_SUBDIR}/<runId>.jsonl——取证链断裂；硬禁令状态：不得存在"摘要里有 id、磁盘上没有该转录"）`,
+  ];
+}
+
 /**
  * TD-186 只读认证证据详情：每个在册席位一行五列（声明 / 组件观测 / 组合结果 /
  * 证据适用性 / 限制与来源）。既有查询路径（CLI `registry list --cert-evidence`；
@@ -679,6 +796,7 @@ export function assessCertEvidenceApplicability({
  * @param {string} [input.runDir]
  * @param {Function} [input.readRegistryFn]
  * @param {Function} [input.readFileFn]
+ * @param {Function} [input.existsFn] — 转录存在性探测（测试注入；默认 existsSync）
  * @param {string|Date} [input.now] — 新鲜度计算基准（测试注入）
  * @returns {Promise<Array<object>>}
  */
@@ -687,6 +805,7 @@ export async function getCertificationEvidenceInventory({
   runDir,
   readRegistryFn,
   readFileFn,
+  existsFn = existsSync,
   now = new Date().toISOString(),
 } = {}) {
   const _readRegistry = readRegistryFn ?? readRegistry;
@@ -703,6 +822,8 @@ export async function getCertificationEvidenceInventory({
       componentObservation: component,
       now,
     });
+    // TD-186 复核 FAIL-B：drillRunIds 回查性只读观测（并列限制项，不改三态）。
+    const drillLimits = drillEvidenceLimitations(runDir, workerRecord, existsFn);
     rows.push({
       id: agent.id,
       // 列 1：声明（当前 registry 生效画像——与派发同源）。
@@ -724,7 +845,7 @@ export async function getCertificationEvidenceInventory({
       applicability: verdict.applicability,
       // 列 5：限制与来源（两本台账的来源状态分别可辨 + 非门控限制项）。
       limitationsAndSources: {
-        limitations: verdict.limitations,
+        limitations: [...verdict.limitations, ...drillLimits],
         sources: [
           { file: "runs/reliability-summary.json", state: ledger.state },
           { file: `runs/${COMPONENT_LEDGER_FILENAME}`, state: component.state },

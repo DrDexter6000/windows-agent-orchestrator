@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   certifyCase,
   summarizeCertification,
@@ -8,6 +10,13 @@ import {
   pruneStaleCases,
 } from "../../scripts/reliability/certification.mjs";
 import { inconclusiveCheck, naCheck } from "../../scripts/reliability/checkStates.mjs";
+import {
+  drillTranscriptsDir,
+  collectReferencedDrillRunIds,
+  missingDrillTranscripts,
+  nullUnresolvableDrillRunIds,
+  pruneUnreferencedDrillTranscripts,
+} from "../../scripts/reliability/drillEvidence.mjs";
 
 function check(name, pass, category, extra = {}) {
   return { name, pass, category, ...extra };
@@ -694,3 +703,144 @@ test("TD-186 钉②（不得合并成绿）：历史通过 + 本次失败——w
   // 执行画像仍如实携带（失败证据也表达画像——供适用性比较）。
   assert.equal(w.executionProfile.effort, "high");
 });
+
+// =====================================================================
+// TD-186 复核 FAIL-B（2026-09-22 第二包）：drillRunIds 取证闭环（写入侧）。
+//
+// 复核实证：sentinel/scorecard 的 run 转录落在 TMP_DIR/runs/（CLI 子进程 cwd
+// 相对解析），run-reliability.mjs 收尾 rmSync(TMP_DIR) 连带删除——summary 里的
+// drillRunIds 指向已删除的证据。方案 1（转录保留在可解析位置 runs/reliability/）
+// + 写盘守卫 + 引用集清理。本节：drillEvidence.mjs 行为钉 + 入口接线结构钉。
+// =====================================================================
+
+function evidenceCase(caseId, drillRunIds) {
+  return greenCase({ caseId, executionProfile: { ...PROFILE_HIGH, drillRunIds } });
+}
+
+test("TD-186 复核 FAIL-B: collectReferencedDrillRunIds 收集非空字符串 id（去重；null/形状外不收集）", () => {
+  const summary = {
+    cases: [
+      evidenceCase("a", { sentinel: "run_t1", scorecard: "run_t2", isolation: null }),
+      evidenceCase("b", { sentinel: "run_t1", scorecard: 7, isolation: null, stop: "" }),
+    ],
+  };
+  assert.deepEqual(collectReferencedDrillRunIds(summary), ["run_t1", "run_t2"],
+    "null（如实未记录）/非字符串/空串都不是可回查主张，不进守卫与保留集");
+  assert.deepEqual(collectReferencedDrillRunIds({}), []);
+  assert.deepEqual(collectReferencedDrillRunIds({ cases: [greenCase({ caseId: "legacy" })] }), [],
+    "legacy case 无画像 → 无 id");
+});
+
+test("TD-186 复核 FAIL-B: missingDrillTranscripts 守卫——转录在场的 id 不报，缺失的报", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td186-de-missing-"));
+  try {
+    const transcriptsDir = drillTranscriptsDir(dir);
+    mkdirSync(transcriptsDir, { recursive: true });
+    writeFileSync(join(transcriptsDir, "run_t1.jsonl"), "{}\n", "utf8");
+    assert.deepEqual(missingDrillTranscripts(["run_t1", "run_t2"], transcriptsDir), ["run_t2"],
+      "守卫精确点名不可回查的 id（fail-closed 检测面）");
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+
+test("TD-186 复核 FAIL-B: nullUnresolvableDrillRunIds——prior 悬空 id 置 null（判定字段一字不动；原数组不被就地改写）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td186-de-null-"));
+  try {
+    const transcriptsDir = drillTranscriptsDir(dir);
+    mkdirSync(transcriptsDir, { recursive: true });
+    writeFileSync(join(transcriptsDir, "run_t1.jsonl"), "{}\n", "utf8");
+    // prior case：run_t1 可回查、run_dead 是旧版取证遗留死指针（转录已被清）。
+    const prior = evidenceCase("prior case", { sentinel: "run_t1", scorecard: "run_dead", isolation: null });
+    const { cases, nulled } = nullUnresolvableDrillRunIds([prior], { transcriptsDir: transcriptsDir });
+    assert.deepEqual(nulled, [{ caseId: "prior case", drill: "scorecard", runId: "run_dead" }],
+      "每条置 null 都被报告（非静默改史）");
+    assert.deepEqual(
+      cases[0].executionProfile.drillRunIds,
+      { sentinel: "run_t1", scorecard: null, isolation: null },
+      "悬空 id 如实置 null；可回查 id 保留",
+    );
+    assert.deepEqual(prior.executionProfile.drillRunIds, { sentinel: "run_t1", scorecard: "run_dead", isolation: null },
+      "入参原对象不被就地改写（纯函数）");
+    // 判定字段不动：置 null 只动指针，checks/capturedAt 照旧。
+    assert.deepEqual(cases[0].checks, prior.checks);
+    assert.equal(cases[0].executionProfile.capturedAt, prior.executionProfile.capturedAt);
+    // 置 null 后 summarize 产出（写盘形状）不再含死指针。
+    const summary = summarizeCertification(cases);
+    assert.equal(summary.workers.auditor.executionProfile.drillRunIds.scorecard, null);
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+
+test("TD-186 复核 FAIL-B: pruneUnreferencedDrillTranscripts——保留集=引用集；非 runId 形状文件绝不动", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td186-de-prune-"));
+  try {
+    const transcriptsDir = drillTranscriptsDir(dir);
+    mkdirSync(transcriptsDir, { recursive: true });
+    for (const name of ["run_keep.jsonl", "run_stale1.jsonl", "run_stale2.jsonl", "notes.txt", "run_NOTAID.jsonl"]) {
+      writeFileSync(join(transcriptsDir, name), "{}\n", "utf8");
+    }
+    const result = pruneUnreferencedDrillTranscripts(transcriptsDir, ["run_keep"]);
+    assert.equal(result.kept, 1, "引用集中的保留");
+    assert.equal(result.removed, 2, "被取代认证的转录删除（不无限增长）");
+    assert.deepEqual(readdirSync(transcriptsDir).sort(), ["notes.txt", "run_NOTAID.jsonl", "run_keep.jsonl"],
+      "非 runId 文件名形状（notes.txt / 大写 run_NOTAID.jsonl）不在清理面");
+    // 目录不存在 → 空结果不抛。
+    assert.deepEqual(pruneUnreferencedDrillTranscripts(join(dir, "nope"), []), { removed: 0, kept: 0 });
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+
+test("TD-186 复核 FAIL-B 结构钉: run-reliability 转录持久化 + 写盘守卫 + 悬空置 null + 引用集清理接线", () => {
+  const entry = readFileSync(new URL("../../scripts/run-reliability.mjs", import.meta.url), "utf8");
+  // ① sentinel/scorecard 派发显式 --run-dir 到持久化转录目录（不再落会被整体删除的 tmpDir）。
+  assert.match(entry, /"--run-dir",\s*DRILL_TRANSCRIPTS_DIR/, "sentinel 派发必须 --run-dir 到 DRILL_TRANSCRIPTS_DIR");
+  assert.match(entry, /transcriptDir:\s*DRILL_TRANSCRIPTS_DIR/, "createDrills 注入 transcriptDir（scorecard 转录落同处）");
+  // ② 写盘守卫：fresh id 缺转录 = 拒绝写 summary 并非零退出（硬禁令：不记录悬空 id）。
+  assert.match(entry, /missingDrillTranscripts\(freshRunIds,\s*DRILL_TRANSCRIPTS_DIR\)/, "写盘前逐 id 守卫");
+  assert.match(entry, /process\.exit\(3\)/, "守卫失败非零退出");
+  // ③ prior 悬空 id 置 null（不可回查就不记 id）。
+  assert.match(entry, /nullUnresolvableDrillRunIds\(mergedCases,\s*\{\s*transcriptsDir:\s*DRILL_TRANSCRIPTS_DIR/, "prior 死指针写盘前置 null");
+  // ④ 引用集清理（保留集 = 刚写出的 summary 引用集）。
+  assert.match(entry, /pruneUnreferencedDrillTranscripts\(\s*DRILL_TRANSCRIPTS_DIR,\s*collectReferencedDrillRunIds\(summary\)/, "写盘后按引用集清理");
+  // ⑤ "unknown" 占位绝不入账（它不是可回查 id）。
+  assert.match(entry, /value !== "unknown"/, "runId 占位 unknown 如实归 null");
+  // ⑥ 转录目录名 SSOT 下向复用（不在 scripts 侧再造第二份名字）。
+  const glue = readFileSync(new URL("../../scripts/reliability/drillEvidence.mjs", import.meta.url), "utf8");
+  assert.match(glue, /import\s*\{[^}]*CERT_DRILL_TRANSCRIPTS_SUBDIR[^}]*\}\s*from\s*"\.\.\/\.\.\/src\/application\/registryInventory\.js"/,
+    "子目录名单一来源 = src/application/registryInventory.js（与只读回查层同名）");
+  // 守卫语义独立验证（证伪：守卫不是恒真/恒假）。
+  assert.deepEqual(missingDrillTranscripts(["run_x"], "nowhere", () => false), ["run_x"]);
+  assert.deepEqual(missingDrillTranscripts(["run_x"], "nowhere", () => true), []);
+});
+
+test("TD-186 复核 FAIL-B: 端到端形状——守卫+置 null 后写出的 summary 引用集全部可解析（无死指针）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td186-de-e2e-"));
+  try {
+    const transcriptsDir = drillTranscriptsDir(dir);
+    mkdirSync(transcriptsDir, { recursive: true });
+    writeFileSync(join(transcriptsDir, "run_ok.jsonl"), "{}\n", "utf8");
+    // 模拟合并后的 cases（mergeCaseResults 真实顺序：prior 在前、fresh 追加在后）：
+    // 一条 prior（死指针）、一条 fresh（id 可回查）。
+    const cases = [
+      evidenceCase("prior case", { sentinel: "run_dead", scorecard: null }),
+      evidenceCase("fresh case", { sentinel: "run_ok", scorecard: null }),
+    ];
+    // 入口同款顺序：先守卫 fresh（fresh ids 都可回查才继续）……
+    const freshIds = collectReferencedDrillRunIds({ cases: cases.slice(1) });
+    assert.deepEqual(missingDrillTranscripts(freshIds, transcriptsDir), [], "fresh id 全部可回查（守卫通过）");
+    // ……再对合并集置 null prior 死指针，写出的 summary 引用集里只剩可回查 id。
+    const { cases: closedCases } = nullUnresolvableDrillRunIds(cases, { transcriptsDir });
+    const summary = summarizeCertification(closedCases);
+    const referenced = collectReferencedDrillRunIds(summary);
+    assert.deepEqual(missingDrillTranscripts(referenced, transcriptsDir), [],
+      "写出的 summary 引用的每个 id 都可解析（硬禁令状态不复存在）");
+    assert.equal(summary.workers.auditor.executionProfile.drillRunIds.sentinel, "run_ok",
+      "同 identity 聚合取最后一条带画像的 case（置 null 后的 prior 不覆盖 fresh）");
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+});
+

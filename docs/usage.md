@@ -441,22 +441,35 @@ opencode-serve 是 HTTP 服务 backend，因此保持稳定的未验证身份。
   `test/isolation-infra/docsSurface.test.js` / `docs-consistency.test.js` 守卫）；
   此处复制会制造第二份会漂移的真相源。
 
-**认证证据绑定执行画像 + 只读适用性三态（TD-186，2026-09-22）**：组合层认证
-（`npm run reliability`）新写入的 case 记录实际生效的执行画像——`modelId` /
+**认证证据绑定执行画像 + 只读适用性三态（TD-186，2026-09-22；同日复核收口）**：
+组合层认证（`npm run reliability`）新写入的 case 记录实际生效的执行画像——`modelId` /
 `providerID` / `providerKey` / `effort`（取自该 lane 的 registry 配置，与派发同源）、
 `runtime`（复用 `runtimeIdentity.mjs` 探测，探不到如实 `verified:false`）、`codeRef`
 （git HEAD 只读获取）、`capturedAt`、各 drill 的 `runId`（`drillRunIds`；drills.mjs
-不上抛内部 runId 的 drill 如实记 `null`）。旧记录不补猜值（缺画像即 unknown）。查询
+不上抛内部 runId 的 drill 如实记 `null`；派发失败占位 `unknown` 同样归 `null`）。
+**drillRunIds 取证闭环（复核 FAIL-B）**：sentinel/scorecard 的 run 转录持久化在
+`runs/reliability/<runId>.jsonl`（runs 归档清扫只处理顶层 `*.jsonl`，子目录语料不在
+清扫面内），每个 id 可独立回查；写 summary 前逐 id 守卫（fresh id 缺转录 = 拒绝
+写盘并非零退出——绝不记录指向已删除/不存在证据的 id），旧版取证遗留的悬空 prior id
+写盘前如实置 `null` 并告警，写盘后按引用集清理目录（重认证覆盖同 caseId，被取代的
+转录随之删除，不无限增长）。旧记录不补猜值（缺画像即 unknown）。查询
 侧：`registry list --cert-evidence`（text 追加详情块 / `--format json` 附
 `certificationEvidence` 数组，与 `registry_list` 共用
 `src/application/registryInventory.js` 服务）按席位分列展示**声明 / 组件观测 / 组合
 结果 / 证据适用性 / 限制与来源**；台账来源状态（缺文件 / 不可解析 / 读取错误）分别
-可辨，不复用有损吞错的简表路径。**证据适用性是三态闭集
-`matched / mismatched / undeterminable`**：身份四元组（`matchedCertRecord` SSOT）或
-effort 与声明不一致 → `mismatched`；画像不明（legacy 记录无执行画像）或台账来源
-不可用/无记录 → `undeterminable`；**`undeterminable` 绝不算绿**，且该列**绝不**与
+可辨，不复用有损吞错的简表路径；`drillRunIds` 记录了 id 但对应转录不在回查位置时
+浮出 `drill-evidence-unresolvable` 限制项（不改三态）。**证据适用性是三态闭集
+`matched / mismatched / undeterminable`，判定 fail-closed（复核 FAIL-A：不复用
+`matchedCertRecord` 的缺字段容忍——那是派发门"旧记录不误杀"的取舍，取证路径缺身份
+就是无法证明）**：记录的 executionProfile 身份四元组（`modelId`/`providerID`/
+`providerKey`/`effort`）不完整（`modelId`/`effort` 须非空字符串；`providerID`/
+`providerKey` 须非空字符串或 `null`=已观察无接入方）、画像不明（legacy 记录无执行
+画像）或台账来源不可用/无记录 → `undeterminable`；四元组与当前声明不一致（含
+provider 一侧 `null` 一侧非 `null`）、与记录顶层身份矛盾（如
+`executionProfile.modelId` ≠ 顶层 `modelId`）、或 effort 不同 → `mismatched`；全等 →
+`matched`。**`undeterminable` 绝不算绿**，且该列**绝不**与
 组件/组合结果合并派生"总体可用=true"——只读展示，不改派发门（`--require-certified`
-语义不变；effort 纳入派发身份是 Owner 级决定）。
+与 `matchedCertRecord` 语义不变；effort 纳入派发身份是 Owner 级决定）。
 
 **认证更新的触发器与执行人**（ADR-0032 附则呼应；不改代码行为，只定规程）：
 

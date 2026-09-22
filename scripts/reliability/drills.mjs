@@ -117,6 +117,11 @@ const REQUIRED_DRILL_DEPS = Object.freeze([
  * @param {string} deps.waitTimeout — 单 worker 等待超时（毫秒字符串，CLI 参数原样透传）
  * @param {string} deps.pollInterval — 轮询间隔（毫秒字符串，CLI 参数原样透传）
  * @param {string} deps.registry — registry 文件路径（CLI 参数原样透传）
+ * @param {string} [deps.transcriptDir] — 可选：drill 转录的持久化 run 目录
+ *   （TD-186 复核 FAIL-B）。提供时 runStrictScorecardDrill 的派发显式 --run-dir
+ *   到该目录——runId 会进 executionProfile.drillRunIds 的 drill，转录必须落在
+ *   可回查位置（tmpDir 会在收尾被整体删除）。不提供时行为与旧版一致（组件层
+ *   入口不记 drillRunIds，无此约束）。
  * @returns {object} 绑定该环境的 drill glue（runCli / 各 drill / ensureTmpGitRepo /
  *   readRunEvents）
  */
@@ -130,7 +135,7 @@ export function createDrills(deps) {
       );
     }
   }
-  const { nodeBin, root, tmpDir, waitTimeout, pollInterval, registry } = deps;
+  const { nodeBin, root, tmpDir, waitTimeout, pollInterval, registry, transcriptDir } = deps;
 
   function runCli(cmdArgs, options = {}) {
     // 用 spawnSync 而非 execFileSync：execFileSync 在 Windows 上退出时会清理整个进程树，
@@ -170,6 +175,10 @@ export function createDrills(deps) {
       "--poll-interval", pollInterval,
       "--registry", registry,
       "--cwd", tmpDir,
+      // TD-186 复核 FAIL-B：scorecard 的 runId 会进 executionProfile.drillRunIds，
+      // 转录必须落在可回查位置（tmpDir 收尾会被整体删除）——注入了 transcriptDir
+      // 就显式 --run-dir 过去；未注入（组件层入口）保持旧默认不变。
+      ...(transcriptDir ? ["--run-dir", transcriptDir] : []),
       "--scorecard-rules", JSON.stringify(scorecardRules),
       "--format", "json",
     ]);

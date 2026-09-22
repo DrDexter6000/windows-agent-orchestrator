@@ -42,10 +42,23 @@ import { scorecardCommandFailureIsCredible } from "./reliability/scorecardEviden
 // 组合入口（本文件）与将来的组件入口（component-check）共用——防双轨漂移。
 // 纯判定内核仍在 adversarialEscape.mjs / metricsCheck.mjs，drills.mjs 只 import 消费。
 import { extractJson, check, hasSentinel, createDrills } from "./reliability/drills.mjs";
+// TD-186 复核 FAIL-B：drillRunIds 取证闭环（守卫/清理/悬空 prior id 置 null）。
+import {
+  drillTranscriptsDir,
+  collectReferencedDrillRunIds,
+  missingDrillTranscripts,
+  nullUnresolvableDrillRunIds,
+  pruneUnreferencedDrillTranscripts,
+} from "./reliability/drillEvidence.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
 const RUNS_DIR = resolve(ROOT, "runs");
+// TD-186 复核 FAIL-B：sentinel/scorecard 转录的持久化回查位置（runs/reliability/）。
+// 旧版落 TMP_DIR/runs/（cwd 相对解析）随后被 rmSync(TMP_DIR) 连带删除——
+// drillRunIds 指向已删除证据（硬禁例）。runs/ 已 gitignore；runs 归档清扫只处理
+// 顶层 *.jsonl，子目录语料不在清扫面内（smoke/、verify/ 同款先例）。
+const DRILL_TRANSCRIPTS_DIR = drillTranscriptsDir(RUNS_DIR);
 const TMP_DIR = resolve(__dirname, "reliability-tmp");
 
 // reliability spawn 的 CLI 子进程也必须走 v22（与 npm run reliability 入口一致）。
@@ -97,6 +110,8 @@ const {
   waitTimeout: WAIT_TIMEOUT,
   pollInterval: POLL_INTERVAL,
   registry: REGISTRY,
+  // TD-186 复核 FAIL-B：scorecard 转录落可回查位置（drillRunIds 闭环的前半）。
+  transcriptDir: DRILL_TRANSCRIPTS_DIR,
 });
 
 // --- sentinel 生成 ---
@@ -287,6 +302,8 @@ console.log("");
 mkdirSync(TMP_DIR, { recursive: true });
 writeFileSync(join(TMP_DIR, "sent_a.txt"), SENTINEL_A);
 writeFileSync(join(TMP_DIR, "sent_b.txt"), SENTINEL_B);
+// TD-186 复核 FAIL-B：drill 转录目录（sentinel/scorecard 派发 --run-dir 到此）。
+mkdirSync(DRILL_TRANSCRIPTS_DIR, { recursive: true });
 
 const results = [];
 let allPass = true;
@@ -347,6 +364,9 @@ for (const tc of MATRIX) {
       "--poll-interval", POLL_INTERVAL,
       "--registry", REGISTRY,
       "--cwd", TMP_DIR,
+      // TD-186 复核 FAIL-B：sentinel 的 runId 会进 executionProfile.drillRunIds，
+      // 转录必须落在可回查位置（TMP_DIR 收尾会被整体删除）。
+      "--run-dir", DRILL_TRANSCRIPTS_DIR,
       "--format", "json",
     ]);
 
@@ -435,14 +455,18 @@ for (const tc of MATRIX) {
 
   // TD-186：该 case 各 drill 的 runId——runner 直接可观察的 drill（sentinel/scorecard）
   // 记实际 runId；drills.mjs 只回 checks、不上抛内部 runId 的 drill（isolation/
-  // adversarialEscape/workflowRunDir/stop）如实记 null（绝不用 "unknown" 之外的猜值）。
+  // adversarialEscape/workflowRunDir/stop）如实记 null。派发失败/无 runId 时的
+  // "unknown" 占位也如实归 null——它不是可回查 id，入账即悬空指针（复核 FAIL-B
+  // 硬禁令：不得记录指向不存在证据的 id）。
+  const resolvableRunId = (value) =>
+    typeof value === "string" && value.length > 0 && value !== "unknown" ? value : null;
   caseResult.executionProfile.drillRunIds = Object.fromEntries(
     tc.drills.map((drill) => [
       drill,
       drill === "sentinel"
-        ? (caseResult.runId ?? null)
+        ? resolvableRunId(caseResult.runId)
         : drill === "scorecard"
-          ? (caseResult.scorecardRunId ?? null)
+          ? resolvableRunId(caseResult.scorecardRunId)
           : null,
     ]),
   );
@@ -577,8 +601,39 @@ try {
 // 陈年 case 不再拖累 worker 级最差聚合。注意 scope：MATRIX 是（可能经 --agent
 // 过滤后的）当前矩阵行，pruneStaleCases 对不在矩阵 agentIds 里的 prior 不动。
 const mergedCases = mergeCaseResults(pruneStaleCases(priorCases, MATRIX), results);
-const summary = summarizeCertification(mergedCases);
+// TD-186 复核 FAIL-B 守卫（先于任何写盘）：本次运行记录的每个 drillRunId 必须有
+// 转录在场（runs/reliability/<runId>.jsonl）。任一缺失 = 取证接线断裂——拒绝写
+// 新 summary 并非零退出。宁可丢本次运行结果，绝不记录悬空 id（硬禁令：记录一个
+// 指向随后被删除/不存在的证据的 id）。
+const freshRunIds = collectReferencedDrillRunIds({ cases: results });
+const missingFresh = missingDrillTranscripts(freshRunIds, DRILL_TRANSCRIPTS_DIR);
+if (missingFresh.length > 0) {
+  console.error(
+    `[reliability] ERROR: ${missingFresh.length} 个本次运行的 drillRunIds 无对应转录（runs/reliability/<runId>.jsonl 不在场）——拒绝写入 summary（硬禁令：不得记录不可回查的 id）。这属于取证接线 bug，请上报。`,
+  );
+  process.exit(3);
+}
+// 旧版取证遗留的悬空 prior id（转录当时写在已被清理的临时目录）：写盘前如实置
+// null（不可回查就不记 id）+ 逐条告警——写出的 summary 不含死指针；checks/status
+// 等判定字段一字不动。
+const { cases: closedCases, nulled: nulledPriorIds } = nullUnresolvableDrillRunIds(mergedCases, {
+  transcriptsDir: DRILL_TRANSCRIPTS_DIR,
+});
+for (const n of nulledPriorIds.slice(0, 16)) {
+  console.warn(`[reliability] WARN: case ${n.caseId} 的 drill ${n.drill} runId 转录不可回查（旧版取证遗留），已如实置 null`);
+}
+if (nulledPriorIds.length > 16) {
+  console.warn(`[reliability] WARN: 另有 ${nulledPriorIds.length - 16} 条同类悬空 id 已置 null`);
+}
+const summary = summarizeCertification(closedCases);
 writeFileSync(summaryPath, JSON.stringify(summary, null, 2));
+// TD-186 复核 FAIL-B 清理：保留集 = 刚写出的 summary 引用的 id 集；被取代认证的
+// 转录随之删除（重认证覆盖同 caseId），目录不无限增长。只删 runId 形状文件。
+const transcriptSweep = pruneUnreferencedDrillTranscripts(
+  DRILL_TRANSCRIPTS_DIR,
+  collectReferencedDrillRunIds(summary),
+);
+console.log(`Drill transcripts (runs/reliability/): kept ${transcriptSweep.kept}, pruned ${transcriptSweep.removed} unreferenced`);
 console.log(`\nSummary written to ${summaryPath}`);
 console.log(`Certification counts: ${JSON.stringify(summary.counts)}`);
 console.log(`\n=== ${allPass ? "ALL PASS" : "SOME FAILED"} ===`);

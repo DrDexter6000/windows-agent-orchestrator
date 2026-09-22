@@ -293,7 +293,7 @@ test("TD-186 B 画像不匹配: 记录 effort=medium vs 声明 high → mismatch
   }
 });
 
-test("TD-186 B 身份不匹配: 记录 backend 漂移 → mismatched（matchedCertRecord SSOT 裁决）", async () => {
+test("TD-186 B 身份不匹配: 记录 backend 漂移 → mismatched（fail-closed 比对裁决；门禁 matchedCertRecord 不入此路径）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-td186-idmm-"));
   try {
     const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
@@ -302,6 +302,138 @@ test("TD-186 B 身份不匹配: 记录 backend 漂移 → mismatched（matchedCe
     const rows = await runEvidence({ registryPath, runDir });
     assert.equal(rows[0].applicability, "mismatched");
     assert.ok(rows[0].limitationsAndSources.limitations.some((l) => l.startsWith("identity-mismatch:backend")));
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ===== TD-186 复核 FAIL-A 回归钉（2026-09-22 第二包：画像判定 fail-closed）=====
+//
+// 独立复核的两条反例 + provider null 语义钉。判据（四态判据的行为面）：
+//   - 身份四元组不完整（缺/非字符串/空；provider 两字段合法 null）⇒ undeterminable；
+//   - 顶层与画像侧内部矛盾 / 四元组与声明不一致 ⇒ mismatched。
+
+test("TD-186 复核反例①（FAIL-A）: {status:certified, executionProfile:{effort:high}} 身份全缺 → undeterminable（绝不能 matched）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td186-rev1-"));
+  try {
+    const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
+    const runDir = makeRunDir(dir);
+    // 复核原文形状：顶层身份全缺，画像里只有 effort——旧判定经 matchedCertRecord
+    // 的缺字段容忍直通，effort 相等即 matched（假绿）。
+    writeSummary(runDir, {
+      auditor: { status: "certified", executionProfile: { effort: "high" } },
+    });
+    const rows = await runEvidence({ registryPath, runDir });
+    assert.equal(rows[0].combined.record.status, "certified", "组合结果列如实展示 certified");
+    assert.equal(rows[0].applicability, "undeterminable",
+      "身份全缺 = 无法证明证据属于当前画像——绝不能 matched");
+    assert.ok(rows[0].limitationsAndSources.limitations.some((l) => l.startsWith("execution-profile-incomplete:")),
+      "限制项须点名画像身份不完整");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-186 复核反例①变体: 画像字段非字符串/空串同样 undeterminable（不只要缺字段）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td186-rev1b-"));
+  try {
+    const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
+    const runDir = makeRunDir(dir);
+    const profile = matchedWorkerRecord().executionProfile;
+    writeSummary(runDir, {
+      auditor: matchedWorkerRecord({ executionProfile: { ...profile, modelId: "", providerID: 7 } }),
+    });
+    const rows = await runEvidence({ registryPath, runDir });
+    assert.equal(rows[0].applicability, "undeterminable", "空串 modelId / 非字符串 providerID ⇒ 不完整");
+    const limits = rows[0].limitationsAndSources.limitations.join(" ");
+    assert.match(limits, /execution-profile-incomplete:modelId\+providerID/, "逐字段点名");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-186 复核反例②（FAIL-A）: 顶层身份正确但 executionProfile.modelId 为另一模型 → mismatched 且 limitations 非空（内部矛盾不得判 matched）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td186-rev2-"));
+  try {
+    const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
+    const runDir = makeRunDir(dir);
+    // 顶层身份与声明完全一致（旧判定的顶层比对全通过），但画像侧 modelId 是另一
+    // 模型——旧判定无人再看画像侧身份，直接 matched（假绿）。
+    const profile = matchedWorkerRecord().executionProfile;
+    writeSummary(runDir, {
+      auditor: matchedWorkerRecord({ executionProfile: { ...profile, modelId: "gpt-6-b-sidian" } }),
+    });
+    const rows = await runEvidence({ registryPath, runDir });
+    assert.equal(rows[0].applicability, "mismatched");
+    const limits = rows[0].limitationsAndSources.limitations;
+    assert.ok(limits.length > 0, "limitations 非空");
+    assert.ok(limits.some((l) => l.startsWith("identity-contradiction:modelId")),
+      "须点名顶层与画像的内部矛盾");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-186 复核 FAIL-A: provider 一侧 null 一侧非 null ⇒ mismatched；双侧 null（无接入方）⇒ 逐字段相等可 matched", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td186-revpn-"));
+  try {
+    const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
+    const runDir = makeRunDir(dir);
+    // 声明侧：无 provider 块（providerKeyFor 派生 null、providerID null）。
+    // 记录侧画像：providerID 声明了字符串——一侧 null 一侧非 null。
+    const profile = matchedWorkerRecord().executionProfile;
+    writeSummary(runDir, {
+      auditor: matchedWorkerRecord({ executionProfile: { ...profile, providerID: "zhipuai-coding-plan" } }),
+    });
+    const rows = await runEvidence({ registryPath, runDir });
+    assert.equal(rows[0].applicability, "mismatched", "一侧 null 一侧非 null ⇒ mismatched");
+    const limits = rows[0].limitationsAndSources.limitations.join(" ");
+    assert.match(limits, /identity-contradiction:providerID/, "同时是顶层(null)与画像(字符串)的内部矛盾");
+    // 双侧 null 的对照在「正常」用例（matchedWorkerRecord 画像 providerID/providerKey
+    // 均 null，声明侧同 null）已钉 matched——此处不再重复。
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ===== TD-186 复核 FAIL-B 回归钉（C.3：方案 1——id 可解析）=====
+
+test("TD-186 复核 FAIL-B（方案 1）: 转录在场 → id 可解析、无悬空限制项；转录被删 → 浮出 drill-evidence-unresolvable（不改三态）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td186-revb-"));
+  try {
+    const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
+    const runDir = makeRunDir(dir);
+    writeSummary(runDir, {
+      auditor: matchedWorkerRecord({
+        executionProfile: {
+          ...matchedWorkerRecord().executionProfile,
+          drillRunIds: { sentinel: "run_t1", scorecard: "run_t2", isolation: null },
+        },
+      }),
+    });
+    // 写入侧约定位置：<runDir>/reliability/<runId>.jsonl（run-reliability.mjs 的
+    // sentinel/scorecard 派发 --run-dir 落账处）。isolation 如实 null——无 id 即
+    // 无可回查主张，不该有任何限制项。
+    const transcriptsDir = join(runDir, "reliability");
+    mkdirSync(transcriptsDir, { recursive: true });
+    writeFileSync(join(transcriptsDir, "run_t1.jsonl"), '{"type":"run.started"}\n', "utf8");
+    writeFileSync(join(transcriptsDir, "run_t2.jsonl"), '{"type":"run.started"}\n', "utf8");
+
+    const resolvable = await runEvidence({ registryPath, runDir });
+    assert.equal(resolvable[0].applicability, "matched");
+    assert.ok(
+      !resolvable[0].limitationsAndSources.limitations.some((l) => l.startsWith("drill-evidence-unresolvable")),
+      "id 各自可解析（isolation=null 不主张可回查）→ 无悬空限制项",
+    );
+
+    // 转录随后被删（复现实证形态：临时目录被清）——只读层必须把断裂浮出为限制项，
+    // 且不改适用性三态（回查性是并列事实，不是画像判定输入）。
+    rmSync(join(transcriptsDir, "run_t2.jsonl"), { force: true });
+    const broken = await runEvidence({ registryPath, runDir });
+    assert.equal(broken[0].applicability, "matched", "回查性限制项不改三态");
+    const limits = broken[0].limitationsAndSources.limitations.join(" ");
+    assert.match(limits, /drill-evidence-unresolvable:scorecard/, "被删转录的 drill 被点名");
+    assert.ok(!/drill-evidence-unresolvable:[^ ]*sentinel/.test(limits), "仍在场的 run_t1 不误报");
   } finally {
     cleanupDir(dir);
   }
