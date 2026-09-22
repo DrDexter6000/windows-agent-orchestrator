@@ -485,6 +485,10 @@ provider 一侧 `null` 一侧非 `null`）、与记录顶层身份矛盾（如
 `matched`。**`undeterminable` 绝不算绿**，且该列**绝不**与
 组件/组合结果合并派生"总体可用=true"——只读展示，不改派发门（`--require-certified`
 与 `matchedCertRecord` 语义不变；effort 纳入派发身份是 Owner 级决定）。
+MCP 侧同款按需投影（ADR-0032 修订 2026-09-22，Owner 裁定）：`registry_list` 传
+`detail:"certificationEvidence"` 时返回可选 `certificationEvidence` 行（同一服务、
+五列与来源状态保真；默认调用一字不变；advisory-only，`requireCertified=false`
+与 CLI 门禁语义原样）。
 
 **认证更新的触发器与执行人**（ADR-0032 附则呼应；不改代码行为，只定规程）：
 

@@ -30,6 +30,7 @@ import { z } from "zod";
 import {
   getRegistryInventory,
   getRegistryInventoryWithIssues,
+  getCertificationEvidenceInventory,
   projectRegistryIssues,
   normalizeInventoryResult,
   REGISTRY_ISSUE_CODES,
@@ -38,6 +39,10 @@ import {
   AUTHENTICATION_STATUSES,
   ENTITLEMENT_STATUSES,
   LIVE_CHECK_STATUSES,
+  // ADR-0032 修订（2026-09-22）：认证证据详情按需投影的闭集 SSOT——适用性三态与
+  // 台账来源状态从服务层唯一登记处派生（z.enum 展开副本，无第二份清单可漂移）。
+  CERT_EVIDENCE_APPLICABILITY,
+  CERT_LEDGER_SOURCE_STATES,
 } from "../application/registryInventory.js";
 // TD-111: certification advisory context closed set — the AGENT_ENTRY /
 // lead_preflight worker enums derive from this ONE SSOT constant (same wiring
@@ -334,10 +339,23 @@ function isStringField(v) {
 // read failed, never why in operational detail.
 const SERVICE_ERROR_TEXT = "registry_list failed";
 
-// The registry_list tool input: a strict empty object. Extra keys are rejected
-// by zod validation before the service is ever called, so a model cannot
-// override server-side registryPath/runDir via tool arguments.
-const REGISTRY_LIST_INPUT = z.object({}).strict();
+// The registry_list tool input: a strict object whose ONLY member is the
+// optional closed-set detail selector. Extra keys are rejected by zod
+// validation before the service is ever called, so a model cannot override
+// server-side registryPath/runDir via tool arguments.
+//
+// ADR-0032 修订（2026-09-22，Owner 裁定）:认证证据详情按需进入 MCP 只读面。
+// detail 是单值闭集枚举（今日仅 "certificationEvidence"）；默认调用不传
+// detail —— 简表投影（agents/issues/issuesTruncated）一字不变。请求详情时
+// 额外返回可选 certificationEvidence（按席位五列），与 CLI
+// `registry list --cert-evidence` 共用同一 getCertificationEvidenceInventory
+// 服务（同一判断，无第二套语义）。advisory-only：组件通过不推出组合绿；
+// "undeterminable" 绝不算绿；绝不派生"总体可用=true"。不改派发门
+// （--require-certified / matchedCertRecord / requireCertified=false 原语义）。
+const REGISTRY_LIST_DETAIL_VALUES = Object.freeze(["certificationEvidence"]);
+const REGISTRY_LIST_INPUT = z.object({
+  detail: z.enum([...REGISTRY_LIST_DETAIL_VALUES]).optional(),
+}).strict();
 
 // M12-6 FR-02: strict provider readiness truth projection. Enums derive from
 // the registryInventory.js SSOT (z.enum(CONFIGURATION_STATUSES) etc.), so the
@@ -399,11 +417,48 @@ const REGISTRY_ISSUE = z.object({
   agentId: z.string().nullable(),
 }).strict();
 
+// ADR-0032 修订（2026-09-22）：按席位五列的认证证据详情行（可选——仅在
+// detail:"certificationEvidence" 时出现在输出里；默认调用一字节不多）。
+//
+// 五列与 CLI `registry list --cert-evidence` 同源同义（同一服务
+// getCertificationEvidenceInventory）：
+//   declared            列1 声明（当前 registry 生效画像，与派发同源）
+//   componentObserved   列2 组件观测（component-checks.json 只读事实，非判定）
+//   combined            列3 组合结果（reliability-summary worker 记录有界投影）
+//   applicability       列4 证据适用性三态闭集（matched/mismatched/undeterminable）
+//   limitations +       列5 限制与来源：非门控限制项（含 drill 转录回查性断裂）
+//   summaryLedgerState      + 两本台账各自的来源状态闭集（ok/missing/
+//   componentLedgerState    unparseable/read-error，分别可辨、绝不折叠）
+//
+// 体积与保真的取舍（ADR-0032 修订"不得为控体积丢弃限制与来源"）：观察性三列
+// （声明/组件观测/组合结果）投影为有界单行文本（内容与 CLI 行渲染同源的服务
+// 字段）；三态与两账来源状态是**枚举字段**（机器可辨、闭集校验、越界即整次
+// 调用 fail-closed 到固定错误文本）。缺记录/画像缺失以显式标记呈现
+// （record=none / profile=unrecorded(legacy)），绝不因字段缺席而被读成绿。
+// 全行**没有**任何合并布尔（无 usable/available/overall/dispatchable）——
+// 适用性永远与组合结果并列，不合成单一绿。
+const CERT_EVIDENCE_ROW = z.object({
+  id: z.string(),
+  declared: z.string().max(768),
+  componentObserved: z.string().max(4096),
+  combined: z.string().max(512),
+  applicability: z.enum([...CERT_EVIDENCE_APPLICABILITY]),
+  limitations: z.array(z.string().max(1024)).max(24),
+  // 两本台账的来源状态（列5"来源"半边）：组合层 reliability-summary.json 与
+  // 组件层 component-checks.json 各自独立判定、并列呈现（一账 ok 一账 read-error
+  // 同时可见）；闭集外的值（含缺失）整次调用 fail-closed，不静默折叠。
+  summaryLedgerState: z.enum([...CERT_LEDGER_SOURCE_STATES]),
+  componentLedgerState: z.enum([...CERT_LEDGER_SOURCE_STATES]),
+}).strict();
+
 const REGISTRY_LIST_OUTPUT = z.object({
   agents: z.array(AGENT_ENTRY),
   // M12-25: bounded per-entry issues (closed code set; canonical id only).
   issues: z.array(REGISTRY_ISSUE).max(REGISTRY_ISSUES_CAP),
   issuesTruncated: z.boolean(),
+  // ADR-0032 修订：可选（optional = 键缺席 ⇔ 未请求详情；请求了详情则必有
+  // ——服务抛错整次调用 fail-closed，绝不静默省略被读成"无证据行"）。
+  certificationEvidence: z.array(CERT_EVIDENCE_ROW).optional(),
 }).strict();
 
 // Read-only annotations tell MCP hosts this tool is safe to cache/retry and
@@ -415,9 +470,98 @@ const REGISTRY_LIST_ANNOTATIONS = {
   openWorldHint: false,
 };
 
+// ADR-0032 修订（2026-09-22）：描述更新——registry_list 不再"无参数"（新增可选
+// detail 选择器）。描述字节预算受 FROZEN_22_DESC_CEILING 约束（M12-16-B），本次
+// 改写控制在 +51B 内（advisory/never-a-gate 边界句必须保留在面上）。
 const REGISTRY_LIST_DESCRIPTION =
-  "List configured worker agents: backend, model, reliability certification. Read-only; " +
-  "takes no arguments — registry and run directory are server-owned.";
+  "List configured worker agents: backend, model, certification. Read-only; " +
+  "optional detail='certificationEvidence' adds per-seat advisory evidence " +
+  "(never a gate); registry/run dir are server-owned.";
+
+// ===== ADR-0032 修订（2026-09-22）：certificationEvidence 行投影（纯函数） =====
+//
+// 输入 = getCertificationEvidenceInventory 的服务行（与 CLI
+// `registry list --cert-evidence` 同一服务、同一判断）；输出 = 上述
+// CERT_EVIDENCE_ROW 的 wire 形状。观察性三列压成有界单行文本；三态与两账
+// 来源状态原样透传给闭集枚举字段（schema 层 fail-closed）。显式缺席标记：
+// record=none（无该席位组合记录）/ profile=unrecorded(legacy)（记录不表达
+// 执行画像）——缺席是事实，不得被读成绿。
+
+/** 组件观测记录的紧凑渲染（result@codeRef#fingerprint(advisory)，与 CLI 同形）。 */
+function certEvidenceComponentRecordLine(record) {
+  const r = record && typeof record === "object" ? record : {};
+  return `${r.result ?? "?"}@${r.codeRef ?? "?"}`
+    + `${r.runtimeFingerprint ? `#${r.runtimeFingerprint}` : ""}`
+    + `${r.advisoryCode ? `(${r.advisoryCode})` : ""}`;
+}
+
+/** 列2 组件观测：state + llm 键可派生性 + backend/llm 观测列表 + 截断标记。 */
+function certEvidenceComponentObservedLine(componentObserved) {
+  const c = componentObserved && typeof componentObserved === "object" ? componentObserved : {};
+  const list = (xs) => (Array.isArray(xs) ? xs : []).map(certEvidenceComponentRecordLine).join(",");
+  const parts = [`state=${c.state ?? "?"}`];
+  if (c.llmKeyDerivable === false) parts.push("llmKeyUnderivable(no providerID)");
+  parts.push(`backend=[${list(c.backend)}]`, `llm=[${list(c.llm)}]`);
+  if (c.truncated === true) parts.push("truncated=true");
+  return parts.join(" ");
+}
+
+/** 列3 组合结果：state + status/record=none + 画像（或 legacy 标记）+ 全绿时间戳。 */
+function certEvidenceCombinedLine(combined) {
+  const b = combined && typeof combined === "object" ? combined : {};
+  const record = b.record && typeof b.record === "object" ? b.record : null;
+  const parts = [`state=${b.state ?? "?"}`];
+  if (!record) {
+    parts.push("record=none");
+    return parts.join(" ");
+  }
+  parts.push(`status=${record.status ?? "?"}`);
+  const profile = record.executionProfile
+    && typeof record.executionProfile === "object" ? record.executionProfile : null;
+  if (profile) {
+    parts.push(
+      `effort=${profile.effort ?? "null"}`,
+      `codeRef=${profile.codeRef ?? "?"}`,
+      `capturedAt=${profile.capturedAt ?? "?"}`,
+    );
+  } else {
+    parts.push("profile=unrecorded(legacy)");
+  }
+  if (record.lastFullHealthyRunAt) parts.push(`lastFullHealthy=${record.lastFullHealthyRunAt}`);
+  return parts.join(" ");
+}
+
+/**
+ * 服务行数组 → wire 行数组。注意：applicability 与两账来源状态**原样透传**
+ * （闭集枚举在 schema 层校验，越界/缺失 ⇒ 整次调用 fail-closed 到固定错误
+ * 文本）；不派生、不合并、不折叠任何"总体可用"布尔。
+ */
+function projectCertEvidenceRows(rows) {
+  // 非数组的服务结果 = 形状违约 → 抛给调用侧 fail-closed（绝不折叠成"无证据行"
+  // 的空数组成功——那会把"读不了"伪装成"查过了、没有"）。
+  if (!Array.isArray(rows)) {
+    throw new Error("certification evidence inventory must be an array");
+  }
+  return rows.map((row) => {
+    const r = row && typeof row === "object" ? row : {};
+    const declared = r.declared && typeof r.declared === "object" ? r.declared : {};
+    const limitations = r.limitationsAndSources
+      && Array.isArray(r.limitationsAndSources.limitations) ? r.limitationsAndSources.limitations : [];
+    return {
+      id: r.id,
+      // 列1 声明：与 CLI 行同形的键值文本（缺省值 "-"，effort 缺省 "null"）。
+      declared: `backend=${declared.backend ?? "-"} model=${declared.modelId ?? "-"} `
+        + `provider=${declared.providerID ?? "-"} providerKey=${declared.providerKey ?? "null"} `
+        + `effort=${declared.effort ?? "null"}`,
+      componentObserved: certEvidenceComponentObservedLine(r.componentObserved),
+      combined: certEvidenceCombinedLine(r.combined),
+      applicability: r.applicability,
+      limitations,
+      summaryLedgerState: r.combined?.state,
+      componentLedgerState: r.componentObserved?.state,
+    };
+  });
+}
 
 // Fixed safe text returned when run dispatch fails. Never concatenate dynamic
 // content (err.message, path, argv, env) — the model learns only that dispatch
@@ -2743,6 +2887,7 @@ const SEMANTICS_DETAIL_ERROR_TEXT = "semantics detail failed";
  * @param {number} [input.globalWaitTimeout] — server-owned global config.waitTimeout (M10-pre closeout)
  * @param {string} [input.workspaceRoot] — server-owned explicit workspace root (M10-pre2)
  * @param {Function} [input.getRegistryInventoryFn] — injectable for testing
+ * @param {Function} [input.getCertificationEvidenceFn] — injectable certification-evidence detail service for testing (ADR-0032 revision; defaults to the real read-only service shared with the CLI)
  * @param {Function} [input.dispatchRunFn] — injectable dispatcher for testing
  * @param {Function} [input.getRunStatusFn] — injectable status service for testing
  * @param {Function} [input.collectRunMessagesFn] — injectable collect service for testing
@@ -2875,6 +3020,9 @@ export function createWaoMcpServer({
   // returned via MCP.
   leadSession,
   getRegistryInventoryFn,
+  // ADR-0032 修订（2026-09-22）：可注入的认证证据详情服务（默认真实
+  // getCertificationEvidenceInventory；测试注伪用，同 getRegistryInventoryFn 模式）。
+  getCertificationEvidenceFn,
   dispatchRunFn,
   getRunStatusFn,
   collectRunMessagesFn,
@@ -2943,6 +3091,8 @@ export function createWaoMcpServer({
   // both registry_list and lead_preflight normalize accordingly.) The strict
   // getRegistryInventory is still exported for CLI `registry list`/`validate`.
   const service = getRegistryInventoryFn ?? getRegistryInventoryWithIssues;
+  // ADR-0032 修订（2026-09-22）：按需认证证据详情服务（与 CLI 共用同一判断）。
+  const certEvidenceService = getCertificationEvidenceFn ?? getCertificationEvidenceInventory;
   // M11-7: the Windows user-env reader for credential readiness. Defaults to
   // the real reader (PowerShell HKCU\Environment); tests inject a fake.
   const resolveUserEnv = userEnvReader ?? readWindowsUserEnv;
@@ -3135,7 +3285,7 @@ export function createWaoMcpServer({
       outputSchema: REGISTRY_LIST_OUTPUT,
       annotations: REGISTRY_LIST_ANNOTATIONS,
     },
-    async () => {
+    async ({ detail } = {}) => {
       let invResult;
       try {
         invResult = await service({ registryPath, runDir, userEnvReader: resolveUserEnv });
@@ -3166,12 +3316,29 @@ export function createWaoMcpServer({
       // carry dynamic text, an out-of-set code, a non-canonical id, or exceed the
       // cap; >cap input with issuesTruncated:false still reports truncation.
       const { issues, issuesTruncated } = projectRegistryIssues(norm.issues, norm.issuesTruncated);
+      const wirePayload = { agents: norm.agents, issues, issuesTruncated };
+      // ADR-0032 修订（2026-09-22）：按需详情——仅在显式 detail 请求时追加
+      // certificationEvidence。默认调用不进本分支：载荷键集合与字节一字不变。
+      // 证据服务抛错/形状违约 → 整次调用 fail-closed 到固定错误文本：请求了
+      // 详情却静默省略，会被读成"查过了、没有证据行"（伪事实）。
+      if (detail === "certificationEvidence") {
+        try {
+          wirePayload.certificationEvidence = projectCertEvidenceRows(
+            await certEvidenceService({ registryPath, runDir }),
+          );
+        } catch {
+          return {
+            isError: true,
+            content: [{ type: "text", text: SERVICE_ERROR_TEXT }],
+          };
+        }
+      }
       // Validate AND return the parsed safe object — strict schemas strip any
       // internal-only / unknown fields so the model never sees fields that
       // bypassed the output contract.
       let payload;
       try {
-        payload = REGISTRY_LIST_OUTPUT.parse({ agents: norm.agents, issues, issuesTruncated });
+        payload = REGISTRY_LIST_OUTPUT.parse(wirePayload);
       } catch {
         return {
           isError: true,
