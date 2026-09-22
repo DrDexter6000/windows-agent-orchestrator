@@ -34,9 +34,12 @@ function renderCertEvidence(rows) {
     const las = row.limitationsAndSources ?? {};
     console.log(`cert-evidence ${row.id}`);
     console.log(`  声明: backend=${d.backend ?? "-"} model=${d.modelId ?? "-"} provider=${d.providerID ?? "-"} providerKey=${d.providerKey ?? "null"} effort=${d.effort ?? "null"}`);
+    // B2（2026-09-22）：保留取证时间——组件观测行渲染 lastVerifiedAt（审计清单
+    // "保留取证时间"；服务行本就携带，此前渲染层丢弃）。缺失/形状外 → "?"（与
+    // result/codeRef 的缺席约定一致：缺席是事实，不得静默隐去）。
     const compLine = (list) => list.length === 0
       ? "-"
-      : list.map((r) => `${r.result ?? "?"}@${r.codeRef ?? "?"}${r.runtimeFingerprint ? `#${r.runtimeFingerprint}` : ""}${r.advisoryCode ? `(${r.advisoryCode})` : ""}`).join(", ");
+      : list.map((r) => `${r.result ?? "?"}@${r.codeRef ?? "?"}@${r.lastVerifiedAt ?? "?"}${r.runtimeFingerprint ? `#${r.runtimeFingerprint}` : ""}${r.advisoryCode ? `(${r.advisoryCode})` : ""}`).join(", ");
     console.log(`  组件观测: state=${c.state}${c.llmKeyDerivable === false ? " llm键不可派生(无providerID)" : ""} backend=[${compLine(c.backend ?? [])}] llm=[${compLine(c.llm ?? [])}]${c.truncated ? " (截断)" : ""}`);
     console.log(`  组合结果: state=${b.state}${rec.status ? ` status=${rec.status}` : " 无记录"}${rec.executionProfile ? ` effort=${rec.executionProfile.effort ?? "null"} codeRef=${rec.executionProfile.codeRef ?? "?"} capturedAt=${rec.executionProfile.capturedAt ?? "?"}` : " 画像=未记录(legacy)"}${rec.lastFullHealthyRunAt ? ` lastFullHealthy=${rec.lastFullHealthyRunAt}` : ""}`);
     console.log(`  证据适用性: ${row.applicability}`);

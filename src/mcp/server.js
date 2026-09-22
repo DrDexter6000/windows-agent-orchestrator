@@ -487,10 +487,12 @@ const REGISTRY_LIST_DESCRIPTION =
 // record=none（无该席位组合记录）/ profile=unrecorded(legacy)（记录不表达
 // 执行画像）——缺席是事实，不得被读成绿。
 
-/** 组件观测记录的紧凑渲染（result@codeRef#fingerprint(advisory)，与 CLI 同形）。 */
+/** 组件观测记录的紧凑渲染（result@codeRef@lastVerifiedAt#fingerprint(advisory)，与 CLI 同形）。
+ *  B2（2026-09-22）：保留取证时间——lastVerifiedAt 进 wire 行（审计清单"保留取证
+ *  时间"；此前紧凑渲染丢弃）。缺失/形状外 → "?"（缺席是事实，不静默隐去）。 */
 function certEvidenceComponentRecordLine(record) {
   const r = record && typeof record === "object" ? record : {};
-  return `${r.result ?? "?"}@${r.codeRef ?? "?"}`
+  return `${r.result ?? "?"}@${r.codeRef ?? "?"}@${r.lastVerifiedAt ?? "?"}`
     + `${r.runtimeFingerprint ? `#${r.runtimeFingerprint}` : ""}`
     + `${r.advisoryCode ? `(${r.advisoryCode})` : ""}`;
 }

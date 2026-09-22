@@ -9,9 +9,9 @@
 //     （缺文件/记录缺失/不可解析/读取错误分别可辨——不复用有损 buildCertMap）；
 //   - 适用性三态闭集（matched/mismatched/undeterminable），"无法判断"绝不算绿；
 //   - 绝不派生"总体可用=true"之类的合并绿；
-//   - 三条"不得合并成绿"钉：①组件通过+组合失败 ②历史通过+本次失败（见
-//     reliabilityCertification.test.js TD-186 钉②，summary 层）③一账有旧证据+
-//     另一账读取报错。
+//   - 三条"不得合并成绿"钉：①组件通过+组合失败 ②历史通过+本次失败（summary 层
+//     见 reliabilityCertification.test.js TD-186 钉②；B2 补详情层钉——组合列如实
+//     展示本次失败，历史全绿时间只作历史事实保留）③一账有旧证据+另一账读取报错。
 //
 // 派发门零改动（matchedCertRecord / --require-certified 不动）由
 // test/run-lifecycle/certGateIdentityFreshness.test.js 既有守卫承载；本文件只测
@@ -565,6 +565,37 @@ test("TD-186 钉①（组合失败变体）: 组件通过 + 组合 conditional �
   }
 });
 
+test("TD-186 钉②（不得合并成绿，详情层）: 历史通过 + 本次失败——组合列如实 draft-only，历史全绿时间只作历史事实保留", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td186-p2-"));
+  try {
+    const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
+    const runDir = makeRunDir(dir);
+    // summary 层钉（reliabilityCertification.test.js TD-186 钉②）已证 summarize 时
+    // status=draft-only 且 lastHealthyRunAt 保留历史时间；本钉证【详情查询面】读
+    // 到该形状时不得把历史全绿读成"当前绿"。
+    writeSummary(runDir, {
+      auditor: matchedWorkerRecord({
+        status: "draft-only",
+        lastHealthyRunAt: "2026-08-10T00:00:00.000Z",
+        lastFullHealthyRunAt: "2026-08-10T00:00:00.000Z",
+      }),
+    });
+    const rows = await runEvidence({ registryPath, runDir });
+    const row = rows[0];
+    assert.equal(row.combined.record.status, "draft-only", "本次失败必须如实可见（不被历史全绿覆盖）");
+    assert.equal(row.combined.record.lastFullHealthyRunAt, "2026-08-10T00:00:00.000Z",
+      "历史全绿时间保留为历史事实（取证时间不抹除）");
+    // 身份/画像仍匹配 → applicability=matched；但 matched 只陈述"证据适用"，
+    // 不与 status 合并成任何可用性绿（质量列与适用性列并列）。
+    assert.equal(row.applicability, "matched");
+    const dumped = JSON.stringify(row);
+    assert.ok(!/"(?:available|usable|overall|green|dispatchable)":\s*true/.test(dumped),
+      "历史通过 + 本次失败不得产出任何合并绿布尔");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 test("TD-186 钉③（不得合并成绿）: 一账有旧证据 + 另一账（组件台账）读取报错 → 两来源状态分别可辨，不吞不绿", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-td186-p3-"));
   try {
@@ -648,6 +679,32 @@ test("TD-186 B CLI: registry list 默认输出不变；--cert-evidence 追加五
     assert.match(block, /限制与来源:/);
     assert.match(block, /runs\/reliability-summary\.json\(ok\)/);
     assert.match(block, /runs\/component-checks\.json\(missing\)/);
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD-186 B CLI（B2 取证时间）: 组件观测行渲染 lastVerifiedAt；组合列渲染 capturedAt/lastFullHealthy——取证时间不得在渲染层丢弃", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td186-cli2-"));
+  try {
+    const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
+    const runDir = makeRunDir(dir);
+    writeSummary(runDir, { auditor: matchedWorkerRecord() });
+    writeComponentLedger(runDir, {
+      "backend:codex@92209bb#v1-abc123def4567890": componentRecord(),
+    });
+    const rows = await runEvidence({ registryPath, runDir });
+    // 服务行本就携带（JSON 路径无损）；
+    assert.equal(rows[0].componentObserved.backend[0].lastVerifiedAt, "2026-09-21T10:00:00.000Z");
+    const out = execSync(
+      "node src/cli.js registry list --registry " + registryPath + " --run-dir " + runDir + " --cert-evidence",
+      { cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" } },
+    );
+    // 文本渲染（B2 前丢弃）三处取证时间都必须在场：
+    assert.match(out, /组件观测: state=ok .*backend=\[pass@92209bb@2026-09-21T10:00:00\.000Z#/,
+      "组件观测行携带 lastVerifiedAt（result@codeRef@lastVerifiedAt#fingerprint）");
+    assert.match(out, /capturedAt=2026-09-22T15:05:15\.876Z/, "组合列携带画像 capturedAt");
+    assert.match(out, /lastFullHealthy=2026-09-22T15:05:15\.876Z/, "组合列携带全绿时间戳");
   } finally {
     cleanupDir(dir);
   }

@@ -198,6 +198,10 @@ test("ADR32-MCP-2: detail call returns per-seat five-column rows through the MCP
       assert.match(row.declared, /effort=high/);
       assert.match(row.componentObserved, /state=ok/);
       assert.match(row.componentObserved, /pass@92209bb/);
+      // B2（2026-09-22）：保留取证时间——组件观测行携带 lastVerifiedAt（此前紧凑
+      // 渲染丢弃；与 CLI 文本渲染同形 result@codeRef@lastVerifiedAt#fingerprint）。
+      assert.match(row.componentObserved, /pass@92209bb@2026-09-21T10:00:00\.000Z#/,
+        "component forensic timestamp survives the wire projection");
       assert.match(row.combined, /status=certified/);
       assert.ok(Array.isArray(row.limitations), "limitations column present (never dropped for size)");
       assert.equal(row.summaryLedgerState, "ok");
@@ -363,6 +367,7 @@ test("ADR32-MCP-5: limitations column carries drill-evidence breakage and non-ce
     const registryPath = makeRegistry(dir, {
       seat_drill: agentEntry(dir, "high"),
       seat_cond: agentEntry(dir, "high"),
+      seat_hist: agentEntry(dir, "high"),
     });
     const runDir = makeRunDir(dir);
     writeSummary(runDir, {
@@ -375,6 +380,13 @@ test("ADR32-MCP-5: limitations column carries drill-evidence breakage and non-ce
       }),
       // 身份/画像全等但 status=conditional：适用性 matched ≠ 质量绿。
       seat_cond: matchedWorkerRecord({ status: "conditional" }),
+      // B2 钉②（详情层）：历史通过 + 本次失败——status 反映本次失败，历史全绿
+      // 时间只作历史事实保留（summary 层钉见 reliabilityCertification.test.js）。
+      seat_hist: matchedWorkerRecord({
+        status: "draft-only",
+        lastHealthyRunAt: "2026-08-10T00:00:00.000Z",
+        lastFullHealthyRunAt: "2026-08-10T00:00:00.000Z",
+      }),
     });
     const server = createWaoMcpServer({ registryPath, runDir });
     const client = await buildInMemoryClient(server);
@@ -388,6 +400,11 @@ test("ADR32-MCP-5: limitations column carries drill-evidence breakage and non-ce
       const cond = byId.get("seat_cond");
       assert.equal(cond.applicability, "matched", "identity match is about applicability, not quality");
       assert.match(cond.combined, /status=conditional/, "non-certified combined status stays visible");
+      const hist = byId.get("seat_hist");
+      assert.match(hist.combined, /status=draft-only/, "this-run failure stays visible (not overridden by history)");
+      assert.match(hist.combined, /lastFullHealthy=2026-08-10T00:00:00\.000Z/,
+        "historical all-green timestamp preserved as a forensic fact");
+      assert.equal(hist.applicability, "matched", "applicability is parallel to quality — never merged into green");
       assert.ok(!NO_MERGED_GREEN_RE.test(JSON.stringify(parsed)), "no derived overall-usable boolean");
     } finally {
       await client.close();

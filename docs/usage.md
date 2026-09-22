@@ -471,7 +471,10 @@ runs 清扫 runbook 同频，且维护时无进行中的 reliability 运行—�
 侧：`registry list --cert-evidence`（text 追加详情块 / `--format json` 附
 `certificationEvidence` 数组，与 `registry_list` 共用
 `src/application/registryInventory.js` 服务）按席位分列展示**声明 / 组件观测 / 组合
-结果 / 证据适用性 / 限制与来源**；台账来源状态（缺文件 / 不可解析 / 读取错误）分别
+结果 / 证据适用性 / 限制与来源**，**取证时间在两处渲染里保留**（组件观测行携带
+`lastVerifiedAt`；组合列携带画像 `capturedAt` 与全绿 `lastFullHealthyRunAt`；
+`--format json` 的服务行保留全部原始时间戳字段——渲染层不得丢弃取证时间）；
+台账来源状态（缺文件 / 不可解析 / 读取错误）分别
 可辨，不复用有损吞错的简表路径；`drillRunIds` 记录了 id 但对应转录不在回查位置时
 浮出 `drill-evidence-unresolvable` 限制项（不改三态）。**证据适用性是三态闭集
 `matched / mismatched / undeterminable`，判定 fail-closed（复核 FAIL-A：不复用
