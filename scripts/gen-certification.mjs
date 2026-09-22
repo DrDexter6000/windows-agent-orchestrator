@@ -25,11 +25,12 @@
 // 无临时路径、无随机值——同输入 ⇒ 逐字节相同的输出。零 spawn、零网络、零新依赖。
 //
 // Usage: npm run gen:certification            （写出文件）
-//        npm run gen:certification -- --check （重渲染与磁盘逐字节比对，不一致 exit 1）
+//        npm run gen:certification -- --check （重渲染与磁盘比对：换行归一化后文本一致，
+//        CRLF/LF 视为相同——`.gitattributes` 已钉 docs/surface/*.md eol=lf；不一致 exit 1）
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { KNOWN_BACKENDS, REASONING_EFFORTS } from "../src/registry.js";
 import {
@@ -248,7 +249,7 @@ export function renderCertification() {
     lines.push(`| ${row.backendKey} | ${BACKEND_CAPABILITY_AXES.map((axis) => capabilityCell(row.capabilities[axis])).join(" | ")} |`);
   }
   lines.push("");
-  lines.push("✅ = 类声明 `=== true`；— = 未声明（strict 读取为 false）。带条件/限制的轴（如 opencode-serve 角色合同的版本门）见 §二条件与限制说明。");
+  lines.push("✅ = 类声明 `=== true`；— = **未声明或非严格 true**（strict `=== true` 读取为 false——两者同格，例如 deepseek-acp 多轴是显式声明 `false`）。带条件/限制的轴（如 opencode-serve 角色合同的版本门）见 §二条件与限制说明。");
   lines.push("");
   lines.push("## 二、配置表达力四轴判定（validateAgentPolicy 行为探针派生）");
   lines.push("");
@@ -292,7 +293,25 @@ export function renderCertification() {
 }
 
 // 写出/校验仅在作为主模块运行时发生（import 永不写入）。
-if (import.meta.main) {
+// F1（2026-09-22 auditor 审计修复）：`import.meta.main` 直到 Node 22.18 才加入，而
+// package.json 允许整个 Node 22 系列——更早的 22.x 上该属性为 undefined，整块写出/校验
+// 会被静默跳过（fail-open：过期/缺失的生成物也 exit 0）。改用 argv[1] ↔ import.meta.url
+// 的兼容比对，并在「看起来是被当脚本调用、却判定不是主模块」时 fail-closed 直接 exit 1。
+const ENTRY_ARG = typeof process.argv[1] === "string" ? process.argv[1] : "";
+const INVOKED_AS_SCRIPT = /gen-certification\.mjs$/.test(ENTRY_ARG);
+let isMainModule = false;
+if (ENTRY_ARG.length > 0) {
+  try {
+    isMainModule = pathToFileURL(resolve(ENTRY_ARG)).href === import.meta.url;
+  } catch {
+    isMainModule = false;
+  }
+}
+if (!isMainModule && INVOKED_AS_SCRIPT) {
+  console.error("[gen-certification] entry-point detection failed — refusing to exit 0 without checking (fail-closed)");
+  process.exit(1);
+}
+if (isMainModule) {
   const target = join(REPO_ROOT, CERTIFICATION_MD);
   const rendered = renderCertification();
   if (process.argv.includes("--check")) {

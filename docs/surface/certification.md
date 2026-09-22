@@ -22,7 +22,7 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 | deepseek-harness | ✅ | — | — | ✅ | ✅ | ✅ |
 | deepseek-acp | ✅ | ✅ | — | — | — | — |
 
-✅ = 类声明 `=== true`；— = 未声明（strict 读取为 false）。带条件/限制的轴（如 opencode-serve 角色合同的版本门）见 §二条件与限制说明。
+✅ = 类声明 `=== true`；— = **未声明或非严格 true**（strict `=== true` 读取为 false——两者同格，例如 deepseek-acp 多轴是显式声明 `false`）。带条件/限制的轴（如 opencode-serve 角色合同的版本门）见 §二条件与限制说明。
 
 ## 二、配置表达力四轴判定（validateAgentPolicy 行为探针派生）
 
