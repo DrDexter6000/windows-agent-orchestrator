@@ -610,15 +610,19 @@ const RED_23_WIRE = 75492;
 // Ceiling re-frozen at the exact measured 78127.
 // ADR-0032 修订（2026-09-22，Owner 裁定：认证证据详情按需进入 MCP 只读面）：
 // registry_list 的 INPUT 增加可选闭集 detail 枚举（单值
-// "certificationEvidence"，+58 B），OUTPUT 增加可选 certificationEvidence
+// "certificationEvidence"，+59 B），OUTPUT 增加可选 certificationEvidence
 // 数组（按席位五列：声明/组件观测/组合结果/适用性三态/限制与来源——含两本
-// 台账各自的来源状态枚举，"限制与来源"未为控体积丢弃，+767 B）。纯 additive
+// 台账各自的来源状态枚举，"限制与来源"未为控体积丢弃，+766 B）。纯 additive
 // 可选成员（ADR-0021 第一档仪式）；默认调用投影一字不变（详情缺席 ⇔ 未请求）。
 // 不新增工具（22 不变）、不动认证门禁。描述仅 registry_list 一条改写
 // （"takes no arguments" 已不真实）：152 → 195 B（+43 B，desc total
 // 11174 → 11217，FROZEN_22_DESC_CEILING 11225 未动）。合计 wire +868 B
-// （78127 → 78995，+1.11%），必要增量如上逐项列明；上限按达成值重冻，零富余。
-const FROZEN_22_WIRE_CEILING = 78995;
+// （78127 → 78995，+1.11%），必要增量如上逐项列明。
+// **Owner 2026-09-22 现场授权：体积上限可提高 10%。** 据此整体上限由 78127 调整为
+// 85939（=78127×1.1 向下取整）；描述上限 11225 未动（实测 11217 未破）。本次落在
+// 授权额度内（富余 6944 B）。上一条"不得为转绿放宽上限"的禁令仍然有效——放宽只能
+// 由 Owner 逐次裁定且须有实测增量与逐项说明，本次即为该裁定（授权记录见 ADR-0032 修订节）。
+const FROZEN_22_WIRE_CEILING = 85939;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
