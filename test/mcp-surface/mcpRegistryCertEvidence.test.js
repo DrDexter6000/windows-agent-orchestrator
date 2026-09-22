@@ -16,6 +16,8 @@
 //     issuesTruncated，无 certificationEvidence 键）；
 //   - 输入闭集：detail 只接受 "certificationEvidence"；证据服务抛错/形状
 //     违约整次 fail-closed（绝不静默省略被读成"无证据行"）。
+//   - audit11（2026-09-23）：未预标注的自然过期（组件自身时间/夹具资格）经
+//     wire 仍是限制项；lastFullHealthyRunAt 缺席渲染 lastFullHealthy=?。
 //
 // 纯内存传输（InMemoryTransport）+ os.tmpdir() 真实磁盘 fixture + 真实服务
 // （默认 getCertificationEvidenceInventory，与 CLI 同一判断）——read-error
@@ -594,6 +596,55 @@ test("ADR32-MCP-8: tools/list declares the additive detail member; evidence NOT 
         assert.ok(!dumped.includes("certificationEvidence"),
           name + " does not carry the evidence detail (not copied)");
       }
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
+// 9. audit11（2026-09-23）两缺口经 MCP 投影保真：①未预标注的自然过期（组件
+//    自身时间 / 夹具资格）作为限制项透出（绝不淡化成"无"）；②lastFullHealthyRunAt
+//    缺席渲染 lastFullHealthy=?（缺席显示 ?、不整项省略）。
+// =====================================================================
+
+test("ADR32-MCP-9 (audit11): natural-expiry limitations and lastFullHealthy=? survive the wire projection", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-adr32-m9-"));
+  try {
+    const registryPath = makeRegistry(dir, {
+      seat_exp: agentEntry(dir, "high"),
+      seat_nofull: agentEntry(dir, "high"),
+    });
+    const runDir = makeRunDir(dir);
+    writeSummary(runDir, {
+      seat_exp: matchedWorkerRecord(),
+      // 有 status、缺全绿时间戳（legacy 半迁移形状）→ lastFullHealthy=?。
+      seat_nofull: matchedWorkerRecord({ lastFullHealthyRunAt: undefined }),
+    });
+    // 组件账（codex 前缀对每个 codex 席位都可见——观测按前缀列出）：
+    // ①记录自身时间自然过期（无预标注）②夹具资格自然过期（记录自身时间新鲜）。
+    writeComponentLedger(runDir, {
+      "backend:codex@92209bb": componentRecord({ lastVerifiedAt: "2026-08-08T00:00:00.000Z" }),
+      "backend:codex@92209bb#drift": componentRecord({
+        key: "backend:codex@92209bb#drift",
+        fixture: { qualifiedBy: "composition-cert", qualifiedAt: "2026-08-08T00:00:00.000Z" },
+      }),
+    });
+    const server = createWaoMcpServer({ registryPath, runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const { parsed } = await callRegistryList(client, { detail: "certificationEvidence" });
+      const byId = new Map(parsed.certificationEvidence.map((r) => [r.id, r]));
+      const limits = byId.get("seat_exp").limitations.join(" ");
+      assert.match(limits, /component-expired:/, "record natural expiry surfaces as a limitation through MCP");
+      assert.match(limits, /component-fixture-decayed:/, "fixture natural expiry surfaces as a limitation through MCP");
+      assert.match(byId.get("seat_nofull").combined, /lastFullHealthy=\?/,
+        "absent all-green timestamp renders ? on the wire (never silently omitted)");
+      // 有值时保留的对照：ADR32-MCP-5 seat_hist 已钉 lastFullHealthy=2026-08-10…。
+      assert.ok(!NO_MERGED_GREEN_RE.test(JSON.stringify(parsed)), "no derived overall-usable boolean");
     } finally {
       await client.close();
       await server.close();

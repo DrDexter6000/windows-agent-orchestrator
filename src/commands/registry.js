@@ -41,7 +41,10 @@ function renderCertEvidence(rows) {
       ? "-"
       : list.map((r) => `${r.result ?? "?"}@${r.codeRef ?? "?"}@${r.lastVerifiedAt ?? "?"}${r.runtimeFingerprint ? `#${r.runtimeFingerprint}` : ""}${r.advisoryCode ? `(${r.advisoryCode})` : ""}`).join(", ");
     console.log(`  组件观测: state=${c.state}${c.llmKeyDerivable === false ? " llm键不可派生(无providerID)" : ""} backend=[${compLine(c.backend ?? [])}] llm=[${compLine(c.llm ?? [])}]${c.truncated ? " (截断)" : ""}`);
-    console.log(`  组合结果: state=${b.state}${rec.status ? ` status=${rec.status}` : " 无记录"}${rec.executionProfile ? ` effort=${rec.executionProfile.effort ?? "null"} codeRef=${rec.executionProfile.codeRef ?? "?"} capturedAt=${rec.executionProfile.capturedAt ?? "?"}` : " 画像=未记录(legacy)"}${rec.lastFullHealthyRunAt ? ` lastFullHealthy=${rec.lastFullHealthyRunAt}` : ""}`);
+    // B2-audit11 缺口 2：lastFullHealthyRunAt 缺席渲染 "?"（与 lastVerifiedAt/
+    // capturedAt 的"缺席显示 ?、不静默隐去"约定一致）——有记录但缺全绿时间戳
+    // 是事实，不得整项省略被读成"无此维度"；无记录仍由"无记录"整体标记承载。
+    console.log(`  组合结果: state=${b.state}${rec.status ? ` status=${rec.status}` : " 无记录"}${rec.executionProfile ? ` effort=${rec.executionProfile.effort ?? "null"} codeRef=${rec.executionProfile.codeRef ?? "?"} capturedAt=${rec.executionProfile.capturedAt ?? "?"}` : " 画像=未记录(legacy)"}${b.record != null ? ` lastFullHealthy=${rec.lastFullHealthyRunAt ?? "?"}` : ""}`);
     console.log(`  证据适用性: ${row.applicability}`);
     const sources = (las.sources ?? []).map((s) => `${s.file}(${s.state})`).join(" ");
     const limits = (las.limitations ?? []).length > 0 ? (las.limitations ?? []).join(" | ") : "无";

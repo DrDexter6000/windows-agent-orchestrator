@@ -472,11 +472,23 @@ runs 清扫 runbook 同频，且维护时无进行中的 reliability 运行—�
 `certificationEvidence` 数组，与 `registry_list` 共用
 `src/application/registryInventory.js` 服务）按席位分列展示**声明 / 组件观测 / 组合
 结果 / 证据适用性 / 限制与来源**，**取证时间在两处渲染里保留**（组件观测行携带
-`lastVerifiedAt`；组合列携带画像 `capturedAt` 与全绿 `lastFullHealthyRunAt`；
+`lastVerifiedAt`；组合列携带画像 `capturedAt` 与全绿 `lastFullHealthyRunAt`，
+后者**缺席时两路统一渲染 `lastFullHealthy=?`**——缺席显示 `?`、不整项省略
+（audit11 缺口 2 收口，与 `lastVerifiedAt`/`capturedAt` 的缺席约定一致）；
 `--format json` 的服务行保留全部原始时间戳字段——渲染层不得丢弃取证时间）；
 台账来源状态（缺文件 / 不可解析 / 读取错误）分别
 可辨，不复用有损吞错的简表路径；`drillRunIds` 记录了 id 但对应转录不在回查位置时
-浮出 `drill-evidence-unresolvable` 限制项（不改三态）。**证据适用性是三态闭集
+浮出 `drill-evidence-unresolvable` 限制项（不改三态）。**自然时效限制项（audit11
+缺口 1 收口，2026-09-23）**：组件观测除复制磁盘 `advisory.code` 外，还按
+`componentLedger.mjs::classifyComponent` 的时间维**现算**自然过期——组件记录自身
+`lastVerifiedAt` 超 30 天新鲜期（或缺时间戳不可证新鲜，fail-closed 同判）→
+`component-expired:<n>`；夹具资格自然过期（`qualifiedAt` 超 30 天或
+`ownerValidUntil` 已过、且未预标注）→ `component-fixture-decayed:<n>`。两类未预
+标注的自然过期在 CLI 与 MCP 两路都显示为**限制项**（措辞不淡化成"无"；只是
+advisory 提醒，不改三态、不进门禁）。阈值常量在 src 侧以同值常量镜像
+（layering 冻结 `src/**` 不得 import `scripts/**`），由
+`test/registry-roles/certificationEvidenceInventory.test.js` 的**等值钉**守恒
+（测试同时 import 两侧，常量或边界漂移即红）。**证据适用性是三态闭集
 `matched / mismatched / undeterminable`，判定 fail-closed（复核 FAIL-A：不复用
 `matchedCertRecord` 的缺字段容忍——那是派发门"旧记录不误杀"的取舍，取证路径缺身份
 就是无法证明）**：记录的 executionProfile 身份四元组（`modelId`/`providerID`/

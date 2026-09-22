@@ -529,7 +529,10 @@ function certEvidenceCombinedLine(combined) {
   } else {
     parts.push("profile=unrecorded(legacy)");
   }
-  if (record.lastFullHealthyRunAt) parts.push(`lastFullHealthy=${record.lastFullHealthyRunAt}`);
+  // B2-audit11 缺口 2：缺席渲染 lastFullHealthy=?（与 lastVerifiedAt/capturedAt 的
+  // "缺席显示 ?、不静默隐去"约定一致；与 CLI 文本渲染同形）。record=none 时整个
+  // 组合列由 record=none 显式承载缺席（无记录 ≠ 有记录缺字段）。
+  parts.push(`lastFullHealthy=${record.lastFullHealthyRunAt ?? "?"}`);
   return parts.join(" ");
 }
 

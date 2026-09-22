@@ -12,6 +12,10 @@
 //   - 三条"不得合并成绿"钉：①组件通过+组合失败 ②历史通过+本次失败（summary 层
 //     见 reliabilityCertification.test.js TD-186 钉②；B2 补详情层钉——组合列如实
 //     展示本次失败，历史全绿时间只作历史事实保留）③一账有旧证据+另一账读取报错。
+//   - audit11（2026-09-23）两缺口回归：①组件记录自身时间/夹具资格自然过期（未预
+//     标注）进限制项（component-expired / component-fixture-decayed，两路不得淡化
+//     成"无"）+ SSOT（classifyComponent）等值钉；②lastFullHealthyRunAt 缺席渲染
+//     lastFullHealthy=?（缺席显示 ?、不整项省略）。
 //
 // 派发门零改动（matchedCertRecord / --require-certified 不动）由
 // test/run-lifecycle/certGateIdentityFreshness.test.js 既有守卫承载；本文件只测
@@ -29,7 +33,17 @@ import {
   getCertificationEvidenceInventory,
   CERT_EVIDENCE_APPLICABILITY,
   CERT_LEDGER_SOURCE_STATES,
+  COMPONENT_RECORD_MAX_AGE_DAYS,
+  COMPONENT_FIXTURE_MAX_AGE_DAYS,
+  componentNaturalExpiry,
 } from "../../src/application/registryInventory.js";
+// 等值钉（audit11 缺口 1）允许测试同时 import 两侧：src 镜像 vs scripts SSOT。
+// layering 冻结的是 src/** 不得 import scripts/**；测试侧无此约束。
+import {
+  DEFAULT_MAX_AGE_DAYS,
+  DEFAULT_FIXTURE_MAX_AGE_DAYS,
+  classifyComponent,
+} from "../../scripts/reliability/componentLedger.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -522,6 +536,149 @@ test("TD-186 B 组件台账不可解析: componentObserved.state=unparseable + �
   }
 });
 
+// ===== audit11 缺口 1（2026-09-23）：自然过期进查询限制项 + SSOT 等值钉 =====
+//
+// 复核实证：组件记录自身时间已过期 45 天，详情仍显示"限制：无"；夹具资格自然
+// 过期但未预标注 advisory.code 时两路均无提醒。修复 = observeComponentLedgerForSeat
+// 现算时效（componentNaturalExpiry——classifyComponent 时间维的 src 侧镜像）。
+// 等值钉（下方第一条测试）同时 import src 镜像与 scripts SSOT：常量或边界语义
+// 漂移即红。全部只是 advisory 限制项：不改三态、不进门禁。
+
+test("audit11 等值钉: src 自然时效镜像与 SSOT classifyComponent 同值同界（常量/边界漂移即红）", () => {
+  assert.equal(COMPONENT_RECORD_MAX_AGE_DAYS, DEFAULT_MAX_AGE_DAYS,
+    "组件记录新鲜期常量必须与 SSOT DEFAULT_MAX_AGE_DAYS 等值");
+  assert.equal(COMPONENT_FIXTURE_MAX_AGE_DAYS, DEFAULT_FIXTURE_MAX_AGE_DAYS,
+    "夹具新鲜期常量必须与 SSOT DEFAULT_FIXTURE_MAX_AGE_DAYS 等值");
+
+  const now = "2026-09-23T00:00:00.000Z";
+  const KEY = "backend:codex@92209bb";
+  const classify = (record) => classifyComponent(
+    { state: "loaded", ledger: { components: { [KEY]: record } } },
+    KEY,
+    { now },
+  ).state;
+  const at = (days) => new Date(Date.parse(now) - days * 86_400_000).toISOString();
+
+  // 记录自身时间维（SSOT stale 维 2/3）：恰 30 天（严格大于才过期）双侧都新鲜；
+  // 31 天双侧都过期；缺失/不可解析双侧都 fail-closed 过期。
+  assert.equal(classify({ result: "pass", lastVerifiedAt: at(30) }), "normal");
+  assert.equal(componentNaturalExpiry({ result: "pass", lastVerifiedAt: at(30) }, now), null);
+  assert.equal(classify({ result: "pass", lastVerifiedAt: at(31) }), "stale");
+  assert.equal(componentNaturalExpiry({ result: "pass", lastVerifiedAt: at(31) }, now), "stale");
+  assert.equal(classify({ result: "pass" }), "stale");
+  assert.equal(componentNaturalExpiry({ result: "pass" }, now), "stale");
+  assert.equal(componentNaturalExpiry({ result: "pass", lastVerifiedAt: "not-a-date" }, now), "stale");
+
+  // 夹具自然过期维（SSOT fixture-decayed，优先于 stale）：qualifiedAt 31 天前
+  //（记录自身新鲜）双侧 fixture-decayed；恰 30 天双侧新鲜；owner-declared 超
+  // ownerValidUntil 双侧 fixture-decayed。
+  const fixtureExpired = {
+    result: "pass",
+    lastVerifiedAt: at(1),
+    fixture: { qualifiedBy: "composition-cert", qualifiedAt: at(31) },
+  };
+  assert.equal(classify(fixtureExpired), "fixture-decayed");
+  assert.equal(componentNaturalExpiry(fixtureExpired, now), "fixture-decayed");
+  const fixtureFresh = {
+    result: "pass",
+    lastVerifiedAt: at(1),
+    fixture: { qualifiedBy: "composition-cert", qualifiedAt: at(30) },
+  };
+  assert.equal(classify(fixtureFresh), "normal");
+  assert.equal(componentNaturalExpiry(fixtureFresh, now), null);
+  const ownerExpired = {
+    result: "pass",
+    lastVerifiedAt: at(1),
+    fixture: { qualifiedBy: "owner-declared", ownerValidUntil: at(1) },
+  };
+  assert.equal(classify(ownerExpired), "fixture-decayed");
+  assert.equal(componentNaturalExpiry(ownerExpired, now), "fixture-decayed");
+
+  // 优先级镜像：blocked / 预标注 advisory 由磁盘事实优先（SSOT 同款），镜像不重复计。
+  assert.equal(classify({ result: "blocked", lastVerifiedAt: at(31) }), "blocked");
+  assert.equal(componentNaturalExpiry({ result: "blocked", lastVerifiedAt: at(31) }, now), null);
+  assert.equal(
+    componentNaturalExpiry(
+      { result: "pass", lastVerifiedAt: at(31), advisory: { code: "fixture-decayed" } },
+      now,
+    ),
+    null,
+    "预标注 fixture-decayed 走既有 component-advisory 限制项，镜像不重复计",
+  );
+});
+
+test("audit11 缺口1①: 组件记录自身时间自然过期（45 天，未预标注）→ matched 不变 + 限制项点名（不得淡化成无）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-a11-exp-"));
+  try {
+    const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
+    const runDir = makeRunDir(dir);
+    writeSummary(runDir, { auditor: matchedWorkerRecord() });
+    writeComponentLedger(runDir, {
+      "backend:codex@92209bb#v1-abc123def4567890": componentRecord({
+        lastVerifiedAt: "2026-08-08T00:00:00.000Z", // NOW 前 45+ 天，无 advisory 预标注
+      }),
+    });
+    const rows = await runEvidence({ registryPath, runDir });
+    assert.equal(rows[0].applicability, "matched", "自然过期是 advisory 提醒，不改三态");
+    assert.equal(rows[0].componentObserved.backend[0].naturalExpiry, "stale");
+    const limits = rows[0].limitationsAndSources.limitations.join(" ");
+    assert.match(limits, /component-expired:1/, "限制项点名记录自身自然过期");
+    assert.match(limits, /componentLedger\.mjs stale/, "措辞指明 SSOT 出处");
+    assert.ok(!limits.includes("component-fixture-decayed"), "无夹具账不误报夹具过期");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("audit11 缺口1②: 夹具资格自然过期（qualifiedAt 45 天前，未预标注 advisory.code）→ 限制项点名 fixture-decayed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-a11-fx-"));
+  try {
+    const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
+    const runDir = makeRunDir(dir);
+    writeSummary(runDir, { auditor: matchedWorkerRecord() });
+    writeComponentLedger(runDir, {
+      "backend:codex@92209bb#v1-abc123def4567890": componentRecord({
+        // 记录自身时间新鲜（2026-09-21 vs NOW 2026-09-22）——只有夹具资格过期。
+        fixture: { qualifiedBy: "composition-cert", qualifiedAt: "2026-08-08T00:00:00.000Z" },
+      }),
+    });
+    const rows = await runEvidence({ registryPath, runDir });
+    assert.equal(rows[0].applicability, "matched", "夹具自然过期是 advisory 提醒，不改三态");
+    assert.equal(rows[0].componentObserved.backend[0].naturalExpiry, "fixture-decayed");
+    const limits = rows[0].limitationsAndSources.limitations.join(" ");
+    assert.match(limits, /component-fixture-decayed:1/, "限制项点名夹具资格自然过期");
+    assert.ok(!/component-expired:/.test(limits), "记录自身新鲜不误报 component-expired");
+    assert.ok(!limits.includes("component-advisory:fixture-decayed"),
+      "未预标注：不走磁盘 advisory 透出路径，走自然过期路径");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("audit11 缺口1 对照: 记录与夹具均新鲜 → 无自然过期限制项（不误报、既有行为不变）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-a11-fresh-"));
+  try {
+    const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
+    const runDir = makeRunDir(dir);
+    writeSummary(runDir, { auditor: matchedWorkerRecord() });
+    writeComponentLedger(runDir, {
+      "backend:codex@92209bb#v1-abc123def4567890": componentRecord({
+        fixture: { qualifiedBy: "composition-cert", qualifiedAt: "2026-09-21T10:00:00.000Z" },
+      }),
+    });
+    const rows = await runEvidence({ registryPath, runDir });
+    assert.equal(rows[0].componentObserved.backend[0].naturalExpiry, null);
+    assert.ok(
+      !rows[0].limitationsAndSources.limitations.some(
+        (l) => l.startsWith("component-expired") || l.startsWith("component-fixture-decayed"),
+      ),
+      "新鲜记录不得产生自然过期限制项",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
 // ===== 三条"不得合并成绿"钉（①③在本文件；②在 reliabilityCertification.test.js）=====
 
 test("TD-186 钉①（不得合并成绿）: 组件通过 + 组合无记录 → 组件 pass 不得把适用性抬出 undeterminable", async () => {
@@ -705,6 +862,37 @@ test("TD-186 B CLI（B2 取证时间）: 组件观测行渲染 lastVerifiedAt；
       "组件观测行携带 lastVerifiedAt（result@codeRef@lastVerifiedAt#fingerprint）");
     assert.match(out, /capturedAt=2026-09-22T15:05:15\.876Z/, "组合列携带画像 capturedAt");
     assert.match(out, /lastFullHealthy=2026-09-22T15:05:15\.876Z/, "组合列携带全绿时间戳");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("audit11 B2 CLI: 两类自然过期都进限制列（限制与来源不得显示 无）+ lastFullHealthy 缺席渲染 ?", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-a11-cli-"));
+  try {
+    const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
+    const runDir = makeRunDir(dir);
+    // 组合记录有 status 但缺全绿时间戳（legacy 半迁移形状）→ lastFullHealthy=?。
+    writeSummary(runDir, { auditor: matchedWorkerRecord({ lastFullHealthyRunAt: undefined }) });
+    // 组件账两条记录：①自身时间 45 天前自然过期（无预标注）②夹具资格自然过期。
+    writeComponentLedger(runDir, {
+      "backend:codex@92209bb#v1-abc123def4567890": componentRecord({
+        lastVerifiedAt: "2026-08-08T00:00:00.000Z",
+      }),
+      "backend:codex@92209bb": componentRecord({
+        key: "backend:codex@92209bb",
+        fixture: { qualifiedBy: "composition-cert", qualifiedAt: "2026-08-08T00:00:00.000Z" },
+      }),
+    });
+    const out = execSync(
+      "node src/cli.js registry list --registry " + registryPath + " --run-dir " + runDir + " --cert-evidence",
+      { cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" } },
+    );
+    assert.match(out, /component-expired:1/, "CLI 限制列点名记录自身自然过期");
+    assert.match(out, /component-fixture-decayed:1/, "CLI 限制列点名夹具资格自然过期");
+    assert.ok(!out.includes("限制与来源: 无"), "存在限制项时不得显示 无（措辞不得淡化）");
+    assert.match(out, /lastFullHealthy=\?/, "全绿时间戳缺席渲染 ?（不整项省略）");
+    // 对照：有值时保留——既有 B2 CLI 测试已钉 lastFullHealthy=2026-09-22T15:05:15.876Z。
   } finally {
     cleanupDir(dir);
   }

@@ -455,6 +455,70 @@ const COMPONENT_RESULT_CLOSED_SET = ["pass", "fail", "blocked"];
 const EVIDENCE_REVIEW_WINDOW_DAYS = 30;
 const DAY_MS = 86_400_000;
 
+// ===== audit11 缺口 1（2026-09-23）：组件/夹具自然时效——SSOT 的 src 侧镜像 =====
+//
+// 复核实证：组件记录自身时间已过期 45 天、详情仍显示"限制：无"；夹具资格自然
+// 过期但未预标注 advisory.code 时两路均无提醒。根因：observeComponentLedgerForSeat
+// 只复制磁盘上的 advisory.code，未计算时效。
+//
+// SSOT：scripts/reliability/componentLedger.mjs::classifyComponent（过期/夹具失效
+// 语义与阈值常量）。layering 冻结 src/** 不得 import scripts/**，故此处以**同值
+// 常量 + 同语义纯函数**镜像；等值钉在
+// test/registry-roles/certificationEvidenceInventory.test.js（测试同时 import 两侧，
+// 常量或边界漂移即红）。只镜像**时间维**（classifyComponent 的 stale 维 2/3 与
+// fixture 自然过期判定）；codeRef 比对维需要当前 git HEAD，详情路径不持有，不镜像。
+// 全部只是只读提醒（advisory），绝不进门禁（组件层本就不进门，ADR-0032）。
+
+// 组件记录新鲜期（天）——SSOT: componentLedger.mjs DEFAULT_MAX_AGE_DAYS。
+export const COMPONENT_RECORD_MAX_AGE_DAYS = 30;
+// 夹具组合认证新鲜期（天）——SSOT: componentLedger.mjs DEFAULT_FIXTURE_MAX_AGE_DAYS。
+export const COMPONENT_FIXTURE_MAX_AGE_DAYS = 30;
+
+// fixtureQualificationState（componentLedger.mjs）"expired" 判定的同语义镜像：
+// owner-declared 看 ownerValidUntil；composition-cert 看 qualifiedAt 超
+// COMPONENT_FIXTURE_MAX_AGE_DAYS 天。缺基准/不可解析 → 不算过期（SSOT "unknown"：
+// 诚实不猜），镜像返回 false。
+function fixtureQualificationExpiredMirror(fixture, nowMs) {
+  if (!fixture || typeof fixture !== "object" || Array.isArray(fixture)) return false;
+  if (fixture.qualifiedBy === "owner-declared") {
+    if (fixture.ownerValidUntil == null) return false;
+    const untilMs = Date.parse(fixture.ownerValidUntil);
+    if (!Number.isFinite(untilMs)) return false;
+    return nowMs > untilMs;
+  }
+  if (fixture.qualifiedAt == null) return false;
+  const atMs = Date.parse(fixture.qualifiedAt);
+  if (!Number.isFinite(atMs)) return false;
+  return (nowMs - atMs) > COMPONENT_FIXTURE_MAX_AGE_DAYS * DAY_MS;
+}
+
+/**
+ * 单条组件记录的自然时效（audit11 缺口 1；classifyComponent 时间维的 src 侧镜像）。
+ * 判定优先级与 SSOT 一致（先消费磁盘事实，再判自然时效）：
+ *   - result=blocked / 预标注 advisory（fixture-decayed、runtime-drifted 闭集内两码）
+ *     → null：磁盘已带的事实由既有 component-blocked / component-advisory 限制项
+ *     透出，本函数不重复计（闭集外 advisory 码 SSOT 不识别，继续判自然时效）；
+ *   - 夹具资格自然过期 → "fixture-decayed"（SSOT：fixture-decayed 优先于 stale）；
+ *   - lastVerifiedAt 缺失/不可解析（fail-closed：无法证明新鲜即按过期）或超过
+ *     COMPONENT_RECORD_MAX_AGE_DAYS 天 → "stale"（SSOT：stale 维 2/3）；
+ *   - 其余 → null（无可提醒的自然过期）。
+ * @returns {null|"stale"|"fixture-decayed"}
+ */
+export function componentNaturalExpiry(record, now = new Date().toISOString()) {
+  const r = record && typeof record === "object" && !Array.isArray(record) ? record : {};
+  if (r.result === "blocked") return null;
+  if (r.advisory?.code === "fixture-decayed" || r.advisory?.code === "runtime-drifted") {
+    return null;
+  }
+  const nowMs = Date.parse(now);
+  if (!Number.isFinite(nowMs)) return null;
+  if (fixtureQualificationExpiredMirror(r.fixture, nowMs)) return "fixture-decayed";
+  const verifiedMs = typeof r.lastVerifiedAt === "string" ? Date.parse(r.lastVerifiedAt) : Number.NaN;
+  if (!Number.isFinite(verifiedMs)) return "stale";
+  if ((nowMs - verifiedMs) > COMPONENT_RECORD_MAX_AGE_DAYS * DAY_MS) return "stale";
+  return null;
+}
+
 function boundedTextOrNull(value, max) {
   return typeof value === "string" && value.length <= max ? value : null;
 }
@@ -502,10 +566,11 @@ async function readReliabilityLedgerDetail(runDir, readFileFn) {
  * （backend:<name>@）与可派生的 llm 前缀（llm:<providerID>/<modelId>@）列出
  * 观测到的记录（有界投影，闭集校验）。这是观测不是判定：六态分类
  * （stale/blocked/…）的 SSOT 在 scripts/reliability/componentLedger.mjs
- * （src 不得上向 import），此处只投影磁盘事实。
+ * （src 不得上向 import），此处只投影磁盘事实 + 计算自然时效
+ * （audit11 缺口 1：componentNaturalExpiry 镜像该 SSOT 的时间维，等值钉守恒）。
  * @private
  */
-async function observeComponentLedgerForSeat({ runDir, readFileFn, agent }) {
+async function observeComponentLedgerForSeat({ runDir, readFileFn, agent, now }) {
   const empty = (llmKeyDerivable) => ({ state: "missing", llmKeyDerivable, backend: [], llm: [], truncated: false });
   const providerID = agent.model?.providerID ?? null;
   const modelId = agent.model?.id ?? null;
@@ -541,6 +606,9 @@ async function observeComponentLedgerForSeat({ runDir, readFileFn, agent }) {
         ? r.runtimeIdentity.verified === true
         : null,
       advisoryCode: boundedTextOrNull(r.advisory?.code, 64),
+      // audit11 缺口 1：自然时效（SSOT 时间维的镜像，见 componentNaturalExpiry）。
+      // null = 无可提醒的自然过期；预标注 advisory / blocked 仍走既有限制项。
+      naturalExpiry: componentNaturalExpiry(r, now),
     });
   }
   return { state: "ok", llmKeyDerivable, backend, llm, truncated };
@@ -657,7 +725,9 @@ function profileConfigMismatchFields(agent, profile) {
  *   - 四元组全等 → matched。
  *
  * 附加限制项（不改三态，只进 limitations）：30 天审阅窗提醒（组合记录时间戳
- * 超期/缺失）、组件台账来源状态、组件 blocked/advisory 观测。
+ * 超期/缺失）、组件台账来源状态、组件 blocked/advisory 观测、组件/夹具自然时效
+ * （audit11 缺口 1：componentNaturalExpiry——SSOT componentLedger.mjs 时间维的
+ * 等值镜像，未预标注的自然过期同样点名，绝不淡化成"无"）。
  *
  * @returns {{applicability: "matched"|"mismatched"|"undeterminable", limitations: string[]}}
  */
@@ -742,6 +812,23 @@ export function assessCertEvidenceApplicability({
       for (const code of [...new Set(advised)].slice(0, 4)) {
         limitations.push(`component-advisory:${code}`);
       }
+      // audit11 缺口 1：自然时效限制项（SSOT componentLedger.mjs 时间维的镜像，
+      // 阈值常量 COMPONENT_RECORD_MAX_AGE_DAYS / COMPONENT_FIXTURE_MAX_AGE_DAYS 与
+      // SSOT 等值钉守恒）。只提醒不改三态——过期是 advisory，绝不是门。
+      const fixtureDecayed = [...componentObservation.backend, ...componentObservation.llm]
+        .filter((r) => r.naturalExpiry === "fixture-decayed").length;
+      if (fixtureDecayed > 0) {
+        limitations.push(
+          `component-fixture-decayed:${fixtureDecayed} 条组件记录夹具资格自然过期（qualifiedAt 超 ${COMPONENT_FIXTURE_MAX_AGE_DAYS} 天新鲜期或 ownerValidUntil 已过，且未预标注——SSOT componentLedger.mjs fixture-decayed；advisory 提醒非门）`,
+        );
+      }
+      const recordExpired = [...componentObservation.backend, ...componentObservation.llm]
+        .filter((r) => r.naturalExpiry === "stale").length;
+      if (recordExpired > 0) {
+        limitations.push(
+          `component-expired:${recordExpired} 条组件记录自然过期（lastVerifiedAt 超 ${COMPONENT_RECORD_MAX_AGE_DAYS} 天新鲜期或缺时间戳不可证新鲜——SSOT componentLedger.mjs stale；advisory 提醒非门）`,
+        );
+      }
     }
   }
   return { applicability: "matched", limitations };
@@ -813,7 +900,7 @@ export async function getCertificationEvidenceInventory({
   const ledger = await readReliabilityLedgerDetail(runDir, readFileFn);
   const rows = [];
   for (const agent of registry.listAgents()) {
-    const component = await observeComponentLedgerForSeat({ runDir, readFileFn, agent });
+    const component = await observeComponentLedgerForSeat({ runDir, readFileFn, agent, now });
     const workerRecord = ledger.state === "ok" ? ledger.workers[agent.id] : undefined;
     const verdict = assessCertEvidenceApplicability({
       agent,
