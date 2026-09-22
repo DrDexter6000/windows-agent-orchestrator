@@ -330,6 +330,10 @@ npm run smoke -- --isolate  # 测 worktree 隔离
 npm run reliability
 npm run reliability -- --profile strict
 npm run reliability -- --profile delta   # delta 子集（新 lane 先行认证，见下节）
+
+# 维护：清理未被 reliability-summary 引用且超龄的 drill 转录（零 token；发布路径零删除后显式触发）
+node scripts/wao-node.cjs scripts/reliability/prune-drill-transcripts.mjs --dry-run
+node scripts/wao-node.cjs scripts/reliability/prune-drill-transcripts.mjs --max-age-days 7
 ```
 
 ### delta 认证规程（lane 架构，ADR-0025 批次 3）
@@ -451,8 +455,19 @@ opencode-serve 是 HTTP 服务 backend，因此保持稳定的未验证身份。
 `runs/reliability/<runId>.jsonl`（runs 归档清扫只处理顶层 `*.jsonl`，子目录语料不在
 清扫面内），每个 id 可独立回查；写 summary 前逐 id 守卫（fresh id 缺转录 = 拒绝
 写盘并非零退出——绝不记录指向已删除/不存在证据的 id），旧版取证遗留的悬空 prior id
-写盘前如实置 `null` 并告警，写盘后按引用集清理目录（重认证覆盖同 caseId，被取代的
-转录随之删除，不无限增长）。旧记录不补猜值（缺画像即 unknown）。查询
+写盘前如实置 `null` 并告警。**发布路径零删除（2026-09-22 审计收口：交错发布误删
+证据）**：生成/发布 summary 的路径只写不删——旧版写盘后按【进程内】summary 的引用集
+清理，与其他发布者不协调（A 写→B 写+清理→A 恢复清理 ⇒ 最终 summary 引用的转录被
+删；B 写完中断、A 再收尾亦复现）。删除唯一入口 = 显式维护步骤
+`node scripts/wao-node.cjs scripts/reliability/prune-drill-transcripts.mjs [--max-age-days <n>] [--dry-run]`
+——删除前**重新读取磁盘上的当前 summary**，只删「未被任何条目引用 且 超过年龄阈值
+（默认 7 天）」的转录；被引用的绝不删（无论多老）；summary 缺失/不可解析时一个都
+不删（fail-closed）。**增长有界是带条件的**：仅当该维护步骤被例行执行（建议与
+runs 清扫 runbook 同频，且维护时无进行中的 reliability 运行——年龄阈值只是维护
+步骤自身 TOCTOU 窗口的兜底，不是并发协调机制）时，`runs/reliability/` 才收敛到
+「当前 summary 引用集 + 阈值年龄窗口内」的转录量；无人执行维护时目录只增不减
+（重认证不断产生被取代的转录），维护中被锁跳过的文件依赖下一次维护，不自动收敛。
+旧记录不补猜值（缺画像即 unknown）。查询
 侧：`registry list --cert-evidence`（text 追加详情块 / `--format json` 附
 `certificationEvidence` 数组，与 `registry_list` 共用
 `src/application/registryInventory.js` 服务）按席位分列展示**声明 / 组件观测 / 组合

@@ -42,13 +42,15 @@ import { scorecardCommandFailureIsCredible } from "./reliability/scorecardEviden
 // 组合入口（本文件）与将来的组件入口（component-check）共用——防双轨漂移。
 // 纯判定内核仍在 adversarialEscape.mjs / metricsCheck.mjs，drills.mjs 只 import 消费。
 import { extractJson, check, hasSentinel, createDrills } from "./reliability/drills.mjs";
-// TD-186 复核 FAIL-B：drillRunIds 取证闭环（守卫/清理/悬空 prior id 置 null）。
+// TD-186 复核 FAIL-B：drillRunIds 取证闭环（守卫/悬空 prior id 置 null）。
+// 2026-09-22 审计收口（交错发布误删证据）：发布路径零删除——prune 类清理从本
+// 入口移除，删除唯一入口 = 显式维护步骤 scripts/reliability/prune-drill-transcripts.mjs
+// （sweepStaleDrillTranscripts：删除前重读磁盘 summary + 年龄阈值）。
 import {
   drillTranscriptsDir,
   collectReferencedDrillRunIds,
   missingDrillTranscripts,
   nullUnresolvableDrillRunIds,
-  pruneUnreferencedDrillTranscripts,
 } from "./reliability/drillEvidence.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -627,13 +629,13 @@ if (nulledPriorIds.length > 16) {
 }
 const summary = summarizeCertification(closedCases);
 writeFileSync(summaryPath, JSON.stringify(summary, null, 2));
-// TD-186 复核 FAIL-B 清理：保留集 = 刚写出的 summary 引用的 id 集；被取代认证的
-// 转录随之删除（重认证覆盖同 caseId），目录不无限增长。只删 runId 形状文件。
-const transcriptSweep = pruneUnreferencedDrillTranscripts(
-  DRILL_TRANSCRIPTS_DIR,
-  collectReferencedDrillRunIds(summary),
-);
-console.log(`Drill transcripts (runs/reliability/): kept ${transcriptSweep.kept}, pruned ${transcriptSweep.removed} unreferenced`);
+// 2026-09-22 审计收口（交错发布误删证据）：发布路径到此为止，零删除。
+// 旧版在此按【进程内】summary 的引用集清理 runs/reliability/——与其他发布者
+// 不协调：A 写 summary→B 写 summary 并清理→A 恢复清理 ⇒ 最终 summary 引用的
+// 转录不存在（B 写完中断、A 再收尾亦复现）。删除唯一入口 = 显式维护步骤
+// （删除前重读磁盘 summary，只删「未被引用 且 超龄」的转录）。
+console.log("Drill transcripts (runs/reliability/): publish path never deletes (audit fix 2026-09-22) — unreferenced transcripts are pruned only by the explicit maintenance step:");
+console.log("  node scripts/wao-node.cjs scripts/reliability/prune-drill-transcripts.mjs [--max-age-days <n>] [--dry-run]");
 console.log(`\nSummary written to ${summaryPath}`);
 console.log(`Certification counts: ${JSON.stringify(summary.counts)}`);
 console.log(`\n=== ${allPass ? "ALL PASS" : "SOME FAILED"} ===`);

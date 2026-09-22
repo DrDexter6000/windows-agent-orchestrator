@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,7 +15,8 @@ import {
   collectReferencedDrillRunIds,
   missingDrillTranscripts,
   nullUnresolvableDrillRunIds,
-  pruneUnreferencedDrillTranscripts,
+  sweepStaleDrillTranscripts,
+  DEFAULT_STALE_DRILL_TRANSCRIPT_AGE_MS,
 } from "../../scripts/reliability/drillEvidence.mjs";
 
 function check(name, pass, category, extra = {}) {
@@ -710,7 +711,11 @@ test("TD-186 钉②（不得合并成绿）：历史通过 + 本次失败——w
 // 复核实证：sentinel/scorecard 的 run 转录落在 TMP_DIR/runs/（CLI 子进程 cwd
 // 相对解析），run-reliability.mjs 收尾 rmSync(TMP_DIR) 连带删除——summary 里的
 // drillRunIds 指向已删除的证据。方案 1（转录保留在可解析位置 runs/reliability/）
-// + 写盘守卫 + 引用集清理。本节：drillEvidence.mjs 行为钉 + 入口接线结构钉。
+// + 写盘守卫。清理面（2026-09-22 审计收口：交错发布误删证据）：发布路径零删除，
+// 删除唯一入口 = 显式维护步骤（sweepStaleDrillTranscripts：删除前重读磁盘
+// summary + 年龄阈值；交错发布反例的行为钉在
+// test/registry-roles/reliabilityDrillTranscriptRace.test.js）。本节：drillEvidence.mjs
+// 行为钉 + 入口接线结构钉。
 // =====================================================================
 
 function evidenceCase(caseId, drillRunIds) {
@@ -773,27 +778,62 @@ test("TD-186 复核 FAIL-B: nullUnresolvableDrillRunIds——prior 悬空 id 置
   }
 });
 
-test("TD-186 复核 FAIL-B: pruneUnreferencedDrillTranscripts——保留集=引用集；非 runId 形状文件绝不动", () => {
-  const dir = mkdtempSync(join(tmpdir(), "wao-td186-de-prune-"));
+test("TD-186 复核 FAIL-B + 审计收口: sweepStaleDrillTranscripts——被引用绝不删（无论多老）；未引用超龄才删；无协调依据不删", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td186-de-sweep-"));
   try {
     const transcriptsDir = drillTranscriptsDir(dir);
     mkdirSync(transcriptsDir, { recursive: true });
-    for (const name of ["run_keep.jsonl", "run_stale1.jsonl", "run_stale2.jsonl", "notes.txt", "run_NOTAID.jsonl"]) {
+    const summaryPath = join(dir, "reliability-summary.json");
+    const now = Date.now();
+    const old = new Date(now - DEFAULT_STALE_DRILL_TRANSCRIPT_AGE_MS - 24 * 3600 * 1000); // 超龄（阈值+1天）
+    for (const name of ["run_ref.jsonl", "run_stale1.jsonl", "run_fresh1.jsonl", "notes.txt", "run_NOTAID.jsonl"]) {
       writeFileSync(join(transcriptsDir, name), "{}\n", "utf8");
     }
-    const result = pruneUnreferencedDrillTranscripts(transcriptsDir, ["run_keep"]);
-    assert.equal(result.kept, 1, "引用集中的保留");
-    assert.equal(result.removed, 2, "被取代认证的转录删除（不无限增长）");
-    assert.deepEqual(readdirSync(transcriptsDir).sort(), ["notes.txt", "run_NOTAID.jsonl", "run_keep.jsonl"],
+    // run_ref / run_stale1 置为超龄；run_fresh1 保持新鲜（刚写出的转录）。
+    utimesSync(join(transcriptsDir, "run_ref.jsonl"), old, old);
+    utimesSync(join(transcriptsDir, "run_stale1.jsonl"), old, old);
+    // 磁盘 summary 引用 run_ref（引用集来源 = 磁盘，不是调用方参数）。
+    writeFileSync(summaryPath, JSON.stringify({
+      cases: [{ caseId: "a", executionProfile: { drillRunIds: { sentinel: "run_ref" } } }],
+    }), "utf8");
+
+    // dry-run：只判定不删除。
+    const plan = sweepStaleDrillTranscripts(transcriptsDir, summaryPath, { now, dryRun: true });
+    assert.equal(plan.status, "pruned");
+    assert.deepEqual(plan.wouldRemove, ["run_stale1"], "只有「未引用+超龄」进入待删清单");
+    assert.equal(existsSync(join(transcriptsDir, "run_stale1.jsonl")), true, "dry-run 不删除");
+
+    const result = sweepStaleDrillTranscripts(transcriptsDir, summaryPath, { now });
+    assert.equal(result.removed, 1, "超龄未引用转录删除（清理仍有效，零删除不等于永不清理）");
+    assert.equal(result.keptReferenced, 1, "被磁盘 summary 引用的保留");
+    assert.equal(result.keptYoung, 1, "未引用但未超龄的保留（年龄阈值兜底并发发布窗口）");
+    assert.deepEqual(readdirSync(transcriptsDir).sort(), ["notes.txt", "run_NOTAID.jsonl", "run_fresh1.jsonl", "run_ref.jsonl"],
       "非 runId 文件名形状（notes.txt / 大写 run_NOTAID.jsonl）不在清理面");
-    // 目录不存在 → 空结果不抛。
-    assert.deepEqual(pruneUnreferencedDrillTranscripts(join(dir, "nope"), []), { removed: 0, kept: 0 });
+
+    // fail-closed：summary 缺失 / 不可解析 → 一个都不删（没有协调依据就没有删除授权）。
+    writeFileSync(join(transcriptsDir, "run_stale2.jsonl"), "{}\n", "utf8");
+    utimesSync(join(transcriptsDir, "run_stale2.jsonl"), old, old);
+    const missing = sweepStaleDrillTranscripts(transcriptsDir, join(dir, "nope-summary.json"), { now });
+    assert.equal(missing.status, "summary-missing");
+    assert.equal(missing.removed, 0, "summary 缺失 → 不删");
+    writeFileSync(summaryPath, "{not json", "utf8");
+    const unparseable = sweepStaleDrillTranscripts(transcriptsDir, summaryPath, { now });
+    assert.equal(unparseable.status, "summary-unparseable");
+    assert.equal(unparseable.removed, 0, "summary 不可解析 → 不删");
+    assert.equal(existsSync(join(transcriptsDir, "run_stale2.jsonl")), true, "fail-closed 实证：文件仍在");
+    // 转录目录不存在 → 空结果不抛（summary 先恢复有效——fail-closed 判定优先于目录扫描）。
+    writeFileSync(summaryPath, JSON.stringify({
+      cases: [{ caseId: "a", executionProfile: { drillRunIds: { sentinel: "run_ref" } } }],
+    }), "utf8");
+    const noDir = sweepStaleDrillTranscripts(join(dir, "nope"), summaryPath, { now });
+    assert.equal(noDir.status, "transcripts-dir-unreadable");
+    assert.equal(noDir.removed, 0);
   } finally {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
   }
 });
 
-test("TD-186 复核 FAIL-B 结构钉: run-reliability 转录持久化 + 写盘守卫 + 悬空置 null + 引用集清理接线", () => {
+test("TD-186 复核 FAIL-B 结构钉: run-reliability 转录持久化 + 写盘守卫 + 悬空置 null + 发布零删除（清理只在维护步骤）", () => {
   const entry = readFileSync(new URL("../../scripts/run-reliability.mjs", import.meta.url), "utf8");
   // ① sentinel/scorecard 派发显式 --run-dir 到持久化转录目录（不再落会被整体删除的 tmpDir）。
   assert.match(entry, /"--run-dir",\s*DRILL_TRANSCRIPTS_DIR/, "sentinel 派发必须 --run-dir 到 DRILL_TRANSCRIPTS_DIR");
@@ -803,8 +843,16 @@ test("TD-186 复核 FAIL-B 结构钉: run-reliability 转录持久化 + 写盘�
   assert.match(entry, /process\.exit\(3\)/, "守卫失败非零退出");
   // ③ prior 悬空 id 置 null（不可回查就不记 id）。
   assert.match(entry, /nullUnresolvableDrillRunIds\(mergedCases,\s*\{\s*transcriptsDir:\s*DRILL_TRANSCRIPTS_DIR/, "prior 死指针写盘前置 null");
-  // ④ 引用集清理（保留集 = 刚写出的 summary 引用集）。
-  assert.match(entry, /pruneUnreferencedDrillTranscripts\(\s*DRILL_TRANSCRIPTS_DIR,\s*collectReferencedDrillRunIds\(summary\)/, "写盘后按引用集清理");
+  // ④ 发布路径零删除（2026-09-22 审计收口：交错发布误删证据）——发布 summary 的
+  //    路径不得包含任何转录清理【调用】（按调用形状匹配；注释里的历史说明不算）；
+  //    删除唯一入口 = 显式维护步骤。
+  assert.doesNotMatch(entry, /(?:pruneUnreferencedDrillTranscripts|sweepStaleDrillTranscripts)\s*\(/,
+    "发布路径零删除：run-reliability 不得调用任何转录清理（旧版按进程内快照清理，交错发布时互删证据）");
+  assert.doesNotMatch(entry, /rmSync\([^)]*DRILL_TRANSCRIPTS_DIR/, "发布路径不得对转录目录做任何 rmSync");
+  const maintenance = readFileSync(new URL("../../scripts/reliability/prune-drill-transcripts.mjs", import.meta.url), "utf8");
+  assert.match(maintenance, /sweepStaleDrillTranscripts\(\s*TRANSCRIPTS_DIR,\s*SUMMARY_PATH/,
+    "维护步骤把删除决策绑定到磁盘 summary 路径（删除前重读，绝不信进程内快照）");
+  assert.match(maintenance, /reliability-summary\.json/, "维护步骤读的正是发布路径写出的 summary");
   // ⑤ "unknown" 占位绝不入账（它不是可回查 id）。
   assert.match(entry, /value !== "unknown"/, "runId 占位 unknown 如实归 null");
   // ⑥ 转录目录名 SSOT 下向复用（不在 scripts 侧再造第二份名字）。
