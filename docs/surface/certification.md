@@ -9,7 +9,7 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 - 配置表达力四轴：对经共享工厂构造的 backend 实例调用 `validateAgentPolicy` 的**行为探针**派生（判定法沿用退役 TD-162 policy 门守卫的同一套派生法；kimi 档位绑定模型提取自 `src/backends/kimiCode.js` `KIMI_K3_MODEL_ID` 源常量）。
 - 每 backend 条件与限制说明：`src/backends/factory.js` `CAPABILITY_NOTES`（单一出处，§二之末逐条渲染）。
 
-漂移纪律：判定词与档位集合**只在生成期从代码派生**；磁盘副本由字节钉守卫（`npm run gen:certification -- --check` + `test/isolation-infra/docsSurface.test.js` + `test/isolation-infra/docs-consistency.test.js` 的 TD-162 生成物守卫）钉住——改 backend 代码/`CAPABILITY_NOTES` 后须 `npm run gen:certification` 再生成并提交。
+漂移纪律：判定词与档位集合**只在生成期从代码派生**；磁盘副本由字节钉守卫（`npm run gen:certification -- --check` + `test/isolation-infra/docsSurface.test.js` + `test/isolation-infra/docs-consistency.test.js` 的 TD-162 生成物守卫）钉住。**守卫的实际保证是「换行归一化后文本一致」**（CRLF/LF 视为相同——`.gitattributes` 已钉 `docs/surface/*.md eol=lf`），不是原始字节相等；入口检测失败时 `--check` fail-closed（exit 1），绝不静默跳过——改 backend 代码/`CAPABILITY_NOTES` 后须 `npm run gen:certification` 再生成并提交。
 
 ## 一、六轴能力闭集声明（strict === true）
 

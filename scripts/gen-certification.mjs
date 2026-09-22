@@ -28,7 +28,7 @@
 //        npm run gen:certification -- --check （重渲染与磁盘比对：换行归一化后文本一致，
 //        CRLF/LF 视为相同——`.gitattributes` 已钉 docs/surface/*.md eol=lf；不一致 exit 1）
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -239,7 +239,7 @@ export function renderCertification() {
   lines.push("- 配置表达力四轴：对经共享工厂构造的 backend 实例调用 `validateAgentPolicy` 的**行为探针**派生（判定法沿用退役 TD-162 policy 门守卫的同一套派生法；kimi 档位绑定模型提取自 `src/backends/kimiCode.js` `KIMI_K3_MODEL_ID` 源常量）。");
   lines.push("- 每 backend 条件与限制说明：`src/backends/factory.js` `CAPABILITY_NOTES`（单一出处，§二之末逐条渲染）。");
   lines.push("");
-  lines.push("漂移纪律：判定词与档位集合**只在生成期从代码派生**；磁盘副本由字节钉守卫（`npm run gen:certification -- --check` + `test/isolation-infra/docsSurface.test.js` + `test/isolation-infra/docs-consistency.test.js` 的 TD-162 生成物守卫）钉住——改 backend 代码/`CAPABILITY_NOTES` 后须 `npm run gen:certification` 再生成并提交。");
+  lines.push("漂移纪律：判定词与档位集合**只在生成期从代码派生**；磁盘副本由字节钉守卫（`npm run gen:certification -- --check` + `test/isolation-infra/docsSurface.test.js` + `test/isolation-infra/docs-consistency.test.js` 的 TD-162 生成物守卫）钉住。**守卫的实际保证是「换行归一化后文本一致」**（CRLF/LF 视为相同——`.gitattributes` 已钉 `docs/surface/*.md eol=lf`），不是原始字节相等；入口检测失败时 `--check` fail-closed（exit 1），绝不静默跳过——改 backend 代码/`CAPABILITY_NOTES` 后须 `npm run gen:certification` 再生成并提交。");
   lines.push("");
   lines.push("## 一、六轴能力闭集声明（strict === true）");
   lines.push("");
@@ -297,18 +297,26 @@ export function renderCertification() {
 // package.json 允许整个 Node 22 系列——更早的 22.x 上该属性为 undefined，整块写出/校验
 // 会被静默跳过（fail-open：过期/缺失的生成物也 exit 0）。改用 argv[1] ↔ import.meta.url
 // 的兼容比对，并在「看起来是被当脚本调用、却判定不是主模块」时 fail-closed 直接 exit 1。
+// N1（2026-09-22 窄复核修复）：判据**不得**是"文件名后缀"——那会把合法 import 误杀
+// （例如 `my-gen-certification.mjs` 或同名包装脚本导入时 exit 1，实测已发生）。
+// 只在"**确实是同一个文件**、URL 比对却失败"时才 fail-closed；非本文件一律按 import 处理。
 const ENTRY_ARG = typeof process.argv[1] === "string" ? process.argv[1] : "";
-const INVOKED_AS_SCRIPT = /gen-certification\.mjs$/.test(ENTRY_ARG);
 let isMainModule = false;
+let sameFileByRealpath = false;
 if (ENTRY_ARG.length > 0) {
   try {
     isMainModule = pathToFileURL(resolve(ENTRY_ARG)).href === import.meta.url;
   } catch {
     isMainModule = false;
   }
+  try {
+    sameFileByRealpath = realpathSync(resolve(ENTRY_ARG)) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    sameFileByRealpath = false;
+  }
 }
-if (!isMainModule && INVOKED_AS_SCRIPT) {
-  console.error("[gen-certification] entry-point detection failed — refusing to exit 0 without checking (fail-closed)");
+if (!isMainModule && sameFileByRealpath) {
+  console.error("[gen-certification] entry-point detection failed on the same file — refusing to exit 0 without checking (fail-closed)");
   process.exit(1);
 }
 if (isMainModule) {
