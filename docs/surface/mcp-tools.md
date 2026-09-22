@@ -7,15 +7,13 @@ Rendered from the live `tools/list` of a real `createWaoMcpServer` over an SDK I
 
 ## registry_list
 
-List configured worker agents: backend, model, certification. Read-only; optional detail='certificationEvidence' adds per-seat advisory evidence (never a gate); registry/run dir are server-owned.
+List configured worker agents: backend, model, reliability certification. Read-only; takes no arguments — registry and run directory are server-owned.
 
 Annotations: readOnlyHint=true, destructiveHint=false, idempotentHint=true, openWorldHint=false
 
 Input:
 
-| name | type | required | notes |
-| --- | --- | --- | --- |
-| detail | string | no | enum: certificationEvidence |
+*(no top-level fields)*
 
 Output:
 
@@ -24,7 +22,6 @@ Output:
 | agents | array<object> | yes |  |
 | issues | array<object> | yes |  |
 | issuesTruncated | boolean | yes |  |
-| certificationEvidence | array<object> | no |  |
 
 ## workspace_status
 

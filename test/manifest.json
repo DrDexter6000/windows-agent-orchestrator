@@ -56,7 +56,6 @@
       "mcp-surface/m12-10-tool-surface.test.js",
       "run-lifecycle/m12-11-wait-projection.test.js",
       "mcp-surface/m12-12-semantics-catalog.test.js",
-      "mcp-surface/mcpRegistryCertEvidence.test.js",
       "isolation-infra/m12-13-isolation-failure.test.js",
       "backends/m12-14-claudeContextIsolation.test.js",
       "transcript/m12-14-scopeObservation.test.js",

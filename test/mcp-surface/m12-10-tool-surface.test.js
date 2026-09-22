@@ -608,17 +608,7 @@ const RED_23_WIRE = 75492;
 // consult (auditor run_202609180757006603nxdsx + coder_mm
 // run_20260918075704956eh790g). The wire grew +113 bytes (78014 → 78127).
 // Ceiling re-frozen at the exact measured 78127.
-// ADR-0032 修订（2026-09-22，Owner 裁定：认证证据详情按需进入 MCP 只读面）：
-// registry_list 的 INPUT 增加可选闭集 detail 枚举（单值
-// "certificationEvidence"，+58 B），OUTPUT 增加可选 certificationEvidence
-// 数组（按席位五列：声明/组件观测/组合结果/适用性三态/限制与来源——含两本
-// 台账各自的来源状态枚举，"限制与来源"未为控体积丢弃，+767 B）。纯 additive
-// 可选成员（ADR-0021 第一档仪式）；默认调用投影一字不变（详情缺席 ⇔ 未请求）。
-// 不新增工具（22 不变）、不动认证门禁。描述仅 registry_list 一条改写
-// （"takes no arguments" 已不真实）：152 → 195 B（+43 B，desc total
-// 11174 → 11217，FROZEN_22_DESC_CEILING 11225 未动）。合计 wire +868 B
-// （78127 → 78995，+1.11%），必要增量如上逐项列明；上限按达成值重冻，零富余。
-const FROZEN_22_WIRE_CEILING = 78995;
+const FROZEN_22_WIRE_CEILING = 78127;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -769,18 +759,8 @@ test("M12-10-H: deterministic 22-tool wire at or below the frozen ceiling", asyn
 // run_202609180757006603nxdsx + coder_mm run_20260918075704956eh790g).
 // M12-10-H re-freezes the wire ceiling; this hash remains the losslessness
 // proof.
-// Re-measured for the ADR-0032 revision (2026-09-22, Owner ruling): the
-// registry_list INPUT gained the optional closed-set `detail` enum and the
-// OUTPUT gained the optional `certificationEvidence` array (per-seat five-
-// column read-only evidence rows; applicability three-state enum + two
-// ledger-source-state enums derived from the registryInventory.js SSOT).
-// Both additive members are part of the stripped payload, so the SHA changed
-// truthfully; no other tool's schema, name, order, or annotation changed, and
-// the default registry_list projection (agents/issues/issuesTruncated) is
-// byte-identical when detail is not requested. M12-10-H re-freezes the wire
-// ceiling; this hash remains the losslessness proof.
 const DESC_STRIPPED_CONTRACT_SHA =
-  "cad381b9836b206a918ecd6f491571af6c162f2394cc621ab0917ff32ae1d91e";
+  "c6454f5d44975199afb785a7f142242f6b3caebac4e2023c632b7e12b145ff50";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;
@@ -808,9 +788,6 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // Re-baselined again for the M12-19 process-missing delivery recovery (the
 // sanctioned advisory/settlement description text, +491 bytes over the
 // supervision-recovery-truth value); re-frozen at the measured 11225.
-// ADR-0032 修订（2026-09-22）：本次 registry_list 描述改写（"takes no
-// arguments" 因新增可选 detail 选择器不再真实）控制在 +43 B（152 → 195，
-// desc total 11174 → 11217）——天花板未动、未突破。
 const FROZEN_22_DESC_CEILING = 11225;
 
 // Recursively remove every `description` key from a tools/list payload (the 21
