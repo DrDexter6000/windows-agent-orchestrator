@@ -23,7 +23,7 @@ WAO 曾在 2026-06-16 做过一次 SSOT 审计（`docs/archive/docs-ssot-audit.m
 | `user-config` | 第三方 / 用户 agent 配置 | `AGENT_ONBOARDING.md`、`config/agents.example.json`、`wao doctor` 输出、`mcp bind` 输出 |
 | `user-troubleshoot` | 第三方 / 用户 agent 排障 | `docs/troubleshooting.md`、`wao doctor` 输出 |
 | `user-daily` | Lead / 用户 agent 日常使用 | `SKILL.md`、`docs/usage.md` |
-| `harness-certify` | 给某 harness / LLM 做组件层单独验证（backend conformant / llm verified） | `docs/usage.md`（认证检查结果五态与能力轴分层）、`.wao/decisions/0032-两层验证与认证.md`、`docs/tech-debt.md`（在册限制须随结论一并标注，如 TD-182） |
+| `harness-certify` | 给某 harness / LLM 做组件层单独验证（backend conformant / llm verified） | `docs/surface/certification.md`（生成层：backend 能力/配置表达力事实与台账指针，TD-162；npm run gen:certification 再生成）、`docs/usage.md`（认证检查结果五态与能力轴分层）、`.wao/decisions/0032-两层验证与认证.md`、`docs/tech-debt.md`（在册限制须随结论一并标注，如 TD-182） |
 | `seat-certify` | 给某席位装配做组合层认证（certified / conditional / draft-only） | `docs/usage.md`（delta 认证规程 + 五态节）、`.wao/decisions/0032-两层验证与认证.md`、`docs/team-roles.md`、`config/agents.example.json`、`docs/tech-debt.md` |
 
 ## 1. 核心架构：五大类别
@@ -105,7 +105,7 @@ ADR 风格：一条决策一个文件，定下后归档，只追加"修订"不�
 
 ## 2. 三条铁律
 
-1. **一处定义，处处指针**。活文档承载第二份当前值的充要条件是显式写明“投影自 X”且有关系型守卫钉到同一真值源；命名投影只有 `backend-capabilities`（`src/backends/*.js` 闭集能力成员，TD-162 守卫）与 `transcript-events-human`（`docs/02-architecture.md` §3.2，事件行集守卫）。
+1. **一处定义，处处指针**。活文档承载第二份当前值的充要条件是显式写明“投影自 X”且有关系型守卫钉到同一真值源；命名投影只有 `backend-capabilities`（生成层 `docs/surface/certification.md`——由 `scripts/gen-certification.mjs` 从 `src/backends/*.js` 闭集能力成员与 `validateAgentPolicy` 行为探针派生、字节钉守卫，TD-162；手写副本已退场）与 `transcript-events-human`（`docs/02-architecture.md` §3.2，事件行集守卫）。
 2. **类别不可混放**。根因分析进事故复盘（过程），现象+做法进 troubleshooting（运维），接口定义进 architecture（契约）。跨类别只指针不复制。
 3. **过程文档只追加**。事故复盘/mN-audit/research 定格后不改写事实；修复状态、被取代状态一律用指针，不回改正文叙述。
 

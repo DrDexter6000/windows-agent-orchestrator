@@ -67,6 +67,67 @@ export const BACKEND_CAPABILITY_AXES = Object.freeze([
 ]);
 
 /**
+ * 每 backend 的条件与限制说明——单一出处（TD-162 生成层批次，2026-09-22 从
+ * docs/usage.md 手写能力对照表各格条件文字迁移并压缩：保留可判定语义，删叙述）。
+ *
+ * 消费者：scripts/gen-certification.mjs（渲染进 docs/surface/certification.md，
+ * 字节钉由 test/isolation-infra/docsSurface.test.js + docs-consistency.test.js 守卫）。
+ * 纪律：
+ *   - 这里只写**派生不出**的条件/限制语义（fail-closed 分叉、通道形状、绑定事实）；
+ *     判定词（支持/不支持/条件）与档位集合由生成器对 validateAgentPolicy 的行为
+ *     探针派生，不在此复述——静态文本复述探针可派生的集合会制造第二份会漂的值。
+ *   - 键集：四个 policy 面（model / reasoning / contextWindow / provider）＋
+ *     BACKEND_CAPABILITY_AXES 成员（仅承载额外条件者，如 opencode-serve 角色合同
+ *     的版本门）。缺席 = 该轴无额外条件（判定词即全部语义）。
+ *   - 成员增补属 Owner 决策：新 backend 必须在此登记条件说明（无则显式空对象）。
+ */
+export const CAPABILITY_NOTES = Object.freeze({
+  "opencode-serve": Object.freeze({
+    model: "须 OpenCode 形状 `{providerID, id, variant}`；canonical 裸 `{id}` 被拒（模型路由由 model.providerID 承担）",
+    provider: "不支持 provider 块——模型路由由 `model.providerID` 承担",
+    supportsRoleContract: "须 serve healthy 且版本 ≥ 1.18.0（派发前运行时探测，OPENCODE_NATIVE_SYSTEM_MIN_VERSION）",
+    reportsTokenUsage: "session.tokens 周期轮询",
+  }),
+  "claude-code": Object.freeze({
+    contextWindow: "仅 provider 路径（wrapper `--context-window`）；native OAuth 直连被拒",
+    provider: "经 provider wrapper（`baseUrl` / `apiKeyEnv`）表达",
+    supportsSessionReuse: "`--session-id` / `--resume`（opaque uuid 由控制平面派生）",
+    supportsRoleContract: "`--append-system-prompt`（内容直传，恰好一次）",
+    supportsInFlightCorrection: "stdin stream-json 排队（同一活进程；delivered 证明字节被接受，不证明模型执行了该轮）",
+    reportsTokenUsage: "result 帧 usage",
+  }),
+  codex: Object.freeze({
+    contextWindow: "无 CLI flag 可表达，配了即拒",
+    provider: "codex 自有登录（非 anthropic-compatible wrapper），配了即拒",
+    supportsSessionReuse: "`codex exec resume <thread_id>`；id 由 codex 自产（thread.started.thread_id）、runner 运行期补记入 `session.created`；resume 轮 id 缺失即派发前拒绝",
+    supportsRoleContract: "`-c developer_instructions` 追加（TOML 安全转义；不替换 base instructions）",
+    reportsTokenUsage: "turn.completed 帧 usage",
+  }),
+  "kimi-code": Object.freeze({
+    reasoning: "effort 编译为 `KIMI_MODEL_THINKING_EFFORT` 子进程 env；`agent.env` 自设同名被拒；档位与模型绑定见判定表（探针派生）",
+    provider: "kimi 托管认证，配了即拒",
+    supportsSessionReuse: "`kimi -r <session_id>`；id 来自轮末 `session.resume_hint`、runner 运行期补记；resume 轮 id 缺失即派发前拒绝",
+    supportsRoleContract: "拼进同一条 prompt（非系统级通道，prompt 级引导）",
+    reportsTokenUsage: "stream-json 无 usage——tokenBudget 不生效（TD-87）",
+  }),
+  "deepseek-harness": Object.freeze({
+    reasoning: "可省略（未配置不拒）",
+    provider: "组合由 `dshConfigPath` / `dshProvider` 表达，配 provider 块即拒",
+    supportsRoleContract: "`DSH_SYSTEM_PROMPT`",
+    reportsTokenUsage: "assistant/message 帧 usage",
+  }),
+  "deepseek-acp": Object.freeze({
+    model: "模型经 shipped acp profile 的 session configOptions 承载；通道已证可 set（Phase 5），但 WAO 未接线（ACP 值形状是 provider/model JSON 对，非裸 model.id）；配了即拒，模型取 profile 缺省",
+    reasoning: "经 `session/set_config_option` 下发（六值闭集 ∩ ACP 广告 off/low/high/max 的交集，不发明映射）；响应未确认即 fail-closed 拒绝派发；resume 轮不发 set，改用 session/resume 响应 configOptions 只读核对，不符即拒",
+    contextWindow: "同 model 块——无可验证设置通道，配了即拒",
+    provider: "组合面固定为 `--profile acp` + 操作员 patch，配 provider 块即拒",
+    supportsSessionReuse: "ADR-0031 §3.6 关联面：resume 信封只携带前任 WAO runId，sessionId 由 spawn 权威按 runId 从转录取回、in-process 送达（不进 argv）；关联缺失/损坏/上游拒绝一律 fail-closed 拒绝，绝不静默新会话；仅 stable-workspace lane 的非 delivery 派发，delivery 一律 fresh",
+    supportsRoleContract: "per-dispatch `--patch` personaPrefix（结构化序列化）",
+    reportsTokenUsage: "`PromptResponse.usage` 实测可为 null——声明 false（2026-09-20 裁定）；翻转条件 = 有可验证 token 计量通道",
+  }),
+});
+
+/**
  * ADR-0025 批次 2（2026-09-21 扩到声明闭集全量，ADR-0032 §2）：backend 实例
  * 闭集能力声明的静态读取 SSOT（单一定义处）。
  *

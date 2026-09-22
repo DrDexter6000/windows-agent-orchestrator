@@ -3426,198 +3426,27 @@ test("TD-161: ADR-0028 升格批指针存在性（0028 文件 + map 索引 + 四
 });
 
 // ---------------------------------------------------------------------------
-// TD-162（2026-09-17）：backend 能力对照表关系型守卫（TD-120 原则：断言关系，
-// 不断言值）。usage.md「backend 能力对照表（TD-162）」节自称"投影、权威源是
-// backend 代码"——下面三道守卫把该声称变成机器事实：
-//   1. 结构：节在场、表头声明句在场、行集 = KNOWN_BACKENDS（registry.js 闭集
-//      SSOT，双向对账——新增 backend 不补行即红）。
-//   2. 闭集声明列（角色合同/sessionReuse/token usage/在途纠偏）：经共享工厂
-//      构造实例，strict === true 纪律读类声明，断言判定格与声明一致；opencode
-//      角色合同的版本门条件格锚到 OPENCODE_NATIVE_SYSTEM_MIN_VERSION 源常量。
-//   3. policy 门列（model/reasoning/contextWindow/provider）：对实例的
-//      validateAgentPolicy 做真实行为探针（调用即权威，非源码文本匹配）——
-//      全过=支持 / 全拒=不支持 / 混合=条件；条件格的关键条件词（provider /
-//      providerID / K3 模型绑定 / effort 档位成员）再锚到代码事实。
+// TD-162（2026-09-22 生成层批次）：生成物字节钉。原「表体解析器 + 三道关系型
+// 守卫」（结构/闭集声明/policy 行为探针对账，2026-09-18 落地）已随 docs/usage.md
+// 手写表体一并退场：能力对照表改为生成层 docs/surface/certification.md，由
+// scripts/gen-certification.mjs 从 registry/factory 闭集 SSOT +
+// validateAgentPolicy 行为探针派生（判定法沿用原 policy 门守卫的同一套派生法，
+// 含 KIMI_K3_MODEL_ID / OPENCODE_NATIVE_SYSTEM_MIN_VERSION 源常量锚定与
+// CAPABILITY_NOTES 键集校验——漂移在生成期即红）。守卫收敛：此处不再解析手写
+// 表体（死锚已删），也不与 docsSurface.test.js 的字节钉形成两套机制——统一为
+// 「重新渲染 == 磁盘内容」（模式照抄 docsSurface.test.js），任一侧漂移即红。
 // ---------------------------------------------------------------------------
 
-/** 判定词闭集（表格 cell 首词）。交替序保证"不支持"先于"支持"匹配（前缀包含）。 */
-const TD162_VERDICT_RE = /^(不支持|支持|条件)/;
-
-/** 提取 usage.md 能力表。返回 { header, rows, section }；rows 以行首 backend 键索引。 */
-function td162CapabilityTable() {
-  const usage = read("docs/usage.md");
-  const heading = "### backend 能力对照表（TD-162）";
-  const start = usage.indexOf(heading);
-  assert.ok(start !== -1, "docs/usage.md 缺「backend 能力对照表（TD-162）」节");
-  const rest = usage.slice(start + heading.length);
-  const next = rest.indexOf("\n### ");
-  const section = next === -1 ? rest : rest.slice(0, next);
-  const tableLines = section.split("\n").filter((l) => l.startsWith("|"));
-  assert.ok(tableLines.length >= 3, "能力表解析异常（表行不足 3 行）");
-  const header = splitRowCells(tableLines[0]).map((c) => c.trim());
-  const rows = new Map();
-  for (const line of tableLines.slice(1)) {
-    if (/^\|[-\s|]+\|?$/.test(line.trim())) continue; // |---|---| 分隔行
-    const cells = splitRowCells(line).map((c) => c.trim());
-    // auditor F5：Map.set 会覆盖同名行——重复表行必须直接红（否则守卫对重复行半盲）。
-    const rowKey = cells[0];
-    assert.ok(!rows.has(rowKey), `能力表出现重复行 ${rowKey}（后行会覆盖先行，守卫对重复行半盲）`);
-    assert.equal(cells.length, header.length,
-      `能力表数据行「${cells[0]}」列数（${cells.length}）与表头（${header.length}）不一致`);
-    rows.set(cells[0], cells);
-  }
-  assert.ok(rows.size > 0, "能力表解析到 0 条数据行（守卫空转）");
-  return { header, rows, section };
-}
-
-/** 按表头锚取列号（锚在表头各列唯一）。 */
-function td162Col(header, anchor) {
-  const hits = header.flatMap((h, i) => (h.includes(anchor) ? [i] : []));
-  assert.equal(hits.length, 1, `能力表表头列锚「${anchor}」必须恰好命中一列（实际 ${hits.length}）`);
-  return hits[0];
-}
-
-test("TD-162 结构守卫: 能力表行集 = KNOWN_BACKENDS，权威源声明句在场", async () => {
-  const { KNOWN_BACKENDS } = await import("../../src/registry.js");
-  const { rows, section } = td162CapabilityTable();
-  // 表头注明：权威源是 backend 代码类声明、本表是投影、漂移以代码为准。
-  assert.ok(/权威源[\s\S]*投影[\s\S]*以代码为准/.test(section),
-    "能力表必须注明：值的权威源是 backend 代码类声明，本表是投影，漂移以代码为准");
-  // 行集与闭集 SSOT 双向对账：新增 backend 必须补行；表内不得出现闭集外成员。
-  assert.deepEqual([...rows.keys()].sort(), [...KNOWN_BACKENDS].sort(),
-    "能力表行集必须与 registry.js KNOWN_BACKENDS 一致（闭集成员增补是 Owner 决策，落库时同步补行）");
+test("TD-162 生成物守卫: docs/surface/certification.md 与 renderCertification() 逐字节一致", async () => {
+  const { renderCertification } = await import("../../scripts/gen-certification.mjs");
+  const onDisk = readFileSync(join(ROOT, "docs", "surface", "certification.md"), "utf8")
+    .replace(/\r\n/g, "\n");
+  assert.equal(
+    onDisk,
+    renderCertification(),
+    "docs/surface/certification.md is stale — run npm run gen:certification and commit the output",
+  );
 });
-
-test("TD-162 关系型守卫: 能力表闭集声明列与 backend 类声明一致（strict === true 纪律）", async () => {
-  const { backendFor, readBackendCapabilities } = await import("../../src/backends/factory.js");
-  const { header, rows } = td162CapabilityTable();
-  const { KNOWN_BACKENDS } = await import("../../src/registry.js");
-  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({}) });
-  // ssot: true 的列经 factory 的 readBackendCapabilities 单一定义处读取；
-  // 其余列按同一 strict === true 纪律直读实例属性。
-  const DECLARED_COLS = [
-    { anchor: "角色合同", prop: "supportsRoleContract" },
-    { anchor: "sessionReuse", prop: "supportsSessionReuse", ssot: true },
-    { anchor: "token usage", prop: "reportsTokenUsage", ssot: true },
-    { anchor: "在途纠偏", prop: "supportsInFlightCorrection" },
-  ];
-  for (const backendKey of KNOWN_BACKENDS) {
-    const backend = backendFor({ backend: backendKey, cwd: "D:/td162/probe" }, { fetchImpl });
-    const caps = readBackendCapabilities(backend);
-    const cells = rows.get(backendKey);
-    assert.ok(cells, `能力表缺 ${backendKey} 行`);
-    for (const { anchor, prop, ssot } of DECLARED_COLS) {
-      const declared = ssot ? caps[prop] : backend[prop] === true;
-      const cell = cells[td162Col(header, anchor)];
-      assert.ok(TD162_VERDICT_RE.test(cell), `${backendKey} ${anchor} 格缺判定词（支持/不支持/条件）`);
-      const verdict = cell.match(TD162_VERDICT_RE)[1];
-      if (declared) {
-        assert.notEqual(verdict, "不支持",
-          `${backendKey} 类声明 ${prop} === true，能力表 ${anchor} 格不得写"不支持"`);
-      } else {
-        assert.equal(verdict, "不支持",
-          `${backendKey} 未声明 ${prop}（strict === true 读 false），能力表 ${anchor} 格必须写"不支持"`);
-      }
-    }
-  }
-  // opencode-serve 角色合同的版本门：条件格里的版本号从源常量提取（不硬编码）。
-  const minSrc = read("src/backends/opencodeServe.js")
-    .match(/OPENCODE_NATIVE_SYSTEM_MIN_VERSION = Object\.freeze\(\[([^\]]*)\]\)/)?.[1];
-  assert.ok(minSrc, "opencodeServe.js 必须定义 OPENCODE_NATIVE_SYSTEM_MIN_VERSION");
-  const [maj, min] = [...minSrc.matchAll(/\d+/g)].map((m) => m[0]);
-  assert.ok(rows.get("opencode-serve")[td162Col(header, "角色合同")].includes(`${maj}.${min}`),
-    `opencode-serve 角色合同条件格必须含 serve 版本门 ${maj}.${min}（与 OPENCODE_NATIVE_SYSTEM_MIN_VERSION 同源）`);
-});
-
-test("TD-162 关系型守卫: 能力表 policy 门列与 validateAgentPolicy 行为探针一致", async () => {
-  const { backendFor } = await import("../../src/backends/factory.js");
-  const { REASONING_EFFORTS, KNOWN_BACKENDS } = await import("../../src/registry.js");
-  const { header, rows } = td162CapabilityTable();
-  const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({}) });
-  const PROVIDER = { protocol: "anthropic-compatible", baseUrl: "https://td162-probe.invalid", apiKeyEnv: "TD162_PROBE_KEY" };
-  // kimi 的 effort 门绑定自身 K3 模型——常量从源码提取（K3 绑定的事实源，不硬编码）。
-  const k3Model = read("src/backends/kimiCode.js").match(/const KIMI_K3_MODEL_ID = "([^"]+)"/)?.[1];
-  assert.ok(k3Model, "kimiCode.js 必须定义 KIMI_K3_MODEL_ID");
-  const passes = (backend, agent) => {
-    try { backend.validateAgentPolicy(agent); return true; } catch { return false; }
-  };
-  const mentions = (cell, token) =>
-    new RegExp(`(?<![a-zA-Z0-9])${token}(?![a-zA-Z0-9])`).test(cell);
-  const derive = (results) => (results.every(Boolean) ? "支持" : (results.some(Boolean) ? "条件" : "不支持"));
-
-  for (const backendKey of KNOWN_BACKENDS) {
-    const backend = backendFor({ backend: backendKey, cwd: "D:/td162/probe" }, { fetchImpl });
-    const cells = rows.get(backendKey);
-    assert.ok(cells, `能力表缺 ${backendKey} 行`);
-
-    // provider 列无伴随字段，先探——contextWindow 的 provider 伴随探针以 provider 合法为前提。
-    const providerResults = [{ provider: PROVIDER }].map((a) => passes(backend, a));
-    // model 列：canonical 裸 {id} 与 OpenCode {providerID, id} 两种模型形状。
-    const modelResults = [
-      { model: { id: "td162-probe-model" } },
-      { model: { providerID: "td162-probe", id: "td162-probe-model" } },
-    ].map((a) => passes(backend, a));
-    // reasoning 列：六值闭集逐成员裸探 + 绑定 K3 模型再探（kimi 档位门的事实源）。
-    const reasoningAccepted = REASONING_EFFORTS.filter((e) =>
-      passes(backend, { reasoning: { effort: e } })
-      || passes(backend, { model: { id: k3Model }, reasoning: { effort: e } }));
-    const needsModelCompanion = reasoningAccepted.some((e) =>
-      !passes(backend, { reasoning: { effort: e } })
-      && passes(backend, { model: { id: k3Model }, reasoning: { effort: e } }));
-    // contextWindow 列：裸 + 带模型 id +（provider 合法时）provider 路径伴随。
-    const contextWindowProbes = [
-      { model: { contextWindow: 1000000 } },
-      { model: { id: "td162-probe-model", contextWindow: 1000000 } },
-    ];
-    if (providerResults[0]) {
-      contextWindowProbes.push({ provider: PROVIDER, model: { id: "td162-probe-model", contextWindow: 1000000 } });
-    }
-    const contextWindowResults = contextWindowProbes.map((a) => passes(backend, a));
-
-    const expectations = [
-      { anchor: "model override", verdict: derive(modelResults) },
-      { anchor: "reasoning effort", verdict: derive(REASONING_EFFORTS.map((e) => reasoningAccepted.includes(e))) },
-      { anchor: "contextWindow", verdict: derive(contextWindowResults) },
-      { anchor: "provider 块", verdict: derive(providerResults) },
-    ];
-    for (const { anchor, verdict } of expectations) {
-      const cell = cells[td162Col(header, anchor)];
-      assert.ok(TD162_VERDICT_RE.test(cell), `${backendKey} ${anchor} 格缺判定词`);
-      assert.equal(cell.match(TD162_VERDICT_RE)[1], verdict,
-        `${backendKey} ${anchor} 格判定词与 validateAgentPolicy 行为探针不符（探针派生 ${verdict}）`);
-    }
-    // 条件格的内容锚（TD-162 要求：条件支持必须写清条件，不能只打勾叉）。
-    if (expectations[0].verdict === "条件") {
-      assert.ok(cells[td162Col(header, "model override")].includes("providerID"),
-        `${backendKey} model 格为条件支持，必须写明形状条件（providerID）`);
-    }
-    const reasoningCell = cells[td162Col(header, "reasoning effort")];
-    if (expectations[1].verdict === "条件") {
-      // auditor F5：单向 includes 抓漏写不抓多写——内存给档位集加一个实际被拒的
-      // medium 仍绿。改为精确集合比对：格内 "effort ∈ {…}" 集合 ≡ 探针接受集。
-      const setMatch = reasoningCell.match(/effort ∈ \{([^}]+)\}/);
-      assert.ok(setMatch, `${backendKey} reasoning 条件格缺 'effort ∈ {…}' 集合形态（条件必须可机读）`);
-      const docSet = new Set(setMatch[1].split(/[,，]\s*/).map((x) => x.trim()).filter(Boolean));
-      const probeSet = new Set(reasoningAccepted);
-      const extra = [...docSet].filter((x) => !probeSet.has(x));
-      const missing = [...probeSet].filter((x) => !docSet.has(x));
-      assert.deepEqual(
-        { extra, missing },
-        { extra: [], missing: [] },
-        `${backendKey} reasoning 条件格档位集合必须与探针精确一致（文档多写不被拒的档位=误导；少写=漏报）`,
-      );
-      if (needsModelCompanion) {
-        assert.ok(reasoningCell.includes(k3Model),
-          `${backendKey} reasoning 条件格必须点名模型绑定 ${k3Model}（档位接受依赖该模型）`);
-      }
-    }
-    if (expectations[2].verdict === "条件") {
-      assert.ok(/provider/i.test(cells[td162Col(header, "contextWindow")]),
-        `${backendKey} contextWindow 格为条件支持，必须写明条件维度（provider 路径）`);
-    }
-  }
-});
-
 
 // TD-184（2026-09-21）：上游 harness 原语对照表的刷新期限守卫。已发生的漂移实例：
 // 能力矩阵把 codex / kimi-code 的 sessionReuse 记「不支持」，读者据此合理地读成
