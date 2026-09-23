@@ -3506,3 +3506,225 @@ test("TD-162 顺带: onboarding 认证表覆盖 registry 模板声明的全部�
       `AGENT_ONBOARDING.md 认证选择表缺模板声明的凭据 env 名 ${envName}（新人无从知道该设哪个变量）`);
   }
 });
+
+// ============================================================
+// B3 试点（2026-09-23，TD-187）：seat-certify 阅读单位索引守卫（ssot §0.1.1）。
+// §0.1 主表保持文件级路由（tier1Paths 语义不变）；§0.1.1 把该面阅读单位收窄为
+// "短公共约束 + 相关合同节及其显式依赖"。五个 test 对应五条守卫要求：
+//   ① 地址有效——文件存在、锚唯一可解析；缺失/歧义必须红，不得当空集
+//   ② 公共项不可跳过——公共约束与核心无条件单元在场且不可删
+//   ③ 依赖完整——已知跨模块案例（delta 规程 ⟶ architecture containment
+//      事件合同 + 状态机）必须显式连读，且依赖关系是真实的（TD-120 关系型）
+//   ④ 未知不静默省略——未映射触发回退主表权威全文，由 Lead 界定范围
+//   ⑤ 不冻结散文——锚按节名前缀解析（括注后缀措辞可变）；只钉闭集词汇
+//      token 与锚关系，不钉目标文档长句
+// ============================================================
+
+/** 提取 ssot.md §0.1.1 seat-certify 阅读单位索引块（到下一个 `## ` 节为止）。 */
+function seatCertifyIndexBlock() {
+  const ssot = read("docs/ssot.md");
+  const start = ssot.indexOf("#### 0.1.1 ");
+  assert.ok(start !== -1, "docs/ssot.md 缺 §0.1.1 seat-certify 阅读单位索引（B3 试点，TD-187）");
+  const rest = ssot.slice(start);
+  const end = rest.indexOf("\n## ");
+  return end === -1 ? rest : rest.slice(0, end);
+}
+
+/** §0.1.1 索引表的 seat-certify 行，切 4 列（action id / 触发条件 / 无条件 / 条件追加）。 */
+function seatCertifyIndexRow() {
+  const row = seatCertifyIndexBlock().split(/\r?\n/).find((l) => l.startsWith("| `seat-certify` |"));
+  assert.ok(row, "§0.1.1 索引缺 `| `seat-certify` | ... |` 行（目标形状 4 列）");
+  const cells = splitRowCells(row);
+  assert.equal(cells.length, 4,
+    `§0.1.1 seat-certify 行应为 4 列（action id / 触发条件 / 无条件必读单元 / 条件追加单元），实际 ${cells.length}`);
+  return cells;
+}
+
+/** 从单元格里解析阅读单位 token：含 " §" = markdown 节锚；含 " @" = 结构化锚。
+ * 纯文件名 token（无锚）不是本索引的阅读单位（回退集由 §0.1 主表承载）。 */
+function parseReadingUnits(cell) {
+  return [...cell.matchAll(/`([^`]+)`/g)]
+    .map((m) => m[1])
+    .filter((t) => t.includes(" §") || t.includes(" @"))
+    .map((t) => {
+      const hashIdx = t.indexOf(" §");
+      const atIdx = t.indexOf(" @");
+      const k = hashIdx !== -1 && (atIdx === -1 || hashIdx < atIdx) ? hashIdx : atIdx;
+      return {
+        rel: t.slice(0, k).trim(),
+        kind: t.slice(k, k + 2) === " §" ? "heading" : "structured",
+        anchor: t.slice(k + 2).trim(),
+        token: t,
+      };
+    });
+}
+
+/** 在 markdown 文本中按节名**前缀**解析节锚：0 命中或歧义都抛红（①：不得当空集）。
+ * 前缀匹配同时是 ⑤ 的实现：节名后的括注（日期 / ADR 号等）措辞可变、不冻结。 */
+function resolveHeadingIn(text, rel, anchor) {
+  const hits = text.split(/\r?\n/).filter((l) => {
+    const m = l.match(/^#{1,6}\s+(.*)$/);
+    return m !== null && m[1].startsWith(anchor);
+  });
+  assert.ok(hits.length > 0,
+    `${rel} 节锚 §${anchor} 解析 0 命中——节被改名/删除，须同步 §0.1.1 索引（断锚不得当空集）`);
+  assert.ok(hits.length === 1,
+    `${rel} 节锚 §${anchor} 歧义（${hits.length} 个标题命中）——锚必须唯一`);
+  return hits[0];
+}
+
+/** 结构化锚解析：`@TD-xxx` = tech-debt 登记行（行首唯一命中）；`@a.b` = JSON 键路径。 */
+function assertStructuredAnchorResolves(unit) {
+  if (/^TD-\d+$/.test(unit.anchor)) {
+    const rowRe = new RegExp("^\\|\\s*" + unit.anchor + "\\s*\\|");
+    const rows = read(unit.rel).split(/\r?\n/).filter((l) => rowRe.test(l));
+    assert.ok(rows.length > 0,
+      `${unit.rel} 结构化锚 @${unit.anchor} 解析 0 命中——登记行被移走/改号（断锚不得当空集）`);
+    assert.equal(rows.length, 1, `${unit.rel} @${unit.anchor} 歧义（${rows.length} 行命中）——锚必须唯一`);
+    return;
+  }
+  if (unit.rel.endsWith(".json")) {
+    let node = JSON.parse(read(unit.rel));
+    for (const key of unit.anchor.split(".")) {
+      assert.ok(node != null && Object.prototype.hasOwnProperty.call(node, key),
+        `${unit.rel} 结构化锚 @${unit.anchor} 在键 "${key}" 处断裂（断锚不得当空集）`);
+      node = node[key];
+    }
+    return;
+  }
+  assert.fail(`§0.1.1 出现未知结构化锚种类：${unit.token}（只允许 @TD-xxx / JSON 键路径）`);
+}
+
+/** ①：阅读单位地址有效 = 文件存在 + 锚可解析且唯一（缺失/歧义红，不当空集）。 */
+function assertReadingUnitResolves(unit) {
+  assert.ok(existsSync(join(ROOT, unit.rel)), `阅读单位地址无效：文件不存在 ${unit.rel}`);
+  if (unit.kind === "heading") resolveHeadingIn(read(unit.rel), unit.rel, unit.anchor);
+  else if (unit.kind === "structured") assertStructuredAnchorResolves(unit);
+}
+
+/** 切出一个节（命中标题行到下一个标题行）——③ 的关系型验证用。 */
+function sectionText(rel, anchor) {
+  const lines = read(rel).split(/\r?\n/);
+  const idx = lines.findIndex((l) => {
+    const m = l.match(/^#{1,6}\s+(.*)$/);
+    return m !== null && m[1].startsWith(anchor);
+  });
+  assert.ok(idx !== -1, `${rel} 缺节 §${anchor}`);
+  let end = idx + 1;
+  while (end < lines.length && !/^#{1,6}\s+/.test(lines[end])) end++;
+  return lines.slice(idx, end).join("\n");
+}
+
+test("B3-①: seat-certify 索引阅读单位地址全部有效（文件存在 + 锚唯一可解析；断锚必红）", () => {
+  const cells = seatCertifyIndexRow();
+  const unconditional = parseReadingUnits(cells[2]);
+  const conditional = parseReadingUnits(cells[3]);
+  assert.ok(unconditional.length >= 3, `无条件必读单元异常收缩（仅 ${unconditional.length} 个锚）——公共项被删？`);
+  assert.ok(conditional.length >= 3, `条件追加单元异常收缩（仅 ${conditional.length} 个锚）——触发映射被删？`);
+  for (const unit of [...unconditional, ...conditional]) assertReadingUnitResolves(unit);
+
+  // 断锚负对照（合成夹具，防解析器写反导致守卫空转——TD-81 旧守卫的教训）：
+  // 0 命中、歧义都必须红；前缀唯一命中即解析成功。
+  const FX = "### delta 认证规程（lane 架构，ADR-0025 批次 3）\n正文\n";
+  assert.throws(() => resolveHeadingIn(FX, "fixture.md", "不存在的节"), /0 命中/);
+  assert.throws(() => resolveHeadingIn("### 甲节（一）\n### 甲节（二）\n", "fixture.md", "甲节"), /歧义/);
+  // 结构化锚负对照：TD 行 0 命中必须红。
+  assert.throws(
+    () => assertStructuredAnchorResolves(
+      { rel: "docs/tech-debt.md", anchor: "TD-99999", kind: "structured", token: "docs/tech-debt.md @TD-99999" }),
+    /0 命中/,
+  );
+});
+
+test("B3-②: 公共项不可跳过——公共约束在场 + 4 列目标形状 + 核心无条件单元不可删", () => {
+  const block = seatCertifyIndexBlock();
+  // 目标形状（4 列表头）必须在场。
+  assert.ok(/\| action id \| 触发条件 \| 无条件必读单元 \| 条件追加单元 \|/.test(block),
+    "§0.1.1 缺目标形状表头（action id | 触发条件 | 无条件必读单元 | 条件追加单元）");
+  // 公共约束：每条钉闭集词汇 token（词钉非散文钉——⑤：措辞可变，词汇闭集不可漂）。
+  const CONSTRAINT_PINS = [
+    ["conditional", "certificationScope", "全量重跑"],        // C1 delta 全绿 ≠ certified
+    ["零 case", "ALL PASS", "TD-169"],                        // C2 零目标假绿
+    ["not-applicable", "能力绿", "ADR-0032 §8"],              // C3 五态 N/A 纪律
+    ["advisory", "permission gate", "--require-certified"],   // C4 非门禁
+    ["组件层", "组合层", "ADR-0032 §1"],                      // C5 分层防火墙
+    ["在册限制", "超出证据"],                                  // C6 限制随附
+  ];
+  for (const tokens of CONSTRAINT_PINS) {
+    for (const t of tokens) {
+      assert.ok(block.includes(t), `§0.1.1 公共约束缺闭集词汇 ${t}（公共项不可跳过/不可删）`);
+    }
+  }
+  // 核心无条件单元不可删：delta 规程 / 五态节 / 认证矩阵三锚必须留在无条件列。
+  const cells = seatCertifyIndexRow();
+  const unconditional = parseReadingUnits(cells[2]);
+  const has = (rel, anchorPrefix) =>
+    unconditional.some((u) => u.rel === rel && u.anchor.startsWith(anchorPrefix));
+  assert.ok(has("docs/usage.md", "delta 认证规程"), "无条件必读单元缺 §delta 认证规程 锚（公共项不可跳过）");
+  assert.ok(has("docs/usage.md", "认证检查结果五态"), "无条件必读单元缺 §认证检查结果五态 锚（公共项不可跳过）");
+  assert.ok(has("config/agents.example.json", "certification.matrix"),
+    "无条件必读单元缺 @certification.matrix 锚（公共项不可跳过）");
+});
+
+test("B3-③: 依赖完整——adversarialEscape 判读必须显式连读 architecture containment 合同与状态机（已知跨模块案例）", () => {
+  const cells = seatCertifyIndexRow();
+  const conditional = parseReadingUnits(cells[3]);
+  assert.ok(cells[3].includes("adversarialEscape"), "条件追加单元缺 adversarialEscape 触发项（越界写对抗判读）");
+  // (a) 索引必须把两个依赖锚显式连进条件项（删锚即红）。
+  const dep46 = conditional.find((u) => u.rel === "docs/02-architecture.md" && u.anchor.startsWith("4.6 "));
+  const dep41 = conditional.find((u) => u.rel === "docs/02-architecture.md" && u.anchor.startsWith("4.1 "));
+  assert.ok(dep46, "条件追加单元缺显式依赖 docs/02-architecture.md §4.6（containment 事件合同——必须连读）");
+  assert.ok(dep41, "条件追加单元缺显式依赖 docs/02-architecture.md §4.1（状态机终态判定——必须连读）");
+  // (b) 依赖是**真实的**（TD-120 关系型，防索引凭空声明依赖）：
+  //     delta 规程节确实消费 workdir_escape / failed 词汇；
+  //     architecture §4.6 确实定义 run.isolation_violation 事件合同；§4.1 确实定义 failed 终态。
+  const delta = sectionText("docs/usage.md", "delta 认证规程");
+  assert.ok(delta.includes("workdir_escape"),
+    "usage.md §delta 认证规程 不再含 workdir_escape——依赖声明与正文失联，须同步 §0.1.1");
+  assert.ok(delta.includes("failed"),
+    "usage.md §delta 认证规程 不再含 failed 终态——依赖声明与正文失联，须同步 §0.1.1");
+  const containment = sectionText("docs/02-architecture.md", dep46.anchor);
+  assert.ok(containment.includes("run.isolation_violation"),
+    "architecture §4.6 缺 run.isolation_violation 事件合同（依赖锚空转）");
+  assert.ok(containment.includes("workdir_escape"),
+    "architecture §4.6 缺 workdir_escape 闭集码（依赖锚空转）");
+  const sm = sectionText("docs/02-architecture.md", dep41.anchor);
+  assert.ok(sm.includes("failed"), "architecture §4.1 状态机缺 failed 终态（依赖锚空转）");
+});
+
+test("B3-④: 未映射触发不静默省略——回退条款在场，主表行保留权威全文集并指向索引", () => {
+  const cells = seatCertifyIndexRow();
+  const fallback = cells[3].split("；").find((s) => s.includes("未映射")) ?? "";
+  assert.ok(fallback.length > 0, "条件追加单元缺'未映射触发条件'出口（未知不得静默省略）");
+  assert.ok(/回退/.test(fallback), "未映射出口必须是'回退权威全文'，不是丢弃");
+  assert.ok(/Lead/.test(fallback), "回退范围必须由 Lead 当次界定（不得静默自动收窄）");
+  // 主表路由行：阅读单位指向 §0.1.1，且回退权威全文（tier1Paths）保持 live。
+  const mainRow = read("docs/ssot.md").split(/\r?\n/)
+    .find((l) => l.startsWith("| `seat-certify` |") && l.includes("阅读单位"));
+  assert.ok(mainRow, "§0.1 主表缺 seat-certify 路由行（阅读单位指针）");
+  assert.ok(/§0\.1\.1/.test(mainRow), "主表 seat-certify 行未指向 §0.1.1 阅读单位索引");
+  assert.ok(/回退/.test(mainRow), "主表 seat-certify 行未声明回退权威全文语义");
+  for (const rel of tier1Paths("seat-certify")) {
+    assert.ok(existsSync(join(ROOT, rel)), `回退权威全文路径失效：${rel}`);
+  }
+});
+
+test("B3-⑤: 不冻结散文——锚按前缀解析容忍括注改写；索引保持短、不复制目标节正文", () => {
+  // (a) 节名前缀后的括注（日期 / ADR 号）改写不红：解析器只认前缀，不钉整行标题。
+  assert.doesNotThrow(
+    () => resolveHeadingIn("### delta 认证规程（完全改写过的括注 2099-01-01）\n", "fixture.md", "delta 认证规程"),
+    "节锚应按前缀解析（括注措辞可变），不应钉整行标题",
+  );
+  // (b) 节名本身（稳定标识）改掉必须红——这是 ① 负对照在本测试族的作用面。
+  assert.throws(
+    () => resolveHeadingIn("### 别的名字（括注不变）\n", "fixture.md", "delta 认证规程"),
+    /0 命中/,
+  );
+  // (c) 索引是索引不是副本：长度帽防其膨胀成第二份真相源（正文复制是漂移头号来源，
+  //     ssot §1 铁律 1）。本帽只钉 §0.1.1 自身体积，不是任何权威文档的 cap。
+  const block = seatCertifyIndexBlock();
+  const bytes = Buffer.byteLength(block, "utf8");
+  assert.ok(bytes <= 4096, `§0.1.1 索引膨胀到 ${bytes} bytes（>4096）——索引应保持短；复制目标节正文须改为锚`);
+  // (d) 锚语法约定须自述（稳定标识的语义说明在场，读者不必猜 §/@ 记法）。
+  assert.ok(/锚语法/.test(block), "§0.1.1 缺锚语法说明（`路径 §节名` / `路径 @标识` 约定须自述）");
+});
