@@ -3514,6 +3514,8 @@ test("TD-162 顺带: onboarding 认证表覆盖 registry 模板声明的全部�
 //   ① 地址有效——文件存在、锚唯一可解析；缺失/歧义必须红，不得当空集
 //   ② 公共项不可跳过——公共约束 [C1]..[C6] 逐条在场（恰 6 条）+
 //      无条件单元 [U1]..[U7] 逐个钉住（恰 7 个），删任一条/个必红
+//      （② 的枚举+断言核心在 assertReadingIndex 纯函数；audit15/audit16 已发现
+//       反例由 B3-②R 族固化为可执行回归——见该函数与 B3-②R 各 test 的注释）
 //   ③ 依赖完整——已知跨模块案例（delta 规程 ⟶ architecture containment
 //      事件合同 + 状态机）必须显式连读，且依赖关系是真实的（TD-120 关系型）
 //   ④ 未知不静默省略——未映射触发回退主表权威全文，由 Lead 界定范围
@@ -3531,14 +3533,21 @@ function seatCertifyIndexBlock() {
   return end === -1 ? rest : rest.slice(0, end);
 }
 
-/** §0.1.1 索引表的 seat-certify 行，切 4 列（action id / 触发条件 / 无条件 / 条件追加）。 */
-function seatCertifyIndexRow() {
-  const row = seatCertifyIndexBlock().split(/\r?\n/).find((l) => l.startsWith("| `seat-certify` |"));
+/** §0.1.1 块**文本** → seat-certify 索引行 4 列（纯函数：不读盘，接受任意文本输入）。
+ * B3 第四轮（audit18）：块级解析从"只读真实文档"抽成文本输入的纯函数——反例固化
+ * 测试（B3-②R 族）用同一解析路径喂变异文本，生产守卫与回归测试不各养一份解析器。 */
+function seatCertifyRowFromBlock(block) {
+  const row = block.split(/\r?\n/).find((l) => l.startsWith("| `seat-certify` |"));
   assert.ok(row, "§0.1.1 索引缺 `| `seat-certify` | ... |` 行（目标形状 4 列）");
   const cells = splitRowCells(row);
   assert.equal(cells.length, 4,
     `§0.1.1 seat-certify 行应为 4 列（action id / 触发条件 / 无条件必读单元 / 条件追加单元），实际 ${cells.length}`);
   return cells;
+}
+
+/** §0.1.1 索引表的 seat-certify 行，切 4 列（action id / 触发条件 / 无条件 / 条件追加）。 */
+function seatCertifyIndexRow() {
+  return seatCertifyRowFromBlock(seatCertifyIndexBlock());
 }
 
 /** 从单元格里解析阅读单位 token：含 " §" = markdown 节锚；含 " @" = 结构化锚。
@@ -3616,29 +3625,15 @@ function sectionText(rel, anchor) {
   return lines.slice(idx, end).join("\n");
 }
 
-test("B3-①: seat-certify 索引阅读单位地址全部有效（文件存在 + 锚唯一可解析；断锚必红）", () => {
-  const cells = seatCertifyIndexRow();
-  const unconditional = parseReadingUnits(cells[2]);
-  const conditional = parseReadingUnits(cells[3]);
-  assert.ok(unconditional.length >= 3, `无条件必读单元异常收缩（仅 ${unconditional.length} 个锚）——公共项被删？`);
-  assert.ok(conditional.length >= 3, `条件追加单元异常收缩（仅 ${conditional.length} 个锚）——触发映射被删？`);
-  for (const unit of [...unconditional, ...conditional]) assertReadingUnitResolves(unit);
-
-  // 断锚负对照（合成夹具，防解析器写反导致守卫空转——TD-81 旧守卫的教训）：
-  // 0 命中、歧义都必须红；前缀唯一命中即解析成功。
-  const FX = "### delta 认证规程（lane 架构，ADR-0025 批次 3）\n正文\n";
-  assert.throws(() => resolveHeadingIn(FX, "fixture.md", "不存在的节"), /0 命中/);
-  assert.throws(() => resolveHeadingIn("### 甲节（一）\n### 甲节（二）\n", "fixture.md", "甲节"), /歧义/);
-  // 结构化锚负对照：TD 行 0 命中必须红。
-  assert.throws(
-    () => assertStructuredAnchorResolves(
-      { rel: "docs/tech-debt.md", anchor: "TD-99999", kind: "structured", token: "docs/tech-debt.md @TD-99999" }),
-    /0 命中/,
-  );
-});
-
-test("B3-②: 公共项不可跳过——公共约束 [C1]..[C6] 逐条在场（恰 6 条）+ 7 个无条件单元 [U1]..[U7] 逐个钉住", () => {
-  const block = seatCertifyIndexBlock();
+/** B3-② 的"枚举 + 断言"核心，抽成接受 §0.1.1 块**文本**的纯函数（B3 第四轮，audit18）。
+ * 背景：反例修复（audit14 行级词钉 → audit15 独立枚举 → audit16 结构计数）此前只落在
+ * "处理逻辑 + 注释"里——把枚举（LIST_ITEM_RE）撤回到旧实现（只认点号编号）后守卫仍
+ * 5/5 绿（audit18 实证）：已发现反例不是可执行回归输入，同一漏洞可再次进入。抽成纯函数后：
+ *   - 生产面：B3-② 用真实文档文本调用（断言语义不变）；
+ *   - 回归面：B3-②R 反例固化测试族把变异文本喂进来断言**必抛**——枚举实现一旦退回，
+ *     变异不再抛 ⇒ 那些 assert.throws 自身变红（修复被撤销可被机器检测）。
+ * 被测文档不被改写：变异只发生在测试内存里的文本副本上。 */
+function assertReadingIndex(block) {
   // 目标形状（4 列表头）必须在场。
   assert.ok(/\| action id \| 触发条件 \| 无条件必读单元 \| 条件追加单元 \|/.test(block),
     "§0.1.1 缺目标形状表头（action id | 触发条件 | 无条件必读单元 | 条件追加单元）");
@@ -3704,7 +3699,7 @@ test("B3-②: 公共项不可跳过——公共约束 [C1]..[C6] 逐条在场（
     ["U6", "docs/team-roles.md", "Lane"],
     ["U7", "config/agents.example.json", "certification.matrix"],
   ];
-  const cells = seatCertifyIndexRow();
+  const cells = seatCertifyRowFromBlock(block);
   // 按锚语法枚举**全部**阅读单元（不只数带 [Un] 者）：反引号 token 含 " §"/" @"
   // 即单元；纯文件名 token（无锚）不是阅读单位（回退集由 §0.1 主表承载）。
   const units = [];
@@ -3730,6 +3725,152 @@ test("B3-②: 公共项不可跳过——公共约束 [C1]..[C6] 逐条在场（
   }
   assert.deepEqual(units.map((u) => u.id).sort(), UNCONDITIONAL_UNITS.map(([id]) => id).sort(),
     "§0.1.1 无条件单元标识集合必须恰为 [U1]..[U7]（多标/跳号/换号都红）");
+}
+
+test("B3-①: seat-certify 索引阅读单位地址全部有效（文件存在 + 锚唯一可解析；断锚必红）", () => {
+  const cells = seatCertifyIndexRow();
+  const unconditional = parseReadingUnits(cells[2]);
+  const conditional = parseReadingUnits(cells[3]);
+  assert.ok(unconditional.length >= 3, `无条件必读单元异常收缩（仅 ${unconditional.length} 个锚）——公共项被删？`);
+  assert.ok(conditional.length >= 3, `条件追加单元异常收缩（仅 ${conditional.length} 个锚）——触发映射被删？`);
+  for (const unit of [...unconditional, ...conditional]) assertReadingUnitResolves(unit);
+
+  // 断锚负对照（合成夹具，防解析器写反导致守卫空转——TD-81 旧守卫的教训）：
+  // 0 命中、歧义都必须红；前缀唯一命中即解析成功。
+  const FX = "### delta 认证规程（lane 架构，ADR-0025 批次 3）\n正文\n";
+  assert.throws(() => resolveHeadingIn(FX, "fixture.md", "不存在的节"), /0 命中/);
+  assert.throws(() => resolveHeadingIn("### 甲节（一）\n### 甲节（二）\n", "fixture.md", "甲节"), /歧义/);
+  // 结构化锚负对照：TD 行 0 命中必须红。
+  assert.throws(
+    () => assertStructuredAnchorResolves(
+      { rel: "docs/tech-debt.md", anchor: "TD-99999", kind: "structured", token: "docs/tech-debt.md @TD-99999" }),
+    /0 命中/,
+  );
+});
+
+test("B3-②: 公共项不可跳过——公共约束 [C1]..[C6] 逐条在场（恰 6 条）+ 7 个无条件单元 [U1]..[U7] 逐个钉住", () => {
+  // 断言核心已抽成文本输入的纯函数 assertReadingIndex（audit18 反例固化的前提）；
+  // 本测试钉"真实文档通过"，变异文本必红由下方 B3-②R 反例固化测试族承载。
+  assertReadingIndex(seatCertifyIndexBlock());
+});
+
+// ============================================================
+// B3 第四轮（audit18）：已发现反例固化为永久可执行回归。
+// audit18 中级：行为修复成立（audit15/audit16 反例在现行枚举下确已红），但反例
+// 只存在于"处理逻辑 + 注释"里——把枚举退回旧实现（只认点号编号）后守卫仍全绿，
+// 同一漏洞可再次进入。本测试族把每个已发现反例**原样**固化为可执行输入：对真实
+// §0.1.1 文本的内存副本做变异，喂给与生产守卫共用的 assertReadingIndex，断言必抛。
+// 修复被撤销 ⇒ 变异不再抛 ⇒ 这些 assert.throws 自身变红（撤回可被机器检测）。
+// 被测文档本身不被改写；变异文本只存在于测试内存中。
+// ============================================================
+
+/** 反例固化的公共夹具：取真实 §0.1.1 块文本，返回 { block, lines, insertAfterC6 }。
+ * 前置自检全部 assert——夹具失效（文档形状漂移）时本族测试红，不静默通过。 */
+function b3CounterexampleFixture() {
+  const block = seatCertifyIndexBlock();
+  // 前置：未变异的当前文档必须通过守卫（否则"必红"断言建立在错误前提上）。
+  assert.doesNotThrow(() => assertReadingIndex(block),
+    "前置失败：当前 §0.1.1 文本未通过 assertReadingIndex（先修文档，不是修测试）");
+  const lines = block.split("\n");
+  const c6Idx = lines.findIndex((l) => /^[ \t]*\d+\.\s+\[C6\]/.test(l));
+  assert.ok(c6Idx !== -1, "夹具失效：块内定位不到 `[C6]` 条目行（行首数字. 编号）");
+  // 在最后一个公共约束条目（[C6] 行）之后插入一行 = "新增第 7 条"的最小变异。
+  const insertAfterC6 = (extra) =>
+    [...lines.slice(0, c6Idx + 1), extra, ...lines.slice(c6Idx + 1)].join("\n");
+  return { block, lines, insertAfterC6 };
+}
+
+test("B3-②R-audit15: 反例固化——新增无标识第 7 条 / 重复 [C6] / 无条件列无标识第 8 个阅读单元必红", () => {
+  const { lines, insertAfterC6 } = b3CounterexampleFixture();
+  // audit15 反例①：新增无标识第 7 条公共约束（点号编号）——旧实现只数带 [Cn] 的行，
+  // 无标识条目被解析器忽略，5/5 绿。
+  assert.throws(() => assertReadingIndex(insertAfterC6("7. 新增公共约束。")),
+    /恰为 6 个条目/, "audit15 反例①：无标识第 7 条（`7.`）必须红");
+  // audit15 反例②：追加重复 [C6] 条目——旧实现用 Map 按标识去重，重复标识被折叠，5/5 绿。
+  assert.throws(() => assertReadingIndex(insertAfterC6("7. [C6] 新增公共约束。")),
+    /恰为 6 个条目/, "audit15 反例②：重复 [C6] 条目必须红");
+  // audit15 反例③：无条件列新增无标识第 8 个阅读单元（audit15 复核的原样反例：
+  // 追加 docs/02-architecture.md §4.1 状态机锚）——旧实现只统计紧邻 [Un] 的锚。
+  const withUnmarkedUnit = lines.map((l) =>
+    l.startsWith("| `seat-certify` |")
+      ? l.replace("[U7] `config/agents.example.json @certification.matrix`",
+        "[U7] `config/agents.example.json @certification.matrix`、`docs/02-architecture.md §4.1 状态机`")
+      : l,
+  ).join("\n");
+  assert.notEqual(withUnmarkedUnit, lines.join("\n"), "夹具失效：无条件列无标识单元变异未生效");
+  assert.throws(() => assertReadingIndex(withUnmarkedUnit),
+    /缺 \[Un\] 稳定标识/, "audit15 反例③：无条件列无标识第 8 个阅读单元必须红");
+});
+
+test("B3-②R-audit16: 反例固化——`7)`（右括号编号、无标识）与 `7) [C6]` 必红（旧枚举只认点号，曾 5/5 绿）", () => {
+  const { insertAfterC6 } = b3CounterexampleFixture();
+  // audit16 反例①：右括号编号、无标识——audit15 修复的枚举 `^\d+\.` 只认点号，
+  // 本变异曾被直接忽略（audit18 撤回探针的靶子：退回旧枚举时本测试必须红）。
+  assert.throws(() => assertReadingIndex(insertAfterC6("7) 新增公共约束。")),
+    /恰为 6 个条目/, "audit16 反例①：`7) 新增公共约束。`（右括号、无标识）必须红");
+  // audit16 反例②：右括号编号 + 重复标识。
+  assert.throws(() => assertReadingIndex(insertAfterC6("7) [C6] 新增公共约束。")),
+    /恰为 6 个条目/, "audit16 反例②：`7) [C6] 新增公共约束。`（右括号、重复标识）必须红");
+});
+
+test("B3-②R-结构计数: 反例固化——`- `/`* `/`+ ` 无序列表项与 `8.` 跳号新增必红（计数不假设编号风格/连续性）", () => {
+  const { insertAfterC6 } = b3CounterexampleFixture();
+  for (const marker of ["-", "*", "+"]) {
+    assert.throws(() => assertReadingIndex(insertAfterC6(`${marker} 新增公共约束。`)),
+      /恰为 6 个条目/, `无序列表标记 \`${marker} \` 新增条目必须红`);
+  }
+  assert.throws(() => assertReadingIndex(insertAfterC6("8. 新增公共约束。")),
+    /恰为 6 个条目/, "`8.` 跳号新增必须红（计数不看编号连续性）");
+});
+
+test("B3-②R-标识纪律: 反例固化——[C6] 替换 [C5] / 逐条删除 C1–C6 / 逐条摘标识必红（条目数不变也红）", () => {
+  const { block, lines } = b3CounterexampleFixture();
+  // [C6] 替换 [C5]：条目数仍 6，靠"逐条在场 + 标识集合恰等"抓红（非计数路径）。
+  assert.throws(
+    () => assertReadingIndex(block.replace(/^([ \t]*\d+\.[ \t]+)\[C5\]/m, "$1[C6]")),
+    /缺 \[C5\]|标识集合必须恰为/,
+    "[C6] 替换 [C5] 必须红（标识漂移，非计数路径）",
+  );
+  // 逐条删除 C1–C6：删任一条 ⇒ 计数 5 ≠ 6。（按"编号条目行 + 标识"锚定删除，
+  // 不用 RegExp 构造器拼字符串——模板字面量的转义语义会吃掉正则反斜杠。）
+  const numberedEntryRe = /^\d+\.\s+\[C\d+\]/;
+  for (let n = 1; n <= 6; n++) {
+    const removed = lines.filter((l) => !(numberedEntryRe.test(l) && l.includes(`[C${n}]`))).join("\n");
+    assert.notEqual(removed, lines.join("\n"), `夹具失效：删除 [C${n}] 条目的变异未生效`);
+    assert.throws(() => assertReadingIndex(removed),
+      /恰为 6 个条目|缺 \[C/, `逐条删除：删 [C${n}] 条目必须红`);
+  }
+  // 逐条摘标识：条目数仍 6，靠"每条恰带一个 [Cn]"抓红。
+  for (let n = 1; n <= 6; n++) {
+    const stripped = lines.map((l) => l.replace(`[C${n}] `, "")).join("\n");
+    assert.notEqual(stripped, lines.join("\n"), `夹具失效：摘 [C${n}] 标识的变异未生效`);
+    assert.throws(() => assertReadingIndex(stripped),
+      /恰带一个 \[Cn\]|缺 \[C/, `逐条摘标识：摘 [C${n}] 必须红`);
+  }
+});
+
+test("B3-②R-撤回探针: 旧枚举（只认点号编号）对右括号/无序标记变异失明——证明上方必红依赖的恰是结构计数修复", () => {
+  // 差分探针（持久面）：audit16 时代的旧枚举 `/^\s*\d+\.\s+/` 对下列变异数到的
+  // 仍是 6 条（不抛）。若 assertReadingIndex 的 LIST_ITEM_RE 被退回该形状，上方
+  // B3-②R-audit16 / B3-②R-结构计数 的 assert.throws 将因"变异不再抛"而自身变红
+  // ——这就是"回归能检测修复被撤销"的机制。本探针把旧逻辑的失明形状钉在案：
+  // 它们一旦不再失明（或变异文本改写成了点号形态），说明探针与回归输入脱钩，须复核。
+  const { insertAfterC6 } = b3CounterexampleFixture();
+  const OLD_DOT_ONLY_RE = /^\s*\d+\.\s+/; // audit15→audit16 之间曾被撤回目标的旧实现形状
+  for (const extra of [
+    "7) 新增公共约束。",
+    "7) [C6] 新增公共约束。",
+    "- 新增公共约束。",
+    "* 新增公共约束。",
+    "+ 新增公共约束。",
+  ]) {
+    const mutated = insertAfterC6(extra);
+    assert.equal(mutated.split("\n").filter((l) => OLD_DOT_ONLY_RE.test(l)).length, 6,
+      `撤回探针前提失效：旧枚举（只认点号）竂数出 ≠6 条（变异：${JSON.stringify(extra)}）——探针与回归输入脱钩`);
+    // 对照：现行结构计数必须把同一变异数成 7 条（这正是 audit16 修复的本体）。
+    assert.equal(mutated.split("\n").filter((l) => /^[ \t]*(?:\d+[.)]|[-*+])[ \t]+\S/.test(l)).length, 7,
+      `对照失效：现行结构计数未把变异计入（${JSON.stringify(extra)}）`);
+  }
 });
 
 test("B3-③: 依赖完整——adversarialEscape 判读必须显式连读 architecture containment 合同与状态机（已知跨模块案例）", () => {
