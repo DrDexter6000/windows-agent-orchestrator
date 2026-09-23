@@ -3512,7 +3512,8 @@ test("TD-162 顺带: onboarding 认证表覆盖 registry 模板声明的全部�
 // §0.1 主表保持文件级路由（tier1Paths 语义不变）；§0.1.1 把该面阅读单位收窄为
 // "短公共约束 + 相关合同节及其显式依赖"。五个 test 对应五条守卫要求：
 //   ① 地址有效——文件存在、锚唯一可解析；缺失/歧义必须红，不得当空集
-//   ② 公共项不可跳过——公共约束与核心无条件单元在场且不可删
+//   ② 公共项不可跳过——公共约束 [C1]..[C6] 逐条在场（恰 6 条）+
+//      无条件单元 [U1]..[U7] 逐个钉住（恰 7 个），删任一条/个必红
 //   ③ 依赖完整——已知跨模块案例（delta 规程 ⟶ architecture containment
 //      事件合同 + 状态机）必须显式连读，且依赖关系是真实的（TD-120 关系型）
 //   ④ 未知不静默省略——未映射触发回退主表权威全文，由 Lead 界定范围
@@ -3636,34 +3637,75 @@ test("B3-①: seat-certify 索引阅读单位地址全部有效（文件存在 +
   );
 });
 
-test("B3-②: 公共项不可跳过——公共约束在场 + 4 列目标形状 + 核心无条件单元不可删", () => {
+test("B3-②: 公共项不可跳过——公共约束 [C1]..[C6] 逐条在场（恰 6 条）+ 7 个无条件单元 [U1]..[U7] 逐个钉住", () => {
   const block = seatCertifyIndexBlock();
   // 目标形状（4 列表头）必须在场。
   assert.ok(/\| action id \| 触发条件 \| 无条件必读单元 \| 条件追加单元 \|/.test(block),
     "§0.1.1 缺目标形状表头（action id | 触发条件 | 无条件必读单元 | 条件追加单元）");
-  // 公共约束：每条钉闭集词汇 token（词钉非散文钉——⑤：措辞可变，词汇闭集不可漂）。
+
+  // —— F1（audit14 中级）：公共约束逐条可判定 ——
+  // 旧实现 block.includes(token) 在整个索引块找词，而条件追加栏含同样措辞
+  // （"零 case / ALL PASS / TD-169"）⇒ 删掉某条公共约束后其它栏的同词掩盖缺席，
+  // 守卫仍绿（变异实测：删第 2 条 190/190 全绿）。改为**行级**判定：每条公共
+  // 约束必须是一行带 `[Cn]` 稳定标识的列表项——逐条断言标识在场、该条的闭集
+  // 词汇钉在**该行**、总数恰为 6；禁止退回整块 substring 搜索作为在场判据。
+  // 词汇钉仍是词钉非散文钉（⑤：条目措辞可变，词汇闭集不可漂）。
+  const constraintLines = new Map(); // [Cn] -> 条目行
+  for (const line of block.split(/\r?\n/)) {
+    const m = line.match(/^\s*\d+\.\s*\[(C\d+)\]/);
+    if (m) constraintLines.set(m[1], line);
+  }
+  assert.equal(constraintLines.size, 6,
+    `§0.1.1 公共约束必须恰为 6 条带 [C1]..[C6] 标识的条目，实际 ${constraintLines.size} 条——删条/加条/摘标识都红`);
   const CONSTRAINT_PINS = [
-    ["conditional", "certificationScope", "全量重跑"],        // C1 delta 全绿 ≠ certified
-    ["零 case", "ALL PASS", "TD-169"],                        // C2 零目标假绿
-    ["not-applicable", "能力绿", "ADR-0032 §8"],              // C3 五态 N/A 纪律
-    ["advisory", "permission gate", "--require-certified"],   // C4 非门禁
-    ["组件层", "组合层", "ADR-0032 §1"],                      // C5 分层防火墙
-    ["在册限制", "超出证据"],                                  // C6 限制随附
+    ["C1", ["conditional", "certificationScope", "全量重跑"]],        // delta 全绿 ≠ certified
+    ["C2", ["零 case", "ALL PASS", "TD-169"]],                        // 零目标假绿
+    ["C3", ["not-applicable", "能力绿", "ADR-0032 §8"]],              // 五态 N/A 纪律
+    ["C4", ["advisory", "permission gate", "--require-certified"]],   // 非门禁
+    ["C5", ["组件层", "组合层", "ADR-0032 §1"]],                      // 分层防火墙
+    ["C6", ["在册限制", "超出证据"]],                                  // 限制随附
   ];
-  for (const tokens of CONSTRAINT_PINS) {
+  for (const [id, tokens] of CONSTRAINT_PINS) {
+    const line = constraintLines.get(id);
+    assert.ok(line !== undefined, `§0.1.1 公共约束缺 [${id}] 稳定标识条目（公共项不可跳过/不可删）`);
     for (const t of tokens) {
-      assert.ok(block.includes(t), `§0.1.1 公共约束缺闭集词汇 ${t}（公共项不可跳过/不可删）`);
+      assert.ok(line.includes(t),
+        `§0.1.1 公共约束 [${id}] 条目行缺闭集词汇 ${t}（词钉钉在条目行内，不钉整块）`);
     }
   }
-  // 核心无条件单元不可删：delta 规程 / 五态节 / 认证矩阵三锚必须留在无条件列。
+  assert.deepEqual([...constraintLines.keys()].sort(), CONSTRAINT_PINS.map(([id]) => id).sort(),
+    "§0.1.1 公共约束标识集合必须恰为 [C1]..[C6]（多标/跳号/换号都红）");
+
+  // —— F2（audit14 中级）：7 个无条件单元逐个钉住 ——
+  // 旧实现只逐项锁 delta 规程 / 五态 / @certification.matrix 三锚，ADR §1 / §2 /
+  // §8 与 Lane 节共 4 个单元可被静默删除而全绿（变异实测：删 ADR §1 单元后
+  // 190/190 全绿）。现给每个无条件单元一个 `[Un]` 稳定标识，逐个断言
+  // 标识 ↔ (文件 + 锚前缀) 一一对应、总数恰为 7；锚的可解析性仍由 B3-① 负责。
+  const UNCONDITIONAL_UNITS = [
+    ["U1", "docs/usage.md", "delta 认证规程"],
+    ["U2", "docs/usage.md", "认证检查结果五态"],
+    ["U3", ".wao/decisions/0032-两层验证与认证.md", "1. "],
+    ["U4", ".wao/decisions/0032-两层验证与认证.md", "2. "],
+    ["U5", ".wao/decisions/0032-两层验证与认证.md", "8. "],
+    ["U6", "docs/team-roles.md", "Lane"],
+    ["U7", "config/agents.example.json", "certification.matrix"],
+  ];
   const cells = seatCertifyIndexRow();
-  const unconditional = parseReadingUnits(cells[2]);
-  const has = (rel, anchorPrefix) =>
-    unconditional.some((u) => u.rel === rel && u.anchor.startsWith(anchorPrefix));
-  assert.ok(has("docs/usage.md", "delta 认证规程"), "无条件必读单元缺 §delta 认证规程 锚（公共项不可跳过）");
-  assert.ok(has("docs/usage.md", "认证检查结果五态"), "无条件必读单元缺 §认证检查结果五态 锚（公共项不可跳过）");
-  assert.ok(has("config/agents.example.json", "certification.matrix"),
-    "无条件必读单元缺 @certification.matrix 锚（公共项不可跳过）");
+  const marked = [...cells[2].matchAll(/\[(U\d+)\]\s*`([^`]+)`/g)].map((m) => [m[1], m[2]]);
+  assert.equal(marked.length, UNCONDITIONAL_UNITS.length,
+    `§0.1.1 无条件必读单元必须恰为 7 个带 [U1]..[U7] 标识的锚，实际 ${marked.length} 个——删单元/摘标识都红`);
+  for (const [id, rel, anchorPrefix] of UNCONDITIONAL_UNITS) {
+    const hits = marked.filter(([mid]) => mid === id);
+    assert.equal(hits.length, 1,
+      `§0.1.1 无条件必读单元 [${id}]（${rel} §${anchorPrefix}…）标识必须恰出现一次（公共项不可跳过/不可删）`);
+    const [unit] = parseReadingUnits(`\`${hits[0][1]}\``);
+    assert.ok(unit, `§0.1.1 [${id}] 标识未挂在阅读单位锚上（token：${hits[0][1]}）`);
+    assert.equal(unit.rel, rel, `§0.1.1 [${id}] 无条件单元文件漂移：期望 ${rel}，实际 ${unit.rel}`);
+    assert.ok(unit.anchor.startsWith(anchorPrefix),
+      `§0.1.1 [${id}] 无条件单元锚漂移：期望前缀 "${anchorPrefix}"，实际 "${unit.anchor}"`);
+  }
+  assert.deepEqual(marked.map(([id]) => id).sort(), UNCONDITIONAL_UNITS.map(([id]) => id).sort(),
+    "§0.1.1 无条件单元标识集合必须恰为 [U1]..[U7]（多标/跳号/换号都红）");
 });
 
 test("B3-③: 依赖完整——adversarialEscape 判读必须显式连读 architecture containment 合同与状态机（已知跨模块案例）", () => {

@@ -30,19 +30,20 @@ WAO 曾在 2026-06-16 做过一次 SSOT 审计（`docs/archive/docs-ssot-audit.m
 
 > 试点范围：仅本面；其余行动面阅读单位不变（文件级）。多面命中仍取**并集**。本索引只回答"为这件事哪些合同必须知道"，不回答写时归属；**不得**借精简后的本面绕过 `contract-edit`——写认证合同本身（状态闭集 / 门语义 / 五态 / 事件合同）仍读 `contract-edit` 全集。
 > 锚语法（稳定标识，节内措辞可变）：`路径 §节名` = markdown 节标题锚（按节名前缀唯一解析）；`路径 @标识` = 结构化锚（`@TD-xxx` = tech-debt 登记行，`@键.路径` = JSON 键）。锚缺失或歧义必须报错，不得当空集静默跳过（守卫：`test/isolation-infra/docs-consistency.test.js` B3 块，TD-187）。
+> 条目标识（守卫稳定锚，audit14）：公共约束条头的 `[C1]..[C6]` 与无条件单元条头的 `[U1]..[U7]` 是 B3-② 逐条在场的判定锚（数量恰为 6 / 7）；条目散文措辞可变，标识与数量不可漂。
 
 **公共约束（无条件项；任何 seat-certify 行动前必读，跳过即错）**：
 
-1. 组合层状态闭集 `certified` / `conditional`；delta 子集全绿只产生 `conditional` + `certificationScope:"delta"`，升 `certified` 的唯一路径是全量重跑。
-2. 认证证据是实跑台账 `runs/reliability-summary.json`；零 case 或只有 skip 的运行不得报 `ALL PASS`（ADR-0032 §7 前置根修；TD-169 教训）。
-3. 检查结果五态 `pass / fail / not-applicable / blocked / inconclusive`；N/A 必须带原因且不贡献能力绿（ADR-0032 §8）。
-4. 认证是 advisory evidence 不是 permission gate；唯一 opt-in 门 = 显式 `--require-certified`（身份四元组 + `lastFullHealthyRunAt` 新鲜度，fail-closed）。
-5. 组件层绿不推出组合层绿；两层状态词汇闭集不得互换（ADR-0032 §1）。
-6. 认证结论必须随附在册限制（见条件追加单元的 TD 行），不得声称超出证据的结论。
+1. [C1] 组合层状态闭集 `certified` / `conditional`；delta 子集全绿只产生 `conditional` + `certificationScope:"delta"`，升 `certified` 的唯一路径是全量重跑。
+2. [C2] 认证证据是实跑台账 `runs/reliability-summary.json`；零 case 或只有 skip 的运行不得报 `ALL PASS`（ADR-0032 §7 前置根修；TD-169 教训）。
+3. [C3] 检查结果五态 `pass / fail / not-applicable / blocked / inconclusive`；N/A 必须带原因且不贡献能力绿（ADR-0032 §8）。
+4. [C4] 认证是 advisory evidence 不是 permission gate；唯一 opt-in 门 = 显式 `--require-certified`（身份四元组 + `lastFullHealthyRunAt` 新鲜度，fail-closed）。
+5. [C5] 组件层绿不推出组合层绿；两层状态词汇闭集不得互换（ADR-0032 §1）。
+6. [C6] 认证结论必须随附在册限制（见条件追加单元的 TD 行），不得声称超出证据的结论。
 
 | action id | 触发条件 | 无条件必读单元 | 条件追加单元 |
 |---|---|---|---|
-| `seat-certify` | 给某席位装配（harness × 模型 × 角色合同）跑组合层认证，或判读 / 升级其认证结果 | `docs/usage.md §delta 认证规程`、`docs/usage.md §认证检查结果五态与能力轴分层`、`.wao/decisions/0032-两层验证与认证.md §1. 词汇与状态闭集`、`.wao/decisions/0032-两层验证与认证.md §2. 两层各测什么`、`.wao/decisions/0032-两层验证与认证.md §8. 五态检查结果`、`docs/team-roles.md §Lane：角色多通道`、`config/agents.example.json @certification.matrix` | ①判读 `adversarialEscape`（越界写对抗）→ 显式依赖连读：`docs/02-architecture.md §4.6 Coder Delivery Contract`（`run.isolation_violation(code=workdir_escape)` 事件合同与 packaging 前转 failed）＋`docs/02-architecture.md §4.1 状态机`（终态判定）；②判读 `conditional` / wire `certificationReasonCode:null` → `docs/tech-debt.md @TD-133`；③分诊"零 case / 全 skip 仍 ALL PASS"或核对执行计数 → `docs/tech-debt.md @TD-169`；④席位配置（model / reasoning / provider）变更后判读旧证据适用性 → `docs/tech-debt.md @TD-186`；⑤未映射触发条件 → 回退读 §0.1 主表 `seat-certify` 行的权威全文（范围由 Lead 当次界定并记录），不得静默省略 |
+| `seat-certify` | 给某席位装配（harness × 模型 × 角色合同）跑组合层认证，或判读 / 升级其认证结果 | [U1] `docs/usage.md §delta 认证规程`、[U2] `docs/usage.md §认证检查结果五态与能力轴分层`、[U3] `.wao/decisions/0032-两层验证与认证.md §1. 词汇与状态闭集`、[U4] `.wao/decisions/0032-两层验证与认证.md §2. 两层各测什么`、[U5] `.wao/decisions/0032-两层验证与认证.md §8. 五态检查结果`、[U6] `docs/team-roles.md §Lane：角色多通道`、[U7] `config/agents.example.json @certification.matrix` | ①判读 `adversarialEscape`（越界写对抗）→ 显式依赖连读：`docs/02-architecture.md §4.6 Coder Delivery Contract`（`run.isolation_violation(code=workdir_escape)` 事件合同与 packaging 前转 failed）＋`docs/02-architecture.md §4.1 状态机`（终态判定）；②判读 `conditional` / wire `certificationReasonCode:null` → `docs/tech-debt.md @TD-133`；③分诊"零 case / 全 skip 仍 ALL PASS"或核对执行计数 → `docs/tech-debt.md @TD-169`；④席位配置（model / reasoning / provider）变更后判读旧证据适用性 → `docs/tech-debt.md @TD-186`；⑤未映射触发条件 → 回退读 §0.1 主表 `seat-certify` 行的权威全文（范围由 Lead 当次界定并记录），不得静默省略 |
 
 ## 1. 核心架构：五大类别
 
