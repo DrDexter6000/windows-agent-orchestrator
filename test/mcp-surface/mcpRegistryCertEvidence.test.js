@@ -18,6 +18,9 @@
 //     违约整次 fail-closed（绝不静默省略被读成"无证据行"）。
 //   - audit11（2026-09-23）：未预标注的自然过期（组件自身时间/夹具资格）经
 //     wire 仍是限制项；lastFullHealthyRunAt 缺席渲染 lastFullHealthy=?。
+//   - audit12 F1（2026-09-23 第二轮）：非 matched 路径（mismatched/undeterminable）
+//     的组件限制汇总经 wire 不丢——三组反例（组件过期+effort 不匹配 / 夹具过期+
+//     legacy 无画像 / 组件过期+组合无记录·读取错误）逐条钉（见 ADR32-MCP-10）。
 //
 // 纯内存传输（InMemoryTransport）+ os.tmpdir() 真实磁盘 fixture + 真实服务
 // （默认 getCertificationEvidenceInventory，与 CLI 同一判断）——read-error
@@ -648,6 +651,104 @@ test("ADR32-MCP-9 (audit11): natural-expiry limitations and lastFullHealthy=? su
     } finally {
       await client.close();
       await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
+// 10. audit12 F1（2026-09-23 第二轮）：非 matched 路径的组件限制汇总经 MCP
+//     投影不丢。复核实证：服务已算出 naturalExpiry，但适用性判定的早返回让
+//     限制汇总只在 matched 尾部执行——三组反例经 wire 各只剩单条限制。修复后
+//     每条路径的限制项都必须同时携带"适用性判定的理由"与"组件侧并列事实"。
+//     （服务层与 CLI 侧钉见
+//     test/registry-roles/certificationEvidenceInventory.test.js audit12 F1 三反例。）
+// =====================================================================
+
+test("ADR32-MCP-10 (audit12 F1): natural-expiry limitations survive on mismatched/undeterminable rows", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-adr32-m10-"));
+  try {
+    // 主 runDir：三席位同账——反例1（effort 不匹配 + 组件过期）/ 反例2（legacy
+    // 无画像 + 夹具过期）/ 反例3a（组合无记录 + 组件过期）。
+    const registryPath = makeRegistry(dir, {
+      seat_effmm: agentEntry(dir, "high"),
+      seat_legacy: agentEntry(dir, "high"),
+      seat_norec: agentEntry(dir, "high"),
+    });
+    const runDir = makeRunDir(dir);
+    writeSummary(runDir, {
+      seat_effmm: matchedWorkerRecord({ executionProfile: { ...matchedWorkerRecord().executionProfile, effort: "medium" } }),
+      seat_legacy: matchedWorkerRecord({ executionProfile: undefined }),
+      // seat_norec: 无该席位记录
+    });
+    // 组件账两条（backend:codex@ 前缀对每个 codex 席位可见）：
+    // ①记录自身时间自然过期（未预标注）②夹具资格自然过期（记录自身时间新鲜）。
+    writeComponentLedger(runDir, {
+      "backend:codex@92209bb#expired": componentRecord({
+        key: "backend:codex@92209bb#expired",
+        lastVerifiedAt: "2026-08-08T00:00:00.000Z",
+      }),
+      "backend:codex@92209bb#v1-abc123def4567890": componentRecord({
+        key: "backend:codex@92209bb#v1-abc123def4567890",
+        fixture: { qualifiedBy: "composition-cert", qualifiedAt: "2026-08-08T00:00:00.000Z" },
+      }),
+    });
+    const server = createWaoMcpServer({ registryPath, runDir });
+    const client = await buildInMemoryClient(server);
+    try {
+      const { parsed } = await callRegistryList(client, { detail: "certificationEvidence" });
+      const byId = new Map(parsed.certificationEvidence.map((r) => [r.id, r]));
+      // 反例1：mismatched 行同时带 effort-mismatch 与 component-expired。
+      const effmm = byId.get("seat_effmm");
+      assert.equal(effmm.applicability, "mismatched");
+      assert.match(effmm.limitations.join(" "), /effort-mismatch: declared=high evidence=medium/);
+      assert.match(effmm.limitations.join(" "), /component-expired:1/,
+        "expiry limitation must not be swallowed by the mismatched early return");
+      // 反例2：undeterminable 行同时带画像未记录与 component-fixture-decayed。
+      const legacy = byId.get("seat_legacy");
+      assert.equal(legacy.applicability, "undeterminable");
+      assert.match(legacy.limitations.join(" "), /execution-profile-not-recorded/);
+      assert.match(legacy.limitations.join(" "), /component-fixture-decayed:1/,
+        "fixture-decayed limitation must not be swallowed by the legacy-profile early return");
+      // 反例3a：undeterminable（无记录）行同时带 no-worker-record 与 component-expired。
+      const norec = byId.get("seat_norec");
+      assert.equal(norec.applicability, "undeterminable");
+      assert.match(norec.limitations.join(" "), /no-worker-record/);
+      assert.match(norec.limitations.join(" "), /component-expired:1/,
+        "expiry limitation must not be swallowed by the no-record early return");
+      assert.ok(!NO_MERGED_GREEN_RE.test(JSON.stringify(parsed)), "no derived overall-usable boolean");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+
+    // 反例3b：组合账读取错误（目录占位 → EISDIR/EPERM，非 ENOENT）+ 组件过期
+    //——读取错误路径同样带上过期限制（wire 层 reliability-ledger:read-error 与
+    // component-expired 并列可辨）。
+    const runDirErr = makeRunDir(dir, "-err");
+    mkdirSync(join(runDirErr, "reliability-summary.json"));
+    writeComponentLedger(runDirErr, {
+      "backend:codex@92209bb#expired": componentRecord({
+        key: "backend:codex@92209bb#expired",
+        lastVerifiedAt: "2026-08-08T00:00:00.000Z",
+      }),
+    });
+    const serverErr = createWaoMcpServer({ registryPath, runDir: runDirErr });
+    const clientErr = await buildInMemoryClient(serverErr);
+    try {
+      const { parsed } = await callRegistryList(clientErr, { detail: "certificationEvidence" });
+      const row = parsed.certificationEvidence[0];
+      assert.equal(row.summaryLedgerState, "read-error");
+      assert.equal(row.applicability, "undeterminable");
+      const limits = row.limitations.join(" ");
+      assert.match(limits, /reliability-ledger:read-error/);
+      assert.match(limits, /component-expired:1/,
+        "read-error path also carries the component expiry limitation");
+      assert.ok(!NO_MERGED_GREEN_RE.test(JSON.stringify(parsed)), "no derived overall-usable boolean");
+    } finally {
+      await clientErr.close();
+      await serverErr.close();
     }
   } finally {
     cleanupDir(dir);

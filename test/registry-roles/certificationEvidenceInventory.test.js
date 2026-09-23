@@ -16,6 +16,11 @@
 //     标注）进限制项（component-expired / component-fixture-decayed，两路不得淡化
 //     成"无"）+ SSOT（classifyComponent）等值钉；②lastFullHealthyRunAt 缺席渲染
 //     lastFullHealthy=?（缺席显示 ?、不整项省略）。
+//   - audit12（2026-09-23 第二轮）两中级缺口回归：①非 matched 路径（mismatched/
+//     undeterminable）不得漏掉组件限制汇总（三组反例逐条钉，CLI 与 MCP 两路——
+//     MCP 侧见 test/mcp-surface/mcpRegistryCertEvidence.test.js ADR32-MCP-10）；
+//     ②owner 期限等号边界（now === ownerValidUntil 仍有效）纳入等值钉——改任一
+//     侧等号语义（> → >=）该钉必红（变异验证过）。
 //
 // 派发门零改动（matchedCertRecord / --require-certified 不动）由
 // test/run-lifecycle/certGateIdentityFreshness.test.js 既有守卫承载；本文件只测
@@ -25,6 +30,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -677,6 +683,287 @@ test("audit11 缺口1 对照: 记录与夹具均新鲜 → 无自然过期限制
   } finally {
     cleanupDir(dir);
   }
+});
+
+// ===== audit12 F1（2026-09-23 第二轮）：非 matched 路径不得漏掉组件限制汇总 =====
+//
+// 复核实证：observeComponentLedgerForSeat 已算出 naturalExpiry（组件观测列可见），
+// 但 assessCertEvidenceApplicability 的早返回让组件限制汇总只在 matched 尾部执行
+// ——下述三组反例各自只剩单条限制（过期限制被吞）。修复 = 汇总抽成
+// componentObservationLimitations 纯函数，在所有返回路径（matched / mismatched /
+// undeterminable）追加。CLI/MCP 两路：本文件下方 audit12 F1 CLI 用例 +
+// test/mcp-surface/mcpRegistryCertEvidence.test.js ADR32-MCP-10。
+
+test("audit12 F1 反例1: 组件过期 + effort 不匹配 → mismatched 且限制项同时含 effort-mismatch 与 component-expired", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-a12-f1a-"));
+  try {
+    const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
+    const runDir = makeRunDir(dir);
+    const profile = matchedWorkerRecord().executionProfile;
+    writeSummary(runDir, {
+      auditor: matchedWorkerRecord({ executionProfile: { ...profile, effort: "medium" } }),
+    });
+    // 组件记录自身时间自然过期（NOW 2026-09-22 前 45+ 天，未预标注）。
+    writeComponentLedger(runDir, {
+      "backend:codex@92209bb#v1-abc123def4567890": componentRecord({
+        lastVerifiedAt: "2026-08-08T00:00:00.000Z",
+      }),
+    });
+    const rows = await runEvidence({ registryPath, runDir });
+    assert.equal(rows[0].applicability, "mismatched");
+    assert.equal(rows[0].componentObserved.backend[0].naturalExpiry, "stale", "服务已算出自然过期");
+    const limits = rows[0].limitationsAndSources.limitations.join(" ");
+    assert.match(limits, /effort-mismatch: declared=high evidence=medium/);
+    assert.match(limits, /component-expired:1/, "过期限制不得被 mismatched 早返回吞掉");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("audit12 F1 反例2: 夹具过期 + legacy 无画像 → undeterminable 且限制项同时含画像未记录与 component-fixture-decayed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-a12-f1b-"));
+  try {
+    const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
+    const runDir = makeRunDir(dir);
+    writeSummary(runDir, { auditor: matchedWorkerRecord({ executionProfile: undefined }) });
+    // 记录自身时间新鲜（2026-09-21），夹具资格自然过期（qualifiedAt 45+ 天前，
+    // 未预标注 advisory.code）。
+    writeComponentLedger(runDir, {
+      "backend:codex@92209bb#v1-abc123def4567890": componentRecord({
+        fixture: { qualifiedBy: "composition-cert", qualifiedAt: "2026-08-08T00:00:00.000Z" },
+      }),
+    });
+    const rows = await runEvidence({ registryPath, runDir });
+    assert.equal(rows[0].applicability, "undeterminable");
+    assert.equal(rows[0].componentObserved.backend[0].naturalExpiry, "fixture-decayed", "服务已算出夹具过期");
+    const limits = rows[0].limitationsAndSources.limitations.join(" ");
+    assert.match(limits, /execution-profile-not-recorded/);
+    assert.match(limits, /component-fixture-decayed:1/, "夹具过期限制不得被 undeterminable 早返回吞掉");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("audit12 F1 反例3: 组件过期 + 组合无记录/读取错误 → undeterminable 且限制项同时含组合来源问题与 component-expired", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-a12-f1c-"));
+  try {
+    const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
+    const expiredLedger = {
+      "backend:codex@92209bb#v1-abc123def4567890": componentRecord({
+        lastVerifiedAt: "2026-08-08T00:00:00.000Z",
+      }),
+    };
+    // (a) 组合账可读但无该席位记录（缺证据 ≠ 匹配）。
+    {
+      const runDir = makeRunDir(dir, "-a");
+      writeSummary(runDir, { coder_hq: matchedWorkerRecord() }); // 只有别的席位
+      writeComponentLedger(runDir, expiredLedger);
+      const rows = await runEvidence({ registryPath, runDir });
+      assert.equal(rows[0].applicability, "undeterminable");
+      const limits = rows[0].limitationsAndSources.limitations.join(" ");
+      assert.match(limits, /no-worker-record/);
+      assert.match(limits, /component-expired:1/, "无记录路径同样带上组件过期限制");
+    }
+    // (b) 组合账读取错误（EACCES，非缺文件非坏 JSON）——组件账照常从磁盘读取。
+    {
+      const runDir = makeRunDir(dir, "-b");
+      writeComponentLedger(runDir, expiredLedger);
+      const readFileFn = async (path, ...rest) => {
+        if (String(path).includes("reliability-summary.json")) {
+          const err = new Error("EACCES: permission denied");
+          err.code = "EACCES";
+          throw err;
+        }
+        return readFile(path, ...rest);
+      };
+      const rows = await runEvidence({ registryPath, runDir, readFileFn });
+      assert.equal(rows[0].combined.state, "read-error");
+      assert.equal(rows[0].applicability, "undeterminable");
+      const limits = rows[0].limitationsAndSources.limitations.join(" ");
+      assert.match(limits, /reliability-ledger:read-error/);
+      assert.match(limits, /component-expired:1/, "读取错误路径同样带上组件过期限制");
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// 剩余三条返回分支（画像不完整 / 内部矛盾 / 身份不匹配）与组件过期组合——
+// WQ-02：改动的行为是"所有限制汇总在所有返回路径执行"，逐返回语句覆盖。
+test("audit12 F1 分支补全: 画像不完整 / 内部矛盾 / 身份不匹配三条返回路径同样带组件过期限制", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-a12-f1e-"));
+  try {
+    const registryPath = makeRegistry(dir, {
+      seat_incomplete: auditorAgent(dir),
+      seat_contradiction: auditorAgent(dir),
+      seat_idmm: auditorAgent(dir),
+    });
+    const runDir = makeRunDir(dir);
+    const profile = matchedWorkerRecord().executionProfile;
+    writeSummary(runDir, {
+      // 返回分支：execution-profile-incomplete（四元组不完整 → undeterminable）。
+      seat_incomplete: { status: "certified", executionProfile: { effort: "high" } },
+      // 返回分支：identity-contradiction（顶层与画像矛盾 → mismatched）。
+      seat_contradiction: matchedWorkerRecord({ executionProfile: { ...profile, modelId: "gpt-6-b-sidian" } }),
+      // 返回分支：identity-mismatch（顶层 backend 漂移 → mismatched）。
+      seat_idmm: matchedWorkerRecord({ backend: "claude-code" }),
+    });
+    writeComponentLedger(runDir, {
+      "backend:codex@92209bb#v1-abc123def4567890": componentRecord({
+        lastVerifiedAt: "2026-08-08T00:00:00.000Z",
+      }),
+    });
+    const rows = await runEvidence({ registryPath, runDir });
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const cases = [
+      ["seat_incomplete", "undeterminable", /execution-profile-incomplete:/],
+      ["seat_contradiction", "mismatched", /identity-contradiction:modelId/],
+      ["seat_idmm", "mismatched", /identity-mismatch:backend/],
+    ];
+    for (const [id, applicability, primary] of cases) {
+      const row = byId.get(id);
+      assert.equal(row.applicability, applicability, id);
+      const limits = row.limitationsAndSources.limitations.join(" ");
+      assert.match(limits, primary, id + " 主限制项在场");
+      assert.match(limits, /component-expired:1/, id + " 返回路径同样带上组件过期限制");
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("audit12 F1 对照: 非 matched 路径 + 组件与夹具均新鲜 → 不新增自然过期限制项（不误报）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-a12-f1d-"));
+  try {
+    const registryPath = makeRegistry(dir, { auditor: auditorAgent(dir) });
+    const runDir = makeRunDir(dir);
+    const profile = matchedWorkerRecord().executionProfile;
+    writeSummary(runDir, {
+      auditor: matchedWorkerRecord({ executionProfile: { ...profile, effort: "medium" } }),
+    });
+    writeComponentLedger(runDir, {
+      "backend:codex@92209bb#v1-abc123def4567890": componentRecord({
+        fixture: { qualifiedBy: "composition-cert", qualifiedAt: "2026-09-21T10:00:00.000Z" },
+      }),
+    });
+    const rows = await runEvidence({ registryPath, runDir });
+    assert.equal(rows[0].applicability, "mismatched");
+    const limits = rows[0].limitationsAndSources.limitations.join(" ");
+    assert.match(limits, /effort-mismatch/);
+    assert.ok(
+      !/component-expired:|component-fixture-decayed:/.test(limits),
+      "新鲜组件在非 matched 路径同样不得误报自然过期",
+    );
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("audit12 F1 CLI: 三组反例经 --cert-evidence 限制列都不得漏自然过期（两路之一）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-a12-f1cli-"));
+  const env = { ...process.env, WAO_SKIP_VERSION_GUARD: "1" };
+  const certEvidence = (registryPath, runDir) => execSync(
+    "node src/cli.js registry list --registry " + registryPath + " --run-dir " + runDir + " --cert-evidence",
+    { cwd: REPO_ROOT, encoding: "utf8", env },
+  );
+  try {
+    // 主 runDir：反例1（effort 不匹配 + 组件过期）/ 反例2（legacy 无画像 + 夹具过期）/
+    // 反例3a（组合无记录 + 组件过期）三个席位同账。
+    const registryPath = makeRegistry(dir, {
+      seat_effmm: auditorAgent(dir),
+      seat_legacy: auditorAgent(dir),
+      seat_norec: auditorAgent(dir),
+    });
+    const runDir = makeRunDir(dir);
+    const profile = matchedWorkerRecord().executionProfile;
+    writeSummary(runDir, {
+      seat_effmm: matchedWorkerRecord({ executionProfile: { ...profile, effort: "medium" } }),
+      seat_legacy: matchedWorkerRecord({ executionProfile: undefined }),
+      // seat_norec: 无记录
+    });
+    writeComponentLedger(runDir, {
+      "backend:codex@92209bb#expired": componentRecord({
+        key: "backend:codex@92209bb#expired",
+        lastVerifiedAt: "2026-08-08T00:00:00.000Z",
+      }),
+      "backend:codex@92209bb#v1-abc123def4567890": componentRecord({
+        fixture: { qualifiedBy: "composition-cert", qualifiedAt: "2026-08-08T00:00:00.000Z" },
+      }),
+    });
+    const out = certEvidence(registryPath, runDir);
+    // 按席位切块（每块以 "cert-evidence <id>" 起），逐席断言两条限制同时在场。
+    const blocks = new Map(
+      out.split(/^cert-evidence /m).slice(1).map((b) => [b.slice(0, b.indexOf("\n")).trim(), b]),
+    );
+    assert.equal(blocks.size, 3);
+    const effmm = blocks.get("seat_effmm");
+    assert.match(effmm, /effort-mismatch: declared=high evidence=medium/);
+    assert.match(effmm, /component-expired:1/, "CLI 反例1：过期限制与 effort-mismatch 并列");
+    const legacy = blocks.get("seat_legacy");
+    assert.match(legacy, /execution-profile-not-recorded/);
+    assert.match(legacy, /component-fixture-decayed:1/, "CLI 反例2：夹具过期与画像未记录并列");
+    const norec = blocks.get("seat_norec");
+    assert.match(norec, /no-worker-record/);
+    assert.match(norec, /component-expired:1/, "CLI 反例3a：过期限制与无记录并列");
+
+    // 反例3b（组合账读取错误 + 组件过期）：目录占位 reliability-summary.json
+    //（EISDIR/EPERM，跨平台非 ENOENT——与 MCP 测试 4(d) 同款真实读取路径）。
+    const runDirErr = join(dir, "runs-err");
+    mkdirSync(runDirErr, { recursive: true });
+    mkdirSync(join(runDirErr, "reliability-summary.json"));
+    writeComponentLedger(runDirErr, {
+      "backend:codex@92209bb#expired": componentRecord({
+        key: "backend:codex@92209bb#expired",
+        lastVerifiedAt: "2026-08-08T00:00:00.000Z",
+      }),
+    });
+    const outErr = certEvidence(registryPath, runDirErr);
+    assert.match(outErr, /证据适用性: undeterminable/);
+    assert.match(outErr, /reliability-ledger:read-error/);
+    assert.match(outErr, /component-expired:1/, "CLI 反例3b：读取错误路径同样带上过期限制");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ===== audit12 F2（2026-09-23 第二轮）：owner 期限等号边界纳入等值钉 =====
+//
+// 复核实证：把 src 与 SSOT 两侧 owner 边界同时 > → >=，上方 audit11 等值钉仍绿
+//（它只测了 strictly-past 的 ownerExpired），但 now === ownerValidUntil 时两侧会
+// 分歧（一侧 normal、一侧 fixture-decayed）。本钉把等号边界钉成绝对语义：
+// ownerValidUntil 含该时刻（有效至并含）——now === ownerValidUntil 双侧都仍
+// normal/null；恰过界（strictly past）双侧都过期。改任一侧（或两侧同时）的等号
+// 语义（> → >=）此钉必红（变异验证记录见交付报告）。
+
+test("audit12 F2 边界等值钉: owner 期限等号边界（now === ownerValidUntil 仍有效）双侧同判", () => {
+  const now = "2026-09-23T00:00:00.000Z";
+  const KEY = "backend:codex@92209bb";
+  const classify = (record) => classifyComponent(
+    { state: "loaded", ledger: { components: { [KEY]: record } } },
+    KEY,
+    { now },
+  ).state;
+  const at = (days) => new Date(Date.parse(now) - days * 86_400_000).toISOString();
+
+  const ownerBoundary = {
+    result: "pass",
+    lastVerifiedAt: at(1),
+    fixture: { qualifiedBy: "owner-declared", ownerValidUntil: at(0) }, // at(0) === now
+  };
+  assert.equal(Date.parse(ownerBoundary.fixture.ownerValidUntil), Date.parse(now),
+    "前置自检：ownerValidUntil 与 now 同毫秒（等号边界本身）");
+  assert.equal(classify(ownerBoundary), "normal",
+    "SSOT：now === ownerValidUntil 仍 normal（严格大于才过期）——SSOT 侧 > 改 >= 此钉必红");
+  assert.equal(componentNaturalExpiry(ownerBoundary, now), null,
+    "src 镜像：now === ownerValidUntil 不判 fixture-decayed——src 侧 > 改 >= 此钉必红");
+
+  // 边界另一侧对照：恰过界 1 天双侧都过期（语义连续：等号内有效、过界即过期）。
+  const ownerJustPast = {
+    ...ownerBoundary,
+    fixture: { qualifiedBy: "owner-declared", ownerValidUntil: at(1) },
+  };
+  assert.equal(classify(ownerJustPast), "fixture-decayed");
+  assert.equal(componentNaturalExpiry(ownerJustPast, now), "fixture-decayed");
 });
 
 // ===== 三条"不得合并成绿"钉（①③在本文件；②在 reliabilityCertification.test.js）=====

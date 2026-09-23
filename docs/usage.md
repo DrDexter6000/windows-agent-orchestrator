@@ -485,10 +485,16 @@ runs 清扫 runbook 同频，且维护时无进行中的 reliability 运行—�
 `component-expired:<n>`；夹具资格自然过期（`qualifiedAt` 超 30 天或
 `ownerValidUntil` 已过、且未预标注）→ `component-fixture-decayed:<n>`。两类未预
 标注的自然过期在 CLI 与 MCP 两路都显示为**限制项**（措辞不淡化成"无"；只是
-advisory 提醒，不改三态、不进门禁）。阈值常量在 src 侧以同值常量镜像
+advisory 提醒，不改三态、不进门禁），且组件限制汇总（来源状态/blocked/advisory/
+自然时效）在**所有适用性路径**（matched / mismatched / undeterminable）都执行——
+非 matched 的早返回不得吞掉组件侧并列事实（audit12 F1 收口，2026-09-23：组件过期
++effort 不匹配、夹具过期+legacy 无画像、组件过期+组合无记录/读取错误三组反例逐条
+回归钉两路）。阈值常量在 src 侧以同值常量镜像
 （layering 冻结 `src/**` 不得 import `scripts/**`），由
 `test/registry-roles/certificationEvidenceInventory.test.js` 的**等值钉**守恒
-（测试同时 import 两侧，常量或边界漂移即红）。**证据适用性是三态闭集
+（测试同时 import 两侧，常量或边界漂移即红）；owner 期限**等号边界**已纳入等值钉
+（audit12 F2 收口，2026-09-23：`now === ownerValidUntil` 仍有效——严格大于才过期，
+双侧同判；改任一侧（或两侧同时）等号语义 `>`→`>=` 该钉必红）。**证据适用性是三态闭集
 `matched / mismatched / undeterminable`，判定 fail-closed（复核 FAIL-A：不复用
 `matchedCertRecord` 的缺字段容忍——那是派发门"旧记录不误杀"的取舍，取证路径缺身份
 就是无法证明）**：记录的 executionProfile 身份四元组（`modelId`/`providerID`/

@@ -729,6 +729,14 @@ function profileConfigMismatchFields(agent, profile) {
  * （audit11 缺口 1：componentNaturalExpiry——SSOT componentLedger.mjs 时间维的
  * 等值镜像，未预标注的自然过期同样点名，绝不淡化成"无"）。
  *
+ * audit12 F1（2026-09-23）：限制项汇总在【所有】返回路径执行。复核实证：本函数
+ * 此前的早返回（ledger 非 ok / 无记录 / 画像缺失或不完整 / 矛盾 / mismatch）都
+ * 提前 return，组件限制汇总只在 matched 尾部执行——"组件过期 + effort 不匹配"
+ * 只剩 effort-mismatch、"夹具过期 + legacy 无画像"只剩画像未记录、"组件过期 +
+ * 组合无记录/读取错误"只剩组合来源问题（observeComponentLedgerForSeat 已算出
+ * naturalExpiry 却被早返回丢弃）。限制项是并列事实列，不是 matched 的装饰：
+ * 组件限制（componentObservationLimitations）现在入口处一次算好，逐路径追加。
+ *
  * @returns {{applicability: "matched"|"mismatched"|"undeterminable", limitations: string[]}}
  */
 export function assessCertEvidenceApplicability({
@@ -738,19 +746,21 @@ export function assessCertEvidenceApplicability({
   componentObservation = null,
   now = new Date().toISOString(),
 } = {}) {
+  // audit12 F1：组件限制汇总与适用性判定正交——先算好，所有返回路径都带上。
+  const componentLimits = componentObservationLimitations(componentObservation);
   const limitations = [];
   if (ledgerState !== "ok") {
     limitations.push(`reliability-ledger:${ledgerState}`);
-    return { applicability: "undeterminable", limitations };
+    return { applicability: "undeterminable", limitations: [...limitations, ...componentLimits] };
   }
   if (!workerRecord || typeof workerRecord !== "object") {
     limitations.push("no-worker-record: 组合层台账无该席位记录（缺证据 ≠ 匹配）");
-    return { applicability: "undeterminable", limitations };
+    return { applicability: "undeterminable", limitations: [...limitations, ...componentLimits] };
   }
   const profile = workerRecord.executionProfile;
   if (!profile || typeof profile !== "object" || Array.isArray(profile)) {
     limitations.push("execution-profile-not-recorded: legacy 证据不表达执行画像（effort 未知），不得当当前画像已验证");
-    return { applicability: "undeterminable", limitations };
+    return { applicability: "undeterminable", limitations: [...limitations, ...componentLimits] };
   }
   // 复核反例①收口：四元组完整性 fail-closed——任一字段缺失/非字符串/空 ⇒
   // undeterminable（绝不能 matched）。
@@ -759,7 +769,7 @@ export function assessCertEvidenceApplicability({
     limitations.push(
       `execution-profile-incomplete:${invalidFields.join("+")}（画像身份四元组不完整：modelId/effort 须非空字符串，providerID/providerKey 须非空字符串或 null=无接入方；缺身份 = 无法证明，绝不能 matched）`,
     );
-    return { applicability: "undeterminable", limitations };
+    return { applicability: "undeterminable", limitations: [...limitations, ...componentLimits] };
   }
   // 复核反例②收口：顶层身份与画像身份矛盾 ⇒ mismatched（内部矛盾不得判 matched）。
   const contradictionFields = profileContradictionFields(workerRecord, profile);
@@ -767,7 +777,7 @@ export function assessCertEvidenceApplicability({
     limitations.push(
       `identity-contradiction:${contradictionFields.join("+")}（executionProfile 与记录顶层身份矛盾——同一记录两处声明打架，不得判 matched）`,
     );
-    return { applicability: "mismatched", limitations };
+    return { applicability: "mismatched", limitations: [...limitations, ...componentLimits] };
   }
   // 四元组（+ 顶层 backend）与当前席位有效配置比对：任一字段不同 ⇒ mismatched。
   const mismatchDims = [];
@@ -787,7 +797,7 @@ export function assessCertEvidenceApplicability({
     );
   }
   if (mismatchDims.length > 0 || profile.effort !== declaredEffort) {
-    return { applicability: "mismatched", limitations };
+    return { applicability: "mismatched", limitations: [...limitations, ...componentLimits] };
   }
   // 身份与 effort 均匹配 → matched。仍并列非门控限制项（matched ≠ 可用）：
   const basis = workerRecord.lastFullHealthyRunAt ?? workerRecord.lastHealthyRunAt ?? null;
@@ -800,38 +810,52 @@ export function assessCertEvidenceApplicability({
       limitations.push(`evidence-age:${ageDays}d>${EVIDENCE_REVIEW_WINDOW_DAYS}d-review-window: 审阅提醒（窗是提醒不是门，也不能替代配置变更后的影响判断）`);
     }
   }
-  if (componentObservation) {
-    if (componentObservation.state !== "ok") {
-      limitations.push(`component-ledger:${componentObservation.state}（组件观测来源不可用，与组合证据分开可辨）`);
-    } else {
-      const blocked = [...componentObservation.backend, ...componentObservation.llm]
-        .filter((r) => r.result === "blocked").length;
-      if (blocked > 0) limitations.push(`component-blocked:${blocked} 条组件记录 blocked（验证时夹具/基础设施不可用）`);
-      const advised = [...componentObservation.backend, ...componentObservation.llm]
-        .filter((r) => r.advisoryCode).map((r) => r.advisoryCode);
-      for (const code of [...new Set(advised)].slice(0, 4)) {
-        limitations.push(`component-advisory:${code}`);
-      }
-      // audit11 缺口 1：自然时效限制项（SSOT componentLedger.mjs 时间维的镜像，
-      // 阈值常量 COMPONENT_RECORD_MAX_AGE_DAYS / COMPONENT_FIXTURE_MAX_AGE_DAYS 与
-      // SSOT 等值钉守恒）。只提醒不改三态——过期是 advisory，绝不是门。
-      const fixtureDecayed = [...componentObservation.backend, ...componentObservation.llm]
-        .filter((r) => r.naturalExpiry === "fixture-decayed").length;
-      if (fixtureDecayed > 0) {
-        limitations.push(
-          `component-fixture-decayed:${fixtureDecayed} 条组件记录夹具资格自然过期（qualifiedAt 超 ${COMPONENT_FIXTURE_MAX_AGE_DAYS} 天新鲜期或 ownerValidUntil 已过，且未预标注——SSOT componentLedger.mjs fixture-decayed；advisory 提醒非门）`,
-        );
-      }
-      const recordExpired = [...componentObservation.backend, ...componentObservation.llm]
-        .filter((r) => r.naturalExpiry === "stale").length;
-      if (recordExpired > 0) {
-        limitations.push(
-          `component-expired:${recordExpired} 条组件记录自然过期（lastVerifiedAt 超 ${COMPONENT_RECORD_MAX_AGE_DAYS} 天新鲜期或缺时间戳不可证新鲜——SSOT componentLedger.mjs stale；advisory 提醒非门）`,
-        );
-      }
-    }
-  }
+  limitations.push(...componentLimits);
   return { applicability: "matched", limitations };
+}
+
+/**
+ * 组件观测限制项汇总（audit12 F1 从 matched 尾部抽出的独立纯函数）：
+ * 组件台账来源状态（missing/unparseable/read-error 与组合证据分开可辨）、
+ * blocked 观测、磁盘预标注 advisory、自然时效（audit11 缺口 1：
+ * componentNaturalExpiry——SSOT componentLedger.mjs 时间维的等值镜像）。
+ * 只提醒不改三态——全部是 advisory，绝不是门。assessCertEvidenceApplicability
+ * 的所有返回路径都必须带上本汇总（限制项是并列事实列，不是 matched 的装饰）。
+ * @private
+ */
+function componentObservationLimitations(componentObservation) {
+  if (!componentObservation) return [];
+  const limitations = [];
+  if (componentObservation.state !== "ok") {
+    limitations.push(`component-ledger:${componentObservation.state}（组件观测来源不可用，与组合证据分开可辨）`);
+    return limitations;
+  }
+  const blocked = [...componentObservation.backend, ...componentObservation.llm]
+    .filter((r) => r.result === "blocked").length;
+  if (blocked > 0) limitations.push(`component-blocked:${blocked} 条组件记录 blocked（验证时夹具/基础设施不可用）`);
+  const advised = [...componentObservation.backend, ...componentObservation.llm]
+    .filter((r) => r.advisoryCode).map((r) => r.advisoryCode);
+  for (const code of [...new Set(advised)].slice(0, 4)) {
+    limitations.push(`component-advisory:${code}`);
+  }
+  // audit11 缺口 1：自然时效限制项（SSOT componentLedger.mjs 时间维的镜像，
+  // 阈值常量 COMPONENT_RECORD_MAX_AGE_DAYS / COMPONENT_FIXTURE_MAX_AGE_DAYS 与
+  // SSOT 等值钉守恒）。只提醒不改三态——过期是 advisory，绝不是门。
+  const fixtureDecayed = [...componentObservation.backend, ...componentObservation.llm]
+    .filter((r) => r.naturalExpiry === "fixture-decayed").length;
+  if (fixtureDecayed > 0) {
+    limitations.push(
+      `component-fixture-decayed:${fixtureDecayed} 条组件记录夹具资格自然过期（qualifiedAt 超 ${COMPONENT_FIXTURE_MAX_AGE_DAYS} 天新鲜期或 ownerValidUntil 已过，且未预标注——SSOT componentLedger.mjs fixture-decayed；advisory 提醒非门）`,
+    );
+  }
+  const recordExpired = [...componentObservation.backend, ...componentObservation.llm]
+    .filter((r) => r.naturalExpiry === "stale").length;
+  if (recordExpired > 0) {
+    limitations.push(
+      `component-expired:${recordExpired} 条组件记录自然过期（lastVerifiedAt 超 ${COMPONENT_RECORD_MAX_AGE_DAYS} 天新鲜期或缺时间戳不可证新鲜——SSOT componentLedger.mjs stale；advisory 提醒非门）`,
+    );
+  }
+  return limitations;
 }
 
 // drillRunIds 值的合法形状（runManager 默认 runId：run_ + 时间戳 + base36 随机；
