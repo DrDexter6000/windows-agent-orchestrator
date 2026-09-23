@@ -3643,20 +3643,25 @@ test("B3-②: 公共项不可跳过——公共约束 [C1]..[C6] 逐条在场（
   assert.ok(/\| action id \| 触发条件 \| 无条件必读单元 \| 条件追加单元 \|/.test(block),
     "§0.1.1 缺目标形状表头（action id | 触发条件 | 无条件必读单元 | 条件追加单元）");
 
-  // —— F1（audit14 中级）：公共约束逐条可判定 ——
-  // 旧实现 block.includes(token) 在整个索引块找词，而条件追加栏含同样措辞
-  // （"零 case / ALL PASS / TD-169"）⇒ 删掉某条公共约束后其它栏的同词掩盖缺席，
-  // 守卫仍绿（变异实测：删第 2 条 190/190 全绿）。改为**行级**判定：每条公共
-  // 约束必须是一行带 `[Cn]` 稳定标识的列表项——逐条断言标识在场、该条的闭集
-  // 词汇钉在**该行**、总数恰为 6；禁止退回整块 substring 搜索作为在场判据。
-  // 词汇钉仍是词钉非散文钉（⑤：条目措辞可变，词汇闭集不可漂）。
-  const constraintLines = new Map(); // [Cn] -> 条目行
-  for (const line of block.split(/\r?\n/)) {
-    const m = line.match(/^\s*\d+\.\s*\[(C\d+)\]/);
-    if (m) constraintLines.set(m[1], line);
-  }
-  assert.equal(constraintLines.size, 6,
-    `§0.1.1 公共约束必须恰为 6 条带 [C1]..[C6] 标识的条目，实际 ${constraintLines.size} 条——删条/加条/摘标识都红`);
+  // —— F1（audit14 中级 + audit15 中级）：公共约束逐条可判定且数量精确 6 ——
+  // audit14 用行级词钉堵住了"其它栏同词掩盖缺席"（block.includes → 行级），
+  // 但守卫仍只数**带 [Cn] 前缀的行**并用 Map 去重 ⇒ ①追加无标识第 7 条被解
+  // 析器直接忽略、②追加重复 [C6] 被 Map 折叠，均 5/5 绿（audit15 复核实证）。
+  // 改为**先独立枚举有序列表的全部条目**——按行首编号语法（`^\d+.`），与是否
+  // 带标识无关（§0.1.1 块内唯一有序列表即公共约束列表：表行以 | 起头、条件列
+  // 用 ①..⑤，行首编号不会误匹配）——再断言：条目数恰 6、每条恰带一个 [Cn]
+  // 标识、标识集合恰为 [C1]..[C6]。新增（带标识/无标识/重复/跳号）一律红；
+  // 词钉仍是词钉非散文钉（⑤：条目措辞可变，词汇闭集不可漂）。
+  const entries = block.split(/\r?\n/).filter((l) => /^\s*\d+\.\s+/.test(l));
+  assert.equal(entries.length, 6,
+    `§0.1.1 公共约束有序列表必须恰为 6 个条目（按行首编号独立枚举，与是否带 [Cn] 无关），实际 ${entries.length} 个——删条/加条（含无标识/重复标识条目）都红`);
+  const entryIds = entries.map((line, i) => {
+    const ids = [...line.matchAll(/\[(C\d+)\]/g)].map((m) => m[1]);
+    assert.equal(ids.length, 1,
+      `§0.1.1 公共约束第 ${i + 1} 条必须恰带一个 [Cn] 稳定标识（实际 ${ids.length} 个）——无标识条目不可判定，摘标识/多标识都红`);
+    return ids[0];
+  });
+  const constraintLines = new Map(entryIds.map((id, i) => [id, entries[i]])); // [Cn] -> 条目行
   const CONSTRAINT_PINS = [
     ["C1", ["conditional", "certificationScope", "全量重跑"]],        // delta 全绿 ≠ certified
     ["C2", ["零 case", "ALL PASS", "TD-169"]],                        // 零目标假绿
@@ -3673,14 +3678,18 @@ test("B3-②: 公共项不可跳过——公共约束 [C1]..[C6] 逐条在场（
         `§0.1.1 公共约束 [${id}] 条目行缺闭集词汇 ${t}（词钉钉在条目行内，不钉整块）`);
     }
   }
-  assert.deepEqual([...constraintLines.keys()].sort(), CONSTRAINT_PINS.map(([id]) => id).sort(),
-    "§0.1.1 公共约束标识集合必须恰为 [C1]..[C6]（多标/跳号/换号都红）");
+  assert.deepEqual([...entryIds].sort(), CONSTRAINT_PINS.map(([id]) => id).sort(),
+    "§0.1.1 公共约束标识集合必须恰为 [C1]..[C6]（重复/跳号/换号都红）");
 
-  // —— F2（audit14 中级）：7 个无条件单元逐个钉住 ——
-  // 旧实现只逐项锁 delta 规程 / 五态 / @certification.matrix 三锚，ADR §1 / §2 /
-  // §8 与 Lane 节共 4 个单元可被静默删除而全绿（变异实测：删 ADR §1 单元后
-  // 190/190 全绿）。现给每个无条件单元一个 `[Un]` 稳定标识，逐个断言
-  // 标识 ↔ (文件 + 锚前缀) 一一对应、总数恰为 7；锚的可解析性仍由 B3-① 负责。
+  // —— F2（audit14 中级 + audit15 中级）：7 个无条件单元逐个钉住且数量精确 7 ——
+  // audit14 给每个无条件单元挂 `[Un]` 稳定标识并断言 marked.length == 7，但
+  // marked 的正则**只统计紧邻 [Un] 的锚** ⇒ 在无条件列追加**无标识**的第 8 个
+  // 阅读单元（audit15 复核实证：追加无标识的 docs/02-architecture.md §4.1 状态
+  // 机）后实际 8 个单元仍 5/5 绿。改为**按锚语法枚举该列全部阅读单元**（同
+  // parseReadingUnits 的切分语义：反引号 token 且含 " §"/" @"，与是否带标识
+  // 无关），再断言：单元数恰 7、每单元 token 紧邻前置恰一个 [Un] 标识、标识
+  // 集合恰为 [U1]..[U7]。无标识追加/删单元/重复/跳号都红；锚的可解析性仍由
+  // B3-① 负责。
   const UNCONDITIONAL_UNITS = [
     ["U1", "docs/usage.md", "delta 认证规程"],
     ["U2", "docs/usage.md", "认证检查结果五态"],
@@ -3691,20 +3700,30 @@ test("B3-②: 公共项不可跳过——公共约束 [C1]..[C6] 逐条在场（
     ["U7", "config/agents.example.json", "certification.matrix"],
   ];
   const cells = seatCertifyIndexRow();
-  const marked = [...cells[2].matchAll(/\[(U\d+)\]\s*`([^`]+)`/g)].map((m) => [m[1], m[2]]);
-  assert.equal(marked.length, UNCONDITIONAL_UNITS.length,
-    `§0.1.1 无条件必读单元必须恰为 7 个带 [U1]..[U7] 标识的锚，实际 ${marked.length} 个——删单元/摘标识都红`);
+  // 按锚语法枚举**全部**阅读单元（不只数带 [Un] 者）：反引号 token 含 " §"/" @"
+  // 即单元；纯文件名 token（无锚）不是阅读单位（回退集由 §0.1 主表承载）。
+  const units = [];
+  for (const m of cells[2].matchAll(/`([^`]+)`/g)) {
+    const token = m[1];
+    if (!(token.includes(" §") || token.includes(" @"))) continue;
+    const idm = cells[2].slice(0, m.index).match(/\[(U\d+)\]\s*$/);
+    assert.ok(idm !== null,
+      `§0.1.1 无条件必读单元缺 [Un] 稳定标识：\`${token}\`（单元必须逐个带标识，不得无标识追加）`);
+    units.push({ id: idm[1], token });
+  }
+  assert.equal(units.length, UNCONDITIONAL_UNITS.length,
+    `§0.1.1 无条件必读单元必须恰为 7 个（按锚语法枚举全部单元，与是否带标识无关），实际 ${units.length} 个——删单元/无标识追加/多标追加都红`);
   for (const [id, rel, anchorPrefix] of UNCONDITIONAL_UNITS) {
-    const hits = marked.filter(([mid]) => mid === id);
+    const hits = units.filter((u) => u.id === id);
     assert.equal(hits.length, 1,
       `§0.1.1 无条件必读单元 [${id}]（${rel} §${anchorPrefix}…）标识必须恰出现一次（公共项不可跳过/不可删）`);
-    const [unit] = parseReadingUnits(`\`${hits[0][1]}\``);
-    assert.ok(unit, `§0.1.1 [${id}] 标识未挂在阅读单位锚上（token：${hits[0][1]}）`);
+    const [unit] = parseReadingUnits(`\`${hits[0].token}\``);
+    assert.ok(unit, `§0.1.1 [${id}] 标识未挂在阅读单位锚上（token：${hits[0].token}）`);
     assert.equal(unit.rel, rel, `§0.1.1 [${id}] 无条件单元文件漂移：期望 ${rel}，实际 ${unit.rel}`);
     assert.ok(unit.anchor.startsWith(anchorPrefix),
       `§0.1.1 [${id}] 无条件单元锚漂移：期望前缀 "${anchorPrefix}"，实际 "${unit.anchor}"`);
   }
-  assert.deepEqual(marked.map(([id]) => id).sort(), UNCONDITIONAL_UNITS.map(([id]) => id).sort(),
+  assert.deepEqual(units.map((u) => u.id).sort(), UNCONDITIONAL_UNITS.map(([id]) => id).sort(),
     "§0.1.1 无条件单元标识集合必须恰为 [U1]..[U7]（多标/跳号/换号都红）");
 });
 
