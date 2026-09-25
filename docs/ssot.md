@@ -24,26 +24,7 @@ WAO 曾在 2026-06-16 做过一次 SSOT 审计（`docs/archive/docs-ssot-audit.m
 | `user-troubleshoot` | 第三方 / 用户 agent 排障 | `docs/troubleshooting.md`、`wao doctor` 输出 |
 | `user-daily` | Lead / 用户 agent 日常使用 | `SKILL.md`、`docs/usage.md` |
 | `harness-certify` | 给某 harness / LLM 做组件层单独验证（backend conformant / llm verified） | `docs/surface/certification.md`（生成层：backend 能力/配置表达力事实与台账指针，TD-162；npm run gen:certification 再生成）、`docs/usage.md`（认证检查结果五态与能力轴分层）、`.wao/decisions/0032-两层验证与认证.md`、`docs/tech-debt.md`（在册限制须随结论一并标注，如 TD-182） |
-| `seat-certify` | 给某席位装配做组合层认证（certified / conditional / draft-only） | 阅读单位 = §0.1.1 索引（短公共约束 + 合同节锚 + 显式依赖；B3 试点）；未映射触发条件回退本格权威全文（范围由 Lead 当次界定）：`docs/usage.md`、`.wao/decisions/0032-两层验证与认证.md`、`docs/team-roles.md`、`config/agents.example.json`、`docs/tech-debt.md` |
-
-#### 0.1.1 `seat-certify` 阅读单位索引（B3 试点：短公共约束 + 相关合同节及其显式依赖）
-
-> 试点范围：仅本面；其余行动面阅读单位不变（文件级）。多面命中仍取**并集**。本索引只回答"为这件事哪些合同必须知道"，不回答写时归属；**不得**借精简后的本面绕过 `contract-edit`——写认证合同本身（状态闭集 / 门语义 / 五态 / 事件合同）仍读 `contract-edit` 全集。
-> 锚语法（稳定标识，节内措辞可变）：`路径 §节名` = markdown 节标题锚（按节名前缀唯一解析）；`路径 @标识` = 结构化锚（`@TD-xxx` = tech-debt 登记行，`@键.路径` = JSON 键）。锚缺失或歧义必须报错，不得当空集静默跳过（守卫：`test/isolation-infra/docs-consistency.test.js` B3 块，TD-187）。
-> 条目标识（守卫稳定锚，audit14）：公共约束条头的 `[C1]..[C6]` 与无条件单元条头的 `[U1]..[U7]` 是 B3-② 逐条在场的判定锚（数量恰为 6 / 7）；条目散文措辞可变，标识与数量不可漂。
-
-**公共约束（无条件项；任何 seat-certify 行动前必读，跳过即错）**：
-
-1. [C1] 组合层状态闭集 `certified` / `conditional`；delta 子集全绿只产生 `conditional` + `certificationScope:"delta"`，升 `certified` 的唯一路径是全量重跑。
-2. [C2] 认证证据是实跑台账 `runs/reliability-summary.json`；零 case 或只有 skip 的运行不得报 `ALL PASS`（ADR-0032 §7 前置根修；TD-169 教训）。
-3. [C3] 检查结果五态 `pass / fail / not-applicable / blocked / inconclusive`；N/A 必须带原因且不贡献能力绿（ADR-0032 §8）。
-4. [C4] 认证是 advisory evidence 不是 permission gate；唯一 opt-in 门 = 显式 `--require-certified`（身份四元组 + `lastFullHealthyRunAt` 新鲜度，fail-closed）。
-5. [C5] 组件层绿不推出组合层绿；两层状态词汇闭集不得互换（ADR-0032 §1）。
-6. [C6] 认证结论必须随附在册限制（见条件追加单元的 TD 行），不得声称超出证据的结论。
-
-| action id | 触发条件 | 无条件必读单元 | 条件追加单元 |
-|---|---|---|---|
-| `seat-certify` | 给某席位装配（harness × 模型 × 角色合同）跑组合层认证，或判读 / 升级其认证结果 | [U1] `docs/usage.md §delta 认证规程`、[U2] `docs/usage.md §认证检查结果五态与能力轴分层`、[U3] `.wao/decisions/0032-两层验证与认证.md §1. 词汇与状态闭集`、[U4] `.wao/decisions/0032-两层验证与认证.md §2. 两层各测什么`、[U5] `.wao/decisions/0032-两层验证与认证.md §8. 五态检查结果`、[U6] `docs/team-roles.md §Lane：角色多通道`、[U7] `config/agents.example.json @certification.matrix` | ①判读 `adversarialEscape`（越界写对抗）→ 显式依赖连读：`docs/02-architecture.md §4.6 Coder Delivery Contract`（`run.isolation_violation(code=workdir_escape)` 事件合同与 packaging 前转 failed）＋`docs/02-architecture.md §4.1 状态机`（终态判定）；②判读 `conditional` / wire `certificationReasonCode:null` → `docs/tech-debt.md @TD-133`；③分诊"零 case / 全 skip 仍 ALL PASS"或核对执行计数 → `docs/tech-debt.md @TD-169`；④席位配置（model / reasoning / provider）变更后判读旧证据适用性 → `docs/tech-debt.md @TD-186`＋连读 `docs/usage.md §接入新模型`（当前启动行为约束，含 2026-09-19 claude-code `--bare --strict-mcp-config`）——判读旧证据必须先判定其适用于哪个 backend／lane，不得把某 backend 的限制套到别的席位；⑤讨论 `--require-certified` 是否放行 → 连读完整门合同 `docs/usage.md §MCP run_dispatch`（身份四元组＋`lastFullHealthyRunAt` 时效窗口＋legacy 回落＋Owner `manualOverride:"cleared"` 旁路＋MCP `requireCertified:false` 差异——不得只截新鲜度分支）；⑥未映射触发条件 → 回退读 §0.1 主表 `seat-certify` 行的权威全文（范围由 Lead 当次界定并记录），不得静默省略 |
+| `seat-certify` | 给某席位装配做组合层认证（certified / conditional / draft-only） | 无条件全文必读：`docs/usage.md`、`.wao/decisions/0032-两层验证与认证.md`、`docs/team-roles.md`、`config/agents.example.json`、`docs/tech-debt.md`。五份不得收窄，也不得按 Lead 裁量收窄（含不得以节选或索引替代）；多行动面命中取并集；正文显式依赖继续跟进；读取输出被截断必须补齐。追加依赖（非独立入口、非节选替代）：判读 adversarialEscape（越界写对抗）时连读 docs/02-architecture.md §4.6 Coder Delivery Contract（containment 事件合同）与 §4.1 状态机（终态判定） |
 
 ## 1. 核心架构：五大类别
 
@@ -151,6 +132,6 @@ SSOT 规则用 `test/isolation-infra/docs-consistency.test.js` 固化。守卫�
 - transcript 事件 spec 在 `docs/02-architecture.md` §3.2 维护，`docs/usage.md` §三是受行集守卫的人读投影。
 - 技术债编号必须能在 `docs/tech-debt.md` 查到。
 - 历史审计和 phase plan 必须在 `docs/archive/`，不能回到 docs 根目录充当活文档。
-- seat-certify 阅读单位索引（§0.1.1，B3 试点）：节锚 / 结构化锚可解析且唯一、公共约束与无条件单元在场、跨模块依赖（adversarialEscape → architecture containment 合同 + 状态机）显式连读、未映射触发回退权威全文不静默省略。
+- seat-certify 文件级入口（TD-187 索引试点已于 2026-09-25 回退，不保留可选索引路线）：§0.1 主表行无条件全文必读恰五文件；多行动面并集、正文显式依赖跟进、截断补读三义务在场；adversarialEscape → architecture §4.6/§4.1 为追加依赖指针（非独立入口）；恢复索引 / 节选替代全文 / 裁量收窄必红。撤下前 §0.1.1 原文在测试文件内冻结为历史输入（不是阅读入口），原索引守卫族与反例固化继续实际执行。
 
 历史审计矩阵不在本文维护；需要查当时发现和收束过程时读 `docs/archive/docs-ssot-audit.md`。当前项目状态以 `docs/roadmap.md`、`docs/tech-debt.md`、`docs/02-architecture.md` 和代码/测试为准。
