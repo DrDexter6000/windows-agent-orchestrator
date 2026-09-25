@@ -4114,10 +4114,22 @@ test("B3-⑦: 无条件全文与三义务在场——条件化/节选措辞、�
   const excerptWording = row.replace("无条件全文必读", "无条件节选必读");
   assert.notEqual(excerptWording, row, "夹具失效：节选措辞变异未生效");
   assert.throws(() => assertFileLevelSeatRow(excerptWording), /"全文"/, "节选措辞不得替代全文");
-  // 负对照——恢复索引入口（试点期路由形状拼回）。
-  const indexRoute = row.replace("无条件全文必读：", "阅读单位 = §0.1.1 索引（短公共约束 + 合同节锚）；未映射回退全文：");
-  assert.notEqual(indexRoute, row, "夹具失效：索引路由变异未生效");
-  assert.throws(() => assertFileLevelSeatRow(indexRoute), /§0\.1\.1|阅读单位/, "恢复索引入口必须红（试点已回退，不留可选索引路线）");
+  // 负对照——恢复索引入口（试点期路由形状拼回）。audit run_20260925221335498wiqpnc：
+  // 旧版单条变异靠"替换"删掉了无条件/全文/必读 token，先在 ⑦a token 检查红，其错误
+  // 消息又含"阅读单位"碰巧匹配宽泛正则——真撤掉 ⑦b 索引禁用断言后测试仍绿（假绿）。
+  // 修正纪律：两条变异都只"添加"被禁止的路由，无条件/全文/必读、五文件闭集与三义务
+  // 原样保留，使唯一能红的恰是对应索引禁用断言；两条形状互相隔离（各自只含一种被禁
+  // 形状，不互相遮挡），错误正则精确指向该断言自身的错误消息。
+  // 形状一：仅拼回 §0.1.1 索引锚（不含"阅读单位 ="措辞，不遮挡形状二的断言）。
+  const indexAnchorRoute = row.replace("无条件全文必读：", "无条件全文必读（可选索引路线：§0.1.1 阅读索引）；");
+  assert.notEqual(indexAnchorRoute, row, "夹具失效：§0.1.1 索引锚变异未生效");
+  assert.throws(() => assertFileLevelSeatRow(indexAnchorRoute), /不得再路由 §0\.1\.1/,
+    "拼回 §0.1.1 索引锚必须红（试点已回退，不留可选索引路线；错误必须来自 §0.1.1 索引禁用断言）");
+  // 形状二：仅拼回『阅读单位 = 』收窄声明（不含 §0.1.1 字样，不遮挡形状一的断言）。
+  const readingUnitRoute = row.replace("无条件全文必读：", "无条件全文必读（阅读单位 = 短公共约束索引可选）；");
+  assert.notEqual(readingUnitRoute, row, "夹具失效：阅读单位收窄变异未生效");
+  assert.throws(() => assertFileLevelSeatRow(readingUnitRoute), /不得再声明『阅读单位/,
+    "拼回『阅读单位 = 』收窄声明必须红（文件级入口唯一；错误必须来自阅读单位禁用断言）");
   // 负对照——Lead 裁量收窄回潮（试点期"范围由 Lead 当次界定"形状）。
   const discretion = row.replace("也不得按 Lead 裁量收窄", "范围可由 Lead 当次界定收窄");
   assert.notEqual(discretion, row, "夹具失效：裁量收窄变异未生效");
