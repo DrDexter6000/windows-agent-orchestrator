@@ -3570,11 +3570,15 @@ function parseReadingUnits(cell) {
 }
 
 /** 在 markdown 文本中按节名**前缀**解析节锚：0 命中或歧义都抛红（①：不得当空集）。
- * 前缀匹配同时是 ⑤ 的实现：节名后的括注（日期 / ADR 号等）措辞可变、不冻结。 */
+ * 前缀匹配同时是 ⑤ 的实现：节名后的括注（日期 / ADR 号等）措辞可变、不冻结。
+ * TD-187 索引路由最小修复（audit24）：标题正文先剥 code span 反引号再比对前缀——
+ * 本仓节标题惯用代码体（如 docs/usage.md 门合同所在节 `### MCP \`run_dispatch\`（…）`），
+ * 字面 startsWith 对任何含反引号的标题前缀都寻址不到。剥反引号只扩大可寻址面；
+ * 0 命中 / 歧义仍必红，守卫不放宽（对照夹具见 B3-① 的 code-span 对照）。 */
 function resolveHeadingIn(text, rel, anchor) {
   const hits = text.split(/\r?\n/).filter((l) => {
     const m = l.match(/^#{1,6}\s+(.*)$/);
-    return m !== null && m[1].startsWith(anchor);
+    return m !== null && m[1].replace(/`/g, "").startsWith(anchor);
   });
   assert.ok(hits.length > 0,
     `${rel} 节锚 §${anchor} 解析 0 命中——节被改名/删除，须同步 §0.1.1 索引（断锚不得当空集）`);
@@ -3740,6 +3744,12 @@ test("B3-①: seat-certify 索引阅读单位地址全部有效（文件存在 +
   const FX = "### delta 认证规程（lane 架构，ADR-0025 批次 3）\n正文\n";
   assert.throws(() => resolveHeadingIn(FX, "fixture.md", "不存在的节"), /0 命中/);
   assert.throws(() => resolveHeadingIn("### 甲节（一）\n### 甲节（二）\n", "fixture.md", "甲节"), /歧义/);
+  // TD-187（audit24）code-span 对照：剥反引号后 code-span 标题可寻址且仍须唯一；
+  // 仅反引号差异的标题对同一锚仍判歧义（剥反引号不放宽守卫的回归钉）。
+  assert.doesNotThrow(() =>
+    resolveHeadingIn("### MCP `run_dispatch`（合成夹具）\n", "fixture.md", "MCP run_dispatch"));
+  assert.throws(() =>
+    resolveHeadingIn("### `甲`节\n### 甲节\n", "fixture.md", "甲节"), /歧义/);
   // 结构化锚负对照：TD 行 0 命中必须红。
   assert.throws(
     () => assertStructuredAnchorResolves(
