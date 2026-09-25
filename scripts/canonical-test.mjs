@@ -135,6 +135,12 @@
 //   - Writes a bounded test-results.json that keeps every failure attributable to
 //     BOTH its resource category AND its execution wave: each file records
 //     resourceCategory + executionWave; each wave records timing/counts/exit.
+//     TD-181 (a, 2026-09-25): every non-pass firstRound.failures[] entry ALSO
+//     retains the wave's own bounded failure content (failing sub-test names,
+//     assertion/error text, stacks — explicit truncation markers; collection
+//     failures recorded as unknown, never green), and each wave carries an
+//     advisory `observation` annotation (start time / concurrency / gate /
+//     concurrent-suite marker / node-process count with sampling time).
 //
 // Performance: one Node process per WAVE (≈5 starts) instead of one per file
 // (≈161 starts) or one per category (6 starts with serial long poles). In-wave
@@ -525,6 +531,145 @@ export function realListRunsDir(runsDir) {
   return (sub = "") => list(sub ? join(runsDir, sub) : runsDir);
 }
 
+// ── TD-181 (a): first-round failure-detail retention (bounded, additive) ─────
+// The wave child's structured report carries the ONLY copy of a first-round
+// failure's content (failing sub-test names, assertion/error text, stacks).
+// runWave() reads it but the aggregate used to keep only per-file STATUS, and
+// isolationTail comes from the RERUN — it can never reconstruct what the FIRST
+// round printed. These helpers retain a BOUNDED copy of that content for every
+// non-pass file, with explicit truncation markers; any collection failure is
+// recorded honestly as { status: "unknown", reason } — an observation failure
+// must never manufacture a green (or a fabricated detail).
+export const FAILURE_DETAIL_TEST_CAP = 5;   // max failing sub-tests kept per file
+export const FAILURE_DETAIL_TEXT_CAP = 1000; // max chars per retained string field
+export const FAILURE_DETAIL_CHAR_BUDGET = 8000; // max serialized chars per file
+
+export function unknownFailureDetail(reason) {
+  return { status: "unknown", reason: String(reason) };
+}
+
+// Bounded string: null for non-strings; over-cap strings are cut with an
+// EXPLICIT truncation marker carrying the shown/total counts.
+export function boundDetailString(value, cap = FAILURE_DETAIL_TEXT_CAP) {
+  if (typeof value !== "string") return null;
+  if (value.length <= cap) return value;
+  return value.slice(0, cap) + `…[TRUNCATED: first ${cap} of ${value.length} chars]`;
+}
+
+// Stale-report residue detection (shape 5 of the TD-181 collection contract).
+// The reporter stamps report.timestamp at flush time; a report that predates
+// the wave's own start can only be residue (a skipped/failed pre-spawn delete,
+// a leftover from an earlier run) — its content is NOT this wave's and must
+// never be read as this wave's result (including as a green). Only a parseable
+// timestamp that provably precedes the wave start flags stale; a missing or
+// unparseable timestamp keeps the existing validation semantics untouched.
+export function staleReportInfo(report, waveStartMs) {
+  if (!report || typeof report !== "object") return { stale: false };
+  const ts = report.timestamp;
+  if (typeof ts !== "string" || !ts) return { stale: false };
+  const t = Date.parse(ts);
+  if (!Number.isFinite(t)) return { stale: false };
+  if (t < waveStartMs) return { stale: true, timestamp: ts };
+  return { stale: false };
+}
+
+// Extract the bounded first-round failure detail for ONE file from a VALID
+// wave report. Defensive by contract: any surprise (missing suite, weird
+// shapes, a throw) degrades to { status: "unknown", reason } — never a crash,
+// never a fabricated pass. fail-status suites win over pass duplicates,
+// mirroring mapReportToFiles.
+export function firstRoundFailureDetail(report, rel) {
+  try {
+    let suite = null;
+    const suites = report && Array.isArray(report.suites) ? report.suites : [];
+    for (const s of suites) {
+      if (!s || typeof s.name !== "string") continue;
+      if (suiteRelToManifest(s.name) !== rel) continue;
+      if (!suite || s.status === "fail") suite = s;
+    }
+    if (!suite) return unknownFailureDetail("no suite for this file in the wave report");
+    if (suite.status !== "fail") return unknownFailureDetail(`suite status '${suite.status}' — no failure content to retain`);
+    const allFailing = (Array.isArray(suite.tests) ? suite.tests : [])
+      .filter((t) => t && typeof t === "object" && t.status === "fail");
+    const detail = {
+      status: "collected",
+      source: "firstRoundWaveReport",
+      failingTestsTotal: allFailing.length,
+      failingTestsDropped: Math.max(0, allFailing.length - FAILURE_DETAIL_TEST_CAP),
+      failingTests: [],
+      fileFailure: null,
+    };
+    for (const t of allFailing.slice(0, FAILURE_DETAIL_TEST_CAP)) {
+      const e = t.error && typeof t.error === "object" ? t.error : {};
+      detail.failingTests.push({
+        name: boundDetailString(t.name) ?? "(test name unavailable)",
+        operator: boundDetailString(e.operator),
+        expected: boundDetailString(e.expected),
+        actual: boundDetailString(e.actual),
+        diff: boundDetailString(e.diff),
+        stack: boundDetailString(e.stack),
+      });
+    }
+    if (suite.fileFailure && typeof suite.fileFailure === "object") {
+      detail.fileFailure = {
+        message: boundDetailString(suite.fileFailure.message) ?? "(no message)",
+        stack: boundDetailString(suite.fileFailure.stack),
+      };
+    }
+    // Per-file char budget: drop trailing failing tests (counted as dropped)
+    // until the serialized detail fits; one capped test always fits by
+    // construction (6 fields × (cap + marker) < budget).
+    while (detail.failingTests.length > 1 && JSON.stringify(detail).length > FAILURE_DETAIL_CHAR_BUDGET) {
+      detail.failingTests.pop();
+      detail.failingTestsDropped += 1;
+    }
+    return detail;
+  } catch (err) {
+    return unknownFailureDetail(`collection error: ${err && err.message ? err.message : String(err)}`);
+  }
+}
+
+// ── TD-181 (a): per-wave SECONDARY observations (advisory annotations) ───────
+// One bounded annotation per wave: start time, the wave's configured
+// concurrency, the machine verification-gate state, the advisory inflight
+// marker (another full suite), and a node-process count WITH its sampling
+// timestamp. Every observation is advisory — it NEVER influences the verdict —
+// and every collection failure (or unwired observer) is recorded as an honest
+// unknown, mirroring the failure-detail discipline. These live in their own
+// report field so they can never crowd out first-round failure content.
+export async function collectWaveObservation(spec, observers) {
+  const startedAt = new Date().toISOString();
+  const obs = observers && typeof observers === "object" ? observers : {};
+  const wrap = async (label, fn) => {
+    if (typeof fn !== "function") return { state: "unknown", reason: `${label} observer not provided` };
+    try {
+      const v = await fn(spec);
+      return v ?? { state: "unknown", reason: `${label} observer returned nothing` };
+    } catch (err) {
+      return { state: "unknown", reason: `${label} observer failed: ${err && err.message ? err.message : String(err)}` };
+    }
+  };
+  let nodeProcessCount = { count: null, sampledAt: startedAt, reason: "nodeProcessCount observer not provided" };
+  if (typeof obs.nodeProcessCount === "function") {
+    try {
+      const v = await obs.nodeProcessCount(spec);
+      nodeProcessCount = v && Number.isFinite(v.count)
+        ? { count: v.count, sampledAt: typeof v.sampledAt === "string" && v.sampledAt ? v.sampledAt : startedAt }
+        : { count: null, sampledAt: startedAt, reason: v && v.reason ? String(v.reason) : "observer returned no count" };
+    } catch (err) {
+      nodeProcessCount = { count: null, sampledAt: startedAt, reason: `nodeProcessCount observer failed: ${err && err.message ? err.message : String(err)}` };
+    }
+  }
+  return {
+    startedAt,
+    waveConcurrency: spec && Number.isInteger(spec.concurrency) ? spec.concurrency : null,
+    advisory: true, // annotations only — never verdict-affecting
+    verificationGate: await wrap("verificationGate", obs.verificationGate),
+    concurrentFullSuite: await wrap("concurrentFullSuite", obs.concurrentFullSuite),
+    nodeProcessCount,
+  };
+}
+
 // ── R8-C C-5: post-verdict exit decision (pure, unit-tested) ──────────────────
 // main()'s two guard red-light branches had zero automated coverage ("verdict=
 // pass cannot be pressed green" was human-evidence-only). The decision is
@@ -705,10 +850,11 @@ export async function runWave({ name, files, concurrency, reporterArg, runChild,
   try {
     await deleteReport();
   } catch (err) {
+    const reason = `delete report failed: ${err && err.message ? err.message : String(err)}`;
     return {
       name, durationMs: Date.now() - start, exitCode: null,
-      groupError: `delete report failed: ${err && err.message ? err.message : String(err)}`,
-      results: files.map((f) => ({ path: f.path, status: "crash", resourceCategory: f.resourceCategory, executionWave: name, durationMs: null })),
+      groupError: reason,
+      results: files.map((f) => ({ path: f.path, status: "crash", resourceCategory: f.resourceCategory, executionWave: name, durationMs: null, failureDetail: unknownFailureDetail(reason) })),
     };
   }
 
@@ -726,10 +872,11 @@ export async function runWave({ name, files, concurrency, reporterArg, runChild,
     // name the wave; existing injected fakes ignore it.
     child = await runChild(argv, { waveName: name });
   } catch (err) {
+    const reason = `spawn error: ${err && err.message ? err.message : String(err)}`;
     return {
       name, durationMs: Date.now() - start, exitCode: null,
-      groupError: `spawn error: ${err && err.message ? err.message : String(err)}`,
-      results: files.map((f) => ({ path: f.path, status: "crash", resourceCategory: f.resourceCategory, executionWave: name, durationMs: null })),
+      groupError: reason,
+      results: files.map((f) => ({ path: f.path, status: "crash", resourceCategory: f.resourceCategory, executionWave: name, durationMs: null, failureDetail: unknownFailureDetail(reason) })),
     };
   }
 
@@ -744,19 +891,55 @@ export async function runWave({ name, files, concurrency, reporterArg, runChild,
       : `wave '${name}' ran ${elapsedMs}ms (wall-clock limit ${limitMs}ms) — watchdog backstop fired; cleanup unconfirmed (pid ${pid} still alive after taskkill + ${probes} probe(s)); subsequent waves will NOT start`;
     return {
       name, durationMs: Date.now() - start, exitCode: child.exitCode ?? null, groupError,
-      results: files.map((f) => ({ path: f.path, status: "crash", crashReason: "watchdog_timeout", resourceCategory: f.resourceCategory, executionWave: name, durationMs: null })),
+      results: files.map((f) => ({ path: f.path, status: "crash", crashReason: "watchdog_timeout", resourceCategory: f.resourceCategory, executionWave: name, durationMs: null, failureDetail: unknownFailureDetail("watchdog_timeout — wave killed by the backstop; no first-round report content can be trusted") })),
       watchdog: child.watchdog,
       childStderr: child.stderr, childStdout: child.stdout,
       abortSuite: !confirmed,
     };
   }
 
-  const report = await readReport();
-  const { reportValid, reportError, perFile, perFileDurationMs } = mapReportToFiles(report, expectedRels);
+  // TD-181 (a) shape "collection error": a readReport that THROWS is a failed
+  // observation, not a silent zero-failure success. The wave fails CLOSED
+  // (every file crash + groupError; later waves still run) and the detail is
+  // an honest unknown — an observation failure must never manufacture green.
+  let report;
+  try {
+    report = await readReport();
+  } catch (err) {
+    const reason = `read report failed: ${err && err.message ? err.message : String(err)}`;
+    return {
+      name, durationMs: Date.now() - start, exitCode: child.exitCode ?? null,
+      groupError: reason,
+      results: files.map((f) => ({ path: f.path, status: "crash", resourceCategory: f.resourceCategory, executionWave: name, durationMs: null, failureDetail: unknownFailureDetail(reason) })),
+      childStderr: child.stderr, childStdout: child.stdout,
+    };
+  }
+
+  // TD-181 (a) shape "stale report residue": a report whose flush timestamp
+  // provably predates this wave's start is residue, never this wave's result —
+  // not even when its suites claim the expected files pass.
+  const stale = staleReportInfo(report, start);
+  const { reportValid, reportError, perFile, perFileDurationMs } = stale.stale
+    ? {
+        reportValid: false,
+        reportError: `stale report residue: report timestamp ${stale.timestamp} predates wave start (${new Date(start).toISOString()}) — content is not from this wave`,
+        perFile: new Map(expectedRels.map((r) => [r, "crash"])),
+        perFileDurationMs: new Map(expectedRels.map((r) => [r, null])),
+      }
+    : mapReportToFiles(report, expectedRels);
   // durationMs rides along per file (R23-F/A A3): advisory timing metadata —
   // pass/fail ⇒ finite non-negative ms, missing/crash ⇒ null. Never verdict-
-  // affecting.
-  const results = files.map((f) => ({ path: f.path, status: perFile.get(f.path) || "missing", resourceCategory: f.resourceCategory, executionWave: name, durationMs: perFileDurationMs.get(f.path) ?? null }));
+  // affecting. TD-181 (a): every NON-PASS file also carries its bounded
+  // first-round failure detail (collected from THIS wave's report, or an
+  // honest unknown when the report is missing/malformed/stale).
+  const results = files.map((f) => {
+    const status = perFile.get(f.path) || "missing";
+    const r = { path: f.path, status, resourceCategory: f.resourceCategory, executionWave: name, durationMs: perFileDurationMs.get(f.path) ?? null };
+    if (status !== "pass") {
+      r.failureDetail = reportValid ? firstRoundFailureDetail(report, f.path) : unknownFailureDetail(reportError);
+    }
+    return r;
+  });
 
   const hasNonPass = results.some((r) => r.status !== "pass");
   let groupError = null;
@@ -783,7 +966,7 @@ export async function runWave({ name, files, concurrency, reporterArg, runChild,
 // TD-165 R2.4: the ONE no-early-abort exception — when a wave dies to the
 // watchdog and cleanup is UNCONFIRMED (possible residue), later waves are NOT
 // started and isolation reruns are skipped; the verdict is fail either way.
-export async function runCanonical({ waveSpecs, reporterArg, runChild, readReport, deleteReport, isolator, onWaveStart, onWaveEnd, testTimeoutMs = TEST_TIMEOUT_MS }) {
+export async function runCanonical({ waveSpecs, reporterArg, runChild, readReport, deleteReport, isolator, onWaveStart, onWaveEnd, testTimeoutMs = TEST_TIMEOUT_MS, observers = null }) {
   const wavesReport = [];
   const firstRound = [];
   let suiteError = false;
@@ -793,6 +976,11 @@ export async function runCanonical({ waveSpecs, reporterArg, runChild, readRepor
   // unconfirmed ⇒ no further reruns; first-round waves already completed).
   let abortOrigin = null;
   for (const spec of waveSpecs) {
+    // TD-181 (a): advisory per-wave secondary observation — collected BEFORE
+    // the wave runs; every failure inside it degrades to unknown and none of
+    // it can affect the verdict (injectable seam; production wires
+    // realWaveObservers in runSuite).
+    const observation = await collectWaveObservation(spec, observers);
     if (onWaveStart) onWaveStart(spec);
     const w = await runWave({ name: spec.name, files: spec.files, concurrency: spec.concurrency, reporterArg, runChild, readReport, deleteReport, testTimeoutMs });
     if (w.groupError) suiteError = true;
@@ -809,6 +997,10 @@ export async function runCanonical({ waveSpecs, reporterArg, runChild, readRepor
       missing: w.results.filter((r) => r.status === "missing").length,
       crashed: w.results.filter((r) => r.status === "crash").length,
       groupError: w.groupError,
+      // TD-181 (a): advisory annotations (startedAt / concurrency / gate /
+      // concurrent-suite marker / node-process count with sampling time).
+      // Additive; never verdict-affecting; separate from failure content.
+      observation,
       // TD-165 R2: wave-level watchdog record (null when it never fired) —
       // fired/confirmed/elapsedMs/probes/pid for triage; verdict-relevant parts
       // already surface via groupError + per-file crashReason.
@@ -874,7 +1066,12 @@ export async function runCanonical({ waveSpecs, reporterArg, runChild, readRepor
     firstRound: {
       verdict: firstRoundVerdict,
       passed, failed, missing, crashed,
-      failures: failures.map((r) => ({ path: r.path, status: r.status, crashReason: r.crashReason ?? null })),
+      // TD-181 (a): every first-round failure carries the bounded content of
+      // WHAT failed in the wave (sub-test names, assertion/error text, stacks
+      // — with explicit truncation markers), or an honest unknown when it could
+      // not be collected. Isolation reruns append a classification; they can
+      // never replace this first-round content nor wash the verdict green.
+      failures: failures.map((r) => ({ path: r.path, status: r.status, crashReason: r.crashReason ?? null, failureDetail: r.failureDetail ?? unknownFailureDetail("no first-round detail collected") })),
     },
     isolation,
     finalVerdict: firstRoundVerdict, // isolation never changes the verdict
@@ -1127,6 +1324,75 @@ export function realIsolator(nodeExe, repoRoot, env, watchOpts = {}, spawnImpl =
   });
 }
 
+// ── TD-181 (a): real secondary-observation adapters (read-only, bounded) ─────
+// node-process count with sampling time: one bounded `tasklist` sample on
+// win32 (timeout-raced; the timer is unref'd so a hung tasklist can never
+// stall the suite), honest {count:null, reason} everywhere else. Advisory only.
+export function defaultCountNodeProcesses({ timeoutMs = 5000, spawnImpl = spawn } = {}) {
+  const sampledAt = new Date().toISOString();
+  return new Promise((resolve) => {
+    if (process.platform !== "win32") {
+      resolve({ count: null, sampledAt, reason: `unsupported platform ${process.platform} (win32 tasklist sample only)` });
+      return;
+    }
+    let settled = false;
+    let out = "";
+    const finish = (result) => { if (!settled) { settled = true; resolve(result); } };
+    const timer = setTimeout(() => finish({ count: null, sampledAt, reason: `sample timed out after ${timeoutMs}ms` }), timeoutMs);
+    if (typeof timer.unref === "function") timer.unref();
+    let child;
+    try {
+      child = spawnImpl("tasklist", ["/FI", "IMAGENAME eq node.exe", "/FO", "CSV", "/NH"], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+    } catch (err) {
+      clearTimeout(timer);
+      finish({ count: null, sampledAt, reason: `spawn failed: ${err && err.message ? err.message : String(err)}` });
+      return;
+    }
+    child.stdout?.on("data", (c) => { out += c; if (out.length > CHILD_BUFFER_CAP) out = out.slice(out.length - CHILD_BUFFER_CAP); });
+    child.on("error", (err) => { clearTimeout(timer); finish({ count: null, sampledAt, reason: `tasklist failed: ${err && err.message ? err.message : String(err)}` }); });
+    child.on("close", () => {
+      clearTimeout(timer);
+      const count = out.split(/\r?\n/).filter((l) => /^"node\.exe"/i.test(l.trim())).length;
+      finish({ count, sampledAt });
+    });
+  });
+}
+
+// Production observer bundle wired by runSuite: verification-gate state (the
+// read-only status() query — no acquire, no side effects), the advisory
+// inflight marker (another full suite on this machine), and the bounded node
+// count. Every piece is read-only and degrades to unknown on any failure.
+export function realWaveObservers({
+  createGate = () => createVerificationGate({ identity: { owner: "scripts/canonical-test.mjs#observation" } }),
+  markerReader = realInflightAdapter(),
+  countNodeProcesses = defaultCountNodeProcesses,
+} = {}) {
+  let gate = null;
+  return {
+    verificationGate: async () => {
+      gate ??= createGate();
+      const st = await gate.status();
+      if (st && st.free) return { state: "free" };
+      if (st && st.corrupt) return { state: "corrupt" };
+      if (st && st.holder) {
+        return { state: "held", holder: { owner: st.holder.owner ?? null, pid: st.holder.pid ?? null, startedAt: st.holder.startedAt ?? null } };
+      }
+      return { state: "unknown", reason: "gate status returned an unrecognized shape" };
+    },
+    concurrentFullSuite: () => {
+      const raw = markerReader.readMarker();
+      if (raw === null) return { state: "none" };
+      try {
+        const info = JSON.parse(raw) || {};
+        return { state: "present", pid: Number.isFinite(info.pid) ? info.pid : "unknown", startedAt: typeof info.startedAt === "string" && info.startedAt ? info.startedAt : "unknown" };
+      } catch {
+        return { state: "present", pid: "unknown", startedAt: "unknown", note: "marker present but unparseable" };
+      }
+    },
+    nodeProcessCount: () => countNodeProcesses(),
+  };
+}
+
 // ── main(): verification gate, then advisory inflight marker, then the suite.
 
 /**
@@ -1298,6 +1564,9 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
     readReport: realReadReport(reportPath),
     deleteReport: realDeleteReport(reportPath),
     isolator: realIsolator(nodeExe, repoRoot, childEnv),
+    // TD-181 (a): advisory per-wave secondary observations (read-only, bounded,
+    // failure-degrades-to-unknown, never verdict-affecting).
+    observers: realWaveObservers(),
     onWaveStart: (spec) => console.error(`[canonical] wave=${spec.name} start files=${spec.files.length} categories=${spec.categories.join("+")} concurrency=${spec.concurrency}`),
     onWaveEnd: (w) => {
       const wf = w.failed + w.crashed + w.missing;
@@ -1332,7 +1601,11 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
   }
 
   const report = {
-    schemaVersion: 3,
+    // schemaVersion 4 (TD-181, 2026-09-25): ADDITIVE over 3 — every non-pass
+    // firstRound.failures[] entry now carries bounded `failureDetail` (or an
+    // honest unknown), and each executionWaves[] entry carries the advisory
+    // `observation` annotation. Existing fields are unchanged.
+    schemaVersion: 4,
     generatedAt: new Date().toISOString(),
     runner: { name: "canonical-test", node: process.version, hardwareParallelism: HW, mode: "one-node-test-child-per-wave" },
     discoveredCount: discovered.length,
@@ -1416,7 +1689,7 @@ export async function runSuite({ repoRoot, testDir, manifestPath, reportPath, no
 function failInvalidEnvironment(reportPath, message) {
   console.error(`[canonical] INVALID ENVIRONMENT (no tests run): ${message}`);
   const report = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     generatedAt: new Date().toISOString(),
     runner: { name: "canonical-test", node: process.version },
     finalVerdict: "environment_invalid",

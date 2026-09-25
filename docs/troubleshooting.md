@@ -33,10 +33,10 @@
 | 认证判 draft-only/rejected 但模型应该会 | [§7.8 认证误判](#78-认证判-draft-onlyrejected-但模型其实会认证误判) |
 | 改了 example 配置但 worker 行为没变 | [§7.9 agents.json 真相源](#79-agentsjson-vs-agentsexamplejson-混淆配置真相源) |
 | `run_delivery` 返回失败面 / 不知道下一步用哪个交付工具 | [§delivery 失败模式 → 正确工具（闭集查表）](#delivery-失败模式--正确工具闭集查表) |
-| `npm test` exit 1 但失败全为 isolation_pass（同机并发互踩） | [§8.1](#81-npm-test-exit-1-但失败全为-isolation_pass并发互踩非代码回归) |
-| `npm test` stderr 打 another full suite WARNING / 同机另一全量在跑 | [§8.1](#81-npm-test-exit-1-但失败全为-isolation_pass并发互踩非代码回归) |
-| 交付验证报 `command_timeout` 但单独复跑很快（同机并发验证互踩拖慢） | [§8.1](#81-npm-test-exit-1-但失败全为-isolation_pass并发互踩非代码回归) |
-| 验证在排队等待 / 想查同机验证闸持有者或残留租约 | [§8.1](#81-npm-test-exit-1-但失败全为-isolation_pass并发互踩非代码回归)（`runs gate` 只读查询） |
+| `npm test` exit 1 但失败全为 isolation_pass（波内红、隔离绿 ⇒ 原因未明） | [§8.1](#81-npm-test-exit-1-但失败全为-isolation_pass波内红隔离绿--原因未明) |
+| `npm test` stderr 打 another full suite WARNING / 同机另一全量在跑 | [§8.1](#81-npm-test-exit-1-但失败全为-isolation_pass波内红隔离绿--原因未明) |
+| 交付验证报 `command_timeout` 但单独复跑很快（原因未明，处置见 §8.1） | [§8.1](#81-npm-test-exit-1-但失败全为-isolation_pass波内红隔离绿--原因未明) |
+| 验证在排队等待 / 想查同机验证闸持有者或残留租约 | [§8.1](#81-npm-test-exit-1-但失败全为-isolation_pass波内红隔离绿--原因未明)（`runs gate` 只读查询） |
 | 主仓根全量尾部 runs-guard RED（套件期间出现新 runs/ 条目） | [§8.2](#82-主仓根跑全量前确认无活跃-workerdaemonruns-guard-红灯td-134) |
 | `npm test` 某波长时间不动 / 尾部 `watchdog backstop fired` 或 crashReason=watchdog_timeout | [§8.3](#83-npm-test-波次挂死或长滞td-165-看门狗分诊) |
 
@@ -456,17 +456,18 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 
 ## 8. 测试套件与验证环境（canonical runner）
 
-`npm test` 由 `scripts/canonical-test.mjs`（TD-107 canonical runner）分波执行全量。本章覆盖套件自身的**环境性失败判定**——特别是同机并行 Lead 会话互踩（TD-130 isolation_pass 家族）与主仓根 runs-guard 红灯（TD-134）。两者都表现为 "exit 1 + 顺序复跑绿"，但判定规则与处置不同。何时可 focused（须带 `--test-timeout`）、何时必须全量：见 `docs/usage.md` 场景 4b 测试分层运行规则（T0-T3，2026-09-19）。
+`npm test` 由 `scripts/canonical-test.mjs`（TD-107 canonical runner）分波执行全量。本章覆盖套件自身的**环境性失败判定**——特别是波内红、隔离绿的未归因形态（TD-181，见 §8.1）与主仓根 runs-guard 红灯（TD-134）。两者都表现为 "exit 1 + 顺序复跑绿"，但判定规则与处置不同。何时可 focused（须带 `--test-timeout`）、何时必须全量：见 `docs/usage.md` 场景 4b 测试分层运行规则（T0-T3，2026-09-19）。
 
-### 8.1 npm test exit 1 但失败全为 isolation_pass（并发互踩，非代码回归）
+### 8.1 npm test exit 1 但失败全为 isolation_pass（波内红、隔离绿 ⇒ 原因未明）
 
 - **症状**：全量 exit 1，stderrTail 中每一条失败分类行都是 `[canonical] isolation ... ⇒ isolation_pass`（首轮红、单文件隔离复跑绿）；无 `stable_fail`、无 `environment_invalid`、无其他形状的 fail。在 delivery verification / reverify 里表现为验证命令 `npm test` 失败。
-- **第一反应（三步，按序）**：① 读 `delivery_verification_*` 事件的 `stderrTail`——经 R17/W1 已携带 [canonical] 行全文，一次读取即得**文件名 + 波次 + 类别**；② 查 canonical 结构化报告的 isolation 分类行（`[canonical] isolation ... ⇒ isolation_pass` 形状，确认无 `stable_fail`/`environment_invalid` 混入）；③ 按本节判定规则处置——全为 `isolation_pass` ⇒ 错峰后再走**单次 reverify**，不走 reject。
-- **2026-08-19 并发实证（TD-130）**：两会话并行时同机并发 `npm test` 互踩，放大该家族——单日 5 个文件 × 8 轮次（`mcpWorkspaceSmoke` / `runWait` / `processBackend` / `mcpBind` / `mcpRunDeliveryReverify`，跨文件跨波）；两轮撞车后只剩 reject+前作集成可走，浪费一整轮验证预算。机器空闲时顺序复跑恒绿（worker 自跑 + Lead 复跑双证）。
+- **第一反应（三步，按序）**：① 读 `delivery_verification_*` 事件的 `stderrTail`——经 R17/W1 已携带 [canonical] 行全文，一次读取即得**文件名 + 波次 + 类别**；② 查 canonical 结构化报告的 isolation 分类行（`[canonical] isolation ... ⇒ isolation_pass` 形状，确认无 `stable_fail`/`environment_invalid` 混入）与 `firstRound.failures[].failureDetail`（首轮失败内容，TD-181）；③ 按本节判定规则处置——全为 `isolation_pass` ⇒ 安静窗口单发复验后再走**单次 reverify**，不走 reject。
+- **判定边界（TD-181 措辞纠正，2026-09-25）**：**波内红、隔离绿 ⇒ 原因未明**。隔离复跑绿只说明**本次未复现**，不能证明根因；首轮 exit 1 与失败内容仍是既成事实。历史上发生过的失败（含下方 TD-130 实证）**不能被追认为本次的原因**——证据路径只能证明那次失败发生过，不能证明同一机制是本次的原因。**安静窗口单发复验是复验条件，不是归因证明**。
+- **2026-08-19 并发实证（TD-130；历史记录，该实例不能用于逐例归因）**：两会话并行时同机并发 `npm test` 互踩，放大该现象——单日 5 个文件 × 8 轮次（`mcpWorkspaceSmoke` / `runWait` / `processBackend` / `mcpBind` / `mcpRunDeliveryReverify`，跨文件跨波）；两轮撞车后只剩 reject+前作集成可走，浪费一整轮验证预算。机器空闲时顺序复跑恒绿（worker 自跑 + Lead 复跑双证）。此为当日实证的记录，**不构成对任何后续个例的归因**。
 - **判定规则（闭集）**：
   - **条件**：`npm test` exit 1，且 stderrTail 中**全部**条目为 `isolation_pass` 分类行（无 `stable_fail`、无 `environment_invalid`、无其他 fail）。
-  - **判定**：`environment_contaminated`——资源争用假阳性，**非代码回归**。
-  - **行动**：**错峰后再 reverify**（等另一全量结束）。不走 reject——reverify 是单发机会，撞车后只剩 reject+前作集成，等于再浪费一轮验证预算。
+  - **判定**：操作参数记 `environment_contaminated`（reverify 资格用的操作分类）——**它不代表根因已确认**；本次失败**原因未明**。
+  - **行动**：**安静窗口单发复验通过后走单次 reverify**（复验前确认无其他全量/验证在本机在跑）。不走 reject——reverify 是单发机会，烧掉后只剩 reject+前作集成，等于再浪费一轮验证预算。
   - **反例**：tail 含**任何** `stable_fail` ⇒ 是真红，走正常 reverify/reject 路径，不得借本规则豁免。
 - **预防（R22 W1 advisory inflight 标记，2026-08-20 落地；R23-F/A 迁址+探活降级）**：runner 开跑前（runs-guard 基线快照之前）在**机器级状态目录**（win32 `%LOCALAPPDATA%\wao`，回退 `~/.wao-machine`；经 `src/machineGatePaths.js` SSOT——该路径对 harness per-attempt TEMP 注入免疫，R23-F/A 前的 `os.tmpdir()` 派生曾使两通道互不可见）放 `wao-canonical-test.inflight` **机器全局 advisory 标记（非锁）**。同机另一全量在跑时，本套件 stderr 打一行 `[canonical] WARNING: another full suite started at <ts> (pid <n>) — results may be affected by resource contention`。**WARNING = 结果可能受资源争用污染，顺序复跑即可**——它永不阻塞、永不等待、不吃任何预算。崩溃残留的孤儿标记：pid 探活证死则降级为 `[canonical] NOTICE: stale inflight marker`（R23-F/A），pid 活/不可判仍打 WARNING，不产生新失败面；标记在自己拥有的退出路径删除（仅删自己创建的那份；强杀路径不删——见 R23-E 取证报告 B 节）。
 - **根治层（R23-F/B 同机验证串行化闸，2026-08-22）**：同一机器级目录下另有 `verification.lease` 租约闸，把"任何经三条生产路径发起的交付验证"与"直连 canonical 全量"**串行化**（粒度 = 整个 verifyDelivery 命令序列 / 一次 canonical main()）——后到者排队等待而非并发踩踏（本节 2026-08-19 实证的止血），排队绝不计入 `verificationTimeoutMs` 或测试预算。持有方心跳续期（~30s）、心跳陈旧 ~90s 或单次持锁超 130min 即允许接管、释放只认 token；基础设施故障一律 fail-open（无闸继续跑），争用/等待/降级永不改变验证结果语义、不新增失败码。等待与降级日志写同目录 `gate.log`（每 ~30s 一条含持有者身份）。inflight 标记保留为**降级态告警层**：fail-open、kill switch（`WAO_VERIFICATION_GATE=off`）、单文件跑等不经闸的场景仍由它兜底告警。运维出口：`npm run cli -- runs gate` 只读查询 free/held/corrupt 与 kill switch；`--release` 人工破锁仅限确认没有验证在跑而租约残留的场景（破除失败 fail-closed 非零退出）。

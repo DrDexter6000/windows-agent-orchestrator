@@ -14,7 +14,7 @@ async function main() {
     process.exit(1);
   }
 
-  const data = JSON.parse(raw);
+  const data = adaptForRender(JSON.parse(raw));
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -170,6 +170,119 @@ function formatDuration(ms) {
   const m = Math.floor(ms / 60000);
   const s = Math.round((ms % 60000) / 1000);
   return `${m}m${s}s`;
+}
+
+// ── TD-181 (a) consumer-side compatibility ───────────────────────────────────
+// `npm test` (canonical runner) overwrites test-results.json with its OWN
+// aggregate schema (schemaVersion 4: executionWaves/firstRound/isolation…),
+// which previously made this tool crash (no data.summary). Projection below is
+// ADDITIVE compatibility + failure-detail rendering only:
+//   - a reporter-shaped report ({summary, suites}) passes through UNCHANGED;
+//   - a canonical aggregate is projected into the summary/suites view the
+//     renderer already consumes, surfacing each first-round failure's retained
+//     detail (sub-test names, assertion text, stacks) via the existing error
+//     boxes. New canonical fields are ignored here by design — this is not a
+//     report platform.
+function detailError(d) {
+  return {
+    actual: d.actual ?? "",
+    expected: d.expected ?? "",
+    operator: d.operator ?? "fail",
+    stack: d.stack ?? "",
+    diff: d.diff ?? null,
+  };
+}
+
+function canonicalSuites(data) {
+  const isolationByPath = new Map();
+  for (const iso of (Array.isArray(data.isolation) ? data.isolation : [])) {
+    if (iso && typeof iso.path === "string") isolationByPath.set(iso.path, iso);
+  }
+  const suites = [];
+  for (const wave of (Array.isArray(data.executionWaves) ? data.executionWaves : [])) {
+    if (!wave || !Array.isArray(wave.files)) continue;
+    for (const f of wave.files) {
+      if (!f || typeof f.path !== "string") continue;
+      const status = f.status === "pass" ? "pass" : "fail"; // missing/crash render as fail (they are non-pass)
+      const tests = [];
+      if (status === "fail") {
+        const failure = (data.firstRound && Array.isArray(data.firstRound.failures))
+          ? data.firstRound.failures.find((x) => x && x.path === f.path) : null;
+        const d = failure && failure.failureDetail;
+        if (d && d.status === "collected") {
+          for (const t of (Array.isArray(d.failingTests) ? d.failingTests : [])) {
+            tests.push({ name: t.name ?? "(unnamed)", status: "fail", duration: 0, error: detailError(t) });
+          }
+          if (d.fileFailure && (d.fileFailure.message || d.fileFailure.stack)) {
+            tests.push({
+              name: `fileFailure: ${d.fileFailure.message ?? ""}`,
+              status: "fail", duration: 0,
+              error: { actual: "", expected: "", operator: "fail", stack: d.fileFailure.stack ?? "", diff: null },
+            });
+          }
+          if (d.failingTestsDropped > 0) {
+            tests.push({ name: `… ${d.failingTestsDropped} more failing test(s) truncated in the bounded report`, status: "skip", duration: 0 });
+          }
+        } else {
+          tests.push({
+            name: `first-round ${f.status} — failure detail ${d && d.status === "unknown" ? "unknown" : "not collected"}${d && d.reason ? ` (${d.reason})` : ""}`,
+            status: "fail", duration: 0,
+          });
+        }
+      }
+      const iso = isolationByPath.get(f.path);
+      if (iso) {
+        tests.push({
+          name: `isolation rerun: alone=${iso.isolationStatus} ⇒ ${iso.classification}${iso.isolationDurationMs != null ? ` (${formatDuration(iso.isolationDurationMs)})` : ""}`,
+          status: iso.classification === "isolation_pass" ? "skip" : "fail",
+          duration: 0,
+        });
+      }
+      suites.push({ name: `test/${f.path}`, status, duration: f.durationMs ?? 0, tests });
+    }
+  }
+  return suites;
+}
+
+function adaptForRender(data) {
+  if (!data || typeof data !== "object") return data;
+  if (!data.executionWaves && !data.firstRound) {
+    // failInvalidEnvironment's minimal report (no waves, no firstRound): render
+    // its error as one visible failed suite instead of crashing on summary.
+    if (data.finalVerdict === "environment_invalid") {
+      return {
+        canonical: true,
+        finalVerdict: data.finalVerdict,
+        summary: { total: 0, passed: 0, failed: 0, skipped: 0 },
+        duration: 0,
+        suites: [{
+          name: "canonical-runner/environment_invalid",
+          status: "fail",
+          duration: 0,
+          tests: [{
+            name: `environment_invalid (no tests run): ${typeof data.error === "string" ? data.error : "(no error message)"}`,
+            status: "fail", duration: 0,
+            error: { actual: "", expected: "", operator: "fail", stack: "", diff: null },
+          }],
+        }],
+      };
+    }
+    return data; // reporter shape: unchanged
+  }
+  const fr = data.firstRound || {};
+  const num = (v) => (Number.isFinite(v) ? v : 0);
+  return {
+    canonical: true,
+    finalVerdict: data.finalVerdict ?? null,
+    summary: {
+      total: num(fr.passed) + num(fr.failed) + num(fr.missing) + num(fr.crashed),
+      passed: num(fr.passed),
+      failed: num(fr.failed) + num(fr.missing) + num(fr.crashed),
+      skipped: 0,
+    },
+    duration: data.totalDurationMs ?? 0,
+    suites: canonicalSuites(data),
+  };
 }
 
 function buildScriptSource() {

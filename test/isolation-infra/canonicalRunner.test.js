@@ -42,6 +42,11 @@ import {
   TEST_TIMEOUT_MS, WAVE_WATCHDOG_MS, WAVE_ALARM_MS, KILL_TREE_DEADLINE_MS,
   defaultKillTree, realRunChild, realIsolator, realReadReport, realDeleteReport,
   createChildSupervisor, runSuite,
+  // TD-181 (a)：首轮失败内容保留（有界 + 截断标识 + 采集失败记 unknown）与次级观测。
+  firstRoundFailureDetail, staleReportInfo, collectWaveObservation,
+  boundDetailString, unknownFailureDetail,
+  FAILURE_DETAIL_TEST_CAP, FAILURE_DETAIL_TEXT_CAP, FAILURE_DETAIL_CHAR_BUDGET,
+  realWaveObservers, defaultCountNodeProcesses,
 } from "../../scripts/canonical-test.mjs";
 
 function manifestFixture() {
@@ -1641,4 +1646,374 @@ test("TD-165 F2b: suiteAborted ⇒ 报告落盘且全部打印之后 exitFn(非�
   assert.equal(aborted[0].reportSeen, true, "报告先于退出落盘且内容完整（bounded 报告不因强退丢失）");
   const clean = await drive("wao-td165-f2b-c-", cleanOutcome);
   assert.equal(clean.length, 0, "未中止 ⇒ 不强退（自然退出路径保持不变）");
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// TD-181 (a, 2026-09-25)：canonical 报告保留**首轮**失败内容（有界 + 明确截断标识
+// + 采集失败如实记 unknown，绝不因观测失败制造绿）。覆盖五种形态：
+//   缺报告 / 坏报告 / 采集错误 / 截断 / 旧报告残留；
+// 外加「波内失败 + 隔离通过」仍保留原失败内容且终判仍 fail，以及次级观测
+// （附注，不改判定，不挤占首轮失败内容）。全部走注入 seam，零真实子进程。
+// ────────────────────────────────────────────────────────────────────────────
+
+// 带失败内容的波报告夹具：reporter 形状（suite.tests[].error = {actual,expected,
+// operator,stack,diff}；suite.fileFailure = {message,stack}）。
+function makeRichReport(rel, { failingTests = [], fileFailure = null, timestamp } = {}) {
+  return {
+    ...(timestamp ? { timestamp } : {}),
+    suites: [{
+      name: "test/" + rel, status: failingTests.length > 0 || fileFailure ? "fail" : "pass", duration: 42,
+      tests: failingTests,
+      ...(fileFailure ? { fileFailure } : {}),
+    }],
+  };
+}
+
+test("TD-181(a): 波内失败 + 隔离通过 ⇒ firstRound.failures 保留原失败内容（子测试名/断言/堆栈）且 finalVerdict 仍为 fail", async () => {
+  const report = makeRichReport("flake.test.js", {
+    failingTests: [
+      { name: "subtest A", status: "fail", duration: 5, error: {
+        actual: "1", expected: "2", operator: "equal",
+        stack: "AssertionError [ERR_ASSERTION]: should be equal\n    at flake.test.js:10:5",
+        diff: "- Expected: 2\n+ Received: 1" } },
+      { name: "subtest B", status: "pass", duration: 3 },
+      { name: "subtest C", status: "fail", duration: 2, error: { actual: "x", expected: "y", operator: "equal", stack: "AssertionError: x !== y", diff: null } },
+    ],
+  });
+  // 次级观测同时在场（rich observers）——证明附注不挤占首轮失败内容。
+  const observers = {
+    verificationGate: async () => ({ state: "held", holder: { owner: "verifyDelivery", pid: 4242, startedAt: "2026-09-25T00:00:00.000Z" } }),
+    concurrentFullSuite: async () => ({ state: "present", pid: 99, startedAt: "2026-09-25T00:01:00.000Z" }),
+    nodeProcessCount: async () => ({ count: 7, sampledAt: "2026-09-25T00:02:00.000Z" }),
+  };
+  const out = await runCanonical({
+    waveSpecs: [{ name: "pure", concurrency: 8, categories: ["pure"], files: waveFiles(["flake.test.js"], "pure") }],
+    reporterArg: "R",
+    runChild: async () => ({ exitCode: 1, stdout: "", stderr: "" }),
+    readReport: async () => report,
+    deleteReport: noopDelete,
+    isolator: async () => ({ status: "pass", exitCode: 0, tail: "alone-pass" }),
+    observers,
+  });
+  assert.equal(out.firstRound.verdict, "fail");
+  assert.equal(out.finalVerdict, "fail", "隔离通过绝不洗绿（既有钉不变）");
+  assert.equal(out.isolation.length, 1);
+  assert.equal(out.isolation[0].classification, "isolation_pass");
+
+  const f = out.firstRound.failures[0];
+  assert.equal(f.path, "flake.test.js");
+  assert.equal(f.status, "fail");
+  assert.equal(f.failureDetail.status, "collected", "首轮失败内容已采集");
+  assert.equal(f.failureDetail.source, "firstRoundWaveReport");
+  assert.equal(f.failureDetail.failingTestsTotal, 2);
+  assert.equal(f.failureDetail.failingTests.length, 2, "两个失败子测试都保留（通过的兄弟不进清单）");
+  const a = f.failureDetail.failingTests[0];
+  assert.equal(a.name, "subtest A");
+  assert.equal(a.expected, "2");
+  assert.equal(a.actual, "1");
+  assert.equal(a.operator, "equal");
+  assert.ok(a.stack.includes("at flake.test.js:10:5"), "堆栈原文保留");
+  assert.ok(a.diff.includes("+ Received: 1"), "断言 diff 保留");
+  assert.equal(f.failureDetail.failingTests[1].name, "subtest C");
+
+  // 附注在场且不挤占：failureDetail 完整的同时 observation 独立成字段。
+  const obs = out.waves[0].observation;
+  assert.equal(obs.verificationGate.state, "held");
+  assert.equal(obs.concurrentFullSuite.state, "present");
+  assert.equal(obs.nodeProcessCount.count, 7);
+  assert.equal(obs.waveConcurrency, 8);
+  assert.equal(obs.advisory, true);
+  assert.ok(!Number.isNaN(Date.parse(obs.startedAt)), "波开始时间为可解析 ISO 时间");
+  assert.ok(!("failureDetail" in out.waves[0].files[0]), "首轮失败内容只落在 firstRound.failures，不重复进 waves[].files");
+});
+
+test("TD-181(a) 形态① 缺报告 ⇒ 全 crash + failureDetail 如实 unknown（记报告缺失）", async () => {
+  const files = waveFiles(["a.test.js"], "pure");
+  const w = await runWave({
+    name: "pure", files, concurrency: 2, reporterArg: "R",
+    runChild: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    readReport: async () => null, // reporter never flushed
+    deleteReport: noopDelete,
+  });
+  assert.ok(w.groupError, "missing report is a wave error（既有钉）");
+  assert.ok(w.results.every((r) => r.status === "crash"));
+  for (const r of w.results) {
+    assert.equal(r.failureDetail.status, "unknown", "观测失败 ⇒ unknown，不编造内容");
+    assert.ok(/missing|not an object/.test(r.failureDetail.reason), `reason 指明缺报告（实际 ${r.failureDetail.reason}）`);
+  }
+  const out = await runCanonical({
+    waveSpecs: [{ name: "pure", concurrency: 2, categories: ["pure"], files }],
+    reporterArg: "R", runChild: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    readReport: async () => null, deleteReport: noopDelete,
+  });
+  assert.equal(out.finalVerdict, "fail", "缺报告绝不判绿");
+  assert.equal(out.firstRound.failures[0].failureDetail.status, "unknown");
+});
+
+test("TD-181(a) 形态② 坏报告（无法识别的 suite status）⇒ invalid + failureDetail unknown（带 reportError 原文）", async () => {
+  const files = waveFiles(["a.test.js"], "pure");
+  const w = await runWave({
+    name: "pure", files, concurrency: 2, reporterArg: "R",
+    runChild: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    readReport: async () => ({ suites: [{ name: "test/a.test.js", status: "todo", tests: [] }] }),
+    deleteReport: noopDelete,
+  });
+  assert.ok(w.groupError && /unrecognized status/.test(w.groupError));
+  assert.equal(w.results[0].status, "crash");
+  assert.equal(w.results[0].failureDetail.status, "unknown");
+  assert.ok(/unrecognized status/.test(w.results[0].failureDetail.reason), "unknown 的 reason 透传 reportError");
+});
+
+test("TD-181(a) 形态③ 采集错误（readReport 抛错）⇒ 波 fail-closed（全 crash + groupError）+ failureDetail unknown；后续波照常", async () => {
+  const specs = [
+    { name: "pure", concurrency: 2, categories: ["pure"], files: waveFiles(["a.test.js"], "pure") },
+    { name: "lock", concurrency: 1, categories: ["lock"], files: waveFiles(["c.test.js"], "lock") },
+  ];
+  let call = 0;
+  const readReport = async () => {
+    call += 1;
+    if (call === 1) throw new Error("EACCES report read blocked"); // 只有 pure 波采集失败
+    return makeReport(["c.test.js"], new Set());
+  };
+  const out = await runCanonical({
+    waveSpecs: specs, reporterArg: "R",
+    runChild: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    readReport,
+    deleteReport: noopDelete,
+  });
+  const pure = out.waves.find((x) => x.name === "pure");
+  assert.ok(/read report failed: EACCES report read blocked/.test(pure.groupError), "采集错误如实入 groupError");
+  assert.ok(pure.files.every((f) => f.status === "crash"), "采集失败 ⇒ 全 crash（绝不因观测失败制造绿）");
+  const f = out.firstRound.failures.find((x) => x.path === "a.test.js");
+  assert.equal(f.failureDetail.status, "unknown");
+  assert.ok(/read report failed/.test(f.failureDetail.reason));
+  assert.equal(out.finalVerdict, "fail");
+  const lock = out.waves.find((x) => x.name === "lock");
+  assert.equal(lock.files[0].status, "pass", "后续波不受采集错误连坐（与 delete 失败同语义）");
+});
+
+test("TD-181(a) 形态④ 截断 ⇒ 超长子测试计数丢弃、超长字段带明确 TRUNCATED 标识", async () => {
+  const longStack = "E".repeat(5000);
+  const longExpected = "2".repeat(3000);
+  const failingTests = [
+    { name: "big one", status: "fail", duration: 5, error: { actual: "1", expected: longExpected, operator: "equal", stack: longStack, diff: "- x" } },
+    ...Array.from({ length: 7 }, (_, i) => ({ name: `t${i}`, status: "fail", duration: 1 })),
+  ];
+  const w = await runWave({
+    name: "pure", files: waveFiles(["a.test.js"], "pure"), concurrency: 2, reporterArg: "R",
+    runChild: async () => ({ exitCode: 1, stdout: "", stderr: "" }),
+    readReport: async () => makeRichReport("a.test.js", { failingTests }),
+    deleteReport: noopDelete,
+  });
+  const d = w.results[0].failureDetail;
+  assert.equal(d.status, "collected");
+  assert.equal(d.failingTestsTotal, 8, "失败子测试总数如实记录");
+  assert.equal(d.failingTests.length, FAILURE_DETAIL_TEST_CAP, `最多保留 ${FAILURE_DETAIL_TEST_CAP} 条`);
+  assert.equal(d.failingTestsDropped, 3, "丢弃数明确记录");
+  const big = d.failingTests[0];
+  assert.ok(big.stack.endsWith(`…[TRUNCATED: first ${FAILURE_DETAIL_TEXT_CAP} of 5000 chars]`), "堆栈截断带明确标识与原始长度");
+  assert.ok(big.expected.endsWith(`…[TRUNCATED: first ${FAILURE_DETAIL_TEXT_CAP} of 3000 chars]`), "expected 截断带明确标识");
+});
+
+test("TD-181(a) 形态④b 每文件字符预算 ⇒ 序列化后不超 FAILURE_DETAIL_CHAR_BUDGET（丢弃计入 dropped）", async () => {
+  const bigField = (c) => "z".repeat(c);
+  const failingTests = Array.from({ length: 8 }, (_, i) => ({
+    name: `t${i}`, status: "fail", duration: 1,
+    error: { actual: bigField(1200), expected: bigField(1200), operator: "equal", stack: bigField(1200), diff: bigField(1200) },
+  }));
+  const out = await runCanonical({
+    waveSpecs: [{ name: "pure", concurrency: 2, categories: ["pure"], files: waveFiles(["a.test.js"], "pure") }],
+    reporterArg: "R",
+    runChild: async () => ({ exitCode: 1, stdout: "", stderr: "" }),
+    readReport: async () => makeRichReport("a.test.js", { failingTests }),
+    deleteReport: noopDelete,
+  });
+  const d = out.firstRound.failures[0].failureDetail;
+  assert.equal(d.failingTestsTotal, 8);
+  assert.ok(d.failingTests.length >= 1, "至少保留一条（截断不归零）");
+  assert.ok(JSON.stringify(d).length <= FAILURE_DETAIL_CHAR_BUDGET,
+    `序列化长度 ${JSON.stringify(d).length} ≤ 预算 ${FAILURE_DETAIL_CHAR_BUDGET}`);
+  assert.equal(d.failingTestsTotal - d.failingTests.length, d.failingTestsDropped, "丢弃数 = 总数 - 保留数");
+});
+
+test("TD-181(a) 形态⑤ 旧报告残留 ⇒ 时间戳早于波开始 ⇒ 不读作本波结果（即便 suites 全 pass），全 crash + unknown；新鲜时间戳不受误伤", async () => {
+  const files = waveFiles(["a.test.js"], "pure");
+  const staleReport = {
+    timestamp: new Date(Date.now() - 60000).toISOString(), // 波开始前一分钟落盘的残留
+    suites: [{ name: "test/a.test.js", status: "pass", duration: 5, tests: [] }],
+  };
+  const stale = await runWave({
+    name: "pure", files, concurrency: 2, reporterArg: "R",
+    runChild: async () => ({ exitCode: 1, stdout: "", stderr: "" }), // 子进程其实崩了，没写报告
+    readReport: async () => staleReport,
+    deleteReport: async () => {}, // noop delete：残留报告可被读到
+  });
+  assert.ok(/stale report residue/.test(stale.groupError), "groupError 指明残留");
+  assert.ok(stale.results.every((r) => r.status === "crash"), "残留内容绝不读作本波结果（含 pass）");
+  assert.equal(stale.results[0].failureDetail.status, "unknown");
+  assert.ok(/stale report residue/.test(stale.results[0].failureDetail.reason));
+
+  // 对照：新鲜时间戳（波开始之后）照常映射，不误伤。
+  const fresh = await runWave({
+    name: "pure", files, concurrency: 2, reporterArg: "R",
+    runChild: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    readReport: async () => ({ timestamp: new Date().toISOString(), suites: [{ name: "test/a.test.js", status: "pass", duration: 5, tests: [] }] }),
+    deleteReport: noopDelete,
+  });
+  assert.equal(fresh.results[0].status, "pass");
+  assert.equal(fresh.groupError, null);
+
+  // 纯函数钉：无时间戳 / 不可解析 / 未来时间 ⇒ 不判残留。
+  assert.equal(staleReportInfo(null, 0).stale, false);
+  assert.equal(staleReportInfo({ suites: [] }, 0).stale, false, "无 timestamp 的报告维持既有校验语义");
+  assert.equal(staleReportInfo({ timestamp: "not-a-date" }, 0).stale, false);
+  assert.equal(staleReportInfo({ timestamp: new Date(Date.now() + 60000).toISOString() }, Date.now()).stale, false);
+});
+
+test("TD-181(a): watchdog 波腿 crash ⇒ failureDetail 如实 unknown（带 watchdog_timeout 原因）", async () => {
+  const w = await runWave({
+    name: "lock", files: waveFiles(["a.test.js"], "lock"), concurrency: 1, reporterArg: "R",
+    runChild: async () => ({ exitCode: null, stdout: "", stderr: "", watchdog: { fired: true, confirmed: true, elapsedMs: 321, probes: 1, pid: 4242, limitMs: 5000 } }),
+    readReport: async () => { throw new Error("must not be called"); },
+    deleteReport: noopDelete,
+  });
+  assert.ok(w.results.every((r) => r.status === "crash" && r.crashReason === "watchdog_timeout"));
+  for (const r of w.results) {
+    assert.equal(r.failureDetail.status, "unknown");
+    assert.ok(/watchdog_timeout/.test(r.failureDetail.reason));
+  }
+});
+
+test("TD-181(a) 次级观测：采集失败/未接线 ⇒ 各自 unknown；观测绝不影响 verdict（含全绿波）", async () => {
+  const specs = [{ name: "pure", concurrency: 8, categories: ["pure"], files: waveFiles(["ok.test.js"], "pure") }];
+  const readReport = async () => makeReport(["ok.test.js"], new Set(), { "ok.test.js": 45 });
+  const runChild = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+
+  // 全部观察器抛错 ⇒ unknown 带 reason，verdict 仍 pass。
+  const boom = async () => { throw new Error("observer blew up"); };
+  const outThrow = await runCanonical({
+    waveSpecs: specs, reporterArg: "R", runChild, readReport, deleteReport: noopDelete,
+    observers: { verificationGate: boom, concurrentFullSuite: boom, nodeProcessCount: async () => { throw new Error("count failed"); } },
+  });
+  const obsT = outThrow.waves[0].observation;
+  assert.ok(/observer failed: observer blew up/.test(obsT.verificationGate.reason));
+  assert.ok(/observer failed/.test(obsT.concurrentFullSuite.reason));
+  assert.equal(obsT.nodeProcessCount.count, null, "计数失败 ⇒ count=null（不编造 0）");
+  assert.ok(/observer failed: count failed/.test(obsT.nodeProcessCount.reason));
+  assert.equal(outThrow.finalVerdict, "pass", "次级观测失败绝不改变判定");
+
+  // 未接线（observers=null，元测试缺省）⇒ unknown + not provided。
+  const outBare = await runCanonical({ waveSpecs: specs, reporterArg: "R", runChild, readReport, deleteReport: noopDelete });
+  const obsB = outBare.waves[0].observation;
+  assert.ok(/not provided/.test(obsB.verificationGate.reason));
+  assert.ok(/not provided/.test(obsB.concurrentFullSuite.reason));
+  assert.ok(/not provided/.test(obsB.nodeProcessCount.reason));
+  assert.equal(obsB.nodeProcessCount.count, null);
+  assert.equal(obsB.waveConcurrency, 8);
+  assert.equal(obsB.advisory, true);
+
+  // 观察器返回无 count 的对象 ⇒ count=null + reason（不把 undefined 折成 0）。
+  const outNoCount = await runCanonical({
+    waveSpecs: specs, reporterArg: "R", runChild, readReport, deleteReport: noopDelete,
+    observers: { nodeProcessCount: async () => ({ reason: "sample unsupported" }) },
+  });
+  assert.equal(outNoCount.waves[0].observation.nodeProcessCount.count, null);
+  assert.ok(/sample unsupported/.test(outNoCount.waves[0].observation.nodeProcessCount.reason));
+});
+
+test("TD-181(a) 真实观测适配器（注入 fs/gate/count seam，零真实进程表）：marker 三态 + gate status 三态 + tasklist 计数/超时", async () => {
+  // marker：none / present（可解析）/ present（撕裂）。
+  let markerText = null;
+  const markerReader = { readMarker: () => {
+    if (markerText === null) return null;
+    return markerText;
+  } };
+  const obs = realWaveObservers({
+    createGate: () => ({ status: async () => ({ free: true }) }),
+    markerReader,
+    countNodeProcesses: async () => ({ count: 2, sampledAt: "2026-09-25T03:00:00.000Z" }),
+  });
+  assert.equal((await obs.verificationGate()).state, "free");
+  assert.equal(obs.concurrentFullSuite().state, "none");
+  assert.deepEqual(await obs.nodeProcessCount(), { count: 2, sampledAt: "2026-09-25T03:00:00.000Z" });
+
+  markerText = JSON.stringify({ pid: 4242, startedAt: "2026-09-25T02:00:00.000Z" }) + "\n";
+  assert.deepEqual(obs.concurrentFullSuite(), { state: "present", pid: 4242, startedAt: "2026-09-25T02:00:00.000Z" });
+  markerText = "{torn";
+  const torn = obs.concurrentFullSuite();
+  assert.equal(torn.state, "present", "撕裂标记仍是 present（标记存在这一事实独立于可解析性）");
+  assert.equal(torn.pid, "unknown");
+
+  // gate：held / corrupt。
+  const held = realWaveObservers({
+    createGate: () => ({ status: async () => ({ free: false, holder: { owner: "verifyDelivery", pid: 1, startedAt: 100, heartbeatAt: 100, ageMs: 0 } }) }),
+    markerReader: { readMarker: () => null },
+    countNodeProcesses: async () => ({ count: 0, sampledAt: "t" }),
+  });
+  const hs = await held.verificationGate();
+  assert.equal(hs.state, "held");
+  assert.equal(hs.holder.owner, "verifyDelivery");
+  const corrupt = realWaveObservers({
+    createGate: () => ({ status: async () => ({ free: false, corrupt: true, holder: null }) }),
+    markerReader: { readMarker: () => null },
+    countNodeProcesses: async () => ({ count: 0, sampledAt: "t" }),
+  });
+  assert.equal((await corrupt.verificationGate()).state, "corrupt");
+
+  // tasklist 计数：fake spawnImpl 解析 CSV 行；不返回的 child ⇒ 超时记 unknown。
+  const csv = '"node.exe","111","Console","1","1,234 K"\r\n"node.exe","222","Console","1","2,345 K"\r\nINFO: No tasks are running which match the specified criteria.\r\n';
+  const fakeSpawnOk = () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    queueMicrotask(() => { child.stdout.emit("data", csv); child.emit("close", 0); });
+    return child;
+  };
+  const counted = await defaultCountNodeProcesses({ timeoutMs: 2000, spawnImpl: fakeSpawnOk });
+  assert.equal(counted.count, 2, 'CSV 行按 "node.exe" 前缀计数');
+  assert.ok(!Number.isNaN(Date.parse(counted.sampledAt)), "带采样时间");
+  const fakeSpawnHang = () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    return child; // 永不 close ⇒ 超时腿
+  };
+  // fake child 无真实进程句柄撑环——unref 的超时 timer 会让 node:test 判
+  // "pending promise + empty loop"（F2a 同款问题）。用 ref'd interval 撑环。
+  const keepAlive = setInterval(() => {}, 200);
+  let timed;
+  try {
+    timed = await defaultCountNodeProcesses({ timeoutMs: 60, spawnImpl: fakeSpawnHang });
+  } finally { clearInterval(keepAlive); }
+  assert.equal(timed.count, null, "采样超时 ⇒ count=null");
+  assert.ok(/timed out after 60ms/.test(timed.reason));
+});
+
+test("TD-181(a) 纯函数钉：boundDetailString 截断标识 / firstRoundFailureDetail 防御形状（tests 非数组、抛错、fail 胜出）", () => {
+  assert.equal(boundDetailString(undefined), null);
+  assert.equal(boundDetailString(123), null);
+  assert.equal(boundDetailString("short"), "short");
+  const cut = boundDetailString("x".repeat(FAILURE_DETAIL_TEXT_CAP + 40));
+  assert.ok(cut.endsWith(`…[TRUNCATED: first ${FAILURE_DETAIL_TEXT_CAP} of ${FAILURE_DETAIL_TEXT_CAP + 40} chars]`));
+  assert.ok(cut.length <= FAILURE_DETAIL_TEXT_CAP + 60, "截断结果有界");
+
+  assert.equal(firstRoundFailureDetail(null, "a.test.js").status, "unknown");
+  assert.equal(firstRoundFailureDetail({ suites: [{ name: "test/a.test.js", status: "fail", tests: "not-an-array" }] }, "a.test.js").status, "collected", "tests 非数组不炸（零失败内容）");
+  const weird = { suites: [{ name: "test/a.test.js", status: "fail", tests: [null, 42, { status: "fail" }] }] };
+  const wd = firstRoundFailureDetail(weird, "a.test.js");
+  assert.equal(wd.status, "collected");
+  assert.equal(wd.failingTests[0].name, "(test name unavailable)", "无名失败子测试有明确占位，不编造名字");
+  // 抛错防护：把 suites 变成 getter 陷阱。
+  const hostile = { get suites() { throw new Error("boom"); } };
+  const hd = firstRoundFailureDetail(hostile, "a.test.js");
+  assert.equal(hd.status, "unknown");
+  assert.ok(/collection error: boom/.test(hd.reason));
+  // fail 胜出（与 mapReportToFiles 同语义）。
+  const dup = { suites: [
+    { name: "test/a.test.js", status: "pass", tests: [] },
+    { name: "test/a.test.js", status: "fail", tests: [{ name: "n", status: "fail", duration: 1 }] },
+  ] };
+  assert.equal(firstRoundFailureDetail(dup, "a.test.js").failingTestsTotal, 1);
+  // fileFailure 保留。
+  const ff = firstRoundFailureDetail({ suites: [{ name: "test/a.test.js", status: "fail", tests: [], fileFailure: { message: "test timed out after 1000ms", stack: "at x" } }] }, "a.test.js");
+  assert.equal(ff.fileFailure.message, "test timed out after 1000ms");
+  assert.equal(unknownFailureDetail("r").status, "unknown");
 });
