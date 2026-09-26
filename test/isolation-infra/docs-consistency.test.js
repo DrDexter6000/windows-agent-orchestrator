@@ -4051,7 +4051,7 @@ test("B3-⑤: 不冻结散文——锚按前缀解析容忍括注改写；冻结
  * 2026-09-26 认证正文迁移：`docs/usage.md` 换为 `docs/certification-runbook.md`
  * （认证操作正文完整迁移；usage 原位置留具名标题与单向链接）。 */
 const SEAT_CERTIFY_REQUIRED_FILES = Object.freeze([
-  "docs/certification-runbook.md",
+  CERT_RUNBOOK_DOC,
   ".wao/decisions/0032-两层验证与认证.md",
   "docs/team-roles.md",
   "config/agents.example.json",
@@ -4127,11 +4127,11 @@ test("B3-⑥: 现行入口 = 文件级五文件全集——缺行/漏文件/重�
   assert.notEqual(missing, row, "夹具失效：漏文件变异未生效");
   assert.throws(() => assertFileLevelSeatRow(missing), /恰 5 个/, "漏文件必须红");
   // 负对照 3——重复替代：计数不变（仍 5），去重集合对账抓红。
-  const dup = row.replace("`config/agents.example.json`", "`docs/certification-runbook.md`");
+  const dup = row.replace("`config/agents.example.json`", `\`${CERT_RUNBOOK_DOC}\``);
   assert.notEqual(dup, row, "夹具失效：重复替代变异未生效");
   assert.throws(() => assertFileLevelSeatRow(dup), /五文件闭集/, "重复替代必须红");
   // 负对照 4——节选锚替代全文路径（文件级入口退化为节选路由）。
-  const excerpt = row.replace("`docs/certification-runbook.md`", "`docs/certification-runbook.md §delta 认证规程`");
+  const excerpt = row.replace(`\`${CERT_RUNBOOK_DOC}\``, `\`${CERT_RUNBOOK_DOC} §delta 认证规程\``);
   assert.notEqual(excerpt, row, "夹具失效：节选锚变异未生效");
   assert.throws(() => assertFileLevelSeatRow(excerpt), /节选/, "节选锚替代全文必须红");
 });
@@ -4271,7 +4271,7 @@ test("认证迁移负对照: 摘原位链接 / 改 runbook 目标节名 / 删 us
   const usage = read(USAGE_DOC);
   const runbook = read(CERT_RUNBOOK_DOC);
   // 负对照 1——原位段链接路径被整体改写（空标题假绿形状）→ 必红。
-  const stripped = usage.split(`docs/certification-runbook.md`).join("docs/usage.md");
+  const stripped = usage.split(CERT_RUNBOOK_DOC).join(USAGE_DOC);
   assert.notEqual(stripped, usage, "夹具失效：摘链接变异未生效");
   assert.throws(() => assertInPlaceCertPointer(stripped, runbook, "delta 认证规程"),
     /缺指向/, "原位段链接丢失必须红（防空标题假绿）");
