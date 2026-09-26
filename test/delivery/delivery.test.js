@@ -80,6 +80,18 @@ function baseInput(worktreePath, baseCommit, overrides = {}) {
   };
 }
 
+// Early-input-rejection cases (e.g. 2A-10..2C-10 below) are thrown by
+// validateInput (src/delivery.js) before any Git/filesystem access, so they
+// need no real repo/worktree: shape-valid synthetic values suffice and are
+// never touched on disk. Only for cases whose assertion never reaches Git.
+const SYNTHETIC_WORKTREE_PATH = "C:/wao-synthetic-worktree";
+const SYNTHETIC_BASE_COMMIT = "0".repeat(40);
+
+/** Filesystem-free base input for cases rejected by validateInput before Git. */
+function syntheticInput(overrides = {}) {
+  return baseInput(SYNTHETIC_WORKTREE_PATH, SYNTHETIC_BASE_COMMIT, overrides);
+}
+
 /** Assert that a delivery call throws with a specific deliveryCode. */
 function assertDeliveryError(fn, code) {
   assert.throws(fn, (err) => {
@@ -242,55 +254,34 @@ test("2A-09: primary checkout fails as non-isolated", async () => {
 
 // ===== 2A Tests: Isolation validation =====
 
-test("2A-10: isolation strategy ephemeral fails closed", async () => {
-  const { repo, baseCommit } = await makeRepo();
-  const wtPath = makeWorktree(repo);
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    assertDeliveryError(
-      () =>
-        inspectDelivery(
-          baseInput(wtPath, baseCommit, {
-            isolation: { type: "worktree", strategy: "ephemeral" },
-          }),
-        ),
-      "invalid_isolation",
-    );
-  } finally {
-    await cleanupRepo(repo);
-  }
+test("2A-10: isolation strategy ephemeral fails closed", () => {
+  assertDeliveryError(
+    () =>
+      inspectDelivery(
+        syntheticInput({
+          isolation: { type: "worktree", strategy: "ephemeral" },
+        }),
+      ),
+    "invalid_isolation",
+  );
 });
 
-test("2A-11: isolation type none fails closed", async () => {
-  const { repo, baseCommit } = await makeRepo();
-  const wtPath = makeWorktree(repo);
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    assertDeliveryError(
-      () =>
-        inspectDelivery(
-          baseInput(wtPath, baseCommit, {
-            isolation: { type: "none", strategy: "persistent" },
-          }),
-        ),
-      "invalid_isolation",
-    );
-  } finally {
-    await cleanupRepo(repo);
-  }
+test("2A-11: isolation type none fails closed", () => {
+  assertDeliveryError(
+    () =>
+      inspectDelivery(
+        syntheticInput({
+          isolation: { type: "none", strategy: "persistent" },
+        }),
+      ),
+    "invalid_isolation",
+  );
 });
 
-test("2A-12: missing isolation fails closed", async () => {
-  const { repo, baseCommit } = await makeRepo();
-  const wtPath = makeWorktree(repo);
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    const input = baseInput(wtPath, baseCommit);
-    delete input.isolation;
-    assertDeliveryError(() => inspectDelivery(input), "invalid_isolation");
-  } finally {
-    await cleanupRepo(repo);
-  }
+test("2A-12: missing isolation fails closed", () => {
+  const input = syntheticInput();
+  delete input.isolation;
+  assertDeliveryError(() => inspectDelivery(input), "invalid_isolation");
 });
 
 // ===== 2A Tests: Git state validation =====
@@ -362,123 +353,74 @@ test("2A-16: pre-staged worker changes fail closed", async () => {
 
 // ===== 2A Tests: allowedPaths validation =====
 
-test("2A-17a: invalid allowedPath — path traversal fails closed", async () => {
-  const { repo, baseCommit } = await makeRepo();
-  const wtPath = makeWorktree(repo);
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    assertDeliveryError(
-      () =>
-        inspectDelivery(
-          baseInput(wtPath, baseCommit, { allowedPaths: ["../evil"] }),
-        ),
-      "invalid_allowed_paths",
-    );
-  } finally {
-    await cleanupRepo(repo);
-  }
+test("2A-17a: invalid allowedPath — path traversal fails closed", () => {
+  assertDeliveryError(
+    () =>
+      inspectDelivery(
+        syntheticInput({ allowedPaths: ["../evil"] }),
+      ),
+    "invalid_allowed_paths",
+  );
 });
 
-test("2A-17b: invalid allowedPath — absolute Windows path fails closed", async () => {
-  const { repo, baseCommit } = await makeRepo();
-  const wtPath = makeWorktree(repo);
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    assertDeliveryError(
-      () =>
-        inspectDelivery(
-          baseInput(wtPath, baseCommit, { allowedPaths: ["C:/evil"] }),
-        ),
-      "invalid_allowed_paths",
-    );
-  } finally {
-    await cleanupRepo(repo);
-  }
+test("2A-17b: invalid allowedPath — absolute Windows path fails closed", () => {
+  assertDeliveryError(
+    () =>
+      inspectDelivery(
+        syntheticInput({ allowedPaths: ["C:/evil"] }),
+      ),
+    "invalid_allowed_paths",
+  );
 });
 
-test("2A-17c: invalid allowedPath — rooted slash fails closed", async () => {
-  const { repo, baseCommit } = await makeRepo();
-  const wtPath = makeWorktree(repo);
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    assertDeliveryError(
-      () =>
-        inspectDelivery(
-          baseInput(wtPath, baseCommit, { allowedPaths: ["/evil"] }),
-        ),
-      "invalid_allowed_paths",
-    );
-  } finally {
-    await cleanupRepo(repo);
-  }
+test("2A-17c: invalid allowedPath — rooted slash fails closed", () => {
+  assertDeliveryError(
+    () =>
+      inspectDelivery(
+        syntheticInput({ allowedPaths: ["/evil"] }),
+      ),
+    "invalid_allowed_paths",
+  );
 });
 
-test("2A-17d: invalid allowedPath — empty string fails closed", async () => {
-  const { repo, baseCommit } = await makeRepo();
-  const wtPath = makeWorktree(repo);
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    assertDeliveryError(
-      () =>
-        inspectDelivery(
-          baseInput(wtPath, baseCommit, { allowedPaths: [""] }),
-        ),
-      "invalid_allowed_paths",
-    );
-  } finally {
-    await cleanupRepo(repo);
-  }
+test("2A-17d: invalid allowedPath — empty string fails closed", () => {
+  assertDeliveryError(
+    () =>
+      inspectDelivery(
+        syntheticInput({ allowedPaths: [""] }),
+      ),
+    "invalid_allowed_paths",
+  );
 });
 
-test("2A-17e: invalid allowedPath — dot fails closed", async () => {
-  const { repo, baseCommit } = await makeRepo();
-  const wtPath = makeWorktree(repo);
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    assertDeliveryError(
-      () =>
-        inspectDelivery(
-          baseInput(wtPath, baseCommit, { allowedPaths: ["."] }),
-        ),
-      "invalid_allowed_paths",
-    );
-  } finally {
-    await cleanupRepo(repo);
-  }
+test("2A-17e: invalid allowedPath — dot fails closed", () => {
+  assertDeliveryError(
+    () =>
+      inspectDelivery(
+        syntheticInput({ allowedPaths: ["."] }),
+      ),
+    "invalid_allowed_paths",
+  );
 });
 
-test("2A-17f: invalid allowedPath — NUL byte fails closed", async () => {
-  const { repo, baseCommit } = await makeRepo();
-  const wtPath = makeWorktree(repo);
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    assertDeliveryError(
-      () =>
-        inspectDelivery(
-          baseInput(wtPath, baseCommit, { allowedPaths: ["foo\0bar"] }),
-        ),
-      "invalid_allowed_paths",
-    );
-  } finally {
-    await cleanupRepo(repo);
-  }
+test("2A-17f: invalid allowedPath — NUL byte fails closed", () => {
+  assertDeliveryError(
+    () =>
+      inspectDelivery(
+        syntheticInput({ allowedPaths: ["foo\0bar"] }),
+      ),
+    "invalid_allowed_paths",
+  );
 });
 
-test("2A-17g: empty allowedPaths array fails closed", async () => {
-  const { repo, baseCommit } = await makeRepo();
-  const wtPath = makeWorktree(repo);
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    assertDeliveryError(
-      () =>
-        inspectDelivery(
-          baseInput(wtPath, baseCommit, { allowedPaths: [] }),
-        ),
-      "invalid_allowed_paths",
-    );
-  } finally {
-    await cleanupRepo(repo);
-  }
+test("2A-17g: empty allowedPaths array fails closed", () => {
+  assertDeliveryError(
+    () =>
+      inspectDelivery(
+        syntheticInput({ allowedPaths: [] }),
+      ),
+    "invalid_allowed_paths",
+  );
 });
 
 test("2A-18: path-segment boundary — src accepts src/a.js but rejects src2/a.js", async () => {
@@ -523,17 +465,10 @@ test("2A-19: allowed path and changed filename containing spaces work", async ()
   }
 });
 
-test("2A-20: missing verification commands and missing reason fail closed", async () => {
-  const { repo, baseCommit } = await makeRepo();
-  const wtPath = makeWorktree(repo);
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    const input = baseInput(wtPath, baseCommit);
-    delete input.verificationCommands;
-    assertDeliveryError(() => inspectDelivery(input), "invalid_verification");
-  } finally {
-    await cleanupRepo(repo);
-  }
+test("2A-20: missing verification commands and missing reason fail closed", () => {
+  const input = syntheticInput();
+  delete input.verificationCommands;
+  assertDeliveryError(() => inspectDelivery(input), "invalid_verification");
 });
 
 test("2A-20b: verification unavailable reason is accepted", async () => {
@@ -635,21 +570,14 @@ test("2A-22: DeliveryRef has exact v1 defaults and canonical full hashes", async
 
 // ===== 2A Tests: Invalid runId =====
 
-test("2A-23: invalid runId with slash fails closed", async () => {
-  const { repo, baseCommit } = await makeRepo();
-  const wtPath = makeWorktree(repo);
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    assertDeliveryError(
-      () =>
-        inspectDelivery(
-          baseInput(wtPath, baseCommit, { runId: "run_evil/../path" }),
-        ),
-      "invalid_run_id",
-    );
-  } finally {
-    await cleanupRepo(repo);
-  }
+test("2A-23: invalid runId with slash fails closed", () => {
+  assertDeliveryError(
+    () =>
+      inspectDelivery(
+        syntheticInput({ runId: "run_evil/../path" }),
+      ),
+    "invalid_run_id",
+  );
 });
 
 // ===== 2B Tests: packageDelivery =====
@@ -1177,75 +1105,47 @@ test("2C-04: ignored files do not affect success — porcelain non-ignored is cl
 
 // ===== 2C Tests: Input boundary hardening =====
 
-test("2C-05: baseCommit starting with '--' must not be interpreted as a git option", async () => {
-  const { repo, baseCommit } = await makeRepo();
-  const wtPath = makeWorktree(repo);
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    assertDeliveryError(
-      () =>
-        inspectDelivery(
-          baseInput(wtPath, baseCommit, { baseCommit: "--evil" }),
-        ),
-      "invalid_base_commit",
-    );
-  } finally {
-    await cleanupRepo(repo);
-  }
+test("2C-05: baseCommit starting with '--' must not be interpreted as a git option", () => {
+  assertDeliveryError(
+    () =>
+      inspectDelivery(
+        syntheticInput({ baseCommit: "--evil" }),
+      ),
+    "invalid_base_commit",
+  );
 });
 
-test("2C-06: verificationCommands with only whitespace must be rejected", async () => {
-  const { repo, baseCommit } = await makeRepo();
-  const wtPath = makeWorktree(repo);
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    assertDeliveryError(
-      () =>
-        inspectDelivery(
-          baseInput(wtPath, baseCommit, { verificationCommands: ["   "] }),
-        ),
-      "invalid_verification",
-    );
-  } finally {
-    await cleanupRepo(repo);
-  }
+test("2C-06: verificationCommands with only whitespace must be rejected", () => {
+  assertDeliveryError(
+    () =>
+      inspectDelivery(
+        syntheticInput({ verificationCommands: ["   "] }),
+      ),
+    "invalid_verification",
+  );
 });
 
-test("2C-07: verificationUnavailableReason with only whitespace must be rejected", async () => {
-  const { repo, baseCommit } = await makeRepo();
-  const wtPath = makeWorktree(repo);
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    assertDeliveryError(
-      () =>
-        inspectDelivery(
-          baseInput(wtPath, baseCommit, {
-            verificationCommands: undefined,
-            verificationUnavailableReason: "   ",
-          }),
-        ),
-      "invalid_verification",
-    );
-  } finally {
-    await cleanupRepo(repo);
-  }
+test("2C-07: verificationUnavailableReason with only whitespace must be rejected", () => {
+  assertDeliveryError(
+    () =>
+      inspectDelivery(
+        syntheticInput({
+          verificationCommands: undefined,
+          verificationUnavailableReason: "   ",
+        }),
+      ),
+    "invalid_verification",
+  );
 });
 
-test("2C-08: allowedPaths with empty segment must be rejected", async () => {
-  const { repo, baseCommit } = await makeRepo();
-  const wtPath = makeWorktree(repo);
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    assertDeliveryError(
-      () =>
-        inspectDelivery(
-          baseInput(wtPath, baseCommit, { allowedPaths: ["src//a.js"] }),
-        ),
-      "invalid_allowed_paths",
-    );
-  } finally {
-    await cleanupRepo(repo);
-  }
+test("2C-08: allowedPaths with empty segment must be rejected", () => {
+  assertDeliveryError(
+    () =>
+      inspectDelivery(
+        syntheticInput({ allowedPaths: ["src//a.js"] }),
+      ),
+    "invalid_allowed_paths",
+  );
 });
 
 test("2C-09: allowedPaths with trailing slash is accepted and normalized (TD-137④)", async () => {
@@ -1264,21 +1164,14 @@ test("2C-09: allowedPaths with trailing slash is accepted and normalized (TD-137
   }
 });
 
-test("2C-10: allowedPaths with leading slash (rooted) must be rejected", async () => {
-  const { repo, baseCommit } = await makeRepo();
-  const wtPath = makeWorktree(repo);
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    assertDeliveryError(
-      () =>
-        inspectDelivery(
-          baseInput(wtPath, baseCommit, { allowedPaths: ["/src"] }),
-        ),
-      "invalid_allowed_paths",
-    );
-  } finally {
-    await cleanupRepo(repo);
-  }
+test("2C-10: allowedPaths with leading slash (rooted) must be rejected", () => {
+  assertDeliveryError(
+    () =>
+      inspectDelivery(
+        syntheticInput({ allowedPaths: ["/src"] }),
+      ),
+    "invalid_allowed_paths",
+  );
 });
 
 test("2C-11: legal paths with normal spaces still work after hardening", async () => {
