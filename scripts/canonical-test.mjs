@@ -205,10 +205,12 @@ export const MANIFEST_GROUPS = Object.freeze([
 //   @8  = 212s  (argv-order scheduling strands the alphabetically-late pole)
 //   @16 = 178s  (conservative knee — solidly past the @8 that failed the target)
 //   @24 = 171s  (diminishing: +8 concurrency saves only ~7s past 16)
+// Historical conclusion: 16 is the smallest value that comfortably meets the delivery window.
 // Current choice: 8, PROVISIONAL (2026-09-26). Basis: a small repeated-case
-// comparison showed less per-case delay at 8 with no observed batch throughput
-// loss. That does NOT establish optimality, full-suite speed, root cause, or
-// acceptance; a full-suite A/B should precede any re-raise past 8.
+// comparison observed shorter TAP process duration (excluding queue time waiting
+// for a runner slot) at 8, with no observed batch throughput loss. That small
+// comparison does NOT establish optimality, full-suite speed, root cause, or
+// acceptance.
 function hardwareParallelism() {
   try { return availableParallelism ? availableParallelism() : cpus().length; }
   catch { return 4; }
