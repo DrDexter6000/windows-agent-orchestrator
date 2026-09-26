@@ -21,6 +21,15 @@ import { TOOLS } from "../../src/mcp/toolSurface.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..", "..");
 
+// TD-177 前置收敛（2026-09-26 认证正文迁移包的最小面）：认证操作正文自
+// docs/usage.md 文件级全文迁移至 docs/certification-runbook.md 后，本文件中
+// 随正文迁移的检查统一引用顶部常量、区分两个源（USAGE_DOC = 部署/日常/事件
+// 投影/MCP §四 等运维正文；CERT_RUNBOOK_DOC = 认证操作正文唯一权威）。
+// 非迁移面的 usage 字面量不在本包收敛范围；B3 冻结历史常量
+// （HISTORICAL_SEAT_INDEX_BLOCK / HISTORICAL_SEAT_MAIN_ROW）逐字节不变。
+const USAGE_DOC = "docs/usage.md";
+const CERT_RUNBOOK_DOC = "docs/certification-runbook.md";
+
 /** 读取仓库内文件（相对 ROOT 的路径），返回字符串。 */
 function read(rel) {
   return readFileSync(join(ROOT, rel), "utf8");
@@ -193,6 +202,9 @@ test("面向 agent 的文档命令调用形式必须统一为 `npm run cli --`�
     "docs/usage.md",
     "docs/troubleshooting.md",
     "docs/smoke-guide.md",
+    // 认证正文迁移（2026-09-26）：迁出的命令正文（smoke/reliability/prune）落在
+    // 认证 runbook，命令形式扫描随之纳入新文件。
+    CERT_RUNBOOK_DOC,
   ];
   // 真命令 token（任何能真触发 version guard 的子命令）。
   const REAL_CMD = "run|spawn|retry|resume|status|tail|collect|stop|runs|workflow|worktree|wao|daemon|registry";
@@ -412,6 +424,8 @@ test("面向 lead/user 的入口文档不得再使用旧 worker 示例名", () =
     "docs/troubleshooting.md",
     "docs/02-architecture.md",
     "AGENT_ONBOARDING.md",
+    // 认证正文迁移（2026-09-26）：旧 worker 名扫描纳入迁出正文所在的新文件。
+    CERT_RUNBOOK_DOC,
   ];
   for (const file of files) {
     const txt = read(file);
@@ -3025,22 +3039,24 @@ test("ADR 0023: team-roles.md 第 7 条与 onboarding 副审配置建议对齐 0
 // （缺一处即"代码有、文档漂"，正是本文件存在的意义）。
 // ---------------------------------------------------------------------------
 
-test("R10-A: usage.md 记录 --model 用法、合成语义与两道硬互斥（人读权威）", () => {
-  const usage = read("docs/usage.md");
+test("R10-A: 认证 runbook（原 usage 场景 1b）记录 --model 用法、合成语义与两道硬互斥（人读权威）", () => {
+  // 2026-09-26 认证正文迁移：场景 1b 正文（含 MCP model 覆盖特有规则）随迁移
+  // 落在 docs/certification-runbook.md；usage 原位置只留标题 + 单向链接。
+  const runbook = read(CERT_RUNBOOK_DOC);
   // 用法与合成语义：单次生效、不落注册表、只替换 .id、兄弟字段保留。
-  assert.ok(usage.includes("--model"), "usage.md 必须记录 --model");
-  assert.match(usage, /只替换.*\.id|replaces? only.*\.id|仅替换.*id/i,
+  assert.ok(runbook.includes("--model"), "认证 runbook 必须记录 --model");
+  assert.match(runbook, /只替换.*\.id|replaces? only.*\.id|仅替换.*id/i,
     "必须说明只替换 model.id（contextWindow/providerID/variant 保留）");
-  assert.match(usage, /单次生效|一次性|单次派发|one dispatch/i, "必须说明单次生效不落配置");
+  assert.match(runbook, /单次生效|一次性|单次派发|one dispatch/i, "必须说明单次生效不落配置");
   // 两道硬互斥。
-  assert.match(usage, /--model[\s\S]{0,200}--require-certified|model_override_certified_conflict/,
+  assert.match(runbook, /--model[\s\S]{0,200}--require-certified|model_override_certified_conflict/,
     "必须记录 × --require-certified 互斥（认证矩阵按 provider+model 记）");
-  assert.match(usage, /model_override_reuse_conflict/,
+  assert.match(runbook, /model_override_reuse_conflict/,
     "必须记录 × provider-session 复用互斥（闭集码）");
   // 失败模式：打错模型名在 provider 期才报错 → 回显 effective model。
-  assert.match(usage, /effective model/, "必须记录 effective model 回显");
+  assert.match(runbook, /effective model/, "必须记录 effective model 回显");
   // 排除边界。
-  assert.match(usage, /spawn[\s\S]{0,120}(不支持|不携带|没有|排除|不在)|--model[\s\S]{0,160}spawn/,
+  assert.match(runbook, /spawn[\s\S]{0,120}(不支持|不携带|没有|排除|不在)|--model[\s\S]{0,160}spawn/,
     "必须记录 spawn/workflow/daemon 排除边界");
 });
 
@@ -3052,13 +3068,16 @@ test("R10-A: usage.md 人读投影的 run.started 行携带 modelOverride 字段
     "run.started 行必须提到 modelOverride 字段（一次性覆盖 vs 改注册表可审计区分）");
 });
 
-test("R10-A: usage.md MCP run_dispatch 节记录可选 model 参数与 reuse 互斥的固定文案", () => {
-  const usage = read("docs/usage.md");
-  const mcpSection = usage.slice(usage.indexOf("### MCP `run_dispatch`"));
-  const bounded = mcpSection.slice(0, mcpSection.indexOf("###", 1) === -1 ? mcpSection.length : mcpSection.indexOf("###", 1));
-  assert.ok(bounded.includes("`model`"), "run_dispatch 节必须记录可选 model 参数");
-  assert.match(bounded, /model_override_reuse_conflict/, "必须记录 MCP 侧 reuse 冲突固定文案");
-  assert.match(bounded, /certif/, "必须说明与认证组合声明的关系（requireCertified 是 server-owned false）");
+test("R10-A: 认证 runbook 场景 1b 节记录 MCP 可选 model 参数与 reuse 互斥的固定文案", () => {
+  // 2026-09-26 认证正文迁移：MCP `model` 覆盖特有规则并入认证 runbook 场景 1b
+  // （usage §MCP run_dispatch 原位置留单向链接）。
+  const runbook = read(CERT_RUNBOOK_DOC);
+  const start = runbook.indexOf("## 场景 1b：单次派发换模型");
+  assert.ok(start !== -1, `${CERT_RUNBOOK_DOC} 缺「场景 1b」节（MCP model 规则合并落点）`);
+  const section = runbook.slice(start, runbook.indexOf("\n## ", start) === -1 ? runbook.length : runbook.indexOf("\n## ", start));
+  assert.ok(section.includes("`model`"), "场景 1b 节必须记录 MCP 可选 model 参数");
+  assert.match(section, /model_override_reuse_conflict/, "必须记录 MCP 侧 reuse 冲突固定文案");
+  assert.match(section, /certif/, "必须说明与认证组合声明的关系（requireCertified 是 server-owned false）");
 });
 
 test("R10-A: RUN_USAGE_TEXT 用法页携带 --model（CLI 面；生成层字节由 docsSurface-1 守卫）", async () => {
@@ -3127,41 +3146,44 @@ test("R11-2 0024: AGENT_ONBOARDING.md 双源说明 + usage.md 配置节追加（
 // 生成层表面。
 // =====================================================================
 
-test("R11-1: usage.md 记录 --reasoning 用法——闭集值域与 runtime SSOT 同源（零漂移）", async () => {
-  const usage = read("docs/usage.md");
+test("R11-1: 认证 runbook（原 usage 场景 1c）记录 --reasoning 用法——闭集值域与 runtime SSOT 同源（零漂移）", async () => {
+  // 2026-09-26 认证正文迁移：场景 1c 正文（含 MCP reasoning 覆盖特有规则）
+  // 随迁移落在 docs/certification-runbook.md。
+  const runbook = read(CERT_RUNBOOK_DOC);
   const { REASONING_EFFORTS } = await import("../../src/registry.js");
   // 每一个 SSOT 成员都必须出现在闭集文档表述里（成员级绑定，而非一次
   // 性字符串快照——集合扩展时本测试红，提示补文档）。
-  const setLine = usage.match(/minimal\s*\/\s*low\s*\/\s*medium\s*\/\s*high\s*\/\s*xhigh\s*\/\s*max/);
-  assert.ok(setLine, "usage.md 必须以斜杠分隔形式记录六值闭集");
+  const setLine = runbook.match(/minimal\s*\/\s*low\s*\/\s*medium\s*\/\s*high\s*\/\s*xhigh\s*\/\s*max/);
+  assert.ok(setLine, "认证 runbook 必须以斜杠分隔形式记录六值闭集");
   for (const member of REASONING_EFFORTS) {
-    assert.ok(usage.includes(member), `usage.md 闭集表述缺成员 ${member}`);
+    assert.ok(runbook.includes(member), `认证 runbook 闭集表述缺成员 ${member}`);
   }
-  assert.match(usage, /只替换.*\.effort|replaces? only.*\.effort/i,
+  assert.match(runbook, /只替换.*\.effort|replaces? only.*\.effort/i,
     "必须说明只替换 reasoning.effort");
-  assert.match(usage, /REASONING_EFFORTS/, "必须指出闭集 SSOT 的家（registry.js）");
+  assert.match(runbook, /REASONING_EFFORTS/, "必须指出闭集 SSOT 的家（registry.js）");
 });
 
-test("R11-1: usage.md 记录 --reasoning 两道硬互斥与组合策略拒绝指对旗标", () => {
-  const usage = read("docs/usage.md");
-  assert.match(usage, /reasoning_override_certified_conflict/,
+test("R11-1: 认证 runbook 记录 --reasoning 两道硬互斥与组合策略拒绝指对旗标", () => {
+  const runbook = read(CERT_RUNBOOK_DOC);
+  assert.match(runbook, /reasoning_override_certified_conflict/,
     "必须记录 × --require-certified 互斥（闭集码）");
-  assert.match(usage, /reasoning_override_reuse_conflict/,
+  assert.match(runbook, /reasoning_override_reuse_conflict/,
     "必须记录 × provider-session 复用互斥（闭集码，typed ReasoningOverrideConflictError）");
   // 组合策略（--model + --reasoning）拒绝指对旗标：model 冲突确定性先拒。
-  assert.match(usage, /组合策略拒绝指对旗标/, "必须说明组合覆盖拒绝时指对旗标的确定性顺序");
+  assert.match(runbook, /组合策略拒绝指对旗标/, "必须说明组合覆盖拒绝时指对旗标的确定性顺序");
   // resume 重建链。
-  assert.match(usage, /reasoningOverride/, "必须记录 run.started.reasoningOverride 事实与 resume 重建");
+  assert.match(runbook, /reasoningOverride/, "必须记录 run.started.reasoningOverride 事实与 resume 重建");
 });
 
-test("R11-1: usage.md MCP run_dispatch 节记录可选 reasoning 参数、闭集枚举 wire 化与 contract_check 忽略注记", () => {
-  const usage = read("docs/usage.md");
-  const mcpSection = usage.slice(usage.indexOf("### MCP `run_dispatch`"));
-  const bounded = mcpSection.slice(0, mcpSection.indexOf("###", 1) === -1 ? mcpSection.length : mcpSection.indexOf("###", 1));
-  assert.ok(bounded.includes("`reasoning`"), "run_dispatch 节必须记录可选 reasoning 参数");
-  assert.match(bounded, /reasoning_override_reuse_conflict/, "必须记录 MCP 侧 reuse 冲突固定文案");
-  assert.match(bounded, /忽略 `reasoning`/, "必须记录 contract_check 共享 schema 但忽略 reasoning 的注记");
-  assert.match(bounded, /zod enum|闭集枚举/, "必须说明 wire 侧直接序列化闭集枚举（比正则更严）");
+test("R11-1: 认证 runbook 场景 1c 节记录 MCP 可选 reasoning 参数、闭集枚举 wire 化与 contract_check 忽略注记", () => {
+  const runbook = read(CERT_RUNBOOK_DOC);
+  const start = runbook.indexOf("## 场景 1c：单次派发换推理力度");
+  assert.ok(start !== -1, `${CERT_RUNBOOK_DOC} 缺「场景 1c」节（MCP reasoning 规则合并落点）`);
+  const section = runbook.slice(start, runbook.indexOf("\n## ", start) === -1 ? runbook.length : runbook.indexOf("\n## ", start));
+  assert.ok(section.includes("`reasoning`"), "场景 1c 节必须记录 MCP 可选 reasoning 参数");
+  assert.match(section, /reasoning_override_reuse_conflict/, "必须记录 MCP 侧 reuse 冲突固定文案");
+  assert.match(section, /忽略 `reasoning`/, "必须记录 contract_check 共享 schema 但忽略 reasoning 的注记");
+  assert.match(section, /zod enum|闭集枚举/, "必须说明 wire 侧直接序列化闭集枚举（比正则更严）");
 });
 
 test("R11-1: RUN_USAGE_TEXT 用法页携带 --reasoning（CLI 面；生成层字节由 docsSurface-1 守卫）", async () => {
@@ -3183,14 +3205,16 @@ test("R11-1: RUN_USAGE_TEXT 用法页携带 --reasoning（CLI 面；生成层字
 // 场景 5 retry 节补记"任务文本按 runId 绑定取本 run 最后一条 prompt 记录"。
 // ---------------------------------------------------------------------------
 
-test("R13: usage.md retry 节记录任务文本的 runId 绑定取法（TD-127 修复的人读锚）", () => {
-  const usage = read("docs/usage.md");
-  const start = usage.indexOf("### 场景 5：重试 / 恢复");
-  const end = usage.indexOf("### 场景 6");
-  assert.ok(start !== -1 && end > start, "usage.md 必须有场景 5（重试/恢复）节");
-  const section = usage.slice(start, end);
+test("R13: 认证 runbook retry 继承节记录任务文本的 runId 绑定取法（TD-127 修复的人读锚）", () => {
+  // 2026-09-26 认证正文迁移：retry per-dispatch 覆盖继承正文（含 R13 任务文本
+  // 取法）随迁移落在 docs/certification-runbook.md；usage 场景 5 留单向链接。
+  const runbook = read(CERT_RUNBOOK_DOC);
+  const start = runbook.indexOf("## retry 的 per-dispatch 覆盖继承");
+  assert.ok(start !== -1, `${CERT_RUNBOOK_DOC} 缺「retry 的 per-dispatch 覆盖继承」节`);
+  const end = runbook.indexOf("\n## ", start);
+  const section = runbook.slice(start, end === -1 ? runbook.length : end);
   assert.match(section, /prompt\.sent[\s\S]{0,160}runId 绑定|runId 绑定[\s\S]{0,160}prompt\.sent/,
-    "retry 节必须记录任务文本按 runId 绑定取本 run 最后一条 prompt 记录");
+    "retry 继承节必须记录任务文本按 runId 绑定取本 run 最后一条 prompt 记录");
 });
 
 // ---------------------------------------------------------------------------
@@ -3200,12 +3224,13 @@ test("R13: usage.md retry 节记录任务文本的 runId 绑定取法（TD-127 �
 // 同步）——代码有、文档漂正是本文件存在的意义。
 // ---------------------------------------------------------------------------
 
-test("R12: usage.md retry 节记录覆盖继承语义 + 替换 flag + 坏值 fail-closed + 无覆盖重试指 run（人读权威）", () => {
-  const usage = read("docs/usage.md");
-  const start = usage.indexOf("### 场景 5：重试 / 恢复");
-  const end = usage.indexOf("### 场景 6");
-  assert.ok(start !== -1 && end > start, "usage.md 必须有场景 5（重试/恢复）节");
-  const section = usage.slice(start, end);
+test("R12: 认证 runbook retry 继承节记录覆盖继承语义 + 替换 flag + 坏值 fail-closed + 无覆盖重试指 run（人读权威）", () => {
+  // 2026-09-26 认证正文迁移：R12 继承正文随迁移落在 docs/certification-runbook.md。
+  const runbook = read(CERT_RUNBOOK_DOC);
+  const start = runbook.indexOf("## retry 的 per-dispatch 覆盖继承");
+  const end = runbook.indexOf("\n## ", start);
+  assert.ok(start !== -1 && (end === -1 || end > start), `${CERT_RUNBOOK_DOC} 必须有「retry 的 per-dispatch 覆盖继承」节`);
+  const section = runbook.slice(start, end === -1 ? runbook.length : end);
   // 继承语义：源 run.started 覆盖事实原样继承（与 resume 重建链对称）。
   assert.ok(/run\.started\.modelOverride/.test(section) && /run\.started\.reasoningOverride/.test(section),
     "retry 节必须点名继承来源（run.started 双覆盖事实）");
@@ -3252,24 +3277,25 @@ test("R12: HELP_TEXT retry 命令行携带替换 flag（CLI 面；cli.md 字节�
 //   拒绝语义不同但各自正确）。
 // ---------------------------------------------------------------------------
 
-test("R12-C C-4: usage.md 排除边界句如实含 retry（--model/--reasoning 于 retry 为替换继承值）", () => {
-  const usage = read("docs/usage.md");
+test("R12-C C-4: 认证 runbook 排除边界句如实含 retry（--model/--reasoning 于 retry 为替换继承值）", () => {
+  // 2026-09-26 认证正文迁移：排除边界句随场景 1b/1c 正文迁至 docs/certification-runbook.md。
+  const runbook = read(CERT_RUNBOOK_DOC);
   for (const flag of ["--model", "--reasoning"]) {
     const sentence = `\`${flag}\` 只存在于 \`run\`（含 \`--background\`）与 \`retry\`（retry 上为替换继承值`;
-    assert.ok(usage.includes(sentence),
-      `docs/usage.md 的 ${flag} 排除边界句必须如实含 retry："${sentence}…"`);
+    assert.ok(runbook.includes(sentence),
+      `${CERT_RUNBOOK_DOC} 的 ${flag} 排除边界句必须如实含 retry："${sentence}…"`);
   }
   // 反回归：R12 前的独占句式不得复现。
-  assert.ok(!usage.includes("只存在于 `run`（含 `--background`）。"),
-    "docs/usage.md 不得回退为'--model/--reasoning 只存在于 run'的旧独占边界句（R12 起 retry 面也接受）");
+  assert.ok(!runbook.includes("只存在于 `run`（含 `--background`）。"),
+    `${CERT_RUNBOOK_DOC} 不得回退为'--model/--reasoning 只存在于 run'的旧独占边界句（R12 起 retry 面也接受）`);
 });
 
-test("R12-C C-1/C-2/C-3/C-5: usage.md retry 节诚实化锚（继承权威 + 范围收窄 + reuse 真话 + 旧格式宽容）", () => {
-  const usage = read("docs/usage.md");
-  const start = usage.indexOf("### 场景 5：重试 / 恢复");
-  const end = usage.indexOf("### 场景 6");
-  assert.ok(start !== -1 && end > start, "usage.md 必须有场景 5（重试/恢复）节");
-  const section = usage.slice(start, end);
+test("R12-C C-1/C-2/C-3/C-5: 认证 runbook retry 继承节诚实化锚（继承权威 + 范围收窄 + reuse 真话 + 旧格式宽容）", () => {
+  const runbook = read(CERT_RUNBOOK_DOC);
+  const start = runbook.indexOf("## retry 的 per-dispatch 覆盖继承");
+  const end = runbook.indexOf("\n## ", start);
+  assert.ok(start !== -1 && (end === -1 || end > start), `${CERT_RUNBOOK_DOC} 必须有「retry 的 per-dispatch 覆盖继承」节`);
+  const section = runbook.slice(start, end === -1 ? runbook.length : end);
   // C-1：继承权威 = 首条绑定该 runId 的 run.started（尾部伪造不采信）。
   assert.ok(section.includes("首条绑定该 runId 的 `run.started`"),
     "C-1：必须声明继承权威为首条 runId 绑定的 run.started（篡改探针的文档面）");
@@ -3455,12 +3481,14 @@ test("TD-162 生成物守卫: docs/surface/certification.md 与 renderCertificat
 // 基线日 + 期限，由机器保证「到期必须复核」，不靠人记（Owner 当日两次提出该期限）。
 test("TD-184 守卫: 上游 harness 原语表覆盖闭集 + 基线日在刷新期限内", async () => {
   const { KNOWN_BACKENDS } = await import("../../src/registry.js");
-  const usage = read("docs/usage.md");
-  const heading = "### 上游 harness 原语对照（实测）";
-  const start = usage.indexOf(heading);
-  assert.ok(start !== -1, "docs/usage.md 缺「上游 harness 原语对照（实测）」节");
-  const rest = usage.slice(start + heading.length);
-  const next = rest.indexOf("\n### ");
+  // 2026-09-26 认证正文迁移：原语表随正文迁至 docs/certification-runbook.md
+  // （docs/usage.md 原位置留同名标题 + 单向链接，由迁移链接守卫另行钉住）。
+  const runbook = read(CERT_RUNBOOK_DOC);
+  const heading = "## 上游 harness 原语对照（实测）";
+  const start = runbook.indexOf(heading);
+  assert.ok(start !== -1, `${CERT_RUNBOOK_DOC} 缺「上游 harness 原语对照（实测）」节`);
+  const rest = runbook.slice(start + heading.length);
+  const next = rest.indexOf("\n## ");
   const section = next === -1 ? rest : rest.slice(0, next);
   const tableLines = section.split("\n").filter((l) => l.startsWith("|"));
   assert.ok(tableLines.length >= 3, "上游原语表解析异常（表行不足 3 行）");
@@ -3617,13 +3645,13 @@ function parseReadingUnits(cell) {
  * 本仓节标题惯用代码体（如 docs/usage.md 门合同所在节 `### MCP \`run_dispatch\`（…）`），
  * 字面 startsWith 对任何含反引号的标题前缀都寻址不到。剥反引号只扩大可寻址面；
  * 0 命中 / 歧义仍必红，守卫不放宽（对照夹具见 B3-① 的 code-span 对照）。 */
-function resolveHeadingIn(text, rel, anchor) {
+function resolveHeadingIn(text, rel, anchor, syncHint = "须同步 §0.1.1 索引") {
   const hits = text.split(/\r?\n/).filter((l) => {
     const m = l.match(/^#{1,6}\s+(.*)$/);
     return m !== null && m[1].replace(/`/g, "").startsWith(anchor);
   });
   assert.ok(hits.length > 0,
-    `${rel} 节锚 §${anchor} 解析 0 命中——节被改名/删除，须同步 §0.1.1 索引（断锚不得当空集）`);
+    `${rel} 节锚 §${anchor} 解析 0 命中——节被改名/删除，${syncHint}（断锚不得当空集）`);
   assert.ok(hits.length === 1,
     `${rel} 节锚 §${anchor} 歧义（${hits.length} 个标题命中）——锚必须唯一`);
   return hits[0];
@@ -3948,13 +3976,15 @@ test("B3-③: 依赖完整——现行主表行保留 adversarialEscape 追加�
   assert.ok(dep46, "历史索引行缺显式依赖 docs/02-architecture.md §4.6（containment 事件合同——冻结副本失真？）");
   assert.ok(dep41, "历史索引行缺显式依赖 docs/02-architecture.md §4.1（状态机终态判定——冻结副本失真？）");
   // (b) 依赖是**真实的**（TD-120 关系型，防指针凭空声明依赖）：
-  //     delta 规程节确实消费 workdir_escape / failed 词汇；
+  //     delta 规程节确实消费 workdir_escape / failed 词汇（2026-09-26 认证正文
+  //     迁移后正文在 docs/certification-runbook.md；usage 原位链接可达性由
+  //     认证迁移链接守卫钉住）；
   //     architecture §4.6 确实定义 run.isolation_violation 事件合同；§4.1 确实定义 failed 终态。
-  const delta = sectionText("docs/usage.md", "delta 认证规程");
+  const delta = sectionText(CERT_RUNBOOK_DOC, "delta 认证规程");
   assert.ok(delta.includes("workdir_escape"),
-    "usage.md §delta 认证规程 不再含 workdir_escape——依赖声明与正文失联，须同步主表行指针");
+    `${CERT_RUNBOOK_DOC} §delta 认证规程 不再含 workdir_escape——依赖声明与正文失联，须同步主表行指针`);
   assert.ok(delta.includes("failed"),
-    "usage.md §delta 认证规程 不再含 failed 终态——依赖声明与正文失联，须同步主表行指针");
+    `${CERT_RUNBOOK_DOC} §delta 认证规程 不再含 failed 终态——依赖声明与正文失联，须同步主表行指针`);
   const containment = sectionText("docs/02-architecture.md", dep46.anchor);
   assert.ok(containment.includes("run.isolation_violation"),
     "architecture §4.6 缺 run.isolation_violation 事件合同（依赖锚空转）");
@@ -4017,9 +4047,11 @@ test("B3-⑤: 不冻结散文——锚按前缀解析容忍括注改写；冻结
 // assert.notEqual 证明确已生效，防"变异未生效 ⇒ 假绿"（TD-81 教训）。
 // ============================================================
 
-/** seat-certify 文件级入口的五文件闭集（与 §0.1 主表行对账的期望全集）。 */
+/** seat-certify 文件级入口的五文件闭集（与 §0.1 主表行对账的期望全集）。
+ * 2026-09-26 认证正文迁移：`docs/usage.md` 换为 `docs/certification-runbook.md`
+ * （认证操作正文完整迁移；usage 原位置留具名标题与单向链接）。 */
 const SEAT_CERTIFY_REQUIRED_FILES = Object.freeze([
-  "docs/usage.md",
+  "docs/certification-runbook.md",
   ".wao/decisions/0032-两层验证与认证.md",
   "docs/team-roles.md",
   "config/agents.example.json",
@@ -4095,11 +4127,11 @@ test("B3-⑥: 现行入口 = 文件级五文件全集——缺行/漏文件/重�
   assert.notEqual(missing, row, "夹具失效：漏文件变异未生效");
   assert.throws(() => assertFileLevelSeatRow(missing), /恰 5 个/, "漏文件必须红");
   // 负对照 3——重复替代：计数不变（仍 5），去重集合对账抓红。
-  const dup = row.replace("`config/agents.example.json`", "`docs/usage.md`");
+  const dup = row.replace("`config/agents.example.json`", "`docs/certification-runbook.md`");
   assert.notEqual(dup, row, "夹具失效：重复替代变异未生效");
   assert.throws(() => assertFileLevelSeatRow(dup), /五文件闭集/, "重复替代必须红");
   // 负对照 4——节选锚替代全文路径（文件级入口退化为节选路由）。
-  const excerpt = row.replace("`docs/usage.md`", "`docs/usage.md §delta 认证规程`");
+  const excerpt = row.replace("`docs/certification-runbook.md`", "`docs/certification-runbook.md §delta 认证规程`");
   assert.notEqual(excerpt, row, "夹具失效：节选锚变异未生效");
   assert.throws(() => assertFileLevelSeatRow(excerpt), /节选/, "节选锚替代全文必须红");
 });
@@ -4145,4 +4177,112 @@ test("B3-⑦: 无条件全文与三义务在场——条件化/节选措辞、�
     assert.notEqual(mutated, row, `夹具失效：${label} 删除变异未生效`);
     assert.throws(() => assertFileLevelSeatRow(mutated), re, `${label} 丢失必须红`);
   }
+});
+
+// ============================================================
+// 认证正文迁移（2026-09-26，seat-certify 五文件换成员）：原位链接可达性守卫。
+// docs/certification-runbook.md 是认证操作正文唯一权威；docs/usage.md 原位置
+// 只留原具名标题 + 指向新文件的单向链接。历史引用（docs/team-roles.md:27、
+// AGENT_ONBOARDING.md:122、docs/tech-debt.md TD-184、scripts/reliability/
+// args.mjs「认证节」、src/backends/factory.js 能力轴骨架等）经这些标题到达新
+// 正文——本守卫钉住"标题在 + 链接在 + 目标节真实存在"三层关系，防空标题假绿
+// （标题还在、链接被删或目标节改名时必须红）。断言核心抽成文本输入的纯函数，
+// 负对照喂变异文本断言必抛（B3-②R 反例固化模式；变异只发生在内存副本上）。
+// ============================================================
+
+/** usage 原位保留的具名标题 → runbook 目标节锚前缀（两侧同名前缀）。 */
+const CERT_MIGRATION_IN_PLACE_HEADINGS = Object.freeze([
+  "接入新模型 / 新运行时",
+  "上游 harness 原语对照",
+  "delta 认证规程",
+  "认证检查结果五态与能力轴分层",
+  "场景 1b：单次派发换模型",
+  "场景 1c：单次派发换推理力度",
+]);
+
+/** usage §四 迁出段的具名导语（历史引用落点）——所在行必须同行携带单向链接。 */
+const CERT_MIGRATION_IN_PLACE_LEADS = Object.freeze([
+  "TD-111 certification advisory context",
+  "M11-7 凭据可用性",
+  "M12-6 FR-02 provider readiness 真相",
+  "行为变更（TD-131/TD-132 认证门收口",
+  "R10-A 单次模型覆盖（可选，`model`）",
+  "R11-1 单次推理力度覆盖（可选，`reasoning`）",
+]);
+
+/** 纯函数：usage 原位标题段的链接可达性（0 命中/歧义/缺链接/目标节缺失必红）。 */
+function assertInPlaceCertPointer(usageText, runbookText, anchorPrefix) {
+  // (1) usage 侧原具名标题唯一在场（前缀解析：0 命中/歧义必红）。
+  const headingLine = resolveHeadingIn(usageText, USAGE_DOC, anchorPrefix, "须同步认证迁移原位标题");
+  // (2) 标题到下一标题之间的原位段必须携带指向 runbook 的单向链接路径。
+  const lines = usageText.split(/\r?\n/);
+  const idx = lines.indexOf(headingLine);
+  assert.ok(idx !== -1, "夹具失效：标题行定位失败");
+  let end = idx + 1;
+  while (end < lines.length && !/^#{1,6}\s+/.test(lines[end])) end++;
+  const section = lines.slice(idx, end).join("\n");
+  assert.ok(section.includes(CERT_RUNBOOK_DOC),
+    `${USAGE_DOC} §${anchorPrefix} 原位段缺指向 ${CERT_RUNBOOK_DOC} 的单向链接（不得只留空标题）`);
+  // (3) 链接目标节在 runbook 真实存在且唯一（防目标节改名后链接悬空）。
+  resolveHeadingIn(runbookText, CERT_RUNBOOK_DOC, anchorPrefix, "须同步原位单向链接");
+}
+
+test("认证迁移: usage 原位具名标题携带单向链接且目标节在 runbook 真实可达（防空标题假绿）", () => {
+  const usage = read(USAGE_DOC);
+  const runbook = read(CERT_RUNBOOK_DOC);
+  for (const anchor of CERT_MIGRATION_IN_PLACE_HEADINGS) {
+    assertInPlaceCertPointer(usage, runbook, anchor);
+  }
+  // 场景 5 内的 retry 覆盖继承迁出段（非独立标题）：原位置必须以指针可达。
+  const s5Start = usage.indexOf("### 场景 5：重试 / 恢复");
+  const s5End = usage.indexOf("### 场景 6");
+  assert.ok(s5Start !== -1 && s5End > s5Start, `${USAGE_DOC} 必须有场景 5（重试/恢复）节`);
+  const s5 = usage.slice(s5Start, s5End);
+  assert.ok(s5.includes(CERT_RUNBOOK_DOC),
+    `${USAGE_DOC} 场景 5 的 retry 覆盖继承迁出后缺指向 ${CERT_RUNBOOK_DOC} 的单向链接`);
+  resolveHeadingIn(runbook, CERT_RUNBOOK_DOC, "retry 的 per-dispatch 覆盖继承");
+  // §四 迁出段的具名导语（历史引用落点）同行携带链接。
+  for (const lead of CERT_MIGRATION_IN_PLACE_LEADS) {
+    const line = usage.split(/\r?\n/).find((l) => l.includes(lead));
+    assert.ok(line !== undefined, `${USAGE_DOC} 缺迁出段导语落点：${lead}`);
+    assert.ok(line.includes(CERT_RUNBOOK_DOC),
+      `${USAGE_DOC} 导语「${lead}」所在行缺指向 ${CERT_RUNBOOK_DOC} 的单向链接`);
+  }
+  // 「认证节」类泛指的总落点（scripts/reliability/args.mjs、ADR-0032 附则、
+  // src/backends/factory.js 能力轴骨架的旧指向）：usage 必须有该标题并链接新文件。
+  // （该标题是 usage 侧导航落点，不要求 runbook 存在同名节——runbook 各目标节
+  // 已由上方逐项锚点核对。）
+  const landing = resolveHeadingIn(usage, USAGE_DOC, "认证正文总落点", "须保留认证总落点标题");
+  {
+    const lines = usage.split(/\r?\n/);
+    const idx = lines.indexOf(landing);
+    let endL = idx + 1;
+    while (endL < lines.length && !/^#{1,6}\s+/.test(lines[endL])) endL++;
+    assert.ok(lines.slice(idx, endL).join("\n").includes(CERT_RUNBOOK_DOC),
+      `${USAGE_DOC} §认证正文总落点 缺指向 ${CERT_RUNBOOK_DOC} 的链接（泛指「认证节」旧指向将失去落点）`);
+  }
+  // 唯一权威方向：runbook 不得把认证必需义务路由回 usage（单向链接纪律）——
+  // runbook 头部声明在场（正文级反向引用由各迁移检查的读向承载）。
+  assert.ok(runbook.includes("不把必需认证义务路由回 `docs/usage.md`"),
+    `${CERT_RUNBOOK_DOC} 头部缺「不把必需认证义务路由回 docs/usage.md」单向链接纪律声明`);
+});
+
+test("认证迁移负对照: 摘原位链接 / 改 runbook 目标节名 / 删 usage 原位标题必红（反例固化）", () => {
+  const usage = read(USAGE_DOC);
+  const runbook = read(CERT_RUNBOOK_DOC);
+  // 负对照 1——原位段链接路径被整体改写（空标题假绿形状）→ 必红。
+  const stripped = usage.split(`docs/certification-runbook.md`).join("docs/usage.md");
+  assert.notEqual(stripped, usage, "夹具失效：摘链接变异未生效");
+  assert.throws(() => assertInPlaceCertPointer(stripped, runbook, "delta 认证规程"),
+    /缺指向/, "原位段链接丢失必须红（防空标题假绿）");
+  // 负对照 2——runbook 目标节改名（链接悬空）→ 必红。
+  const renamed = runbook.replace("## delta 认证规程（lane 架构，ADR-0025 批次 3）", "## 已改名的认证规程节");
+  assert.notEqual(renamed, runbook, "夹具失效：目标节改名变异未生效");
+  assert.throws(() => assertInPlaceCertPointer(usage, renamed, "delta 认证规程"),
+    /0 命中/, "runbook 目标节改名必须红（单向链接悬空）");
+  // 负对照 3——usage 原位标题被删（历史引用落点失联）→ 必红。
+  const noHeading = usage.replace("### delta 认证规程（lane 架构，ADR-0025 批次 3）\n", "");
+  assert.notEqual(noHeading, usage, "夹具失效：删标题变异未生效");
+  assert.throws(() => assertInPlaceCertPointer(noHeading, runbook, "delta 认证规程"),
+    /0 命中|歧义/, "usage 原位标题删除必须红（历史引用落点失联）");
 });

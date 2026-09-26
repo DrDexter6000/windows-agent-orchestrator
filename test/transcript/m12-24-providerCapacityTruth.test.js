@@ -278,12 +278,14 @@ test("M12-24-REAL1: persisted JSONL transcript projects quota exhaustion through
 });
 
 test("M12-24-DOC1: Lead guidance distinguishes static readiness from live capacity", async () => {
-  const [skill, usage, architecture] = await Promise.all([
+  // 2026-09-26 认证正文迁移：usage 对应的“complete ≠ 当前 provider quota”检查
+  // 随正文迁至 docs/certification-runbook.md §认证与当前就绪。
+  const [skill, runbook, architecture] = await Promise.all([
     readFile(new URL("../../SKILL.md", import.meta.url), "utf8"),
-    readFile(new URL("../../docs/usage.md", import.meta.url), "utf8"),
+    readFile(new URL("../../docs/certification-runbook.md", import.meta.url), "utf8"),
     readFile(new URL("../../docs/02-architecture.md", import.meta.url), "utf8"),
   ]);
   assert.match(skill, /does \*\*not\*\* probe current provider authentication, entitlement, quota, or rate limits/i);
-  assert.match(usage, /complete.*not.*provider.*quota/i);
+  assert.match(runbook, /complete.*not.*provider.*quota/i);
   assert.match(architecture, /provider-capacity.*no-effect/i);
 });

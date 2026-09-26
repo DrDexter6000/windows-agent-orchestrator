@@ -1030,6 +1030,11 @@ test("ARCH-03: no 'node ...wao-cli.cmd' in docs or generated content", async () 
   const usagePath = join(dirname(fileURLToPath(import.meta.url)), "../..", "docs", "usage.md");
   const usageSrc = readFileSync(usagePath, "utf8");
   assert.ok(!/node\s+.*wao-cli\.cmd/.test(usageSrc));
+  // 2026-09-26 认证正文迁移：smoke/reliability/prune 命令正文迁至认证 runbook，
+  // 错误 Node 命令形式检查同时覆盖迁出的命令正文所在文件。
+  const runbookPath = join(dirname(fileURLToPath(import.meta.url)), "../..", "docs", "certification-runbook.md");
+  const runbookSrc = readFileSync(runbookPath, "utf8");
+  assert.ok(!/node\s+.*wao-cli\.cmd/.test(runbookSrc));
   const modulePath = join(dirname(fileURLToPath(import.meta.url)), "../..", "src", "application", "mcpWorkspaceActivation.js");
   const src = readFileSync(modulePath, "utf8");
   assert.ok(!/node\s+.*wao-cli\.cmd/.test(src));

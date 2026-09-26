@@ -486,11 +486,16 @@ test("M12-6-FR02-D9: registry_list round-trips providerReadiness through the wir
 // ===== (e) Docs consistency machine guard =====
 
 test("M12-6-FR02-E1: docs state the truth contract (no authenticated/entitled/live claim without probe)", () => {
+  // 2026-09-26 认证正文迁移：FR-02 provider readiness 真相正文随迁移落在
+  // docs/certification-runbook.md §认证与当前就绪（usage 原位置留单向链接）——
+  // 就绪真相检查改读新权威；诊断码闭集仍读原来的有效来源（usage §四
+  // run_diagnose 节，正文未迁移）。
+  const runbook = readFileSync(join(process.cwd(), "docs", "certification-runbook.md"), "utf8");
+  assert.ok(runbook.includes("providerReadiness"), "certification-runbook.md documents providerReadiness");
+  assert.ok(runbook.includes("authenticationStatus"), "certification-runbook.md documents authenticationStatus");
+  assert.ok(runbook.includes("liveCheckStatus"), "certification-runbook.md documents liveCheckStatus");
+  assert.ok(runbook.includes("not_checked"), "certification-runbook.md documents the not_checked closed value");
   const usage = readFileSync(join(process.cwd(), "docs", "usage.md"), "utf8");
-  assert.ok(usage.includes("providerReadiness"), "usage.md documents providerReadiness");
-  assert.ok(usage.includes("authenticationStatus"), "usage.md documents authenticationStatus");
-  assert.ok(usage.includes("liveCheckStatus"), "usage.md documents liveCheckStatus");
-  assert.ok(usage.includes("not_checked"), "usage.md documents the not_checked closed value");
   assert.ok(usage.includes("subscription_access_disabled"), "usage.md documents the diagnosis code closed set");
   const arch = readFileSync(join(process.cwd(), "docs", "02-architecture.md"), "utf8");
   assert.ok(arch.includes("providerReadiness"), "architecture.md documents providerReadiness");

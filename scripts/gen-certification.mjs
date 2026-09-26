@@ -257,7 +257,7 @@ export function renderCertification() {
   lines.push("");
   lines.push("## 二、配置表达力四轴判定（validateAgentPolicy 行为探针派生）");
   lines.push("");
-  lines.push("判定词（只管 **WAO 接线层**）：**支持**＝全部探针通过；**不支持**＝全部探针被 `validateAgentPolicy` 拒绝（fail-closed 硬拒，不是静默忽略——成因三分：上游无此能力 / 上游有原语但 WAO 未接线 / 配置形状不一致被拒，逐条事实见 `docs/usage.md`「上游 harness 原语对照（实测）」节）；**条件**＝部分探针通过（条件写在格内，探针派生）。");
+  lines.push("判定词（只管 **WAO 接线层**）：**支持**＝全部探针通过；**不支持**＝全部探针被 `validateAgentPolicy` 拒绝（fail-closed 硬拒，不是静默忽略——成因三分：上游无此能力 / 上游有原语但 WAO 未接线 / 配置形状不一致被拒，逐条事实见 `docs/certification-runbook.md`「上游 harness 原语对照（实测）」节）；**条件**＝部分探针通过（条件写在格内，探针派生）。");
   lines.push("");
   lines.push("| backend | model override（model.id / --model） | reasoning effort | model.contextWindow | provider 块 |");
   lines.push("| --- | --- | --- | --- | --- |");
@@ -292,7 +292,7 @@ export function renderCertification() {
   lines.push("- **组件层台账**：`runs/component-checks.json`（gitignored 运行时状态）——backend/llm 单独验证记录（组件键含 runtimeIdentity 指纹，版本漂移降 advisory）。刷新：`npm run component-check`。");
   lines.push("- **组合层台账**：`runs/reliability-summary.json`（gitignored 运行时状态）——按席位 agentId 的 certified/conditional/draft-only 台账。刷新：`npm run reliability`。");
   lines.push("- 台账是**运行时状态**，由上述命令产出与刷新；本生成文件只承载静态能力/配置表达力事实（§一/§二）——嵌入台账 live 值会把它变成会过期的快照，禁止。");
-  lines.push("- 认证检查结果五态判定纪律（pass / fail / not-applicable / blocked / inconclusive）与能力轴分层：`docs/usage.md`（ADR-0032 §8 节）；两层认证决策：`.wao/decisions/0032-两层验证与认证.md`。");
+  lines.push("- 认证检查结果五态判定纪律（pass / fail / not-applicable / blocked / inconclusive）与能力轴分层：`docs/certification-runbook.md`（ADR-0032 §8 节）；两层认证决策：`.wao/decisions/0032-两层验证与认证.md`。");
   return lines.join("\n") + "\n";
 }
 
