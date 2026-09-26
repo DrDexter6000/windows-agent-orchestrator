@@ -192,7 +192,6 @@
       "delivery/runDeliveryReverify.test.js",
       "run-lifecycle/runStop.test.js",
       "run-lifecycle/runStopCloseout.test.js",
-      "run-lifecycle/runWait.test.js",
       "run-lifecycle/runsList.test.js",
       "run-lifecycle/runsListCloseout.test.js",
       "run-lifecycle/runsListSmoke.test.js",
@@ -259,7 +258,8 @@
     "mcp": [
       "mcp-surface/m12-11-wait-mcp.test.js",
       "mcp-surface/m12-12-semantics-mcp.test.js",
-      "run-lifecycle/mcpRunAwaitResult.test.js"
+      "run-lifecycle/mcpRunAwaitResult.test.js",
+      "run-lifecycle/runWait.test.js"
     ]
   }
 }
