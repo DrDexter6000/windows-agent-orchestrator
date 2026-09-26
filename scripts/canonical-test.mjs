@@ -200,11 +200,15 @@ export const MANIFEST_GROUPS = Object.freeze([
 // never competes with cross-file load for the SDK request budget. Every manifest
 // category must appear in exactly one wave (validated before execution).
 //
-// Concurrency is tuned from MEASURED evidence (filesystem wave, 54 files):
+// Concurrency — HISTORICAL measured evidence (filesystem wave, 54 files; frozen
+// figures kept for the record, NOT the basis of the current value):
 //   @8  = 212s  (argv-order scheduling strands the alphabetically-late pole)
 //   @16 = 178s  (conservative knee — solidly past the @8 that failed the target)
 //   @24 = 171s  (diminishing: +8 concurrency saves only ~7s past 16)
-// 16 is the smallest value that comfortably meets the delivery window.
+// Current choice: 8, PROVISIONAL (2026-09-26). Basis: a small repeated-case
+// comparison showed less per-case delay at 8 with no observed batch throughput
+// loss. That does NOT establish optimality, full-suite speed, root cause, or
+// acceptance; a full-suite A/B should precede any re-raise past 8.
 function hardwareParallelism() {
   try { return availableParallelism ? availableParallelism() : cpus().length; }
   catch { return 4; }
@@ -212,7 +216,7 @@ function hardwareParallelism() {
 const HW = hardwareParallelism();
 export const WAVE_PLAN = Object.freeze([
   { name: "pure", concurrency: 8, categories: ["pure"] },
-  { name: "filesystem", concurrency: 16, categories: ["git", "worktree"] },
+  { name: "filesystem", concurrency: 8, categories: ["git", "worktree"] },
   { name: "mcp", concurrency: 1, categories: ["mcp"] },
   { name: "process", concurrency: 3, categories: ["process"] },
   { name: "lock", concurrency: 1, categories: ["lock"] },

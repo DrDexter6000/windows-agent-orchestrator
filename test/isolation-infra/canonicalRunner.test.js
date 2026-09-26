@@ -179,7 +179,7 @@ test("WAVE_PLAN: lock is strictly serial; the filesystem wave pools git+worktree
   assert.equal(byName.get("lock").concurrency, 1, "lock wave is strictly serial");
   const fsWave = byName.get("filesystem");
   assert.deepEqual([...fsWave.categories].sort(), ["git", "worktree"], "filesystem wave pools git+worktree");
-  assert.ok(fsWave.concurrency >= 8, "filesystem wave has bounded concurrency (>= 8)");
+  assert.equal(fsWave.concurrency, 8, "filesystem wave concurrency is pinned to exactly 8 (current scheduling policy)");
 });
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -550,7 +550,7 @@ test("causal: the mcp wave is a serial, exclusive wave that never pools with git
   assert.ok(mcpWave, "a dedicated 'mcp' wave exists");
   assert.equal(mcpWave.concurrency, 1, "the mcp wave runs serially (concurrency 1)");
   assert.deepEqual([...mcpWave.categories].sort(), ["mcp"], "the mcp wave owns exactly the mcp category");
-  // It must NOT be pooled into the filesystem wave (which carries git/worktree at concurrency 16).
+  // It must NOT be pooled into the filesystem wave (which carries git/worktree at concurrency 8).
   const fsWave = byName.get("filesystem");
   assert.ok(fsWave, "filesystem wave exists");
   assert.ok(!fsWave.categories.includes("mcp"), "mcp is NOT pooled into the filesystem wave");
