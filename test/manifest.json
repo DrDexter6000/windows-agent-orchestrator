@@ -6,7 +6,6 @@
       "isolation-infra/backendCapabilityMatrix.test.js",
       "isolation-infra/stateChangeReasons.test.js",
       "registry-roles/applicationRegistryInventory.test.js",
-      "isolation-infra/canonicalRunner.test.js",
       "registry-roles/certificationReasons.test.js",
       "registry-roles/componentLedger.test.js",
       "backends/claudeCodeProvider.test.js",
@@ -223,6 +222,7 @@
       "run-lifecycle/readOnlyDispatch.test.js"
     ],
     "process": [
+      "isolation-infra/canonicalRunner.test.js",
       "isolation-infra/backgroundRunner.test.js",
       "isolation-infra/backgroundRunnerDeadline.test.js",
       "isolation-infra/cli.test.js",

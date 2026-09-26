@@ -854,7 +854,7 @@ test("MCP-WAIT-10 (P2-B): real stdio smoke — tool discovery + already-terminal
 // wall-clock timeout behavior cannot be exercised here. Real Codex Host 180s
 // acceptance remains the only host proof.
 
-test("KEEPALIVE-01 (P1-A/M10-pre3C): server emits progress + SDK onprogress receives it with resetTimeoutOnProgress set", async () => {
+test("KEEPALIVE-01 (P1-A/M10-pre3C): server emits progress + SDK onprogress receives it with resetTimeoutOnProgress set", async (t) => {
   // This is a real SDK client-behavior test. It proves the END-TO-END progress
   // path: the client requests progress (onprogress → SDK attaches
   // _meta.progressToken), the server reads extra._meta.progressToken and emits
@@ -896,6 +896,11 @@ test("KEEPALIVE-01 (P1-A/M10-pre3C): server emits progress + SDK onprogress rece
     try {
       // callTool(params, resultSchema, options). CompatibilityCallToolResultSchema
       // avoids the SDK 1.29 zod-compat response-path quirk. Do NOT swallow.
+      // This checks notification wiring, not wall-clock timeout behavior. Keep
+      // the SDK timer controlled too: real Git latency must not become a hidden
+      // five-second performance requirement. The outer node:test timeout still
+      // bounds a hung request; missing progress still fails the assertion below.
+      t.mock.timers.enable({ apis: ["setTimeout"] });
       const res = await client.callTool(
         { name: "run_wait", arguments: { runId: "run_ka", waitMs: 180000 } },
         CompatibilityCallToolResultSchema,

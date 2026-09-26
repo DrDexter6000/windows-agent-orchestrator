@@ -25,8 +25,7 @@ const ROOT = join(__dirname, "..", "..");
 // docs/usage.md 文件级全文迁移至 docs/certification-runbook.md 后，本文件中
 // 随正文迁移的检查统一引用顶部常量、区分两个源（USAGE_DOC = 部署/日常/事件
 // 投影/MCP §四 等运维正文；CERT_RUNBOOK_DOC = 认证操作正文唯一权威）。
-// 非迁移面的 usage 字面量不在本包收敛范围；B3 冻结历史常量
-// （HISTORICAL_SEAT_INDEX_BLOCK / HISTORICAL_SEAT_MAIN_ROW）逐字节不变。
+// 非迁移面的 usage 字面量不在本包收敛范围。
 const USAGE_DOC = "docs/usage.md";
 const CERT_RUNBOOK_DOC = "docs/certification-runbook.md";
 
@@ -3536,116 +3535,13 @@ test("TD-162 顺带: onboarding 认证表覆盖 registry 模板声明的全部�
 });
 
 // ============================================================
-// B3（2026-09-23 试点 → 2026-09-25 回退，TD-187）：seat-certify 阅读入口守卫。
-// 试点期 §0.1.1 把该面阅读单位收窄为"短公共约束 + 相关合同节及其显式依赖"的
-// 索引；两次真实 seat-certify 行动复核索引自足性均 FAIL 后，Owner 授权撤销索引
-// 试点并恢复文件级入口（§0.1 主表 seat-certify 行 = 无条件全文必读五文件，不保留
-// 可选索引路线）。本块因此分两段：
-//   - 历史索引族（①②②R、③历史部、④⑤）：输入是撤下前 §0.1.1 原文与旧主表行的
-//     **逐字节冻结常量**（HISTORICAL_SEAT_INDEX_BLOCK / HISTORICAL_SEAT_MAIN_ROW），
-//     历史输入，不是阅读入口；原守卫（assertReadingIndex、全部 B3-②R 变异、正常
-//     夹具通过前提、变异生效检查、撤回探针、锚解析反例、4096 字节断言）原样实际
-//     执行——不删、不 skip、不吞异常，上述守卫逻辑一旦被撤回即可被机器检测。
-//   - 现行守卫（③现行部 + ⑥⑦）：§0.1 主表 seat-certify 行 = 无条件全文必读恰五
-//     文件 + 多面并集 / 正文显式依赖跟进 / 截断补读三义务 + adversarialEscape 追加
-//     依赖指针（architecture §4.6/§4.1，非独立入口）；缺行 / 漏文件 / 重复替代 /
-//     节选替代全文 / 恢复索引入口 / 丢义务必红。静态测试只证明规则文本在场，
-//     不证明执行者真读完全文。
-// 以下 ①~⑤ 为试点期原义的五条守卫要求，在冻结历史输入上继续成立：
-// "短公共约束 + 相关合同节及其显式依赖"。五个 test 对应五条守卫要求：
-//   ① 地址有效——文件存在、锚唯一可解析；缺失/歧义必须红，不得当空集
-//   ② 公共项不可跳过——公共约束 [C1]..[C6] 逐条在场（恰 6 条）+
-//      无条件单元 [U1]..[U7] 逐个钉住（恰 7 个），删任一条/个必红
-//      （② 的枚举+断言核心在 assertReadingIndex 纯函数；audit15/audit16 已发现
-//       反例由 B3-②R 族固化为可执行回归——见该函数与 B3-②R 各 test 的注释）
-//   ③ 依赖完整——已知跨模块案例（delta 规程 ⟶ architecture containment
-//      事件合同 + 状态机）必须显式连读，且依赖关系是真实的（TD-120 关系型）
-//   ④ 未知不静默省略——未映射触发回退主表权威全文，由 Lead 界定范围
-//   ⑤ 不冻结散文——锚按节名前缀解析（括注后缀措辞可变）；只钉闭集词汇
-//      token 与锚关系，不钉目标文档长句
-// ============================================================
+// seat-certify checks protect the CURRENT file-level entry and live links.
+// The retired reading-index implementation and its frozen-text tests remain in
+// Git history (8a652af); they are not part of current-product acceptance.
+// Missing files, optional excerpt routes and dropped obligations remain covered
+// by B3-③/⑥/⑦ and the migration-link checks below.
 
-/** TD-187 回退（2026-09-25）冻结的历史输入一：撤下前 docs/ssot.md §0.1.1 全文
- *  （含标题、引言、[C1]..[C6] 公共约束与 4 列索引表，到原 `## ` 节边界为止）。
- *  **历史输入，不是阅读入口**——现行阅读入口 = §0.1 主表 seat-certify 行（文件级，
- *  守卫见 B3-⑥/⑦）。逐字节冻结（原文件行尾即 LF；字节数仍受 B3-⑤ 的 4096 帽钉住，
- *  冻结副本被增删即红）。下方 ①~⑤ 历史族与 B3-②R 反例固化族在此原文上原样执行。 */
-const HISTORICAL_SEAT_INDEX_BLOCK = [
-  "#### 0.1.1 `seat-certify` 阅读单位索引（B3 试点：短公共约束 + 相关合同节及其显式依赖）",
-  "",
-  "> 试点范围：仅本面；其余行动面阅读单位不变（文件级）。多面命中仍取**并集**。本索引只回答\"为这件事哪些合同必须知道\"，不回答写时归属；**不得**借精简后的本面绕过 `contract-edit`——写认证合同本身（状态闭集 / 门语义 / 五态 / 事件合同）仍读 `contract-edit` 全集。",
-  "> 锚语法（稳定标识，节内措辞可变）：`路径 §节名` = markdown 节标题锚（按节名前缀唯一解析）；`路径 @标识` = 结构化锚（`@TD-xxx` = tech-debt 登记行，`@键.路径` = JSON 键）。锚缺失或歧义必须报错，不得当空集静默跳过（守卫：`test/isolation-infra/docs-consistency.test.js` B3 块，TD-187）。",
-  "> 条目标识（守卫稳定锚，audit14）：公共约束条头的 `[C1]..[C6]` 与无条件单元条头的 `[U1]..[U7]` 是 B3-② 逐条在场的判定锚（数量恰为 6 / 7）；条目散文措辞可变，标识与数量不可漂。",
-  "",
-  "**公共约束（无条件项；任何 seat-certify 行动前必读，跳过即错）**：",
-  "",
-  "1. [C1] 组合层状态闭集 `certified` / `conditional`；delta 子集全绿只产生 `conditional` + `certificationScope:\"delta\"`，升 `certified` 的唯一路径是全量重跑。",
-  "2. [C2] 认证证据是实跑台账 `runs/reliability-summary.json`；零 case 或只有 skip 的运行不得报 `ALL PASS`（ADR-0032 §7 前置根修；TD-169 教训）。",
-  "3. [C3] 检查结果五态 `pass / fail / not-applicable / blocked / inconclusive`；N/A 必须带原因且不贡献能力绿（ADR-0032 §8）。",
-  "4. [C4] 认证是 advisory evidence 不是 permission gate；唯一 opt-in 门 = 显式 `--require-certified`（身份四元组 + `lastFullHealthyRunAt` 新鲜度，fail-closed）。",
-  "5. [C5] 组件层绿不推出组合层绿；两层状态词汇闭集不得互换（ADR-0032 §1）。",
-  "6. [C6] 认证结论必须随附在册限制（见条件追加单元的 TD 行），不得声称超出证据的结论。",
-  "",
-  "| action id | 触发条件 | 无条件必读单元 | 条件追加单元 |",
-  "|---|---|---|---|",
-  "| `seat-certify` | 给某席位装配（harness × 模型 × 角色合同）跑组合层认证，或判读 / 升级其认证结果 | [U1] `docs/usage.md §delta 认证规程`、[U2] `docs/usage.md §认证检查结果五态与能力轴分层`、[U3] `.wao/decisions/0032-两层验证与认证.md §1. 词汇与状态闭集`、[U4] `.wao/decisions/0032-两层验证与认证.md §2. 两层各测什么`、[U5] `.wao/decisions/0032-两层验证与认证.md §8. 五态检查结果`、[U6] `docs/team-roles.md §Lane：角色多通道`、[U7] `config/agents.example.json @certification.matrix` | ①判读 `adversarialEscape`（越界写对抗）→ 显式依赖连读：`docs/02-architecture.md §4.6 Coder Delivery Contract`（`run.isolation_violation(code=workdir_escape)` 事件合同与 packaging 前转 failed）＋`docs/02-architecture.md §4.1 状态机`（终态判定）；②判读 `conditional` / wire `certificationReasonCode:null` → `docs/tech-debt.md @TD-133`；③分诊\"零 case / 全 skip 仍 ALL PASS\"或核对执行计数 → `docs/tech-debt.md @TD-169`；④席位配置（model / reasoning / provider）变更后判读旧证据适用性 → `docs/tech-debt.md @TD-186`＋连读 `docs/usage.md §接入新模型`（当前启动行为约束，含 2026-09-19 claude-code `--bare --strict-mcp-config`）——判读旧证据必须先判定其适用于哪个 backend／lane，不得把某 backend 的限制套到别的席位；⑤讨论 `--require-certified` 是否放行 → 连读完整门合同 `docs/usage.md §MCP run_dispatch`（身份四元组＋`lastFullHealthyRunAt` 时效窗口＋legacy 回落＋Owner `manualOverride:\"cleared\"` 旁路＋MCP `requireCertified:false` 差异——不得只截新鲜度分支）；⑥未映射触发条件 → 回退读 §0.1 主表 `seat-certify` 行的权威全文（范围由 Lead 当次界定并记录），不得静默省略 |",
-  "",
-].join("\n");
-
-/** TD-187 回退（2026-09-25）冻结的历史输入二：撤下前 §0.1 主表 seat-certify 行
- *  （试点期的索引路由形态）。历史输入，不是阅读入口；仅 B3-④ 历史部在其上
- *  原样执行"路由行指向 §0.1.1 + 回退权威全文路径 live"的原始断言。 */
-const HISTORICAL_SEAT_MAIN_ROW = "| `seat-certify` | 给某席位装配做组合层认证（certified / conditional / draft-only） | 阅读单位 = §0.1.1 索引（短公共约束 + 合同节锚 + 显式依赖；B3 试点）；未映射触发条件回退本格权威全文（范围由 Lead 当次界定）：`docs/usage.md`、`.wao/decisions/0032-两层验证与认证.md`、`docs/team-roles.md`、`config/agents.example.json`、`docs/tech-debt.md` |";
-
-/** 撤下前 §0.1.1 seat-certify 阅读单位索引块。TD-187 回退（2026-09-25）起返回
- *  上方冻结常量——不再读 docs/ssot.md（活跃索引已撤下）。历史输入，不是阅读入口。 */
-function seatCertifyIndexBlock() {
-  return HISTORICAL_SEAT_INDEX_BLOCK;
-}
-
-/** §0.1.1 块**文本** → seat-certify 索引行 4 列（纯函数：不读盘，接受任意文本输入）。
- * B3 第四轮（audit18）：块级解析从"只读真实文档"抽成文本输入的纯函数——反例固化
- * 测试（B3-②R 族）用同一解析路径喂变异文本，生产守卫与回归测试不各养一份解析器。 */
-function seatCertifyRowFromBlock(block) {
-  const row = block.split(/\r?\n/).find((l) => l.startsWith("| `seat-certify` |"));
-  assert.ok(row, "§0.1.1 索引缺 `| `seat-certify` | ... |` 行（目标形状 4 列）");
-  const cells = splitRowCells(row);
-  assert.equal(cells.length, 4,
-    `§0.1.1 seat-certify 行应为 4 列（action id / 触发条件 / 无条件必读单元 / 条件追加单元），实际 ${cells.length}`);
-  return cells;
-}
-
-/** §0.1.1 索引表的 seat-certify 行，切 4 列（action id / 触发条件 / 无条件 / 条件追加）。 */
-function seatCertifyIndexRow() {
-  return seatCertifyRowFromBlock(seatCertifyIndexBlock());
-}
-
-/** 从单元格里解析阅读单位 token：含 " §" = markdown 节锚；含 " @" = 结构化锚。
- * 纯文件名 token（无锚）不是本索引的阅读单位（回退集由 §0.1 主表承载）。 */
-function parseReadingUnits(cell) {
-  return [...cell.matchAll(/`([^`]+)`/g)]
-    .map((m) => m[1])
-    .filter((t) => t.includes(" §") || t.includes(" @"))
-    .map((t) => {
-      const hashIdx = t.indexOf(" §");
-      const atIdx = t.indexOf(" @");
-      const k = hashIdx !== -1 && (atIdx === -1 || hashIdx < atIdx) ? hashIdx : atIdx;
-      return {
-        rel: t.slice(0, k).trim(),
-        kind: t.slice(k, k + 2) === " §" ? "heading" : "structured",
-        anchor: t.slice(k + 2).trim(),
-        token: t,
-      };
-    });
-}
-
-/** 在 markdown 文本中按节名**前缀**解析节锚：0 命中或歧义都抛红（①：不得当空集）。
- * 前缀匹配同时是 ⑤ 的实现：节名后的括注（日期 / ADR 号等）措辞可变、不冻结。
- * TD-187 索引路由最小修复（audit24）：标题正文先剥 code span 反引号再比对前缀——
- * 本仓节标题惯用代码体（如 docs/usage.md 门合同所在节 `### MCP \`run_dispatch\`（…）`），
- * 字面 startsWith 对任何含反引号的标题前缀都寻址不到。剥反引号只扩大可寻址面；
- * 0 命中 / 歧义仍必红，守卫不放宽（对照夹具见 B3-① 的 code-span 对照）。 */
-function resolveHeadingIn(text, rel, anchor, syncHint = "须同步 §0.1.1 索引") {
+function resolveHeadingIn(text, rel, anchor, syncHint = "须同步当前文档链接") {
   const hits = text.split(/\r?\n/).filter((l) => {
     const m = l.match(/^#{1,6}\s+(.*)$/);
     return m !== null && m[1].replace(/`/g, "").startsWith(anchor);
@@ -3657,36 +3553,6 @@ function resolveHeadingIn(text, rel, anchor, syncHint = "须同步 §0.1.1 索�
   return hits[0];
 }
 
-/** 结构化锚解析：`@TD-xxx` = tech-debt 登记行（行首唯一命中）；`@a.b` = JSON 键路径。 */
-function assertStructuredAnchorResolves(unit) {
-  if (/^TD-\d+$/.test(unit.anchor)) {
-    const rowRe = new RegExp("^\\|\\s*" + unit.anchor + "\\s*\\|");
-    const rows = read(unit.rel).split(/\r?\n/).filter((l) => rowRe.test(l));
-    assert.ok(rows.length > 0,
-      `${unit.rel} 结构化锚 @${unit.anchor} 解析 0 命中——登记行被移走/改号（断锚不得当空集）`);
-    assert.equal(rows.length, 1, `${unit.rel} @${unit.anchor} 歧义（${rows.length} 行命中）——锚必须唯一`);
-    return;
-  }
-  if (unit.rel.endsWith(".json")) {
-    let node = JSON.parse(read(unit.rel));
-    for (const key of unit.anchor.split(".")) {
-      assert.ok(node != null && Object.prototype.hasOwnProperty.call(node, key),
-        `${unit.rel} 结构化锚 @${unit.anchor} 在键 "${key}" 处断裂（断锚不得当空集）`);
-      node = node[key];
-    }
-    return;
-  }
-  assert.fail(`§0.1.1 出现未知结构化锚种类：${unit.token}（只允许 @TD-xxx / JSON 键路径）`);
-}
-
-/** ①：阅读单位地址有效 = 文件存在 + 锚可解析且唯一（缺失/歧义红，不当空集）。 */
-function assertReadingUnitResolves(unit) {
-  assert.ok(existsSync(join(ROOT, unit.rel)), `阅读单位地址无效：文件不存在 ${unit.rel}`);
-  if (unit.kind === "heading") resolveHeadingIn(read(unit.rel), unit.rel, unit.anchor);
-  else if (unit.kind === "structured") assertStructuredAnchorResolves(unit);
-}
-
-/** 切出一个节（命中标题行到下一个标题行）——③ 的关系型验证用。 */
 function sectionText(rel, anchor) {
   const lines = read(rel).split(/\r?\n/);
   const idx = lines.findIndex((l) => {
@@ -3699,262 +3565,15 @@ function sectionText(rel, anchor) {
   return lines.slice(idx, end).join("\n");
 }
 
-/** B3-② 的"枚举 + 断言"核心，抽成接受 §0.1.1 块**文本**的纯函数（B3 第四轮，audit18）。
- * 背景：反例修复（audit14 行级词钉 → audit15 独立枚举 → audit16 结构计数）此前只落在
- * "处理逻辑 + 注释"里——把枚举（LIST_ITEM_RE）撤回到旧实现（只认点号编号）后守卫仍
- * 5/5 绿（audit18 实证）：已发现反例不是可执行回归输入，同一漏洞可再次进入。抽成纯函数后：
- *   - 生产面：B3-② 用真实文档文本调用（断言语义不变）；
- *   - 回归面：B3-②R 反例固化测试族把变异文本喂进来断言**必抛**——枚举实现一旦退回，
- *     变异不再抛 ⇒ 那些 assert.throws 自身变红（修复被撤销可被机器检测）。
- * 被测文档不被改写：变异只发生在测试内存里的文本副本上。 */
-function assertReadingIndex(block) {
-  // 目标形状（4 列表头）必须在场。
-  assert.ok(/\| action id \| 触发条件 \| 无条件必读单元 \| 条件追加单元 \|/.test(block),
-    "§0.1.1 缺目标形状表头（action id | 触发条件 | 无条件必读单元 | 条件追加单元）");
-
-  // —— F1（audit14 中级 + audit15 中级 + audit16 中级）：公共约束逐条可判定且数量精确 6 ——
-  // audit14 用行级词钉堵住了"其它栏同词掩盖缺席"（block.includes → 行级）；
-  // audit15 改为按行首编号独立枚举，但正则 `^\d+.` **只认点号编号** ⇒ 追加
-  // `7)` 条目（带或不带 [Cn]）被解析器直接忽略，5/5 绿（audit16 实证）。改为
-  // **按列表项结构计数，不假设编号风格**：行首（允许缩进）`数字.` / `数字)` /
-  // `-` / `*` / `+` 后跟空白与非空白内容，即公共约束列表的一个条目——§0.1.1
-  // 块内公共约束列表是唯一 markdown 列表（表行以 | 起头、引言行以 > 起头、
-  // 标题以 # 起头、粗体导语以 ** 起头且第二字符非空白，均不满足列表项语法）。
-  // 再断言：条目数恰 6、每条恰带一个 [Cn] 标识、标识集合恰为 [C1]..[C6]。
-  // 新增条目无论用哪种标记（点号/右括号/短横/星号、带标识/无标识/重复/跳号）
-  // 都会改变条目计数或触发标识断言 ⇒ 一律红；已有条目换编号风格（1. → 1)）
-  // 不红（结构不变，不冻结散文风格）；词钉仍是词钉非散文钉（⑤：条目措辞可
-  // 变，词汇闭集不可漂）。
-  const LIST_ITEM_RE = /^[ \t]*(?:\d+[.)]|[-*+])[ \t]+\S/;
-  const entries = block.split(/\r?\n/).filter((l) => LIST_ITEM_RE.test(l));
-  assert.equal(entries.length, 6,
-    `§0.1.1 公共约束列表必须恰为 6 个条目（按列表项结构计数：数字./数字)/-/*/+ 一律算，不假设编号风格），实际 ${entries.length} 个——删条/加条（含换标记形态、无标识/重复标识条目）都红`);
-  const entryIds = entries.map((line, i) => {
-    const ids = [...line.matchAll(/\[(C\d+)\]/g)].map((m) => m[1]);
-    assert.equal(ids.length, 1,
-      `§0.1.1 公共约束第 ${i + 1} 条必须恰带一个 [Cn] 稳定标识（实际 ${ids.length} 个）——无标识条目不可判定，摘标识/多标识都红`);
-    return ids[0];
-  });
-  const constraintLines = new Map(entryIds.map((id, i) => [id, entries[i]])); // [Cn] -> 条目行
-  const CONSTRAINT_PINS = [
-    ["C1", ["conditional", "certificationScope", "全量重跑"]],        // delta 全绿 ≠ certified
-    ["C2", ["零 case", "ALL PASS", "TD-169"]],                        // 零目标假绿
-    ["C3", ["not-applicable", "能力绿", "ADR-0032 §8"]],              // 五态 N/A 纪律
-    ["C4", ["advisory", "permission gate", "--require-certified"]],   // 非门禁
-    ["C5", ["组件层", "组合层", "ADR-0032 §1"]],                      // 分层防火墙
-    ["C6", ["在册限制", "超出证据"]],                                  // 限制随附
-  ];
-  for (const [id, tokens] of CONSTRAINT_PINS) {
-    const line = constraintLines.get(id);
-    assert.ok(line !== undefined, `§0.1.1 公共约束缺 [${id}] 稳定标识条目（公共项不可跳过/不可删）`);
-    for (const t of tokens) {
-      assert.ok(line.includes(t),
-        `§0.1.1 公共约束 [${id}] 条目行缺闭集词汇 ${t}（词钉钉在条目行内，不钉整块）`);
-    }
-  }
-  assert.deepEqual([...entryIds].sort(), CONSTRAINT_PINS.map(([id]) => id).sort(),
-    "§0.1.1 公共约束标识集合必须恰为 [C1]..[C6]（重复/跳号/换号都红）");
-
-  // —— F2（audit14 中级 + audit15 中级）：7 个无条件单元逐个钉住且数量精确 7 ——
-  // audit14 给每个无条件单元挂 `[Un]` 稳定标识并断言 marked.length == 7，但
-  // marked 的正则**只统计紧邻 [Un] 的锚** ⇒ 在无条件列追加**无标识**的第 8 个
-  // 阅读单元（audit15 复核实证：追加无标识的 docs/02-architecture.md §4.1 状态
-  // 机）后实际 8 个单元仍 5/5 绿。改为**按锚语法枚举该列全部阅读单元**（同
-  // parseReadingUnits 的切分语义：反引号 token 且含 " §"/" @"，与是否带标识
-  // 无关），再断言：单元数恰 7、每单元 token 紧邻前置恰一个 [Un] 标识、标识
-  // 集合恰为 [U1]..[U7]。无标识追加/删单元/重复/跳号都红；锚的可解析性仍由
-  // B3-① 负责。
-  const UNCONDITIONAL_UNITS = [
-    ["U1", "docs/usage.md", "delta 认证规程"],
-    ["U2", "docs/usage.md", "认证检查结果五态"],
-    ["U3", ".wao/decisions/0032-两层验证与认证.md", "1. "],
-    ["U4", ".wao/decisions/0032-两层验证与认证.md", "2. "],
-    ["U5", ".wao/decisions/0032-两层验证与认证.md", "8. "],
-    ["U6", "docs/team-roles.md", "Lane"],
-    ["U7", "config/agents.example.json", "certification.matrix"],
-  ];
-  const cells = seatCertifyRowFromBlock(block);
-  // 按锚语法枚举**全部**阅读单元（不只数带 [Un] 者）：反引号 token 含 " §"/" @"
-  // 即单元；纯文件名 token（无锚）不是阅读单位（回退集由 §0.1 主表承载）。
-  const units = [];
-  for (const m of cells[2].matchAll(/`([^`]+)`/g)) {
-    const token = m[1];
-    if (!(token.includes(" §") || token.includes(" @"))) continue;
-    const idm = cells[2].slice(0, m.index).match(/\[(U\d+)\]\s*$/);
-    assert.ok(idm !== null,
-      `§0.1.1 无条件必读单元缺 [Un] 稳定标识：\`${token}\`（单元必须逐个带标识，不得无标识追加）`);
-    units.push({ id: idm[1], token });
-  }
-  assert.equal(units.length, UNCONDITIONAL_UNITS.length,
-    `§0.1.1 无条件必读单元必须恰为 7 个（按锚语法枚举全部单元，与是否带标识无关），实际 ${units.length} 个——删单元/无标识追加/多标追加都红`);
-  for (const [id, rel, anchorPrefix] of UNCONDITIONAL_UNITS) {
-    const hits = units.filter((u) => u.id === id);
-    assert.equal(hits.length, 1,
-      `§0.1.1 无条件必读单元 [${id}]（${rel} §${anchorPrefix}…）标识必须恰出现一次（公共项不可跳过/不可删）`);
-    const [unit] = parseReadingUnits(`\`${hits[0].token}\``);
-    assert.ok(unit, `§0.1.1 [${id}] 标识未挂在阅读单位锚上（token：${hits[0].token}）`);
-    assert.equal(unit.rel, rel, `§0.1.1 [${id}] 无条件单元文件漂移：期望 ${rel}，实际 ${unit.rel}`);
-    assert.ok(unit.anchor.startsWith(anchorPrefix),
-      `§0.1.1 [${id}] 无条件单元锚漂移：期望前缀 "${anchorPrefix}"，实际 "${unit.anchor}"`);
-  }
-  assert.deepEqual(units.map((u) => u.id).sort(), UNCONDITIONAL_UNITS.map(([id]) => id).sort(),
-    "§0.1.1 无条件单元标识集合必须恰为 [U1]..[U7]（多标/跳号/换号都红）");
-}
-
-test("B3-①(历史): 冻结索引原文的阅读单位地址全部有效（文件存在 + 锚唯一可解析；断锚必红）——历史输入，不是阅读入口", () => {
-  const cells = seatCertifyIndexRow();
-  const unconditional = parseReadingUnits(cells[2]);
-  const conditional = parseReadingUnits(cells[3]);
-  assert.ok(unconditional.length >= 3, `无条件必读单元异常收缩（仅 ${unconditional.length} 个锚）——公共项被删？`);
-  assert.ok(conditional.length >= 3, `条件追加单元异常收缩（仅 ${conditional.length} 个锚）——触发映射被删？`);
-  for (const unit of [...unconditional, ...conditional]) assertReadingUnitResolves(unit);
-
-  // 断锚负对照（合成夹具，防解析器写反导致守卫空转——TD-81 旧守卫的教训）：
-  // 0 命中、歧义都必须红；前缀唯一命中即解析成功。
-  const FX = "### delta 认证规程（lane 架构，ADR-0025 批次 3）\n正文\n";
-  assert.throws(() => resolveHeadingIn(FX, "fixture.md", "不存在的节"), /0 命中/);
-  assert.throws(() => resolveHeadingIn("### 甲节（一）\n### 甲节（二）\n", "fixture.md", "甲节"), /歧义/);
-  // TD-187（audit24）code-span 对照：剥反引号后 code-span 标题可寻址且仍须唯一；
-  // 仅反引号差异的标题对同一锚仍判歧义（剥反引号不放宽守卫的回归钉）。
-  assert.doesNotThrow(() =>
-    resolveHeadingIn("### MCP `run_dispatch`（合成夹具）\n", "fixture.md", "MCP run_dispatch"));
-  assert.throws(() =>
-    resolveHeadingIn("### `甲`节\n### 甲节\n", "fixture.md", "甲节"), /歧义/);
-  // 结构化锚负对照：TD 行 0 命中必须红。
-  assert.throws(
-    () => assertStructuredAnchorResolves(
-      { rel: "docs/tech-debt.md", anchor: "TD-99999", kind: "structured", token: "docs/tech-debt.md @TD-99999" }),
-    /0 命中/,
-  );
+test("Current documentation heading resolver: missing or ambiguous anchors fail; code spans and suffixes resolve", () => {
+  assert.throws(() => resolveHeadingIn("### Existing\n", "fixture.md", "Missing"), /0 命中/);
+  assert.throws(() => resolveHeadingIn("### Same (one)\n### Same (two)\n", "fixture.md", "Same"), /歧义/);
+  assert.equal(resolveHeadingIn("### MCP `run_dispatch`（updated note）\n", "fixture.md", "MCP run_dispatch"),
+    "### MCP `run_dispatch`（updated note）");
+  assert.throws(() => resolveHeadingIn("### `Same`\n### Same\n", "fixture.md", "Same"), /歧义/);
 });
 
-test("B3-②(历史): 公共项不可跳过——公共约束 [C1]..[C6] 逐条在场（恰 6 条）+ 7 个无条件单元 [U1]..[U7] 逐个钉住（冻结原文）", () => {
-  // 断言核心已抽成文本输入的纯函数 assertReadingIndex（audit18 反例固化的前提）；
-  // 本测试钉"冻结历史原文通过"（撤下前它是真实文档；冻结副本一旦失真此处先红，
-  // 是 ①~⑤ 历史族的夹具哨兵），变异文本必红由下方 B3-②R 反例固化测试族承载。
-  assertReadingIndex(seatCertifyIndexBlock());
-});
-
-// ============================================================
-// B3 第四轮（audit18）：已发现反例固化为永久可执行回归。
-// audit18 中级：行为修复成立（audit15/audit16 反例在现行枚举下确已红），但反例
-// 只存在于"处理逻辑 + 注释"里——把枚举退回旧实现（只认点号编号）后守卫仍全绿，
-// 同一漏洞可再次进入。本测试族把每个已发现反例**原样**固化为可执行输入：对真实
-// §0.1.1 文本的内存副本做变异，喂给与生产守卫共用的 assertReadingIndex，断言必抛。
-// 修复被撤销 ⇒ 变异不再抛 ⇒ 这些 assert.throws 自身变红（撤回可被机器检测）。
-// 被测文档本身不被改写；变异文本只存在于测试内存中。
-// ============================================================
-
-/** 反例固化的公共夹具：取冻结历史 §0.1.1 原文，返回 { block, lines, insertAfterC6 }。
- * 前置自检全部 assert——夹具失效（冻结副本形状漂移）时本族测试红，不静默通过。 */
-function b3CounterexampleFixture() {
-  const block = seatCertifyIndexBlock();
-  // 前置：未变异的冻结历史原文必须通过守卫（否则"必红"断言建立在错误前提上）。
-  assert.doesNotThrow(() => assertReadingIndex(block),
-    "前置失败：冻结历史 §0.1.1 原文未通过 assertReadingIndex（冻结副本失真——重新逐字节冻结，不是修守卫）");
-  const lines = block.split("\n");
-  const c6Idx = lines.findIndex((l) => /^[ \t]*\d+\.\s+\[C6\]/.test(l));
-  assert.ok(c6Idx !== -1, "夹具失效：块内定位不到 `[C6]` 条目行（行首数字. 编号）");
-  // 在最后一个公共约束条目（[C6] 行）之后插入一行 = "新增第 7 条"的最小变异。
-  const insertAfterC6 = (extra) =>
-    [...lines.slice(0, c6Idx + 1), extra, ...lines.slice(c6Idx + 1)].join("\n");
-  return { block, lines, insertAfterC6 };
-}
-
-test("B3-②R-audit15: 反例固化——新增无标识第 7 条 / 重复 [C6] / 无条件列无标识第 8 个阅读单元必红", () => {
-  const { lines, insertAfterC6 } = b3CounterexampleFixture();
-  // audit15 反例①：新增无标识第 7 条公共约束（点号编号）——旧实现只数带 [Cn] 的行，
-  // 无标识条目被解析器忽略，5/5 绿。
-  assert.throws(() => assertReadingIndex(insertAfterC6("7. 新增公共约束。")),
-    /恰为 6 个条目/, "audit15 反例①：无标识第 7 条（`7.`）必须红");
-  // audit15 反例②：追加重复 [C6] 条目——旧实现用 Map 按标识去重，重复标识被折叠，5/5 绿。
-  assert.throws(() => assertReadingIndex(insertAfterC6("7. [C6] 新增公共约束。")),
-    /恰为 6 个条目/, "audit15 反例②：重复 [C6] 条目必须红");
-  // audit15 反例③：无条件列新增无标识第 8 个阅读单元（audit15 复核的原样反例：
-  // 追加 docs/02-architecture.md §4.1 状态机锚）——旧实现只统计紧邻 [Un] 的锚。
-  const withUnmarkedUnit = lines.map((l) =>
-    l.startsWith("| `seat-certify` |")
-      ? l.replace("[U7] `config/agents.example.json @certification.matrix`",
-        "[U7] `config/agents.example.json @certification.matrix`、`docs/02-architecture.md §4.1 状态机`")
-      : l,
-  ).join("\n");
-  assert.notEqual(withUnmarkedUnit, lines.join("\n"), "夹具失效：无条件列无标识单元变异未生效");
-  assert.throws(() => assertReadingIndex(withUnmarkedUnit),
-    /缺 \[Un\] 稳定标识/, "audit15 反例③：无条件列无标识第 8 个阅读单元必须红");
-});
-
-test("B3-②R-audit16: 反例固化——`7)`（右括号编号、无标识）与 `7) [C6]` 必红（旧枚举只认点号，曾 5/5 绿）", () => {
-  const { insertAfterC6 } = b3CounterexampleFixture();
-  // audit16 反例①：右括号编号、无标识——audit15 修复的枚举 `^\d+\.` 只认点号，
-  // 本变异曾被直接忽略（audit18 撤回探针的靶子：退回旧枚举时本测试必须红）。
-  assert.throws(() => assertReadingIndex(insertAfterC6("7) 新增公共约束。")),
-    /恰为 6 个条目/, "audit16 反例①：`7) 新增公共约束。`（右括号、无标识）必须红");
-  // audit16 反例②：右括号编号 + 重复标识。
-  assert.throws(() => assertReadingIndex(insertAfterC6("7) [C6] 新增公共约束。")),
-    /恰为 6 个条目/, "audit16 反例②：`7) [C6] 新增公共约束。`（右括号、重复标识）必须红");
-});
-
-test("B3-②R-结构计数: 反例固化——`- `/`* `/`+ ` 无序列表项与 `8.` 跳号新增必红（计数不假设编号风格/连续性）", () => {
-  const { insertAfterC6 } = b3CounterexampleFixture();
-  for (const marker of ["-", "*", "+"]) {
-    assert.throws(() => assertReadingIndex(insertAfterC6(`${marker} 新增公共约束。`)),
-      /恰为 6 个条目/, `无序列表标记 \`${marker} \` 新增条目必须红`);
-  }
-  assert.throws(() => assertReadingIndex(insertAfterC6("8. 新增公共约束。")),
-    /恰为 6 个条目/, "`8.` 跳号新增必须红（计数不看编号连续性）");
-});
-
-test("B3-②R-标识纪律: 反例固化——[C6] 替换 [C5] / 逐条删除 C1–C6 / 逐条摘标识必红（条目数不变也红）", () => {
-  const { block, lines } = b3CounterexampleFixture();
-  // [C6] 替换 [C5]：条目数仍 6，靠"逐条在场 + 标识集合恰等"抓红（非计数路径）。
-  assert.throws(
-    () => assertReadingIndex(block.replace(/^([ \t]*\d+\.[ \t]+)\[C5\]/m, "$1[C6]")),
-    /缺 \[C5\]|标识集合必须恰为/,
-    "[C6] 替换 [C5] 必须红（标识漂移，非计数路径）",
-  );
-  // 逐条删除 C1–C6：删任一条 ⇒ 计数 5 ≠ 6。（按"编号条目行 + 标识"锚定删除，
-  // 不用 RegExp 构造器拼字符串——模板字面量的转义语义会吃掉正则反斜杠。）
-  const numberedEntryRe = /^\d+\.\s+\[C\d+\]/;
-  for (let n = 1; n <= 6; n++) {
-    const removed = lines.filter((l) => !(numberedEntryRe.test(l) && l.includes(`[C${n}]`))).join("\n");
-    assert.notEqual(removed, lines.join("\n"), `夹具失效：删除 [C${n}] 条目的变异未生效`);
-    assert.throws(() => assertReadingIndex(removed),
-      /恰为 6 个条目|缺 \[C/, `逐条删除：删 [C${n}] 条目必须红`);
-  }
-  // 逐条摘标识：条目数仍 6，靠"每条恰带一个 [Cn]"抓红。
-  for (let n = 1; n <= 6; n++) {
-    const stripped = lines.map((l) => l.replace(`[C${n}] `, "")).join("\n");
-    assert.notEqual(stripped, lines.join("\n"), `夹具失效：摘 [C${n}] 标识的变异未生效`);
-    assert.throws(() => assertReadingIndex(stripped),
-      /恰带一个 \[Cn\]|缺 \[C/, `逐条摘标识：摘 [C${n}] 必须红`);
-  }
-});
-
-test("B3-②R-撤回探针: 旧枚举（只认点号编号）对右括号/无序标记变异失明——证明上方必红依赖的恰是结构计数修复", () => {
-  // 差分探针（持久面）：audit16 时代的旧枚举 `/^\s*\d+\.\s+/` 对下列变异数到的
-  // 仍是 6 条（不抛）。若 assertReadingIndex 的 LIST_ITEM_RE 被退回该形状，上方
-  // B3-②R-audit16 / B3-②R-结构计数 的 assert.throws 将因"变异不再抛"而自身变红
-  // ——这就是"回归能检测修复被撤销"的机制。本探针把旧逻辑的失明形状钉在案：
-  // 它们一旦不再失明（或变异文本改写成了点号形态），说明探针与回归输入脱钩，须复核。
-  const { insertAfterC6 } = b3CounterexampleFixture();
-  const OLD_DOT_ONLY_RE = /^\s*\d+\.\s+/; // audit15→audit16 之间曾被撤回目标的旧实现形状
-  for (const extra of [
-    "7) 新增公共约束。",
-    "7) [C6] 新增公共约束。",
-    "- 新增公共约束。",
-    "* 新增公共约束。",
-    "+ 新增公共约束。",
-  ]) {
-    const mutated = insertAfterC6(extra);
-    assert.equal(mutated.split("\n").filter((l) => OLD_DOT_ONLY_RE.test(l)).length, 6,
-      `撤回探针前提失效：旧枚举（只认点号）竂数出 ≠6 条（变异：${JSON.stringify(extra)}）——探针与回归输入脱钩`);
-    // 对照：现行结构计数必须把同一变异数成 7 条（这正是 audit16 修复的本体）。
-    assert.equal(mutated.split("\n").filter((l) => /^[ \t]*(?:\d+[.)]|[-*+])[ \t]+\S/.test(l)).length, 7,
-      `对照失效：现行结构计数未把变异计入（${JSON.stringify(extra)}）`);
-  }
-});
-
-test("B3-③: 依赖完整——现行主表行保留 adversarialEscape 追加依赖指针（§4.6/§4.1，非独立入口），且依赖对真实正文成立（历史索引行的显式锚连读对照保留）", () => {
+test("B3-③: 依赖完整——现行主表行保留 adversarialEscape 追加依赖指针（§4.6/§4.1，非独立入口），且依赖对真实正文成立", () => {
   // (0)（现行）文件级入口的五文件之外，adversarialEscape 的追加依赖必须以简短指针
   //     保留在 §0.1 主表 seat-certify 行内——表述为追加/连读依赖，不是另一条可选入口
   //     （入口唯一性由 B3-⑥/⑦ 钉住：五文件集合 + 拒绝索引/节选路线）。
@@ -3966,15 +3585,6 @@ test("B3-③: 依赖完整——现行主表行保留 adversarialEscape 追加�
     "主表 seat-certify 行缺追加依赖指针 docs/02-architecture.md §4.1 状态机（状态机终态判定——必须连读）");
   assert.ok(/追加|连读/.test(entry),
     "adversarialEscape 指针必须表述为追加/连读依赖，不得写成独立可选入口或节选替代");
-  // (a)（历史对照）撤下前索引行曾把两个依赖锚显式连进条件项——在冻结原文上原样复核，
-  //     防冻结副本失真（锚仍须对真实文件解析，见 B3-①）。
-  const cells = seatCertifyIndexRow();
-  const conditional = parseReadingUnits(cells[3]);
-  assert.ok(cells[3].includes("adversarialEscape"), "历史索引行缺 adversarialEscape 触发项（冻结副本失真？）");
-  const dep46 = conditional.find((u) => u.rel === "docs/02-architecture.md" && u.anchor.startsWith("4.6 "));
-  const dep41 = conditional.find((u) => u.rel === "docs/02-architecture.md" && u.anchor.startsWith("4.1 "));
-  assert.ok(dep46, "历史索引行缺显式依赖 docs/02-architecture.md §4.6（containment 事件合同——冻结副本失真？）");
-  assert.ok(dep41, "历史索引行缺显式依赖 docs/02-architecture.md §4.1（状态机终态判定——冻结副本失真？）");
   // (b) 依赖是**真实的**（TD-120 关系型，防指针凭空声明依赖）：
   //     delta 规程节确实消费 workdir_escape / failed 词汇（2026-09-26 认证正文
   //     迁移后正文在 docs/certification-runbook.md；usage 原位链接可达性由
@@ -3985,51 +3595,13 @@ test("B3-③: 依赖完整——现行主表行保留 adversarialEscape 追加�
     `${CERT_RUNBOOK_DOC} §delta 认证规程 不再含 workdir_escape——依赖声明与正文失联，须同步主表行指针`);
   assert.ok(delta.includes("failed"),
     `${CERT_RUNBOOK_DOC} §delta 认证规程 不再含 failed 终态——依赖声明与正文失联，须同步主表行指针`);
-  const containment = sectionText("docs/02-architecture.md", dep46.anchor);
+  const containment = sectionText("docs/02-architecture.md", "4.6 Coder Delivery Contract");
   assert.ok(containment.includes("run.isolation_violation"),
     "architecture §4.6 缺 run.isolation_violation 事件合同（依赖锚空转）");
   assert.ok(containment.includes("workdir_escape"),
     "architecture §4.6 缺 workdir_escape 闭集码（依赖锚空转）");
-  const sm = sectionText("docs/02-architecture.md", dep41.anchor);
+  const sm = sectionText("docs/02-architecture.md", "4.1 状态机");
   assert.ok(sm.includes("failed"), "architecture §4.1 状态机缺 failed 终态（依赖锚空转）");
-});
-
-test("B3-④(历史): 未映射触发不静默省略——回退条款与旧主表路由在冻结原文上原样执行（历史输入，不是阅读入口；现行入口见 B3-⑥/⑦）", () => {
-  const cells = seatCertifyIndexRow();
-  const fallback = cells[3].split("；").find((s) => s.includes("未映射")) ?? "";
-  assert.ok(fallback.length > 0, "历史索引行缺'未映射触发条件'出口（未知不得静默省略；冻结副本失真？）");
-  assert.ok(/回退/.test(fallback), "历史未映射出口必须是'回退权威全文'，不是丢弃");
-  assert.ok(/Lead/.test(fallback), "历史回退范围必须由 Lead 当次界定（不得静默自动收窄）");
-  // 旧主表路由行（冻结）：阅读单位指向 §0.1.1，且回退权威全文路径保持 live。
-  // 现行主表行不得再含此路由形状（B3-⑦ 拒绝恢复索引入口）。
-  const mainRow = HISTORICAL_SEAT_MAIN_ROW;
-  assert.ok(mainRow.includes("阅读单位"), "旧主表行冻结失真：缺阅读单位路由");
-  assert.ok(/§0\.1\.1/.test(mainRow), "旧主表行冻结失真：未指向 §0.1.1 阅读单位索引");
-  assert.ok(/回退/.test(mainRow), "旧主表行冻结失真：未声明回退权威全文语义");
-  for (const rel of [...splitRowCells(mainRow)[2].matchAll(/`([^`]+)`/g)].map((m) => m[1])) {
-    assert.ok(existsSync(join(ROOT, rel)), `回退权威全文路径失效：${rel}`);
-  }
-});
-
-test("B3-⑤: 不冻结散文——锚按前缀解析容忍括注改写；冻结索引原文保持短（4096 字节断言原样执行）、不复制目标节正文", () => {
-  // (a) 节名前缀后的括注（日期 / ADR 号）改写不红：解析器只认前缀，不钉整行标题。
-  assert.doesNotThrow(
-    () => resolveHeadingIn("### delta 认证规程（完全改写过的括注 2099-01-01）\n", "fixture.md", "delta 认证规程"),
-    "节锚应按前缀解析（括注措辞可变），不应钉整行标题",
-  );
-  // (b) 节名本身（稳定标识）改掉必须红——这是 ① 负对照在本测试族的作用面。
-  assert.throws(
-    () => resolveHeadingIn("### 别的名字（括注不变）\n", "fixture.md", "delta 认证规程"),
-    /0 命中/,
-  );
-  // (c) 索引是索引不是副本：长度帽防其膨胀成第二份真相源（正文复制是漂移头号来源，
-  //     ssot §1 铁律 1）。本帽只钉 §0.1.1 自身体积，不是任何权威文档的 cap。TD-187
-  //     回退后输入是冻结常量——帽继续实际执行，冻结副本被增删膨胀即红。
-  const block = seatCertifyIndexBlock();
-  const bytes = Buffer.byteLength(block, "utf8");
-  assert.ok(bytes <= 4096, `§0.1.1 索引膨胀到 ${bytes} bytes（>4096）——索引应保持短；复制目标节正文须改为锚`);
-  // (d) 锚语法约定须自述（稳定标识的语义说明在场，读者不必猜 §/@ 记法）。
-  assert.ok(/锚语法/.test(block), "§0.1.1 缺锚语法说明（`路径 §节名` / `路径 @标识` 约定须自述）");
 });
 
 // ============================================================
@@ -4187,7 +3759,7 @@ test("B3-⑦: 无条件全文与三义务在场——条件化/节选措辞、�
 // args.mjs「认证节」、src/backends/factory.js 能力轴骨架等）经这些标题到达新
 // 正文——本守卫钉住"标题在 + 链接在 + 目标节真实存在"三层关系，防空标题假绿
 // （标题还在、链接被删或目标节改名时必须红）。断言核心抽成文本输入的纯函数，
-// 负对照喂变异文本断言必抛（B3-②R 反例固化模式；变异只发生在内存副本上）。
+// 负对照喂变异文本断言必抛（当前规则的反例固化模式；变异只发生在内存副本上）。
 // ============================================================
 
 /** usage 原位保留的具名标题 → runbook 目标节锚前缀（两侧同名前缀）。 */

@@ -36,7 +36,7 @@ import { mkdtemp, rm, writeFile, mkdir, readFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -49,9 +49,9 @@ const RUN_ID = "run_m113b_0001";
 
 // ===== Helpers =====
 
-async function makeRepo(prefix = "wao-m113b-") {
+async function makeRepo(prefix = "wao-m113b-", objectFormat = "sha1") {
   const dir = await mkdtemp(join(tmpdir(), prefix));
-  execSync("git init -b main", { cwd: dir, stdio: "ignore" });
+  execSync(`git init -b main --object-format=${objectFormat}`, { cwd: dir, stdio: "ignore" });
   execSync('git config user.email "test@test"', { cwd: dir, stdio: "ignore" });
   execSync('git config user.name "test"', { cwd: dir, stdio: "ignore" });
   await mkdir(join(dir, "src"), { recursive: true });
@@ -100,8 +100,8 @@ async function writeTranscriptFor(runDir, runId, events) {
  * Returns { repo, baseCommit, wtPath, ref, runDir } with a transcript recording
  * the delivery under runId.
  */
-async function buildReviewScenario({ changeFn, allowedPaths = ["src"], runId = RUN_ID, prefix = "wao-m113b-", env } = {}) {
-  const { repo, baseCommit } = await makeRepo(prefix);
+async function buildReviewScenario({ changeFn, allowedPaths = ["src"], runId = RUN_ID, prefix = "wao-m113b-", env, objectFormat = "sha1" } = {}) {
+  const { repo, baseCommit } = await makeRepo(prefix, objectFormat);
   const wtPath = makeWorktree(repo, runId);
   // Apply the change inside the worktree before packaging.
   if (changeFn) await changeFn(wtPath);
@@ -901,56 +901,38 @@ test("M11-3B-G22: truncated === (nextCursor !== null); every page <= 16 KiB", as
 // M11-3B Package A: cursor portability (40/64-hex) + path C0/C1/DEL safety
 // =====================================================================
 
-test("M11-3B-PA-CURSOR-LEN: continuation cursor stays <=192 for 40 AND 64-hex commits", async () => {
-  // Force a real multi-page artifact so the service emits a real cursor.
-  // Use sha256 repo (64-hex) if available; otherwise the assertion still
-  // validates the 40-hex case, and a direct cursor-length unit check covers
-  // 64-hex without needing a sha256 repo.
-  const s = await buildReviewScenario({
-    changeFn: async (wt) => { await writeFile(join(wt, "src", "a.js"), "Y".repeat(20000) + "\n"); },
-    prefix: "wao-m113b-palen-",
-  });
-  try {
-    const page1 = await getRunDeliveryReview({
-      runId: s.runId, runDir: s.runDir, authorizedWorkspaceRoot: s.repo, fileIndex: 0,
+// Both object formats go through the real producer and consumer. A locally
+// reconstructed payload cannot prove that the product emits a valid cursor.
+for (const [objectFormat, commitLength] of [["sha1", 40], ["sha256", 64]]) {
+  test(`M11-3B-PA-CURSOR-LEN: real ${objectFormat} delivery cursor is bounded and resumes the next page`, async () => {
+    const s = await buildReviewScenario({
+      objectFormat,
+      changeFn: async (wt) => { await writeFile(join(wt, "src", "a.js"), "Y".repeat(20000) + "\n"); },
+      prefix: "wao-m113b-palen-",
     });
-    assert.ok(page1.nextCursor, "need a real cursor");
-    assert.ok(page1.nextCursor.length <= 192,
-      `40-hex cursor must be <=192, got ${page1.nextCursor.length}`);
-    // The cursor must NOT carry the full commit literal (it is bound via the
-    // artifact fingerprint), so 64-hex commits also stay within bound.
-    const decoded = JSON.parse(Buffer.from(page1.nextCursor, "base64url").toString("utf8"));
-    assert.ok(!("c" in decoded),
-      "cursor must not carry a full-commit field (bind via artifact fingerprint)");
-    assert.ok("a" in decoded && typeof decoded.a === "string" && decoded.a.length === 22,
-      "cursor binds an artifact fingerprint (runId+commit+fileIndex)");
-  } finally {
-    await cleanupRepo(s.repo);
-    await cleanupRepo(s.runDir);
-  }
-});
-
-test("M11-3B-PA-CURSOR-64HEX: 64-hex commit fingerprint keeps cursor <=192", async () => {
-  // Synthetic check: build the exact cursor payload the service would emit for a
-  // 64-hex commit and assert the bound. This covers the sha256 case without
-  // requiring a sha256 git repo (which is non-trivial to construct on sha1 git).
-  const { createHash } = await import("node:crypto");
-  const fakeRunId = "run_m113b_pa64";
-  const fakeCommit64 = "a".repeat(64);
-  const fakeDigest = createHash("sha256").update("x").digest().subarray(0, 16).toString("base64url");
-  // Domain-separated fingerprint: sha256(runId|commit|fileIndex) first 16 bytes.
-  const fp = createHash("sha256").update(`${fakeRunId}|${fakeCommit64}|0`).digest().subarray(0, 16).toString("base64url");
-  // OLD design (full commit literal): 203 chars → OVERFLOW at 64-hex.
-  const payloadOld = { v: 3, a: fp, c: fakeCommit64, i: 0, o: 12345, d: fakeDigest };
-  const tokenOld = Buffer.from(JSON.stringify(payloadOld), "utf8").toString("base64url");
-  console.log("  64-hex WITH full commit (old design):", tokenOld.length, tokenOld.length<=192?"OK":"OVERFLOW");
-  assert.ok(tokenOld.length > 192, "old design (full commit) must overflow at 64-hex (proving the bug)");
-  // NEW design (artifact fingerprint only, no full commit): <=192.
-  const payloadNew = { v: 3, a: fp, i: 0, o: 12345, d: fakeDigest };
-  const tokenNew = Buffer.from(JSON.stringify(payloadNew), "utf8").toString("base64url");
-  console.log("  64-hex fingerprint-only (new design):", tokenNew.length, tokenNew.length<=192?"OK":"OVERFLOW");
-  assert.ok(tokenNew.length <= 192, `fingerprint-only cursor must be <=192 even for 64-hex commit, got ${tokenNew.length}`);
-});
+    try {
+      assert.equal(s.ref.deliveryCommit.length, commitLength, "fixture must use the requested Git object format");
+      const input = { runId: s.runId, runDir: s.runDir, authorizedWorkspaceRoot: s.repo, fileIndex: 0 };
+      const page1 = await getRunDeliveryReview(input);
+      assert.equal(page1.available, true);
+      assert.equal(page1.truncated, true);
+      assert.ok(page1.nextCursor && page1.nextCursor.length <= 192);
+      const decoded = JSON.parse(Buffer.from(page1.nextCursor, "base64url").toString("utf8"));
+      assert.ok(!("c" in decoded), "cursor must not carry the full commit literal");
+      assert.equal(decoded.a.length, 22, "cursor binds the artifact fingerprint");
+      const page2 = await getRunDeliveryReview({ ...input, cursor: page1.nextCursor });
+      assert.equal(page2.available, true);
+      assert.equal(page2.nextCursor, null);
+      assert.equal(page2.truncated, false);
+      const expected = execFileSync("git", ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=3", s.baseCommit, s.ref.deliveryCommit, "--", "src/a.js"],
+        { cwd: s.repo, encoding: "utf8", windowsHide: true });
+      assert.equal(page1.fragment + page2.fragment, expected, "real cursor resumes without losing or duplicating any byte, including the final newline");
+    } finally {
+      await cleanupRepo(s.repo);
+      await cleanupRepo(s.runDir);
+    }
+  });
+}
 
 test("M11-3B-PA-PATH-C1: validateProjectedPath rejects C0, C1, DEL control chars", async () => {
   const { validateProjectedPath } = await import("../../src/application/deliveryReview.js");

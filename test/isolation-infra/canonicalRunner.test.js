@@ -13,7 +13,8 @@
 // tests lock the decision logic that keeps the verdict truthful and attributable.
 //
 // TD-165 exception: the watchdog tests at the bottom of this file DO spawn real
-// short-lived `node --test` children — but only against mkdtemp tmpdir synthetic
+// short-lived `node --test` children (this file belongs to the process wave),
+// only against mkdtemp tmpdir synthetic
 // test/ trees with 1-5s injected budgets (never the repo's own test/ tree,
 // never production defaults). Everything else stays child-free.
 
@@ -1367,17 +1368,46 @@ test("TD-165 T2: 同步 while(true) 死循环 + 注入 1s per-test 超时 ⇒ �
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("TD-165 T3: 竞态——恰在注入超时之下完成的测试正常通过，无误杀", async () => {
-  // F5 修复轮：完成时间 ≈ 注入超时的 70%（1400ms / 2000ms）。余量取舍：300ms/2500ms
-  // （8%）证不了"恰在超时之下"；90%+ 又会把慢机调度抖动放大成误杀假阳性；70%
-  // 离边界近到能证"之下不误杀"，同时 600ms 余量吸收子进程启动/调度延迟。
-  const root = synthWorkspace("wao-td165-t3-", { "slow.test.js": synthSlowOk(1400) });
-  try {
-    const w = await runSynthWave(root, { rels: ["slow.test.js"], testTimeoutMs: 2000, watch: { waveWatchdogMs: 5000 } });
-    assert.equal(w.results[0].status, "pass", "1400ms 慢而合法的测试在 2000ms 上限（70% 边界）内 ⇒ pass（不误杀）");
-    assert.equal(w.groupError, null);
-    assert.ok(!w.watchdog, "兜底未触发");
-  } finally { rmSync(root, { recursive: true, force: true }); }
+// Test our adapter's deadline ordering with a controlled clock. Node's own
+// per-file timer is exercised by T1/T2/T8; it is not reimplemented here.
+test("TD-165 T3: close before watchdog deadline cancels the kill, even after time advances", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  const { child } = fakeChild({ pid: 424240 });
+  const kills = [];
+  const runChild = realRunChild(process.execPath, "unused-root", {}, {
+    waveWatchdogMs: 2000, waveAlarmMs: 0,
+    killTreeFn: async (pid) => { kills.push(pid); },
+  }, () => child);
+  const pending = runChild(["--test"], { waveName: "process" });
+  t.mock.timers.tick(1999);
+  assert.deepEqual(kills, []);
+  child.emit("close", 0);
+  const result = await pending;
+  t.mock.timers.tick(10000);
+  assert.equal(result.exitCode, 0);
+  assert.ok(!result.watchdog, "completed child must not become a timeout");
+  assert.deepEqual(kills, [], "close must disarm the watchdog");
+});
+
+test("TD-165 T3 deadline: live child is killed at the deadline and a late close cannot erase timeout", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  const { child } = fakeChild({ pid: 424241 });
+  const kills = [];
+  const runChild = realRunChild(process.execPath, "unused-root", {}, {
+    waveWatchdogMs: 2000, waveAlarmMs: 0,
+    killTreeFn: async (pid) => { kills.push(pid); },
+    probeAliveFn: () => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); },
+  }, () => child);
+  const pending = runChild(["--test"], { waveName: "process" });
+  t.mock.timers.tick(1999);
+  assert.deepEqual(kills, []);
+  t.mock.timers.tick(1);
+  child.emit("close", 0);
+  const result = await pending;
+  assert.deepEqual(kills, [child.pid]);
+  assert.equal(result.watchdog.fired, true);
+  assert.equal(result.watchdog.confirmed, true);
+  assert.equal(result.watchdog.elapsedMs, 2000);
 });
 
 test("TD-165 T4: 波级兜底先于 per-test 超时触发（注入小 watchdogMs + 真实 taskkill）⇒ 全文件 crash + crashReason + groupError 四要素", async () => {
@@ -1466,25 +1496,26 @@ test("TD-165 T6: 隔离重跑再挂 ⇒ 兜底收杀重跑 + 分类不是 enviro
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("TD-165 T7: 慢波告警（注入小 alarmMs）⇒ stderr 出现 NOTICE 行，verdict 不受影响", async () => {
-  // F4 修复轮：全部注入值收进 1-5s 区间——慢测 3s 完成于 5s 上限内、1s 告警先响
-  // （约 3 行）、5s 兜底不触发。
-  const root = synthWorkspace("wao-td165-t7-", { "slow.test.js": synthSlowOk(3000) });
+test("TD-165 T7: slow-wave notices are informational and stop after child close", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: 0 });
+  const { child } = fakeChild({ pid: 424247 });
   const lines = [];
-  try {
-    const w = await runSynthWave(root, {
-      name: "mcp", rels: ["slow.test.js"], category: "mcp", concurrency: 1,
-      testTimeoutMs: 5000, watch: { waveWatchdogMs: 5000, waveAlarmMs: 1000, logLine: (l) => lines.push(l) },
-    });
-    assert.ok(lines.length >= 1, "至少一条告警行（子进程墙钟 > alarmMs）");
-    for (const line of lines) {
-      assert.ok(/^\[canonical\] NOTICE: wave=mcp running for \d+s \(slow-wave alarm, informational\)$/.test(line),
-        `告警行形状（纯读、带波名与秒数）：${line}`);
-    }
-    assert.equal(w.results[0].status, "pass", "告警绝不影响结果（纯读）");
-    assert.equal(w.groupError, null);
-    assert.ok(!w.watchdog, "告警不是兜底：绝不杀进程");
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  const kills = [];
+  const runChild = realRunChild(process.execPath, "unused-root", {}, {
+    waveWatchdogMs: 5000, waveAlarmMs: 1000,
+    logLine: (line) => lines.push(line),
+    killTreeFn: async (pid) => { kills.push(pid); },
+  }, () => child);
+  const pending = runChild(["--test"], { waveName: "mcp" });
+  t.mock.timers.tick(1000);
+  assert.deepEqual(lines, ["[canonical] NOTICE: wave=mcp running for 1s (slow-wave alarm, informational)"]);
+  child.emit("close", 0);
+  const result = await pending;
+  t.mock.timers.tick(10000);
+  assert.equal(lines.length, 1, "close must cancel subsequent notices");
+  assert.deepEqual(kills, [], "notice must never kill a child");
+  assert.equal(result.exitCode, 0);
+  assert.ok(!result.watchdog);
 });
 
 test("TD-165 T8 (F3): 挂死文件含 1 个通过兄弟 + 注入小 per-test 超时 ⇒ 该文件非 pass 且指名（带原因），不只波级 groupError", async () => {
