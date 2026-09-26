@@ -22,17 +22,34 @@
 //   - tool order is the exact tools/list (registration) order;
 //   - .gitattributes pins docs/surface/*.md to eol=lf so checkouts stay stable.
 //
-// Usage: npm run gen:surface   (writes both files; import { generate } for the
-// in-memory strings — importing never writes).
+// Pure-library contract (TD-185, 2026-09-27 — same split as gen-certification):
+// this file exports ONLY generate() + render(). Importing is side-effect-free
+// and entry-detection-free (no import.meta.main, no argv[1] comparison, no
+// realpath-ino identity check, no process.exit). `import.meta.main` was the old
+// entry gate and is undefined on Node 22.x < 22.18 while package.json engines
+// admits the whole 22.x line — there `if (import.meta.main)` made `npm run
+// gen:surface` exit 0 WITHOUT writing either file (fail-open; the F1 twin of
+// the already-fixed gen-certification). The gate is now deleted outright, so
+// the library never depends on that API again.
+//
+// The process entry is the thin CLI scripts/gen-surface-cli.mjs:
+//   no args            = write both files (only after generate() fully succeeded)
+//   exactly `--check`  = read-only compare (CRLF/LF-normalized); missing/stale
+//                        ⇒ non-zero exit, never repairs, never creates
+//   any other argv     = non-zero exit, no generation, no writes
+//
+// Usage: npm run gen:surface               (write both files via the thin CLI)
+//        npm run gen:surface -- --check    (read-only freshness check)
+//        import { generate, render }       (in-memory strings — never writes)
+//
+// Regression: test/process/genSurfaceEntry.test.js (real subprocesses).
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import { HELP_TEXT } from "../src/cliHelp.js";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MCP_TOOLS_MD = "docs/surface/mcp-tools.md";
 const CLI_MD = "docs/surface/cli.md";
 
@@ -234,8 +251,25 @@ function renderCliMd() {
 }
 
 // =====================================================================
-// generate()
+// render() / generate()
 // =====================================================================
+
+/**
+ * Render both surface documents from an already-derived tools/list result.
+ * Pure and synchronous: no transport, no temp dir, no working-tree I/O —
+ * byte-deterministic for identical inputs (same determinism contract as
+ * generate()).
+ *
+ * @param {Array<object>} tools — the live tools/list result, in registration
+ *   order (as returned by the SDK client in generate()).
+ * @returns {{ "docs/surface/mcp-tools.md": string, "docs/surface/cli.md": string }}
+ */
+export function render(tools) {
+  return {
+    [MCP_TOOLS_MD]: renderMcpToolsMd(tools),
+    [CLI_MD]: renderCliMd(),
+  };
+}
 
 /**
  * Derive both surface reference documents. Pure with respect to the working
@@ -263,10 +297,7 @@ export async function generate() {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     const tools = (await client.listTools()).tools;
-    return {
-      [MCP_TOOLS_MD]: renderMcpToolsMd(tools),
-      [CLI_MD]: renderCliMd(),
-    };
+    return render(tools);
   } finally {
     if (client) await client.close().catch(() => {});
     if (server) await server.close().catch(() => {});
@@ -274,13 +305,8 @@ export async function generate() {
   }
 }
 
-// Write the files only when run as the main module (never on import).
-if (import.meta.main) {
-  const files = await generate();
-  for (const [rel, content] of Object.entries(files)) {
-    const target = join(REPO_ROOT, rel);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, content, "utf8");
-    console.log(`[gen-surface] wrote ${rel} (${Buffer.byteLength(content, "utf8")} bytes)`);
-  }
-}
+// Pure-library endpoint: no entry detection, no writes, no --check, no
+// process.exit. The removed `if (import.meta.main)` block is the TD-185
+// fail-open (undefined on Node 22.x < 22.18 ⇒ `npm run gen:surface` exit 0
+// with zero files written); entry duties live entirely in the thin CLI
+// scripts/gen-surface-cli.mjs — pinned by test/process/genSurfaceEntry.test.js.

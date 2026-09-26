@@ -235,6 +235,7 @@
       "delivery/m11-10-readiness.test.js",
       "mcp-surface/mcpRegistry.test.js",
       "process/genCertificationEntry.test.js",
+      "process/genSurfaceEntry.test.js",
       "isolation-infra/parseSmoke.test.js",
       "transcript/runCollectServeCapRed.test.js",
       "transcript/runCollectStdioSmoke.test.js",
