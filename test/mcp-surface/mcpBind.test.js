@@ -321,9 +321,14 @@ test("ROLLBACK-ADD-01: codexAdd fails → exclude rolled back", async () => {
     fk.codexAdd = async () => { throw new Error("simulated add failure"); };
 
     const { bindWorkspace } = await import("../../src/application/mcpWorkspaceActivation.js");
+    // Exact simulated-add error: a restore fault would surface as
+    // "cleanup_failed: codex mcp add failed: … — restoration incomplete: …".
+    // The old .includes("add failed") predicate accepted that wrapper too,
+    // discarding the original OS error before the exclude assertion failed.
+    // Exact equality makes cleanup_failed fail HERE with its real message.
     await assert.rejects(
       () => bindWorkspace({ host: "codex", cwd: dir, hooks: fk }),
-      (err) => err.message.includes("add failed"),
+      (err) => err.message === "codex mcp add failed: simulated add failure",
     );
     // Exclude must be restored
     assert.deepEqual(readExclude(join(dir, ".git")), excludeBefore);

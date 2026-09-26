@@ -348,7 +348,16 @@ test("M9-2A-07: requireCertified propagated — fails at certification-gate, nev
     for (let i = 0; i < 80; i += 1) {
       if (existsSync(transcriptPath)) {
         events = await readTranscript(transcriptPath);
-        if (["failed", "completed", "aborted", "timed_out"].includes(findState(events))) break;
+        // Poll ONLY on the explicit terminal run.state_change the assertions
+        // below require. findState() would report "failed" on a bare run.error
+        // (legacy fallback), which can be observed in the window AFTER the
+        // runner appends run.error(phase certification-gate) but BEFORE the
+        // subsequent run.state_change → failed is durable — breaking there
+        // reads a transcript whose failedChange is still absent.
+        const explicitTerminal = events.some(
+          (e) => e.type === "run.state_change" && ["failed", "completed", "aborted", "timed_out"].includes(e.to),
+        );
+        if (explicitTerminal) break;
       }
       await new Promise((r) => setTimeout(r, 150));
     }

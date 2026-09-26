@@ -178,17 +178,26 @@ test("D-F3: runBackground 运行中写 ownership 文件，完成后删", async (
   try {
     // slow mock：/message 先空几轮（让 run 卡 running），再返回 assistant（让 run 完成）。
     // 这样能在 run 进行中观测到 ownership 文件。
+    // 停止验证三面必须可观察且稳定（idle status + 稳定 tokens + 稳定 messages）：
+    // 缺席（404）时 verifyStopQuiet 判 unavailable → 写 run.stop_unverified，
+    // 且 raiseAlert 是 fire-and-forget，会在 runBackground 返回后异步写 ALERTS.log，
+    // 与 finally 的 rm(dir) 竞态。补齐三面让 stop 验证走真实 quiet 判定 → stop_verified。
+    // 用 pathname 精确匹配：backend 会带 ?directory=.../limit=... 查询串，不能
+    // 用裸字符串 includes/endsWith 匹配（/session/status 与 /session/<id> 易混）。
     let polls = 0;
     const slowFetch = async (url, init = {}) => {
-      const u = String(url);
-      if (init.method === "POST" && u.endsWith("/api/session")) return { ok: true, status: 200, async json() { return { data: { id: "ses_slow" } }; }, async text() { return JSON.stringify({ data: { id: "ses_slow" } }); } };
-      if (init.method === "POST" && u.includes("/prompt_async")) return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
-      if (init.method === "GET" && u.includes("/message")) {
+      const { pathname } = new URL(String(url));
+      const method = init.method ?? "GET";
+      if (method === "POST" && pathname === "/api/session") return { ok: true, status: 200, async json() { return { data: { id: "ses_slow" } }; }, async text() { return JSON.stringify({ data: { id: "ses_slow" } }); } };
+      if (method === "POST" && pathname === "/session/ses_slow/prompt_async") return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
+      if (method === "GET" && pathname === "/session/ses_slow/message") {
         polls += 1;
         const msgs = polls > 3 ? [{ info: { id: "m", role: "assistant" }, parts: [{ type: "text", text: "done" }] }] : [];
         return { ok: true, status: 200, async json() { return msgs; }, async text() { return JSON.stringify(msgs); } };
       }
-      if (init.method === "POST" && u.includes("/abort")) return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
+      if (method === "GET" && pathname === "/session/status") return { ok: true, status: 200, async json() { return { ses_slow: { type: "idle" } }; }, async text() { return JSON.stringify({ ses_slow: { type: "idle" } }); } };
+      if (method === "GET" && pathname === "/session/ses_slow") return { ok: true, status: 200, async json() { return { id: "ses_slow", tokens: { input: 100, output: 5, reasoning: 1 }, cost: 0 }; }, async text() { return JSON.stringify({ id: "ses_slow", tokens: { input: 100, output: 5, reasoning: 1 }, cost: 0 }); } };
+      if (method === "POST" && pathname === "/session/ses_slow/abort") return { ok: true, status: 204, async json() { return null; }, async text() { return ""; } };
       return { ok: false, status: 404, async text() { return "x"; } };
     };
 
@@ -214,6 +223,21 @@ test("D-F3: runBackground 运行中写 ownership 文件，完成后删", async (
     assert.ok(ownerSeenDuringRun, "runBackground 运行中应写 ownership 文件（.owner-<runId>）");
 
     const result = await runPromise;
+    // run 自然完成（慢消息推进后 completed）——补齐 fixture 后停验证才有意义。
+    assert.equal(result.completed, true, `run 应自然 completed，实际 ${JSON.stringify(result)}`);
+
+    // 实际 stop_verified 证据：三面 fixture 必须真的让停验证观察到 quiet。
+    // 若意外回到 unavailable（如误 404），run 会静默落 stop_unverified + 异步告警，
+    // 此处必须失败而不是靠 rm 竞态碰运气。
+    const events = await readTranscript(path.join(dir, `${result.runId}.jsonl`));
+    const stopVerified = events.find((e) => e.type === "run.stop_verified");
+    assert.ok(stopVerified, "transcript 应有 run.stop_verified（停验证观察到 quiet）");
+    assert.equal(stopVerified.backendSessionId, "ses_slow", "stop_verified 绑定本 run 的 session");
+    assert.equal(events.some((e) => e.type === "run.stop_unverified"), false,
+      "不得回到 stop_unverified（unavailable 告警路径）");
+    assert.equal(existsSync(path.join(dir, "ALERTS.log")), false,
+      "stop 验证通过时不应写 ALERTS.log");
+
     // 完成后 ownership 文件应删（runner finally 清理）
     const ownerPath = path.join(dir, `.owner-${result.runId}`);
     assert.equal(existsSync(ownerPath), false, "runBackground 完成后应删 ownership 文件");
