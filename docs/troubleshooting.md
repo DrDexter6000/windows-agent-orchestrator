@@ -456,7 +456,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 
 ## 8. 测试套件与验证环境（canonical runner）
 
-`npm test` 由 `scripts/canonical-test.mjs`（TD-107 canonical runner）分波执行全量。本章覆盖套件自身的**环境性失败判定**——特别是波内红、隔离绿的未归因形态（TD-181，见 §8.1）与主仓根 runs-guard 红灯（TD-134）。两者都表现为 "exit 1 + 顺序复跑绿"，但判定规则与处置不同。何时可 focused（须带 `--test-timeout`）、何时必须全量：见 `docs/usage.md` 场景 4b 测试分层运行规则（T0-T3，2026-09-19）。
+`npm test` 由 `scripts/canonical-test.mjs`（TD-107 canonical runner）分波执行全量。本章按**失败形态与复验处置**组织（形态先行，不做环境归因）——特别是波内红、隔离绿的未归因形态（TD-181，见 §8.1；处置 = 安静窗口单发复验通过后走单次 reverify）与主仓根 runs-guard 红灯（TD-134，见 §8.2；处置 = 跑全量前确认无活跃 worker/daemon）。两者都表现为 "exit 1 + 顺序复跑绿"，但失败形态与复验处置不同：判定一律以**实际失败形态**（`isolation_pass` / `stable_fail` / `environment_invalid` / runs-guard 新增条目 / 波级 groupError / watchdog 中止）为准，顺序复跑变绿只是复验条件，不构成任何根因结论。何时可 focused（须带 `--test-timeout`）、何时必须全量：见 `docs/usage.md` 场景 4b 测试分层运行规则（T0-T3，2026-09-19）。
 
 ### 8.1 npm test exit 1 但失败全为 isolation_pass（波内红、隔离绿 ⇒ 原因未明）
 

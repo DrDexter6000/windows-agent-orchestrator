@@ -141,6 +141,12 @@
 //     failures recorded as unknown, never green), and each wave carries an
 //     advisory `observation` annotation (start time / concurrency / gate /
 //     concurrent-suite marker / node-process count with sampling time).
+//     TD-181 (b, 2026-09-26, audit22 fixes): the failureDetail budget is
+//     enforced on the ACTUAL JSON-serialized length (a single test + fileFailure
+//     with escaped characters used to exceed it), unknownFailureDetail bounds
+//     its reason, and the node-process sample records unknown — never 0 — on
+//     non-zero exit / signal / unparseable output, releasing the sampling
+//     child's handles on timeout.
 //
 // Performance: one Node process per WAVE (≈5 starts) instead of one per file
 // (≈161 starts) or one per category (6 starts with serial long poles). In-wave
@@ -550,8 +556,14 @@ export const FAILURE_DETAIL_TEST_CAP = 5;   // max failing sub-tests kept per fi
 export const FAILURE_DETAIL_TEXT_CAP = 1000; // max chars per retained string field
 export const FAILURE_DETAIL_CHAR_BUDGET = 8000; // max serialized chars per file
 
+// TD-181 (b, 2026-09-26): the unknown's `reason` rides into the bounded report
+// too — a multi-K reportError must not blow the per-file budget. Same bounding
+// discipline as every other retained string: worst case a char serializes to 6
+// (\u0001), so cap + marker stays under FAILURE_DETAIL_CHAR_BUDGET by
+// construction (6 × (1000 + 44) + structure ≪ 8000), and the truncation marker
+// keeps the true original length — nothing fabricated.
 export function unknownFailureDetail(reason) {
-  return { status: "unknown", reason: String(reason) };
+  return { status: "unknown", reason: boundDetailString(String(reason)) ?? "" };
 }
 
 // Bounded string: null for non-strings; over-cap strings are cut with an
@@ -584,6 +596,25 @@ export function staleReportInfo(report, waveStartMs) {
 // shapes, a throw) degrades to { status: "unknown", reason } — never a crash,
 // never a fabricated pass. fail-status suites win over pass duplicates,
 // mirroring mapReportToFiles.
+//
+// TD-181 (b, 2026-09-26): the budget is enforced on the ACTUAL serialized
+// length (JSON.stringify of the built detail), not "by construction". The old
+// claim "one capped test always fits by construction (6 fields × (cap +
+// marker) < budget)" was FALSE: JSON escaping expands one source char to as
+// many as 6 serialized chars (\u0001), so even a SINGLE failing test — with or
+// without fileFailure — could serialize past the budget (measured 8534/12437
+// plain-quoted, 14833 control-char; audit22). The fit ladder below is
+// re-derived from the RAW values at every step, so every truncation marker
+// states the TRUE shown/total counts and no content is ever fabricated:
+//   1. drop trailing failing tests (counted in failingTestsDropped) down to 1;
+//   2. drop fileFailure — its message is normally the SAME assertion error the
+//      first failing test's stack already carries (redundant content first);
+//      recorded explicitly as fileFailureDropped: true. Skipped when it is the
+//      ONLY content (no failing subtests were retained);
+//   3. halve the per-field cap and re-bound every field from its RAW value
+//      (markers restate the smaller cap against the original length);
+//   4. cap 0 leaves marker-only strings — if even that cannot fit
+//      (pathological), degrade to an honest unknown rather than exceed.
 export function firstRoundFailureDetail(report, rel) {
   try {
     let suite = null;
@@ -597,39 +628,63 @@ export function firstRoundFailureDetail(report, rel) {
     if (suite.status !== "fail") return unknownFailureDetail(`suite status '${suite.status}' — no failure content to retain`);
     const allFailing = (Array.isArray(suite.tests) ? suite.tests : [])
       .filter((t) => t && typeof t === "object" && t.status === "fail");
-    const detail = {
-      status: "collected",
-      source: "firstRoundWaveReport",
-      failingTestsTotal: allFailing.length,
-      failingTestsDropped: Math.max(0, allFailing.length - FAILURE_DETAIL_TEST_CAP),
-      failingTests: [],
-      fileFailure: null,
-    };
+    // RAW (unbounded) entries: the ladder re-derives bounded copies from these
+    // so each shrink step truncates the ORIGINAL, never a previously-truncated
+    // copy (markers would otherwise understate the true original length).
+    const rawTests = [];
     for (const t of allFailing.slice(0, FAILURE_DETAIL_TEST_CAP)) {
       const e = t.error && typeof t.error === "object" ? t.error : {};
-      detail.failingTests.push({
-        name: boundDetailString(t.name) ?? "(test name unavailable)",
-        operator: boundDetailString(e.operator),
-        expected: boundDetailString(e.expected),
-        actual: boundDetailString(e.actual),
-        diff: boundDetailString(e.diff),
-        stack: boundDetailString(e.stack),
+      rawTests.push({
+        name: typeof t.name === "string" ? t.name : null,
+        operator: e.operator, expected: e.expected, actual: e.actual,
+        diff: e.diff, stack: e.stack,
       });
     }
-    if (suite.fileFailure && typeof suite.fileFailure === "object") {
-      detail.fileFailure = {
-        message: boundDetailString(suite.fileFailure.message) ?? "(no message)",
-        stack: boundDetailString(suite.fileFailure.stack),
+    const rawFileFailure = suite.fileFailure && typeof suite.fileFailure === "object"
+      ? suite.fileFailure : null;
+    let kept = rawTests.length;
+    let dropped = Math.max(0, allFailing.length - FAILURE_DETAIL_TEST_CAP);
+    let cap = FAILURE_DETAIL_TEXT_CAP;
+    let fileFailureKept = true;
+    const build = () => {
+      const detail = {
+        status: "collected",
+        source: "firstRoundWaveReport",
+        failingTestsTotal: allFailing.length,
+        failingTestsDropped: dropped,
+        failingTests: [],
+        fileFailure: null,
       };
+      for (const rt of rawTests.slice(0, kept)) {
+        detail.failingTests.push({
+          name: boundDetailString(rt.name, cap) ?? "(test name unavailable)",
+          operator: boundDetailString(rt.operator, cap),
+          expected: boundDetailString(rt.expected, cap),
+          actual: boundDetailString(rt.actual, cap),
+          diff: boundDetailString(rt.diff, cap),
+          stack: boundDetailString(rt.stack, cap),
+        });
+      }
+      if (rawFileFailure) {
+        if (fileFailureKept) {
+          detail.fileFailure = {
+            message: boundDetailString(rawFileFailure.message, cap) ?? "(no message)",
+            stack: boundDetailString(rawFileFailure.stack, cap),
+          };
+        } else {
+          // explicit drop count — never silently vanish
+          detail.fileFailureDropped = true;
+        }
+      }
+      return detail;
+    };
+    while (JSON.stringify(build()).length > FAILURE_DETAIL_CHAR_BUDGET) {
+      if (kept > 1) { kept -= 1; dropped += 1; continue; }
+      if (rawFileFailure && fileFailureKept && rawTests.length > 0) { fileFailureKept = false; continue; }
+      if (cap > 0) { cap = Math.floor(cap / 2); continue; }
+      return unknownFailureDetail("failure detail could not be bounded within the per-file char budget");
     }
-    // Per-file char budget: drop trailing failing tests (counted as dropped)
-    // until the serialized detail fits; one capped test always fits by
-    // construction (6 fields × (cap + marker) < budget).
-    while (detail.failingTests.length > 1 && JSON.stringify(detail).length > FAILURE_DETAIL_CHAR_BUDGET) {
-      detail.failingTests.pop();
-      detail.failingTestsDropped += 1;
-    }
-    return detail;
+    return build();
   } catch (err) {
     return unknownFailureDetail(`collection error: ${err && err.message ? err.message : String(err)}`);
   }
@@ -1334,6 +1389,50 @@ export function realIsolator(nodeExe, repoRoot, env, watchOpts = {}, spawnImpl =
 // node-process count with sampling time: one bounded `tasklist` sample on
 // win32 (timeout-raced; the timer is unref'd so a hung tasklist can never
 // stall the suite), honest {count:null, reason} everywhere else. Advisory only.
+//
+// TD-181 (b, 2026-09-26, audit22; row-shape strictness re-fixed 2026-09-26 r2):
+// a sample that FAILED is unknown, never 0. The previous close handler ignored
+// the exit code and signal and counted rows unconditionally — a tasklist that
+// died non-zero (or was killed by a signal, or printed an unparseable banner)
+// with no node.exe rows was recorded as count 0, fabricating "zero node
+// processes". Policy (pinned):
+//   non-zero exit        ⇒ unknown (reason names the code)
+//   signal exit          ⇒ unknown (reason names the signal)
+//   unparseable output   ⇒ unknown — ANY non-blank line that is not a
+//                          WELL-FORMED quoted node.exe CSV row (full-line
+//                          shape: five columns with valid PID/session IDs):
+//                          a `"node.exe"garbage` broken row, a quoted row for
+//                          another image (the /FI filter was bypassed / not
+//                          tasklist output), or legal rows with unquoted
+//                          residue (a truncated buffer or a locale notice —
+//                          deliberately NO per-locale notice dictionary: a
+//                          notice cannot be PROVEN to be the normal no-match
+//                          line, zh-CN prints 「信息: 没有匹配…」, and an
+//                          unprovable zero must not be recorded as 0)
+//   normal empty sample  ⇒ 0 — the ONLY shape that may record 0: blank/empty
+//                          output after a successful process exit
+//   all rows well-formed ⇒ their count
+// The timeout leg additionally RELEASES the sampling child (kill + pipe
+// destroy + unref) before resolving — a hung tasklist must not leave live
+// handles holding the runner's natural exit (same F2a discipline as the
+// wave/isolation children).
+// tasklist /FO CSV /NH has exactly five quoted columns. Session names and
+// memory display are localized; only image, PID and numeric session ID have
+// machine-readable identities. Escaped quotes and commas remain field content.
+const TASKLIST_NODE_CSV_ROW = /^"node\.exe","([0-9]+)","(?:[^"]|"")*","([0-9]+)","(?:[^"]|"")*"$/;
+export function parseTasklistSample(out) {
+  const lines = typeof out === "string" ? out.split(/\r?\n/) : [];
+  const nonBlank = lines.map((l) => l.trim()).filter((l) => l !== "");
+  if (nonBlank.length === 0) return { count: 0 };
+  for (const l of nonBlank) {
+    const fields = TASKLIST_NODE_CSV_ROW.exec(l);
+    if (!fields || Number(fields[1]) <= 0 || Number(fields[1]) > 0xffffffff || Number(fields[2]) > 0xffffffff) {
+      return { count: null, reason: `unparseable tasklist output: not a well-formed quoted node.exe CSV row (first offending line: ${boundDetailString(l, 120)})` };
+    }
+  }
+  return { count: nonBlank.length };
+}
+
 export function defaultCountNodeProcesses({ timeoutMs = 5000, spawnImpl = spawn } = {}) {
   const sampledAt = new Date().toISOString();
   return new Promise((resolve) => {
@@ -1343,10 +1442,21 @@ export function defaultCountNodeProcesses({ timeoutMs = 5000, spawnImpl = spawn 
     }
     let settled = false;
     let out = "";
+    let child = null;
     const finish = (result) => { if (!settled) { settled = true; resolve(result); } };
-    const timer = setTimeout(() => finish({ count: null, sampledAt, reason: `sample timed out after ${timeoutMs}ms` }), timeoutMs);
+    // 采样异常不留活句柄：超时腿在 resolve 前先把采样子进程收掉（kill + 销毁
+    // 管道 + unref，全部 best-effort 且带类型守卫——注入的 fake child 可缺方法）。
+    const releaseChild = () => {
+      if (!child) return;
+      try { if (typeof child.kill === "function") child.kill(); } catch { /* best effort */ }
+      try { child.stdout?.destroy?.(); } catch { /* best effort */ }
+      try { if (typeof child.unref === "function") child.unref(); } catch { /* best effort */ }
+    };
+    const timer = setTimeout(() => {
+      releaseChild();
+      finish({ count: null, sampledAt, reason: `sample timed out after ${timeoutMs}ms` });
+    }, timeoutMs);
     if (typeof timer.unref === "function") timer.unref();
-    let child;
     try {
       child = spawnImpl("tasklist", ["/FI", "IMAGENAME eq node.exe", "/FO", "CSV", "/NH"], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
     } catch (err) {
@@ -1356,10 +1466,18 @@ export function defaultCountNodeProcesses({ timeoutMs = 5000, spawnImpl = spawn 
     }
     child.stdout?.on("data", (c) => { out += c; if (out.length > CHILD_BUFFER_CAP) out = out.slice(out.length - CHILD_BUFFER_CAP); });
     child.on("error", (err) => { clearTimeout(timer); finish({ count: null, sampledAt, reason: `tasklist failed: ${err && err.message ? err.message : String(err)}` }); });
-    child.on("close", () => {
+    child.on("close", (code, signal) => {
       clearTimeout(timer);
-      const count = out.split(/\r?\n/).filter((l) => /^"node\.exe"/i.test(l.trim())).length;
-      finish({ count, sampledAt });
+      if (signal) {
+        finish({ count: null, sampledAt, reason: `tasklist exited on signal ${signal}` });
+        return;
+      }
+      if (code !== 0) {
+        finish({ count: null, sampledAt, reason: `tasklist exited with code ${code}` });
+        return;
+      }
+      const parsed = parseTasklistSample(out);
+      finish(parsed.count === null ? { count: null, sampledAt, reason: parsed.reason } : { count: parsed.count, sampledAt });
     });
   });
 }

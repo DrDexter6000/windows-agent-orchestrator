@@ -135,6 +135,6 @@ SSOT 规则用 `test/isolation-infra/docs-consistency.test.js` 固化。守卫�
 - transcript 事件 spec 在 `docs/02-architecture.md` §3.2 维护，`docs/usage.md` §三是受行集守卫的人读投影。
 - 技术债编号必须能在 `docs/tech-debt.md` 查到。
 - 历史审计和 phase plan 必须在 `docs/archive/`，不能回到 docs 根目录充当活文档。
-- seat-certify 文件级入口（TD-187 索引试点已于 2026-09-25 回退，不保留可选索引路线）：§0.1 主表行无条件全文必读恰五文件（2026-09-26 起 `docs/usage.md` 换为 `docs/certification-runbook.md`——认证操作正文完整迁移，`docs/usage.md` 原位置留具名标题与单向链接；TD-187 冻结历史原文逐字节不变）；多行动面并集、正文显式依赖跟进、截断补读三义务在场；adversarialEscape → architecture §4.6/§4.1 为追加依赖指针（非独立入口）；恢复索引 / 节选替代全文 / 裁量收窄必红。撤下前 §0.1.1 原文在测试文件内冻结为历史输入（不是阅读入口），原索引守卫族与反例固化继续实际执行。
+- seat-certify 文件级入口（TD-187 索引试点已于 2026-09-25 回退，不保留可选索引路线）：§0.1 主表行无条件全文必读恰五文件（2026-09-26 起 `docs/usage.md` 换为 `docs/certification-runbook.md`——认证操作正文完整迁移，`docs/usage.md` 原位置留具名标题与单向链接）；多行动面并集、正文显式依赖跟进、截断补读三义务在场；adversarialEscape → architecture §4.6/§4.1 为追加依赖指针（非独立入口）；恢复索引 / 节选替代全文 / 裁量收窄必红。旧索引守卫族（锚解析 / 公共项 / 依赖 / 回退 / 4096 帽）与 §0.1.1 冻结夹具**已不再执行**：TD-187 回退包（`f9c1fbe`，2026-09-25）曾将其落库，2026-09-26 的测试边界修正（`3304f71`）已整体移除——历史查 Git（`f9c1fbe` 引入、`3304f71` 移除），测试文件内不再保留其冻结副本。现行实际执行的是：文件级入口守卫族（B3-③ 追加依赖指针、B3-⑥ 恰五文件全集、B3-⑦ 无条件全文与三义务，负反例固化——恢复索引 / 节选 / 裁量收窄形状喂入必红）与认证迁移链接可达性守卫（原位具名标题 + 单向链接 + 目标节真实存在，摘链接 / 改目标节名 / 删标题必红）。
 
 历史审计矩阵不在本文维护；需要查当时发现和收束过程时读 `docs/archive/docs-ssot-audit.md`。当前项目状态以 `docs/roadmap.md`、`docs/tech-debt.md`、`docs/02-architecture.md` 和代码/测试为准。

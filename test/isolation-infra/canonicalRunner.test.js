@@ -47,7 +47,7 @@ import {
   firstRoundFailureDetail, staleReportInfo, collectWaveObservation,
   boundDetailString, unknownFailureDetail,
   FAILURE_DETAIL_TEST_CAP, FAILURE_DETAIL_TEXT_CAP, FAILURE_DETAIL_CHAR_BUDGET,
-  realWaveObservers, defaultCountNodeProcesses,
+  realWaveObservers, defaultCountNodeProcesses, parseTasklistSample,
 } from "../../scripts/canonical-test.mjs";
 
 function manifestFixture() {
@@ -1991,8 +1991,10 @@ test("TD-181(a) 真实观测适配器（注入 fs/gate/count seam，零真实进
   });
   assert.equal((await corrupt.verificationGate()).state, "corrupt");
 
-  // tasklist 计数：fake spawnImpl 解析 CSV 行；不返回的 child ⇒ 超时记 unknown。
-  const csv = '"node.exe","111","Console","1","1,234 K"\r\n"node.exe","222","Console","1","2,345 K"\r\nINFO: No tasks are running which match the specified criteria.\r\n';
+  // tasklist 计数：fake spawnImpl 解析完整形状 CSV 行（TD-181(b) 第二轮起行形状
+  // 严格化——合法行+未加引号 notice/垃圾残留 ⇒ unknown，因此计数夹具只含合法行；
+  // notice 残留形状在「TD-181(b) ③」测试中钉为 unknown）；不返回的 child ⇒ 超时记 unknown。
+  const csv = '"node.exe","111","Console","1","1,234 K"\r\n"node.exe","222","Console","1","2,345 K"\r\n';
   const fakeSpawnOk = () => {
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
@@ -2000,7 +2002,7 @@ test("TD-181(a) 真实观测适配器（注入 fs/gate/count seam，零真实进
     return child;
   };
   const counted = await defaultCountNodeProcesses({ timeoutMs: 2000, spawnImpl: fakeSpawnOk });
-  assert.equal(counted.count, 2, 'CSV 行按 "node.exe" 前缀计数');
+  assert.equal(counted.count, 2, 'CSV 行按完整行形状（"node.exe" + 引号字段）计数');
   assert.ok(!Number.isNaN(Date.parse(counted.sampledAt)), "带采样时间");
   const fakeSpawnHang = () => {
     const child = new EventEmitter();
@@ -2047,4 +2049,297 @@ test("TD-181(a) 纯函数钉：boundDetailString 截断标识 / firstRoundFailur
   const ff = firstRoundFailureDetail({ suites: [{ name: "test/a.test.js", status: "fail", tests: [], fileFailure: { message: "test timed out after 1000ms", stack: "at x" } }] }, "a.test.js");
   assert.equal(ff.fileFailure.message, "test timed out after 1000ms");
   assert.equal(unknownFailureDetail("r").status, "unknown");
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// TD-181 (b, 2026-09-26, audit22 修复钉)：三个可复现缺陷的回归——
+//   ① 预算按「实际 JSON 序列化长度」收敛：单条失败子测试 + fileFailure、含 JSON
+//      转义字符（控制字符/引号）时旧实现序列化 8534/12437/14833 > 8000；
+//   ② unknown 的 reason 限长（旧实现实测 20032）；
+//   ③ node 进程观测：非零退出 / 信号 / 不可解析输出必须 unknown（旧实现全记 0），
+//      正常空列表才可 0；采样超时释放采样子进程句柄；
+//   ④ 端到端回归：走真实 canonical 套件入口（runSuite + 真实子进程适配器），
+//      读取实际落盘报告，断言「首轮 fail + 单跑 pass ⇒ 仍 fail、失败详情已保存」
+//      ——在落盘前撤掉 failureDetail（audit22 M2 变异）必红。
+// ────────────────────────────────────────────────────────────────────────────
+
+test("TD-181(b) ① 单条失败子测试 + fileFailure + 控制字符转义 ⇒ 实际序列化 ≤ 预算，截断标识带真实原始长度", () => {
+  const ctl = (n) => "\u0001".repeat(n); // JSON.stringify 每字符膨胀 6 倍（\u0001）
+  const report = makeRichReport("a.test.js", {
+    failingTests: [{
+      name: "the only failing subtest", status: "fail", duration: 1,
+      error: {
+        actual: ctl(3000) + "|actual-tail", expected: ctl(3000) + "|expected-tail",
+        operator: "equal", stack: "AssertionError: values differ\n    at a.test.js:9:5",
+        diff: "- Expected: x\n+ Received: y",
+      },
+    }],
+    fileFailure: { message: "file-level failure: " + ctl(600), stack: "    at a.test.js:1:1" },
+  });
+  const d = firstRoundFailureDetail(report, "a.test.js");
+  const len = JSON.stringify(d).length;
+  assert.equal(d.status, "collected");
+  assert.ok(d.failingTests.length >= 1, "至少保留一条（截断不归零）");
+  assert.ok(len <= FAILURE_DETAIL_CHAR_BUDGET, `按实际序列化长度收敛：${len} ≤ ${FAILURE_DETAIL_CHAR_BUDGET}（旧实现此形状 14833）`);
+  const t = d.failingTests[0];
+  assert.equal(t.name, "the only failing subtest", "子测试名完整保留");
+  assert.ok(/\[TRUNCATED: first \d+ of 3012 chars\]/.test(t.actual), `actual 截断标识带真实原始长度（实际 ${JSON.stringify(t.actual.slice(-60))}）`);
+  assert.ok(/\[TRUNCATED: first \d+ of 3014 chars\]/.test(t.expected), "expected 截断标识带真实原始长度");
+  assert.ok(t.actual.startsWith("\u0001\u0001\u0001"), "截断保留原文前缀，不杜撰内容");
+  // 丢弃计数诚实：保留 + 丢弃 = 总数；fileFailure 被丢弃以腾预算时必须显式标注。
+  assert.equal(d.failingTestsTotal - d.failingTests.length, d.failingTestsDropped);
+  if (!d.fileFailure) assert.equal(d.fileFailureDropped, true, "fileFailure 丢弃必须显式计数，不得静默消失");
+});
+
+test("TD-181(b) ① 引号转义（每字符×2）多字段 ⇒ 实际序列化 ≤ 预算；fileFailure 为唯一内容时不被丢弃只缩前缀", () => {
+  const q = (n) => '"'.repeat(n); // JSON.stringify 每字符膨胀 2 倍（\"）
+  const multi = makeRichReport("a.test.js", {
+    failingTests: [{
+      name: "quoted subtest", status: "fail", duration: 1,
+      error: { actual: q(1500), expected: q(1500), operator: "equal", stack: q(1500), diff: q(1500) },
+    }],
+    fileFailure: { message: q(1500), stack: q(1500) },
+  });
+  const md = firstRoundFailureDetail(multi, "a.test.js");
+  assert.ok(JSON.stringify(md).length <= FAILURE_DETAIL_CHAR_BUDGET,
+    `引号形状同样收敛（实际 ${JSON.stringify(md).length}）`);
+  assert.equal(md.status, "collected");
+
+  // fileFailure 是唯一内容（文件级失败、零子测试事件）⇒ 只缩字段前缀，绝不丢弃到空。
+  const onlyFile = { suites: [{ name: "test/b.test.js", status: "fail", tests: [], fileFailure: { message: q(4000), stack: q(4000) } }] };
+  const od = firstRoundFailureDetail(onlyFile, "b.test.js");
+  assert.equal(od.status, "collected");
+  assert.ok(od.fileFailure && od.fileFailure.message, "fileFailure 为唯一内容时必须保留（截断而非丢弃）");
+  assert.ok(/\[TRUNCATED: first \d+ of 4000 chars\]/.test(od.fileFailure.message), "截断标识带真实原始长度");
+  assert.ok(JSON.stringify(od).length <= FAILURE_DETAIL_CHAR_BUDGET, `fileFailure-only 形状同样收敛（实际 ${JSON.stringify(od).length}）`);
+});
+
+test("TD-181(b) ② unknown reason 限长 ⇒ 实际序列化 ≤ 预算且保留可辨识前缀（旧实现实测 20032）", async () => {
+  const ud = unknownFailureDetail(`suite 'a.test.js' has unrecognized status "todo" — ` + "E".repeat(20032));
+  assert.equal(ud.status, "unknown");
+  assert.ok(ud.reason.startsWith("suite 'a.test.js' has unrecognized status"), "可辨识前缀保留");
+  assert.ok(/\[TRUNCATED: first \d+ of \d+ chars\]/.test(ud.reason), "截断标识在场（真实原始长度）");
+  const len = JSON.stringify(ud).length;
+  assert.ok(len <= FAILURE_DETAIL_CHAR_BUDGET, `unknown 序列化 ${len} ≤ ${FAILURE_DETAIL_CHAR_BUDGET}`);
+  // runWave 的坏报告腿透传 reportError ⇒ 同样有界。
+  const w = await runWave({
+    name: "pure", files: waveFiles(["a.test.js"], "pure"), concurrency: 1, reporterArg: "R",
+    runChild: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    readReport: async () => ({ suites: [{ name: "test/a.test.js", status: "nope", tests: [] }] }),
+    deleteReport: noopDelete,
+  });
+  const wd = w.results[0].failureDetail;
+  assert.equal(wd.status, "unknown");
+  assert.ok(JSON.stringify(wd).length <= FAILURE_DETAIL_CHAR_BUDGET, "波内透传的 unknown 同样受预算约束");
+});
+
+test("TD-181(b) ③ node 进程观测：非零退出/信号/不可解析 ⇒ unknown（绝不记 0）；正常空列表才可 0", async () => {
+  const csv = '"node.exe","111","Console","1","1,234 K"\r\n"node.exe","222","Console","1","2,345 K"\r\n';
+  const fakeSpawn = (output, code = 0, signal = null) => () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    queueMicrotask(() => { child.stdout.emit("data", output); child.emit("close", code, signal); });
+    return child;
+  };
+  const sample = (output, code, signal) => defaultCountNodeProcesses({ timeoutMs: 2000, spawnImpl: fakeSpawn(output, code, signal) });
+
+  // 正常：完整形状的 node.exe CSV 行按行计数；正常空输出（无可非难残留）⇒ 0。
+  assert.equal((await sample(csv)).count, 2, "正常样本按完整 CSV 行计数");
+  assert.equal((await sample("")).count, 0, "正常空列表（空输出）才可记 0");
+
+  // 非零退出——即使输出里全是可数行，也必须 unknown。
+  const nonZero = await sample(csv, 1);
+  assert.equal(nonZero.count, null, "非零退出绝不记 0");
+  assert.match(nonZero.reason, /exited with code 1/);
+
+  // 信号退出 ⇒ unknown。
+  const signaled = await sample(csv, null, "SIGKILL");
+  assert.equal(signaled.count, null, "信号退出绝不记 0");
+  assert.match(signaled.reason, /signal SIGKILL/);
+
+  // 不可解析：无 node 行的非空残留（本地化 notice/垃圾均不可证为正常空列表——不建各语言 notice 字典）⇒ unknown。
+  const garbage = await sample("some banner that is not tasklist CSV\r\n");
+  assert.equal(garbage.count, null, "不可解析输出绝不记 0");
+  assert.match(garbage.reason, /unparseable/);
+
+  // 不可解析：带引号的非 node.exe 行（过滤器被绕过/不是 tasklist 输出）⇒ unknown。
+  const otherImage = await sample('"cmd.exe","999","Console","1","1,000 K"\r\n');
+  assert.equal(otherImage.count, null);
+  assert.match(otherImage.reason, /unparseable/);
+
+  // 不可解析：行首像 node.exe 但行形状不完整（"node.exe"garbage）⇒ unknown——按完整 CSV 行形状验证。
+  const brokenRow = await sample('"node.exe"garbage\r\n');
+  assert.equal(brokenRow.count, null, '"node.exe"garbage 不是完整 CSV 行 ⇒ unknown（前缀匹配不够）');
+  assert.match(brokenRow.reason, /unparseable/);
+
+  // 不可解析：合法行 + 未加引号垃圾残留 ⇒ unknown（残留可能吞掉了被截断的行）。
+  const rowsPlusGarbage = await sample('"node.exe","111","Console","1","1,234 K"\r\nleftover junk\r\n');
+  assert.equal(rowsPlusGarbage.count, null, "合法行+未加引号垃圾 ⇒ unknown");
+  assert.match(rowsPlusGarbage.reason, /unparseable/);
+
+  // 纯函数钉：parseTasklistSample 形状闭集（完整行形状验证）。
+  assert.deepEqual(parseTasklistSample(""), { count: 0 });
+  assert.deepEqual(parseTasklistSample(csv), { count: 2 });
+  assert.equal(parseTasklistSample('"cmd.exe","1","c","0","1 K"').count, null);
+  assert.equal(parseTasklistSample('"node.exe"garbage').count, null, "残行不得按前缀计数");
+  assert.equal(parseTasklistSample('"node.exe","111","Console","1","1,234 K"\r\n信息: 没有运行的任务匹配指定标准。\r\n').count, null,
+    "合法行+本地化 notice ⇒ unknown（无 notice 字典，不可证为正常空列表）");
+  assert.equal(parseTasklistSample("信息: 没有运行的任务匹配指定标准。").count, null, "本地化 notice 不可证为正常空列表 ⇒ unknown");
+});
+
+test("TD-181(b) ③ node 进程观测：采样超时 ⇒ unknown 且不留活句柄（kill/destroy/unref 各恰一次，先于 resolve）", async () => {
+  const calls = { kill: 0, destroy: 0, unref: 0 };
+  const fakeSpawnHang = () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.kill = () => { calls.kill += 1; };
+    child.stdout.destroy = () => { calls.destroy += 1; };
+    child.unref = () => { calls.unref += 1; };
+    return child; // 永不 close ⇒ 超时腿
+  };
+  // fake child 无真实句柄撑环——unref 的超时 timer 会让 node:test 判 "pending
+  // promise + empty loop"；用 ref'd interval 模拟真实子进程句柄的撑环效果。
+  const keepAlive = setInterval(() => {}, 200);
+  let timed;
+  try {
+    timed = await defaultCountNodeProcesses({ timeoutMs: 60, spawnImpl: fakeSpawnHang });
+  } finally { clearInterval(keepAlive); }
+  assert.equal(timed.count, null, "超时 ⇒ unknown");
+  assert.match(timed.reason, /timed out after 60ms/);
+  assert.deepEqual(calls, { kill: 1, destroy: 1, unref: 1 },
+    "超时腿释放采样子进程句柄：kill + stdout.destroy + unref 各恰一次（不留活句柄）");
+});
+
+// ── TD-181 (b) ④：真实 canonical 入口端到端回归 ──────────────────────────────
+// 走 runSuite（main() 调的同一套件函数）+ 生产适配器（真实 node --test 子进程、
+// 真实读写中间/聚合报告），夹具为合成 test/ 树 + 仓库 reporter 副本。
+// Fixture phase is explicit at the existing adapter boundary: the real wave
+// runs first, then the real isolator. Child fixtures read the phase marker;
+// no absence timeout can masquerade as isolation. This proves report behavior
+// for first-fail/alone-pass, not the cause of real-world process contention.
+// 首轮 fail + 单跑 pass ⇒ 终判仍 fail、失败详情已落盘。
+// 变异敏感性：落盘前撤掉 failureDetail（M2）或撤掉
+// 序列化收敛 ⇒ 本测试红（内容缺失 / 长度超 8000）。
+const E2E_SCRATCH_ROOT = join(synthRepoRoot, ".wao", "runs");
+
+test("TD-181(b) tasklist CSV validates all five columns and numeric identities", () => {
+  const invalid = [
+    '"node.exe"', '"node.exe","123"',
+    '"node.exe","123","Console","1"',
+    '"node.exe","123","Console","1","1 K","extra"',
+    '"node.exe","","Console","1","1 K"',
+    '"node.exe","abc","Console","1","1 K"',
+    '"node.exe","0","Console","1","1 K"',
+    '"node.exe","4294967296","Console","1","1 K"',
+    '"node.exe","123","Console","","1 K"',
+    '"node.exe","123","Console","-1","1 K"',
+    '"node.exe","123","Console","one","1 K"',
+    '"node.exe","123","Console","4294967296","1 K"',
+    '"node.exe","123","Con"sole","1","1 K"',
+  ];
+  const valid = '"node.exe","123","控制台, ""local""","0","1,234 K"';
+  assert.deepEqual(parseTasklistSample(valid), { count: 1 });
+  for (const row of invalid) {
+    const result = parseTasklistSample(`${valid}\r\n${row}`);
+    assert.equal(result.count, null, row);
+    assert.match(result.reason, /unparseable/);
+  }
+});
+
+test("TD-181(b) ④ 真实入口回归: 首轮 fail + 单跑 pass ⇒ 落盘报告仍 fail、失败详情已保存、有界；verdict 行如实", async () => {
+  await mkdirSync(E2E_SCRATCH_ROOT, { recursive: true });
+  const root = mkdtempSync(join(E2E_SCRATCH_ROOT, "td181-e2e-"));
+  // TEMP 纪律：工作区在 <checkout>/.wao/runs/ 短子目录内（gitignored），不越界。
+  assert.ok(root.startsWith(E2E_SCRATCH_ROOT), "夹具工作区必须在授权 scratch 内");
+  const prevExitCode = process.exitCode;
+  const stderrLines = [];
+  const origError = console.error;
+  console.error = (line) => { stderrLines.push(String(line)); };
+  try {
+    writeFileSync(join(root, "package.json"), '{"type":"module"}\n', "utf8");
+    mkdirSync(join(root, "test"), { recursive: true });
+    // 仓库 reporter 副本：波子进程经 --test-reporter ./test/reporter.mjs 写中间报告。
+    writeFileSync(join(root, "test", "reporter.mjs"), readFileSync(join(synthRepoRoot, "test", "reporter.mjs"), "utf8"), "utf8");
+    const phasePath = join(root, "td181-fixture-phase.txt");
+    writeFileSync(join(root, "test", "partner.test.js"), [
+      'import { test } from "node:test";',
+      'import assert from "node:assert/strict";',
+      'import { readFileSync } from "node:fs";',
+      'import { join } from "node:path";',
+      'test("partner passes in first round", () => {',
+      '  assert.equal(readFileSync(join(process.cwd(), "td181-fixture-phase.txt"), "utf8"), "first");',
+      '});',
+      "",
+    ].join("\n"), "utf8");
+    writeFileSync(join(root, "test", "cofail.test.js"), [
+      'import { test } from "node:test";',
+      'import assert from "node:assert/strict";',
+      'import { readFileSync } from "node:fs";',
+      'import { join } from "node:path";',
+      'const ctl = (n) => "\\u0001".repeat(n);',
+      'test("fixture first-round fail, isolation pass", () => {',
+      '  const phase = readFileSync(join(process.cwd(), "td181-fixture-phase.txt"), "utf8");',
+      '  assert.ok(phase === "first" || phase === "isolation", "explicit fixture phase required");',
+      '  if (phase === "first") assert.equal(ctl(1500) + "|seen-actual", ctl(1500) + "|seen-expected");',
+      '});',
+      "",
+    ].join("\n"), "utf8");
+    const manifest = { groups: { pure: ["cofail.test.js", "partner.test.js"], git: [], worktree: [], process: [], lock: [], timeout: [], mcp: [] } };
+    const manifestPath = join(root, "test", "manifest.json");
+    const reportPath = join(root, "test-results.json");
+    writeFileSync(manifestPath, JSON.stringify(manifest), "utf8");
+
+    const exitCalls = [];
+    await runSuite({
+      repoRoot: root, testDir: join(root, "test"), manifestPath, reportPath,
+      nodeExe: process.execPath, childEnv: synthChildEnv(),
+      exitFn: (code) => exitCalls.push(code),
+      runCanonicalImpl: (options) => runCanonical({
+        ...options,
+        runChild: (...args) => {
+          writeFileSync(phasePath, "first", "utf8");
+          return options.runChild(...args);
+        },
+        isolator: (...args) => {
+          writeFileSync(phasePath, "isolation", "utf8");
+          return options.isolator(...args);
+        },
+      }),
+    });
+    assert.deepEqual(exitCalls, [], "无看门狗中止 ⇒ 不强退（有界退出路径不触发）");
+
+    // 读取实际落盘报告（非内存对象）——这是 audit22 M2 变异（落盘前撤掉
+    // failureDetail）必须红掉的断言面。
+    const report = JSON.parse(readFileSync(reportPath, "utf8"));
+    assert.equal(report.finalVerdict, "fail", "首轮 fail + 隔离 pass ⇒ 最终仍 fail（绝不洗绿）");
+    assert.equal(report.suiteError, false, "干净波（无波级错误）——失败全部归因到文件");
+    assert.equal(report.firstRound.verdict, "fail");
+    assert.equal(report.firstRound.passed, 1, "partner 波内通过");
+    assert.equal(report.firstRound.failed, 1, "explicit first-round fixture failure");
+    const f = report.firstRound.failures.find((x) => x.path === "cofail.test.js");
+    assert.ok(f, "failures 含 cofail.test.js");
+    assert.equal(f.status, "fail");
+    const d = f.failureDetail;
+    assert.equal(d.status, "collected", "首轮失败详情已保存（落盘报告内）");
+    assert.equal(d.source, "firstRoundWaveReport");
+    assert.ok(Array.isArray(d.failingTests) && d.failingTests.length >= 1, "至少一条失败子测试保留");
+    assert.equal(d.failingTests[0].name, "fixture first-round fail, isolation pass", "失败子测试名如实保留");
+    const dLen = JSON.stringify(d).length;
+    assert.ok(dLen <= FAILURE_DETAIL_CHAR_BUDGET, `落盘 failureDetail 实际序列化 ${dLen} ≤ ${FAILURE_DETAIL_CHAR_BUDGET}（撤掉序列化收敛必红）`);
+    assert.ok(/\[TRUNCATED: first \d+ of \d+ chars\]/.test(d.failingTests[0].actual), "重内容被截断时带真实原始长度标识");
+    assert.ok(d.failingTests[0].actual.startsWith("\u0001\u0001\u0001"), "截断保留原文前缀，不杜撰内容");
+    assert.equal(d.failingTestsTotal - d.failingTests.length, d.failingTestsDropped, "丢弃计数诚实");
+    const iso = report.isolation.find((x) => x.path === "cofail.test.js");
+    assert.ok(iso, "cofail 获得一次隔离重跑");
+    assert.equal(iso.isolationStatus, "pass", "单文件重跑通过");
+    assert.equal(iso.classification, "isolation_pass", "分类 = isolation_pass");
+    assert.deepEqual(report.runsDirGuard.additions, [], "合成根目录无 runs/ 写入");
+    // stderr verdict 行如实（runSuite 打印，非内存）。
+    assert.ok(stderrLines.some((l) => /verdict=fail /.test(l)), `verdict 行必须如实为 fail（实际首行：${stderrLines.find((l) => l.includes("verdict=")) ?? "(无)"}）`);
+    assert.ok(stderrLines.some((l) => /isolation cofail\.test\.js .* ⇒ isolation_pass/.test(l)), "isolation 分类行如实");
+  } finally {
+    console.error = origError;
+    process.exitCode = prevExitCode; // runSuite 置 process.exitCode=1——恢复宿主 runner 状态
+    rmSync(root, { recursive: true, force: true });
+  }
 });

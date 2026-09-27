@@ -126,15 +126,16 @@ body{
 <div class="summary-bar">
   <h1>Test Report</h1>
   <span class="counts">
-    <span class="count-pass">\u2714 ${data.summary.passed} passed</span>
-    ${data.summary.failed > 0 ? `<span class="count-fail">\u2716 ${data.summary.failed} failed</span>` : ""}
+    ${data.canonical ? `<span class="${data.canonicalOverallPass ? "count-pass" : "count-fail"}">${data.canonicalOverallPass ? "\u2714" : "\u2716"} canonical overall: ${data.canonicalOverallPass ? "PASS" : "FAIL"}</span><span class="count-skip">runner verdict: ${data.canonicalVerdictLabel}</span>` : ""}
+    <span class="count-pass">\u2714 ${data.summary.passed}${data.canonical ? ` file${data.summary.passed === 1 ? "" : "s"} passed` : " passed"}</span>
+    ${data.summary.failed > 0 ? `<span class="count-fail">\u2716 ${data.summary.failed}${data.canonical ? ` file${data.summary.failed === 1 ? "" : "s"} failed` : " failed"}</span>` : ""}
     ${data.summary.skipped > 0 ? `<span class="count-skip">\u2014 ${data.summary.skipped} skipped</span>` : ""}
   </span>
   <div class="progress-container">
     <div class="progress-bar">
-      <div class="progress-fill" style="width:${data.summary.total > 0 ? (data.summary.passed / data.summary.total * 100) : 100}%"></div>
+      <div class="progress-fill" style="width:${data.summary.total > 0 ? (data.summary.passed / data.summary.total * 100) : (data.canonical ? 0 : 100)}%"></div>
     </div>
-    <div class="progress-label">${data.summary.passed}/${data.summary.total} tests passing</div>
+    <div class="progress-label">${data.summary.passed}/${data.summary.total} ${data.canonical ? "files" : "tests"} passing</div>
   </div>
 </div>
 <div class="main">
@@ -154,7 +155,7 @@ body{
   <span>Skip: <span class="count-skip">${data.summary.skipped}</span></span>
   <span>Duration: ${formatDuration(data.duration)}</span>
 </div>
-<script id="test-data" type="application/json">${JSON.stringify(data)}</script>
+<script id="test-data" type="application/json">${JSON.stringify(data).replace(/</g, "\\u003c")}</script>
 <script>${buildScriptSource()}</script>
 </body>
 </html>`;
@@ -183,6 +184,27 @@ function formatDuration(ms) {
 //     detail (sub-test names, assertion text, stacks) via the existing error
 //     boxes. New canonical fields are ignored here by design — this is not a
 //     report platform.
+//
+// TD-181 (b, 2026-09-26, audit22 fix; r2 rework): the projection must separate
+// OVERALL execution failure from the TEST verdict, and must not fake green.
+//   - The runner's exit decision (finalRunnerOutcome) is NOT the same as the
+//     JSON finalVerdict: runsDirGuard additions/error exit non-zero even when
+//     finalVerdict is "pass". suiteError / suiteAborted / wave groupError /
+//     guard are therefore evaluated INDEPENDENTLY, and ANY of them (or a
+//     non-pass / missing verdict) makes the run OVERALL non-pass. The top bar
+//     then shows a red "canonical overall: FAIL" badge — a green PASS badge
+//     may never coexist with failure rows — while the runner's own test
+//     verdict is listed separately as a neutral, closed-set line.
+//   - FILE COUNTS STAY FILE COUNTS. firstRound.passed/failed/missing/crashed
+//     count FILES; runner-level diagnostics are rendered as their own visible
+//     rows but are NOT folded into the passed/failed denominators (the r1
+//     projection rendered the real 243/246 aggregate as "243/247, 4 failed").
+//   - SECURITY: the embedded JSON payload escapes every "<" as the JSON escape
+//     sequence backslash-u-0-0-3-c so report
+//     content (failureDetail, groupError, guard errors…) can never terminate
+//     the script element early; badge labels come from a CLOSED verdict label
+//     set — raw verdict strings never enter server-rendered HTML. Report
+//     content still round-trips losslessly: < parses back to "<".
 function detailError(d) {
   return {
     actual: d.actual ?? "",
@@ -223,6 +245,12 @@ function canonicalSuites(data) {
           if (d.failingTestsDropped > 0) {
             tests.push({ name: `… ${d.failingTestsDropped} more failing test(s) truncated in the bounded report`, status: "skip", duration: 0 });
           }
+          // TD-181 (b) r2: an explicitly dropped fileFailure must be SHOWN as a
+          // budget omission (same honesty as failingTestsDropped) — a skip row,
+          // never counted as a test/failure.
+          if (d.fileFailureDropped === true) {
+            tests.push({ name: "fileFailure content omitted — dropped to fit the per-file char budget (fileFailureDropped)", status: "skip", duration: 0 });
+          }
         } else {
           tests.push({
             name: `first-round ${f.status} — failure detail ${d && d.status === "unknown" ? "unknown" : "not collected"}${d && d.reason ? ` (${d.reason})` : ""}`,
@@ -244,15 +272,30 @@ function canonicalSuites(data) {
   return suites;
 }
 
+// Closed label set for the runner's test verdict — the ONLY values the
+// server-rendered badge/verdict line may interpolate (an unknown or hostile
+// verdict string degrades to "unknown" here; its raw value is still preserved
+// losslessly inside the escaped JSON payload for the client to render via esc()).
+const CANONICAL_VERDICT_LABELS = Object.freeze({ pass: "pass", fail: "fail", environment_invalid: "environment_invalid" });
+function canonicalVerdictLabelOf(verdict) {
+  return typeof verdict === "string" && Object.prototype.hasOwnProperty.call(CANONICAL_VERDICT_LABELS, verdict)
+    ? CANONICAL_VERDICT_LABELS[verdict] : "unknown";
+}
+
 function adaptForRender(data) {
   if (!data || typeof data !== "object") return data;
   if (!data.executionWaves && !data.firstRound) {
     // failInvalidEnvironment's minimal report (no waves, no firstRound): render
     // its error as one visible failed suite instead of crashing on summary.
+    // TD-181 (b) r2: zero files ran — the file counts stay an honest 0/0 and the
+    // progress bar stays empty; overall failure is carried by the red badge and
+    // the visible row, not by folding the diagnostic row into file counts.
     if (data.finalVerdict === "environment_invalid") {
       return {
         canonical: true,
-        finalVerdict: data.finalVerdict,
+        canonicalVerdict: "environment_invalid",
+        canonicalVerdictLabel: "environment_invalid",
+        canonicalOverallPass: false,
         summary: { total: 0, passed: 0, failed: 0, skipped: 0 },
         duration: 0,
         suites: [{
@@ -271,9 +314,27 @@ function adaptForRender(data) {
   }
   const fr = data.firstRound || {};
   const num = (v) => (Number.isFinite(v) ? v : 0);
+  const suites = canonicalSuites(data);
+  const suiteLevel = canonicalSuiteLevelRows(data);
+  if (suiteLevel.length > 0) {
+    // Runner-level diagnostics render as their own visible suite (each row
+    // individually attributable) but are NEVER folded into the file counts —
+    // summary below stays a pure firstRound FILE tally.
+    suites.push({
+      name: "canonical/overall-verdict",
+      status: "fail",
+      duration: 0,
+      tests: suiteLevel.map((name) => ({ name, status: "fail", duration: 0 })),
+    });
+  }
   return {
     canonical: true,
-    finalVerdict: data.finalVerdict ?? null,
+    canonicalVerdict: (typeof data.finalVerdict === "string" && data.finalVerdict) || "missing",
+    canonicalVerdictLabel: canonicalVerdictLabelOf(data.finalVerdict),
+    // overall pass ⇔ NO failure signal at all (verdict pass AND no suiteError
+    // AND no abort AND no wave groupError AND no guard additions AND no guard
+    // error) — canonicalSuiteLevelRows returns [] exactly in that state.
+    canonicalOverallPass: suiteLevel.length === 0,
     summary: {
       total: num(fr.passed) + num(fr.failed) + num(fr.missing) + num(fr.crashed),
       passed: num(fr.passed),
@@ -281,8 +342,71 @@ function adaptForRender(data) {
       skipped: 0,
     },
     duration: data.totalDurationMs ?? 0,
-    suites: canonicalSuites(data),
+    suites,
   };
+}
+
+// TD-181 (b) r2: suite-level non-pass rows for a canonical aggregate — the
+// causes that never appear as a failing FILE but decide the runner's EXIT.
+// Returns [] exactly when nothing suite-level is wrong (a clean pass renders no
+// synthetic suite). Every signal is evaluated INDEPENDENTLY of finalVerdict:
+// finalRunnerOutcome exits non-zero on runs-guard additions/error even when the
+// JSON verdict is "pass". Row texts are plain statements of the report's own
+// fields; long groupError text is cut with an explicit truncation marker, never
+// rewritten. Rows live only inside the escaped JSON payload (rendered by the
+// client via esc()) — none of this text is interpolated into server HTML.
+function canonicalSuiteLevelRows(data) {
+  const num = (v) => (Number.isFinite(v) ? v : 0);
+  const fr = data.firstRound || {};
+  const guard = data.runsDirGuard && typeof data.runsDirGuard === "object" ? data.runsDirGuard : {};
+  const guardAdds = Array.isArray(guard.additions) ? guard.additions : [];
+  const waveErrors = [];
+  for (const wave of (Array.isArray(data.executionWaves) ? data.executionWaves : [])) {
+    if (wave && typeof wave.groupError === "string" && wave.groupError) {
+      waveErrors.push({ name: typeof wave.name === "string" ? wave.name : "?", groupError: wave.groupError });
+    }
+  }
+  const verdict = (typeof data.finalVerdict === "string" && data.finalVerdict) || null;
+  const verdictNonPass = verdict !== "pass"; // missing verdict is fail-visible too
+  if (!verdictNonPass && waveErrors.length === 0 && !data.suiteError && !data.suiteAborted
+    && guardAdds.length === 0 && !guard.error) {
+    return [];
+  }
+  const rows = [];
+  const causes = [`canonical overall: FAIL — the run did not pass`];
+  if (verdict === null) {
+    causes.push("finalVerdict missing from the report");
+  } else if (verdict !== "pass") {
+    causes.push(`runner test verdict: ${canonicalVerdictLabelOf(verdict)} (raw field: ${JSON.stringify(verdict)})`);
+    const nonPass = num(fr.failed) + num(fr.missing) + num(fr.crashed);
+    if (nonPass > 0) {
+      causes.push(`first-round non-pass files: ${num(fr.failed)} failed / ${num(fr.missing)} missing / ${num(fr.crashed)} crashed`);
+    }
+  } else {
+    // verdict pass but a runner-level failure exists — finalRunnerOutcome still
+    // exits non-zero; state the discrepancy instead of letting counts imply pass.
+    causes.push("runner test verdict says pass, but the runner still exited non-zero on a runner-level failure");
+  }
+  if (data.suiteError) causes.push("suiteError: at least one wave-level error (groupError)");
+  if (data.suiteAborted) causes.push(`suite aborted (origin: ${typeof data.abortOrigin === "string" ? data.abortOrigin : "unknown"}) — waves/isolation after the abort point did NOT run`);
+  if (guardAdds.length > 0) causes.push(`runs-guard: ${guardAdds.length} new entries in the REAL runs/ during the suite (non-zero exit even when every test passed)`);
+  if (guard.error) causes.push(`runs-guard could not observe runs/ (${guard.error})`);
+  rows.push(causes.join(" — "));
+  for (const w of waveErrors) {
+    rows.push(`wave '${w.name}' error: ${boundRenderText(w.groupError, 500)}`);
+  }
+  for (const a of guardAdds) {
+    rows.push(`runs-guard: runs/${typeof a?.file === "string" ? a.file : "?"} (first seen: ${typeof a?.phase === "string" ? a.phase : "?"})`);
+  }
+  if (guard.error) rows.push(`runs-guard observation error: ${boundRenderText(String(guard.error), 500)}`);
+  return rows;
+}
+
+// Render-side bounded text: cut with an explicit marker carrying shown/total.
+function boundRenderText(value, cap) {
+  if (typeof value !== "string") return "";
+  if (value.length <= cap) return value;
+  return value.slice(0, cap) + `…[TRUNCATED: first ${cap} of ${value.length} chars]`;
 }
 
 function buildScriptSource() {
@@ -310,9 +434,9 @@ document.querySelectorAll(".tree-item.active").forEach(function(e){e.classList.r
 var btn=document.querySelector('[data-suite="'+esc(sn)+'"]');
 if(btn)btn.classList.add("active");renderDetail(sn)}
 function renderDetail(sn){var su;for(var i=0;i<data.suites.length;i++){if(data.suites[i].name===sn){su=data.suites[i];break}}
-if(!su)return;var con=document.getElementById("content");var h='<div class="suite-header"><h2>'+esc(su.name)+'</h2><div class="meta"><span>'+su.tests.length+' tests</span><span>'+su.duration.toFixed(0)+'ms</span></div></div><div class="test-list">';
+if(!su)return;var con=document.getElementById("content");var unit=data.canonical?'report entries':'tests';var h='<div class="suite-header"><h2>'+esc(su.name)+'</h2><div class="meta"><span>'+su.tests.length+' '+unit+'</span><span>'+su.duration.toFixed(0)+'ms</span></div></div><div class="test-list">';
 var tts=su.tests;if(ft){var lc=ft.toLowerCase();tts=su.tests.filter(function(t){return t.name.toLowerCase().indexOf(lc)!==-1})}
-if(tts.length===0&&ft){h+='<div style="color:var(--text-dim);padding:20px;text-align:center">No tests match "'+esc(ft)+'"</div>'}
+if(tts.length===0&&ft){h+='<div style="color:var(--text-dim);padding:20px;text-align:center">No '+unit+' match "'+esc(ft)+'"</div>'}
 for(var j=0;j<tts.length;j++){var t=tts[j];var ic=t.status==="pass"?"\\u2714":t.status==="fail"?"\\u2716":"\\u2014";
 h+='<div class="test-row '+t.status+'"'+(t.status==="fail"?' data-fail="1"':'')+'>';
 h+='<span class="status-icon">'+ic+'</span><span class="test-name">'+esc(t.name)+'</span><span class="test-duration">'+t.duration.toFixed(0)+'ms</span></div>';
