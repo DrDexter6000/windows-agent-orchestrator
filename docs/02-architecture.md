@@ -977,7 +977,9 @@ CLI JSON 区分 `decisionAccepted:true`（winner）vs `decisionAccepted:false` +
 **共享纯事实权威**（TD-179，`src/transcript.js::validateDeliveryFacts(events, options)`）：
 读面（`gatherDeliveryView` / `projectDeliveryReadiness` / `run_await_result` 终态 outcome）与
 锁内写面（`tryAppendDecision`）复用**同一**校验器，不存在第二套决策/重建算法。窄模式经显式
-options 进入，默认单参调用行为字节不变（review/reverify/repackage 等 legacy 消费者不受影响）：
+options 进入，默认单参调用行为字节不变（reverify/repackage 等默认单参 legacy 消费者不受影响；
+direct review 解析器 `resolveRunDeliveryReviewTarget` 现已显式以 `{expectedRunId}` 进入绑定模式，
+不再走默认单参形态）：
 
 - `{expectedRunId}`（runId 绑定模式）：核心类别（`run.delivery_created` / 原始 outcome /
   `run.delivery_accepted|rejected`）绑定到请求 runId——**外信封事件被忽略**（属别的 run，不是

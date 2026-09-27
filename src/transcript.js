@@ -1909,7 +1909,9 @@ export function projectCorrectionStatus(events, runId, correctionId) {
  *     final status with no backing outcome) never gains pending validity.
  *
  * The default single-argument behavior is byte-identical for every legacy
- * caller (review / reverify / repackage keep their own expectations).
+ * caller; reverify / repackage keep their own expectations, while the direct
+ * review resolver (resolveRunDeliveryReviewTarget) now explicitly opts into
+ * bound mode via { expectedRunId }.
  *
  * @param {object[]} events
  * @param {{expectedRunId?: string, allowVerificationPending?: boolean}} [options]

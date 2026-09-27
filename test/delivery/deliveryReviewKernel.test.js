@@ -43,6 +43,7 @@ import {
   DeliveryError,
 } from "../../src/delivery.js";
 import { resolveRunDeliveryReviewTarget } from "../../src/application/runDeliveryReview.js";
+import { validateDeliveryFacts } from "../../src/transcript.js";
 
 // ===== Constants =====
 
@@ -715,9 +716,17 @@ test("M11-3A-IDBIND-OK: request matches durable ref runId → resolves", async (
 //
 // The requested runId must equal: created event envelope runId, verification
 // event envelope runId, created DeliveryRef.runId, and verification
-// DeliveryRef.runId. Each of the four mismatch classes must be rejected BEFORE
-// workspace ownership and Git proof. (The earlier IDBIND tests only covered the
-// verification ref runId; the created ref runId was unbound.)
+// DeliveryRef.runId. Since TD-179 bound mode, each of the four mismatch
+// classes is rejected INSIDE the shared facts authority
+// validateDeliveryFacts(events, { expectedRunId }) — the direct resolver
+// resolveRunDeliveryReviewTarget then throws its documented wrapping
+// `delivery facts not reviewable: <facts.error>` BEFORE workspace ownership
+// and Git proof. Foreign-envelope events are IGNORED by the shared authority
+// (docs/02-architecture.md shared-facts section), so the per-override fact
+// categories differ and are asserted independently below. (The OUTER
+// getRunDeliveryReview surface may instead surface verification_pending with
+// no content for a foreign-envelope outcome; this test pins the DIRECT
+// resolver only, not every outer surface.)
 test("M11-3A-IDBIND-CHAIN: each of the 4 durable runId positions must match the request", async () => {
   const { resolveRunDeliveryReviewTarget } = await import("../../src/application/runDeliveryReview.js");
   const { repo, ref } = await buildSimpleDelivery("wao-m113a-chain-");
@@ -746,6 +755,24 @@ test("M11-3A-IDBIND-CHAIN: each of the 4 durable runId positions must match the 
     ];
   };
 
+  // Expected INDEPENDENT bound-facts category per single-field mutation
+  // (hardcoded so the test cannot drift with the implementation, and cannot
+  // pass through a different rejection path):
+  //   createdEvent  → delivery_malformed   (foreign-envelope created is IGNORED
+  //                                     → the bound outcome becomes an orphan);
+  //   verifiedEvent → delivery_unavailable (foreign-envelope outcome is IGNORED
+  //                                     → no bound outcome; pending is not
+  //                                     admitted without allowVerificationPending);
+  //   createdRef    → delivery_malformed   (created DeliveryRef.runId mismatch);
+  //   verifiedRef   → delivery_malformed   (verification DeliveryRef.runId
+  //                                     mismatch).
+  const EXPECTED_CODE = {
+    createdEvent: "delivery_malformed",
+    verifiedEvent: "delivery_unavailable",
+    createdRef: "delivery_malformed",
+    verifiedRef: "delivery_malformed",
+  };
+
   try {
     // Positive: no override → resolves (all four positions consistent).
     await writeTranscriptFor(runDir, "run_closeout", buildEvents(null));
@@ -756,16 +783,31 @@ test("M11-3A-IDBIND-CHAIN: each of the 4 durable runId positions must match the 
 
     // Each of the four override classes must be rejected before Git proof.
     for (const override of ["createdEvent", "verifiedEvent", "createdRef", "verifiedRef"]) {
-      // Rewrite the transcript with this single override.
+      const events = buildEvents(override);
+
+      // 1. Independent shared-facts assertion: bound validateDeliveryFacts
+      //    itself must reject this event list with the hardcoded category and
+      //    a non-empty error string.
+      const facts = validateDeliveryFacts(events, { expectedRunId: "run_closeout" });
+      assert.equal(facts.valid, false, `override=${override}: bound facts must be invalid`);
+      assert.equal(facts.code, EXPECTED_CODE[override],
+        `override=${override}: facts.code must be ${EXPECTED_CODE[override]}`);
+      assert.ok(typeof facts.error === "string" && facts.error.length > 0,
+        `override=${override}: facts.error must be a non-empty string`);
+
+      // 2. The direct resolver must throw the EXACT documented wrapping of
+      //    that shared error — not any arbitrary/ownership/Git/legacy
+      //    rejection. Rewrite the transcript with this single override.
       const { rmSync } = await import("node:fs");
       try { rmSync(join(runDir, "run_closeout.jsonl"), { force: true }); } catch {}
-      await writeTranscriptFor(runDir, "run_closeout", buildEvents(override));
+      await writeTranscriptFor(runDir, "run_closeout", events);
       await assert.rejects(
         () => resolveRunDeliveryReviewTarget({
           runId: "run_closeout", runDir, authorizedWorkspaceRoot: repo, fileIndex: 0,
         }),
-        (err) => /runId mismatch|identity does not match/i.test(err.message),
-        `override=${override} must be rejected before Git proof`,
+        (err) => err instanceof Error
+          && err.message === `delivery facts not reviewable: ${facts.error}`,
+        `override=${override} must be rejected before Git proof with the exact shared-facts wrapping`,
       );
     }
   } finally {
