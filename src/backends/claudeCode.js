@@ -48,6 +48,16 @@ export class ClaudeCodeBackend extends ProcessBackend {
   // Lead id / workspace / agentId never reach the provider.
   supportsSessionReuse = true;
 
+  // TD188（2026-09-27）：覆写基类的取回 id 可用性判定为恒 true。claude-code 的
+  // 续接 lane 编译的是路由信封里的 opaqueUuid（--resume <uuid>），从不消费
+  // 转录取回的 session id——转录里记录的 proc_<pid> spawn 身份因此不是本
+  // backend 的续接阻断（真实形状如此：ClaudeStreamParser 不广告 native id，
+  // session.created 就是 proc 身份）。若按全局 proc 前缀规则拒绝，会误伤这条
+  // 合法 opaque 续接路径（m11-11c CHAIN-2 钉的就是它）。
+  canResumeWithRecoveredSessionId(_sessionId) {
+    return true;
+  }
+
   // M12-16: explicit in-flight-correction capability declaration. claude-code
   // drives ONE stream-json process whose prompt is fed over stdin
   // (`-p --input-format stream-json`), so a follow-up user turn can be queued to

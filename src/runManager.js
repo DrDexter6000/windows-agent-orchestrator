@@ -14,7 +14,7 @@ import { verifyDelivery as defaultVerifyDelivery, createCallerGate } from "./del
 import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecutionContract } from "./application/roleContract.js";
 import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./application/credentialReadiness.js";
 import { inheritedEnvNames } from "./envPolicy.js";
-import { validateSessionReuseRouting, resolvePriorProviderSessionId } from "./application/sessionReuse.js";
+import { validateSessionReuseRouting, resolvePriorProviderSessionId, PROVIDER_SESSION_BOUND_EVENT } from "./application/sessionReuse.js";
 import { WRITE_INTENT_CORRELATION_STATUS, DONE_MARKERS } from "./runEvent.js";
 import { ISOLATION_VIOLATION_REASONS } from "./diagnosis.js";
 // R11-1: the closed effort set SSOT lives in the registry (its historical
@@ -897,12 +897,35 @@ export class RunManager {
     // a silent fresh conversation. Layering note: the bound reader lives in
     // sessionReuse.js (core) because backends cannot import the transcript SSOT
     // (upward edge); the SPAWN AUTHORITY reads and threads it.
+    //
+    // TD188 (2026-09-27): the recovered value is additionally judged by the
+    // backend-owned PURE availability hook (canResumeWithRecoveredSessionId on
+    // the existing backend instance — no factory dispatch table, no
+    // runtime-name branch, NOT a certification axis). Production incident
+    // (run_20260926235905551efnojy): a Kimi delivery parent recorded only the
+    // process placeholder (proc_43244) and the id was threaded straight into
+    // `kimi -r` → upstream "Session not found", zero tool execution. Kimi/Codex
+    // (runtime-self-produced ids) inherit the base hook and refuse a
+    // placeholder BEFORE it reaches the provider; claude-code overrides the
+    // hook to true (its resume compiles routing.opaqueUuid and never consumes
+    // this id — the legal opaque path must not be hurt by a global proc-prefix
+    // rule); non-process backends (ACP) have no hook and keep their existing
+    // native-id semantics (session.created IS the native id).
     let priorProviderSessionId = null;
     if (sessionReuse?.turn === "resume") {
       priorProviderSessionId = await resolvePriorProviderSessionId({
         runDir: resolve(runDir ?? this.config.runDir),
         priorRunId: sessionReuse.priorRunId,
       });
+      if (typeof backend.canResumeWithRecoveredSessionId === "function"
+        && backend.canResumeWithRecoveredSessionId(priorProviderSessionId) !== true) {
+        throw new Error(
+          `Agent ${agentId}: sessionReuse resume requires a provider-native session id this backend can resume, `
+          + `but the prior run recorded only the process placeholder identity (proc_<pid>) — refusing instead of `
+          + `resuming with an unusable id. Re-dispatch a fresh run, or continue a run whose transcript recorded a `
+          + `native provider session id (${PROVIDER_SESSION_BOUND_EVENT}).`,
+        );
+      }
     }
 
     // R7-AB (layer 2): working-directory existence early-refusal, shared SSOT
@@ -1927,6 +1950,10 @@ export class Run {
     this.result = result;
     // provider 会话复用路由（null = 非复用 run，字节兼容）。
     this.sessionReuse = sessionReuse;
+    // TD188（2026-09-27）：运行期 native id 绑定事实（delivery：run.provider_
+    // session_bound / 非 delivery：晚补 session.created）本 Run 至多写一次的
+    // 防重标志（同 Run 的并发 waitForCompletion 等待者不会重复落盘）。
+    this._providerSessionFactWritten = false;
     this.config = config;
     this.onRemove = onRemove;
     this.state = initialState;
@@ -2271,24 +2298,45 @@ export class Run {
       clearTimeout(timer);
     }
 
-    // provider 会话复用，运行时自产 id 的运行期补记（2026-09-21，ADR-0031 §3.6 形状）：
-    // codex / kimi 的会话 id 由**运行时**产生且只在流里出现，晚于 spawn 时刻那条
-    // session.created——而 §3.6 的续接关联读的正是绑定转录里的 session.created。
-    // 故在终态分派前把 wire 事实补记一条（读取侧取 LAST-bound，故后者胜出）。
-    // 三条边界：①只对复用 run 生效（非复用 run 保持恰好一条 session.created——
-    // process_missing 恢复精确解析 "proc_<pid>"）；②delivery run 一律不记（交付走
-    // fresh，且交付恢复同样要求唯一 proc_<pid>）；③未观察到 id 或已终态则不记
-    // （静默不写胜过写一个不可归因的 id：下次 resume 会 fail-closed 拒绝）。
-    if (this.sessionReuse && !this.deliveryContext && !TERMINAL_STATES.includes(this.state)
+    // provider 会话复用，运行时自产 id 的运行期补记（2026-09-21，ADR-0031 §3.6 形状；
+    // TD188 2026-09-27 delivery 侧收口）：codex / kimi 的会话 id 由**运行时**产生且
+    // 只在流里出现，晚于 spawn 时刻那条 session.created——而 §3.6 的续接关联读的
+    // 正是绑定转录里的会话事实。按 run 形状分流两条写侧：
+    //   - 非 delivery 复用 run（既有写侧，字节兼容）：补记第二条绑定
+    //     session.created（读取侧取 LAST-bound，故后者胜出）。
+    //   - delivery 复用 run（TD188）：绝不补第二条 session.created——M12-19
+    //     process_missing 恢复要求恰好一条绑定 session.created 且 backendSessionId
+    //     恰为 "proc_<pid>"（唯一进程身份）。改为追加一条独立有界绑定事实
+    //     run.provider_session_bound {backend, backendSessionId(原 spawn 身份),
+    //     providerSessionId(wire 观察到的 native id)}——共享读取器
+    //     （resolvePriorProviderSessionId）优先采信并严格校验它（runId 信封 /
+    //     唯一性 / native 非空且非占位 / 与原 spawn 身份一致），坏事实拒绝、绝不
+    //     回落旧值遮蔽。不猜 id、不把 opaque UUID 当 native id。
+    // 共同边界：①只对复用 run 生效（非复用 run 保持恰好一条 session.created）；
+    // ②本 Run 至多写一次（_providerSessionFactWritten 防并发等待者重复）；
+    // ③未观察到 id 或已终态则不记——静默不写胜过写一个不可归因的 id：下次
+    // resume 会 fail-closed 拒绝（Kimi/Codex 的 proc-only 缺证据由 backend 钩子/
+    // continueRun 预检拒成 no_provider_session 或 start 侧固定拒绝）。
+    if (this.sessionReuse && !TERMINAL_STATES.includes(this.state)
+      && !this._providerSessionFactWritten
       && typeof this.handle?.providerSessionId === "function") {
       const providerSessionId = this.handle.providerSessionId();
       if (typeof providerSessionId === "string" && providerSessionId.length > 0
         && providerSessionId !== this.result?.backendSessionId) {
-        await this.transcript.append("session.created", {
-          backend: this.result?.backend,
-          backendSessionId: providerSessionId,
-          serveUrl: this.agent?.serveUrl,
-        });
+        this._providerSessionFactWritten = true;
+        if (this.deliveryContext) {
+          await this.transcript.append(PROVIDER_SESSION_BOUND_EVENT, {
+            backend: this.result?.backend,
+            backendSessionId: this.result?.backendSessionId,
+            providerSessionId,
+          });
+        } else {
+          await this.transcript.append("session.created", {
+            backend: this.result?.backend,
+            backendSessionId: providerSessionId,
+            serveUrl: this.agent?.serveUrl,
+          });
+        }
       }
     }
 

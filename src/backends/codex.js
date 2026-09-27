@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { ProcessBackend } from "./processBackend.js";
+import { ProcessBackend, isProcessPlaceholderSessionId } from "./processBackend.js";
 import { CodexStreamParser } from "./parsers/codex.js";
 import { inheritedEnvNames } from "../envPolicy.js";
 
@@ -54,14 +54,19 @@ export class CodexBackend extends ProcessBackend {
         // provider 会话复用（2026-09-21）：resume 轮以 `exec resume <thread_id>` 续接
         // 前任 run 的会话。id 缺失/不可用在此**派发前**拒绝（双重拒绝点：spawn
         // 权威已先拒一次）——绝不静默开一段全新对话。
+        // TD188（2026-09-27）：占位进程号（proc_<pid>）同样拒绝——它不是 codex
+        // thread id（与 Kimi 同类代码路径；本轮 Codex 未真实复现，按同构防线
+        // fail-closed）。proc_<pid> 是 ProcessBackend 的本地子进程身份。
         const args = [];
         if (task.sessionReuse?.turn === "resume") {
           const priorSessionId = task.priorProviderSessionId;
-          if (typeof priorSessionId !== "string" || priorSessionId.length === 0) {
+          if (typeof priorSessionId !== "string" || priorSessionId.length === 0
+            || isProcessPlaceholderSessionId(priorSessionId)) {
             throw new Error(
               "codex sessionReuse resume turn requires the prior provider thread id "
-              + "(session.created.backendSessionId of the prior run) — refusing instead of "
-              + "silently starting a fresh codex conversation",
+              + "(a runtime-advertised native id — session.created.backendSessionId of the "
+              + "prior run; a proc_<pid> process placeholder is not a codex thread id) "
+              + "— refusing instead of silently starting a fresh codex conversation",
             );
           }
           args.push("exec", "resume", priorSessionId, "--json", "--skip-git-repo-check");

@@ -17,6 +17,7 @@
 | worker 卡 `submitted` 直到超时 | [§1 provider 故障](#1-provider-故障) |
 | worker 报 401 "身份验证失败" | [§1.2 serve 进程缺 key](#12-serve-进程缺-provider-key-401) |
 | worker 静默无响应（无 error 无 message） | [§1.3 Kimi 白名单](#13-kimi-白名单静默拒绝) |
+| `run_continue` 拒 `no_provider_session`（Kimi/Codex continuable 父 run） | [§1.7 TD-188](#17-run_continue-返回-no_provider_sessionkimicodex-continuable-父-runtd-188) |
 | 长文档/大文件写入期间摘要不变，分不清在推进还是卡死 | [§6.8 双维度判读](#68-长文档大文件写入期间摘要不变分不清在推进还是卡死td-113--round4-f-2-关单) |
 | opencode TUI 能用但 WAO 不能 | [§1.2](#12-serve-进程缺-provider-key-401) 或 [§1.3](#13-kimi-白名单静默拒绝) |
 | 多行 prompt 被截断（只传第一行） | [§2 CLI 与 shell](#2-cli-与-shell) |
@@ -164,6 +165,16 @@ serve 后台进程不一定。
   - 重启宿主应用/终端（拿新的 env 快照）；
   - 进程内桥接：PowerShell 读 User 作用域值注入当前会话再派发（值不落盘、不回显、不进提示词；life-index 会话 2026-08-22 实证有效）；
   - 把变量写进 shell profile（每次会话自动带出）。
+
+### 1.7 `run_continue` 返回 `no_provider_session`（Kimi/Codex continuable 父 run；TD-188）
+
+- **症状**：对一个 kimi-code/codex 后端的终态 continuable delivery 调 `run_continue`，被 `no_provider_session` 拒绝；或复用 resume 派发在 runner 侧以固定文案拒绝（"recorded only the process placeholder identity (proc_<pid>)"）。修复前的相反症状已消除：续接曾把 `session.created.backendSessionId=proc_43244`（本地子进程占位身份）直接交给 `kimi -r`，上游报 `Session "proc_43244" not found`、child 零工具执行（实证 `run_20260926235905551efnojy`）。
+- **根因（按形状分）**：
+  - 父 run 早于 TD188 修复（转录只有 `proc_<pid>` 占位 `session.created`，无 `run.provider_session_bound` 绑定事实）——历史 Kimi/Codex proc-only 父**明确不可续接**，不迁移旧数据；
+  - 父 run 是修复后新 run 但 runtime 未在 wire 上广告 native id（无绑定事实）——同上不可续接，重新派发新 continuable run；
+  - 绑定事实损坏（重复/空/占位值/与原 spawn 身份不一致）——fail-closed 拒绝，绝不回落占位值。
+- **验证**：查父转录 `runs/<parentRunId>.jsonl`：应恰有一条 `session.created`（`backendSessionId` 形如 `proc_<pid>`）且恰有一条 `run.provider_session_bound`（`providerSessionId` 为 kimi `session.resume_hint` / codex `thread.started` 广告的 native id）。
+- **修复/规避**：对旧父 run，让 Lead 以**新的** `run_dispatch`（`continuable:true`）重新交付并接手冻结候选（本轮修复前的既定处置）；新 run 会记录绑定事实，之后 `run_continue` 即用真实 native id 续接。claude-code 父 run 不受影响（resume 编译 opaque uuid，proc 身份不是阻断）；ACP 的 native `session.created` 照常可续接。
 
 ---
 

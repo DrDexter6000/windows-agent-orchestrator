@@ -250,6 +250,32 @@ const ROUTING_ENTRY_DAMAGED_TEXT = "sessionReuse: routing entry for this reuse i
 // never a silent fresh conversation, never a resume against an unusable id.
 const PRIOR_SESSION_UNADDRESSABLE_TEXT = "sessionReuse: prior run has a bound session.created but no addressable provider session id (backendSessionId missing/empty/non-string) — refusing resume instead of silently starting a fresh provider conversation";
 
+// ===== TD188 (2026-09-27): delivery provider-session binding fact =====
+//
+// A DELIVERY + sessionReuse run keeps its spawn-time session.created EXACTLY as
+// ProcessBackend wrote it (backendSessionId "proc_<pid>") — M12-19 process-missing
+// recovery requires that unique process identity (classifyProcessMissingCandidate:
+// exactly one bound session.created whose backendSessionId parses as proc_<pid>).
+// When the runtime advertises its native provider id on the wire (kimi
+// session.resume_hint / codex thread.started), the runner appends ONE separate
+// bounded binding fact that associates the native id with that original spawn
+// identity. The reader below prefers the binding fact and validates it strictly;
+// a bad/duplicated/conflicting fact is DAMAGE (refuse) — it must never fall back
+// to the older session.created value and mask the failure with a placeholder.
+export const PROVIDER_SESSION_BOUND_EVENT = "run.provider_session_bound";
+
+// The transport placeholder shape ProcessBackend writes at spawn time. A PURE
+// WAO transport fact (a local child-process identity), never a provider-native
+// session id. The same frozen shape is parsed by src/application/processRecovery.js
+// (_parseProcPid) and src/backends/processBackend.js (isProcessPlaceholderSessionId)
+// — keep the three in sync; the shape is frozen by the M12-19 recovery tests.
+const PROCESS_PLACEHOLDER_SESSION_ID_RE = /^proc_\d+$/;
+
+const PROVIDER_SESSION_BOUND_DAMAGED_TEXT =
+  "sessionReuse: prior run has a provider session binding fact that is damaged "
+  + "(duplicated, malformed, or inconsistent with the recorded session identity) "
+  + "— refusing resume instead of silently starting a fresh provider conversation";
+
 async function readRoutingEntryFile(filePath) {
   let raw;
   try {
@@ -558,21 +584,114 @@ export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, 
 }
 
 /**
+ * TD188 (2026-09-27): PURE event-level prior-session reader — the shared
+ * judgment behind resolvePriorProviderSessionId (spawn authority) and
+ * continueRun's pre-mutation resumability preflight (both consume the SAME
+ * reader, so the two authorities can never disagree about what the prior
+ * transcript licenses).
+ *
+ * Decision order:
+ *   1. ANY `run.provider_session_bound`-typed line present → the fact family is
+ *      validated FIRST (envelope/uniqueness/structure); a bad fact NEVER
+ *      degrades to the legacy lane:
+ *        - every such line must be strictly BOUND to priorRunId (envelope runId
+ *          equality — a foreign or envelope-less binding line is DAMAGE: there
+ *          is no pre-envelope producer of this event type, so an unattributable
+ *          instance in this file cannot be innocent);
+ *        - exactly ONE such line (duplicates — identical or conflicting — are
+ *          DAMAGE);
+ *        - its providerSessionId is a non-empty string, NOT the placeholder
+ *          process shape (proc_<pid>), and NOT equal to the original spawn
+ *          identity;
+ *        - the original spawn identity is STRICTLY UNIQUE: exactly ONE bound
+ *          session.created, whose non-empty-string {backend, backendSessionId}
+ *          both match the binding fact (undefined === undefined does not pass).
+ *      A fact that fails ANY of these refuses with the fixed damaged text; the
+ *      reader NEVER falls back to the older session.created value in that case
+ *      (the fallback would hand a proc_<pid> placeholder to the provider — the
+ *      exact TD-188 production incident, now masked as "success").
+ *   2. NO binding-typed line at all → the EXISTING §3.6 read, byte-compatible:
+ *      the LAST-bound session.created.backendSessionId (claude-code's legal
+ *      opaque lane records a proc identity there and resumes via
+ *      routing.opaqueUuid; ACP records a native id there directly — both keep
+ *      working). Whether that legacy value is USABLE for resume is the
+ *      backend-owned availability judgment (canResumeWithRecoveredSessionId on
+ *      the backend instance), never a global prefix rule in this provider-
+ *      neutral module.
+ *
+ * @param {object[]} events — the prior run's transcript events (raw read)
+ * @param {string} priorRunId
+ * @returns {string} the addressable provider session id
+ * @throws {Error} fixed-text refusal on every failure mode (§3.6 item 5)
+ */
+export function resolvePriorProviderSessionIdFromEvents(events, priorRunId) {
+  if (!Array.isArray(events)) throw new Error(PRIOR_SESSION_UNADDRESSABLE_TEXT);
+  // TD188-R3: inspect the binding-TYPED facts FIRST, before any runId filter.
+  // A run.provider_session_bound line that is not strictly bound to priorRunId
+  // (foreign envelope or envelope-less) is DAMAGE in this file, not "absent":
+  // reading it as absent would fall back to the legacy session.created value
+  // and mask the corruption — the file's own run can never have written that
+  // line (the event type exists only since TD188 and only via the
+  // envelope-stamping transcript append, so there is no legacy/pre-envelope
+  // producer whose tolerance should apply). Foreign lines of OTHER types keep
+  // their established lane discipline (invisible, not fatal).
+  const bindingTyped = events.filter((e) => e && e.type === PROVIDER_SESSION_BOUND_EVENT);
+  if (bindingTyped.length === 0) {
+    // Legacy lane (unchanged §3.6 read): LAST-bound session.created.
+    const created = findLatestBound(events, "session.created", priorRunId);
+    const sessionId = created?.backendSessionId;
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
+      throw new Error(PRIOR_SESSION_UNADDRESSABLE_TEXT);
+    }
+    return sessionId;
+  }
+  if (bindingTyped.some((e) => e.runId !== priorRunId) || bindingTyped.length > 1) {
+    throw new Error(PROVIDER_SESSION_BOUND_DAMAGED_TEXT);
+  }
+  const binding = bindingTyped[0];
+  const nativeId = binding.providerSessionId;
+  if (typeof nativeId !== "string" || nativeId.length === 0
+    || nativeId === binding.backendSessionId
+    || PROCESS_PLACEHOLDER_SESSION_ID_RE.test(nativeId)) {
+    throw new Error(PROVIDER_SESSION_BOUND_DAMAGED_TEXT);
+  }
+  // TD188-R2: the ORIGINAL spawn identity must be STRICTLY UNIQUE — a second
+  // bound session.created makes "the identity this fact was recorded against"
+  // ambiguous, and a LAST-bound read could let a tail-appended duplicate vouch
+  // for the binding. Both sides must also carry a NON-EMPTY STRING backend that
+  // matches (undefined === undefined no longer passes).
+  const boundCreated = events.filter(
+    (e) => e && e.type === "session.created" && e.runId === priorRunId,
+  );
+  if (boundCreated.length !== 1) throw new Error(PROVIDER_SESSION_BOUND_DAMAGED_TEXT);
+  const created = boundCreated[0];
+  if (typeof binding.backend !== "string" || binding.backend.length === 0
+    || typeof created.backend !== "string" || created.backend.length === 0
+    || created.backend !== binding.backend
+    || typeof created.backendSessionId !== "string" || created.backendSessionId.length === 0
+    || created.backendSessionId !== binding.backendSessionId) {
+    throw new Error(PROVIDER_SESSION_BOUND_DAMAGED_TEXT);
+  }
+  return nativeId;
+}
+
+/**
  * Recover the PRIOR run's provider session id from the transcript SSOT at
  * runner time (ADR-0031 §3.6 association, R2). The resume envelope carries only
  * the prior WAO runId; this bound reader turns that handle back into the
- * addressable provider session id (session.created.backendSessionId, LAST-bound
- * to the prior run — the same lane discipline resolveReuseTurn's decision read
- * uses). Called by the spawn authority (RunManager.start) BEFORE transcript/
- * worktree/spawn, and the resolved id crosses to the backend in the in-process
- * task object — it never travels in argv.
+ * addressable provider session id (TD188: the run.provider_session_bound fact
+ * when present and valid, else the LAST-bound session.created.backendSessionId
+ * — the same lane discipline resolveReuseTurn's decision read uses). Called by
+ * the spawn authority (RunManager.start) BEFORE transcript/worktree/spawn, and
+ * the resolved id crosses to the backend in the in-process task object — it
+ * never travels in argv.
  *
  * Fail-closed on EVERY failure mode (§3.6 item 5): prior transcript missing or
- * unparseable, no session.created bound to the prior run, or a
- * backendSessionId that is missing/empty/non-string — each refuses with a
- * fixed text; none silently starts a fresh conversation. (Whether an upstream
- * `session/resume` then rejects the recovered id is the backend's fail-closed
- * lane — never fall back to session/new.)
+ * unparseable, no session.created bound to the prior run, a backendSessionId
+ * that is missing/empty/non-string, or a damaged binding fact — each refuses
+ * with a fixed text; none silently starts a fresh conversation. (Whether an
+ * upstream `session/resume` then rejects the recovered id is the backend's
+ * fail-closed lane — never fall back to session/new.)
  *
  * @param {object} input
  * @param {string} input.runDir — transcript directory (spawn authority's runDir)
@@ -591,12 +710,7 @@ export async function resolvePriorProviderSessionId({ runDir, priorRunId }) {
   } catch {
     throw new Error("sessionReuse: prior transcript for resume is missing or unparseable — refusing instead of silently starting a fresh provider conversation");
   }
-  const created = findLatestBound(events, "session.created", priorRunId);
-  const sessionId = created?.backendSessionId;
-  if (typeof sessionId !== "string" || sessionId.length === 0) {
-    throw new Error(PRIOR_SESSION_UNADDRESSABLE_TEXT);
-  }
-  return sessionId;
+  return resolvePriorProviderSessionIdFromEvents(events, priorRunId);
 }
 
 // ===== M12-7: lineage-scoped provider session reuse =====
@@ -765,6 +879,16 @@ export async function resolveLineageFirstTurn({ runDir, runId, leadSession, work
  * continuations of the same parent serialize here; the loser observes the
  * winner's non-terminal child and is refused busy before any worktree/spawn.
  *
+ * TD188-R1 (2026-09-27): the resume's ACTUAL prior is decided INSIDE this lock
+ * — the lineage slot's previous owner (entry.runId) when one exists, else the
+ * requested parentRunId. When `validatePriorRunId` is supplied, it is awaited
+ * on that FINAL prior BEFORE the claim is written (shared prior-session reader
+ * + backend-owned availability hook, injected by the caller): a refusal
+ * propagates with the slot's original entry bytes untouched and zero
+ * child-side effects (no claim → no worktree transition → no child transcript
+ * → no fork). The returned routing carries this SAME verified prior, so the
+ * spawn authority re-reads exactly what was validated here.
+ *
  * @param {object} input
  * @param {string} input.runDir
  * @param {string} input.runId — the prospective NEW child runId
@@ -775,9 +899,12 @@ export async function resolveLineageFirstTurn({ runDir, runId, leadSession, work
  * @param {string} input.agentId
  * @param {object} [input.reuseStore]
  * @param {number} [input.now]
+ * @param {Function} [input.validatePriorRunId] — async (finalPriorRunId) => void;
+ *   awaited INSIDE the lock on the FINAL prior before the claim is written.
+ *   Throws to refuse (propagates; nothing has been written).
  * @returns {Promise<{kind:"resume", routing:{mode:"run_lineage", opaqueUuid:string, turn:"resume"}} | {kind:"busy", activeRunId:string}>}
  */
-export async function resolveLineageContinuationTurn({ runDir, runId, parentRunId, rootRunId, leadSession, workspace, agentId, reuseStore, now }) {
+export async function resolveLineageContinuationTurn({ runDir, runId, parentRunId, rootRunId, leadSession, workspace, agentId, reuseStore, now, validatePriorRunId = null }) {
   const store = reuseStore ?? defaultLineageStore(runDir);
   const clock = typeof now === "number" ? now : Date.now();
   const keyHash = deriveLineageReuseKeyHash({ leadSession, workspace, agentId, rootRunId });
@@ -821,6 +948,19 @@ export async function resolveLineageContinuationTurn({ runDir, runId, parentRunI
         }
       }
     }
+    // TD188-R1: the FINAL prior whose transcript the resume will read — the
+    // lineage slot's previous owner when one exists, else the requested
+    // parent. Resolved ONCE; validated INSIDE this lock (when the caller
+    // supplies the shared reader + backend-hook judgment) BEFORE the claim is
+    // written, and reused verbatim in the returned routing below. A validation
+    // refusal propagates before writeEntry: the slot's original entry bytes
+    // stay untouched and zero child-side effects exist (no rollback theater).
+    const finalPriorRunId = (entry && typeof entry.runId === "string" && entry.runId.length > 0)
+      ? entry.runId
+      : parentRunId;
+    if (typeof validatePriorRunId === "function") {
+      await validatePriorRunId(finalPriorRunId);
+    }
     await store.writeEntry(keyHash, { runId, updatedAt: clock });
     return {
       kind: "resume",
@@ -828,13 +968,12 @@ export async function resolveLineageContinuationTurn({ runDir, runId, parentRunI
       // previous owner — the run whose transcript holds the provider session;
       // parentRunId when the slot had no prior entry). claude-code compiles the
       // opaque uuid only; a transcript-bound backend recovers the provider
-      // session id from this handle at runner time.
+      // session id from this handle at runner time. TD188-R1: this is the SAME
+      // finalPriorRunId validated above — never a second, unverified pick.
       routing: {
         ...routing,
         turn: "resume",
-        priorRunId: (entry && typeof entry.runId === "string" && entry.runId.length > 0)
-          ? entry.runId
-          : parentRunId,
+        priorRunId: finalPriorRunId,
       },
       // Internal rollback token. It never crosses the application/MCP boundary.
       claim: { keyHash, runId, parentRunId, previousEntry: entry ?? null },

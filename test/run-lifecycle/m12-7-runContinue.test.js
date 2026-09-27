@@ -16,7 +16,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
@@ -69,6 +69,11 @@ async function seedParent({
   worktreePath, worktreeBranch, baseCommit, allowedPaths = ["src", "keep.txt"],
   deliveryCommit = null, rootRunId, terminalState = "completed",
   withLineage = true, withDeliveryContext = true, withProviderSession = true,
+  // TD188（2026-09-27）：session.created 的 backendSessionId 可注入（默认保持既有
+  // "provider-session-1"，存量测试字节不变）；boundProviderSessionId 非空时追加一条
+  // run.provider_session_bound 绑定事实（delivery 复用 run 的运行期 native id 记录）。
+  providerSessionId = "provider-session-1",
+  boundProviderSessionId = null,
   decision = null,
 }) {
   mkdirSync(runDir, { recursive: true });
@@ -92,7 +97,14 @@ async function seedParent({
     await t.append("run.session_reuse", { mode: "run_lineage", turn: "first", rootRunId: rootRunId ?? runId });
   }
   if (withProviderSession) {
-    await t.append("session.created", { backend, backendSessionId: "provider-session-1", serveUrl: null });
+    await t.append("session.created", { backend, backendSessionId: providerSessionId, serveUrl: null });
+  }
+  if (boundProviderSessionId) {
+    await t.append("run.provider_session_bound", {
+      backend,
+      backendSessionId: providerSessionId,
+      providerSessionId: boundProviderSessionId,
+    });
   }
   if (deliveryCommit) {
     await t.append("run.delivery_created", {
@@ -839,4 +851,300 @@ test("M12-22-RC-05: cumulative-scope inventory caps at the existing inventory li
   assert.equal(r2.uncoveredInheritedCount, 300);
   assert.equal(r2.uncoveredInheritedPaths.length, INVENTORY_PATHS_LIMIT);
   assert.equal(r2.uncoveredInheritedTruncated, true);
+});
+
+// ----- TD188（2026-09-27）：Kimi/Codex continuable 交付续接用真实 provider 会话 -----
+//
+// 生产事故（TD-188，run_20260926235905551efnojy）：Kimi 交付父 run 只留下
+// session.created.backendSessionId=proc_43244（本地进程占位身份），continueRun
+// 放行后 runner 把它交给 `kimi -r`，上游 Session not found、child 零工具执行。
+// 修复合同：完整可续接检查（共享读取器 + backend-owned 可用性钩子）在 registry
+// 身份一致与 backend 支持检查之后、lineage claim / worktree 转换 / child
+// transcript / spawn 之前完成；缺真实 provider 会话证据 → 既有 no_provider_session，
+// 零 claim / 零工作树变化 / 零 child 记录 / 零 spawn。历史 Kimi/Codex proc-only
+// 父本轮明确不可续接（不迁移旧数据）；claude legacy proc/opaque 路径照常续接。
+
+test("TD188-RC-1: Kimi 父 run 仅 proc_ 占位身份 → no_provider_session；零 claim/工作树/child transcript/spawn", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParent(repo, "run_parent_kimi_proconly");
+  const dir = mkdtempSync(join(tmpdir(), "wao-td188-rc1-"));
+  const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
+  try {
+    await seedParent({
+      runDir: dir, runId: "run_parent_kimi_proconly", agentId: "coder_hq", cwd: repo,
+      backend: "kimi-code",
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit,
+      providerSessionId: "proc_43244", // 父 run 只记录了进程占位身份（事故原状）
+    });
+    const r = await continueRun({
+      parentRunId: "run_parent_kimi_proconly", prompt: "fix it",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src", "keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "kimi-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: (agent) => new KimiCodeBackend(), // 真实 backend 实例（继承占位拒绝钩子）
+      spawnFn: () => { throw new Error("must not spawn"); },
+    });
+    assert.equal(r.accepted, false);
+    assert.equal(r.rejectionReason, "no_provider_session");
+    // 零副作用：无 lineage claim、工作树仍在父分支、无 child transcript、零 spawn。
+    assert.equal(existsSync(join(dir, ".lineage-reuse")), false, "no lineage claim written");
+    assert.equal(git("symbolic-ref --short HEAD", parent.wt), parent.branch, "worktree untouched");
+    assert.deepEqual(childTranscriptsFor(dir, "run_parent_kimi_proconly"), [], "zero child transcripts");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("TD188-RC-2: Codex 父 run 仅 proc_ 占位身份 → no_provider_session（同类 fail-closed）", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParent(repo, "run_parent_codex_proconly");
+  const dir = mkdtempSync(join(tmpdir(), "wao-td188-rc2-"));
+  const { CodexBackend } = await import("../../src/backends/codex.js");
+  try {
+    await seedParent({
+      runDir: dir, runId: "run_parent_codex_proconly", agentId: "coder_hq", cwd: repo,
+      backend: "codex",
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit,
+      providerSessionId: "proc_43244",
+    });
+    const r = await continueRun({
+      parentRunId: "run_parent_codex_proconly", prompt: "fix it",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src", "keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "codex", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: (agent) => new CodexBackend(),
+      spawnFn: () => { throw new Error("must not spawn"); },
+    });
+    assert.equal(r.accepted, false);
+    assert.equal(r.rejectionReason, "no_provider_session");
+    assert.equal(existsSync(join(dir, ".lineage-reuse")), false, "no lineage claim written");
+    assert.deepEqual(childTranscriptsFor(dir, "run_parent_codex_proconly"), [], "zero child transcripts");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("TD188-RC-3: Kimi 父 run 带绑定事实（真实 native id）→ 续接被接受，spawn 恰一次（resume 路由）", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParent(repo, "run_parent_kimi_bound");
+  const dir = mkdtempSync(join(tmpdir(), "wao-td188-rc3-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
+  const NATIVE = "session_014e3fb4-1dbd-435e-a883-a63245876ea0";
+  try {
+    await seedParent({
+      runDir: dir, runId: "run_parent_kimi_bound", agentId: "coder_hq", cwd: repo,
+      backend: "kimi-code",
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit,
+      providerSessionId: "proc_43244",
+      boundProviderSessionId: NATIVE, // 运行期 wire 广告的 native id 已按 TD188 绑定
+    });
+    const r = await continueRun({
+      parentRunId: "run_parent_kimi_bound", prompt: "correct the bug",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src", "keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "kimi-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: (agent) => new KimiCodeBackend(),
+      spawnFn: fakeSpawn,
+    });
+    assert.equal(r.accepted, true);
+    assert.equal(r.rootRunId, "run_parent_kimi_bound");
+    assert.equal(calls.length, 1, "spawned once");
+    const routing = JSON.parse(argVal(calls, "--session-reuse-json"));
+    assert.equal(routing.mode, "run_lineage");
+    assert.equal(routing.turn, "resume");
+    assert.equal(routing.priorRunId, "run_parent_kimi_bound");
+    // 工作树已转换到 child 分支 @base（成功路径既有语义不回退）。
+    assert.equal(git("symbolic-ref --short HEAD", parent.wt), `wao/${r.runId}`);
+    assert.equal(git("rev-parse HEAD", parent.wt), parent.base);
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("TD188-RC-4: 坏绑定事实（重复/空/占位/关联不一致）→ no_provider_session，零副作用", async () => {
+  const repo = makeRepo();
+  const dir = mkdtempSync(join(tmpdir(), "wao-td188-rc4-"));
+  const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
+  const { JsonlTranscript: JT } = await import("../../src/transcript.js");
+  const NATIVE = "session_014e3fb4-1dbd-435e-a883-a63245876ea0";
+  const badShapes = ["duplicate", "empty", "placeholder", "mismatch"];
+  try {
+    for (const shape of badShapes) {
+      const runId = `run_parent_kimi_bad_${shape}`;
+      const p = buildCommittedParent(repo, runId);
+      await seedParent({
+        runDir: dir, runId, agentId: "coder_hq", cwd: repo,
+        backend: "kimi-code",
+        worktreePath: p.wt, worktreeBranch: p.branch, baseCommit: p.base,
+        deliveryCommit: p.deliveryCommit,
+        providerSessionId: "proc_43244",
+      });
+      const t = new JT(join(dir, `${runId}.jsonl`), { runId, agentId: "coder_hq" });
+      if (shape === "duplicate") {
+        await t.append("run.provider_session_bound", { backend: "kimi-code", backendSessionId: "proc_43244", providerSessionId: NATIVE });
+        await t.append("run.provider_session_bound", { backend: "kimi-code", backendSessionId: "proc_43244", providerSessionId: `${NATIVE}-x` });
+      } else if (shape === "empty") {
+        await t.append("run.provider_session_bound", { backend: "kimi-code", backendSessionId: "proc_43244", providerSessionId: "" });
+      } else if (shape === "placeholder") {
+        await t.append("run.provider_session_bound", { backend: "kimi-code", backendSessionId: "proc_43244", providerSessionId: "proc_43244" });
+      } else {
+        await t.append("run.provider_session_bound", { backend: "kimi-code", backendSessionId: "proc_999", providerSessionId: NATIVE });
+      }
+      const r = await continueRun({
+        parentRunId: runId, prompt: "fix",
+        delivery: { mode: "git_commit_v1", allowedPaths: ["src", "keep.txt"], verificationCommands: ["node --test"] },
+        runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "kimi-code", cwd: repo } }),
+        authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+        backendFor: (agent) => new KimiCodeBackend(),
+        spawnFn: () => { throw new Error("must not spawn"); },
+      });
+      assert.equal(r.accepted, false, `shape=${shape}`);
+      assert.equal(r.rejectionReason, "no_provider_session", `shape=${shape}`);
+      assert.equal(git("symbolic-ref --short HEAD", p.wt), p.branch, `worktree untouched (shape=${shape})`);
+    }
+    assert.equal(existsSync(join(dir, ".lineage-reuse")), false, "no lineage claim written for any bad shape");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("TD188-RC-5: Claude 父 run 仅 proc 身份（legacy opaque 路径）→ 续接照常接受", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParent(repo, "run_parent_claude_opaque");
+  const dir = mkdtempSync(join(tmpdir(), "wao-td188-rc5-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  const { ClaudeCodeBackend } = await import("../../src/backends/claudeCode.js");
+  try {
+    await seedParent({
+      runDir: dir, runId: "run_parent_claude_opaque", agentId: "coder_hq", cwd: repo,
+      backend: "claude-code",
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit,
+      providerSessionId: "proc_1234", // claude parser 不广告 native id：真实形状就是 proc-only
+    });
+    const r = await continueRun({
+      parentRunId: "run_parent_claude_opaque", prompt: "correct the bug",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src", "keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "claude-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: "lead-session-1",
+      backendFor: (agent) => new ClaudeCodeBackend(),
+      spawnFn: fakeSpawn,
+    });
+    assert.equal(r.accepted, true, "claude 续接编译 routing.opaqueUuid（--resume <uuid>），proc 身份不是阻断");
+    assert.equal(calls.length, 1);
+    const routing = JSON.parse(argVal(calls, "--session-reuse-json"));
+    assert.equal(routing.turn, "resume");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+// ----- TD188 返工 R1（高）：lineage 锁内验证【最终实际前任】 -----
+//
+// continueRun 预检的是请求的 parentRunId，但 resume 实际读取的 prior 由 lineage 槽
+// 决定：有 entry 时是 entry.runId（前任 owner B），无 entry 才回落 parent。返工前：
+// 父 A 有效 + 槽内前任 B 身份无效（proc-only）时，旧候选先 claim 槽位 / 转换工作树 /
+// 建 child 转录 / fork runner，直到 RunManager.start 才拒 B（副作用已发生）。
+// 修复：既有 lineage 锁内确定最终实际 prior，对它执行共享读取器 + 既有 backend 钩子
+// 校验，通过后才写 claim；routing 使用同一已验证 prior。失败零副作用（entry 原字节
+// 不动、树分支/HEAD/字节不动、零 child、零 spawn）——不是 claim 后回滚冒充。
+
+test("TD188-R1-RC-6: 槽内实际前任 B（≠请求父 A）不可续接 → no_provider_session；entry 字节/树/字节全不动、零 child/零 spawn", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParent(repo, "run_parent_r1_a");
+  const dir = mkdtempSync(join(tmpdir(), "wao-td188-r1c6-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
+  const { resolveLineageFirstTurn, deriveLineageReuseKeyHash } = await import("../../src/application/sessionReuse.js");
+  const OWNER = "run_r1_owner_b";
+  const NATIVE = "session_014e3fb4-1dbd-435e-a883-a63245876ea0";
+  const LEAD = "lead-session-1";
+  try {
+    // 请求父 A：有效（kimi + 绑定事实）——9b 预检通过，证明后续拒绝来自槽内实际前任 B。
+    await seedParent({
+      runDir: dir, runId: "run_parent_r1_a", agentId: "coder_hq", cwd: repo,
+      backend: "kimi-code",
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit,
+      providerSessionId: "proc_43244", boundProviderSessionId: NATIVE,
+    });
+    // 真实 store：lineage 槽前 owner = B（≠ A），终态但只有 proc 占位身份（无可续接证据）。
+    await resolveLineageFirstTurn({
+      runDir: dir, runId: OWNER, leadSession: LEAD, workspace: repo,
+      agentId: "coder_hq", rootRunId: "run_parent_r1_a", now: 1000,
+    });
+    const bt = new JsonlTranscript(join(dir, `${OWNER}.jsonl`), { runId: OWNER, agentId: "coder_hq" });
+    await bt.append("run.started", { backend: "kimi-code" });
+    await bt.transitionState(null, "pending", "created");
+    await bt.append("session.created", { backend: "kimi-code", backendSessionId: "proc_777", serveUrl: null });
+    await bt.transitionState("pending", "completed", "done");
+
+    // 快照：entry 原始字节 + 工作树分支/HEAD/字节。
+    const key = deriveLineageReuseKeyHash({ leadSession: LEAD, workspace: repo, agentId: "coder_hq", rootRunId: "run_parent_r1_a" });
+    const entryPath = join(dir, ".lineage-reuse", `${key}.json`);
+    const entryBefore = readFileSync(entryPath, "utf8");
+    const headBefore = git("rev-parse HEAD", parent.wt);
+    const statusBefore = git("status --porcelain=v1 --untracked-files=all", parent.wt);
+
+    const r = await continueRun({
+      parentRunId: "run_parent_r1_a", prompt: "fix it",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src", "keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "kimi-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: LEAD,
+      backendFor: (agent) => new KimiCodeBackend(),
+      spawnFn: fakeSpawn,
+    });
+    assert.equal(r.accepted, false, "槽内实际前任 B 不可续接 → 既有 no_provider_session（锁内、claim 前）");
+    assert.equal(r.rejectionReason, "no_provider_session");
+    // 零副作用四件套 + entry 原字节不动。
+    assert.equal(calls.length, 0, "零 spawn");
+    assert.equal(readFileSync(entryPath, "utf8"), entryBefore, "lineage entry 字节不动（claim 未写，非回滚恢复）");
+    assert.equal(git("symbolic-ref --short HEAD", parent.wt), parent.branch, "工作树分支不动");
+    assert.equal(git("rev-parse HEAD", parent.wt), headBefore, "HEAD 不动");
+    assert.equal(git("status --porcelain=v1 --untracked-files=all", parent.wt), statusBefore, "工作树字节不动");
+    const jsonlFiles = readdirSync(dir).filter((n) => n.endsWith(".jsonl")).sort();
+    assert.deepEqual(jsonlFiles, [`${OWNER}.jsonl`, "run_parent_r1_a.jsonl"].sort(), "零 child 转录（B 与 A 之外无新文件）");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("TD188-R1-RC-7: 槽内实际前任 B 有效（绑定事实）→ 续接接受；routing.priorRunId = 锁内已验证的同一实际前任 B", async () => {
+  const repo = makeRepo();
+  const parent = buildCommittedParent(repo, "run_parent_r1_pos");
+  const dir = mkdtempSync(join(tmpdir(), "wao-td188-r1c7-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  const { KimiCodeBackend } = await import("../../src/backends/kimiCode.js");
+  const { resolveLineageFirstTurn } = await import("../../src/application/sessionReuse.js");
+  const OWNER = "run_r1_owner_pos";
+  const NATIVE = "session_014e3fb4-1dbd-435e-a883-a63245876ea0";
+  const LEAD = "lead-session-1";
+  try {
+    await seedParent({
+      runDir: dir, runId: "run_parent_r1_pos", agentId: "coder_hq", cwd: repo,
+      backend: "kimi-code",
+      worktreePath: parent.wt, worktreeBranch: parent.branch, baseCommit: parent.base,
+      deliveryCommit: parent.deliveryCommit,
+      providerSessionId: "proc_43244", boundProviderSessionId: NATIVE,
+    });
+    // 槽前 owner B：终态 + 有效绑定事实（resume 实际要读的前任就是它）。
+    await resolveLineageFirstTurn({
+      runDir: dir, runId: OWNER, leadSession: LEAD, workspace: repo,
+      agentId: "coder_hq", rootRunId: "run_parent_r1_pos", now: 1000,
+    });
+    const bt = new JsonlTranscript(join(dir, `${OWNER}.jsonl`), { runId: OWNER, agentId: "coder_hq" });
+    await bt.append("run.started", { backend: "kimi-code" });
+    await bt.transitionState(null, "pending", "created");
+    await bt.append("session.created", { backend: "kimi-code", backendSessionId: "proc_777", serveUrl: null });
+    await bt.append("run.provider_session_bound", {
+      backend: "kimi-code", backendSessionId: "proc_777", providerSessionId: NATIVE,
+    });
+    await bt.transitionState("pending", "completed", "done");
+
+    const r = await continueRun({
+      parentRunId: "run_parent_r1_pos", prompt: "correct the bug",
+      delivery: { mode: "git_commit_v1", allowedPaths: ["src", "keep.txt"], verificationCommands: ["node --test"] },
+      runDir: dir, registryPath: makeRegistry(dir, { coder_hq: { backend: "kimi-code", cwd: repo } }),
+      authorizedWorkspaceRoot: repo, leadSession: LEAD,
+      backendFor: (agent) => new KimiCodeBackend(),
+      spawnFn: fakeSpawn,
+    });
+    assert.equal(r.accepted, true, "实际前任 B 带有效绑定事实 → 续接接受（正对照）");
+    assert.equal(calls.length, 1);
+    const routing = JSON.parse(argVal(calls, "--session-reuse-json"));
+    assert.equal(routing.priorRunId, OWNER, "routing 携带锁内已验证的同一实际前任 B（而非请求父 A）");
+    assert.equal(routing.turn, "resume");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
 });

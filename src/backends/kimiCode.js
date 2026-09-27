@@ -1,4 +1,4 @@
-import { ProcessBackend } from "./processBackend.js";
+import { ProcessBackend, isProcessPlaceholderSessionId } from "./processBackend.js";
 import { KimiStreamParser } from "./parsers/kimiCode.js";
 import { inheritedEnvNames } from "../envPolicy.js";
 
@@ -96,14 +96,20 @@ export class KimiCodeBackend extends ProcessBackend {
         // provider 会话复用（2026-09-21）：resume 轮以 `-r <session_id>` 续接前任 run
         // 的会话；id 缺失/不可用在此**派发前**拒绝（双重拒绝点）。`-r` 是 kimi 自己
         // 在 `session.resume_hint` 里广告的续接开关（另有 `-S/--session`、`-c/--continue`）。
+        // TD188（2026-09-27）：占位进程号（proc_<pid>）同样拒绝——生产事故
+        // （run_20260926235905551efnojy）里它被当成 session id 传给 `-r`，上游
+        // Session not found、零工具执行。proc_<pid> 是 ProcessBackend 的本地子进程
+        // 身份，绝不是 kimi 会话 id。
         const resumeArgs = [];
         if (task.sessionReuse?.turn === "resume") {
           const priorSessionId = task.priorProviderSessionId;
-          if (typeof priorSessionId !== "string" || priorSessionId.length === 0) {
+          if (typeof priorSessionId !== "string" || priorSessionId.length === 0
+            || isProcessPlaceholderSessionId(priorSessionId)) {
             throw new Error(
               "kimi-code sessionReuse resume turn requires the prior provider session id "
-              + "(session.created.backendSessionId of the prior run) — refusing instead of "
-              + "silently starting a fresh kimi conversation",
+              + "(a runtime-advertised native id — session.created.backendSessionId of the "
+              + "prior run; a proc_<pid> process placeholder is not a kimi session id) "
+              + "— refusing instead of silently starting a fresh kimi conversation",
             );
           }
           resumeArgs.push("-r", priorSessionId);

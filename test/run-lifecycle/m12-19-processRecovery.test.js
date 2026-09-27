@@ -1083,3 +1083,22 @@ test("H1: smoke — point-in-time projects advisory candidate, then explicit rep
     assert.equal(after.terminalState, "failed"); // settled, not completed
   } finally { await cleanupDir(repo); await cleanupDir(runDir); }
 });
+
+// ── TD188（2026-09-27）：run.provider_session_bound 绑定事实不干扰 process_missing ──
+// delivery + sessionReuse run 自 TD188 起在终态分派前把 wire 观察到的 native
+// provider id 记为独立事实 run.provider_session_bound（不补第二条 session.created）。
+// process_missing 恢复依赖"恰好一条绑定 session.created 且 backendSessionId 恰为
+// proc_<pid>"——本测试钉：绑定事实存在时该不变量原样成立（分类器不读新事实）。
+test("TD188: run.provider_session_bound 不破坏 process_missing 的唯一 proc 身份判定", () => {
+  const events = [
+    ...baseOrphanFixture(),
+    ev("run.provider_session_bound", {
+      backend: "process",
+      backendSessionId: `proc_${CHILD_PID}`,
+      providerSessionId: "session_014e3fb4-1dbd-435e-a883-a63245876ea0",
+    }),
+  ];
+  const r = classifyProcessMissingCandidate(events, RUN_ID);
+  assert.equal(r.eligible, true, "绑定事实是旁路 durable 事实，不影响孤儿判定");
+  assert.equal(r.pid, CHILD_PID, "恢复身份仍是唯一 session.created 的 proc_<pid>");
+});

@@ -439,6 +439,7 @@ interface TranscriptEvent {
 | `run.state_change` | 状态机转移；`reason` ∈ `STATE_CHANGE_REASONS`（闭集 SSOT = `src/transcript.js`） | `[S]` M0 |
 | `run.state_change_rejected` | TD-99：first-terminal-wins 拒绝迟到转移 | `[S]` TD-99 |
 | `session.created` | backend 建立 provider session | `[S]` M0 |
+| `run.provider_session_bound` | TD188：delivery+sessionReuse run 在终态分派前，把 wire 上观察到的 runtime native provider id（kimi `session.resume_hint` / codex `thread.started`）与原 spawn 身份（`backend`+`backendSessionId`）关联记录的**独立有界绑定事实**——不补第二条 `session.created`（M12-19 process_missing 恢复依赖唯一 `proc_<pid>` 身份）；共享续接读取器（`resolvePriorProviderSessionId`）优先采信并严格校验（runId 信封/唯一性/native 非空且非占位/与原 spawn 身份一致），坏/重复/冲突事实 fail-closed 拒绝、绝不回落旧 `session.created` 值遮蔽 | `[M]` TD188 |
 | `prompt.sent` | prompt 投递 | `[S]` M0 |
 | `run.submitted` | 投递完成，进入等待 | `[S]` M0 |
 | `run.metrics` | token、成本与耗时事实；不触发状态转移 | `[M]` M4 |
@@ -1006,6 +1007,25 @@ transcript 缺失且新鲜（<5min）→`busy`；缺失且陈旧→`first`。`fi
 session id 由 spawn 权威经 `resolvePriorProviderSessionId`（runId 绑定读取器）从前任何
 转录取回、in-process 送达 backend——**绝不进 argv**（ADR-0031 §3.6/R2）。
 
+**TD188（2026-09-27）交付续接的 native id 绑定与缺证据 fail-closed**：delivery+
+sessionReuse run 的 spawn 时刻 `session.created` 保持唯一进程身份（`proc_<pid>`——M12-19
+process_missing 恢复按唯一 `proc_<pid>` 解析子进程 PID，不变量不动）；运行期 wire 广告的
+native provider id（kimi `session.resume_hint` / codex `thread.started`）由 runner 在终态分派前
+追加**独立**绑定事实 `run.provider_session_bound`（见 §3.2 事件表；不猜 id、不把 opaque UUID
+当 native id、不写凭据）。共享读取器（`resolvePriorProviderSessionId` /
+`resolvePriorProviderSessionIdFromEvents`——spawn 权威与 `run_continue` 预检同一判定 SSOT）优先
+采信绑定事实并严格校验：runId 信封、唯一性、native 非空且非 `proc_` 占位、与原 spawn 身份
+（backend/backendSessionId）一致；坏/重复/冲突事实拒绝，绝不回落旧值遮蔽。无绑定事实时保持
+既有 native `session.created` 兼容读取；该值的**可用性**由 backend-owned 纯验证钩子
+（`backend.canResumeWithRecoveredSessionId`，经现有 backend 实例调用——无 factory 分发表、共享
+层不按 backend 名分支、非认证能力轴）判定：kimi/codex（运行时自产 id）对 `proc_<pid>` 占位
+fail-closed（`RunManager.start` 固定拒绝、`run_continue` 返回既有 `no_provider_session`，均在
+lineage claim/worktree/child transcript/spawn 之前）；claude-code 覆写恒 true（resume 编译
+routing.opaqueUuid，从不消费取回 id——合法 opaque 路径不被全局 proc 前缀规则误伤）；非进程式
+backend（ACP）无该钩子、原 native `session.created` 语义不退化。非 delivery 复用 run 的晚补
+`session.created` 写侧保持兼容（读取侧 LAST-bound）。历史 Kimi/Codex proc-only 父 run 本轮明确
+不可续接（不迁移旧数据）；新真实 run 起记录绑定事实。
+
 **能力驱动 fail-closed**：backend 若无法表达所配置的复用策略，detached runner 在 provider spawn 前失败
 （`backend.supportsSessionReuse !== true` 即抛错），绝不静默开新 provider 会话。初始 background transcript
 可记录这次 startup failure；不得把它误报成已复用成功。
@@ -1226,7 +1246,7 @@ src/
 │   ├── runDispatch.js        #   background dispatch service（CLI + MCP 共用；continuable 选项——delivery-only 续谱根，建立 run_lineage turn:first provider 会话；MCP adapter 派发前经共享 executionProfiles resolver 解析可选 executionProfileId（profile/inline 互斥），把解析后的 verification 折入 effective delivery 传入；runDispatch.js 自身不解析 profile；providerSessionRouting 闭集输出——仅由内部已选 routing.turn 派生的路由请求真相，非 provider 成功证明，不暴露 mode/opaque uuid）
 │   ├── runDispatchContract.js #   advisory pre-dispatch contract check service（MCP）：MCP adapter 在 run_dispatch 与本工具间共享输入 schema（service 自身不导入 Zod），service 复用同一 application 校验（共享 resolver + prepareDeliveryRequest），返回闭集 workspace/registry/contract 视图 + 有界 issue 码；contractValid 只反映 delivery/profile 机械合同（不预评 expectedGitHead/expectedDirty/expectedWorkspaceRoot、continuable/backend/session 资格或凭据），非门禁（sections 独立 observed/unknown、advisory 恒 true）、零副作用、run_dispatch 不可依赖它
 │   ├── executionProfiles.js   #   frozen trusted execution-profile catalog + 共享 delivery 验证解析器：node-npm-test-v1 / node-npm-ci-test-v1 / python-pytest-v1 仅提供 verificationSetup/verificationCommands；profile 与 inline verification 互斥，未知/冲突由共享 resolver 稳定拒绝
-│   ├── runContinue.js        #   Lead 授权修正续跑 service（由 MCP adapter 直接委托）：对终态 continuable delivery 续 ONE 修正回合，复用父 run 的 retained worktree + 续 provider 会话（turn:resume，同一 opaque uuid）；closed-set 资格/身份/配置/worktree 检查先于 mutation，spawn 前失败事务回滚；从不推断 correction/scope/retry/accept
+│   ├── runContinue.js        #   Lead 授权修正续跑 service（由 MCP adapter 直接委托）：对终态 continuable delivery 续 ONE 修正回合，复用父 run 的 retained worktree + 续 provider 会话（turn:resume，同一 opaque uuid）；closed-set 资格/身份/配置/worktree 检查先于 mutation，spawn 前失败事务回滚；TD188：共享读取器 + backend 钩子的完整可续接预检先于 claim/worktree/child transcript/spawn，缺真实 provider 会话证据返回既有 no_provider_session；从不推断 correction/scope/retry/accept
 │   ├── runStatus.js          #   read-only run status service（CLI + MCP 共用）
 │   ├── runCollect.js         #   run collection service（CLI + MCP 共用）
 │   ├── runDiagnosis.js       #   read-only run diagnosis service（CLI + MCP 共用）
@@ -1239,7 +1259,7 @@ src/
 │   ├── ownerLiveness.js      #   run liveness 投影 SSOT（terminal/progress/process_only/silent，runWait/runAwaitResult 共用）
 │   ├── workspaceBinding.js   #   host-authorized workspace proof SSOT（MCP 共用）
 │   ├── sessionWorkspace.js   #   Lead session workspace selection kernel（无状态，委托 proveWorkspace）
-│   ├── sessionReuse.js       #   expert session reuse SSOT（provider 中立：opaque uuid 派生 + turn 决策 first/resume/busy + per-key 文件锁；run_lineage routing——续谱作用域 = Lead session + workspace + agent + rootRunId，复用同一 opaque provider id；run_lineage 是 routing-only，不是 agent 可声明策略）（CORE_MEMBERS 例外：归 core 桶，TD-122）
+│   ├── sessionReuse.js       #   expert session reuse SSOT（provider 中立：opaque uuid 派生 + turn 决策 first/resume/busy + per-key 文件锁；run_lineage routing——续谱作用域 = Lead session + workspace + agent + rootRunId，复用同一 opaque provider id；run_lineage 是 routing-only，不是 agent 可声明策略；TD188 前任会话读取器优先校验 run.provider_session_bound 绑定事实，坏事实 fail-closed 不回落）（CORE_MEMBERS 例外：归 core 桶，TD-122）
 │   ├── leadPreflight.js      #   advisory single-call preflight aggregator（组合 registryInventory+listRuns，advisory 非 gate；registryIssues/registryIssuesTruncated——复用 registry_list 同一闭集 issue 形状与同一单读快照，非空时 checkStatus.workers=warning→complete:false 但有效 worker 照常返回）
 │   ├── mcpWorkspaceActivation.js # project-scoped workspace activation（CLI 用，委托 hostAdapters）
 │   ├── timeoutPolicy.js      #   wait timeout precedence SSOT（CLI + MCP 共用）

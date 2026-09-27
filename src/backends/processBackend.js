@@ -13,6 +13,15 @@ const SAFE_INHERITED_ENV = new Set([
   "USERNAME", "USERPROFILE", "WINDIR",
 ]);
 
+// TD188（2026-09-27）：本类 spawn 时刻写出的 backendSessionId 占位形状。纯粹的
+// WAO 传输事实（本地子进程身份），绝不是 provider 原生会话 id。同一冻结形状由
+// src/application/processRecovery.js（_parseProcPid——M12-19 process_missing 恢复
+// 依赖）与 src/application/sessionReuse.js（绑定事实读取器的占位校验）各自解析；
+// 三处保持同步，形状由 M12-19 恢复测试冻结。
+export function isProcessPlaceholderSessionId(value) {
+  return typeof value === "string" && /^proc_\d+$/.test(value);
+}
+
 /**
  * 事件队列：把 parser 产出的事件和进程 close 信号汇成一条流。
  * 每个 handle 独立一个实例（不跨 run 共享）。
@@ -129,6 +138,21 @@ export class ProcessBackend {
   // **运行时自产**（claude-code 那种控制面自选 `--session-id` 的路子不适用），故
   // 默认 false；子类按 wire 事实 opt-in。strict === true 读取，未声明绝不读成支持。
   supportsSessionReuse = false;
+
+  // TD188（2026-09-27）：backend-owned 的**纯**可用性判定——"这个从转录取回的
+  // provider 会话 id，本 backend 能否用它续接"。由 spawn 权威（RunManager.start）
+  // 与续接预检（continueRun）经现有 backend 实例调用：不加 factory 分发表、共享
+  // 调度层不按 backend 名分支、也不升成认证能力轴。基类答案：ProcessBackend 的
+  // spawn 身份就是子进程本身，"proc_<pid>" 占位（或非字符串/空值）不是 provider
+  // 可寻址的会话 id → fail-closed 拒绝，且必须发生在该 id 被线程给 provider 之前。
+  // 子类分工：运行时自产 native id 的 runtime（kimi -r / codex exec resume）继承
+  // 本判定；resume lane 从不消费该 id 的 backend（claude-code 编译 routing
+  // .opaqueUuid）覆写为恒 true；非进程式 backend（ACP）不继承本类——无此方法即
+  // 意味着调用方保持其既有 native id 语义（session.created 本身就是 nativeID）。
+  canResumeWithRecoveredSessionId(sessionId) {
+    return typeof sessionId === "string" && sessionId.length > 0
+      && !isProcessPlaceholderSessionId(sessionId);
+  }
 
   // ADR-0025 批次 2（TD-87）：usage/token 上报保真维度的闭集声明（仿
   // supportsSessionReuse / supportsInFlightCorrection 模式）。true = 该 backend

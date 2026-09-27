@@ -54,6 +54,8 @@ import {
 import {
   releaseLineageContinuationTurn,
   resolveLineageContinuationTurn,
+  resolvePriorProviderSessionId,
+  resolvePriorProviderSessionIdFromEvents,
 } from "./sessionReuse.js";
 // M12-22: cumulative-scope truth reuses the existing path-validation SSOT and the
 // repository's existing inventory cap — no second path-identity algorithm and no
@@ -80,6 +82,19 @@ const DEFAULT_RUNNER_PATH = join(
 );
 const DEFAULT_POLL_INTERVAL = 1000;
 const ARGV_MAX_TOTAL = 24000;
+
+// TD188-R1 (2026-09-27): internal sentinel for the IN-LOCK prior-session
+// validation refusal (the lineage slot's final prior holds no provider session
+// this backend can resume). Never crosses the application/MCP boundary —
+// continueRun maps it to the existing no_provider_session closed-set reason.
+// Scoping matters: resolveLineageContinuationTurn's OTHER failure modes
+// (damaged routing entry, lock timeout) keep propagating untouched.
+class PriorProviderSessionUnresumableError extends Error {
+  constructor() {
+    super("sessionReuse: the lineage's resumable prior holds no provider session this backend can resume");
+    this.name = "PriorProviderSessionUnresumableError";
+  }
+}
 
 // M12-7: the closed set of Lead-facing continuation rejection reasons. Every
 // read-only eligibility refusal returns one of these — WAO never infers a
@@ -433,6 +448,39 @@ export async function continueRun({
     return refuse("unsupported_backend");
   }
 
+  // 9b. TD188 (2026-09-27): COMPLETE resumability preflight — the SAME shared
+  //     reader + backend-owned availability judgment the spawn authority
+  //     (RunManager.start) applies at resume time, so the two authorities can
+  //     never disagree about what the parent transcript licenses. A Kimi/Codex
+  //     parent that only ever recorded the process placeholder identity
+  //     (proc_<pid>) is refused HERE with the existing no_provider_session
+  //     reason — BEFORE the lineage claim, any worktree transition, the child
+  //     transcript, and the fork (the pre-fix flow forked a runner that handed
+  //     proc_43244 to `kimi -r`: upstream "Session not found", zero tool
+  //     execution). A parent that late-bound its runtime-native id
+  //     (run.provider_session_bound) resolves to that id; a damaged/duplicated/
+  //     conflicting binding fact refuses rather than falling back to the
+  //     placeholder. claude-code parents (resume compiles routing.opaqueUuid,
+  //     hook overridden to true) stay continuable on the legal opaque path;
+  //     ACP native session.created stays valid (no hook → legacy semantics).
+  //     Historical proc-only parents are deliberately NOT continuable this
+  //     round; a fresh real run records the binding fact going forward.
+  let priorProviderSessionId = null;
+  try {
+    priorProviderSessionId = resolvePriorProviderSessionIdFromEvents(parentEvents, parentRunId);
+  } catch {
+    return refuse("no_provider_session");
+  }
+  if (typeof backend.canResumeWithRecoveredSessionId === "function") {
+    let hookOk = true;
+    try {
+      hookOk = backend.canResumeWithRecoveredSessionId(priorProviderSessionId) === true;
+    } catch {
+      hookOk = false;
+    }
+    if (!hookOk) return refuse("no_provider_session");
+  }
+
   // 10. Credential preflight (environmental — throws, like dispatchRun).
   let finalCredentials = {};
   if (!skipCredentialCheck) {
@@ -548,15 +596,53 @@ export async function continueRun({
   // 13. Lineage continuation turn (turn:resume, SAME opaque uuid as the root).
   //     The per-key concurrency gate: a non-terminal lineage owner is busy, so
   //     two concurrent continuations of the same parent cannot both proceed.
-  const contTurn = await resolveLineageContinuationTurn({
-    runDir: resolvedRunDir,
-    runId: childRunId,
-    parentRunId,
-    rootRunId,
-    leadSession,
-    workspace: authorizedWorkspaceRoot,
-    agentId,
-  });
+  //     TD188-R1: the resume's ACTUAL prior is decided INSIDE this lock — the
+  //     lineage slot's previous owner (entry.runId) when one exists, else the
+  //     requested parent. validatePriorRunId runs the SAME shared reader +
+  //     backend-hook judgment (and maps to the SAME no_provider_session reason)
+  //     on that FINAL prior BEFORE the claim is written: a slot owner whose
+  //     transcript holds no resumable provider session refuses with ZERO side
+  //     effects — entry bytes untouched, no worktree transition, no child
+  //     transcript, no fork. The pre-fix flow claimed the slot, transitioned
+  //     the worktree, created the child transcript and forked, and only failed
+  //     later at RunManager.start (which reads the slot owner, not the
+  //     requested parent). The returned routing carries this same verified
+  //     prior, so what start re-reads is exactly what was validated here.
+  let contTurn;
+  try {
+    contTurn = await resolveLineageContinuationTurn({
+      runDir: resolvedRunDir,
+      runId: childRunId,
+      parentRunId,
+      rootRunId,
+      leadSession,
+      workspace: authorizedWorkspaceRoot,
+      agentId,
+      validatePriorRunId: async (finalPriorRunId) => {
+        try {
+          const recovered = await resolvePriorProviderSessionId({
+            runDir: resolvedRunDir,
+            priorRunId: finalPriorRunId,
+          });
+          if (typeof backend.canResumeWithRecoveredSessionId === "function"
+            && backend.canResumeWithRecoveredSessionId(recovered) !== true) {
+            throw new Error("recovered provider session id is not resumable by this backend");
+          }
+        } catch (error) {
+          // Collapse EVERY validation failure mode (reader refusal, hook
+          // refusal, throwing hook) to the sentinel — the closed-set refusal
+          // reason carries the semantics; the fixed-text details stay in the
+          // reader's own messages for the lanes that surface them.
+          throw new PriorProviderSessionUnresumableError();
+        }
+      },
+    });
+  } catch (error) {
+    if (error instanceof PriorProviderSessionUnresumableError) {
+      return refuse("no_provider_session");
+    }
+    throw error;
+  }
   if (contTurn.kind === "busy") {
     return refuse("busy", { activeRunId: contTurn.activeRunId });
   }
