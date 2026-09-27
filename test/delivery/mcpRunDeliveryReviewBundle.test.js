@@ -421,6 +421,13 @@ test("M12-3B-09: cross-artifact review and non-reviewable cursor fail closed", a
       },
       getRunDeliveryReviewFn: async ({ runId }) => {
         reviewCalls += 1;
+        if (mode === "unexpectedPending") {
+          return reviewPage(runId, {
+            available: false, unavailableReason: "verification_pending",
+            deliveryCommit: null, changedFileCount: null, changedPath: null,
+            contentFormat: null, artifactTextTrust: null, fragment: "", fragmentBytes: 0,
+          });
+        }
         return reviewPage(runId, { deliveryCommit: "e".repeat(40) });
       },
     });
@@ -442,6 +449,13 @@ test("M12-3B-09: cross-artifact review and non-reviewable cursor fail closed", a
       assert.equal(staleCursor.isError, true);
       assert.equal(staleCursor.structuredContent, undefined);
       assert.equal(reviewCalls, 1, "pending state must not read review content");
+      mode = "unexpectedPending";
+      const wrongAdvisory = await client.callTool({
+        name: "run_delivery_review_bundle",
+        arguments: { runId: "run_binding", fileIndex: 1, waitMs: 1000 },
+      });
+      assert.equal(wrongAdvisory.isError, true, "final delivery cannot compose a pending advisory");
+      assert.equal(wrongAdvisory.structuredContent, undefined);
     } finally {
       await client.close();
       await server.close();
@@ -660,6 +674,184 @@ test("M12-3B-SMOKE: default services read one real verified delivery page withou
     }
     rmSync(repo, { recursive: true, force: true });
     rmSync(runDir, { recursive: true, force: true });
+  }
+});
+
+// ===== TD-179: the settled pending rejection composed through the bundle =====
+//
+// A completed run whose packaged delivery EXPLICITLY declares verification
+// "pending" and which carries a validated pending-verification REJECTION (no
+// outcome) projects readiness `reviewable` with a durable delivery, while the
+// review service returns the canonical no-content verification_pending
+// advisory (null commit/count, zero Git diff reads). The bundle must compose
+// that exact advisory safely — the artifact commit/count match stays enforced
+// for every actual review fragment — and a supplied cursor stays rejected.
+// A bogus pending decision fails closed to ambiguous with no review content,
+// and a late real outcome resumes a real (matching) review page.
+
+test("M12-3B-TD179: settled pending rejection composes the pending advisory safely (default services)", async () => {
+  const { packageDelivery } = await import("../../src/delivery.js");
+
+  /** Fresh repo + linked worktree + packaged delivery + scenario transcript. */
+  const buildScenario = async ({ bogusOrdering = false, lateOutcome = null } = {}) => {
+    const runId = "run_bundle_td179";
+    const repo = mkdtempSync(join(tmpdir(), "m123b-td179-repo-"));
+    const runDir = mkdtempSync(join(tmpdir(), "m123b-td179-runs-"));
+    const transcriptPath = join(runDir, `${runId}.jsonl`);
+    let worktreePath = null;
+    try {
+      execSync("git init -b main", { cwd: repo, stdio: "ignore" });
+      execSync('git config user.email "test@example.invalid"', { cwd: repo, stdio: "ignore" });
+      execSync('git config user.name "WAO Test"', { cwd: repo, stdio: "ignore" });
+      mkdirSync(join(repo, "src"), { recursive: true });
+      writeFileSync(join(repo, "src", "answer.js"), "export const answer = 1;\n", "utf8");
+      execSync("git add . && git commit -m init", { cwd: repo, stdio: "ignore" });
+      const baseCommit = execSync("git rev-parse HEAD", {
+        cwd: repo, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+      }).trim();
+      worktreePath = join(repo, ".wao-worktrees", runId);
+      execSync(`git worktree add "${worktreePath}" -b "wao/${runId}"`, { cwd: repo, stdio: "ignore" });
+      writeFileSync(join(worktreePath, "src", "answer.js"), "export const answer = 42;\n", "utf8");
+      const deliveryRef = packageDelivery({
+        runId,
+        worktreePath,
+        baseCommit,
+        allowedPaths: ["src"],
+        isolation: { type: "worktree", strategy: "persistent" },
+        verificationCommands: ["npm test"],
+      });
+      const completed = {
+        type: "run.state_change", runId, ts: "2026-01-01T00:00:03Z", seq: 5,
+        from: "running", to: "completed",
+      };
+      const decision = {
+        type: "run.delivery_rejected",
+        runId,
+        ts: "2026-01-01T00:00:04Z",
+        seq: 6,
+        delivery: { ...deliveryRef, acceptance: { status: "rejected", reviewerType: "lead_agent" } },
+        deliveryCommit: deliveryRef.deliveryCommit,
+        reason: "settling without an outcome",
+      };
+      const events = [
+        { type: "run.started", runId, ts: "2026-01-01T00:00:00Z", seq: 1 },
+        { type: "run.background_submitted", runId, ts: "2026-01-01T00:00:00Z", seq: 2, cwd: repo, background: true },
+        { type: "run.delivery_created", runId, ts: "2026-01-01T00:00:01Z", seq: 3, delivery: deliveryRef },
+      ];
+      if (bogusOrdering) {
+        // The decision precedes the completed transition → the shared facts
+        // authority marks it malformed → readiness collapses to ambiguous.
+        events.push(decision, completed);
+      } else {
+        events.push(completed, decision);
+      }
+      if (lateOutcome) {
+        events.push({
+          type: `run.delivery_verification_${lateOutcome}`,
+          runId,
+          ts: "2026-01-01T00:00:05Z",
+          seq: 7,
+          // The packaged (still-pending) snapshot ref: the Lead-approved narrow
+          // exception lets the closed-set event TYPE be the outcome authority.
+          delivery: deliveryRef,
+        });
+      }
+      writeFileSync(
+        transcriptPath,
+        `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+        "utf8",
+      );
+      return { deliveryRef, repo, runDir, transcriptPath, worktreePath, runId };
+    } catch (err) {
+      if (worktreePath) {
+        try { execSync(`git worktree remove --force "${worktreePath}"`, { cwd: repo, stdio: "ignore" }); } catch {}
+      }
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(runDir, { recursive: true, force: true });
+      throw err;
+    }
+  };
+
+  const cleanupScenario = (s) => {
+    try { execSync(`git worktree remove --force "${s.worktreePath}"`, { cwd: s.repo, stdio: "ignore" }); } catch {}
+    rmSync(s.repo, { recursive: true, force: true });
+    rmSync(s.runDir, { recursive: true, force: true });
+  };
+
+  const call = async (s, args) => {
+    const server = createWaoMcpServer({ registryPath: "/registry.json", runDir: s.runDir, workspaceRoot: s.repo });
+    const client = await buildClient(server);
+    try {
+      return await client.callTool({ name: "run_delivery_review_bundle", arguments: args });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  };
+
+  // (a) The settled pending rejection composes the pending advisory.
+  {
+    const s = await buildScenario();
+    try {
+      const bytesBefore = statSync(s.transcriptPath).size;
+      const result = await call(s, { runId: s.runId, fileIndex: 0, waitMs: 1000 });
+      assert.equal(result.isError, undefined, "the composed pending advisory is a normal outcome, not an error");
+      assert.equal(result.structuredContent.runId, s.runId);
+      assert.equal(result.structuredContent.delivery.readiness, "reviewable", "the durable decision settles readiness");
+      assert.equal(result.structuredContent.delivery.verificationStatus, "pending", "verification stays pending");
+      assert.equal(result.structuredContent.delivery.acceptanceStatus, "rejected");
+      assert.equal(result.structuredContent.delivery.deliveryCommit, s.deliveryRef.deliveryCommit);
+      assert.equal(result.structuredContent.review.available, false);
+      assert.equal(result.structuredContent.review.unavailableReason, "verification_pending");
+      assert.equal(result.structuredContent.review.deliveryCommit, null, "canonical no-content advisory nulls");
+      assert.equal(result.structuredContent.review.changedFileCount, null);
+      assert.equal(result.structuredContent.review.fragment, "");
+      assert.equal(result.structuredContent.review.nextCursor, null);
+      assert.equal(statSync(s.transcriptPath).size, bytesBefore, "zero transcript append");
+    } finally {
+      cleanupScenario(s);
+    }
+  }
+  // (b) A supplied cursor is a replay against a not-yet-paginated artifact.
+  {
+    const s = await buildScenario();
+    try {
+      const cursorResult = await call(s, { runId: s.runId, fileIndex: 0, cursor: "abc", waitMs: 1000 });
+      assert.equal(cursorResult.isError, true, "cursor + pending advisory stays the fixed safe error");
+    } finally {
+      cleanupScenario(s);
+    }
+  }
+  // (c) A bogus pending decision (no completed-before) fails closed — no
+  // advisory, no content: readiness ambiguous with a null review.
+  {
+    const s = await buildScenario({ bogusOrdering: true });
+    try {
+      const bogus = await call(s, { runId: s.runId, fileIndex: 0, waitMs: 1000 });
+      assert.equal(bogus.isError, undefined);
+      assert.equal(bogus.structuredContent.delivery.readiness, "ambiguous");
+      assert.equal(bogus.structuredContent.review, null, "no review content for a malformed pending decision");
+    } finally {
+      cleanupScenario(s);
+    }
+  }
+  // (d) Late-outcome control: a real outcome after the rejection resumes a
+  // REAL review page whose artifact still matches the delivery projection.
+  {
+    const s = await buildScenario({ lateOutcome: "passed" });
+    try {
+      const late = await call(s, { runId: s.runId, fileIndex: 0, waitMs: 1000 });
+      assert.equal(late.isError, undefined);
+      assert.equal(late.structuredContent.delivery.readiness, "reviewable");
+      assert.equal(late.structuredContent.delivery.verificationStatus, "passed", "the late outcome is the verification truth");
+      assert.equal(late.structuredContent.delivery.acceptanceStatus, "rejected", "the rejection is not undone");
+      assert.equal(late.structuredContent.review.available, true, "real review content resumes");
+      assert.equal(late.structuredContent.review.deliveryCommit, s.deliveryRef.deliveryCommit, "artifact match still enforced for real fragments");
+      assert.equal(late.structuredContent.review.changedFileCount, late.structuredContent.delivery.changedFileCount);
+      assert.match(late.structuredContent.review.fragment, /answer = 42/);
+    } finally {
+      cleanupScenario(s);
+    }
   }
 });
 

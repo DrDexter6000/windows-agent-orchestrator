@@ -312,6 +312,156 @@ test("M11-12A-A5: bound created ref with a malformed commit literal fails closed
 });
 
 // =====================================================================
+// TD-179: the SETTLED pending rejection on the review surface.
+//
+// A completed run whose committed delivery EXPLICITLY declares verification
+// "pending" and which carries a validated pending-verification REJECTION (no
+// outcome) projects readiness `reviewable` — but there is still NO verified
+// artifact to review. getRunDeliveryReview must return the SAME established
+// verification_pending advisory (zero Git diff reads, no diff permission),
+// reject cursor/fileIndex abuse on that path, fail closed on a BOGUS pending
+// decision, and resume real review once a late outcome lands.
+// =====================================================================
+
+/** Seed a settled TD-179 pending rejection over a real packaged delivery. */
+async function writeSettledPendingRejection(s, { decisionBeforeCompleted = false, lateOutcome = null } = {}) {
+  const events = [
+    { type: "run.started", runId: s.runId, ts: "2026-01-01T00:00:00Z", seq: 1 },
+    { type: "run.background_submitted", runId: s.runId, ts: "2026-01-01T00:00:00Z", seq: 1, cwd: s.repo, background: true, deliveryRequested: true },
+    { type: "run.delivery_created", runId: s.runId, ts: "2026-01-01T00:00:01Z", seq: 2, delivery: s.ref },
+  ];
+  const decision = {
+    type: "run.delivery_rejected",
+    runId: s.runId,
+    ts: "2026-01-01T00:00:03Z",
+    seq: 4,
+    delivery: { ...s.ref, acceptance: { status: "rejected", reviewerType: "lead_agent" } },
+    deliveryCommit: s.ref.deliveryCommit,
+    reason: "settling without an outcome",
+  };
+  const completed = {
+    type: "run.state_change",
+    runId: s.runId,
+    ts: "2026-01-01T00:00:02Z",
+    seq: 3,
+    from: "running",
+    to: "completed",
+    reason: "done",
+  };
+  if (decisionBeforeCompleted) {
+    // A BOGUS ordering: the decision precedes the completed transition → the
+    // authority marks it malformed (no completed-before) → no advisory.
+    events.push(decision, completed);
+  } else {
+    events.push(completed, decision);
+  }
+  if (lateOutcome) {
+    events.push({
+      type: `run.delivery_verification_${lateOutcome}`,
+      runId: s.runId,
+      ts: "2026-01-01T00:00:04Z",
+      seq: 5,
+      // The packaged (still-pending) snapshot ref: the Lead-approved narrow
+      // exception lets the closed-set event TYPE be the outcome authority.
+      delivery: s.ref,
+    });
+  }
+  await writeTranscript(s.runDir, s.runId, events);
+}
+
+test("M11-12A-A7 (TD-179): settled pending rejection → the SAME pending advisory, ZERO Git reader calls", async () => {
+  const s = await buildPendingScenario({ prefix: "wao-m11-12a-a7-" });
+  try {
+    await writeSettledPendingRejection(s);
+    let gitReaderCalls = 0;
+    const r = await getRunDeliveryReview(
+      { runId: s.runId, runDir: s.runDir, authorizedWorkspaceRoot: s.repo, fileIndex: 0 },
+      {
+        gitExecFileSyncFn: () => { gitReaderCalls += 1; throw new Error("git reader must not be called for a settled pending rejection"); },
+      },
+    );
+    assert.equal(r.available, false);
+    assert.equal(r.unavailableReason, "verification_pending");
+    assert.equal(r.fragment, "");
+    assert.equal(r.fragmentBytes, 0);
+    assert.equal(r.nextCursor, null);
+    assert.equal(r.truncated, false);
+    assert.equal(r.deliveryCommit, null, "no proof-backed metadata — no diff permission granted");
+    assert.equal(r.changedFileCount, null);
+    assert.equal(r.changedPath, null);
+    assert.equal(r.contentFormat, null);
+    assert.equal(r.artifactTextTrust, null);
+    assert.equal(r.runId, s.runId);
+    assert.equal(r.fileIndex, 0);
+    assert.equal(gitReaderCalls, 0, "no Git numstat/diff reader call — readiness is reviewable but verification is still pending");
+  } finally {
+    await cleanup(s.repo);
+    await cleanup(s.runDir);
+  }
+});
+
+test("M11-12A-A8 (TD-179): settled pending rejection — cursor/fileIndex abuse rejected; bogus pending decision fails closed; late outcome resumes real review", async () => {
+  // (a) A supplied cursor is a replay against a not-yet-paginated artifact.
+  {
+    const s = await buildPendingScenario({ prefix: "wao-m11-12a-a8a-" });
+    try {
+      await writeSettledPendingRejection(s);
+      await assert.rejects(
+        () => getRunDeliveryReview(
+          { runId: s.runId, runDir: s.runDir, authorizedWorkspaceRoot: s.repo, fileIndex: 0, cursor: "abc" },
+        ),
+        /cursor|paginated|invalid/i,
+        "cursor must be rejected on the settled-pending-rejection path",
+      );
+      await assert.rejects(
+        () => getRunDeliveryReview(
+          { runId: s.runId, runDir: s.runDir, authorizedWorkspaceRoot: s.repo, fileIndex: -1 },
+        ),
+        /fileIndex/i,
+        "negative fileIndex must be rejected on the settled-pending-rejection path",
+      );
+    } finally {
+      await cleanup(s.repo);
+      await cleanup(s.runDir);
+    }
+  }
+  // (b) A BOGUS pending decision (no completed-before) is malformed — it gets
+  // NEITHER the advisory NOR content: the resolver fails closed.
+  {
+    const s = await buildPendingScenario({ prefix: "wao-m11-12a-a8b-" });
+    try {
+      await writeSettledPendingRejection(s, { decisionBeforeCompleted: true });
+      await assert.rejects(
+        () => getRunDeliveryReview({ runId: s.runId, runDir: s.runDir, authorizedWorkspaceRoot: s.repo, fileIndex: 0 }),
+        /delivery|review|facts|not reviewable|invalid/i,
+        "a bogus pending decision must fail closed (throw), not return the advisory",
+      );
+    } finally {
+      await cleanup(s.repo);
+      await cleanup(s.runDir);
+    }
+  }
+  // (c) Late-outcome control: once a real outcome lands (after the rejection),
+  // review resumes on the verified artifact — the advisory is not a mask.
+  {
+    const s = await buildPendingScenario({ prefix: "wao-m11-12a-a8c-" });
+    try {
+      await writeSettledPendingRejection(s, { lateOutcome: "passed" });
+      const r = await getRunDeliveryReview({
+        runId: s.runId, runDir: s.runDir, authorizedWorkspaceRoot: s.repo, fileIndex: 0,
+      });
+      assert.equal(r.available, true, "a late outcome resumes real review");
+      assert.equal(r.unavailableReason, null);
+      assert.equal(r.deliveryCommit, s.ref.deliveryCommit);
+      assert.equal(r.changedPath, "src/a.js");
+    } finally {
+      await cleanup(s.repo);
+      await cleanup(s.runDir);
+    }
+  }
+});
+
+// =====================================================================
 // P. Shared projection (projectReviewResult) — pure, no git
 // =====================================================================
 

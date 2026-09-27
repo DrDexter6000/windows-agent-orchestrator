@@ -423,6 +423,14 @@ Lead 验收通过 transcript-backed 原子 first-decision-wins 写入 `run.deliv
 `run.delivery_rejected` 事件。`--reason-file` 必须是非空 UTF-8 文件。语义见
 `docs/02-architecture.md` §4.9。
 
+TD-179 有界 pending 拒绝（操作入口）：当 run 已 completed、delivery 已 committed、其 created ref
+显式声明 `verification:"pending"` 且**从未落任何** `run.delivery_verification_*` outcome 时，
+上面的 `--reject` 命令即可结算（无需其它参数）。该出口不推断/不中断验证进程；之后迟到的真实
+outcome 照常落盘并在 `runs delivery` / `run_delivery` / `run_await_result` 中如实显示
+（verification=该 outcome，acceptance 恒 rejected；readiness 落为 `reviewable`）。
+`--accept` 对 pending 仍拒绝；reverify/repackage 资格不变。排查症状见
+`docs/troubleshooting.md` §delivery 表。
+
 ### 场景 5：重试 / 恢复
 
 ```powershell

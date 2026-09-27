@@ -10,8 +10,9 @@
 //   - Does not import src/commands/*, src/mcp/*, MCP SDK, or zod.
 //   - Depends on transcript.js (readTranscript/findState/JsonlTranscript/findLastEventSeq)
 //     and delivery.js (isValidRunId).
-//   - The _reconstructDelivery algorithm is migrated here from src/commands/runs.js
-//     so CLI and MCP share one reconstruction path.
+//   - Delivery facts are validated by the shared validateDeliveryFacts authority
+//     (src/transcript.js, TD-179); this module only projects the view,
+//     so CLI and MCP share one projection path.
 
 import { join, resolve } from "node:path";
 
@@ -216,143 +217,25 @@ export const DELIVERY_DECISION_TYPES = Object.freeze([
  * @param {string} runId
  * @returns {string} one of DELIVERY_READINESS_STATES
  */
-// M11-10 closeout: a bound delivery event (envelope runId === requested runId)
-// carries a USABLE DeliveryRef iff `delivery` is an object whose own runId equals
-// the requested runId. A missing/non-object payload (malformed event) or a ref
-// whose runId disagrees with its envelope (cross-run injection) is a durable
-// CONFLICT, not merely "no delivery". Shared by projectDeliveryReadiness and
-// _reconstructDelivery so the readiness label and the reconstructed view apply
-// ONE binding rule.
-function _deliveryRefIsBound(e, runId) {
-  return !!e && typeof e.delivery === "object" && e.delivery !== null
-    && e.delivery.runId === runId;
-}
-
-/**
- * A bound created/verification event is a durable conflict unless its DeliveryRef
- * is fully USABLE: bound (a missing/non-object payload, or a ref.runId that
- * disagrees with its envelope = cross-run injection) AND both baseCommit and
- * deliveryCommit canonical lowercase 40/64-hex. The canonical-commit requirement
- * reuses the SAME isCanonicalCommitId SSOT that assertDeliveryCommitInRepository
- * and validateDeliveryFacts enforce — HEAD / short SHA / uppercase / non-hex /
- * missing commit is a conflict, never a usable fact. No second regex, no
- * error-string matching: _deliveryRefIsUsable is the single usability rule,
- * shared with _reconstructDelivery so the readiness label and the reconstructed
- * view cannot diverge (M11-12A P1: projectDeliveryReadiness previously used the
- * weaker _deliveryRefIsBound here, letting a malformed-commit created ref reach
- * waiting_for_verification).
- *
- * @param {object[]} boundEvents — already envelope-bound to runId
- * @param {string} runId
- * @returns {boolean} true if ANY bound event has a malformed/cross-run delivery
- * @private
- */
-function _hasConflictDelivery(boundEvents, runId) {
-  return boundEvents.some((e) => !_deliveryRefIsUsable(e, runId));
-}
-
-/**
- * A bound delivery event carries a USABLE DeliveryRef iff `delivery` is a non-null
- * object whose own runId equals the requested runId (the binding rule shared with
- * _deliveryRefIsBound) AND whose baseCommit and deliveryCommit are both canonical
- * commit ids. The canonical-commit requirement is the SAME immutable-identity
- * contract assertDeliveryCommitInRepository enforces — HEAD / short-SHA /
- * uppercase / non-hex are rejected before any use — reused via isCanonicalCommitId
- * so there is ONE commit validator and NO duplicated regex.
- *
- * Shared by the reconstruction layer (_reconstructDelivery): a malformed-but-
- * truthy commit (e.g. "HEAD") on a created/verification/decision ref is a durable
- * CONFLICT, not a usable fact, so it can never enter a success view.
- * @param {object} e
- * @param {string} runId
- * @returns {boolean}
- * @private
- */
-function _deliveryRefIsUsable(e, runId) {
-  return _deliveryRefIsBound(e, runId)
-    && isCanonicalCommitId(e.delivery?.baseCommit)
-    && isCanonicalCommitId(e.delivery?.deliveryCommit);
-}
-
 export function projectDeliveryReadiness(events, runId) {
   if (!Array.isArray(events)) return "ambiguous";
-
-  // Envelope-bound durable events: the event runId MUST equal the requested
-  // runId. A foreign-envelope event belongs to another run and is ignored (it is
-  // NOT a conflict — only an envelope/ref mismatch within a bound event is).
-  const boundCreated = events.filter(
-    (e) => e && e.type === "run.delivery_created" && e.runId === runId,
-  );
-  const boundVerification = events.filter(
-    (e) => e && DELIVERY_VERIFICATION_OUTCOME_TYPES.has(e.type) && e.runId === runId,
-  );
-  const failed = events.filter(
-    (e) => e && e.type === "run.delivery_failed" && e.runId === runId,
-  );
-
-  // M11-10 closeout (auditor blockers 2 & 3) + M11-12A P1: a bound created/
-  // verification event is a durable conflict unless its DeliveryRef is fully
-  // USABLE — a missing/non-object payload, a DeliveryRef.runId that disagrees
-  // with its envelope (cross-run injection), OR a non-canonical baseCommit /
-  // deliveryCommit (HEAD / short SHA / uppercase / non-hex / missing; reuses
-  // isCanonicalCommitId via _deliveryRefIsUsable). Such an event must NEVER reach
-  // waiting_for_verification — which would surface a verification_pending review
-  // result — so it fails closed to ambiguous. No malformed/injected value is
-  // echoed (only the closed-set label).
-  if (_hasConflictDelivery(boundCreated, runId)) return "ambiguous";
-  if (_hasConflictDelivery(boundVerification, runId)) return "ambiguous";
-
-  // After the conflict checks, every bound created/verification event carries a
-  // usable, runId-bound DeliveryRef.
-  const created = boundCreated;
-  const verification = boundVerification;
-
-  // M12-1S2: a bound run.delivery_failed is SUPERSEDED when a recovery provenance
-  // (run.delivery_repackaged) binds the same delivery commit as the single bound
-  // delivery_created. A model-free repackage of a retained disallowed_path
-  // failure appends exactly that provenance atomically with delivery_created, so
-  // the pre-existing failure is no longer a durable conflict — it is the
-  // recovered state of the run. Without this, created+failed would collapse to
-  // ambiguous and the recovered delivery could never become reviewable.
-  const failureSuperseded = created.length === 1
-    && findValidRepackageProvenance(events, runId, created[0].delivery) !== null;
-
-  // Conflicting durable facts → ambiguous (fail closed).
-  if (created.length > 1) return "ambiguous";
-  if (verification.length > 1) return "ambiguous";
-  // Multiple bound failures are conflicting durable facts (no single
-  // authoritative failure) → ambiguous. A single bound failure falls through to
-  // packaging_failed below.
-  if (failed.length > 1) return "ambiguous";
-  // created+failed is a durable conflict UNLESS the failure was superseded by a
-  // recovery provenance bound to the created commit (M12-1S2).
-  if (created.length === 1 && failed.length > 0 && !failureSuperseded) return "ambiguous";
-  // A verification outcome bound to this runId with NO bound delivery_created
-  // is an orphan durable fact (broken durable chain) → ambiguous. It must never
-  // fall through to waiting_for_packaging / not_requested.
-  if (verification.length > 0 && created.length === 0) return "ambiguous";
-
-  if (created.length === 1 && verification.length === 1) {
-    const createdRef = created[0].delivery;
-    const verificationRef = verification[0].delivery;
-    // Full durable-identity binding to the requested runId (cross-run defense)
-    // and matching verification commit. Any drift → ambiguous.
-    if (createdRef.runId !== runId) return "ambiguous";
-    if (verificationRef.runId !== runId) return "ambiguous";
-    if (createdRef.deliveryCommit !== verificationRef.deliveryCommit) return "ambiguous";
-    // SSOT authority: validateDeliveryFacts must agree this is an unambiguous,
-    // reviewable delivery (exactly one created + one matching final outcome, both
-    // commits canonical). Only THIS run's envelope-bound events are passed, so a
-    // foreign event in a concatenated/corrupt transcript cannot poison the
-    // durable-facts validator. The canonical-commit requirement lives in
-    // validateDeliveryFacts (single commit validator) — no second regex here.
-    const facts = validateDeliveryFacts(events.filter((e) => e && e.runId === runId));
-    if (!facts.valid) return "ambiguous";
-    return "reviewable";
+  const facts = validateDeliveryFacts(events, {
+    expectedRunId: runId,
+    allowVerificationPending: true,
+  });
+  if (facts.code === "delivery_malformed") return "ambiguous";
+  if (facts.valid) {
+    return facts.verificationStatus !== "pending" || facts.decisionEvent
+      ? "reviewable"
+      : "waiting_for_verification";
   }
-
-  if (failed.length > 0 && !failureSuperseded) return "packaging_failed";
-  if (created.length === 1) return "waiting_for_verification";
+  // Legacy created refs without an explicit pending status remain readable,
+  // but do not gain decision eligibility. The authority already checked them.
+  if (facts.createdRef) return "waiting_for_verification";
+  const failed = events.filter((event) => event?.type === "run.delivery_failed"
+    && event.runId === runId);
+  if (failed.length > 1) return "ambiguous";
+  if (failed.length === 1) return "packaging_failed";
 
   // No committed delivery and no packaging failure. Distinguish "delivery was
   // requested but not yet packaged" from "delivery was never requested" using
@@ -410,89 +293,18 @@ function _deliveryWasRequested(events, runId) {
   );
 }
 
-// ===== Private: delivery reconstruction (migrated from runs.js) =====
-
-/**
- * Reconstruct the latest delivery ref, decision event, and delivery commit
- * from transcript events. This is the single algorithm — point-in-time
- * getRunDelivery and the wait/readiness handshake both use it via
- * gatherDeliveryView.
- *
- * M11-10 closeout (auditor blocker 2 + Lead-review residue): created/
- * verification/decision scans are ALL bound by the requested runId, so a
- * foreign-run event in a concatenated/corrupt transcript cannot leak its
- * commit/changedPaths/acceptance into this run's view. An envelope-bound event
- * whose DeliveryRef is NOT USABLE — missing/non-object payload, a ref.runId that
- * disagrees with its envelope (cross-run injection), or a non-canonical
- * baseCommit/deliveryCommit (HEAD/short-SHA/uppercase/non-hex; reused via
- * isCanonicalCommitId) — is a durable CONFLICT: it sets `conflict` and is NOT
- * used as a success fact. The caller fail-closes a conflict to ambiguous — it
- * must never be disguised as "no delivery" by silently filtering it out, and no
- * ref/path/commit is echoed.
- *
- * Each category is FULL-scanned (newest→oldest) for a conflict BEFORE the newest
- * usable fact is selected. The scan does NOT break on the first usable event:
- * a reverse-order `break` would shadow an earlier malformed bound event behind a
- * newer valid one (leaving conflict=false while the view echoed the newer ref).
- * The durable-facts contract is "ANY bound malformed/injected/non-canonical
- * event fails closed", so every conflict is recorded first.
- *
- * A formal run.delivery_accepted/rejected event always carries a delivery ref
- * (see JsonlTranscript.tryAppendDecision); a decision missing delivery is a
- * conflict, never a tolerated "decision without ref" that projects acceptance.
- * @param {Array} events
- * @param {string} runId
- * @returns {{latestRef: object|null, decisionEvent: object|null, deliveryCommit: string|null, conflict: boolean}}
- */
-function _reconstructDelivery(events, runId) {
-  let conflict = false;
-  let createdRef = null;
-  let verificationRef = null;
-  let decisionEvent = null;
-  let decisionRef = null;
-
-  // For each category: scan newest→oldest over ALL bound events (envelope
-  // runId === requested runId). Record a conflict for ANY event whose ref is not
-  // USABLE; the newest USABLE ref (first usable encountered) is the category's
-  // candidate. No `break`: an earlier malformed bound event must still set
-  // conflict even when a newer usable event exists.
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const e = events[i];
-    if (!e || e.type !== "run.delivery_created" || e.runId !== runId) continue;
-    if (!_deliveryRefIsUsable(e, runId)) { conflict = true; continue; }
-    if (!createdRef) createdRef = e.delivery;
-  }
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const e = events[i];
-    if (!e || !DELIVERY_VERIFICATION_OUTCOME_TYPES.has(e.type) || e.runId !== runId) continue;
-    if (!_deliveryRefIsUsable(e, runId)) { conflict = true; continue; }
-    if (!verificationRef) verificationRef = e.delivery;
-  }
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const e = events[i];
-    if (!e || (e.type !== "run.delivery_accepted" && e.type !== "run.delivery_rejected") || e.runId !== runId) continue;
-    // A bound decision that is missing delivery / non-object delivery / foreign
-    // ref.runId / non-canonical commit is a durable CONFLICT — it must never
-    // project acceptance. (Previously a missing delivery was tolerated.)
-    if (!_deliveryRefIsUsable(e, runId)) { conflict = true; continue; }
-    if (!decisionEvent) { decisionEvent = e; decisionRef = e.delivery; }
-  }
-
-  // Priority matches the prior algorithm: a usable decision overrides a usable
-  // verification, which overrides a usable created. When conflict is true the
-  // caller ignores latestRef entirely (ambiguous marker), so a conflict found in
-  // any category voids the whole view.
-  const latestRef = decisionRef ?? verificationRef ?? createdRef;
-  const deliveryCommit = latestRef?.deliveryCommit ?? null;
-  return { latestRef, createdRef, decisionEvent, deliveryCommit, conflict };
-}
-
 // ===== Private: shared delivery-view gatherer =====
 //
 // M11-10: the single fact-gathering path used by BOTH getRunDelivery
-// (point-in-time) and getRunDeliveryReadiness (bounded wait). Reuses
-// _reconstructDelivery + _findBoundDeliveryFailed + safeProjectPackagingCode —
-// there is no second reconstruction algorithm.
+// (point-in-time) and getRunDeliveryReadiness (bounded wait).
+//
+// TD-179: the delivery-present branch is validated by the ONE shared pure
+// facts authority — validateDeliveryFacts in its runId-bound pending-aware
+// mode, the SAME validator the in-lock decision writer (tryAppendDecision)
+// uses. There is no second reconstruction/decision algorithm here: a
+// delivery_malformed verdict fails every read surface closed to the ambiguous
+// marker, and a valid facts result provides the created/outcome/decision refs
+// the view projects.
 //
 // Returns one of:
 //   - success: { runId, terminalState, deliveryAvailable: true, deliveryRef, verification, acceptance }
@@ -508,13 +320,15 @@ function _reconstructDelivery(events, runId) {
 // transcript/Git read via getRunDelivery and WITHOUT a run_collect call. Pure:
 // reads ONLY the in-memory `events` snapshot (no filesystem, no Git, no async).
 export function gatherDeliveryView(events, runId, terminalState) {
-  const { latestRef, createdRef, decisionEvent, deliveryCommit, conflict } = _reconstructDelivery(events, runId);
-
-  // M11-10 closeout (auditor blocker 2): a durable conflict detected by the
-  // runId-bound reconstruction must NOT be disguised as "no delivery" (which
-  // would let a malformed/injected event masquerade as a clean waiting state)
-  // and must NOT echo the conflicting ref. Fail closed to the ambiguous marker.
-  if (conflict) {
+  // TD-179: one authority call validates the whole core chain (created /
+  // original outcome / decision) for THIS runId — foreign-envelope core events
+  // are ignored, all bound events are counted before payload checks, and any
+  // conflict fails closed to the ambiguous marker below.
+  const facts = validateDeliveryFacts(events, {
+    expectedRunId: runId,
+    allowVerificationPending: true,
+  });
+  if (facts.code === "delivery_malformed") {
     return {
       runId,
       terminalState,
@@ -524,11 +338,45 @@ export function gatherDeliveryView(events, runId, terminalState) {
     };
   }
 
-  if (latestRef && deliveryCommit) {
-    const verificationStatus = latestRef.verification?.status ?? "pending";
+  // TD-179: a bound created event that the pending-aware authority did NOT
+  // admit (a legacy ref with an ABSENT verification status, or one claiming a
+  // final status with no outcome) still reads as a delivery on the view — the
+  // legacy absent status projects "pending" exactly as before (zero drift);
+  // it only lacks the new pending-REJECTION eligibility, which the write-side
+  // gate owns. Any bound decision on such a chain already failed closed above.
+  if (facts.valid || facts.createdRef) {
+    const decisionEvent = facts.valid ? facts.decisionEvent : null;
+    const createdRef = facts.createdRef;
+    // The ORIGINAL verification fact: the outcome event's ref when an outcome
+    // exists, otherwise the created ref (which the authority proved either
+    // explicitly pending or legacy-absent — both read as pending below).
+    const outcomeRef = facts.verificationEventRunId !== null ? facts.latestRef : null;
+    const decisionRef = decisionEvent?.delivery ?? null;
+    let verificationSource;
+    let deliveryRef;
+    if (decisionRef && decisionRef.verification?.status === "pending") {
+      // TD-179 pending rejection: the durable decision owns ACCEPTANCE; a late
+      // real outcome (validated by the authority against the same fixed
+      // identity) owns the VERIFICATION truth. The composed view displays that
+      // original outcome while acceptance stays rejected — the rejection is
+      // never undone and the pending snapshot never masks a late outcome.
+      verificationSource = outcomeRef ?? decisionRef;
+      deliveryRef = outcomeRef ? { ...outcomeRef, acceptance: decisionRef.acceptance } : decisionRef;
+    } else {
+      verificationSource = outcomeRef ?? createdRef;
+      deliveryRef = decisionRef ?? outcomeRef ?? createdRef;
+    }
+    // TD-179: when an outcome EXISTS its closed-set event TYPE is the status
+    // authority (facts.verificationStatus is type-derived; an appended outcome
+    // whose snapshot ref still says "pending" defers to the type). With no
+    // outcome the created/decision ref's embedded status is the historical
+    // read — absent → pending (legacy zero drift).
+    const verificationStatus = facts.verificationEventRunId !== null
+      ? facts.verificationStatus
+      : (verificationSource.verification?.status ?? "pending");
     const acceptanceStatus = decisionEvent
       ? (decisionEvent.type === "run.delivery_accepted" ? "accepted" : "rejected")
-      : (latestRef.acceptance?.status ?? "pending");
+      : (deliveryRef.acceptance?.status ?? "pending");
     // M12-6 Package 3B: ADDITIVE original/effective/reverify projection. The
     // `verification` field stays the ORIGINAL truth (the durable verification
     // outcome on the run) so existing callers see zero drift. The effective
@@ -547,10 +395,10 @@ export function gatherDeliveryView(events, runId, terminalState) {
       terminalState,
       deliveryAvailable: true,
       deliveryRequested: true,
-      deliveryRef: latestRef,
+      deliveryRef,
       verification: {
         status: verificationStatus,
-        ...(latestRef.verification?.failureCode ? { failureCode: latestRef.verification.failureCode } : {}),
+        ...(verificationSource.verification?.failureCode ? { failureCode: verificationSource.verification.failureCode } : {}),
       },
       effectiveVerification: { status: effectiveStatus },
       reverify: {

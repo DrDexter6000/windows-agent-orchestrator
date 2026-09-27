@@ -81,6 +81,22 @@ function makeRef(runId, over = {}) {
   };
 }
 
+/**
+ * TD-179: an OUTCOME-event ref — the embedded verification status agrees with
+ * the event type, exactly as the production appenders (RunManager /
+ * repackage) always write it. The shared facts authority enforces the
+ * type/status agreement, so fixtures for a passed/failed/unavailable event
+ * must carry the matching status.
+ */
+function makeVerifiedRef(runId, status) {
+  const verification = status === "failed"
+    ? { status, failureCode: "command_failed", commands: [], verifiedCommit: "d".repeat(40), results: [] }
+    : status === "unavailable"
+      ? { status, unavailableReason: "env gone", commands: [], verifiedCommit: "d".repeat(40), results: [] }
+      : { status, commands: [], verifiedCommit: "d".repeat(40), results: [] };
+  return makeRef(runId, { verification });
+}
+
 /** Write a fresh transcript from a list of partial events (envelope ts/seq added). */
 function writeTranscript(runDir, runId, partials) {
   mkdirSync(runDir, { recursive: true });
@@ -133,7 +149,7 @@ test("M11-10-READY-02: reviewable — exactly one created + one matching bound v
   const events = [
     startedWithDelivery(runId),
     { type: "run.delivery_created", runId, delivery: ref },
-    { type: "run.delivery_verification_passed", runId, delivery: ref },
+    { type: "run.delivery_verification_passed", runId, delivery: makeVerifiedRef(runId, "passed") },
     ...terminal(runId),
   ];
   assert.equal(projectDeliveryReadiness(events, runId), "reviewable");
@@ -149,7 +165,7 @@ test("M11-10-READY-02: reviewable — exactly one created + one matching bound v
   assert.equal(projectDeliveryReadiness([
     startedWithDelivery(runId),
     { type: "run.delivery_created", runId, delivery: ref },
-    { type: "run.delivery_verification_unavailable", runId, delivery: ref },
+    { type: "run.delivery_verification_unavailable", runId, delivery: makeVerifiedRef(runId, "unavailable") },
     ...terminal(runId),
   ], runId), "reviewable");
 });
@@ -366,7 +382,7 @@ test("M11-10-SVC-01 (RED→GREEN): terminal + delivery_created, verification app
       sleepCalls += 1;
       if (!appended) {
         appended = true;
-        appendEvent(tp, { type: "run.delivery_verification_passed", runId, delivery: ref });
+        appendEvent(tp, { type: "run.delivery_verification_passed", runId, delivery: makeVerifiedRef(runId, "passed") });
       }
     };
     const result = await getRunDeliveryReadiness({
@@ -423,7 +439,7 @@ test("M11-10-SVC-03: non-waiting readiness returns immediately (no polling)", as
     writeTranscript(runDir, "run_svc03", [
       startedWithDelivery("run_svc03"),
       { type: "run.delivery_created", runId: "run_svc03", delivery: ref },
-      { type: "run.delivery_verification_passed", runId: "run_svc03", delivery: ref },
+      { type: "run.delivery_verification_passed", runId: "run_svc03", delivery: makeVerifiedRef("run_svc03", "passed") },
       ...terminal("run_svc03"),
     ]);
     let sleepCalls = 0;
@@ -517,7 +533,7 @@ test("M11-10-SVC-06: invalid runId / waitMs rejected at the shared business boun
     const ref = makeRef("run_bounds");
     writeTranscript(runDir, "run_bounds", [
       { type: "run.delivery_created", runId: "run_bounds", delivery: ref },
-      { type: "run.delivery_verification_passed", runId: "run_bounds", delivery: ref },
+      { type: "run.delivery_verification_passed", runId: "run_bounds", delivery: makeVerifiedRef("run_bounds", "passed") },
     ]);
     for (const okMs of [DELIVERY_WAIT_MS_MIN, DELIVERY_WAIT_MS_MAX]) {
       const r = await getRunDeliveryReadiness({ runId: "run_bounds", runDir, waitMs: okMs, sleepFn: async () => {}, nowFn: () => 1 });
@@ -582,7 +598,7 @@ test("M11-10-SVC-09: point-in-time getRunDelivery shape unchanged (backward comp
     writeTranscript(runDir, runId, [
       startedWithDelivery(runId),
       { type: "run.delivery_created", runId, delivery: ref },
-      { type: "run.delivery_verification_passed", runId, delivery: ref },
+      { type: "run.delivery_verification_passed", runId, delivery: makeVerifiedRef(runId, "passed") },
       ...terminal(runId),
     ]);
     const view = await getRunDelivery({ runId, runDir });
@@ -598,10 +614,11 @@ test("M11-10-SVC-09: point-in-time getRunDelivery shape unchanged (backward comp
       ].sort(),
     );
     // Zero-drift truth: a plain chain with NO reverify events → effective ===
-    // the original status as carried by the ref (makeRef's verification.status
-    // is "pending") and a clean "none" reverify projection.
-    assert.deepEqual(view.verification, { status: "pending" });
-    assert.deepEqual(view.effectiveVerification, { status: "pending" });
+    // the original status carried by the outcome ref (TD-179: the outcome
+    // event's embedded status agrees with its type) and a clean "none"
+    // reverify projection.
+    assert.deepEqual(view.verification, { status: "passed" });
+    assert.deepEqual(view.effectiveVerification, { status: "passed" });
     assert.deepEqual(view.reverify, { status: "none" });
   } finally { cleanupDir(runDir); }
 });
@@ -1019,7 +1036,7 @@ test("M11-10-MCP-06 (RED→GREEN real default service): delayed verification app
       // Append the verification outcome shortly after the wait starts. The
       // default service polls every 1s; the append at 50ms lands before the
       // first poll re-reads, so the wait returns reviewable early.
-      const timer = setTimeout(() => appendEvent(tp, { type: "run.delivery_verification_passed", runId, delivery: ref }), 50);
+      const timer = setTimeout(() => appendEvent(tp, { type: "run.delivery_verification_passed", runId, delivery: makeVerifiedRef(runId, "passed") }), 50);
       try {
         const res = await client.callTool({ name: "run_delivery", arguments: { runId, waitMs: 3000 } });
         assert.equal(res.isError, undefined, "default-service wait resolves");
@@ -1119,7 +1136,7 @@ test("M11-10-CLI-02: without --wait-ms the query keeps the old shape (no readine
     writeTranscript(runDir, runId, [
       startedWithDelivery(runId),
       { type: "run.delivery_created", runId, delivery: ref },
-      { type: "run.delivery_verification_passed", runId, delivery: ref },
+      { type: "run.delivery_verification_passed", runId, delivery: makeVerifiedRef(runId, "passed") },
       ...terminal(runId),
     ]);
     const lines = [];
@@ -1257,7 +1274,7 @@ test("M11-10-BLK2-SVC (real service): foreign-run events in the transcript must 
     writeTranscript(runDir, self, [
       startedWithDelivery(self),
       { type: "run.delivery_created", runId: self, delivery: selfRef },
-      { type: "run.delivery_verification_passed", runId: self, delivery: selfRef },
+      { type: "run.delivery_verification_passed", runId: self, delivery: makeVerifiedRef(self, "passed") },
       ...terminal(self),
       // Foreign-run events concatenated into the same transcript file. Their
       // envelope runId is a DIFFERENT run, so they must not contribute to THIS
@@ -1578,5 +1595,185 @@ test("M11-10-CLZ3-SVC (real service): earlier malformed created not shadowed by 
     assert.ok(!dumped.includes("OLDER/leak.js"), "older malformed changedPath not echoed");
     assert.ok(!dumped.includes("src/newer.js"), "newer valid changedPath not echoed either (whole view fail-closed)");
     assert.ok(!dumped.includes("HEAD"), "older non-canonical commit not echoed");
+  } finally { cleanupDir(runDir); }
+});
+
+// =====================================================================
+// TD-179: bounded pending rejection on the READ surfaces.
+//
+// A completed run whose committed delivery EXPLICITLY declares verification
+// "pending" and which has NO verification outcome may be explicitly rejected
+// (see runsDelivery / transcript tests for the write path). On the read side:
+//   - the pending rejection settles readiness as REVIEWABLE (a durable
+//     decision exists) while the verification projection stays "pending"
+//     (no new enum, no new field);
+//   - a LATE real outcome (passed/failed/unavailable) becomes the verification
+//     truth while acceptance stays rejected — the rejection is never undone;
+//   - an impossible pending ACCEPTED decision fails every read surface closed
+//     to ambiguous (it can never be legalized by a later pass);
+//   - a legacy created ref with an ABSENT verification status keeps reading as
+//     pending (waiting_for_verification) — zero drift, no new eligibility.
+// =====================================================================
+
+function td179PendingRejectedEvent(runId, ref) {
+  return {
+    type: "run.delivery_rejected",
+    runId,
+    delivery: { ...ref, acceptance: { status: "rejected", reviewerType: "lead_agent" } },
+    deliveryCommit: ref.deliveryCommit,
+    reason: "settling without an outcome",
+  };
+}
+
+function td179OutcomeEvent(runId, ref, status) {
+  const verification = status === "failed"
+    ? { status, failureCode: "command_failed", commands: [], verifiedCommit: ref.deliveryCommit, results: [] }
+    : status === "unavailable"
+      ? { status, unavailableReason: "env gone", commands: [], verifiedCommit: ref.deliveryCommit, results: [] }
+      : { status, commands: [], verifiedCommit: ref.deliveryCommit, results: [] };
+  return {
+    type: `run.delivery_verification_${status}`,
+    runId,
+    delivery: { ...ref, verification },
+  };
+}
+
+test("TD-179-R1 (projection): a pending rejection settles readiness as reviewable while verification stays pending", () => {
+  const runId = "run_td179_r1";
+  const ref = makeRef(runId);
+  const base = [
+    startedWithDelivery(runId),
+    { type: "run.delivery_created", runId, delivery: ref },
+    ...terminal(runId),
+    td179PendingRejectedEvent(runId, ref),
+  ];
+  assert.equal(projectDeliveryReadiness(base, runId), "reviewable",
+    "a durable decision exists → reviewable (no new enum)");
+  // Without the decision the same transcript is the ordinary transient pending.
+  assert.equal(projectDeliveryReadiness(base.slice(0, -1), runId), "waiting_for_verification");
+});
+
+test("TD-179-R2 (projection+service): a late outcome after a pending reject displays that outcome and stays rejected", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "td179-r2-"));
+  try {
+    for (const lateStatus of ["passed", "failed", "unavailable"]) {
+      const runId = `run_td179_r2_${lateStatus}`;
+      const ref = makeRef(runId);
+      const partials = [
+        startedWithDelivery(runId),
+        { type: "run.delivery_created", runId, delivery: ref },
+        ...terminal(runId),
+        td179PendingRejectedEvent(runId, ref),
+        td179OutcomeEvent(runId, ref, lateStatus),
+      ];
+      assert.equal(projectDeliveryReadiness(partials, runId), "reviewable",
+        `${lateStatus}: still reviewable after the late outcome`);
+
+      writeTranscript(runDir, runId, partials);
+      let clock = 1_000_000;
+      const r = await getRunDeliveryReadiness({
+        runId, runDir, waitMs: 1000,
+        sleepFn: async (ms) => { clock += ms; }, nowFn: () => clock,
+      });
+      assert.equal(r.readiness, "reviewable", `${lateStatus}: readiness`);
+      assert.equal(r.verification.status, lateStatus, `${lateStatus}: the LATE outcome is the verification truth`);
+      assert.equal(r.acceptance.status, "rejected", `${lateStatus}: the rejection is not undone`);
+      assert.equal(r.acceptance.decisionEvent.type, "run.delivery_rejected", `${lateStatus}: decision event projected`);
+      assert.equal(r.deliveryAvailable, true);
+      assert.equal(r.deliveryRef.acceptance.status, "rejected", `${lateStatus}: composed ref carries the rejection`);
+      assert.equal(r.deliveryRef.verification.status, lateStatus, `${lateStatus}: composed ref carries the real outcome`);
+    }
+  } finally { cleanupDir(runDir); }
+});
+
+test("TD-179-R3 (projection+service): pending rejection with no outcome yet — verification stays pending on the read surface", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "td179-r3-"));
+  try {
+    const runId = "run_td179_r3";
+    const ref = makeRef(runId);
+    const partials = [
+      startedWithDelivery(runId),
+      { type: "run.delivery_created", runId, delivery: ref },
+      ...terminal(runId),
+      td179PendingRejectedEvent(runId, ref),
+    ];
+    writeTranscript(runDir, runId, partials);
+    // Keep the RED path bounded when the old implementation still waits.
+    let clock = 1_000_000;
+    const r = await getRunDeliveryReadiness({
+      runId, runDir, waitMs: 1000,
+      sleepFn: async (ms) => { clock += ms; }, nowFn: () => clock,
+    });
+    assert.equal(r.readiness, "reviewable", "decision exists → reviewable settles immediately");
+    assert.equal(r.verification.status, "pending", "verification stays pending");
+    assert.equal(r.acceptance.status, "rejected");
+    assert.deepEqual(r.effectiveVerification, { status: "pending" }, "no reverify → effective stays pending");
+    assert.deepEqual(r.reverify, { status: "none" });
+    assert.equal(r.deliveryAvailable, true);
+  } finally { cleanupDir(runDir); }
+});
+
+test("TD-179-R4: an impossible pending ACCEPTED fails every read surface closed to ambiguous", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "td179-r4-"));
+  try {
+    const runId = "run_td179_r4";
+    const ref = makeRef(runId);
+    const partials = [
+      startedWithDelivery(runId),
+      { type: "run.delivery_created", runId, delivery: ref },
+      ...terminal(runId),
+      {
+        type: "run.delivery_accepted",
+        runId,
+        delivery: { ...ref, acceptance: { status: "accepted", reviewerType: "lead_agent" } },
+        deliveryCommit: ref.deliveryCommit,
+        reason: "impossible",
+      },
+      // A late pass must NOT legalize the pending accepted.
+      td179OutcomeEvent(runId, ref, "passed"),
+    ];
+    assert.equal(projectDeliveryReadiness(partials, runId), "ambiguous", "projection fails closed");
+    writeTranscript(runDir, runId, partials);
+    let clock = 1_000_000;
+    const r = await getRunDeliveryReadiness({
+      runId, runDir, waitMs: 1000,
+      sleepFn: async (ms) => { clock += ms; }, nowFn: () => clock,
+    });
+    assert.equal(r.readiness, "ambiguous");
+    assert.equal(r.deliveryAvailable, false);
+    assert.equal(r.verification, null, "no success fields");
+    assert.equal(r.acceptance, null, "no success fields");
+    await assert.rejects(
+      () => getRunDelivery({ runId, runDir }),
+      /ambiguous/i,
+      "the point-in-time query fails closed on the same conflict",
+    );
+  } finally { cleanupDir(runDir); }
+});
+
+test("TD-179-R5: a legacy created ref with an ABSENT verification status still reads as pending (zero drift)", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "td179-r5-"));
+  try {
+    const runId = "run_td179_r5";
+    const legacyRef = makeRef(runId);
+    delete legacyRef.verification;
+    const partials = [
+      startedWithDelivery(runId),
+      { type: "run.delivery_created", runId, delivery: legacyRef },
+      ...terminal(runId),
+    ];
+    assert.equal(projectDeliveryReadiness(partials, runId), "waiting_for_verification",
+      "legacy absent status keeps the waiting label");
+    writeTranscript(runDir, runId, partials);
+    // This case intentionally waits: the injected clock must reach the deadline.
+    let clock = 1_000_000;
+    const r = await getRunDeliveryReadiness({
+      runId, runDir, waitMs: 1000,
+      sleepFn: async (ms) => { clock += ms; }, nowFn: () => clock,
+    });
+    assert.equal(r.readiness, "waiting_for_verification");
+    assert.equal(r.waitReturnedEarly, false, "the bounded wait expires honestly");
+    assert.equal(r.verification.status, "pending", "absent status reads as pending");
+    assert.equal(r.acceptance.status, "pending");
   } finally { cleanupDir(runDir); }
 });

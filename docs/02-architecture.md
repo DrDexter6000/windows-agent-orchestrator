@@ -62,7 +62,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
   - `runStatus.js` — 只读 run status service。
   - `runCollect.js` — run collection service（非只读）。
   - `runDiagnosis.js` — 只读 run 诊断 service。
-  - `runDelivery.js` — 只读 delivery 查询 + 持久决策：委托 `tryAppendDecision` 原子 first-decision-wins；`getRunDeliveryReadiness` 提供可选 bounded 只读 readiness wait + `projectDeliveryReadiness` 闭集投影，复用 `validateDeliveryFacts` SSOT，CLI/MCP 共用同一 service；`isolation_failed` 闭集状态 + `isolationFailure:{code}` 安全投影 + `projectIsolationViolationCode`——终端 delivery-requested run 且**唯一**较高优先级 delivery 事实为恰好一条 run-bound `run.isolation_violation(code=workdir_escape)` 时 settle 为 `isolation_failed`，与 packaging failure（`deliveryFailure`）严格分离，绝不带 candidateInventory/repackage/salvage/retry/stop/decision 面；facts 优先于隔离事实，缺失/多条/跨 run/malformed code 一律 fail-closed `ambiguous`。
+  - `runDelivery.js` — 只读 delivery 查询 + 持久决策：委托 `tryAppendDecision` 原子 first-decision-wins；`getRunDeliveryReadiness` 提供可选 bounded 只读 readiness wait + `projectDeliveryReadiness` 闭集投影，复用 `validateDeliveryFacts` SSOT（TD-179 起为 runId 绑定共享事实权威——见 §4.9），CLI/MCP 共用同一 service；`isolation_failed` 闭集状态 + `isolationFailure:{code}` 安全投影 + `projectIsolationViolationCode`——终端 delivery-requested run 且**唯一**较高优先级 delivery 事实为恰好一条 run-bound `run.isolation_violation(code=workdir_escape)` 时 settle 为 `isolation_failed`，与 packaging failure（`deliveryFailure`）严格分离，绝不带 candidateInventory/repackage/salvage/retry/stop/decision 面；facts 优先于隔离事实，缺失/多条/跨 run/malformed code 一律 fail-closed `ambiguous`。
   - `workspaceBinding.js` — host-authorized workspace proof SSOT。
   - `runStop.js` — workspace-bound 失控 worker 停止，CLI `stop` 与 MCP 共用。
   - `runList.js` — workspace-bound run 列表，CLI `runs list` 与 MCP 共用。
@@ -85,7 +85,7 @@ adapters ──→ application ──→ core ──→ backends ──→ share
   | `registry_list` | 只读 | registry inventory 投影，委托共享 service（见上方 `registryInventory.js` 条目）。 |
   | `run_dispatch` | destructive，delivery-capable | 在调用 shared service 前重新解析并证明 workspace——证明后的 canonical Git root 作为 server-owned `cwd` 传入，模型不能通过 tool argument 提供任意路径。支持 delivery-only 顶层 `continuable` 选项（语义见 `run_continue` 行）。 |
   | `run_status` / `run_collect` / `run_diagnose` | 只读 / 非只读非幂等 / 只读安全诊断（依次对应左侧三工具） | 均委托共享 application service（见上方 services 目录）。 |
-  | `run_delivery` | 只读 delivery 查询 | 支持可选 `waitMs`（共享常量锁定 `[1000,300000]` ms），触发 bounded 只读 readiness wait 并返回严格闭集 `readiness`（`waiting_for_packaging\|waiting_for_verification\|reviewable\|packaging_failed\|isolation_failed\|not_requested\|ambiguous`，`isolation_failed` 见 `runDelivery.js` 条目）；CLI `runs delivery --wait-ms N` 与 MCP 委托同一份 `getRunDeliveryReadiness` service——MCP 不解析 transcript、不 shell-out CLI，`run_delivery_review` 的 exact-proof/安全投影/错误边界不因等待放松，省略 `waitMs` 时 point-in-time 输出向后兼容。 |
+  | `run_delivery` | 只读 delivery 查询 | 支持可选 `waitMs`（共享常量锁定 `[1000,300000]` ms），触发 bounded 只读 readiness wait 并返回严格闭集 `readiness`（`waiting_for_packaging\|waiting_for_verification\|reviewable\|packaging_failed\|isolation_failed\|not_requested\|ambiguous`，`isolation_failed` 见 `runDelivery.js` 条目；TD-179：已校验的 pending 拒绝把 readiness 落为 `reviewable` 而 verification 仍显示 pending——规范见 §4.9）；CLI `runs delivery --wait-ms N` 与 MCP 委托同一份 `getRunDeliveryReadiness` service——MCP 不解析 transcript、不 shell-out CLI，`run_delivery_review` 的 exact-proof/安全投影/错误边界不因等待放松，省略 `waitMs` 时 point-in-time 输出向后兼容。 |
   | `run_delivery_decide` | destructive | 持久 Lead 决策，first-decision-wins。 |
   | `workspace_status` | 只读 | host-authorized workspace binding 状态查询。 |
   | `workspace_select` | 会话级 | Lead 选择工作 Git 项目，`lead_session` 来源，最高优先级——workspace 解析优先级为 `lead_session` > `mcp_root` > `server_config` > fail-closed；Lead 无需 Human Owner bind、项目配置或重启即可在当前会话选择项目并派工。 |
@@ -946,24 +946,80 @@ verification 状态/failureCode、acceptance 状态及已有决策事件（如�
 不创建额外 current-state 文件。
 
 **决策前置条件**：
-- 必须存在 exactly one committed delivery（有 `run.delivery_created` + verification event）。
+- 必须存在 exactly one committed delivery（有 `run.delivery_created`；有 verification event，或符合下述 TD-179 有界 pending 拒绝形态）。
 - `--accept` 和 `--reject` 互斥。
 - `--reason-file` 必须是非空 UTF-8 文件（不支持 inline reason，避免 PowerShell quoting drift）。
-- `--accept` 要求 run terminal `completed` + verification `passed`。
+- `--accept` 要求 run terminal `completed` + effective verification `passed`。
 - `--reject` 允许 passed/failed/unavailable verification，但仍要求 committed delivery。
+- **TD-179（有界 pending 拒绝）**：`--reject` 额外允许「verification 仍 pending 且无任何
+  `run.delivery_verification_*` outcome」的形态，但仅当 run 已有**绑定的** `run.state_change → completed`
+  （legacy 末事件推断不算——追加决策事件本身会变成末事件并把推断状态打回 running），且
+  `run.delivery_created` 的 DeliveryRef **显式**声明 `verification.status:"pending"`（缺失/未知/
+  谎称终态的 legacy ref 不获得该资格）。该出口**不推断验证进程生死、不中断验证、不伪造结果**：
+  迟到的真实 outcome（passed/failed/unavailable）照常落盘并在读面如实显示，acceptance 恒为 rejected。
+  `--accept` 对 pending 一律拒绝（`verification_failed`）；`run_delivery_reverify` 资格不变
+  （仍要求原始 verification failed）；repackage 资格不变。
 - 不执行 merge/reset/checkout/cherry-pick/push/branch deletion/worktree deletion/Git mutation。
 
 **事件**：append exactly one of `run.delivery_accepted` / `run.delivery_rejected`。
 事件含新 DeliveryRef（acceptance.status 变为 accepted/rejected，其余字段不变）+
 `deliveryCommit` + `reviewerType:"lead_agent"` + trimmed reason。
-不重写已有 `run.delivery_created` 或 verification 事件。
+不重写已有 `run.delivery_created` 或 verification 事件。TD-179 pending 拒绝的决策 ref 显式保留
+`verification:"pending"` + `acceptance:"rejected"`——这正是读面校验的唯一合法 pending 决策形态。
 
 **原子 first-decision-wins**（`JsonlTranscript.tryAppendDecision`）：
-在已有 cross-process append lock 内完成：读事件 → 检查同一 `deliveryCommit` 的已有
-accepted/rejected event → append at most one decision event → 返回 `{accepted:true,event}`
-给 winner 或 `{accepted:false,existing}` 给 loser。此原语窄，不泛化为 workflow engine。
+在已有 cross-process append lock 内完成：读事件 → **先经共享事实权威校验** → 返回已校验的已有
+decision（`{accepted:false,existing}` loser，先于任何新动作 gate）→ append at most one decision
+event → 返回 `{accepted:true,event}` 给 winner。此原语窄，不泛化为 workflow engine。
 append 失败原样传播；不在 durable transcript write 前 report acceptance。
 CLI JSON 区分 `decisionAccepted:true`（winner）vs `decisionAccepted:false` + existing（loser）。
+
+**共享纯事实权威**（TD-179，`src/transcript.js::validateDeliveryFacts(events, options)`）：
+读面（`gatherDeliveryView` / `projectDeliveryReadiness` / `run_await_result` 终态 outcome）与
+锁内写面（`tryAppendDecision`）复用**同一**校验器，不存在第二套决策/重建算法。窄模式经显式
+options 进入，默认单参调用行为字节不变（review/reverify/repackage 等 legacy 消费者不受影响）：
+
+- `{expectedRunId}`（runId 绑定模式）：核心类别（`run.delivery_created` / 原始 outcome /
+  `run.delivery_accepted|rejected`）绑定到请求 runId——**外信封事件被忽略**（属别的 run，不是
+  冲突），但**先计数全部绑定事件再做 payload 检查**：重复、孤儿（有 outcome/decision 无
+  created）、或畸形的绑定事实一律 `delivery_malformed`。每个被消费的 ref 必须携带**canonical
+  且一致**的 `(runId, baseCommit, deliveryCommit)`；在场的顶层 `deliveryCommit` 与
+  `verifiedCommit` 必须一致（缺失的历史可选值不发明、不视为冲突）。原始 outcome 事件以
+  **closed-set 事件类型为状态权威**：内嵌状态缺失或仍为 `"pending"`（快照滞后）时以类型为准；
+  内嵌状态声称**另一个终态或未知值**则是冲突。新写入的 decision 快照使用已经校验的
+  effective verification 状态，不照抄旧 outcome 的缺失/pending 状态；历史事件不改写。
+  写入器在同一锁内用本校验器检查拟追加结果，只有追加后仍合法才写入。
+- `{allowVerificationPending:true}`（pending 感知模式）：额外接纳「恰一条绑定可用 created +
+  零 outcome」为 valid-with-pending——但**仅当** created ref 显式声明
+  `verification.status:"pending"`。legacy 缺失状态（或无 outcome 却谎称终态）保持旧
+  `delivery_unavailable` 拒绝，不获得 pending 拒绝资格；读面仍照旧读作 pending（零漂移）。
+
+**已有 decision 的校验**（绑定模式下唯一一条时）：
+- 身份匹配（与 created 同一 canonical `(runId, base, deliveryCommit)`）；在场顶层
+  `deliveryCommit`/`verifiedCommit` 一致；内嵌 verification 状态必须**在场且已知**（缺失/未知恒为
+  冲突）；acceptance 印记与事件类型一致——**窄 legacy 例外**：缺失或 `"pending"` 的印记仅在
+  「非 pending 快照且有更早的匹配原始 outcome 或合法 reverify 背书」时允许（legacy C2 形态）。
+- 每个 decision 都须在其前缀中已有同一 created；未来追加的 created 或 reverify 请求不得
+  反过来证明过去的决定。新动作的终态权限只从当前 run 的绑定事件中读取。
+- **非 pending decision** 必须在其 transcript 前缀（append 序，seq 缺失允许）中有更早的匹配
+  原始 outcome 或完整合法 reverify 链背书；accepted 必须背书为 passed。
+- **pending decision** 只能是 reject：显式印 `rejected`、created 显式声明 pending、更早存在绑定
+  `run.state_change → completed`、且决策前无原始 outcome（**之后的迟到 outcome 合法**）。
+  pending 的 accepted 永不合法——迟到的 pass 也不能将其洗白（读面 fail-closed `ambiguous`，
+  写面拒绝其充当已有决策）。合法 pending 拒绝之后的迟到 passed/failed/unavailable 在读面
+  **如实显示该原始 outcome**，acceptance 恒为 rejected；reverify 链（projectReverifyChain 的
+  特殊合同不变：任何外信封 reverify 事件仍是 malformed，绝不预过滤、资格不变）与 pending
+  decision 互斥。
+
+**读面语义**（point / readiness / await 三面一致）：
+- malformed ⇒ `ambiguous`（或查询 throw），无任何 success 字段——await 的终态 outcome 以共享
+  视图的 ambiguous 判定为准，不建第二状态机。
+- **迟到 outcome 作为 verification 事实，已校验 decision 作为 acceptance 事实**；原始 verification
+  与 effective verification（reverify）保持区分。
+- **pending 拒绝把 readiness 落为 `reviewable`**（存在持久决策）而 verification 仍显示
+  `pending`——不新增枚举/字段；legacy 缺失状态仍读 `waiting_for_verification`。
+- `run_delivery_review` 的 exact-proof 资格不变（仍要求 verification outcome；pending 拒绝形态
+  对 review fail-closed）。
 
 ---
 
