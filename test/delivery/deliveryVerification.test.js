@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -120,32 +120,104 @@ test("3B-04: timeout -> failed/command_timeout and timedOut true", async () => {
   }
 });
 
-test("3B-05: timeout kills the real process tree; PID no longer alive after bounded polling", async () => {
+test("3B-05: timeout kills the observed command process while it would naturally still be alive", async () => {
   const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-05-");
+  // Fixture-owned unique directory OUTSIDE the verified artifact: the PID file,
+  // stop sentinel and fixture script must never perturb the tracked-artifact
+  // proof (artifact_mutated) nor the delivery worktree itself.
+  const fixtureDir = await mkdtemp(join(tmpdir(), "wao-ver-05-fx-"));
+  const stopFile = join(fixtureDir, "stop.sentinel");
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let observedPid = 0;    // numeric PID — used ONLY for signal-0 observation
+  let realCommand = null; // real runner promise, settled responsibly in finally
+  let realSettled = false;
   try {
     await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    // Command writes its PID to a file, then sleeps
-    const pidFile = join(tmpdir(), `wao-ver-pid-${Date.now()}.txt`);
-    const cmd = `node -e "require('fs').writeFileSync('${pidFile.replace(/\\/g, "/")}', String(process.pid)); setTimeout(()=>{},99999)"`;
+    const pidFile = join(fixtureDir, "child.pid");
+    // Portable single-process fixture (no shell `&&` chain, no POSIX sleep):
+    // an absolute-path node script publishes its own PID, then stays alive on
+    // a finite ~99s timer (natural-expiry backstop) while polling (unref'd
+    // interval) for a unique external stop sentinel — cooperative, fixture-
+    // owned shutdown used by cleanup. JSON.stringify keeps the literal
+    // Windows paths correctly escaped inside the generated script source.
+    const holdScript = join(fixtureDir, "publish-pid-and-hold.cjs");
+    await writeFile(holdScript, [
+      "const fs = require('node:fs');",
+      `fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`,
+      `const stopFile = ${JSON.stringify(stopFile)};`,
+      `const fixtureDir = ${JSON.stringify(fixtureDir)};`,
+      "const stopPoll = setInterval(() => {",
+      "  if (fs.existsSync(stopFile) || !fs.existsSync(fixtureDir)) process.exit(0);",
+      "}, 25);",
+      "stopPoll.unref();",
+      "setTimeout(() => process.exit(0), 99000);",
+      "",
+    ].join("\n"));
+    const cmd = `"${process.execPath}" "${holdScript}"`;
     const ref = makeDeliveryRef(wtPath, baseCommit, { verificationCommands: [cmd] });
-    const result = await verifyDelivery(ref, { timeoutMs: 500 });
+
+    // Observation lives INSIDE the command boundary via the existing
+    // opts.runCommand seam: the delegate hands off to the REAL
+    // runVerificationCommand (same env/options, same shell spawn, same
+    // process-tree kill — nothing is mocked) and settles the monitor
+    // alongside the real runner promise. verifyDelivery's pre- and
+    // post-command synchronous Git proofs therefore sit outside every
+    // deadline below, so filesystem-wave contention cannot eat the windows.
+    //
+    // Accept PID publication within 4s and ESRCH within 6s, well before the
+    // fixture's natural expiry. Check time AFTER each observation but BEFORE
+    // accepting success. These are proof deadlines, not a promise that a
+    // blocked event loop can report failure immediately. EPERM is not death.
+    const PID_PUBLISH_DEADLINE_MS = 4000;
+    const DEATH_DEADLINE_MS = 6000;
+    const runCommandDelegate = (command, cwd, opts) => {
+      const startedAt = process.hrtime.bigint();
+      const elapsedMs = () => Number(process.hrtime.bigint() - startedAt) / 1e6;
+      const monitor = (async () => {
+        // 1) The command process must publish a valid PID — missing PID fails.
+        for (;;) {
+          let pid = 0;
+          try { pid = Number((await readFile(pidFile, "utf8")).trim()); } catch { /* not published yet */ }
+          assert.ok(elapsedMs() <= PID_PUBLISH_DEADLINE_MS,
+            `valid PID must be observed within ${PID_PUBLISH_DEADLINE_MS}ms; missing or late PID cannot prove kill semantics`);
+          if (Number.isInteger(pid) && pid > 0) { observedPid = pid; break; }
+          await sleep(25);
+        }
+        // 2) Death watch while the fixture would naturally still be alive.
+        //    The observed PID is only ever signalled with 0 (observation).
+        for (;;) {
+          let esrch = false;
+          try {
+            process.kill(observedPid, 0);
+          } catch (err) {
+            if (err?.code === "ESRCH") esrch = true;
+          }
+          assert.ok(elapsedMs() <= DEATH_DEADLINE_MS,
+            `ESRCH must be observed within ${DEATH_DEADLINE_MS}ms; late death cannot prove timely kill`);
+          if (esrch) return;
+          await sleep(50);
+        }
+      })();
+      realCommand = runVerificationCommand(command, cwd, opts);
+      realCommand.then(() => { realSettled = true; }, () => { realSettled = true; });
+      // Attach both outcomes immediately; monitoring cannot change the real result.
+      return Promise.all([realCommand, monitor]).then(([realResult]) => realResult);
+    };
+
+    const result = await verifyDelivery(ref, { timeoutMs: 500, runCommand: runCommandDelegate });
     assert.equal(result.outcome, "failed");
     assert.equal(result.failureCode, "command_timeout");
-
-    // Bounded polling for process death (up to 5s with backoff)
-    const { readFile } = await import("node:fs/promises");
-    let pid;
-    try { pid = Number(await readFile(pidFile, "utf8")); } catch { pid = 0; }
-    if (pid > 0) {
-      let alive = true;
-      for (let attempt = 0; attempt < 10; attempt++) {
-        await new Promise(r => setTimeout(r, 200));
-        try { process.kill(pid, 0); } catch { alive = false; break; }
-      }
-      assert.equal(alive, false, "timed-out verification process must be dead");
-    }
-    try { await rm(pidFile, { force: true }); } catch { /* best effort */ }
+    assert.equal(result.delivery.verification.results[0].timedOut, true,
+      "results[0].timedOut must reflect a real timeout, not an early non-zero exit");
   } finally {
+    // Never kill a numeric PID that could have been reused. Cleanup cannot
+    // rescue a failed proof: request cooperative exit only after the verdict.
+    if (realCommand && !realSettled) {
+      await writeFile(stopFile, "stop\n");
+      await Promise.race([realCommand.catch(() => {}), sleep(2000)]);
+    }
+    if (!realCommand || realSettled) await cleanupDir(fixtureDir);
+    else console.warn(`Retained cleanup sentinel for unsettled fixture: ${fixtureDir}`);
     await cleanupDir(repo);
   }
 });
@@ -442,50 +514,47 @@ test("3B-21: unavailableReason with no commands -> unavailable, zero command cal
 });
 
 test("3B-22: missing commands and missing unavailableReason fails closed", async () => {
-  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-22-");
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    // Create a ref with empty verification (no commands, no reason)
-    const ref = packageDelivery({
-      runId: RUN_ID, worktreePath: wtPath, baseCommit,
-      allowedPaths: ["src"],
-      isolation: { type: "worktree", strategy: "persistent" },
-      verificationCommands: ["echo ok"],
-    });
-    // Forge: remove commands and reason
-    const forged = {
-      ...ref,
-      verification: { status: "pending", commands: [] },
-    };
-    delete forged.verification.unavailableReason;
-    await assert.rejects(
-      () => verifyDelivery(forged),
-      (err) => err.deliveryCode === "execution_error",
-    );
-  } finally {
-    await cleanupDir(repo);
-  }
+  let commandCount = 0;
+  const fakeRunCommand = async () => {
+    commandCount++;
+    return { exitCode: 0, stdoutBytes: 0, stderrBytes: 0, durationMs: 0, timedOut: false, signal: null };
+  };
+  // The fail-closed branch (no commands AND no unavailableReason) is a pre-Git
+  // execution_error in verifyDelivery — raised before assertCommittedDeliveryRef —
+  // so a minimal schema/kind-valid input suffices; no repo/worktree/package
+  // setup is needed to prove it.
+  const ref = {
+    schemaVersion: 1,
+    kind: "git_commit",
+    verification: { status: "pending", commands: [] },
+  };
+  await assert.rejects(
+    () => verifyDelivery(ref, { runCommand: fakeRunCommand }),
+    (err) => err.deliveryCode === "execution_error",
+  );
+  assert.equal(commandCount, 0, "zero commands must run when commands and unavailableReason are both missing");
 });
 
 test("3B-23: invalid timeout (0/negative/NaN/string) fails before command execution", async () => {
-  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-23-");
   let commandCount = 0;
-  try {
-    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    const ref = makeDeliveryRef(wtPath, baseCommit, { verificationCommands: ["echo ok"] });
-    for (const badTimeout of [0, -1, NaN, "300000"]) {
-      commandCount = 0;
-      await assert.rejects(
-        () => verifyDelivery(ref, {
-          timeoutMs: badTimeout,
-          runCommand: async () => { commandCount++; return { exitCode: 0, stdoutBytes: 0, stderrBytes: 0, durationMs: 0, timedOut: false, signal: null }; },
-        }),
-        (err) => err.deliveryCode === "execution_error",
-      );
-      assert.equal(commandCount, 0, `zero commands for invalid timeout ${badTimeout}`);
-    }
-  } finally {
-    await cleanupDir(repo);
+  const fakeRunCommand = async () => {
+    commandCount++;
+    return { exitCode: 0, stdoutBytes: 0, stderrBytes: 0, durationMs: 0, timedOut: false, signal: null };
+  };
+  // Timeout validation runs before any Git access or command spawn — a minimal
+  // schema/kind-valid input proves it with no repo/worktree setup.
+  const ref = {
+    schemaVersion: 1,
+    kind: "git_commit",
+    verification: { status: "pending", commands: ["echo ok"] },
+  };
+  for (const badTimeout of [0, -1, NaN, "300000"]) {
+    commandCount = 0;
+    await assert.rejects(
+      () => verifyDelivery(ref, { timeoutMs: badTimeout, runCommand: fakeRunCommand }),
+      (err) => err.deliveryCode === "execution_error",
+    );
+    assert.equal(commandCount, 0, `zero commands for invalid timeout ${badTimeout}`);
   }
 });
 
@@ -634,17 +703,40 @@ test("3B-C3: exit-1 command modifies tracked file -> artifact_mutated (CTO RED #
  */
 test("3B-C4: timeout command modifies tracked file -> artifact_mutated (CTO RED #2)", async () => {
   const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-c4-");
+  // Fixture-owned dir outside the worktree for the script itself; the script
+  // mutates a TRACKED file relative to the verification cwd (the worktree).
+  const fixtureDir = await mkdtemp(join(tmpdir(), "wao-ver-c4-fx-"));
   try {
     await writeFile(join(wtPath, "src", "a.js"), "modified\n");
-    const ref = makeDeliveryRef(wtPath, baseCommit, {
-      verificationCommands: ['node -e "require(\'fs\').writeFileSync(\'src/a.js\', \'corrupted\\n\')" && sleep 10'],
-    });
+    // One portable process: mutate the tracked file, then stay alive far past
+    // the timeout. Replaces the old `node ... && sleep 10` chain, which could
+    // exit immediately on Windows (no sleep.exe / PATH resolution) and still
+    // pass via artifact_mutated priority without a real timeout ever firing.
+    const script = join(fixtureDir, "mutate-and-hold.cjs");
+    await writeFile(script, [
+      "const fs = require('node:fs');",
+      "fs.writeFileSync('src/a.js', 'corrupted\\n');", // cwd = delivery worktree
+      "setTimeout(() => {}, 99000);", // hold past every bound in this test
+      "",
+    ].join("\n"));
+    const cmd = `"${process.execPath}" "${script}"`;
+    const ref = makeDeliveryRef(wtPath, baseCommit, { verificationCommands: [cmd] });
 
     const result = await verifyDelivery(ref, { timeoutMs: 500 });
+    assert.equal(result.delivery.verification.results[0].timedOut, true,
+      "must be a real timeout — an early non-zero exit must not satisfy this proof");
+    // NOTE on scope: this bound is evaluated AFTER the result resolves, so a
+    // broken kill still costs the ~99s natural hold before failing here —
+    // bounded-TIME failure is proven by 3B-05's concurrent observation, not
+    // here. This bound only prevents a slow natural-expiry run from counting
+    // as a green pass.
+    assert.ok(result.delivery.verification.results[0].durationMs < 10000,
+      "command must be killed near the 500ms timeout, not run to natural expiry");
     assert.equal(result.outcome, "failed");
     assert.equal(result.failureCode, "artifact_mutated",
       "timeout + file mutation must be artifact_mutated, NOT command_timeout");
   } finally {
+    await cleanupDir(fixtureDir);
     await cleanupDir(repo);
   }
 });
