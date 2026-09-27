@@ -292,6 +292,116 @@ test("reporter captures error from test:fail event when cause has actual/expecte
 });
 
 // ────────────────────────────────────────────────────────────────────────────
+// TD-165 F3 / TD-181（2026-09-27 证明结构修正）：文件级超时的确定性证明。
+//
+// 记账事实（canonicalRunner.test.js 头注释同源；Node v22 实测事件流见
+// td181-t8-diagnosis evidence evbase-i1.events.jsonl）：挂死测试自身永不产生
+// test:complete；Node 以文件级事件收尾，真实顺序为 test:complete(name=文件路径,
+// passed=false) 在前、test:fail(同 name) 在后——同一失败的两份通知都要喂（覆盖
+// reporter 的两条记录路径），不做笛卡尔积。details.error.message 是结构化超时
+// 原因（"test timed out after Nms"，非 TAP 文本）。
+//
+// 原 canonicalRunner T8 用真实子进程断言"同文件通过兄弟记录在场"，但 Node 的
+// 文件级超时计时先于子文件完成开始，兄弟完成事件与文件级失败事件的相对顺序
+// 未被证实（main b119 自然失败即兄弟记录缺失）——兄弟保留证明移到此处：先确定
+// 性喂兄弟通过 complete（前提闭合），再喂文件级超时事件，走真实 TestReporter
+// write → end → 落盘 → 读回路径。真实子进程超时通路仍由 T8 保留。
+// ────────────────────────────────────────────────────────────────────────────
+
+function makeFileTimeoutError() {
+  const err = new Error("test timed out after 1000ms");
+  err.stack = "TestTimeoutError: test timed out after 1000ms\n    at hangsib.test.js:1:1";
+  return err;
+}
+
+function makeFileCompleteFailedEvent(filePath) {
+  return {
+    type: "test:complete",
+    data: { name: filePath, file: filePath, details: { passed: false, duration_ms: 1010, error: makeFileTimeoutError() } },
+  };
+}
+
+function makeFileFailEvent(filePath) {
+  return {
+    type: "test:fail",
+    data: { name: filePath, file: filePath, details: { error: makeFileTimeoutError() } },
+  };
+}
+
+test("TD-165 F3 timeout-proof sibling-kept: 兄弟通过 complete 先落，再喂文件级超时事件（Node 真实顺序 failed-complete→fail）⇒ 兄弟记录保留不重复、summary 不动、suite fail 且 fileFailure 在场", async () => {
+  await withTempDir(async (dir) => {
+    const { default: TestReporter } = await import("../../test/reporter.mjs");
+    const reporter = new TestReporter();
+
+    const filePath = join(dir, "test", "hangsib.test.js");
+    // 前提闭合：兄弟测试的通过完成事件已确定性送达（T8 之前缺的正是这一步）。
+    reporter.write(makeCompleteEvent("passes fine", filePath, true, 7));
+    // Node 文件级超时的真实事件顺序：failed complete 在前、fail 通知在后。
+    reporter.write(makeFileCompleteFailedEvent(filePath));
+    reporter.write(makeFileFailEvent(filePath));
+
+    await new Promise((resolve, reject) => {
+      reporter.on("finish", resolve);
+      reporter.on("error", reject);
+      reporter.end();
+    });
+
+    const raw = await readFile(join(dir, "test-results.json"), "utf8");
+    const data = JSON.parse(raw);
+    assert.equal(data.suites.length, 1, "恰好一个 suite（文件级事件不建第二个）");
+    const suite = data.suites[0];
+    assert.equal(suite.status, "fail", "文件级失败事件 ⇒ suite 非 pass（修复前该形状误记 pass）");
+    // 已收到的通过兄弟记录保留且不重复：恰一条、名字/状态/时长精确。
+    assert.equal(suite.tests.length, 1, "已收到的通过兄弟记录恰一条（不删除、不重复）");
+    assert.equal(suite.tests[0].name, "passes fine");
+    assert.equal(suite.tests[0].status, "pass");
+    assert.equal(suite.tests[0].duration, 7);
+    // summary 只数真实（非文件级）test:complete：文件级失败事件不增不删任何计数。
+    assert.equal(data.summary.total, 1);
+    assert.equal(data.summary.passed, 1);
+    assert.equal(data.summary.failed, 0);
+    assert.equal(data.summary.skipped, 0);
+    assert.equal(data.summary.todo, 0);
+    // 结构化超时原因在场（details.error 原文透传，非 TAP 文本正则）。
+    assert.ok(suite.fileFailure, "fileFailure 在场");
+    assert.ok(/test timed out after \d+ms/.test(suite.fileFailure.message),
+      `fileFailure.message 为结构化超时原因（实际 ${JSON.stringify(suite.fileFailure?.message)}）`);
+    assert.ok(suite.fileFailure.stack.length > 0, "超时原因的堆栈原文保留");
+  });
+});
+
+test("TD-165 F3 timeout-proof no-sibling: 无兄弟完成的文件级超时 ⇒ suite 仍建且 fail、tests 空、summary 零计数（不伪造 passed）、fileFailure 在场", async () => {
+  await withTempDir(async (dir) => {
+    const { default: TestReporter } = await import("../../test/reporter.mjs");
+    const reporter = new TestReporter();
+
+    const filePath = join(dir, "test", "lonely.test.js");
+    reporter.write(makeFileCompleteFailedEvent(filePath));
+    reporter.write(makeFileFailEvent(filePath));
+
+    await new Promise((resolve, reject) => {
+      reporter.on("finish", resolve);
+      reporter.on("error", reject);
+      reporter.end();
+    });
+
+    const raw = await readFile(join(dir, "test-results.json"), "utf8");
+    const data = JSON.parse(raw);
+    assert.equal(data.suites.length, 1, "文件级失败事件仍建 suite（失败归因到文件，而非仅波级）");
+    const suite = data.suites[0];
+    assert.equal(suite.status, "fail");
+    assert.equal(suite.tests.length, 0, "没有真实完成事件 ⇒ tests 空（不伪造兄弟条目）");
+    assert.equal(data.summary.total, 0, "summary 不伪造任何计数");
+    assert.equal(data.summary.passed, 0);
+    assert.equal(data.summary.failed, 0);
+    assert.equal(data.summary.skipped, 0);
+    assert.equal(data.summary.todo, 0);
+    assert.ok(suite.fileFailure && /test timed out after \d+ms/.test(suite.fileFailure.message),
+      `fileFailure.message 为结构化超时原因（实际 ${JSON.stringify(suite.fileFailure?.message)}）`);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
 // TD-181 (b, 2026-09-26; r2 rework): tools/generate-report.mjs must separate
 // OVERALL execution failure from the test verdict and must not fake green.
 //   - The canonical run can exit non-zero with JSON finalVerdict "pass"

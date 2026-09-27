@@ -1181,6 +1181,12 @@ test("B5 RED isolationDurationMs 透传：isolator 的 durationMs 进入 isolati
 // fileFailure 原因，同文件已通过的兄弟条目保留可见 ⇒ runWave 映射为
 // "fail"（带原因、指名文件，且进隔离重跑）。修复前的形状：无 suite ⇒
 // missing；兄弟通过时 suite 误记 pass、只剩波级 groupError 不指名文件。
+// TD-181（2026-09-27 证明结构修正）："兄弟条目保留可见"与"无兄弟完成时不
+// 伪造条目/summary 计数"由 test/isolation-infra/reporter.test.js 以确定性
+// 事件序列证明（前提闭合：先喂兄弟通过 complete，再按 Node 真实顺序喂文件级
+// failed-complete + fail 两份通知）；文件级超时计时先于子文件完成开始，兄弟
+// 完成事件与文件级失败事件的相对顺序未证实（main b119 自然失败），T8 因此
+// 不再附带通过兄弟夹具、不再依赖该时序前提。
 // ────────────────────────────────────────────────────────────────────────────
 
 test("TD-165 budgets: 生产默认值钉死（1200s per-test / 1800s 波级兜底 / 900s 告警；兜底必须大于 per-test 上限）", () => {
@@ -1296,15 +1302,6 @@ const SYNTH_HANG_ASYNC = [
   "",
 ].join("\n");
 const SYNTH_HANG_SYNC = 'import { test } from "node:test";\ntest("sync infinite loop", () => { while (true) {} });\n';
-// F3 审计场景：同文件 1 个通过兄弟 + 1 个挂死测试——修复前 suite 误记 pass、
-// 只剩波级 groupError 不指名文件的正是这个形状。
-const SYNTH_HANG_SIB = [
-  'import { test } from "node:test";',
-  'test("passes fine", () => {});',
-  'test("hangs forever", () => new Promise(() => {}));',
-  "const iv = setInterval(() => {}, 50); // pending handle：文件活到超时收杀为止",
-  "",
-].join("\n");
 const synthSlowOk = (ms) => `import { test } from "node:test";\ntest("slow but legal", () => new Promise((r) => setTimeout(r, ${ms})));\n`;
 
 function synthWorkspace(prefix, files) {
@@ -1518,25 +1515,29 @@ test("TD-165 T7: slow-wave notices are informational and stop after child close"
   assert.ok(!result.watchdog);
 });
 
-test("TD-165 T8 (F3): 挂死文件含 1 个通过兄弟 + 注入小 per-test 超时 ⇒ 该文件非 pass 且指名（带原因），不只波级 groupError", async () => {
-  const root = synthWorkspace("wao-td165-t8-", { "hangsib.test.js": SYNTH_HANG_SIB });
+test("TD-165 T8 (F3): 真实 Node22 子进程文件级超时 ⇒ 该文件非 pass 且带结构化 timeout 原因、非零退出、无伪 wave-only groupError、无 watchdog 中止", async () => {
+  const root = synthWorkspace("wao-td165-t8-", { "hang.test.js": SYNTH_HANG_ASYNC });
   try {
-    const w = await runSynthWave(root, { rels: ["hangsib.test.js"], testTimeoutMs: 1000, watch: { waveWatchdogMs: 5000 } });
+    const w = await runSynthWave(root, { rels: ["hang.test.js"], testTimeoutMs: 1000, watch: { waveWatchdogMs: 5000 } });
     const r = w.results[0];
-    assert.equal(r.path, "hangsib.test.js");
+    assert.equal(r.path, "hang.test.js");
     assert.notEqual(r.status, "pass", "挂死文件必须非 pass");
     assert.ok(r.status === "fail" || r.status === "missing",
       "必须归因到该文件而非仅波级 groupError（fail/missing 皆可——钉语义不钉实现）");
     // 修复的核心承诺：报告里该文件的 suite 非 pass 且带结构化原因（文件级失败
-    // 事件 details.error，非 TAP 文本正则）；同文件的通过兄弟仍可见。
+    // 事件 details.error，非 TAP 文本正则）。
+    //
+    // TD-181（2026-09-27 证明结构修正）：本用例不再附带"通过兄弟"夹具——Node 的
+    // 文件级超时计时先于子文件完成开始，兄弟完成事件与文件级失败事件的相对顺序
+    // 未被证实（main b119 自然失败即兄弟记录缺失）。兄弟记录保留、以及无兄弟完成
+    // 时不伪造条目/summary 计数，已在 test/isolation-infra/reporter.test.js 以
+    // 确定性事件序列（真实 write/end/读盘）证明；本测试只钉真实子进程超时通路。
     const raw = JSON.parse(readFileSync(join(root, "test-results.json"), "utf8"));
-    const suite = raw.suites.find((s) => s.name === "test/hangsib.test.js");
+    const suite = raw.suites.find((s) => s.name === "test/hang.test.js");
     assert.ok(suite, "报告中有该文件的 suite");
     assert.equal(suite.status, "fail", "suite 非 pass（修复前该形状误记 pass）");
     assert.ok(suite.fileFailure && /test timed out/.test(suite.fileFailure.message),
       `suite 带原因（fileFailure.message 含 "test timed out"，实际 ${JSON.stringify(suite.fileFailure?.message)}）`);
-    const sib = suite.tests.find((t) => t.name === "passes fine");
-    assert.ok(sib && sib.status === "pass", "同文件的通过兄弟条目仍可见");
     // 波级语义如常：失败已归因到文件 ⇒ "exit≠0 但报告全 pass" 的 groupError 不再
     // 触发（该规则本身未动）；该文件作为非 pass 进入后续隔离重跑资格。
     assert.equal(w.groupError, null, "归因到文件后不再只剩波级 groupError");
