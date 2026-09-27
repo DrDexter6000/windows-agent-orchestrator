@@ -31,8 +31,10 @@
 //     - 能力声明 ⇔ 实测一致性（本层最高价值断言；2026-09-21 扩到声明闭集全量六轴）：
 //       声明闭集各轴双向对账——declared=true 须正向实测证据（reportsTokenUsage ⇔
 //       input 非空双向；supportsSessionReuse 须真实跨 run 恢复证据【Phase 6 形状
-//       证据引用，绝不以 session 锚点顶替】；supportsRoleContract 须合同内 marker
-//       的模型回显；reportsCommandExitCode 须探针 run 的 scorecard commandsPassed）；
+//       证据引用，绝不以 session 锚点顶替】；supportsRoleContract 须探针 run 可证
+//       正常完成前提下的合同内 marker 模型回显——完成事实绑定探针自己 runId 的
+//       持久 transcript，探针未完成如实 inconclusive（TD-183）；
+//       reportsCommandExitCode 须探针 run 的 scorecard commandsPassed）；
 //       declared=false 须配置面明确拒绝（sessionReuse/systemPrompt 的 spawn 前硬门
 //       探针）或按既定纪律记 N/A（exitCode 无证据通道 / 无配置面的轴 + 原因）。
 //   llm 组件（夹具 = 有可追溯成功证据的 backend）：
@@ -97,6 +99,9 @@ import { findWorkdirEscapeEvidence } from "./adversarialEscape.mjs";
 import { providerKeyFor } from "../../src/providerFingerprint.js";
 // ADR-0025 批次 2：backend 能力声明 SSOT（构造零副作用）。
 import { backendCapabilitySnapshot } from "../../src/backends/factory.js";
+// TD-183：读侧 runId 信封绑定 SSOT——探针完成事实必须绑定当前探针自己的 runId，
+// 外 run transcript / 缺信封事件不得顶替。
+import { assertEventsBoundToRunId } from "../../src/transcript.js";
 
 const DAY_MS = 86_400_000;
 
@@ -654,6 +659,49 @@ export function sessionReuseEvidenceFromPhase6File(json, { expectedRuntimeIdenti
 }
 
 /**
+ * TD-183：role 探针 run 的"可证正常完成"投影（纯函数；role 能力判定的唯一
+ * 完成证据面）。修复的坏模式：探针块只读 lastAssistantText(result) 判 marker，
+ * 不校验探针 run 本身是否正常完成——探针 run 传输层失败（TD-183 真实事故：
+ * run.error → failed(backend_error)）被误判成"合同未送达"的能力红（假红）。
+ *
+ * 完成事实只来自【当前探针自己 runId】的持久 transcript（AGENTS 不变量 1：
+ * run state 来自 runs/<runId>.jsonl，内存/回包主张不顶替）：
+ *   - 事件信封必须绑定该 runId（复用读侧 SSOT assertEventsBoundToRunId——
+ *     外 run 的 completed transcript / 缺信封事件一律不构成完成证据）；
+ *   - 投影复用共享 inferState（不新增第二套状态机）；"completed 主张必须有
+ *     run.completed 事实背书"（与 completionBackedByEvent 同款纪律）。
+ * 只有 completed=true 才允许进入 supportsRoleContract 的 marker 判定；其余形状
+ *（缺 runId / 读取失败 / 事件为空 / 绑定失败 / failed|timed_out|aborted|pending|
+ * 未知投影 / 无背书的 completed 主张）一律 completed:false + 原因，消费侧如实记
+ * inconclusive——探针未完成 = 能力未评估，既不得红成"合同未送达"，更不得置绿。
+ * 绝不读 run.error/backend_error 文本推外部类型（无错误签名词表——外部 blocked
+ * 的结构化原因证据 WAO 今天没有，不猜网络）。
+ */
+export function roleProbeRunCompletion({ runId = null, events = [], readError = null } = {}) {
+  const notCompleted = (reason) => ({ completed: false, state: null, reason });
+  if (typeof readError === "string" && readError.length > 0) {
+    return notCompleted(`probe run transcript unreadable for runId ${JSON.stringify(runId)}: ${readError}`);
+  }
+  if (typeof runId !== "string" || runId.length === 0) {
+    return notCompleted("probe dispatch returned no runId — no persisted transcript to bind completion facts to");
+  }
+  if (!Array.isArray(events) || events.length === 0) {
+    return notCompleted(`no persisted transcript events for probe runId ${JSON.stringify(runId)} — completion unproven`);
+  }
+  try {
+    assertEventsBoundToRunId(events, runId);
+  } catch (error) {
+    return notCompleted(`probe completion evidence is not bound to the probe's own runId (${error?.message ?? String(error)}) — another run's transcript must never stand in`);
+  }
+  const state = inferState(events);
+  const hasCompletedFact = events.some((e) => e?.type === "run.completed");
+  if (state === "completed" && hasCompletedFact) {
+    return { completed: true, state, reason: `probe run ${runId} verifiably completed (run.completed fact + projected state=completed)` };
+  }
+  return notCompleted(`probe run ${runId} did not verifiably complete (projected state=${JSON.stringify(state)}, run.completed fact=${hasCompletedFact}) — role-contract capability not assessed`);
+}
+
+/**
  * backend 能力声明 ⇔ 实测一致性——声明闭集【全量轴】逐轴双向对账
  * （ADR-0032 §2 本层最高价值断言；2026-09-21 从双轴扩到闭集全量）。
  *
@@ -685,6 +733,7 @@ export function backendCapabilityConsistencyChecks({
   sessionReuseRejected = null,
   resumeEvidence = null,
   roleContractEchoed = null,
+  roleProbeCompletion = null,
   systemPromptRejected = null,
   commandExitCodeEvidence = null,
 }) {
@@ -725,6 +774,32 @@ export function backendCapabilityConsistencyChecks({
       `declared=false: a sessionReuse-configured dispatch must be explicitly rejected (fail-closed), never a silent fresh conversation; sessionReuseRejected=${sessionReuseRejected}`,
       { capability: "supportsSessionReuse" },
     );
+  // TD-183：supportsRoleContract=true 的 marker 判定以探针 run 的可证正常完成
+  // 为前置（roleProbeRunCompletion 投影，glue 注入）。未可证完成 → 如实
+  // inconclusive（探针未完成 = 能力未评估）——不假红成"合同未送达"，更不置绿，
+  // 也绝不凭 run.error 文本推网络/blocked。declared=false 的拒绝探针语义不变。
+  const roleContractCheck = !roleContract
+    ? check(
+      "supportsRoleContractConsistency",
+      systemPromptRejected === true,
+      "operational",
+      `declared=false: a systemPrompt-configured dispatch must be explicitly rejected (runManager spawn-pre gate), never silently dropped. systemPromptRejected=${systemPromptRejected}`,
+      { capability: "supportsRoleContract" },
+    )
+    : roleProbeCompletion?.completed === true
+      ? check(
+        "supportsRoleContractConsistency",
+        roleContractEchoed === true,
+        "operational",
+        `declared=true: the role contract must actually reach the model through the declared channel (probe run verifiably completed: ${roleProbeCompletion.reason}; probe: a systemPrompt variant carrying a unique marker; the model must echo it). roleContractEchoed=${roleContractEchoed}`,
+        { capability: "supportsRoleContract", ...(roleContractEchoed === true ? { state: "pass" } : {}) },
+      )
+      : inconclusiveCheck(
+        "supportsRoleContractConsistency",
+        `declared=true but the role-contract probe run did not verifiably complete — capability not assessed (no marker judgment without a verifiably completed probe run): ${roleProbeCompletion?.reason ?? "no probe completion facts supplied"}`,
+        "operational",
+        { capability: "supportsRoleContract" },
+      );
   return [
     check(
       "reportsTokenUsageConsistency",
@@ -734,17 +809,7 @@ export function backendCapabilityConsistencyChecks({
       { capability: "reportsTokenUsage" },
     ),
     reuseCheck,
-    check(
-      "supportsRoleContractConsistency",
-      roleContract
-        ? roleContractEchoed === true
-        : systemPromptRejected === true,
-      "operational",
-      roleContract
-        ? `declared=true: the role contract must actually reach the model through the declared channel (probe: a systemPrompt variant carrying a unique marker; the model must echo it). roleContractEchoed=${roleContractEchoed}`
-        : `declared=false: a systemPrompt-configured dispatch must be explicitly rejected (runManager spawn-pre gate), never silently dropped. systemPromptRejected=${systemPromptRejected}`,
-      { capability: "supportsRoleContract" },
-    ),
+    roleContractCheck,
     check(
       "reportsCommandExitCodeConsistency",
       exitCode
@@ -1930,7 +1995,11 @@ export function createComponentDrills(deps) {
     // 证据（systemPrompt 变体携带合同内 marker——回显证明合同经声明通道到达模型；
     // 同一 run 携带 scorecard requireCommands——产品自身 commandsPassed 即命令
     // 退出码证据判定，含 toolCallId↔tool_result 推断通道）。
+    // TD-183：supportsRoleContract 的 marker 判定以探针 run 的可证正常完成为前置
+    // （roleProbeRunCompletion——完成事实绑定本探针 runId 的持久 transcript 投影）；
+    // 探针传输层失败/未完成时 role 检查如实 inconclusive，不假红成"合同未送达"。
     let roleContractEchoed = null;
+    let roleProbeCompletion = null;
     let systemPromptRejected = null;
     let commandExitCodeEvidence = null;
     if (declared.supportsRoleContract === true || declared.reportsCommandExitCode === true) {
@@ -1958,6 +2027,19 @@ export function createComponentDrills(deps) {
       const result = extractJson(r.stdout || "") ?? null;
       if (declared.supportsRoleContract === true) {
         roleContractEchoed = (lastAssistantText(result) ?? "").includes(marker);
+        // TD-183：完成事实绑定当前探针自己 runId 的持久 transcript（读取失败不
+        // 抛出——如实降级为 readError，由 roleProbeRunCompletion 记 inconclusive）。
+        const probeRunId = typeof result?.runId === "string" ? result.runId : null;
+        let probeEvents = [];
+        let probeReadError = null;
+        if (probeRunId !== null) {
+          try {
+            probeEvents = readRunEvents(probeRunId);
+          } catch (error) {
+            probeReadError = error?.message ?? String(error);
+          }
+        }
+        roleProbeCompletion = roleProbeRunCompletion({ runId: probeRunId, events: probeEvents, readError: probeReadError });
       }
       const scorecardCommands = Array.isArray(result?.scorecard?.checks)
         ? result.scorecard.checks.find((c) => c.name === "commandsPassed")
@@ -1985,6 +2067,7 @@ export function createComponentDrills(deps) {
       sessionReuseRejected,
       resumeEvidence,
       roleContractEchoed,
+      roleProbeCompletion,
       systemPromptRejected,
       commandExitCodeEvidence,
     }));

@@ -50,6 +50,7 @@ import {
   planComponentChecks,
   qualifiedFixtureCandidates,
   resolveSubjects,
+  roleProbeRunCompletion,
   sessionReuseEvidenceFromPhase6File,
 } from "../../scripts/reliability/componentDrills.mjs";
 import {
@@ -829,6 +830,17 @@ test("kernel: 能力声明 ⇔ 实测【双向】——声明与实测任一方�
 test("kernel【判据升级 2026-09-21】: supportsSessionReuse=true 只认真实跨 run 恢复证据——session 锚点不再顶替", () => {
   const byName = (checks) => new Map(checks.map((c) => [c.name, c]));
   const declared = { reportsTokenUsage: true, supportsSessionReuse: true, reportsCommandExitCode: true, supportsRoleContract: true };
+  // TD-183：role 判据的证据组 = 可证正常完成的探针 run + marker 回显（判定面）
+  // ——合成一份绑定探针 runId 的 completed transcript。
+  const probeCompleted = (runId) => roleProbeRunCompletion({
+    runId,
+    events: [
+      { type: "run.started", seq: 1, runId, agentId: "a", cwd: "c" },
+      { type: "run.state_change", from: "pending", to: "running", seq: 2, runId },
+      { type: "run.completed", seq: 3, runId },
+      { type: "run.state_change", from: "running", to: "completed", seq: 4, runId },
+    ],
+  });
   // 旧判据形状（sessionAnchorPresent=true 但无真恢复证据）→ 红：只证明会话建立
   // 不证明能恢复（ADR-0032 §2 判据升级）。
   const anchorOnly = backendCapabilityConsistencyChecks({ declared, metricsInput: 5, sessionAnchorPresent: true });
@@ -839,6 +851,7 @@ test("kernel【判据升级 2026-09-21】: supportsSessionReuse=true 只认真�
     declared, metricsInput: 5,
     resumeEvidence: { accepted: true, detail: "real cross-run resume evidence accepted: run1 → run2 same session" },
     roleContractEchoed: true,
+    roleProbeCompletion: probeCompleted("run_probe_ok"),
     commandExitCodeEvidence: { passed: true },
   });
   for (const name of ["supportsSessionReuseConsistency", "supportsRoleContractConsistency", "reportsCommandExitCodeConsistency", "reportsTokenUsageConsistency"]) {
@@ -849,6 +862,7 @@ test("kernel【判据升级 2026-09-21】: supportsSessionReuse=true 只认真�
     declared, metricsInput: 5,
     resumeEvidence: { accepted: false, detail: "session-reuse evidence rejected: backendSessionId not identical across runs" },
     roleContractEchoed: true,
+    roleProbeCompletion: probeCompleted("run_probe_ok"),
     commandExitCodeEvidence: { passed: true },
   });
   assert.equal(byName(rejected).get("supportsSessionReuseConsistency").pass, false);
@@ -867,15 +881,54 @@ test("kernel: 声明闭集全量轴——roleContract/exitCode 各双向 + 无�
     "supportsSessionReuseConsistency",
   ], "六轴闭集（snapshot 全量成员各一检查）");
 
-  // supportsRoleContract：true 无回显 → 红；false 未拒绝 → 红；false 明确拒绝 → 绿。
-  const echo = byName(backendCapabilityConsistencyChecks({ declared: { supportsRoleContract: true }, roleContractEchoed: false }));
-  assert.equal(echo.get("supportsRoleContractConsistency").pass, false);
+  // supportsRoleContract（TD-183 语义）：只有可证正常完成的探针 run 才进入
+  // marker 判定——completed 缺回显 → 红（真实能力红，旧语义保持）；completed
+  // 有回显 → 绿；探针未可证完成 → inconclusive（能力未评估，不假红更不置绿）；
+  // false 未拒绝 → 红；false 明确拒绝 → 绿。
+  const completedProbe = roleProbeRunCompletion({
+    runId: "run_probe_c",
+    events: [
+      { type: "run.started", seq: 1, runId: "run_probe_c", agentId: "a", cwd: "c" },
+      { type: "run.state_change", from: "pending", to: "running", seq: 2, runId: "run_probe_c" },
+      { type: "run.completed", seq: 3, runId: "run_probe_c" },
+      { type: "run.state_change", from: "running", to: "completed", seq: 4, runId: "run_probe_c" },
+    ],
+  });
+  const failedProbe = roleProbeRunCompletion({
+    runId: "run_probe_f",
+    events: [
+      { type: "run.started", seq: 1, runId: "run_probe_f", agentId: "a", cwd: "c" },
+      { type: "run.state_change", from: "pending", to: "running", seq: 2, runId: "run_probe_f" },
+      { type: "run.error", seq: 3, runId: "run_probe_f", error: "backend transport failed", phase: "wait" },
+      { type: "run.state_change", from: "running", to: "failed", seq: 4, runId: "run_probe_f", reason: "backend_error" },
+    ],
+  });
+  const echoMissingAfterCompletion = byName(backendCapabilityConsistencyChecks({
+    declared: { supportsRoleContract: true }, roleContractEchoed: false, roleProbeCompletion: completedProbe,
+  }));
+  assert.equal(echoMissingAfterCompletion.get("supportsRoleContractConsistency").pass, false, "正常完成缺 marker → 红（旧测试语义保持）");
+  assert.equal(echoMissingAfterCompletion.get("supportsRoleContractConsistency").state, undefined, "完成后的 marker 缺失是 judged fail，不是 inconclusive");
+  const echoPresentAfterCompletion = byName(backendCapabilityConsistencyChecks({
+    declared: { supportsRoleContract: true }, roleContractEchoed: true, roleProbeCompletion: completedProbe,
+  }));
+  assert.equal(echoPresentAfterCompletion.get("supportsRoleContractConsistency").pass, true, "正常完成 + 回显 → 绿");
+  for (const echoed of [true, false]) {
+    const inconclusiveProbe = byName(backendCapabilityConsistencyChecks({
+      declared: { supportsRoleContract: true }, roleContractEchoed: echoed, roleProbeCompletion: failedProbe,
+    }));
+    assert.equal(inconclusiveProbe.get("supportsRoleContractConsistency").pass, false, `探针未完成不得置绿（echoed=${echoed}）`);
+    assert.equal(inconclusiveProbe.get("supportsRoleContractConsistency").state, "inconclusive", `探针 failed → 能力未评估（echoed=${echoed}——回显在场也不得判能力）`);
+    assert.match(inconclusiveProbe.get("supportsRoleContractConsistency").stateReason, /did not verifiably complete/);
+  }
   const silentDrop = byName(backendCapabilityConsistencyChecks({ declared: { supportsRoleContract: false }, systemPromptRejected: false }));
   assert.equal(silentDrop.get("supportsRoleContractConsistency").pass, false, "声明不支持而 systemPrompt 配置被静默接受 → 红");
   const rejected = byName(backendCapabilityConsistencyChecks({ declared: { supportsRoleContract: false }, systemPromptRejected: true }));
   assert.equal(rejected.get("supportsRoleContractConsistency").pass, true, "明确拒绝 = 正确结果");
-  // 探针未观察（null）→ 红，不得当绿。
-  assert.equal(byName(backendCapabilityConsistencyChecks({ declared: { supportsRoleContract: true } })).get("supportsRoleContractConsistency").pass, false);
+  // 探针完成事实缺席（未提供投影）→ inconclusive：不置绿，也不得在无完成事实时红成"合同未送达"（TD-183）。
+  const noFacts = byName(backendCapabilityConsistencyChecks({ declared: { supportsRoleContract: true }, roleContractEchoed: false }));
+  assert.equal(noFacts.get("supportsRoleContractConsistency").pass, false, "inconclusive 绝不置绿");
+  assert.equal(noFacts.get("supportsRoleContractConsistency").state, "inconclusive");
+  assert.match(noFacts.get("supportsRoleContractConsistency").stateReason, /capability not assessed|no probe completion facts/);
 
   // reportsCommandExitCode：true 需 commandsPassed 正向证据；false 记 N/A（带原因，不置绿不算失败）。
   const exitGreen = byName(backendCapabilityConsistencyChecks({ declared: { reportsCommandExitCode: true }, commandExitCodeEvidence: { passed: true } }));
@@ -898,6 +951,82 @@ test("kernel: 声明闭集全量轴——roleContract/exitCode 各双向 + 无�
       assert.equal(c.pass, false);
     }
   }
+});
+
+// ── TD-183：role 探针完成事实（只有可证正常完成才进入能力判定）─────────────────
+//
+// 完成事实 = 当前探针【自己 runId】的持久 transcript 投影（信封绑定 + 共享
+// inferState + run.completed 事实背书）；其余形状一律 completed:false + 原因，
+// 消费侧如实 inconclusive——探针未完成 = 能力未评估，不假红更不置绿，也绝不凭
+// run.error/backend_error 文本推外部原因（无错误签名词表）。
+
+const TD183_PROBE_RUN = "run_role_probe_self";
+
+function td183BoundEvents(overrides = []) {
+  return [
+    { type: "run.started", seq: 1, runId: TD183_PROBE_RUN, agentId: "a", cwd: "c" },
+    { type: "run.state_change", from: "pending", to: "running", seq: 2, runId: TD183_PROBE_RUN },
+    ...overrides,
+  ];
+}
+
+test("TD-183 kernel: roleProbeRunCompletion——只认探针自己 runId 的可证正常完成；其余一律 completed:false + 原因", () => {
+  const completedEvents = td183BoundEvents([
+    { type: "run.completed", seq: 3, runId: TD183_PROBE_RUN },
+    { type: "run.state_change", from: "running", to: "completed", seq: 4, runId: TD183_PROBE_RUN },
+  ]);
+  const ok = roleProbeRunCompletion({ runId: TD183_PROBE_RUN, events: completedEvents });
+  assert.equal(ok.completed, true, "run.completed 事实 + completed 投影 → 可证正常完成");
+  assert.equal(ok.state, "completed");
+
+  // 各未完成形状（failed / timed_out / aborted / pending / 未知投影）→ completed:false，
+  // 且原因只陈述投影事实，不含外部原因猜测（无 network/blocked 词表）。
+  const incompleteShapes = {
+    failed: [{ type: "run.error", seq: 3, runId: TD183_PROBE_RUN, error: "DeepSeek API request failed", phase: "wait" }, { type: "run.state_change", from: "running", to: "failed", seq: 4, runId: TD183_PROBE_RUN, reason: "backend_error" }],
+    timed_out: [{ type: "run.timed_out", seq: 3, runId: TD183_PROBE_RUN }, { type: "run.state_change", from: "running", to: "timed_out", seq: 4, runId: TD183_PROBE_RUN }],
+    aborted: [{ type: "run.aborted", seq: 3, runId: TD183_PROBE_RUN }, { type: "run.state_change", from: "running", to: "aborted", seq: 4, runId: TD183_PROBE_RUN }],
+    pending: [],
+    // 未知投影（state_change.to 不在已知闭集）同样不得算完成。
+    unknownProjection: [{ type: "run.state_change", from: "running", to: "quantum", seq: 3, runId: TD183_PROBE_RUN }],
+    // 仅 state_change 主张 completed 但无 run.completed 事实背书 → 不算（与
+    // completionBackedByEvent 同款纪律：断流/伪造完成不制造成功证据）。
+    unbackedCompletedClaim: [{ type: "run.state_change", from: "running", to: "completed", seq: 3, runId: TD183_PROBE_RUN }],
+  };
+  for (const [shape, overrides] of Object.entries(incompleteShapes)) {
+    const out = roleProbeRunCompletion({ runId: TD183_PROBE_RUN, events: td183BoundEvents(overrides) });
+    assert.equal(out.completed, false, `${shape} 不得算可证正常完成`);
+    assert.equal(typeof out.reason === "string" && out.reason.length > 0, true, `${shape} 必须带原因`);
+    assert.doesNotMatch(out.reason, /network|blocked/i, `${shape} 的原因不得推外部类型（无错误签名词表）`);
+  }
+
+  // 缺 runId / 空 events / 读取失败 → completed:false。
+  for (const [shape, args] of Object.entries({
+    missingRunId: { runId: null, events: completedEvents },
+    emptyRunId: { runId: "", events: completedEvents },
+    noEvents: { runId: TD183_PROBE_RUN, events: [] },
+    notArrayEvents: { runId: TD183_PROBE_RUN, events: "run_role_probe_self.jsonl" },
+    readFailure: { runId: TD183_PROBE_RUN, events: [], readError: "ENOENT: transcript unreadable" },
+  })) {
+    const out = roleProbeRunCompletion(args);
+    assert.equal(out.completed, false, `${shape} → 不得算完成`);
+    assert.ok(out.reason.length > 0, `${shape} 必须带原因`);
+  }
+
+  // 外 run 状态不能洗绿：事件信封绑定别的 runId（或缺信封）→ 绑定失败，不得算完成。
+  const foreignRun = "run_someone_elses_run";
+  const foreignEvents = [
+    { type: "run.started", seq: 1, runId: foreignRun, agentId: "a", cwd: "c" },
+    { type: "run.completed", seq: 2, runId: foreignRun },
+    { type: "run.state_change", from: "running", to: "completed", seq: 3, runId: foreignRun },
+  ];
+  const foreign = roleProbeRunCompletion({ runId: TD183_PROBE_RUN, events: foreignEvents });
+  assert.equal(foreign.completed, false, "外 run 的 completed transcript 不得顶替当前探针的完成事实");
+  assert.match(foreign.reason, /runId/);
+  const unbound = roleProbeRunCompletion({
+    runId: TD183_PROBE_RUN,
+    events: [{ type: "run.started", seq: 1 }, { type: "run.completed", seq: 2 }, { type: "run.state_change", from: "running", to: "completed", seq: 3 }],
+  });
+  assert.equal(unbound.completed, false, "缺 runId 信封的事件不得构成完成证据（fail-closed）");
 });
 
 test("kernel G1/G5: sessionReuseEvidenceFromPhase6File 交叉核原始素材，任一矛盾都不得 accepted", () => {
@@ -1460,6 +1589,147 @@ test("glue【集成 dry】: stop 按执行形态分车道——serve 走 spawn+`
   } finally {
     if (prevLog === undefined) delete process.env.STUB_LOG; else process.env.STUB_LOG = prevLog;
     if (prevLinger === undefined) delete process.env.STUB_LINGER; else process.env.STUB_LINGER = prevLinger;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// ── TD-183 glue 集成 dry：role 探针完成事实经真实 runBackendComponentDrills 接线──
+// stub CLI 合成 transcript（零 token）：探针 run 的完成事实必须绑定探针自己
+// runId 的持久事件（共享 inferState 投影 + runId 信封绑定），未完成 → role 检查
+// 如实 inconclusive；可证完成后的 marker 判定语义（有回显绿/缺回显红）经同一
+// glue 保持。场景经 STUB_ROLE_SCENARIO 注入：
+//   failed-marker         —— 探针 run 以 run.error(backend_error)→failed 终止（TD-183
+//                            真实事故形状），但 assistant 仍回显了 marker → 必须
+//                            inconclusive（回显在场也不得判能力）；
+//   completed-marker      —— 正向对照：可证完成 + 回显 → 绿（证明 stub marker
+//                            提取与 glue 完成事实传递真实有效）；
+//   completed-no-marker   —— 可证完成但无回显 → judged fail（旧语义保持）。
+const ROLE_PROBE_STUB_CLI_SOURCE = [
+  "import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from \"node:fs\";",
+  "import { join } from \"node:path\";",
+  "const args = process.argv.slice(2);",
+  "const say = (o) => process.stdout.write(JSON.stringify(o) + \"\\n\");",
+  "const opts = {};",
+  "for (let i = 0; i < args.length; i += 1) {",
+  "  if (args[i].startsWith(\"--\")) {",
+  "    const k = args[i].slice(2);",
+  "    const v = args[i + 1];",
+  "    if (v && !v.startsWith(\"--\")) { opts[k] = v; i += 1; }",
+  "  }",
+  "}",
+  "const appendEvents = (dir, runId, events) => {",
+  "  mkdirSync(dir, { recursive: true });",
+  "  const file = join(dir, runId + \".jsonl\");",
+  "  let seq = 0;",
+  "  try { for (const l of readFileSync(file, \"utf8\").trim().split(/\\r?\\n/).filter(Boolean)) { const e = JSON.parse(l); if (typeof e.seq === \"number\") seq = Math.max(seq, e.seq); } } catch {}",
+  "  appendFileSync(file, events.map((e) => JSON.stringify({ ...e, seq: (seq += 1), runId, ts: new Date().toISOString() })).join(\"\\n\") + \"\\n\", \"utf8\");",
+  "};",
+  "const cmd = args[0];",
+  "if (cmd === \"run\") {",
+  "  const agentId = args[1];",
+  "  if (args.includes(\"--scorecard-rules\")) {",
+  "    const scenario = process.env.STUB_ROLE_SCENARIO ?? \"failed-marker\";",
+  "    const runId = \"run_stub_role_probe\";",
+  "    const runsDir = join(opts.cwd ?? process.cwd(), \"runs\");",
+  "    const assembly = JSON.parse(readFileSync(opts.registry, \"utf8\")).agents[agentId];",
+  "    const marker = /Your role marker is: (\\S+)/.exec(readFileSync(assembly.systemPrompt, \"utf8\"))[1];",
+  "    const echo = scenario === \"completed-no-marker\" ? \"I do not recall any role marker.\" : marker;",
+  "    const reply = { runId, metrics: { tokens: { input: 7 } }, messages: [{ info: { role: \"assistant\" }, parts: [{ type: \"text\", text: echo }] }] };",
+  "    if (scenario === \"failed-marker\") {",
+  "      appendEvents(runsDir, runId, [",
+  "        { type: \"run.started\", agentId, cwd: opts.cwd ?? \".\" },",
+  "        { type: \"run.state_change\", from: \"pending\", to: \"running\" },",
+  "        { type: \"run.error\", phase: \"wait\", error: \"stub: DeepSeek API request to https://api.example.invalid failed\" },",
+  "        { type: \"run.state_change\", from: \"running\", to: \"failed\", reason: \"backend_error\" },",
+  "      ]);",
+  "      say({ ...reply, completed: false });",
+  "    } else if (scenario === \"completed-marker\" || scenario === \"completed-no-marker\") {",
+  "      appendEvents(runsDir, runId, [",
+  "        { type: \"run.started\", agentId, cwd: opts.cwd ?? \".\" },",
+  "        { type: \"run.state_change\", from: \"pending\", to: \"running\" },",
+  "        { type: \"run.completed\" },",
+  "        { type: \"run.state_change\", from: \"running\", to: \"completed\" },",
+  "      ]);",
+  "      say({ ...reply, completed: true, scorecard: { checks: [{ name: \"commandsPassed\", passed: true, detail: \"stub\" }] } });",
+  "    } else {",
+  "      say({});",
+  "    }",
+  "  } else {",
+  "    say({});",
+  "  }",
+  "} else if (cmd === \"spawn\") {",
+  "  const runId = \"run_stub_role_serve\";",
+  "  appendEvents(opts[\"run-dir\"], runId, [",
+  "    { type: \"run.started\", agentId: args[1], cwd: opts.cwd ?? \".\" },",
+  "    { type: \"session.created\", backend: \"opencode-serve\", backendSessionId: \"ses_1\", serveUrl: \"http://127.0.0.1:4297\" },",
+  "    { type: \"run.state_change\", from: \"pending\", to: \"running\" },",
+  "  ]);",
+  "  say({ runId, background: true });",
+  "} else if (cmd === \"stop\") {",
+  "  appendEvents(opts[\"run-dir\"], args[1], [",
+  "    { type: \"run.aborted\" },",
+  "    { type: \"run.state_change\", from: \"running\", to: \"aborted\" },",
+  "  ]);",
+  "  say({ stopped: true });",
+  "} else {",
+  "  say({});",
+  "}",
+].join("\n");
+
+test("TD-183 glue【集成 dry】: role 探针完成事实接线——探针未完成如实 inconclusive（marker 回显在场也不判能力）；可证完成后 marker 语义保持（stub CLI，零 token）", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "wao-cc-roleprobe-"));
+  const fakeRoot = join(tmp, "root");
+  mkdirSync(join(fakeRoot, "src"), { recursive: true });
+  writeFileSync(join(fakeRoot, "src", "cli.js"), ROLE_PROBE_STUB_CLI_SOURCE);
+  const prevScenario = process.env.STUB_ROLE_SCENARIO;
+  try {
+    const runDrills = (scenario) => {
+      process.env.STUB_ROLE_SCENARIO = scenario;
+      const registryPath = join(tmp, `registry-${Math.random().toString(36).slice(2)}.json`);
+      writeFileSync(registryPath, JSON.stringify({
+        agents: { a1: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4297", cwd: "." } },
+      }));
+      const drills = createComponentDrills({
+        nodeBin: "node", root: fakeRoot, tmpDir: tmp, waitTimeout: "1000", pollInterval: "50", registry: registryPath,
+      });
+      return drills.runBackendComponentDrills({
+        agentId: "a1",
+        configuredModelId: null,
+        capabilitySnapshot: { supportsSessionReuse: true, supportsRoleContract: true, reportsTokenUsage: false, reportsCommandExitCode: false },
+      });
+    };
+    const roleCheckOf = (out) => out.checks.find((c) => c.name === "supportsRoleContractConsistency");
+
+    // TD-183 反例（真实事故形状）：探针 run 以 run.error(backend_error)→failed 终止，
+    // assistant 却已回显 marker → 角色检查必须 inconclusive（探针未完成 = 能力未评估），
+    // 不假红成"合同未送达"，更不得凭 run.error 文本推网络/blocked。
+    const failed = runDrills("failed-marker");
+    const failedRole = roleCheckOf(failed);
+    assert.equal(failedRole.pass, false, "探针未完成绝不置绿");
+    assert.equal(failedRole.state, "inconclusive");
+    assert.match(failedRole.stateReason, /did not verifiably complete/);
+    assert.match(failedRole.stateReason, /capability not assessed/);
+    assert.doesNotMatch(failedRole.stateReason, /network/i, "不得凭错误文本推网络原因（无错误签名词表）");
+    assert.equal(failedRole.stateReason.includes("blocked"), false, "外部 blocked 缺结构化原因证据——不凭文本推为 blocked");
+    // 组件整体判定不放水：inconclusive 在场 → componentResultFromChecks 仍非 pass。
+    assert.equal(componentResultFromChecks(failed.checks), "fail", "role 检查 inconclusive 时组件整体不得 pass");
+
+    // 正向对照：可证正常完成 + marker 回显 → 绿（证明 stub 的 marker 提取与 glue
+    // 的完成事实传递真实有效——上一条 inconclusive 并非"回显没送到"的空转反例）。
+    const green = runDrills("completed-marker");
+    const greenRole = roleCheckOf(green);
+    assert.equal(greenRole.pass, true, "可证正常完成 + 回显 → 绿");
+    assert.equal(greenRole.state, "pass");
+
+    // 旧语义保持（经真实 glue）：可证正常完成但无回显 → judged fail（非 inconclusive）。
+    const completedNoMarker = runDrills("completed-no-marker");
+    const noMarkerRole = roleCheckOf(completedNoMarker);
+    assert.equal(noMarkerRole.pass, false, "正常完成缺 marker → 红（旧测试语义保持）");
+    assert.equal(noMarkerRole.state, undefined, "完成后的 marker 缺失是 judged fail，不是 inconclusive");
+    assert.match(noMarkerRole.detail, /roleContractEchoed=false/);
+    assert.equal(componentResultFromChecks(completedNoMarker.checks), "fail");
+  } finally {
+    if (prevScenario === undefined) delete process.env.STUB_ROLE_SCENARIO; else process.env.STUB_ROLE_SCENARIO = prevScenario;
     rmSync(tmp, { recursive: true, force: true });
   }
 });
