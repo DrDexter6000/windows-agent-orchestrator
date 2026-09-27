@@ -1442,6 +1442,7 @@ export function defaultCountNodeProcesses({ timeoutMs = 5000, spawnImpl = spawn 
     }
     let settled = false;
     let out = "";
+    let outputTruncated = false;
     let child = null;
     const finish = (result) => { if (!settled) { settled = true; resolve(result); } };
     // 采样异常不留活句柄：超时腿在 resolve 前先把采样子进程收掉（kill + 销毁
@@ -1464,7 +1465,14 @@ export function defaultCountNodeProcesses({ timeoutMs = 5000, spawnImpl = spawn 
       finish({ count: null, sampledAt, reason: `spawn failed: ${err && err.message ? err.message : String(err)}` });
       return;
     }
-    child.stdout?.on("data", (c) => { out += c; if (out.length > CHILD_BUFFER_CAP) out = out.slice(out.length - CHILD_BUFFER_CAP); });
+    child.stdout?.on("data", (c) => {
+      if (outputTruncated) return;
+      out += c;
+      if (out.length > CHILD_BUFFER_CAP) {
+        outputTruncated = true;
+        out = out.slice(0, CHILD_BUFFER_CAP);
+      }
+    });
     child.on("error", (err) => { clearTimeout(timer); finish({ count: null, sampledAt, reason: `tasklist failed: ${err && err.message ? err.message : String(err)}` }); });
     child.on("close", (code, signal) => {
       clearTimeout(timer);
@@ -1474,6 +1482,12 @@ export function defaultCountNodeProcesses({ timeoutMs = 5000, spawnImpl = spawn 
       }
       if (code !== 0) {
         finish({ count: null, sampledAt, reason: `tasklist exited with code ${code}` });
+        return;
+      }
+      // A truncated sample can end exactly on a valid row boundary. Its rows
+      // remain parseable, but cannot prove the total number of processes.
+      if (outputTruncated) {
+        finish({ count: null, sampledAt, reason: `tasklist sample truncated: output exceeded ${CHILD_BUFFER_CAP} chars` });
         return;
       }
       const parsed = parseTasklistSample(out);

@@ -2222,6 +2222,32 @@ test("TD-181(b) ③ node 进程观测：采样超时 ⇒ unknown 且不留活句
 // 序列化收敛 ⇒ 本测试红（内容缺失 / 长度超 8000）。
 const E2E_SCRATCH_ROOT = join(synthRepoRoot, ".wao", "runs");
 
+test("TD-181(b) tasklist output overflow is unknown even at complete-row boundaries", async () => {
+  const prefix = '"node.exe","123","Console","1","';
+  const suffix = '"\r\n';
+  const row = prefix + "K".repeat(64 - prefix.length - suffix.length) + suffix;
+  const atCap = row.repeat(512);
+  assert.equal(atCap.length, 32768);
+  const sample = (chunks) => defaultCountNodeProcesses({
+    timeoutMs: 2000,
+    spawnImpl: () => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      queueMicrotask(() => {
+        for (const chunk of chunks) child.stdout.emit("data", chunk);
+        child.emit("close", 0, null);
+      });
+      return child;
+    },
+  });
+  assert.equal((await sample([atCap])).count, 512, "complete sample exactly at cap remains valid");
+  for (const chunks of [[row + atCap], [row, atCap], [atCap, row]]) {
+    const result = await sample(chunks);
+    assert.equal(result.count, null, "a valid-looking retained tail must never hide omitted rows");
+    assert.match(result.reason, /truncated|exceed|overflow/i);
+  }
+});
+
 test("TD-181(b) tasklist CSV validates all five columns and numeric identities", () => {
   const invalid = [
     '"node.exe"', '"node.exe","123"',
