@@ -436,6 +436,14 @@ test("M11-12A-A8 (TD-179): settled pending rejection — cursor/fileIndex abuse 
         /delivery|review|facts|not reviewable|invalid/i,
         "a bogus pending decision must fail closed (throw), not return the advisory",
       );
+      // A later outcome must not let the resolver's legacy mode bypass the
+      // same malformed decision that readiness already rejected.
+      await writeSettledPendingRejection(s, { decisionBeforeCompleted: true, lateOutcome: "passed" });
+      await assert.rejects(
+        () => getRunDeliveryReview({ runId: s.runId, runDir: s.runDir, authorizedWorkspaceRoot: s.repo, fileIndex: 0 }),
+        /delivery|review|facts|invalid/i,
+        "late pass cannot expose diff bytes for a malformed earlier decision",
+      );
     } finally {
       await cleanup(s.repo);
       await cleanup(s.runDir);

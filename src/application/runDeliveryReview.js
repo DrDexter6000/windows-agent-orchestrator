@@ -124,7 +124,7 @@ export async function resolveRunDeliveryReviewTarget({
 
   // 3. Durable delivery facts (unambiguous: exactly one created + one matching
   //    final verification outcome). Reuses the SAME SSOT as tryAppendDecision.
-  const facts = validateDeliveryFacts(events);
+  const facts = validateDeliveryFacts(events, { expectedRunId: runId });
   if (!facts.valid) {
     throw new Error(`delivery facts not reviewable: ${facts.error}`);
   }
