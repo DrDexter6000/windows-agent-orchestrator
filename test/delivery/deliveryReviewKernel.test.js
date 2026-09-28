@@ -34,6 +34,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -845,4 +846,50 @@ test("M11-3A-COUNT: merge fixture (first-parent=base, count>1) fails on commit-c
   } finally {
     await cleanupRepo(repo);
   }
+});
+
+// ===== ID-B*: kernel identity check batching (single structured git query) =====
+//
+// Same SSOT contract as ID-B1 in delivery.test.js, proven through the kernel
+// entrypoint with its EXPLICIT full delivery commit (not HEAD): exactly ONE git
+// child query per identity check, NUL-batched four fields, same ref/cwd. The
+// count is of real child invocations via a narrowly-scoped delegating spy
+// (node:child_process.execFileSync + syncBuiltinESMExports, restored in finally).
+
+/** Identity-query detector: legacy per-field formats + the NUL-batched form. */
+const IDENTITY_QUERY_FORMATS = new Set([
+  "--format=%an", "--format=%ae", "--format=%cn", "--format=%ce",
+  "--format=%an%x00%ae%x00%cn%x00%ce",
+]);
+
+test("ID-B2: kernel identity check issues exactly ONE git query against the explicit delivery commit", async () => {
+  const { repo, deliveryRef } = await buildDeliveryScenario("wao-m113a-idb2-");
+  const require = createRequire(import.meta.url);
+  const childProcess = require("node:child_process");
+  const realExecFileSync = childProcess.execFileSync;
+  const queries = [];
+  try {
+    childProcess.execFileSync = (cmd, args, opts) => {
+      if (cmd === "git" && Array.isArray(args) && args.some((a) => IDENTITY_QUERY_FORMATS.has(a))) {
+        queries.push(args);
+      }
+      return realExecFileSync(cmd, args, opts);
+    };
+    syncBuiltinESMExports();
+    const { assertDeliveryCommitInRepository } = await import("../../src/delivery.js");
+    const proof = assertDeliveryCommitInRepository({ repoRoot: repo, deliveryRef });
+    assert.equal(proof.deliveryCommit, deliveryRef.deliveryCommit,
+      "kernel proof must succeed unchanged under the delegating spy");
+  } finally {
+    childProcess.execFileSync = realExecFileSync;
+    syncBuiltinESMExports();
+    await cleanupRepo(repo);
+  }
+  assert.equal(queries.length, 1,
+    `identity check must issue exactly ONE git child query (observed ${queries.length})`);
+  assert.deepEqual(
+    queries[0],
+    ["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", deliveryRef.deliveryCommit],
+    "the single query must target the explicit full delivery commit (same-ref), not HEAD",
+  );
 });

@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync, execFileSync } from "node:child_process";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { packageDelivery } from "../../src/delivery.js";
@@ -47,9 +48,10 @@ function makeDeliveryRef(wtPath, baseCommit, opts = {}) {
   });
 }
 
-/** Clean up temp repo with retry. */
+/** Clean up temp dir with retry. Never runs `git worktree prune`: dir may nest
+ *  inside an ancestor repo whose worktree metadata is not ours to delete
+ *  (regression proof: CB-1 at the bottom of this file). */
 async function cleanupDir(dir) {
-  try { execSync("git worktree prune", { cwd: dir, stdio: "ignore" }); } catch { /* best effort */ }
   for (let attempt = 0; attempt < 5; attempt++) {
     try { await rm(dir, { recursive: true, force: true }); return; }
     catch { if (attempt === 4) return; await new Promise(r => setTimeout(r, 50 * (attempt + 1))); }
@@ -1133,5 +1135,202 @@ test("R23-F/B-F2② Reverify/Repackage 生产路径：同款 createCallerGate �
   assert.ok(forRepackage && typeof forRepackage.acquire === "function", "Repackage 默认验证器 ⇒ 闸在场");
   // 注入式对照（测试面零牵连）：
   assert.equal(createCallerGate({ usesDefaultVerifier: false, env: {}, identity: {} }), null);
+});
+
+// ===== cleanupDir 边界回归（CB-1）：绝不 prune 祖先仓库的 worktree 元数据 =====
+//
+// cleanupDir 曾对每个待删目录无条件执行 `git worktree prune`（cwd=该目录）。
+// 当目录本身不是 Git 仓库时，Git 会沿父目录向上发现"最近的祖先仓库"并对它
+// prune——清理一个嵌套的非仓库 fixture 时，可能顺手删除 ancestor 仓库的
+// linked-worktree 管理元数据（.git/worktrees/*），这些元数据不属于被清理的
+// fixture，也不是本测试文件的所有物。本回归在一个完全合成的临时仓库内闭环
+// 取证（全部位于授权 scratch：<worktreeRoot>/.wao/runs/cleanup-boundary/），
+// 绝不对真实项目/WAO worktree 执行任何 prune：
+//   · 合成仓库自带 linked-worktree 元数据，且其工作目录已被删除 ⇒ 处于
+//     "可 prune"状态（porcelain 标注 prunable；`worktree prune --dry-run`
+//     报告将删除）——先钉死资格，防止假阴性；
+//   · 对仓库内嵌套的非仓库 fixture 调 cleanupDir：fixture 必须被删除，而
+//     祖先仓库与其 worktree 元数据必须原封不动（porcelain 全文逐字相等 +
+//     admin 目录仍在）；
+//   · 随后对合成仓库整体调 cleanupDir：自有整仓 fixture 照常可删（rm 重试
+//     路径，无 prune 依赖）。
+test("CB-1: cleanupDir removes nested non-repo fixture without pruning ancestor repo worktree metadata", async () => {
+  // 完全合成的取证仓库——显式落在授权 scratch 内（不依赖 TEMP 配置）。
+  const scratch = join(import.meta.dirname, "..", "..", ".wao", "runs", "cleanup-boundary");
+  await mkdir(scratch, { recursive: true });
+  const repo = await mkdtemp(join(scratch, "synth-repo-"));
+  const linkedWtPath = join(repo, "linked-wt");
+  const adminDir = join(repo, ".git", "worktrees", "linked-wt");
+  const gitOut = (args) => execFileSync("git", args, {
+    cwd: repo, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+  });
+  try {
+    execSync("git init -b main", { cwd: repo, stdio: "ignore" });
+    execSync('git config user.email "test@test"', { cwd: repo, stdio: "ignore" });
+    execSync('git config user.name "test"', { cwd: repo, stdio: "ignore" });
+    await writeFile(join(repo, "a.txt"), "synthetic\n");
+    execSync("git add .", { cwd: repo, stdio: "ignore" });
+    execSync('git commit -m "init"', { cwd: repo, stdio: "ignore" });
+    // 真实 linked-worktree 元数据，随后删除其工作目录使其变为"可 prune"。
+    execSync(`git worktree add "${linkedWtPath}" -b cb-linked`, { cwd: repo, stdio: "ignore" });
+    await rm(linkedWtPath, { recursive: true, force: true });
+    assert.ok(!existsSync(linkedWtPath), "linked worktree dir must be gone to become prunable");
+    assert.ok(existsSync(adminDir), "stale linked-worktree admin metadata must exist");
+    // 资格前置钉：dry-run 报告将删除（dry-run 无副作用，绝不做真 prune）。
+    // git 把 "Removing worktrees/..." 报告写到 stderr——用 shell 合并捕获。
+    const eligibility = execSync("git worktree prune --dry-run 2>&1", {
+      cwd: repo, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
+    });
+    assert.match(
+      eligibility,
+      /worktrees[/\\]linked-wt/,
+      "metadata must be pruning-eligible before the proof (else this regression proves nothing)",
+    );
+    const porcelainBefore = gitOut(["worktree", "list", "--porcelain"]);
+    // porcelain 输出用正斜杠；join() 在 Windows 产出反斜杠——归一后再比较。
+    assert.ok(porcelainBefore.includes(linkedWtPath.replace(/\\/g, "/")),
+      "porcelain must list the stale linked worktree");
+
+    // 嵌套非仓库 fixture（合成仓库的子目录，无 .git）——cleanupDir 的合法对象。
+    const fixture = await mkdtemp(join(repo, "nested-fx-"));
+    await writeFile(join(fixture, "f.txt"), "fixture\n");
+    await cleanupDir(fixture);
+
+    assert.ok(!existsSync(fixture), "nested non-repo fixture must be removed");
+    assert.ok(existsSync(join(repo, ".git")), "ancestor repo must remain");
+    assert.equal(
+      gitOut(["worktree", "list", "--porcelain"]),
+      porcelainBefore,
+      "cleanupDir on a nested non-repo fixture must NOT prune ancestor repo worktree metadata (prunable entry was lost)",
+    );
+    assert.ok(existsSync(adminDir), "linked-worktree admin metadata must survive nested-fixture cleanup");
+
+    // 自有整仓 fixture：cleanupDir 仍必须能整体删除（仅靠 rm 重试路径）。
+    await cleanupDir(repo);
+    assert.ok(!existsSync(repo), "own whole-repo fixture must be removable by cleanupDir");
+  } finally {
+    await cleanupDir(repo);
+  }
+});
+
+// ===== ID-B*：身份检查批量化回归（单次结构化 Git 查询）=====
+//
+// assertDeliveryIdentity（SSOT）收敛为每检查一次 `git show -s
+// --format=%an%x00%ae%x00%cn%x00%ce`（NUL 四字段）。本组经公共生产入口
+// verifyDelivery 钉住完整语义：
+//   · ID-B3 四个身份字段逐一出错（真实 Git 锻造）各自被拒——精确比较不变；
+//   · ID-B4 输出畸形（截断/空/多字段）以 artifact_mismatch 失败关闭——
+//     窄 mock（node:child_process.execFileSync + syncBuiltinESMExports，
+//     finally 恢复）仅拦截组合格式查询，其余全部走真实 Git；
+//   · ID-B5 合法字段带边界空白仍被接受——String/trim 语义逐字段保留。
+
+test("ID-B3: each of the four identity fields independently wrong -> artifact_mismatch (real Git)", async () => {
+  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-idb3-");
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = makeDeliveryRef(wtPath, baseCommit, { verificationCommands: ["echo ok"] });
+    // 锻造基线：与真实 delivery 提交同 tree/parent/message，只有身份不同。
+    const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+      cwd: wtPath, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+    }).trim();
+    const parent = execFileSync("git", ["rev-parse", "HEAD^"], {
+      cwd: wtPath, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
+    }).trim();
+    const waoEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "WAO Delivery",
+      GIT_AUTHOR_EMAIL: "wao-delivery@local",
+      GIT_COMMITTER_NAME: "WAO Delivery",
+      GIT_COMMITTER_EMAIL: "wao-delivery@local",
+    };
+    const cases = [
+      ["author name", { GIT_AUTHOR_NAME: "Attacker" }],
+      ["author email", { GIT_AUTHOR_EMAIL: "attacker@evil" }],
+      ["committer name", { GIT_COMMITTER_NAME: "Attacker" }],
+      ["committer email", { GIT_COMMITTER_EMAIL: "evil@local" }],
+    ];
+    for (const [label, forge] of cases) {
+      const forged = execFileSync("git", ["commit-tree", tree, "-p", parent], {
+        cwd: wtPath, encoding: "utf8", env: { ...waoEnv, ...forge },
+        input: `wao-delivery: ${RUN_ID}\n`,
+      }).trim();
+      execFileSync("git", ["update-ref", `refs/heads/${BRANCH}`, forged], {
+        cwd: wtPath, stdio: "ignore",
+      });
+      await assert.rejects(
+        () => verifyDelivery({ ...ref, deliveryCommit: forged }),
+        (err) => err.deliveryCode === "artifact_mismatch",
+        `wrong ${label} ALONE must fail verification`,
+      );
+    }
+  } finally {
+    await cleanupDir(repo);
+  }
+});
+
+test("ID-B4: malformed identity query output (truncated/empty/extra fields) -> artifact_mismatch fail-closed", async () => {
+  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-idb4-");
+  const require = createRequire(import.meta.url);
+  const childProcess = require("node:child_process");
+  const realExecFileSync = childProcess.execFileSync;
+  const COMBINED = "--format=%an%x00%ae%x00%cn%x00%ce";
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = makeDeliveryRef(wtPath, baseCommit, { verificationCommands: ["echo ok"] });
+    const malformed = [
+      ["truncated: 3 fields", "WAO Delivery\0wao-delivery@local\0WAO Delivery"],
+      ["empty output", ""],
+      ["extra: 5 fields", "WAO Delivery\0wao-delivery@local\0WAO Delivery\0wao-delivery@local\0extra"],
+    ];
+    for (const [label, payload] of malformed) {
+      childProcess.execFileSync = (cmd, args, opts) => {
+        if (cmd === "git" && Array.isArray(args) && args.includes(COMBINED)) {
+          return Buffer.from(payload, "utf8");
+        }
+        return realExecFileSync(cmd, args, opts);
+      };
+      syncBuiltinESMExports();
+      await assert.rejects(
+        () => verifyDelivery(ref),
+        (err) => err.deliveryCode === "artifact_mismatch",
+        `malformed identity output (${label}) must fail closed with the supplied code`,
+      );
+    }
+  } finally {
+    childProcess.execFileSync = realExecFileSync;
+    syncBuiltinESMExports();
+    await cleanupDir(repo);
+  }
+});
+
+test("ID-B5: legal identity fields with boundary whitespace remain accepted (String/trim semantics per field)", async () => {
+  const { repo, baseCommit, wtPath } = await makeRepoWithWorktree("wao-ver-idb5-");
+  const require = createRequire(import.meta.url);
+  const childProcess = require("node:child_process");
+  const realExecFileSync = childProcess.execFileSync;
+  const COMBINED = "--format=%an%x00%ae%x00%cn%x00%ce";
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "modified\n");
+    const ref = makeDeliveryRef(wtPath, baseCommit, { verificationCommands: ["echo ok"] });
+    // 四个字段全为合法值，但各自带边界空白（含真实的尾随换行形态）——
+    // trim 后精确相等 ⇒ 必须接受。真实 Git 会剥除 ident 里的空白，故经
+    // 同一窄 mock 注入（其余查询全部走真实 Git）。
+    const payload = "  WAO Delivery \0\twao-delivery@local\t\0\n WAO Delivery \n\0 wao-delivery@local\n";
+    childProcess.execFileSync = (cmd, args, opts) => {
+      if (cmd === "git" && Array.isArray(args) && args.includes(COMBINED)) {
+        return Buffer.from(payload, "utf8");
+      }
+      return realExecFileSync(cmd, args, opts);
+    };
+    syncBuiltinESMExports();
+    const result = await verifyDelivery(ref);
+    assert.equal(result.outcome, "passed",
+      "boundary-whitespace-wrapped legal identity fields must be accepted after per-field trim");
+    assert.equal(result.delivery.verification.status, "passed");
+  } finally {
+    childProcess.execFileSync = realExecFileSync;
+    syncBuiltinESMExports();
+    await cleanupDir(repo);
+  }
 });
 

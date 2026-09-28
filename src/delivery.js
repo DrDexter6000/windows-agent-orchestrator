@@ -229,20 +229,37 @@ function parseNul(output) {
  * verifyPostCommitIntegrity (packaging) and assertCommittedDeliveryRef /
  * assertDeliveryCommitInRepository (verification proof).
  *
+ * Batched query: ONE `git show -s` per check returns all four identity fields
+ * NUL-separated (%an%x00%ae%x00%cn%x00%ce) for the SAME ref in the SAME cwd as
+ * the historical per-field queries. Per-field String/trim semantics and the
+ * exact comparisons are unchanged; Git execution errors propagate identically.
+ * The output must carry exactly four fields — truncated, empty, or extra-field
+ * output fails closed with the supplied errorDeliveryCode.
+ *
  * @param {string} cwd — repository/worktree path
  * @param {string} errorDeliveryCode — DeliveryCode to throw on mismatch
  *   ("commit_integrity" for packaging, "artifact_mismatch" for verification)
  * @param {string} [commitRef="HEAD"] — the commit to check. Defaults to HEAD for
  *   packaging/linked-worktree callers; the source-repo kernel passes an explicit
  *   full delivery commit hash so the check is independent of the working tree.
- * @throws {DeliveryError} if author or committer identity does not match
+ * @throws {DeliveryError} if author or committer identity does not match, or the
+ *   query output is not exactly four NUL-separated fields
  */
 function assertDeliveryIdentity(cwd, errorDeliveryCode, commitRef = "HEAD") {
   const ref = commitRef;
-  const authorName = String(git(["show", "-s", "--format=%an", ref], { cwd })).trim();
-  const authorEmail = String(git(["show", "-s", "--format=%ae", ref], { cwd })).trim();
-  const committerName = String(git(["show", "-s", "--format=%cn", ref], { cwd })).trim();
-  const committerEmail = String(git(["show", "-s", "--format=%ce", ref], { cwd })).trim();
+  const fields = String(
+    git(["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", ref], { cwd }),
+  ).split("\0");
+  if (fields.length !== 4) {
+    throw new DeliveryError(
+      errorDeliveryCode,
+      `identity query for ${ref} returned ${fields.length} fields (expected 4)`,
+    );
+  }
+  const authorName = fields[0].trim();
+  const authorEmail = fields[1].trim();
+  const committerName = fields[2].trim();
+  const committerEmail = fields[3].trim();
   if (authorName !== DELIVERY_IDENTITY.name || authorEmail !== DELIVERY_IDENTITY.email) {
     throw new DeliveryError(
       errorDeliveryCode,

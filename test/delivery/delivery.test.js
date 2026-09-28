@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync, execFileSync } from "node:child_process";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -225,12 +226,25 @@ test("2A-07: empty diff fails closed", async () => {
 
 test("2A-08: non-Git path fails closed", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wao-notgit-"));
+  // Fixture guard: WAO run rules pin TEMP/TMP inside the worktree scratch
+  // (<worktreeRoot>/.wao/runs/<task>/). Git repo discovery would then walk UP
+  // from this mkdtemp fixture into the REAL worktree and turn the intended
+  // "non-Git path" into an ancestor-repo hit (toplevel mismatch →
+  // worktree_path_mismatch instead of not_a_git_repo). GIT_CEILING_DIRECTORIES
+  // blocks upward discovery for the duration of this one assertion, making the
+  // fixture a genuine non-repo path under ANY TEMP location (with the default
+  // out-of-repo TEMP the ceiling is simply never reached). The assertion itself
+  // is unchanged; env is restored in finally.
+  const previousCeiling = process.env.GIT_CEILING_DIRECTORIES;
+  process.env.GIT_CEILING_DIRECTORIES = join(import.meta.dirname, "..", "..").replace(/\\/g, "/");
   try {
     assertDeliveryError(
       () => inspectDelivery(baseInput(dir, "0".repeat(40))),
       "not_a_git_repo",
     );
   } finally {
+    if (previousCeiling === undefined) delete process.env.GIT_CEILING_DIRECTORIES;
+    else process.env.GIT_CEILING_DIRECTORIES = previousCeiling;
     await rm(dir, { recursive: true, force: true });
   }
 });
@@ -1779,4 +1793,54 @@ test("2E-02: omitting rename destinations or sources from allowedPaths fails dis
   } finally {
     await cleanupRepo(repo2);
   }
+});
+
+// ===== ID-B*: delivery identity check batching (single structured git query) =====
+//
+// assertDeliveryIdentity is the SSOT shared by packaging (verifyPostCommitIntegrity,
+// HEAD), verification and recovery (explicit commit). The historical form issued
+// FOUR separate `git show -s --format=%an|%ae|%cn|%ce` child processes per check.
+// These regressions pin the converged contract: exactly ONE git child query per
+// identity check, returning all four fields NUL-separated
+// (%an%x00%ae%x00%cn%x00%ce), same ref and same cwd as before. The proof counts
+// REAL child-process invocations through a narrowly-scoped delegating spy
+// (node:child_process.execFileSync + syncBuiltinESMExports, restored in finally)
+// — it is not a speed threshold.
+
+/** Identity-query detector: legacy per-field formats + the NUL-batched form. */
+const IDENTITY_QUERY_FORMATS = new Set([
+  "--format=%an", "--format=%ae", "--format=%cn", "--format=%ce",
+  "--format=%an%x00%ae%x00%cn%x00%ce",
+]);
+
+test("ID-B1: packageDelivery identity check issues exactly ONE git query (NUL-batched four fields, HEAD ref)", async () => {
+  const { repo, baseCommit } = await makeRepo();
+  const wtPath = makeWorktree(repo);
+  const require = createRequire(import.meta.url);
+  const childProcess = require("node:child_process");
+  const realExecFileSync = childProcess.execFileSync;
+  const queries = [];
+  try {
+    await writeFile(join(wtPath, "src", "a.js"), "const a = 2;\n");
+    childProcess.execFileSync = (cmd, args, opts) => {
+      if (cmd === "git" && Array.isArray(args) && args.some((a) => IDENTITY_QUERY_FORMATS.has(a))) {
+        queries.push(args);
+      }
+      return realExecFileSync(cmd, args, opts);
+    };
+    syncBuiltinESMExports();
+    const ref = packageDelivery(baseInput(wtPath, baseCommit, { verificationCommands: ["echo ok"] }));
+    assert.ok(ref.deliveryCommit, "packaging must succeed unchanged under the delegating spy");
+  } finally {
+    childProcess.execFileSync = realExecFileSync;
+    syncBuiltinESMExports();
+    await cleanupRepo(repo);
+  }
+  assert.equal(queries.length, 1,
+    `identity check must issue exactly ONE git child query (observed ${queries.length})`);
+  assert.deepEqual(
+    queries[0],
+    ["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", "HEAD"],
+    "the single query must be the structured NUL four-field form against the same ref (HEAD)",
+  );
 });
