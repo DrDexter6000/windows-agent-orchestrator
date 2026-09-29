@@ -45,6 +45,9 @@ import { COMMAND_NAMES, RUN_USAGE_TEXT } from "../cliHelp.js";
 // R11-1: assertValidReasoningOverride is the same SSOT discipline for the
 // per-dispatch --reasoning effort override (closed REASONING_EFFORTS set).
 import { dispatchRun, DeliveryCwdRequiredError, assertValidModelOverride, assertValidReasoningOverride } from "../application/runDispatch.js";
+// ADR 0035 S3: dispatch-startup advisory line renderer (repo resource counts;
+// fail-open — any git failure/timeout omits the line entirely).
+import { renderDispatchResourceAdvisory } from "../dispatchResourceAdvisory.js";
 
 function parseAgentList(args) {
   const agents = [];
@@ -464,6 +467,18 @@ export async function runCommand(args, config) {
       + "(remove --no-isolate, or drop --read-only)",
     );
   }
+  // ADR 0035 S3（fail-open advisory）：派发启动时向 Lead 报一行仓库资源存量
+  // （注册 worktree 总数 + wao/run_* 分支总数，RAW 计数、无阈值；详情走
+  // `npm run hygiene`）。计数走 git 子进程，失败/超时 → 该行完全省略，不报错、
+  // 不加失败码、不影响任何既有输出与退出码（machineGatePaths 的 advisory
+  // discipline 先例）。stderr 输出（printObservationDeadlineNotice 先例：不污染
+  // --format json 的 stdout 管道）。采样 cwd = 显式 --cwd（有则用之），否则 CLI
+  // 进程 cwd——两查询都是 repo 级事实，同一 repo 任何 worktree 观测一致，无需
+  // 复刻 RunManager 的 agent 默认 cwd 解析。
+  const advisoryLine = renderDispatchResourceAdvisory(
+    options.cwd ? resolve(options.cwd) : process.cwd(),
+  );
+  if (advisoryLine) console.error(advisoryLine);
   // M9-7A: background delivery is now supported — the delivery request is
   // forwarded through the shared dispatchRun service to the detached runner.
   // P2（M7）：--background = detached runner 托管。CLI 预生成 runId、fork runner、立即返回。

@@ -103,6 +103,12 @@ const CORE_TOP = Object.freeze(new Set([
   "src/deliveryFailureCodes.js",
   "src/deliveryVerification.js",
   "src/diagnosis.js",
+  // ADR 0035 S3 登记（2026-09-30）：派发启动 advisory 资源计数行（注册
+  // worktree 总数 + wao/run_* 分支总数的 RAW 计数；fail-open——git 失败/
+  // 超时省略整行，永不阻塞派发）。零相对出边（node:child_process only，
+  // machineGatePaths 同型）；唯一消费方 src/commands/run.js（adapters 下向
+  // import）。
+  "src/dispatchResourceAdvisory.js",
   "src/frictionLog.js",
   "src/gitLocalExclude.js",
   "src/installRoot.js",
