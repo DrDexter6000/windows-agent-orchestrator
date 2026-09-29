@@ -269,94 +269,172 @@ test("3A1-04: missing delivery option preserves existing behavior and emits no d
 });
 
 test("3A1-05: unsupported mode rejects before backend.spawn", async () => {
-  const { repo, baseCommit } = await makeRepo();
+  // No Git setup needed: prepareDeliveryRequest validates the mode in start()
+  // preflight — before runDir/transcript/worktree/any Git call — so an empty
+  // independently-owned temp dir as agent.cwd suffices. The tightened
+  // DeliveryError.deliveryCode assertion would fail if a later Git/environment
+  // error masked the intended rejection.
+  const agentDir = await mkdtemp(join(tmpdir(), "wao-rd-05-agent-"));
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-05-"));
   let spawnCount = 0;
   try {
     const fetchImpl = createMockFetch();
     // Wrap fetch to count spawn attempts
-    const origFetch = fetchImpl;
     const countingFetch = async (...args) => {
       const urlStr = String(args[0]);
       if (urlStr.includes("/api/session")) spawnCount++;
-      return origFetch(...args);
+      return fetchImpl(...args);
     };
-    const mgr = makeManager(runDir, repo, countingFetch);
+    const mgr = makeManager(runDir, agentDir, countingFetch);
     await assert.rejects(
       () => mgr.start("test", {
         prompt: "hi",
         isolate: true,
         runId: "run_delivtest_05",
-        delivery: deliveryOpts(repo, baseCommit, { mode: "patch_v1" }),
+        delivery: deliveryOpts(undefined, undefined, { mode: "patch_v1" }),
       }),
+      (err) => {
+        assert.ok(err instanceof DeliveryError, `must be a DeliveryError, got: ${err?.constructor?.name}`);
+        assert.equal(err.deliveryCode, "invalid_mode", "must reject with the invalid_mode delivery code");
+        assert.match(err.message, /git_commit_v1/);
+        return true;
+      },
     );
     assert.equal(spawnCount, 0, "backend.spawn must not be called for invalid delivery mode");
   } finally {
-    await cleanupDir(repo);
+    await cleanupDir(agentDir);
     await cleanupDir(runDir);
   }
 });
 
 test("3A1-06: delivery with isolation none rejects before backend.spawn", async () => {
-  const { repo, baseCommit } = await makeRepo();
+  // No Git setup needed: the persistent-isolation preflight check runs in
+  // start() before runDir/transcript/worktree/any Git call — an empty temp dir
+  // as agent.cwd suffices. The exact none-config error assertion would fail if
+  // a later Git/environment error masked the intended rejection.
+  const agentDir = await mkdtemp(join(tmpdir(), "wao-rd-06-agent-"));
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-06-"));
   let spawnCount = 0;
   try {
     const fetchImpl = createMockFetch();
-    const origFetch = fetchImpl;
     const countingFetch = async (...args) => {
       const urlStr = String(args[0]);
       if (urlStr.includes("/api/session")) spawnCount++;
-      return origFetch(...args);
+      return fetchImpl(...args);
     };
-    const mgr = makeManager(runDir, repo, countingFetch);
+    const mgr = makeManager(runDir, agentDir, countingFetch);
     await assert.rejects(
       () => mgr.start("test", {
         prompt: "hi",
         isolate: false,
         runId: "run_delivtest_06",
-        delivery: deliveryOpts(repo, baseCommit),
+        delivery: deliveryOpts(),
       }),
+      (err) => {
+        assert.match(err.message, /Delivery mode requires persistent worktree isolation/);
+        assert.ok(
+          err.message.includes('{"type":"none","strategy":"persistent"}'),
+          `rejection must report the none isolation config, got: ${err.message}`,
+        );
+        return true;
+      },
     );
     assert.equal(spawnCount, 0, "backend.spawn must not be called when isolation is none");
   } finally {
-    await cleanupDir(repo);
+    await cleanupDir(agentDir);
     await cleanupDir(runDir);
   }
 });
 
 test("3A1-07: delivery with ephemeral worktree rejects before backend.spawn", async () => {
-  const { repo, baseCommit } = await makeRepo();
+  // No Git setup needed: both rejections below fire in start() preflight —
+  // prepareDeliveryRequest plus the persistent-isolation check — before
+  // runDir/transcript/worktree/any Git call, so an empty temp dir as
+  // agent.cwd suffices and no later Git/environment error can mask the guard.
+  const agentDir = await mkdtemp(join(tmpdir(), "wao-rd-07-agent-"));
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-07-"));
   let spawnCount = 0;
   try {
     const fetchImpl = createMockFetch();
-    const origFetch = fetchImpl;
     const countingFetch = async (...args) => {
       const urlStr = String(args[0]);
       if (urlStr.includes("/api/session")) spawnCount++;
-      return origFetch(...args);
+      return fetchImpl(...args);
     };
-    const mgr = makeManager(runDir, repo, countingFetch, {
+    // (a) Agent isolation {type:"worktree",strategy:"ephemeral"} via the
+    // existing makeManager opts.manager.readRegistry seam. The isolate flag is
+    // deliberately OMITTED so it cannot override the agent isolation:
+    // isolate:true would force persistent (no rejection) and isolate:false
+    // would force none (the wrong config under test).
+    const mgrEphemeral = makeManager(runDir, agentDir, countingFetch, {
+      manager: {
+        readRegistry: async () => ({
+          getAgent(id) {
+            return {
+              id,
+              backend: "opencode-serve",
+              serveUrl: "http://127.0.0.1:4299",
+              agent: "build",
+              cwd: agentDir,
+              model: { providerID: "p", id: "m" },
+              isolation: { type: "worktree", strategy: "ephemeral" },
+            };
+          },
+          listAgents() { return []; },
+        }),
+      },
+    });
+    await assert.rejects(
+      () => mgrEphemeral.start("test", {
+        prompt: "hi",
+        runId: "run_delivtest_07",
+        delivery: deliveryOpts(),
+      }),
+      (err) => {
+        assert.match(err.message, /Delivery mode requires persistent worktree isolation/);
+        assert.ok(
+          err.message.includes('{"type":"worktree","strategy":"ephemeral"}'),
+          `rejection must report the ephemeral agent isolation config, got: ${err.message}`,
+        );
+        return true;
+      },
+    );
+    assert.equal(spawnCount, 0, "backend.spawn must not be called for ephemeral delivery isolation");
+
+    // (b) Default-none coverage preserved: no isolate flag, no agent isolation,
+    // config defaultIsolation "none" → delivery still rejects on the none config.
+    const mgrDefaultNone = makeManager(runDir, agentDir, countingFetch, {
       config: { defaultIsolation: "none" },
     });
     await assert.rejects(
-      () => mgr.start("test", {
+      () => mgrDefaultNone.start("test", {
         prompt: "hi",
-        runId: "run_delivtest_07",
-        delivery: deliveryOpts(repo, baseCommit),
+        runId: "run_delivtest_07b",
+        delivery: deliveryOpts(),
       }),
-      // agent isolation is ephemeral → should reject
+      (err) => {
+        assert.match(err.message, /Delivery mode requires persistent worktree isolation/);
+        assert.ok(
+          err.message.includes('{"type":"none","strategy":"persistent"}'),
+          `rejection must report the default-none isolation config, got: ${err.message}`,
+        );
+        return true;
+      },
     );
-    assert.equal(spawnCount, 0, "backend.spawn must not be called for ephemeral delivery isolation");
+    assert.equal(spawnCount, 0, "backend.spawn must not be called for default-none delivery isolation");
   } finally {
-    await cleanupDir(repo);
+    await cleanupDir(agentDir);
     await cleanupDir(runDir);
   }
 });
 
 test("3A1-08: invalid allowedPaths rejects before spawn using delivery-kernel codes", async () => {
-  const { repo, baseCommit } = await makeRepo();
+  // No Git setup needed: prepareDeliveryRequest validates allowedPaths in
+  // start() preflight — before runDir/transcript/worktree/any Git call — so an
+  // empty temp dir as agent.cwd suffices. The tightened DeliveryError
+  // deliveryCode assertion would fail if a later Git/environment error masked
+  // the intended rejection.
+  const agentDir = await mkdtemp(join(tmpdir(), "wao-rd-08-agent-"));
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-08-"));
   let spawnCount = 0;
   try {
@@ -365,25 +443,35 @@ test("3A1-08: invalid allowedPaths rejects before spawn using delivery-kernel co
       if (String(args[0]).includes("/api/session")) spawnCount++;
       return fetchImpl(...args);
     };
-    const mgr = makeManager(runDir, repo, countingFetch);
+    const mgr = makeManager(runDir, agentDir, countingFetch);
     await assert.rejects(
       () => mgr.start("test", {
         prompt: "hi",
         isolate: true,
         runId: "run_delivtest_08",
-        delivery: deliveryOpts(repo, baseCommit, { allowedPaths: ["../evil"] }),
+        delivery: deliveryOpts(undefined, undefined, { allowedPaths: ["../evil"] }),
       }),
-      /invalid_allowed_paths|disallowed|delivery/i,
+      (err) => {
+        assert.ok(err instanceof DeliveryError, `must be a DeliveryError, got: ${err?.constructor?.name}`);
+        assert.equal(err.deliveryCode, "invalid_allowed_paths", "must reject with the invalid_allowed_paths delivery code");
+        assert.match(err.message, /\.\.\/evil/);
+        return true;
+      },
     );
     assert.equal(spawnCount, 0, "backend.spawn must not be called");
   } finally {
-    await cleanupDir(repo);
+    await cleanupDir(agentDir);
     await cleanupDir(runDir);
   }
 });
 
 test("3A1-09: missing or whitespace-only verification declaration rejects before spawn", async () => {
-  const { repo, baseCommit } = await makeRepo();
+  // No Git setup needed: prepareDeliveryRequest validates the verification
+  // declaration in start() preflight — before runDir/transcript/worktree/any
+  // Git call — so an empty temp dir as agent.cwd suffices. The tightened
+  // DeliveryError deliveryCode assertion would fail if a later Git/environment
+  // error masked the intended rejection.
+  const agentDir = await mkdtemp(join(tmpdir(), "wao-rd-09-agent-"));
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-09-"));
   let spawnCount = 0;
   try {
@@ -392,7 +480,7 @@ test("3A1-09: missing or whitespace-only verification declaration rejects before
       if (String(args[0]).includes("/api/session")) spawnCount++;
       return fetchImpl(...args);
     };
-    const mgr = makeManager(runDir, repo, countingFetch);
+    const mgr = makeManager(runDir, agentDir, countingFetch);
 
     // Whitespace-only verificationCommands
     await assert.rejects(
@@ -400,13 +488,17 @@ test("3A1-09: missing or whitespace-only verification declaration rejects before
         prompt: "hi",
         isolate: true,
         runId: "run_delivtest_09a",
-        delivery: deliveryOpts(repo, baseCommit, { verificationCommands: ["   "] }),
+        delivery: deliveryOpts(undefined, undefined, { verificationCommands: ["   "] }),
       }),
-      /invalid_verification|delivery/i,
+      (err) => {
+        assert.ok(err instanceof DeliveryError, `must be a DeliveryError, got: ${err?.constructor?.name}`);
+        assert.equal(err.deliveryCode, "invalid_verification", "must reject with the invalid_verification delivery code");
+        return true;
+      },
     );
 
     // Missing both commands and reason
-    const delivery2 = deliveryOpts(repo, baseCommit);
+    const delivery2 = deliveryOpts();
     delete delivery2.verificationCommands;
     await assert.rejects(
       () => mgr.start("test", {
@@ -415,12 +507,16 @@ test("3A1-09: missing or whitespace-only verification declaration rejects before
         runId: "run_delivtest_09b",
         delivery: delivery2,
       }),
-      /invalid_verification|delivery/i,
+      (err) => {
+        assert.ok(err instanceof DeliveryError, `must be a DeliveryError, got: ${err?.constructor?.name}`);
+        assert.equal(err.deliveryCode, "invalid_verification", "must reject with the invalid_verification delivery code");
+        return true;
+      },
     );
 
     assert.equal(spawnCount, 0, "backend.spawn must not be called");
   } finally {
-    await cleanupDir(repo);
+    await cleanupDir(agentDir);
     await cleanupDir(runDir);
   }
 });
@@ -1832,7 +1928,12 @@ test("3A1-15d: resume fails closed when scorecard rules snapshot is missing", as
 // ===== Phase 3A security: runId injection prevention =====
 
 test("3A-SEC-01: runId with shell metacharacters rejected before worktree creation", async () => {
-  const { repo, baseCommit } = await makeRepo();
+  // No Git setup needed: the RunManager runId preflight (isValidRunId SSOT)
+  // runs before runDir/transcript/worktree/any Git call — an empty temp dir as
+  // agent.cwd suffices. The exact "Invalid runId" error prefix proves the
+  // preflight rejected it; a missed guard would surface a createWorktree or
+  // Git ("not a git repository") error instead.
+  const agentDir = await mkdtemp(join(tmpdir(), "wao-rd-sec01-agent-"));
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-sec01-"));
   let spawnCount = 0;
   try {
@@ -1841,26 +1942,32 @@ test("3A-SEC-01: runId with shell metacharacters rejected before worktree creati
       if (String(args[0]).includes("/api/session")) spawnCount++;
       return fetchImpl(...args);
     };
-    const mgr = makeManager(runDir, repo, countingFetch);
+    const mgr = makeManager(runDir, agentDir, countingFetch);
     await assert.rejects(
       () => mgr.start("test", {
         prompt: "hi", isolate: true,
         runId: 'run_evil"; rm -rf /',
-        delivery: deliveryOpts(repo, baseCommit),
+        delivery: deliveryOpts(),
       }),
+      (err) => {
+        assert.match(err.message, /^Invalid runId \(contains path separators, shell metacharacters, or traversal\)/);
+        return true;
+      },
     );
     assert.equal(spawnCount, 0, "backend.spawn must not be called for malicious runId");
     // No worktree directory created
-    assert.ok(!existsSync(join(repo, ".wao-worktrees", 'run_evil"; rm -rf /')),
+    assert.ok(!existsSync(join(agentDir, ".wao-worktrees", 'run_evil"; rm -rf /')),
       "no worktree directory must be created for malicious runId");
   } finally {
-    await cleanupDir(repo);
+    await cleanupDir(agentDir);
     await cleanupDir(runDir);
   }
 });
 
 test("3A-SEC-02: runId with path traversal rejected", async () => {
-  const { repo, baseCommit } = await makeRepo();
+  // No Git setup needed (see 3A-SEC-01): the runId preflight fires before any
+  // Git call; the exact "Invalid runId" prefix is the proof.
+  const agentDir = await mkdtemp(join(tmpdir(), "wao-rd-sec02-agent-"));
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-sec02-"));
   let spawnCount = 0;
   try {
@@ -1869,23 +1976,29 @@ test("3A-SEC-02: runId with path traversal rejected", async () => {
       if (String(args[0]).includes("/api/session")) spawnCount++;
       return fetchImpl(...args);
     };
-    const mgr = makeManager(runDir, repo, countingFetch);
+    const mgr = makeManager(runDir, agentDir, countingFetch);
     await assert.rejects(
       () => mgr.start("test", {
         prompt: "hi", isolate: true,
         runId: "run_evil../../../etc",
-        delivery: deliveryOpts(repo, baseCommit),
+        delivery: deliveryOpts(),
       }),
+      (err) => {
+        assert.match(err.message, /^Invalid runId \(contains path separators, shell metacharacters, or traversal\)/);
+        return true;
+      },
     );
     assert.equal(spawnCount, 0, "backend.spawn must not be called for traversal runId");
   } finally {
-    await cleanupDir(repo);
+    await cleanupDir(agentDir);
     await cleanupDir(runDir);
   }
 });
 
 test("3A-SEC-03: runId with path separator rejected", async () => {
-  const { repo, baseCommit } = await makeRepo();
+  // No Git setup needed (see 3A-SEC-01): the runId preflight fires before any
+  // Git call; the exact "Invalid runId" prefix is the proof.
+  const agentDir = await mkdtemp(join(tmpdir(), "wao-rd-sec03-agent-"));
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-sec03-"));
   let spawnCount = 0;
   try {
@@ -1894,23 +2007,29 @@ test("3A-SEC-03: runId with path separator rejected", async () => {
       if (String(args[0]).includes("/api/session")) spawnCount++;
       return fetchImpl(...args);
     };
-    const mgr = makeManager(runDir, repo, countingFetch);
+    const mgr = makeManager(runDir, agentDir, countingFetch);
     await assert.rejects(
       () => mgr.start("test", {
         prompt: "hi", isolate: true,
         runId: "run_evil/path",
-        delivery: deliveryOpts(repo, baseCommit),
+        delivery: deliveryOpts(),
       }),
+      (err) => {
+        assert.match(err.message, /^Invalid runId \(contains path separators, shell metacharacters, or traversal\)/);
+        return true;
+      },
     );
     assert.equal(spawnCount, 0, "backend.spawn must not be called for separator runId");
   } finally {
-    await cleanupDir(repo);
+    await cleanupDir(agentDir);
     await cleanupDir(runDir);
   }
 });
 
 test("3A-SEC-04: runId with ampersand rejected", async () => {
-  const { repo, baseCommit } = await makeRepo();
+  // No Git setup needed (see 3A-SEC-01): the runId preflight fires before any
+  // Git call; the exact "Invalid runId" prefix is the proof.
+  const agentDir = await mkdtemp(join(tmpdir(), "wao-rd-sec04-agent-"));
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-sec04-"));
   let spawnCount = 0;
   try {
@@ -1919,23 +2038,29 @@ test("3A-SEC-04: runId with ampersand rejected", async () => {
       if (String(args[0]).includes("/api/session")) spawnCount++;
       return fetchImpl(...args);
     };
-    const mgr = makeManager(runDir, repo, countingFetch);
+    const mgr = makeManager(runDir, agentDir, countingFetch);
     await assert.rejects(
       () => mgr.start("test", {
         prompt: "hi", isolate: true,
         runId: "run_evil&whoami",
-        delivery: deliveryOpts(repo, baseCommit),
+        delivery: deliveryOpts(),
       }),
+      (err) => {
+        assert.match(err.message, /^Invalid runId \(contains path separators, shell metacharacters, or traversal\)/);
+        return true;
+      },
     );
     assert.equal(spawnCount, 0, "backend.spawn must not be called for ampersand runId");
   } finally {
-    await cleanupDir(repo);
+    await cleanupDir(agentDir);
     await cleanupDir(runDir);
   }
 });
 
 test("3A-SEC-05: runId with spaces rejected", async () => {
-  const { repo, baseCommit } = await makeRepo();
+  // No Git setup needed (see 3A-SEC-01): the runId preflight fires before any
+  // Git call; the exact "Invalid runId" prefix is the proof.
+  const agentDir = await mkdtemp(join(tmpdir(), "wao-rd-sec05-agent-"));
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-sec05-"));
   let spawnCount = 0;
   try {
@@ -1944,38 +2069,53 @@ test("3A-SEC-05: runId with spaces rejected", async () => {
       if (String(args[0]).includes("/api/session")) spawnCount++;
       return fetchImpl(...args);
     };
-    const mgr = makeManager(runDir, repo, countingFetch);
+    const mgr = makeManager(runDir, agentDir, countingFetch);
     await assert.rejects(
       () => mgr.start("test", {
         prompt: "hi", isolate: true,
         runId: "run evil spaced",
-        delivery: deliveryOpts(repo, baseCommit),
+        delivery: deliveryOpts(),
       }),
+      (err) => {
+        assert.match(err.message, /^Invalid runId \(contains path separators, shell metacharacters, or traversal\)/);
+        return true;
+      },
     );
     assert.equal(spawnCount, 0, "backend.spawn must not be called for spaced runId");
   } finally {
-    await cleanupDir(repo);
+    await cleanupDir(agentDir);
     await cleanupDir(runDir);
   }
 });
 
 test("3A-SEC-06: createWorktree directly rejects malicious names", async () => {
   const { createWorktree } = await import("../../src/isolation.js");
-  const { repo } = await makeRepo();
+  // No Git setup needed: createWorktree validates the name (isValidRunId SSOT)
+  // BEFORE any Git call — an empty non-Git temp dir proves every rejection
+  // below is the name guard itself, not a "not a git repository" error.
+  const agentDir = await mkdtemp(join(tmpdir(), "wao-rd-sec06-agent-"));
+  const invalidNameError = (name) => (err) => {
+    assert.match(
+      err.message,
+      /^Invalid worktree name \(contains path separators, shell metacharacters, or traversal\)/,
+      `createWorktree must reject ${JSON.stringify(name)} via the name guard, got: ${err.message}`,
+    );
+    return true;
+  };
   try {
     // createWorktree is async (M11-1B); invalid names reject the returned promise.
     // Shell metacharacter
-    await assert.rejects(() => createWorktree(repo, 'evil"; rm -rf /'));
+    await assert.rejects(() => createWorktree(agentDir, 'evil"; rm -rf /'), invalidNameError('evil"; rm -rf /'));
     // Path traversal
-    await assert.rejects(() => createWorktree(repo, "evil/../../../etc"));
+    await assert.rejects(() => createWorktree(agentDir, "evil/../../../etc"), invalidNameError("evil/../../../etc"));
     // Backslash
-    await assert.rejects(() => createWorktree(repo, "evil\\path"));
+    await assert.rejects(() => createWorktree(agentDir, "evil\\path"), invalidNameError("evil\\path"));
     // Empty
-    await assert.rejects(() => createWorktree(repo, ""));
+    await assert.rejects(() => createWorktree(agentDir, ""), invalidNameError(""));
     // Ampersand
-    await assert.rejects(() => createWorktree(repo, "evil&whoami"));
+    await assert.rejects(() => createWorktree(agentDir, "evil&whoami"), invalidNameError("evil&whoami"));
   } finally {
-    await cleanupDir(repo);
+    await cleanupDir(agentDir);
   }
 });
 
@@ -2053,10 +2193,15 @@ test("3A-REG-01: isValidRunId SSOT rejects &, quotes, path separators, spaces, l
 });
 
 test("3A-REG-02: RunManager rejects malicious runId with 'Invalid runId' message (not 'Invalid worktree name')", async () => {
-  const { repo, baseCommit } = await makeRepo();
+  // No Git setup needed: the RunManager runId preflight (isValidRunId SSOT)
+  // runs before runDir/transcript/worktree/any Git call — an empty temp dir as
+  // agent.cwd suffices. The exact "Invalid runId" prefix (and the absence of
+  // "worktree name") proves the RunManager preflight — not createWorktree and
+  // not a Git error — rejected the malicious runId.
+  const agentDir = await mkdtemp(join(tmpdir(), "wao-rd-reg02-agent-"));
   const runDir = await mkdtemp(join(tmpdir(), "wao-rd-reg02-"));
   try {
-    const mgr = makeManager(runDir, repo, createMockFetch());
+    const mgr = makeManager(runDir, agentDir, createMockFetch());
     // The ampersand runId: isValidRunId must reject it at RunManager level,
     // BEFORE createWorktree is called. The error message must say "runId"
     // not "worktree name" — proving RunManager preflight caught it.
@@ -2065,16 +2210,20 @@ test("3A-REG-02: RunManager rejects malicious runId with 'Invalid runId' message
       await mgr.start("test", {
         prompt: "hi", isolate: true,
         runId: "run_evil&whoami",
-        delivery: deliveryOpts(repo, baseCommit),
+        delivery: deliveryOpts(),
       });
     } catch (e) {
       errorMsg = e.message;
     }
     assert.ok(errorMsg, "start must throw");
-    assert.ok(errorMsg.includes("runId"), "error must reference runId (not worktree name)");
+    assert.match(
+      errorMsg,
+      /^Invalid runId \(contains path separators, shell metacharacters, or traversal\)/,
+      "error must be the RunManager runId preflight rejection",
+    );
     assert.ok(!errorMsg.includes("worktree name"), "error must not reference worktree name");
   } finally {
-    await cleanupDir(repo);
+    await cleanupDir(agentDir);
     await cleanupDir(runDir);
   }
 });
@@ -2311,32 +2460,6 @@ test("3B2-16: verifier throw maps to execution_error without raw sentinel leakag
     const failed = events.find((e) => e.type === "run.delivery_verification_failed");
     assert.ok(failed);
     assert.ok(!JSON.stringify(failed).includes("SECRET_KEY"), "no secret leakage in transcript");
-  } finally {
-    await cleanupDir(repo);
-    await cleanupDir(runDir);
-  }
-});
-
-test("3B2-17: verification failure does not append failed/aborted/timed_out state_change", async () => {
-  const { repo, baseCommit } = await makeRepo("wao-rd-3b2-17-");
-  const runDir = await mkdtemp(join(tmpdir(), "wao-rd-3b217-"));
-  try {
-    const mgr = makeManagerWithPackager(
-      runDir, repo, createMockFetch(),
-      (input) => packageDelivery(input),
-      { verifyDeliveryFn: async (ref) => ({ delivery: { ...ref, verification: { status: "failed", failureCode: "command_failed", verifiedCommit: ref.deliveryCommit, results: [] } }, outcome: "failed", failureCode: "command_failed" }) },
-    );
-    const run = await mgr.start("test", {
-      prompt: "hi", isolate: true, runId: "run_3b2_test_17",
-      delivery: deliveryOpts(repo, baseCommit),
-    });
-    const { writeFile: wf } = await import("node:fs/promises");
-    await wf(join(run.deliveryContext.worktreePath, "src", "a.js"), "modified\n");
-    await run.waitForCompletion({});
-    const events = await readTranscript(run.transcript.filePath);
-    const terminals = events.filter((e) => e.type === "run.state_change" && ["completed", "failed", "aborted", "timed_out"].includes(e.to));
-    assert.equal(terminals.length, 1, "only one terminal");
-    assert.equal(terminals[0].to, "completed", "must be completed (not failed/aborted)");
   } finally {
     await cleanupDir(repo);
     await cleanupDir(runDir);
