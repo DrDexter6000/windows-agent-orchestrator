@@ -22,7 +22,7 @@
     "reliability": "node scripts/wao-node.cjs scripts/run-reliability.mjs",
     "component-check": "node scripts/wao-node.cjs scripts/run-component-check.mjs",
     "long-run": "node scripts/wao-node.cjs scripts/long-run-probe.mjs",
-    "hygiene": "node scripts/wao-node.cjs scripts/hygiene.mjs"
+    "hygiene": "node scripts/wao-node.cjs scripts/hygiene-cli.mjs"
   },
   "bin": {
     "wao": "bin/wao.js"
