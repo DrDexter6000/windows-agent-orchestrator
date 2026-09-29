@@ -55,7 +55,9 @@ WAO exposes exactly **22 MCP tools** — always registered, no profile, no flag,
 
 Roster: `lead_preflight`, `registry_list`, `workspace_status`, `workspace_select`, `run_dispatch`, `run_dispatch_contract_check`, `run_continue`, `run_correct`, `run_status`, `run_wait`, `run_await_result`, `run_collect`, `run_activity`, `run_diagnose`, `run_delivery`, `run_delivery_review`, `run_delivery_review_bundle`, `run_delivery_reverify`, `run_delivery_decide`, `run_delivery_repackage`, `run_stop`, `runs_list`.
 
-Every result carries REQUIRED `availableDrilldowns` (≤4, progressive disclosure, never auto-call) + REQUIRED `semanticNotes` (1..4 `{id,meaning,doesNotMean}`; `wao://semantics/{id}`). `run_activity` adds advisory `scopeObservation` (`complete:true` = terminal snapshot + every confirmed `file_written` evaluable — not filesystem completeness). **Before relying on any tool field's exact meaning** (`delivery.verificationTimeoutMs` bounds/persistence/inheritance, `providerSessionRouting` closed set, `executionProfileId`, `readOnly` declaration chain): read `docs/usage.md` §四（被脚本/LLM 驱动，含逐工具小节）+ per-tool schemas `docs/surface/mcp-tools.md`（生成层）.
+Results carry REQUIRED `availableDrilldowns` (≤4; progressive disclosure; never auto-call) and `semanticNotes` (1..4 `{id,meaning,doesNotMean}`; `wao://semantics/{id}`). `run_activity.scopeObservation` is advisory: `complete:true` means a terminal snapshot with every confirmed write evaluable, not filesystem completeness. For exact field semantics (`delivery.verificationTimeoutMs`, `providerSessionRouting`, `executionProfileId`, `readOnly`), read `docs/usage.md` §四 and generated schemas `docs/surface/mcp-tools.md`.
+
+Wait for meaningful changes; do not narrate unchanged polls. Before supervision, read [quiet supervision](docs/usage.md#lead-quiet-supervision).
 
 ## Optional Lead Playbooks
 
