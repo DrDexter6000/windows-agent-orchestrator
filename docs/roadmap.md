@@ -301,6 +301,14 @@ WAO 新增独立 `DeepSeekHarnessBackend`，通过用户提供的 DSH SDK stdio 
 
 发布后的 Codex Fresh Host 加载 `main@1ceeb8d7fe4c0685ea198c8999a8045378943a44` 与 22-tool MCP 合同；一次 `lead_preflight` 证明 workspace 精确绑定该 SHA、registry 无 issue、active runs 0，且 `coder_low` 正确投影为 `deepseek-harness` / `deepseek-v4-flash` / `certified`。无模型交叉-run 探针先从 `run_20260814044506804kqn2iv` 获取合法 cursor，再将其用于 `run_20260814035423280owrilx`：MCP 固定返回 `isError:true` / `run_activity failed`，同时只给 `status:"cursor_rejected"` 与 `request_page_1_without_cursor` / `use_afterSeq_from_known_sequence` 两项静态选择；按第一项无 cursor 重读立即成功。该验收没有自动重试、停止或控制面写入，也没有调用模型或修改项目文件。
 
+### 悬空交付明确拒收（TD-179 有界出口）集成发布（2026-09-29，已发布）
+
+**用户获得的能力**：验证进程被中断、始终没有结果的合法身份交付，Lead 现在可以明确 `--reject` 结算；接受路径与身份检查不变，迟到的真实验证 outcome 照常落盘并在账面如实合并显示（规范 `docs/02-architecture.md` §4.9）。
+
+发布范围 `365b3e3..1bf85cd` 共 7 提交：`0ccc8f1`→`c65bd9b`→`246e546` 拒收功能链（原已验收候选）、`849fcdc`/`9151af5` 测试证明与准备减负、`61e4be2` 安静监督手册、merge `1bf85cd`。验收依据：候选期独立审查与官方 review PASS、focused 211/211、四例真实历史只读核对 4/4；集成后在冻结 `main@1bf85cd` 上经 Owner 具名批准的一次安静窗口完整 T3 首轮 247/247 全绿（690 秒、六波全部 exit 0、零隔离复查、runs-guard clean、前后 HEAD/clean 一致），push 后 ls-remote 确认；方案经 auditor/coder_mm 双席会审（SUPPORT-WITH-CHANGES，必改项全部吸收）。证据与 SHA256：gitignored `.wao/runs/shared-cost/t3-quiet-attempt-20260929/`（post.json、release-binding.json）。
+
+边界如实记录：TD-181（组合测试间歇超时）仍开放未归因——本次绿灯认证冻结代码，不认证机器稳定性。2026-09 各中间实验候选（cap4 并发、最重文件单独波、大文件拆分、47c3 报告减负、749d650 波收尾等）均未采用，其逐条进度未回填本表，证据见 `.wao/runs/` 与 git 历史。
+
 ### Post-M12 candidate：MCP Host-visible 上下文测量与渐进披露审计（计划已冻结，未实施）
 
 下一轮只做**无损测量与候选实验**，不以当前全量 `tools/list` wire 直接代替 Lead 的真实上下文成本：分别记录 Codex、Claude Code、Kimi Code Host 的完整 wire、实际 Host-visible 投影与各自 tokenizer token，并独立统计累计响应成本（`text`、`structuredContent`、`semanticNotes` 与 drilldown）。当前基线为 22 tools / 75,965 wire bytes；o200k 估算 18,372 tokens，其中 output schemas 约占 69.5%，但一次 Codex Host 探针实际只向模型投影 `{name,description,inputSchema}`，约 20,798 bytes / 5,030 tokens，因此该差异必须形成 Host-neutral 矩阵，不能由单一 Host 外推。
