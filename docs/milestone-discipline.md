@@ -51,10 +51,11 @@ milestone 标记 ✅ 前必须满足：
 3. `npm test` 全绿
 4. **涉及外部系统交互的 milestone，必须跑 `npm run smoke`（真实 CLI），不能只靠 mock 报绿**
 5. 更新 `docs/roadmap.md` 进度表，附测试数
+6. 工作流/阶段闭合 = 热日志归档（同深度移动 + 墓碑指针）完成、活续接入口关闭或移交——append-only 流水账不算闭合（ADR 0034）
 
 ## 5. 不留技术债的原则
 
-- 发现即修，不推到下个 milestone（除非修复成本 > 当前 milestone 价值，且已登记）
+- 发现即处置：当场修，或经源头判断（含同类问题史检索）后按 Owner 批准的取舍延后并登记触发条件；同类问题第二次出现补丁前必须先写源头归因，不原地打第三个补丁（ADR 0034）
 - 每个临时桥接代码必须标注"何时拆除"（如 M0 的 waitForCompletion 桥接标注 M1 拆除）
 - 不允许"先跑起来再说"的未测代码合入
 
@@ -98,6 +99,7 @@ milestone 标记 ✅ 前必须满足：
   两次都是"局部修复"，被独立 reliability 测试（codex）打脸。
 - **规则：涉及完成判定 / provider / metrics 的修改，必须问"同类路径（另一个 completionMode、其它 provider）有没有同样问题"，
   全部验证才算完成。npm test 全绿 ≠ 实测可用。**
+- **规则（ADR 0034 扩展）**：补丁交付说明须自声明治标/治本；同类问题第二次出现 → 先检索 tech-debt/事故记录、写一段共同原因归因再动手，不打无归因的第三个补丁。
 
 ### 6.7 reliability 套件：完成判定/provider 路径修改的硬门槛
 
@@ -176,3 +178,8 @@ milestone 标记 ✅ 前必须满足：
   白名单逐条带理由、失效即删。**
 
 **R23-D Lead 补全（2026-08-21，stage 4 审计后）**：守卫规则族扩至字符串形（模板串内 registry validate/list 无 --run-dir 即红——auditor F2/coder_mm 没问但该问）；argv 形收紧为 --run-dir 须在 validate token 之后（F4）；dashboard 面（表 ⑤）现役实例已隔离（boundReadSweep 两处 --cwd），该面机械守卫为后续触发（单行 argv 规则不覆盖 --cwd 形状）。
+
+## 8. 决策与收尾卫生（ADR 0034，2026-09-29）
+
+- 重大取舍（Mainline(3)/ADR 级）的方案对比必须含"重建/重写"行并附长期沉默成本；以成本/工作量为由删除该行越权——成本否决权只在 Owner。
+- 已决（accepted/rejected）且无承重引用的交付 run，验收收尾时 worktree remove 与 `wao/run_*` 分支删除连体执行；SKILL.md 受 12,000 字节瘦身上限约束不承载正文（本次落位即被该守卫拦截后改道，属防税设计正常生效）。

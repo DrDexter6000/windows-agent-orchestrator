@@ -38,5 +38,6 @@ Plain JavaScript ESM, named exports, two-space indentation, and async/await. Mat
 - Use the npm scripts for WAO entrypoints so they select Node 22; do not change the system-wide Node version.
 - On Windows, use an explicit absolute temporary path or `os.tmpdir()`; never use ambiguous POSIX `/tmp` paths.
 - Keep WAO independent from `D:\projects\talking-cli`.
+- Keep at most one active continuation entry; on workstream close, archive its logs (hash-verified same-depth move + tombstone pointer) instead of growing or rewriting them (ADR 0034).
 - No GUI or automatic merge/release behavior unless explicitly requested.
 - Never commit `config/agents.json`, `runs/`, `.wao-worktrees/`, credentials, or secrets.
