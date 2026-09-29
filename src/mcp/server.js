@@ -173,7 +173,7 @@ import {
   REPACKAGE_ALLOWED_PATHS_LIMIT,
 } from "../application/runDeliveryRepackage.js";
 import { projectReviewResult } from "../application/deliveryReviewProjection.js";
-import { REVIEW_UNAVAILABLE_REASONS } from "../application/reviewUnavailableReasons.js";
+import { REVIEW_UNAVAILABLE_REASONS, REVIEW_PENDING_REASON } from "../application/reviewUnavailableReasons.js";
 import { projectCollectResult } from "../application/runCollectProjection.js";
 import { RUNTIME_ACTIVITY_STATUSES } from "../runEvent.js";
 import {
@@ -5343,11 +5343,28 @@ export function createWaoMcpServer({
           const projected = projectReviewResult(result, { runId });
           review = DELIVERY_REVIEW_OUTPUT.parse(projected);
 
+          // TD-179: the settled pending rejection is the ONE reviewable shape
+          // whose review result is the no-content verification_pending advisory
+          // (canonical null deliveryCommit/changedFileCount — there is no
+          // verified artifact to review, and the service performed ZERO Git
+          // diff reads). That exact advisory — unavailable + the closed-set
+          // pending reason + the canonical nulls — carries no artifact
+          // metadata to bind, so the match below is skipped for it alone.
+          // Every other shape (an available fragment, or a proof-backed
+          // unavailable variant like binary/diff_too_large, which always
+          // carries non-null commit/count) still must match EXACTLY.
+          const pendingAdvisory = delivery.verificationStatus === "pending"
+            && delivery.acceptanceStatus === "rejected"
+            && review.available === false
+            && review.unavailableReason === REVIEW_PENDING_REASON
+            && review.deliveryCommit === null
+            && review.changedFileCount === null;
           // A composition must never splice delivery truth from one artifact
           // with review bytes from another. The application service proves both
           // independently; this transport boundary binds their safe projections.
-          if (review.deliveryCommit !== delivery.deliveryCommit
-              || review.changedFileCount !== delivery.changedFileCount) {
+          if (!pendingAdvisory
+              && (review.deliveryCommit !== delivery.deliveryCommit
+                || review.changedFileCount !== delivery.changedFileCount)) {
             throw new Error("delivery/review artifact mismatch");
           }
         } else if (cursor !== undefined) {

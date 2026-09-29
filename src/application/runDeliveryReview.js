@@ -124,7 +124,7 @@ export async function resolveRunDeliveryReviewTarget({
 
   // 3. Durable delivery facts (unambiguous: exactly one created + one matching
   //    final verification outcome). Reuses the SAME SSOT as tryAppendDecision.
-  const facts = validateDeliveryFacts(events);
+  const facts = validateDeliveryFacts(events, { expectedRunId: runId });
   if (!facts.valid) {
     throw new Error(`delivery facts not reviewable: ${facts.error}`);
   }
@@ -529,14 +529,20 @@ export async function getRunDeliveryReview(
   // been recorded yet, surface a TRUTHFUL structured not-yet-reviewable result
   // instead of the generic review error, so a Lead can wait (run_delivery
   // waitMs) or retry review later. Pending is the ONLY readiness state handled
-  // here; it is valid for the EXACT `waiting_for_verification` state only. This
-  // gate runs AFTER workspace ownership but BEFORE resolveRunDeliveryReviewTarget
-  // (which reads the Git commit proof) and before any diff/numstat read — so the
+  // here; it is valid for the EXACT `waiting_for_verification` state only —
+  // PLUS the TD-179 settled pending rejection: a run whose readiness projects
+  // `reviewable` ONLY because a validated pending-verification REJECTION
+  // decision exists while exact verification is still pending. That settled
+  // shape gets the SAME verification_pending advisory (never Git diff
+  // permission — there is still no verified artifact to review). Both gates run
+  // AFTER workspace ownership but BEFORE resolveRunDeliveryReviewTarget (which
+  // reads the Git commit proof) and before any diff/numstat read — so the
   // pending path performs ZERO Git proof / numstat / diff reader calls. Every
-  // other readiness state (reviewable, ambiguous, packaging_failed,
+  // other readiness state (ordinary reviewable, ambiguous, packaging_failed,
   // waiting_for_packaging, not_requested) falls through to the existing
   // fail-closed resolver path below, unchanged. No duplicate readiness logic:
-  // projectDeliveryReadiness is the SAME SSOT run_delivery uses.
+  // projectDeliveryReadiness + validateDeliveryFacts are the SAME SSOTs
+  // run_delivery and the decision writer use.
   if (!isValidRunId(runId)) {
     throw new Error("invalid runId");
   }
@@ -563,7 +569,22 @@ export async function getRunDeliveryReview(
   verifyRunWorkspaceOwnership(_gateEvents, authorizedWorkspaceRoot, runId);
 
   const _readiness = projectDeliveryReadiness(_gateEvents, runId);
-  if (_readiness === "waiting_for_verification") {
+  // TD-179: is this reviewable ONLY because of a settled pending rejection?
+  // The shared facts authority (pending-aware, runId-bound — the SAME
+  // validator the decision writer uses) decides; there is no second policy
+  // here. A valid pending verification PLUS a validated decision event is
+  // exactly the settled pending-rejection shape (an ordinary reviewable
+  // delivery always carries a final outcome, so it never enters this branch).
+  const _settledPendingRejection = _readiness === "reviewable" && (() => {
+    const facts = validateDeliveryFacts(_gateEvents, {
+      expectedRunId: runId,
+      allowVerificationPending: true,
+    });
+    return facts.valid === true
+      && facts.verificationStatus === "pending"
+      && facts.decisionEvent !== null;
+  })();
+  if (_readiness === "waiting_for_verification" || _settledPendingRejection) {
     // fileIndex must be a non-negative integer (it is echoed back so the Lead
     // can correlate the advisory with its request). A supplied cursor is
     // rejected: a not-yet-reviewable artifact is never paginated.

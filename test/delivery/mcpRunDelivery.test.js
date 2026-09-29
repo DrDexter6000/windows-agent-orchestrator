@@ -19,6 +19,19 @@ function cleanupDir(dir) {
   try { rmSync(dir, { recursive: true, force: true }); } catch {}
 }
 
+/** Minimal git repo so the MCP workspace binding has a real root. */
+async function makeGitRepo(dir) {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdirSync } = await import("node:fs");
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "T"], { cwd: dir });
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(join(dir, "src", "a.js"), "const a = 1;\n");
+  execFileSync("git", ["add", "-A"], { cwd: dir });
+  execFileSync("git", ["commit", "-q", "-m", "i"], { cwd: dir });
+}
+
 async function buildInMemoryClient(server) {
   const { Client } = await import("@modelcontextprotocol/sdk/client");
   const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -1306,4 +1319,108 @@ test("M9-6B-16: run_delivery description states waitMs range, 0 invalid, point-i
     assert.match(desc, /Host transport loss\/cancellation does not stop the detached run/, "detached-run truth");
     assert.match(desc, /re-read point-in-time/, "recovery: re-read point-in-time");
   } finally { await client.close(); await server.close(); }
+});
+
+// ===== TD-179: bounded pending rejection through the real MCP decision service =====
+
+/** A completed run with a committed delivery that EXPLICITLY declares pending verification and has NO outcome. */
+async function setupPendingDeliveryRun(dir, runId) {
+  const { JsonlTranscript } = await import("../../src/transcript.js");
+  const runDir = join(dir, "runs");
+  const transcript = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "test" });
+  const ref = {
+    schemaVersion: 1, kind: "git_commit", runId,
+    baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
+    branch: "wao/x", worktreePath: "/fake", changedFiles: ["a.js"],
+    verification: { status: "pending", commands: [] },
+    acceptance: { status: "pending" }, integration: { status: "pending", targetCommit: null },
+  };
+  await transcript.append("run.started", { delivery: { mode: "git_commit_v1" }, worktreePath: "/fake", cwd: dir });
+  await transcript.append("run.delivery_created", { delivery: ref });
+  await transcript.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+  const rp = join(dir, "agents.json");
+  writeFileSync(rp, JSON.stringify({ agents: { w: { backend: "claude-code", cwd: dir } } }), "utf8");
+  return { runDir, rp, ref, transcript };
+}
+
+test("M9-6B-18 (TD-179): pending reject settles; a later accept is already_decided BEFORE gates; run_delivery shows the rejection", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "m96b-18-"));
+  try {
+    await makeGitRepo(dir);
+    const { runDir, rp, ref } = await setupPendingDeliveryRun(dir, "run_i18");
+
+    // Accept still requires effective passed → structured verification_failed.
+    {
+      const server = createWaoMcpServer({ registryPath: rp, runDir, workspaceRoot: dir });
+      const client = await buildInMemoryClient(server);
+      try {
+        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i18", decision: "accepted", reason: "x" } });
+        const p = JSON.parse(res.content.find((b) => b.type === "text").text);
+        assert.equal(p.decisionAccepted, false);
+        assert.equal(p.rejectionReason, "verification_failed", "accept on pending verification is a structured rejection");
+      } finally { await client.close(); await server.close(); }
+    }
+    // The bounded pending rejection settles through the real service.
+    {
+      const server = createWaoMcpServer({ registryPath: rp, runDir, workspaceRoot: dir });
+      const client = await buildInMemoryClient(server);
+      try {
+        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i18", decision: "rejected", reason: "verification never settled" } });
+        const p = JSON.parse(res.content.find((b) => b.type === "text").text);
+        assert.equal(p.decisionAccepted, true, "TD-179 reject settles");
+        assert.equal(p.rejectionReason, null);
+        assert.equal(p.acceptanceStatus, "rejected");
+        assert.equal(p.deliveryCommit, "d".repeat(40));
+      } finally { await client.close(); await server.close(); }
+    }
+    // First-decision-wins BEFORE the new-action gates: a later accept LOSES
+    // with already_decided (existing rejected), never a verification_failed.
+    {
+      const server = createWaoMcpServer({ registryPath: rp, runDir, workspaceRoot: dir });
+      const client = await buildInMemoryClient(server);
+      try {
+        const res = await client.callTool({ name: "run_delivery_decide", arguments: { runId: "run_i18", decision: "accepted", reason: "x" } });
+        const p = JSON.parse(res.content.find((b) => b.type === "text").text);
+        assert.equal(p.decisionAccepted, false);
+        assert.equal(p.rejectionReason, "already_decided", "existing decision returned before gates");
+        assert.equal(p.existingStatus, "rejected");
+      } finally { await client.close(); await server.close(); }
+    }
+    const { readTranscript } = await import("../../src/transcript.js");
+    const events = await readTranscript(join(runDir, "run_i18.jsonl"));
+    assert.equal(events.filter((e) => e.type === "run.delivery_rejected").length, 1, "one rejected event");
+
+    // run_delivery (wait path, real service) shows verification pending + rejected.
+    {
+      const server = createWaoMcpServer({ registryPath: rp, runDir, workspaceRoot: dir });
+      const client = await buildInMemoryClient(server);
+      try {
+        const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_i18", waitMs: 1000 } });
+        const p = JSON.parse(res.content.find((b) => b.type === "text").text);
+        assert.equal(p.readiness, "reviewable", "pending rejection settles readiness as reviewable");
+        assert.equal(p.verificationStatus, "pending", "verification stays pending");
+        assert.equal(p.acceptanceStatus, "rejected");
+      } finally { await client.close(); await server.close(); }
+    }
+
+    // A late real outcome remains visible without undoing the rejection.
+    {
+      const { JsonlTranscript } = await import("../../src/transcript.js");
+      const transcript = new JsonlTranscript(join(runDir, "run_i18.jsonl"), { runId: "run_i18", agentId: "test" });
+      await transcript.append("run.delivery_verification_failed", {
+        delivery: {
+          ...ref,
+          verification: { status: "failed", failureCode: "command_failed", commands: [], verifiedCommit: "d".repeat(40), results: [] },
+        },
+      });
+      const server = createWaoMcpServer({ registryPath: rp, runDir, workspaceRoot: dir });
+      const client = await buildInMemoryClient(server);
+      try {
+        const res = await client.callTool({ name: "run_delivery", arguments: { runId: "run_i18" } });
+        const p = JSON.parse(res.content.find((b) => b.type === "text").text);
+        assert.equal(p.verificationStatus, "failed", "late outcome is the verification truth");
+        assert.equal(p.acceptanceStatus, "rejected", "rejection not undone");
+      } finally { await client.close(); await server.close(); }
+    }
+  } finally { cleanupDir(dir); }
 });

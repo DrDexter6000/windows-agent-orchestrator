@@ -370,13 +370,27 @@ export function projectTerminalOutcome(events, runId, terminalState, injectables
     // ===== delivery (bounded closed-set projection from the shared view) =====
     const view = gatherView(events, runId, terminalState) || {};
 
+    // TD-179: the SHARED view's ambiguous marker WINS over the pure readiness
+    // label. The view (gatherDeliveryView) fail-closes durable-conflict shapes
+    // the pure label cannot see (an impossible pending-accepted decision, an
+    // unbacked claimed decision status, a drifted decision commit/base, or
+    // duplicates behind a newest-wins selection) through the SAME shared facts
+    // authority the point query and the bounded readiness service use — one
+    // projection, no second state machine. Computing the label alone could
+    // otherwise emit readiness "reviewable" with available:false here,
+    // diverging from the point-in-time query (throws) and the readiness
+    // service (ambiguous).
     let readiness;
-    try {
-      readiness = readinessFn(events, runId);
-    } catch {
+    if (view.ambiguous === true) {
       readiness = "ambiguous";
+    } else {
+      try {
+        readiness = readinessFn(events, runId);
+      } catch {
+        readiness = "ambiguous";
+      }
+      if (!DELIVERY_READINESS_STATES.includes(readiness)) readiness = "ambiguous";
     }
-    if (!DELIVERY_READINESS_STATES.includes(readiness)) readiness = "ambiguous";
 
     // Each raw status is projected through its closed set; unknown/malformed
     // values collapse to null (never echoed). A verificationFailureCode is

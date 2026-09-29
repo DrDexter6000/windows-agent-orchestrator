@@ -659,12 +659,17 @@ test("3C2-A15: ordinary runs list behavior unchanged", async () => {
 });
 
 // ===== Phase 3C-2 audit closeout: durable precondition RED tests =====
+// TD-179 rework: A/B now pin the BOUNDED PENDING REJECTION — a completed run
+// with a uniquely valid committed delivery whose created ref EXPLICITLY
+// declares verification "pending" and which has NO verification outcome may be
+// explicitly REJECTED. Accept still requires effective passed; a NON-completed
+// run and a legacy absent verification status keep the old refusal.
 
 /**
- * A. Only run.delivery_created, verification=pending, no verification outcome event.
- * --reject must fail; no run.delivery_rejected must be appended.
+ * A. Only run.delivery_created, verification=pending (EXPLICIT), no verification
+ * outcome event, run completed → the TD-179 bounded pending rejection settles.
  */
-test("3C2-PRE-A: reject on pending verification (no outcome event) fails closed", async () => {
+test("3C2-PRE-A: reject on explicit pending verification of a completed run settles (TD-179)", async () => {
   const { dir, runId, transcript } = makeDeliveryTranscript("wao-3c2-pre-a-");
   try {
     // Write delivery_created but NO verification event
@@ -684,15 +689,29 @@ test("3C2-PRE-A: reject on pending verification (no outcome event) fails closed"
     writeFileSync(reasonPath, "rejecting before verification", "utf8");
 
     const { runsDeliveryCommand } = await import("../../src/commands/runs.js");
-    await assert.rejects(
-      () => runsDeliveryCommand([runId, "--reject", "--reason-file", reasonPath, "--run-dir", dir, "--format", "json"], {}),
-      /verification|cannot reject/i,
-      "reject on pending verification must fail",
-    );
+    const out = await captureLog(async () => {
+      await runsDeliveryCommand([runId, "--reject", "--reason-file", reasonPath, "--run-dir", dir, "--format", "json"], {});
+    });
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.decisionAccepted, true, "TD-179: reject on pending verification of a completed run settles");
+    assert.equal(parsed.delivery.verification.status, "pending", "the decision snapshot keeps verification pending");
+    assert.equal(parsed.delivery.acceptance.status, "rejected");
 
     const events = await readTranscript(transcript.filePath);
-    assert.equal(events.filter((e) => e.type === "run.delivery_rejected").length, 0,
-      "no rejected event must be appended");
+    const rejected = events.filter((e) => e.type === "run.delivery_rejected");
+    assert.equal(rejected.length, 1, "exactly one rejected event");
+    assert.equal(rejected[0].delivery.verification.status, "pending");
+
+    // A LATE real outcome stays displayable while acceptance stays rejected.
+    await transcript.append("run.delivery_verification_passed", {
+      delivery: { ...ref, verification: { status: "passed", commands: ["echo ok"], verifiedCommit: "d".repeat(40), results: [] } },
+    });
+    const queryOut = await captureLog(async () => {
+      await runsDeliveryCommand([runId, "--run-dir", dir, "--format", "json"], {});
+    });
+    const view = JSON.parse(queryOut);
+    assert.equal(view.verification.status, "passed", "the late outcome is the verification truth");
+    assert.equal(view.acceptance.status, "rejected", "the durable rejection is not undone");
   } finally {
     await cleanupDir(dir);
   }
@@ -700,9 +719,9 @@ test("3C2-PRE-A: reject on pending verification (no outcome event) fails closed"
 
 /**
  * B. Verification outcome completely missing (no verification event at all).
- * Both accept and reject must fail closed; no decision event appended.
+ * Accept still fails closed; reject settles (TD-179) on the completed run.
  */
-test("3C2-PRE-B: missing verification outcome → accept/reject both fail closed", async () => {
+test("3C2-PRE-B: missing verification outcome → accept fails closed, reject settles (TD-179)", async () => {
   const { dir, runId, transcript } = makeDeliveryTranscript("wao-3c2-pre-b-");
   try {
     const ref = {
@@ -726,17 +745,70 @@ test("3C2-PRE-B: missing verification outcome → accept/reject both fail closed
       /verification|cannot accept/i,
       "accept with missing verification must fail",
     );
-    await assert.rejects(
-      () => runsDeliveryCommand([runId, "--reject", "--reason-file", reasonPath, "--run-dir", dir], {}),
-      /verification|cannot reject/i,
-      "reject with missing verification must fail",
-    );
+    const out = await captureLog(async () => {
+      await runsDeliveryCommand([runId, "--reject", "--reason-file", reasonPath, "--run-dir", dir, "--format", "json"], {});
+    });
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.decisionAccepted, true, "TD-179: reject settles the pending verification");
 
     const events = await readTranscript(transcript.filePath);
-    assert.equal(events.filter((e) => e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected").length, 0,
-      "no decision event must be appended");
+    assert.equal(events.filter((e) => e.type === "run.delivery_rejected").length, 1,
+      "exactly one rejected event");
   } finally {
     await cleanupDir(dir);
+  }
+});
+
+/**
+ * TD-179-B1. A NON-completed run keeps the pending-rejection refusal, and a
+ * legacy created ref with an ABSENT verification status gains no new
+ * rejection eligibility.
+ */
+test("TD-179-3C2-B1: pending reject refused on a non-completed run and on a legacy absent verification status", async () => {
+  const cases = [
+    {
+      label: "non-completed run (still running)",
+      ref: { verification: { status: "pending", commands: ["echo ok"] } },
+      terminal: [["run.state_change", { from: "submitted", to: "running", reason: "first_event" }]],
+    },
+    {
+      label: "completed run, legacy created ref with ABSENT verification status",
+      ref: {},
+      terminal: [["run.state_change", { from: "running", to: "completed", reason: "done" }]],
+    },
+  ];
+  for (const c of cases) {
+    const { dir, runId, transcript } = makeDeliveryTranscript("wao-3c2-td179b1-");
+    try {
+      const ref = {
+        schemaVersion: 1, kind: "git_commit", runId,
+        baseCommit: "b".repeat(40), deliveryCommit: "d".repeat(40),
+        branch: `wao/${runId}`, worktreePath: "/fake/wt", changedFiles: ["src/a.js"],
+        acceptance: { status: "pending", reviewerType: "lead_agent" },
+        integration: { status: "pending", targetCommit: null },
+        ...c.ref,
+      };
+      await transcript.append("run.started", { delivery: { mode: "git_commit_v1" } });
+      await transcript.append("run.delivery_created", { delivery: ref });
+      for (const [type, payload] of c.terminal) await transcript.append(type, payload);
+
+      const reasonPath = join(dir, "reason.txt");
+      writeFileSync(reasonPath, "early reject", "utf8");
+      const { runsDeliveryCommand } = await import("../../src/commands/runs.js");
+      await assert.rejects(
+        () => runsDeliveryCommand([runId, "--reject", "--reason-file", reasonPath, "--run-dir", dir, "--format", "json"], {}),
+        (err) => {
+          assert.match(err.message, /pending|verification|completed|outcome/i, `${c.label}: refusal message`);
+          return true;
+        },
+        `${c.label}: reject must be refused`,
+      );
+      const events = await readTranscript(transcript.filePath);
+      assert.equal(events.filter((e) => e.type === "run.delivery_rejected").length, 0,
+        `${c.label}: no rejected event appended`);
+    } finally {
+      await cleanupDir(dir);
+    }
   }
 });
 

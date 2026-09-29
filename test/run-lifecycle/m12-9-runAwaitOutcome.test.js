@@ -342,3 +342,104 @@ test("C2: strict outcome key set — exactly the bounded closed-set fields, noth
   assert.deepEqual(Object.keys(o.diagnosis).sort(), DIAGNOSIS_KEYS);
   assert.deepEqual(Object.keys(o.delivery).sort(), DELIVERY_KEYS);
 });
+
+// ===== TD-179: bounded pending rejection on the await terminal outcome =====
+//
+// The await outcome derives from the SAME shared delivery view as the point
+// query and the readiness service. A legal pending rejection (completed run,
+// committed delivery explicitly declaring pending verification, no outcome)
+// projects readiness=reviewable + verificationStatus=pending +
+// acceptanceStatus=rejected + decisionType=run.delivery_rejected — no new
+// enums or fields. A LATE real outcome becomes the verification truth while
+// acceptance stays rejected. An impossible pending ACCEPTED (never legal, not
+// even after a late pass) fails closed to readiness=ambiguous with null
+// statuses — the shared view's ambiguous marker wins over the pure label.
+
+function td179PendingRejected(runId, ref) {
+  return {
+    type: "run.delivery_rejected",
+    runId,
+    delivery: { ...ref, acceptance: { status: "rejected", reviewerType: "lead_agent" } },
+    deliveryCommit: ref.deliveryCommit,
+    reason: "settling without an outcome",
+  };
+}
+
+function td179LateOutcome(runId, ref, status) {
+  const verification = status === "failed"
+    ? { status, failureCode: "command_failed", commands: [], verifiedCommit: ref.deliveryCommit, results: [] }
+    : status === "unavailable"
+      ? { status, unavailableReason: "env gone", commands: [], verifiedCommit: ref.deliveryCommit, results: [] }
+      : { status, commands: [], verifiedCommit: ref.deliveryCommit, results: [] };
+  return { type: `run.delivery_verification_${status}`, runId, delivery: { ...ref, verification } };
+}
+
+test("TD-179-O1: pending rejection → reviewable + verification pending + rejected, bounded shape", () => {
+  const runId = "run_td179_o1";
+  const ref = makeRef(runId);
+  const events = [
+    startedWithDelivery(runId),
+    { type: "run.delivery_created", runId, delivery: ref },
+    ...terminalCompleted(runId),
+    td179PendingRejected(runId, ref),
+  ];
+  const o = projectTerminalOutcome(events, runId, "completed");
+  assert.ok(o, "outcome present");
+  assert.equal(o.delivery.readiness, "reviewable", "decision exists → reviewable");
+  assert.equal(o.delivery.verificationStatus, "pending", "verification stays pending");
+  assert.equal(o.delivery.verificationFailureCode, null);
+  assert.equal(o.delivery.acceptanceStatus, "rejected");
+  assert.equal(o.delivery.decisionType, "run.delivery_rejected");
+  assert.deepEqual(Object.keys(o.delivery).sort(), DELIVERY_KEYS, "no new fields");
+  assertOutcomeClosedSet(o);
+  assertOutcomeNoLeak(o, runId);
+});
+
+test("TD-179-O2: a late outcome after a pending reject displays that outcome and stays rejected", () => {
+  for (const lateStatus of ["passed", "failed", "unavailable"]) {
+    const runId = `run_td179_o2_${lateStatus}`;
+    const ref = makeRef(runId);
+    const events = [
+      startedWithDelivery(runId),
+      { type: "run.delivery_created", runId, delivery: ref },
+      ...terminalCompleted(runId),
+      td179PendingRejected(runId, ref),
+      td179LateOutcome(runId, ref, lateStatus),
+    ];
+    const o = projectTerminalOutcome(events, runId, "completed");
+    assert.ok(o, `${lateStatus}: outcome present`);
+    assert.equal(o.delivery.readiness, "reviewable", `${lateStatus}: readiness`);
+    assert.equal(o.delivery.verificationStatus, lateStatus, `${lateStatus}: late outcome is the verification truth`);
+    assert.equal(o.delivery.acceptanceStatus, "rejected", `${lateStatus}: rejection not undone`);
+    assert.equal(o.delivery.decisionType, "run.delivery_rejected", `${lateStatus}: decision type`);
+    assertOutcomeClosedSet(o);
+    assertOutcomeNoLeak(o, runId);
+  }
+});
+
+test("TD-179-O3: an impossible pending ACCEPTED (even with a late pass) fails closed to ambiguous, null statuses", () => {
+  const runId = "run_td179_o3";
+  const ref = makeRef(runId);
+  const events = [
+    startedWithDelivery(runId),
+    { type: "run.delivery_created", runId, delivery: ref },
+    ...terminalCompleted(runId),
+    {
+      type: "run.delivery_accepted",
+      runId,
+      delivery: { ...ref, acceptance: { status: "accepted", reviewerType: "lead_agent" } },
+      deliveryCommit: ref.deliveryCommit,
+      reason: "impossible",
+    },
+    td179LateOutcome(runId, ref, "passed"),
+  ];
+  const o = projectTerminalOutcome(events, runId, "completed");
+  assert.ok(o, "outcome present (fail-closed inside delivery, not a thrown error)");
+  assert.equal(o.delivery.readiness, "ambiguous");
+  assert.equal(o.delivery.available, false);
+  assert.equal(o.delivery.verificationStatus, null, "no success fields");
+  assert.equal(o.delivery.acceptanceStatus, null, "no success fields");
+  assert.equal(o.delivery.decisionType, null, "no success fields");
+  assertOutcomeClosedSet(o);
+  assertOutcomeNoLeak(o, runId);
+});

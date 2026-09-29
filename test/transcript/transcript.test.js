@@ -1274,7 +1274,13 @@ test("M12-9-T5: tryAppendDecision verification/terminal gates throw the dedicate
       const filePath = join(dir, `${DEC_RUN}.jsonl`);
       const t = new JsonlTranscript(filePath, { runId: DEC_RUN, agentId: "test" });
       await t.append("run.delivery_created", { delivery: decRef() });
-      await t.append("run.delivery_verification_failed", { delivery: decRef() });
+      // TD-179: the outcome event's embedded status must agree with its type
+      // (the production appenders always write the matching status).
+      await t.append("run.delivery_verification_failed", {
+        delivery: decRef({
+          verification: { status: "failed", failureCode: "command_failed", commands: [], verifiedCommit: DEC_COMMIT, results: [] },
+        }),
+      });
       await t.append("run.state_change", { from: "running", to: "completed", reason: "done" });
       await assert.rejects(
         () => t.tryAppendDecision({ decision: "accepted", reason: "x" }),
@@ -1323,7 +1329,12 @@ test("M12-9-T5: tryAppendDecision verification/terminal gates throw the dedicate
       const filePath = join(dir, `${DEC_RUN}.jsonl`);
       const t = new JsonlTranscript(filePath, { runId: DEC_RUN, agentId: "test" });
       await t.append("run.delivery_created", { delivery: decRef() });
-      await t.append("run.delivery_verification_unavailable", { delivery: decRef() });
+      // TD-179: the outcome event's embedded status must agree with its type.
+      await t.append("run.delivery_verification_unavailable", {
+        delivery: decRef({
+          verification: { status: "unavailable", unavailableReason: "no assertions", commands: [], verifiedCommit: DEC_COMMIT, results: [] },
+        }),
+      });
       await t.append("run.state_change", { from: "running", to: "completed", reason: "done" });
       const result = await t.tryAppendDecision({ decision: "rejected", reason: "bad" });
       assert.equal(result.accepted, true, "reject on unavailable verification succeeds");
@@ -1661,5 +1672,704 @@ test("TD-71: a metadata-write non-transient error after a successful open cleans
       "unlinked exactly once, only the owned lock path");
   } finally {
     __resetAppendLockFsForTest();
+  }
+});
+
+// ============================================================
+// TD-179: bounded delivery settlement — the shared pure facts
+// authority (validateDeliveryFacts runId-bound mode) and the
+// in-lock decision writer (tryAppendDecision).
+//
+// Contract under test (docs/02-architecture.md delivery-decision
+// section + TD-179):
+//   - Core created/original-outcome/decision facts are bound to the
+//     requested runId; foreign-envelope events in these core categories are
+//     IGNORED, but ALL bound events are counted before payload checks — a
+//     duplicate or malformed bound fact (incl. a decision without a usable
+//     same-identity ref) is delivery_malformed.
+//   - Created alone with an EXPLICIT verification.status "pending" is valid
+//     waiting in the pending-aware mode; legacy absent status (or a claimed
+//     final status with no backing outcome) never gains pending validity.
+//   - A pending-verification decision can ONLY be a reject, explicitly stamped
+//     rejected, on a created that explicitly declared pending, with a bound
+//     completed state_change EARLIER in append order and no original outcome
+//     before the decision. A late real outcome (passed/failed/unavailable)
+//     stays a legal display fact; acceptance stays rejected.
+//   - A nonpending decision needs earlier matching original or valid reverify
+//     backing; accepted must be passed. Legacy tolerance ONLY: a missing or
+//     "pending" acceptance stamp on a backed nonpending snapshot, and missing
+//     top-level deliveryCommit/seq/verifiedCommit historical optional values.
+//   - tryAppendDecision validates facts BEFORE returning already_decided and
+//     returns a validated existing decision BEFORE the new-action gates; the
+//     ONLY new rejection path is completed + explicit pending + no outcome.
+// ============================================================
+
+const TDD_RUN = "run_td179_facts";
+const TDD_BASE = "b".repeat(40);
+const TDD_COMMIT = "d".repeat(40);
+const TDD_OTHER = "e".repeat(40);
+
+function tddCreatedRef(over = {}) {
+  return {
+    schemaVersion: 1,
+    kind: "git_commit",
+    runId: TDD_RUN,
+    baseCommit: TDD_BASE,
+    deliveryCommit: TDD_COMMIT,
+    branch: "wao/x",
+    worktreePath: "/fake",
+    changedFiles: ["a.js"],
+    verification: { status: "pending", commands: ["npm test"] },
+    acceptance: { status: "pending", reviewerType: "lead_agent" },
+    integration: { status: "pending", targetCommit: null },
+    ...over,
+  };
+}
+
+function tddOutcomeRef(status) {
+  const verification = status === "failed"
+    ? { status, failureCode: "command_failed", commands: ["npm test"], verifiedCommit: TDD_COMMIT, results: [] }
+    : status === "unavailable"
+      ? { status, unavailableReason: "env gone", commands: [], verifiedCommit: TDD_COMMIT, results: [] }
+      : { status, commands: ["npm test"], verifiedCommit: TDD_COMMIT, results: [] };
+  return tddCreatedRef({ verification });
+}
+
+function tddCreated() {
+  return { type: "run.delivery_created", runId: TDD_RUN, delivery: tddCreatedRef() };
+}
+
+function tddOutcome(status, over = {}) {
+  return {
+    type: `run.delivery_verification_${status}`,
+    runId: TDD_RUN,
+    delivery: tddOutcomeRef(status),
+    ...over,
+  };
+}
+
+function tddCompleted() {
+  return { type: "run.state_change", runId: TDD_RUN, from: "running", to: "completed", reason: "done" };
+}
+
+function tddRunning() {
+  return { type: "run.state_change", runId: TDD_RUN, from: "submitted", to: "running", reason: "first_event" };
+}
+
+/** A legal TD-179 pending rejection, stamped from the (pending) created ref. */
+function tddPendingRejected(over = {}) {
+  return {
+    type: "run.delivery_rejected",
+    runId: TDD_RUN,
+    delivery: tddCreatedRef({ acceptance: { status: "rejected", reviewerType: "lead_agent" } }),
+    deliveryCommit: TDD_COMMIT,
+    reason: "settling without an outcome",
+    ...over,
+  };
+}
+
+/** A conventional nonpending decision stamped from an outcome ref. */
+function tddDecision(type, claimedStatus, over = {}) {
+  return {
+    type: `run.delivery_${type}`,
+    runId: TDD_RUN,
+    delivery: {
+      ...tddOutcomeRef(claimedStatus),
+      acceptance: { status: type, reviewerType: "lead_agent" },
+    },
+    deliveryCommit: TDD_COMMIT,
+    reason: "decision",
+    ...over,
+  };
+}
+
+const TDD_PENDING_OPTS = { expectedRunId: TDD_RUN, allowVerificationPending: true };
+
+test("TD-179-closeout: new decisions from legacy outcomes remain readable and idempotent", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "td179-closure-"));
+  try {
+    for (const status of ["passed", "failed", "unavailable"]) {
+      for (const embedded of [undefined, "pending", status]) {
+        for (const decision of status === "passed" ? ["accepted", "rejected"] : ["rejected"]) {
+          const label = `${status}-${embedded}-${decision}`;
+          const filePath = join(dir, `${label}.jsonl`);
+          const outcome = tddOutcome(status);
+          outcome.delivery.verification.status = embedded;
+          const original = [tddCompleted(), tddCreated(), outcome];
+          await writeFile(filePath, original.map(e => JSON.stringify(e)).join("\n") + "\n");
+          const transcript = new JsonlTranscript(filePath, { runId: TDD_RUN, agentId: "test" });
+          const result = await transcript.tryAppendDecision({ decision, reason: label });
+          assert.equal(result.accepted, true, label);
+          assert.equal(result.event.delivery.verification.status, status, label);
+          const events = await readTranscript(filePath);
+          assert.equal(validateDeliveryFacts(events, TDD_PENDING_OPTS).valid, true, label);
+          assert.deepEqual(events.slice(0, 3), JSON.parse(JSON.stringify(original)), "history unchanged");
+          const retry = await transcript.tryAppendDecision({ decision, reason: "retry" });
+          assert.equal(retry.accepted, false, label);
+          assert.equal((await readTranscript(filePath)).length, 4, "exactly one append");
+        }
+      }
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-179-closeout: created commit conflicts and unsuperseded failures refuse without append", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "td179-created-"));
+  const seeds = [
+    [tddCompleted(), { ...tddCreated(), deliveryCommit: TDD_OTHER }],
+    [tddCompleted(), { ...tddCreated(), delivery: tddCreatedRef({ verification: { status: "pending", verifiedCommit: TDD_OTHER } }) }],
+    [tddCompleted(), tddCreated(), tddOutcome("passed"), { type: "run.delivery_failed", runId: TDD_RUN, deliveryCode: "commit_failed" }],
+  ];
+  try {
+    for (const [index, events] of seeds.entries()) {
+      const filePath = join(dir, `${index}.jsonl`);
+      const bytes = events.map(e => JSON.stringify(e)).join("\n") + "\n";
+      await writeFile(filePath, bytes);
+      const transcript = new JsonlTranscript(filePath, { runId: TDD_RUN, agentId: "test" });
+      await assert.rejects(() => transcript.tryAppendDecision({ decision: "rejected", reason: "conflict" }),
+        err => err.code === "delivery_malformed", `case ${index}`);
+      assert.equal(await readFile(filePath, "utf8"), bytes, "zero append on conflict");
+    }
+    for (const status of ["pending", "passed"]) {
+      const created = { ...tddCreated(), deliveryCommit: TDD_COMMIT,
+        delivery: tddCreatedRef({ verification: { status: "pending", verifiedCommit: TDD_COMMIT } }) };
+      const events = [tddCompleted(), created, ...(status === "passed" ? [tddOutcome(status)] : [])];
+      assert.equal(validateDeliveryFacts(events, TDD_PENDING_OPTS).valid, true, "matching optional fields allowed");
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-179-closeout: future facts cannot back an earlier decision", () => {
+  const original = [tddCompleted(), tddCreated(), tddOutcome("passed"), tddDecision("accepted", "passed")];
+  assert.equal(validateDeliveryFacts(original, TDD_PENDING_OPTS).valid, true, "no seq required");
+  const lateCreated = [original[0], original[2], original[3], original[1]];
+  assert.equal(validateDeliveryFacts(lateCreated, TDD_PENDING_OPTS).code, "delivery_malformed");
+  const latePendingCreated = [tddCompleted(), tddPendingRejected(), tddCreated()];
+  assert.equal(validateDeliveryFacts(latePendingCreated, TDD_PENDING_OPTS).code, "delivery_malformed");
+  const passed = revOutcome("passed");
+  const decision = { type: "run.delivery_accepted", runId: REV_RUN, deliveryCommit: REV_COMMIT,
+    delivery: { ...passed.delivery, acceptance: { status: "accepted" } } };
+  const prefix = [{ type: "run.delivery_created", runId: REV_RUN, delivery: revRef() },
+    { type: "run.delivery_verification_failed", runId: REV_RUN, delivery: revRef({ verification: { status: "failed" } }) }];
+  const opts = { expectedRunId: REV_RUN, allowVerificationPending: true };
+  assert.equal(validateDeliveryFacts([...prefix, revRequested(), passed, decision], opts).valid, true);
+  assert.equal(validateDeliveryFacts([...prefix, passed, decision, revRequested()], opts).code, "delivery_malformed");
+});
+
+test("TD-179-closeout: foreign terminal states cannot grant or deny acceptance", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "td179-terminal-"));
+  try {
+    for (const local of ["running", "completed"]) {
+      const filePath = join(dir, `${local}.jsonl`);
+      const events = [{ ...tddCompleted(), to: local }, tddCreated(), tddOutcome("passed"),
+        { ...tddCompleted(), runId: "run_foreign", to: local === "running" ? "completed" : "running" }];
+      await writeFile(filePath, events.map(e => JSON.stringify(e)).join("\n") + "\n");
+      const transcript = new JsonlTranscript(filePath, { runId: TDD_RUN, agentId: "test" });
+      if (local === "running") {
+        await assert.rejects(() => transcript.tryAppendDecision({ decision: "accepted", reason: "local state" }),
+          err => err.code === "terminal_not_eligible");
+        assert.equal((await readTranscript(filePath)).length, events.length);
+      } else {
+        assert.equal((await transcript.tryAppendDecision({ decision: "accepted", reason: "local state" })).accepted, true);
+      }
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-179-A1: the shared facts authority matrix (runId-bound mode)", () => {
+  const cases = [
+    {
+      label: "created alone (explicit pending) — valid waiting ONLY in pending-aware mode",
+      events: [tddCreated()],
+      defaultCode: "delivery_unavailable",
+      pending: { valid: true, verificationStatus: "pending", decisionType: null },
+    },
+    {
+      label: "legacy created with ABSENT verification status gains no pending validity",
+      events: [{ type: "run.delivery_created", runId: TDD_RUN, delivery: tddCreatedRef({ verification: undefined }) }],
+      defaultCode: "delivery_unavailable",
+      pending: { valid: false, code: "delivery_unavailable" },
+    },
+    {
+      label: "created claiming a FINAL status with no backing outcome gains no pending validity",
+      events: [{
+        type: "run.delivery_created",
+        runId: TDD_RUN,
+        delivery: tddCreatedRef({ verification: { status: "passed", commands: ["npm test"] } }),
+      }],
+      defaultCode: "delivery_unavailable",
+      pending: { valid: false, code: "delivery_unavailable" },
+    },
+    {
+      label: "legal pending reject (completed before, explicitly stamped rejected)",
+      events: [tddCreated(), tddCompleted(), tddPendingRejected()],
+      defaultCode: "delivery_unavailable",
+      pending: { valid: true, verificationStatus: "pending", decisionType: "run.delivery_rejected" },
+    },
+    {
+      label: "pending reject followed by a LATE passed outcome — displays passed, stays rejected",
+      events: [tddCreated(), tddCompleted(), tddPendingRejected(), tddOutcome("passed")],
+      pending: { valid: true, verificationStatus: "passed", decisionType: "run.delivery_rejected" },
+    },
+    {
+      label: "pending reject followed by a LATE failed outcome — displays failed, stays rejected",
+      events: [tddCreated(), tddCompleted(), tddPendingRejected(), tddOutcome("failed")],
+      pending: { valid: true, verificationStatus: "failed", decisionType: "run.delivery_rejected" },
+    },
+    {
+      label: "pending reject followed by a LATE unavailable outcome — displays unavailable, stays rejected",
+      events: [tddCreated(), tddCompleted(), tddPendingRejected(), tddOutcome("unavailable")],
+      pending: { valid: true, verificationStatus: "unavailable", decisionType: "run.delivery_rejected" },
+    },
+    {
+      label: "pending reject WITHOUT completed-before is malformed",
+      events: [tddCreated(), tddPendingRejected()],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "pending reject with only a nonterminal bound state_change is malformed",
+      events: [tddCreated(), tddRunning(), tddPendingRejected()],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "pending reject whose completed state_change comes AFTER the decision is malformed",
+      events: [tddCreated(), tddPendingRejected(), tddCompleted()],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "pending decision with an EARLIER original outcome is malformed",
+      events: [tddCreated(), tddCompleted(), tddOutcome("passed"), tddPendingRejected()],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "pending reject not explicitly stamped rejected is malformed",
+      events: [tddCreated(), tddCompleted(), { type: "run.delivery_rejected", runId: TDD_RUN, delivery: tddCreatedRef(), reason: "x" }],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "pending ACCEPTED can never be legalized — not even by a later pass",
+      events: [
+        tddCreated(),
+        tddCompleted(),
+        {
+          type: "run.delivery_accepted",
+          runId: TDD_RUN,
+          delivery: tddCreatedRef({ acceptance: { status: "accepted", reviewerType: "lead_agent" } }),
+          deliveryCommit: TDD_COMMIT,
+          reason: "x",
+        },
+        tddOutcome("passed"),
+      ],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "duplicate bound decisions are malformed",
+      events: [tddCreated(), tddCompleted(), tddPendingRejected(), tddPendingRejected()],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "orphan bound outcome (no created) is malformed in bound mode",
+      events: [tddOutcome("passed")],
+      defaultCode: "delivery_unavailable",
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "orphan bound decision (no created) is malformed in bound mode",
+      events: [tddCompleted(), tddPendingRejected()],
+      defaultCode: "delivery_unavailable",
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "decision with canonical-but-different base commit is malformed",
+      events: [
+        tddCreated(),
+        tddCompleted(),
+        tddOutcome("passed"),
+        tddDecision("accepted", "passed", {
+          delivery: {
+            ...tddOutcomeRef("passed"),
+            baseCommit: TDD_OTHER,
+            acceptance: { status: "accepted", reviewerType: "lead_agent" },
+          },
+        }),
+      ],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "decision with canonical-but-different delivery commit is malformed",
+      events: [
+        tddCreated(),
+        tddCompleted(),
+        tddOutcome("passed"),
+        tddDecision("accepted", "passed", {
+          delivery: {
+            ...tddOutcomeRef("passed"),
+            deliveryCommit: TDD_OTHER,
+            verification: { status: "passed", commands: ["npm test"], verifiedCommit: TDD_OTHER, results: [] },
+            acceptance: { status: "accepted", reviewerType: "lead_agent" },
+          },
+        }),
+      ],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "decision top-level deliveryCommit drift is malformed",
+      events: [tddCreated(), tddCompleted(), tddOutcome("passed"), tddDecision("accepted", "passed", { deliveryCommit: TDD_OTHER })],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "decision MISSING top-level deliveryCommit is allowed (legacy)",
+      events: [tddCreated(), tddCompleted(), tddOutcome("passed"), (() => {
+        const d = tddDecision("accepted", "passed");
+        delete d.deliveryCommit;
+        return d;
+      })()],
+      pending: { valid: true, verificationStatus: "passed", decisionType: "run.delivery_accepted" },
+    },
+    {
+      label: "explicit OPPOSITE acceptance stamp is malformed",
+      events: [
+        tddCreated(),
+        tddCompleted(),
+        tddOutcome("passed"),
+        tddDecision("accepted", "passed", {
+          delivery: { ...tddOutcomeRef("passed"), acceptance: { status: "rejected", reviewerType: "lead_agent" } },
+        }),
+      ],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "MISSING decision verification status is malformed",
+      events: [
+        tddCreated(),
+        tddCompleted(),
+        tddOutcome("passed"),
+        (() => {
+          const ref = { ...tddOutcomeRef("passed"), acceptance: { status: "accepted", reviewerType: "lead_agent" } };
+          delete ref.verification;
+          return { type: "run.delivery_accepted", runId: TDD_RUN, delivery: ref, deliveryCommit: TDD_COMMIT, reason: "x" };
+        })(),
+      ],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "UNKNOWN decision verification status is malformed",
+      events: [
+        tddCreated(),
+        tddCompleted(),
+        tddOutcome("passed"),
+        tddDecision("accepted", "passed", {
+          delivery: {
+            ...tddOutcomeRef("passed"),
+            verification: { status: "maybe", commands: ["npm test"] },
+            acceptance: { status: "accepted", reviewerType: "lead_agent" },
+          },
+        }),
+      ],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "unbacked claimed decision status is malformed",
+      events: [tddCreated(), tddCompleted(), tddOutcome("failed"), tddDecision("rejected", "passed")],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "accepted must be passed — accepted claiming failed is malformed",
+      events: [tddCreated(), tddCompleted(), tddOutcome("failed"), tddDecision("accepted", "failed")],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "nonpending rejected backed by an earlier matching unavailable outcome is valid",
+      events: [tddCreated(), tddCompleted(), tddOutcome("unavailable"), tddDecision("rejected", "unavailable")],
+      pending: { valid: true, verificationStatus: "unavailable", decisionType: "run.delivery_rejected" },
+    },
+    {
+      label: "legacy missing acceptance stamp is valid on a backed nonpending snapshot",
+      events: [tddCreated(), tddCompleted(), tddOutcome("passed"), (() => {
+        const d = tddDecision("accepted", "passed");
+        delete d.delivery.acceptance;
+        return d;
+      })()],
+      pending: { valid: true, verificationStatus: "passed", decisionType: "run.delivery_accepted" },
+    },
+    {
+      label: "legacy 'pending' acceptance stamp is valid on a backed nonpending snapshot",
+      events: [tddCreated(), tddCompleted(), tddOutcome("passed"), tddDecision("accepted", "passed", { delivery: tddOutcomeRef("passed") })],
+      pending: { valid: true, verificationStatus: "passed", decisionType: "run.delivery_accepted" },
+    },
+    {
+      label: "outcome embedding a CONFLICTING final status is malformed (bound mode)",
+      events: [tddCreated(), tddCompleted(), tddOutcome("passed", { delivery: tddOutcomeRef("failed") })],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "outcome embedding an UNKNOWN verification status is malformed (bound mode)",
+      events: [tddCreated(), tddCompleted(), tddOutcome("passed", {
+        delivery: {
+          ...tddOutcomeRef("passed"),
+          verification: { status: "maybe", commands: ["npm test"], verifiedCommit: TDD_COMMIT, results: [] },
+        },
+      })],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "outcome whose snapshot ref still says pending defers to the event TYPE (Lead-approved narrow exception)",
+      events: [tddCreated(), tddCompleted(), tddOutcome("passed", { delivery: tddCreatedRef() })],
+      pending: { valid: true, verificationStatus: "passed", decisionType: null },
+    },
+    {
+      label: "outcome whose snapshot ref has NO verification object defers to the event TYPE (Lead-approved narrow exception)",
+      events: [tddCreated(), tddCompleted(), tddOutcome("passed", { delivery: (() => { const r = tddCreatedRef(); delete r.verification; return r; })() })],
+      pending: { valid: true, verificationStatus: "passed", decisionType: null },
+    },
+    {
+      label: "the outcome TYPE exception NEVER extends to decisions — pending-snapshot accepted stays malformed",
+      events: [
+        tddCreated(),
+        tddCompleted(),
+        tddOutcome("passed", { delivery: tddCreatedRef() }),
+        {
+          type: "run.delivery_accepted",
+          runId: TDD_RUN,
+          delivery: tddCreatedRef({ acceptance: { status: "accepted", reviewerType: "lead_agent" } }),
+          deliveryCommit: TDD_COMMIT,
+          reason: "x",
+        },
+      ],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "outcome verifiedCommit drift is malformed (bound mode)",
+      events: [tddCreated(), tddCompleted(), tddOutcome("passed", {
+        delivery: {
+          ...tddOutcomeRef("passed"),
+          verification: { status: "passed", commands: ["npm test"], verifiedCommit: TDD_OTHER, results: [] },
+        },
+      })],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "outcome base drift vs created is malformed (bound mode)",
+      events: [tddCreated(), tddCompleted(), tddOutcome("passed", { delivery: { ...tddOutcomeRef("passed"), baseCommit: TDD_OTHER } })],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "outcome top-level deliveryCommit drift is malformed (bound mode)",
+      events: [tddCreated(), tddCompleted(), tddOutcome("passed", { deliveryCommit: TDD_OTHER })],
+      pending: { valid: false, code: "delivery_malformed" },
+    },
+    {
+      label: "foreign-envelope core events are IGNORED (not conflicts)",
+      events: [
+        tddCreated(),
+        tddCompleted(),
+        tddPendingRejected(),
+        {
+          type: "run.delivery_accepted",
+          runId: "run_FOREIGN",
+          delivery: {
+            ...tddCreatedRef(),
+            runId: "run_FOREIGN",
+            acceptance: { status: "accepted", reviewerType: "lead_agent" },
+          },
+          deliveryCommit: TDD_OTHER,
+          reason: "foreign",
+        },
+      ],
+      pending: { valid: true, verificationStatus: "pending", decisionType: "run.delivery_rejected" },
+    },
+  ];
+
+  for (const c of cases) {
+    if (c.defaultCode !== undefined) {
+      const legacy = validateDeliveryFacts(c.events);
+      assert.equal(legacy.valid, false, `${c.label}: legacy default mode invalid`);
+      assert.equal(legacy.code, c.defaultCode, `${c.label}: legacy default code`);
+    }
+    const facts = validateDeliveryFacts(c.events, TDD_PENDING_OPTS);
+    if (c.pending.valid) {
+      assert.equal(facts.valid, true, `${c.label}: valid`);
+      assert.equal(facts.code, null, `${c.label}: no code`);
+      assert.equal(facts.verificationStatus, c.pending.verificationStatus, `${c.label}: verificationStatus`);
+      assert.equal(facts.decisionEvent?.type ?? null, c.pending.decisionType, `${c.label}: decisionEvent`);
+    } else {
+      assert.equal(facts.valid, false, `${c.label}: invalid`);
+      assert.equal(facts.code, c.pending.code, `${c.label}: code`);
+      assert.equal(typeof facts.error === "string" && facts.error.length > 0, true, `${c.label}: human message kept`);
+    }
+  }
+});
+
+test("TD-179-A2: legal reverify-pass acceptance stays valid through the authority (no drift)", () => {
+  const failedRef = revRef({
+    verification: { status: "failed", failureCode: "command_failed", commands: ["assert"], verifiedCommit: REV_COMMIT, results: [] },
+  });
+  const reverifyOutcomeRef = revRef({
+    verification: { status: "passed", commands: ["assert"], verifiedCommit: REV_COMMIT, results: [] },
+    acceptance: { status: "accepted", reviewerType: "lead_agent" },
+  });
+  const events = [
+    { type: "run.delivery_created", runId: REV_RUN, delivery: revRef() },
+    { type: "run.delivery_verification_failed", runId: REV_RUN, delivery: failedRef },
+    revRequested(),
+    revOutcome("passed"),
+    {
+      type: "run.delivery_accepted",
+      runId: REV_RUN,
+      delivery: reverifyOutcomeRef,
+      deliveryCommit: REV_COMMIT,
+      reason: "reverify passed",
+    },
+  ];
+  const facts = validateDeliveryFacts(events, { expectedRunId: REV_RUN, allowVerificationPending: true });
+  assert.equal(facts.valid, true);
+  assert.equal(facts.verificationStatus, "failed", "original verification truth unchanged");
+  assert.equal(facts.effectiveVerificationStatus, "passed", "effective is the reverify outcome");
+  assert.equal(facts.reverifyStatus, "complete");
+  assert.equal(facts.decisionEvent?.type, "run.delivery_accepted");
+});
+
+test("TD-179-W1: tryAppendDecision — the ONLY new rejection path is completed + explicit pending + no outcome", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "td179-w1-"));
+  try {
+    const filePath = join(dir, `${TDD_RUN}.jsonl`);
+    const t = new JsonlTranscript(filePath, { runId: TDD_RUN, agentId: "test" });
+    await t.append("run.started", { delivery: { mode: "git_commit_v1" } });
+    await t.append("run.delivery_created", { delivery: tddCreatedRef() });
+    await t.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+
+    // Accept still requires effective passed — a pending verification refuses.
+    await assert.rejects(
+      () => t.tryAppendDecision({ decision: "accepted", reason: "nope" }),
+      (err) => {
+        assert.ok(err instanceof DeliveryDecisionPolicyError);
+        assert.equal(err.code, "verification_failed");
+        assert.match(err.message, /pending/);
+        return true;
+      },
+    );
+
+    // The bounded pending rejection settles the delivery.
+    const result = await t.tryAppendDecision({ decision: "rejected", reason: "verification never produced an outcome" });
+    assert.equal(result.accepted, true, "pending reject succeeds");
+    assert.equal(result.event.type, "run.delivery_rejected");
+    assert.equal(result.event.deliveryCommit, TDD_COMMIT);
+    assert.equal(result.event.delivery.verification.status, "pending", "decision snapshot keeps verification pending");
+    assert.equal(result.event.delivery.acceptance.status, "rejected", "explicitly stamped rejected");
+
+    // First-decision-wins BEFORE the new-action gates: a later ACCEPT is a
+    // loser (already_decided), NOT a verification_failed throw.
+    const later = await t.tryAppendDecision({ decision: "accepted", reason: "changed my mind" });
+    assert.equal(later.accepted, false);
+    assert.equal(later.existing.status, "rejected");
+    assert.equal(later.existing.type, "run.delivery_rejected");
+
+    const events = await readTranscript(filePath);
+    assert.equal(events.filter((e) => e.type === "run.delivery_rejected").length, 1, "exactly one decision event");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-179-W2: pending reject refusals — non-completed run, legacy inferred completed, legacy absent status", async () => {
+  const cases = [
+    {
+      label: "running run (bound state_change running)",
+      seed: [
+        ["run.started", { delivery: { mode: "git_commit_v1" } }],
+        ["run.delivery_created", { delivery: tddCreatedRef() }],
+        ["run.state_change", { from: "submitted", to: "running", reason: "first_event" }],
+      ],
+      code: "terminal_not_eligible",
+    },
+    {
+      label: "legacy completed inferred from the last event only (no bound state_change)",
+      seed: [
+        ["run.started", { delivery: { mode: "git_commit_v1" } }],
+        ["run.delivery_created", { delivery: tddCreatedRef() }],
+        ["run.completed", {}],
+      ],
+      code: "terminal_not_eligible",
+    },
+    {
+      label: "legacy created with ABSENT verification status gains no rejection eligibility",
+      seed: [
+        ["run.started", { delivery: { mode: "git_commit_v1" } }],
+        ["run.delivery_created", { delivery: tddCreatedRef({ verification: undefined }) }],
+        ["run.state_change", { from: "running", to: "completed", reason: "done" }],
+      ],
+      code: "delivery_unavailable",
+    },
+    {
+      label: "created claiming a final status with no backing outcome gains no rejection eligibility",
+      seed: [
+        ["run.started", { delivery: { mode: "git_commit_v1" } }],
+        ["run.delivery_created", { delivery: tddCreatedRef({ verification: { status: "passed", commands: ["npm test"] } }) }],
+        ["run.state_change", { from: "running", to: "completed", reason: "done" }],
+      ],
+      code: "delivery_unavailable",
+    },
+  ];
+  for (const c of cases) {
+    const dir = await mkdtemp(join(tmpdir(), "td179-w2-"));
+    try {
+      const filePath = join(dir, `${TDD_RUN}.jsonl`);
+      const t = new JsonlTranscript(filePath, { runId: TDD_RUN, agentId: "test" });
+      for (const [type, payload] of c.seed) await t.append(type, payload);
+      await assert.rejects(
+        () => t.tryAppendDecision({ decision: "rejected", reason: "x" }),
+        (err) => {
+          assert.ok(err instanceof DeliveryDecisionPolicyError, `${c.label}: dedicated type`);
+          assert.equal(err.code, c.code, `${c.label}: code`);
+          return true;
+        },
+      );
+      const events = await readTranscript(filePath);
+      assert.equal(
+        events.filter((e) => e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected").length,
+        0,
+        `${c.label}: nothing appended`,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("TD-179-W3: an impossible pending ACCEPTED on disk is a durable conflict — never an already_decided loser", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "td179-w3-"));
+  try {
+    const filePath = join(dir, `${TDD_RUN}.jsonl`);
+    const t = new JsonlTranscript(filePath, { runId: TDD_RUN, agentId: "test" });
+    await t.append("run.started", { delivery: { mode: "git_commit_v1" } });
+    await t.append("run.delivery_created", { delivery: tddCreatedRef() });
+    await t.append("run.state_change", { from: "running", to: "completed", reason: "done" });
+    await t.append("run.delivery_accepted", {
+      delivery: tddCreatedRef({ acceptance: { status: "accepted", reviewerType: "lead_agent" } }),
+      deliveryCommit: TDD_COMMIT,
+      reason: "forged",
+    });
+    await t.append("run.delivery_verification_passed", { delivery: tddOutcomeRef("passed") });
+
+    for (const decision of ["accepted", "rejected"]) {
+      await assert.rejects(
+        () => t.tryAppendDecision({ decision, reason: "x" }),
+        (err) => {
+          assert.ok(err instanceof DeliveryDecisionPolicyError, `${decision}: dedicated type`);
+          assert.equal(err.code, "delivery_malformed", `${decision}: a pending accepted is malformed even after a late pass`);
+          return true;
+        },
+      );
+    }
+    const events = await readTranscript(filePath);
+    assert.equal(events.filter((e) => e.type === "run.delivery_rejected").length, 0, "nothing appended");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });

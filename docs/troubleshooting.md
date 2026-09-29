@@ -51,7 +51,8 @@
 |---|---|
 | readiness `not_requested`（`deliveryAvailable:false` + `deliveryRequested:false`） | 正常（非 delivery run），无需动作 |
 | readiness `waiting_for_packaging`（非终态请求中） | 带 `waitMs` 重读（`run_delivery` / `runs delivery --wait-ms`）；不要 stop |
-| readiness `waiting_for_verification` | 带 `waitMs` 重读；验证是控制面异步事实 |
+| readiness `waiting_for_verification` | 带 `waitMs` 重读；验证是控制面异步事实。**例外**：若该 run 已 completed 且已有合法 pending 拒绝决策，readiness 会落为 `reviewable`（verification 仍显示 `pending`，acceptance=rejected）——此时无需动作；这是 TD-179 的有界结算形态，不是卡死 |
+| completed + verification `pending` 无 outcome、无决策（readiness `waiting_for_verification` 一直不落） | TD-179 有界 pending 拒绝：`runs delivery <runId> --reject --reason-file FILE` 显式结算（要求 created ref 显式声明 `verification:"pending"`；legacy 缺失状态不具资格，非 completed 也不具资格）。不 stop/reverify/repackage；结算后 readiness 落为 `reviewable`（verification 仍 `pending`）；迟到的真实 outcome 之后照常显示而 acceptance 恒 rejected。规范见 `docs/02-architecture.md` §4.9 |
 | readiness `isolation_failed`（`isolationFailure.code` 为 `workdir_escape`） | **无任何 salvage 面**：不 repackage/reverify/review/decide/stop——重新派发 |
 | readiness `packaging_failed` 且 `deliveryFailure.code` 为 `disallowed_path`（candidateKind `disallowed_scope`，带 candidateInventory） | 读 candidateInventory，Lead 裁定后 `run_delivery_repackage` |
 | readiness `packaging_failed` 且 code 非 `disallowed_path`（其余包装失败码） | 无候选面：读 `deliveryFailure.code` + `run_diagnose`（只给事实），重新派发或人工核 |

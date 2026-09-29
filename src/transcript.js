@@ -463,6 +463,159 @@ function _reverificationOutcomeFromType(type) {
   return null;
 }
 
+// =====================================================================
+// TD-179: the shared pure delivery-facts authority helpers.
+//
+// validateDeliveryFacts(events, { expectedRunId, allowVerificationPending })
+// is the ONE facts authority reused by the read surfaces (gatherDeliveryView /
+// projectDeliveryReadiness / the await terminal outcome) and the in-lock
+// decision writer (tryAppendDecision). The helpers below are its private
+// clauses — there is no second decision validator anywhere else.
+// =====================================================================
+
+// The closed set of verification statuses a DeliveryRef may declare.
+const DELIVERY_REF_VERIFICATION_STATUSES = new Set([
+  "pending",
+  ...DELIVERY_VERIFICATION_OUTCOMES,
+]);
+
+/**
+ * TD-179: the `to` of the LAST run.state_change bound to runId at an index
+ * strictly below `beforeIndex`, or null when the prefix has none. Append
+ * order (array order) is the ordering authority — seq absence is allowed.
+ * @private
+ */
+function _lastBoundStateChangeBefore(events, runId, beforeIndex) {
+  for (let index = Math.min(beforeIndex, events.length) - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event && event.type === "run.state_change" && event.runId === runId) {
+      return event.to;
+    }
+  }
+  return null;
+}
+
+/**
+ * TD-179: is the LAST run.state_change bound to runId a transition to
+ * `expected`? A transcript with NO bound state_change yields false — legacy
+ * last-event inference is never sufficient (appending a decision event would
+ * itself become the last event and regress a legacy-inferred terminal state).
+ * @private
+ */
+function _lastBoundStateChangeIs(events, runId, expected) {
+  const to = _lastBoundStateChangeBefore(events, runId, events.length + 1);
+  return to === expected;
+}
+
+/**
+ * TD-179: validate the single bound decision event against the created ref,
+ * the (optional) original outcome event, and the reverify chain projection.
+ *
+ * Normative rules (docs/02-architecture.md delivery-decision section):
+ *   - identity: the decision's DeliveryRef must be a usable object with the
+ *     SAME canonical (runId, baseCommit, deliveryCommit) as the created ref;
+ *   - any PRESENT top-level deliveryCommit / embedded verifiedCommit must
+ *     agree with the created commit (missing historical optionals allowed —
+ *     never invented, never conflicting);
+ *   - the decision's verification status must be present and known — missing
+ *     or unknown is always invalid;
+ *   - a PENDING decision can only be a reject: explicitly stamped rejected,
+ *     created explicitly declared pending, a bound completed state_change
+ *     EARLIER in append order, and no original outcome before the decision
+ *     (a later real outcome stays a legal display fact). A pending accepted
+ *     can never be legalized — not even by a later pass;
+ *   - a NONPENDING decision needs an earlier matching original outcome or a
+ *     valid (complete) reverify backing in its transcript prefix; an accepted
+ *     must be passed. Legacy tolerance ONLY: a missing or "pending"
+ *     acceptance stamp on such a backed nonpending snapshot.
+ *
+ * @param {object} decision — the bound run.delivery_accepted/rejected event
+ * @param {object} ctx — { events, runId, createdRef, createdCommit,
+ *   outcomeEvent, reverifyChain }
+ * @returns {string|null} a human diagnostics message, or null when valid
+ * @private
+ */
+function _validateBoundDecisionEvent(decision, {
+  events, runId, createdRef, createdCommit, outcomeEvent, reverifyChain,
+}) {
+  const ref = decision?.delivery;
+  if (!ref || typeof ref !== "object") {
+    return "decision event is missing a usable DeliveryRef";
+  }
+  if (!_sameDeliveryIdentity(ref, createdRef, runId)) {
+    return "decision event DeliveryRef identity does not match the delivery_created ref (runId binding + canonical base/delivery commit required)";
+  }
+  if (decision.deliveryCommit !== undefined && decision.deliveryCommit !== createdCommit) {
+    return "decision event top-level deliveryCommit does not match the delivery_created commit";
+  }
+  const decisionVerified = ref.verification?.verifiedCommit;
+  if (decisionVerified !== undefined && decisionVerified !== createdCommit) {
+    return "decision event verifiedCommit does not match the delivery commit";
+  }
+  const claimed = ref.verification?.status;
+  if (!DELIVERY_REF_VERIFICATION_STATUSES.has(claimed)) {
+    return "decision event verification status is missing or unknown";
+  }
+  const decisionIndex = events.indexOf(decision);
+  const prefix = events.slice(0, decisionIndex);
+  if (!prefix.some((event) => event?.type === "run.delivery_created"
+    && event.runId === runId && event.delivery === createdRef)) {
+    return "decision event has no earlier delivery_created backing";
+  }
+  const expectedStamp = decision.type === "run.delivery_accepted" ? "accepted" : "rejected";
+  const stamp = ref.acceptance?.status;
+
+  if (claimed === "pending") {
+    if (decision.type !== "run.delivery_rejected") {
+      return "a pending-verification decision can only be a reject; an accepted whose ref still declares verification pending is a durable conflict";
+    }
+    if (stamp !== "rejected") {
+      return "a pending-verification reject must be explicitly stamped acceptance \"rejected\"";
+    }
+    if (createdRef.verification?.status !== "pending") {
+      return "a pending-verification decision requires delivery_created to explicitly declare verification.status \"pending\"";
+    }
+    if (_lastBoundStateChangeBefore(events, runId, decisionIndex) !== "completed") {
+      return "a pending-verification decision requires a bound completed run.state_change earlier in the transcript";
+    }
+    for (let index = 0; index < decisionIndex; index += 1) {
+      const event = events[index];
+      if (event && DELIVERY_VERIFICATION_OUTCOME_TYPES.has(event.type) && event.runId === runId) {
+        return "a pending-verification decision conflicts with an earlier original verification outcome";
+      }
+    }
+    if (reverifyChain.status !== "none") {
+      return "a pending-verification decision conflicts with a reverify chain";
+    }
+    return null;
+  }
+
+  // Nonpending snapshot: it must be BACKED by an earlier matching original
+  // outcome or a valid (complete) reverify chain outcome in the prefix.
+  let backed = false;
+  if (outcomeEvent) {
+    const outcomeIndex = events.indexOf(outcomeEvent);
+    if (outcomeIndex >= 0 && outcomeIndex < decisionIndex
+      && _verificationOutcomeFromType(outcomeEvent.type) === claimed) {
+      backed = true;
+    }
+  }
+  // A request appended later cannot retroactively authorize this snapshot.
+  const priorReverify = projectReverifyChain(prefix, runId, createdRef);
+  if (!backed && priorReverify.status === "complete"
+    && priorReverify.effectiveStatus === claimed) backed = true;
+  if (!backed) {
+    return "decision event verification status has no earlier matching original outcome or valid reverify backing";
+  }
+  if (decision.type === "run.delivery_accepted" && claimed !== "passed") {
+    return "an accepted decision must be backed by a passed verification";
+  }
+  if (stamp !== undefined && stamp !== expectedStamp && stamp !== "pending") {
+    return "decision event acceptance status disagrees with the event type";
+  }
+  return null;
+}
+
 // M12-6 Package 3B1: is this durable reverify REQUEST event envelope-bound to
 // runId, identity-bound to createdRef, top-level-commit-bound, and shape-valid
 // (closed-set reason, bounded setupCommands)? Any failure — a foreign envelope
@@ -828,12 +981,24 @@ export class JsonlTranscript {
    *   5. return {accepted:true, event} to the winner or
    *      {accepted:false, existing} to losers.
    *
-   * Durable preconditions (checked in-lock, not in the CLI):
-   *   - exactly one run.delivery_created event;
-   *   - exactly one verification outcome event (passed/failed/unavailable);
-   *   - verification event's deliveryCommit must match delivery_created's;
-   *   - reject only allowed when verification status ∈ {passed, failed, unavailable};
-   *   - accept requires terminal state completed + verification passed.
+   * Durable preconditions (checked in-lock, not in the CLI) — fact consistency
+   * is owned by the shared authority validateDeliveryFacts (TD-179), invoked
+   * here in its runId-bound pending-aware mode:
+   *   - exactly one BOUND run.delivery_created event (foreign envelopes are
+   *     ignored; duplicates/orphans/malformed bound facts are malformed);
+   *   - at most one bound verification outcome event; when present it must
+   *     carry the full fixed identity and type/status agreement;
+   *   - at most one BOUND decision event, fully validated (identity, stamps,
+   *     snapshot backing in append order) — a VALIDATED existing decision is
+   *     returned as the already_decided loser BEFORE any new-action gate;
+   *   - reject allowed when verification status ∈ {passed, failed, unavailable};
+   *   - accept requires terminal state completed + effective verification passed;
+   *   - TD-179: reject is ALSO allowed for a pending verification, but ONLY on
+   *     a completed run whose created ref EXPLICITLY declares
+   *     verification.status "pending" with no outcome and no decision — the
+   *     bounded pending rejection. It does not interrupt or infer anything
+   *     about the verifier; a late real outcome stays visible while the
+   *     acceptance remains rejected.
    *
    * The event contains a new DeliveryRef value equal to the latest verified
    * DeliveryRef except acceptance.status becomes "accepted" or "rejected",
@@ -860,7 +1025,17 @@ export class JsonlTranscript {
       }
 
       // In-lock fact validation — single owner of delivery facts.
-      const facts = validateDeliveryFacts(events);
+      // TD-179: the SAME shared authority the read surfaces use, in its
+      // runId-bound pending-aware mode. Core facts (created / original outcome /
+      // decision) bind to THIS transcript's runId — foreign-envelope events are
+      // ignored, all bound events are counted before payload checks, and a
+      // single bound decision must fully validate (identity, stamps, snapshot
+      // backing in append order). Fact consistency is separated from the
+      // new-decision PERMISSION gates below.
+      const facts = validateDeliveryFacts(events, {
+        expectedRunId: this.context.runId,
+        allowVerificationPending: true,
+      });
       if (facts.error) {
         // M12-9: throw the DEDICATED policy type carrying the structured fact
         // category (facts.code). The human `facts.error` message is retained
@@ -868,8 +1043,25 @@ export class JsonlTranscript {
         throw new DeliveryDecisionPolicyError(facts.code, facts.error);
       }
 
-      // Decision-specific gate (also in-lock).
-      const terminalState = findState(events);
+      // TD-179: FIRST-DECISION-WINS BEFORE the new-action gates. The facts
+      // authority has already VALIDATED the existing decision (a malformed or
+      // impossible one failed closed above and can never masquerade as this
+      // run's decision), so a durable decision is returned as the
+      // already_decided loser before any verification/terminal gate runs.
+      if (facts.decisionEvent) {
+        return {
+          accepted: false,
+          existing: {
+            type: facts.decisionEvent.type,
+            status: facts.decisionEvent.type === "run.delivery_accepted" ? "accepted" : "rejected",
+            deliveryCommit: facts.deliveryCommit,
+          },
+        };
+      }
+
+      // Decision-specific gate (also in-lock). PERMISSION only — every fact
+      // consistency question was settled by the authority above.
+      const terminalState = findState(events.filter((event) => event?.runId === this.context.runId));
       // M12-6 Package 3B: the accept/reject gate consults the EFFECTIVE
       // verification status. With no reverify chain this equals the original
       // status (zero drift). With a complete valid reverify chain it equals the
@@ -880,7 +1072,8 @@ export class JsonlTranscript {
       const verificationStatus = facts.effectiveVerificationStatus;
       if (decision === "accepted") {
         // Accept ALWAYS requires a passed (effective) verification, for both the
-        // normal completed path, the recovery path, and the reverify path.
+        // normal completed path, the recovery path, and the reverify path. A
+        // pending verification NEVER gains acceptance (TD-179 keeps this).
         if (verificationStatus !== "passed") {
           // M12-9: typed policy rejection; message kept for diagnostics only.
           throw new DeliveryDecisionPolicyError("verification_failed", `Cannot accept: delivery verification is ${verificationStatus}, must be passed`);
@@ -899,6 +1092,24 @@ export class JsonlTranscript {
             `Cannot accept: run terminal state is ${terminalState}, must be completed (or a recovery-eligible failed run)`,
           );
         }
+      } else if (facts.verificationStatus === "pending") {
+        // TD-179: the BOUNDED PENDING REJECTION — the only new settlement
+        // path. The authority already proved the shape (exactly one bound
+        // usable created that EXPLICITLY declares verification "pending",
+        // zero outcomes, no decision, no conflicting chain). Permission still
+        // requires a DURABLE completed run: the LAST bound run.state_change
+        // must be a transition to completed. Legacy last-event inference is
+        // never sufficient — appending this decision would itself become the
+        // last event and regress a legacy-inferred completed back to running.
+        // No verifier liveness is inferred and nothing is interrupted: a late
+        // real outcome still lands and stays visible while acceptance remains
+        // rejected.
+        if (!_lastBoundStateChangeIs(events, this.context.runId, "completed")) {
+          throw new DeliveryDecisionPolicyError(
+            "terminal_not_eligible",
+            "Cannot reject: delivery verification is pending and the run has no durable bound completed run.state_change (a pending-verification reject requires a completed run)",
+          );
+        }
       } else {
         // reject: only allowed when verification has a final outcome
         if (!["passed", "failed", "unavailable"].includes(verificationStatus)) {
@@ -910,26 +1121,21 @@ export class JsonlTranscript {
       // M12-6 Package 3B: stamp acceptance onto the EFFECTIVE DeliveryRef when a
       // complete reverify chain exists (its outcome ref carries the effective
       // verification status); otherwise the original latest verification ref.
+      // TD-179 pending rejection: latestRef is the created ref, so the decision
+      // snapshot explicitly retains verification "pending" while acceptance
+      // becomes "rejected" — exactly the legal pending-reject shape the
+      // authority validates on every later read.
       const deliveryRef = facts.effectiveRef ?? facts.latestRef;
       const decisionType = decision === "accepted"
         ? "run.delivery_accepted"
         : "run.delivery_rejected";
 
-      // Check for existing decision event for the same deliveryCommit.
-      if (facts.decisionEvent) {
-        return {
-          accepted: false,
-          existing: {
-            type: facts.decisionEvent.type,
-            status: facts.decisionEvent.type === "run.delivery_accepted" ? "accepted" : "rejected",
-            deliveryCommit: facts.decisionEvent.deliveryCommit,
-          },
-        };
-      }
-
       // Build the new DeliveryRef with updated acceptance status.
       const newRef = {
         ...deliveryRef,
+        // Legacy outcome refs may lack a status or still say pending. Only
+        // the NEW snapshot is stamped from the validated outcome authority.
+        verification: { ...deliveryRef.verification, status: verificationStatus },
         acceptance: {
           status: decision,
           reviewerType: "lead_agent",
@@ -944,6 +1150,13 @@ export class JsonlTranscript {
         ...this.redact({ delivery: newRef, deliveryCommit, reason: trimmedReason }),
         ts, seq, ...ctx, type: decisionType,
       };
+      const appendedFacts = validateDeliveryFacts([...events, event], {
+        expectedRunId: this.context.runId,
+        allowVerificationPending: true,
+      });
+      if (!appendedFacts.valid) {
+        throw new DeliveryDecisionPolicyError(appendedFacts.code, appendedFacts.error);
+      }
       await appendFile(this.filePath, `${JSON.stringify(event)}\n`, "utf8");
       this.seq = seq;
       return { accepted: true, event };
@@ -1669,34 +1882,192 @@ export function projectCorrectionStatus(events, runId, correctionId) {
  * reuse the SAME durable-facts validator as tryAppendDecision, without altering
  * tryAppendDecision or introducing a second reconstruction algorithm.
  *
+ * TD-179: OPTIONAL narrow modes — the SAME single validator, never a second
+ * reconstruction algorithm:
+ *   - `{ expectedRunId }` (runId-bound mode): the CORE categories (created /
+ *     original outcome / decision) are bound to the requested runId. A
+ *     foreign-envelope event in a core category is IGNORED (it belongs to
+ *     another run), but ALL bound events are counted BEFORE payload checks —
+ *     an orphan bound outcome/decision, a duplicate, or a malformed bound
+ *     fact is delivery_malformed. Every consumed ref must carry the canonical
+ *     identical (runId, baseCommit, deliveryCommit); any PRESENT top-level
+ *     deliveryCommit / verifiedCommit must agree (missing historical optional
+ *     values are not invented); the outcome event's type must agree with its
+ *     embedded verification status (Lead-approved narrow exception: an outcome
+ *     ref whose embedded status is missing or still the default "pending"
+ *     defers to the closed-set event TYPE — the baseline already derived the
+ *     status from the type; an opposite FINAL or UNKNOWN embedded value is a
+ *     conflict, and the exception never extends to decision snapshots); and a
+ *     single bound decision is validated by _validateBoundDecisionEvent
+ *     (identity, stamps, snapshot backing in append order, pending ⇒
+ *     rejected-only). Reused by the read surfaces and the in-lock decision
+ *     writer so they cannot drift.
+ *   - `{ allowVerificationPending: true }` (pending-aware mode): additionally
+ *     admits "exactly one bound usable created + zero outcomes" as
+ *     valid-with-pending — but ONLY when the created ref EXPLICITLY declares
+ *     verification.status "pending". A legacy absent status (or a claimed
+ *     final status with no backing outcome) never gains pending validity.
+ *
+ * The default single-argument behavior is byte-identical for every legacy
+ * caller; reverify / repackage keep their own expectations, while the direct
+ * review resolver (resolveRunDeliveryReviewTarget) now explicitly opts into
+ * bound mode via { expectedRunId }.
+ *
  * @param {object[]} events
- * @returns {{valid:boolean, latestRef:object|null, deliveryCommit:string|null, verificationStatus:string, decisionEvent:object|null, code:string|null, error:string|null}}
+ * @param {{expectedRunId?: string, allowVerificationPending?: boolean}} [options]
+ * @returns {{valid:boolean, latestRef:object|null, createdRef:object|null, deliveryCommit:string|null, verificationStatus:string, effectiveVerificationStatus:string, effectiveRef:object|null, decisionEvent:object|null, recoveryAcceptable:boolean, reverifyStatus:string, reverifyReason:string|null, reverifyRequestedEvent:object|null, reverifyOutcomeEvent:object|null, createdEventRunId:string|null, verificationEventRunId:string|null, code:string|null, error:string|null}}
  */
-export function validateDeliveryFacts(events) {
-  const createdEvents = events.filter((e) => e.type === "run.delivery_created" && e.delivery);
+export function validateDeliveryFacts(events, options = {}) {
+  const expectedRunId = typeof options?.expectedRunId === "string" && options.expectedRunId.length > 0
+    ? options.expectedRunId
+    : null;
+  const boundMode = expectedRunId !== null;
+  const allowPendingVerification = options?.allowVerificationPending === true;
+
+  // TD-179: in bound mode created events are counted WITHOUT the payload
+  // filter — a bound created event missing its DeliveryRef is a durable
+  // conflict, never silently filtered away. Default mode keeps the historical
+  // payload-filtered counting byte-identical for every existing caller.
+  const createdEvents = boundMode
+    ? events.filter((e) => e && e.type === "run.delivery_created" && e.runId === expectedRunId)
+    : events.filter((e) => e.type === "run.delivery_created" && e.delivery);
+  const verificationEvents = events.filter((e) =>
+    e && DELIVERY_VERIFICATION_OUTCOME_TYPES.has(e.type)
+    && (!boundMode || e.runId === expectedRunId));
+  const boundDecisionEvents = boundMode
+    ? events.filter((e) =>
+      e && (e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected")
+      && e.runId === expectedRunId)
+    : [];
+
+  const unavailable = (latestRef, commit) => ({
+    valid: false, latestRef, createdRef: latestRef ?? null, deliveryCommit: commit ?? null,
+    verificationStatus: "pending", effectiveVerificationStatus: "pending", effectiveRef: null,
+    decisionEvent: null, recoveryAcceptable: false, reverifyStatus: "none", reverifyReason: null,
+    reverifyRequestedEvent: null, reverifyOutcomeEvent: null,
+    createdEventRunId: boundMode ? expectedRunId : (createdEvents[0]?.runId ?? null),
+    verificationEventRunId: null,
+    code: "delivery_unavailable",
+    error: "No verification outcome event found (missing run.delivery_verification_*)",
+  });
+  const malformed = (message, latestRef = null, commit = null) => ({
+    valid: false, latestRef, createdRef: latestRef ?? null, deliveryCommit: commit ?? null,
+    verificationStatus: "pending", effectiveVerificationStatus: "pending", effectiveRef: null,
+    decisionEvent: null, recoveryAcceptable: false, reverifyStatus: "none", reverifyReason: null,
+    reverifyRequestedEvent: null, reverifyOutcomeEvent: null,
+    createdEventRunId: boundMode ? expectedRunId : (createdEvents[0]?.runId ?? null),
+    verificationEventRunId: null,
+    code: "delivery_malformed",
+    error: message,
+  });
+
   if (createdEvents.length === 0) {
+    if (boundMode) {
+      // TD-179: an orphan bound outcome/decision is a broken durable chain —
+      // malformed, never "no delivery".
+      if (verificationEvents.length > 0) {
+        return malformed("Orphan verification outcome event found (bound to this runId without a delivery_created)");
+      }
+      if (boundDecisionEvents.length > 0) {
+        return malformed("Orphan decision event found (bound to this runId without a delivery_created)");
+      }
+    }
     // M12-9: structured fact category — no committed delivery → delivery_unavailable.
-    return { valid: false, latestRef: null, deliveryCommit: null, verificationStatus: "pending", decisionEvent: null, code: "delivery_unavailable", error: "No committed delivery found (missing run.delivery_created)" };
+    return {
+      valid: false, latestRef: null, createdRef: null, deliveryCommit: null,
+      verificationStatus: "pending", effectiveVerificationStatus: "pending", effectiveRef: null,
+      decisionEvent: null, recoveryAcceptable: false, reverifyStatus: "none", reverifyReason: null,
+      reverifyRequestedEvent: null, reverifyOutcomeEvent: null,
+      createdEventRunId: null, verificationEventRunId: null,
+      code: "delivery_unavailable",
+      error: "No committed delivery found (missing run.delivery_created)",
+    };
   }
   if (createdEvents.length > 1) {
     // M12-9: conflicting durable facts → delivery_malformed.
-    return { valid: false, latestRef: null, deliveryCommit: null, verificationStatus: "pending", decisionEvent: null, code: "delivery_malformed", error: `Multiple delivery_created events found (${createdEvents.length}); exactly one required` };
+    return malformed(`Multiple delivery_created events found (${createdEvents.length}); exactly one required`);
   }
 
   const createdRef = createdEvents[0].delivery;
-  const createdCommit = createdRef.deliveryCommit;
+  const createdCommit = createdRef?.deliveryCommit;
 
-  // Find verification outcome events
-  const verificationEvents = events.filter((e) =>
-    DELIVERY_VERIFICATION_OUTCOME_TYPES.has(e.type));
+  // TD-179 bound mode: the single created event must be fully usable — a
+  // non-null object DeliveryRef carrying the fixed delivery identity (runId
+  // binding + canonical base/delivery commits) via the SAME _sameDeliveryIdentity
+  // SSOT the reverify/repackage chains use.
+  if (boundMode && !_sameDeliveryIdentity(createdRef, createdRef, expectedRunId)) {
+    return malformed("delivery_created DeliveryRef identity is invalid (runId binding + canonical base/delivery commit required)");
+  }
+
+  if (boundMode) {
+    const topCommit = createdEvents[0].deliveryCommit;
+    const verifiedCommit = createdRef.verification?.verifiedCommit;
+    if ((topCommit !== undefined && topCommit !== createdCommit)
+      || (verifiedCommit !== undefined && verifiedCommit !== createdCommit)) {
+      return malformed("delivery_created optional commit fields conflict with its delivery commit");
+    }
+    const failures = events.filter((event) => event?.type === "run.delivery_failed"
+      && event.runId === expectedRunId);
+    if (failures.length > 0
+      && findValidRepackageProvenance(events, expectedRunId, createdRef) === null) {
+      return malformed("delivery_created conflicts with an unsuperseded bound run.delivery_failed");
+    }
+  }
 
   if (verificationEvents.length === 0) {
+    if (boundMode) {
+      // TD-179: validate the (at most one) bound decision shape FIRST — an
+      // impossible decision (e.g. a pending accepted, an unbacked claimed
+      // status) is a durable conflict even when no outcome exists.
+      const reverifyChainNone = projectReverifyChain(events, expectedRunId, createdRef);
+      if (boundDecisionEvents.length > 1) {
+        return malformed(`Multiple decision events found (${boundDecisionEvents.length}); at most one decision may exist (first-decision-wins)`);
+      }
+      let decisionEvent = null;
+      if (boundDecisionEvents.length === 1) {
+        const decisionError = _validateBoundDecisionEvent(boundDecisionEvents[0], {
+          events, runId: expectedRunId, createdRef, createdCommit,
+          outcomeEvent: null, reverifyChain: reverifyChainNone,
+        });
+        if (decisionError) return malformed(decisionError);
+        decisionEvent = boundDecisionEvents[0];
+      }
+      // Pending-aware admission: ONLY a created ref that EXPLICITLY declares
+      // verification "pending" is valid waiting. Legacy absent status (or a
+      // claimed final status with no backing outcome) keeps the legacy
+      // delivery_unavailable refusal — it never gains rejection eligibility.
+      if (allowPendingVerification && createdRef.verification?.status === "pending") {
+        if (reverifyChainNone.status !== "none") {
+          return malformed("a reverify chain exists without an original verification outcome");
+        }
+        return {
+          valid: true,
+          latestRef: createdRef,
+          createdRef,
+          deliveryCommit: createdCommit,
+          verificationStatus: "pending",
+          effectiveVerificationStatus: "pending",
+          effectiveRef: null,
+          decisionEvent,
+          recoveryAcceptable: false,
+          reverifyStatus: "none",
+          reverifyReason: null,
+          reverifyRequestedEvent: null,
+          reverifyOutcomeEvent: null,
+          createdEventRunId: createdEvents[0].runId ?? null,
+          verificationEventRunId: null,
+          code: null,
+          error: null,
+        };
+      }
+      return unavailable(createdRef, createdCommit);
+    }
     // M12-9: no verification outcome → delivery_unavailable.
-    return { valid: false, latestRef: createdRef, deliveryCommit: createdCommit, verificationStatus: "pending", decisionEvent: null, code: "delivery_unavailable", error: "No verification outcome event found (missing run.delivery_verification_*)" };
+    return unavailable(createdRef, createdCommit);
   }
   if (verificationEvents.length > 1) {
     // M12-9: conflicting durable facts → delivery_malformed.
-    return { valid: false, latestRef: createdRef, deliveryCommit: createdCommit, verificationStatus: "pending", decisionEvent: null, code: "delivery_malformed", error: `Multiple verification outcome events found (${verificationEvents.length}); exactly one required` };
+    return malformed(`Multiple verification outcome events found (${verificationEvents.length}); exactly one required`, createdRef, createdCommit);
   }
 
   const verificationEvent = verificationEvents[0];
@@ -1712,13 +2083,50 @@ export function validateDeliveryFacts(events) {
   // on either side fails closed.
   if (!isCanonicalCommitId(createdCommit) || !isCanonicalCommitId(verificationCommit)) {
     // M12-9: non-canonical commit → delivery_malformed.
-    return { valid: false, latestRef: createdRef, deliveryCommit: createdCommit, verificationStatus: "pending", decisionEvent: null, code: "delivery_malformed", error: "delivery_created and verification deliveryCommit must both be canonical 40/64-hex commit ids" };
+    return malformed("delivery_created and verification deliveryCommit must both be canonical 40/64-hex commit ids", createdRef, createdCommit);
   }
 
   // Verification commit must match delivery_created commit
   if (verificationCommit !== createdCommit) {
     // M12-9: commit mismatch → delivery_malformed.
-    return { valid: false, latestRef: createdRef, deliveryCommit: createdCommit, verificationStatus: "pending", decisionEvent: null, code: "delivery_malformed", error: `Verification deliveryCommit (${verificationCommit}) does not match delivery_created commit (${createdCommit})` };
+    return malformed(`Verification deliveryCommit (${verificationCommit}) does not match delivery_created commit (${createdCommit})`, createdRef, createdCommit);
+  }
+
+  // TD-179 bound mode: the outcome event must carry the FULL fixed identity
+  // (canonical runId + base + delivery commit equal to the created ref) and
+  // type/status agreement, and any PRESENT top-level deliveryCommit /
+  // verifiedCommit must agree. Missing historical optional values are allowed —
+  // never invented, never conflicting.
+  //
+  // NARROWLY PRESERVED COMPATIBILITY EXCEPTION (Lead-approved 2026-09-27): the
+  // closed-set event TYPE is the outcome status authority — the baseline
+  // implementation already derived the verification status from the event
+  // type, so an outcome ref whose embedded verification metadata is MISSING or
+  // still the default "pending" defers to the type instead of failing. This is
+  // a read-compatibility tolerance only; no historical real transcript record
+  // of this shape has been observed (the production appenders always stamp the
+  // matching final status on the outcome ref). It does NOT soften the rule: an
+  // embedded status claiming a DIFFERENT final outcome than the type, or an
+  // UNKNOWN value, is a durable conflict. The exception NEVER extends to the
+  // decision verification snapshot — a decision's embedded status must be
+  // present and known, backed, and a pending accepted stays invalid.
+  if (boundMode) {
+    if (!_sameDeliveryIdentity(verificationRef, createdRef, expectedRunId)) {
+      return malformed("verification outcome DeliveryRef identity does not match delivery_created (runId binding + canonical base/delivery commit required)", createdRef, createdCommit);
+    }
+    const expectedStatus = _verificationOutcomeFromType(verificationEvent.type);
+    const embeddedStatus = verificationRef.verification?.status;
+    if (embeddedStatus !== undefined && embeddedStatus !== "pending" && embeddedStatus !== expectedStatus) {
+      return malformed("verification outcome event type disagrees with its embedded verification status", createdRef, createdCommit);
+    }
+    if (verificationEvent.deliveryCommit !== undefined
+      && verificationEvent.deliveryCommit !== createdCommit) {
+      return malformed("verification outcome top-level deliveryCommit does not match the delivery_created commit", createdRef, createdCommit);
+    }
+    const verified = verificationRef.verification?.verifiedCommit;
+    if (verified !== undefined && verified !== createdCommit) {
+      return malformed("verification outcome verifiedCommit does not match the delivery commit", createdRef, createdCommit);
+    }
   }
 
   // Extract verification status
@@ -1732,8 +2140,33 @@ export function validateDeliveryFacts(events) {
   const latestRef = verificationRef;
 
   // Check for existing decision event
-  const decisionEvent = events.find((e) =>
-    e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected") ?? null;
+  let decisionEvent;
+  if (boundMode) {
+    // TD-179: only the BOUND decision may settle this run — a foreign-envelope
+    // decision is ignored (the default-mode loose find below is legacy-only).
+    // A duplicate is a conflict; the single bound decision must fully validate.
+    if (boundDecisionEvents.length > 1) {
+      return malformed(`Multiple decision events found (${boundDecisionEvents.length}); at most one decision may exist (first-decision-wins)`, createdRef, createdCommit);
+    }
+    decisionEvent = null;
+    if (boundDecisionEvents.length === 1) {
+      const decisionError = _validateBoundDecisionEvent(boundDecisionEvents[0], {
+        events,
+        runId: expectedRunId,
+        createdRef,
+        createdCommit,
+        outcomeEvent: verificationEvent,
+        reverifyChain: projectReverifyChain(events, expectedRunId, createdRef),
+      });
+      if (decisionError) {
+        return malformed(decisionError, createdRef, createdCommit);
+      }
+      decisionEvent = boundDecisionEvents[0];
+    }
+  } else {
+    decisionEvent = events.find((e) =>
+      e.type === "run.delivery_accepted" || e.type === "run.delivery_rejected") ?? null;
+  }
 
   // M12-1S2: recoveryAcceptable — the strict recovery chain that lets a
   // terminally-failed disallowed_path run be Lead-ACCEPTED after a model-free
