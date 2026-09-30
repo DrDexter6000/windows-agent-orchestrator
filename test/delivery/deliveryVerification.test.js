@@ -1210,10 +1210,12 @@ test("CB-1: cleanupDir removes nested non-repo fixture without pruning ancestor 
     assert.ok(!existsSync(repo), "own whole-repo fixture must be removable by cleanupDir");
   } finally {
     await cleanupDir(repo);
-    // 收掉空 scratch 壳（根目录卫生 ADR 0035 W1）：内容清理完整时必然为空、
-    // 此处删除必须成功；若非空则 ENOTEMPTY 抛错——那是清理不完整的真实信号，
-    // 不是噪声。
-    await rm(scratch, { force: true });
+    // 收掉 scratch 壳（根目录卫生 ADR 0035 W1）。必须 recursive：非递归 rm 是
+    // 文件语义、对目录恒抛 EPERM（本测试首版踩坑——"专项验证通过"实为跑前
+    // 目录不存在的假阳性，套件中 mkdir 后必在、必炸）。scratch 为本测试专属
+    // 沙箱（全仓唯一使用者），递归清空+删壳安全，且能自愈被杀兄弟套件留下的
+    // 外来残骸——跨进程残骸归 hygiene W1 辖区，不由本测试失败面承担。
+    await rm(scratch, { recursive: true, force: true });
   }
 });
 
