@@ -2,8 +2,12 @@
 // Pure/classifying functions + fact collectors; importable with zero side
 // effects (thin CLI: scripts/hygiene-cli.mjs). Zero dependencies.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+
+export const normPath = (p) => p.replace(/\\/g, "/").toLowerCase();
+export const defaultExists = (p) => { try { fs.accessSync(p); return true; } catch { return false; } };
 
 // ---- W1 config: .wao/runs root whitelist (edit + reason + declare per ADR 0035) ----
 export const ROOT_WHITELIST = new Map([
@@ -13,6 +17,7 @@ export const ROOT_WHITELIST = new Map([
   ["gen-surface-T2-binding.json", "TD-185 引用的验收绑定（同上）"],
   ["shared-cost", "活证据（t3 发布验收）+ 三本归档日志 + 墓碑"],
   ["cleanup-consult-20260929", "2026-09 清洁包案卷（ADR 0034/0035 引用）"],
+  ["s3-integration-t3-20260930", "S3 前作集成的 T3 证据目录（工作流闭合时移入 archive 并除名）"],
   ["archive-2026-09", "历史证据冷藏室（含 INDEX.md 与移动清单，内容不逐件检查）"],
 ]);
 
@@ -20,15 +25,14 @@ export const ROOT_WHITELIST = new Map([
 export const BRANCH_CAP = 175; // 2026-09-30 baseline 151 + headroom
 
 // ---- W5 config: known external checkout roots ----
+// 用户名相关根从 os.homedir() 运行时派生（tracked 文件不得含本机绝对路径——
+// 脱敏守卫 desensitization.test.js 的铁律）；无用户名的根才用字面量。
 export const REGISTRY_EXTERNAL_ROOTS = new Map([
-  ["c:/users/17865/.codex/worktrees", "codex clone（filesystem-eight 等持有 246 原始 T2 证据 worktree）"],
+  [normPath(path.join(os.homedir(), ".codex", "worktrees")), "codex clone（filesystem-eight 等持有 246 原始 T2 证据 worktree）"],
   ["d:/projects/.codex-worktrees", "2026-06~08 老 checkout 群（m12-8f 等，物理仍在）"],
   ["d:/projects/windows-agent-orchestrator-poc-dispatch-readiness", "2026-06 dispatch-readiness checkout"],
   ["d:/projects/windows-agent-orchestrator-poc/.dev", ".dev 私有合同 worktree"],
 ]);
-
-export const normPath = (p) => p.replace(/\\/g, "/").toLowerCase();
-export const defaultExists = (p) => { try { fs.accessSync(p); return true; } catch { return false; } };
 
 // ---- A-class classifiers (pure, fixture-testable) ----
 export function classifyRegistryEntries(paths, { repo, externalRoots = REGISTRY_EXTERNAL_ROOTS, existsFn = defaultExists }) {

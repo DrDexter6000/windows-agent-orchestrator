@@ -1210,6 +1210,10 @@ test("CB-1: cleanupDir removes nested non-repo fixture without pruning ancestor 
     assert.ok(!existsSync(repo), "own whole-repo fixture must be removable by cleanupDir");
   } finally {
     await cleanupDir(repo);
+    // 收掉空 scratch 壳（根目录卫生 ADR 0035 W1）：内容清理完整时必然为空、
+    // 此处删除必须成功；若非空则 ENOTEMPTY 抛错——那是清理不完整的真实信号，
+    // 不是噪声。
+    await rm(scratch, { force: true });
   }
 });
 
