@@ -118,20 +118,22 @@ backend 换 model/provider → `--profile delta`；换 backend / 升主力 lane 
 
 上表判定词只管 **WAO 接线层**，所以「不支持」会掩盖三种截然不同的成因。本节把「上游到底有没有」的事实单独立表——2026-09-21 就是这么误读的：codex / kimi-code 的 headless 复用被读成「不存在」。
 
-> **基线日（as-of）：2026-09-21**；**刷新期限：90 天**（超期由 `test/isolation-infra/docs-consistency.test.js` 的 TD-184 守卫直接变红，不靠人记）。**事件触发优先**：同一 harness 升级、WAO 适配层改动、新 harness 入册，都必须当场刷新本节与基线日。
+> **基线日（as-of）：2026-09-30**；**刷新期限：90 天**（超期由 `test/isolation-infra/docs-consistency.test.js` 的 TD-184 守卫直接变红，不靠人记）。**事件触发优先**：同一 harness 升级、WAO 适配层改动、新 harness 入册，都必须当场刷新本节与基线日。
 
 | backend | 上游会话续接原语 | 实测（as-of 当日） | 上游在途消息原语 | 实测 |
 |---|---|---|---|---|
 | claude-code | `--session-id` / `--resume` | 已接线（组合层认证在册） | stdin stream-json 排队 | 已接线（唯一 supportsInFlightCorrection=true） |
-| codex | `codex exec resume <thread_id>`（会话标识来自 `thread.started.thread_id`；另有 `codex fork`） | **已接线**（2026-09-21，`supportsSessionReuse=true`）；上游正向跨 run 携带上下文、错 id → `no rollout found` exit 1（直跑实测） | `codex queue`（给已有 session 排队消息） | 未测（是否能在活 turn 中生效未知） |
-| kimi-code | `kimi -r <session_id>`（stream 内 `session.resume_hint` 广告；另有 `-S/--session`、`-c/--continue`、`kimi fork`） | **已接线**（2026-09-21，`supportsSessionReuse=true`）；上游正向跨 run 携带上下文、错 id → `Session "…" not found` exit 1（直跑实测） | 未测（无对应文案） | 未测 |
+| codex | `codex exec resume <thread_id>`（会话标识来自 `thread.started.thread_id`；另有 `codex fork`） | **已接线**（2026-09-21，`supportsSessionReuse=true`）；上游正向跨 run 携带上下文、错 id → `no rollout found` exit 1（直跑实测） | `codex queue`（给已有 session 排队消息；0.158.0 起本地在册） | **exec 通道实测阴性（2026-09-30，三次探针）**：消息入队被接受，但 headless `codex exec` 活轮次不消费、exec 单轮结束即退出不续跑；`instant_interrupt`（0.159.0 引入，官方标注 under-development）两端开启后仍无效。queue 预期面向常驻会话面（TUI/app-server，该通道未测） |
+| kimi-code | `kimi -r <session_id>`（stream 内 `session.resume_hint` 广告；另有 `-S/--session`、`-c/--continue`、`kimi fork`） | **已接线**（2026-09-21，`supportsSessionReuse=true`）；上游正向跨 run 携带上下文、错 id → `Session "…" not found` exit 1（直跑实测） | `kimi web` 本地 HTTP API：`POST /api/v1/sessions/{id}/prompts` 排队 + `POST …/prompts:steer` 转入活动轮（本地 2.1.1 OpenAPI 在册） | **实测阳性（2026-09-30）**：`steered:true` 后纠偏消息在同一活会话被消费、模型紧邻轮立即响应（原生成流跑完当轮，打断发生在轮边界）——语义同 claude-code stdin 排队（delivered 即入列，不证明截断当轮生成） |
 | deepseek-harness | 未测（旧 dsh 原生通道；WAO 侧声明 false） | — | 未测 | — |
 | deepseek-acp | ACP `session/resume` | 已接线（ADR-0031 §3.6 + phase6 真实恢复证据） | 上游无（ACP 无在途消息改写，F7 实测） | 上游无此能力 |
-| opencode-serve | 未测（serve 持有 session 概念；WAO 侧未接线） | — | 未测（HTTP 双向，理论可注入） | — |
+| opencode-serve | 未测（serve 持有 session 概念；WAO 侧未接线） | — | 上游原语存在（源码级核实，2026-09-30）：`POST /session/:id/message`（同步）/`prompt_async`（异步）可向活动 session 注入，busy 时 runner 排队消化、shell 中则 ShellThenRun（v1.18.18 已具备，与 1.18.33 一致） | 未直跑实测（Owner 2026-09-30 裁定暂停本通道投入——不升级、不接线；上游事实记录备查） |
 
 **读法**：①「未测」是**未测**，不是「没有」——期限就是用来逼这些格子在值得填的时候被填掉；②**复用只在 MCP 通道可用**：CLI 后台通道刻意每次派发用一次性 leadSession（`src/commands/run.js` 注释：one-shot 进程没有稳定 Lead 会话），所以 CLI 派发的复用 agent 永远走首轮——真正的跨 run 复用只有 MCP（稳定 leadSession）能给；②已实测可复用的 codex / kimi-code 仍记 `sessionReuse` 不支持，因为接线要的是 WAO 侧关联面（resume 信封只带前任 WAO runId、sessionId 由 WAO 从转录取回、关联缺失即 fail-closed 拒绝，形状见 ADR-0031 §3.6）加真实跨 run drill 证据，见 TD-184。
 
 > **勘误注记（2026-09-26 迁移时按 TD-184 现状纠正）**：上段"②"中"已实测可复用的 codex / kimi-code 仍记 `sessionReuse` 不支持"为**接线前（2026-09-21 之前）的历史**。当前 codex / kimi-code 的 backend 类声明均为 `supportsSessionReuse=true`（2026-09-21 已接线：resume 关联面 + parser 捕获 `thread.started.thread_id` / `session.resume_hint` + 终态前补记绑定 `session.created`）；剩余缺口是真实跨 run 恢复的端到端证据（组件层正向证据登记，见 TD-184）。
+
+> **刷新注记（2026-09-30，TD-184 事件触发：当日 harness 升级）**：claude-code 2.1.280→2.1.285（无原语面变化）、codex 0.158.0→0.159.2；kimi 2.1.1 与 dsh 0.2.0-rc.2 当日检查已是 latest；opencode 停留 1.18.18 系 Owner 裁定（暂停投入）。codex queue 三次探针（长任务生成中段注入、含两端开启 instant_interrupt）与 kimi steer 探针（`kimi web` 本地 API，queue+steer→`steered:true`→紧邻轮消费）均为当日直跑实测；基线日随刷新改为 2026-09-30。ZCode（智谱）同日调研结论：无官方 headless/CLI 自动化面，不入本表（不入册 harness 不占行）。
 
 ## 认证与转录维护命令（原 usage「验证安装」迁出部）
 
