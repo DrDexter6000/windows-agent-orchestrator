@@ -52,7 +52,9 @@
 //   - `session/send` params `{sessionId, content:<文本>}` →
 //     `{accepted:true, stateRevision}`；消息经 `session/messages {sessionId}` 轮询：
 //     result.messages[].parts[]（type:"text" 带文本；type:"step-finish" 带
-//     reason:"stop" 与 tokens——**轮次完成信号**）。
+//     reason:"stop" 与 tokens——**轮次完成信号**；type:"tool" 带 callId/tool/state
+//     {status, input, output|error}——工具调用帧，completed 轮投影为证据事件，
+//     形状见 evidenceEventsFromZcodeToolPart 注释）。
 //   - `session/usage {sessionId}` → 全量计量（totalTokens/inputTokens/outputTokens/
 //     reasoningTokens/cacheReadTokens/cacheCreationTokens/modelRequestCount——字段名
 //     以 bundle CRn 实现为准，zcode.cjs:15259；早期按 kimi 系惯例记的
@@ -106,8 +108,11 @@
 // parts 的 type 闭集 text|step-finish）——`session/send` 的 content 若以 text part
 // 回显进 messages，按**精确等值**剔除首个匹配（找得到回显 → 取其后；找不到 →
 // 全量拼接）。两种上游形状都不会把 prompt 误报成 assistant 产出；剔除后为空 =
-// 按 failed 收口（N1 教训：传输成功不是可用答案，绝不伪造完成）。其余 part 类型
-// 未实测——不投影、不猜（reportsCommandExitCode=false 同源）。
+// 按 failed 收口（N1 教训：传输成功不是可用答案，绝不伪造完成）。tool part 的
+// 形状后经 bundle zod schema 核证（见 evidenceEventsFromZcodeToolPart 注释）——
+// completed 轮投影为证据事件（file_written/command/tool_use/tool_result，2026-10-01
+// 补齐，kimi-web F2 同族）；其余 part 类型（reasoning/file/patch/compaction/…）仍
+// 未投影、不猜（reportsCommandExitCode=false 同源）。
 //
 // 结构纪律：镜像 deepSeekAcp.js（同为双向 stdio 行协议的进程式 backend）+
 // processBackend.js 的进程管理惯例（可注入 spawnFn、buildChildEnv 安全继承、
@@ -117,7 +122,15 @@
 import { spawn } from "node:child_process";
 import readline from "node:readline";
 
-import { doneEvent, messageEvent, metricsEvent } from "../runEvent.js";
+import {
+  commandEvent,
+  doneEvent,
+  fileWrittenEvent,
+  messageEvent,
+  metricsEvent,
+  toolResultEvent,
+  toolUseEvent,
+} from "../runEvent.js";
 import { inheritedEnvNames } from "../envPolicy.js";
 import { createSecretRedactor, isSecretEnvName } from "../secretRedaction.js";
 import { buildChildEnv, compileInvocation, isProcessPlaceholderSessionId } from "./processBackend.js";
@@ -224,6 +237,101 @@ function metricsEventFromUsage(usage) {
   return seen ? metricsEvent(sums) : null;
 }
 
+// ===== completed 轮 tool part 证据投影（2026-10-01 补齐，delta 认证证据链）=====
+//
+// 缺陷（kimi-web F2 同族）：模型真写了文件（run_202610012228351231l4qsr——
+// "File created at …wao_cert_coder_hq_muq3vm7a.txt"、文件真实落盘），但本 backend
+// 的完成路径不投影 tool part → WAO 侧零证据事件，delta scorecard 的 hasEvidence
+// 误红。补齐 = completed 轮把本轮 parts 里的 tool 帧投影为证据事件（证据先于
+// assistant 文本发射——opencodeServe/kimiWeb 同惯例）。
+//
+// tool part 形状来源 = 捆绑 zcode.cjs（0.16.9，sha256 FAD4C35C…E6275F，**形状不
+// 发明**）的 zod schema 只读核证。`session/messages` 结果 schema `U5i =
+// {messages: [WZe]}`、`WZe = {info, parts: [qZe]}`（bundle 第 72 行 schema 块，
+// 会话快照 ePe 的 messages 同源同形）：
+//   - part 联合 `qZe = discriminatedUnion("type", …)` 的 tool 臂（.strict()）：
+//     `{partId, sessionId, messageId, type:"tool", callId:Ru(string), tool:Ru(string),
+//     state:nor, metadata?}`——`tool` = 工具名（本 bundle 工具注册表 metadata.name
+//     实证："Write"/"Edit"/"Bash"；无 "Shell"/"MultiEdit"，规则按归一化超集取），
+//     `callId` = 运行时工具调用 id。
+//   - state 联合 `nor = discriminatedUnion("status", …)`（全部 .strict()）：
+//       `{status:"pending",   input, raw}` |
+//       `{status:"running",   input, title?, metadata?, startedAt}` |
+//       `{status:"completed", input, output:string, title, metadata, startedAt, completedAt}` |
+//       `{status:"error",     input, error:string, metadata?, startedAt, completedAt}`
+//     ——工具输入在 **state.input**（record(string, unknown)），不在 part 顶层。
+//   - 工具输入键（bundle runtimeInputSchema 实证）：Write=`{file_path("must be
+//     absolute, not relative"), content}`；Edit=`{file_path, old_string, new_string,
+//     replace_all?}`；Bash=`{command, timeout?, description?, run_in_background?,
+//     dangerouslyDisableSandbox?}`。file_path 是绝对路径形状 → fileWrittenEvent
+//     **原样透传**（控制面 containment 求值用词法+realpath，kimi-web 同款）。
+//
+// 投影规则——镜像 src/backends/opencodeServe.js 的 evidenceEventsFromOpenCodeToolPart
+// 与 kimiWeb.js 的 evidenceEventsFromKimiToolFrame（差异仅限形状读取位与终态词）：
+//   - tool 归一化小写后 bash/shell 类且有 state.input.command → commandEvent
+//     （tool part state schema **无退出码字段**——reportsCommandExitCode=false 维持，
+//     exitCode 恒省略，绝不虚构；callId 进 meta 关联 tool_result）；
+//   - write/edit/multiedit 类且有 input.filePath/file_path/path → fileWrittenEvent
+//     （bundle 实证键是 file_path；filePath/path 是家族超集宽容——path 缺席不虚构）；
+//   - 其余工具 → toolUseEvent(tool, input)；
+//   - state.status 终态（completed|error）再追加 toolResultEvent(callId, output,
+//     isError)——output 取 completed 臂的 state.output / error 臂的 state.error，
+//     投影事件在前、结果事件在后（与 opencode 逐 part 双事件形状一致）。
+function evidenceEventsFromZcodeToolPart(part) {
+  const tool = String(part?.tool ?? "unknown");
+  const toolKey = tool.toLowerCase();
+  const state = part?.state;
+  const input = state?.input ?? {};
+  const callId = typeof part?.callId === "string" && part.callId.length > 0
+    ? part.callId
+    : tool;
+  const status = state?.status;
+  const events = [];
+  if ((toolKey === "bash" || toolKey === "shell") && typeof input.command === "string") {
+    events.push(commandEvent(input.command, undefined, { toolCallId: callId }));
+  } else if (isFileWriteToolKey(toolKey)) {
+    const filePath = input.filePath ?? input.file_path ?? input.path;
+    if (typeof filePath === "string") {
+      events.push(fileWrittenEvent(filePath));
+    }
+  } else {
+    events.push(toolUseEvent(tool, input));
+  }
+  if (isTerminalZcodeToolStatus(status)) {
+    events.push(toolResultEvent(
+      callId,
+      status === "error" ? state.error : state.output,
+      status === "error",
+    ));
+  }
+  return events;
+}
+
+// parts 序列 → tool part 证据事件（按序；非 tool part 跳过——本轮归属切片由
+// 调用侧的 baseline 切片 + 回显剔除决定，这里只认 type==="tool"）。
+function evidenceEventsFromZcodeParts(parts) {
+  const events = [];
+  for (const part of parts) {
+    if (part?.type !== "tool") continue;
+    events.push(...evidenceEventsFromZcodeToolPart(part));
+  }
+  return events;
+}
+
+// tool part state.status 的终态闭集（bundle schema nor 核证：闭集 =
+// pending|running|completed|error，其中 completed|error 为终态、pending|running
+// 非终态）。与 opencode 的 isTerminalToolStatus（completed|error|failed）同位
+// 不同集：zcode 的闭集是 schema literal，没有 "failed"——不掺入他席词表。
+function isTerminalZcodeToolStatus(status) {
+  return status === "completed" || status === "error";
+}
+
+// opencodeServe.js isFileWriteTool 同款谓词（该函数未导出——镜像保持一处一份
+// 语义，kimiWeb.js isFileWriteToolKey 同款，注释互指）。
+function isFileWriteToolKey(toolKey) {
+  return toolKey === "write" || toolKey === "edit" || toolKey === "multiedit";
+}
+
 // workspaceKey：上游未文档化其语义（live 探针用常量 "wao-probe" 通过）。取每
 // agent 稳定键（canonical id 字母表内）——绝不掺 cwd/runId（跨 run 漂移会破坏键
 // 的稳定性假定；防御性归一防直调形状）。
@@ -299,8 +407,9 @@ export class ZcodeBackend {
   // （opencode session.tokens 同款语义）；resume 轮的 usage 含前任轮用量，如实。
   reportsTokenUsage = true;
 
-  // 命令退出码：消息 parts 的 live 闭集只有 text|step-finish——无已证实退出码
-  // 通道，不产出该证据（翻转条件 = 实测到携带退出码的 part 类型并接线）。
+  // 命令退出码：live 闭集（text|step-finish）无退出码；bundle 核证的 tool part
+  // state schema（nor：pending|running|completed|error）也无退出码字段——无已证实
+  // 退出码通道，不产出该证据（翻转条件 = 实测到携带退出码的 part 形状并接线）。
   reportsCommandExitCode = false;
 
   constructor({ spawnFn = spawn, killFn = null, waoCliPath = null, platform } = {}) {
@@ -824,7 +933,9 @@ export class ZcodeBackend {
    * 不承担终态）。每拍恰一次 session/messages：
    *   - 新 part 增长 = 进展（无进展计数清零）；完成 = 本轮（序号 >= baselineParts）
    *     出现 step-finish(reason stop|error) 且其后无新 part（快照最后一位）。
-   *   - stop → 发射 user echo + assistant text（发射前非空复检——N1 教训）+
+   *   - stop → 发射 tool part 证据（本轮 type:"tool" 帧投影——
+   *     evidenceEventsFromZcodeParts，证据先行）+ user echo + assistant text
+   *     （发射前非空复检——N1 教训，空文本门在证据投影之前：零发射含证据）+
    *     usage→metrics + done(completed)；error → done(failed)（固定文案——该
    *     part 未实证携带错误明细，不虚构）。
    *   - 无进展兜底（分相）：已有产出后连续 60 拍无新 part → done(failed,
@@ -968,8 +1079,10 @@ export class ZcodeBackend {
 
   /**
    * completed 轮发射序列：usage（session/usage——reportsTokenUsage=true 的通道；
-   * 失败按通信失败收口）→ 进程回收 → user echo → assistant text（发射前非空复检，
-   * N1 教训）→ metrics（分量在场才发）→ done(completed)。
+   * 失败按通信失败收口）→ 进程回收 → tool part 证据（本轮 type:"tool" 帧逐帧投影
+   * ——evidenceEventsFromZcodeParts，证据先行，opencode/kimi-web 同惯例）→
+   * user echo → assistant text（发射前非空复检，N1 教训——空文本门在证据投影
+   * 之前，failed 收口零发射含证据）→ metrics（分量在场才发）→ done(completed)。
    */
   async *_completeTurn({ wire, child, sessionId, parts, baselineParts, sentContent, finish }) {
     const slice = parts.slice(baselineParts);
@@ -1009,6 +1122,13 @@ export class ZcodeBackend {
     }
     // 进程回收先行（事件序列已定，usage 已取完）。
     finish();
+    // tool part 证据投影（2026-10-01 补齐——delta 证据链，kimi-web F2 同族）：
+    // 本轮（回显剔除后的切片）里 type:"tool" 的 part 逐帧投影为证据事件，证据
+    // 先于 user echo / assistant 文本发射。投影规则与形状依据见
+    // evidenceEventsFromZcodeToolPart 注释（bundle zod schema 核证，形状不发明）。
+    for (const event of evidenceEventsFromZcodeParts(textSlice)) {
+      yield event;
+    }
     if (typeof sentContent === "string" && sentContent.length > 0) {
       yield messageEvent("user", [{ type: "text", text: sentContent }]);
     }

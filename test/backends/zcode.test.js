@@ -14,7 +14,11 @@
 // （step-finish stop/error）+ 历史含 stop 的 resume 反例（auditor 完成判据反例）、
 // stalled 兜底（分相：已有产出后 60 拍 / 零 part 思考预算 120 拍——GLM-5.3 首
 // part 延迟实证反例组 ⑥c-⑥e run_20261001195259045cle1ft；步间静默反例 ⑥f——
-// 第二轮 live 诊断 run_20261001203009794bb6add，首轮 8 拍门误杀步间 reasoning）、发射前非空复检（N1）、usage→metrics（cacheReadTokens/
+// 第二轮 live 诊断 run_20261001203009794bb6add，首轮 8 拍门误杀步间 reasoning）、
+// tool part 证据投影（④c-④g：write→file_written / bash→command / 未知→tool_use /
+// 终态→tool_result，证据先于 assistant 文本、空文本门零证据、非终态不猜——
+// bundle zod schema qZe/nor 形状，F2 同族补齐 run_202610012228351231l4qsr）、
+// 发射前非空复检（N1）、usage→metrics（cacheReadTokens/
 // cacheCreationTokens 上游字段名——auditor #2）、abort（幂等/诚实措辞/传输已关
 // 不抛——auditor #4）、resume 轮（先 session/resume 装载再 setModel——auditor #1，
 // fake 对端有状态）、真杀隔离守卫（全部构造注入 killFn——auditor #3）、policy
@@ -574,6 +578,224 @@ test("zcode ④b: 中间 step-finish(非 stop|error) 不算完成；step-finish(
   assert.match(done.error, /step-finish reason error/);
   assert.equal(failedEvents.filter((e) => e.kind === "message" && e.role === "assistant").length, 0, "失败轮零 assistant 投影");
   failed.child.kill();
+});
+
+// ===== ④c-④g tool part 证据投影（2026-10-01 补齐——delta 认证证据链，kimi-web
+// F2 同族：模型真写了文件但 WAO 无 file_written 事件，hasEvidence 误红）。tool
+// part 形状 = bundle zod schema（zcode.cjs:72 qZe/nor）的最小复刻——测试驱动与
+// src/backends/zcode.js 投影实现的同一形状依据（详见该函数注释）。=====
+
+// bundle qZe tool 臂 + nor state 联合的形状复刻（.strict() 字段集）：
+// {partId, sessionId, messageId, type:"tool", callId, tool, state:{status, input, …}}。
+const toolPart = ({ callId, tool, status, input, output, error, raw }) => ({
+  partId: `part_${callId}`,
+  sessionId: SESSION_ID,
+  messageId: "msg_tool_1",
+  type: "tool",
+  callId,
+  tool,
+  state: status === "completed"
+    ? { status, input, output, title: "done", metadata: {}, startedAt: 1, completedAt: 2 }
+    : status === "error"
+      ? { status, input, error, metadata: {}, startedAt: 1, completedAt: 2 }
+      : status === "running"
+        ? { status, input, title: "running", startedAt: 1 }
+        : { status, input, raw: raw ?? "" },
+});
+
+test("zcode ④c: completed 轮 tool(write) part → file_written + tool_result，证据先于 user echo/assistant 文本（F2 同族补齐）", async () => {
+  const writePart = toolPart({
+    callId: "call_wao_cert_coder_hq_muq3vm7a",
+    tool: "Write",
+    status: "completed",
+    input: { file_path: "D:/wao-test/zcode-ws/out/wao_cert_coder_hq_muq3vm7a.txt", content: "payload" },
+    output: "Created file D:/wao-test/zcode-ws/out/wao_cert_coder_hq_muq3vm7a.txt",
+  });
+  const { handle, child } = await runScenario({
+    peerOptions: {
+      messages: (n) => (n <= 1 ? [] : [
+        userMsg("do the task"),
+        // live 形状：tool part 与 text part 同轮混排（tool → text → step-finish，
+        // 完成判据要求 step-finish 收尾）——证据先行与 part 排布位置无关。
+        { role: "assistant", parts: [writePart, { type: "text", text: "wrote the probe file" }, { type: "step-finish", reason: "stop", tokens: {} }] },
+      ]),
+    },
+  });
+  const events = await collect(handle);
+  assert.deepEqual(
+    events.map((e) => e.kind),
+    ["file_written", "tool_result", "message", "message", "metrics", "done"],
+    "顺序锁死：tool part 证据（file_written + tool_result）→ user echo → assistant text → metrics → done",
+  );
+  // bundle schema：Write input.file_path "must be absolute, not relative"——绝对路径
+  // 原样透传（控制面 containment 求值用词法+realpath，投影层不改写）。
+  assert.deepEqual(events[0], {
+    kind: "file_written",
+    path: "D:/wao-test/zcode-ws/out/wao_cert_coder_hq_muq3vm7a.txt",
+  });
+  assert.deepEqual(events[1], {
+    kind: "tool_result",
+    tool: "call_wao_cert_coder_hq_muq3vm7a",
+    output: "Created file D:/wao-test/zcode-ws/out/wao_cert_coder_hq_muq3vm7a.txt",
+    isError: false,
+  });
+  // 消息投影不变：回显剔除 + text 拼接只认 type:"text"（tool part 不入文本）。
+  assert.equal(events[2].role, "user");
+  assert.deepEqual(events[2].parts, [{ type: "text", text: "do the task" }]);
+  assert.equal(events[3].role, "assistant");
+  assert.deepEqual(events[3].parts, [{ type: "text", text: "wrote the probe file" }]);
+  assert.equal(events.at(-1).reason, "completed");
+  child.kill();
+});
+
+test("zcode ④d: bash part → commandEvent（exitCode 恒省略）；未知工具 → toolUseEvent；error state → tool_result isError:true", async () => {
+  const bashDone = toolPart({
+    callId: "call_bash_ok",
+    tool: "Bash",
+    status: "completed",
+    input: { command: "node scripts/probe.mjs" },
+    output: "probe ok",
+  });
+  const readDone = toolPart({
+    callId: "call_read",
+    tool: "Read",
+    status: "completed",
+    input: { path: "README.md" },
+    output: "readme body",
+  });
+  const bashError = toolPart({
+    callId: "call_bash_err",
+    tool: "Bash",
+    status: "error",
+    input: { command: "node scripts/failing.mjs" },
+    error: "exit status 1",
+  });
+  const { handle, child } = await runScenario({
+    peerOptions: {
+      messages: (n) => (n <= 1 ? [] : [
+        userMsg("do the task"),
+        { role: "assistant", parts: [bashDone, readDone, bashError, { type: "text", text: "done" }, { type: "step-finish", reason: "stop", tokens: {} }] },
+      ]),
+    },
+  });
+  const events = await collect(handle);
+  assert.deepEqual(
+    events.map((e) => e.kind),
+    ["command", "tool_result", "tool_use", "tool_result", "command", "tool_result", "message", "message", "metrics", "done"],
+    "逐 part 双事件形状（投影在前、终态结果在后）与 opencode/kimi-web 一致",
+  );
+  // Bash → commandEvent：tool part state schema 无退出码字段（nor 闭集核证），
+  // exitCode 恒省略绝不虚构；toolCallId 关联 tool_result。
+  assert.deepEqual(events[0], { kind: "command", command: "node scripts/probe.mjs", toolCallId: "call_bash_ok" });
+  assert.deepEqual(events[1], { kind: "tool_result", tool: "call_bash_ok", output: "probe ok", isError: false });
+  // 非 bash/write 类工具 → toolUseEvent(tool, state.input)。
+  assert.deepEqual(events[2], { kind: "tool_use", tool: "Read", input: { path: "README.md" } });
+  assert.deepEqual(events[3], { kind: "tool_result", tool: "call_read", output: "readme body", isError: false });
+  // error state → 主投影照发 + tool_result isError:true，output 取 error 臂的
+  // state.error（bundle nor error 臂形状）。
+  assert.deepEqual(events[4], { kind: "command", command: "node scripts/failing.mjs", toolCallId: "call_bash_err" });
+  assert.deepEqual(events[5], { kind: "tool_result", tool: "call_bash_err", output: "exit status 1", isError: true });
+  assert.equal(events.at(-1).reason, "completed");
+  child.kill();
+});
+
+test("zcode ④e: 非终态 status（pending|running）只投影主事件不追加 tool_result；write 帧缺 file_path 不虚构 file_written", async () => {
+  // 腿 1：pending/running（nor 闭集前两臂）= 工具已发起未收口——command 在场、
+  // tool_result 缺席（闭集内非终态绝不猜成终态，镜像 opencodeServe terminal 门）。
+  const pending = toolPart({ callId: "call_pending", tool: "Bash", status: "pending", input: { command: "node slow.mjs" }, raw: "queued" });
+  const running = toolPart({ callId: "call_running", tool: "Bash", status: "running", input: { command: "node slower.mjs" } });
+  const leg1 = await runScenario({
+    peerOptions: {
+      messages: (n) => (n <= 1 ? [] : [
+        userMsg("do the task"),
+        { role: "assistant", parts: [pending, running, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }] },
+      ]),
+    },
+  });
+  const events1 = await collect(leg1.handle);
+  assert.deepEqual(
+    events1.map((e) => e.kind),
+    ["command", "command", "message", "message", "metrics", "done"],
+    "非终态 tool part：主投影在场、tool_result 缺席",
+  );
+  assert.equal(events1.filter((e) => e.kind === "tool_result").length, 0);
+  assert.deepEqual(events1[0], { kind: "command", command: "node slow.mjs", toolCallId: "call_pending" });
+  assert.deepEqual(events1[1], { kind: "command", command: "node slower.mjs", toolCallId: "call_running" });
+  leg1.child.kill();
+
+  // 腿 2：Write 帧 input 缺 file_path → 零 file_written（不虚构）；终态
+  // tool_result 仍按 state 投影（与 opencodeServe 逐 part 双事件形状一致）。
+  const noPath = toolPart({
+    callId: "call_nopath",
+    tool: "Write",
+    status: "completed",
+    input: { content: "orphan" },
+    output: "nothing written",
+  });
+  const leg2 = await runScenario({
+    peerOptions: {
+      messages: (n) => (n <= 1 ? [] : [
+        userMsg("do the task"),
+        { role: "assistant", parts: [noPath, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }] },
+      ]),
+    },
+  });
+  const events2 = await collect(leg2.handle);
+  assert.deepEqual(
+    events2.map((e) => e.kind),
+    ["tool_result", "message", "message", "metrics", "done"],
+    "无 file_path 的 Write 帧：零 file_written、终态 tool_result 在场",
+  );
+  assert.deepEqual(events2[0], { kind: "tool_result", tool: "call_nopath", output: "nothing written", isError: false });
+  assert.ok(!events2.some((e) => e.kind === "file_written"));
+  leg2.child.kill();
+});
+
+test("zcode ④f: 纯文本轮 → 零证据事件（保持——投影只认 type:\"tool\" part）", async () => {
+  const { handle, child } = await runScenario({
+    peerOptions: {
+      messages: (n) => (n <= 1 ? [] : [userMsg("do the task"), assistantMsg("answer")]),
+    },
+  });
+  const events = await collect(handle);
+  assert.deepEqual(
+    events.map((e) => e.kind),
+    ["message", "message", "metrics", "done"],
+    "纯文本轮发射序列不变（user echo → assistant text → metrics → done）",
+  );
+  assert.ok(
+    !events.some((e) => ["command", "file_written", "tool_use", "tool_result"].includes(e.kind)),
+    "零证据事件",
+  );
+  child.kill();
+});
+
+test("zcode ④g: completed 轮只有 tool part 无 assistant 文本 → 空文本门在证据投影之前（done(failed) 零证据发射，N1 语义）", async () => {
+  const writePart = toolPart({
+    callId: "call_write_only",
+    tool: "Write",
+    status: "completed",
+    input: { file_path: "D:/wao-test/zcode-ws/out.txt", content: "payload" },
+    output: "Created file D:/wao-test/zcode-ws/out.txt",
+  });
+  const { handle, child } = await runScenario({
+    peerOptions: {
+      messages: (n) => (n <= 1 ? [] : [
+        userMsg("do the task"),
+        { role: "assistant", parts: [writePart, { type: "step-finish", reason: "stop", tokens: {} }] },
+      ]),
+    },
+  });
+  const events = await collect(handle);
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /without assistant text/);
+  assert.deepEqual(
+    events.map((e) => e.kind),
+    ["done"],
+    "空文本门先于证据投影——零 user echo、零 assistant、零证据发射（kimiWeb 空文本门同款语义）",
+  );
+  child.kill();
 });
 
 // ===== ⑤ 发射前非空复检（N1）与 usage 缺席 =====
