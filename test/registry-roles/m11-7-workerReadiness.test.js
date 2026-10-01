@@ -68,6 +68,12 @@ test("M11-7-R1a: optional env names are NOT required (no false blocker)", () => 
   const codex = { backend: "codex", id: "tester" };
   assert.deepEqual(requiredCredentialNames(codex), [], "codex has NO required creds");
   assert.ok(inheritedEnvNames(codex).includes("CODEX_HOME"), "CODEX_HOME is inherited (optional)");
+  const zcode = { backend: "zcode", id: "coder_zcode" };
+  assert.deepEqual(requiredCredentialNames(zcode), [], "zcode has NO required creds (login shared with desktop)");
+  assert.ok(
+    inheritedEnvNames(zcode).includes("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"),
+    "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE is inherited (optional) — app-server exits without it",
+  );
 });
 
 test("M11-7-R1b: explicitly-declared REQUIRED credential blocks when missing", async () => {

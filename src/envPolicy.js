@@ -37,8 +37,11 @@ const INHERITED_ENV_NAMES = {
   "deepseek-acp": [],
   // 第 8 个 backend「zcode」（2026-10-01）：登录态与 ZCode 桌面版共享（live
   // 实测无需额外认证）——凭据不在 env 面；登录态落位走 SAFE_INHERITED_ENV 已含
-  // 的 APPDATA/LOCALAPPDATA/USERPROFILE 系，无额外可选 env，显式空集。
-  "zcode": [],
+  // 的 APPDATA/LOCALAPPDATA/USERPROFILE 系。
+  // ZCODE_BUILTIN_PROVIDER_CONFIG_FILE：ZCode 桌面端安装时写入的用户级变量，指向
+  // 内置 provider 配置（~/.zcode/v2/runtime/provider/windows-x86_64/…）；缺失时
+  // CLI 回落到两条不存在的路径，`app-server` 启动即退（2026-10-01 bisect 实证）。
+  "zcode": ["ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"],
   "opencode-serve": [],
 };
 
