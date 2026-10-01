@@ -56,6 +56,11 @@ export function listWorktreePaths(cwd) {
   return [...raw.matchAll(/^worktree (.+)$/gm)].map((m) => m[1]);
 }
 
+// git worktree list --porcelain 的首条 worktree 恒为主检出（git 契约），从任意 worktree 观察一致。
+export function primaryWorktreePath(cwd) {
+  return listWorktreePaths(cwd)[0];
+}
+
 export function countRunBranches(cwd) {
   return execSync('git branch --list "wao/run_*"', { cwd, encoding: "utf8" })
     .split("\n").filter((s) => s.trim()).length;

@@ -168,6 +168,11 @@ test("ADR25-B2-MATRIX: backendCapabilitySnapshot 与全部工厂 backend 类的�
     // （scripts/reliability/dsh-acp/evidence/phase6-*.json）通过 → 2026-09-21 翻 true。
     "deepseek-acp": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: false, reportsTokenUsage: false, reportsCommandExitCode: false },
     "opencode-serve": { supportsRoleContract: true, supportsSessionReuse: false, supportsInFlightCorrection: false, replayByRespawn: false, reportsTokenUsage: true, reportsCommandExitCode: true },
+    // 第七成员 kimi-web（Owner 2026-09-30 批准入册；上游事实 = 当日对本机
+    // kimi 2.1.1 `kimi web` REST 的直跑实测）：在途纠偏走 prompts 排队 +
+    // prompts:steer；v8（transcript 轮次原语）起 steps[].usage 实测非零 →
+    // reportsTokenUsage=true（完成判定同轮迁移到 transcript 终态原语）。
+    "kimi-web": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: true, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: false },
   };
   for (const [backend, caps] of Object.entries(expected)) {
     assert.deepEqual(

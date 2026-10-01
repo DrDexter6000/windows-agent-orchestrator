@@ -128,6 +128,7 @@ backend 换 model/provider → `--profile delta`；换 backend / 升主力 lane 
 | deepseek-harness | 未测（旧 dsh 原生通道；WAO 侧声明 false） | — | 未测 | — |
 | deepseek-acp | ACP `session/resume` | 已接线（ADR-0031 §3.6 + phase6 真实恢复证据） | 上游无（ACP 无在途消息改写，F7 实测） | 上游无此能力 |
 | opencode-serve | 未测（serve 持有 session 概念；WAO 侧未接线） | — | 上游原语存在（源码级核实，2026-09-30）：`POST /session/:id/message`（同步）/`prompt_async`（异步）可向活动 session 注入，busy 时 runner 排队消化、shell 中则 ShellThenRun（v1.18.18 已具备，与 1.18.33 一致） | 未直跑实测（Owner 2026-09-30 裁定暂停本通道投入——不升级、不接线；上游事实记录备查） |
+| kimi-web | 会话常驻 `kimi web` 本地服务器（`POST /api/v1/sessions/{id}/prompts` 续用既有 session；REST 无会话级中止端点，8 个动作名实测阴性 2026-09-30） | 已接线（2026-09-30 新增 backend，`supportsSessionReuse=true`） | `POST …/prompts` 排队 + `POST …/prompts:steer` 转入活动轮（`steered:true` 实测；轮边界消费，不截断当轮生成） | 已接线（`sendCorrection`，2026-09-30 实测） |
 
 **读法**：①「未测」是**未测**，不是「没有」——期限就是用来逼这些格子在值得填的时候被填掉；②**复用只在 MCP 通道可用**：CLI 后台通道刻意每次派发用一次性 leadSession（`src/commands/run.js` 注释：one-shot 进程没有稳定 Lead 会话），所以 CLI 派发的复用 agent 永远走首轮——真正的跨 run 复用只有 MCP（稳定 leadSession）能给；②已实测可复用的 codex / kimi-code 仍记 `sessionReuse` 不支持，因为接线要的是 WAO 侧关联面（resume 信封只带前任 WAO runId、sessionId 由 WAO 从转录取回、关联缺失即 fail-closed 拒绝，形状见 ADR-0031 §3.6）加真实跨 run drill 证据，见 TD-184。
 

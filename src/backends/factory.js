@@ -7,7 +7,8 @@
 // commands/shared.js）共用本模块。
 //
 // 注入点：
-//   - fetchImpl：仅 opencode-serve 使用（测试注入；不注入走默认 fetch）。
+//   - fetchImpl：HTTP 家族（opencode-serve / kimi-web）使用（测试注入；不注入走
+//     默认 fetch）。
 //   - waoCliPath：三个进程式 backend（claude-code / codex / kimi-code）使用。
 //     显式注入优先；未注入时内部调 getWaoCliPath() 解析。
 //     daemon.js / backgroundRunner.js 在启动时算好传入（每次进程一次）；
@@ -24,6 +25,7 @@ import { CodexBackend } from "./codex.js";
 import { KimiCodeBackend } from "./kimiCode.js";
 import { DeepSeekHarnessBackend } from "./deepSeekHarness.js";
 import { DeepSeekAcpBackend } from "./deepSeekAcp.js";
+import { KimiWebBackend } from "./kimiWeb.js";
 import { getWaoCliPath } from "../waoCliPath.js";
 
 /**
@@ -31,13 +33,20 @@ import { getWaoCliPath } from "../waoCliPath.js";
  *
  * @param {object} agent - 规范化后的 agent（含 backend 字段）
  * @param {object} [opts]
- * @param {Function} [opts.fetchImpl] - opencode-serve fetch 注入（测试）
+ * @param {Function} [opts.fetchImpl] - HTTP 家族 backend（opencode-serve / kimi-web）
+ *   的 fetch 注入（测试；不注入走默认 fetch）。
  * @param {string} [opts.waoCliPath] - worker 注入用的 WAO CLI 入口路径；
  *   未注入时内部调 getWaoCliPath() 解析（TD-90）。
  */
 export function backendFor(agent, { fetchImpl, waoCliPath } = {}) {
   if (agent.backend === "opencode-serve") {
     return new OpenCodeServeBackend(fetchImpl ? { fetchImpl } : {});
+  }
+  // 第 7 个 backend「kimi-web」（HTTP attach，`kimi web` 本地服务器的官方 REST
+  // API；闭集 6→7 扩员经 Owner 2026-09-30 批准）。构造零副作用；fetchImpl 注入
+  // 同 opencode-serve 分支（HTTP 家族不需要 waoCliPath）。
+  if (agent.backend === "kimi-web") {
+    return new KimiWebBackend(fetchImpl ? { fetchImpl } : {});
   }
   const cliPath = waoCliPath ?? getWaoCliPath();
   if (agent.backend === "claude-code") return new ClaudeCodeBackend({ waoCliPath: cliPath });
@@ -125,6 +134,18 @@ export const CAPABILITY_NOTES = Object.freeze({
     supportsRoleContract: "per-dispatch `--patch` personaPrefix（结构化序列化）",
     reportsTokenUsage: "`PromptResponse.usage` 实测可为 null——声明 false（2026-09-20 裁定）；翻转条件 = 有可验证 token 计量通道",
   }),
+  // 第 7 个 backend（Owner 2026-09-30 批准入册）。上游事实 = 2026-09-30 对本机
+  // kimi 2.1.1 `kimi web` REST API 的直跑实测（详见 src/backends/kimiWeb.js 文件头；
+  // v8 完成判定 = transcript 轮次终态原语）。
+  "kimi-web": Object.freeze({
+    model: "`model.id` 必填（空白/纯空白串同拒）并原样直传 prompts body（上游缺 model 时接口返 success 但轮次静默秒败——fail-closed 硬拒于派发前）；`model.providerID` / `model.variant` 配了即拒（prompts body 只认裸 model id，防迁移配置的路由字段被静默丢弃）；serveUrl/tokenEnv 亦必填——裸 model 探针形状因缺连接字段被拒（§二判定词按探针机械派生，非模型通道不存在）",
+    reasoning: "prompts body 有 thinking 字段但值形状未实测——不发明映射，配了即拒",
+    provider: "kimi 托管认证（服务器 bearer token，`tokenEnv` 每请求解析，token 值绝不进 transcript/日志/错误消息）；配 provider 块即拒",
+    supportsRoleContract: "拼进 prompt 正文前缀，role/task 以 `\\n\\n---\\n\\n` 分隔（对齐 kimi-code ROLE_TASK_SEPARATOR；非系统级通道，prompt 级引导）",
+    supportsSessionReuse: "resume 轮不 POST /sessions，直接向前任 session id POST prompts；id 取 `session.created.backendSessionId`（服务器自产 session_ id）、runner 运行期补记；resume 轮 id 缺失即派发前拒绝；完成判定同一段逻辑天然工作（v8 transcript 轮次归属：resume 的 prompt 在既有会话触发新 turn，triggerPromptId === prompt_id 唯一圈定，历史轮永不重放/误归属——按构造不可能）",
+    supportsInFlightCorrection: "`prompts` 排队 + `prompts:steer` 转入活动轮（`steered:true` 即 delivered）；delivered 证明已转入活动轮，不证明模型截断了当轮生成（纠偏在轮边界被消费）；消费可见性（**形状未实测**，仅标注）：steered 的消费据说可见于 transcript prompts[].steeredAt / turn 结构；排队成功但 steer 失败（如 40402 无活动轮）时上游可能仍会在后续轮消费该排队消息——send_failed ≠ 一定未执行，Lead 重发前须知此不对称",
+    reportsTokenUsage: "transcript 轮次 `steps[].usage` 实测非零（2026-09-30 live，inputOther/output/inputCacheRead/inputCacheCreation 四计数）——v8 起声明 true（v7 false 的翻转条件自此满足；会话详情 usage 可为全零不再是唯一通道）；通道 = completed 轮 steps[].usage 求和（仅本轮）→ metrics 事件，tokenBudget 闸门生效；REST 无会话级中止端点（abort 抛固定错误），显式停止需 Lead 人工处置服务器侧，停止验证经 handle 探针观测会话 busy 状态——失控 run 无 WAO 内自动停止杠杆，派发须 bounded 任务 + 操作员监督；事件流有界终止 = silentTimeout（提交滞后无 turn 即 silent fail）+ 无进展出口（归属 turn 连续 8 拍 state 不变且 steps/frames 无增长即 done(failed)，两出口独立并存；waitTimeout 到期只通知不终止（ADR-0030），不构成兜底）",
+  }),
 });
 
 /**
@@ -149,7 +170,7 @@ export function readBackendCapabilities(backend) {
 /**
  * ADR-0025 批次 2：按 agent.backend 构造 backend 并读取其闭集能力声明。
  *
- * 纯静态：五个 backend 类的构造函数都无副作用（不 spawn 进程、不发网络
+ * 纯静态：全部 backend 类的构造函数都无副作用（不 spawn 进程、不发网络
  * 请求——spawn/fetch 只在运行时方法里被调用），`registry validate` 的加载
  * 路径因此可以零副作用地读到类声明。未知 backend → null（validate 的
  * "unknown backend" hard issue 由调用方另行报告；能力面不猜）。

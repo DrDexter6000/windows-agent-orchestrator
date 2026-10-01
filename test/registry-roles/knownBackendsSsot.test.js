@@ -3,9 +3,10 @@
 // TD-161 钉住测试：backend 闭集 SSOT 常量 + unknown-backend 报错文案。
 //
 // 三根钉：
-//   1. 常量内容钉：KNOWN_BACKENDS 恰为六成员且冻结（成员增补只能经 Owner
+//   1. 常量内容钉：KNOWN_BACKENDS 恰为七成员且冻结（成员增补只能经 Owner
 //      决定进入，且进入时本文件与文案钉会一起被审视——第六成员 deepseek-acp
-//      由 ADR-0031 提议加入，待 Owner 裁定 accepted）。
+//      由 ADR-0031 提议加入，待 Owner 裁定 accepted；第七成员 kimi-web 的
+//      闭集 6→7 扩员经 Owner 2026-09-30 批准）。
 //   2. 报错文案钉：unknown-backend 错误逐名列出闭集全部成员 + "Owner decision"
 //      + "ADR-0028"（分叉指路：换模型走既有 backend 的 model/provider 字段；
 //      新 backend 是 Owner 决定——不诱导把模型通道当 runtime 替代解）。
@@ -20,11 +21,14 @@ import { normalizeAgent, KNOWN_BACKENDS } from "../../src/registry.js";
 
 const COMMANDS_REGISTRY_URL = new URL("../../src/commands/registry.js", import.meta.url);
 
-test("TD-161: KNOWN_BACKENDS SSOT 恰为六成员且冻结", () => {
+test("TD-161: KNOWN_BACKENDS SSOT 恰为七成员且冻结", () => {
   assert.deepEqual(KNOWN_BACKENDS, [
     "opencode-serve", "claude-code", "codex", "kimi-code", "deepseek-harness",
     // 第六成员：DSH ACP 集成面——由 ADR-0031 提议，待 Owner 裁定 accepted。
     "deepseek-acp",
+    // 第七成员：kimi-web（HTTP attach，`kimi web` 本地服务器的官方 REST API）
+    // ——闭集 6→7 扩员经 Owner 2026-09-30 批准。
+    "kimi-web",
   ]);
   assert.ok(Object.isFrozen(KNOWN_BACKENDS), "闭集必须冻结（防运行期漂移）");
 });

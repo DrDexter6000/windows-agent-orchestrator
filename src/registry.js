@@ -39,6 +39,9 @@ export const KNOWN_BACKENDS = Object.freeze([
   // 新旧两线并存；旧 deepseek-harness 保留至新线认证通过后由 Owner 决定去留
   // （ADR-0031 §3.7）。回退面集中：移除本成员 + factory/registry/docs 同步即可。
   "deepseek-acp",
+  // 第 7 个 backend「kimi-web」（HTTP attach，`kimi web` 本地服务器的 Kimi Code
+  // 官方 REST API）。闭集 6→7 扩员经 Owner 2026-09-30 批准。
+  "kimi-web",
 ]);
 
 // TD-161（auditor F3 修复）：unknown-backend 指路文案的单一真相——
@@ -226,6 +229,20 @@ export function normalizeAgent(id, agent) {
     }
     if (!agent.model?.providerID || !agent.model?.id) {
       throw new Error(`Agent ${id} is missing model.providerID/model.id`);
+    }
+  } else if (agent.backend === "kimi-web") {
+    // HTTP attach 型（同 opencode-serve 的 serveUrl 用法：`kimi web` 本地服务器
+    // 基址）。tokenEnv 是 bearer token 的 env 变量名（新增字段，按既有字符串字段
+    // 的校验风格：非空非空白字符串）；model.id 必填——上游缺 model 时轮次静默
+    // 秒败（backend validateAgentPolicy 同样硬拒，这里是配置层的早失败面）。
+    if (!agent.serveUrl) {
+      throw new Error(`Agent ${id} is missing serveUrl`);
+    }
+    if (!agent.model?.id) {
+      throw new Error(`Agent ${id} is missing model.id`);
+    }
+    if (typeof agent.tokenEnv !== "string" || agent.tokenEnv.trim().length === 0) {
+      throw new Error(`Agent ${id}: tokenEnv is required and must be a non-blank string`);
     }
   } else if (agent.backend === "claude-code" || agent.backend === "codex" || agent.backend === "kimi-code") {
     // 进程式 backend：serveUrl/model 非必填（进程自带模型配置）。

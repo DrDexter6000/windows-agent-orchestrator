@@ -21,6 +21,7 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 | kimi-code | ✅ | ✅ | — | ✅ | — | ✅ |
 | deepseek-harness | ✅ | — | — | ✅ | ✅ | ✅ |
 | deepseek-acp | ✅ | ✅ | — | — | — | — |
+| kimi-web | ✅ | ✅ | ✅ | ✅ | ✅ | — |
 
 ✅ = 类声明 `=== true`；— = **未声明或非严格 true**（strict `=== true` 读取为 false——两者同格，例如 deepseek-acp 多轴是显式声明 `false`）。带条件/限制的轴（如 opencode-serve 角色合同的版本门）见 §二条件与限制说明。
 
@@ -36,6 +37,7 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 | kimi-code | 支持 | 条件：effort ∈ {low, high, max}，须绑定 kimi-code/k3 | 不支持 | 不支持 |
 | deepseek-harness | 支持 | 条件：effort ∈ {high, max} | 支持 | 不支持 |
 | deepseek-acp | 不支持 | 条件：effort ∈ {low, high, max} | 不支持 | 不支持 |
+| kimi-web | 不支持 | 不支持 | 不支持 | 不支持 |
 
 衔接：per-dispatch `--model` 只替换 `model.id`、兄弟字段保留——opencode-serve 的 agent 必须先带 `providerID`；`--reasoning` 的六值闭集（minimal/low/medium/high/xhigh/max）由 `registry.js` `REASONING_EFFORTS` 在 registry 层校验，backend 层再按上表条件格收窄。
 
@@ -78,6 +80,14 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
   - supportsRoleContract（角色合同）：per-dispatch `--patch` personaPrefix（结构化序列化）
   - supportsSessionReuse（会话复用）：ADR-0031 §3.6 关联面：resume 信封只携带前任 WAO runId，sessionId 由 spawn 权威按 runId 从转录取回、in-process 送达（不进 argv）；关联缺失/损坏/上游拒绝一律 fail-closed 拒绝，绝不静默新会话；仅 stable-workspace lane 的非 delivery 派发，delivery 一律 fresh
   - reportsTokenUsage（token usage）：`PromptResponse.usage` 实测可为 null——声明 false（2026-09-20 裁定）；翻转条件 = 有可验证 token 计量通道
+- **kimi-web**
+  - model override：`model.id` 必填（空白/纯空白串同拒）并原样直传 prompts body（上游缺 model 时接口返 success 但轮次静默秒败——fail-closed 硬拒于派发前）；`model.providerID` / `model.variant` 配了即拒（prompts body 只认裸 model id，防迁移配置的路由字段被静默丢弃）；serveUrl/tokenEnv 亦必填——裸 model 探针形状因缺连接字段被拒（§二判定词按探针机械派生，非模型通道不存在）
+  - reasoning effort：prompts body 有 thinking 字段但值形状未实测——不发明映射，配了即拒
+  - provider 块：kimi 托管认证（服务器 bearer token，`tokenEnv` 每请求解析，token 值绝不进 transcript/日志/错误消息）；配 provider 块即拒
+  - supportsRoleContract（角色合同）：拼进 prompt 正文前缀，role/task 以 `\n\n---\n\n` 分隔（对齐 kimi-code ROLE_TASK_SEPARATOR；非系统级通道，prompt 级引导）
+  - supportsSessionReuse（会话复用）：resume 轮不 POST /sessions，直接向前任 session id POST prompts；id 取 `session.created.backendSessionId`（服务器自产 session_ id）、runner 运行期补记；resume 轮 id 缺失即派发前拒绝；完成判定同一段逻辑天然工作（v8 transcript 轮次归属：resume 的 prompt 在既有会话触发新 turn，triggerPromptId === prompt_id 唯一圈定，历史轮永不重放/误归属——按构造不可能）
+  - supportsInFlightCorrection（在途纠偏）：`prompts` 排队 + `prompts:steer` 转入活动轮（`steered:true` 即 delivered）；delivered 证明已转入活动轮，不证明模型截断了当轮生成（纠偏在轮边界被消费）；消费可见性（**形状未实测**，仅标注）：steered 的消费据说可见于 transcript prompts[].steeredAt / turn 结构；排队成功但 steer 失败（如 40402 无活动轮）时上游可能仍会在后续轮消费该排队消息——send_failed ≠ 一定未执行，Lead 重发前须知此不对称
+  - reportsTokenUsage（token usage）：transcript 轮次 `steps[].usage` 实测非零（2026-09-30 live，inputOther/output/inputCacheRead/inputCacheCreation 四计数）——v8 起声明 true（v7 false 的翻转条件自此满足；会话详情 usage 可为全零不再是唯一通道）；通道 = completed 轮 steps[].usage 求和（仅本轮）→ metrics 事件，tokenBudget 闸门生效；REST 无会话级中止端点（abort 抛固定错误），显式停止需 Lead 人工处置服务器侧，停止验证经 handle 探针观测会话 busy 状态——失控 run 无 WAO 内自动停止杠杆，派发须 bounded 任务 + 操作员监督；事件流有界终止 = silentTimeout（提交滞后无 turn 即 silent fail）+ 无进展出口（归属 turn 连续 8 拍 state 不变且 steps/frames 无增长即 done(failed)，两出口独立并存；waitTimeout 到期只通知不终止（ADR-0030），不构成兜底）
 
 ## 三、认证台账（指针；严禁嵌入 live 值）
 

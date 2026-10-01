@@ -10,9 +10,10 @@ import {
   BRANCH_CAP, REGISTRY_EXTERNAL_ROOTS,
   classifyRegistryEntries, classifyBranchCount,
   listWorktreePaths, countRunBranches, normPath,
+  primaryWorktreePath,
 } from "../../scripts/hygiene.mjs";
 
-const repo = path.resolve(import.meta.dirname, "..", "..");
+const repo = primaryWorktreePath(path.resolve(import.meta.dirname, "..", ".."));
 const never = () => false;
 const always = () => true;
 

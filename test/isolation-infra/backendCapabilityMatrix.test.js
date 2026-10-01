@@ -21,7 +21,7 @@
 //
 // Maintenance boundary: a backend type newly added to the factory MUST get a
 // case below (the hardcoded expected partitions enumerate the current factory
-// branches; `registry.js` normalizeAgent's known-backend set is the same six).
+// branches; `registry.js` normalizeAgent's known-backend set is the same seven).
 //
 // Pure group: object construction + injectable seams only. The process-family
 // spawn is recorded through the established `_spawnFn` injection point and
@@ -102,11 +102,27 @@ function factoryCases(dir) {
         model: { providerID: "zhipuai-coding-plan", id: "glm-5.2" },
       },
     },
+    {
+      // 第七成员 kimi-web：HTTP attach（`kimi web` REST）。bearer token 每请求
+      // 从 env 解析——matrix 的 spawn 腿需要该 env 在场（token 值任意非空）。
+      key: "kimi-web",
+      agent: {
+        backend: "kimi-web",
+        cwd: "D:/matrix/kimi-web",
+        serveUrl: "http://127.0.0.1:4310",
+        model: { id: "kimi-code/k3" },
+        tokenEnv: "KIMI_WEB_MATRIX_TOKEN",
+      },
+    },
   ];
 }
 
 test("R7-C-7 matrix: preflightInvocation ⇔ LOCAL spawn with cwd: agent.cwd, across EVERY factory backend", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-capmatrix-"));
+  // kimi-web 的 bearer token env（spawn 前每请求解析；matrix 腿在场即可）。
+  const hadMatrixToken = Object.hasOwn(process.env, "KIMI_WEB_MATRIX_TOKEN");
+  const prevMatrixToken = process.env.KIMI_WEB_MATRIX_TOKEN;
+  process.env.KIMI_WEB_MATRIX_TOKEN = "matrix-token-value";
   try {
     // deepseek-harness's preflight proves dshConfigPath is readable — a real
     // tmp file (the fixture must satisfy the same SSOT contract production does).
@@ -128,7 +144,27 @@ test("R7-C-7 matrix: preflightInvocation ⇔ LOCAL spawn with cwd: agent.cwd, ac
       const fetchCalls = [];
       const backend = backendFor(agent, {
         fetchImpl: async (url) => {
-          fetchCalls.push(String(url));
+          const urlStr = String(url);
+          fetchCalls.push(urlStr);
+          // kimi-web v8 起 spawn 序列（POST /sessions → GET 会话详情（提交前
+          // 静默门）→ GET transcript?agent_id=main（preSubmitTurnIds 观察锚）→
+          // POST prompts）走 fail-closed 形状门（A4）：transcript 需 items 数组、
+          // detail 需 id 与 busy/main_turn_active 在场；其余端点（含
+          // opencode-serve 的 POST /api/session）维持默认 `{data:{id}}` 形状。
+          if (urlStr.includes("/transcript?agent_id=")) {
+            return {
+              ok: true, status: 200,
+              json: async () => ({ data: { items: [], seq: 1, has_more: false } }),
+            };
+          }
+          if (/\/api\/v1\/sessions\/[^/]+$/.test(urlStr)) {
+            return {
+              ok: true, status: 200,
+              json: async () => ({
+                data: { id: "sess-matrix", busy: false, main_turn_active: false, last_turn_reason: null },
+              }),
+            };
+          }
           return { ok: true, status: 200, json: async () => ({ data: { id: "sess-matrix" } }) };
         },
       });
@@ -173,15 +209,17 @@ test("R7-C-7 matrix: preflightInvocation ⇔ LOCAL spawn with cwd: agent.cwd, ac
     );
     assert.deepEqual(
       remoteHintKeys,
-      ["opencode-serve"],
+      ["opencode-serve", "kimi-web"],
       "the remote-hint family declares no preflightInvocation",
     );
   } finally {
+    if (hadMatrixToken) process.env.KIMI_WEB_MATRIX_TOKEN = prevMatrixToken;
+    else delete process.env.KIMI_WEB_MATRIX_TOKEN;
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
   }
 });
 
-test("R7-C-7 guard: the factory rejects an unknown backend (the matrix's six cases are the closed factory surface)", () => {
+test("R7-C-7 guard: the factory rejects an unknown backend (the matrix's seven cases are the closed factory surface)", () => {
   assert.throws(
     () => backendFor({ backend: "bogus-runtime", cwd: "D:/matrix/bogus" }),
     /Unsupported backend/,
