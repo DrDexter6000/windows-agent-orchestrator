@@ -39,6 +39,16 @@
 //     配好）。缺 reasoningLevel 时部分模型报 "Reasoning level is required"。另有
 //     `session/setThoughtLevel {sessionId, thoughtLevel}`（v1 不用）。expectedRevision
 //     v1 不传（跨轮 revision 追踪未实测，不发明）。
+//   - `session/setMode {sessionId, mode}`（fresh 与 resume 都发，setModel 之后、
+//     提交之前固定 mode:"yolo"）：无头 CLI `-p` 默认即 yolo（--help 在案：
+//     "default: yolo for --prompt"），而 app-server 的 session/create 默认 build
+//     （安全默认、写需许可）——scorecard 实测 GLM-5.3 写文件被权限层拦截
+//     （"Write tool was blocked by the WAO headless permission layer"，
+//     runs/reliability/run_20261001213724000cy1b3a）。worker 无人值守，写许可必须
+//     放开（与其它席位 --dangerously-skip-permissions / permission_mode:"auto"
+//     姿态对齐）。mode 枚举 = ["plan","build","edit","yolo","auto"]（bundle schema
+//     $j 核证）；expectedRevision v1 不传（同 setModel 纪律）。setMode 失败 =
+//     fail-closed 固定错误拒绝派发（权限没放开比派发失败更危险）。
 //   - `session/send` params `{sessionId, content:<文本>}` →
 //     `{accepted:true, stateRevision}`；消息经 `session/messages {sessionId}` 轮询：
 //     result.messages[].parts[]（type:"text" 带文本；type:"step-finish" 带
@@ -693,6 +703,26 @@ export class ZcodeBackend {
             : {}),
         },
       });
+      // 权限模式（fresh 与 resume 都发——与 setModel 同款「每次派发生效」惯例），
+      // 固定在 setModel 之后、基线快照/提交之前：session/setMode {sessionId,
+      // mode:"yolo"}。依据：
+      //   (1) CLI -p 默认即 yolo（zcode CLI --help："--mode <mode>  Permission mode for prompts: build, edit, plan, or yolo (default: yolo for --prompt)"）——无头 worker 与其它席位 --dangerously-skip-permissions / permission_mode:"auto" 姿态对齐；
+      //   (2) app-server 的 session/create 默认 build（写需许可）——delta 认证 scorecard 实测 GLM-5.3 写文件被拦："Write tool was blocked by the WAO headless permission layer"（runs/reliability/run_20261001213724000cy1b3a），无人值守席位的写许可必须放开；
+      //   (3) mode 枚举 = ["plan","build","edit","yolo","auto"]（bundle schema $j 核证；expectedRevision v1 不传，同 setModel 纪律）。
+      // 失败 fail-closed（固定错误拒绝派发——权限没放开比派发失败更危险，绝不带病
+      // 送 prompt；上游明细有界附注如 abort 失败腿同款）。任何拒绝形态（错误帧/
+      // 超时/传输已关）走同一 catch——确认放开前 prompt 不出闸。
+      try {
+        await request("session/setMode", { sessionId, mode: "yolo" });
+      } catch (error) {
+        throw new Error(
+          "zcode dispatch refused: session/setMode did not succeed ("
+          + `${bounded(error?.message ?? error)}) — the app-server session/create `
+          + "default is build mode and the prompt must never be dispatched without "
+          + "confirmed write permission (fail-closed: an unpermitted write is worse "
+          + "than a failed dispatch)",
+        );
+      }
       // 提交前基线快照：展平 parts 数。本轮归属 = 序号 >= baselineParts（fresh
       // 会话为 0；resume 会话为历史长度——「历史 stop 不误判」依赖头部不插入的
       // 追加语义：头部插入可使旧 stop 序号右移入本轮区间，B′ 残余见文件头完成

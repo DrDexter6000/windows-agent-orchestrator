@@ -8,7 +8,9 @@
 // （src/backends/zcode.js 文件头，行号在案）。
 //
 // 覆盖：信封（无 jsonrpc）、server→client 请求应答器（逐方法 schema 合法拒绝
-// ——第三轮 auditor #5）、create→setModel→send 请求形状、模型 ref 拆分、完成判定
+// ——第三轮 auditor #5）、create→setModel→setMode(yolo)→send 请求形状（setMode
+// 权限帧 + 失败 fail-closed 拒绝派发——scorecard 写拦截修复
+// run_20261001213724000cy1b3a）、模型 ref 拆分、完成判定
 // （step-finish stop/error）+ 历史含 stop 的 resume 反例（auditor 完成判据反例）、
 // stalled 兜底（分相：已有产出后 60 拍 / 零 part 思考预算 120 拍——GLM-5.3 首
 // part 延迟实证反例组 ⑥c-⑥e run_20261001195259045cle1ft；步间静默反例 ⑥f——
@@ -92,7 +94,8 @@ function fakeKill() {
  * fake zcode app-server 对端：记录 backend 发出的全部帧（clientFrames），按
  * options 应答。**有状态（auditor #1）**：activeSessions 集合模拟上游每进程一张
  * 的 sessions Map（zcode.cjs:15262）——create/resume 注册，requireSession 系方法
- * （setModel/send/messages/usage/stop）查表 miss 即回 "Session is not active"
+ * （setModel/setMode/send/messages/usage/stop）查表 miss 即回 "Session is not
+ * active"
  * （zcode.cjs:15245 Xy 的形状）。正是 v2 漏检形状：跳过 session/resume 直发
  * setModel 在这里必然失败（⑨d 直接钉）。
  * messages 脚本：函数 (pollCount) => messages[]（第 1 次调用 = spawn 期基线快照，
@@ -101,6 +104,7 @@ function fakeKill() {
 function fakeZcodePeer(child, {
   sessionId = SESSION_ID,
   setModelError = null,      // {code, message} → setModel 返回错误（zod 教学形状）
+  setModeError = null,       // {code, message} → setMode 返回错误（fail-closed 测试）
   accepted = true,           // session/send 的 accepted 值
   messages = () => [],       // (pollCount) => messages[]
   // 上游 CRn 实际字段名（zcode.cjs:15259）：cache 系带 Tokens 后缀（auditor #2）。
@@ -174,6 +178,12 @@ function fakeZcodePeer(child, {
     if (frame.method === "session/setModel") {
       if (!requireActive(frame)) return;
       if (setModelError) send({ id: frame.id, error: setModelError });
+      else send({ id: frame.id, result: {} });
+      return;
+    }
+    if (frame.method === "session/setMode") {
+      if (!requireActive(frame)) return;
+      if (setModeError) send({ id: frame.id, error: setModeError });
       else send({ id: frame.id, result: {} });
       return;
     }
@@ -293,7 +303,7 @@ test("zcode ①: 请求信封无 jsonrpc（{id, method, params}），server 请�
   );
   // 信封纪律：backend 发出的全部请求帧不带 jsonrpc 字段（上游 zod 拒收——live 实测）。
   const requests = peer.clientFrames.filter((f) => typeof f.method === "string");
-  assert.ok(requests.length >= 4, "create/setModel/send(基线 messages) 至少 4 帧");
+  assert.ok(requests.length >= 5, "create/setModel/setMode/send(基线 messages) 至少 5 帧");
   for (const frame of requests) {
     assert.equal(Object.hasOwn(frame, "jsonrpc"), false, "请求帧绝不带 jsonrpc 字段");
     assert.equal(typeof frame.id, "number");
@@ -360,9 +370,9 @@ test("zcode ①b: server 请求逐方法应答 schema 合法拒绝——必填�
   child.kill();
 });
 
-// ===== ② create→setModel→send 请求形状 + spawn argv =====
+// ===== ② create→setModel→setMode→send 请求形状 + spawn argv =====
 
-test("zcode ②: spawn argv = node <zcode.cjs> app-server；create/setModel/send 请求形状逐字段", async () => {
+test("zcode ②: spawn argv = node <zcode.cjs> app-server；create/setModel/setMode/send 请求形状逐字段", async () => {
   const agent = makeAgent({ reasoning: { effort: "high" } });
   const { peer, spawnCalls, handle, child } = await runScenario({
     agent,
@@ -389,6 +399,20 @@ test("zcode ②: spawn argv = node <zcode.cjs> app-server；create/setModel/send
     },
     "ref 拆分直传 + effort→options.reasoningLevel（live 验证形状）",
   );
+  // 权限模式帧（scorecard 写拦截修复 run_20261001213724000cy1b3a）：app-server 的
+  // session/create 默认 build（写需许可），无人值守 worker 必须在提交前放开——
+  // mode 固定 "yolo"（CLI -p 的 help 默认同款；枚举 = plan|build|edit|yolo|auto，
+  // bundle schema $j）。
+  const setMode = peer.framesOf("session/setMode")[0];
+  assert.deepEqual(
+    setMode.params,
+    { sessionId: SESSION_ID, mode: "yolo" },
+    "setMode 帧形状：提交前放开写许可（对齐其它席位 --dangerously-skip-permissions / permission_mode:\"auto\" 姿态）",
+  );
+  const indexOf = (method) => peer.clientFrames.findIndex((f) => f.method === method);
+  assert.ok(indexOf("session/create") < indexOf("session/setModel"), "create 先于 setModel");
+  assert.ok(indexOf("session/setModel") < indexOf("session/setMode"), "setModel 先于 setMode");
+  assert.ok(indexOf("session/setMode") < indexOf("session/send"), "setMode 先于 send——次序固定 create→setModel→setMode→send");
   const sent = peer.framesOf("session/send")[0];
   assert.deepEqual(
     sent.params,
@@ -427,6 +451,26 @@ test("zcode ②c: setModel 上游 zod 教学错误如实透传（code/data.name/
   );
   // #3：失败清理路径的击杀必须是注入 fake（v2 此处漏注 killFn——默认 killFn 会在
   // 测试里真跑 taskkill）。
+  assert.equal(kill.calls.length, 1, "半握手进程经注入 killFn 回收");
+});
+
+// 权限模式 fail-closed（delta 认证 scorecard 修复 run_20261001213724000cy1b3a）：
+// setMode 失败 = 固定错误拒绝派发——app-server 默认 build（写需许可），权限没放开
+// 比派发失败更危险，绝不带病做基线快照/送 prompt。
+test("zcode ②d: setMode 失败 → fail-closed 拒绝派发（固定错误），零基线快照/零 send；清理走注入 killFn", async () => {
+  const child = makeFakeChild();
+  const kill = fakeKill();
+  const backend = new ZcodeBackend({ spawnFn: () => child, killFn: kill.killFn });
+  const peer = fakeZcodePeer(child, {
+    setModeError: { code: -32602, data: { name: "ProtocolRequestError" }, message: "invalid enum value" },
+  });
+  await assert.rejects(
+    () => backend.spawn(makeAgent(), { prompt: "x" }),
+    /zcode dispatch refused: session\/setMode did not succeed .*fail-closed/,
+    "固定错误前缀 + 有界上游明细（abort 失败腿同款诚实措辞）",
+  );
+  assert.equal(peer.framesOf("session/messages").length, 0, "绝不带病做基线快照");
+  assert.equal(peer.framesOf("session/send").length, 0, "权限未确认放开：绝不 send");
   assert.equal(kill.calls.length, 1, "半握手进程经注入 killFn 回收");
 });
 
@@ -862,7 +906,7 @@ const RESUME_ROUTING = {
 // 任何以历史 stop 判完成的实现都会在这里误报（⑨/⑨c 的基线正确性证明用）。
 const RESUME_HISTORY = [userMsg("old question"), assistantMsg("old answer")];
 
-test("zcode ⑨: resume 轮不 create，先 session/resume 装载 → setModel → send（次序固定）", async () => {
+test("zcode ⑨: resume 轮不 create，先 session/resume 装载 → setModel → setMode → send（次序固定）", async () => {
   const prior = "sess_prior_run_1";
   const { peer, handle, child } = await runScenario({
     task: { prompt: "continue", sessionReuse: RESUME_ROUTING, priorProviderSessionId: prior },
@@ -881,9 +925,15 @@ test("zcode ⑨: resume 轮不 create，先 session/resume 装载 → setModel �
   assert.deepEqual(resume.params, { sessionId: prior }, "resume params = 前任 sess_ id（rGt：sessionId 必填，zcode.cjs:72）");
   const indexOf = (method) => peer.clientFrames.findIndex((f) => f.method === method);
   assert.ok(indexOf("session/resume") < indexOf("session/setModel"), "resume 先于 setModel");
-  assert.ok(indexOf("session/setModel") < indexOf("session/send"), "setModel 先于 send");
+  assert.ok(indexOf("session/setModel") < indexOf("session/setMode"), "setModel 先于 setMode（写许可放开同 setModel 一样每次派发生效）");
+  assert.ok(indexOf("session/setMode") < indexOf("session/send"), "setMode 先于 send");
   const setModel = peer.framesOf("session/setModel")[0];
   assert.equal(setModel.params.sessionId, prior, "setModel 作用于前任会话（配置模型每次派发生效）");
+  assert.deepEqual(
+    peer.framesOf("session/setMode")[0].params,
+    { sessionId: prior, mode: "yolo" },
+    "setMode 同样作用于前任会话（resume 轮的写许可不豁免——fail-closed 同款）",
+  );
   assert.deepEqual(peer.framesOf("session/send")[0].params, { sessionId: prior, content: "continue" });
   // 基线含历史（含历史 step-finish(stop)）：完成判定只认基线之后的 parts——历史
   // 文本/stop 永不重放。
@@ -1129,12 +1179,12 @@ function scanZcodeConstructions(source) {
 test("zcode ⑪: 真杀隔离守卫——本文件全部构造处均注入 killFn（正则识别 + 计数严格相等 + 块级检查）", () => {
   const source = readFileSync(new URL(import.meta.url), "utf8");
   const { constructions, violations } = scanZcodeConstructions(source);
-  // P2②b：严格相等。当前实际 = 10 处：runScenario / ②c / ③b / ⑦b / ⑦c / ⑨b /
-  // ⑨e / ⑨f / ⑨g / ⑩b。加/删构造必须同步更新此数字——不更新即红。
+  // P2②b：严格相等。当前实际 = 11 处：runScenario / ②c / ②d / ③b / ⑦b / ⑦c /
+  // ⑨b / ⑨e / ⑨f / ⑨g / ⑩b。加/删构造必须同步更新此数字——不更新即红。
   assert.equal(
     constructions.length,
-    10,
-    `守卫扫描应找到恰 10 处构造（runScenario/②c/③b/⑦b/⑦c/⑨b/⑨e/⑨f/⑨g/⑩b），实际 ${constructions.length}——加/删构造必须同步更新守卫计数（扫描器失效即守卫空转）`,
+    11,
+    `守卫扫描应找到恰 11 处构造（runScenario/②c/②d/③b/⑦b/⑦c/⑨b/⑨e/⑨f/⑨g/⑩b），实际 ${constructions.length}——加/删构造必须同步更新守卫计数（扫描器失效即守卫空转）`,
   );
   assert.deepEqual(
     violations,
