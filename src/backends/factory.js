@@ -26,6 +26,7 @@ import { KimiCodeBackend } from "./kimiCode.js";
 import { DeepSeekHarnessBackend } from "./deepSeekHarness.js";
 import { DeepSeekAcpBackend } from "./deepSeekAcp.js";
 import { KimiWebBackend } from "./kimiWeb.js";
+import { ZcodeBackend } from "./zcode.js";
 import { getWaoCliPath } from "../waoCliPath.js";
 
 /**
@@ -57,6 +58,10 @@ export function backendFor(agent, { fetchImpl, waoCliPath } = {}) {
   // containment 资产 detect / resume fail-closed / argv 预算都在
   // preflightInvocation（spawn 前、transcript 前）执行。
   if (agent.backend === "deepseek-acp") return new DeepSeekAcpBackend();
+  // 第 8 个 backend「zcode」（进程式 stdio app-server，驱动智谱 ZCode 桌面版捆绑
+  // CLI 的 ZCode Protocol v1；闭集 7→8 扩员经 Owner 2026-10-01 批准）。进程式
+  // 家族：与 claude-code/codex/kimi-code 同款注入 waoCliPath（构造零副作用）。
+  if (agent.backend === "zcode") return new ZcodeBackend({ waoCliPath: cliPath });
   throw new Error(`Unsupported backend: ${agent.backend}`);
 }
 
@@ -145,6 +150,18 @@ export const CAPABILITY_NOTES = Object.freeze({
     supportsSessionReuse: "resume 轮不 POST /sessions，直接向前任 session id POST prompts；id 取 `session.created.backendSessionId`（服务器自产 session_ id）、runner 运行期补记；resume 轮 id 缺失即派发前拒绝；完成判定同一段逻辑天然工作（v8 transcript 轮次归属：resume 的 prompt 在既有会话触发新 turn，triggerPromptId === prompt_id 唯一圈定，历史轮永不重放/误归属——按构造不可能）",
     supportsInFlightCorrection: "`prompts` 排队 + `prompts:steer` 转入活动轮（`steered:true` 即 delivered）；delivered 证明已转入活动轮，不证明模型截断了当轮生成（纠偏在轮边界被消费）；消费可见性（**形状未实测**，仅标注）：steered 的消费据说可见于 transcript prompts[].steeredAt / turn 结构；排队成功但 steer 失败（如 40402 无活动轮）时上游可能仍会在后续轮消费该排队消息——send_failed ≠ 一定未执行，Lead 重发前须知此不对称",
     reportsTokenUsage: "transcript 轮次 `steps[].usage` 实测非零（2026-09-30 live，inputOther/output/inputCacheRead/inputCacheCreation 四计数）——v8 起声明 true（v7 false 的翻转条件自此满足；会话详情 usage 可为全零不再是唯一通道）；通道 = completed 轮 steps[].usage 求和（仅本轮）→ metrics 事件，tokenBudget 闸门生效；REST 无会话级中止端点（abort 抛固定错误），显式停止需 Lead 人工处置服务器侧，停止验证经 handle 探针观测会话 busy 状态——失控 run 无 WAO 内自动停止杠杆，派发须 bounded 任务 + 操作员监督；事件流有界终止 = silentTimeout（提交滞后无 turn 即 silent fail）+ 无进展出口（归属 turn 连续 8 拍 state 不变且 steps/frames 无增长即 done(failed)，两出口独立并存；waitTimeout 到期只通知不终止（ADR-0030），不构成兜底）",
+  }),
+  // 第 8 个 backend（Owner 2026-10-01 批准入册）。上游事实 = 2026-10-01 对本机
+  // zcode 0.16.9 捆绑 CLI app-server（ZCode Protocol v1）的 live 实测（详见
+  // src/backends/zcode.js 文件头）。
+  "zcode": Object.freeze({
+    model: "`model.id` 必填且为上游原生 ref 形状 `<providerId>/<modelId>`（恰好一个 `/`，两段非空；live 验证例 `bigmodel-api/GLM-5.3`——backend 拆分后经 `session/setModel` 下发）；canonical 裸 `{id}` 无 `/` 被拒（无法路由——含 per-dispatch `--model` 覆盖形状）；`model.providerID`/`model.variant` 配了即拒（路由在 ref 里）；binary 亦必填（桌面捆绑 zcode.cjs 绝对路径，桌面更新会漂移）——裸 model 探针形状因 ref 无 `/` 被拒（§二判定词按探针机械派生，非模型通道不存在）",
+    reasoning: "effort 直传 `session/setModel` 的 `options.reasoningLevel`（不发明映射）；值闭集由上游 zod 校验——域外值上游报错如实透传固定形状（`Reasoning level is required` 形缺省坑只对部分模型成立，配了才发）；effort 缺省不传 options",
+    provider: "登录态与 ZCode 桌面版共享（无需额外认证，凭据不在 env 面），配 provider 块即拒",
+    supportsRoleContract: "拼进 `session/send` content 前缀，role/task 以 `\\n\\n---\\n\\n` 分隔（对齐 kimi-code/kimi-web ROLE_TASK_SEPARATOR 先例；协议未证实系统级通道——prompt 级引导，非 system 级隔离）",
+    supportsSessionReuse: "resume 轮不 `session/create`，次序固定 `session/resume {sessionId}` → `session/setModel` → `session/send`——resume 是上游持久化恢复 + 注册进**本进程**会话表的唯一途径（bundle 核证 zcode.cjs:15262 sessions:new Map 每进程一张、15256 setModel 走 requireSession、15245 查表 miss 抛 `Session is not active`、15256 wRn 装载注册；跳过 resume 直接 setModel 必失败）；resume 帧失败/未知形状 fail-closed 拒绝派发；id 取 `session.created.backendSessionId`（zcode 的该值即上游自产 sess_ id——spawn 时刻已知，无 proc_<pid> 占位中间态）；resume 轮 id 缺失/占位即派发前拒绝（live 未逐测——bundle 源码核证形状，见 zcode.js 文件头依据链）；完成判据的基线切片依赖「历史 parts 稳定尾部追加」——若上游向历史头部插入 parts（非追加变更），旧 stop 序号可右移入本轮区间 → **可能提前误报完成**（发射旧答案并 done(completed)，无进展兜底不拦该分支），已知算法限制按 B′ 声明为残余，翻转条件 = 上游提供轮次身份原语或事件订阅后按身份切片",
+    supportsInFlightCorrection: "协议未见在途注入原语（bundle 方法表未实测到 steer 类方法）——如实声明 false；翻转条件 = 上游出现 steer/queue 类方法并有 live 证据",
+    reportsTokenUsage: "`session/usage` 全量计量 live 非零实测（2026-10-01，inputTokens/outputTokens/reasoningTokens/cacheReadTokens/cacheCreationTokens 分量 + totalTokens/modelRequestCount——字段名按上游 CRn 实现形状 zcode.cjs:15259，cache 系带 `Tokens` 后缀）——completed 轮取一次 → metrics 事件（分量 1:1 映射，totalTokens 合计不重复计）；会话级累计（非增量），tokenBudget 闸门按累计值比对（opencode session.tokens 同款语义）；abort 双层：RunManager signal 先杀进程树，handle.abort() 在进程仍活时先试 `session/stop`（形状未经 live 验证，失败/未知如实上抛固定错误）再启动 taskkill 树杀（启动 ≠ 树杀成功，结果不核实）；abort 幂等（共享 Promise，二次调用复用首次结果）",
   }),
 });
 

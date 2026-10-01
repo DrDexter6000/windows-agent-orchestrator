@@ -21,7 +21,7 @@
 //
 // Maintenance boundary: a backend type newly added to the factory MUST get a
 // case below (the hardcoded expected partitions enumerate the current factory
-// branches; `registry.js` normalizeAgent's known-backend set is the same seven).
+// branches; `registry.js` normalizeAgent's known-backend set is the same eight).
 //
 // Pure group: object construction + injectable seams only. The process-family
 // spawn is recorded through the established `_spawnFn` injection point and
@@ -114,6 +114,18 @@ function factoryCases(dir) {
         tokenEnv: "KIMI_WEB_MATRIX_TOKEN",
       },
     },
+    {
+      // 第八成员 zcode（Owner 2026-10-01 批准入册）：进程式 stdio app-server。
+      // 绝对 binary（registry 必填面）+ 上游原生模型 ref 形状；spawn 腿在
+      // `await spawned` 处被 stub 拒绝（同其余进程式成员——opts 断言面）。
+      key: "zcode",
+      agent: {
+        backend: "zcode",
+        cwd: "D:/matrix/zcode",
+        binary: "D:/matrix/tools/zcode.cjs",
+        model: { id: "bigmodel-api/GLM-5.3" },
+      },
+    },
   ];
 }
 
@@ -204,7 +216,7 @@ test("R7-C-7 matrix: preflightInvocation ⇔ LOCAL spawn with cwd: agent.cwd, ac
     // becoming a local spawner — moves a key between these lists and goes red.
     assert.deepEqual(
       [...localSpawnKeys].sort(),
-      ["claude-code", "codex", "deepseek-acp", "deepseek-harness", "kimi-code"],
+      ["claude-code", "codex", "deepseek-acp", "deepseek-harness", "kimi-code", "zcode"],
       "the local-spawn family is exactly the preflightInvocation-declaring family",
     );
     assert.deepEqual(

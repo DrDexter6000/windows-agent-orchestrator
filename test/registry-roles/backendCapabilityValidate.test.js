@@ -173,6 +173,12 @@ test("ADR25-B2-MATRIX: backendCapabilitySnapshot 与全部工厂 backend 类的�
     // prompts:steer；v8（transcript 轮次原语）起 steps[].usage 实测非零 →
     // reportsTokenUsage=true（完成判定同轮迁移到 transcript 终态原语）。
     "kimi-web": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: true, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: false },
+    // 第八成员 zcode（Owner 2026-10-01 批准入册；上游事实 = 当日对本机 zcode
+    // 0.16.9 app-server 协议的 live 实测）：roleContract 拼进 content 前缀
+    //（prompt 级）；session 复用 = 复用前任 sess_ id 直发 session/send；
+    // 在途注入原语未见（如实 false）；session/usage 全量计量非零 → true；
+    // 命令退出码通道未证实 → false。
+    "zcode": { supportsRoleContract: true, supportsSessionReuse: true, supportsInFlightCorrection: false, replayByRespawn: true, reportsTokenUsage: true, reportsCommandExitCode: false },
   };
   for (const [backend, caps] of Object.entries(expected)) {
     assert.deepEqual(

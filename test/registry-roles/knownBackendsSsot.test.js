@@ -3,10 +3,11 @@
 // TD-161 钉住测试：backend 闭集 SSOT 常量 + unknown-backend 报错文案。
 //
 // 三根钉：
-//   1. 常量内容钉：KNOWN_BACKENDS 恰为七成员且冻结（成员增补只能经 Owner
+//   1. 常量内容钉：KNOWN_BACKENDS 恰为八成员且冻结（成员增补只能经 Owner
 //      决定进入，且进入时本文件与文案钉会一起被审视——第六成员 deepseek-acp
 //      由 ADR-0031 提议加入，待 Owner 裁定 accepted；第七成员 kimi-web 的
-//      闭集 6→7 扩员经 Owner 2026-09-30 批准）。
+//      闭集 6→7 扩员经 Owner 2026-09-30 批准；第八成员 zcode 的闭集 7→8
+//      扩员经 Owner 2026-10-01 批准）。
 //   2. 报错文案钉：unknown-backend 错误逐名列出闭集全部成员 + "Owner decision"
 //      + "ADR-0028"（分叉指路：换模型走既有 backend 的 model/provider 字段；
 //      新 backend 是 Owner 决定——不诱导把模型通道当 runtime 替代解）。
@@ -21,7 +22,7 @@ import { normalizeAgent, KNOWN_BACKENDS } from "../../src/registry.js";
 
 const COMMANDS_REGISTRY_URL = new URL("../../src/commands/registry.js", import.meta.url);
 
-test("TD-161: KNOWN_BACKENDS SSOT 恰为七成员且冻结", () => {
+test("TD-161: KNOWN_BACKENDS SSOT 恰为八成员且冻结", () => {
   assert.deepEqual(KNOWN_BACKENDS, [
     "opencode-serve", "claude-code", "codex", "kimi-code", "deepseek-harness",
     // 第六成员：DSH ACP 集成面——由 ADR-0031 提议，待 Owner 裁定 accepted。
@@ -29,6 +30,9 @@ test("TD-161: KNOWN_BACKENDS SSOT 恰为七成员且冻结", () => {
     // 第七成员：kimi-web（HTTP attach，`kimi web` 本地服务器的官方 REST API）
     // ——闭集 6→7 扩员经 Owner 2026-09-30 批准。
     "kimi-web",
+    // 第八成员：zcode（进程式 stdio app-server，智谱 ZCode 桌面捆绑 CLI 的
+    // ZCode Protocol v1）——闭集 7→8 扩员经 Owner 2026-10-01 批准。
+    "zcode",
   ]);
   assert.ok(Object.isFrozen(KNOWN_BACKENDS), "闭集必须冻结（防运行期漂移）");
 });
@@ -36,7 +40,8 @@ test("TD-161: KNOWN_BACKENDS SSOT 恰为七成员且冻结", () => {
 test("TD-161: unknown-backend 报错逐名列出闭集全部成员 + Owner decision + ADR-0028", () => {
   let err;
   try {
-    normalizeAgent("bad", { backend: "zcode", cwd: "D:/proj" });
+    // 2026-10-01 起 zcode 是闭集成员——unknown 例值换用一个真正不在册的名字。
+    normalizeAgent("bad", { backend: "qwen-cli", cwd: "D:/proj" });
   } catch (e) {
     err = e;
   }
@@ -47,7 +52,7 @@ test("TD-161: unknown-backend 报错逐名列出闭集全部成员 + Owner decis
   assert.ok(err.message.includes("Owner decision"), "必须含 Owner decision 指路");
   assert.ok(err.message.includes("ADR-0028"), "必须指向 ADR-0028");
   // 坏值回显是既有行为（fixed-safe 纪律允许）。
-  assert.ok(err.message.includes("zcode"), "坏值本身回显（既有行为）");
+  assert.ok(err.message.includes("qwen-cli"), "坏值本身回显（既有行为）");
 });
 
 test("TD-161 SSOT 钉: commands/registry.js 无本地闭集字面量且 import 自 core", async () => {

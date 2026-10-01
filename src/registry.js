@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import { isValidCanonicalAgentId } from "./canonicalAgentId.js";
 import { isValidSessionReuseMode } from "./application/sessionReuse.js";
 
@@ -42,6 +43,11 @@ export const KNOWN_BACKENDS = Object.freeze([
   // 第 7 个 backend「kimi-web」（HTTP attach，`kimi web` 本地服务器的 Kimi Code
   // 官方 REST API）。闭集 6→7 扩员经 Owner 2026-09-30 批准。
   "kimi-web",
+  // 第 8 个 backend「zcode」（进程式 stdio app-server，驱动智谱 ZCode 桌面版捆绑
+  // CLI 的 ZCode Protocol v1，目标模型 GLM-5.3/GLM-5.3-Flash）。闭集 7→8 扩员经
+  // Owner 2026-10-01 批准接线（此前 ADR-0028 曾按"app-server 通道在、在途注入+
+  // 公开承诺缺"维持不入册——本轮 Owner 复核后批准，见 .wao/decisions/0028）。
+  "zcode",
 ]);
 
 // TD-161（auditor F3 修复）：unknown-backend 指路文案的单一真相——
@@ -55,6 +61,17 @@ export function unknownBackendGuidance(backend) {
     `to add a new backend (a different CLI/runtime), that is an Owner decision — ` +
     `see ADR-0028 (previously evaluated candidates, e.g. zcode) in .wao/decisions/.`
   );
+}
+
+// zcode 模型 ref 形状（<providerId>/<modelId>：恰好一个 "/"，两段非空）。形状
+// 事实与 src/backends/zcode.js 的 splitZcodeModelRef 同源（2026-10-01 live：
+// setModel 拆分 bigmodel-api/GLM-5.3 系 ref 直传）。此处独立实现是刻意的——
+// core（registry）不上向 import backends（L4 分层）；两处由
+// test/backends/zcode.test.js 的形状一致性用例互钉（拆分行为逐值对拍）。
+function isZcodeModelRef(id) {
+  if (typeof id !== "string" || id.length === 0) return false;
+  const first = id.indexOf("/");
+  return first > 0 && id.indexOf("/", first + 1) === -1 && first < id.length - 1;
 }
 
 // Flags that are MANAGED by the structured model/reasoning/provider fields.
@@ -263,6 +280,26 @@ export function normalizeAgent(id, agent) {
     // dshConfigPath/dshProvider 属旧线字段，本线不用；binary 可选（缺省 dsh）。
     if (typeof agent.credentialEnv !== "string" || agent.credentialEnv.trim().length === 0) {
       throw new Error(`Agent ${id}: credentialEnv is required and must be a non-blank string`);
+    }
+  } else if (agent.backend === "zcode") {
+    // 第 8 个 backend「zcode」（Owner 2026-10-01 批准接线）：binary 必填 = 指向
+    // 桌面版捆绑 CLI zcode.cjs 的**绝对路径**（桌面更新会改安装路径——不可缺省、
+    // 不猜 PATH）；model.id 必填且为上游原生 ref 形状 `<providerId>/<modelId>`
+    // （恰好一个 "/"，两段非空——backend 的 validateAgentPolicy 同形状二次硬拒，
+    // per-dispatch --model 覆盖也过那道门，配置层这里是早失败面）。
+    if (typeof agent.binary !== "string" || agent.binary.trim().length === 0
+      || !isAbsolute(agent.binary)) {
+      throw new Error(
+        `Agent ${id}: zcode requires binary (an absolute path to the desktop-bundled zcode.cjs — the install path drifts across desktop updates, so it must be provided by the registry)`,
+      );
+    }
+    if (!agent.model?.id) {
+      throw new Error(`Agent ${id} is missing model.id`);
+    }
+    if (!isZcodeModelRef(agent.model.id)) {
+      throw new Error(
+        `Agent ${id}: zcode model.id must be the upstream native ref shape <providerId>/<modelId> (exactly one slash, both segments non-empty, e.g. bigmodel-api/GLM-5.3)`,
+      );
     }
   }
   // M10-pre: validate agent.waitTimeout if present (production range).
