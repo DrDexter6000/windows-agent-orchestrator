@@ -28,6 +28,15 @@
 // 零）。反例补齐：停滞门增长重置必要性（跨过无重置失败点的确定性构造）、queued
 // 单列、提交前静默门 busy 到界零提交、transcript 不可解析 JSON、先见 running 后
 // 请求连续失败不复用旧 turn。
+//
+// 第十轮小交付（2026-10-01 delta 认证证据链补齐）：completed 轮 steps[].frames
+// 里 kind:"tool" 的帧（形状 = 2026-10-01 live 探针：{kind:"tool", frameId,
+// toolCallId, name, state, input, output}）投影为证据事件——镜像 opencodeServe
+// evidenceEventsFromOpenCodeToolPart（bash/shell+command → command、
+// write/edit/multiedit+path/file_path → file_written、其余 → tool_use、终态
+// done|error|failed 追加 tool_result），证据先于 assistant 文本发射。v1 误以为
+// frames 是 thinking|text 闭集：模型真写了文件但 WAO 无 file_written 事件，
+// delta scorecard 误红 hasEvidence/filesExist——本轮补齐证据面。
 
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -513,13 +522,21 @@ test("kimi-web ④: sendCorrection 失败腿——40402 无活动轮（code!==0�
 // ===== ⑤ events 轮询生成器：transcript 轮次终态原语（triggerPromptId 归属 +
 // state 终态闭集） =====
 
-test("kimi-web ⑤ ①: completed 轮——turn 挂 triggerPromptId、frames 带 assistant text → 首拍发射全文 + usage + completed（thinking 帧不投影、无 role 的 text 帧宽容计入）", async () => {
+test("kimi-web ⑤ ①: completed 轮——turn 挂 triggerPromptId、frames 带 assistant text → 首拍发射 tool 帧证据 + 全文 + usage + completed（thinking 帧不投影、无 role 的 text 帧宽容计入；tool 帧证据先行）", async () => {
+  // tool 帧形状 = 2026-10-01 live 探针（delta 证据链）：{kind:"tool", frameId,
+  // toolCallId, name, state, input, output}。四类投影各占一帧：Write(done)、
+  // Bash(done)、Read(未知类)、Bash(state=error)——逐条 deepEqual 见断言区。
   const turn = turnItem({
     steps: [
       stepItem({
         stepId: "s0",
         frames: [
           { kind: "thinking", text: "(internal reasoning)" },
+          {
+            kind: "tool", frameId: "f_w", toolCallId: "tc_write", name: "Write", state: "done",
+            input: { path: "wao_perm_probe.txt", content: "probe" },
+            output: "Wrote 5 bytes to wao_perm_probe.txt",
+          },
           { kind: "text", text: "Hello", role: "assistant" },
         ],
         usage: { inputOther: 100, output: 7, inputCacheRead: 10, inputCacheCreation: 3 },
@@ -527,7 +544,21 @@ test("kimi-web ⑤ ①: completed 轮——turn 挂 triggerPromptId、frames 带
       stepItem({
         stepId: "s1",
         ordinal: 1,
-        frames: [{ kind: "text", text: " world" }], // 无 role 的 text 帧（实测宽容形状）
+        frames: [
+          {
+            kind: "tool", frameId: "f_b", toolCallId: "tc_bash", name: "Bash", state: "done",
+            input: { command: "node scripts/probe.mjs" }, output: "probe ok",
+          },
+          {
+            kind: "tool", frameId: "f_r", toolCallId: "tc_read", name: "Read", state: "done",
+            input: { path: "README.md" }, output: "readme body",
+          },
+          {
+            kind: "tool", frameId: "f_e", toolCallId: "tc_err", name: "Bash", state: "error",
+            input: { command: "node scripts/failing.mjs" }, output: "exit status 1",
+          },
+          { kind: "text", text: " world" }, // 无 role 的 text 帧（实测宽容形状）
+        ],
         usage: { inputOther: 50, output: 5, inputCacheRead: 10, inputCacheCreation: 3 },
       }),
     ],
@@ -541,16 +572,57 @@ test("kimi-web ⑤ ①: completed 轮——turn 挂 triggerPromptId、frames 带
   for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
     events.push(ev);
   }
+  // 事件顺序（证据先行，同 opencode 惯例）：tool 帧证据逐帧（投影事件 + 终态
+  // tool_result）→ user echo → assistant text → metrics → done(completed)。
   assert.deepEqual(
     events.map((e) => e.kind),
-    ["message", "message", "metrics", "done"],
-    "user echo（turn.prompt）→ assistant text（跨 step 按序拼接）→ metrics（usage 求和）→ done(completed)",
+    [
+      "file_written", "tool_result", // s0: Write 帧（done）
+      "command", "tool_result", // s1: Bash 帧（done）
+      "tool_use", "tool_result", // s1: Read 帧（非 bash/write 类 → toolUseEvent）
+      "command", "tool_result", // s1: Bash 帧（state=error → isError:true）
+      "message", "message", "metrics", "done",
+    ],
+    "tool 帧证据先行（8 条）→ user echo → assistant text → metrics → done",
   );
-  assert.equal(events[0].role, "user");
-  assert.deepEqual(events[0].parts, [{ type: "text", text: "hi" }]);
-  assert.equal(events[1].role, "assistant");
+  // Write 帧 → fileWrittenEvent 带 path（live 探针形状：input.path）。
+  assert.deepEqual(events[0], { kind: "file_written", path: "wao_perm_probe.txt" });
   assert.deepEqual(
-    events[1].parts,
+    events[1],
+    { kind: "tool_result", tool: "tc_write", output: "Wrote 5 bytes to wao_perm_probe.txt", isError: false },
+  );
+  // bash 帧 → commandEvent（kimi 无已证实退出码通道——reportsCommandExitCode=
+  // false，exitCode 恒省略；toolCallId 关联 tool_result）。
+  assert.deepEqual(
+    events[2],
+    { kind: "command", command: "node scripts/probe.mjs", toolCallId: "tc_bash" },
+  );
+  assert.deepEqual(
+    events[3],
+    { kind: "tool_result", tool: "tc_bash", output: "probe ok", isError: false },
+  );
+  // 未知工具（非 bash/shell、非 write/edit/multiedit）→ toolUseEvent(name, input)。
+  assert.deepEqual(events[4], { kind: "tool_use", tool: "Read", input: { path: "README.md" } });
+  assert.deepEqual(
+    events[5],
+    { kind: "tool_result", tool: "tc_read", output: "readme body", isError: false },
+  );
+  // 错误 state（error）→ toolResultEvent isError:true。
+  assert.deepEqual(
+    events[6],
+    { kind: "command", command: "node scripts/failing.mjs", toolCallId: "tc_err" },
+  );
+  assert.deepEqual(
+    events[7],
+    { kind: "tool_result", tool: "tc_err", output: "exit status 1", isError: true },
+  );
+  // 消息投影不变：user echo → assistant text（跨 step 按序拼接；tool/thinking
+  // 帧不入文本）。
+  assert.equal(events[8].role, "user");
+  assert.deepEqual(events[8].parts, [{ type: "text", text: "hi" }]);
+  assert.equal(events[9].role, "assistant");
+  assert.deepEqual(
+    events[9].parts,
     [{ type: "text", text: "Hello world" }],
     "两 step 的 text 帧按序拼接为单条 assistant text",
   );
@@ -559,11 +631,135 @@ test("kimi-web ⑤ ①: completed 轮——turn 挂 triggerPromptId、frames 带
   // inputOther→input / output→output / inputCacheRead→cacheRead /
   // inputCacheCreation→cacheWrite；reasoning/costUsd 无 kimi 对应字段——省略）。
   assert.deepEqual(
-    events[2],
+    events[10],
     { kind: "metrics", tokens: { input: 150, output: 12, cacheRead: 20, cacheWrite: 6 } },
   );
-  assert.equal(events[3].reason, "completed");
+  assert.equal(events[11].reason, "completed");
   assert.equal(polls(), 1, "首拍即终态——轮次原语无需等待窗口/稳定性重读");
+});
+
+test("kimi-web ⑤: 混合帧 completed 轮（thinking + tool + text）→ tool 帧证据先于 assistant message（证据先行，同 opencode 惯例；thinking 帧不投影）", async () => {
+  const turn = turnItem({
+    steps: [stepItem({
+      stepId: "s0",
+      frames: [
+        { kind: "thinking", text: "(plan the probe write)" },
+        {
+          kind: "tool", frameId: "f_m", toolCallId: "tc_mixed", name: "Write", state: "done",
+          input: { path: "out/probe.txt", content: "payload" },
+          output: "Wrote 7 bytes to out/probe.txt",
+        },
+        { kind: "text", text: "wrote the probe file", role: "assistant" },
+      ],
+      usage: { inputOther: 10, output: 4, inputCacheRead: 1, inputCacheCreation: 1 },
+    })],
+  });
+  const { handler, markSpawned, polls } = turnScriptServer("session_mix", { script: [[turn]] });
+  const { fetchImpl } = kimiServer(handler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
+    events.push(ev);
+  }
+  assert.deepEqual(
+    events.map((e) => e.kind),
+    ["file_written", "tool_result", "message", "message", "metrics", "done"],
+    "顺序锁死：tool 帧证据（file_written + tool_result）→ user echo → assistant message → metrics → done",
+  );
+  const assistantIndex = events.findIndex((e) => e.kind === "message" && e.role === "assistant");
+  const evidenceIndexes = events
+    .map((e, i) => (["command", "file_written", "tool_use", "tool_result"].includes(e.kind) ? i : -1))
+    .filter((i) => i >= 0);
+  assert.ok(evidenceIndexes.length > 0, "tool 帧证据事件在场");
+  assert.ok(
+    evidenceIndexes.every((i) => i < assistantIndex),
+    "全部 tool 帧证据事件先于 assistant message",
+  );
+  assert.deepEqual(events[0], { kind: "file_written", path: "out/probe.txt" });
+  assert.deepEqual(
+    events[1],
+    { kind: "tool_result", tool: "tc_mixed", output: "Wrote 7 bytes to out/probe.txt", isError: false },
+  );
+  assert.deepEqual(events[3].parts, [{ type: "text", text: "wrote the probe file" }]);
+  assert.ok(!JSON.stringify(events).includes("plan the probe write"), "thinking 帧内容不进事件流");
+  assert.equal(events.at(-1).reason, "completed");
+  assert.equal(polls(), 1);
+});
+
+test("kimi-web ⑤: tool 帧 state 非终态 / 写帧缺 path → 终态闭集 done|error|failed 之外不追加 tool_result、无 path 不虚构 file_written（镜像 opencodeServe 的 terminal-status 门）", async () => {
+  // 腿 1：bash 帧 state:"running"（终态闭集外的任意非终态值代表形状）→ 只投影
+  // commandEvent，无 tool_result——闭集外 state 绝不猜成终态。
+  {
+    const turn = turnItem({
+      steps: [stepItem({
+        usage: undefined,
+        frames: [
+          {
+            kind: "tool", frameId: "f_r", toolCallId: "tc_run", name: "Bash", state: "running",
+            input: { command: "node scripts/watch.mjs" },
+          },
+          { kind: "text", text: "still working", role: "assistant" },
+        ],
+      })],
+    });
+    const { handler, markSpawned } = turnScriptServer("session_tr", { script: [[turn]] });
+    const { fetchImpl } = kimiServer(handler);
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+    markSpawned();
+    const events = [];
+    for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
+      events.push(ev);
+    }
+    assert.deepEqual(
+      events.map((e) => e.kind),
+      ["command", "message", "message", "done"],
+      "非终态 tool 帧：投影事件在场、tool_result 缺席",
+    );
+    assert.deepEqual(
+      events[0],
+      { kind: "command", command: "node scripts/watch.mjs", toolCallId: "tc_run" },
+    );
+    assert.ok(!events.some((e) => e.kind === "tool_result"));
+    assert.equal(events.at(-1).reason, "completed");
+  }
+  // 腿 2：Write 帧 input 缺 path/file_path → 不虚构 file_written；终态
+  // tool_result 仍按 state 投影（与 opencodeServe 逐 part 双事件形状一致）。
+  {
+    const turn = turnItem({
+      steps: [stepItem({
+        usage: undefined,
+        frames: [
+          {
+            kind: "tool", frameId: "f_np", toolCallId: "tc_nopath", name: "Write", state: "done",
+            input: { content: "no target path" }, output: "nothing written",
+          },
+          { kind: "text", text: "no path case", role: "assistant" },
+        ],
+      })],
+    });
+    const { handler, markSpawned } = turnScriptServer("session_np", { script: [[turn]] });
+    const { fetchImpl } = kimiServer(handler);
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+    markSpawned();
+    const events = [];
+    for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
+      events.push(ev);
+    }
+    assert.deepEqual(
+      events.map((e) => e.kind),
+      ["tool_result", "message", "message", "done"],
+      "无 path 的 Write 帧：零 file_written、终态 tool_result 在场",
+    );
+    assert.deepEqual(
+      events[0],
+      { kind: "tool_result", tool: "tc_nopath", output: "nothing written", isError: false },
+    );
+    assert.ok(!events.some((e) => e.kind === "file_written"));
+  }
 });
 
 test("kimi-web ⑤ ⑩: completed 轮 steps 无 usage 数据 → 不发 metrics 事件（绝不虚构零值通道）", async () => {
@@ -814,7 +1010,7 @@ test("kimi-web ⑤ ⑨: onPollTick 每拍恰一次（tick 数 = transcript 轮�
   assert.equal(ticks, 3);
 });
 
-test("kimi-web ⑤ ⑦: completed 但 frames 无 assistant text（仅 thinking / 纯空白 text / role=user 的 text）→ 不伪造完成——done(failed) 收口（N1 教训），零 message 事件", async () => {
+test("kimi-web ⑤ ⑦: completed 但 frames 无 assistant text（仅 thinking / 纯空白 text / role=user 的 text / 仅 tool 帧）→ 不伪造完成——done(failed) 收口（N1 教训），零 message 事件", async () => {
   // 腿 1：steps 只有 thinking 帧（无 text）。
   {
     const turn = turnItem({
@@ -872,6 +1068,34 @@ test("kimi-web ⑤ ⑦: completed 但 frames 无 assistant text（仅 thinking /
     assert.equal(events.length, 1);
     assert.equal(events[0].reason, "failed");
     assert.match(events[0].error, /completed without assistant text/);
+  }
+  // 腿 4（tool 帧证据投影的空文本门在先）：completed 轮有 tool 帧（模型真干了
+  // 活）但零 assistant text → 仍按 failed 收口、**零证据发射**（N1 语义不因证据
+  // 面扩张而松动：无文本的 completed 轮是失败形状，证据只在成功发射路径投影）。
+  {
+    const turn = turnItem({
+      steps: [stepItem({
+        frames: [
+          {
+            kind: "tool", frameId: "f_w2", toolCallId: "tc_w2", name: "Write", state: "done",
+            input: { path: "wao_perm_probe.txt", content: "probe" }, output: "Wrote 5 bytes",
+          },
+        ],
+      })],
+    });
+    const { handler, markSpawned } = turnScriptServer("session_e4", { script: [[turn]] });
+    const { fetchImpl } = kimiServer(handler);
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+    markSpawned();
+    const events = [];
+    for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
+      events.push(ev);
+    }
+    assert.equal(events.length, 1, "tool 帧不改变空文本门的零发射语义");
+    assert.equal(events[0].reason, "failed");
+    assert.match(events[0].error, /completed without assistant text/);
+    assert.ok(!events.some((e) => e.kind === "file_written"), "空文本门在证据投影之前——零 file_written");
   }
 });
 

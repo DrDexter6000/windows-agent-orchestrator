@@ -18,7 +18,13 @@
 //     粒度）**：{kind:"turn", turnId:"t0", triggerPromptId:"msg_…", ordinal,
 //     state, prompt, endedAt, durationMs, error, steps:[{stepId, turnId,
 //     ordinal, state, usage:{inputOther,output,inputCacheRead,inputCacheCreation},
-//     llmTiming, frames:[{kind:"thinking"|"text", text, role?}]}]}。
+//     llmTiming, frames:[{kind:"thinking"|"text", text, role?}|
+//     {kind:"tool", frameId, toolCallId, name, state, input, output}]}]}。
+//       · **tool 帧形状 = 2026-10-01 live 探针（delta 认证证据链）**：v1 曾误以为
+//         frames 是 thinking|text 闭集——实测另有 kind:"tool"（name=工具名；
+//         input 形状随工具变化；state 有 done 等终态）。completed 轮按
+//         evidenceEventsFromKimiToolFrame 投影为证据事件（镜像 opencodeServe
+//         evidenceEventsFromOpenCodeToolPart），证据先于 assistant 文本发射。
 //       · **state 闭集：queued|running|completed|failed|cancelled**（终态 = 后
 //         三个）。
 //       · **triggerPromptId === POST prompts 返回的 prompt_id**（live 双验证：
@@ -60,9 +66,10 @@
 //   - state=completed → 从该 turn 的 steps[].frames 取 kind==="text" 且
 //     role==="assistant"（或无 role 的 text 帧，按实测宽容）按序拼接；**发射前
 //     复检非空**（空则按 failed 收口——N1 教训：传输成功不是可用答案，绝不伪造
-//     完成）；发射 user echo（turn.prompt）+ assistant text + usage
-//     （steps[].usage 求和 → metrics 事件）+ done(completed)。**只发射该 turn
-//     的内容——历史重放按构造不可能**。
+//     完成）；**先发射 tool 帧证据**（kind:"tool" 帧逐帧投影，2026-10-01 补齐
+//     ——delta scorecard 的证据面），再发射 user echo（turn.prompt）+ assistant
+//     text + usage（steps[].usage 求和 → metrics 事件）+ done(completed)。
+//     **只发射该 turn 的内容——历史重放按构造不可能**。
 //   - state=failed|cancelled → done(failed, error 字段或固定文案；R9 F2：拼装
 //     结果过与 request 层同一 redactToken 清洗——turn.error 是 HTTP 200 成功
 //     路径的上游回显文本，不经 sanitizeError 出口，token 值绝不原样进事件流)。
@@ -95,6 +102,10 @@ import {
   messageEvent,
   doneEvent,
   metricsEvent,
+  commandEvent,
+  fileWrittenEvent,
+  toolUseEvent,
+  toolResultEvent,
 } from "../runEvent.js";
 import { isProcessPlaceholderSessionId } from "./processBackend.js";
 
@@ -567,9 +578,10 @@ export class KimiWebBackend {
    *   - state=completed → steps[].frames 取 kind==="text" 且 role==="assistant"
    *     （或无 role 的 text 帧，按实测宽容）按序拼接；**发射前复检非空**——
    *     空/纯空白 ⇒ done(failed) 收口（N1 教训：传输成功不是可用答案，绝不
-   *     伪造完成）；发射 user echo（turn.prompt，在场且非空才发）+ assistant
-   *     text + usage（steps[].usage 求和 → metrics 事件）+ done(completed)。
-   *     **只发射该 turn 的内容**。
+   *     伪造完成）；先发射 tool 帧证据（kind:"tool" 帧逐帧投影——
+   *     evidenceEventsFromKimiTurn，证据先行），再发射 user echo（turn.prompt，
+   *     在场且非空才发）+ assistant text + usage（steps[].usage 求和 → metrics
+   *     事件）+ done(completed)。**只发射该 turn 的内容**。
    *   - state=failed|cancelled → done(failed, turn.error 字段或固定文案；R9 F2：
    *     拼装后过与 request 层同一 redactToken 清洗——token 值绝不经此路径进
    *     事件流)。
@@ -584,8 +596,8 @@ export class KimiWebBackend {
    *   - signal.aborted → 静默 return（不 emit done，终态归 RunManager）。
    * metrics（reportsTokenUsage=true）：completed 轮发射恰一次 metrics 事件
    * （steps[].usage 四计数求和映射，见 metricsEventFromTurn；usage 数据全缺席
-   * 则不发——绝不虚构零值通道）。事件顺序：user echo → assistant text →
-   * metrics → done(completed)。
+   * 则不发——绝不虚构零值通道）。事件顺序：tool 帧证据（逐帧）→ user echo →
+   * assistant text → metrics → done(completed)。
    */
   async *streamEvents(agent, sessionId, {
     signal, interval = 1000, silentTimeout, onPollTick, turnAnchor,
@@ -682,6 +694,15 @@ export class KimiWebBackend {
             "kimi turn completed without assistant text (state=completed, no text frames — refusing to fabricate completion)",
           );
           return;
+        }
+        // tool 帧证据投影（2026-10-01 补齐，证据先行——同 opencode 惯例：证据
+        // 事件先于消息投影）：归属 turn 的 steps[].frames 里 kind==="tool" 的帧
+        // 逐帧投影为证据事件。delta 证据链动机：v1 误以为 frames 是 thinking|text
+        // 闭集，模型真写了文件但 WAO 无 file_written 事件——delta scorecard 的
+        // hasEvidence/filesExist 误红。空文本门在先：completed 轮无 assistant
+        // text 时按 failed 收口、零发射（含证据），维持 N1 语义。
+        for (const ev of evidenceEventsFromKimiTurn(turn)) {
+          yield ev;
         }
         if (typeof turn.prompt === "string" && turn.prompt.length > 0) {
           yield messageEvent("user", [{ type: "text", text: turn.prompt }]);
@@ -849,9 +870,11 @@ function findTurnByPromptId(items, promptId) {
 
 // completed 轮答案切片：该 turn 全部 steps（按序）的全部 frames（按序）里
 // kind==="text" 且（role==="assistant" 或无 role——实测宽容，两形状都见过）的
-// text 直接拼接为单条 assistant text。thinking 帧不投影（frames 闭集
-// thinking|text，v8 无 thinking 投影需求）；非字符串 text 的帧跳过（形状不可用，
-// 不计入拼接——空结果由调用侧的发射前复检收口）。
+// text 直接拼接为单条 assistant text。thinking 帧不投影（v8 无 thinking 投影
+// 需求）；kind==="tool" 帧不入文本拼接，由 evidenceEventsFromKimiTurn 单独
+// 投影为证据事件（2026-10-01 live 实测：frames 并非 thinking|text 闭集）；非
+// 字符串 text 的帧跳过（形状不可用，不计入拼接——空结果由调用侧的发射前复检
+// 收口）。
 function assistantTextOfTurn(turn) {
   const parts = [];
   for (const step of Array.isArray(turn?.steps) ? turn.steps : []) {
@@ -863,6 +886,74 @@ function assistantTextOfTurn(turn) {
     }
   }
   return parts.join("");
+}
+
+// completed 轮 tool 帧证据投影（2026-10-01 补齐，delta 认证证据链）：该 turn
+// 全部 steps（按序）的全部 frames（按序）里 kind==="tool" 的帧逐帧投影为证据
+// 事件——只吃本轮 frames，历史轮按构造不可能混入。
+function evidenceEventsFromKimiTurn(turn) {
+  const events = [];
+  for (const step of Array.isArray(turn?.steps) ? turn.steps : []) {
+    for (const frame of Array.isArray(step?.frames) ? step.frames : []) {
+      if (frame?.kind !== "tool") continue;
+      events.push(...evidenceEventsFromKimiToolFrame(frame));
+    }
+  }
+  return events;
+}
+
+// 单个 tool 帧的投影规则——**镜像 src/backends/opencodeServe.js 的
+// evidenceEventsFromOpenCodeToolPart**（差异仅限帧形状与终态词）。
+// 形状来源 = 2026-10-01 live 探针（delta 证据链）：
+//   {kind:"tool", frameId, toolCallId, name:"Write", state:"done",
+//    input:{path:"wao_perm_probe.txt", content:"…"}, output:"Wrote 8 bytes to …"}
+// （name 是工具名；input 形状随工具变化；state 有 done 等终态）。规则：
+//   - name 归一化小写后 bash/shell 类且有 input.command → commandEvent
+//     （kimi 无已证实的命令退出码通道——reportsCommandExitCode=false，
+//     exitCode 恒省略，绝不虚构；toolCallId 进 meta 关联 tool_result）；
+//   - write/edit/multiedit 类且有 input.path/file_path → fileWrittenEvent(path)
+//     （path 缺席不虚构 file_written）；
+//   - 其余 → toolUseEvent(name, input)；
+//   - state 终态（done|error|failed）再追加 toolResultEvent(toolCallId, output,
+//     isError 按 state 判)——投影事件在前、结果事件在后，与 opencode 逐 part 的
+//     双事件形状一致。
+function evidenceEventsFromKimiToolFrame(frame) {
+  const tool = String(frame?.name ?? "unknown");
+  const toolKey = tool.toLowerCase();
+  const input = frame?.input ?? {};
+  const callId = typeof frame?.toolCallId === "string" && frame.toolCallId.length > 0
+    ? frame.toolCallId
+    : tool;
+  const state = frame?.state;
+  const events = [];
+  if ((toolKey === "bash" || toolKey === "shell") && typeof input.command === "string") {
+    events.push(commandEvent(input.command, undefined, { toolCallId: callId }));
+  } else if (isFileWriteToolKey(toolKey)) {
+    const filePath = input.filePath ?? input.file_path ?? input.path;
+    if (typeof filePath === "string") {
+      events.push(fileWrittenEvent(filePath));
+    }
+  } else {
+    events.push(toolUseEvent(tool, input));
+  }
+  if (isTerminalKimiToolState(state)) {
+    events.push(toolResultEvent(callId, frame?.output, state === "error" || state === "failed"));
+  }
+  return events;
+}
+
+// tool 帧 state 的终态闭集（live 探针实测 done；error/failed 为错误终态）——
+// 闭集外（含非终态/未知 state）绝不追加 tool_result、绝不猜终态。与 opencode
+// 的 isTerminalToolStatus 同位：opencode 终态词是 "completed"，kimi 实测是
+// "done"，闭集按各自 live 形状取，不复用。
+function isTerminalKimiToolState(state) {
+  return state === "done" || state === "error" || state === "failed";
+}
+
+// opencodeServe.js isFileWriteTool 同款谓词（该函数未导出——镜像保持一处一份
+// 语义，注释互指）。
+function isFileWriteToolKey(toolKey) {
+  return toolKey === "write" || toolKey === "edit" || toolKey === "multiedit";
 }
 
 // 终态失败文案（failed|cancelled 轮的 done(failed) 错误）：turn.error 字段在场
