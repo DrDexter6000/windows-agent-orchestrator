@@ -35,6 +35,9 @@ export const HARNESS_VERSION_PROBES = Object.freeze({
   "claude-code": Object.freeze({ distribution: "claude", binary: configuredBinary("claude") }),
   "codex": Object.freeze({ distribution: "codex", binary: configuredBinary("codex") }),
   "kimi-code": Object.freeze({ distribution: "kimi", binary: configuredBinary("kimi") }),
+  // kimi-web：本地 HTTP 服务由宿主 kimi CLI 二进制承载（`kimi web`），`kimi --version`
+  // 与服务器 banner 同源同版——探宿主二进制是诚实的运行时身份（opencode-serve null 是因独立部署无本地二进制，此处不同）。
+  "kimi-web": Object.freeze({ distribution: "kimi-web", binary: configuredBinary("kimi") }),
   "deepseek-acp": Object.freeze({ distribution: "dsh", binary: configuredBinary("dsh") }),
   "deepseek-harness": Object.freeze({ distribution: "dsh-jsonrpc-agent", binary: configuredBinary("dsh-jsonrpc-agent") }),
   // opencode-serve：HTTP 服务——无本地二进制；探测恒 honest unknown。
