@@ -83,9 +83,11 @@
 // **不拦此分支**（完成判据先于兜底检查、当拍即发射）。此为已知算法限制，按
 // B′ 声明为残余而非阻断；翻转条件 = 上游提供轮次身份原语（turn/message id）
 // 或事件订阅（session/subscribe）后，按身份而非序号切片重写判据。判据不命中
-// 的纯错位形状由无进展兜底（连续 8 拍无新 part → done(failed, "turn stalled")）
-// 有界收口。通信失败 = 进程死 = done(failed)（stdio 无 HTTP 重试面；请求超时/
-// 传输关闭同路径）。
+// 的纯错位形状由无进展兜底（**已有产出后**连续 8 拍无新 part → done(failed,
+// "turn stalled")）有界收口；零 part 阶段（正常思考中——GLM-5.3 high reasoning
+// 首 part 延迟实测 >8s，run_20261001195259045cle1ft）8 拍门不生效，改由
+// silentTimeout（在场）或零 part 思考预算（缺席，120 拍）有界收口。通信失败 =
+// 进程死 = done(failed)（stdio 无 HTTP 重试面；请求超时/传输关闭同路径）。
 //
 // assistant 文本切片的诚实边界：上游消息表未实证携带 role 标注（live 事实只有
 // parts 的 type 闭集 text|step-finish）——`session/send` 的 content 若以 text part
@@ -113,12 +115,21 @@ const BACKEND_NAME = "zcode";
 // prompt 级角色合同通道的 backend 用同一分隔形状，避免两套事实并存。
 export const ZCODE_ROLE_TASK_SEPARATOR = "\n\n---\n\n";
 
-// 无进展兜底阈值：连续 8 拍轮询无新 part → done(failed, "turn stalled")。
-// silentTimeout 在场且从未见过新 part 时（提交被静默拒收形状），无 part 等待
-// **只**以 silentTimeout 为界（镜像 kimiWeb R9 F3 分工——8 拍兜底不抢先误杀
-// 慢出现的合法轮）；silentTimeout 缺席（生产 config 默认 null）时本兜底是唯一
-// 上界，绝不无限等待。
+// 无进展兜底阈值：**已有产出后**连续 8 拍轮询无新 part → done(failed,
+// "turn stalled")（真停滞的有界收口）。零 part 阶段（本轮基线后尚无任何产出）
+// 本门**不生效**——GLM-5.3 high reasoning 首 part 延迟实测 >8s（2026-10-01
+// delta 认证 scorecard drill，run_20261001195259045cle1ft 转录在案），8 拍门会
+// 把正常思考中的轮次误杀成 turn stalled（kimiWeb R9 F3 同族分工；缺席分支按
+// 本轮实证收紧为下方思考预算）。
 const NO_PROGRESS_POLL_LIMIT = 8;
+
+// 零 part 思考预算（silentTimeout 缺席时的兜底上界）：连续 120 拍
+// （NO_PROGRESS_POLL_LIMIT × 15）无任何 part → done(failed)。取值依据：GLM-5.3
+// high reasoning 首 part 延迟实测 >8s（run_20261001195259045cle1ft），8 拍门在
+// drill 轮询节奏下恰被该延迟击穿；×15（120 拍）相对实测首延迟留足一个数量级
+// 余量（慢思考/上游排队），仍保底有界——绝不无限等待。silentTimeout 在场时本
+// 预算不参与（零 part 等待只以 silentTimeout 为界）。
+const ZERO_PART_POLL_LIMIT = NO_PROGRESS_POLL_LIMIT * 15;
 
 // 请求级超时：session/create 涉及 storage 装载（live 探针曾给 60s），其余 30s。
 const CREATE_TIMEOUT_MS = 60_000;
@@ -736,7 +747,7 @@ export class ZcodeBackend {
       backendSessionId: sessionId,
       redact: (value) => redactor.redact(value),
       // 事件流工厂：RunManager 传 signal（abort 静默退出——终态判定不依赖它，
-      // 有界性由 8 拍无进展兜底 + silentTimeout 家族保证）、pollInterval/
+      // 有界性由无进展兜底 + silentTimeout/零 part 思考预算家族保证）、pollInterval/
       // silentTimeout 控制轮询、correctable run 另传 onPollTick（zcode 不支持在途
       // 纠偏，生产不传；透传保持 provider 中立签名）。
       events: (signal, opts = {}) => this._streamEvents({
@@ -768,9 +779,11 @@ export class ZcodeBackend {
    *   - stop → 发射 user echo + assistant text（发射前非空复检——N1 教训）+
    *     usage→metrics + done(completed)；error → done(failed)（固定文案——该
    *     part 未实证携带错误明细，不虚构）。
-   *   - 无进展兜底：连续 8 拍无新 part → done(failed, "turn stalled")；从未见过
-   *     新 part 且 silentTimeout 在场时，静默等待只以 silentTimeout 为界（kimiWeb
-   *     R9 F3 同款分工）。
+   *   - 无进展兜底（分相）：已有产出后连续 8 拍无新 part → done(failed,
+   *     "turn stalled")；零 part 阶段 8 拍门不生效——silentTimeout 在场只以它
+   *     为界，缺席以 ZERO_PART_POLL_LIMIT 思考预算有界（GLM-5.3 high reasoning
+   *     首 part 延迟实测 >8s，8 拍曾把思考中的轮次误杀——scorecard drill
+   *     run_20261001195259045cle1ft；kimiWeb R9 F3 同族）。
    *   - 轮询失败（请求超时/传输关闭/进程死/致命协议错误）→ done(failed)（stdio
    *     无 HTTP 重试面：通信失败 = 进程死）。
    */
@@ -861,15 +874,27 @@ export class ZcodeBackend {
           );
           return;
         }
-        // 无进展/静默兜底：从未见过新 part 且 silentTimeout 在场 → 只以
-        // silentTimeout 为界（慢出现的合法轮不被 8 拍误杀）；其余形状 8 拍收口。
-        const stalled = noProgressPolls >= NO_PROGRESS_POLL_LIMIT
-          && (anyNewPart || !silentTimeout);
+        // 无进展/静默兜底（kimiWeb R9 F3 同族；缺席分支按本轮实证收紧）：
+        //   - 零 part 阶段（anyNewPart=false：本轮基线后尚无任何产出）——8 拍门
+        //     **不得**生效（GLM-5.3 high reasoning 首 part 延迟实测 >8s，
+        //     scorecard drill run_20261001195259045cle1ft 转录在案）：silentTimeout
+        //     在场 → 只以 silentTimeout 为界；缺席 → 宽松思考预算
+        //     ZERO_PART_POLL_LIMIT 拍有界，绝不无限等待。
+        //   - 已有产出后的停滞（anyNewPart=true）——8 拍门照旧，真停滞有界收口。
+        const stalled = anyNewPart && noProgressPolls >= NO_PROGRESS_POLL_LIMIT;
         if (!anyNewPart && silentTimeout && (Date.now() - sentAt) > silentTimeout) {
           finish();
           yield doneEvent(
             "failed",
             `silent timeout: no turn parts observed within ${silentTimeout}ms (provider may have silently rejected)`,
+          );
+          return;
+        }
+        if (!anyNewPart && !silentTimeout && noProgressPolls >= ZERO_PART_POLL_LIMIT) {
+          finish();
+          yield doneEvent(
+            "failed",
+            `zcode thinking budget exceeded (no turn parts observed for ${ZERO_PART_POLL_LIMIT} consecutive polls, silentTimeout absent — bounded exit)`,
           );
           return;
         }

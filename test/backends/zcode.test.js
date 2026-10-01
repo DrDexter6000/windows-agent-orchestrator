@@ -10,7 +10,8 @@
 // 覆盖：信封（无 jsonrpc）、server→client 请求应答器（逐方法 schema 合法拒绝
 // ——第三轮 auditor #5）、create→setModel→send 请求形状、模型 ref 拆分、完成判定
 // （step-finish stop/error）+ 历史含 stop 的 resume 反例（auditor 完成判据反例）、
-// stalled 兜底、发射前非空复检（N1）、usage→metrics（cacheReadTokens/
+// stalled 兜底（分相：已有产出后 8 拍 / 零 part 思考预算——GLM-5.3 首 part 延迟
+// 实证反例组 ⑥c-⑥e，run_20261001195259045cle1ft）、发射前非空复检（N1）、usage→metrics（cacheReadTokens/
 // cacheCreationTokens 上游字段名——auditor #2）、abort（幂等/诚实措辞/传输已关
 // 不抛——auditor #4）、resume 轮（先 session/resume 装载再 setModel——auditor #1，
 // fake 对端有状态）、真杀隔离守卫（全部构造注入 killFn——auditor #3）、policy
@@ -570,13 +571,80 @@ test("zcode ⑥: 连续 8 拍无新 part → done(failed, turn stalled)", async 
 });
 
 test("zcode ⑥b: silentTimeout 在场且零新 part → 只以 silentTimeout 为界（8 拍兜底不抢先）", async () => {
-  const { handle, child } = await runScenario({
+  const { handle, child, peer } = await runScenario({
     peerOptions: { messages: () => [] },
   });
-  const events = await collect(handle, { pollInterval: 5, silentTimeout: 120 });
+  // 补强（2026-10-01 零 part 分相修复）：silentTimeout 放宽到 500ms，实证收口前
+  // 已远超 8 拍——无进展门在零 part 阶段不生效。
+  const events = await collect(handle, { pollInterval: 5, silentTimeout: 500 });
   const done = events.at(-1);
   assert.equal(done.reason, "failed");
   assert.match(done.error, /silent timeout/, "无 turn 等待的上界是 silentTimeout，不是 8 拍");
+  assert.ok(peer.polls() > 8, `收口前已过 8 拍（实际 ${peer.polls()} 拍）——8 拍门零 part 阶段不抢先`);
+  child.kill();
+});
+
+// ===== ⑥c-⑥e 零 part 分相反例组（2026-10-01 实证：GLM-5.3 high reasoning 首
+// part 延迟 >8s——delta 认证 scorecard drill run_20261001195259045cle1ft 转录在
+// 案；旧形状 8 拍门把正常思考中的轮次杀成 turn stalled）。拍号约定：fake 对端的
+// n=1 是 spawn 期基线快照，事件拍从 n=2 起。 =====
+
+// 反例①：前 11 个事件拍零 part，首 part 第 12 拍才出现（无 silentTimeout）→
+// 不被杀、正常完成。
+test("zcode ⑥c: 反例①——首 part 第 12 拍才出现（前 11 拍零 part，无 silentTimeout）→ 不被 8 拍门误杀、正常完成", async () => {
+  const { handle, child, peer } = await runScenario({
+    peerOptions: {
+      messages: (n) => (n <= 12 ? [] : [userMsg("do the task"), assistantMsg("answer")]),
+    },
+  });
+  const events = await collect(handle, { pollInterval: 2 });
+  const done = events.at(-1);
+  assert.equal(done.kind, "done");
+  assert.equal(done.reason, "completed", "第 12 拍才出首 part 的思考轮正常完成（8 拍门在零 part 阶段不生效）");
+  assert.ok(!JSON.stringify(events).includes("turn stalled"), "绝不 turn stalled");
+  assert.ok(!JSON.stringify(events).includes("thinking budget"), "远未触及思考预算");
+  const assistant = events.filter((e) => e.kind === "message" && e.role === "assistant");
+  assert.equal(assistant.length, 1);
+  assert.equal(assistant[0].parts[0].text, "answer", "正常走完整发射序列");
+  // 恰 13 次轮询（基线 + 12 事件拍）——确定性拍号核对。
+  assert.equal(peer.polls(), 13);
+  child.kill();
+});
+
+// 反例②：已有产出后停滞 8 拍 → 仍 done(failed, "turn stalled")；silentTimeout
+// 在场也不豁免——宽松只保护零 part 阶段，不保护已有产出后的真停滞。
+test("zcode ⑥d: 反例②——有 part 后停滞 8 拍 → 仍 failed（silentTimeout 在场也不豁免 8 拍门）", async () => {
+  // 第 2 事件拍出现 user 回显（anyNewPart=true），此后恒不变；silentTimeout 给足
+  // 60s（绝不触发）。
+  const { handle, child, peer } = await runScenario({
+    peerOptions: { messages: (n) => (n <= 2 ? [] : [userMsg("do the task")]) },
+  });
+  const events = await collect(handle, { pollInterval: 2, silentTimeout: 60_000 });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /turn stalled/, "已有产出后的真停滞仍由 8 拍门有界收口");
+  assert.ok(!JSON.stringify(events).includes("silent timeout"), "silentTimeout 不豁免已有产出后的 8 拍门");
+  // 确定性拍号：基线 + 第 2 拍仍零 part + 第 3 拍回显（进展）+ 8 个无进展拍
+  // （n=4..11）→ 第 11 拍收口。
+  assert.equal(peer.polls(), 11);
+  child.kill();
+});
+
+// 反例③的在场分支见 ⑥b（补强）；此处钉思考预算本身的界：silentTimeout 缺席、
+// 零 part 恒持续 → 120 拍（= NO_PROGRESS_POLL_LIMIT×15）有界收口——绝不无限
+// 等待、也绝不在 8 拍抢先。
+test("zcode ⑥e: 思考预算收口——零 part 恒持续 + silentTimeout 缺席 → 120 拍 bounded fail（非 8 拍）", async () => {
+  const { handle, child, peer } = await runScenario({
+    peerOptions: { messages: () => [] },
+  });
+  const events = await collect(handle, { pollInterval: 1 });
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /thinking budget exceeded/);
+  assert.match(done.error, /for 120 consecutive polls/, "预算值 = NO_PROGRESS_POLL_LIMIT×15 = 120（改动须有意识更新本钉）");
+  assert.match(done.error, /silentTimeout absent/);
+  // 恰 121 次轮询（基线 + 120 事件拍）——既非 8 拍抢先、也非无限等待。
+  assert.equal(peer.polls(), 121);
   child.kill();
 });
 
@@ -832,7 +900,10 @@ test("zcode ⑨c: 反例——历史尾部 step-finish(stop) + 新轮无新 part
   const done = events.at(-1);
   assert.equal(done.kind, "done");
   assert.equal(done.reason, "failed", "绝不 completed——历史 stop 不是本轮完成信号");
-  assert.match(done.error, /turn stalled|silent timeout/, "由无进展/静默兜底有界收口");
+  // 零 part 分相修复（2026-10-01）后，本形状（无 silentTimeout、恒零 new part）
+  // 由零 part 思考预算有界收口——不再是 8 拍 stalled（GLM-5.3 首 part 延迟实证
+  // run_20261001195259045cle1ft）；不变量不变：绝不 completed、零消息发射。
+  assert.match(done.error, /thinking budget exceeded/, "由零 part 思考预算有界收口（8 拍门不在零 part 阶段生效）");
   assert.equal(
     events.filter((e) => e.kind === "message").length, 0,
     "零消息发射——历史 old answer 绝不被当作本轮 assistant 产出",
