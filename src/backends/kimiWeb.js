@@ -392,6 +392,10 @@ export class KimiWebBackend {
         body: JSON.stringify({
           content: [{ type: "text", text }],
           model: agent.model.id,
+          // 上游默认 permission="manual"：工具调用需人工审批，WAO worker 无人审批，
+          // 要写文件/跑命令的 turn 会永久挂起——恒发 "auto"（枚举闭集 manual|yolo|auto），
+          // 与其它 worker 席位 --dangerously-skip-permissions 的姿态对齐。证据：2026-10-01 coder_mm delta 认证 scorecard 失败（turn stalled 8 拍，runs/reliability 日志）。
+          permission_mode: "auto",
         }),
       },
     );

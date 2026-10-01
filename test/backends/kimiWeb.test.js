@@ -271,6 +271,7 @@ test("kimi-web ②: spawn fresh 轮——POST /sessions → GET detail（F3 静�
   assert.deepEqual(JSON.parse(calls[3].body), {
     content: [{ type: "text", text: "Read README only." }],
     model: "kimi-code/k3",
+    permission_mode: "auto",
   });
 
   for (const call of calls) {
@@ -329,6 +330,7 @@ test("kimi-web ③: resume 轮不 POST /sessions——GET detail（F3 静默门�
   assert.deepEqual(JSON.parse(calls[2].body), {
     content: [{ type: "text", text: "continue" }],
     model: "kimi-code/k3",
+    permission_mode: "auto",
   });
 });
 
