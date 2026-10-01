@@ -83,10 +83,13 @@
 // **不拦此分支**（完成判据先于兜底检查、当拍即发射）。此为已知算法限制，按
 // B′ 声明为残余而非阻断；翻转条件 = 上游提供轮次身份原语（turn/message id）
 // 或事件订阅（session/subscribe）后，按身份而非序号切片重写判据。判据不命中
-// 的纯错位形状由无进展兜底（**已有产出后**连续 8 拍无新 part → done(failed,
-// "turn stalled")）有界收口；零 part 阶段（正常思考中——GLM-5.3 high reasoning
-// 首 part 延迟实测 >8s，run_20261001195259045cle1ft）8 拍门不生效，改由
-// silentTimeout（在场）或零 part 思考预算（缺席，120 拍）有界收口。通信失败 =
+// 的纯错位形状由无进展兜底（**已有产出后**连续 60 拍无新 part → done(failed,
+// "turn stalled")；60 = 60s @ 1s 轮询——GLM-5.3 步间静默实测 8-14s ×4 余量，
+// 首轮 8 拍门被步间 reasoning 误杀，第二轮 live 诊断 run_20261001203009794bb6add
+// 在案，取值依据见 NO_PROGRESS_POLL_LIMIT 注释）有界收口；零 part 阶段（正常
+// 思考中——GLM-5.3 high reasoning 首 part 延迟实测 >8s，
+// run_20261001195259045cle1ft）该门不生效，改由 silentTimeout（在场）或零 part
+// 思考预算（缺席，120 拍）有界收口。通信失败 =
 // 进程死 = done(failed)（stdio 无 HTTP 重试面；请求超时/传输关闭同路径）。
 //
 // assistant 文本切片的诚实边界：上游消息表未实证携带 role 标注（live 事实只有
@@ -115,21 +118,36 @@ const BACKEND_NAME = "zcode";
 // prompt 级角色合同通道的 backend 用同一分隔形状，避免两套事实并存。
 export const ZCODE_ROLE_TASK_SEPARATOR = "\n\n---\n\n";
 
-// 无进展兜底阈值：**已有产出后**连续 8 拍轮询无新 part → done(failed,
+// 无进展兜底阈值：**已有产出后**连续 60 拍轮询无新 part → done(failed,
 // "turn stalled")（真停滞的有界收口）。零 part 阶段（本轮基线后尚无任何产出）
-// 本门**不生效**——GLM-5.3 high reasoning 首 part 延迟实测 >8s（2026-10-01
-// delta 认证 scorecard drill，run_20261001195259045cle1ft 转录在案），8 拍门会
-// 把正常思考中的轮次误杀成 turn stalled（kimiWeb R9 F3 同族分工；缺席分支按
-// 本轮实证收紧为下方思考预算）。
-const NO_PROGRESS_POLL_LIMIT = 8;
+// 本门**不生效**——分相纪律 kimiWeb R9 F3 同族，缺席分支由下方思考预算收口。
+//
+// 60 的取值依据（2026-10-01 第二轮 live 诊断，探针 zcode-live-diag*.cjs @
+// %TEMP%\wao-probe-20260930 只读参照）：GLM-5.3 high reasoning 工具任务的 part
+// 时间线（1s 轮询实测）t=1s text echo → t=4s step-start → t=4s~18s 无任何新
+// part（模型步间 reasoning）→ t=18s step-finish——步间静默实测 8-14s；且
+// reasoning 进展可能不逐拍暴露（上游或整步一次刷出：同日诊断实测 t=8s→t=10s
+// 一跳 5 parts），「拍间无新 part」不等于「模型死了」。首轮的 8 拍门（8s）恰被
+// 实测步间延迟击穿：delta drill run_20261001203009794bb6add 在 session.created
+// 后 20s 报 "turn stalled (8 consecutive polls)"（echo+step-start 两拍产出后
+// 静默 8 拍即误杀）。60 拍 = 实测最坏 14s × 4 余量 ≈ 56s → 取整 60s；轮次真死
+// （上游不发 step-finish 且 60s 无变化）仍由本门有界收口。
+//
+// 否决的两段式（步内 30 拍 + 总 120 拍）：「总静默预算」按静默拍累计——长工具
+// 任务的多个正常步间 reasoning 会累计击穿（如 10 步 × 12s ≈ 120s 即误杀），
+// 「总时长预算」则会杀掉带持续产出的长轮——单一「单次静默间隙」门不引入这两类
+// 新误杀面，语义最诚实（真死轮的恢复延迟 60s 可接受：与零 part 预算同数量级）。
+const NO_PROGRESS_POLL_LIMIT = 60;
 
-// 零 part 思考预算（silentTimeout 缺席时的兜底上界）：连续 120 拍
-// （NO_PROGRESS_POLL_LIMIT × 15）无任何 part → done(failed)。取值依据：GLM-5.3
-// high reasoning 首 part 延迟实测 >8s（run_20261001195259045cle1ft），8 拍门在
-// drill 轮询节奏下恰被该延迟击穿；×15（120 拍）相对实测首延迟留足一个数量级
-// 余量（慢思考/上游排队），仍保底有界——绝不无限等待。silentTimeout 在场时本
-// 预算不参与（零 part 等待只以 silentTimeout 为界）。
-const ZERO_PART_POLL_LIMIT = NO_PROGRESS_POLL_LIMIT * 15;
+// 零 part 思考预算（silentTimeout 缺席时的兜底上界）：连续 120 拍无任何 part →
+// done(failed)。取值沿用上轮裁定（首轮 live 证据 run_20261001195259045cle1ft：
+// GLM-5.3 high reasoning 首 part 延迟 >8s；当时按 NO_PROGRESS_POLL_LIMIT × 15
+// 推导得 120）。本轮停滞门提到 60 后两预算**显式解耦**（再按 ×15 推导会得 900，
+// 非本意）：两者语义本就不同——零 part = 首产出前的冷启动/深思考/上游排队（更
+// 不确定 → 120 拍 + silentTimeout 优先），已有产出后 = 管道已证活、只剩步间间隙
+// （实测 8-14s → 60 拍已 4 倍余量）。仍保底有界——绝不无限等待。silentTimeout
+// 在场时本预算不参与（零 part 等待只以 silentTimeout 为界）。
+const ZERO_PART_POLL_LIMIT = 120;
 
 // 请求级超时：session/create 涉及 storage 装载（live 探针曾给 60s），其余 30s。
 const CREATE_TIMEOUT_MS = 60_000;
@@ -779,11 +797,12 @@ export class ZcodeBackend {
    *   - stop → 发射 user echo + assistant text（发射前非空复检——N1 教训）+
    *     usage→metrics + done(completed)；error → done(failed)（固定文案——该
    *     part 未实证携带错误明细，不虚构）。
-   *   - 无进展兜底（分相）：已有产出后连续 8 拍无新 part → done(failed,
-   *     "turn stalled")；零 part 阶段 8 拍门不生效——silentTimeout 在场只以它
-   *     为界，缺席以 ZERO_PART_POLL_LIMIT 思考预算有界（GLM-5.3 high reasoning
-   *     首 part 延迟实测 >8s，8 拍曾把思考中的轮次误杀——scorecard drill
-   *     run_20261001195259045cle1ft；kimiWeb R9 F3 同族）。
+   *   - 无进展兜底（分相）：已有产出后连续 60 拍无新 part → done(failed,
+   *     "turn stalled")（GLM-5.3 步间静默实测 8-14s，首轮 8 拍门曾把步间
+   *     reasoning 误杀——run_20261001203009794bb6add）；零 part 阶段该门不
+   *     生效——silentTimeout 在场只以它为界，缺席以 ZERO_PART_POLL_LIMIT
+   *     思考预算（120 拍）有界（首 part 延迟实证 run_20261001195259045cle1ft；
+   *     kimiWeb R9 F3 同族）。
    *   - 轮询失败（请求超时/传输关闭/进程死/致命协议错误）→ done(failed)（stdio
    *     无 HTTP 重试面：通信失败 = 进程死）。
    */
@@ -874,13 +893,16 @@ export class ZcodeBackend {
           );
           return;
         }
-        // 无进展/静默兜底（kimiWeb R9 F3 同族；缺席分支按本轮实证收紧）：
-        //   - 零 part 阶段（anyNewPart=false：本轮基线后尚无任何产出）——8 拍门
+        // 无进展/静默兜底（kimiWeb R9 F3 同族分相；两相宽松度各按 live 实证分账）：
+        //   - 零 part 阶段（anyNewPart=false：本轮基线后尚无任何产出）——停滞门
         //     **不得**生效（GLM-5.3 high reasoning 首 part 延迟实测 >8s，
         //     scorecard drill run_20261001195259045cle1ft 转录在案）：silentTimeout
         //     在场 → 只以 silentTimeout 为界；缺席 → 宽松思考预算
         //     ZERO_PART_POLL_LIMIT 拍有界，绝不无限等待。
-        //   - 已有产出后的停滞（anyNewPart=true）——8 拍门照旧，真停滞有界收口。
+        //   - 已有产出后的停滞（anyNewPart=true）——NO_PROGRESS_POLL_LIMIT 拍门
+        //     （60 拍：步间 reasoning 实测 8-14s，上游 part 或整步刷出不逐拍暴露，
+        //     8 拍门曾误杀——run_20261001203009794bb6add；取值依据见常量注释），
+        //     真停滞仍收口。
         const stalled = anyNewPart && noProgressPolls >= NO_PROGRESS_POLL_LIMIT;
         if (!anyNewPart && silentTimeout && (Date.now() - sentAt) > silentTimeout) {
           finish();
