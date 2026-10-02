@@ -20,6 +20,10 @@
 //   → 持久写组记录（.wao/runs/consults/<consultId>.json，席位-runId 映射
 //   = 意见-决策回链锚点）。
 //
+// 只读重渲染 rerenderConsultFromRecord({...deps})（M13-r2）：
+//   从组记录回读各席位 transcript 重建同形结果对象（CLI consult show 与 MCP
+//   run_consult 读取模式共用）——零派发（不持有 dispatch 通道）。
+//
 // 三条不变式（0039 §2.2，红绿测试钉住于 test/run-lifecycle/consult.test.js）：
 //   ① 零信息损失——attributeReply 输出的 preamble+ordered+unclassified 三块
 //     按序拼接逐字节等于输入文本；只分组、不摘要、不截断、不重排隐藏。
@@ -362,6 +366,10 @@ export async function runConsult({
   declaredFields,
   reviewedRunId,
   budgetMs = CONSULT_WAIT_DEFAULT_MS,
+  // M13-r2：预算下限按调用面注入——CLI/r1 保持 run_wait 域（180000），MCP
+  // run_consult 的 waitMs 闭集是 0..600000（0=扇出后立即取当下观察快照），注入 0。
+  // 上限恒为 CONSULT_WAIT_MAX_MS，不可注入。
+  budgetFloorMs = CONSULT_WAIT_MIN_MS,
   registryPath,
   runDir,
   consultsDir,
@@ -397,8 +405,8 @@ export async function runConsult({
   if (!consultsDir || typeof consultsDir !== "string") {
     throw new Error("runConsult: consultsDir is required");
   }
-  if (!Number.isInteger(budgetMs) || budgetMs < CONSULT_WAIT_MIN_MS || budgetMs > CONSULT_WAIT_MAX_MS) {
-    throw new Error(`budgetMs must be an integer in [${CONSULT_WAIT_MIN_MS}, ${CONSULT_WAIT_MAX_MS}] (run_wait range), got: ${JSON.stringify(budgetMs)}`);
+  if (!Number.isInteger(budgetMs) || budgetMs < budgetFloorMs || budgetMs > CONSULT_WAIT_MAX_MS) {
+    throw new Error(`budgetMs must be an integer in [${budgetFloorMs}, ${CONSULT_WAIT_MAX_MS}], got: ${JSON.stringify(budgetMs)}`);
   }
 
   const startNow = nowFn();
@@ -406,7 +414,9 @@ export async function runConsult({
   const resolvedRunDir = resolve(runDir);
   const resolvedConsultsDir = resolve(consultsDir);
 
-  // brief 共享内核：逐字节原文（每席 prompt 的公共前段）。
+  // brief 共享内核：逐字节原文（每席 prompt 的公共前段）。briefText 注入优先
+  // （r1 契约，FLOW-3 钉住）；"内联 vs 文件二选一"由各调用面结构性保证——CLI
+  // 只传 briefPath，MCP run_consult 只传 briefText（其输入无文件参数，M13-r2）。
   let text = briefText;
   if (text === undefined || text === null) {
     if (!briefPath || typeof briefPath !== "string") {
@@ -623,4 +633,100 @@ export async function loadConsultRecord({ consultId, consultsDir, readFileFn = r
     throw new Error("consult record malformed: consultId mismatch");
   }
   return record;
+}
+
+/**
+ * 从组记录只读重渲染 council-diff 结果对象（M13-r2：CLI `consult show` 与 MCP
+ * `run_consult` 读取模式共用同一实现——同形输出、零漂移；代码自 CLI 适配层
+ * 原样上移，CLI 字节面不变）。
+ *
+ * 重渲染语义：经组记录的席位-runId 映射回读各 transcript，重新归组/比对；
+ * runState/formatState 按当前 transcript 真值重导出（show 是当下观察）；组
+ * 记录中的历史观察值保留在返回的 record 字段里。零派发——本函数不持有任何
+ * dispatch 通道（MCP 读取模式不变式的实现基础）。
+ *
+ * @param {object} input
+ * @param {object} input.record loadConsultRecord 输出
+ * @param {string} input.runDir
+ * @param {string} input.consultsDir（recordPath 回显用）
+ * @param {Function} [input.readTranscriptFn]
+ * @param {object} [input.env] 脱敏 env
+ * @returns {Promise<object>} 与 runConsult 结果同形的结果对象（无 console 副作用）
+ */
+export async function rerenderConsultFromRecord({
+  record,
+  runDir,
+  consultsDir,
+  readTranscriptFn = readTranscript,
+  env = process.env,
+}) {
+  const seatResults = [];
+  const perSeatAttribution = {};
+  for (const seat of record.seats ?? []) {
+    let observation = null;
+    if (seat.runId) {
+      try {
+        observation = await observeSeatRun({ runId: seat.runId, runDir, readTranscriptFn, env });
+      } catch {
+        observation = null;
+      }
+    }
+    const runState = observation ? observation.runState : (seat.runId ? "missing" : seat.runState);
+    const attribution = observation
+      ? attributeReply(observation.finalText)
+      : { ordered: [], unclassified: "", preamble: "" };
+    perSeatAttribution[seat.agentId] = attribution;
+    const { formatState } = deriveSeatStates({ runState, questions: record.questions ?? [], attribution });
+    seatResults.push({
+      agentId: seat.agentId,
+      runId: seat.runId,
+      runState,
+      formatState,
+      backend: seat.backend ?? null,
+      provider: seat.provider ?? null,
+      ...(seat.perspectiveSnippet ? { perspectiveSnippet: seat.perspectiveSnippet } : {}),
+      budgetExpired: observation ? !observation.terminal : true,
+      attribution,
+      ...(observation ? { finalText: observation.finalText } : {}),
+    });
+  }
+  const { fieldDiff, fieldValues } = compareFields(perSeatAttribution, record.declaredFields);
+
+  // 非作者砖：与 runConsult 同一读法（被审 run transcript 的 canonical agentId）。
+  let authorInSeats = null;
+  let reviewedAgentId = null;
+  if (record.reviewedRunId) {
+    try {
+      const events = await readTranscriptFn(join(runDir, `${record.reviewedRunId}.jsonl`));
+      reviewedAgentId = extractCanonicalAgentId(events, record.reviewedRunId);
+      authorInSeats = reviewedAgentId !== "unknown"
+        && (record.seats ?? []).some((s) => s.agentId === reviewedAgentId);
+    } catch {
+      authorInSeats = null;
+    }
+  }
+
+  return {
+    consultId: record.consultId,
+    recordPath: join(consultsDir, `${record.consultId}.json`),
+    record,
+    questions: record.questions ?? [],
+    brief: record.brief,
+    budgetMs: record.budgetMs,
+    elapsedMs: record.elapsedMs ?? null,
+    seats: seatResults,
+    fieldDiff,
+    fieldValues,
+    bricks: {
+      runtimeFacts: (record.seats ?? []).map((s) => ({
+        agentId: s.agentId,
+        backend: s.backend ?? null,
+        provider: s.provider ?? null,
+      })),
+      authorInSeats,
+      reviewedAgentId,
+      ...(record.reviewedRunId ? { reviewedRunId: record.reviewedRunId } : {}),
+      sessionIndependence: "未提供",
+    },
+  };
 }

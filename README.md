@@ -76,11 +76,15 @@ accept/reject decision recording (it records the Lead's decision; it does not ac
 reject for the Lead); workers receive only a bounded task prompt and stay out of
 orchestration.
 
-WAO exposes **22 MCP tools** covering the supervised Lead loop:
+WAO exposes **23 MCP tools** covering the supervised Lead loop:
 
 > `inventory → workspace_status → dispatch → await result → delivery query/review → Lead decision`
 
-plus `runs_list` recovery. The playbook catalog is read on demand via MCP resources
+plus `runs_list` recovery. `run_consult` (CLI `wao consult`, a.k.a. the **Agent Union**)
+convenes bounded multi-seat, cross-family consultations: mechanical fan-out, verbatim
+collection, and a council-diff view that places each seat's full original answer side
+by side — advice is recorded, never auto-synthesized; the Lead reads the divergence and
+decides. The playbook catalog is read on demand via MCP resources
 (`wao://playbooks`), not tools. Every state-changing operation calls the same shared
 application service as the CLI fallback, producing identical transcript durable facts.
 See [`SKILL.md`](SKILL.md) for the tool table and routing contract.
@@ -93,7 +97,7 @@ observation; safe changed-path projection, exact delivery proof, and bounded/red
 diff review; advisory `candidateInventory` recovery for retained `disallowed_path`
 failures plus Lead-authorized, model-free `run_delivery_repackage` (re-check and re-verify
 the original worktree, base, and verification declaration without calling the worker
-model again); `run_continue` correction lineages; the 22-tool frozen MCP surface; and
+model again); `run_continue` correction lineages; the 23-tool frozen MCP surface; and
 per-command execution budgets.
 
 Certification is advisory evidence about a worker's recorded reliability, not a dispatch
@@ -167,7 +171,7 @@ is set); see AGENT_ONBOARDING.md §3.
 | You want to… | Read this |
 |---|---|
 | **Start from zero — install, one worker, validate, MCP host, first canary** | [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md) — the single new-user setup path |
-| **Use the orchestrator as an agent / from a script** (22 MCP tools, commands, workflows, config) | [`SKILL.md`](SKILL.md) — the agent-facing usage manual + tool table |
+| **Use the orchestrator as an agent / from a script** (23 MCP tools, commands, workflows, config) | [`SKILL.md`](SKILL.md) — the agent-facing usage manual + tool table |
 | **Deploy / configure / operate it as a human** | [`docs/usage.md`](docs/usage.md) — full deployment + usage guide |
 | **Look up a tool parameter or CLI flag** | [`docs/surface/`](docs/surface/) — generated reference (regen: `npm run gen:surface`); repo index: [`llms.txt`](llms.txt) |
 | **Compare backend capabilities / understand certification** | [`docs/surface/certification.md`](docs/surface/certification.md) (generated) + [`docs/certification-runbook.md`](docs/certification-runbook.md) |
@@ -211,7 +215,7 @@ npm run cli -- workflow run <file.mjs> [--vars k=v]
 ```
 
 Full command reference: `npm run cli -- help`, or [`SKILL.md`](SKILL.md) for the
-22-tool MCP table and routing contract.
+23-tool MCP table and routing contract.
 
 ## Testing
 

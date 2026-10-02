@@ -65,6 +65,7 @@
       "run-lifecycle/m12-16-runCorrection.test.js",
       "mcp-surface/mcpPlaybook.test.js",
       "mcp-surface/mcpRunCollect.test.js",
+      "mcp-surface/mcpRunConsult.test.js",
       "mcp-surface/mcpRunContinue.test.js",
       "mcp-surface/mcpRunCorrection.test.js",
       "delivery/mcpRunDelivery.test.js",

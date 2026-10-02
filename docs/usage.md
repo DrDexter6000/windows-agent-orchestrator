@@ -926,6 +926,19 @@ workspace-bound：父 run 必须属于当前绑定 workspace，否则 `workspace
 
 runner 以 requested → claimed → delivered/delivery_failed 的 durable 事件链串行处理；`run_activity` 只暴露安全的 correction 生命周期状态，不返回纠正正文。WAO 不判断纠正内容是否合理，也不会据此扩大 `allowedPaths`、改 verification、自动停止或接受交付；这些语义和最终决策仍完全属于 Lead。
 
+### MCP `run_consult`（多席只读会审，M13-r2 / 决定 0039）
+
+`run_consult` 把"召集多席只读咨询"产品化为一个动作：**机械扇出 + 收集 + council-diff 并列呈现**——不做语义合成、不自动重发、零截断（0039 契约 v0.2 三不变式不放松）。单工具双模式：
+
+- **创建模式** `{brief, seats, perspectives?, fields?, reviewedRunId?, waitMs?}`：`brief` 是**内联文本**（编号问题 Q1..Qn + 输出格式契约）——MCP 面不接受文件路径（与 `run_dispatch` 的 prompt 同纪律）；`perspectives` 同理内联（每席 `{agentId, text}`，0039：只写"答题姿势"，禁止列期望结论）。扇出走 `src/application/consultService.js` 现有逻辑：每席一个 **readOnly 子 run**（席位 prompt = brief 逐字节 + 该席视角尾巴）。服务端有界等待 `waitMs`：**闭集 0..600000，默认 270000**——`0` 合法（扇出后立即取当下观察快照）；到期 = **观察截止**（席位照跑、状态如实 running、`budgetExpired:true`），永不杀进程、永不重发（同 `run_wait`/`run_await_result` 到期语义）。返回 council-diff 快照 JSON：每席**完整原文零截断**（归组三块 preamble/ordered/unclassified 拼接逐字节等于原文）+ `consultId` + 三块砖独立性事实（registry 原始字段直读）+ 席位-runId 回链清单；`fields` 闭集声明字段（`{"Q1":["A","B"]}`）只产生"字段值不同"标记（`fieldDiff`/`fieldValues`），**永不出一致/分歧结论**。席位 malformed（纯散文）= 观察事实（`formatState:unstructured`），整段原文照常呈现、零惩罚、零重发。malformed/缺席/派发失败/到期任一混合都组装**降级视图**（部分成功），不中断其余席位。
+- **读取模式** `{consultId}`：从组记录（`.wao/runs/consults/<consultId>.json`，与 CLI 同一落点）重渲染，**零派发**——读取路径不触碰 dispatch 通道（MCP 层不变式，测试钉住）；等价 CLI `wao consult show`（同一 service 重渲染内核，runState/formatState 按当前 transcript 真值重导出）。
+
+输入闭集校验：模式互斥（`consultId` 与创建字段同给 = 固定拒绝）；`seats` 逐个 registry 存在性校验，缺席席**指名**拒绝（重复席、视角席不在 seats 同样指名拒绝）；`waitMs`/`fields` 键形状由 wire schema 拒绝。一切拒绝发生在任何派发之前（派发计数为 0）。
+
+**与 CLI 的对应关系**：`wao consult run <briefFile> --seats a,b …`（brief 走文件、`--wait-timeout` 走 run_wait 域 180000..600000 默认 600000）与创建模式同 service；`wao consult show <consultId>` 与读取模式同一重渲染内核。组记录、席位只读子 run、`council-diff` 文本渲染的进一步语义见 §场景 4d；参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。CLI/面差异只有两处：MCP 的 brief/perspectives 恒为内联文本；MCP 的 `waitMs` 闭集是 0..600000（CLI `--wait-timeout` 下限 180000）。
+
+`run_consult` 是 **advisory 动作工具**（会派出真实只读子 run 并写组记录），不是观察工具——不进 `availableDrilldowns`/`semanticNotes` 目录；扇出成功 ≠ 验收成功（0039 边界：判断权在 Lead）。
+
 ### MCP `workspace_status`（workspace binding 状态查询，M10-pre2 + M11-6）
 
 `workspace_status` 查询当前 workspace 绑定状态。`run_dispatch` 在执行前**自行重新证明** workspace，不信任此工具的先前结果。

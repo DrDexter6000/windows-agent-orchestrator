@@ -1633,12 +1633,13 @@ test("M11-2C-12: SKILL tool-count 文案不得声称 minimal loop 必须经过�
   const mandatoryAll = /full\s+minimal\s+loop\s+through\s+15|minimal\s+loop\s+必须.*全部\s*15|loop\s+must\s+(use|go through|include)\s+all\s+15/i;
   assert.ok(!mandatoryAll.test(skill),
     "SKILL tool-count 文案不得声称 minimal loop 必须经过全部工具");
-  // 必须表达：WAO 暴露 22 tools，但 minimal control loop 只用相关 control tools，
+  // 必须表达：WAO 暴露 23 tools，但 minimal control loop 只用相关 control tools，
   // playbook resources 是可选且在 dispatch loop 外。
-  assert.ok(/22 MCP tools|22 tools/i.test(skill),
-    "SKILL 声明 WAO 暴露 22 MCP tools");
-  assert.ok(!/23 MCP tools|23 tools/i.test(skill),
-    "SKILL 不得再声称 23 tools");
+  // （M13-r2 计数随真值：22→23，加 run_consult；负向探针同步 23→24。）
+  assert.ok(/23 MCP tools|23 tools/i.test(skill),
+    "SKILL 声明 WAO 暴露 23 MCP tools");
+  assert.ok(!/24 MCP tools|24 tools/i.test(skill),
+    "SKILL 不得再声称 24 tools");
   assert.ok(/optional|可选/i.test(skill) && /dispatch loop|control loop/i.test(skill),
     "SKILL 必须说明 playbook reads 可选且在 dispatch/control loop 之外");
 });
@@ -2423,13 +2424,13 @@ test("M12 closeout: roadmap marks the milestone complete and records the current
 // MCP host → read-only canary). Failure → fix the doc, not the test.
 // ============================================================
 
-test("onboarding closeout: README 是新读者入口——22-tool / M12 complete / 突出链接 AGENT_ONBOARDING.md", () => {
+test("onboarding closeout: README 是新读者入口——23-tool / M12 complete / 突出链接 AGENT_ONBOARDING.md", () => {
   const readme = read("README.md");
-  // Current tool truth (22); stale counts (18/16) gone.
-  assert.ok(/22 MCP tools|22 tools/.test(readme),
-    "README 必须声明当前 22 MCP tools");
+  // Current tool truth (23 — M13-r2 加 run_consult)；stale counts (18/16) gone.
+  assert.ok(/23 MCP tools|23 tools/.test(readme),
+    "README 必须声明当前 23 MCP tools");
   assert.ok(!/18 MCP tools|16-tool|16 MCP/.test(readme),
-    "README 不得再声称 18/16-tool（当前 22 always-registered MCP tools）");
+    "README 不得再声称 18/16-tool（当前 23 always-registered MCP tools）");
   // M12 complete, not in progress.
   assert.ok(!/M12[^\n]*\s*in progress/.test(readme),
     "README 不得再把 M12 标为 in progress（M12 已 complete）");

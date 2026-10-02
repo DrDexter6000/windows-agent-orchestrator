@@ -85,7 +85,7 @@ function makeServer({ dir, serviceResult, serviceThrow, workspaceRoot = dir }) {
 // Group 1: tool discovery + count + annotations
 // =====================================================================
 
-test("M12-1S2-M1: run_delivery_repackage registered; total tools = 22; destructive + idempotent", async () => {
+test("M12-1S2-M1: run_delivery_repackage registered; total tools = 23; destructive + idempotent", async () => {
   const dir = makeGitDir("m12s2-m1-");
   try {
     writeFileSync(join(dir, "agents.json"), JSON.stringify({ agents: { w: { backend: "claude-code", cwd: dir } } }), "utf8");
@@ -95,7 +95,7 @@ test("M12-1S2-M1: run_delivery_repackage registered; total tools = 22; destructi
       const { tools } = await client.listTools();
       const t = tools.find((x) => x.name === "run_delivery_repackage");
       assert.ok(t, "run_delivery_repackage present");
-      assert.equal(tools.length, 22, "exactly 22 tools (M12-10 moved playbook catalog to resources; M12-16 added run_correct)");
+      assert.equal(tools.length, 23, "exactly 23 tools (M12-10 moved playbook catalog to resources; M12-16 added run_correct; M13 added run_consult)");
       // Packaging moves a branch + appends transcript events: destructive, but
       // reentrant/crash-safe so idempotent in outcome.
       assert.equal(t.annotations.destructiveHint, true);

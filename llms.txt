@@ -1,6 +1,6 @@
 # WAO (Windows Agent Orchestrator)
 
-> Windows-native control plane for supervised worker dispatch through local agent runtimes: MCP-first (22 frozen tools), transcript SSOT, deterministic control plane — semantic decisions belong to the Lead agent. This file is a pure index (llms.txt convention); content lives in the linked authorities.
+> Windows-native control plane for supervised worker dispatch through local agent runtimes: MCP-first (23 frozen tools), transcript SSOT, deterministic control plane — semantic decisions belong to the Lead agent. This file is a pure index (llms.txt convention); content lives in the linked authorities.
 
 ## Start Here
 
@@ -11,7 +11,7 @@
 
 ## Reference (generated — do not hand-edit)
 
-- [docs/surface/mcp-tools.md](docs/surface/mcp-tools.md): the 22 MCP tools, parameters and shapes. Generated from tools/list by `npm run gen:surface`.
+- [docs/surface/mcp-tools.md](docs/surface/mcp-tools.md): the 23 MCP tools, parameters and shapes. Generated from tools/list by `npm run gen:surface`.
 - [docs/surface/cli.md](docs/surface/cli.md): CLI command surface. Generated from the CLI help SSOT.
 
 ## Contracts & Architecture

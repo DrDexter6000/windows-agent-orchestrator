@@ -67,11 +67,13 @@ Codex CLI、OpenCode 或任何 MCP host——以 stdio MCP server 方式驱动 W
 状态、隔离、transcript、交付验证与 Lead 接受/拒绝决策的持久记录（它记录 Lead 的决策，
 不替 Lead 决策）；worker 只收到有界的任务 prompt，不参与编排。
 
-WAO 暴露 **22 个 MCP 工具**，覆盖受监督的 Lead 闭环：
+WAO 暴露 **23 个 MCP 工具**，覆盖受监督的 Lead 闭环：
 
 > `inventory → workspace_status → dispatch → await result → delivery query/review → Lead decision`
 
-外加 `runs_list` 恢复入口。Playbook 目录按需经 MCP resources（`wao://playbooks`）读取，
+外加 `runs_list` 恢复入口。`run_consult`（CLI `wao consult`，即 **Agent Union**）召集
+有界多席跨族系咨询：机械扇出、原文收集、council-diff 把每席完整原话并列呈现——
+意见留痕、绝不自动合成，分歧由 Lead 读取裁定。Playbook 目录按需经 MCP resources（`wao://playbooks`）读取，
 不占工具面。每个改状态的操作都与 CLI fallback 调用同一共享 application service，产生
 相同的 transcript 持久事实。工具表与路由契约见 [`SKILL.md`](SKILL.md)。
 
@@ -81,7 +83,7 @@ runtime 认证；workspace 绑定的派发/恢复/停止 + `run_wait` 存活观�
 投影、exact 交付证明与有界/脱敏 diff 审查；`disallowed_path` 保留失败的 advisory
 `candidateInventory` 恢复 + Lead 授权的**不重调模型** `run_delivery_repackage`（复用原
 worktree、base 与验证声明原地重检重验，不再调用 worker 模型）；`run_continue` 修正谱系；
-22 工具冻结 MCP 面；逐命令执行预算。
+23 工具冻结 MCP 面；逐命令执行预算。
 
 认证是关于 worker 已记录可靠性的 advisory 证据，不是派发许可门。两层验证、delta 认证
 规程与上游原语复核 SOP 见 [`docs/certification-runbook.md`](docs/certification-runbook.md)；
@@ -148,7 +150,7 @@ AGENT_ONBOARDING.md §3。
 | 你想…… | 读这个 |
 |---|---|
 | **从零开始——安装、单 worker、校验、MCP host、首个 canary** | [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md)——唯一的新用户上手路径 |
-| **作为 agent / 脚本使用编排器**（22 个 MCP 工具、命令、工作流、配置） | [`SKILL.md`](SKILL.md)——面向 agent 的使用手册 + 工具表 |
+| **作为 agent / 脚本使用编排器**（23 个 MCP 工具、命令、工作流、配置） | [`SKILL.md`](SKILL.md)——面向 agent 的使用手册 + 工具表 |
 | **作为人类部署 / 配置 / 运维** | [`docs/usage.md`](docs/usage.md)——完整部署与使用指南 |
 | **查工具参数或 CLI 旗标** | [`docs/surface/`](docs/surface/)——生成参考（再生成：`npm run gen:surface`）；仓库索引：[`llms.txt`](llms.txt) |
 | **对比 backend 能力 / 理解认证** | [`docs/surface/certification.md`](docs/surface/certification.md)（生成）+ [`docs/certification-runbook.md`](docs/certification-runbook.md) |
@@ -190,7 +192,7 @@ npm run cli -- playbook list|show <id>                  # 可选的 Lead playboo
 npm run cli -- workflow run <file.mjs> [--vars k=v]
 ```
 
-完整命令参考：`npm run cli -- help`；22 工具 MCP 表与路由契约见 [`SKILL.md`](SKILL.md)。
+完整命令参考：`npm run cli -- help`；23 工具 MCP 表与路由契约见 [`SKILL.md`](SKILL.md)。
 
 ## 测试
 

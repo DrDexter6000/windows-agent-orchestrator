@@ -167,6 +167,18 @@ import {
   CONTRACT_CHECK_ISSUE_CODES,
   CONTRACT_CHECK_SECTIONS,
 } from "../application/runDispatchContract.js";
+// M13-r2 (decision 0039): multi-seat read-only council consult (Agent Union) on
+// the MCP face. The service layer owns fan-out/collect/snapshot semantics; this
+// adapter owns the dual-mode input contract (inline brief — never a file path),
+// per-seat registry existence, the 0..600000 bounded wait window, and the
+// ZERO-DISPATCH read mode. Same DI pattern as the other application services.
+import {
+  runConsult,
+  loadConsultRecord,
+  rerenderConsultFromRecord,
+  CONSULT_WAIT_MAX_MS,
+} from "../application/consultService.js";
+import { readRegistry } from "../registry.js";
 import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
 import {
   runDeliveryRepackage,
@@ -912,6 +924,154 @@ const RUN_DISPATCH_CONTRACT_CHECK_DESCRIPTION =
   "worker presence, returning a bounded closed-set result. Shares run_dispatch's input schema. " +
   "NOT a gate: contractValid never auto-blocks an independent run_dispatch; run_dispatch stays " +
   "authoritative.";
+
+// ===== run_consult (M13-r2 multi-seat read-only council consult) constants =====
+//
+// Decision 0039 contract v0.2 on the MCP face: mechanical fan-out + collect +
+// council-diff side-by-side presentation — NO semantic synthesis, no auto
+// re-dispatch, zero truncation (full per-seat original text). ONE tool, TWO
+// structurally exclusive modes (no file parameters anywhere on this face — the
+// brief/perspectives are INLINE text, same discipline as run_dispatch's prompt):
+//   create {brief, seats, perspectives?, fields?, reviewedRunId?, waitMs?}
+//     → one read-only background sub-run per seat (service-owned fan-out) →
+//       server-side bounded wait → council-diff snapshot JSON + consultId +
+//       independence facts + per-seat runId backlinks.
+//   read {consultId}
+//     → re-render the stored group record (CLI `consult show` parity) with
+//       ZERO dispatch — the read path never touches the dispatcher.
+//
+// waitMs is a CLOSED SET 0..600000, default 270000 (run_await_result-style floor
+// 0 = fan out + immediate point-in-time snapshot; run_wait's 180000 floor is a
+// CLI/r1 policy injected as the service's budgetFloorMs default, NOT this face's
+// domain). Expiry = observation cutoff ONLY: seats keep running, states stay
+// truthful (running/budgetExpired), never killed, never re-dispatched.
+const RUN_CONSULT_ERROR_TEXT = "run_consult failed";
+const RUN_CONSULT_MODE_TEXT =
+  "run_consult refused: exactly one mode — consultId (read, zero dispatch) or " +
+  "brief+seats (create); the create fields and consultId are mutually exclusive.";
+const RUN_CONSULT_WAIT_MIN_MS = 0;
+const RUN_CONSULT_WAIT_DEFAULT_MS = 270000;
+
+const RUN_CONSULT_INPUT = z.object({
+  // Read mode selector. consultId shape mirrors the service's isValidConsultId
+  // gate (regex serializes to JSON Schema — M9-2B-01).
+  consultId: z.string().min(1).max(128).regex(/^consult_[A-Za-z0-9_-]+$/).optional(),
+  // Create mode: the shared brief kernel as INLINE text (numbered questions
+  // Q1..Qn + output-format contract). Never a file path on this face.
+  brief: z.string().min(1).optional(),
+  seats: z.array(z.string().min(1).max(128)).min(1).optional(),
+  // Per-seat perspective snippets, INLINE (0039: "answering posture" only —
+  // never expected conclusions or candidate directions).
+  perspectives: z.array(
+    z.object({ agentId: z.string().min(1).max(128), text: z.string().min(1) }).strict(),
+  ).optional(),
+  // Closed-set declared field values {"Q1": ["A","B"]} — literal extraction +
+  // "field value differs" markers only; the tool never concludes.
+  fields: z.record(z.string().regex(/^Q\d+$/), z.array(z.string().min(1))).optional(),
+  reviewedRunId: z.string().min(1).optional(),
+  waitMs: z.number().int().min(RUN_CONSULT_WAIT_MIN_MS).max(CONSULT_WAIT_MAX_MS)
+    .default(RUN_CONSULT_WAIT_DEFAULT_MS),
+}).strict();
+
+// Council-diff shapes (strict mirrors of the consultService result — the SAME
+// schema parses both modes; they are the same object shape). Text fields are
+// deliberately UNBOUNDED: capping them would collapse a long per-seat original
+// text to the fixed error instead of returning it — a zero-truncation red line
+// (0039 §2.2 invariant ①). runState stays an open string: it is transcript
+// truth passed through verbatim (missing/dispatch_failed included), never
+// rewritten by this layer.
+const RUN_CONSULT_FORMAT_STATES = z.enum(["structured", "partial", "unstructured", "empty"]);
+const RUN_CONSULT_QUESTION = z.object({
+  q: z.number().int().positive(),
+  heading: z.string(),
+}).strict();
+const RUN_CONSULT_BRIEF_FACT = z.object({
+  path: z.string().nullable(),
+  sha256: z.string().length(64),
+}).strict();
+const RUN_CONSULT_ATTRIBUTION = z.object({
+  ordered: z.array(z.object({ q: z.number().int().positive(), text: z.string() }).strict()),
+  unclassified: z.string(),
+  preamble: z.string(),
+}).strict();
+const RUN_CONSULT_RECORD_SEAT = z.object({
+  agentId: z.string().min(1),
+  runId: z.string().nullable(),
+  runState: z.string(),
+  formatState: RUN_CONSULT_FORMAT_STATES,
+  backend: z.string().nullable(),
+  provider: z.string().nullable(),
+  perspectiveSnippet: z.string().optional(),
+  budgetExpired: z.literal(true).optional(),
+}).strict();
+const RUN_CONSULT_RECORD = z.object({
+  consultId: z.string().min(1),
+  createdAt: z.string().min(1),
+  brief: RUN_CONSULT_BRIEF_FACT,
+  budgetMs: z.number().int().nonnegative(),
+  elapsedMs: z.number().int().nonnegative(),
+  questions: z.array(RUN_CONSULT_QUESTION),
+  declaredFields: z.record(z.array(z.string().min(1))).optional(),
+  seats: z.array(RUN_CONSULT_RECORD_SEAT),
+  fieldDiff: z.array(z.string()),
+  reviewedRunId: z.string().min(1).optional(),
+}).strict();
+const RUN_CONSULT_OUTPUT = z.object({
+  consultId: z.string().min(1),
+  recordPath: z.string(),
+  record: RUN_CONSULT_RECORD,
+  questions: z.array(RUN_CONSULT_QUESTION),
+  brief: RUN_CONSULT_BRIEF_FACT,
+  budgetMs: z.number().int().nonnegative(),
+  // Create mode: measured elapsed; read mode: the record's historical value
+  // (null only for a hand-corrupted record without it).
+  elapsedMs: z.number().int().nonnegative().nullable(),
+  seats: z.array(z.object({
+    agentId: z.string().min(1),
+    runId: z.string().nullable(),
+    runState: z.string(),
+    formatState: RUN_CONSULT_FORMAT_STATES,
+    backend: z.string().nullable(),
+    provider: z.string().nullable(),
+    perspectiveSnippet: z.string().optional(),
+    budgetExpired: z.boolean(),
+    attribution: RUN_CONSULT_ATTRIBUTION,
+    finalText: z.string().optional(),
+    dispatchError: z.string().optional(),
+  }).strict()),
+  fieldDiff: z.array(z.string()),
+  fieldValues: z.record(z.record(z.string().nullable())),
+  bricks: z.object({
+    runtimeFacts: z.array(z.object({
+      agentId: z.string().min(1),
+      backend: z.string().nullable(),
+      provider: z.string().nullable(),
+    }).strict()),
+    authorInSeats: z.boolean().nullable(),
+    reviewedAgentId: z.string().nullable(),
+    reviewedRunId: z.string().min(1).optional(),
+    sessionIndependence: z.string(),
+  }).strict(),
+}).strict();
+
+// Consult convenes real worker sub-runs (spawned processes) and persists a group
+// record — same annotation shape as the dispatch family (run_dispatch/run_continue).
+const RUN_CONSULT_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: true,
+};
+
+const RUN_CONSULT_DESCRIPTION =
+  "Convene a multi-seat read-only council consult (Agent Union). Create mode {brief, seats}: " +
+  "brief is INLINE text (never a file path); one read-only background sub-run per seat; " +
+  "server-side bounded wait waitMs 0..600000 (default 270000; expiry = observation cutoff only " +
+  "— seats keep running with truthful states, never killed or re-dispatched); returns a " +
+  "zero-truncation council-diff snapshot (full per-seat original text) + consultId + " +
+  "independence facts + per-seat runId backlinks. Facts only: never synthesizes, merges, " +
+  "ranks, or concludes. Read mode {consultId}: re-renders the stored group record with " +
+  "ZERO dispatch.";
 
 // ===== run_continue (M12-7 Lead-authorized correction continuation) constants =====
 //
@@ -3077,6 +3237,12 @@ export function createWaoMcpServer({
   // M12-9: injectable advisory dispatch-contract precheck service. Defaults to
   // the real read-only service; threaded for transport tests.
   runDispatchContractCheckFn,
+  // M13-r2: injectable council-consult service (create mode; read mode re-renders
+  // from the group record with ZERO dispatch). consultsDir mirrors the CLI default
+  // anchor .wao/runs/consults resolved against the process cwd — exactly how the
+  // default runDir "runs" resolves — so CLI and MCP agree on the record location.
+  runConsultFn,
+  consultsDir,
   // M12-18: injectable bounded in-memory run-transcript cache. Defaults to a
   // fresh cache owned by THIS server instance. The SAME cache is shared by the
   // long-lived read-only query handlers (lead_preflight and runs_list) — never
@@ -3132,6 +3298,11 @@ export function createWaoMcpServer({
   const continueService = continueRunFn ?? continueRun;
   const correctService = correctRunFn ?? correctRun;
   const contractCheckService = runDispatchContractCheckFn ?? runDispatchContractCheck;
+  // M13-r2: council consult wiring. The service receives the server's dispatcher
+  // (the SAME injectable dispatchRunFn seam every dispatch-bearing tool uses);
+  // the READ mode below never threads it — zero dispatch is structural there.
+  const consultService = runConsultFn ?? runConsult;
+  const consultRecordsDir = consultsDir ?? ".wao/runs/consults";
 
   // M12-7: backend capability resolver for the continuation service's
   // supportsSessionReuse gate. Mirrors the backendFor in backgroundRunner.js /
@@ -3953,6 +4124,153 @@ export function createWaoMcpServer({
         return {
           isError: true,
           content: [{ type: "text", text: CONTRACT_CHECK_ERROR_TEXT }],
+        };
+      }
+    },
+  );
+
+  register(
+    "run_consult",
+    {
+      description: RUN_CONSULT_DESCRIPTION,
+      inputSchema: RUN_CONSULT_INPUT,
+      outputSchema: RUN_CONSULT_OUTPUT,
+      annotations: RUN_CONSULT_ANNOTATIONS,
+    },
+    async (input) => {
+      // M13-r2 (0039): dual-mode contract. Mode discrimination lives HERE in the
+      // handler — a top-level .refine() on the inputSchema would break its
+      // tools/list JSON-schema property serialization (M9-2B-01, same root cause
+      // as RUN_DISPATCH_INPUT). Wrong-mode input is refused with a fixed text
+      // BEFORE any service/dispatch call (counts stay 0).
+      const readMode = input.consultId !== undefined;
+      const hasCreateField = input.brief !== undefined || input.seats !== undefined
+        || input.perspectives !== undefined || input.fields !== undefined
+        || input.reviewedRunId !== undefined;
+      if (readMode && hasCreateField) {
+        return { isError: true, content: [{ type: "text", text: RUN_CONSULT_MODE_TEXT }] };
+      }
+      if (!readMode && (input.brief === undefined || input.seats === undefined)) {
+        return { isError: true, content: [{ type: "text", text: RUN_CONSULT_MODE_TEXT }] };
+      }
+
+      // ---- Read mode: re-render the stored group record. ZERO dispatch — this
+      // branch never touches consultService/dispatcher (invariant, pinned by
+      // test). CLI `consult show` parity via the SAME shared re-render kernel.
+      if (readMode) {
+        try {
+          const record = await loadConsultRecord({ consultId: input.consultId, consultsDir: consultRecordsDir });
+          const result = await rerenderConsultFromRecord({
+            record,
+            runDir,
+            consultsDir: consultRecordsDir,
+            env: process.env,
+          });
+          const parsed = RUN_CONSULT_OUTPUT.parse(result);
+          return {
+            content: [{ type: "text", text: JSON.stringify(parsed) }],
+            structuredContent: parsed,
+          };
+        } catch {
+          return {
+            isError: true,
+            content: [{ type: "text", text: RUN_CONSULT_ERROR_TEXT }],
+          };
+        }
+      }
+
+      // ---- Create mode: closed-set input checks BEFORE any dispatch. Seat ids
+      // are model-supplied bounded strings (safe to name back — they are not
+      // secrets); every refusal below leaves the dispatch count at 0.
+      const seatIds = input.seats;
+      const duplicates = [...new Set(seatIds.filter((id, i) => seatIds.indexOf(id) !== i))];
+      if (duplicates.length > 0) {
+        return {
+          isError: true,
+          content: [{
+            type: "text",
+            text: `run_consult refused: seats must be unique (duplicates: ${duplicates.join(", ")})`,
+          }],
+        };
+      }
+      if (input.perspectives !== undefined) {
+        const stray = [...new Set(
+          input.perspectives.map((p) => p.agentId).filter((id) => !seatIds.includes(id)),
+        )];
+        if (stray.length > 0) {
+          return {
+            isError: true,
+            content: [{
+              type: "text",
+              text: `run_consult refused: perspectives mention seat(s) not in seats: ${stray.join(", ")}`,
+            }],
+          };
+        }
+      }
+      // Per-seat registry existence (closed-set refusal naming the missing seats).
+      // An unreadable registry fails closed here — existence cannot be proven,
+      // so nothing is dispatched.
+      let registry;
+      try {
+        registry = await readRegistry(registryPath);
+      } catch {
+        return { isError: true, content: [{ type: "text", text: RUN_CONSULT_ERROR_TEXT }] };
+      }
+      const missing = seatIds.filter((id) => {
+        try {
+          registry.getAgent(id);
+          return false;
+        } catch {
+          return true;
+        }
+      });
+      if (missing.length > 0) {
+        return {
+          isError: true,
+          content: [{
+            type: "text",
+            text: `run_consult refused: seat(s) not in registry: ${missing.join(", ")}`,
+          }],
+        };
+      }
+
+      const perspectivesBySeat = new Map(
+        (input.perspectives ?? []).map((p) => [p.agentId, p.text]),
+      );
+      try {
+        const result = await consultService({
+          briefText: input.brief,
+          seats: seatIds.map((agentId) => ({
+            agentId,
+            ...(perspectivesBySeat.has(agentId)
+              ? { perspectiveText: perspectivesBySeat.get(agentId) }
+              : {}),
+          })),
+          ...(input.fields !== undefined ? { declaredFields: input.fields } : {}),
+          ...(input.reviewedRunId !== undefined ? { reviewedRunId: input.reviewedRunId } : {}),
+          budgetMs: input.waitMs,
+          // MCP face domain: 0..600000 (0 = fan out + immediate point-in-time
+          // snapshot). The service's own default floor (180000, run_wait domain)
+          // is the CLI/r1 policy — injected down to this face's floor here.
+          budgetFloorMs: RUN_CONSULT_WAIT_MIN_MS,
+          registryPath,
+          runDir,
+          consultsDir: consultRecordsDir,
+          env: process.env,
+          dispatchFn: dispatcher,
+        });
+        const parsed = RUN_CONSULT_OUTPUT.parse(result);
+        return {
+          content: [{ type: "text", text: JSON.stringify(parsed) }],
+          structuredContent: parsed,
+        };
+      } catch {
+        // Any service/output failure (including an oversized or malformed
+        // result object) collapses to the fixed safe text — never an
+        // unstructured error, never dynamic content.
+        return {
+          isError: true,
+          content: [{ type: "text", text: RUN_CONSULT_ERROR_TEXT }],
         };
       }
     },

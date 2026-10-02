@@ -23,12 +23,8 @@ import { parseOptions, resolveTargetCwd } from "./shared.js";
 import {
   runConsult,
   loadConsultRecord,
-  observeSeatRun,
-  attributeReply,
-  deriveSeatStates,
-  compareFields,
+  rerenderConsultFromRecord,
 } from "../application/consultService.js";
-import { readTranscript, extractCanonicalAgentId } from "../transcript.js";
 
 // 可重复旗标收集（--perspective/--fields 可出现多次；parseOptions 只留末值，
 // 重复值在这里显式收集）。
@@ -242,79 +238,17 @@ async function consultShowCommand(args, config, deps = {}) {
   const runDir = options.runDir ?? config?.runDir ?? "runs";
   const record = await (deps.loadConsultRecord ?? loadConsultRecord)({ consultId, consultsDir });
 
-  // 只读重渲染：经组记录的席位-runId 映射回读各 transcript，重新归组/比对。
-  // runState/formatState 按当前 transcript 真值重导出（show 是当下观察）；
-  // 组记录中的历史观察值保留在 json 输出的 record 字段里。
-  const readTranscriptFn = deps.readTranscript ?? readTranscript;
-  const seatResults = [];
-  const perSeatAttribution = {};
-  for (const seat of record.seats ?? []) {
-    let observation = null;
-    if (seat.runId) {
-      try {
-        observation = await observeSeatRun({ runId: seat.runId, runDir, readTranscriptFn, env: process.env });
-      } catch {
-        observation = null;
-      }
-    }
-    const runState = observation ? observation.runState : (seat.runId ? "missing" : seat.runState);
-    const attribution = observation
-      ? attributeReply(observation.finalText)
-      : { ordered: [], unclassified: "", preamble: "" };
-    perSeatAttribution[seat.agentId] = attribution;
-    const { formatState } = deriveSeatStates({ runState, questions: record.questions ?? [], attribution });
-    seatResults.push({
-      agentId: seat.agentId,
-      runId: seat.runId,
-      runState,
-      formatState,
-      backend: seat.backend ?? null,
-      provider: seat.provider ?? null,
-      ...(seat.perspectiveSnippet ? { perspectiveSnippet: seat.perspectiveSnippet } : {}),
-      budgetExpired: observation ? !observation.terminal : true,
-      attribution,
-      ...(observation ? { finalText: observation.finalText } : {}),
-    });
-  }
-  const { fieldDiff, fieldValues } = compareFields(perSeatAttribution, record.declaredFields);
-
-  // 非作者砖：与 runConsult 同一读法（被审 run transcript 的 canonical agentId）。
-  let authorInSeats = null;
-  let reviewedAgentId = null;
-  if (record.reviewedRunId) {
-    try {
-      const events = await readTranscriptFn(join(runDir, `${record.reviewedRunId}.jsonl`));
-      reviewedAgentId = extractCanonicalAgentId(events, record.reviewedRunId);
-      authorInSeats = reviewedAgentId !== "unknown"
-        && (record.seats ?? []).some((s) => s.agentId === reviewedAgentId);
-    } catch {
-      authorInSeats = null;
-    }
-  }
-
-  const result = {
-    consultId: record.consultId,
-    recordPath: join(consultsDir, `${record.consultId}.json`),
+  // 只读重渲染委派 service 层（M13-r2 提炼：CLI consult show 与 MCP run_consult
+  // 读取模式共用同一实现；本层只做 console 渲染）。runState/formatState 按当前
+  // transcript 真值重导出（show 是当下观察）；组记录中的历史观察值保留在 json
+  // 输出的 record 字段里。
+  const result = await rerenderConsultFromRecord({
     record,
-    questions: record.questions ?? [],
-    brief: record.brief,
-    budgetMs: record.budgetMs,
-    elapsedMs: record.elapsedMs ?? null,
-    seats: seatResults,
-    fieldDiff,
-    fieldValues,
-    bricks: {
-      runtimeFacts: (record.seats ?? []).map((s) => ({
-        agentId: s.agentId,
-        backend: s.backend ?? null,
-        provider: s.provider ?? null,
-      })),
-      authorInSeats,
-      reviewedAgentId,
-      ...(record.reviewedRunId ? { reviewedRunId: record.reviewedRunId } : {}),
-      sessionIndependence: "未提供",
-    },
-  };
+    runDir,
+    consultsDir,
+    ...(deps.readTranscript ? { readTranscriptFn: deps.readTranscript } : {}),
+    env: process.env,
+  });
   if (format === "json") {
     console.log(JSON.stringify(result, null, 2));
     return;
