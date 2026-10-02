@@ -58,9 +58,11 @@ export const ADVISORY_GIT_TIMEOUT_MS = 2000;
  */
 export const BRANCH_CAP = 185; // 2026-09-30 baseline 151 + headroom（2026-10-02 抬至 185——最后一次抬升）
 
-/** ADR 0035 S3 固定行文案（两个计数是仅有的动态内容；无其他动态载荷）。 */
+/** ADR 0035 S3 固定行文案（两个计数是仅有的动态内容；无其他动态载荷）。
+ * 2026-10-02 指路扩展（Owner 指示）：行尾加清退 SOP 短指路——Lead agent 依此
+ * 找到处置规程（场景 7b：分类→批准→bundle→执行→收口五步）。仍为静态文本。 */
 function advisoryLine(worktrees, waoRunBranches) {
-  return `[wao] advisory: worktrees=${worktrees} waoRunBranches=${waoRunBranches} (npm run hygiene for details)`;
+  return `[wao] advisory: worktrees=${worktrees} waoRunBranches=${waoRunBranches} (npm run hygiene; cleanup SOP: docs/usage.md 场景 7b)`;
 }
 
 /**

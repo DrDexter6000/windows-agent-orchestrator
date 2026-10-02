@@ -573,6 +573,26 @@ npm run cli -- runs prune --older-than 90d --archive   # 归档 90 天前的 run
 
 **清扫 runbook（首次与例行）**：① 跑之前停 daemon 并确认无活跃 run（`runs list` 无非终态；被归档 run 若仍有进程在写，`appendFile` 会在 runs/ 原地重建单事件 stub，法医链断裂且下轮清扫抓不到）；② 清扫前后各数一次 `ls runs/*.jsonl | wc -l`，差值应与汇总行 `Archived` 数一致——**当前语料最老为 2026-06，90 天参数下首扫预期 `Archived 0` 是正常结果不是故障**（首次真正咬量在 9 月下旬六月文件期满时）；③ 关闭所有占用 runs/ 文件的编辑器/tail——归档循环无逐文件容错，Windows 上文件被占用会让 rename EPERM 中断整批（已输出的 `Archived` 行即恢复痕迹，续跑即可）；④ 逐条保留输出的 `Archived ... -> ...` 行（唯一的迁移审计轨迹）。**清扫面边界（Owner 知情）**：仅 runDir 顶层 `.jsonl`——子目录语料（`smoke/`、`verify/`、`driver-comparison-*/`、`wao-prod-drill-*/` 等）与顶层日志（ALERTS.log、*.log）、`.owner-run_*` 标记、`reliability-summary.json` 不在清扫面内。
 
+### 场景 7b：卫生清退 SOP（worktree / 分支批量清退，2026-10-02 首次实战沉淀）
+
+> 派发 advisory（worktrees/branches 计数）弹行或 `npm run hygiene` W4/W5 变红时的处置规程。源流：2026-10-02 大清退（177 分支 + 78 工作树，Owner 四批全批；全量记录 `runs-archive/2026-10/hygiene-cleanup-20261002-record.md`，含 bundle 复原路径）。**销毁性纪律不变**：分类清单须 Owner 点名批准后才执行删除。
+
+**五步流程**：
+
+1. **分类（只读，双证）**：
+   - 分界：`git branch --merged main --list "wao/run_*"`（并入=删标签零丢失）vs `--no-merged`。
+   - 台账交叉：runId = 分支名去 `wao/` 前缀（**含** `run_`）；转录查两处——`runs/<runId>.jsonl` 与 `runs-archive/<yyyy-mm>/<runId>.jsonl`。
+   - **交付判定取"最后一个"决定事件**（转录存在多轮 repackage/correction/reverify——先拒后收的 run 按首事件判会错分类）；无决定事件但有 `delivery_created` → 悬空。
+   - **已接受 ≠ 已并入**：squash 落地使 `--no-merged` 误报——用 `git cherry main <分支>` 验 patch 等价性（`+` 行数为 0 = 内容已在 main）。
+   - 承重引用：未并入分支 tip SHA 前 7 位 grep `docs/ .wao/decisions/ README.md`；引用是冻结文本不改写，SHA 靠 bundle 备份。
+   - 双证：worker 全量扫描 + Lead 独立脚本复核，计数逐项吻合才继续。
+2. **Owner 批准**：分类清单 + 建议处置（并入→删 / 已拒绝→bundle 删 / 悬空→Owner 裁 / 引用→Owner 裁）报批；未裁定项**保守保留**。
+3. **保全（先于一切删除）**：`git bundle create <runs-archive/<yyyy-mm>/hygiene-cleanup-<date>.bundle> <全部待删引用>`（显式清单，含引用 SHA）→ `git bundle verify` → sha256 入记录。
+4. **执行（顺序不可换）**：摘工作树（**嵌套深度降序、最深先**——套娃树先内后外；脏树先 `git status --porcelain` 快照留痕再 `--force`）→ 删分支（已并入 `-d`（git 保险丝，拒未并入）；未并入 `-D`（仅 bundle 之后）；**显式名单循环，禁 glob**）→ `git worktree prune`。
+5. **收口**：计数闭合（前后分支/树数对账）→ `npm run hygiene` 5/5 → 清退记录落 `runs-archive/<yyyy-mm>/`（record.md + bundle + 脏树快照，磁盘档）→ 台账指针（TD 行注记）提交。
+
+**踩坑备忘**：非时间戳命名 runId（dogfood 系）别按时间戳规则批量误伤；"已并入但台账已拒绝/悬空"的反常行单独标注不阻塞（内容在 main 即零丢失）；`git bundle create` 的 `--version` flag 在部分 git 版本不认（省略即可）；runs/ 转录不动（清扫走场景 7 的 prune --archive 通道，两套清退互不越界）。
+
 ### 场景 8：daemon + 自愈（无人值守 / 长跑）
 
 daemon 是常驻派发点（detached，CLI 退出不杀它），让 worker run 脱离单次 CLI 调用存活。supervisor

@@ -69,7 +69,7 @@ test("S3-1: 正常计数 → 行出现且整行全等；两命令与 options 形
   const line = renderDispatchResourceAdvisory("D:/proj", { exec: fakeExec, stateDir: makeTempStateDir() });
   assert.equal(
     line,
-    "[wao] advisory: worktrees=2 waoRunBranches=3 (npm run hygiene for details)",
+    "[wao] advisory: worktrees=2 waoRunBranches=3 (npm run hygiene; cleanup SOP: docs/usage.md 场景 7b)",
   );
   assert.equal(calls.length, 3, "恰三次子进程调用（决定 0042 起第三拍 rev-parse 作状态键）");
   assert.equal(calls[0].command, "git worktree list --porcelain");
@@ -90,7 +90,7 @@ test("S3-2: CRLF 输出（Windows git 真实形态）→ 计数不漂", () => {
   const line = renderDispatchResourceAdvisory("D:/proj", { exec: fakeExec, stateDir: makeTempStateDir() });
   assert.equal(
     line,
-    "[wao] advisory: worktrees=2 waoRunBranches=3 (npm run hygiene for details)",
+    "[wao] advisory: worktrees=2 waoRunBranches=3 (npm run hygiene; cleanup SOP: docs/usage.md 场景 7b)",
   );
 });
 
@@ -100,7 +100,7 @@ test("S3-3: 零 wao/run_* 分支（空输出）→ waoRunBranches=0 照常成行
   const line = renderDispatchResourceAdvisory("D:/proj", { exec: fakeExec, stateDir: makeTempStateDir() });
   assert.equal(
     line,
-    "[wao] advisory: worktrees=1 waoRunBranches=0 (npm run hygiene for details)",
+    "[wao] advisory: worktrees=1 waoRunBranches=0 (npm run hygiene; cleanup SOP: docs/usage.md 场景 7b)",
   );
 });
 
