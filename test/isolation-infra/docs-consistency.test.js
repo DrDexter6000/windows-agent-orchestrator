@@ -1827,11 +1827,15 @@ test("post-M12 runtime reliability closeout: TD-48/71/80 resolved, TD-106 non-go
     assert.doesNotMatch(openSection, new RegExp(`^\\|\\s*${id}\\b`, "m"), `${id} must not remain open`);
   }
   assert.match(designSection, /^\|\s*TD-106\b/m, "TD-106 must be a WAO non-goal/design constraint");
-  assert.match(td, /TD-48[^\n]*(diagnose[^\n]*single|single[^\n]*diagnose|单[^\n]*run)[^\n]*(dashboard|1\.8)/i,
+  // TD-192 归档（2026-10-02）：已偿还叙事行迁 docs/archive/tech-debt-repaid.md，
+  // 主表留索引行——叙事级事实断言改为联合读取（主表索引 + 归档原文），
+  // 行存在性断言仍钉主表（上方 repaidSection ^| 锚）。
+  const tdAll = td + "\n" + read("docs/archive/tech-debt-repaid.md");
+  assert.match(tdAll, /TD-48[^\n]*(diagnose[^\n]*single|single[^\n]*diagnose|单[^\n]*run)[^\n]*(dashboard|1\.8)/i,
     "TD-48 must record current CLI diagnose/dashboard measurement truth");
-  assert.match(td, /TD-71[^\n]*EPERM[^\n]*EBUSY[^\n]*(bounded|有界)/i,
+  assert.match(tdAll, /TD-71[^\n]*EPERM[^\n]*EBUSY[^\n]*(bounded|有界)/i,
     "TD-71 must record bounded Windows append-lock retry");
-  assert.match(td, /TD-80[^\n]*legacy[^\n]*evidence_passed_backend_failed/i,
+  assert.match(tdAll, /TD-80[^\n]*legacy[^\n]*evidence_passed_backend_failed/i,
     "TD-80 must record the legacy transcript projection fix");
 
   assert.match(roadmap, /M12-23[^\n]*runtime reliability truth/i,
