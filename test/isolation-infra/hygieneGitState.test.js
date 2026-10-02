@@ -51,7 +51,8 @@ test("classifyBranchCount: ratchet boundary", () => {
 });
 
 test("BRANCH_CAP and external roots carry ADR 0035 values", () => {
-  assert.equal(BRANCH_CAP, 175);
+  // 2026-10-02 175→185（declare 在案：M13-r1 交付分支顶帽 176；已决分支清退另立）。
+  assert.equal(BRANCH_CAP, 185);
   for (const [root, reason] of REGISTRY_EXTERNAL_ROOTS) {
     assert.match(root, /^[a-z]:\//, "roots are stored normalized");
     assert.ok(reason.length > 5, "every allowlist entry carries a reason");

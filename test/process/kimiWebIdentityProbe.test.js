@@ -13,7 +13,7 @@ import { parseArgs, probeIdentity, main } from "../../scripts/reliability/kimi-w
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, "..", "..", "scripts", "reliability", "kimi-web-identity-probe.mjs");
-const ENV = { KIMI_WEB_TOKEN: "secret-token-value-do-not-leak" };
+const ENV = { KIMI_WEB_TOKEN: "test-secret-token-value-do-not-leak" };
 
 function fetchReturning({ status = 200, body = "{}", captureInto = null } = {}) {
   return async (url, options) => {
@@ -40,7 +40,7 @@ test("probe: 非回环目标拒跑（明文 HTTP + Bearer 不得上网，凭据�
 });
 
 test("probe: 401 → http-error + 状态码，零正文字段", async () => {
-  const r = await probeIdentity({ url: "http://127.0.0.1:1", tokenEnv: "KIMI_WEB_TOKEN", env: ENV, fetchFn: fetchReturning({ status: 401, body: "{\"error\":\"Bearer secret-token-value-do-not-leak rejected\"}" }) });
+  const r = await probeIdentity({ url: "http://127.0.0.1:1", tokenEnv: "KIMI_WEB_TOKEN", env: ENV, fetchFn: fetchReturning({ status: 401, body: "{\"error\":\"Bearer test-secret-token-value-do-not-leak rejected\"}" }) });
   assert.equal(r.exitCode, 0);
   assert.equal(r.stdout.outcome, "http-error");
   assert.equal(r.stdout.status, 401);
@@ -51,7 +51,7 @@ test("probe: 请求形状——Bearer 头内存构造、禁重定向", async () 
   const captured = {};
   await probeIdentity({ url: "http://127.0.0.1:58627/", tokenEnv: "KIMI_WEB_TOKEN", env: ENV, fetchFn: fetchReturning({ captureInto: captured }) });
   assert.equal(captured.url, "http://127.0.0.1:58627/openapi.json", "尾斜杠归一 + 固定路径");
-  assert.equal(captured.options.headers.Authorization, "Bearer secret-token-value-do-not-leak");
+  assert.equal(captured.options.headers.Authorization, "Bearer test-secret-token-value-do-not-leak");
   assert.equal(captured.options.redirect, "manual");
   assert.ok(captured.options.signal, "超时信号在场");
 });
@@ -61,7 +61,7 @@ test("probe: 200 + 规格体 → 受约束身份字段 + 上游自报语义标�
     openapi: "3.1.0",
     info: { title: "kimi web", version: "2.1.1-doc" },
     version: "2.1.1",
-    note: "echo secret-token-value-do-not-leak",
+    note: "echo test-secret-token-value-do-not-leak",
     paths: { "/a": {}, "/b": {}, "/c": {} },
   });
   const r = await probeIdentity({ url: "http://127.0.0.1:58627", tokenEnv: "KIMI_WEB_TOKEN", env: ENV, fetchFn: fetchReturning({ body }) });
@@ -83,7 +83,7 @@ test("probe: 超长字段截断到 120、畸形响应 unparseable-body、网络�
   const bad = await probeIdentity({ url: "http://127.0.0.1:1", tokenEnv: "KIMI_WEB_TOKEN", env: ENV, fetchFn: fetchReturning({ body: "not json <<<" }) });
   assert.equal(bad.stdout.outcome, "unparseable-body");
 
-  const err = new Error("connect ECONNREFUSED http://127.0.0.1:1 with secret-token-value-do-not-leak");
+  const err = new Error("connect ECONNREFUSED http://127.0.0.1:1 with test-secret-token-value-do-not-leak");
   err.name = "Error";
   const netErr = await probeIdentity({ url: "http://127.0.0.1:1", tokenEnv: "KIMI_WEB_TOKEN", env: ENV, fetchFn: async () => { throw err; } });
   assert.equal(netErr.stdout.outcome, "network-error");

@@ -164,20 +164,27 @@ test("R7-C-7 matrix: preflightInvocation ⇔ LOCAL spawn with cwd: agent.cwd, ac
           // detail 需 id 与 busy/main_turn_active 在场；其余端点（含
           // opencode-serve 的 POST /api/session）维持默认 `{data:{id}}` 形状。
           if (urlStr.includes("/transcript?agent_id=")) {
+            const transcriptBody = { data: { items: [], seq: 1, has_more: false } };
             return {
               ok: true, status: 200,
-              json: async () => ({ data: { items: [], seq: 1, has_more: false } }),
+              json: async () => transcriptBody,
+              // kimi-web 非 JSON 守卫（2026-10-02 900446c）后成功路径先
+              // response.text() 再 JSON.parse——桩必须同时提供 text 与 json。
+              text: async () => JSON.stringify(transcriptBody),
             };
           }
           if (/\/api\/v1\/sessions\/[^/]+$/.test(urlStr)) {
+            const detailBody = {
+              data: { id: "sess-matrix", busy: false, main_turn_active: false, last_turn_reason: null },
+            };
             return {
               ok: true, status: 200,
-              json: async () => ({
-                data: { id: "sess-matrix", busy: false, main_turn_active: false, last_turn_reason: null },
-              }),
+              json: async () => detailBody,
+              text: async () => JSON.stringify(detailBody),
             };
           }
-          return { ok: true, status: 200, json: async () => ({ data: { id: "sess-matrix" } }) };
+          const defaultBody = { data: { id: "sess-matrix" } };
+          return { ok: true, status: 200, json: async () => defaultBody, text: async () => JSON.stringify(defaultBody) };
         },
       });
       if (agent.backend === "deepseek-acp") backend._containmentPatchPathOverride = containmentFixture;
