@@ -942,3 +942,52 @@ test("TD-153: --state × --since × --agent × --latest 任意叠加（行集叠
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ===== TD-200①②（2026-10-02 前置盘点收口批）：diagnose 非终态措辞 / summary 位置参数 =====
+
+test("TD-200②: runs summary 拒绝位置参数（曾静默无视 runId 输出全局统计——误导单 run 查询）", async () => {
+  const dir = await makeRunDir();
+  try {
+    await writeJsonl(dir, "run_aaa", [
+      { type: "run.started", ts: "2026-06-12T10:00:00.000Z" },
+    ]);
+    let threw = null;
+    try {
+      cli(["runs", "summary", "run_aaa"], dir);
+    } catch (error) {
+      threw = error;
+    }
+    assert.ok(threw, "带位置参数必须非零退出");
+    assert.match(threw.stderr ?? "", /takes no <runId>/);
+    assert.match(threw.stderr ?? "", /runs diagnose <runId>/, "拒绝文案指路单 run 命令");
+    // 会审补强（auditor）：指路不含 runs list（列表命令）；含 runs metrics（单 run 指标）。
+    assert.doesNotMatch(threw.stderr ?? "", /runs list/);
+    assert.match(threw.stderr ?? "", /runs metrics <runId>/);
+    // 合法形状（无位置参数）不受影响
+    const ok = cli(["runs", "summary"], dir);
+    assert.match(ok, /Total runs: 1/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-200①: diagnose 非终态 run 输出未终态措辞（不再误称 completed successfully）", async () => {
+  const dir = await makeRunDir();
+  try {
+    await writeJsonl(dir, "run_nt", [
+      { type: "run.started", ts: "2026-06-12T10:00:00.000Z" },
+    ]);
+    await writeJsonl(dir, "run_done", [
+      { type: "run.started", ts: "2026-06-12T11:00:00.000Z" },
+      { type: "run.state_change", from: "running", to: "completed", reason: "done", ts: "2026-06-12T11:05:00.000Z" },
+    ]);
+    const nt = cli(["runs", "diagnose", "run_nt"], dir);
+    assert.match(nt, /not terminal \(state: running\)/, "非终态如实标注状态并指引复诊");
+    assert.ok(!nt.includes("completed successfully"), "非终态不得误称 completed successfully");
+
+    const done = cli(["runs", "diagnose", "run_done"], dir);
+    assert.match(done, /no failure to diagnose — run completed successfully/, "终态+none 保持原文案");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

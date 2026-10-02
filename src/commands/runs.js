@@ -610,6 +610,21 @@ async function runsListCommand(args, config) {
 }
 
 async function runsSummaryCommand(args, config) {
+  // TD-200②（2026-10-02 前置盘点收口）：位置参数 fail-closed——`runs summary
+  // <runId>` 曾静默无视 runId 输出全局统计（子命令名暗示单 run 查询，误导
+  // 监督判断）。合法形状 = 仅 flags。
+  const knownValueFlags = new Set(["--format", "--run-dir"]);
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i];
+    if (a.startsWith("--")) {
+      if (knownValueFlags.has(a)) i += 1;
+      continue;
+    }
+    throw new Error(
+      `runs summary is a global-tally command and takes no <runId> (got: ${a}) `
+      + "— single-run queries: runs diagnose <runId> / runs wait <runId> / runs metrics <runId>",
+    );
+  }
   const options = parseOptions(args);
   const runDir = resolve(options.runDir ?? config.runDir);
   const jsonlFiles = await loadRunOnlyFiles(runDir);
@@ -956,7 +971,14 @@ async function runsDiagnoseCommand(args, config) {
       console.log(`  [${e.eventType}] ${e.fact}`);
     }
   } else if (d.category === "none") {
-    console.log(`(no failure to diagnose — run completed successfully)`);
+    // TD-200①（2026-10-02 前置盘点收口）：服务本就返回 terminal/state——非终态
+    // run 曾被误称 "run completed successfully"（category none 只说明无失败事实，
+    // 不说明已完成）。
+    if (d.terminal) {
+      console.log(`(no failure to diagnose — run completed successfully)`);
+    } else {
+      console.log(`(no failure to diagnose yet — run not terminal (state: ${d.state}); re-diagnose after terminal)`);
+    }
   } else {
     console.log(`(no concrete evidence signal; review transcript manually)`);
   }
