@@ -11,6 +11,7 @@ config/agents.json
 .wao-worktrees/
 .wao-worker-claude-config/
 .zcode/
+.zcodeignore
 
 # 测试报告产物
 test-results.json

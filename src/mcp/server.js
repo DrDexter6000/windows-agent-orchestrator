@@ -291,10 +291,11 @@ import {
   REAL_AGENT_ID_WIRE_PATTERN,
 } from "../canonicalAgentId.js";
 // M12-10 progressive-disclosure correction: the FROZEN tool surface. WAO exposes
-// exactly 21 always-registered tools (no profile, no flag, no restart). The
-// single frozen definition lives in toolSurface.js; the tool-surface tests
-// assert the live tools/list order is byte-equal to that SSOT, so this module
-// and the SSOT cannot drift. No Host/runtime-name branching lives here.
+// an always-registered tool surface (no profile, no flag, no restart); the
+// exact tool count lives only in the SSOT. The single frozen definition lives
+// in toolSurface.js; the tool-surface tests assert the live tools/list order
+// is byte-equal to that SSOT, so this module and the SSOT cannot drift. No
+// Host/runtime-name branching lives here.
 import { TOOLS as FROZEN_TOOL_SURFACE } from "./toolSurface.js";
 
 // M11-8B final closeout: TWO distinct agentId schemas, both sourced from the

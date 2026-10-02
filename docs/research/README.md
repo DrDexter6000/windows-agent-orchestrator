@@ -31,6 +31,9 @@
 | [14-p3-daemon-dogfood-2026-06-25.md](./14-p3-daemon-dogfood-2026-06-25.md) | P3-T1 daemon 落地后 lead-agent 视角 e2e dogfood（D-F1..D-F4），含 handshake 位置决策输入 | 实测记录 |
 | [15-cross-runtime-dogfood-comparison-2026-07-07.md](./15-cross-runtime-dogfood-comparison-2026-07-07.md) | 跨 runtime dogfood 对比（GLM-5.2 vs GPT-5.5 codex xhigh）：模型差异对 WAO 引导力的启示 | 实测记录 |
 | [16-terminal-reason-taxonomy-comparison.md](./16-terminal-reason-taxonomy-comparison.md) | Symphony（OpenAI 开源 Codex 编排器）五终态分类 ↔ WAO 两层终态模型逐项对照；Stalled 终态与自动重试的裁定记录（不引入） | 外部参考（归档） |
+| [2026-09-21-adr0032-five-state-impact.md](./2026-09-21-adr0032-five-state-impact.md) | ADR-0032 §8 五态落地对在册认证记录（reliability-summary + component-checks）的一次性影响评估快照 | 实测记录（历史） |
+| [governance-cost-baseline-2026-08.md](./governance-cost-baseline-2026-08.md) | 治理成本基线 v1（决策 0027 委托；Owner 硬约束：测量 ≠ 裁剪授权） | 决策固化 |
+| [td130-root-cause.md](./td130-root-cause.md) | TD-130（R23-E）根因取证报告：两席会审定稿方案的取证实施（零生产代码改动） | 实测记录（历史） |
 
 **推荐顺序**：
 01（生态定位）→ 02（RunMaestro 负例）→ 04（Niuma 正例）→ 03（架构推演）→ 05（收敛后的决策）→ 06（onboarding 设计）。
@@ -39,7 +42,7 @@
 ## 当前进度
 
 本目录是**早期调研与架构推演**的归档（决策已收敛进 PRD / spec / 代码）。
-**实现里程碑进度不在本处维护**——权威来源是 [`docs/roadmap.md`](../roadmap.md)（含 M0–M7 状态 + 测试数），
+**实现里程碑进度不在本处维护**——权威来源是 [`docs/roadmap.md`](../roadmap.md)（含 M0–M13 状态与测试数），
 技术债清单见 [`docs/tech-debt.md`](../tech-debt.md)。两处之外不得再有第二份进度/债务表（SSOT）。
 
 调研本身的完成状态：
@@ -59,6 +62,7 @@
 
 ## 最后更新
 
+- 2026-10-02 索引补登三份后补文件（2026-09-21 ADR-0032 五态影响评估 / 2026-08 治理成本基线 / 2026-08-21 TD-130 根因取证）——SSOT 体检发现索引缺口，文件本体未动。
 - 2026-08-16 终态原因分类对照归档（16）：Symphony 五终态 ↔ WAO 两层终态模型逐项映射；裁定不引入 Stalled 终态与自动重试（ADR 0018 + AGENTS.md 不变量 #4）。同轮补登 15 的索引行。
 - 2026-06-25 P3 daemon/IPC spike（13）：Windows detached+unref 后台存活实测成立（T0a 收敛）；IPC 命名管道 vs 本地 HTTP 实测均可用，推荐命名管道，待 owner 拍板（T0b）。
 - 2026-06-25 P0 真任务 dogfood（12）+ Lead e2e 审计（11）：friction 清单归档，决策 0010/0011 输入。

@@ -1486,6 +1486,26 @@ test("M12-8A/M12-9/M12-10/M12-16: SKILL/architecture 工具数与 toolSurface SS
   const serverLine = arch.split("\n").find((l) => /server\.js.*tools/.test(l)) || "";
   assert.ok(new RegExp(`${n} tools`).test(serverLine),
     `architecture server.js 注释工具数必须与 toolSurface TOOLS.length=${n} 一致`);
+  // 2026-10-02 SSOT 体检补盲：中文计数形式（"恰好 N 个 always-registered"）此前
+  // 不在守卫射程——英文 "N tools" 正则匹配不到中文表述，M12-16/M13 两轮加工具后
+  // 架构契约段漂移到"恰好 22 个"未被抓住。正负探针均从 SSOT 派生（n±1），
+  // 加/减工具都不会把守卫锁死在旧计数。
+  assert.ok(arch.includes(`恰好 ${n} 个 always-registered`),
+    `architecture 冻结工具面段中文计数必须与 TOOLS.length=${n} 一致`);
+  assert.ok(!new RegExp(`恰好 (?:${n + 1}|${n - 1}) 个 always-registered`).test(arch),
+    `architecture 不得声称 ${n + 1}/${n - 1} 个 always-registered（陈旧/超前计数）`);
+  // 中文 README（用户面）同形补盲。
+  const readmeZh = read("README.zh-CN.md");
+  assert.ok(readmeZh.includes(`${n} 个 MCP 工具`),
+    `README.zh-CN.md 中文计数必须与 TOOLS.length=${n} 一致`);
+  assert.ok(!readmeZh.includes(`${n + 1} 个 MCP 工具`) && !readmeZh.includes(`${n - 1} 个 MCP 工具`),
+    `README.zh-CN.md 不得声称 ${n + 1}/${n - 1} 个 MCP 工具`);
+  // roster 完备性：server.js 注释行的工具名序列必须与 TOOLS 同名同序——2026-10-02
+  // 发现该行写 23 tools 却只列 22 名（漏 run_consult），且历史顺序与 SSOT 不一致。
+  const roster = serverLine.match(/tools（([^；]+)；/);
+  assert.ok(roster, "server.js 注释行必须含 tools（…；格式的 roster 名单");
+  assert.deepEqual(roster[1].split("/"), TOOLS,
+    "architecture server.js 注释 roster 必须与 toolSurface TOOLS 同名同序（单边漂移即红）");
 });
 
 test("L4 依赖方向：docs 分类学与 layering.test.js 冻结集合一致（TD-120 关系型守卫，doc↔test）", () => {
