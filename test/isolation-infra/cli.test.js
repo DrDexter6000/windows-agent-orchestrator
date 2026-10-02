@@ -3434,6 +3434,32 @@ test("A-2: run --help 子进程 exit 0 且 stdout 含用法（execSync 非零退
   assert.match(out, /--read-only/, "run --help 必须打印 --read-only flag");
 });
 
+// v0.2.0（决定 0038）：version 命令 + --version 旗标。版本号单一来源是仓库根
+// package.json 的 version 字段；CLI 与 MCP serverInfo（SERVER_VERSION）两个
+// 消费者必须同源同步——本组测试同时钉住"输出的是同一个值"与"两种问法都在"。
+test("v0.2.0: wao version / wao --version 输出 package.json 版本（SSOT 钉）", () => {
+  const pkg = JSON.parse(readFileSync(resolve(import.meta.dirname, "../../package.json"), "utf8"));
+  assert.equal(runCliOnPathNode("version").trim(), pkg.version, "wao version 必须原样输出 package.json version");
+  assert.equal(runCliOnPathNode("--version").trim(), pkg.version, "wao --version 必须与子命令同值");
+});
+
+test("v0.2.0: --version 无 WAO_SKIP_VERSION_GUARD 也可查询（与 help 同类例外，任何环境可答）", () => {
+  // 故意不注入 WAO_SKIP_VERSION_GUARD：version 与 help 一样是"用户始终能查"的
+  // 入口。在 PATH node 为 v24 的开发机上本测试同时证明 guard 例外；在 v22 上
+  // 它至少钉住 exit 0 + 输出形状不回归。
+  const res = spawnSync(process.execPath, ["src/cli.js", "--version"], { encoding: "utf8" });
+  assert.equal(res.status, 0, `--version 必须 exit 0（stderr: ${res.stderr}）`);
+  assert.match(res.stdout.trim(), /^\d+\.\d+\.\d+$/, "--version 输出必须是裸 semver");
+});
+
+test("v0.2.0: WAO_VERSION 与 MCP SERVER_VERSION 同源（package.json 单一来源，两消费者同步）", async () => {
+  const { WAO_VERSION } = await import("../../src/version.js");
+  const { SERVER_VERSION } = await import("../../src/mcp/server.js");
+  const pkg = JSON.parse(readFileSync(resolve(import.meta.dirname, "../../package.json"), "utf8"));
+  assert.equal(WAO_VERSION, pkg.version);
+  assert.equal(SERVER_VERSION, pkg.version, "serverInfo.version 漂移即破坏单一来源声称");
+});
+
 test("A-3: delivery spec 带 {\"delivery\":...} 外层包装 → SSOT 拒绝 + INNER delivery object 提示", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-dspec-wrap-"));
   try {

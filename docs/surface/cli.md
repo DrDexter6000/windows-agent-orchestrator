@@ -9,6 +9,7 @@ Verbatim `wao help` output (`HELP_TEXT` in `src/cliHelp.js` — the same SSOT th
 Windows Agent Orchestrator PoC
 
 Commands:
+  version   # print the WAO version (bare semver; SSOT: package.json; --version also works)
   registry list --registry config/agents.json
   registry check [--registry config/agents.json] [--format json]   # live opencode-serve health only
   registry validate [--registry FILE] [--format json]

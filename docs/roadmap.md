@@ -3,6 +3,7 @@
 > 状态：✅ 已确认（第一轮）。
 > 上游：`docs/01-prd.md`、`docs/02-architecture.md`、`docs/research/05-key-decisions.md`。
 > 本文档定义里程碑、完成定义、依赖关系与风险。实现时按 M 编号推进。
+> 版本线：v0.2.0（2026-10-01 tag；semver 采纳与 v1.0.0 门槛见 `.wao/decisions/0038-semver-adoption-and-release-baseline.md`，范围快照见 `docs/changelog-2026-10-01-v0.2.0.md`）。
 >
 > **权威边界（ADR 0018）**：WAO 自动监测，不自动监督；自动封装，不自动验收；自动呈现，不自动决策。
 > （English: WAO monitors, never supervises; packages, never accepts; presents, never decides.）

@@ -48,6 +48,8 @@ import { playbookCommand } from "./commands/playbook.js";
 // cli.js 底部自执行 main()，生成器（scripts/gen-surface.mjs）不能 import 本文件——
 // 它改 import 无副作用的 cliHelp.js，CLI 打印的仍是同一份 SSOT。
 import { HELP_TEXT } from "./cliHelp.js";
+// v0.2.0（决定 0038）：CLI 版本常量，单一来源 package.json（同 MCP SERVER_VERSION）。
+import { WAO_VERSION } from "./version.js";
 // TD-98 阶段 2a/2b/2c/2e：parseOptions/loadPrompt/displayModel/resolveTargetCwd
 // 抽到 commands/shared.js，消除 commands/*.js 对 cli.js 的反向依赖。
 // cli.js re-export 以保持 test/cli.test.js 的 `from "../src/cli.js"` 导入行不变。
@@ -124,7 +126,10 @@ async function main(argv) {
   // WAO_SKIP_VERSION_GUARD=1 绕过（仅测试用：测试在任意 Node 上跑，不依赖真实进程隔离）。
   const [firstArg] = argv;
   const isHelp = !firstArg || firstArg === "help" || firstArg === "--help" || firstArg === "-h";
-  if (!isHelp && process.env.WAO_SKIP_VERSION_GUARD !== "1") {
+  // v0.2.0（决定 0038）：version 与 help 同类例外——用户始终能查版本，
+  // 不被 Node 版本 guard 拦（guard 拦的是会真跑 worker 的命令）。
+  const isVersion = firstArg === "version" || firstArg === "--version";
+  if (!isHelp && !isVersion && process.env.WAO_SKIP_VERSION_GUARD !== "1") {
     const guard = checkNodeVersion(process.version);
     if (!guard.ok) {
       console.error(`WAO 拒绝启动：${guard.reason}`);
@@ -137,6 +142,12 @@ async function main(argv) {
   const [command, ...rest] = argv;
   if (!command || command === "help" || command === "--help" || command === "-h") {
     printHelp();
+    return;
+  }
+  if (isVersion) {
+    // v0.2.0（决定 0038）：版本号单一来源 package.json（src/version.js），
+    // 与 MCP serverInfo 同源；输出裸 semver 便于脚本消费。
+    console.log(WAO_VERSION);
     return;
   }
   if (command === "registry") {

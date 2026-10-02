@@ -74,6 +74,7 @@ const SHARED_MEMBERS = Object.freeze(new Set([
   "src/secretRedaction.js",
   "src/canonicalAgentId.js",
   "src/waoCliPath.js",
+  "src/version.js",
 ]));
 
 // core(2) 的 application 内精确成员例外（TD-122 归零裁定）：sessionReuse 消费

@@ -13,6 +13,7 @@
 export const HELP_TEXT = `Windows Agent Orchestrator PoC
 
 Commands:
+  version   # print the WAO version (bare semver; SSOT: package.json; --version also works)
   registry list --registry config/agents.json
   registry check [--registry config/agents.json] [--format json]   # live opencode-serve health only
   registry validate [--registry FILE] [--format json]
@@ -86,7 +87,7 @@ Notes:
 // （如 `run status ...`）做 did-you-mean 提示。恰 17 名；不含 help（HELP_TEXT
 // 无 help 命令行且字节冻结——评审裁定 (a)）。
 export const COMMAND_NAMES = Object.freeze([
-  "registry", "spawn", "retry", "resume", "run", "status", "tail", "collect",
+  "version", "registry", "spawn", "retry", "resume", "run", "status", "tail", "collect",
   "stop", "runs", "dashboard", "workflow", "worktree", "wao", "daemon", "mcp", "playbook",
 ]);
 
