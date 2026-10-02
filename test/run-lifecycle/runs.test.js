@@ -1009,3 +1009,66 @@ test("TD-200② R6 补强: summary 参数边界矩阵——选项前后带 runId
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("Lead 体验批 Q5a: diagnose --format json 补 state/terminal（additive）", async () => {
+  const dir = await makeRunDir();
+  try {
+    await writeJsonl(dir, "run_nt", [
+      { type: "run.started", ts: "2026-06-12T10:00:00.000Z" },
+    ]);
+    const out = cli(["runs", "diagnose", "run_nt", "--format", "json"], dir);
+    const j = JSON.parse(out);
+    assert.equal(j.runId, "run_nt");
+    assert.equal(j.state, "running", "JSON 消费者可分辨非终态（category:none 不再混淆）");
+    assert.equal(j.terminal, false);
+    assert.equal(j.category, "none");
+    assert.ok(Array.isArray(j.evidence));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Lead 体验批 Q1: kimi-web run 的 collect 走转录重建（错适配器根修）——不触活服务、backend 如实上报", async () => {
+  const dir = await makeRunDir();
+  try {
+    // serveUrl 指向不可达端口：旧实现会走 OpenCodeServeBackend 去拉（必失败/
+    // 超时）——新实现转录重建根本不碰网络，这是天然的反向证明。
+    await writeJsonl(dir, "run_kw", [
+      { type: "run.started", ts: "2026-06-12T10:00:00.000Z", runId: "run_kw", agentId: "coder_mm" },
+      { type: "session.created", backend: "kimi-web", backendSessionId: "session_kw1", serveUrl: "http://127.0.0.1:1", ts: "2026-06-12T10:00:01.000Z", runId: "run_kw", agentId: "coder_mm" },
+      { type: "run.event", kind: "message", role: "user", parts: [{ type: "text", text: "do the task" }], ts: "2026-06-12T10:00:02.000Z", runId: "run_kw", agentId: "coder_mm" },
+      { type: "run.event", kind: "tool_use", tool: "Bash", input: { command: "node x.mjs" }, ts: "2026-06-12T10:00:03.000Z", runId: "run_kw", agentId: "coder_mm" },
+      { type: "run.event", kind: "message", role: "assistant", parts: [{ type: "text", text: "final answer".repeat(50) }, { type: "text", text: "" }].slice(0, 1), ts: "2026-06-12T10:00:04.000Z", runId: "run_kw", agentId: "coder_mm" },
+    ]);
+    const out = cli(["collect", "run_kw"], dir);
+    const j = JSON.parse(out);
+    assert.equal(j.reconstructed, true, "转录重建（非 serve 拉取）");
+    assert.equal(j.backend, "kimi-web", "backend 身份从 session.created 派生（不再误标 process）");
+    assert.ok(j.data.length >= 2, "user + assistant 消息项在场（raw 返回无 count 字段——按 data 长度断言）");
+    const msgs = j.data.filter((m) => m.kind === "message");
+    assert.ok(msgs.some((m) => m.role === "assistant" && /final answer/.test(JSON.stringify(m.parts))), "assistant 终稿可从转录恢复");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Lead 体验批 Q1: crash run（无 session.created）collect 仍拒绝 + 指路 diagnose（不伪装空成功）", async () => {
+  const dir = await makeRunDir();
+  try {
+    await writeJsonl(dir, "run_crash", [
+      { type: "run.started", ts: "2026-06-12T10:00:00.000Z", runId: "run_crash", agentId: "coder_mm" },
+      { type: "run.error", phase: "spawn", error: "bearer token env X is not set", ts: "2026-06-12T10:00:01.000Z", runId: "run_crash", agentId: "coder_mm" },
+    ]);
+    let threw = null;
+    try {
+      cli(["collect", "run_crash"], dir);
+    } catch (error) {
+      threw = error;
+    }
+    assert.ok(threw, "crash run 拒绝 collect（诚实拒绝 > 空成功）");
+    assert.match(threw.stderr ?? "", /no session metadata/);
+    assert.match(threw.stderr ?? "", /runs diagnose run_crash/, "指路诊断（会审 Q2 定稿措辞：证据指路非处方）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

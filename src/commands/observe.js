@@ -208,12 +208,19 @@ export async function collectCommand(args, config) {
     // M11-4 CTO rework (Fix E): --limit is honored here (legacy raw CLI
     // contract). In projection mode --limit is rejected below (the projection
     // owns pagination; a user-supplied limit would silently conflict).
-    const result = await collectRunMessages({
-      runId,
-      runDir,
-      limit: Number(options.limit ?? 50),
-    });
-    console.log(JSON.stringify(result, null, 2));
+    // 2026-10-02 Lead 体验批（会审定稿）：取回失败 ≠ 运行失败——错误原样抛出、
+    // 追加诊断指路（不写 "failure cause"：成功 run 的会话被回收时 collect 失败
+    // 但 diagnose 无运行失败可报，措辞只指向"已记录的运行状态与失败证据"）。
+    try {
+      const result = await collectRunMessages({
+        runId,
+        runDir,
+        limit: Number(options.limit ?? 50),
+      });
+      console.log(JSON.stringify(result, null, 2));
+    } catch (error) {
+      throw new Error(`${error.message}\n  — 查看已记录的运行状态与失败证据：npm run cli -s -- runs diagnose ${runId} --format json`);
+    }
     return;
   }
 
@@ -316,7 +323,15 @@ export async function collectCommand(args, config) {
   // exempt from the audit append — collect is non-read-only, --final keeps
   // exactly one messages.collected per successful call.
   const mode = hasFinal || options.mode === "compact" ? "compact" : "full";
-  const raw = await collectRunMessages({ runId, runDir, cursor, deferAppend: true });
+  // 会审补全（auditor 验证）：JSON/projection 模式的取回失败同样指路——指路恒带
+  // 实际 runDir（复制即用）；仅包裹服务调用本身，参数/游标解析错误不机械追加。
+  let raw;
+  try {
+    raw = await collectRunMessages({ runId, runDir, cursor, deferAppend: true });
+  } catch (error) {
+    throw new Error(`${error.message}
+  — 查看已记录的运行状态与失败证据：npm run cli -s -- runs diagnose ${runId} --run-dir ${runDir} --format json`);
+  }
   const payload = projectCollectResult(raw, { runId, cursor, mode });
   // Projection succeeded → safe to commit the audit.
   if (typeof raw.commitAppend === "function") {

@@ -958,8 +958,10 @@ async function runsDiagnoseCommand(args, config) {
   // null unless category is provider_auth. Never the raw error message.
   const d = await getRunDiagnosis({ runId, runDir });
   if (options.format === "json") {
-    // CLI JSON shape: {runId, category, code, evidence} — no state/terminal.
-    console.log(JSON.stringify({ runId: d.runId, category: d.category, code: d.code ?? null, evidence: d.evidence }, null, 2));
+    // CLI JSON shape: {runId, state, terminal, category, code, evidence} —
+    // state/terminal 自 2026-10-02 起补入（脚本消费者读 category:"none" 时原先
+    // 分不清非终态与已完成——F-A 实证；additive，MCP 面独立不受影响）。
+    console.log(JSON.stringify({ runId: d.runId, state: d.state, terminal: d.terminal, category: d.category, code: d.code ?? null, evidence: d.evidence }, null, 2));
     return;
   }
   console.log(`runId:    ${d.runId}`);

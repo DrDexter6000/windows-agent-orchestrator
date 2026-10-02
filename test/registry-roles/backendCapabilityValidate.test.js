@@ -384,3 +384,31 @@ test("ADR25-B2-NOSPAWN: registry 命令模块不 import node:child_process（val
   assert.doesNotMatch(source, /from\s+"node:child_process"/,
     "src/commands/registry.js 不得 import node:child_process（validate 纯静态）");
 });
+
+// ===== 2026-10-02 Lead 体验批：matrix 手术护栏（Q4，双席会审裁定）文案钉 =====
+test("matrixLabelRetirementAdvisories: 改名报警 / 首次认证静默 / 撞名报警 / 无变化静默（四形状钉）", async () => {
+  const { matrixLabelRetirementAdvisories, matrixCaseLabel } = await import("../../src/registry.js");
+  const rename = matrixLabelRetirementAdvisories("a", [{ agentId: "a", label: "a v2" }], { cases: ["a v1"] });
+  assert.equal(rename.length, 1);
+  assert.match(rename[0], /label 用作 caseId 键：历史 caseId \[a v1\] 已不在当前矩阵/);
+  assert.match(rename[0], /pruneStaleCases/);
+
+  assert.deepEqual(matrixLabelRetirementAdvisories("a", [{ agentId: "a", label: "a v1" }], undefined), [],
+    "首次认证（无台账）不误报");
+  assert.deepEqual(matrixLabelRetirementAdvisories("a", [{ agentId: "a", label: "a v1" }], { cases: ["a v1"] }), [],
+    "无变化静默");
+
+  const collision = matrixLabelRetirementAdvisories("b", [{ agentId: "b", label: "shared" }, { agentId: "a2", label: "shared" }], undefined);
+  assert.equal(collision.length, 1);
+  assert.match(collision[0], /撞名——caseId 合并键是全局的/);
+
+  assert.equal(matrixCaseLabel("x", {}), "x", "label 缺省回落 agentId（SSOT 单一定义）");
+  assert.equal(matrixCaseLabel("x", { label: "L" }), "L");
+});
+
+test("matrixLabelRetirementAdvisories: 删最后一行（矩阵无该 agent 行、台账有历史）→ 报警不失效（验证会审探针补钉）", async () => {
+  const { matrixLabelRetirementAdvisories } = await import("../../src/registry.js");
+  const deletion = matrixLabelRetirementAdvisories("a", [{ agentId: "b", label: "B" }], { cases: ["A"] });
+  assert.equal(deletion.length, 1, "删行形状必须报警——ownLabels 为空不得提前返回");
+  assert.match(deletion[0], /历史 caseId \[A\] 已不在当前矩阵/);
+});

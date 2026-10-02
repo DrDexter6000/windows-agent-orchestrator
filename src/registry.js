@@ -396,3 +396,59 @@ export function certMigrationAdvisories(workerRecord) {
   }
   return advisories;
 }
+
+/**
+ * matrix 行的 caseId 派生 SSOT（label 缺省回落 agentId）。
+ * scripts/reliability/matrix.mjs 的 normalizeCase 与 registry validate 的
+ * 手术护栏 advisory 共用此函数——比较两侧不造第二份派生规则。
+ * @param {string} agentId
+ * @param {object} row - 原始 matrix 行
+ * @returns {string}
+ */
+export function matrixCaseLabel(agentId, row) {
+  return row?.label ?? agentId;
+}
+
+/**
+ * registry 手术护栏（2026-10-02 Lead 体验批，双席会审裁定）：label 是 caseId
+ * 键——手改 matrix 行（改名/删行）会让台账旧记录退出矩阵。纯函数、warn-only、
+ * per-agent 形状（渲染同 certMigrationAdvisories 约定：不带 id 前缀）。
+ * 仅**退出矩阵的旧 caseId** 报警（首次认证/台账为空/单纯新增不误报）；另查该
+ * agent 的 label 被其他 agent 行撞名（caseId 合并键是全局的）。无台账/无矩阵 →
+ * 静默（fail-silent 同族）。
+ *
+ * @param {string} agentId
+ * @param {object[]|undefined} matrixRows - 原始 certification.matrix 全表
+ * @param {object|undefined} workerRecord - 该 agent 的 summary.workers 条目
+ * @returns {string[]}
+ */
+export function matrixLabelRetirementAdvisories(agentId, matrixRows, workerRecord) {
+  const advisories = [];
+  if (!Array.isArray(matrixRows)) return advisories;
+  const ownLabels = new Set();
+  for (const row of matrixRows) {
+    if (row?.agentId === agentId) ownLabels.add(matrixCaseLabel(agentId, row));
+  }
+  // 注意：ownLabels 为空（该 agent 的 matrix 行被整删）**不**提前返回——
+  // 台账有历史 caseId 而矩阵无行 = 删行形状，历史记录全部退出矩阵，必须报警
+  // （验证会审探针实证：提前返回会让"删最后一行"绕过护栏）。
+  for (const row of matrixRows) {
+    if (!row || row.agentId === agentId || typeof row.agentId !== "string") continue;
+    if (ownLabels.size === 0) break;
+    const foreign = matrixCaseLabel(row.agentId, row);
+    if (ownLabels.has(foreign)) {
+      advisories.push(
+        `label "${foreign}" 与 ${row.agentId} 的 matrix 行撞名——caseId 合并键是全局的，跨 agent 撞名会让两条 lane 的认证记录互相覆盖，必须改名`,
+      );
+    }
+  }
+  const ledger = workerRecord?.cases;
+  if (!Array.isArray(ledger) || ledger.length === 0) return advisories;
+  const removed = ledger.filter((caseId) => typeof caseId === "string" && !ownLabels.has(caseId));
+  if (removed.length > 0) {
+    advisories.push(
+      `label 用作 caseId 键：历史 caseId [${removed.join(", ")}] 已不在当前矩阵——若为改名，新 label 不会按旧键更新记录（下次 reliability 按既有规则清理，pruneStaleCases）；请确认此变化有意`,
+    );
+  }
+  return advisories;
+}

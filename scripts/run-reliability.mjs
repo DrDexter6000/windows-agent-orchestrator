@@ -323,6 +323,11 @@ mkdirSync(DRILL_TRANSCRIPTS_DIR, { recursive: true });
 const results = [];
 let allPass = true;
 
+if (ONLY_AGENT) {
+  // 2026-10-02 Lead 体验批（双席会审 Q3）：--agent 模式分栏——目标 lane 结果与
+  // 环境噪声（[ambient] 段）视觉分离；最终判定行与退出码语义不动。
+  console.log(`=== target lane: ${ONLY_AGENT} ===`);
+}
 for (const tc of MATRIX) {
   console.log(`[RUN] ${tc.label} (${tc.agentId})...`);
   const info = agentInfo(tc.agentId);
@@ -519,7 +524,7 @@ for (const tc of MATRIX) {
 // ADR-0032 §8（2026-09-21 修复）：serve 不可达时不再写"通过"（旧坏模式：silentPass=true
 // 顶绿）——检查如实记 not-applicable + 原因（fallback lane down）；不置绿、不算失败，
 // allPass/退出码只受真失败影响。
-console.log("[RUN] silentTimeout early-fail test...");
+console.log(`${ONLY_AGENT ? "[ambient] " : ""}[RUN] silentTimeout early-fail test...${ONLY_AGENT ? " (fallback-lane 探针，与目标 lane 无关)" : ""}`);
 let serveReachable = false;
 try {
   const probeRes = await fetch(`${SERVE_URL}/`, { method: "GET", signal: AbortSignal.timeout(3000) });
@@ -533,7 +538,7 @@ let silentElapsed = 0;
 let silentResult = null;
 let silentCheck;
 if (!serveReachable) {
-  console.log(`  [N/A] silentTimeout: opencode-serve not reachable at ${SERVE_URL} (fallback lane down; process-based silent-timeout covered by TD-43 unit tests)`);
+  console.log(`  ${ONLY_AGENT ? "[ambient] " : ""}[N/A] silentTimeout: opencode-serve not reachable at ${SERVE_URL} (fallback lane down; process-based silent-timeout covered by TD-43 unit tests)`);
   silentState = "not-applicable";
   silentCheck = naCheck(
     "silentTimeout",
@@ -567,7 +572,7 @@ if (!serveReachable) {
                silentElapsed < 25000;
   silentState = silentPass ? "pass" : "fail";
   silentCheck = check("silentTimeout", silentPass, "operational", `failed=${silentResult?.failed}, elapsed=${silentElapsed}ms`, { capability: "silentTimeout" });
-  console.log(`  [${silentPass ? "PASS" : "FAIL"}] silentTimeout: failed=${silentResult?.failed}, elapsed=${silentElapsed}ms`);
+  console.log(`  ${ONLY_AGENT ? "[ambient] " : ""}[${silentPass ? "PASS" : "FAIL"}] silentTimeout: failed=${silentResult?.failed}, elapsed=${silentElapsed}ms`);
 }
 if (silentState === "fail") allPass = false;
 // suite case 的全绿基准：N/A 不置绿（pass=false → lastHealthyRunAt=null），但也不算失败。
@@ -650,6 +655,14 @@ writeFileSync(summaryPath, JSON.stringify(summary, null, 2));
 console.log("Drill transcripts (runs/reliability/): publish path never deletes (audit fix 2026-09-22) — unreferenced transcripts are pruned only by the explicit maintenance step:");
 console.log("  node scripts/wao-node.cjs scripts/reliability/prune-drill-transcripts.mjs [--max-age-days <n>] [--dry-run]");
 console.log(`\nSummary written to ${summaryPath}`);
-console.log(`Certification counts: ${JSON.stringify(summary.counts)}`);
+if (ONLY_AGENT) {
+  const laneCases = closedCases.filter((c) => (c.agentId ?? "") === ONLY_AGENT);
+  const laneCounts = {};
+  for (const c of laneCases) laneCounts[c.certification?.status ?? "unknown"] = (laneCounts[c.certification?.status ?? "unknown"] ?? 0) + 1;
+  console.log(`Target lane counts: ${JSON.stringify(laneCounts)}`);
+  console.log(`[ambient] Certification counts (post-merge whole-ledger, 含其他 lane 旧 case): ${JSON.stringify(summary.counts)}`);
+} else {
+  console.log(`Certification counts: ${JSON.stringify(summary.counts)}`);
+}
 console.log(`\n=== ${allPass ? "ALL PASS" : "SOME FAILED"} ===`);
 process.exit(allPass ? 0 : 1);

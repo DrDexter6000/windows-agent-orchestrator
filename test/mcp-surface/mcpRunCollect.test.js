@@ -973,7 +973,7 @@ test("TD-121: inconsistent projection fails closed at the boundary with zero aud
       const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_td121" } });
       assert.equal(res.isError, true, `(${truncated}, ${JSON.stringify(nextCursor)}): flagged as error`);
       const text = res.content.find((b) => b.type === "text").text;
-      assert.equal(text, "run_collect failed", "fixed safe text, no violation detail leaks");
+      assert.equal(text, "run_collect failed — call run_diagnose for the recorded run state and failure evidence", "fixed safe text（2026-10-02 起附静态诊断指路——会审 Q2 双通道）, no violation detail leaks");
       assert.ok(!res.structuredContent, "no structuredContent on the collapsed error");
       assert.equal(commitCalls.length, 0, "commitAppend never called — the check fires before the audit commit");
     } finally {

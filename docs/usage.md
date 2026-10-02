@@ -274,6 +274,10 @@ npm run cli -- <command> [options]
 
 **已执行 `npm link` 后（M12-8F），优先用全局 `wao` 命令**：`wao <command> [options]` 与 `npm run cli -- <command> [options]` 等价（同一个 CLI、同一个 v22 shim），且可从任意目录调用。`npm run cli --` 嵌套形式仍完整保留。
 
+> **脚本化消费（管道/jq，2026-10-02 实证）**：`npm run cli --` 的 stdout 会带 npm 横幅行（`> windows-agent-orchestrator@…`），直接 `| jq` 会炸——加 `-s`（silent）得干净输出：`npm run cli -s -- <command> --format json | jq`。**读转录文件（`runs/<runId>.jsonl`）时注意平铺形状**：事件的载荷字段合并信封顶层（`{kind, role, parts, ts, seq, runId, agentId, type}` 一层平铺）——**没有**嵌套的 `payload` 键；信封字段（ts/seq/runId/agentId/type）权威、载荷不得覆盖；`run.error` 的 `error`/`phase` 同样在顶层。消费输出时**优先用 projection JSON（`collect --format json`）——那是路径无关形状**；直读转录或 raw collect 才需要按 kind 形解析。`--format json` 的诊断输出自 2026-10-02 起含 `state`/`terminal`（非终态与"无失败事实"不再混淆）。
+
+> **行为变更（2026-10-02 Lead 体验批，双席会审）：kimi-web 的 collect 改转录重建**——此前 collect 对带 serveUrl 的 run 一律走 OpenCode 消息协议拉活服务（对 kimi-web 是错适配器 + 无鉴权，从未成功过；会话被服务端回收后崩溃）。现在 kimi-web run 的 collect 与 process backend 同路：从转录事件重建（不变量 1），活服务不再参与 collect。三个连带语义：① 活 run 的 collect 返回**截至当前已落盘内容**的快照（与 process 一致，非实时拉取）；② raw 模式输出形状从 serve 信封变为重建条目（`reconstructed:true, backend:"kimi-web"`——backend 身份自 session.created 派生，不再误标 process；projection/`--format json` 面**字段结构**不变，但 `evidenceCounts` 计数值从 serve 形的 tool/command 全记 other 变为真实计数——机器消费字段的值会变，如 run_20261002121934119hkvz81 实得 command=30/toolUse=36/toolResult=67）；③ **跨版本翻页游标作废**——升级前发出的 serve 形 nextCursor 升级后按既有 fail-closed 语义拒绝（快照摘要不匹配），重新从第 1 页读起即可。停止验证消费者的 `handle.messages` 活会话探针不受影响。
+
 ### 场景 1：让 agent 做一件事并等结果
 
 ```powershell

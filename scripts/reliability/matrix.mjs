@@ -1,6 +1,7 @@
 // R23-C：providerKey（认证身份第 4 维）归一化单一实现——src 宿主下向 import，
 // 与 run-reliability.mjs agentInfo / runManager.matchedCertRecord 同源零漂移。
 import { providerKeyFor } from "../../src/providerFingerprint.js";
+import { matrixCaseLabel } from "../../src/registry.js";
 
 const LEGACY_MATRIX = [
   { agentId: "coder", label: "GLM snapshot-stable", providerID: "zhipuai-coding-plan" },
@@ -66,7 +67,7 @@ function normalizeCase(tc, agent = {}, profileOverride) {
   const drills = normalizeDrills(tc.drills, profile);
   return {
     agentId: tc.agentId,
-    label: tc.label ?? tc.agentId,
+    label: matrixCaseLabel(tc.agentId, tc),
     profile,
     drills,
     requiredCategories: mergeCategories(tc.requiredCategories, requiredCategoriesForDrills(drills)),

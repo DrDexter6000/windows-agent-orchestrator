@@ -29,6 +29,19 @@ import { KimiWebBackend } from "./kimiWeb.js";
 import { ZcodeBackend } from "./zcode.js";
 import { getWaoCliPath } from "../waoCliPath.js";
 
+// 「转录自报」能力位（2026-10-02 Lead 体验批，双席会审两席共同裁定）：
+// 消息与证据事件**完整落盘**的 backend（collect 走转录重建，不做活服务拉取）。
+// 这是行为元数据表（HARNESS_VERSION_PROBES 同形状——键控查表，共享层不按
+// runtime 名分支），**不是** gen:certification 的能力轴，不进派生面。
+// 本批仅启用 kimi-web（其 run.event 完整性已实证：run_20261002121934119hkvz81
+// 36 tool_use/67 tool_result/30 command/1 file_written/2 message 含 5,560 字终稿）。
+// opencode-serve 的 run.event 亦落盘（N4）但本批不扩大爆炸半径——留口：全员
+// 启用后 serve 拉取路径可整体退役（取源统一为转录重建）。
+export const SELF_REPORTED_TRANSCRIPT_BACKENDS = Object.freeze(new Set(["kimi-web"]));
+export function collectsFromTranscript(backendName) {
+  return typeof backendName === "string" && SELF_REPORTED_TRANSCRIPT_BACKENDS.has(backendName);
+}
+
 /**
  * 按 agent.backend 选对应后端实例。
  *

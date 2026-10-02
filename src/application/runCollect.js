@@ -23,6 +23,7 @@ import { readTranscript, findLatestBound, findFirstBound, JsonlTranscript, findL
 import { isValidRunId } from "../delivery.js";
 // R21（TD-128 W2 升格修复）：重建输入的绑定作用域——metrics.js 单一定义处。
 import { boundReportScope } from "../metrics.js";
+import { collectsFromTranscript } from "../backends/factory.js";
 
 const DEFAULT_LIMIT = 50;
 
@@ -230,7 +231,16 @@ export async function collectRunMessages({
   // continuation contract (shape-driven algorithm, no runtime-name branch).
   const isProjectionMode = deferAppend;
 
-  if (!session.serveUrl) {
+  // 2026-10-02 Lead 体验批（双席会审两席共同核实的根因）：「有 serveUrl」≠「走
+  // OpenCode 消息协议」——kimi-web run 带 serveUrl，但其消息端点形状/鉴权完全
+  // 不同（/api/v1/sessions/<id>/messages + Bearer vs OpenCode /session/<id>/
+  // message 无鉴权）；此前 serve 路径无条件实例化 OpenCodeServeBackend（错适配
+  // 器 + 无鉴权——对 kimi-web 从未成功过，会话回收后 collect 崩溃只是最先暴露
+  // 的形状）。「转录自报」能力位（见 factory：键控元数据表，共享层不按 runtime
+  // 名分支）的 backend 走转录重建——不变量 1：run 真相来自转录；活 run 语义 =
+  // 截至当前快照（与 process backend 一致）。crash run（无 session.created）
+  // 仍保 "no session metadata" 拒绝（R13-C 同面），CLI 侧附诊断指路。
+  if (!session.serveUrl || collectsFromTranscript(session.backend)) {
     // Process-backed: reconstruct run.event entries from transcript.
     // M12-3: reuse the shared reconstructItemsFromEvents SSOT (one algorithm).
     // R21（TD-128 W2 升格修复，原 W4"明确不做"经双席咨询改判）：重建输入经
@@ -247,19 +257,29 @@ export async function collectRunMessages({
 
     const payload = {
       backendSessionId: session.backendSessionId,
-      backend: "process",
+      // backend 身份从 session.created 事实派生（runAwaitResult 同款先例）——
+      // process run 的 session.created 恒带 backend:"process"（零漂移），
+      // kimi-web 如实上报自身身份（此前硬编码 "process" 会让 wire 消费者看到
+      // 错误身份）。
+      backend: typeof session.backend === "string" && session.backend.length > 0 ? session.backend : "process",
       count: reconstructed.length,
       reconstructed: true,
     };
     if (isProjectionMode) {
       return {
-        data: reconstructed, reconstructed: true, backend: "process", agentId,
+        data: reconstructed, reconstructed: true,
+        backend: typeof session.backend === "string" && session.backend.length > 0 ? session.backend : "process",
+        agentId,
         commitAppend: buildCommitAppend(appendCollectedFn, transcriptPath, runId, payload),
       };
     }
     const _append = appendCollectedFn ?? defaultAppendFn(transcriptPath, runId);
     await _append("messages.collected", payload);
-    return { data: reconstructed, reconstructed: true, backend: "process", agentId };
+    return {
+      data: reconstructed, reconstructed: true,
+      backend: typeof session.backend === "string" && session.backend.length > 0 ? session.backend : "process",
+      agentId,
+    };
   }
 
   // Serve-backed: fetch messages via backend capability.

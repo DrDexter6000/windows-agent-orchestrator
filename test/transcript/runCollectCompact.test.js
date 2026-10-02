@@ -292,7 +292,7 @@ test("M12-2A-F2: MCP compact+cursor → service NOT called, fixed error, no leak
     assert.equal(callCount, 0, "service must NOT be called for compact+cursor");
     assert.equal(res.isError, true, "compact+cursor flagged as error");
     const text = res.content.find((b) => b.type === "text").text;
-    assert.equal(text, "run_collect failed", "fixed safe text only");
+    assert.equal(text, "run_collect failed — call run_diagnose for the recorded run state and failure evidence", "fixed safe text only（2026-10-02 起附静态指路）");
     assert.ok(!res.structuredContent, "no partial structuredContent");
   } finally {
     await client.close();
@@ -416,7 +416,7 @@ test("M12-2A-H2: MCP compact where service fails appends ZERO", async () => {
     try {
       const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_h2", mode: "compact" } });
       assert.equal(res.isError, true, "service failure → error");
-      assert.equal(res.content.find((b) => b.type === "text").text, "run_collect failed");
+      assert.equal(res.content.find((b) => b.type === "text").text, "run_collect failed — call run_diagnose for the recorded run state and failure evidence");
       assert.ok(!res.structuredContent, "no partial output on service failure");
     } finally {
       await client.close();
@@ -584,7 +584,7 @@ test("M12-2A-J3: compact error returns fixed text and leaks no secret/command/pa
     assert.equal(callCount, 1);
     assert.equal(res.isError, true);
     const dumped = JSON.stringify(res);
-    assert.equal(res.content.find((b) => b.type === "text").text, "run_collect failed");
+    assert.equal(res.content.find((b) => b.type === "text").text, "run_collect failed — call run_diagnose for the recorded run state and failure evidence");
     assert.ok(!dumped.includes(secret), "no secret leak");
     assert.ok(!/rm|evil|secret/i.test(dumped), "no command/path/secret detail leak");
     assert.ok(!res.structuredContent, "no partial structuredContent");
@@ -769,7 +769,7 @@ test("M12-2A-L2: MCP compact collapses serve-sentinel throw to fixed error, zero
     try {
       const res = await client.callTool({ name: "run_collect", arguments: { runId: "run_l2", mode: "compact" } });
       assert.equal(res.isError, true);
-      assert.equal(res.content.find((b) => b.type === "text").text, "run_collect failed");
+      assert.equal(res.content.find((b) => b.type === "text").text, "run_collect failed — call run_diagnose for the recorded run state and failure evidence");
       assert.ok(!res.structuredContent);
     } finally {
       await client.close();

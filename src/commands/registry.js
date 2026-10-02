@@ -10,7 +10,7 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { readRegistry, normalizeAgent, certMigrationAdvisories, KNOWN_BACKENDS, unknownBackendGuidance } from "../registry.js";
+import { readRegistry, normalizeAgent, certMigrationAdvisories, matrixLabelRetirementAdvisories, KNOWN_BACKENDS, unknownBackendGuidance } from "../registry.js";
 import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { backendCapabilitySnapshot } from "../backends/factory.js";
 import { isSecretEnvName } from "../secretRedaction.js";
@@ -337,6 +337,14 @@ async function registryValidateCommand(args, config) {
       // be tampered), and no record at all means no ledger → no advisory. This
       // does not change validate's pass/fail semantics.
       warnings.push(...certMigrationAdvisories(summaryWorkers?.[id]));
+      // 2026-10-02 Lead 体验批（双席会审）：matrix 手术护栏——label 是 caseId 键，
+      // 手改行会让台账旧记录退出矩阵（Lead 当日手改 researcher 行时无任何提示）。
+      // warn-only 不改 valid/退出码；矩阵缺失静默（同 certMigration 纪律）。
+      warnings.push(...matrixLabelRetirementAdvisories(
+        id,
+        parsed?.certification?.matrix,
+        summaryWorkers?.[id],
+      ));
       // M11-5（TD-89 修复）：所有三个 process backend（claude-code/codex/kimi-code）
       // 现在都消费 systemPrompt。registry validate 用共享加载器（roleContract.js）
       // 验证角色文件——缺失/目录/空/超限/非法 UTF-8/NUL 都 fail closed（不再是

@@ -1265,7 +1265,10 @@ const RUN_STATUS_DESCRIPTION =
 // CLI delegate to it — there is no second projection algorithm here. The
 // schema constants below are the MCP output contract only.
 
-const COLLECT_ERROR_TEXT = "run_collect failed";
+// 2026-10-02 Lead 体验批（会审 Q2 双通道）：MCP 固定错误文本追加静态诊断指路
+// （静态后缀不破坏"绝不泄漏原始异常"契约；collect 取回失败 ≠ 运行失败——
+// run_diagnose 给的是已记录的运行状态与失败证据，不承诺解释取回故障本身）。
+const COLLECT_ERROR_TEXT = "run_collect failed — call run_diagnose for the recorded run state and failure evidence";
 const COLLECT_LIMIT = 50;
 // Cursor alphabet: base64url (RFC 4648 §5), no padding. ≤192 chars.
 const COLLECT_CURSOR_RE = /^[A-Za-z0-9_-]+$/;
