@@ -40,7 +40,7 @@
 // 本模块内部 helper：_doctorParseSmoke、isProviderWrappedClaudeCodeWorker、
 // hasClaudeOauthCredentials、whichCli（均为 doctor 专用，随 doctor 族搬迁）。
 
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve, join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -549,15 +549,23 @@ export async function waoDoctorCommand(args, config) {
     process.platform === "win32" ? "where" : "which",
     ["wao"], { encoding: "utf8", windowsHide: true, timeout: 15000 },
   );
-  const waoPath = (whereWao.status === 0 ? (whereWao.stdout ?? "").split("\n").map((l) => l.trim()).filter(Boolean)[0] : null) ?? null;
+  const whereLines = whereWao.status === 0 ? (whereWao.stdout ?? "").split("\n").map((l) => l.trim()).filter(Boolean) : [];
+  // Windows 上 where 返回多行（无扩展 sh 包装 / .cmd / .ps1）——优先可执行扩展，
+  // 免得 spawn 无扩展包装拿不到版本、把"未知"误报成漂移。
+  const waoPath = (process.platform === "win32"
+    ? (whereLines.find((l) => /\.(cmd|exe)$/i.test(l)) ?? whereLines[0])
+    : whereLines[0]) ?? null;
+  let shimVersion = null;
   if (waoPath) {
     installLines.push(`全局 \`wao\` 在 PATH：${waoPath}`);
-    let shimVersion = "未知";
+    shimVersion = "未知";
     try {
-      const v = spawnSync(waoPath, ["--version"], { encoding: "utf8", windowsHide: true, timeout: 30000 });
+      const v = spawnSync(`"${waoPath}" --version`, { encoding: "utf8", windowsHide: true, timeout: 30000, shell: true });
       if (v.status === 0) shimVersion = (v.stdout ?? "").trim() || "未知";
     } catch { /* 探测失败如实报未知 */ }
-    if (shimVersion === WAO_VERSION) {
+    if (shimVersion === "未知") {
+      installLines.push("shim 版本未探测到（无法与当前仓比对——如实报未知，不判漂移）。");
+    } else if (shimVersion === WAO_VERSION) {
       installLines.push(`版本与当前仓一致（${WAO_VERSION}）。`);
     } else {
       installLines.push(
@@ -568,7 +576,15 @@ export async function waoDoctorCommand(args, config) {
     installLines.push("PATH 上无全局 \`wao\`——用 \`npm run cli -- <command>\`（走 v22 shim）调用；这是仓内正常调用形态，不是安装缺失。");
   }
   const skillsCopySkill = join(homedir(), ".agents", "skills", "wao-orchestrator", "SKILL.md");
+  const skillsPkg = join(homedir(), ".agents", "skills", "wao-orchestrator", "package.json");
+  // 三根盘点（TD-191⑥ 一致性机制，Owner 2026-10-02 裁定 C=日常根）：收集各在场
+  // 安装形态的版本事实，末尾统一做一致性裁决报告——只报事实与漂移，不自动选根。
+  const rootVersions = [];
+  const skillsVersion = existsSync(skillsPkg)
+    ? (() => { try { return JSON.parse(readFileSync(skillsPkg, "utf8")).version ?? "未知"; } catch { return "未知"; } })()
+    : null;
   if (existsSync(skillsCopySkill)) {
+    rootVersions.push(["B skills 拷贝", skillsVersion ?? "未知"]);
     const repoSkillPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "SKILL.md");
     let inSync = null;
     try {
@@ -580,11 +596,33 @@ export async function waoDoctorCommand(args, config) {
       inSync === null
         ? `skills 整仓拷贝在场（${dirname(skillsCopySkill)}；同步性未探测）。`
         : inSync
-          ? `skills 整仓拷贝与当前仓同步（SKILL.md 一致）。`
-          : `skills 整仓拷贝与当前仓**不同步**（SKILL.md 有差异）——宿主可能加载旧技能（TD-191⑥）。`,
+          ? `skills 整仓拷贝与当前仓同步（SKILL.md 一致；版本 ${skillsVersion ?? "未知"}）。`
+          : `skills 整仓拷贝与当前仓**不同步**（SKILL.md 有差异；版本 ${skillsVersion ?? "未知"}）——宿主可能加载旧技能（TD-191⑥）。`,
     );
   }
-  installLines.push(`当前检出（安装权威候选之一）：${dirname(fileURLToPath(import.meta.url))}${sep}..${sep}..`);
+  // C 根（installer 形态，AGENT_ONBOARDING §4a 默认 %USERPROFILE%\wao）
+  const installerPkg = join(homedir(), "wao", "package.json");
+  if (existsSync(installerPkg)) {
+    let cv = "未知";
+    try { cv = JSON.parse(readFileSync(installerPkg, "utf8")).version ?? "未知"; } catch { /* 如实未知 */ }
+    rootVersions.push(["C installer 根", cv]);
+    installLines.push(`installer 根在场：${join(homedir(), "wao")}（版本 ${cv}；Owner 裁定的日常执行根——TD-191⑥）。`);
+  }
+  if (shimVersion !== null && shimVersion !== "未知") rootVersions.push(["PATH 全局 shim", shimVersion]);
+  installLines.push(`当前检出（安装权威候选之一）：${dirname(fileURLToPath(import.meta.url))}${sep}..${sep}..（版本 ${WAO_VERSION}）`);
+  rootVersions.push(["A 当前检出", WAO_VERSION]);
+  // 一致性裁决报告：在场形态 ≥2 且版本不齐 → 明示漂移与维护义务；只有一份在场
+  // 则明示"唯一在册"，避免把单形态机器误报成漂移。
+  const present = new Set(rootVersions.map(([, v]) => v));
+  if (rootVersions.length >= 2) {
+    installLines.push(
+      present.size === 1
+        ? `安装形态 ${rootVersions.length} 份在场、版本一致（${[...present][0]}）——一致性义务满足。`
+        : `**安装形态版本漂移**：${rootVersions.map(([n, v]) => `${n}=${v}`).join(" / ")}——三份一致性维护义务与刷新规则见 AGENT_ONBOARDING §2（日常根=C，Owner 2026-10-02 裁定）。`,
+    );
+  } else {
+    installLines.push("在册安装形态唯一（当前检出）——无一致性义务。");
+  }
   checks.push({
     name: "invocation_method",
     pass: true,

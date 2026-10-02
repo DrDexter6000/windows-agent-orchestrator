@@ -36,6 +36,8 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 
 **安装形态与"我实际用的是哪份 WAO"（TD-191⑥）**：一台机器上可能并存三种 WAO 安装形态——①开发仓检出（`npm run cli` 调用，或 `npm link` 后的全局 `wao`，后者始终执行 link 的活检出）；②`~/.agents/skills/wao-orchestrator` 整仓拷贝（skill 消费者只读形态，**会随时间与主仓漂移**）；③installer 装到自选根（如 `%USERPROFILE%\wao`）。`wao doctor` 的 `invocation_method` 检查项**只报事实不裁决**：PATH 上有无全局 `wao`、其版本是否与当前检出漂移、skills 拷贝是否同步、当前检出根在哪。多份并存时收敛为一份属 Owner 机器裁定；判断"刚才那条命令用了哪份"以 doctor 报告的检出根 + 实际调用形态为准。
 
+**角色定位与三份一致性维护义务（Owner 2026-10-02 裁定；auditor 咨询 run_20261002222103077r5zygi）**：**A 开发仓**=开发 WAO 本体时显式使用；**B skills 拷贝**=只承担技能发现，不承担执行；**C installer 根=日常执行根**（日常调用与全局入口指向 C，需要验证开发行为时显式用 A）。三份并存即承担**保持一致、不互相冲突的维护义务**，机制地板：`wao doctor` 三根盘点（各在场形态的版本 + skills 拷贝同步态），在场 ≥2 份即输出一致性裁决行——版本漂移被明示并指向本节；B 的刷新以与 C 匹配的来源为准（记录来源提交，先验证再替换，保留旧副本回滚）；SKILL.md 同步 ≠ 整仓同步，B 不能当执行根用。
+
 ## 3. 前置条件检查
 
 在安装前，确认环境满足（不满足的项先跑 §4d 的 doctor 报告给 owner——doctor 是建议性报告，不是使用门禁）：
@@ -160,7 +162,7 @@ npm run mcp -- --registry config/agents.json --run-dir runs
 
 **未验证宿主（如 zcode）的入表清单（Owner 在场执行，可逆步骤）**：宿主表只收格式已核实的宿主（fail-closed，不猜格式）。给新宿主入表：① 记录宿主名与版本；② 备份该宿主 MCP 配置文件；③ 把 host-neutral 片段（`wao onboarding` 输出的 mcpServers JSON）按该宿主语法追加为单键 `wao` 条目（不改动既有键）；④ 重启宿主，观察 wao server 出现并能调用只读工具（`lead_preflight`）；⑤ 无论成败还原备份，把"格式与加载结果"记录进 hostDescriptors 的证据锚点，`hostVerified` 按结果如实置位。⑤ 之前，host-neutral 片段对任何 MCP 宿主仍可直接手接。
 
-**zcode 入表现状（2026-10-02 走查至第 ③ 步前半）**：格式已核实——ZCode 的 MCP 注册走**插件系统**（非 mcpServers JSON）：插件包 = `.claude-plugin/plugin.json`（name/description/author）+ 根级 `.mcp.json`（**扁平** server 映射 `{wao: {command, args}}`），证据 = 本机在册 context7 插件实包勘察。`mcp bind --host zcode` 现已 emit 该插件包内容（`hostVerified=false`）。**剩余 Owner 步骤**：①' 记录 ZCode 版本（app 内"关于"页，本机无离线可读版本文件）；③' 把 emit 的两个文件放入本地插件目录并注册（本机未发现本地插件注册命令——installed_plugins.json 是内部注册表，手改有风险，倾向找 ZCode 的插件安装入口或问官方）；④ 重启 ZCode 观察 wao server → 成功则 hostVerified 置 true；⑤ 还原/清理。内置 server（4_5v/web_reader/node_repl）的注册面本轮未定位到（不在插件缓存），说明 ZCode 可能另有非插件 MCP 通道——入表时一并确认。
+**zcode 入表现状（2026-10-03 走查至第 ④ 步执行中）**：格式已核实——ZCode 的 MCP 注册走**插件系统**（非 mcpServers JSON）：插件包 = `.claude-plugin/plugin.json`（name/description/author）+ 根级 `.mcp.json`（**扁平** server 映射 `{wao: {command, args}}`），证据 = 本机在册 context7 插件实包勘察。**本地注册三件套已确认并执行**（插件目录 `~/.zcode/cli/plugins/cache/local/wao/0.2.0/` + `installed_plugins.json` 条目 + `config.json` `enabledPlugins` 开关；注册表备份在 gitignored `.dev/zcode-admission-backup/`）。**宿主版本已记录：ZCode 3.14.4.7912**（exe VersionInfo）。渲染层重载（Ctrl+R）**不**重扫插件——装机后需整机重启；判定证据（重启后新 wao stdio 进程）由延迟重启器+监护脚本写 gitignored `.dev/zcode-admission-result.txt`（`WVERDICT` 行）。回滚：拷回两个备份文件 + 删插件目录。内置 server（4_5v/web_reader/node_repl）的注册面仍未定位（不在插件缓存），或有非插件通道。`mcp bind --host zcode` emit 同款插件包内容（hostVerified=false 直至 WVERDICT 确认加载）。
 
 ### 4f. 首次只读 canary
 
