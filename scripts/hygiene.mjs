@@ -25,7 +25,11 @@ export const ROOT_WHITELIST = new Map([
 // ---- W4 config ----
 // 2026-10-02 175→185：M13-r1 交付分支把计数顶到 176（Lead 派发即顶帽——帽先于
 // 交付存在且已 175/175）；抬帽经 declare 登记，已决交付分支的批量清退另立工作项。
-export const BRANCH_CAP = 185; // 2026-09-30 baseline 151 + headroom（2026-10-02 抬至 185）
+// 决定 0042（2026-10-02）：BRANCH_CAP 的 SSOT 迁至 src/dispatchResourceAdvisory.js
+//（本文件 re-export——单一定义保持）；**帽只降不升**，上调须 Owner 明示并同步
+// hygieneGitState.test.js 的只降钉。2026-10-02 的 175→185 系最后一次抬升。
+import { BRANCH_CAP } from "../src/dispatchResourceAdvisory.js";
+export { BRANCH_CAP };
 
 // ---- W5 config: known external checkout roots ----
 // 用户名相关根从 os.homedir() 运行时派生（tracked 文件不得含本机绝对路径——

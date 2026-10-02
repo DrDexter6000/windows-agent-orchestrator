@@ -19,6 +19,10 @@
 // runCommand 的 console.error 挂接（3 行 wiring）不在纯单测覆盖——由直接消费
 // 者既有测试（readOnlyDispatch RO-C4 等真跑 runCommand）守护不回归。
 
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -45,6 +49,10 @@ const BRANCH_LIST = [
 ].join("\n");
 
 /** 按序回放响应的 fake 执行器：Error 实例 → 抛出；否则作为 stdout 返回。 */
+function makeTempStateDir() {
+  return mkdtempSync(join(tmpdir(), "wao-adv-state-"));
+}
+
 function makeFakeExec(responses) {
   const calls = [];
   const fakeExec = (command, options) => {
@@ -57,13 +65,13 @@ function makeFakeExec(responses) {
 }
 
 test("S3-1: 正常计数 → 行出现且整行全等；两命令与 options 形状钉死", () => {
-  const { fakeExec, calls } = makeFakeExec([WORKTREE_PORCELAIN, BRANCH_LIST]);
-  const line = renderDispatchResourceAdvisory("D:/proj", { exec: fakeExec });
+  const { fakeExec, calls } = makeFakeExec([WORKTREE_PORCELAIN, BRANCH_LIST, "D:/proj/main\n"]);
+  const line = renderDispatchResourceAdvisory("D:/proj", { exec: fakeExec, stateDir: makeTempStateDir() });
   assert.equal(
     line,
     "[wao] advisory: worktrees=2 waoRunBranches=3 (npm run hygiene for details)",
   );
-  assert.equal(calls.length, 2, "恰两次子进程调用");
+  assert.equal(calls.length, 3, "恰三次子进程调用（决定 0042 起第三拍 rev-parse 作状态键）");
   assert.equal(calls[0].command, "git worktree list --porcelain");
   assert.equal(calls[1].command, 'git branch --list "wao/run_*"');
   for (const c of calls) {
@@ -77,8 +85,9 @@ test("S3-2: CRLF 输出（Windows git 真实形态）→ 计数不漂", () => {
   const { fakeExec } = makeFakeExec([
     WORKTREE_PORCELAIN.split("\n").join("\r\n"),
     BRANCH_LIST.split("\n").join("\r\n"),
+    "D:/proj/main\r\n",
   ]);
-  const line = renderDispatchResourceAdvisory("D:/proj", { exec: fakeExec });
+  const line = renderDispatchResourceAdvisory("D:/proj", { exec: fakeExec, stateDir: makeTempStateDir() });
   assert.equal(
     line,
     "[wao] advisory: worktrees=2 waoRunBranches=3 (npm run hygiene for details)",
@@ -87,8 +96,8 @@ test("S3-2: CRLF 输出（Windows git 真实形态）→ 计数不漂", () => {
 
 test("S3-3: 零 wao/run_* 分支（空输出）→ waoRunBranches=0 照常成行", () => {
   const singleMain = "worktree D:/proj/main\nHEAD 1111\nbranch refs/heads/main\n";
-  const { fakeExec } = makeFakeExec([singleMain, "\n"]);
-  const line = renderDispatchResourceAdvisory("D:/proj", { exec: fakeExec });
+  const { fakeExec } = makeFakeExec([singleMain, "\n", "D:/proj/main\n"]);
+  const line = renderDispatchResourceAdvisory("D:/proj", { exec: fakeExec, stateDir: makeTempStateDir() });
   assert.equal(
     line,
     "[wao] advisory: worktrees=1 waoRunBranches=0 (npm run hygiene for details)",
@@ -128,9 +137,9 @@ test("S3-7: 输出非字符串（不可解析）→ null（与子进程失败同
 });
 
 test("S3-8: 每次调用携带同一有界 timeout（fail-open 的有界等待）+ windowsHide", () => {
-  const { fakeExec, calls } = makeFakeExec([WORKTREE_PORCELAIN, BRANCH_LIST]);
-  renderDispatchResourceAdvisory("D:/proj", { exec: fakeExec });
-  assert.equal(calls.length, 2);
+  const { fakeExec, calls } = makeFakeExec([WORKTREE_PORCELAIN, BRANCH_LIST, "D:/proj/main\n"]);
+  renderDispatchResourceAdvisory("D:/proj", { exec: fakeExec, stateDir: makeTempStateDir() });
+  assert.equal(calls.length, 3);
   for (const c of calls) {
     assert.equal(c.options.timeout, ADVISORY_GIT_TIMEOUT_MS);
     assert.ok(
@@ -139,4 +148,47 @@ test("S3-8: 每次调用携带同一有界 timeout（fail-open 的有界等待�
     );
     assert.equal(c.options.windowsHide, true);
   }
+});
+
+
+
+// ===== 决定 0042（Owner 2026-10-02）：变化弹 + 帽内静默 + 超帽恒弹 =====
+import { BRANCH_CAP as SRC_BRANCH_CAP } from "../../src/dispatchResourceAdvisory.js";
+
+const ROOT_OUT = "D:/proj/main\n";
+
+test("决定 0042 ①②: 帽内无变化 → 第二次起静默；数字变化 → 弹一次", () => {
+  const dir = makeTempStateDir();
+  const first = renderDispatchResourceAdvisory("D:/proj", {
+    exec: makeFakeExec([WORKTREE_PORCELAIN, BRANCH_LIST, ROOT_OUT]).fakeExec,
+    stateDir: dir,
+  });
+  assert.ok(first !== null, "首调无先前状态（=变化）→ 弹");
+  const second = renderDispatchResourceAdvisory("D:/proj", {
+    exec: makeFakeExec([WORKTREE_PORCELAIN, BRANCH_LIST, ROOT_OUT]).fakeExec,
+    stateDir: dir,
+  });
+  assert.equal(second, null, "帽内且计数与上次一致 → 静默（治警报疲劳——单日 20+ 次恒弹的旧形状死了）");
+  const grew = BRANCH_LIST + "\n  wao/run_new";
+  const third = renderDispatchResourceAdvisory("D:/proj", {
+    exec: makeFakeExec([WORKTREE_PORCELAIN, grew, ROOT_OUT]).fakeExec,
+    stateDir: dir,
+  });
+  assert.ok(third !== null && third.includes("waoRunBranches=4"), "数字变化 → 弹一次（去重不盲）");
+});
+
+test("决定 0042 ③: 超帽恒弹（违规保持可见直至清退——帽只降不升，清退是唯一出路）", () => {
+  const dir = makeTempStateDir();
+  const many = Array.from({ length: SRC_BRANCH_CAP + 3 }, (_, i) => "  wao/run_" + i).join("\n");
+  const over = () => renderDispatchResourceAdvisory("D:/proj", {
+    exec: makeFakeExec([WORKTREE_PORCELAIN, many, ROOT_OUT]).fakeExec,
+    stateDir: dir,
+  });
+  assert.ok(over() !== null, "超帽弹");
+  assert.ok(over() !== null, "超帽且无变化仍弹——违规不因重复而隐身");
+});
+
+test("决定 0042: BRANCH_CAP 帽只降不升（≤185；上调须 Owner 明示并同步本钉）", () => {
+  assert.equal(SRC_BRANCH_CAP, 185);
+  assert.ok(SRC_BRANCH_CAP <= 185, "帽只降不升（决定 0042）——2026-10-02 的 175→185 系最后一次抬升");
 });

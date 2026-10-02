@@ -574,7 +574,10 @@ if (!serveReachable) {
   silentCheck = check("silentTimeout", silentPass, "operational", `failed=${silentResult?.failed}, elapsed=${silentElapsed}ms`, { capability: "silentTimeout" });
   console.log(`  ${ONLY_AGENT ? "[ambient] " : ""}[${silentPass ? "PASS" : "FAIL"}] silentTimeout: failed=${silentResult?.failed}, elapsed=${silentElapsed}ms`);
 }
-if (silentState === "fail") allPass = false;
+// 决定 0042（Owner 2026-10-02）：--agent 模式退出码只归目标 lane——ambient
+// 段（fallback-lane 探针）真失败不翻 allPass/退出码，只在 [ambient] 行如实可见；
+// 全量模式语义不变（ambient 失败仍算整次失败）。
+if (silentState === "fail" && !ONLY_AGENT) allPass = false;
 // suite case 的全绿基准：N/A 不置绿（pass=false → lastHealthyRunAt=null），但也不算失败。
 const silentCasePass = silentState === "pass";
 results.push({

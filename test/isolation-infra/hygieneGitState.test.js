@@ -53,6 +53,9 @@ test("classifyBranchCount: ratchet boundary", () => {
 test("BRANCH_CAP and external roots carry ADR 0035 values", () => {
   // 2026-10-02 175→185（declare 在案：M13-r1 交付分支顶帽 176；已决分支清退另立）。
   assert.equal(BRANCH_CAP, 185);
+  // 决定 0042（Owner 2026-10-02）：帽只降不升——SSOT 已迁 src/dispatchResourceAdvisory.js
+  //（本文件经 hygiene re-export 消费，值不变）；上调须 Owner 明示并同步 dispatchResourceAdvisory.test.js 的只降钉。
+  assert.ok(BRANCH_CAP <= 185, "BRANCH_CAP 只降不升（决定 0042）");
   for (const [root, reason] of REGISTRY_EXTERNAL_ROOTS) {
     assert.match(root, /^[a-z]:\//, "roots are stored normalized");
     assert.ok(reason.length > 5, "every allowlist entry carries a reason");
