@@ -3515,6 +3515,28 @@ test("TD-184 守卫: 上游 harness 原语表覆盖闭集 + 基线日在刷新�
     + Math.floor(ageDays) + " 天）——按节内规程复核各 backend 的上游原语与接线状态，复核完更新基线日");
 });
 
+// 2026-10-02 前置盘点双席会审（coder_mm 建议）：「认证结果用于派发选择的边界」
+// 节自 2026-10-02 起指针化——只定规则不定名单（席位名单写进 runbook 必随席位
+// 切换漂移，round 2 F8 实证：coder_hq/coder_low 已切 zcode 而正文仍写 Claude
+// Code worker）。负向钉：本节不得出现 example registry 的席位 id（词表派生自
+// config/agents.example.json，非手写清单）；名单解析走 registry list /
+// reliability-summary / team-roles 三指针。
+test("派发策略指针钉: 认证结果用于派发选择的边界节不得写死席位 id", () => {
+  const runbook = read(CERT_RUNBOOK_DOC);
+  const heading = "## 认证结果用于派发选择的边界";
+  const start = runbook.indexOf(heading);
+  assert.ok(start !== -1, `${CERT_RUNBOOK_DOC} 缺「认证结果用于派发选择的边界」节`);
+  const rest = runbook.slice(start + heading.length);
+  const next = rest.indexOf("\n## ");
+  const section = next === -1 ? rest : rest.slice(0, next);
+  const example = JSON.parse(read("config/agents.example.json"));
+  const seatIds = Object.keys(example.agents ?? {});
+  assert.ok(seatIds.length > 0, "example registry 无席位（守卫空转）");
+  const hits = seatIds.filter((id) => new RegExp(`\\b${id}\\b`).test(section));
+  assert.deepEqual(hits, [],
+    `席位 id 不得写死在本节（名单解析走三指针）；命中：${hits.join(", ")}`);
+});
+
 // TD-162 顺带（任务第 3 项评估结论的落地）：onboarding 认证选择表 ↔ registry 模板
 // provider 声明此前无关系守卫（现有测试只做 onboarding 文内关键词在场检查，模板侧
 // env 名换掉不会红）。前向对账成本 ≤15 行：模板声明的每个凭据 env 名都必须在

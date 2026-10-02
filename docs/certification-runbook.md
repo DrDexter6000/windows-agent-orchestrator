@@ -7,11 +7,10 @@
 ## 认证结果用于派发选择的边界（原 usage「当前派发策略」）
 
 当前派发策略：
-- 真实编码/文件修改/命令执行优先用 certified Claude Code worker（如 `coder_hq` / `coder_low`）。
+- 真实编码/文件修改/命令执行优先用经认证的 coder 席位——**本行只定规则、不定名单**：当前哪些席位属此列，查 `registry list`（当前配置 × 历史认证的**匹配投影**，不重验运行时；简表把台账缺失/不可读折叠成"无认证记录"，且**投影不含 certificationScope**——delta/full 只在 summary 磁盘层，双指针互补，勿把 `registry list` 当充分条件；需判适用性时用 `registry list --cert-evidence` 与"认证证据绑定执行画像"节）与当前 runDir 下 `reliability-summary.json` 的 `workers` 字段（认证台账权威），角色划分权威见 `docs/team-roles.md`（席位名单是活配置，写进本文必漂移——2026-10-02 盘点实证后改指针式，负向守卫钉住本节不得出现席位 id）。
 - 标准角色以 `docs/team-roles.md` 为权威，配置落地以 `config/agents.example.json` 为模板。
-- opencode worker 只作为 fallback / optional lane，用于需要 token 闸门精确控成本、且经过认证的特定模型任务。
-- runtime/model 是否可进入 strict dispatch，以 `npm run reliability` 生成的 `runs/reliability-summary.json.workers` 为准。
-- opencode stop 路径已有 TD-37/TD-38 后台 quietness 验证；派发前仍必须看最新 certification、`tokenBudget` 和 stop verification evidence。
+- opencode worker 只作为 fallback / optional lane 的选择政策以 `docs/team-roles.md` 为权威（本文不重复政策正文）；受 Owner 2026-09-30 暂停投入裁定约束（在册裁定状态见原语表行）。派发前仍必须看最新 certification、`tokenBudget` 和 stop verification evidence（TD-37/TD-38 系历史机制证据，不代表当前部署已验证）。
+- runtime/model 是否可进入 strict dispatch，以 `npm run reliability` 生成的 `runs/reliability-summary.json.workers` 为准（本行是**选择参考**；认证的门禁语义——MCP advisory、CLI `--require-certified`——见"认证与当前就绪"节，两回事不混写）。
 
 ## DSH 通道适用限制与能力交叉警告（原 usage registry 配置详解段）
 
@@ -120,16 +119,16 @@ backend 换 model/provider → `--profile delta`；换 backend / 升主力 lane 
 
 > **基线日（as-of）：2026-10-01**；**刷新期限：90 天**（超期由 `test/isolation-infra/docs-consistency.test.js` 的 TD-184 守卫直接变红，不靠人记）。**事件触发优先**：同一 harness 升级、WAO 适配层改动、新 harness 入册，都必须当场刷新本节与基线日。
 
-| backend | 上游会话续接原语 | 实测（as-of 当日） | 上游在途消息原语 | 实测 |
-|---|---|---|---|---|
-| claude-code | `--session-id` / `--resume` | 已接线（组合层认证在册） | stdin stream-json 排队 | 已接线（唯一 supportsInFlightCorrection=true） |
-| codex | `codex exec resume <thread_id>`（会话标识来自 `thread.started.thread_id`；另有 `codex fork`） | **已接线**（2026-09-21，`supportsSessionReuse=true`）；上游正向跨 run 携带上下文、错 id → `no rollout found` exit 1（直跑实测） | `codex queue`（给已有 session 排队消息；0.158.0 起本地在册） | **exec 通道实测阴性（2026-09-30，三次探针）**：消息入队被接受，但 headless `codex exec` 活轮次不消费、exec 单轮结束即退出不续跑；`instant_interrupt`（0.159.0 引入，官方标注 under-development）两端开启后仍无效。queue 预期面向常驻会话面（TUI/app-server，该通道未测） |
-| kimi-code | `kimi -r <session_id>`（stream 内 `session.resume_hint` 广告；另有 `-S/--session`、`-c/--continue`、`kimi fork`） | **已接线**（2026-09-21，`supportsSessionReuse=true`）；上游正向跨 run 携带上下文、错 id → `Session "…" not found` exit 1（直跑实测） | `kimi web` 本地 HTTP API：`POST /api/v1/sessions/{id}/prompts` 排队 + `POST …/prompts:steer` 转入活动轮（本地 2.1.1 OpenAPI 在册） | **实测阳性（2026-09-30）**：`steered:true` 后纠偏消息在同一活会话被消费、模型紧邻轮立即响应（原生成流跑完当轮，打断发生在轮边界）——语义同 claude-code stdin 排队（delivered 即入列，不证明截断当轮生成） |
-| deepseek-harness | 未测（旧 dsh 原生通道；WAO 侧声明 false） | — | 未测 | — |
-| deepseek-acp | ACP `session/resume` | 已接线（ADR-0031 §3.6 + phase6 真实恢复证据） | 上游无（ACP 无在途消息改写，F7 实测） | 上游无此能力 |
-| opencode-serve | 未测（serve 持有 session 概念；WAO 侧未接线） | — | 上游原语存在（源码级核实，2026-09-30）：`POST /session/:id/message`（同步）/`prompt_async`（异步）可向活动 session 注入，busy 时 runner 排队消化、shell 中则 ShellThenRun（v1.18.18 已具备，与 1.18.33 一致） | 未直跑实测（Owner 2026-09-30 裁定暂停本通道投入——不升级、不接线；上游事实记录备查） |
-| kimi-web | 会话常驻 `kimi web` 本地服务器（`POST /api/v1/sessions/{id}/prompts` 续用既有 session；REST 无会话级中止端点，8 个动作名实测阴性 2026-09-30） | 已接线（2026-09-30 新增 backend，`supportsSessionReuse=true`） | `POST …/prompts` 排队 + `POST …/prompts:steer` 转入活动轮（`steered:true` 实测；轮边界消费，不截断当轮生成） | 已接线（`sendCorrection`，2026-09-30 实测） |
-| zcode | session/resume（bundle 源码核证 2026-10-01：持久化恢复 + 注册进本进程会话表，zcode.cjs:15262/15256/15245 依据链；live 未逐测） | 已接线（2026-10-01 新增 backend；resume 轮次序 resume→setModel→send，跳过 resume 的 setModel 必抛 "Session is not active"） | 协议未见在途注入原语（未实测到 steer 类方法） | 上游无此能力 |
+| backend | 上游会话续接原语 | 实测（as-of 当日） | 上游在途消息原语 | 实测 | 官方渠道（变更信息源） |
+|---|---|---|---|---|---|
+| claude-code | `--session-id` / `--resume` | 已接线（组合层认证在册） | stdin stream-json 排队 | 已接线（唯一 supportsInFlightCorrection=true） | npm `@anthropic-ai/claude-code`（native 同序列）＋ github.com/anthropics/claude-code CHANGELOG.md |
+| codex | `codex exec resume <thread_id>`（会话标识来自 `thread.started.thread_id`；另有 `codex fork`） | **已接线**（2026-09-21，`supportsSessionReuse=true`）；上游正向跨 run 携带上下文、错 id → `no rollout found` exit 1（直跑实测） | `codex queue`（给已有 session 排队消息；0.158.0 起本地在册） | **exec 通道实测阴性（2026-09-30，三次探针）**：消息入队被接受，但 headless `codex exec` 活轮次不消费、exec 单轮结束即退出不续跑；`instant_interrupt`（0.159.0 引入，官方标注 under-development）两端开启后仍无效。queue 预期面向常驻会话面（TUI/app-server，该通道未测） | npm `@openai/codex` ＋ GitHub releases |
+| kimi-code | `kimi -r <session_id>`（stream 内 `session.resume_hint` 广告；另有 `-S/--session`、`-c/--continue`、`kimi fork`） | **已接线**（2026-09-21，`supportsSessionReuse=true`）；上游正向跨 run 携带上下文、错 id → `Session "…" not found` exit 1（直跑实测） | `kimi web` 本地 HTTP API：`POST /api/v1/sessions/{id}/prompts` 排队 + `POST …/prompts:steer` 转入活动轮（本地 2.1.1 OpenAPI 在册） | **实测阳性（2026-09-30）**：`steered:true` 后纠偏消息在同一活会话被消费、模型紧邻轮立即响应（原生成流跑完当轮，打断发生在轮边界）——语义同 claude-code stdin 排队（delivered 即入列，不证明截断当轮生成） | `@moonshot-ai/kimi-code`（官方 docs 记载包名）＋ GitHub MoonshotAI/kimi-code releases；`kimi upgrade` 无只读 check（跑=真升级） |
+| deepseek-harness | 未测（旧 dsh 原生通道；WAO 侧声明 false） | — | 未测 | — | 候选包名 `@deepseek-ai/dsh-jsonrpc-agent` 查询 E404（候选名未经官方确认——E404 首先说明候选渠道未确认）；变更信息源未知 |
+| deepseek-acp | ACP `session/resume` | 已接线（ADR-0031 §3.6 + phase6 真实恢复证据） | 上游无（ACP 无在途消息改写，F7 实测） | 上游无此能力 | npm `@deepseek-ai/dsh`（dist-tag latest 本身是 rc 系） |
+| opencode-serve | 未测（serve 持有 session 概念；WAO 侧未接线） | — | 上游原语存在（源码级核实，2026-09-30）：`POST /session/:id/message`（同步）/`prompt_async`（异步）可向活动 session 注入，busy 时 runner 排队消化、shell 中则 ShellThenRun（v1.18.18 已具备，与 1.18.33 一致） | 未直跑实测（Owner 2026-09-30 裁定暂停本通道投入——不升级、不接线；上游事实记录备查） | npm `opencode-ai`（参照渠道；部署对象无在册） |
+| kimi-web | 会话常驻 `kimi web` 本地服务器（`POST /api/v1/sessions/{id}/prompts` 续用既有 session；REST 无会话级中止端点，8 个动作名实测阴性 2026-09-30） | 已接线（2026-09-30 新增 backend，`supportsSessionReuse=true`） | `POST …/prompts` 排队 + `POST …/prompts:steer` 转入活动轮（`steered:true` 实测；轮边界消费，不截断当轮生成） | 已接线（`sendCorrection`，2026-09-30 实测） | 宿主同 kimi-code（同二进制同渠道；服务身份证据走执行检查单的认证探针脚本，不占本列） |
+| zcode | session/resume（bundle 源码核证 2026-10-01：持久化恢复 + 注册进本进程会话表，zcode.cjs:15262/15256/15245 依据链；live 未逐测） | 已接线（2026-10-01 新增 backend；resume 轮次序 resume→setModel→send，跳过 resume 的 setModel 必抛 "Session is not active"） | 协议未见在途注入原语（未实测到 steer 类方法） | 上游无此能力 | 官网 changelog（zcode.z.ai，产品版本锚）＋应用内更新通道；捆绑 CLI 0.16.9 为内部序列，随桌面走 |
 
 **读法**：①「未测」是**未测**，不是「没有」——期限就是用来逼这些格子在值得填的时候被填掉；②**复用只在 MCP 通道可用**：CLI 后台通道刻意每次派发用一次性 leadSession（`src/commands/run.js` 注释：one-shot 进程没有稳定 Lead 会话），所以 CLI 派发的复用 agent 永远走首轮——真正的跨 run 复用只有 MCP（稳定 leadSession）能给；②已实测可复用的 codex / kimi-code 仍记 `sessionReuse` 不支持，因为接线要的是 WAO 侧关联面（resume 信封只带前任 WAO runId、sessionId 由 WAO 从转录取回、关联缺失即 fail-closed 拒绝，形状见 ADR-0031 §3.6）加真实跨 run drill 证据，见 TD-184。
 
@@ -139,17 +138,28 @@ backend 换 model/provider → `--profile delta`；换 backend / 升主力 lane 
 
 > **刷新注记（2026-10-01，TD-184 事件触发：zcode 入册）**：zcode 0.16.9 app-server 协议 live 验证（setModel `bigmodel-api/GLM-5.3`、send/messages/usage 通；GLM provider 系 Owner 桌面 UI 配置）；当日新增 backend 接线（闭集 7→8，Owner 批准），本行随接入落表——其余行未复核（局部刷新，既有实测日期保留）；基线日随刷新改为 2026-10-01。
 
+> **注记（2026-10-02，渠道信息源列新增，双席会审修正）**：前置盘点两轮实战（run_20261002084927096r9h4oo / run_20261002093210425m3j4gt）后新增"官方渠道（变更信息源）"列。**渠道事实不设列级时钟**——鲜度跟随各行括注日期/实测日期（与"局部刷新保留其他行实测日期"的既有纪律同构），渠道内容有变动时行内注明核验日。TD-184 守卫只检查行集 / 原语锚点 / 表头日期——**不检查渠道列**，渠道内容不在守卫保障内（无需新增门禁），随复核循环人工刷新；"厂商换 npm scope / 迁 changelog 地址"类事件在本机无可观察面，90 天期限钟是唯一兜底。单目标只读探针命令：`node scripts/wao-node.cjs scripts/reliability/runtime-identity-cli.mjs --backend <name> [--registry <file>]`——每次调用取该 backend 首个匹配席位作 anchor 并在输出携带 `anchorAgentId`，多部署逐目标各调一次，勿以单次调用代表全部目标。
+
 ### 上游原语复核循环（TD-184 守卫的人读规程）
 
 > 本节是 TD-184 守卫失败文案所承诺的"节内规程"。守卫证明的只是表行/锚点/日期/期限的机械一致性——它**不证明调研或实测发生过**；守卫绿 ≠ 本规程不过时，发现规程与现实脱节即改本节。全流程叙事与证据（2026-09-30 kimi-web 接线批，11 轮交付 8 审）见 `docs/incidents/2026-09-30-kimi-web-wiring.md`——本节只固化动作规则，不复制事故叙事。
 
-**触发**（三源合一，两钟合并——事件触发的当场刷新会顺带重置 90 天钟，基线日=最近复核日）：① 90 天期限守卫变红；② 事件触发（harness 升级 / WAO 适配层改动 / 新 harness 入册，角色分工见"认证更新的触发器与执行人"节——升级由操作员执行，Lead 界定影响并安排验证，Owner 决定新增组合、费用与承重用途）；③ Owner 指令。守卫红后的第一分钟：读本表表头的基线日与期限 → 从下方"对象与证据"开始，**先别急着升级**。
+**触发**（三源合一，两钟合并——事件触发的当场刷新会顺带重置 90 天钟，基线日=最近复核日）：① 90 天期限守卫变红；② 事件触发（harness 升级 / WAO 适配层改动 / 新 harness 入册，角色分工见"认证更新的触发器与执行人"节——升级由操作员执行，Lead 界定影响并安排验证，Owner 决定新增组合、费用与承重用途）；③ Owner 指令。守卫红后的第一分钟：读本表表头的基线日与期限 → 从下方"对象与证据"起（身份界定 → 前置盘点 → 动作出口），**先别急着升级**。
 
-**对象与证据**。对象身份 = 实际运行的东西：process backend 用 `scripts/reliability/runtimeIdentity.mjs` 的版本探针（新 backend 入册时核对探针覆盖面——kimi-web 当前不在探针表内，属已知盲区）；HTTP attach 型 backend（opencode-serve、kimi-web）无本地二进制可探，盘点法 = 本地 OpenAPI 快照 vs 在册快照的端点 diff（kimi 系注意：同一 kimi CLI 二进制同时供 CLI 通道与 web 通道，一次升级联动本表两行）。证据四层不可互替：上游有原语 / WAO 已接线 / 真实运行成功 / 席位认证适用——`gen:certification` 再生成只反映代码声明与配置探针，不产生真实运行证据。
+**对象与证据**。对象身份 = 实际运行的东西：process backend 用 `scripts/reliability/runtimeIdentity.mjs` 的版本探针（新 backend 入册时核对探针覆盖面——2026-10-02 起闭集八成员全有探针条目：kimi-web 探宿主 kimi 二进制；zcode 经 backend `resolveInvocationPrefix` 以 node 前缀探桌面捆绑 zcode.cjs；opencode-serve 恒 honest unknown）。**证据单位是实际安装/部署，不是席位**：同一 harness 多席位可能用不同 binary / serveUrl——按实际目标去重，多目标在该行列子项，不得挑一个席位代表全部；PATH 探测只代表当前执行环境。宿主二进制版本对 HTTP attach 型只是**提醒，不证明 live 服务身份**（kimi-web 探针与 serveUrl 指向的服务没有身份关联，升级后旧服务可能仍在跑）——本地安装版本与运行服务身份分开记录，证据不足记"服务身份未确认"。**服务身份证据递进**（双席会审 2026-10-02 修正——认证层级与载荷可识别性是两根轴，不压成一维阶梯）：① 目标地址有响应（裸端口存活；401 带 `WWW-Authenticate` 头可记高一档"讲 HTTP 的服务类"）→ ② 响应有产品特征但身份/版本证据不完整（可辨 banner / 产品结构而无版本 → 记"服务类型可辨，版本未确认"；认证后 200 无版本字段 = "认证可达、版本未确认"，居②③之间）→ ③ 版本确认——只认**显式版本字段**或**与宿主探针的一致比对**（认证成功但只回"healthy"同样不够③）。**认证与否单独记录为支撑证据**："认证通过"（token 被接受）本身是强身份线索；未认证的自报版本是弱证据。文档版本字段 ≠ 运行程序版本——字段语义未经证实时如实标"上游自报"。梯度 ①② 不得写成"身份已确认"；③ 的执行出口见执行检查单的认证探针脚本（盘点席通常无凭据，须代跑）。端点/原语面复核 = **对照在册原语结论复核**（本表该行括注 + 已有证据指针），不设 OpenAPI 快照文件——完整历史 schema 的机械比较能力就此明确放弃，出现追查任意接口漂移的真实需求时再评估入库快照（届时快照也须绑定实际服务身份）。复核触发不因版本未动而豁免：服务换部署、实际行为与在册结论冲突同样触发。证据四层不可互替：上游有原语 / WAO 已接线 / 真实运行成功 / 席位认证适用——`gen:certification` 再生成只反映代码声明与配置探针，不产生真实运行证据。
+
+**前置盘点（本地安装 × 官方最新版对照，升级建议的发现入口）**。复核循环的第一组动作：对本表行集（= KNOWN_BACKENDS 闭集，即 harness 目录清单）逐行走四步链——
+
+- ① **本地是否已安装**：身份与版本探法同"对象与证据"（探针描述符；证据单位 = 实际安装/部署）。**PATH/配置路径未发现 ≠ 未安装**——如实记"配置路径/PATH 未发现，本机安装状态未确认"，仅当另有安装记录等证据才写"未安装"；zcode 无配置路径时不得把裸名 fallback 的命中冒充在册桌面捆绑产物。**否定证据只有观察值、没有升级阈值**（双席会审 2026-10-02 修正）：PATH 未发现 / 已装同族包 bin 清单不含 / 候选包名查询 E404 各自只覆盖所查范围，互不叠加成"本机不存在"——**"未安装"不作为盘点结论词**，唯一落法是证据形态："未发现安装证据（已查渠道：列举所查渠道；无正面记录）"；仅持有覆盖范围明确的安装清单（如包管理器全量清单）才可写"在该管理范围内未安装"。**按分发形态选否定腿**：npm 发行型的腿 = PATH + 同族包 bin + 官方 scope；native 安装型（claude/kimi）的腿 = 安装目录 + winget/卸载注册表 + 官方渠道；捆绑型（zcode）的腿 = 桌面应用存在性（PATH/npm 双查对它天然阴性）。候选包名未经官方确认时，E404 首先说明**候选渠道未确认**，不得写成"官方 scope 查无该包"。未安装/不可探是**事实记录，不是安装义务**——是否引入由 Owner 决定（走"接线"分叉）。
+- ② **已安装 → 是否官方 latest**：分发渠道从**实际调用目标**出发发现（顺序：配置的 binary/调用前缀 → 实际落点或包装入口（`where.exe <name>` 单名单查——批量查询有 miss 时 exit 仍 0，退出码不可编程判定）→ 发布者官方文档确认渠道），不得拿 PATH 同名程序替代配置对象。npm 候选包名以**官方来源确认**为准——搜到相似名不算交叉验证（2026-10-02 实测：kimi 的 npm 候选 `kimi-cli` 即第三方占位包；**官方 repo 名 ≠ 官方 npm 包名**——MoonshotAI/kimi-cli 系官方 archived legacy 仓库，包名以官方 docs 记载为准）。本地安装形态与官方渠道不同源时（如 native 安装对照 npm dist-tag），渠道值仅作版本参照并标注"参照渠道"，且须先确认产品 / 版本序列 / 发布通道 / 平台可比——不可比时只写"参照渠道发布了 X，本安装是否落后待确认"；"latest"按渠道语义读（dist-tag latest 可能本身是 rc，如 dsh）。**捆绑型分发**（桌面应用捆绑 CLI，如 zcode）：行版本锚**产品版本**（对照官方 changelog），捆绑组件自报版本作附属身份记录（两序列不互证；桌面更新会同时漂移 binary 路径与 bundle 行号依据链——该行④须重核）。kimi 系"一次核对覆盖两行"以实际路径与服务来源一致为前提。渠道已知但查询面不可达（更新服务未运行等）→ 如实记"latest 不可探、待确认"，不构成升级论据、不虚构。
+- ③ **非最新 → 差异与建议**：拉官方 changelog / release notes，按影响面归类（原语面变化 / 行为变化 / 安全修复 / 与 WAO 无关），并**带着缺项清单读**——最新版补上在册缺项（本表"未测"格、"上游无原语"结论）是升级建议的正面论据。据此形成升级建议（升级 / 暂缓 + 理由）**报 Owner 决策**：盘点与建议是复核者（Lead）的职责，是否升级由 Owner 拍板，执行是操作员（复核者可委派取证——Lead 可委派研究员代跑盘点命令，核验与建议责任仍在 Lead；角色分工见"认证更新的触发器与执行人"节；本链补齐的是"升级与否"的发起与决策格）。**检出非最新 ≠ 必须升级**：在册的 Owner 暂停投入类裁定（如 opencode 停留 1.18.18 系）在 Owner 明示改变前继续有效，盘点只记版本差、不翻裁定；暂缓与维持现状同样是合法结论。
+- ④ **Owner 决定升级 → 缺项补齐全查**：升级后当轮除走"实测补证"外，对照缺项清单逐项重查——清单 = 本表"未测"格 + 生成层 `docs/surface/certification.md` 的 false/条件能力轴 + 本表"上游无原语"结论。差异清单出现原语面变化时优先复核对应行（升级正是"未测"该被填、"上游无"该被重看的时机）；上游出现值得接线的新原语 → 走"接线"分叉（动代码须 repo-change 行动面；WAO 侧能力轴只经接线 + 重认证翻转，不因上游升级自动变绿）。补齐事实只有实测可进本表。
+
+全员走完 ≠ 全员已确认最新：latest 不可探、渠道未知、本地身份未确认、原语未复核的行**不得计入**"已 latest"或"零差异"（2026-10-02 首测实证：汇总曾把"zcode 不可判"计入"4 行已 latest"——未知被汇总吞掉）。**汇总格式三档分列**：已确认 latest ｜ 非 latest ｜ 不可判——每行结论只能是"有证据的结论"或"明确未知"，不可判行不入前两档。全行有结论（含明确未知）即完成盘点，按"仅刷新"出口收口；零变化也要翻基线日写注记，防"忘了盘"与"盘了无差异"无法区分；仅盘点不更新未做的实测日期。
 
 **动作分叉**（每条都是合法出口——维持现状、暂缓升级、未测、受阻、暂停投入皆为正当复核结论，不为走完循环强行升级或接线）：
 - 仅刷新（版本/原语无变化）：跳到收口，**零变化也要翻基线日并写注记**，否则下次无法区分"忘了复核"与"复核了无变化"。
-- 升级：操作员执行；Lead 界定影响面并安排验证；升级后当轮走"实测补证"。
+- 升级：操作员执行；是否升级由 Owner 决策、建议由"前置盘点"③发起；Lead 界定影响面并安排验证；升级后当轮走"实测补证"并按"前置盘点"④对照缺项清单查补齐。
 - 实测补证：直跑探针验证上游原语（在册"未测"格的填格义务）；结论只有实测可进本表。
 - 接线（唯一动代码的路径）：走 repo-change 行动面（`docs/ssot.md` §0.1）。判断框架三行——上游原语三态：无原语 / 有原语未接线 / 配置形状不一致，先分清再设计；**"未找到原语"≠"没有原语"**（先查相关 schema/源码/真实响应，勿凭路径名下结论）；上游确定性原语优先于 WAO 侧启发式。残余声明按 B′ 判据：已掌握的本地信息未被正确使用属本地必修；只有依赖尚未取得的上游保证才能消除的不确定性才进残余取舍——声明残余必须写明用户影响、允许用途、证据边界与重新评估条件，Owner 决定取舍，审查者只判边界。实操照历史样例抄（kimi-web 批次的 brief/spec 与 git 提交链），不冻结模板。
 - 会审（方案级或验收级）：按风险分配审查范围，先定审查边界再审；六问检查单与 B′ 判据全文见 incident 文件。
@@ -163,12 +173,16 @@ backend 换 model/provider → `--profile delta`；换 backend / 升主力 lane 
 - 【硬】reverify 单发、仅环境类失败码可用；`artifact_mutated` 不具资格——先取证工作树终态（瞬态孤儿/中断 vs 真变异）再决定重派。
 - 【硬】销毁性回收：先 bundle 保全+verify、显式路径禁 glob、双席审计+Owner 点名批准；bundle 存在不证明整个工作树可恢复（未提交/未跟踪/被引证据另行处理）。
 - 【硬】验收决定即时落账（reject/accept 当轮记录，不留补记）。
+- 【硬】HTTP attach 实测的凭据纪律：值从 env 读取、内存构造 Authorization 头——绝不展开进外部程序 argv、URL、任务书、转录或报告（`curl -H "…$TOKEN"` 经 shell 展开后值仍在 argv，"来源是 env"≠"没进命令行"；参考实现 `src/backends/kimiWeb.js` 的 resolveBearerToken/request）。401/403、服务不可达、响应不可解析分别如实记"本轮未完成该项复核"——不推断零差异，不为完成盘点自行取新凭据、改认证配置或重启服务。
+- 【硬】更新通道只读：应用内"检查更新"不得点击、`upgrade`/`update` 类子命令不得运行（2026-10-02 实测 kimi upgrade 无只读 check 模式，跑=真升级）；查询动作是否零副作用不确定时记"待操作员核实"，查询失败不构成修复更新服务的授权。
+- 【参】kimi-web 服务身份代跑走正式探针脚本（双席会审 2026-10-02 修正：内联模板的截断非脱敏 / 父进程 env 污染 / fetch 非 2xx 不 reject 等边界由脚本承担）：`node scripts/wao-node.cjs scripts/reliability/kimi-web-identity-probe.mjs --url http://127.0.0.1:<port>`——凭据只从 env 读（缺省 `KIMI_WEB_TOKEN`）、Bearer 头内存构造、禁重定向、10s 超时、输出只含受约束身份字段（含 `serverVersionSemantics:"upstream-self-reported"` 标注，文档版本 ≠ 运行版本）。**授权主体是操作员或获该次取证授权的代跑者**（"有凭据环境"不是主体）；env 注入用一次性子进程包裹（如 `powershell -Command "$env:KIMI_WEB_TOKEN=[Environment]::GetEnvironmentVariable('KIMI_WEB_TOKEN','User'); node …"`，包裹进程即退不留污染），勿在长命 shell 里 set。回传记：时间、目标标识、端点、状态、身份字段路径与值、结论与限制；**"携带凭据"≠"端点已认证"**（authObserved 只记请求带了凭据）。2026-10-02 代跑实证：status 200、`info.version`（docVersion）2.1.1、docTitle "Kimi Code Server API"、pathCount 105——文档版本字段与宿主二进制同版本。
 - 【参】OpenAPI 先扫全目录再深查相关端点与含义不明端点；无搜索能力的 worker 在任务书里种候选 URL。
 - 【参】咨询任务书自包含（引用外部文件须附全文或可达绝对路径）。
 - 【参】长验证前确认无计划内系统重启（Active Hours 避开安静窗）。
 - 【参】测试证明力存疑时用变异自检（删掉实现里的对应赋值，测试必须变红）。
+- 【参】文档修复落地前做**并立检查**：grep 同节旧限定词 / 同义门——新句与旧句并立是 2026-10-02 修复批三处返工的共同形状（第二门槛、健康端点洞、双日期），与 F8 病根同族。
 
-**收口**（五项齐备才算循环结束）：本表按本轮实际复核范围刷新（**局部刷新保留其他行的实测日期与未测状态**，勿全表刷日期掩盖未复核行）→ 基线日翻日 → TD-184 守卫复绿 → `npm run gen:certification` 再生成并提交（字节钉守卫 docsSurface 会拦手改）→ 刷新注记落笔（范围+结论+证据指针）。
+**收口**（五项齐备才算循环结束）：本表按本轮实际复核范围刷新（**局部刷新保留其他行的实测日期与未测状态**，勿全表刷日期掩盖未复核行）→ 基线日翻日 → TD-184 守卫复绿 → `npm run gen:certification` 再生成并提交（字节钉守卫 docsSurface 会拦手改）→ 刷新注记落笔（范围+结论+证据指针；含前置盘点结果——各 harness 本地×latest 版本对照、升级建议与 Owner 决定，暂缓/维持现状同样落笔，防"建议过但无人记得"）。
 
 **显式排除清单**（故意不进本节，非遗漏）：worktree/分支回收细则（hygiene 既有机制，ADR 0035）；各事故的叙事与归因（incident 文件）；Windows 系统配置操作（环境提示，SOP 不改系统）。
 
