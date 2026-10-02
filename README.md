@@ -1,10 +1,15 @@
 # Windows Agent Orchestrator (WAO)
 
-Windows-native, headless, runtime-agnostic orchestrator for local agent runtimes
-(claude-code / codex / kimi-code / opencode-serve, plus an experimental
-DeepSeek Harness JSON-RPC adapter). Drives agents via subprocess or HTTP,
-records everything to JSONL transcripts, provides git worktree isolation, resume,
-token/cost metrics, declarative DAG workflows, and evidence-chain scorecard gating.
+[![version](https://img.shields.io/badge/version-v0.2.0-2f2f2f?style=flat-square)](docs/changelog-2026-10-01-v0.2.0.md)
+[![license](https://img.shields.io/badge/license-Apache--2.0-2f2f2f?style=flat-square)](LICENSE)
+
+English · [简体中文](README.zh-CN.md)
+
+Put your existing coding-agent subscriptions to work. WAO lets one Lead agent — or you,
+from any MCP host — dispatch Claude Code, Codex, Kimi, GLM (ZCode) and DeepSeek workers
+against real repositories: the token bill lands on each worker's own provider, every run
+is captured as an auditable transcript, and the control plane never makes decisions for
+you.
 
 > **Value & boundary (ADR 0018):** WAO's value is routing worker token spend onto
 > external provider quota — it lets a Lead dispatch real work to external worker runtimes
@@ -13,72 +18,72 @@ token/cost metrics, declarative DAG workflows, and evidence-chain scorecard gati
 > second semantic supervisor. WAO 自动监测，不自动监督；自动封装，不自动验收；自动呈现，不自动决策。
 > (English: WAO monitors, never supervises; packages, never accepts; presents, never decides.)
 
-> **New to WAO?** Start with [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md) — it is the one
+> **New to WAO?** Start with [`AGENT_ONBOARDING.md`](AGENT_ONBOARDING.md) — the one
 > authoritative path from zero to a working setup: install WAO, configure **ONE** worker,
 > validate it, connect an MCP Host, and run a first read-only canary. You do **not** need
-> all six runtimes or every provider credential to start.
+> every runtime or provider credential to start.
 
-- **Minimal dependencies** — plain Node ESM; only `@modelcontextprotocol/sdk` + `zod` for the MCP control surface. No Docker/WSL.
-- **Transcript is source of truth** — every run reconstructable from `runs/<runId>.jsonl`.
-- **Windows-native** — worktree isolation + process-tree cleanup tuned for Windows.
+## Why WAO
 
-## Vision
+- **Route the token bill** — workers run on their own provider quota; the Lead's context
+  stays small and cheap.
+- **First-party harnesses** — WAO drives each vendor's own CLI directly (no protocol
+  re-implementation): ZCode for GLM, the Kimi desktop web channel, Codex CLI, DeepSeek
+  over ACP. All 8 seats in the reference fleet run on first-party harnesses; 8 backend
+  adapters are supported in total — per-axis facts in the generated
+  [capability matrix](docs/surface/certification.md).
+- **Transcript is the source of truth** — every run reconstructable from
+  `runs/<runId>.jsonl`; delivery review is bounded and redacted, never a raw diff.
+- **Monitors, never supervises** — WAO observes, packages, and presents evidence; the
+  semantic call (accept, reject, rework) always belongs to the Lead.
+- **Windows-native, minimal footprint** — plain Node ESM; two direct production
+  dependencies (`@modelcontextprotocol/sdk` + `zod`, confined to `src/mcp/**`); no
+  Docker/WSL; worktree isolation and process-tree cleanup tuned for Windows.
 
-WAO is a Windows-native control plane that lets a lead agent dispatch external worker
-agents to do real repository work, routing the token spend onto each worker's provider
-quota. It keeps orchestration out of worker system prompts: workers receive normal task
-prompts, while WAO owns transcripts, state, isolation, workflow execution, metrics, and
-evidence-chain scorecard gates. Certification is advisory evidence about a worker's
-recorded reliability, not a dispatch permission gate.
+## What's new in v0.2.0 (2026-10-01)
 
-## Current Status
+- All 8 worker seats now run on first-party vendor harnesses (new backends: zcode,
+  kimi-web, deepseek-acp).
+- Six-axis backend capability matrix and two-tier certification published as a generated
+  surface: [`docs/surface/certification.md`](docs/surface/certification.md).
+- Semver adopted; release-gate evidence (251/251 tests green, dated 2026-10-01) in
+  [`docs/changelog-2026-10-01-v0.2.0.md`](docs/changelog-2026-10-01-v0.2.0.md).
 
-WAO is an **MCP-first control plane** (Decision 0017). A lead agent runtime —
-Claude Desktop, Codex CLI, OpenCode, or any MCP host — drives WAO as a stdio MCP
-server. WAO owns dispatch, state, isolation, transcripts, delivery verification,
-and durable Lead accept/reject decision recording (it records the Lead's decision;
-it does not accept or reject for the Lead); workers receive only a bounded task
-prompt and stay out of orchestration.
+## Current status
 
-WAO exposes **22 MCP tools** covering the full supervised Lead loop:
+WAO is an **MCP-first control plane** (Decision 0017). A lead agent runtime — Claude
+Desktop, Codex CLI, OpenCode, or any MCP host — drives WAO as a stdio MCP server. WAO
+owns dispatch, state, isolation, transcripts, delivery verification, and durable Lead
+accept/reject decision recording (it records the Lead's decision; it does not accept or
+reject for the Lead); workers receive only a bounded task prompt and stay out of
+orchestration.
+
+WAO exposes **22 MCP tools** covering the supervised Lead loop:
 
 > `inventory → workspace_status → dispatch → await result → delivery query/review → Lead decision`
 
-plus `runs_list` recovery. The playbook catalog is read on demand via MCP
-resources (`wao://playbooks`), not tools. Every state-changing operation calls
-the same shared application service as the CLI fallback, producing identical
-transcript durable facts. See
-[`SKILL.md`](SKILL.md) for the tool table and routing contract.
+plus `runs_list` recovery. The playbook catalog is read on demand via MCP resources
+(`wao://playbooks`), not tools. Every state-changing operation calls the same shared
+application service as the CLI fallback, producing identical transcript durable facts.
+See [`SKILL.md`](SKILL.md) for the tool table and routing contract.
 
-**Milestones M0–M12 complete** (M12: Lead Token Efficiency + Assisted
-Orchestration). Implemented: explicit state machine + JSONL transcript source
-of truth; multi-backend (opencode-serve + claude-code + codex + kimi-code,
-with DeepSeek Harness available as an experimental, uncertified adapter);
-worktree isolation, resume, metrics aggregation; declarative DAG engine +
-parameterized workflow templates; daemon supervision + scorecard evidence
-gating + runtime certification + diagnostics; MCP-first Lead closed loop with
-workspace-bound dispatch/recovery/stop + `run_wait` liveness observation +
-durable decisions + restart recovery; real multi-worker dogfood on an external
-project; safe changed-path projection + exact delivery proof + bounded/redacted
-diff review (`run_delivery_review`); bounded `run_collect` continuation with
-opaque cursor pagination; adaptive playbook catalog; workspace-scoped expert
-session reuse; read-only `run_await_result` combining bounded wait, truthful
-liveness, and safe compact terminal output without hiding the atomic tools.
-M11 closed complete; the former "Tester context/token efficiency"
-item is retired/deferred out of M11. M12-1+ delivered advisory
-`candidateInventory` for retained `disallowed_path` failures and
-Lead-authorized, model-free `run_delivery_repackage` reuse of the original
-worktree, base, and verification declaration, plus compact collect, delivery
-review bundles, backend-failure candidate recovery, `run_continue`, the
-22-tool frozen MCP surface with playbook/semantics resources, and per-command
-execution budgets. The only remaining non-blocking candidate is broader
-cross-run/historical evidence aggregation — explicitly out of the M12
-completion definition.
+**Milestones M0–M12 complete.** Delivered highlights: multi-backend dispatch with
+worktree isolation, resume, and token/cost metrics; declarative DAG workflows and
+parameterized templates; evidence-chain scorecards; daemon supervision, diagnostics, and
+runtime certification; workspace-bound dispatch/recovery/stop with `run_wait` liveness
+observation; safe changed-path projection, exact delivery proof, and bounded/redacted
+diff review; advisory `candidateInventory` recovery for retained `disallowed_path`
+failures plus Lead-authorized, model-free `run_delivery_repackage` (re-check and re-verify
+the original worktree, base, and verification declaration without calling the worker
+model again); `run_continue` correction lineages; the 22-tool frozen MCP surface; and
+per-command execution budgets.
 
-See [`docs/roadmap.md`](docs/roadmap.md) for full milestone status and
-[`docs/tech-debt.md`](docs/tech-debt.md) for the open tech-debt register.
-Runtime/model dispatch certification lives in `runs/reliability-summary.json`
-(gitignored, generated by `npm run reliability`).
+Certification is advisory evidence about a worker's recorded reliability, not a dispatch
+permission gate. Two-tier verification, the delta certification procedure, and the
+upstream-primitive refresh SOP live in
+[`docs/certification-runbook.md`](docs/certification-runbook.md); live per-worker status:
+`npm run cli -- registry list`. Milestone history:
+[`docs/roadmap.md`](docs/roadmap.md); open debt: [`docs/tech-debt.md`](docs/tech-debt.md).
 
 ## Quick start
 
@@ -101,17 +106,16 @@ Copy-Item config/agents.example.json config/agents.json
 #    agents.example.json is the TRACKED template, aligned one-to-one with the
 #    canonical team roles — leave it untouched. Your copied agents.json is
 #    gitignored and yours to prune: keep only the workers whose runtime/auth
-#    path you actually have, delete the rest. One runtime is enough to use
-#    WAO. The choice table per runtime (claude-code + provider key / codex
-#    login / Kimi Code) is in AGENT_ONBOARDING.md.
+#    path you actually have, delete the rest. One runtime is enough to use WAO.
+#    The per-runtime auth choice table is in AGENT_ONBOARDING.md.
 #    Edit each kept worker's cwd to the project it should operate on.
 
 # 2. Verify the registry (no runtime needed for this)
 # registry list = inventory + certification status; registry validate = static schema; registry check = live opencode health
 npm run cli -- registry list --registry config/agents.json
 npm run cli -- registry validate --registry config/agents.json
-#    registry check probes a live opencode-serve backend — it only applies if
-#    you kept the opencode fallback worker and started scripts/serve.ps1.
+#    registry check probes a live opencode-serve backend (maintenance lane) —
+#    it only applies if you kept the opencode fallback worker and started scripts/serve.ps1.
 
 # 3. Connect an MCP Host (primary control surface — Decision 0017)
 #    Run this from the WAO install root (the repo you cloned). Point any MCP
@@ -123,7 +127,7 @@ npm run mcp -- --registry config/agents.json --run-dir runs
 
 # 4. First read-only canary via the CLI fallback (one retained worker)
 #    Replace <agentId> with one worker id from `registry list` in step 2 — the
-#    canary works for ANY retained process worker (claude-code / codex / kimi-code):
+#    canary works for ANY retained process worker:
 npm run cli -- run <agentId> --prompt "Read package.json and summarize what WAO does" --cwd <目标项目> --registry config/agents.json --format json
 #    <目标项目> must be an existing directory on this machine — a brand-new
 #    machine can temporarily use the WAO repo itself (the read-only canary has
@@ -148,11 +152,13 @@ is set); see AGENT_ONBOARDING.md §3.
 | **Use the orchestrator as an agent / from a script** (22 MCP tools, commands, workflows, config) | [`SKILL.md`](SKILL.md) — the agent-facing usage manual + tool table |
 | **Deploy / configure / operate it as a human** | [`docs/usage.md`](docs/usage.md) — full deployment + usage guide |
 | **Look up a tool parameter or CLI flag** | [`docs/surface/`](docs/surface/) — generated reference (regen: `npm run gen:surface`); repo index: [`llms.txt`](llms.txt) |
+| **Compare backend capabilities / understand certification** | [`docs/surface/certification.md`](docs/surface/certification.md) (generated) + [`docs/certification-runbook.md`](docs/certification-runbook.md) |
+| **Check live per-worker dispatch certification** | `npm run cli -- registry list` (data: `runs/reliability-summary.json`, gitignored, generated by `npm run reliability`) |
+| **See what shipped in each release** | `docs/changelog-*.md` snapshots (latest: [v0.2.0](docs/changelog-2026-10-01-v0.2.0.md)) |
 | **Run real smoke tests** (claude/codex/opencode) | [`docs/smoke-guide.md`](docs/smoke-guide.md) |
 | **Understand the architecture** (layers, interfaces, state machine) | [`docs/02-architecture.md`](docs/02-architecture.md) |
 | **See requirements / non-goals / acceptance** | [`docs/01-prd.md`](docs/01-prd.md) |
 | **Track milestones / progress** | [`docs/roadmap.md`](docs/roadmap.md) |
-| **Check runtime/model dispatch certification** | `runs/reliability-summary.json` generated by `npm run reliability` |
 | **See open tech debt** | [`docs/tech-debt.md`](docs/tech-debt.md) |
 | **Read research / design decisions** | [`docs/research/`](docs/research/) |
 

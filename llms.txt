@@ -7,6 +7,7 @@
 - [AGENTS.md](AGENTS.md): repository contract — invariants, boundaries, commands. Read first before changes.
 - [SKILL.md](SKILL.md): Lead-agent-facing usage manual (dispatch/acceptance loop). Only when operating WAO.
 - [AGENT_ONBOARDING.md](AGENT_ONBOARDING.md): single new-user setup path (install, one worker, MCP host, first canary).
+- [README.zh-CN.md](README.zh-CN.md): Chinese mirror of the project homepage (README.md).
 
 ## Reference (generated — do not hand-edit)
 
