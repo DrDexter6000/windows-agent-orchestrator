@@ -461,6 +461,53 @@ outcome 照常落盘并在 `runs delivery` / `run_delivery` / `run_await_result`
 `--accept` 对 pending 仍拒绝；reverify/repackage 资格不变。排查症状见
 `docs/troubleshooting.md` §delivery 表。
 
+### 场景 4d：多席只读会审（wao consult，M13-r1 / 决定 0039）
+
+把"召集多席只读咨询"从 Lead 手搓五步（写共享任务书→拼席位尾巴→逐席派发→抠日志→
+人工对比）产品化为一个动作——机械扇出 + 收集 + council-diff 并列呈现。**不做语义
+合成**：不汇总意见、不裁分歧、不重发格式不合格的席位（ADR-0018 边界不变，判断权
+在 Lead）。
+
+```powershell
+# brief 文件 = 共享任务书（编号问题 Q1..Qn + 输出格式契约），逐字节分发给每席
+npm run cli -- consult run brief.md --seats auditor,coder_mm,researcher
+
+# 带每席视角片段（答题姿势 2-3 句：差异化资产 + 自测问题；原样拼在该席 prompt 尾部）
+npm run cli -- consult run brief.md --seats a,b --perspective a=persp-a.md --perspective b=persp-b.md
+
+# 闭集字段比对（只标"字段值不同"，字面等值比较、大小写敏感、不出结论词）
+npm run cli -- consult run brief.md --seats a,b --fields Q1=A,B
+
+# 黄牌核查：被审 run 的作者是否在席位清单（advisory，不拦截）
+npm run cli -- consult run brief.md --seats a,b --reviewed-run <runId>
+
+# 从组记录重渲染（只读）
+npm run cli -- consult show <consultId> --format json
+```
+
+**状态两维独立**：每席 `runState`（transcript 真值：pending/running/completed/
+failed/…；超时/缺席是观察事实，不改写为失败）× `formatState`（structured /
+partial / unstructured / empty——`completed` + `unstructured` 是合法组合，
+malformed 不惩罚）。半结构化回复（某问藏在散文里）不做句子级切分，按整段原文
+兜底进未归类区（切错比不切更糟）。
+
+**不变式承诺（机器守卫钉住）**：① 零信息损失——每席回复按问题锚点（行首
+`## Q1` / `Q1:` 形）只分组、不摘要、不截断、不重排隐藏，归组块+开场+未归类
+三块拼接逐字节等于原文；② 标记即提示——闭集字段值不同仅标"字段值不同(Qn)"，
+工具永不输出"一致/分歧"类结论；③ malformed 零自动重发——格式不合格只是观察
+事实，WAO 绝不替 Lead 重问。
+
+**组记录**：每次会审在 `<项目根>/.wao/runs/consults/<consultId>.json` 落一份
+组记录（席位-runId 映射 = 意见-决策回链锚点，供 decisions/declare 引用）。
+组记录不写 `runs/`（防 metrics 聚合双计）、不写认证台账、不产生任何 delivery
+事件；席位子 run 本身是普通只读 run（`readOnly` 声明 + 强制隔离），回复正文的
+唯一权威在各 run transcript，经 runId 回链。呈现尾部附独立性三块砖事实表
+（厂族 / 非作者 / 会话独立性），全部 advisory、不下独立性结论——厂族砖直读
+registry 原始字段（`backend` + `provider` 标识：`model.providerID` 优先、
+wrapper 形取 `provider.baseUrl`），不做族系归类判断（判断权在 Lead）；会话
+独立性 r1 如实显示"未提供"。`--wait-timeout` 总预算默认 600000ms、范围同
+`runs wait`。
+
 ### 场景 5：重试 / 恢复
 
 ```powershell

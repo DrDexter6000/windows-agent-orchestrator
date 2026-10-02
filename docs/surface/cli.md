@@ -10,6 +10,8 @@ Windows Agent Orchestrator PoC
 
 Commands:
   version   # print the WAO version (bare semver; SSOT: package.json; --version also works)
+  consult run <briefFile> --seats a,b [--perspective <agentId>=<file>]... [--fields Q1=A,B]... [--reviewed-run <runId>] [--wait-timeout MS] [--format json|text] [--cwd DIR] [--registry FILE] [--run-dir DIR]   # 多席只读会审（M13-r1/决定 0039：机械扇出+收集+council-diff 并列呈现；不做语义合成）
+  consult show <consultId> [--format json|text] [--cwd DIR] [--run-dir DIR]   # 从组记录重渲染 council-diff（只读；组记录在 .wao/runs/consults/）
   registry list --registry config/agents.json
   registry check [--registry config/agents.json] [--format json]   # live opencode-serve health only
   registry validate [--registry FILE] [--format json]

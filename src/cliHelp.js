@@ -14,6 +14,8 @@ export const HELP_TEXT = `Windows Agent Orchestrator PoC
 
 Commands:
   version   # print the WAO version (bare semver; SSOT: package.json; --version also works)
+  consult run <briefFile> --seats a,b [--perspective <agentId>=<file>]... [--fields Q1=A,B]... [--reviewed-run <runId>] [--wait-timeout MS] [--format json|text] [--cwd DIR] [--registry FILE] [--run-dir DIR]   # 多席只读会审（M13-r1/决定 0039：机械扇出+收集+council-diff 并列呈现；不做语义合成）
+  consult show <consultId> [--format json|text] [--cwd DIR] [--run-dir DIR]   # 从组记录重渲染 council-diff（只读；组记录在 .wao/runs/consults/）
   registry list --registry config/agents.json
   registry check [--registry config/agents.json] [--format json]   # live opencode-serve health only
   registry validate [--registry FILE] [--format json]
@@ -84,10 +86,10 @@ Notes:
 `;
 
 // A-1（friction 2026-08-15 #1）：run <agentId> 的 agentId 位置误填顶层命令名时
-// （如 `run status ...`）做 did-you-mean 提示。恰 17 名；不含 help（HELP_TEXT
-// 无 help 命令行且字节冻结——评审裁定 (a)）。
+// （如 `run status ...`）做 did-you-mean 提示。恰 18 名（M13-r1 增 consult）；
+// 不含 help（HELP_TEXT 无 help 命令行且字节冻结——评审裁定 (a)）。
 export const COMMAND_NAMES = Object.freeze([
-  "version", "registry", "spawn", "retry", "resume", "run", "status", "tail", "collect",
+  "version", "consult", "registry", "spawn", "retry", "resume", "run", "status", "tail", "collect",
   "stop", "runs", "dashboard", "workflow", "worktree", "wao", "daemon", "mcp", "playbook",
 ]);
 

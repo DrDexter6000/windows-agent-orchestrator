@@ -19,6 +19,7 @@ export const ROOT_WHITELIST = new Map([
   ["cleanup-consult-20260929", "2026-09 清洁包案卷（ADR 0034/0035 引用）"],
   ["s3-integration-t3-20260930", "S3 前作集成的 T3 证据目录（工作流闭合时移入 archive 并除名）"],
   ["archive-2026-09", "历史证据冷藏室（含 INDEX.md 与移动清单，内容不逐件检查）"],
+  ["consults", "M13 Agent Union 会审组记录（席位-runId 映射/意见-决策回链——决定 0039）"],
 ]);
 
 // ---- W4 config ----

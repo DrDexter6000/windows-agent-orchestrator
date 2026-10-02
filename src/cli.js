@@ -44,6 +44,9 @@ import { mcpCommand } from "./commands/mcp.js";
 // M11-2B: playbook list/show 命令族（Lead Playbook Catalog 只读 CLI 适配）。
 // 纯 CLI 适配：argv/format/console，数据逻辑委托 ../application/playbookCatalog.js。
 import { playbookCommand } from "./commands/playbook.js";
+// M13-r1（决定 0039）：consult run/show 命令族（多席只读会审 CLI 适配）。
+// 纯 CLI 适配，数据逻辑委托 ../application/consultService.js。
+import { consultCommand } from "./commands/consult.js";
 // P4-乙 Phase 1a：help 文本抽到 src/cliHelp.js（命名导出 HELP_TEXT，字节不变）。
 // cli.js 底部自执行 main()，生成器（scripts/gen-surface.mjs）不能 import 本文件——
 // 它改 import 无副作用的 cliHelp.js，CLI 打印的仍是同一份 SSOT。
@@ -216,6 +219,10 @@ async function main(argv) {
   }
   if (command === "playbook") {
     await playbookCommand(rest, config);
+    return;
+  }
+  if (command === "consult") {
+    await consultCommand(rest, config);
     return;
   }
   throw new Error(`Unknown command: ${command}`);
