@@ -43,9 +43,16 @@ import {
   codexMcpRemove,
 } from "../hostAdapters/codexMcpConfig.js";
 
+// TD-191① / 决定 0043：宿主闭集从 hostDescriptors 派生（唯一权威），不再手写字面量。
+// 含义随三能力矩阵分化：autoBind 宿主（codex）真写配置；snippet-only 宿主
+// （claude-code 等）mcp bind emit 精确片段而非拒绝——"输出片段"不等于"绑定成功"。
+import { HOST_DESCRIPTOR_IDS, findHostDescriptor } from "../hostAdapters/hostDescriptors.js";
+// 片段构造与宿主示例行复用 onboarding 的单一派生（TD-191① 验收判据：消灭第二清单）。
+import { buildMcpSnippet, buildHostExamples } from "./onboarding.js";
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const SUPPORTED_HOSTS = ["codex"];
+const SUPPORTED_HOSTS = HOST_DESCRIPTOR_IDS;
 
 const EXCLUDE_MARKER_BEGIN = "# >>> WAO MANAGED (mcp workspace activation v1) >>>";
 const EXCLUDE_MARKER_END = "# <<< WAO MANAGED (mcp workspace activation v1) <<<";
@@ -448,7 +455,26 @@ async function classifyState(h, canonicalRoot, expected) {
  */
 export async function bindWorkspace({ host, cwd, hooks }) {
   if (!SUPPORTED_HOSTS.includes(host)) {
-    throw new Error(`unsupported host: ${host} (supported: ${SUPPORTED_HOSTS.join(", ")})`);
+    throw new Error(`unsupported host: ${host} (known hosts: ${SUPPORTED_HOSTS.join(", ")})`);
+  }
+  // snippet-only 宿主：emit 精确注册片段，零写入（TD-191①）。cwd 不参与——
+  // 片段只含安装根路径，与目标项目无关；不做 workspace 证明、不碰任何配置。
+  const descriptor = findHostDescriptor(host);
+  if (descriptor && !descriptor.autoBind) {
+    const snippet = buildMcpSnippet({ installRoot: REPO_ROOT });
+    const example = buildHostExamples(snippet).find((e) => e.host === host) ?? null;
+    return {
+      bound: false,
+      mode: "snippet",
+      host,
+      hostLabel: descriptor.label,
+      hostVerified: descriptor.hostVerified,
+      snippet,
+      example,
+      note:
+        `SNIPPET GENERATED — NOT BOUND: WAO never writes ${host} config. ` +
+        `Paste the snippet into ${host}'s MCP config (or run the example command), then restart ${host}.`,
+    };
   }
   if (typeof cwd !== "string" || cwd.length === 0) {
     throw new Error("workspace: cwd must be a non-empty string");
@@ -592,6 +618,17 @@ export async function statusWorkspace({ host, cwd, hooks }) {
   if (!SUPPORTED_HOSTS.includes(host)) {
     return { bound: false, host, status: "unsupported_host" };
   }
+  // snippet-only 宿主（TD-191①）：WAO 从不写其配置——没有 WAO 绑定可查询。
+  const statusDescriptor = findHostDescriptor(host);
+  if (statusDescriptor && !statusDescriptor.autoBind) {
+    return {
+      bound: false,
+      host,
+      mode: "snippet-only",
+      status: "not_applicable",
+      note: `${host} is a snippet-only host: WAO never writes its config, so there is no WAO binding to status. Registration state lives in ${host}'s own config.`,
+    };
+  }
 
   const h = { ...defaultHooks(), ...hooks };
 
@@ -642,7 +679,18 @@ export async function statusWorkspace({ host, cwd, hooks }) {
  */
 export async function unbindWorkspace({ host, cwd, hooks }) {
   if (!SUPPORTED_HOSTS.includes(host)) {
-    throw new Error(`unsupported host: ${host} (supported: ${SUPPORTED_HOSTS.join(", ")})`);
+    throw new Error(`unsupported host: ${host} (known hosts: ${SUPPORTED_HOSTS.join(", ")})`);
+  }
+  // snippet-only 宿主（TD-191①）：零写入 ⇒ 零解绑；显式说明而非报错。
+  const unbindDescriptor = findHostDescriptor(host);
+  if (unbindDescriptor && !unbindDescriptor.autoBind) {
+    return {
+      bound: false,
+      host,
+      mode: "snippet-only",
+      status: "nothing_to_unbind",
+      note: `${host} is a snippet-only host: WAO never wrote its config, so there is nothing to unbind. Remove the wao entry from ${host}'s own config if present.`,
+    };
   }
 
   const h = { ...defaultHooks(), ...hooks };

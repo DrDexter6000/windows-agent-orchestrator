@@ -24,7 +24,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, dirname } from "node:path";
+import { spawnSync, spawn } from "node:child_process";
 
 import {
   stripComments,
@@ -2497,4 +2498,66 @@ test("R11-2 0024 drift 明细 ≤3 上界：5 条 drift → 3 条明细 + '另�
   const detailLines = text.split("\n").filter((l) => l.startsWith("  drift: "));
   assert.equal(detailLines.length, 3, "drift 明细 ≤3 上界");
   assert.ok(text.includes("另有 2 条 drift 明细未显示"), "超出部分有界尾注");
+});
+
+// ── TD-191②：onboarding --host 一站式注册指引（决定 0043）──────────────────────
+
+test("TD-191②: --host 表内宿主给出能力事实 + 一站式步骤（render 层）", async () => {
+  const { renderHostGuideBlock, buildHostGuide } = await import("../../src/commands/onboarding.js");
+  const { HOST_DESCRIPTORS } = await import("../../src/hostAdapters/hostDescriptors.js");
+  const snippetExamples = HOST_DESCRIPTORS.filter((d) => d.snippet)
+    .map((d) => ({ host: d.id, stability: d.stability, command: d.example("node a.cjs b.js") }));
+  const result = { hostExamples: snippetExamples };
+
+  const cc = renderHostGuideBlock("claude-code", result);
+  assert.match(cc, /host: claude-code \/ Claude Code/);
+  assert.match(cc, /autoBind=false/);
+  assert.match(cc, /snippet-only host — WAO never writes its config/);
+  assert.match(cc, /claude mcp add wao --scope user -- node a\.cjs b\.js/);
+  assert.match(cc, /hostVerified=true/);
+
+  const cx = renderHostGuideBlock("codex", result);
+  assert.match(cx, /autoBind=true/);
+  assert.match(cx, /npm run cli -- mcp bind --host codex --cwd <git-root>/);
+
+  const guide = buildHostGuide("claude-code", result);
+  assert.deepEqual(guide.capabilities, { snippet: true, autoBind: false, hostVerified: true });
+  assert.equal(guide.bindCommand, null, "snippet-only 宿主无 bind 命令");
+});
+
+test("TD-191②: --host zcode（表外）fail-closed——报 known hosts 并指向 AGENT_ONBOARDING 清单", () => {
+  const { status } = spawnSync(
+    process.execPath, ["src/cli.js", "wao", "onboarding", "--host", "zcode"],
+    { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" } },
+  );
+  assert.notEqual(status, 0, "表外宿主必须非零退出（fail-closed）");
+  const out = (spawnSync(
+    process.execPath, ["src/cli.js", "wao", "onboarding", "--host", "zcode"],
+    { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" }, stdio: ["ignore", "pipe", "pipe"] },
+  ).stderr ?? "").toString();
+  assert.match(out, /not in the verified host table/);
+  assert.match(out, /AGENT_ONBOARDING\.md/);
+  assert.match(out, /host-neutral snippet/);
+});
+
+test("TD-191②: host-neutral 片段的 argv 能真启动 stdio server（scratch spawn 冒烟）", async () => {
+  const { buildMcpSnippet } = await import("../../src/application/onboarding.js");
+  const { fileURLToPath } = await import("node:url");
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  const snippet = buildMcpSnippet({ installRoot: repoRoot });
+  const entry = snippet.mcpServers.wao;
+  const runDir = mkdtempSync(join(tmpdir(), "wao-spawn-smoke-"));
+  const child = spawn(process.execPath, [
+    ...entry.args.slice(0, 4), // shim + stdio.js（启动器与入口）
+    "--registry", join(repoRoot, "config", "agents.example.json"),
+    "--run-dir", runDir,
+  ], { cwd: repoRoot, stdio: ["pipe", "ignore", "ignore"], windowsHide: true });
+  let booted = false;
+  child.on("exit", () => { if (!booted) booted = false; });
+  await new Promise((r) => setTimeout(r, 1800));
+  booted = child.exitCode === null && child.killed === false; // 仍存活 = 启动成功
+  child.kill();
+  await new Promise((r) => child.once("exit", r));
+  rmSync(runDir, { recursive: true, force: true });
+  assert.ok(booted, "片段 argv 启动的 stdio server 应在 1.8s 后仍存活（启动即崩 = 片段不可用）");
 });

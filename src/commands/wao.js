@@ -369,6 +369,12 @@ async function waoStateCommand(args, config) {
  *   ask 子命令依赖注入——cli.js 注入 waoAskCommand（它内部调 commands/run.js 的 runCommand）。
  *   wao.js 不 import ../cli.js，故 askHandler 由 cli.js 注入，保持依赖方向。
  */
+// TD-191④：wao 命名空间子命令闭集——顶层 Unknown 报错指路的数据源。
+// 与下方 waoCommand 的 dispatch 同步（cli.test.js 有同步守卫）。
+export const WAO_SUBCOMMANDS = [
+  "init", "state", "decision", "handoff", "declare", "stage", "ask", "doctor", "onboarding",
+];
+
 export async function waoCommand(args, config, deps = {}) {
   const [sub, ...tail] = args;
   if (sub === "init") {

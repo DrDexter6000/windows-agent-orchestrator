@@ -2254,17 +2254,19 @@ test("M12-6 FR-07 docs: architecture 记录 reverify 共享 service 与当前 to
 // that truth across the live docs and the SKILL entrypoint size cap.
 // ============================================================
 
-test("M12-10: SKILL.md stays a slim entrypoint (≤ 12000 bytes; Owner reset the cap 2026-09-19 — TD-166 restructure to routing+pointers)", () => {
+test("M12-10: SKILL.md stays a slim entrypoint (≤ 13800 bytes; Owner reset 2026-09-19 to 12000 — TD-166; Owner authorized +15% 2026-10-02 for TD-191③ host-conditional wording)", () => {
   // Owner 政策（2026-08-20 定策，R23-B 收口）：新增运维/语义文本**默认落权威文档**
   // （troubleshooting/usage 等，先例：round4 F-2 判读句落 §6.8 而非 SKILL）。
   // 申请抬上限仅当两条件同时成立：①新增内容确含重要语义信息；②SKILL.md 已无
   // 可无损压缩语义的空间——届时作为临时议题呈 Owner 批准，不得自行抬。
   // 2026-09-19（TD-166）：SKILL.md 重构为"结构化路由+指针"（一句话内核+动作锚定
   // 指针，渐进披露三级化），Owner 批准冻结值 17000→12000 单值替换（无多层并存）。
+  // 2026-10-02（TD-191③）：Owner 明示授权帽 +15%（12000→13800）——宿主条件句
+  // 与支持闭集句式需要增量空间；授权原文在 M13 会话记录，消耗情况逐次回填 TD-191 行。
   const skill = read("SKILL.md");
   const bytes = Buffer.byteLength(skill, "utf8");
-  assert.ok(bytes <= 12000,
-    `SKILL.md must stay a slim entrypoint ≤ 12000 bytes (got ${bytes}); move detail to authority docs`);
+  assert.ok(bytes <= 13800,
+    `SKILL.md must stay a slim entrypoint ≤ 13800 bytes (got ${bytes}); move detail to authority docs`);
 });
 
 test("TD-166: SKILL.md 指针完整性——每个 docs//references/ 指针路径存在且关键锚点可命中（关系型守卫，非值指纹）", () => {
@@ -2929,10 +2931,11 @@ test("R5 onboarding surface anchors: install.ps1 thin-wrapper path + hostExample
   // R5-D：host 一行注册示例的权威指向（示例不是权威，片段+usage.md 才是）。
   assert.ok(/claude mcp add wao --scope user/.test(ob),
     "onboarding 的 MCP 一行注册示例必须用 --scope user 形状（R5 会审纠正项）");
-  // 代码侧同形状钉死（buildHostExamples 是输出唯一来源，示例形状改动必须两处同步）。
-  const onb = read("src/application/onboarding.js");
-  assert.ok(/claude mcp add wao --scope user --/.test(onb) && /codex mcp add wao --/.test(onb),
-    "buildHostExamples 的一行注册示例形状（claude --scope user / codex）不得漂移");
+  // 代码侧同形状钉死（TD-191①/决定 0043：示例构造器已迁 hostDescriptors.js
+  // 唯一权威——buildHostExamples 只是它的纯映射；示例形状改动必须与文档两处同步）。
+  const descriptors = read("src/hostAdapters/hostDescriptors.js");
+  assert.ok(/claude mcp add wao --scope user --/.test(descriptors) && /codex mcp add wao --/.test(descriptors),
+    "hostDescriptors 示例构造器的一行注册示例形状（claude --scope user / codex）不得漂移");
 });
 
 // ============================================================
@@ -3962,4 +3965,34 @@ test("认证迁移负对照: 摘原位链接 / 改 runbook 目标节名 / 删 us
   assert.notEqual(noHeading, usage, "夹具失效：删标题变异未生效");
   assert.throws(() => assertInPlaceCertPointer(noHeading, runbook, "delta 认证规程"),
     /0 命中|歧义/, "usage 原位标题删除必须红（历史引用落点失联）");
+});
+
+// ── TD-191③ / 决定 0043：宿主闭集单一权威（关系型守卫：docs ↔ hostDescriptors 表）──
+// 会审（consult_20261002211156585jgebok）裁定"模板可出/可自动绑定/真机验证是三种
+// 能力"——文档宿主条件句必须指向描述符表权威，且表内宿主在 usage 接入节可见；
+// 单边漂移（加宿主不改文档 / 改文档不动表）即红。
+
+test("TD-191③/0043: 宿主闭集 = hostDescriptors 唯一权威，docs 条件句在位且表内宿主可见", async () => {
+  const { HOST_DESCRIPTORS, HOST_DESCRIPTOR_IDS } = await import("../../src/hostAdapters/hostDescriptors.js");
+  const arch = read("docs/02-architecture.md");
+  const usage = read("docs/usage.md");
+  // 1) 架构与 usage 的冻结工具面段必须点名描述符表为宿主闭集权威（宿主条件句在位）
+  assert.ok(arch.includes("hostDescriptors.js") && arch.includes("决定 0043"),
+    "architecture 冻结工具面段必须携带宿主条件句并指向 hostDescriptors 唯一权威");
+  assert.ok(usage.includes("hostDescriptors.js"),
+    "usage 冻结工具面段必须指向 hostDescriptors 唯一权威");
+  // 2) 表内宿主必须在 usage 的 mcp bind 接入节出现（加宿主不改文档即红）
+  const bindSection = usage.split("mcp bind/status/unbind")[1]?.slice(0, 4000) ?? "";
+  for (const id of HOST_DESCRIPTOR_IDS) {
+    assert.ok(bindSection.includes(id), `usage mcp bind 节缺少表内宿主 ${id}（宿主表与文档漂移）`);
+  }
+  // 3) autoBind 宿主任置如实：表里 autoBind=true 的宿主必须被 usage 标为 autoBind 当前集成员
+  const autoBindIds = HOST_DESCRIPTORS.filter((d) => d.autoBind).map((d) => d.id);
+  const snippetOnlyIds = HOST_DESCRIPTORS.filter((d) => !d.autoBind).map((d) => d.id);
+  for (const id of autoBindIds) {
+    assert.ok(new RegExp(`autoBind 宿主（[^）]*${id}）`).test(usage), `usage 必须把 ${id} 标为 autoBind 宿主（当前集）`);
+  }
+  for (const id of snippetOnlyIds) {
+    assert.ok(new RegExp(`snippet-only 宿主（[^）]*${id}）`).test(usage), `usage 必须把 ${id} 标为 snippet-only 宿主（当前集）`);
+  }
 });

@@ -60,7 +60,7 @@ Workspace activation (host project binding):
   mcp status --host codex --cwd <git-root>
   mcp unbind --host codex --cwd <git-root>
 
-Project state (.wao/):
+Project state (.wao/) — wao-namespace subcommands; npm form "npm run cli -- wao <sub>", global shim form "wao wao <sub>":
   wao init [--cwd DIR] [--state-dir DIR]
   wao state read [--format text|json]
   wao state snapshot --workflow-id ID [--cwd DIR]
@@ -75,7 +75,7 @@ Project state (.wao/):
   wao handoff write --from R --to R --summary S [--artifacts a,b]
   wao handoff read <role> [--format json]  # latest incoming handoff addressed to role
   wao doctor [--cwd DIR] [--format json] [--warn-as-error]
-  wao onboarding [--agent <id>] [--apply] [--endorse-worker <id>] [--json]  # third-party: generate one minimal private registry from the tracked template (+ host-neutral MCP snippet)
+  wao onboarding [--agent <id>] [--apply] [--endorse-worker <id>] [--host <id>] [--json]  # third-party: generate one minimal private registry from the tracked template (+ host-neutral MCP snippet; --host adds per-host registration guide, verified hosts only)
 
 Notes:
   - runId 内嵌时间戳为 UTC；本地时间需自行换算。

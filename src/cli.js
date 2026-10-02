@@ -29,7 +29,7 @@ import { worktreeCommand } from "./commands/worktree.js";
 // wao.js 的 waoCommand 接受 deps.askHandler（= cli.js 的 waoAskCommand）。
 // waoAskCommand 留 cli.js，调用 commands/run.js 导出的 runCommand（下方 import）。
 // DI 的目的：让 wao.js 不反向 import cli.js，保持依赖方向 cli.js -> wao.js。
-import { waoCommand as waoCommandCore, resolveArtifactPath } from "./commands/wao.js";
+import { waoCommand as waoCommandCore, resolveArtifactPath, WAO_SUBCOMMANDS } from "./commands/wao.js";
 // TD-98 阶段 2e-1a：只读 observe 命令族（status/tail/collect）拆到 src/commands/observe.js。
 import { statusCommand, tailCommand, collectCommand } from "./commands/observe.js";
 // TD-98 阶段 2e-1b：stop 命令拆到 src/commands/stop.js（杀进程 + verification + alert，非只读）。
@@ -225,7 +225,18 @@ async function main(argv) {
     await consultCommand(rest, config);
     return;
   }
-  throw new Error(`Unknown command: ${command}`);
+  // TD-191④：顶层 Unknown 裸报是"幻影命令"误诊两次的根因——命中 wao 命名空间
+  // 子命令名时给出两种完整调用形；其余给通用指路。退出码与分派语义不变。
+  if (WAO_SUBCOMMANDS.includes(command)) {
+    throw new Error(
+      `Unknown command: ${command} — it is a wao-namespace subcommand. ` +
+        `Use "npm run cli -- wao ${command}" (global shim form: "wao wao ${command}").`
+    );
+  }
+  throw new Error(
+    `Unknown command: ${command}. See --help for available commands; ` +
+      `wao-namespace subcommands (doctor/onboarding/state/…) run as "wao <sub>".`
+  );
 }
 
 // TD-98 阶段 1：registry 命令族已拆到 src/commands/registry.js（行为不变）。

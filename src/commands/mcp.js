@@ -69,6 +69,15 @@ async function mcpBindCommand(args, config) {
   const result = await bindWorkspace({ host, cwd });
   console.log(JSON.stringify(result, null, 2));
   console.log("");
+  // TD-191①：snippet-only 宿主 emit 片段——banner 必须明说"未绑定"，不得沿用
+  // codex 的"configured"成功文案（会审裁定：输出片段 ≠ 绑定成功）。
+  if (result.mode === "snippet") {
+    console.log(result.note);
+    if (result.example) {
+      console.log(`Example (${result.example.stability}): ${result.example.command}`);
+    }
+    return;
+  }
   console.log(
     `WAO workspace configured for ${host}. ` +
       `Restart or open a new Codex task in this project for the configuration to take effect.`,

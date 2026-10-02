@@ -51,7 +51,7 @@ Before dispatch: `registry_list` for inventory + required-credential presence + 
 
 ## Minimal MCP Loop
 
-WAO exposes exactly **23 MCP tools** — always registered, no profile, no flag, no restart. Closed loop: `lead_preflight (or registry_list → workspace_status) → run_dispatch → run_await_result → run_delivery_review_bundle → Lead decision`. `run_await_result` is the default supervision primitive (waits 0..270000 ms, early on terminal, folds compact result + evidence counts; never stop/retry/decide; terminal + cleanly observed → bounded closed-set `outcome`). Atomic tools always remain available — no convenience tool removes or weakens them.
+WAO exposes exactly **23 MCP tools** — always registered for every host that completes MCP onboarding (auto-registration path: `mcp bind`, codex only; other hosts use `wao onboarding`), no profile, no flag, no restart. Closed loop: `lead_preflight (or registry_list → workspace_status) → run_dispatch → run_await_result → run_delivery_review_bundle → Lead decision`. `run_await_result` is the default supervision primitive (waits 0..270000 ms, early on terminal, folds compact result + evidence counts; never stop/retry/decide; terminal + cleanly observed → bounded closed-set `outcome`). Atomic tools always remain available — no convenience tool removes or weakens them.
 
 Roster: `lead_preflight`, `registry_list`, `workspace_status`, `workspace_select`, `run_dispatch`, `run_dispatch_contract_check`, `run_consult`, `run_continue`, `run_correct`, `run_status`, `run_wait`, `run_await_result`, `run_collect`, `run_activity`, `run_diagnose`, `run_delivery`, `run_delivery_review`, `run_delivery_review_bundle`, `run_delivery_reverify`, `run_delivery_decide`, `run_delivery_repackage`, `run_stop`, `runs_list`.
 

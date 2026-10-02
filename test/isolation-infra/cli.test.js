@@ -2067,9 +2067,10 @@ test("TD-95 #11: doctor --strict 跑 JS parse smoke（防注释崩溃漏到运�
   }
 });
 
-test("TD-72 延伸: doctor 报告 invocation_method（info 级，告知 WAO 故意不进 PATH）", () => {
-  // codex 实测 friction：把"PATH 里没有 wao"误读成安装缺失。其实是 v22 约束的刻意设计。
-  // doctor 主动告知正确调用方式，堵住认知缺口——且 info 级不计入 HEALTHY 判定。
+test("TD-72 延伸/TD-191⑥: doctor 报告 invocation_method（info 级安装权威如实探测，机器无关）", () => {
+  // 演化：旧版自述"故意不进 PATH"绝对句；TD-191⑥ 改为如实探测——PATH 上有无
+  // 全局 wao、版本漂移、skills 拷贝同步、本检出根。断言按**结构**而非机器状态：
+  // 有 shim 报 shim 事实，无 shim 给 npm run cli 指引；两种形态都合法。
   const dir = mkdtempSync(join(tmpdir(), "wao-invok-"));
   try {
     const result = spawnSync(process.execPath, [
@@ -2077,14 +2078,19 @@ test("TD-72 延伸: doctor 报告 invocation_method（info 级，告知 WAO 故�
       "--cwd", dir,
       "--registry", DOCTOR_REGISTRY,
       "--format", "json",
-    ], { cwd: process.cwd(), encoding: "utf8", env: doctorSpawnEnv(), timeout: 10000 });
+    ], { cwd: process.cwd(), encoding: "utf8", env: doctorSpawnEnv(), timeout: 20000 });
     const parsed = JSON.parse(result.stdout);
     const inv = parsed.checks.find((c) => c.name === "invocation_method");
     assert.ok(inv, "doctor 应有 invocation_method info 项");
     assert.equal(inv.pass, true);
     assert.equal(inv.level, "info", "invocation_method 是 info 级，不是健康检查");
-    assert.match(inv.detail, /npm run cli/, "应告知用 npm run cli 调");
-    assert.match(inv.detail, /不进 PATH|不是安装缺失/, "应明示不进 PATH 是设计非缺失");
+    // 两种机器形态之一（有/无全局 shim），都必须出现：
+    assert.match(inv.detail, /npm run cli -- <command>|全局 `wao` 在 PATH/,
+      "无 shim 时给 npm run cli 指引；有 shim 时如实报告 PATH 命中");
+    // 恒在：本检出根（安装权威候选事实行，机器无关）
+    assert.match(inv.detail, /当前检出（安装权威候选之一）/, "必须报告本检出根事实");
+    // 恒不在：旧的绝对句已退场
+    assert.ok(!inv.detail.includes("故意不进 PATH"), "旧绝对句'故意不进 PATH'不得残留（TD-191⑥）");
     // info 项不影响 verdict（HEALTHY 不因它变 ISSUE）
     assert.equal(result.status, 0, "info 项不应让 doctor exit 非零");
   } finally {
@@ -5498,3 +5504,46 @@ test("TD-153 runs list --state/--since 过滤与组合正交：行集叠加、JS
   }
 });
 // test/cli.test.js
+// ===== TD-191④：顶层 Unknown 报错指路（wao 命名空间两段式陷阱）=====
+// 历史事实：裸 `onboarding`/`doctor` 顶层调用只有 "Unknown command" 裸报，
+// 两次把审计会话误诊成"幻影命令"（TD-191）。指路文案必须给出两种完整调用形。
+
+function runCliExpectFail(cmd) {
+  try {
+    execSync(`node src/cli.js ${cmd}`, {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  } catch (e) {
+    return { status: e.status, stderr: (e.stderr ?? "").toString() };
+  }
+  return { status: 0, stderr: "" };
+}
+
+test("TD-191④: bare wao-namespace subcommand at top level gets both full invocation forms", () => {
+  for (const sub of ["onboarding", "doctor", "declare"]) {
+    const { status, stderr } = runCliExpectFail(sub);
+    assert.notEqual(status, 0, `${sub} 必须仍以非零退出（语义不变）`);
+    assert.match(stderr, new RegExp(`npm run cli -- wao ${sub}`), `${sub} 必须给出 npm 完整调用形`);
+    assert.match(stderr, new RegExp(`wao wao ${sub}`), `${sub} 必须给出全局 shim 完整调用形`);
+    assert.match(stderr, new RegExp(`Unknown command: ${sub}`), `${sub} 保留 Unknown command 事实前缀`);
+  }
+});
+
+test("TD-191④: non-namespace unknown command keeps exit 1 + gains a generic pointer", () => {
+  const { status, stderr } = runCliExpectFail("definitely-not-a-command");
+  assert.notEqual(status, 0);
+  assert.match(stderr, /Unknown command: definitely-not-a-command/);
+  assert.match(stderr, /wao <sub>/, "通用指路必须提到 wao 命名空间两段式形态");
+});
+
+test("TD-191④: WAO_SUBCOMMANDS 与 waoCommand dispatch 保持同步", async () => {
+  const src = readFileSync(join(process.cwd(), "src", "commands", "wao.js"), "utf8");
+  const { WAO_SUBCOMMANDS } = await import("../../src/commands/wao.js");
+  assert.ok(Array.isArray(WAO_SUBCOMMANDS) && WAO_SUBCOMMANDS.length >= 9, "闭集必须非空且覆盖现存 9 子命令");
+  for (const sub of WAO_SUBCOMMANDS) {
+    assert.ok(src.includes(`sub === "${sub}"`), `WAO_SUBCOMMANDS 成员 ${sub} 在 waoCommand dispatch 中不存在（闭集与分派漂移）`);
+  }
+});

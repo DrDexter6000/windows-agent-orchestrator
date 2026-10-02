@@ -45,6 +45,9 @@ import { readFile } from "node:fs/promises";
 import { resolve, join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { homedir } from "node:os";
+// TD-191⑥：安装权威如实化探测消费版本单一来源（决定 0038）。
+import { WAO_VERSION } from "../version.js";
 
 import { validateWaoDir } from "../waoDir.js";
 import { parseOptions, resolveTargetCwd } from "./shared.js";
@@ -535,17 +538,60 @@ export async function waoDoctorCommand(args, config) {
     });
   }
 
-  // 8. invocation_method（TD-72 延伸，info 级，永不计入 verdict 判定）：
-  // fresh agent 易把"PATH 里没有 wao"误读成安装缺失——但 WAO 故意不进 PATH
-  // （v22 约束：链进 PATH 会被系统默认 v24 node 拉起被 version guard 拒）。
-  // doctor 主动告知正确调用方式，堵住认知 friction。
+  // 8. invocation_method / 安装权威探测（TD-72 延伸 → TD-191⑥ 如实化，info 级，
+  //    永不计入 verdict 判定）：旧版自述"WAO 故意不进 PATH"为绝对句——但
+  //    bin/wao.js（npm link）恰是官方全局形态（M12-8F），机器上还可能并存
+  //    陈旧 shim 与 ~/.agents/skills 整仓拷贝。改为**只报事实不裁决**：PATH 上
+  //    有没有 wao、版本是否漂移、skills 拷贝是否同步、本检出根在哪。三份安装
+  //    权威收敛为一份属 Owner 机器裁定（TD-191⑥ 机器半），doctor 不替 Owner 选。
+  const installLines = [];
+  const whereWao = spawnSync(
+    process.platform === "win32" ? "where" : "which",
+    ["wao"], { encoding: "utf8", windowsHide: true, timeout: 15000 },
+  );
+  const waoPath = (whereWao.status === 0 ? (whereWao.stdout ?? "").split("\n").map((l) => l.trim()).filter(Boolean)[0] : null) ?? null;
+  if (waoPath) {
+    installLines.push(`全局 \`wao\` 在 PATH：${waoPath}`);
+    let shimVersion = "未知";
+    try {
+      const v = spawnSync(waoPath, ["--version"], { encoding: "utf8", windowsHide: true, timeout: 30000 });
+      if (v.status === 0) shimVersion = (v.stdout ?? "").trim() || "未知";
+    } catch { /* 探测失败如实报未知 */ }
+    if (shimVersion === WAO_VERSION) {
+      installLines.push(`版本与当前仓一致（${WAO_VERSION}）。`);
+    } else {
+      installLines.push(
+        `版本漂移：PATH shim=${shimVersion} vs 当前仓=${WAO_VERSION}——宿主可能调到旧 WAO 行为（TD-191⑥）。`,
+      );
+    }
+  } else {
+    installLines.push("PATH 上无全局 \`wao\`——用 \`npm run cli -- <command>\`（走 v22 shim）调用；这是仓内正常调用形态，不是安装缺失。");
+  }
+  const skillsCopySkill = join(homedir(), ".agents", "skills", "wao-orchestrator", "SKILL.md");
+  if (existsSync(skillsCopySkill)) {
+    const repoSkillPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "SKILL.md");
+    let inSync = null;
+    try {
+      const a = await readFile(repoSkillPath, "utf8");
+      const b = await readFile(skillsCopySkill, "utf8");
+      inSync = a === b;
+    } catch { /* 读失败如实报未探测 */ }
+    installLines.push(
+      inSync === null
+        ? `skills 整仓拷贝在场（${dirname(skillsCopySkill)}；同步性未探测）。`
+        : inSync
+          ? `skills 整仓拷贝与当前仓同步（SKILL.md 一致）。`
+          : `skills 整仓拷贝与当前仓**不同步**（SKILL.md 有差异）——宿主可能加载旧技能（TD-191⑥）。`,
+    );
+  }
+  installLines.push(`当前检出（安装权威候选之一）：${dirname(fileURLToPath(import.meta.url))}${sep}..${sep}..`);
   checks.push({
     name: "invocation_method",
     pass: true,
     level: "info",
     status: "info",
     severity: "info",
-    detail: "WAO 是本地仓内工具，故意不进 PATH——用 `npm run cli -- <command>` 调（走 v22 shim）。PATH 里没有 wao 命令是正常的，不是安装缺失。",
+    detail: installLines.join("\n"),
   });
 
   // 9. TD-95 #11 --strict：JS parse smoke（防注释崩溃漏到运行时，复盘 #3 教训）。

@@ -34,6 +34,8 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 - `.wao/` 建在**被开发的目标项目里**（因为它记的是那个项目的开发状态）。
 - worker 的 `cwd` 是**动态的**——CLI 派发时由 Lead 用 `--cwd <目标项目>` 指定；MCP 派发时 workspace 来自 host 授权绑定（`--workspace-root` / `roots/list` / `workspace_select`）。agents.json 只配 backend/model/认证，不写死 cwd。
 
+**安装形态与"我实际用的是哪份 WAO"（TD-191⑥）**：一台机器上可能并存三种 WAO 安装形态——①开发仓检出（`npm run cli` 调用，或 `npm link` 后的全局 `wao`，后者始终执行 link 的活检出）；②`~/.agents/skills/wao-orchestrator` 整仓拷贝（skill 消费者只读形态，**会随时间与主仓漂移**）；③installer 装到自选根（如 `%USERPROFILE%\wao`）。`wao doctor` 的 `invocation_method` 检查项**只报事实不裁决**：PATH 上有无全局 `wao`、其版本是否与当前检出漂移、skills 拷贝是否同步、当前检出根在哪。多份并存时收敛为一份属 Owner 机器裁定；判断"刚才那条命令用了哪份"以 doctor 报告的检出根 + 实际调用形态为准。
+
 ## 3. 前置条件检查
 
 在安装前，确认环境满足（不满足的项先跑 §4d 的 doctor 报告给 owner——doctor 是建议性报告，不是使用门禁）：
@@ -151,10 +153,12 @@ Registry command split: registry list = inventory + certification status; regist
 npm run mcp -- --registry config/agents.json --run-dir runs
 ```
 
-- 已装 host 的话，`wao onboarding` 的输出同时给出按 host 的一行注册示例（如 `claude mcp add wao --scope user -- node <wao-node.cjs> <stdio.js> --registry ... --run-dir ...`；codex 标注 experimental）——示例的 flag 随 host 版本演进，权威形状 = `docs/usage.md` §MCP stdio，host-neutral 片段永远是兜底。
+- 已装 host 的话，`wao onboarding --host <id>` 给出该宿主的一站式注册指引（能力事实 + 具体步骤，决定 0043 宿主表：当前 claude-code=codex 两席）。无 `--host` 时输出所有表内宿主的一行注册示例（如 `claude mcp add wao --scope user -- node <wao-node.cjs> <stdio.js> --registry ... --run-dir ...`；codex 标注 experimental）——示例的 flag 随 host 版本演进，权威形状 = `docs/usage.md` §MCP stdio + `src/hostAdapters/hostDescriptors.js` 冻结表，host-neutral 片段永远是兜底。
 - **CLI `--cwd` 只控制 workspace 观察/过滤**（哪些路径算改动、canary 在哪个项目里跑）。
 - **MCP 派发的 workspace 来自 host 授权的绑定**：`--workspace-root` / `roots/list` / `workspace_select` 协商出 host 批准的目录，与 CLI `--cwd` 是两回事，别混。
 - 完整的 host 配置示例见 `docs/usage.md` §MCP stdio。
+
+**未验证宿主（如 zcode）的入表清单（Owner 在场执行，可逆步骤）**：宿主表只收格式已核实的宿主（fail-closed，不猜格式）。给新宿主入表：① 记录宿主名与版本；② 备份该宿主 MCP 配置文件；③ 把 host-neutral 片段（`wao onboarding` 输出的 mcpServers JSON）按该宿主语法追加为单键 `wao` 条目（不改动既有键）；④ 重启宿主，观察 wao server 出现并能调用只读工具（`lead_preflight`）；⑤ 无论成败还原备份，把"格式与加载结果"记录进 hostDescriptors 的证据锚点，`hostVerified` 按结果如实置位。⑤ 之前，host-neutral 片段对任何 MCP 宿主仍可直接手接。
 
 ### 4f. 首次只读 canary
 

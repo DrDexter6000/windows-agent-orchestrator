@@ -772,7 +772,7 @@ WAO 是 MCP-first 控制面（Decision 0017）：一个 MCP host（如 Claude De
 
 #### 冻结工具面（always-registered tools，M12-10 progressive-disclosure correction + M12-16 run_correct）
 
-WAO 的 MCP 工具**全部始终注册**：无 profile、无启动 flag、无 restart-to-recover——每个操作工具对连接的整个生命周期都可独立调用。这是一个**静态呈现层**：它**不是**权限层、**不是**路由层、**不按** host/runtime 名分支（Claude/Codex/Kimi/OpenCode 一视同仁，无任何 `if host==…`），也不依赖 `tools/list_changed` 或运行期动态注册。工具面的字节稳定性**分层**（ADR 0021）：`name` 与注册顺序逐字节冻结；`inputSchema`/`outputSchema`/`annotations` 由 description 剥离 SHA-256 冻结契约哈希锁定（仅限 additive 变更 + 显式重冻结记录）；`description` 可修订——受冻结字节天花板约束、每次修订附 Lead 复核记录。演进 additive-first，减面两级程序见 `.wao/decisions/0021`。参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。
+WAO 的 MCP 工具**全部始终注册**（对**任何完成 MCP 接入的宿主**：接入通路闭集与各宿主能力由 `src/hostAdapters/hostDescriptors.js` 冻结描述符表承载——决定 0043 三能力轴 snippet/autoBind/hostVerified；表外宿主 fail-closed，host-neutral 片段兜底）：无 profile、无启动 flag、无 restart-to-recover——每个操作工具对连接的整个生命周期都可独立调用。这是一个**静态呈现层**：它**不是**权限层、**不是**路由层、**不按** host/runtime 名分支（Claude/Codex/Kimi/OpenCode 一视同仁，无任何 `if host==…`），也不依赖 `tools/list_changed` 或运行期动态注册。工具面的字节稳定性**分层**（ADR 0021）：`name` 与注册顺序逐字节冻结；`inputSchema`/`outputSchema`/`annotations` 由 description 剥离 SHA-256 冻结契约哈希锁定（仅限 additive 变更 + 显式重冻结记录）；`description` 可修订——受冻结字节天花板约束、每次修订附 Lead 复核记录。演进 additive-first，减面两级程序见 `.wao/decisions/0021`。参数与形状见 docs/surface/mcp-tools.md（生成层，随代码再生成）。
 
 原 playbook 工具已**整体移出工具面**（M12-10），built-in playbook catalog 改为按需读取的 MCP resources（`wao://playbooks`，见下文）；M12-16 增 `run_correct`（queued in-flight correction）。全部工具（含 `workspace_select`、`run_dispatch_contract_check`、`run_wait`、`run_correct`）不再被任何子集隐藏，因此一个永不重启的 Host 保留全部操作能力。所有 `DRILLDOWN_TOOLS` 闭集成员（`run_status`/`run_activity`/`run_collect`/`run_delivery`/`run_delivery_review`/`run_diagnose`）均在冻结工具面内，故 `availableDrilldowns` 渐进式披露提示永远只广告可安全调用的观察工具；它只披露、不自动调用、不决策、不广告 mutation/control 工具。
 
@@ -999,11 +999,15 @@ runner 以 requested → claimed → delivered/delivery_failed 的 durable 事�
 
 MCP workspace binding 来源优先级：`lead_session`（`workspace_select`）> `mcp_root`（client roots/list）> `server_config`（显式 `--workspace-root`）> fail-closed。`--workspace-root` 是全局静态启动参数。
 
-`mcp bind/status/unbind` 命令让 Human Owner 在目标项目中执行**一次**（可选）项目级激活，生成一个 `.codex/config.toml` 中的 WAO managed block（含 `--workspace-root` 绑定到项目 canonical Git root）。这提供一个持久项目级默认——但不是正常使用的前置条件。
+`mcp bind/status/unbind` 命令让 Human Owner 在目标项目中执行**一次**（可选）项目级激活。宿主闭集与能力由 `src/hostAdapters/hostDescriptors.js` 冻结描述符表派生（决定 0043，三能力轴：snippet / autoBind / hostVerified）：
 
-**前置条件**：项目必须是 Codex trusted project（在 Codex Desktop 打开一次即建立 trust）。详见 Codex 官方文档 `.codex/config.toml (trusted projects only)`。
+- **autoBind 宿主（当前 = codex）**：`bind` 真写目标项目 `.codex/config.toml` 中的 WAO managed block（含 `--workspace-root` 绑定到项目 canonical Git root），提供持久项目级默认——但不是正常使用的前置条件。
+- **snippet-only 宿主（当前 = claude-code）**：`bind` **emit 精确注册片段（JSON + 一行示例命令）而非写配置**——零写入，输出明说 `SNIPPET GENERATED — NOT BOUND`（输出片段 ≠ 绑定成功）。`status` 返回 `not_applicable`、`unbind` 返回 `nothing_to_unbind`（WAO 从未写其配置）。
+- 未知宿主 fail-closed：报错给出 known hosts 闭集。
 
-**真实可执行入口**（当前没有全局 `wao` executable）：
+**前置条件**（仅 autoBind/codex 路径）：项目必须是 Codex trusted project（在 Codex Desktop 打开一次即建立 trust）。详见 Codex 官方文档 `.codex/config.toml (trusted projects only)`。
+
+**真实可执行入口**（第三方安装默认没有全局 `wao` 命令；开发仓 `npm link` 后可用全局 `wao`——安装形态与定位见 `AGENT_ONBOARDING.md`）：
 
 ```powershell
 # bind: 在目标项目中生成 WAO managed block

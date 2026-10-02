@@ -41,6 +41,9 @@ import { BACKEND_CLI } from "./backendCliMap.js";
 // 模板面的 rows，分级推导与六态映射都在 panelReadiness（doctor 共用，禁止
 // 两处各算）。computeReadyState 探测归一后委托 deriveReadyState（单一实现）。
 import { assessPanelReadiness, deriveReadyState, seatRoleOf } from "./panelReadiness.js";
+// TD-191① / 决定 0043：宿主示例行从 hostDescriptors 唯一权威派生（消灭此前
+// 硬编码 claude-code/codex 两条的第二份宿主清单——会审指认的既有漂移点）。
+import { HOST_DESCRIPTORS } from "../hostAdapters/hostDescriptors.js";
 
 /**
  * Fixed safe error for the onboarding service. The `message` is always a fixed
@@ -456,10 +459,11 @@ export function buildHostExamples(snippet) {
     return [];
   }
   const argv = [entry.command, ...entry.args].map(quoteIfSpaced).join(" ");
-  return [
-    { host: "claude-code", stability: "stable", command: `claude mcp add wao --scope user -- ${argv}` },
-    { host: "codex", stability: "experimental", command: `codex mcp add wao -- ${argv}` },
-  ];
+  // TD-191①：host 清单、stability 与一行注册命令全部派生自 hostDescriptors
+  // 冻结表（唯一权威）；本函数只做片段→argv 的纯映射。
+  return HOST_DESCRIPTORS
+    .filter((d) => d.snippet)
+    .map((d) => ({ host: d.id, stability: d.stability, command: d.example(argv) }));
 }
 
 /**

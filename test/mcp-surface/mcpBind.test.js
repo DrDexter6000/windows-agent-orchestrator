@@ -1125,3 +1125,90 @@ test("P0-1R-INTEGRATION: fresh project with spaces and ampersand binds without a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── TD-191① / 决定 0043：宿主描述符表与 snippet-only emit ──────────────────────
+
+test("TD-191①: HOST_DESCRIPTORS 闭集形状——三能力布尔、示例构造器、无未知字段", async () => {
+  const { HOST_DESCRIPTORS, HOST_DESCRIPTOR_IDS, findHostDescriptor } = await import("../../src/hostAdapters/hostDescriptors.js");
+  assert.ok(HOST_DESCRIPTORS.length >= 2, "表至少含 codex 与 claude-code");
+  const seen = new Set();
+  for (const d of HOST_DESCRIPTORS) {
+    assert.match(d.id, /^[a-z][a-z0-9-]*$/, "id 形状");
+    assert.ok(!seen.has(d.id), `id 重复：${d.id}`);
+    seen.add(d.id);
+    for (const cap of ["snippet", "autoBind", "hostVerified"]) {
+      assert.equal(typeof d[cap], "boolean", `${d.id}.${cap} 必须是显式布尔（三能力矩阵不许缺省）`);
+    }
+    assert.equal(typeof d.example, "function", `${d.id}.example 必须是构造器`);
+    assert.ok(["stable", "experimental"].includes(d.stability), `${d.id}.stability 闭集`);
+    // autoBind 宿主当前只有 codex（真写配置的适配器仅此一个）
+    if (d.autoBind) assert.equal(d.id, "codex", "autoBind 闭集当前 = {codex}（新增须扩 hostAdapters 适配器）");
+  }
+  assert.deepEqual(HOST_DESCRIPTOR_IDS, [...seen], "id 派生数组与表一致");
+  assert.equal(findHostDescriptor("definitely-not-a-host"), null, "未知宿主返回 null（fail-closed 数据源）");
+});
+
+test("TD-191①: bind claude-code = snippet emit，零写入、明说 NOT BOUND", async () => {
+  const { bindWorkspace } = await import("../../src/application/mcpWorkspaceActivation.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-snippet-bind-"));
+  makeGitRepo(dir);
+  try {
+    const before = readFileSync(join(dir, "README.md"), "utf8");
+    const result = await bindWorkspace({ host: "claude-code", cwd: dir });
+    assert.equal(result.bound, false, "snippet 模式 bound=false");
+    assert.equal(result.mode, "snippet");
+    assert.match(result.note, /NOT BOUND/i, "必须明说未绑定");
+    assert.ok(result.snippet?.mcpServers?.wao?.args?.length >= 4, "片段含 stdio argv");
+    assert.match(result.example.command, /^claude mcp add wao --scope user -- /, "示例行来自描述符表");
+    assert.equal(result.hostVerified, true, "claude-code hostVerified（M9-7B dogfood 证据）");
+    // 零写入：仓库内容与目录清单不变（没有 .codex/ 被创建）
+    assert.equal(readFileSync(join(dir, "README.md"), "utf8"), before, "仓库内容不变");
+    assert.equal(existsSync(join(dir, ".codex")), false, "不得创建 .codex/");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-191①: status/unbind 对 snippet-only 宿主显式 not_applicable / nothing_to_unbind", async () => {
+  const { statusWorkspace, unbindWorkspace } = await import("../../src/application/mcpWorkspaceActivation.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-snippet-status-"));
+  makeGitRepo(dir);
+  try {
+    const st = await statusWorkspace({ host: "claude-code", cwd: dir });
+    assert.equal(st.mode, "snippet-only");
+    assert.equal(st.status, "not_applicable");
+    assert.equal(st.bound, false);
+    const ub = await unbindWorkspace({ host: "claude-code", cwd: dir });
+    assert.equal(ub.mode, "snippet-only");
+    assert.equal(ub.status, "nothing_to_unbind");
+    assert.equal(ub.bound, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-191①: 未知宿主 fail-closed——bind/unbind 报错文案给 known hosts", async () => {
+  const { bindWorkspace, unbindWorkspace } = await import("../../src/application/mcpWorkspaceActivation.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-unknown-host-"));
+  makeGitRepo(dir);
+  try {
+    await assert.rejects(() => bindWorkspace({ host: "not-a-host", cwd: dir }), /unsupported host: not-a-host \(known hosts: claude-code, codex\)/);
+    await assert.rejects(() => unbindWorkspace({ host: "not-a-host", cwd: dir }), /known hosts: claude-code, codex/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("TD-191①: onboarding buildHostExamples 从描述符表派生（单一宿主清单）", async () => {
+  const { buildHostExamples } = await import("../../src/application/onboarding.js");
+  const { HOST_DESCRIPTORS } = await import("../../src/hostAdapters/hostDescriptors.js");
+  const snippet = { mcpServers: { wao: { command: "node", args: ["a.cjs", "b.js", "--registry", "r.json", "--run-dir", "rd"] } } };
+  const examples = buildHostExamples(snippet);
+  assert.deepEqual(examples.map((e) => e.host), HOST_DESCRIPTORS.filter((d) => d.snippet).map((d) => d.id),
+    "示例 host 清集与顺序 = 描述符表（第二份手写清单已消灭）");
+  for (const e of examples) {
+    const d = HOST_DESCRIPTORS.find((x) => x.id === e.host);
+    assert.equal(e.stability, d.stability);
+    assert.ok(e.command.startsWith(d.example("")), `示例命令来自描述符构造器（${e.host}）`);
+  }
+});
