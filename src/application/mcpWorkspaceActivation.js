@@ -461,8 +461,10 @@ export async function bindWorkspace({ host, cwd, hooks }) {
   // 片段只含安装根路径，与目标项目无关；不做 workspace 证明、不碰任何配置。
   const descriptor = findHostDescriptor(host);
   if (descriptor && !descriptor.autoBind) {
-    const snippet = buildMcpSnippet({ installRoot: REPO_ROOT });
-    const example = buildHostExamples(snippet).find((e) => e.host === host) ?? null;
+    // 片段按宿主形态渲染（决定 0043）：mcpServers 宿主 vs zcode 插件包形态。
+    const entry = buildMcpSnippet({ installRoot: REPO_ROOT }).mcpServers.wao;
+    const snippet = descriptor.renderSnippet(entry);
+    const example = buildHostExamples(buildMcpSnippet({ installRoot: REPO_ROOT })).find((e) => e.host === host) ?? null;
     return {
       bound: false,
       mode: "snippet",

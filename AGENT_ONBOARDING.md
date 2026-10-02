@@ -160,6 +160,8 @@ npm run mcp -- --registry config/agents.json --run-dir runs
 
 **未验证宿主（如 zcode）的入表清单（Owner 在场执行，可逆步骤）**：宿主表只收格式已核实的宿主（fail-closed，不猜格式）。给新宿主入表：① 记录宿主名与版本；② 备份该宿主 MCP 配置文件；③ 把 host-neutral 片段（`wao onboarding` 输出的 mcpServers JSON）按该宿主语法追加为单键 `wao` 条目（不改动既有键）；④ 重启宿主，观察 wao server 出现并能调用只读工具（`lead_preflight`）；⑤ 无论成败还原备份，把"格式与加载结果"记录进 hostDescriptors 的证据锚点，`hostVerified` 按结果如实置位。⑤ 之前，host-neutral 片段对任何 MCP 宿主仍可直接手接。
 
+**zcode 入表现状（2026-10-02 走查至第 ③ 步前半）**：格式已核实——ZCode 的 MCP 注册走**插件系统**（非 mcpServers JSON）：插件包 = `.claude-plugin/plugin.json`（name/description/author）+ 根级 `.mcp.json`（**扁平** server 映射 `{wao: {command, args}}`），证据 = 本机在册 context7 插件实包勘察。`mcp bind --host zcode` 现已 emit 该插件包内容（`hostVerified=false`）。**剩余 Owner 步骤**：①' 记录 ZCode 版本（app 内"关于"页，本机无离线可读版本文件）；③' 把 emit 的两个文件放入本地插件目录并注册（本机未发现本地插件注册命令——installed_plugins.json 是内部注册表，手改有风险，倾向找 ZCode 的插件安装入口或问官方）；④ 重启 ZCode 观察 wao server → 成功则 hostVerified 置 true；⑤ 还原/清理。内置 server（4_5v/web_reader/node_repl）的注册面本轮未定位到（不在插件缓存），说明 ZCode 可能另有非插件 MCP 通道——入表时一并确认。
+
 ### 4f. 首次只读 canary
 
 用一个**进程式 worker**（claude-code / codex / kimi-code 都行，不是 opencode）跑一个最小只读任务，验证端到端。`<agentId>` 填你在 §4c 保留的那个 worker——从 `registry list` 的输出里挑它的 id 复制过来：

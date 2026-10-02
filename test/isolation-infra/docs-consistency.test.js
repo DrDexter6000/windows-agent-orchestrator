@@ -2267,6 +2267,14 @@ test("M12-10: SKILL.md stays a slim entrypoint (≤ 13800 bytes; Owner reset 202
   const bytes = Buffer.byteLength(skill, "utf8");
   assert.ok(bytes <= 13800,
     `SKILL.md must stay a slim entrypoint ≤ 13800 bytes (got ${bytes}); move detail to authority docs`);
+  // TD-191 追加（2026-10-02 SSOT 审计）：帽值唯一权威在本守卫——其它文档只许指针
+  // 不许第二份数值（当天实证：守卫抬 13800 后 milestone-discipline §8 的 12,000
+  // 字面量变成冲突陈述，被 Owner SSOT 体检点名）。此处反向钉住"无字面量"。
+  const discipline = read("docs/milestone-discipline.md");
+  assert.ok(!/1[2-9],?\d{3} ?字节/.test(discipline),
+    "milestone-discipline 不得携带 SKILL 帽数值字面量（唯一权威在本守卫；历史事件值以事件时点措辞记载）");
+  assert.ok(discipline.includes("SKILL 帽守卫为唯一权威"),
+    "milestone-discipline 的 SKILL 帽句必须指向本守卫（防第二份陈述再生）");
 });
 
 test("TD-166: SKILL.md 指针完整性——每个 docs//references/ 指针路径存在且关键锚点可命中（关系型守卫，非值指纹）", () => {
@@ -3988,11 +3996,13 @@ test("TD-191③/0043: 宿主闭集 = hostDescriptors 唯一权威，docs 条件�
   }
   // 3) autoBind 宿主任置如实：表里 autoBind=true 的宿主必须被 usage 标为 autoBind 当前集成员
   const autoBindIds = HOST_DESCRIPTORS.filter((d) => d.autoBind).map((d) => d.id);
-  const snippetOnlyIds = HOST_DESCRIPTORS.filter((d) => !d.autoBind).map((d) => d.id);
+  const snippetOnlyIds = HOST_DESCRIPTORS.filter((d) => d.autoBind === false).map((d) => d.id);
+  // 正则不锚定列表位置（成员后可能跟 "、next"）：只要求 id 出现在对应标签的
+  // 括号集内——多成员列表（如 "（当前 = claude-code、zcode）"）对每个成员都成立。
   for (const id of autoBindIds) {
-    assert.ok(new RegExp(`autoBind 宿主（[^）]*${id}）`).test(usage), `usage 必须把 ${id} 标为 autoBind 宿主（当前集）`);
+    assert.ok(new RegExp(`autoBind 宿主（[^）]*${id}`).test(usage), `usage 必须把 ${id} 列入 autoBind 宿主当前集`);
   }
   for (const id of snippetOnlyIds) {
-    assert.ok(new RegExp(`snippet-only 宿主（[^）]*${id}）`).test(usage), `usage 必须把 ${id} 标为 snippet-only 宿主（当前集）`);
+    assert.ok(new RegExp(`snippet-only 宿主（[^）]*${id}`).test(usage), `usage 必须把 ${id} 列入 snippet-only 宿主当前集`);
   }
 });

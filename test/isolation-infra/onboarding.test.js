@@ -1035,7 +1035,7 @@ test("R5-D: buildHostExamples derives one-liners from the snippet with stable/ex
   const { buildHostExamples, HOST_EXAMPLES_AUTHORITY } = await import("../../src/application/onboarding.js");
   const snippet = buildMcpSnippet({ installRoot: "D:/my projects/wao" });
   const examples = buildHostExamples(snippet);
-  assert.equal(examples.length, 2, "exactly two host examples (bounded)");
+  assert.equal(examples.length, 3, "exactly three host examples (derived from hostDescriptors: claude-code/codex/zcode)");
   const [claude, codex] = examples;
   assert.equal(claude.host, "claude-code");
   assert.equal(claude.stability, "stable");
@@ -1056,8 +1056,8 @@ test("R5-D: hostExamples carried by every outcome incl. refused, and rendered in
   const { HOST_EXAMPLES_AUTHORITY } = await import("../../src/application/onboarding.js");
   const mem = await memRun({ agentId: "coder_low" });
   const r = await mem.result;
-  assert.ok(Array.isArray(r.hostExamples) && r.hostExamples.length === 2,
-    "structured result carries hostExamples (bounded 2)");
+  assert.ok(Array.isArray(r.hostExamples) && r.hostExamples.length === 3,
+    "structured result carries hostExamples (derived from hostDescriptors, now 3)");
   // Refused outcome carries them too (same baseResult merge point).
   const dir = mkdtempSync(join(tmpdir(), "wao-onb-refused-"));
   const root = join(dir, "wao");
@@ -1076,7 +1076,7 @@ test("R5-D: hostExamples carried by every outcome incl. refused, and rendered in
       mkdir: (p) => import("node:fs/promises").then((m) => m.mkdir(p, { recursive: true })) },
   });
   assert.equal(refused.outcome, "refused");
-  assert.equal(refused.hostExamples.length, 2, "refused outcome still carries hostExamples");
+  assert.equal(refused.hostExamples.length, 3, "refused outcome still carries hostExamples");
   // Human rendering shows the one-liners + authority sentence.
   const text = renderHuman(r);
   assert.ok(text.includes("One-line registration examples"), "human output renders the examples block");
@@ -2525,19 +2525,24 @@ test("TD-191②: --host 表内宿主给出能力事实 + 一站式步骤（rende
   assert.equal(guide.bindCommand, null, "snippet-only 宿主无 bind 命令");
 });
 
-test("TD-191②: --host zcode（表外）fail-closed——报 known hosts 并指向 AGENT_ONBOARDING 清单", () => {
-  const { status } = spawnSync(
-    process.execPath, ["src/cli.js", "wao", "onboarding", "--host", "zcode"],
-    { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" } },
-  );
-  assert.notEqual(status, 0, "表外宿主必须非零退出（fail-closed）");
-  const out = (spawnSync(
-    process.execPath, ["src/cli.js", "wao", "onboarding", "--host", "zcode"],
+test("TD-191②: --host zcode（格式级入表）给指引且如实标注 hostVerified 未验证；真表外宿主仍 fail-closed", () => {
+  const runHost = (h) => spawnSync(
+    process.execPath, ["src/cli.js", "wao", "onboarding", "--host", h],
     { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" }, stdio: ["ignore", "pipe", "pipe"] },
-  ).stderr ?? "").toString();
-  assert.match(out, /not in the verified host table/);
-  assert.match(out, /AGENT_ONBOARDING\.md/);
-  assert.match(out, /host-neutral snippet/);
+  );
+  // zcode 已格式级入表：exit 0，输出含能力事实与 hostVerified=false 指引
+  const zc = runHost("zcode");
+  const zcOut = ((zc.stdout || "") + (zc.stderr || "")).toString();
+  assert.equal(zc.status, 0, "zcode 在表内（格式级）——应成功给指引");
+  assert.match(zcOut, /host: zcode/, "应给 zcode 宿主指引块");
+  assert.match(zcOut, /hostVerified=false/, "必须如实标注宿主加载未验证");
+  assert.match(zcOut, /AGENT_ONBOARDING/, "未验证宿主应指向 Owner 入表清单");
+  // 真表外宿主：fail-closed + 指路
+  const bad = runHost("not-a-host");
+  assert.notEqual(bad.status, 0, "表外宿主必须非零退出");
+  const badOut = ((bad.stderr || "") + (bad.stdout || "")).toString();
+  assert.match(badOut, /not in the verified host table/);
+  assert.match(badOut, /host-neutral snippet/);
 });
 
 test("TD-191②: host-neutral 片段的 argv 能真启动 stdio server（scratch spawn 冒烟）", async () => {

@@ -1140,7 +1140,7 @@ test("TD-191①: HOST_DESCRIPTORS 闭集形状——三能力布尔、示例构�
       assert.equal(typeof d[cap], "boolean", `${d.id}.${cap} 必须是显式布尔（三能力矩阵不许缺省）`);
     }
     assert.equal(typeof d.example, "function", `${d.id}.example 必须是构造器`);
-    assert.ok(["stable", "experimental"].includes(d.stability), `${d.id}.stability 闭集`);
+    assert.ok(["stable", "experimental", "unverified-host-load"].includes(d.stability), `${d.id}.stability 闭集（zcode 格式级入表用 unverified-host-load）`);
     // autoBind 宿主当前只有 codex（真写配置的适配器仅此一个）
     if (d.autoBind) assert.equal(d.id, "codex", "autoBind 闭集当前 = {codex}（新增须扩 hostAdapters 适配器）");
   }
@@ -1192,8 +1192,8 @@ test("TD-191①: 未知宿主 fail-closed——bind/unbind 报错文案给 known
   const dir = mkdtempSync(join(tmpdir(), "wao-unknown-host-"));
   makeGitRepo(dir);
   try {
-    await assert.rejects(() => bindWorkspace({ host: "not-a-host", cwd: dir }), /unsupported host: not-a-host \(known hosts: claude-code, codex\)/);
-    await assert.rejects(() => unbindWorkspace({ host: "not-a-host", cwd: dir }), /known hosts: claude-code, codex/);
+    await assert.rejects(() => bindWorkspace({ host: "not-a-host", cwd: dir }), /unsupported host: not-a-host \(known hosts: claude-code, codex, zcode\)/);
+    await assert.rejects(() => unbindWorkspace({ host: "not-a-host", cwd: dir }), /known hosts: claude-code, codex, zcode/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1210,5 +1210,28 @@ test("TD-191①: onboarding buildHostExamples 从描述符表派生（单一宿�
     const d = HOST_DESCRIPTORS.find((x) => x.id === e.host);
     assert.equal(e.stability, d.stability);
     assert.ok(e.command.startsWith(d.example("")), `示例命令来自描述符构造器（${e.host}）`);
+  }
+});
+
+// ── TD-191②/决定 0043：zcode 格式级入表（hostVerified=false）+ 插件包片段渲染 ──────
+
+test("TD-191②: zcode 描述符=格式级入表（hostVerified=false 如实）+ 插件包形态片段", async () => {
+  const { bindWorkspace } = await import("../../src/application/mcpWorkspaceActivation.js");
+  const dir = mkdtempSync(join(tmpdir(), "wao-zcode-emit-"));
+  try {
+    const result = await bindWorkspace({ host: "zcode", cwd: dir });
+    assert.equal(result.mode, "snippet");
+    assert.equal(result.bound, false);
+    assert.equal(result.hostVerified, false, "zcode 宿主加载未验证——hostVerified 必须如实为 false");
+    assert.equal(result.snippet.configShape, "zcode-local-plugin", "zcode 片段=插件包形态（非 mcpServers）");
+    const pluginJson = result.snippet.files[".claude-plugin/plugin.json"];
+    const mcpJson = result.snippet.files[".mcp.json"];
+    assert.ok(pluginJson && pluginJson.name === "wao", "插件清单在场");
+    assert.ok(mcpJson && mcpJson.wao && mcpJson.wao.command === "node" && Array.isArray(mcpJson.wao.args),
+      ".mcp.json 是扁平 server 映射 {wao:{command,args}}（实机勘察格式）");
+    assert.match(result.note, /NOT BOUND/i);
+    assert.equal(existsSync(join(dir, ".zcode")), false, "零写入");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
