@@ -356,7 +356,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 
 - **症状**：worker 长时间写同一文件时，状态摘要停留在同一文件名（round4 F-2 实证约 20 分钟）；长静默 CPU 段零新事件，无法区分"在算"与"断了"。
 - **判读（两个维度，配合用）**：
-  - **推进维度**：CLI `runs status` 的 `lastActivitySummary` 自 R23-B 起对重复同名写带计数——`写 report.md ×3（最近）`（file_written 子序列尾部同名计数；CLI 独有，MCP `run_status` 有意不返回该摘要）。
+  - **推进维度**：CLI `status <runId>` 的 `lastActivitySummary` 自 R23-B 起对重复同名写带计数——`写 report.md ×3（最近）`（file_written 子序列尾部同名计数；CLI 独有，MCP `run_status` 有意不返回该摘要）。
   - **时间维度**：CLI `secondsSinceActivity` / MCP `run_status` 的 `lastActivity.secondsSince`（同一事实的两种字段名）——即"当前活动已持续 X 秒"，**不要等摘要变化**；静默超过阈值再结合 heartbeat 判停（判停永远 Lead 决定）。
 - **边界**：计数饱和（真实交错形状有效上限约 20-30 次写）不影响判读——×20 与 ×30 都是"在推进"；"卡死"判定归时间维度。
 

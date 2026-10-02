@@ -236,6 +236,23 @@ smoke / runtime certification（`npm run reliability`）/ drill 转录维护命�
 
 ## 二、日常使用
 
+### MCP 工具名 ↔ CLI 命令速查（TD-200③，2026-10-02）
+
+MCP 工具面（ADR-0021 冻结）与 CLI 子命令名**不一一对应**——本表按用途映射，非改名（名字两侧均不动）；本表由 docs-consistency 守卫绑定断言（MCP 名派生自 `toolSurface.js` TOOLS、CLI 名派生自 `RUNS_SUBCOMMANDS` 导出，表内名字漂移即红）。完整参数见生成层 `docs/surface/`（权威源是代码，随代码再生成）。
+
+| 用途 | MCP 工具 | CLI 等价 | 差异注 |
+|---|---|---|---|
+| 单 run 状态 | `run_status` | `runs diagnose <runId>`（诊断视图）/ `runs metrics <runId>`（指标视图） | 无单一等价——MCP run_status 是即时快照，CLI 按"要诊断还是要指标"分两命令 |
+| 等待/观察 | `run_wait` | `runs wait <runId>` | 同一 service，等价 |
+| 收集结果 | `run_collect` | `collect <runId>` | 等价（CLI 另有 `--final`/游标续读） |
+| 全局统计 | —（无直接等价） | `runs summary` / `runs list` | MCP 侧用 `runs_list` 按需过滤 |
+| run 列表 | `runs_list` | `runs list` | 等价 |
+| 派发 | `run_dispatch` | `run <agentId> …` | MCP 无前台阻塞语义，CLI run 前台等待 |
+| 验收/交付查询与决策 | `run_delivery` / `run_delivery_decide` | `runs delivery <runId> [--accept/--reject]` | CLI 覆盖查询与 accept/reject；review 见下行 |
+| 交付审查（diff/review） | `run_delivery_review` / `run_delivery_review_bundle` | —（无 CLI 等价，MCP 独有） | CLI 侧用 `runs delivery` 查询 + 本地只读 Git 兜底 |
+| 停止 | `run_stop` | `stop <runId>` | 等价 |
+| 台账诊断 | `run_diagnose` | `runs diagnose` | 等价（MCP 返回含 state/terminal；CLI JSON 分支刻意不含） |
+
 <a id="lead-quiet-supervision"></a>
 ### Lead 安静监督与续接
 
@@ -268,6 +285,8 @@ npm run cli -- run coder_low --prompt "..." --format json
 ```
 
 > **前台 vs 后台生命周期（TD-148 → ADR-0030/TD-151 根修，2026-09-18）**：等待窗（`--wait-timeout` / agent / global 配置三源）到期 = **通知，不杀**——WAO 只落一条 `run.observation_deadline_reached` 观察事实（载荷有界：waitTimeoutMs + source），前台 CLI 同刻打印一行指引后**继续等到自然终态**；`--background` 的 detached runner 同样只记事实、继续监督到自然终态。终止 worker 只剩两个来源：Lead 显式 `stop`；既有硬安全线（tokenBudget 闸门、workdir_escape 隔离守卫）。有界观察用 `runs wait <runId>` 自身的窗口（到期只结束观察、exit 0）；要 worker 脱离派发进程存活用 `--background`。`resume` 不带 `--wait` 已改为 detached runner 托管续跑（不再挂起）；`resume --wait` 前台等待期间本进程退出会 Job Object 连坐杀 worker——这是进程隔离的设计行为（见上文 Node v22 节），要存活走后台托管。
+
+> **行为变更（TD-199，2026-10-02）：zcode 工具证据改轮询期增量落盘**——此前 zcode 的全部工具证据（command/tool_use/file_written/tool_result）积压到轮末一次性进转录，长 run 运行期转录零事件、`runs wait` liveness 只有 process_only；现在工具证据随轮询节拍（CLI 缺省 5s）增量落盘。两个连带语义：① zcode delivery run 的**包容门从轮末批审变为写后即拦**——越界写的 `file_written` 证据一经轮询观察到，即在运行中段触发 `workdir_escape` 转 failed（**写后侦测拦截，非写前阻止**——包容是侦测不是沙箱；adversarialEscape 对 zcode 的拦截链从"轮末事后"变为真实在飞）；② 纯文本/纯思考段（无工具活动）仍零 run.event——增量投影只治愈工具活跃期的可见性，长文本段在途监督仍靠 liveness 观察与终态事实。
 
 ### 场景 1b：单次派发换模型（--model，R10-A）
 

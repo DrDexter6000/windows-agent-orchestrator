@@ -113,6 +113,7 @@ function fakeZcodePeer(child, {
   messages = () => [],       // (pollCount) => messages[]
   // 上游 CRn 实际字段名（zcode.cjs:15259）：cache 系带 Tokens 后缀（auditor #2）。
   usage = { totalTokens: 101, inputTokens: 60, outputTokens: 30, reasoningTokens: 5, cacheReadTokens: 4, cacheCreationTokens: 2, modelRequestCount: 2 },
+  usageError = null,         // {code, message} → session/usage 返回错误帧（⑫g：终态后 usage 失败路径）
   stopError = null,          // session/stop 的错误（abort 失败腿）
   hangCreate = false,        // 不应答 session/create（spawn 期进程死测试用）
   resumeError = null,        // session/resume 的错误帧（fail-closed 测试）
@@ -204,6 +205,10 @@ function fakeZcodePeer(child, {
     }
     if (frame.method === "session/usage") {
       if (!requireActive(frame)) return;
+      if (usageError) {
+        send({ id: frame.id, error: usageError });
+        return;
+      }
       send({ id: frame.id, result: usage });
       return;
     }
@@ -788,7 +793,7 @@ test("zcode ④f: 纯文本轮 → 零证据事件（保持——投影只认 ty
   child.kill();
 });
 
-test("zcode ④g: completed 轮只有 tool part 无 assistant 文本 → 空文本门在证据投影之前（done(failed) 零证据发射，N1 语义）", async () => {
+test("zcode ④g: completed 轮只有 tool part 无 assistant 文本 → done(failed) 但已发生的工具证据保留（TD-199 双席会审再裁定：事实不随失败丢失）", async () => {
   const writePart = toolPart({
     callId: "call_write_only",
     tool: "Write",
@@ -808,10 +813,13 @@ test("zcode ④g: completed 轮只有 tool part 无 assistant 文本 → 空文�
   const done = events.at(-1);
   assert.equal(done.reason, "failed");
   assert.match(done.error, /without assistant text/);
+  // TD-199（2026-10-02 双席会审）：空文本失败不再压掉已发生的工具事实——
+  // 证据先落（file_written + tool_result），随后如实 done(failed)、零伪完成。
+  // （旧合同"零证据发射"已废弃：真实工具活动不因无文本而消失。）
   assert.deepEqual(
     events.map((e) => e.kind),
-    ["done"],
-    "空文本门先于证据投影——零 user echo、零 assistant、零证据发射（kimiWeb 空文本门同款语义）",
+    ["file_written", "tool_result", "done"],
+    "证据保留 → done(failed)；零 user echo、零 assistant（不伪造完成）",
   );
   child.kill();
 });
@@ -1470,3 +1478,228 @@ test("zcode ⑪b: 守卫负例——无 killFn 构造判红；跨块文本命中
   assert.deepEqual(goodScan.violations, [], "注入齐全零判红");
 });
 
+
+// ===== ⑫ TD-199 增量证据投影（2026-10-02，双席会审重设：part 投影台账驱动）=====
+
+test("zcode ⑫a: 轮询期增量落盘——running bash 的 command 事件在终态快照送达前即可拉取", async () => {
+  // 增量投影的硬证明：消费者 it.next() 在 peer 从未应答过含 step-finish 的快照
+  // 时拉到 command（批式实现的第一事件要等到终态投影——本用例对它是红的）。
+  const running = toolPart({ callId: "call_inc1", tool: "Bash", status: "running", input: { command: "node long.mjs" } });
+  const doneTool = toolPart({ callId: "call_inc1", tool: "Bash", status: "completed", input: { command: "node long.mjs" }, output: "long ok" });
+  let maxPoll = 0;
+  const { handle, child } = await runScenario({
+    peerOptions: {
+      messages: (n) => {
+        maxPoll = Math.max(maxPoll, n);
+        if (n <= 1) return [];
+        if (n === 2) return [userMsg("do the task"), { role: "assistant", parts: [running] }];
+        return [userMsg("do the task"), { role: "assistant", parts: [doneTool, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }] }];
+      },
+    },
+  });
+  const gen = handle.events(new AbortController().signal, { pollInterval: 2 });
+  const first = await gen.next();
+  assert.equal(
+    first.value.kind, "command",
+    "第一条事件是工具证据且在终态快照存在前到达（maxPoll 此刻 <=2）",
+  );
+  assert.equal(first.value.command, "node long.mjs");
+  assert.ok(maxPoll <= 2, "拉到首事件时 peer 尚未送达任何 step-finish 快照");
+  const rest = [];
+  for (;;) {
+    const r = await gen.next();
+    if (r.done) break;
+    rest.push(r.value);
+  }
+  assert.deepEqual(
+    rest.map((e) => e.kind),
+    ["tool_result", "message", "message", "metrics", "done"],
+    "原位收口补 tool_result → echo → assistant → metrics → done（与既有终态合同一致）",
+  );
+  child.kill();
+});
+
+test("zcode ⑫b: 同 part 原位终态（parts.length 不变）→ tool_result 恰一次补发（纯新增切片方案会永久漏发的杀伤用例）", async () => {
+  const running = toolPart({ callId: "call_flip", tool: "Bash", status: "running", input: { command: "node flip.mjs" } });
+  const flipped = toolPart({ callId: "call_flip", tool: "Bash", status: "completed", input: { command: "node flip.mjs" }, output: "flip ok" });
+  let sawSameLengthFlip = false;
+  const { handle, child } = await runScenario({
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 1) return [];
+        if (n === 2) return [userMsg("do the task"), { role: "assistant", parts: [running] }];
+        if (n === 3) {
+          sawSameLengthFlip = true;
+          return [userMsg("do the task"), { role: "assistant", parts: [flipped] }];
+        }
+        return [userMsg("do the task"), { role: "assistant", parts: [flipped, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }] }];
+      },
+    },
+  });
+  const events = await collect(handle);
+  assert.ok(sawSameLengthFlip, "场景确实经历了同长原位翻转拍");
+  assert.equal(events.filter((e) => e.kind === "command").length, 1, "主事件恰一次（台账防重发）");
+  const results = events.filter((e) => e.kind === "tool_result");
+  assert.equal(results.length, 1, "原位终态的 tool_result 恰一次被补发");
+  assert.deepEqual(results[0], { kind: "tool_result", tool: "call_flip", output: "flip ok", isError: false });
+  child.kill();
+});
+
+test("zcode ⑫c: live 形状（callId 缺席，toolCallId 回落工具名）——同名多次调用各自独立在场，不因去重坍缩", async () => {
+  // live 实证（2026-10-02 三轮 run）：真实转录 tool_result 的 toolCallId 去重后
+  // 只剩工具名——台账键必须是 part 序号，同名调用不得坍缩成一个。
+  const b1 = { type: "tool", tool: "Bash", state: { status: "completed", input: { command: "npm test one" }, output: "ok1" } };
+  const b2 = { type: "tool", tool: "Bash", state: { status: "completed", input: { command: "npm test two" }, output: "ok2" } };
+  const { handle, child } = await runScenario({
+    peerOptions: {
+      messages: (n) => (n <= 1 ? [] : [
+        userMsg("do the task"),
+        { role: "assistant", parts: [b1, b2, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }] },
+      ]),
+    },
+  });
+  const events = await collect(handle);
+  const commands = events.filter((e) => e.kind === "command");
+  const results = events.filter((e) => e.kind === "tool_result");
+  assert.equal(commands.length, 2, "两次同名 Bash 调用各有一条 command（未坍缩）");
+  assert.deepEqual(commands.map((c) => c.command), ["npm test one", "npm test two"]);
+  assert.equal(results.length, 2, "两条 tool_result 各自在场");
+  assert.deepEqual(results.map((r) => r.output), ["ok1", "ok2"]);
+  assert.ok(commands.every((c) => c.toolCallId === "Bash"), "callId 缺席时回落工具名（live 形状）");
+  child.kill();
+});
+
+test("zcode ⑫d: 快照缩短（parts.length 回退）→ fail-closed done(failed)，不把错位序号当本轮证据", async () => {
+  const running = toolPart({ callId: "call_shrink", tool: "Bash", status: "running", input: { command: "node x.mjs" } });
+  const { handle, child } = await runScenario({
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 1) return [];
+        if (n === 2) return [userMsg("do the task"), { role: "assistant", parts: [running] }];
+        return [userMsg("do the task")];
+      },
+    },
+  });
+  const events = await collect(handle);
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /snapshot shrank \(1 < 2\)/);
+  child.kill();
+});
+
+test("zcode ⑫e: pending write（path 在场）零 file_written——completed 收口才发（写意图不冒充成功，RunEvent 契约）", async () => {
+  const writePending = toolPart({ callId: "call_w", tool: "Write", status: "running", input: { file_path: "D:/wao-test/zcode-ws/out.txt", content: "x" } });
+  const writeDone = toolPart({ callId: "call_w", tool: "Write", status: "completed", input: { file_path: "D:/wao-test/zcode-ws/out.txt", content: "x" }, output: "Created" });
+  const { handle, child } = await runScenario({
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 1) return [];
+        // pending 拍保持 ~400 拍（@2ms ≈ 800ms）再翻转；每拍追加一个填充 text
+        // part 重置无进展计数（停滞门 60 拍不触发——纯 hold 会先 done(stalled)）。
+        // 检查点 400ms 落在 pending 期内，"pending 期零事件"可确定断言。
+        if (n <= 400) {
+          const fillers = Array.from({ length: n }, (_, i) => ({ type: "text", text: `wip ${i}` }));
+          return [userMsg("do the task"), { role: "assistant", parts: [writePending, ...fillers] }];
+        }
+        // 翻转快照必须 ≥ filler 撑大的长度（否则触发缩短守卫 done(shrank)）：
+        // write 原位转 completed + 400 fillers + ok + step-finish。
+        const fillers = Array.from({ length: 400 }, (_, i) => ({ type: "text", text: `wip ${i}` }));
+        return [userMsg("do the task"), { role: "assistant", parts: [writeDone, ...fillers, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }] }];
+      },
+    },
+  });
+  // 验证会审补强（auditor）：只看终序列抓不住"running 拍提前发 file_written"。
+  // 后台泵持续收集（带时间戳）；400ms 检查点断言 pending 期零事件——提前
+  // file_written 会在检查点立刻红。
+  const gen = handle.events(new AbortController().signal, { pollInterval: 2 });
+  const collected = [];
+  const pump = (async () => {
+    for (;;) {
+      const r = await gen.next();
+      if (r.done) break;
+      collected.push(r.value);
+    }
+  })();
+  await delay(400);
+  assert.equal(collected.length, 0, `pending write 拍零事件（提前 file_written 立刻红；实得 ${collected.map((e) => e.kind).join(",")}）`);
+  await pump;
+  assert.deepEqual(
+    collected.map((e) => e.kind),
+    ["file_written", "tool_result", "message", "message", "metrics", "done"],
+    "completed 收口才 file_written + tool_result",
+  );
+  child.kill();
+});
+
+test("zcode ⑫f: 证据已落后进程死（通信失败）→ done(failed) 且已发证据保留、零双发", async () => {
+  const bashDone = toolPart({ callId: "call_dead", tool: "Bash", status: "completed", input: { command: "node a.mjs" }, output: "a ok" });
+  const { handle, child } = await runScenario({
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 1) return [];
+        if (n === 2) return [userMsg("do the task"), { role: "assistant", parts: [bashDone] }];
+        // 拍 3 起：不给终态，外部杀进程（wire closed → done(failed)）
+        return [userMsg("do the task"), { role: "assistant", parts: [bashDone] }];
+      },
+    },
+  });
+  const gen = handle.events(new AbortController().signal, { pollInterval: 2 });
+  const first = await gen.next();
+  assert.equal(first.value.kind, "command", "进程死前证据已增量落盘");
+  child.kill();
+  const rest = [];
+  for (;;) {
+    const r = await gen.next();
+    if (r.done) break;
+    rest.push(r.value);
+  }
+  assert.equal(rest.filter((e) => e.kind === "command").length, 0, "零双发（台账）");
+  const done = rest.at(-1);
+  assert.equal(done.kind, "done");
+  assert.equal(done.reason, "failed");
+  child.kill();
+});
+
+test("zcode ⑫g: 终态后 session/usage 失败 → done(failed) 且已发证据保留（零 echo/assistant——不伪造完成）", async () => {
+  const bashDone = toolPart({ callId: "call_usage", tool: "Bash", status: "completed", input: { command: "node u.mjs" }, output: "u ok" });
+  const { handle, child } = await runScenario({
+    peerOptions: {
+      usageError: { code: -32000, message: "usage backend exploded" },
+      messages: (n) => (n <= 1 ? [] : [
+        userMsg("do the task"),
+        { role: "assistant", parts: [bashDone, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }] },
+      ]),
+    },
+  });
+  const events = await collect(handle);
+  assert.deepEqual(
+    events.map((e) => e.kind),
+    ["command", "tool_result", "done"],
+    "证据保留 → done(failed, usage)；零 echo/assistant/metrics（usage 失败不伪造完成）",
+  );
+  assert.equal(events.at(-1).reason, "failed");
+  assert.match(events.at(-1).error, /session\/usage failed/);
+  child.kill();
+});
+
+test("zcode ⑫h: 输入晚来——Bash 首拍 input 空壳不投占位/不锁台账，command 补齐后补发 commandEvent（验证会审发现）", async () => {
+  const shellEmpty = { type: "tool", callId: "call_late", tool: "Bash", state: { status: "running", input: {} } };
+  const shellFilled = toolPart({ callId: "call_late", tool: "Bash", status: "completed", input: { command: "node late.mjs" }, output: "late ok" });
+  const { handle, child } = await runScenario({
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 1) return [];
+        if (n === 2) return [userMsg("do the task"), { role: "assistant", parts: [shellEmpty] }];
+        return [userMsg("do the task"), { role: "assistant", parts: [shellFilled, { type: "text", text: "ok" }, { type: "step-finish", reason: "stop", tokens: {} }] }];
+      },
+    },
+  });
+  const events = await collect(handle);
+  const commands = events.filter((e) => e.kind === "command");
+  assert.equal(commands.length, 1, "空壳拍零 tool_use 占位；command 补齐后恰一次补发");
+  assert.equal(commands[0].command, "node late.mjs");
+  assert.equal(events.filter((e) => e.kind === "tool_use").length, 0, "Bash 家族永不落 tool_use 占位");
+  const results = events.filter((e) => e.kind === "tool_result");
+  assert.equal(results.length, 1);
+  child.kill();
+});

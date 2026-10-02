@@ -54,7 +54,7 @@
 //     result.messages[].parts[]（type:"text" 带文本；type:"step-finish" 带
 //     reason:"stop" 与 tokens——**轮次完成信号**；type:"tool" 带 callId/tool/state
 //     {status, input, output|error}——工具调用帧，completed 轮投影为证据事件，
-//     形状见 evidenceEventsFromZcodeToolPart 注释）。
+//     形状见 zcodeToolIdentityEvents / zcodeToolResultEvents / projectTurnToolEvents 注释——TD-199 起台账驱动增量投影）。
 //   - `session/usage {sessionId}` → 全量计量（totalTokens/inputTokens/outputTokens/
 //     reasoningTokens/cacheReadTokens/cacheCreationTokens/modelRequestCount——字段名
 //     以 bundle CRn 实现为准，zcode.cjs:15259；早期按 kimi 系惯例记的
@@ -104,12 +104,17 @@
 // 思考预算（缺席，120 拍）有界收口。通信失败 =
 // 进程死 = done(failed)（stdio 无 HTTP 重试面；请求超时/传输关闭同路径）。
 //
+// **TD-199（2026-10-02）证据投影同乘追加假设**：增量台账按 part 序号键控
+// （live 实证 callId 缺席、partId 跨快照稳定性未证实——见 projectTurnToolEvents
+// 注释），头插同样使台账错位（漏发/重发证据）；可检测的**缩短**已 fail-closed
+// （snapshot shrank → done(failed)），不可检测的头插与完成判据同残余等级。
+//
 // assistant 文本切片的诚实边界：上游消息表未实证携带 role 标注（live 事实只有
 // parts 的 type 闭集 text|step-finish）——`session/send` 的 content 若以 text part
 // 回显进 messages，按**精确等值**剔除首个匹配（找得到回显 → 取其后；找不到 →
 // 全量拼接）。两种上游形状都不会把 prompt 误报成 assistant 产出；剔除后为空 =
 // 按 failed 收口（N1 教训：传输成功不是可用答案，绝不伪造完成）。tool part 的
-// 形状后经 bundle zod schema 核证（见 evidenceEventsFromZcodeToolPart 注释）——
+// 形状后经 bundle zod schema 核证（见 zcodeToolIdentityEvents 注释）——
 // completed 轮投影为证据事件（file_written/command/tool_use/tool_result，2026-10-01
 // 补齐，kimi-web F2 同族）；其余 part 类型（reasoning/file/patch/compaction/…）仍
 // 未投影、不猜（reportsCommandExitCode=false 同源）。
@@ -267,53 +272,97 @@ function metricsEventFromUsage(usage) {
 //     **原样透传**（控制面 containment 求值用词法+realpath，kimi-web 同款）。
 //
 // 投影规则——镜像 src/backends/opencodeServe.js 的 evidenceEventsFromOpenCodeToolPart
-// 与 kimiWeb.js 的 evidenceEventsFromKimiToolFrame（差异仅限形状读取位与终态词）：
-//   - tool 归一化小写后 bash/shell 类且有 state.input.command → commandEvent
-//     （tool part state schema **无退出码字段**——reportsCommandExitCode=false 维持，
-//     exitCode 恒省略，绝不虚构；callId 进 meta 关联 tool_result）；
-//   - write/edit/multiedit 类且有 input.filePath/file_path/path → fileWrittenEvent
-//     （bundle 实证键是 file_path；filePath/path 是家族超集宽容——path 缺席不虚构）；
-//   - 其余工具 → toolUseEvent(tool, input)；
-//   - state.status 终态（completed|error）再追加 toolResultEvent(callId, output,
-//     isError)——output 取 completed 臂的 state.output / error 臂的 state.error，
-//     投影事件在前、结果事件在后（与 opencode 逐 part 双事件形状一致）。
-function evidenceEventsFromZcodeToolPart(part) {
+// TD-199（2026-10-02，双席会审后重设）：证据投影改【part 投影台账】驱动的增量
+// 投影——轮询每拍扫【本轮全区间】[baselineParts, parts.length)，每 part 双状态
+// {identitySent, resultSent}，首见发主事件、首见终态发 tool_result，各恰一次。
+// 为什么不能"只看新增切片"：同一 tool part 会 pending/running→completed/error
+// **原位更新且 parts.length 不变**——纯切片会永久漏发 tool_result（比双发更糟的
+// 证据缺失）。为什么键用 part 序号而非 id：live 转录实证 callId 缺席（tool_result
+// 的 toolCallId 去重后只剩工具名——名字 fallback 每次触发，callId 去重会把同名
+// 多次调用坍缩成一键，不可用）；partId 的跨快照稳定性未 live 证实。序号键 rides
+// 追加语义——与完成判据**同一 B′ 假设**（上游向历史头部插入 parts 时序号漂移；
+// 可检测的缩短已 fail-closed，见 _streamEvents；不可检测的头插与完成判据同风险
+// 等级，文件头 B′ 段一并覆盖）。扫描成本 O(轮内 parts)，每拍可忽略。
+function zcodeToolCallKey(part, tool) {
+  return typeof part?.callId === "string" && part.callId.length > 0
+    ? part.callId
+    : tool;
+}
+
+// 主事件（identity）：bash/shell 类且有 input.command → commandEvent（无退出码
+// 字段，exitCode 恒省绝不虚构）；write/edit/multiedit 类 → fileWrittenEvent
+// **只在 status==="completed" 且 path 在场**（RunEvent 契约：file_written = 已
+// 确认成功的写入——pending/running 的写意图不冒充成功；此前由"终态才投影"隐式
+// 保证，增量时序下显式化）；其余 → toolUseEvent(tool, input)。
+function zcodeToolIdentityEvents(part) {
   const tool = String(part?.tool ?? "unknown");
   const toolKey = tool.toLowerCase();
   const state = part?.state;
   const input = state?.input ?? {};
-  const callId = typeof part?.callId === "string" && part.callId.length > 0
-    ? part.callId
-    : tool;
-  const status = state?.status;
-  const events = [];
-  if ((toolKey === "bash" || toolKey === "shell") && typeof input.command === "string") {
-    events.push(commandEvent(input.command, undefined, { toolCallId: callId }));
-  } else if (isFileWriteToolKey(toolKey)) {
-    const filePath = input.filePath ?? input.file_path ?? input.path;
-    if (typeof filePath === "string") {
-      events.push(fileWrittenEvent(filePath));
+  const callId = zcodeToolCallKey(part, tool);
+  if (toolKey === "bash" || toolKey === "shell") {
+    // 输入晚来（2026-10-02 验证会审发现）：首拍无 input.command 的空壳不投
+    // tool_use 占位、不锁 identitySent——同一 part 后续补齐 command 时补发
+    // commandEvent；从不补齐则零主事件（无命令事实不虚构，tool_result 照发）。
+    if (typeof input.command === "string") {
+      return [commandEvent(input.command, undefined, { toolCallId: callId })];
     }
-  } else {
-    events.push(toolUseEvent(tool, input));
+    return [];
   }
-  if (isTerminalZcodeToolStatus(status)) {
-    events.push(toolResultEvent(
-      callId,
-      status === "error" ? state.error : state.output,
-      status === "error",
-    ));
+  if (isFileWriteToolKey(toolKey)) {
+    const filePath = input.filePath ?? input.file_path ?? input.path;
+    if (state?.status === "completed" && typeof filePath === "string") {
+      return [fileWrittenEvent(filePath)];
+    }
+    return [];
   }
-  return events;
+  return [toolUseEvent(tool, input)];
 }
 
-// parts 序列 → tool part 证据事件（按序；非 tool part 跳过——本轮归属切片由
-// 调用侧的 baseline 切片 + 回显剔除决定，这里只认 type==="tool"）。
-function evidenceEventsFromZcodeParts(parts) {
+// 终态结果：status ∈ {completed, error} 恰一次——output/error 按 state 臂取，
+// error → isError:true。
+function zcodeToolResultEvents(part) {
+  const state = part?.state;
+  if (!isTerminalZcodeToolStatus(state?.status)) return [];
+  const tool = String(part?.tool ?? "unknown");
+  const callId = zcodeToolCallKey(part, tool);
+  return [toolResultEvent(
+    callId,
+    state.status === "error" ? state.error : state.output,
+    state.status === "error",
+  )];
+}
+
+// 台账扫描：对 parts 的本轮区间逐 tool part 补投未发事件（轮询每拍与终态收口
+// 复用同一台账——天然防双发且覆盖原位突变）。ledger: Map<partIndex, entry>。
+function projectTurnToolEvents(parts, baselineParts, ledger) {
   const events = [];
-  for (const part of parts) {
+  for (let i = baselineParts; i < parts.length; i += 1) {
+    const part = parts[i];
     if (part?.type !== "tool") continue;
-    events.push(...evidenceEventsFromZcodeToolPart(part));
+    let entry = ledger.get(i);
+    if (!entry) {
+      entry = { identitySent: false, resultSent: false };
+      ledger.set(i, entry);
+    }
+    if (!entry.identitySent) {
+      const identity = zcodeToolIdentityEvents(part);
+      if (identity.length > 0) {
+        events.push(...identity);
+        entry.identitySent = true;
+      } else if (isTerminalZcodeToolStatus(part?.state?.status)) {
+        // 终态仍无主事件（如 write 缺 path / 未 completed）——不会再有，标记收口
+        // 免重复求值（pending write 的空主事件保持未标记，completed 时补发）。
+        entry.identitySent = true;
+      }
+    }
+    if (!entry.resultSent) {
+      const result = zcodeToolResultEvents(part);
+      if (result.length > 0) {
+        events.push(...result);
+        entry.resultSent = true;
+      }
+    }
   }
   return events;
 }
@@ -954,7 +1003,7 @@ export class ZcodeBackend {
    *     出现 step-finish(reason stop|error) 且其后无新 part（快照最后一位）。
    *   - stop → 发射 tool part 证据（本轮 type:"tool" 帧投影——
    *     evidenceEventsFromZcodeParts，证据先行）+ user echo + assistant text
-   *     （发射前非空复检——N1 教训，空文本门在证据投影之前：零发射含证据）+
+   *     （发射前非空复检——N1 教训；TD-199 2026-10-02 再裁定：台账补漏先行，空文本失败保留已发证据，仅不伪造 echo/assistant）+
    *     usage→metrics + done(completed)；error → done(failed)（固定文案——该
    *     part 未实证携带错误明细，不虚构）。
    *   - 无进展兜底（分相）：已有产出后连续 60 拍无新 part → done(failed,
@@ -976,6 +1025,10 @@ export class ZcodeBackend {
     let lastPartsCount = baselineParts;
     let noProgressPolls = 0;
     let anyNewPart = false;
+    // TD-199 增量投影状态：台账（partIndex → 双状态）+ 已见 parts 高水位（缩短
+    // 检测——追加语义被破坏时 fail-closed，绝不静默把错位序号当本轮证据）。
+    const toolLedger = new Map();
+    let highWaterParts = baselineParts;
     const finish = () => {
       // 终态后回收进程（一个 WAO run 一个 app-server 进程；会话本体常驻上游
       // storage，进程回收不影响 resume lane）。幂等。
@@ -1022,6 +1075,22 @@ export class ZcodeBackend {
           return;
         }
         const parts = flattenParts(result.messages);
+        if (parts.length < highWaterParts) {
+          finish();
+          yield doneEvent(
+            "failed",
+            `zcode session/messages snapshot shrank (${parts.length} < ${highWaterParts}) — evidence attribution unreliable, refusing to guess`,
+          );
+          return;
+        }
+        highWaterParts = Math.max(highWaterParts, parts.length);
+        // TD-199：每拍台账扫描——工具证据在轮询期即落盘（原实现全部证据积压到
+        // 终态 _completeTurn 一次性投影，长 run 运行期转录零事件、liveness 只有
+        // process_only，Lead 无法区分"在干活"与"挂死"）。纯文本/思考段仍零
+        // run.event（诚实边界：本修复只治愈工具活跃期）。
+        for (const event of projectTurnToolEvents(parts, baselineParts, toolLedger)) {
+          yield event;
+        }
         if (parts.length > lastPartsCount) {
           lastPartsCount = parts.length;
           anyNewPart = true;
@@ -1041,7 +1110,7 @@ export class ZcodeBackend {
           : null;
         if (finishReason === "stop") {
           yield* this._completeTurn({
-            wire, child, sessionId, parts, baselineParts, sentContent, finish,
+            wire, child, sessionId, parts, baselineParts, sentContent, finish, toolLedger,
           });
           return;
         }
@@ -1100,10 +1169,11 @@ export class ZcodeBackend {
    * completed 轮发射序列：usage（session/usage——reportsTokenUsage=true 的通道；
    * 失败按通信失败收口）→ 进程回收 → tool part 证据（本轮 type:"tool" 帧逐帧投影
    * ——evidenceEventsFromZcodeParts，证据先行，opencode/kimi-web 同惯例）→
-   * user echo → assistant text（发射前非空复检，N1 教训——空文本门在证据投影
-   * 之前，failed 收口零发射含证据）→ metrics（分量在场才发）→ done(completed)。
+   * 台账补漏（TD-199：终态先补未发证据）→ user echo → assistant text（发射前
+   * 非空复检，N1 教训——空文本失败仅不伪造 echo/assistant，已发证据保留）→
+   * metrics（分量在场才发）→ done(completed)。
    */
-  async *_completeTurn({ wire, child, sessionId, parts, baselineParts, sentContent, finish }) {
+  async *_completeTurn({ wire, child, sessionId, parts, baselineParts, sentContent, finish, toolLedger }) {
     const slice = parts.slice(baselineParts);
     // 剔除我们自己的 user 回显（上游未实证 role 标注——见文件头诚实边界声明）：
     // 首个与发送内容精确等值的 text part 之前的切片全部跳过；找不到回显则全量。
@@ -1120,6 +1190,12 @@ export class ZcodeBackend {
       if (part?.type === "text" && typeof part.text === "string") textParts.push(part.text);
     }
     const text = textParts.join("");
+    // TD-199（双席会审修正）：终态先跑台账补漏扫描再判失败——空文本/usage 失败
+    // 路径下，已发生的工具事实必须保留（原实现空文本会压掉全部证据，已记录的
+    // 真实工具活动随失败丢失）；轮询期已增量发过的事件由台账天然去重。
+    for (const event of projectTurnToolEvents(parts, baselineParts, toolLedger)) {
+      yield event;
+    }
     if (text.trim().length === 0) {
       finish();
       yield doneEvent(
@@ -1141,13 +1217,6 @@ export class ZcodeBackend {
     }
     // 进程回收先行（事件序列已定，usage 已取完）。
     finish();
-    // tool part 证据投影（2026-10-01 补齐——delta 证据链，kimi-web F2 同族）：
-    // 本轮（回显剔除后的切片）里 type:"tool" 的 part 逐帧投影为证据事件，证据
-    // 先于 user echo / assistant 文本发射。投影规则与形状依据见
-    // evidenceEventsFromZcodeToolPart 注释（bundle zod schema 核证，形状不发明）。
-    for (const event of evidenceEventsFromZcodeParts(textSlice)) {
-      yield event;
-    }
     if (typeof sentContent === "string" && sentContent.length > 0) {
       yield messageEvent("user", [{ type: "text", text: sentContent }]);
     }

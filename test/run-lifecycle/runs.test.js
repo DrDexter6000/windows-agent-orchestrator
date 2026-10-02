@@ -991,3 +991,21 @@ test("TD-200①: diagnose 非终态 run 输出未终态措辞（不再误称 com
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("TD-200② R6 补强: summary 参数边界矩阵——选项前后带 runId / 缺选项值 / 未知 flag 带值", async () => {
+  const dir = await makeRunDir();
+  try {
+    await writeJsonl(dir, "run_aaa", [{ type: "run.started", ts: "2026-06-12T10:00:00.000Z" }]);
+    const expectReject = (args) => {
+      let threw = null;
+      try { cli(["runs", "summary", ...args], dir); } catch (e) { threw = e; }
+      assert.ok(threw, `expected rejection: ${JSON.stringify(args)}`);
+      assert.match(threw.stderr ?? "", /takes no <runId>|--format requires|--run-dir requires|unknown/i);
+    };
+    expectReject(["--format", "json", "run_aaa"]);   // 选项之后的 runId（值已跳过，runId 裸词命中）
+    expectReject(["--format"]);                       // 缺选项值（parseOptions 层拒绝或本守卫拒绝）
+    expectReject(["--bogus", "x"]);                   // 未知 flag 带值——值 x 被当位置参数拒绝
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -85,7 +85,9 @@ import { readRegistry } from "../registry.js";
 // TD-109: the full legal subcommand set of `runs`. `list` was previously only
 // reachable through the silent fallthrough; it is now an explicit branch so the
 // fail-closed unknown-subcommand error below cannot swallow it.
-const RUNS_SUBCOMMANDS = [
+// TD-200③（2026-10-02）：导出供 docs-consistency 的 MCP↔CLI 映射表守卫派生核对
+// （docs/usage.md 映射表是手写值指纹——TD-120 家族，必须绑定断言防静默腐烂）。
+export const RUNS_SUBCOMMANDS = [
   "list", "summary", "prune", "grep", "metrics", "scorecard",
   "dashboard", "diagnose", "delivery", "wait", "gate",
 ];
@@ -977,7 +979,8 @@ async function runsDiagnoseCommand(args, config) {
     if (d.terminal) {
       console.log(`(no failure to diagnose — run completed successfully)`);
     } else {
-      console.log(`(no failure to diagnose yet — run not terminal (state: ${d.state}); re-diagnose after terminal)`);
+      // 会审措辞（auditor）：不带"等终态再诊"尾巴——运行中出现新失败事实同样值得复诊。
+      console.log(`(no failure to diagnose yet — run not terminal (state: ${d.state}))`);
     }
   } else {
     console.log(`(no concrete evidence signal; review transcript manually)`);

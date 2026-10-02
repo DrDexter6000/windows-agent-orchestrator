@@ -3537,6 +3537,64 @@ test("派发策略指针钉: 认证结果用于派发选择的边界节不得写
     `席位 id 不得写死在本节（名单解析走三指针）；命中：${hits.join(", ")}`);
 });
 
+// TD-200③（2026-10-02，双席会审）：usage.md 的 MCP↔CLI 映射表是手写"值指纹"
+// （TD-120 家族——任一侧加工具/改子命令，无守卫的表会静默腐烂）。绑定断言
+// （验证会审 auditor 补强：只查名字存在性抓不住错配/删行/清空——改**精确
+// 配对钉**）：表行集必须与冻结期望配对 deepEqual，且名字从权威源派生核对
+// （MCP 名 ∈ toolSurface TOOLS；`runs <sub>` ∈ RUNS_SUBCOMMANDS 导出）。
+test("TD-200③: usage.md MCP↔CLI 映射表精确配对钉（防错配/删行/清空/静默腐烂）", async () => {
+  const usage = read("docs/usage.md");
+  const heading = "### MCP 工具名 ↔ CLI 命令速查";
+  const start = usage.indexOf(heading);
+  assert.ok(start !== -1, "docs/usage.md 缺 MCP↔CLI 映射表");
+  const nextSection = usage.indexOf("\n### ", start + 1);
+  const section = usage.slice(start, nextSection === -1 ? undefined : nextSection);
+  const rows = section.split("\n").filter((l) => l.startsWith("|")).slice(2);
+  const { TOOLS } = await import("../../src/mcp/toolSurface.js");
+  const { RUNS_SUBCOMMANDS } = await import("../../src/commands/runs.js");
+  // 冻结期望配对（改表 = 有意变更，须同步此钉）：
+  const expected = [
+    { mcp: ["run_status"], cli: ["runs diagnose", "runs metrics"] },
+    { mcp: ["run_wait"], cli: ["runs wait"] },
+    { mcp: ["run_collect"], cli: ["collect"] },
+    { mcp: [], cli: ["runs summary", "runs list"] },
+    { mcp: ["runs_list"], cli: ["runs list"] },
+    { mcp: ["run_dispatch"], cli: ["run"] },
+    { mcp: ["run_delivery", "run_delivery_decide"], cli: ["runs delivery"] },
+    { mcp: ["run_delivery_review", "run_delivery_review_bundle"], cli: [] },
+    { mcp: ["run_stop"], cli: ["stop"] },
+    { mcp: ["run_diagnose"], cli: ["runs diagnose"] },
+  ];
+  assert.equal(rows.length, expected.length, `映射表行数漂移（${rows.length} vs ${expected.length}）——删行/加行须同步守卫期望`);
+  const cliTokenRe = /runs [a-z]+|\bcollect\b|\brun\b|\bstop\b/g;
+  rows.forEach((row, i) => {
+    const cells = splitRowCells(row).map((c) => c.trim());
+    const mcp = cells[1]?.match(/[a-z]+(?:_[a-z]+)+/g) ?? [];
+    const cli = [...new Set(cliTokenRe.exec ? (cells[2]?.match(cliTokenRe) ?? []) : [])]
+      .map((t) => t.replace(/\s+/g, " "));
+    assert.deepEqual(mcp, expected[i].mcp,
+      `第 ${i + 1} 行 MCP 名漂移：${JSON.stringify(mcp)} vs ${JSON.stringify(expected[i].mcp)}`);
+    assert.deepEqual(cli, expected[i].cli,
+      `第 ${i + 1} 行 CLI 名漂移：${JSON.stringify(cli)} vs ${JSON.stringify(expected[i].cli)}`);
+    for (const name of mcp) {
+      assert.ok(TOOLS.includes(name), `映射表 MCP 名 \`${name}\` 不在 TOOLS 冻结面`);
+    }
+    for (const token of cli) {
+      if (token.startsWith("runs ")) {
+        assert.ok(RUNS_SUBCOMMANDS.includes(token.replace("runs ", "")),
+          `映射表 CLI 子命令 \`${token}\` 不在 RUNS_SUBCOMMANDS`);
+      }
+    }
+  });
+  // R9 补强（coder_mm 验证）：差异注等**全表**提到的 MCP 名也必须 ∈ TOOLS
+  // （改任一格提到不存在的工具即红）。已知边界（单向绑定，自知）：TOOLS /
+  // 子命令**新增**不强制补行；CLI 顶层命令（run/collect/stop）改名靠精确配对
+  // 钉的行值红，不在权威源派生面内。
+  for (const name of (section.match(/[a-z]+(?:_[a-z]+)+/g) ?? [])) {
+    assert.ok(TOOLS.includes(name), `映射表任意格提到的 MCP 名 \`${name}\` 不在 TOOLS 冻结面`);
+  }
+});
+
 // TD-162 顺带（任务第 3 项评估结论的落地）：onboarding 认证选择表 ↔ registry 模板
 // provider 声明此前无关系守卫（现有测试只做 onboarding 文内关键词在场检查，模板侧
 // env 名换掉不会红）。前向对账成本 ≤15 行：模板声明的每个凭据 env 名都必须在
