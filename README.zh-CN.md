@@ -5,6 +5,8 @@
 
 [English](README.md) · 简体中文
 
+**旗舰智力，平价劳力，常设会审。**
+
 > 本文件是 [`README.md`](README.md) 的中文镜像（内容同步维护，事实以英文版与各权威文档为准）。
 
 让你已有的 coding agent 订阅真正干活。WAO 让一个 Lead agent——或任意 MCP host 里的你——把

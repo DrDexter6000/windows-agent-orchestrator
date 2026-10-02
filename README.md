@@ -5,6 +5,8 @@
 
 English · [简体中文](README.zh-CN.md)
 
+**Rent judgment, buy labor, seat the council.**
+
 Put your existing coding-agent subscriptions to work. WAO lets one Lead agent — or you,
 from any MCP host — dispatch Claude Code, Codex, Kimi, GLM (ZCode) and DeepSeek workers
 against real repositories: the token bill lands on each worker's own provider, every run
