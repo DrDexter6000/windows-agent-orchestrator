@@ -40,6 +40,10 @@ export const HARNESS_VERSION_PROBES = Object.freeze({
   "kimi-web": Object.freeze({ distribution: "kimi-web", binary: configuredBinary("kimi") }),
   "deepseek-acp": Object.freeze({ distribution: "dsh", binary: configuredBinary("dsh") }),
   "deepseek-harness": Object.freeze({ distribution: "dsh-jsonrpc-agent", binary: configuredBinary("dsh-jsonrpc-agent") }),
+  // zcode：桌面捆绑 zcode.cjs（node 脚本）。席位配置必填 binary（安装路径随桌面
+  // 更新漂移）；无席位 fallback 裸名不在 PATH → honest unknown。真实探测依赖
+  // backend resolveInvocationPrefix 提供 node 入口前缀（component-check 已接线）。
+  "zcode": Object.freeze({ distribution: "zcode", binary: configuredBinary("zcode") }),
   // opencode-serve：HTTP 服务——无本地二进制；探测恒 honest unknown。
   "opencode-serve": null,
 });

@@ -34,7 +34,7 @@ import { probeRuntimeIdentity } from "./reliability/runtimeIdentity.mjs";
 import { providerKeyFor } from "../src/providerFingerprint.js";
 import { metricsNonZeroCheck } from "./reliability/metricsCheck.mjs";
 // reportsCommandExitCode 条件化的判定源（backendCapabilitySnapshot SSOT）。
-import { backendCapabilitySnapshot } from "../src/backends/factory.js";
+import { backendCapabilitySnapshot, backendFor } from "../src/backends/factory.js";
 // ADR-0032 §8：检查结果五态（N/A 构造 + 状态派生）。
 import { naCheck, checkStateOf } from "./reliability/checkStates.mjs";
 import { scorecardCommandFailureIsCredible } from "./reliability/scorecardEvidence.mjs";
@@ -213,12 +213,25 @@ const GIT_HEAD = (() => {
 })();
 
 const runtimeIdentityByBackend = new Map();
-function runtimeIdentityFor(agent) {
+async function runtimeIdentityFor(agent) {
   if (!agent?.backend) return null;
   if (!runtimeIdentityByBackend.has(agent.backend)) {
+    // 与 component-check（run-component-check.mjs）同源：backend 暴露
+    // resolveInvocationPrefix 时优先消费——探测必须与真实 run 执行同一入口
+    // （zcode.cjs 是 node 脚本，直发二进制在 Windows 不可执行；.cmd 包装器经
+    // 前缀解析直达真实入口）。解析失败保持 honest unknown，不得中断取证。
+    let resolvedInvocation = null;
+    try {
+      const backend = backendFor(agent);
+      if (typeof backend?.resolveInvocationPrefix === "function") {
+        resolvedInvocation = await backend.resolveInvocationPrefix(agent);
+      }
+    } catch {
+      // 探测的 fallback 目标可能失败并落 verified:false——这正是要记录的事实。
+    }
     runtimeIdentityByBackend.set(
       agent.backend,
-      probeRuntimeIdentity({ backendName: agent.backend, agent }),
+      probeRuntimeIdentity({ backendName: agent.backend, agent, resolvedInvocation }),
     );
   }
   return runtimeIdentityByBackend.get(agent.backend);
@@ -332,7 +345,7 @@ for (const tc of MATRIX) {
       providerID: tc.providerID ?? info.providerID,
       providerKey: tc.providerKey ?? info.providerKey,
       effort: info.effort,
-      runtime: runtimeIdentityFor(registry.agents?.[tc.agentId]),
+      runtime: await runtimeIdentityFor(registry.agents?.[tc.agentId]),
       codeRef: GIT_HEAD,
       capturedAt: new Date().toISOString(),
       drillRunIds: {},

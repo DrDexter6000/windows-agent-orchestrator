@@ -31,6 +31,15 @@ test("run-reliability imports child_process APIs it uses", () => {
   }
 });
 
+test("run-reliability runtimeIdentityFor 消费 backend resolveInvocationPrefix（探针与真实 run 同入口）", () => {
+  const script = readFileSync(new URL("../../scripts/run-reliability.mjs", import.meta.url), "utf8");
+  const fn = script.slice(script.indexOf("async function runtimeIdentityFor"), script.indexOf("async function runtimeIdentityFor") + 1600);
+  assert.match(fn, /resolveInvocationPrefix/,
+    "runtimeIdentityFor 必须消费 backend 的 resolveInvocationPrefix——zcode.cjs 是 node 脚本，直发二进制在 Windows 不可执行（漏接时该 backend 的 runtime 恒 verified:false，与 component-check 漂移）");
+  assert.match(fn, /probeRuntimeIdentity\(\{\s*backendName:\s*agent\.backend,\s*agent,\s*resolvedInvocation/s,
+    "resolvedInvocation 必须传入 probeRuntimeIdentity（消费前缀但不传 = 白解析）");
+});
+
 test("certifyCase: all core, strict, operational, and observability checks pass -> certified", () => {
   const result = certifyCase({
     caseId: "claude+deepseek",

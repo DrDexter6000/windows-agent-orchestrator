@@ -480,6 +480,24 @@ test("zcode ②d: setMode 失败 → fail-closed 拒绝派发（固定错误）�
 
 // ===== ③ 模型 ref 拆分 + policy 拒绝分支 =====
 
+test("zcode ②e: resolveInvocationPrefix → node 入口前缀（runtimeIdentity 探测消费）；binary 缺失拒绝", async () => {
+  const kill = fakeKill();
+  const backend = new ZcodeBackend({ killFn: kill.killFn });
+  const agent = makeAgent({});
+  const prefix = await backend.resolveInvocationPrefix(agent);
+  assert.equal(prefix.binary, process.execPath, "zcode.cjs 是 node 脚本——与 spawn argv 一致，必须经 node 入口");
+  assert.deepEqual(prefix.args, [agent.binary]);
+  await assert.rejects(
+    () => backend.resolveInvocationPrefix({ ...agent, binary: "" }),
+    /zcode backend requires agent\.binary/,
+  );
+  // 含空格路径：前缀只承载字符串（引用/转义在 compileInvocation 层），逐字保留。
+  const spaced = await backend.resolveInvocationPrefix(
+    makeAgent({ binary: "C:/Program Files (x86)/ZCode/resources/glm/zcode.cjs" }),
+  );
+  assert.deepEqual(spaced.args, ["C:/Program Files (x86)/ZCode/resources/glm/zcode.cjs"]);
+});
+
 test("zcode ③: splitZcodeModelRef 恰好一个 '/' 且两段非空", () => {
   assert.deepEqual(splitZcodeModelRef("bigmodel-api/GLM-5.3"), { providerId: "bigmodel-api", modelId: "GLM-5.3" });
   assert.deepEqual(splitZcodeModelRef("bigmodel-api/GLM-5.3-Flash"), { providerId: "bigmodel-api", modelId: "GLM-5.3-Flash" });
@@ -1401,12 +1419,12 @@ function scanZcodeConstructions(source) {
 test("zcode ⑪: 真杀隔离守卫——本文件全部构造处均注入 killFn（正则识别 + 计数严格相等 + 块级检查）", () => {
   const source = readFileSync(new URL(import.meta.url), "utf8");
   const { constructions, violations } = scanZcodeConstructions(source);
-  // P2②b：严格相等。当前实际 = 11 处：runScenario / ②c / ②d / ③b / ⑦b / ⑦c /
-  // ⑨b / ⑨e / ⑨f / ⑨g / ⑩b。加/删构造必须同步更新此数字——不更新即红。
+  // P2②b：严格相等。当前实际 = 12 处：runScenario / ②c / ②d / ②e / ③b / ⑦b /
+  // ⑦c / ⑨b / ⑨e / ⑨f / ⑨g / ⑩b。加/删构造必须同步更新此数字——不更新即红。
   assert.equal(
     constructions.length,
-    11,
-    `守卫扫描应找到恰 11 处构造（runScenario/②c/②d/③b/⑦b/⑦c/⑨b/⑨e/⑨f/⑨g/⑩b），实际 ${constructions.length}——加/删构造必须同步更新守卫计数（扫描器失效即守卫空转）`,
+    12,
+    `守卫扫描应找到恰 12 处构造（runScenario/②c/②d/②e/③b/⑦b/⑦c/⑨b/⑨e/⑨f/⑨g/⑩b），实际 ${constructions.length}——加/删构造必须同步更新守卫计数（扫描器失效即守卫空转）`,
   );
   assert.deepEqual(
     violations,

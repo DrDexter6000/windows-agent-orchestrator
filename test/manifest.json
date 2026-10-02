@@ -240,6 +240,8 @@
       "mcp-surface/mcpRegistry.test.js",
       "process/genCertificationEntry.test.js",
       "process/genSurfaceEntry.test.js",
+      "process/runtimeIdentityCli.test.js",
+      "process/kimiWebIdentityProbe.test.js",
       "isolation-infra/parseSmoke.test.js",
       "transcript/runCollectServeCapRed.test.js",
       "transcript/runCollectStdioSmoke.test.js",

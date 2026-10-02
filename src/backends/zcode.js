@@ -426,6 +426,16 @@ export class ZcodeBackend {
   }
 
   /**
+   * 与 spawn argv 同源的 node 入口前缀（`node <zcode.cjs>`），供 preflight 与
+   * runtimeIdentity 版本探测消费（ProcessBackend 家族契约）。zcode.cjs 是 node
+   * 脚本——直发该路径在 Windows 上不可执行，探测必须经 node 入口。不合并
+   * prependArgs：zcode 的 validateAgentPolicy 拒绝该配置，spawn argv 亦无此前缀。
+   */
+  async resolveInvocationPrefix(agent) {
+    return { binary: process.execPath, args: [requireZcodeBinary(agent)] };
+  }
+
+  /**
    * M11-9 派发前策略门（RunManager 在 transcript/worktree/spawn 之前调用；spawn
    * 首行再次调用做权威防线）。zcode 能表达：model.id（上游原生 ref
    * `<providerId>/<modelId>` 拆分后经 session/setModel 下发）与 reasoning.effort
@@ -498,7 +508,9 @@ export class ZcodeBackend {
    */
   async preflightInvocation(agent, task = {}) {
     this.validateAgentPolicy(agent);
-    const zcodeCliPath = requireZcodeBinary(agent);
+    // binary 必填的早期拒绝（错误顺序保持：先于 resume 预检）；argv 前缀统一由
+    // resolveInvocationPrefix 构造（单一定义）。
+    requireZcodeBinary(agent);
     if (task?.sessionReuse?.turn === "resume") {
       const priorSessionId = task.priorProviderSessionId;
       if (typeof priorSessionId !== "string" || priorSessionId.length === 0
@@ -511,9 +523,12 @@ export class ZcodeBackend {
         );
       }
     }
+    // 单一前缀定义（resolveInvocationPrefix）：preflight/spawn/版本探测三处同源
+    // 消费，防第三份 process.execPath 副本漂移（auditor 咨询 2026-10-02）。
+    const prefix = await this.resolveInvocationPrefix(agent);
     return compileInvocation({
-      binary: process.execPath,
-      builtArgs: [zcodeCliPath, "app-server"],
+      binary: prefix.binary,
+      builtArgs: [...prefix.args, "app-server"],
       platform: this._platform,
     });
   }
@@ -521,7 +536,9 @@ export class ZcodeBackend {
   async spawn(agent, task) {
     // 权威策略门（RunManager 已在零副作用位置调过一次——defense-in-depth）。
     this.validateAgentPolicy(agent);
-    const zcodeCliPath = requireZcodeBinary(agent);
+    // binary 必填的早期拒绝（错误顺序保持）；argv 前缀统一由
+    // resolveInvocationPrefix 构造（单一定义）。
+    requireZcodeBinary(agent);
     // resume 轮 fail-closed 预检（纯 task 形状检查——**先于进程创建**；与
     // preflightInvocation 互为双拒绝点）。关联面：spawn 权威（runManager）经
     // transcript SSOT 绑定读取器取回前任 session.created.backendSessionId，以
@@ -559,10 +576,12 @@ export class ZcodeBackend {
 
     // argv = node <zcode.cjs> app-server：zcode.cjs 是 node 脚本，Windows 下直接
     // spawn 无 shebang 关联——必须经 node 入口跑（codex.js 绕 .cmd 直跑 js 入口
-    // 的同款纪律；live 探针同形状）。
+    // 的同款纪律；live 探针同形状）。前缀与 preflight/版本探测同源
+    // （resolveInvocationPrefix 单一定义）。
+    const prefix = await this.resolveInvocationPrefix(agent);
     const compiled = compileInvocation({
-      binary: process.execPath,
-      builtArgs: [zcodeCliPath, "app-server"],
+      binary: prefix.binary,
+      builtArgs: [...prefix.args, "app-server"],
       platform: this._platform,
     });
     const child = this._spawnFn(compiled.binary, compiled.args, {

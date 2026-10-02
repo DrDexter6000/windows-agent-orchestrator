@@ -10,7 +10,7 @@
 //   2. unknown 明确 verified=false，且同一探测目标的未验证键稳定（不制造新键噪声）；
 //   3. opencode-serve（HTTP 服务 backend）→ honest unknown + 原因；
 //   4. 未知 backend 名 → unknown（无描述符，不猜）；
-//   5. HARNESS_VERSION_PROBES 是身份元数据表（七 backend 全覆盖或显式 null）；
+//   5. HARNESS_VERSION_PROBES 是身份元数据表（八 backend 全覆盖或显式 null）；
 //   6. 版本解析：stdout 首个非空行、超长截断、多行 banner 取首行。
 
 import { test } from "node:test";
@@ -108,14 +108,31 @@ test("probe: kimi-web（HTTP 服务、宿主 kimi 二进制承载）→ 探宿�
   assert.equal(wrapped.binaryPath, "C:/custom/kimi-wrapper.exe");
 });
 
+test("probe: zcode（桌面捆绑 zcode.cjs node 脚本）→ 经 backend resolveInvocationPrefix 的 node 前缀探 node <zcode.cjs> --version", () => {
+  const agent = { binary: "C:/probe/zcode.cjs" };
+  const spawn = fakeSpawn({ stdout: "0.16.9\n" });
+  const id = probeRuntimeIdentity({
+    backendName: "zcode",
+    agent,
+    resolvedInvocation: { binary: process.execPath, args: [agent.binary] },
+    spawnFn: spawn,
+  });
+  assert.equal(spawn.calls.length, 1);
+  assert.equal(spawn.calls[0].binary, process.execPath, "zcode.cjs 是 node 脚本——探针必须经 node 入口（直发 .cjs 在 Windows 必失败）");
+  assert.deepEqual(spawn.calls[0].args, [agent.binary, "--version"]);
+  assert.equal(id.verified, true);
+  assert.equal(id.version, "0.16.9");
+  assert.equal(id.distribution, "zcode");
+});
+
 test("probe【证伪】: 未知 backend 名 → unknown（无描述符，不猜）", () => {
   const id = probeRuntimeIdentity({ backendName: "bogus-runtime", spawnFn: fakeSpawn() });
   assert.equal(id.distribution, null);
   assert.match(id.reason, /no harness probe descriptor/);
 });
 
-test("HARNESS_VERSION_PROBES F5: 七 backend 全覆盖，所有 process backend honor agent.binary", () => {
-  const knownBackends = ["claude-code", "codex", "kimi-code", "kimi-web", "deepseek-acp", "deepseek-harness", "opencode-serve"];
+test("HARNESS_VERSION_PROBES F5: 八 backend 全覆盖，所有 process backend honor agent.binary", () => {
+  const knownBackends = ["claude-code", "codex", "kimi-code", "kimi-web", "deepseek-acp", "deepseek-harness", "opencode-serve", "zcode"];
   assert.deepEqual([...Object.keys(HARNESS_VERSION_PROBES)].sort(), [...knownBackends].sort());
   assert.equal(HARNESS_VERSION_PROBES["opencode-serve"], null, "HTTP 服务显式 null（不静默缺省）");
   assert.equal(HARNESS_VERSION_PROBES["deepseek-acp"].binary({}), "dsh");
