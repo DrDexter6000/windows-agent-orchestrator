@@ -48,3 +48,7 @@
 ## 发版记录
 
 - tag：`v0.2.0`（annotated）→ 推远端（沿用 v0.1.0 惯例）。
+
+## 勘误（2026-10-02，auditor 咨询复核发现，只追加不回改）
+
+"zcode backend"条目中"会话内纠偏（steer）"表述**错误**：zcode 协议未见证 steer 类在途注入原语，`supportsInFlightCorrection = false`（`src/backends/zcode.js:400`，翻转条件在册）。zcode 不具备在途纠偏能力——该能力属 kimi-web（`prompts:steer`）。同条目中"派发、usage 计量、工具帧证据投影"等其余声称不受影响（发版门槛实跑复核在案）。
