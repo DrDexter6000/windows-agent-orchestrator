@@ -57,9 +57,11 @@ export function requiredCredentialNames(agent) {
   const names = [];
   const configured = agent.backend === "deepseek-harness" || agent.backend === "deepseek-acp"
     ? agent.credentialEnv
-    : agent.backend === "claude-code"
-      ? agent.provider?.apiKeyEnv
-      : undefined;
+    : agent.backend === "kimi-web"
+      ? agent.tokenEnv
+      : agent.backend === "claude-code"
+        ? agent.provider?.apiKeyEnv
+        : undefined;
   if (typeof configured === "string" && configured.length > 0) names.push(configured);
   if (agent.backend !== "claude-code") return [...new Set(names)];
   const prependArgs = Array.isArray(agent.prependArgs) ? agent.prependArgs : [];

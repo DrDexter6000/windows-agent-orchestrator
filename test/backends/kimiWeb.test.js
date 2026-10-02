@@ -2125,7 +2125,10 @@ test("kimi-web R9 ⑮: transcript 返回不可解析 JSON（HTTP 200、body 非�
   assert.equal(events.length, 1, "恰一个 done 事件——流有界终止");
   assert.equal(events[0].kind, "done");
   assert.equal(events[0].reason, "failed");
-  assert.match(events[0].error, /Unexpected token/, "解析错误原样进 done.error（token 清洗层在，本例无 token）");
+  // 2026-10-02 坑修：裸 SyntaxError（"Unexpected token '<'"，不可诊断）换成
+  // 固定形状 typed 错误（含状态码/content-type、不回显正文）——有界收口与
+  // "绝不回落猜测形状"的反例意图不变。
+  assert.match(events[0].error, /non-JSON body \(status 200/, "typed 错误进 done.error");
 });
 
 test("kimi-web R9 ⑯: 先见 running 后请求连续失败 → done(failed)（绝不复用旧 turn 判完成，也不无限等待）", async () => {
@@ -2197,3 +2200,52 @@ test("kimi-web 注册: normalizeAgent 的 serveUrl/model.id/tokenEnv 必填面",
   assert.throws(() => normalizeAgent("bad_token", makeAgent({ tokenEnv: " " })), /tokenEnv.*non-blank string/);
 });
 
+
+// ===== ⑫ user-env 桥接 + 非 JSON 守卫（2026-10-02 坑修：token 不继承 / collect HTML 崩溃）=====
+
+test("kimi-web ⑫: spawn 捕获 task.resolvedCredentials 的桥接 token——process.env 缺席时 request 仍带正确 Bearer 头", async () => {
+  const saved = process.env[TOKEN_ENV];
+  delete process.env[TOKEN_ENV];
+  try {
+    const { calls, fetchImpl } = kimiServer(spawnOkRoutes());
+    const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+    await backend.spawn(makeAgent(), {
+      prompt: "Read README only.",
+      resolvedCredentials: { [TOKEN_ENV]: "bridged-token-value" },
+    });
+    assert.equal(calls.length, 4, "spawn fresh 轮四请求照常");
+    assert.equal(
+      calls[0].headers.authorization,
+      "Bearer bridged-token-value",
+      "桥接值优先于 process.env（detached runner 不继承 user-env 的坑修）",
+    );
+  } finally {
+    if (saved !== undefined) process.env[TOKEN_ENV] = saved;
+  }
+});
+
+test("kimi-web ⑫: request 对 200+HTML 抛固定形状错误（不回显正文、不带裸 SyntaxError）", async () => {
+  const htmlResponse = {
+    ok: true,
+    status: 200,
+    headers: { get: (n) => (n === "content-type" ? "text/html" : null) },
+    async json() { throw new SyntaxError("Unexpected token '<'"); },
+    async text() { return "<!doctype html><html>login page</html>"; },
+  };
+  const backend = new KimiWebBackend({ fetchImpl: async () => htmlResponse, timeout: 5000, retries: 0 });
+  await assert.rejects(
+    () => backend.request(makeAgent(), "http://127.0.0.1:4310/api/v1/sessions/s1/messages", { method: "GET" }),
+    (error) => {
+      assert.match(error.message, /non-JSON body \(status 200, content-type text\/html\)/);
+      assert.match(error.message, /refusing to guess/);
+      assert.equal(error.message.includes("<!doctype"), false, "正文绝不进错误消息");
+      return true;
+    },
+  );
+});
+
+test("kimi-web ⑫: envPolicy 把 tokenEnv 纳入必需凭据面（readiness 门与 user-env 桥的前提）", async () => {
+  const { requiredCredentialNames } = await import("../../src/envPolicy.js");
+  const agent = normalizeAgent("coder_kimiweb", makeAgent());
+  assert.deepEqual(requiredCredentialNames(agent), [TOKEN_ENV]);
+});

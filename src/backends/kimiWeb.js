@@ -241,6 +241,14 @@ export class KimiWebBackend {
 
   async spawn(agent, task, opts = {}) {
     this.validateAgentPolicy(agent);
+    // user-env 桥接值捕获（2026-10-02 坑修）：detached runner 不继承 Windows
+    // user-env（setx 后长命 shell 的子进程拿不到）——runManager 的 credential
+    // 桥（credentialReadiness → task.resolvedCredentials）已按 envPolicy 把
+    // tokenEnv 解析进来。spawn 时捕获到 per-agent 槽，request 免 PowerShell 重读。
+    const bridgedToken = task?.resolvedCredentials?.[agent.tokenEnv];
+    if (typeof bridgedToken === "string" && bridgedToken.trim().length > 0) {
+      SPAWN_BRIDGED_BEARER.set(agent, bridgedToken);
+    }
     let sessionId;
     if (task.sessionReuse?.turn === "resume") {
       // 镜像 kimiCode.js 的 resume 轮实现：前任 provider session id 缺失/空/占位
@@ -808,7 +816,23 @@ export class KimiWebBackend {
           if (response.status === 204) {
             return null;
           }
-          const body = await response.json();
+          // 非 JSON 守卫（2026-10-02 坑修）：会话被服务端回收/鉴权面回退时，
+          // 200 + HTML（登录页/错误页）会让 response.json() 抛裸 SyntaxError
+          // （"Unexpected token '<'"）向上穿透成不可诊断崩溃。改读原文再解析，
+          // 解析失败抛固定形状错误——只含状态码与 content-type，绝不回显正文。
+          const rawBody = await response.text();
+          let body = null;
+          if (rawBody.length > 0) {
+            try {
+              body = JSON.parse(rawBody);
+            } catch {
+              throw new Error(
+                `kimi web request returned a non-JSON body (status ${response.status}, `
+                + `content-type ${response.headers?.get?.("content-type") ?? "unknown"}) `
+                + "— session likely evicted or an HTML page was served; refusing to guess",
+              );
+            }
+          }
           if (body && typeof body === "object" && body.code !== undefined && body.code !== 0) {
             throw new Error(
               `kimi web request failed (code ${body.code}): ${redactToken(String(body.msg ?? "unknown error"), token)}`,
@@ -838,15 +862,21 @@ export class KimiWebBackend {
   }
 }
 
-// Bearer token 每次请求时从 process.env[agent.tokenEnv] 读取；字段缺失或 env 未设
-// → 固定安全形状错误（只点名 env 变量名，绝不回显 env 内容——token 值永不进
-// 错误消息/transcript/日志）。
+// Bearer token 每次请求时解析；优先级：spawn 捕获的桥接值（runManager 的
+// user-env 桥——2026-10-02 坑修）→ process.env[agent.tokenEnv]。字段缺失或两处
+// 均未设 → 固定安全形状错误（只点名 env 变量名，绝不回显 env 内容——token 值
+// 永不进错误消息/transcript/日志）。
+const SPAWN_BRIDGED_BEARER = new WeakMap();
 function resolveBearerToken(agent) {
   const name = agent?.tokenEnv;
   if (typeof name !== "string" || name.trim().length === 0) {
     throw new Error(
       "kimi-web backend requires tokenEnv (non-empty string; the bearer token env var name)",
     );
+  }
+  const bridged = SPAWN_BRIDGED_BEARER.get(agent);
+  if (typeof bridged === "string" && bridged.trim().length > 0) {
+    return bridged;
   }
   const value = process.env[name];
   if (typeof value !== "string" || value.trim().length === 0) {
