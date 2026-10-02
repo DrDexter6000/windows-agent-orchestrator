@@ -40,6 +40,22 @@ you.
   dependencies (`@modelcontextprotocol/sdk` + `zod`, confined to `src/mcp/**`); no
   Docker/WSL; worktree isolation and process-tree cleanup tuned for Windows.
 
+## A staffing model for intelligence
+
+- **Rent judgment, buy labor** — seat your strongest model as advisor and auditor
+  (plan review, delivery gating) and let cost-efficient models do the bulk of the work.
+  A $200-tier subscription on every seat is not a prerequisite; frontier-grade review is
+  applied where you decide it matters.
+- **A council beats a genius — and costs less than one.** Cross-family, multi-seat
+  review brings several top models to one decision chain; model families err
+  differently, so cross-examination covers blind spots. The pattern has independent
+  backing — OpenRouter's Fusion council [reports](https://openrouter.ai/blog/announcements/fusion-beats-frontier)
+  cheaper panels outscoring frontier flagships, and the Mixture-of-Agents paper
+  ([arXiv:2406.04692](https://arxiv.org/abs/2406.04692)) topped GPT-4 Omni on
+  AlpacaEval 2.0 with open-source models only. WAO turns the same principle into
+  review discipline: advice is recorded, the Lead decides. Results depend on task and
+  configuration.
+
 ## What's new in v0.2.0 (2026-10-01)
 
 - All 8 worker seats now run on first-party vendor harnesses (new backends: zcode,

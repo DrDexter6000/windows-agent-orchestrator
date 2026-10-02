@@ -36,6 +36,19 @@ token 账单落在 worker 自己的 provider 配额上，每次运行都落成�
   （`@modelcontextprotocol/sdk` + `zod`，且限定在 `src/mcp/**`）；无 Docker/WSL；
   worktree 隔离与进程树清理针对 Windows 调优。
 
+## 智力的用人制度
+
+- **让贵的脑子管判断，便宜的算力管干活**——把最强的模型放在顾问与审计席（方案评审、
+  交付把关），批量执行交给高性价比 worker。不是每个席位都要配两百美元档的月订阅；
+  旗舰级审查用在你认定要紧的关口。
+- **三个臭皮匠，顶个诸葛亮——还比诸葛亮便宜。** 跨族系多席会审把多家顶尖模型的判断
+  汇入同一条决策链；不同族系犯不同的错，交叉审查互相补盲。这一思路有独立佐证——
+  OpenRouter 的 Fusion 议会[报告称](https://openrouter.ai/blog/announcements/fusion-beats-frontier)
+  更便宜的模型组合在基准上超过前沿旗舰，Mixture-of-Agents 论文
+  （[arXiv:2406.04692](https://arxiv.org/abs/2406.04692)）以纯开源模型在
+  AlpacaEval 2.0 上超过 GPT-4 Omni。WAO 把同一原理做成审查纪律：意见留痕，裁定归
+  Lead；效果因任务与配置而异。
+
 ## v0.2.0 新增（2026-10-01）
 
 - 全部 8 个 worker 席位运行在原厂第一方 harness 上（新增 backend：zcode、kimi-web、
