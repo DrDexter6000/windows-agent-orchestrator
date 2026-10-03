@@ -81,7 +81,7 @@ function launcherInjections(server, lc, extras = {}) {
     gitRootFn: () => "/canonical/ws",
     openUrlFn: async () => {},
     createServerFn: () => server,
-    readRegistryFn: async () => ({ agents: [] }),
+    readRegistryFn: async () => ({ listAgents: () => [] }),
     lifecycle: lc,
     log: () => {},
     ...extras,
@@ -283,7 +283,7 @@ test("LEGACY: runs dashboard --web does NOT auto-open and retains the non-Git fa
   const p = runsDashboardCommand(["--web"], baseConfig, {
     createServerFn: (cfg) => { created = cfg; return server; },
     proveWorkspaceFn: () => { throw new Error("not a git repo"); },
-    readRegistryFn: async () => ({ agents: [] }),
+    readRegistryFn: async () => ({ listAgents: () => [] }),
     lifecycle: lc,
     log: (s) => logs.push(s),
   });
@@ -304,7 +304,7 @@ test("LEGACY: runDashboardWeb without the new hooks behaves byte-identically (2 
   const p = runDashboardWeb({ web: true, port: "7654" }, baseConfig, {
     createServerFn: () => server,
     proveWorkspaceFn: (cwd) => ({ root: cwd }),
-    readRegistryFn: async () => ({ agents: [] }),
+    readRegistryFn: async () => ({ listAgents: () => [] }),
     lifecycle: lc,
     log: (s) => logs.push(s),
   });

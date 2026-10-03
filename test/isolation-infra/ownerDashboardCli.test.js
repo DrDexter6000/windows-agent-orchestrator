@@ -13,8 +13,12 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { runDashboardWeb, runsDashboardCommand } from "../../src/commands/runs.js";
+import { readRegistry } from "../../src/registry.js";
 
 // Flush the microtask + macrotask queues so an async function can run until it
 // parks at an injected await (here: lifecycle.wait()).
@@ -53,7 +57,7 @@ function defaultInjections(server, lc, extras = {}) {
   return {
     createServerFn: () => server,
     proveWorkspaceFn: (cwd) => ({ root: cwd }),
-    readRegistryFn: async () => ({ agents: [] }),
+    readRegistryFn: async () => ({ listAgents: () => [] }),
     lifecycle: lc,
     log: () => {},
     ...extras,
@@ -75,7 +79,7 @@ test("STARTUP: prints exactly one URL (#token=<64hex>, path '/') + Ctrl-C line",
     {
       createServerFn: (cfg) => { created = cfg; return server; },
       proveWorkspaceFn: (cwd) => ({ root: "/canonical/ws" }),
-      readRegistryFn: async () => ({ agents: [{ id: "coder_low" }] }),
+      readRegistryFn: async () => ({ listAgents: () => [{ id: "coder_low" }] }),
       lifecycle: lc,
       log: (s) => logs.push(s),
     },
@@ -118,7 +122,7 @@ test("FRAGMENT: default port (ephemeral) — printed URL uses the listen port, n
     {
       createServerFn: (cfg) => { created = cfg; return server; },
       proveWorkspaceFn: (cwd) => ({ root: cwd }),
-      readRegistryFn: async () => ({ agents: [] }),
+      readRegistryFn: async () => ({ listAgents: () => [] }),
       lifecycle: lc,
       log: (s) => logs.push(s),
     },
@@ -192,7 +196,7 @@ test("AUTHORITY: proveWorkspace + readRegistry outputs threaded to the server", 
     {
       createServerFn: (cfg) => { created = cfg; return makeFakeServer(); },
       proveWorkspaceFn: () => { proveCalled = true; return { root: "/canonical/root" }; },
-      readRegistryFn: async () => { registryCalled = true; return { agents: [{ id: "coder_hq" }, { id: "kimi_low" }] }; },
+      readRegistryFn: async () => { registryCalled = true; return { listAgents: () => [{ id: "coder_hq" }, { id: "kimi_low" }] }; },
       lifecycle: lc,
       log: () => {},
     },
@@ -215,7 +219,7 @@ test("AUTHORITY: unprovable workspace fails SOFT (dashboard still starts)", asyn
     {
       createServerFn: (cfg) => { created = cfg; return makeFakeServer(); },
       proveWorkspaceFn: () => { throw new Error("not a git repo"); },
-      readRegistryFn: async () => ({ agents: [] }),
+      readRegistryFn: async () => ({ listAgents: () => [] }),
       lifecycle: lc,
       log: () => {},
     },
@@ -264,4 +268,133 @@ test("SHUTDOWN: server is closed in a finally (runs even if wait rejects)", asyn
     /signal/,
   );
   assert.equal(server.closeCalled, true, "close ran in finally despite the rejected wait");
+});
+
+// =====================================================================
+// P0 (2026-10-03) — REAL registry shape regression pins.
+//
+// The production readRegistry() has ALWAYS returned {listAgents, getAgent,
+// rawEntries} and never an `agents` array; runDashboardWeb's old
+// Array.isArray(reg.agents) check was a day-one wiring defect that silently
+// emptied knownAgentIds (every production run showed agentId "unknown";
+// injected fakes matched the wrong shape and hid it — same family as the
+// M12-25B finding in the MCP path). These pins bind the dashboard wiring to
+// the REAL reader + REAL file shape so the seam cannot drift silently again.
+// =====================================================================
+
+// Real fs reads park on the libuv thread pool — one setImmediate flush is not
+// enough for the real reader. Bounded poll until the command reaches
+// createServerFn (or fail loudly if it never does).
+async function waitFor(pred, label) {
+  for (let i = 0; i < 200 && !pred(); i++) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.ok(pred(), label);
+}
+
+function writeRegistry(dir, agents) {
+  const regPath = join(dir, "agents.json");
+  writeFileSync(regPath, JSON.stringify({ agents }), "utf8");
+  return regPath;
+}
+
+test("P0 REAL-SHAPE: real readRegistry ids reach the server (exact ids, not just non-empty)", async () => {
+  const lc = makeControllableLifecycle();
+  const dir = mkdtempSync(join(tmpdir(), "wao-dash-reg-"));
+  let created = null;
+  try {
+    // codex entries: process backend with no registry-required extras, so the
+    // pin exercises the wiring, not per-backend validation.
+    const regPath = writeRegistry(dir, {
+      coder_hq: { backend: "codex", cwd: "/x" },
+      researcher: { backend: "codex", cwd: "/x" },
+    });
+    const p = runDashboardWeb(
+      { web: true },
+      { ...baseConfig, registry: regPath },
+      {
+        createServerFn: (cfg) => { created = cfg; return makeFakeServer(); },
+        proveWorkspaceFn: (cwd) => ({ root: cwd }),
+        // NOTE: no readRegistryFn — the PRODUCTION reader runs against a real file.
+        lifecycle: lc,
+        log: () => {},
+      },
+    );
+    await waitFor(() => created !== null, "createServerFn reached (real fs read settled)");
+    assert.deepEqual(created.knownAgentIds, ["coder_hq", "researcher"],
+      "exact real-registry ids threaded (order = file order)");
+    lc.resolve();
+    await p;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0 FROZEN-SHAPE: readRegistry exposes listAgents() and no agents array", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-dash-shape-"));
+  try {
+    const regPath = writeRegistry(dir, { coder_hq: { backend: "codex", cwd: "/x" } });
+    const reg = await readRegistry(regPath);
+    assert.equal(typeof reg.listAgents, "function", "listAgents is the dashboard/MCP consumption surface");
+    assert.ok(Array.isArray(reg.listAgents()), "listAgents() returns an array");
+    assert.ok(!Array.isArray(reg.agents), "no agents array on the service shape — consumers must use listAgents()");
+    assert.deepEqual(reg.listAgents().map((a) => a.id), ["coder_hq"], "normalized entries carry id");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0 DEGRADED: corrupt registry file fails SOFT (empty ids, no crash)", async () => {
+  const lc = makeControllableLifecycle();
+  const dir = mkdtempSync(join(tmpdir(), "wao-dash-corrupt-"));
+  let created = null;
+  try {
+    const regPath = join(dir, "agents.json");
+    writeFileSync(regPath, "{ not json", "utf8");
+    const p = runDashboardWeb(
+      { web: true },
+      { ...baseConfig, registry: regPath },
+      {
+        createServerFn: (cfg) => { created = cfg; return makeFakeServer(); },
+        proveWorkspaceFn: (cwd) => ({ root: cwd }),
+        lifecycle: lc,
+        log: () => {},
+      },
+    );
+    await waitFor(() => created !== null, "createServerFn reached despite corrupt registry");
+    assert.deepEqual(created.knownAgentIds, [], "corrupt registry → empty ids (degraded 'unknown'), server still starts");
+    lc.resolve();
+    await p;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0 DEGRADED: one malformed entry fails the whole list SOFT (documented readRegistry semantics)", async () => {
+  const lc = makeControllableLifecycle();
+  const dir = mkdtempSync(join(tmpdir(), "wao-dash-badentry-"));
+  let created = null;
+  try {
+    const regPath = writeRegistry(dir, {
+      coder_hq: { backend: "codex", cwd: "/x" },
+      broken: {}, // missing backend → normalizeAgent throws inside listAgents()
+    });
+    const p = runDashboardWeb(
+      { web: true },
+      { ...baseConfig, registry: regPath },
+      {
+        createServerFn: (cfg) => { created = cfg; return makeFakeServer(); },
+        proveWorkspaceFn: (cwd) => ({ root: cwd }),
+        lifecycle: lc,
+        log: () => {},
+      },
+    );
+    await waitFor(() => created !== null, "createServerFn reached despite malformed entry");
+    assert.deepEqual(created.knownAgentIds, [],
+      "single malformed entry → whole list degrades to empty (agentIds 'unknown'), no crash");
+    lc.resolve();
+    await p;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

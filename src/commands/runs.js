@@ -1182,11 +1182,19 @@ export async function runDashboardWeb(options, config, injections = {}) {
 
   // Shared registry authority: agent ids for agentId validation. Registry
   // unavailable → agentIds render as "unknown" (fail soft, do not crash).
+  // P0 (2026-10-03): readRegistry returns {listAgents, getAgent, rawEntries}
+  // and NEVER had an `agents` array — the old Array.isArray(reg.agents) check
+  // was a day-one wiring defect that silently emptied knownAgentIds (every
+  // run showed agentId "unknown" in production; injected test fakes matched
+  // the wrong shape and hid it). Same shape family as the M12-25B finding in
+  // the MCP path (src/mcp/server.js knownAgentIds block).
   let knownAgentIds = [];
   try {
     const reg = await readReg(resolve(config.registry ?? "config/agents.json"));
-    if (reg && Array.isArray(reg.agents)) {
-      knownAgentIds = reg.agents.map((a) => a && a.id).filter((id) => typeof id === "string");
+    if (reg && typeof reg.listAgents === "function") {
+      knownAgentIds = reg.listAgents()
+        .map((a) => a && a.id)
+        .filter((id) => typeof id === "string");
     }
   } catch { /* registry unavailable → "unknown" agentIds */ }
 

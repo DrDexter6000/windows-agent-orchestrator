@@ -175,7 +175,7 @@ test("DASHBOARD: rebased config → server runDir + registry from install root; 
       gitRootFn: (cwd) => resolveCanonicalGitRoot(cwd),
       openUrlFn: async () => {},
       createServerFn: (cfg) => { created = cfg; return server; },
-      readRegistryFn: async (rp) => { regPath = rp; return { agents: [] }; },
+      readRegistryFn: async (rp) => { regPath = rp; return { listAgents: () => [] }; },
       lifecycle: lc,
       log: () => {},
     });
@@ -209,7 +209,7 @@ test("DASHBOARD: explicit --run-dir is NOT rebased (stays relative to the caller
       gitRootFn: (cwd) => resolveCanonicalGitRoot(cwd),
       openUrlFn: async () => {},
       createServerFn: (cfg) => { created = cfg; return server; },
-      readRegistryFn: async () => ({ agents: [] }),
+      readRegistryFn: async () => ({ listAgents: () => [] }),
       lifecycle: lc,
       log: () => {},
     });
