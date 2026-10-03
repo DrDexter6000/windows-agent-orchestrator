@@ -1889,3 +1889,87 @@ test("RO-10: the policy hint has three exact shapes — model-only / reasoning-o
     cleanupDir(dir);
   }
 });
+
+// =====================================================================
+// TD-198 (2026-10-03) — the background OWNERSHIP fact records the ABSOLUTE
+// resolved cwd. A relative run.background_submitted.cwd carries no workspace
+// identity (the ownership verifier rejects it); the fact is now absolute from
+// birth while the runner argv keeps threading the raw --cwd flag (HTTP
+// backends treat cwd as a remote hint; the runner normalizes idempotently).
+// =====================================================================
+
+test("TD198-B1: background dispatch, explicit relative --cwd \".\" → background_submitted.cwd is the resolved absolute", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td198b1-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const result = await dispatchRun({
+      agentId: "coder_low",
+      prompt: "x",
+      registryPath,
+      runDir: join(dir, "runs"),
+      cwd: ".",
+      background: true,
+      spawnFn: fakeSpawn,
+      userEnvReader: NO_ENV_READER,
+    });
+    assert.equal(result.accepted, true);
+    const events = await readTranscript(result.transcriptPath);
+    const fact = events.find((e) => e.type === "run.background_submitted");
+    assert.ok(fact, "background ownership fact present");
+    assert.equal(fact.cwd, resolve("."), "ownership fact cwd is resolved-absolute");
+    const cwdIdx = calls[0].args.indexOf("--cwd");
+    assert.equal(calls[0].args[cwdIdx + 1], ".", "runner argv still threads the raw flag (CE-4 contract)");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD198-B2: background dispatch, NO --cwd, registry cwd \".\" → ownership fact ABSOLUTE (previously absent)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td198b2-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: "." } });
+    const result = await dispatchRun({
+      agentId: "coder_low",
+      prompt: "x",
+      registryPath,
+      runDir: join(dir, "runs"),
+      background: true,
+      spawnFn: fakeSpawn,
+      userEnvReader: NO_ENV_READER,
+    });
+    assert.equal(result.accepted, true);
+    const events = await readTranscript(result.transcriptPath);
+    const fact = events.find((e) => e.type === "run.background_submitted");
+    assert.ok(fact, "background ownership fact present");
+    assert.equal(fact.cwd, resolve("."), "registry-relative cwd recorded as the resolved absolute fact");
+    assert.equal(calls[0].args.includes("--cwd"), false, "no explicit flag → no --cwd in argv (CE-13 contract)");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD198-B3: background dispatch, explicit ABSOLUTE --cwd → fact byte-identical", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td198b3-"));
+  const { fakeSpawn } = makeFakeSpawn();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const result = await dispatchRun({
+      agentId: "coder_low",
+      prompt: "x",
+      registryPath,
+      runDir: join(dir, "runs"),
+      cwd: dir,
+      background: true,
+      spawnFn: fakeSpawn,
+      userEnvReader: NO_ENV_READER,
+    });
+    assert.equal(result.accepted, true);
+    const events = await readTranscript(result.transcriptPath);
+    const fact = events.find((e) => e.type === "run.background_submitted");
+    assert.equal(fact.cwd, dir, "absolute --cwd threads byte-identically");
+  } finally {
+    cleanupDir(dir);
+  }
+});

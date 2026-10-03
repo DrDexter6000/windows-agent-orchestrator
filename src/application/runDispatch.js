@@ -26,7 +26,7 @@ import { readRegistry } from "../registry.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { inheritedEnvNames } from "../envPolicy.js";
 import { resolveReuseTurn, resolveLineageFirstTurn } from "./sessionReuse.js";
-import { assertExistingDispatchCwd, assertValidModelOverride, assertValidReasoningOverride } from "../runManager.js";
+import { assertExistingDispatchCwd, assertValidModelOverride, assertValidReasoningOverride, resolvePredictedDispatchCwd } from "../runManager.js";
 // R7-C (C-2): application→backends is a legal DOWNWARD edge under the frozen
 // L4 layering SSOT (backends sits deeper than application). Used only to read
 // the declared preflightInvocation capability for the cwd gate below — the
@@ -464,6 +464,15 @@ export async function dispatchRun({
   let finalCredentials = resolvedCredentials ?? {};
   const registry = await readRegistry(resolvedRegistry);
   const agent = registry.getAgent(agentId);
+  // TD-198 (2026-10-03): the ABSOLUTE ownership cwd for the background
+  // ownership record + the detached runner argv, derived through the SAME
+  // resolvePredictedDispatchCwd authority RunManager.start normalizes with —
+  // explicit --cwd wins, else the registry entry's cwd, resolved against THIS
+  // process's cwd (exactly the semantics the runner child would apply: it
+  // inherits this process's cwd). A relative fact carries no workspace
+  // identity (the ownership verifier rejects it); this makes every NEW
+  // background ownership fact absolute from birth.
+  const ownershipCwd = resolvePredictedDispatchCwd({ explicitCwd: cwd, agentCwd: agent.cwd })?.path;
 
   // R7-C (C-3, hoisted precedence): the TD-110 (D2 A3) typed refusal for a
   // sessionReuse agent dispatched WITHOUT a bound workspace must keep its
@@ -679,6 +688,12 @@ export async function dispatchRun({
   if (globalWaitTimeout !== undefined && globalWaitTimeout !== null) {
     runnerArgs.push("--global-wait-timeout", String(globalWaitTimeout));
   }
+  // TD-198: the runner argv keeps threading the RAW --cwd flag value when one
+  // was given — the runner's RunManager.start normalizes idempotently against
+  // its inherited cwd (the CLI's), and HTTP backends (opencode-serve) treat
+  // cwd as a REMOTE hint that must not be silently replaced by a locally
+  // resolved path. The ABSOLUTE ownership fact lives in
+  // run.background_submitted.cwd above, not in the argv.
   if (cwd) runnerArgs.push("--cwd", cwd);
   // R10-A: thread the per-dispatch model override to the detached runner (the
   // --cwd pair precedent). Included in the argv-length guard below by
@@ -746,7 +761,12 @@ export async function dispatchRun({
   // Initial durable facts, in order: background_submitted, then pending.
   await transcript.append("run.background_submitted", {
     background: true,
-    cwd,
+    // TD-198: the ABSOLUTE resolved ownership cwd (explicit --cwd or the
+    // registry entry, resolved) — a relative fact is unprovable workspace
+    // identity. ownershipCwd is null only in the defensive no-prediction
+    // corner; fall back to the raw flag value so the fact is never silently
+    // dropped.
+    cwd: ownershipCwd ?? cwd,
     scorecardConfigured: Boolean(scorecardRules),
     // Durable before the detached runner starts so startup failures still
     // preserve whether the Lead requested a delivery.

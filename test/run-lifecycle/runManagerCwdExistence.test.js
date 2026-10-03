@@ -52,7 +52,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve, dirname } from "node:path";
+import { join, resolve, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { RunManager, DispatchCwdNotFoundError } from "../../src/runManager.js";
@@ -517,7 +517,7 @@ test("RCE-11: start throws the SAME SSOT class layer 1 throws (single class defi
 // 6. Acceptance — relative cwd threads verbatim (spawn semantics unchanged)
 // =====================================================================
 
-test("RCE-12: explicit relative cwd that exists (\".\") → accepted, threaded verbatim to the backend", async () => {
+test("RCE-12: explicit relative cwd that exists (\".\") → accepted, threaded RESOLVED-ABSOLUTE to the backend (TD-198)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-rce12-"));
   const { backend, spawns } = makeProcessBackend();
   try {
@@ -526,7 +526,11 @@ test("RCE-12: explicit relative cwd that exists (\".\") → accepted, threaded v
     const run = await manager.start("coder_low", { prompt: "x", cwd: "." });
     assert.ok(run.runId, "a relative-but-existing cwd starts as before");
     assert.equal(spawns.length, 1);
-    assert.equal(spawns[0].agent.cwd, ".", "threaded verbatim (resolution stays spawn-side semantics)");
+    // TD-198 (2026-10-03): the OLD verbatim-relative contract is exactly the
+    // defect — a relative spawn cwd carries no workspace identity (ownership
+    // verifier rejects it; deepseek-acp refuses it). The resolved-absolute
+    // path now flows to the backend through the single resolve authority.
+    assert.equal(spawns[0].agent.cwd, resolve("."), "threaded resolved-absolute (TD-198 single authority)");
   } finally {
     cleanupDir(dir);
   }
@@ -578,6 +582,71 @@ test("RCE-13: resume, non-delivery run whose started cwd no longer exists → ty
     const events = await readTranscript(join(runDir, `${runId}.jsonl`));
     assert.equal(events.length, lines.length, "no events appended by the refused resume");
     assert.equal(events.some((e) => e.type === "run.rerun"), false, "no run.rerun fact");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// =====================================================================
+// TD-198 (2026-10-03) — absolute ownership cwd from the single resolve
+// authority. A relative cwd (registry "." or a relative --cwd) carries no
+// workspace identity: the ownership verifier rejects it ("unprovable
+// ownership workspace") and deepseek-acp refuses it at spawn. run.started.cwd
+// and the spawn cwd must both be the resolvePredictedDispatchCwd result.
+// =====================================================================
+
+test("TD198-1: registry cwd \".\" → run.started.cwd is ABSOLUTE and the spawn cwd matches it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td198-1-"));
+  const { backend, spawns } = makeProcessBackend();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: "." } });
+    const runDir = join(dir, "runs");
+    const manager = makeManager({ registryPath, runDir, backend });
+    const run = await manager.start("coder_low", { prompt: "x" });
+
+    const events = await readTranscript(join(runDir, `${run.runId}.jsonl`));
+    const started = events.find((e) => e.type === "run.started");
+    assert.ok(started, "run.started recorded");
+    assert.equal(started.cwd, resolve("."), "run.started.cwd is the resolved ABSOLUTE path");
+    assert.ok(isAbsolute(started.cwd), "recorded cwd is absolute");
+    assert.equal(spawns.length, 1, "one spawn");
+    assert.equal(spawns[0].agent.cwd, resolve("."), "spawn agent.cwd is the same absolute path (one authority)");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD198-2: explicit RELATIVE --cwd → both the fact and the spawn carry the resolved absolute", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td198-2-"));
+  const { backend, spawns } = makeProcessBackend();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const runDir = join(dir, "runs");
+    const manager = makeManager({ registryPath, runDir, backend });
+    const run = await manager.start("coder_low", { prompt: "x", cwd: "." });
+
+    const events = await readTranscript(join(runDir, `${run.runId}.jsonl`));
+    const started = events.find((e) => e.type === "run.started");
+    assert.equal(started.cwd, resolve("."), "explicit relative --cwd resolves against process.cwd()");
+    assert.equal(spawns[0].agent.cwd, resolve("."), "spawn cwd matches the fact");
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+test("TD198-3: explicit ABSOLUTE --cwd → recorded byte-identically (normalization is idempotent)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td198-3-"));
+  const { backend, spawns } = makeProcessBackend();
+  try {
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const runDir = join(dir, "runs");
+    const manager = makeManager({ registryPath, runDir, backend });
+    const run = await manager.start("coder_low", { prompt: "x", cwd: dir });
+
+    const events = await readTranscript(join(runDir, `${run.runId}.jsonl`));
+    const started = events.find((e) => e.type === "run.started");
+    assert.equal(started.cwd, dir, "absolute cwd threads byte-identically");
+    assert.equal(spawns[0].agent.cwd, dir, "spawn cwd unchanged for absolute input");
   } finally {
     cleanupDir(dir);
   }

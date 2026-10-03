@@ -145,7 +145,9 @@ function isExistingDirectory(p) {
  * @param {string|undefined} input.agentCwd — the registry entry's cwd
  * @returns {{path:string, source:"flag"|"registry"}|null}
  */
-function resolvePredictedDispatchCwd({ explicitCwd, agentCwd }) {
+// TD-198: exported for dispatchRun's background ownership record + runner
+// argv — the ONE cwd resolution authority (no second copy anywhere).
+export function resolvePredictedDispatchCwd({ explicitCwd, agentCwd }) {
   if (typeof explicitCwd === "string" && explicitCwd.length > 0) {
     return { path: resolve(explicitCwd), source: "flag" };
   }
@@ -698,6 +700,21 @@ export class RunManager {
     const registryPath = resolve(registry ?? this.config.registry);
     const loaded = await this._readRegistryWithGuidance(registryPath);
     let agent = loaded.getAgent(agentId, { cwd });
+    // TD-198 (2026-10-03): the merged agent cwd may be RELATIVE (registry
+    // entries commonly declare "."; an explicit --cwd may also be relative).
+    // A relative cwd carries no workspace identity: the ownership verifier
+    // rejects it ("unprovable ownership workspace") and deepseek-acp refuses
+    // it at spawn. Normalize ONCE here, through the SAME
+    // resolvePredictedDispatchCwd authority the existence assert uses, so
+    // run.started.cwd, the spawn cwd, the worktree base, and the frozen-HEAD
+    // revalidation all see ONE absolute path. resolve() is idempotent for an
+    // already-absolute value, so explicit absolute --cwd is byte-identical.
+    {
+      const predictedCwd = resolvePredictedDispatchCwd({ explicitCwd: cwd, agentCwd: agent.cwd });
+      if (predictedCwd !== null && predictedCwd.path && predictedCwd.path !== agent.cwd) {
+        agent = { ...agent, cwd: predictedCwd.path };
+      }
+    }
     // R10-A: synthesize the override (see the option comment above). The
     // synthesized object flows through validateAgentPolicy below unchanged —
     // zero NEW validation surface; a backend that cannot express the resulting
@@ -1515,6 +1532,19 @@ export class RunManager {
     // keep using runStarted.cwd as before.
     const resumeCwd = deliveryContext ? deliveryContext.worktreePath : runStarted.cwd;
     let agent = loaded.getAgent(transcript.context.agentId, { cwd: resumeCwd });
+    // TD-198 (2026-10-03): legacy transcripts may carry a RELATIVE run.started
+    // cwd (recorded before start-side normalization). Normalize through the
+    // SAME authority as start — resolve() here has exactly the semantics the
+    // spawn below would apply to a relative cwd anyway (resolved against the
+    // resuming process's cwd), so this changes no behavior while making the
+    // resumed run's cwd an absolute, ownership-provable path. Delivery resumes
+    // already carry an absolute worktreePath and are idempotent here.
+    {
+      const predictedResumeCwd = resolvePredictedDispatchCwd({ explicitCwd: resumeCwd, agentCwd: agent.cwd });
+      if (predictedResumeCwd !== null && predictedResumeCwd.path && predictedResumeCwd.path !== agent.cwd) {
+        agent = { ...agent, cwd: predictedResumeCwd.path };
+      }
+    }
     // R10-C C-1: rebuild the per-dispatch model override from run.started — the
     // SAME authoritative source the delivery context above is rebuilt from.
     // run.started.modelOverride is the durable fact that THIS dispatch carried
