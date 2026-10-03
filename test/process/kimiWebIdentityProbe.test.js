@@ -25,9 +25,54 @@ function fetchReturning({ status = 200, body = "{}", captureInto = null } = {}) 
 
 test("probe: 凭据缺失 → exit 1 + 固定文案，零请求（fetch 不被调用）", async () => {
   let called = false;
-  const r = await probeIdentity({ url: "http://127.0.0.1:1", tokenEnv: "KIMI_WEB_TOKEN", env: {}, fetchFn: async () => { called = true; } });
+  const r = await probeIdentity({ url: "http://127.0.0.1:1", tokenEnv: "KIMI_WEB_TOKEN", env: {}, userEnvReader: async () => undefined, fetchFn: async () => { called = true; } });
   assert.equal(r.exitCode, 1);
-  assert.match(r.stderr, /credential missing: env KIMI_WEB_TOKEN not set/);
+  assert.match(r.stderr, /credential missing: env KIMI_WEB_TOKEN not set and no Windows user-scope value/);
+  assert.equal(called, false);
+});
+
+// ===== TD-208 (2026-10-03)：两级凭据解析（env → HKCU 同权威回退）=====
+test("probe TD208: env 空但 HKCU 命中 → 回退值承重（Bearer 用回退值发请求）", async () => {
+  const captured = {};
+  const r = await probeIdentity({
+    url: "http://127.0.0.1:58627", tokenEnv: "KIMI_WEB_TOKEN", env: {},
+    userEnvReader: async (name) => (name === "KIMI_WEB_TOKEN" ? "hkcu-fallback-token-value" : undefined),
+    fetchFn: fetchReturning({ captureInto: captured }),
+  });
+  assert.equal(r.exitCode, 0);
+  assert.equal(captured.options.headers.Authorization, "Bearer hkcu-fallback-token-value", "回退值真实承重");
+});
+
+test("probe TD208: env 值优先于 HKCU（同级同值时绝不双读覆盖）+ 空串 env 也走回退", async () => {
+  const captured = {};
+  let readerCalled = 0;
+  await probeIdentity({
+    url: "http://127.0.0.1:58627", tokenEnv: "KIMI_WEB_TOKEN", env: ENV,
+    userEnvReader: async () => { readerCalled += 1; return "hkcu-fallback-token-value"; },
+    fetchFn: fetchReturning({ captureInto: captured }),
+  });
+  assert.equal(readerCalled, 0, "env 命中时根本不读 HKCU");
+  assert.equal(captured.options.headers.Authorization, "Bearer test-secret-token-value-do-not-leak");
+
+  const captured2 = {};
+  await probeIdentity({
+    url: "http://127.0.0.1:58627", tokenEnv: "KIMI_WEB_TOKEN", env: { KIMI_WEB_TOKEN: "" },
+    userEnvReader: async () => "hkcu-fallback-token-value",
+    fetchFn: fetchReturning({ captureInto: captured2 }),
+  });
+  assert.equal(captured2.options.headers.Authorization, "Bearer hkcu-fallback-token-value", "空串 env 同样走回退");
+});
+
+test("probe TD208: reader 抛错按缺失处理 → exit 1 固定文案，值/错误绝不回显", async () => {
+  let called = false;
+  const r = await probeIdentity({
+    url: "http://127.0.0.1:1", tokenEnv: "KIMI_WEB_TOKEN", env: {},
+    userEnvReader: async () => { throw new Error("registry read failed with secret-token-value"); },
+    fetchFn: async () => { called = true; },
+  });
+  assert.equal(r.exitCode, 1);
+  assert.match(r.stderr, /credential missing/);
+  assert.equal(r.stderr.includes("secret-token-value"), false, "reader 错误文本绝不透传");
   assert.equal(called, false);
 });
 

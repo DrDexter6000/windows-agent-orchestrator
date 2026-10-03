@@ -5,8 +5,12 @@
 // fetch 非 2xx 不 reject 等边界全部由本脚本承担）。
 //
 // 边界（镜像 src/backends/kimiWeb.js 的生产纪律）：
-//   - 凭据只从 env 读（缺省变量名 KIMI_WEB_TOKEN，--token-env 可覆盖），非空
-//     检查；值绝不进 argv / 输出 / 错误文本。
+//   - 凭据解析两级（TD-208，2026-10-03）：传入 env（缺省 process.env，变量名
+//     缺省 KIMI_WEB_TOKEN，--token-env 可覆盖）→ Windows Current-User 作用域
+//     （HKCU，经 src/application/credentialReadiness.js 的 readWindowsUserEnv
+//     单一实现——与 WAO 派发链同一权威，绝不镜像第二份读法）。值绝不进 argv /
+//     输出 / 错误文本。二级回退消除"setx 写入不进长命 shell → 有凭据环境还得
+//     手工注入"的复发摩擦（Owner 2026-10-03 点名）。
 //   - 请求禁跟随重定向（redirect:"manual"）+ 10s 超时；Authorization 头只在
 //     进程内存构造。
 //   - 输出只有受约束的身份字段（类型 + 长度检查的字符串），绝不输出原始正文
@@ -21,6 +25,9 @@
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_FIELD_LEN = 120;
+
+// TD-208：Windows 用户作用域读取走 WAO 核心的单一实现（绝不镜像第二份）。
+import { readWindowsUserEnv } from "../../src/application/credentialReadiness.js";
 
 function boundedString(value) {
   if (typeof value !== "string" || value.length === 0) return null;
@@ -55,7 +62,7 @@ export function parseArgs(argv) {
   return out;
 }
 
-export async function probeIdentity({ url, tokenEnv, env = process.env, fetchFn = fetch, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+export async function probeIdentity({ url, tokenEnv, env = process.env, userEnvReader = readWindowsUserEnv, fetchFn = fetch, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   // 仅 loopback：明文 HTTP + Bearer 头发给非回环地址会把凭据送上网络——
   // serveUrl 指向非回环时拒绝执行（fix-closed，不降级重试）。
   let host = null;
@@ -64,9 +71,17 @@ export async function probeIdentity({ url, tokenEnv, env = process.env, fetchFn 
   if (!loopback) {
     return { exitCode: 1, stderr: `refusing non-loopback target: ${url} (plaintext HTTP + bearer to a non-loopback host would put the credential on the network)` };
   }
-  const token = env[tokenEnv];
+  // TD-208 两级解析：env → HKCU（同一 readWindowsUserEnv 权威；reader 抛错按
+  // 缺失处理，绝不回显值）。两级都空才拒绝。
+  let token = env[tokenEnv];
   if (typeof token !== "string" || token.length === 0) {
-    return { exitCode: 1, stderr: `credential missing: env ${tokenEnv} not set (operator or authorized deputy must run this in a credentialed environment)` };
+    try {
+      const userValue = await userEnvReader(tokenEnv);
+      if (typeof userValue === "string" && userValue.length > 0) token = userValue;
+    } catch { /* reader failure → treat as missing */ }
+  }
+  if (typeof token !== "string" || token.length === 0) {
+    return { exitCode: 1, stderr: `credential missing: env ${tokenEnv} not set and no Windows user-scope value (operator or authorized deputy must run this in a credentialed environment)` };
   }
   const base = { outcome: null, target: `${url.replace(/\/+$/, "")}/openapi.json`, authObserved: true };
   let response;
