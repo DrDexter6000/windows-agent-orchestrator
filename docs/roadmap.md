@@ -311,11 +311,21 @@ WAO 新增独立 `DeepSeekHarnessBackend`，通过用户提供的 DSH SDK stdio 
 
 边界如实记录：TD-181（组合测试间歇超时）仍开放未归因——本次绿灯认证冻结代码，不认证机器稳定性。2026-09 各中间实验候选（cap4 并发、最重文件单独波、大文件拆分、47c3 报告减负、749d650 波收尾等）均未采用，其逐条进度未回填本表，证据见 `.wao/runs/` 与 git 历史。
 
-### Post-M12 candidate：MCP Host-visible 上下文测量与渐进披露审计（计划已冻结，未实施）
+### Post-M12 candidate：MCP Host-visible 上下文测量与渐进披露审计（测量轮已激活，2026-10-03 Owner 批准）
 
-下一轮只做**无损测量与候选实验**，不以当前全量 `tools/list` wire 直接代替 Lead 的真实上下文成本：分别记录 Codex、Claude Code、Kimi Code Host 的完整 wire、实际 Host-visible 投影与各自 tokenizer token，并独立统计累计响应成本（`text`、`structuredContent`、`semanticNotes` 与 drilldown）。计划冻结时基线为 22 tools / 75,965 wire bytes（M13 后工具面为 23，实施时以 toolSurface SSOT 现值重测）；o200k 估算 18,372 tokens，其中 output schemas 约占 69.5%，但一次 Codex Host 探针实际只向模型投影 `{name,description,inputSchema}`，约 20,798 bytes / 5,030 tokens，因此该差异必须形成 Host-neutral 矩阵，不能由单一 Host 外推。
+**起因**：外部论据（Pi 0.99 codemode 讨论，@jiangkoumo_ 2026-10-01）+ 双席会审（consult_20261003074356720tyln23：auditor run_20261003074356722ahp7jp / coder_mm run_20261003074358956q932vy）——裁定「部分效仿」：学减 token/减往返目标，不做零注入与内嵌沙箱（红线见下）。
 
-候选实验只比较：现状、三句式紧凑 description、把少用语义说明移至 response/resource，以及仅在证明无损时减少派生枚举重复；验收要求 22 个工具始终可调用、完整 input schema 与关键 Lead 决策字段不丢、Fresh Host 能在不预读文档时正确首派并可依 response 自助恢复。禁止 lite/full profile、动态工具隐藏、通用 meta-tool、跨工具 `$defs`/`$ref`，也不先删 output schema 或放宽枚举。先建立 `hostVisibleBudget`、`descriptionBudget`、`wireBudget` 三类预算，再由 Owner 决定是否实施任何瘦身。
+**确定性基线（2026-10-03 实测，`scripts/measure-mcp-surface.mjs`，23 工具真 stdio wire，零面变更）**：
+
+- fullWire **84,528 B**（≈20,417 tok 估算）；hostVisible（`{name,description,inputSchema}`，M12-16 实测的 Codex 投影形状）**21,854 B ≈ 5,285 tok 估算**
+- 拆分：description 11,837 B（**投影的 54%——最大杠杆**）/ inputSchema 9,680 B / outputSchema 57,933 B（**wire 的 68.6%，但不进 Codex 投影**）/ annotations 2,051 B
+- **枚举去重靶为空**：全 inputSchema 仅 1 组重复枚举、冗余 47 B——原候选「减少派生枚举重复」**据测量裁撤**（不再触碰哈希冻结层）
+- token 为估算（沿用冻结比率 4.14 B/tok）；真实分词计数与 Claude Code/Kimi Code 投影形状待三宿主活探针（smoke 级、耗 token、不进 npm test）
+- 历史对照：22 工具时代 fullWire 75,965 B / o200k 估 18,372 tok（M12-16 轮）；M13 加 `run_consult` 后 wire +8,563 B（+11.3%）、投影 +1,056 B（+5.1%）
+
+**三类预算初值（= 当前实测，ratchet 语义：只降不升，动帽须 Owner）**：`hostVisibleBudget` 21,854 B · `descriptionBudget` 11,837 B · `wireBudget` 84,528 B。
+
+候选实验（测量后修订）只比较：**三句式紧凑 description（主靶）**、把少用语义说明移至 response/resource；验收要求 23 个工具始终可调用、完整 input schema 与关键 Lead 决策字段不丢、Fresh Host 能在不预读文档时正确首派并可依 response 自助恢复。禁止 lite/full profile、动态工具隐藏、通用 meta-tool、跨工具 `$defs`/`$ref`、先删 output schema、放宽枚举、控制面内嵌代码沙箱、自动化批量验收/重派（会审 Q4 红线）。任何 description/schema 变更须 `npm run gen:surface` 重生成 + wire-cap 测试 refreeze 评估 + SKILL 计数句同步。
 
 ### 本机 `coder_hq` GLM-5.3 operation acceptance（2026-08-14）
 
