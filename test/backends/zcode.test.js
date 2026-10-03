@@ -919,23 +919,61 @@ test("zcode ⑥c: 反例①——首 part 第 12 拍才出现（前 11 拍零 pa
 // 在场也不豁免——宽松只保护零 part 阶段，不保护已有产出后的真停滞。产出形状取
 // 本轮 live 实测的步间形状（echo + step-start，run_20261001203009794bb6add 失败
 // 时间线的前缀），只是静默永不终结——门必须在第 60 个无进展拍收口。
-test("zcode ⑥d: 反例②——有 part 后静默满 60 拍 → 仍 failed（silentTimeout 在场也不豁免停滞门）", async () => {
-  // 第 3 拍 echo+step-start 现身（anyNewPart=true），此后恒不变；silentTimeout
-  // 给足 60s（绝不触发）。
+test("zcode ⑥d (TD-197①): 有 part 后静默段 ≥ 自适应预算（300s floor，恰不紧于旧 60 拍×5s=300s 门）才收口；silentTimeout 在场也不豁免停滞门", async () => {
+  // 基线拍 n=1、零 part n=2、n=3 echo+step-start（prime 基线，t=90s），此后恒
+  // 不变；假钟 +30s/拍——静默 300s ≥ floor 时收口（无观测 → 预算 = floor）。
+  let fakeNow = 0;
+  const clock = () => fakeNow;
   const { handle, child, peer } = await runScenario({
     peerOptions: {
       messages: (n) => (n <= 2 ? [] : [userMsg("do the task"), stepStartMsg()]),
     },
   });
-  const events = await collect(handle, { pollInterval: 2, silentTimeout: 60_000 });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    silentTimeout: 6_000_000,
+    stallClock: clock,
+    onPollTick: () => { fakeNow += 30_000; },
+  });
   const done = events.at(-1);
   assert.equal(done.reason, "failed");
   assert.match(done.error, /turn stalled/, "已有产出后的真停滞仍由停滞门有界收口");
-  assert.match(done.error, /for 60 consecutive polls/, "门限值 = NO_PROGRESS_POLL_LIMIT = 60（改动须有意识更新本钉）");
+  assert.match(done.error, /adaptive budget/, "TD-197① 自适应预算合同");
+  assert.match(done.error, /300000ms floor/, "floor = NO_PROGRESS_FLOOR_MS = 300000（改动须有意识更新本钉）");
   assert.ok(!JSON.stringify(events).includes("silent timeout"), "silentTimeout 不豁免已有产出后的停滞门");
-  // 确定性拍号：基线 + 第 2 拍仍零 part + 第 3 拍产出（进展，计数清零）+ 恰 60 个
-  // 无进展拍（n=4..63）→ 第 63 拍收口。
-  assert.equal(peer.polls(), 63);
+  // 确定性拍号：prime t=90（n=3）→ 静默 30×(n-3) ≥ 300 → n=13 收口。
+  assert.equal(peer.polls(), 13);
+  child.kill();
+});
+
+test("zcode ⑥d TD-197① 自放大存活（2026-10-02 误杀形态回归钉）：先验 120s gap → 预算 360s，320s 静默（旧 300s 门必杀）→ step-finish 正常完成", async () => {
+  // 复刻 run_20261002144448432xikf8k 的形态：先验间隙 120s（n=9 处 parts 增长，
+  // t=180-60=120s → 预算 = max(300, 3×120)=360s），随后恒静默到 n=25（t=500，
+  // 静默 320s > 旧门 300s【旧门在 n=24、静默 300s 即杀】、< 360s 预算）才
+  // step-finish → 必须放行完成。假钟 +20s/拍。
+  let fakeNow = 0;
+  const clock = () => fakeNow;
+  const { handle, child, peer } = await runScenario({
+    peerOptions: {
+      messages: (n) => {
+        if (n <= 2) return [];
+        if (n === 3) return [userMsg("do the task"), stepStartMsg()];
+        // n=9 parts 增长（先验 gap 120s 的进度点）；此后保持 3 parts 恒定
+        // （回落会触发快照缩短 fail-closed——那不是本钉的对象）。
+        if (n >= 9 && n < 25) return [userMsg("do the task"), stepStartMsg(), stepStartMsg()];
+        if (n >= 25) return [userMsg("do the task"), stepStartMsg(), assistantMsg("done text", "stop")];
+        return [userMsg("do the task"), stepStartMsg()];
+      },
+    },
+  });
+  const events = await collect(handle, {
+    pollInterval: 2,
+    stallClock: clock,
+    onPollTick: () => { fakeNow += 20_000; },
+  });
+  const done = events.at(-1);
+  assert.equal(done.reason, "completed", "320s 批间静默（旧门必杀点之后）在 360s 自适应预算下放行到正常完成");
+  assert.ok(peer.polls() >= 25);
   child.kill();
 });
 

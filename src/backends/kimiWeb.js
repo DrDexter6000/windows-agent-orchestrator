@@ -108,6 +108,7 @@ import {
   toolResultEvent,
 } from "../runEvent.js";
 import { isProcessPlaceholderSessionId } from "./processBackend.js";
+import { createStallTracker } from "./stallBudget.js";
 
 // role/task 分隔符对齐 kimiCode.js 的 ROLE_TASK_SEPARATOR（"\n\n---\n\n"）——
 // 两个 prompt 级通道的 backend 用同一分隔形状，避免两套事实并存。
@@ -124,7 +125,24 @@ const TRANSCRIPT_AGENT_ID = "main";
 // silentTimeout 缺席的防御形状（turn 永不出现）仍被该出口有界覆盖，绝不无限
 // 等待。同一阈值另作 R9 F4 闭集外 state 的独立有界计数（增长不清零——见
 // streamEvents 分支注释）。
-const NO_PROGRESS_POLL_LIMIT = 8;
+// R9 F3/F4 形状漂移界（原 NO_PROGRESS_POLL_LIMIT 的存留职责）：F3 = 无 turn
+// 兜底（仅 silentTimeout 缺席的防御形状生效——正常路径由 silentTimeout 界定）、
+// F4 = 闭集外 state 的连续拍界（等待增长无意义，形状问题不是进度问题）。两者
+// 都不是"进度停滞"检测，维持 8 拍紧界——TD-197① 拆分（auditor Q5）。
+const SHAPE_DRIFT_POLL_LIMIT = 8;
+
+// TD-197①（2026-10-03，双席会审 v2）：无进展停滞门（turn 在场、state 在受支持
+// 闭集内、signature 连续不变）改观测自适应时间预算。原 8 拍（≈8s）门当日三次
+// 误杀刚提交、仍在服务端排队/慢启动的合法 turn（run_202610030913306635cko6a /
+// run_20261003113532551q8oyps / run_202610031138135415ap6e2——三例全部
+// session.created 在场、零 auth 错，token 从未缺位）。floor 抬到 60s 直接治
+// 排队冷启动（auditor 对 v1 的 FAIL：自适应学不到被它杀掉的第一次），预算随
+// 本轮已恢复的最大静默间隙 ×3 自放大、240s 硬顶保有界（顶约束静默段而非
+// 墙钟——每拍另有请求/重试/睡眠叠加）。显式失败（failed/cancelled/空答案）
+// 先于本门处理，不被拖慢。
+const NO_PROGRESS_FLOOR_MS = 60_000;
+const NO_PROGRESS_FACTOR = 3;
+const NO_PROGRESS_CEILING_MS = 240_000;
 
 // completed 轮 usage 求和的字段映射（kimi usage 四计数 → metrics 轴）：
 // inputOther→input、output→output、inputCacheRead→cacheRead、
@@ -329,6 +347,8 @@ export class KimiWebBackend {
         silentTimeout: opts?.silentTimeout,
         onPollTick: opts?.onPollTick,
         turnAnchor,
+        // TD-197① test seam: injectable monotonic clock for the stall budget.
+        stallClock: opts?.stallClock,
       }),
       // 上游无会话级中止通道（见文件头停止杠杆声明）：抛固定错误（原因由控制面
       // 记入 run.aborted.error；cleanup 的停止验证对 kimi-web 形状不可观察 → 记
@@ -608,7 +628,7 @@ export class KimiWebBackend {
    * assistant text → metrics → done(completed)。
    */
   async *streamEvents(agent, sessionId, {
-    signal, interval = 1000, silentTimeout, onPollTick, turnAnchor,
+    signal, interval = 1000, silentTimeout, onPollTick, turnAnchor, stallClock,
   } = {}) {
     // 归属键：spawn 传入的 promptId（非空字符串才可匹配；缺失/直调防御形状
     // 匹配不到任何 turn ⇒ 由 silentTimeout / 无进展出口有界收口，绝不发明归属
@@ -618,12 +638,20 @@ export class KimiWebBackend {
       : null;
     const anchorTime = typeof turnAnchor?.submitAt === "number" ? turnAnchor.submitAt : Date.now();
     // 无进展计数：turn 首见拍建立基线（清零——turn 出现 = 进展，提交滞后的解除
-    // 不算停滞）；此后 signature（state + steps/frames 结构投影）不变即累进，
-    // ≥NO_PROGRESS_POLL_LIMIT → 有界收口（R9 F3 后无 turn 分支只在 silentTimeout
-    // 缺席时才累进此计数——见分支内注释）。
+    // 不算停滞）；此后 signature（state + steps/frames 结构投影）不变即累进。
+    // TD-197① 拆分：该计数现只喂 F3（无 turn 兜底，silentTimeout 缺席时）；
+    // 受支持非终态的"进度停滞"改由下方 tracker 的时间预算判定。
     let noProgressPolls = 0;
     let turnSeen = false;
     let lastSignature = null;
+    // TD-197①：无进展停滞门的时间化（shared stallBudget 纯算法，单调钟；
+    // stallClock 为测试注入缝，缺省 performance.now()）。
+    const stallTracker = createStallTracker({
+      floorMs: NO_PROGRESS_FLOOR_MS,
+      ceilingMs: NO_PROGRESS_CEILING_MS,
+      factor: NO_PROGRESS_FACTOR,
+      ...(typeof stallClock === "function" ? { now: stallClock } : {}),
+    });
     // R9 F4：闭集外 state 的独立有界计数——turn 在场且 state 不在支持闭集的
     // **连续**拍数（turn 消失或 state 回闭集内即清零）。steps/frames 增长**不**
     // 清零此计数（与普通停滞门分工：那守"受支持的非终态停滞"，这守"状态本身
@@ -660,10 +688,10 @@ export class KimiWebBackend {
         // 生效：turn 永不出现也有界，绝不无限等待。
         if (!silentTimeout) {
           noProgressPolls += 1;
-          if (noProgressPolls >= NO_PROGRESS_POLL_LIMIT) {
+          if (noProgressPolls >= SHAPE_DRIFT_POLL_LIMIT) {
             yield doneEvent(
               "failed",
-              `turn stalled (no progress): turn not observed for ${NO_PROGRESS_POLL_LIMIT} consecutive polls (bounded exit, silentTimeout absent)`,
+              `turn stalled (no progress): turn not observed for ${SHAPE_DRIFT_POLL_LIMIT} consecutive polls (bounded exit, silentTimeout absent)`,
             );
             return;
           }
@@ -733,11 +761,11 @@ export class KimiWebBackend {
       // queued|running 分支/上方终态分支）即回正常路径（计数清零）。
       if (state !== "queued" && state !== "running") {
         unsupportedStatePolls += 1;
-        if (unsupportedStatePolls >= NO_PROGRESS_POLL_LIMIT) {
+        if (unsupportedStatePolls >= SHAPE_DRIFT_POLL_LIMIT) {
           yield doneEvent(
             "failed",
             `unsupported turn state: ${String(state)} (outside the supported closed set `
-            + `queued|running|completed|failed|cancelled — bounded exit after ${NO_PROGRESS_POLL_LIMIT} `
+            + `queued|running|completed|failed|cancelled — bounded exit after ${SHAPE_DRIFT_POLL_LIMIT} `
             + "consecutive polls; growth does not extend this bound because the client already "
             + "knows this state is unsupported)",
           );
@@ -747,21 +775,27 @@ export class KimiWebBackend {
         continue;
       }
       unsupportedStatePolls = 0;
-      // queued | running（受支持的非终态）：等（绝不猜终态）。无进展兜底 =
-      // signature（state + steps/frames 结构投影）连续 NO_PROGRESS_POLL_LIMIT
-      // 拍不变 → done(failed)；首见拍建立基线（清零），steps/frames 增长或
-      // state 变化任一发生即清零。
+      // queued | running（受支持的非终态）：等（绝不猜终态）。无进展兜底
+      // （TD-197① 观测自适应时间门）：signature（state + steps/frames 结构
+      // 投影）变化/首见 = 进度（tracker.noteProgress + 计数清零）；静默段 ≥
+      // budgetMs → done(failed)。budget = min(240s, max(60s, 3 × 本轮已恢复的
+      // 最大静默间隙))——floor 60s 直接保护刚提交 turn 的排队/慢启动（当日三
+      // 杀实录见常量注释），轮内节奏自放大，硬顶保有界（顶约束静默段而非墙钟）。
       const signature = turnSignature(turn);
       if (!turnSeen || signature !== lastSignature) {
         turnSeen = true;
         lastSignature = signature;
         noProgressPolls = 0;
+        stallTracker.noteProgress();
       } else {
         noProgressPolls += 1;
-        if (noProgressPolls >= NO_PROGRESS_POLL_LIMIT) {
+        if (stallTracker.stallMs() >= stallTracker.budgetMs()) {
+          const d = stallTracker.diagnostics();
           yield doneEvent(
             "failed",
-            `turn stalled (no progress): turn state unchanged and no steps/frames growth for ${NO_PROGRESS_POLL_LIMIT} consecutive polls (bounded exit)`,
+            `turn stalled (no progress): silent stretch ${Math.round(stallTracker.stallMs())}ms exceeded adaptive budget `
+              + `${Math.round(d.floorMs)}ms floor / ×${d.factor} / ${Math.round(d.ceilingMs)}ms ceiling; `
+              + `max recovered gap this turn ${Math.round(d.maxObservedGapMs)}ms (bounded exit)`,
           );
           return;
         }

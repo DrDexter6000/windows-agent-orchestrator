@@ -27,6 +27,7 @@
       "isolation-infra/isolation-integration.test.js",
       "backends/kimiCode.test.js",
       "backends/kimiWeb.test.js",
+      "backends/stallBudget.test.js",
       "backends/zcode.test.js",
       "backends/providerSessionReuse.test.js",
       "isolation-infra/layering.test.js",

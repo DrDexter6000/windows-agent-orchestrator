@@ -139,6 +139,7 @@ import {
 import { inheritedEnvNames } from "../envPolicy.js";
 import { createSecretRedactor, isSecretEnvName } from "../secretRedaction.js";
 import { buildChildEnv, compileInvocation, isProcessPlaceholderSessionId } from "./processBackend.js";
+import { createStallTracker } from "./stallBudget.js";
 
 const BACKEND_NAME = "zcode";
 
@@ -165,7 +166,24 @@ export const ZCODE_ROLE_TASK_SEPARATOR = "\n\n---\n\n";
 // 任务的多个正常步间 reasoning 会累计击穿（如 10 步 × 12s ≈ 120s 即误杀），
 // 「总时长预算」则会杀掉带持续产出的长轮——单一「单次静默间隙」门不引入这两类
 // 新误杀面，语义最诚实（真死轮的恢复延迟 60s 可接受：与零 part 预算同数量级）。
-const NO_PROGRESS_POLL_LIMIT = 60;
+//
+// TD-197①（2026-10-03，双席会审 v2 + 实测校准修正）：旧 60 拍门（生产
+// pollInterval=5000ms ⇒ 实际 300s 静默预算——会审 brief 曾误写"≈60s"，本注释
+// 为修正后事实）一周内四次误杀真实工作（2026-10-02 ×3 报告/打包阶段 + 
+// 2026-10-03 run_20261003093816570xtkvw4）。**实测校准**（turn 段事件间隙，
+// 真实转录）：成功完成的同任务重试 run_20261003094617447bqyhql turn 内合法
+// 静默最大 **276s**（次大 215s/119s——GLM-5.3 撰写大文件体时的批间静默），
+// 旧 300s 门恰压在观测最大值上；10-02 被杀 run_20261002144448432xikf8k 先验
+// gap 120s。故取 **floor=300s（恰不紧于旧门，永不收紧）×3 自放大 / 600s 硬顶**
+// ——预算区间 [300s,600s] 严格宽于旧门：先验 120s gap 的 run 预算 360s，其
+// 301s 终末静默（旧门杀点）存活；观测 276s 的 run 预算封顶 600s。有界性不破
+// 坏（真停滞最迟静默段 ≥600s 收口；顶约束静默段而非墙钟——每拍另有请求/
+// 重试/睡眠叠加，不宣称严格墙钟上界）。进度定义不变（parts 增长）；零 part
+// 门与 silentTimeout 优先级不变。auditor 会审数值（floor 120s）基于错误的
+// 1s-间隔前提，已被本实测校准取代（Lead 裁定，会审记录在案）。
+const NO_PROGRESS_FLOOR_MS = 300_000;
+const NO_PROGRESS_FACTOR = 3;
+const NO_PROGRESS_CEILING_MS = 600_000;
 
 // 零 part 思考预算（silentTimeout 缺席时的兜底上界）：连续 120 拍无任何 part →
 // done(failed)。取值沿用上轮裁定（首轮 live 证据 run_20261001195259045cle1ft：
@@ -986,6 +1004,8 @@ export class ZcodeBackend {
         interval: opts.pollInterval,
         silentTimeout: opts.silentTimeout,
         onPollTick: opts.onPollTick,
+        // TD-197① test seam: injectable monotonic clock for the stall budget.
+        stallClock: opts.stallClock,
         markTerminal: () => { terminalEmitted = true; },
       }),
       abort: () => {
@@ -1017,7 +1037,7 @@ export class ZcodeBackend {
    */
   async *_streamEvents({
     wire, child, sessionId, baselineParts, sentAt, sentContent,
-    signal, interval, silentTimeout, onPollTick, markTerminal,
+    signal, interval, silentTimeout, onPollTick, markTerminal, stallClock,
   }) {
     const pollInterval = Number.isFinite(interval) && interval > 0
       ? interval
@@ -1025,6 +1045,16 @@ export class ZcodeBackend {
     let lastPartsCount = baselineParts;
     let noProgressPolls = 0;
     let anyNewPart = false;
+    // TD-197①：no-progress 门的时间化（shared stallBudget 纯算法）。noProgressPolls
+    // 仍保留——零 part 思考预算（ZERO_PART_POLL_LIMIT 拍）继续按拍计；turn 内
+    // 停滞改按"静默段时长 ≥ 自适应预算"判（单调钟，与 pollInterval 解耦；
+    // stallClock 为测试注入缝，缺省 performance.now()）。
+    const stallTracker = createStallTracker({
+      floorMs: NO_PROGRESS_FLOOR_MS,
+      ceilingMs: NO_PROGRESS_CEILING_MS,
+      factor: NO_PROGRESS_FACTOR,
+      ...(typeof stallClock === "function" ? { now: stallClock } : {}),
+    });
     // TD-199 增量投影状态：台账（partIndex → 双状态）+ 已见 parts 高水位（缩短
     // 检测——追加语义被破坏时 fail-closed，绝不静默把错位序号当本轮证据）。
     const toolLedger = new Map();
@@ -1095,6 +1125,7 @@ export class ZcodeBackend {
           lastPartsCount = parts.length;
           anyNewPart = true;
           noProgressPolls = 0;
+          stallTracker.noteProgress();
         } else {
           noProgressPolls += 1;
         }
@@ -1128,11 +1159,12 @@ export class ZcodeBackend {
         //     scorecard drill run_20261001195259045cle1ft 转录在案）：silentTimeout
         //     在场 → 只以 silentTimeout 为界；缺席 → 宽松思考预算
         //     ZERO_PART_POLL_LIMIT 拍有界，绝不无限等待。
-        //   - 已有产出后的停滞（anyNewPart=true）——NO_PROGRESS_POLL_LIMIT 拍门
-        //     （60 拍：步间 reasoning 实测 8-14s，上游 part 或整步刷出不逐拍暴露，
-        //     8 拍门曾误杀——run_20261001203009794bb6add；取值依据见常量注释），
-        //     真停滞仍收口。
-        const stalled = anyNewPart && noProgressPolls >= NO_PROGRESS_POLL_LIMIT;
+        //   - 已有产出后的停滞（anyNewPart=true）——TD-197① 观测自适应时间门：
+        //     静默段 ≥ budgetMs 才收口。budget = min(300s, max(120s, 3 × 本轮已
+        //     恢复的最大静默间隙))——首段静默由 120s floor 直接保护（一周四次
+        //     误杀实录见常量注释），轮内批间节奏自放大，硬顶保有界性（顶约束
+        //     静默段而非墙钟）。真停滞仍收口。
+        const stalled = anyNewPart && stallTracker.stallMs() >= stallTracker.budgetMs();
         if (!anyNewPart && silentTimeout && (Date.now() - sentAt) > silentTimeout) {
           finish();
           yield doneEvent(
@@ -1151,9 +1183,12 @@ export class ZcodeBackend {
         }
         if (stalled) {
           finish();
+          const d = stallTracker.diagnostics();
           yield doneEvent(
             "failed",
-            `zcode turn stalled (no new message parts for ${NO_PROGRESS_POLL_LIMIT} consecutive polls — bounded exit)`,
+            `zcode turn stalled (silent stretch ${Math.round(stallTracker.stallMs())}ms exceeded adaptive budget `
+              + `${Math.round(d.floorMs)}ms floor / ×${d.factor} / ${Math.round(d.ceilingMs)}ms ceiling; `
+              + `max recovered gap this turn ${Math.round(d.maxObservedGapMs)}ms — bounded exit)`,
           );
           return;
         }

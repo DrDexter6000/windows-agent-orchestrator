@@ -914,7 +914,7 @@ test("kimi-web ⑤ ④: 提交滞后——首拍无本轮 turn（他人 turn 在
   assert.ok(Date.now() - start < 2000);
 });
 
-test("kimi-web ⑤ ⑤a: stalled——running 连续 8 拍 state 不变且 steps/frames 无增长 → bounded fail（done(failed, 'turn stalled (no progress)')）", async () => {
+test("kimi-web ⑤ ⑤a (TD-197①): queued/慢启动静默不再被 8 拍门误杀；静默段 ≥ 自适应预算（60s floor）才 bounded fail", async () => {
   const stalled = turnItem({
     state: "running",
     endedAt: null,
@@ -922,23 +922,36 @@ test("kimi-web ⑤ ⑤a: stalled——running 连续 8 拍 state 不变且 steps
     steps: [stepItem({ state: "running", frames: [] })],
   });
   const { handler, markSpawned, polls } = turnScriptServer("session_st", { script: [[stalled]] });
-  const { fetchImpl } = kimiServer(handler);
+  // TD-197① 时钟注入缝：假钟在每拍 transcript 轮询请求时推进 10s（停滞轮不产
+  // 出事件，钟必须由轮询驱动而非事件驱动）。首拍 turn 现身=进展（noteProgress
+  // 基线）；此后每拍静默 +10s——第 6 拍 50s < 60s floor 仍存活（旧 8 拍门在第
+  // 9 拍早已误杀），第 7 拍 60s ≥ floor 才收口。
+  let fakeNow = 0;
+  const clock = () => fakeNow;
+  const clockedHandler = (url) => {
+    if (url.includes("/transcript")) fakeNow += 10_000;
+    return handler(url);
+  };
+  const { fetchImpl } = kimiServer(clockedHandler);
   const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
   const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
   markSpawned();
   const events = [];
   const start = Date.now();
-  for await (const ev of handle.events(undefined, { pollInterval: 5 })) {
+  for await (const ev of handle.events(undefined, { pollInterval: 1, stallClock: clock })) {
     events.push(ev);
   }
   assert.equal(events.length, 1, "停滞轮恰一个 done 事件（零 message）");
-  assert.equal(events[0].reason, "failed");
-  assert.match(events[0].error, /turn stalled \(no progress\)/);
-  assert.match(events[0].error, /state unchanged and no steps\/frames growth for 8 consecutive polls/);
-  // 首见拍建立基线（turn 出现 = 进展）+ 8 拍零增长 → 第 9 拍退出。
-  assert.equal(polls(), 9, "首拍基线 + 连续 8 拍零增长后退出");
-  assert.ok(Date.now() - start < 2000);
+  const done = events[0];
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /turn stalled \(no progress\)/);
+  assert.match(done.error, /adaptive budget/);
+  assert.match(done.error, /60000ms floor/);
+  assert.equal(polls(), 7, "首拍基线 + 6 拍 50s 内存活 + 第 7 拍 60s≥floor 收口");
+  assert.ok(Date.now() - start < 2000, "假钟驱动，零真实等待");
 });
+
+
 
 test("kimi-web ⑤ ⑤b: 有增长 → 计数清零不误触发——每拍 frames 文本增长（>8 拍仍在写），第 9 拍 completed 正常完成（绝不 no-progress 误杀）", async () => {
   // 每拍文本 +1 字符（signature 变化 = 进展 = 清零）；若无清零，第 8 拍已误触
@@ -2248,4 +2261,51 @@ test("kimi-web ⑫: envPolicy 把 tokenEnv 纳入必需凭据面（readiness 门
   const { requiredCredentialNames } = await import("../../src/envPolicy.js");
   const agent = normalizeAgent("coder_kimiweb", makeAgent());
   assert.deepEqual(requiredCredentialNames(agent), [TOKEN_ENV]);
+});
+
+test("kimi-web ⑤ TD-197① 预算自放大（auditor FAIL 修复回归钉）：观测间隙抬升预算，更长的同轮静默不再误杀", async () => {
+  // 时间线（假钟在每个 transcript 请求时 +30s；spawn 期有恰好一次 transcript
+  // 调用，见 [dbg] 实测）：spawn 调用 t=30（unspawned → preTurns，不建基线）；
+  // poll1 t=60 turn 现身 frames "x"（PRIME——首见建立基线，不算静默）；
+  // poll2 t=90 frames "xx"（进展——已恢复静默 30s，成为观测值 → 预算 =
+  // max(60s, 3×30s)=90s；固定 60s 门在预算上与之区分）；poll3 t=120 静默 30s、
+  // poll4 t=150 静默 60s（固定 60s 门此刻即杀——本钉的对照面）、poll5 t=180
+  // 静默 90s < 90s？否——恰 ≥ 90s 收口。若预算不放大：poll4 已杀；若放大：
+  // poll5 收口。断言 polls=5 且 maxGap=30000ms 双证。
+  const growing = (poll) => [turnItem({
+    state: "running",
+    endedAt: null,
+    durationMs: null,
+    steps: [stepItem({ state: "running", frames: [{ kind: "text", text: "x".repeat(poll), role: "assistant" }] })],
+  })];
+  const stalled = [turnItem({
+    state: "running",
+    endedAt: null,
+    durationMs: null,
+    steps: [stepItem({ state: "running", frames: [{ kind: "text", text: "xx", role: "assistant" }] })],
+  })];
+  const { handler, markSpawned, polls } = turnScriptServer("session_ad", {
+    script: [growing, growing, stalled],
+  });
+  let fakeNow = 0;
+  const clock = () => fakeNow;
+  const clockedHandler = (url) => {
+    if (url.includes("/transcript")) fakeNow += 30_000;
+    return handler(url);
+  };
+  const { fetchImpl } = kimiServer(clockedHandler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 1, stallClock: clock })) {
+    events.push(ev);
+  }
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /adaptive budget/);
+  assert.match(done.error, /max recovered gap this turn 30000ms/, "30s 已恢复静默成为观测值");
+  // poll1 基线（60）+ poll2 进展（90，gap 30 记录）+ poll3 静默 30（120）+
+  // poll4 静默 60（150——固定 60s 门的杀点，对照面）+ poll5 静默 90（180）≥ 90 收口。
+  assert.equal(polls(), 5, "预算 3×30s=90s：poll4 的 60s 静默存活（固定门必杀），poll5 才收口");
 });
