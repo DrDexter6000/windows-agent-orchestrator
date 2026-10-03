@@ -17,11 +17,11 @@
 // 证据锚点：
 //   codex       — M9-7B Codex Lead dogfood（run_20260715122607417p5fbue，MCP 闭环）
 //   claude-code — M9-7B Claude Code/Fable Lead dogfood（run_20260715124226755a97el2）
-//   zcode       — 格式级入表（2026-10-02 实机勘察：本机在册插件 context7 的
-//                 .claude-plugin/plugin.json + 根级 .mcp.json 扁平 server 映射
-//                 {name:{command,args}}——非 mcpServers 嵌套形）。hostVerified=
-//                 false：真实宿主加载（注册机制+重启生效）未验证，走
-//                 AGENT_ONBOARDING 的 Owner 入表清单（备份→追加→重启→观察→还原）。
+//   zcode       — 真机验证（2026-10-03）：官方通路 `zcode plugins marketplace add
+//                 <本地名录>`（source kind=directory）+ `plugins install wao@wao-local`
+//                 装入；新会话实测加载全部 23 个工具（前缀 mcp__plugin_wao_wao__），
+//                 initialize 握手返回 wao-mcp 0.2.0。名录与插件包源在
+//                 ~/.zcode/wao-local-marketplace/（机器级资产，不进仓库）。
 
 /** host-neutral stdio entry → 该宿主形态的注册片段（纯映射，零 I/O）。 */
 function mcpServersShape(entry) {
@@ -71,11 +71,11 @@ export const HOST_DESCRIPTORS = [
     label: "ZCode",
     snippet: true,
     autoBind: false,
-    hostVerified: false, // 格式已核实（实机插件包勘察）；宿主加载未验证
-    stability: "unverified-host-load",
+    hostVerified: true, // 2026-10-03 真机验证（官方插件通路，23 工具实测加载）
+    stability: "stable",
     renderSnippet: zcodePluginShape,
     example: () =>
-      "按 AGENT_ONBOARDING 的 zcode 入表清单装为本地插件（.claude-plugin/plugin.json + .mcp.json），重启 ZCode 后观察 wao server——hostVerified 待真机加载验证",
+      "zcode plugins marketplace add <本地名录目录> && zcode plugins install wao@wao-local —— 名录与插件包内容见 mcp bind --host zcode 的 emit（接入步骤见 AGENT_ONBOARDING）",
   },
 ];
 

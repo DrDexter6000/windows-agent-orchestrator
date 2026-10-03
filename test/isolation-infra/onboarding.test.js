@@ -2530,12 +2530,12 @@ test("TD-191②: --host zcode（格式级入表）给指引且如实标注 hostV
     process.execPath, ["src/cli.js", "wao", "onboarding", "--host", h],
     { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, WAO_SKIP_VERSION_GUARD: "1" }, stdio: ["ignore", "pipe", "pipe"] },
   );
-  // zcode 已格式级入表：exit 0，输出含能力事实与 hostVerified=false 指引
+  // zcode 已真机验证入表：exit 0，输出含能力事实（hostVerified=true）
   const zc = runHost("zcode");
   const zcOut = ((zc.stdout || "") + (zc.stderr || "")).toString();
   assert.equal(zc.status, 0, "zcode 在表内（格式级）——应成功给指引");
   assert.match(zcOut, /host: zcode/, "应给 zcode 宿主指引块");
-  assert.match(zcOut, /hostVerified=false/, "必须如实标注宿主加载未验证");
+  assert.match(zcOut, /hostVerified=true/, "zcode 已真机验证（2026-10-03）——能力事实必须如实为 true");
   assert.match(zcOut, /AGENT_ONBOARDING/, "未验证宿主应指向 Owner 入表清单");
   // 真表外宿主：fail-closed + 指路
   const bad = runHost("not-a-host");

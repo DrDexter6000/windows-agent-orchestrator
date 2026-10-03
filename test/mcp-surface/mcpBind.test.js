@@ -1222,7 +1222,7 @@ test("TD-191②: zcode 描述符=格式级入表（hostVerified=false 如实）+
     const result = await bindWorkspace({ host: "zcode", cwd: dir });
     assert.equal(result.mode, "snippet");
     assert.equal(result.bound, false);
-    assert.equal(result.hostVerified, false, "zcode 宿主加载未验证——hostVerified 必须如实为 false");
+    assert.equal(result.hostVerified, true, "zcode 已真机验证（2026-10-03 官方插件通路，23 工具实测加载）");
     assert.equal(result.snippet.configShape, "zcode-local-plugin", "zcode 片段=插件包形态（非 mcpServers）");
     const pluginJson = result.snippet.files[".claude-plugin/plugin.json"];
     const mcpJson = result.snippet.files[".mcp.json"];
