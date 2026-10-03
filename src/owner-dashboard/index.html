@@ -45,6 +45,12 @@
         <button class="mode-btn" type="button" data-preset="24h">24h</button>
         <button class="mode-btn" type="button" data-preset="7d">7d</button>
         <span class="mode-sep" aria-hidden="true">·</span>
+        <!-- list ⇄ board: a PRESENTATION toggle over the SAME scope data. The
+             board view groups the current window's runs per seat; switching
+             views never refetches and never resets the chosen window. -->
+        <button class="mode-btn" type="button" data-view="list">list</button>
+        <button class="mode-btn" type="button" data-view="board">board</button>
+        <span class="mode-sep" aria-hidden="true">·</span>
         <label class="hist-field">
           <span class="visually-hidden">history from (local time)</span>
           <input id="hist-from" type="datetime-local" aria-label="History from (local time)">
@@ -56,12 +62,12 @@
         <button id="hist-apply" class="mode-btn" type="button">show history</button>
         <span id="range-label" class="range-label" aria-live="polite"></span>
       </div>
-      <div class="pane-head">
+      <div id="pane-head" class="pane-head">
         <input id="search" class="filter-input" type="search"
                placeholder="filter run id…" autocomplete="off"
                aria-label="Filter runs by run id">
       </div>
-      <div class="filters">
+      <div id="filters" class="filters">
         <label class="filter">
           <span class="filter-label">state</span>
           <select id="state-filter" aria-label="Filter runs by state">
@@ -86,6 +92,23 @@
       <ul id="run-list" class="run-list" role="list"></ul>
       <p id="runs-loading" class="empty muted" hidden>Loading…</p>
       <p id="runs-empty" class="empty muted" hidden>No runs.</p>
+
+      <!-- Seat board: a second presentation of the SAME current-scope /api/runs
+           data (list ⇄ board toggle in the mode bar). It adds no endpoint and
+           no fetch. The top stays honest: the current scope label, the window
+           truncation notice, and the standing caveat that an empty lane is not
+           evidence a seat is idle. The unknown lane is a data limitation, not
+           a real seat. All dynamic text is filled by app.js (textContent only).
+           -->
+      <div id="board" class="board" hidden>
+        <div class="board-top">
+          <span id="board-scope" class="board-scope"></span>
+          <span id="board-truncated" class="board-truncated" hidden></span>
+        </div>
+        <p id="board-caveat" class="board-caveat muted"></p>
+        <p id="board-status" class="board-status" hidden></p>
+        <div id="board-lanes" class="board-lanes" role="list"></div>
+      </div>
     </section>
 
     <section class="pane detail-pane" aria-label="Selected run">

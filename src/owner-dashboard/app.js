@@ -855,6 +855,237 @@ export async function runsFetchOnce(state, trigger, deps) {
   }
 }
 
+// ===== Board view pure helpers — seat swimlane board (DOM-free) =====
+//
+// The board is a SECOND PRESENTATION of the SAME /api/runs data the list view
+// shows (same scope: active auto-refresh or a bounded history window). It adds
+// NO endpoint, NO field, and NO fetch: switching list ⇄ board is presentation-
+// only — it never refetches, never resets the chosen window, and never touches
+// the selection. Runs are grouped per agentId into seat lanes.
+
+/** Fixed identity palette (the seat color track). The styles.css .seat-N
+ *  lane-track rules carry the SAME hexes in the SAME order; a test pins the
+ *  pairing so the two lists cannot drift. */
+export const BOARD_PALETTE = Object.freeze([
+  "#2b6cb0", "#1f6f3a", "#9b1c1c", "#a16207", "#5b3fa8",
+  "#0f766e", "#9d2a6b", "#47606b", "#374151", "#c2410c",
+]);
+
+/** Standing honesty line: an empty lane is the absence of runs IN THIS WINDOW,
+ *  not evidence that a seat is idle (bounded window + bounded list). */
+export const BOARD_IDLE_CAVEAT = "No runs in this window does not mean the seat is idle.";
+
+/** The explicit lane key for runs whose agentId is "unknown" or absent — the
+ *  server's marker for an identity that failed registry verification or a seat
+ *  that was removed. NOT a real seat: the lane renders last, with a data-limit
+ *  note, and never takes a palette slot. */
+export const BOARD_UNKNOWN_LANE = "unknown";
+
+/**
+ * Whether a run's agentId denotes the explicit unknown lane (the "unknown"
+ * marker, an empty value, or a non-string) rather than a real seat.
+ * @param {*} agentId
+ * @returns {boolean}
+ */
+export function isUnknownAgent(agentId) {
+  return typeof agentId !== "string" || agentId.length === 0 || agentId === BOARD_UNKNOWN_LANE;
+}
+
+// FNV-1a 32-bit over UTF-16 code units — a fixed, portable hash so the SAME
+// agentId maps to the SAME preferred slot in every browser/session.
+function seatHash(agentId) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < agentId.length; i += 1) {
+    h ^= agentId.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+/**
+ * The PREFERRED palette slot for a seat id (deterministic: same id → same slot
+ * on every refresh). Actual on-screen assignment goes through boardColorSlots,
+ * which resolves collisions.
+ * @param {string} agentId
+ * @returns {number}
+ */
+export function seatColorIndex(agentId) {
+  return seatHash(typeof agentId === "string" ? agentId : "") % BOARD_PALETTE.length;
+}
+
+/**
+ * Deterministic agentId→palette-slot map for the CURRENT set of visible real
+ * seats (unknown-lane ids are not seats and never take a slot). The preferred
+ * slot is seatColorIndex; on a collision the seat deterministically yields to
+ * the first free slot FORWARD from its preferred one (first-fit, wrapping), so
+ * any set of ≤ BOARD_PALETTE.length seats is pairwise color-distinct on screen.
+ * Assignment is a pure function of the id SET (ids are sorted first), so the
+ * same on-screen set keeps the same colors across refreshes regardless of the
+ * order runs arrived in. With MORE visible seats than palette slots (not a
+ * realistic shape) an overflowing seat falls back to its preferred slot — the
+ * only case where two lanes may share a color.
+ * @param {string[]} agentIds
+ * @returns {Object<string,number>}
+ */
+export function boardColorSlots(agentIds) {
+  const ids = Array.from(new Set((Array.isArray(agentIds) ? agentIds : [])
+    .filter((a) => typeof a === "string" && a.length > 0 && !isUnknownAgent(a))))
+    .sort();
+  const taken = new Array(BOARD_PALETTE.length).fill(false);
+  const slots = {};
+  for (const id of ids) {
+    const preferred = seatColorIndex(id);
+    let slot = preferred;
+    if (taken[preferred]) {
+      slot = -1;
+      for (let step = 1; step < BOARD_PALETTE.length; step += 1) {
+        const cand = (preferred + step) % BOARD_PALETTE.length;
+        if (!taken[cand]) { slot = cand; break; }
+      }
+      if (slot === -1) slot = preferred; // palette exhausted — documented fallback
+    }
+    taken[slot] = true;
+    slots[id] = slot;
+  }
+  return slots;
+}
+
+// Parse a run's updatedAt to epoch ms; a missing/unparseable value is the
+// OLDEST possible (sorts last) — never a NaN-poisoned comparator.
+function boardRunMs(r) {
+  const t = Date.parse(r && r.updatedAt);
+  return Number.isFinite(t) ? t : -1;
+}
+
+/**
+ * Group the current scope's runs into seat swimlanes. Each real agentId becomes
+ * one lane; every unknown/absent identity merges into ONE explicit unknown lane
+ * (isUnknown) pinned LAST — never mixed into a real seat, never hidden. Lane
+ * order: the seat's freshest updatedAt first, ties by agentId lexicographic.
+ * Cards inside a lane: non-terminal runs first (emphasized), terminal runs
+ * after (de-emphasized), each group freshest-first (ties by runId). Malformed
+ * entries (no usable runId) are dropped. No manual/config ordering exists —
+ * this ordering IS the contract.
+ * @param {object[]} runs
+ * @returns {{agentId:string, isUnknown:boolean, latestMs:number, runs:object[]}[]}
+ */
+export function boardLanes(runs) {
+  const arr = Array.isArray(runs) ? runs : [];
+  const bySeat = new Map();
+  for (const r of arr) {
+    if (!r || typeof r.runId !== "string" || r.runId.length === 0) continue;
+    const key = isUnknownAgent(r.agentId) ? BOARD_UNKNOWN_LANE : r.agentId;
+    if (!bySeat.has(key)) bySeat.set(key, []);
+    bySeat.get(key).push(r);
+  }
+  const lanes = [];
+  for (const [agentId, laneRuns] of bySeat) {
+    const cards = laneRuns.slice().sort((a, b) => {
+      const at = a.terminal === true ? 1 : 0;
+      const bt = b.terminal === true ? 1 : 0;
+      if (at !== bt) return at - bt;           // live first, terminal after
+      const d = boardRunMs(b) - boardRunMs(a); // freshest first in each group
+      if (d !== 0) return d;
+      return a.runId < b.runId ? -1 : 1;       // stable tie-break
+    });
+    let latest = -1;
+    for (const r of laneRuns) { const t = boardRunMs(r); if (t > latest) latest = t; }
+    lanes.push({ agentId, isUnknown: agentId === BOARD_UNKNOWN_LANE, latestMs: latest, runs: cards });
+  }
+  lanes.sort((a, b) => {
+    if (a.isUnknown !== b.isUnknown) return a.isUnknown ? 1 : -1;  // unknown lane last
+    if (a.latestMs !== b.latestMs) return b.latestMs - a.latestMs; // freshest seat first
+    return a.agentId < b.agentId ? -1 : 1;                         // tie → agentId order
+  });
+  return lanes;
+}
+
+/**
+ * The visible tail of a runId (board cards are dense): the last `keep` chars,
+ * ellipsis-prefixed when shortened. Pure display shortening — it never claims
+ * the run vanished.
+ * @param {string} runId
+ * @param {number} [keep=10]
+ * @returns {string}
+ */
+export function runIdTail(runId, keep = 10) {
+  const id = typeof runId === "string" ? runId : "";
+  const k = Number.isInteger(keep) && keep > 0 ? keep : 10;
+  if (id.length <= k) return id;
+  return "…" + id.slice(id.length - k);
+}
+
+/**
+ * The board's scope label — the SAME window the list view shows, always
+ * visible at the board top: "active", or the history window label from
+ * historyRangeLabel ("last 24h" / a custom local-time range). A degenerate
+ * history mode collapses to "history", never an arbitrary string.
+ * @param {object|null} mode
+ * @param {(ms:number)=>string} [formatLocal]
+ * @returns {string}
+ */
+export function boardScopeLabel(mode, formatLocal) {
+  if (!mode || mode.scope !== "history") return "active";
+  return historyRangeLabel(mode, formatLocal) || "history";
+}
+
+/**
+ * The window-truncation honesty line. Empty when the response was not
+ * truncated; otherwise a fixed closed-set sentence carrying matchedCount vs
+ * returnedCount (a bounded list was returned inside a larger window match).
+ * Malformed counts degrade to a bounded fallback that still says truncated.
+ * @param {{truncated?:boolean, matchedCount?:number, returnedCount?:number}|null} meta
+ * @returns {string}
+ */
+export function boardTruncationNotice(meta) {
+  const m = meta && typeof meta === "object" ? meta : {};
+  if (m.truncated !== true) return "";
+  const matched = Number.isInteger(m.matchedCount) ? m.matchedCount : null;
+  const returned = Number.isInteger(m.returnedCount) ? m.returnedCount : null;
+  if (matched === null || returned === null) return "window truncated — list is bounded";
+  return `window truncated — matched ${matched} runs, showing ${returned}`;
+}
+
+/**
+ * The board's render-state reducer (the five-state contract, mirroring the
+ * list view's bounded states — see renderRunList):
+ *   "ready"   normal — fresh data, lanes render;
+ *   "loading" a mode switch cleared the list and the new view's first response
+ *             is pending (runsFresh null + empty list) — never shown as empty;
+ *   "empty"   the current window genuinely returned zero runs (the caveat
+ *             line stays up);
+ *   "error"   the refresh failed with NO current data (a bounded closed-set
+ *             message; "missing"/"unparseable" responses reduce here — an
+ *             unparseable body throws in fetchJson → runsFresh false);
+ *   "stale"   stale-data-plus-error — the refresh failed but the last good
+ *             lanes stay on screen with the error line.
+ * @param {{runs?:object[], runsFresh?:boolean|null}} state
+ * @returns {{status:"ready"|"loading"|"empty"|"error"|"stale", lanes?:object[]}}
+ */
+export function boardViewState(state) {
+  const s = state || {};
+  const runs = Array.isArray(s.runs) ? s.runs : [];
+  if (s.runsFresh === null && runs.length === 0) return { status: "loading" };
+  if (runs.length === 0) return { status: s.runsFresh === false ? "error" : "empty" };
+  return { status: s.runsFresh === false ? "stale" : "ready", lanes: boardLanes(runs) };
+}
+
+/**
+ * The closed-set board status line for a render status. An unknown status
+ * collapses to "" — never an arbitrary string.
+ * @param {string} status — a boardViewState status
+ * @returns {string}
+ */
+export function boardStatusText(status) {
+  switch (status) {
+    case "loading": return "Loading…";
+    case "empty": return "No runs in this window.";
+    case "error": return "refresh failed — no current data";
+    case "stale": return "refresh failed — showing last view";
+    default: return "";
+  }
+}
+
 // ===== Browser bootstrap (runs ONLY with a DOM present) =====
 
 if (typeof document !== "undefined" && typeof window !== "undefined") {
@@ -885,6 +1116,14 @@ function boot() {
     histFrom: $("hist-from"),
     histTo: $("hist-to"),
     histApply: $("hist-apply"),
+    paneHead: $("pane-head"),
+    filters: $("filters"),
+    board: $("board"),
+    boardScope: $("board-scope"),
+    boardTruncated: $("board-truncated"),
+    boardCaveat: $("board-caveat"),
+    boardStatus: $("board-status"),
+    boardLanes: $("board-lanes"),
     noSelection: $("no-selection"),
     detail: $("detail"),
     detailRunid: $("detail-runid"),
@@ -938,6 +1177,12 @@ function boot() {
     // a prior mode/query can never overwrite the current view (isCurrentRunsMode).
     runsMode: defaultRunsMode(),
     runsEpoch: 0,
+    // Board view: a presentation-only list ⇄ board toggle ("list" is the
+    // default). The board reuses the SAME scope data — switching views never
+    // refetches and never resets the chosen window. runsMeta keeps ONLY the
+    // safe response counters the board's honesty line needs.
+    view: "list",
+    runsMeta: null,
     // M12-17: opt-in notifications. notifyEnabled flips ONLY from the explicit
     // button click; observedTerminal is the per-page-session terminal map the
     // pure planner folds every runs/activity snapshot into (baseline-safe).
@@ -1033,6 +1278,13 @@ function wireUi(state) {
   if (activeBtn) {
     activeBtn.addEventListener("click", () => switchRunsMode(state, defaultRunsMode()));
   }
+  // Board view toggle: PRESENTATION-only. Switching list ⇄ board never changes
+  // runsMode/runsEpoch (no refetch, no window reset) and never touches the
+  // selection — the board renders whatever the current scope already holds.
+  const viewBtns = els.modeBar ? els.modeBar.querySelectorAll("[data-view]") : [];
+  for (const btn of viewBtns) {
+    btn.addEventListener("click", () => switchView(state, btn.dataset.view));
+  }
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && state.selectedRunId) pollOnce(state);
   });
@@ -1117,7 +1369,7 @@ function observeActivityTerminal(state, page) {
 function switchRunsMode(state, mode) {
   setRunsMode(state, mode);
   renderModeBar(state);
-  renderRunList(state);
+  renderRunsSurfaces(state);
   // An explicit Owner mode action forces EXACTLY ONE fetch for the new mode
   // (active OR history). force:true routes through the "explicit" trigger, which
   // is never gated by shouldAutoRefreshRuns — so a history switch always fetches
@@ -1140,6 +1392,10 @@ function renderModeBar(state, errMsg) {
   for (const btn of els.modeBar.querySelectorAll("[data-preset]")) {
     btn.classList.toggle("current", !isActive && mode.preset === btn.dataset.preset);
   }
+  // Highlight the current PRESENTATION (list ⇄ board) — independent of scope.
+  for (const btn of els.modeBar.querySelectorAll("[data-view]")) {
+    btn.classList.toggle("current", btn.dataset.view === state.view);
+  }
   // Range label: "last <preset>" or a custom local-time window. Active → blank.
   if (els.rangeLabel) {
     els.rangeLabel.textContent = historyRangeLabel(mode, (ms) => new Date(ms).toLocaleString());
@@ -1150,10 +1406,165 @@ function renderModeBar(state, errMsg) {
   }
 }
 
+// ===== Board view (seat swimlane board — second presentation, same data) =====
+
+// Switch the runs pane's PRESENTATION (list ⇄ board). Presentation-only: the
+// scope (runsMode), the runs epoch, the fetched data, and the selection are all
+// untouched — the board reuses whatever the current window already holds.
+function switchView(state, view) {
+  if (view !== "board" && view !== "list") return;
+  if (state.view === view) return;
+  state.view = view;
+  renderView(state);
+}
+
+// Apply the current view: toggle the list-only controls against the board
+// container, then render the ACTIVE surface. Each view owns its own
+// loading/empty lines, so the list's bounded states never leak under the board
+// (and vice versa).
+function renderView(state) {
+  const els = state.els;
+  const isBoard = state.view === "board";
+  if (els.board) els.board.hidden = !isBoard;
+  if (els.paneHead) els.paneHead.hidden = isBoard;
+  if (els.filters) els.filters.hidden = isBoard;
+  if (els.runList) els.runList.hidden = isBoard;
+  if (isBoard) {
+    if (els.runsLoading) els.runsLoading.hidden = true;
+    if (els.runsEmpty) els.runsEmpty.hidden = true;
+    renderBoard(state);
+  } else {
+    renderRunList(state);
+  }
+  renderModeBar(state);
+}
+
+// Render BOTH presentations of the runs data. The hidden one renders into its
+// (hidden) container harmlessly, so whichever view the Owner switches to is
+// already current — no refetch, no reset, no stale flash. Every commit/error
+// path that owns the runs data routes through here.
+function renderRunsSurfaces(state) {
+  renderRunList(state);
+  renderBoard(state);
+}
+
+// Render the seat board from the SAME current-scope data as the list. The top
+// is always honest: the current scope label, the truncation notice when the
+// bounded list cut a larger window match, and the standing caveat that an
+// empty lane is not evidence a seat is idle. The status line is the closed-set
+// boardStatusText of the boardViewState reducer — the five bounded states.
+function renderBoard(state) {
+  const els = state.els;
+  if (!els.board) return;
+  if (els.boardScope) {
+    els.boardScope.textContent = "scope: " + boardScopeLabel(state.runsMode, (ms) => new Date(ms).toLocaleString());
+  }
+  if (els.boardCaveat) els.boardCaveat.textContent = BOARD_IDLE_CAVEAT;
+  const notice = boardTruncationNotice(state.runsMeta);
+  if (els.boardTruncated) {
+    els.boardTruncated.textContent = notice;
+    els.boardTruncated.hidden = !notice;
+  }
+  const vs = boardViewState(state);
+  const lanesWrap = els.boardLanes;
+  if (lanesWrap) lanesWrap.textContent = "";
+  if (vs.status === "ready" || vs.status === "stale") {
+    if (els.boardStatus) {
+      // "stale" keeps the last good lanes AND shows the bounded error line.
+      els.boardStatus.hidden = vs.status !== "stale";
+      els.boardStatus.classList.toggle("warn", vs.status === "stale");
+      els.boardStatus.textContent = boardStatusText(vs.status);
+    }
+    if (lanesWrap && vs.lanes) {
+      const seats = vs.lanes.filter((l) => !l.isUnknown).map((l) => l.agentId);
+      const slots = boardColorSlots(seats);
+      for (const lane of vs.lanes) lanesWrap.appendChild(boardLaneNode(state, lane, slots));
+    }
+    return;
+  }
+  if (els.boardStatus) {
+    els.boardStatus.hidden = false;
+    els.boardStatus.classList.remove("warn");
+    els.boardStatus.textContent = boardStatusText(vs.status);
+  }
+}
+
+// One seat lane: header (identity track + seat name + count — identity is
+// carried by the NAME, the track is only decorative reinforcement) and the
+// lane's run cards. The unknown lane is named "unknown seats", pinned last by
+// boardLanes, and its header carries the explicit data-limit note — it is NOT
+// a real seat and never takes a palette slot.
+function boardLaneNode(state, lane, slots) {
+  const section = document.createElement("section");
+  section.className = "board-lane" + (lane.isUnknown ? " unknown-lane" : "");
+  section.setAttribute("role", "listitem");
+
+  const head = document.createElement("div");
+  head.className = "lane-head";
+  const track = document.createElement("span");
+  track.className = "lane-track" + (lane.isUnknown ? "" : " seat-" + (slots[lane.agentId] ?? 0));
+  track.setAttribute("aria-hidden", "true"); // decorative: identity also carries the name text
+  const name = document.createElement("span");
+  name.className = "lane-name";
+  name.textContent = lane.isUnknown ? "unknown seats" : lane.agentId;
+  const count = document.createElement("span");
+  count.className = "lane-count";
+  count.textContent = `${lane.runs.length} run${lane.runs.length === 1 ? "" : "s"}`;
+  head.appendChild(track);
+  head.appendChild(name);
+  head.appendChild(count);
+  if (lane.isUnknown) {
+    const note = document.createElement("span");
+    note.className = "lane-note";
+    note.textContent = "not a real seat — identity not registry-verified or the seat was removed";
+    head.appendChild(note);
+  }
+  section.appendChild(head);
+
+  const cards = document.createElement("div");
+  cards.className = "lane-cards";
+  for (const r of lane.runs) cards.appendChild(boardCardNode(state, r, lane.agentId));
+  section.appendChild(cards);
+  return section;
+}
+
+// One run card: a REAL button (keyboard focusable; Enter opens) reusing the
+// existing selectRun detail path — no new navigation. The state pill carries a
+// TEXT label (state is never color-only), and the accessible name carries the
+// full runId + facts (the visible tail is only a dense short form).
+function boardCardNode(state, r, laneAgentId) {
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "board-card " + (r.terminal === true ? "is-terminal" : "is-live");
+  if (r.runId === state.selectedRunId) card.classList.add("selected");
+  card.dataset.runId = r.runId;
+  const pill = statePill(r.state);
+  const ago = document.createElement("span");
+  ago.className = "card-ago";
+  ago.textContent = relativeAge(r.updatedAt, state.nowMs());
+  const rid = document.createElement("span");
+  rid.className = "card-rid mono";
+  rid.textContent = runIdTail(r.runId);
+  const stateText = typeof r.state === "string" && r.state.length ? r.state : "unknown";
+  card.setAttribute("aria-label", `${laneAgentId} · ${r.runId} · ${stateText} · ${ago.textContent}`);
+  card.appendChild(pill);
+  card.appendChild(ago);
+  card.appendChild(rid);
+  card.addEventListener("click", () => selectRun(state, r.runId));
+  return card;
+}
+
 // Apply a committed runs response: set the list + freshness, fold terminal
 // transitions, and re-render. Shared by the single runsFetchOnce commit path.
 function applyRunsResult(state, data) {
   state.runs = data && Array.isArray(data.runs) ? data.runs : [];
+  // Board honesty (window truncation): keep ONLY the safe response counters —
+  // a boolean + two integers, nothing else from the envelope.
+  state.runsMeta = data && typeof data === "object" ? {
+    truncated: data.truncated === true,
+    matchedCount: Number.isInteger(data.matchedCount) ? data.matchedCount : null,
+    returnedCount: Number.isInteger(data.returnedCount) ? data.returnedCount : null,
+  } : null;
   // Runs-list freshness owns ONLY runsFresh + sessionEnded. It must NOT touch
   // activityFresh: a successful runs refresh cannot heal a failed/unavailable
   // activity read (M12-8 separation). A 200 also proves the token still works.
@@ -1169,7 +1580,7 @@ function applyRunsResult(state, data) {
   state.observedTerminal = plan.observed;
   if (state.notifyEnabled) for (const n of plan.notifications) fireNotification(n);
   renderAgentFilter(state);
-  renderRunList(state);
+  renderRunsSurfaces(state);
   // Selection retention (M12-17): a selected run that falls out of the bounded
   // list STAYS selected — the detail keeps refreshing via the activity poll, and
   // "not in the list" is never reported as terminal.
@@ -1189,7 +1600,7 @@ async function refreshRuns(state, opts = {}) {
   await runsFetchOnce(state, opts.force ? "explicit" : "timer", {
     fetch: (token, query) => fetchJson(token, `/api/runs?${query}`),
     commit: applyRunsResult,
-    error: (s, err) => { onFetchError(s, err, "runs"); renderRunList(s); },
+    error: (s, err) => { onFetchError(s, err, "runs"); renderRunsSurfaces(s); },
   });
 }
 
@@ -1272,7 +1683,7 @@ function statePill(state) {
 function selectRun(state, runId) {
   if (state.selectedRunId === runId) return;
   advanceSelection(state, runId);
-  renderRunList(state);
+  renderRunsSurfaces(state);
   bootstrapActivity(state);
 }
 

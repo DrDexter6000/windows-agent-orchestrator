@@ -252,6 +252,65 @@ html, body {
 code { font-family: var(--mono); font-size: 12px; background: var(--unknown-bg); padding: 0 4px; border-radius: 3px; }
 [hidden] { display: none !important; }
 
+/* ===== Seat board (list ⇄ board: second presentation of the same scope) =====
+   Identity colors are decorative reinforcement only — a lane is identified by
+   its NAME text, a card's state by its pill TEXT; nothing is color-only.
+   De-emphasis never lowers text contrast (no opacity on text-bearing nodes). */
+.board { display: flex; flex-direction: column; gap: 6px; }
+.board-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+.board-scope { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.board-truncated { font-size: 11px; color: var(--warn); font-weight: 600; }
+.board-caveat { margin: 0; font-size: 11px; }
+.board-status { margin: 0; padding: 8px 4px; font-size: 12px; color: var(--muted); }
+.board-status.warn { color: var(--warn); font-weight: 600; }
+.board-lanes { display: flex; flex-direction: column; gap: 8px; }
+.board-lane { border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; }
+.board-lane.unknown-lane { border-style: dashed; }
+.lane-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.lane-track { width: 16px; height: 4px; border-radius: 2px; align-self: center; background: var(--border-strong); }
+/* The seat-N hexes below mirror BOARD_PALETTE in app.js slot-for-slot (a test
+   pins the pairing). The unknown lane's track is a PATTERN, not a palette
+   color: it is not a seat and never takes (or mimics) a seat slot. */
+.lane-track.seat-0 { background: #2b6cb0; }
+.lane-track.seat-1 { background: #1f6f3a; }
+.lane-track.seat-2 { background: #9b1c1c; }
+.lane-track.seat-3 { background: #a16207; }
+.lane-track.seat-4 { background: #5b3fa8; }
+.lane-track.seat-5 { background: #0f766e; }
+.lane-track.seat-6 { background: #9d2a6b; }
+.lane-track.seat-7 { background: #47606b; }
+.lane-track.seat-8 { background: #374151; }
+.lane-track.seat-9 { background: #c2410c; }
+.unknown-lane .lane-track {
+  background: repeating-linear-gradient(90deg, var(--border-strong) 0 3px, transparent 3px 6px);
+}
+.lane-name { font-weight: 600; font-size: 12px; }
+.lane-count { font-size: 11px; color: var(--muted); }
+.lane-note { font-size: 11px; color: var(--muted); font-style: italic; }
+.lane-cards { display: flex; flex-wrap: wrap; gap: 4px; padding-top: 5px; }
+.board-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+/* Live (non-terminal) runs read at full text contrast and carry the stronger
+   border; terminal runs stay muted — emphasis without touching contrast. */
+.board-card.is-live { border-color: var(--border-strong); }
+.board-card:hover { background: var(--accent-soft); }
+.board-card.selected { background: var(--accent-soft); border-color: var(--accent); }
+.board-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.board-card .card-ago { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.board-card .card-rid { font-size: 11px; color: var(--muted); }
+.board-card.is-live .card-rid { color: var(--text); }
+
 /* ===== Responsive: stack to one column under 860px ===== */
 @media (max-width: 860px) {
   .layout { grid-template-columns: 1fr; }
@@ -260,5 +319,8 @@ code { font-family: var(--mono); font-size: 12px; background: var(--unknown-bg);
      does not push the selected-run activity below every run; the detail pane
      stays reachable in the same narrow-viewport flow. Desktop is unaffected. */
   .run-list { max-height: 45vh; overflow-y: auto; }
+  /* The board obeys the same narrow-viewport bound as the list: it scrolls
+     internally and never pushes the detail pane below every lane. */
+  .board-lanes { max-height: 45vh; overflow-y: auto; }
   .timeline { max-height: 60vh; }
 }

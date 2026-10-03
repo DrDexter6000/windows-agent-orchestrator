@@ -81,6 +81,7 @@
       "isolation-infra/ownerDashboardServer.test.js",
       "isolation-infra/ownerDashboardCli.test.js",
       "isolation-infra/ownerDashboardWeb.test.js",
+      "isolation-infra/ownerDashboardBoard.test.js",
       "isolation-infra/panelReadiness.test.js",
       "backends/opencodeStopVerify.test.js",
       "parsers/claudeCode.test.js",
