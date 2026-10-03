@@ -323,6 +323,9 @@ WAO 新增独立 `DeepSeekHarnessBackend`，通过用户提供的 DSH SDK stdio 
 - token 为估算（沿用冻结比率 4.14 B/tok）；真实分词计数与 Claude Code/Kimi Code 投影形状待三宿主活探针（smoke 级、耗 token、不进 npm test）
 - 历史对照：22 工具时代 fullWire 75,965 B / o200k 估 18,372 tok（M12-16 轮）；M13 加 `run_consult` 后 wire +8,563 B（+11.3%）、投影 +1,056 B（+5.1%）
 
+
+**试点结果（2026-10-03，pilot-only，Owner 批准「①试点，先汇报不全量铺开」）**：三句式紧凑 description 改写 Top5（run_delivery/run_delivery_repackage/run_delivery_review_bundle/run_activity/run_await_result，各 -28%~-37%）；hostVisible 21,854→20,758B（-1,096B，估算 5,285→5,020 tok）。验收：m12-10 全绿（M12-10-G 语义守卫三处措辞微调保短语：transport 原句/waitMs=0 is invalid）；gen:surface 已再生；改后 zcode Fresh 会话探针全参数正确枚举 + 新描述语义复述准确。全量铺开待 Owner 裁定。
+
 **三类预算初值（= 当前实测，ratchet 语义：只降不升，动帽须 Owner）**：`hostVisibleBudget` 21,854 B · `descriptionBudget` 11,837 B · `wireBudget` 84,528 B。
 
 候选实验（测量后修订）只比较：**三句式紧凑 description（主靶）**、把少用语义说明移至 response/resource；验收要求 23 个工具始终可调用、完整 input schema 与关键 Lead 决策字段不丢、Fresh Host 能在不预读文档时正确首派并可依 response 自助恢复。禁止 lite/full profile、动态工具隐藏、通用 meta-tool、跨工具 `$defs`/`$ref`、先删 output schema、放宽枚举、控制面内嵌代码沙箱、自动化批量验收/重派（会审 Q4 红线）。任何 description/schema 变更须 `npm run gen:surface` 重生成 + wire-cap 测试 refreeze 评估 + SKILL 计数句同步。

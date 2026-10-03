@@ -346,7 +346,7 @@ Output:
 
 ## run_delivery
 
-Query a run's delivery status: terminal state, base/delivery commits, changed-file count with bounded repo-relative changed paths (truncation flag), and verification/acceptance status. Read-only — the Lead owns semantic acceptance; only verificationStatus=passed means verification passed; this read never stop/retry/accept/rejects. Optional waitMs: 1000..300000 ms (waitMs=0 is invalid; omit for a point-in-time read), a bounded read-only readiness handshake returning readiness + waitReturnedEarly; pending-at-deadline is truthful, never an error. Host transport loss/cancellation does not stop the detached run — re-read point-in-time to observe. candidateKind/candidateInventory are advisory only; candidateKind=process_missing means the detached runner/provider process is provably gone and the retained work is recoverable — it is still NOT acceptance, and only an explicit run_delivery_repackage call settles it. Self-explaining semanticNotes; wao://semantics/{id}.
+Read-only delivery query: terminal state, base/delivery commits, bounded repo-relative changed paths (truncation flag), verification/acceptance status. waitMs: 1000..300000 ms (waitMs=0 is invalid; omit = point-in-time) is one bounded readiness wait — pending-at-deadline is truthful, never an loss never stops the run, re-read to observe. verificationStatus=passed is NOT acceptance; never stop/retry/accept/reject. candidateKind is advisory: process_missing = runner provably gone and recoverable — only an explicit run_delivery_repackage settles it. Self-explaining semanticNotes; wao://semantics/{id}.
 
 Annotations: readOnlyHint=true, destructiveHint=false, idempotentHint=true, openWorldHint=false
 
@@ -493,7 +493,7 @@ Output:
 
 ## run_await_result
 
-One read-only call: wait up to waitMs for terminal, then return the safe compact final assistant result plus a truthful liveness observation. Returns early on terminal. Advisory — never stop/retry/decide/accept/reject/repackage/append transcript events; no semantic judgment. result.status distinguishes terminal from not_terminal/unavailable; a read failure yields a closed-set readFailureReason. Idempotent, snapshot-only. Host transport loss/cancellation does not stop the detached run: observation unknown; no control-plane mutation. re-read point-in-time with waitMs:0 or run_status; never infer a stop. Self-explaining semanticNotes; wao://semantics/{id}.
+One read-only call: bounded waitMs wait for terminal (early on terminal), then the safe compact final assistant result + truthful liveness observation. Advisory — never stop/retry/decide/accept/reject/repackage or append events. result.status: terminal | not_terminal | unavailable; read failure yields a closed-set readFailureReason. Host transport loss/cancellation does not stop the detached run — re-read point-in-time (waitMs:0 / run_status); never infer a stop. Idempotent, snapshot-only. Self-explaining semanticNotes; wao://semantics/{id}.
 
 Annotations: readOnlyHint=true, destructiveHint=false, idempotentHint=true, openWorldHint=false
 
@@ -532,7 +532,7 @@ Output:
 
 ## run_activity
 
-Read-only activity timeline for a run from ONE transcript snapshot (zero append). Closed-set safe facts only (raw argv, tool I/O, absolute/traversal paths withheld); secrets redacted; no semantic summary or progress estimate. Advisory scopeObservation: whether confirmed file_written events remain within delivery.allowedPaths — facts only, never a stop/retry/repackage decision. Paginated via an opaque cursor; a rejected cursor (stale, cross-run, cross-view, or out-of-range) returns a cursor_rejected recovery — no auto-retry: re-request page 1 without a cursor or use afterSeq. Other failures stay the fixed generic error. pageSize defaults to 8. Idempotent; workspace-bound.
+Read-only run activity timeline from one transcript snapshot (zero append): closed-set safe facts only — raw argv/tool I/O and absolute/traversal paths withheld, secrets redacted, no semantic summary or progress estimate. scopeObservation states facts only (file_written within delivery.allowedPaths?), never a stop/retry/repackage decision. Opaque-cursor pagination: cursor_rejected means re-request page 1 (no cursor) or use afterSeq — no auto-retry; other failures stay the fixed generic error. pageSize default 8. Idempotent; workspace-bound.
 
 Annotations: readOnlyHint=true, destructiveHint=false, idempotentHint=true, openWorldHint=false
 
@@ -599,7 +599,7 @@ Output:
 
 ## run_delivery_review_bundle
 
-Wait for delivery readiness and, only when reviewable, return one Lead-selected bounded review page (settled readiness returns early). Optional waitMs: 1000..300000 ms (waitMs=0 is invalid; omit for a point-in-time read) — one bounded read-only readiness wait; pending-at-deadline is truthful, never an error. The response always carries the safe run_delivery facts; review is null when not reviewable (no Git diff read then). Host transport loss/cancellation does not stop the detached run — re-read point-in-time to observe. fileIndex and cursor are Lead-supplied for one page: the tool never chooses/traverses files or cursors, never summarizes repository text, and never stop/retry/repackage/accept/reject. run_delivery/run_delivery_review remain for atomic control.
+One bounded read-only readiness wait (waitMs: 1000..300000 ms, waitMs=0 is invalid; omit = point-in-time; pending-at-deadline truthful, never an error), then — only when reviewable — one Lead-selected bounded review page; settled readiness returns early, review is null when not reviewable (no diff read). Response always carries the safe run_delivery facts. fileIndex/cursor are Lead-supplied: the tool never chooses/traverses files or cursors, never summarizes repository text, never stop/retry/repackage/accept/reject. run_delivery/run_delivery_review remain for atomic control.
 
 Annotations: readOnlyHint=true, destructiveHint=false, idempotentHint=true, openWorldHint=false
 
@@ -622,7 +622,7 @@ Output:
 
 ## run_delivery_repackage
 
-Re-package a retained delivery candidate after a disallowed_path packaging failure, an eligible verified-quiet backend failure, OR a process_missing orphan (the detached runner/provider process is provably gone), reusing the original run's persisted worktree, base commit, and verification config (no model, no worker resume, no path inference, no verification override). For process_missing the run is settled to failed with a safe confirmation fact first-terminal-wins, then packaged exactly like the other recovery kinds. The Lead's allowedPaths must include the original scope and cover every actual changed path — the only scope authority. Records a recovery provenance; recovery is never semantic acceptance. Reentrant and crash-safe: retries and competing requests converge on one terminal fact, one commit, and one outcome. run_delivery_decide still owns accept/reject.
+Re-package a retained delivery candidate after disallowed_path, verified-quiet backend failure, or process_missing (runner provably gone; settles the run failed, first-terminal-wins), reusing the original worktree, base commit, and verification config — no model, no resume, no path inference, no verification override. allowedPaths must cover the original scope and every actual changed path (sole scope authority); recovery provenance recorded, never semantic acceptance. Reentrant and crash-safe (one terminal fact, one commit, one outcome); run_delivery_decide owns accept/reject.
 
 Annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=true, openWorldHint=false
 
