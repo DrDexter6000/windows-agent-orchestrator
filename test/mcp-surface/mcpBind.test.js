@@ -1229,6 +1229,11 @@ test("TD-191②: zcode 描述符=格式级入表（hostVerified=false 如实）+
     assert.ok(pluginJson && pluginJson.name === "wao", "插件清单在场");
     assert.ok(mcpJson && mcpJson.wao && mcpJson.wao.command === "node" && Array.isArray(mcpJson.wao.args),
       ".mcp.json 是扁平 server 映射 {wao:{command,args}}（实机勘察格式）");
+    assert.equal(mcpJson.wao.timeoutMs, 660_000,
+      ".mcp.json 携带 timeoutMs=660000：zcode 宿主默认 30000ms 会把 >30s 的等待族调用掐成假失败；600s 最大阻塞预算 + 60s 余量（改动须同步 hostDescriptors 常量与本钉）");
+    const cc = await bindWorkspace({ host: "claude-code", cwd: dir });
+    assert.equal(cc.snippet.mcpServers.wao.timeoutMs, undefined,
+      "claude-code/codex 片段不带 timeoutMs（其配置是否支持该字段未核实——不猜测格式，fail-closed）");
     assert.match(result.note, /NOT BOUND/i);
     assert.equal(existsSync(join(dir, ".zcode")), false, "零写入");
   } finally {

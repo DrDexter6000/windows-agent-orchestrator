@@ -59,6 +59,8 @@ Results carry REQUIRED `availableDrilldowns` (≤4; progressive disclosure; neve
 
 Wait for meaningful changes; do not narrate unchanged polls. Before supervision, read [quiet supervision](docs/usage.md#lead-quiet-supervision).
 
+**Host per-call timeout ≠ run death.** A wait-family call (`run_wait` / `run_await_result` / `run_consult`) may die at the HOST transport layer ("Tool execution timed out after Nms") while the run keeps living detached. On zcode the host default is 30000ms — the WAO plugin package carries `timeoutMs: 660000` (installs/reinstalls from 2026-10-04; older installs lack it). If you see a host-timeout error: do NOT treat it as run failure — verify with `runs_list`/`run_status`, then wait in smaller steps (`run_wait` 180000..600000 chunks, or `run_status` polling); `run_consult` supports `budgetMs: 0` instant snapshot + consultId read mode.
+
 ## Optional Lead Playbooks
 
 Read-only optional decision scaffolds as MCP resources: `wao://playbooks`（摘要）+ `wao://playbooks/{id}`（全文）；CLI parity `playbook list/show`. Optional and Lead-adaptable, sit outside the dispatch loop; never required before `run_dispatch`. Advisor/Auditor stages remain conditional.
