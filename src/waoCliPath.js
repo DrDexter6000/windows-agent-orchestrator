@@ -12,7 +12,9 @@
 // 当前真实调用点（避免漂移，新增时同步本注释）：
 //   - src/backends/factory.js（共享工厂内部解析：未显式注入 waoCliPath 时兜底）
 //   - src/backgroundRunner.js / src/daemon.js（启动时算好，显式注入工厂）
-//   - src/mcp/server.js（resolveBackendFor，M12-7 续跑资格检查的刻意 fail-soft 构造点）
+//   （2026-10-04：src/mcp/server.js 的 resolveBackendFor 已改走工厂薄包装，不再是
+//    独立构造点——其五后端手抄名单漂移曾误拒 kimi-web/zcode/deepseek-acp 的
+//    continuable/correctable 派发。）
 
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";

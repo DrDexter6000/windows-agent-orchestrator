@@ -179,3 +179,147 @@ test("M12-7-DCT-04: continuable root refuses an unsupported backend before trans
     assert.deepEqual(readdirSync(dir).filter((name) => name.endsWith(".jsonl")), []);
   } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
 });
+
+// ── 2026-10-04 drift-fix legs (consult_20261004192559512mefa3k) ──────────────
+// The gates above were only ever tested with FAKE backendFor injections — the
+// REAL server-threaded resolver drifted (five-backend hand mirror missing
+// kimi-web/zcode/deepseek-acp) and refused real seats whose backends DO
+// declare the capability. These legs drive the gates with the REAL factory
+// resolver so capability-declaration drift between factory and backends is
+// exercised, and pin the typed error names (2026-10-04) the MCP boundary
+// collapses to fixed reason-code texts.
+
+import { backendFor as factoryBackendFor } from "../../src/backends/factory.js";
+
+test("2026-10-04: kimi-web + continuable (REAL factory resolver) passes the capability gate and roots the lineage", async () => {
+  const repo = makeRepo();
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-drift-kw-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    const r = await dispatchRun({
+      agentId: "coder_mm",
+      prompt: "do the work",
+      registryPath: makeRegistry(dir, { coder_mm: { backend: "kimi-web", cwd: repo, serveUrl: "http://127.0.0.1:1", tokenEnv: "WAO_TEST_TOKEN_KW", model: { id: "kimi-code/k3" } } }),
+      runDir: dir,
+      cwd: repo,
+      delivery: DELIVERY,
+      continuable: true,
+      leadSession: "lead-session-drift",
+      backendFor: factoryBackendFor,
+        skipCredentialCheck: true,
+      spawnFn: fakeSpawn,
+    });
+    assert.equal(r.accepted, true, "kimi-web declares supportsSessionReuse=true — the gate must pass (the drift refused exactly this)");
+    const events = await readTranscript(join(dir, `${r.runId}.jsonl`));
+    const reuse = findLatest(events, "run.session_reuse");
+    assert.ok(reuse, "lineage first-turn audit fact written");
+    assert.equal(reuse.mode, "run_lineage");
+    assert.equal(reuse.turn, "first");
+    assert.ok(calls.length > 0, "runner forked");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("2026-10-04: deepseek-harness + continuable (REAL factory resolver) → typed ContinuableBackendUnsupportedError, zero side effects", async () => {
+  const repo = makeRepo();
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-drift-dsh-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    await assert.rejects(
+      () => dispatchRun({
+        agentId: "dsh",
+        prompt: "do the work",
+        registryPath: makeRegistry(dir, { dsh: { backend: "deepseek-harness", cwd: repo, dshConfigPath: "C:/inert/dsh.json", credentialEnv: "DSH_TEST_TOKEN" } }),
+        runDir: dir,
+        cwd: repo,
+        delivery: DELIVERY,
+        continuable: true,
+        leadSession: "lead-session-drift",
+        backendFor: factoryBackendFor,
+        skipCredentialCheck: true,
+        spawnFn: fakeSpawn,
+      }),
+      (e) => e.name === "ContinuableBackendUnsupportedError" && /supports provider session reuse/.test(e.message),
+      "typed error name (MCP boundary keys its fixed text on it) + the semantic message",
+    );
+    assert.equal(calls.length, 0, "no fork");
+    const { readdirSync, existsSync } = await import("node:fs");
+    assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".jsonl")), [], "no transcript");
+    assert.equal(existsSync(join(dir, ".lineage-reuse")), false, "no lineage slot claimed");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("2026-10-04: kimi-web + correctable (REAL factory resolver) passes the correction capability gate", async () => {
+  const repo = makeRepo();
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-drift-cor-"));
+  const { fakeSpawn } = makeFakeSpawn();
+  try {
+    const r = await dispatchRun({
+      agentId: "coder_mm",
+      prompt: "do the work",
+      registryPath: makeRegistry(dir, { coder_mm: { backend: "kimi-web", cwd: repo, serveUrl: "http://127.0.0.1:1", tokenEnv: "WAO_TEST_TOKEN_KW", model: { id: "kimi-code/k3" } } }),
+      runDir: dir,
+      cwd: repo,
+      delivery: DELIVERY,
+      correctable: true,
+      leadSession: "lead-session-drift",
+      backendFor: factoryBackendFor,
+        skipCredentialCheck: true,
+      spawnFn: fakeSpawn,
+    });
+    assert.equal(r.accepted, true, "kimi-web declares supportsInFlightCorrection=true — the drift refused exactly this");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("2026-10-04: combo continuable+correctable+zcode (REAL factory resolver) → correctable refusal fires BEFORE the lineage claim, zero side effects", async () => {
+  const repo = makeRepo();
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-drift-zc-"));
+  const { fakeSpawn, calls } = makeFakeSpawn();
+  try {
+    await assert.rejects(
+      () => dispatchRun({
+        agentId: "zseat",
+        prompt: "do the work",
+        registryPath: makeRegistry(dir, { zseat: { backend: "zcode", cwd: repo, binary: "C:/inert/zcode.cjs", model: { id: "bigmodel-api/GLM-5.3" } } }),
+        runDir: dir,
+        cwd: repo,
+        delivery: DELIVERY,
+        continuable: true,
+        correctable: true,
+        leadSession: "lead-session-drift",
+        backendFor: factoryBackendFor,
+        skipCredentialCheck: true,
+        spawnFn: fakeSpawn,
+      }),
+      (e) => e.name === "CorrectableBackendUnsupportedError" && /supportsInFlightCorrection/.test(e.message),
+      "zcode declares supportsInFlightCorrection=false — typed refusal, not the opaque generic",
+    );
+    // Ordering pin (runDispatch.js: the correctable gate precedes the continuable
+    // lineage-slot claim): the refusal must leak neither a claim nor a transcript.
+    assert.equal(calls.length, 0, "no fork");
+    const { readdirSync, existsSync } = await import("node:fs");
+    assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".jsonl")), [], "no transcript");
+    assert.equal(existsSync(join(dir, ".lineage-reuse")), false, "correctable refusal precedes the lineage claim (no busy-slot leak)");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("2026-10-04: zcode + continuable (REAL factory resolver) passes the capability gate — the drift's second silent victim", async () => {
+  const repo = makeRepo();
+  const dir = mkdtempSync(join(tmpdir(), "wao-m127-drift-zx-"));
+  const { fakeSpawn } = makeFakeSpawn();
+  try {
+    const r = await dispatchRun({
+      agentId: "zseat",
+      prompt: "do the work",
+      registryPath: makeRegistry(dir, { zseat: { backend: "zcode", cwd: repo, binary: "C:/inert/zcode.cjs", model: { id: "bigmodel-api/GLM-5.3" } } }),
+      runDir: dir,
+      cwd: repo,
+      delivery: DELIVERY,
+      continuable: true,
+      leadSession: "lead-session-drift",
+      backendFor: factoryBackendFor,
+        skipCredentialCheck: true,
+      spawnFn: fakeSpawn,
+    });
+    assert.equal(r.accepted, true, "zcode declares supportsSessionReuse=true — the gate must pass");
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+});

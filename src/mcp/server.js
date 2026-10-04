@@ -74,12 +74,14 @@ import {
 // here at the control-plane boundary — the same tier backgroundRunner.js
 // constructs them at — so the application service stays backend-free. Never
 // branch on the runtime name; read the declared capability.
-import { ClaudeCodeBackend } from "../backends/claudeCode.js";
-import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
-import { CodexBackend } from "../backends/codex.js";
-import { KimiCodeBackend } from "../backends/kimiCode.js";
-import { DeepSeekHarnessBackend } from "../backends/deepSeekHarness.js";
-import { getWaoCliPath } from "../waoCliPath.js";
+// 2026-10-04 drift fix: backend construction for the capability resolver now
+// delegates to the shared factory (the previous five hand-mirrored direct
+// imports missed kimi-web / zcode / deepseek-acp — the mirror silently refused
+// continuable/correctable on seats whose backends DO declare the capability).
+import { backendFor as factoryBackendFor } from "../backends/factory.js";
+// 后端闭集 SSOT——resolver 的未知值 fail-closed 闸门用（工厂对未知值 throw，
+// 本边界契约是 null；不复制名单）。
+import { KNOWN_BACKENDS } from "../registry.js";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { getRunStatus } from "../application/runStatus.js";
@@ -661,6 +663,30 @@ const DISPATCH_REASONING_OVERRIDE_CONFLICT_TEXT =
 const DISPATCH_CWD_NOT_FOUND_TEXT =
   "run_dispatch refused: dispatch_cwd_not_found. The dispatch working directory does not " +
   "exist; pass an existing --cwd or fix the registry entry cwd (dispatch_cwd_not_found).";
+
+// 2026-10-04: continuable/correctable eligibility refusals — typed errors from
+// the shared service (ContinuableDeliveryOnlyError / ContinuableBackendUnsupported
+// Error / CorrectableBackendUnsupportedError) collapse to these fixed texts.
+// Family discipline as the precedents above: literal reason code + fixed
+// guidance; never echoes agent id, workspace, or backend name — capability
+// truth lives in backend class declarations (human-readable projection:
+// docs/surface/certification.md; a registry sessionReuse entry is a routing
+// configuration, NOT a capability proof). Context: these gates used to throw
+// untyped errors that collapsed to the opaque generic text, so a cross-project
+// session burned two dispatches discovering the cause by trial.
+const DISPATCH_CONTINUABLE_DELIVERY_ONLY_TEXT =
+  "run_dispatch refused: continuable_delivery_only. continuable roots a continuation " +
+  "lineage, which is anchored in a delivery run — add a delivery block or drop " +
+  "continuable.";
+const DISPATCH_CONTINUABLE_BACKEND_UNSUPPORTED_TEXT =
+  "run_dispatch refused: continuable_backend_unsupported. The selected seat's backend " +
+  "does not declare provider session reuse (capability columns: docs/surface/" +
+  "certification.md; registry sessionReuse is configuration, not capability). " +
+  "Dispatch a session-reuse-capable seat or drop continuable.";
+const DISPATCH_CORRECTABLE_BACKEND_UNSUPPORTED_TEXT =
+  "run_dispatch refused: correctable_backend_unsupported. The selected seat's backend " +
+  "does not declare in-flight correction (capability columns: docs/surface/" +
+  "certification.md). Dispatch a correction-capable seat or drop correctable.";
 
 // M12-6 (FR-03): fixed, actionable error when a supplied workspace/head
 // expectation mismatches the freshly-proven binding at dispatch time. The ONLY
@@ -3318,18 +3344,19 @@ export function createWaoMcpServer({
   const consultRecordsDir = consultsDir ?? ".wao/runs/consults";
 
   // M12-7: backend capability resolver for the continuation service's
-  // supportsSessionReuse gate. Mirrors the backendFor in backgroundRunner.js /
-  // commands/shared.js (same construction tier) — reads the declared capability,
-  // never branches on the runtime name. Lives here so the application service
-  // stays backend-free; the constructed objects are read for one boolean only.
+  // supportsSessionReuse gate (and M12-16 correctable). 2026-10-04 drift fix:
+  // construction DELEGATES to the shared factory — the previous hand-mirrored
+  // five-backend list (a "mirror" of the factory predating kimi-web/zcode/
+  // deepseek-acp) returned null for those backends and refused continuable/
+  // correctable dispatches on seats whose backends DO declare the capability
+  // (consult_20261004192559512mefa3k; parity pin in mcpRunDispatch.test.js).
+  // The wrapper owns ONE contract the factory deliberately does not: unknown
+  // backend ids collapse to null (fail-closed for capability gating) instead
+  // of the factory's throw. Reads declared capability booleans only; backend
+  // construction is side-effect-free. Never branches on the runtime name.
   function resolveBackendFor(agent) {
-    const waoCliPath = getWaoCliPath();
-    if (agent.backend === "opencode-serve") return new OpenCodeServeBackend();
-    if (agent.backend === "claude-code") return new ClaudeCodeBackend({ waoCliPath });
-    if (agent.backend === "codex") return new CodexBackend({ waoCliPath });
-    if (agent.backend === "kimi-code") return new KimiCodeBackend({ waoCliPath });
-    if (agent.backend === "deepseek-harness") return new DeepSeekHarnessBackend();
-    return null;
+    if (!KNOWN_BACKENDS.includes(agent?.backend)) return null;
+    return factoryBackendFor(agent);
   }
 
   /**
@@ -3999,6 +4026,29 @@ export function createWaoMcpServer({
           return {
             isError: true,
             content: [{ type: "text", text: DISPATCH_REASONING_OVERRIDE_CONFLICT_TEXT }],
+          };
+        }
+        // 2026-10-04: continuable/correctable eligibility — typed refusals from
+        // the shared service (capability gates throw BEFORE any transcript
+        // write / lineage claim / fork). Collapse to fixed reason-code texts;
+        // without these branches every eligibility refusal died as the opaque
+        // generic text (see the three constants above for the incident record).
+        if (e && e.name === "ContinuableDeliveryOnlyError") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DISPATCH_CONTINUABLE_DELIVERY_ONLY_TEXT }],
+          };
+        }
+        if (e && e.name === "ContinuableBackendUnsupportedError") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DISPATCH_CONTINUABLE_BACKEND_UNSUPPORTED_TEXT }],
+          };
+        }
+        if (e && e.name === "CorrectableBackendUnsupportedError") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DISPATCH_CORRECTABLE_BACKEND_UNSUPPORTED_TEXT }],
           };
         }
         // M11-11C: reusable-expert busy — fixed actionable text. The active

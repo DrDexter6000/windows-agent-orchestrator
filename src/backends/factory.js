@@ -15,9 +15,12 @@
 //     commands/shared.js 走薄委托不传参，每次调用由工厂内部解析——两种现状行为均不变。
 //
 // 刻意不在本工厂的构造点（禁止并入）：
-//   - src/mcp/server.js 的 resolveBackendFor：未知 backend return null 而非抛错，
-//     这是 M12-7 续跑资格检查的刻意 fail-soft 语义。
 //   - src/smoke.js：4 分支（无 kimi-code）、不传 waoCliPath，是刻意的最小探测面。
+//
+// （2026-10-04 修订：src/mcp/server.js 的 resolveBackendFor 曾在此列为独立构造点
+//  ——那份五后端手抄名单漂移漏掉 kimi-web/zcode/deepseek-acp，误拒其 continuable/
+//  correctable 派发。现改为薄包装：构造委托本工厂，仅"未知 backend → null"的
+//  fail-closed 闸门留在包装层。parity 钉：mcpRunDispatch.test.js。）
 
 import { OpenCodeServeBackend } from "./opencodeServe.js";
 import { ClaudeCodeBackend } from "./claudeCode.js";

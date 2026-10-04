@@ -148,6 +148,40 @@ export class ReasoningOverrideConflictError extends Error {
   }
 }
 
+// 2026-10-04: continuable/correctable eligibility refusals — typed so the MCP
+// boundary can surface fixed reason-code texts instead of the opaque generic
+// "run_dispatch failed" (a cross-project session lost two dispatches to that
+// opacity and concluded — wrongly — that kimi-web cannot root a continuable
+// lineage; the real cause was a stale hand-mirrored backend list in the MCP
+// resolver, consult_20261004192559512mefa3k). Family contract as above: stable
+// error.name + closed-set reasonCode, thrown BEFORE any transcript write,
+// lineage-slot claim, or fork (the capability gates precede the lineage claim
+// by construction). Messages are internal (CLI/local stderr); the MCP adapter
+// collapses to its own fixed texts — never echoed dynamic payload.
+export class ContinuableDeliveryOnlyError extends Error {
+  constructor() {
+    super("dispatchRun: continuable is delivery-only (a continuation lineage is rooted in a delivery run)");
+    this.name = "ContinuableDeliveryOnlyError";
+    this.reasonCode = "continuable_delivery_only";
+  }
+}
+
+export class ContinuableBackendUnsupportedError extends Error {
+  constructor() {
+    super("dispatchRun: continuable delivery requires a backend that supports provider session reuse");
+    this.name = "ContinuableBackendUnsupportedError";
+    this.reasonCode = "continuable_backend_unsupported";
+  }
+}
+
+export class CorrectableBackendUnsupportedError extends Error {
+  constructor() {
+    super("dispatchRun: correctable requires a backend that declares supportsInFlightCorrection");
+    this.name = "CorrectableBackendUnsupportedError";
+    this.reasonCode = "correctable_backend_unsupported";
+  }
+}
+
 // TD-110 (D2 A3): thrown when a sessionReuse:"lead_workspace" agent is
 // dispatched WITHOUT a bound workspace (cwd). The message is the pre-existing
 // closed-set text (byte-identical to the old bare Error) — the typed class is
@@ -615,7 +649,7 @@ export async function dispatchRun({
   if (correctable) {
     const correctionBackend = typeof backendFor === "function" ? backendFor(agent) : null;
     if (!correctionBackend || correctionBackend.supportsInFlightCorrection !== true) {
-      throw new Error("dispatchRun: correctable requires a backend that declares supportsInFlightCorrection");
+      throw new CorrectableBackendUnsupportedError();
     }
   }
 
@@ -629,7 +663,7 @@ export async function dispatchRun({
   let lineageRootRunId = null;
   if (continuable) {
     if (!publicDelivery) {
-      throw new Error("dispatchRun: continuable is delivery-only (a continuation lineage is rooted in a delivery run)");
+      throw new ContinuableDeliveryOnlyError();
     }
     if (typeof leadSession !== "string" || leadSession.length === 0) {
       throw new Error("dispatchRun: leadSession is required for a continuable delivery (server-owned Lead session identity)");
@@ -639,7 +673,7 @@ export async function dispatchRun({
     }
     const continuationBackend = typeof backendFor === "function" ? backendFor(agent) : null;
     if (!continuationBackend || continuationBackend.supportsSessionReuse !== true) {
-      throw new Error("dispatchRun: continuable delivery requires a backend that supports provider session reuse");
+      throw new ContinuableBackendUnsupportedError();
     }
     const firstTurn = await resolveLineageFirstTurn({
       runDir: resolvedRunDir,

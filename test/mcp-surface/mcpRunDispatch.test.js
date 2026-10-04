@@ -25,6 +25,8 @@ import { execSync } from "node:child_process";
 import { createWaoMcpServer } from "../../src/mcp/server.js";
 import { dispatchRun as realDispatchRun } from "../../src/application/runDispatch.js";
 import { readTranscript, findState, findLatest } from "../../src/transcript.js";
+// 2026-10-04 drift pin: 后端闭集 SSOT（resolver parity 遍历源）。
+import { KNOWN_BACKENDS } from "../../src/registry.js";
 // TD-168: run_dispatch 输入键集合 SSOT（安全字段边界合同——缺键/多键都该红）。
 import { RUN_DISPATCH_INPUT_KEYS } from "../fixtures/mcpWireKeySets.js";
 
@@ -903,4 +905,169 @@ test("M12-25-MCP-ROUT-5: dispatcher omits providerSessionRouting → fixed safe 
   } finally {
     cleanupDir(dir);
   }
+});
+
+// ---------------------------------------------------------------------
+// 2026-10-04 drift pin (consult_20261004192559512mefa3k): the SERVER-threaded
+// backend capability resolver must cover every KNOWN_BACKENDS backend. A
+// hand-mirrored five-backend list in server.js refused continuable/correctable
+// on kimi-web / zcode / deepseek-acp although those backends declare the
+// capabilities (supportsSessionReuse=true at class level). This pin captures
+// the ACTUAL resolver the server threads (dispatchRunFn seam — no public
+// export added) and walks the full closed set + the unknown-value
+// fail-closed contract (null, not the factory's throw).
+// ---------------------------------------------------------------------
+
+test("resolver parity: server-threaded backendFor covers every KNOWN_BACKENDS; unknown stays null (2026-10-04 drift pin)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-resolver-parity-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { mm: { backend: "kimi-web", cwd: dir } });
+    let captured = null;
+    const fakeDispatch = async (input) => {
+      captured = input;
+      return {
+        accepted: true, runId: "run_resolver_pin", agentId: "mm", state: "pending",
+        providerSessionRouting: "not_used", transcriptPath: "/x.jsonl",
+      };
+    };
+    const server = createWaoMcpServer({
+      registryPath, runDir: "/server/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatch,
+    });
+    const client = await buildInMemoryClient(server);
+    try {
+      await client.callTool({
+        name: "run_dispatch",
+        arguments: {
+          agentId: "mm", prompt: "pin",
+          delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["node --test"] },
+          continuable: true,
+        },
+      });
+      assert.equal(typeof captured.backendFor, "function",
+        "continuable threads the capability resolver to the dispatcher");
+      const resolver = captured.backendFor;
+      for (const id of KNOWN_BACKENDS) {
+        const b = resolver({ backend: id });
+        assert.ok(b, `resolver must construct the "${id}" backend — factory parity (mirror drift was the 2026-10-04 bug)`);
+      }
+      // Capability truth over the closed set (class-level declarations).
+      const reuseTrue = ["claude-code", "codex", "kimi-code", "kimi-web", "zcode", "deepseek-acp"];
+      const reuseNotTrue = ["deepseek-harness", "opencode-serve"];
+      for (const id of reuseTrue) {
+        assert.equal(resolver({ backend: id }).supportsSessionReuse, true,
+          `${id} declares provider session reuse — continuable must pass its gate`);
+      }
+      for (const id of reuseNotTrue) {
+        assert.notEqual(resolver({ backend: id }).supportsSessionReuse, true,
+          `${id} does not declare provider session reuse — honest refusal stays`);
+      }
+      // Unknown backend: fail-closed null at the wrapper boundary (the factory
+      // itself throws for unknown ids — the wrapper owns the closed-set contract).
+      assert.equal(resolver({ backend: "not-a-backend" }), null,
+        "unknown backend → null (fail-closed), never a factory throw crossing the seam");
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  } finally {
+    cleanupDir(dir);
+  }
+});
+
+// ---------------------------------------------------------------------
+// 2026-10-04: fixed reason-code texts for the continuable/correctable
+// eligibility refusals (family discipline of R10-A-MCP-4 above — typed error
+// from the service collapses to a fixed text with a literal reason code,
+// semantic why, actionable guidance, and NO collapse to the opaque generic).
+// ---------------------------------------------------------------------
+
+test("2026-10-04: ContinuableDeliveryOnlyError collapses to the fixed continuable_delivery_only text", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-cont-delonly-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const fakeDispatcher = async () => {
+      const err = new Error("dispatchRun: continuable is delivery-only (a continuation lineage is rooted in a delivery run)");
+      err.name = "ContinuableDeliveryOnlyError";
+      err.reasonCode = "continuable_delivery_only";
+      throw err;
+    };
+    const server = createWaoMcpServer({ registryPath, runDir: "/server/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatcher });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: { agentId: "coder_low", prompt: "y", continuable: true },
+      });
+      assert.equal(res.isError, true);
+      const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+      assert.match(text, /continuable_delivery_only/, "closed-set reason code surfaced");
+      assert.match(text, /anchored in a delivery run/, "states the semantic why");
+      assert.match(text, /add a delivery block or drop continuable/, "fixed actionable guidance");
+      assert.doesNotMatch(text, /run_dispatch failed/, "NOT the opaque generic dispatch text");
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); }
+});
+
+test("2026-10-04: ContinuableBackendUnsupportedError collapses to the fixed continuable_backend_unsupported text", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-cont-unsup-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const fakeDispatcher = async () => {
+      const err = new Error("dispatchRun: continuable delivery requires a backend that supports provider session reuse");
+      err.name = "ContinuableBackendUnsupportedError";
+      err.reasonCode = "continuable_backend_unsupported";
+      throw err;
+    };
+    const server = createWaoMcpServer({ registryPath, runDir: "/server/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatcher });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: {
+          agentId: "coder_low", prompt: "y", continuable: true,
+          delivery: { mode: "git_commit_v1", allowedPaths: ["src"], verificationCommands: ["node --test"] },
+        },
+      });
+      assert.equal(res.isError, true);
+      const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+      assert.match(text, /continuable_backend_unsupported/, "closed-set reason code surfaced");
+      assert.match(text, /does not declare provider session reuse/, "states the semantic why");
+      assert.match(text, /docs\/surface\/certification\.md/, "points at the generated capability projection");
+      assert.match(text, /registry sessionReuse is configuration, not capability/, "prevents the config-as-capability misread");
+      assert.match(text, /drop continuable/, "fixed actionable guidance");
+      assert.doesNotMatch(text, /run_dispatch failed/, "NOT the opaque generic dispatch text");
+      assert.doesNotMatch(text, /kimi-web|zcode|deepseek/, "no backend enumeration in the fixed text (lists drift)");
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); }
+});
+
+test("2026-10-04: CorrectableBackendUnsupportedError collapses to the fixed correctable_backend_unsupported text", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-corr-unsup-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = makeRegistry(dir, { coder_low: { backend: "claude-code", cwd: dir } });
+    const fakeDispatcher = async () => {
+      const err = new Error("dispatchRun: correctable requires a backend that declares supportsInFlightCorrection");
+      err.name = "CorrectableBackendUnsupportedError";
+      err.reasonCode = "correctable_backend_unsupported";
+      throw err;
+    };
+    const server = createWaoMcpServer({ registryPath, runDir: "/server/runs", workspaceRoot: dir, dispatchRunFn: fakeDispatcher });
+    const client = await buildInMemoryClient(server);
+    try {
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: { agentId: "coder_low", prompt: "y", correctable: true },
+      });
+      assert.equal(res.isError, true);
+      const text = res.content?.map((b) => b.text ?? "").join(" ") ?? "";
+      assert.match(text, /correctable_backend_unsupported/, "closed-set reason code surfaced");
+      assert.match(text, /does not declare in-flight correction/, "states the semantic why");
+      assert.match(text, /drop correctable/, "fixed actionable guidance");
+      assert.doesNotMatch(text, /run_dispatch failed/, "NOT the opaque generic dispatch text");
+    } finally { await client.close(); await server.close(); }
+  } finally { cleanupDir(dir); }
 });
