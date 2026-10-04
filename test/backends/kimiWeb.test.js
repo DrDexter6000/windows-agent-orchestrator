@@ -2309,3 +2309,39 @@ test("kimi-web ⑤ TD-197① 预算自放大（auditor FAIL 修复回归钉）�
   // poll4 静默 60（150——固定 60s 门的杀点，对照面）+ poll5 静默 90（180）≥ 90 收口。
   assert.equal(polls(), 5, "预算 3×30s=90s：poll4 的 60s 静默存活（固定门必杀），poll5 才收口");
 });
+
+// ── 2026-10-04 会审精度钉（consult_202610042037269516qqzn9）──────────────────
+// HTTP 状态失败是服务端语义答复，永不重试。旧瞬态判定按消息子串（"fetch failed"），
+// 而 HTTP 错误消息嵌着响应正文——401 正文恰含该词会被误判瞬态重试 GET。两钉都以
+// retries=2 证明预算零消耗（恰一次请求）。
+test("kimi-web ⑬a: GET 401（普通正文）→ 恰一次请求、错误含状态码——服务端答复非瞬态", async () => {
+  let attempts = 0;
+  const fetchImpl = async () => {
+    attempts += 1;
+    return new Response(JSON.stringify({ code: 40101, msg: "Unauthorized" }), {
+      status: 401, headers: { "content-type": "application/json" },
+    });
+  };
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 2000, retries: 2 });
+  await assert.rejects(
+    () => backend.request(makeAgent(), "http://127.0.0.1:1/api/v1/sessions/s/x"),
+    /401/,
+  );
+  assert.equal(attempts, 1, "401 不吃重试预算——恰一次请求");
+});
+
+test("kimi-web ⑬b: GET 401 且正文恰含 \"fetch failed\" → 仍恰一次请求（消息子串不再是瞬态依据）", async () => {
+  let attempts = 0;
+  const fetchImpl = async () => {
+    attempts += 1;
+    return new Response("upstream proxy said: fetch failed for route", {
+      status: 401, headers: { "content-type": "text/plain" },
+    });
+  };
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 2000, retries: 2 });
+  await assert.rejects(
+    () => backend.request(makeAgent(), "http://127.0.0.1:1/api/v1/sessions/s/x"),
+    /401/,
+  );
+  assert.equal(attempts, 1, "正文碰撞词不得把 401 变成瞬态——旧判定此处会重试");
+});

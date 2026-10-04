@@ -104,6 +104,10 @@ export function buildProviderReadiness(credentialAvailability) {
  */
 export function displayModel(agent) {
   if (typeof agent.model === "string") return agent.model;
+  // 轴向钉（2026-10-04 census）：此列表="model 为可选项的后端"（normalize 不强制
+  // model.id 的恰为五老进程族后端）；kimi-web/zcode 在 normalize 强制 model.id
+  // （缺席即派发前拒绝），故永不落入本回退——列表值今日正确，轴向以本注释+census
+  // 登记钉住（扩员时审视：新后端 model 可选则入列）。
   return agent.model?.id
     ?? (["claude-code", "codex", "kimi-code", "deepseek-harness", "deepseek-acp"].includes(agent.backend) ? "(default)" : "-");
 }

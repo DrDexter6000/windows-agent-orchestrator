@@ -92,6 +92,18 @@ metrics 投影断裂时第一时间红）。`CERTIFICATION_STATUSES` / required-
   Owner 判断，**不得当成等价解**——provider lane 只解模型面（backend 不变），不构成
   "指定 CLI 驱动 runtime" 需求的满足。
 
+**扩员同步面（add-a-backend sync surface，2026-10-04 事故固化——机器化）**：新
+backend 入列（Owner 决定，ADR-0028）时的同步义务不再是人脑记忆，由守卫机器化。同步面 =
+① src/backends/factory.js 构造分支（backendCapabilityMatrix 交叉钉）② src/registry.js
+normalize 必填字段（knownBackendsSsot 交叉钉）③ `test/isolation-infra/backendSwitchCensus.test.js`
+登记表——src/ 任何后端身份串消费点（字面比较/冻结集合/查表）都必须登记轴向意图，full-set
+消费点必须全知闭集（扩员即红）④ npm run gen:certification 再生成 docs/surface/
+certification.md ⑤ 本表加行 + 刷新注记 ⑥ 有 tokenEnv/credentialEnv 者：credentialReadiness
+探针面 + envPolicy 允许清单。事故背景：2026-10-04 continuable 解析器五后端手抄名单漂移
+（docs/incidents/2026-10-04-continuable-resolver-drift.md）——同步了①②④⑤仍漏了不在
+任何清单里的影子名单；census 守卫当天又抓获 modelFamily 缺 kimi-web、registryInventory
+硬编码列表两个同病实例。
+
 **操作食谱（只换模型时）**：改 provider 块（`baseUrl`/`apiKeyEnv`）→ 设 env（Windows User
 环境变量）→ smoke 首跑 → 承重前 delta 认证。认证档位规则与刷新触发面见 ADR-0029：同
 backend 换 model/provider → `--profile delta`；换 backend / 升主力 lane → 全量重跑

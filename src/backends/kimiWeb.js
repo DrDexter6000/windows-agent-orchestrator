@@ -842,10 +842,16 @@ export class KimiWebBackend {
             },
           });
           if (!response.ok) {
+            // 2026-10-04（会审 consult_202610042037269516qqzn9）：HTTP 状态失败打
+            // 标记——它是服务端语义答复，绝不属于传输瞬态。旧瞬态判定按消息子串
+            // （"fetch failed"），而本错误消息嵌着响应正文：401/5xx 正文若恰好含
+            // 该词会被误判瞬态而重试 GET。标记后重试判定显式排除 HTTP 状态错误。
             const text = await response.text();
-            throw new Error(
+            const err = new Error(
               `kimi web request failed ${response.status}: ${redactToken(text, token)}`,
             );
+            err.waoHttpStatus = response.status;
+            throw err;
           }
           if (response.status === 204) {
             return null;
@@ -886,7 +892,10 @@ export class KimiWebBackend {
           ? false
           : init.method === "POST"
             ? isConnRefused(error)
-            : (error.name === "AbortError" || isTransient(error));
+            // waoHttpStatus 在场 = 服务端已明确答复（含 401/404/5xx）——非传输
+            // 瞬态，永不重试（消息子串不可作为瞬态依据：正文可含任意词）。
+            : (error.name === "AbortError"
+              || (error.waoHttpStatus === undefined && isTransient(error)));
         if (!retryable || attempt === this.retries) break;
         await sleep(1000 * 2 ** attempt);
       }

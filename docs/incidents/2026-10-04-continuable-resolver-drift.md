@@ -53,4 +53,4 @@ kimi-web 还声明 `supportsInFlightCorrection = true`。
 组合零副作用钉（`test/mcp-surface/mcpRunDispatch.test.js` /
 `test/run-lifecycle/m12-7-runDispatchContinuable.test.js`）。方案会审：
 `consult_20261004192559512mefa3k`（auditor run_20261004192559513jnxvxo，五点修正
-全采纳）。无 TD 遗留。
+全采纳）。无 TD 遗留。防再生：后端身份串消费面 census 守卫（test/isolation-infra/backendSwitchCensus.test.js，扩员同步面清单见 docs/certification-runbook.md §接入新模型/新运行时）——守卫落地当天另抓获 modelFamily 缺 kimi-web、registryInventory 硬编码列表两个同病实例（均已处置）。

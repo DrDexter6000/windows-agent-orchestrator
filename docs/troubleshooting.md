@@ -491,6 +491,21 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **前置确认（运维规程）**：**主仓根跑全量前确认无活跃 worker/daemon**（`runs dashboard` / 活跃 run 检查）。交付 worktree 管道天然免疫（worktree 无 `runs/` ⇒ 空基线）。
 - **状态**：运维规程登记（TD-134）；根修（进程归属或隔离 run-dir）待真实痛点再立项。
 
+### 8.2a 短命宿主会话退出连坐杀 detached runner（2026-10-04 观察登记）
+
+- **症状**：从**短命宿主会话**（headless `zcode -p`、一次性 CI 脚本）经插件 MCP 派发后，
+  run 停在 submitted/pending 零进展；serve 侧 turn 可能早已完成，但 runner 进程已消失，
+  转录止于早期事件、无 run.error（启动/观察途中被杀）。
+- **机制**：对退出时会清理后代进程的宿主，detached/unref **不保证** runner 存活（runner
+  spawn 已是 detached:true + stdio ignore + unref，Node 侧无更多可做；宿主进程树清理
+  域覆盖子进程）。Job Object 具体配置与逐案因果未独立证实——记录观察形态，不写平台定律。
+- **运维处置**：**应在同一宿主会话内等待 run 终态**——短命会话用"单会话大回合"模式
+  （dispatch → run_await_result → 需要时 run_continue → collect，中间用 sleep 桥保活）。
+  CLI 后台派发的 detached runner 实测不受 Bash 退出影响（本仓 dogfood 先例）。
+- **证据**：run_20261004193908195llqx3k / run_20261004195105913txu7pc（两孤儿同因，
+  见 .dev/friction-log/2026-10-04-continuable-resolver-dogfood.md）。
+- **状态**：运维登记；不引入 broker/看门狗（会审 consult_202610042037269516qqzn9 裁定）。
+
 ### 8.3 `npm test` 波次挂死或长滞（TD-165 看门狗分诊）
 
 - **症状**：全量在某波长时间无进展；stderr 每 5 分钟一行 `[canonical] NOTICE: wave=<name> running for <N>s (slow-wave alarm, informational)`；或尾部出现 `watchdog backstop fired` / 文件 `crashReason: "watchdog_timeout"`。TD-165 之前一个挂死文件会让整个波次无限期停摆——现在三层看门狗已把无限等待变成有界等待并**指名肇事文件/波**。

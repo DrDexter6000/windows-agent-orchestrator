@@ -31,6 +31,7 @@
       "backends/zcode.test.js",
       "backends/providerSessionReuse.test.js",
       "isolation-infra/layering.test.js",
+      "isolation-infra/backendSwitchCensus.test.js",
       "run-lifecycle/m10pre3Deadline.test.js",
       "run-lifecycle/m10pre3RunManagerBehavior.test.js",
       "run-lifecycle/m10preCloseout3.test.js",

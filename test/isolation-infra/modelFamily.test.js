@@ -104,3 +104,13 @@ test("R9 守卫: 模块头声明展示专用非契约（防未来被当门控引
   assert.ok(text.includes("本表不是契约，展示专用"), "模块头必须声明展示专用非契约");
   assert.ok(text.includes("不得据此门控"), "模块头必须禁止据此门控");
 });
+
+// 2026-10-04 census 抓获补漏的行为钉：kimi-web 与 kimi-code 同族（同二进制同
+// K 血统）——缺席曾使 kimi-web 席族系显示 UNKNOWN。zcode 有意 UNKNOWN
+// （多 provider 宿主，无单一族系缺省——见 modelFamily.js 表注）。
+test("2026-10-04: kimi-web 后端兜底族系 = kimi（census 补漏）；zcode 兜底 = 诚实 UNKNOWN", () => {
+  assert.equal(modelFamilyOf({ backend: "kimi-web" }), "kimi",
+    "kimi-web 席位 modelId 不可解析时兜底到 kimi 族（与 kimi-code 同族）");
+  assert.equal(modelFamilyOf({ backend: "zcode" }), UNKNOWN_FAMILY,
+    "zcode 多 provider 宿主无单一缺省族系——UNKNOWN 是诚实值，不是漏登");
+});

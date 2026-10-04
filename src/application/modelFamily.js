@@ -22,10 +22,14 @@ const KNOWN_FAMILIES = Object.freeze([
   "deepseek", "glm", "kimi", "claude", "gpt", "gemini", "qwen", "llama", "mistral", "codex",
 ]);
 
-/** 无 model 块时的 backend → 族系兜底表（可推断 provider 族系的 backend 才列）。 */
+/** 无 model 块时的 backend → 族系兜底表（可推断 provider 族系的 backend 才列）。
+ * 2026-10-04 census 抓获补漏：kimi-web 与 kimi-code 同族（同二进制同 K 血统），
+ * 缺席曾使 kimi-web 席族系显示 UNKNOWN。zcode 有意不列：多 provider 宿主
+ * （桌面可切换 provider），无单一族系缺省——modelId 不可解析时 UNKNOWN 是诚实。 */
 const BACKEND_FAMILY_FALLBACK = Object.freeze({
   "claude-code": "claude",
   "kimi-code": "kimi",
+  "kimi-web": "kimi",
   "deepseek-harness": "deepseek",
   "deepseek-acp": "deepseek",
   "codex": "codex",
