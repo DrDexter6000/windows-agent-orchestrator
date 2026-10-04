@@ -807,7 +807,9 @@ export class KimiWebBackend {
   /**
    * 统一请求门：镜像 opencodeServe.request 的超时/重试/204 处理，外加 kimi web
    * 的 {code,msg,data} 信封判定——非 2xx 或 body.code!==0 都算失败（抛含 msg 的
-   * 错误）。Bearer 头从 process.env[agent.tokenEnv] **每次请求**解析（不缓存）。
+   * 错误）。Bearer 解析两级（2026-10-04 会审 coder_mm 纠正的陈旧注释）：优先
+   * spawn 捕获的桥接槽 SPAWN_BRIDGED_BEARER（task.resolvedCredentials，每 run
+   * 一次），缺失再读 process.env[agent.tokenEnv]，双缺抛固定安全错误（:899）。
    * 重试策略（#8）：GET 幂等，保持既有瞬态重试（超时/ECONNRESET/fetch
    * failed）；POST 非幂等（建会话/提交 prompt/steer），只在 ECONNREFUSED（连接
    * 未建立、服务器确定未收到）时重试——超时/ECONNRESET/fetch failed 的 POST 一律

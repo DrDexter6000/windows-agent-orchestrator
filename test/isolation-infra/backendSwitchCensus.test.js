@@ -104,7 +104,6 @@ const REGISTERED_CENSUS = {
   "application/runStop.js": { "opencode-serve": 3 },
   "backends/deepSeekAcp.js": { "deepseek-acp": 1 },
   "backends/deepSeekHarness.js": { "deepseek-harness": 1 },
-  "backends/factory.js": { "kimi-web": 3, "opencode-serve": 2, "claude-code": 2, codex: 1, "kimi-code": 2, "deepseek-harness": 2, "deepseek-acp": 2, zcode: 2 },
   "backends/kimiWeb.js": { "kimi-web": 1 },
   "backends/opencodeServe.js": { "opencode-serve": 1 },
   "backends/zcode.js": { zcode: 1 },
@@ -114,30 +113,38 @@ const REGISTERED_CENSUS = {
   "envPolicy.js": { "claude-code": 3, "kimi-code": 1, "deepseek-harness": 2, "deepseek-acp": 2, zcode: 1, "opencode-serve": 1, "kimi-web": 1 },
   "hostAdapters/codexMcpConfig.js": { codex: 3 },
   "hostAdapters/hostDescriptors.js": { "claude-code": 1, codex: 1, zcode: 1 },
-  "registry.js": { "opencode-serve": 2, "claude-code": 2, codex: 2, "kimi-code": 2, "deepseek-harness": 2, "deepseek-acp": 2, "kimi-web": 2, zcode: 2 },
   "smoke.js": { "opencode-serve": 4, "claude-code": 4, codex: 6, "deepseek-harness": 1 },
 };
 
-test("census 正身：src/ 后端身份串普查逐文件逐名字逐次数等于登记表", () => {
+test("census 正身：src/ 后端身份串普查逐文件逐名字逐次数等于登记表（full-set 两文件豁免抄件）", () => {
   const files = [];
   walkJs(SRC_ROOT, files);
   const rel = {};
   const prefixLen = SRC_ROOT.length + 1;
   for (const f of files) rel[f.slice(prefixLen).replace(/\\/g, "/")] = readFileSync(f, "utf8");
   const actual = extractIdentityCensus(rel, [...KNOWN_BACKENDS]);
-  assert.deepEqual(
-    actual,
-    REGISTERED_CENSUS,
-    "src/ 后端身份串消费面与登记表不符——新消费点必须登记轴向意图（或改走 SSOT），"
+  // 精化（coder_mm 会审 consult_20261004204955653fko0i0）：full-set-SSOT 两文件
+  // （backends/factory.js、registry.js）不进登记表抓名单副本——登记表若嵌入它们
+  // 的名字副本，本身就是"第二份手抄真值"病；其成员覆盖由下方 full-set 钉从
+  // 真实文件内容派生并与 KNOWN_BACKENDS 机械比对（名单唯一出处仍是
+  // src/registry.js）。
+  const FULL_SET_FILES = ["backends/factory.js", "registry.js"];
+  const expectedKeys = [...Object.keys(REGISTERED_CENSUS), ...FULL_SET_FILES].sort();
+  assert.deepEqual(Object.keys(actual).sort(), expectedKeys,
+    "普查文件集 = 登记表 ∪ full-set 两文件——新消费点必须登记轴向意图（或改走 SSOT），"
       + "扩员必须同步 factory/registry 的 full-set 面。见本文件头注与 "
-      + "docs/certification-runbook.md §扩员同步面。",
-  );
+      + "docs/certification-runbook.md §扩员同步面。");
+  for (const [file, per] of Object.entries(actual)) {
+    if (FULL_SET_FILES.includes(file)) continue;
+    assert.deepEqual(per, REGISTERED_CENSUS[file], `${file} 的身份串多重集与登记表不符`);
+  }
 });
 
-test("census full-set 钉：factory 与 registry 的身份串必须覆盖每个 KNOWN_BACKENDS 成员（扩员即红）", () => {
+test("census full-set 钉：factory 与 registry 的身份串必须覆盖每个 KNOWN_BACKENDS 成员（扩员即红；派生不抄名单）", () => {
+  // 从真实 src 文件内容派生（不读登记表——名单唯一出处 = KNOWN_BACKENDS）。
   for (const file of ["backends/factory.js", "registry.js"]) {
-    const per = REGISTERED_CENSUS[file];
-    assert.ok(per, `${file} 在登记表内`);
+    const content = readFileSync(join(SRC_ROOT, file), "utf8");
+    const per = extractIdentityCensus({ [file]: content }, [...KNOWN_BACKENDS])[file] ?? {};
     for (const name of KNOWN_BACKENDS) {
       assert.ok((per[name] ?? 0) >= 1,
         `${file} 缺 "${name}" —— full-set-SSOT 消费点必须全知闭集（扩员时同步，否则本钉即红）`);

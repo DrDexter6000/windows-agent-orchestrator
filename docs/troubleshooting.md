@@ -18,6 +18,7 @@
 | worker 报 401 "身份验证失败" | [§1.2 serve 进程缺 key](#12-serve-进程缺-provider-key-401) |
 | worker 静默无响应（无 error 无 message） | [§1.3 Kimi 白名单](#13-kimi-白名单静默拒绝) |
 | `run_continue` 拒 `no_provider_session`（Kimi/Codex continuable 父 run） | [§1.7 TD-188](#17-run_continue-返回-no_provider_sessionkimicodex-continuable-父-runtd-188) |
+| run 无声悬置、转录停在派发+1h（短命宿主派发形态） | [§4.5](#45-run-无声悬置后被宿主-3600s-收尸短命宿主派发形态2026-10-04) |
 | 长文档/大文件写入期间摘要不变，分不清在推进还是卡死 | [§6.8 双维度判读](#68-长文档大文件写入期间摘要不变分不清在推进还是卡死td-113--round4-f-2-关单) |
 | opencode TUI 能用但 WAO 不能 | [§1.2](#12-serve-进程缺-provider-key-401) 或 [§1.3](#13-kimi-白名单静默拒绝) |
 | 多行 prompt 被截断（只传第一行） | [§2 CLI 与 shell](#2-cli-与-shell) |
@@ -281,6 +282,23 @@ git -C <worktreeRoot> diff > "%TEMP%\\<runId>-wip.patch"
 
 边界：本配方是**人工采纳**，不自动接受任何 WIP；价值判断完全归 Lead。**归档/清理历史 runs 前的固定步骤 = 确认无可抢救 WIP**（与 TD-156 保留策略联动）。下次真实死亡时顺手核对既有通道覆盖面，缺口确凿再评估专用命令（runs salvage 立项与否）。
 
+### 4.5 run 无声悬置后被宿主 +3600s 收尸（短命宿主派发形态，2026-10-04）
+
+- **症状**：从**短命宿主会话**（headless `zcode -p`、一次性脚本）经插件 MCP 派发后，run
+  停在早期事件零进展；转录 mtime 恰好停在**派发+3600s**；无 run.error、无 .owner 心跳
+  （spawn 前挂死形态）或心跳活到收尸一刻（spawn 后挂死形态）。
+- **时间线（双案实测，coder_mm 会审核验）**：run_20261004193908195llqx3k（挂死于
+  createSession 内、30s abort 未击发）与 run_20261004195105913txu7pc（serve 15s 完成但
+  完成判定/停滞出口未击发、心跳活满一小时）均在**派发+3600s 整**被外部进程树清理收尸
+  ——宿主清理域对后代是延迟收割（观察值 1 小时），早退会话不是即杀而是延迟杀。
+  挂死根因未解（TD 立案：Node fetch+abort 在分离进程对健康/死连接两个受控复现均正常
+  击发——见 tech-debt.md 对应行）；+3600s 收割者身份未定位。
+- **运维处置**：短命会话用"单会话大回合"保活（dispatch → run_await_result → 需要时
+  run_continue → collect，sleep 桥保活到终态）；CLI 后台派发的 detached runner 实测
+  不受 shell 退出影响。诊断顺序：先看 .owner 心跳（P2′ 起入口起拍——活心跳+零转录
+  进展=spawn 前挂死；无心跳+转录残缺=同形态）再查转录 mtime 与派发时刻差。
+- **状态**：观察登记（双案+复现阴性结果入 TD）；不引入 broker/看门狗（会审裁定）。
+
 ## 5. 证据完整性
 
 ### 5.1 metrics 提取（已修复）
@@ -490,21 +508,6 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **根因**：runs-guard 对 `runs/` 做基线-现状差分但**不做进程归属**——套件运行期间任何非套件写入者（活跃 daemon 追加 daemon-health、另一会话的 MCP dispatch、手动 `wao run`）落地的新条目都触发同一红灯。真实归因是"另一会话的 dispatch"，不是"测试写入"，但红灯文案无法区分。
 - **前置确认（运维规程）**：**主仓根跑全量前确认无活跃 worker/daemon**（`runs dashboard` / 活跃 run 检查）。交付 worktree 管道天然免疫（worktree 无 `runs/` ⇒ 空基线）。
 - **状态**：运维规程登记（TD-134）；根修（进程归属或隔离 run-dir）待真实痛点再立项。
-
-### 8.2a 短命宿主会话退出连坐杀 detached runner（2026-10-04 观察登记）
-
-- **症状**：从**短命宿主会话**（headless `zcode -p`、一次性 CI 脚本）经插件 MCP 派发后，
-  run 停在 submitted/pending 零进展；serve 侧 turn 可能早已完成，但 runner 进程已消失，
-  转录止于早期事件、无 run.error（启动/观察途中被杀）。
-- **机制**：对退出时会清理后代进程的宿主，detached/unref **不保证** runner 存活（runner
-  spawn 已是 detached:true + stdio ignore + unref，Node 侧无更多可做；宿主进程树清理
-  域覆盖子进程）。Job Object 具体配置与逐案因果未独立证实——记录观察形态，不写平台定律。
-- **运维处置**：**应在同一宿主会话内等待 run 终态**——短命会话用"单会话大回合"模式
-  （dispatch → run_await_result → 需要时 run_continue → collect，中间用 sleep 桥保活）。
-  CLI 后台派发的 detached runner 实测不受 Bash 退出影响（本仓 dogfood 先例）。
-- **证据**：run_20261004193908195llqx3k / run_20261004195105913txu7pc（两孤儿同因，
-  见 .dev/friction-log/2026-10-04-continuable-resolver-dogfood.md）。
-- **状态**：运维登记；不引入 broker/看门狗（会审 consult_202610042037269516qqzn9 裁定）。
 
 ### 8.3 `npm test` 波次挂死或长滞（TD-165 看门狗分诊）
 

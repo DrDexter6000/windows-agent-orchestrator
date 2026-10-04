@@ -101,6 +101,16 @@ export async function runBackground(opts = {}) {
   if (!prompt) throw new Error("runBackground: prompt required");
   if (!runDir) throw new Error("runBackground: runDir required");
 
+  // P2′（2026-10-04 双席会审 coder_mm，consult_20261004204955653fko0i0）：心跳
+  // 前置到进程入口。旧实现等 manager.start() 返回才起拍——spawn 前阶段（registry
+  // 读取 / 凭据桥 / worktree / backend 首个请求）挂死时零观察面：llqx3k 实证转录
+  // 止于 6 事件、无 .owner 文件、run.error 缺席，一小时后被外部 +3600s 收尸。
+  // 前置后"活进程 + 零转录进展"成为可观察形态（daemon 判活/runs 巡检可见），
+  // 而不是无痕消失。start() 返回后的既有起拍位保留一次即时刷新（幂等写）。
+  writeOwnerHeartbeat(runDir, runId);
+  const heartbeatTimer = setInterval(() => writeOwnerHeartbeat(runDir, runId), OWNER_HEARTBEAT_INTERVAL_MS);
+  heartbeatTimer.unref?.();
+
   // TD-90: Windows 上指向 scripts/wao-cli.cmd（v22 shim），避免 worker shell 默认 v24 触发 guard
   const waoCliPath = getWaoCliPath();
   // registry 可是路径（生产）或对象（测试注入）。对象时构造一个内存 readRegistry。
@@ -196,6 +206,9 @@ export async function runBackground(opts = {}) {
     });
   } catch (error) {
     await writeStartupFailureTranscript({ runDir, runId, agentId, prompt, error });
+    // P2′：入口起拍的心跳在此路径必须回收（失败也是终态——owner 不再存活）。
+    clearInterval(heartbeatTimer);
+    clearOwner(runDir, runId);
     return {
       runId,
       completed: false,
@@ -206,9 +219,8 @@ export async function runBackground(opts = {}) {
   }
 
   // D-F3：写 ownership 心跳（daemon resume 判活用），存活期间更新，finally 删。
+  // P2′：起拍已前置到函数入口（spawn 前阶段可观察）；此处保留一次即时刷新。
   writeOwnerHeartbeat(runDir, run.runId);
-  const heartbeatTimer = setInterval(() => writeOwnerHeartbeat(runDir, run.runId), OWNER_HEARTBEAT_INTERVAL_MS);
-  heartbeatTimer.unref?.();
 
   let waitResult;
   try {
@@ -252,6 +264,12 @@ export async function runResumeBackground(opts = {}) {
   if (!runId) throw new Error("runResumeBackground: runId required");
   if (!runDir) throw new Error("runResumeBackground: runDir required");
 
+  // P2′：心跳前置到入口（与 runBackground 同款——resume 的 start 前阶段同有
+  // 挂死观察盲区）。
+  writeOwnerHeartbeat(runDir, runId);
+  const heartbeatTimer = setInterval(() => writeOwnerHeartbeat(runDir, runId), OWNER_HEARTBEAT_INTERVAL_MS);
+  heartbeatTimer.unref?.();
+
   const waoCliPath = getWaoCliPath();
   const registryResolver = typeof opts.registry === "object" && opts.registry !== null
     ? makeObjectRegistry(opts.registry)
@@ -284,10 +302,14 @@ export async function runResumeBackground(opts = {}) {
   try {
     run = await manager.resume(runId, {});
   } catch (e) {
+    clearInterval(heartbeatTimer);
+    clearOwner(runDir, runId);
     await appendDurableResumeFailure(runId, runDir, "resume threw before handle attach");
     throw e;
   }
   if (!run) {
+    clearInterval(heartbeatTimer);
+    clearOwner(runDir, runId);
     await appendDurableResumeFailure(runId, runDir, "resume refused (terminal/not found/authority missing)");
     return {
       runId,
@@ -300,9 +322,8 @@ export async function runResumeBackground(opts = {}) {
   }
 
   // D-F3：与 runBackground 同款 ownership 心跳（daemon resume 判活用）。
+  // P2′：起拍已前置到函数入口；此处保留一次即时刷新。
   writeOwnerHeartbeat(runDir, run.runId);
-  const heartbeatTimer = setInterval(() => writeOwnerHeartbeat(runDir, run.runId), OWNER_HEARTBEAT_INTERVAL_MS);
-  heartbeatTimer.unref?.();
 
   let waitResult;
   try {

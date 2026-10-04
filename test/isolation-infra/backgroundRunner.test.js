@@ -392,3 +392,36 @@ test("R4: runBackground readOnly → isolated run + exactly-one declaration; wri
   }
 });
 // test/backgroundRunner.test.js
+// P2′（2026-10-04 双席会审 coder_mm，consult_20261004204955653fko0i0）：心跳前置
+// 到进程入口。旧实现等 manager.start() 返回才起拍——spawn 前阶段挂死零观察面
+//（llqx3k 实证：无 .owner、run.error 缺席、+3600s 外部收尸无痕）。本钉：backend
+// spawn 永挂时，.owner-<runId> 必须在 start 返回前就可见（入口起拍的观察语义）。
+test("P2′ runBackground: spawn 永挂 → .owner 心跳先于 start 返回可见（入口起拍钉）", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "wao-bg-hb-"));
+  const runId = "run_hbentry00000000000x";
+  const never = runBackground({
+    agentId: "hb_hang",
+    prompt: "hang",
+    registry: { agents: { hb_hang: { backend: "opencode-serve", serveUrl: "http://127.0.0.1:4299", agent: "build", cwd: dir, model: { providerID: "p", id: "m" }, completionMode: "first-stable" } } },
+    runDir: dir,
+    runId,
+    fetchImpl: makeMockFetch(),
+    // backendFor 注入：spawn 返回永挂 promise（复刻 llqx3k 的 spawn 前挂死形态）。
+    backendFor: () => ({
+      spawn: () => new Promise(() => {}),
+      validateAgentPolicy() {},
+    }),
+    pollInterval: 10,
+  });
+  try {
+    // 不 await never——断言窗口内（入口起拍 = 毫秒级）文件必须在场。轮询上界 2s。
+    let seen = false;
+    for (let i = 0; i < 200 && !seen; i += 1) {
+      seen = existsSync(path.join(dir, `.owner-${runId}`));
+      if (!seen) await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.ok(seen, "spawn 挂死期间 .owner 心跳可见（入口起拍）——llqx3k 形态从无痕变可观察");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
