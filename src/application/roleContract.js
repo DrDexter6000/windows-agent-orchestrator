@@ -42,6 +42,7 @@ import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
+import { createHash } from "node:crypto";
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
 
 // WAO installation/repo root, derived from this module's URL
@@ -52,6 +53,21 @@ const WAO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /** Maximum acceptable role contract size (bytes). */
 export const ROLE_CONTRACT_MAX_BYTES = 4096;
+
+/**
+ * 0045 §1.3（角色钉住）：角色合同正文的内容指纹（sha256 hex）。
+ *
+ * 用途：start 时把 {systemPrompt 相对路径, sha256} 钉进 run.started；resume 从
+ * 钉住值重建并校验——派发后改角色文件或改注册表指向，续跑必须 fail-closed
+ * 而非静默换身份（R1 会审 coder_mm 抓的洞；修复=P1 增量，纯加性：无
+ * systemPrompt 的派发不产生钉，run.started 字节不变）。
+ *
+ * @param {string} content — loadRoleContract 返回的原始正文（身份头组装前）
+ * @returns {string} sha256 hex
+ */
+export function roleContractSha256(content) {
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
 
 // C0 control chars except TAB (0x09), LF (0x0A), CR (0x0D); plus DEL (0x7F)
 // and C1 (0x80-0x9F). These are rejected because they break downstream

@@ -11,7 +11,7 @@ import { assessRunEvidence } from "./runEvidenceAssessment.js";
 import { createSecretRedactor } from "./secretRedaction.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError } from "./delivery.js";
 import { verifyDelivery as defaultVerifyDelivery, createCallerGate } from "./deliveryVerification.js";
-import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecutionContract } from "./application/roleContract.js";
+import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecutionContract, roleContractSha256 } from "./application/roleContract.js";
 import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./application/credentialReadiness.js";
 import { inheritedEnvNames } from "./envPolicy.js";
 import { validateSessionReuseRouting, resolvePriorProviderSessionId, PROVIDER_SESSION_BOUND_EVENT } from "./application/sessionReuse.js";
@@ -775,6 +775,7 @@ export class RunManager {
     // 角色。（注意：worker 输出可能在回答中引用或复述角色，这由模型决定，
     // 不是 WAO 持久化角色正文。）
     let roleContract = undefined;
+    let rolePin = undefined;
     if (agent.systemPrompt) {
       if (backend.supportsRoleContract !== true) {
         throw new Error(
@@ -782,8 +783,13 @@ export class RunManager {
           `Remove systemPrompt from this agent, or switch to a backend that declares supportsRoleContract.`
         );
       }
+      const rawRoleContent = loadRoleContract(agent.systemPrompt);
+      // 0045 §1.3 角色钉住：把 {registry 声明的相对路径, 正文 sha256} 作为派发
+      // 时刻的事实钉进 run.started——resume 据此重建并校验（fail-closed），不再
+      // 从当前注册表重读。无 systemPrompt 的派发不产生钉（载荷字节不变）。
+      rolePin = { systemPrompt: agent.systemPrompt, sha256: roleContractSha256(rawRoleContent) };
       roleContract = composeRoleContractWithIdentity({
-        roleContract: loadRoleContract(agent.systemPrompt),
+        roleContract: rawRoleContent,
         agentId,
       });
     }
@@ -1222,6 +1228,10 @@ export class RunManager {
       ...(reasoningOverride !== null && reasoningOverride !== undefined
         ? { reasoningOverride }
         : {}),
+      // 0045 §1.3 角色钉住：派发时刻的角色事实（registry 声明路径 + 正文
+      // sha256）。resume 从此钉重建并校验——改注册表指向或改角色文件后续跑
+      // fail-closed，不再静默换身份。无角色派发缺席（字节兼容）。
+      ...(rolePin ? { rolePin } : {}),
       scorecardConfigured: Boolean(scorecardRules),
       ...(tagsPayload ? { tags: tagsPayload } : {}),
       ...(deliveryContext ? {
@@ -1607,19 +1617,50 @@ export class RunManager {
     // （不再静默 return null）——resume 不能假装成功然后丢掉角色。错误是固定
     // 安全形状。这里在 spawn/attach 前拒绝，spawn 计数为 0、transcript 字节不变。
     // Package C2 严格性：只有 supportsRoleContract === true 才允许（truthy 非-true 拒绝）。
-    let resumeRoleContract = undefined;
-    if (agent.systemPrompt) {
+    //
+    // 0045 §1.3 角色钉住：**钉优先**——run.started 带 rolePin 的 run，从钉住
+    // 路径加载并校验 sha256，**不看当前注册表**（防派发后改配置静默换身份；
+    // 当前注册表 systemPrompt 已 unset 的钉住 run 也照常加载——防静默丢角色）。
+    // 正文漂移（文件被改）→ 具名 fail-closed（role_contract_drift，零 respawn、
+    // transcript 字节不变）。无钉（legacy 档案）→ 原行为逐字保留（从当前注册表
+    // 读；切换批的遗留五态再收紧）。
+    let resumeRoleSource = undefined;
+    const resumeRolePin = runStarted?.rolePin;
+    if (resumeRolePin && typeof resumeRolePin === "object"
+      && typeof resumeRolePin.systemPrompt === "string"
+      && typeof resumeRolePin.sha256 === "string") {
+      if (backend.supportsRoleContract !== true) {
+        throw new Error(
+          `Agent ${transcript.context.agentId}: the pinned role contract requires role contract injection, ` +
+          `but the selected backend does not support it. ` +
+          `Remove systemPrompt from this agent, or switch to a backend that declares supportsRoleContract.`
+        );
+      }
+      const pinnedRaw = loadRoleContract(resumeRolePin.systemPrompt);
+      if (roleContractSha256(pinnedRaw) !== resumeRolePin.sha256) {
+        throw new Error(
+          `role_contract_drift: the role contract pinned at dispatch (${resumeRolePin.systemPrompt}) has changed (sha256 mismatch); ` +
+          `refusing to resume with a different role identity. Restore the pinned file content or start a new run.`
+        );
+      }
+      resumeRoleSource = pinnedRaw;
+    } else if (agent.systemPrompt) {
       if (backend.supportsRoleContract !== true) {
         throw new Error(
           `Agent ${transcript.context.agentId}: systemPrompt is configured but the selected backend does not support role contract injection. ` +
           `Remove systemPrompt from this agent, or switch to a backend that declares supportsRoleContract.`
         );
       }
-      resumeRoleContract = composeRoleContractWithIdentity({
-        roleContract: loadRoleContract(agent.systemPrompt),
+      resumeRoleSource = loadRoleContract(agent.systemPrompt);
+    }
+    // 单点组装（WQ-GRN-07：composeRoleContractWithIdentity 全仓恰 start+resume
+    // 两处调用——钉优先与 legacy 两分支只决定"源"，不复制组装点）。let：
+    // 下方交付续跑块会把交付执行合同前置重组（M11-8C Gap A）。
+    let resumeRoleContract = resumeRoleSource === undefined ? undefined
+      : composeRoleContractWithIdentity({
+        roleContract: resumeRoleSource,
         agentId: transcript.context.agentId,
       });
-    }
 
     // M11-8C closeout (Gap A): a DELIVERY run that resumes MUST re-inject the
     // control-plane-owned Delivery Execution Contract — the same contract the
