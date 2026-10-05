@@ -421,3 +421,34 @@ test("BOARD R8 A11Y NON-TEXT: seat track colors + focus outline >= 3:1 against t
   const accent = cssVar(css, "accent");
   assert.ok(contrast(accent, surface) >= 3, "focus outline accent >= 3:1");
 });
+
+
+// ── 0045 §1.4：explicit（车道+角色组合）run 的独立泳道 ────────────────────────
+
+test("boardLanes 0045：explicit run 进自己的 lane/role 泳道（不占接线席位泳道）；alias 注解随席位", () => {
+  const runs = [
+    { runId: "run_a", agentId: "coder_low", state: "completed", terminal: true },
+    { runId: "run_b", agentId: "coder_low", state: "completed", terminal: true, resolvedFrom: "explicit", laneId: "glm-flash", roleId: "researcher" },
+    { runId: "run_c", agentId: "researcher", state: "completed", terminal: true, resolvedFrom: "alias", laneId: "glm-flash", roleId: "researcher" },
+  ];
+  const lanes = app.boardLanes(runs);
+  const keys = lanes.map((l) => l.agentId);
+  assert.ok(keys.includes("coder_low"), "接线席位泳道仍在");
+  assert.ok(keys.includes("glm-flash/researcher"), "explicit 泳道=lane/role");
+  assert.ok(keys.includes("researcher"), "alias 注解 run 随席位泳道（H1 注解不执行）");
+  const explicitLane = lanes.find((l) => l.agentId === "glm-flash/researcher");
+  assert.equal(explicitLane.isExplicit, true);
+  assert.deepEqual(explicitLane.runs.map((r) => r.runId), ["run_b"]);
+  const wiringLane = lanes.find((l) => l.agentId === "coder_low");
+  assert.deepEqual(wiringLane.runs.map((r) => r.runId), ["run_a"], "explicit run 不占接线席位泳道");
+});
+
+test("boardLanes 0045：explicit 字段残缺（缺 laneId/roleId）→ 回落席位泳道不炸", () => {
+  const runs = [
+    { runId: "run_x", agentId: "coder_low", state: "completed", terminal: true, resolvedFrom: "explicit", laneId: null },
+  ];
+  const lanes = app.boardLanes(runs);
+  assert.equal(lanes.length, 1);
+  assert.equal(lanes[0].agentId, "coder_low");
+  assert.equal(lanes[0].isExplicit, false);
+});

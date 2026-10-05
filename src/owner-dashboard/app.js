@@ -974,12 +974,19 @@ export function boardLanes(runs) {
   const bySeat = new Map();
   for (const r of arr) {
     if (!r || typeof r.runId !== "string" || r.runId.length === 0) continue;
-    const key = isUnknownAgent(r.agentId) ? BOARD_UNKNOWN_LANE : r.agentId;
-    if (!bySeat.has(key)) bySeat.set(key, []);
-    bySeat.get(key).push(r);
+    // 0045 §1.4：explicit（车道+角色组合）run 进自己的 lane/role 泳道——不再错坐
+    // 接线席位的泳道（其 agentId 是接线事实而非身份；alias 注解 run 仍随席位泳道）。
+    const explicitKey = r.resolvedFrom === "explicit"
+      && typeof r.laneId === "string" && r.laneId.length
+      && typeof r.roleId === "string" && r.roleId.length
+      ? `${r.laneId}/${r.roleId}` : null;
+    const key = explicitKey ?? (isUnknownAgent(r.agentId) ? BOARD_UNKNOWN_LANE : r.agentId);
+    if (!bySeat.has(key)) bySeat.set(key, { runs: [], isExplicit: explicitKey !== null });
+    bySeat.get(key).runs.push(r);
   }
   const lanes = [];
-  for (const [agentId, laneRuns] of bySeat) {
+  for (const [agentId, entry] of bySeat) {
+    const laneRuns = entry.runs;
     const cards = laneRuns.slice().sort((a, b) => {
       const at = a.terminal === true ? 1 : 0;
       const bt = b.terminal === true ? 1 : 0;
@@ -990,7 +997,7 @@ export function boardLanes(runs) {
     });
     let latest = -1;
     for (const r of laneRuns) { const t = boardRunMs(r); if (t > latest) latest = t; }
-    lanes.push({ agentId, isUnknown: agentId === BOARD_UNKNOWN_LANE, latestMs: latest, runs: cards });
+    lanes.push({ agentId, isUnknown: agentId === BOARD_UNKNOWN_LANE, isExplicit: entry.isExplicit, latestMs: latest, runs: cards });
   }
   lanes.sort((a, b) => {
     if (a.isUnknown !== b.isUnknown) return a.isUnknown ? 1 : -1;  // unknown lane last
@@ -1517,6 +1524,13 @@ function boardLaneNode(state, lane, slots) {
     const note = document.createElement("span");
     note.className = "lane-note";
     note.textContent = "not a real seat — identity not registry-verified or the seat was removed";
+    head.appendChild(note);
+  }
+  if (lane.isExplicit) {
+    // 0045 §1.4：显式组合泳道（lane/role）——不是席位，是"这条车道戴这顶帽子"的派发身份。
+    const note = document.createElement("span");
+    note.className = "lane-note";
+    note.textContent = "explicit lane/role dispatch — not a seat";
     head.appendChild(note);
   }
   section.appendChild(head);
