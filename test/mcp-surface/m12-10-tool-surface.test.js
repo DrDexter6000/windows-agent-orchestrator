@@ -647,9 +647,10 @@ const RED_23_WIRE = 75492;
 // 两工具的 lane/role schema 条目），按 re-freeze-at-measured 制度重冻。
 // Owner 2026-10-05 授权（"改扩展就扩展"+0045 签署）覆盖本增量；距授权顶
 // 85939 余 2578B。
-// 0045 W4d 重冻（2026-10-05）：run_dispatch/run_dispatch_contract_check 的 agentId
-// 入参语义更新为车道键派发目标（描述/共享 schema 微调，实测 83361 → 83403，+42B）。
-const FROZEN_23_WIRE_CEILING = 83403;
+// 0045 窗口门重冻（2026-10-05）：run_consult 出参镜像补 W3d/W4c 成员（seats 四
+// 枚举/runtimeFacts registryResolution/bricks authorLaneInSeats——strict 镜像同步），
+// 实测 83403 → 84111（+708B）。距 Owner 授权顶 85939 余 1828B。
+const FROZEN_23_WIRE_CEILING = 84111;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -821,9 +822,9 @@ test("M12-10-H: deterministic 23-tool wire at or below the frozen ceiling", asyn
 // losslessness proof.
 // 0045 §1.4 第 5 步（2026-10-05）：run_dispatch/contract_check 共享入参加
 // lane/role（schema 在 stripped 载荷内），SHA 如实变（无损证明语义不变）。
-// 0045 W4d（2026-10-05）：入参 schema 语义更新——SHA 如实翻新（无损证明语义不变）。
+// 0045 窗口门（2026-10-05）：run_consult 出参镜像成员补齐——SHA 如实翻新。
 const DESC_STRIPPED_CONTRACT_SHA =
-  "613dd2f356fa926309a791a9a1a9fe5f77527899dd591bd302b6c9d19356b5b8";
+  "1bdb82e4388dc77ed56c996718e8d2f5132306fd1ae579871fb49033eddc1f3e";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;
