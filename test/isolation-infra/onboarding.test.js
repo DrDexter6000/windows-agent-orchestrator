@@ -2239,7 +2239,10 @@ test("R11-2 0024 已配置面全有效：表头混合句 N/M + registry 顺序�
     agents: {
       // 同 id coder_low 与模板 backend/model 一致 → 不判 drift；registry 顺序 = 展示顺序。
       coder_hq: privEntry("claude-code", "glm-5.3[1m]", "ZHIPU_API_KEY", { seatRole: "implementation" }),
-      coder_low: privEntry("claude-code", "deepseek-v4-flash", "DEEPSEEK_API_KEY", { seatRole: "implementation" }),
+      // d′（决定 0044）：effort 入 drift 闭集——"同值不判"的夹具须在新闭集上真同值
+      //（模板 coder_low reasoning.effort=max，私有侧补齐；无 effort 的私有席位对
+      // 有 effort 的模板行现在如实判 drift，这正是 10-05 漏面要的可见性）。
+      coder_low: privEntry("claude-code", "deepseek-v4-flash", "DEEPSEEK_API_KEY", { seatRole: "implementation", reasoning: { effort: "max" } }),
     },
   };
   const { result } = await memRun({
@@ -2569,4 +2572,59 @@ test("TD-191②: host-neutral 片段的 argv 能真启动 stdio server（scratch
   await new Promise((r) => child.once("exit", r));
   rmSync(runDir, { recursive: true, force: true });
   assert.ok(booted, "片段 argv 启动的 stdio server 应在 1.8s 后仍存活（启动即崩 = 片段不可用）");
+});
+
+// ── d′（决定 0044，2026-10-05）：drift 闭集扩展的正向钉 ──────────────────────
+// 10-05 两起漏面的对应可见面：①effort 维（auditor effort 调整旧闭集不可见）；
+// ②认证矩阵行 modelId 维（live①②↔模板③）。drift 仍是纯展示事实（信息非错误）。
+test("d′ ①: 仅 effort 不同（backend/model 同）→ 判 drift 且 templateEffort 在场（auditor 10-05 形态）", async () => {
+  const priv = {
+    agents: {
+      coder_low: privEntry("claude-code", "deepseek-v4-flash", "DEEPSEEK_API_KEY", {
+        seatRole: "implementation",
+        reasoning: { effort: "high" }, // 模板 coder_low = max → effort 维 drift
+      }),
+    },
+  };
+  const { result } = await memRun({
+    probeEnv: PROBE_ALL_READY,
+    privateRegistryPath: "D:/wao/config/agents.json",
+    initial: { "D:/wao/config/agents.json": JSON.stringify(priv) },
+  });
+  const r = await result;
+  const low = r.recommendations.rows.find((x) => x.id === "coder_low");
+  assert.ok(low.drift, "仅 effort 不同也判 drift（10-05 盲区闭合）");
+  assert.equal(low.drift.templateEffort, "max", "模板侧 effort 值在场");
+  assert.equal(low.drift.matrix, undefined, "矩阵两侧行 modelId 一致（私有无矩阵行 → 不比）不报矩阵维");
+  const text = renderHuman(r);
+  assert.ok(text.includes("drift: coder_low") && text.includes("/effort=max"), "人读明细含 effort 维");
+});
+
+test("d′ ②: 认证矩阵行 modelId 漂移（席位块同值）→ drift.matrix 在场（live①②↔模板③）", async () => {
+  const priv = {
+    agents: {
+      coder_low: privEntry("claude-code", "deepseek-v4-flash", "DEEPSEEK_API_KEY", {
+        seatRole: "implementation",
+        reasoning: { effort: "max" }, // 席位块三维与模板全同
+      }),
+    },
+    certification: {
+      matrix: [
+        { agentId: "coder_low", label: "DeepSeek V4 Flash X", profile: "strict", modelId: "deepseek-v4-flash-x", drills: ["sentinel"] },
+      ],
+    },
+  };
+  const { result } = await memRun({
+    probeEnv: PROBE_ALL_READY,
+    privateRegistryPath: "D:/wao/config/agents.json",
+    initial: { "D:/wao/config/agents.json": JSON.stringify(priv) },
+  });
+  const r = await result;
+  const low = r.recommendations.rows.find((x) => x.id === "coder_low");
+  assert.ok(low.drift, "矩阵行 modelId 漂移判 drift");
+  assert.deepEqual(low.drift.matrix, { liveModelId: "deepseek-v4-flash-x", templateModelId: "deepseek-v4-flash" });
+  assert.equal(low.drift.templateEffort, undefined, "席位块 effort 同值 → 不报 effort 维");
+  const text = renderHuman(r);
+  assert.ok(text.includes("drift(矩阵): coder_low 认证矩阵 modelId=deepseek-v4-flash-x ≠ 模板矩阵 deepseek-v4-flash"),
+    "人读明细含矩阵维");
 });

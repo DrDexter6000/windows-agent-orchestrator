@@ -706,6 +706,13 @@ async function buildTemplateFaceRecommendations(candidates, template, probeEnv) 
  * @returns {Promise<{advisory: string, rows: object[], configuredCount: number,
  *   templateCandidateCount: number, templateOmitted: number, privateOmitted: number}>}
  */
+// d′（决定 0044）：行 effort 的稳定读法——优先行字段（buildConfiguredFace 若
+// 投影），缺席时从私有 registry 席位块兜底（模板侧对称读 tpl.reasoning.effort）。
+function rowEffortOf(row, privAgents) {
+  if (typeof row?.effort === "string" && row.effort.length > 0) return row.effort;
+  const seat = privAgents?.[row?.id];
+  return isPlainObject(seat) ? seat.reasoning?.effort ?? null : null;
+}
 async function buildDualSourceMatrix({ template, privateRegistry, cfg, probeEnv }) {
   const tplAgents = isPlainObject(template?.agents) ? template.agents : {};
   const privAgents = isPlainObject(privateRegistry?.agents) ? privateRegistry.agents : {};
@@ -726,11 +733,30 @@ async function buildDualSourceMatrix({ template, privateRegistry, cfg, probeEnv 
     const out = { ...row }; // 已带 source "configured"（buildConfiguredFace 行生产）
     const tpl = tplAgents[row.id];
     if (tpl !== undefined) {
-      // 0024(4)：drift 闭集仅 backend + model.id（形状差异 ≠ drift）。
+      // 0024(4)：drift 闭集 backend + model.id（形状差异 ≠ drift）。d′（决定
+      // 0044，2026-10-05）扩两维：reasoning.effort（10-05 auditor effort 漏面
+      // 的结构性盲区——旧闭集对此不可见）+ 认证矩阵行 modelId（live①②↔模板③；
+      // 仅当两侧矩阵行都在场才比——缺行是另一事实不在此报）。drift 仍是纯展示
+      // 事实而非错误：模板重定性后 live↔模板滞后是合法状态，本比对把滞后从
+      // "巡检顺带才能发现"变为"改完跑一次 onboarding 立见"。
       const templateBackend = isPlainObject(tpl) ? tpl.backend ?? null : null;
       const templateModel = isPlainObject(tpl) ? tpl.model?.id ?? null : null;
-      if ((out.backend ?? null) !== templateBackend || (out.model ?? null) !== templateModel) {
-        out.drift = { templateBackend, templateModel };
+      const templateEffort = isPlainObject(tpl) ? tpl.reasoning?.effort ?? null : null;
+      const privMatrix = Array.isArray(privateRegistry?.certification?.matrix)
+        ? privateRegistry.certification.matrix : [];
+      const tplMatrix = Array.isArray(template?.certification?.matrix)
+        ? template.certification.matrix : [];
+      const privMatrixModel = privMatrix.find((m) => m && m.agentId === row.id)?.modelId ?? null;
+      const tplMatrixModel = tplMatrix.find((m) => m && m.agentId === row.id)?.modelId ?? null;
+      const effortDrift = rowEffortOf(out, privAgents) !== templateEffort;
+      const matrixDrift = privMatrixModel !== null && tplMatrixModel !== null && privMatrixModel !== tplMatrixModel;
+      if ((out.backend ?? null) !== templateBackend || (out.model ?? null) !== templateModel || effortDrift || matrixDrift) {
+        out.drift = {
+          templateBackend,
+          templateModel,
+          ...(effortDrift ? { templateEffort } : {}),
+          ...(matrixDrift ? { matrix: { liveModelId: privMatrixModel, templateModelId: tplMatrixModel } } : {}),
+        };
       }
     }
     rows.push(out);

@@ -109,17 +109,34 @@ certification.md ⑤ 本表加行 + 刷新注记 ⑥ 有 tokenEnv/credentialEnv 
 backend 换 model/provider → `--profile delta`；换 backend / 升主力 lane → 全量重跑
 （delta 规程详见下文「delta 认证规程」节）。
 
-**换模型同步面 checklist（2026-09-17 实证八处，防"靠记忆同步"）**：改一条 lane 的
-模型/provider 时逐项核对——① live `config/agents.json` 席位块；② 同文件认证矩阵行
-（providerID/modelId/label）；③ `config/agents.example.json` 席位块+矩阵行；④
-`docs/team-roles.md` 该角色 model 行（**历史 probe 实测表是冻结记录，不随当前模型改写**）；
-⑤ `docs/usage.md` 中的配置示例（如有）；⑥ `AGENT_ONBOARDING.md` 引用（如有）；⑦ 相关
-测试断言面（onboarding/modelFamily/docs-consistency 等——改漏会红，这是设计行为）；
-⑧ 若涉及新增测试文件，`test/manifest.json` 登记。
+**lane 变更同步面（决定 0044 重定性，2026-10-05 Owner 批准——两段式）**：
+
+> **历史注记**：本节原为"换模型同步面 checklist（2026-09-17 八处）"。2026-10-05
+> 层级 ROI 会审（consult_20261005132336059f49h25）裁定：模板（③）的历史身份中
+> "live 的镜像"是非法的——模板的承诺是"这些组合认证过能跑"，不是"Owner 此刻在跑
+> 什么"；每改必同步的镜像义务是本周多起漏面的根源。重定性后分两段：
+
+**第一段 · lane 变更（模型/effort/通道调整——只动本机，模板不动）**：
+① live `config/agents.json` 席位块（model/reasoning/通道字段）；
+② 同文件 `certification.matrix` 行（modelId/label——**在决定 0044 的矩阵字段派生
+落地前仍是手写**；label 兼任认证 caseId，改名即改历史证据关联，慎动）；
+③ 改完**裸跑 `npm run cli -- onboarding` 看 ·drift 明细**（d′ 后闭集 =
+backend + model.id + reasoning.effort + 认证矩阵行 modelId——live↔模板的滞后
+一条命令立见；滞后本身是合法状态，看一眼是确认"我知道它滞后"而非"必须消除"）；
+④ 涉认证档位变化（模型/通道）时按 ADR-0029 走 delta 认证；纯 effort 调整免。
+（原 ④team-roles ⑤usage ⑥onboarding 三处**不再属于本段**——它们钉的是模板的
+内容，随模板改版走第二段；10-05 实证这三处在 lane 变更中常年空转。）
+
+**第二段 · 模板改版（蓄意事件：新认证组合入册/角色矩阵调整/新 lane 进模板）**：
+③ `config/agents.example.json`（席位块+矩阵行，双身份：新手脚手架+测试夹具锚点）；
+④ `docs/team-roles.md`；⑤ `docs/usage.md` 示例（如有）；⑥ `AGENT_ONBOARDING.md`
+（如有）；⑦ 测试断言面（模板动了钉自然翻红——按红项逐一核对，是设计行为）；
+⑧ 新测试文件登记 manifest。改版收尾同样裸跑一次 onboarding 确认 ·drift 清零
+（模板与 live 的已知滞后应在改版中一并审视，蓄意保留的记入行内注记）。
 
 **案例一行**：2026-09 zcode 事件——life-index CTO agent 接指令切模型（"ZCode 后端驱动"），
 在 WAO 源码 grep `zcode` 零命中后停滞；判断本身正确（src/ 无 zcode 后端是 Owner 刻意
-边界），裁定与重看触发器见 ADR-0028。
+边界），
 
 ## backend 能力对照表（TD-162）
 

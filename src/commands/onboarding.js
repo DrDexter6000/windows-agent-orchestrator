@@ -263,7 +263,13 @@ export function renderHuman(r) {
         // 0024(4)：drift 有界明细（≤3 条 + "另有 K 条"尾注）——值全从行字段投影。
         const drifts = rows.filter((row) => row.drift);
         for (const row of drifts.slice(0, 3)) {
-          lines.push(`  drift: ${row.id} 私有 model=${row.model ?? "?"}/backend=${row.backend ?? "?"} ≠ 模板 ${row.drift.templateModel ?? "?"}/${row.drift.templateBackend ?? "?"}`);
+          // d′（决定 0044）：effort 维（模板侧值展示，私有侧语义=不相等）与
+          // 认证矩阵行 modelId 维各占一段——10-05 两起漏面的对应可见面。
+          const eff = row.drift.templateEffort !== undefined ? `/effort=${row.drift.templateEffort}` : "";
+          lines.push(`  drift: ${row.id} 私有 model=${row.model ?? "?"}/backend=${row.backend ?? "?"} ≠ 模板 ${row.drift.templateModel ?? "?"}/${row.drift.templateBackend ?? "?"}${eff}`);
+          if (row.drift.matrix) {
+            lines.push(`  drift(矩阵): ${row.id} 认证矩阵 modelId=${row.drift.matrix.liveModelId} ≠ 模板矩阵 ${row.drift.matrix.templateModelId}`);
+          }
         }
         if (drifts.length > 3) {
           lines.push(`  另有 ${drifts.length - 3} 条 drift 明细未显示`);
