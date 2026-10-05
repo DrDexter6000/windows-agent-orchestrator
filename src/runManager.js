@@ -315,6 +315,9 @@ export function selectCertRecord(summary, agent, agentId) {
   const workers = summary?.workers ?? {};
   const seatKeyed = workers[agentId ?? agent?.id];
   if (seatKeyed !== undefined) return seatKeyed;
+  // 事实扫描回退仅对车道键台账（lane-v1）生效：席位键台账的键缺席=真无记录
+  // （不得向同轴兄弟席位借记录——ADR-0032 三态"undeterminable"塌缩回归）。
+  if (summary?.ledgerKeySpace !== "lane-v1") return undefined;
   const byFacts = Object.values(workers).find((cand) => matchedCertRecord(agent, cand) !== null);
   return byFacts ?? undefined;
 }
@@ -1595,17 +1598,20 @@ export class RunManager {
     // keep using runStarted.cwd as before.
     const resumeCwd = deliveryContext ? deliveryContext.worktreePath : runStarted.cwd;
     // 0045 W4d（R5 §1.3）：重键前档案的 envelope agentId=席位名，注册表已无此键——
-    // 跨版本续跑固定文案具名拒绝（不静默换道、不裸抛 Unknown）。
-    {
-      const allIds = new Set(loaded.listAgents().map((a) => a.id));
-      if (!allIds.has(transcript.context.agentId)) {
+    // getAgent 的 Unknown 信号转固定文案具名拒绝（不裸抛、不静默换道）。mock 注册
+    // 表可无 listAgents——以 getAgent 本身为准（诚实信号），不做前置键扫描。
+    let agent;
+    try {
+      agent = loaded.getAgent(transcript.context.agentId, { cwd: resumeCwd });
+    } catch (e) {
+      if (String(e?.message ?? "").includes("Unknown agent")) {
         throw new Error(
           "legacy_dispatch_unsupported: this run's envelope agentId predates the lane-keyed registry "
           + `(recorded "${transcript.context.agentId}"); cross-era resume is refused by 0045 §1.3 — start a new dispatch instead`,
         );
       }
+      throw e;
     }
-    let agent = loaded.getAgent(transcript.context.agentId, { cwd: resumeCwd });
     // TD-198 (2026-10-03): legacy transcripts may carry a RELATIVE run.started
     // cwd (recorded before start-side normalization). Normalize through the
     // SAME authority as start — resolve() here has exactly the semantics the

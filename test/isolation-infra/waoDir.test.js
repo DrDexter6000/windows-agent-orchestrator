@@ -109,10 +109,10 @@ test("S3-1: getWaoDir 支持 --state-dir 覆盖", () => {
   assert.ok(custom.endsWith(".custom-wao"), `应支持覆盖，got ${custom}`);
 });
 
-test("S3-1: WAO_TOP_LEVEL_SLOTS 导出预定义 6 槽位（TD-91 加 pipeline）", () => {
+test("S3-1: WAO_TOP_LEVEL_SLOTS 导出预定义 7 槽位（TD-91 pipeline；0045 §4.2 migration 证据包槽）", () => {
   assert.ok(Array.isArray(WAO_TOP_LEVEL_SLOTS));
-  assert.ok(WAO_TOP_LEVEL_SLOTS.length === 6, "应正好 6 个槽位（TD-91 加 pipeline）");
-  for (const slot of ["project.md", "state", "decisions", "pipeline", "handoff", "runs"]) {
+  assert.ok(WAO_TOP_LEVEL_SLOTS.length === 7, "应正好 7 个槽位（0045：+migration）");
+  for (const slot of ["project.md", "state", "decisions", "pipeline", "handoff", "runs", "migration"]) {
     assert.ok(WAO_TOP_LEVEL_SLOTS.includes(slot), `应含 ${slot}`);
   }
 });

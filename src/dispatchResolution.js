@@ -149,6 +149,10 @@ export function effectiveSessionReuse({ roleId, agent, rolePolicies }) {
   const policies = rolePolicies ?? loadRolePolicies().roles;
   const rolePolicy = roleId !== undefined && roleId !== null ? policies[roleId] : undefined;
   if (rolePolicy !== undefined) return rolePolicy.sessionReuse ?? null;
+  if (roleId === undefined || roleId === null) {
+    // 纯 legacy 调用（无角色维度）：席位字段是唯一政策源（pre-W4b 语义保持）。
+    return agent?.sessionReuse ?? null;
+  }
   if (agent && typeof agent.systemPrompt === "string" && agent.systemPrompt.endsWith(".md")) {
     const stem = agent.systemPrompt.split("/").pop().slice(0, -3);
     if (roleId === stem && agent.sessionReuse !== undefined) return agent.sessionReuse ?? null;

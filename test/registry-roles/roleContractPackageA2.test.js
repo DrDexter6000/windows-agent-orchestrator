@@ -442,7 +442,8 @@ test("M11-5-A2-ARCH1: runManager role-contract region is capability-driven, no r
   // context by ensuring the capability is the sole gate.
   // Strict guard: the start role-contract block must not branch on runtime.
   // Package C1: path resolution moved into loadRoleContract (no call-site resolve()).
-  const startRoleBlock = src.match(/let roleContract[\s\S]*?loadRoleContract\(agent\.systemPrompt\)/);
+  // 0045 W3b/W4d：start 块角色源=explicitRolePath ?? agent.systemPrompt（解析层供角色）。
+  const startRoleBlock = src.match(/let roleContract[\s\S]*?loadRoleContract\(roleSourcePath\)/);
   assert.ok(startRoleBlock, "found start role-contract block");
   const block = startRoleBlock[0];
   assert.ok(!/opencode-serve|claude-code|codex|kimi-code/.test(block),
@@ -460,7 +461,9 @@ test("M11-5-A2-ARCH2: resume role-contract region is capability-driven, no silen
   // The resume role-contract block: from resumeRoleContract declaration to
   // the loadRoleContract call. Package C1: path resolution moved into
   // loadRoleContract (no call-site resolve()).
-  const resumeRoleBlock = src.match(/let resumeRoleContract[\s\S]*?loadRoleContract\(agent\.systemPrompt\)/);
+  // 0045 W4d：resume 钉优先（rolePin.systemPrompt），legacy 分支 agent.systemPrompt 兜底——
+  // 结构钉锚定两分支各自的加载点。
+  const resumeRoleBlock = src.match(/let resumeRoleSource[\s\S]*?loadRoleContract\(agent\.systemPrompt\)/);
   assert.ok(resumeRoleBlock, "found resume role-contract block");
   const block = resumeRoleBlock[0];
   assert.ok(!/opencode-serve|claude-code|codex|kimi-code/.test(block),

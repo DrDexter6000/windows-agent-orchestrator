@@ -17,7 +17,8 @@ import { join, resolve } from "node:path";
 // 锁死的 6 个顶层槽位。新增槽位是架构变更，需同步改 waoLayout.test.js 守卫。
 // TD-91：pipeline/ 是第 6 槽位——STAGE-/DECL- 运行时声明专用，与 decisions/（ADR 冻结决策）分离。
 // 原先 STAGE/DECL 写进 decisions/（被 git 跟踪），实验声明和真实 ADR 混在一起污染版本库。
-export const WAO_TOP_LEVEL_SLOTS = ["project.md", "state", "decisions", "pipeline", "handoff", "runs"];
+// 0045 §4.2：migration=台账迁移证据包槽（.wao/migration/0045-ledger/，证据文件入库）。
+export const WAO_TOP_LEVEL_SLOTS = ["project.md", "state", "decisions", "pipeline", "handoff", "runs", "migration"];
 
 // state/decisions/pipeline/handoff 有 map.md（索引），project.md 是单文件，runs 无 map。
 const SLOTS_WITH_MAP = ["state", "decisions", "pipeline", "handoff"];

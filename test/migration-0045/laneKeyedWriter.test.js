@@ -63,6 +63,7 @@ test("KEYW-3: 无身份事实的 legacy case → seat: 名键（可被读者选�
 test("KEYW-4: selectCertRecord 双空间——席位键优先；车道键台账按事实选出", () => {
   const laneKey = laneLedgerKey({ backend: "zcode", modelId: "m-flash", providerID: null, providerKey: null });
   const laneLedger = {
+    ledgerKeySpace: "lane-v1",
     workers: {
       [laneKey]: { agentId: "coder_low", agentIds: ["researcher", "coder_low"], laneKey, backend: "zcode", modelId: "m-flash", providerID: null, providerKey: null, status: "conditional" },
       "lane:ffffffffffffffff": { agentId: "other", backend: "codex", modelId: "m-sol", providerID: null, providerKey: null, status: "certified" },

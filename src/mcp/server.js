@@ -1059,6 +1059,13 @@ const RUN_CONSULT_RECORD_SEAT = z.object({
   provider: z.string().nullable(),
   perspectiveSnippet: z.string().optional(),
   budgetExpired: z.literal(true).optional(),
+  // 0045 W3d（独立性三枚举，R4 裁定）：laneGroup=车道等价类编号（null=无事实）；
+  // authorRelation/modelRelation 闭集 + unknown；providerSessionRelation 恒 unknown
+  // （会话关联未记录——如实）。读路径（rerender）在场；纯 CLI 场景可缺席。
+  laneGroup: z.number().int().nullable().optional(),
+  authorRelation: z.enum(["same_lane", "different_lane", "unknown"]).optional(),
+  modelRelation: z.enum(["same_model", "different_model", "unknown"]).optional(),
+  providerSessionRelation: z.literal("unknown").optional(),
 }).strict();
 const RUN_CONSULT_RECORD = z.object({
   consultId: z.string().min(1),
@@ -1094,6 +1101,11 @@ const RUN_CONSULT_OUTPUT = z.object({
     attribution: RUN_CONSULT_ATTRIBUTION,
     finalText: z.string().optional(),
     dispatchError: z.string().optional(),
+    // 0045 W3d（独立性三枚举）：读/写两路径均携带；缺事实=unknown/null。
+    laneGroup: z.number().int().nullable().optional(),
+    authorRelation: z.enum(["same_lane", "different_lane", "unknown"]).optional(),
+    modelRelation: z.enum(["same_model", "different_model", "unknown"]).optional(),
+    providerSessionRelation: z.literal("unknown").optional(),
   }).strict()),
   fieldDiff: z.array(z.string()),
   fieldValues: z.record(z.record(z.string().nullable())),
@@ -1102,8 +1114,13 @@ const RUN_CONSULT_OUTPUT = z.object({
       agentId: z.string().min(1),
       backend: z.string().nullable(),
       provider: z.string().nullable(),
+      // 0045 W4c：注册表解析三态（ok/failed/registry-unreadable）——创建路径如实
+      // 标注（席位不在册≠确无 provider）；读取路径（rerender，零注册表读）缺席。
+      registryResolution: z.enum(["ok", "failed", "registry-unreadable"]).optional(),
     }).strict()),
     authorInSeats: z.boolean().nullable(),
+    // 0045 W3d：被审作者与某席同车道（null=无法判定）。
+    authorLaneInSeats: z.boolean().nullable().optional(),
     reviewedAgentId: z.string().nullable(),
     reviewedRunId: z.string().min(1).optional(),
     sessionIndependence: z.string(),

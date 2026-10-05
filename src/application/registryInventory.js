@@ -128,6 +128,8 @@ async function buildCertMap(runDir, customReadFile) {
     const raw = await _readFile(join(runDir, "reliability-summary.json"), "utf8");
     const summary = JSON.parse(raw);
     const certMap = {};
+    // 0045 W4a：键空间标记随表（__ 前缀=元数据槽，非席位记录；消费见投影三态门）。
+    certMap.__ledgerKeySpace = summary?.ledgerKeySpace ?? null;
     for (const [id, w] of Object.entries(summary?.workers ?? {})) {
       certMap[id] = {
         status: w.status ?? "-",
@@ -359,9 +361,13 @@ function projectInventoryEntry(agent, certMap, readiness) {
   // （backend/modelId 不一致 → 认证不可继承，新字段同样不继承）。
   // 0045 R5（W4a）：车道键台账双空间——certMap 含两种键（指纹键记录 + legacy
   // 席位键记录）；席位键未命中时按事实匹配选记录（matchedCertRecord 三态语义不变）。
+  // 事实扫描回退仅对车道键台账（certSummary.ledgerKeySpace 由 buildCertMap 携带；
+  // 席位键台账键缺席=真无记录——防同轴兄弟席位借录，ADR-0032 三态保真）。
   const certRecord = certMap[agent.id] !== undefined
     ? matchedCertRecord(agent, certMap[agent.id])
-    : Object.values(certMap).find((cand) => matchedCertRecord(agent, cand) !== null) ?? null;
+    : (certMap.__ledgerKeySpace === "lane-v1"
+        ? Object.values(certMap).find((cand) => matchedCertRecord(agent, cand) !== null) ?? null
+        : null);
   return {
     id: agent.id,
     backend: agent.backend,
@@ -566,7 +572,8 @@ async function readReliabilityLedgerDetail(runDir, readFileFn) {
   if (!workers || typeof workers !== "object" || Array.isArray(workers)) {
     return { state: "unparseable", workers: null };
   }
-  return { state: "ok", workers };
+  // 0045 W4a：键空间标记随读（lane-v1=车道键台账可事实扫描；缺席=legacy 席位键）。
+  return { state: "ok", workers, ledgerKeySpace: source.data?.ledgerKeySpace ?? null };
 }
 
 /**
@@ -934,8 +941,12 @@ export async function getCertificationEvidenceInventory({
   for (const agent of registry.listAgents()) {
     const component = await observeComponentLedgerForSeat({ runDir, readFileFn, agent, now });
     // 0045 R5（W4a）：车道键台账双空间选择（席位键优先，事实匹配兜底）。
+    // 同门：车道键台账才做事实扫描回退（席位键台账键缺席=真无记录）。
     const workerRecord = ledger.state === "ok"
-      ? (ledger.workers[agent.id] ?? Object.values(ledger.workers).find((cand) => matchedCertRecord(agent, cand) !== null))
+      ? (ledger.workers[agent.id]
+        ?? (ledger.ledgerKeySpace === "lane-v1"
+          ? Object.values(ledger.workers).find((cand) => matchedCertRecord(agent, cand) !== null)
+          : undefined))
       : undefined;
     const verdict = assessCertEvidenceApplicability({
       agent,

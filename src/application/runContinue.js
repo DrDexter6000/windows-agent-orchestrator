@@ -473,16 +473,19 @@ export async function continueRun({
   //    decides from the declared capability.
   const registry = await readRegistry(resolve(registryPath));
   // 0045 W4d（R5 §1.3）：重键前父档案的 envelope agentId=席位名（注册表已车道键化）——
-  // 跨版本谱系续接待续接具名拒绝（固定文案指路重派，不裸抛 Unknown）。
-  {
-    const allIds = new Set(registry.listAgents().map((a) => a.id));
-    if (agentId !== null && agentId !== undefined && !allIds.has(agentId)) {
+  // getAgent 的 Unknown 信号转具名拒绝（固定文案指路重派，不裸抛；mock 注册表同
+  // resume 侧一致以 getAgent 为准）。
+  let agent;
+  try {
+    agent = registry.getAgent(agentId);
+  } catch (e) {
+    if (String(e?.message ?? "").includes("Unknown agent")) {
       return refuse("legacy_dispatch_continuable_unsupported", {
         detail: `the parent run's envelope agentId ("${agentId}") predates the lane-keyed registry; cross-era continuation is refused by 0045 §1.3 — dispatch a new run instead`,
       });
     }
+    throw e;
   }
-  const agent = registry.getAgent(agentId);
   // R23-C §4: the provider attachment (baseUrl + apiKeyEnv NAME) joins the
   // drift check — swapping the provider wiring mid-lineage must start a fresh
   // run, not silently resume on the new endpoint. The parent-side durable
