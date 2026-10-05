@@ -24,7 +24,7 @@ WAO 曾在 2026-06-16 做过一次 SSOT 审计（`docs/archive/docs-ssot-audit.m
 | `user-troubleshoot` | 第三方 / 用户 agent 排障 | `docs/troubleshooting.md`、`wao doctor` 输出 |
 | `user-daily` | Lead / 用户 agent 日常使用 | `SKILL.md`、`docs/usage.md` |
 | `harness-certify` | 给某 harness / LLM 做组件层单独验证（backend conformant / llm verified） | `docs/surface/certification.md`（生成层：backend 能力/配置表达力事实与台账指针，TD-162；npm run gen:certification 再生成）、`docs/usage.md`（认证检查结果五态与能力轴分层）、`.wao/decisions/0032-两层验证与认证.md`、`docs/tech-debt.md`（在册限制须随结论一并标注，如 TD-182） |
-| `seat-certify` | 给某席位装配做组合层认证（certified / conditional / draft-only） | 无条件全文必读：`docs/certification-runbook.md`、`.wao/decisions/0032-两层验证与认证.md`、`docs/team-roles.md`、`config/agents.example.json`、`docs/tech-debt.md`。五份不得收窄，也不得按 Lead 裁量收窄（含不得以节选或索引替代）；多行动面命中取并集；正文显式依赖继续跟进；读取输出被截断必须补齐。追加依赖（非独立入口、非节选替代）：判读 adversarialEscape（越界写对抗）时连读 docs/02-architecture.md §4.6 Coder Delivery Contract（containment 事件合同）与 §4.1 状态机（终态判定） |
+| `seat-certify` | 给某席位/车道装配做组合层认证（certified / conditional / draft-only；0045 起台账键=车道内容指纹，席位名仅 provenance） | 无条件全文必读：`docs/certification-runbook.md`、`.wao/decisions/0032-两层验证与认证.md`、`.wao/decisions/0045-终局身份模型与0.3.0一步到位合同.md`、`docs/team-roles.md`、`docs/tech-debt.md`。五份不得收窄，也不得按 Lead 裁量收窄（含不得以节选或索引替代）；多行动面命中取并集；正文显式依赖继续跟进；读取输出被截断必须补齐。追加依赖（非独立入口、非节选替代）：判读 adversarialEscape（越界写对抗）时连读 docs/02-architecture.md §4.6 Coder Delivery Contract（containment 事件合同）与 §4.1 状态机（终态判定）；车道表事实（lane→轴/别名映射）以 config/lanes.json 为数据权威、席位接线模板以 config/agents.example.json 为模板权威（0045 §3） |
 
 ## 1. 核心架构：五大类别
 

@@ -3755,8 +3755,11 @@ test("B3-③: 依赖完整——现行主表行保留 adversarialEscape 追加�
 const SEAT_CERTIFY_REQUIRED_FILES = Object.freeze([
   CERT_RUNBOOK_DOC,
   ".wao/decisions/0032-两层验证与认证.md",
+  // 0045 §3（Owner 签署）：车道键时代五必读换血——0045 合同（车道键/例外重签/
+  // 迁移合同）入列；agents.example.json 转追加依赖（模板权威指针随行，见
+  // seat-certify 行追加依赖句；config/lanes.json 同为数据权威指针非全文必读）。
+  ".wao/decisions/0045-终局身份模型与0.3.0一步到位合同.md",
   "docs/team-roles.md",
-  "config/agents.example.json",
   "docs/tech-debt.md",
 ]);
 
@@ -3829,7 +3832,8 @@ test("B3-⑥: 现行入口 = 文件级五文件全集——缺行/漏文件/重�
   assert.notEqual(missing, row, "夹具失效：漏文件变异未生效");
   assert.throws(() => assertFileLevelSeatRow(missing), /恰 5 个/, "漏文件必须红");
   // 负对照 3——重复替代：计数不变（仍 5），去重集合对账抓红。
-  const dup = row.replace("`config/agents.example.json`", `\`${CERT_RUNBOOK_DOC}\``);
+  // 0045 §3 五必读换血后变异目标改为 0045 合同（agents.example.json 已不在五行）。
+  const dup = row.replace("`.wao/decisions/0045-终局身份模型与0.3.0一步到位合同.md`", `\`${CERT_RUNBOOK_DOC}\``);
   assert.notEqual(dup, row, "夹具失效：重复替代变异未生效");
   assert.throws(() => assertFileLevelSeatRow(dup), /五文件闭集/, "重复替代必须红");
   // 负对照 4——节选锚替代全文路径（文件级入口退化为节选路由）。

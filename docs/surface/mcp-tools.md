@@ -110,7 +110,9 @@ Input:
 
 | name | type | required | notes |
 | --- | --- | --- | --- |
-| agentId | string | yes |  |
+| agentId | string | no |  |
+| lane | string | no |  |
+| role | string | no |  |
 | prompt | string | yes |  |
 | delivery | object | no |  |
 | expectedGitHead | string | no |  |
@@ -144,7 +146,9 @@ Input:
 
 | name | type | required | notes |
 | --- | --- | --- | --- |
-| agentId | string | yes |  |
+| agentId | string | no |  |
+| lane | string | no |  |
+| role | string | no |  |
 | prompt | string | yes |  |
 | delivery | object | no |  |
 | expectedGitHead | string | no |  |
@@ -228,7 +232,7 @@ Output:
 | agentId | string\|null | yes |  |
 | rootRunId | string\|null | yes |  |
 | state | string\|null | yes |  |
-| rejectionReason | string\|null | yes | enum: malformed_input \| invalid_delivery \| parent_not_found \| parent_not_terminal \| parent_accepted \| not_continuable \| no_provider_session \| workspace_mismatch \| no_delivery \| worker_configuration_changed \| unsupported_backend \| missing_worktree \| worktree_drift \| continuation_scope_incomplete \| busy |
+| rejectionReason | string\|null | yes | enum: malformed_input \| invalid_delivery \| parent_not_found \| parent_not_terminal \| parent_accepted \| not_continuable \| no_provider_session \| workspace_mismatch \| no_delivery \| worker_configuration_changed \| role_contract_drift \| unsupported_backend \| missing_worktree \| worktree_drift \| continuation_scope_incomplete \| busy |
 | inheritedChangedPaths | array<string>\|null | no |  |
 | inheritedChangedCount | integer\|null | no |  |
 | inheritedChangedTruncated | boolean\|null | no |  |
