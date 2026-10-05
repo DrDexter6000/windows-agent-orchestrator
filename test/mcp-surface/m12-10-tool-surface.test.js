@@ -637,7 +637,11 @@ const RED_23_WIRE = 75492;
 // description bytes), still BELOW the Owner-authorized 85939 ceiling — no new
 // ceiling authorization was needed; per the re-freeze-at-measured regime the
 // frozen ceiling is re-frozen at the exact measured 84494.
-const FROZEN_23_WIRE_CEILING = 84494;
+// 0045 清账批 CB-1 重冻（2026-10-05）：10-03 delivery 族描述三句式瘦身后未重冻，
+// 顶（84494）对实测（83099）静默松弛 1395 B。按 re-freeze-at-measured 在册制度
+// 重冻于实测值；Owner 授权顶（78127×1.1=85939，2026-09-22 裁定）不变，扩限仍须
+// 逐次裁定+实测增量+逐项说明（决定 0045 §1.7）。
+const FROZEN_23_WIRE_CEILING = 83099;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -845,7 +849,10 @@ const M12_16_DESC_REDUCTION_MIN = 500;
 // (11217 + 620); ceiling re-frozen at the exact measured value — a NEW TOOL's
 // description is sanctioned additive growth (same precedent as run_correct's
 // 517-byte description at 21→22), not description creep on existing tools.
-const FROZEN_23_DESC_CEILING = 11837;
+// 0045 清账批 CB-1 重冻（2026-10-05）：同上 wire 重冻批——desc 顶（11837）对实测
+// （10442）静默松弛 1395 B，重冻于实测值。防 creep 语义不变：新增/改写描述超顶
+// 即红，需要 Owner 逐次裁定。
+const FROZEN_23_DESC_CEILING = 10442;
 
 // Recursively remove every `description` key from a tools/list payload (the 21
 // top-level tool descriptions and any nested schema descriptions). Returns a new
