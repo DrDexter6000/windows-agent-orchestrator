@@ -360,6 +360,24 @@ export async function continueRun({
     return refuse("parent_accepted");
   }
 
+  // 0045 R3 裁定 H3：explicit（车道+角色组合）派发的父 run 不可被 continue——
+  // 续接链路从 registry 重建子 run 且不携带角色，会静默把 explicit 帽换回接线
+  // 席位的默认帽（R1 关闭的同族洞）。父档形态从 run.started 一眼可知，故此门
+  // 先于 lineage/delivery 门（避免 not_continuable 掩盖真实原因）；legacy 父
+  // （无 resolvedFrom 字段）不受影响。直到身份钉住传到 run_continue（0045 §6
+  // 第 3 步收口）为止具名拒绝。
+  {
+    const parentStarted = parentEvents.find((e) => e && e.type === "run.started" && e.runId === parentRunId);
+    if (parentStarted?.resolvedFrom === "explicit") {
+      return refuse("explicit_dispatch_continuable_unsupported", {
+        detail: "the parent run was dispatched as an explicit lane+role combination; run_continue "
+          + "rebuilds the child from the registry entry without the explicit role (a silent "
+          + "hat switch). Dispatch by agentId for continuable work until 0045 step-3 identity "
+          + "pinning reaches run_continue",
+      });
+    }
+  }
+
   // 5. Parent must be a continuable lineage run (run.session_reuse run_lineage).
   //    A plain delivery (no lineage event) is legacy and NOT continuable — WAO
   //    never infers a continuation where the Lead did not opt in.

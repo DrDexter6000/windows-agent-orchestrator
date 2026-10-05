@@ -23,7 +23,7 @@
 //     字母表的值；choices 给完整合法全集（不截断冒充全集）。
 //   - wiringAgent 过渡退役：0045 §6 第 3 步收口退出；版本绊线（0.3.0 发布时
 //     lanes.json schema 仍含 wiringAgent → 下方守卫红）。
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
@@ -37,6 +37,23 @@ function resolveRoot() {
 
 /** lane id / 别名 / roleId 的 canonical 字母表（错误回显白名单同此）。 */
 export const ID_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
+
+/**
+ * 角色库清单（config/roles/*.md 文件名 stem 排序闭集）——解析器的 roleLibrary
+ * 输入源，路径权威与 loadLanesConfig 同根（WAO 安装根）。角色文件本体的加载/
+ * 校验仍归 application/roleContract.js（单一权威）；此处只枚举成员。
+ */
+export function listRoleLibrary() {
+  try {
+    return readdirSync(join(WAO_ROOT, "config", "roles"))
+      .filter((f) => f.endsWith(".md"))
+      .map((f) => f.slice(0, -3))
+      .filter((id) => ID_RE.test(id))
+      .sort();
+  } catch {
+    return [];
+  }
+}
 
 /** 解析来源闭集（§1.4）。 */
 export const RESOLVED_FROM = Object.freeze(["alias", "explicit", "legacy-agent"]);

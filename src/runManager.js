@@ -551,6 +551,12 @@ export class RunManager {
       tags,
       isolate,
       scorecard,
+      // 0045 §1.4 W2：派发目标解析结果（dispatchResolution.resolveDispatchTarget
+      // 产出）。source="explicit" → 角色=角色库 config/roles/<roleId>.md（经 P1
+      // 钉住机制生效，替代 registry 的 systemPrompt）；source="alias" → 仅身份
+      // 注解（执行零变化，H1）；absent → 行为与 W2 前逐字节一致。注册表赢原则：
+      // 轴不一致在解析器已拒（lane_wiring_mismatch），此处不重比。
+      resolvedTarget = null,
       // M8-1：默认 scorecard 模式。warn=默认开启(不阻塞,只留痕) | hard=升级硬闸 | off=完全关闭。
       scorecardMode = "warn",
       // fire-and-forget 语义：调用方是否会在 backend 起来后立即返回（不进 waitForCompletion）。
@@ -776,18 +782,25 @@ export class RunManager {
     // 不是 WAO 持久化角色正文。）
     let roleContract = undefined;
     let rolePin = undefined;
-    if (agent.systemPrompt) {
+    // 0045 W2：explicit 派发的角色来自角色库（config/roles/<roleId>.md），替代
+    // registry 的 systemPrompt——"任意车道戴任意帽"的机制本体。同一加载器/校验/
+    // P1 钉住通道（rolePin 记库路径与正文 sha），组装点不增（GRN-07 守卫）。
+    const explicitRolePath = resolvedTarget?.source === "explicit" && typeof resolvedTarget.roleId === "string"
+      ? `config/roles/${resolvedTarget.roleId}.md`
+      : null;
+    const roleSourcePath = explicitRolePath ?? (agent.systemPrompt || null);
+    if (roleSourcePath) {
       if (backend.supportsRoleContract !== true) {
         throw new Error(
-          `Agent ${agentId}: systemPrompt is configured but the selected backend does not support role contract injection. ` +
-          `Remove systemPrompt from this agent, or switch to a backend that declares supportsRoleContract.`
+          `Agent ${agentId}: ${explicitRolePath ? "the requested role" : "systemPrompt"} is configured but the selected backend does not support role contract injection. ` +
+          `Remove ${explicitRolePath ? "the --role for this lane" : "systemPrompt from this agent"}, or switch to a backend that declares supportsRoleContract.`
         );
       }
-      const rawRoleContent = loadRoleContract(agent.systemPrompt);
+      const rawRoleContent = loadRoleContract(roleSourcePath);
       // 0045 §1.3 角色钉住：把 {registry 声明的相对路径, 正文 sha256} 作为派发
       // 时刻的事实钉进 run.started——resume 据此重建并校验（fail-closed），不再
-      // 从当前注册表重读。无 systemPrompt 的派发不产生钉（载荷字节不变）。
-      rolePin = { systemPrompt: agent.systemPrompt, sha256: roleContractSha256(rawRoleContent) };
+      // 从当前注册表重读。无角色派发不产生钉（载荷字节不变）。
+      rolePin = { systemPrompt: roleSourcePath, sha256: roleContractSha256(rawRoleContent) };
       roleContract = composeRoleContractWithIdentity({
         roleContract: rawRoleContent,
         agentId,
@@ -1232,6 +1245,25 @@ export class RunManager {
       // sha256）。resume 从此钉重建并校验——改注册表指向或改角色文件后续跑
       // fail-closed，不再静默换身份。无角色派发缺席（字节兼容）。
       ...(rolePin ? { rolePin } : {}),
+      // 0045 §1.4 W2：派发目标解析注记。alias=身份注解（执行零变化）；explicit
+      // =车道+角色组合派发（wiringAgent 为过渡接线事实，R3 裁定记档以可归因）。
+      // 无解析结果（legacy-agent 直查/未提供）缺席（字节兼容）。
+      ...(resolvedTarget && (resolvedTarget.source === "explicit" || resolvedTarget.source === "alias")
+        ? {
+          laneId: resolvedTarget.laneId ?? null,
+          roleId: resolvedTarget.roleId ?? null,
+          resolvedFrom: resolvedTarget.source,
+          ...(resolvedTarget.source === "explicit"
+            ? {
+              wiringAgent: resolvedTarget.wiringAgent ?? null,
+              lanesSha256: resolvedTarget.lanesSha256 ?? null,
+              // R3 裁定⑥：explicit 无条件 fresh——有界原因注记（不伪造
+              // run.session_reuse 事件；前台 CLI 本就一次性进程天然 fresh）。
+              sessionReuseDecision: "fresh_identity_transition",
+            }
+            : { lanesSha256: resolvedTarget.lanesSha256 ?? null }),
+        }
+        : {}),
       scorecardConfigured: Boolean(scorecardRules),
       ...(tagsPayload ? { tags: tagsPayload } : {}),
       ...(deliveryContext ? {

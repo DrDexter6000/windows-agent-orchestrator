@@ -34,6 +34,8 @@ import { renderRunSummary } from "../cliRunSummary.js";
 // （boundReportScope；commands → core 下向边，与 runs.js 既有 metrics import 同款）。
 import { boundReportScope } from "../metrics.js";
 import { parseOptions, loadPrompt, newRunManager, resolveIsolateFlag, resolveReadOnlyFlag } from "./shared.js";
+import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "../dispatchResolution.js";
+import { readRegistry } from "../registry.js";
 import { prepareDeliveryRequest } from "../delivery.js";
 import { COMMAND_NAMES, RUN_USAGE_TEXT } from "../cliHelp.js";
 // M9-2A: background dispatch delegated to shared application service.
@@ -355,14 +357,22 @@ export async function runCommand(args, config) {
     console.log(RUN_USAGE_TEXT);
     return;
   }
-  const [agentId, ...tail] = args;
-  if (!agentId) {
+  const [agentId0, ...tail] = args;
+  // 0045 W2：flags-only 形态（--lane/--role 显式派发无位置 agentId）。args[0]
+  // 以 "--" 开头时全部走 parseOptions；agentId 留空由下方 lane/role 解析闭集
+  // 判定（只给 lane 或只给 role 或全空 → dispatch_selector_invalid）。
+  const flagsOnly = typeof args[0] === "string" && args[0].startsWith("--");
+  let [agentId, ...rest] = flagsOnly ? [undefined, ...args] : [agentId0, ...tail];
+  const options = parseOptions(flagsOnly ? rest : tail);
+  if (!agentId && !flagsOnly) {
     throw new Error("run requires <agentId>");
   }
-  const options = parseOptions(tail);
+  if (!agentId && !options.lane && !options.role) {
+    throw new Error("run requires <agentId> (or --lane <lane> --role <role>)");
+  }
   // A-1（friction 2026-08-15 #1）：agentId 位置误填了顶层命令名（如 `run status ...`）
   // → did-you-mean 提示。纯检查、零副作用，先于超时校验/文件读取/manager 构造。
-  if (COMMAND_NAMES.includes(agentId) && !options.prompt && !options.promptFile) {
+  if (agentId && COMMAND_NAMES.includes(agentId) && !options.prompt && !options.promptFile) {
     throw new Error(
       `Provide --prompt or --prompt-file\n` +
       `(hint: "${agentId}" is a top-level WAO command, not an agentId — did you mean \`${agentId} ...\` without the \`run\` prefix? Full list: \`npm run cli -- help\`)`,
@@ -440,6 +450,57 @@ export async function runCommand(args, config) {
         + "drop one of the two flags",
       );
     }
+  }
+  // 0045 §1.4 W2（R3 会审裁定）：lane/role 显式派发解析。--registry 非默认时
+  // 车道表停用（H2 防跨绑）；explicit × --background 本增量具名拒绝（后台穿线
+  // =W2b）；--explain 只打印解析结果零副作用；错误=闭集码+received+完整合法
+  // 全集+修正例（auditor R3 文案基准）。
+  let resolvedTarget = null;
+  const wantsLaneRole = options.lane !== undefined || options.role !== undefined;
+  if (wantsLaneRole || options.explain) {
+    const registryPath = resolve(options.registry ?? config.registry);
+    const lanesEnabled = !options.registry || registryPath === resolve(config.registry ?? "config/agents.json");
+    const lanesDoc = lanesEnabled ? loadLanesConfig() : { lanes: [], sha256: null, issues: [], rolesHint: [] };
+    // readRegistry 返回方法对象（getAgent/listAgents）；解析器要纯映射
+    // {id: 条目}——listAgents 的 normalizeAgent 产物自带 id 字段。
+    const reg = await readRegistry(registryPath);
+    const registryAgents = Object.fromEntries(reg.listAgents().map((a) => [a.id, a]));
+    const resolution = resolveDispatchTarget({
+      agentId, lane: options.lane, role: options.role,
+      lanesDoc, registryAgents,
+      roleLibrary: listRoleLibrary(),
+    });
+    if (options.explain) {
+      const explanation = resolution.kind === "error"
+        ? { status: "error", code: resolution.code, message: resolution.message, received: resolution.received, choices: resolution.choices }
+        : { status: "resolved", source: resolution.source, agentId: resolution.agentId, laneId: resolution.laneId ?? null, roleId: resolution.roleId ?? null, wiringAgent: resolution.wiringAgent ?? null, lanesSha256: resolution.lanesSha256 ?? null };
+      console.log(JSON.stringify(explanation, null, 2));
+      return;
+    }
+    if (resolution.kind === "error") {
+      const choices = resolution.choices ?? {};
+      const lines = [resolution.message];
+      if (choices.forms) lines.push(`合法形态: ${choices.forms.join(" | ")}`);
+      if (choices.aliases) lines.push(`合法 alias: ${choices.aliases.join(", ")}`);
+      if (choices.lanes?.length) lines.push(`合法 lane: ${choices.lanes.join(", ")}`);
+      if (choices.roles?.length) lines.push(`合法 role: ${choices.roles.join(", ")}`);
+      lines.push(`修正示例: npm run cli -- run --lane ${choices.lanes?.[0] ?? "<lane>"} --role ${choices.roles?.[0] ?? "<role>"} --prompt "任务文本"`);
+      throw new Error(lines.join("\n"));
+    }
+    if (resolution.source === "explicit") {
+      if (options.background) {
+        throw new Error(
+          "explicit lane/role dispatch requires the foreground path in this increment "
+          + "(explicit_background_unsupported): background runner threading lands in the next "
+          + "increment (0045 W2b) — drop --background for lane/role dispatch until then",
+        );
+      }
+      agentId = resolution.agentId; // 接线席位（过渡）；身份注记随 resolvedTarget 落档
+      resolvedTarget = resolution;
+    } else if (resolution.source === "alias") {
+      resolvedTarget = resolution; // H1：注解不执行——agentId 不变
+    }
+    // legacy-agent：无注解可记，resolvedTarget 保持 null（行为与 W2 前一致）
   }
   // TD-103 Phase 3C-1: load and validate delivery spec before any side effects.
   const delivery = await loadDeliverySpec(options);
@@ -521,6 +582,9 @@ export async function runCommand(args, config) {
     // reasoningOverride fact. Composable with --model (the Owner scenario
     // "gpt-5.6-sol + xhigh").
     ...(options.reasoning !== undefined ? { reasoningOverride: options.reasoning } : {}),
+    // 0045 W2：派发目标解析结果（alias=身份注解 / explicit=车道+角色组合，
+    // 角色经 P1 钉住机制在 start 内生效）。absent = 字节兼容。
+    ...(resolvedTarget ? { resolvedTarget } : {}),
   });
   // R10-A/R11-1: echo the EFFECTIVE policies (the synthesized agent's model /
   // reasoning — the override value plus preserved siblings) at dispatch

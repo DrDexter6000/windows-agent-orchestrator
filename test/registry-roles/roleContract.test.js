@@ -354,10 +354,15 @@ test("M11-5-C3: resume spawn call passes roleContract (no bypass)", () => {
   const src = readFileSync(resolve(process.cwd(), "src/runManager.js"), "utf8");
   // M11-8B: resume composes the role contract with the identity header through
   // composeRoleContractWithIdentity, but still loads via loadRoleContract and
-  // passes the result to backend.spawn. The structural guard verifies the
-  // resume path loads the role and the composed result reaches spawn.
-  assert.ok(/resumeRoleContract\s*=\s*composeRoleContractWithIdentity\(\s*\{\s*roleContract:\s*loadRoleContract/.test(src),
-    "resume path loads roleContract via loadRoleContract and composes it");
+  // passes the result to backend.spawn. 0045 P1/W2 结构更新（先定源、单点组装，
+  // WQ-GRN-07）：两个加载分支（钉优先 + legacy 注册表）都经 loadRoleContract，
+  // 组装恰一处，结果到 spawn——结构钉按此翻新，意图不变。
+  assert.ok(/loadRoleContract\(resumeRolePin\.systemPrompt\)/.test(src),
+    "resume 钉优先分支经 loadRoleContract 加载钉住角色（0045 §1.3）");
+  assert.ok(/loadRoleContract\(agent\.systemPrompt\)/.test(src),
+    "resume legacy 分支经 loadRoleContract 从注册表加载（行为保留）");
+  assert.ok(/resumeRoleContract\s*=\s*resumeRoleSource === undefined\s*\?\s*undefined\s*:?\s*composeRoleContractWithIdentity\(/.test(src),
+    "resume 单点组装（WQ-GRN-07：composeRoleContractWithIdentity 全仓恰 start+resume 两处）");
   // The resume backend.spawn call must include roleContract.
   assert.ok(/backend\.spawn\([^)]*roleContract:\s*resumeRoleContract/s.test(src),
     "resume backend.spawn passes roleContract");
