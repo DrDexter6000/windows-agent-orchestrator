@@ -684,10 +684,21 @@ test("agents.example.json 角色条目的 backend/model/effort 完整且落在 r
     const w = parsed.agents?.[id];
     assert.ok(w && KNOWN_BACKENDS.includes(w.backend), `${id}.backend 必须落在 KNOWN_BACKENDS 闭集`);
     assert.ok(typeof w.model?.id === "string" && w.model.id.trim(), `${id}.model.id 必须非空`);
-    assert.ok(REASONING_EFFORTS.includes(w.reasoning?.effort), `${id}.reasoning.effort 必须落在闭集`);
-    assert.doesNotThrow(() => normalizeAgent(id, w), `${id} 必须通过 registry 规范化闭集`);
+    // 2026-10-05（harness 版本巡检补账轮）：effort 完整性按后端表达力分化——
+    // 能表达 reasoning 的后端必须给出闭集内 effort；不能表达的（如 kimi-web 对
+    // reasoning 配置直接拒绝）缺席才是合法形状。以行为探针判定（合成一个合法
+    // effort 喂给 validateAgentPolicy，期望它拒绝），不点名后端名单。
     const backend = backendFor(w, { fetchImpl });
-    assert.doesNotThrow(() => backend.validateAgentPolicy(w), `${id} model/effort 超出 backend policy`);
+    if (REASONING_EFFORTS.includes(w.reasoning?.effort)) {
+      assert.doesNotThrow(() => backend.validateAgentPolicy(w), `${id} model/effort 超出 backend policy`);
+    } else {
+      assert.throws(
+        () => backend.validateAgentPolicy({ ...w, reasoning: { effort: REASONING_EFFORTS[0] } }),
+        /reasoning/i,
+        `${id}.reasoning.effort 必须落在闭集——除非后端不表达 reasoning（行为探针判负）`,
+      );
+    }
+    assert.doesNotThrow(() => normalizeAgent(id, w), `${id} 必须通过 registry 规范化闭集`);
   }
   assert.throws(() => normalizeAgent("tester", { ...parsed.agents.tester, reasoning: { effort: "outside-closed-set" } }), /reasoning\.effort/);
   const LEGACY_LANE_IDS = new Set(["coder_opencode_fallback"]);
@@ -702,12 +713,14 @@ test("agents.example.json 角色条目的 backend/model/effort 完整且落在 r
         `备用 lane ${id} 必须显式声明 seatRole（决策 0025：防后缀命名被席位惯例误判）`);
     }
   }
-  // coder_mm 必须是 kimi-code 且不带 --yolo
+  // coder_mm 通道钉（2026-10-01 Owner 裁定 kimi-code CLI → kimi-web HTTP attach；
+  // 模板与钉在 2026-10-05 harness 版本巡检补账轮一并对齐——旧钉"kimi-code 进程式"
+  // 与 --yolo 互斥注记随通道切换作废，--yolo 检查保留为通用防御）。
   const mm = parsed.agents?.coder_mm;
-  assert.equal(mm.backend, "kimi-code", "coder_mm 必须是 kimi-code（多模态，进程式）");
+  assert.equal(mm.backend, "kimi-web", "coder_mm 必须是 kimi-web（原厂 web 通道，2026-10-01 Owner 裁定）");
   assert.ok(
     !(Array.isArray(mm.args) && mm.args.includes("--yolo")),
-    "coder_mm 不得带 --yolo args（kimi -p 模式互斥，会导致 run failed）"
+    "coder_mm 不得带 --yolo args（通用防御：历史 kimi -p 互斥坑；kimi-web 通道无 args 面）"
   );
   // opencode worker 必须显式标注为 fallback（不得混在主角色里不标）
   const opencodeWorkers = Object.entries(parsed.agents)
@@ -1465,7 +1478,8 @@ test("M12 canonical role value pins: coder_low + tester + auditor Owner decision
   assert.equal(parsed.agents?.tester?.model?.id, "gpt-5.6-sol");
   assert.equal(parsed.agents?.tester?.reasoning?.effort, "xhigh");
   assert.equal(parsed.agents?.auditor?.model?.id, "gpt-6-astra");
-  assert.equal(parsed.agents?.auditor?.reasoning?.effort, "high");
+  // Owner 2026-10-05 令 effort high→xhigh（模型不变，轻量变更不触发重认证）。
+  assert.equal(parsed.agents?.auditor?.reasoning?.effort, "xhigh");
 });
 
 test("M12-8A/M12-9/M12-10/M12-16: SKILL/architecture 工具数与 toolSurface SSOT 一致（TD-120 关系型守卫）", () => {

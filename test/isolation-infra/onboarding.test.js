@@ -1384,8 +1384,12 @@ test("R6-C: recommendations over the REAL tracked template derive all seven rows
   // 2026-09-17 Owner 裁定：researcher/coder_low 由 DeepSeek 切智谱 GLM-5.3-Flash[1m]。
   assert.equal(byId.researcher.requiresKeyEnv, "ZHIPU_API_KEY");
   assert.equal(byId.coder_low.requiresKeyEnv, "ZHIPU_API_KEY");
-  assert.equal(byId.coder_mm.requiresKeyEnv, null, "kimi uses CLI login state");
-  assert.equal(byId.coder_mm.requiresCli, "kimi");
+  // 2026-10-01 Owner 裁定 coder_mm 通道 kimi-code CLI → kimi-web（模板 2026-10-05
+  // 巡检补账轮对齐）：就绪映射从 CLI 登录态变为 tokenEnv 凭据 + 无 CLI（HTTP attach）。
+  // 如实钉现状：推荐矩阵层尚未建模 kimi-web 的凭据就绪（tokenEnv 不进 requiresKeyEnv
+  // 派生；与 doctor 对 kimi-web/zcode 无就绪映射的在册缺口同族——待该面增强时翻新）。
+  assert.equal(byId.coder_mm.requiresKeyEnv, null);
+  assert.equal(byId.coder_mm.requiresCli, null, "kimi-web is HTTP attach — no CLI to probe");
   assert.equal(byId.tester.requiresKeyEnv, null, "tester uses codex login");
   assert.equal(byId.tester.requiresCli, "codex");
   assert.equal(byId.auditor.requiresKeyEnv, null, "auditor uses codex login (2026-09-17 switch)");

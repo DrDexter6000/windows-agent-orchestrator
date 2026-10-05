@@ -88,20 +88,18 @@
     },
     "coder_mm": {
       "_comment": "[Coder-MM] 多模态、视觉创意与高质量工程通道；可作为 Coder-HQ 的高价替补。对齐 team-roles.md Coder-MM。",
-      "_comment_backend": "kimi-code（进程式，官方过 Kimi 白名单，无需伪装 header）。K3 原生最高 1M context，effort=max，实际可用窗口取决于 Kimi Code 账户档位。",
-      "_comment_yolo": "⚠ 不要加 --yolo：kimi -p 模式与 --yolo 互斥（CLI 报错）。-p 模式已默认无交互批准。",
-      "_comment_limit": "kimi stream-json 不含 usage/token；Kimi Code/K3 自主管理上下文，WAO 不配置 backend 无法表达的 contextWindow override。token 价格较高，不作为常规低风险编码的默认通道。",
+      "_comment_backend": "kimi-web（HTTP attach 原厂 web 通道，2026-10-01 Owner 裁定由 kimi-code CLI 切换；permission_mode=auto 恒发、tool 帧证据投影）。k3-256k 档 256k 上下文（2026-10-04 模型切换，serve /api/v1/models 验真）；kimi-web 不表达 reasoning（配了即派发前拒绝）。",
+      "_comment_limit": "token 价格较高，不作为常规低风险编码的默认通道；REST 无会话级中止端点（8 动作名实测阴性 2026-09-30），失控 run 无 WAO 内自动停止杠杆——派发须 bounded 任务+操作员监督。",
       "_comment_task": "适合任务: 图像/视频内容理解、前端设计与实现、视觉/美术审核、策略策划、文案写作、图像相关编码；也可作为 Coder-HQ 的高质量工程替补",
-      "backend": "kimi-code",
+      "backend": "kimi-web",
       "seatRole": "adversarial",
       "cwd": ".",
       "systemPrompt": "config/roles/coder_mm.md",
       "model": {
-        "id": "kimi-code/k3"
+        "id": "kimi-code/k3-256k"
       },
-      "reasoning": {
-        "effort": "max"
-      }
+      "serveUrl": "http://127.0.0.1:4297",
+      "tokenEnv": "KIMI_WEB_TOKEN"
     },
     "tester": {
       "_comment": "[Tester] 执行层验证 + 运行监控（轮询）。对齐 team-roles.md Tester。",
@@ -133,7 +131,7 @@
         "id": "gpt-6-astra"
       },
       "reasoning": {
-        "effort": "high"
+        "effort": "xhigh"
       },
       "args": []
     },
@@ -196,12 +194,13 @@
       },
       {
         "agentId": "coder_mm",
-        "label": "kimi-code/k3 max via kimi-code CLI（多模态）",
+        "label": "kimi-code/k3-256k via kimi-web（原厂 web 通道，多模态；2026-10-04 模型切换 k3→k3-256k）",
         "profile": "strict",
         "drills": [
           "sentinel",
           "scorecard"
-        ]
+        ],
+        "modelId": "kimi-code/k3-256k"
       },
       {
         "agentId": "tester",
@@ -215,7 +214,7 @@
       },
       {
         "agentId": "auditor",
-        "label": "GPT-6-astra high via codex（前置建议/红队挑战 + 独立审计）",
+        "label": "GPT-6-astra xhigh via codex（前置建议/红队挑战 + 独立审计）",
         "profile": "strict",
         "modelId": "gpt-6-astra",
         "drills": [
