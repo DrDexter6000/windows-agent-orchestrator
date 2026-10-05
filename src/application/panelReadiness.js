@@ -55,8 +55,18 @@ export { PANEL_STAGES } from "../waoStage.js";
  * @param {unknown} [declared] 显式 seatRole 声明（闭集外视为未声明）
  * @returns {"adversarial"|"implementation"|"non_seat"}
  */
-export function seatRoleOf(id, declared) {
+export function seatRoleOf(id, declared, facts) {
+  // 0045 W4c（R5 裁定）：分类依据从"席位名字模式"改为"角色事实"——facts.roleStem
+  // （席位 systemPrompt 文件名 stem，或派发解析的 roleId）优先：auditor 族角色=
+  // 对抗席，coder 族=实现席。名字模式（auditor/coder_mm/^coder_）降为 legacy
+  // 回退（无 facts 的历史调用面）。declared 显式声明仍最优先（闭集内）。
   if (typeof declared === "string" && SEAT_ROLES.includes(declared)) return declared;
+  const stem = typeof facts?.roleStem === "string" ? facts.roleStem : null;
+  if (stem !== null) {
+    if (stem === "auditor" || stem.startsWith("auditor")) return "adversarial";
+    if (stem.startsWith("coder")) return "implementation";
+    return "non_seat";
+  }
   const s = String(id ?? "");
   if (s === "auditor" || s === "coder_mm") return "adversarial";
   if (/^coder_/.test(s)) return "implementation";

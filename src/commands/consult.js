@@ -162,7 +162,12 @@ export function renderCouncilDiffText(result) {
   lines.push("—— 独立性事实（advisory，非结论）——");
   // R9（决定 0023）：厂族砖直读 registry 原始字段（backend + provider 标识），
   // 不做族系归类——modelFamily 是展示闭集模块，控制面路径不得消费。
-  const runtimeParts = result.seats.map((s) => `${s.agentId}=${s.backend ?? "?"} @ ${s.provider ?? "无 provider 标识"}`);
+  const runtimeParts = result.seats.map((s) => {
+    // 0045 W4c：注册表解析失败如实标注（区别于"确无 provider 标识"）。
+    if (s.registryResolution === "failed") return `${s.agentId}=注册表解析失败（席位已不在注册表？不按独立计）`;
+    if (s.registryResolution === "registry-unreadable") return `${s.agentId}=注册表不可读（不按独立计）`;
+    return `${s.agentId}=${s.backend ?? "?"} @ ${s.provider ?? "无 provider 标识"}`;
+  });
   lines.push(`厂族：${runtimeParts.join(" · ")}（registry 原始字段直读，不归类——判断权在 Lead）`);
   // 0045 R4 独立性三枚举（措辞不对称：相等=断言同源；不等=只说未检出，永不出现"独立"）。
   const groups = new Map();

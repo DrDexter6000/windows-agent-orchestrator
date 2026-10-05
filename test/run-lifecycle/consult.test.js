@@ -499,9 +499,11 @@ test("BRICK-1: runConsult 厂族砖=backend/provider 原始字段直读；regist
   const b = result.seats.find((s) => s.agentId === "seat_b");
   assert.equal(b.backend, "codex");
   assert.equal(b.provider, null, "无 provider 块如实 null——不猜不归类");
+  // 0045 W4c：runtimeFacts 增 registryResolution（"ok"|"failed"|"registry-unreadable"）
+  // ——解析失败不再静默吞成与"确无 provider"同形的 null。
   assert.deepEqual(result.bricks.runtimeFacts, [
-    { agentId: "seat_a", backend: "claude-code", provider: "https://stub.example/api/anthropic" },
-    { agentId: "seat_b", backend: "codex", provider: null },
+    { agentId: "seat_a", backend: "claude-code", provider: "https://stub.example/api/anthropic", registryResolution: "ok" },
+    { agentId: "seat_b", backend: "codex", provider: null, registryResolution: "ok" },
   ]);
   assert.ok(!("modelFamily" in a), "席位不再携带族系归类字段（R9 控制面铁律）");
   assert.ok(!("modelFamily" in result.record.seats[0]), "组记录席位同样不落族系归类字段");
@@ -514,8 +516,8 @@ test("BRICK-1: runConsult 厂族砖=backend/provider 原始字段直读；regist
     mkdirFn: async () => {},
   }));
   assert.deepEqual(degraded.bricks.runtimeFacts, [
-    { agentId: "seat_a", backend: null, provider: null },
-    { agentId: "seat_b", backend: null, provider: null },
+    { agentId: "seat_a", backend: null, provider: null, registryResolution: "registry-unreadable" },
+    { agentId: "seat_b", backend: null, provider: null, registryResolution: "registry-unreadable" },
   ]);
 });
 

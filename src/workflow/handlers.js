@@ -34,7 +34,23 @@ import { buildPrompt, buildUpstreamContext, checkRequiredClaims } from "./handof
 const agentHandler = {
   async execute(node, ctx) {
     const prompt = buildPrompt(node, ctx);
+    // 0045 W4c（R5 裁定）：workflow 不再直穿 agentId——经 dispatchResolution 解析
+    // 取身份注记（alias → {laneId, roleId}；legacy/未入表席位零变化）。解析器抛错
+    // 不吞（unknown 形状由 start 的既有权威报错兜底——此处只加注记不加门）。
+    let resolvedTarget;
+    try {
+      const { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } = await import("../dispatchResolution.js");
+      const registryAgents = typeof ctx?.runManager?.readRegistry === "function"
+        ? Object.fromEntries((await ctx.runManager.readRegistry()).listAgents().map((a) => [a.id, a]))
+        : {};
+      const resolution = resolveDispatchTarget({
+        agentId: node.agentId, lane: undefined, role: undefined,
+        lanesDoc: loadLanesConfig(), registryAgents, roleLibrary: listRoleLibrary(),
+      });
+      if (resolution.kind === "resolved" && resolution.source === "alias") resolvedTarget = resolution;
+    } catch { /* 解析面不可用=照旧直穿（零行为变化） */ }
     const run = await ctx.runManager.start(node.agentId, {
+      ...(resolvedTarget ? { resolvedTarget } : {}),
       prompt,
       isolate: ctx.options?.isolate,
       // C1 修复（审计 P1-a）：节点级 scorecard 配置传给 RunManager。

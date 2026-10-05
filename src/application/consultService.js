@@ -441,13 +441,16 @@ export async function runConsult({
   } catch {
     registry = null; // registry 不可读不阻断会审——厂族砖如实降级为 null
   }
+  // 0045 W4c（R5 点名）：getAgent 抛错不再静默吞成 null——如实标注
+  // registryResolution（"ok" | "failed" | "registry-unreadable"），渲染层区分
+  // "席位已不在注册表"与"确无 provider 标识"，独立性判断不因此静默塌成 unknown。
   const runtimeFacts = seats.map((seat) => {
-    if (!registry) return { agentId: seat.agentId, backend: null, provider: null };
+    if (!registry) return { agentId: seat.agentId, backend: null, provider: null, registryResolution: "registry-unreadable" };
     try {
       const agent = registry.getAgent(seat.agentId);
-      return { agentId: seat.agentId, ...seatRuntimeFacts(agent) };
+      return { agentId: seat.agentId, ...seatRuntimeFacts(agent), registryResolution: "ok" };
     } catch {
-      return { agentId: seat.agentId, backend: null, provider: null };
+      return { agentId: seat.agentId, backend: null, provider: null, registryResolution: "failed" };
     }
   });
 
