@@ -209,6 +209,10 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
       // + certified-exclusive up in runCommand). undefined when absent =
       // byte-compatible.
       reasoningOverride: options.reasoning,
+      // 0045 W2b：显式车道+角色穿线到 detached runner（runner 侧重解析生效，
+      // R3 "启动前重查"）。前台路径不经此（resolvedTarget 直达 start）。
+      resolvedLane: options.lane,
+      resolvedRole: options.role,
       runnerPath,
       // M11-11C: CLI dispatch is a one-shot process — there is no stable Lead
       // session across CLI invocations, so reusable experts always start a fresh
@@ -488,15 +492,8 @@ export async function runCommand(args, config) {
       throw new Error(lines.join("\n"));
     }
     if (resolution.source === "explicit") {
-      if (options.background) {
-        throw new Error(
-          "explicit lane/role dispatch requires the foreground path in this increment "
-          + "(explicit_background_unsupported): background runner threading lands in the next "
-          + "increment (0045 W2b) — drop --background for lane/role dispatch until then",
-        );
-      }
-      agentId = resolution.agentId; // 接线席位（过渡）；身份注记随 resolvedTarget 落档
-      resolvedTarget = resolution;
+      agentId = resolution.agentId; // 前台路径的接线席位（过渡）；后台路径 runner 侧重解析
+      if (!options.background) resolvedTarget = resolution;
     } else if (resolution.source === "alias") {
       resolvedTarget = resolution; // H1：注解不执行——agentId 不变
     }
@@ -504,6 +501,16 @@ export async function runCommand(args, config) {
   }
   // TD-103 Phase 3C-1: load and validate delivery spec before any side effects.
   const delivery = await loadDeliverySpec(options);
+  // 0045 R3 裁定 H3（派发侧臂）：explicit × continuable 拒绝——continue 重建子 run
+  // 不带角色=静默换帽（runContinue 侧父臂已拒；此处把组合在派发面也关死）。
+  if (resolvedTarget?.source === "explicit" && delivery && delivery.continuable) {
+    throw new Error(
+      "explicit lane/role dispatch cannot be continuable in this increment "
+      + "(explicit_continuable_unsupported, 0045 R3 裁定 H3): the continue path rebuilds the "
+      + "child from the registry entry without the explicit role — a silent hat switch. "
+      + "Dispatch by agentId for continuable work until identity pinning reaches run_continue",
+    );
+  }
   // Delivery requires --isolate; reject before spawn.
   if (delivery && !resolveIsolateFlag(options)) {
     throw new Error("delivery mode requires --isolate (persistent worktree isolation)");

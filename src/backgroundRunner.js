@@ -32,6 +32,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { writeFileSync, unlinkSync } from "node:fs";
 import { validateSessionReuseRouting } from "./application/sessionReuse.js";
+import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "./dispatchResolution.js";
 
 // D-F3 修复：ownership 心跳文件。daemon --resume-on-start 用它判活，
 // 避免劫持 P2 runner 还在驱动的 run（双所有者 = 06-18 孤儿变体）。
@@ -147,7 +148,43 @@ export async function runBackground(opts = {}) {
 
   let run;
   try {
-    run = await manager.start(agentId, {
+    // 0045 W2b：显式车道+角色派发的 runner 侧重解析（R3 裁定"启动前重查一致
+    // 性"——CLI 派发与 runner 起动之间 lanes.json/注册表可能已变，单一真相在
+    // dispatchResolution）。失败=具名 fail-closed：写 run.error + failed 终态，
+    // 不留 pending 转录、不 spawn（delivery-json 解析失败的收口先例同款）。
+    let startAgentId = agentId;
+    let resolvedTarget = null;
+    if (opts.lane !== undefined || opts.role !== undefined) {
+      const lanesDoc = loadLanesConfig();
+      const reg = await registryResolver(registryPath ?? "config/agents.json");
+      const registryAgents = Object.fromEntries(
+        (typeof reg.listAgents === "function" ? reg.listAgents() : []).map((a) => [a.id, a]),
+      );
+      const resolution = resolveDispatchTarget({
+        // lane/role 在场时它们是唯一选择器（二选一闭集）——argv 位置 agentId 只是
+        // 转录预写事实的接线提示（CLI 侧解析所得），不得进选择器（混用即拒）。
+        agentId: (opts.lane !== undefined || opts.role !== undefined) ? undefined : agentId,
+        lane: opts.lane, role: opts.role,
+        lanesDoc, registryAgents, roleLibrary: listRoleLibrary(),
+      });
+      if (resolution.kind === "error") {
+        const transcriptPath = join(runDir, `${runId}.jsonl`);
+        try {
+          const t = new JsonlTranscript(transcriptPath, {
+            runId, agentId: agentId ?? "unknown", initialSeq: 0,
+          });
+          await t.append("run.error", { phase: "dispatch_resolution", error: resolution.code, message: resolution.message });
+          await t.transitionState("pending", "failed", STATE_CHANGE_REASON.dispatch_resolution_failed);
+        } catch { /* best effort — the returned failure is the primary surface */ }
+        return {
+          runId, completed: false, failed: true, timedOut: false,
+          error: `dispatch_resolution: ${resolution.code}: ${resolution.message}`,
+        };
+      }
+      if (resolution.source === "explicit") startAgentId = resolution.agentId;
+      if (resolution.source === "explicit" || resolution.source === "alias") resolvedTarget = resolution;
+    }
+    run = await manager.start(startAgentId, {
       prompt,
       registry: registryPath,
       runDir,
@@ -156,6 +193,7 @@ export async function runBackground(opts = {}) {
       fireAndForget: false,
       // CLI --background 模式预生成 runId，传给 runner 保持一致。
       runId,
+      ...(resolvedTarget ? { resolvedTarget } : {}),
       ...(opts.scorecardRules ? { scorecard: { rules: opts.scorecardRules } } : {}),
       // M8-1：透传 --scorecard-mode（默认 warn；hard/off 由 Lead 显式传）。
       ...(opts.scorecardMode ? { scorecardMode: opts.scorecardMode } : {}),
@@ -520,6 +558,10 @@ export async function runMain(argv = process.argv.slice(2)) {
     scorecardRules: opts["scorecard-rules"] ? JSON.parse(opts["scorecard-rules"]) : undefined,
     scorecardMode: opts["scorecard-mode"],
     requireCertified: argv.includes("--require-certified"),
+    // 0045 W2b：显式车道+角色派发（--lane/--role 从 dispatchRun argv 穿线；
+    // runBackground 侧重解析后生效）。
+    lane: opts.lane,
+    role: opts.role,
     delivery: parsedDelivery,
     isolate: argv.includes("--isolate"),
     // M11-11C: opaque reuse routing threaded from dispatchRun. A malformed

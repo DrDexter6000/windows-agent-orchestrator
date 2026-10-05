@@ -389,6 +389,9 @@ export async function dispatchRun({
   // sibling fields preserved). Absent = byte-compatible dispatch (argv
   // unchanged).
   reasoningOverride = null,
+  // 0045 W2b：显式车道+角色派发（CLI --lane/--role 穿线；MCP 面第 5 步再开）。
+  resolvedLane = null,
+  resolvedRole = null,
 }) {
   if (!agentId || typeof agentId !== "string") {
     throw new Error("dispatchRun: agentId is required");
@@ -741,6 +744,15 @@ export async function dispatchRun({
   // parseSimpleFlags restores the pair exactly.
   if (reasoningOverride !== null && reasoningOverride !== undefined) {
     runnerArgs.push("--reasoning", reasoningOverride);
+  }
+  // 0045 W2b：显式车道+角色派发穿线到 detached runner（--model 对先例）。runner
+  // 侧经 dispatchResolution 单一真相重解析（R3 裁定"启动前重查一致性"——CLI 与
+  // runner 起动间 lanes.json/注册表可能已变）；配对完整性由解析器闭集把关。
+  if (resolvedLane !== undefined && resolvedLane !== null) {
+    runnerArgs.push("--lane", resolvedLane);
+  }
+  if (resolvedRole !== undefined && resolvedRole !== null) {
+    runnerArgs.push("--role", resolvedRole);
   }
   if (scorecardRules) runnerArgs.push("--scorecard-rules", scorecardRules);
   if (scorecardMode) runnerArgs.push("--scorecard-mode", scorecardMode);

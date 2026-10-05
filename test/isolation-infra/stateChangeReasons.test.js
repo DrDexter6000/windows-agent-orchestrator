@@ -72,6 +72,7 @@ const FROZEN_MEMBERS = [
   "startup_error",
   "delivery_parse_error",
   "reuse_worktree_parse_error",
+  "dispatch_resolution_failed", // 0045 W2b：显式派发 runner 侧重解析失败 fail-closed
   "certification_gate",
   "fire_forget_guard",
   "workdir_escape",

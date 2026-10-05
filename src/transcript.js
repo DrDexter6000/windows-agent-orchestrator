@@ -72,6 +72,7 @@ export const STATE_CHANGE_REASONS = Object.freeze([
   "startup_error", // backgroundRunner 启动兜底：runner 启动失败
   "delivery_parse_error", // backgroundRunner runMain：--delivery-json 解析失败 fail-closed
   "reuse_worktree_parse_error", // backgroundRunner runMain：--reuse-worktree-json 解析失败 fail-closed
+  "dispatch_resolution_failed", // backgroundRunner runBackground：0045 W2b 显式派发 runner 侧重解析失败 fail-closed
   "certification_gate", // RunManager.start：认证新鲜度门拒绝派发
   "fire_forget_guard", // RunManager.start：fire-and-forget 孤儿 session 护栏拒绝
   "workdir_escape", // Run.waitForCompletion：写越界（isolation violation）
