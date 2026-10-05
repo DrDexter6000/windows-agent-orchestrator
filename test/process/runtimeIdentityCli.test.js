@@ -129,3 +129,13 @@ test("main: --help 与缺 backend 的 exit code（进程内注入 stdout/stderr�
   assert.equal(await main([], { stdout, stderr }), 1);
   assert.match(err.join(""), /--backend is required/);
 });
+
+// 2026-10-05 巡检摩擦①回归钉：where.exe 未命中的本地码页提示（GBK）曾经
+// execFileSync 的 stderr 默认继承直通控制台，污染 JSON 输出的机读性——修复后
+// 探测失败必须零 stderr（stdout 仍是单行 JSON honest unknown）。
+test("cli: 探测未命中（deepseek-harness 裸名）→ stderr 零字节（where 噪声不外泄）", () => {
+  const r = runCli(["--backend", "deepseek-harness", "--registry", "config/agents.json"]);
+  assert.ok(!r.stderr || r.stderr.length === 0, "探测未命中的 stderr 必须为空（where.exe 码页提示不外泄）");
+  const parsed = JSON.parse(r.stdout.trim());
+  assert.equal(parsed.verified, false, "stdout 仍是 honest unknown JSON");
+});

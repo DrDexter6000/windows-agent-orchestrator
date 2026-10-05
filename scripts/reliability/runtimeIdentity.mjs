@@ -73,7 +73,11 @@ function resolveBareBinary(name, platform) {
   if (platform !== "win32") return name;
   if (/[\\/]/.test(name) || /^[A-Za-z]:/.test(name)) return name;
   try {
-    const output = execFileSync("where.exe", [name], { encoding: "utf8", windowsHide: true });
+    // 2026-10-05 巡检摩擦①修：execFileSync 的 stderr 默认继承父进程——where 未命中
+    // 的本地码页提示（如 GBK "信息: 用提供的模式无法找到文件"）会直通污染控制台。
+    // 显式管道化：探测语义只吃 stdout 命中清单，未命中走 catch 返回裸名（ENOENT 由
+    // 版本探测承载），stderr 不再外泄。
+    const output = execFileSync("where.exe", [name], { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     const paths = output.split(/\r?\n/).filter(Boolean);
     const ranked = paths.find((value) => value.toLowerCase().endsWith(".exe"))
       ?? paths.find((value) => value.toLowerCase().endsWith(".cmd"))
