@@ -123,8 +123,20 @@ export function extractRunFacts(events, runId = null) {
       updatedAt = parsed.toISOString();
     }
   }
+  // 0045 R4 读取面独立字段：explicit（车道+角色组合）run 的身份注记从本 run 的
+  // run.started 提取（agentId 字段不重载——wire pattern 不变）；缺缺席=undefined
+  // （JSON 序列化丢弃，legacy 行字节兼容）。
+  const startedEvent = scope.find((e) => e && e.type === "run.started");
+  const identityAnnotation = startedEvent?.resolvedFrom === "explicit" || startedEvent?.resolvedFrom === "alias"
+    ? {
+        laneId: typeof startedEvent.laneId === "string" ? startedEvent.laneId : null,
+        roleId: typeof startedEvent.roleId === "string" ? startedEvent.roleId : null,
+        resolvedFrom: startedEvent.resolvedFrom,
+      }
+    : null;
   return {
     agentId: rawAgentId,
+    ...(identityAnnotation ? { laneId: identityAnnotation.laneId, roleId: identityAnnotation.roleId, resolvedFrom: identityAnnotation.resolvedFrom } : {}),
     state: safeState,
     terminal,
     updatedAt,
@@ -166,7 +178,14 @@ function finalizeSummary(runId, facts, knownAgentIds, input) {
   const agentId = input.validateAgentIds === false
     ? (typeof rawAgentId === "string" ? rawAgentId : "unknown")
     : (typeof rawAgentId === "string" && knownAgentIds.includes(rawAgentId) ? rawAgentId : "unknown");
-  return { runId, agentId, state: facts.state, terminal: facts.terminal, updatedAt: facts.updatedAt };
+  // 0045 R4：独立身份字段透传（agentId 不重载；legacy 行无新键=字节兼容）。
+  return {
+    runId, agentId,
+    ...(facts.laneId !== undefined ? { laneId: facts.laneId } : {}),
+    ...(facts.roleId !== undefined ? { roleId: facts.roleId } : {}),
+    ...(facts.resolvedFrom !== undefined ? { resolvedFrom: facts.resolvedFrom } : {}),
+    state: facts.state, terminal: facts.terminal, updatedAt: facts.updatedAt,
+  };
 }
 
 // TD-153: transcript-updated window key — the summary updatedAt (already the

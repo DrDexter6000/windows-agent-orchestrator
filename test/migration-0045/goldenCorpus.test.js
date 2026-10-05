@@ -71,6 +71,15 @@ const CORPUS = [
     ],
   },
   {
+    shape: "explicit-lane-role (0045 R4 第七形状：独立字段不重载 agentId)",
+    runId: "run_gold_explicit",
+    events: [
+      { type: "run.started", runId: "run_gold_explicit", agentId: "coder_low", backend: "zcode", model: { id: "bigmodel-api/GLM-5.3-Flash" }, reasoning: { effort: "high" }, providerKey: "pk-gold-zcode", laneId: "glm-flash", roleId: "researcher", resolvedFrom: "explicit", ts: TS, seq: 1 },
+      { type: "run.state_change", runId: "run_gold_explicit", agentId: "coder_low", from: "pending", to: "running", reason: "first_event", ts: TS, seq: 2 },
+      { type: "run.completed", runId: "run_gold_explicit", agentId: "coder_low", ts: TS, seq: 3 },
+    ],
+  },
+  {
     shape: "missing-reasoning",
     runId: "run_gold_no_reasoning",
     events: [
@@ -92,6 +101,7 @@ const GOLDEN = {
   "run_gold_no_reasoning": { "agentId": "unknown", "state": "completed", "terminal": true, "activityStatus": "terminal" },
   "run_gold_no_started": { "agentId": "unknown", "state": "completed", "terminal": true, "activityStatus": "terminal" },
   "run_gold_normal": { "agentId": "coder_hq", "state": "completed", "terminal": true, "activityStatus": "terminal" },
+  "run_gold_explicit": { "agentId": "coder_low", "laneId": "glm-flash", "roleId": "researcher", "resolvedFrom": "explicit", "state": "completed", "terminal": true, "activityStatus": "terminal" },
 };
 
 test("0045 CB-4 黄金对照：六身份形状的 listRuns 投影冻结（改造前行为基线）", async () => {
@@ -100,7 +110,7 @@ test("0045 CB-4 黄金对照：六身份形状的 listRuns 投影冻结（改造
     for (const c of CORPUS) writeRun(dir, c.runId, c.events);
     const { runs } = await listRuns({
       runDir: dir,
-      knownAgentIds: ["coder_hq", "tester"],
+      knownAgentIds: ["coder_hq", "tester", "coder_low"],
       validateAgentIds: true,
       nowMs: Date.parse(TS) + 60_000,
       checkLivenessFn: () => "unknown",
@@ -108,6 +118,9 @@ test("0045 CB-4 黄金对照：六身份形状的 listRuns 投影冻结（改造
     const byId = {};
     for (const row of runs) byId[row.runId] = {
       agentId: row.agentId,
+      ...(row.laneId !== undefined ? { laneId: row.laneId } : {}),
+      ...(row.roleId !== undefined ? { roleId: row.roleId } : {}),
+      ...(row.resolvedFrom !== undefined ? { resolvedFrom: row.resolvedFrom } : {}),
       state: row.state,
       terminal: row.terminal,
       activityStatus: row.activityStatus,

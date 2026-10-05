@@ -51,6 +51,7 @@ import { readRegistry } from "../registry.js";
 import { boundReportScope } from "../metrics.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 import { dispatchRun } from "./runDispatch.js";
+import { deriveStartedIdentity, laneFingerprint } from "./identityProjection.js";
 // 预算范围与 run_wait 同域（0039 r1：--wait-timeout 默认 600000，范围同 run_wait）。
 import { RUN_WAIT_MIN_MS, RUN_WAIT_MAX_MS } from "./runWait.js";
 // R9（决定 0023）：modelFamily 是展示闭集模块，本文件（dispatch/delivery 控制
@@ -620,6 +621,45 @@ export async function runConsult({
  * 读取一个会审组记录（consult show 的入口；只读）。
  * @returns {Promise<object>} record
  */
+
+/**
+ * 0045 R4（consult_…j6ixxl 裁定）：车道独立性三枚举派生（纯函数）。
+ * laneGroup=等价类编号（首现顺序；null=无 run.started 事实）；authorRelation/
+ * modelRelation ∈ same_lane|different_lane|unknown（或 same_model|different_model）；
+ * providerSessionRelation 恒 "unknown"（会话关联未记录在转录——如实，不猜）。
+ * 缺事实=unknown（不折叠成 false——R4：unknown≠false）。
+ */
+export function deriveIndependenceRelations({ seatFacts, authorFacts = null }) {
+  const groupOf = new Map();
+  let nextGroup = 1;
+  const seats = (seatFacts ?? []).map((f) => {
+    let laneGroup = null;
+    if (typeof f.laneFingerprint === "string") {
+      if (!groupOf.has(f.laneFingerprint)) groupOf.set(f.laneFingerprint, nextGroup++);
+      laneGroup = groupOf.get(f.laneFingerprint);
+    }
+    const authorRelation = authorFacts === null || typeof authorFacts.laneFingerprint !== "string"
+      ? "unknown"
+      : (typeof f.laneFingerprint === "string"
+        ? (f.laneFingerprint === authorFacts.laneFingerprint ? "same_lane" : "different_lane")
+        : "unknown");
+    const modelRelation = authorFacts === null || typeof authorFacts.modelId !== "string"
+      ? "unknown"
+      : (typeof f.modelId === "string"
+        ? (f.modelId === authorFacts.modelId ? "same_model" : "different_model")
+        : "unknown");
+    return {
+      agentId: f.agentId ?? null, runId: f.runId ?? null,
+      laneGroup, authorRelation, modelRelation,
+      providerSessionRelation: "unknown",
+    };
+  });
+  const authorLaneInSeats = authorFacts === null || typeof authorFacts.laneFingerprint !== "string"
+    ? null
+    : seats.some((x, i) => x.authorRelation === "same_lane" ? true : false) || null;
+  return { seats, authorLaneInSeats: authorLaneInSeats === null ? null : Boolean(authorLaneInSeats) };
+}
+
 export async function loadConsultRecord({ consultId, consultsDir, readFileFn = readFile }) {
   if (!isValidConsultId(consultId)) {
     throw new Error(`invalid consultId: ${JSON.stringify(consultId)}`);
@@ -695,14 +735,51 @@ export async function rerenderConsultFromRecord({
   // 非作者砖：与 runConsult 同一读法（被审 run transcript 的 canonical agentId）。
   let authorInSeats = null;
   let reviewedAgentId = null;
+  let authorIdentityFacts = null;
   if (record.reviewedRunId) {
     try {
       const events = await readTranscriptFn(join(runDir, `${record.reviewedRunId}.jsonl`));
       reviewedAgentId = extractCanonicalAgentId(events, record.reviewedRunId);
       authorInSeats = reviewedAgentId !== "unknown"
         && (record.seats ?? []).some((s) => s.agentId === reviewedAgentId);
+      const authorStarted = events.find((e) => e && e.type === "run.started" && e.runId === record.reviewedRunId);
+      const authorIdentity = authorStarted ? deriveStartedIdentity(authorStarted) : null;
+      authorIdentityFacts = authorIdentity === null ? null : {
+        laneFingerprint: laneFingerprint(authorIdentity),
+        modelId: authorIdentity.modelId,
+      };
     } catch {
       authorInSeats = null;
+    }
+  }
+  // 0045 R4 独立性三枚举：每席从自己的 run.started 事实派生（缺事实=unknown）。
+  const seatFactsForRelations = [];
+  for (const seat of seatResults) {
+    try {
+      const evs = await readTranscriptFn(join(runDir, `${seat.runId}.jsonl`));
+      const st = evs.find((e) => e && e.type === "run.started" && e.runId === seat.runId);
+      const identity = st ? deriveStartedIdentity(st) : null;
+      seatFactsForRelations.push({
+        agentId: seat.agentId, runId: seat.runId,
+        laneFingerprint: identity ? laneFingerprint(identity) : undefined,
+        modelId: identity ? identity.modelId : undefined,
+      });
+    } catch {
+      seatFactsForRelations.push({ agentId: seat.agentId, runId: seat.runId });
+    }
+  }
+  const relations = deriveIndependenceRelations({
+    seatFacts: seatFactsForRelations,
+    authorFacts: authorIdentityFacts,
+  });
+  const relationsByRunId = new Map(relations.seats.map((r) => [r.runId, r]));
+  for (const seat of seatResults) {
+    const r = relationsByRunId.get(seat.runId);
+    if (r) {
+      seat.laneGroup = r.laneGroup;
+      seat.authorRelation = r.authorRelation;
+      seat.modelRelation = r.modelRelation;
+      seat.providerSessionRelation = r.providerSessionRelation;
     }
   }
 
@@ -724,6 +801,7 @@ export async function rerenderConsultFromRecord({
         provider: s.provider ?? null,
       })),
       authorInSeats,
+      authorLaneInSeats: relations.authorLaneInSeats,
       reviewedAgentId,
       ...(record.reviewedRunId ? { reviewedRunId: record.reviewedRunId } : {}),
       sessionIndependence: "未提供",

@@ -164,6 +164,33 @@ export function renderCouncilDiffText(result) {
   // 不做族系归类——modelFamily 是展示闭集模块，控制面路径不得消费。
   const runtimeParts = result.seats.map((s) => `${s.agentId}=${s.backend ?? "?"} @ ${s.provider ?? "无 provider 标识"}`);
   lines.push(`厂族：${runtimeParts.join(" · ")}（registry 原始字段直读，不归类——判断权在 Lead）`);
+  // 0045 R4 独立性三枚举（措辞不对称：相等=断言同源；不等=只说未检出，永不出现"独立"）。
+  const groups = new Map();
+  for (const seat of result.seats ?? []) {
+    if (typeof seat.laneGroup === "number") {
+      if (!groups.has(seat.laneGroup)) groups.set(seat.laneGroup, []);
+      groups.get(seat.laneGroup).push(seat.agentId);
+    }
+  }
+  for (const [group, members] of [...groups.entries()].sort((a, b) => a[0] - b[0])) {
+    if (members.length >= 2) {
+      lines.push(`黄牌·同源席位：${members.join("、")} 同车道（等价类 ${group}）——这几份意见只算一个来源，不互为印证`);
+    }
+  }
+  if (result.bricks?.reviewedRunId) {
+    if (result.bricks.authorLaneInSeats === true) {
+      const sameLaneSeat = (result.seats ?? []).find((x) => x.authorRelation === "same_lane");
+      lines.push(`黄牌·作者同源：被审 run 与 ${sameLaneSeat?.agentId ?? "某席位"} 同车道——该席不算对作者的独立复核`);
+    } else if (result.bricks.authorLaneInSeats === false) {
+      lines.push("车道关联：未检出与被审 run 同车道的席位（不等于已证明独立）");
+    } else {
+      lines.push("车道关联：无法判定（缺 run.started 身份事实——不按独立计）");
+    }
+  }
+  const noFact = (result.seats ?? []).filter((x) => x.laneGroup === null || x.laneGroup === undefined);
+  if (noFact.length > 0) {
+    lines.push(`车道身份未知：${noFact.map((x) => x.agentId).join("、")} 无 run.started 事实——不按独立计`);
+  }
   if (result.bricks?.reviewedRunId) {
     const author = result.bricks.reviewedAgentId ?? "unknown";
     if (result.bricks.authorInSeats === true) {
