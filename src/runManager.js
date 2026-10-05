@@ -800,7 +800,9 @@ export class RunManager {
     // 0045 W2：explicit 派发的角色来自角色库（config/roles/<roleId>.md），替代
     // registry 的 systemPrompt——"任意车道戴任意帽"的机制本体。同一加载器/校验/
     // P1 钉住通道（rolePin 记库路径与正文 sha），组装点不增（GRN-07 守卫）。
-    const explicitRolePath = resolvedTarget?.source === "explicit" && typeof resolvedTarget.roleId === "string"
+    // W4d：alias 与 explicit 同款——角色从解析结果的 roleId 取（别名=车道+角色执行，
+    // R5 裁定反转 R3-H1）；无 resolvedTarget 时保持 registry systemPrompt（legacy 条目）。
+    const explicitRolePath = resolvedTarget && typeof resolvedTarget.roleId === "string"
       ? `config/roles/${resolvedTarget.roleId}.md`
       : null;
     const roleSourcePath = explicitRolePath ?? (agent.systemPrompt || null);
@@ -818,7 +820,7 @@ export class RunManager {
       rolePin = { systemPrompt: roleSourcePath, sha256: roleContractSha256(rawRoleContent) };
       // 0045 R4 身份头：explicit 派发的头用结构化 lane/role（消除"戴帽自称接线席
       // 位"）；alias/legacy 头字节保持原钉。
-      const identityHeaderInput = resolvedTarget?.source === "explicit"
+      const identityHeaderInput = resolvedTarget
         && typeof resolvedTarget.laneId === "string" && typeof resolvedTarget.roleId === "string"
         ? { laneId: resolvedTarget.laneId, roleId: resolvedTarget.roleId }
         : undefined;
@@ -1267,23 +1269,18 @@ export class RunManager {
       // sha256）。resume 从此钉重建并校验——改注册表指向或改角色文件后续跑
       // fail-closed，不再静默换身份。无角色派发缺席（字节兼容）。
       ...(rolePin ? { rolePin } : {}),
-      // 0045 §1.4 W2：派发目标解析注记。alias=身份注解（执行零变化）；explicit
-      // =车道+角色组合派发（wiringAgent 为过渡接线事实，R3 裁定记档以可归因）。
-      // 无解析结果（legacy-agent 直查/未提供）缺席（字节兼容）。
+      // 0045 §1.4/W4d：派发目标解析注记（alias 与 explicit 同款执行——envelope
+      // agentId=车道键即接线条目，无需再记过渡接线字段）。explicit 额外带
+      // fresh 原因注记（R3 裁定⑥；前台 CLI 本就一次性进程天然 fresh）。
       ...(resolvedTarget && (resolvedTarget.source === "explicit" || resolvedTarget.source === "alias")
         ? {
           laneId: resolvedTarget.laneId ?? null,
           roleId: resolvedTarget.roleId ?? null,
           resolvedFrom: resolvedTarget.source,
+          lanesSha256: resolvedTarget.lanesSha256 ?? null,
           ...(resolvedTarget.source === "explicit"
-            ? {
-              wiringAgent: resolvedTarget.wiringAgent ?? null,
-              lanesSha256: resolvedTarget.lanesSha256 ?? null,
-              // R3 裁定⑥：explicit 无条件 fresh——有界原因注记（不伪造
-              // run.session_reuse 事件；前台 CLI 本就一次性进程天然 fresh）。
-              sessionReuseDecision: "fresh_identity_transition",
-            }
-            : { lanesSha256: resolvedTarget.lanesSha256 ?? null }),
+            ? { sessionReuseDecision: "fresh_identity_transition" }
+            : {}),
         }
         : {}),
       scorecardConfigured: Boolean(scorecardRules),
@@ -1597,6 +1594,17 @@ export class RunManager {
     // NOT the source repo (runStarted.cwd is the source repo). Non-delivery runs
     // keep using runStarted.cwd as before.
     const resumeCwd = deliveryContext ? deliveryContext.worktreePath : runStarted.cwd;
+    // 0045 W4d（R5 §1.3）：重键前档案的 envelope agentId=席位名，注册表已无此键——
+    // 跨版本续跑固定文案具名拒绝（不静默换道、不裸抛 Unknown）。
+    {
+      const allIds = new Set(loaded.listAgents().map((a) => a.id));
+      if (!allIds.has(transcript.context.agentId)) {
+        throw new Error(
+          "legacy_dispatch_unsupported: this run's envelope agentId predates the lane-keyed registry "
+          + `(recorded "${transcript.context.agentId}"); cross-era resume is refused by 0045 §1.3 — start a new dispatch instead`,
+        );
+      }
+    }
     let agent = loaded.getAgent(transcript.context.agentId, { cwd: resumeCwd });
     // TD-198 (2026-10-03): legacy transcripts may carry a RELATIVE run.started
     // cwd (recorded before start-side normalization). Normalize through the

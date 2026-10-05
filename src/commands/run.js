@@ -213,8 +213,9 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
       // R3 "启动前重查"）。前台路径不经此（resolvedTarget 直达 start）。
       resolvedLane: options.lane,
       resolvedRole: options.role,
-      // 0045 W4b：alias 派发的角色注记（生效复用策略按角色取）。
-      ...(resolvedTarget?.source === "alias" && resolvedTarget.roleId ? { resolvedRoleId: resolvedTarget.roleId } : {}),
+      // 0045 W4b：alias 派发的角色注记（生效复用策略按角色取；runCommand 在调用
+      // 前把它放进 options.resolvedRoleId——本函数无 resolvedTarget 作用域）。
+      ...(options.resolvedRoleId !== undefined ? { resolvedRoleId: options.resolvedRoleId } : {}),
       runnerPath,
       // M11-11C: CLI dispatch is a one-shot process — there is no stable Lead
       // session across CLI invocations, so reusable experts always start a fresh
@@ -479,7 +480,7 @@ export async function runCommand(args, config) {
     if (options.explain) {
       const explanation = resolution.kind === "error"
         ? { status: "error", code: resolution.code, message: resolution.message, received: resolution.received, choices: resolution.choices }
-        : { status: "resolved", source: resolution.source, agentId: resolution.agentId, laneId: resolution.laneId ?? null, roleId: resolution.roleId ?? null, wiringAgent: resolution.wiringAgent ?? null, lanesSha256: resolution.lanesSha256 ?? null };
+        : { status: "resolved", source: resolution.source, agentId: resolution.agentId, laneId: resolution.laneId ?? null, roleId: resolution.roleId ?? null, lanesSha256: resolution.lanesSha256 ?? null };
       console.log(JSON.stringify(explanation, null, 2));
       return;
     }
@@ -497,7 +498,8 @@ export async function runCommand(args, config) {
       agentId = resolution.agentId; // 前台路径的接线席位（过渡）；后台路径 runner 侧重解析
       if (!options.background) resolvedTarget = resolution;
     } else if (resolution.source === "alias") {
-      resolvedTarget = resolution; // H1：注解不执行——agentId 不变
+      resolvedTarget = resolution; // 前台注记
+      if (typeof resolution.roleId === "string") options.resolvedRoleId = resolution.roleId; // 后台政策语义
     }
     // legacy-agent：无注解可记，resolvedTarget 保持 null（行为与 W2 前一致）
   }

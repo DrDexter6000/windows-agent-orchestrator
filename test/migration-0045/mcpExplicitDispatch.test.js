@@ -32,7 +32,7 @@ async function withServer(fn) {
     // 注册表与在库车道表 claude-opus 轴一致（公开轴=backend/model/effort）
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: {
-      auditor_claude: { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, systemPrompt: "config/roles/auditor.md", cwd: dir },
+      "claude-opus": { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, cwd: dir },
       legacy_seat: { backend: "claude-code", cwd: dir },
     } }), "utf8");
     const dispatches = [];
@@ -63,10 +63,10 @@ test("W5-1: MCP explicit {lane,role} 派发——dispatcher 收接线席位+reso
     });
     assert.equal(res.isError, undefined, `unexpected error: ${JSON.stringify(res.content ?? res).slice(0, 200)}`);
     assert.equal(dispatches.length, 1);
-    assert.equal(dispatches[0].agentId, "auditor_claude", "接线席位（解析结果）");
+    assert.equal(dispatches[0].agentId, "claude-opus", "W4d：接线=注册表车道键（解析结果）");
     assert.equal(dispatches[0].resolvedLane, "claude-opus");
     assert.equal(dispatches[0].resolvedRole, "auditor");
-    assert.equal(res.structuredContent.agentId, "auditor_claude", "出参绑定=解析后身份");
+    assert.equal(res.structuredContent.agentId, "claude-opus", "出参绑定=解析后身份（车道键）");
   });
 });
 

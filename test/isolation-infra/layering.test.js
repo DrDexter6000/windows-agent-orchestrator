@@ -187,6 +187,8 @@ const DYNAMIC_DISCLOSED = Object.freeze([
   "src/runManager.js -> src/application/timeoutPolicy.js",
   "src/commands/lifecycle.js -> src/application/timeoutPolicy.js",
   "src/backgroundRunner.js -> src/transcript.js",
+  // 0045 W4c：workflow agentHandler 经解析层（workflow→core 下向，同其 RunManager 直调平级）。
+  "src/workflow/handlers.js -> src/dispatchResolution.js",
   "src/runManager.js -> src/backends/opencodeStopVerify.js",
 ]);
 

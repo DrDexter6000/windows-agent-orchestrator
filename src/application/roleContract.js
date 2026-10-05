@@ -44,7 +44,7 @@ import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
-import { ID_RE } from "../dispatchResolution.js";
+import { ID_RE } from "../canonicalAgentId.js";
 
 // WAO installation/repo root, derived from this module's URL
 // (<repoRoot>/src/application/roleContract.js → up two levels). Stable across

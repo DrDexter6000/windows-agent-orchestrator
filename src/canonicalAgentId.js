@@ -95,3 +95,10 @@ export function isValidCanonicalAgentId(value) {
 export function safeProjectAgentId(value) {
   return isValidCanonicalAgentId(value) ? value : UNKNOWN_AGENT_ID;
 }
+
+/**
+ * 0045 lane/role id 字母表（原 dispatchResolution 私有——W4d 分层守卫执法后
+ * 迁 shared 身份字母表 SSOT 家：application 层（roleContract 等）与 core 层
+ * （dispatchResolution）共用，不再造上向边或抄件）。
+ */
+export const ID_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;

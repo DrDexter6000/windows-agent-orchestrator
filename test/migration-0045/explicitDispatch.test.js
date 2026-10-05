@@ -77,7 +77,7 @@ test("EXPL-1: explicit 派发——角色=角色库文件（非接线席位默�
       resolvedTarget: {
         kind: "resolved", source: "explicit", agentId: "_0045_w2_lane_seat",
         laneId: "test-lane", roleId: "_0045_w2_researcher",
-        wiringAgent: "_0045_w2_lane_seat", lanesSha256: "ab" .repeat(32),
+        lanesSha256: "ab".repeat(32),
       },
     });
     try { await run.waitForCompletion({ pollInterval: 1 }); } catch { /* tolerate */ }
@@ -87,7 +87,7 @@ test("EXPL-1: explicit 派发——角色=角色库文件（非接线席位默�
     assert.equal(started.resolvedFrom, "explicit");
     assert.equal(started.laneId, "test-lane");
     assert.equal(started.roleId, "_0045_w2_researcher");
-    assert.equal(started.wiringAgent, "_0045_w2_lane_seat");
+    assert.equal(started.wiringAgent, undefined, "W4d：过渡接线字段退役（envelope agentId=车道键）");
     assert.equal(started.lanesSha256, "ab".repeat(32));
     assert.equal(started.sessionReuseDecision, "fresh_identity_transition", "R3 裁定⑥：有界 fresh 原因");
     // 角色钉住指向角色库目标帽（P1 机制承载 W2 的角色生效）
@@ -104,39 +104,40 @@ test("EXPL-1: explicit 派发——角色=角色库文件（非接线席位默�
   }
 });
 
-test("EXPL-2: alias 注解——执行零变化（角色仍=registry 的 systemPrompt）+ 注记在档", async () => {
+test("EXPL-2（W4d）：alias=执行——角色=别名表 roleId 经库加载；身份头结构化", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-expl2-"));
-  const roleDefault = "# default\nMARKER_REGISTRY_HAT\n";
-  writeFileSync(join(ROLES_DIR, "_0045_w2_coder_low.md"), roleDefault, "utf8");
+  const roleDefault = "# default\nMARKER_ALIAS_HAT\n";
+  writeFileSync(join(ROLES_DIR, "w3d-alias-hat.md"), roleDefault, "utf8");
   try {
     makeGitRepo(dir);
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: {
-      _0045_w2_lane_seat: { backend: "claude-code", cwd: dir, systemPrompt: "config/roles/_0045_w2_coder_low.md" },
+      "test-lane": { backend: "claude-code", cwd: dir }, // W4d：车道键条目、无 systemPrompt
     } }), "utf8");
     const capture = {};
     const manager = await makeManager(dir, registryPath, capture);
-    const run = await manager.start("_0045_w2_lane_seat", {
+    const run = await manager.start("test-lane", {
       prompt: "task", runDir: join(dir, "runs"), registry: registryPath,
       resolvedTarget: {
-        kind: "resolved", source: "alias", agentId: "_0045_w2_lane_seat",
-        laneId: "test-lane", roleId: "some-hat",
-        wiringAgent: "_0045_w2_lane_seat", lanesSha256: "cd".repeat(32),
+        kind: "resolved", source: "alias", agentId: "test-lane",
+        laneId: "test-lane", roleId: "w3d-alias-hat",
+        lanesSha256: "cd".repeat(32),
       },
     });
     try { await run.waitForCompletion({ pollInterval: 1 }); } catch { /* tolerate */ }
     const started = readStarted(dir);
     assert.equal(started.resolvedFrom, "alias");
     assert.equal(started.laneId, "test-lane");
-    assert.equal(started.roleId, "some-hat");
-    assert.equal(started.wiringAgent, undefined, "alias 注解不带 wiringAgent（执行不经接线）");
-    assert.equal(started.sessionReuseDecision, undefined, "alias 无 fresh 注记（行为零变化）");
-    assert.deepEqual(started.rolePin, { systemPrompt: "config/roles/_0045_w2_coder_low.md", sha256: sha(roleDefault) },
-      "alias 角色钉=registry 的 systemPrompt（H1 注解不执行）");
-    assert.match(capture.task.roleContract, /MARKER_REGISTRY_HAT/);
+    assert.equal(started.roleId, "w3d-alias-hat");
+    assert.equal(started.wiringAgent, undefined, "W4d：过渡字段全面退役");
+    assert.equal(started.sessionReuseDecision, undefined, "alias 无 fresh 注记");
+    assert.deepEqual(started.rolePin, { systemPrompt: "config/roles/w3d-alias-hat.md", sha256: sha(roleDefault) },
+      "alias 角色钉=别名表角色经库加载（W4d 别名执行化）");
+    assert.match(capture.task.roleContract, /MARKER_ALIAS_HAT/);
+    assert.match(capture.task.roleContract, /lane=test-lane role=w3d-alias-hat/, "alias 也用结构化身份头（W4d）");
   } finally {
     cleanupDir(dir);
-    rmSync(join(ROLES_DIR, "_0045_w2_coder_low.md"), { force: true });
+    rmSync(join(ROLES_DIR, "w3d-alias-hat.md"), { force: true });
   }
 });
 
@@ -153,7 +154,7 @@ test("EXPL-3: 无 resolvedTarget → run.started 无新字段（字节兼容）"
     const run = await manager.start("_0045_w2_seat", { prompt: "t", runDir: join(dir, "runs"), registry: registryPath });
     try { await run.waitForCompletion({ pollInterval: 1 }); } catch { /* tolerate */ }
     const started = readStarted(dir);
-    for (const k of ["laneId", "roleId", "resolvedFrom", "wiringAgent", "lanesSha256", "sessionReuseDecision", "rolePin"]) {
+    for (const k of ["laneId", "roleId", "resolvedFrom", "lanesSha256", "sessionReuseDecision", "rolePin"]) {
       assert.equal(started[k], undefined, `${k} 缺席（字节兼容）`);
     }
   } finally { cleanupDir(dir); }
@@ -216,7 +217,7 @@ test("CLI-1: --explain 别名解析打印 resolved JSON、零副作用", async (
   try {
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: {
-      auditor_claude: { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, systemPrompt: "config/roles/auditor.md", cwd: dir },
+      "claude-opus": { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, cwd: dir },
     } }), "utf8");
     const { threw, logs } = await runCli(["auditor_claude", "--explain"], registryPath);
     assert.equal(threw, null);
@@ -225,7 +226,7 @@ test("CLI-1: --explain 别名解析打印 resolved JSON、零副作用", async (
     assert.equal(out.source, "alias");
     assert.equal(out.laneId, "claude-opus");
     assert.equal(out.roleId, "auditor");
-    assert.equal(out.wiringAgent, "auditor_claude");
+    assert.equal(out.agentId, "claude-opus", "W4d：explain 的 agentId=车道键");
   } finally { cleanupDir(dir); }
 });
 
@@ -276,7 +277,7 @@ test("HDR-1: explicit 派发身份头=lane/role 模板，无接线席位名（al
       resolvedTarget: {
         kind: "resolved", source: "explicit", agentId: "w3b-seat",
         laneId: "test-lane", roleId: "w3b-hat",
-        wiringAgent: "w3b-seat", lanesSha256: "ab".repeat(32),
+        lanesSha256: "ab".repeat(32),
       },
     });
     try { await run.waitForCompletion({ pollInterval: 1 }); } catch { /* tolerate */ }

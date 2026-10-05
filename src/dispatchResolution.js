@@ -35,8 +35,10 @@ function resolveRoot() {
   return join(dirname(fileURLToPath(import.meta.url)), "..");
 }
 
-/** lane id / 别名 / roleId 的 canonical 字母表（错误回显白名单同此）。 */
-export const ID_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
+// ID_RE 自 canonicalAgentId.js（shared 身份字母表 SSOT）re-export——消费面
+// （roleContract 等 application 层）经原路径 import 不变。
+import { ID_RE as _ID_RE } from "./canonicalAgentId.js";
+export const ID_RE = _ID_RE;
 
 /**
  * 角色库清单（config/roles/*.md 文件名 stem 排序闭集）——解析器的 roleLibrary
@@ -65,7 +67,7 @@ export const DISPATCH_ERROR_CODES = Object.freeze([
 ]);
 
 /** lanes.json 键白名单（G1：未知键整文件拒——防 schema 蔓延与 smuggle）。 */
-const LANE_KEYS = new Set(["id", "backend", "model", "reasoning", "wiringAgent", "aliases"]);
+const LANE_KEYS = new Set(["id", "backend", "model", "reasoning", "aliases"]);
 const ALIAS_KEYS = new Set(["role"]);
 const TOP_KEYS = new Set(["schema", "lanes", "_comment"]);
 
@@ -116,7 +118,7 @@ export function loadRolePolicies() {
   } catch (e) {
     return { ok: false, path, roles: {}, issues: [`roles.json 不可解析：${e.message}`] };
   }
-  if (doc.schema !== 1) issues.push("schema 必须为 1");
+  if (doc.schema !== 1) issues.push("roles.json schema 必须为 1");
   for (const k of Object.keys(doc)) {
     if (!ROLE_POLICY_TOP_KEYS.has(k)) issues.push(`未知顶层键 "${k}"`);
   }
@@ -163,14 +165,13 @@ export function effectiveSessionReuse({ roleId, agent, rolePolicies }) {
 export function validateLanesStructure(doc) {
   const issues = [];
   if (!doc || typeof doc !== "object") return ["lanes.json 顶层必须是对象"];
-  if (doc.schema !== 1) issues.push("schema 必须为 1");
+  if (doc.schema !== 2) issues.push("schema 必须为 2（W4d：接线归注册表车道键，本表无 wiringAgent）");
   for (const k of Object.keys(doc)) {
     if (!TOP_KEYS.has(k)) issues.push(`未知顶层键 "${k}"（白名单 ${[...TOP_KEYS].join("/")}）`);
   }
   const lanes = Array.isArray(doc.lanes) ? doc.lanes : [];
   const seenLaneIds = new Set();
   const seenAliases = new Map();
-  const seenWiring = new Map();
   const seenAxes = new Set();
   const rolesHint = new Set();
   for (const lane of lanes) {
@@ -181,11 +182,9 @@ export function validateLanesStructure(doc) {
     if (typeof lane.id !== "string" || !ID_RE.test(lane.id)) issues.push(`lane id "${String(lane.id)}" 不合字母表`);
     else if (seenLaneIds.has(lane.id)) issues.push(`lane id "${lane.id}" 重复`);
     else seenLaneIds.add(lane.id);
-    if (typeof lane.wiringAgent !== "string" || !ID_RE.test(lane.wiringAgent)) {
-      issues.push(`lane "${lane.id}" wiringAgent 缺失或不合字母表`);
-    } else if (seenWiring.has(lane.wiringAgent)) {
-      issues.push(`wiringAgent "${lane.wiringAgent}" 被 ${seenWiring.get(lane.wiringAgent)} 与 ${lane.id} 双引用`);
-    } else seenWiring.set(lane.wiringAgent, lane.id);
+    if (lane.wiringAgent !== undefined) {
+      issues.push(`lane "${lane.id}" 含 wiringAgent——W4d 终局本表禁用该过渡字段（接线=注册表车道键）`);
+    }
     const axesKey = JSON.stringify(laneAxes(lane));
     const prior = seenAxes.has(axesKey);
     if (prior) issues.push(`lane "${lane.id}" 公开轴与既有车道重复（G2）`);
@@ -248,27 +247,20 @@ export function validateLanesAgainstRegistry(lanesDoc, registryAgents) {
   const issues = [...(lanesDoc.issues ?? [])];
   const warns = [];
   const agents = registryAgents && typeof registryAgents === "object" ? registryAgents : {};
+  // W4d 终局：接线=注册表车道键条目。校验=每车道有接线条目 + 公开轴一致（断言，
+  // 注册表赢）；别名不再对注册表（角色一致性由别名表结构自证——role 键白名单）。
   for (const lane of lanesDoc.lanes ?? []) {
-    const agent = agents[lane.wiringAgent];
-    if (!agent) { issues.push(`lane "${lane.id}" wiringAgent "${lane.wiringAgent}" 不在注册表`); continue; }
-    const la = laneAxes(lane);
-    const aa = agentAxes(agent);
-    if (!axesEqual(la, aa)) {
-      // H2：换机/模板机公开轴不一致——alias 侧降级 WARN（零破坏），explicit 侧由
-      // 解析器拒绝（lane_wiring_mismatch）。此处按结构面记 WARN + 明细。
-      warns.push(
-        `lane "${lane.id}" 公开轴(${la.backend}/${la.modelId}/${la.effort}) 与注册表 ${lane.wiringAgent}(${aa.backend}/${aa.modelId}/${aa.effort}) 不一致——别名注解降级 legacy-agent，explicit 派发将拒绝`,
-      );
+    const wiring = agents[lane.id];
+    if (!wiring) {
+      issues.push(`lane "${lane.id}" 的接线条目（注册表车道键）不在注册表`);
+      continue;
     }
-    for (const [alias, spec] of Object.entries(lane.aliases ?? {})) {
-      const aliasAgent = agents[alias];
-      if (!aliasAgent) {
-        warns.push(`别名 "${alias}"（lane ${lane.id}）不在注册表——仅注解候选，无执行影响`);
-        continue;
-      }
-      if (!axesEqual(agentAxes(aliasAgent), la)) {
-        warns.push(`别名 "${alias}" 注册表轴与其车道 "${lane.id}" 不一致——注解降级 legacy-agent`);
-      }
+    const la = laneAxes(lane);
+    const aa = agentAxes(wiring);
+    if (!axesEqual(la, aa)) {
+      warns.push(
+        `lane "${lane.id}" 公开轴(${la.backend}/${la.modelId}/${la.effort}) 与注册表接线条目(${aa.backend}/${aa.modelId}/${aa.effort}) 不一致——explicit 派发将拒绝，请对齐`,
+      );
     }
   }
   return { issues, warns };
@@ -327,32 +319,21 @@ export function resolveDispatchTarget({ agentId, lane, role, lanesDoc, registryA
 
   if (hasAgent) {
     const name = String(agentId).trim();
-    const agent = registryAgents?.[name];
     const aliasLane = aliasMap.get(name);
-    if (aliasLane && agent && !lanesStructurallyInvalid) {
-      // H1：别名=注解不执行——执行仍走 registry 原条目（调用方负责）。
-      // H2：注册表轴与车道轴不一致时降级 legacy-agent（注解缺席）。
-      // R4：别名注解的 role 必须与注册表条目实际 systemPrompt 的 stem 一致——
-      // 不符（含席位未配角色）即降级 legacy-agent（防注记 roleId 与 rolePin 自相矛盾）。
+    if (aliasLane && !lanesStructurallyInvalid) {
+      // W4d（R5 裁定：别名=执行）：别名→车道→注册表车道键直取接线，角色=别名表
+      // 声明的角色。注册表轴与车道轴断言不一致（H2）→ 降级 legacy-agent。
+      const wiring = registryAgents?.[aliasLane.id];
       const declaredRole = aliasLane.aliases[name]?.role;
-      const actualRoleStem = typeof agent.systemPrompt === "string" && agent.systemPrompt.endsWith(".md")
-        ? agent.systemPrompt.split("/").pop().slice(0, -3)
-        : null;
-      const aliasRoleConsistent = declaredRole !== undefined
-        && actualRoleStem !== null && declaredRole === actualRoleStem;
-      if (axesEqual(agentAxes(agent), laneAxes(aliasLane)) && aliasRoleConsistent) {
+      if (wiring && axesEqual(agentAxes(wiring), laneAxes(aliasLane)) && declaredRole !== undefined) {
         return {
-          kind: "resolved", source: "alias", agentId: name,
+          kind: "resolved", source: "alias", agentId: aliasLane.id,
           laneId: aliasLane.id, roleId: declaredRole,
-          wiringAgent: aliasLane.wiringAgent, lanesSha256: lanesDoc?.sha256 ?? null,
+          lanesSha256: lanesDoc?.sha256 ?? null,
         };
       }
-      return {
-        kind: "resolved", source: "legacy-agent", agentId: name,
-        laneId: null, roleId: null, wiringAgent: null, lanesSha256: null,
-      };
     }
-    if (agent) {
+    if (registryAgents?.[name]) {
       return {
         kind: "resolved", source: "legacy-agent", agentId: name,
         laneId: null, roleId: null, wiringAgent: null, lanesSha256: null,
@@ -386,29 +367,30 @@ export function resolveDispatchTarget({ agentId, lane, role, lanesDoc, registryA
         message: `unknown_role: 收到 role="${safe(roleName)}"；该角色不在角色库。`,
       };
     }
-    const agent = registryAgents?.[targetLane.wiringAgent];
-    if (!agent) {
+    // W4d：接线=注册表车道键条目直取（无 wiringAgent 过渡字段）。
+    const wiring = registryAgents?.[targetLane.id];
+    if (!wiring) {
       return {
         kind: "error", code: "lane_wiring_mismatch",
         received: { lane: safe(laneName), role: safe(roleName) },
         choices: { lanes: laneIds, roles },
-        message: `lane_wiring_mismatch: lane "${laneName}" 的接线席位 ${targetLane.wiringAgent} 不在注册表。`,
+        message: `lane_wiring_mismatch: lane "${laneName}" 的接线条目（注册表车道键 ${targetLane.id}）不在注册表。`,
       };
     }
-    if (!axesEqual(laneAxes(targetLane), agentAxes(agent))) {
+    if (!axesEqual(laneAxes(targetLane), agentAxes(wiring))) {
       // G4：注册表赢——车道字段只断言不生效，不一致即拒（防"改 lanes.json 换模型"）。
-      const la = laneAxes(targetLane); const aa = agentAxes(agent);
+      const la = laneAxes(targetLane); const aa = agentAxes(wiring);
       return {
         kind: "error", code: "lane_wiring_mismatch",
         received: { lane: safe(laneName), role: safe(roleName) },
         choices: { lanes: laneIds, roles },
-        message: `lane_wiring_mismatch: lane "${laneName}" 声明 (${la.backend}/${la.modelId}/${la.effort}) 与注册表 ${targetLane.wiringAgent} (${aa.backend}/${aa.modelId}/${aa.effort}) 不一致——注册表为准，请对齐 lanes.json。`,
+        message: `lane_wiring_mismatch: lane "${laneName}" 声明 (${la.backend}/${la.modelId}/${la.effort}) 与注册表 ${targetLane.id} (${aa.backend}/${aa.modelId}/${aa.effort}) 不一致——注册表为准，请对齐 lanes.json。`,
       };
     }
     return {
-      kind: "resolved", source: "explicit", agentId: targetLane.wiringAgent,
+      kind: "resolved", source: "explicit", agentId: targetLane.id,
       laneId: targetLane.id, roleId: roleName,
-      wiringAgent: targetLane.wiringAgent, lanesSha256: lanesDoc?.sha256 ?? null,
+      lanesSha256: lanesDoc?.sha256 ?? null,
     };
   }
 

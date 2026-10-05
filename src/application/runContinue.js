@@ -114,6 +114,7 @@ export const CONTINUE_REJECTION_REASONS = Object.freeze([
   "no_delivery", // parent run.started lacks canonical base + retained worktree
   "worker_configuration_changed", // current backend/model/provider differs from the parent session
   "role_contract_drift", // 0045 R4 洞①：父钉住的角色正文与当前文件不一致/不可加载——同谱系静默换帽拒绝
+  "legacy_dispatch_continuable_unsupported", // 0045 W4d：父 envelope agentId=重键前席位名——跨版本谱系拒绝
   "unsupported_backend", // backend does not declare supportsSessionReuse
   "missing_worktree", // retained worktree path no longer exists on disk
   "worktree_drift", // retained worktree base/branch/detached state drifted
@@ -471,6 +472,16 @@ export async function continueRun({
   //    RunManager.start). No runtime-name branching — the injected backendFor
   //    decides from the declared capability.
   const registry = await readRegistry(resolve(registryPath));
+  // 0045 W4d（R5 §1.3）：重键前父档案的 envelope agentId=席位名（注册表已车道键化）——
+  // 跨版本谱系续接待续接具名拒绝（固定文案指路重派，不裸抛 Unknown）。
+  {
+    const allIds = new Set(registry.listAgents().map((a) => a.id));
+    if (agentId !== null && agentId !== undefined && !allIds.has(agentId)) {
+      return refuse("legacy_dispatch_continuable_unsupported", {
+        detail: `the parent run's envelope agentId ("${agentId}") predates the lane-keyed registry; cross-era continuation is refused by 0045 §1.3 — dispatch a new run instead`,
+      });
+    }
+  }
   const agent = registry.getAgent(agentId);
   // R23-C §4: the provider attachment (baseUrl + apiKeyEnv NAME) joins the
   // drift check — swapping the provider wiring mid-lineage must start a fresh
