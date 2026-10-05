@@ -26,9 +26,12 @@ export const RUN_STATUS_OUTPUT_KEYS = Object.freeze([
 // members (delivery, M12-6 expectations, M12-9 executionProfileId, M12-7
 // continuable, M12-16 correctable, Round-4 readOnly, R10-A model, R11-1
 // reasoning). run_dispatch_contract_check SHARES this schema (M12-9 SSOT).
+// 0045 §1.4 第 5 步（2026-10-05）：+lane/+role（agentId 转可选——{agentId} 或
+// {lane, role} 二选一闭集，选择器校验在 handler 经 dispatchResolution）。
 export const RUN_DISPATCH_INPUT_KEYS = Object.freeze([
   "agentId", "continuable", "correctable", "delivery", "executionProfileId", "expectedDirty",
-  "expectedGitHead", "expectedWorkspaceRoot", "model", "prompt", "readOnly", "reasoning",
+  "expectedGitHead", "expectedWorkspaceRoot", "lane", "model", "prompt", "readOnly",
+  "reasoning", "role",
 ]);
 
 // run_delivery (point-in-time) output: 23 top-level keys (M11-1A-01 /

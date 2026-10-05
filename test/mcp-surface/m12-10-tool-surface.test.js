@@ -641,7 +641,13 @@ const RED_23_WIRE = 75492;
 // 顶（84494）对实测（83099）静默松弛 1395 B。按 re-freeze-at-measured 在册制度
 // 重冻于实测值；Owner 授权顶（78127×1.1=85939，2026-09-22 裁定）不变，扩限仍须
 // 逐次裁定+实测增量+逐项说明（决定 0045 §1.7）。
-const FROZEN_23_WIRE_CEILING = 83099;
+// 0045 §1.4 第 5 步重冻（2026-10-05）：run_dispatch/run_dispatch_contract_check
+// 共享入参新增可选 lane/role（regex 形，非 enum——每机车道配置不进 wire），
+// agentId 转可选（二选一闭集在 handler 校验）。实测 83099 → 83361（+262B =
+// 两工具的 lane/role schema 条目），按 re-freeze-at-measured 制度重冻。
+// Owner 2026-10-05 授权（"改扩展就扩展"+0045 签署）覆盖本增量；距授权顶
+// 85939 余 2578B。
+const FROZEN_23_WIRE_CEILING = 83361;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -811,8 +817,10 @@ test("M12-10-H: deterministic 23-tool wire at or below the frozen ceiling", asyn
 // SHA changed truthfully; no other tool's schema, name, order, or annotation
 // changed. M12-10-H re-freezes the wire ceiling; this hash remains the
 // losslessness proof.
+// 0045 §1.4 第 5 步（2026-10-05）：run_dispatch/contract_check 共享入参加
+// lane/role（schema 在 stripped 载荷内），SHA 如实变（无损证明语义不变）。
 const DESC_STRIPPED_CONTRACT_SHA =
-  "a487891581ad5ed9c075004a4a48a3fe56cc842788ffb78b20b565a7b51cbca2";
+  "0a8388d85f90e32c000543bacaaac8395ebaf55dd0d7b21d88cf4059758442b1";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

@@ -181,6 +181,7 @@ import {
   CONSULT_WAIT_MAX_MS,
 } from "../application/consultService.js";
 import { readRegistry } from "../registry.js";
+import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "../dispatchResolution.js";
 import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
 import {
   runDeliveryRepackage,
@@ -753,8 +754,36 @@ const DELIVERY_INPUT = z.object({
 // top-level .refine(), because that breaks this schema's JSON-schema property
 // serialization in tools/list (M9-2B-01). The handler enforces them with the
 // fixed dispatch error, so the dispatcher call count stays 0 on any bad combo.
+
+/**
+ * 0045 §1.4：派发选择器错误的固定文案（闭集码 + received 白名单回显 + 完整
+ * 合法全集[≤32 项截断指向 registry_list] + 修正例）。M11-8B 纪律：isError 固定
+ * 文本（不 structuredContent——SDK 对 isError 出参的 outputSchema 校验未验证，
+ * R3 auditor_claude 裁定保守形态）。
+ */
+function dispatchSelectorErrorText(resolution) {
+  const cap = (list) => (list.length > 32
+    ? `${list.slice(0, 32).join(", ")} …（截断，全 wao lanes 详见 registry_list）`
+    : list.join(", "));
+  const c = resolution.choices ?? {};
+  const parts = [`dispatch refused: ${resolution.code}. ${resolution.message}`];
+  if (Array.isArray(c.lanes) && c.lanes.length > 0) parts.push(`known lanes (${c.lanes.length}): ${cap(c.lanes)}`);
+  if (Array.isArray(c.roles) && c.roles.length > 0) parts.push(`known roles (${c.roles.length}): ${cap(c.roles)}`);
+  if (Array.isArray(c.aliases) && c.aliases.length > 0) parts.push(`known aliases (${c.aliases.length}): ${cap(c.aliases)}`);
+  if (Array.isArray(c.forms)) parts.push(`accepted forms: ${c.forms.join(" | ")}`);
+  const exLane = (c.lanes ?? [])[0] ?? "<lane>";
+  const exRole = (c.roles ?? [])[0] ?? "<role>";
+  parts.push(`fix: run_dispatch({ "lane": "${exLane}", "role": "${exRole}", "prompt": "任务文本" }) 或 run_dispatch({ "agentId": "<别名>", "prompt": "任务文本" })`);
+  return parts.join("\n");
+}
+
 const RUN_DISPATCH_INPUT = z.object({
-  agentId: z.string().min(1),
+  // 0045 §1.4 第 5 步：派发目标二选一闭集——{agentId} 或 {lane, role}（regex 非
+  // enum：每机车道配置不进 wire，R3 auditor_claude 裁定）。选择器校验在 handler
+  // （dispatchResolution 单一真相）；旧 {agentId} 调用字节不变。
+  agentId: z.string().min(1).optional(),
+  lane: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,31}$/).optional(),
+  role: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,31}$/).optional(),
   prompt: z.string().min(1),
   delivery: DELIVERY_INPUT.optional(),
   // M12-6 (FR-03): optional workspace/head freeze. The Lead may pin dispatch to
@@ -3783,19 +3812,39 @@ export function createWaoMcpServer({
       outputSchema: RUN_DISPATCH_OUTPUT,
       annotations: RUN_DISPATCH_ANNOTATIONS,
     },
-    async ({ agentId, prompt, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable, correctable, executionProfileId, readOnly, model, reasoning }) => {
-      // M11-8B final: validate the requested agentId at the VERY TOP, before
-      // workspace resolution or any dispatcher call. An invalid or reserved
-      // ("unknown") id collapses to the fixed dispatch error immediately — the
-      // workspace resolver is not invoked and the dispatcher call count stays
-      // 0. This is the first trust boundary: a non-canonical id never reaches
-      // the control plane's dispatch path.
-      if (!isValidCanonicalAgentId(agentId)) {
+    async ({ agentId, prompt, lane, role, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable, correctable, executionProfileId, readOnly, model, reasoning }) => {
+      // 0045 §1.4 第 5 步：派发目标选择器（{agentId} 或 {lane, role} 二选一闭集，
+      // dispatchResolution 单一真相）。lane/role 在场或 agentId 缺席→解析；错误=
+      // 固定文案带闭集码+完整合法全集（≤32 项截断指向 registry_list），零派发。
+      let effectiveAgentId = agentId;
+      let resolvedLane;
+      let resolvedRole;
+      if (lane !== undefined || role !== undefined || agentId === undefined) {
+        const lanesDoc = loadLanesConfig();
+        const registry = await readRegistry(registryPath);
+        const registryAgents = Object.fromEntries(registry.listAgents().map((a) => [a.id, a]));
+        const resolution = resolveDispatchTarget({
+          agentId, lane, role,
+          lanesDoc, registryAgents, roleLibrary: listRoleLibrary(),
+        });
+        if (resolution.kind === "error") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: dispatchSelectorErrorText(resolution) }],
+          };
+        }
+        if (resolution.source === "explicit") {
+          effectiveAgentId = resolution.agentId; // 接线席位（过渡）；runner 侧重解析生效
+          resolvedLane = lane;
+          resolvedRole = role;
+        }
+      } else if (!isValidCanonicalAgentId(agentId)) {
         return {
           isError: true,
           content: [{ type: "text", text: DISPATCH_ERROR_TEXT }],
         };
       }
+      const agentIdInput = effectiveAgentId;
       // Round 4 Bundle B: readOnly × delivery is a contradictory declaration.
       // Handler-layer mutual exclusion (M9-2B-01: NOT a top-level schema
       // .refine() — that breaks tools/list JSON-schema serialization). The
@@ -3921,10 +3970,12 @@ export function createWaoMcpServer({
       let result;
       try {
         result = await dispatcher({
-          agentId,
+          agentId: agentIdInput,
           prompt,
           registryPath,
           runDir,
+          ...(resolvedLane !== undefined ? { resolvedLane } : {}),
+          ...(resolvedRole !== undefined ? { resolvedRole } : {}),
           // M10-pre2: server-owned canonical workspace root as cwd.
           // The model cannot provide this — it comes from host-authorized binding.
           cwd: workspaceCwd,
@@ -4096,11 +4147,13 @@ export function createWaoMcpServer({
       // safeProjectAgentId is NOT used here: a dispatch may never return the
       // "unknown" sentinel — that would disguise a binding failure as success.
       try {
-        if (!isValidCanonicalAgentId(agentId)) {
+        // 0045 §1.4：绑定基准=解析后身份（explicit=接线席位——R3 auditor 裁定
+        // "成功派发必须返回确定且匹配解析结果的身份"；读取损坏历史才可 unknown）。
+        if (!isValidCanonicalAgentId(agentIdInput)) {
           throw new Error("dispatch requested agentId is not canonical");
         }
-        // Identity binding: the service MUST return exactly the requested id.
-        if (result.agentId !== agentId) {
+        // Identity binding: the service MUST return exactly the resolved id.
+        if (result.agentId !== agentIdInput) {
           throw new Error("dispatch agentId binding mismatch");
         }
         // M12-6 (FR-03): attach the bounded workspace proof derived from the
