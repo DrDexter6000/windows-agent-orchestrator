@@ -1,4 +1,6 @@
 import { resolve, dirname, join } from "node:path";
+import { existsSync, mkdtempSync, copyFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { ProcessBackend } from "./processBackend.js";
 import { ClaudeStreamParser } from "./parsers/claudeCode.js";
@@ -14,6 +16,28 @@ const WRAPPER_PATH = resolve(join(dirname(fileURLToPath(import.meta.url)), "..",
 // 经 backend 自己的 runtimeEnv 注入——runtimeEnv 在每次 spawn 都跑，无需 RunManager
 // 或 runtime-name 分支；buildChildEnv 合并序保证它压过同名 agent.env。
 const DISABLE_AUTO_MEMORY_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
+
+// 2026-10-05（auditor_claude 席位设立批）：native OAuth 通道的纯净模式实现切换。
+// CLI 官方语义（2.1.289 --help）：--bare 下 "OAuth and keychain are never read"
+// ——OAuth 订阅凭据与 bare 纯净在架构上互斥（三连差分实测：bare+凭据文件在场仍
+// 认证失败；凭据目录+无 bare 通过；空目录+无 bare 失败）。替代纯净法：把
+// CLAUDE_CONFIG_DIR 指向仅含 .credentials.json 拷贝的隔离目录——hooks/settings/
+// CLAUDE.md/插件/技能从空目录解析即全空（实测比 bare 更纯：bare 下用户插件仍
+// 载入 3 个，隔离目录下仅剩 CLI 内置插件）。凭据文件为 spawn 时现拷贝（token
+// 轮换后旧拷贝自然失效，不缓存）；目录在 os.tmpdir()（用户级），run 期间存活、
+// 之后交由 OS 临时清理；token 值永不进 argv/转录/env 展示（env 只带目录路径）。
+const CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR";
+const OAUTH_CREDENTIALS_RELATIVE = join(".claude", ".credentials.json");
+
+function prepareClaudeOauthConfigDir() {
+  const dir = mkdtempSync(join(tmpdir(), "wao-claude-oauth-"));
+  const source = join(homedir(), OAUTH_CREDENTIALS_RELATIVE);
+  if (existsSync(source)) {
+    copyFileSync(source, join(dir, ".credentials.json"));
+  }
+  // 凭据文件缺席 = 未登录：照常返回空目录，spawn 后由 CLI 如实报认证失败。
+  return dir;
+}
 
 /**
  * Claude Code backend（M2-6）。
@@ -149,15 +173,18 @@ export class ClaudeCodeBackend extends ProcessBackend {
         // CLAUDE.md 自动发现），--strict-mcp-config 跳过一切配置来源的 MCP。
         // 全局技能/插件/全局 CLAUDE.md 是 worker 的纯 token 税与工具选择干扰
         // （skillUsage 实证：worker 期零使用）；角色合同经上方显式注入不受影响。
-        args.push("--bare", "--strict-mcp-config");
-        // M11-9: model/reasoning from canonical structured fields (single source).
-        // When a provider exists, resolveProviderArgs returns cliFlags with
-        // --model/--effort derived from the same fields. When no provider
-        // (native OAuth direct-connect), we generate them here directly.
+        // M11-9: provider 判定先于纯净旗标（2026-10-05 起 bare 按通道条件化）。
         const providerArgs = resolveProviderArgs(agent, WRAPPER_PATH);
         if (providerArgs) {
+          // provider wrapper 通道：凭据经 wrapper env 注入，bare 字节不变
+          //（2026-09-19 Owner 裁定的原形态）。
+          args.push("--bare", "--strict-mcp-config");
           args.push(...providerArgs.cliFlags);
         } else {
+          // native OAuth 通道：bare 与 OAuth 互斥（见 prepareClaudeOauthConfigDir 注释）
+          // ——纯净改由 CLAUDE_CONFIG_DIR 隔离目录承载（spawn 覆写预备、runtimeEnv 注入）；
+          // strict-mcp-config 仍保留（MCP 面与配置目录正交，双保险）。
+          args.push("--strict-mcp-config");
           // No provider: translate model/reasoning directly to CLI flags.
           if (agent.model?.id) args.push("--model", agent.model.id);
           if (agent.reasoning?.effort) args.push("--effort", agent.reasoning.effort);
@@ -175,6 +202,9 @@ export class ClaudeCodeBackend extends ProcessBackend {
         // M12-14: auto-memory 必须对每个 supervised claude 子进程关闭（见顶部常量注释）。
         [DISABLE_AUTO_MEMORY_ENV]: "1",
         ...(task.deliveryMode ? { CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS: "1" } : {}),
+        // 2026-10-05：native OAuth 通道的隔离配置目录（spawn 覆写预备在 task 上；
+        // 只带目录路径，凭据值永不进 env 展示面之外的任何位置）。
+        ...(task.claudeOauthConfigDir ? { [CLAUDE_CONFIG_DIR_ENV]: task.claudeOauthConfigDir } : {}),
       }),
       ...opts,
     });
@@ -194,13 +224,23 @@ export class ClaudeCodeBackend extends ProcessBackend {
     const stripped = {};
     let removed = false;
     for (const [name, value] of Object.entries(agentEnv)) {
-      if (name.toUpperCase() === DISABLE_AUTO_MEMORY_ENV) {
+      // CLAUDE_CONFIG_DIR 与 auto-memory 同款权威化：runtimeEnv 是唯一来源
+      //（2026-10-05 native OAuth 通道由 backend 预备隔离目录，agent.env 反设剥离）。
+      if (name.toUpperCase() === DISABLE_AUTO_MEMORY_ENV || name.toUpperCase() === CLAUDE_CONFIG_DIR_ENV) {
         removed = true;
         continue;
       }
       stripped[name] = value;
     }
-    return super.spawn(removed ? { ...agent, env: stripped } : agent, task);
+    // native OAuth 通道：预备仅含凭据拷贝的隔离配置目录（见 prepareClaudeOauthConfigDir）。
+    // task 上挂字段穿线到 runtimeEnv（buildArgs 的旗标决策纯由 agent.provider 派生，
+    // 与本字段无耦合——preflight/spawn 两次 buildArgs 调用天然一致）。
+    const taskExtras = {};
+    if (!agent?.provider && task && typeof task === "object") {
+      taskExtras.claudeOauthConfigDir = prepareClaudeOauthConfigDir();
+    }
+    const enrichedTask = task && typeof task === "object" ? { ...task, ...taskExtras } : task;
+    return super.spawn(removed ? { ...agent, env: stripped } : agent, enrichedTask);
   }
 
   // P4 决策B：有 provider 时，binary=node + prependArgs 从 provider 推导（wrapper 调起）。

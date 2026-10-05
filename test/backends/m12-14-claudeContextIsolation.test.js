@@ -13,6 +13,8 @@
 // 捕获手段：ProcessBackend 的 spawnFn 注入缝（M11-7），直接读 spawn 收到的真实
 // child env / argv，不起真实进程、不调模型。
 
+import { join } from "node:path";
+import { homedir } from "node:os";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -211,9 +213,8 @@ test("M12-14: env 变更不进 argv —— native 路径 argv 逐字节符合既
     "--include-partial-messages",
     "--exclude-dynamic-system-prompt-sections",
     "--no-session-persistence",
-    "--bare",
     "--strict-mcp-config",
-  ], "native 路径 argv：既有形态 + 纯净模式双旗标（Owner 2026-09-19）");
+  ], "native 路径 argv（2026-10-05 修订）：bare 与 OAuth 互斥（CLI 官方语义〔OAuth and keychain are never read〕），纯净改由 CLAUDE_CONFIG_DIR 隔离目录承载（env 钉见下），strict-mcp 保留");
 });
 
 test("M12-14: 不泄漏敏感值 —— flag 是常量 '1'，凭据值只出现在其声明 env 名下", async () => {
@@ -247,4 +248,42 @@ test("M12-14: kimi-code 子进程 env 不含 CLAUDE_CODE_DISABLE_AUTO_MEMORY", a
   const backend = new KimiCodeBackend({ spawnFn });
   await spawnAndCapture(backend, { id: "k", backend: "kimi-code", binary: "fake-kimi", cwd: process.cwd() }, { prompt: "do" });
   assert.equal(envEntriesCaseInsensitive(captures[0].opts.env, MANAGED).length, 0, "kimi 不接收 claude-only 变量");
+});
+
+// ── 2026-10-05（auditor_claude 席位批）：native OAuth 通道的隔离目录机制钉 ────
+test("2026-10-05: native 通道 spawn → env 带 CLAUDE_CONFIG_DIR 指向仅含凭据拷贝的隔离目录；argv 无 bare", async () => {
+  const { spawnFn, captures } = makeCapturingSpawn();
+  const backend = new ClaudeCodeBackend({ spawnFn });
+  await spawnAndCapture(backend, nativeAgent(), { prompt: "do" });
+  const [capture] = captures;
+  assert.ok(!capture.args.includes("--bare"), "native 通道不再带 bare（OAuth 互斥）");
+  assert.ok(capture.args.includes("--strict-mcp-config"), "strict-mcp 保留");
+  const dir = capture.opts.env.CLAUDE_CONFIG_DIR;
+  assert.ok(typeof dir === "string" && dir.length > 0, "env 注入隔离目录路径");
+  const { existsSync, readFileSync } = await import("node:fs");
+  assert.ok(existsSync(join(dir, ".credentials.json")) === existsSync(join(homedir(), ".claude", ".credentials.json")),
+    "凭据文件在场性与源一致（源在场=拷贝在场；源缺席=空目录留给 CLI 如实报未登录）");
+  if (existsSync(join(dir, ".credentials.json"))) {
+    const src = JSON.parse(readFileSync(join(homedir(), ".claude", ".credentials.json"), "utf8"));
+    const copy = JSON.parse(readFileSync(join(dir, ".credentials.json"), "utf8"));
+    assert.deepEqual(Object.keys(copy), Object.keys(src), "拷贝结构同源（值不比对不展示）");
+  }
+});
+
+test("2026-10-05: agent.env 反设 CLAUDE_CONFIG_DIR 被剥离（任意大小写），backend 预备值是唯一权威", async () => {
+  const { spawnFn, captures } = makeCapturingSpawn();
+  const backend = new ClaudeCodeBackend({ spawnFn });
+  const agent = { ...nativeAgent(), env: { "claude_config_dir": "C:/evil/override" } };
+  await spawnAndCapture(backend, agent, { prompt: "do" });
+  const env = captures[0].opts.env;
+  assert.notEqual(env["claude_config_dir"], "C:/evil/override", "小写反设被剥");
+  assert.ok(env.CLAUDE_CONFIG_DIR && env.CLAUDE_CONFIG_DIR !== "C:/evil/override", "权威值来自 backend 预备");
+});
+
+test("2026-10-05: provider wrapper 通道字节不变 —— bare 恰好一次、无 CLAUDE_CONFIG_DIR 注入", async () => {
+  const { spawnFn, captures } = makeCapturingSpawn();
+  const backend = new ClaudeCodeBackend({ spawnFn });
+  await spawnAndCapture(backend, providerAgent(), { prompt: "do" });
+  assert.equal(captures[0].args.filter((a) => a === "--bare").length, 1, "wrapper 通道维持 bare（2026-09-19 原形态）");
+  assert.ok(!captures[0].opts.env.CLAUDE_CONFIG_DIR, "wrapper 通道不注入隔离目录（凭据走 wrapper env）");
 });

@@ -399,6 +399,7 @@ test("R4: runBackground readOnly → isolated run + exactly-one declaration; wri
 test("P2′ runBackground: spawn 永挂 → .owner 心跳先于 start 返回可见（入口起拍钉）", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "wao-bg-hb-"));
   const runId = "run_hbentry00000000000x";
+  let failSpawn;
   const never = runBackground({
     agentId: "hb_hang",
     prompt: "hang",
@@ -408,7 +409,7 @@ test("P2′ runBackground: spawn 永挂 → .owner 心跳先于 start 返回可�
     fetchImpl: makeMockFetch(),
     // backendFor 注入：spawn 返回永挂 promise（复刻 llqx3k 的 spawn 前挂死形态）。
     backendFor: () => ({
-      spawn: () => new Promise(() => {}),
+      spawn: () => new Promise((_, reject) => { failSpawn = reject; }),
       validateAgentPolicy() {},
     }),
     pollInterval: 10,
@@ -416,12 +417,21 @@ test("P2′ runBackground: spawn 永挂 → .owner 心跳先于 start 返回可�
   try {
     // 不 await never——断言窗口内（入口起拍 = 毫秒级）文件必须在场。轮询上界 2s。
     let seen = false;
-    for (let i = 0; i < 200 && !seen; i += 1) {
+    // 同时等 failSpawn 赋值（spawn 被调用）：入口心跳先于 spawn 调用出现，两条件都备齐再断言。
+    for (let i = 0; i < 200 && !(seen && failSpawn); i += 1) {
       seen = existsSync(path.join(dir, `.owner-${runId}`));
-      if (!seen) await new Promise((r) => setTimeout(r, 10));
+      if (!(seen && failSpawn)) await new Promise((r) => setTimeout(r, 10));
     }
     assert.ok(seen, "spawn 挂死期间 .owner 心跳可见（入口起拍）——llqx3k 形态从无痕变可观察");
+    // 观察完成：主动拒绝 fake spawn → runBackground 走启动失败早退路径（清心跳/owner）→ 目录可清。
+    failSpawn(new Error("test: observed"));
+    await never;
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    // Windows 竞态：spawn 失败经 RunManager 内部 catch 收口后事件流/转录仍可能异步收尾，
+    // 与 rm 递归删除赛跑（ENOTEMPTY）——本钉的目的是观察入口起拍语义，清场尽力而为+重试。
+    for (let i = 0; i < 5; i += 1) {
+      try { await rm(dir, { recursive: true, force: true }); break; }
+      catch (e) { if (e.code !== "ENOTEMPTY" && e.code !== "EBUSY") throw e; await new Promise((r) => setTimeout(r, 50)); }
+    }
   }
 });
