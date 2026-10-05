@@ -72,6 +72,7 @@ import { providerKeyFor } from "../providerFingerprint.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { inheritedEnvNames } from "../envPolicy.js";
 import { CredentialMissingError } from "./runDispatch.js";
+import { loadRoleContract, roleContractSha256 } from "./roleContract.js";
 
 // Reuse the dispatch application service's startup-failure error type so the MCP
 // boundary collapses a missing credential to the same fixed actionable text.
@@ -112,6 +113,7 @@ export const CONTINUE_REJECTION_REASONS = Object.freeze([
   "workspace_mismatch", // parent ownership != authorized workspace
   "no_delivery", // parent run.started lacks canonical base + retained worktree
   "worker_configuration_changed", // current backend/model/provider differs from the parent session
+  "role_contract_drift", // 0045 R4 洞①：父钉住的角色正文与当前文件不一致/不可加载——同谱系静默换帽拒绝
   "unsupported_backend", // backend does not declare supportsSessionReuse
   "missing_worktree", // retained worktree path no longer exists on disk
   "worktree_drift", // retained worktree base/branch/detached state drifted
@@ -375,6 +377,32 @@ export async function continueRun({
           + "hat switch). Dispatch by agentId for continuable work until 0045 step-3 identity "
           + "pinning reaches run_continue",
       });
+    }
+  }
+
+  // 0045 R4 洞①关门（P1 只关了 resume 臂）：父 run 钉住的角色正文 sha 与当前
+  // 角色文件不一致 → 拒绝续接——否则子 run 会在同一 provider 谱系会话上静默
+  // 换帽。父事实一眼可知，故与 H3 同置于 lineage/delivery 门之前（防
+  // not_continuable/no_delivery 掩盖真实原因）。钉缺席（P1 前的 legacy 父）跳过
+  // 本维（record-side-undefined-skip）。
+  {
+    const parentStarted = parentEvents.find((e) => e && e.type === "run.started" && e.runId === parentRunId);
+    const parentRolePin = parentStarted?.rolePin;
+    if (parentRolePin && typeof parentRolePin.sha256 === "string"
+      && typeof parentRolePin.systemPrompt === "string") {
+    let currentRoleSha = null;
+    try {
+      currentRoleSha = roleContractSha256(loadRoleContract(parentRolePin.systemPrompt));
+    } catch {
+      return refuse("role_contract_drift", {
+        detail: `the role contract pinned by the parent (${parentRolePin.systemPrompt}) is no longer loadable; a continuation must not silently drop the role`,
+      });
+    }
+    if (currentRoleSha !== parentRolePin.sha256) {
+      return refuse("role_contract_drift", {
+        detail: `the role contract pinned by the parent (${parentRolePin.systemPrompt}) has changed since dispatch; a continuation would run the SAME provider lineage under a different role — start a new run instead`,
+      });
+    }
     }
   }
 

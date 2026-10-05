@@ -33,6 +33,9 @@ import { dirname, join } from "node:path";
 import { writeFileSync, unlinkSync } from "node:fs";
 import { validateSessionReuseRouting } from "./application/sessionReuse.js";
 import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "./dispatchResolution.js";
+import { laneFingerprint as laneFingerprintOf } from "./application/identityProjection.js";
+import { providerKeyFor } from "./providerFingerprint.js";
+import { loadRoleContract, roleContractSha256 } from "./application/roleContract.js";
 
 // D-F3 修复：ownership 心跳文件。daemon --resume-on-start 用它判活，
 // 避免劫持 P2 runner 还在驱动的 run（双所有者 = 06-18 孤儿变体）。
@@ -95,6 +98,18 @@ function makeObjectRegistry(registryObj) {
  *   （run.observation_deadline_reached）——到期不杀 worker，completed/failed 是
  *   自然终态；timedOut 只对 legacy 终态转录为 true（新 run 恒 false）。
  */
+
+/** 0045 W3c：解析/校验类失败的具名收口（W2b 形状提炼）——run.error + failed 终态，零 spawn。 */
+async function failClosedResolution(runDir, runId, agentId, code, message) {
+  const transcriptPath = join(runDir, `${runId}.jsonl`);
+  try {
+    const t = new JsonlTranscript(transcriptPath, { runId, agentId: agentId ?? "unknown", initialSeq: 0 });
+    await t.append("run.error", { phase: "dispatch_resolution", error: code, message });
+    await t.transitionState("pending", "failed", STATE_CHANGE_REASON.dispatch_resolution_failed);
+  } catch { /* best effort — the returned failure is the primary surface */ }
+  return { runId, completed: false, failed: true, timedOut: false, error: `dispatch_resolution: ${code}: ${message}` };
+}
+
 export async function runBackground(opts = {}) {
   const { agentId, prompt, runDir } = opts;
   const runId = opts.runId ?? `run_${new Date().toISOString().replace(/[-:.TZ]/g, "")}${Math.random().toString(36).slice(2, 8)}`;
@@ -146,8 +161,38 @@ export async function runBackground(opts = {}) {
       : (agent) => backendFor(agent, { fetchImpl: opts.fetchImpl, waoCliPath }),
   });
 
-  let run;
-  try {
+    // 0045 W3c（R4"runner 钉前比对"）：--reuse-material-json 在场（复用/谱系路由
+    // 派发）时，runner 从注册表重算车道指纹+角色 sha 并与派发冻结值比对——不
+    // 等=派发与起动间注册表被改，具名 fail-closed（W2b 收口同款，零 spawn）。
+    if (opts["reuse-material-json"]) {
+      let frozenMaterial = null;
+      try { frozenMaterial = JSON.parse(opts["reuse-material-json"]); } catch { frozenMaterial = null; }
+      const regM = await registryResolver(registryPath ?? "config/agents.json");
+      const agentEntry = typeof regM.getAgent === "function" && agentId ? regM.getAgent(agentId) : null;
+      if (!frozenMaterial || !agentEntry) {
+        return await failClosedResolution(runDir, runId, agentId,
+          "reuse_material_mismatch", "malformed --reuse-material-json or unresolvable agent");
+      }
+      const recomputed = {
+        laneFingerprint: laneFingerprintOf({
+          backend: agentEntry.backend,
+          modelId: agentEntry.model?.id ?? null,
+          providerID: agentEntry.model?.providerID ?? null,
+          providerKey: providerKeyFor(agentEntry.provider),
+        }),
+        roleSha256: agentEntry.systemPrompt
+          ? roleContractSha256(loadRoleContract(agentEntry.systemPrompt))
+          : "none",
+      };
+      if (recomputed.laneFingerprint !== frozenMaterial.laneFingerprint
+        || recomputed.roleSha256 !== frozenMaterial.roleSha256) {
+        return await failClosedResolution(runDir, runId, agentId,
+          "reuse_material_mismatch",
+          "registry wiring changed between dispatch and runner start (lane fingerprint or role content sha mismatch)");
+      }
+    }
+    let run;
+    try {
     // 0045 W2b：显式车道+角色派发的 runner 侧重解析（R3 裁定"启动前重查一致
     // 性"——CLI 派发与 runner 起动之间 lanes.json/注册表可能已变，单一真相在
     // dispatchResolution）。失败=具名 fail-closed：写 run.error + failed 终态，

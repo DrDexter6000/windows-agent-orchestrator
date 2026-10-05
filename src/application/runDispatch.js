@@ -26,6 +26,9 @@ import { readRegistry } from "../registry.js";
 import { assessWorkerReadiness, createEnvResolver } from "./credentialReadiness.js";
 import { inheritedEnvNames } from "../envPolicy.js";
 import { resolveReuseTurn, resolveLineageFirstTurn } from "./sessionReuse.js";
+import { providerKeyFor } from "../providerFingerprint.js";
+import { laneFingerprint as laneFingerprintOf } from "./identityProjection.js";
+import { loadRoleContract, roleContractSha256 } from "./roleContract.js";
 import { assertExistingDispatchCwd, assertValidModelOverride, assertValidReasoningOverride, resolvePredictedDispatchCwd } from "../runManager.js";
 // R7-C (C-2): application→backends is a legal DOWNWARD edge under the frozen
 // L4 layering SSOT (backends sits deeper than application). Used only to read
@@ -520,7 +523,27 @@ export async function dispatchRun({
   // sit before resolveReuseTurn, so the zero-routing-slot discipline (CE-6)
   // is unchanged. The checks inside the reuse block below remain as
   // defense-in-depth.
-  const reuseEligible = agent.sessionReuse === "lead_workspace" && !publicDelivery;
+  const reuseEligible = agent.sessionReuse === "lead_workspace" && !publicDelivery
+    // 0045 R4 洞②关门（真门非注记）：explicit（车道+角色组合）派发永不进复用
+    // 路由——接线席配了 lead_workspace 也不得跨帽续接（此前仅靠 CLI 一次性
+    // leadSession 恰好未触发；explicit 上 MCP 后即成真洞）。
+    && resolvedLane === null && resolvedRole === null;
+  // 0045 §1.6/R4 键材料升维（只增不减）：可复用/可续接的新 run，键材料追加
+  // 车道内容指纹 + 角色正文指纹（无角色="none" 显式标记）。派发时刻从注册表
+  // 冻结（run.started 尚未写）——角色文件不可载在此具名失败（零转录零 fork）。
+  const reuseIdentityMaterial = (reuseEligible || continuable)
+    ? {
+        laneFingerprint: laneFingerprintOf({
+          backend: agent.backend,
+          modelId: agent.model?.id ?? null,
+          providerID: agent.model?.providerID ?? null,
+          providerKey: providerKeyFor(agent.provider),
+        }),
+        roleSha256: agent.systemPrompt
+          ? roleContractSha256(loadRoleContract(agent.systemPrompt))
+          : "none",
+      }
+    : {};
   // R10-A: a per-dispatch model override can never ride a provider-session
   // reuse dispatch — EITHER shape. lead_workspace: a resumed expert
   // conversation spans turns that must run one model. run_lineage (continuable
@@ -634,6 +657,7 @@ export async function dispatchRun({
       leadSession,
       workspace: cwd,
       agentId,
+      ...reuseIdentityMaterial,
     });
     if (reuseDecision.kind === "busy") {
       throw new ReuseBusyError(reuseDecision.activeRunId);
@@ -684,6 +708,7 @@ export async function dispatchRun({
       leadSession,
       workspace: cwd,
       agentId,
+      ...reuseIdentityMaterial,
       rootRunId: finalRunId,
     });
     if (firstTurn.kind === "busy") {
@@ -785,6 +810,9 @@ export async function dispatchRun({
   // already travels the same channel.
   if (sessionReuseRouting) {
     runnerArgs.push("--session-reuse-json", JSON.stringify(sessionReuseRouting));
+    // 0045 W3c（R4"runner 钉前比对"）：键材料冻结值随路由穿给 runner——runner
+    // 从注册表重算并比对，不等=注册表在派发与起动间被改，具名 fail-closed。
+    runnerArgs.push("--reuse-material-json", JSON.stringify(reuseIdentityMaterial));
   }
   // M12-16: thread correctable to the detached runner so RunManager.start spawns
   // the child with a piped stdin + the stream-json input format and drains the

@@ -178,11 +178,20 @@ function canonicalizeWorkspacePath(p) {
 
 /**
  * Validate + canonicalize the reuse identity inputs.
- * @returns {{leadSession:string, workspace:string, agentId:string}}
+ * 0045 §1.6/R4（只增不减）：可选 laneFingerprint（车道内容指纹）与 roleSha256
+ * （角色正文指纹；无角色席位用显式标记 "none"，不许空串）入键材料——同车道
+ * 换角色正文后新键必然 miss（"改正文必 first"验收项）；缺席=旧材料形状（调用
+ * 方未升级时键连续性保持）。agentId 保留（去掉会把同四元组同角色不同接线的
+ * 两席并成一个 provider 会话——R4 裁定）。
+ * @returns {{leadSession:string, workspace:string, agentId:string,
+ *            laneFingerprint?:string, roleSha256?:string}}
  * @throws {Error} if any input is missing/invalid (fixed safe shape — never
  *   echoes the raw Lead id or workspace path in a way that could leak).
  */
-function canonicalReuseInput({ leadSession, workspace, agentId }) {
+const LANE_FP_RE = /^lane:[0-9a-f]{16}$/;
+const ROLE_SHA_RE = /^(?:[0-9a-f]{64}|none)$/;
+
+function canonicalReuseInput({ leadSession, workspace, agentId, laneFingerprint, roleSha256 }) {
   if (typeof leadSession !== "string" || leadSession.length === 0) {
     throw new Error("sessionReuse: leadSession is required (server-owned Lead session identity)");
   }
@@ -192,11 +201,32 @@ function canonicalReuseInput({ leadSession, workspace, agentId }) {
   if (!isValidCanonicalAgentId(agentId)) {
     throw new Error("sessionReuse: agentId must be a valid canonical id");
   }
-  return {
+  const out = {
     leadSession,
     workspace: canonicalizeWorkspacePath(workspace),
     agentId,
   };
+  if (laneFingerprint !== undefined) {
+    if (typeof laneFingerprint !== "string" || !LANE_FP_RE.test(laneFingerprint)) {
+      throw new Error("sessionReuse: laneFingerprint must be a lane:<16-hex> content fingerprint");
+    }
+    out.laneFingerprint = laneFingerprint;
+  }
+  if (roleSha256 !== undefined) {
+    if (typeof roleSha256 !== "string" || !ROLE_SHA_RE.test(roleSha256)) {
+      throw new Error("sessionReuse: roleSha256 must be 64-hex or the explicit \"none\" marker (never an empty string)");
+    }
+    out.roleSha256 = roleSha256;
+  }
+  return out;
+}
+
+/** 键材料的可选身份组件行（在场才追加——缺席时与升级前材料逐字节一致）。 */
+function identityMaterialLines(c) {
+  let lines = "";
+  if (c.laneFingerprint !== undefined) lines += `\nlaneFp=${c.laneFingerprint}`;
+  if (c.roleSha256 !== undefined) lines += `\nroleSha=${c.roleSha256}`;
+  return lines;
 }
 
 /**
@@ -210,10 +240,10 @@ function canonicalReuseInput({ leadSession, workspace, agentId }) {
  * @param {{leadSession:string, workspace:string, agentId:string}} input
  * @returns {string} a well-formed RFC 4122 v4 UUID
  */
-export function deriveOpaqueUuid({ leadSession, workspace, agentId }) {
-  const c = canonicalReuseInput({ leadSession, workspace, agentId });
+export function deriveOpaqueUuid({ leadSession, workspace, agentId, laneFingerprint, roleSha256 }) {
+  const c = canonicalReuseInput({ leadSession, workspace, agentId, laneFingerprint, roleSha256 });
   // Delimiter-tagged material prevents cross-field collision ambiguity.
-  const material = `lead=${c.leadSession}\nworkspace=${c.workspace}\nagent=${c.agentId}`;
+  const material = `lead=${c.leadSession}\nworkspace=${c.workspace}\nagent=${c.agentId}` + identityMaterialLines(c);
   const digest = createHash("sha256").update(material, "utf8").digest();
   // Format the first 16 bytes as an RFC 4122 v4 UUID (set version + variant).
   digest[6] = (digest[6] & 0x0f) | 0x40; // version 4
@@ -451,11 +481,11 @@ async function withKeyLock(store, keyHash, fn) {
  * @param {number} [input.now=Date.now()] — injectable clock for tests
  * @returns {Promise<{kind:"first", routing:{mode, opaqueUuid, turn:"first"}} | {kind:"resume", routing:{mode, opaqueUuid, turn:"resume", priorRunId:string}} | {kind:"busy", activeRunId:string}>}
  */
-export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, agentId, reuseStore, now }) {
+export async function resolveReuseTurn({ runDir, runId, leadSession, workspace, agentId, laneFingerprint, roleSha256, reuseStore, now }) {
   const store = reuseStore ?? defaultReuseStore(runDir);
   const clock = typeof now === "number" ? now : Date.now();
-  const keyHash = deriveReuseKeyHash({ leadSession, workspace, agentId });
-  const opaqueUuid = deriveOpaqueUuid({ leadSession, workspace, agentId });
+  const keyHash = deriveReuseKeyHash({ leadSession, workspace, agentId, laneFingerprint, roleSha256 });
+  const opaqueUuid = deriveOpaqueUuid({ leadSession, workspace, agentId, laneFingerprint, roleSha256 });
   const routing = { mode: "lead_workspace", opaqueUuid };
 
   return withKeyLock(store, keyHash, async () => {
@@ -749,7 +779,7 @@ function canonicalLineageReuseInput({ leadSession, workspace, agentId, rootRunId
  */
 export function deriveLineageOpaqueUuid(input) {
   const c = canonicalLineageReuseInput(input);
-  const material = `mode=run_lineage\nlead=${c.leadSession}\nworkspace=${c.workspace}\nagent=${c.agentId}\nroot=${c.rootRunId}`;
+  const material = `mode=run_lineage\nlead=${c.leadSession}\nworkspace=${c.workspace}\nagent=${c.agentId}\nroot=${c.rootRunId}` + identityMaterialLines(c);
   const digest = createHash("sha256").update(material, "utf8").digest();
   digest[6] = (digest[6] & 0x0f) | 0x40; // version 4
   digest[8] = (digest[8] & 0x3f) | 0x80; // variant 10
@@ -814,11 +844,11 @@ function defaultLineageStore(runDir) {
  * @param {number} [input.now]
  * @returns {Promise<{kind:"first", routing:{mode:"run_lineage", opaqueUuid:string, turn:"first"}} | {kind:"busy", activeRunId:string}>}
  */
-export async function resolveLineageFirstTurn({ runDir, runId, leadSession, workspace, agentId, rootRunId, reuseStore, now }) {
+export async function resolveLineageFirstTurn({ runDir, runId, leadSession, workspace, agentId, rootRunId, laneFingerprint, roleSha256, reuseStore, now }) {
   const store = reuseStore ?? defaultLineageStore(runDir);
   const clock = typeof now === "number" ? now : Date.now();
-  const keyHash = deriveLineageReuseKeyHash({ leadSession, workspace, agentId, rootRunId });
-  const opaqueUuid = deriveLineageOpaqueUuid({ leadSession, workspace, agentId, rootRunId });
+  const keyHash = deriveLineageReuseKeyHash({ leadSession, workspace, agentId, rootRunId, laneFingerprint, roleSha256 });
+  const opaqueUuid = deriveLineageOpaqueUuid({ leadSession, workspace, agentId, rootRunId, laneFingerprint, roleSha256 });
   const routing = { mode: "run_lineage", opaqueUuid };
 
   return withKeyLock(store, keyHash, async () => {
@@ -904,11 +934,11 @@ export async function resolveLineageFirstTurn({ runDir, runId, leadSession, work
  *   Throws to refuse (propagates; nothing has been written).
  * @returns {Promise<{kind:"resume", routing:{mode:"run_lineage", opaqueUuid:string, turn:"resume"}} | {kind:"busy", activeRunId:string}>}
  */
-export async function resolveLineageContinuationTurn({ runDir, runId, parentRunId, rootRunId, leadSession, workspace, agentId, reuseStore, now, validatePriorRunId = null }) {
+export async function resolveLineageContinuationTurn({ runDir, runId, parentRunId, rootRunId, leadSession, workspace, agentId, laneFingerprint, roleSha256, reuseStore, now, validatePriorRunId = null }) {
   const store = reuseStore ?? defaultLineageStore(runDir);
   const clock = typeof now === "number" ? now : Date.now();
-  const keyHash = deriveLineageReuseKeyHash({ leadSession, workspace, agentId, rootRunId });
-  const opaqueUuid = deriveLineageOpaqueUuid({ leadSession, workspace, agentId, rootRunId });
+  const keyHash = deriveLineageReuseKeyHash({ leadSession, workspace, agentId, rootRunId, laneFingerprint, roleSha256 });
+  const opaqueUuid = deriveLineageOpaqueUuid({ leadSession, workspace, agentId, rootRunId, laneFingerprint, roleSha256 });
   const routing = { mode: "run_lineage", opaqueUuid };
 
   return withKeyLock(store, keyHash, async () => {
