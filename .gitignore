@@ -37,3 +37,4 @@ scripts/reliability-tmp/
 
 # 用户本地草图/笔记（不入库）
 演示文稿1.pptx
+config/agents.json.bak-*
