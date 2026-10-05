@@ -22,6 +22,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, copyFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { laneLedgerKey } from "../../src/application/identityProjection.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const SUMMARY_PATH = process.argv.includes("--summary")
@@ -35,16 +36,16 @@ const EVIDENCE_DIR = process.argv.includes("--evidence-dir")
 const STATUS_SEVERITY = { "draft-only": 0, blocked: 0, rejected: 0, conditional: 1, certified: 2 };
 const sha256 = (s) => createHash("sha256").update(s, "utf8").digest("hex");
 
+// 0045 R5/W4e：键派生切 identityProjection.laneLedgerKey SSOT（tri-state 严格——
+// undefined=从未观察/null=已观察无/string 各成键成分，与 R23-C 记录纪律同轴；
+// 此前本地版 ?? null 归并抹掉 undefined/null 区分，auditor R5 点名）。
 function laneKeyOf(record) {
-  // 与 identityProjection.laneFingerprint 同一四元组（backend/modelId/providerID/
-  // providerKey），键形 lane:<16hex>；null 归一。
-  const tuple = {
-    backend: record?.backend ?? null,
-    modelId: record?.modelId ?? null,
-    providerID: record?.providerID ?? null,
-    providerKey: record?.providerKey ?? null,
-  };
-  return "lane:" + sha256(JSON.stringify(tuple)).slice(0, 16);
+  return laneLedgerKey({
+    backend: record?.backend,
+    modelId: record?.modelId,
+    providerID: record?.providerID,
+    providerKey: record?.providerKey,
+  });
 }
 
 const before = readFileSync(SUMMARY_PATH, "utf8");
@@ -63,10 +64,11 @@ for (const [agentId, w] of Object.entries(beforeSummary.workers ?? {})) {
   if (!laneRecords.has(laneKey)) {
     laneRecords.set(laneKey, {
       laneKey,
-      backend: w.backend ?? null,
-      providerID: w.providerID ?? null,
-      modelId: w.modelId ?? null,
-      providerKey: w.providerKey ?? null,
+      // R23-C tri-state 保真：undefined（legacy 未观察）与 null（已观察无）不归并。
+      backend: w.backend,
+      providerID: w.providerID,
+      modelId: w.modelId,
+      providerKey: w.providerKey,
       status: w.status ?? "draft-only",
       recommendedUse: w.recommendedUse ?? null,
       certificationScope: w.certificationScope ?? null,

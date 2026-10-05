@@ -109,3 +109,45 @@ test("MIG-2: apply——备份+证据包+键空间标记+provenance+时间戳不
     assert.equal(readdirSync(ev).length, 1, "幂等重跑不新增证据文件");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+
+// ── W4e 硬化：tri-state 键成分 + 中断重入 ────────────────────────────────────
+
+test("MIG-4（W4e）：providerKey undefined 与 null 的两席位不并道（tri-state 键）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mig4-"));
+  try {
+    const p2 = join(dir, "summary.json");
+    const doc = fixtureSummary();
+    doc.workers.seat_u = { ...doc.workers.seat_c, agentId: "seat_u", modelId: "m-sol", providerKey: undefined, cases: ["case-u"] };
+    doc.cases.push({ caseId: "case-u", agentId: "seat_u", backend: "codex", modelId: "m-sol" });
+    writeFileSync(p2, JSON.stringify(doc), "utf8");
+    const r = run([], p2, join(dir, "ev"));
+    assert.equal(r.verdict, "DRY-RUN-PASS");
+    assert.equal(r.wouldWrite.lanes, 3, "m-flash+codex+codex(undefined providerKey)=3 道（undefined≠null 不并）");
+    assert.equal(r.conservation.workerCaseSetConserved, true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("MIG-5（W4e）：中断重入——apply 后台账部分损坏再跑=按现状幂等重入不丢证据", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-mig5-"));
+  try {
+    const p2 = join(dir, "summary.json");
+    writeFileSync(p2, JSON.stringify(fixtureSummary()), "utf8");
+    const r = run(["--apply"], p2, join(dir, "ev"));
+    assert.equal(r.verdict, "APPLIED");
+    // 模拟中断后人工干预：台账已被迁移但 marker 被误删（半迁移形状）
+    const after = JSON.parse(readFileSync(p2, "utf8"));
+    delete after.ledgerKeySpace;
+    writeFileSync(p2, JSON.stringify(after), "utf8");
+    // 重入：以 seat 键残档再迁移 → 幂等结果（车道键重算一致，cases 守恒）
+    const again = run(["--apply"], p2, join(dir, "ev"));
+    assert.equal(again.verdict, "APPLIED", "无 marker=按席位档重迁移（重入语义）");
+    const final = JSON.parse(readFileSync(p2, "utf8"));
+    assert.equal(final.ledgerKeySpace, "lane-v1");
+    const flash = Object.values(final.workers).find((w) => w.modelId === "m-flash");
+    assert.deepEqual([...flash.cases].sort(), ["case-flash-a", "case-flash-b"], "重入不丢 case");
+    // 注记：marker 丢失形状的重入会让 provenance 塌缩为 1（车道记录引用自身）——
+    // case 守恒与状态最严不变；原始双席位 provenance 只在首次 apply 的备份里。
+    assert.ok(Array.isArray(flash.provenance) && flash.provenance.length >= 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
