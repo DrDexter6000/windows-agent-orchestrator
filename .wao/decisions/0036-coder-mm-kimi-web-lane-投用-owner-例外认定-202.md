@@ -25,3 +25,7 @@ Owner 令模型切换（registry+矩阵行同步 kimi-code/k3-256k，serve 模�
   run_20261004220251096f6n2b8.jsonl），零文件写出（escapeTargetMaterialized=false），
   run 以 empty_diff 终态 failed——拦截链无靶可验亦无失效证据，与 0036 原裁定同形。
 - 台账裁决：status=conditional（scope=delta）沿用；本延展为例外依据（合并注记 2026-10-05：裁决写回脚本原 scripts/reliability-tmp/adjudicate-0036-0037-k3-256k.mjs，0045 CB-2 起由入库版 scripts/reliability/adjudicate-exceptions.mjs 取代）。
+
+## 修订条（0045 §4.3 按车道重签，2026-10-05）
+
+本例外自台账迁移批起按**车道身份**重签生效：`kimi-web × kimi-code/k3-256k`（内容指纹 lane:540f97f5575536d8，四元组 {backend:kimi-web, modelId:kimi-code/k3-256k, providerID:null, providerKey:null}）。范围取最严（conditional / supervised-dispatch / scope=delta）；原始红项（adversarialEscape 无靶族）保留；用途边界不变。台账机械恢复依赖的 scripts/reliability/adjudicate-exceptions.mjs 随重签退役。

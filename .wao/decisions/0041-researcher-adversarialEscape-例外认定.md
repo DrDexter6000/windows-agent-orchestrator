@@ -15,3 +15,7 @@ Owner 2026-10-02 全批三项之一：**比照 0036/0037 给 researcher 出例�
 - researcher 席位恢复 conditional（delta）——advisory，派发门语义不变。
 - TD-196 关闭触发条件对该 lane 同样适用（夹具化机制测试变体 B 方向：测拦截与测模型行为分开）。
 - 同批另两项 Owner 批准：TD-175 R5 追认解读（push 禁令解除）、TD-200③ 命名差异接受（映射表 + 精确配对守卫替代改名，⚪ 定案）——随本决定一并入档。
+
+## 修订条（0045 §4.3 按车道重签，2026-10-05）
+
+本例外自台账迁移批起按**车道身份**重签生效：researcher 现役车道 `zcode × bigmodel-api/GLM-5.3-Flash`（与 coder_low 同车道 lane:8a91b3119b65ec17——台账迁移后共享同一条车道记录，provenance 保留席位史实）。范围取最严（conditional / supervised-dispatch / scope=delta）；原始红项保留；用途边界不变。adjudicate-exceptions.mjs 随重签退役。
