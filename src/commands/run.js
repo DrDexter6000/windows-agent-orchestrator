@@ -213,6 +213,8 @@ async function spawnBackgroundRunner(agentId, options, config, delivery) {
       // R3 "启动前重查"）。前台路径不经此（resolvedTarget 直达 start）。
       resolvedLane: options.lane,
       resolvedRole: options.role,
+      // 0045 W4b：alias 派发的角色注记（生效复用策略按角色取）。
+      ...(resolvedTarget?.source === "alias" && resolvedTarget.roleId ? { resolvedRoleId: resolvedTarget.roleId } : {}),
       runnerPath,
       // M11-11C: CLI dispatch is a one-shot process — there is no stable Lead
       // session across CLI invocations, so reusable experts always start a fresh

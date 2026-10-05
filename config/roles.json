@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "_comment": "0045 R4/W4b：角色政策登记（复用策略归角色——'终局复用策略归角色'裁定）。sessionReuse 闭集 {lead_workspace}；缺席=该角色不复用。席位（agents.json）上的同名字段自本批起降级为兼容来源：仅当派发角色=席位原生角色（systemPrompt stem 相同）时生效，跨帽/显式组合派发绝不继承席位策略。键集=角色库文件名 stem。",
+  "roles": {
+    "researcher": { "sessionReuse": "lead_workspace" }
+  }
+}

@@ -3819,6 +3819,7 @@ export function createWaoMcpServer({
       let effectiveAgentId = agentId;
       let resolvedLane;
       let resolvedRole;
+      let resolvedRoleId;
       if (lane !== undefined || role !== undefined || agentId === undefined) {
         const lanesDoc = loadLanesConfig();
         const registry = await readRegistry(registryPath);
@@ -3838,6 +3839,9 @@ export function createWaoMcpServer({
           resolvedLane = lane;
           resolvedRole = role;
         }
+        // 0045 W4b：生效复用策略按角色取——alias 派发的角色注记也透传（显式路径
+        // 本就被洞②真门排除复用，resolvedRoleId 仅为统一语义）。
+        resolvedRoleId = resolution.roleId ?? undefined;
       } else if (!isValidCanonicalAgentId(agentId)) {
         return {
           isError: true,
@@ -3976,6 +3980,7 @@ export function createWaoMcpServer({
           runDir,
           ...(resolvedLane !== undefined ? { resolvedLane } : {}),
           ...(resolvedRole !== undefined ? { resolvedRole } : {}),
+          ...(resolvedRoleId !== undefined ? { resolvedRoleId } : {}),
           // M10-pre2: server-owned canonical workspace root as cwd.
           // The model cannot provide this — it comes from host-authorized binding.
           cwd: workspaceCwd,

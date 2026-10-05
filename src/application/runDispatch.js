@@ -28,6 +28,7 @@ import { inheritedEnvNames } from "../envPolicy.js";
 import { resolveReuseTurn, resolveLineageFirstTurn } from "./sessionReuse.js";
 import { providerKeyFor } from "../providerFingerprint.js";
 import { laneFingerprint as laneFingerprintOf } from "./identityProjection.js";
+import { effectiveSessionReuse } from "../dispatchResolution.js";
 import { loadRoleContract, roleContractSha256 } from "./roleContract.js";
 import { assertExistingDispatchCwd, assertValidModelOverride, assertValidReasoningOverride, resolvePredictedDispatchCwd } from "../runManager.js";
 // R7-C (C-2): application→backends is a legal DOWNWARD edge under the frozen
@@ -395,6 +396,8 @@ export async function dispatchRun({
   // 0045 W2b：显式车道+角色派发（CLI --lane/--role 穿线；MCP 面第 5 步再开）。
   resolvedLane = null,
   resolvedRole = null,
+  // 0045 W4b：别名/显式派发的解析角色（生效复用策略按角色取——R4 裁定归角色）。
+  resolvedRoleId = null,
 }) {
   if (!agentId || typeof agentId !== "string") {
     throw new Error("dispatchRun: agentId is required");
@@ -523,10 +526,14 @@ export async function dispatchRun({
   // sit before resolveReuseTurn, so the zero-routing-slot discipline (CE-6)
   // is unchanged. The checks inside the reuse block below remain as
   // defense-in-depth.
-  const reuseEligible = agent.sessionReuse === "lead_workspace" && !publicDelivery
-    // 0045 R4 洞②关门（真门非注记）：explicit（车道+角色组合）派发永不进复用
-    // 路由——接线席配了 lead_workspace 也不得跨帽续接（此前仅靠 CLI 一次性
-    // leadSession 恰好未触发；explicit 上 MCP 后即成真洞）。
+  // 0045 R4/W4b："终局复用策略归角色"——生效政策经 effectiveSessionReuse（角色
+  // 政策优先；席位字段仅在派发角色=席位原生角色时兼容生效；跨帽/显式绝不继承）。
+  // 洞②真门保持：explicit（车道+角色组合）派发永不进复用路由。
+  const effectiveReuse = effectiveSessionReuse({
+    roleId: resolvedRoleId,
+    agent,
+  });
+  const reuseEligible = effectiveReuse === "lead_workspace" && !publicDelivery
     && resolvedLane === null && resolvedRole === null;
   // 0045 §1.6/R4 键材料升维（只增不减）：可复用/可续接的新 run，键材料追加
   // 车道内容指纹 + 角色正文指纹（无角色="none" 显式标记）。派发时刻从注册表

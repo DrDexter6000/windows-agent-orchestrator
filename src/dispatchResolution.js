@@ -93,6 +93,68 @@ function axesEqual(a, b) {
 }
 
 /**
+ * 0045 R4/W4b："终局复用策略归角色"落地——config/roles.json（git 跟踪、键白名单、
+ * 闭集校验）加载。文件缺失=空政策（所有角色不复用；席位兼容来源按 effectiveSessionReuse）。
+ * 结构 issue 与 lanes.json 同纪律（调用方决定消费语义）。
+ */
+const ROLE_POLICY_TOP_KEYS = new Set(["schema", "roles", "_comment"]);
+const ROLE_POLICY_KEYS = new Set(["sessionReuse"]);
+export const SESSION_REUSE_POLICIES = Object.freeze(["lead_workspace"]);
+
+export function loadRolePolicies() {
+  let raw;
+  const path = join(WAO_ROOT, "config", "roles.json");
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return { ok: true, path, roles: {}, issues: [] };
+  }
+  let doc;
+  const issues = [];
+  try {
+    doc = JSON.parse(raw);
+  } catch (e) {
+    return { ok: false, path, roles: {}, issues: [`roles.json 不可解析：${e.message}`] };
+  }
+  if (doc.schema !== 1) issues.push("schema 必须为 1");
+  for (const k of Object.keys(doc)) {
+    if (!ROLE_POLICY_TOP_KEYS.has(k)) issues.push(`未知顶层键 "${k}"`);
+  }
+  const roles = {};
+  for (const [roleId, policy] of Object.entries(doc.roles ?? {})) {
+    if (!ID_RE.test(roleId)) { issues.push(`角色政策键 "${roleId}" 不合字母表`); continue; }
+    if (!policy || typeof policy !== "object") { issues.push(`角色 "${roleId}" 政策必须是对象`); continue; }
+    for (const k of Object.keys(policy)) {
+      if (!ROLE_POLICY_KEYS.has(k)) issues.push(`角色 "${roleId}" 未知政策键 "${k}"`);
+    }
+    if (policy.sessionReuse !== undefined && !SESSION_REUSE_POLICIES.includes(policy.sessionReuse)) {
+      issues.push(`角色 "${roleId}" sessionReuse 不在闭集 ${SESSION_REUSE_POLICIES.join("/")}`);
+    }
+    roles[roleId] = { sessionReuse: policy.sessionReuse ?? null };
+  }
+  return { ok: issues.length === 0, path, roles, issues };
+}
+
+/**
+ * 生效复用策略（R4 裁定：归角色；席位字段降级为兼容来源）：
+ *   ① roles.json[roleId].sessionReuse（角色政策，终局权威）；
+ *   ② 缺席时：席位条目自带 sessionReuse 且派发角色=该席位原生角色
+ *      （systemPrompt stem===roleId）→ 兼容生效（过渡期，席位政策随 W4d 重键消失）；
+ *   ③ 其余（跨帽/显式组合/无政策）→ null（绝不把接线席位的策略继承成角色策略）。
+ * @returns {"lead_workspace"|null}
+ */
+export function effectiveSessionReuse({ roleId, agent, rolePolicies }) {
+  const policies = rolePolicies ?? loadRolePolicies().roles;
+  const rolePolicy = roleId !== undefined && roleId !== null ? policies[roleId] : undefined;
+  if (rolePolicy !== undefined) return rolePolicy.sessionReuse ?? null;
+  if (agent && typeof agent.systemPrompt === "string" && agent.systemPrompt.endsWith(".md")) {
+    const stem = agent.systemPrompt.split("/").pop().slice(0, -3);
+    if (roleId === stem && agent.sessionReuse !== undefined) return agent.sessionReuse ?? null;
+  }
+  return null;
+}
+
+/**
  * 结构校验（纯函数，G1/G2）：未知键整文件拒、lane id/别名跨车道/wiringAgent/
  * 公开轴三元组全局唯一、别名值只允许 {role}、id 受字母表限制。
  * @param {object} doc 已解析的 lanes.json 文档对象

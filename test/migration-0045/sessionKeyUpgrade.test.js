@@ -129,28 +129,35 @@ test("HOLE-B: dispatchRun——explicit（resolvedLane/Role）× lead_workspace 
   } finally { cleanupDir(dir); }
 });
 
-test("HOLE-B 对照：普通 lead_workspace 派发照常进复用路由（升维材料随行）", async () => {
+test("HOLE-B 对照：lead_workspace 派发照常进复用路由（升维材料随行；W4b 政策语义）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-hb2-"));
+  const ROLES = join(REPO_ROOT, "config", "roles");
+  writeFileSync(join(ROLES, "w4b-hat.md"), "# w4b\nPOL_HAT\n", "utf8");
   try {
     makeGitRepo(dir);
     const registryPath = join(dir, "agents.json");
+    // 0045 W4b：席位字段降级——复用进路由须经 resolvedRoleId（角色政策或原生角色兼容）。
+    // 本对照走"原生角色兼容"腿：席位 systemPrompt stem=派发角色+席位自带字段。
     writeFileSync(registryPath, JSON.stringify({ agents: {
-      "reuse-seat": { backend: "claude-code", cwd: dir, sessionReuse: "lead_workspace" },
+      "reuse-seat": { backend: "claude-code", cwd: dir, systemPrompt: "config/roles/w4b-hat.md", sessionReuse: "lead_workspace" },
     } }), "utf8");
     const { dispatchRun } = await import("../../src/application/runDispatch.js");
     let argv = null;
     await dispatchRun({
-      agentId: "reuse-seat", prompt: "t",
+      agentId: "reuse-seat", prompt: "t", resolvedRoleId: "w4b-hat",
       registryPath, runDir: join(dir, "runs"), runId: "run_0045_hole_b2",
       leadSession: "stable-lead-session", cwd: dir,
       spawnFn: (...a) => { argv = a[1]; return { pid: 1, unref() {}, on() {} }; },
       runnerPath: join(dir, "fake-runner.mjs"),
     });
-    assert.ok(argv.includes("--session-reuse-json"), "普通复用派发照常路由");
+    assert.ok(argv.includes("--session-reuse-json"), "原生角色兼容腿：复用派发照常路由");
     const matIdx = argv.indexOf("--reuse-material-json");
     assert.ok(matIdx >= 0, "升维材料随行");
     const material = JSON.parse(argv[matIdx + 1]);
     assert.match(material.laneFingerprint, /^lane:[0-9a-f]{16}$/, "车道指纹冻结");
-    assert.equal(material.roleSha256, "none", "无角色席=显式 none 标记");
-  } finally { cleanupDir(dir); }
+    assert.notEqual(material.roleSha256, "none", "有角色席=正文 sha（非 none）");
+  } finally {
+    cleanupDir(dir);
+    rmSync(join(ROLES, "w4b-hat.md"), { force: true });
+  }
 });

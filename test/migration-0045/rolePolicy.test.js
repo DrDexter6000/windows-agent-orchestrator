@@ -1,0 +1,86 @@
+// test/migration-0045/rolePolicy.test.js
+//
+// 0045 R4/W4b："终局复用策略归角色"落地——角色政策登记（config/roles.json）+
+// 生效规则（角色政策优先；席位字段仅限原生角色兼容；跨帽/显式绝不继承）。
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execSync } from "node:child_process";
+import {
+  loadRolePolicies, effectiveSessionReuse, SESSION_REUSE_POLICIES,
+} from "../../src/dispatchResolution.js";
+
+const REPO = join(import.meta.dirname, "../..");
+
+test("POL-1: 政策登记加载——活体 researcher=lead_workspace，其余角色缺席；结构闭集钉", () => {
+  const p = loadRolePolicies();
+  assert.ok(p.ok, `结构 issues：${JSON.stringify(p.issues)}`);
+  assert.equal(p.roles.researcher?.sessionReuse, "lead_workspace");
+  assert.equal(p.roles.coder_low, undefined, "无政策角色缺席（非 null 填充）");
+  assert.deepEqual([...SESSION_REUSE_POLICIES], ["lead_workspace"]);
+});
+
+test("POL-2: 生效规则——角色政策优先；席位字段仅限原生角色兼容；跨帽绝不继承", () => {
+  const policies = { researcher: { sessionReuse: "lead_workspace" } };
+  const seatResearcher = { systemPrompt: "config/roles/researcher.md", sessionReuse: "lead_workspace" };
+  const seatCoderLow = { systemPrompt: "config/roles/coder_low.md", sessionReuse: undefined };
+  // ① 角色政策（登记在册）
+  assert.equal(effectiveSessionReuse({ roleId: "researcher", agent: seatCoderLow, rolePolicies: policies }), "lead_workspace",
+    "角色政策优先（接线席位无关）");
+  // ② 席位兼容：无登记+派发角色=席位原生角色+席位自带字段
+  const seatLegacy = { systemPrompt: "config/roles/auditor.md", sessionReuse: "lead_workspace" };
+  assert.equal(effectiveSessionReuse({ roleId: "auditor", agent: seatLegacy, rolePolicies: policies }), "lead_workspace",
+    "未登记角色+席位原生角色+席位自带=兼容生效（过渡期）");
+  // ③ 跨帽：席位字段绝不继承给其他角色
+  assert.equal(effectiveSessionReuse({ roleId: "tester", agent: seatLegacy, rolePolicies: policies }), null,
+    "跨帽派发不继承席位策略（R4 裁定核心）");
+  // ④ 无政策
+  assert.equal(effectiveSessionReuse({ roleId: "coder_low", agent: seatCoderLow, rolePolicies: policies }), null);
+  assert.equal(effectiveSessionReuse({ roleId: undefined, agent: seatCoderLow, rolePolicies: policies }), null);
+});
+
+function makeGitRepo(dir) {
+  execSync("git init", { cwd: dir, stdio: "pipe" });
+  execSync("git config user.email t@t.com", { cwd: dir, stdio: "pipe" });
+  execSync("git config user.name T", { cwd: dir, stdio: "pipe" });
+  writeFileSync(join(dir, "README.md"), "# t\n", "utf8");
+  execSync("git add README.md", { cwd: dir, stdio: "pipe" });
+  execSync("git commit -m i", { cwd: dir, stdio: "pipe" });
+}
+function cleanupDir(dir) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+
+test("POL-3: dispatchRun——researcher 别名（角色政策）进复用路由且材料随行；explicit 换帽同车道不进（真门）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-pol3-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: {
+      researcher: { backend: "claude-code", cwd: dir }, // 注意：席位不再自带 sessionReuse——政策在角色
+    } }), "utf8");
+    const { dispatchRun } = await import("../../src/application/runDispatch.js");
+    const argvOf = async (over) => {
+      let argv = null;
+      const res = await dispatchRun({
+        agentId: "researcher", prompt: "t",
+        registryPath, runDir: join(dir, "runs"), runId: `run_${Math.random().toString(36).slice(2, 8)}`,
+        leadSession: "stable-lead-session", cwd: dir,
+        spawnFn: (...a) => { argv = a[1]; return { pid: 1, unref() {}, on() {} }; },
+        runnerPath: join(dir, "fake-runner.mjs"),
+        ...over,
+      });
+      return { argv, res };
+    };
+    // ① 别名 researcher + resolvedRoleId=researcher → 复用路由进（角色政策）
+    const alias = await argvOf({ resolvedRoleId: "researcher" });
+    assert.equal(alias.res.providerSessionRouting !== "not_used" || alias.argv.includes("--session-reuse-json"), true,
+      "角色政策 lead_workspace → 复用路由进入");
+    // ② explicit（lane/role 在场）同角色 → 洞②真门拒（不因角色政策放行）
+    const explicit = await argvOf({ resolvedLane: "x-lane", resolvedRole: "researcher", resolvedRoleId: "researcher" });
+    assert.equal(explicit.res.providerSessionRouting, "not_used", "explicit 派发永不复用（真门优先于角色政策）");
+    // ③ 无 resolvedRoleId（legacy 调用，席位无字段）→ 不进复用
+    const legacy = await argvOf({});
+    assert.equal(legacy.res.providerSessionRouting, "not_used", "无角色无席位政策 → 不复用");
+  } finally { cleanupDir(dir); }
+});
