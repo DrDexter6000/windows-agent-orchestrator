@@ -30,7 +30,7 @@ import { CERTIFICATION_REASON_CODES } from "./certificationReasons.js";
 // matchedCertRecord——与 runDispatch.js 消费 R10-A/R11-1 覆盖校验器同一
 // application→core 下向纪律）。显示层投影与 P1-1 派发门共用同一判定，
 // 不存在第二套 identity 匹配规则。
-import { matchedCertRecord } from "../runManager.js";
+import { matchedCertRecord, selectCertRecord } from "../runManager.js";
 // TD-186：声明侧 providerKey 派生与 matchedCertRecord 记录侧同一 SSOT
 // （src/providerFingerprint.js 单一实现，无第二套归一化）。
 import { providerKeyFor } from "../providerFingerprint.js";
@@ -357,7 +357,11 @@ export async function getRegistryInventoryWithIssues({
 function projectInventoryEntry(agent, certMap, readiness) {
   // TD-111: certification 与两新 advisory 字段共用同一 identity 匹配规则
   // （backend/modelId 不一致 → 认证不可继承，新字段同样不继承）。
-  const certRecord = matchedCertRecord(agent, certMap[agent.id]);
+  // 0045 R5（W4a）：车道键台账双空间——certMap 含两种键（指纹键记录 + legacy
+  // 席位键记录）；席位键未命中时按事实匹配选记录（matchedCertRecord 三态语义不变）。
+  const certRecord = certMap[agent.id] !== undefined
+    ? matchedCertRecord(agent, certMap[agent.id])
+    : Object.values(certMap).find((cand) => matchedCertRecord(agent, cand) !== null) ?? null;
   return {
     id: agent.id,
     backend: agent.backend,
@@ -929,7 +933,10 @@ export async function getCertificationEvidenceInventory({
   const rows = [];
   for (const agent of registry.listAgents()) {
     const component = await observeComponentLedgerForSeat({ runDir, readFileFn, agent, now });
-    const workerRecord = ledger.state === "ok" ? ledger.workers[agent.id] : undefined;
+    // 0045 R5（W4a）：车道键台账双空间选择（席位键优先，事实匹配兜底）。
+    const workerRecord = ledger.state === "ok"
+      ? (ledger.workers[agent.id] ?? Object.values(ledger.workers).find((cand) => matchedCertRecord(agent, cand) !== null))
+      : undefined;
     const verdict = assessCertEvidenceApplicability({
       agent,
       ledgerState: ledger.state,

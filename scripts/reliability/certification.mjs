@@ -1,6 +1,7 @@
 // TD-111: certification advisory context 闭集 SSOT（reasonCode 与自由文本 reason
 // 并列；blockerReason 原文绝不进码）。certifyCase/summarizeWorkers 经它映射。
 import { reasonCodeFor } from "../../src/application/certificationReasons.js";
+import { laneLedgerKey } from "../../src/application/identityProjection.js";
 // ADR-0025 §5（批次 3）：delta drill 子集 SSOT（scope 派生的比对基准，单一清单）。
 import { DELTA_DRILLS } from "./matrix.mjs";
 // ADR-0032 §8：检查结果五态（checkStates 是两层共用的纯词汇模块，不是组件层
@@ -175,13 +176,21 @@ export function summarizeCertification(caseResults = [], options = {}) {
   // counts 按 agent 最终状态计数（与 workers 一致），非 per-case（否则一个 agent 多 case 被重复计）。
   // 有 agentId 的 case → 按 worker 最终状态计 1 次；
   // 无 agentId 的 case（suite-level，如 silentTimeout）→ 各自独立计 1 次。
-  const countedAgents = new Set();
+  const countedLanes = new Set();
   const counts = Object.fromEntries(CERTIFICATION_STATUSES.map((status) => [status, 0]));
   for (const c of cases) {
     if (c.agentId) {
-      if (countedAgents.has(c.agentId)) continue; // 同一 agent 只按最终状态计一次
-      countedAgents.add(c.agentId);
-      counts[workers[c.agentId].status] += 1;
+      // 同一车道（指纹）只按最终状态计一次——同车道多席位不再重复计数；
+      // 无事实 case 按其席位 active 车道计（与分组同一继承规则）。
+      const declared = declaredIdentity(c);
+      const hasAnyFact = declared.backend !== null
+        || declared.providerID !== null
+        || declared.modelId !== null
+        || declared.providerKey !== undefined;
+      const key = hasAnyFact ? laneLedgerKey(declared) : agentActiveLaneFor(cases, c.agentId);
+      if (countedLanes.has(key)) continue;
+      countedLanes.add(key);
+      counts[workers[key].status] += 1;
     } else {
       counts[c.certification.status] += 1; // suite-level case
     }
@@ -189,6 +198,9 @@ export function summarizeCertification(caseResults = [], options = {}) {
 
   return {
     version: 1,
+    // 0045 R5（W4a）：键空间标记——workers 键=车道内容指纹（无身份事实的 legacy
+    // 聚合 case 落 seat: 名键）。读者（cert 门/证据详情）双空间选择。
+    ledgerKeySpace: "lane-v1",
     generatedAt: options.generatedAt ?? new Date().toISOString(),
     counts,
     allCertified: Object.keys(workers).length > 0 && Object.values(workers).every((w) => w.status === "certified"),
@@ -224,20 +236,63 @@ export function pruneStaleCases(priorCases = [], currentRows = []) {
   return priorCases.filter((c) => labels.has(c.caseId) || !agentIds.has(c.agentId));
 }
 
+
+/** counts 用：指定 agentId 的 active 车道键（与 summarizeWorkers 分组同规则）。 */
+function agentActiveLaneFor(cases, agentId) {
+  const agentCases = cases.filter((c) => c.agentId === agentId);
+  const active = findActiveIdentity(agentCases);
+  const hasAnyFact = active.backend !== null
+    || active.providerID !== null
+    || active.modelId !== null
+    || active.providerKey !== undefined;
+  return hasAnyFact ? laneLedgerKey(active) : `seat:${agentId}`;
+}
+
 function summarizeWorkers(cases) {
+  // 0045 R5（W4a）：台账键=车道内容指纹（从 case 自带事实派生，tri-state 严格——
+  // undefined/null/string 各自成键成分；席位名降为 provenance）。无任何已声明身份
+  // 事实的 case（legacy 聚合 fixture 形状）无法派生指纹 → 落 seat:<agentId> 名键
+  // 空间（读者双空间选择器兼容）。同指纹多席位（researcher+coder_low 同车道）
+  // 聚合成单条车道记录——身份四元组相同即同一认证对象（0045 §2）。
   const workers = {};
-  const byAgent = new Map();
+  // 两遍分组（0045 R5 W4a，保持旧聚合语义）：
+  // 第一遍——每 agentId 的 active identity（最后声明的事实）→ 该席位的 active 车道键；
+  // 第二遍——case 有自身事实→自身指纹键；无事实→继承本席位 active 车道键（旧
+  // matchesActiveIdentity 的"未声明即继承"语义）；席位全无事实→seat: 名键。
+  const byAgentCases = new Map();
   for (const c of cases) {
     if (!c.agentId) continue;
-    if (!byAgent.has(c.agentId)) byAgent.set(c.agentId, []);
-    byAgent.get(c.agentId).push(c);
+    if (!byAgentCases.has(c.agentId)) byAgentCases.set(c.agentId, []);
+    byAgentCases.get(c.agentId).push(c);
   }
-  for (const [agentId, agentCases] of byAgent) {
+  const agentActiveLane = new Map();
+  for (const [agentId, agentCases] of byAgentCases) {
+    const active = findActiveIdentity(agentCases);
+    const hasAnyFact = active.backend !== null
+      || active.providerID !== null
+      || active.modelId !== null
+      || active.providerKey !== undefined;
+    agentActiveLane.set(agentId, hasAnyFact ? laneLedgerKey(active) : `seat:${agentId}`);
+  }
+  const byLane = new Map();
+  for (const c of cases) {
+    if (!c.agentId) continue;
+    const declared = declaredIdentity(c);
+    const hasAnyFact = declared.backend !== null
+      || declared.providerID !== null
+      || declared.modelId !== null
+      || declared.providerKey !== undefined;
+    const key = hasAnyFact ? laneLedgerKey(declared) : agentActiveLane.get(c.agentId);
+    if (!byLane.has(key)) byLane.set(key, []);
+    byLane.get(key).push(c);
+  }
+  for (const [laneKey, agentCases] of byLane) {
     // active identity = 该 agent 最近一次观察到的 backend+providerID+modelId。
     // 只把 active identity 的 case 聚合进 worker summary；历史旧 identity 的 case
     // 不进入 status/capabilities/cases 聚合（避免旧 claude-code 掩盖新 deepseek-harness），
     // 但仍保留在 summarizeCertification 的 summary.cases（可审计历史）。
     const active = findActiveIdentity(agentCases);
+    const agentIds = [...new Set(agentCases.map((c) => c.agentId))];
     let summary = null;
     for (const c of agentCases) {
       if (!matchesActiveIdentity(c, active)) continue;
@@ -248,7 +303,9 @@ function summarizeWorkers(cases) {
       const adoptsWorse =
         summary === null || STATUS_SEVERITY[c.certification.status] > STATUS_SEVERITY[summary.status];
       summary = {
-        agentId,
+        agentId: agentIds[0],
+        agentIds,
+        laneKey: laneKey,
         backend: active.backend,
         providerID: active.providerID,
         modelId: active.modelId,
@@ -291,7 +348,7 @@ function summarizeWorkers(cases) {
         cases: [...(summary?.cases ?? []), c.caseId],
       };
     }
-    if (summary) workers[agentId] = summary;
+    if (summary) workers[laneKey] = summary;
   }
   return workers;
 }

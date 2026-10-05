@@ -738,7 +738,9 @@ test("T8g 写入侧聚合：仅 full 全绿刷新 lastFullHealthyRunAt；delta �
       lastHealthyRunAt: DELTA_NEW_AT, checks: GREEN_CHECKS,
     },
   ]);
-  const w = summary.workers.agg_w;
+  // 0045 R5（W4a）：workers 键=车道指纹/seat: 名键——经值定位（该 fixture 单记录）。
+  const w = Object.values(summary.workers)[0];
+  assert.ok(w, "agg_w 记录在");
   assert.equal(w.status, "conditional", "delta 全绿是 conditional（混合取最差）");
   assert.equal(w.certificationScope, "delta", "worker scope 混合取保守值");
   assert.equal(w.lastHealthyRunAt, DELTA_NEW_AT, "任意口径全绿都刷新旧判据字段");

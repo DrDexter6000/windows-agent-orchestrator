@@ -305,6 +305,20 @@ export function assertValidReasoningOverride(value) {
 // separate src/application module would be an application-bucket file and
 // core→application is an upward edge (frozen empty whitelist, TD-122), so the
 // R7-AB hosting precedent applies: core hosts, application imports down.
+/**
+ * 0045 R5（W4a）：认证记录选择器——车道键台账（lane-v1，键=记录自带事实指纹）
+ * 与席位键 legacy 台账双空间。席位键精确命中优先（manualOverride 等坐记录上）；
+ * 未命中按 matchedCertRecord 事实匹配扫描（车道键记录的键是指纹字符串，席位名
+ * 查不到——按事实找）。事实语义/tri-state 跳过规则与门完全一致（同一函数）。
+ */
+export function selectCertRecord(summary, agent, agentId) {
+  const workers = summary?.workers ?? {};
+  const seatKeyed = workers[agentId ?? agent?.id];
+  if (seatKeyed !== undefined) return seatKeyed;
+  const byFacts = Object.values(workers).find((cand) => matchedCertRecord(agent, cand) !== null);
+  return byFacts ?? undefined;
+}
+
 export function matchedCertRecord(agent, record) {
   if (!record) return null;
   if (record.backend !== undefined && record.backend !== agent.backend) return null;
@@ -1348,7 +1362,9 @@ export class RunManager {
       const summaryPath = join(dir, "reliability-summary.json");
       let summary = null;
       try { summary = JSON.parse(readFileSync(summaryPath, "utf8")); } catch { /* 缺 summary = 未认证 */ }
-      const w = summary?.workers?.[agentId];
+      // 0045 R5（W4a）：双空间选择——席位键精确命中优先（manualOverride 坐记录上），
+      // 未命中按事实匹配扫描（车道键台账的键=指纹，席位名查不到）。
+      const w = selectCertRecord(summary, agent, agentId);
       const reasons = [];
       if (!summary) reasons.push("reliability-summary.json 不存在");
       else if (!w) reasons.push(`worker "${agentId}" 未在 reliability-summary 中`);

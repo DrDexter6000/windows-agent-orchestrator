@@ -312,16 +312,17 @@ test("summarizeCertification: aggregates agent cases into worker capability summ
     },
   ]);
 
-  assert.deepEqual(Object.keys(summary.workers), ["researcher"]);
-  assert.equal(summary.workers.researcher.status, "conditional");
-  assert.equal(summary.workers.researcher.recommendedUse, "supervised-dispatch");
-  assert.equal(summary.workers.researcher.backend, "opencode-serve");
-  assert.equal(summary.workers.researcher.providerID, "deepseek");
-  assert.equal(summary.workers.researcher.modelId, "deepseek-v4-flash");
-  assert.equal(summary.workers.researcher.capabilities.complete, true);
-  assert.equal(summary.workers.researcher.capabilities.commandEvidence, true);
-  assert.equal(summary.workers.researcher.capabilities.isolation, false);
-  assert.deepEqual(summary.workers.researcher.cases, ["researcher strict", "researcher isolate"]);
+  assert.equal(Object.keys(summary.workers).length, 1);
+  assert.match(Object.keys(summary.workers)[0], /^lane:[0-9a-f]{16}$/, "0045：有身份事实 → 车道指纹键");
+  assert.equal(recordOf(summary, "researcher").status, "conditional");
+  assert.equal(recordOf(summary, "researcher").recommendedUse, "supervised-dispatch");
+  assert.equal(recordOf(summary, "researcher").backend, "opencode-serve");
+  assert.equal(recordOf(summary, "researcher").providerID, "deepseek");
+  assert.equal(recordOf(summary, "researcher").modelId, "deepseek-v4-flash");
+  assert.equal(recordOf(summary, "researcher").capabilities.complete, true);
+  assert.equal(recordOf(summary, "researcher").capabilities.commandEvidence, true);
+  assert.equal(recordOf(summary, "researcher").capabilities.isolation, false);
+  assert.deepEqual(recordOf(summary, "researcher").cases, ["researcher strict", "researcher isolate"]);
 });
 
 test("summarizeCertification: counts 反映 per-agent 最终状态（非 per-case 重复计数）", () => {
@@ -338,8 +339,8 @@ test("summarizeCertification: counts 反映 per-agent 最终状态（非 per-cas
   ]);
   // workers 应是 2 个（a=conditional, b=rejected）
   assert.equal(Object.keys(summary.workers).length, 2, "应聚合为 2 个 worker");
-  assert.equal(summary.workers.a.status, "conditional");
-  assert.equal(summary.workers.b.status, "rejected");
+  assert.equal(recordOf(summary, "a").status, "conditional");
+  assert.equal(recordOf(summary, "b").status, "rejected");
   // counts 应按 agent 最终状态（conditional:1, rejected:1），不是按 case（conditional:2）
   assert.equal(summary.counts.conditional, 1, "conditional 应按 agent 计数=1（非 per-case 的 2）");
   assert.equal(summary.counts.rejected, 1);
@@ -379,17 +380,23 @@ test("summarizeWorkers: 最近观察的 backend+model identity 为 active；旧 
     },
   ]);
 
-  const w = summary.workers.coder_low;
-  assert.equal(w.backend, "deepseek-harness", "active identity 的 backend 应为最近观察的 deepseek-harness");
+  // 0045 R5（W4a）：席位内历史 identity 不再被 active 掩盖——claude 历史车道
+  // 各留各的记录（原 case/结果分别保留，R2 裁定）；当前车道不被拖低。
+  const allRecords = Object.values(summary.workers);
+  assert.equal(allRecords.length, 2, "两 identity=两条车道记录");
+  const w = allRecords.find((r) => r.backend === "deepseek-harness");
+  const legacy = allRecords.find((r) => r.backend === "claude-code");
+  assert.ok(w && legacy, "当前+历史车道记录都在");
   assert.equal(w.providerID, "deepseek");
   assert.equal(w.modelId, "deepseek-v4-flash");
-  assert.equal(w.status, "certified", "旧 claude-code rejected 不得拖低 active identity 状态");
+  assert.equal(w.status, "certified", "旧 claude rejected 不拖低当前车道状态");
   assert.equal(w.capabilities.isolation, true);
-  assert.deepEqual(w.cases, ["coder_low deepseek-harness"], "只聚合 active identity 的 case");
-  // counts/allCertified 按 active identity 最终状态计
+  assert.deepEqual(w.cases, ["coder_low deepseek-harness"], "当前车道只聚合自身 case");
+  assert.equal(legacy.status, "rejected", "历史车道保留其真实结果（不洗白不掩盖）");
+  assert.deepEqual(legacy.cases, ["coder_low claude legacy"]);
+  // counts 按车道计：certified:1 + rejected:1（各车道最终状态）
   assert.equal(summary.counts.certified, 1);
-  assert.equal(summary.counts.rejected, 0);
-  assert.equal(summary.allCertified, true);
+  assert.equal(summary.counts.rejected, 1);
   // 历史 case 不丢：仍在 summary.cases
   assert.equal(summary.cases.length, 2, "旧 identity 的历史 case 保留在 summary.cases");
 });
@@ -431,8 +438,9 @@ test("summarizeWorkers: 相同 identity 的多 case 聚合进 active summary；�
     },
   ]);
 
-  const w = summary.workers.coder_low;
-  assert.equal(w.backend, "deepseek-harness", "active identity 取最近观察，而非首个 claude-code");
+  // 0045 R5（W4a）：两 identity=两条车道记录；w=当前 deepseek-harness 车道。
+  const w = Object.values(summary.workers).find((r) => r.backend === "deepseek-harness");
+  assert.ok(w, "当前车道记录在");
   assert.equal(w.providerID, "deepseek");
   assert.equal(w.modelId, "deepseek-v4-flash");
   // 同 identity 多 case 聚合：worseStatus(certified, conditional) = conditional，capabilities 合并
@@ -464,7 +472,7 @@ test("mergeCaseResults: 本次 case 覆盖同 caseId 的旧 case（重认证刷�
   assert.equal(merged[0].caseId, "GLM-5.2 high");
   // 刷新后的状态应反映本次（certified），而非旧的 rejected
   const summary = summarizeCertification(merged);
-  assert.equal(summary.workers.coder_hq.status, "certified", "重认证刷新后应为 certified");
+  assert.equal(recordOf(summary, "coder_hq").status, "certified", "重认证刷新后应为 certified");
 });
 
 test("mergeCaseResults: 未重跑的旧 case 保留（不丢失其他 worker）", () => {
@@ -481,10 +489,11 @@ test("mergeCaseResults: 未重跑的旧 case 保留（不丢失其他 worker）"
   const merged = mergeCaseResults(prior, fresh);
   // 关键断言：researcher 和 coder_low 没丢
   const summary = summarizeCertification(merged);
-  assert.deepEqual(Object.keys(summary.workers).sort(), ["auditor", "coder_low", "researcher"], "未重跑的 worker 必须保留");
-  assert.equal(summary.workers.researcher.status, "certified", "researcher 仍 certified");
-  assert.equal(summary.workers.coder_low.status, "certified", "coder_low 仍 certified");
-  assert.equal(summary.workers.auditor.status, "certified", "auditor 被刷新为 certified");
+  assert.equal(Object.keys(summary.workers).length, 3, "0045：三席（无身份事实 fixture → seat: 名键）未重跑必须保留");
+  for (const n of ["auditor", "coder_low", "researcher"]) assert.ok(recordOf(summary, n), `${n} 记录在`);
+  assert.equal(recordOf(summary, "researcher").status, "certified", "researcher 仍 certified");
+  assert.equal(recordOf(summary, "coder_low").status, "certified", "coder_low 仍 certified");
+  assert.equal(recordOf(summary, "auditor").status, "certified", "auditor 被刷新为 certified");
 });
 
 test("mergeCaseResults: 全新 caseId 追加（纯增量）", () => {
@@ -571,9 +580,9 @@ test("pruneStaleCases T4 认证级：清算后 worker 级聚合升 certified（�
     { caseId: "kimi-code/k3 max / 1M catalog via Kimi Code CLI（多模态）", agentId: "coder_mm", backend: "kimi-code", modelId: "kimi-code/k3", checks: greenChecks },
   ];
   const withoutPrune = summarizeCertification(mergeCaseResults(prior, []));
-  assert.equal(withoutPrune.workers.coder_mm.status, "conditional", "前置断言：不 prune 时复现实况（最差聚合）");
+  assert.equal(recordOf(withoutPrune, "coder_mm").status, "conditional", "前置断言：不 prune 时复现实况（最差聚合）");
   const withPrune = summarizeCertification(mergeCaseResults(pruneStaleCases(prior, rows), []));
-  assert.equal(withPrune.workers.coder_mm.status, "certified", "清算后现行 case 主导聚合");
+  assert.equal(recordOf(withPrune, "coder_mm").status, "certified", "清算后现行 case 主导聚合");
 });
 
 test("pruneStaleCases T5 结构钉：run-reliability merge 调用点接线", () => {
@@ -636,7 +645,7 @@ test("TD-186 A: case 的 executionProfile 原样进入 summary.cases 与 worker 
   // case 级：磁盘 facts 保留执行画像（供审计与详情层读取）。
   assert.deepEqual(summary.cases[0].executionProfile, PROFILE_HIGH);
   // worker 级：active identity 的 case 带画像 → 原样入账（不重算、不裁剪）。
-  const w = summary.workers.auditor;
+  const w = recordOf(summary, "auditor");
   assert.equal(w.status, "certified");
   assert.deepEqual(w.executionProfile, PROFILE_HIGH);
   assert.equal(w.executionProfile.effort, "high", "effort=null 的旧病灶不再出现于新记录");
@@ -645,11 +654,11 @@ test("TD-186 A: case 的 executionProfile 原样进入 summary.cases 与 worker 
 test("TD-186 A: legacy case 无 executionProfile → worker 记录整体缺失该字段（不补猜）", () => {
   const legacy = greenCase({ caseId: "legacy case" });
   const summary = summarizeCertification([legacy]);
-  assert.equal(summary.workers.auditor.status, "certified");
-  assert.equal(summary.workers.auditor.executionProfile, undefined,
+  assert.equal(recordOf(summary, "auditor").status, "certified");
+  assert.equal(recordOf(summary, "auditor").executionProfile, undefined,
     "旧记录缺画像 = unknown（undefined），绝不由 summarize 层补猜");
   // 画像不进既有 worker 字段（backend/modelId 等照旧）。
-  assert.equal(summary.workers.auditor.modelId, "gpt-6-astra");
+  assert.equal(recordOf(summary, "auditor").modelId, "gpt-6-astra");
 });
 
 test("TD-186 A: 同 identity 多 case → worker 取最后一条带画像的记录（重认证后天然最新）", () => {
@@ -667,7 +676,7 @@ test("TD-186 A: 同 identity 多 case → worker 取最后一条带画像的记�
     lastHealthyRunAt: "2026-09-22T15:05:15.876Z",
   });
   const summary = summarizeCertification([older, middle, latest]);
-  assert.equal(summary.workers.auditor.executionProfile.effort, "high",
+  assert.equal(recordOf(summary, "auditor").executionProfile.effort, "high",
     "最后一条带画像的 active-identity case 胜出（重取证后 medium 历史不覆盖 high 新证据）");
 });
 
@@ -704,7 +713,7 @@ test("TD-186 钉②（不得合并成绿）：历史通过 + 本次失败——w
     lastHealthyRunAt: null,
   };
   const summary = summarizeCertification([history, freshFail]);
-  const w = summary.workers.auditor;
+  const w = recordOf(summary, "auditor");
   assert.equal(w.status, "draft-only", "本次 strict 失败必须压过历史 certified（最差聚合）");
   assert.equal(w.lastHealthyRunAt, "2026-09-22T15:05:15.876Z", "历史全绿时间保留为历史事实（不抹除）");
   // 钉死"合并成绿"的路径：status 与 recommendedUse 都不得因历史全绿而回绿。
@@ -781,7 +790,7 @@ test("TD-186 复核 FAIL-B: nullUnresolvableDrillRunIds——prior 悬空 id 置
     assert.equal(cases[0].executionProfile.capturedAt, prior.executionProfile.capturedAt);
     // 置 null 后 summarize 产出（写盘形状）不再含死指针。
     const summary = summarizeCertification(cases);
-    assert.equal(summary.workers.auditor.executionProfile.drillRunIds.scorecard, null);
+    assert.equal(recordOf(summary, "auditor").executionProfile.drillRunIds.scorecard, null);
   } finally {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
   }
@@ -894,10 +903,22 @@ test("TD-186 复核 FAIL-B: 端到端形状——守卫+置 null 后写出的 su
     const referenced = collectReferencedDrillRunIds(summary);
     assert.deepEqual(missingDrillTranscripts(referenced, transcriptsDir), [],
       "写出的 summary 引用的每个 id 都可解析（硬禁令状态不复存在）");
-    assert.equal(summary.workers.auditor.executionProfile.drillRunIds.sentinel, "run_ok",
+    assert.equal(recordOf(summary, "auditor").executionProfile.drillRunIds.sentinel, "run_ok",
       "同 identity 聚合取最后一条带画像的 case（置 null 后的 prior 不覆盖 fresh）");
   } finally {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
   }
 });
+
+// 0045 R5（W4a）钉翻新：workers 键=车道内容指纹（有身份事实的 case）或
+// seat:<agentId> 名键（无事实 fixture）；席位名降为 agentIds provenance。断言
+// 语义不变——经三键形查找取同一记录。
+function recordOf(summary, name) {
+  const workers = summary?.workers ?? {};
+  if (workers[name] !== undefined) return workers[name];
+  if (workers[`seat:${name}`] !== undefined) return workers[`seat:${name}`];
+  return Object.values(workers).find((w) => Array.isArray(w.agentIds) && w.agentIds.includes(name))
+    ?? Object.values(workers).find((w) => w.agentId === name);
+}
+
 
