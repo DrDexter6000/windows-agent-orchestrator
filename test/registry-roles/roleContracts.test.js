@@ -131,6 +131,9 @@ test("M12 role naming: auditor.md exposes Chief-Advisor/Auditor dual-mode semant
     "the advisory mode must be explicit");
   assert.ok(/后置.*审计|后置.*验收|audit/i.test(content),
     "the audit mode must be explicit");
-  assert.ok(/agentId.*auditor|canonical.*auditor/i.test(content),
-    "the stable canonical agentId auditor must remain explicit");
+  // 0045 §1.2（2026-10-05 Owner 签署）：角色文件中立性——席位身份由控制面身份头
+  // 注入（M11-8B composeRoleContractWithIdentity），角色文件禁 agentId 硬编码。
+  // 原"agentId auditor 必须明示"钉随旧席位绑定合同一并反转。
+  assert.ok(!/agentId|canonical/i.test(content),
+    "role file must be seat-neutral: no agentId/canonical hardcoding (0045 §1.2)");
 });
