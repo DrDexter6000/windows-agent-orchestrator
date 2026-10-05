@@ -104,6 +104,13 @@ const CORE_TOP = Object.freeze(new Set([
   "src/deliveryFailureCodes.js",
   "src/deliveryVerification.js",
   "src/diagnosis.js",
+  // 决定 0045 写侧 W1（2026-10-05）：派发目标解析（lanes.json + lane/role 显式
+  // 派发 + 别名注解）。放核心层的理由（R3 会审 auditor 裁定）：workflow/handlers
+  // 直接调 RunManager.start，若放 application/ 会迫使 workflow 向上引用；核心
+  // 承载、应用服务向下调用（R7-AB 先例，同 matchedCertRecord）。零相对出边
+  // （node:fs/path/url/crypto only）；消费方 src/commands/run.js、src/runManager.js
+  // （W2）、registry validate/doctor（经 validateLanesAgainstRegistry）。
+  "src/dispatchResolution.js",
   // ADR 0035 S3 登记（2026-09-30）：派发启动 advisory 资源计数行（注册
   // worktree 总数 + wao/run_* 分支总数的 RAW 计数；fail-open——git 失败/
   // 超时省略整行，永不阻塞派发）。零相对出边（node:child_process only，

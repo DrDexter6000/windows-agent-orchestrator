@@ -1,0 +1,87 @@
+{
+  "schema": 1,
+  "_comment": "0045 §1.1 车道注册表（git 跟踪、无密钥）。lane id=人读定位名（非身份；身份=四元组指纹，见 src/application/identityProjection.js）。wiringAgent=过渡绑定（0045 §6 第 3 步收口时退役，绊线见 dispatchResolution 版本守卫）：explicit 派发借用该在册席位条目的接线（provider/env/cwd），车道字段只断言不生效（注册表赢，不一致即拒）。aliases=老席位名注解（§1.4：只在派发边界解析为身份注记，不改执行——别名派发仍走 registry 原条目，行为零变化）。",
+  "lanes": [
+    {
+      "id": "glm-flash",
+      "backend": "zcode",
+      "model": { "id": "bigmodel-api/GLM-5.3-Flash" },
+      "reasoning": { "effort": "high" },
+      "wiringAgent": "coder_low",
+      "aliases": {
+        "researcher": { "role": "researcher" },
+        "coder_low": { "role": "coder_low" }
+      }
+    },
+    {
+      "id": "glm-pro",
+      "backend": "zcode",
+      "model": { "id": "bigmodel-api/GLM-5.3" },
+      "reasoning": { "effort": "high" },
+      "wiringAgent": "coder_hq",
+      "aliases": {
+        "coder_hq": { "role": "coder_hq" }
+      }
+    },
+    {
+      "id": "kimi-k3",
+      "backend": "kimi-web",
+      "model": { "id": "kimi-code/k3-256k" },
+      "reasoning": { "effort": null },
+      "wiringAgent": "coder_mm",
+      "aliases": {
+        "coder_mm": { "role": "coder_mm" }
+      }
+    },
+    {
+      "id": "gpt-sol-56",
+      "backend": "codex",
+      "model": { "id": "gpt-5.6-sol" },
+      "reasoning": { "effort": "xhigh" },
+      "wiringAgent": "tester",
+      "aliases": {
+        "tester": { "role": "tester" }
+      }
+    },
+    {
+      "id": "gpt-astra",
+      "backend": "codex",
+      "model": { "id": "gpt-6-astra" },
+      "reasoning": { "effort": "xhigh" },
+      "wiringAgent": "auditor",
+      "aliases": {
+        "auditor": { "role": "auditor" }
+      }
+    },
+    {
+      "id": "gpt-sol-61",
+      "backend": "codex",
+      "model": { "id": "gpt-6.1-sol" },
+      "reasoning": { "effort": "xhigh" },
+      "wiringAgent": "coder_temp",
+      "aliases": {
+        "coder_temp": { "role": "coder_low" }
+      }
+    },
+    {
+      "id": "ds-acp",
+      "backend": "deepseek-acp",
+      "model": null,
+      "reasoning": { "effort": null },
+      "wiringAgent": "coder_low_dsh",
+      "aliases": {
+        "coder_low_dsh": { "role": "coder_low" }
+      }
+    },
+    {
+      "id": "claude-opus",
+      "backend": "claude-code",
+      "model": { "id": "claude-opus-5-5" },
+      "reasoning": { "effort": "xhigh" },
+      "wiringAgent": "auditor_claude",
+      "aliases": {
+        "auditor_claude": { "role": "auditor" }
+      }
+    }
+  ]
+}
