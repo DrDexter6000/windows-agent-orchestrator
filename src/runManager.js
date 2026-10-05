@@ -12,6 +12,7 @@ import { createSecretRedactor } from "./secretRedaction.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError } from "./delivery.js";
 import { verifyDelivery as defaultVerifyDelivery, createCallerGate } from "./deliveryVerification.js";
 import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecutionContract, roleContractSha256 } from "./application/roleContract.js";
+import { ID_RE } from "./dispatchResolution.js";
 import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./application/credentialReadiness.js";
 import { inheritedEnvNames } from "./envPolicy.js";
 import { validateSessionReuseRouting, resolvePriorProviderSessionId, PROVIDER_SESSION_BOUND_EVENT } from "./application/sessionReuse.js";
@@ -801,9 +802,16 @@ export class RunManager {
       // 时刻的事实钉进 run.started——resume 据此重建并校验（fail-closed），不再
       // 从当前注册表重读。无角色派发不产生钉（载荷字节不变）。
       rolePin = { systemPrompt: roleSourcePath, sha256: roleContractSha256(rawRoleContent) };
+      // 0045 R4 身份头：explicit 派发的头用结构化 lane/role（消除"戴帽自称接线席
+      // 位"）；alias/legacy 头字节保持原钉。
+      const identityHeaderInput = resolvedTarget?.source === "explicit"
+        && typeof resolvedTarget.laneId === "string" && typeof resolvedTarget.roleId === "string"
+        ? { laneId: resolvedTarget.laneId, roleId: resolvedTarget.roleId }
+        : undefined;
       roleContract = composeRoleContractWithIdentity({
         roleContract: rawRoleContent,
         agentId,
+        ...(identityHeaderInput ? { identity: identityHeaderInput } : {}),
       });
     }
 
@@ -1657,6 +1665,7 @@ export class RunManager {
     // transcript 字节不变）。无钉（legacy 档案）→ 原行为逐字保留（从当前注册表
     // 读；切换批的遗留五态再收紧）。
     let resumeRoleSource = undefined;
+    let resumeIdentityHeaderInput = undefined;
     const resumeRolePin = runStarted?.rolePin;
     if (resumeRolePin && typeof resumeRolePin === "object"
       && typeof resumeRolePin.systemPrompt === "string"
@@ -1676,6 +1685,22 @@ export class RunManager {
         );
       }
       resumeRoleSource = pinnedRaw;
+      // 0045 R4：explicit run 的身份头从钉住值重建（不经当前 lanes.json 重解析——
+      // 车道改名/删除后头仍按派发时刻事实生成）；片段缺失或不过字母表=具名拒绝
+      // 零 respawn（不许静默回退 agentId 头——worker 中途被换自称）。
+      if (runStarted.resolvedFrom === "explicit") {
+        const pinnedLaneId = runStarted.laneId;
+        const pinnedRoleId = runStarted.roleId;
+        if (typeof pinnedLaneId !== "string" || typeof pinnedRoleId !== "string"
+          || !ID_RE.test(pinnedLaneId) || !ID_RE.test(pinnedRoleId)) {
+          throw new Error(
+            `identity_pin_invalid: the parent run was dispatched as an explicit lane+role combination, ` +
+            `but the pinned laneId/roleId facts on run.started are missing or malformed; ` +
+            `refusing to resume with an unverifiable identity. Start a new run.`
+          );
+        }
+        resumeIdentityHeaderInput = { laneId: pinnedLaneId, roleId: pinnedRoleId };
+      }
     } else if (agent.systemPrompt) {
       if (backend.supportsRoleContract !== true) {
         throw new Error(
@@ -1692,6 +1717,7 @@ export class RunManager {
       : composeRoleContractWithIdentity({
         roleContract: resumeRoleSource,
         agentId: transcript.context.agentId,
+        ...(resumeIdentityHeaderInput ? { identity: resumeIdentityHeaderInput } : {}),
       });
 
     // M11-8C closeout (Gap A): a DELIVERY run that resumes MUST re-inject the

@@ -225,7 +225,10 @@ test("M12-6-WQ-GRN-07: single injection point — no second block insertion, no 
     "RunManager must not insert the block separately — it rides the existing roleContract channel");
 
   const rcSrc = readFileSync(resolve(import.meta.dirname, "../../src/application/roleContract.js"), "utf8");
-  const fn = rcSrc.match(/export function composeRoleContractWithIdentity\(\{ roleContract, agentId \}\) \{[\s\S]*?\n\}/);
+  // 0045 R4：compose 签名加可选 identity（explicit 结构化身份头）——结构钉的
+  // 函数体定位随签名同步；意图不变（不得按 backend/席位分支；按结构化 identity
+  // 参数选择头模板是 0045 合同声明的能力，非席位分支）。
+  const fn = rcSrc.match(/export function composeRoleContractWithIdentity\(\{ roleContract, agentId, identity \}\) \{[\s\S]*?\n\}/);
   assert.ok(fn, "composition function body found");
   assert.ok(!/claude|codex|kimi|opencode|researcher|coder_hq|coder_low|coder_mm|tester|auditor/i.test(fn[0]),
     "composition body must not branch by backend or worker seat");

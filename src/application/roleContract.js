@@ -44,6 +44,7 @@ import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { isValidCanonicalAgentId } from "../canonicalAgentId.js";
+import { ID_RE } from "../dispatchResolution.js";
 
 // WAO installation/repo root, derived from this module's URL
 // (<repoRoot>/src/application/roleContract.js → up two levels). Stable across
@@ -237,13 +238,35 @@ export const WORKER_EVIDENCE_DISCIPLINE = [
  * @param {object} input
  * @param {string|undefined} [input.roleContract] — validated role contract content
  * @param {string} input.agentId — canonical WAO agentId (registry id)
+ * @param {{laneId:string, roleId:string}} [input.identity] — 0045 R4：explicit
+ *   （车道+角色组合）派发的结构化身份。两片段过 ID_RE（比 canonical 字母表更严）
+ *   才入 prompt；在场且合法时头用 lane/role 模板（接线席位不入头——消除"戴
+ *   researcher 帽自称 coder_low"），agentId 模板与字节保持原钉（alias/legacy 零
+ *   变化）。片段非法=头省略返回正文（防御位；启动/resume 路径在调用前已具名拒绝）。
  * @returns {string|undefined} the composed contract string, or undefined
  */
-export function composeRoleContractWithIdentity({ roleContract, agentId }) {
+export function composeRoleContractWithIdentity({ roleContract, agentId, identity }) {
   // Only agents that already have a role contract get the identity header.
   // An agent without systemPrompt keeps its unchanged behavior (undefined).
   if (roleContract === undefined || roleContract === null) return undefined;
   if (typeof roleContract !== "string" || roleContract.length === 0) return undefined;
+
+  const SEPARATOR = "\n\n---\n\n";
+
+  // 0045 R4：explicit 派发的结构化身份头（两席收敛文案，无接线席位括注——
+  // 席位名与角色名可能同词，括注会在 prompt 里制造帽子混淆）。
+  if (identity && typeof identity === "object") {
+    const { laneId, roleId } = identity;
+    if (typeof laneId === "string" && ID_RE.test(laneId)
+      && typeof roleId === "string" && ID_RE.test(roleId)) {
+      const structuredHeader =
+        `Your canonical WAO identity is lane=${laneId} role=${roleId}. ` +
+        `When explicitly asked for your WAO identity, report exactly this lane and role. ` +
+        `Do not derive it from OS user, runtime, model, cwd, or role display name.`;
+      return `${structuredHeader}${SEPARATOR}${WORKER_EVIDENCE_DISCIPLINE}${SEPARATOR}${roleContract}`;
+    }
+    return roleContract;
+  }
 
   // The identity header is added ONLY when the agentId is a valid canonical id.
   // An invalid id (newline injection, whitespace, punctuation, overlong, etc.)
@@ -268,7 +291,6 @@ export function composeRoleContractWithIdentity({ roleContract, agentId }) {
   // discipline block, then the role body. The block is the SAME fixed constant
   // for every worker — no runtime-name or worker-seat branch. It rides the
   // existing roleContract transport; composition adds no gate or decision.
-  const SEPARATOR = "\n\n---\n\n";
   return `${identityHeader}${SEPARATOR}${WORKER_EVIDENCE_DISCIPLINE}${SEPARATOR}${roleContract}`;
 }
 

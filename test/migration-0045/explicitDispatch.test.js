@@ -216,7 +216,7 @@ test("CLI-1: --explain 别名解析打印 resolved JSON、零副作用", async (
   try {
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: {
-      auditor_claude: { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, cwd: dir },
+      auditor_claude: { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, systemPrompt: "config/roles/auditor.md", cwd: dir },
     } }), "utf8");
     const { threw, logs } = await runCli(["auditor_claude", "--explain"], registryPath);
     assert.equal(threw, null);
@@ -234,7 +234,7 @@ test("CLI-2: 未知 lane → 抛错含闭集码+完整合法 lane 全集+修正�
   try {
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: {
-      auditor_claude: { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, cwd: dir },
+      auditor_claude: { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, systemPrompt: "config/roles/auditor.md", cwd: dir },
     } }), "utf8");
     const { threw } = await runCli(["--lane", "claude-opus1", "--role", "auditor", "--prompt", "t"], registryPath);
     assert.ok(threw.includes("unknown_lane"), "闭集码在场");
@@ -249,10 +249,56 @@ test("CLI-3: agentId 与 lane/role 混用 → dispatch_selector_invalid", async 
   try {
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: {
-      auditor_claude: { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, cwd: dir },
+      auditor_claude: { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, systemPrompt: "config/roles/auditor.md", cwd: dir },
     } }), "utf8");
     const { threw } = await runCli(["auditor_claude", "--lane", "claude-opus", "--role", "auditor", "--prompt", "t"], registryPath);
     assert.ok(threw.includes("dispatch_selector_invalid"), "混用被拒");
     assert.ok(threw.includes("合法形态"), "二选一形态说明在场");
   } finally { cleanupDir(dir); }
+});
+
+// ── W3b 身份头（R4 裁定：explicit 结构化身份、无接线括注、resume 从钉住值重建）──
+
+test("HDR-1: explicit 派发身份头=lane/role 模板，无接线席位名（alias/legacy 头保持原钉）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-hdr1-"));
+  writeFileSync(join(ROLES_DIR, "w3b-hat.md"), "# w3b\nMARKER_W3B\n", "utf8");
+  try {
+    makeGitRepo(dir);
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: {
+"w3b-seat": { backend: "claude-code", cwd: dir, systemPrompt: "config/roles/_0045_w2_coder_low.md" },
+    } }), "utf8");
+    writeFileSync(join(ROLES_DIR, "_0045_w2_coder_low.md"), "# cl\nMARKER_CL\n", "utf8");
+    const capture = {};
+    const manager = await makeManager(dir, registryPath, capture);
+    const run = await manager.start("w3b-seat", {
+      prompt: "t", runDir: join(dir, "runs"), registry: registryPath,
+      resolvedTarget: {
+        kind: "resolved", source: "explicit", agentId: "w3b-seat",
+        laneId: "test-lane", roleId: "w3b-hat",
+        wiringAgent: "w3b-seat", lanesSha256: "ab".repeat(32),
+      },
+    });
+    try { await run.waitForCompletion({ pollInterval: 1 }); } catch { /* tolerate */ }
+    assert.match(capture.task.roleContract, /Your canonical WAO identity is lane=test-lane role=w3b-hat\./, "结构化身份头");
+    assert.ok(!capture.task.roleContract.includes("Your canonical WAO agentId is"), "无旧模板头");
+    assert.ok(!/wiring|agentId is w3b-seat/.test(capture.task.roleContract), "接线席位名不入头");
+  } finally {
+    cleanupDir(dir);
+    rmSync(join(ROLES_DIR, "w3b-hat.md"), { force: true });
+    rmSync(join(ROLES_DIR, "_0045_w2_coder_low.md"), { force: true });
+  }
+});
+
+test("HDR-2: explicit resume 身份头从钉住值重建（车道已改名仍按派发事实）；片段非法=具名拒", async () => {
+  const { composeRoleContractWithIdentity } = await import("../../src/application/roleContract.js");
+  // 纯函数层：模板钉（alias/legacy 字节不变 + explicit 模板 + 非法片段防御）
+  const legacy = composeRoleContractWithIdentity({ roleContract: "BODY", agentId: "coder_low" });
+  assert.match(legacy, /Your canonical WAO agentId is coder_low\./);
+  assert.ok(!legacy.includes("lane="), "legacy 头零变化");
+  const explicit = composeRoleContractWithIdentity({ roleContract: "BODY", agentId: "x", identity: { laneId: "glm-flash", roleId: "researcher" } });
+  assert.match(explicit, /Your canonical WAO identity is lane=glm-flash role=researcher\./);
+  assert.ok(!explicit.includes("agentId is"), "explicit 不含 agentId 头");
+  const invalid = composeRoleContractWithIdentity({ roleContract: "BODY", agentId: "x", identity: { laneId: "../evil", roleId: "r" } });
+  assert.equal(invalid, "BODY", "非法片段=头省略（防御位；路径层已具名拒）");
 });
