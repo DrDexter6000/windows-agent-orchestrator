@@ -1,0 +1,98 @@
+{
+  "_comment": "0045 W3a 入库 fixture：lanes.json 守卫测试的注册表投影（与 config/lanes.json 轴一致）。私有 agents.json 缺席时（干净检出）以本件为准；在场时跨文件活体校验另测。只含结构字段（backend/model/reasoning/systemPrompt/cwd 占位），无 env/凭据。",
+  "agents": {
+    "researcher": {
+      "backend": "zcode",
+      "model": {
+        "id": "bigmodel-api/GLM-5.3-Flash"
+      },
+      "reasoning": {
+        "effort": "high"
+      },
+      "systemPrompt": "config/roles/researcher.md",
+      "cwd": "."
+    },
+    "coder_hq": {
+      "backend": "zcode",
+      "model": {
+        "id": "bigmodel-api/GLM-5.3"
+      },
+      "reasoning": {
+        "effort": "high"
+      },
+      "systemPrompt": "config/roles/coder_hq.md",
+      "cwd": "."
+    },
+    "coder_low": {
+      "backend": "zcode",
+      "model": {
+        "id": "bigmodel-api/GLM-5.3-Flash"
+      },
+      "reasoning": {
+        "effort": "high"
+      },
+      "systemPrompt": "config/roles/coder_low.md",
+      "cwd": "."
+    },
+    "coder_mm": {
+      "backend": "kimi-web",
+      "model": {
+        "id": "kimi-code/k3-256k"
+      },
+      "reasoning": null,
+      "systemPrompt": "config/roles/coder_mm.md",
+      "cwd": "."
+    },
+    "tester": {
+      "backend": "codex",
+      "model": {
+        "id": "gpt-5.6-sol"
+      },
+      "reasoning": {
+        "effort": "xhigh"
+      },
+      "systemPrompt": "config/roles/tester.md",
+      "cwd": "."
+    },
+    "auditor": {
+      "backend": "codex",
+      "model": {
+        "id": "gpt-6-astra"
+      },
+      "reasoning": {
+        "effort": "xhigh"
+      },
+      "systemPrompt": "config/roles/auditor.md",
+      "cwd": "."
+    },
+    "coder_low_dsh": {
+      "backend": "deepseek-acp",
+      "model": null,
+      "reasoning": null,
+      "systemPrompt": "config/roles/coder_low.md",
+      "cwd": "."
+    },
+    "coder_temp": {
+      "backend": "codex",
+      "model": {
+        "id": "gpt-6.1-sol"
+      },
+      "reasoning": {
+        "effort": "xhigh"
+      },
+      "systemPrompt": "config/roles/coder_low.md",
+      "cwd": "."
+    },
+    "auditor_claude": {
+      "backend": "claude-code",
+      "model": {
+        "id": "claude-opus-5-5"
+      },
+      "reasoning": {
+        "effort": "xhigh"
+      },
+      "systemPrompt": "config/roles/auditor.md",
+      "cwd": "."
+    }
+  }
+}

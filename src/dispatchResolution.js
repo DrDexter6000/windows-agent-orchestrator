@@ -58,9 +58,10 @@ export function listRoleLibrary() {
 /** 解析来源闭集（§1.4）。 */
 export const RESOLVED_FROM = Object.freeze(["alias", "explicit", "legacy-agent"]);
 
-/** 错误码闭集（R3 两席词表收敛：auditor 词表为准）。 */
+/** 错误码闭集（R3 两席词表收敛：auditor 词表为准；R4 增 lanes_config_invalid）。 */
 export const DISPATCH_ERROR_CODES = Object.freeze([
-  "unknown_lane", "unknown_role", "dispatch_selector_invalid", "unknown_agent", "lane_wiring_mismatch",
+  "unknown_lane", "unknown_role", "dispatch_selector_invalid", "unknown_agent",
+  "lane_wiring_mismatch", "lanes_config_invalid",
 ]);
 
 /** lanes.json 键白名单（G1：未知键整文件拒——防 schema 蔓延与 smuggle）。 */
@@ -229,6 +230,10 @@ export function resolveDispatchTarget({ agentId, lane, role, lanesDoc, registryA
   const roles = [...roleLibrary].sort();
   const aliasMap = new Map();
   for (const l of lanes) for (const a of Object.keys(l.aliases ?? {})) aliasMap.set(a, l);
+  // R4（auditor_claude 红队）守卫落地：结构 issues 在派发路径上必须被消费——
+  // explicit 侧整表即拒（lanes_config_invalid 新闭集码）；alias 侧降级 legacy-agent
+  // （零破坏）。此前"整文件拒"只活在注释里。
+  const lanesStructurallyInvalid = Array.isArray(lanesDoc?.issues) && lanesDoc.issues.length > 0;
 
   const safe = (v) => (typeof v === "string" && ID_RE.test(v) ? v : "<未回显：非规范字符>");
 
@@ -249,19 +254,34 @@ export function resolveDispatchTarget({ agentId, lane, role, lanesDoc, registryA
       message: `dispatch_selector_invalid: lane 与 role 必须成对提供（收到 ${hasLane ? "仅 lane" : "仅 role"}）。`,
     };
   }
-  if (hasAgent && hasRole) { /* 已被上面混用分支拦截 */ }
+  if (lanesStructurallyInvalid && hasLane && hasRole) {
+    return {
+      kind: "error", code: "lanes_config_invalid",
+      received: { lane: safe(lane), role: safe(role) },
+      choices: { forms: ["agentId", "lane+role"] },
+      message: `lanes_config_invalid: config/lanes.json 结构校验未过（${lanesDoc.issues.length} 项 issue）——explicit 派发整表拒绝；修复 lanes.json 或按 agentId 派发。明细：${lanesDoc.issues.slice(0, 3).join("；")}`,
+    };
+  }
 
   if (hasAgent) {
     const name = String(agentId).trim();
     const agent = registryAgents?.[name];
     const aliasLane = aliasMap.get(name);
-    if (aliasLane && agent) {
+    if (aliasLane && agent && !lanesStructurallyInvalid) {
       // H1：别名=注解不执行——执行仍走 registry 原条目（调用方负责）。
       // H2：注册表轴与车道轴不一致时降级 legacy-agent（注解缺席）。
-      if (axesEqual(agentAxes(agent), laneAxes(aliasLane))) {
+      // R4：别名注解的 role 必须与注册表条目实际 systemPrompt 的 stem 一致——
+      // 不符（含席位未配角色）即降级 legacy-agent（防注记 roleId 与 rolePin 自相矛盾）。
+      const declaredRole = aliasLane.aliases[name]?.role;
+      const actualRoleStem = typeof agent.systemPrompt === "string" && agent.systemPrompt.endsWith(".md")
+        ? agent.systemPrompt.split("/").pop().slice(0, -3)
+        : null;
+      const aliasRoleConsistent = declaredRole !== undefined
+        && actualRoleStem !== null && declaredRole === actualRoleStem;
+      if (axesEqual(agentAxes(agent), laneAxes(aliasLane)) && aliasRoleConsistent) {
         return {
           kind: "resolved", source: "alias", agentId: name,
-          laneId: aliasLane.id, roleId: aliasLane.aliases[name].role,
+          laneId: aliasLane.id, roleId: declaredRole,
           wiringAgent: aliasLane.wiringAgent, lanesSha256: lanesDoc?.sha256 ?? null,
         };
       }

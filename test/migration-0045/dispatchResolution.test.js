@@ -17,10 +17,21 @@ const LIVE = loadLanesConfig();
 const ROLES = readdirSync(join(REPO_ROOT, "config", "roles"))
   .filter((f) => f.endsWith(".md"))
   .map((f) => f.slice(0, -3));
-// 注册表结构投影（只读键与公开轴——不碰 env/args 值）
-const agentsDoc = JSON.parse(readFileSync(join(REPO_ROOT, "config", "agents.json"), "utf8"));
-const REG = Object.fromEntries(Object.entries(agentsDoc.agents).map(([id, a]) => [id, {
-  backend: a.backend, model: a.model, reasoning: a.reasoning,
+// 注册表结构投影：干净检出无私有 config/agents.json（gitignored，R4 auditor_claude
+// 实证旧写法在隔离 worktree ENOENT 全红）——入库 fixture 为默认，私有件在场时
+// 活体跨文件校验另测（skip-if-absent 显式标注）。
+function readRegistryProjection() {
+  try {
+    const doc = JSON.parse(readFileSync(join(REPO_ROOT, "config", "agents.json"), "utf8"));
+    return { source: "live", agents: doc.agents };
+  } catch {
+    const doc = JSON.parse(readFileSync(join(REPO_ROOT, "test", "fixtures", "lanes-agents.fixture.json"), "utf8"));
+    return { source: "fixture", agents: doc.agents };
+  }
+}
+const REGISTRY_PROJECTION = readRegistryProjection();
+const REG = Object.fromEntries(Object.entries(REGISTRY_PROJECTION.agents).map(([id, a]) => [id, {
+  backend: a.backend, model: a.model, reasoning: a.reasoning, systemPrompt: a.systemPrompt,
 }]));
 
 // ── 活体基线钉（G7 冻结快照：改 lanes.json 必须同 diff 看到这里） ────────────
@@ -44,11 +55,60 @@ test("W1 活体：与真实注册表跨文件校验零 issue（alias 轴不一�
 test("W1 闭集钉：RESOLVED_FROM / DISPATCH_ERROR_CODES / ID_RE", () => {
   assert.deepEqual([...RESOLVED_FROM], ["alias", "explicit", "legacy-agent"]);
   assert.deepEqual([...DISPATCH_ERROR_CODES], [
-    "unknown_lane", "unknown_role", "dispatch_selector_invalid", "unknown_agent", "lane_wiring_mismatch",
+    "unknown_lane", "unknown_role", "dispatch_selector_invalid", "unknown_agent",
+    "lane_wiring_mismatch", "lanes_config_invalid",
   ]);
   assert.ok(ID_RE.test("glm-flash"));
   assert.ok(!ID_RE.test("GLM_Flash"), "大写/下划线不进字母表");
   assert.ok(!ID_RE.test("../etc/passwd"), "路径穿越形不进字母表（received 回显白名单同此）");
+});
+
+// ── R4 守卫加固 ────────────────────────────────────────────────────────────
+
+test("W3a 映射冻结（R4 红队'标签互换'防御）：laneId→轴/wiringAgent/别名→role 全结构快照", () => {
+  // 任何改绑（含内容对调保 id 原位的标签互换攻击）都会改变此快照——改绑必须
+  // 同 diff 更新本钉，评审可见。
+  const snapshot = LIVE.lanes.map((l) => ({
+    id: l.id, backend: l.backend, modelId: l.model?.id ?? null,
+    effort: l.reasoning?.effort ?? null, wiringAgent: l.wiringAgent,
+    aliases: Object.fromEntries(Object.entries(l.aliases ?? {}).map(([a, s]) => [a, s.role])),
+  })).sort((a, b) => (a.id < b.id ? -1 : 1));
+  assert.deepEqual(snapshot, [
+    { id: "claude-opus", backend: "claude-code", modelId: "claude-opus-5-5", effort: "xhigh", wiringAgent: "auditor_claude", aliases: { auditor_claude: "auditor" } },
+    { id: "ds-acp", backend: "deepseek-acp", modelId: null, effort: null, wiringAgent: "coder_low_dsh", aliases: { coder_low_dsh: "coder_low" } },
+    { id: "glm-flash", backend: "zcode", modelId: "bigmodel-api/GLM-5.3-Flash", effort: "high", wiringAgent: "coder_low", aliases: { coder_low: "coder_low", researcher: "researcher" } },
+    { id: "glm-pro", backend: "zcode", modelId: "bigmodel-api/GLM-5.3", effort: "high", wiringAgent: "coder_hq", aliases: { coder_hq: "coder_hq" } },
+    { id: "gpt-astra", backend: "codex", modelId: "gpt-6-astra", effort: "xhigh", wiringAgent: "auditor", aliases: { auditor: "auditor" } },
+    { id: "gpt-sol-56", backend: "codex", modelId: "gpt-5.6-sol", effort: "xhigh", wiringAgent: "tester", aliases: { tester: "tester" } },
+    { id: "gpt-sol-61", backend: "codex", modelId: "gpt-6.1-sol", effort: "xhigh", wiringAgent: "coder_temp", aliases: { coder_temp: "coder_low" } },
+    { id: "kimi-k3", backend: "kimi-web", modelId: "kimi-code/k3-256k", effort: null, wiringAgent: "coder_mm", aliases: { coder_mm: "coder_mm" } },
+  ]);
+});
+
+test("W3a 守卫消费（R4）：结构 issues——explicit 整表拒 lanes_config_invalid；alias 降级", () => {
+  const badDoc = { ...LIVE, issues: ["lane id \"x\" 重复"] };
+  const explicit = R({ lanesDoc: badDoc, lane: "glm-flash", role: "researcher" });
+  assert.equal(explicit.kind, "error");
+  assert.equal(explicit.code, "lanes_config_invalid");
+  assert.match(explicit.message, /整表拒绝/);
+  const alias = R({ lanesDoc: badDoc, agentId: "researcher" });
+  assert.equal(alias.kind, "resolved");
+  assert.equal(alias.source, "legacy-agent", "alias 侧结构坏表降级零破坏");
+});
+
+test("W3a 别名角色一致性（R4）：注记 role 与注册表 systemPrompt stem 不符 → 降级", () => {
+  // 构造注记撒谎形：researcher 别名注记 tester，实际 systemPrompt=researcher.md
+  const doctored = JSON.parse(readFileSync(join(REPO_ROOT, "config", "lanes.json"), "utf8"));
+  doctored.lanes.find((l) => l.id === "glm-flash").aliases.researcher = { role: "tester" };
+  const doc = { ...LIVE, lanes: doctored.lanes };
+  const r = R({ lanesDoc: doc, agentId: "researcher" });
+  assert.equal(r.source, "legacy-agent", "注记 roleId 与实际角色不符 → 降级（防 roleId/rolePin 自相矛盾）");
+});
+
+test("W3a 跨文件活体校验（私有注册表在场时；干净检出显式 skip）", { skip: REGISTRY_PROJECTION.source !== "live" }, () => {
+  const { issues, warns } = validateLanesAgainstRegistry(LIVE, REG);
+  assert.deepEqual(issues, []);
+  assert.deepEqual(warns, []);
 });
 
 // ── 解析：二选一闭集（八种参数组合） ────────────────────────────────────────
