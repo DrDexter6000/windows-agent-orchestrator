@@ -464,16 +464,21 @@ export async function runCommand(args, config) {
   // 全集+修正例（auditor R3 文案基准）。
   let resolvedTarget = null;
   const wantsLaneRole = options.lane !== undefined || options.role !== undefined;
-  // 0045 W4d：别名派发也要经解析块（agentId 可能是车道别名——researcher→
-  // glm-flash 车道键+researcher 角色）。只有"确定不是别名"（键在注册表直查
-  // 命中）才跳过——但直查需要 registry 读，成本与解析块同；干脆一律走解析。
+  // 0045 W4d：别名派发也要经解析块（agentId 可能是车道别名）。原 A-1 顺序
+  // （prompt 校验先于注册表解析）保持：无 prompt 时先拒绝，不触发解析。
+  if (options.prompt === undefined && options.promptFile === undefined
+    && options.deliverySpecFile === undefined
+    && !COMMAND_NAMES.includes(agentId ?? "")) {
+    throw new Error("Provide --prompt or --prompt-file");
+  }
   if (true) {
-    const registryPath = resolve(options.registry ?? config.registry);
-    const lanesEnabled = !options.registry || registryPath === resolve(config.registry ?? "config/agents.json");
+    const registryPath = resolve(options.registry ?? config?.registry ?? "config/agents.json");
+    const lanesEnabled = !options.registry || registryPath === resolve(config?.registry ?? "config/agents.json");
     const lanesDoc = lanesEnabled ? loadLanesConfig() : { lanes: [], sha256: null, issues: [], rolesHint: [] };
     // readRegistry 返回方法对象（getAgent/listAgents）；解析器要纯映射
     // {id: 条目}——listAgents 的 normalizeAgent 产物自带 id 字段。
-    const reg = await readRegistry(registryPath);
+    // 注入优先（测试/嵌入面）：config.readRegistry 存在则不经磁盘。
+    const reg = await (config?.readRegistry ?? readRegistry)(registryPath);
     const registryAgents = Object.fromEntries(reg.listAgents().map((a) => [a.id, a]));
     const resolution = resolveDispatchTarget({
       agentId, lane: options.lane, role: options.role,
@@ -488,14 +493,20 @@ export async function runCommand(args, config) {
       return;
     }
     if (resolution.kind === "error") {
-      const choices = resolution.choices ?? {};
-      const lines = [resolution.message];
-      if (choices.forms) lines.push(`合法形态: ${choices.forms.join(" | ")}`);
-      if (choices.aliases) lines.push(`合法 alias: ${choices.aliases.join(", ")}`);
-      if (choices.lanes?.length) lines.push(`合法 lane: ${choices.lanes.join(", ")}`);
-      if (choices.roles?.length) lines.push(`合法 role: ${choices.roles.join(", ")}`);
-      lines.push(`修正示例: npm run cli -- run --lane ${choices.lanes?.[0] ?? "<lane>"} --role ${choices.roles?.[0] ?? "<role>"} --prompt "任务文本"`);
-      throw new Error(lines.join("\n"));
+      // 注入空注册表面（listAgents 空）不构成"确定未知"——回落 legacy 直查
+      // （start 的注册表权威给最终判定；测试/嵌入注入面照旧工作）。
+      const injectedEmpty = resolution.code === "unknown_agent"
+        && typeof config?.readRegistry === "function";
+      if (!injectedEmpty) {
+        const choices = resolution.choices ?? {};
+        const lines = [resolution.message];
+        if (choices.forms) lines.push(`合法形态: ${choices.forms.join(" | ")}`);
+        if (choices.aliases) lines.push(`合法 alias: ${choices.aliases.join(", ")}`);
+        if (choices.lanes?.length) lines.push(`合法 lane: ${choices.lanes.join(", ")}`);
+        if (choices.roles?.length) lines.push(`合法 role: ${choices.roles.join(", ")}`);
+        lines.push(`修正示例: npm run cli -- run --lane ${choices.lanes?.[0] ?? "<lane>"} --role ${choices.roles?.[0] ?? "<role>"} --prompt "任务文本"`);
+        throw new Error(lines.join("\n"));
+      }
     }
     if (resolution.source === "explicit") {
       agentId = resolution.agentId; // 前台路径的接线席位（过渡）；后台路径 runner 侧重解析
