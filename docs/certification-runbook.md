@@ -120,10 +120,18 @@ backend 换 model/provider → `--profile delta`；换 backend / 升主力 lane 
 ① live `config/agents.json` 席位块（model/reasoning/通道字段）；
 ② 同文件 `certification.matrix` 行（modelId/label——**在决定 0044 的矩阵字段派生
 落地前仍是手写**；label 兼任认证 caseId，改名即改历史证据关联，慎动）；
+②′ **lanes.json 断言面同步（0046 补步）**：effort/model 任何变更必须 live registry
++ `config/lanes.json`（+example，模板事件时）**三处原子同步**——G4"注册表赢、不
+一致即拒"会让该车道全部 explicit 派发 `lane_wiring_mismatch` 整拒（本步早于 W4d
+断言面，2026-10-06 前的 checklist 漏面）；
 ③ 改完**裸跑 `npm run cli -- onboarding` 看 ·drift 明细**（d′ 后闭集 =
 backend + model.id + reasoning.effort + 认证矩阵行 modelId——live↔模板的滞后
 一条命令立见；滞后本身是合法状态，看一眼是确认"我知道它滞后"而非"必须消除"）；
-④ 涉认证档位变化（模型/通道）时按 ADR-0029 走 delta 认证；纯 effort 调整免。
+④ 涉认证档位变化（模型/通道）时按 ADR-0029 走 delta 认证；~~纯 effort 调整免~~
+**effort 调整=delta 重取证（0046 §1.9 修订，Owner 2026-10-06 批；ADR-0029 §3
+刷新触发闭集相应扩 effort）**：四元组指纹虽不含 effort，但 executionProfile 失真
+即认证不再代表执行特征——重取证范围=effort 相关 drill 子集+画像重绑，
+conditional 状态沿用（0046 §5 步⑦ 七道实证）。
 （原 ④team-roles ⑤usage ⑥onboarding 三处**不再属于本段**——它们钉的是模板的
 内容，随模板改版走第二段；10-05 实证这三处在 lane 变更中常年空转。）
 
