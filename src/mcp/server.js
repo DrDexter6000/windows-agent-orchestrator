@@ -2336,14 +2336,16 @@ const RUN_DELIVERY_REVERIFY_INPUT = z.object({
 }).strict();
 
 const RUN_DELIVERY_REVERIFY_OUTPUT = z.object({
+  // TD-215：status 枚举（同 REPACKAGE——"pending"=超窗续跑，poll run_delivery）。
+  status: z.enum(["ok", "pending"]),
   runId: z.string().min(1),
-  deliveryCommit: COMMIT_HASH_SCHEMA,
-  state: z.enum(["created", "resumed", "idempotent"]),
-  reason: z.enum(REVERIFY_REASONS),
-  verificationStatus: z.enum(["passed", "failed", "unavailable"]),
-  failureCode: z.enum(REVERIFY_FAILURE_CODES).nullable(),
-  requested: z.boolean(),
-  outcomeRecorded: z.boolean(),
+  deliveryCommit: COMMIT_HASH_SCHEMA.optional(),
+  state: z.enum(["created", "resumed", "idempotent"]).optional(),
+  reason: z.enum(REVERIFY_REASONS).optional(),
+  verificationStatus: z.enum(["passed", "failed", "unavailable"]).optional(),
+  failureCode: z.enum(REVERIFY_FAILURE_CODES).nullable().optional(),
+  requested: z.boolean().optional(),
+  outcomeRecorded: z.boolean().optional(),
 }).strict();
 
 const RUN_DELIVERY_REVERIFY_ANNOTATIONS = {
@@ -2381,12 +2383,15 @@ const RUN_DELIVERY_REPACKAGE_INPUT = z.object({
 }).strict();
 
 const RUN_DELIVERY_REPACKAGE_OUTPUT = z.object({
+  // TD-215：status 枚举——"ok"=同步完成（其余字段必在，handler 侧强校验）；
+  // "pending"=有界等待超窗（验证在服务进程继续，其余字段缺席，poll run_delivery）。
+  status: z.enum(["ok", "pending"]),
   runId: z.string().min(1),
-  deliveryCommit: COMMIT_HASH_SCHEMA,
-  verificationStatus: z.enum(["passed", "failed", "unavailable"]),
-  source: z.enum(["packaged", "recovered"]),
-  recoveryKind: RECOVERY_CANDIDATE_KIND_SCHEMA,
-  created: z.boolean(),
+  deliveryCommit: COMMIT_HASH_SCHEMA.optional(),
+  verificationStatus: z.enum(["passed", "failed", "unavailable"]).optional(),
+  source: z.enum(["packaged", "recovered"]).optional(),
+  recoveryKind: RECOVERY_CANDIDATE_KIND_SCHEMA.optional(),
+  created: z.boolean().optional(),
 }).strict();
 
 const RUN_DELIVERY_REPACKAGE_ANNOTATIONS = {
@@ -3448,6 +3453,23 @@ export function createWaoMcpServer({
   const deliveryReviewService = getRunDeliveryReviewFn ?? getRunDeliveryReview;
   const deliveryRepackageService = getRunDeliveryRepackageFn ?? runDeliveryRepackage;
   const deliveryReverifyService = runDeliveryReverifyFn ?? runDeliveryReverify;
+  // TD-215（2026-10-06 三方会审收敛：「限时等待，超时返回 pending」，非受理即回执）：
+  // 长验证（全套 ~13min）必然超过宿主传输上限（zcode 插件 660s）——占住传输层只会
+  // 产生 TransportError+人工轮询舞（当日两案）。有界等待内完成=同步返回既有契约；
+  // 超时=text-only pending 回执（不动冻结 output schema——structuredContent 缺席
+  // 是合法形状），验证在服务进程内继续（分离架构实证：当日两次宿主掐断后验证
+  // 均继续并落定）。可调：WAO_DELIVERY_WAIT_MS。
+  const DELIVERY_BOUNDED_WAIT_MS = (() => {
+    const raw = Number.parseInt(String(process.env.WAO_DELIVERY_WAIT_MS ?? ""), 10);
+    return Number.isFinite(raw) && raw > 0 ? raw : 300_000;
+  })();
+  const withBoundedWait = (servicePromise, { runId, op }) => Promise.race([
+    servicePromise,
+    new Promise((resolve) => setTimeout(
+      () => resolve({ __boundedWaitPending: true, runId, op }),
+      DELIVERY_BOUNDED_WAIT_MS,
+    )),
+  ]);
   const continueService = continueRunFn ?? continueRun;
   const correctService = correctRunFn ?? correctRun;
   const contractCheckService = runDispatchContractCheckFn ?? runDispatchContractCheck;
@@ -6087,12 +6109,29 @@ export function createWaoMcpServer({
         if (!binding.bound) {
           return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
         }
-        const result = await deliveryRepackageService({
+        const result = await withBoundedWait(deliveryRepackageService({
           runId,
           runDir,
           allowedPaths,
           authorizedWorkspaceRoot: binding.root,
-        });
+        }), { runId, op: "run_delivery_repackage" });
+        if (result?.__boundedWaitPending) {
+          const pending = RUN_DELIVERY_REPACKAGE_OUTPUT.parse({
+            status: "pending",
+            runId,
+          });
+          return {
+            content: [{
+              type: "text",
+              text: `run_delivery_repackage pending: verification still running after the bounded wait `
+                + `(${Math.round(DELIVERY_BOUNDED_WAIT_MS / 1000)}s). The verification CONTINUES server-side `
+                + "(detached-server architecture — same-day evidence: verifications survived host transport cuts). "
+                + `Poll run_delivery with { runId: "${runId}", waitMs } for the settled outcome; the service is `
+                + "reentrant — an accidental re-call resumes/idempotently returns rather than duplicating work.",
+            }],
+            structuredContent: pending,
+          };
+        }
         // Build a NEW payload from the service result — validate every field.
         // Any violation throws → fixed error with no structuredContent.
         if (result.runId !== runId) throw new Error("runId mismatch");
@@ -6113,7 +6152,7 @@ export function createWaoMcpServer({
           recoveryKind: result.recoveryKind,
           created: result.created,
         };
-        const parsed = RUN_DELIVERY_REPACKAGE_OUTPUT.parse(payload);
+        const parsed = RUN_DELIVERY_REPACKAGE_OUTPUT.parse({ ...payload, status: "ok" });
         return {
           content: [{ type: "text", text: JSON.stringify(parsed) }],
           structuredContent: parsed,
@@ -6150,14 +6189,27 @@ export function createWaoMcpServer({
         if (!binding.bound) {
           return { isError: true, content: [{ type: "text", text: WORKSPACE_NOT_BOUND_TEXT }] };
         }
-        const result = await deliveryReverifyService({
+        const result = await withBoundedWait(deliveryReverifyService({
           runId,
           runDir,
           reason,
           ...(setupCommands !== undefined ? { setupCommands } : {}),
           ...(timeoutMs !== undefined ? { timeoutMs } : {}),
           authorizedWorkspaceRoot: binding.root,
-        });
+        }), { runId, op: "run_delivery_reverify" });
+        if (result?.__boundedWaitPending) {
+          const pending = RUN_DELIVERY_REVERIFY_OUTPUT.parse({ status: "pending", runId });
+          return {
+            content: [{
+              type: "text",
+              text: `run_delivery_reverify pending: re-verification still running after the bounded wait `
+                + `(${Math.round(DELIVERY_BOUNDED_WAIT_MS / 1000)}s). It CONTINUES server-side; poll `
+                + `run_delivery with { runId: "${runId}", waitMs } for the settled outcome. The request chain is `
+                + "persisted — re-calls resume/idempotently return (created|resumed|idempotent).",
+            }],
+            structuredContent: pending,
+          };
+        }
         // Build a NEW payload from the service result — validate every field
         // through closed sets. Any violation throws → fixed safe error with no
         // structuredContent; no command/path/stderr/event/credential is echoed.
@@ -6187,7 +6239,7 @@ export function createWaoMcpServer({
           requested: result.requested,
           outcomeRecorded: result.outcomeRecorded,
         };
-        const parsed = RUN_DELIVERY_REVERIFY_OUTPUT.parse(payload);
+        const parsed = RUN_DELIVERY_REVERIFY_OUTPUT.parse({ ...payload, status: "ok" });
         return {
           content: [{ type: "text", text: JSON.stringify(parsed) }],
           structuredContent: parsed,

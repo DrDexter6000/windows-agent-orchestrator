@@ -641,12 +641,13 @@ Output:
 
 | name | type | required | notes |
 | --- | --- | --- | --- |
+| status | string | yes | enum: ok \| pending |
 | runId | string | yes |  |
-| deliveryCommit | string | yes |  |
-| verificationStatus | string | yes | enum: passed \| failed \| unavailable |
-| source | string | yes | enum: packaged \| recovered |
-| recoveryKind | string | yes | enum: disallowed_scope \| backend_failed \| process_missing |
-| created | boolean | yes |  |
+| deliveryCommit | string | no |  |
+| verificationStatus | string | no | enum: passed \| failed \| unavailable |
+| source | string | no | enum: packaged \| recovered |
+| recoveryKind | string | no | enum: disallowed_scope \| backend_failed \| process_missing |
+| created | boolean | no |  |
 
 ## run_delivery_reverify
 
@@ -667,12 +668,13 @@ Output:
 
 | name | type | required | notes |
 | --- | --- | --- | --- |
+| status | string | yes | enum: ok \| pending |
 | runId | string | yes |  |
-| deliveryCommit | string | yes |  |
-| state | string | yes | enum: created \| resumed \| idempotent |
-| reason | string | yes | enum: tooling_invalid \| environment_contaminated \| dependency_setup_missing |
-| verificationStatus | string | yes | enum: passed \| failed \| unavailable |
-| failureCode | string\|null | yes | enum: command_failed \| command_timeout \| execution_error \| setup_failed \| setup_timeout \| setup_environment_error \| artifact_mutated |
-| requested | boolean | yes |  |
-| outcomeRecorded | boolean | yes |  |
+| deliveryCommit | string | no |  |
+| state | string | no | enum: created \| resumed \| idempotent |
+| reason | string | no | enum: tooling_invalid \| environment_contaminated \| dependency_setup_missing |
+| verificationStatus | string | no | enum: passed \| failed \| unavailable |
+| failureCode | string\|null | no | enum: command_failed \| command_timeout \| execution_error \| setup_failed \| setup_timeout \| setup_environment_error \| artifact_mutated |
+| requested | boolean | no |  |
+| outcomeRecorded | boolean | no |  |
 

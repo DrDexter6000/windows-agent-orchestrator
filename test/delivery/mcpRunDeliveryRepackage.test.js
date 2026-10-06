@@ -194,7 +194,8 @@ test("M12-1S2-M4: bound success → bounded structured output; authorizedWorkspa
       // Bounded field set — no worktreePath / commands / stderr / reason leak.
       assert.deepEqual(
         Object.keys(sc).sort(),
-        ["created", "deliveryCommit", "recoveryKind", "runId", "source", "verificationStatus"],
+        // TD-215：status 枚举加入（ok|pending——pending 时 ok 字段缺席 .optional 化）。
+        ["created", "deliveryCommit", "recoveryKind", "runId", "source", "status", "verificationStatus"],
       );
       assert.equal(sc.runId, "run_m4");
       assert.match(sc.deliveryCommit, /^[0-9a-f]{40}$/, "canonical commit only");

@@ -232,8 +232,8 @@ test("3B2a-RV-02: success — service called once with server-owned runDir + bou
       const parsed = JSON.parse(res.content.find((b) => b.type === "text").text);
       assert.deepEqual(
         new Set(Object.keys(parsed)),
-        new Set(["runId", "deliveryCommit", "state", "reason", "verificationStatus", "failureCode", "requested", "outcomeRecorded"]),
-        "exact safe output key set",
+        new Set(["runId", "deliveryCommit", "state", "reason", "verificationStatus", "failureCode", "requested", "outcomeRecorded", "status"]),
+        "exact safe output key set (TD-215: status ok|pending 枚举加入)",
       );
       assert.equal(parsed.runId, "run_x");
       assert.equal(parsed.deliveryCommit, "d".repeat(40), "exact deliveryCommit");
