@@ -16,6 +16,11 @@
       },
       "reasoning": {
         "effort": "max"
+      },
+      "_comment_env_bridge": "承重环境桥（0046 收口，Carlola 案）：zcode app-server 需要 ZCODE_BUILTIN_PROVIDER_CONFIG_FILE/ZCODE_PERSONAL_PROVIDER_CONFIG_FILE 两个环境变量定位 provider 配置——宿主无 ZCode 桌面上下文时（codex/claude-code/PowerShell 等任何 Lead 经 wao 启动器）必须在此 env 块注入本机真实路径（值=路径非凭据；ZCode 桌面大版本更新后路径可能漂移，症状=spawn 期「无法定位 CLI ZCode Built-in Provider Config」）。",
+      "env": {
+        "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": "C:/Users/<you>/AppData/.../zcode-builtin.json（换成你机器的真实路径）",
+        "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE": "C:/Users/<you>/.../zcode-personal.json（同上）"
       }
     },
     "glm-flash": {
