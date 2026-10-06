@@ -444,7 +444,7 @@ test("AGENT_ONBOARDING.md 最小安装闭环必须使用当前角色和显式 cw
   const txt = read("AGENT_ONBOARDING.md");
   assert.ok(!/coder_strict|coder_glm_claude/.test(txt), "onboarding 不得再引用已不存在的 coder_strict/coder_glm_claude");
   assert.ok(txt.includes("runtime 的 skill 目录"), "onboarding 必须明确 skill 安装到 runtime skill 目录");
-  assert.ok(txt.includes("coder_low"), "onboarding 最小闭环应使用当前 registry 的 coder_low");
+  assert.ok(txt.includes("glm-flash"), "onboarding 最小闭环应使用当前 registry 的 glm-flash（0046 车道键）");
   assert.ok(txt.includes("--cwd <目标项目>"), "onboarding 最小闭环必须显式传 --cwd <目标项目>");
   assert.ok(txt.includes("--registry <WAO目录>/config/agents.json"), "onboarding 最小闭环必须显式传 --registry <WAO目录>/config/agents.json");
   const h2s = [...txt.matchAll(/^## 4\./gm)];
@@ -2507,8 +2507,8 @@ test("onboarding closeout: AGENT_ONBOARDING.md 自包含单 worker 安装路径�
     "4f 首次只读 canary 必须用 <agentId> 占位（从 registry list 挑），不得硬编码具体 worker");
   assert.ok(/claude-code \/ codex \/ kimi-code/.test(canary),
     "canary 的进程式 worker 必须并列 claude-code / codex / kimi-code");
-  assert.ok(/入库/.test(ob) && /lane 映射/.test(ob) && /每角色 ≥1/.test(ob) && /gitignored/.test(ob),
-    "onboarding 必须区分入库模板（与 team-roles 按 lane 映射，每角色 ≥1 条目，决策 0025）与 gitignored 私人 agents.json 副本");
+  assert.ok(/入库/.test(ob) && /车道/.test(ob) && /seatRole/.test(ob) && /gitignored/.test(ob),
+    "onboarding 必须区分入库模板（0046 车道键形状+全员显式 seatRole）与 gitignored 私人 agents.json 副本");
 });
 
 test("onboarding closeout: 陈旧 claims 已纠正（零依赖 / 禁 npm link / doctor HEALTHY 硬门 / CLI --cwd vs MCP workspace）", () => {
@@ -2549,28 +2549,18 @@ test("onboarding closeout: 陈旧 claims 已纠正（零依赖 / 禁 npm link / 
     "wao init 必须标注为可选且不是 MCP workspace 绑定 / run_dispatch 的前提");
 });
 
-test("onboarding closeout: usage.md claude-code registry 示例为当前结构化 schema + DeepSeek V4 Pro policy", () => {
+test("onboarding closeout: usage.md claude-code registry 示例为 0046 原生形状（无 provider wrapper）", () => {
   const usage = read("docs/usage.md");
   const start = usage.indexOf("// ── claude-code");
-  const end = usage.indexOf("// ── codex");
+  const end = usage.indexOf("// ── zcode");
   assert.ok(start !== -1 && end > start, "usage.md 必须保留 claude-code 配置示例块");
   const ex = usage.slice(start, end);
-  // provider carries protocol/baseUrl/apiKeyEnv; model/effort are SIBLINGS.
-  assert.ok(/\"protocol\": "anthropic-compatible"/.test(ex)
-    && /\"baseUrl\"/.test(ex) && /\"apiKeyEnv\"/.test(ex),
-    "usage claude-code 示例的 provider 必须含 protocol/baseUrl/apiKeyEnv");
-  assert.ok(/\"model\"[\s\S]{0,300}\"contextWindow\"/.test(ex),
-    "usage claude-code 示例必须有 sibling model {id, contextWindow}（不在 provider 内）");
-  assert.ok(/\"reasoning\"[\s\S]{0,300}\"effort\"/.test(ex),
-    "usage claude-code 示例必须有 sibling reasoning {effort}（不在 provider 内）");
-  // Stale inlined shape gone; current coder_low policy.
-  assert.ok(!/glm-5-turbo/.test(ex),
-    "usage claude-code 示例不得再出现旧 provider.model=glm-5-turbo 内联形状");
-  // 2026-09-17: coder_low switched to Zhipu GLM-5.3-Flash[1m] (Owner decision;
-  // DeepSeek unpaid). Scoped to the coder_low sub-block — whole-slice checks
-  // keep passing via neighboring examples and guard nothing.
-  assert.ok(/"coder_low"[\s\S]{0,600}glm-5\.3-flash\[1m\]/.test(ex) && /ZHIPU_API_KEY/.test(ex),
-    "usage claude-code 示例必须是当前 coder_low 智谱 GLM-5.3-Flash[1m] policy");
+  assert.ok(/"backend": "claude-code"/.test(ex), "0046：claude-code 示例=原生通道条目");
+  assert.ok(/"model"[\s\S]{0,200}"id": "claude-opus-5-5"/.test(ex), "sibling model {id}");
+  assert.ok(/"reasoning"[\s\S]{0,200}"effort"/.test(ex), "sibling reasoning {effort}");
+  assert.ok(!/"protocol": "anthropic-compatible"/.test(ex) && !/apiKeyEnv/.test(ex),
+    "0046：原生 claude-code 无 provider wrapper 块");
+  assert.ok(/seatRole/.test(ex), "0046：示例显式声明 seatRole");
 });
 
 test("onboarding closeout: agents.example.json 移除 managed-flag 向后兼容声明、coder_hq 标为 max、标注可裁剪示例", () => {
@@ -2618,12 +2608,12 @@ test("team-roles.md 角色职责只指向默认 lane 配置，不复制 backend/
   const roles = read("docs/team-roles.md");
   const sectionTitles = {
     researcher: "Researcher",
-    coder_hq: "Coder-HQ",
-    coder_low: "Coder-Low",
-    coder_mm: "Coder-MM",
+    coder: "Coder",
     tester: "Tester",
     auditor: "Chief-Advisor / Auditor",
   };
+  // 0046 步⑤：三 Coder 角色合并为 coder；lane 指针=车道键。
+  const LANE_POINTER = { researcher: "glm-flash", coder: "glm-pro", tester: "sol", auditor: "astra" };
   const sections = new Map();
   for (const part of roles.split(/^### /m).slice(1)) {
     const title = part.slice(0, part.indexOf("\n")).trim();
@@ -2632,7 +2622,7 @@ test("team-roles.md 角色职责只指向默认 lane 配置，不复制 backend/
   for (const [id, titlePrefix] of Object.entries(sectionTitles)) {
     const section = [...sections.entries()].find(([t]) => t.startsWith(titlePrefix))?.[1];
     assert.ok(section, `team-roles.md 必须存在 ### ${titlePrefix} 角色节`);
-    assert.ok(section.includes("config/agents.example.json") && section.includes(`\`${id}\``), `${titlePrefix} 缺默认 lane 指针`);
+    assert.ok(section.includes("config/agents.example.json") && section.includes(`\`${LANE_POINTER[id]}\``), `${titlePrefix} 缺默认 lane 指针（0046：${LANE_POINTER[id]}）`);
     assert.ok(/config\/agents\.json.*gitignored/.test(section), `${titlePrefix} 缺本机真值声明`);
     assert.ok(!/^\| \*\*(?:backend|model|effort)\*\* \|/m.test(section), `${titlePrefix} 仍复制 lane 当前值`);
     assert.match(section, /\| \*\*裁定注记\*\* \| 20\d{2}-\d{2}-\d{2} /, `${titlePrefix} 缺带日期裁定注记`);
@@ -3047,8 +3037,8 @@ test("ADR 0023: team-roles.md 第 7 条与 onboarding 副审配置建议对齐 0
     "验收会审行不得保留'高风险/低信心才召集'旧姿态（0023 默认推荐）");
   // AGENT_ONBOARDING.md 的副审配置建议（两席最佳 = auditor 专职 + coder 系替补）。
   const ob = read("AGENT_ONBOARDING.md");
-  assert.ok(/对抗席专职/.test(ob) && /coder 系/.test(ob),
-    "onboarding 副审建议必须给出 auditor 专职 + coder 系替补的最佳组合");
+  assert.ok(/对抗席车道/.test(ob) && /实现席车道/.test(ob),
+    "onboarding 副审建议必须给出对抗席车道 + 实现席车道的最佳组合（0046 措辞）");
   assert.ok(/不同大模型族系|不同族系/.test(ob), "onboarding 副审建议必须含跨族系建议");
   assert.ok(ob.includes("决策 0023"), "onboarding 副审建议必须指向决策 0023");
   assert.ok(ob.includes("--panel-skip-reason"), "onboarding 副审建议必须提及 skip 登记出口");

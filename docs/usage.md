@@ -128,18 +128,23 @@ Copy-Item config/agents.example.json config/agents.json
       "tokenBudget": 5000000
     },
 
-    // ── claude-code（进程式，默认真实编码 lane）──
-    "coder_low": {
+    // ── claude-code（0046 原生通道：官方 OAuth 订阅）──
+    "opus": {
       "backend": "claude-code",
-      "provider": {
-        "protocol": "anthropic-compatible",
-        "baseUrl": "https://open.bigmodel.cn/api/anthropic",
-        "apiKeyEnv": "ZHIPU_API_KEY"
-      },
-      "model": { "id": "glm-5.3-flash[1m]", "contextWindow": 1000000 },
-      "reasoning": { "effort": "max" },
-      "cwd": "D:/projects/my-app",
+      "seatRole": "adversarial",
+      "model": { "id": "claude-opus-5-5" },
+      "reasoning": { "effort": "high" },
+      "cwd": ".",
       "args": ["--dangerously-skip-permissions"]
+    },
+
+    // ── zcode（0046 原生通道：原厂 harness 驱动原厂 LLM）──
+    "glm-flash": {
+      "backend": "zcode",
+      "binary": "C:/Users/<you>/AppData/Local/Programs/ZCode/resources/glm/zcode.cjs",
+      "model": { "id": "bigmodel-api/GLM-5.3-Flash" },
+      "reasoning": { "effort": "max" },
+      "cwd": "."
     },
 
     // ── deepseek-harness（实验性；不要从 GUI preset/TUI 抓输出）──
@@ -175,7 +180,7 @@ Copy-Item config/agents.example.json config/agents.json
     },
 
     // ── 带 worktree 隔离的 agent ──
-    "coder_hq": {
+    "glm-pro": {
       "backend": "claude-code",
       "cwd": "D:/projects/my-app",
       "args": ["--dangerously-skip-permissions"],
@@ -189,7 +194,7 @@ Copy-Item config/agents.example.json config/agents.json
 `seatRole`（R10-B）是三席会审（决策 0023）的显式席位声明，闭集为
 `"adversarial"`（对抗席）/ `"implementation"`（实现席）/ `"non_seat"`（非席位）——registry
 schema、就绪分级引擎与展示层共用同一词表（`registry validate` 对闭集外或非字符串值固定拒绝，
-错误信息不回显坏值）。**省略该字段合法**：席位角色回退命名惯例（`auditor`/`coder_mm` = 对抗席、
+错误信息不回显坏值）。**省略该字段合法**（0045 前历史惯例，0046 后旧席位名已不存在——显式声明是唯一判据）：席位角色回退命名惯例（旧 `auditor`/`coder_mm` = 对抗席、
 `coder_` 前缀 = 实现席、其余非席位），老 registry 零迁移。新配置建议显式声明——惯例对
 `coder_opencode_fallback` 这类"名字像实现席、实为 fallback 非席位"的 worker 会误分类，
 显式 `"non_seat"` 才能把它从席位候选剔除。
@@ -282,10 +287,10 @@ npm run cli -- <command> [options]
 
 ```powershell
 # run = spawn + wait，打印 assistant 文本
-npm run cli -- run coder_low --prompt "总结这个项目的 README"
+npm run cli -- run glm-flash --prompt "总结这个项目的 README"
 
 # JSON 输出（含完整 messages + metrics）
-npm run cli -- run coder_low --prompt "..." --format json
+npm run cli -- run glm-flash --prompt "..." --format json
 ```
 
 > **前台 vs 后台生命周期（TD-148 → ADR-0030/TD-151 根修，2026-09-18）**：等待窗（`--wait-timeout` / agent / global 配置三源）到期 = **通知，不杀**——WAO 只落一条 `run.observation_deadline_reached` 观察事实（载荷有界：waitTimeoutMs + source），前台 CLI 同刻打印一行指引后**继续等到自然终态**；`--background` 的 detached runner 同样只记事实、继续监督到自然终态。终止 worker 只剩两个来源：Lead 显式 `stop`；既有硬安全线（tokenBudget 闸门、workdir_escape 隔离守卫）。有界观察用 `runs wait <runId>` 自身的窗口（到期只结束观察、exit 0）；要 worker 脱离派发进程存活用 `--background`。`resume` 不带 `--wait` 已改为 detached runner 托管续跑（不再挂起）；`resume --wait` 前台等待期间本进程退出会 Job Object 连坐杀 worker——这是进程隔离的设计行为（见上文 Node v22 节），要存活走后台托管。
@@ -347,7 +352,7 @@ spawn_error 事故全部走 workflow 通道，即此层；**后台派发通道**
 上游间歇空窗期派发会秒败空跑（~30s 零产出）；`scripts/dispatch-with-liveness.mjs` 收编 Lead 手写的"派发→观察→查活性→退避重派"循环：
 
 ```powershell
-node scripts/wao-node.cjs scripts/dispatch-with-liveness.mjs --agent coder_hq --prompt-file task.md --cwd D:\proj\x -- --model gpt-5.6-sol
+node scripts/wao-node.cjs scripts/dispatch-with-liveness.mjs --agent glm-pro --prompt-file task.md --cwd D:\proj\x -- --model gpt-5.6-sol
 ```
 
 重派谓词三条件同时满足才重派；退出码如实：**真完成（completed 且非空跑）=0**，其余（失败/谓词不满足/轮次耗尽/派发失败）=1：① 前一轮已 terminal；② 带 `completed_empty`/零证据 marker（`DIAGNOSIS_CODES` 闭集语义，与 `runs diagnose` 同一投影）；③ 证停新鲜度前提（复核四审定谳）：终态后 settle 重读**成功**（`stopRereadOk`）是条件③两臂的共同前提——重读失败时旧快照的证停可能已被其后落盘的未证停事实压掉，两臂全关不重派。重读成功后：默认严格臂=`run.stop_verified`（类别是注册表事实而非本 run 进程已退出证据——processBackend 存在 done(failed)-while-alive 路径）；类别臂仅为显式 opt-in 启发式（`--allow-process-death-inference` 且无显式 `run.stop_unverified` 事实）。不变量：**绝不中止/重试在飞 run**（派发走后台分离 + 独立观察窗，不挂 `--wait-timeout`——ADR-0030 起该窗到期只通知不杀，活性判定本来就归本脚本自己的谓词——TD-148）；零产出 ≠ 没在工作（纯调研零写入合法，观察窗内活跃即继续等）。出处 TD-158；纯函数面钉于 `test/registry-roles/dispatchLiveness.test.js`。
@@ -356,14 +361,14 @@ node scripts/wao-node.cjs scripts/dispatch-with-liveness.mjs --agent coder_hq --
 
 ```powershell
 # 同时启动多个，--wait 等全部完成
-npm run cli -- spawn researcher coder_low --prompt "审查这个函数" --wait
+npm run cli -- spawn glm-pro glm-flash --prompt "审查这个函数" --wait
 ```
 
 ### 场景 4：worktree 隔离（每个 run 独立工作树）
 
 ```powershell
 # 方式 A：命令行 flag（临时）
-npm run cli -- run coder_low --prompt "..." --isolate
+npm run cli -- run glm-flash --prompt "..." --isolate
 
 # 方式 B：registry 配置（持久）
 # 在 agents.json 里给 agent 加 "isolation": { "type": "worktree" }
@@ -386,7 +391,7 @@ npm run cli -- run coder_low --prompt "..." --isolate
 '@ | Set-Content delivery-spec.json
 
 # 2. 前台运行，--isolate 必须指定
-npm run cli -- run coder_low --prompt "..." --isolate --delivery-spec-file delivery-spec.json --format json
+npm run cli -- run glm-flash --prompt "..." --isolate --delivery-spec-file delivery-spec.json --format json
 ```
 
 > 已知坑（friction 2026-08-15 #3）：spec 文件内容是**内层 delivery 对象本身**——`{"mode":"git_commit_v1","allowedPaths":[...],"verificationCommands":[...]}`，**不带** `{"delivery": ...}` 外层包装（那层包装是 MCP `run_dispatch` 工具参数的形状，见 §四）。CLI 把文件内容直接交给 `prepareDeliveryRequest` SSOT 解析，带外层包装会因缺顶层 `mode` 被拒绝。
@@ -474,7 +479,7 @@ outcome 照常落盘并在 `runs delivery` / `run_delivery` / `run_await_result`
 
 ```powershell
 # brief 文件 = 共享任务书（编号问题 Q1..Qn + 输出格式契约），逐字节分发给每席
-npm run cli -- consult run brief.md --seats auditor,coder_mm,researcher
+npm run cli -- consult run brief.md --seats astra,kimi,glm-flash
 
 # 带每席视角片段（答题姿势 2-3 句：差异化资产 + 自测问题；原样拼在该席 prompt 尾部）
 npm run cli -- consult run brief.md --seats a,b --perspective a=persp-a.md --perspective b=persp-b.md
@@ -604,7 +609,7 @@ npm run cli -- daemon start --resume-on-start
 
 # 经 daemon 派发 worker（run 归 daemon 持有 → 出现在 daemon list，可被自愈保护）。
 # 优先用这个而非 `run --background`（那个不经 daemon，daemon list 看不到）。
-npm run cli -- daemon run coder_low --prompt "..."
+npm run cli -- daemon run glm-flash --prompt "..."
 
 # 查活 / 统一视图（含 external/orphan run）/ 单 run 状态
 npm run cli -- daemon ping
@@ -709,10 +714,10 @@ Get-Content runs\<runId>.jsonl | ForEach-Object { $_ | ConvertFrom-Json }
 
 ```powershell
 # spawn 返回 JSON（含 runId + transcript 路径）
-npm run --silent cli -- spawn coder_low --prompt "..." | ConvertFrom-Json
+npm run --silent cli -- spawn glm-flash --prompt "..." | ConvertFrom-Json
 
 # run 的 JSON 输出含 messages + metrics
-npm run --silent cli -- run coder_low --prompt "..." --format json | ConvertFrom-Json
+npm run --silent cli -- run glm-flash --prompt "..." --format json | ConvertFrom-Json
 
 # 查询族：registry / runs / wao 的只读子命令（TD-86 起同样支持 --format json）
 npm run --silent cli -- registry validate --registry config/agents.json --format json
@@ -748,7 +753,7 @@ LLM 编排器（未来的 M5 DAG 或外部脚本）只需要：
 
 ```powershell
 # 登记自报副审席位（registry 存在性校验；自报、未验证——评审旁证走 --artifacts 的 runs/<runId>.jsonl）
-npm run cli -- wao stage 2 --task "方案定稿" --panel-seats coder_hq,auditor --artifacts docs/plan.md
+npm run cli -- wao stage 2 --task "方案定稿" --panel-seats glm-pro,astra --artifacts docs/plan.md
 # 登记跳过理由（闭集码；与 --panel-seats 互斥，非法码 fail-fast）
 npm run cli -- wao stage 4 --task "交付验收" --panel-skip-reason low_risk_small_task
 # 裸跑查看 panel 分布 + skip 理由分布（pipeline 自省）
@@ -758,7 +763,7 @@ npm run cli -- wao stage --cwd <目标项目>
 - 跳过理由闭集（SSOT：`src/waoStage.js` 的 `PANEL_SKIP_REASONS`）：`no_reviewer_available` / `low_risk_small_task` / `time_critical` / `owner_direct`。细节差异（如 provider 临时不可用）进 `--note`，不扩闭集。
 - 其余 stage（1/3/5/6）带 panel 参数 fail-fast（"panel 字段只在方案（2）/交付物验收（4）登记"——不写成"会审仅发生在两节点"，同一 stage 允许多条记录，返工/窄复核照常再登记）。
 - stage 2/4 落盘成功且无 panel 字段时输出 JSON 加性字段 `panelAdvisory`（未记录会审提示；exit 0 不变——非门禁）；stage 4 成功输出固定复述红线："评审意见是证据不是验收；`run_delivery_decide` 只由 Lead 调用"。panel 记录写进 STAGE 正文 frontmatter 与 `pipeline/map.md` 索引行第 5 列（无 panel 的旧行照常解析）。
-- 会审就绪提示的两张面（数据源不同，勿混）：`wao onboarding` 的分级块**按面切换**（R10-B）——私有 `config/agents.json` 不存在时是**模板面**（从入库模板行 + 当前环境探测推导）；存在且可读（或刚被 `--apply` 写入）时切到**已配置面**（从该 registry 的行 + 同一探测实现推导；标题标注"已配置面"，附"已配置 N 名 worker（真实状态以它为准）——完整体检见 `wao doctor`"指针行；私有 registry 存在但读取失败则降级模板面并标注来源不可读，不阻塞主流程）；`wao doctor` 的 `panel_readiness` 检查恒为**已配置面**——从你的 `config/agents.json` + doctor 既有探测推导，仅当可用席位候选 ≤1 或零对抗席时打印 INFO（三席齐备且含对抗席才静默；registry 缺位沿既有"未配置（跳过）"INFO 模式；不计 DEGRADED、不改退出码）。分级只统计**席位候选**（对抗席 = auditor 专职 / coder_mm 替补；实现席 = coder 系通道；researcher/tester 等调研/工具角色不进席位计数与建议）：三席（≥2 名可用席位候选，推荐标准）/ 两席（恰 1 名，次之推荐，补齐第二副审可升级）/ 无可用席位候选（跳过提示）；≥2 席位候选但 0 对抗席时仍判三席（物理可配）但必附"无对抗席候选（auditor/coder_mm）——建议补配"提示行，doctor 不静默；`login_based`/`unknown` 不计入可用但如实展示（登录态型展示"登录态未验证"，serve 注入型展示"注入式认证（serve 探测不覆盖）"，探测未知展示"探测未知"）；跨族系（推断族系标签，展示专用非契约）是更强推荐。席位角色的判定顺序：显式 `seatRole` 声明优先，省略回退命名惯例（见上文 registry 配置详解）。
+- 会审就绪提示的两张面（数据源不同，勿混）：`wao onboarding` 的分级块**按面切换**（R10-B）——私有 `config/agents.json` 不存在时是**模板面**（从入库模板行 + 当前环境探测推导）；存在且可读（或刚被 `--apply` 写入）时切到**已配置面**（从该 registry 的行 + 同一探测实现推导；标题标注"已配置面"，附"已配置 N 名 worker（真实状态以它为准）——完整体检见 `wao doctor`"指针行；私有 registry 存在但读取失败则降级模板面并标注来源不可读，不阻塞主流程）；`wao doctor` 的 `panel_readiness` 检查恒为**已配置面**——从你的 `config/agents.json` + doctor 既有探测推导，仅当可用席位候选 ≤1 或零对抗席时打印 INFO（三席齐备且含对抗席才静默；registry 缺位沿既有"未配置（跳过）"INFO 模式；不计 DEGRADED、不改退出码）。分级只统计**席位候选**（0046：按 seatRole 声明——对抗席 = adversarial 车道如 astra/opus；实现席 = implementation 车道；未声明/非席位不进席位计数与建议）：三席（≥2 名可用席位候选，推荐标准）/ 两席（恰 1 名，次之推荐，补齐第二副审可升级）/ 无可用席位候选（跳过提示）；≥2 席位候选但 0 对抗席时仍判三席（物理可配）但必附"无对抗席候选——建议补配"提示行，doctor 不静默；`login_based`/`unknown` 不计入可用但如实展示（登录态型展示"登录态未验证"，serve 注入型展示"注入式认证（serve 探测不覆盖）"，探测未知展示"探测未知"）；跨族系（推断族系标签，展示专用非契约）是更强推荐。席位角色的判定顺序：显式 `seatRole` 声明优先，省略回退命名惯例（见上文 registry 配置详解）。
 
 ### MCP stdio 接口（agent-facing primary，M9）
 
@@ -865,7 +870,7 @@ M9-7A 起支持可选 `delivery` 块（嵌套形状以 wire 为权威），用�
 
 ```json
 {
-  "agentId": "coder_low",
+  "agentId": "glm-flash",
   "prompt": "bounded task prompt",
   "delivery": {
     "mode": "git_commit_v1",

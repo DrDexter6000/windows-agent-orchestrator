@@ -47,7 +47,7 @@ WAO 是**"装一次，开发多个项目"**的工具。有两件不同的事，�
 - **worker CLI 在 PATH**：至少一个你想调度的 runtime（claude / codex / kimi）——**一个 runtime 就够**，不需要全部装齐
 - **认证任选其一**：官方 Claude OAuth（`claude login`）、provider key（`DEEPSEEK_API_KEY` / `ZHIPU_API_KEY`）、`codex login`、或 Kimi Code 登录态——选你有的那一种即可，见 §4c 选择表
 - **WAO 项目目录**：owner 会告诉你 WAO 装在哪（通常是 `D:/projects/windows-agent-orchestrator`）。**这个目录是 WAO 的源码 + 配置所在，不是被开发项目。**
-- **Claude OAuth trap 已隔离**：provider-wrapped claude-code worker（researcher/coder_hq/coder_low）会用 WAO wrapper 设置独立 `CLAUDE_CONFIG_DIR`，避免读取用户 `~/.claude` 里的 `claudeAiOauth` 凭证并覆盖 provider key；auditor 不走 wrapper，仍使用官方 Claude OAuth。
+- **Claude OAuth trap 已隔离**（0045 前历史配置；0046 后 opus=原生 claude-code 通道）：provider-wrapped claude-code worker 用 WAO wrapper 设置独立 `CLAUDE_CONFIG_DIR`，避免读取用户 `~/.claude` 里的 `claudeAiOauth` 凭证；`opus` 不走 wrapper，使用官方 Claude OAuth。
 
 ---
 
@@ -102,7 +102,7 @@ WAO 的 `SKILL.md` 符合 anthropic skill-creator 规范。各 runtime 的 skill
 
 先分清两个文件的作用域，不要混淆：
 
-- **`config/agents.example.json`（入库的模板）**：与 `docs/team-roles.md` 规范角色按 **lane 映射**（决策 0025：每个模板条目必须能映射到一个规范角色，反向每角色 ≥1 条目；主 lane 用角色名，备用 lane 用 `<角色>_<后缀>` 且显式 `seatRole`），保持六个角色 worker（researcher / coder_hq / coder_low / coder_mm / tester / auditor + opencode fallback）全量——它是上游样例，不需要编辑它本身。
+- **`config/agents.example.json`（入库的模板）**：0046 车道键形状——模型家族短名车道（glm-pro / glm-flash / kimi / sol / astra / opus / deepseek-pro / deepseek-flash）+ 全员显式 seatRole；角色与车道解绑（角色库 auditor/coder/researcher/tester 经 `--role` 显式选择）——它是上游样例，不需要编辑它本身。
 - **`config/agents.json`（你的私人副本，gitignored 不入库）**：复制后**可以删到只剩你实际能认证的 worker**。
 
 > **自动化（可选）**：`npm run cli -- wao onboarding --agent <你保留的 worker id> --apply` 从入库模板自动生成只含一个 worker 的 `config/agents.json`（零手编、带该 worker 的认证矩阵、并打印 host-neutral MCP 片段）。不带 `--agent` 裸跑 `npm run cli -- wao onboarding` 会按你当前环境打印角色矩阵与适配推荐（探测 PATH 里的 CLI 与已设置的 key；advisory 输出，不会自动选择或写配置）——先看推荐，再决定 `--agent <id>`。下面的手动复制+裁剪是同一结果的等价做法。正式验收链见本文档 §9。
@@ -117,17 +117,17 @@ Copy-Item config/agents.example.json config/agents.json
 
 | 你有的 runtime/认证 | 保留的 worker | 认证方式 |
 |---|---|---|
-| claude-code + GLM key（当前标准 lane 配置） | researcher / coder_hq / coder_low | `ZHIPU_API_KEY`（Windows User 环境变量） |
+| zcode app-server（0046 原生通道） | glm-pro / glm-flash | 无需 API key（桌面登录态共享） |
 | claude-code + 官方 Claude OAuth（无 provider 直连） | 任一 claude-code worker | `claude login`（原生 OAuth，不走 provider wrapper） |
 | claude-code + DeepSeek key（可选替代 provider） | 任一 claude-code worker（改 provider 块） | `DEEPSEEK_API_KEY`（Windows User 环境变量） |
 | codex | tester / auditor | `codex login` |
-| Kimi Code | coder_mm | Kimi Code 登录态（无需 API key） |
+| Kimi web（0046 原生通道） | kimi | `KIMI_WEB_TOKEN`（本地 serve bearer） |
 
 > 接入新模型 / 新运行时（改 provider/model 字段 vs 换 backend 的分叉）见 docs/usage.md「接入新模型 / 新运行时」节。
 
 删到只剩一个 worker 也完全可用。每个保留的 worker 里的 `cwd` 可留模板值（模板自 R8-1 起统一为 `.`——解析为发起派发的进程的当前工作目录：CLI 通道=你敲命令时所在目录；MCP 通道=MCP 服务进程的 cwd，由 host 决定；任何机器恒存在），派发时覆盖；若你改成了自己的路径，注意对本地进程式 backend，派发时 cwd 不存在会被 typed 早拒绝（`wao doctor` 也会预先 WARN；cwd 为 `.` 的 worker doctor 会出一条 INFO 落点提示，不计 DEGRADED）——见 `docs/troubleshooting.md §3.1/§3.2`。
 
-> **副审（会审席位）配置建议（决策 0023，advisory）**：三席会审（你作为 Lead 主审 + 两名副审）是推荐标准——最佳配置是 `auditor`（对抗席专职）+ 一名 coder 系通道（实现席替补，如 `coder_hq`/`coder_low`）；只有一名副审时以两席（主审 + 一副审）为次之推荐，零副审时可跳过（在 `wao stage 2/4` 用 `--panel-skip-reason` 登记理由）。强烈推荐两名副审来自不同大模型族系（跨族系会审是更强推荐）。你有多种认证时按此优先级裁剪：先保 `auditor` + 一个 coder 通道，再保族系差异。`wao onboarding` 的分级块与 `wao doctor` 的 `panel_readiness` INFO 会按当前环境给出就绪提示——onboarding 的块在你已生成 `config/agents.json` 后自动切到**已配置面**（以你的 registry 真实行为准），还没生成时是**模板面**；单 worker（它即被审产出作者）时两席建议事实空转——如实跳过即可。
+> **副审（会审席位）配置建议（决策 0023，advisory）**：三席会审（你作为 Lead 主审 + 两名副审）是推荐标准——最佳配置是对抗席车道（`astra`/`opus` 取一）+ 一名实现席车道（如 `glm-pro`/`sol`）；只有一名副审时以两席（主审 + 一副审）为次之推荐，零副审时可跳过（在 `wao stage 2/4` 用 `--panel-skip-reason` 登记理由）。强烈推荐两名副审来自不同大模型族系（跨族系会审是更强推荐）。你有多种认证时按此优先级裁剪：先保一个对抗席车道 + 一个实现席车道，再保族系差异。`wao onboarding` 的分级块与 `wao doctor` 的 `panel_readiness` INFO 会按当前环境给出就绪提示——onboarding 的块在你已生成 `config/agents.json` 后自动切到**已配置面**（以你的 registry 真实行为准），还没生成时是**模板面**；单 worker（它即被审产出作者）时两席建议事实空转——如实跳过即可。
 
 ### 4d. 自检 registry 与环境（必做）
 
@@ -178,13 +178,13 @@ npm run cli -- run <agentId> --prompt "Read package.json and report the package 
 
 ## 5. 开始用：最小闭环
 
-### 派发 GLM 任务（推荐用 coder_hq 或 coder_low，不是 opencode coder）
+### 派发 GLM 任务（推荐 glm-pro 或 glm-flash）
 
 ```
-npm run cli -- run coder_hq --prompt "你的任务" --cwd <目标项目> --registry <WAO目录>/config/agents.json --format json
+npm run cli -- run glm-pro --prompt "你的任务" --cwd <目标项目> --registry <WAO目录>/config/agents.json --format json
 ```
 
-`coder_hq` 是 GLM-5.2 via claude-code wrapper（进程式 + 已 probe 验证），适合较重编码任务；轻量任务用 `coder_low`（若保留了它）。**不要默认用 opencode worker**——它有 stop 虚假成功风险（06-18 事故），只在需要 token 闸门精确控成本时用，且必配 tokenBudget。
+`glm-pro` 是 GLM-5.3 via zcode app-server（原厂 harness 驱动原厂 LLM，0046 原汤化原食），适合较重编码任务；轻量/探索任务用 `glm-flash`。**不要默认用 opencode worker**——它有 stop 虚假成功风险（06-18 事故），只在需要 token 闸门精确控成本时用，且必配 tokenBudget。
 
 ### 记录状态（每次任务后）
 

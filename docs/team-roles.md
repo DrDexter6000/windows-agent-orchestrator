@@ -23,7 +23,7 @@ WAO 是"装一次，开发多个项目"的工具：
 
 **lane = 角色在 registry 中的一个具体实现通道**（固定 backend × provider × model × effort 组合）。本节各角色行的 backend/model 描述**主 lane**；lane 通道的实际组合以 registry 为准。
 
-1. 每角色 ≥1 lane：主 lane 用角色名原 id（如 `coder_hq`），备用 lane 用 `<roleId>_<后缀>`（后缀语义自明，如 `_dsh`）。
+1. 角色与车道解绑（0046）：车道键=模型家族短名（glm-pro/glm-flash/kimi/sol/astra/opus/deepseek-pro/deepseek-flash），角色是派发时按任务显式选择的帽子（`--role`，库=config/roles/*.md：auditor/coder/researcher/tester）。
 2. **新旧 harness 用独立 agentId 并存，禁止原位换**（认证历史隔离可回退；provider 会话复用键按 canonical agentId 派生、不含 harness——原位换会把 A 通道会话续到 B 通道 harness）。**适用面（ADR-0029 修订）**：本禁令针对新旧 harness 双活的切换；旧通道已死（订阅取消/停服）时 Owner 可裁定原位迁移（会话复用机制随迁移重估、认证历史作废重跑）。"换 harness 驱动同一模型" = Owner 建新 lane 条目 + 认证，之后 Lead 派发时在既有条目间点名切换。**模型面 vs runtime 面分叉**：接入新模型 = lane 内操作（改既有 backend 的 provider/model 字段）；接入新 runtime（另一 CLI/runtime 驱动）= 新 backend = Owner 裁定（先例 ADR-0028）。操作食谱见 docs/usage.md「接入新模型 / 新运行时」节。
 3. **组合权 = Owner，选择权 = Lead**：Owner 的组合动作是写 registry + 付认证费；registry 里存在的条目即一条已付认证费的 lane（纪律修订见 ADR-0029 两段式：供应商死亡类突发允许入册先行 + 切换当刻 smoke 首跑 + 承重前补 delta）。这是集合边界与纪律，不是 MCP 门禁（ADR 0018 的"认证非 permission gate"不变）。
 4. lane 备用条目（id ≠ 角色名原 id）**必须显式声明 `seatRole`**——防后缀命名被 `/^coder_/` 惯例误判席位、稀释三席会审候选统计（决策 0023）。
@@ -48,42 +48,21 @@ WAO 是"装一次，开发多个项目"的工具：
 | **身份** | 调研/分析专家。只读分析，不改产品代码 |
 | **Work Scope** | 读代码库、技术选型、可行性分析、输出 brief/affectedFiles 清单；边界清晰的简单任务（仍限只读分析边界） |
 | **边界** | 不改产品代码；不跑测试（只读）；不做实现决策（决策归 Lead+Auditor） |
-| **默认 lane 配置** | 见 `config/agents.example.json` 的 `researcher` 条目；本机真值以 `config/agents.json`（gitignored）为准 |
-| **裁定注记** | 2026-09-17 Owner 裁定由 DeepSeek-v4-flash 切换到智谱 GLM-5.3-Flash[1m] |
+| **默认 lane 配置** | 见 `config/agents.example.json` 的 `glm-flash` 条目；本机真值以 `config/agents.json`（gitignored）为准 |
+| **裁定注记** | 2026-09-17 Owner 裁定由 DeepSeek-v4-flash 切换到智谱 GLM-5.3-Flash[1m]；**2026-10-06 0046 步⑤⑥：角色与车道解绑（researcher 经 `--role` 显式选择，默认落点 glm-flash；复用政策席位字段保活）** |
 | **配置要点** | model/reasoning/context 从结构化 provider policy 单一编译，不手拼 CLI flags |
 | **会话复用** | `sessionReuse=lead_workspace`（M11-11C）：同一 MCP Lead server 实例在同一 workspace 内多次询问 Researcher 时，复用 provider 原生会话保留上下文/cache，每次仍是独立 run/transcript。Host/MCP 重启后开新会话；仅非 delivery；详见 `02-architecture.md §4.10`。**CLI 直派注意（2026-08-23 life-index 会话实证）**：前台 `run` 派发 sessionReuse 型 agent 须显式 `--cwd` 指向 git 根，否则复用路由不命中、需补发 |
 
-### Coder-HQ（码农-长程高质量）
+### Coder（实现者）
 
 | 维度 | 内容 |
 |---|---|
-| **身份** | 高耦合与长程连贯实现通道 |
-| **Work Scope** | 跨模块高耦合实现、歧义较高且需要持续统筹的编码任务、难以经济拆分的长程实现，以及按 brief 写/改代码、跑 lint/build、修 bug；按 Lead 指派兼职方案顾问与交付物评审（只读意见，不做验收决定） |
-| **边界** | 不做架构决策（归 Lead+Auditor）；不验收自己（归 Auditor） |
-| **默认 lane 配置** | 见 `config/agents.example.json` 的 `coder_hq` 条目；本机真值以 `config/agents.json`（gitignored）为准 |
-| **裁定注记** | 2026-08-15 Owner 裁定维持 claude-code wrapper，并把模板模型与已认证的 GLM-5.3[1m] 对齐 |
-
-### Coder-Low（码农-低成本快速）
-
-| 维度 | 内容 |
-|---|---|
-| **身份** | 低成本高吞吐的通用第二实现通道；`Low` 不表示低能力 |
-| **Work Scope** | 默认承担边界明确的实现包、TDD、修 bug、重构、兼容性、脚本、文档/配置与窄修正；适合独立并行包；按 Lead 指派兼职方案顾问与交付物评审（只读意见，不做验收决定） |
-| **边界** | 不替 Lead 作架构、范围、拆包或转派决策；不自行扩域；不验收自己。不得仅因文件数、prompt 长度、耗时或规模自行拒绝，是否拆分/转派由 Lead 决定 |
-| **默认 lane 配置** | 见 `config/agents.example.json` 的 `coder_low` 条目；本机真值以 `config/agents.json`（gitignored）为准 |
-| **裁定注记** | 2026-09-17 Owner 裁定由 deepseek-v4-pro 切换到智谱 GLM-5.3-Flash[1m] |
-
-### Coder-MM（多模态创意与高质量工程）
-
-| 维度 | 内容 |
-|---|---|
-| **身份** | 多模态、视觉创意与高质量工程通道 |
-| **Work Scope** | 图像/截图/视频内容理解；前端设计与实现；UI 截图还原；视觉/美术审核；带图文档与图像相关编码；产品、内容和体验策略方案起草；文案写作；高质量工程与代码实现；按 Lead 指派兼职方案顾问与交付物评审/会审对抗席（只读意见；不做验收决定，不评审自己的产出） |
-| **边界** | 不替 Lead 做最终产品/策略/架构决策；不验收自己的产出；常规低风险纯文本编码默认归 Coder-HQ/Low |
-| **默认 lane 配置** | 见 `config/agents.example.json` 的 `coder_mm` 条目；本机真值以 `config/agents.json`（gitignored）为准 |
-| **裁定注记** | 2026-06-23 决策 0005 将 Coder-MM 定为 Kimi 多模态通道 |
-| **配置要点** | 不要加 `--yolo`（与 -p 互斥）；Kimi Code/K3 自主管理上下文，WAO 不配置 backend 无法表达的 `contextWindow` override |
-| **派工策略** | 多模态、视觉、前端、创意、策略或文案任务优先；工程与代码能力强，可在 Coder-HQ 不可用、并行容量不足，或任务明显受益于 K3 长上下文/多模态能力时作为高质量替补。token 价格较高，不作为常规低风险编码的默认通道 |
+| **身份** | 团队的实现者，承担边界清晰的编码与制作任务包（0046 步⑤：Coder-HQ/Low/MM 三角色合并——模型与身份解绑，通道由车道承担） |
+| **Work Scope** | bounded implementation package：实现功能、修 bug、重构、兼容性调整、TDD（RED→GREEN 与指定验证）、脚本/文档/配置、前端实现与 UI 截图还原、图像/视觉内容理解（车道具备视觉能力时）、独立并行实现包与窄修正；按 Lead 指派兼职方案顾问与交付物评审（只读意见，不做验收决定） |
+| **边界** | 不替 Lead 作产品、架构、范围、拆包或转派决策；不自行扩域；不验收自己；不得仅因文件数、prompt 长度、耗时或规模自行拒绝，是否拆分/转派由 Lead 决定 |
+| **默认 lane 配置** | 主力 `glm-pro`、副通道 `glm-flash`/`deepseek-flash`——见 `config/agents.example.json` 对应条目；本机真值以 `config/agents.json`（gitignored）为准 |
+| **裁定注记** | 2026-10-06 Owner 裁定（0046 §1）三 Coder 角色合并为任务命名角色 coder，档位身份语言随旧席位名一并废弃；历史裁定（2026-08-15 wrapper 维持、2026-09-17 切智谱、2026-06-23 决策 0005 MM 定位）随旧角色退役归档 |
+| **派工策略** | 高耦合/长程优先 `glm-pro`（次选 `sol`）；预算敏感并行小包与视觉/探索优先 `glm-flash`/`deepseek-flash`；创意/文案优先 `kimi`；高要求前端设计 `opus` |
 
 ### Tester（测试员）+ 轮询职责
 
@@ -94,18 +73,18 @@ WAO 是"装一次，开发多个项目"的工具：
 | **Work Scope（扩展-轮询）** | 轮询各 worker 运行状态（`runs status`/`runs list`）、检测超时/失控、向 Lead 汇报异常。降低 Lead 的 token 开销 |
 | **Work Scope（扩展-多模态+简单任务，2026-08-15）** | 多模态识别（读取并分析图像输入；codex 图像输入能力由 Owner 人工验证）；边界清晰的简单任务 |
 | **边界** | 不修 bug（归 Coder）；不做语义判断（只看证据）；不审编排方案（归 Auditor） |
-| **默认 lane 配置** | 见 `config/agents.example.json` 的 `tester` 条目；本机真值以 `config/agents.json`（gitignored）为准 |
-| **裁定注记** | 2026-09-03 Owner 裁定 tester effort 由 medium 升级为 xhigh |
+| **默认 lane 配置** | 见 `config/agents.example.json` 的 `sol` 条目；本机真值以 `config/agents.json`（gitignored）为准 |
+| **裁定注记** | 2026-09-03 Owner 裁定 tester effort 由 medium 升级为 xhigh；**2026-10-06 0046：tester 经 `--role` 显式选择，默认落点 sol（旧落点 gpt-sol-56 随升级淘汰）** |
 
 ### Chief-Advisor / Auditor（首席顾问与审计员）— 按需双模式
 
 | 维度 | 内容 |
 |---|---|
-| **身份** | Lead Agent 的平级顾问与审计合作伙伴，独立红队。canonical `agentId` 固定为 `auditor`，不另建 `advisor` worker |
+| **身份** | Lead Agent 的平级顾问与审计合作伙伴，独立红队。0046：auditor 经 `--role` 显式选择（角色库 canonical 角色），不另建 `advisor` 角色 |
 | **Work Scope（前置 advisory）** | 对 Lead 明确提出的未决问题做头脑风暴、红队挑战和方案审查，给可验证的替代方向，不替 Lead 拍板 |
 | **Work Scope（后置 audit）** | 独立复核 Coder 产出、查伪完成、质疑声明、给 PASS/FAIL，不把验收扩张成新方案 |
 | **边界** | 不改代码（归 Coder）；不和 Coder 同源（独立性）；不跑测试（归 Tester） |
-| **默认 lane 配置** | 见 `config/agents.example.json` 的 `auditor` 条目；本机真值以 `config/agents.json`（gitignored）为准 |
+| **默认 lane 配置** | 主审 `astra`、Claude 系备胎 `opus`——见 `config/agents.example.json` 对应条目；本机真值以 `config/agents.json`（gitignored）为准 |
 | **裁定注记** | 2026-09-17 Owner 裁定由已停用的 Claude 通道切到 Codex / GPT-6-astra，effort=medium；**2026-09-22 Owner 裁定 effort medium → high**（本机 `config/agents.json` 已改并 `registry validate` 复核：9 agent 全 valid、零 ⚠） |
 | **会话复用** | 无（2026-09-17 切 codex 起）。历史注记：claude-code 通道时期用 `sessionReuse=lead_workspace`（M11-11C，语义详见 `02-architecture.md §4.10`）；**CLI 直派 sessionReuse 型 agent 须显式 `--cwd` 指向 git 根**的注意事项对仍在用该机制的 agent（如 researcher）依然适用（2026-08-23 life-index 会话实证） |
 
@@ -113,9 +92,9 @@ WAO 是"装一次，开发多个项目"的工具：
 
 1. **Lead 拥有路由权**：worker 可以报告合同矛盾、缺少授权或能力风险，但不得自行决定拆包、缩减合同或转派。认证、provider 状态、成本和既往表现都是 Lead 的决策事实，不是自动门禁。
 2. **按任务性质选通道**：主要判断语义耦合度、需求歧义、长程上下文连续性、验收边界、是否可独立并行、多模态需求、provider 可用性与成本；不按 `Low`/`HQ` 名称、prompt 长度、文件数量或预计耗时机械路由。
-3. **默认实现通道偏好（Owner 劝诫，2026-08-15）**：无明确耦合、成本或并行理由时，多数实现任务优先派发 `coder_hq`（质量优先）。`coder_low` 仍是低成本高吞吐与并行容量通道——预算敏感、可独立并行的批量小包优先走 `coder_low`。此为建议性偏好（advisory），不是控制面规则；Lead 仍按语义耦合与项目实际裁量，不机械路由。
-4. **高耦合 lane**：跨模块语义强耦合、歧义较高、需要一次长程保持整体设计，或拆包会显著损失上下文时优先 `coder_hq`。
-5. **多模态与高质量替补**：视觉、前端、创意和多模态任务优先 `coder_mm`；也可在 `coder_hq` 不可用或任务明显受益于 K3 能力时作为高质量替补。
+3. **默认实现通道偏好（0046 车道版）**：无明确耦合、成本或并行理由时，多数实现任务优先派发 `glm-pro`（质量优先）；预算敏感、可独立并行的批量小包与视觉/探索优先 `glm-flash` 或 `deepseek-flash`。此为建议性偏好（advisory），不是控制面规则；Lead 仍按语义耦合与项目实际裁量，不机械路由。
+4. **高耦合 lane**：跨模块语义强耦合、歧义较高、需要一次长程保持整体设计，或拆包会显著损失上下文时优先 `glm-pro`（次选 `sol`）。
+5. **多模态与创意**：视觉、前端、创意和多模态任务优先 `kimi`（文案/头脑风暴）或 `glm-flash`/`deepseek-flash`（视觉理解）；`opus` 承担高要求前端设计与备胎审计。
 6. **拆包条件**：只有工作确实可独立验收、并行能降低等待或单包合同难以清晰表达时才拆；最终是否拆分或转派由 Lead 决定。
 7. **顾问/审计与三席会审**：同一个 `auditor` 专家在执行前使用 advisory 模式、交付后使用 audit 模式。三席会审是推荐标准（决策 0023，2026-08-17 起产品化；supersedes 0019 "默认不审"）：方案（stage 2）与交付物验收（stage 4）强烈建议 Lead 主审 + 两名副审（席位避同族、避被审产出作者——0019 §3 席位回避保留），配不齐两副审则以 Lead + 一副审两席为次之推荐。强烈推荐但非强制：跳过需 `--panel-skip-reason` 显式登记理由；跨族系大模型会审是更强推荐。panel 记录是证据不是验收，`run_delivery_decide` 只由 Lead 调用。新配置建议在 registry 里显式声明 `seatRole`（adversarial/implementation/non_seat，省略按命名惯例回退——见 docs/usage.md registry 配置详解）。
 
@@ -125,7 +104,7 @@ WAO 是"装一次，开发多个项目"的工具：
 Lead 收到需求
   → 必要时派 Researcher 调研（输出 brief + affectedFiles）
   → Lead 出执行方案
-  → 方案定稿后默认推荐召集副审会审（advisory 模式；决策 0023：三席 = Lead 主审 + 实现席 coder_hq/low 取一避同族 + 对抗席 auditor/mm 取一；跳过需 --panel-skip-reason 登记理由，wao stage 2 留痕）
+  → 方案定稿后默认推荐召集副审会审（advisory 模式；决策 0023：三席 = Lead 主审 + 实现席车道取一避同族 + 对抗席车道（astra/opus）取一；跳过需 --panel-skip-reason 登记理由，wao stage 2 留痕）
   → Lead 独立裁定方案并选择 Coder-HQ/Low/MM
   → 必要时派 Tester 提供独立执行证据
   → 交付物验收前默认推荐召集副审会审（audit 模式；决策 0023：组合同上；跳过需 --panel-skip-reason 登记理由，wao stage 4 留痕；auditor 同会话连审两阶段的独立性侵蚀见 ADR 0019 §3）
