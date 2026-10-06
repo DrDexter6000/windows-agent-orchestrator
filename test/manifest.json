@@ -132,6 +132,7 @@
       "run-lifecycle/m12-9-executionProfiles.test.js",
       "run-lifecycle/m12-9-runAwaitOutcome.test.js",
       "run-lifecycle/m12-9-smoke.test.js",
+      "run-lifecycle/nestedDispatchGuard.test.js",
       "run-lifecycle/processStopVerify.test.js",
       "run-lifecycle/resumeBoundRead.test.js",
       "run-lifecycle/runDispatch.test.js",

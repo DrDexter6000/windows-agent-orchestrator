@@ -291,6 +291,9 @@ export class ProcessBackend {
       ...backendRuntimeEnv,
       ...(this.waoCliPath ? { WAO_CLI: this.waoCliPath } : {}),
       WAO_TARGET_CWD: agent.cwd,
+      // 0047 L1：worker 血统标记——WAO 派生的 harness 子进程携带，其 shell/
+      // 子进程/会话拉起的 MCP 服务实例全链继承；派发入口据此拒绝向下派发。
+      WAO_IN_WORKER: "1",
     }, resolvedCredentials);
     // Build the redactor over process.env MERGED with the resolved fallback
     // credentials, so fallback values are scrubbed from worker output too.

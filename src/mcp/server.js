@@ -185,6 +185,7 @@ import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "../disp
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { selectCertRecord } from "../runManager.js";
+import { assertNotNestedDispatchContext } from "../application/nestedDispatchGuard.js";
 import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
 import {
   runDeliveryRepackage,
@@ -3897,6 +3898,13 @@ export function createWaoMcpServer({
       annotations: RUN_DISPATCH_ANNOTATIONS,
     },
     async ({ agentId, prompt, lane, role, delivery, expectedGitHead, expectedDirty, expectedWorkspaceRoot, continuable, correctable, executionProfileId, readOnly, model, reasoning }) => {
+      // 0047 L1：防向下派发门（worker 会话拉起的 MCP 服务实例在 side effect 前被拒；
+      // 判定 SSOT=nestedDispatchGuard，与 RunManager.start 同一函数零分叉）。
+      try {
+        assertNotNestedDispatchContext();
+      } catch (e) {
+        return { isError: true, content: [{ type: "text", text: String(e.message) }] };
+      }
       // 0045 §1.4 第 5 步：派发目标选择器（{agentId} 或 {lane, role} 二选一闭集，
       // dispatchResolution 单一真相）。lane/role 在场或 agentId 缺席→解析；错误=
       // 固定文案带闭集码+完整合法全集（≤32 项截断指向 registry_list），零派发。
@@ -4403,6 +4411,13 @@ export function createWaoMcpServer({
       annotations: RUN_CONSULT_ANNOTATIONS,
     },
     async (input) => {
+      // 0047 L1：防向下派发门（worker 会话拉起的 MCP 服务实例在 side effect 前被拒；
+      // 判定 SSOT=nestedDispatchGuard，与 RunManager.start 同一函数零分叉）。
+      try {
+        assertNotNestedDispatchContext();
+      } catch (e) {
+        return { isError: true, content: [{ type: "text", text: String(e.message) }] };
+      }
       // M13-r2 (0039): dual-mode contract. Mode discrimination lives HERE in the
       // handler — a top-level .refine() on the inputSchema would break its
       // tools/list JSON-schema property serialization (M9-2B-01, same root cause
@@ -4580,6 +4595,13 @@ export function createWaoMcpServer({
       annotations: RUN_CONTINUE_ANNOTATIONS,
     },
     async ({ parentRunId, prompt, delivery }) => {
+      // 0047 L1：防向下派发门（worker 会话拉起的 MCP 服务实例在 side effect 前被拒；
+      // 判定 SSOT=nestedDispatchGuard，与 RunManager.start 同一函数零分叉）。
+      try {
+        assertNotNestedDispatchContext();
+      } catch (e) {
+        return { isError: true, content: [{ type: "text", text: String(e.message) }] };
+      }
       // M12-7: re-resolve and prove the workspace BEFORE any continuation —
       // state-changing calls do their own authority proof (same as run_dispatch).
       // The parent must belong to the bound workspace; a missing binding refuses

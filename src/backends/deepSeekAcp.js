@@ -473,6 +473,8 @@ export class DeepSeekAcpBackend {
     const inheritedNames = inheritedEnvNames(agent);
     const childEnv = buildChildEnv(inheritedNames, agentEnv, {
       WAO_TARGET_CWD: agent.cwd,
+      // 0047 L1：worker 血统标记（同 processBackend——语义见彼处注释）。
+      WAO_IN_WORKER: "1",
     }, resolvedCredentials);
     const redactor = createSecretRedactor(
       { ...process.env, ...resolvedCredentials },

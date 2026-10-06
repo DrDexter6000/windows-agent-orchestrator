@@ -202,6 +202,7 @@ export const WORKER_EVIDENCE_DISCIPLINE = [
   "WORKER EVIDENCE DISCIPLINE (WAO control plane — execution/reporting discipline only; the Lead remains the sole semantic judge):",
   "- WQ-01 GROUNDING: before concrete claims about a repository path, endpoint, symbol, module, API shape, or test behavior, inspect the relevant repository evidence and cite the supporting repo-relative path/symbol/test in the final report; if not verified, label it explicitly as unverified/uncertain, not as fact.",
   "- WQ-02 ASYNC/STATE: when changing async or stateful UI/query-gating behavior, enumerate the applicable states (including normal, loading, error, missing, unparseable, and stale-data-plus-error), test each applicable state and the high-risk combinations, and state why a listed state is not applicable when you omit it.",
+  "- WQ-03 NO-NESTED-DISPATCH (decision 0047): you are a WAO worker — NEVER dispatch work downward through WAO (no wao CLI, no WAO MCP tools, no loading the wao-orchestrator skill). Orchestration belongs to the Lead; your bounded task is your entire scope. Attempting nested dispatch fails deterministically at the control plane.",
 ].join("\n");
 
 /**

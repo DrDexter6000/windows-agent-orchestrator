@@ -12,6 +12,7 @@ import { createSecretRedactor } from "./secretRedaction.js";
 import { prepareDeliveryRequest, packageDelivery as defaultPackageDelivery, proveLinkedWorktree, isValidRunId, DeliveryError } from "./delivery.js";
 import { verifyDelivery as defaultVerifyDelivery, createCallerGate } from "./deliveryVerification.js";
 import { loadRoleContract, composeRoleContractWithIdentity, composeDeliveryExecutionContract, roleContractSha256 } from "./application/roleContract.js";
+import { assertNotNestedDispatchContext } from "./application/nestedDispatchGuard.js";
 import { ID_RE } from "./dispatchResolution.js";
 import { assessWorkerReadiness, createEnvResolver, readWindowsUserEnv } from "./application/credentialReadiness.js";
 import { inheritedEnvNames } from "./envPolicy.js";
@@ -565,6 +566,10 @@ export class RunManager {
   }
 
   async start(agentId, options = {}) {
+    // 0047 L1：防向下派发门（一切派发的单一咽喉——CLI run/spawn、MCP run_dispatch、
+    // consult 扇出、resume 全经此）。worker 上下文（env 标记或 worktree cwd）即拒，
+    // 先于任何转录/分叉副作用。判定 SSOT=nestedDispatchGuard（纯函数）。
+    assertNotNestedDispatchContext();
     const {
       prompt,
       cwd,
