@@ -37,9 +37,9 @@ const REG = Object.fromEntries(Object.entries(REGISTRY_PROJECTION.agents).map(([
 
 // ── 活体基线钉（G7 冻结快照：改 lanes.json 必须同 diff 看到这里） ────────────
 
-test("W1 活体：config/lanes.json 9 车道/0 别名/4 角色，结构零 issue（0046 步④b+⑥）", () => {
+test("W1 活体：config/lanes.json 8 车道/0 别名/4 角色，结构零 issue（0046 步⑧ -gpt-sol-56）", () => {
   assert.ok(LIVE.ok, `结构 issues 必须为空，实际：${JSON.stringify(LIVE.issues)}`);
-  assert.equal(LIVE.lanes.length, 9);
+  assert.equal(LIVE.lanes.length, 8);
   const aliases = LIVE.lanes.flatMap((l) => Object.keys(l.aliases ?? {}));
   assert.equal(aliases.length, 0, "0046 步⑥：旧席位名别名表全数清空（机制保留=空表合法）");
   assert.deepEqual(ROLES.sort(), ["auditor", "coder", "researcher", "tester"],
@@ -81,7 +81,6 @@ test("W3a 映射冻结（R4 红队'标签互换'防御）：laneId→轴/wiringA
     { id: "deepseek-pro", backend: "deepseek-acp", modelId: "deepseek-v4-pro", effort: "max", aliases: {} },
     { id: "glm-flash", backend: "zcode", modelId: "bigmodel-api/GLM-5.3-Flash", effort: "max", aliases: {} },
     { id: "glm-pro", backend: "zcode", modelId: "bigmodel-api/GLM-5.3", effort: "max", aliases: {} },
-    { id: "gpt-sol-56", backend: "codex", modelId: "gpt-5.6-sol", effort: "xhigh", aliases: {} },
     { id: "kimi", backend: "kimi-web", modelId: "kimi-code/k3-256k", effort: null, aliases: {} },
     { id: "opus", backend: "claude-code", modelId: "claude-opus-5-5", effort: "high", aliases: {} },
     { id: "sol", backend: "codex", modelId: "gpt-6.1-sol", effort: "high", aliases: {} },
@@ -93,6 +92,7 @@ test("W3a 映射冻结（R4 红队'标签互换'防御）：laneId→轴/wiringA
   // 不表达保持 null）+deepseek 双车道（pro=deepseek-v4-pro/flash=deepseek-flash，
   // 双字段 model 形状，flash 无历史别名=空表）。
   // 0046 §5 步⑤⑥：角色库合并（coder_hq/coder_low/coder_mm→coder）+别名表全清空。
+  // 0046 §5 步⑧：gpt-sol-56 车道删除（sol 全量认证绿后执行）。
 });
 
 test("W3a 守卫消费（R4）：结构 issues——explicit 整表拒 lanes_config_invalid；alias 降级", () => {

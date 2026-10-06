@@ -28,16 +28,6 @@
       },
       "cwd": "."
     },
-    "gpt-sol-56": {
-      "backend": "codex",
-      "model": {
-        "id": "gpt-5.6-sol"
-      },
-      "reasoning": {
-        "effort": "xhigh"
-      },
-      "cwd": "."
-    },
     "astra": {
       "backend": "codex",
       "model": {
