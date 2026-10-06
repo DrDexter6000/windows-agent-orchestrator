@@ -2104,7 +2104,7 @@ test("R5-B: doctor scoped——registry 无 worker 时 CLI/key 全部 INFO 跳�
     // 建一个完整 .wao/（6 槽位）使 wao_init 为 OK——verdict 可确定断言 HEALTHY。
     mkdirSync(join(dir, ".wao"), { recursive: true });
     writeFileSync(join(dir, ".wao", "project.md"), "", "utf8");
-    for (const slot of ["state", "decisions", "pipeline", "handoff", "runs"]) {
+    for (const slot of ["state", "decisions", "pipeline", "handoff", "runs", "migration"]) { // 0045 §4.2：+migration 证据槽（7 槽）
       mkdirSync(join(dir, ".wao", slot), { recursive: true });
     }
     const registryPath = join(dir, "agents.json");
@@ -2676,7 +2676,7 @@ test("R8-2: --warn-as-error 在仅 cwd 存在性 WARN 时 exit 1（分级语义�
     // 且 name 为 cwd_tester，与 cli_* 的 PATH 探测结果解耦。
     mkdirSync(join(dir, ".wao"), { recursive: true });
     writeFileSync(join(dir, ".wao", "project.md"), "", "utf8");
-    for (const slot of ["state", "decisions", "pipeline", "handoff", "runs"]) {
+    for (const slot of ["state", "decisions", "pipeline", "handoff", "runs", "migration"]) { // 0045 §4.2：+migration 证据槽（7 槽）
       mkdirSync(join(dir, ".wao", slot), { recursive: true });
     }
     const registryPath = join(dir, "agents.json");
