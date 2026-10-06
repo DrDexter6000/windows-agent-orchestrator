@@ -189,6 +189,8 @@ const DYNAMIC_DISCLOSED = Object.freeze([
   "src/backgroundRunner.js -> src/transcript.js",
   // 0045 W4c：workflow agentHandler 经解析层（workflow→core 下向，同其 RunManager 直调平级）。
   "src/workflow/handlers.js -> src/dispatchResolution.js",
+  // 0045 门5：consultService 别名解析（runtimeFacts 同步缓存包装，application→core 下向）。
+  "src/application/consultService.js -> src/dispatchResolution.js",
   "src/runManager.js -> src/backends/opencodeStopVerify.js",
 ]);
 

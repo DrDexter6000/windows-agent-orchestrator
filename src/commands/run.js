@@ -471,6 +471,15 @@ export async function runCommand(args, config) {
     && !COMMAND_NAMES.includes(agentId ?? "")) {
     throw new Error("Provide --prompt or --prompt-file");
   }
+  const earlyDeliveryRef = { value: undefined };
+  {
+    // DC-5/A-3 原顺序：delivery spec 校验 + --isolate 检查先于注册表解析——
+    // 解析块读磁盘注册表的 ENOENT 不得劫持 spec/isolate 的既有拒绝面。
+    earlyDeliveryRef.value = await loadDeliverySpec(options);
+    if (earlyDeliveryRef.value && !resolveIsolateFlag(options)) {
+      throw new Error("delivery mode requires --isolate (persistent worktree isolation)");
+    }
+  }
   if (true) {
     const registryPath = resolve(options.registry ?? config?.registry ?? "config/agents.json");
     const lanesEnabled = !options.registry || registryPath === resolve(config?.registry ?? "config/agents.json");
@@ -520,7 +529,8 @@ export async function runCommand(args, config) {
     // legacy-agent：无注解可记，resolvedTarget 保持 null（行为与 W2 前一致）
   }
   // TD-103 Phase 3C-1: load and validate delivery spec before any side effects.
-  const delivery = await loadDeliverySpec(options);
+  // （已在解析块前提前加载 earlyDelivery——此处复用同一结果，不二次读盘。）
+  const delivery = earlyDeliveryRef.value;
   // 0045 R3 裁定 H3（派发侧臂）：explicit × continuable 拒绝——continue 重建子 run
   // 不带角色=静默换帽（runContinue 侧父臂已拒；此处把组合在派发面也关死）。
   if (resolvedTarget?.source === "explicit" && delivery && delivery.continuable) {
