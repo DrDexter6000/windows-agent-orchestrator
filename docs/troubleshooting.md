@@ -30,6 +30,7 @@
 | claude-code wrapper 401 / worker 连不上 provider | [§7.1](#71-claude-code-wrapper-401worker-连不上-provider) |
 | worker 在错误项目目录干活 | [§7.4](#74-worker-在错误目录干活) |
 | agents.json 配置过时/缺 tokenBudget | [§7.5](#75-agentsjson-配置漂移) |
+| WAO 派发的 claude-code worker 看不到用户级 skills/配置（临时 CLAUDE_CONFIG_DIR 隔离） | [§7.13](#713-claude-code-worker-看不到用户级-claudeskills临时-claude_config_dir-隔离td-221) |
 | 不确定环境是否就绪 | [§7.6 wao doctor](#76-wao-doctor-体检) |
 | run completed 但 messages 空 / 无 assistant text | [§7.7 证据链断链](#77-worker-输出证据为空但-run-completed证据链断链高危) |
 | 认证判 draft-only/rejected 但模型应该会 | [§7.8 认证误判](#78-认证判-draft-onlyrejected-但模型其实会认证误判) |
@@ -481,6 +482,13 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **runtime identity mismatch / malformed JSON-RPC / transport closed**：这是 DSH composition 或 transport 故障，不是模型语义失败。直接运行同一 binary 做 `initialize` no-model probe；不得改成抓 TUI 文本或把未知输出投影为 completed。
 - **内部 subagent 事件导致失败**：这是预期 containment。WAO 的 worker 不能再通过 DSH 内部编排绕过 Lead/WAO；关闭 composition 中的 subagent/workflow 后再派发。
 - **认证显示 null**：认证按 agent id + backend + model 绑定。把同名 worker 从 claude-code 切到 DSH 后，旧认证不会继承；先做真实 canary，再由 Owner 决定是否运行完整 reliability。
+
+### 7.13 claude-code worker 看不到用户级 ~/.claude/skills（临时 CLAUDE_CONFIG_DIR 隔离，TD-221）
+
+- **症状**：用户日常 `~/.claude/skills` 里装好的技能，WAO 派发的 claude-code worker 会话里不可见（`/技能名` 不存在、Skill 工具列不出）；反过来，worker 往「自己 harness」装到 `~/.claude` 的东西，对后续 WAO 派发的会话也不生效。
+- **根因**：native OAuth 通道的 claude-code worker 运行于 `CLAUDE_CONFIG_DIR=%TEMP%\wao-claude-oauth-*` 临时隔离目录（2026-10-05 起 TD-210 bare×OAuth 互斥的技术解：目录内只有凭据副本，hooks/settings/CLAUDE.md/插件/技能全空，比 `--bare` 更纯净）。它的「个人级技能目录」就是该临时目录——与用户日常 `~/.claude` 完全隔离。这是**设计行为**（会话纯净性 + 认证可比性），不是 bug。
+- **逃生门**：任务确实需要访问用户目录下的特定内容时，往该 lane 的注册表 `args` 加 `--add-dir <最窄目录>`（例如只要读 `~/.claude/skills` 就指它，**不要**给整个用户主目录）。`--add-dir C:\Users\17865` 形态已实测有效（2026-10-06）。注意：`args` 是注册表级常驻透传——改它影响该 lane 后续所有派发，属于 lane 变更（按 certification-runbook 第一段走 drift 检查）；继承任何用户级配置都会让「认证过的席位=固定行为」失效，能不继承就不继承。
+- **代价提醒**：`--add-dir <home>` 等于把整个用户主目录交给该 worker（含凭据、私钥等一切可读文件），只在任务确需时用最窄路径。
 
 ---
 

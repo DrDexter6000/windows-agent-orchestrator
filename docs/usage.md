@@ -57,6 +57,8 @@ cd D:\projects\windows-agent-orchestrator   # 配 --use-on-cd 会按 .nvmrc 自�
 
 **你不需要全装。** 装一个就能用。不同 agent 可以用不同 backend。
 
+claude-code 车道（native OAuth 通道）的 worker 会话运行于临时隔离配置目录——用户日常 `~/.claude` 的技能/插件/设置对 WAO 派发的会话**不可见**（设计行为，含 `--add-dir` 逃生门）：见 `docs/troubleshooting.md §7.13`。
+
 #### Provider key（claude-code wrapper / opencode serve 需要）
 
 claude-code 经 wrapper 调非 Claude provider（GLM/DeepSeek）时，wrapper 读 env 里的 key；opencode serve 也需 provider key。所需 env：`ZHIPU_API_KEY` / `DEEPSEEK_API_KEY` / `KIMI_API_KEY`（按你用的 provider 配）。**详细的 key 验证 / 注入 / 401 排错见 `docs/troubleshooting.md §1.2`**（用 `scripts/serve.ps1` 启动 serve 会从 User registry 读 key 注入）。`npm run cli -- wao doctor` 按 registry 保留 worker 声明的 env 名查 key（scoped）：进程 env 命中为 OK；仅在 Windows User 作用域命中给 WARN（新开终端可用）；都没有才 FAIL（附 setx 修复提示）。
