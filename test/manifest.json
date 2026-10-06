@@ -286,6 +286,7 @@
     "mcp": [
       "mcp-surface/m12-11-wait-mcp.test.js",
       "mcp-surface/m12-12-semantics-mcp.test.js",
+      "mcp-surface/mcpCertGate.test.js",
       "run-lifecycle/mcpRunAwaitResult.test.js",
       "run-lifecycle/runWait.test.js"
     ]

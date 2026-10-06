@@ -634,6 +634,16 @@ npm run cli -- daemon stop
 **无人值守长跑姿势**：`daemon start --resume-on-start` → `daemon supervise` → 派发任务 → `daemon health` 巡检。
 （长跑 dogfood 本身需真实 token 预算 + 能盯着暴露的 bug，见 `docs/archive/m7-audit.md`。）
 
+### 认证清单门禁（D10，部署级，默认关；0046 §5 步⑨）
+
+MCP 边界的 `run_dispatch` 可选升级为"只派认证清单成员"（Owner 指令"派发任务永远派发认证清单中的"的机器化；ADR 0018 的 advisory 语义在门关着时原样保留）：
+
+- **开**：`setx WAO_MCP_REQUIRE_CERTIFIED 1` 后**重启宿主**（环境变量在 MCP 服务进程 spawn 时定格，模型不可经 tool args 翻转/绕过）；**回退**：删除该变量 + 重启。
+- **成员资格**：`selectCertRecord` 双空间命中（席位键直查→车道指纹扫描）且 status ∈ {certified, conditional}——例外条款族的 conditional 是常态；**新鲜度不进门**（30 天跑步机是展示事实，不是拒绝理由）。
+- **边界**：门禁只驻 MCP 边界（模型可达面）。CLI 保持 Owner/Lead 特权通道——认证 drill 本身经 CLI 自举（`npm run reliability -- --agent <lane>`），全局门=自举悖论。
+- **fail-closed**：台账缺失/不可读/键空间不对=拒绝（固定文案含纠正路径）。
+- 翻转前建议全量刷绿一轮（新车道先认证再开门）；2026-10-06 真机实证：门开+sol（certified）真派发放行、空台账 fail-closed 拒绝。
+
 ---
 
 ## 三、transcript 格式

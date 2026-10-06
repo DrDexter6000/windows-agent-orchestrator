@@ -182,6 +182,9 @@ import {
 } from "../application/consultService.js";
 import { readRegistry } from "../registry.js";
 import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "../dispatchResolution.js";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { selectCertRecord } from "../runManager.js";
 import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
 import {
   runDeliveryRepackage,
@@ -3866,6 +3869,49 @@ export function createWaoMcpServer({
         };
       }
       const agentIdInput = effectiveAgentId;
+      // 0046 §5 步⑨（D10 认证清单门禁——部署级开关，默认关）：
+      // WAO_MCP_REQUIRE_CERTIFIED=1 时，MCP 边界的 run_dispatch 只放行认证清单
+      // 成员（成员资格=selectCertRecord 双空间命中且 status ∈ {certified,
+      // conditional}——例外条款族的 conditional 是常态；新鲜度不进门，保持展示）。
+      // 语义边界（会审三席共识）：门禁只驻 MCP 边界（模型可达面）——CLI 保持
+      // Owner/Lead 特权通道（认证 drill 本身经 CLI 自举，全局门=自举悖论）；
+      // 台账缺失/不可读=门开着时 fail-closed；环境变量在宿主进程 spawn 时定格，
+      // 模型不可经 tool args 翻转。翻转/回退：setx WAO_MCP_REQUIRE_CERTIFIED 1
+      // （或删除该变量回退）+ 重启宿主。这是 ADR 0018"advisory 非门禁"的 0046 §1.4
+      // 部署级修订（Owner 指令：派发只派认证清单中的），非全局翻默认。
+      if (process.env.WAO_MCP_REQUIRE_CERTIFIED === "1") {
+        let gateRecord = null;
+        let ledgerState = "ok";
+        try {
+          const summary = JSON.parse(await readFile(join(runDir, "reliability-summary.json"), "utf8"));
+          let gateAgent = null;
+          try {
+            const gateRegistry = await readRegistry(registryPath);
+            gateAgent = gateRegistry.getAgent(agentIdInput);
+          } catch {
+            gateAgent = null;
+          }
+          gateRecord = gateAgent ? selectCertRecord(summary, gateAgent, agentIdInput) ?? null : null;
+          if (summary?.ledgerKeySpace !== "lane-v1") ledgerState = "keyspace";
+        } catch {
+          ledgerState = "unreadable";
+        }
+        const inList = ledgerState === "ok" && gateRecord !== null
+          && (gateRecord.status === "certified" || gateRecord.status === "conditional");
+        if (!inList) {
+          return {
+            isError: true,
+            content: [{
+              type: "text",
+              text: "run_dispatch refused by the certification-list gate (WAO_MCP_REQUIRE_CERTIFIED=1): "
+                + `lane ${agentIdInput} has no certified/conditional record in the certification ledger `
+                + `(ledger state: ${ledgerState}). Dispatch only dispatches list members (decision 0046). `
+                + "Certify via the CLI privileged channel (npm run reliability -- --agent <lane>), then retry. "
+                + "The gate is deployment-level and MCP-boundary only; it cannot be changed from tool arguments.",
+            }],
+          };
+        }
+      }
       // Round 4 Bundle B: readOnly × delivery is a contradictory declaration.
       // Handler-layer mutual exclusion (M9-2B-01: NOT a top-level schema
       // .refine() — that breaks tools/list JSON-schema serialization). The
@@ -4354,14 +4400,28 @@ export function createWaoMcpServer({
       } catch {
         return { isError: true, content: [{ type: "text", text: RUN_CONSULT_ERROR_TEXT }] };
       }
-      const missing = seatIds.filter((id) => {
+      // 0046 ⑨：席位门走与 CLI 同款解析——席位名可能是车道别名（本会话首腿实测
+      // 踩中：MCP 门裸 getAgent 拒掉别名席位，CLI 路径在 dogfood 时已修同款）。
+      // 别名表当前为空（0046 步⑥），此修复为机制一致性——未来别名回用时不再漏。
+      const consultSeatLaneId = (id) => {
         try {
           registry.getAgent(id);
-          return false;
+          return id;
         } catch {
-          return true;
+          // fallthrough 到别名解析
         }
-      });
+        try {
+          const lanesDoc = loadLanesConfig();
+          const registryAgents = Object.fromEntries(registry.listAgents().map((a) => [a.id, a]));
+          const resolution = resolveDispatchTarget({
+            agentId: id, lanesDoc, registryAgents, roleLibrary: listRoleLibrary(),
+          });
+          return resolution.kind === "resolved" ? resolution.agentId : null;
+        } catch {
+          return null;
+        }
+      };
+      const missing = seatIds.filter((id) => consultSeatLaneId(id) === null);
       if (missing.length > 0) {
         return {
           isError: true,
