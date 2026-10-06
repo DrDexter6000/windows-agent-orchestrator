@@ -661,7 +661,6 @@ export class KimiWebBackend {
       factor: NO_PROGRESS_FACTOR,
       ...(typeof stallClock === "function" ? { now: stallClock } : {}),
     });
-    const stallNow = typeof stallClock === "function" ? stallClock : () => performance.now();
     let attestedSilentMs = 0;
     let livenessAttestations = 0;
     // R9 F4：闭集外 state 的独立有界计数——turn 在场且 state 不在支持闭集的
@@ -835,9 +834,11 @@ export class KimiWebBackend {
             );
             return;
           }
-          // 证词续命：重置静默段（不重置 signature 基线——后续拍若仍零帧会再次
-          // 走本门、再次取证词，形成 ~floor 周期的活体复核）。
-          stallTracker.noteProgress();
+          // 证词续命：resetSilent 清静默段但不喂自适应学习（opus 补席审计：noteProgress
+          // 会把续命段记成已恢复间隙，预算自放大后真挂死发现退到 180-240s）。不重置
+          // signature 基线——后续拍若仍零帧会再次走本门、再次取证词；复核周期=
+          // 当前预算（floor 起步，随真实恢复间隙自适应，证词不参与放大）。
+          stallTracker.resetSilent();
         }
       }
       await sleep(interval);

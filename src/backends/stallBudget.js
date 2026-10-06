@@ -89,6 +89,15 @@ export function createStallTracker({ floorMs, ceilingMs, factor, now = () => per
       if (Number.isFinite(gap) && gap > maxObservedGapMs) maxObservedGapMs = gap;
       if (Number.isFinite(t)) lastProgressAt = t;
     },
+    // 0046 B5②（opus 补席审计保留点）：证词续命专用复位——清当前静默段但**不**把
+    // 该段记入 maxObservedGap（noteProgress 会，导致预算 60→180→240s 自放大、
+    // 续命后真挂死发现退到 180-240s）。被证词续命的静默是"零产出的活"，不是
+    // "已恢复间隙"——不是学习材料。
+    resetSilent() {
+      const t = now();
+      if (Number.isFinite(t)) lastProgressAt = t;
+      primed = true;
+    },
     stallMs() {
       const g = now() - lastProgressAt;
       return Number.isFinite(g) && g > 0 ? g : 0;

@@ -3382,14 +3382,30 @@ export function createWaoMcpServer({
     const failing = [];
     for (const id of laneIds) {
       let record = null;
+      let agent = null;
       try {
-        const agent = registryForGate?.getAgent(id);
+        agent = registryForGate?.getAgent(id) ?? null;
         record = agent ? selectCertRecord(summary, agent, id) ?? null : null;
       } catch {
         record = null;
       }
+      // opus 补席审计盲区修（Owner B1 批复精神延伸；2026-10-06）：持久 effort 漂移
+      // 的机制约束——记录 executionProfile.effort（已知时）与车道当前 reasoning.effort
+      // 不一致=不在清单（一次性 reasoning 覆盖已拒，配置漂移不能成为旁路）。
+      // 三态纪律同 TD-186：null≡null（通道不可表达）；画像未记录 effort（legacy）
+      // =不可判定，不按 mismatch 猜（比对跳过，status 语义不变）。
+      let effortDrifted = false;
+      const profileEffort = record?.executionProfile?.effort;
+      if (record !== null && typeof profileEffort === "string") {
+        const laneEffort = agent?.reasoning?.effort ?? null;
+        effortDrifted = laneEffort !== profileEffort;
+      } else if (record !== null && profileEffort === null) {
+        const laneEffort = agent?.reasoning?.effort ?? null;
+        effortDrifted = laneEffort !== null;
+      }
       const inList = record !== null
-        && (record.status === "certified" || record.status === "conditional");
+        && (record.status === "certified" || record.status === "conditional")
+        && !effortDrifted;
       if (!inList) failing.push(id);
     }
     return failing;
@@ -3957,19 +3973,22 @@ export function createWaoMcpServer({
             }],
           };
         }
-        // B1（Owner 2026-10-06 批）：reasoning(effort) 覆盖同拒——车道内容指纹含 effort
-        // 轴（lanes.json G4 断言面），放行覆盖=已认证车道为未取证执行参数背书，与
-        // model 覆盖同洞（0046 §1.9 effort 调整=delta 重取证）。
+        // B1（Owner 2026-10-06 批）：reasoning(effort) 覆盖同拒——**政策取向而非指纹
+        // 推论**（身份指纹=四元组，effort 有意不进指纹；effort 只在 G4 断言面）：
+        // 已认证记录不能为未取证的执行参数背书（0046 §1.9 effort 调整=delta 重取证）。
+        // 持久配置漂移的同族机制约束=门禁侧 effort 比对（见 certGateFailingLanes，
+        // opus 补席审计盲区修，Owner B1 批复精神延伸）。
         if (failing !== null && reasoning !== undefined) {
           return {
             isError: true,
             content: [{
               type: "text",
               text: "run_dispatch refused by the certification-list gate (WAO_MCP_REQUIRE_CERTIFIED=1): "
-                + "per-dispatch reasoning override is mutually exclusive with the gate (the lane content "
-                + "fingerprint covers the effort axis — a certified record cannot vouch for an uncertified "
-                + "effort; effort changes require delta re-evidence per 0046 §1.9). Remove the reasoning "
-                + "override, or re-certify the lane at the new effort.",
+                + "per-dispatch reasoning override is mutually exclusive with the gate — a certified record "
+                + "cannot vouch for an uncertified effort (policy per Owner ruling 2026-10-06; the identity "
+                + "fingerprint deliberately excludes effort, and persistent effort drift is covered by the "
+                + "gate's executionProfile comparison; effort changes require delta re-evidence per 0046 §1.9). "
+                + "Remove the reasoning override, or re-certify the lane at the new effort.",
             }],
           };
         }
