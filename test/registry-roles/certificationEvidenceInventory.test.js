@@ -30,6 +30,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { assessCertEvidenceApplicability } from "../../src/application/registryInventory.js";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
@@ -1208,4 +1209,27 @@ test("TD-186 B CLI: --cert-evidence --format json 输出 {agents, certificationE
   } finally {
     cleanupDir(dir);
   }
+});
+
+// ── 0046 §6：TD-186 三态修订——"通道不可表达"≠"证据缺失" ────────────────────
+
+test("0046 §6：kimi 形（画像 effort=null + 配置不表达）= 声明态——matched 而非 undeterminable", () => {
+  const rec = {
+    backend: "kimi-web", modelId: "kimi-code/k3-256k", providerID: null, providerKey: null,
+    executionProfile: { modelId: "kimi-code/k3-256k", providerID: null, providerKey: null, effort: null,
+      runtime: { distribution: "kimi-web" }, codeRef: "x", capturedAt: "2026-10-06T00:00:00Z", drillRunIds: {} },
+    lastFullHealthyRunAt: new Date().toISOString(),
+  };
+  const agent = { backend: "kimi-web", model: { id: "kimi-code/k3-256k" } };
+  const r = assessCertEvidenceApplicability({
+    agent, ledgerState: "ok", workerRecord: rec, now: new Date().toISOString(),
+  });
+  assert.equal(r.applicability, "matched", "双侧同不表达=声明态，非证据缺失（0046 §6）");
+  assert.deepEqual(r.limitations.filter((l) => l.startsWith("execution-profile-incomplete")), []);
+  // 反例：画像 null 而配置声明了 effort（形状矛盾）——仍不得 matched。
+  const r2 = assessCertEvidenceApplicability({
+    agent: { backend: "kimi-web", model: { id: "kimi-code/k3-256k" }, reasoning: { effort: "high" } },
+    ledgerState: "ok", workerRecord: rec, now: new Date().toISOString(),
+  });
+  assert.notEqual(r2.applicability, "matched", "画像不表达+配置有声明的矛盾形状不得 matched");
 });

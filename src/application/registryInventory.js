@@ -684,11 +684,17 @@ function projectWorkerEvidenceRecord(record) {
  * 反例由这里关死：缺身份 = 无法证明，绝不能 matched。
  * @private
  */
-function invalidProfileIdentityFields(profile) {
+function invalidProfileIdentityFields(profile, { effortUnexpressed = false } = {}) {
   const isNonEmptyString = (v) => typeof v === "string" && v.length > 0;
   const invalid = [];
   if (!isNonEmptyString(profile.modelId)) invalid.push("modelId");
-  if (!isNonEmptyString(profile.effort)) invalid.push("effort");
+  // 0046 §6（TD-186 三态修订）："通道不可表达"≠"证据缺失"——画像 effort=null 在
+  // 当前席位同样不表达 effort（kimi-web 形，行为面配了即拒）时是**声明态**而非
+  // 缺失：完整性通过，比对层 null≡null 相等。effortUnexpressed 由调用方按当前
+  // 配置派生（declaredEffort 为 null/缺席）；仅画像侧 null 而配置侧有声明的
+  // 形状仍判缺（记录与配置对通道表达力的声明矛盾，走 mismatch 路径前的完整性
+  // 拦截——不伪装成 matched）。
+  if (!isNonEmptyString(profile.effort) && !(effortUnexpressed && profile.effort === null)) invalid.push("effort");
   if (profile.providerID !== null && !isNonEmptyString(profile.providerID)) invalid.push("providerID");
   if (profile.providerKey !== null && !isNonEmptyString(profile.providerKey)) invalid.push("providerKey");
   return invalid;
@@ -782,7 +788,8 @@ export function assessCertEvidenceApplicability({
   }
   // 复核反例①收口：四元组完整性 fail-closed——任一字段缺失/非字符串/空 ⇒
   // undeterminable（绝不能 matched）。
-  const invalidFields = invalidProfileIdentityFields(profile);
+  const declaredEffortForShape = agent?.reasoning?.effort ?? null;
+  const invalidFields = invalidProfileIdentityFields(profile, { effortUnexpressed: declaredEffortForShape === null });
   if (invalidFields.length > 0) {
     limitations.push(
       `execution-profile-incomplete:${invalidFields.join("+")}（画像身份四元组不完整：modelId/effort 须非空字符串，providerID/providerKey 须非空字符串或 null=无接入方；缺身份 = 无法证明，绝不能 matched）`,
