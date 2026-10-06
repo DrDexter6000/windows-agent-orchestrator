@@ -213,3 +213,64 @@ test("D10 双洞②：门开 + run_consult 席位不在清单 = 整体拒绝点�
     }
   } finally { cleanupDir(dir); }
 });
+
+// ── B1/B4 回归钉（Owner 2026-10-06 批） ─────────────────────────────────────
+
+test("B1：门开 + per-dispatch reasoning 覆盖 = 拒绝（effort 轴在指纹内，同洞 P1-1）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-gate-b1-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: {
+      fresh_lane: { backend: "codex", model: { id: "gpt-6.1-sol" }, reasoning: { effort: "high" }, cwd: dir },
+    } }), "utf8");
+    const runDir = join(dir, "runs");
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, "reliability-summary.json"), JSON.stringify({
+      ledgerKeySpace: "lane-v1", workers: { fresh_lane: CERTIFIED_REC },
+    }), "utf8");
+    let dispatched = null;
+    const server = createWaoMcpServer({
+      registryPath, runDir, workspaceRoot: dir, certGateOverride: true,
+      dispatchRunFn: async (args) => { dispatched = args; return { runId: "r", state: "submitted" }; },
+    });
+    try {
+      const client = await buildInMemoryClient(server);
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: { agentId: "fresh_lane", prompt: "x", reasoning: "max" },
+      });
+      const text = res.content?.find((b) => b.type === "text")?.text ?? "";
+      assert.equal(dispatched, null, "reasoning 覆盖×门开=零 dispatch");
+      assert.equal(Boolean(res.isError), true);
+      assert.match(text, /reasoning override is mutually exclusive with the gate/);
+      assert.match(text, /delta re-evidence per 0046/);
+    } finally { await server.close(); }
+  } finally { cleanupDir(dir); }
+});
+
+test("B1 负钉：门关 + reasoning 覆盖 = 正常透传（advisory 语义不变）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-gate-b1n-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: {
+      fresh_lane: { backend: "codex", model: { id: "gpt-6.1-sol" }, reasoning: { effort: "high" }, cwd: dir },
+    } }), "utf8");
+    const runDir = join(dir, "runs");
+    mkdirSync(runDir, { recursive: true });
+    let dispatched = null;
+    const server = createWaoMcpServer({
+      registryPath, runDir, workspaceRoot: dir, certGateOverride: false,
+      dispatchRunFn: async (args) => { dispatched = args; return { runId: "r", state: "submitted" }; },
+    });
+    try {
+      const client = await buildInMemoryClient(server);
+      await client.callTool({
+        name: "run_dispatch",
+        arguments: { agentId: "fresh_lane", prompt: "x", reasoning: "max" },
+      });
+      assert.ok(dispatched, "门关=reasoning 覆盖正常透传");
+    } finally { await server.close(); }
+  } finally { cleanupDir(dir); }
+});

@@ -143,6 +143,13 @@ const SHAPE_DRIFT_POLL_LIMIT = 8;
 const NO_PROGRESS_FLOOR_MS = 60_000;
 const NO_PROGRESS_FACTOR = 3;
 const NO_PROGRESS_CEILING_MS = 240_000;
+// 0046 B5 根因修复（Owner 2026-10-06 否决短 brief 降质绕法）：预算击发前先取
+// serve 活体证词（sessionDetail 的 main_turn_active/busy）——K3 长 dense brief 首
+// 拍重思考零帧是活轮不是停滞（当日四杀实证），证词为真 = noteProgress 重置静默
+// 段继续观察；证词为假/取不到 = 照杀（fail-closed 防真挂死）。证词续命有硬墙钟
+// 顶：单 turn 墙钟超此值即使活着也收口（真失控保护——serve 自身死循环时 WAO
+// 仍有界）。
+const LIVENESS_ATTESTED_TURN_CAP_MS = 30 * 60_000;
 
 // completed 轮 usage 求和的字段映射（kimi usage 四计数 → metrics 轴）：
 // inputOther→input、output→output、inputCacheRead→cacheRead、
@@ -652,6 +659,9 @@ export class KimiWebBackend {
       factor: NO_PROGRESS_FACTOR,
       ...(typeof stallClock === "function" ? { now: stallClock } : {}),
     });
+    const stallNow = typeof stallClock === "function" ? stallClock : () => performance.now();
+    let turnFirstSeenAt = null;
+    let livenessAttestations = 0;
     // R9 F4：闭集外 state 的独立有界计数——turn 在场且 state 不在支持闭集的
     // **连续**拍数（turn 消失或 state 回闭集内即清零）。steps/frames 增长**不**
     // 清零此计数（与普通停滞门分工：那守"受支持的非终态停滞"，这守"状态本身
@@ -783,6 +793,7 @@ export class KimiWebBackend {
       // 杀实录见常量注释），轮内节奏自放大，硬顶保有界（顶约束静默段而非墙钟）。
       const signature = turnSignature(turn);
       if (!turnSeen || signature !== lastSignature) {
+        if (!turnSeen) turnFirstSeenAt = stallNow();
         turnSeen = true;
         lastSignature = signature;
         noProgressPolls = 0;
@@ -791,13 +802,40 @@ export class KimiWebBackend {
         noProgressPolls += 1;
         if (stallTracker.stallMs() >= stallTracker.budgetMs()) {
           const d = stallTracker.diagnostics();
-          yield doneEvent(
-            "failed",
-            `turn stalled (no progress): silent stretch ${Math.round(stallTracker.stallMs())}ms exceeded adaptive budget `
-              + `${Math.round(d.floorMs)}ms floor / ×${d.factor} / ${Math.round(d.ceilingMs)}ms ceiling; `
-              + `max recovered gap this turn ${Math.round(d.maxObservedGapMs)}ms (bounded exit)`,
-          );
-          return;
+          // 0046 B5：活体证词先行——serve 说 turn 还在跑（main_turn_active/busy 任一
+          // 严格 true）就不是停滞：重置静默段继续等（硬墙钟顶另收口）。证词请求
+          // 失败/形状不符（sessionDetail 抛错）= 无证词 = 照杀（fail-closed）。
+          let attestedActive = false;
+          try {
+            const detail = await this.sessionDetail(agent, sessionId);
+            attestedActive = detail?.main_turn_active === true || detail?.busy === true;
+          } catch {
+            attestedActive = false;
+          }
+          if (!attestedActive) {
+            yield doneEvent(
+              "failed",
+              `turn stalled (no progress): silent stretch ${Math.round(stallTracker.stallMs())}ms exceeded adaptive budget `
+                + `${Math.round(d.floorMs)}ms floor / ×${d.factor} / ${Math.round(d.ceilingMs)}ms ceiling; `
+                + `max recovered gap this turn ${Math.round(d.maxObservedGapMs)}ms (bounded exit`
+                + `${livenessAttestations > 0 ? `; ${livenessAttestations} prior liveness attestation(s)` : ""})`,
+            );
+            return;
+          }
+          livenessAttestations += 1;
+          const turnWallMs = stallNow() - (turnFirstSeenAt ?? stallNow());
+          if (turnWallMs >= LIVENESS_ATTESTED_TURN_CAP_MS) {
+            yield doneEvent(
+              "failed",
+              `turn stalled: serve-attested active turn exceeded the ${Math.round(LIVENESS_ATTESTED_TURN_CAP_MS / 60_000)}min hard wall cap `
+                + `(${Math.round(turnWallMs)}ms across ${livenessAttestations} attestation(s); adaptive budget diagnostics: `
+                + `floor ${Math.round(d.floorMs)}ms / ×${d.factor} / ceiling ${Math.round(d.ceilingMs)}ms) — bounded exit despite liveness`,
+            );
+            return;
+          }
+          // 证词续命：重置静默段（不重置 signature 基线——后续拍若仍零帧会再次
+          // 走本门、再次取证词，形成 ~floor 周期的活体复核）。
+          stallTracker.noteProgress();
         }
       }
       await sleep(interval);

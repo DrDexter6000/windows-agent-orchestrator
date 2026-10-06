@@ -3957,6 +3957,22 @@ export function createWaoMcpServer({
             }],
           };
         }
+        // B1（Owner 2026-10-06 批）：reasoning(effort) 覆盖同拒——车道内容指纹含 effort
+        // 轴（lanes.json G4 断言面），放行覆盖=已认证车道为未取证执行参数背书，与
+        // model 覆盖同洞（0046 §1.9 effort 调整=delta 重取证）。
+        if (failing !== null && reasoning !== undefined) {
+          return {
+            isError: true,
+            content: [{
+              type: "text",
+              text: "run_dispatch refused by the certification-list gate (WAO_MCP_REQUIRE_CERTIFIED=1): "
+                + "per-dispatch reasoning override is mutually exclusive with the gate (the lane content "
+                + "fingerprint covers the effort axis — a certified record cannot vouch for an uncertified "
+                + "effort; effort changes require delta re-evidence per 0046 §1.9). Remove the reasoning "
+                + "override, or re-certify the lane at the new effort.",
+            }],
+          };
+        }
       }
       // Round 4 Bundle B: readOnly × delivery is a contradictory declaration.
       // Handler-layer mutual exclusion (M9-2B-01: NOT a top-level schema
@@ -4577,6 +4593,36 @@ export function createWaoMcpServer({
           isError: true,
           content: [{ type: "text", text: CONTINUE_VERIFICATION_REQUIRED_TEXT }],
         };
+      }
+      // B4（Owner 2026-10-06 批）：认证门禁覆盖续接——"父 run 创建时已过门"只在门
+      // 恒开时成立，台账可能在中间把车道刷掉；continue 启动的是新执行，按父 run
+      // 的装配（其 agentId）过同一个共享判定，不在清单即拒（零派发零 fork）。
+      {
+        const parentAgentId = await (async () => {
+          try {
+            const status = await getRunStatus({ runId: parentRunId, runDir });
+            return status?.agentId ?? null;
+          } catch {
+            return null;
+          }
+        })();
+        if (parentAgentId) {
+          const failingParent = await certGateFailingLanes([parentAgentId]);
+          if (failingParent !== null && failingParent.length > 0) {
+            return {
+              isError: true,
+              content: [{
+                type: "text",
+                text: `run_continue refused by the certification-list gate (WAO_MCP_REQUIRE_CERTIFIED=1): `
+                  + `parent lane ${failingParent.join(", ")} has no certified/conditional record in the certification `
+                  + "ledger. Continuation launches new execution and re-checks the parent assembly (decision 0046, "
+                  + "Owner ruling 2026-10-06). Certify via the CLI privileged channel, then retry.",
+              }],
+            };
+          }
+        }
+        // parentAgentId 解析失败（如转录不可读）：不在门上猜——continueService 自己
+        // 的父校验会处理无效父，这里不重复 fail（门只对可证明的缺席拒）。
       }
 
       let result;

@@ -2345,3 +2345,121 @@ test("kimi-web ⑬b: GET 401 且正文恰含 \"fetch failed\" → 仍恰一次�
   );
   assert.equal(attempts, 1, "正文碰撞词不得把 401 变成瞬态——旧判定此处会重试");
 });
+
+// ── 0046 B5 根因修复：活体证词停滞门（Owner 2026-10-06 否决短 brief 降质绕法） ──
+
+/** 可控 detail 的脚本服务器包装：silentDetail 控预算击发时的活体证词。 */
+function attestedScriptServer(sessionId, { script, detailMode = "active" }) {
+  const inner = turnScriptServer(sessionId, { script });
+  let detailCalls = 0;
+  let submitted = false;
+  const handler = (url, init, n) => {
+    if (url === `http://127.0.0.1:4310/api/v1/sessions/${sessionId}`) {
+      // 提交前（F3 静默门）恒 idle——active/throw 证词只在提交后的预算复核出现。
+      if (!submitted) return detailEnvelope(sessionId, false, false, null);
+      detailCalls += 1;
+      if (detailMode === "active") return detailEnvelope(sessionId, false, true, null);
+      if (detailMode === "throw") throw new Error("detail probe failed");
+      return detailEnvelope(sessionId, false, false, null);
+    }
+    return inner.handler(url, init, n);
+  };
+  return {
+    handler,
+    markSpawned: () => { submitted = true; inner.markSpawned(); },
+    polls: inner.polls,
+    detailCalls: () => detailCalls,
+  };
+}
+
+test("kimi-web B5①: 预算击发 + serve 证词 main_turn_active=true → 续命不杀，最终 completed", async () => {
+  // 场景=当日四杀实录：turn 在场、state running、steps/frames 零增长（K3 首 拍
+  // 重思考零帧），静默段超预算——但 serve 说 turn 活着 → noteProgress 续命，
+  // 多轮静默多次续命后 transcript 终态完成。
+  const frozen = [turnItem({
+    state: "running",
+    endedAt: null,
+    durationMs: null,
+    steps: [stepItem({ state: "running", frames: [] })],
+  })];
+  const completed = [turnItem({
+    steps: [stepItem({ frames: [{ kind: "text", text: "long-thought-answer", role: "assistant" }] })],
+  })];
+  // 15 拍冻结（假钟每拍 transcript +10s：第 7 拍首超 60s 预算、其后每 7 拍左右
+  // 再超一次=多轮续命），第 16 拍完成。
+  const script = [...Array(15).fill(frozen), completed];
+  const { handler, markSpawned, detailCalls } = attestedScriptServer("session_b5a", { script, detailMode: "active" });
+  const fakeNow = { v: 0 };
+  const clockedHandler = (url, init, n) => {
+    if (url.includes("/transcript")) fakeNow.v += 10_000;
+    return handler(url, init, n);
+  };
+  const { fetchImpl } = kimiServer(clockedHandler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 1, stallClock: () => fakeNow.v })) {
+    events.push(ev);
+  }
+  const done = events.at(-1);
+  assert.equal(done.reason, "completed", "活轮绝不因零帧静默被误杀（证词续命）");
+  assert.ok(!JSON.stringify(events).includes("turn stalled"), "从未走停滞出口");
+  // 自适应预算在证词续命后会放大（3×已恢复间隙），本脚本长度内可能只复核一次——
+  // 断言语义：≥1 次证词 + 轮询越过原必死点（无证词时第 7 拍已死，16 拍完成）。
+  assert.ok(detailCalls() >= 1, `至少一轮活体复核（实际 ${detailCalls()}）`);
+});
+
+test("kimi-web B5②: 证词活着但超 30min 硬墙钟顶 → 收口 failed（真失控保护）", async () => {
+  const frozen = [turnItem({
+    state: "running",
+    endedAt: null,
+    durationMs: null,
+    steps: [stepItem({ state: "running", frames: [] })],
+  })];
+  const { handler, markSpawned } = attestedScriptServer("session_b5b", { script: [frozen], detailMode: "active" });
+  const fakeNow = { v: 0 };
+  const clockedHandler = (url, init, n) => {
+    // 每拍大幅推进：6 拍即 31min 墙钟（第 7 拍击 60s 预算→首证词时墙钟已超顶）。
+    if (url.includes("/transcript")) fakeNow.v += 310_000;
+    return handler(url, init, n);
+  };
+  const { fetchImpl } = kimiServer(clockedHandler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 1, stallClock: () => fakeNow.v })) {
+    events.push(ev);
+  }
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /serve-attested active turn exceeded the 30min hard wall cap/);
+  assert.match(done.error, /despite liveness/);
+});
+
+test("kimi-web B5③: 预算击发 + 证词请求失败 → 照杀（fail-closed：无证词=无续命）", async () => {
+  const frozen = [turnItem({
+    state: "running",
+    endedAt: null,
+    durationMs: null,
+    steps: [stepItem({ state: "running", frames: [] })],
+  })];
+  const { handler, markSpawned } = attestedScriptServer("session_b5c", { script: [frozen], detailMode: "throw" });
+  const fakeNow = { v: 0 };
+  const clockedHandler = (url, init, n) => {
+    if (url.includes("/transcript")) fakeNow.v += 10_000;
+    return handler(url, init, n);
+  };
+  const { fetchImpl } = kimiServer(clockedHandler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 1, stallClock: () => fakeNow.v })) {
+    events.push(ev);
+  }
+  const done = events.at(-1);
+  assert.equal(done.reason, "failed");
+  assert.match(done.error, /turn stalled \(no progress\)/);
+});
