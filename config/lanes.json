@@ -1,6 +1,6 @@
 {
   "schema": 2,
-  "_comment": "0045 §1.1 车道注册表（git 跟踪、无密钥）。lane id=人读定位名（非身份；身份=四元组指纹，见 src/application/identityProjection.js）。W4d 终局：接线=私有注册表 config/agents.json 的车道键条目（laneId 直取），本表不再携带接线引用；车道字段只断言不生效（注册表赢，不一致即拒）。aliases=老席位名注解（§1.4：只在派发边界解析为身份注记，不改执行——别名派发仍走 registry 原条目，行为零变化）。0046 §5 步②（2026-10-06）：车道键模型名化（kimi-k3→kimi / gpt-astra→astra / gpt-sol-61→sol / claude-opus→opus / ds-acp→deepseek-pro；glm-pro/glm-flash 不变），旧键入 LEGACY_AGENT_NAMES 历史冻结名单；别名表暂留（⑥步全删），目标已随键同步重指向。 0046 步③④b：effort 轴同步（G4 断言面）+deepseek 双车道；deepseek-flash 无历史别名（空表）。",
+  "_comment": "0045 §1.1 车道注册表（git 跟踪、无密钥）。lane id=人读定位名（非身份；身份=四元组指纹，见 src/application/identityProjection.js）。W4d 终局：接线=私有注册表 config/agents.json 的车道键条目（laneId 直取），本表不再携带接线引用；车道字段只断言不生效（注册表赢，不一致即拒）。aliases=老席位名注解机制（0045 §1.4）。0046 §5 步⑥（2026-10-06）：旧席位名别名表全数清空（Owner 裁定\"彻底抛弃旧命名\"）——机制保留（空表合法），历史名已入 LEGACY_AGENT_NAMES 显示投影；角色与席位彻底解绑，角色按任务显式 --role 选择。 0046 步③④b：effort 轴同步（G4 断言面）+deepseek 双车道；deepseek-flash 无历史别名（空表）。 0046 步③④b：effort 轴同步（G4 断言面）+deepseek 双车道；deepseek-flash 无历史别名（空表）。",
   "lanes": [
     {
       "id": "glm-flash",
@@ -11,14 +11,7 @@
       "reasoning": {
         "effort": "max"
       },
-      "aliases": {
-        "researcher": {
-          "role": "researcher"
-        },
-        "coder_low": {
-          "role": "coder_low"
-        }
-      }
+      "aliases": {}
     },
     {
       "id": "glm-pro",
@@ -29,11 +22,7 @@
       "reasoning": {
         "effort": "max"
       },
-      "aliases": {
-        "coder_hq": {
-          "role": "coder_hq"
-        }
-      }
+      "aliases": {}
     },
     {
       "id": "kimi",
@@ -44,11 +33,7 @@
       "reasoning": {
         "effort": null
       },
-      "aliases": {
-        "coder_mm": {
-          "role": "coder_mm"
-        }
-      }
+      "aliases": {}
     },
     {
       "id": "gpt-sol-56",
@@ -59,11 +44,7 @@
       "reasoning": {
         "effort": "xhigh"
       },
-      "aliases": {
-        "tester": {
-          "role": "tester"
-        }
-      }
+      "aliases": {}
     },
     {
       "id": "astra",
@@ -74,11 +55,7 @@
       "reasoning": {
         "effort": "high"
       },
-      "aliases": {
-        "auditor": {
-          "role": "auditor"
-        }
-      }
+      "aliases": {}
     },
     {
       "id": "sol",
@@ -89,11 +66,7 @@
       "reasoning": {
         "effort": "high"
       },
-      "aliases": {
-        "coder_temp": {
-          "role": "coder_low"
-        }
-      }
+      "aliases": {}
     },
     {
       "id": "deepseek-pro",
@@ -105,11 +78,7 @@
       "reasoning": {
         "effort": "max"
       },
-      "aliases": {
-        "coder_low_dsh": {
-          "role": "coder_low"
-        }
-      }
+      "aliases": {}
     },
     {
       "id": "deepseek-flash",
@@ -132,11 +101,7 @@
       "reasoning": {
         "effort": "high"
       },
-      "aliases": {
-        "auditor_claude": {
-          "role": "auditor"
-        }
-      }
+      "aliases": {}
     }
   ]
 }

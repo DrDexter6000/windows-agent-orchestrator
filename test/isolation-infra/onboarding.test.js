@@ -1369,40 +1369,38 @@ test("R6-C: recommendations are additive; every pre-existing result key is prese
   assert.equal(err.recommendations.advisory, RECOMMENDATIONS_ADVISORY);
 });
 
-test("R6-C: recommendations over the REAL tracked template derive all seven rows from template data", async () => {
+test("R6-C: recommendations over the REAL tracked template derive all rows from template data（0046 车道键模板）", async () => {
   const raw = readFileSync(join("config", "agents.example.json"), "utf8");
   const template = JSON.parse(raw);
   const candidates = buildCandidateList(template);
-  assert.equal(candidates.length, 7, "real template has the seven workers");
+  assert.equal(candidates.length, 8, "0046 real template has the eight lanes");
   const rec = await buildRecommendations(candidates, template, {
     hasCli: async () => true,
     hasKeyEnv: async (n) => (n === "ZHIPU_API_KEY" ? "process_env" : "missing"),
   });
-  assert.equal(rec.rows.length, 7);
+  assert.equal(rec.rows.length, 8);
   const byId = Object.fromEntries(rec.rows.map((r) => [r.id, r]));
-  assert.equal(byId.coder_hq.requiresKeyEnv, "ZHIPU_API_KEY");
-  // 2026-09-17 Owner 裁定：researcher/coder_low 由 DeepSeek 切智谱 GLM-5.3-Flash[1m]。
-  assert.equal(byId.researcher.requiresKeyEnv, "ZHIPU_API_KEY");
-  assert.equal(byId.coder_low.requiresKeyEnv, "ZHIPU_API_KEY");
-  // 2026-10-01 Owner 裁定 coder_mm 通道 kimi-code CLI → kimi-web（模板 2026-10-05
-  // 巡检补账轮对齐）：就绪映射从 CLI 登录态变为 tokenEnv 凭据 + 无 CLI（HTTP attach）。
-  // 如实钉现状：推荐矩阵层尚未建模 kimi-web 的凭据就绪（tokenEnv 不进 requiresKeyEnv
-  // 派生；与 doctor 对 kimi-web/zcode 无就绪映射的在册缺口同族——待该面增强时翻新）。
-  assert.equal(byId.coder_mm.requiresKeyEnv, null);
-  assert.equal(byId.coder_mm.requiresCli, null, "kimi-web is HTTP attach — no CLI to probe");
-  assert.equal(byId.tester.requiresKeyEnv, null, "tester uses codex login");
-  assert.equal(byId.tester.requiresCli, "codex");
-  assert.equal(byId.auditor.requiresKeyEnv, null, "auditor uses codex login (2026-09-17 switch)");
-  assert.equal(byId.auditor.requiresCli, "codex");
-  assert.equal(byId.coder_opencode_fallback.requiresKeyEnv, null);
-  assert.equal(byId.coder_opencode_fallback.requiresCli, "opencode");
-  assert.equal(byId.coder_hq.readyState, "ready");
-  assert.equal(byId.researcher.readyState, "ready", "ZHIPU key present in the fake probe (process_env)");
-  // duty/authNote all come from template rows (no hand-written role table).
-  assert.ok(byId.researcher.duty.startsWith("适合任务: "));
-  assert.ok(byId.auditor.duty.startsWith("适合任务: "));
-  // 2026-09-17 auditor 切 codex/GPT-6-astra（claude 订阅取消）：认证注记标记词随模板更新。
-  assert.ok(byId.auditor.authNote.includes("codex 自有认证"), "authNote from _comment_auth");
+  // 0046：原生通道无 provider 块——requiresKeyEnv 全空（凭据走 credentialEnv/tokenEnv，
+  // 推荐矩阵层尚未建模，与 doctor 对 kimi-web/zcode 无就绪映射的在册缺口同族）。
+  for (const id of ["glm-pro", "glm-flash", "kimi", "sol", "astra", "opus", "deepseek-pro", "deepseek-flash"]) {
+    assert.equal(byId[id]?.requiresKeyEnv, null, `${id} 无 provider 块（0046 原生通道）`);
+  }
+  // CLI 探测映射（BACKEND_CLI SSOT）：codex→codex、claude-code→claude、deepseek-acp→dsh；
+  // zcode/kimi-web 未映射=无 CLI 面（HTTP attach/app-server 由 binary/serveUrl 直连）。
+  assert.equal(byId.sol.requiresCli, "codex");
+  assert.equal(byId.astra.requiresCli, "codex");
+  assert.equal(byId.opus.requiresCli, "claude");
+  assert.equal(byId["deepseek-pro"].requiresCli, "dsh");
+  assert.equal(byId["deepseek-flash"].requiresCli, "dsh");
+  assert.equal(byId["glm-pro"].requiresCli, null);
+  assert.equal(byId.kimi.requiresCli, null, "kimi-web is HTTP attach — no CLI to probe");
+  // readyState：登录态通道（codex/claude/dsh）CLI 在场=login_based（登录态不可探，
+  // 与 ready 区分）；无 CLI 面不可验证=unknown。
+  assert.equal(byId.sol.readyState, "login_based");
+  assert.equal(byId.opus.readyState, "login_based");
+  assert.equal(byId["deepseek-flash"].readyState, "login_based");
+  assert.equal(byId["glm-pro"].readyState, "unknown", "zcode 无 CLI 映射=无法验证（不假装已覆盖）");
+  assert.equal(byId.kimi.readyState, "unknown");
   // The serialized recommendation never carries a credential VALUE.
   assert.ok(!/sk-[A-Za-z0-9]{6,}/.test(JSON.stringify(rec)));
 });
@@ -2092,9 +2090,8 @@ test("R10-C C-2: 已配置面第四态 readable-but-invalid——无效条目被
   }
 });
 
-test("R10-B B-1: coder_opencode_fallback 显式 non_seat → 不再是实现席候选（移除模板字段即红）", async () => {
-  // 用真实入库模板：/^coder_/ 前缀惯例会把 coder_opencode_fallback 误归实现席，
-  // 显式 seatRole: non_seat 修正之——删除模板里该字段本断言即红（item 3 红测）。
+test("R10-B B-1: 0046 模板 seatRole 全员显式——对抗席=auditor 家族落点车道（移除字段即红）", async () => {
+  // 0046：旧席位名命名惯例回退已死（席位名不存在），显式 seatRole 是唯一判据。
   const raw = readFileSync(join("config", "agents.example.json"), "utf8");
   const { result } = await memRun({
     initial: { "D:/wao/config/agents.example.json": raw },
@@ -2102,19 +2099,20 @@ test("R10-B B-1: coder_opencode_fallback 显式 non_seat → 不再是实现席�
   });
   const r = await result;
   assert.equal(r.outcome, "needs-selection");
-  assert.deepEqual(r.panelReadiness.implementationIds.slice().sort(), ["coder_hq", "coder_low"],
-    "实现席清单恰为模板显式声明的两通道——coder_opencode_fallback 被显式 non_seat 剔除");
-  assert.deepEqual(r.panelReadiness.adversarialIds.slice().sort(), ["auditor", "coder_mm"],
-    "对抗席清单 = 模板显式声明的 auditor + coder_mm");
+  assert.deepEqual(r.panelReadiness.implementationIds.slice().sort(),
+    ["deepseek-flash", "deepseek-pro", "glm-flash", "glm-pro", "kimi", "sol"],
+    "实现席清单 = 模板显式 implementation 的六条车道");
+  assert.deepEqual(r.panelReadiness.adversarialIds.slice().sort(), ["astra", "opus"],
+    "对抗席清单 = 模板显式 adversarial 的 auditor 家族落点（astra+opus）");
 });
 
 test("R10-B B-1: --apply 生成物逐字携带 seatRole（buildMinimalRegistry 注释剥离不动业务字段）", () => {
   const template = JSON.parse(readFileSync(join("config", "agents.example.json"), "utf8"));
-  const fb = buildMinimalRegistry({ template, agentId: "coder_opencode_fallback" });
-  assert.equal(fb.agents.coder_opencode_fallback.seatRole, "non_seat",
+  const fl = buildMinimalRegistry({ template, agentId: "deepseek-flash" });
+  assert.equal(fl.agents["deepseek-flash"].seatRole, "implementation",
     "生成物携带显式 seatRole（逐字拷贝模板条目）");
-  const hq = buildMinimalRegistry({ template, agentId: "coder_hq" });
-  assert.equal(hq.agents.coder_hq.seatRole, "implementation");
+  const ad = buildMinimalRegistry({ template, agentId: "astra" });
+  assert.equal(ad.agents.astra.seatRole, "adversarial");
 });
 
 test("R10-B B-2: doctor/onboarding 已配置面数字对账——同一 registry 同一探测事实 → 同一分级", async () => {

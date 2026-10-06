@@ -51,12 +51,11 @@ test("WF-1: workflow agentHandler 经解析层——alias 派发带身份注记�
     const { default: handlers } = await import("../../src/workflow/handlers.js");
     const agentHandler = handlers?.agentHandler
       ?? (await import("../../src/workflow/handlers.js")).agentHandler;
-    // alias：researcher（活体车道表 glm-flash 的别名）
-    await agentHandler.execute({ agentId: "researcher", prompt: "t" }, ctx);
+    // 0046 步⑥：别名表已清空——agentId 形（含车道键）一律 legacy 直查零注解；
+    // 身份注记只经显式 lane+role 组合（commands/run.js 解析块）。
+    await agentHandler.execute({ agentId: "glm-flash", prompt: "t" }, ctx);
     assert.equal(starts.length, 1);
-    assert.equal(starts[0].options.resolvedTarget?.source, "alias", "alias 派发带身份注记");
-    assert.equal(starts[0].options.resolvedTarget?.laneId, "glm-flash");
-    assert.equal(starts[0].options.resolvedTarget?.roleId, "researcher");
+    assert.equal(starts[0].options.resolvedTarget, undefined, "车道键 agentId=legacy 直穿零变化（0046）");
     // legacy：未入车道表席位 → 无注记零变化
     await agentHandler.execute({ agentId: "legacy_seat", prompt: "t" }, ctx);
     assert.equal(starts.length, 2);

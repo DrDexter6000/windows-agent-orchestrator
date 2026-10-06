@@ -37,13 +37,14 @@ const REG = Object.fromEntries(Object.entries(REGISTRY_PROJECTION.agents).map(([
 
 // ── 活体基线钉（G7 冻结快照：改 lanes.json 必须同 diff 看到这里） ────────────
 
-test("W1 活体：config/lanes.json 9 车道/9 别名/6 角色，结构零 issue（0046 步④b +deepseek-flash）", () => {
+test("W1 活体：config/lanes.json 9 车道/0 别名/4 角色，结构零 issue（0046 步④b+⑥）", () => {
   assert.ok(LIVE.ok, `结构 issues 必须为空，实际：${JSON.stringify(LIVE.issues)}`);
   assert.equal(LIVE.lanes.length, 9);
   const aliases = LIVE.lanes.flatMap((l) => Object.keys(l.aliases ?? {}));
-  assert.equal(aliases.length, 9);
-  assert.equal(new Set(aliases).size, 9, "别名全局唯一（G2）");
-  assert.deepEqual(LIVE.rolesHint.sort(), ["auditor", "coder_hq", "coder_low", "coder_mm", "researcher", "tester"]);
+  assert.equal(aliases.length, 0, "0046 步⑥：旧席位名别名表全数清空（机制保留=空表合法）");
+  assert.deepEqual(ROLES.sort(), ["auditor", "coder", "researcher", "tester"],
+    "0046 步⑤：coder_hq/coder_low/coder_mm 合并为 coder（角色库=config/roles 目录清单；"
+      + "LIVE.rolesHint 随别名表清空而为空——那是别名派生 hint，非角色库权威）");
 });
 
 test("W1 活体：与真实注册表跨文件校验零 issue（alias 轴不一致只 WARN）", () => {
@@ -75,15 +76,15 @@ test("W3a 映射冻结（R4 红队'标签互换'防御）：laneId→轴/wiringA
     aliases: Object.fromEntries(Object.entries(l.aliases ?? {}).map(([a, s]) => [a, s.role])),
   })).sort((a, b) => (a.id < b.id ? -1 : 1));
   assert.deepEqual(snapshot, [
-    { id: "astra", backend: "codex", modelId: "gpt-6-astra", effort: "high", aliases: { auditor: "auditor" } },
+    { id: "astra", backend: "codex", modelId: "gpt-6-astra", effort: "high", aliases: {} },
     { id: "deepseek-flash", backend: "deepseek-acp", modelId: "deepseek-flash", effort: "max", aliases: {} },
-    { id: "deepseek-pro", backend: "deepseek-acp", modelId: "deepseek-v4-pro", effort: "max", aliases: { coder_low_dsh: "coder_low" } },
-    { id: "glm-flash", backend: "zcode", modelId: "bigmodel-api/GLM-5.3-Flash", effort: "max", aliases: { coder_low: "coder_low", researcher: "researcher" } },
-    { id: "glm-pro", backend: "zcode", modelId: "bigmodel-api/GLM-5.3", effort: "max", aliases: { coder_hq: "coder_hq" } },
-    { id: "gpt-sol-56", backend: "codex", modelId: "gpt-5.6-sol", effort: "xhigh", aliases: { tester: "tester" } },
-    { id: "kimi", backend: "kimi-web", modelId: "kimi-code/k3-256k", effort: null, aliases: { coder_mm: "coder_mm" } },
-    { id: "opus", backend: "claude-code", modelId: "claude-opus-5-5", effort: "high", aliases: { auditor_claude: "auditor" } },
-    { id: "sol", backend: "codex", modelId: "gpt-6.1-sol", effort: "high", aliases: { coder_temp: "coder_low" } },
+    { id: "deepseek-pro", backend: "deepseek-acp", modelId: "deepseek-v4-pro", effort: "max", aliases: {} },
+    { id: "glm-flash", backend: "zcode", modelId: "bigmodel-api/GLM-5.3-Flash", effort: "max", aliases: {} },
+    { id: "glm-pro", backend: "zcode", modelId: "bigmodel-api/GLM-5.3", effort: "max", aliases: {} },
+    { id: "gpt-sol-56", backend: "codex", modelId: "gpt-5.6-sol", effort: "xhigh", aliases: {} },
+    { id: "kimi", backend: "kimi-web", modelId: "kimi-code/k3-256k", effort: null, aliases: {} },
+    { id: "opus", backend: "claude-code", modelId: "claude-opus-5-5", effort: "high", aliases: {} },
+    { id: "sol", backend: "codex", modelId: "gpt-6.1-sol", effort: "high", aliases: {} },
   ]);
   // 0046 §5 步②（2026-10-06）：车道键模型名化重键（kimi-k3→kimi/gpt-astra→astra/
   // gpt-sol-61→sol/claude-opus→opus/ds-acp→deepseek-pro；glm 系与 gpt-sol-56 不变，
@@ -91,6 +92,7 @@ test("W3a 映射冻结（R4 红队'标签互换'防御）：laneId→轴/wiringA
   // 0046 §5 步③④b：effort 原子批（sol/astra/opus→high、glm 双道→max；kimi 通道
   // 不表达保持 null）+deepseek 双车道（pro=deepseek-v4-pro/flash=deepseek-flash，
   // 双字段 model 形状，flash 无历史别名=空表）。
+  // 0046 §5 步⑤⑥：角色库合并（coder_hq/coder_low/coder_mm→coder）+别名表全清空。
 });
 
 test("W3a 守卫消费（R4）：结构 issues——explicit 整表拒 lanes_config_invalid；alias 降级", () => {
@@ -124,15 +126,15 @@ const R = (over = {}) => resolveDispatchTarget({
   lanesDoc: LIVE, registryAgents: REG, roleLibrary: ROLES, ...over,
 });
 
-test("W1 解析：alias 命中——researcher → {laneId glm-flash, roleId researcher, 注解不执行}", () => {
-  const r = R({ agentId: "researcher" });
+test("W1 解析：alias 命中（机制钉，注入夹具车道表；0046 步⑥ 活体别名表已清空）", () => {
+  const doc = { lanes: [{ id: "glm-flash", backend: "zcode", model: { id: "bigmodel-api/GLM-5.3-Flash" }, reasoning: { effort: "max" }, aliases: { researcher: { role: "researcher" } } }], sha256: "fixture-alias" };
+  const r = R({ agentId: "researcher", lanesDoc: doc });
   assert.equal(r.kind, "resolved");
   assert.equal(r.source, "alias");
   assert.equal(r.agentId, "glm-flash", "W4d：别名=执行——agentId=车道键（接线直取）");
   assert.equal(r.laneId, "glm-flash");
   assert.equal(r.roleId, "researcher");
   assert.equal(r.wiringAgent, undefined, "过渡字段已退役");
-  assert.equal(r.lanesSha256, LIVE.sha256);
 });
 
 test("W1 解析：legacy-agent——注册表键在但不在车道表（如临时直配车道键）→ 无注解零破坏", () => {
@@ -171,10 +173,10 @@ test("W1 错误：unknown_lane/unknown_role/unknown_agent——码+received 回�
   assert.deepEqual(lane.choices.lanes, LIVE.lanes.map((l) => l.id).sort(), "合法 lane 全集（不截断冒充全集）");
   const role = R({ lane: "glm-flash", role: "reviewer" });
   assert.equal(role.code, "unknown_role");
-  assert.deepEqual(role.choices.roles, ["auditor", "coder_hq", "coder_low", "coder_mm", "researcher", "tester"]);
+  assert.deepEqual(role.choices.roles, ["auditor", "coder", "researcher", "tester"], "0046 步⑤：合并后角色库");
   const agent = R({ agentId: "ghost" });
   assert.equal(agent.code, "unknown_agent");
-  assert.ok(Array.isArray(agent.choices.aliases) && agent.choices.aliases.includes("researcher"));
+  assert.ok(Array.isArray(agent.choices.aliases), "choices.aliases 恒为数组（0046 步⑥ 后活体为空数组）");
   // 非规范字符：received 换固定标记不透传（安全形状纪律）
   const evil = R({ lane: "../etc/passwd", role: "researcher" });
   assert.equal(evil.code, "unknown_lane");

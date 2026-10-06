@@ -31,7 +31,7 @@ Before expanding work, stop at the first true line: (1) It does not block the cu
 4. Add a Tester when independent execution evidence is useful. The canonical `auditor` is one Chief-Advisor/Auditor expert: advisory mode before execution or audit mode after delivery.
 5. Hard check: `verificationCommands` containing the full suite (`npm test`) must declare `verificationTimeoutMs ≥ 1200000` — the default 300000 reliably hits `command_timeout` (TD-138).
 
-Route by semantic coupling (ambiguity, long-horizon coherence, acceptance clarity, parallelism, modality, provider health/cost) — do not route mechanically by Low/HQ/name. `coder_low` 是 bounded implementation lane；Owner 劝诫（2026-08-15，advisory）：多数实现任务优先 `coder_hq`（高耦合/长程连贯上下文尤甚）；多模态/视觉/创意用 `coder_mm`. Choose via `docs/team-roles.md` + the registry; the Lead owns the verdict. File count, prompt length, and elapsed time are not automatic routing or reassignment triggers; a worker reports concrete blockers and 拆分与转派由 Lead 决定.
+Route by semantic coupling (ambiguity, long-horizon coherence, acceptance clarity, parallelism, modality, provider health/cost) — do not route mechanically by name. 0046 车道（模型名席位）：多数实现优先 `glm-pro`；副通道/视觉用 `glm-flash`/`deepseek-flash`；创意/文案用 `kimi`. Choose via `docs/team-roles.md` + the registry; the Lead owns the verdict. File count, prompt length, and elapsed time are not automatic routing or reassignment triggers; a worker reports concrete blockers and 拆分与转派由 Lead 决定.
 
 Workflow size ladder: simple read-only/tiny Lead task → do directly. One bounded worker task: dispatch, supervise, accept, report. Two or more independent workers, cross-session work, or an explicitly audited engagement → six-stage pipeline (run bare `wao stage` or `wao declare` to inspect stages/reason codes; `wao stage` records progress, `wao declare` records Lead self-work deviations).
 
@@ -83,7 +83,7 @@ Worker self-report is evidence, not acceptance; `verification=passed` alone is n
 
 ## Advisor / Auditor Discipline
 
-Lead 先自审方案和结果。`auditor` 是 Chief-Advisor/Auditor（前置建议，后置复核）；不可用、超时或无 verdict 时可换 `coder_mm`，不阻断 dispatch；仅项目权威明令必审时停为 governance block，不得称 WAO control-plane failure。意见不替代 Lead 裁定。三席会审是推荐标准（决策 0023，advisory 非门禁）：方案（`wao stage 2`）与交付物验收（`wao stage 4`）强烈建议 Lead 主审 + 两名副审，跨族系大模型会审是更强推荐；席位避同族、避被审产出作者（0019 §3 回避保留）；跳过需 `--panel-skip-reason` 显式登记。panel 记录是证据不是验收，`run_delivery_decide` 只由 Lead 调用。
+Lead 先自审方案和结果。`auditor` 是 Chief-Advisor/Auditor（前置建议，后置复核）；不可用、超时或无 verdict 时可换 `kimi` 车道，不阻断 dispatch；仅项目权威明令必审时停为 governance block，不得称 WAO control-plane failure。意见不替代 Lead 裁定。三席会审是推荐标准（决策 0023，advisory 非门禁）：方案（`wao stage 2`）与交付物验收（`wao stage 4`）强烈建议 Lead 主审 + 两名副审，跨族系大模型会审是更强推荐；席位避同族、避被审产出作者（0019 §3 回避保留）；跳过需 `--panel-skip-reason` 显式登记。panel 记录是证据不是验收，`run_delivery_decide` 只由 Lead 调用。
 
 ## Scorecard
 

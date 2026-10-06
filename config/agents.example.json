@@ -1,227 +1,204 @@
 {
-  "_comment": "Worker agent registry（角色驱动，对齐 team-roles.md + 决策 0005）。权威源是 docs/team-roles.md；本文件是它的配置落地。每个 worker 按【角色】命名，主控按能力派任务。Lead runtime（装 WAO skill 的那个）不进 registry——它是调用方。",
-  "_comment_ssot": "⚠ 修改本文件前先读 docs/team-roles.md（角色权威）+ .wao/decisions/0005（定稿决策）+ .wao/decisions/0025（lane 架构）。本文件的 worker 与 team-roles.md 按 lane 映射：每个条目必须能映射到一个规范角色，反向每角色 ≥1 条目；主 lane 用角色名原 id，备用 lane 用 <角色>_<后缀>（后缀语义自明，如 _dsh）且必须显式声明 seatRole（防后缀命名被席位惯例误判）。新增 lane = Owner 组合权（写 registry + 付认证费，未付认证费的组合不进 registry）；切换 = Lead 在既有条目间点名。旧条目 coder_opencode_fallback 为 pre-0025 命名特例，追认不改名。opencode 已降为 fallback（见 coder_opencode_fallback）。",
-  "_comment_seatRole": "R10-B：seatRole 是三席会审（决策 0023）的显式席位声明，闭集 [adversarial/implementation/non_seat]（registry.js SEAT_ROLES，schema/引擎/展示同一词表）。省略时按命名惯例回退（auditor/coder_mm=对抗席、coder_ 前缀=实现席、其余非席位——老 registry 零迁移）；新配置建议显式声明。coder_opencode_fallback 显式 non_seat：按惯例会被 /^coder_/ 误归实现席。",
-  "_comment_example": "⚠ 本文件是入库的模板（完整示例）：与 docs/team-roles.md 规范角色一一对应，保持六个角色 worker + opencode fallback 全量矩阵供参考。裁剪发生在你的私人副本上——把本文件复制为 config/agents.json（gitignored，不入库）后，在 agents.json 里按可用认证删减，甚至可删到只剩一个 worker；agents.json 只保留实际要用的条目即可。cwd 统一为 \".\"（R8-1 去占位化）：解析为发起派发的进程的当前工作目录（CLI 通道=你敲命令时所在目录；MCP 通道=MCP 服务进程的 cwd，由 host 决定）、任何机器恒存在，开箱即跑；要固定目标项目就在私人副本里改成真实路径（必须已存在，见 docs/troubleshooting.md §3.2），或派发时显式 --cwd 覆盖（wao doctor 对 cwd 为 \".\" 的 worker 会出一条 INFO 落点提示，不计 DEGRADED）。",
-  "_comment_safe": "安全：默认全进程式 backend（进程死即会话死，无 opencode stop 虚假成功风险，见 06-18 事故）。opencode 仅在需要 token 闸门精确控成本时用，且必须配 tokenBudget。",
-  "_comment_provider": "P4 决策B（决策 0010 融合项 #3）：claude-code worker 用 provider 一等字段（protocol/baseUrl/apiKeyEnv），model/reasoning 与 provider 同级，backend 从它推导 wrapper 参数 + claude CLI flags，单一真相源防漂移（opus-4.8 bug 温床）。不再手拼 prependArgs/args 里的 model/effort——M11-9 起手拼 managed flags（--model/--default-model/--effort/--context-window）在 args/prependArgs 中是固定迁移错误（registry.js 拒绝，无透明提取），必须用结构化一等字段；provider 不得携带 model/effort/contextWindow（旧形状被拒）。args 仅留真正 ad-hoc 的 CLI flag（如 --dangerously-skip-permissions）。",
+  "_comment": "Worker lane registry 模板（0046 席位矩阵模型名化：车道键=模型家族短名，模型绑定原厂 harness「原汤化原食」）。本文件是入库的完整示例（complete example，可裁剪）：复制为 config/agents.json（gitignored，不入库）后按可用认证删减，删到只剩一个 worker 也行。角色权威=docs/team-roles.md，角色库 config/roles/*.md 与之一一对应；条目不携带 systemPrompt（角色是派发时按任务显式选择的帽子，--role），画像元数据（特征描述/建议任务类别）仅对 Lead 暴露（config/lane-traits.json，0046 §1）。",
+  "_comment_ssot": "⚠ 修改本文件=模板改版蓄意事件（决策 0044/0046）。车道身份=四元组 {backend, model.id, providerID, providerKey} 内容指纹（effort=参数不进身份）；席位升级（模型 id/harness 升级）走 harness 版本巡检 SOP+重认证（0046 §1.4：派发只派认证清单中的）。新增车道=Owner 组合权；同 backend 多 model 车道合法（如 deepseek-pro/deepseek-flash）。G4 断言面：本表轴须与 config/lanes.json 一致（不一致即拒）。",
+  "_comment_seatRole": "R10-B：seatRole 是三席会审（决策 0023）的显式席位声明，闭集 [adversarial/implementation/non_seat]（registry.js SEAT_ROLES）。模板全员显式声明；对抗席=auditor 家族任务的默认落点。",
+  "_comment_example_axes": "轴示例与 docs/surface/certification.md 一致；zcode binary 为桌面捆绑路径占位（换机改真实路径）；effort 值域按官方：codex/claude 五档 low/medium/high/xhigh/max、GLM/ACP 三档 low/high/max、kimi-web 通道不表达（缺省合法）。",
+  "_comment_safe": "安全：全进程式 backend（进程死即会话死，无 opencode stop 虚假成功风险，06-18 事故后弃 opencode；如需 token 闸门精确控成本的 opencode fallback 见 docs/troubleshooting.md）。",
   "agents": {
-    "researcher": {
-      "_comment": "[Researcher] 调研/分析专家。只读分析不改产品代码。对齐 team-roles.md Researcher。",
-      "_comment_backend": "claude-code wrapper（进程式，弃 opencode——06-18 事故风险）。GLM-5.3-Flash[1m] 1M context，原生多模态/视觉（2026-09-17 Owner 裁定由 DeepSeek 切智谱）。",
-      "_comment_effort": "reasoning.effort=max，由 provider wrapper 统一编译。",
-      "_comment_task": "适合任务: 代码库调研/技术选型/可行性分析/文档生成/brief 输出",
-      "backend": "claude-code",
-      "seatRole": "non_seat",
-      "provider": {
-        "protocol": "anthropic-compatible",
-        "baseUrl": "https://open.bigmodel.cn/api/anthropic",
-        "apiKeyEnv": "ZHIPU_API_KEY"
-      },
-      "cwd": ".",
-      "systemPrompt": "config/roles/researcher.md",
-      "sessionReuse": "lead_workspace",
-      "args": [
-        "--dangerously-skip-permissions"
-      ],
-      "_comment_env": "TD-79 Python 环境隔离：researcher 是只读角色，不应改全局 Python env。PIP_REQUIRE_VIRTUALENV 让 pip 在无激活 venv 时直接拒绝安装；PYTHONNOUSERSITE 禁 user site-packages。两者都是 OS-native 机制，pip 自己拒绝，无需 WAO 包装命令。需真正装包的 worker（coder_*）不配此项。",
-      "env": {
-        "PIP_REQUIRE_VIRTUALENV": "1",
-        "PYTHONNOUSERSITE": "1"
-      },
-      "model": {
-        "id": "glm-5.3-flash[1m]",
-        "contextWindow": 1000000
-      },
-      "reasoning": {
-        "effort": "max"
-      }
-    },
-    "coder_hq": {
-      "_comment": "[Coder-HQ] 核心实现者。高质量/长程编码任务。对齐 team-roles.md Coder-HQ。",
-      "_comment_backend": "claude-code wrapper（进程式，已 probe）。GLM-5.3[1m] 1M context 编码能力强。",
-      "_comment_effort": "effort=max，由 provider wrapper 统一编译。",
-      "_comment_task": "适合任务: 写/改代码/重构/修 bug/按 brief 实现",
-      "backend": "claude-code",
+    "glm-pro": {
+      "_comment": "主力代码执行（GLM-5.3 via zcode app-server，原厂 harness 驱动原厂 LLM）。",
+      "backend": "zcode",
       "seatRole": "implementation",
-      "provider": {
-        "protocol": "anthropic-compatible",
-        "baseUrl": "https://open.bigmodel.cn/api/anthropic",
-        "apiKeyEnv": "ZHIPU_API_KEY"
-      },
       "cwd": ".",
-      "systemPrompt": "config/roles/coder_hq.md",
-      "args": [
-        "--dangerously-skip-permissions"
-      ],
+      "binary": "C:/Users/<you>/AppData/Local/Programs/ZCode/resources/glm/zcode.cjs",
       "model": {
-        "id": "glm-5.3[1m]",
-        "contextWindow": 1000000
+        "id": "bigmodel-api/GLM-5.3"
       },
       "reasoning": {
         "effort": "max"
       }
     },
-    "coder_low": {
-      "_comment": "[Coder-Low] 低成本高吞吐的通用第二实现通道；Low 不表示低能力。对齐 team-roles.md Coder-Low。",
-      "_comment_backend": "claude-code wrapper（进程式）。GLM-5.3-Flash[1m]，1M context，effort=max，原生多模态/视觉（2026-09-17 Owner 裁定由 DeepSeek 切智谱）。",
-      "_comment_task": "默认适合: 边界明确的实现包/TDD/修 bug/重构/兼容性/脚本/文档配置/窄修正；是否拆分或转派由 Lead 决定",
-      "backend": "claude-code",
+    "glm-flash": {
+      "_comment": "副代码执行/探索研究/视觉理解（GLM-5.3-Flash，GLM-5 系首个原生多模态）；researcher 复用政策的历史承载车道（0046 §4：席位字段保活）。",
+      "backend": "zcode",
       "seatRole": "implementation",
-      "provider": {
-        "protocol": "anthropic-compatible",
-        "baseUrl": "https://open.bigmodel.cn/api/anthropic",
-        "apiKeyEnv": "ZHIPU_API_KEY"
-      },
       "cwd": ".",
-      "systemPrompt": "config/roles/coder_low.md",
-      "args": [
-        "--dangerously-skip-permissions"
-      ],
+      "binary": "C:/Users/<you>/AppData/Local/Programs/ZCode/resources/glm/zcode.cjs",
       "model": {
-        "id": "glm-5.3-flash[1m]",
-        "contextWindow": 1000000
+        "id": "bigmodel-api/GLM-5.3-Flash"
       },
       "reasoning": {
         "effort": "max"
-      }
+      },
+      "sessionReuse": "lead_workspace"
     },
-    "coder_mm": {
-      "_comment": "[Coder-MM] 多模态、视觉创意与高质量工程通道；可作为 Coder-HQ 的高价替补。对齐 team-roles.md Coder-MM。",
-      "_comment_backend": "kimi-web（HTTP attach 原厂 web 通道，2026-10-01 Owner 裁定由 kimi-code CLI 切换；permission_mode=auto 恒发、tool 帧证据投影）。k3-256k 档 256k 上下文（2026-10-04 模型切换，serve /api/v1/models 验真）；kimi-web 不表达 reasoning（配了即派发前拒绝）。",
-      "_comment_limit": "token 价格较高，不作为常规低风险编码的默认通道；REST 无会话级中止端点（8 动作名实测阴性 2026-09-30），失控 run 无 WAO 内自动停止杠杆——派发须 bounded 任务+操作员监督。",
-      "_comment_task": "适合任务: 图像/视频内容理解、前端设计与实现、视觉/美术审核、策略策划、文案写作、图像相关编码；也可作为 Coder-HQ 的高质量工程替补",
+    "kimi": {
+      "_comment": "方案 advisor/创意头脑风暴（kimi-code/k3-256k via kimi-web，原厂 web 通道；256K 上下文、仅图输入；effort 通道不表达=缺省）。",
       "backend": "kimi-web",
-      "seatRole": "adversarial",
+      "seatRole": "implementation",
       "cwd": ".",
-      "systemPrompt": "config/roles/coder_mm.md",
+      "serveUrl": "http://127.0.0.1:58627",
+      "tokenEnv": "KIMI_WEB_TOKEN",
       "model": {
         "id": "kimi-code/k3-256k"
-      },
-      "serveUrl": "http://127.0.0.1:4297",
-      "tokenEnv": "KIMI_WEB_TOKEN"
-    },
-    "tester": {
-      "_comment": "[Tester] 执行层验证 + 运行监控（轮询）。对齐 team-roles.md Tester。",
-      "_comment_backend": "codex（进程式，command_execution exitCode 最准，scorecard commandsPassed 门控最准）。GPT-5.6-sol（2026-09-03 Owner 裁定升级）。",
-      "_comment_effort": "effort=xhigh（2026-09-03 Owner 裁定由 medium 升级）。",
-      "_comment_note": "codex 作为 Lead（主控）时不进 registry——这里是把它当 worker 用。",
-      "_comment_task": "适合任务: 跑测试/验证 exitCode/检查产出文件/轮询运行状态",
-      "backend": "codex",
-      "seatRole": "non_seat",
-      "cwd": ".",
-      "systemPrompt": "config/roles/tester.md",
-      "model": {
-        "id": "gpt-5.6-sol"
-      },
-      "reasoning": {
-        "effort": "xhigh"
       }
     },
-    "auditor": {
-      "_comment": "[Chief-Advisor / Auditor] 同一个 auditor agentId 的按需双模式专家：前置建议/红队挑战 + 后置独立审计。与 Coder 不同源。",
-      "_comment_backend": "codex（OpenAI Codex CLI）。GPT-6-astra，effort=high（2026-09-22 Owner 裁定由 medium 升级；通道本身于 2026-09-17 Owner 裁定切换——claude 订阅已取消，官方 Claude 通道停用）。",
-      "_comment_auth": "codex 自有认证（~/.codex，与 tester 同源），无 OAuth 依赖。",
-      "_comment_task": "适合任务: 前置方案审计/后置独立复核/PASS-FAIL 判定",
+    "sol": {
+      "_comment": "方案 advisor/交付物 auditor/高难度代码执行（gpt-6.1-sol via codex）。",
+      "backend": "codex",
+      "seatRole": "implementation",
+      "cwd": ".",
+      "model": {
+        "id": "gpt-6.1-sol"
+      },
+      "reasoning": {
+        "effort": "high"
+      }
+    },
+    "astra": {
+      "_comment": "方案 advisor/交付物 auditor/高难度 bug 挖掘（gpt-6-astra via codex）；auditor 家族对抗席。",
       "backend": "codex",
       "seatRole": "adversarial",
       "cwd": ".",
-      "systemPrompt": "config/roles/auditor.md",
       "model": {
         "id": "gpt-6-astra"
       },
       "reasoning": {
-        "effort": "xhigh"
-      },
-      "args": []
+        "effort": "high"
+      }
     },
-    "coder_opencode_fallback": {
-      "_comment": "[FALLBACK] opencode-serve worker。⚠ 默认不用——opencode 是 fallback 选项（决策 0005）。仅在需要 token 闸门精确控成本时用。",
-      "_comment_risk": "opencode session 存活在 WAO 进程之外，有 stop 虚假成功风险（06-18 事故，TD-37/39）。fire-and-forget 路径已被护栏拒绝（TD-39）。用此 worker 必须 --wait。tokenBudget 是硬门（registry validate 强制）。",
-      "_comment_gating": "P1-1 认证门是 opt-in：仅 CLI 显式 --require-certified 时触发（身份比对 + per-worker 新鲜度校验，身份不匹配/过期/缺认证则拒绝）；MCP 路径 requireCertified 恒为 server-owned false（ADR 0018：认证是 advisory 不是门禁），不触发本门。",
-      "backend": "opencode-serve",
-      "seatRole": "non_seat",
-      "serveUrl": "http://127.0.0.1:4297",
-      "agent": "build",
+    "opus": {
+      "_comment": "方案 auditor/创意/高要求前端设计（claude-opus-5-5 via claude-code，原厂订阅 OAuth）；auditor 家族对抗席（Claude 系）。",
+      "backend": "claude-code",
+      "seatRole": "adversarial",
       "cwd": ".",
       "model": {
-        "providerID": "zhipuai-coding-plan",
-        "id": "glm-5.2"
+        "id": "claude-opus-5-5"
       },
-      "tokenBudget": 5000000,
-      "tokenBudgetMultiplier": 100
+      "reasoning": {
+        "effort": "high"
+      },
+      "args": [
+        "--dangerously-skip-permissions"
+      ]
+    },
+    "deepseek-pro": {
+      "_comment": "主力/副代码执行（deepseek-v4-pro via ACP stdio 通道；model=双字段 {id, providerID} 形状，0046 §3 wire 实证）。",
+      "backend": "deepseek-acp",
+      "seatRole": "implementation",
+      "cwd": ".",
+      "credentialEnv": "DEEPSEEK_API_KEY",
+      "model": {
+        "id": "deepseek-v4-pro",
+        "providerID": "deepseek-official"
+      },
+      "reasoning": {
+        "effort": "max"
+      }
+    },
+    "deepseek-flash": {
+      "_comment": "副代码执行/视觉理解/快速探索（deepseek-flash 视觉档——勿与默认档 deepseek-v4-flash 混淆，0046 §1 裁定钉死）。",
+      "backend": "deepseek-acp",
+      "seatRole": "implementation",
+      "cwd": ".",
+      "credentialEnv": "DEEPSEEK_API_KEY",
+      "model": {
+        "id": "deepseek-flash",
+        "providerID": "deepseek-official"
+      },
+      "reasoning": {
+        "effort": "max"
+      }
     }
   },
   "certification": {
-    "_comment": "npm run reliability 读取此矩阵认证 runtime+model 组合。对齐 team-roles.md：进程式 worker 是主认证对象；opencode fallback 不强制认证（已降级）。",
-    "_comment_drills": "drills: sentinel(读文件/assistant text/metrics), scorecard(command+file evidence), isolation(--isolate worktree), workflowRunDir(workflow 子 run 归档)。进程式 backend 不跑 stop drill（进程死即会话死，无 stop 风险）。",
+    "_comment": "runtime+model 组合认证矩阵（与私人副本同构；drills: sentinel/scorecard/adversarialEscape）。effort 调整=delta 重取证（0046 §1.9 修订 0044）；派发只派认证清单中的（certified/conditional 都算在册，0046 §5 步⑨）。",
     "matrix": [
       {
-        "agentId": "researcher",
-        "label": "GLM-5.3-Flash[1m] max via claude-code wrapper（2026-09-17 Owner 裁定由 DeepSeek 切智谱）",
-        "profile": "strict",
-        "providerID": "zhipuai-coding-plan",
-        "modelId": "glm-5.3-flash[1m]",
+        "agentId": "glm-pro",
+        "label": "bigmodel-api/GLM-5.3 via zcode app-server（模板行）",
+        "profile": "delta",
+        "modelId": "bigmodel-api/GLM-5.3",
         "drills": [
           "sentinel",
           "scorecard",
-          "workflowRunDir"
+          "adversarialEscape"
         ]
       },
       {
-        "agentId": "coder_hq",
-        "label": "GLM-5.3[1m] max via claude-code wrapper",
-        "profile": "strict",
-        "providerID": "zhipuai-coding-plan",
-        "modelId": "glm-5.3[1m]",
+        "agentId": "glm-flash",
+        "label": "bigmodel-api/GLM-5.3-Flash via zcode app-server（模板行）",
+        "profile": "delta",
+        "modelId": "bigmodel-api/GLM-5.3-Flash",
         "drills": [
           "sentinel",
           "scorecard",
-          "isolation",
-          "workflowRunDir"
+          "adversarialEscape"
         ]
       },
       {
-        "agentId": "coder_low",
-        "label": "GLM-5.3-Flash[1m] max / 1M via claude-code wrapper（轻活，2026-09-17 Owner 裁定由 DeepSeek 切智谱）",
+        "agentId": "kimi",
+        "label": "kimi-code/k3-256k via kimi-web（模板行）",
+        "profile": "delta",
+        "modelId": "kimi-code/k3-256k",
+        "drills": [
+          "sentinel",
+          "scorecard",
+          "adversarialEscape"
+        ]
+      },
+      {
+        "agentId": "sol",
+        "label": "gpt-6.1-sol via codex（模板行）",
         "profile": "strict",
-        "providerID": "zhipuai-coding-plan",
-        "modelId": "glm-5.3-flash[1m]",
+        "modelId": "gpt-6.1-sol",
         "drills": [
           "sentinel",
           "scorecard"
         ]
       },
       {
-        "agentId": "coder_mm",
-        "label": "kimi-code/k3-256k via kimi-web（原厂 web 通道，多模态；2026-10-04 模型切换 k3→k3-256k）",
-        "profile": "strict",
-        "drills": [
-          "sentinel",
-          "scorecard"
-        ],
-        "modelId": "kimi-code/k3-256k"
-      },
-      {
-        "agentId": "tester",
-        "label": "GPT-5.6-sol xhigh via codex（测试+轮询）",
-        "profile": "strict",
-        "modelId": "gpt-5.6-sol",
-        "drills": [
-          "sentinel",
-          "scorecard"
-        ]
-      },
-      {
-        "agentId": "auditor",
-        "label": "GPT-6-astra xhigh via codex（前置建议/红队挑战 + 独立审计）",
+        "agentId": "astra",
+        "label": "gpt-6-astra via codex（模板行）",
         "profile": "strict",
         "modelId": "gpt-6-astra",
         "drills": [
           "sentinel",
           "scorecard"
-        ],
-        "_comment": "TD-186（2026-09-22）：label 必须随 effort 档位同步——label 是 runner 的 caseId，旧档位字样（medium）会让重取证的新证据仍被读成旧档已认证。effort=high（2026-09-22 Owner 裁定由 medium 升级，同日重取证）。旧 case 是历史，不删；本行只表达当前档位。"
+        ]
+      },
+      {
+        "agentId": "opus",
+        "label": "claude-opus-5-5 via claude-code（模板行）",
+        "profile": "delta",
+        "modelId": "claude-opus-5-5",
+        "drills": [
+          "sentinel",
+          "scorecard",
+          "adversarialEscape"
+        ]
+      },
+      {
+        "agentId": "deepseek-pro",
+        "label": "deepseek-acp × deepseek-v4-pro（模板行）",
+        "profile": "delta",
+        "modelId": "deepseek-v4-pro",
+        "drills": [
+          "sentinel",
+          "scorecard",
+          "adversarialEscape"
+        ]
+      },
+      {
+        "agentId": "deepseek-flash",
+        "label": "deepseek-acp × deepseek-flash（模板行）",
+        "profile": "delta",
+        "modelId": "deepseek-flash",
+        "drills": [
+          "sentinel",
+          "scorecard",
+          "adversarialEscape"
+        ]
       }
     ]
   }

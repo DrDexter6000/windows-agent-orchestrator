@@ -212,21 +212,21 @@ async function runCli(args, registryPath) {
   }
 }
 
-test("CLI-1: --explain 别名解析打印 resolved JSON、零副作用", async () => {
+test("CLI-1: --explain 裸车道键解析打印 resolved JSON、零副作用（0046 步⑥：别名表已清空）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-cli1-"));
   try {
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: {
       "opus": { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "high" }, cwd: dir },
     } }), "utf8");
-    const { threw, logs } = await runCli(["auditor_claude", "--explain"], registryPath);
+    const { threw, logs } = await runCli(["opus", "--explain"], registryPath);
     assert.equal(threw, null);
     const out = JSON.parse(logs.join("\n"));
     assert.equal(out.status, "resolved");
-    assert.equal(out.source, "alias");
-    assert.equal(out.laneId, "opus");
-    assert.equal(out.roleId, "auditor");
-    assert.equal(out.agentId, "opus", "W4d：explain 的 agentId=车道键（0046 步②：claude-opus→opus）");
+    assert.equal(out.source, "legacy-agent", "0046：裸车道键=legacy 直查形（别名层已空，角色经 --role 显式选择）");
+    assert.equal(out.laneId, null);
+    assert.equal(out.roleId, null);
+    assert.equal(out.agentId, "opus");
   } finally { cleanupDir(dir); }
 });
 

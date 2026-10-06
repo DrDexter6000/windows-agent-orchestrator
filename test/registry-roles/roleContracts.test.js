@@ -36,7 +36,8 @@ async function readRoleFiles() {
 // ---------------------------------------------------------------------------
 test("1A: no role file contains orchestration markers ($WAO_CLI / WAO_TARGET_CWD / wao handoff / wao decision / wao stage)", async () => {
   const files = await readRoleFiles();
-  assert.ok(files.length >= 6, `expected at least 6 role files, got ${files.length}`);
+  // 0046 步⑤：coder_hq/coder_low/coder_mm 合并为 coder——角色库 4 文件。
+  assert.ok(files.length >= 4, `expected at least 4 role files (0046 merged library), got ${files.length}`);
   const violations = [];
   for (const { name, content } of files) {
     for (const marker of ORCHESTRATION_MARKERS) {
@@ -108,10 +109,10 @@ test("1A: auditor.md expresses independence, non-decision, alternatives, proport
 // ---------------------------------------------------------------------------
 // 6. coder_low is a general bounded implementation lane, not a tiny-task gate
 // ---------------------------------------------------------------------------
-test("M12 role routing: coder_low does not self-reject by size and leaves reassignment to Lead", async () => {
-  const content = await readFile(join(ROLES_DIR, "coder_low.md"), "utf8");
-  assert.ok(/通用.*实现|第二.*实现|bounded implementation|边界明确.*实现/i.test(content),
-    "coder_low must be described as a general/secondary bounded implementation lane");
+test("M12 role routing: coder does not self-reject by size and leaves reassignment to Lead（0046 合并角色）", async () => {
+  const content = await readFile(join(ROLES_DIR, "coder.md"), "utf8");
+  assert.ok(/通用.*实现|第二.*实现|bounded implementation|边界明确.*实现|边界清晰/i.test(content),
+    "coder must be described as a bounded implementation role");
   assert.ok(/Lead.*决定.*拆分|Lead.*决定.*转派|拆分.*Lead|转派.*Lead/i.test(content),
     "Lead must retain package split and reassignment authority");
   assert.ok(/不.*仅因.*(?:文件|耗时|规模|长程).*拒绝|不得.*仅因.*(?:文件|耗时|规模|长程).*拒绝/i.test(content),

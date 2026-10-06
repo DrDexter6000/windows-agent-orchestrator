@@ -164,12 +164,17 @@ test("面向用户的文档 serveUrl 端口必须统一为 4297（opencode 默�
     "docs/smoke-guide.md",
     "README.md",
   ];
+  // 0046（2026-10-06）：端口权威按通道分化——kimi-web 文档默认 58627（kimi web CLI
+  // 默认），opencode-serve 文档默认 4297。原则不变：面向用户文档只写文档默认端口，
+  // 本机真实端口属配置私事，不进文档。
+  const PORT_BY_FILE = { "config/agents.example.json": "58627" };
   for (const f of FILES) {
+    const allowed = PORT_BY_FILE[f] ?? "4297";
     const ports = collectServePorts(read(f));
     for (const p of ports) {
       assert.equal(
-        p, "4297",
-        `${f} 出现非 4297 的 serveUrl 端口（${p}）。面向用户文档统一用 opencode 默认 4297；本机真实端口属配置私事，不进文档。`
+        p, allowed,
+        `${f} 出现非 ${allowed} 的 serveUrl 端口（${p}）。面向用户文档统一写通道文档默认端口（kimi-web=58627，opencode=4297）；本机真实端口属配置私事，不进文档。`
       );
     }
   }
@@ -660,34 +665,29 @@ test("历史 SSOT 审计和 M7 phase 文档必须归档，不得继续作为 doc
   assert.ok(/docs-ssot-audit\.md/.test(archiveReadme), "docs/archive/README.md 未列出 docs-ssot-audit.md");
 });
 
-test("agents.example.json 角色条目的 backend/model/effort 完整且落在 runtime 闭集", async () => {
-  // team-roles.md 拥有职责；默认 lane 值由 tracked example config 拥有。
+test("agents.example.json 车道条目的 backend/model/effort 完整且落在 runtime 闭集（0046 车道键模板）", async () => {
+  // 0046 §5 步⑥ 模板改版（蓄意事件）：example=车道键形状（模型名席位），角色与
+  // 席位解绑（无 systemPrompt）；画像元数据另档 config/lane-traits.json（仅 Lead）。
   const { KNOWN_BACKENDS, REASONING_EFFORTS, normalizeAgent } = await import("../../src/registry.js"), { backendFor } = await import("../../src/backends/factory.js");
-  // 决策 0005：默认进程式 backend，opencode 降为 fallback。主 worker 必须是进程式。
   const raw = read("config/agents.example.json");
   const parsed = JSON.parse(raw);
-  // 5 个角色 worker 必须存在且进程式（coder_hq/coder_low/coder_mm/researcher/tester）
-  const ROLE_WORKERS = ["researcher", "coder_hq", "coder_low", "coder_mm", "tester"];
-  for (const id of ROLE_WORKERS) {
-    const w = parsed.agents?.[id];
-    assert.ok(w, `agents.example.json 缺角色 worker: ${id}（team-roles.md 定义的角色必须配置）`);
-    assert.notEqual(w.backend, "opencode-serve",
-      `${id} 不得用 opencode-serve（决策 0005：主 worker 进程式，opencode 降级 fallback）`);
+  const laneIds = Object.keys(parsed.agents ?? {});
+  assert.ok(laneIds.length >= 8, `0046 模板应含 ≥8 条车道（实际 ${laneIds.length}）`);
+  for (const [id, w] of Object.entries(parsed.agents ?? {})) {
+    assert.notEqual(w?.backend, "opencode-serve",
+      `${id} 不得用 opencode-serve（决策 0005：主 worker 进程式）`);
   }
-  // 决策 0025（lane 架构）关系型守卫：模板条目必须能映射到规范角色（<角色> 或
-  // <角色>_<后缀>）；备用 lane（id ≠ 角色名）必须显式声明 seatRole。关系源是
-  // .wao/decisions/0025 + team-roles.md "Lane：角色多通道" 节，不硬编码可漂移值。
-  // coder_opencode_fallback 为 pre-0025 命名特例（ADR 0025 追认不改名）。
-  const KNOWN_ROLES = [...ROLE_WORKERS, "auditor"];
   const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({}) });
-  for (const id of KNOWN_ROLES) {
-    const w = parsed.agents?.[id];
+  for (const id of laneIds) {
+    const w = parsed.agents[id];
     assert.ok(w && KNOWN_BACKENDS.includes(w.backend), `${id}.backend 必须落在 KNOWN_BACKENDS 闭集`);
     assert.ok(typeof w.model?.id === "string" && w.model.id.trim(), `${id}.model.id 必须非空`);
-    // 2026-10-05（harness 版本巡检补账轮）：effort 完整性按后端表达力分化——
-    // 能表达 reasoning 的后端必须给出闭集内 effort；不能表达的（如 kimi-web 对
-    // reasoning 配置直接拒绝）缺席才是合法形状。以行为探针判定（合成一个合法
-    // effort 喂给 validateAgentPolicy，期望它拒绝），不点名后端名单。
+    if (w.backend === "deepseek-acp") {
+      assert.ok(typeof w.model?.providerID === "string" && w.model.providerID.trim(),
+        `${id}.model.providerID 必须非空（ACP model 值=provider/model 二元组，0046 §3）`);
+    }
+    // 2026-10-05 补账轮原样保留：effort 完整性按后端表达力分化（行为探针判定，
+    // 不点名后端名单）——不能表达的后端（如 kimi-web）缺席才是合法形状。
     const backend = backendFor(w, { fetchImpl });
     if (REASONING_EFFORTS.includes(w.reasoning?.effort)) {
       assert.doesNotThrow(() => backend.validateAgentPolicy(w), `${id} model/effort 超出 backend policy`);
@@ -700,64 +700,31 @@ test("agents.example.json 角色条目的 backend/model/effort 完整且落在 r
     }
     assert.doesNotThrow(() => normalizeAgent(id, w), `${id} 必须通过 registry 规范化闭集`);
   }
-  assert.throws(() => normalizeAgent("tester", { ...parsed.agents.tester, reasoning: { effort: "outside-closed-set" } }), /reasoning\.effort/);
-  const LEGACY_LANE_IDS = new Set(["coder_opencode_fallback"]);
-  for (const id of Object.keys(parsed.agents ?? {})) {
-    if (LEGACY_LANE_IDS.has(id)) continue;
-    const base = KNOWN_ROLES.find((r) => id === r)
-      ?? KNOWN_ROLES.find((r) => id.startsWith(r + "_"));
-    assert.ok(base,
-      `agents.example.json 条目 ${id} 无法映射到规范角色（决策 0025 lane 命名：<角色> 或 <角色>_<后缀>）`);
-    if (id !== base) {
-      assert.ok(typeof parsed.agents[id].seatRole === "string",
-        `备用 lane ${id} 必须显式声明 seatRole（决策 0025：防后缀命名被席位惯例误判）`);
-    }
-  }
-  // coder_mm 通道钉（2026-10-01 Owner 裁定 kimi-code CLI → kimi-web HTTP attach；
-  // 模板与钉在 2026-10-05 harness 版本巡检补账轮一并对齐——旧钉"kimi-code 进程式"
-  // 与 --yolo 互斥注记随通道切换作废，--yolo 检查保留为通用防御）。
-  const mm = parsed.agents?.coder_mm;
-  assert.equal(mm.backend, "kimi-web", "coder_mm 必须是 kimi-web（原厂 web 通道，2026-10-01 Owner 裁定）");
-  assert.ok(
-    !(Array.isArray(mm.args) && mm.args.includes("--yolo")),
-    "coder_mm 不得带 --yolo args（通用防御：历史 kimi -p 互斥坑；kimi-web 通道无 args 面）"
-  );
-  // opencode worker 必须显式标注为 fallback（不得混在主角色里不标）
-  const opencodeWorkers = Object.entries(parsed.agents)
-    .filter(([, w]) => w.backend === "opencode-serve")
-    .map(([id]) => id);
-  for (const id of opencodeWorkers) {
-    const w = parsed.agents[id];
-    assert.ok(/fallback|FALLBACK/.test(JSON.stringify(w)),
-      `opencode worker ${id} 必须在 _comment 标注 fallback（决策 0005，不得无声混入）`);
-  }
-  // R8-1 去占位化：shipped 模板全部 cwd 必须是 "."（与私有 config/agents.json 惯例
-  // 一致，本机恒存在，开箱即跑）。历史占位 "D:/projects/your-project" 曾是 2026-08-16
-  // 22 条 researcher spawn_error 事故的批量来源（派发不带 --cwd 时继承占位路径）。
-  // 占位回潮 = 模板重新不可开箱即跑，本守卫直接红。
+  assert.ok(!laneIds.includes("tester") && !laneIds.includes("coder_hq"),
+    "0046：模板不再携带旧席位名键（彻底抛弃旧命名）");
+  // R8-1 去占位化：shipped 模板全部 cwd 必须是 "."（历史占位路径曾是 2026-08-16
+  // 22 条 spawn_error 事故的批量来源）。占位回潮 = 模板不可开箱即跑，直接红。
   for (const [id, w] of Object.entries(parsed.agents)) {
     assert.equal(w?.cwd, ".",
       `agents.example.json 的 ${id}.cwd 必须是 "."（R8-1 去占位化；不得回填文档占位路径）`);
   }
 });
 
-test("agents.example.json 七个条目显式声明 seatRole（R10-B 闭集；schema/引擎/展示同一词表）", () => {
-  // R10-B B-1：模板全员显式声明席位角色。省略虽合法（回退命名惯例），但模板是
-  // 新配置的样板——coder_opencode_fallback 按 /^coder_/ 惯例会被误归实现席，
-  // 其显式 non_seat 修正依赖此字段在场（移除即红，item 3/4 红测）。
+test("agents.example.json 全部车道条目显式声明 seatRole（R10-B 闭集；0046 模板全员显式）", () => {
+  // R10-B B-1：模板全员显式声明席位角色。0046 后命名惯例回退已死（旧席位名不存在），
+  // 显式声明是唯一判据。
   const parsed = JSON.parse(read("config/agents.example.json"));
-  const EXPECTED = {
-    auditor: "adversarial", coder_mm: "adversarial",
-    coder_hq: "implementation", coder_low: "implementation",
-    researcher: "non_seat", tester: "non_seat", coder_opencode_fallback: "non_seat",
-  };
   const CLOSED = ["adversarial", "implementation", "non_seat"];
-  assert.equal(Object.keys(parsed.agents).length, 7, "模板恰七个 worker（前置条件：全员显式）");
-  for (const [id, role] of Object.entries(EXPECTED)) {
-    assert.equal(parsed.agents?.[id]?.seatRole, role, `模板 ${id}.seatRole 必须显式 = ${role}`);
-  }
-  for (const [id, w] of Object.entries(parsed.agents)) {
-    assert.ok(CLOSED.includes(w?.seatRole), `${id}.seatRole 必须落在闭集内（schema/引擎/展示同一词表）`);
+  const EXPECTED = {
+    "glm-pro": "implementation", "glm-flash": "implementation", kimi: "implementation",
+    sol: "implementation", astra: "adversarial", opus: "adversarial",
+    "deepseek-pro": "implementation", "deepseek-flash": "implementation",
+  };
+  for (const id of Object.keys(parsed.agents ?? {})) {
+    assert.ok(CLOSED.includes(parsed.agents[id]?.seatRole), `${id}.seatRole 必须落在闭集内（schema/引擎/展示同一词表）`);
+    if (EXPECTED[id] !== undefined) {
+      assert.equal(parsed.agents[id]?.seatRole, EXPECTED[id], `模板 ${id}.seatRole 必须显式 = ${EXPECTED[id]}`);
+    }
   }
 });
 
@@ -978,7 +945,7 @@ test("Prompt surfaces 保持薄入口与 Lead/worker 边界", () => {
   assert.ok(skill.includes("One bounded worker task: dispatch, supervise, accept, report."), "Lead SKILL 缺单 worker 最短路径");
   assert.ok(skill.includes("Two or more independent workers"), "Lead SKILL 缺复杂任务触发条件");
   assert.ok(!/每个任务走这 6 步|每个任务都走/.test(skill), "Lead SKILL 不应强迫所有任务走六阶段");
-  for (const role of ["researcher", "coder_hq", "coder_low", "coder_mm", "tester", "auditor"]) {
+  for (const role of ["researcher", "coder", "tester", "auditor"]) {
     const prompt = read(`config/roles/${role}.md`);
     assert.ok(!/roadmap|wao stage|wao declare/i.test(prompt), `${role} 不应收到 Lead roadmap/pipeline 规则`);
   }
@@ -1430,9 +1397,9 @@ test("M11-2C-09: SKILL/PRD 保持 Advisor/Auditor conditional（非默认流水�
   }
 });
 
-test("Advisor/Auditor failure remains Lead-governed and may fall back to coder_mm", () => {
+test("Advisor/Auditor failure remains Lead-governed and may fall back to another lane（0046：kimi）", () => {
   const skill = read("SKILL.md");
-  assert.match(skill, /不可用、超时或无 verdict 时可换 `coder_mm`/);
+  assert.match(skill, /不可用、超时或无 verdict 时可换 `kimi` 车道/);
   assert.match(skill, /不阻断 dispatch/);
   assert.match(skill, /项目权威明令必审时停为 governance block，不得称 WAO control-plane failure/);
 });
@@ -1447,12 +1414,12 @@ test("M12 worker routing: SKILL keeps semantic routing and Lead authority", () =
     "SKILL must not use package surface size as an automatic reassignment rule");
   assert.ok(/拆分.*转派.*Lead|Lead.*(?:拆分|转派).*决定/i.test(skill),
     "Lead must own package split and reassignment decisions");
-  assert.ok(/coder_low.*bounded implementation lane/i.test(skill),
-    "SKILL must identify coder_low as the bounded implementation lane");
-  assert.ok(/Owner 劝诫.*优先 `coder_hq`|多数实现任务优先 `coder_hq`/i.test(skill),
-    "SKILL must carry the Owner advisory (2026-08-15) preferring coder_hq for most implementation tasks");
-  assert.ok(/coder_hq.*高耦合|高耦合.*coder_hq|coder_hq.*长程连贯/i.test(skill),
-    "SKILL must reserve coder_hq for highly coupled or long-horizon work");
+  assert.ok(/多数实现优先 `glm-pro`/i.test(skill),
+    "0046：SKILL 路由建议指向 glm-pro（模型名车道，旧席位名已废弃）");
+  assert.ok(/视觉用 `glm-flash`\/`deepseek-flash`|`glm-flash`.*`deepseek-flash`/i.test(skill),
+    "0046：视觉/副通道建议指向 flash 车道");
+  assert.ok(!/`coder_low`|`coder_hq`|`coder_mm`/.test(skill),
+    "0046：SKILL 不得再引用已废弃的旧席位名");
 });
 
 test("M12 role naming: stable auditor id represents one advisory/audit expert", () => {
@@ -1466,22 +1433,26 @@ test("M12 role naming: stable auditor id represents one advisory/audit expert", 
   }
 });
 
-test("M12 canonical role value pins: coder_low + tester + auditor Owner decisions", () => {
+test("M12 canonical value pins: 0046 车道键模板（原厂通道+effort 档）", () => {
   const parsed = JSON.parse(read("config/agents.example.json"));
-  const low = parsed.agents?.coder_low;
-  assert.equal(low?.model?.id, "glm-5.3-flash[1m]");
-  assert.equal(low?.reasoning?.effort, "max");
-  assert.equal(low?.model?.contextWindow, 1000000);
-  assert.equal(low?.provider?.apiKeyEnv, "ZHIPU_API_KEY");
-  assert.ok(/bigmodel\.cn\/api\/anthropic/.test(low?.provider?.baseUrl ?? ""));
-
-  assert.equal(parsed.agents?.tester?.model?.id, "gpt-5.6-sol");
-  assert.equal(parsed.agents?.tester?.reasoning?.effort, "xhigh");
-  assert.equal(parsed.agents?.auditor?.model?.id, "gpt-6-astra");
-  // Owner 2026-10-05 令 effort high→xhigh（模型不变，轻量变更不触发重认证）。
-  assert.equal(parsed.agents?.auditor?.reasoning?.effort, "xhigh");
+  const flash = parsed.agents?.["glm-flash"];
+  assert.equal(flash?.backend, "zcode");
+  assert.equal(flash?.model?.id, "bigmodel-api/GLM-5.3-Flash");
+  assert.equal(flash?.reasoning?.effort, "max");
+  assert.equal(flash?.provider, undefined, "0046：原生通道无 provider wrapper 块");
+  assert.equal(flash?.sessionReuse, "lead_workspace", "researcher 复用政策的席位承载（0046 §4）");
+  assert.equal(parsed.agents?.sol?.model?.id, "gpt-6.1-sol");
+  assert.equal(parsed.agents?.sol?.reasoning?.effort, "high");
+  // Owner 2026-10-06 批复：astra/opus xhigh→high（0046 §2 官方五档内降档）。
+  assert.equal(parsed.agents?.astra?.model?.id, "gpt-6-astra");
+  assert.equal(parsed.agents?.astra?.reasoning?.effort, "high");
+  assert.equal(parsed.agents?.opus?.model?.id, "claude-opus-5-5");
+  assert.equal(parsed.agents?.opus?.reasoning?.effort, "high");
+  const dsp = parsed.agents?.["deepseek-pro"];
+  assert.equal(dsp?.model?.id, "deepseek-v4-pro");
+  assert.equal(dsp?.model?.providerID, "deepseek-official", "ACP 双字段 model 形状（0046 §3）");
+  assert.equal(parsed.agents?.["deepseek-flash"]?.model?.id, "deepseek-flash", "flash 钉视觉档（勿配 deepseek-v4-flash）");
 });
-
 test("M12-8A/M12-9/M12-10/M12-16: SKILL/architecture 工具数与 toolSurface SSOT 一致（TD-120 关系型守卫）", () => {
   // TD-120 (2026-08-15): the count is DERIVED from the code SSOT (toolSurface.js
   // TOOLS, load-time self-checked) instead of a hardcoded literal — a legitimate
@@ -2621,9 +2592,11 @@ test("onboarding closeout: agents.example.json 移除 managed-flag 向后兼容�
     assert.ok(typeof entry.label === "string" && entry.label.toLowerCase().includes(effectiveModelId.toLowerCase()),
       `agents.example.json 认证 label 必须包含生效 modelId（${entry.agentId}: ${effectiveModelId}，大小写不敏感）— doc 内部自洽（TD-120）`);
   }
-  const hqCert = parsed.certification.matrix.find((m) => m.agentId === "coder_hq");
-  assert.ok(hqCert && /max/.test(hqCert.label) && !/high/.test(hqCert.label),
-    "agents.example.json 的 coder_hq 认证 label 必须为 max（不是 high）");
+  // 0046：旧席位名钉退役——模板矩阵行键=车道键且不含旧席位名。
+  const matrixIds = (parsed.certification?.matrix ?? []).map((m) => m.agentId);
+  assert.ok(matrixIds.length >= 8, "0046 模板矩阵应含 ≥8 行");
+  assert.ok(!matrixIds.includes("coder_hq") && !matrixIds.includes("tester"),
+    "0046：模板矩阵不得再携带旧席位名 agentId");
   // File labeled a complete example prunable to one worker.
   const raw = read("config/agents.example.json");
   assert.ok(/完整示例|complete example/.test(raw),
