@@ -97,6 +97,7 @@
       "registry-roles/checkStates.test.js",
       "registry-roles/componentLedger.test.js",
       "registry-roles/dispatchLiveness.test.js",
+      "registry-roles/fixtureDriftGuard.test.js",
       "registry-roles/knownBackendsF3.test.js",
       "registry-roles/knownBackendsSsot.test.js",
       "registry-roles/laneTraits.test.js",

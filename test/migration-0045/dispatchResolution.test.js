@@ -20,14 +20,14 @@ const ROLES = readdirSync(join(REPO_ROOT, "config", "roles"))
 // 注册表结构投影：干净检出无私有 config/agents.json（gitignored，R4 auditor_claude
 // 实证旧写法在隔离 worktree ENOENT 全红）——入库 fixture 为默认，私有件在场时
 // 活体跨文件校验另测（skip-if-absent 显式标注）。
+// TD-214（2026-10-06 双席会审裁定 B）：确定性套件只读 tracked fixture——删除
+// "有 live 就读 live"的双源回退（同一断言在两种检出下对着两份数据：worktree/
+// 干净检出无私有注册表时行为漂移，当日交付验证假红的根因）。live 注册表合规
+// 归 doctor/registry validate 面，不进 npm test。fixture 与 lanes.json/example
+// 的一致性由 lanesTraits/独立守卫钉（tracked 对 tracked）。
 function readRegistryProjection() {
-  try {
-    const doc = JSON.parse(readFileSync(join(REPO_ROOT, "config", "agents.json"), "utf8"));
-    return { source: "live", agents: doc.agents };
-  } catch {
-    const doc = JSON.parse(readFileSync(join(REPO_ROOT, "test", "fixtures", "lanes-agents.fixture.json"), "utf8"));
-    return { source: "fixture", agents: doc.agents };
-  }
+  const doc = JSON.parse(readFileSync(join(REPO_ROOT, "test", "fixtures", "lanes-agents.fixture.json"), "utf8"));
+  return { source: "fixture", agents: doc.agents };
 }
 const REGISTRY_PROJECTION = readRegistryProjection();
 // W4d：键已车道化（laneId）；条目无 systemPrompt（角色来自解析/别名表）。
@@ -47,10 +47,11 @@ test("W1 活体：config/lanes.json 8 车道/0 别名/4 角色，结构零 issue
       + "LIVE.rolesHint 随别名表清空而为空——那是别名派生 hint，非角色库权威）");
 });
 
-test("W1 活体：与真实注册表跨文件校验零 issue（alias 轴不一致只 WARN）", () => {
+test("W1 活体：与 tracked fixture 注册表跨文件校验零 issue（TD-214：fixture 权威化）", () => {
   const { issues, warns } = validateLanesAgainstRegistry(LIVE, REG);
   assert.deepEqual(issues, [], `硬 issue 必须为空：${JSON.stringify(issues)}`);
-  // 本机 9 席全在册且轴一致 → warns 也应为空；换机/模板机才会出现 WARN（H2）
+  // fixture 与 lanes.json 同为 tracked 权威 → issues 与 warns 都应为空（H2 语义
+  // 收紧：双源已消灭，漂移由 fixture↔lanes 一致性守卫单独钉）
   assert.deepEqual(warns, []);
 });
 
