@@ -5,7 +5,7 @@
 // 被机械降级的车道记录，不重跑任何 drill。
 // 用法：node scripts/wao-node.cjs scripts/migration/resummarize-cert.mjs [--dry-run]
 import { readFileSync, writeFileSync, copyFileSync } from "node:fs";
-import { summarizeCertification, pruneStaleCases } from "../reliability/certification.mjs";
+import { summarizeCertification, pruneStaleCases, matrixScopeFromRegistry } from "../reliability/certification.mjs";
 
 const SUMMARY = "runs/reliability-summary.json";
 const DRY = process.argv.includes("--dry-run");
@@ -19,7 +19,7 @@ const currentRows = registry.certification?.matrix ?? [];
 const cases = pruneStaleCases(prior.cases, currentRows);
 const pruned = prior.cases.length - cases.length;
 const matrixAgentIds = new Set(currentRows.map((r) => r.agentId).filter(Boolean));
-const after = summarizeCertification(cases, { generatedAt: new Date().toISOString(), matrixAgentIds });
+const after = summarizeCertification(cases, { generatedAt: new Date().toISOString(), ...matrixScopeFromRegistry(registry) });
 const rows = [];
 for (const key of new Set([...Object.keys(prior.workers ?? {}), ...Object.keys(after.workers)])) {
   const a = prior.workers?.[key];

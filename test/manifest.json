@@ -83,6 +83,7 @@
       "migration-0045/ledgerMigration.test.js",
       "migration-0045/longTailConsumers.test.js",
       "migration-0045/mcpExplicitDispatch.test.js",
+      "migration-0045/reliabilityScopePin.test.js",
       "migration-0045/rolePinning.test.js",
       "migration-0045/rolePolicy.test.js",
       "migration-0045/sessionKeyUpgrade.test.js",

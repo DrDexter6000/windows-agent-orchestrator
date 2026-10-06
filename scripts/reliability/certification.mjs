@@ -165,6 +165,7 @@ export function certifyCase(caseResult = {}) {
 
 export function summarizeCertification(caseResults = [], options = {}) {
   const matrixAgentIds = options.matrixAgentIds instanceof Set ? options.matrixAgentIds : null;
+  const matrixLaneKeys = options.matrixLaneKeys instanceof Set ? options.matrixLaneKeys : null;
   const cases = caseResults.map((caseResult) => {
     // Disk/prior cases may already carry a cached certification object. Shape
     // validation still runs before trusting it; malformed five-state checks
@@ -173,14 +174,14 @@ export function summarizeCertification(caseResults = [], options = {}) {
     const certification = caseResult.certification ?? certifyCase(caseResult);
     return { ...caseResult, certification };
   });
-  const workers = summarizeWorkers(cases, matrixAgentIds);
+  const workers = summarizeWorkers(cases, matrixAgentIds, matrixLaneKeys);
   // counts 按 agent 最终状态计数（与 workers 一致），非 per-case（否则一个 agent 多 case 被重复计）。
   // 有 agentId 的 case → 按 worker 最终状态计 1 次；
   // 无 agentId 的 case（suite-level，如 silentTimeout）→ 各自独立计 1 次。
   const countedLanes = new Set();
   const counts = Object.fromEntries(CERTIFICATION_STATUSES.map((status) => [status, 0]));
-  const countable = matrixAgentIds instanceof Set
-    ? cases.filter((c) => !c.agentId || matrixAgentIds.has(c.agentId))
+  const countable = matrixAgentIds instanceof Set || matrixLaneKeys instanceof Set
+    ? cases.filter((c) => caseInMatrixScope(c, matrixAgentIds, matrixLaneKeys))
     : cases;
   for (const c of countable) {
     if (c.agentId) {
@@ -305,7 +306,51 @@ function allRedChecksExcepted(c, exception) {
   return reds.every((x) => exception.checks.has(x.name));
 }
 
-function summarizeWorkers(cases, matrixAgentIds) {
+// 0046 ⑨：scope 成员判定——agentId 直配（快路径）或 case 指纹 ∈ 当前矩阵车道
+// 指纹集合（重键/改名韧性）。providerKey 三态在【scope 匹配】层做容忍归一
+// （undefined/null 同视为 null）：台账键 SSOT（laneLedgerKey tri-state 严格）不
+// 动——这里只是成员资格判断，不是身份键派生（case 侧 JSON null 与注册表侧
+// 字段缺席天然异形，不归一会全量脱钩）。
+function caseInMatrixScope(c, matrixAgentIds, matrixLaneKeys) {
+  if (!c.agentId) return true; // suite-level case（silentTimeout 等）恒在册
+  if (matrixAgentIds instanceof Set && matrixAgentIds.has(c.agentId)) return true;
+  if (matrixLaneKeys instanceof Set) {
+    const declared = declaredIdentity(c);
+    const hasAnyFact = declared.backend !== null
+      || declared.providerID !== null
+      || declared.modelId !== null
+      || declared.providerKey !== undefined;
+    if (!hasAnyFact) return false;
+    return matrixLaneKeys.has(laneLedgerKey({ ...declared, providerKey: declared.providerKey ?? null }));
+  }
+  return false;
+}
+
+/**
+ * 0046 ⑨：从注册表派生矩阵 scope（agentId 集 + 车道指纹集）。行指向不在册 lane
+ * 时跳过（与 run-reliability 的 dropped 裁剪同语义）。runner/resummarize 共用，
+ * 防 --agent 过滤缩表（必须取全量矩阵，不可用 onlyAgent 过滤后的行集）。
+ */
+export function matrixScopeFromRegistry(registry) {
+  const rows = Array.isArray(registry?.certification?.matrix) ? registry.certification.matrix : [];
+  const agents = registry?.agents ?? {};
+  const matrixAgentIds = new Set();
+  const matrixLaneKeys = new Set();
+  for (const row of rows) {
+    const agent = agents[row?.agentId];
+    if (!agent) continue;
+    matrixAgentIds.add(row.agentId);
+    matrixLaneKeys.add(laneLedgerKey({
+      backend: agent.backend ?? null,
+      providerID: agent.model?.providerID ?? null,
+      modelId: agent.model?.id ?? null,
+      providerKey: agent.provider?.apiKeyEnv ?? null,
+    }));
+  }
+  return { matrixAgentIds, matrixLaneKeys };
+}
+
+function summarizeWorkers(cases, matrixAgentIds, matrixLaneKeys) {
   // 0045 R5（W4a）：台账键=车道内容指纹（从 case 自带事实派生，tri-state 严格——
   // undefined/null/string 各自成键成分；席位名降为 provenance）。无任何已声明身份
   // 事实的 case（legacy 聚合 fixture 形状）无法派生指纹 → 落 seat:<agentId> 名键
@@ -319,8 +364,11 @@ function summarizeWorkers(cases, matrixAgentIds) {
   // 0045 车道聚合 scope（窗口门 4 修复）：agentId 不在当前矩阵的退役席位 case
   // 保留在 summary.cases 审计历史，但不参与车道 status 聚合——历史身份不拖累
   // 当前车道认证（R2：认证身份按当前配置；TD-87 scope 外保留只护审计）。
-  const scoped = matrixAgentIds instanceof Set
-    ? cases.filter((c) => !c.agentId || matrixAgentIds.has(c.agentId))
+  // 0046 ⑨（指纹 scope）：case agentId 因重键/改名与矩阵行脱钩时，按 case 自带
+  // 身份事实的指纹匹配当前矩阵车道——重键不丢认证（kimi-k3→kimi 实证）；
+  // 退役真身（模型已不在矩阵，如 gpt-sol-56/幽灵审计 case）仍被排除。
+  const scoped = matrixAgentIds instanceof Set || matrixLaneKeys instanceof Set
+    ? cases.filter((c) => caseInMatrixScope(c, matrixAgentIds, matrixLaneKeys))
     : cases;
   const byAgentCases = new Map();
   for (const c of scoped) {

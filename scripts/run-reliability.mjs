@@ -25,7 +25,7 @@ import { writeFileSync, mkdirSync, rmSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { certifyCase, summarizeCertification, mergeCaseResults, pruneStaleCases } from "./reliability/certification.mjs";
+import { certifyCase, summarizeCertification, mergeCaseResults, pruneStaleCases, matrixScopeFromRegistry } from "./reliability/certification.mjs";
 import { buildCertificationMatrix } from "./reliability/matrix.mjs";
 // TD-186：认证证据绑定执行画像——运行时身份探测复用组件层既有探针（一次 spawn /
 // backend，零新指纹平台），探不到如实 verified:false，绝不猜。
@@ -659,7 +659,15 @@ for (const n of nulledPriorIds.slice(0, 16)) {
 if (nulledPriorIds.length > 16) {
   console.warn(`[reliability] WARN: 另有 ${nulledPriorIds.length - 16} 条同类悬空 id 已置 null`);
 }
-const summary = summarizeCertification(closedCases);
+// 0046 步⑨（幽灵行+重键沉底修复）：summarizeCertification 必须携带 scope——退役
+// 席位 case（agentId 不在矩阵且指纹不在当前车道集）只留 cases 审计，不进 workers
+// 聚合；而重键/改名脱钩的 case（agentId 旧、指纹仍在矩阵）经指纹匹配保住认证
+// （kimi-k3→kimi 实证）。此前 runner 唯一调用点不传 scope（0045 窗口遗留缺口：
+// 当时干净 workers 由 resummarize 迁移脚本重生成维持）。scope 取【全量】在册矩阵
+// 行派生——不可用 ONLY_AGENT 过滤后的 MATRIX（否则 --agent 增量跑会把其他车道
+// 挤出 workers）。
+const MATRIX_SCOPE = matrixScopeFromRegistry(registry);
+const summary = summarizeCertification(closedCases, MATRIX_SCOPE);
 writeFileSync(summaryPath, JSON.stringify(summary, null, 2));
 // 2026-09-22 审计收口（交错发布误删证据）：发布路径到此为止，零删除。
 // 旧版在此按【进程内】summary 的引用集清理 runs/reliability/——与其他发布者
