@@ -50,6 +50,7 @@ import { dispatchRun, DeliveryCwdRequiredError, assertValidModelOverride, assert
 // ADR 0035 S3: dispatch-startup advisory line renderer (repo resource counts;
 // fail-open — any git failure/timeout omits the line entirely).
 import { renderDispatchResourceAdvisory } from "../dispatchResourceAdvisory.js";
+import { assertNotNestedDispatchContext } from "../application/nestedDispatchGuard.js";
 
 function parseAgentList(args) {
   const agents = [];
@@ -357,6 +358,12 @@ export async function spawnCommand(args, config) {
 }
 
 export async function runCommand(args, config) {
+  // 0047 L1：CLI 入口门——worker 上下文先于注册表解析拒绝（否则 worker 会看到
+  // 困惑的 ENOENT 而不是 0047 文案；真机 dogfood run_20261006200100467i0ddgr 实证
+  // 的分层修正）。--help 短路仍在前（只读用法页不设防）。
+  if (args[0] !== "--help" && args[0] !== "-h") {
+    assertNotNestedDispatchContext();
+  }
   // A-2（friction 2026-08-15 #2）：run --help 打印用法页。--help 必须是 run 之后
   // 的第一个参数（run <agentId> --help 会被 parseOptions 当布尔 flag 吞掉，
   // 用法页只在这一位短路）。
