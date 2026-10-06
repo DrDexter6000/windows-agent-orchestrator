@@ -805,20 +805,27 @@ export class KimiWebBackend {
           // 0046 B5：活体证词先行——serve 说 turn 还在跑（main_turn_active/busy 任一
           // 严格 true）就不是停滞：重置静默段继续等（硬墙钟顶另收口）。证词请求
           // 失败/形状不符（sessionDetail 抛错）= 无证词 = 照杀（fail-closed）。
-          let attestedActive = false;
+          // TD-213 收窄版（2026-10-06 三方会审）：证词两态分辨进文案——serve 明确说
+          // 不活跃（inactive）与证词取不到（unavailable）是不同事实，折叠会让 Lead
+          // 误判"服务器死了"vs"探针失败"。
+          let attestationState = "unavailable";
           try {
             const detail = await this.sessionDetail(agent, sessionId);
-            attestedActive = detail?.main_turn_active === true || detail?.busy === true;
+            const active = detail?.main_turn_active === true || detail?.busy === true;
+            attestationState = active ? "active" : "inactive";
           } catch {
-            attestedActive = false;
+            attestationState = "unavailable";
           }
-          if (!attestedActive) {
+          if (attestationState !== "active") {
             yield doneEvent(
               "failed",
               `turn stalled (no progress): silent stretch ${Math.round(stallTracker.stallMs())}ms exceeded adaptive budget `
                 + `${Math.round(d.floorMs)}ms floor / ×${d.factor} / ${Math.round(d.ceilingMs)}ms ceiling; `
                 + `max recovered gap this turn ${Math.round(d.maxObservedGapMs)}ms (bounded exit`
-                + `${livenessAttestations > 0 ? `; ${livenessAttestations} prior liveness attestation(s)` : ""})`,
+                + `${livenessAttestations > 0 ? `; ${livenessAttestations} prior liveness attestation(s)` : ""}; `
+                + `attestation: ${attestationState} — ${attestationState === "inactive"
+                  ? "the serve reports the turn NOT active (likely a true stall; probe the session before re-dispatching)"
+                  : "the attestation probe failed (unknown liveness; do NOT assume the serve is dead — probe the session, then diagnose)"})`,
             );
             return;
           }

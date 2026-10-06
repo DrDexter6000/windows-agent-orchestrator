@@ -507,7 +507,7 @@ for (const tc of MATRIX) {
   results.push(caseResult);
 
   const status = caseFailed ? "FAIL" : (pass ? "PASS" : "NO-POSITIVE-EVIDENCE");
-  console.log(`  [${status}] ${tc.label} -> ${caseResult.certification.status} (${caseResult.certification.recommendedUse})`);
+  console.log(`  [${status}] ${tc.label} -> case: ${caseResult.certification.status} (${caseResult.certification.recommendedUse})`);
   for (const c of checks) {
     const icon = checkStateOf(c) === "pass" ? "✔" : checkStateOf(c) === "not-applicable" ? "○" : "✖";
     console.log(`    ${icon} ${c.name} [${c.category}]: ${c.detail}`);
@@ -682,6 +682,12 @@ if (ONLY_AGENT) {
   const laneCounts = {};
   for (const c of laneCases) laneCounts[c.certification?.status ?? "unknown"] = (laneCounts[c.certification?.status ?? "unknown"] ?? 0) + 1;
   console.log(`Target lane counts: ${JSON.stringify(laneCounts)}`);
+// U1（2026-10-06 三方会审）：case 原始态之上补 worker 终态（例外条款裁决发生在
+// 聚合层——case: draft-only + worker: conditional 是常态组合，此前只打 case 态
+// 会误判；本行复用权威聚合结果，不在控制台重算）。
+for (const w of Object.values(summary.workers ?? {})) {
+  console.log(`  worker ${w.agentId} -> ${w.status} (${w.certificationScope ?? "-"})`);
+}
   console.log(`[ambient] Certification counts (post-merge whole-ledger, 含其他 lane 旧 case): ${JSON.stringify(summary.counts)}`);
 } else {
   console.log(`Certification counts: ${JSON.stringify(summary.counts)}`);
