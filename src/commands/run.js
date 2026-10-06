@@ -50,7 +50,7 @@ import { dispatchRun, DeliveryCwdRequiredError, assertValidModelOverride, assert
 // ADR 0035 S3: dispatch-startup advisory line renderer (repo resource counts;
 // fail-open — any git failure/timeout omits the line entirely).
 import { renderDispatchResourceAdvisory } from "../dispatchResourceAdvisory.js";
-import { assertNotNestedDispatchContext } from "../application/nestedDispatchGuard.js";
+import { assertNotNestedDispatchContext } from "../nestedDispatchGuard.js";
 
 function parseAgentList(args) {
   const agents = [];

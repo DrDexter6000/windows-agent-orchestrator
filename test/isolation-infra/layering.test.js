@@ -127,6 +127,12 @@ const CORE_TOP = Object.freeze(new Set([
   // 扫描图内——与 providerFingerprint 登记同型。
   "src/machineGatePaths.js",
   "src/metrics.js",
+  // 0047 勘误登记（2026-10-07）：防向下派发判定 SSOT。0047 初版误放
+  // src/application/ 造成 runManager（core）上向依赖（layering 红但当时聚焦
+  // 套件未含本守卫，漏网）。归 core 顶层：零相对出边（node:path only）；
+  // 消费方 src/runManager.js（core 同层）、src/commands/run.js 与
+  // src/mcp/server.js（adapters 下向）。判定纯函数本身零变更，仅路径搬家。
+  "src/nestedDispatchGuard.js",
   "src/nodeVersionGuard.js",
   // R23-C 跟进登记（2026-08-21）：providerKey 归一化单一实现，唯一 src 消费方
   // runManager.js（core 同层 2→2）；scripts 侧下向 import 不在本守卫扫描图内。

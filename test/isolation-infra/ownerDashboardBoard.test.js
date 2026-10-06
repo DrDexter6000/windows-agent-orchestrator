@@ -32,6 +32,13 @@ import { fileURLToPath } from "node:url";
 
 import * as app from "../../src/owner-dashboard/app.js";
 
+test("TD-220 BOARD: thinking and envelope survive category filtering and safe description", () => {
+  const entries = [{ category: "thinking" }, { category: "envelope", kind: "stop_verified" }, { category: "other" }];
+  const selected = app.filterByCategories(entries, new Set(["thinking", "envelope"]));
+  assert.deepEqual(selected.map((e) => app.describeEntry(e).category), ["thinking", "envelope"]);
+  assert.deepEqual(selected.map((e) => app.describeEntry(e).body), ["思考中", "envelope · stop_verified"]);
+});
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = join(HERE, "../..", "src", "owner-dashboard");
 const readAsset = (name) => readFileSync(join(SRC, name), "utf8");

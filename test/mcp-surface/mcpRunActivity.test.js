@@ -169,13 +169,13 @@ test("MAA-03: output schema strict; entries discriminated by category; counts cl
       }
       // counts covers exactly the closed-set categories.
       assert.deepEqual(Object.keys(props.counts.properties ?? {}).sort(),
-        ["command", "correction", "file_written", "message", "other", "runtime_status", "state", "tool_result", "tool_use"].sort());
+        [...ACTIVITY_CATEGORIES].sort());
       // entries is a discriminated union on `category` (serialized under items.anyOf).
       const entryItems = props.entries.items ?? props.entries;
       const members = entryItems.oneOf ?? entryItems.anyOf ?? [];
       const cats = members.map((m) => m.properties?.category?.const ?? m.properties?.category?.enum?.[0]).filter(Boolean);
       assert.deepEqual([...cats].sort(),
-        ["command", "correction", "file_written", "message", "other", "runtime_status", "state", "tool_result", "tool_use"].sort(),
+        [...ACTIVITY_CATEGORIES].sort(),
         "entry variants cover the closed-set categories");
       // Flatten every field name appearing across entry variants: NONE may be a
       // raw payload channel (command/input/output/error/payload/path-absolute).

@@ -136,7 +136,7 @@ test("#1 normal ordered activity page preserves seq order and surfaces terminal 
   // counts cover the frozen filtered snapshot, not just the page.
   assert.deepEqual(r.counts, {
     message: 1, command: 1, tool_use: 1, tool_result: 1, file_written: 1,
-    runtime_status: 1, state: 1, correction: 0, other: 0,
+    runtime_status: 1, state: 1, correction: 0, thinking: 0, envelope: 0, other: 0,
   });
   assert.equal(r.total, 7);
   // assistant text excerpt surfaced.
@@ -156,7 +156,7 @@ test("#2 empty snapshot yields empty entries and zero counts, no cursor", () => 
   assert.equal(r.nextCursor, null);
   assert.deepEqual(r.counts, {
     message: 0, command: 0, tool_use: 0, tool_result: 0, file_written: 0,
-    runtime_status: 0, state: 0, correction: 0, other: 0,
+    runtime_status: 0, state: 0, correction: 0, thinking: 0, envelope: 0, other: 0,
   });
 });
 
@@ -394,7 +394,7 @@ test("#10 raw command/tool/file payloads and absolute paths never cross the lead
   assert.ok(!json.includes("raw error"), "no raw error text");
   // command entry only carries a closed-set exitStatus.
   const cmd = r.entries.find((e) => e.category === "command");
-  assert.deepEqual(Object.keys(cmd).sort(), ["category", "exitStatus", "seq", "ts"]);
+  assert.deepEqual(Object.keys(cmd).sort(), ["category", "exitStatus", "exitStatusSource", "seq", "ts"]);
   assert.ok(["ok", "failed", "unknown"].includes(cmd.exitStatus));
   // tool_use carries only a bounded tool name (no input).
   const tu = r.entries.find((e) => e.category === "tool_use");

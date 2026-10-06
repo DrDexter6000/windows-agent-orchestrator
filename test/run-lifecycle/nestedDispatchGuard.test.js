@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   nestedDispatchContext, assertNotNestedDispatchContext, NESTED_DISPATCH_ENV_MARKER,
-} from "../../src/application/nestedDispatchGuard.js";
+} from "../../src/nestedDispatchGuard.js";
 
 test("0047 ①: 判定纯函数——env 标记/worktree cwd/豁免/放行", () => {
   assert.equal(nestedDispatchContext({}, "/D:/proj/repo"), null, "Lead 主检出=放行");

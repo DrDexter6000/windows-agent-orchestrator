@@ -185,7 +185,7 @@ import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "../disp
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { selectCertRecord } from "../runManager.js";
-import { assertNotNestedDispatchContext } from "../application/nestedDispatchGuard.js";
+import { assertNotNestedDispatchContext } from "../nestedDispatchGuard.js";
 import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
 import {
   runDeliveryRepackage,
@@ -199,6 +199,7 @@ import {
   projectRunActivity,
   ACTIVITY_CATEGORIES,
   CORRECTION_ACTIVITY_STATUSES,
+  ENVELOPE_ACTIVITY_LABELS,
   LEAD_PAGE_DEFAULT,
   LEAD_PAGE_HARD_CAP,
   LEAD_TEXT_EXCERPT_CAP,
@@ -2915,6 +2916,7 @@ const RUN_ACTIVITY_ENTRY_COMMAND = z.object({
   ts: z.string().max(ACTIVITY_TS_CAP),
   seq: z.number().int(),
   exitStatus: z.enum(["ok", "failed", "unknown"]),
+  exitStatusSource: z.enum(["wire", "inferred"]).optional(),
 }).strict();
 
 const RUN_ACTIVITY_ENTRY_TOOL_USE = z.object({
@@ -2971,6 +2973,19 @@ const RUN_ACTIVITY_ENTRY_CORRECTION = z.object({
   correctionId: z.string().max(ACTIVITY_LABEL_CAP),
 }).strict();
 
+const RUN_ACTIVITY_ENTRY_THINKING = z.object({
+  category: z.literal("thinking"),
+  ts: z.string().max(ACTIVITY_TS_CAP),
+  seq: z.number().int(),
+}).strict();
+
+const RUN_ACTIVITY_ENTRY_ENVELOPE = z.object({
+  category: z.literal("envelope"),
+  ts: z.string().max(ACTIVITY_TS_CAP),
+  seq: z.number().int(),
+  kind: z.enum([...ENVELOPE_ACTIVITY_LABELS]),
+}).strict();
+
 const RUN_ACTIVITY_ENTRY = z.union([
   RUN_ACTIVITY_ENTRY_MESSAGE,
   RUN_ACTIVITY_ENTRY_COMMAND,
@@ -2980,6 +2995,8 @@ const RUN_ACTIVITY_ENTRY = z.union([
   RUN_ACTIVITY_ENTRY_RUNTIME_STATUS,
   RUN_ACTIVITY_ENTRY_STATE,
   RUN_ACTIVITY_ENTRY_CORRECTION,
+  RUN_ACTIVITY_ENTRY_THINKING,
+  RUN_ACTIVITY_ENTRY_ENVELOPE,
   RUN_ACTIVITY_ENTRY_OTHER,
 ]);
 
@@ -2992,6 +3009,8 @@ const RUN_ACTIVITY_COUNTS = z.object({
   runtime_status: z.number().int().nonnegative(),
   state: z.number().int().nonnegative(),
   correction: z.number().int().nonnegative(),
+  thinking: z.number().int().nonnegative(),
+  envelope: z.number().int().nonnegative(),
   other: z.number().int().nonnegative(),
 }).strict();
 

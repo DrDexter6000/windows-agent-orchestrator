@@ -654,7 +654,9 @@ const RED_23_WIRE = 75492;
 // reverify 出参 schema 增 status 枚举（ok|pending）+既有字段 .optional 化（pending
 // 时缺席；ok 形状仍由 handler 侧逐字段强校验守门）。实测 84111 → 84060（**-51B**
 // ——optional 化的 schema 序列化略小于原必填形）。距 Owner 授权顶 85939 余 1879B。
-const FROZEN_23_WIRE_CEILING = 84060;
+// TD-220（2026-10-07）：run_activity 新增来源字段、thinking/envelope 严格条目及计数，
+// 实测 84060 → 84827（+767B），按实测重冻；Owner 硬顶 85939 不变，余 1112B。
+const FROZEN_23_WIRE_CEILING = 84827;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -828,7 +830,8 @@ test("M12-10-H: deterministic 23-tool wire at or below the frozen ceiling", asyn
 // lane/role（schema 在 stripped 载荷内），SHA 如实变（无损证明语义不变）。
 // 0045 窗口门（2026-10-05）：run_consult 出参镜像成员补齐——SHA 如实翻新。
 const DESC_STRIPPED_CONTRACT_SHA =
-  "2f1fa6113f1f6218e8dd0c52c1cb276e860cf9b0f14e22a079f98de2627e8589";
+  // TD-220（2026-10-07）：仅活动 schema 扩闭集，按实测更新无 description 合同 hash。
+  "2edf4903473b7492fe016cd8845ee449479f63420e4e9ce7e599379fb4205a48";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

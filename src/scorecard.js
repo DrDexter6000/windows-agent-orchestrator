@@ -193,7 +193,7 @@ async function checkAcceptance(scriptPath, cwd) {
   }
 }
 
-function withInferredCommandExitCode(command, toolResults) {
+export function withInferredCommandExitCode(command, toolResults) {
   if (typeof command.exitCode === "number") return command;
   if (typeof command.toolCallId !== "string") return command;
   const result = toolResults.find((r) => r.tool === command.toolCallId);

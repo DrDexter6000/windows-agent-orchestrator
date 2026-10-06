@@ -30,6 +30,13 @@
 
 export const CATEGORIES = Object.freeze([
   "message", "command", "tool_use", "tool_result", "file_written", "runtime_status", "state", "other",
+  "thinking", "envelope",
+]);
+
+// TD-220（2026-10-07）：浏览器独立校验固定标签，未知标签不回显载荷。
+const ENVELOPE_LABELS = Object.freeze([
+  "prompt", "wait_policy", "metrics", "scorecard", "stop_verified",
+  "cleanup_done", "session_reuse", "provider_session_bound",
 ]);
 
 // Bounded timeline window. Live polling appends newest entries and trims oldest
@@ -197,7 +204,16 @@ export function describeEntry(entry) {
     case "command": {
       const status = ["ok", "failed", "unknown"].includes(e.exitStatus) ? e.exitStatus : "unknown";
       body = `command · exit ${status}`;
+      if (["wire", "inferred"].includes(e.exitStatusSource)) body += ` · ${e.exitStatusSource}`;
       mono = true;
+      break;
+    }
+    case "thinking": {
+      body = "思考中";
+      break;
+    }
+    case "envelope": {
+      body = ENVELOPE_LABELS.includes(e.kind) ? `envelope · ${e.kind}` : "[unknown_event]";
       break;
     }
     case "tool_use": {

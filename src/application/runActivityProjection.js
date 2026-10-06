@@ -10,7 +10,7 @@
 //     facts fail closed BEFORE any structured activity result — never degrade
 //     agentId to unknown while still projecting content;
 //   - shape-driven classification of every transcript event into a closed set
-//     of 8 activity categories (NO backend/runtime branching);
+//     of activity categories (NO backend/runtime branching);
 //   - uniform dynamic-string safety: EVERY transcript-derived dynamic string
 //     that crosses output (ts, role, message text, tool name, relative path,
 //     backend, state, unknown-event label) goes through ONE redact -> sanitize
@@ -50,6 +50,7 @@
 // never drift.
 
 import { createHash } from "node:crypto";
+import { withInferredCommandExitCode } from "../scorecard.js";
 
 import { createSecretRedactor } from "../secretRedaction.js";
 import { safeProjectAgentId } from "../canonicalAgentId.js";
@@ -100,6 +101,8 @@ export const ACTIVITY_CATEGORIES = Object.freeze([
   "runtime_status",
   "state",
   "correction",
+  "thinking",
+  "envelope",
   "other",
 ]);
 
@@ -128,6 +131,19 @@ const CORRECTION_TYPE_TO_STATUS = Object.freeze({
   "run.correction_rejected": "rejected",
 });
 
+// TD-220（2026-10-07）：信封只投影源码闭集标签，避免暴露 prompt、会话与指标载荷。
+const ENVELOPE_TYPE_TO_LABEL = Object.freeze({
+  "prompt.sent": "prompt",
+  "run.wait_policy": "wait_policy",
+  "run.metrics": "metrics",
+  "scorecard.checked": "scorecard",
+  "run.stop_verified": "stop_verified",
+  "run.cleanup_done": "cleanup_done",
+  "run.session_reuse": "session_reuse",
+  "run.provider_session_bound": "provider_session_bound",
+});
+export const ENVELOPE_ACTIVITY_LABELS = Object.freeze(Object.values(ENVELOPE_TYPE_TO_LABEL));
+
 function emptyCounts() {
   return {
     message: 0,
@@ -138,6 +154,8 @@ function emptyCounts() {
     runtime_status: 0,
     state: 0,
     correction: 0,
+    thinking: 0,
+    envelope: 0,
     other: 0,
   };
 }
@@ -432,9 +450,7 @@ function safeFilePath(raw, redactor) {
   return s.length <= ACTIVITY_PATH_CAP ? s : safeSliceUtf16(s, 0, ACTIVITY_PATH_CAP);
 }
 
-// Bookkeeping envelope types are NOT worker activity — skipped (never counted,
-// never emitted). Unknown run.event kinds and any other non-bookkeeping type
-// become a bounded `other` entry (label only, never the payload).
+// TD-220（2026-10-07）：启动/读取记账跳过；可见信封由固定映射分类，未知事件只出哨兵。
 const SKIP_TYPES = new Set([
   "run.submitted",
   "run.started",
@@ -446,6 +462,7 @@ const SKIP_TYPES = new Set([
   // (the envelope IS the fact) — not worker activity. It mounts the advisory
   // readOnlyObservation instead of a timeline entry.
   "run.read_only_declared",
+  "messages.collected",
 ]);
 
 /**
@@ -464,13 +481,14 @@ function classifyEvent(event) {
     const k = event.kind;
     if (k === "runtime_activity") return "runtime_status";
     if (k === "message" || k === "command" || k === "tool_use"
-      || k === "tool_result" || k === "file_written") return k;
+      || k === "tool_result" || k === "file_written" || k === "thinking") return k;
     return "other";
   }
   if (typeof t === "string" && SKIP_TYPES.has(t)) return null;
   // M12-16: correction lifecycle — a meaningful closed-set status (not the
   // opaque `other` sentinel). The prompt/body/reason never reach the surface.
-  if (CORRECTION_TYPE_TO_STATUS[t]) return "correction";
+  if (Object.hasOwn(CORRECTION_TYPE_TO_STATUS, t)) return "correction";
+  if (Object.hasOwn(ENVELOPE_TYPE_TO_LABEL, t)) return "envelope";
   return "other";
 }
 
@@ -480,7 +498,7 @@ function classifyEvent(event) {
  * Every transcript-derived dynamic string uses the uniform
  * safeDynamicText path or a stricter closed-set/sentinel.
  */
-function buildEntry(event, category, redactor, textCap) {
+function buildEntry(event, category, redactor, textCap, toolResultsById) {
   const ts = safeDynamicText(event.ts ?? "", redactor, ACTIVITY_TS_CAP);
   const seq = Number.isInteger(event.seq) ? event.seq : 0;
   switch (category) {
@@ -495,8 +513,21 @@ function buildEntry(event, category, redactor, textCap) {
       const { text: safe, truncated } = boundText(full, redactor, textCap);
       return { category, ts, seq, role, text: safe, truncated };
     }
-    case "command":
-      return { category, ts, seq, exitStatus: commandExitStatus(event) };
+    case "command": {
+      if (event.exitCode !== undefined) {
+        return { category, ts, seq, exitStatus: commandExitStatus(event), exitStatusSource: "wire" };
+      }
+      const result = toolResultsById.get(event.toolCallId);
+      const command = withInferredCommandExitCode(event, result ? [result] : []);
+      return {
+        category, ts, seq, exitStatus: commandExitStatus(command),
+        ...(command.exitCode !== undefined ? { exitStatusSource: "inferred" } : {}),
+      };
+    }
+    case "thinking":
+      return { category, ts, seq };
+    case "envelope":
+      return { category, ts, seq, kind: ENVELOPE_TYPE_TO_LABEL[event.type] };
     case "tool_use":
       return {
         category, ts, seq,
@@ -665,6 +696,15 @@ export function projectRunActivity(rawSnapshot, {
   // Build the ordered filtered safe-entry list from the FROZEN snapshot so
   // counts + pagination are stable across pages. The view filter (category +
   // afterSeq) narrows the set; counts describe exactly this filtered timeline.
+  // TD-220（2026-10-07）：只关联本冻结窗口的 tool_result；结果在窗口外则降为 unknown，
+  // 不跨窗拼接，保证游标续页稳定。保留首条匹配结果，与 scorecard 的 find 语义一致。
+  const toolResultsById = new Map();
+  for (const event of frozenEvents) {
+    if (event?.type === "run.event" && event.kind === "tool_result"
+      && typeof event.tool === "string" && !toolResultsById.has(event.tool)) {
+      toolResultsById.set(event.tool, event);
+    }
+  }
   const allEntries = [];
   const counts = emptyCounts();
   for (const event of frozenEvents) {
@@ -675,7 +715,7 @@ export function projectRunActivity(rawSnapshot, {
       const s = Number.isInteger(event?.seq) ? event.seq : 0;
       if (!(s > afterSeq)) continue;
     }
-    allEntries.push(buildEntry(event, category, redactor, textCap));
+    allEntries.push(buildEntry(event, category, redactor, textCap, toolResultsById));
     counts[category] += 1;
   }
   const total = allEntries.length;

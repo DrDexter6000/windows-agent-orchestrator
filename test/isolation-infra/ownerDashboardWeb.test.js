@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 
 import { createOwnerDashboardServer } from "../../src/ownerDashboardServer.js";
 import * as app from "../../src/owner-dashboard/app.js";
+import { ENVELOPE_ACTIVITY_LABELS, projectRunActivity } from "../../src/application/runActivityProjection.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = join(HERE, "../..", "src", "owner-dashboard");
@@ -335,6 +336,30 @@ test("CLIENT SAFE: describeEntry reads only safe fields per category", () => {
     "runtime · unknown");
   assert.equal(app.describeEntry({ category: "state", to: "completed", ts: "t", seq: 1 }).body, "state → completed");
   assert.equal(app.describeEntry({ category: "other", ts: "t", seq: 1 }).body, "[unknown_event]");
+});
+
+test("TD-220 CLIENT SAFE: new categories and command sources are closed sets with fixed presentation", () => {
+  assert.ok(app.CATEGORIES.includes("thinking") && app.CATEGORIES.includes("envelope"));
+  const runId = "run_td220_dashboard";
+  const page = projectRunActivity({ events: [
+    { type: "run.event", kind: "thinking", text: "SECRET", runId, seq: 1 },
+    { type: "run.metrics", payload: "SECRET", runId, seq: 2 },
+  ] }, { runId });
+  assert.equal(app.describeEntry(page.entries[0]).body, "思考中");
+  assert.equal(app.describeEntry(page.entries[1]).body, "envelope · metrics");
+  assert.equal(app.describeEntry({ category: "thinking", text: "SECRET", payload: "SECRET" }).body, "思考中");
+  for (const kind of ENVELOPE_ACTIVITY_LABELS) {
+    assert.equal(app.describeEntry({ category: "envelope", kind, payload: "SECRET" }).body, `envelope · ${kind}`);
+  }
+  for (const kind of ["SECRET", "toString", "__proto__", undefined]) {
+    assert.equal(app.describeEntry({ category: "envelope", kind }).body, "[unknown_event]");
+  }
+  for (const source of ["wire", "inferred"]) {
+    assert.equal(app.describeEntry({ category: "command", exitStatus: "ok", exitStatusSource: source }).body,
+      `command · exit ok · ${source}`);
+  }
+  assert.equal(app.describeEntry({ category: "command", exitStatus: "ok", exitStatusSource: "SECRET" }).body,
+    "command · exit ok");
 });
 
 test("CLIENT SAFE: describeEntry never surfaces raw command / prompt / payload", () => {
