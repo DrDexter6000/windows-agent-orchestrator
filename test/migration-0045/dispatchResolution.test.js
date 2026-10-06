@@ -75,15 +75,18 @@ test("W3a 映射冻结（R4 红队'标签互换'防御）：laneId→轴/wiringA
     aliases: Object.fromEntries(Object.entries(l.aliases ?? {}).map(([a, s]) => [a, s.role])),
   })).sort((a, b) => (a.id < b.id ? -1 : 1));
   assert.deepEqual(snapshot, [
-    { id: "claude-opus", backend: "claude-code", modelId: "claude-opus-5-5", effort: "xhigh", aliases: { auditor_claude: "auditor" } },
-    { id: "ds-acp", backend: "deepseek-acp", modelId: null, effort: null, aliases: { coder_low_dsh: "coder_low" } },
+    { id: "astra", backend: "codex", modelId: "gpt-6-astra", effort: "xhigh", aliases: { auditor: "auditor" } },
+    { id: "deepseek-pro", backend: "deepseek-acp", modelId: null, effort: null, aliases: { coder_low_dsh: "coder_low" } },
     { id: "glm-flash", backend: "zcode", modelId: "bigmodel-api/GLM-5.3-Flash", effort: "high", aliases: { coder_low: "coder_low", researcher: "researcher" } },
     { id: "glm-pro", backend: "zcode", modelId: "bigmodel-api/GLM-5.3", effort: "high", aliases: { coder_hq: "coder_hq" } },
-    { id: "gpt-astra", backend: "codex", modelId: "gpt-6-astra", effort: "xhigh", aliases: { auditor: "auditor" } },
     { id: "gpt-sol-56", backend: "codex", modelId: "gpt-5.6-sol", effort: "xhigh", aliases: { tester: "tester" } },
-    { id: "gpt-sol-61", backend: "codex", modelId: "gpt-6.1-sol", effort: "xhigh", aliases: { coder_temp: "coder_low" } },
-    { id: "kimi-k3", backend: "kimi-web", modelId: "kimi-code/k3-256k", effort: null, aliases: { coder_mm: "coder_mm" } },
+    { id: "kimi", backend: "kimi-web", modelId: "kimi-code/k3-256k", effort: null, aliases: { coder_mm: "coder_mm" } },
+    { id: "opus", backend: "claude-code", modelId: "claude-opus-5-5", effort: "xhigh", aliases: { auditor_claude: "auditor" } },
+    { id: "sol", backend: "codex", modelId: "gpt-6.1-sol", effort: "xhigh", aliases: { coder_temp: "coder_low" } },
   ]);
+  // 0046 §5 步②（2026-10-06）：车道键模型名化重键（kimi-k3→kimi/gpt-astra→astra/
+  // gpt-sol-61→sol/claude-opus→opus/ds-acp→deepseek-pro；glm 系与 gpt-sol-56 不变，
+  // 后者待⑧步删除）。旧键已入 LEGACY_AGENT_NAMES。
 });
 
 test("W3a 守卫消费（R4）：结构 issues——explicit 整表拒 lanes_config_invalid；alias 降级", () => {
@@ -136,11 +139,11 @@ test("W1 解析：legacy-agent——注册表键在但不在车道表（如临�
 });
 
 test("W1 解析：explicit lane+role → wiringAgent 执行 + 身份注记", () => {
-  const r = R({ lane: "claude-opus", role: "tester" });
+  const r = R({ lane: "opus", role: "tester" });
   assert.equal(r.kind, "resolved");
   assert.equal(r.source, "explicit");
-  assert.equal(r.agentId, "claude-opus", "W4d：agentId=车道键（接线直取）");
-  assert.equal(r.laneId, "claude-opus");
+  assert.equal(r.agentId, "opus", "W4d：agentId=车道键（接线直取）；0046 步②：claude-opus→opus 重键");
+  assert.equal(r.laneId, "opus");
   assert.equal(r.roleId, "tester");
 });
 

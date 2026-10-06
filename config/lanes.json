@@ -1,6 +1,6 @@
 {
   "schema": 2,
-  "_comment": "0045 §1.1 车道注册表（git 跟踪、无密钥）。lane id=人读定位名（非身份；身份=四元组指纹，见 src/application/identityProjection.js）。W4d 终局：接线=私有注册表 config/agents.json 的车道键条目（laneId 直取），本表不再携带接线引用；车道字段只断言不生效（注册表赢，不一致即拒）。aliases=老席位名注解（§1.4：只在派发边界解析为身份注记，不改执行——别名派发仍走 registry 原条目，行为零变化）。",
+  "_comment": "0045 §1.1 车道注册表（git 跟踪、无密钥）。lane id=人读定位名（非身份；身份=四元组指纹，见 src/application/identityProjection.js）。W4d 终局：接线=私有注册表 config/agents.json 的车道键条目（laneId 直取），本表不再携带接线引用；车道字段只断言不生效（注册表赢，不一致即拒）。aliases=老席位名注解（§1.4：只在派发边界解析为身份注记，不改执行——别名派发仍走 registry 原条目，行为零变化）。0046 §5 步②（2026-10-06）：车道键模型名化（kimi-k3→kimi / gpt-astra→astra / gpt-sol-61→sol / claude-opus→opus / ds-acp→deepseek-pro；glm-pro/glm-flash 不变），旧键入 LEGACY_AGENT_NAMES 历史冻结名单；别名表暂留（⑥步全删），目标已随键同步重指向。",
   "lanes": [
     {
       "id": "glm-flash",
@@ -36,7 +36,7 @@
       }
     },
     {
-      "id": "kimi-k3",
+      "id": "kimi",
       "backend": "kimi-web",
       "model": {
         "id": "kimi-code/k3-256k"
@@ -66,7 +66,7 @@
       }
     },
     {
-      "id": "gpt-astra",
+      "id": "astra",
       "backend": "codex",
       "model": {
         "id": "gpt-6-astra"
@@ -81,7 +81,7 @@
       }
     },
     {
-      "id": "gpt-sol-61",
+      "id": "sol",
       "backend": "codex",
       "model": {
         "id": "gpt-6.1-sol"
@@ -96,7 +96,7 @@
       }
     },
     {
-      "id": "ds-acp",
+      "id": "deepseek-pro",
       "backend": "deepseek-acp",
       "model": null,
       "reasoning": {
@@ -109,7 +109,7 @@
       }
     },
     {
-      "id": "claude-opus",
+      "id": "opus",
       "backend": "claude-code",
       "model": {
         "id": "claude-opus-5-5"

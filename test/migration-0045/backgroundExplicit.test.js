@@ -83,17 +83,17 @@ test("BG-2: runBackground 重解析 explicit——角色库帽生效+注记落�
   try {
     makeGitRepo(dir);
     const runDir = join(dir, "runs");
-    // W4d：注册表键=车道键（claude-opus）——explicit 解析直取接线条目。
+    // W4d：注册表键=车道键——explicit 解析直取接线条目。0046 步②：claude-opus→opus。
     const registry = { agents: {
-      "claude-opus": { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, cwd: dir },
+      "opus": { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, cwd: dir },
     } };
     const { mkdirSync } = await import("node:fs");
     mkdirSync(runDir, { recursive: true });
     const { runBackground } = await import("../../src/backgroundRunner.js");
     let spawnHappened = false;
     const result = await runBackground({
-      agentId: "claude-opus", prompt: "t", runDir, runId: "run_0045_bg2_ok",
-      registry, lane: "claude-opus", role: "w2b-hat",
+      agentId: "opus", prompt: "t", runDir, runId: "run_0045_bg2_ok",
+      registry, lane: "opus", role: "w2b-hat",
       backendFor: () => ({
         supportsRoleContract: true, sessionOutlivesProcess: false,
         async spawn() {

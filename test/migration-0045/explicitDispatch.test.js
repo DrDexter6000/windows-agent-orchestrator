@@ -217,16 +217,16 @@ test("CLI-1: --explain 别名解析打印 resolved JSON、零副作用", async (
   try {
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: {
-      "claude-opus": { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, cwd: dir },
+      "opus": { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, cwd: dir },
     } }), "utf8");
     const { threw, logs } = await runCli(["auditor_claude", "--explain"], registryPath);
     assert.equal(threw, null);
     const out = JSON.parse(logs.join("\n"));
     assert.equal(out.status, "resolved");
     assert.equal(out.source, "alias");
-    assert.equal(out.laneId, "claude-opus");
+    assert.equal(out.laneId, "opus");
     assert.equal(out.roleId, "auditor");
-    assert.equal(out.agentId, "claude-opus", "W4d：explain 的 agentId=车道键");
+    assert.equal(out.agentId, "opus", "W4d：explain 的 agentId=车道键（0046 步②：claude-opus→opus）");
   } finally { cleanupDir(dir); }
 });
 
@@ -240,7 +240,7 @@ test("CLI-2: 未知 lane → 抛错含闭集码+完整合法 lane 全集+修正�
     const { threw } = await runCli(["--lane", "claude-opus1", "--role", "auditor", "--prompt", "t"], registryPath);
     assert.ok(threw.includes("unknown_lane"), "闭集码在场");
     assert.ok(threw.includes("合法 lane: "), "合法全集行在场");
-    assert.ok(threw.includes("claude-opus"), "全集含正确车道");
+    assert.ok(threw.includes("opus"), "全集含正确车道");
     assert.ok(threw.includes("修正示例"), "修正例在场");
   } finally { cleanupDir(dir); }
 });

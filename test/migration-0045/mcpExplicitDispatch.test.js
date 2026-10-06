@@ -29,10 +29,10 @@ async function withServer(fn) {
   const dir = mkdtempSync(join(tmpdir(), "wao-mcpw5-"));
   try {
     makeGitRepo(dir);
-    // 注册表与在库车道表 claude-opus 轴一致（公开轴=backend/model/effort）
+    // 注册表与在库车道表 opus 轴一致（公开轴=backend/model/effort；0046 步②重键）
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: {
-      "claude-opus": { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, cwd: dir },
+      "opus": { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, cwd: dir },
       legacy_seat: { backend: "claude-code", cwd: dir },
     } }), "utf8");
     const dispatches = [];
@@ -59,14 +59,14 @@ test("W5-1: MCP explicit {lane,role} 派发——dispatcher 收接线席位+reso
   await withServer(async ({ client, dispatches }) => {
     const res = await client.callTool({
       name: "run_dispatch",
-      arguments: { lane: "claude-opus", role: "auditor", prompt: "review this" },
+      arguments: { lane: "opus", role: "auditor", prompt: "review this" },
     });
     assert.equal(res.isError, undefined, `unexpected error: ${JSON.stringify(res.content ?? res).slice(0, 200)}`);
     assert.equal(dispatches.length, 1);
-    assert.equal(dispatches[0].agentId, "claude-opus", "W4d：接线=注册表车道键（解析结果）");
-    assert.equal(dispatches[0].resolvedLane, "claude-opus");
+    assert.equal(dispatches[0].agentId, "opus", "W4d：接线=注册表车道键（解析结果）");
+    assert.equal(dispatches[0].resolvedLane, "opus");
     assert.equal(dispatches[0].resolvedRole, "auditor");
-    assert.equal(res.structuredContent.agentId, "claude-opus", "出参绑定=解析后身份（车道键）");
+    assert.equal(res.structuredContent.agentId, "opus", "出参绑定=解析后身份（车道键）");
   });
 });
 
@@ -74,18 +74,18 @@ test("W5-2: 选择器错误→isError 固定文案（闭集码+合法全集+修�
   await withServer(async ({ client, dispatches }) => {
     const unknownLane = await client.callTool({
       name: "run_dispatch",
-      arguments: { lane: "claude-opus1", role: "auditor", prompt: "x" },
+      arguments: { lane: "opus1", role: "auditor", prompt: "x" },
     });
     assert.equal(unknownLane.isError, true);
     const text = unknownLane.content[0].text;
     assert.match(text, /unknown_lane/);
     assert.match(text, /known lanes \(\d+\): /);
-    assert.ok(text.includes("claude-opus"), "合法全集含正确车道");
+    assert.ok(text.includes("opus"), "合法全集含正确车道（0046 步②重键后）");
     assert.match(text, /fix: run_dispatch\(/);
 
     const mixed = await client.callTool({
       name: "run_dispatch",
-      arguments: { agentId: "legacy_seat", lane: "claude-opus", role: "auditor", prompt: "x" },
+      arguments: { agentId: "legacy_seat", lane: "opus", role: "auditor", prompt: "x" },
     });
     assert.equal(mixed.isError, true);
     assert.match(mixed.content[0].text, /dispatch_selector_invalid/);

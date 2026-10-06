@@ -20,13 +20,14 @@ const SRC_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "src"
 
 // ── 冻结闭集钉 ──────────────────────────────────────────────────────────────
 
-test("0045 §1.5：legacy 名单冻结钉（2026-10-05 数据驱动 12 名；扩集=蓄意事件须改本钉）", () => {
+test("0045 §1.5：legacy 名单冻结钉（12 历史扫描名 + 0046 §5 步② 重键扩编 6 车道旧键 = 18 名；扩集=蓄意事件须改本钉）", () => {
   assert.deepEqual([...LEGACY_AGENT_NAMES].sort(), [
-    "auditor", "auditor_claude", "coder", "coder_hq", "coder_low",
-    "coder_low_dsh", "coder_mm", "coder_temp", "glm_worker",
-    "parallel-verify", "researcher", "tester",
-  ], "legacy 名单与 590 份真实转录扫描出的 12 历史名不符——扩集是蓄意事件，"
-    + "须同步更新本钉与名单头注（0045 §1.5）");
+    "auditor", "auditor_claude", "claude-opus", "coder", "coder_hq", "coder_low",
+    "coder_low_dsh", "coder_mm", "coder_temp", "ds-acp", "glm_worker",
+    "gpt-astra", "gpt-sol-56", "gpt-sol-61", "kimi-k3", "parallel-verify",
+    "researcher", "tester",
+  ], "legacy 名单与 12 历史扫描名 + 6 个 0046 重键退役车道旧键不符——扩集是蓄意事件，"
+    + "须同步更新本钉与名单头注（0045 §1.5 / 0046 §5 步②）");
   assert.ok(Object.isFrozen(LEGACY_AGENT_NAMES), "名单 Object.frozen");
 });
 
