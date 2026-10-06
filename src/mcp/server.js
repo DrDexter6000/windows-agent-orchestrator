@@ -3456,20 +3456,30 @@ export function createWaoMcpServer({
   // TD-215（2026-10-06 三方会审收敛：「限时等待，超时返回 pending」，非受理即回执）：
   // 长验证（全套 ~13min）必然超过宿主传输上限（zcode 插件 660s）——占住传输层只会
   // 产生 TransportError+人工轮询舞（当日两案）。有界等待内完成=同步返回既有契约；
-  // 超时=text-only pending 回执（不动冻结 output schema——structuredContent 缺席
-  // 是合法形状），验证在服务进程内继续（分离架构实证：当日两次宿主掐断后验证
-  // 均继续并落定）。可调：WAO_DELIVERY_WAIT_MS。
+  // 超时=status:"pending" 回执（output schema 增 status 枚举——会审批准的契约最小
+  // 扩展；窗内完成=status:"ok" 同步契约原样）。可调：WAO_DELIVERY_WAIT_MS。
   const DELIVERY_BOUNDED_WAIT_MS = (() => {
     const raw = Number.parseInt(String(process.env.WAO_DELIVERY_WAIT_MS ?? ""), 10);
     return Number.isFinite(raw) && raw > 0 ? raw : 300_000;
   })();
-  const withBoundedWait = (servicePromise, { runId, op }) => Promise.race([
-    servicePromise,
-    new Promise((resolve) => setTimeout(
-      () => resolve({ __boundedWaitPending: true, runId, op }),
-      DELIVERY_BOUNDED_WAIT_MS,
-    )),
-  ]);
+  // 补席审计修正：窗内完成即清 timer（否则拖住进程到窗口尽头——实测每个走默认
+  // 窗的测试文件多挂 ~5min）；超窗后服务侧若 reject，吞掉并记录（pending 文案不再
+  // 无条件声称"验证继续"——迟失败经 run_delivery 可见）。
+  const withBoundedWait = (servicePromise, { runId, op }) => new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve({ __boundedWaitPending: true, runId, op });
+    }, DELIVERY_BOUNDED_WAIT_MS);
+    servicePromise.then(
+      (v) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } },
+      (e) => {
+        if (!settled) { settled = true; clearTimeout(timer); resolve(e); }
+        // 已 pending：迟 reject 吞掉（服务侧失败事实经 run_delivery 落定，Lead 轮询可见）
+      },
+    );
+  });
   const continueService = continueRunFn ?? continueRun;
   const correctService = correctRunFn ?? correctRun;
   const contractCheckService = runDispatchContractCheckFn ?? runDispatchContractCheck;
@@ -6124,10 +6134,10 @@ export function createWaoMcpServer({
             content: [{
               type: "text",
               text: `run_delivery_repackage pending: verification still running after the bounded wait `
-                + `(${Math.round(DELIVERY_BOUNDED_WAIT_MS / 1000)}s). The verification CONTINUES server-side `
-                + "(detached-server architecture — same-day evidence: verifications survived host transport cuts). "
-                + `Poll run_delivery with { runId: "${runId}", waitMs } for the settled outcome; the service is `
-                + "reentrant — an accidental re-call resumes/idempotently returns rather than duplicating work.",
+                + `(${Math.round(DELIVERY_BOUNDED_WAIT_MS / 1000)}s). The verification typically continues `
+                + "server-side (detached-server architecture — same-day evidence); poll run_delivery with "
+                + `{ runId: "${runId}", waitMs } for the settled outcome (including a late failure). `
+                + "Do NOT blind-retry while a run is in flight — reentry re-executes verification side effects.",
             }],
             structuredContent: pending,
           };
@@ -6203,9 +6213,9 @@ export function createWaoMcpServer({
             content: [{
               type: "text",
               text: `run_delivery_reverify pending: re-verification still running after the bounded wait `
-                + `(${Math.round(DELIVERY_BOUNDED_WAIT_MS / 1000)}s). It CONTINUES server-side; poll `
-                + `run_delivery with { runId: "${runId}", waitMs } for the settled outcome. The request chain is `
-                + "persisted — re-calls resume/idempotently return (created|resumed|idempotent).",
+                + `(${Math.round(DELIVERY_BOUNDED_WAIT_MS / 1000)}s). It typically continues server-side; poll `
+                + `run_delivery with { runId: "${runId}", waitMs } for the settled outcome (including a late failure). `
+                + "Avoid concurrent re-calls while the first is in flight — reentry re-executes verification.",
             }],
             structuredContent: pending,
           };

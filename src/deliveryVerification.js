@@ -229,14 +229,18 @@ function _validateTimeout(timeoutMs) {
  */
 async function _prepareAttemptEnv(gateHeld = false) {
   // 防自锁标记只在本进程真正持闸时注入；无闸/fail-open 绝不谎报。
-  const held = gateHeld ? { [VERIFICATION_GATE_HELD_ENV]: "1" } : {};
+  
+// 0047（补席审计缺口）：验证命令由控制面在交付 worktree 内执行——cwd 命中
+// 防向下派发门。这是 Lead 授权场景（验证即 Lead 行为），注入豁免；worker
+// 自发 shell 不经此 env，门对其仍然有效。
+const held = gateHeld ? { [VERIFICATION_GATE_HELD_ENV]: "1" } : {};
   try {
     const dir = await mkdtemp(join(tmpdir(), "wao-verify-"));
-    return { env: { ...process.env, TMP: dir, TEMP: dir, TMPDIR: dir, ...held }, tempDir: dir, isolated: true };
+    return { env: { ...process.env, TMP: dir, TEMP: dir, TMPDIR: dir, ...held, WAO_ALLOW_NESTED_DISPATCH: "1" }, tempDir: dir, isolated: true };
   } catch {
     const fallback = tmpdir();
     return {
-      env: { ...process.env, TMP: fallback, TEMP: fallback, TMPDIR: fallback, ...held },
+      env: { ...process.env, TMP: fallback, TEMP: fallback, TMPDIR: fallback, ...held, WAO_ALLOW_NESTED_DISPATCH: "1" },
       tempDir: null,
       isolated: false,
     };

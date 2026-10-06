@@ -72,6 +72,7 @@ import { assessPanelReadiness, deriveReadyState } from "../application/panelRead
 // R9：doctor INFO 文案与 waoStage 的 skip 码闭集对账（同一 SSOT import，禁值指纹）。
 import { PANEL_SKIP_REASONS } from "../waoStage.js";
 import { LOAD_BEARING_ENV_BY_BACKEND, resolveLoadBearingEnvFull } from "../application/loadBearingEnv.js";
+import { readWindowsUserEnv as readWindowsUserEnvValue } from "../application/credentialReadiness.js";
 
 // TD-95 #11 --strict：JS parse smoke（防注释崩溃漏到运行时，复盘 #3 教训）。
 // 对 src/*.js 跑 node --check。doctor --strict 时调用。
@@ -343,8 +344,10 @@ export async function waoDoctorCommand(args, config) {
           declared,
           agentEnv: agent?.env ?? {},
           processEnv: process.env,
+          // 补席审计修正：User 作用域真读（readWindowsUserEnv，与凭据面同实现），
+          // 不再复读 process.env（setx 后旧 shell 也能如实报"User 作用域已设置"）。
           userEnvReader: (name) => {
-            try { return process.env[name] ?? null; } catch { return null; }
+            try { return readWindowsUserEnvValue(name); } catch { return null; }
           },
           existsFn: existsSyncFn,
         });

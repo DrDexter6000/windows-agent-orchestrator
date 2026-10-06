@@ -138,6 +138,8 @@ export class DeepSeekHarnessBackend {
       ...(task.roleContract ? { DSH_SYSTEM_PROMPT: task.roleContract } : {}),
       DSH_SESSION_ROOT: sessionRoot,
       WAO_TARGET_CWD: agent.cwd,
+      // 0047 L1：worker 血统标记（同 processBackend——补席审计缺口）。
+      WAO_IN_WORKER: "1",
     }, resolvedCredentials);
     const redactor = createSecretRedactor(
       { ...process.env, ...resolvedCredentials },

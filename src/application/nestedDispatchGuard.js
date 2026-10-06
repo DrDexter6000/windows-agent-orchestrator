@@ -57,7 +57,7 @@ export function nestedDispatchRefusalText(ctx) {
     + "through WAO (orchestration belongs to the Lead — invariant 4). "
     + `Detected worker context: ${ctx?.reason ?? "unknown"} (${ctx?.detail ?? "no detail"}). `
     + "Complete the bounded task you were given instead. "
-    + `If this is a legitimate Lead-sanctioned exception, set ${NESTED_DISPATCH_BYPASS_ENV}=1.`;
+    + "(Lead-sanctioned exceptions exist; ask the Lead — the mechanism is deliberately not named here.)";
 }
 
 /** 便捷断言：worker 上下文即抛（供入口消费）。 */

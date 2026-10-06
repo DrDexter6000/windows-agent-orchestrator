@@ -812,7 +812,10 @@ export class KimiWebBackend {
           try {
             const detail = await this.sessionDetail(agent, sessionId);
             const active = detail?.main_turn_active === true || detail?.busy === true;
-            attestationState = active ? "active" : "inactive";
+            // 补席审计修正：inactive 需 serve 显式 boolean false（null/形状不符=不可判
+            // 定，归 unavailable——未知绝不冒充"明确不活跃"）。
+            const explicitInactive = detail?.main_turn_active === false && detail?.busy === false;
+            attestationState = active ? "active" : (explicitInactive ? "inactive" : "unavailable");
           } catch {
             attestationState = "unavailable";
           }

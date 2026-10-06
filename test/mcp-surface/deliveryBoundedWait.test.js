@@ -27,7 +27,7 @@ async function buildClient(server) {
   return client;
 }
 
-test("TD-215 ①: 服务超窗 → text-only pending 回执（isError 未设、无 structuredContent、指向 run_delivery）", async () => {
+test("TD-215 ①: 服务超窗 → status:pending 回执（isError 未设、structuredContent 极简、指向 run_delivery）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wao-bw-1-"));
   try {
     makeGitRepo(dir);
@@ -56,8 +56,9 @@ test("TD-215 ①: 服务超窗 → text-only pending 回执（isError 未设、�
       );
       assert.equal(res.structuredContent?.status, "pending");
       assert.match(text, /run_delivery_repackage pending/);
-      assert.match(text, /CONTINUES server-side/);
-      assert.match(text, /Poll run_delivery/);
+      assert.match(text, /typically continues server-side/);
+      assert.match(text, /Do NOT blind-retry/);
+      assert.match(text, /poll run_delivery/);
     } finally {
       if (prev === undefined) delete process.env.WAO_DELIVERY_WAIT_MS;
       else process.env.WAO_DELIVERY_WAIT_MS = prev;

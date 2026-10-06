@@ -685,7 +685,9 @@ if (ONLY_AGENT) {
 // U1（2026-10-06 三方会审）：case 原始态之上补 worker 终态（例外条款裁决发生在
 // 聚合层——case: draft-only + worker: conditional 是常态组合，此前只打 case 态
 // 会误判；本行复用权威聚合结果，不在控制台重算）。
+const targetAgentIds = new Set(MATRIX.map((tc) => tc.agentId));
 for (const w of Object.values(summary.workers ?? {})) {
+  if (!targetAgentIds.has(w.agentId)) continue;
   console.log(`  worker ${w.agentId} -> ${w.status} (${w.certificationScope ?? "-"})`);
 }
   console.log(`[ambient] Certification counts (post-merge whole-ledger, 含其他 lane 旧 case): ${JSON.stringify(summary.counts)}`);
