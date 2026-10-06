@@ -37,7 +37,7 @@ Audience: repository-level agents and humans; 认证台账 live 值不在本文�
 | codex | 支持 | 支持 | 不支持 | 不支持 |
 | kimi-code | 支持 | 条件：effort ∈ {low, high, max}，须绑定 kimi-code/k3 | 不支持 | 不支持 |
 | deepseek-harness | 支持 | 条件：effort ∈ {high, max} | 支持 | 不支持 |
-| deepseek-acp | 不支持 | 条件：effort ∈ {low, high, max} | 不支持 | 不支持 |
+| deepseek-acp | 条件：仅 OpenCode 形状 `{providerID, id}` | 条件：effort ∈ {low, high, max} | 不支持 | 不支持 |
 | kimi-web | 不支持 | 不支持 | 不支持 | 不支持 |
 | zcode | 不支持 | 支持 | 不支持 | 不支持 |
 
