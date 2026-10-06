@@ -600,11 +600,22 @@ results.push({
   error: serveReachable ? silentResult?.error : `not-applicable (opencode-serve not reachable at ${SERVE_URL})`,
 });
 
-// 清理（Windows 下可能有文件锁，try/catch 不阻断结果输出）
+// 清理（Windows 下可能有文件锁，try/catch 不阻断结果输出）。
+// 0045 窗口门 4 修复（2026-10-06）：删除后必须**重建空目录**——Kimi serve 的
+// workspace root 绑定粘滞在本路径（reliability 派发 --cwd TMP_DIR 时注册），
+// 目录一旦消失，后续一切 kimi-web 会话（含 Owner 手动新建）报 40409
+// "workspace root does not exist"（实测：全量 reliability 收尾删目录直接
+// 打挂 kimi-k3 车道与 Owner 的 Kimi 客户端）。重建空目录=绑定仍有效、
+// drill 残留（哨兵/转录）不积累。
 try {
   rmSync(TMP_DIR, { recursive: true, force: true });
 } catch {
   console.log(`(cleanup skipped: ${TMP_DIR} locked, remove manually)`);
+}
+try {
+  mkdirSync(TMP_DIR, { recursive: true });
+} catch {
+  console.log(`(workspace-root recreate failed: ${TMP_DIR} — kimi-web sessions will 40409 until it exists)`);
 }
 
 // 输出 summary
