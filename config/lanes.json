@@ -1,6 +1,6 @@
 {
   "schema": 2,
-  "_comment": "0045 §1.1 车道注册表（git 跟踪、无密钥）。lane id=人读定位名（非身份；身份=四元组指纹，见 src/application/identityProjection.js）。W4d 终局：接线=私有注册表 config/agents.json 的车道键条目（laneId 直取），本表不再携带接线引用；车道字段只断言不生效（注册表赢，不一致即拒）。aliases=老席位名注解（§1.4：只在派发边界解析为身份注记，不改执行——别名派发仍走 registry 原条目，行为零变化）。0046 §5 步②（2026-10-06）：车道键模型名化（kimi-k3→kimi / gpt-astra→astra / gpt-sol-61→sol / claude-opus→opus / ds-acp→deepseek-pro；glm-pro/glm-flash 不变），旧键入 LEGACY_AGENT_NAMES 历史冻结名单；别名表暂留（⑥步全删），目标已随键同步重指向。",
+  "_comment": "0045 §1.1 车道注册表（git 跟踪、无密钥）。lane id=人读定位名（非身份；身份=四元组指纹，见 src/application/identityProjection.js）。W4d 终局：接线=私有注册表 config/agents.json 的车道键条目（laneId 直取），本表不再携带接线引用；车道字段只断言不生效（注册表赢，不一致即拒）。aliases=老席位名注解（§1.4：只在派发边界解析为身份注记，不改执行——别名派发仍走 registry 原条目，行为零变化）。0046 §5 步②（2026-10-06）：车道键模型名化（kimi-k3→kimi / gpt-astra→astra / gpt-sol-61→sol / claude-opus→opus / ds-acp→deepseek-pro；glm-pro/glm-flash 不变），旧键入 LEGACY_AGENT_NAMES 历史冻结名单；别名表暂留（⑥步全删），目标已随键同步重指向。 0046 步③④b：effort 轴同步（G4 断言面）+deepseek 双车道；deepseek-flash 无历史别名（空表）。",
   "lanes": [
     {
       "id": "glm-flash",
@@ -9,7 +9,7 @@
         "id": "bigmodel-api/GLM-5.3-Flash"
       },
       "reasoning": {
-        "effort": "high"
+        "effort": "max"
       },
       "aliases": {
         "researcher": {
@@ -27,7 +27,7 @@
         "id": "bigmodel-api/GLM-5.3"
       },
       "reasoning": {
-        "effort": "high"
+        "effort": "max"
       },
       "aliases": {
         "coder_hq": {
@@ -72,7 +72,7 @@
         "id": "gpt-6-astra"
       },
       "reasoning": {
-        "effort": "xhigh"
+        "effort": "high"
       },
       "aliases": {
         "auditor": {
@@ -87,7 +87,7 @@
         "id": "gpt-6.1-sol"
       },
       "reasoning": {
-        "effort": "xhigh"
+        "effort": "high"
       },
       "aliases": {
         "coder_temp": {
@@ -98,9 +98,12 @@
     {
       "id": "deepseek-pro",
       "backend": "deepseek-acp",
-      "model": null,
+      "model": {
+        "id": "deepseek-v4-pro",
+        "providerID": "deepseek-official"
+      },
       "reasoning": {
-        "effort": null
+        "effort": "max"
       },
       "aliases": {
         "coder_low_dsh": {
@@ -109,13 +112,25 @@
       }
     },
     {
+      "id": "deepseek-flash",
+      "backend": "deepseek-acp",
+      "model": {
+        "id": "deepseek-flash",
+        "providerID": "deepseek-official"
+      },
+      "reasoning": {
+        "effort": "max"
+      },
+      "aliases": {}
+    },
+    {
       "id": "opus",
       "backend": "claude-code",
       "model": {
         "id": "claude-opus-5-5"
       },
       "reasoning": {
-        "effort": "xhigh"
+        "effort": "high"
       },
       "aliases": {
         "auditor_claude": {

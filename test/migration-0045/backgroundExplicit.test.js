@@ -85,7 +85,7 @@ test("BG-2: runBackground 重解析 explicit——角色库帽生效+注记落�
     const runDir = join(dir, "runs");
     // W4d：注册表键=车道键——explicit 解析直取接线条目。0046 步②：claude-opus→opus。
     const registry = { agents: {
-      "opus": { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, cwd: dir },
+      "opus": { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "high" }, cwd: dir },
     } };
     const { mkdirSync } = await import("node:fs");
     mkdirSync(runDir, { recursive: true });

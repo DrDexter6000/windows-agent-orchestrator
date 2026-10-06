@@ -32,7 +32,7 @@ async function withServer(fn) {
     // 注册表与在库车道表 opus 轴一致（公开轴=backend/model/effort；0046 步②重键）
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: {
-      "opus": { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, cwd: dir },
+      "opus": { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "high" }, cwd: dir },
       legacy_seat: { backend: "claude-code", cwd: dir },
     } }), "utf8");
     const dispatches = [];

@@ -37,9 +37,9 @@ const REG = Object.fromEntries(Object.entries(REGISTRY_PROJECTION.agents).map(([
 
 // ── 活体基线钉（G7 冻结快照：改 lanes.json 必须同 diff 看到这里） ────────────
 
-test("W1 活体：config/lanes.json 8 车道/9 别名/6 角色，结构零 issue", () => {
+test("W1 活体：config/lanes.json 9 车道/9 别名/6 角色，结构零 issue（0046 步④b +deepseek-flash）", () => {
   assert.ok(LIVE.ok, `结构 issues 必须为空，实际：${JSON.stringify(LIVE.issues)}`);
-  assert.equal(LIVE.lanes.length, 8);
+  assert.equal(LIVE.lanes.length, 9);
   const aliases = LIVE.lanes.flatMap((l) => Object.keys(l.aliases ?? {}));
   assert.equal(aliases.length, 9);
   assert.equal(new Set(aliases).size, 9, "别名全局唯一（G2）");
@@ -75,18 +75,22 @@ test("W3a 映射冻结（R4 红队'标签互换'防御）：laneId→轴/wiringA
     aliases: Object.fromEntries(Object.entries(l.aliases ?? {}).map(([a, s]) => [a, s.role])),
   })).sort((a, b) => (a.id < b.id ? -1 : 1));
   assert.deepEqual(snapshot, [
-    { id: "astra", backend: "codex", modelId: "gpt-6-astra", effort: "xhigh", aliases: { auditor: "auditor" } },
-    { id: "deepseek-pro", backend: "deepseek-acp", modelId: null, effort: null, aliases: { coder_low_dsh: "coder_low" } },
-    { id: "glm-flash", backend: "zcode", modelId: "bigmodel-api/GLM-5.3-Flash", effort: "high", aliases: { coder_low: "coder_low", researcher: "researcher" } },
-    { id: "glm-pro", backend: "zcode", modelId: "bigmodel-api/GLM-5.3", effort: "high", aliases: { coder_hq: "coder_hq" } },
+    { id: "astra", backend: "codex", modelId: "gpt-6-astra", effort: "high", aliases: { auditor: "auditor" } },
+    { id: "deepseek-flash", backend: "deepseek-acp", modelId: "deepseek-flash", effort: "max", aliases: {} },
+    { id: "deepseek-pro", backend: "deepseek-acp", modelId: "deepseek-v4-pro", effort: "max", aliases: { coder_low_dsh: "coder_low" } },
+    { id: "glm-flash", backend: "zcode", modelId: "bigmodel-api/GLM-5.3-Flash", effort: "max", aliases: { coder_low: "coder_low", researcher: "researcher" } },
+    { id: "glm-pro", backend: "zcode", modelId: "bigmodel-api/GLM-5.3", effort: "max", aliases: { coder_hq: "coder_hq" } },
     { id: "gpt-sol-56", backend: "codex", modelId: "gpt-5.6-sol", effort: "xhigh", aliases: { tester: "tester" } },
     { id: "kimi", backend: "kimi-web", modelId: "kimi-code/k3-256k", effort: null, aliases: { coder_mm: "coder_mm" } },
-    { id: "opus", backend: "claude-code", modelId: "claude-opus-5-5", effort: "xhigh", aliases: { auditor_claude: "auditor" } },
-    { id: "sol", backend: "codex", modelId: "gpt-6.1-sol", effort: "xhigh", aliases: { coder_temp: "coder_low" } },
+    { id: "opus", backend: "claude-code", modelId: "claude-opus-5-5", effort: "high", aliases: { auditor_claude: "auditor" } },
+    { id: "sol", backend: "codex", modelId: "gpt-6.1-sol", effort: "high", aliases: { coder_temp: "coder_low" } },
   ]);
   // 0046 §5 步②（2026-10-06）：车道键模型名化重键（kimi-k3→kimi/gpt-astra→astra/
   // gpt-sol-61→sol/claude-opus→opus/ds-acp→deepseek-pro；glm 系与 gpt-sol-56 不变，
   // 后者待⑧步删除）。旧键已入 LEGACY_AGENT_NAMES。
+  // 0046 §5 步③④b：effort 原子批（sol/astra/opus→high、glm 双道→max；kimi 通道
+  // 不表达保持 null）+deepseek 双车道（pro=deepseek-v4-pro/flash=deepseek-flash，
+  // 双字段 model 形状，flash 无历史别名=空表）。
 });
 
 test("W3a 守卫消费（R4）：结构 issues——explicit 整表拒 lanes_config_invalid；alias 降级", () => {

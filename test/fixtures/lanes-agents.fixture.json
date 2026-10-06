@@ -1,5 +1,5 @@
 {
-  "_comment": "0045 W3a 入库 fixture：lanes.json 守卫测试的注册表投影（与 config/lanes.json 轴一致）。私有 agents.json 缺席时（干净检出）以本件为准；在场时跨文件活体校验另测。只含结构字段（backend/model/reasoning/cwd 占位），无 env/凭据。0046 §5 步②（2026-10-06）：随车道键模型名化重写为 8 车道键形状（对齐 W4d 后 live 形态——旧席位键+systemPrompt 形状系 W4d 漏改面，本批补正）。",
+  "_comment": "0045 W3a 入库 fixture：lanes.json 守卫测试的注册表投影（与 config/lanes.json 轴一致）。私有 agents.json 缺席时（干净检出）以本件为准；在场时跨文件活体校验另测。只含结构字段（backend/model/reasoning/cwd 占位），无 env/凭据。0046 §5 步②（2026-10-06）：随车道键模型名化重写为 8 车道键形状（对齐 W4d 后 live 形态——旧席位键+systemPrompt 形状系 W4d 漏改面，本批补正）。 0046 步③④b 同步。",
   "agents": {
     "glm-flash": {
       "backend": "zcode",
@@ -7,7 +7,7 @@
         "id": "bigmodel-api/GLM-5.3-Flash"
       },
       "reasoning": {
-        "effort": "high"
+        "effort": "max"
       },
       "cwd": "."
     },
@@ -17,7 +17,7 @@
         "id": "bigmodel-api/GLM-5.3"
       },
       "reasoning": {
-        "effort": "high"
+        "effort": "max"
       },
       "cwd": "."
     },
@@ -44,7 +44,7 @@
         "id": "gpt-6-astra"
       },
       "reasoning": {
-        "effort": "xhigh"
+        "effort": "high"
       },
       "cwd": "."
     },
@@ -54,13 +54,30 @@
         "id": "gpt-6.1-sol"
       },
       "reasoning": {
-        "effort": "xhigh"
+        "effort": "high"
       },
       "cwd": "."
     },
     "deepseek-pro": {
       "backend": "deepseek-acp",
-      "model": null,
+      "model": {
+        "id": "deepseek-v4-pro",
+        "providerID": "deepseek-official"
+      },
+      "cwd": ".",
+      "reasoning": {
+        "effort": "max"
+      }
+    },
+    "deepseek-flash": {
+      "backend": "deepseek-acp",
+      "model": {
+        "id": "deepseek-flash",
+        "providerID": "deepseek-official"
+      },
+      "reasoning": {
+        "effort": "max"
+      },
       "cwd": "."
     },
     "opus": {
@@ -69,7 +86,7 @@
         "id": "claude-opus-5-5"
       },
       "reasoning": {
-        "effort": "xhigh"
+        "effort": "high"
       },
       "cwd": "."
     }

@@ -217,7 +217,7 @@ test("CLI-1: --explain 别名解析打印 resolved JSON、零副作用", async (
   try {
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: {
-      "opus": { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "xhigh" }, cwd: dir },
+      "opus": { backend: "claude-code", model: { id: "claude-opus-5-5" }, reasoning: { effort: "high" }, cwd: dir },
     } }), "utf8");
     const { threw, logs } = await runCli(["auditor_claude", "--explain"], registryPath);
     assert.equal(threw, null);

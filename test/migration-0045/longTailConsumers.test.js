@@ -29,7 +29,7 @@ test("WF-1: workflow agentHandler 经解析层——alias 派发带身份注记�
     makeGitRepo(dir);
     const registryPath = join(dir, "agents.json");
     writeFileSync(registryPath, JSON.stringify({ agents: {
-      "glm-flash": { backend: "zcode", model: { id: "bigmodel-api/GLM-5.3-Flash" }, reasoning: { effort: "high" }, binary: "C:/fake/zcode.cjs", cwd: dir },
+      "glm-flash": { backend: "zcode", model: { id: "bigmodel-api/GLM-5.3-Flash" }, reasoning: { effort: "max" }, binary: "C:/fake/zcode.cjs", cwd: dir },
       legacy_seat: { backend: "claude-code", cwd: dir },
     } }), "utf8");
     const { readRegistry } = await import("../../src/registry.js");
