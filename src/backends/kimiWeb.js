@@ -146,10 +146,12 @@ const NO_PROGRESS_CEILING_MS = 240_000;
 // 0046 B5 根因修复（Owner 2026-10-06 否决短 brief 降质绕法）：预算击发前先取
 // serve 活体证词（sessionDetail 的 main_turn_active/busy）——K3 长 dense brief 首
 // 拍重思考零帧是活轮不是停滞（当日四杀实证），证词为真 = noteProgress 重置静默
-// 段继续观察；证词为假/取不到 = 照杀（fail-closed 防真挂死）。证词续命有硬墙钟
-// 顶：单 turn 墙钟超此值即使活着也收口（真失控保护——serve 自身死循环时 WAO
-// 仍有界）。
-const LIVENESS_ATTESTED_TURN_CAP_MS = 30 * 60_000;
+// 段继续观察；证词为假/取不到 = 照杀（fail-closed 防真挂死）。证词续命的硬顶=
+// **累计被证词续命的静默时间**（每次续命把该段静默计入累计；产出/流式时间不
+// 计数）——kimi 席验收轮咬出的边界修正：按 turn 墙钟计顶会精确斩杀"健康长跑
+// 后的收尾思考"（越有产出越晚遇到首个静默段）；累计静默语义下真锁死（活着但
+// 永远沉默）照样在此值收口，健康长 turn 的产出时间不受罚。
+const LIVENESS_ATTESTED_SILENT_CAP_MS = 30 * 60_000;
 
 // completed 轮 usage 求和的字段映射（kimi usage 四计数 → metrics 轴）：
 // inputOther→input、output→output、inputCacheRead→cacheRead、
@@ -660,7 +662,7 @@ export class KimiWebBackend {
       ...(typeof stallClock === "function" ? { now: stallClock } : {}),
     });
     const stallNow = typeof stallClock === "function" ? stallClock : () => performance.now();
-    let turnFirstSeenAt = null;
+    let attestedSilentMs = 0;
     let livenessAttestations = 0;
     // R9 F4：闭集外 state 的独立有界计数——turn 在场且 state 不在支持闭集的
     // **连续**拍数（turn 消失或 state 回闭集内即清零）。steps/frames 增长**不**
@@ -793,7 +795,6 @@ export class KimiWebBackend {
       // 杀实录见常量注释），轮内节奏自放大，硬顶保有界（顶约束静默段而非墙钟）。
       const signature = turnSignature(turn);
       if (!turnSeen || signature !== lastSignature) {
-        if (!turnSeen) turnFirstSeenAt = stallNow();
         turnSeen = true;
         lastSignature = signature;
         noProgressPolls = 0;
@@ -823,13 +824,14 @@ export class KimiWebBackend {
             return;
           }
           livenessAttestations += 1;
-          const turnWallMs = stallNow() - (turnFirstSeenAt ?? stallNow());
-          if (turnWallMs >= LIVENESS_ATTESTED_TURN_CAP_MS) {
+          attestedSilentMs += stallTracker.stallMs();
+          if (attestedSilentMs >= LIVENESS_ATTESTED_SILENT_CAP_MS) {
             yield doneEvent(
               "failed",
-              `turn stalled: serve-attested active turn exceeded the ${Math.round(LIVENESS_ATTESTED_TURN_CAP_MS / 60_000)}min hard wall cap `
-                + `(${Math.round(turnWallMs)}ms across ${livenessAttestations} attestation(s); adaptive budget diagnostics: `
-                + `floor ${Math.round(d.floorMs)}ms / ×${d.factor} / ceiling ${Math.round(d.ceilingMs)}ms) — bounded exit despite liveness`,
+              `turn stalled: cumulative serve-attested silence exceeded the ${Math.round(LIVENESS_ATTESTED_SILENT_CAP_MS / 60_000)}min cap `
+                + `(${Math.round(attestedSilentMs)}ms across ${livenessAttestations} attestation(s); adaptive budget diagnostics: `
+                + `floor ${Math.round(d.floorMs)}ms / ×${d.factor} / ceiling ${Math.round(d.ceilingMs)}ms) — bounded exit despite liveness `
+                + "(the serve keeps attesting an active turn that never lands output)",
             );
             return;
           }

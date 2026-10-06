@@ -2410,7 +2410,7 @@ test("kimi-web B5①: 预算击发 + serve 证词 main_turn_active=true → 续�
   assert.ok(detailCalls() >= 1, `至少一轮活体复核（实际 ${detailCalls()}）`);
 });
 
-test("kimi-web B5②: 证词活着但超 30min 硬墙钟顶 → 收口 failed（真失控保护）", async () => {
+test("kimi-web B5②: 证词活着但累计被续命静默 ≥30min → 收口 failed（真锁死保护；产出时间不计数）", async () => {
   const frozen = [turnItem({
     state: "running",
     endedAt: null,
@@ -2420,7 +2420,8 @@ test("kimi-web B5②: 证词活着但超 30min 硬墙钟顶 → 收口 failed（
   const { handler, markSpawned } = attestedScriptServer("session_b5b", { script: [frozen], detailMode: "active" });
   const fakeNow = { v: 0 };
   const clockedHandler = (url, init, n) => {
-    // 每拍大幅推进：6 拍即 31min 墙钟（第 7 拍击 60s 预算→首证词时墙钟已超顶）。
+    // 每拍 +310s：第 2 拍起每拍击预算→证词→续命（每周期累计 ~310s 静默），
+    // 第 6 次证词时累计 ≥1800s → 收口。
     if (url.includes("/transcript")) fakeNow.v += 310_000;
     return handler(url, init, n);
   };
@@ -2434,8 +2435,8 @@ test("kimi-web B5②: 证词活着但超 30min 硬墙钟顶 → 收口 failed（
   }
   const done = events.at(-1);
   assert.equal(done.reason, "failed");
-  assert.match(done.error, /serve-attested active turn exceeded the 30min hard wall cap/);
-  assert.match(done.error, /despite liveness/);
+  assert.match(done.error, /cumulative serve-attested silence exceeded the 30min cap/);
+  assert.match(done.error, /never lands output/);
 });
 
 test("kimi-web B5③: 预算击发 + 证词请求失败 → 照杀（fail-closed：无证词=无续命）", async () => {
@@ -2462,4 +2463,48 @@ test("kimi-web B5③: 预算击发 + 证词请求失败 → 照杀（fail-closed
   const done = events.at(-1);
   assert.equal(done.reason, "failed");
   assert.match(done.error, /turn stalled \(no progress\)/);
+});
+
+test("kimi-web B5④: 健康长跑（墙钟>30min 持续产出）后的收尾静默段 → 证词续命不收口（验收轮咬出的边界）", async () => {
+  // 产出期：每拍 frames 增长（签名变化=进展，停滞门从不击发），假钟推进累计
+  // >31min 墙钟；随后冻结静默（收尾重思考）→ 预算击发 → 证词活着 → 累计静默
+  // 仍小（单段）→ 不收口 → completed。按 turn 墙钟计顶的旧语义会在此精确斩杀。
+  const growing = (poll) => [turnItem({
+    state: "running",
+    endedAt: null,
+    durationMs: null,
+    steps: [stepItem({ state: "running", frames: [{ kind: "text", text: "x".repeat(poll), role: "assistant" }] })],
+  })];
+  const frozen = [turnItem({
+    state: "running",
+    endedAt: null,
+    durationMs: null,
+    steps: [stepItem({ state: "running", frames: [{ kind: "text", text: "x".repeat(40), role: "assistant" }] })],
+  })];
+  const completed = [turnItem({
+    steps: [stepItem({ frames: [{ kind: "text", text: "long-run-final-answer", role: "assistant" }] })],
+  })];
+  const script = [
+    ...Array.from({ length: 8 }, (_, i) => growing(i + 1)), // 产出期：8 拍 × 260s ≈ 34.7min 墙钟
+    frozen, frozen, frozen, frozen, frozen, frozen, frozen,  // 收尾静默 ~80s > 60s 预算
+    completed,
+  ];
+  const { handler, markSpawned, detailCalls } = attestedScriptServer("session_b5d", { script, detailMode: "active" });
+  const fakeNow = { v: 0 };
+  const clockedHandler = (url, init, n) => {
+    if (url.includes("/transcript")) fakeNow.v += 260_000;
+    return handler(url, init, n);
+  };
+  const { fetchImpl } = kimiServer(clockedHandler);
+  const backend = new KimiWebBackend({ fetchImpl, timeout: 5000, retries: 0 });
+  const handle = await backend.spawn(makeAgent(), { prompt: "hi" });
+  markSpawned();
+  const events = [];
+  for await (const ev of handle.events(undefined, { pollInterval: 1, stallClock: () => fakeNow.v })) {
+    events.push(ev);
+  }
+  const done = events.at(-1);
+  assert.equal(done.reason, "completed", "健康长跑后的收尾思考不被墙钟顶斩杀（累计静默语义）");
+  assert.ok(!JSON.stringify(events).includes("turn stalled"), "从未走停滞出口");
+  assert.ok(detailCalls() >= 1, "收尾静默段吃到至少一次证词续命");
 });
