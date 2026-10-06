@@ -467,7 +467,7 @@ export async function runCommand(args, config) {
   // 0045 W4d：别名派发也要经解析块（agentId 可能是车道别名）。原 A-1 顺序
   // （prompt 校验先于注册表解析）保持：无 prompt 时先拒绝，不触发解析。
   if (options.prompt === undefined && options.promptFile === undefined
-    && options.deliverySpecFile === undefined
+    && options.deliverySpecFile === undefined && !options.explain
     && !COMMAND_NAMES.includes(agentId ?? "")) {
     throw new Error("Provide --prompt or --prompt-file");
   }
