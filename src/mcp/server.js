@@ -3389,7 +3389,7 @@ export function createWaoMcpServer({
       } catch {
         record = null;
       }
-      // opus 补席审计盲区修（Owner B1 批复精神延伸；2026-10-06）：持久 effort 漂移
+      // opus 补席审计盲区修（Owner 2026-10-06 追认，0046 附录 B）：持久 effort 漂移
       // 的机制约束——记录 executionProfile.effort（已知时）与车道当前 reasoning.effort
       // 不一致=不在清单（一次性 reasoning 覆盖已拒，配置漂移不能成为旁路）。
       // 三态纪律同 TD-186：null≡null（通道不可表达）；画像未记录 effort（legacy）
