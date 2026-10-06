@@ -97,6 +97,21 @@ const DEFAULT_BINARY = "dsh";
 // 反证）——只接受交集 low/high/max，其余固定文案拒绝，绝不发明映射。
 // 直接 set 证据覆盖 off/low/max；high 是 session/new 的缺省 currentValue（广告闭集
 // 成员，与 low/max 走同一 wire 通道），未单独 set 验证——如实声明。
+//
+// 0046 §3/§5 第④步：model 块接线（同一证据文件 steps.setModel 的三条 wire 事实）：
+//   1. model 选项经 `session/set_config_option { configId: "model", value }` 可设置，
+//      value 形状 = JSON.stringify([providerSegment, modelId])，provider 段实测
+//      "deepseek-official"（原样透传，绝不缩写/映射转换；无任何 id 白名单——
+//      值域完全由广告选项决定）。WAO 侧表达 = model: { id, providerID } 双字段
+//      （ACP 需要完整二元组，裸 model.id 拒绝）。
+//   2. **设 model 会把 reasoning_effort 重置回 high**（setModel 响应里 effort
+//      currentValue 回到 "high"，即使前序已设 max）——顺序纪律：先 model、
+//      后 effort，且 effort 设置后从最后一次响应同时读回确认两者。
+//   3. 广告选项漂移：切走后原值会从选项列表消失——model 值域校验只对
+//      session/new 时刻的广告快照做精确字符串成员比对，绝不对"设置后再查"
+//      的列表做（漂移列表不是值域权威）。resume 轮不发 set：与 effort 同款，
+//      改用 session/resume 响应 configOptions 只读核对原 model，不符即拒
+//      （不静默切换模型）。拒绝文案固定、不回显请求值（坏值可能带注入载荷）。
 
 // 越界 tripwire deny-list（ADR-0031 §3.5）：检测，不是阻止——副作用可能已发生。
 // wire 上 title 即工具真名（F8），故直接按名字断言。
@@ -230,6 +245,36 @@ export function serializeRoleContractPatch(roleContract) {
     + JSON.stringify(String(roleContract)) + "\n";
 }
 
+/** 从 configOptions 数组里按 id 找选项（session/new、set_config_option 响应、resume 响应同构）。 */
+function findConfigOption(configOptions, id) {
+  return Array.isArray(configOptions)
+    ? configOptions.find((option) => option?.id === id)
+    : undefined;
+}
+
+/**
+ * 收集一个 select 型选项的广告 value 闭集（0046 model 值域权威）。
+ * 形状依据 evidence/phase5-config-option-set.json：model 选项是分组嵌套
+ * `options: [{ group, name, options: [{ value, name }] }]`，effort 选项是平面
+ * `options: [{ value, name }]`——两种都收，只取 string value，绝不解析/归一：
+ * 成员资格按精确字符串比对（wire 值本身就是 JSON 字符串）。
+ * @param {object|undefined} option
+ * @returns {Set<string>}
+ */
+function advertisedSelectValues(option) {
+  const values = new Set();
+  if (!option || !Array.isArray(option.options)) return values;
+  for (const entry of option.options) {
+    if (typeof entry?.value === "string") values.add(entry.value);
+    if (Array.isArray(entry?.options)) {
+      for (const leaf of entry.options) {
+        if (typeof leaf?.value === "string") values.add(leaf.value);
+      }
+    }
+  }
+  return values;
+}
+
 /** 从 shell 工具结果文本提取退出码；无法提取时不伪造（返回 undefined）。 */
 function extractExitCode(content) {
   const text = contentText(content);
@@ -331,13 +376,32 @@ export class DeepSeekAcpBackend {
     if (agent?.provider) {
       throw new Error("deepseek-acp cannot express provider policy; the composition is fixed via --profile acp and operator-installed patches");
     }
-    // model 块（id / contextWindow）**本轮仍未接线**——理由与 F5 时代不同：Phase 5
-    // 已实测同一通道可设置 model（evidence/phase5-*.json 的 steps.setModel，currentValue
-    // 变更），所以理由不再是"无通道"，而是"未接线 + 值形状不同"：ACP 的 model value 是
-    // provider/model JSON 对，WAO 的 model.id 是裸 id，接线需要单独的值域/映射决策。
-    // 在此之前 fail-closed 拒绝，不静默忽略（repo 纪律：配了不能表达的值必须硬拒）。
-    if (agent?.model) {
-      throw new Error("deepseek-acp cannot express a model block: the ACP model config option is settable over the verified channel but WAO does not wire it yet (its value is a provider/model pair, not WAO's bare model.id); refusing instead of silently ignoring");
+    // model 块（0046 §3/§5 第④步起接线）：ACP 的 model 选项 value 是
+    // provider/model 二元组（JSON.stringify([providerID, id])，provider 段实测
+    // "deepseek-official"——原样透传，不做任何缩写/映射转换）——只接受
+    // { id, providerID } 双字段形状（两者都必填非空字符串；裸 id 无法表达，
+    // 固定文案拒绝，不猜 provider）。其他子字段（variant/contextWindow 等）
+    // wire 上不可表达——拒绝，不静默忽略（repo 纪律：配了不能表达的值必须硬拒）。
+    // 值域不在这层校验：合法性对每会话 session/new 时刻的广告快照做（见 spawn）。
+    // 空值（null/undefined）视同未配置，不拒。
+    if (agent?.model !== undefined && agent?.model !== null) {
+      const model = agent.model;
+      const isObject = typeof model === "object" && model !== null && !Array.isArray(model);
+      const hasId = isObject && typeof model.id === "string" && model.id.length > 0;
+      const hasProviderID = isObject
+        && typeof model.providerID === "string" && model.providerID.length > 0;
+      if (!hasId || !hasProviderID) {
+        throw new Error(
+          "deepseek-acp model policy requires both model.id and model.providerID as non-empty strings — the ACP model config option takes a provider/model pair (JSON-stringified [provider, model]), so a bare model.id cannot be expressed; refusing instead of silently ignoring",
+        );
+      }
+      const hasExtraSubfield = Object.keys(model)
+        .some((key) => key !== "id" && key !== "providerID");
+      if (hasExtraSubfield) {
+        throw new Error(
+          "deepseek-acp model policy only accepts { id, providerID } — other model subfields cannot be expressed on the ACP wire; refusing instead of silently ignoring",
+        );
+      }
     }
     // reasoning.effort（Phase 5 后语义）：session/set_config_option 已被实测证明
     // 可设置（evidence/phase5-*.json）——只放行已验证可设置的值域交集
@@ -784,6 +848,7 @@ export class DeepSeekAcpBackend {
       //   - first 轮/普通派发：session/new（既有行为，byte-compatible）。
       const resumeRouting = task?.sessionReuse?.turn === "resume" ? task.sessionReuse : null;
       let resumedConfigOptions = null;
+      let newSessionConfigOptions = null;
       if (resumeRouting) {
         const priorSessionId = task.priorProviderSessionId;
         if (typeof priorSessionId !== "string" || priorSessionId.length === 0) {
@@ -819,6 +884,78 @@ export class DeepSeekAcpBackend {
           throw new Error("deepseek-acp returned no sessionId");
         }
         acpSessionId = created.sessionId;
+        // 0046 model 值域权威：session/new 时刻的广告快照（漂移前的完整闭集）。
+        newSessionConfigOptions = Array.isArray(created?.configOptions)
+          ? created.configOptions
+          : null;
+      }
+      // model 下发（0046 §3/§5 第④步；wire 事实 = evidence/phase5-config-option-set.json）：
+      // 值形状 = JSON.stringify([providerID, id])，provider 段原样透传（实测
+      // "deepseek-official"，无任何缩写/映射转换、无 id 白名单）。**顺序纪律：先
+      // model、后 effort**——设 model 会把 reasoning_effort 重置回 high（同证据文件
+      // setModel 响应，即使前序已设 max），effort 必须在其后重放。**fail-closed**：
+      // 值域只对 session/new 时刻的广告快照做精确字符串成员校验（漂移事实：切走后
+      // 原值从广告列表消失——"设置后再查"的列表不是值域权威）；请求失败 / 快照
+      // 不含目标值 / 响应未确认请求值 → 拒绝派发，不静默回退、不静默继续。
+      // §3.6 resume 轮：**不发 set**（与 effort 同款——resumed 会话上的 set 无
+      // 实证），改用 resume 响应 configOptions 只读核对原 model——不符即拒
+      // （不静默切换模型）。拒绝文案固定、不回显请求值（坏值可能带注入载荷）；
+      // 成功后的 system 转录事实回显的是已通过快照成员校验的 server 端字符串。
+      const modelPolicy = agent?.model;
+      let modelWire = null;
+      if (modelPolicy !== undefined && modelPolicy !== null) {
+        // 权威防线（spawn 内再核形状；validateAgentPolicy 是第一道门）。
+        const isObject = typeof modelPolicy === "object" && modelPolicy !== null && !Array.isArray(modelPolicy);
+        if (!isObject
+          || typeof modelPolicy.id !== "string" || modelPolicy.id.length === 0
+          || typeof modelPolicy.providerID !== "string" || modelPolicy.providerID.length === 0) {
+          throw new Error(
+            "deepseek-acp model policy requires both model.id and model.providerID as non-empty strings — the ACP model config option takes a provider/model pair (JSON-stringified [provider, model]), so a bare model.id cannot be expressed; refusing instead of silently ignoring",
+          );
+        }
+        modelWire = JSON.stringify([modelPolicy.providerID, modelPolicy.id]);
+      }
+      if (modelWire !== null && resumeRouting) {
+        const confirmedModel = findConfigOption(resumedConfigOptions, "model");
+        if (confirmedModel?.currentValue !== modelWire) {
+          throw new Error(
+            "deepseek-acp resumed session's model does not match the configured model (expected the session/resume configOptions model currentValue to equal the configured provider/model pair, got "
+            + (confirmedModel === undefined ? "no model option" : "a different value")
+            + ") — refusing to dispatch instead of silently proceeding with a different model",
+          );
+        }
+        queue.push(redactor.redact(messageEvent("system", [{
+          type: "text",
+          text: "deepseek-acp model verified on the resumed session: currentValue="
+            + confirmedModel.currentValue
+            + " from session/resume configOptions (read-only check; matches the configured model)",
+        }])));
+      } else if (modelWire !== null) {
+        const advertised = advertisedSelectValues(findConfigOption(newSessionConfigOptions, "model"));
+        if (!advertised.has(modelWire)) {
+          throw new Error(
+            "deepseek-acp cannot set the configured model: the requested provider/model pair is not among the model options this session advertised at session/new (the session-new advertisement is the only value authority — no id whitelist or mapping is invented, and the advertised list drifts after sets so post-set lists are not authoritative) — refusing to dispatch instead of echoing the requested value",
+          );
+        }
+        const modelSetResult = await request("session/set_config_option", {
+          sessionId: acpSessionId,
+          configId: "model",
+          value: modelWire,
+        });
+        const confirmedModel = findConfigOption(modelSetResult?.configOptions, "model");
+        if (confirmedModel?.currentValue !== modelWire) {
+          throw new Error(
+            "deepseek-acp session/set_config_option did not confirm the requested model (expected the model currentValue to equal the requested provider/model pair, got "
+            + (confirmedModel === undefined ? "no model option" : "a different value")
+            + ") — refusing to dispatch instead of silently proceeding with a different model",
+          );
+        }
+        queue.push(redactor.redact(messageEvent("system", [{
+          type: "text",
+          text: "deepseek-acp model set: requested=" + modelWire
+            + ", confirmed=" + confirmedModel.currentValue
+            + " via session/set_config_option (session config option id model; the value is the JSON-stringified provider/model pair)",
+        }])));
       }
       // reasoning.effort 下发（Phase 5 实证通道）：生效策略带非空 effort（registry
       // 配置或 per-dispatch --reasoning 覆盖；validateAgentPolicy 已把它收窄到
@@ -863,6 +1000,20 @@ export class DeepSeekAcpBackend {
             + effort + ", got " + (confirmed === undefined ? "no reasoning_effort option" : JSON.stringify(confirmed.currentValue))
             + ") — refusing to dispatch instead of silently proceeding with a different effort",
           );
+        }
+        // 双读回确认（0046）：effort set 的响应同时携带 model 选项（证据文件里
+        // setEffortAgain/setModel 响应均含两个选项的 currentValue）——从这最后一次
+        // 响应同时核对 model 与 effort。设 model 会重置 effort（先 model 后 effort
+        // 的顺序已保证重放）；反向 effort set 不应动 model——currentValue 漂移即拒。
+        if (modelWire !== null) {
+          const modelReconfirmed = findConfigOption(setResult?.configOptions, "model");
+          if (modelReconfirmed?.currentValue !== modelWire) {
+            throw new Error(
+              "deepseek-acp session/set_config_option (reasoning_effort) response did not hold the already-confirmed model (expected the model currentValue to equal the confirmed provider/model pair, got "
+              + (modelReconfirmed === undefined ? "no model option" : "a different value")
+              + ") — refusing to dispatch instead of silently proceeding with a drifted model",
+            );
+          }
         }
         // 会话内转录事实（既有事件类型：system message，同权限应答审计先例——
         // system 消息不是 usable effect，不污染证据链）。

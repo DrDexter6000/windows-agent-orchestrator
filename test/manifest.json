@@ -5,6 +5,7 @@
       "backends/claudeCodeProvider.test.js",
       "backends/claudeProviderWrapper.test.js",
       "backends/deepSeekAcp.test.js",
+      "backends/deepSeekAcpModelWiring.test.js",
       "backends/deepSeekHarness.test.js",
       "backends/integration.test.js",
       "backends/kimiCode.test.js",

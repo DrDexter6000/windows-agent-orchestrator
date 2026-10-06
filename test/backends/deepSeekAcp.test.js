@@ -229,7 +229,7 @@ async function runAcpScenario({ drive, task, agentOverrides = {}, containmentTex
 
 // ===== policy / containment / 资产钉 =====
 
-test("ACP policy: effort 只放行 wire 实证可设置交集 low/high/max（Phase 5）；其余固定文案拒；provider/model 被拒", () => {
+test("ACP policy: effort 只放行 wire 实证可设置交集 low/high/max（Phase 5）；其余固定文案拒；provider 块被拒；model 块须 {id, providerID} 双字段（0046 §3/§5 第④步接线）", () => {
   const backend = new DeepSeekAcpBackend();
   // Phase 5（evidence/phase5-config-option-set*.json，2026-09-20 真实 dsh 实测）：
   // session/set_config_option 可设置 reasoning_effort（off/low/max 有直接
@@ -258,16 +258,35 @@ test("ACP policy: effort 只放行 wire 实证可设置交集 low/high/max（Pha
     })),
     /cannot express provider/,
   );
-  // model 块（id/contextWindow）：Phase 5 已取证同一通道可 set，但 WAO **本轮未接线**
-  // （value 形状是 provider/model JSON 对，非裸 model.id）→ fail-closed 拒绝，不静默忽略
+  // model 块（0046 改写：旧语义"配了即拒"已随 model 接线退役）：ACP 的 model
+  // value 是 provider/model 二元组（evidence/phase5-config-option-set.json
+  // steps.setModel，provider 段实测 "deepseek-official"）——双字段
+  // { id, providerID } 通过；裸 id / 缺 providerID 固定文案拒（无映射，不猜
+  // provider）；其他子字段（variant/contextWindow）wire 上不可表达即拒；
+  // 空值视同未配置。值域校验不在这一层（对每会话 session/new 广告快照做，
+  // 见 deepSeekAcpModelWiring.test.js）。
+  assert.doesNotThrow(() => backend.validateAgentPolicy(agent({
+    model: { id: "deepseek-v4-flash", providerID: "deepseek-official" },
+  })));
   assert.throws(
     () => backend.validateAgentPolicy(agent({ model: { id: "deepseek-v4-flash" } })),
-    /cannot express a model block/,
+    /requires both model\.id and model\.providerID as non-empty strings/,
+  );
+  assert.throws(
+    () => backend.validateAgentPolicy(agent({ model: { providerID: "deepseek-official" } })),
+    /requires both model\.id and model\.providerID as non-empty strings/,
   );
   assert.throws(
     () => backend.validateAgentPolicy(agent({ model: { id: "deepseek-v4-flash", contextWindow: 1000000 } })),
-    /cannot express a model block/,
+    /requires both model\.id and model\.providerID as non-empty strings/,
   );
+  assert.throws(
+    () => backend.validateAgentPolicy(agent({
+      model: { id: "deepseek-v4-flash", providerID: "deepseek-official", variant: "x" },
+    })),
+    /model policy only accepts \{ id, providerID \}/,
+  );
+  assert.doesNotThrow(() => backend.validateAgentPolicy(agent({ model: null })));
   assert.doesNotThrow(() => backend.validateAgentPolicy(agent()));
 });
 
