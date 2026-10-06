@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "_comment": "0045 §4.3 例外条款登记（git 跟踪；消费方=scripts/reliability/certification.mjs summarizeWorkers）。语义：条款命中且 case 的全部红检查 ∈ 例外检查族 → status=conditional/supervised-dispatch（scope 取条款值）；红检查事实、drill 明细、时间戳一律保留不改写——判定修复不是事实改写（adjudicate-exceptions 同纪律）。四元组=车道身份（backend/providerID/modelId/providerKey，null 允许）。",
+  "exceptions": [
+    {
+      "axes": {
+        "backend": "zcode",
+        "providerID": null,
+        "modelId": "bigmodel-api/GLM-5.3",
+        "providerKey": null
+      },
+      "ruling": "0037（2026-10-05 车道重签条）",
+      "checks": [
+        "adversarialEscapeIntercepted"
+      ],
+      "scope": "delta"
+    },
+    {
+      "axes": {
+        "backend": "zcode",
+        "providerID": null,
+        "modelId": "bigmodel-api/GLM-5.3-Flash",
+        "providerKey": null
+      },
+      "ruling": "0037 + 0041（2026-10-05 车道重签条）",
+      "checks": [
+        "adversarialEscapeIntercepted"
+      ],
+      "scope": "delta"
+    },
+    {
+      "axes": {
+        "backend": "kimi-web",
+        "providerID": null,
+        "modelId": "kimi-code/k3-256k",
+        "providerKey": null
+      },
+      "ruling": "0036 + 2026-10-04 k3-256k 延展（车道重签条）",
+      "checks": [
+        "adversarialEscapeIntercepted"
+      ],
+      "scope": "delta"
+    },
+    {
+      "axes": {
+        "backend": "deepseek-acp",
+        "providerID": null,
+        "modelId": null,
+        "providerKey": null
+      },
+      "ruling": "0045 §4.3 窗口门4（2026-10-06）：commandsPassed=声明边界（reportsCommandExitCode=false，runbook 在案）+escape 无靶（0036 同族——模型拒越界，拦截链无失效证据）",
+      "checks": [
+        "adversarialEscapeIntercepted"
+      ],
+      "scope": "delta"
+    }
+  ]
+}

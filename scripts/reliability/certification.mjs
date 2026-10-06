@@ -164,6 +164,7 @@ export function certifyCase(caseResult = {}) {
 }
 
 export function summarizeCertification(caseResults = [], options = {}) {
+  const matrixAgentIds = options.matrixAgentIds instanceof Set ? options.matrixAgentIds : null;
   const cases = caseResults.map((caseResult) => {
     // Disk/prior cases may already carry a cached certification object. Shape
     // validation still runs before trusting it; malformed five-state checks
@@ -172,13 +173,16 @@ export function summarizeCertification(caseResults = [], options = {}) {
     const certification = caseResult.certification ?? certifyCase(caseResult);
     return { ...caseResult, certification };
   });
-  const workers = summarizeWorkers(cases);
+  const workers = summarizeWorkers(cases, matrixAgentIds);
   // counts 按 agent 最终状态计数（与 workers 一致），非 per-case（否则一个 agent 多 case 被重复计）。
   // 有 agentId 的 case → 按 worker 最终状态计 1 次；
   // 无 agentId 的 case（suite-level，如 silentTimeout）→ 各自独立计 1 次。
   const countedLanes = new Set();
   const counts = Object.fromEntries(CERTIFICATION_STATUSES.map((status) => [status, 0]));
-  for (const c of cases) {
+  const countable = matrixAgentIds instanceof Set
+    ? cases.filter((c) => !c.agentId || matrixAgentIds.has(c.agentId))
+    : cases;
+  for (const c of countable) {
     if (c.agentId) {
       // 同一车道（指纹）只按最终状态计一次——同车道多席位不再重复计数；
       // 无事实 case 按其席位 active 车道计（与分组同一继承规则）。
@@ -248,7 +252,60 @@ function agentActiveLaneFor(cases, agentId) {
   return hasAnyFact ? laneLedgerKey(active) : `seat:${agentId}`;
 }
 
-function summarizeWorkers(cases) {
+
+// ===== 0045 §4.3 例外条款消费方（2026-10-06 窗口门 4）=====
+// 语义：条款按车道四元组命中（tri-state 严格——laneLedgerKey 同键空间）；case 的
+// 全部红检查 ∈ 条款例外族 → 该 case 的红不压过 conditional（裁决=0036/0037/0041
+// 重签：无靶=模型守合同拒越界，拦截链未验证亦无失效证据）。事实字段（checks
+// 明细/drill runId/时间戳/reasonCode）一律原样保留——判定修复不是事实改写。
+import { readFileSync as _rf } from "node:fs";
+import { fileURLToPath as _fURL } from "node:url";
+import { dirname as _dn, join as _join } from "node:path";
+
+let _EXCEPTION_CACHE = null;
+function loadLaneExceptions() {
+  if (_EXCEPTION_CACHE !== null) return _EXCEPTION_CACHE;
+  try {
+    const path = _join(_dn(_fURL(import.meta.url)), "..", "..", "config", "lane-exceptions.json");
+    const doc = JSON.parse(_rf(path, "utf8"));
+    const entries = (doc.exceptions ?? []).map((e) => ({
+      axes: e.axes ?? {},
+      checks: new Set(e.checks ?? []),
+      scope: e.scope ?? "delta",
+      ruling: e.ruling ?? "",
+    }));
+    _EXCEPTION_CACHE = { entries };
+  } catch {
+    _EXCEPTION_CACHE = { byKey: new Map() };
+  }
+  return _EXCEPTION_CACHE;
+}
+
+/** 条款逐轴匹配：backend/modelId 严格相等；provider 维条款侧 null/省略=记录侧 null 或 undefined 均命中（判定层的"无接入方"等价——证据层 tri-state 纪律不受影响）。 */
+function exceptionMatches(active, exception) {
+  const a = exception.axes;
+  if (a.backend !== undefined && a.backend !== active.backend) return false;
+  if (a.modelId !== undefined && a.modelId !== active.modelId) return false;
+  for (const dim of ["providerID", "providerKey"]) {
+    const want = a[dim];
+    if (want === undefined) continue; // 省略=通配
+    const got = active[dim];
+    if (want === null && (got === null || got === undefined)) continue;
+    if (want !== got) return false;
+  }
+  return true;
+}
+
+/** case 的红检查（state=fail）是否全部落在例外族内（N/A 不是红）。 */
+function allRedChecksExcepted(c, exception) {
+  // 红=pass:false 且 state 非 N/A（磁盘 case 兼容两形状：0032 五态带 state；legacy
+  // 只有 pass 布尔——无 state 的 pass:false 就是红）。
+  const reds = (c.checks ?? []).filter((x) => x.pass === false && x.state !== "not-applicable");
+  if (reds.length === 0) return false;
+  return reds.every((x) => exception.checks.has(x.name));
+}
+
+function summarizeWorkers(cases, matrixAgentIds) {
   // 0045 R5（W4a）：台账键=车道内容指纹（从 case 自带事实派生，tri-state 严格——
   // undefined/null/string 各自成键成分；席位名降为 provenance）。无任何已声明身份
   // 事实的 case（legacy 聚合 fixture 形状）无法派生指纹 → 落 seat:<agentId> 名键
@@ -259,8 +316,14 @@ function summarizeWorkers(cases) {
   // 第一遍——每 agentId 的 active identity（最后声明的事实）→ 该席位的 active 车道键；
   // 第二遍——case 有自身事实→自身指纹键；无事实→继承本席位 active 车道键（旧
   // matchesActiveIdentity 的"未声明即继承"语义）；席位全无事实→seat: 名键。
+  // 0045 车道聚合 scope（窗口门 4 修复）：agentId 不在当前矩阵的退役席位 case
+  // 保留在 summary.cases 审计历史，但不参与车道 status 聚合——历史身份不拖累
+  // 当前车道认证（R2：认证身份按当前配置；TD-87 scope 外保留只护审计）。
+  const scoped = matrixAgentIds instanceof Set
+    ? cases.filter((c) => !c.agentId || matrixAgentIds.has(c.agentId))
+    : cases;
   const byAgentCases = new Map();
-  for (const c of cases) {
+  for (const c of scoped) {
     if (!c.agentId) continue;
     if (!byAgentCases.has(c.agentId)) byAgentCases.set(c.agentId, []);
     byAgentCases.get(c.agentId).push(c);
@@ -275,7 +338,7 @@ function summarizeWorkers(cases) {
     agentActiveLane.set(agentId, hasAnyFact ? laneLedgerKey(active) : `seat:${agentId}`);
   }
   const byLane = new Map();
-  for (const c of cases) {
+  for (const c of scoped) {
     if (!c.agentId) continue;
     const declared = declaredIdentity(c);
     const hasAnyFact = declared.backend !== null
@@ -293,10 +356,16 @@ function summarizeWorkers(cases) {
     // 但仍保留在 summarizeCertification 的 summary.cases（可审计历史）。
     const active = findActiveIdentity(agentCases);
     const agentIds = [...new Set(agentCases.map((c) => c.agentId))];
+    // 0045 §4.3：车道例外条款（0036/0037/0041 重签）——四元组严格键命中。
+    const exception = loadLaneExceptions().entries.find((e) => exceptionMatches(active, e)) ?? null;
     let summary = null;
     for (const c of agentCases) {
       if (!matchesActiveIdentity(c, active)) continue;
-      const status = worseStatus(summary?.status, c.certification.status);
+      // 条款命中且本 case 全部红检查 ∈ 例外族 → 裁决 conditional（事实不动）。
+      const caseStatus = exception && allRedChecksExcepted(c, exception)
+        ? "conditional"
+        : c.certification.status;
+      const status = worseStatus(summary?.status, caseStatus);
       // TD-111: worker 的 reasonCode 取"决定最终（最差）status 的那个 case"的码。
       // 分支语境（如 blocked 优先于 core 失败）只在 case 级成立，聚合层不可用
       // 合并后的 failedChecks 重建；平级 status 冲突时保留先观察到的 case 的码（确定性）。
