@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "_comment": "0046 §1/⑤：车道画像元数据（特征描述+建议任务类别+上下文/多模态事实）——仅对 Lead agent 暴露、供选席参考。非路由规则、非身份成分、不进派发解析面（dispatchResolution 不读本文件）、不进 MCP wire（冻结面零字节）。来源标注：official=官方文档核实（2026-10-06 联网）、owner=Owner 实测口述（2026-10-06）、wire=dsh/ACP 会话广告值。描述性文字来自 Owner 手拟矩阵（含主观评价），与可核实事实分列。",
+  "traits": {
+    "sol": {
+      "profile": "四星智力，相对严谨、保守、后端能力较强，容易钻牛角尖，价格中高（Owner 撰写）",
+      "suggestedUses": ["方案 advisor", "交付物 auditor", "高难度代码执行"],
+      "contextWindow": { "tokens": 1050000, "shape": "922K in / 128K out shared", "source": "official" },
+      "multimodal": { "image": true, "video": false, "source": "official" }
+    },
+    "astra": {
+      "profile": "五星智力，极其严谨、保守、后端能力极强，容易钻牛角尖，价格高昂（Owner 撰写）",
+      "suggestedUses": ["方案 advisor", "交付物 auditor", "高难度 bug 挖掘"],
+      "contextWindow": { "tokens": 1050000, "shape": "922K in / 128K out shared", "source": "official" },
+      "multimodal": { "image": true, "video": false, "source": "official" }
+    },
+    "glm-pro": {
+      "profile": "三星智力，代码能力尚可、长程任务能力尚可，价格低廉（Owner 撰写）",
+      "suggestedUses": ["主力代码执行"],
+      "contextWindow": { "tokens": 1000000, "source": "official" },
+      "multimodal": { "image": false, "video": false, "source": "official（GLM-5 系首个原生多模态是 Flash；本体无视觉）" }
+    },
+    "glm-flash": {
+      "profile": "三星智力，代码能力不如 glm-pro，价格极其低廉（Owner 撰写）",
+      "suggestedUses": ["副代码执行", "视觉理解", "探索/研究/总结"],
+      "contextWindow": { "tokens": 1000000, "source": "official" },
+      "multimodal": { "image": true, "video": false, "source": "official（GLM-5 系首个原生多模态）" }
+    },
+    "kimi": {
+      "profile": "四星智力，有格局、有创意、文案强，但不如 astra 严谨，价格高昂（Owner 撰写）",
+      "suggestedUses": ["方案 advisor", "交付物 auditor", "创意头脑风暴"],
+      "contextWindow": { "tokens": 262144, "source": "owner（k3-256k 档 256K；K3 冷却期才 1M，1M 档=未来席位升级项，需另 model id 另认证）" },
+      "multimodal": { "image": true, "video": false, "source": "owner（仅图；视频识别需 kimi-for-coding=K2.8 Preview 另车道）" },
+      "effortNote": "通道不表达 effort（kimi-web thinking 字段未实测，WAO 不发明映射）——模型侧默认 high（owner 实测）"
+    },
+    "opus": {
+      "profile": "五星智力，有格局、有创意、文案强，但不如 astra 严谨，价格高昂（Owner 撰写）",
+      "suggestedUses": ["方案 advisor", "交付物 auditor", "创意头脑风暴", "高要求前端设计"],
+      "contextWindow": { "tokens": 1000000, "source": "official" },
+      "multimodal": { "image": true, "video": false, "source": "official" }
+    },
+    "deepseek-pro": {
+      "profile": "暂无（Owner 表待补；模型=deepseek-v4-pro）",
+      "suggestedUses": ["主力代码执行（暂沿 ds 通道历史定位）"],
+      "contextWindow": { "tokens": 1000000, "source": "official" },
+      "multimodal": { "image": false, "video": false, "source": "official（无视觉证据）" }
+    },
+    "deepseek-flash": {
+      "profile": "三星智力，代码能力不如 glm，执行速度极快，价格极其低廉（Owner 撰写）",
+      "suggestedUses": ["副代码执行", "视觉理解", "探索/研究/总结"],
+      "contextWindow": { "tokens": 1000000, "source": "official" },
+      "multimodal": { "image": true, "video": false, "source": "official（deepseek-flash 接受图像输入，api-docs 实证）" }
+    }
+  }
+}
