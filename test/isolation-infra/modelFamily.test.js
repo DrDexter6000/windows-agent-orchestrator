@@ -57,16 +57,18 @@ test("R9: familyLabel 展示标签闭集；未知 token 一律未知族系", () 
   assert.equal(familyLabel(undefined), UNKNOWN_FAMILY);
 });
 
-test("R9: 真实入库模板七 worker 的族系事实（doc↔config 对账锚）", () => {
+test("R9: 真实入库模板八车道的族系事实（doc↔config 对账锚；0046 车道键）", () => {
   const parsed = JSON.parse(readFileSync(join(ROOT, "config", "agents.example.json"), "utf8"));
   const expect = {
-    researcher: "glm", // 2026-09-17 由 DeepSeek 切智谱 glm-5.3-flash[1m]
-    coder_hq: "glm",
-    coder_low: "glm", // 2026-09-17 由 DeepSeek 切智谱 glm-5.3-flash[1m]
-    coder_mm: "kimi",
-    tester: "gpt", // 2026-09-03 起有 model 块（gpt-5.6-sol）→ model 族系优先
-    auditor: "gpt", // 2026-09-17 切 codex/GPT-6-astra（claude 订阅取消）
-    coder_opencode_fallback: "glm",
+    // 0046 §5 步⑥：模板=车道键形状（模型名席位），族系事实按车道对账。
+    "glm-pro": "glm",
+    "glm-flash": "glm", // GLM-5 系首个原生多模态；researcher 复用政策承载车道
+    kimi: "kimi",
+    sol: "gpt", // gpt-6.1-sol（0046 §1.5 升主力）
+    astra: "gpt", // gpt-6-astra（auditor 家族落点）
+    opus: "claude",
+    "deepseek-pro": "deepseek",
+    "deepseek-flash": "deepseek",
   };
   for (const [id, family] of Object.entries(expect)) {
     const agent = parsed.agents?.[id];

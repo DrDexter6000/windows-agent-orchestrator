@@ -56,10 +56,15 @@ const FAMILY_LABELS = Object.freeze({
  * @returns {string} 族系 token（如 "glm"）或 UNKNOWN_FAMILY
  */
 export function modelFamilyOf({ modelId, backend } = {}) {
-  const token = normalizeModelToken(modelId);
-  if (token) {
-    const hit = KNOWN_FAMILIES.find((f) => token === f || token.startsWith(f));
-    if (hit) return hit;
+  // 0046 ⑨：provider 前缀 ref（zcode 原生形状 "bigmodel-api/GLM-5.3"）的族系
+  // 活在后续段——逐段探测（首个命中的家族即返回；家族 token 互不为前缀，无歧义）。
+  const segments = String(modelId ?? "").toLowerCase().replace(/\[[^\]]*\]/g, "").split("/");
+  for (const segment of segments) {
+    const token = normalizeModelToken(segment);
+    if (token) {
+      const hit = KNOWN_FAMILIES.find((f) => token === f || token.startsWith(f));
+      if (hit) return hit;
+    }
   }
   return BACKEND_FAMILY_FALLBACK[String(backend ?? "").toLowerCase()] ?? UNKNOWN_FAMILY;
 }

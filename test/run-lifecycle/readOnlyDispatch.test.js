@@ -581,7 +581,7 @@ test("RO-C1: run --read-only × --delivery-spec-file is rejected before any side
     }), "utf8");
     const { runCommand } = await import("../../src/commands/run.js");
     await assert.rejects(
-      () => runCommand(["coder_low", "--prompt", "x", "--read-only", "--delivery-spec-file", spec, "--isolate"], {}),
+      () => runCommand(["glm-flash", "--prompt", "x", "--read-only", "--delivery-spec-file", spec, "--isolate"], {}),
       (e) => {
         assert.match(e.message, /read_only_delivery_conflict/);
         assert.match(e.message, /--read-only is mutually exclusive with --delivery-spec-file/);
@@ -598,7 +598,7 @@ test("RO-C1: run --read-only × --delivery-spec-file is rejected before any side
 test("RO-C2: run --read-only × --no-isolate is rejected as a contradictory declaration", async () => {
   const { runCommand } = await import("../../src/commands/run.js");
   await assert.rejects(
-    () => runCommand(["coder_low", "--prompt", "x", "--read-only", "--no-isolate"], {}),
+    () => runCommand(["glm-flash", "--prompt", "x", "--read-only", "--no-isolate"], {}),
     /--no-isolate contradicts a read-only declaration/,
   );
 });
