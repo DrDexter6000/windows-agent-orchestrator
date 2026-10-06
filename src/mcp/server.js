@@ -3280,6 +3280,9 @@ export function createWaoMcpServer({
   // getCertificationEvidenceInventory；测试注伪用，同 getRegistryInventoryFn 模式）。
   getCertificationEvidenceFn,
   dispatchRunFn,
+  // 0046 D10：认证门禁开关的测试注入缝（同 dispatchRunFn 模式——server-owned，
+  // 模型不可经 tool args 触达）。缺省回落宿主 env（部署开关）。
+  certGateOverride,
   getRunStatusFn,
   collectRunMessagesFn,
   // TD-121: injectable collect projection (test seam, same pattern as M12-19
@@ -3354,7 +3357,13 @@ export function createWaoMcpServer({
   // CLI 保持 Owner/Lead 特权通道（认证 drill 经 CLI 自举——全局门=自举悖子）。
   // 返回 null=门关；[]=全过；非空=不在清单的 lane 名单（调用方零派发拒绝）。
   const certGateFailingLanes = async (laneIds) => {
-    if (process.env.WAO_MCP_REQUIRE_CERTIFIED !== "1") return null;
+    // 0064 注入缝补（并发测试雷）：测试经 certGateOverride 定门（进程级 env 会被
+    // 并行测试文件互相踩——实测 model-override 用例被隔壁文件的门误伤）。部署面
+    // 语义不变：env 宿主定格、tool args 不可达。
+    const gateOn = certGateOverride !== undefined
+      ? certGateOverride === true
+      : process.env.WAO_MCP_REQUIRE_CERTIFIED === "1";
+    if (!gateOn) return null;
     let summary = null;
     let ledgerState = "ok";
     try {
@@ -3919,6 +3928,10 @@ export function createWaoMcpServer({
       // （或删除该变量回退）+ 重启宿主。这是 ADR 0018"advisory 非门禁"的 0046 §1.4
       // 部署级修订（Owner 指令：派发只派认证清单中的），非全局翻默认。
       {
+        // 0046 收口补丁（三席会审双洞之一，opus 席复现）：门开时拒绝 per-dispatch
+        // model 覆盖——否则可借已认证车道跑未认证模型（P1-1 互斥先例的门禁继承）。
+        // reasoning 覆盖是否同拒待 Owner 裁定（0046 把 effort 调整定为 delta 重取证，
+        // 同族推理适用，但按纪律不擅自扩闭集）。failing !== null 即门开。
         const failing = await certGateFailingLanes([agentIdInput]);
         if (failing !== null && failing.length > 0) {
           return {
@@ -3933,11 +3946,7 @@ export function createWaoMcpServer({
             }],
           };
         }
-        // 0046 收口补丁（三席会审双洞之一，opus 席复现）：门开时拒绝 per-dispatch
-        // model 覆盖——否则可借已认证车道跑未认证模型（P1-1 互斥先例的门禁继承）。
-        // reasoning 覆盖是否同拒待 Owner 裁定（0046 把 effort 调整定为 delta 重取证，
-        // 同族推理适用，但按纪律不擅自扩闭集）。
-        if (model !== undefined) {
+        if (failing !== null && model !== undefined) {
           return {
             isError: true,
             content: [{

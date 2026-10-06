@@ -36,7 +36,7 @@ async function buildInMemoryClient(server) {
   return client;
 }
 
-async function dispatchOnce({ dir, gateEnv, summaryWorkers, laneKey }) {
+async function dispatchOnce({ dir, gateEnv, summaryWorkers }) {
   const registryPath = join(dir, "agents.json");
   writeFileSync(registryPath, JSON.stringify({ agents: {
     fresh_lane: { backend: "codex", model: { id: "gpt-6.1-sol" }, reasoning: { effort: "high" }, cwd: dir },
@@ -50,17 +50,17 @@ async function dispatchOnce({ dir, gateEnv, summaryWorkers, laneKey }) {
     }), "utf8");
   }
   let dispatched = null;
+  // 0064 注入缝：门禁经 server-owned certGateOverride 注入——不碰进程级 env
+  // （并行测试文件会互踩，实测误伤 model-override 用例）。
   const server = createWaoMcpServer({
     registryPath, runDir, workspaceRoot: dir,
+    certGateOverride: gateEnv === "1",
     dispatchRunFn: async (args) => {
       dispatched = args;
       return { runId: "run_gate_probe", state: "submitted" };
     },
   });
-  const prev = process.env.WAO_MCP_REQUIRE_CERTIFIED;
   try {
-    if (gateEnv === undefined) delete process.env.WAO_MCP_REQUIRE_CERTIFIED;
-    else process.env.WAO_MCP_REQUIRE_CERTIFIED = gateEnv;
     const client = await buildInMemoryClient(server);
     const res = await client.callTool({
       name: "run_dispatch",
@@ -69,8 +69,6 @@ async function dispatchOnce({ dir, gateEnv, summaryWorkers, laneKey }) {
     const text = res.content?.find((b) => b.type === "text")?.text ?? "";
     return { dispatched, isError: Boolean(res.isError), text };
   } finally {
-    if (prev === undefined) delete process.env.WAO_MCP_REQUIRE_CERTIFIED;
-    else process.env.WAO_MCP_REQUIRE_CERTIFIED = prev;
     await server.close();
   }
 }
@@ -157,11 +155,10 @@ test("D10 双洞①：门开 + per-dispatch model 覆盖 = 拒绝（P1-1 互斥�
     let dispatched = null;
     const server = createWaoMcpServer({
       registryPath, runDir, workspaceRoot: dir,
+      certGateOverride: true,
       dispatchRunFn: async (args) => { dispatched = args; return { runId: "r", state: "submitted" }; },
     });
-    const prev = process.env.WAO_MCP_REQUIRE_CERTIFIED;
     try {
-      process.env.WAO_MCP_REQUIRE_CERTIFIED = "1";
       const client = await buildInMemoryClient(server);
       const res = await client.callTool({
         name: "run_dispatch",
@@ -173,8 +170,6 @@ test("D10 双洞①：门开 + per-dispatch model 覆盖 = 拒绝（P1-1 互斥�
       assert.match(text, /mutually exclusive with the gate/);
       assert.match(text, /P1-1 precedent/);
     } finally {
-      if (prev === undefined) delete process.env.WAO_MCP_REQUIRE_CERTIFIED;
-      else process.env.WAO_MCP_REQUIRE_CERTIFIED = prev;
       await server.close();
     }
   } finally { cleanupDir(dir); }
@@ -198,11 +193,10 @@ test("D10 双洞②：门开 + run_consult 席位不在清单 = 整体拒绝点�
     let consultDispatches = 0;
     const server = createWaoMcpServer({
       registryPath, runDir, workspaceRoot: dir,
+      certGateOverride: true,
       dispatchRunFn: async () => { consultDispatches += 1; return { runId: "r", state: "submitted" }; },
     });
-    const prev = process.env.WAO_MCP_REQUIRE_CERTIFIED;
     try {
-      process.env.WAO_MCP_REQUIRE_CERTIFIED = "1";
       const client = await buildInMemoryClient(server);
       const res = await client.callTool({
         name: "run_consult",
@@ -215,8 +209,6 @@ test("D10 双洞②：门开 + run_consult 席位不在清单 = 整体拒绝点�
       assert.match(text, /Consult only fans out to list members/);
       assert.ok(!/listed_lane(?!,)/.test(text.split(":")[2] ?? "") || text.includes("unlisted_lane"), "点名缺席者");
     } finally {
-      if (prev === undefined) delete process.env.WAO_MCP_REQUIRE_CERTIFIED;
-      else process.env.WAO_MCP_REQUIRE_CERTIFIED = prev;
       await server.close();
     }
   } finally { cleanupDir(dir); }
