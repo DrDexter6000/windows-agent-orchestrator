@@ -101,6 +101,7 @@
       "registry-roles/knownBackendsF3.test.js",
       "registry-roles/knownBackendsSsot.test.js",
       "registry-roles/laneTraits.test.js",
+      "registry-roles/loadBearingEnv.test.js",
       "registry-roles/m11-9-packageA.test.js",
       "registry-roles/m11-9-packageB.test.js",
       "registry-roles/m12-3-workdirContainment.test.js",

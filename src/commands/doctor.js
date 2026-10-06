@@ -71,6 +71,7 @@ import { BACKEND_CLI } from "../application/backendCliMap.js";
 import { assessPanelReadiness, deriveReadyState } from "../application/panelReadiness.js";
 // R9：doctor INFO 文案与 waoStage 的 skip 码闭集对账（同一 SSOT import，禁值指纹）。
 import { PANEL_SKIP_REASONS } from "../waoStage.js";
+import { LOAD_BEARING_ENV_BY_BACKEND, resolveLoadBearingEnvFull } from "../application/loadBearingEnv.js";
 
 // TD-95 #11 --strict：JS parse smoke（防注释崩溃漏到运行时，复盘 #3 教训）。
 // 对 src/*.js 跑 node --check。doctor --strict 时调用。
@@ -317,6 +318,49 @@ export async function waoDoctorCommand(args, config) {
           detail: `未设置（对应 provider 会 401）；run: setx ${name} "<key>"（Windows User 作用域，新开终端生效）`,
           fix: `setx ${name} "<key>"（Windows User 作用域，新开终端生效）`,
         });
+      }
+    }
+  }
+
+  // 5b. TD-218：承重运行时 env（独立 advisory——不进 requiredCredentialNames、
+  //     不改变派发阻断语义）。backend 声明表 + 注册表 env 块，按 spawn 解析序
+  //     （agent.env → 进程 env → User 作用域）检查存在性；file 类查路径存在。
+  //     名字在场、值不回显（envPolicy 纪律）。Carlola 案（zcode 双变量缺失=
+  //     spawn 期死）的配置期前移诊断面。
+  if (registryOk) {
+    const existsSyncFn = (await import("node:fs")).existsSync;
+    for (const [id, agent] of Object.entries(registryAgents)) {
+      const declaredList = LOAD_BEARING_ENV_BY_BACKEND.get(agent?.backend) ?? [];
+      // 注册表 env 块声明的变量同样承重（无论 backend 是否声明表在册）。
+      const envBlockNames = Object.keys(agent?.env ?? {});
+      const all = [
+        ...declaredList.map((d) => ({ ...d, origin: "backend-declared" })),
+        ...envBlockNames.filter((n) => !declaredList.some((d) => d.name === n))
+          .map((n) => ({ name: n, kind: "plain", origin: "agent-env-block" })),
+      ];
+      for (const declared of all) {
+        const r = resolveLoadBearingEnvFull({
+          declared,
+          agentEnv: agent?.env ?? {},
+          processEnv: process.env,
+          userEnvReader: (name) => {
+            try { return process.env[name] ?? null; } catch { return null; }
+          },
+          existsFn: existsSyncFn,
+        });
+        const label = `env_${id}_${declared.name}`;
+        if (r.status === "ok") {
+          pushCheck(checks, { name: label, pass: true, level: "info",
+            detail: `承重 env 已解析（来源 ${r.source}${declared.kind === "file" ? ", 文件在" : ""}；值不回显）` });
+        } else if (r.status === "file-missing") {
+          pushCheck(checks, { name: label, pass: false,
+            detail: `承重 env 已声明但目标文件不存在（${declared.kind}；spawn 将失败——检查路径或 ZCode 桌面升级后的配置迁移）`,
+            fix: "修正注册表 env 块中的路径，或重新定位该配置文件" });
+        } else {
+          pushCheck(checks, { name: label, pass: false, level: "warn",
+            detail: `承重 env 三级解析均缺失（agent.env → 进程 env → User 作用域；${declared.origin}——该 backend spawn 期可能即死，Carlola 同形）`,
+            fix: `在注册表 env 块声明它，或 setx ${declared.name} "<值>"` });
+        }
       }
     }
   }
