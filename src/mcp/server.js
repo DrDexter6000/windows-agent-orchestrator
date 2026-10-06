@@ -3346,6 +3346,45 @@ export function createWaoMcpServer({
   // current binding, registry, heartbeat and filters against them per query.
   const summaryCache = runSummaryCache ?? createRunSummaryCache();
   const cachedRunFactsReader = (filePath) => summaryCache.read(filePath);
+  // 0046 §5 步⑨（D10 认证清单门禁——部署级开关，默认关）公共判定（三席会审双洞
+  // 修补：run_dispatch 与 run_consult 共用；成员资格=selectCertRecord 双空间命中
+  // 且 status ∈ {certified, conditional}——例外条款族的 conditional 是常态；新鲜度
+  // 不进门，保持展示）。台账缺失/不可读/键空间不对=门开着时 fail-closed。
+  // WAO_MCP_REQUIRE_CERTIFIED 在宿主进程 spawn 时定格，模型不可经 tool args 翻转。
+  // CLI 保持 Owner/Lead 特权通道（认证 drill 经 CLI 自举——全局门=自举悖子）。
+  // 返回 null=门关；[]=全过；非空=不在清单的 lane 名单（调用方零派发拒绝）。
+  const certGateFailingLanes = async (laneIds) => {
+    if (process.env.WAO_MCP_REQUIRE_CERTIFIED !== "1") return null;
+    let summary = null;
+    let ledgerState = "ok";
+    try {
+      summary = JSON.parse(await readFile(join(runDir, "reliability-summary.json"), "utf8"));
+      if (summary?.ledgerKeySpace !== "lane-v1") ledgerState = "keyspace";
+    } catch {
+      ledgerState = "unreadable";
+    }
+    if (ledgerState !== "ok") return [...laneIds]; // fail-closed：全部按不在清单拒
+    let registryForGate = null;
+    try {
+      registryForGate = await readRegistry(registryPath);
+    } catch {
+      registryForGate = null;
+    }
+    const failing = [];
+    for (const id of laneIds) {
+      let record = null;
+      try {
+        const agent = registryForGate?.getAgent(id);
+        record = agent ? selectCertRecord(summary, agent, id) ?? null : null;
+      } catch {
+        record = null;
+      }
+      const inList = record !== null
+        && (record.status === "certified" || record.status === "conditional");
+      if (!inList) failing.push(id);
+    }
+    return failing;
+  };
   // M12-25: the default inventory service is the PARTIAL projection — it returns
   // valid agents + bounded safe per-entry issues, so one malformed entry never
   // hides the healthy workers. (An injected getRegistryInventoryFn may return
@@ -3879,35 +3918,33 @@ export function createWaoMcpServer({
       // 模型不可经 tool args 翻转。翻转/回退：setx WAO_MCP_REQUIRE_CERTIFIED 1
       // （或删除该变量回退）+ 重启宿主。这是 ADR 0018"advisory 非门禁"的 0046 §1.4
       // 部署级修订（Owner 指令：派发只派认证清单中的），非全局翻默认。
-      if (process.env.WAO_MCP_REQUIRE_CERTIFIED === "1") {
-        let gateRecord = null;
-        let ledgerState = "ok";
-        try {
-          const summary = JSON.parse(await readFile(join(runDir, "reliability-summary.json"), "utf8"));
-          let gateAgent = null;
-          try {
-            const gateRegistry = await readRegistry(registryPath);
-            gateAgent = gateRegistry.getAgent(agentIdInput);
-          } catch {
-            gateAgent = null;
-          }
-          gateRecord = gateAgent ? selectCertRecord(summary, gateAgent, agentIdInput) ?? null : null;
-          if (summary?.ledgerKeySpace !== "lane-v1") ledgerState = "keyspace";
-        } catch {
-          ledgerState = "unreadable";
+      {
+        const failing = await certGateFailingLanes([agentIdInput]);
+        if (failing !== null && failing.length > 0) {
+          return {
+            isError: true,
+            content: [{
+              type: "text",
+              text: `run_dispatch refused by the certification-list gate (WAO_MCP_REQUIRE_CERTIFIED=1): `
+                + `lane ${failing.join(", ")} has no certified/conditional record in the certification ledger. `
+                + "Dispatch only dispatches list members (decision 0046). "
+                + "Certify via the CLI privileged channel (npm run reliability -- --agent <lane>), then retry. "
+                + "The gate is deployment-level and MCP-boundary only; it cannot be changed from tool arguments.",
+            }],
+          };
         }
-        const inList = ledgerState === "ok" && gateRecord !== null
-          && (gateRecord.status === "certified" || gateRecord.status === "conditional");
-        if (!inList) {
+        // 0046 收口补丁（三席会审双洞之一，opus 席复现）：门开时拒绝 per-dispatch
+        // model 覆盖——否则可借已认证车道跑未认证模型（P1-1 互斥先例的门禁继承）。
+        // reasoning 覆盖是否同拒待 Owner 裁定（0046 把 effort 调整定为 delta 重取证，
+        // 同族推理适用，但按纪律不擅自扩闭集）。
+        if (model !== undefined) {
           return {
             isError: true,
             content: [{
               type: "text",
               text: "run_dispatch refused by the certification-list gate (WAO_MCP_REQUIRE_CERTIFIED=1): "
-                + `lane ${agentIdInput} has no certified/conditional record in the certification ledger `
-                + `(ledger state: ${ledgerState}). Dispatch only dispatches list members (decision 0046). `
-                + "Certify via the CLI privileged channel (npm run reliability -- --agent <lane>), then retry. "
-                + "The gate is deployment-level and MCP-boundary only; it cannot be changed from tool arguments.",
+                + "per-dispatch model override is mutually exclusive with the gate (a certified lane id cannot "
+                + "vouch for an unlisted model — P1-1 precedent). Remove the model override, or certify a dedicated lane.",
             }],
           };
         }
@@ -4428,6 +4465,22 @@ export function createWaoMcpServer({
           content: [{
             type: "text",
             text: `run_consult refused: seat(s) not in registry: ${missing.join(", ")}`,
+          }],
+        };
+      }
+      // 0046 收口补丁（三席会审双洞之二，opus+sol 双席独立复现）：consult 扇出不
+      // 经 run_dispatch 处理器——门禁必须在此逐席生效，任一席位不在清单=整体拒绝
+      // 零派发（点名缺席者）。
+      const gateFailingSeats = await certGateFailingLanes(seatIds);
+      if (gateFailingSeats !== null && gateFailingSeats.length > 0) {
+        return {
+          isError: true,
+          content: [{
+            type: "text",
+            text: `run_consult refused by the certification-list gate (WAO_MCP_REQUIRE_CERTIFIED=1): `
+              + `seat(s) ${gateFailingSeats.join(", ")} have no certified/conditional record in the certification `
+              + "ledger. Consult only fans out to list members (decision 0046). Certify via the CLI privileged "
+              + "channel (npm run reliability -- --agent <lane>), then retry.",
           }],
         };
       }

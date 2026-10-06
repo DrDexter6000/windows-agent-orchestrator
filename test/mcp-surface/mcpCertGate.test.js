@@ -94,9 +94,9 @@ test("D10 门禁开：certified/conditional 成员放行（含例外条款族 co
     const dir = mkdtempSync(join(tmpdir(), "wao-gate-member-"));
     try {
       makeGitRepo(dir);
-      const { dispatched, text } = await dispatchOnce({ dir, gateEnv: "1", summaryWorkers: { fresh_lane: rec } });
+      const { dispatched, text: passText } = await dispatchOnce({ dir, gateEnv: "1", summaryWorkers: { fresh_lane: rec } });
       assert.ok(dispatched, `status=${rec.status} 成员必须放行`);
-      assert.ok(!/certification-list gate/.test(text), `status=${rec.status} 成员不得吃门禁文案`);
+      assert.ok(!/certification-list gate/.test(passText), `status=${rec.status} 成员不得吃门禁文案`);
     } finally { cleanupDir(dir); }
   }
 });
@@ -133,7 +133,91 @@ test("D10 门禁开：台账缺失/键空间不对=fail-closed（不静默放行
       const { dispatched, isError, text } = await dispatchOnce({ dir, gateEnv: "1", summaryWorkers: scenario === "keyspace" ? null : workers });
       assert.equal(dispatched, null, `${scenario}=零 dispatch`);
       assert.equal(isError, true);
-      assert.match(text, /ledger state: (unreadable|keyspace)/);
+      assert.match(text, /certification-list gate/, `${scenario}=门禁文案在场（统一文案，无状态后缀）`);
     } finally { cleanupDir(dir); }
   }
+});
+
+// ── 0046 收口补丁回归钉（三席会审双洞，opus 席复现表后两行） ────────────────
+
+test("D10 双洞①：门开 + per-dispatch model 覆盖 = 拒绝（P1-1 互斥继承，零 dispatch）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-gate-mo-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: {
+      fresh_lane: { backend: "codex", model: { id: "gpt-6.1-sol" }, reasoning: { effort: "high" }, cwd: dir },
+    } }), "utf8");
+    const runDir = join(dir, "runs");
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, "reliability-summary.json"), JSON.stringify({
+      ledgerKeySpace: "lane-v1",
+      workers: { fresh_lane: CERTIFIED_REC },
+    }), "utf8");
+    let dispatched = null;
+    const server = createWaoMcpServer({
+      registryPath, runDir, workspaceRoot: dir,
+      dispatchRunFn: async (args) => { dispatched = args; return { runId: "r", state: "submitted" }; },
+    });
+    const prev = process.env.WAO_MCP_REQUIRE_CERTIFIED;
+    try {
+      process.env.WAO_MCP_REQUIRE_CERTIFIED = "1";
+      const client = await buildInMemoryClient(server);
+      const res = await client.callTool({
+        name: "run_dispatch",
+        arguments: { agentId: "fresh_lane", prompt: "x", model: "never-certified-model" },
+      });
+      const text = res.content?.find((b) => b.type === "text")?.text ?? "";
+      assert.equal(dispatched, null, "model 覆盖×门开=零 dispatch");
+      assert.equal(Boolean(res.isError), true);
+      assert.match(text, /mutually exclusive with the gate/);
+      assert.match(text, /P1-1 precedent/);
+    } finally {
+      if (prev === undefined) delete process.env.WAO_MCP_REQUIRE_CERTIFIED;
+      else process.env.WAO_MCP_REQUIRE_CERTIFIED = prev;
+      await server.close();
+    }
+  } finally { cleanupDir(dir); }
+});
+
+test("D10 双洞②：门开 + run_consult 席位不在清单 = 整体拒绝点名缺席者（零扇出）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-gate-cc-"));
+  try {
+    makeGitRepo(dir);
+    const registryPath = join(dir, "agents.json");
+    writeFileSync(registryPath, JSON.stringify({ agents: {
+      listed_lane: { backend: "codex", model: { id: "gpt-6.1-sol" }, reasoning: { effort: "high" }, cwd: dir },
+      unlisted_lane: { backend: "codex", model: { id: "gpt-6-astra" }, reasoning: { effort: "high" }, cwd: dir },
+    } }), "utf8");
+    const runDir = join(dir, "runs");
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, "reliability-summary.json"), JSON.stringify({
+      ledgerKeySpace: "lane-v1",
+      workers: { listed_lane: { agentId: "listed_lane", backend: "codex", modelId: "gpt-6.1-sol", status: "certified" } },
+    }), "utf8");
+    let consultDispatches = 0;
+    const server = createWaoMcpServer({
+      registryPath, runDir, workspaceRoot: dir,
+      dispatchRunFn: async () => { consultDispatches += 1; return { runId: "r", state: "submitted" }; },
+    });
+    const prev = process.env.WAO_MCP_REQUIRE_CERTIFIED;
+    try {
+      process.env.WAO_MCP_REQUIRE_CERTIFIED = "1";
+      const client = await buildInMemoryClient(server);
+      const res = await client.callTool({
+        name: "run_consult",
+        arguments: { brief: "gate consult probe", seats: ["listed_lane", "unlisted_lane"] },
+      });
+      const text = res.content?.find((b) => b.type === "text")?.text ?? "";
+      assert.equal(consultDispatches, 0, "任一席位不在清单=整体零扇出");
+      assert.equal(Boolean(res.isError), true);
+      assert.match(text, /unlisted_lane/);
+      assert.match(text, /Consult only fans out to list members/);
+      assert.ok(!/listed_lane(?!,)/.test(text.split(":")[2] ?? "") || text.includes("unlisted_lane"), "点名缺席者");
+    } finally {
+      if (prev === undefined) delete process.env.WAO_MCP_REQUIRE_CERTIFIED;
+      else process.env.WAO_MCP_REQUIRE_CERTIFIED = prev;
+      await server.close();
+    }
+  } finally { cleanupDir(dir); }
 });
