@@ -47,10 +47,23 @@ import { join, resolve } from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 
 import { readTranscript, findState, TERMINAL_STATES, extractCanonicalAgentId } from "../transcript.js";
+
+// 0045 W4d：runtimeFacts 的同步解析缓存（模块级一次）。
+let _registryAgentsCache = null;
+function registryAgentsForFacts(registry) {
+  if (_registryAgentsCache) return _registryAgentsCache;
+  _registryAgentsCache = Object.fromEntries(registry.listAgents().map((a) => [a.id, a]));
+  return _registryAgentsCache;
+}
+function loadLanesConfigForFacts() { return loadLanesConfig(); }
+function listRoleLibrarySync() { return listRoleLibrary(); }
+
+
 import { readRegistry } from "../registry.js";
 import { boundReportScope } from "../metrics.js";
 import { createSecretRedactor } from "../secretRedaction.js";
 import { dispatchRun } from "./runDispatch.js";
+import { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } from "../dispatchResolution.js";
 import { deriveStartedIdentity, laneFingerprint } from "./identityProjection.js";
 // 预算范围与 run_wait 同域（0039 r1：--wait-timeout 默认 600000，范围同 run_wait）。
 import { RUN_WAIT_MIN_MS, RUN_WAIT_MAX_MS } from "./runWait.js";
@@ -446,8 +459,19 @@ export async function runConsult({
   // "席位已不在注册表"与"确无 provider 标识"，独立性判断不因此静默塌成 unknown。
   const runtimeFacts = seats.map((seat) => {
     if (!registry) return { agentId: seat.agentId, backend: null, provider: null, registryResolution: "registry-unreadable" };
+    // 0045 W4d：先直查；Unknown 则经别名解析取车道键（席位名可能是别名）。
+    const lookupId = (() => {
+      try { registry.getAgent(seat.agentId); return seat.agentId; } catch { /* fallthrough */ }
+      try {
+        const resolution = resolveDispatchTarget({
+          agentId: seat.agentId, lanesDoc: loadLanesConfigForFacts(),
+          registryAgents: registryAgentsForFacts(registry), roleLibrary: listRoleLibrarySync(),
+        });
+        return resolution.kind === "resolved" ? resolution.agentId : seat.agentId;
+      } catch { return seat.agentId; }
+    })();
     try {
-      const agent = registry.getAgent(seat.agentId);
+      const agent = registry.getAgent(lookupId);
       return { agentId: seat.agentId, ...seatRuntimeFacts(agent), registryResolution: "ok" };
     } catch {
       return { agentId: seat.agentId, backend: null, provider: null, registryResolution: "failed" };
@@ -456,13 +480,31 @@ export async function runConsult({
 
   // 扇出：逐席后台只读 run（共享内核=brief 逐字节；视角片段原样拼在尾部）。
   const dispatchStates = [];
+  const seatPolicies = new Map(); // agentId → {laneId, roleId, resolvedTarget}（W4d 别名解析缓存）
   for (const seat of seats) {
     const prompt = typeof seat.perspectiveText === "string" && seat.perspectiveText.length > 0
       ? `${text}\n\n${seat.perspectiveText}`
       : text;
     try {
+      // 0045 W4d：席位名可能是车道别名（auditor→gpt-astra）——经解析层取车道键
+      // （别名=执行；未入别名表的 legacy 键原样透传）。
+      let dispatchAgentId = seat.agentId;
+      try {
+        const { loadLanesConfig, resolveDispatchTarget, listRoleLibrary } = await import("../dispatchResolution.js");
+        const lanesDoc = loadLanesConfig();
+        const registryAgents = Object.fromEntries(registry.listAgents().map((a) => [a.id, a]));
+        const resolution = resolveDispatchTarget({
+          agentId: seat.agentId, lanesDoc, registryAgents, roleLibrary: listRoleLibrary(),
+        });
+        if (resolution.kind === "resolved" && resolution.source === "alias") {
+          dispatchAgentId = resolution.agentId;
+          seatPolicies.set(seat.agentId, { laneId: resolution.laneId, roleId: resolution.roleId, resolvedTarget: resolution });
+        }
+      } catch { /* 解析面不可用=照旧透传 */ }
+      const seatPolicy = seatPolicies.get(seat.agentId);
       const result = await dispatchFn({
-        agentId: seat.agentId,
+        agentId: dispatchAgentId,
+        ...(seatPolicy?.roleId ? { resolvedRoleId: seatPolicy.roleId } : {}),
         prompt,
         registryPath: resolvedRegistry,
         runDir: resolvedRunDir,
