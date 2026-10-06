@@ -318,7 +318,12 @@ export function selectCertRecord(summary, agent, agentId) {
   // 事实扫描回退仅对车道键台账（lane-v1）生效：席位键台账的键缺席=真无记录
   // （不得向同轴兄弟席位借记录——ADR-0032 三态"undeterminable"塌缩回归）。
   if (summary?.ledgerKeySpace !== "lane-v1") return undefined;
-  const byFacts = Object.values(workers).find((cand) => matchedCertRecord(agent, cand) !== null);
+  // 元数据槽（__ 前缀，如 __ledgerKeySpace）不进事实扫描——字符串会过全跳过
+  // 检查被误"匹配"（窗口门 3 实测）。
+  const byFacts = Object.entries(workers)
+    .filter(([k]) => !k.startsWith("__"))
+    .map(([, v]) => v)
+    .find((cand) => matchedCertRecord(agent, cand) !== null);
   return byFacts ?? undefined;
 }
 

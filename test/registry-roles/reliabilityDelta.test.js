@@ -304,7 +304,7 @@ test("summarizeCertification: delta case → worker status=conditional 且 certi
       checks: deltaPassingChecks(),
     },
   ], { generatedAt: "2026-08-19T00:00:00.000Z" });
-  const w = summary.workers.coder_new;
+  const w = Object.values(summary.workers)[0]; // 0045 W4a：有身份事实 → 车道指纹键
   assert.equal(w.status, "conditional");
   assert.equal(w.certificationScope, "delta");
   assert.equal(w.reasonCode, null, "delta 降档的 worker 码诚实为 null");
@@ -326,7 +326,7 @@ test("summarizeCertification: full profile 全绿 → certified 且 scope=full",
       checks: deltaPassingChecks(),
     },
   ]);
-  const w = summary.workers.coder_hq;
+  const w = Object.values(summary.workers)[0]; // 0045 W4a：同上
   assert.equal(w.status, "certified");
   assert.equal(w.certificationScope, "full");
 });
@@ -348,7 +348,7 @@ test("summarizeCertification: 混合（同 agent delta + full case）→ 保守�
       checks: deltaPassingChecks(),
     },
   ]);
-  const w = summary.workers.coder_mix;
+  const w = Object.values(summary.workers)[0]; // 0045 W4a：同上
   assert.equal(w.status, "conditional", "delta case 的 conditional 决定最差 status");
   assert.equal(w.certificationScope, "delta", "混合取保守值 delta");
   assert.deepEqual(w.cases, ["lane mixed delta", "lane mixed full"]);

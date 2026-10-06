@@ -366,7 +366,10 @@ function projectInventoryEntry(agent, certMap, readiness) {
   const certRecord = certMap[agent.id] !== undefined
     ? matchedCertRecord(agent, certMap[agent.id])
     : (certMap.__ledgerKeySpace === "lane-v1"
-        ? Object.values(certMap).find((cand) => matchedCertRecord(agent, cand) !== null) ?? null
+        ? Object.entries(certMap)
+          .filter(([k]) => !k.startsWith("__"))
+          .map(([, v]) => v)
+          .find((cand) => matchedCertRecord(agent, cand) !== null) ?? null
         : null);
   return {
     id: agent.id,
@@ -945,7 +948,10 @@ export async function getCertificationEvidenceInventory({
     const workerRecord = ledger.state === "ok"
       ? (ledger.workers[agent.id]
         ?? (ledger.ledgerKeySpace === "lane-v1"
-          ? Object.values(ledger.workers).find((cand) => matchedCertRecord(agent, cand) !== null)
+          ? Object.entries(ledger.workers)
+            .filter(([k]) => !k.startsWith("__"))
+            .map(([, v]) => v)
+            .find((cand) => matchedCertRecord(agent, cand) !== null)
           : undefined))
       : undefined;
     const verdict = assessCertEvidenceApplicability({

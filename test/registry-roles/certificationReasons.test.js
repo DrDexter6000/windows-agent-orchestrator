@@ -47,7 +47,8 @@ function fakeReadRegistry(agentId, backend, modelId) {
 }
 
 async function inventoryWithSummary(agent, workers) {
-  const fakeReadFile = async () => JSON.stringify({ workers });
+  // 0045 W4a：键空间标记随 summary 携带（车道键台账的事实扫描回退门依赖它）。
+  const fakeReadFile = async () => JSON.stringify({ ledgerKeySpace: "lane-v1", workers });
   return getRegistryInventory({
     registryPath: "/r.json",
     runDir: "/runs",
@@ -198,7 +199,7 @@ test("TD-111-R1d: summarizeWorkers 聚合 per-worker reasonCode + lastHealthyRun
       lastHealthyRunAt: null,
     },
   ]);
-  const w = summary.workers.w;
+  const w = summary.workers["seat:w"]; // 0045 W4a：无身份事实 fixture → seat: 名键
   assert.equal(w.status, "rejected");
   assert.equal(w.reasonCode, "core_checks_failed", "worker 码 = 决定最差 status 的 case 的码");
   assert.equal(w.lastHealthyRunAt, "2026-08-01T00:00:00.000Z", "最近一次全绿 case 的时间保留");
@@ -208,16 +209,16 @@ test("TD-111-R1d: summarizeWorkers 聚合 per-worker reasonCode + lastHealthyRun
     { caseId: "m1", agentId: "m", checks: allGreenChecks(), lastHealthyRunAt: "2026-08-01T00:00:00.000Z" },
     { caseId: "m2", agentId: "m", checks: allGreenChecks(), lastHealthyRunAt: "2026-08-10T00:00:00.000Z" },
   ]);
-  assert.equal(multi.workers.m.lastHealthyRunAt, "2026-08-10T00:00:00.000Z", "取最近一次全绿时间");
-  assert.equal(multi.workers.m.status, "certified");
-  assert.equal(multi.workers.m.reasonCode, null, "certified worker → 无 advisory 码");
+  assert.equal(multi.workers["seat:m"].lastHealthyRunAt, "2026-08-10T00:00:00.000Z", "取最近一次全绿时间");
+  assert.equal(multi.workers["seat:m"].status, "certified");
+  assert.equal(multi.workers["seat:m"].reasonCode, null, "certified worker → 无 advisory 码");
 
   // 从未全绿 → null（不伪造）。
   const never = summarizeCertification([
     { caseId: "b-red", agentId: "b", checks: [{ name: "completed", pass: false, category: "core" }], lastHealthyRunAt: null },
   ]);
-  assert.equal(never.workers.b.lastHealthyRunAt, null);
-  assert.equal(never.workers.b.reasonCode, "core_checks_failed");
+  assert.equal(never.workers["seat:b"].lastHealthyRunAt, null);
+  assert.equal(never.workers["seat:b"].reasonCode, "core_checks_failed");
 
   // 旧格式 case（磁盘 prior：certification 预置、无 reasonCode、无 lastHealthyRunAt）
   // → 经 SSOT 尽力重 derive（blocked 优先于 core）；时间戳不伪造。
@@ -232,9 +233,9 @@ test("TD-111-R1d: summarizeWorkers 聚合 per-worker reasonCode + lastHealthyRun
       },
     },
   ]);
-  assert.equal(legacy.workers.lw.status, "blocked");
-  assert.equal(legacy.workers.lw.reasonCode, "case_blocked", "旧数据经 SSOT 重 derive（blocked 分支优先）");
-  assert.equal(legacy.workers.lw.lastHealthyRunAt, null, "旧 case 无时间戳 → null");
+  assert.equal(legacy.workers["seat:lw"].status, "blocked");
+  assert.equal(legacy.workers["seat:lw"].reasonCode, "case_blocked", "旧数据经 SSOT 重 derive（blocked 分支优先）");
+  assert.equal(legacy.workers["seat:lw"].lastHealthyRunAt, null, "旧 case 无时间戳 → null");
 
   // 旧 identity 的全绿时间不得计入 active identity 的新鲜度（与 status/capabilities
   // 聚合同规则：只聚合 active identity 的 case）。
@@ -258,9 +259,16 @@ test("TD-111-R1d: summarizeWorkers 聚合 per-worker reasonCode + lastHealthyRun
       lastHealthyRunAt: null,
     },
   ]);
-  assert.equal(identity.workers.iw.status, "rejected");
-  assert.equal(identity.workers.iw.reasonCode, "core_checks_failed");
-  assert.equal(identity.workers.iw.lastHealthyRunAt, null, "旧 identity 的全绿时间不计入 active identity");
+  // 0045 W4a：席位内两 identity=两条车道记录（历史不被 active 掩盖）。active
+  //（deepseek）车道 rejected 且不继承旧 claude 全绿时间；历史车道保留 certified 事实。
+  const recs = Object.values(identity.workers).filter((r) => Array.isArray(r.agentIds) && r.agentIds.includes("iw"));
+  assert.equal(recs.length, 2, "两 identity=两记录");
+  const activeRec = recs.find((r) => r.backend === "deepseek-harness");
+  const legacyRec = recs.find((r) => r.backend === "claude-code");
+  assert.equal(activeRec.status, "rejected");
+  assert.equal(activeRec.reasonCode, "core_checks_failed");
+  assert.equal(activeRec.lastHealthyRunAt, null, "旧 identity 的全绿时间不计入 active 车道");
+  assert.equal(legacyRec.status, "certified", "历史车道保留自身事实（R2：不掩盖不洗白）");
 });
 
 // =====================================================================
