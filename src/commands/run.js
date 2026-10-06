@@ -464,7 +464,10 @@ export async function runCommand(args, config) {
   // 全集+修正例（auditor R3 文案基准）。
   let resolvedTarget = null;
   const wantsLaneRole = options.lane !== undefined || options.role !== undefined;
-  if (wantsLaneRole || options.explain) {
+  // 0045 W4d：别名派发也要经解析块（agentId 可能是车道别名——researcher→
+  // glm-flash 车道键+researcher 角色）。只有"确定不是别名"（键在注册表直查
+  // 命中）才跳过——但直查需要 registry 读，成本与解析块同；干脆一律走解析。
+  if (true) {
     const registryPath = resolve(options.registry ?? config.registry);
     const lanesEnabled = !options.registry || registryPath === resolve(config.registry ?? "config/agents.json");
     const lanesDoc = lanesEnabled ? loadLanesConfig() : { lanes: [], sha256: null, issues: [], rolesHint: [] };
@@ -498,7 +501,9 @@ export async function runCommand(args, config) {
       agentId = resolution.agentId; // 前台路径的接线席位（过渡）；后台路径 runner 侧重解析
       if (!options.background) resolvedTarget = resolution;
     } else if (resolution.source === "alias") {
-      resolvedTarget = resolution; // 前台注记
+      // W4d：别名=执行——agentId 换为车道键（接线条目），角色经 resolvedTarget。
+      agentId = resolution.agentId;
+      resolvedTarget = resolution;
       if (typeof resolution.roleId === "string") options.resolvedRoleId = resolution.roleId; // 后台政策语义
     }
     // legacy-agent：无注解可记，resolvedTarget 保持 null（行为与 W2 前一致）
