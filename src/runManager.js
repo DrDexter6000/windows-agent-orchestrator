@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { JsonlTranscript, TERMINAL_STATES, STATE_CHANGE_REASON, readTranscript, findState, findLatestBound, findFirstBound, projectCorrections } from "./transcript.js";
 import { createWorktree, removeWorktree } from "./isolation.js";
 import { checkScorecard } from "./scorecard.js";
@@ -1290,6 +1291,15 @@ export class RunManager {
       // sha256）。resume 从此钉重建并校验——改注册表指向或改角色文件后续跑
       // fail-closed，不再静默换身份。无角色派发缺席（字节兼容）。
       ...(rolePin ? { rolePin } : {}),
+      // TD-221 Owner 裁定 B+小修（2026-10-07）：注册表级 agent.args 是
+      // --add-dir 逃生门的合法形态（配最窄目录纪律）；留痕小修把"这次派发
+      // 带了哪些 args"记成 transcript 事实——count + 规范化数组 sha256 指纹
+      // + addDirs 的目录路径（--add-dir 的暴露面是安全相关事实，路径本身进
+      // 档案；args 可含其他任意旗标/敏感值，故只记指纹不记原值）。无 args
+      // 派发缺席（字节兼容）。
+      ...(Array.isArray(agent.args) && agent.args.length > 0
+        ? { agentArgs: summarizeAgentArgs(agent.args) }
+        : {}),
       // 0045 §1.4/W4d：派发目标解析注记（alias 与 explicit 同款执行——envelope
       // agentId=车道键即接线条目，无需再记过渡接线字段）。explicit 额外带
       // fresh 原因注记（R3 裁定⑥；前台 CLI 本就一次性进程天然 fresh）。
@@ -2045,6 +2055,24 @@ async function safeCleanup(cleanupFn, transcript) {
 // 这类 run 的临时目录在任何终态路径都不会被删除（TD-223 病灶：%TEMP% 堆积上千个）。
 // dispose 由 ProcessBackend 基类声明（默认 no-op）；非进程式/测试假 backend 无此
 // 方法时静默跳过（组合层永不因此抛错）。
+// TD-221 Owner 裁定 B+小修（2026-10-07）：agent.args 的派发时刻留痕摘要。
+// count + 规范化数组的 sha256 指纹 + --add-dir 的目录路径（暴露面事实，路径
+// 本身进档案）；args 可含其他任意旗标/敏感值——只记指纹不记原值。两种
+// --add-dir 形态（分离参数与 = 连写）都解析；指纹对两者是不同输入、各自如实。
+export function summarizeAgentArgs(args) {
+  const addDirs = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--add-dir" && typeof args[i + 1] === "string") addDirs.push(args[i + 1]);
+    else if (typeof a === "string" && a.startsWith("--add-dir=")) addDirs.push(a.slice("--add-dir=".length));
+  }
+  return {
+    count: args.length,
+    sha256: createHash("sha256").update(JSON.stringify(args)).digest("hex"),
+    ...(addDirs.length > 0 ? { addDirs } : {}),
+  };
+}
+
 function composeBackendDispose(cleanupFn, backend) {
   const prev = cleanupFn ?? null;
   return async () => {

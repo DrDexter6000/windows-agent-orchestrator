@@ -435,7 +435,7 @@ interface TranscriptEvent {
 
 | type | 何时写 | 阶段 |
 |------|--------|------|
-| `run.started` | run 创建；记录生效 backend/cwd/model/reasoning/providerKey 与显式 override | `[S]` M0 |
+| `run.started` | run 创建；记录生效 backend/cwd/model/reasoning/providerKey、显式 override 与 agentArgs 摘要（TD-221 小修：count+sha256 指纹+addDirs 暴露面路径；无 args 缺席） | `[S]` M0 |
 | `run.state_change` | 状态机转移；`reason` ∈ `STATE_CHANGE_REASONS`（闭集 SSOT = `src/transcript.js`） | `[S]` M0 |
 | `run.state_change_rejected` | TD-99：first-terminal-wins 拒绝迟到转移 | `[S]` TD-99 |
 | `session.created` | backend 建立 provider session | `[S]` M0 |

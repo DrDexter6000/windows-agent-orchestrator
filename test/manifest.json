@@ -149,6 +149,7 @@
       "run-lifecycle/runs.test.js",
       "run-lifecycle/runsWait.test.js",
       "run-lifecycle/runTerminalBackendDispose.test.js",
+      "run-lifecycle/agentArgsFingerprint.test.js",
       "run-lifecycle/stopSideEffect.test.js",
       "run-lifecycle/timeoutPolicy.test.js",
       "run-lifecycle/waoAcceptCli.test.js",

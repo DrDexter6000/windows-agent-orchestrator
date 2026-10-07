@@ -483,7 +483,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 
 - **症状**：用户日常 `~/.claude` 的技能/插件/设置对 WAO 派发的 claude-code worker 不可见；反向同理。
 - **根因**：native OAuth 通道 worker 运行于 `%TEMP%\wao-claude-oauth-*` 临时隔离目录（TD-210 技术解，只含凭据副本其余全空——设计行为；机制详见 src/backends/claudeCode.js 头注释与 TD-221 台账行）。
-- **逃生门**：确需访问用户目录特定内容时，往该 lane 注册表 `args` 加 `--add-dir <最窄目录>`（勿给整个主目录；实测有效 2026-10-06）。`args` 为注册表级常驻透传，改动按 lane 变更走 drift 检查。
+- **逃生门（Owner 裁定 2026-10-07：合法形态）**：确需时往该 lane 注册表 `args` 加 `--add-dir <最窄目录>`（勿给整个主目录）。args 指纹与 addDirs 随 run.started 留痕（TD-221 小修）；改动按 lane 变更走 drift 检查。
 
 ---
 
