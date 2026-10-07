@@ -13,12 +13,28 @@ import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync, mkdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import test from "node:test";
+import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 
 import { ClaudeCodeBackend } from "../../src/backends/claudeCode.js";
 import { OAUTH_DIR_PREFIX, OWNER_MARKER_FILE } from "../../src/application/oauthDirSweep.js";
+import { CLAUDE_OAUTH_TOKEN_ENV } from "../../src/envPolicy.js";
+
+// TD-229（2026-10-07）：本文件钉【拷贝路径】生命周期。宿主迁移长期令牌后
+// process.env 若带 CLAUDE_CODE_OAUTH_TOKEN，spawn 会切 token 模式（不拷贝），
+// 本文件全部用例假红——测试期强制删值，跑完恢复（与 claudeOauthTokenMode.test.js
+// 同款纪律：宿主 env 状态不得改变测试结局）。
+let restoreProcessToken = () => {};
+before(() => {
+  const prev = Object.getOwnPropertyDescriptor(process.env, CLAUDE_OAUTH_TOKEN_ENV);
+  delete process.env[CLAUDE_OAUTH_TOKEN_ENV];
+  restoreProcessToken = () => {
+    if (prev === undefined) delete process.env[CLAUDE_OAUTH_TOKEN_ENV];
+    else process.env[CLAUDE_OAUTH_TOKEN_ENV] = prev.value;
+  };
+});
+after(() => restoreProcessToken());
 
 // 捕获 spawnFn（m12-14 同款）：记录 (binary, argv, opts)，返回立即 spawn→close(0)
 // 的假子进程——backend 完整跑完目录预备/env 组装，无真实进程、无模型。

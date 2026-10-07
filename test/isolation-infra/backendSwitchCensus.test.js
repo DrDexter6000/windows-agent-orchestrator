@@ -113,10 +113,14 @@ const REGISTERED_CENSUS = {
   // TD-220 验收修（2026-10-07）：EXIT_CODE_INFERENCE_PROVEN_BACKENDS 闭集成员
   // （数据来源可靠性声明，ADR-0032 §8；runActivityProjection 经它门控推断）。
   "scorecard.js": { "claude-code": 1 },
-  "commands/doctor.js": { "claude-code": 1, "deepseek-harness": 1, codex: 1, "kimi-code": 1, "opencode-serve": 1 },
+  // TD-229（2026-10-07）：doctor 5d 认证模式检查按 backend==="claude-code" &&
+  // !provider 筛 native worker（轴向=native OAuth 通道识别，非全后端分叉）。
+  "commands/doctor.js": { "claude-code": 2, "deepseek-harness": 1, codex: 1, "kimi-code": 1, "opencode-serve": 1 },
   "commands/onboarding.js": { "opencode-serve": 2 },
   "commands/registry.js": { "opencode-serve": 2, "claude-code": 1 },
-  "envPolicy.js": { "claude-code": 3, "kimi-code": 1, "deepseek-harness": 2, "deepseek-acp": 2, zcode: 1, "opencode-serve": 1, "kimi-web": 1 },
+  // TD-229（2026-10-07）：inheritedEnvNames 对 native 通道（backend==="claude-code"
+  // && !provider）追加长期令牌继承名——通道条件派生，非新分叉轴。
+  "envPolicy.js": { "claude-code": 4, "kimi-code": 1, "deepseek-harness": 2, "deepseek-acp": 2, zcode: 1, "opencode-serve": 1, "kimi-web": 1 },
   "hostAdapters/codexMcpConfig.js": { codex: 3 },
   "hostAdapters/hostDescriptors.js": { "claude-code": 1, codex: 1, zcode: 1 },
   "smoke.js": { "opencode-serve": 4, "claude-code": 4, codex: 6, "deepseek-harness": 1 },

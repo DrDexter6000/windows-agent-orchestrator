@@ -423,7 +423,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **何时跑**：部署前、出问题时第一件事、定期
 - **命令**：`npm run cli -- wao doctor [--registry config/agents.json] [--cwd <目标项目>] [--format json]`；CI 想把 WARN 也卡成非零退出可加 `--warn-as-error`（只改退出码，不改报告内容）
 - **检查项**（scoped——只按 registry 保留 worker 收窄；逐项语义以 doctor 输出与 src/commands/doctor.js 为权威，此处只列要点）：
-  - Node 版本（>=22）；保留 worker 的 CLI 在 PATH（无 worker 需要 CLI 时 INFO 跳过）；声明的 provider key（进程 env 或 Windows User 作用域；kimi-code 走 CLI 登录态）；agents.json 完整性（opencode worker 必须配 tokenBudget——06-18 事故防线）；registry `cwd` 存在性（`path.resolve` 后须为已存在目录；`.` 解析为派发进程 cwd 恒存在不误报，语义详见 §3.1/§7.4；sessionReuse worker 的 WARN 措辞区分实际先发拒因）；承重 env 存在性（5b，TD-218）；claude OAuth 临时目录报数（5c，TD-223）。HTTP serve backend 的 cwd 是远端目录提示，不检查。环境类检查落 doctor 而非 `registry validate`（后者纯静态 schema）。
+  - Node 版本（>=22）；保留 worker 的 CLI 在 PATH（无 worker 需要 CLI 时 INFO 跳过）；声明的 provider key（进程 env 或 Windows User 作用域；kimi-code 走 CLI 登录态）；agents.json 完整性（opencode worker 必须配 tokenBudget——06-18 事故防线）；registry `cwd` 存在性（`path.resolve` 后须为已存在目录；`.` 解析为派发进程 cwd 恒存在不误报，语义详见 §3.1/§7.4；sessionReuse worker 的 WARN 措辞区分实际先发拒因）；承重 env 存在性（5b，TD-218）；claude OAuth 临时目录报数（5c，TD-223）；claude OAuth 认证模式（5d，TD-229）。HTTP serve backend 的 cwd 是远端目录提示，不检查。环境类检查落 doctor 而非 `registry validate`（后者纯静态 schema）。
   - 目标项目的 `.wao/` 是否 init（未 init / fresh clone 缺槽位是 WARN，结构混乱才是 FAIL）
 - **判读**（advisory，非门禁——doctor 不自动阻断任何派发，verdict 行自带"（advisory，非门禁）"标注）：
   - `HEALTHY`：无 FAIL 无 WARN，可直接继续
@@ -482,8 +482,15 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 ### 7.13 claude-code worker 看不到用户级 skills（临时 CLAUDE_CONFIG_DIR，TD-221）
 
 - **症状**：用户日常 `~/.claude` 的技能/插件/设置对 WAO 派发的 claude-code worker 不可见；反向同理。
-- **根因**：native OAuth 通道 worker 运行于 `%TEMP%\wao-claude-oauth-*` 临时隔离目录（TD-210 技术解，只含凭据副本其余全空——设计行为；详见 claudeCode.js 头注释与 TD-221 台账行）。
+- **根因**：native OAuth 通道 worker 运行于 `%TEMP%\wao-claude-oauth-*` 临时隔离目录（TD-210 技术解——拷贝模式只含凭据副本、令牌模式全空（§7.14），其余全空是设计行为；详见 claudeCode.js 头注释与 TD-221 台账行）。
 - **逃生门（2026-10-07 Owner 裁定合法形态）**：确需时往该 lane 注册表 `args` 加 `--add-dir <最窄目录>`（勿给整个主目录）。给的是**文件读取面**——不注册为 Skill 工具可调用技能（实测）。args 指纹与 addDirs 随 run.started 留痕；改动按 lane 变更走 drift 检查。
+
+### 7.14 claude-code native OAuth 被反复登出（凭据拷贝 × 续期轮换互斥，TD-229）
+
+- **症状**：native 车道启动即 `OAuth session expired and could not be refreshed`，重新登录只管几小时；`~/.claude/.credentials.json` 周期性被清空。
+- **根因**：CLI 在副本内续期后，新 refresh token 只落副本随目录销毁，原件留下已作废旧令牌——下次拷贝续期失败、CLI 清空登录（机制与物证时间线见 TD-229 台账行）。
+- **修复（2026-10-07 已落）**：`CLAUDE_CODE_OAUTH_TOKEN` 可解析（进程 env 或 Windows 用户环境，无需重启服务器）时目录保持空、不拷贝凭据、认证走 env（实测 2.1.289 空配置目录认此变量）；缺席回退旧拷贝路径（轮换缺陷仍在）。空值视为缺席（若 CLI 把空串当已设置是可见 401，非静默毁登录）。token 值不进 argv/转录（名字经 inheritedNames 进脱敏器）。
+- **迁移（Owner 一次性）**：`claude setup-token` 生成长期令牌 → `setx CLAUDE_CODE_OAUTH_TOKEN "<token>"`；`wao doctor` 的 `claude_oauth_token_mode` 显示"长期令牌模式"即生效；迁移后跑一次全量 `npm test` 复验。迁移前勿派 native run——副本内续期会作废当前登录。
 
 ---
 
@@ -495,10 +502,10 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 
 - **症状**：全量 exit 1，stderrTail 中每一条失败分类行都是 `[canonical] isolation ... ⇒ isolation_pass`（首轮红、单文件隔离复跑绿）；无 `stable_fail`、无 `environment_invalid`、无其他形状的 fail。在 delivery verification / reverify 里表现为验证命令 `npm test` 失败。
 - **第一反应（三步，按序）**：① 读 `delivery_verification_*` 事件的 `stderrTail`——经 R17/W1 已携带 [canonical] 行全文，一次读取即得**文件名 + 波次 + 类别**；② 查 canonical 结构化报告的 isolation 分类行（`[canonical] isolation ... ⇒ isolation_pass` 形状，确认无 `stable_fail`/`environment_invalid` 混入）与 `firstRound.failures[].failureDetail`（首轮失败内容，TD-181）；③ 按本节判定规则处置——全为 `isolation_pass` ⇒ 安静窗口单发复验后再走**单次 reverify**，不走 reject。
-- **判定边界（TD-181 措辞纠正，2026-09-25）**：**波内红、隔离绿 ⇒ 原因未明**。隔离复跑绿只说明**本次未复现**，不能证明根因；首轮 exit 1 与失败内容仍是既成事实。历史上发生过的失败（含下方 TD-130 实证）**不能被追认为本次的原因**——证据路径只能证明那次失败发生过，不能证明同一机制是本次的原因。**安静窗口单发复验是复验条件，不是归因证明**。
-- **2026-08-19 并发实证（TD-130；历史记录，该实例不能用于逐例归因）**：两会话并行时同机并发 `npm test` 互踩，放大该现象——单日 5 个文件 × 8 轮次（`mcpWorkspaceSmoke` / `runWait` / `processBackend` / `mcpBind` / `mcpRunDeliveryReverify`，跨文件跨波）；两轮撞车后只剩 reject+前作集成可走，浪费一整轮验证预算。机器空闲时顺序复跑恒绿（worker 自跑 + Lead 复跑双证）。此为当日实证的记录，**不构成对任何后续个例的归因**。
+- **判定边界（TD-181 措辞纠正，2026-09-25）**：**波内红、隔离绿 ⇒ 原因未明**。隔离复跑绿只说明本次未复现，不能证明根因；首轮 exit 1 与失败内容仍是既成事实。历史失败**不能被追认为本次的原因**；**安静窗口单发复验是复验条件，不是归因证明**。
+- **2026-08-19 并发实证（TD-130）**：两会话同机并发全量互踩放大本现象（单日 5 文件×8 波跨文件跨波；撞车后只剩 reject+前作集成）；机器空闲顺序复跑恒绿（worker 自跑 + Lead 复跑双证）。历史记录，不构成对后续个例的归因。
 - **判定规则（闭集）**：
-  - **条件**：`npm test` exit 1，且 stderrTail 中**全部**条目为 `isolation_pass` 分类行（无 `stable_fail`、无 `environment_invalid`、无其他 fail）。
+  - **条件**：症状如上（exit 1 且 tail 全部条目为 `isolation_pass`，无 `stable_fail`/`environment_invalid`/其他 fail）。
   - **判定**：操作参数记 `environment_contaminated`（reverify 资格用的操作分类）——**它不代表根因已确认**；本次失败**原因未明**。
   - **行动**：**安静窗口单发复验通过后走单次 reverify**（复验前确认无其他全量/验证在本机在跑）。不走 reject——reverify 是单发机会，烧掉后只剩 reject+前作集成，等于再浪费一轮验证预算。
   - **反例**：tail 含**任何** `stable_fail` ⇒ 是真红，走正常 reverify/reject 路径，不得借本规则豁免。
@@ -531,17 +538,13 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 
 ### 8.4 session reuse 关联面拒绝时的运维处置（ADR-0031 §3.6 / TD-175，2026-09-21）
 
-- **症状**：一次本应"复用上次会话"的派发被**拒**，固定文案属于以下四类之一（fetch 全文见 `src/application/sessionReuse.js` 的三个常量）：
-  1. `routing entry for this reuse identity is damaged (present but unparseable or malformed)` —— 关联槽位**存在但损坏**（坏 JSON、`runId` 形状非法、`updatedAt` 非有限/为负/在未来）。
-  2. `prior run has a bound session.created but no addressable provider session id` —— 前任 run 确实建过 provider 会话，但转录里记的 id 不可用。
-  3. `prior transcript for resume is missing or unparseable` —— 前任转录读不出来。
-  4. `no transcript-recovered prior provider session id reached the backend` —— runner 侧没拿到 id（shape 与 2 同源）。
-- **这是刻意的 fail-closed**：§3.6 要求"缺失/损坏时**拒绝**恢复，绝不静默新建会话"。看到拒绝**不要**把它当成故障去绕——静默新会话正是这条契约要防的（用户会以为上下文还在）。
-- **状态在哪**：`<runDir>/.session-reuse/<sha256(opaque uuid)>.json`（内容恒为有界事实 `{runId, updatedAt}`；**不含** provider session id——那份唯一真源是前任 run 转录的 `session.created.backendSessionId`）。lineage 复用面在 `<runDir>/.lineage-reuse/`，同构。
-- **operator 恢复（唯一受支持的动作）**：确认**没有**在飞的 run 之后，删除对应的那一个条目文件（`.session-reuse/<hash>.json` 或 `.lineage-reuse/<hash>.json`），下一次同身份派发会按"条目缺失"回到 `first`（既有 bootstrap 合同）。**不要**手工编辑条目内容去"修好"它——写入是原子 rename（tmp + rename），手编会绕过校验；也**不要**删整个目录（会一次丢掉全部身份的关联）。
-- **怎么定位是哪个 hash**：条目文件名即 `sha256(opaqueUuid)`，而 opaqueUuid 由 `(Lead 会话 + canonical workspace + agentId)`（lineage 再加 `rootRunId`）派生，**磁盘上不含**这些原值（安全设计）。因此无法从目录反查身份——按"最近一次被拒的派发时间"缩小范围（`updatedAt`），或直接删掉该时间窗内的条目。
-- **已知不可达（不是本节的处置对象）**：路由条目**被删除**（ENOENT）时按 M11-11C provider-中立合同回到 `first`，这是**降级不是拒绝**，不在 §3.6 的 fail-closed 声称范围内（ADR-0031 §3.6 范围注）。
-- **仍未闭合并已登记**（TD-175）：resume 失败会**永久孤儿化**该关联链（单槽指针被新 runId 覆盖后，下一转按"终态无 session.created ⇒ first"降级，Lead 只看到 `turn=first`、无显式断链信号）；本条 runbook 是当前唯一的人工出口。
+- **症状**：一次本应"复用上次会话"的派发被**拒**，文案属于固定四类（槽位存在但损坏 / 前任无可寻址 session id / 前任转录不可读 / runner 未拿到 id——四类全文与判定细则的单一权威是 `src/application/sessionReuse.js` 常量，ADR-0031 §3.6）。
+- **这是刻意的 fail-closed**：§3.6 要求"缺失/损坏时**拒绝**恢复，绝不静默新建会话"。看到拒绝**不要**当成故障去绕——静默新会话正是这条契约要防的。
+- **状态在哪**：`<runDir>/.session-reuse/<sha256(opaqueUuid)>.json`（有界事实 `{runId, updatedAt}`；不含 provider session id——真源是前任转录的 `session.created.backendSessionId`）；lineage 面在 `.lineage-reuse/` 同构。
+- **operator 恢复（唯一受支持的动作）**：确认无在飞 run 后，删除对应的那**一个**条目文件，下次同身份派发按"条目缺失"回到 `first`。不要手编条目内容（写入是原子 rename+校验，手编绕过校验），也不要删整个目录（一次丢掉全部身份关联）。
+- **怎么定位是哪个 hash**：条目文件名即 `sha256(opaqueUuid)`（Lead 会话 + canonical workspace + agentId 派生，lineage 再加 `rootRunId`），磁盘不含原值（安全设计）无法反查——按最近被拒派发时间（`updatedAt`）缩小范围删对应条目。
+- **已知不可达（非本节对象）**：条目被删（ENOENT）按 M11-11C 合同回到 `first`——降级不是拒绝，不在 §3.6 fail-closed 范围（ADR-0031 §3.6 范围注）。
+- **仍未闭合并已登记**（TD-175）：resume 失败会永久孤儿化关联链（单槽指针被覆盖后按"终态无 session.created ⇒ first"降级，无显式断链信号）；本节 runbook 是当前唯一人工出口。
 
 ---
 

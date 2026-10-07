@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { ProcessBackend } from "./processBackend.js";
 import { ClaudeStreamParser } from "./parsers/claudeCode.js";
 import { resolveProviderArgs } from "./claudeCodeProvider.js";
-import { inheritedEnvNames } from "../envPolicy.js";
+import { inheritedEnvNames, CLAUDE_OAUTH_TOKEN_ENV } from "../envPolicy.js";
 
 // claude-code-provider-wrapper.mjs 的绝对路径（本文件同目录的 ../../scripts/wrappers/）。
 const WRAPPER_PATH = resolve(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts", "wrappers", "claude-code-provider-wrapper.mjs"));
@@ -23,11 +23,21 @@ const DISABLE_AUTO_MEMORY_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
 // 认证失败；凭据目录+无 bare 通过；空目录+无 bare 失败）。替代纯净法：把
 // CLAUDE_CONFIG_DIR 指向仅含 .credentials.json 拷贝的隔离目录——hooks/settings/
 // CLAUDE.md/插件/技能从空目录解析即全空（实测比 bare 更纯：bare 下用户插件仍
-// 载入 3 个，隔离目录下仅剩 CLI 内置插件）。凭据文件为 spawn 时现拷贝（token
-// 轮换后旧拷贝自然失效，不缓存）；目录在 os.tmpdir()（用户级），run 期间存活、
-// 终态由 backend.dispose() 删除（TD-223，2026-10-07——此前"交由 OS 临时清理"
-// 实测永不发生，%TEMP% 堆积上千个含凭据副本的目录；进程崩溃等残留由
-// wao sweep-claude-config 清扫）；token 值永不进 argv/转录/env 展示（env 只带目录路径）。
+// 载入 3 个，隔离目录下仅剩 CLI 内置插件）。
+// TD-229（2026-10-07）：凭据【拷贝】模式与 OAuth 续期令牌单次轮换互斥——副本内
+// CLI 续期后，新 refresh token 只写进临时副本并随目录销毁；~/.claude/
+// .credentials.json 留下已作废的旧令牌，下一次从原件拷贝后续期失败，CLI 清空
+// 登录（物证 %TEMP% 副本时间线：2026-10-06 15:47:12Z 副本内续期 → 15:48:39Z
+// 另一副本被清空 → 16:32:23Z 原件被清空）。修复：CLAUDE_CODE_OAUTH_TOKEN
+// （claude setup-token 长期令牌；envPolicy 声明为 native 通道继承名，随
+// resolvedCredentials/进程 env 流入子进程并进脱敏器）可解析时，隔离目录保持
+// 空、不再拷贝凭据——目录职责收敛为"纯净配置面"，认证走 env。令牌缺席时回退
+// 旧拷贝路径（未迁移机器不断腿）。
+// 目录在 os.tmpdir()（用户级），run 期间存活、终态由 backend.dispose() 删除
+// （TD-223，2026-10-07——此前"交由 OS 临时清理"实测永不发生，%TEMP% 堆积上千
+// 个含凭据副本的目录；进程崩溃等残留由 wao sweep-claude-config 清扫）；token
+// 值永不进 argv/转录/env 展示（env 只带目录路径；token 名经 inheritedNames 进
+// 脱敏器，且其名字本身匹配 secret 名正则——双保险）。
 const CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR";
 const OAUTH_CREDENTIALS_RELATIVE = join(".claude", ".credentials.json");
 // TD-223（2026-10-07）：目录内的 owner 标记文件——内容仅 {pid, createdAt}，供
@@ -36,25 +46,48 @@ const OAUTH_CREDENTIALS_RELATIVE = join(".claude", ".credentials.json");
 const OAUTH_OWNER_MARKER_FILE = ".wao-owner.json";
 
 function prepareClaudeOauthConfigDir(
-  { credentialsSource = join(homedir(), OAUTH_CREDENTIALS_RELATIVE), onDirCreated } = {},
+  { credentialsSource = join(homedir(), OAUTH_CREDENTIALS_RELATIVE), oauthToken = null, onDirCreated } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), "wao-claude-oauth-"));
   // TD-223 验收修（2026-10-07 sol 会审 Q1）：目录落地【立即】回调登记——标记写入或
   // 凭据拷贝中途抛错时目录已存在，晚于此刻的登记会漏回收（登记必须先于任何可能
   // 抛错的后续步骤）。
   if (typeof onDirCreated === "function") onDirCreated(dir);
-  // TD-223：标记先于凭据拷贝写入——即使拷贝中途失败，目录也带 owner 标记，
+  // TD-223：标记先于一切后续步骤写入——即使后续失败，目录也带 owner 标记，
   // sweep 不会把它误判成"无标记遗留目录"。
   writeFileSync(
     join(dir, OAUTH_OWNER_MARKER_FILE),
     JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }),
     "utf8",
   );
-  if (existsSync(credentialsSource)) {
+  // TD-229：令牌可解析（非空字符串）= token 模式——目录保持空，不拷贝凭据
+  // （拷贝与续期轮换互斥，见头注释）。令牌缺席 = 回退旧拷贝路径；凭据源缺席
+  // （未登录）照常返回空目录，spawn 后由 CLI 如实报认证失败。
+  if (!oauthToken && existsSync(credentialsSource)) {
     copyFileSync(credentialsSource, join(dir, ".credentials.json"));
   }
-  // 凭据文件缺席 = 未登录：照常返回空目录，spawn 后由 CLI 如实报认证失败。
   return dir;
+}
+
+// TD-229：判定本次 spawn 的认证模式用哪个令牌值。语义 =【镜像 buildChildEnv 的
+// 合并结果】：resolvedCredentials（runManager 经 assessWorkerReadiness 预解析：
+// process.env → Windows User 桥接）里出现该名字（任意大小写、string 值——含空串）
+// 即压过 process.env 同名值（credEnv 段后铺）；两处都没有非空值 = null（回退
+// 拷贝路径）。sol 验收 P2-2（2026-10-07）：不镜像会出现构造性脱节——空串覆盖
+// （判定拷贝/子进程带令牌）或小写键（判定空目录/子进程无令牌）。值本身不进
+// 任何展示面（与 resolvedCredentials 同纪律）。
+function activeOauthTokenValue(task) {
+  const resolved = task?.resolvedCredentials;
+  if (resolved && typeof resolved === "object" && !Array.isArray(resolved)) {
+    for (const [name, value] of Object.entries(resolved)) {
+      if (name.toUpperCase() === CLAUDE_OAUTH_TOKEN_ENV && typeof value === "string") {
+        return value.length > 0 ? value : null;
+      }
+    }
+  }
+  const fromProcess = process.env[CLAUDE_OAUTH_TOKEN_ENV];
+  if (typeof fromProcess === "string" && fromProcess.length > 0) return fromProcess;
+  return null;
 }
 
 /**
@@ -256,14 +289,15 @@ export class ClaudeCodeBackend extends ProcessBackend {
       }
       stripped[name] = value;
     }
-    // native OAuth 通道：预备仅含凭据拷贝的隔离配置目录（见 prepareClaudeOauthConfigDir）。
+    // native OAuth 通道：预备隔离配置目录（见 prepareClaudeOauthConfigDir）。
     // task 上挂字段穿线到 runtimeEnv（buildArgs 的旗标决策纯由 agent.provider 派生，
     // 与本字段无耦合——preflight/spawn 两次 buildArgs 调用天然一致）。
     // TD-223：目录创建即登记（super.spawn 在其后才跑——ENOENT 等失败时目录已落盘，
     // 靠登记表让 dispose 在 spawn 失败路径也能回收）。
+    // TD-229：令牌可解析时目录保持空（token 模式，不拷贝凭据）。
     const taskExtras = {};
     if (!agent?.provider && task && typeof task === "object") {
-      taskExtras.claudeOauthConfigDir = this._prepareAndTrackOauthConfigDir();
+      taskExtras.claudeOauthConfigDir = this._prepareAndTrackOauthConfigDir(activeOauthTokenValue(task));
     }
     const enrichedTask = task && typeof task === "object" ? { ...task, ...taskExtras } : task;
     return super.spawn(removed ? { ...agent, env: stripped } : agent, enrichedTask);
@@ -272,12 +306,15 @@ export class ClaudeCodeBackend extends ProcessBackend {
   /**
    * TD-223（2026-10-07）：创建 native OAuth 隔离目录并登记进实例表。
    * 凭据源可注入（构造参数 oauthCredentialsSource；默认真实 ~/.claude 路径）。
+   * TD-229：oauthToken 非空（spawn 时的活跃令牌值，见 activeOauthTokenValue）
+   * = token 模式——目录保持空，不拷贝凭据。
    */
-  _prepareAndTrackOauthConfigDir() {
+  _prepareAndTrackOauthConfigDir(oauthToken = null) {
     // TD-223 验收修：登记经 onDirCreated 在 mkdtemp 后立即发生（早于标记写入/
     // 凭据拷贝等任何可能抛错的步骤），杜绝"目录已建但未登记"的回收漏洞。
     return prepareClaudeOauthConfigDir({
       credentialsSource: this._oauthCredentialsSource ?? undefined,
+      oauthToken,
       onDirCreated: (dir) => this._oauthConfigDirs.push(dir),
     });
   }

@@ -63,6 +63,9 @@ import { backendFor } from "../backends/factory.js";
 // 名单、注入式 reader、5s 超时）——本文件不写第二份注册表读取。
 // requiredCredentialNames 是"worker 声明了哪些必需 key env 名"的 SSOT（envPolicy.js）。
 import { resolveCredentialEnv, requiredCredentialNames } from "../application/credentialReadiness.js";
+// TD-229：native OAuth 通道长期令牌名（envPolicy SSOT——doctor 只报模式与来源，
+// 值不回显）。
+import { CLAUDE_OAUTH_TOKEN_ENV } from "../envPolicy.js";
 // R6-C3（P2-4）：backend→CLI 探测映射收敛到 backendCliMap.js 单一权威表——本文件
 // 原持有的本地表与 application/onboarding.js 逐字重复且都漏了 deepseek-harness。
 import { BACKEND_CLI } from "../application/backendCliMap.js";
@@ -399,6 +402,33 @@ export async function waoDoctorCommand(args, config) {
         detail,
         ...(deletable > 0
           ? { fix: "npm run cli -- wao sweep-claude-config --apply（先不带 --apply 看清单）" }
+          : {}),
+      });
+    }
+  }
+
+  // 5d. TD-229（2026-10-07）：claude-code native OAuth 通道认证模式体检（advisory，
+  //     恒 INFO——机器 env 状态不得影响 verdict/退出码，同 5c 纪律）。令牌可解析 →
+  //     token 模式（隔离目录保持空、不拷贝凭据）；缺席 → 旧拷贝模式带 TD-229 轮换
+  //     缺陷（副本内续期会作废 ~/.claude 原件登录），fix 指路迁移。名字在场、值不
+  //     回显（envPolicy 纪律）。
+  if (registryOk) {
+    const nativeClaudeWorkers = Object.entries(registryAgents)
+      .filter(([, agent]) => agent?.backend === "claude-code" && !agent?.provider)
+      .map(([id]) => id);
+    if (nativeClaudeWorkers.length > 0) {
+      const token = await resolveCredentialEnv(CLAUDE_OAUTH_TOKEN_ENV, {
+        userEnvReader: config.userEnvReader,
+      });
+      pushCheck(checks, {
+        name: "claude_oauth_token_mode",
+        pass: true,
+        level: "info",
+        detail: token.source === "missing"
+          ? `claude-code native worker（${nativeClaudeWorkers.join(",")}）走凭据拷贝模式：与 OAuth 续期令牌轮换互斥（TD-229——副本内续期会作废 ~/.claude 原件登录），建议迁移长期令牌`
+          : `claude-code native worker（${nativeClaudeWorkers.join(",")}）走长期令牌模式（CLAUDE_CODE_OAUTH_TOKEN 已解析，来源 ${token.source === "user_env" ? "Windows 用户环境" : "进程环境"}；隔离目录保持空，不拷贝凭据）`,
+        ...(token.source === "missing"
+          ? { fix: "claude setup-token 生成长期令牌，然后 setx CLAUDE_CODE_OAUTH_TOKEN \"<token>\"（详见 docs/troubleshooting.md §7.14）" }
           : {}),
       });
     }

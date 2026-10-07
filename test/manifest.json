@@ -281,7 +281,9 @@
       "registry-roles/certificationEvidenceInventory.test.js",
       "backends/claudeOauthDispose.test.js",
       "backends/oauthDirSweep.test.js",
-      "run-lifecycle/claudeOauthDoctorCheck.test.js"
+      "run-lifecycle/claudeOauthDoctorCheck.test.js",
+      "backends/claudeOauthTokenMode.test.js",
+      "run-lifecycle/claudeOauthTokenModeDoctor.test.js"
     ],
     "lock": [
       "isolation-infra/portAllocator.test.js",

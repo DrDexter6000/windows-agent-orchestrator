@@ -1331,7 +1331,7 @@ src/
 ├── backends/
 │   ├── opencodeServe.js      # L1：HTTP 类 backend
 │   ├── processBackend.js     # L1：进程式 backend 基类
-│   ├── claudeCode.js         # L1：claude-code 后端（`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` 注入【每一个】supervised 子进程 env——native OAuth / provider wrapper / start / resume 会话复用；backend 安全值压过 agent.env 反设，含 Windows 大小写不敏感的变体；阻止/抑制 provider auto-memory 写入；仅 claude-code 接收该变量，其它 backend 不注入）
+│   ├── claudeCode.js         # L1：claude-code 后端（`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` 注入【每一个】supervised 子进程 env——native OAuth / provider wrapper / start / resume 会话复用；backend 安全值压过 agent.env 反设，含 Windows 大小写不敏感的变体；阻止/抑制 provider auto-memory 写入；仅 claude-code 接收该变量，其它 backend 不注入。native OAuth 通道凭据双模式（TD-229）：`CLAUDE_CODE_OAUTH_TOKEN` 长期令牌可解析时隔离目录保持空、不拷贝 `~/.claude` 凭据、认证走 env（名字经 envPolicy native 通道继承并进脱敏器）——凭据拷贝与续期令牌单次轮换互斥；令牌缺席回退 spawn 时现拷贝路径）
 │   ├── codex.js              # L1：codex 后端
 │   ├── deepSeekHarness.js    # L1：实验性 DSH stdio JSON-RPC 后端
 │   ├── deepSeekAcp.js        # L1：DSH ACP 集成面后端（ADR-0031：dsh --profile acp + --patch containment/role-contract；§2.5b）

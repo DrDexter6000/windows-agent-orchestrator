@@ -15,12 +15,28 @@
 
 import { join } from "node:path";
 import { homedir } from "node:os";
-import test from "node:test";
+import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { ClaudeCodeBackend } from "../../src/backends/claudeCode.js";
 import { CodexBackend } from "../../src/backends/codex.js";
 import { KimiCodeBackend } from "../../src/backends/kimiCode.js";
+import { CLAUDE_OAUTH_TOKEN_ENV } from "../../src/envPolicy.js";
+
+// TD-229（2026-10-07，sol 验收 P2-1）：本文件钉 native 通道【拷贝路径】的隔离目录
+// 机制。宿主迁移长期令牌后 process.env 若带 CLAUDE_CODE_OAUTH_TOKEN，spawn 切
+// token 模式（不拷贝），下方"凭据在场性=源在场性"断言假红——测试期强制删值，
+// 跑完恢复（与 claudeOauthDispose.test.js 同款纪律）。
+let restoreProcessToken = () => {};
+before(() => {
+  const prev = Object.getOwnPropertyDescriptor(process.env, CLAUDE_OAUTH_TOKEN_ENV);
+  delete process.env[CLAUDE_OAUTH_TOKEN_ENV];
+  restoreProcessToken = () => {
+    if (prev === undefined) delete process.env[CLAUDE_OAUTH_TOKEN_ENV];
+    else process.env[CLAUDE_OAUTH_TOKEN_ENV] = prev.value;
+  };
+});
+after(() => restoreProcessToken());
 
 const MANAGED = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
 
