@@ -377,9 +377,12 @@ export async function waoDoctorCommand(args, config) {
   // 5c. TD-223（2026-10-07）：claude-code native OAuth 临时配置目录体检（advisory，
   //     永不执行删除——本命令头部铁律）。复用 sweep 模块 dry-run（判定规则单一
   //     实现：owner 标记 pid 存活不删；无标记遗留 >24h 可删）。健康面零目录时
-  //     不产生条目（budget_* 惯例：只在有信号时出现）；有可清理目录（含凭据
-  //     副本、创建进程已退出或遗留超 24h）→ WARN（卫生债），仅剩活 run 目录
-  //     → INFO（正常在场）。本检查只读 .wao-owner.json 与 stat，不碰凭据内容。
+  //     不产生条目（budget_* 惯例：只在有信号时出现）。**恒 INFO**（验收修
+  //     2026-10-07，opus 验收第 4 条预言成真）：%TEMP% 实时状态不得影响 doctor
+  //     verdict/退出码——WARN 会让开发机常态 DEGRADED、--warn-as-error 常态
+  //     exit 1（cli.test.js 四连红实证）。可清理数与 fix 指引保留在 detail/fix
+  //     字段里；行动面是 wao sweep-claude-config。本检查只读 .wao-owner.json
+  //     与 stat，不碰凭据内容。
   {
     const sweep = sweepClaudeOauthDirs({ baseDir: tmpdir(), apply: false });
     if (sweep.scanned > 0) {
@@ -392,7 +395,7 @@ export async function waoDoctorCommand(args, config) {
       pushCheck(checks, {
         name: "claude_oauth_temp_dirs",
         pass: true,
-        level: deletable > 0 ? "warn" : "info",
+        level: "info",
         detail,
         ...(deletable > 0
           ? { fix: "npm run cli -- wao sweep-claude-config --apply（先不带 --apply 看清单）" }

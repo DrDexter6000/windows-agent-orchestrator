@@ -79,7 +79,7 @@ test("TD-223 doctor: 有可清理目录 → WARN 条目 + sweep 指引 fix；dry
     const { checks } = await doctorChecks(root, ["--format", "json"]);
     const check = checks.find((c) => c.name === "claude_oauth_temp_dirs");
     assert.ok(check, "出现 claude_oauth_temp_dirs 检查条目");
-    assert.equal(check.status, "warn", "有可清理目录时是 WARN（卫生债）");
+    assert.equal(check.status, "info", "恒 INFO（验收修：%TEMP% 状态不得影响 verdict/退出码；fix 指引承载行动面）");
     assert.ok(check.detail.includes("2 个"), `报数扫描到 2 个前缀目录：${check.detail}`);
     assert.ok(check.detail.includes("可清理 1"), "可清理数 = 1（超龄遗留）");
     assert.equal(

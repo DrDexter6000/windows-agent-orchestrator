@@ -22,6 +22,10 @@ import { waoCommand, WAO_SUBCOMMANDS } from "../../src/commands/wao.js";
 import { AcceptanceRecordError } from "../../src/application/acceptanceRecord.js";
 import { recordAcceptance } from "../../src/application/acceptanceRecord.js";
 
+// 静态守卫（staticRunsGuard）禁止测试源码出现裸相对 "runs" runDir——config 默认
+// 值在这些用例里从不真实落盘（--run-dir 旗标恒胜出），用绝对占位路径保持形状。
+const CONFIG_DEFAULT_UNUSED = join(tmpdir(), "wao-accept-config-default-unused");
+
 // ===== Helpers =====
 
 function makeTempDir(prefix) {
@@ -92,7 +96,7 @@ test("TD-219: wao accept 参数解析——--run/--decision/--reason/--evidence-
         "--evidence-summary", "证据：install.log 校验通过",
         "--run-dir", dir,
       ],
-      { runDir: "runs" },
+      { runDir: CONFIG_DEFAULT_UNUSED },
     ));
     const out = JSON.parse(output[0]);
     assert.equal(out.appended, true, "成功输出 appended:true");
@@ -138,7 +142,7 @@ test("TD-219: wao accept --show 只列既有 acceptance.recorded 并退出（不
 
     const output = await captureOutput(() => waoCommand(
       ["accept", "--run", runId, "--show", "--run-dir", dir],
-      { runDir: "runs" },
+      { runDir: CONFIG_DEFAULT_UNUSED },
     ));
     const out = JSON.parse(output[0]);
     assert.equal(out.runId, runId);
@@ -159,7 +163,7 @@ test("TD-219: wao accept --show 无记录 → count 0（exit 语义：正常输�
     writeTranscript(dir, runId, terminalTranscript(runId));
     const output = await captureOutput(() => waoCommand(
       ["accept", "--run", runId, "--show", "--run-dir", dir],
-      { runDir: "runs" },
+      { runDir: CONFIG_DEFAULT_UNUSED },
     ));
     const out = JSON.parse(output[0]);
     assert.equal(out.count, 0, "无记录 → count 0");
@@ -175,22 +179,22 @@ test("TD-219: wao accept 错误文案——缺必填参数 fail-fast", async () 
     const runId = "run_acceptargv16";
     writeTranscript(dir, runId, terminalTranscript(runId));
     await assert.rejects(
-      () => waoCommand(["accept", "--run-dir", dir], { runDir: "runs" }),
+      () => waoCommand(["accept", "--run-dir", dir], { runDir: CONFIG_DEFAULT_UNUSED }),
       /wao accept requires --run <runId>/,
       "缺 --run 报固定文案",
     );
     await assert.rejects(
-      () => waoCommand(["accept", "--run", runId, "--reason", "x", "--run-dir", dir], { runDir: "runs" }),
+      () => waoCommand(["accept", "--run", runId, "--reason", "x", "--run-dir", dir], { runDir: CONFIG_DEFAULT_UNUSED }),
       /wao accept requires --decision <accepted\|rejected>/,
       "缺 --decision 报固定文案",
     );
     await assert.rejects(
-      () => waoCommand(["accept", "--run", runId, "--decision", "accepted", "--run-dir", dir], { runDir: "runs" }),
+      () => waoCommand(["accept", "--run", runId, "--decision", "accepted", "--run-dir", dir], { runDir: CONFIG_DEFAULT_UNUSED }),
       /wao accept requires --reason <text>/,
       "缺 --reason 报固定文案",
     );
     await assert.rejects(
-      () => waoCommand(["accept", "--show", "--run-dir", dir], { runDir: "runs" }),
+      () => waoCommand(["accept", "--show", "--run-dir", dir], { runDir: CONFIG_DEFAULT_UNUSED }),
       /wao accept --show requires --run <runId>/,
       "--show 缺 --run 报固定文案",
     );
@@ -208,14 +212,14 @@ test("TD-219: wao accept 服务错误透传——终态门与 decision 闭集文
     writeTranscript(dir, terminalId, terminalTranscript(terminalId));
 
     await assert.rejects(
-      () => waoCommand(["accept", "--run", inflightId, "--decision", "accepted", "--reason", "x", "--run-dir", dir], { runDir: "runs" }),
+      () => waoCommand(["accept", "--run", inflightId, "--decision", "accepted", "--reason", "x", "--run-dir", dir], { runDir: CONFIG_DEFAULT_UNUSED }),
       (error) => error instanceof AcceptanceRecordError
         && error.code === "run_not_terminal"
         && /只对终态 run 记验收/.test(error.message),
       "在途 run 终态门拒绝文案透传（typed 错误）",
     );
     await assert.rejects(
-      () => waoCommand(["accept", "--run", terminalId, "--decision", "maybe", "--reason", "x", "--run-dir", dir], { runDir: "runs" }),
+      () => waoCommand(["accept", "--run", terminalId, "--decision", "maybe", "--reason", "x", "--run-dir", dir], { runDir: CONFIG_DEFAULT_UNUSED }),
       (error) => error instanceof AcceptanceRecordError
         && error.code === "invalid_decision"
         && /accepted 或 rejected/.test(error.message),

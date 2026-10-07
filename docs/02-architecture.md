@@ -455,6 +455,7 @@ interface TranscriptEvent {
 | `run.stop_verified` | worker runtime 已确认静默；不表示 Lead 必然调用过 stop | `[M]` M10-pre |
 | `run.stop_unverified` | worker runtime 未确认静默 | `[M]` M10-pre |
 | `messages.collected` | collect 拉取消息 | `[S]` M0 |
+| `acceptance.recorded` | Lead 侧验收落盘（TD-219 第一步，`wao accept` CLI）：decision(accepted/rejected)+reason+可选 digest/摘要；只对终态 run 追加、多笔合法（最新为当前结论）、不覆盖 run_delivery_decide 决定面 | `[S]` TD-219 |
 | `run.rerun` | 进程式 resume 重放 | `[S]` M3 |
 | `run.cleanup_done` | 终态清理完成（worktree 删除 + backend 文件工件 dispose——TD-223 起非 delivery run 也会发） | `[S]` M3 |
 | `run.delivery_created` | delivery 打包成功，携带 DeliveryRef | `[S]` Phase 3A |
