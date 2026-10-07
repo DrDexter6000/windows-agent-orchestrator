@@ -545,7 +545,7 @@ Input:
 | name | type | required | notes |
 | --- | --- | --- | --- |
 | runId | string | yes |  |
-| categories | array<string> | no | enum: message \| command \| tool_use \| tool_result \| file_written \| runtime_status \| state \| correction \| other |
+| categories | array<string> | no | enum: message \| command \| tool_use \| tool_result \| file_written \| runtime_status \| state \| correction \| thinking \| envelope \| other |
 | afterSeq | integer | no |  |
 | cursor | string | no |  |
 | pageSize | integer | no |  |
