@@ -1550,6 +1550,13 @@ export function buildCanonicalChildEnv(baseEnv, { gateHeld }) {
   return {
     ...baseEnv,
     WAO_SKIP_VERSION_GUARD: "1",
+    // TD-229（2026-10-07，全量实战暴露）：MCP 认证门禁是部署级开关（User 作用域
+    // setx，宿主 spawn 时定格）——若宿主 User env 带它，套件子进程继承后
+    // run_dispatch 族夹具车道（无认证记录）全被门拒绝（16 文件 stable_fail 实证；
+    // 上午发版套件绿是因跑在 setx 前启动的长命 shell 里）。套件契约=确定性：
+    // 钉 "0"（默认关）；门禁自身行为由 mcpCertGate.test.js 自设环境变量覆盖，
+    // 不受此钉影响。
+    WAO_MCP_REQUIRE_CERTIFIED: "0",
     ...(gateHeld ? { [VERIFICATION_GATE_HELD_ENV]: "1" } : {}),
   };
 }

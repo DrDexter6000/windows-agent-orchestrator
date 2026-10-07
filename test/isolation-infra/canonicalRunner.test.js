@@ -1040,6 +1040,13 @@ test("B2-⑥ buildCanonicalChildEnv：基础注入 WAO_SKIP_VERSION_GUARD；held
   assert.equal(bare.WAO_SKIP_VERSION_GUARD, "1", "版本守卫豁免是既有行为（语义保留）");
   assert.equal(bare.PATH, "keep", "其余 env 原样透传");
   assert.equal(bare[VERIFICATION_GATE_HELD_ENV], undefined, "未持闸不得主动注入 HELD 标记");
+  // TD-229（2026-10-07）：MCP 认证门禁钉 "0"——套件契约=确定性，宿主 User env
+  // setx 的部署级开关不得漏进测试子进程（16 文件 stable_fail 实证）。
+  assert.equal(bare.WAO_MCP_REQUIRE_CERTIFIED, "0", "认证门禁对套件子进程强制关闭");
+  const gateLeaked = buildCanonicalChildEnv(
+    { WAO_MCP_REQUIRE_CERTIFIED: "1" }, { gateHeld: false },
+  );
+  assert.equal(gateLeaked.WAO_MCP_REQUIRE_CERTIFIED, "0", "宿主漏入的门禁值被压回 0（不被部署 env 翻转）");
 
   const held = buildCanonicalChildEnv({ PATH: "keep" }, { gateHeld: true });
   assert.equal(held[VERIFICATION_GATE_HELD_ENV], "1", "持闸时 wave 子进程必须看到 HELD=1（env 第二跳）");
