@@ -82,6 +82,7 @@ Project state (.wao/) — wao-namespace subcommands; npm form "npm run cli -- wa
   wao onboarding [--agent <id>] [--apply] [--endorse-worker <id>] [--host <id>] [--json]  # third-party: generate one minimal private registry from the tracked template (+ host-neutral MCP snippet; --host adds per-host registration guide, verified hosts only)
   wao accept --run <runId> --decision <accepted|rejected> --reason <text> [--evidence-digest <sha256hex>] [--evidence-summary <text>] [--run-dir DIR]  # Lead 侧验收落盘（TD-219）：非 delivery run 的 acceptance 审计事件追加进该 run transcript（只对终态 run；多笔以最新一笔为当前结论）
   wao accept --run <runId> --show [--run-dir DIR]  # 只读：列出该 run 既有 acceptance.recorded 事件（不追加）
+  wao sweep-claude-config [--apply]  # claude-code OAuth 临时配置目录（%TEMP%\wao-claude-oauth-*，含凭据副本）存量清扫：默认 dry-run 只报清单，--apply 才真删（带 owner 标记的按创建进程存活判定；无标记遗留目录按 >24h 判龄；TD-223）
 
 Notes:
   - runId 内嵌时间戳为 UTC；本地时间需自行换算。
