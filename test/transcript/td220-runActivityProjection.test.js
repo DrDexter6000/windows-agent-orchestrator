@@ -56,6 +56,35 @@ test("TD-220: cursor replay ignores appended results outside the frozen window; 
   assert.equal(fresh.entries[0].exitStatusSource, "inferred");
 });
 
+test("TD-220 验收修: inference gated to proven backends — kimi-web tool_done never becomes exit 0", () => {
+  // sol 会审 Q2 实测：kimi run …itm1mx 三条命令曾被全数 inferred。kimiWeb.js 声明
+  // 无已证退出码通道（tool done ≠ exit 0）——推断必须只对 ADR-0032 §8 证明过的
+  // backend（claude-code）生效；闭集外 exitStatus 如实 unknown（wire 退出码仍直读）。
+  const items = [
+    { kind: "command", toolCallId: "k1", exitCode: undefined },
+    { kind: "tool_result", tool: "k1", isError: false },
+    { kind: "command", exitCode: 3 },
+  ];
+  for (const backend of ["kimi-web", "codex", "zcode", "", undefined]) {
+    const r = projectRunActivity(
+      { events: items.map((e, i) => ({ runId, ts, seq: i + 1, type: "run.event", ...e })), backend, state: "running" },
+      { runId, pageSize: 50, env: {} },
+    );
+    const commands = r.entries.filter((e) => e.category === "command");
+    assert.deepEqual(
+      commands.map((e) => [e.exitStatus, e.exitStatusSource]),
+      [["unknown", undefined], ["failed", "wire"]],
+      `backend=${backend}: 未证通道不得推断（unknown/无 source），wire 退出码照直读`,
+    );
+  }
+  // 闭集内（claude-code）同形状照常推断——防门控误伤。
+  const trusted = project(items, { categories: ["command"] });
+  assert.deepEqual(
+    trusted.entries.map((e) => [e.exitStatus, e.exitStatusSource]),
+    [["ok", "inferred"], ["failed", "wire"]],
+  );
+});
+
 test("TD-220: thinking is count-only; envelope labels fixed; collect audits skipped; unknown remains opaque", () => {
   const types = ["prompt.sent", "run.wait_policy", "run.metrics", "scorecard.checked", "run.stop_verified",
     "run.cleanup_done", "run.session_reuse", "run.provider_session_bound"];

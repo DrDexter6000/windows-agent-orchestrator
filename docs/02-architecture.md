@@ -456,7 +456,7 @@ interface TranscriptEvent {
 | `run.stop_unverified` | worker runtime 未确认静默 | `[M]` M10-pre |
 | `messages.collected` | collect 拉取消息 | `[S]` M0 |
 | `run.rerun` | 进程式 resume 重放 | `[S]` M3 |
-| `run.cleanup_done` | worktree 清理完成 | `[S]` M3 |
+| `run.cleanup_done` | 终态清理完成（worktree 删除 + backend 文件工件 dispose——TD-223 起非 delivery run 也会发） | `[S]` M3 |
 | `run.delivery_created` | delivery 打包成功，携带 DeliveryRef | `[S]` Phase 3A |
 | `run.delivery_failed` | delivery 打包失败，携带 deliveryCode 与脱敏摘要 | `[S]` Phase 3A |
 | `run.delivery_verification_passed` | delivery 验证通过 | `[S]` Phase 3B |

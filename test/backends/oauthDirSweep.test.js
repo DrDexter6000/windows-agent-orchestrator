@@ -22,6 +22,7 @@ import assert from "node:assert/strict";
 
 import {
   sweepClaudeOauthDirs,
+  defaultIsPidAlive,
   OAUTH_DIR_PREFIX,
   OWNER_MARKER_FILE,
   SWEEP_LEGACY_AGE_MS,
@@ -216,5 +217,26 @@ test("TD-223 sweep: 默认 isPidAlive——EPERM 视为存活（保守），本�
     assert.equal(res.deleted, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("TD-223 验收修: defaultIsPidAlive 判死仅认 ESRCH——EPERM/未知探测错误一律按存活", () => {
+  // sol 会审 Q1：原实现只认 EPERM 判活，未知探测错误全被当死（方向反了）。
+  // 判死唯一依据 = ESRCH；其余（EPERM/EACCES/任何未知）保守判活。
+  const real = process.kill;
+  const cases = [
+    { code: "ESRCH", expected: false },
+    { code: "EPERM", expected: true },
+    { code: "EACCES", expected: true }, // 未知家族错误 → 存活
+    { code: undefined, expected: true }, // 无 code 的意外异常 → 存活
+  ];
+  try {
+    assert.equal(defaultIsPidAlive(process.pid), true, "自身进程存活");
+    for (const { code, expected } of cases) {
+      process.kill = () => { const e = new Error("probe"); e.code = code; throw e; };
+      assert.equal(defaultIsPidAlive(4242), expected, `probe error code=${String(code)} → alive=${expected}`);
+    }
+  } finally {
+    process.kill = real; // 恢复全局，防泄漏到后续测试
   }
 });

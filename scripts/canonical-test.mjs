@@ -158,10 +158,10 @@
 // verdict), no timeout inflation, no skipped failures, no new deps.
 
 import { spawn } from "node:child_process";
-import { readdirSync, readFileSync, writeFileSync, statSync, unlinkSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync, statSync, unlinkSync, mkdtempSync, rmSync } from "node:fs";
 import { join, resolve, dirname, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { availableParallelism, cpus } from "node:os";
+import { availableParallelism, cpus, tmpdir } from "node:os";
 
 // R23-F/A (TD-130): machine-global gate paths SSOT (scripts→src downward import,
 // same direction as scripts/reliability/certification.mjs). The inflight marker's
@@ -1608,6 +1608,21 @@ async function main() {
   const manifestPath = join(testDir, "manifest.json");
   const reportPath = join(repoRoot, "test-results.json");
   const nodeExe = process.execPath;
+
+  // TD-223 尾项（2026-10-07 opus 验收发现）：套件一次性 TEMP 隔离。16 个测试
+  // 文件构造 ClaudeCodeBackend（只有 1 个注入 fixture 凭据源）——native OAuth
+  // 通道的 prepare 会把真实 ~/.claude/.credentials.json 复制进 os.tmpdir()，
+  // 每跑一次全量就往用户真实 %TEMP% 撒约 24 份凭据副本（实测 00:24Z 批 24/24
+  // 字节同源）。本重定向把整套件（本进程 os.tmpdir() 与全部子进程 env）指到
+  // 一次性目录，退出时删除；被 watchdog 强杀的残留目录带 owner 标记（pid=测试
+  // 子进程），由 wao sweep-claude-config 清扫兜底。设 env 必须在 startCanonical
+  // Suite 之前——childEnv 从 process.env 派生。
+  const realTmp = tmpdir(); // 捕获真实值——重定向后再调 tmpdir() 会拿到套件目录
+  const suiteTempRoot = mkdtempSync(join(realTmp, "wao-canonical-temp-"));
+  for (const name of ["TMP", "TEMP", "TMPDIR"]) process.env[name] = suiteTempRoot;
+  process.on("exit", () => {
+    try { rmSync(suiteTempRoot, { recursive: true, force: true }); } catch { /* 强杀/占用残留交 sweep */ }
+  });
 
   // Gate engagement decided ONCE per invocation from the live process env:
   // engaged unless kill-switched off or already held by an ancestor (HELD

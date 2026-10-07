@@ -677,8 +677,9 @@ MCP 边界的 `run_dispatch` 可选升级为"只派认证清单成员"（Owner �
 | `run.stop_verified` | M10-pre：worker runtime 已确认静默；可能来自普通终态清理或显式 `run_stop`，不表示 Lead 一定调用过 stop | M10-pre |
 | `run.stop_unverified` | M10-pre：worker runtime 未能确认静默（outcome: alive/probe_error）；可能来自终态清理或显式 stop | M10-pre |
 | `messages.collected` | collect 命令拉取消息 | M0 |
+| `acceptance.recorded` | Lead 侧验收落盘（TD-219 第一步，`wao accept` CLI）：载荷 {decision(accepted/rejected), reason, evidenceDigest?, evidenceSummary?, recordedBy:"lead", recordedAt, source}。只对终态 run 追加；多笔合法（审计日志语义，最新一笔为当前结论）；**不覆盖 delivery run 的 run_delivery_decide 语义**（那是恰一笔 first-wins 决定面）——本事件是非 delivery run 的验收承载 | TD-219 |
 | `run.rerun` | 进程式 resume 重放（originalSessionId → newSessionId） | M3 |
-| `run.cleanup_done` | worktree 清理完成 | M3 |
+| `run.cleanup_done` | 终态清理完成（worktree 删除 + backend 文件工件 dispose——TD-223 起非 delivery run 也会发） | M3 |
 | `run.delivery_created` | TD-103：delivery 打包成功——含完整 DeliveryRef | Phase 3A |
 | `run.delivery_failed` | TD-103：delivery 打包失败——含 deliveryCode + message | Phase 3A |
 | `run.delivery_verification_passed` | TD-103：delivery 验证通过 | Phase 3B |

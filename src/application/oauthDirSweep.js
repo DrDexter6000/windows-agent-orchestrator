@@ -27,14 +27,16 @@ export const OWNER_MARKER_FILE = ".wao-owner.json";
 // "刚创建但标记写入前被杀"的目录（标记先于凭据拷贝写入，窗口极小但非零）。
 export const SWEEP_LEGACY_AGE_MS = 24 * 60 * 60 * 1000;
 
-// 默认 pid 存活探测：signal 0 只探测不发送。EPERM = 进程存在但当前用户无权限
-// 探测——按存活保守处理（宁可漏删不误删；漏删的下轮清扫还有机会）。
-function defaultIsPidAlive(pid) {
+// 默认 pid 存活探测：signal 0 只探测不发送。验收修（2026-10-07 sol 会审 Q1）：
+// 判死唯一依据 = ESRCH（进程确证不存在）；EPERM（存在但无权限）与任何未知探测
+// 错误一律按存活保守处理——宁可漏删不误删，漏删的下轮清扫还有机会。若反过来
+// 只认 EPERM 判活，未知探测错误会被当死、误删活 run 的目录。
+export function defaultIsPidAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
   } catch (e) {
-    return e?.code === "EPERM";
+    return e?.code !== "ESRCH";
   }
 }
 

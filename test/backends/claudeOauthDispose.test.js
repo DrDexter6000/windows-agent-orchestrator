@@ -9,7 +9,7 @@
 // 凭据纪律：构造参数 oauthCredentialsSource 注入 fixture 副本源——测试绝不
 // 复制真实 ~/.claude/.credentials.json，绝不触碰真实 HOME。
 
-import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -222,6 +222,33 @@ test("TD-223 dispose: 单目录删除失败（被占为子进程 CWD）继续其
     await new Promise((r) => setTimeout(r, 200)); // Windows 释放 CWD 占用
     if (held) safeRm(held); // held 在真实 tmpdir() 下，防御性回收
     if (free) safeRm(free);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("TD-223 验收修: 凭据拷贝中途抛错也回收——登记先于一切可抛步骤", async () => {
+  // sol 会审 Q1：登记若晚于 prepare 返回，标记写入/拷贝抛错会漏回收。修后
+  // onDirCreated 在 mkdtemp 后立即登记——本测试用「凭据源是目录」让 copyFileSync
+  // 中途抛 EISDIR，断言 spawn 拒绝但目录已登记、dispose 能删。
+  const root = mkdtempSync(join(tmpdir(), "wao-td223-throwreg-"));
+  let trackedDir = null;
+  try {
+    const dirAsSource = join(root, "credentials-as-dir");
+    mkdirSync(dirAsSource); // existsSync=true 但 copyFileSync 读它必抛
+    const { spawnFn } = makeCapturingSpawn();
+    const backend = new ClaudeCodeBackend({ spawnFn, oauthCredentialsSource: dirAsSource });
+    await assert.rejects(
+      () => spawnAndCapture(backend, nativeAgent(), { prompt: "do" }),
+      (e) => { trackedDir = backend._oauthConfigDirs[0] ?? null; return true; },
+      "凭据源不可读时 spawn 必须抛错（照常由 CLI 认证路径如实报失败）",
+    );
+    assert.equal(backend._oauthConfigDirs.length, 1, "抛错路径目录仍已登记");
+    assert.ok(trackedDir && existsSync(trackedDir), "抛错时目录已落盘（待 dispose 回收）");
+    await backend.dispose();
+    assert.ok(!existsSync(trackedDir), "抛错路径目录被 dispose 回收");
+    assert.deepEqual(backend._oauthConfigDirs, []);
+  } finally {
+    if (trackedDir) safeRm(trackedDir);
     rmSync(root, { recursive: true, force: true });
   }
 });

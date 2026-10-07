@@ -193,6 +193,17 @@ async function checkAcceptance(scriptPath, cwd) {
   }
 }
 
+// TD-220 验收修（2026-10-07 sol 会审 Q2）：退出码推断（toolCallId→tool_result.isError
+// → 0/1）的可靠性是 per-backend 的已证事实，不是普适 wire 语义。ADR-0032 §8 只对
+// claude-code 证明过该推断通道（command 事件 wire 不带退出码、tool_result 以
+// toolCallId 关联且 isError 语义已证）；codex wire 自带 exitCode、推断不触发；
+// kimi-web 的 tool done ≠ exit 0（kimiWeb.js 声明无已证退出码通道）——对它推断
+// 会把「工具完成」伪造成「exit 0」。消费方（runActivityProjection）以本闭集门控
+// 推断；这不是 runtime 编排分支，是数据来源可靠性声明（单一真相在本模块）。
+export const EXIT_CODE_INFERENCE_PROVEN_BACKENDS = Object.freeze(
+  new Set(["claude-code"]),
+);
+
 export function withInferredCommandExitCode(command, toolResults) {
   if (typeof command.exitCode === "number") return command;
   if (typeof command.toolCallId !== "string") return command;

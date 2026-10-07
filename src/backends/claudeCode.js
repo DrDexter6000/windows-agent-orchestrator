@@ -35,8 +35,14 @@ const OAUTH_CREDENTIALS_RELATIVE = join(".claude", ".credentials.json");
 // 任何 secret。名字与 sweep 模块的 OWNER_MARKER_FILE 同一约定（值同步靠测试钉）。
 const OAUTH_OWNER_MARKER_FILE = ".wao-owner.json";
 
-function prepareClaudeOauthConfigDir(credentialsSource = join(homedir(), OAUTH_CREDENTIALS_RELATIVE)) {
+function prepareClaudeOauthConfigDir(
+  { credentialsSource = join(homedir(), OAUTH_CREDENTIALS_RELATIVE), onDirCreated } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), "wao-claude-oauth-"));
+  // TD-223 验收修（2026-10-07 sol 会审 Q1）：目录落地【立即】回调登记——标记写入或
+  // 凭据拷贝中途抛错时目录已存在，晚于此刻的登记会漏回收（登记必须先于任何可能
+  // 抛错的后续步骤）。
+  if (typeof onDirCreated === "function") onDirCreated(dir);
   // TD-223：标记先于凭据拷贝写入——即使拷贝中途失败，目录也带 owner 标记，
   // sweep 不会把它误判成"无标记遗留目录"。
   writeFileSync(
@@ -268,9 +274,12 @@ export class ClaudeCodeBackend extends ProcessBackend {
    * 凭据源可注入（构造参数 oauthCredentialsSource；默认真实 ~/.claude 路径）。
    */
   _prepareAndTrackOauthConfigDir() {
-    const dir = prepareClaudeOauthConfigDir(this._oauthCredentialsSource ?? undefined);
-    this._oauthConfigDirs.push(dir);
-    return dir;
+    // TD-223 验收修：登记经 onDirCreated 在 mkdtemp 后立即发生（早于标记写入/
+    // 凭据拷贝等任何可能抛错的步骤），杜绝"目录已建但未登记"的回收漏洞。
+    return prepareClaudeOauthConfigDir({
+      credentialsSource: this._oauthCredentialsSource ?? undefined,
+      onDirCreated: (dir) => this._oauthConfigDirs.push(dir),
+    });
   }
 
   /**

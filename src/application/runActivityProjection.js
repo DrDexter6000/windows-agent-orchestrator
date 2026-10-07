@@ -50,7 +50,7 @@
 // never drift.
 
 import { createHash } from "node:crypto";
-import { withInferredCommandExitCode } from "../scorecard.js";
+import { withInferredCommandExitCode, EXIT_CODE_INFERENCE_PROVEN_BACKENDS } from "../scorecard.js";
 
 import { createSecretRedactor } from "../secretRedaction.js";
 import { safeProjectAgentId } from "../canonicalAgentId.js";
@@ -463,6 +463,9 @@ const SKIP_TYPES = new Set([
   // readOnlyObservation instead of a timeline entry.
   "run.read_only_declared",
   "messages.collected",
+  // TD-219 验收附注（opus 会审 Q2）：Lead 侧验收落盘是 Lead 动作审计事件，
+  // 非 worker 活动——与 messages.collected 同型，跳过（读取面为 wao accept --show）。
+  "acceptance.recorded",
 ]);
 
 /**
@@ -698,11 +701,21 @@ export function projectRunActivity(rawSnapshot, {
   // afterSeq) narrows the set; counts describe exactly this filtered timeline.
   // TD-220（2026-10-07）：只关联本冻结窗口的 tool_result；结果在窗口外则降为 unknown，
   // 不跨窗拼接，保证游标续页稳定。保留首条匹配结果，与 scorecard 的 find 语义一致。
+  // TD-220 验收修（sol 会审 Q2）：推断仅对 EXIT_CODE_INFERENCE_PROVEN_BACKENDS 闭集
+  // 生效（ADR-0032 §8 只证过 claude-code 的 toolCallId→isError→exit 通道；kimi-web
+  // 的 tool done ≠ exit 0，推断会把「工具完成」伪造成 exit 0——实测 itm1mx 三条
+  // 命令曾被全数 inferred）。闭集外 backend 的 tool_result 不建映射 → 推断静默关闭，
+  // exitStatus 如实保持 unknown（wire 退出码仍直读，不受影响）。
+  const inferenceTrusted = EXIT_CODE_INFERENCE_PROVEN_BACKENDS.has(
+    String(rawSnapshot.backend ?? ""),
+  );
   const toolResultsById = new Map();
-  for (const event of frozenEvents) {
-    if (event?.type === "run.event" && event.kind === "tool_result"
-      && typeof event.tool === "string" && !toolResultsById.has(event.tool)) {
-      toolResultsById.set(event.tool, event);
+  if (inferenceTrusted) {
+    for (const event of frozenEvents) {
+      if (event?.type === "run.event" && event.kind === "tool_result"
+        && typeof event.tool === "string" && !toolResultsById.has(event.tool)) {
+        toolResultsById.set(event.tool, event);
+      }
     }
   }
   const allEntries = [];
