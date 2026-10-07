@@ -423,7 +423,7 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **何时跑**：部署前、出问题时第一件事、定期
 - **命令**：`npm run cli -- wao doctor [--registry config/agents.json] [--cwd <目标项目>] [--format json]`；CI 想把 WARN 也卡成非零退出可加 `--warn-as-error`（只改退出码，不改报告内容）
 - **检查项**（scoped——只按 registry 保留 worker 收窄；逐项语义以 doctor 输出与 src/commands/doctor.js 为权威，此处只列要点）：
-  - Node 版本（>=22）；保留 worker 的 CLI 在 PATH（无 worker 需要 CLI 时 INFO 跳过）；声明的 provider key（进程 env 或 Windows User 作用域；kimi-code 走 CLI 登录态）；agents.json 完整性（opencode worker 必须配 tokenBudget——06-18 事故防线）；registry `cwd` 存在性（`path.resolve` 后须为已存在目录；`.` 解析为派发进程 cwd 恒存在不误报，语义详见 §3.1/§7.4；sessionReuse worker 的 WARN 措辞区分实际先发拒因）；承重 env 变量存在性（5b，TD-218，值不回显）；claude OAuth 临时目录报数（5c，TD-223，dry-run 永不删）。HTTP serve backend 的 cwd 是远端目录提示，不检查。环境类检查落 doctor 而非 `registry validate`（后者纯静态 schema）。
+  - Node 版本（>=22）；保留 worker 的 CLI 在 PATH（无 worker 需要 CLI 时 INFO 跳过）；声明的 provider key（进程 env 或 Windows User 作用域；kimi-code 走 CLI 登录态）；agents.json 完整性（opencode worker 必须配 tokenBudget——06-18 事故防线）；registry `cwd` 存在性（`path.resolve` 后须为已存在目录；`.` 解析为派发进程 cwd 恒存在不误报，语义详见 §3.1/§7.4；sessionReuse worker 的 WARN 措辞区分实际先发拒因）；承重 env 存在性（5b，TD-218）；claude OAuth 临时目录报数（5c，TD-223）。HTTP serve backend 的 cwd 是远端目录提示，不检查。环境类检查落 doctor 而非 `registry validate`（后者纯静态 schema）。
   - 目标项目的 `.wao/` 是否 init（未 init / fresh clone 缺槽位是 WARN，结构混乱才是 FAIL）
 - **判读**（advisory，非门禁——doctor 不自动阻断任何派发，verdict 行自带"（advisory，非门禁）"标注）：
   - `HEALTHY`：无 FAIL 无 WARN，可直接继续
@@ -482,8 +482,8 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 ### 7.13 claude-code worker 看不到用户级 skills（临时 CLAUDE_CONFIG_DIR，TD-221）
 
 - **症状**：用户日常 `~/.claude` 的技能/插件/设置对 WAO 派发的 claude-code worker 不可见；反向同理。
-- **根因**：native OAuth 通道 worker 运行于 `%TEMP%\wao-claude-oauth-*` 临时隔离目录（TD-210 技术解，只含凭据副本其余全空——设计行为；机制详见 src/backends/claudeCode.js 头注释与 TD-221 台账行）。
-- **逃生门（Owner 裁定 2026-10-07：合法形态）**：确需时往该 lane 注册表 `args` 加 `--add-dir <最窄目录>`（勿给整个主目录）。args 指纹与 addDirs 随 run.started 留痕（TD-221 小修）；改动按 lane 变更走 drift 检查。
+- **根因**：native OAuth 通道 worker 运行于 `%TEMP%\wao-claude-oauth-*` 临时隔离目录（TD-210 技术解，只含凭据副本其余全空——设计行为；详见 claudeCode.js 头注释与 TD-221 台账行）。
+- **逃生门（2026-10-07 Owner 裁定合法形态）**：确需时往该 lane 注册表 `args` 加 `--add-dir <最窄目录>`（勿给整个主目录）。给的是**文件读取面**——不注册为 Skill 工具可调用技能（实测）。args 指纹与 addDirs 随 run.started 留痕；改动按 lane 变更走 drift 检查。
 
 ---
 
