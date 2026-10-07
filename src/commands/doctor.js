@@ -34,8 +34,11 @@
 //   - backend 能力解析（R8-2 与 R7 派发门同一能力键）：../backends/factory.js
 //     （backendFor——构造无副作用，仅读 preflightInvocation 能力标记；
 //     commands→backends 下向边，precedent：./shared.js 同款 import）
+//   - OAuth 临时目录报数（TD-223 dry-run）：../application/oauthDirSweep.js
+//     （sweepClaudeOauthDirs——本检查只 dry-run 报数，doctor 永不执行删除）
 //   - node built-in：fs（existsSync/readdirSync/statSync）、fs/promises（readFile）、
-//     path（resolve/join/dirname）、url（fileURLToPath）、child_process（spawnSync/execSync）
+//     path（resolve/join/dirname）、url（fileURLToPath）、child_process（spawnSync/execSync）、
+//     os（homedir/tmpdir）
 //
 // 本模块内部 helper：_doctorParseSmoke、isProviderWrappedClaudeCodeWorker、
 // hasClaudeOauthCredentials、whichCli（均为 doctor 专用，随 doctor 族搬迁）。
@@ -45,7 +48,7 @@ import { readFile } from "node:fs/promises";
 import { resolve, join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 // TD-191⑥：安装权威如实化探测消费版本单一来源（决定 0038）。
 import { WAO_VERSION } from "../version.js";
 
@@ -73,6 +76,9 @@ import { assessPanelReadiness, deriveReadyState } from "../application/panelRead
 import { PANEL_SKIP_REASONS } from "../waoStage.js";
 import { LOAD_BEARING_ENV_BY_BACKEND, resolveLoadBearingEnvFull } from "../application/loadBearingEnv.js";
 import { readWindowsUserEnv as readWindowsUserEnvValue } from "../application/credentialReadiness.js";
+// TD-223（2026-10-07）：OAuth 临时目录报数复用 sweep 模块 dry-run（判定规则单一
+// 实现；doctor 只报数，永不执行删除）。
+import { sweepClaudeOauthDirs } from "../application/oauthDirSweep.js";
 
 // TD-95 #11 --strict：JS parse smoke（防注释崩溃漏到运行时，复盘 #3 教训）。
 // 对 src/*.js 跑 node --check。doctor --strict 时调用。
@@ -365,6 +371,33 @@ export async function waoDoctorCommand(args, config) {
             fix: `在注册表 env 块声明它，或 setx ${declared.name} "<值>"` });
         }
       }
+    }
+  }
+
+  // 5c. TD-223（2026-10-07）：claude-code native OAuth 临时配置目录体检（advisory，
+  //     永不执行删除——本命令头部铁律）。复用 sweep 模块 dry-run（判定规则单一
+  //     实现：owner 标记 pid 存活不删；无标记遗留 >24h 可删）。健康面零目录时
+  //     不产生条目（budget_* 惯例：只在有信号时出现）；有可清理目录（含凭据
+  //     副本、创建进程已退出或遗留超 24h）→ WARN（卫生债），仅剩活 run 目录
+  //     → INFO（正常在场）。本检查只读 .wao-owner.json 与 stat，不碰凭据内容。
+  {
+    const sweep = sweepClaudeOauthDirs({ baseDir: tmpdir(), apply: false });
+    if (sweep.scanned > 0) {
+      const deletable = sweep.byReason["dry-run"] ?? 0;
+      const alive = sweep.byReason["owner-alive"] ?? 0;
+      const legacyYoung = sweep.byReason["legacy-young"] ?? 0;
+      const detail = `os.tmpdir() 下 ${sweep.scanned} 个 wao-claude-oauth-* 目录`
+        + `（含 ~/.claude/.credentials.json 副本）：可清理 ${deletable}（创建进程已退出或遗留超 24h）`
+        + `、活 run 在用 ${alive}、遗留未满 24h ${legacyYoung}${deletable > 0 ? "；目录含凭据副本，建议清扫" : ""}`;
+      pushCheck(checks, {
+        name: "claude_oauth_temp_dirs",
+        pass: true,
+        level: deletable > 0 ? "warn" : "info",
+        detail,
+        ...(deletable > 0
+          ? { fix: "npm run cli -- wao sweep-claude-config --apply（先不带 --apply 看清单）" }
+          : {}),
+      });
     }
   }
 

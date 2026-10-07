@@ -585,6 +585,12 @@ export class ProcessBackend {
     throw new Error(`agent ${agent.id} missing binary for process backend`);
   }
 
+  // TD-223（2026-10-07）：spawn 期文件工件的生命周期钩子。基类默认无工件 → no-op；
+  // 子类按需覆写（claude-code 的 native OAuth 隔离目录覆写为删除自建目录表）。
+  // RunManager 在 run 终态（含 spawn 失败路径）调用；幂等，重复调用无害。
+  // 共享编排层只认这个方法，不按 backend 名分支。
+  async dispose() {}
+
   /**
    * 探测真实可执行路径。解决 Windows 上 codex 是 codex.cmd、
    * child_process.spawn 不自动补 .cmd 扩展名的问题。

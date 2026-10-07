@@ -2,14 +2,15 @@
 //
 // TD-98 阶段 2d：wao command family 从 cli.js 拆出（行为不变，纯搬迁）。
 //
-// 命令族：wao init | state | decision | handoff | declare | stage | ask | doctor | onboarding
+// 命令族：wao init | state | decision | handoff | declare | stage | ask | doctor |
+//         onboarding | sweep-claude-config
 //
 // 依赖：
 //   - 外部模块：../waoDir.js、../waoState.js、../waoDecisions.js、../waoDeclare.js、
-//     ../waoStage.js、../waoHandoff.js
+//     ../waoStage.js、../waoHandoff.js、../application/oauthDirSweep.js
 //   - 共享工具：./shared.js（parseOptions/resolveTargetCwd）
 //   - doctor 子命令：./doctor.js（waoDoctorCommand）
-//   - node built-in：fs/promises（readFile）、path（resolve/join）
+//   - node built-in：fs/promises（readFile）、path（resolve/join）、os（tmpdir）
 //
 // 注意：wao.js 不持有也不直接调用 runCommand（runCommand 由 commands/run.js 持有）。
 // wao ask 子命令通过依赖注入接收 askHandler：cli.js 把 waoAskCommand 作为 deps.askHandler
@@ -20,6 +21,7 @@
 
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { tmpdir } from "node:os";
 
 import { initWaoDir, getWaoDir } from "../waoDir.js";
 import { writeStateSnapshot, readCurrentState } from "../waoState.js";
@@ -27,6 +29,7 @@ import { addDecision, listDecisions, readDecision } from "../waoDecisions.js";
 import { addDeclare, listDeclares, summarizeDeclares, REASON_CODES } from "../waoDeclare.js";
 import { addStage, summarizeStages, STAGE_NUMBERS, PANEL_SKIP_REASONS, PANEL_STAGES } from "../waoStage.js";
 import { writeHandoff, readHandoff } from "../waoHandoff.js";
+import { sweepClaudeOauthDirs } from "../application/oauthDirSweep.js";
 import { parseOptions, resolveTargetCwd } from "./shared.js";
 import { waoDoctorCommand } from "./doctor.js";
 import { onboardingCommand } from "./onboarding.js";
@@ -361,6 +364,35 @@ async function waoStateCommand(args, config) {
 }
 
 /**
+ * wao sweep-claude-config（TD-223，2026-10-07）：清扫 os.tmpdir() 下 claude-code
+ * native OAuth 临时配置目录（wao-claude-oauth-*，含凭据副本）。默认 dry-run 只
+ * 报告；--apply 才真删。判定规则在 application/oauthDirSweep.js（单一实现）：
+ * owner 标记 pid 存活 → 不删（活 run 的目录）；无标记遗留目录 >24h → 可删。
+ */
+async function waoSweepClaudeConfigCommand(args) {
+  const options = parseOptions(args);
+  const apply = options.apply === true;
+  const result = sweepClaudeOauthDirs({ apply });
+  // dry-run 的"将删数" = byReason["dry-run"]（可删但未删的计数）；apply 时该
+  // reason 恒不产生。跳过原因计数照抄 byReason（含 owner-alive/legacy-young/
+  // not-a-dir/error）。
+  const wouldDelete = result.byReason["dry-run"] ?? 0;
+  const wouldDeleteDetail = result.skipped
+    .filter((s) => s.reason === "dry-run")
+    .map((s) => s.dir);
+  console.log(JSON.stringify({
+    mode: apply ? "apply" : "dry-run",
+    baseDir: tmpdir(),
+    scanned: result.scanned,
+    deleted: result.deleted,
+    wouldDelete,
+    ...(wouldDelete > 0 ? { wouldDeleteDirs: wouldDeleteDetail } : {}),
+    byReason: result.byReason,
+    hint: apply ? undefined : "dry-run 未删除任何目录；确认清单后加 --apply 执行删除",
+  }, null, 2));
+}
+
+/**
  * wao 命令族派遣器。
  *
  * @param {string[]} args
@@ -373,6 +405,7 @@ async function waoStateCommand(args, config) {
 // 与下方 waoCommand 的 dispatch 同步（cli.test.js 有同步守卫）。
 export const WAO_SUBCOMMANDS = [
   "init", "state", "decision", "handoff", "declare", "stage", "ask", "doctor", "onboarding",
+  "sweep-claude-config",
 ];
 
 export async function waoCommand(args, config, deps = {}) {
@@ -416,5 +449,9 @@ export async function waoCommand(args, config, deps = {}) {
     await onboardingCommand(tail, config);
     return;
   }
-  throw new Error(`Unknown wao subcommand: ${sub ?? "(none)"}. Try: wao init | wao state | wao decision | wao handoff | wao declare | wao stage | wao ask | wao doctor | wao onboarding`);
+  if (sub === "sweep-claude-config") {
+    await waoSweepClaudeConfigCommand(tail);
+    return;
+  }
+  throw new Error(`Unknown wao subcommand: ${sub ?? "(none)"}. Try: wao init | wao state | wao decision | wao handoff | wao declare | wao stage | wao ask | wao doctor | wao onboarding | wao sweep-claude-config`);
 }

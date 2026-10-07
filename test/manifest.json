@@ -148,6 +148,7 @@
       "run-lifecycle/runStatus.test.js",
       "run-lifecycle/runs.test.js",
       "run-lifecycle/runsWait.test.js",
+      "run-lifecycle/runTerminalBackendDispose.test.js",
       "run-lifecycle/stopSideEffect.test.js",
       "run-lifecycle/timeoutPolicy.test.js",
       "transcript/cliRunSummary.test.js",
@@ -274,7 +275,10 @@
       "run-lifecycle/runStopSmoke.test.js",
       "isolation-infra/waoNodeShim.test.js",
       "registry-roles/runtimeIdentity.test.js",
-      "registry-roles/certificationEvidenceInventory.test.js"
+      "registry-roles/certificationEvidenceInventory.test.js",
+      "backends/claudeOauthDispose.test.js",
+      "backends/oauthDirSweep.test.js",
+      "run-lifecycle/claudeOauthDoctorCheck.test.js"
     ],
     "lock": [
       "isolation-infra/portAllocator.test.js",

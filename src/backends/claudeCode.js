@@ -1,5 +1,5 @@
 import { resolve, dirname, join } from "node:path";
-import { existsSync, mkdtempSync, copyFileSync } from "node:fs";
+import { existsSync, mkdtempSync, copyFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { ProcessBackend } from "./processBackend.js";
@@ -25,15 +25,27 @@ const DISABLE_AUTO_MEMORY_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
 // CLAUDE.md/插件/技能从空目录解析即全空（实测比 bare 更纯：bare 下用户插件仍
 // 载入 3 个，隔离目录下仅剩 CLI 内置插件）。凭据文件为 spawn 时现拷贝（token
 // 轮换后旧拷贝自然失效，不缓存）；目录在 os.tmpdir()（用户级），run 期间存活、
-// 之后交由 OS 临时清理；token 值永不进 argv/转录/env 展示（env 只带目录路径）。
+// 终态由 backend.dispose() 删除（TD-223，2026-10-07——此前"交由 OS 临时清理"
+// 实测永不发生，%TEMP% 堆积上千个含凭据副本的目录；进程崩溃等残留由
+// wao sweep-claude-config 清扫）；token 值永不进 argv/转录/env 展示（env 只带目录路径）。
 const CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR";
 const OAUTH_CREDENTIALS_RELATIVE = join(".claude", ".credentials.json");
+// TD-223（2026-10-07）：目录内的 owner 标记文件——内容仅 {pid, createdAt}，供
+// sweep（application/oauthDirSweep.js）判定"创建者进程还在不在"；不是凭据，不含
+// 任何 secret。名字与 sweep 模块的 OWNER_MARKER_FILE 同一约定（值同步靠测试钉）。
+const OAUTH_OWNER_MARKER_FILE = ".wao-owner.json";
 
-function prepareClaudeOauthConfigDir() {
+function prepareClaudeOauthConfigDir(credentialsSource = join(homedir(), OAUTH_CREDENTIALS_RELATIVE)) {
   const dir = mkdtempSync(join(tmpdir(), "wao-claude-oauth-"));
-  const source = join(homedir(), OAUTH_CREDENTIALS_RELATIVE);
-  if (existsSync(source)) {
-    copyFileSync(source, join(dir, ".credentials.json"));
+  // TD-223：标记先于凭据拷贝写入——即使拷贝中途失败，目录也带 owner 标记，
+  // sweep 不会把它误判成"无标记遗留目录"。
+  writeFileSync(
+    join(dir, OAUTH_OWNER_MARKER_FILE),
+    JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }),
+    "utf8",
+  );
+  if (existsSync(credentialsSource)) {
+    copyFileSync(credentialsSource, join(dir, ".credentials.json"));
   }
   // 凭据文件缺席 = 未登录：照常返回空目录，spawn 后由 CLI 如实报认证失败。
   return dir;
@@ -208,6 +220,12 @@ export class ClaudeCodeBackend extends ProcessBackend {
       }),
       ...opts,
     });
+    // TD-223（2026-10-07）：本实例创建的 native OAuth 隔离目录登记表 + 可注入的
+    // 凭据源路径（默认 ~/.claude/.credentials.json；测试注入 fixture 路径——
+    // 测试绝不复制真实凭据）。session 复用/多 turn 会多次 spawn 累积多个目录，
+    // 全记，终态 dispose() 一次清空。
+    this._oauthCredentialsSource = opts.oauthCredentialsSource ?? null;
+    this._oauthConfigDirs = [];
   }
 
   /**
@@ -235,12 +253,44 @@ export class ClaudeCodeBackend extends ProcessBackend {
     // native OAuth 通道：预备仅含凭据拷贝的隔离配置目录（见 prepareClaudeOauthConfigDir）。
     // task 上挂字段穿线到 runtimeEnv（buildArgs 的旗标决策纯由 agent.provider 派生，
     // 与本字段无耦合——preflight/spawn 两次 buildArgs 调用天然一致）。
+    // TD-223：目录创建即登记（super.spawn 在其后才跑——ENOENT 等失败时目录已落盘，
+    // 靠登记表让 dispose 在 spawn 失败路径也能回收）。
     const taskExtras = {};
     if (!agent?.provider && task && typeof task === "object") {
-      taskExtras.claudeOauthConfigDir = prepareClaudeOauthConfigDir();
+      taskExtras.claudeOauthConfigDir = this._prepareAndTrackOauthConfigDir();
     }
     const enrichedTask = task && typeof task === "object" ? { ...task, ...taskExtras } : task;
     return super.spawn(removed ? { ...agent, env: stripped } : agent, enrichedTask);
+  }
+
+  /**
+   * TD-223（2026-10-07）：创建 native OAuth 隔离目录并登记进实例表。
+   * 凭据源可注入（构造参数 oauthCredentialsSource；默认真实 ~/.claude 路径）。
+   */
+  _prepareAndTrackOauthConfigDir() {
+    const dir = prepareClaudeOauthConfigDir(this._oauthCredentialsSource ?? undefined);
+    this._oauthConfigDirs.push(dir);
+    return dir;
+  }
+
+  /**
+   * TD-223（2026-10-07）：删除本实例创建的全部 OAuth 隔离目录（含凭据副本）。
+   * 生命周期：RunManager 把它组合进 run 终态 cleanupFn（start/resume 两站点），
+   * spawn 失败/终态路径都会触发。设计注：dispose 只在 run 终态触发；同 run 中间
+   * turn 的目录活到终态一起删——run 进行中目录必须存活（子进程正在读），这是
+   * 可接受的泄漏窗口（run 崩溃不终态的残留由 wao sweep-claude-config 清扫）。
+   * 幂等：重复调用无害（表已清空即 no-op）；单目录删除失败继续其余，永不抛出。
+   */
+  async dispose() {
+    const dirs = this._oauthConfigDirs;
+    this._oauthConfigDirs = [];
+    for (const dir of dirs) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // 单目录失败继续其余（TD-223）：一个目录卡死不得阻塞整批清理。
+      }
+    }
   }
 
   // P4 决策B：有 provider 时，binary=node + prependArgs 从 provider 推导（wrapper 调起）。

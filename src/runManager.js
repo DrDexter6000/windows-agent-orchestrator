@@ -1195,6 +1195,14 @@ export class RunManager {
       }
     }
 
+    // TD-223（2026-10-07）：backend 创建的临时文件工件（native OAuth 隔离目录）
+    // 必须在 run 终态回收。在 spawn 前把 dispose 组合进 cleanupFn 后，下方全部
+    // 提前终态路径（pending-rejected / certification-gate / fire-forget-guard /
+    // spawn 失败 / submitted-rejected）与 Run 正常终态（this._cleanup）自动覆盖。
+    // delivery 验证仍在 cleanup 之后对 delivery commit 进行（与 worktree 删除及
+    // 本目录删除均无耦合），相对次序不变。
+    cleanupFn = composeBackendDispose(cleanupFn, backend);
+
     // TD-103 Phase 3A: capture base commit AFTER worktree creation, BEFORE backend spawn.
     // The base commit is the full hash of the worktree's HEAD at creation time.
     let deliveryContext = null;
@@ -1862,12 +1870,21 @@ export class RunManager {
         });
       }
       // 重新 spawn 新进程
-      const newResult = await backend.spawn(agent, {
-        prompt: promptEvent.prompt,
-        roleContract: resumeRoleContract,
-        resolvedCredentials: resumeResolvedCredentials,
-        ...(deliveryContext ? { deliveryMode: true } : {}),
-      });
+      // TD-223：spawn 失败（ENOENT 等）时 backend 已创建的临时文件工件（native
+      // OAuth 隔离目录在 super.spawn 之前落盘）就地 dispose——resume 路径此时还没
+      // 有 Run/cleanupFn 兜底，不回收即泄漏。
+      let newResult;
+      try {
+        newResult = await backend.spawn(agent, {
+          prompt: promptEvent.prompt,
+          roleContract: resumeRoleContract,
+          resolvedCredentials: resumeResolvedCredentials,
+          ...(deliveryContext ? { deliveryMode: true } : {}),
+        });
+      } catch (error) {
+        try { await backend.dispose?.(); } catch { /* best-effort：不掩盖原错误 */ }
+        throw error;
+      }
       await transcript.append("run.rerun", {
         originalSessionId,
         newSessionId: newResult.backendSessionId,
@@ -1885,6 +1902,9 @@ export class RunManager {
         config: this.config,
         onRemove: () => this.activeRuns.delete(runId),
         initialState: "submitted",
+        // TD-223：resume 重建的 Run 此前不带 cleanup（resume 不建 worktree）——
+        // 组合 dispose 包装，让重放 run 终态同样回收 backend 临时文件工件。
+        cleanup: composeBackendDispose(null, backend),
         ...(deliveryContext ? { effectiveCwd: deliveryContext.worktreePath } : {}),
         scorecardRules: resumeScorecardRules,
         deliveryContext,
@@ -2016,6 +2036,24 @@ async function safeCleanup(cleanupFn, transcript) {
   } catch (error) {
     await transcript.append("run.cleanup_error", { phase: "spawn_fail", error: error.message });
   }
+}
+
+// TD-223（2026-10-07）：把 backend 自有文件工件回收（dispose——claude-code native
+// OAuth 隔离目录，含凭据副本）组合进终态 cleanupFn。已有 cleanupFn（ephemeral
+// worktree 删除）时包一层——worktree 清理抛错也必须 finally 执行 dispose；为 null
+// （非 delivery run 恒 null，persistent by design）时直接以 dispose 包装设立——此前
+// 这类 run 的临时目录在任何终态路径都不会被删除（TD-223 病灶：%TEMP% 堆积上千个）。
+// dispose 由 ProcessBackend 基类声明（默认 no-op）；非进程式/测试假 backend 无此
+// 方法时静默跳过（组合层永不因此抛错）。
+function composeBackendDispose(cleanupFn, backend) {
+  const prev = cleanupFn ?? null;
+  return async () => {
+    try {
+      if (prev) await prev();
+    } finally {
+      if (typeof backend?.dispose === "function") await backend.dispose();
+    }
+  };
 }
 
 /**
