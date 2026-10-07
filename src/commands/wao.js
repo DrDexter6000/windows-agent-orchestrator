@@ -3,11 +3,12 @@
 // TD-98 阶段 2d：wao command family 从 cli.js 拆出（行为不变，纯搬迁）。
 //
 // 命令族：wao init | state | decision | handoff | declare | stage | ask | doctor |
-//         onboarding | sweep-claude-config
+//         onboarding | sweep-claude-config | accept
 //
 // 依赖：
 //   - 外部模块：../waoDir.js、../waoState.js、../waoDecisions.js、../waoDeclare.js、
-//     ../waoStage.js、../waoHandoff.js、../application/oauthDirSweep.js
+//     ../waoStage.js、../waoHandoff.js、../application/oauthDirSweep.js、
+//     ../application/acceptanceRecord.js
 //   - 共享工具：./shared.js（parseOptions/resolveTargetCwd）
 //   - doctor 子命令：./doctor.js（waoDoctorCommand）
 //   - node built-in：fs/promises（readFile）、path（resolve/join）、os（tmpdir）
@@ -33,6 +34,10 @@ import { sweepClaudeOauthDirs } from "../application/oauthDirSweep.js";
 import { parseOptions, resolveTargetCwd } from "./shared.js";
 import { waoDoctorCommand } from "./doctor.js";
 import { onboardingCommand } from "./onboarding.js";
+// TD-219 第一步：Lead 侧验收落盘（非 delivery run 的 acceptance 审计事件追加进
+// run transcript）。数据逻辑委托 ../application/acceptanceRecord.js，本命令只做
+// argv/console 适配——与 consult/playbook 同款分层。
+import { recordAcceptance, listAcceptance } from "../application/acceptanceRecord.js";
 
 /**
  * TD-95 #7：解析 stage artifact 路径（随 wao stage 搬迁）。
@@ -319,6 +324,51 @@ async function assertSeatsInRegistry(seats, options, config) {
   }
 }
 
+/**
+ * wao accept：Lead 侧验收落盘（TD-219 第一步，非 delivery run 的 acceptance 审计）。
+ *
+ * delivery run 的验收走 runs delivery --accept/--reject（run_delivery_decide 同源）；
+ * 本命令面向非 delivery run（如"给本机 harness 装配置"这类仓库外写入任务），把
+ * "接受了什么、凭什么"以 acceptance.recorded 审计事件追加进该 run 的 transcript。
+ * 校验/终态门/追加通道全部在 ../application/acceptanceRecord.js（CLI 只做适配）。
+ *
+ * 用法：
+ *   wao accept --run <runId> --decision <accepted|rejected> --reason <text>
+ *              [--evidence-digest <sha256hex>] [--evidence-summary <text>] [--run-dir DIR]
+ *   wao accept --run <runId> --show [--run-dir DIR]   # 只读：列出既有 acceptance.recorded（不追加）
+ *
+ * 语义：只对终态 run 记验收（终态门 typed 拒绝）；多笔追加合法（审计日志语义，
+ * 最新一笔为当前结论）。--show 与其他参数互斥处理：带 --show 即只列出并退出。
+ */
+async function waoAcceptCommand(args, config) {
+  const options = parseOptions(args);
+  const runsDir = resolve(options.runDir ?? config.runDir);
+
+  if (options.show === true) {
+    if (!options.run) throw new Error("wao accept --show requires --run <runId>");
+    const records = await listAcceptance({ runsDir, runId: options.run });
+    console.log(JSON.stringify({ runId: options.run, count: records.length, records }, null, 2));
+    return;
+  }
+  if (!options.run) throw new Error("wao accept requires --run <runId>");
+  if (!options.decision) throw new Error("wao accept requires --decision <accepted|rejected>");
+  if (!options.reason) throw new Error("wao accept requires --reason <text>");
+  const result = await recordAcceptance({
+    runsDir,
+    runId: options.run,
+    decision: options.decision,
+    reason: options.reason,
+    evidenceDigest: options.evidenceDigest,
+    evidenceSummary: options.evidenceSummary,
+  });
+  console.log(JSON.stringify({
+    appended: result.appended,
+    runId: options.run,
+    seq: result.seq,
+    decision: options.decision,
+  }, null, 2));
+}
+
 async function waoStateCommand(args, config) {
   const [sub, ...tail] = args;
   if (sub === "read") {
@@ -405,7 +455,7 @@ async function waoSweepClaudeConfigCommand(args) {
 // 与下方 waoCommand 的 dispatch 同步（cli.test.js 有同步守卫）。
 export const WAO_SUBCOMMANDS = [
   "init", "state", "decision", "handoff", "declare", "stage", "ask", "doctor", "onboarding",
-  "sweep-claude-config",
+  "sweep-claude-config", "accept",
 ];
 
 export async function waoCommand(args, config, deps = {}) {
@@ -453,5 +503,9 @@ export async function waoCommand(args, config, deps = {}) {
     await waoSweepClaudeConfigCommand(tail);
     return;
   }
-  throw new Error(`Unknown wao subcommand: ${sub ?? "(none)"}. Try: wao init | wao state | wao decision | wao handoff | wao declare | wao stage | wao ask | wao doctor | wao onboarding | wao sweep-claude-config`);
+  if (sub === "accept") {
+    await waoAcceptCommand(tail, config);
+    return;
+  }
+  throw new Error(`Unknown wao subcommand: ${sub ?? "(none)"}. Try: wao init | wao state | wao decision | wao handoff | wao declare | wao stage | wao ask | wao doctor | wao onboarding | wao sweep-claude-config | wao accept`);
 }

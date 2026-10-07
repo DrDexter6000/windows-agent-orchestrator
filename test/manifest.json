@@ -151,6 +151,8 @@
       "run-lifecycle/runTerminalBackendDispose.test.js",
       "run-lifecycle/stopSideEffect.test.js",
       "run-lifecycle/timeoutPolicy.test.js",
+      "run-lifecycle/waoAcceptCli.test.js",
+      "transcript/acceptanceRecord.test.js",
       "transcript/cliRunSummary.test.js",
       "transcript/collectFinal.test.js",
       "transcript/diagnosis.test.js",

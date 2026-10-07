@@ -80,6 +80,8 @@ Project state (.wao/) — wao-namespace subcommands; npm form "npm run cli -- wa
   wao handoff read <role> [--format json]  # latest incoming handoff addressed to role
   wao doctor [--cwd DIR] [--format json] [--warn-as-error]
   wao onboarding [--agent <id>] [--apply] [--endorse-worker <id>] [--host <id>] [--json]  # third-party: generate one minimal private registry from the tracked template (+ host-neutral MCP snippet; --host adds per-host registration guide, verified hosts only)
+  wao accept --run <runId> --decision <accepted|rejected> --reason <text> [--evidence-digest <sha256hex>] [--evidence-summary <text>] [--run-dir DIR]  # Lead 侧验收落盘（TD-219）：非 delivery run 的 acceptance 审计事件追加进该 run transcript（只对终态 run；多笔以最新一笔为当前结论）
+  wao accept --run <runId> --show [--run-dir DIR]  # 只读：列出该 run 既有 acceptance.recorded 事件（不追加）
 
 Notes:
   - runId 内嵌时间戳为 UTC；本地时间需自行换算。
