@@ -23,7 +23,7 @@ import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
 
 import { createWaoMcpServer } from "../../src/mcp/server.js";
-import { CONTRACT_CHECK_ISSUE_CODES, CONTRACT_CHECK_SECTIONS } from "../../src/application/runDispatchContract.js";
+import { CONTRACT_CHECK_ISSUE_CODES, CONTRACT_CHECK_SECTIONS, runDispatchContractCheck } from "../../src/application/runDispatchContract.js";
 import { EXECUTION_PROFILE_IDS } from "../../src/application/executionProfiles.js";
 // TD-168: run_dispatch 输入键集合 SSOT（安全字段边界合同——缺键/多键都该红）。
 import { RUN_DISPATCH_INPUT_KEYS } from "../fixtures/mcpWireKeySets.js";
@@ -156,6 +156,106 @@ test("B4: precheck returns bounded advisory result over the wire — closed-set,
     assert.equal(r.permit, undefined);
     assert.equal(r.allowed, undefined);
   });
+});
+
+// ===== TD-227: deterministic verification lint stays advisory over MCP =====
+
+for (const field of ["verificationCommands", "verificationSetupCommands"]) {
+  test(`TD-227: ${field} lint matrix over the wire`, async (t) => {
+    await withServer(async ({ client }) => {
+      const cases = [
+        ["directory", "node --test test/mcp-surface", ["verification_dir_test_form", "verification_bare_node"]],
+        ["quoted node.exe and directory", '\t"NODE.EXE" --test --test-force-exit "test/with spaces"', ["verification_dir_test_form", "verification_bare_node"]],
+        ["later directory argument", "node --test test/one.test.js test/mcp-surface", ["verification_dir_test_form", "verification_bare_node"]],
+        ["bare node glob", 'node --test "test/*.test.js"', ["verification_bare_node"]],
+        ["bare node single file", "node --test test/one.test.js", ["verification_bare_node"]],
+        ["shim glob", 'node scripts/wao-node.cjs --test "test/*"', []],
+        ["shim single file", "node scripts/wao-node.cjs --test test/one.test.js", []],
+        ["shim module files", "node scripts/wao-node.cjs --test test/one.mjs test/two.cjs", []],
+        ["Windows shim path", 'node.exe ".\\scripts\\wao-node.cjs" --test "test/with spaces/one.test.js"', []],
+        ["shim directory still suspicious", "node scripts/wao-node.cjs --test test/mcp-surface", ["verification_dir_test_form"]],
+        ["npm test", "npm test", []],
+        ["npm entry with test flag", 'npm exec -- node --test "test/*.test.js"', []],
+        ["npx entry with test flag", "npx node --test test/one.test.js", []],
+        ["explicit node path", "./node.exe --test test/one.test.js", []],
+        ["no test flag", "node test/one.test.js", []],
+        ["similar flag", "node --test-name-pattern smoke", []],
+        ["flags only after test", "node --test --test-force-exit", ["verification_bare_node"]],
+      ];
+      for (const [name, command, expected] of cases) {
+        await t.test(name, async () => {
+          const res = await client.callTool({
+            name: "run_dispatch_contract_check",
+            arguments: {
+              agentId: "coder_low",
+              prompt: "x",
+              delivery: {
+                mode: "git_commit_v1",
+                allowedPaths: ["README.md"],
+                verificationCommands: ["npm test"],
+                [field]: [command, command], // each issue must appear only once
+              },
+            },
+          });
+          assert.equal(res.isError, undefined, "advisories survive the strict MCP output boundary");
+          const r = res.structuredContent;
+          assert.deepEqual(r.issueCodes.filter((code) => code.startsWith("verification_")), expected);
+          assert.equal(r.advisory, true);
+          assert.equal(r.contractValid, true, "lint never changes structural validity");
+          assert.ok(r.observations.length <= CONTRACT_CHECK_SECTIONS.length);
+          assert.ok(!JSON.stringify(r).includes(command), "command text never leaks");
+        });
+      }
+    });
+  });
+}
+
+test("TD-227: lint plus registry and path warnings retain bounded MCP observations", async () => {
+  await withServer(async ({ client }) => {
+    const res = await client.callTool({
+      name: "run_dispatch_contract_check",
+      arguments: {
+        agentId: "missing_agent",
+        prompt: "x",
+        delivery: {
+          mode: "git_commit_v1",
+          allowedPaths: ["README.md"],
+          verificationCommands: ["node --test missing-tests/dir"],
+        },
+      },
+    });
+    assert.equal(res.isError, undefined);
+    const r = res.structuredContent;
+    assert.deepEqual(r.issueCodes, [
+      "agent_not_found", "verification_dir_test_form", "verification_bare_node", "referenced_path_probe_miss",
+    ]);
+    assert.equal(r.observations.length, 2, "one registry and one combined contract observation");
+    assert.match(r.observations[1], /scripts\/wao-node\.cjs.*Node 22/);
+    assert.equal(r.contractValid, true);
+    assert.equal(r.advisory, true);
+  });
+});
+
+test("TD-227: lexical lint works without workspace or filesystem probes", async () => {
+  const r = await runDispatchContractCheck({
+    agentId: "coder_low",
+    prompt: "x",
+    workspaceBinding: { bound: false },
+    registryPath: "unused",
+    readRegistryFn: async () => { throw new Error("unreadable registry"); },
+    pathExistsFn: () => assert.fail("lexical lint must not probe the filesystem"),
+    delivery: {
+      mode: "git_commit_v1",
+      allowedPaths: ["README.md"],
+      verificationCommands: ["node --test missing-tests/dir"],
+    },
+  });
+  assert.deepEqual(r.issueCodes, [
+    "workspace_unbound", "registry_unreadable", "verification_dir_test_form", "verification_bare_node",
+  ]);
+  assert.equal(r.observations.length, CONTRACT_CHECK_SECTIONS.length);
+  assert.equal(r.contractValid, true);
+  assert.equal(r.advisory, true);
 });
 
 // ===== B4: production-parity missing-agent truth at the published MCP boundary =====

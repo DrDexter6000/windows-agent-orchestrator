@@ -66,7 +66,8 @@ import { readRegistry } from "../registry.js";
 // profile_requires_delivery, profile_inline_conflict, delivery_invalid,
 // invalid_verification_path.
 // Section-level advisory codes (do NOT affect contractValid): workspace_unbound,
-// registry_unreadable, agent_not_found, referenced_path_probe_miss.
+// registry_unreadable, agent_not_found, referenced_path_probe_miss,
+// verification_dir_test_form, verification_bare_node.
 export const CONTRACT_CHECK_ISSUE_CODES = Object.freeze([
   "profile_unknown",
   "profile_requires_delivery",
@@ -77,6 +78,8 @@ export const CONTRACT_CHECK_ISSUE_CODES = Object.freeze([
   "registry_unreadable",
   "agent_not_found",
   "referenced_path_probe_miss",
+  "verification_dir_test_form", // TD-227: non-flag after --test has no * or .js/.mjs/.cjs suffix.
+  "verification_bare_node", // TD-227: bare node/node.exe with --test bypasses the Node 22 shim.
 ]);
 
 // The frozen closed set of advisory sections. Single SSOT: the service inits its
@@ -175,6 +178,27 @@ function* commandLiteralTokens(command) {
     }
     yield buf;
   }
+}
+
+// TD-227: pure string lint; no filesystem or shell evaluation. Reuse the
+// quote-aware literal scanner, and inspect both resolved verification lists.
+function lintVerificationCommands(commands) {
+  let directoryForm = false;
+  let bareNode = false;
+  for (const command of commands) {
+    if (typeof command !== "string") continue;
+    const argv = [...commandLiteralTokens(command)];
+    const testAt = argv.indexOf("--test");
+    if (testAt < 0) continue;
+    if (argv.slice(testAt + 1).some((arg) => arg.length > 0
+      && !arg.startsWith("-") && !arg.includes("*") && !/\.(?:js|mjs|cjs)$/.test(arg))) {
+      directoryForm = true;
+    }
+    const usesShim = argv.slice(1, testAt).some((arg) =>
+      arg.replace(/\\/g, "/").replace(/^\.\//, "") === "scripts/wao-node.cjs");
+    if (/^node(?:\.exe)?$/i.test(argv[0]) && !usesShim) bareNode = true;
+  }
+  return { directoryForm, bareNode };
 }
 
 /**
@@ -454,6 +478,23 @@ export async function runDispatchContractCheck({
     }
   }
 
+  // One contract observation preserves the MCP one-per-section output bound,
+  // including when both TD-227 codes and the TD-157 path probe fire together.
+  const verificationObservations = [];
+  const verificationCommands = resolved.ok ? [
+    ...(resolved.verification.commands ?? []),
+    ...(resolved.verification.setupCommands ?? []),
+  ] : [];
+  const lint = lintVerificationCommands(verificationCommands);
+  if (lint.directoryForm) {
+    issueCodes.push("verification_dir_test_form");
+    verificationObservations.push("verification uses a suspected directory argument after --test — use a glob or a .js/.mjs/.cjs file (advisory; reported only)");
+  }
+  if (lint.bareNode) {
+    issueCodes.push("verification_bare_node");
+    verificationObservations.push("verification uses bare node with --test — use scripts/wao-node.cjs or an npm script to select Node 22 (advisory; reported only)");
+  }
+
   // ===== TD-157: referenced-path advisory probe (fail-open; never gates) =====
   // Consumes the RESOLVED effective verification commands — so inline and
   // profile states are covered by the same path naturally. Runs only when the
@@ -471,19 +512,19 @@ export async function runDispatchContractCheck({
   if (resolved.ok && probeRoot) {
     const missed = probeReferencedPathsForMiss({
       root: probeRoot,
-      commands: [
-        ...(resolved.verification.commands ?? []),
-        ...(resolved.verification.setupCommands ?? []),
-      ],
+      commands: verificationCommands,
       allowedPaths: Array.isArray(delivery?.allowedPaths) ? delivery.allowedPaths : [],
       pathExists: pathExistsFn ?? defaultWorkspacePathExists,
     });
     if (missed) {
       issueCodes.push("referenced_path_probe_miss");
-      observations.push(
+      verificationObservations.push(
         "one or more referenced relative paths were not found under the bound workspace (advisory probe; reported only)",
       );
     }
+  }
+  if (verificationObservations.length > 0) {
+    observations.push(verificationObservations.join(" "));
   }
 
   // contractValid reflects ONLY contract-level issue codes. workspace/registry
