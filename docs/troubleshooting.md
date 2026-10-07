@@ -30,7 +30,7 @@
 | claude-code wrapper 401 / worker 连不上 provider | [§7.1](#71-claude-code-wrapper-401worker-连不上-provider) |
 | worker 在错误项目目录干活 | [§7.4](#74-worker-在错误目录干活) |
 | agents.json 配置过时/缺 tokenBudget | [§7.5](#75-agentsjson-配置漂移) |
-| WAO 派发的 claude-code worker 看不到用户级 skills/配置（临时 CLAUDE_CONFIG_DIR 隔离） | [§7.13](#713-claude-code-worker-看不到用户级-claudeskills临时-claude_config_dir-隔离td-221) |
+| claude-code worker 看不到用户级 skills（TD-221） | [§7.13](#713-claude-code-worker-看不到用户级-skills临时-claude_config_dirtd-221) |
 | 不确定环境是否就绪 | [§7.6 wao doctor](#76-wao-doctor-体检) |
 | run completed 但 messages 空 / 无 assistant text | [§7.7 证据链断链](#77-worker-输出证据为空但-run-completed证据链断链高危) |
 | 认证判 draft-only/rejected 但模型应该会 | [§7.8 认证误判](#78-认证判-draft-onlyrejected-但模型其实会认证误判) |
@@ -227,7 +227,7 @@ serve 后台进程不一定。
 
 - **症状**：派发/执行终态 `spawn_error`，`run.error` 写着 `spawn C:\...\node.exe ENOENT`，但该 node.exe 实际存在（2026-08-16 一批 22 条 researcher 派发即此形状）
 - **判读**：**报错归咎 node.exe 但 node.exe 存在时，真因几乎总是 cwd 目录不存在**（Node spawn 的经典陷阱：`cwd` 选项指向不存在的目录时，ENOENT 会归咎到可执行文件名上）。工作目录来自显式 `--cwd`，否则来自 registry 条目的 `cwd`。（历史：2026-08-16 事故的批量来源是 example 模板的占位路径 `D:/projects/your-project`——该占位已由 R8-1 上游消除，模板 cwd 统一为 `.`，恒存在；本节判读价值保留给**自配 cwd 打错/目录后被删**的情形。R8-1 的 trade-off——忘传 `--cwd` 从此变成静默落在派发进程 cwd 而非早拒绝——见 §3.1。）
-- **现状**：已双层早拒绝。**承重层是前台执行通道**（`run` 前台 / workflow agent 节点 / daemon `start` / `retry` → RunManager.start；`resume` 的进程重放分支 → RunManager.resume 同款防护）——2026-08-16 的 22 条事故 transcript 全部 run.started 先行（无 background_submitted）且带 wf_*.jsonl 兄弟，即 workflow 通道，走的正是此层；**后台派发通道**（`run --background` / `spawn` / MCP `run_dispatch`）在派发服务层（dispatchRun）是同款 typed 早拒绝的预防面。两层均按 backend 能力划分（`preflightInvocation`）：本地进程式 backend 两层都查，HTTP serve backend（cwd 是远端目录提示）两层一致豁免。预测 cwd 解析（`path.resolve`）后不是已存在目录（存在但是文件同样算）时，在任何 transcript 写入/worktree 创建/fork/spawn 之前抛 typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，message 含解析后的绝对路径与来源标注）。**旧 transcript 见此判读**
+- **现状**：已双层早拒绝——前台执行通道（RunManager.start/resume）与后台派发通道（dispatchRun）在 transcript 写入/worktree 创建/fork/spawn **之前**，按 backend 能力（`preflightInvocation`；HTTP serve backend 豁免——cwd 是远端提示）预测 `path.resolve` 后非已存在目录（是文件同样算）即抛 typed error `DispatchCwdNotFoundError`（reasonCode `dispatch_cwd_not_found`，message 含解析后绝对路径与来源）。**旧 transcript 见此判读**
 - **修复**：`--cwd` 指向已存在的目标目录，或把 agents.json 里该 worker 的 `cwd` 改成真实项目路径（派发/执行会显式拒绝并指路，不会再走到 spawn 期）。`wao doctor` 对 registry 里不存在的本地进程式 worker cwd 会预先给 WARN（R8-2）
 
 ---
@@ -422,12 +422,8 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 
 - **何时跑**：部署前、出问题时第一件事、定期
 - **命令**：`npm run cli -- wao doctor [--registry config/agents.json] [--cwd <目标项目>] [--format json]`；CI 想把 WARN 也卡成非零退出可加 `--warn-as-error`（只改退出码，不改报告内容）
-- **检查项**（scoped——只按 registry 里保留的 worker 收窄，不再 4 CLI / 3 key 全查）：
-  - Node 版本（>=22）
-  - 保留 worker 需要的 CLI 在 PATH（没有 worker 需要的 CLI 显示 INFO 跳过，不判 FAIL）
-  - 保留 worker 声明的 provider key（进程 env 或 Windows User 作用域；kimi-code 走 CLI 登录态，不查 API key）
-  - agents.json 完整性（opencode worker 必须配 tokenBudget——06-18 事故防线）
-  - 保留 worker 的 registry `cwd` 存在性（R8-2：本地进程式 backend 逐 worker 检查 `path.resolve` 后是否为已存在目录；不存在给 WARN + fix 提示——R8-C 起 detail 附 `run:` 子句，sessionReuse worker 的措辞区分实际先发的拒因（后台族不带 --cwd 先报 SessionReuseWorkspaceRequiredError）。`.` 解析为发起派发的进程的 cwd（CLI 通道=你敲命令时所在目录；MCP 通道=MCP 服务进程的 cwd，由 host 决定）恒存在、不误报，R8-C 起对 cwd 为 `.` 的 worker 出一条 INFO 落点提示（不计 DEGRADED）；HTTP serve backend（opencode-serve）的 cwd 是远端目录提示，与派发层能力豁免对称，不检查。环境类检查落 doctor 而非 `registry validate`——后者是纯静态 schema）
+- **检查项**（scoped——只按 registry 保留 worker 收窄；逐项语义以 doctor 输出与 src/commands/doctor.js 为权威，此处只列要点）：
+  - Node 版本（>=22）；保留 worker 的 CLI 在 PATH（无 worker 需要 CLI 时 INFO 跳过）；声明的 provider key（进程 env 或 Windows User 作用域；kimi-code 走 CLI 登录态）；agents.json 完整性（opencode worker 必须配 tokenBudget——06-18 事故防线）；registry `cwd` 存在性（`path.resolve` 后须为已存在目录；`.` 解析为派发进程 cwd 恒存在不误报，语义详见 §3.1/§7.4；sessionReuse worker 的 WARN 措辞区分实际先发拒因）；承重 env 变量存在性（5b，TD-218，值不回显）；claude OAuth 临时目录报数（5c，TD-223，dry-run 永不删）。HTTP serve backend 的 cwd 是远端目录提示，不检查。环境类检查落 doctor 而非 `registry validate`（后者纯静态 schema）。
   - 目标项目的 `.wao/` 是否 init（未 init / fresh clone 缺槽位是 WARN，结构混乱才是 FAIL）
 - **判读**（advisory，非门禁——doctor 不自动阻断任何派发，verdict 行自带"（advisory，非门禁）"标注）：
   - `HEALTHY`：无 FAIL 无 WARN，可直接继续
@@ -483,12 +479,11 @@ WAO 的完成判定有两种模式：`snapshot-stable`（默认）和 `first-sta
 - **内部 subagent 事件导致失败**：这是预期 containment。WAO 的 worker 不能再通过 DSH 内部编排绕过 Lead/WAO；关闭 composition 中的 subagent/workflow 后再派发。
 - **认证显示 null**：认证按 agent id + backend + model 绑定。把同名 worker 从 claude-code 切到 DSH 后，旧认证不会继承；先做真实 canary，再由 Owner 决定是否运行完整 reliability。
 
-### 7.13 claude-code worker 看不到用户级 ~/.claude/skills（临时 CLAUDE_CONFIG_DIR 隔离，TD-221）
+### 7.13 claude-code worker 看不到用户级 skills（临时 CLAUDE_CONFIG_DIR，TD-221）
 
-- **症状**：用户日常 `~/.claude/skills` 里装好的技能，WAO 派发的 claude-code worker 会话里不可见（`/技能名` 不存在、Skill 工具列不出）；反过来，worker 往「自己 harness」装到 `~/.claude` 的东西，对后续 WAO 派发的会话也不生效。
-- **根因**：native OAuth 通道的 claude-code worker 运行于 `CLAUDE_CONFIG_DIR=%TEMP%\wao-claude-oauth-*` 临时隔离目录（2026-10-05 起 TD-210 bare×OAuth 互斥的技术解：目录内只有凭据副本，hooks/settings/CLAUDE.md/插件/技能全空，比 `--bare` 更纯净）。它的「个人级技能目录」就是该临时目录——与用户日常 `~/.claude` 完全隔离。这是**设计行为**（会话纯净性 + 认证可比性），不是 bug。
-- **逃生门**：任务确实需要访问用户目录下的特定内容时，往该 lane 的注册表 `args` 加 `--add-dir <最窄目录>`（例如只要读 `~/.claude/skills` 就指它，**不要**给整个用户主目录）。`--add-dir C:\Users\17865` 形态已实测有效（2026-10-06）。注意：`args` 是注册表级常驻透传——改它影响该 lane 后续所有派发，属于 lane 变更（按 certification-runbook 第一段走 drift 检查）；继承任何用户级配置都会让「认证过的席位=固定行为」失效，能不继承就不继承。
-- **代价提醒**：`--add-dir <home>` 等于把整个用户主目录交给该 worker（含凭据、私钥等一切可读文件），只在任务确需时用最窄路径。
+- **症状**：用户日常 `~/.claude` 的技能/插件/设置对 WAO 派发的 claude-code worker 不可见；反向同理。
+- **根因**：native OAuth 通道 worker 运行于 `%TEMP%\wao-claude-oauth-*` 临时隔离目录（TD-210 技术解，只含凭据副本其余全空——设计行为；机制详见 src/backends/claudeCode.js 头注释与 TD-221 台账行）。
+- **逃生门**：确需访问用户目录特定内容时，往该 lane 注册表 `args` 加 `--add-dir <最窄目录>`（勿给整个主目录；实测有效 2026-10-06）。`args` 为注册表级常驻透传，改动按 lane 变更走 drift 检查。
 
 ---
 
