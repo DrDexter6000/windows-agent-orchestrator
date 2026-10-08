@@ -42,9 +42,8 @@ import {
   projectCorrections,
   CORRECTION_OUTCOMES,
   CORRECTION_REJECTION_REASONS,
-  // TD-234 验收修（astra R3）：识别 CAS 政策类 typed 错误（意外异常透传）。
-  RepackageCasPolicyError,
-  DeliveryDecisionPolicyError,
+  // TD-234 验收修（opus C5）：CAS 形状拒绝专用类型（其余异常一律意外上抛）。
+  CorrectionShapeError,
 } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
@@ -203,12 +202,12 @@ export async function correctRun({
     // TD-234 验收修（astra R3，2026-10-08）：锁内读失败等基础设施故障现在
     // 原样上抛（意外错误出口）——无差别 catch 会把 I/O 故障误报成
     // malformed_input（astra 实测复现）。
-    // 区分判据：本 CAS 原语的形状拒绝是自造 plain Error（无 .code）；I/O 故障
-    // 是 Node 系统错误（恒带 string .code，如 EACCES/ENOENT）。带系统码=意外，
-    // 原样上抛；typed 政策错误（理论不可达于此原语，防御性）同样上抛。
-    if (err instanceof RepackageCasPolicyError || err instanceof DeliveryDecisionPolicyError) throw err;
-    if (err && typeof err.code === "string") throw err;
-    return reject("malformed_input");
+    // 会审验收修（opus C5 + astra P2-1，2026-10-08）：只认专用类型
+    // CorrectionShapeError（CAS 形状拒绝）归 malformed_input；其余一律意外
+    // 上抛——含 Node 系统错误（EACCES 等带 .code）、SyntaxError（账本损坏）、
+    // 锁超时（无码 plain Error）等基础设施故障，不再按"有无 .code"推断。
+    if (err instanceof CorrectionShapeError) return reject("malformed_input");
+    throw err;
   }
   if (res.queued) return { ...base, outcome: "queued", reason: null };
   // Lost the terminal race inside the lock (the run terminated between this

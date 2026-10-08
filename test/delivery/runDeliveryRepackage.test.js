@@ -63,6 +63,24 @@ function git(args, cwd) {
   }).trim();
 }
 
+// TD-233 B 辅助：带 WAO 交付身份 env 的 git（commit-tree 需要内联身份，
+// 不能依赖仓库 local config——身份必须恰是 assertDeliveryIdentity 认的那套）。
+function gitWithIdentity(cwd, args) {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "ignore"],
+    windowsHide: true,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "WAO Delivery",
+      GIT_AUTHOR_EMAIL: "wao-delivery@local",
+      GIT_COMMITTER_NAME: "WAO Delivery",
+      GIT_COMMITTER_EMAIL: "wao-delivery@local",
+    },
+  }).trim();
+}
+
 async function cleanupDir(dir) {
   for (let attempt = 0; attempt < 6; attempt += 1) {
     try {
@@ -2137,18 +2155,23 @@ test("TD-233 A: backend_failed crash-window candidate with a provable WAO packag
 test("TD-233 B: merge-commit forgery (second parent smuggles changes past first-parent diff) is rejected", async () => {
   const s = await setupBackendFailureScenario();
   try {
-    // opus 反例形态：合并提交第一父非 base、第二父走私改动——旧 `HEAD^` 只看
-    // 第一父是否为 base、diff-tree 只比第一父树，双检查都可被绕过。单父强校验必拒。
-    // 在 wao/<RUN_ID> 分支上做：side 链 → reset 回 base → WAO 消息提交 → merge side。
+    // opus 验收复现形态（真实 [base, X] 合并，比方案轮反例更严格）：commit-tree
+    // 直接构造 parents=[base, side] 的合并提交 M，树里带 src/forged.js——旧
+    // `HEAD^`==base ✓、count==1 ✓、diff-tree（比第一父树）=[] 全过，改动被藏进
+    // changedFiles:[]。单父强校验必拒。
     git(["add", "."], s.worktreePath);
     git(["commit", "-m", "side changes"], s.worktreePath);
     const sideHash = git(["rev-parse", "HEAD"], s.worktreePath).trim();
-    git(["reset", "-q", "--hard", s.baseCommit], s.worktreePath);
+    // 建 tree：当前 index（base 树 + src/forged.js）
     mkdirSync(join(s.worktreePath, "src"), { recursive: true });
     writeFileSync(join(s.worktreePath, "src", "forged.js"), "forged\n", "utf8");
     git(["add", "src/forged.js"], s.worktreePath);
-    git(["commit", "-m", `wao-delivery: ${RUN_ID}`], s.worktreePath);
-    git(["merge", "--no-ff", "-m", `wao-delivery: ${RUN_ID}`, sideHash], s.worktreePath);
+    git(["reset", "-q", "--soft", s.baseCommit], s.worktreePath);
+    const tree = git(["write-tree"], s.worktreePath).trim();
+    const forged = gitWithIdentity(s.worktreePath,
+      ["commit-tree", tree, "-p", s.baseCommit, "-p", sideHash, "-m", `wao-delivery: ${RUN_ID}`]).trim();
+    git(["update-ref", `refs/heads/wao/${RUN_ID}`, forged], s.worktreePath);
+    git(["reset", "-q", "--hard", forged], s.worktreePath);
     await assert.rejects(
       () => runDeliveryRepackage({
         runId: RUN_ID, runDir: s.runDir, allowedPaths: ["src", "root.txt", "src/forged.js"], authorizedWorkspaceRoot: s.repo,

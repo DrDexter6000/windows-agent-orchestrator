@@ -508,6 +508,12 @@ export function assertDeliveryCommitInRepository({ repoRoot, deliveryRef }) {
   const committedFiles = parseNul(
     git(["diff", "--no-renames", "--name-only", "-r", "-z", `${canonicalBase}`, canonicalDelivery], { cwd }),
   ).sort();
+  // 会审验收修（astra P2-3，2026-10-08）：空清单在内核同样拒绝——单父==base、
+  // 树==base 的空提交配 changedFiles:[] 曾可通过纯等值比较；与 recover 的
+  // 非空拒绝对称。
+  if (committedFiles.length === 0) {
+    throw new DeliveryError("artifact_mismatch", "delivery commit contains no changes vs base");
+  }
   const expectedFiles = [...deliveryRef.changedFiles].sort();
   if (committedFiles.length !== expectedFiles.length ||
       committedFiles.some((p, i) => p !== expectedFiles[i])) {

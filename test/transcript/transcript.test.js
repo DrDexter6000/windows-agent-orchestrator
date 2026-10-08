@@ -2566,7 +2566,7 @@ test("TD-234 council R2: ENOENT on an EXISTING ledger (initialSeq>0) is an error
     (e) => e && e.code === "ENOENT",
     "initialSeq>0 的 ENOENT 上抛（不造孤儿事实）",
   );
-  assert.equal(await (await import("node:fs/promises")).existsSync?.(filePath) ?? false, false, "零追加");
+  assert.equal((await import("node:fs")).existsSync(filePath), false, "零追加（会审修 opus：原 existsSync 取自 fs/promises 是空断言恒真）");
 });
 
 test("TD-234 council R2: ENOENT after this instance already appended is an error (EXACTLY-ONCE not bypassable)", async () => {
@@ -2602,4 +2602,45 @@ test("TD-234 council R2: ENOENT after this instance already appended is an error
   }
   const lines = (await real(filePath, "utf8")).trim().split("\n").filter(Boolean);
   assert.equal(lines.length, 1, "声明仍恰一条");
+});
+
+
+// 会审验收修回归钉（astra P2-2，2026-10-08）：去重提前返回（recorded:false）也
+// 必须同步 this.seq——否则同文件的【新实例】（seq=0）仍可借 ENOENT 豁免追加
+// 第二条声明（EXACTLY-ONCE 绕过）。
+test("TD-234 council P2-2: dedupe early-return syncs seq — a fresh instance cannot bypass EXACTLY-ONCE via ENOENT", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "td234-p22-"));
+  try {
+    const filePath = join(dir, "fw.jsonl");
+    const first = new JsonlTranscript(filePath, { runId: "run_p22", agentId: "w" });
+    const r1 = await first.appendReadOnlyDeclared();
+    assert.equal(r1.recorded, true, "首写一条声明");
+    // 新实例：先正常读到既有账本（dedupe 提前返回）——seq 必须被同步。
+    const second = new JsonlTranscript(filePath, { runId: "run_p22", agentId: "w" });
+    const r2 = await second.appendReadOnlyDeclared();
+    assert.equal(r2.recorded, false, "去重提前返回");
+    assert.ok(second.seq > 0, `seq 已同步（=${second.seq}）`);
+    // 此后锁内 ENOENT（注入）→ 不再命中 seq===0 豁免 → 上抛。
+    const fsP = (await import("node:fs/promises")).default;
+    const { syncBuiltinESMExports: sync } = await import("node:module");
+    const fault = Object.assign(new Error("vanished"), { code: "ENOENT" });
+    const real = fsP.readFile;
+    fsP.readFile = async (p, ...rest) => {
+      if (p === filePath) throw fault;
+      return real(p, ...rest);
+    };
+    sync();
+    try {
+      await assert.rejects(
+        () => second.appendReadOnlyDeclared(),
+        (e) => e === fault,
+        "去重后的 ENOENT 上抛（不绕 EXACTLY-ONCE）",
+      );
+    } finally {
+      fsP.readFile = real;
+      sync();
+    }
+    const lines = (await real(filePath, "utf8")).trim().split("\n").filter(Boolean);
+    assert.equal(lines.length, 1, "声明仍恰一条");
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });

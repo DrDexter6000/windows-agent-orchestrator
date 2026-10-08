@@ -1844,3 +1844,42 @@ test("ID-B1: packageDelivery identity check issues exactly ONE git query (NUL-ba
     "the single query must be the structured NUL four-field form against the same ref (HEAD)",
   );
 });
+
+
+// 会审验收修回归钉（astra P2-3，2026-10-08）：内核空清单拒绝——单父==base、
+// 树==base、正确消息/身份的【空提交】配 changedFiles:[] 曾可通过纯等值比较；
+// 现与 recover 的非空拒绝对称。
+test("TD-233 council P2-3: kernel rejects an empty-changes delivery commit (parity with recover)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wao-p23-"));
+  try {
+    execSync("git init -b main", { cwd: dir, stdio: "ignore" });
+    execSync('git config user.email "wao-delivery@local"', { cwd: dir, stdio: "ignore" });
+    execSync('git config user.name "WAO Delivery"', { cwd: dir, stdio: "ignore" });
+    await mkdir(join(dir, "src"), { recursive: true });
+    await writeFile(join(dir, "src", "a.js"), "const a = 1;\n");
+    execSync("git add .", { cwd: dir, stdio: "ignore" });
+    execSync('git commit -m "init"', { cwd: dir, stdio: "ignore" });
+    const baseCommit = execSync("git rev-parse HEAD", { cwd: dir, encoding: "utf8" }).trim();
+    // 空提交：单父==base、树==base、WAO 消息与身份。
+    execSync(`git commit --allow-empty -m "wao-delivery: ${RUN_ID}"`, { cwd: dir, stdio: "ignore" });
+    const deliveryCommit = execSync("git rev-parse HEAD", { cwd: dir, encoding: "utf8" }).trim();
+    const { assertDeliveryCommitInRepository } = await import("../../src/delivery.js");
+    await assert.rejects(
+      async () => assertDeliveryCommitInRepository({
+        repoRoot: dir,
+        deliveryRef: {
+          schemaVersion: 1, kind: "git_commit", runId: RUN_ID,
+          baseCommit, deliveryCommit, branch: "main", worktreePath: dir,
+          changedFiles: [],
+          verification: { status: "passed", commands: ["npm test"], verifiedCommit: deliveryCommit, results: [] },
+          acceptance: { status: "pending", reviewerType: "lead_agent" },
+          integration: { status: "pending", targetCommit: null },
+        },
+      }),
+      (e) => e.deliveryCode === "artifact_mismatch" && /no changes vs base/.test(e.message),
+      "空清单提交被内核拒绝（与 recover 对称）",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -266,6 +266,16 @@ export class DeliveryDecisionPolicyError extends Error {
 
 // TD-231: CAS policy subset of the application repackage rejection contract.
 // Consumers must check both the dedicated type and this closed set.
+// TD-234 验收修（opus C5，2026-10-08）：correction CAS 的形状拒绝专用类型——
+// 调用方（runCorrection）只把这一类归为 malformed_input，其余（锁超时、
+// SyntaxError、I/O 故障——共同点是无系统码的 plain Error）一律意外上抛。
+export class CorrectionShapeError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "CorrectionShapeError";
+  }
+}
+
 export const REPACKAGE_CAS_POLICY_CODES = Object.freeze([
   "durable_chain_inconsistent",
   "scope_violation",
@@ -867,12 +877,12 @@ export class JsonlTranscript {
     await mkdir(dirname(this.filePath), { recursive: true });
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
-      // TD-234（2026-10-08）+ 验收修（astra R2）：锁内读失败不再吞——ENOENT 仅在
-      // 【证明确为首写】时视为合法空账本（this.seq === 0：实例既无 initialSeq
-      // 也未写过任何事件）；既有账本（restart/resume 传 initialSeq>0，或本实例
-      // 已 append 过）的 ENOENT = 账本丢失/被删 = 异常，如实上抛——否则孤儿
-      // 状态事实与 EXACTLY-ONCE 绕过都可能（astra 两反例）。其余 I/O/解析故障
-      // 一律上抛。
+      // TD-234（2026-10-08）+ 验收修（astra R2/P2-2）：锁内读失败不再吞——
+      // ENOENT 仅在【证明确为首写】时视为合法空账本（this.seq === 0：实例既无
+      // initialSeq、未写过事件、也未读过非空账本）；既有账本（restart/resume 传
+      // initialSeq>0、本实例已 append、或本实例曾成功读到非空账本——含去重提前
+      // 返回路径，读取成功即同步 findLastEventSeq）的 ENOENT = 账本丢失 = 异常
+      // 上抛。其余 I/O/解析故障一律上抛。
       let events;
       try {
         events = await readTranscript(this.filePath);
@@ -880,9 +890,16 @@ export class JsonlTranscript {
         if (err && err.code === "ENOENT" && this.seq === 0) events = [];
         else throw err;
       }
+      if (events.length > 0) this.seq = Math.max(this.seq, findLastEventSeq(events));
       const already = events.some((e) => e && typeof e === "object"
         && e.type === "run.read_only_declared" && e.runId === this.context.runId);
-      if (already) return { recorded: false };
+      if (already) {
+        // 会审验收修（astra P2-2，2026-10-08）：成功读到既有账本这一事实必须
+        // 反映进 this.seq——否则同文件的后续新实例（seq=0）仍可借 ENOENT 豁免
+        // 绕过 EXACTLY-ONCE 追加重复声明。
+        this.seq = Math.max(this.seq, findLastEventSeq(events));
+        return { recorded: false };
+      }
       // In-lock direct write (same CAS discipline as tryClaimCorrection) — the
       // public append() re-acquires this lock, so it must NOT be called here.
       const seq = Math.max(this.seq, findLastEventSeq(events)) + 1;
@@ -936,12 +953,12 @@ export class JsonlTranscript {
     await mkdir(dirname(this.filePath), { recursive: true });
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
-      // TD-234（2026-10-08）+ 验收修（astra R2）：锁内读失败不再吞——ENOENT 仅在
-      // 【证明确为首写】时视为合法空账本（this.seq === 0：实例既无 initialSeq
-      // 也未写过任何事件）；既有账本（restart/resume 传 initialSeq>0，或本实例
-      // 已 append 过）的 ENOENT = 账本丢失/被删 = 异常，如实上抛——否则孤儿
-      // 状态事实与 EXACTLY-ONCE 绕过都可能（astra 两反例）。其余 I/O/解析故障
-      // 一律上抛。
+      // TD-234（2026-10-08）+ 验收修（astra R2/P2-2）：锁内读失败不再吞——
+      // ENOENT 仅在【证明确为首写】时视为合法空账本（this.seq === 0：实例既无
+      // initialSeq、未写过事件、也未读过非空账本）；既有账本（restart/resume 传
+      // initialSeq>0、本实例已 append、或本实例曾成功读到非空账本——含去重提前
+      // 返回路径，读取成功即同步 findLastEventSeq）的 ENOENT = 账本丢失 = 异常
+      // 上抛。其余 I/O/解析故障一律上抛。
       let events;
       try {
         events = await readTranscript(this.filePath);
@@ -949,6 +966,7 @@ export class JsonlTranscript {
         if (err && err.code === "ENOENT" && this.seq === 0) events = [];
         else throw err;
       }
+      if (events.length > 0) this.seq = Math.max(this.seq, findLastEventSeq(events));
       const existing = _detectExistingTerminal(events);
       const baseSeq = Math.max(this.seq, findLastEventSeq(events));
       const attemptEvents = Array.isArray(options.attemptEvents) ? options.attemptEvents : [];
@@ -1618,11 +1636,11 @@ export class JsonlTranscript {
   async tryAppendCorrectionRequested({ correctionId, prompt } = {}) {
     if (typeof correctionId !== "string" || !correctionId
       || correctionId.length > CORRECTION_ID_MAX_LEN || !CORRECTION_ID_RE.test(correctionId)) {
-      throw new Error("tryAppendCorrectionRequested: correctionId must be 1..64 [A-Za-z0-9_-] chars");
+      throw new CorrectionShapeError("tryAppendCorrectionRequested: correctionId must be 1..64 [A-Za-z0-9_-] chars");
     }
     if (typeof prompt !== "string" || prompt.length === 0
       || prompt.length > CORRECTION_PROMPT_MAX_LEN) {
-      throw new Error("tryAppendCorrectionRequested: prompt must be 1..15000 chars");
+      throw new CorrectionShapeError("tryAppendCorrectionRequested: prompt must be 1..15000 chars");
     }
     await mkdir(dirname(this.filePath), { recursive: true });
     const releaseLock = await acquireAppendLock(this.filePath);

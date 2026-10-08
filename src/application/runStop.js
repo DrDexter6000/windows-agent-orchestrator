@@ -26,7 +26,7 @@
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { JsonlTranscript, readTranscript, findState, findLatestBound, STATE_CHANGE_REASON } from "../transcript.js";
+import { JsonlTranscript, readTranscript, findState, findLatestBound, STATE_CHANGE_REASON, findLastEventSeq } from "../transcript.js";
 import { OpenCodeServeBackend } from "../backends/opencodeServe.js";
 import { executeStopWithVerification } from "../backends/opencodeStopVerify.js";
 import { raiseAlert } from "../alerts.js";
@@ -187,6 +187,11 @@ export async function stopRun(input) {
   // Re-open transcript for writing
   const transcript = new JsonlTranscript(transcriptPath, {
     runId,
+    // TD-234 验收修（opus C3，2026-10-08）：既有账本的 last seq 必须随构造传入
+    // ——否则本实例 seq=0，若账本在预读与加锁之间被删，transitionState 的
+    // ENOENT 豁免会把既有账本误判成空账本（孤儿 stop 事实）。与
+    // commands/shared.js:161 同款。
+    initialSeq: findLastEventSeq(events),
     // R13-C: bound read (same sweep as the session lookup above) — a foreign
     // tail run.started never supplies the writer context's agentId.
     agentId: findLatestBound(events, "run.started", runId)?.agentId ?? "unknown",

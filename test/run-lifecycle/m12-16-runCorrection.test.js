@@ -846,3 +846,31 @@ test("M12-16 TD-234 R3: locked CAS read failure propagates (never misreported ma
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+
+// 会审验收修回归钉（astra P2-1，2026-10-08）：锁内 CAS 读到的账本是损坏 JSON
+// （readTranscript JSON.parse 抛 SyntaxError，无 .code）→ 意外错误上抛，
+// 不再误报 malformed_input。
+test("M12-16 TD-234 P2-1: locked CAS parse failure (broken JSON) propagates, never malformed_input", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "m1216-p21-"));
+  try {
+    const { filePath } = await seedCorrectableRun(dir, { workspaceRoot: dir, running: true });
+    const real = fsPromisesDefault.readFile;
+    let reads = 0;
+    fsPromisesDefault.readFile = async (path, ...rest) => {
+      if (path === filePath && reads++ > 0) return "{broken-json";
+      return real(path, ...rest);
+    };
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(
+        () => correctRun({ runId: RUN_ID, correctionId: "p21probe", prompt: "p", runDir: dir, authorizedWorkspaceRoot: dir }),
+        (e) => e instanceof SyntaxError,
+        "锁内 JSON 解析失败按意外错误上抛（SyntaxError）",
+      );
+    } finally {
+      fsPromisesDefault.readFile = real;
+      syncBuiltinESMExports();
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
