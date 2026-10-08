@@ -722,6 +722,7 @@ test("G2: rejected preconditions (child alive) → throw, transcript + git uncha
   try {
     const filePath = join(env.runDir, `${RUN_ID}.jsonl`);
     const bytesBefore = readFileSync(filePath, "utf8");
+    const eventsBefore = await readTranscript(filePath);
     const headBefore = git(["rev-parse", "HEAD"], env.repo);
     await assert.rejects(
       runDeliveryRepackage({
@@ -734,10 +735,24 @@ test("G2: rejected preconditions (child alive) → throw, transcript + git uncha
       }),
       /process_missing liveness|not recovery-eligible|must be failed/i,
     );
-    assert.equal(readFileSync(filePath, "utf8"), bytesBefore, "transcript unchanged");
+    // TD-226（2026-10-08，glm-pro 交付）：typed 拒绝现落恰一条有界审计事件
+    // run.delivery_repackage_rejected（载荷仅 rejectionReason）——本测试原
+    // "transcript 零变化"钉与新可观测性设计冲突，按 TD-226 语义更新：唯一
+    // 允许的转录增量是该审计事件，无任何状态/结算/delivery 变更。
+    const eventsAfter = await readTranscript(filePath);
+    assert.equal(eventsAfter.length, eventsBefore.length + 1,
+      "唯一增量 = 恰一条审计事件");
+    const audit = eventsAfter[eventsAfter.length - 1];
+    assert.equal(audit.type, "run.delivery_repackage_rejected");
+    assert.equal(audit.rejectionReason, "liveness_proof_failed");
     assert.equal(git(["rev-parse", "HEAD"], env.repo), headBefore, "repo HEAD unchanged");
     // worktree branch HEAD unchanged too
     assert.equal(git(["rev-parse", "HEAD"], env.worktreePath), env.baseCommit);
+    const mutationTypes = new Set(["run.state_change", "run.delivery_created", "run.process_missing_confirmed"]);
+    const beforeMutations = eventsBefore.filter((e) => mutationTypes.has(e.type)).length;
+    const afterMutations = eventsAfter.filter((e) => mutationTypes.has(e.type)).length;
+    assert.equal(afterMutations, beforeMutations,
+      "无新增状态变更/结算/delivery——拒绝不是失败转移");
   } finally { await cleanupDir(env.repo); await cleanupDir(env.runDir); }
 });
 
@@ -758,7 +773,13 @@ test("G3: Lead scope must cover actual changed paths and include original — el
       }),
       /include the original allowedPaths|cover actual changed/i,
     );
-    assert.equal(readFileSync(filePath, "utf8"), bytesBefore, "no mutation on rejected scope");
+    // TD-226（2026-10-08）：typed 拒绝落恰一条有界审计事件——其余零变更。
+    const eventsAfter = await readTranscript(filePath);
+    const audit = eventsAfter[eventsAfter.length - 1];
+    assert.equal(audit.type, "run.delivery_repackage_rejected");
+    assert.equal(audit.rejectionReason, "scope_violation");
+    assert.equal(eventsAfter.filter((e) => e.type === "run.state_change" || e.type === "run.delivery_created" || e.type === "run.process_missing_confirmed").length, 3,
+      "种子状态事件之外无新增状态/结算/delivery");
   } finally { await cleanupDir(env.repo); await cleanupDir(env.runDir); }
 });
 
@@ -936,7 +957,13 @@ test("G8: pre-existing run.process_missing_confirmed on a NONTERMINAL run → re
       }),
       /process_missing_confirmed already exists/i,
     );
-    assert.equal(readFileSync(filePath, "utf8"), bytesBefore, "transcript byte-identical (no re-confirmation/transition)");
+    // TD-226（2026-10-08）：typed 拒绝（durable_chain_inconsistent）落恰一条审计；
+    // 其余字节零变化（无再确认/无转移）。
+    const eventsAfterG8 = await readTranscript(filePath);
+    assert.equal(eventsAfterG8.length, (await readTranscript(filePath)).length, "read stability");
+    const auditG8 = eventsAfterG8[eventsAfterG8.length - 1];
+    assert.equal(auditG8.type, "run.delivery_repackage_rejected");
+    assert.equal(auditG8.rejectionReason, "durable_chain_inconsistent");
     assert.equal(git(["rev-parse", "HEAD"], env.repo), headBefore, "repo HEAD unchanged");
     assert.equal(git(["rev-parse", "HEAD"], env.worktreePath), env.baseCommit, "worktree not packaged");
     // No terminal transition, no created event, no second confirmation.

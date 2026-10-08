@@ -50,11 +50,14 @@ test("TD-215 ①: 服务超窗 → status:pending 回执（isError 未设、stru
       assert.notEqual(res.isError, true, "pending 不是错误");
       // TD-215 定稿：schema 增 status 枚举（会审批准的契约最小扩展）——pending 带
       // structuredContent={status:"pending", runId}；ok 字段缺席（.optional 化）。
+      // TD-226（2026-10-08）：rejectionReason 为 required-nullable，pending 恒
+      // null（无拒绝在案）——键集含三键。
       assert.deepEqual(
         Object.keys(res.structuredContent ?? {}).sort(),
-        ["runId", "status"],
+        ["rejectionReason", "runId", "status"],
       );
       assert.equal(res.structuredContent?.status, "pending");
+      assert.equal(res.structuredContent?.rejectionReason, null, "pending 无拒绝在案");
       assert.match(text, /run_delivery_repackage pending/);
       assert.match(text, /typically continues server-side/);
       assert.match(text, /Do NOT blind-retry/);
