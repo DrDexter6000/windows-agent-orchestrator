@@ -249,9 +249,15 @@ export async function _sweepStaleVerifyWorktrees(gitFn, repoRoot) {
   let registered = new Set();
   // 归一化（分隔符/大小写——Windows 上 porcelain 与 join 的路径形态不一致）
   const norm = (p) => String(p).replace(/[\\/]+/g, "\\").toLowerCase();
-  try {
+  const listRegistered = () => {
     const list = String(gitFn(["worktree", "list", "--porcelain"], { cwd: repoRoot }));
-    for (const m of list.matchAll(/^worktree\s+(\S+)$/gm)) registered.add(norm(m[1]));
+    const s = new Set();
+    // 复核会审修：路径取整行余部（\S+ 漏含空格路径），trim 收边。
+    for (const m of list.matchAll(/^worktree (.+)$/gm)) s.add(norm(m[1].trim()));
+    return s;
+  };
+  try {
+    registered = listRegistered();
   } catch { /* 读不出注册表=无法证明失活——放弃本轮清扫 */ }
   if (registered.size === 0) return;
   const wtRoot = join(repoRoot, ".wao-worktrees");
@@ -265,6 +271,11 @@ export async function _sweepStaleVerifyWorktrees(gitFn, repoRoot) {
     if (!name.startsWith("verify-")) continue;
     const dir = join(wtRoot, name);
     if (registered.has(norm(dir))) continue; // 注册中=可能在役，不回收
+    // 复核会审修（astra）：快照后新建的并发 worktree 会落进本循环——删除前
+    // 重查一次注册表，命中即跳过（把误删窗口压到"重查与 rm 之间"这一极窄段）。
+    try {
+      if (listRegistered().has(norm(dir))) continue;
+    } catch { /* 重查失败=无法证明失活——跳过本目录，残留交下次 */ }
     try {
       await rm(dir, { recursive: true, force: true });
     } catch { /* best-effort：残留交给下次 */ }

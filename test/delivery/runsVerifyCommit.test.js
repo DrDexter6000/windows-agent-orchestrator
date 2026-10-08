@@ -430,7 +430,8 @@ test("TD-240 F3：trailer 行锚定——前缀碰撞与正文伪 trailer 不命
     const gitIn = (args, cwd) => execFileSync("git", args, { cwd, encoding: "utf8" });
     // 重写 commitA 的消息：正文伪 trailer（缩进）+ 尾部真 trailer 指向 decoy
     gitIn(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--amend", "-m",
-      `正文提到  WAO-Adopted-From: ${target}（缩进伪 trailer 不命中）\n\nWAO-Adopted-From: ${decoy}`], repo.path);
+      `正文提到 WAO-Adopted-From 字样。
+   WAO-Adopted-From: ${target}\n\nWAO-Adopted-From: ${decoy}`], repo.path);
     const amended = gitIn(["rev-parse", "HEAD"], repo.path).trim();
     await writeRunTranscript(runDir, target, repo.path, amended);
     const result = await runVerifyCommit(baseInput({
@@ -464,13 +465,10 @@ test("TD-240 F4：assume-unchanged / skip-worktree 位对复证隐身——在�
     const repo = makeRepo(join(scratch, "repo"));
     const runDir = join(scratch, "runs");
     await writeRunTranscript(runDir, "run_vc_bits", repo.path, repo.commitA);
-    // 命令把 tracked 文件改动后设置 assume-unchanged 位——status 隐身，但
-    // ls-files -v 小写位在场 ⇒ 复证必须按漂移处理（命令 exit 0 也不得 passed）
-    const { execFileSync } = await import("node:child_process");
-    const gitIn = (args, cwd) => execFileSync("git", args, { cwd, encoding: "utf8" });
-    void gitIn;
-    const stashBit = "git update-index --assume-unchanged f.txt"
-      + " && echo modified >> f.txt";
+    // 复核会审修（astra）：夹具用真实 tracked 文件（README.md 在 makeRepo 里
+    // 必在）且命令必须 exit 0——只有"改动+置位+命令成功"三全才证明是复证层
+    // （而非命令自身失败）拦下的漂移；断言 results 带 contentDrift。
+    const stashBit = "echo modified >> README.md && git update-index --assume-unchanged README.md && exit 0";
     const result = await runVerifyCommit(baseInput({
       runDir, runId: "run_vc_bits", repo, commit: repo.commitA,
       commands: [stashBit],
@@ -478,7 +476,22 @@ test("TD-240 F4：assume-unchanged / skip-worktree 位对复证隐身——在�
     assert.equal(result.status, "failed", "索引位隐身改动不得记 passed");
     const events = await readTranscript(join(runDir, "run_vc_bits.jsonl"));
     const outcome = findEvent(events, LEAD_COMMIT_CHECK_OUTCOME_TYPE);
-    assert.equal(outcome[outcome.length - 1].status, "failed");
+    const last = outcome[outcome.length - 1];
+    assert.equal(last.status, "failed");
+    assert.equal(last.results[0].exitCode, 0, "命令本身必须成功（否则测试空转——astra 复核反例）");
+    assert.equal(last.results[0].contentDrift, true, "拦截来自复证层：索引位在场按漂移记");
+    // skip-worktree 变体（S 位）同族拦
+    await writeRunTranscript(runDir, "run_vc_bits2", repo.path, repo.commitA);
+    const stashSkip = "echo modified >> README.md && git update-index --skip-worktree README.md && exit 0";
+    const r2 = await runVerifyCommit(baseInput({
+      runDir, runId: "run_vc_bits2", repo, commit: repo.commitA,
+      commands: [stashSkip],
+    }));
+    assert.equal(r2.status, "failed", "skip-worktree 位同样按漂移拒");
+    const ev2 = await readTranscript(join(runDir, "run_vc_bits2.jsonl"));
+    const o2 = findEvent(ev2, LEAD_COMMIT_CHECK_OUTCOME_TYPE);
+    assert.equal(o2[o2.length - 1].results[0].exitCode, 0);
+    assert.equal(o2[o2.length - 1].results[0].contentDrift, true);
   } finally {
     cleanupDir(scratch);
   }
