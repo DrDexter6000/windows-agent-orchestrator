@@ -648,6 +648,7 @@ Output:
 | source | string | no | enum: packaged \| recovered |
 | recoveryKind | string | no | enum: disallowed_scope \| backend_failed \| process_missing |
 | created | boolean | no |  |
+| rejectionReason | string\|null | yes | enum: malformed_input \| run_not_found \| workspace_not_authorized \| candidate_ineligible \| candidate_contract_malformed \| worktree_unusable \| inventory_unavailable \| inventory_incomplete \| inventory_empty \| scope_violation \| durable_chain_inconsistent \| concurrent_terminal_ineligible \| liveness_proof_failed |
 
 ## run_delivery_reverify
 
