@@ -689,7 +689,7 @@ MCP 边界的 `run_dispatch` 可选升级为"只派认证清单成员"（Owner �
 | `run.delivery_rejected` | TD-103：Lead 拒绝——含 updated DeliveryRef + deliveryCommit + reason | Phase 3C-2 |
 | `run.delivery_repackage_rejected` | TD-226：`run_delivery_repackage` 的 expected-policy 拒绝审计——payload 仅闭集 `rejectionReason`（无路径/凭据/计数），每次被拒尝试恰一条；`malformed_input`/`run_not_found` 不落 | TD-226 |
 | `run.read_only_declared` | Round 4：只读声明（`run_dispatch` 顶层 `readOnly:true` / CLI `run --read-only`）——start 时恰一次的 durable 事实；payload 为空（envelope 即事实，无 prompt/路径/argv），其存在是 `run_activity` 附带 `readOnlyObservation` 观察投影的权威输入，本身不构成任何门 | R4 |
-| `run.lead_commit_check_started` | TD-240：`runs verify-commit` 首命令前写入——checkId 随机 nonce、受检提交全形、命令清单原文 + commands-file 字节 sha256、timeoutMs、终态判定依据（state_change/legacy_inferred）、提交关系事实字段（isDeliveryCommit/containsDeliveryCommit/adoptedFromTrailer，记事实不设拒）；`kind:"lead_self_check"` + `independentAuditRequired:true` 边界锁；仅 started 无 outcome = 合法**不完整**证据（绝不读作通过） | TD-240 |
+| `run.lead_commit_check_started` | TD-240：`runs verify-commit` 首命令前写入——checkId 随机 nonce、受检提交全形、命令清单原文 + commands-file 字节 sha256、timeoutMs、终态判定依据（准入只认终态 run.state_change；legacy 推断终态无准入资格——追加自检事件会翻转其推断状态）、提交关系事实字段（isDeliveryCommit/containsDeliveryCommit/adoptedFromTrailer，记事实不设拒）；`kind:"lead_self_check"` + `independentAuditRequired:true` 边界锁；仅 started 无 outcome = 合法**不完整**证据（绝不读作通过） | TD-240 |
 | `run.lead_commit_check_outcome` | TD-240：`runs verify-commit` 收口——status∈{passed,failed,aborted}、results[]（index/exitCode/timedOut/durationMs + 失败 8KiB 尾，TD-130 式）、独立 cleanup∈{ok,failed} 字段；不做恰一条 CAS（允许多次核验，checkId 区分）；事件族**不进** validateDeliveryFacts/decide/wao accept 任何判定输入 | TD-240 |
 | `workflow.*` | DAG 节点级事件（workflow.started/completed、node.started/completed），独立 `wf_*.jsonl` | M5 |
 

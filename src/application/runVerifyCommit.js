@@ -11,7 +11,7 @@
 //
 // 裁定对照（偏离任何一条即回会审）：
 //   ① 事件落点 = CLI 指定 runId（不反推提交归属）；仅接受已终态（findState 落
-//      TERMINAL_STATES，判定依据 state_change/legacy_inferred 记录进 started
+//      TERMINAL_STATES（只认 state_change——legacy 推断拒绝，验收修 F1），判定依据记录进 started
 //      事件）且转录含恰好一条可用 run.delivery_created 的 run；信封 agentId
 //      沿用该 run 真实 agentId（repackage :754 形态 events[0]?.agentId）；提交
 //      关系记事实字段不设拒（isDeliveryCommit/containsDeliveryCommit/
@@ -115,7 +115,7 @@ export const LEAD_COMMIT_CHECK_OUTCOME_TYPE = "run.lead_commit_check_outcome";
 export const LEAD_COMMIT_CHECK_KIND = "lead_self_check";
 export const LEAD_COMMIT_CHECK_STATUSES = Object.freeze(["passed", "failed", "aborted"]);
 export const LEAD_COMMIT_CHECK_CLEANUP_STATUSES = Object.freeze(["ok", "failed"]);
-export const LEAD_COMMIT_CHECK_TERMINALITY_BASES = Object.freeze(["state_change", "legacy_inferred"]);
+export const LEAD_COMMIT_CHECK_TERMINALITY_BASES = Object.freeze(["state_change"]); // 会审验收修 F1：legacy 无准入资格，basis 字段保留 legacy_inferred 仅用于拒绝时的依据记录
 
 // ===== 内部 git 执行（delivery.js 同款纪律：结构化参数，绝不拼 shell 串） =====
 
@@ -221,6 +221,12 @@ function _worktreeIntact(gitFn, wtPath, commit) {
       { cwd: wtPath },
     ));
     if (porcelain.trim().length > 0) return false;
+    // 会审验收修（F4，astra）：assume-unchanged / skip-worktree 位可对
+    // status/diff 隐身改动——ls-files -v 里小写 h（assume-unchanged）与
+    // S（skip-worktree）即异常标志，在场一律按漂移处理（fail-closed，不
+    // 信任索引标志，强制走真实 tracked 内容检查面）。
+    const ls = String(gitFn(["ls-files", "-v"], { cwd: wtPath }));
+    if (/(^|\n)([a-z]|S)/.test(ls)) return false;
     return true;
   } catch {
     return false;
@@ -232,10 +238,22 @@ function _worktreeIntact(gitFn, wtPath, commit) {
  * 遗留）。全部 best-effort：prune/清扫失败不阻塞本次核验（worktree add 自带
  * 目录名随机性，碰撞概率可忽略；残留只会占磁盘）。
  */
-async function _sweepStaleVerifyWorktrees(gitFn, repoRoot) {
+export async function _sweepStaleVerifyWorktrees(gitFn, repoRoot) {
   try {
     gitFn(["worktree", "prune"], { cwd: repoRoot });
   } catch { /* best-effort */ }
+  // 会审验收修（F2，astra+opus）：只回收"可证明失活"的目录——仍在
+  // `git worktree list` 注册中的 verify-* 属于可能活着的并发核验（或未及
+  // self-clean 的本实例），一律跳过；仅清除未注册的孤儿目录（崩溃残留）。
+  // 调用点在闸前：安全性由注册检查承担（worktree add 即注册，活实例恒在册）；
+  let registered = new Set();
+  // 归一化（分隔符/大小写——Windows 上 porcelain 与 join 的路径形态不一致）
+  const norm = (p) => String(p).replace(/[\\/]+/g, "\\").toLowerCase();
+  try {
+    const list = String(gitFn(["worktree", "list", "--porcelain"], { cwd: repoRoot }));
+    for (const m of list.matchAll(/^worktree\s+(\S+)$/gm)) registered.add(norm(m[1]));
+  } catch { /* 读不出注册表=无法证明失活——放弃本轮清扫 */ }
+  if (registered.size === 0) return;
   const wtRoot = join(repoRoot, ".wao-worktrees");
   let entries;
   try {
@@ -245,8 +263,10 @@ async function _sweepStaleVerifyWorktrees(gitFn, repoRoot) {
   }
   for (const name of entries) {
     if (!name.startsWith("verify-")) continue;
+    const dir = join(wtRoot, name);
+    if (registered.has(norm(dir))) continue; // 注册中=可能在役，不回收
     try {
-      await rm(join(wtRoot, name), { recursive: true, force: true });
+      await rm(dir, { recursive: true, force: true });
     } catch { /* best-effort：残留交给下次 */ }
   }
 }
@@ -279,15 +299,18 @@ async function _removeVerifyWorktree(gitFn, repoRoot, wtPath) {
   return existsSync(wtPath) ? "failed" : "ok";
 }
 
-/** 裁定①：终态判定 + 依据。bound = 本 runId 信封绑定事件。 */
+/** 裁定①：终态判定 + 依据。bound = 本 runId 信封绑定事件。
+ * 会审验收修（F1，astra+opus 一致）：只认终态 run.state_change 作准入——
+ * legacy"末条事件推断"的 run 一律拒绝。原因：findState 的 legacy 分支按最后
+ * 一条事件推断，追加本命令的两条自检事件会把 completed 翻成 running，间接
+ * 污染 acceptanceRecord 消费的状态（违反裁定⑥"不改任何判定输入"）。 */
 function _terminality(bound) {
-  const state = findState(bound);
   const hasTerminalStateChange = bound.some(
     (e) => e && e.type === "run.state_change" && TERMINAL_STATES.includes(e.to),
   );
   return {
-    state,
-    terminal: TERMINAL_STATES.includes(state),
+    state: findState(bound),
+    terminal: hasTerminalStateChange,
     basis: hasTerminalStateChange ? "state_change" : "legacy_inferred",
   };
 }
@@ -474,7 +497,12 @@ export async function runVerifyCommit({
       ["log", "-1", "--format=%B", "--end-of-options", commit],
       { cwd: authorizedWorkspaceRoot },
     ));
-    adoptedFromTrailer = message.includes(`WAO-Adopted-From: ${runId}`);
+    // 会审验收修（F3，astra+opus）：行锚定精确匹配——includes 会把前缀碰撞
+    // （run_example2 命中 run_example）与正文伪 trailer 一并误报。
+    adoptedFromTrailer = new RegExp(
+      `^WAO-Adopted-From: ${runId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+      "m",
+    ).test(message);
   } catch {
     adoptedFromTrailer = false;
   }

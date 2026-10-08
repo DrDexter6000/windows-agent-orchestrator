@@ -28,7 +28,7 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync, spawn } from "node:child_process";
 
-import { JsonlTranscript, readTranscript, validateDeliveryFacts } from "../../src/transcript.js";
+import { JsonlTranscript, readTranscript, validateDeliveryFacts, findState } from "../../src/transcript.js";
 import {
   runVerifyCommit,
   projectLeadCommitChecks,
@@ -268,10 +268,13 @@ test("TD-240 主路径：真实仓核验通过——事件族形状/关系事实
     assert.equal(outcome[0].results.length, 2);
     assert.equal(outcome[0].results[0].stdoutTail, "");
     assert.equal(outcome[0].results[0].stderrTail, "");
-    // 裁定④：临时 worktree 用后清理（verify-* 无残留）
+    // 裁定④：临时 worktree 用后清理（会审验收修：真零残留断言——目录 nonce
+    // 与 checkId 是两次独立随机数，`verify-${checkId}` 检查恒真〔opus 反例〕）
     const wtRoot = join(repo.path, ".wao-worktrees");
-    assert.ok(!existsSync(wtRoot) || !existsSync(join(wtRoot, `verify-${result.checkId}`)),
-      "verify worktree must be removed");
+    const leftover = existsSync(wtRoot)
+      ? readdirSync(wtRoot).filter((n) => n.startsWith("verify-"))
+      : [];
+    assert.deepEqual(leftover, [], "verify-* 零残留");
   } finally {
     cleanupDir(scratch);
   }
@@ -379,19 +382,131 @@ test("TD-240 反例：非终态 run 拒绝（含 legacy 终态依据记录的正
       runVerifyCommit(baseInput({ runDir, runId: "run_vc_live", repo, commit: repo.commitA, commands: ["echo ok"] })),
       /is not terminal/,
     );
-    // legacy 终态（无 state_change、末事件 run.completed 推断）——可核验但依据记录为 legacy_inferred
+    // legacy 终态（无 state_change、末事件 run.completed 推断）——会审验收修
+    // （F1，astra+opus）：一律拒绝。legacy 分支按"末条事件"推断状态，追加本
+    // 命令的自检事件会把 completed 翻成 running，间接污染 acceptanceRecord
+    // 消费的状态（违裁定⑥）——legacy 不具准入资格。
     await writeRunTranscript(runDir, "run_vc_legacy", repo.path, repo.commitA, { legacy: true });
+    await assert.rejects(
+      runVerifyCommit(baseInput({
+        runDir, runId: "run_vc_legacy", repo, commit: repo.commitA, commands: ["echo ok"],
+      })),
+      /is not terminal/,
+      "legacy 推断终态不具准入资格（须有终态 run.state_change）",
+    );
+    // 准入 run（state_change 终态）追加自检事件后状态不得翻转（⑥ 判定输入隔离钉）
+    await writeRunTranscript(runDir, "run_vc_sc", repo.path, repo.commitA);
     const result = await runVerifyCommit(baseInput({
-      runDir, runId: "run_vc_legacy", repo, commit: repo.commitA, commands: ["echo ok"],
+      runDir, runId: "run_vc_sc", repo, commit: repo.commitA, commands: ["echo ok"],
     }));
     assert.equal(result.status, "passed");
-    const events = await readTranscript(join(runDir, "run_vc_legacy.jsonl"));
-    const started = findEvent(events, LEAD_COMMIT_CHECK_STARTED_TYPE);
-    assert.deepEqual(started[0].terminality, { state: "completed", basis: "legacy_inferred" });
+    const eventsAfter = await readTranscript(join(runDir, "run_vc_sc.jsonl"));
+    assert.equal(findState(eventsAfter), "completed", "自检事件追加后 findState 保持 completed");
   } finally {
     cleanupDir(scratch);
   }
 }));
+
+// ===== 会审验收修反例（consult_20261008204210101b15omd：F3/F4/F2） =====
+
+test("TD-240 F3：trailer 行锚定——前缀碰撞与正文伪 trailer 不命中", withLeadExemptionEnv(async () => {
+  const scratch = makeScratch("vc-trailer-");
+  try {
+    const repo = makeRepo(join(scratch, "repo"));
+    const runDir = join(scratch, "runs");
+    // 提交消息正文里含"伪 trailer 行样"与前缀碰撞目标（另一 runId 是本 run 的前缀）
+    const target = "run_vc_trailer1";
+    const decoy = `${target}x`; // 前缀碰撞：includes 会把 decoy 的 trailer 误判给 target
+    const mk = async (runId, message) => {
+      await writeRunTranscript(runDir, runId, repo.path, repo.commitA);
+      const t = new JsonlTranscript(join(runDir, `${runId}.jsonl`), { runId, agentId: "x" });
+      await t.append("run.delivery_created", { deliveryCommit: repo.commitA });
+      void t;
+      void message;
+    };
+    // 直接驱动内部事实计算太深——经端到端验证：decoy 场景（提交消息带
+    // WAO-Adopted-From: run_vc_trailer1x，断言 target 的 adoptedFromTrailer=false）
+    const { execFileSync } = await import("node:child_process");
+    const gitIn = (args, cwd) => execFileSync("git", args, { cwd, encoding: "utf8" });
+    // 重写 commitA 的消息：正文伪 trailer（缩进）+ 尾部真 trailer 指向 decoy
+    gitIn(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--amend", "-m",
+      `正文提到  WAO-Adopted-From: ${target}（缩进伪 trailer 不命中）\n\nWAO-Adopted-From: ${decoy}`], repo.path);
+    const amended = gitIn(["rev-parse", "HEAD"], repo.path).trim();
+    await writeRunTranscript(runDir, target, repo.path, amended);
+    const result = await runVerifyCommit(baseInput({
+      runDir, runId: target, repo, commit: amended, commands: ["echo ok"],
+    }));
+    assert.equal(result.status, "passed");
+    const events = await readTranscript(join(runDir, `${target}.jsonl`));
+    const started = findEvent(events, LEAD_COMMIT_CHECK_STARTED_TYPE);
+    assert.equal(started[0].commitRelations.adoptedFromTrailer, false,
+      "前缀碰撞（decoy trailer）与缩进伪 trailer 均不得命中");
+    // 对照：真行锚定命中（trailer 值 = 受验 run 自己的 runId）
+    gitIn(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--amend", "-m",
+      `title\n\nWAO-Adopted-From: run_vc_trailer2`], repo.path);
+    const amended2 = gitIn(["rev-parse", "HEAD"], repo.path).trim();
+    await writeRunTranscript(runDir, "run_vc_trailer2", repo.path, amended2);
+    const r2 = await runVerifyCommit(baseInput({
+      runDir, runId: "run_vc_trailer2", repo, commit: amended2, commands: ["echo ok"],
+    }));
+    assert.equal(r2.status, "passed");
+    const ev2 = await readTranscript(join(runDir, "run_vc_trailer2.jsonl"));
+    assert.equal(findEvent(ev2, LEAD_COMMIT_CHECK_STARTED_TYPE)[0].commitRelations.adoptedFromTrailer, true,
+      "真 trailer 行命中");
+  } finally {
+    cleanupDir(scratch);
+  }
+}));
+
+test("TD-240 F4：assume-unchanged / skip-worktree 位对复证隐身——在场即按漂移拒（fail-closed）", withLeadExemptionEnv(async () => {
+  const scratch = makeScratch("vc-indexbits-");
+  try {
+    const repo = makeRepo(join(scratch, "repo"));
+    const runDir = join(scratch, "runs");
+    await writeRunTranscript(runDir, "run_vc_bits", repo.path, repo.commitA);
+    // 命令把 tracked 文件改动后设置 assume-unchanged 位——status 隐身，但
+    // ls-files -v 小写位在场 ⇒ 复证必须按漂移处理（命令 exit 0 也不得 passed）
+    const { execFileSync } = await import("node:child_process");
+    const gitIn = (args, cwd) => execFileSync("git", args, { cwd, encoding: "utf8" });
+    void gitIn;
+    const stashBit = "git update-index --assume-unchanged f.txt"
+      + " && echo modified >> f.txt";
+    const result = await runVerifyCommit(baseInput({
+      runDir, runId: "run_vc_bits", repo, commit: repo.commitA,
+      commands: [stashBit],
+    }));
+    assert.equal(result.status, "failed", "索引位隐身改动不得记 passed");
+    const events = await readTranscript(join(runDir, "run_vc_bits.jsonl"));
+    const outcome = findEvent(events, LEAD_COMMIT_CHECK_OUTCOME_TYPE);
+    assert.equal(outcome[outcome.length - 1].status, "failed");
+  } finally {
+    cleanupDir(scratch);
+  }
+}));
+
+test("TD-240 F2：清扫不伤在册 worktree（注册中=可能在役，只回收孤儿）", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { _sweepStaleVerifyWorktrees } = await import("../../src/application/runVerifyCommit.js");
+  const scratch = makeScratch("vc-sweep-");
+  try {
+    const repo = makeRepo(join(scratch, "repo"));
+    const wtRoot = join(repo.path, ".wao-worktrees");
+    mkdirSync(wtRoot, { recursive: true });
+    // 孤儿目录（未注册）与在册目录（经 git worktree add 创建）并存
+    mkdirSync(join(wtRoot, "verify-orphan1"));
+    writeFileSync(join(wtRoot, "verify-orphan1", "stale.txt"), "x");
+    execFileSync("git", ["worktree", "add", "--detach",
+      join(wtRoot, "verify-live1"), "HEAD"], { cwd: repo.path, stdio: "ignore" });
+    await _sweepStaleVerifyWorktrees(
+      (args, opts) => execFileSync("git", args, { ...opts, encoding: "utf8" }),
+      repo.path,
+    );
+    assert.ok(!existsSync(join(wtRoot, "verify-orphan1")), "孤儿被回收");
+    assert.ok(existsSync(join(wtRoot, "verify-live1")), "在册 worktree 不被清扫（可能在役）");
+  } finally {
+    cleanupDir(scratch);
+  }
+});
 
 // ===== 反例：SHA 形状 =====
 
