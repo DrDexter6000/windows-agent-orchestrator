@@ -23,7 +23,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import fsPromisesDefault, { mkdtemp, rm } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -807,6 +808,40 @@ test("M12-16-S14 (P1+P2): a prior queued correction's status is still reportable
     // No second append happened.
     const events = await readTranscript(filePath);
     assert.equal(events.filter((e) => e.type === "run.correction_requested").length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+
+// TD-234 验收修回归钉（astra R3，2026-10-08）：CAS 边界的无差别 catch 曾把
+// 基础设施故障误报 malformed_input——修后锁内读失败（EACCES）原样上抛
+// （意外错误出口）；外层读成功、仅锁内 CAS 读失败（astra 复现形态）。
+test("M12-16 TD-234 R3: locked CAS read failure propagates (never misreported malformed_input)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "m1216-r3-"));
+  try {
+    const { filePath } = await seedCorrectableRun(dir, { workspaceRoot: dir, running: true });
+    const fault = Object.assign(new Error("read denied"), { code: "EACCES" });
+    const real = fsPromisesDefault.readFile;
+    let reads = 0;
+    fsPromisesDefault.readFile = async (path, ...rest) => {
+      if (path === filePath && reads++ > 0) throw fault;
+      return real(path, ...rest);
+    };
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(
+        () => correctRun({ runId: RUN_ID, correctionId: "r3probe", prompt: "p", runDir: dir, authorizedWorkspaceRoot: dir }),
+        (e) => e === fault,
+        "锁内读失败原样上抛（不被误报 malformed_input）",
+      );
+    } finally {
+      fsPromisesDefault.readFile = real;
+      syncBuiltinESMExports();
+    }
+    // 零追加
+    const lines = (await real(filePath, "utf8")).trim().split("\n").filter(Boolean);
+    assert.ok(!lines.some((l) => l.includes("r3probe")), "故障路径零追加");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

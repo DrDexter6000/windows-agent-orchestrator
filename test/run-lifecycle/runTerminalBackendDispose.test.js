@@ -19,6 +19,8 @@
 // 全部用假 backend（含 dispose 计数器），零真实进程、零真实凭据。
 
 import { mkdtempSync, rmSync } from "node:fs";
+import fsPromisesDefault from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -301,6 +303,52 @@ test("TD-223: 无 dispose 方法的注入 backend（legacy 测试假件形状）
     const run = await manager.start("w", { prompt: "do", runId: "run_td223_legacy" });
     const result = await run.waitForCompletion({});
     assert.equal(result.completed, true, "无 dispose backend 生命周期不受影响");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+
+// TD-234 验收修回归钉（astra R1，2026-10-08）：终态写入抛读错误（EACCES）时
+// run 已摘除但 cleanup 曾被跳过——修后 waitForCompletion 终态化尾部 try/finally
+// 兜底执行 _runCleanup（backend.dispose 仍恰一次），原始错误不吞。
+test("TD-234 R1: terminal write failing mid-read-error still runs backend.dispose exactly once", async () => {
+  const dir = await makeTempDir();
+  try {
+    // astra R1 复现形态：done 事件【之后】、终态写入【之前】武装读故障——
+    // 终态 CAS 锁内读失败 → 上抛；finally 兜底 cleanup。
+    const filePath = join(dir, "run_td234_r1.jsonl");
+    const fault = Object.assign(new Error("read denied"), { code: "EACCES" });
+    const real = fsPromisesDefault.readFile;
+    const { backend: armingBackend, calls } = makeDisposeBackend(() => ({
+      backend: "fake",
+      backendSessionId: "ses_td234r1",
+      events: async function* () {
+        yield { kind: "message", role: "assistant", parts: [{ type: "text", text: "x" }] };
+        // 此刻流转尚未消费 done——先武装，再交出 done。
+        fsPromisesDefault.readFile = async (p, ...rest) => {
+          if (p === filePath) throw fault;
+          return real(p, ...rest);
+        };
+        syncBuiltinESMExports();
+        yield { kind: "done", reason: "completed" };
+      },
+      abort: async () => {},
+      isAlive: () => false,
+    }));
+    const manager = makeManager(dir, armingBackend);
+    const run = await manager.start("w", { prompt: "do", runId: "run_td234_r1" });
+    let threw = null;
+    try {
+      await run.waitForCompletion({});
+    } catch (e) {
+      threw = e;
+    } finally {
+      fsPromisesDefault.readFile = real;
+      syncBuiltinESMExports();
+    }
+    assert.ok(threw, "意外错误上抛（不吞）");
+    assert.equal(calls.dispose, 1, "终态写入失败的兜底 cleanup 仍执行 backend.dispose 恰一次");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

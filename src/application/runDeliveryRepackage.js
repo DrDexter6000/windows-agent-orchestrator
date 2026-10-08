@@ -107,7 +107,7 @@ export const REPACKAGE_REJECTION_CODES = Object.freeze([
   "candidate_ineligible",
   // The persisted run.started delivery contract is unusable (not exactly one bound run.started; missing worktreePath/baseCommit/allowedPaths/verification declaration; malformed verificationTimeoutMs).
   "candidate_contract_malformed",
-  // The worktree is missing/unprovable, its index is non-empty, its HEAD already left the original base before the first repackage, or its HEAD is not a provable delivery artifact (会审验收修 opus R2：补充而非替换原 HEAD≠base 语义).
+  // The worktree is missing/unprovable, its index is non-empty, or its HEAD has left the original base WITHOUT being a provable WAO delivery commit for this run (recover proof: wao/<runId> branch, single parent == base, exact message/identity, clean tree). A provable drifted HEAD is RECOVERED (source:"recovered"), not rejected (TD-233).
   "worktree_unusable",
   // The candidate inventory read failed — the candidate cannot be enumerated.
   "inventory_unavailable",
@@ -530,22 +530,21 @@ function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, ha
   // 300000 default.
   const verificationTimeoutMs = _validateVerificationTimeoutMs(delivery.verificationTimeoutMs);
   // The persisted worktreePath must be a real Git worktree top-level (defense).
-  // Before the first backend-failure recovery, HEAD must still be the exact
-  // original base. After delivery_created exists, idempotent re-entry is bound
-  // by the committed DeliveryRef + provenance instead.
+  // TD-233 起 HEAD 不再有 Phase 0 前置门（见下方删门注）；delivery_created 存在
+  // 时的幂等重入由已提交 DeliveryRef + provenance 约束。
   let workspaceProof;
   try {
     workspaceProof = proveWorkspace(bound.worktreePath);
   } catch (err) {
     throw new RepackageRejectionError("worktree_unusable", `runDeliveryRepackage: candidate worktree is not provable (${err?.message ?? "unprovable worktree"})`);
   }
-  if (
-    (recoveryKind === "backend_failed" || recoveryKind === "process_missing")
-    && !hasCreated
-    && workspaceProof.gitHead !== delivery.baseCommit
-  ) {
-    throw new RepackageRejectionError("worktree_unusable", "runDeliveryRepackage: candidate HEAD does not match the original base");
-  }
+  // TD-233（2026-10-08，双席方案会审裁定删门）：入射即漂移的 HEAD 不再前置拒绝
+  // ——恢复资格交 _resolve 的 recoverDeliveryCommit 全验（单父==base、消息/身份/
+  // 净树/范围全套）。可证明的 WAO 交付提交（Phase 2 打包后、Phase 3 落盘前崩溃
+  // 的形态）按 source:"recovered" 救回；垃圾/外来提交 artifact_mismatch 且
+  // headAtBase=false → 桥接 worktree_unusable + 审计。防洗白守卫不受影响（其
+  // 判据 headAtBase 仍为 Phase 0 实测）。
+
 
   const originalAllowedPaths = _normalizeOriginalAllowedPaths(delivery.allowedPaths);
   return {

@@ -482,13 +482,13 @@ export function assertDeliveryCommitInRepository({ repoRoot, deliveryRef }) {
     throw new DeliveryError("artifact_mismatch", "resolved deliveryCommit differs from the persisted literal");
   }
 
-  // 3. Parent must be exactly baseCommit (explicit object query, not HEAD^).
-  const parent = String(git(
-    ["rev-parse", "--verify", "--end-of-options", `${canonicalDelivery}^`],
-    { cwd },
-  )).trim();
-  if (parent !== canonicalBase) {
-    throw new DeliveryError("artifact_mismatch", "delivery commit parent does not match baseCommit");
+  // 3. Parent must be exactly baseCommit — AND exactly one parent
+  //    (TD-233 方案会审修：同 recover 的合并提交伪造防线，rev-list --parents）。
+  const parentsRawInspect = String(git(
+    ["rev-list", "--parents", "-n", "1", canonicalDelivery], { cwd },
+  )).trim().split(/\s+/);
+  if (parentsRawInspect.length !== 2 || parentsRawInspect[1] !== canonicalBase) {
+    throw new DeliveryError("artifact_mismatch", "delivery commit must have exactly one parent, equal to baseCommit");
   }
 
   // 4. Exactly one commit in base..delivery.
@@ -504,8 +504,9 @@ export function assertDeliveryCommitInRepository({ repoRoot, deliveryRef }) {
   //    --no-renames: committed path identity is raw, independent of Git rename
   //    heuristics/config (diff-tree never enables renames by default, but this
   //    pins the contract explicitly).
+  // TD-233 方案会审修：两树 diff base..delivery（与 recover 同款语义）。
   const committedFiles = parseNul(
-    git(["diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", "-z", canonicalDelivery], { cwd }),
+    git(["diff", "--no-renames", "--name-only", "-r", "-z", `${canonicalBase}`, canonicalDelivery], { cwd }),
   ).sort();
   const expectedFiles = [...deliveryRef.changedFiles].sort();
   if (committedFiles.length !== expectedFiles.length ||
@@ -1856,12 +1857,15 @@ function recoverDeliveryCommit(input) {
     throw new DeliveryError("artifact_mismatch", `HEAD on wrong branch: ${branchRaw.trim()} != ${expectedBranch}`);
   }
 
-  // Parent must be exactly base.
-  const parent = String(
-    git(["rev-parse", "--verify", "--end-of-options", `${canonicalHead}^`], { cwd }),
-  ).trim();
-  if (parent !== canonicalBase) {
-    throw new DeliveryError("artifact_mismatch", "recovered commit parent does not match baseCommit");
+  // Parent must be exactly base — AND the commit must have exactly ONE parent.
+  // TD-233 方案会审修（opus 真实 Git 反例，2026-10-08）：`HEAD^` 只取第一父——
+  // 合并提交 `[base, base~1]` 可携真实改动通过第一父==base 检查；配合 diff-tree
+  // 只比第一父树，能把实际改动藏进 committedFiles:[]。单父强校验堵死该形态。
+  const parentsRaw = String(git(
+    ["rev-list", "--parents", "-n", "1", canonicalHead], { cwd },
+  )).trim().split(/\s+/);
+  if (parentsRaw.length !== 2 || parentsRaw[1] !== canonicalBase) {
+    throw new DeliveryError("artifact_mismatch", "recovered commit must have exactly one parent, equal to baseCommit");
   }
 
   // Exactly one commit base..HEAD.
@@ -1872,12 +1876,16 @@ function recoverDeliveryCommit(input) {
     throw new DeliveryError("artifact_mismatch", `expected 1 commit in base..HEAD, got ${count}`);
   }
 
-  // Committed files (exact object query). --no-renames: raw committed path
-  // identity, so a recovered split still checks BOTH deleted source and added
-  // destination against allowedPaths below.
+  // Committed files — TWO-TREE diff base..HEAD（TD-233 方案会审修，opus 反例）：
+  // diff-tree -r HEAD 只比第一父树，单父强校验后二者等价，但两树 diff 是
+  // "交付提交相对 base 实际改变了什么"的直接语义，天然不含合并第二父的暗道；
+  // --no-renames 保留删除源与新增目标的原始路径身份（同前）。
   const committedFiles = parseNul(
-    git(["diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", "-z", canonicalHead], { cwd }),
+    git(["diff", "--no-renames", "--name-only", "-r", "-z", `${canonicalBase}`, canonicalHead], { cwd }),
   ).sort();
+  if (committedFiles.length === 0) {
+    throw new DeliveryError("artifact_mismatch", "recovered commit contains no changes vs base");
+  }
   const disallowed = committedFiles.filter(
     (p) => !isPathAllowed(p, validated.allowedPaths),
   );

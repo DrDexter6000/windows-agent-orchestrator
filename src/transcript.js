@@ -867,11 +867,18 @@ export class JsonlTranscript {
     await mkdir(dirname(this.filePath), { recursive: true });
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
-      let events = [];
+      // TD-234（2026-10-08）+ 验收修（astra R2）：锁内读失败不再吞——ENOENT 仅在
+      // 【证明确为首写】时视为合法空账本（this.seq === 0：实例既无 initialSeq
+      // 也未写过任何事件）；既有账本（restart/resume 传 initialSeq>0，或本实例
+      // 已 append 过）的 ENOENT = 账本丢失/被删 = 异常，如实上抛——否则孤儿
+      // 状态事实与 EXACTLY-ONCE 绕过都可能（astra 两反例）。其余 I/O/解析故障
+      // 一律上抛。
+      let events;
       try {
         events = await readTranscript(this.filePath);
-      } catch {
-        events = [];
+      } catch (err) {
+        if (err && err.code === "ENOENT" && this.seq === 0) events = [];
+        else throw err;
       }
       const already = events.some((e) => e && typeof e === "object"
         && e.type === "run.read_only_declared" && e.runId === this.context.runId);
@@ -929,11 +936,18 @@ export class JsonlTranscript {
     await mkdir(dirname(this.filePath), { recursive: true });
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
-      let events = [];
+      // TD-234（2026-10-08）+ 验收修（astra R2）：锁内读失败不再吞——ENOENT 仅在
+      // 【证明确为首写】时视为合法空账本（this.seq === 0：实例既无 initialSeq
+      // 也未写过任何事件）；既有账本（restart/resume 传 initialSeq>0，或本实例
+      // 已 append 过）的 ENOENT = 账本丢失/被删 = 异常，如实上抛——否则孤儿
+      // 状态事实与 EXACTLY-ONCE 绕过都可能（astra 两反例）。其余 I/O/解析故障
+      // 一律上抛。
+      let events;
       try {
         events = await readTranscript(this.filePath);
-      } catch {
-        events = [];
+      } catch (err) {
+        if (err && err.code === "ENOENT" && this.seq === 0) events = [];
+        else throw err;
       }
       const existing = _detectExistingTerminal(events);
       const baseSeq = Math.max(this.seq, findLastEventSeq(events));
@@ -1035,12 +1049,10 @@ export class JsonlTranscript {
     await mkdir(dirname(this.filePath), { recursive: true });
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
-      let events = [];
-      try {
-        events = await readTranscript(this.filePath);
-      } catch {
-        events = [];
-      }
+      // TD-234（2026-10-08）：锁内读失败不再吞成空数组——I/O/解析故障如实上抛
+      // （意外错误）：在未读到既有事实时追加新事实=重复登记风险（EXACTLY-ONCE
+      // 声明、终态判定、reverify/corrections 幂等全部依赖锁内重读）。
+      const events = await readTranscript(this.filePath);
 
       // In-lock fact validation — single owner of delivery facts.
       // TD-179: the SAME shared authority the read surfaces use, in its
@@ -1416,12 +1428,10 @@ export class JsonlTranscript {
     await mkdir(dirname(this.filePath), { recursive: true });
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
-      let events = [];
-      try {
-        events = await readTranscript(this.filePath);
-      } catch {
-        events = [];
-      }
+      // TD-234（2026-10-08）：锁内读失败不再吞成空数组——I/O/解析故障如实上抛
+      // （意外错误）：在未读到既有事实时追加新事实=重复登记风险（EXACTLY-ONCE
+      // 声明、终态判定、reverify/corrections 幂等全部依赖锁内重读）。
+      const events = await readTranscript(this.filePath);
 
       // Validate inputs (fail closed before any append).
       if (!delivery || typeof delivery !== "object") {
@@ -1504,12 +1514,10 @@ export class JsonlTranscript {
     await mkdir(dirname(this.filePath), { recursive: true });
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
-      let events = [];
-      try {
-        events = await readTranscript(this.filePath);
-      } catch {
-        events = [];
-      }
+      // TD-234（2026-10-08）：锁内读失败不再吞成空数组——I/O/解析故障如实上抛
+      // （意外错误）：在未读到既有事实时追加新事实=重复登记风险（EXACTLY-ONCE
+      // 声明、终态判定、reverify/corrections 幂等全部依赖锁内重读）。
+      const events = await readTranscript(this.filePath);
 
       if (!delivery || typeof delivery !== "object") {
         throw new Error("tryAppendReverifyOutcome: delivery must be an object");
@@ -1619,12 +1627,10 @@ export class JsonlTranscript {
     await mkdir(dirname(this.filePath), { recursive: true });
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
-      let events = [];
-      try {
-        events = await readTranscript(this.filePath);
-      } catch {
-        events = [];
-      }
+      // TD-234（2026-10-08）：锁内读失败不再吞成空数组——I/O/解析故障如实上抛
+      // （意外错误）：在未读到既有事实时追加新事实=重复登记风险（EXACTLY-ONCE
+      // 声明、终态判定、reverify/corrections 幂等全部依赖锁内重读）。
+      const events = await readTranscript(this.filePath);
       const proj = projectCorrections(events, this.context.runId);
       if (proj.has(correctionId)) {
         return { queued: false, reason: "duplicate", existing: proj.get(correctionId) };
@@ -1672,12 +1678,10 @@ export class JsonlTranscript {
     }
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
-      let events = [];
-      try {
-        events = await readTranscript(this.filePath);
-      } catch {
-        events = [];
-      }
+      // TD-234（2026-10-08）：锁内读失败不再吞成空数组——I/O/解析故障如实上抛
+      // （意外错误）：在未读到既有事实时追加新事实=重复登记风险（EXACTLY-ONCE
+      // 声明、终态判定、reverify/corrections 幂等全部依赖锁内重读）。
+      const events = await readTranscript(this.filePath);
       const proj = projectCorrections(events, this.context.runId);
       if (!proj.has(correctionId)) return { claimed: false, reason: "not_found" };
       const info = proj.get(correctionId);
@@ -1708,12 +1712,10 @@ export class JsonlTranscript {
     }
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
-      let events = [];
-      try {
-        events = await readTranscript(this.filePath);
-      } catch {
-        events = [];
-      }
+      // TD-234（2026-10-08）：锁内读失败不再吞成空数组——I/O/解析故障如实上抛
+      // （意外错误）：在未读到既有事实时追加新事实=重复登记风险（EXACTLY-ONCE
+      // 声明、终态判定、reverify/corrections 幂等全部依赖锁内重读）。
+      const events = await readTranscript(this.filePath);
       const proj = projectCorrections(events, this.context.runId);
       const info = proj.get(correctionId);
       if (info && info.status === "delivered") return { recorded: false, correctionId };
@@ -1741,12 +1743,10 @@ export class JsonlTranscript {
     const safeReason = CORRECTION_DELIVERY_FAIL_REASONS.includes(reason) ? reason : "send_failed";
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
-      let events = [];
-      try {
-        events = await readTranscript(this.filePath);
-      } catch {
-        events = [];
-      }
+      // TD-234（2026-10-08）：锁内读失败不再吞成空数组——I/O/解析故障如实上抛
+      // （意外错误）：在未读到既有事实时追加新事实=重复登记风险（EXACTLY-ONCE
+      // 声明、终态判定、reverify/corrections 幂等全部依赖锁内重读）。
+      const events = await readTranscript(this.filePath);
       const proj = projectCorrections(events, this.context.runId);
       const info = proj.get(correctionId);
       // Already terminal for this correction → no-op (no duplicate fact).
@@ -1782,12 +1782,10 @@ export class JsonlTranscript {
     const safeReason = reason === "stdin_closed" ? "stdin_closed" : "terminal_race";
     const releaseLock = await acquireAppendLock(this.filePath);
     try {
-      let events = [];
-      try {
-        events = await readTranscript(this.filePath);
-      } catch {
-        events = [];
-      }
+      // TD-234（2026-10-08）：锁内读失败不再吞成空数组——I/O/解析故障如实上抛
+      // （意外错误）：在未读到既有事实时追加新事实=重复登记风险（EXACTLY-ONCE
+      // 声明、终态判定、reverify/corrections 幂等全部依赖锁内重读）。
+      const events = await readTranscript(this.filePath);
       const proj = projectCorrections(events, this.context.runId);
       const outstanding = [];
       for (const [cid, info] of proj) {

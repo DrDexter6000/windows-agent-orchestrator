@@ -1,4 +1,6 @@
 import { mkdtemp, readFile, rm, writeFile, open as realOpen } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+import fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -2445,4 +2447,159 @@ test("TD-231 council R3: verification CAS created-count split (0 → candidate_i
       );
     }
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+
+// =====================================================================
+// TD-234（2026-10-08，glm-pro P2-1 存量发现）：锁内读失败不再吞成空数组。
+// 8 个既有事实方法（decision/reverify×2/corrections×5）读失败 → 原样上抛
+// （意外错误，绝不追加新事实）；2 个首写方法（read_only_declared/
+// transitionState）ENOENT=合法空账本、其余读失败上抛。
+// 注入技法复用 TD-231（t.mock.method(fsPromises,"readFile")+syncBuiltinESMExports）。
+// =====================================================================
+test("TD-234: eight fact-append methods rethrow locked read failures verbatim (never append on unread facts)", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "td234-rw-"));
+  const fault = Object.assign(new Error("read denied"), { code: "EACCES" });
+  const ctx = { runId: "run_td234", agentId: "w" };
+  // 各方法最小合法入参（读失败在入参校验之后、事实判定之前被触发）。
+  const ref = () => ({
+    schemaVersion: 1, kind: "git_commit", runId: "run_td234",
+    baseCommit: "a".repeat(40), deliveryCommit: "b".repeat(40), branch: "wao/run_td234",
+    worktreePath: "D:/x", changedFiles: ["src/a.js"],
+    verification: { status: "passed", commands: ["npm test"], verifiedCommit: "b".repeat(40), results: [] },
+    acceptance: { status: "pending", reviewerType: "lead_agent" },
+    integration: { status: "pending", targetCommit: null },
+  });
+  const cases = [
+    ["tryAppendDecision", (tr) => [{ decision: "accepted", reason: "ok" }]],
+    ["tryAppendReverifyRequested", (tr) => [{ delivery: ref(), reason: "tooling_invalid" }]],
+    ["tryAppendReverifyOutcome", (tr) => [{ delivery: ref(), outcome: "passed" }]],
+    ["tryAppendCorrectionRequested", (tr) => [{ correctionId: "cor_td234", prompt: "p" }]],
+    ["tryClaimCorrection", (tr) => [{ correctionId: "cor_td234" }]],
+    ["appendCorrectionDelivered", (tr) => [{ correctionId: "cor_td234" }]],
+    ["appendCorrectionDeliveryFailed", (tr) => [{ correctionId: "cor_td234", reason: "send_failed" }]],
+    ["rejectOutstandingCorrections", (tr) => [{}]],
+  ];
+  for (const [method, mkArgs] of cases) {
+    await t.test(method, async () => {
+      const filePath = join(dir, method + ".jsonl");
+      const tr = new JsonlTranscript(filePath, ctx);
+      await tr.append("run.submitted", { cwd: "D:/x" }); // 文件在场，避开 ENOENT
+      const bytesBefore = await readFile(filePath, "utf8");
+      const real = fsPromises.readFile;
+      const mocked = t.mock.method(fsPromises, "readFile", async (path, ...rest) => {
+        if (path === filePath) throw fault;
+        return real(path, ...rest);
+      });
+      syncBuiltinESMExports();
+      try {
+        await assert.rejects(
+          () => tr[method](...mkArgs(tr)),
+          (err) => err === fault,
+          method + " 锁内读失败原样上抛",
+        );
+      } finally {
+        mocked.mock.restore();
+        syncBuiltinESMExports();
+      }
+      assert.equal(await readFile(filePath, "utf8"), bytesBefore, method + " 读失败零追加");
+    });
+  }
+});
+
+test("TD-234: first-write methods treat ENOENT as an empty ledger but rethrow other read failures", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "td234-fw-"));
+  const ctx = { runId: "run_td234fw", agentId: "w" };
+  // ENOENT=合法空账本：新文件首写两法照常工作。
+  {
+    const tr = new JsonlTranscript(join(dir, "fw.jsonl"), ctx);
+    const r1 = await tr.appendReadOnlyDeclared();
+    assert.equal(r1.recorded, true, "read_only_declared 首写成功（ENOENT=空账本）");
+    const r2 = await tr.transitionState(null, "pending", "created");
+    assert.equal(r2.accepted, true, "transitionState 首写成功（文件已在）");
+  }
+  // 非 ENOENT 读失败：两法均上抛、零追加。
+  const fault = Object.assign(new Error("read denied"), { code: "EACCES" });
+  for (const method of ["appendReadOnlyDeclared", "transitionState"]) {
+    await t.test(method, async () => {
+      const filePath = join(dir, method + ".jsonl");
+      const tr = new JsonlTranscript(filePath, ctx);
+      await tr.append("run.submitted", { cwd: "D:/x" });
+      const bytesBefore = await readFile(filePath, "utf8");
+      const real = fsPromises.readFile;
+      const mocked = t.mock.method(fsPromises, "readFile", async (path, ...rest) => {
+        if (path === filePath) throw fault;
+        return real(path, ...rest);
+      });
+      syncBuiltinESMExports();
+      try {
+        await assert.rejects(
+          () => method === "appendReadOnlyDeclared"
+            ? tr.appendReadOnlyDeclared()
+            : tr.transitionState("pending", "running", "first_event"),
+          (err) => err === fault,
+          method + " 非 ENOENT 读失败上抛",
+        );
+      } finally {
+        mocked.mock.restore();
+        syncBuiltinESMExports();
+      }
+      assert.equal(await readFile(filePath, "utf8"), bytesBefore, method + " 读失败零追加");
+    });
+  }
+});
+
+
+// =====================================================================
+// TD-234 验收修回归钉（2026-10-08，astra R2）：ENOENT 豁免必须"证明确为首写"
+// （this.seq === 0）——既有账本的 ENOENT（restart/resume 传 initialSeq>0，或
+// 本实例已写过事件）= 账本丢失 = 异常上抛。两反例对应两钉。
+// =====================================================================
+test("TD-234 council R2: ENOENT on an EXISTING ledger (initialSeq>0) is an error, never a fresh-ledger write", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "td234-r2a-"));
+  const ctx = { runId: "run_r2a", agentId: "w", initialSeq: 8 };
+  const filePath = join(dir, "lost.jsonl");
+  // 文件缺席但账本应有 8 条事实（astra 反例一）：不得造孤儿状态事实。
+  const tr = new JsonlTranscript(filePath, ctx);
+  await assert.rejects(
+    () => tr.transitionState("running", "completed", "done"),
+    (e) => e && e.code === "ENOENT",
+    "initialSeq>0 的 ENOENT 上抛（不造孤儿事实）",
+  );
+  assert.equal(await (await import("node:fs/promises")).existsSync?.(filePath) ?? false, false, "零追加");
+});
+
+test("TD-234 council R2: ENOENT after this instance already appended is an error (EXACTLY-ONCE not bypassable)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "td234-r2b-"));
+  const ctx = { runId: "run_r2b", agentId: "w" };
+  const filePath = join(dir, "fw.jsonl");
+  const tr = new JsonlTranscript(filePath, ctx);
+  const first = await tr.appendReadOnlyDeclared();
+  assert.equal(first.recorded, true, "真正的首写照常成功");
+  // astra 反例二：锁内读被注入 ENOENT（文件实际在）——this.seq>0 → 上抛，
+  // 不得把 EXACTLY-ONCE 绕过成第二条声明。注入复用 t.mock 技法。
+  // 这里用更直接的形态：临时 mock readFile 抛 ENOENT。
+  const fsP = (await import("node:fs/promises")).default;
+  const { syncBuiltinESMExports } = await import("node:module");
+  const fault = Object.assign(new Error("vanished"), { code: "ENOENT" });
+  const real = fsP.readFile;
+  const test = (await import("node:test")).default;
+  // node:test 的 mock 需 TestContext——改用朴素 monkey-patch + 恢复。
+  fsP.readFile = async (path, ...rest) => {
+    if (path === filePath) throw fault;
+    return real(path, ...rest);
+  };
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(
+      () => tr.appendReadOnlyDeclared(),
+      (e) => e === fault,
+      "实例已 append 过的 ENOENT 上抛（EXACTLY-ONCE 不可绕）",
+    );
+  } finally {
+    fsP.readFile = real;
+    syncBuiltinESMExports();
+  }
+  const lines = (await real(filePath, "utf8")).trim().split("\n").filter(Boolean);
+  assert.equal(lines.length, 1, "声明仍恰一条");
 });

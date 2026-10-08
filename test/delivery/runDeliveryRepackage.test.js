@@ -28,7 +28,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
-import { writeFileSync, readFileSync, existsSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -1927,7 +1927,7 @@ for (const kind of ["parent", "message", "dirty", "committed path after inventor
     const ctx = { runId: RUN_ID, worktreePath: s.worktreePath, baseCommit: s.baseCommit,
       isolation: { type: "worktree", strategy: "persistent" }, allowedPaths: ["root.txt", "src"], verificationCommands: ["npm test"] };
     const expected = kind === "committed path after inventory" ? "scope_violation" : "worktree_unusable";
-    const messages = { parent: /parent does not match/, message: /message mismatch/, dirty: /dirty during recovery/ };
+    const messages = { parent: /parent does not match|exactly one parent/, message: /message mismatch/, dirty: /dirty during recovery/ };
     try {
       if (kind === "message" || kind === "parent") {
         git(["add", "."], s.worktreePath);
@@ -2095,5 +2095,68 @@ test("TD-231 bridge fail-closed negatives and local delivery whitelist", async (
     assert.deepEqual(table, { artifact_mismatch: "worktree_unusable", disallowed_path: "scope_violation", pre_staged_changes: "worktree_unusable", empty_diff: "inventory_empty" });
     assert.ok(Object.values(table).every((code) => REPACKAGE_REJECTION_CODES.includes(code)));
     assert.ok(REPACKAGE_CAS_POLICY_CODES.every((code) => REPACKAGE_REJECTION_CODES.includes(code)));
+  } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
+});
+
+
+// =====================================================================
+// TD-233（2026-10-08，双席方案会审裁定删门 + opus 前置加固）：
+// A. 崩溃窗口救回——backend_failed 候选，工作树里躺着一个【合法 WAO 打包提交】
+//    （Phase 2 完成、Phase 3 落盘前崩溃），created 缺席 → repackage 走 recover
+//    全验成功，source:"recovered"（原硬门在此形态永久拒绝——不对称修复的正例）。
+// B. 合并提交伪造（opus 真实 Git 反例）——单父强校验拒绝。
+// =====================================================================
+test("TD-233 A: backend_failed crash-window candidate with a provable WAO packaging commit is RECOVERED", async () => {
+  const s = await setupBackendFailureScenario();
+  try {
+    // 模拟崩溃窗口：在 worktree 用【真实 packageDelivery】打出一个合法提交
+    // （消息/身份/分支全对），但不写任何 delivery 转录事件（created 缺席）。
+    const { packageDelivery } = await import("../../src/delivery.js");
+    const ref = packageDelivery({
+      runId: RUN_ID,
+      worktreePath: s.worktreePath,
+      baseCommit: s.baseCommit,
+      branch: `wao/${RUN_ID}`,
+      isolation: { type: "worktree", strategy: "persistent" },
+      allowedPaths: ["src"],
+      verificationCommands: ["npm test"],
+    });
+    // worktree 干净、HEAD=交付提交、无 created——正是崩溃窗口形态。
+    const result = await runDeliveryRepackage({
+      runId: RUN_ID, runDir: s.runDir, allowedPaths: ["src", "root.txt"], authorizedWorkspaceRoot: s.repo,
+      resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+      computeInventoryFn: computeCandidateInventory,
+    });
+    assert.equal(result.source, "recovered", "崩溃窗口候选按 recover 救回");
+    assert.equal(result.created, true, "created 在本次尝试落盘");
+    assert.equal(result.deliveryCommit, ref.deliveryCommit, "恢复的交付提交=原打包提交");
+    assert.equal(result.verificationStatus, "passed");
+  } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
+});
+
+test("TD-233 B: merge-commit forgery (second parent smuggles changes past first-parent diff) is rejected", async () => {
+  const s = await setupBackendFailureScenario();
+  try {
+    // opus 反例形态：合并提交第一父非 base、第二父走私改动——旧 `HEAD^` 只看
+    // 第一父是否为 base、diff-tree 只比第一父树，双检查都可被绕过。单父强校验必拒。
+    // 在 wao/<RUN_ID> 分支上做：side 链 → reset 回 base → WAO 消息提交 → merge side。
+    git(["add", "."], s.worktreePath);
+    git(["commit", "-m", "side changes"], s.worktreePath);
+    const sideHash = git(["rev-parse", "HEAD"], s.worktreePath).trim();
+    git(["reset", "-q", "--hard", s.baseCommit], s.worktreePath);
+    mkdirSync(join(s.worktreePath, "src"), { recursive: true });
+    writeFileSync(join(s.worktreePath, "src", "forged.js"), "forged\n", "utf8");
+    git(["add", "src/forged.js"], s.worktreePath);
+    git(["commit", "-m", `wao-delivery: ${RUN_ID}`], s.worktreePath);
+    git(["merge", "--no-ff", "-m", `wao-delivery: ${RUN_ID}`, sideHash], s.worktreePath);
+    await assert.rejects(
+      () => runDeliveryRepackage({
+        runId: RUN_ID, runDir: s.runDir, allowedPaths: ["src", "root.txt", "src/forged.js"], authorizedWorkspaceRoot: s.repo,
+        resolveDeliveryCommitFn: resolveDeliveryCommit, verifyDeliveryFn: passedVerifier,
+        computeInventoryFn: computeCandidateInventory,
+      }),
+      (e) => e instanceof Error && /exactly one parent/.test(e.message || ""),
+      "合并提交被单父强校验拒绝（改动无处藏匿）",
+    );
   } finally { await cleanupDir(s.repo); await cleanupDir(s.runDir); }
 });

@@ -42,6 +42,9 @@ import {
   projectCorrections,
   CORRECTION_OUTCOMES,
   CORRECTION_REJECTION_REASONS,
+  // TD-234 验收修（astra R3）：识别 CAS 政策类 typed 错误（意外异常透传）。
+  RepackageCasPolicyError,
+  DeliveryDecisionPolicyError,
 } from "../transcript.js";
 import { isValidRunId } from "../delivery.js";
 import { verifyRunWorkspaceOwnership } from "./runWorkspaceOwnership.js";
@@ -194,8 +197,17 @@ export async function correctRun({
   let res;
   try {
     res = await transcript.tryAppendCorrectionRequested({ correctionId, prompt });
-  } catch {
-    // Defense-in-depth at the CAS boundary (invalid shape the service missed).
+  } catch (err) {
+    // Defense-in-depth at the CAS boundary (invalid shape the service missed):
+    // 只有 CAS 原语自带的形状类普通 Error 归 malformed_input。
+    // TD-234 验收修（astra R3，2026-10-08）：锁内读失败等基础设施故障现在
+    // 原样上抛（意外错误出口）——无差别 catch 会把 I/O 故障误报成
+    // malformed_input（astra 实测复现）。
+    // 区分判据：本 CAS 原语的形状拒绝是自造 plain Error（无 .code）；I/O 故障
+    // 是 Node 系统错误（恒带 string .code，如 EACCES/ENOENT）。带系统码=意外，
+    // 原样上抛；typed 政策错误（理论不可达于此原语，防御性）同样上抛。
+    if (err instanceof RepackageCasPolicyError || err instanceof DeliveryDecisionPolicyError) throw err;
+    if (err && typeof err.code === "string") throw err;
     return reject("malformed_input");
   }
   if (res.queued) return { ...base, outcome: "queued", reason: null };

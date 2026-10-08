@@ -2577,6 +2577,12 @@ export class Run {
 
     this._removeFromManager();
 
+    // TD-234 验收修（astra R1，2026-10-08）：终态化尾部（摘除后到返回/抛出）包
+    // try/finally——终态写入抛读错误等意外时，_runCleanup 仍兜底执行（run 已摘
+    // 除，不清理会遗留会话/资源；_cleaned 幂等使各分支既有调用不受影响；兜底
+    // 自身失败吞掉，不遮蔽原始错误）。
+    try {
+
     // M10-pre3C: if an external signal aborted the wait (and no other path has
     // already terminalized this run), route it through _abortInternal so the
     // terminal fact is exactly one aborted — not fabricated.
@@ -2878,6 +2884,9 @@ export class Run {
       return _loserResult(unknownResult.state, { messages, evidence, metrics });
     }
     throw new Error("backend stream ended with unknown done reason");
+    } finally {
+      try { await this._runCleanup(); } catch { /* TD-234 兜底：不遮蔽原始错误 */ }
+    }
   }
 
   async abort(reason = STATE_CHANGE_REASON.user) {
