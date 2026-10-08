@@ -9,6 +9,17 @@
 // and selection-bound activity commits: a late response from a superseded
 // selection is dropped silently and never mutates the current selection's facts.
 //
+// TD-228（2026-10-08）— two live-board presentation fixes, both projection-only:
+//   ① the "correction" activity category (mid-flight corrections) renders as
+//     its own category with its closed-set status — never collapsed to "other";
+//   ② when the selected run is FIRST observed terminal (the projection's
+//     terminal fact — TERMINAL_RUN_STATES), the timeline is re-bootstrapped
+//     EXACTLY ONCE through the existing selection-epoch binding (M12-17):
+//     commands whose exitStatus is upgraded in place (same seq) are invisible
+//     to afterSeq polling, and the terminal state ends new-entry flow, so
+//     without this one refetch the board freezes on stale "exit unknown"
+//     commands for long test/build commands in particular.
+//
 // A zero-dependency browser module. It renders a bounded, read-only view of
 // recent runs + selected-run activity by calling the SAME ownerDashboardServer
 // HTTP boundary (which reuses the single application SSOTs). It performs NO
@@ -30,13 +41,20 @@
 
 export const CATEGORIES = Object.freeze([
   "message", "command", "tool_use", "tool_result", "file_written", "runtime_status", "state", "other",
-  "thinking", "envelope",
+  "thinking", "envelope", "correction",
 ]);
 
 // TD-220（2026-10-07）：浏览器独立校验固定标签，未知标签不回显载荷。
 const ENVELOPE_LABELS = Object.freeze([
   "prompt", "wait_policy", "metrics", "scorecard", "stop_verified",
   "cleanup_done", "session_reuse", "provider_session_bound",
+]);
+
+// TD-228②：correction 生命周期状态的客户端闭集（镜像服务端
+// CORRECTION_ACTIVITY_STATUSES，由 run.correction_* 事件类型推导）。
+// 未知/缺失状态塌缩为固定哨兵，不回显 correctionId 或任何载荷。
+const CORRECTION_LABELS = Object.freeze([
+  "requested", "claimed", "delivered", "delivery_failed", "rejected",
 ]);
 
 // Bounded timeline window. Live polling appends newest entries and trims oldest
@@ -214,6 +232,12 @@ export function describeEntry(entry) {
     }
     case "envelope": {
       body = ENVELOPE_LABELS.includes(e.kind) ? `envelope · ${e.kind}` : "[unknown_event]";
+      break;
+    }
+    case "correction": {
+      // TD-228②：中途纠正。只渲染客户端闭集内的生命周期状态（与 envelope 的
+      // 固定标签模式一致）；未知/缺失状态与 correctionId/payload 一律不回显。
+      body = CORRECTION_LABELS.includes(e.status) ? `correction · ${e.status}` : "[unknown_event]";
       break;
     }
     case "tool_use": {
@@ -634,6 +658,10 @@ export function advanceSelection(state, runId) {
   state.lastGoodActivity = null;
   state.unavailableReason = null;
   state.activityFresh = null;
+  // TD-228①: the per-selection terminal-observation slot starts UNobserved —
+  // a new selection session re-arms the exactly-once terminal refetch (whose
+  // bootstrap then re-baselines this slot from its own first page).
+  state.selectionTerminalObserved = null;
   return { runId, epoch: state.selectionEpoch };
 }
 
@@ -652,6 +680,75 @@ export function isCurrentSelection(state, captured) {
   if (state.selectedRunId !== captured.runId) return false;
   if (state.selectionEpoch !== captured.epoch) return false;
   return true;
+}
+
+// ===== TD-228① — exactly-once re-bootstrap on the FIRST terminal observation ====
+//
+// afterSeq polling can never see an in-place upgrade: a command entry first
+// projected with exitStatus "unknown" keeps its seq, so when the transcript
+// later resolves the wire/inferred exit the updated entry is seq <= maxSeq and
+// is never re-fetched. Once the run goes terminal no new entries arrive to
+// heal this — the board would freeze on stale "exit unknown" rows forever.
+// The fix: when the selected run is FIRST observed terminal in a selection
+// session, re-run the bootstrap path EXACTLY ONCE. The trigger is the
+// projection's own terminal fact (page.activity.terminal — the projection of
+// the TERMINAL_RUN_STATES closed set: completed / failed / aborted / timed_out),
+// the same fact M12-17 notifications already consume.
+
+/**
+ * Fold ONE activity-page terminal fact into the per-selection terminal slot
+ * (DOM-free; the tested contract). The slot is null = not yet observed in this
+ * selection session:
+ *   - null  + terminal → the session's BASELINE (the bootstrap that created the
+ *     selection already carries the run's current shape) — recorded, never a
+ *     transition, so selecting an already-terminal run never refetches;
+ *   - false + true     → the non-terminal → terminal TRANSITION — the one
+ *     observation that demands the exactly-once refetch;
+ *   - true  + *        → ABSORBING — once terminal, never a transition again
+ *     (this is what makes the refetch exactly-once per selection session);
+ *   - a non-boolean terminal fact keeps the slot unchanged, never a transition.
+ * @param {boolean|null|undefined} prev — the slot's current value
+ * @param {*} terminal — the activity page's terminal fact
+ * @returns {{observed:boolean|null, transition:boolean}}
+ */
+export function foldSelectionTerminal(prev, terminal) {
+  if (typeof terminal !== "boolean") {
+    return { observed: prev === true ? true : (prev === false ? false : null), transition: false };
+  }
+  if (prev === true) return { observed: true, transition: false };
+  if (prev === null || prev === undefined) return { observed: terminal, transition: false };
+  return { observed: terminal, transition: terminal };
+}
+
+/**
+ * THE terminal refetch executor (DOM-free, deps-injected — the runsFetchOnce
+ * pattern). Performs the exactly-once re-bootstrap for the STILL-selected run:
+ * it reuses THE existing M12-17 selection-epoch mechanism — advanceSelection
+ * bumps selectionEpoch, so every in-flight bootstrap / poll / load-older that
+ * captured the PRE-bump binding is dropped by isCurrentSelection when it
+ * resolves late (a stale page can never pollute the refetched state) — and
+ * resets the per-selection activity state (timeline cleared, maxSeq → 0,
+ * cursor → null), so the injected refetch re-runs the real bootstrap path and
+ * maxSeq is rebuilt from its response exactly as a fresh selection would.
+ * No new concurrency mechanism.
+ *
+ * Exactly-once is inherited from foldSelectionTerminal's absorbing slot: the
+ * transition fires at most once per selection session, and this executor's own
+ * advanceSelection re-baselines the slot (null → the refetched bootstrap's
+ * baseline), so the same terminal fact can never re-trigger.
+ *
+ * @param {{selectedRunId:string|null, selectionEpoch:number}} state
+ * @param {{refetch:(state:object)=>Promise<void>}} deps — the browser supplies
+ *        bootstrapActivity; tests supply a recorder
+ * @returns {Promise<{refetched:boolean, binding?:{runId:string, epoch:number}}>}
+ */
+export async function terminalRefetchOnce(state, deps) {
+  if (!state || typeof state !== "object") return { refetched: false };
+  const runId = state.selectedRunId;
+  if (typeof runId !== "string" || runId.length === 0) return { refetched: false };
+  const binding = advanceSelection(state, runId);
+  if (deps && typeof deps.refetch === "function") await deps.refetch(state);
+  return { refetched: true, binding };
 }
 
 // ===== M12-20 pure helpers — active-first / history-on-demand (DOM-free) =====
@@ -1211,6 +1308,10 @@ function boot() {
     // pure planner folds every runs/activity snapshot into (baseline-safe).
     notifyEnabled: false,
     observedTerminal: {},
+    // TD-228①: the PER-SELECTION terminal slot (null = not yet observed in this
+    // selection session). Its non-terminal → terminal transition triggers the
+    // exactly-once re-bootstrap; advanceSelection resets it per selection.
+    selectionTerminalObserved: null,
   };
 
   els.app.hidden = false;
@@ -1370,15 +1471,24 @@ function fireNotification(n) {
 // list. An unavailable page contributes nothing — absence is not terminal.
 // Called ONLY for the current selection (the race gate has already dropped any
 // late response from a superseded selection).
+//
+// TD-228①: the same page ALSO folds into the per-selection terminal slot
+// (foldSelectionTerminal). Returns true ONLY on the non-terminal → terminal
+// transition — the one observation that must trigger the exactly-once
+// re-bootstrap; the caller routes that through terminalRefetchOnce and skips
+// its own trailing commit (the refetch owns freshness + render from there).
 function observeActivityTerminal(state, page) {
-  if (!page || page.available === false || !page.activity) return;
+  if (!page || page.available === false || !page.activity) return false;
   const act = page.activity;
-  if (typeof act.runId !== "string" || act.runId.length === 0) return;
+  if (typeof act.runId !== "string" || act.runId.length === 0) return false;
   const plan = planTerminalNotifications(state.observedTerminal, [{
     runId: act.runId, agentId: act.agentId, state: act.state, terminal: act.terminal,
   }]);
   state.observedTerminal = plan.observed;
   if (state.notifyEnabled) for (const n of plan.notifications) fireNotification(n);
+  const fold = foldSelectionTerminal(state.selectionTerminalObserved, act.terminal);
+  state.selectionTerminalObserved = fold.observed;
+  return fold.transition;
 }
 
 // ===== Run list =====
@@ -1731,7 +1841,14 @@ async function bootstrapActivity(state, opts = {}) {
     );
     if (!isCurrentSelection(state, captured)) return; // late — drop, never mutate
     applyBootstrapPage(state, page);
-    observeActivityTerminal(state, page);
+    // TD-228①: a transition observed here (e.g. the manual refresh path, where
+    // no advanceSelection preceded this read) triggers the EXACTLY-ONCE
+    // epoch-bound re-bootstrap; it owns the follow-up freshness + render, so
+    // this read's trailing commit is skipped.
+    if (observeActivityTerminal(state, page)) {
+      await terminalRefetchOnce(state, { refetch: (s) => bootstrapActivity(s) });
+      return;
+    }
     // Activity freshness follows THIS read's availability: available:false keeps
     // the evidence visibly stale/unavailable; an available read restores live.
     if (page && page.available !== false) {
@@ -1805,7 +1922,16 @@ async function pollOnce(state) {
       applyPollPage(state, page);
       guard += 1;
     }
-    observeActivityTerminal(state, page);
+    // TD-228①: the FIRST non-terminal → terminal observation of this selection
+    // session triggers the EXACTLY-ONCE epoch-bound re-bootstrap (in-place
+    // exitStatus upgrades ride the same seq and are invisible to afterSeq
+    // polling). It owns the follow-up freshness + render, so this poll's
+    // trailing commit is skipped — a late page from THIS poll's pre-bump epoch
+    // is dropped by isCurrentSelection anyway.
+    if (observeActivityTerminal(state, page)) {
+      await terminalRefetchOnce(state, { refetch: (s) => bootstrapActivity(s) });
+      return;
+    }
     // Activity freshness follows the read's availability: available:false keeps
     // the last-good evidence visibly stale/unavailable; an available read is live.
     if (page && page.available !== false) {

@@ -1580,3 +1580,180 @@ test("M12-20 LABEL: historyRangeLabel renders preset 'last <p>' and custom local
   assert.equal(app.historyRangeLabel(app.defaultRunsMode(), fmt), "", "active → no label");
   assert.equal(app.historyRangeLabel(null, fmt), "", "absent mode → no label");
 });
+
+// =====================================================================
+// F) TD-228 — LIVE-BOARD PRESENTATION FIXES (client-side, projection-only)
+//   ② The "correction" category (the M12-16 run.correction_* lifecycle —
+//      mid-flight corrections) is a first-class CATEGORIES member rendered
+//      from the client's own closed-set status mirror — never collapsed to
+//      "other", never echoing correctionId or any payload.
+//   ① The selected run's FIRST non-terminal → terminal observation triggers
+//      EXACTLY ONE re-bootstrap through the EXISTING M12-17 selection-epoch
+//      mechanism (advanceSelection bump + isCurrentSelection gate): a command
+//      entry whose exitStatus is upgraded in place keeps its seq, so afterSeq
+//      polling can never see the upgrade — and terminal ends new-entry flow,
+//      so without the refetch the board freezes on stale "exit unknown" rows
+//      (the long test/build commands, precisely). A late page from a pre-bump
+//      epoch is dropped and can never pollute the refetched state.
+// Deterministic over the pure fold + deps-injected executor the wiring reduces
+// to (no DOM, no fetch, no timers — the runsFetchOnce pattern), plus D3-style
+// static wiring assertions that the shell routes the trigger through them.
+// =====================================================================
+
+test("TD-228② CATEGORY: correction is a first-class category rendered from the closed set — never 'other', never payload", () => {
+  assert.ok(Object.isFrozen(app.CATEGORIES), "the category closed set stays frozen");
+  assert.ok(app.CATEGORIES.includes("correction"), "CATEGORIES carries correction");
+  // A known closed-set status renders the fixed presentation (the chip list is
+  // built straight from CATEGORIES, so this chip now exists).
+  const d = app.describeEntry({ category: "correction", status: "claimed", correctionId: "cor_1", ts: "t", seq: 7 });
+  assert.deepEqual(d, { category: "correction", ts: "t", body: "correction · claimed", mono: false });
+  for (const st of ["requested", "claimed", "delivered", "delivery_failed", "rejected"]) {
+    assert.equal(app.describeEntry({ category: "correction", status: st, ts: "t", seq: 1 }).body,
+      `correction · ${st}`);
+  }
+  // Client defense-in-depth (the ENVELOPE_LABELS pattern): an out-of-set or
+  // missing status collapses to the sentinel — correctionId / payload NEVER echo.
+  for (const bad of ["SECRET", "toString", "__proto__", "", undefined, null, 7]) {
+    const desc = app.describeEntry({
+      category: "correction", status: bad, correctionId: "LEAK", prompt: "SECRET", ts: "t", seq: 1,
+    });
+    assert.equal(desc.body, "[unknown_event]", `status ${String(bad)} collapses to the sentinel`);
+    assert.ok(!desc.body.includes("LEAK") && !desc.body.includes("SECRET"), "no id/payload echo");
+  }
+  // Category filtering treats correction as its own bucket.
+  const entries = [
+    { category: "correction", status: "requested", ts: "t", seq: 1 },
+    { category: "command", exitStatus: "ok", ts: "t", seq: 2 },
+  ];
+  assert.deepEqual(app.filterByCategories(entries, new Set(["correction"])).map((e) => e.category),
+    ["correction"], "an enabled correction filter keeps only correction entries");
+});
+
+test("TD-228② PROJECTION SMOKE: real run.correction_* events render as correction — the server shape verbatim", () => {
+  const runId = "run_td228_correction";
+  const page = projectRunActivity({ events: [
+    { type: "run.correction_requested", correctionId: "cor_td228", prompt: "SECRET PROMPT", runId, seq: 1 },
+    { type: "run.correction_delivered", correctionId: "cor_td228", runId, seq: 2 },
+  ] }, { runId });
+  assert.equal(page.entries.length, 2);
+  assert.ok(!JSON.stringify(page.entries).includes("SECRET"), "the projection never emits the payload");
+  const d0 = app.describeEntry(page.entries[0]);
+  assert.equal(d0.category, "correction", "the correction entry keeps its own category (not other)");
+  assert.equal(d0.body, "correction · requested");
+  assert.equal(app.describeEntry(page.entries[1]).body, "correction · delivered");
+});
+
+test("TD-228① FOLD: baseline never transitions; only non-terminal→terminal does; terminal is absorbing", () => {
+  // Baseline (null slot): the bootstrap that created the selection already
+  // carries the run's current shape — record, never transition.
+  assert.deepEqual(app.foldSelectionTerminal(null, true), { observed: true, transition: false });
+  assert.deepEqual(app.foldSelectionTerminal(undefined, true), { observed: true, transition: false });
+  assert.deepEqual(app.foldSelectionTerminal(null, false), { observed: false, transition: false });
+  // THE one transition.
+  assert.deepEqual(app.foldSelectionTerminal(false, true), { observed: true, transition: true });
+  assert.deepEqual(app.foldSelectionTerminal(false, false), { observed: false, transition: false });
+  // Absorbing — this latch is what makes the refetch exactly-once.
+  assert.deepEqual(app.foldSelectionTerminal(true, true), { observed: true, transition: false });
+  assert.deepEqual(app.foldSelectionTerminal(true, false), { observed: true, transition: false });
+  // A non-boolean terminal fact changes nothing.
+  assert.deepEqual(app.foldSelectionTerminal(false, undefined), { observed: false, transition: false });
+  assert.deepEqual(app.foldSelectionTerminal(null, "yes"), { observed: null, transition: false });
+});
+
+test("TD-228① REFETCH: the transition refetches EXACTLY ONCE, epoch-bound, maxSeq reset to bootstrap semantics; a late pre-bump page never pollutes", async () => {
+  const state = freshSelectionState();
+  const selection = app.advanceSelection(state, "run_t"); // epoch 1 — the Owner's selection
+  // The selection bootstrap observes the run RUNNING (baseline, no trigger).
+  assert.equal(app.foldSelectionTerminal(state.selectionTerminalObserved, false).transition, false);
+  state.selectionTerminalObserved = false;
+  // A pre-terminal poll has pinned maxSeq at the stale "exit unknown" entry.
+  state.timeline = [{ seq: 1, category: "command", ts: "t", exitStatus: "unknown" }];
+  state.maxSeq = 1;
+
+  // A poll page observes terminal — THE transition. The refetch is injected
+  // (the shell passes bootstrapActivity; here a recorder + commit simulation).
+  const fold = app.foldSelectionTerminal(state.selectionTerminalObserved, true);
+  assert.equal(fold.transition, true, "the non-terminal → terminal observation is the one trigger");
+  state.selectionTerminalObserved = fold.observed;
+  const refetches = [];
+  const res = await app.terminalRefetchOnce(state, {
+    refetch: async (s) => {
+      // advanceSelection has ALREADY reset the per-selection state — the
+      // refetched bootstrap runs with bootstrap semantics (maxSeq 0, empty
+      // timeline), then rebuilds them from its (simulated) response page.
+      refetches.push({ epoch: s.selectionEpoch, maxSeq: s.maxSeq, timeline: s.timeline.length });
+      s.timeline = [
+        { seq: 1, category: "command", ts: "t", exitStatus: "ok" },
+        { seq: 2, category: "state", ts: "t" },
+      ];
+      s.maxSeq = app.highestSeq(s.timeline);
+      // The refetched bootstrap re-baselines the slot from its own first page.
+      s.selectionTerminalObserved = app.foldSelectionTerminal(s.selectionTerminalObserved, true).observed;
+    },
+  });
+  assert.deepEqual(res, { refetched: true, binding: { runId: "run_t", epoch: 2 } },
+    "the refetch is bound to the BUMPED epoch via the existing advanceSelection");
+  assert.deepEqual(refetches, [{ epoch: 2, maxSeq: 0, timeline: 0 }],
+    "exactly one refetch; timeline cleared and maxSeq zeroed BEFORE it");
+  assert.equal(state.maxSeq, 2, "maxSeq rebuilt from the refetch, bootstrap semantics restored");
+  assert.equal(state.timeline[0].exitStatus, "ok", "the upgraded exit is finally visible");
+
+  // THE existing-epoch-guard pin: a poll that captured the PRE-bump binding
+  // resolves late and is dropped by the SAME commit gate every path uses —
+  // the stale "unknown" page can never overwrite the refetched state.
+  assert.equal(app.isCurrentSelection(state, selection), false, "the pre-bump binding is stale");
+  if (app.isCurrentSelection(state, selection)) { // mirrors pollOnce's commit gate
+    state.timeline = app.trimOldest(app.appendNewer(state.timeline,
+      [{ seq: 1, category: "command", ts: "t", exitStatus: "unknown" }]), app.TIMELINE_CAP);
+    state.maxSeq = app.highestSeq(state.timeline);
+  }
+  assert.equal(state.timeline[0].exitStatus, "ok", "the late pre-bump page never pollutes the refetched state");
+  assert.equal(state.maxSeq, 2);
+
+  // Absorption: every later terminal observation is a no-trigger, so repeated
+  // polls after the refetch can never re-fire it.
+  for (let i = 0; i < 3; i += 1) {
+    const again = app.foldSelectionTerminal(state.selectionTerminalObserved, true);
+    assert.equal(again.transition, false, "terminal is absorbing within the selection session");
+    state.selectionTerminalObserved = again.observed;
+  }
+});
+
+test("TD-228① SESSION: a selection change re-arms the slot; re-selecting an already-terminal run never refetches", () => {
+  const state = freshSelectionState();
+  app.advanceSelection(state, "run_a");
+  state.selectionTerminalObserved = true; // a transition was consumed this session
+  // Owner switches to B, then BACK to A — each advanceSelection re-arms.
+  app.advanceSelection(state, "run_b");
+  assert.equal(state.selectionTerminalObserved, null, "a new selection session starts unobserved");
+  app.advanceSelection(state, "run_a");
+  assert.equal(state.selectionTerminalObserved, null);
+  // A's fresh bootstrap observes terminal → BASELINE (never a transition): the
+  // bootstrap itself already carries the run's final shape.
+  assert.equal(app.foldSelectionTerminal(state.selectionTerminalObserved, true).transition, false,
+    "re-selecting an already-terminal run never triggers the refetch");
+});
+
+test("TD-228① WIRING: both observe sites route the transition through the epoch-bound refetch and skip their trailing commit", () => {
+  const js = readAsset("app.js");
+  // The per-selection fold drives the trigger at the observation site.
+  assert.match(js, /const fold = foldSelectionTerminal\(state\.selectionTerminalObserved, act\.terminal\)/,
+    "observeActivityTerminal folds the per-selection slot");
+  assert.match(js, /state\.selectionTerminalObserved = fold\.observed;/, "the folded slot is stored");
+  assert.match(js, /return fold\.transition;/, "the transition is the trigger signal");
+  // BOTH the bootstrap and the poll path gate the refetch on the transition and
+  // return early — the refetch owns the follow-up freshness + render.
+  const gates = js.match(
+    /if \(observeActivityTerminal\(state, page\)\) \{\s*\n\s*await terminalRefetchOnce\(state, \{ refetch: \(s\) => bootstrapActivity\(s\) \}\);\s*\n\s*return;\s*\n\s*\}/g,
+  ) || [];
+  assert.ok(gates.length >= 2, `bootstrap AND poll route the transition through the refetch (found ${gates.length})`);
+  // The refetch reuses THE existing epoch mechanism — advanceSelection inside
+  // terminalRefetchOnce; no second epoch counter, no new concurrency primitive.
+  assert.match(js,
+    /const binding = advanceSelection\(state, runId\);\s*\n\s*if \(deps && typeof deps\.refetch === "function"\) await deps\.refetch\(state\);/,
+    "terminalRefetchOnce bumps the EXISTING selection epoch and awaits the injected refetch");
+  // The SAME advanceSelection resets the slot — the re-arm point per selection.
+  assert.match(js, /state\.selectionTerminalObserved = null;\s*\n\s*return \{ runId, epoch: state\.selectionEpoch \};/,
+    "advanceSelection resets the slot");
+  assert.match(js, /selectionTerminalObserved: null/, "boot state initializes the slot");
+});
