@@ -1608,6 +1608,46 @@ export async function startCanonicalSuite({
   }
 }
 
+// ── TD-233: worker-context self-awareness + verification lease attribution ────
+
+// runId shape check — a LOCAL copy of the allowlist in src/delivery.js
+// isValidRunId (the SSOT): letters/digits/underscore/hyphen, no leading dot or
+// dash. scripts/ is test infrastructure and must NOT import src production
+// modules (no reverse dependency), so the rule is duplicated here; if
+// delivery.js ever tightens the rule, update this copy in step.
+export function isValidRunIdShape(runId) {
+  if (typeof runId !== "string" || runId.length === 0) return false;
+  if (!/^[A-Za-z0-9_-]+$/.test(runId)) return false;
+  if (/^[.-]/.test(runId)) return false;
+  return true;
+}
+
+// Derive the delivery-worktree runId from this process's cwd. Delivery
+// worktrees are checked out at <repo>/.wao-worktrees/<runId>, so the segment
+// right after `.wao-worktrees` is the owning runId. Any other cwd (main repo
+// checkout, unexpected nesting, a segment that fails the isValidRunId allowlist)
+// yields null — the gate identity then carries no runId, exactly the pre-TD-233
+// shape. The ≤64-char cap is the display-side bound for the lease record (a
+// gate.log forensic surface); real WAO runIds are far shorter.
+export function runIdFromWorktreeCwd(cwd = process.cwd()) {
+  const segments = cwd.split(/[\\/]+/);
+  const idx = segments.lastIndexOf(".wao-worktrees");
+  const candidate = idx >= 0 && idx + 1 < segments.length ? segments[idx + 1] : undefined;
+  if (!candidate || !isValidRunIdShape(candidate)) return null;
+  return candidate.slice(0, 64);
+}
+
+// One-line startup banner for a suite launched INSIDE a worker context
+// (WAO_IN_WORKER set): decision 0047 (anti-nested-dispatch gate) legitimately
+// blocks the suite's own dispatch-family tests, so those files go red —
+// expected behavior, NOT a regression. Returns the line to print on the
+// suite's stderr banner channel, or null outside a worker context. Pure
+// advisory: no env is stripped or waived, decision 0047's semantics untouched.
+export function workerBannerLine(env = process.env) {
+  if (!env.WAO_IN_WORKER) return null;
+  return "[canonical] NOTE: 本进程处于 worker 上下文（检测到 WAO_IN_WORKER）——派发族测试受决定 0047（防向下派发门）约束会变红，属预期行为非回归；未做任何 env 豁免。";
+}
+
 async function main() {
   const here = dirname(fileURLToPath(import.meta.url));
   const repoRoot = resolve(here, "..");
@@ -1631,12 +1671,24 @@ async function main() {
     try { rmSync(suiteTempRoot, { recursive: true, force: true }); } catch { /* 强杀/占用残留交 sweep */ }
   });
 
+  // Decision 0047 self-awareness: say up front that a worker-context suite's
+  // red dispatch-family files are by-design (see workerBannerLine). Advisory
+  // only — nothing is stripped or waived.
+  const banner = workerBannerLine();
+  if (banner) console.error(banner);
+
   // Gate engagement decided ONCE per invocation from the live process env:
   // engaged unless kill-switched off or already held by an ancestor (HELD
   // guard — anti-self-lock). Disabled ⇒ null ⇒ startCanonicalSuite skips the
   // gate segment entirely (degrades to the R22 marker warning layer).
+  // TD-233 租约归因：delivery worktree 里跑套件时，把 worktree 的 runId 附进
+  // 租约身份（gate.log 取证线索）；主仓/其他 cwd 解析不出 runId ⇒ 不附，保持现状。
+  const workerRunId = runIdFromWorktreeCwd();
   const createGate = gateEngaged(process.env)
-    ? () => createVerificationGate({ identity: { owner: "scripts/canonical-test.mjs" } })
+    ? () => createVerificationGate({ identity: {
+      owner: "scripts/canonical-test.mjs",
+      ...(workerRunId ? { runId: workerRunId } : {}),
+    } })
     : null;
 
   await startCanonicalSuite({

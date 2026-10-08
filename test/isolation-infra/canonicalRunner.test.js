@@ -48,6 +48,8 @@ import {
   boundDetailString, unknownFailureDetail,
   FAILURE_DETAIL_TEST_CAP, FAILURE_DETAIL_TEXT_CAP, FAILURE_DETAIL_CHAR_BUDGET,
   realWaveObservers, defaultCountNodeProcesses, parseTasklistSample,
+  // TD-233：worker 上下文自知（横幅）与验证租约的 worktree runId 归因。
+  workerBannerLine, runIdFromWorktreeCwd,
 } from "../../scripts/canonical-test.mjs";
 
 function manifestFixture() {
@@ -2376,4 +2378,40 @@ test("TD-181(b) ④ 真实入口回归: 首轮 fail + 单跑 pass ⇒ 落盘报�
     process.exitCode = prevExitCode; // runSuite 置 process.exitCode=1——恢复宿主 runner 状态
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ── TD-233：worker 上下文自知（横幅）+ 验证租约的 worktree runId 归因 ──────────
+
+test("TD-233: workerBannerLine — 命中 WAO_IN_WORKER 给出 0047 预期红说明，未命中为 null", () => {
+  assert.equal(workerBannerLine({}), null, "worker 上下文外不打横幅");
+  assert.equal(workerBannerLine({ WAO_IN_WORKER: "" }), null, "空值视为未命中");
+  const line = workerBannerLine({ WAO_IN_WORKER: "1" });
+  assert.ok(line, "命中必须返回横幅行");
+  assert.ok(line.startsWith("[canonical]"), "横幅走套件既有 [canonical] stderr 通道");
+  assert.ok(line.includes("WAO_IN_WORKER"), "横幅点名检测到的 env");
+  assert.ok(line.includes("0047"), "横幅点名决定 0047（防向下派发门）");
+  assert.ok(line.includes("预期") && line.includes("非回归"), "横幅必须说明会红属预期非回归");
+});
+
+test("TD-233: runIdFromWorktreeCwd — 从 .wao-worktrees/<runId> 形态解析 runId", () => {
+  const worktreeCwd = join(tmpdir(), "host", "repo", ".wao-worktrees", "run_20261008140227412zt6oi1");
+  assert.equal(runIdFromWorktreeCwd(worktreeCwd), "run_20261008140227412zt6oi1", "join 形态（平台分隔符）");
+  assert.equal(runIdFromWorktreeCwd("C:/host/repo/.wao-worktrees/run_abc123"), "run_abc123", "正斜杠形态同样解析");
+});
+
+test("TD-233: runIdFromWorktreeCwd — 解析失败一律返回 null（不附 runId，保持现状）", () => {
+  assert.equal(runIdFromWorktreeCwd(join(tmpdir(), "host", "repo")), null, "主仓 checkout（无 .wao-worktrees 段）");
+  assert.equal(runIdFromWorktreeCwd(join(tmpdir(), "host", ".wao-worktrees")), null, ".wao-worktrees 是末段（无 runId 跟随）");
+  assert.equal(runIdFromWorktreeCwd(join(tmpdir(), "host", "repo", ".wao-worktrees", "bad runid")), null, "段含空格（非 allowlist）");
+  assert.equal(runIdFromWorktreeCwd(join(tmpdir(), "host", "repo", ".wao-worktrees", ".hidden")), null, "段以点开头（isValidRunId 同款拒绝）");
+  assert.equal(runIdFromWorktreeCwd(join(tmpdir(), "host", "repo", ".wao-worktrees", "-lead")), null, "段以连字符开头（isValidRunId 同款拒绝）");
+  assert.equal(runIdFromWorktreeCwd(join(tmpdir(), "host", "repo", ".wao-worktrees", "..")), null, "段是父目录引用（ traversal 拒绝）");
+});
+
+test("TD-233: runIdFromWorktreeCwd — 末次出现优先 + 显示侧 64 字符帽", () => {
+  const nested = join(tmpdir(), "host", ".wao-worktrees", "decoy01", "inner", ".wao-worktrees", "run_real1");
+  assert.equal(runIdFromWorktreeCwd(nested), "run_real1", "取最后一次 .wao-worktrees 之后的段");
+  const long = "a".repeat(100);
+  assert.equal(runIdFromWorktreeCwd(join(tmpdir(), "host", "repo", ".wao-worktrees", long)), "a".repeat(64),
+    "合法形态但超长 ⇒ 截到显示侧 64 字符帽");
 });

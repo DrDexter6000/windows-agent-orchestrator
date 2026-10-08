@@ -9,10 +9,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { join, resolve, sep } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { JsonlTranscript, readTranscript } from "../../src/transcript.js";
 
@@ -281,6 +282,147 @@ test("AUTH-05: Windows case-alias — same canonical root allowed", async () => 
     });
     assert.notEqual(result.authorized, false, "case alias should match on Windows");
     assert.equal(result.terminalAccepted, true, "should proceed to terminal claim");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── TD-233: alert logPath stays inside the run's own runDir ──────────────────
+// The raiseAlert call sites used to build logPath from deps.config?.runDir ?? "."
+// — when deps.config was missing, the alert landed in the PROCESS CWD
+// (production evidence: a stray ALERTS.log at the repo root after a manual
+// stop). All three call sites now reuse the resolvedRunDir the transcript
+// itself lives in. Every test below omits deps.config entirely — the exact
+// pre-fix bug trigger — and pins that the alert target is the runDir's
+// ALERTS.log, never the bare process cwd.
+
+function alertCapture(captured) {
+  return async (level, message, opts) => { captured.push({ level, message, opts }); };
+}
+
+function assertAlertInsideRunDir(captured, dir) {
+  assert.equal(captured.length, 1, "exactly one alert");
+  const resolvedDir = resolve(dir);
+  const actual = resolve(captured[0].opts.logPath);
+  assert.equal(actual, join(resolvedDir, "ALERTS.log"),
+    "alert logPath must resolve to the runDir's ALERTS.log");
+  assert.ok(actual.startsWith(resolvedDir + sep),
+    "alert target must stay inside the injected tmp runDir");
+  assert.notEqual(actual, join(process.cwd(), "ALERTS.log"),
+    "alert must never fall back to the process cwd (pre-TD-233 bug shape)");
+}
+
+test("TD-233-01: process unverified stop — alert lands in runDir even with deps.config missing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td233-01-"));
+  try {
+    makeGitRepo(dir);
+    await seedRunningProcessRun(dir, "run_td23301", 41001, dir);
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const captured = [];
+    const result = await stopRun({
+      runId: "run_td23301", runDir: dir,
+      deps: {
+        kill: () => ({ called: true, exitCode: 0 }),
+        isAlive: () => true, // process survives ⇒ unverified path
+        alert: alertCapture(captured),
+      },
+    });
+    assert.equal(result.stopVerified, false);
+    assertAlertInsideRunDir(captured, dir);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("TD-233-02: invalid PID — alert lands in runDir even with deps.config missing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td233-02-"));
+  try {
+    makeGitRepo(dir);
+    const tp = join(dir, "run_td23302.jsonl");
+    const t = new JsonlTranscript(tp, { runId: "run_td23302", agentId: "a" });
+    await t.append("run.started", { backend: "claude-code" });
+    await t.append("run.background_submitted", { background: true, cwd: dir });
+    await t.append("session.created", { backend: "process", backendSessionId: "proc_not-a-number" });
+    await t.transitionState(null, "pending", "created");
+    await t.transitionState("pending", "running", "first_event");
+
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const captured = [];
+    const result = await stopRun({
+      runId: "run_td23302", runDir: dir,
+      deps: { alert: alertCapture(captured) },
+    });
+    assert.equal(result.invalidPid, true);
+    assertAlertInsideRunDir(captured, dir);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("TD-233-03: opencode unverified stop — alert lands in runDir even with deps.config missing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wao-td233-03-"));
+  try {
+    makeGitRepo(dir);
+    const tp = join(dir, "run_td23303.jsonl");
+    const t = new JsonlTranscript(tp, { runId: "run_td23303", agentId: "a" });
+    await t.append("run.started", { backend: "opencode" });
+    await t.append("run.background_submitted", { background: true, cwd: dir });
+    await t.append("session.created", {
+      backend: "opencode-serve", backendSessionId: "sess_td23303", serveUrl: "http://127.0.0.1:9",
+    });
+    await t.transitionState(null, "pending", "created");
+    await t.transitionState("pending", "submitted", "spawned");
+    await t.transitionState("submitted", "running", "first_event");
+
+    const { stopRun } = await import("../../src/application/runStop.js");
+    const captured = [];
+    const result = await stopRun({
+      runId: "run_td23303", runDir: dir,
+      deps: {
+        executeStop: async () => ({ verified: false, taskkillCalled: false }),
+        alert: alertCapture(captured),
+      },
+    });
+    assert.equal(result.stopVerified, false);
+    assertAlertInsideRunDir(captured, dir);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("TD-233-04: runDir omitted — alert follows the cwd-derived default (<cwd>/runs), never bare cwd", async () => {
+  // resolveRunDir's no-input default anchors the process cwd's runs/
+  // subdirectory — the same directory the transcript is read from. Exercised
+  // in a child process whose cwd is the tmp dir so the default cannot touch
+  // the repo's real runs/.
+  const dir = mkdtempSync(join(tmpdir(), "wao-td233-04-"));
+  try {
+    mkdirSync(join(dir, "runs"));
+    await seedRunningProcessRun(join(dir, "runs"), "run_td23304", 41004, dir);
+    const runStopUrl = pathToFileURL(join(
+      fileURLToPath(new URL(".", import.meta.url)), "..", "..", "src", "application", "runStop.js",
+    ));
+    const script = `
+import { stopRun } from ${JSON.stringify(runStopUrl.href)};
+import { writeFileSync } from "node:fs";
+const captured = [];
+const result = await stopRun({
+  runId: "run_td23304",
+  deps: {
+    kill: () => ({ called: true, exitCode: 0 }),
+    isAlive: () => true,
+    alert: async (level, message, opts) => { captured.push(opts.logPath); },
+  },
+});
+writeFileSync(${JSON.stringify(join(dir, "td23304-out.json"))}, JSON.stringify({
+  stopVerified: result.stopVerified,
+  alertPaths: captured,
+}));
+`;
+    writeFileSync(join(dir, "td23304-child.mjs"), script, "utf8");
+    const child = spawnSync(process.execPath, [join(dir, "td23304-child.mjs")], {
+      cwd: dir, encoding: "utf8",
+    });
+    assert.equal(child.status, 0, `child process failed: ${child.stderr}`);
+    const out = JSON.parse(readFileSync(join(dir, "td23304-out.json"), "utf8"));
+    assert.equal(out.stopVerified, false);
+    assert.equal(out.alertPaths.length, 1, "exactly one alert");
+    assert.equal(resolve(out.alertPaths[0]), join(resolve(dir), "runs", "ALERTS.log"),
+      "alert must follow the cwd-derived <cwd>/runs default (same dir as the transcript)");
+    assert.notEqual(resolve(out.alertPaths[0]), join(resolve(dir), "ALERTS.log"),
+      "alert must never land at the bare process cwd");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

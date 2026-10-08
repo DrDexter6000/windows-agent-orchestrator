@@ -204,10 +204,12 @@ export async function stopRun(input) {
     if (!Number.isInteger(pid) || pid <= 0) {
       return await invalidPidStop({
         transcript, session, fromState, runId, deps, stopRequestedAttempt, rawPid,
+        runDir: resolvedRunDir,
       });
     }
     return await processStop({
       transcript, session, fromState, runId, pid, deps, stopRequestedAttempt,
+      runDir: resolvedRunDir,
     });
   }
 
@@ -216,13 +218,14 @@ export async function stopRun(input) {
     throw new Error(`Run ${runId} session has no serveUrl (opencode path needs one)`);
   }
   return await opencodeStop({
-    transcript, session, fromState, runId, config: deps.config ?? {}, deps, stopRequestedAttempt,
+    transcript, session, fromState, runId, deps, stopRequestedAttempt,
+    runDir: resolvedRunDir,
   });
 }
 
 // ── processStop (extracted from stop.js) ─────────────────────────────────────
 
-async function processStop({ transcript, session, fromState, runId, pid, deps, stopRequestedAttempt }) {
+async function processStop({ transcript, session, fromState, runId, pid, deps, stopRequestedAttempt, runDir }) {
   const kill = deps.kill ?? ((p) => killProcessTree(p));
   const isAlive = deps.isAlive ?? ((p) => isPidAlive(p));
   const alert = deps.alert ?? (async (level, msg, opts) => raiseAlert(level, msg, opts));
@@ -303,9 +306,11 @@ async function processStop({ transcript, session, fromState, runId, pid, deps, s
       processAliveBefore: aliveBefore,
       processAliveAfter: aliveAfter,
     });
+    // TD-233（告警落点收口）：告警跟随本调用实际解析出的 runDir（与转录同一
+    // 来源，stopRun 传入的 resolvedRunDir），绝不回落到进程 cwd。
     await alert("stop_unverified",
       `stop ${runId} not verified: process may still be running (pid=${pid}, outcome=${outcome})`,
-      { runId, logPath: join(deps.config?.runDir ?? ".", "ALERTS.log") },
+      { runId, logPath: join(runDir, "ALERTS.log") },
     ).catch(() => { /* alert failure doesn't affect terminal state */ });
   }
 
@@ -330,7 +335,7 @@ async function processStop({ transcript, session, fromState, runId, pid, deps, s
 
 // ── opencodeStop (extracted from stop.js) ────────────────────────────────────
 
-async function opencodeStop({ transcript, session, fromState, runId, config, deps, stopRequestedAttempt }) {
+async function opencodeStop({ transcript, session, fromState, runId, deps, stopRequestedAttempt, runDir }) {
   const executeStop = deps.executeStop ?? ((b, url, sid, opts) => executeStopWithVerification(b, url, sid, opts));
   const alert = deps.alert ?? (async (level, msg, opts) => raiseAlert(level, msg, opts));
   const backend = deps.opencodeBackend ?? new OpenCodeServeBackend({
@@ -386,9 +391,10 @@ async function opencodeStop({ transcript, session, fromState, runId, config, dep
       method: "abort+verify",
       taskkillCalled: stopResult.taskkillCalled ?? false,
     });
+    // TD-233（告警落点收口）：同 processStop——告警跟随实际写转录的 runDir。
     await alert("stop_unverified",
       `stop ${runId} not verified: opencode session may still be active`,
-      { runId, logPath: join(config.runDir ?? ".", "ALERTS.log") },
+      { runId, logPath: join(runDir, "ALERTS.log") },
     ).catch(() => { /* alert failure doesn't affect terminal state */ });
   }
 
@@ -408,7 +414,7 @@ async function opencodeStop({ transcript, session, fromState, runId, config, dep
 
 // ── invalidPidStop (extracted from stop.js) ──────────────────────────────────
 
-async function invalidPidStop({ transcript, session, fromState, runId, deps, stopRequestedAttempt, rawPid }) {
+async function invalidPidStop({ transcript, session, fromState, runId, deps, stopRequestedAttempt, rawPid, runDir }) {
   const alert = deps.alert ?? (async (level, msg, opts) => raiseAlert(level, msg, opts));
 
   // Does NOT claim terminal state — records stop_requested + stop_unverified
@@ -426,9 +432,10 @@ async function invalidPidStop({ transcript, session, fromState, runId, deps, sto
     processAliveBefore: false,
     processAliveAfter: false,
   });
+  // TD-233（告警落点收口）：同 processStop——告警跟随实际写转录的 runDir。
   await alert("stop_unverified",
     `Run ${runId} has invalid PID: ${rawPid}`,
-    { runId, logPath: join(deps.config?.runDir ?? ".", "ALERTS.log") },
+    { runId, logPath: join(runDir, "ALERTS.log") },
   ).catch(() => { /* alert failure doesn't affect terminal state */ });
 
   return {
@@ -449,6 +456,11 @@ async function invalidPidStop({ transcript, session, fromState, runId, deps, sto
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+// TD-233（告警落点收口）：本函数的返回值是转录与告警的共同落点 SSOT。
+// 缺省时落到 <cwd>/runs（非裸 cwd）——转录从这个目录读，告警就写到这个目录，
+// 两者永不分离；返回值恒为绝对路径，因此告警路径 join(runDir, "ALERTS.log")
+// 不存在"落到进程 cwd"的缺省形态（alerts.js 的相对缺省仅在其直接调用方不传
+// logPath 时可达，runStop 不属于该形态）。
 function resolveRunDir(runDir) {
   if (!runDir) return join(process.cwd(), "runs");
   return resolve(runDir);
