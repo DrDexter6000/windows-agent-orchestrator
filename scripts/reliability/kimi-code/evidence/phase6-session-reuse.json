@@ -1,0 +1,353 @@
+{
+  "drill": "TD-184 phase6 session-reuse association (real dispatch, kimi-code)",
+  "format": "phase6-session-reuse-self-contained-v1",
+  "date": "2026-10-08T22:54:09.451Z",
+  "node": "v22.23.1",
+  "backend": "kimi-code",
+  "runtimeIdentity": {
+    "distribution": "kimi",
+    "version": "2.1.1",
+    "binaryPath": "C:\\Users\\17865\\.kimi-code\\bin\\kimi.exe",
+    "fingerprint": "v1-b2ddc0fd24cf66f2",
+    "verified": true,
+    "reason": null
+  },
+  "agentId": "kimi_code_reuse_probe",
+  "leadSession": "<fixed drill lead (simulates the MCP server's stable injection)>",
+  "marker": "WAO_REUSE_P6_MV04VGBJ_K2SNHY",
+  "entry": "dispatchRun (the shared background dispatch service used by CLI run --background and MCP run_dispatch); the detached runner / RunManager / backend / CLI / model chain is real",
+  "registrySource": "D:\\projects\\windows-agent-orchestrator-poc\\config\\agents.json",
+  "scratchLane": {
+    "agentId": "kimi_code_reuse_probe",
+    "backend": "kimi-code",
+    "cwd": ".",
+    "model": {
+      "id": "kimi-code/k3"
+    },
+    "sessionReuse": "lead_workspace"
+  },
+  "runDir": "D:\\projects\\windows-agent-orchestrator-poc\\.wao\\runs\\phase6-reuse-runs-kimi_code",
+  "steps": {
+    "run1": {
+      "runId": "run_202610082254094522iscuy",
+      "accepted": true,
+      "providerSessionRouting": "first_turn_requested",
+      "state": "completed",
+      "backendSessionId": "session_c84cd2c5-4e80-4692-aa86-dcf47d114034",
+      "runSessionReuseTurn": "first",
+      "assistantEcho": "MARKER_STORED",
+      "toolEventCount": 0,
+      "evidenceRefs": {
+        "sessionCreated": "run1-session-created",
+        "sessionReuse": "run1-session-reuse",
+        "assistant": "run1-assistant",
+        "terminal": "run1-terminal"
+      }
+    },
+    "run2": {
+      "runId": "run_20261008225430260bdcfba",
+      "accepted": true,
+      "providerSessionRouting": "resume_requested",
+      "state": "completed",
+      "backendSessionId": "session_c84cd2c5-4e80-4692-aa86-dcf47d114034",
+      "runSessionReuseTurn": "resume",
+      "assistantEcho": "WAO_REUSE_P6_MV04VGBJ_K2SNHY",
+      "evidenceRefs": {
+        "sessionCreated": "run2-session-created",
+        "sessionReuse": "run2-session-reuse",
+        "assistant": "run2-assistant",
+        "terminal": "run2-terminal"
+      }
+    },
+    "run3": {
+      "runId": "run_20261008225446792vkzohy",
+      "accepted": true,
+      "providerSessionRouting": "resume_requested",
+      "state": "completed",
+      "backendSessionId": "session_c84cd2c5-4e80-4692-aa86-dcf47d114034",
+      "runSessionReuseTurn": "resume",
+      "assistantEcho": "WAO_REUSE_P6_MV04VGBJ_K2SNHY",
+      "evidenceRefs": {
+        "sessionCreated": "run3-session-created",
+        "sessionReuse": "run3-session-reuse",
+        "assistant": "run3-assistant",
+        "terminal": "run3-terminal"
+      }
+    },
+    "negD_fresh_control": {
+      "runId": "run_20261008225501485eklcs4",
+      "accepted": true,
+      "providerSessionRouting": "first_turn_requested"
+    },
+    "negC_dispatch": {
+      "runId": "run_20261008225523037weadh3",
+      "accepted": true,
+      "providerSessionRouting": "resume_requested"
+    }
+  },
+  "positive": {
+    "pass": true,
+    "sameProviderSessionObserved": true,
+    "claims": {
+      "resumeTurnRouted": true,
+      "nativeSessionObservedAllRuns": true,
+      "sameProviderSessionAcrossRuns": true,
+      "contextCarried": true,
+      "chainDepthTwoResumes": true,
+      "terminalState": "completed"
+    }
+  },
+  "negativeD": {
+    "evidenceRef": "negativeD",
+    "runId": "run_20261008225501485eklcs4",
+    "control": "distinct leadSession, same lane/workspace/prompt as run2 — fresh provider conversation must NOT be able to echo the marker",
+    "state": "completed",
+    "runSessionReuseTurn": "first",
+    "markerEchoed": false,
+    "assistantEcho": "I don't have a marker string — this conversation contains no earlier message asking me to remember one, and I won't invent one. If you have the marker, paste it and I'll store or echo it as needed.",
+    "evidenceRefs": {
+      "sessionReuse": "negd-session-reuse",
+      "assistant": "negd-assistant",
+      "terminal": "negd-terminal"
+    },
+    "pass": true
+  },
+  "negativeA": {
+    "evidenceRef": "negativeA",
+    "tamper": "prior transcript session.created.backendSessionId (all bound lines incl. the LAST-bound native line) -> empty string",
+    "refused": true,
+    "message": "sessionReuse: prior run has a bound session.created but no addressable provider session id (backendSessionId missing/empty/non-string) — refusing resume instead of silently starting a fresh provider conversation",
+    "addedTranscripts": [],
+    "noTranscriptForRefusedDispatch": true,
+    "pass": true
+  },
+  "negativeB": {
+    "evidenceRef": "negativeB",
+    "tamper": "routing entry file -> unparseable bytes",
+    "refused": true,
+    "message": "sessionReuse: routing entry for this reuse identity is damaged (present but unparseable or malformed) — refusing instead of silently starting a fresh provider conversation",
+    "pass": true
+  },
+  "negativeC": {
+    "evidenceRef": "negativeC",
+    "tamper": "prior transcript session.created.backendSessionId -> well-formed nonexistent id (11111111-2222-4333-8444-555555555555)",
+    "state": "failed",
+    "spawnError": "process exited with code 1; stderr: error: failed to run prompt: Session \"11111111-2222-4333-8444-555555555555\" not found.See log: C:\\Users\\17865\\.kimi-code\\logs\\kimi-code.log",
+    "nativeSessionIdObserved": false,
+    "providerSessionBoundEvents": 0,
+    "pass": true
+  },
+  "embeddedEvidence": {
+    "format": "phase6-session-reuse-self-contained-v1",
+    "backend": "kimi-code",
+    "marker": "WAO_REUSE_P6_MV04VGBJ_K2SNHY",
+    "positiveInputs": {
+      "run1": {
+        "runId": "run_202610082254094522iscuy",
+        "providerSessionRouting": "first_turn_requested",
+        "prompt": "Remember this marker string for later: WAO_REUSE_P6_MV04VGBJ_K2SNHY\nDo not use any tools. Do not read or write any files. Do not run any commands.\nReply with exactly one line: MARKER_STORED"
+      },
+      "run2": {
+        "runId": "run_20261008225430260bdcfba",
+        "providerSessionRouting": "resume_requested",
+        "prompt": "Reply with exactly the marker string you were asked to remember earlier, and nothing else."
+      },
+      "run3": {
+        "runId": "run_20261008225446792vkzohy",
+        "providerSessionRouting": "resume_requested",
+        "prompt": "Reply with exactly the marker string you were asked to remember earlier, and nothing else."
+      },
+      "freshControl": {
+        "runId": "run_20261008225501485eklcs4",
+        "providerSessionRouting": "first_turn_requested",
+        "prompt": "Reply with exactly the marker string you were asked to remember earlier, and nothing else."
+      }
+    },
+    "evidenceLines": [
+      {
+        "id": "run1-session-created",
+        "source": "run transcript excerpt",
+        "runId": "run_202610082254094522iscuy",
+        "type": "session.created",
+        "backendSessionId": "session_c84cd2c5-4e80-4692-aa86-dcf47d114034"
+      },
+      {
+        "id": "run1-session-reuse",
+        "source": "run transcript excerpt",
+        "runId": "run_202610082254094522iscuy",
+        "type": "run.session_reuse",
+        "turn": "first"
+      },
+      {
+        "id": "run1-assistant",
+        "source": "run transcript excerpt",
+        "runId": "run_202610082254094522iscuy",
+        "type": "run.event",
+        "kind": "message",
+        "role": "assistant",
+        "text": "MARKER_STORED"
+      },
+      {
+        "id": "run1-terminal",
+        "source": "run transcript excerpt",
+        "runId": "run_202610082254094522iscuy",
+        "type": "run.completed",
+        "state": "completed"
+      },
+      {
+        "id": "run2-session-created",
+        "source": "run transcript excerpt",
+        "runId": "run_20261008225430260bdcfba",
+        "type": "session.created",
+        "backendSessionId": "session_c84cd2c5-4e80-4692-aa86-dcf47d114034"
+      },
+      {
+        "id": "run2-session-reuse",
+        "source": "run transcript excerpt",
+        "runId": "run_20261008225430260bdcfba",
+        "type": "run.session_reuse",
+        "turn": "resume"
+      },
+      {
+        "id": "run2-assistant",
+        "source": "run transcript excerpt",
+        "runId": "run_20261008225430260bdcfba",
+        "type": "run.event",
+        "kind": "message",
+        "role": "assistant",
+        "text": "WAO_REUSE_P6_MV04VGBJ_K2SNHY"
+      },
+      {
+        "id": "run2-terminal",
+        "source": "run transcript excerpt",
+        "runId": "run_20261008225430260bdcfba",
+        "type": "run.completed",
+        "state": "completed"
+      },
+      {
+        "id": "run3-session-created",
+        "source": "run transcript excerpt",
+        "runId": "run_20261008225446792vkzohy",
+        "type": "session.created",
+        "backendSessionId": "session_c84cd2c5-4e80-4692-aa86-dcf47d114034"
+      },
+      {
+        "id": "run3-session-reuse",
+        "source": "run transcript excerpt",
+        "runId": "run_20261008225446792vkzohy",
+        "type": "run.session_reuse",
+        "turn": "resume"
+      },
+      {
+        "id": "run3-assistant",
+        "source": "run transcript excerpt",
+        "runId": "run_20261008225446792vkzohy",
+        "type": "run.event",
+        "kind": "message",
+        "role": "assistant",
+        "text": "WAO_REUSE_P6_MV04VGBJ_K2SNHY"
+      },
+      {
+        "id": "run3-terminal",
+        "source": "run transcript excerpt",
+        "runId": "run_20261008225446792vkzohy",
+        "type": "run.completed",
+        "state": "completed"
+      },
+      {
+        "id": "negd-session-reuse",
+        "source": "run transcript excerpt",
+        "runId": "run_20261008225501485eklcs4",
+        "type": "run.session_reuse",
+        "turn": "first"
+      },
+      {
+        "id": "negd-assistant",
+        "source": "run transcript excerpt",
+        "runId": "run_20261008225501485eklcs4",
+        "type": "run.event",
+        "kind": "message",
+        "role": "assistant",
+        "text": "I don't have a marker string — this conversation contains no earlier message asking me to remember one, and I won't invent one. If you have the marker, paste it and I'll store or echo it as needed."
+      },
+      {
+        "id": "negd-terminal",
+        "source": "run transcript excerpt",
+        "runId": "run_20261008225501485eklcs4",
+        "type": "run.completed",
+        "state": "completed"
+      }
+    ],
+    "negativeControls": [
+      {
+        "id": "negativeA",
+        "input": {
+          "kind": "prior-transcript-session-id",
+          "runId": "run_20261008225446792vkzohy",
+          "backendSessionId": ""
+        },
+        "refusal": {
+          "kind": "dispatch_refused",
+          "accepted": false,
+          "refused": true,
+          "message": "sessionReuse: prior run has a bound session.created but no addressable provider session id (backendSessionId missing/empty/non-string) — refusing resume instead of silently starting a fresh provider conversation",
+          "noTranscriptCreated": true
+        }
+      },
+      {
+        "id": "negativeB",
+        "input": {
+          "kind": "routing-entry-bytes",
+          "rawBytes": "{damaged-not-json"
+        },
+        "refusal": {
+          "kind": "dispatch_refused",
+          "accepted": false,
+          "refused": true,
+          "message": "sessionReuse: routing entry for this reuse identity is damaged (present but unparseable or malformed) — refusing instead of silently starting a fresh provider conversation"
+        }
+      },
+      {
+        "id": "negativeC",
+        "input": {
+          "kind": "prior-transcript-session-id",
+          "runId": "run_20261008225446792vkzohy",
+          "backendSessionId": "11111111-2222-4333-8444-555555555555"
+        },
+        "refusal": {
+          "kind": "resume_rejected",
+          "runId": "run_20261008225523037weadh3",
+          "dispatchAccepted": true,
+          "providerSessionRouting": "resume_requested",
+          "terminalState": "failed",
+          "errorMessage": "process exited with code 1; stderr: error: failed to run prompt: Session \"11111111-2222-4333-8444-555555555555\" not found.See log: C:\\Users\\17865\\.kimi-code\\logs\\kimi-code.log",
+          "nativeSessionIdObserved": false,
+          "providerSessionBoundEvents": 0
+        }
+      },
+      {
+        "id": "negativeD",
+        "input": {
+          "kind": "fresh-lead-differential",
+          "runId": "run_20261008225501485eklcs4",
+          "leadSession": "distinct-fresh-lead",
+          "prompt": "Reply with exactly the marker string you were asked to remember earlier, and nothing else."
+        },
+        "control": {
+          "kind": "fresh_session_control",
+          "dispatchAccepted": true,
+          "providerSessionRouting": "first_turn_requested",
+          "turn": "first",
+          "terminalState": "completed",
+          "markerEchoed": false
+        }
+      }
+    ]
+  },
+  "pass": true,
+  "repro": [
+    "node scripts/wao-node.cjs scripts/reliability/session-reuse-drill.mjs --backend kimi-code",
+    "consumes real tokens (run1/run2/run3/fresh-control are small model turns; negC is rejected upstream at session lookup, before the model — no usage fact observed this turn)",
+    "prereq: kimi-code CLI on PATH and logged in; registry source D:\\projects\\windows-agent-orchestrator-poc\\config\\agents.json (read-only copy, scratch lane injected)"
+  ]
+}

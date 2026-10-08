@@ -33,6 +33,7 @@ import {
   BACKEND_COMPONENT_DRILLS,
   LLM_COMPONENT_DRILLS,
   SESSION_REUSE_EVIDENCE_SOURCES,
+  PHASE6_BACKEND_SHAPES,
   backendCapabilityConsistencyChecks,
   backendEventIntegrityChecks,
   backendStartupConfigChecks,
@@ -1210,8 +1211,10 @@ test("component ledger glue F9: stable refresh replaces prior, newly drifted his
     "the duplicate-producing full-prior concatenation must not return");
 });
 
-test("kernel: SESSION_REUSE_EVIDENCE_SOURCES 只登记真实派发证据路径（deepseek-acp → phase6）", () => {
-  assert.deepEqual(Object.keys(SESSION_REUSE_EVIDENCE_SOURCES), ["deepseek-acp"]);
+test("kernel: SESSION_REUSE_EVIDENCE_SOURCES 只登记真实派发证据路径（deepseek-acp/codex/kimi-code → phase6）", () => {
+  assert.deepEqual(Object.keys(SESSION_REUSE_EVIDENCE_SOURCES), ["deepseek-acp", "codex", "kimi-code"]);
+  assert.deepEqual(Object.keys(SESSION_REUSE_EVIDENCE_SOURCES), Object.keys(PHASE6_BACKEND_SHAPES),
+    "证据登记表与形状表必须逐键 1:1——登记了证据就必须有判定形状，反之亦然");
   const source = SESSION_REUSE_EVIDENCE_SOURCES["deepseek-acp"];
   assert.equal(source.path, "scripts/reliability/dsh-acp/evidence/phase6-session-reuse.json");
   assert.ok(existsSync(join(REPO_ROOT, source.path)), "登记的证据路径必须真实存在");
@@ -1221,6 +1224,198 @@ test("kernel: SESSION_REUSE_EVIDENCE_SOURCES 只登记真实派发证据路径�
     "真实 drill 重跑后仍必须生成自足证据，不能把文件覆盖回外部转录依赖形状");
   assert.match(drillSource, /probeRuntimeIdentity/,
     "真实 drill 必须把运行时身份写入证据，未来重跑不能丢失身份绑定");
+  // TD-184（2026-10-09）：codex / kimi-code 共享 drill。两份证据+共享 drill 脚本
+  // 必须真实在场；脚本必须保留自足证据形状与身份绑定（与 dsh 先例同钉）。
+  const sharedDrill = "scripts/reliability/session-reuse-drill.mjs";
+  for (const backend of ["codex", "kimi-code"]) {
+    const entry = SESSION_REUSE_EVIDENCE_SOURCES[backend];
+    assert.equal(entry.drill, sharedDrill);
+    assert.ok(existsSync(join(REPO_ROOT, entry.path)), `${backend} 证据文件必须真实存在`);
+  }
+  assert.ok(existsSync(join(REPO_ROOT, sharedDrill)), "共享 drill 脚本必须真实存在");
+  const sharedSource = readFileSync(join(REPO_ROOT, sharedDrill), "utf8");
+  assert.match(sharedSource, /phase6-session-reuse-self-contained-v1/,
+    "共享 drill 生成自足证据的形状标记不得被移除");
+  assert.match(sharedSource, /probeRuntimeIdentity/,
+    "共享 drill 必须绑定运行时身份");
+  assert.match(sharedSource, /LEAD_FRESH/,
+    "共享 drill 必须保留 N-D 新会话差分对照（fresh lead），不得为过测移除");
+});
+
+// TD-184（2026-10-09，astra+opus 会审修）：CLI 形状验证器的正反例。夹具为
+// 合成材料（零 token）——形状交叉核对/暗号泄漏防线/差分对照缺失/占位 id/
+// 错登拒绝逐一钉死；真证据由真实 drill 产出。
+function cliEvidenceBase({ backend = "codex", distribution = "codex" } = {}) {
+  const marker = "WAO_REUSE_P6_TESTMARKER_ABC123";
+  const run1 = "run_vc_drill_1";
+  const run2 = "run_vc_drill_2";
+  const run3 = "run_vc_drill_3";
+  const fresh = "run_vc_drill_fresh";
+  const negc = "run_vc_drill_negc";
+  const sid = "th_native_session_id";
+  const run2Prompt = "Reply with exactly the marker string you were asked to remember earlier, and nothing else.";
+  const msgA = "sessionReuse: prior run has a bound session.created but no addressable provider session id (backendSessionId missing/empty/non-string) — refusing resume instead of silently starting a fresh provider conversation";
+  const msgB = "sessionReuse: routing entry for this (lead session, workspace, agent) is damaged — refusing dispatch instead of guessing a fresh conversation";
+  const msgC = "ERROR: no rollout found for the requested thread id";
+  const lines = (id, runId, rest) => ({ id, runId, ...rest });
+  return {
+    drill: `TD-184 phase6 session-reuse association (real dispatch, ${backend})`,
+    date: "2026-10-09T00:00:00.000Z",
+    backend,
+    runtimeIdentity: { verified: true, distribution, version: "0.0.0-test", fingerprint: `fp-${distribution}-test` },
+    marker,
+    steps: {
+      run1: { runId: run1, accepted: true, providerSessionRouting: "first_turn_requested", state: "completed", backendSessionId: sid, runSessionReuseTurn: "first", assistantEcho: "MARKER_STORED", toolEventCount: 0, evidenceRefs: { sessionCreated: "run1-session-created", sessionReuse: "run1-session-reuse", assistant: "run1-assistant", terminal: "run1-terminal" } },
+      run2: { runId: run2, accepted: true, providerSessionRouting: "resume_requested", state: "completed", backendSessionId: sid, runSessionReuseTurn: "resume", assistantEcho: marker, evidenceRefs: { sessionCreated: "run2-session-created", sessionReuse: "run2-session-reuse", assistant: "run2-assistant", terminal: "run2-terminal" } },
+      run3: { runId: run3, accepted: true, providerSessionRouting: "resume_requested", state: "completed", backendSessionId: sid, runSessionReuseTurn: "resume", assistantEcho: marker, evidenceRefs: { sessionCreated: "run3-session-created", sessionReuse: "run3-session-reuse", assistant: "run3-assistant", terminal: "run3-terminal" } },
+      negD_fresh_control: { runId: fresh, accepted: true, providerSessionRouting: "first_turn_requested" },
+      negA_dispatch: {},
+      negB_dispatch: {},
+      negC_dispatch: { runId: negc, accepted: true, providerSessionRouting: "resume_requested" },
+    },
+    positive: {
+      pass: true,
+      sameProviderSessionObserved: true,
+      claims: {
+        resumeTurnRouted: true,
+        nativeSessionObservedAllRuns: true,
+        sameProviderSessionAcrossRuns: true,
+        contextCarried: true,
+        chainDepthTwoResumes: true,
+        terminalState: "completed",
+      },
+    },
+    negativeD: { evidenceRef: "negativeD", runId: fresh, state: "completed", runSessionReuseTurn: "first", markerEchoed: false, assistantEcho: "I was not told any marker string.", pass: true, evidenceRefs: { sessionReuse: "negd-session-reuse", assistant: "negd-assistant", terminal: "negd-terminal" } },
+    negativeA: { evidenceRef: "negativeA", refused: true, message: msgA, noTranscriptForRefusedDispatch: true, pass: true },
+    negativeB: { evidenceRef: "negativeB", refused: true, message: msgB, pass: true },
+    negativeC: { evidenceRef: "negativeC", state: "failed", spawnError: msgC, nativeSessionIdObserved: false, providerSessionBoundEvents: 0, pass: true },
+    embeddedEvidence: {
+      format: "phase6-session-reuse-self-contained-v1",
+      backend,
+      marker,
+      positiveInputs: {
+        run1: { runId: run1, providerSessionRouting: "first_turn_requested", prompt: `Remember this marker string for later: ${marker}\nDo not use any tools.` },
+        run2: { runId: run2, providerSessionRouting: "resume_requested", prompt: run2Prompt },
+        run3: { runId: run3, providerSessionRouting: "resume_requested", prompt: run2Prompt },
+        freshControl: { runId: fresh, providerSessionRouting: "first_turn_requested", prompt: run2Prompt },
+      },
+      evidenceLines: [
+        lines("run1-session-created", run1, { type: "session.created", backendSessionId: sid }),
+        lines("run1-session-reuse", run1, { type: "run.session_reuse", turn: "first" }),
+        lines("run1-assistant", run1, { type: "run.event", kind: "message", role: "assistant", text: "MARKER_STORED" }),
+        lines("run1-terminal", run1, { type: "run.completed", state: "completed" }),
+        lines("run2-session-created", run2, { type: "session.created", backendSessionId: sid }),
+        lines("run2-session-reuse", run2, { type: "run.session_reuse", turn: "resume" }),
+        lines("run2-assistant", run2, { type: "run.event", kind: "message", role: "assistant", text: marker }),
+        lines("run2-terminal", run2, { type: "run.completed", state: "completed" }),
+        lines("run3-session-created", run3, { type: "session.created", backendSessionId: sid }),
+        lines("run3-session-reuse", run3, { type: "run.session_reuse", turn: "resume" }),
+        lines("run3-assistant", run3, { type: "run.event", kind: "message", role: "assistant", text: marker }),
+        lines("run3-terminal", run3, { type: "run.completed", state: "completed" }),
+        lines("negd-session-reuse", fresh, { type: "run.session_reuse", turn: "first" }),
+        lines("negd-assistant", fresh, { type: "run.event", kind: "message", role: "assistant", text: "I was not told any marker string." }),
+        lines("negd-terminal", fresh, { type: "run.completed", state: "completed" }),
+      ],
+      negativeControls: [
+        { id: "negativeA", input: { kind: "prior-transcript-session-id", runId: run3, backendSessionId: "" }, refusal: { kind: "dispatch_refused", accepted: false, refused: true, message: msgA, noTranscriptCreated: true } },
+        { id: "negativeB", input: { kind: "routing-entry-bytes", rawBytes: "{damaged-not-json" }, refusal: { kind: "dispatch_refused", accepted: false, refused: true, message: msgB } },
+        { id: "negativeC", input: { kind: "prior-transcript-session-id", runId: run3, backendSessionId: "11111111-2222-4333-8444-555555555555" }, refusal: { kind: "resume_rejected", runId: negc, dispatchAccepted: true, providerSessionRouting: "resume_requested", terminalState: "failed", errorMessage: msgC, nativeSessionIdObserved: false, providerSessionBoundEvents: 0 } },
+        { id: "negativeD", input: { kind: "fresh-lead-differential", runId: fresh, leadSession: "distinct-fresh-lead", prompt: run2Prompt }, control: { kind: "fresh_session_control", dispatchAccepted: true, providerSessionRouting: "first_turn_requested", turn: "first", terminalState: "completed", markerEchoed: false } },
+      ],
+    },
+    pass: true,
+  };
+}
+
+test("kernel: TD-184 CLI 形状验证器——合成正例通过 + 材料不得自选形状", () => {
+  const base = cliEvidenceBase();
+  const pass = sessionReuseEvidenceFromPhase6File(base, { backendName: "codex" });
+  assert.equal(pass.accepted, true, `synthetic cli evidence must pass: ${pass.detail}`);
+  assert.match(pass.detail, /fresh-lead differential control/);
+
+  // 错登拒绝：codex 材料按 kimi-code 形状判 → backend 声明不匹配。
+  const wrongKey = sessionReuseEvidenceFromPhase6File(cliEvidenceBase(), { backendName: "kimi-code" });
+  assert.equal(wrongKey.accepted, false);
+  assert.match(wrongKey.detail, /declares backend/);
+
+  // dsh 历史证据按 codex 形状判 → 无 backend 声明，拒绝（防错登）。
+  const dshReal = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "reliability", "dsh-acp", "evidence", "phase6-session-reuse.json"), "utf8"));
+  const crossRegistered = sessionReuseEvidenceFromPhase6File(dshReal, { backendName: "codex" });
+  assert.equal(crossRegistered.accepted, false);
+  assert.match(crossRegistered.detail, /declares backend/);
+
+  // 未知后端：无形状即拒绝判定。
+  const noShape = sessionReuseEvidenceFromPhase6File(base, { backendName: "zcode" });
+  assert.equal(noShape.accepted, false);
+  assert.match(noShape.detail, /no phase6 evidence shape registered/);
+
+  // CLI 材料走 legacy 门（未指定形状）：deepseek 全杠不满足 → 不得 accepted。
+  const legacyDoor = sessionReuseEvidenceFromPhase6File(base);
+  assert.equal(legacyDoor.accepted, false);
+});
+
+test("kernel: TD-184 CLI 形状验证器——暗号泄漏/占位 id/差分缺失/坏 id 形状反例", () => {
+  const clone = () => structuredClone(cliEvidenceBase());
+
+  // 暗号泄漏进复述 prompt（三条 echo prompt 同变，先过同形检查再触发防线）→
+  // 上下文携带主张作废。
+  const leaked = clone();
+  const leakedPrompt = `${cliEvidenceBase().embeddedEvidence.positiveInputs.run2.prompt} (it is ${leaked.marker})`;
+  for (const key of ["run2", "run3", "freshControl"]) {
+    leaked.embeddedEvidence.positiveInputs[key].prompt = leakedPrompt;
+  }
+  const r1 = sessionReuseEvidenceFromPhase6File(leaked, { backendName: "codex" });
+  assert.equal(r1.accepted, false);
+  assert.match(r1.detail, /marker plaintext/);
+
+  // 占位 id 冒充 native → 拒绝。
+  const placeholder = clone();
+  placeholder.steps.run2.backendSessionId = "proc_12345";
+  for (const line of placeholder.embeddedEvidence.evidenceLines) {
+    if (line.id === "run2-session-created") line.backendSessionId = "proc_12345";
+  }
+  const r2 = sessionReuseEvidenceFromPhase6File(placeholder, { backendName: "codex" });
+  assert.equal(r2.accepted, false);
+  assert.match(r2.detail, /proc_ placeholder|native provider session id/i);
+
+  // 差分对照缺席（只留 3 条负对照）→ CLI 形状要求 A/B/C/D 四条。
+  const noDiff = clone();
+  noDiff.embeddedEvidence.negativeControls = noDiff.embeddedEvidence.negativeControls.filter((c) => c.id !== "negativeD");
+  const r3 = sessionReuseEvidenceFromPhase6File(noDiff, { backendName: "codex" });
+  assert.equal(r3.accepted, false);
+  assert.match(r3.detail, /four negative\/differential controls|incomplete/i);
+
+  // 差分对照自己答出了暗号 → fresh 会话知道暗号 = 泄漏，正向结论不成立。
+  const leakedFresh = clone();
+  leakedFresh.negativeD.markerEchoed = true;
+  leakedFresh.negativeD.assistantEcho = leakedFresh.marker;
+  for (const line of leakedFresh.embeddedEvidence.evidenceLines) {
+    if (line.id === "negd-assistant") line.text = leakedFresh.marker;
+  }
+  for (const c of leakedFresh.embeddedEvidence.negativeControls) {
+    if (c.id === "negativeD") c.control.markerEchoed = true;
+  }
+  const r4 = sessionReuseEvidenceFromPhase6File(leakedFresh, { backendName: "codex" });
+  assert.equal(r4.accepted, false);
+
+  // N-C 错误文本不命中该后端上游拒绝形状 → 负对照不成立。
+  const badShape = clone();
+  const wrongError = "ERROR: something else entirely";
+  badShape.negativeC.spawnError = wrongError;
+  for (const c of badShape.embeddedEvidence.negativeControls) {
+    if (c.id === "negativeC") c.refusal.errorMessage = wrongError;
+  }
+  const r5 = sessionReuseEvidenceFromPhase6File(badShape, { backendName: "codex" });
+  assert.equal(r5.accepted, false);
+
+  // kimi-code 形状：同款合成材料按 kimi 拒绝文本也能通过（形状表分发生效）。
+  const kimi = cliEvidenceBase({ backend: "kimi-code", distribution: "kimi" });
+  kimi.negativeC.spawnError = 'Session "11111111-2222-4333-8444-555555555555" not found';
+  for (const c of kimi.embeddedEvidence.negativeControls) {
+    if (c.id === "negativeC") c.refusal.errorMessage = kimi.negativeC.spawnError;
+  }
+  const r6 = sessionReuseEvidenceFromPhase6File(kimi, { backendName: "kimi-code" });
+  assert.equal(r6.accepted, true, `kimi synthetic evidence must pass: ${r6.detail}`);
 });
 
 test("kernel: 配置传递按支持范围——装配带 model → 值必须送达；装配无 model → 注入必须明确拒绝（ADR-0032 §2）", () => {

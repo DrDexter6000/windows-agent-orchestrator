@@ -385,6 +385,61 @@ export const SESSION_REUSE_EVIDENCE_SOURCES = Object.freeze({
     drill: "scripts/reliability/dsh-acp/wao-reuse-drill.mjs",
     note: "ADR-0031 §3.6 Phase 6 real-dispatch drill (2026-09-21, dsh 0.1.5-rc.2): same ACP session across two runs + three fail-closed negatives",
   }),
+  // TD-184（2026-10-09）：codex / kimi-code 真实派发 drill 证据。进程式 CLI
+  // 形状（详见 PHASE6_BACKEND_SHAPES）：暗号差分对照 + 链深 2 + N-C 无 native
+  // id。覆盖边界 = non-delivery 的 lead_workspace 车道（delivery 复用 run 走
+  // run.provider_session_bound 写侧，不在此证据范围）。
+  codex: Object.freeze({
+    path: "scripts/reliability/codex/evidence/phase6-session-reuse.json",
+    drill: "scripts/reliability/session-reuse-drill.mjs",
+    note: "TD-184 real-dispatch drill (2026-10-09, codex): exec resume across run1→run2→run3 (chain depth 2) + fresh-lead differential control + three fail-closed negatives; non-delivery lead_workspace lane only",
+  }),
+  "kimi-code": Object.freeze({
+    path: "scripts/reliability/kimi-code/evidence/phase6-session-reuse.json",
+    drill: "scripts/reliability/session-reuse-drill.mjs",
+    note: "TD-184 real-dispatch drill (2026-10-09, kimi): -r resume across run1→run2→run3 (chain depth 2) + fresh-lead differential control + three fail-closed negatives; non-delivery lead_workspace lane only",
+  }),
+});
+
+// Phase 6 证据判定的按后端形状表（2026-10-09 astra+opus 方案会审修）。
+// 调用方（component check）传入 subject backend 名选择形状——材料不得自选
+// 更宽松的规则。deepseek-acp 保持 v1 全杠（ACP system resume fact + sid 同一 +
+// errorCode -32602）；codex / kimi-code 是进程式 CLI 后端，判据 =
+//   - 暗号差分对照（N-D fresh 会话答不出暗号 + run1 零工具断言），
+//   - 链深 ≥2（run3 续 run2，native id 可再取回），
+//   - N-C 无 native id 且无 provider_session_bound + 上游拒绝文本形状，
+//   - LAST-bound native id（非 proc_ 占位）。
+// 上游 id 同一性对 CLI 后端作观测记录不作门：resume 若铸造新 thread id，"跨
+// run 上下文携带"仍由差分对照证明——不偷换判据，也不静默降杠。
+export const PHASE6_BACKEND_SHAPES = Object.freeze({
+  "deepseek-acp": Object.freeze({
+    distribution: "dsh",
+    legacy: true,
+    negativeCErrorCode: -32602,
+    negativeCErrorMessage: /not resumable/,
+    negativeCSessionCreatedFalse: true,
+    requireSameProviderSession: true,
+    requireResumeSystemFact: true,
+    requireFreshDifferential: false,
+  }),
+  codex: Object.freeze({
+    distribution: "codex",
+    legacy: false,
+    negativeCErrorMessage: /no rollout found/i,
+    negativeCNoNativeId: true,
+    requireSameProviderSession: false,
+    requireResumeSystemFact: false,
+    requireFreshDifferential: true,
+  }),
+  "kimi-code": Object.freeze({
+    distribution: "kimi",
+    legacy: false,
+    negativeCErrorMessage: /Session .* not found/i,
+    negativeCNoNativeId: true,
+    requireSameProviderSession: false,
+    requireResumeSystemFact: false,
+    requireFreshDifferential: true,
+  }),
 });
 
 /**
@@ -392,8 +447,35 @@ export const SESSION_REUSE_EVIDENCE_SOURCES = Object.freeze({
  * 字段，必须逐项对上内嵌的输入、被引用 transcript 事实行和三条负对照拒绝
  * 形状，再从原始素材独立派生结论。材料缺失/矛盾/身份过期 → inconclusive；
  * 自洽素材明确展示能力失败 → fail；全部正负向事实成立才 accepted:true。
+ * backendName（调用方指定）选择形状表；未指定时按 legacy（deepseek-acp v1）
+ * 全杠执行——材料自己不能挑规则。
  */
-export function sessionReuseEvidenceFromPhase6File(json, { expectedRuntimeIdentity = null } = {}) {
+export function sessionReuseEvidenceFromPhase6File(json, { expectedRuntimeIdentity = null, backendName = null } = {}) {
+  // 形状解析（会审修④）：未知后端拒绝判定，防止材料按宽松形状自证。
+  const shape = backendName === null
+    ? PHASE6_BACKEND_SHAPES["deepseek-acp"]
+    : PHASE6_BACKEND_SHAPES[backendName] ?? null;
+  if (shape === null) {
+    return {
+      accepted: false,
+      state: "inconclusive",
+      detail: `session-reuse evidence rejected: no phase6 evidence shape registered for backend ${backendName} — refusing to let the material pick its own proof rules`,
+    };
+  }
+  // 材料自报 backend 与登记形状交叉核对（防错登：deepseek 证据登到 codex 键下
+  // 必须拒绝，而不是按 codex 形状误判）。
+  if (backendName !== null && backendName !== "deepseek-acp") {
+    if (json?.backend !== backendName) {
+      return {
+        accepted: false,
+        state: "inconclusive",
+        detail: `session-reuse evidence rejected: evidence declares backend ${JSON.stringify(json?.backend)} but is registered/validated as ${backendName}`,
+      };
+    }
+  }
+  if (shape.legacy !== true) {
+    return sessionReuseEvidenceCliShape(json, { expectedRuntimeIdentity, shape, backendName });
+  }
   // 选 inconclusive 而不是 blocked：文件缺失、坏 JSON、身份过期或内部字段矛盾
   // 都表示“现有材料不足以下能力结论”，并非夹具/基础设施阻塞了一次正在执行的
   // 检查。只有一份结构自洽、可交叉核对的原始素材明确展示恢复失败时才记 fail。
@@ -467,6 +549,11 @@ export function sessionReuseEvidenceFromPhase6File(json, { expectedRuntimeIdenti
   if (typeof inputs.run1.prompt !== "string" || !inputs.run1.prompt.includes(json.marker)
     || typeof inputs.run2.prompt !== "string" || inputs.run2.prompt.length === 0) {
     return inconclusive("embedded positive inputs do not carry the marker-setting and resume prompts");
+  }
+  // 会审修（2026-10-09 astra+opus 双席，全形状生效）：复述 prompt 不得携带暗号
+  // 明文——否则"上下文携带"主张作废。dsh 历史证据实测无暗号，向后兼容。
+  if (inputs.run2.prompt.includes(json.marker)) {
+    return inconclusive("the run2 resume prompt carries the marker plaintext — the context-carry claim is void");
   }
   if (inputs.run1.providerSessionRouting !== run1.providerSessionRouting
     || inputs.run2.providerSessionRouting !== run2.providerSessionRouting) {
@@ -655,6 +742,331 @@ export function sessionReuseEvidenceFromPhase6File(json, { expectedRuntimeIdenti
   return outcome(
     "pass",
     `real cross-run resume evidence accepted: run1 ${run1.runId} → run2 ${run2.runId} on the same provider session ${sid1}, marker echoed back from referenced raw evidence, resume transcript fact present, 3/3 fail-closed negatives refused (drill ${json?.drill ?? "unknown"}, dsh ${json?.dsh ?? "?"}, ${json?.date ?? "?"})`,
+  );
+}
+
+// 进程式 CLI 后端（codex / kimi-code）的 Phase 6 证据校验（纯函数；形状由
+// PHASE6_BACKEND_SHAPES 选择，调用方 sessionReuseEvidenceFromPhase6File 分发；
+// 材料不自选规则）。判据设计见形状表注释——与 legacy 的三点差异：
+//   1. 无 ACP system resume fact：resume 证明 = 暗号差分对照（N-D fresh 会话
+//      答不出 + run1 零工具）+ resume 路由事实 + N-C 上游拒绝（坏 id 真达上游，
+//      若 -r/exec resume 被忽略，C 不会失败）。
+//   2. 链深 ≥2：run3 续 run2 且 late-bind native id——路由条目推进 + TD-188
+//      "run2 未再广告 id 则 run3 冻结"事故形状的直接反证。
+//   3. session.created 行必须是 LAST-bound native id（非 proc_ 占位）。
+const PROC_SESSION_PLACEHOLDER_RE = /^proc_/;
+
+function sessionReuseEvidenceCliShape(json, { expectedRuntimeIdentity = null, shape, backendName }) {
+  const outcome = (state, reason) => ({
+    accepted: state === "pass",
+    state,
+    detail: `session-reuse evidence ${state === "pass" ? "accepted" : "rejected"} (${backendName} cli shape): ${reason}`,
+  });
+  const inconclusive = (reason) => outcome("inconclusive", reason);
+  const failed = (reason) => outcome("fail", reason);
+  if (!json || typeof json !== "object") return inconclusive("evidence file is not an object");
+  const run1 = json?.steps?.run1;
+  const run2 = json?.steps?.run2;
+  const run3 = json?.steps?.run3;
+  if (typeof run1?.runId !== "string" || run1.runId.length === 0
+    || typeof run2?.runId !== "string" || run2.runId.length === 0
+    || typeof run3?.runId !== "string" || run3.runId.length === 0) {
+    return inconclusive("missing run1/run2/run3 runIds (no real three-run dispatch chain)");
+  }
+  const distinctRunIds = new Set([run1.runId, run2.runId, run3.runId]).size === 3;
+  if (!distinctRunIds) return failed(`positive drill did not use three distinct runIds (${[run1.runId, run2.runId, run3.runId].join(",")})`);
+
+  const boundRuntime = json.runtimeIdentity;
+  if (!boundRuntime
+    || boundRuntime.verified !== true
+    || typeof boundRuntime.distribution !== "string" || boundRuntime.distribution.trim().length === 0
+    || typeof boundRuntime.version !== "string" || boundRuntime.version.trim().length === 0
+    || typeof boundRuntime.fingerprint !== "string"
+    || boundRuntime.fingerprint.length === 0) {
+    return inconclusive("missing verified runtime identity binding (distribution/version/fingerprint)");
+  }
+  if (boundRuntime.distribution !== shape.distribution) {
+    return inconclusive(`runtime identity distribution ${JSON.stringify(boundRuntime.distribution)} does not match the ${backendName} evidence shape (${shape.distribution})`);
+  }
+  if (expectedRuntimeIdentity !== null) {
+    if (expectedRuntimeIdentity?.verified !== true) {
+      return inconclusive("current runtime identity is unverified; historical resume evidence cannot endorse it");
+    }
+    if (expectedRuntimeIdentity.fingerprint !== boundRuntime.fingerprint) {
+      return inconclusive(`runtime fingerprint differs from the evidence binding (${boundRuntime.fingerprint} vs current ${expectedRuntimeIdentity.fingerprint})`);
+    }
+  }
+
+  const embedded = json.embeddedEvidence;
+  if (!embedded || embedded.format !== "phase6-session-reuse-self-contained-v1") {
+    return inconclusive("missing self-contained embedded evidence format phase6-session-reuse-self-contained-v1");
+  }
+  if (typeof json.marker !== "string" || json.marker.length === 0
+    || embedded.marker !== json.marker) {
+    return inconclusive("marker plaintext is missing or contradicts the embedded evidence marker");
+  }
+  if (!Array.isArray(embedded.evidenceLines) || embedded.evidenceLines.length === 0) {
+    return inconclusive("self-contained evidenceLines are missing");
+  }
+  const evidenceLines = new Map();
+  for (const line of embedded.evidenceLines) {
+    if (typeof line?.id !== "string" || line.id.length === 0) {
+      return inconclusive("an embedded evidence line has no non-empty id");
+    }
+    if (evidenceLines.has(line.id)) {
+      return inconclusive(`embedded evidence line id is duplicated: ${line.id}`);
+    }
+    evidenceLines.set(line.id, line);
+  }
+
+  const inputs = embedded.positiveInputs;
+  if (!inputs?.run1 || !inputs?.run2 || !inputs?.run3 || !inputs?.freshControl
+    || inputs.run1.runId !== run1.runId || inputs.run2.runId !== run2.runId
+    || inputs.run3.runId !== run3.runId) {
+    return inconclusive("positive input runIds contradict the run summaries");
+  }
+  if (typeof inputs.run1.prompt !== "string" || !inputs.run1.prompt.includes(json.marker)
+    || typeof inputs.run2.prompt !== "string" || inputs.run2.prompt.length === 0
+    || inputs.run3.prompt !== inputs.run2.prompt
+    || inputs.freshControl.prompt !== inputs.run2.prompt) {
+    return inconclusive("embedded positive inputs do not carry the marker-setting prompt and the three identical echo prompts");
+  }
+  // 暗号泄漏防线（与 legacy 同款）：所有复述 prompt（run2/run3/fresh 差分）都
+  // 不得携带暗号明文。
+  for (const key of ["run2", "run3", "freshControl"]) {
+    if (inputs[key].prompt.includes(json.marker)) {
+      return inconclusive(`the ${key} prompt carries the marker plaintext — the context-carry claim is void`);
+    }
+  }
+  const freshStep = json?.steps?.negD_fresh_control;
+  for (const [key, run] of [["run1", run1], ["run2", run2], ["run3", run3], ["freshControl", freshStep]]) {
+    if (inputs[key].providerSessionRouting !== run?.providerSessionRouting) {
+      return inconclusive(`embedded dispatch routing fact for ${key} contradicts its run summary`);
+    }
+  }
+
+  const referencedLine = (run, refName, expectedType) => {
+    const ref = run?.evidenceRefs?.[refName];
+    if (typeof ref !== "string" || ref.length === 0 || !evidenceLines.has(ref)) {
+      return { error: `referenced evidence line ${JSON.stringify(ref)} for ${run?.runId}.${refName} is missing` };
+    }
+    const line = evidenceLines.get(ref);
+    if (line.runId !== run.runId) {
+      return { error: `evidence line ${ref} runId ${JSON.stringify(line.runId)} contradicts ${JSON.stringify(run.runId)}` };
+    }
+    if (line.type !== expectedType) {
+      return { error: `evidence line ${ref} type ${JSON.stringify(line.type)} is not ${JSON.stringify(expectedType)}` };
+    }
+    return { line };
+  };
+  const negD = json.negativeD;
+  const lineSpecs = [
+    ["run1.sessionCreated", run1, "sessionCreated", "session.created"],
+    ["run1.sessionReuse", run1, "sessionReuse", "run.session_reuse"],
+    ["run1.assistant", run1, "assistant", "run.event"],
+    ["run1.terminal", run1, "terminal", "run.completed"],
+    ["run2.sessionCreated", run2, "sessionCreated", "session.created"],
+    ["run2.sessionReuse", run2, "sessionReuse", "run.session_reuse"],
+    ["run2.assistant", run2, "assistant", "run.event"],
+    ["run2.terminal", run2, "terminal", "run.completed"],
+    ["run3.sessionCreated", run3, "sessionCreated", "session.created"],
+    ["run3.sessionReuse", run3, "sessionReuse", "run.session_reuse"],
+    ["run3.assistant", run3, "assistant", "run.event"],
+    ["run3.terminal", run3, "terminal", "run.completed"],
+    ["negD.sessionReuse", negD, "sessionReuse", "run.session_reuse"],
+    ["negD.assistant", negD, "assistant", "run.event"],
+    ["negD.terminal", negD, "terminal", "run.completed"],
+  ];
+  const lines = {};
+  for (const [key, run, refName, expectedType] of lineSpecs) {
+    const found = referencedLine(run, refName, expectedType);
+    if (found.error) return inconclusive(found.error);
+    lines[key] = found.line;
+  }
+  for (const key of ["run1.assistant", "run2.assistant", "run3.assistant", "negD.assistant"]) {
+    if (lines[key].kind !== "message" || lines[key].role !== "assistant") {
+      return inconclusive(`${key} evidence line is not an assistant message fact`);
+    }
+  }
+  // 形状差异③：被引用的 session.created 必须是 LAST-bound native id——非空且
+  // 非 proc_ 占位（占位仍在 = 上游 id 从未被观察到）。
+  for (const key of ["run1.sessionCreated", "run2.sessionCreated", "run3.sessionCreated"]) {
+    const sid = lines[key].backendSessionId;
+    if (typeof sid !== "string" || sid.length === 0 || PROC_SESSION_PLACEHOLDER_RE.test(sid)) {
+      return inconclusive(`${key} evidence line carries no late-bound native provider session id (empty or proc_ placeholder)`);
+    }
+  }
+
+  const sid1 = lines["run1.sessionCreated"].backendSessionId;
+  const sid2 = lines["run2.sessionCreated"].backendSessionId;
+  const sid3 = lines["run3.sessionCreated"].backendSessionId;
+  const turn1 = lines["run1.sessionReuse"].turn;
+  const turn2 = lines["run2.sessionReuse"].turn;
+  const turn3 = lines["run3.sessionReuse"].turn;
+  const turnFresh = lines["negD.sessionReuse"].turn;
+  const echo1 = lines["run1.assistant"].text;
+  const echo2 = lines["run2.assistant"].text;
+  const echo3 = lines["run3.assistant"].text;
+  const echoFresh = lines["negD.assistant"].text;
+  const summariesMatchLines = [
+    [run1.backendSessionId, sid1, "run1 backendSessionId"],
+    [run2.backendSessionId, sid2, "run2 backendSessionId"],
+    [run3.backendSessionId, sid3, "run3 backendSessionId"],
+    [run1.runSessionReuseTurn, turn1, "run1 reuse turn"],
+    [run2.runSessionReuseTurn, turn2, "run2 reuse turn"],
+    [run3.runSessionReuseTurn, turn3, "run3 reuse turn"],
+    [negD.runSessionReuseTurn, turnFresh, "fresh-control reuse turn"],
+    [run1.assistantEcho, echo1, "run1 assistant evidence line"],
+    [run2.assistantEcho, echo2, "run2 assistant evidence line / marker echo"],
+    [run3.assistantEcho, echo3, "run3 assistant evidence line / marker echo"],
+    [negD.assistantEcho, echoFresh, "fresh-control assistant evidence line"],
+    [run1.state, lines["run1.terminal"].state, "run1 terminal state"],
+    [run2.state, lines["run2.terminal"].state, "run2 terminal state"],
+    [run3.state, lines["run3.terminal"].state, "run3 terminal state"],
+    [negD.state, lines["negD.terminal"].state, "fresh-control terminal state"],
+  ];
+  for (const [summaryValue, lineValue, label] of summariesMatchLines) {
+    if (summaryValue !== lineValue) {
+      return inconclusive(`${label} contradicts its referenced evidence line (${JSON.stringify(summaryValue)} vs ${JSON.stringify(lineValue)})`);
+    }
+  }
+
+  const sameProviderSessionObserved = sid1 === sid2 && sid2 === sid3;
+  const positiveConditions = {
+    distinctRunIds,
+    acceptedAll: run1.accepted === true && run2.accepted === true && run3.accepted === true,
+    firstTurnRouted: run1.providerSessionRouting === "first_turn_requested" && turn1 === "first",
+    resumeTurnRouted: run2.providerSessionRouting === "resume_requested" && turn2 === "resume"
+      && run3.providerSessionRouting === "resume_requested" && turn3 === "resume",
+    // 链深 ≥2（形状差异②）：run2、run3 都是 resume 轮，且 run3 自身再观察到
+    // native id（若 run2 未再广告 id，路由无法推进到可续状态——TD-188 形状）。
+    chainDepthTwoResumes: turn2 === "resume" && turn3 === "resume"
+      && typeof sid3 === "string" && sid3.length > 0 && !PROC_SESSION_PLACEHOLDER_RE.test(sid3),
+    nativeSessionObservedAllRuns: [sid1, sid2, sid3].every((sid) => typeof sid === "string" && sid.length > 0 && !PROC_SESSION_PLACEHOLDER_RE.test(sid)),
+    markerAcknowledged: typeof echo1 === "string" && echo1.length > 0,
+    contextCarried: typeof echo2 === "string" && echo2 === json.marker && typeof echo3 === "string" && echo3 === json.marker,
+    // 差分对照（形状差异①）：fresh 会话 first 轮、正常完成、答不出暗号。
+    freshDifferential: turnFresh === "first" && negD.state === "completed" && !echoFresh.includes(json.marker),
+    terminalCompleted: run1.state === "completed" && run2.state === "completed" && run3.state === "completed",
+  };
+  const derivedClaims = {
+    resumeTurnRouted: positiveConditions.resumeTurnRouted,
+    nativeSessionObservedAllRuns: positiveConditions.nativeSessionObservedAllRuns,
+    sameProviderSessionAcrossRuns: sameProviderSessionObserved,
+    contextCarried: positiveConditions.contextCarried,
+    chainDepthTwoResumes: positiveConditions.chainDepthTwoResumes,
+    terminalState: run3.state,
+  };
+  const claims = json?.positive?.claims;
+  if (!claims || Object.entries(derivedClaims).some(([key, value]) => claims[key] !== value)) {
+    return inconclusive("positive claims contradict values independently derived from referenced evidence lines");
+  }
+  if (json?.positive?.sameProviderSessionObserved !== undefined
+    && json.positive.sameProviderSessionObserved !== sameProviderSessionObserved) {
+    return inconclusive("declared sameProviderSessionObserved contradicts the referenced session.created lines");
+  }
+  const positivePass = Object.values(positiveConditions).every(Boolean);
+  if (json?.positive?.pass !== positivePass) {
+    return inconclusive(`positive.pass contradicts raw positive facts (declared=${json?.positive?.pass}, derived=${positivePass})`);
+  }
+
+  // 负对照恰好四条：A（空 id 拒绝）/ B（路由条目损坏拒绝）/ C（坏 id 上游拒绝
+  // 且无 native id）/ D（fresh 差分对照——由 control 块承载，非 refusal）。
+  if (!Array.isArray(embedded.negativeControls) || embedded.negativeControls.length !== 4) {
+    return inconclusive("self-contained evidence must carry exactly four negative/differential controls (A/B/C/D) for the cli shape");
+  }
+  const controls = new Map();
+  for (const control of embedded.negativeControls) {
+    if (typeof control?.id !== "string" || control.id.length === 0 || controls.has(control.id)) {
+      return inconclusive("negative control ids must be non-empty and unique");
+    }
+    controls.set(control.id, control);
+  }
+  const topA = json.negativeA;
+  const topB = json.negativeB;
+  const topC = json.negativeC;
+  const topD = json.negativeD;
+  const controlA = controls.get(topA?.evidenceRef);
+  const controlB = controls.get(topB?.evidenceRef);
+  const controlC = controls.get(topC?.evidenceRef);
+  const controlD = controls.get(topD?.evidenceRef);
+  if (!controlA || !controlB || !controlC || !controlD) {
+    return inconclusive("fail-closed negatives incomplete: negativeA/B/C/D must each reference an embedded negative control");
+  }
+
+  const rawNegativePasses = {
+    negativeA: controlA.input?.kind === "prior-transcript-session-id"
+      && controlA.input?.runId === run3.runId
+      && controlA.input?.backendSessionId === ""
+      && controlA.refusal?.kind === "dispatch_refused"
+      && controlA.refusal?.accepted === false
+      && controlA.refusal?.refused === true
+      && typeof controlA.refusal?.message === "string"
+      && /no addressable provider session id/.test(controlA.refusal.message)
+      && controlA.refusal?.noTranscriptCreated === true,
+    negativeB: controlB.input?.kind === "routing-entry-bytes"
+      && controlB.input?.rawBytes === "{damaged-not-json"
+      && controlB.refusal?.kind === "dispatch_refused"
+      && controlB.refusal?.accepted === false
+      && controlB.refusal?.refused === true
+      && typeof controlB.refusal?.message === "string"
+      && /routing entry.*damaged/.test(controlB.refusal.message),
+    negativeC: controlC.input?.kind === "prior-transcript-session-id"
+      && controlC.input?.runId === run3.runId
+      && typeof controlC.input?.backendSessionId === "string"
+      && controlC.input.backendSessionId.length > 0
+      && controlC.input.backendSessionId !== sid1
+      && controlC.refusal?.kind === "resume_rejected"
+      && controlC.refusal?.dispatchAccepted === true
+      && controlC.refusal?.providerSessionRouting === "resume_requested"
+      && controlC.refusal?.terminalState === "failed"
+      && typeof controlC.refusal?.errorMessage === "string"
+      && shape.negativeCErrorMessage.test(controlC.refusal.errorMessage)
+      && controlC.refusal?.nativeSessionIdObserved === false
+      && controlC.refusal?.providerSessionBoundEvents === 0,
+    negativeD: controlD.input?.kind === "fresh-lead-differential"
+      && controlD.control?.kind === "fresh_session_control"
+      && controlD.control?.dispatchAccepted === true
+      && controlD.control?.turn === "first"
+      && controlD.control?.terminalState === "completed"
+      && controlD.control?.markerEchoed === false,
+  };
+  const negativeSummariesMatch = topA?.refused === controlA.refusal?.refused
+    && topA?.message === controlA.refusal?.message
+    && topA?.noTranscriptForRefusedDispatch === controlA.refusal?.noTranscriptCreated
+    && topA?.pass === rawNegativePasses.negativeA
+    && topB?.refused === controlB.refusal?.refused
+    && topB?.message === controlB.refusal?.message
+    && topB?.pass === rawNegativePasses.negativeB
+    && json?.steps?.negC_dispatch?.runId === controlC.refusal?.runId
+    && json?.steps?.negC_dispatch?.accepted === controlC.refusal?.dispatchAccepted
+    && json?.steps?.negC_dispatch?.providerSessionRouting === controlC.refusal?.providerSessionRouting
+    && topC?.state === controlC.refusal?.terminalState
+    && topC?.spawnError === controlC.refusal?.errorMessage
+    && topC?.nativeSessionIdObserved === controlC.refusal?.nativeSessionIdObserved
+    && topC?.pass === rawNegativePasses.negativeC
+    && topD?.state === controlD.control?.terminalState
+    && topD?.runSessionReuseTurn === controlD.control?.turn
+    && topD?.markerEchoed === controlD.control?.markerEchoed
+    && topD?.pass === rawNegativePasses.negativeD;
+  if (!negativeSummariesMatch) {
+    return inconclusive("negativeA/B/C/D summaries contradict an embedded negative control raw shape");
+  }
+  const negativePass = Object.values(rawNegativePasses).every(Boolean);
+  if (json.pass !== (positivePass && negativePass)) {
+    return inconclusive(`top-level pass contradicts independently derived evidence outcome (${json.pass} vs ${positivePass && negativePass})`);
+  }
+  if (!positivePass) {
+    const failedConditions = Object.entries(positiveConditions).filter(([, value]) => !value).map(([key]) => key);
+    return failed(`self-contained positive run facts prove the resume capability failed: ${failedConditions.join(", ")}`);
+  }
+  if (!negativePass) {
+    const failedControls = Object.entries(rawNegativePasses).filter(([, value]) => !value).map(([key]) => key);
+    return failed(`self-contained negative controls prove fail-closed behavior failed: ${failedControls.join(", ")}`);
+  }
+  return outcome(
+    "pass",
+    `real cross-run resume evidence accepted: run1 ${run1.runId} → run2 ${run2.runId} → run3 ${run3.runId} with late-bound native ids, marker echo confirmed by fresh-lead differential control, 3/3 fail-closed negatives refused + differential control held (drill ${json?.drill ?? "unknown"}, ${backendName} ${boundRuntime.version}, sameProviderSession=${sameProviderSessionObserved ? "observed" : "not observed (resume minted a new native id; context carry still proven by the differential)"}, ${json?.date ?? "?"})`,
   );
 }
 
@@ -1974,7 +2386,7 @@ export function createComponentDrills(deps) {
         try {
           resumeEvidence = sessionReuseEvidenceFromPhase6File(
             JSON.parse(readFileSync(join(root, source.path), "utf8")),
-            { expectedRuntimeIdentity: runtimeIdentities[subjectName] ?? null },
+            { expectedRuntimeIdentity: runtimeIdentities[subjectName] ?? null, backendName: subjectName },
           );
         } catch (error) {
           resumeEvidence = {
