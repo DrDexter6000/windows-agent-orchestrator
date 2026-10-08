@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   nestedDispatchContext, assertNotNestedDispatchContext, NESTED_DISPATCH_ENV_MARKER,
+  NESTED_DISPATCH_BYPASS_ENV,
 } from "../../src/nestedDispatchGuard.js";
 
 test("0047 ①: 判定纯函数——env 标记/worktree cwd/豁免/放行", () => {
@@ -41,6 +42,12 @@ test("0047 ②: assertNotNestedDispatchContext——worker 上下文抛固定文
 
 test("0047 ② b: RunManager.start 咽喉门——env 标记进程内即拒（真实 cwd，零副作用）", async () => {
   const prev = process.env[NESTED_DISPATCH_ENV_MARKER];
+  // 本钉的对象是"env 标记触发咽喉门"。交付验证环境合法携带 Lead 豁免
+  // （WAO_ALLOW_NESTED_DISPATCH=1，验证即 Lead 行为——0047 设计），豁免优先
+  // 语义由 ① 覆盖；此处清掉豁免变量，防部署豁免中和被测单元（TD-239 批
+  // 验收实测：验证器 env 下本钉稳定红——start 越过咽喉门摔在缺 deps 上）。
+  const prevBypass = process.env[NESTED_DISPATCH_BYPASS_ENV];
+  delete process.env[NESTED_DISPATCH_BYPASS_ENV];
   try {
     process.env[NESTED_DISPATCH_ENV_MARKER] = "1";
     const mod = await import("../../src/runManager.js");
@@ -59,6 +66,8 @@ test("0047 ② b: RunManager.start 咽喉门——env 标记进程内即拒（�
   } finally {
     if (prev === undefined) delete process.env[NESTED_DISPATCH_ENV_MARKER];
     else process.env[NESTED_DISPATCH_ENV_MARKER] = prev;
+    if (prevBypass === undefined) delete process.env[NESTED_DISPATCH_BYPASS_ENV];
+    else process.env[NESTED_DISPATCH_BYPASS_ENV] = prevBypass;
   }
 });
 

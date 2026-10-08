@@ -486,6 +486,28 @@ export async function runCommand(args, config) {
     if (earlyDeliveryRef.value && !resolveIsolateFlag(options)) {
       throw new Error("delivery mode requires --isolate (persistent worktree isolation)");
     }
+    // Round 4 Bundle B: --read-only is a Lead DECLARATION (advisory observation,
+    // never a gate). Both rejections run before any side effect (manager.start /
+    // dispatchRun / transcript write)——与 DC-5/A-3 同理上移到注册表解析之前：
+    // 隔离 worktree 无私有 config/agents.json 时其 ENOENT 会劫持这两个声明
+    // 冲突拒绝面（TD-239 批验收实测）。
+    //   - × --delivery-spec-file: a read-only run is observation, never a
+    //     delivery — the combination is contradictory.
+    //   - × --no-isolate: read-only forces isolation; explicitly demanding no
+    //     isolation contradicts the declaration.
+    const readOnlyEarly = resolveReadOnlyFlag(options);
+    if (readOnlyEarly && earlyDeliveryRef.value) {
+      throw new Error(
+        "--read-only is mutually exclusive with --delivery-spec-file "
+        + "(read_only_delivery_conflict: a read-only run is advisory observation, never a delivery)",
+      );
+    }
+    if (readOnlyEarly && resolveIsolateFlag(options) === false) {
+      throw new Error(
+        "--read-only requires isolation; --no-isolate contradicts a read-only declaration "
+        + "(remove --no-isolate, or drop --read-only)",
+      );
+    }
   }
   if (true) {
     const registryPath = resolve(options.registry ?? config?.registry ?? "config/agents.json");
@@ -552,26 +574,9 @@ export async function runCommand(args, config) {
   if (delivery && !resolveIsolateFlag(options)) {
     throw new Error("delivery mode requires --isolate (persistent worktree isolation)");
   }
-  // Round 4 Bundle B: --read-only is a Lead DECLARATION (advisory observation,
-  // never a gate). Both rejections run before any side effect (manager.start /
-  // dispatchRun / transcript write):
-  //   - × --delivery-spec-file: a read-only run is observation, never a
-  //     delivery — the combination is contradictory.
-  //   - × --no-isolate: read-only forces isolation; explicitly demanding no
-  //     isolation contradicts the declaration.
+  // Round 4 Bundle B 的两个 --read-only 冲突拒绝已上移至解析块前（DC-5/A-3
+  // 反劫持同款）；此处仅保留声明解析供下方 spawn 面使用。
   const readOnly = resolveReadOnlyFlag(options);
-  if (readOnly && delivery) {
-    throw new Error(
-      "--read-only is mutually exclusive with --delivery-spec-file "
-      + "(read_only_delivery_conflict: a read-only run is advisory observation, never a delivery)",
-    );
-  }
-  if (readOnly && resolveIsolateFlag(options) === false) {
-    throw new Error(
-      "--read-only requires isolation; --no-isolate contradicts a read-only declaration "
-      + "(remove --no-isolate, or drop --read-only)",
-    );
-  }
   // ADR 0035 S3（fail-open advisory）：派发启动时向 Lead 报一行仓库资源存量
   // （注册 worktree 总数 + wao/run_* 分支总数，RAW 计数、无阈值；详情走
   // `npm run hygiene`）。计数走 git 子进程，失败/超时 → 该行完全省略，不报错、

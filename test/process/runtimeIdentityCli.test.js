@@ -133,9 +133,19 @@ test("main: --help 与缺 backend 的 exit code（进程内注入 stdout/stderr�
 // 2026-10-05 巡检摩擦①回归钉：where.exe 未命中的本地码页提示（GBK）曾经
 // execFileSync 的 stderr 默认继承直通控制台，污染 JSON 输出的机读性——修复后
 // 探测失败必须零 stderr（stdout 仍是单行 JSON honest unknown）。
+// 注册表用临时夹具而非相对路径 config/agents.json——后者是私有未跟踪文件，
+// 隔离 worktree（交付验证语境）里不存在，ENOENT 会劫持本钉的真实断言面
+// （TD-239 批验收实测）；探测对象是 PATH 上的裸名二进制，与注册表内容无关。
 test("cli: 探测未命中（deepseek-harness 裸名）→ stderr 零字节（where 噪声不外泄）", () => {
-  const r = runCli(["--backend", "deepseek-harness", "--registry", "config/agents.json"]);
-  assert.ok(!r.stderr || r.stderr.length === 0, "探测未命中的 stderr 必须为空（where.exe 码页提示不外泄）");
-  const parsed = JSON.parse(r.stdout.trim());
-  assert.equal(parsed.verified, false, "stdout 仍是 honest unknown JSON");
+  const dir = mkdtempSync(join(tmpdir(), "wao-rtid-miss-"));
+  try {
+    const regPath = join(dir, "agents.json");
+    writeFileSync(regPath, JSON.stringify({ agents: {} }));
+    const r = runCli(["--backend", "deepseek-harness", "--registry", regPath]);
+    assert.ok(!r.stderr || r.stderr.length === 0, "探测未命中的 stderr 必须为空（where.exe 码页提示不外泄）");
+    const parsed = JSON.parse(r.stdout.trim());
+    assert.equal(parsed.verified, false, "stdout 仍是 honest unknown JSON");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
