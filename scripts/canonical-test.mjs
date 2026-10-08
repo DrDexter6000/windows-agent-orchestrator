@@ -1627,25 +1627,38 @@ export function isValidRunIdShape(runId) {
 // right after `.wao-worktrees` is the owning runId. Any other cwd (main repo
 // checkout, unexpected nesting, a segment that fails the isValidRunId allowlist)
 // yields null — the gate identity then carries no runId, exactly the pre-TD-233
-// shape. The ≤64-char cap is the display-side bound for the lease record (a
-// gate.log forensic surface); real WAO runIds are far shorter.
+// shape. Directory-name comparison is case-insensitive (Windows paths; a
+// `.WAO-WORKTREES` variant must still attribute — 验收会审 astra 反例). An
+// over-cap candidate is DROPPED whole, never truncated (a truncated id would
+// masquerade as a different run — 验收会审 astra 反例); the ≤64 cap stays the
+// display-side bound for the lease record (a gate.log forensic surface), and
+// real WAO runIds are far shorter.
 export function runIdFromWorktreeCwd(cwd = process.cwd()) {
-  const segments = cwd.split(/[\\/]+/);
-  const idx = segments.lastIndexOf(".wao-worktrees");
+  const segments = String(cwd ?? "").split(/[\\/]+/);
+  let idx = -1;
+  for (let i = segments.length - 1; i >= 0; i -= 1) {
+    if (segments[i].toLowerCase() === ".wao-worktrees") { idx = i; break; }
+  }
   const candidate = idx >= 0 && idx + 1 < segments.length ? segments[idx + 1] : undefined;
   if (!candidate || !isValidRunIdShape(candidate)) return null;
-  return candidate.slice(0, 64);
+  if (candidate.length > 64) return null;
+  return candidate;
 }
 
-// One-line startup banner for a suite launched INSIDE a worker context
-// (WAO_IN_WORKER set): decision 0047 (anti-nested-dispatch gate) legitimately
-// blocks the suite's own dispatch-family tests, so those files go red —
-// expected behavior, NOT a regression. Returns the line to print on the
-// suite's stderr banner channel, or null outside a worker context. Pure
+// One-line startup banner for a suite launched INSIDE a worker context.
+// Trigger mirrors the 0047 guard exactly (nestedDispatchGuard.js): env marker
+// must be the literal "1", and an existing Lead bypass exemption means the
+// env arm will NOT block anything — the banner then reports context facts
+// only and makes no red/no-red prediction (验收会审 astra 反例：原实现把 "0"
+// 当真值触发、有豁免时仍预判会红). Outside a worker context → null. Pure
 // advisory: no env is stripped or waived, decision 0047's semantics untouched.
 export function workerBannerLine(env = process.env) {
-  if (!env.WAO_IN_WORKER) return null;
-  return "[canonical] NOTE: 本进程处于 worker 上下文（检测到 WAO_IN_WORKER）——派发族测试受决定 0047（防向下派发门）约束会变红，属预期行为非回归；未做任何 env 豁免。";
+  if (env.WAO_IN_WORKER !== "1") return null;
+  const prefix = "[canonical] NOTE: 本进程处于 worker 上下文（WAO_IN_WORKER=1）";
+  if (env.WAO_ALLOW_NESTED_DISPATCH === "1") {
+    return `${prefix}，且检测到 Lead 豁免（WAO_ALLOW_NESTED_DISPATCH=1）——env 标记臂不拦截派发族测试（豁免是 0047 语义，cwd 臂仍按原样生效）；仅报告上下文事实，不预判红绿；未做任何 env 剥除或注入。`;
+  }
+  return `${prefix}——派发族测试受决定 0047（防向下派发门）约束会变红，属预期行为非回归；未做任何 env 豁免。`;
 }
 
 async function main() {
