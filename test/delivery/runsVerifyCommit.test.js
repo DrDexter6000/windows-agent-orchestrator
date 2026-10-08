@@ -521,6 +521,32 @@ test("TD-240 F2：清扫不伤在册 worktree（注册中=可能在役，只回�
   }
 });
 
+test("TD-240 F2：重查失败跳过删除（fail-closed——astra 第三轮反例）", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { _sweepStaleVerifyWorktrees } = await import("../../src/application/runVerifyCommit.js");
+  const scratch = makeScratch("vc-sweep2-");
+  try {
+    const repo = makeRepo(join(scratch, "repo"));
+    const wtRoot = join(repo.path, ".wao-worktrees");
+    mkdirSync(join(wtRoot, "verify-orphan2"), { recursive: true });
+    // gitFn：首次 list 成功（仅主仓在册），其后所有 list 调用抛错（模拟重查失败）
+    let listCalls = 0;
+    const gitFn = (args, opts) => {
+      if (args[0] === "worktree" && args[1] === "list") {
+        listCalls += 1;
+        if (listCalls > 1) throw new Error("recheck io failure");
+        return "worktree " + repo.path.replace(/\\/g, "/") + "\n";
+      }
+      return execFileSync("git", args, { ...opts, encoding: "utf8" });
+    };
+    await _sweepStaleVerifyWorktrees(gitFn, repo.path);
+    assert.ok(existsSync(join(wtRoot, "verify-orphan2")),
+      "重查失败=无法证明失活——孤儿也不得删（catch 必须 continue）");
+  } finally {
+    cleanupDir(scratch);
+  }
+});
+
 // ===== 反例：SHA 形状 =====
 
 test("TD-240 裁定③：短形/大写/非 hex SHA 拒绝（全形 40/64 唯一接受）", withLeadExemptionEnv(async () => {

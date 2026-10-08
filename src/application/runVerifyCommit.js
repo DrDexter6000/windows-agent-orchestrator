@@ -272,10 +272,12 @@ export async function _sweepStaleVerifyWorktrees(gitFn, repoRoot) {
     const dir = join(wtRoot, name);
     if (registered.has(norm(dir))) continue; // 注册中=可能在役，不回收
     // 复核会审修（astra）：快照后新建的并发 worktree 会落进本循环——删除前
-    // 重查一次注册表，命中即跳过（把误删窗口压到"重查与 rm 之间"这一极窄段）。
+    // 重查一次注册表，命中即跳过；重查失败同样跳过（无法证明失活=不删）。
     try {
       if (listRegistered().has(norm(dir))) continue;
-    } catch { /* 重查失败=无法证明失活——跳过本目录，残留交下次 */ }
+    } catch {
+      continue; // 第三轮会审修（astra 反例）：重查失败不得落穿到 rm
+    }
     try {
       await rm(dir, { recursive: true, force: true });
     } catch { /* best-effort：残留交给下次 */ }
