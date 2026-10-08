@@ -1838,9 +1838,13 @@ const casCases = [
   { name: "canonical id invariant", code: null, mutate: (a) => ({ ...a, delivery: { ...a.delivery, deliveryCommit: "HEAD" } }) },
   { name: "recovery kind changed", code: "candidate_ineligible", mutate: (a) => ({ ...a, recoveryKind: "backend_failed" }) },
   { name: "original scope lost", code: "candidate_contract_malformed", mutate: (a) => ({ ...a, approvedAllowedPaths: ["root.txt"] }) },
-  { name: "created count changed before outcome", phase: "verification", code: "candidate_ineligible", inject: async (t, a) => {
+  { name: "created count changed before outcome", phase: "verification", code: "durable_chain_inconsistent", inject: async (t, a) => {
+    // 会审验收修（opus R3/glm-pro P2-3）：>1 条 created 与 created 侧及预读孪生门
+    // 同归 durable_chain_inconsistent（同一事实跨阶段同码）；0 条才是
+    // candidate_ineligible（竞态输给并发定型）。
     await t.append("run.delivery_created", { delivery: a.delivery });
   } },
+
   { name: "multiple outcomes", phase: "verification", code: "durable_chain_inconsistent", inject: async (t, a) => {
     await t.append("run.delivery_verification_passed", { delivery: a.delivery });
     await t.append("run.delivery_verification_failed", { delivery: a.delivery });
@@ -2055,10 +2059,34 @@ test("TD-231 bridge fail-closed negatives and local delivery whitelist", async (
         assertAuditDelta(before, await readEvents(s.runDir), null);
       }
     }
-    for (const [deliveryCode, expected] of [["artifact_mismatch", "worktree_unusable"], ["disallowed_path", "scope_violation"], ["pre_staged_changes", "worktree_unusable"], ["empty_diff", "inventory_empty"]]) {
+    // 会审验收修（opus R1）：artifact_mismatch 的桥接前提是 Phase 0 实测 HEAD≠base
+    // （真漂移——外来提交/中断恢复残留）。fixture 默认 HEAD==base，在该形态下
+    // artifact_mismatch 只能是本方打包回退残留 → 保持意外（防洗白）。外来提交
+    // 前奏让本行回到真漂移形态。
+    for (const [deliveryCode, expected, driftPreamble] of [
+      ["artifact_mismatch", "worktree_unusable", true],
+      ["disallowed_path", "scope_violation", false],
+      ["pre_staged_changes", "worktree_unusable", false],
+      ["empty_diff", "inventory_empty", false],
+    ]) {
+      if (driftPreamble) git(["commit", "--allow-empty", "-m", "foreign"], s.worktreePath);
       const before = await readEvents(s.runDir);
       await assert.rejects(runDeliveryRepackage({ ...td231Input(s), resolveDeliveryCommitFn: () => { throw new DeliveryError(deliveryCode, "arbitrary wording"); } }), isCode(expected));
       assertAuditDelta(before, await readEvents(s.runDir), expected);
+    }
+    // R1 反例钉（opus 真实 Git 复现）：disallowed_scope 且 Phase 0 实测 HEAD==base，
+    // resolve 抛 artifact_mismatch（打包回退残留形态）→ 不桥接、零审计。
+    {
+      const s2 = await setupDisallowedScenario();
+      try {
+        const fault = new DeliveryError("artifact_mismatch", "recovered commit message mismatch");
+        const before = await readEvents(s2.runDir);
+        await assert.rejects(runDeliveryRepackage({
+          ...td231Input(s2),
+          resolveDeliveryCommitFn: () => { throw fault; },
+        }), (err) => err === fault, "HEAD==base 的 artifact_mismatch 保持意外（防洗白，opus R1）");
+        assertAuditDelta(before, await readEvents(s2.runDir), null);
+      } finally { await cleanupDir(s2.repo); await cleanupDir(s2.runDir); }
     }
     const source = readFileSync(new URL("../../src/application/runDeliveryRepackage.js", import.meta.url), "utf8");
     const literal = source.match(/const REPACKAGE_DELIVERY_POLICY_CODES = Object\.freeze\((\{[^}]+\})\);/);

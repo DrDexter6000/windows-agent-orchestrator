@@ -1332,8 +1332,14 @@ export class JsonlTranscript {
       const createdEvents = events.filter(
         (e) => e && e.type === "run.delivery_created" && e.runId === this.context.runId,
       );
-      if (createdEvents.length !== 1) {
-        throw new RepackageCasPolicyError("candidate_ineligible", "tryAppendRepackageVerification: expected exactly one delivery_created event");
+      if (createdEvents.length > 1) {
+        // 会审验收修（2026-10-08，opus R3/glm-pro P2-3）：多条 created 与 created
+        // 侧 :1225 及预读孪生门同归 durable_chain_inconsistent——同一事实跨阶段
+        // 同码；0 条才是 candidate_ineligible（竞态输给并发定型）。
+        throw new RepackageCasPolicyError("durable_chain_inconsistent", "tryAppendRepackageVerification: multiple delivery_created events");
+      }
+      if (createdEvents.length === 0) {
+        throw new RepackageCasPolicyError("candidate_ineligible", "tryAppendRepackageVerification: no delivery_created event");
       }
       if (!_sameDeliveryIdentity(createdEvents[0].delivery, delivery, this.context.runId)) {
         throw new Error("tryAppendRepackageVerification: delivery does not match delivery_created");

@@ -2402,3 +2402,47 @@ test("TD-231 missing transcript is a read error in both CAS primitives, never em
     }
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+
+// 会审验收修（2026-10-08，opus R3）：verification CAS 的 created 计数拆分归码——
+// >1 条 → durable_chain_inconsistent（与 created 侧 :1225 及预读孪生门同码）；
+// 0 条 → candidate_ineligible（服务流不可达——created 必先落盘；仅直调 CAS
+// 可见，单元级钉死）。
+test("TD-231 council R3: verification CAS created-count split (0 → candidate_ineligible, >1 → durable_chain_inconsistent)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "td231-r3-"));
+  try {
+    const mkRef = () => ({
+      schemaVersion: 1, kind: "git_commit", runId: "run_r3",
+      baseCommit: "a".repeat(40), deliveryCommit: "b".repeat(40), branch: "wao/run_r3",
+      worktreePath: "D:/x", changedFiles: ["src/a.js"],
+      verification: { status: "passed", commands: ["npm test"], verifiedCommit: "b".repeat(40), results: [] },
+      acceptance: { status: "pending", reviewerType: "lead_agent" },
+      integration: { status: "pending", targetCommit: null },
+    });
+    const ctx = { runId: "run_r3", agentId: "w" };
+    // 0 条
+    {
+      // 预置中性事件让文件存在（读失败已不吞——空文件会先 ENOENT 重抛，那是
+      // 意外错误路径，不是本用例目标）。
+      const t0 = new JsonlTranscript(join(dir, "zero.jsonl"), ctx);
+      await t0.append("run.submitted", { cwd: "D:/x" });
+      await assert.rejects(
+        () => t0.tryAppendRepackageVerification({ delivery: mkRef(), outcome: "passed" }),
+        (e) => e instanceof RepackageCasPolicyError && e.code === "candidate_ineligible",
+        "0 created → candidate_ineligible",
+      );
+    }
+    // >1 条
+    {
+      const t2 = new JsonlTranscript(join(dir, "multi.jsonl"), ctx);
+      const ref = mkRef();
+      await t2.append("run.delivery_created", { delivery: ref });
+      await t2.append("run.delivery_created", { delivery: ref });
+      await assert.rejects(
+        () => t2.tryAppendRepackageVerification({ delivery: ref, outcome: "passed" }),
+        (e) => e instanceof RepackageCasPolicyError && e.code === "durable_chain_inconsistent",
+        ">1 created → durable_chain_inconsistent",
+      );
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

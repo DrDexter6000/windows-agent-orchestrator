@@ -107,7 +107,7 @@ export const REPACKAGE_REJECTION_CODES = Object.freeze([
   "candidate_ineligible",
   // The persisted run.started delivery contract is unusable (not exactly one bound run.started; missing worktreePath/baseCommit/allowedPaths/verification declaration; malformed verificationTimeoutMs).
   "candidate_contract_malformed",
-  // The worktree is missing/unprovable, its index is non-empty, or its HEAD is not a provable delivery artifact.
+  // The worktree is missing/unprovable, its index is non-empty, its HEAD already left the original base before the first repackage, or its HEAD is not a provable delivery artifact (会审验收修 opus R2：补充而非替换原 HEAD≠base 语义).
   "worktree_unusable",
   // The candidate inventory read failed — the candidate cannot be enumerated.
   "inventory_unavailable",
@@ -553,6 +553,10 @@ function _proveRepackagePreconditions(events, runId, authorizedWorkspaceRoot, ha
     baseCommit: delivery.baseCommit,
     originalAllowedPaths,
     recoveryKind,
+    // 会审验收修（2026-10-08，opus R1）：Phase 0 实测的 HEAD 是否仍在 base——
+    // 防洗白守卫的判据（不用 recoveryKind 代理：disallowed_scope 在 Phase 0 时
+    // HEAD==base 的打包回退残留同样会被洗白，opus 以真实 Git 反例复现）。
+    headAtBase: workspaceProof.gitHead === delivery.baseCommit,
     ...(hasCommands ? { verificationCommands: [...delivery.verificationCommands] } : {}),
     ...(hasReason ? { verificationUnavailableReason: delivery.verificationUnavailableReason } : {}),
     ...(hasSetup ? { verificationSetupCommands: [...delivery.verificationSetupCommands] } : {}),
@@ -727,12 +731,13 @@ async function _repackageAllPhases({
     try {
       resolved = await _resolve(deliveryCtx);
     } catch (err) {
-      // These first-attempt candidates proved HEAD === base in Phase 0.
-      // artifact_mismatch here can hide a failed packaging rollback; do not
-      // launder that infrastructure failure into an expected policy rejection.
+      // 会审验收修（opus R1）：Phase 0 实测 HEAD==base 的候选，resolve 阶段的
+      // artifact_mismatch 只能意味着 HEAD 在本次尝试内被移动后回退失败——
+      // 基础设施故障，不洗成政策拒绝。判据是 Phase 0 的实测事实，不是
+      // recoveryKind 代理（后者对 disallowed_scope 的同形残留守不住）。
       const rollbackFailure = err instanceof DeliveryError
         && err.deliveryCode === "artifact_mismatch"
-        && (original.recoveryKind === "backend_failed" || original.recoveryKind === "process_missing");
+        && original.headAtBase === true;
       const code = err instanceof DeliveryError
         && Object.hasOwn(REPACKAGE_DELIVERY_POLICY_CODES, err.deliveryCode)
         ? REPACKAGE_DELIVERY_POLICY_CODES[err.deliveryCode] : null;
@@ -869,7 +874,8 @@ async function _recordRejectionAudit({ filePath, events, runId, code, transcript
  *   transcript exists, exactly one bounded `run.delivery_repackage_rejected`
  *   audit event is appended first (never for malformed_input/run_not_found).
  * @throws {Error} on unexpected packaging / verification / append failures
- *   (transcript left byte-identical)
+ *   （会审验收修 opus R2：晚期意外失败可能已留下 Git 移动或已落盘的 created/
+ *   outcome 耐久事实——不回滚、转录不保证字节不变；仅早期意外失败才字节不变）
  */
 export async function runDeliveryRepackage({
   runId,
