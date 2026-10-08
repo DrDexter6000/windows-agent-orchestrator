@@ -30,6 +30,9 @@ import { parseOptions, loadRun } from "./shared.js";
 import { getRunStatus } from "../application/runStatus.js";
 // M9-4A: collection delegated to shared application service.
 import { collectRunMessages } from "../application/runCollect.js";
+// F5 (2026-10-08): 投影层解码/校验路径抛出的类型化 cursor 拒绝信号——CLI 折叠
+// 用（run_activity M12-19 定义的同一类）。
+import { CursorRejectedError } from "../application/runActivityProjection.js";
 // M11-4: shared safe projection — same module MCP uses, so CLI continuation
 // output is deep-equal to MCP structuredContent.
 import { projectCollectResult } from "../application/runCollectProjection.js";
@@ -154,6 +157,14 @@ const COLLECT_PROJECTION_KNOWN_FLAGS = new Set([
 const COLLECT_CURSOR_RE = /^[A-Za-z0-9_-]+$/;
 const COLLECT_CURSOR_MAX = 192;
 
+// F5 (2026-10-08): 坏 cursor 专属 CLI 文案——与 MCP 面 run_collect 的专属拒绝文案
+// 同义（静态恢复指引：第 1 页重取、勿手工修改；不透子类型：过期/跨 run/被改
+// 不区分）。既用于本地语法拒绝（长度/字母表），也用于共享投影抛出的
+// CursorRejectedError 折叠。
+const COLLECT_CURSOR_REJECTED_TEXT =
+  "collect cursor rejected: the cursor is invalid or expired — re-run from page 1 " +
+  "(omit --cursor); a cursor token is opaque and must never be hand-modified";
+
 // TD-112 (D2 A4): fixed markers for collect --final's bounded states. Static
 // text only — never interpolates run/worker content.
 // D1-D3 收口（Bug#3 尾巴）: the too_large marker must name the runnable
@@ -273,15 +284,16 @@ export async function collectCommand(args, config) {
     }
   }
 
-  // Validate cursor if present.
+  // Validate cursor if present. F5: 本地语法拒绝与投影层语义拒绝共用同一条
+  // 专属恢复文案（修法相同：从第 1 页重取）。
   let cursor = null;
   if (hasCursor) {
     cursor = String(options.cursor);
     if (cursor.length === 0 || cursor.length > COLLECT_CURSOR_MAX) {
-      throw new Error("collect projection mode: invalid cursor length");
+      throw new Error(COLLECT_CURSOR_REJECTED_TEXT);
     }
     if (!COLLECT_CURSOR_RE.test(cursor)) {
-      throw new Error("collect projection mode: cursor must be base64url");
+      throw new Error(COLLECT_CURSOR_REJECTED_TEXT);
     }
   }
 
@@ -332,7 +344,18 @@ export async function collectCommand(args, config) {
     throw new Error(`${error.message}
   — 查看已记录的运行状态与失败证据：npm run cli -s -- runs diagnose ${runId} --run-dir ${runDir} --format json`);
   }
-  const payload = projectCollectResult(raw, { runId, cursor, mode });
+  // F5: 投影抛出的 CursorRejectedError（过期/跨 run/被改——不透子类型）折叠为
+  // 专属恢复文案；其余投影错误原样上抛。折叠发生在 commitAppend 之前——被拒
+  // cursor 零审计追加（messages.collected 不写入）。
+  let payload;
+  try {
+    payload = projectCollectResult(raw, { runId, cursor, mode });
+  } catch (error) {
+    if (error instanceof CursorRejectedError) {
+      throw new Error(COLLECT_CURSOR_REJECTED_TEXT);
+    }
+    throw error;
+  }
   // Projection succeeded → safe to commit the audit.
   if (typeof raw.commitAppend === "function") {
     await raw.commitAppend();

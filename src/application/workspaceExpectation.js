@@ -17,7 +17,10 @@
 // SSOT reuse (no duplicated algorithms):
 //   - canonicalizeWorkspacePath + pathsMatch (workspaceBinding.js) for canonical
 //     platform-aware path comparison;
-//   - isCanonicalCommitId (delivery.js) for the 40/64 lowercase-hex head format.
+//   - EXPECTED_GIT_HEAD_RE (this module, F3) for the 7..64 lowercase-hex head
+//     shape — short forms prefix-match, full forms stay exact (see the
+//     constant's doc). isCanonicalCommitId (delivery.js) stays the full-form
+//     authority for the DELIVERY path; its semantics are unchanged.
 //
 // Architectural contract:
 //   - Does NOT import src/mcp/*, src/commands/*, MCP SDK, or zod.
@@ -29,7 +32,6 @@
 import { isAbsolute } from "node:path";
 
 import { canonicalizeWorkspacePath, pathsMatch } from "./workspaceBinding.js";
-import { isCanonicalCommitId } from "../delivery.js";
 
 /**
  * Closed set of mismatch category labels — safe to surface (no values echoed).
@@ -40,6 +42,20 @@ export const WORKSPACE_EXPECTATION_MISMATCH_FIELDS = Object.freeze([
   "dirty",
   "workspaceRoot",
 ]);
+
+/**
+ * F3 (2026-10-08): the accepted expectedGitHead shape — lowercase 7..64 hex.
+ * Short forms (7..39 hex) are a DELIBERATELY WEAKENED assertion: they match the
+ * proven head by PREFIX (provenHead.startsWith(expected)). Full forms (40/64
+ * hex) are unchanged exact-equality assertions (a same-length prefix IS an
+ * exact match). Exported as the SINGLE shape SSOT: src/mcp/server.js binds the
+ * run_dispatch / run_dispatch_contract_check inputSchema regex to this same
+ * source so the wire pattern and the matching semantics can never drift.
+ * isCanonicalCommitId (delivery.js) is intentionally NOT reused here — it stays
+ * the full-form-only authority for the DELIVERY path, whose semantics are
+ * unchanged.
+ */
+export const EXPECTED_GIT_HEAD_RE = /^[0-9a-f]{7,64}$/;
 
 /**
  * Maximum byte length of an expectedWorkspaceRoot string (bounded input).
@@ -59,9 +75,17 @@ export const EXPECTED_WORKSPACE_ROOT_MAX = 1024;
  * from the current proof) is a mismatch and returns { matched:false } with the
  * closed-set category label — never the offending value.
  *
+ * F3 (2026-10-08): expectedGitHead accepts SHORT hashes (7..39 lowercase hex).
+ * A short form is a WEAKENED assertion — it matches by PREFIX
+ * (provenHead.startsWith(expected)), so any head sharing that prefix passes.
+ * A full 40/64-hex form remains an exact-equality assertion (a same-length
+ * prefix is exactly the equality). Consumers that need the strong freeze
+ * should pin the full head from workspace_status.
+ *
  * @param {object} input
  * @param {{bound:boolean, source?:string, root?:string, gitHead?:string, dirty?:boolean}} input.binding
- * @param {string} [input.expectedGitHead] — canonical lowercase 40/64 hex
+ * @param {string} [input.expectedGitHead] — lowercase 7..64 hex (short = prefix
+ *   match, weakened; 40/64 = exact match)
  * @param {boolean} [input.expectedDirty]
  * @param {string} [input.expectedWorkspaceRoot] — absolute path (bounded)
  * @returns {{matched:true, proof: object} | {matched:false, mismatch: string}}
@@ -83,14 +107,17 @@ export function checkWorkspaceExpectation({
   const suppliedRoot = typeof expectedWorkspaceRoot === "string"
     && expectedWorkspaceRoot.length > 0;
 
-  // expectedGitHead: must be canonical 40/64 lowercase hex AND exactly equal the
-  // proven head. git rev-parse yields lowercase hex, so a canonical literal that
-  // resolves to the same object is an exact string match.
+  // expectedGitHead: must be lowercase 7..64 hex (EXPECTED_GIT_HEAD_RE) AND
+  // match the proven head — a full 40/64-hex form is an exact string match (git
+  // rev-parse yields lowercase hex); a SHORT form (7..39 hex) is a deliberately
+  // WEAKENED prefix assertion (provenHead.startsWith(expected)), so any head
+  // sharing the pinned prefix passes (F3, 2026-10-08).
   let expectedGitHeadMatch = null;
   if (suppliedGitHead) {
-    const ok = isCanonicalCommitId(expectedGitHead)
+    const ok = typeof expectedGitHead === "string"
+      && EXPECTED_GIT_HEAD_RE.test(expectedGitHead)
       && typeof binding.gitHead === "string"
-      && binding.gitHead === expectedGitHead;
+      && binding.gitHead.startsWith(expectedGitHead);
     if (!ok) return { matched: false, mismatch: "gitHead" };
     expectedGitHeadMatch = true;
   }

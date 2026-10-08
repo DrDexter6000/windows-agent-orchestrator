@@ -274,7 +274,7 @@ import {
 } from "../application/runSemanticsNotes.js";
 import { proveWorkspace } from "../application/workspaceBinding.js";
 import { selectSessionWorkspace } from "../application/sessionWorkspace.js";
-import { checkWorkspaceExpectation } from "../application/workspaceExpectation.js";
+import { checkWorkspaceExpectation, EXPECTED_GIT_HEAD_RE } from "../application/workspaceExpectation.js";
 import { readWindowsUserEnv } from "../application/credentialReadiness.js";
 import { aggregateLeadPreflight, ACTIVE_RUNS_CAP, WORKERS_CAP, WORKSPACE_UNBOUND_REASONS } from "../application/leadPreflight.js";
 import { readServerBuildFacts } from "../application/serverBuildFacts.js";
@@ -709,11 +709,19 @@ function dispatchExpectationMismatchText(field) {
   const label = field === "gitHead" ? "gitHead"
     : field === "dirty" ? "dirty"
     : "workspaceRoot";
+  // F3 (2026-10-08): 每类 mismatch 各补一句静态修法提示（运行时文案，零 wire；
+  // 闭集分支——只有 label 变化，无动态值）。gitHead 提示短形是弱化断言；dirty
+  // 提示未跟踪文件计入 dirty，可复核后再冻结。
+  const hint = field === "gitHead"
+    ? "A short-form expectedGitHead matches by prefix (weakened assertion) — re-read the full head via workspace_status before freezing it."
+    : field === "dirty"
+      ? "dirty counts untracked files too — re-check with git status --porcelain before freezing expectedDirty."
+      : "";
   return "run_dispatch refused: workspace_expectation_mismatch (" + label + "). " +
     "The bound workspace, its HEAD, or its dirty state differs from the frozen " +
     "expectation, or the expectation was not canonical. Re-read workspace_status " +
     "for the current workspace, head, and dirty state, then retry with current " +
-    "values or omit the expectation.";
+    "values or omit the expectation." + (hint ? " " + hint : "");
 }
 
 // run_dispatch input: agentId + prompt required; optional delivery block.
@@ -798,11 +806,14 @@ const RUN_DISPATCH_INPUT = z.object({
   // M12-6 (FR-03): optional workspace/head freeze. The Lead may pin dispatch to
   // the workspace's current head/dirty/root so a stale or wrong workspace is
   // rejected before any provider/transcript/worktree work. expectedGitHead is a
-  // canonical lowercase 40/64-hex literal (regex serializes to JSON Schema);
+  // lowercase 7..64-hex literal (F3, 2026-10-08: short forms accepted — the
+  // shared expectation SSOT matches them by PREFIX against the proven head, a
+  // deliberately weakened assertion vs the full 40/64-hex exact form; regex
+  // serializes to JSON Schema and rides BOTH dispatch tools' inputSchema);
   // expectedDirty is a boolean; expectedWorkspaceRoot is a bounded absolute path
   // (absoluteness is enforced in the handler via the shared expectation SSOT).
   // Omitted expectations are not checked (existing behavior preserved).
-  expectedGitHead: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/).optional(),
+  expectedGitHead: z.string().regex(EXPECTED_GIT_HEAD_RE).optional(),
   expectedDirty: z.boolean().optional(),
   expectedWorkspaceRoot: z.string().min(1).max(1024).optional(),
   // M12-7: Lead opt-in marking this delivery as the ROOT of a continuable
@@ -1515,6 +1526,16 @@ const RUN_STATUS_DESCRIPTION =
 // （静态后缀不破坏"绝不泄漏原始异常"契约；collect 取回失败 ≠ 运行失败——
 // run_diagnose 给的是已记录的运行状态与失败证据，不承诺解释取回故障本身）。
 const COLLECT_ERROR_TEXT = "run_collect failed — call run_diagnose for the recorded run state and failure evidence";
+// F5 (2026-10-08 friction batch): 坏 cursor 专属拒绝文案。解码/校验路径抛出的
+// CursorRejectedError（instanceof 分类，沿 run_activity M12-19 纪律——不透子类型：
+// 过期/跨 run/被改不区分）折叠为 isError + 这条固定文案：静态恢复指引（第 1 页
+// 重取、勿手工修改），不透原始 cursor、不透错误详情、零 structuredContent。
+// 共享句由三个携带 cursor 的观察工具（run_collect / run_delivery_review /
+// run_delivery_review_bundle）的专属文案复用——单一常量，无三份漂移。
+const CURSOR_REJECTED_GUIDANCE =
+  "cursor is invalid or expired — re-fetch from page 1 (call again without a cursor); " +
+  "never hand-modify a cursor token";
+const COLLECT_CURSOR_REJECTED_TEXT = `run_collect failed — ${CURSOR_REJECTED_GUIDANCE}`;
 // TD-224 (2026-10-08): compact too_large degradation guidance — the D1-D3
 // discipline from the CLI --final marker (src/commands/observe.js), lifted to
 // the MCP surface: static text (never interpolates run/worker content), names
@@ -3229,6 +3250,10 @@ const SEMANTICS_DETAIL_ERROR_TEXT = "semantics detail failed";
 // that the inline version lacked.
 
 const DELIVERY_REVIEW_ERROR_TEXT = "run_delivery_review failed";
+// F5 (2026-10-08): 坏 cursor 专属拒绝文案（instanceof CursorRejectedError 折叠；
+// 共享指引句见 CURSOR_REJECTED_GUIDANCE，不透子类型，零 structuredContent）。
+const DELIVERY_REVIEW_CURSOR_REJECTED_TEXT =
+  `run_delivery_review failed — ${CURSOR_REJECTED_GUIDANCE}`;
 const DELIVERY_REVIEW_INPUT = z.object({
   runId: z.string().min(1),
   fileIndex: z.number().int().nonnegative(),
@@ -3282,6 +3307,9 @@ const DELIVERY_REVIEW_DESCRIPTION =
 // semantic reviewer: it never selects/traverses files or cursors and never
 // stop/retry/repackage/accept/rejects. Atomic tools remain available.
 const DELIVERY_REVIEW_BUNDLE_ERROR_TEXT = "run_delivery_review_bundle failed";
+// F5 (2026-10-08): 坏 cursor 专属拒绝文案（同上，组合工具同款折叠）。
+const DELIVERY_REVIEW_BUNDLE_CURSOR_REJECTED_TEXT =
+  `run_delivery_review_bundle failed — ${CURSOR_REJECTED_GUIDANCE}`;
 const DELIVERY_REVIEW_BUNDLE_DEFAULT_WAIT_MS = 270000;
 
 const DELIVERY_REVIEW_BUNDLE_INPUT = z.object({
@@ -5095,7 +5123,20 @@ export function createWaoMcpServer({
           content: [{ type: "text", text: JSON.stringify(parsed) }],
           structuredContent: parsed,
         };
-      } catch {
+      } catch (e) {
+        // F5: a rejected cursor (malformed / stale / cross-run / snapshot-
+        // changed / out-of-range — classified by TYPE, never by message) gets
+        // the dedicated recovery copy instead of the generic diagnose pointer
+        // (a rejected cursor is not a run failure). Zero-audit ordering is
+        // preserved by structure: CursorRejectedError can only leave the
+        // projection, which runs BEFORE the deferred commitAppend — a rejected
+        // cursor appends no messages.collected event.
+        if (e instanceof CursorRejectedError) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: COLLECT_CURSOR_REJECTED_TEXT }],
+          };
+        }
         return {
           isError: true,
           content: [{ type: "text", text: COLLECT_ERROR_TEXT }],
@@ -6026,7 +6067,17 @@ export function createWaoMcpServer({
           content: [{ type: "text", text: JSON.stringify(payload) }],
           structuredContent: payload,
         };
-      } catch {
+      } catch (e) {
+        // F5: a rejected cursor (typed CursorRejectedError from the decode/
+        // validation path — including the not-yet-paginated artifact gates)
+        // gets the dedicated recovery copy; every other failure keeps the
+        // fixed generic error with no structuredContent.
+        if (e instanceof CursorRejectedError) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DELIVERY_REVIEW_CURSOR_REJECTED_TEXT }],
+          };
+        }
         return {
           isError: true,
           content: [{ type: "text", text: DELIVERY_REVIEW_ERROR_TEXT }],
@@ -6143,7 +6194,9 @@ export function createWaoMcpServer({
         } else if (cursor !== undefined) {
           // A continuation token is meaningful only for an actually-returned
           // review artifact. Never silently ignore a stale/cross-state cursor.
-          throw new Error("cursor without reviewable artifact");
+          // F5: typed rejection so the catch below folds it into the bundle's
+          // dedicated cursor-rejected copy (same remedy: re-fetch from page 1).
+          throw new CursorRejectedError("cursor without reviewable artifact");
         }
 
         const payload = DELIVERY_REVIEW_BUNDLE_OUTPUT.parse({
@@ -6155,7 +6208,14 @@ export function createWaoMcpServer({
           content: [{ type: "text", text: JSON.stringify(payload) }],
           structuredContent: payload,
         };
-      } catch {
+      } catch (e) {
+        // F5: 同款折叠——组合工具携带 cursor 分支的坏 cursor 也走专属文案。
+        if (e instanceof CursorRejectedError) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: DELIVERY_REVIEW_BUNDLE_CURSOR_REJECTED_TEXT }],
+          };
+        }
         return {
           isError: true,
           content: [{ type: "text", text: DELIVERY_REVIEW_BUNDLE_ERROR_TEXT }],

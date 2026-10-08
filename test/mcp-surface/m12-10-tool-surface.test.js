@@ -673,7 +673,15 @@ const RED_23_WIRE = 75492;
 // schema 条目），按实测重冻；Owner 硬顶 85939 不变，余 579B。
 // TD-232 重冻（Lead，2026-10-08）：run_await_result result 子 schema 增可选
 // compactFallback（too_large 降级指引，+36B；Owner 硬顶 85939 余 543B）。
-const FROZEN_23_WIRE_CEILING = 85396;
+// F3 重冻（Lead，2026-10-08 friction batch）：run_dispatch/run_dispatch_contract_check
+// 共享入参 expectedGitHead 的 wire 正则由 /^[0-9a-f]{40}$|^[0-9a-f]{64}$/ 放宽为
+// /^[0-9a-f]{7,64}$/（EXPECTED_GIT_HEAD_RE SSOT，短哈希前缀匹配——弱化断言语义
+// 在 workspaceExpectation.js；两工具的 inputSchema pattern 各序列化一次，正则
+// 内容 31→17 字符）。实测 85396 → 85370（**-26B**，负向增量）。同批 F5（坏 cursor
+// 专属文案）为运行时 handler 文案——零 wire、零 schema 变化，不占本顶。无描述
+// 字节变化（FROZEN_23_DESC_CEILING 实测 10442 不动）。按实测重冻；Owner 硬顶
+// 85939 不变，余 569B。
+const FROZEN_23_WIRE_CEILING = 85370;
 
 async function measureWire() {
   const dir = mkdtempSync(join(tmpdir(), "wao-m1210-wire-"));
@@ -859,7 +867,11 @@ const DESC_STRIPPED_CONTRACT_SHA =
   // SHA 如实翻新；无描述字节变化。
   // TD-232（2026-10-08）：run_await_result result 子 schema 增可选 compactFallback
   // （too_large 降级指引）——同样在 stripped 载荷内，SHA 如实翻新。
-  "dc1c0a44598f7f0ee2bc91668605dc1170e3c360d58fcecd1598dc41315023e2";
+  // F3（2026-10-08 friction batch）：run_dispatch/run_dispatch_contract_check 共享
+  // 入参 expectedGitHead 的 pattern 由两分支全形正则换成单分支 7..64 短哈希正则
+  // （EXPECTED_GIT_HEAD_RE SSOT）——inputSchema 在 stripped 载荷内，SHA 如实翻新；
+  // 无描述字节变化（F5 专属文案为运行时文案，不进 tools/list）。
+  "afaf58ee18284bda36f375a4ec75a98dea058be58ba10478cb5aaf643684d806";
 
 // Description bytes on the M12-15 surface, BEFORE M12-16 slimming (frozen fact).
 const PRE_M12_16_DESC_BASELINE = 11812;

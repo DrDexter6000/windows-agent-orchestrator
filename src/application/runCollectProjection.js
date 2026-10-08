@@ -31,6 +31,12 @@
 import { createHash } from "node:crypto";
 import { createSecretRedactor } from "../secretRedaction.js";
 import { safeProjectAgentId } from "../canonicalAgentId.js";
+// F5 (2026-10-08): typed cursor-rejection signal — the SAME class run_activity
+// (M12-19) defined. The class stays defined in runActivityProjection.js (the
+// single definition point, already exported): instanceof identity across the
+// application layer requires ONE class, and extracting a neutral shim module
+// would add a file with zero behavioral gain. Import-only, no re-export.
+import { CursorRejectedError } from "./runActivityProjection.js";
 
 // ===== Page bounds (must match the legacy projectCollectResult constants) =====
 
@@ -66,7 +72,9 @@ function base64url(buf) {
 
 function base64urlDecode(str) {
   if (typeof str !== "string" || str.length === 0 || !BASE64URL_RE.test(str)) {
-    throw new Error("invalid cursor: not base64url");
+    // F5: decode-path rejection — typed so adapters can fold it into the
+    // dedicated cursor-rejection copy (never a generic Error).
+    throw new CursorRejectedError("invalid cursor: not base64url");
   }
   // Convert base64url → base64, pad to multiple of 4.
   const b64 = str.replace(/-/g, "+").replace(/_/g, "/");
@@ -177,32 +185,35 @@ export function encodeCollectCursor(payload) {
  * @returns {object} {v, r, s, n, m, o}
  */
 export function decodeCollectCursor(token) {
-  if (typeof token !== "string") throw new Error("invalid cursor: not a string");
-  if (token.length === 0 || token.length > CURSOR_MAX_CHARS) throw new Error("invalid cursor length");
-  if (!BASE64URL_RE.test(token)) throw new Error("invalid cursor: not base64url");
+  // F5: every structural rejection on the DECODE path is the typed
+  // CursorRejectedError so the MCP/CLI adapters fold it into the dedicated
+  // recovery copy (subtypes are never surfaced — the run_activity discipline).
+  if (typeof token !== "string") throw new CursorRejectedError("invalid cursor: not a string");
+  if (token.length === 0 || token.length > CURSOR_MAX_CHARS) throw new CursorRejectedError("invalid cursor length");
+  if (!BASE64URL_RE.test(token)) throw new CursorRejectedError("invalid cursor: not base64url");
   let parsed;
   try {
     parsed = JSON.parse(base64urlDecode(token).toString("utf8"));
   } catch {
-    throw new Error("invalid cursor: not decodable JSON");
+    throw new CursorRejectedError("invalid cursor: not decodable JSON");
   }
-  if (!parsed || typeof parsed !== "object") throw new Error("invalid cursor: not an object");
+  if (!parsed || typeof parsed !== "object") throw new CursorRejectedError("invalid cursor: not an object");
   const { v, r, s, n, m, o } = parsed;
-  if (v !== CURSOR_VERSION) throw new Error("unsupported cursor version");
-  if (typeof r !== "string" || r.length !== 22) throw new Error("invalid cursor runId digest"); // 16 bytes → 22 b64url chars
-  if (typeof s !== "string" || s.length !== 22) throw new Error("invalid cursor snapshot digest");
-  if (!Number.isInteger(n) || n < 0 || n > 1_000_000) throw new Error("invalid cursor eventCount");
-  if (!Number.isInteger(m) || m < 0 || m > 1_000_000) throw new Error("invalid cursor msgIdx");
+  if (v !== CURSOR_VERSION) throw new CursorRejectedError("unsupported cursor version");
+  if (typeof r !== "string" || r.length !== 22) throw new CursorRejectedError("invalid cursor runId digest"); // 16 bytes → 22 b64url chars
+  if (typeof s !== "string" || s.length !== 22) throw new CursorRejectedError("invalid cursor snapshot digest");
+  if (!Number.isInteger(n) || n < 0 || n > 1_000_000) throw new CursorRejectedError("invalid cursor eventCount");
+  if (!Number.isInteger(m) || m < 0 || m > 1_000_000) throw new CursorRejectedError("invalid cursor msgIdx");
   // Offset is the absolute intra-message position — it can exceed the
   // per-page total cap when a single message is longer than 12000 chars
   // (pagination resumes mid-message across many pages). Bound it to a
   // generous absolute ceiling that still fits the 192-char token budget.
   const MAX_MSG_OFFSET = 1_000_000;
-  if (!Number.isInteger(o) || o < 0 || o > MAX_MSG_OFFSET) throw new Error("invalid cursor charOffset");
+  if (!Number.isInteger(o) || o < 0 || o > MAX_MSG_OFFSET) throw new CursorRejectedError("invalid cursor charOffset");
   // Reject extra keys — no silent passthrough.
   const allowed = new Set(["v", "r", "s", "n", "m", "o"]);
   for (const k of Object.keys(parsed)) {
-    if (!allowed.has(k)) throw new Error("invalid cursor: unknown key");
+    if (!allowed.has(k)) throw new CursorRejectedError("invalid cursor: unknown key");
   }
   return { v, r, s, n, m, o };
 }
@@ -473,21 +484,23 @@ export function projectCollectResult(rawResult, { runId, cursor, mode, env } = {
     // Binding check 1: runId. Compare digest, never raw runId.
     const expectedRunIdDigest = sha256Base64url(runId);
     if (cursorObj.r !== expectedRunIdDigest) {
-      throw new Error("cursor runId mismatch");
+      // F5: cursor-validation path — typed rejection (stale/cross-run/tampered
+      // are indistinguishable to the consumer by design).
+      throw new CursorRejectedError("cursor runId mismatch");
     }
 
     // Binding check 2: raw snapshot prefix.
     if (liveRawCount === cursorObj.n) {
-      if (cursorObj.s !== liveRawDigest) throw new Error("cursor snapshot mismatch");
+      if (cursorObj.s !== liveRawDigest) throw new CursorRejectedError("cursor snapshot mismatch");
     } else if (liveRawCount > cursorObj.n) {
       const prefix = rawItems.slice(0, cursorObj.n);
       const prefixDigest = computeRawSnapshotDigest(prefix);
-      if (cursorObj.s !== prefixDigest) throw new Error("cursor snapshot prefix mismatch");
+      if (cursorObj.s !== prefixDigest) throw new CursorRejectedError("cursor snapshot prefix mismatch");
       frozenItems = prefix;
       frozenRawCount = cursorObj.n;
       frozenRawDigest = cursorObj.s;
     } else {
-      throw new Error("cursor snapshot shrunk");
+      throw new CursorRejectedError("cursor snapshot shrunk");
     }
   }
 
@@ -546,11 +559,11 @@ export function projectCollectResult(rawResult, { runId, cursor, mode, env } = {
     startMsgIdx = cursorObj.m;
     startOffset = cursorObj.o;
     if (startMsgIdx >= redactedTexts.length) {
-      throw new Error("cursor position at or past frozen assistant-text end");
+      throw new CursorRejectedError("cursor position at or past frozen assistant-text end");
     }
     const msgAtPos = redactedTexts[startMsgIdx];
     if (startOffset > msgAtPos.length) {
-      throw new Error("cursor offset beyond message length");
+      throw new CursorRejectedError("cursor offset beyond message length");
     }
   }
 

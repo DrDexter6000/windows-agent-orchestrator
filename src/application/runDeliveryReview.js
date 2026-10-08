@@ -52,6 +52,10 @@ import { assertDeliveryCommitInRepository, isValidRunId } from "../delivery.js";
 import { validateProjectedPath } from "./deliveryReview.js";
 import { projectDeliveryReadiness } from "./runDelivery.js";
 import { REVIEW_PENDING_REASON } from "./reviewUnavailableReasons.js";
+// F5 (2026-10-08): typed cursor-rejection signal — the SAME class run_activity
+// (M12-19) defined and exported. One class definition keeps instanceof identity
+// across the application layer (see the matching note in runCollectProjection).
+import { CursorRejectedError } from "./runActivityProjection.js";
 
 /**
  * Validate a fileIndex against a verified changed-file list.
@@ -376,29 +380,32 @@ function encodeCursor({ artifactFp, fileIndex, nextOffset, digest }) {
 /**
  * Decode and strictly validate an opaque cursor against the expected binding.
  * Failures (malformed/wrong-version/unknown-keys/wrong-types/cross-artifact/
- * offset-out-of-range/mid-codepoint/stale-digest/noncanonical-encoding) throw a
- * fixed "invalid cursor" error. Omitted cursor → offset 0. `artifactAvailable`
- * must be true: a cursor supplied for a binary/too-large/unavailable artifact
- * is rejected.
+ * offset-out-of-range/mid-codepoint/stale-digest/noncanonical-encoding) throw
+ * the typed CursorRejectedError (F5) carrying a fixed "invalid cursor" message.
+ * Omitted cursor → offset 0. `artifactAvailable` must be true: a cursor
+ * supplied for a binary/too-large/unavailable artifact is rejected.
  * @private
  */
 function decodeCursor(token, {
   artifactFp, fileIndex, totalSafeBytes, safeTextBuf, digest, artifactAvailable,
 }) {
+  // F5: every rejection on the DECODE path is the typed CursorRejectedError so
+  // the MCP/CLI adapters fold it into the dedicated recovery copy (subtypes are
+  // never surfaced — the run_activity discipline).
   if (token === undefined || token === null) {
     return { offset: 0 };
   }
   // A cursor is only valid for a reviewable text artifact. Binary/too-large
   // never produce a cursor, so a supplied cursor here is a replay/mismatch.
   if (!artifactAvailable) {
-    throw new Error("invalid cursor: artifact not paginated");
+    throw new CursorRejectedError("invalid cursor: artifact not paginated");
   }
   if (typeof token !== "string" || token.length === 0 || token.length > CURSOR_MAX_CHARS) {
-    throw new Error("invalid cursor: length");
+    throw new CursorRejectedError("invalid cursor: length");
   }
   // base64url charset only.
   if (!/^[A-Za-z0-9_-]+$/.test(token)) {
-    throw new Error("invalid cursor: encoding");
+    throw new CursorRejectedError("invalid cursor: encoding");
   }
   let payload;
   let rawDecoded;
@@ -406,42 +413,42 @@ function decodeCursor(token, {
     rawDecoded = Buffer.from(token, "base64url").toString("utf8");
     payload = JSON.parse(rawDecoded);
   } catch {
-    throw new Error("invalid cursor: decode");
+    throw new CursorRejectedError("invalid cursor: decode");
   }
   if (!payload || payload.v !== CURSOR_VERSION) {
-    throw new Error("invalid cursor: version");
+    throw new CursorRejectedError("invalid cursor: version");
   }
   // Strict key set (canonical order: a,d,i,o,v).
   const keys = Object.keys(payload).sort().join(",");
   if (keys !== "a,d,i,o,v") {
-    throw new Error("invalid cursor: keys");
+    throw new CursorRejectedError("invalid cursor: keys");
   }
   // Canonical re-encode must equal the input token (rejects noncanonical JSON
   // like reordered/extra-whitespace/repeated-key encodings).
   const canonical = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
   if (canonical !== token) {
-    throw new Error("invalid cursor: noncanonical encoding");
+    throw new CursorRejectedError("invalid cursor: noncanonical encoding");
   }
   // Artifact fingerprint binds runId + deliveryCommit + fileIndex as one. Any
   // cross-run / cross-commit / cross-file replay changes the fingerprint.
   if (typeof payload.a !== "string" || payload.a !== artifactFp) {
-    throw new Error("invalid cursor: artifact mismatch");
+    throw new CursorRejectedError("invalid cursor: artifact mismatch");
   }
   if (!Number.isInteger(payload.i) || payload.i !== fileIndex) {
-    throw new Error("invalid cursor: file mismatch");
+    throw new CursorRejectedError("invalid cursor: file mismatch");
   }
   if (typeof payload.d !== "string" || payload.d !== digest) {
-    throw new Error("invalid cursor: stale digest");
+    throw new CursorRejectedError("invalid cursor: stale digest");
   }
   // offset: integer, 0 <= offset < totalSafeBytes (strict less-than; an offset
   // equal to total is the empty terminal page and is never encoded — nextCursor
   // is null there).
   if (!Number.isInteger(payload.o) || payload.o < 0 || payload.o >= totalSafeBytes) {
-    throw new Error("invalid cursor: offset out of range");
+    throw new CursorRejectedError("invalid cursor: offset out of range");
   }
   // Must not land on a UTF-8 continuation byte (would split a code point).
   if (payload.o > 0 && (safeTextBuf[payload.o] & 0xc0) === 0x80) {
-    throw new Error("invalid cursor: offset splits a code point");
+    throw new CursorRejectedError("invalid cursor: offset splits a code point");
   }
   return { offset: payload.o };
 }
@@ -592,7 +599,9 @@ export async function getRunDeliveryReview(
       throw new Error("fileIndex must be a non-negative integer");
     }
     if (cursor !== undefined && cursor !== null) {
-      throw new Error("invalid cursor: artifact not paginated");
+      // F5: cursor-validation path — typed rejection (same remedy as every
+      // other bad cursor: re-fetch from page 1).
+      throw new CursorRejectedError("invalid cursor: artifact not paginated");
     }
     return {
       runId,
@@ -640,9 +649,9 @@ export async function getRunDeliveryReview(
   // for such an artifact is rejected (decodeCursor checks artifactAvailable).
   const unavailableResult = (reason) => {
     // Validate/reject cursor even on unavailable artifacts — a cursor supplied
-    // here is a replay against a non-paginated artifact.
+    // here is a replay against a non-paginated artifact. F5: typed rejection.
     if (cursor !== undefined && cursor !== null) {
-      throw new Error("invalid cursor: artifact not paginated");
+      throw new CursorRejectedError("invalid cursor: artifact not paginated");
     }
     return {
       runId,

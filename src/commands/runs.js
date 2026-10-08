@@ -45,6 +45,9 @@ import {
 } from "../application/runDelivery.js";
 // M11-3C: delivery review projection delegated to shared application service.
 import { getRunDeliveryReview } from "../application/runDeliveryReview.js";
+// F5 (2026-10-08): typed cursor-rejection signal (run_activity M12-19 定义、
+// runDeliveryReview 解码路径改抛的同一类)——CLI 在此折叠为专属文案。
+import { CursorRejectedError } from "../application/runActivityProjection.js";
 // M12-6 FR-07 closeout: audited unchanged-artifact reverify delegated to the SAME
 // application service the MCP run_delivery_reverify tool uses. The CLI never
 // re-implements the algorithm, never parses the transcript, and never copies
@@ -1266,6 +1269,13 @@ function createProcessLifecycle() {
  * @param {object} config
  * @param {object} [hostDeps] — { getRunDeliveryReviewFn } for testing
  */
+// F5 (2026-10-08): 坏 cursor 专属 CLI 文案——与 MCP 面 run_delivery_review 的
+// 专属拒绝文案同义（静态恢复指引：第 1 页重取、勿手工修改；不透子类型）。
+// 本地语法拒绝与服务层 CursorRejectedError 折叠共用。
+const REVIEW_CURSOR_REJECTED_TEXT =
+  "runs delivery review cursor rejected: the cursor is invalid or expired — re-run " +
+  "without --cursor to restart from page 1; a cursor token is opaque and must never be hand-modified";
+
 async function runsDeliveryReviewCommand(args, config, hostDeps = {}) {
   // M11-3C closeout: strict flag parsing — every flag value must be non-empty /
   // non-whitespace; no duplicates; exactly one positional; format must be json
@@ -1308,10 +1318,10 @@ async function runsDeliveryReviewCommand(args, config, hostDeps = {}) {
   }
   const fileIndex = Number(flags.fileIndex);
 
-  // cursor must be base64url if provided.
+  // cursor must be base64url if provided. F5: 语法拒绝也走专属恢复文案。
   if (flags.cursor !== undefined) {
     if (!/^[A-Za-z0-9_-]+$/.test(flags.cursor)) {
-      throw new Error("--cursor must be a valid opaque token");
+      throw new Error(REVIEW_CURSOR_REJECTED_TEXT);
     }
   }
 
@@ -1325,13 +1335,23 @@ async function runsDeliveryReviewCommand(args, config, hostDeps = {}) {
   const runDir = resolve(flags.runDir ?? config.runDir);
 
   const service = hostDeps.getRunDeliveryReviewFn ?? getRunDeliveryReview;
-  const raw = await service({
-    runId,
-    runDir,
-    authorizedWorkspaceRoot: cwd,
-    fileIndex,
-    ...(flags.cursor !== undefined ? { cursor: flags.cursor } : {}),
-  });
+  // F5: 服务层解码/校验路径抛出的 CursorRejectedError 折叠为专属恢复文案；
+  // 其余错误原样上抛（保持既有失败形状）。
+  let raw;
+  try {
+    raw = await service({
+      runId,
+      runDir,
+      authorizedWorkspaceRoot: cwd,
+      fileIndex,
+      ...(flags.cursor !== undefined ? { cursor: flags.cursor } : {}),
+    });
+  } catch (error) {
+    if (error instanceof CursorRejectedError) {
+      throw new Error(REVIEW_CURSOR_REJECTED_TEXT);
+    }
+    throw error;
+  }
 
   // M11-3C closeout: use the SAME shared safe-output projection as the MCP
   // adapter. Never output the raw service result directly.
