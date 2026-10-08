@@ -2001,7 +2001,10 @@ export class RunManager {
  */
 async function _maybeWriteFrictionLogFromTranscript(transcript, runId, agentId, config) {
   const events = await readTranscript(transcript.filePath);
-  const frictionLogDir = frictionLogDirFromRunDir(config.runDir);
+  // TD-239 同族收口（opus 会审补充）：friction 目录跟随该 run 实际写转录的
+  // 目录（与 _alertsLogPath 同锚），不再取 config.runDir——worker/override
+  // 语境下 config.runDir 与转录目录可能分叉，friction 会写到 worktree 外。
+  const frictionLogDir = frictionLogDirFromRunDir(dirname(transcript.filePath));
   await writeFrictionLog(runId ?? "unknown", agentId ?? "unknown", events, {
     frictionLogDir,
     debugMode: config.debugMode,
@@ -3466,7 +3469,9 @@ function _sanitizeDeliveryMessage(msg) {
  */
 async function _maybeWriteFrictionLog(run) {
   const events = await readTranscript(run.transcript.filePath);
-  const frictionLogDir = frictionLogDirFromRunDir(run.config.runDir);
+  // TD-239 同族收口：同 _maybeWriteFrictionLogFromTranscript——friction 目录
+  // 跟随转录实际目录，不取 config.runDir（防 worker/override 分叉写到 worktree 外）。
+  const frictionLogDir = frictionLogDirFromRunDir(dirname(run.transcript.filePath));
   // metrics 从 transcript 提取（最后一条 run.metrics）
   const metricsEvent = [...events].reverse().find((e) => e.type === "run.metrics");
   const metrics = metricsEvent ? {
