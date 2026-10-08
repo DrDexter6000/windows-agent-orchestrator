@@ -15,7 +15,7 @@ import {
 const identity = (raw, io = {}) => identifyProjectFromCwd(raw, {
   // 缺省注入恒等 realpath（不解析）+ 明确 tmpdir，让用例只测目标规则
   realpath: (p) => p,
-  tmpdir: "C:/Users/17865/AppData/Local/Temp",
+  tmpdir: "C:/PROBE-TMP",
   platform: "win32",
   ...io,
 });
@@ -42,15 +42,15 @@ test("TD-190 D1 R6: '.' 与缺失是身份缺失（unattributed），不是 scra
 });
 
 test("TD-190 D1 R5: 系统临时目录 → scratch 桶（一次性探针目录不占项目桶）", () => {
-  const s = identity("C:\\Users\\17865\\AppData\\Local\\Temp\\wao-mcp-probe");
+  const s = identity("C:\\PROBE-TMP\\wao-mcp-probe");
   assert.equal(s.kind, "scratch");
   assert.equal(s.key, "_scratch");
   // 大小写与分隔符不影响 tmp 判定
-  assert.equal(identity("c:/users/17865/appdata/local/temp/x").kind, "scratch");
+  assert.equal(identity("c:/probe-tmp/x").kind, "scratch");
 });
 
 test("TD-190 D1 R5 边界: 未传 tmpdir 时不启用 scratch 判定（宁缺勿错）", () => {
-  const r = identity("C:/Users/17865/AppData/Local/Temp/x", { tmpdir: undefined });
+  const r = identity("C:/PROBE-TMP/x", { tmpdir: undefined });
   assert.equal(r.kind, "project", "unknown tmpdir must NOT misclassify user paths as scratch");
 });
 
@@ -64,8 +64,8 @@ test("TD-190 D1 R4: .wao-worktrees/<runId> 回溯到所属仓根（隔离工作�
 });
 
 test("TD-190 D1 R3: junction 经 realpath 解析（解析失败=unattributed 不静默用未解析键）", () => {
-  const r = identity("C:/Users/17865/.agents/skills/wao-orchestrator", {
-    realpath: (p) => (p.includes("wao-orchestrator") ? "D:\\projects\\windows-agent-orchestrator-poc" : p),
+  const r = identity("C:/probe-links/wao-skill", {
+    realpath: (p) => (p.includes("wao-skill") ? "D:\\projects\\windows-agent-orchestrator-poc" : p),
   });
   assert.equal(r.kind, "project");
   assert.equal(r.key, "d:/projects/windows-agent-orchestrator-poc", "junction resolves to the real repo root");

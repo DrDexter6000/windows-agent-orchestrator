@@ -73,6 +73,7 @@ const SHARED_MEMBERS = Object.freeze(new Set([
   "src/runEvent.js",
   "src/secretRedaction.js",
   "src/canonicalAgentId.js",
+  "src/projectIdentity.js",
   "src/waoCliPath.js",
   "src/version.js",
 ]));
